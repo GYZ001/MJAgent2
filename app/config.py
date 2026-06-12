@@ -57,7 +57,7 @@ DEFAULT_SETTINGS = {
     "max_ref_images": "2",            # 单镜头最多附几张定妆照
     "auto_qa": "true",
     "auto_retake_threshold": "0.6",
-    "plan_episode_count": "10",
+    "plan_episode_count": "12",  # 分集"每批"集数（分批续写直至铺满全书，非总集数上限）
 }
 
 PROJECTS_DIR.mkdir(exist_ok=True)

@@ -11,7 +11,7 @@ from app.compiler import compile_prompt, shot_cost_cny
 from app.db import get_conn, get_setting, new_id, now, rows_to_dicts, set_setting
 from app.ingest import ingest_novel
 from app.schemas import Bible, Shot, Storyboard, schema_errors
-from app.stages import StageError, generate_bible, generate_plan, generate_storyboard, summarize_chapters_concurrent
+from app.stages import StageError, generate_bible, generate_plan_batch, generate_storyboard, summarize_chapters_concurrent
 from app.validators import validate_storyboard
 
 router = APIRouter(prefix="/api")
@@ -206,19 +206,40 @@ async def _plan_task(project_id: str):
             "SELECT * FROM chapters WHERE project_id=? ORDER BY idx", (project_id,)).fetchall())
         p = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
         bible = Bible.model_validate(json.loads(p["bible_json"]))
-        count = int(get_setting("plan_episode_count") or 10)
-        plan = await generate_plan(
-            [(ch["idx"], ch["title"] or "", ch["summary"] or "") for ch in chapters],
-            bible, count, len(chapters))
+        chapter_count = len(chapters)
+        batch_size = max(int(get_setting("plan_episode_count") or 12), 1)
+        summaries = [(ch["idx"], ch["title"] or "", ch["summary"] or "") for ch in chapters]
+
+        # 分批续写，铺满全书：每批从首个未覆盖章节起，直到最后一章被纳入（防长篇被截断/丢弃）
+        all_episodes = []
+        key_timeline: list[str] = []
+        start_chapter = chapters[0]["idx"] if chapters else 1
+        last_chapter = chapters[-1]["idx"] if chapters else 0
+        guard = 0
+        while start_chapter <= last_chapter and guard < 40:
+            guard += 1
+            batch = await generate_plan_batch(
+                summaries, bible,
+                start_episode_no=len(all_episodes) + 1, start_chapter=start_chapter,
+                chapter_count=chapter_count, batch_size=batch_size,
+                want_timeline=(guard == 1))
+            if guard == 1:
+                key_timeline = batch.key_timeline
+            advanced = batch.episodes[-1].source_chapters[-1]
+            if advanced < start_chapter:  # 无进展，避免死循环
+                raise StageError("剧集规划", [f"分批续写未推进（停在第 {start_chapter} 章），请重试"])
+            all_episodes.extend(batch.episodes)
+            start_chapter = advanced + 1
+
         conn.execute("DELETE FROM episodes WHERE project_id=? AND status='planned'", (project_id,))
-        for ep in plan.episodes:
+        for ep in all_episodes:
             conn.execute(
                 "INSERT INTO episodes(id, project_id, episode_no, title, hook, cliffhanger, synopsis, source_chapters, target_duration_s, status, created_at) "
                 "VALUES(?,?,?,?,?,?,?,?,?, 'planned', ?)",
                 (new_id("ep"), project_id, ep.episode_no, ep.title, ep.hook, ep.cliffhanger,
                  ep.synopsis, json.dumps(ep.source_chapters), ep.target_duration_s, now()))
         conn.execute("UPDATE projects SET plan_status='ready', plan_error=NULL, key_timeline=?, status='planned' WHERE id=?",
-                     (json.dumps(plan.key_timeline, ensure_ascii=False), project_id))
+                     (json.dumps(key_timeline, ensure_ascii=False), project_id))
         conn.commit()
     except (StageError, Exception) as exc:  # noqa: BLE001
         conn.execute("UPDATE projects SET plan_status='failed', plan_error=? WHERE id=?", (str(exc)[:800], project_id))

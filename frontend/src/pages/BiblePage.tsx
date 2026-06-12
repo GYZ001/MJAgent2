@@ -106,7 +106,7 @@ export default function BiblePage() {
 
       {p.bible && (
         <section className="card">
-          <h3>分集 <span className="hint">每集 60~90 秒，三秒钩子，结尾留悬念</span></h3>
+          <h3>分集 <span className="hint">覆盖全书全部 {p.chapters?.length} 章，分批续写，每集 60~90 秒</span></h3>
           <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8 }}>
             <button className="btn primary" disabled={busy || p.plan_status === 'running'}
               onClick={() => act(() => api.post(`/projects/${p.id}/plan`))}>

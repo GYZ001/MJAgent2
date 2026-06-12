@@ -109,21 +109,28 @@ def validate_bible(bible: Bible) -> list[str]:
     return errors
 
 
-def validate_plan(plan_episodes: list, chapter_count: int) -> list[str]:
+def validate_plan(plan_episodes: list, chapter_count: int,
+                  *, start_episode_no: int = 1, start_chapter: int = 1) -> list[str]:
+    """校验一批剧集。批内 episode_no 从 start_episode_no 连续递增，
+    第一集须从 start_chapter 起，章节连续不重叠不跳，不越界。"""
     errors = []
-    prev_end = 0
+    if not plan_episodes:
+        return ["本批未规划出任何剧集"]
+    prev_end = start_chapter - 1
     for i, ep in enumerate(plan_episodes):
-        if ep.episode_no != i + 1:
-            errors.append(f"episodes[{i}].episode_no={ep.episode_no}，要求连续递增从 1 开始")
+        if ep.episode_no != start_episode_no + i:
+            errors.append(f"episodes[{i}].episode_no={ep.episode_no}，本批要求从 {start_episode_no} 起连续递增")
         chs = ep.source_chapters
         if not chs:
             errors.append(f"episodes[{i}].source_chapters 为空")
             continue
         if chs != list(range(chs[0], chs[-1] + 1)):
             errors.append(f"episodes[{i}].source_chapters={chs} 必须是连续区间")
+        if i == 0 and chs[0] != start_chapter:
+            errors.append(f"本批第一集 source_chapters 必须从第 {start_chapter} 章开始，当前为第 {chs[0]} 章")
         if chs[0] <= prev_end:
             errors.append(f"episodes[{i}].source_chapters 与上一集重叠（上一集止于第{prev_end}章）")
-        if chs[0] > prev_end + 1 and prev_end > 0:
+        if chs[0] > prev_end + 1:
             errors.append(f"episodes[{i}].source_chapters 跳过了第{prev_end + 1}~{chs[0] - 1}章，集间不允许跳章")
         if chs[-1] > chapter_count:
             errors.append(f"episodes[{i}].source_chapters 引用第{chs[-1]}章，但全书只有 {chapter_count} 章")

@@ -111,10 +111,21 @@ async def generate_bible(chapters: list[dict], rolling_summary: str = "") -> Bib
 
 # ---------- B. 剧集规划 ----------
 
-async def generate_plan(chapter_summaries: list[tuple[int, str, str]], bible: Bible,
-                        episode_count: int, chapter_count: int) -> EpisodePlan:
+async def generate_plan_batch(chapter_summaries: list[tuple[int, str, str]], bible: Bible,
+                              *, start_episode_no: int, start_chapter: int,
+                              chapter_count: int, batch_size: int,
+                              want_timeline: bool) -> EpisodePlan:
+    """规划一批剧集：从第 start_chapter 章起、至多 batch_size 集。
+    全书可能需要多批续写直至覆盖最后一章（避免长篇被截断/丢弃，见 _plan_task 循环）。
+    """
     summaries_text = "\n".join(f"第{idx}章《{title}》：{summary}" for idx, title, summary in chapter_summaries)
-    prompt = f"""任务：将小说规划为竖屏漫剧剧集（每集 60~90 秒成片）。
+    timeline_req = (
+        "key_timeline：用 10~20 条概括全书关键事件时间线（防伏笔丢失）。"
+        if want_timeline else "key_timeline：本批留空数组 []。")
+    last_batch_hint = (
+        f"若剩余章节（第 {start_chapter}~{chapter_count} 章）能在本批 {batch_size} 集内讲完，"
+        f"则最后一集的 source_chapters 必须包含第 {chapter_count} 章（全书收尾）。")
+    prompt = f"""任务：将小说规划为竖屏漫剧剧集（每集 60~90 秒成片）。全书共 {chapter_count} 章。
 
 漫剧节奏铁律：
 1. 每集开头 3 秒必须是钩子：冲突爆发点/悬念/反转，绝不从平铺直叙开场。
@@ -122,7 +133,13 @@ async def generate_plan(chapter_summaries: list[tuple[int, str, str]], bible: Bi
 3. 每集结尾留下一集的悬念钩。
 4. 节奏宁快勿慢：删除原著中的过渡性内容，跳跃叙事靠旁白补缝。
 
-本次只规划前 {episode_count} 集。每集标注其改编的源章节编号（全书共 {chapter_count} 章），源章节必须连续覆盖、集与集之间不重叠、不跳章，从第 1 章开始。
+本批规划要求：
+- 从第 {start_chapter} 章开始，规划接下来的【至多 {batch_size} 集】（剩余章节够多就规划满 {batch_size} 集）。
+- episode_no 从 {start_episode_no} 开始连续递增。
+- 第一集的 source_chapters 必须从第 {start_chapter} 章开始。
+- 每集 source_chapters 连续、集间不重叠不跳章；一集可覆盖多章（通常 1~3 章），剧情紧凑。
+- 不要超出第 {chapter_count} 章。{last_batch_hint}
+- {timeline_req}
 
 章节摘要：
 {summaries_text}
@@ -135,7 +152,9 @@ async def generate_plan(chapter_summaries: list[tuple[int, str, str]], bible: Bi
 其中 hook=开头3秒画面+一句话；synopsis 80~150字；target_duration_s 取 60~90。"""
     return await _run_with_repair(
         "剧集规划", prompt, EpisodePlan,
-        lambda p: validate_plan(p.episodes, chapter_count), temperature=0.7)
+        lambda p: validate_plan(p.episodes, chapter_count,
+                                start_episode_no=start_episode_no, start_chapter=start_chapter),
+        temperature=0.7, max_tokens=12000)
 
 
 # ---------- C. 单集分镜脚本 ----------

@@ -25,7 +25,7 @@ export default function MonitorPage() {
     max_ref_images: '单镜头最多参考图数',
     auto_qa: '自动质检（true/false，需本机 ffmpeg）',
     auto_retake_threshold: '自动重抽阈值（QA 总分低于此值重抽一次）',
-    plan_episode_count: '每次规划集数',
+    plan_episode_count: '分集每批集数（自动续写铺满全书）',
   }
 
   return (
