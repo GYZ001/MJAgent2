@@ -61,7 +61,7 @@ export default function BoardPage() {
             共 {ep.shots?.length ?? 0} 镜 · 总时长 {totalDur}s / 目标 {ep.target_duration_s}s · 已耗 ¥{ep.cost_cny.toFixed(1)}
           </span>
         </div>
-        {ep.status === 'scripting' && <div style={{ marginTop: 10 }}><span className="stamp gold">分镜中</span> <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>正在写作并通过 V1~V7 校验器，失败会自动带错误修复重试……</span></div>}
+        {ep.status === 'scripting' && <div style={{ marginTop: 10 }}><span className="stamp gold">分镜中</span> <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>正在写作固定 10s 视频段并通过校验器，失败会自动带错误修复重试……</span></div>}
         {ep.script_error && <div className="error-banner">分镜失败（错误已列明，修改源头或重试）：{'\n'}{ep.script_error}</div>}
       </section>
 
@@ -85,7 +85,7 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
     if (!edit) return
     try {
       await api.put(`/shots/${shot.id}`, {
-        duration_s: Number(edit.duration_s), shot_size: edit.shot_size, camera_move: edit.camera_move,
+        duration_s: 10, shot_size: edit.shot_size, camera_move: edit.camera_move,
         scene_setting: edit.scene_setting, characters: edit.characters, action_desc: edit.action_desc,
         narration: edit.narration || null, dialogues: edit.dialogues, transition: edit.transition,
         continuity_from_prev: !!edit.continuity_from_prev,
@@ -100,11 +100,11 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
       <div className="shot-head">
         <span className="sn">镜{String(shot.shot_no).padStart(2, '0')}</span>
         <span className="meta">{s.duration_s}s · {s.shot_size} · {s.camera_move} · {s.transition}{s.continuity_from_prev ? ' · 接上镜' : ''}</span>
-        <span className="meta" style={{ color: 'var(--indigo)' }}>{s.characters.join(' / ') || '无角色'}</span>
+        <span className="meta" style={{ color: 'var(--indigo)' }}>{s.characters.join(' / ') || '缺角色（需修改）'}</span>
         <span style={{ flex: 1 }} />
         <span className="meta">¥{shot.est_cost_cny.toFixed(1)}</span>
         {!edit
-          ? <button className="btn small" disabled={disabled} onClick={() => setEdit(JSON.parse(JSON.stringify(shot)))}>修改</button>
+          ? <button className="btn small" disabled={disabled} onClick={() => setEdit({ ...JSON.parse(JSON.stringify(shot)), duration_s: 10 })}>修改</button>
           : <>
             <button className="btn small primary" onClick={save}>保存</button>
             <button className="btn small ghost" onClick={() => setEdit(null)}>放弃</button>
@@ -115,8 +115,8 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
           <>
             <div className="shot-edit-grid full">
               <div><label className="f">时长(s)</label>
-                <input type="number" min={4} max={12} style={{ width: '100%' }} value={edit.duration_s}
-                  onChange={e => setEdit({ ...edit, duration_s: Number(e.target.value) })} /></div>
+                <input type="number" min={10} max={10} step={10} readOnly style={{ width: '100%' }} value={10}
+                  onChange={() => setEdit({ ...edit, duration_s: 10 })} /></div>
               <div><label className="f">景别</label>
                 <select style={{ width: '100%' }} value={edit.shot_size} onChange={e => setEdit({ ...edit, shot_size: e.target.value })}>
                   {SIZES.map(x => <option key={x}>{x}</option>)}</select></div>
@@ -127,19 +127,19 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
                 <select style={{ width: '100%' }} value={edit.transition} onChange={e => setEdit({ ...edit, transition: e.target.value })}>
                   {TRANS.map(x => <option key={x}>{x}</option>)}</select></div>
             </div>
-            <div className="full"><label className="f">场景（同场景须逐字一致："时间，地点，氛围"）</label>
+            <div className="full"><label className="f">场景标签（只写时间+地点，越短越好）</label>
               <textarea rows={1} value={edit.scene_setting} onChange={e => setEdit({ ...edit, scene_setting: e.target.value })} /></div>
-            <div className="full"><label className="f">画面描述（单一动作，15~50 字）</label>
-              <textarea rows={2} value={edit.action_desc} onChange={e => setEdit({ ...edit, action_desc: e.target.value })} /></div>
+            <div className="full"><label className="f">画面描述（人物和剧情优先，10s 内 3~5 个连续小镜头/动作节点）</label>
+              <textarea rows={3} value={edit.action_desc} onChange={e => setEdit({ ...edit, action_desc: e.target.value })} /></div>
             <div className="full"><label className="f">旁白（可空）</label>
               <textarea rows={2} value={edit.narration ?? ''} onChange={e => setEdit({ ...edit, narration: e.target.value })} /></div>
             <div className="full">
               <label className="f">台词</label>
               {edit.dialogues.map((d, i) => (
                 <div key={i} className="dlg-line">
-                  <input type="text" style={{ width: 110 }} value={d.speaker} placeholder="角色/旁白"
+                  <input type="text" style={{ width: 110 }} value={d.speaker} placeholder="角色名"
                     onChange={e => { const next = [...edit.dialogues]; next[i] = { ...d, speaker: e.target.value }; setEdit({ ...edit, dialogues: next }) }} />
-                  <input type="text" style={{ flex: 1 }} value={d.line} placeholder="台词（≤20字）"
+                  <input type="text" style={{ flex: 1 }} value={d.line} placeholder="台词（不设字数上限）"
                     onChange={e => { const next = [...edit.dialogues]; next[i] = { ...d, line: e.target.value }; setEdit({ ...edit, dialogues: next }) }} />
                   <input type="text" style={{ width: 70 }} value={d.emotion}
                     onChange={e => { const next = [...edit.dialogues]; next[i] = { ...d, emotion: e.target.value }; setEdit({ ...edit, dialogues: next }) }} />
@@ -147,7 +147,7 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
                 </div>
               ))}
               <button className="btn small" style={{ marginTop: 6 }}
-                onClick={() => setEdit({ ...edit, dialogues: [...edit.dialogues, { speaker: episode.shots?.find(x => x.id === shot.id)?.characters[0] ?? '旁白', line: '', emotion: '平静' }] })}>+ 加一句</button>
+                onClick={() => setEdit({ ...edit, dialogues: [...edit.dialogues, { speaker: episode.shots?.find(x => x.id === shot.id)?.characters[0] ?? '', line: '', emotion: '平静' }] })}>+ 加一句</button>
             </div>
           </>
         ) : (

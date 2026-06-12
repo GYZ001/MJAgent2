@@ -6,7 +6,7 @@ import json
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
-from app import worker
+from app import config, worker
 from app.compiler import compile_prompt, shot_cost_cny
 from app.db import get_conn, get_setting, new_id, now, rows_to_dicts, set_setting
 from app.ingest import ingest_novel
@@ -29,6 +29,30 @@ def _episode_or_404(episode_id: str):
     if not row:
         raise HTTPException(404, f"剧集不存在：{episode_id}")
     return row
+
+
+def _compact_episode_target(target_duration_s: int | None) -> int:
+    if target_duration_s is None:
+        return config.EPISODE_TARGET_DEFAULT_S
+    target = int(target_duration_s)
+    if target > config.EPISODE_TARGET_MAX_S:
+        target = config.EPISODE_TARGET_MAX_S
+    elif target < config.EPISODE_TARGET_MIN_S:
+        target = config.EPISODE_TARGET_MIN_S
+    step = config.EPISODE_TARGET_STEP_S
+    rounded = ((target + step // 2) // step) * step
+    return min(config.EPISODE_TARGET_MAX_S, max(config.EPISODE_TARGET_MIN_S, rounded))
+
+
+def _storyboard_target_for_source(target_duration_s: int | None, source_chars: int) -> int:
+    target = _compact_episode_target(target_duration_s)
+    if source_chars >= 5000:
+        return max(target, config.EPISODE_TARGET_MAX_S)
+    if source_chars >= 3500:
+        return max(target, config.EPISODE_TARGET_MAX_S)
+    if source_chars >= 2200:
+        return max(target, 50)
+    return target
 
 
 # ---------- 项目与摄入 ----------
@@ -266,6 +290,7 @@ async def _storyboard_task(episode_id: str):
     conn = get_conn()
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     try:
+        ep_data = dict(ep)
         p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
         bible = Bible.model_validate(json.loads(p["bible_json"]))
         source_chapters = json.loads(ep["source_chapters"] or "[]")
@@ -274,10 +299,15 @@ async def _storyboard_task(episode_id: str):
             f"SELECT * FROM chapters WHERE project_id=? AND idx IN ({placeholders}) ORDER BY idx",
             (ep["project_id"], *source_chapters)).fetchall())
         source_text = "\n\n".join(f"【{ch['title']}】\n{ch['content']}" for ch in chapters)
+        compact_target = _storyboard_target_for_source(ep_data.get("target_duration_s"), len(source_text))
+        if compact_target != ep_data.get("target_duration_s"):
+            conn.execute("UPDATE episodes SET target_duration_s=? WHERE id=?", (compact_target, episode_id))
+            conn.commit()
+            ep_data["target_duration_s"] = compact_target
         prev = conn.execute(
             "SELECT cliffhanger FROM episodes WHERE project_id=? AND episode_no=?",
             (ep["project_id"], ep["episode_no"] - 1)).fetchone()
-        board = await generate_storyboard(dict(ep), source_text, bible,
+        board = await generate_storyboard(ep_data, source_text, bible,
                                           prev_ending=prev["cliffhanger"] if prev else "")
         conn.execute("DELETE FROM shots WHERE episode_id=?", (episode_id,))
         for s in board.shots:
@@ -348,6 +378,7 @@ def edit_shot(shot_id: str, body: dict):
                 "action_desc", "narration", "dialogues", "transition", "continuity_from_prev"):
         if key in body:
             merged[key] = body[key]
+    merged["duration_s"] = config.FIXED_VIDEO_DURATION_S
     instance, errors = schema_errors(Shot, {k: merged[k] for k in (
         "shot_no", "duration_s", "shot_size", "camera_move", "scene_setting", "characters",
         "action_desc", "narration", "dialogues", "transition", "continuity_from_prev")})
@@ -370,6 +401,10 @@ def confirm_episode(episode_id: str):
     """人工确认门（PRD P3）：全量业务校验通过才进入 confirmed。"""
     ep = _episode_or_404(episode_id)
     conn = get_conn()
+    compact_target = _compact_episode_target(ep["target_duration_s"])
+    if compact_target != ep["target_duration_s"]:
+        conn.execute("UPDATE episodes SET target_duration_s=? WHERE id=?", (compact_target, episode_id))
+        conn.commit()
     p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
     bible = Bible.model_validate(json.loads(p["bible_json"]))
     shots_rows = conn.execute("SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)).fetchall()
@@ -381,7 +416,7 @@ def confirm_episode(episode_id: str):
         action_desc=r["action_desc"], narration=r["narration"], dialogues=json.loads(r["dialogues"] or "[]"),
         transition=r["transition"] or "硬切", continuity_from_prev=bool(r["continuity_from_prev"])) for r in shots_rows]
     board = Storyboard(episode_no=ep["episode_no"], shots=shots)
-    errors = validate_storyboard(board, bible, ep["target_duration_s"])
+    errors = validate_storyboard(board, bible, compact_target)
     if errors:
         raise HTTPException(422, json.dumps(errors, ensure_ascii=False))
     # 预编译全部 prompt，把参数错误拦在花钱之前

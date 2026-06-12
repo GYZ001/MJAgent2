@@ -46,12 +46,33 @@ class EpisodePlanItem(BaseModel):
     source_chapters: list[int]
     synopsis: str
     cliffhanger: str
-    target_duration_s: int = 60
+    target_duration_s: int = 50
 
 
 class EpisodePlan(BaseModel):
     key_timeline: list[str] = Field(default_factory=list)
     episodes: list[EpisodePlanItem]
+
+
+# 节拍链（C1 阶段）：分镜的戏剧骨架。时间用 day_offset+time_of_day 数值化，校验单调，从机制上禁掉闪回。
+TIME_OF_DAY_ORDER = ("清晨", "上午", "中午", "下午", "傍晚", "夜晚", "深夜")
+BEAT_TYPES = {"钩子", "铺垫", "升级", "反转", "高潮", "尾钩"}
+
+
+class Beat(BaseModel):
+    beat_no: int
+    day_offset: int          # 0=本集第一天，只能向前
+    time_of_day: str         # TIME_OF_DAY_ORDER 之一
+    location: str            # ≤10 字主地点标签
+    characters: list[str] = Field(default_factory=list)
+    event: str               # 谁做了什么（一句话，用圣经准确姓名）
+    turn: str                # 这一拍改变了什么局势/揭示了什么新信息
+    carry: str               # 留给下一拍的钩子/未完成动作
+    beat_type: str           # BEAT_TYPES 之一
+
+
+class BeatChain(BaseModel):
+    beats: list[Beat]
 
 
 class Dialogue(BaseModel):

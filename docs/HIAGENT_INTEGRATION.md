@@ -12,7 +12,7 @@
 | 鉴权方式 | `Authorization: Bearer <API_KEY>`（OpenAI 兼容） | ✅ 已验证 |
 | Seedance 视频模型 ID | `d7jf6nd5boeaebtfbdqg`（1.0 配置名"HiAgent Seedance 视频"；用户已升级部署 Seedance 2.0，**模型 ID 需确认是否变更**） | ⚠️ ID 待确认 |
 | Seedream 图像模型 ID | `d7ute7ppcc7n89uuqqp0` | ✅ 已验证（健康检查通过） |
-| 文本/VLM 模型 ID | `d7ev71d5boeaebtf4sf0`（1.0 中同时承担剧本/分镜/角色抽取/VLM QA） | ✅ 已验证（真实调用成功） |
+| 文本/VLM 模型 ID | `d7ev7il5boeaebtf4sgg`（1.0 中同时承担剧本/分镜/角色抽取/VLM QA） | ✅ 已验证（真实调用成功） |
 | 文本备选 | `deepseek-v4-pro`（1.0 中 llm_text 实际调用过） | ✅ 已验证 |
 
 凭证管理：`.env` 文件（gitignore），变量名 `HIAGENT_API_KEY`、`HIAGENT_BASE_URL`、`MODEL_TEXT`、`MODEL_VIDEO`、`MODEL_IMAGE`、`MODEL_VLM`。代码中禁止出现任何密钥字面量。
@@ -22,9 +22,9 @@
 | 调用 | 实测延迟 | 2.0 超时设置 | 重试 |
 |---|---|---|---|
 | chat/completions（单章片段抽取，deepseek-v4-pro） | 21.8s / 22.8s | **180s**（长输出的整集分镜可能远超片段抽取） | 2 次，指数退避 1.5s 起 |
-| VLM 调用（d7ev71d5boeaebtf4sf0） | 56.9s / 66.5s | **300s** | 1 次 |
+| VLM 调用（d7ev7il5boeaebtf4sgg） | 56.9s / 66.5s | **300s** | 1 次 |
 | Seedance 任务创建 | 0.12s（健康检查） | 30s | 2 次 |
-| Seedance 任务完成（生成 5~10s 视频） | 未实测 | 轮询间隔 10s，总预算 **15min** | 超预算判失败，可手动重提 |
+| Seedance 任务完成（固定生成 10s 视频） | 未实测 | 轮询间隔 10s，总预算 **15min** | 超预算判失败，可手动重提 |
 
 > 1.0 的核心教训：timeout=15s + 实测 22s = 100% 假失败 → 触发静默兜底 → 垃圾输出。**任何超时值必须 ≥ 实测 P99 的 3 倍。**
 
@@ -57,7 +57,7 @@ POST {base}/contents/generations/tasks
 {
   "model": "<MODEL_VIDEO>",
   "content": [
-    {"type": "text", "text": "<编译后的prompt> --ratio 9:16 --dur 5"},
+    {"type": "text", "text": "<编译后的prompt> --ratio 9:16 --dur 10"},
     // ⚠️ 以下参考图能力待验证（方舟协议形态）：
     {"type": "image_url", "image_url": {"url": "<定妆照url或base64>"}, "role": "reference_image"},
     {"type": "image_url", "image_url": {"url": "<上一镜头尾帧>"}, "role": "first_frame"}
@@ -77,9 +77,9 @@ GET {base}/contents/generations/tasks/{task_id}
 
 - [x] **模型确认**：`d7jf6nd5boeaebtfbdqg` 底层即 `doubao-seedance-2-0`（轮询响应 error 报文中透出），`implement: volcengine`，无需换 ID
 - [x] **轮询端点**：`GET {base}/contents/generations/tasks/{id}` ✅，响应字段：`status`（running/failed/succeeded…）、`content.video_url`、`content.last_frame_url`（**支持尾帧输出**，首尾帧衔接素材可得）、`error.message`、`expired_at`（创建后 7 天过期，**视频必须立即下载落盘**）
-- [x] **文本模型真身**：`d7ev71d5boeaebtf4sf0` = `doubao-seed-2-0-lite-260215`，是**推理模型**，响应含 `reasoning_content` 字段——JSON 提取必须只读 `message.content`
+- [x] **文本模型真身**：`d7ev7il5boeaebtf4sgg` = `doubao-seed-2-0-lite-260215`，是**推理模型**，响应含 `reasoning_content` 字段——JSON 提取必须只读 `message.content`
 - [x] **⚠️ 网关不做同步参数校验**：非法参数（如 `--dur 999`）创建仍返回 200 + task id，仅在轮询时异步 failed。**参数校验必须 100% 前置在编译器**，否则浪费任务额度且失败延迟发现
-- [x] **时长合法取值**：`--dur 3` 非法；`4 / 12 / 15` 合法 → 编译器吸附集合取 **4~12 整数秒**（15 可用但单镜头不需要）
+- [x] **时长合法取值**：网关实测 `--dur 3` 非法、`4 / 12 / 15` 可创建；当前产品策略统一使用 **10s**，产品侧编译器只放行 `--dur 10`，并在 prompt 中要求模型在 10s 内尽可能塞入更多连续小镜头和剧情节点
 - [x] **取消端点**：`DELETE .../tasks/{id}` 对运行中任务返回 500，**不支持取消**——合法参数的探测会真实计费，探测一律用非法参数（免费 failed）
 - [x] 异步失败报文形态：`error.message = 'Error code: 400 - {"message":..., "code":"InvalidParameter", "param":"contents[0].text.duration"}'`
 - [x] `GET {base}/models` 可用，列出全部 3 个已部署模型

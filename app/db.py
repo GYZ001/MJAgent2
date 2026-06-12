@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS episodes (
     cliffhanger TEXT,
     synopsis TEXT,
     source_chapters TEXT,
-    target_duration_s INTEGER DEFAULT 60,
+    target_duration_s INTEGER DEFAULT 50,
     status TEXT DEFAULT 'planned',
     script_error TEXT,
     created_at REAL NOT NULL

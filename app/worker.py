@@ -63,7 +63,7 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
 
     after_shot_id：连贯链依赖——本镜头需等该镜头出成片后，取其尾帧作为首帧（PRD §5.4 第 3 层）。
     """
-    from app.compiler import compile_prompt
+    from app.compiler import compile_prompt, normalize_video_args
     from app.refs import refs_as_image_inputs
     from app.schemas import Bible
 
@@ -91,9 +91,11 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
 
     # first_frame 与 reference_image 互斥（实测 400）：链中镜头 prompt 用"延续首帧"指令，
     # 链头/独立镜头用"与参考图一致"指令
-    prompt_text = prompt_override or compile_prompt(
-        shot, bible, extra_negative,
-        with_refs=bool(ref_inputs) and not chaining, chained=chaining, prev_action=prev_action)
+    prompt_text = (normalize_video_args(prompt_override) if prompt_override else
+                   compile_prompt(
+                       shot, bible, extra_negative,
+                       with_refs=bool(ref_inputs) and not chaining, chained=chaining,
+                       prev_action=prev_action))
 
     # 幂等键用稳定标识（定妆照文件路径 + 依赖镜头），不用体积巨大的 data URL
     ref_paths = [c.ref_image_path or "" for c in bible.characters if c.name in shot.characters][:max_refs]
