@@ -52,6 +52,22 @@ export interface Episode {
   shots?: Shot[]
 }
 
+export interface MixShot {
+  shot_id: string; shot_no: number; duration_s: number
+  video_url: string | null; has_adopted: boolean
+}
+
+export interface MixStatus {
+  episode_id: string; title: string; episode_no: number
+  shots_total: number; shots_ready: number; ready: boolean
+  final_video_url: string | null; shots: MixShot[]
+}
+
+export interface MixResult {
+  video_url: string; shots: number; total_duration_s: number
+  ffmpeg_missing?: boolean; note?: string
+}
+
 export interface Character {
   name: string; role: string; appearance_canonical: string
   personality: string; speech_style: string

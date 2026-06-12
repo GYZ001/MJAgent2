@@ -137,7 +137,7 @@ body {
 @keyframes breathe { 50% { opacity: 0.45; } }
 
 /* ————— 按钮 ————— */
-button.btn {
+button.btn, a.btn {
   font-family: var(--serif);
   font-size: 14px;
   letter-spacing: 0.15em;
@@ -148,15 +148,17 @@ button.btn {
   color: var(--ink);
   cursor: pointer;
   transition: all 0.15s;
+  text-decoration: none;
+  display: inline-block;
 }
-button.btn:hover { border-color: var(--ink-soft); box-shadow: 0 1px 6px rgba(80, 65, 40, 0.12); }
-button.btn:disabled { opacity: 0.4; cursor: not-allowed; box-shadow: none; }
-button.btn.primary {
+button.btn:hover, a.btn:hover { border-color: var(--ink-soft); box-shadow: 0 1px 6px rgba(80, 65, 40, 0.12); }
+button.btn:disabled, a.btn[aria-disabled='true'] { opacity: 0.4; cursor: not-allowed; box-shadow: none; }
+button.btn.primary, a.btn.primary {
   background: var(--cinnabar); color: #fdf8ef; border-color: var(--cinnabar-deep);
 }
-button.btn.primary:hover { background: var(--cinnabar-deep); }
-button.btn.ghost { background: transparent; }
-button.btn.small { padding: 5px 14px; font-size: 13px; }
+button.btn.primary:hover, a.btn.primary:hover { background: var(--cinnabar-deep); }
+button.btn.ghost, a.btn.ghost { background: transparent; }
+button.btn.small, a.btn.small { padding: 5px 14px; font-size: 13px; }
 
 /* ————— 表单 ————— */
 input[type="text"], input[type="number"], textarea, select {

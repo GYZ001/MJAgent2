@@ -533,6 +533,27 @@ def resume_episode(episode_id: str):
     return {"resumed_jobs": worker.retry_paused(episode_id)}
 
 
+# ---------- 成片台：预览 / 拼接 / 导出 ----------
+
+@router.get("/episodes/{episode_id}/mix-status")
+def mix_status(episode_id: str):
+    """按镜号顺序返回每镜成片 URL、整体进度、已合成成品（若有）。"""
+    _episode_or_404(episode_id)
+    return worker.episode_mix_status(episode_id)
+
+
+@router.post("/episodes/{episode_id}/concatenate")
+def concatenate(episode_id: str):
+    """把本集所有已采用的视频片段按镜号顺序拼接成一个 MP4。"""
+    _episode_or_404(episode_id)
+    try:
+        return worker.concatenate_episode(episode_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"ffmpeg 合成失败：{exc}")
+
+
 # ---------- 系统 ----------
 
 @router.get("/system/health")
