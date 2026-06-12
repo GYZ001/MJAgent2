@@ -26,6 +26,7 @@ export default function MonitorPage() {
     auto_qa: '自动质检（true/false，需本机 ffmpeg）',
     auto_retake_threshold: '自动重抽阈值（QA 总分低于此值重抽一次）',
     plan_episode_count: '分集每批集数（自动续写铺满全书）',
+    max_repair_attempts: '修复重试上限（校验失败时让模型反复修正的次数）',
   }
 
   return (

@@ -1,5 +1,7 @@
 """LLM 流水线阶段：摘要 / 角色圣经 / 剧集规划 / 分镜脚本。
-每阶段 = prompt + Schema 校验 + 业务校验 + 修复回路（最多 2 次，失败抛 StageError——禁止兜底）。
+每阶段 = prompt + Schema 校验 + 业务校验 + 修复回路（默认重试到 max_repair_attempts 次，失败抛 StageError——禁止兜底）。
+校验类失败一律让模型继续修复；只有模型真正不可用（鉴权失败/参数 400/网关持续故障，
+即 hiagent.ProviderError 透传）才立刻失败——重试同一 prompt 对这类错误无意义。
 提示词正文与 docs/PROMPT_SPEC.md 保持同步，改动需先跑金样回归。
 """
 from __future__ import annotations
@@ -11,6 +13,7 @@ from typing import Callable
 from pydantic import BaseModel
 
 from app import hiagent
+from app.db import get_setting
 from app.schemas import (Bible, EpisodePlan, Storyboard, extract_json, schema_errors)
 from app.validators import validate_bible, validate_plan, validate_storyboard
 
@@ -33,10 +36,13 @@ class StageError(Exception):
 async def _run_with_repair(stage: str, user_prompt: str, model_cls: type[BaseModel],
                            business_validate: Callable[[BaseModel], list[str]],
                            *, temperature: float = 0.7, max_tokens: int = 8192) -> BaseModel:
+    # 校验类失败持续让模型修复，直到通过或耗尽 max_repair_attempts。
+    # hiagent.ProviderError（模型不可用）不在此捕获，直接透传——对这类错误重试无意义。
+    max_attempts = max(int(get_setting("max_repair_attempts") or 8), 1)
     messages = [{"role": "system", "content": SYSTEM_PREFIX}, {"role": "user", "content": user_prompt}]
     draft = await hiagent.chat(messages, temperature=temperature, max_tokens=max_tokens)
     last_errors: list[str] = []
-    for attempt in range(3):  # 首次 + 修复 2 次
+    for attempt in range(max_attempts):  # 首次 + (max_attempts-1) 次修复
         try:
             obj = extract_json(draft)
         except ValueError as exc:
@@ -48,18 +54,24 @@ async def _run_with_repair(stage: str, user_prompt: str, model_cls: type[BaseMod
                 if not errors:
                     return instance
             last_errors = errors
-        if attempt >= 2:
+        if attempt >= max_attempts - 1:
             break
+        # 反复失败说明模型陷在同一处：升高温度跳出定式，并逐次加重措辞。
+        repair_temp = 0.2 if attempt < 2 else min(0.2 + 0.15 * (attempt - 1), 0.8)
+        emphasis = ("" if attempt < 2 else
+                    f"\n\n【第 {attempt + 1} 次修复】以下问题你已多次未改正。请逐条对照硬性约束逐字修改，"
+                    "确保全部满足，且不要引入新的违规。例如台词超长就必须删字或拆成多句，而不是原样保留。")
         repair_prompt = (
             "你上一次的输出未通过校验。请修复以下具体问题后重新输出完整 JSON（不要解释，不要 Markdown）：\n"
             + "\n".join(f"- {e}" for e in last_errors[:20])
+            + emphasis
             + "\n\n原任务要求：\n" + user_prompt[:3000]
             + "\n\n你的原输出：\n" + draft[:6000]
         )
         draft = await hiagent.chat(
             [{"role": "system", "content": SYSTEM_PREFIX}, {"role": "user", "content": repair_prompt}],
-            temperature=0.2, max_tokens=max_tokens)
-    raise StageError(stage, last_errors)
+            temperature=repair_temp, max_tokens=max_tokens)
+    raise StageError(stage, last_errors + [f"已连续修复 {max_attempts} 次仍未通过校验，可点击重试，或在监制房调高「修复重试上限」"])
 
 
 # ---------- 章节摘要（滚动摘要的原料） ----------

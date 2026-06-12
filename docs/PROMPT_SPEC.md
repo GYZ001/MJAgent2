@@ -9,14 +9,18 @@
 
 ```
 draft = llm(prompt, temperature=0.7)
-for attempt in range(2):                      # 最多修复 2 次
+for attempt in range(max_repair_attempts):    # 默认 8，监制房可调；校验类失败一直让模型修
     json_obj = extract_json(draft)            # 剥代码围栏、截取首尾花括号
     errors = schema_validate(json_obj) + business_validate(json_obj)
     if not errors:
         return json_obj
-    draft = llm(repair_prompt(json_obj, errors), temperature=0.2)   # 低温修复
+    # 反复失败：升温跳出定式 + 加重措辞；错误信息带上违规原文（如超长台词原句）
+    draft = llm(repair_prompt(json_obj, errors), temperature=escalating)
 raise StageFailed(errors)                     # 失败要响，禁止兜底
 ```
+
+> 关键原则：**校验类失败（Schema/业务规则不满足）一直让模型自己修**，直到通过或耗尽 max_repair_attempts；
+> 只有 **模型不可用**（鉴权失败/参数 400/网关持续故障，即 ProviderError）才立即失败——重试同一 prompt 对这类错误无意义。
 
 修复 prompt 模板：
 

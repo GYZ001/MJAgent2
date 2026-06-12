@@ -58,6 +58,7 @@ DEFAULT_SETTINGS = {
     "auto_qa": "true",
     "auto_retake_threshold": "0.6",
     "plan_episode_count": "12",  # 分集"每批"集数（分批续写直至铺满全书，非总集数上限）
+    "max_repair_attempts": "8",  # LLM 输出校验失败的最大修复重试次数（含首次）；模型不可用不走此重试
 }
 
 PROJECTS_DIR.mkdir(exist_ok=True)

@@ -58,7 +58,7 @@ def validate_storyboard(board: Storyboard, bible: Bible, target_duration_s: int)
             if d.speaker not in speakers_ok:
                 errors.append(f"{tag}.dialogues[{j}].speaker=「{d.speaker}」不在该镜头 characters 中（也不是旁白）")
             if len(d.line) > 20:
-                errors.append(f"{tag}.dialogues[{j}] 单句台词 {len(d.line)} 字超过 20 字，请拆短")
+                errors.append(f"{tag}.dialogues[{j}] 单句台词「{d.line}」共 {len(d.line)} 字超过 20 字，请删减用词或拆成两句各 ≤20 字")
         # V5 单动作启发式（宁可漏判不可误判）
         marker_hits = sum(shot.action_desc.count(m) for m in COMPOUND_ACTION_MARKERS)
         if marker_hits >= 2 or "然后" in shot.action_desc:
