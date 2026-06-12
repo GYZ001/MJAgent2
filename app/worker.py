@@ -346,3 +346,129 @@ def retry_paused(episode_id: str) -> int:
         _queue.put_nowait(r["id"])
     conn.commit()
     return len(rows)
+
+
+# ---------- 成片台：汇总状态 / 拼接 / 导出 ----------
+
+def episode_mix_status(episode_id: str) -> dict:
+    """返回：每镜是否已有成片（采用版），以及整体状态。"""
+    conn = get_conn()
+    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    if not ep:
+        return {"ready": False, "shots_total": 0, "shots_ready": 0, "shots": []}
+    shots = rows_to_dicts(conn.execute(
+        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)).fetchall())
+    ready = 0
+    out = []
+    for s in shots:
+        vid = None
+        if s["adopted_version_id"]:
+            v = conn.execute(
+                "SELECT * FROM shot_versions WHERE id=? AND status='succeeded'",
+                (s["adopted_version_id"],)).fetchone()
+            if v and v["video_path"]:
+                from app.config import PROJECTS_DIR
+                vid = "/media/" + v["video_path"].removeprefix(str(PROJECTS_DIR) + "/")
+                ready += 1
+        out.append({"shot_id": s["id"], "shot_no": s["shot_no"],
+                    "duration_s": s["duration_s"], "video_url": vid,
+                    "has_adopted": bool(vid)})
+    return {
+        "episode_id": ep["id"],
+        "title": ep["title"],
+        "episode_no": ep["episode_no"],
+        "shots_total": len(shots),
+        "shots_ready": ready,
+        "ready": len(shots) > 0 and ready == len(shots),
+        "final_video_url": _existing_final_url(ep),
+        "shots": out,
+    }
+
+
+def _existing_final_url(ep_row) -> str | None:
+    from app.config import PROJECTS_DIR
+    final_path = _final_video_path(ep_row["project_id"], ep_row["episode_no"])
+    if final_path.exists():
+        return "/media/" + str(final_path).removeprefix(str(PROJECTS_DIR) + "/")
+    return None
+
+
+def _final_video_path(project_id: str, episode_no: int) -> Path:
+    d = config.PROJECTS_DIR / project_id / "episodes" / str(episode_no) / "final"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "episode.mp4"
+
+
+def _adopted_video_paths(episode_id: str) -> list[tuple[int, str]]:
+    """按镜头顺序返回 (shot_no, video_path)，仅含已有成片的镜头。"""
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT s.shot_no, v.video_path
+           FROM shots s
+           JOIN shot_versions v ON v.id = s.adopted_version_id
+           WHERE s.episode_id=? AND v.status='succeeded' AND v.video_path IS NOT NULL
+           ORDER BY s.shot_no""",
+        (episode_id,)).fetchall()
+    return [(r["shot_no"], r["video_path"]) for r in rows]
+
+
+def concatenate_episode(episode_id: str) -> dict:
+    """把本集所有已采用的镜头顺序拼接成一个 MP4。
+    返回 {video_url, shots, total_duration_s}。若系统未装 ffmpeg 则返回占位说明。
+    """
+    from pathlib import Path as _P
+    conn = get_conn()
+    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    if not ep:
+        raise ValueError("剧集不存在")
+    pieces = _adopted_video_paths(episode_id)
+    if not pieces:
+        raise ValueError("本集没有任何已采用的视频片段，先生成/采用后再试")
+
+    final_path = _final_video_path(ep["project_id"], ep["episode_no"])
+    if not shutil.which("ffmpeg"):
+        # 缺 ffmpeg 的保底：回传首个片段 URL，前端提示用户安装 ffmpeg
+        first = next(p for p in pieces if p[1])
+        from app.config import PROJECTS_DIR
+        return {
+            "video_url": "/media/" + first[1].removeprefix(str(PROJECTS_DIR) + "/"),
+            "shots": len(pieces),
+            "total_duration_s": 10 * len(pieces),
+            "ffmpeg_missing": True,
+            "note": "服务端缺少 ffmpeg，已临时回退为首个片段的直链；请安装 ffmpeg 后重新合成",
+        }
+
+    # 用 concat demuxer（支持不同编码的 mp4 也能直接粘，画质不重编码）
+    with tempfile.TemporaryDirectory() as td:
+        listfile = _P(td) / "list.txt"
+        lines = []
+        for _, vpath in pieces:
+            # concat demuxer 要求绝对路径并转义单引号
+            safe = vpath.replace("'", "'\\''")
+            lines.append(f"file '{safe}'")
+        listfile.write_text("\n".join(lines), encoding="utf-8")
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error",
+             "-f", "concat", "-safe", "0", "-i", str(listfile),
+             "-c", "copy", "-movflags", "+faststart",
+             str(final_path)],
+            check=True, capture_output=True)
+
+    total_dur = 0
+    try:
+        for _, vpath in pieces:
+            raw = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "csv=p=0", vpath], capture_output=True, text=True, check=True
+            ).stdout.strip()
+            total_dur += float(raw) if raw else 0
+    except (subprocess.CalledProcessError, ValueError):
+        total_dur = 10 * len(pieces)
+
+    from app.config import PROJECTS_DIR
+    return {
+        "video_url": "/media/" + str(final_path).removeprefix(str(PROJECTS_DIR) + "/"),
+        "shots": len(pieces),
+        "total_duration_s": round(total_dur, 1),
+        "ffmpeg_missing": False,
+    }
