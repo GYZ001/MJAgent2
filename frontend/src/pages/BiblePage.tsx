@@ -94,10 +94,9 @@ export default function BiblePage() {
                   语风：{c.speech_style}<br />
                   {c.relationships.map(r => `${r.relation}→${r.to}`).join('；')}
                 </div>
-                <button className="btn small" style={{ marginTop: 8 }} disabled={busy || p.refs_status === 'running'}
-                  onClick={() => act(() => api.post(`/projects/${p.id}/refs`, { character: c.name }), `正在为「${c.name}」重新定妆`)}>
-                  {c.ref_image_url ? '重新定妆' : '单独定妆'}
-                </button>
+                <PortraitBlock projectId={p.id} character={c} disabled={busy || p.refs_status === 'running'}
+                  onChanged={refresh} regenerate={() =>
+                    act(() => api.post(`/projects/${p.id}/refs`, { character: c.name }), `正在为「${c.name}」重新定妆`)} />
               </div>
             ))}
           </div>
@@ -145,6 +144,60 @@ export default function BiblePage() {
         </section>
       )}
     </>
+  )
+}
+
+function PortraitBlock({ projectId, character: c, disabled, onChanged, regenerate }: {
+  projectId: string; character: Character; disabled: boolean
+  onChanged: () => void; regenerate: () => void
+}) {
+  const { toast } = useNav()
+  const [draft, setDraft] = useState<string | null>(null)  // null=非编辑态
+  const [saving, setSaving] = useState(false)
+  const isOverridden = !!(c.portrait_prompt_override || '').trim()
+
+  async function save(thenRegen: boolean) {
+    setSaving(true)
+    try {
+      const r = await api.put(`/projects/${projectId}/characters/${encodeURIComponent(c.name)}/portrait`,
+        { portrait_prompt: draft ?? '' })
+      toast(r.reset_to_default ? `「${c.name}」画像描述已恢复默认` : `「${c.name}」画像描述已保存`)
+      setDraft(null); onChanged()
+      if (thenRegen) regenerate()
+    } catch (e: unknown) { toast((e as Error).message, true) }
+    finally { setSaving(false) }
+  }
+
+  return (
+    <div style={{ marginTop: 10 }}>
+      <label className="f">画像描述（定妆照生成词）{isOverridden ? ' · 已自定义' : ' · 默认（由画风+锚点串合成）'}</label>
+      {draft === null ? (
+        <>
+          <div className="f-misc" style={{ background: 'rgba(91,114,83,0.06)', borderLeft: '3px solid var(--moss)', padding: '6px 10px', borderRadius: '0 6px 6px 0', fontSize: 12.5 }}>
+            {c.portrait_prompt_effective}
+          </div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+            <button className="btn small" disabled={disabled || saving}
+              onClick={() => setDraft(c.portrait_prompt_override || c.portrait_prompt_effective || '')}>改画像描述</button>
+            <button className="btn small" disabled={disabled || saving} onClick={regenerate}>
+              {c.ref_image_url ? '重新定妆' : '单独定妆'}
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          <textarea rows={4} style={{ fontSize: 12.5 }} value={draft} onChange={e => setDraft(e.target.value)}
+            placeholder="描述定妆照画面：画风、人物外观、姿态、背景……（10~400 字）" />
+          <div style={{ display: 'flex', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>
+            <button className="btn small primary" disabled={saving || disabled} onClick={() => save(true)}>保存并重新定妆</button>
+            <button className="btn small" disabled={saving} onClick={() => save(false)}>仅保存</button>
+            {isOverridden && <button className="btn small" disabled={saving}
+              onClick={() => { setDraft(''); }} title="清空后保存即恢复默认">清空</button>}
+            <button className="btn small ghost" disabled={saving} onClick={() => setDraft(null)}>放弃</button>
+          </div>
+        </>
+      )}
+    </div>
   )
 }
 

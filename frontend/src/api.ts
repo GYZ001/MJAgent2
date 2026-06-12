@@ -58,6 +58,8 @@ export interface Character {
   relationships: { to: string; relation: string }[]
   ref_image_path?: string | null
   ref_image_url?: string | null
+  portrait_prompt_override?: string | null
+  portrait_prompt_effective?: string
 }
 
 export interface Bible { characters: Character[]; world: { era: string; genre: string; visual_style_canonical: string } }

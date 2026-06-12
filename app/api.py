@@ -96,9 +96,13 @@ def project_detail(project_id: str):
     p.pop("bible_json", None)
     if p["bible"]:
         from app.config import PROJECTS_DIR
+        from app.refs import portrait_prompt
+        style = p["bible"].get("world", {}).get("visual_style_canonical", "")
         for c in p["bible"].get("characters", []):
             path = c.get("ref_image_path")
             c["ref_image_url"] = ("/media/" + path.removeprefix(str(PROJECTS_DIR) + "/")) if path else None
+            override = (c.get("portrait_prompt_override") or "").strip()
+            c["portrait_prompt_effective"] = override or portrait_prompt(style, c.get("appearance_canonical", ""))
     p["key_timeline"] = json.loads(p["key_timeline"]) if p["key_timeline"] else []
     p["chapters"] = rows_to_dicts(conn.execute(
         "SELECT idx, title, char_count, summary IS NOT NULL AS has_summary FROM chapters WHERE project_id=? ORDER BY idx",
@@ -183,6 +187,27 @@ def edit_bible(project_id: str, body: dict):
                  (instance.model_dump_json(), project_id))
     conn.commit()
     return {"bible_version_bumped": True}
+
+
+@router.put("/projects/{project_id}/characters/{character_name}/portrait")
+def edit_portrait_prompt(project_id: str, character_name: str, body: dict):
+    """更新单个角色的画像描述（定妆照生成词）。传空字符串/null 恢复为默认合成描述。"""
+    p = _project_or_404(project_id)
+    if not p["bible_json"]:
+        raise HTTPException(409, "请先生成角色圣经")
+    prompt_text = (body.get("portrait_prompt") or "").strip()
+    if prompt_text and not 10 <= len(prompt_text) <= 400:
+        raise HTTPException(422, f"画像描述长度 {len(prompt_text)} 字，要求 10~400 字（留空则恢复默认）")
+    bible = json.loads(p["bible_json"])
+    target = next((c for c in bible.get("characters", []) if c.get("name") == character_name), None)
+    if target is None:
+        raise HTTPException(404, f"角色不存在：{character_name}")
+    target["portrait_prompt_override"] = prompt_text or None
+    conn = get_conn()
+    conn.execute("UPDATE projects SET bible_json=? WHERE id=?",
+                 (json.dumps(bible, ensure_ascii=False), project_id))
+    conn.commit()
+    return {"saved": True, "reset_to_default": not prompt_text}
 
 
 # ---------- 角色定妆照（人物跨集一致性） ----------

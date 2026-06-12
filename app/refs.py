@@ -48,8 +48,8 @@ async def generate_refs(project_id: str, only_character: str | None = None) -> N
     errors: list[str] = []
     for c in targets:
         try:
-            item = await hiagent.generate_image(
-                portrait_prompt(style, c.appearance_canonical), size=config.REF_IMAGE_SIZE)
+            prompt = (c.portrait_prompt_override or "").strip() or portrait_prompt(style, c.appearance_canonical)
+            item = await hiagent.generate_image(prompt, size=config.REF_IMAGE_SIZE)
             path = ref_path(project_id, c.name)
             if item.get("url"):
                 await hiagent.download(item["url"], path)

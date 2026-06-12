@@ -24,8 +24,10 @@ class Character(BaseModel):
     personality: str = ""
     speech_style: str = ""
     relationships: list[Relationship] = Field(default_factory=list)
-    # 定妆照（圣经定稿后由 Seedream 生成，跨集一致性的视觉锚点；LLM 输出中不含此字段）
+    # 定妆照（圣经定稿后由 Seedream 生成，跨集一致性的视觉锚点；LLM 输出中不含以下字段）
     ref_image_path: str | None = None
+    # 画像描述覆盖：人工编辑的定妆照生成词；为空时用 锚点串+画风 合成的默认描述（refs.portrait_prompt）
+    portrait_prompt_override: str | None = None
 
 
 class World(BaseModel):
