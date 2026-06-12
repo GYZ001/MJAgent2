@@ -68,6 +68,7 @@ export interface Project {
   id: string; name: string; status: string; novel_chars: number
   bible_status: string; bible_error?: string; plan_status: string; plan_error?: string
   bible_version?: number; refs_status?: string; refs_error?: string
+  refs_target?: string | null
   bible?: Bible | null; key_timeline?: string[]
   chapters?: { idx: number; title: string; char_count: number }[]
   episodes?: Episode[]

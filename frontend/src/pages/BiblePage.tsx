@@ -71,14 +71,18 @@ export default function BiblePage() {
           </div>
           {p.refs_status === 'failed' && <div className="error-banner">定妆照生成失败：{'\n'}{p.refs_error}</div>}
           <div className="figure-grid">
-            {bible.characters.map((c: Character, i: number) => (
+            {bible.characters.map((c: Character, i: number) => {
+              const fitting = p.refs_status === 'running' && (!p.refs_target || p.refs_target === c.name)
+              return (
               <div key={c.name} className="figure">
                 <div className="f-name">{c.name} <span className="f-role">{c.role}</span>
-                  {c.ref_image_url ? <span className="stamp green">已定妆</span> : <span className="stamp grey">未定妆</span>}
+                  {fitting ? <span className="stamp gold">定妆中</span>
+                    : c.ref_image_url ? <span className="stamp green">已定妆</span> : <span className="stamp grey">未定妆</span>}
                 </div>
                 {c.ref_image_url && (
-                  <img src={c.ref_image_url + `?v=${p.bible_version}`} alt={c.name}
-                    style={{ width: '100%', borderRadius: 8, border: '1px solid var(--hairline)', marginBottom: 8 }} />
+                  <img src={c.ref_image_url} alt={c.name}
+                    style={{ width: '100%', borderRadius: 8, border: '1px solid var(--hairline)', marginBottom: 8,
+                             opacity: fitting ? 0.45 : 1, transition: 'opacity 0.3s' }} />
                 )}
                 <label className="f">外观锚点串（40~60 字，定稿后锁定）</label>
                 {editing
@@ -98,7 +102,7 @@ export default function BiblePage() {
                   onChanged={refresh} regenerate={() =>
                     act(() => api.post(`/projects/${p.id}/refs`, { character: c.name }), `正在为「${c.name}」重新定妆`)} />
               </div>
-            ))}
+            )})}
           </div>
         </section>
       )}

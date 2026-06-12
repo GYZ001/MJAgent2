@@ -136,6 +136,7 @@ MIGRATIONS = (
     "ALTER TABLE shot_versions ADD COLUMN image_inputs TEXT",
     "ALTER TABLE projects ADD COLUMN refs_status TEXT DEFAULT 'idle'",
     "ALTER TABLE projects ADD COLUMN refs_error TEXT",
+    "ALTER TABLE projects ADD COLUMN refs_target TEXT",
 )
 
 

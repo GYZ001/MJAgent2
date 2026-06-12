@@ -98,9 +98,15 @@ def project_detail(project_id: str):
         from app.config import PROJECTS_DIR
         from app.refs import portrait_prompt
         style = p["bible"].get("world", {}).get("visual_style_canonical", "")
+        import os
         for c in p["bible"].get("characters", []):
             path = c.get("ref_image_path")
-            c["ref_image_url"] = ("/media/" + path.removeprefix(str(PROJECTS_DIR) + "/")) if path else None
+            if path and os.path.exists(path):
+                # 缓存戳=文件 mtime：重新定妆后 URL 自动变化，前端轮询即可换图，无需手动刷新
+                c["ref_image_url"] = ("/media/" + path.removeprefix(str(PROJECTS_DIR) + "/")
+                                      + f"?v={int(os.path.getmtime(path))}")
+            else:
+                c["ref_image_url"] = None
             override = (c.get("portrait_prompt_override") or "").strip()
             c["portrait_prompt_effective"] = override or portrait_prompt(style, c.get("appearance_canonical", ""))
     p["key_timeline"] = json.loads(p["key_timeline"]) if p["key_timeline"] else []
@@ -234,7 +240,8 @@ async def start_refs(project_id: str, body: dict | None = None):
         raise HTTPException(409, "定妆照正在生成中")
     only = (body or {}).get("character")
     conn = get_conn()
-    conn.execute("UPDATE projects SET refs_status='running', refs_error=NULL WHERE id=?", (project_id,))
+    conn.execute("UPDATE projects SET refs_status='running', refs_error=NULL, refs_target=? WHERE id=?",
+                 (only, project_id))
     conn.commit()
     asyncio.create_task(_refs_task(project_id, only))
     return {"status": "running"}
