@@ -1,814 +1,608 @@
-import { useRef, useState } from 'react'
-import { api, Shot, ShotVersion, SceneCandidate } from '../api'
-import { useEpisode, useNav } from '../App'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import EpisodeCrumb from '../components/EpisodeCrumb'
+import { useEpisode } from '../App'
+import { api, type Shot, type ShotVersion } from '../api'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 
-type VideoModeValue = 'REFERENCE_IMAGE_MODE' | 'FIRST_LAST_FRAME_MODE'
-type ModeChoice = 'AUTO' | VideoModeValue
-
-type PreviewModeDecision = {
-  mode: VideoModeValue
-  reason: string
-  confidence: number
-  source: 'manual' | 'frontend_preview'
-  evidence: string[]
-  scores: {
-    reference: number
-    firstLast: number
-  }
-  needReusePreviousScene: boolean
-  needGenerateNewReferences: boolean
-  referenceImagePlan: {
-    totalCount: number
-    reusePreviousSceneCount: number
-    generateNewCount: number
-    types: string[]
-  }
-  forced?: boolean
+/* ─── 常量 ─── */
+const MODE_LABEL: Record<string, string> = {
+  FIRST_LAST_FRAME_MODE: '首尾帧',
+  REFERENCE_IMAGE_MODE: '参考图',
+}
+const REF_TYPE_LABEL: Record<string, string> = {
+  character: '角色定妆照',
+  scene: '场景参考',
+  previous_tail: '上镜尾帧复用',
+  previous_head: '上镜首帧复用',
+  style: '画风锚点',
+  prop: '道具参考',
+  plot_key_frame: '剧情关键帧',
+}
+const SOURCE_LABEL: Record<string, string> = {
+  bible: '角色圣经',
+  generated: 'AI 生成',
+  previous_shot: '上镜复用',
 }
 
-const STRONG_WORDS = [
-  'fight', 'battle', 'explode', 'explosion', 'transform', 'spell', 'magic', 'blast',
-  '打斗', '战斗', '搏斗', '爆气', '爆炸', '法术', '施法', '变身', '快速转身', '转场',
-  '过渡到', '落点', '结尾画面', '尾帧', '强控制', '冲刺', '闪现',
-]
-
-const LIGHT_WORDS = [
-  'dialogue', 'talk', 'walk', 'stand', 'sit', 'look back', 'scene continues',
-  '对话', '说', '交谈', '站', '坐', '走', '回头', '场景延续', '连续出场',
-  '情绪', '环境', '展示', '看向', '轻声',
-]
-
-function modeLabel(mode?: string | null) {
-  return mode === 'REFERENCE_IMAGE_MODE' ? '参考图模式' : '首尾帧模式'
-}
-
-function modeSummary(mode: VideoModeValue) {
-  return mode === 'REFERENCE_IMAGE_MODE'
-    ? '靠参考图维持人物、场景与气质一致，更适合剧情、对白和轻动作镜头。'
-    : '用首图 + 尾图把动作起点和落点钉住，更适合强动作、转场和结果明确的镜头。'
-}
-
-function containsAny(text: string, words: string[]) {
-  return words.some(word => text.includes(word.toLowerCase()))
-}
-
-function matchedWords(text: string, words: string[]) {
-  return words.filter(word => text.includes(word.toLowerCase())).slice(0, 4)
-}
-
-function clamp01(value: number) {
-  return Math.max(0, Math.min(1, value))
-}
-
-function roundedScore(value: number) {
-  return Number(clamp01(value).toFixed(2))
-}
-
-function textForRules(shot: Shot) {
-  return [
-    shot.scene_setting,
-    shot.action_desc,
-    shot.first_frame_desc,
-    shot.last_frame_desc,
-    shot.narration ?? '',
-    shot.transition,
-    ...shot.dialogues.map(d => `${d.speaker} ${d.line} ${d.emotion}`),
-  ].join(' ').toLowerCase()
-}
-
-function sceneContinues(prevShot: Shot | undefined, shot: Shot) {
-  if (!prevShot) return Boolean(shot.continuity_from_prev)
-  return Boolean(shot.continuity_from_prev) || prevShot.scene_setting.trim() === shot.scene_setting.trim()
-}
-
-// 上一镜实际可复用的首尾帧素材数：只有上一镜生成并通过评审的关键帧才可复用。
-// 普通剧情镜（参考图模式）不生成关键帧，因此这里通常为 0——避免预估“复用 N 张”却无可复用之物。
-function reusablePrevSceneCount(prevShot: Shot | undefined) {
-  if (!prevShot) return 0
-  return prevShot.scenes.filter(s => s.status === 'succeeded' && (s.qa?.overall ?? 0) >= 0.75).length
-}
-
-function referencePlanPreview(shot: Shot, prevShot: Shot | undefined) {
-  const maxRefs = 8
-  const isFirst = shot.shot_no <= 1
-  const sameScene = sceneContinues(prevShot, shot)
-  const complexShot = shot.characters.length >= 2 || ((shot.scene_setting || '') + (shot.action_desc || '')).length > 90
-  if (isFirst) {
-    const total = Math.min(Math.max(complexShot ? 8 : 4, 4), maxRefs)
-    return { totalCount: total, reusePreviousSceneCount: 0, generateNewCount: total, types: ['character', 'scene', 'prop', 'style', 'plot_key_frame'] }
-  }
-  if (sameScene) {
-    const reuse = Math.min(4, maxRefs, reusablePrevSceneCount(prevShot))
-    const generated = complexShot ? 2 : 1
-    const total = Math.min(Math.max(4, reuse + generated), maxRefs)
-    return {
-      totalCount: total,
-      reusePreviousSceneCount: reuse,
-      generateNewCount: Math.max(0, total - reuse),
-      types: ['scene', 'previous_shot_frame', 'character', 'plot_key_frame'],
-    }
-  }
-  const total = Math.min(complexShot ? 8 : 4, maxRefs)
-  return { totalCount: total, reusePreviousSceneCount: 0, generateNewCount: total, types: ['character', 'scene', 'plot_key_frame'] }
-}
-
-function buildPreviewDecision(shot: Shot, prevShot: Shot | undefined, choice: ModeChoice): PreviewModeDecision {
-  const autoPlan = referencePlanPreview(shot, prevShot)
-  if (choice === 'REFERENCE_IMAGE_MODE' || choice === 'FIRST_LAST_FRAME_MODE') {
-    const isReference = choice === 'REFERENCE_IMAGE_MODE'
-    return {
-      mode: choice,
-      reason: isReference
-        ? '已手动指定为参考图模式，本次优先用参考图维持人物与场景一致性。'
-        : '已手动指定为首尾帧模式，本次将用首图和尾图强控动作起止状态。',
-      confidence: 1,
-      source: 'manual',
-      evidence: isReference
-        ? ['手动选择参考图模式', autoPlan.generateNewCount > 0 ? `预计新生成参考 ${autoPlan.generateNewCount} 张` : '优先复用已有参考']
-        : ['手动选择首尾帧模式', '需要先通过首图/尾图评审'],
-      scores: { reference: isReference ? 1 : 0, firstLast: isReference ? 0 : 1 },
-      needReusePreviousScene: isReference && autoPlan.reusePreviousSceneCount > 0,
-      needGenerateNewReferences: isReference && autoPlan.generateNewCount > 0,
-      referenceImagePlan: isReference
-        ? autoPlan
-        : { totalCount: 0, reusePreviousSceneCount: 0, generateNewCount: 0, types: [] },
-      forced: true,
-    }
-  }
-
-  const text = textForRules(shot)
-  const strongMatches = matchedWords(text, STRONG_WORDS)
-  const lightMatches = matchedWords(text, LIGHT_WORDS)
-  const sameScene = sceneContinues(prevShot, shot)
-  const hasDialogue = shot.dialogues.length > 0
-  const hasContinuity = Boolean(shot.continuity_from_prev)
-  const transitionNeedsLanding = ['甩镜', '遮挡转场', '匹配剪辑', '闪黑', '闪白', '黑场', '变身'].some(word => shot.transition.includes(word))
-  const hasFrameDescriptions = Boolean(shot.first_frame_desc?.trim() && shot.last_frame_desc?.trim())
-
-  let firstLastScore = 0.34
-  let referenceScore = 0.38
-  const firstLastEvidence: string[] = []
-  const referenceEvidence: string[] = []
-
-  if (strongMatches.length) {
-    firstLastScore += Math.min(0.3, strongMatches.length * 0.12)
-    firstLastEvidence.push(`强动作/落点词：${strongMatches.join('、')}`)
-  }
-  if (hasContinuity) {
-    firstLastScore += 0.26
-    firstLastEvidence.push('接上镜：需要精确首帧衔接')
-  }
-  if (transitionNeedsLanding) {
-    firstLastScore += 0.16
-    firstLastEvidence.push(`转场需要卡落点：${shot.transition}`)
-  }
-  if (hasFrameDescriptions) {
-    firstLastScore += 0.08
-    firstLastEvidence.push('首帧/尾帧描述完整')
-  }
-  if (hasDialogue) {
-    referenceScore += 0.16
-    referenceEvidence.push(`对白 ${shot.dialogues.length} 句`)
-  }
-  if (lightMatches.length) {
-    referenceScore += Math.min(0.2, lightMatches.length * 0.08)
-    referenceEvidence.push(`轻动作/情绪词：${lightMatches.join('、')}`)
-  }
-  if (sameScene && !hasContinuity) {
-    referenceScore += 0.14
-    referenceEvidence.push('同场景续镜：优先保持人物和场景稳定')
-  }
-  if (shot.characters.length >= 2) {
-    referenceScore += 0.08
-    referenceEvidence.push(`多角色同场：${shot.characters.slice(0, 3).join('、')}`)
-  }
-
-  firstLastScore = roundedScore(firstLastScore)
-  referenceScore = roundedScore(referenceScore)
-  const mode: VideoModeValue = firstLastScore > referenceScore ? 'FIRST_LAST_FRAME_MODE' : 'REFERENCE_IMAGE_MODE'
-  const gap = Math.abs(firstLastScore - referenceScore)
-  const confidence = roundedScore(0.58 + gap * 0.45)
-
-  if (mode === 'FIRST_LAST_FRAME_MODE') {
-    const evidence = firstLastEvidence.length ? firstLastEvidence : ['画面起止状态比参考一致性更关键']
-    return {
-      mode,
-      reason: `前端预估偏向首尾帧：${evidence[0]}。生成入队后会记录后台选择器的真实判定。`,
-      confidence,
-      source: 'frontend_preview',
-      evidence,
-      scores: { reference: referenceScore, firstLast: firstLastScore },
-      needReusePreviousScene: false,
-      needGenerateNewReferences: false,
-      referenceImagePlan: { totalCount: 0, reusePreviousSceneCount: 0, generateNewCount: 0, types: [] },
-    }
-  }
-
-  if (referenceEvidence.length) {
-    return {
-      mode,
-      reason: `前端预估偏向参考图：${referenceEvidence[0]}。生成入队后会记录后台选择器的真实判定。`,
-      confidence,
-      source: 'frontend_preview',
-      evidence: referenceEvidence,
-      scores: { reference: referenceScore, firstLast: firstLastScore },
-      needReusePreviousScene: autoPlan.reusePreviousSceneCount > 0,
-      needGenerateNewReferences: autoPlan.generateNewCount > 0,
-      referenceImagePlan: autoPlan,
-    }
-  }
-
-  return {
-    mode: 'REFERENCE_IMAGE_MODE',
-    reason: '前端预估信息不足，默认偏向参考图以保持人物与画面风格稳定；生成入队后会记录后台选择器的真实判定。',
-    confidence,
-    source: 'frontend_preview',
-    evidence: ['未命中强动作/强转场词', '默认保角色与场景一致'],
-    scores: { reference: referenceScore, firstLast: firstLastScore },
-    needReusePreviousScene: autoPlan.reusePreviousSceneCount > 0,
-    needGenerateNewReferences: autoPlan.generateNewCount > 0,
-    referenceImagePlan: autoPlan,
-  }
-}
-
-function planSummary(plan?: { totalCount?: number; reusePreviousSceneCount?: number; generateNewCount?: number }) {
-  if (!plan?.totalCount) return '不需要参考图'
-  const reuse = plan.reusePreviousSceneCount ?? 0
-  const generated = plan.generateNewCount ?? 0
-  const parts = [`新生 ${generated} 张`]
-  if (reuse > 0) parts.unshift(`复用 ${reuse} 张`)
-  return `参考图 ${plan.totalCount} 张：${parts.join(' / ')}`
-}
-
-type UsedRef = NonNullable<NonNullable<ShotVersion['image_inputs']>['reference_images']>[number]
-
-function refSourceLabel(source: string) {
-  return source === 'previous_shot' ? '复用上镜'
-    : source === 'seedream_generated' ? '新生成'
-    : '定妆资产'
-}
-
-// 已生成版本：按真正发给视频模型的参考图，统计实际构成（定妆资产 / 复用上镜 / 新生成）。
-function actualRefSummary(refs: UsedRef[]) {
-  const reuse = refs.filter(r => r.source === 'previous_shot').length
-  const fresh = refs.filter(r => r.source === 'seedream_generated').length
-  const asset = refs.length - reuse - fresh
-  const parts: string[] = []
-  if (asset) parts.push(`定妆资产 ${asset}`)
-  if (reuse) parts.push(`复用上镜 ${reuse}`)
-  if (fresh) parts.push(`新生成 ${fresh}`)
-  return `实际参考图 ${refs.length} 张${parts.length ? `：${parts.join(' · ')}` : ''}`
-}
-
-export default function WallPage() {
-  const { episodeId, projectId, go, toast } = useNav()
-  const { data: ep, refresh } = useEpisode(episodeId!, 5000)
-  const [busy, setBusy] = useState(false)
-  const [active, setActive] = useState(0)
-  const carRef = useRef<HTMLDivElement>(null)
-  const shots = ep?.shots ?? []
-  const previewDecisions = shots.map((shot, idx) => buildPreviewDecision(shot, idx > 0 ? shots[idx - 1] : undefined, 'AUTO'))
-  const firstLastShotIds = new Set(previewDecisions
-    .map((decision, idx) => decision.mode === 'FIRST_LAST_FRAME_MODE' ? shots[idx]?.id : null)
-    .filter(Boolean))
-  const firstLastNeeded = firstLastShotIds.size
-  const sceneApproved = shots.filter(s => firstLastShotIds.has(s.id) && s.scene_status === 'approved').length
-  const videoReady = shots.filter(s => s.versions.some(v => v.status === 'succeeded')).length
-  const keyframeTimer = useTaskTimer(`episode.${episodeId}.keyframes`, shots.some(s => s.scene_status === 'generating'))
-  const videoTimer = useTaskTimer(`episode.${episodeId}.videos`, shots.some(s => s.versions.some(v => v.status === 'queued' || v.status === 'running')))
-
-  if (!ep) return <div className="empty">展卷中……</div>
-
-  const overLimit = ep.cost_limit_cny !== undefined && ep.cost_cny >= ep.cost_limit_cny
-
-  const act = async (fn: () => Promise<unknown>, msg?: string) => {
-    setBusy(true)
-    try { await fn(); if (msg) toast(msg); refresh() }
-    catch (e: unknown) { toast((e as Error).message, true) }
-    finally { setBusy(false) }
-  }
-
-  const goTo = (i: number) => {
-    const idx = Math.max(0, Math.min(shots.length - 1, i))
-    setActive(idx)
-    const el = carRef.current
-    if (el) el.scrollTo({ left: idx * el.clientWidth, behavior: 'smooth' })
-  }
-  const onScroll = () => {
-    const el = carRef.current
-    if (el) setActive(Math.round(el.scrollLeft / el.clientWidth))
-  }
-
+/* ─── Lightbox 图片预览 ─── */
+function Lightbox({ src, alt, onClose }: { src: string; alt: string; onClose: () => void }) {
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
+  }, [onClose])
   return (
-    <>
-      <header className="desk-head">
-        <EpisodeCrumb label="评审墙" view="wall" episodeNo={ep.episode_no} />
-        <h1>评审墙 <span className="sub">一屏一镜 · 自动选择剧情参考或首尾帧控制 · 生成后在此复核视频与素材</span></h1>
-        <hr className="rule" />
-      </header>
-
-      <section className="card" style={{ display: 'flex', gap: 18, alignItems: 'center', flexWrap: 'wrap' }}>
-        <div className="cost-ink">¥{ep.cost_cny.toFixed(1)} <small>/ 上限 ¥{ep.cost_limit_cny}</small></div>
-        {overLimit && (
-          <>
-            <span className="stamp red">预算熔断</span>
-            <button className="btn small" disabled={busy} onClick={() => act(async () => {
-              const r = await api.post(`/episodes/${ep.id}/resume`); toast(`已恢复 ${r.resumed_jobs} 个任务（请先在监制房调高上限）`)
-            })}>调高上限后恢复队列</button>
-          </>
-        )}
-        <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>
-          {firstLastNeeded
-            ? <>首尾帧素材已备 {sceneApproved}/{firstLastNeeded} · 已有成片 {videoReady}/{shots.length}</>
-            : <>本集自动预估以参考图模式为主 · 已有成片 {videoReady}/{shots.length}</>}
-        </span>
-        <span style={{ flex: 1 }} />
-        {firstLastNeeded > 0 && (
-          <button className="btn small" disabled={busy} onClick={() => act(async () => {
-            keyframeTimer.start()
-            const r = await api.post(`/episodes/${ep.id}/scenes-all`) as { started: number }
-            toast(`已为 ${r.started} 个镜头生成首/尾帧候选（供首尾帧模式使用）`)
-          })}>准备首尾帧素材</button>
-        )}
-        <button className="btn small primary" disabled={busy} onClick={() => act(async () => {
-          videoTimer.start()
-          const r = await api.post(`/episodes/${ep.id}/generate`) as { enqueued: { error?: string }[] }
-          const ok = r.enqueued.filter(x => !x.error).length
-          toast(`已入队 ${ok} 镜：系统会逐镜自动选择参考图模式或首尾帧模式`)
-        })}>全片自动生成</button>
-        <button className="btn small" onClick={() => go('cinema', projectId, episodeId)}>入成片台 →</button>
-        <TaskTimer label="首尾帧" timer={keyframeTimer} />
-        <TaskTimer label="视频生成" timer={videoTimer} />
-      </section>
-
-      <section className="card wall-mode-guide">
-        <div className="wall-mode-head">
-          <div>
-            <b>视频生成有两种模式</b>
-            <div className="hint" style={{ marginTop: 4 }}>
-              全片批量生成时会逐镜自动判定；单镜右侧现在也可以直接看到推荐模式，并手动切换后单独生成。
-            </div>
-          </div>
-          <span className="stamp grey">自动判定前置可见</span>
-        </div>
-        <div className="wall-mode-grid">
-          <ModeGuideCard
-            title="参考图模式"
-            desc="更适合对白、剧情推进、场景延续和轻动作。"
-            points={[
-              '优先保持人物脸、服装、场景和气质稳定',
-              '同场景续镜会优先复用上一镜素材',
-              '必要时自动补生成新的参考图',
-            ]}
-          />
-          <ModeGuideCard
-            title="首尾帧模式"
-            desc="更适合打斗、转场、变身、爆发和必须卡落点的镜头。"
-            points={[
-              '首图负责起势，尾图负责落点',
-              '动作路径更受控，但需要先确认关键帧',
-              '适合对起止状态要求很强的镜头',
-            ]}
-          />
-        </div>
-      </section>
-
-      {/* 镜头分页导航 */}
-      <div className="shot-pager">
-        <button className="btn small" disabled={active <= 0} onClick={() => goTo(active - 1)}>← 上一镜</button>
-        <span className="pg-no">镜 {String(shots[active]?.shot_no ?? active + 1).padStart(2, '0')} / {shots.length}</span>
-        <button className="btn small" disabled={active >= shots.length - 1} onClick={() => goTo(active + 1)}>下一镜 →</button>
-        <div className="shot-chips">
-          {shots.map((s, i) => {
-            const hasVideo = s.versions.some(v => v.status === 'succeeded')
-            const cls = ['shot-chip', i === active ? 'active' : '', hasVideo ? 'has-video' : s.scene_status === 'approved' ? 'scene-ok' : ''].join(' ')
-            return <div key={s.id} className={cls} title={`镜${s.shot_no}`} onClick={() => goTo(i)}>{String(s.shot_no).padStart(2, '0')}</div>
-          })}
-        </div>
-      </div>
-
-      <div className="shot-carousel" ref={carRef} onScroll={onScroll}>
-        {shots.map((s, idx) => (
-          <div className="shot-slide" key={s.id}>
-            <ShotSlide shot={s} prevShot={idx > 0 ? shots[idx - 1] : undefined} onChanged={refresh} />
-          </div>
-        ))}
-      </div>
-    </>
-  )
-}
-
-function ModeGuideCard({ title, desc, points }: { title: string; desc: string; points: string[] }) {
-  return (
-    <div className="mode-guide-card">
-      <div className="mode-guide-title">{title}</div>
-      <div className="mode-guide-desc">{desc}</div>
-      <div className="mode-guide-points">
-        {points.map(point => <span key={point} className="stamp grey">{point}</span>)}
+    <div className="lightbox-overlay" onClick={onClose}>
+      <div className="lightbox-content" onClick={e => e.stopPropagation()}>
+        <button className="lightbox-close" onClick={onClose}>✕</button>
+        <img src={src} alt={alt} />
+        {alt && <div className="lightbox-caption">{alt}</div>}
       </div>
     </div>
   )
 }
 
-function ShotSlide({ shot, prevShot, onChanged }: { shot: Shot; prevShot?: Shot; onChanged: () => void }) {
-  const { toast } = useNav()
-  const [busy, setBusy] = useState(false)
-  const [modeChoice, setModeChoice] = useState<ModeChoice>('AUTO')
-  const sceneApproved = shot.scene_status === 'approved'
-  const previewDecision = buildPreviewDecision(shot, prevShot, modeChoice)
+/* ─── 图片缩略图（可点击放大） ─── */
+function ThumbImage({ src, label, onOpen }: { src: string; label?: string; onOpen: (src: string, label?: string) => void }) {
+  return (
+    <div className="thumb-img" onClick={() => onOpen(src, label)} title={label || '点击预览'}>
+      <img src={src} alt={label || ''} loading="lazy" />
+      {label && <span className="thumb-label">{label}</span>}
+    </div>
+  )
+}
 
-  const act = async (fn: () => Promise<unknown>, msg?: string) => {
-    setBusy(true)
-    try { await fn(); if (msg) toast(msg); onChanged() }
-    catch (e: unknown) { toast((e as Error).message, true) }
-    finally { setBusy(false) }
-  }
+/* ─── 图片画廊：集中展示所有参考图、关键帧 ─── */
+function ImageGallery({ shot, onOpen }: { shot: Shot; onOpen: (src: string, label?: string) => void }) {
+  const adopted = shot.versions.find(v => v.id === shot.adopted_version_id) || shot.versions[0]
+  const refs = adopted?.image_inputs?.reference_images || []
+  const hasFirst = adopted?.image_inputs?.first_frame_used
+  const firstSrc = hasFirst ? adopted?.image_inputs?.first_frame_src : null
+  const hasLast = adopted?.image_inputs?.last_frame_used
+  const lastSrc = hasLast ? adopted?.image_inputs?.last_frame_src : null
+  const sceneImgs = shot.scenes.filter(s => s.image_url && s.status === 'succeeded')
 
-  const sceneStamp = sceneApproved ? ['首尾帧素材已备', 'green']
-    : shot.scene_status === 'generating' ? ['首尾帧素材生成中', 'gold']
-      : shot.scene_status === 'review' ? ['首尾帧素材待选', 'red'] : ['未生成首尾帧素材', 'grey']
-  const videoDone = shot.versions.some(v => v.status === 'succeeded')
+  if (!refs.length && !firstSrc && !lastSrc && !sceneImgs.length) return null
 
   return (
-    <div className="slide-card">
-      <div className="slide-head">
-        <span className="sn">镜{String(shot.shot_no).padStart(2, '0')}</span>
-        <span className="meta">{shot.duration_s}s · {shot.shot_size} · {shot.camera_move} · {shot.transition} · {shot.characters.join(' / ') || '缺角色'}</span>
-        {previewDecision.mode === 'FIRST_LAST_FRAME_MODE' && <span className={`stamp ${sceneStamp[1]}`}>{sceneStamp[0]}</span>}
-        {videoDone && <span className="stamp green">已有成片</span>}
+    <div className="image-gallery">
+      <div className="gallery-head">素材画廊</div>
+      <div className="gallery-grid">
+        {firstSrc && <ThumbImage src={firstSrc} label="首帧" onOpen={onOpen} />}
+        {lastSrc && <ThumbImage src={lastSrc} label="尾帧" onOpen={onOpen} />}
+        {refs.map((r, i) => (
+          <ThumbImage
+            key={r.id || i}
+            src={r.image_url || ''}
+            label={REF_TYPE_LABEL[r.type] || r.type}
+            onOpen={onOpen}
+          />
+        ))}
+        {sceneImgs.map(s => (
+          <ThumbImage
+            key={s.id}
+            src={s.image_url!}
+            label={s.kind === 'head' ? '首关键帧' : '尾关键帧'}
+            onOpen={onOpen}
+          />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   WallPage
+   ═══════════════════════════════════════════════════════════════ */
+export default function WallPage() {
+  const [episodeId, setEpisodeId] = useState<string | null>(null)
+  const { data: ep, refresh, err } = useEpisode(episodeId, 5000)
+  const shots = ep?.shots ?? []
+  const [idx, setIdx] = useState(0)
+  const [toast, setToast] = useState<string | null>(null)
+  const [genMask, setGenMask] = useState<Set<string>>(new Set())
+  const [sceneMask, setSceneMask] = useState<Set<string>>(new Set())
+  const [lightbox, setLightbox] = useState<{ src: string; label?: string } | null>(null)
+  const [showGallery, setShowGallery] = useState(true)
+  const [overrides, setOverrides] = useState<Record<string, string>>({})
+  const carouselRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (shots.length && idx >= shots.length) setIdx(shots.length - 1)
+  }, [shots.length, idx])
+
+  useEffect(() => {
+    if (!carouselRef.current || !shots.length) return
+    const el = carouselRef.current.children[idx] as HTMLElement | undefined
+    el?.scrollIntoView({ behavior: 'smooth', inline: 'start', block: 'nearest' })
+  }, [idx, shots.length])
+
+  const keyframeActive = shots.some(s => s.scene_status === 'generating')
+  const videoActive = shots.some(s => s.versions.some(v => v.status === 'queued' || v.status === 'running'))
+  const keyframeTimer = useTaskTimer(`episode.${episodeId}.keyframes`, keyframeActive)
+  const videoTimer = useTaskTimer(`episode.${episodeId}.videos`, videoActive)
+
+  if (!ep) return <div className="empty">展卷中……</div>
+  if (err) return <div className="empty">{err}</div>
+
+  const shot = shots[idx]
+  const keyframeReady = shots.filter(s => s.scene_status === 'approved' || s.scenes.some(sc => sc.status === 'succeeded')).length
+  const videoReady = shots.filter(s => s.versions.some(v => v.status === 'succeeded')).length
+
+  const t = async (fn: () => Promise<unknown>, msg: string) => {
+    try { await fn(); setToast(`${msg} 成功`); refresh() }
+    catch (e: unknown) { setToast(e instanceof Error ? e.message : String(e)) }
+    setTimeout(() => setToast(null), 3200)
+  }
+
+  const doGenerateEpisode = async () => {
+    if (ep.status !== 'confirmed') { setToast('请先在分镜台确认本集分镜'); return }
+    if (!confirm(`即将生成全片 ${shots.length} 个镜头的视频，是否继续？`)) return
+    keyframeTimer.start(); videoTimer.start()
+    await t(() => api.episodeGenerate(ep.id), '全片生成已启动')
+  }
+
+  const doGenerateScene = async (shotId: string, kinds?: ('head' | 'tail')[]) => {
+    setSceneMask(m => new Set(m).add(shotId)); keyframeTimer.start()
+    try { await api.sceneGenerate(shotId, kinds); refresh() }
+    catch (e: unknown) { setToast(e instanceof Error ? e.message : String(e)) }
+    finally { setSceneMask(m => { const n = new Set(m); n.delete(shotId); return n }) }
+  }
+
+  const doGenerateVideo = async (shotId: string) => {
+    setGenMask(m => new Set(m).add(shotId)); videoTimer.start()
+    try {
+      const mode = overrides[shotId] || undefined
+      await api.shotGenerate(shotId, undefined, undefined, undefined, mode === 'AUTO' ? undefined : mode)
+      refresh()
+    } catch (e: unknown) { setToast(e instanceof Error ? e.message : String(e)) }
+    finally { setGenMask(m => { const n = new Set(m); n.delete(shotId); return n }) }
+  }
+
+  const openLightbox = useCallback((src: string, label?: string) => {
+    setLightbox({ src, label })
+  }, [])
+
+  return (
+    <main className="desk wall-page">
+      {/* ── 顶栏 ── */}
+      <div className="wall-topbar">
+        <div className="wall-topbar-left">
+          <EpisodeCrumb label="评审墙" view="wall" episodeNo={ep.episode_no} />
+          <span className="wall-stats">
+            {shots.length} 镜 · 关键帧 {keyframeReady}/{shots.length} · 视频 {videoReady}/{shots.length}
+          </span>
+        </div>
+        <div className="wall-topbar-right">
+          <TaskTimer label="关键帧" timer={keyframeTimer} />
+          <TaskTimer label="视频" timer={videoTimer} />
+          <span className={`stamp ${ep.status === 'confirmed' || ep.status === 'done' ? 'green' : ep.status === 'generating' ? 'gold' : 'grey'}`}>
+            {{ confirmed: '已确认', generating: '生成中', done: '已完成', paused_budget: '预算暂停' }[ep.status] ?? ep.status}
+          </span>
+          {(ep.status === 'confirmed' || ep.status === 'done') && (
+            <button className="btn primary small" onClick={doGenerateEpisode}>全片自动生成</button>
+          )}
+        </div>
       </div>
 
-      <div className="slide-top">
-        <div className="slide-left">
-          <div className="kv"><b>场景</b>{shot.scene_setting}</div>
-          <div className="kv"><b>画面</b>{shot.action_desc}</div>
-          {shot.first_frame_desc && <div className="kv"><b>首帧</b>{shot.first_frame_desc}</div>}
-          {shot.last_frame_desc && <div className="kv"><b>尾帧</b>{shot.last_frame_desc}</div>}
-          {shot.narration && <div className="kv"><b>旁白</b>{shot.narration}</div>}
-          {!!shot.dialogues.length && (
-            <div className="kv"><b>台词</b>
-              {shot.dialogues.map((d, i) => (
-                <div key={i} className="dlg-line"><span className="dlg-speaker">{d.speaker}</span>「{d.line}」</div>
+      {/* ── 镜头分页 ── */}
+      {shots.length > 0 && (
+        <div className="shot-pager">
+          <button className="btn ghost small" disabled={idx === 0} onClick={() => setIdx(i => i - 1)}>← 上一镜</button>
+          <span className="pg-no">第 {idx + 1} / {shots.length} 镜</span>
+          <button className="btn ghost small" disabled={idx >= shots.length - 1} onClick={() => setIdx(i => i + 1)}>下一镜 →</button>
+          <div className="shot-chips">
+            {shots.map((s, i) => (
+              <button
+                key={s.id}
+                className={`shot-chip${i === idx ? ' active' : ''}${s.scene_status === 'approved' ? ' scene-ok' : ''}${s.versions.some(v => v.status === 'succeeded') ? ' has-video' : ''}`}
+                onClick={() => setIdx(i)}
+              >{s.shot_no}</button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── 轮播主体 ── */}
+      <div className="shot-carousel" ref={carouselRef}>
+        {shot && (
+          <div className="shot-slide" key={shot.id}>
+            <ShotSlide
+              shot={shot}
+              episodeStatus={ep.status}
+              generating={genMask.has(shot.id)}
+              sceneGenerating={sceneMask.has(shot.id)}
+              override={overrides[shot.id]}
+              onOverrideChange={v => setOverrides(p => ({ ...p, [shot.id]: v }))}
+              onGenVideo={() => doGenerateVideo(shot.id)}
+              onGenScene={doGenerateScene}
+              onRefresh={refresh}
+              onToast={setToast}
+              onOpenImage={openLightbox}
+              showGallery={showGallery}
+              onToggleGallery={() => setShowGallery(g => !g)}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* ── 全镜图片画廊（可折叠） ── */}
+      {shots.length > 0 && (
+        <div className="wall-global-gallery">
+          <button className="gallery-toggle" onClick={() => setShowGallery(g => !g)}>
+            {showGallery ? '▾' : '▸'} 全镜素材画廊
+          </button>
+          {showGallery && (
+            <div className="global-gallery-grid">
+              {shots.map(s => (
+                <div key={s.id} className={`gallery-shot-section${s.shot_no === shot?.shot_no ? ' active' : ''}`}
+                     onClick={() => setIdx(s.shot_no - 1)}>
+                  <div className="gallery-shot-label">镜 {s.shot_no}</div>
+                  <ImageGallery shot={s} onOpen={openLightbox} />
+                </div>
               ))}
             </div>
           )}
         </div>
+      )}
+
+      {toast && <div className="toast">{toast}</div>}
+      {lightbox && <Lightbox src={lightbox.src} alt={lightbox.label || ''} onClose={() => setLightbox(null)} />}
+    </main>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   ShotSlide — 单镜卡片
+   ═══════════════════════════════════════════════════════════════ */
+function ShotSlide({ shot, episodeStatus, generating, sceneGenerating, override, onOverrideChange,
+  onGenVideo, onGenScene, onRefresh, onToast, onOpenImage, showGallery, onToggleGallery }: {
+  shot: Shot; episodeStatus: string; generating: boolean; sceneGenerating: boolean
+  override?: string; onOverrideChange: (v: string) => void
+  onGenVideo: () => void; onGenScene: (id: string, kinds?: ('head' | 'tail')[]) => void
+  onRefresh: () => void; onToast: (m: string) => void
+  onOpenImage: (src: string, label?: string) => void
+  showGallery: boolean; onToggleGallery: () => void
+}) {
+  const adopted = shot.versions.find(v => v.id === shot.adopted_version_id)
+  const latest = shot.versions[0]
+  const current = adopted || latest
+  const hasAnyVersion = shot.versions.length > 0
+  const isRefMode = current?.image_inputs?.mode === 'REFERENCE_IMAGE_MODE'
+  const needsKf = !isRefMode && (shot.required_keyframes?.length ?? 0) > 0 && shot.scene_status !== 'approved'
+
+  return (
+    <div className="slide-card">
+      {/* 头部 */}
+      <div className="slide-head">
+        <span className="sn">镜 {shot.shot_no}</span>
+        <span className="meta">{shot.shot_size} · {shot.camera_move} · {shot.duration_s}s · {shot.transition}</span>
+        <span className="meta">{shot.scene_setting}</span>
+        {shot.continuity_from_prev ? <span className="stamp blue">接上镜</span> : <span className="stamp grey">新场景</span>}
+        {adopted ? <span className="stamp green">已采用</span> : hasAnyVersion && <span className="stamp grey">待采用</span>}
+        {shot.video_stale && <span className="stamp red">视频需重生</span>}
+        <button className="btn ghost small" onClick={onToggleGallery} style={{ marginLeft: 'auto' }}>
+          {showGallery ? '隐藏画廊' : '显示画廊'}
+        </button>
+      </div>
+
+      <div className="slide-body">
+        {/* 左栏：分镜信息 + 素材画廊 */}
+        <div className="slide-left">
+          <InfoSection shot={shot} />
+          {showGallery && <ImageGallery shot={shot} onOpen={onOpenImage} />}
+        </div>
+
+        {/* 右栏：视频控制 + 模式决策 + 关键帧 */}
         <div className="slide-right">
           <VideoPhase
-            shot={shot}
-            prevShot={prevShot}
-            busy={busy}
-            modeChoice={modeChoice}
-            setModeChoice={setModeChoice}
-            previewDecision={previewDecision}
-            act={act}
+            shot={shot} episodeStatus={episodeStatus} current={current}
+            generating={generating} needsKf={needsKf}
+            override={override} onOverrideChange={onOverrideChange}
+            onGenVideo={onGenVideo} onGenScene={onGenScene}
+            onRefresh={onRefresh} onToast={onToast}
           />
+          {!isRefMode && (
+            <KeyframePhase
+              shot={shot} sceneGenerating={sceneGenerating}
+              onGenScene={onGenScene} onRefresh={onRefresh} onToast={onToast}
+              onOpenImage={onOpenImage}
+            />
+          )}
         </div>
-      </div>
-
-      {previewDecision.mode === 'FIRST_LAST_FRAME_MODE' && (
-        <div className="slide-keyframes">
-          <KeyframePhase shot={shot} busy={busy} act={act} />
-        </div>
-      )}
-    </div>
-  )
-}
-
-function KeyframePhase({ shot, busy, act }: {
-  shot: Shot; busy: boolean; act: (fn: () => Promise<unknown>, msg?: string) => Promise<void>
-}) {
-  const done = (shot.scenes ?? []).filter(s => s.status === 'succeeded')
-  const requiredKinds: ('head' | 'tail')[] = shot.required_keyframes?.length
-    ? shot.required_keyframes
-    : (shot.continuity_from_prev ? ['tail'] : ['head', 'tail'])
-  const needsHead = requiredKinds.includes('head')
-  const missingKinds = requiredKinds.filter(kind =>
-    kind === 'head' ? !shot.approved_head_scene_id : !shot.approved_tail_scene_id
-  )
-  const targetKinds = missingKinds.length ? missingKinds : requiredKinds
-  const targetLabel = targetKinds.map(kind => kind === 'head' ? '首图' : '尾图').join(' / ')
-  const headDone = done.filter(s => s.kind === 'head')
-  const tailDone = done.filter(s => s.kind === 'tail')
-  const thumb = (sc: SceneCandidate, approvedId: string | null | undefined, what: string) => (
-    <SceneThumb key={sc.id} scene={sc} approved={sc.id === approvedId} busy={busy}
-      onApprove={() => act(() => api.post(`/shots/${shot.id}/scene/approve`, { scene_id: sc.id }), `已采用该${what}`)}
-      onDelete={() => act(() => api.del(`/scenes/${sc.id}`), '已删除该首尾帧素材（素材删空时会一并删除本镜旧成片）')} />
-  )
-
-  return (
-    <>
-      <div className="kf-head">
-        <b style={{ fontSize: 13 }}>首尾帧素材</b>
-        <button className="btn small primary" disabled={busy || shot.scene_status === 'generating'}
-          onClick={() => act(
-            () => api.post(`/shots/${shot.id}/scene`, { kinds: targetKinds }),
-            `已发起${targetLabel}生成（自动评审）`
-          )}>
-          {done.length ? `重新生成${targetLabel}` : `生成${targetLabel}`}
-        </button>
-        {shot.scene_status === 'generating' && <span className="stamp gold">生成中…</span>}
-        {shot.scene_status === 'review' && <span style={{ fontSize: 12, color: 'var(--cinnabar-deep)' }}>评审未自动通过，请分别确认所需首图/尾图或重生/删除</span>}
-        {shot.scene_status === 'approved' && <span style={{ fontSize: 12, color: 'var(--moss)' }}>已可用于首尾帧控制；普通剧情镜也可走参考图模式</span>}
-        {!needsHead && <span style={{ fontSize: 12, color: 'var(--ink-faint)' }}>本镜首帧沿用上一镜尾图，只需审核尾图</span>}
-      </div>
-      {!done.length && shot.scene_status !== 'generating' && (
-        <div style={{ fontSize: 12.5, color: 'var(--ink-faint)' }}>尚无首尾帧素材；普通剧情镜可直接走参考图模式生成视频。</div>
-      )}
-      {needsHead && !!headDone.length && (
-        <>
-          <div className="kf-group-label">首图候选（{headDone.length}）</div>
-          <div className="kf-scroll">{headDone.map(sc => thumb(sc, shot.approved_head_scene_id, '首图'))}</div>
-        </>
-      )}
-      {!!tailDone.length && (
-        <>
-          <div className="kf-group-label">尾图候选（{tailDone.length}）</div>
-          <div className="kf-scroll">{tailDone.map(sc => thumb(sc, shot.approved_tail_scene_id, '尾图'))}</div>
-        </>
-      )}
-    </>
-  )
-}
-
-function SceneThumb({ scene, approved, busy, onApprove, onDelete }: {
-  scene: SceneCandidate; approved: boolean; busy: boolean; onApprove: () => void; onDelete: () => void
-}) {
-  const overall = scene.qa?.overall
-  const label = scene.kind === 'head' ? '首图' : '尾图'
-  return (
-    <div className={`scene-thumb ${approved ? 'approved' : ''}`}>
-      <img src={scene.image_url} alt="" />
-      <div className="st-body">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6 }}>
-          <span>{label} · 第{scene.version_no}版{overall !== undefined && overall >= 0 ? ` · ${overall.toFixed(2)}` : ''}</span>
-          <span style={{ display: 'flex', gap: 4 }}>
-            {approved ? <span className="stamp green" style={{ fontSize: 11 }}>采用</span>
-              : <button className="btn small" disabled={busy} onClick={onApprove}>采用</button>}
-            <button className="btn small ghost" disabled={busy} onClick={onDelete} title="删除这张首尾帧素材">删</button>
-          </span>
-        </div>
-        {scene.qa?.issues?.length ? <div style={{ color: 'var(--ink-faint)', marginTop: 3 }}>{scene.qa.issues[0]}</div> : null}
       </div>
     </div>
   )
 }
 
-function VideoModeDetails({ imageInputs }: { imageInputs: NonNullable<ShotVersion['image_inputs']> }) {
-  const mode = modeLabel(imageInputs.mode)
-  const decision = imageInputs.mode_decision
-  const refs = imageInputs.reference_images ?? []
-  const sourceLabel = decision?.llmUsed
-    ? '模型判定'
-    : decision?.defaulted
-      ? '规则兜底'
-      : '未调用模型'
-  const scoreLabel = decision?.llmUsed ? '模型置信' : '规则分'
-  const reasonText = explainDecisionReason(decision?.reason, Boolean(decision?.llmUsed))
+/* ─── 分镜信息区块 ─── */
+function InfoSection({ shot }: { shot: Shot }) {
   return (
-    <div className="mode-detail-card">
-      <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-        <span className="stamp grey">当前版本</span>
-        <b style={{ color: 'var(--ink)' }}>{mode}</b>
-        <span className="decision-pill">{sourceLabel}</span>
-        {decision?.confidence !== undefined && <span className="decision-pill">{scoreLabel} {decision.confidence.toFixed(2)}</span>}
-      </div>
-      {reasonText && <div style={{ marginTop: 5 }}>{reasonText}</div>}
-      {imageInputs.mode === 'REFERENCE_IMAGE_MODE' && (
-        refs.length
-          ? <div style={{ marginTop: 6, color: 'var(--ink)' }}>{actualRefSummary(refs)}</div>
-          : decision?.referenceImagePlan
-            ? <div style={{ marginTop: 6, color: 'var(--ink-faint)' }}>{planSummary(decision.referenceImagePlan)}</div>
-            : null
-      )}
-      {!!refs.length && (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(78px, 1fr))', gap: 8, marginTop: 8 }}>
-          {refs.map(ref => (
-            <div key={ref.id} title={`${refSourceLabel(ref.source)} · ${ref.type}${ref.qualityScore != null ? ` · QA ${ref.qualityScore.toFixed(2)}` : ''}`} style={{ minWidth: 0 }}>
-              <div style={{ position: 'relative' }}>
-                {ref.image_url
-                  ? <img src={ref.image_url} alt="" style={{ width: '100%', aspectRatio: '3 / 4', objectFit: 'cover', borderRadius: 6, border: '1px solid var(--hairline)' }} />
-                  : <div style={{ width: '100%', aspectRatio: '3 / 4', borderRadius: 6, border: '1px dashed var(--hairline)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--ink-faint)', fontSize: 11 }}>无图</div>}
-                <span style={{ position: 'absolute', top: 4, left: 4, fontSize: 10, lineHeight: 1.4, padding: '1px 5px', borderRadius: 999, background: 'rgba(250,248,243,0.92)', border: '1px solid var(--hairline)', color: ref.source === 'previous_shot' ? 'var(--cinnabar-deep)' : 'var(--ink)' }}>{refSourceLabel(ref.source)}</span>
+    <div className="info-section">
+      <div className="info-row"><b>画面</b><span>{shot.action_desc}</span></div>
+      <div className="info-row"><b>首帧</b><span className="mono-text">{shot.first_frame_desc}</span></div>
+      <div className="info-row"><b>尾帧</b><span className="mono-text">{shot.last_frame_desc}</span></div>
+      {shot.narration && <div className="info-row"><b>旁白</b><span>{shot.narration}</span></div>}
+      {shot.dialogues.length > 0 && (
+        <div className="info-row">
+          <b>台词</b>
+          <div className="dlg-list">
+            {shot.dialogues.map((d, i) => (
+              <div key={i} className="dlg-line">
+                <span className="dlg-speaker">{d.speaker}</span>
+                <span>{d.line}</span>
+                {d.emotion !== '平静' && <span className="dlg-emotion">{d.emotion}</span>}
               </div>
-              <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginTop: 3 }}>{ref.type}</div>
-              {ref.qualityScore != null && <div style={{ color: 'var(--ink-faint)' }}>QA {ref.qualityScore.toFixed(2)}</div>}
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   KeyframePhase — 关键帧管理
+   ═══════════════════════════════════════════════════════════════ */
+function KeyframePhase({ shot, sceneGenerating, onGenScene, onRefresh, onToast, onOpenImage }: {
+  shot: Shot; sceneGenerating: boolean
+  onGenScene: (id: string, kinds?: ('head' | 'tail')[]) => void
+  onRefresh: () => void; onToast: (m: string) => void
+  onOpenImage: (src: string, label?: string) => void
+}) {
+  const req = shot.required_keyframes ?? []
+  const heads = shot.scenes.filter(s => s.kind === 'head')
+  const tails = shot.scenes.filter(s => s.kind === 'tail')
+
+  const doApprove = async (sceneId: string, kind: 'head' | 'tail') => {
+    try { await api.sceneApprove(shot.id, sceneId, kind); onRefresh() }
+    catch (e: unknown) { onToast(e instanceof Error ? e.message : String(e)) }
+  }
+  const doDelete = async (sceneId: string) => {
+    if (!confirm('删除此关键帧？')) return
+    try { await api.sceneDelete(sceneId); onRefresh() }
+    catch (e: unknown) { onToast(e instanceof Error ? e.message : String(e)) }
+  }
+
+  return (
+    <div className="kf-section">
+      <div className="kf-head">
+        <span className="kf-title">首尾帧素材</span>
+        {req.length > 0 && shot.scene_status !== 'approved' && (
+          <button className="btn small" disabled={sceneGenerating} onClick={() => onGenScene(shot.id, req.length === 2 ? ['head', 'tail'] : req)}>
+            {sceneGenerating ? '生成中…' : '准备首尾帧素材'}
+          </button>
+        )}
+        {shot.scene_status === 'approved' && <span className="stamp green">已备齐</span>}
+        {shot.scene_status === 'generating' && <span className="stamp gold">生成中</span>}
+      </div>
+
+      {(['head', 'tail'] as const).map(kind => {
+        const items = kind === 'head' ? heads : tails
+        if (!req.includes(kind) && !items.length) return null
+        const approvedId = kind === 'head' ? shot.approved_head_scene_id : shot.approved_tail_scene_id
+        return (
+          <div key={kind}>
+            <div className="kf-group-label">{kind === 'head' ? '首帧' : '尾帧'}{approvedId ? ' ✓' : ''}</div>
+            <div className="kf-scroll">
+              {items.map(s => (
+                <SceneThumb key={s.id} scene={s} approved={approvedId === s.id}
+                  onApprove={() => doApprove(s.id, kind)} onDelete={() => doDelete(s.id)} onOpenImage={onOpenImage} />
+              ))}
+              {!items.length && <span className="kf-empty">暂无</span>}
             </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function SceneThumb({ scene, approved, onApprove, onDelete, onOpenImage }: {
+  scene: { id: string; kind: string; version_no: number; image_url?: string | null; status: string; error?: string; qa?: { overall: number } | null }
+  approved: boolean
+  onApprove: () => void; onDelete: () => void
+  onOpenImage: (src: string, label?: string) => void
+}) {
+  if (scene.status === 'generating') return <div className="scene-thumb"><div className="scene-placeholder">生成中…</div></div>
+  if (scene.status === 'failed') return <div className="scene-thumb"><div className="scene-placeholder">失败</div></div>
+  if (!scene.image_url) return null
+  return (
+    <div className={`scene-thumb${approved ? ' approved' : ''}`}>
+      <img src={scene.image_url} alt="" onClick={() => onOpenImage(scene.image_url!, `${scene.kind === 'head' ? '首' : '尾'}帧 v${scene.version_no}`)} />
+      <div className="st-body">
+        v{scene.version_no} {scene.qa && <span>QA {scene.qa.overall.toFixed(2)}</span>}
+        <div className="st-actions">
+          {!approved && <button className="btn small" onClick={onApprove}>采用</button>}
+          <button className="btn small ghost" onClick={onDelete}>删除</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   VideoPhase — 视频生成控制
+   ═══════════════════════════════════════════════════════════════ */
+function VideoPhase({ shot, episodeStatus, current, generating, needsKf,
+  override, onOverrideChange, onGenVideo, onGenScene, onRefresh, onToast }: {
+  shot: Shot; episodeStatus: string; current?: ShotVersion
+  generating: boolean; needsKf: boolean
+  override?: string; onOverrideChange: (v: string) => void
+  onGenVideo: () => void; onGenScene: (id: string, kinds?: ('head' | 'tail')[]) => void
+  onRefresh: () => void; onToast: (m: string) => void
+}) {
+  const hasAdopted = !!shot.adopted_version_id
+  const modePlan = shot.mode_plan
+
+  const doAdopt = async (vid: string) => {
+    try { await api.adoptVersion(shot.id, vid); onRefresh() }
+    catch (e: unknown) { onToast(e instanceof Error ? e.message : String(e)) }
+  }
+  const doDelete = async (vid: string) => {
+    if (!confirm('删除此版本？')) return
+    try { await api.deleteVersion(vid); onRefresh() }
+    catch (e: unknown) { onToast(e instanceof Error ? e.message : String(e)) }
+  }
+  const doWithCritique = async () => {
+    try { await api.shotGenerate(shot.id, undefined, undefined, true); onRefresh() }
+    catch (e: unknown) { onToast(e instanceof Error ? e.message : String(e)) }
+  }
+
+  // 当前版本的模式决策（已生成后显示实际结果）
+  const decision = current?.image_inputs?.mode_decision
+
+  return (
+    <div className="video-section">
+      {/* 视频播放器 */}
+      <div className="video-player-area">
+        {current?.video_url ? (
+          <video src={current.video_url} controls className="rev-video" />
+        ) : (
+          <div className="vp-empty">
+            <span>{current?.status === 'queued' || current?.status === 'running' ? '⏳ 生成中…' : '暂无视频'}</span>
+            {current?.error && <span className="err-text">{current.error}</span>}
+          </div>
+        )}
+      </div>
+
+      {/* 控制面板 */}
+      <div className="video-controls">
+        {/* 当前版本模式信息 */}
+        {decision?.mode && (
+          <div className="mode-badge">
+            <span className={`mode-tag ${decision.mode === 'REFERENCE_IMAGE_MODE' ? 'ref' : 'ff'}`}>
+              {MODE_LABEL[decision.mode] || decision.mode}
+            </span>
+            {decision.confidence != null && <span className="conf">{(decision.confidence * 100).toFixed(0)}%</span>}
+            {decision.llmUsed && <span className="llm-badge">AI</span>}
+          </div>
+        )}
+        {decision?.reason && <div className="mode-reason">{decision.reason}</div>}
+
+        {/* 模式规划预览（未生成时显示 LLM 规划） */}
+        {!current && modePlan && (
+          <div className="plan-preview">
+            <div className="plan-head">AI 生成计划</div>
+            <div className="plan-mode">
+              推荐模式：<b>{MODE_LABEL[modePlan.mode] || modePlan.mode}</b>
+              <span className="conf"> 置信度 {(modePlan.confidence * 100).toFixed(0)}%</span>
+              {modePlan.llmUsed && <span className="llm-badge">AI 决策</span>}
+            </div>
+            <div className="plan-reason">{modePlan.reason}</div>
+            {modePlan.referenceImagePlan && (
+              <div className="plan-refs">
+                参考图计划：共 {modePlan.referenceImagePlan.totalCount} 张
+                {modePlan.referenceImagePlan.reusePreviousSceneCount > 0 &&
+                  ` · 复用 ${modePlan.referenceImagePlan.reusePreviousSceneCount} 张`}
+                {modePlan.referenceImagePlan.generateNewCount > 0 &&
+                  ` · 新生成 ${modePlan.referenceImagePlan.generateNewCount} 张`}
+                {modePlan.referenceImagePlan.types.length > 0 && (
+                  <div className="plan-types">
+                    {modePlan.referenceImagePlan.types.map(t => (
+                      <span key={t} className="type-tag">{REF_TYPE_LABEL[t] || t}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 当前版本参考图信息 */}
+        {current?.image_inputs?.reference_images && current.image_inputs.reference_images.length > 0 && (
+          <div className="ref-info">
+            <div className="ref-head">使用参考图 ({current.image_inputs.reference_images.length})</div>
+            <div className="ref-list">
+              {current.image_inputs.reference_images.map((r, i) => (
+                <span key={r.id || i} className="ref-item">
+                  {REF_TYPE_LABEL[r.type] || r.type}
+                  {r.qualityScore != null && ` · QA ${r.qualityScore.toFixed(2)}`}
+                  <span className="ref-src">{SOURCE_LABEL[r.source] || r.source}</span>
+                </span>
+              ))}
+            </div>
+            {current.image_inputs.reference_failure_logs && current.image_inputs.reference_failure_logs.length > 0 && (
+              <div className="ref-fails">
+                {current.image_inputs.reference_failure_logs.map((f, i) => (
+                  <span key={i} className="fail-item">{f.type}: {f.error} → {f.fallback}</span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* QA 评分 */}
+        {current?.qa && (
+          <div className={`qa-row ${current.qa.overall >= 0.6 ? 'pass' : 'fail'}`}>
+            QA {current.qa.overall.toFixed(2)}
+            {current.qa.issues.length > 0 && <span> · {current.qa.issues.join('；')}</span>}
+          </div>
+        )}
+
+        {/* 下次生成模式覆盖 */}
+        <div className="mode-override">
+          <span className="mo-label">模式：</span>
+          {['AUTO', 'REFERENCE_IMAGE_MODE', 'FIRST_LAST_FRAME_MODE'].map(m => (
+            <button key={m}
+              className={`mode-btn${(override || 'AUTO') === m ? ' active' : ''}`}
+              onClick={() => onOverrideChange(m)}>
+              {m === 'AUTO' ? '自动' : MODE_LABEL[m]}
+            </button>
           ))}
         </div>
-      )}
-      {imageInputs.fallback_reason && <div style={{ marginTop: 6, color: 'var(--cinnabar-deep)' }}>回退：{imageInputs.fallback_reason}</div>}
-      {imageInputs.retry_reason && <div style={{ marginTop: 6, color: 'var(--cinnabar-deep)' }}>重试：{imageInputs.retry_reason}</div>}
-      {!!imageInputs.reference_failure_logs?.length && (
-        <div style={{ marginTop: 6, color: 'var(--cinnabar-deep)' }}>
-          badcase：{imageInputs.reference_failure_logs[imageInputs.reference_failure_logs.length - 1]?.reason}
-        </div>
-      )}
-    </div>
-  )
-}
 
-function explainDecisionReason(reason?: string, llmUsed?: boolean) {
-  if (!reason) return ''
-  if (llmUsed) return reason
-  if (reason.includes('dialogue') || reason.includes('light action')) {
-    return '命中对白/轻动作规则，本版未调用后台模型改判。'
-  }
-  if (reason.includes('strong action') || reason.includes('transition') || reason.includes('end-state')) {
-    return '命中强动作/转场/落点规则，本版未调用后台模型改判。'
-  }
-  if (reason.includes('exact first-frame handoff')) {
-    return '命中接上镜规则，需要用上一镜尾图做精确首帧衔接。'
-  }
-  if (reason.includes('Default ordinary story shot')) {
-    return '普通剧情镜规则兜底，优先保持人物与场景一致。'
-  }
-  if (reason.includes('Forced by video_generation_default_mode')) {
-    return '由监制房默认视频模式强制指定。'
-  }
-  if (reason.includes('Reference image mode is disabled')) {
-    return '参考图模式已在配置中关闭，自动改走首尾帧模式。'
-  }
-  return reason
-}
-
-function VideoPhase({ shot, prevShot, busy, modeChoice, setModeChoice, previewDecision, act }: {
-  shot: Shot; prevShot?: Shot; busy: boolean
-  modeChoice: ModeChoice
-  setModeChoice: (mode: ModeChoice) => void
-  previewDecision: PreviewModeDecision
-  act: (fn: () => Promise<unknown>, msg?: string) => Promise<void>
-}) {
-  const [showVer, setShowVer] = useState<string | null>(null)
-  const [editPrompt, setEditPrompt] = useState<string | null>(null)
-
-  const adopted = shot.versions.find(v => v.id === shot.adopted_version_id)
-  const current = showVer ? shot.versions.find(v => v.id === showVer)! : (adopted ?? shot.versions[0])
-  const autoDecision = buildPreviewDecision(shot, prevShot, 'AUTO')
-  const nextDecision = previewDecision
-  const nextMode = nextDecision.mode
-  const editingReferenceMode = nextMode === 'REFERENCE_IMAGE_MODE'
-  const keyframeBlocked = nextMode === 'FIRST_LAST_FRAME_MODE' && shot.scene_status !== 'approved'
-  const makeGenerateBody = (extra?: Record<string, unknown>) =>
-    modeChoice === 'AUTO' ? (extra ?? {}) : { ...(extra ?? {}), mode_override: modeChoice }
-  const generateLabel = current ? '再生成一版' : '生成本镜'
-  const generateToast = modeChoice === 'AUTO'
-    ? `已按自动判定入队（当前建议：${modeLabel(autoDecision.mode)}）`
-    : `已按${modeLabel(modeChoice)}入队`
-
-  return (
-    <div className="video-panel">
-      <div className="vp-media">
-        {current?.video_url
-          ? <video className="rev-video" src={current.video_url} controls loop muted playsInline />
-          : <div className="vp-empty">
-              {current?.status === 'running' || current?.status === 'queued'
-                ? <><span className="stamp gold">生成中</span><span style={{ fontSize: 12 }}>{shot.duration_s}s · 约需数分钟</span></>
-                : current?.status === 'failed' ? <span className="stamp red">失败</span>
-                : current?.status === 'paused_budget' ? <span className="stamp red">预算暂停</span>
-                : <span>等待生成视频<br /><span style={{ fontSize: 11 }}>可全片自动生成，也可在右侧先选模式后单独生成</span></span>}
-            </div>}
-      </div>
-      <div className="vp-controls">
-        {current?.qa && current.qa.overall >= 0 && (
-          <div className="fc-qa" style={{ margin: 0 }}>质检 {current.qa.overall.toFixed(2)}{current.qa.issues?.length ? ` · ${current.qa.issues[0]}` : ''}</div>
-        )}
-        {current?.status === 'failed' && current.error && (
-          <div className="error-banner" style={{ margin: 0, fontSize: 12 }}>{current.error}</div>
-        )}
-        {current?.image_inputs?.mode && (
-          <VideoModeDetails imageInputs={current.image_inputs} />
-        )}
-        <div className="mode-detail-card">
-          <div className="mode-preview-head">
-            <b>下次生成</b>
-            <span>{modeChoice === 'AUTO' ? '自动判定' : `手动指定：${modeLabel(modeChoice)}`}</span>
-          </div>
-          <div className="mode-choice-row">
-            {([
-              ['AUTO', '自动判定'],
-              ['REFERENCE_IMAGE_MODE', '参考图'],
-              ['FIRST_LAST_FRAME_MODE', '首尾帧'],
-            ] as [ModeChoice, string][]).map(([value, label]) => (
-              <button
-                key={value}
-                className={`mode-choice ${modeChoice === value ? 'active' : ''}`}
-                onClick={() => setModeChoice(value)}
-                type="button"
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          <div style={{ marginTop: 8, color: 'var(--ink)' }}>
-            <b>{modeLabel(nextMode)}</b> · {modeSummary(nextMode)}
-          </div>
-          <div style={{ marginTop: 5 }}>{nextDecision.reason}</div>
-          <div className="decision-score-row">
-            {modeChoice === 'AUTO' && (
-              <>
-                <span className="decision-pill">前端预估 {nextDecision.confidence.toFixed(2)}</span>
-                <span className="decision-pill">参考 {nextDecision.scores.reference.toFixed(2)}</span>
-                <span className="decision-pill">首尾帧 {nextDecision.scores.firstLast.toFixed(2)}</span>
-              </>
-            )}
-            {nextMode === 'REFERENCE_IMAGE_MODE' && <span className="decision-pill">{planSummary(nextDecision.referenceImagePlan)}</span>}
-            {nextMode === 'FIRST_LAST_FRAME_MODE' && <span className="decision-pill">依赖已过审首图 / 尾图</span>}
-          </div>
-          {!!nextDecision.evidence.length && (
-            <div className="decision-evidence">
-              {nextDecision.evidence.map(item => <span key={item}>{item}</span>)}
-            </div>
+        {/* 操作按钮 */}
+        <div className="action-row">
+          {(episodeStatus === 'confirmed' || episodeStatus === 'done') && (
+            <button className="btn primary small" disabled={generating || needsKf} onClick={onGenVideo}>
+              {generating ? '生成中…' : needsKf ? '需先备关键帧' : hasAdopted ? '重生成' : '生成本镜'}
+            </button>
           )}
-          {modeChoice === 'AUTO' && (
-            <div style={{ marginTop: 6, color: 'var(--ink-faint)' }}>
-              这里是页面预估；真正入队时后台选择器会再次判定，并在生成版本里显示“模型判定”或“规则兜底”。
-            </div>
+          {needsKf && (
+            <button className="btn small" onClick={() => onGenScene(shot.id, shot.required_keyframes)}>
+              准备关键帧
+            </button>
           )}
-          {nextMode === 'REFERENCE_IMAGE_MODE' && (
-            <div style={{ marginTop: 6, color: 'var(--ink-faint)' }}>
-              参考图模式不需要先准备首尾帧素材；下方素材区已收起。
-            </div>
+          {current?.video_url && !hasAdopted && (
+            <button className="btn small" onClick={() => doAdopt(current.id)}>采用此版</button>
           )}
-          {modeChoice !== 'AUTO' && (
-            <div style={{ marginTop: 6, color: 'var(--ink-faint)' }}>
-              自动判定原本建议：{modeLabel(autoDecision.mode)}。{autoDecision.reason}
-            </div>
+          {current?.video_url && (
+            <a className="btn small ghost" href={current.video_url} download={`${shot.shot_no}.mp4`}>导出</a>
           )}
-          {nextMode === 'FIRST_LAST_FRAME_MODE' && shot.scene_status !== 'approved' && (
-            <div style={{ marginTop: 6, color: 'var(--cinnabar-deep)' }}>
-              当前还没有备齐可用首尾帧素材，先在下方完成首图 / 尾图评审，再生成本镜视频。
-            </div>
+          {hasAdopted && current?.qa && (
+            <>
+              <button className="btn small" onClick={doWithCritique}>带评语重生</button>
+              <button className="btn small" onClick={() => onGenVideo()}>改词重生</button>
+            </>
+          )}
+          {shot.versions.length > 1 && (
+            <button className="btn small ghost" onClick={() => onGenVideo()}>原词重抽</button>
+          )}
+          {current && !hasAdopted && (
+            <button className="btn small ghost" onClick={() => doDelete(current.id)}>删除此版</button>
           )}
         </div>
+
+        {/* 版本历史 */}
         {shot.versions.length > 1 && (
-          <select style={{ width: '100%' }} value={current?.id ?? ''} onChange={e => setShowVer(e.target.value)}>
+          <div className="version-history">
+            <div className="vh-head">历史版本 ({shot.versions.length})</div>
             {shot.versions.map(v => (
-              <option key={v.id} value={v.id}>
-                第{v.version_no}版 · {v.status}{v.id === shot.adopted_version_id ? ' · 已采用' : ''}{v.qa && v.qa.overall >= 0 ? ` · QA ${v.qa.overall.toFixed(2)}` : ''}
-              </option>
-            ))}
-          </select>
-        )}
-
-        {editPrompt !== null ? (
-          <>
-            <div className="hint" style={{ fontSize: 11.5, lineHeight: 1.5 }}>
-              {editingReferenceMode
-                ? '改词建议：保留参考图用途说明、角色/场景一致性和单一连贯动作约束，只调整动作细节。'
-                : '改词建议：保留首尾帧素材约束、单一连贯动作和画面稳定/不跳切等约束，只调整动作细节。'}
-            </div>
-            <textarea rows={6} style={{ fontSize: 12.5 }} value={editPrompt} onChange={e => setEditPrompt(e.target.value)} />
-            <div className="fc-actions">
-              <button className="btn small primary" disabled={busy || keyframeBlocked}
-                onClick={() => act(async () => {
-                  await api.post(`/shots/${shot.id}/generate`, makeGenerateBody({ prompt_override: editPrompt }))
-                  setEditPrompt(null)
-                }, `已按修改后的 prompt 入队（${modeLabel(nextMode)}）`)}>提交生成</button>
-              <button className="btn small ghost" onClick={() => setEditPrompt(null)}>放弃</button>
-            </div>
-          </>
-        ) : (
-          <div className="fc-actions">
-            <button className="btn small primary" disabled={busy || keyframeBlocked}
-              onClick={() => act(() => api.post(`/shots/${shot.id}/generate`, makeGenerateBody()), generateToast)}>{generateLabel}</button>
-            {shot.video_stale && (
-              <button className="btn small primary" disabled={busy}
-                onClick={() => act(() => api.post(`/episodes/${shot.episode_id}/generate`, { from_shot_no: shot.shot_no }), '已从本镜起、沿连续段往后重生')}>从此镜往后重生</button>
-            )}
-            {current && current.status === 'succeeded' && current.id !== shot.adopted_version_id && (
-              <button className="btn small primary" disabled={busy}
-                onClick={() => act(() => api.post(`/shots/${shot.id}/adopt`, { version_id: current.id }), '已采用该版本')}>采用此版</button>
-            )}
-            {current?.video_url && (
-              <a className="btn small" href={current.video_url}
-                download={`镜${String(shot.shot_no).padStart(2, '0')}_第${current.version_no}版.mp4`}
-                style={{ textDecoration: 'none' }}>导出</a>
-            )}
-            {shot.versions.length > 0 && (
-              <>
-                <button className="btn small primary" disabled={busy || keyframeBlocked}
-                  onClick={() => act(() => api.post(`/shots/${shot.id}/generate`, makeGenerateBody({ with_critique: true })), `已按${modeLabel(nextMode)}带评语重生`)}>带评语重生</button>
-                <button className="btn small" disabled={busy} onClick={() => setEditPrompt(current?.prompt_text ?? '')}>改词重生</button>
-                <button className="btn small" disabled={busy || keyframeBlocked}
-                  onClick={() => act(() => api.post(`/shots/${shot.id}/generate`, makeGenerateBody({ reroll: true })), `已按${modeLabel(nextMode)}原词重抽`)}>原词重抽</button>
-                {current && (
-                  <button className="btn small ghost" disabled={busy}
-                    onClick={() => { if (window.confirm(`删除镜${shot.shot_no} 第${current.version_no}版视频？`)) act(() => api.del(`/versions/${current.id}`), '已删除该视频版本') }}>删除此版</button>
+              <div key={v.id} className={`vh-item${v.id === shot.adopted_version_id ? ' adopted' : ''}${v.id === current?.id ? ' current' : ''}`}>
+                <span className="vh-no">v{v.version_no}</span>
+                <span className={`stamp ${v.status === 'succeeded' ? 'green' : v.status === 'failed' ? 'red' : 'gold'}`}>
+                  {v.status === 'succeeded' ? '成功' : v.status === 'failed' ? '失败' : '生成中'}
+                </span>
+                {v.image_inputs?.mode && <span className="vh-mode">{MODE_LABEL[v.image_inputs.mode] || v.image_inputs.mode}</span>}
+                {v.qa && <span className="vh-qa">{v.qa.overall.toFixed(2)}</span>}
+                {v.id !== shot.adopted_version_id && v.status === 'succeeded' && (
+                  <button className="btn small ghost" onClick={() => doAdopt(v.id)}>采用</button>
                 )}
-              </>
-            )}
+              </div>
+            ))}
           </div>
         )}
-        {current?.image_inputs?.first_frame_used && (
-          <div style={{ fontSize: 11, color: 'var(--ink-faint)' }}>
-            首帧：{current.image_inputs.first_frame_src === 'prev_tail_keyframe' ? '上一镜尾图' : '本镜首图'}
-            {current.image_inputs.last_frame_used ? ' · 尾帧：本镜尾图' : ''}
-          </div>
-        )}
-        {shot.video_stale && <div style={{ fontSize: 11.5, color: 'var(--cinnabar-deep)' }}>首尾帧素材已变更，本镜视频链已过期，建议「从此镜往后重生」</div>}
       </div>
     </div>
   )
