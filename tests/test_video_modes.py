@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from app import video_modes, worker
+from app import hiagent, video_modes, worker
 from app.schemas import Bible, Character, Shot, World
 from app.video_modes import (
     FIRST_LAST_FRAME_MODE,
@@ -13,6 +13,7 @@ from app.video_modes import (
     ShotVideoModeSelector,
     build_seedance_image_inputs,
     decision_to_dict,
+    dict_to_decision,
 )
 
 
@@ -88,6 +89,45 @@ def test_continuity_shot_uses_first_last_frame_chaining() -> None:
 def test_seedance_inputs_are_mutually_exclusive(meta: dict) -> None:
     with pytest.raises(Exception):
         build_seedance_image_inputs(meta)
+
+
+def test_llm_selector_decides_mode_and_per_image_prompts(monkeypatch) -> None:
+    """模型按剧本决定模式 + 参考图计划（数量/来源/逐图提示词），select() 正确解析并归一。"""
+    llm_reply = json.dumps({
+        "mode": REFERENCE_IMAGE_MODE,
+        "reason": "Dialogue-driven shot; keep character & scene consistency.",
+        "confidence": 0.9,
+        "needReusePreviousScene": False,
+        "needGenerateNewReferences": True,
+        "referenceImagePlan": {
+            "totalCount": 3,
+            "reusePreviousSceneCount": 0,
+            "generateNewCount": 3,
+            "types": ["character", "scene", "plot_key_frame"],
+            "prompts": [
+                {"type": "character", "prompt": "A standing calmly in a blue robe, soft light"},
+                {"type": "scene", "prompt": "An empty stone courtyard at dusk"},
+                {"type": "plot_key_frame", "prompt": "A looking out a window, contemplative"},
+            ],
+        },
+    })
+
+    async def fake_chat(messages, **kwargs):
+        return llm_reply
+
+    monkeypatch.setattr(hiagent, "chat", fake_chat)
+    monkeypatch.setattr(video_modes, "get_setting", lambda *a, **k: None)
+
+    shot = _shot(action_desc="A站在室内与同伴对话。", dialogues=[{"speaker": "A", "line": "你好", "emotion": "平静"}])
+    decision = asyncio.run(ShotVideoModeSelector().select(shot, _bible()))
+
+    assert decision.mode == REFERENCE_IMAGE_MODE
+    assert decision.llmUsed is True
+    plan = decision.referenceImagePlan
+    assert plan.totalCount == 3 and plan.generateNewCount == 3
+    assert [p["type"] for p in plan.prompts] == ["character", "scene", "plot_key_frame"]
+    # 决策可往返序列化（入队持久化 → 生成期复用）
+    assert dict_to_decision(decision_to_dict(decision)).referenceImagePlan.prompts == plan.prompts
 
 
 def test_reference_mode_builds_reference_image_roles() -> None:

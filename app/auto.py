@@ -362,6 +362,10 @@ async def _ensure_videos(pid: str, eid: str, epno: int) -> None:
     conn.execute(
         f"UPDATE shots SET adopted_version_id=NULL WHERE id IN ({','.join('?' for _ in sel_ids)})", sel_ids)
     conn.commit()
+    # 模式与参考图计划由模型按剧本决定：入队前确保每镜都有 mode_plan
+    from app.api import _ensure_shot_mode_plan
+    for s in todo:
+        await _ensure_shot_mode_plan(conn, s["id"])
     for s in todo:
         after = None
         if s["continuity_from_prev"] and s["shot_no"] > 1:

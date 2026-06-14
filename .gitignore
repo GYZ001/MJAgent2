@@ -8,3 +8,9 @@ m0_samples/
 node_modules/
 frontend/dist/
 .DS_Store
+# 运行期产物（绝不入库）：后端/前端日志、巡检与调试日志、临时上传与缓存
+*.log
+logs/
+.uploads/
+.pytest_cache/
+.benchmarks/

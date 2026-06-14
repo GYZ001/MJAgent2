@@ -63,6 +63,23 @@ KEYFRAME_HEAD = "head"
 KEYFRAME_TAIL = "tail"
 
 
+def _decision_from_mode_plan(shot_row):
+    """把已持久化的模型决策（shots.mode_plan）转成 ShotVideoModeDecision；无则返回 None。"""
+    try:
+        raw = shot_row["mode_plan"] if "mode_plan" in shot_row.keys() else None
+    except (TypeError, AttributeError):
+        raw = None
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict) or not data.get("mode"):
+        return None
+    return video_modes.dict_to_decision(data)
+
+
 def _row_value(row, key: str, default=None):
     if row is None:
         return default
@@ -189,7 +206,11 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
     shot = _load_shot_model(shot_row)
     prev_for_decision = conn.execute("SELECT * FROM shots WHERE id=?", (after_shot_id,)).fetchone() if after_shot_id else None
     selector = video_modes.ShotVideoModeSelector()
-    decision = selector.select_by_rules(shot, shot_row=shot_row, prev_shot=prev_for_decision)
+    # 模式与参考图计划由模型按剧本决定（确认/生成前已写入 shots.mode_plan）。
+    # 仅当尚无模型决策时，才回退到确定性规则，避免阻塞生成。
+    decision = _decision_from_mode_plan(shot_row)
+    if decision is None:
+        decision = selector.select_by_rules(shot, shot_row=shot_row, prev_shot=prev_for_decision)
     if mode_override in (video_modes.FIRST_LAST_FRAME_MODE, video_modes.REFERENCE_IMAGE_MODE):
         decision.mode = mode_override  # type: ignore[assignment]
         decision.reason = f"Forced mode: {mode_override}"

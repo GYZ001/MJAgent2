@@ -857,42 +857,46 @@ async def _plan_modes_task(episode_id: str):
         "SELECT bible_json FROM projects WHERE id=(SELECT project_id FROM episodes WHERE id=?)",
         (episode_id,)).fetchone()
     bible = Bible.model_validate(json.loads(p["bible_json"])) if p and p["bible_json"] else None
-    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
-    prev_board = None
-    if ep and ep["episode_no"] > 1:
-        prev_ep = conn.execute(
-            "SELECT id FROM episodes WHERE project_id=? AND episode_no=?",
-            (ep["project_id"], ep["episode_no"] - 1)).fetchone()
-        if prev_ep:
-            prev_shots = rows_to_dicts(conn.execute(
-                "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (prev_ep["id"],)).fetchall())
-            prev_board = prev_shots
-
     selector = ShotVideoModeSelector()
-    planned = 0
     for i, shot_row in enumerate(shots):
         prev_shot = shots[i - 1] if i > 0 else None
-        plan = await selector.select(
-            shot_row, bible, prev_shot=prev_shot, prev_episode_shots=prev_board)
-        plan_dict = {
-            "mode": plan.mode,
-            "reason": plan.reason,
-            "confidence": plan.confidence,
-            "ruleMode": plan.ruleMode,
-            "llmUsed": plan.llmUsed,
-            "defaulted": plan.defaulted,
-            "needReusePreviousScene": plan.needReusePreviousScene,
-            "needGenerateNewReferences": plan.needGenerateNewReferences,
-            "referenceImagePlan": {
-                "totalCount": plan.referenceImagePlan.totalCount,
-                "reusePreviousSceneCount": plan.referenceImagePlan.reusePreviousSceneCount,
-                "generateNewCount": plan.referenceImagePlan.generateNewCount,
-                "types": plan.referenceImagePlan.types,
-            } if plan.referenceImagePlan else None,
-        }
+        plan_dict = await _plan_one_shot(selector, shot_row, bible, prev_shot)
         conn.execute("UPDATE shots SET mode_plan=? WHERE id=?",
                      (json.dumps(plan_dict, ensure_ascii=False), shot_row["id"]))
-        planned += 1
+    conn.commit()
+
+
+async def _plan_one_shot(selector, shot_row, bible, prev_shot) -> dict:
+    """对单个镜头跑（LLM）模式与参考图规划，返回可持久化的 mode_plan dict。
+    bible 缺失或 LLM 不可用时，select() 内部会回退到规则决策。"""
+    from app import video_modes
+    shot_model = worker._load_shot_model(shot_row)
+    if bible is None:
+        plan = selector.select_by_rules(shot_model, shot_row=shot_row, prev_shot=prev_shot)
+    else:
+        plan = await selector.select(shot_model, bible, shot_row=shot_row, prev_shot=prev_shot)
+    return video_modes.decision_to_dict(plan)
+
+
+async def _ensure_shot_mode_plan(conn, shot_id: str, *, force: bool = False) -> None:
+    """生成前确保该镜已有模型决策（shots.mode_plan）。已存在且非强制时跳过。"""
+    from app.video_modes import ShotVideoModeSelector
+    shot_row = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
+    if not shot_row:
+        return
+    if not force and shot_row["mode_plan"]:
+        return
+    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (shot_row["episode_id"],)).fetchone()
+    p = conn.execute("SELECT bible_json FROM projects WHERE id=?", (ep["project_id"],)).fetchone() if ep else None
+    bible = Bible.model_validate(json.loads(p["bible_json"])) if p and p["bible_json"] else None
+    prev_shot = None
+    if shot_row["shot_no"] > 1:
+        prev_shot = conn.execute(
+            "SELECT * FROM shots WHERE episode_id=? AND shot_no=?",
+            (shot_row["episode_id"], shot_row["shot_no"] - 1)).fetchone()
+    plan_dict = await _plan_one_shot(ShotVideoModeSelector(), shot_row, bible, prev_shot)
+    conn.execute("UPDATE shots SET mode_plan=? WHERE id=?",
+                 (json.dumps(plan_dict, ensure_ascii=False), shot_id))
     conn.commit()
 
 
@@ -946,6 +950,11 @@ def episode_detail(episode_id: str):
         s["dialogues"] = json.loads(s["dialogues"] or "[]")
         s["est_cost_cny"] = shot_cost_cny(s["duration_s"])
         s["required_keyframes"] = worker.required_keyframe_kinds(s)
+        # mode_plan 存的是 JSON 文本，解析成对象供前端只读展示模型决策
+        try:
+            s["mode_plan"] = json.loads(s["mode_plan"]) if s.get("mode_plan") else None
+        except (TypeError, ValueError):
+            s["mode_plan"] = None
         if s["scene_status"] != "generating":
             ready = worker.shot_keyframes_ready(s)
             if ready and s["scene_status"] == "approved":
@@ -1049,6 +1058,8 @@ def edit_shot(shot_id: str, body: dict):
          instance.source_excerpt, instance.narration,
          json.dumps([d.model_dump() for d in instance.dialogues], ensure_ascii=False),
          instance.transition, int(instance.continuity_from_prev), shot_id))
+    # 剧本改了 → 旧的模型决策作废，下次生成时按新剧本重新规划
+    conn.execute("UPDATE shots SET mode_plan=NULL WHERE id=?", (shot_id,))
     # 编辑后剧集回到 scripted（需重新确认才能生成）
     conn.execute("UPDATE episodes SET status='scripted' WHERE id=? AND status='confirmed'", (shot["episode_id"],))
     conn.commit()
@@ -1102,12 +1113,18 @@ def confirm_episode_core(episode_id: str) -> dict:
 
 
 @router.post("/episodes/{episode_id}/confirm")
-def confirm_episode(episode_id: str):
-    """人工确认门（PRD P3）：全量业务校验通过才进入 confirmed。"""
+async def confirm_episode(episode_id: str):
+    """人工确认门（PRD P3）：全量业务校验通过才进入 confirmed。
+    确认后后台预跑模型的模式/参考图规划，使评审墙能直接看到模型决策。"""
     try:
-        return confirm_episode_core(episode_id)
+        result = confirm_episode_core(episode_id)
     except ValueError as exc:
         raise HTTPException(422, str(exc))
+    if episode_id not in _plan_tasks or _plan_tasks[episode_id].done():
+        task = asyncio.create_task(_plan_modes_task(episode_id))
+        _plan_tasks[episode_id] = task
+        task.add_done_callback(lambda t, eid=episode_id: _plan_tasks.pop(eid, None))
+    return result
 
 
 # ---------- 生成 ----------
@@ -1212,7 +1229,7 @@ def _shot_by_no(episode_id: str, shot_no: int):
 
 
 @router.post("/episodes/{episode_id}/generate")
-def generate_episode(episode_id: str, body: dict | None = None):
+async def generate_episode(episode_id: str, body: dict | None = None):
     """批量生成整集视频（首尾关键帧）：同场景连续镜的首帧来自上一镜预生成尾图，
     换场/首镜的首帧来自本镜预生成首图；所有镜头都使用本镜预生成尾图作为尾帧，可并行执行。
     body.from_shot_no：只从该镜起、沿其连续段往后重生（中途改动后用）。"""
@@ -1245,6 +1262,9 @@ def generate_episode(episode_id: str, body: dict | None = None):
     conn.execute(
         f"UPDATE shots SET adopted_version_id=NULL WHERE id IN ({','.join('?' for _ in sel_ids)})", sel_ids)
     conn.commit()
+    # 模式与参考图计划由模型按剧本决定：批量生成前确保每个选中镜都有 mode_plan。
+    for s in selected:
+        await _ensure_shot_mode_plan(conn, s["id"])
     results = []
     for s in selected:
         after = None
@@ -1284,6 +1304,8 @@ async def generate_shot(shot_id: str, body: dict | None = None):
                 (shot_id,)).fetchone()
         if ref:
             critique = await worker.critique_version(ref["id"])
+    # 模式与参考图计划由模型按剧本决定：生成前确保已有 mode_plan。
+    await _ensure_shot_mode_plan(conn, shot_id)
     # 同场景接上镜的单镜重生使用上一镜已过审尾图作为首帧。
     after = None
     if shot_row["continuity_from_prev"] and shot_row["shot_no"] > 1:

@@ -161,6 +161,7 @@ export interface ModePlan {
     reusePreviousSceneCount: number
     generateNewCount: number
     types: string[]
+    prompts?: { type: string; prompt: string }[]
   } | null
 }
 

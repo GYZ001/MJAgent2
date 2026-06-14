@@ -32,6 +32,9 @@ class ReferenceImagePlan:
     reusePreviousSceneCount: int = 0
     generateNewCount: int = 4
     types: list[str] = field(default_factory=lambda: ["character", "scene", "plot_key_frame"])
+    # 模型按剧本/分镜为每张「新生成」参考图给出的提示词，元素形如 {"type": str, "prompt": str}。
+    # 为空时回退到 reference_generation_prompt 的模板提示词。
+    prompts: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -175,6 +178,24 @@ def _reference_plan(shot: Shot, *, is_first_shot: bool, same_scene_as_prev: bool
                               types=["character", "scene", "plot_key_frame"])
 
 
+def _parse_ref_prompts(raw: Any) -> list[dict[str, str]]:
+    """归一化模型给出的「新参考图」提示词列表。每项保留合法的 type 与非空 prompt。"""
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        prompt = str(item.get("prompt") or item.get("text") or "").strip()
+        if not prompt:
+            continue
+        ref_type = str(item.get("type") or "plot_key_frame").strip()
+        if ref_type not in REFERENCE_IMAGE_TYPES or ref_type == "previous_shot_frame":
+            ref_type = "plot_key_frame"
+        out.append({"type": ref_type, "prompt": prompt[:600]})
+    return out
+
+
 class ShotVideoModeSelector:
     def select_by_rules(self, shot: Shot, *, shot_row: Any | None = None, prev_shot: Any | None = None) -> ShotVideoModeDecision:
         mode, reason, confidence = _rule_mode(shot)
@@ -234,10 +255,15 @@ class ShotVideoModeSelector:
                     reusePreviousSceneCount=int(plan_data.get("reusePreviousSceneCount", rule.referenceImagePlan.reusePreviousSceneCount)),
                     generateNewCount=int(plan_data.get("generateNewCount", rule.referenceImagePlan.generateNewCount)),
                     types=[t for t in plan_data.get("types", rule.referenceImagePlan.types) if t in REFERENCE_IMAGE_TYPES],
+                    prompts=_parse_ref_prompts(
+                        plan_data.get("prompts")
+                        or plan_data.get("newReferenceImages")
+                        or data.get("newReferenceImages")),
                 )
                 plan.totalCount = min(max(plan.totalCount, 1), max_reference_images())
                 plan.reusePreviousSceneCount = min(max(plan.reusePreviousSceneCount, 0), plan.totalCount)
                 plan.generateNewCount = min(max(plan.generateNewCount, 0), plan.totalCount - plan.reusePreviousSceneCount)
+                plan.prompts = plan.prompts[:plan.generateNewCount]
                 rule.referenceImagePlan = plan
             if mode == FIRST_LAST_FRAME_MODE:
                 rule.referenceImagePlan = ReferenceImagePlan(totalCount=0, reusePreviousSceneCount=0, generateNewCount=0, types=[])
@@ -250,14 +276,32 @@ class ShotVideoModeSelector:
 
 def _selector_prompt(shot: Shot, bible: Bible, rule: ShotVideoModeDecision) -> str:
     characters = ", ".join(shot.characters)
+    char_anchors = {c.name: c.appearance_canonical for c in bible.characters if c.name in shot.characters}
     return json.dumps({
-        "task": "Choose one Seedance 2.0 video generation mode.",
+        "task": (
+            "You are the video director. Read the shot's script and storyboard, then decide "
+            "(1) which Seedance 2.0 video generation mode fits, and (2) the full reference-image plan: "
+            "how many reference images this shot needs, where each one comes from (reuse a previous "
+            "shot's clean frame, the character asset library, or newly generated), and the exact image "
+            "prompt for every NEW reference image. Base every choice on the script content, not on fixed rules."
+        ),
         "allowed_modes": [FIRST_LAST_FRAME_MODE, REFERENCE_IMAGE_MODE],
+        "mode_guidance": {
+            FIRST_LAST_FRAME_MODE: "Strong/precise motion, transformations, explosions, or exact end-state control, and continuity shots that must hand off the previous shot's tail frame.",
+            REFERENCE_IMAGE_MODE: "Dialogue, emotion, light action, or establishing shots where character & scene consistency matter more than frame-exact motion. Requires reference images.",
+        },
+        "reference_sources": {
+            "previous_shot_frame": "reuse a QA-passed clean frame from the previous shot (only when same scene continues)",
+            "asset_library": "character locked-design portrait from the bible (one per character on screen)",
+            "generate_new": "a freshly generated reference image you must write a prompt for",
+        },
+        "allowed_reference_types": sorted(t for t in REFERENCE_IMAGE_TYPES if t != "previous_shot_frame"),
         "rule_recommendation": asdict(rule),
         "shot": {
             "shot_no": shot.shot_no,
             "scene_setting": shot.scene_setting,
             "characters": characters,
+            "character_appearance": char_anchors,
             "action_desc": shot.action_desc,
             "first_frame_desc": shot.first_frame_desc,
             "last_frame_desc": shot.last_frame_desc,
@@ -266,9 +310,15 @@ def _selector_prompt(shot: Shot, bible: Bible, rule: ShotVideoModeDecision) -> s
             "continuity_from_prev": shot.continuity_from_prev,
         },
         "style": bible.world.visual_style_canonical,
+        "constraints": {
+            "max_total_reference_images": max_reference_images(),
+            "totalCount = reusePreviousSceneCount + generateNewCount": True,
+            "len(referenceImagePlan.prompts) must equal generateNewCount": True,
+            "prompts must be in English, 9:16, no text/watermark/extra limbs": True,
+        },
         "output_schema": {
             "mode": "REFERENCE_IMAGE_MODE or FIRST_LAST_FRAME_MODE",
-            "reason": "short reason",
+            "reason": "short reason grounded in the script",
             "confidence": "0..1",
             "needReusePreviousScene": True,
             "needGenerateNewReferences": True,
@@ -277,6 +327,10 @@ def _selector_prompt(shot: Shot, bible: Bible, rule: ShotVideoModeDecision) -> s
                 "reusePreviousSceneCount": 2,
                 "generateNewCount": 2,
                 "types": ["scene", "character", "plot_key_frame"],
+                "prompts": [
+                    {"type": "scene", "prompt": "Concrete English prompt for new reference image #1 derived from the script ..."},
+                    {"type": "plot_key_frame", "prompt": "Concrete English prompt for new reference image #2 ..."},
+                ],
             },
         },
     }, ensure_ascii=False)
@@ -300,6 +354,7 @@ def dict_to_decision(data: dict[str, Any]) -> ShotVideoModeDecision:
             reusePreviousSceneCount=int(plan_data.get("reusePreviousSceneCount", 0)),
             generateNewCount=int(plan_data.get("generateNewCount", 0)),
             types=list(plan_data.get("types") or []),
+            prompts=_parse_ref_prompts(plan_data.get("prompts")),
         ),
         ruleMode=data.get("ruleMode"),
         llmUsed=bool(data.get("llmUsed")),
@@ -411,19 +466,28 @@ def character_reference_assets(bible: Bible, character_names: list[str], *, limi
     return assets
 
 
-def reference_generation_prompt(shot: Shot, bible: Bible, ref_type: str, index: int) -> str:
+def reference_generation_prompt(shot: Shot, bible: Bible, ref_type: str, index: int,
+                                *, content_override: str | None = None) -> str:
     anchors = []
     by_name = {c.name: c for c in bible.characters}
     for name in shot.characters:
         if name in by_name:
             anchors.append(f"{name}: {by_name[name].appearance_canonical}")
+    # content_override：模型按剧本为这张参考图写的内容提示词。提供时以它为主体，
+    # 仍统一补上角色锚点 / 画风 / 负面约束，保证可作为 Seedance 参考图。
+    if content_override:
+        body = content_override.strip()
+    else:
+        body = (
+            f"Create one clean 9:16 anime-drama reference image for Seedance. "
+            f"Reference type: {ref_type}. Shot {shot.shot_no}. Scene: {shot.scene_setting}. "
+            f"Action: {shot.action_desc}. First frame idea: {shot.first_frame_desc}. "
+            f"Last frame idea: {shot.last_frame_desc}."
+        )
     return (
-        f"Create one clean 9:16 anime-drama reference image for Seedance. "
-        f"Reference type: {ref_type}. Shot {shot.shot_no}. Scene: {shot.scene_setting}. "
-        f"Action: {shot.action_desc}. First frame idea: {shot.first_frame_desc}. "
-        f"Last frame idea: {shot.last_frame_desc}. Characters: {'; '.join(anchors)}. "
+        f"{body} Characters: {'; '.join(anchors)}. "
         f"Episode style: {bible.world.visual_style_canonical}. "
-        "No text, no subtitles, no watermark, no logo, no extra limbs, no motion blur. "
+        "No text, no subtitles, no watermark, no logo, no extra limbs, no motion blur. 9:16 portrait. "
         "The image must be suitable as a Seedance 2.0 reference image."
     )
 
@@ -476,9 +540,9 @@ async def review_reference_image(image_b64: str, *, shot: Shot, bible: Bible, re
 
 
 async def _generate_one_reference(*, project_id: str, episode_no: int, shot: Shot, bible: Bible,
-                                  ref_type: str, index: int) -> ReferenceImageAsset:
+                                  ref_type: str, index: int, content_override: str | None = None) -> ReferenceImageAsset:
     dest = reference_image_path(project_id, episode_no, shot.shot_no, ref_type, index)
-    prompt = reference_generation_prompt(shot, bible, ref_type, index)
+    prompt = reference_generation_prompt(shot, bible, ref_type, index, content_override=content_override)
     item = await hiagent.generate_image(prompt, size=config.REF_IMAGE_SIZE)
     if item.get("url"):
         await hiagent.download(item["url"], str(dest))
@@ -518,13 +582,21 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
     generated_needed = max(0, min(plan.totalCount, max_refs) - len(selected))
     generated_needed = min(generated_needed, plan.generateNewCount if plan.generateNewCount > 0 else generated_needed)
     type_cycle = [t for t in plan.types if t in REFERENCE_IMAGE_TYPES and t not in {"previous_shot_frame"}] or ["plot_key_frame"]
-    rejected: list[ReferenceImageAsset] = []
+    # 逐图规格：优先用模型按剧本写好的 (type, prompt)；不足时用类型轮换 + 模板提示词补齐。
+    model_specs = [p for p in (plan.prompts or []) if p.get("prompt")]
+    specs: list[tuple[str, str | None]] = []
     for i in range(generated_needed):
-        ref_type = type_cycle[i % len(type_cycle)]
+        if i < len(model_specs):
+            spec = model_specs[i]
+            specs.append((spec.get("type") or type_cycle[i % len(type_cycle)], spec.get("prompt")))
+        else:
+            specs.append((type_cycle[i % len(type_cycle)], None))
+    rejected: list[ReferenceImageAsset] = []
+    for i, (ref_type, content_override) in enumerate(specs):
         try:
             asset = await _generate_one_reference(
                 project_id=project_id, episode_no=episode_no, shot=shot, bible=bible,
-                ref_type=ref_type, index=i + 1,
+                ref_type=ref_type, index=i + 1, content_override=content_override,
             )
             if asset.rejectReason:
                 rejected.append(asset)
