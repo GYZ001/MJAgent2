@@ -1,7 +1,9 @@
 import { useState } from 'react'
-import { api, Episode, Shot, numToCn } from '../api'
+import { api, Episode, Shot } from '../api'
 import { useEpisode, useNav } from '../App'
 import { EpStamp } from './BiblePage'
+import EpisodeCrumb from '../components/EpisodeCrumb'
+import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 
 const SIZES = ['远景', '全景', '中景', '近景', '特写']
 const MOVES = ['固定', '推近', '拉远', '横摇', '跟随']
@@ -11,6 +13,7 @@ export default function BoardPage() {
   const { episodeId, go, projectId, toast } = useNav()
   const { data: ep, refresh } = useEpisode(episodeId!)
   const [busy, setBusy] = useState(false)
+  const storyboardTimer = useTaskTimer(`episode.${episodeId}.storyboard`, ep?.status === 'scripting')
 
   if (!ep) return <div className="empty">展卷中……</div>
 
@@ -26,9 +29,7 @@ export default function BoardPage() {
   return (
     <>
       <header className="desk-head">
-        <div className="crumb">
-          <a style={{ cursor: 'pointer' }} onClick={() => go('script', projectId, episodeId)}>剧本台</a> / 第{numToCn(ep.episode_no)}集
-        </div>
+        <EpisodeCrumb label="分镜台" view="board" episodeNo={ep.episode_no} />
         <h1>分镜台 <span className="sub">《{ep.title}》 · 脚本免费可改，确认后才花钱</span></h1>
         <hr className="rule" />
       </header>
@@ -41,7 +42,10 @@ export default function BoardPage() {
           </span>
           {ep.screenplay_mode === 'full_script' && <span className="stamp grey">完整剧本</span>}
           <button className="btn" disabled={busy || ep.status === 'scripting' || ep.screenplay_status !== 'ready'}
-            onClick={() => act(() => api.post(`/episodes/${ep.id}/storyboard`), '分镜生成已开始（按剧本拆分分镜卡）')}>
+            onClick={() => {
+              storyboardTimer.start()
+              act(() => api.post(`/episodes/${ep.id}/storyboard`), '分镜生成已开始（按剧本拆分分镜卡）')
+            }}>
             {ep.shots?.length ? '重新生成分镜' : '生成分镜脚本'}
           </button>
           {ep.screenplay_status !== 'ready' && (
@@ -69,6 +73,7 @@ export default function BoardPage() {
             </button>
           )}
           <span style={{ flex: 1 }} />
+          <TaskTimer label="分镜" timer={storyboardTimer} />
           <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>
             共 {ep.shots?.length ?? 0} 镜 · 总时长 {totalDur}s / 目标 {ep.target_duration_s}s · 已耗 ¥{ep.cost_cny.toFixed(1)}
           </span>

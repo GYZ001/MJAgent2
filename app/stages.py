@@ -25,7 +25,8 @@ from app.validators import (ACTION_DESC_MIN_CHARS, NARRATION_TARGET_CHARS,
                             SOURCE_EXCERPT_MIN_CHARS,
                             TRANSITION_HINTS, beat_scene_label, normalize_plan_chapters,
                             validate_beat_chain, validate_bible, validate_plan, validate_screenplay,
-                            validate_storyboard, validate_storyboard_against_beats)
+                            validate_storyboard, validate_storyboard_against_beats,
+                            validate_storyboard_soundtrack)
 
 SYSTEM_PREFIX = (
     "你是专业的竖屏漫剧（动态漫画短剧）编剧与分镜师。\n"
@@ -505,11 +506,12 @@ async def _generate_storyboard_from_full_script(episode: dict, source_text: str,
 4. 每一镜都要明确它在“整集故事弧线”中的位置：它承接前一镜留下的什么状态，又把什么状态交给后一镜。
 5. 若某镜是情绪转折、信息揭示或关系变化的关键节点，前后镜必须在动作、人物表情、台词信息量上形成自然递进，不能像切开后的孤立卡片。
 6. scene_setting 只写时间+地点短标签，characters 只写实际出现在画面中的角色。
-7. 优先用台词+画面动作表达信息；旁白默认留空，仅在画面与台词都无法承载关键信息时写一句短旁白。
-8. 每条 shot 都必须能追溯到完整剧本与原文依据，不要空泛扩写。
-9. 第 1 镜要尽快进入本集 hook：{episode['hook']}
-10. 最后 1 镜必须落到本集尾钩：{episode['cliffhanger']}
-11. 不要把 shot 写成拍卡编号摘要；要写成真正可执行的分镜卡。
+7. 先从完整剧本文本逐行提取“角色对白 / 内心OS / 旁白 / 人群声或环境人声”，再分配到对应 shot；不能只抽动作，把声轨丢掉。
+8. 优先用台词+画面动作表达信息；必要内心OS必须放入 narration，并以“内心OS：……”或“内心：……”开头；非角色圣经人物的人群嘲讽、恭维、议论不要写进 dialogues，可写入 narration 或 action_desc。
+9. 每条 shot 都必须能追溯到完整剧本与原文依据，不要空泛扩写。
+10. 第 1 镜要尽快进入本集 hook：{episode['hook']}，若剧本开场有嘲讽、人声或内心独白，第 1 镜不能是无声画面。
+11. 最后 1 镜必须落到本集尾钩：{episode['cliffhanger']}，结尾悬念优先用旁白或角色低声台词明确抛出。
+12. 不要把 shot 写成拍卡编号摘要；要写成真正可执行的分镜卡。
 
 {output_contract}
 
@@ -522,7 +524,7 @@ async def _generate_storyboard_from_full_script(episode: dict, source_text: str,
 上一集结尾：{prev_ending or "（本集为第一集）"}
 
 输出 JSON Schema：
-{{"episode_no": {episode['episode_no']}, "shots": [{{"shot_no": int, "duration_s": int, "shot_size": "远景|全景|中景|近景|特写", "camera_move": "固定|推近|拉远|横摇|跟随", "scene_setting": "短时间+地点标签", "characters": ["画面中实际可见/在场且属于角色圣经的准确姓名"], "action_desc": str, "first_frame_desc": "本镜开始的静止画面，25~50字，只写看得见的人物姿态/表情/手部/道具/光效", "last_frame_desc": "本镜结束的静止画面，25~50字，与首帧【同机位同场景同构图】，仅人物动作推进后的状态（不要换镜头/景别/场景）", "source_excerpt": "对应本镜头的小说原文逐字摘录，至少 {SOURCE_EXCERPT_MIN_CHARS} 字", "narration": "选填，默认空字符串\\"\\"；如写则一句短旁白（≤{NARRATION_TARGET_CHARS} 字，仅在画面与台词都无法表达关键信息时才写）", "dialogues": [{{"speaker": "必须是本镜头 characters 中的角色名", "line": str, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定"}}], "transition": "{transition_options}", "continuity_from_prev": bool}}]}}"""
+{{"episode_no": {episode['episode_no']}, "shots": [{{"shot_no": int, "duration_s": int, "shot_size": "远景|全景|中景|近景|特写", "camera_move": "固定|推近|拉远|横摇|跟随", "scene_setting": "短时间+地点标签", "characters": ["画面中实际可见/在场且属于角色圣经的准确姓名"], "action_desc": str, "first_frame_desc": "本镜开始的静止画面，25~50字，只写看得见的人物姿态/表情/手部/道具/光效", "last_frame_desc": "本镜结束的静止画面，25~50字，与首帧【同机位同场景同构图】，仅人物动作推进后的状态（不要换镜头/景别/场景）", "source_excerpt": "对应本镜头的小说原文逐字摘录，至少 {SOURCE_EXCERPT_MIN_CHARS} 字", "narration": "可空；用于保留内心OS、结尾悬念旁白、非角色圣经人物的人群声/议论声，≤{NARRATION_TARGET_CHARS} 字", "dialogues": [{{"speaker": "必须是本镜头 characters 中的角色名", "line": str, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定"}}], "transition": "{transition_options}", "continuity_from_prev": bool}}]}}"""
     source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()[:16]
     prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
     log_provider_call(
@@ -535,13 +537,16 @@ async def _generate_storyboard_from_full_script(episode: dict, source_text: str,
             "prompt_chars": len(prompt),
             "source_hash": source_hash,
             "prompt_hash": prompt_hash,
-            "contract_version": "storyboard_full_script_v1",
+            "contract_version": "storyboard_full_script_v2_soundtrack",
             "screenplay_mode": "full_script",
             "fixed_video_duration_s": config.FIXED_VIDEO_DURATION_S,
         })
     board = await _run_with_repair(
         "分镜脚本", prompt, Storyboard,
-        lambda b: validate_storyboard(b, bible, episode["target_duration_s"]),
+        lambda b: (
+            validate_storyboard(b, bible, episode["target_duration_s"])
+            + validate_storyboard_soundtrack(b, screenplay, episode["target_duration_s"])
+        ),
         temperature=0.7, max_tokens=16384, repair_user_prompt_limit=None, fallback_to_last=True)
     residual = list(getattr(board, "residual_errors", []) or [])
     script_residual = [f"剧本：{e}" for e in getattr(screenplay, "residual_errors", []) or []]
@@ -573,8 +578,8 @@ def _storyboard_output_contract(episode: dict, bible: Bible, durations: list[int
 3. 每条 shot 是一个固定 10s 的视频段，本集必须正好 {expected_shots} 条 shot；不要输出 5/6/7/8/9s。
 4. duration_s 必须等于 {config.FIXED_VIDEO_DURATION_S}，这是最终 Seedance 视频生成参数 --dur 10。
 5. 关键：每条 shot 只表现【一个】连贯流畅的主动作（视频模型一镜到底拍这一件事），用一句话把它的"起势→过程→收势"和人物表情/反应写清楚（逗号分句多少不限，写细更好）。判定"多镜头快切"看的不是逗号数量，而是有没有出现切镜：严禁出现"切到/切至/镜头切/镜头转向/闪回/回忆画面/分屏/下一个镜头/→"这类词。
-6. 单镜要像一个真实可拍的连续动作（例如"她攥紧衣角，肩膀微颤，眼泪无声砸落，嘴角弧度僵在半空"是一个动作，没问题；"她哭→镜头切到门口→闪回六年前"才是错误的多段快切）。剧情推进主要靠 narration 旁白承担，画面只需把这一个动作演好。
-7. 叙事方式（重要·本片以台词+画面为主，少用旁白）：剧情优先用【人物台词】和【可见的画面动作/表情】来表达。narration 旁白【默认留空】，绝大多数镜头不要写旁白；只有当某条关键信息既无法用画面表现、又无法让人物说出口时（如较大时间跳跃、必要的内心独白、画面与台词都带不出的隐藏因果），才写【一句尽量短】的旁白，可不写就不写——预计全集只有 0~2 个镜头需要旁白。台词与旁白都要句句提供新信息，禁止空泛情绪词注水。
+6. 单镜要像一个真实可拍的连续动作（例如"她攥紧衣角，肩膀微颤，眼泪无声砸落，嘴角弧度僵在半空"是一个动作，没问题；"她哭→镜头切到门口→闪回六年前"才是错误的多段快切）。画面负责动作和表情，声轨负责冲突、态度、内心和悬念，二者必须共同推进剧情。
+7. 声轨纪律（重要）：分镜必须从【已确认完整剧本】保留角色对白、内心OS、旁白、人群嘲讽/恭维等可听见信息，不能把有声剧本压成纯画面卡。预计 40/50/60s 集至少约 75% 镜头应有 dialogues 或 narration；对白冲突镜优先写 dialogues，内心OS和非角色圣经人物的人群声写入 narration。禁止空泛情绪词注水，每一句声轨都要提供新信息。
 8. action_desc 目标 ≥{ACTION_DESC_MIN_CHARS} 字（不设上限）：写清这一个动作的主体姓名、动作起止、力度/速度、表情与道具反应；不要罗列多个镜头，不要写运镜术语（景别/运镜由独立字段给出）。
 8b. 【关键·首尾帧=同一镜头的起止，决定 10s 视频是否自然】每条 shot 必须给出 first_frame_desc（本镜开始的静止画面）与 last_frame_desc（本镜结束的静止画面），它们是这 10s 视频的起点帧和终点帧：
    - 二者必须是【同一机位、同一场景、同一构图】下，这一个连贯动作的开始瞬间与结束瞬间：背景、镜头框取、人物在画面中的位置与形象保持一致，只有人物的姿态/表情/手部/道具状态随这一个动作自然推进。
@@ -583,8 +588,8 @@ def _storyboard_output_contract(episode: dict, bible: Bible, durations: list[int
    - 各 25~50 字，只写画面里看得见的东西（人物姿态/表情/手部/关键道具/光效），同一场景、同一人物形象；不要写出旁白/字幕文字、不要写运镜。
 9. source_excerpt 必填：每条 shot 必须带对应小说原文摘录，至少 {SOURCE_EXCERPT_MIN_CHARS} 字、不设上限，必须从下方"本集改编源文本"逐字摘录；可以截取最相关的连续段落，不要改写成摘要，不要写分镜解释。它会作为 Seedance prompt 的兜底参考。
 10. 字数只校验下限，不校验上限；目标值仅作写作引导。优先保证戏剧质量与因果连贯，不要为凑数字牺牲剧情。
-11. 信息密度靠"画面一个清晰动作 + 台词承担冲突与信息（必要时一句短旁白补缝）"配合，而不是把多件事塞进同一个画面，也不是靠旁白硬讲剧情。禁止单纯场景氛围、人物呆立、重复上一镜内容。
-12. narration 旁白为【选填】，可以是空字符串 ""。若写则务必简短（一句话、≤{NARRATION_TARGET_CHARS} 字，10s 念得完，超了会被退回）：只承担画面与台词都无法表达的关键信息（因果/时间跳跃/内心动机/隐藏信息），不要复述画面、不要每镜都写。镜头不靠旁白时，必须靠台词或清晰的画面动作把剧情带出来，不要纯氛围空镜、人物呆立。
+11. 信息密度靠"画面一个清晰动作 + 台词/内心OS承担冲突与信息（必要时一句短旁白补缝）"配合，而不是把多件事塞进同一个画面，也不是靠旁白硬讲剧情。禁止单纯场景氛围、人物呆立、重复上一镜内容。
+12. narration 可为空，但以下内容必须优先保留在 narration：必要内心独白、结尾悬念旁白、非角色圣经人物的人群嘲讽/恭维/议论声、画面与角色开口都无法表达的隐藏因果。若写则务必简短（一句话、≤{NARRATION_TARGET_CHARS} 字，10s 念得完），内心独白请以“内心OS：……”或“内心：……”开头。
 13. 角色名必须准确：characters 不能为空，只能使用角色圣经里的准确姓名：{character_names}。characters 只写本镜头画面中实际可见/实际在场的人物；幕后发消息者、纸条落款、屏幕昵称、AI 软件名不算出场角色，除非镜头真的拍到他本人。不要创造新名字，不要把姓名改成外号/称谓，不要用"无角色"。如果原文出现角色姓名，必须照抄原文和角色圣经中的姓名。
 14. action_desc 必须显式写出本镜头主要角色的准确姓名，不能只写"他/她/男人/女人/镜头/纸张"；每个动作节点都优先围绕人物表情、动作、道具反应和剧情后果展开。
 15. dialogues 只写人物实际开口台词，dialogues[*].speaker 必须在本镜头 characters 中；不要把纸条文字、屏幕文字、手机通知、内心独白或旁白写成 speaker="旁白"，这些内容放到 narration 或 action_desc。
@@ -623,7 +628,7 @@ def _storyboard_preflight_contract(episode: dict) -> str:
 6. characters 只写本镜头实际可见/在场的人；屏幕发信人、纸条落款、新闻里提到的人、AI 软件名不算 characters。它们只能写在 action_desc 或 narration。
 7. 每条 action_desc 必须显式写出 characters 中的准确角色名，把这【一个】连贯动作写清（写细无妨，但不要出现切到/闪回/镜头转向/分屏等切镜词）；不要只写纸张、屏幕、镜头、场景自己在动。
 8. 每条 shot 的 source_excerpt 必填，必须从本集原文逐字摘录至少 {SOURCE_EXCERPT_MIN_CHARS} 字（不设上限），作为 Seedance 生成兜底参考。
-9. narration 旁白【选填、默认留空】：本片以台词和画面动作叙事，旁白只在画面与台词都无法表达关键信息时才写一句短旁白（≤{NARRATION_TARGET_CHARS} 字）。有两人及以上在场、或有对话/质问/冲突的镜头，必须写出 dialogues 台词；dialogues[*].speaker 必须是本镜 characters 里的角色名，不能写"旁白"。
+9. 声轨预检：若完整剧本对应段落有“角色名：台词”，本镜必须写 dialogues；若有“角色名（内心/OS）：台词”，本镜必须写 narration 并以“内心OS：……”或“内心：……”开头；若有人群嘲讽/恭维/旁白但说话者不在角色圣经，写入 narration 或 action_desc，不能丢掉。整集至少约 75% 镜头要有 dialogues 或 narration，避免纯画面哑剧。
 10. first_frame_desc 与 last_frame_desc 必须同机位、同场景、同构图，只让人物动作从"开始"推进到"结束"；不要让首尾帧变成两个不同的镜头/景别/场景。
 
 常见错误 → 正确写法：

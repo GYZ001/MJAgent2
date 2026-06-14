@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { api, EpisodeScreenplay, ScriptScene, numToCn } from '../api'
 import { useEpisode, useNav } from '../App'
 import { EpStamp } from './BiblePage'
+import EpisodeCrumb from '../components/EpisodeCrumb'
+import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 
 function ScreenplayStamp({ status }: { status: string }) {
   const map: Record<string, [string, string]> = {
@@ -47,6 +49,8 @@ export default function ScriptPage() {
   const { data: ep, refresh } = useEpisode(episodeId!)
   const [busy, setBusy] = useState(false)
   const [draft, setDraft] = useState<EpisodeScreenplay | null>(null)
+  const screenplayTimer = useTaskTimer(`episode.${episodeId}.screenplay`, ep?.screenplay_status === 'running')
+  const storyboardTimer = useTaskTimer(`episode.${episodeId}.storyboard`, ep?.status === 'scripting')
 
   if (!ep) return <div className="empty">展卷中……</div>
 
@@ -70,6 +74,7 @@ export default function ScriptPage() {
     const isRegenerate = !!ep.screenplay
     if ((isRegenerate || hasDownstream) &&
       !window.confirm('重新生成剧本会清空本集已有分镜、关键帧、视频和成片，需要后续重新展开。确定继续？')) return
+    screenplayTimer.start()
     act(() => api.post(`/episodes/${ep.id}/screenplay`, { force: isRegenerate || hasDownstream }),
       '剧本生成已开始（完成后可在本页编辑，再进入分镜）')
   }
@@ -86,6 +91,7 @@ export default function ScriptPage() {
   const enterBoard = async () => {
     const needGenerate = !ep.shots?.length || ['planned', 'script_failed'].includes(ep.status)
     if (needGenerate && ep.status !== 'scripting') {
+      storyboardTimer.start()
       await act(() => api.post(`/episodes/${ep.id}/storyboard`), '已进入分镜台，正在按最新剧本拆分分镜')
     }
     go('board', projectId, ep.id)
@@ -110,9 +116,7 @@ export default function ScriptPage() {
   return (
     <>
       <header className="desk-head">
-        <div className="crumb">
-          <a style={{ cursor: 'pointer' }} onClick={() => go('episodes', projectId, null)}>分集台</a> / 第{numToCn(ep.episode_no)}集
-        </div>
+        <EpisodeCrumb label="剧本台" view="script" episodeNo={ep.episode_no} />
         <h1>剧本台 <span className="sub">《{ep.title}》 · 小说先转可拍剧本，再展开分镜</span></h1>
         <hr className="rule" />
       </header>
@@ -150,6 +154,8 @@ export default function ScriptPage() {
             </>
           )}
           <span style={{ flex: 1 }} />
+          <TaskTimer label="剧本" timer={screenplayTimer} />
+          <TaskTimer label="分镜" timer={storyboardTimer} />
           <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>
             目标 {ep.target_duration_s}s · 完整剧本视图
           </span>

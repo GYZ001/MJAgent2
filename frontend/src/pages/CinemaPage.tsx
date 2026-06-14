@@ -1,12 +1,15 @@
 import { useEffect, useState } from 'react'
-import { api, MixStatus, MixResult, numToCn } from '../api'
+import { api, MixStatus, MixResult } from '../api'
 import { useEpisode, useNav } from '../App'
+import EpisodeCrumb from '../components/EpisodeCrumb'
+import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 
 export default function CinemaPage() {
-  const { episodeId, projectId, go, toast } = useNav()
+  const { episodeId, toast } = useNav()
   const { data: ep } = useEpisode(episodeId!, 5000)
   const [mix, setMix] = useState<MixStatus | null>(null)
   const [mixBusy, setMixBusy] = useState(false)
+  const mixTimer = useTaskTimer(`episode.${episodeId}.mix`, mixBusy)
 
   const refreshMix = () => {
     if (!episodeId) return
@@ -24,9 +27,7 @@ export default function CinemaPage() {
   return (
     <>
       <header className="desk-head">
-        <div className="crumb">
-          <a style={{ cursor: 'pointer' }} onClick={() => go('wall', projectId, episodeId)}>评审墙</a> / 第{numToCn(ep.episode_no)}集
-        </div>
+        <EpisodeCrumb label="成片台" view="cinema" episodeNo={ep.episode_no} />
         <h1>成片台 <span className="sub">按镜号顺序拼接 · 预览 · 导出</span></h1>
         <hr className="rule" />
       </header>
@@ -47,6 +48,7 @@ export default function CinemaPage() {
                 className="btn primary"
                 disabled={!mix.ready || mixBusy}
                 onClick={async () => {
+                  mixTimer.start()
                   setMixBusy(true)
                   try {
                     const r = (await api.post(`/episodes/${ep.id}/concatenate`)) as MixResult
@@ -68,6 +70,7 @@ export default function CinemaPage() {
                   下载成品
                 </a>
               )}
+              <TaskTimer label="合成" timer={mixTimer} />
             </div>
           </section>
           {mix.final_video_url && (

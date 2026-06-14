@@ -1,6 +1,7 @@
 import { type CSSProperties, useCallback, useEffect, useState } from 'react'
 import { api, AutoStatus, Bible, BrowseResult, Character } from '../api'
 import { useNav, useProject, usePoll } from '../App'
+import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 
 export default function BiblePage() {
   const { projectId, toast } = useNav()
@@ -11,6 +12,8 @@ export default function BiblePage() {
   const [busy, setBusy] = useState(false)
   const [rebibleOpen, setRebibleOpen] = useState(false)
   const [rebibleFeedback, setRebibleFeedback] = useState('')
+  const bibleTimer = useTaskTimer(`project.${projectId}.bible`, p?.bible_status === 'running')
+  const refsTimer = useTaskTimer(`project.${projectId}.refs`, p?.refs_status === 'running')
 
   if (!p) return <div className="empty">展卷中……</div>
 
@@ -24,6 +27,7 @@ export default function BiblePage() {
   const bible = editing ?? p.bible
   const startBible = async (feedback = '') => {
     const note = feedback.trim()
+    bibleTimer.start()
     setBusy(true)
     try {
       await api.post(`/projects/${p.id}/bible`, note ? { feedback: note } : undefined)
@@ -55,6 +59,7 @@ export default function BiblePage() {
           </button>
           {p.bible_status === 'running' && <span className="stamp gold">谱写中（约 1~3 分钟）</span>}
           {p.bible && <span className="stamp green">第 {`${p.bible_version ?? ''}`} 稿</span>}
+          <TaskTimer label="人物谱" timer={bibleTimer} />
         </div>
         {p.bible && rebibleOpen && (
           <div className="rebible-panel">
@@ -121,10 +126,14 @@ export default function BiblePage() {
           <div style={{ height: 16 }} />
           <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}>
             <button className="btn" disabled={busy || p.refs_status === 'running'}
-              onClick={() => act(() => api.post(`/projects/${p.id}/refs`), '定妆照生成已开始（每角色约 20 秒）')}>
+              onClick={() => {
+                refsTimer.start()
+                act(() => api.post(`/projects/${p.id}/refs`), '定妆照生成已开始（每角色约 20 秒）')
+              }}>
               生成全部定妆照
             </button>
             {p.refs_status === 'running' && <span className="stamp gold">定妆中</span>}
+            <TaskTimer label="定妆照" timer={refsTimer} />
             <span style={{ fontSize: 12.5, color: 'var(--ink-faint)' }}>
               定妆照随镜头注入 Seedance 参考图，是人物跨集一致性的视觉锚点（¥0.2/张）
             </span>
@@ -352,6 +361,7 @@ function AutoCard({ projectId, auto, busy, onStart, onCancel }: {
   void projectId
   const running = !!auto?.running
   const pr = auto?.progress
+  const autoTimer = useTaskTimer(`project.${projectId}.auto`, running)
   const stat = (s?: string) => (s === 'ready' ? '✓' : s === 'running' ? '…' : s === 'failed' ? '✗' : '—')
   // 导出目录：用户未编辑时显示服务端记忆值；一旦选择/输入则以其为准（避免每 3 秒轮询把它冲掉）
   const [dir, setDir] = useState<string | null>(null)
@@ -394,11 +404,15 @@ function AutoCard({ projectId, auto, busy, onStart, onCancel }: {
       )}
 
       <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-        <button className="btn primary" disabled={busy || running} onClick={() => onStart(dirValue.trim())}>
+        <button className="btn primary" disabled={busy || running} onClick={() => {
+          autoTimer.start()
+          onStart(dirValue.trim())
+        }}>
           {running ? '自动成片进行中…' : '一键全自动成片'}
         </button>
         {running && <button className="btn ghost" disabled={busy} onClick={onCancel}>停止</button>}
         {auto?.phase && <span className={`stamp ${running ? 'gold' : auto.error ? 'red' : 'green'}`}>{auto.phase}</span>}
+        <TaskTimer label="自动成片" timer={autoTimer} />
       </div>
       <p style={{ fontSize: 12.5, color: 'var(--ink-faint)', marginTop: 8 }}>
         视频是花钱环节（¥0.8/秒），自动化会跳过人工确认直接出片；每集设有成本上限，触顶则该集暂停并在日志报红，其余集继续。

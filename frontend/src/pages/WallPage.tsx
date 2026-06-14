@@ -1,6 +1,8 @@
 import { useRef, useState } from 'react'
-import { api, Shot, ShotVersion, SceneCandidate, numToCn } from '../api'
+import { api, Shot, ShotVersion, SceneCandidate } from '../api'
 import { useEpisode, useNav } from '../App'
+import EpisodeCrumb from '../components/EpisodeCrumb'
+import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 
 type VideoModeValue = 'REFERENCE_IMAGE_MODE' | 'FIRST_LAST_FRAME_MODE'
 type ModeChoice = 'AUTO' | VideoModeValue
@@ -278,6 +280,8 @@ export default function WallPage() {
   const firstLastNeeded = firstLastShotIds.size
   const sceneApproved = shots.filter(s => firstLastShotIds.has(s.id) && s.scene_status === 'approved').length
   const videoReady = shots.filter(s => s.versions.some(v => v.status === 'succeeded')).length
+  const keyframeTimer = useTaskTimer(`episode.${episodeId}.keyframes`, shots.some(s => s.scene_status === 'generating'))
+  const videoTimer = useTaskTimer(`episode.${episodeId}.videos`, shots.some(s => s.versions.some(v => v.status === 'queued' || v.status === 'running')))
 
   const act = async (fn: () => Promise<unknown>, msg?: string) => {
     setBusy(true)
@@ -300,9 +304,7 @@ export default function WallPage() {
   return (
     <>
       <header className="desk-head">
-        <div className="crumb">
-          <a style={{ cursor: 'pointer' }} onClick={() => go('board', projectId, episodeId)}>分镜台</a> / 第{numToCn(ep.episode_no)}集
-        </div>
+        <EpisodeCrumb label="评审墙" view="wall" episodeNo={ep.episode_no} />
         <h1>评审墙 <span className="sub">一屏一镜 · 自动选择剧情参考或首尾帧控制 · 生成后在此复核视频与素材</span></h1>
         <hr className="rule" />
       </header>
@@ -325,16 +327,20 @@ export default function WallPage() {
         <span style={{ flex: 1 }} />
         {firstLastNeeded > 0 && (
           <button className="btn small" disabled={busy} onClick={() => act(async () => {
+            keyframeTimer.start()
             const r = await api.post(`/episodes/${ep.id}/scenes-all`) as { started: number }
             toast(`已为 ${r.started} 个镜头生成首/尾帧候选（供首尾帧模式使用）`)
           })}>准备首尾帧素材</button>
         )}
         <button className="btn small primary" disabled={busy} onClick={() => act(async () => {
+          videoTimer.start()
           const r = await api.post(`/episodes/${ep.id}/generate`) as { enqueued: { error?: string }[] }
           const ok = r.enqueued.filter(x => !x.error).length
           toast(`已入队 ${ok} 镜：系统会逐镜自动选择参考图模式或首尾帧模式`)
         })}>全片自动生成</button>
         <button className="btn small" onClick={() => go('cinema', projectId, episodeId)}>入成片台 →</button>
+        <TaskTimer label="首尾帧" timer={keyframeTimer} />
+        <TaskTimer label="视频生成" timer={videoTimer} />
       </section>
 
       <section className="card wall-mode-guide">

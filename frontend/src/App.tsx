@@ -50,19 +50,47 @@ export default function App() {
     setView(v)
   }, [])
 
+  useEffect(() => {
+    if (!projectId) {
+      setEpisodeId(null)
+      return
+    }
+    let cancelled = false
+    api.get(`/projects/${projectId}`)
+      .then((project: Project) => {
+        if (cancelled) return
+        const episodes = project.episodes ?? []
+        if (!episodes.length) {
+          setEpisodeId(null)
+          return
+        }
+        setEpisodeId(current =>
+          current && episodes.some(ep => ep.id === current) ? current : episodes[0].id
+        )
+      })
+      .catch(() => {
+        if (!cancelled) setEpisodeId(null)
+      })
+    return () => { cancelled = true }
+  }, [projectId])
+
   const nav: Nav = { view, projectId, episodeId, go, toast }
+  const visibleSections = projectId ? SECTIONS : SECTIONS.filter(s => s.key === 'studio')
+
+  const openSection = (s: (typeof SECTIONS)[number]) => {
+    setView(s.key)
+  }
 
   return (
     <NavCtx.Provider value={nav}>
       <aside className="spine">
         <div className="seal">漫</div>
         <nav>
-          {SECTIONS.map(s => (
+          {visibleSections.map(s => (
             <button
               key={s.key}
               className={`spine-item ${view === s.key ? 'active' : ''}`}
-              disabled={(s.needProject && !projectId) || (s.needEpisode && !episodeId)}
-              onClick={() => setView(s.key)}
+              onClick={() => openSection(s)}
             >
               {s.label}
             </button>
@@ -74,14 +102,31 @@ export default function App() {
         {view === 'studio' && <Studio />}
         {view === 'bible' && projectId && <BiblePage key={projectId} />}
         {view === 'episodes' && projectId && <EpisodesPage key={projectId} />}
-        {view === 'script' && episodeId && <ScriptPage key={episodeId} />}
-        {view === 'board' && episodeId && <BoardPage key={episodeId} />}
-        {view === 'wall' && episodeId && <WallPage key={episodeId} />}
-        {view === 'cinema' && episodeId && <CinemaPage key={episodeId} />}
+        {view === 'script' && (episodeId ? <ScriptPage key={episodeId} /> : <WorkspaceEmpty label="剧本台" />)}
+        {view === 'board' && (episodeId ? <BoardPage key={episodeId} /> : <WorkspaceEmpty label="分镜台" />)}
+        {view === 'wall' && (episodeId ? <WallPage key={episodeId} /> : <WorkspaceEmpty label="评审墙" />)}
+        {view === 'cinema' && (episodeId ? <CinemaPage key={episodeId} /> : <WorkspaceEmpty label="成片台" />)}
         {view === 'monitor' && <MonitorPage />}
       </main>
       {toastMsg && <div className={`toast ${toastMsg.err ? 'err' : ''}`}>{toastMsg.text}</div>}
     </NavCtx.Provider>
+  )
+}
+
+function WorkspaceEmpty({ label }: { label: string }) {
+  return (
+    <>
+      <header className="desk-head">
+        <div className="crumb crumb-switch">
+          <button className="crumb-btn" type="button">{label}</button>
+          <span className="crumb-sep">/</span>
+          <select className="episode-switch" aria-label="切换当前分集" value="" disabled />
+        </div>
+        <h1>{label} <span className="sub">当前项目还没有可进入的分集</span></h1>
+        <hr className="rule" />
+      </header>
+      <div className="empty"><div className="big">集</div>暂无分集<br />可先到分集台生成分集</div>
+    </>
   )
 }
 

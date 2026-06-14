@@ -94,6 +94,38 @@ body {
 
 .desk-head { margin-bottom: 34px; }
 .desk-head .crumb { font-size: 13px; color: var(--ink-faint); letter-spacing: 0.12em; margin-bottom: 6px; }
+.crumb-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  letter-spacing: 0.08em;
+}
+.crumb-btn,
+.episode-switch {
+  font-family: var(--serif);
+  font-size: 13px;
+  color: var(--ink-soft);
+  border: 1px solid var(--hairline);
+  border-radius: 7px;
+  background: rgba(255, 253, 246, 0.62);
+  min-height: 30px;
+}
+.crumb-btn {
+  padding: 4px 10px;
+  cursor: pointer;
+}
+.crumb-btn:hover,
+.episode-switch:hover {
+  color: var(--ink);
+  border-color: var(--ink-faint);
+}
+.crumb-sep { color: var(--ink-faint); }
+.episode-switch {
+  max-width: min(420px, 100%);
+  padding: 4px 32px 4px 10px;
+  cursor: pointer;
+}
 .desk-head h1 {
   font-size: 30px;
   font-weight: 600;
@@ -138,6 +170,29 @@ body {
 .stamp.blue { color: var(--indigo); }
 .stamp.grey { color: var(--ink-faint); }
 @keyframes breathe { 50% { opacity: 0.45; } }
+
+.task-timer {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 3px 10px;
+  border: 1px solid rgba(168, 132, 44, 0.45);
+  border-radius: 7px;
+  background: rgba(168, 132, 44, 0.08);
+  color: var(--gold);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.task-timer.done {
+  border-color: rgba(91, 114, 83, 0.45);
+  background: rgba(91, 114, 83, 0.08);
+  color: var(--moss);
+}
+.task-timer b {
+  color: inherit;
+  font-weight: 700;
+}
 
 /* ————— 按钮 ————— */
 button.btn, a.btn {

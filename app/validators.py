@@ -80,6 +80,14 @@ def _text_budget(shot: Shot) -> int:
     return total
 
 
+def _voiced_shot_count(shots: list[Shot]) -> int:
+    return sum(1 for shot in shots if (shot.narration or "").strip() or shot.dialogues)
+
+
+def _soundtrack_text(shot: Shot) -> str:
+    return "".join([shot.narration or "", *(d.line for d in shot.dialogues)])
+
+
 def _action_beat_count(text: str) -> int:
     parts = [p.strip() for p in re.split(r"[，。；;、\n]+", text) if len(p.strip()) >= 4]
     return len(parts)
@@ -358,6 +366,8 @@ FULL_SCRIPT_FORBIDDEN_TERMS = (
 )
 SCRIPT_SCENE_HEADING_RE = re.compile(r"【场\s*\d+】")
 SCRIPT_DIALOGUE_LINE_RE = re.compile(r"^[^\n：]{1,16}(?:（[^）]{1,12}）)?：", re.M)
+SCRIPT_SOUND_LINE_RE = re.compile(r"^([^\n：（]{1,16})(?:（([^）]{1,12})）)?：(.+)$", re.M)
+INNER_VOICE_MARKERS = ("内心", "心声", "OS", "os", "独白")
 
 def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats: int,
                         episode_no: int | None = None) -> list[str]:
@@ -422,6 +432,69 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         errors.append("source_basis 过短或缺失；请概括本集原文依据与关键事件")
     if script.beats:
         errors.append("剧本台不再接受 beats 拍卡结构；请重新生成完整剧本")
+    return errors
+
+
+def _screenplay_sound_stats(script: EpisodeScreenplay) -> dict[str, int]:
+    full_text = (script.full_script_text or "").strip()
+    stats = {"dialogues": 0, "inner": 0, "narration": 0, "quoted_voice": 0}
+    for match in SCRIPT_SOUND_LINE_RE.finditer(full_text):
+        speaker = match.group(1).strip()
+        parenthetical = (match.group(2) or "").strip()
+        if speaker == "旁白":
+            stats["narration"] += 1
+        elif any(marker in parenthetical for marker in INNER_VOICE_MARKERS):
+            stats["inner"] += 1
+        else:
+            stats["dialogues"] += 1
+    stats["quoted_voice"] = len(re.findall(r"(?:声音|嘲讽声|恭维|呼唤|自语|旁白)[^。！？\n]{0,24}[:：]“[^”]{2,}”", full_text))
+    stats["narration"] += full_text.count("旁白：")
+    return stats
+
+
+def validate_storyboard_soundtrack(board: Storyboard, screenplay: EpisodeScreenplay,
+                                   target_duration_s: int) -> list[str]:
+    """校验从完整剧本拆分出的分镜是否保留了可听见的剧情信息。
+
+    通用 validate_storyboard 只管结构与画面可生成性；这里专门约束“剧本台已有台词/内心/旁白，
+    分镜台不能把它们压成纯画面卡”。错误会进入修复回路，让模型补齐声轨。
+    """
+    errors: list[str] = []
+    shots = board.shots
+    if not shots:
+        return errors
+
+    stats = _screenplay_sound_stats(screenplay)
+    script_sound_cues = sum(stats.values())
+    if script_sound_cues == 0:
+        return errors
+
+    expected_shots = max(1, math.ceil(target_duration_s / config.FIXED_VIDEO_DURATION_S))
+    voiced_count = _voiced_shot_count(shots)
+    min_voiced = min(len(shots), max(2, math.ceil(expected_shots * 0.75)))
+    if voiced_count < min_voiced:
+        errors.append(
+            f"分镜声轨过少：完整剧本含 {script_sound_cues} 处台词/内心OS/旁白/人群声音，"
+            f"但只有 {voiced_count}/{len(shots)} 个镜头写了 dialogues 或 narration；"
+            f"请至少让 {min_voiced} 个镜头保留可听见的剧情信息，避免生成纯画面哑剧")
+
+    script_dialogue_targets = stats["dialogues"] + stats["quoted_voice"]
+    if script_dialogue_targets >= 2:
+        dialogue_count = sum(len(shot.dialogues) for shot in shots)
+        min_dialogues = min(script_dialogue_targets, max(2, math.ceil(expected_shots * 0.5)))
+        if dialogue_count < min_dialogues:
+            errors.append(
+                f"分镜对白不足：完整剧本至少有 {script_dialogue_targets} 处角色开口/人声信息，"
+                f"但分镜 dialogues 只有 {dialogue_count} 句；请把关键对白写入 dialogues，"
+                "非角色圣经里的群嘲/恭维声可改写到 narration 或 action_desc")
+
+    if stats["inner"] > 0:
+        soundtrack = "".join(_soundtrack_text(shot) for shot in shots)
+        if not any(marker in soundtrack for marker in INNER_VOICE_MARKERS):
+            errors.append(
+                f"完整剧本含 {stats['inner']} 处内心OS，但分镜未保留任何内心声轨；"
+                "请在对应镜头 narration 中写“内心OS：……”或“内心：……”，"
+                "把主角无法说出口的屈辱、怀疑或决心保留下来")
     return errors
 
 
