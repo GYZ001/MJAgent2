@@ -3,7 +3,19 @@
     "allow": [
       "Bash(git remote *)",
       "Bash(git branch *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(python -m py_compile app/api.py)",
+      "Bash(python -m py_compile app/worker.py)",
+      "Bash(python -m py_compile app/api.py app/worker.py app/refs.py app/compiler.py)",
+      "Bash(python -m pytest tests/ -q)",
+      "Bash(netstat -ano)",
+      "Bash(taskkill /F /T /PID 26920 /PID 22056 /PID 25320)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(echo \"exit=$? \\(1=none listening, good\\)\")",
+      "Bash(python -m py_compile app/validators.py app/stages.py)",
+      "Bash(python -m py_compile app/validators.py app/stages.py app/api.py)",
+      "Bash(python -c ' *)",
+      "Bash(python -m py_compile app/stages.py app/api.py)"
     ]
   }
 }

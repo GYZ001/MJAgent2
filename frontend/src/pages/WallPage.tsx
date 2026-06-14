@@ -268,11 +268,7 @@ export default function WallPage() {
   const [busy, setBusy] = useState(false)
   const [active, setActive] = useState(0)
   const carRef = useRef<HTMLDivElement>(null)
-
-  if (!ep) return <div className="empty">展卷中……</div>
-
-  const overLimit = ep.cost_limit_cny !== undefined && ep.cost_cny >= ep.cost_limit_cny
-  const shots = ep.shots ?? []
+  const shots = ep?.shots ?? []
   const previewDecisions = shots.map((shot, idx) => buildPreviewDecision(shot, idx > 0 ? shots[idx - 1] : undefined, 'AUTO'))
   const firstLastShotIds = new Set(previewDecisions
     .map((decision, idx) => decision.mode === 'FIRST_LAST_FRAME_MODE' ? shots[idx]?.id : null)
@@ -282,6 +278,10 @@ export default function WallPage() {
   const videoReady = shots.filter(s => s.versions.some(v => v.status === 'succeeded')).length
   const keyframeTimer = useTaskTimer(`episode.${episodeId}.keyframes`, shots.some(s => s.scene_status === 'generating'))
   const videoTimer = useTaskTimer(`episode.${episodeId}.videos`, shots.some(s => s.versions.some(v => v.status === 'queued' || v.status === 'running')))
+
+  if (!ep) return <div className="empty">展卷中……</div>
+
+  const overLimit = ep.cost_limit_cny !== undefined && ep.cost_cny >= ep.cost_limit_cny
 
   const act = async (fn: () => Promise<unknown>, msg?: string) => {
     setBusy(true)
