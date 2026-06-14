@@ -91,6 +91,7 @@ export interface ShotVersion {
     mode?: 'FIRST_LAST_FRAME_MODE' | 'REFERENCE_IMAGE_MODE' | string | null
     mode_decision?: {
       mode?: string; reason?: string; confidence?: number
+      ruleMode?: string | null; llmUsed?: boolean; defaulted?: boolean
       needReusePreviousScene?: boolean; needGenerateNewReferences?: boolean
       referenceImagePlan?: {
         totalCount?: number; reusePreviousSceneCount?: number; generateNewCount?: number; types?: string[]

@@ -9,6 +9,12 @@ type PreviewModeDecision = {
   mode: VideoModeValue
   reason: string
   confidence: number
+  source: 'manual' | 'frontend_preview'
+  evidence: string[]
+  scores: {
+    reference: number
+    firstLast: number
+  }
   needReusePreviousScene: boolean
   needGenerateNewReferences: boolean
   referenceImagePlan: {
@@ -46,6 +52,18 @@ function containsAny(text: string, words: string[]) {
   return words.some(word => text.includes(word.toLowerCase()))
 }
 
+function matchedWords(text: string, words: string[]) {
+  return words.filter(word => text.includes(word.toLowerCase())).slice(0, 4)
+}
+
+function clamp01(value: number) {
+  return Math.max(0, Math.min(1, value))
+}
+
+function roundedScore(value: number) {
+  return Number(clamp01(value).toFixed(2))
+}
+
 function textForRules(shot: Shot) {
   return [
     shot.scene_setting,
@@ -63,7 +81,7 @@ function sceneContinues(prevShot: Shot | undefined, shot: Shot) {
   return Boolean(shot.continuity_from_prev) || prevShot.scene_setting.trim() === shot.scene_setting.trim()
 }
 
-// 上一镜实际可复用的强控素材数：只有上一镜生成并通过评审的关键帧才可复用。
+// 上一镜实际可复用的首尾帧素材数：只有上一镜生成并通过评审的关键帧才可复用。
 // 普通剧情镜（参考图模式）不生成关键帧，因此这里通常为 0——避免预估“复用 N 张”却无可复用之物。
 function reusablePrevSceneCount(prevShot: Shot | undefined) {
   if (!prevShot) return 0
@@ -97,15 +115,21 @@ function referencePlanPreview(shot: Shot, prevShot: Shot | undefined) {
 function buildPreviewDecision(shot: Shot, prevShot: Shot | undefined, choice: ModeChoice): PreviewModeDecision {
   const autoPlan = referencePlanPreview(shot, prevShot)
   if (choice === 'REFERENCE_IMAGE_MODE' || choice === 'FIRST_LAST_FRAME_MODE') {
+    const isReference = choice === 'REFERENCE_IMAGE_MODE'
     return {
       mode: choice,
-      reason: choice === 'REFERENCE_IMAGE_MODE'
+      reason: isReference
         ? '已手动指定为参考图模式，本次优先用参考图维持人物与场景一致性。'
         : '已手动指定为首尾帧模式，本次将用首图和尾图强控动作起止状态。',
       confidence: 1,
-      needReusePreviousScene: choice === 'REFERENCE_IMAGE_MODE' && autoPlan.reusePreviousSceneCount > 0,
-      needGenerateNewReferences: choice === 'REFERENCE_IMAGE_MODE' && autoPlan.generateNewCount > 0,
-      referenceImagePlan: choice === 'REFERENCE_IMAGE_MODE'
+      source: 'manual',
+      evidence: isReference
+        ? ['手动选择参考图模式', autoPlan.generateNewCount > 0 ? `预计新生成参考 ${autoPlan.generateNewCount} 张` : '优先复用已有参考']
+        : ['手动选择首尾帧模式', '需要先通过首图/尾图评审'],
+      scores: { reference: isReference ? 1 : 0, firstLast: isReference ? 0 : 1 },
+      needReusePreviousScene: isReference && autoPlan.reusePreviousSceneCount > 0,
+      needGenerateNewReferences: isReference && autoPlan.generateNewCount > 0,
+      referenceImagePlan: isReference
         ? autoPlan
         : { totalCount: 0, reusePreviousSceneCount: 0, generateNewCount: 0, types: [] },
       forced: true,
@@ -113,30 +137,94 @@ function buildPreviewDecision(shot: Shot, prevShot: Shot | undefined, choice: Mo
   }
 
   const text = textForRules(shot)
-  if (containsAny(text, STRONG_WORDS)) {
+  const strongMatches = matchedWords(text, STRONG_WORDS)
+  const lightMatches = matchedWords(text, LIGHT_WORDS)
+  const sameScene = sceneContinues(prevShot, shot)
+  const hasDialogue = shot.dialogues.length > 0
+  const hasContinuity = Boolean(shot.continuity_from_prev)
+  const transitionNeedsLanding = ['甩镜', '遮挡转场', '匹配剪辑', '闪黑', '闪白', '黑场', '变身'].some(word => shot.transition.includes(word))
+  const hasFrameDescriptions = Boolean(shot.first_frame_desc?.trim() && shot.last_frame_desc?.trim())
+
+  let firstLastScore = 0.34
+  let referenceScore = 0.38
+  const firstLastEvidence: string[] = []
+  const referenceEvidence: string[] = []
+
+  if (strongMatches.length) {
+    firstLastScore += Math.min(0.3, strongMatches.length * 0.12)
+    firstLastEvidence.push(`强动作/落点词：${strongMatches.join('、')}`)
+  }
+  if (hasContinuity) {
+    firstLastScore += 0.26
+    firstLastEvidence.push('接上镜：需要精确首帧衔接')
+  }
+  if (transitionNeedsLanding) {
+    firstLastScore += 0.16
+    firstLastEvidence.push(`转场需要卡落点：${shot.transition}`)
+  }
+  if (hasFrameDescriptions) {
+    firstLastScore += 0.08
+    firstLastEvidence.push('首帧/尾帧描述完整')
+  }
+  if (hasDialogue) {
+    referenceScore += 0.16
+    referenceEvidence.push(`对白 ${shot.dialogues.length} 句`)
+  }
+  if (lightMatches.length) {
+    referenceScore += Math.min(0.2, lightMatches.length * 0.08)
+    referenceEvidence.push(`轻动作/情绪词：${lightMatches.join('、')}`)
+  }
+  if (sameScene && !hasContinuity) {
+    referenceScore += 0.14
+    referenceEvidence.push('同场景续镜：优先保持人物和场景稳定')
+  }
+  if (shot.characters.length >= 2) {
+    referenceScore += 0.08
+    referenceEvidence.push(`多角色同场：${shot.characters.slice(0, 3).join('、')}`)
+  }
+
+  firstLastScore = roundedScore(firstLastScore)
+  referenceScore = roundedScore(referenceScore)
+  const mode: VideoModeValue = firstLastScore > referenceScore ? 'FIRST_LAST_FRAME_MODE' : 'REFERENCE_IMAGE_MODE'
+  const gap = Math.abs(firstLastScore - referenceScore)
+  const confidence = roundedScore(0.58 + gap * 0.45)
+
+  if (mode === 'FIRST_LAST_FRAME_MODE') {
+    const evidence = firstLastEvidence.length ? firstLastEvidence : ['画面起止状态比参考一致性更关键']
     return {
-      mode: 'FIRST_LAST_FRAME_MODE',
-      reason: '自动判定命中强动作、转场或尾帧落点控制，优先使用首尾帧强控。',
-      confidence: 0.82,
+      mode,
+      reason: `前端预估偏向首尾帧：${evidence[0]}。生成入队后会记录后台选择器的真实判定。`,
+      confidence,
+      source: 'frontend_preview',
+      evidence,
+      scores: { reference: referenceScore, firstLast: firstLastScore },
       needReusePreviousScene: false,
       needGenerateNewReferences: false,
       referenceImagePlan: { totalCount: 0, reusePreviousSceneCount: 0, generateNewCount: 0, types: [] },
     }
   }
-  if (shot.dialogues.length || Boolean(shot.continuity_from_prev) || containsAny(text, LIGHT_WORDS)) {
+
+  if (referenceEvidence.length) {
     return {
-      mode: 'REFERENCE_IMAGE_MODE',
-      reason: '自动判定命中对白、轻动作或场景延续，优先使用参考图保持角色和场景一致。',
-      confidence: 0.84,
+      mode,
+      reason: `前端预估偏向参考图：${referenceEvidence[0]}。生成入队后会记录后台选择器的真实判定。`,
+      confidence,
+      source: 'frontend_preview',
+      evidence: referenceEvidence,
+      scores: { reference: referenceScore, firstLast: firstLastScore },
       needReusePreviousScene: autoPlan.reusePreviousSceneCount > 0,
       needGenerateNewReferences: autoPlan.generateNewCount > 0,
       referenceImagePlan: autoPlan,
     }
   }
+
   return {
     mode: 'REFERENCE_IMAGE_MODE',
-    reason: '普通剧情镜默认更偏向参考图模式，以保持人物与画面风格稳定。',
-    confidence: 0.72,
+    reason: '前端预估信息不足，默认偏向参考图以保持人物与画面风格稳定；生成入队后会记录后台选择器的真实判定。',
+    confidence,
+    source: 'frontend_preview',
+    evidence: ['未命中强动作/强转场词', '默认保角色与场景一致'],
+    scores: { reference: referenceScore, firstLast: firstLastScore },
     needReusePreviousScene: autoPlan.reusePreviousSceneCount > 0,
     needGenerateNewReferences: autoPlan.generateNewCount > 0,
     referenceImagePlan: autoPlan,
@@ -149,7 +237,7 @@ function planSummary(plan?: { totalCount?: number; reusePreviousSceneCount?: num
   const generated = plan.generateNewCount ?? 0
   const parts = [`新生 ${generated} 张`]
   if (reuse > 0) parts.unshift(`复用 ${reuse} 张`)
-  return `预计参考图 ${plan.totalCount} 张：${parts.join('，')}`
+  return `参考图 ${plan.totalCount} 张：${parts.join(' / ')}`
 }
 
 type UsedRef = NonNullable<NonNullable<ShotVersion['image_inputs']>['reference_images']>[number]
@@ -183,7 +271,12 @@ export default function WallPage() {
 
   const overLimit = ep.cost_limit_cny !== undefined && ep.cost_cny >= ep.cost_limit_cny
   const shots = ep.shots ?? []
-  const sceneApproved = shots.filter(s => s.scene_status === 'approved').length
+  const previewDecisions = shots.map((shot, idx) => buildPreviewDecision(shot, idx > 0 ? shots[idx - 1] : undefined, 'AUTO'))
+  const firstLastShotIds = new Set(previewDecisions
+    .map((decision, idx) => decision.mode === 'FIRST_LAST_FRAME_MODE' ? shots[idx]?.id : null)
+    .filter(Boolean))
+  const firstLastNeeded = firstLastShotIds.size
+  const sceneApproved = shots.filter(s => firstLastShotIds.has(s.id) && s.scene_status === 'approved').length
   const videoReady = shots.filter(s => s.versions.some(v => v.status === 'succeeded')).length
 
   const act = async (fn: () => Promise<unknown>, msg?: string) => {
@@ -210,7 +303,7 @@ export default function WallPage() {
         <div className="crumb">
           <a style={{ cursor: 'pointer' }} onClick={() => go('board', projectId, episodeId)}>分镜台</a> / 第{numToCn(ep.episode_no)}集
         </div>
-        <h1>评审墙 <span className="sub">一屏一镜 · 自动选择剧情参考或动作强控 · 生成后在此复核视频与素材</span></h1>
+        <h1>评审墙 <span className="sub">一屏一镜 · 自动选择剧情参考或首尾帧控制 · 生成后在此复核视频与素材</span></h1>
         <hr className="rule" />
       </header>
 
@@ -225,13 +318,17 @@ export default function WallPage() {
           </>
         )}
         <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>
-          强控通道已备 {sceneApproved}/{shots.length} · 已有成片 {videoReady}/{shots.length}
+          {firstLastNeeded
+            ? <>首尾帧素材已备 {sceneApproved}/{firstLastNeeded} · 已有成片 {videoReady}/{shots.length}</>
+            : <>本集自动预估以参考图模式为主 · 已有成片 {videoReady}/{shots.length}</>}
         </span>
         <span style={{ flex: 1 }} />
-        <button className="btn small" disabled={busy} onClick={() => act(async () => {
-          const r = await api.post(`/episodes/${ep.id}/scenes-all`) as { started: number }
-          toast(`已为 ${r.started} 个镜头生成首/尾帧候选（供强动作、转场和尾帧强约束镜头使用）`)
-        })}>准备强控素材</button>
+        {firstLastNeeded > 0 && (
+          <button className="btn small" disabled={busy} onClick={() => act(async () => {
+            const r = await api.post(`/episodes/${ep.id}/scenes-all`) as { started: number }
+            toast(`已为 ${r.started} 个镜头生成首/尾帧候选（供首尾帧模式使用）`)
+          })}>准备首尾帧素材</button>
+        )}
         <button className="btn small primary" disabled={busy} onClick={() => act(async () => {
           const r = await api.post(`/episodes/${ep.id}/generate`) as { enqueued: { error?: string }[] }
           const ok = r.enqueued.filter(x => !x.error).length
@@ -312,7 +409,9 @@ function ModeGuideCard({ title, desc, points }: { title: string; desc: string; p
 function ShotSlide({ shot, prevShot, onChanged }: { shot: Shot; prevShot?: Shot; onChanged: () => void }) {
   const { toast } = useNav()
   const [busy, setBusy] = useState(false)
+  const [modeChoice, setModeChoice] = useState<ModeChoice>('AUTO')
   const sceneApproved = shot.scene_status === 'approved'
+  const previewDecision = buildPreviewDecision(shot, prevShot, modeChoice)
 
   const act = async (fn: () => Promise<unknown>, msg?: string) => {
     setBusy(true)
@@ -321,9 +420,9 @@ function ShotSlide({ shot, prevShot, onChanged }: { shot: Shot; prevShot?: Shot;
     finally { setBusy(false) }
   }
 
-  const sceneStamp = sceneApproved ? ['强控素材已备', 'green']
-    : shot.scene_status === 'generating' ? ['强控素材生成中', 'gold']
-      : shot.scene_status === 'review' ? ['强控素材待选', 'red'] : ['未生成强控素材', 'grey']
+  const sceneStamp = sceneApproved ? ['首尾帧素材已备', 'green']
+    : shot.scene_status === 'generating' ? ['首尾帧素材生成中', 'gold']
+      : shot.scene_status === 'review' ? ['首尾帧素材待选', 'red'] : ['未生成首尾帧素材', 'grey']
   const videoDone = shot.versions.some(v => v.status === 'succeeded')
 
   return (
@@ -331,7 +430,7 @@ function ShotSlide({ shot, prevShot, onChanged }: { shot: Shot; prevShot?: Shot;
       <div className="slide-head">
         <span className="sn">镜{String(shot.shot_no).padStart(2, '0')}</span>
         <span className="meta">{shot.duration_s}s · {shot.shot_size} · {shot.camera_move} · {shot.transition} · {shot.characters.join(' / ') || '缺角色'}</span>
-        <span className={`stamp ${sceneStamp[1]}`}>{sceneStamp[0]}</span>
+        {previewDecision.mode === 'FIRST_LAST_FRAME_MODE' && <span className={`stamp ${sceneStamp[1]}`}>{sceneStamp[0]}</span>}
         {videoDone && <span className="stamp green">已有成片</span>}
       </div>
 
@@ -351,13 +450,23 @@ function ShotSlide({ shot, prevShot, onChanged }: { shot: Shot; prevShot?: Shot;
           )}
         </div>
         <div className="slide-right">
-          <VideoPhase shot={shot} prevShot={prevShot} busy={busy} act={act} />
+          <VideoPhase
+            shot={shot}
+            prevShot={prevShot}
+            busy={busy}
+            modeChoice={modeChoice}
+            setModeChoice={setModeChoice}
+            previewDecision={previewDecision}
+            act={act}
+          />
         </div>
       </div>
 
-      <div className="slide-keyframes">
-        <KeyframePhase shot={shot} busy={busy} act={act} />
-      </div>
+      {previewDecision.mode === 'FIRST_LAST_FRAME_MODE' && (
+        <div className="slide-keyframes">
+          <KeyframePhase shot={shot} busy={busy} act={act} />
+        </div>
+      )}
     </div>
   )
 }
@@ -380,13 +489,13 @@ function KeyframePhase({ shot, busy, act }: {
   const thumb = (sc: SceneCandidate, approvedId: string | null | undefined, what: string) => (
     <SceneThumb key={sc.id} scene={sc} approved={sc.id === approvedId} busy={busy}
       onApprove={() => act(() => api.post(`/shots/${shot.id}/scene/approve`, { scene_id: sc.id }), `已采用该${what}`)}
-      onDelete={() => act(() => api.del(`/scenes/${sc.id}`), '已删除该强控素材（素材删空时会一并删除本镜旧成片）')} />
+      onDelete={() => act(() => api.del(`/scenes/${sc.id}`), '已删除该首尾帧素材（素材删空时会一并删除本镜旧成片）')} />
   )
 
   return (
     <>
       <div className="kf-head">
-        <b style={{ fontSize: 13 }}>强控素材</b>
+        <b style={{ fontSize: 13 }}>首尾帧素材</b>
         <button className="btn small primary" disabled={busy || shot.scene_status === 'generating'}
           onClick={() => act(
             () => api.post(`/shots/${shot.id}/scene`, { kinds: targetKinds }),
@@ -396,11 +505,11 @@ function KeyframePhase({ shot, busy, act }: {
         </button>
         {shot.scene_status === 'generating' && <span className="stamp gold">生成中…</span>}
         {shot.scene_status === 'review' && <span style={{ fontSize: 12, color: 'var(--cinnabar-deep)' }}>评审未自动通过，请分别确认所需首图/尾图或重生/删除</span>}
-        {shot.scene_status === 'approved' && <span style={{ fontSize: 12, color: 'var(--moss)' }}>已可用于动作强控；普通剧情镜也可走参考图模式</span>}
+        {shot.scene_status === 'approved' && <span style={{ fontSize: 12, color: 'var(--moss)' }}>已可用于首尾帧控制；普通剧情镜也可走参考图模式</span>}
         {!needsHead && <span style={{ fontSize: 12, color: 'var(--ink-faint)' }}>本镜首帧沿用上一镜尾图，只需审核尾图</span>}
       </div>
       {!done.length && shot.scene_status !== 'generating' && (
-        <div style={{ fontSize: 12.5, color: 'var(--ink-faint)' }}>尚无强控素材；普通剧情镜可直接走参考图模式生成视频。</div>
+        <div style={{ fontSize: 12.5, color: 'var(--ink-faint)' }}>尚无首尾帧素材；普通剧情镜可直接走参考图模式生成视频。</div>
       )}
       {needsHead && !!headDone.length && (
         <>
@@ -432,7 +541,7 @@ function SceneThumb({ scene, approved, busy, onApprove, onDelete }: {
           <span style={{ display: 'flex', gap: 4 }}>
             {approved ? <span className="stamp green" style={{ fontSize: 11 }}>采用</span>
               : <button className="btn small" disabled={busy} onClick={onApprove}>采用</button>}
-            <button className="btn small ghost" disabled={busy} onClick={onDelete} title="删除这张强控素材">删</button>
+            <button className="btn small ghost" disabled={busy} onClick={onDelete} title="删除这张首尾帧素材">删</button>
           </span>
         </div>
         {scene.qa?.issues?.length ? <div style={{ color: 'var(--ink-faint)', marginTop: 3 }}>{scene.qa.issues[0]}</div> : null}
@@ -445,14 +554,22 @@ function VideoModeDetails({ imageInputs }: { imageInputs: NonNullable<ShotVersio
   const mode = modeLabel(imageInputs.mode)
   const decision = imageInputs.mode_decision
   const refs = imageInputs.reference_images ?? []
+  const sourceLabel = decision?.llmUsed
+    ? '模型判定'
+    : decision?.defaulted
+      ? '规则兜底'
+      : '未调用模型'
+  const scoreLabel = decision?.llmUsed ? '模型置信' : '规则分'
+  const reasonText = explainDecisionReason(decision?.reason, Boolean(decision?.llmUsed))
   return (
     <div className="mode-detail-card">
       <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
         <span className="stamp grey">当前版本</span>
         <b style={{ color: 'var(--ink)' }}>{mode}</b>
-        {decision?.confidence !== undefined && <span>置信度 {decision.confidence.toFixed(2)}</span>}
+        <span className="decision-pill">{sourceLabel}</span>
+        {decision?.confidence !== undefined && <span className="decision-pill">{scoreLabel} {decision.confidence.toFixed(2)}</span>}
       </div>
-      {decision?.reason && <div style={{ marginTop: 5 }}>{decision.reason}</div>}
+      {reasonText && <div style={{ marginTop: 5 }}>{reasonText}</div>}
       {imageInputs.mode === 'REFERENCE_IMAGE_MODE' && (
         refs.length
           ? <div style={{ marginTop: 6, color: 'var(--ink)' }}>{actualRefSummary(refs)}</div>
@@ -487,20 +604,47 @@ function VideoModeDetails({ imageInputs }: { imageInputs: NonNullable<ShotVersio
   )
 }
 
-function VideoPhase({ shot, prevShot, busy, act }: {
+function explainDecisionReason(reason?: string, llmUsed?: boolean) {
+  if (!reason) return ''
+  if (llmUsed) return reason
+  if (reason.includes('dialogue') || reason.includes('light action')) {
+    return '命中对白/轻动作规则，本版未调用后台模型改判。'
+  }
+  if (reason.includes('strong action') || reason.includes('transition') || reason.includes('end-state')) {
+    return '命中强动作/转场/落点规则，本版未调用后台模型改判。'
+  }
+  if (reason.includes('exact first-frame handoff')) {
+    return '命中接上镜规则，需要用上一镜尾图做精确首帧衔接。'
+  }
+  if (reason.includes('Default ordinary story shot')) {
+    return '普通剧情镜规则兜底，优先保持人物与场景一致。'
+  }
+  if (reason.includes('Forced by video_generation_default_mode')) {
+    return '由监制房默认视频模式强制指定。'
+  }
+  if (reason.includes('Reference image mode is disabled')) {
+    return '参考图模式已在配置中关闭，自动改走首尾帧模式。'
+  }
+  return reason
+}
+
+function VideoPhase({ shot, prevShot, busy, modeChoice, setModeChoice, previewDecision, act }: {
   shot: Shot; prevShot?: Shot; busy: boolean
+  modeChoice: ModeChoice
+  setModeChoice: (mode: ModeChoice) => void
+  previewDecision: PreviewModeDecision
   act: (fn: () => Promise<unknown>, msg?: string) => Promise<void>
 }) {
   const [showVer, setShowVer] = useState<string | null>(null)
   const [editPrompt, setEditPrompt] = useState<string | null>(null)
-  const [modeChoice, setModeChoice] = useState<ModeChoice>('AUTO')
 
   const adopted = shot.versions.find(v => v.id === shot.adopted_version_id)
   const current = showVer ? shot.versions.find(v => v.id === showVer)! : (adopted ?? shot.versions[0])
   const autoDecision = buildPreviewDecision(shot, prevShot, 'AUTO')
-  const nextDecision = buildPreviewDecision(shot, prevShot, modeChoice)
+  const nextDecision = previewDecision
   const nextMode = nextDecision.mode
   const editingReferenceMode = nextMode === 'REFERENCE_IMAGE_MODE'
+  const keyframeBlocked = nextMode === 'FIRST_LAST_FRAME_MODE' && shot.scene_status !== 'approved'
   const makeGenerateBody = (extra?: Record<string, unknown>) =>
     modeChoice === 'AUTO' ? (extra ?? {}) : { ...(extra ?? {}), mode_override: modeChoice }
   const generateLabel = current ? '再生成一版' : '生成本镜'
@@ -556,11 +700,32 @@ function VideoPhase({ shot, prevShot, busy, act }: {
             <b>{modeLabel(nextMode)}</b> · {modeSummary(nextMode)}
           </div>
           <div style={{ marginTop: 5 }}>{nextDecision.reason}</div>
-          <div style={{ marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-            {modeChoice === 'AUTO' && <span className="stamp grey">规则预判 {nextDecision.confidence.toFixed(2)}</span>}
-            {nextMode === 'REFERENCE_IMAGE_MODE' && <span className="stamp grey">{planSummary(nextDecision.referenceImagePlan)}</span>}
-            {nextMode === 'FIRST_LAST_FRAME_MODE' && <span className="stamp grey">依赖已通过评审的首图 / 尾图</span>}
+          <div className="decision-score-row">
+            {modeChoice === 'AUTO' && (
+              <>
+                <span className="decision-pill">前端预估 {nextDecision.confidence.toFixed(2)}</span>
+                <span className="decision-pill">参考 {nextDecision.scores.reference.toFixed(2)}</span>
+                <span className="decision-pill">首尾帧 {nextDecision.scores.firstLast.toFixed(2)}</span>
+              </>
+            )}
+            {nextMode === 'REFERENCE_IMAGE_MODE' && <span className="decision-pill">{planSummary(nextDecision.referenceImagePlan)}</span>}
+            {nextMode === 'FIRST_LAST_FRAME_MODE' && <span className="decision-pill">依赖已过审首图 / 尾图</span>}
           </div>
+          {!!nextDecision.evidence.length && (
+            <div className="decision-evidence">
+              {nextDecision.evidence.map(item => <span key={item}>{item}</span>)}
+            </div>
+          )}
+          {modeChoice === 'AUTO' && (
+            <div style={{ marginTop: 6, color: 'var(--ink-faint)' }}>
+              这里是页面预估；真正入队时后台选择器会再次判定，并在生成版本里显示“模型判定”或“规则兜底”。
+            </div>
+          )}
+          {nextMode === 'REFERENCE_IMAGE_MODE' && (
+            <div style={{ marginTop: 6, color: 'var(--ink-faint)' }}>
+              参考图模式不需要先准备首尾帧素材；下方素材区已收起。
+            </div>
+          )}
           {modeChoice !== 'AUTO' && (
             <div style={{ marginTop: 6, color: 'var(--ink-faint)' }}>
               自动判定原本建议：{modeLabel(autoDecision.mode)}。{autoDecision.reason}
@@ -568,7 +733,7 @@ function VideoPhase({ shot, prevShot, busy, act }: {
           )}
           {nextMode === 'FIRST_LAST_FRAME_MODE' && shot.scene_status !== 'approved' && (
             <div style={{ marginTop: 6, color: 'var(--cinnabar-deep)' }}>
-              当前还没有备齐可用强控素材，先在下方完成首图 / 尾图评审，再生成本镜视频。
+              当前还没有备齐可用首尾帧素材，先在下方完成首图 / 尾图评审，再生成本镜视频。
             </div>
           )}
         </div>
@@ -587,11 +752,11 @@ function VideoPhase({ shot, prevShot, busy, act }: {
             <div className="hint" style={{ fontSize: 11.5, lineHeight: 1.5 }}>
               {editingReferenceMode
                 ? '改词建议：保留参考图用途说明、角色/场景一致性和单一连贯动作约束，只调整动作细节。'
-                : '改词建议：保留强控素材约束、单一连贯动作和画面稳定/不跳切等约束，只调整动作细节。'}
+                : '改词建议：保留首尾帧素材约束、单一连贯动作和画面稳定/不跳切等约束，只调整动作细节。'}
             </div>
             <textarea rows={6} style={{ fontSize: 12.5 }} value={editPrompt} onChange={e => setEditPrompt(e.target.value)} />
             <div className="fc-actions">
-              <button className="btn small primary" disabled={busy}
+              <button className="btn small primary" disabled={busy || keyframeBlocked}
                 onClick={() => act(async () => {
                   await api.post(`/shots/${shot.id}/generate`, makeGenerateBody({ prompt_override: editPrompt }))
                   setEditPrompt(null)
@@ -601,7 +766,7 @@ function VideoPhase({ shot, prevShot, busy, act }: {
           </>
         ) : (
           <div className="fc-actions">
-            <button className="btn small primary" disabled={busy}
+            <button className="btn small primary" disabled={busy || keyframeBlocked}
               onClick={() => act(() => api.post(`/shots/${shot.id}/generate`, makeGenerateBody()), generateToast)}>{generateLabel}</button>
             {shot.video_stale && (
               <button className="btn small primary" disabled={busy}
@@ -618,10 +783,10 @@ function VideoPhase({ shot, prevShot, busy, act }: {
             )}
             {shot.versions.length > 0 && (
               <>
-                <button className="btn small primary" disabled={busy}
+                <button className="btn small primary" disabled={busy || keyframeBlocked}
                   onClick={() => act(() => api.post(`/shots/${shot.id}/generate`, makeGenerateBody({ with_critique: true })), `已按${modeLabel(nextMode)}带评语重生`)}>带评语重生</button>
                 <button className="btn small" disabled={busy} onClick={() => setEditPrompt(current?.prompt_text ?? '')}>改词重生</button>
-                <button className="btn small" disabled={busy}
+                <button className="btn small" disabled={busy || keyframeBlocked}
                   onClick={() => act(() => api.post(`/shots/${shot.id}/generate`, makeGenerateBody({ reroll: true })), `已按${modeLabel(nextMode)}原词重抽`)}>原词重抽</button>
                 {current && (
                   <button className="btn small ghost" disabled={busy}
@@ -637,7 +802,7 @@ function VideoPhase({ shot, prevShot, busy, act }: {
             {current.image_inputs.last_frame_used ? ' · 尾帧：本镜尾图' : ''}
           </div>
         )}
-        {shot.video_stale && <div style={{ fontSize: 11.5, color: 'var(--cinnabar-deep)' }}>强控素材已变更，本镜视频链已过期，建议「从此镜往后重生」</div>}
+        {shot.video_stale && <div style={{ fontSize: 11.5, color: 'var(--cinnabar-deep)' }}>首尾帧素材已变更，本镜视频链已过期，建议「从此镜往后重生」</div>}
       </div>
     </div>
   )
