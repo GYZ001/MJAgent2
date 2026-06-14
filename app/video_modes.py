@@ -502,7 +502,8 @@ async def _generate_one_reference(*, project_id: str, episode_no: int, shot: Sho
 
 async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int, episode_id: str,
                                  shot_id: str, shot: Shot, bible: Bible,
-                                 decision: ShotVideoModeDecision, prev_shot: Any | None = None) -> list[ReferenceImageAsset]:
+                                 decision: ShotVideoModeDecision, prev_shot: Any | None = None,
+                                 rejection_details: list[dict[str, Any]] | None = None) -> list[ReferenceImageAsset]:
     plan = decision.referenceImagePlan
     threshold = quality_threshold()
     max_refs = max_reference_images()
@@ -527,13 +528,26 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
             )
             if asset.rejectReason:
                 rejected.append(asset)
+                if rejection_details is not None:
+                    rejection_details.append({
+                        "type": ref_type, "source": "seedream_generated",
+                        "reason": asset.rejectReason,
+                        "quality_score": asset.qualityScore,
+                        "qa": asset.qa,
+                    })
             else:
                 selected.append(asset)
         except Exception as exc:
+            reason = str(exc)[:240]
             rejected.append(ReferenceImageAsset(
                 id=new_id("ref"), url="", type=ref_type, source="seedream_generated",
-                rejectReason=str(exc)[:240],
+                rejectReason=reason,
             ))
+            if rejection_details is not None:
+                rejection_details.append({
+                    "type": ref_type, "source": "seedream_generated",
+                    "reason": reason,
+                })
         if len(selected) >= max_refs or len(selected) >= plan.totalCount:
             break
 
