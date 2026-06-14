@@ -27,6 +27,7 @@ interface Health {
   audio_tts_model?: string
   audio_asr_model?: string
   audio_voice?: string
+  keys?: Record<ProviderKey, { configured: boolean; preview: string }>
 }
 
 const AUDIO_VOICES = ['Cherry', 'Chelsie', 'Ethan', 'Serena', 'Dylan', 'Jada']
@@ -131,18 +132,54 @@ function selectedModelValue(choices: ModelChoice[], currentModel: string) {
   return choices.some(choice => choice.value === currentModel) ? currentModel : choices[0]?.value ?? ''
 }
 
+interface KeyInfo { configured: boolean; preview: string; label: string; key_name: string }
+type KeyStatus = Record<ProviderKey, KeyInfo>
+
+const KEY_PROVIDERS: { key: ProviderKey; label: string; placeholder: string }[] = [
+  { key: 'hiagent', label: '火山引擎（HiAgent）', placeholder: '填写火山引擎 API Key' },
+  { key: 'openrouter', label: 'OpenRouter', placeholder: 'sk-or-v1-...' },
+  { key: 'bailian', label: '百炼（阿里云 DashScope）', placeholder: 'sk-...' },
+]
+
 export default function MonitorPage() {
   const { toast } = useNav()
   const { data: jobs } = usePoll<JobsView>(() => api.get('/system/jobs'), 4000)
   const { data: calls } = usePoll<Call[]>(() => api.get('/system/calls?limit=40'), 6000)
   const { data: settings, refresh: refreshSettings } = usePoll<Record<string, string>>(() => api.get('/settings'), 0)
   const { data: health, refresh: refreshHealth } = usePoll<Health>(() => api.get('/system/health'), 0)
+  const { data: keyStatus, refresh: refreshKeys } = usePoll<KeyStatus>(() => api.get('/keys'), 0)
   const [draft, setDraft] = useState<Record<string, string>>({})
   const [modelDraft, setModelDraft] = useState<Record<string, string>>({})
+  const [keyDraft, setKeyDraft] = useState<Record<string, string>>({})
+  const [savingKeys, setSavingKeys] = useState(false)
 
   const refreshModelState = () => {
     refreshSettings()
     refreshHealth()
+    refreshKeys()
+  }
+
+  const saveKeys = async () => {
+    const payload: Record<string, string> = {}
+    for (const p of KEY_PROVIDERS) {
+      const v = (keyDraft[p.key] || '').trim()
+      if (v) payload[p.key] = v
+    }
+    if (!Object.keys(payload).length) {
+      toast('请至少填写一个 Key')
+      return
+    }
+    setSavingKeys(true)
+    try {
+      await api.put('/keys', payload)
+      toast('密钥已保存，立即生效')
+      setKeyDraft({})
+      refreshModelState()
+    } catch (e: unknown) {
+      toast((e as Error).message, true)
+    } finally {
+      setSavingKeys(false)
+    }
   }
 
   const setOne = async (key: string, value: string) => {
@@ -242,6 +279,41 @@ export default function MonitorPage() {
       </div>
 
       <div style={{ height: 20 }} />
+
+      <section className="card">
+        <h3>密钥管理 <span className="hint">填写后保存到 .env，下次启动自动加载；留空表示不修改</span></h3>
+        <div className="model-grid">
+          {KEY_PROVIDERS.map(p => {
+            const info = keyStatus?.[p.key]
+            const isConfigured = info?.configured ?? false
+            return (
+              <div className="model-row" key={p.key}>
+                <div className="model-name">
+                  <b>{p.label}</b>
+                  <span className={`stamp ${isConfigured ? 'green' : 'red'}`}>
+                    {isConfigured ? `已配置 ${info?.preview || ''}` : '未配置'}
+                  </span>
+                </div>
+                <div className="model-selects" style={{ flex: 1 }}>
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    placeholder={p.placeholder}
+                    value={keyDraft[p.key] || ''}
+                    onChange={e => setKeyDraft(prev => ({ ...prev, [p.key]: e.target.value }))}
+                    style={{ width: '100%', padding: '6px 10px', fontSize: 13 }}
+                  />
+                </div>
+              </div>
+            )
+          })}
+        </div>
+        <div className="model-actions">
+          <button className="btn primary small" onClick={saveKeys} disabled={savingKeys || !Object.keys(keyDraft).some(k => keyDraft[k]?.trim())}>
+            {savingKeys ? '保存中…' : '保存密钥'}
+          </button>
+        </div>
+      </section>
 
       <section className="card">
         <h3>模型选择 <span className="hint">每类任务单独选择服务和模型；视频和图像当前由火山生成</span></h3>

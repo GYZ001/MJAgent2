@@ -1,13 +1,23 @@
-"""全局配置：.env 加载 + 运行参数。禁止在代码中出现任何密钥字面量。"""
+"""全局配置：.env 加载 + 运行参数。禁止在代码中出现任何密钥字面量。
+
+API Key 通过前端「监制房」页面填写，保存到 .env，后续启动自动加载。
+用户只需提供三个 provider 的 Key，其他配置（base URL、模型名等）均有合理默认值。
+"""
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PROJECTS_DIR = ROOT / "projects"
 DATA_DIR = ROOT / "data"
 DB_PATH = DATA_DIR / "manju.db"
+
+# 可通过前端管理的 API Key 列表
+MANAGED_KEYS = ("HIAGENT_API_KEY", "OPENROUTER_API_KEY", "BAILIAN_API_KEY")
+
+_env_lock = threading.Lock()
 
 
 def _load_env() -> None:
@@ -118,3 +128,87 @@ DEFAULT_SETTINGS = {
 
 PROJECTS_DIR.mkdir(exist_ok=True)
 DATA_DIR.mkdir(exist_ok=True)
+
+
+# ---------- API Key 管理：前端填写 → 持久化 .env → 运行时热更新 ----------
+
+def save_keys_to_env(keys: dict[str, str]) -> list[str]:
+    """将 API Key 保存到 .env 文件（读-合并-写），并更新运行时变量。
+
+    keys: {"HIAGENT_API_KEY": "xxx", ...}，只接受 MANAGED_KEYS 中的键。
+    返回实际更新的 key 名列表。空字符串视为删除（保留原值不动）。
+    """
+    updated: list[str] = []
+    to_write: dict[str, str] = {}
+    for k, v in keys.items():
+        if k not in MANAGED_KEYS:
+            continue
+        v = (v or "").strip()
+        if v:
+            to_write[k] = v
+            updated.append(k)
+
+    if not to_write:
+        return updated
+
+    env_file = ROOT / ".env"
+    with _env_lock:
+        # 读取现有 .env 内容
+        existing_lines: list[str] = []
+        existing_keys: dict[str, int] = {}  # key → line index
+        if env_file.exists():
+            for i, line in enumerate(env_file.read_text(encoding="utf-8").splitlines()):
+                existing_lines.append(line)
+                stripped = line.strip()
+                if stripped and not stripped.startswith("#") and "=" in stripped:
+                    ek, _, _ = stripped.partition("=")
+                    existing_keys[ek.strip()] = i
+
+        # 合并：已有的替换值，没有的追加
+        for k, v in to_write.items():
+            if k in existing_keys:
+                existing_lines[existing_keys[k]] = f"{k}={v}"
+            else:
+                existing_lines.append(f"{k}={v}")
+
+        # 写回 .env
+        env_file.write_text("\n".join(existing_lines) + "\n", encoding="utf-8")
+
+        # 更新 os.environ 和模块级变量
+        for k, v in to_write.items():
+            os.environ[k] = v
+
+    # 热更新模块级变量
+    _reload_keys()
+    return updated
+
+
+def _reload_keys() -> None:
+    """从 os.environ 重新加载 API Key 相关的模块级变量。"""
+    global HIAGENT_API_KEY, OPENROUTER_API_KEY, BAILIAN_API_KEY
+    HIAGENT_API_KEY = os.environ.get("HIAGENT_API_KEY", "")
+    OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+    BAILIAN_API_KEY = os.environ.get("BAILIAN_API_KEY") or os.environ.get("DASHSCOPE_API_KEY", "")
+
+
+def get_key_status() -> dict[str, dict]:
+    """返回各 provider 的 key 配置状态（不暴露完整 key 值）。"""
+    result = {}
+    for key_name in MANAGED_KEYS:
+        val = os.environ.get(key_name, "")
+        provider = key_name.replace("_API_KEY", "").lower()
+        if provider == "hiagent":
+            label = "火山引擎"
+        elif provider == "openrouter":
+            label = "OpenRouter"
+        elif provider == "bailian":
+            label = "百炼（阿里云）"
+        else:
+            label = provider
+        result[provider] = {
+            "key_name": key_name,
+            "label": label,
+            "configured": bool(val),
+            "preview": f"{val[:6]}...{val[-4:]}" if len(val) > 10 else ("已配置" if val else ""),
+        }
+    return result

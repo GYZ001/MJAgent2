@@ -835,11 +835,95 @@ def cancel_storyboard(episode_id: str):
     conn = get_conn()
     has_shots = conn.execute(
         "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)).fetchone()["c"]
-    # 之前已有分镜则回到“待确认”，否则回到“待分镜”
+    # 之前已有分镜则回到"待确认"，否则回到"待分镜"
     fallback = "scripted" if has_shots else "planned"
     conn.execute("UPDATE episodes SET status=?, script_error=NULL WHERE id=?", (fallback, episode_id))
     conn.commit()
     return {"status": fallback}
+
+
+_plan_tasks: dict[str, asyncio.Task] = {}
+
+
+async def _plan_modes_task(episode_id: str):
+    """后台任务：为全集镜头调用 LLM 规划视频生成模式和参考图计划。"""
+    from app.video_modes import ShotVideoModeSelector
+    conn = get_conn()
+    shots = rows_to_dicts(conn.execute(
+        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)).fetchall())
+    if not shots:
+        return
+    p = conn.execute(
+        "SELECT bible_json FROM projects WHERE id=(SELECT project_id FROM episodes WHERE id=?)",
+        (episode_id,)).fetchone()
+    bible = Bible.model_validate(json.loads(p["bible_json"])) if p and p["bible_json"] else None
+    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    prev_board = None
+    if ep and ep["episode_no"] > 1:
+        prev_ep = conn.execute(
+            "SELECT id FROM episodes WHERE project_id=? AND episode_no=?",
+            (ep["project_id"], ep["episode_no"] - 1)).fetchone()
+        if prev_ep:
+            prev_shots = rows_to_dicts(conn.execute(
+                "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (prev_ep["id"],)).fetchall())
+            prev_board = prev_shots
+
+    selector = ShotVideoModeSelector()
+    planned = 0
+    for i, shot_row in enumerate(shots):
+        prev_shot = shots[i - 1] if i > 0 else None
+        plan = await selector.select(
+            shot_row, bible, prev_shot=prev_shot, prev_episode_shots=prev_board)
+        plan_dict = {
+            "mode": plan.mode,
+            "reason": plan.reason,
+            "confidence": plan.confidence,
+            "ruleMode": plan.ruleMode,
+            "llmUsed": plan.llmUsed,
+            "defaulted": plan.defaulted,
+            "needReusePreviousScene": plan.needReusePreviousScene,
+            "needGenerateNewReferences": plan.needGenerateNewReferences,
+            "referenceImagePlan": {
+                "totalCount": plan.referenceImagePlan.totalCount,
+                "reusePreviousSceneCount": plan.referenceImagePlan.reusePreviousSceneCount,
+                "generateNewCount": plan.referenceImagePlan.generateNewCount,
+                "types": plan.referenceImagePlan.types,
+            } if plan.referenceImagePlan else None,
+        }
+        conn.execute("UPDATE shots SET mode_plan=? WHERE id=?",
+                     (json.dumps(plan_dict, ensure_ascii=False), shot_row["id"]))
+        planned += 1
+    conn.commit()
+
+
+@router.post("/episodes/{episode_id}/plan-modes")
+async def start_plan_modes(episode_id: str):
+    """为全集镜头调用 LLM 规划视频生成模式与参考图计划。"""
+    _episode_or_404(episode_id)
+    if episode_id in _plan_tasks and not _plan_tasks[episode_id].done():
+        raise HTTPException(409, "模式规划正在进行中")
+    conn = get_conn()
+    conn.execute("UPDATE episodes SET status='confirming' WHERE id=? AND status='scripted'", (episode_id,))
+    conn.commit()
+    task = asyncio.create_task(_plan_modes_task(episode_id))
+    _plan_tasks[episode_id] = task
+    task.add_done_callback(lambda t, eid=episode_id: _plan_tasks.pop(eid, None))
+    return {"status": "planning"}
+
+
+@router.get("/episodes/{episode_id}/plan-modes/status")
+def plan_modes_status(episode_id: str):
+    _episode_or_404(episode_id)
+    task = _plan_tasks.get(episode_id)
+    if task and not task.done():
+        return {"status": "planning"}
+    conn = get_conn()
+    ep = conn.execute("SELECT status FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    total = conn.execute("SELECT COUNT(*) as c FROM shots WHERE episode_id=?", (episode_id,)).fetchone()["c"]
+    planned = conn.execute(
+        "SELECT COUNT(*) as c FROM shots WHERE episode_id=? AND mode_plan IS NOT NULL",
+        (episode_id,)).fetchone()["c"]
+    return {"status": ep["status"], "total": total, "planned": planned}
 
 
 @router.get("/episodes/{episode_id}")
@@ -1484,3 +1568,37 @@ def put_settings(body: dict):
             set_setting("model_text_provider", sval)
             set_setting("model_vlm_provider", sval)
     return {"ok": True}
+
+
+# ---------- API Key 管理：前端填写 → 持久化 .env ----------
+
+@router.get("/keys")
+def get_keys():
+    """获取各 provider 的 key 状态（不返回完整 key 值）。"""
+    return config.get_key_status()
+
+
+@router.put("/keys")
+def put_keys(body: dict):
+    """保存 API Key 到 .env 并热更新运行时变量。
+
+    body 格式：{"hiagent": "sk-xxx", "openrouter": "sk-or-v1-xxx", "bailian": "sk-xxx"}
+    前端传 provider 名（小写），后端映射到对应的环境变量名。
+    """
+    provider_to_key = {
+        "hiagent": "HIAGENT_API_KEY",
+        "openrouter": "OPENROUTER_API_KEY",
+        "bailian": "BAILIAN_API_KEY",
+    }
+    env_keys: dict[str, str] = {}
+    for provider, value in body.items():
+        p = str(provider).strip().lower()
+        if p not in provider_to_key:
+            raise HTTPException(422, f"不支持的 provider：{p}，可选：{', '.join(provider_to_key)}")
+        env_keys[provider_to_key[p]] = str(value).strip()
+
+    updated = config.save_keys_to_env(env_keys)
+    if not updated:
+        raise HTTPException(422, "没有提供有效的 Key")
+    updated_providers = [k.replace("_API_KEY", "").lower() for k in updated]
+    return {"ok": True, "updated": updated_providers}
