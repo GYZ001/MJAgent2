@@ -39,7 +39,7 @@ const PROVIDERS: { key: ProviderKey; label: string }[] = [
 ]
 
 const MODEL_ROWS: { key: ModelKind; label: string; note: string }[] = [
-  { key: 'text', label: 'Text 模型', note: '分集 / 分镜 / 文本修复' },
+  { key: 'text', label: 'Text 模型', note: '分集 / 剧本 / 分镜 / 文本修复' },
   { key: 'vlm', label: 'VLM 模型', note: '关键帧评审 / 视频质检' },
   { key: 'video', label: '视频模型', note: 'Seedance 视频生成' },
   { key: 'image', label: '图像模型', note: 'Seedream 关键帧 / 定妆照' },
@@ -56,9 +56,16 @@ const OPENROUTER_MODEL_CHOICES: Record<'text' | 'vlm', ModelChoice[]> = {
 
 const BAILIAN_MODEL_CHOICES: Record<'text' | 'vlm', ModelChoice[]> = {
   text: [
+    { label: 'Qwen3.7-Max 2026-06-08（免费额度）', value: 'qwen3.7-max-2026-06-08' },
+    { label: 'Qwen3.7-Max 2026-05-20（免费额度）', value: 'qwen3.7-max-2026-05-20' },
+    { label: 'Qwen3.7-Max 2026-05-17（免费额度）', value: 'qwen3.7-max-2026-05-17' },
+    { label: 'Qwen3.7-Max Preview（免费额度）', value: 'qwen3.7-max-preview' },
+    { label: 'Qwen3.7-Plus 2026-05-26（免费额度）', value: 'qwen3.7-plus-2026-05-26' },
     { label: 'Qwen3.7-Max', value: 'qwen3.7-max' },
+    { label: 'Qwen3.7-Plus', value: 'qwen3.7-plus' },
   ],
   vlm: [
+    { label: 'Qwen3.7-Plus 2026-05-26（免费额度）', value: 'qwen3.7-plus-2026-05-26' },
     { label: 'Qwen3.7-Plus', value: 'qwen3.7-plus' },
   ],
 }

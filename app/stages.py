@@ -1,4 +1,4 @@
-"""LLM 流水线阶段：摘要 / 角色圣经 / 剧集规划 / 分镜脚本。
+"""LLM 流水线阶段：摘要 / 角色圣经 / 剧集规划 / 可拍剧本 / 分镜脚本。
 每阶段 = prompt + Schema 校验 + 业务校验 + 修复回路（默认重试到 max_repair_attempts 次，失败抛 StageError——禁止兜底）。
 校验类失败一律让模型继续修复；只有模型真正不可用（鉴权失败/参数 400/网关持续故障，
 即 hiagent.ProviderError 透传）才立刻失败——重试同一 prompt 对这类错误无意义。
@@ -17,14 +17,14 @@ from pydantic import BaseModel
 
 from app import config, hiagent
 from app.db import get_setting, log_provider_call
-from app.schemas import (BeatChain, Bible, CAMERA_MOVES, EMOTIONS, EpisodePlan, SHOT_SIZES,
-                         Storyboard, TIME_OF_DAY_ORDER, TRANSITIONS, extract_json, schema_errors)
+from app.schemas import (Beat, BeatChain, Bible, CAMERA_MOVES, EMOTIONS, EpisodePlan, EpisodeScreenplay,
+                         SHOT_SIZES, Storyboard, TIME_OF_DAY_ORDER, TRANSITIONS, extract_json, schema_errors)
 from app.validators import (ACTION_DESC_MIN_CHARS, NARRATION_TARGET_CHARS,
                             NARRATION_TARGET_MIN_CHARS,
                             ORAL_TARGET_RANGE, SCENE_SETTING_MAX_CHARS,
                             SOURCE_EXCERPT_MIN_CHARS,
                             TRANSITION_HINTS, beat_scene_label, normalize_plan_chapters,
-                            validate_beat_chain, validate_bible, validate_plan,
+                            validate_beat_chain, validate_bible, validate_plan, validate_screenplay,
                             validate_storyboard, validate_storyboard_against_beats)
 
 SYSTEM_PREFIX = (
@@ -159,26 +159,57 @@ async def summarize_chapters_concurrent(chapters: list[dict], concurrency: int =
 BIBLE_SOURCE_BUDGET_CHARS = 60000
 
 
-def _render_bible_source(chapters: list[dict], budget: int = BIBLE_SOURCE_BUDGET_CHARS) -> str:
-    """Render as much source text as possible for the character bible.
+_BIBLE_TAIL_SAMPLE_MAX = 12      # 后段最多抽样多少章（取其开头，角色多在章首登场）
+_BIBLE_TAIL_SLICE_CHARS = 1500   # 每个抽样章节注入的开头字数
 
-    The old prompt only read the first 5 chapters, which made late-arriving
-    important characters easy to miss in 6+ chapter imports.
+
+def _render_bible_source(chapters: list[dict], budget: int = BIBLE_SOURCE_BUDGET_CHARS) -> str:
+    """为角色圣经渲染源文本：先顺序铺头部（主角通常在前期出场），再在剩余预算里
+    跨越全书【抽样后段章节的开头】，让后期才登场的重要角色（如中后段反派）也能进圣经——
+    否则分镜阶段引用这些角色会因"不在圣经"而反复返工或被迫漏掉。
     """
+    valid = [ch for ch in chapters if (ch.get("content") or "").strip()]
+    if not valid:
+        return ""
+
+    def _title(ch: dict) -> str:
+        return ch.get("title") or f"第{ch.get('idx', '?')}章"
+
+    # 头部顺序铺设：用至多 70% 预算（其余留给后段抽样）。
+    head_budget = int(budget * 0.7)
     blocks: list[str] = []
     used = 0
-    for ch in chapters:
-        title = ch.get("title") or f"第{ch.get('idx', '?')}章"
-        content = (ch.get("content") or "").strip()
-        if not content:
-            continue
-        remain = budget - used
+    head_count = 0
+    for ch in valid:
+        remain = head_budget - used
         if remain <= 200:
             break
+        content = ch["content"].strip()
         clipped = content[:remain]
         suffix = "……（原文过长已截断）" if len(content) > remain else ""
-        blocks.append(f"【{title}】\n{clipped}{suffix}")
+        blocks.append(f"【{_title(ch)}】\n{clipped}{suffix}")
         used += len(clipped)
+        head_count += 1
+
+    # 后段抽样：在头部未覆盖的章节里均匀取样，注入每章开头若干字，覆盖后期登场人物。
+    later = valid[head_count:]
+    remain_budget = budget - used
+    if later and remain_budget > 200:
+        sample_n = min(len(later), _BIBLE_TAIL_SAMPLE_MAX, max(1, remain_budget // _BIBLE_TAIL_SLICE_CHARS))
+        if sample_n > 0:
+            step = len(later) / sample_n
+            picked_idx = sorted({min(len(later) - 1, int(i * step)) for i in range(sample_n)})
+            for li in picked_idx:
+                if remain_budget <= 200:
+                    break
+                ch = later[li]
+                slice_chars = min(_BIBLE_TAIL_SLICE_CHARS, remain_budget)
+                content = ch["content"].strip()
+                clipped = content[:slice_chars]
+                suffix = "……（节选开头，仅供识别后期登场角色）" if len(content) > slice_chars else ""
+                blocks.append(f"【{_title(ch)}·节选】\n{clipped}{suffix}")
+                remain_budget -= len(clipped)
+
     return "\n\n".join(blocks)
 
 
@@ -354,6 +385,171 @@ async def generate_beat_chain(episode: dict, source_text: str, bible: Bible) -> 
         temperature=0.7, max_tokens=6000, fallback_to_last=True)
 
 
+async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
+                              prev_ending: str = "") -> EpisodeScreenplay:
+    """小说 -> 完整剧本。
+
+    新格式不在剧本台阶段强制拆成拍卡，而是先生成一份可读、可审、可拆镜的生产级剧本稿；
+    拆镜与执行字段延后到分镜阶段。
+    """
+    speech_styles = "；".join(f"{c.name}：{c.speech_style}" for c in bible.characters if c.speech_style)
+    prompt = f"""任务：为漫剧第 {episode['episode_no']} 集《{episode['title']}》把小说改写成【完整剧本】。
+
+你现在处于“剧本台”阶段，不是分镜阶段。你的职责是先写出一整集完整、连续、可阅读、可拆镜的【生产级剧本稿】。
+
+剧本层职责：
+1. 生成一整集完整故事，而不是拍卡列表或摘要提纲。
+2. 保证剧情连贯、人物情绪连贯、因果关系连贯。
+3. 输出能直接进入导演/分镜阶段的剧本稿，不要只写成长梗概。
+4. 保留原文依据，并明确改编方向。
+5. 输出适合后续拆成 4~6 个固定 10 秒视频段分镜的连续剧本。
+6. 不在正文里输出“拍01/拍02/拍03”，不写景别、运镜、首尾帧、参考图、提示词。
+
+你必须同时输出两层内容：
+A. `scene_outline`：场次级结构表，是制作层用来审戏和拆镜的骨架。
+B. `full_script_text`：真正的剧本正文，必须是带场标、动作段、对白段的台本稿，而不是一大段总结。
+
+`full_script_text` 必须采用以下剧本写法：
+1. 使用场次标题，例如：`【场1】夜 / 旧仓库内`
+2. 每场先写动作与场面调度，再写人物对白；动作段和对白段要分行，不要挤成一大段。
+3. 对白用“角色名：台词”格式；必要时可写“角色名（情绪/状态）：台词”。
+4. 只写戏剧动作、人物反应、对白、必要旁白；不要写镜头语言。
+5. 每场都要有明确戏剧任务：进入、升级、冲突、转折、收束中的至少一种。
+6. 每场结尾都要把一个新的动作状态、情绪状态或信息状态交给下一场，保证可连续拆镜。
+7. 正文必须像真正台本，不得写成“本场讲了什么”的总结句堆叠。
+
+硬性规则（代码校验，违反会被退回）：
+1. episode_no 必须等于 {episode['episode_no']}。
+2. title / logline / scene_outline / full_script_text / emotional_curve / ending_hook / source_basis 必填。
+3. `scene_outline` 必须是 3~6 场的连续场次结构，scene_no 从 1 连续递增。
+4. full_script_text 必须是一篇连续故事正文，且必须带场次标题、动作段、对白段，不能写成 beat 列表、卡片列表、分镜表或镜头说明。
+5. full_script_text 不能是一大段梗概；必须像台本，至少拆成多场、多段、多行。
+6. full_script_text 中禁止出现：拍01、拍1、拍 01、镜头、景别、运镜、首帧、尾帧、参考图、提示词、prompt。
+7. 剧本开头必须尽快进入本集 hook：{episode['hook']}
+8. 剧本结尾必须落到本集尾钩：{episode['cliffhanger']}
+9. 人物姓名、关系、说话风格必须遵守角色圣经；台词要自然口语化，优先保留原著冲击力。
+10. 信息密度服从目标时长 {episode['target_duration_s']}s：正文不能过度注水，但必须讲清因果链、情绪推进和关键转折。
+11. source_basis 必须概括本集改编依据的原文信息，保留真实事件、对白、冲突或线索；不要空泛。
+
+本集规划信息：
+- 概要（只用于理解，不可替代原文）：{episode.get('synopsis') or ''}
+- 上一集结尾：{prev_ending or '（本集为第一集）'}
+- 本集目标时长：{episode['target_duration_s']} 秒
+
+角色圣经（姓名、关系、说话风格必须遵守）：
+{bible.model_dump_json()}
+
+角色说话风格：
+{speech_styles or '（无额外说话风格）'}
+
+本集改编源文本：
+{source_text[:16000]}
+
+输出 JSON Schema：
+{{"episode_no": {episode['episode_no']}, "mode": "full_script", "title": str, "logline": str, "script_format_note": "一句话说明正文采用的台本格式", "scene_outline": [{{"scene_no": int, "scene_heading": str, "story_function": str, "characters": [str], "summary": str, "conflict": str, "turn": str, "source_basis": str}}], "full_script_text": str, "character_state_changes": [str], "emotional_curve": str, "ending_hook": str, "source_basis": str, "adaptation_direction": str, "opening": str, "development": str, "conflict": str, "climax": str}}"""
+    script = await _run_with_repair(
+        "可拍剧本", prompt, EpisodeScreenplay,
+        lambda s: validate_screenplay(s, bible, max(1, episode["target_duration_s"] // config.FIXED_VIDEO_DURATION_S),
+                                      episode_no=episode["episode_no"]),
+        temperature=0.7, max_tokens=10000, fallback_to_last=True)
+    return script
+
+
+async def _generate_storyboard_from_full_script(episode: dict, source_text: str, bible: Bible,
+                                                prev_ending: str, screenplay: EpisodeScreenplay) -> Storyboard:
+    speech_styles = "；".join(f"{c.name}：{c.speech_style}" for c in bible.characters if c.speech_style)
+    durations = sorted(config.ALLOWED_DURATIONS)
+    output_contract = _storyboard_output_contract(episode, bible, durations, speech_styles)
+    preflight_contract = _storyboard_preflight_contract(episode)
+    transition_options = "|".join(sorted(TRANSITIONS))
+    prompt = f"""任务：为漫剧第 {episode['episode_no']} 集《{episode['title']}》编写分镜脚本。
+
+你现在处于“分镜台”阶段，必须基于下方【已确认完整剧本】把连续故事拆成固定 10 秒视频段镜头卡，而不是回到剧本台重新写故事。
+
+已确认完整剧本：
+标题：{screenplay.title}
+一句话梗概：{screenplay.logline}
+剧本格式说明：{screenplay.script_format_note or '场次化台本稿'}
+场次结构：
+{chr(10).join(
+    f"场{scene.scene_no}｜{scene.scene_heading}｜功能：{scene.story_function}｜人物：{'、'.join(scene.characters)}｜摘要：{scene.summary}｜冲突：{scene.conflict or '（无）'}｜转折：{scene.turn or '（无）'}"
+    for scene in screenplay.scene_outline
+) if screenplay.scene_outline else '（未提供场次结构）'}
+
+完整剧本文本：
+{screenplay.full_script_text}
+
+人物状态变化：
+{chr(10).join(screenplay.character_state_changes) if screenplay.character_state_changes else '（无单列项）'}
+
+情绪曲线：
+{screenplay.emotional_curve}
+
+结尾钩子：
+{screenplay.ending_hook}
+
+原文依据：
+{screenplay.source_basis}
+
+辅助结构：
+- 开端：{screenplay.opening or '（未单列）'}
+- 发展：{screenplay.development or '（未单列）'}
+- 冲突：{screenplay.conflict or '（未单列）'}
+- 高潮：{screenplay.climax or '（未单列）'}
+- 改编方向：{screenplay.adaptation_direction or '（未单列）'}
+
+拆分原则：
+1. 按完整剧本的因果链拆成镜头卡，不能脱离正文另起炉灶。
+2. 每条 shot 都要推进剧情，且承接上一条的动作、情绪或信息状态。
+3. 你在写每一条 shot 时，都必须同时考虑整篇剧本的开头铺陈、中段升级、冲突/高潮和结尾钩子，保证单镜不只贴合局部句子，还要服务整集节奏。
+4. 每一镜都要明确它在“整集故事弧线”中的位置：它承接前一镜留下的什么状态，又把什么状态交给后一镜。
+5. 若某镜是情绪转折、信息揭示或关系变化的关键节点，前后镜必须在动作、人物表情、台词信息量上形成自然递进，不能像切开后的孤立卡片。
+6. scene_setting 只写时间+地点短标签，characters 只写实际出现在画面中的角色。
+7. 优先用台词+画面动作表达信息；旁白默认留空，仅在画面与台词都无法承载关键信息时写一句短旁白。
+8. 每条 shot 都必须能追溯到完整剧本与原文依据，不要空泛扩写。
+9. 第 1 镜要尽快进入本集 hook：{episode['hook']}
+10. 最后 1 镜必须落到本集尾钩：{episode['cliffhanger']}
+11. 不要把 shot 写成拍卡编号摘要；要写成真正可执行的分镜卡。
+
+{output_contract}
+
+{preflight_contract}
+
+本集改编源文本：
+{source_text}
+
+角色圣经：{bible.model_dump_json()}
+上一集结尾：{prev_ending or "（本集为第一集）"}
+
+输出 JSON Schema：
+{{"episode_no": {episode['episode_no']}, "shots": [{{"shot_no": int, "duration_s": int, "shot_size": "远景|全景|中景|近景|特写", "camera_move": "固定|推近|拉远|横摇|跟随", "scene_setting": "短时间+地点标签", "characters": ["画面中实际可见/在场且属于角色圣经的准确姓名"], "action_desc": str, "first_frame_desc": "本镜开始的静止画面，25~50字，只写看得见的人物姿态/表情/手部/道具/光效", "last_frame_desc": "本镜结束的静止画面，25~50字，与首帧【同机位同场景同构图】，仅人物动作推进后的状态（不要换镜头/景别/场景）", "source_excerpt": "对应本镜头的小说原文逐字摘录，至少 {SOURCE_EXCERPT_MIN_CHARS} 字", "narration": "选填，默认空字符串\\"\\"；如写则一句短旁白（≤{NARRATION_TARGET_CHARS} 字，仅在画面与台词都无法表达关键信息时才写）", "dialogues": [{{"speaker": "必须是本镜头 characters 中的角色名", "line": str, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定"}}], "transition": "{transition_options}", "continuity_from_prev": bool}}]}}"""
+    source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()[:16]
+    prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+    log_provider_call(
+        "storyboard_prompt", config.MODEL_TEXT, "PROMPT_READY", None, 0,
+        meta={
+            "episode_id": episode.get("id"),
+            "episode_no": episode.get("episode_no"),
+            "source_chapters": episode.get("source_chapters"),
+            "source_chars": len(source_text),
+            "prompt_chars": len(prompt),
+            "source_hash": source_hash,
+            "prompt_hash": prompt_hash,
+            "contract_version": "storyboard_full_script_v1",
+            "screenplay_mode": "full_script",
+            "fixed_video_duration_s": config.FIXED_VIDEO_DURATION_S,
+        })
+    board = await _run_with_repair(
+        "分镜脚本", prompt, Storyboard,
+        lambda b: validate_storyboard(b, bible, episode["target_duration_s"]),
+        temperature=0.7, max_tokens=16384, repair_user_prompt_limit=None, fallback_to_last=True)
+    residual = list(getattr(board, "residual_errors", []) or [])
+    script_residual = [f"剧本：{e}" for e in getattr(screenplay, "residual_errors", []) or []]
+    if residual or script_residual:
+        object.__setattr__(board, "residual_errors", script_residual + residual)
+    return board
+
+
 def _render_beat_table(chain: BeatChain) -> str:
     rows = []
     for b in chain.beats:
@@ -364,7 +560,7 @@ def _render_beat_table(chain: BeatChain) -> str:
     return "\n".join(rows)
 
 
-# ---------- C2. 单集分镜脚本（对拍展开） ----------
+# ---------- C2. 单集分镜脚本（基于完整剧本拆分） ----------
 
 def _storyboard_output_contract(episode: dict, bible: Bible, durations: list[int],
                                 speech_styles: str) -> str:
@@ -437,103 +633,14 @@ def _storyboard_preflight_contract(episode: dict) -> str:
 
 
 async def generate_storyboard(episode: dict, source_text: str, bible: Bible,
-                              prev_ending: str = "") -> Storyboard:
-    # 两段式：C1 先把剧情压成节拍链（戏剧骨架），C2 逐拍展开成 10s 视频段。
-    # 紧凑与连贯由 C1 保证（因果链+线性时间+反转覆盖），C2 只做"视觉翻译"，不再让模型平铺切原文。
-    chain = await generate_beat_chain(episode, source_text, bible)
-    beat_table = _render_beat_table(chain)
-    speech_styles = "；".join(f"{c.name}：{c.speech_style}" for c in bible.characters if c.speech_style)
-    durations = sorted(config.ALLOWED_DURATIONS)
-    output_contract = _storyboard_output_contract(episode, bible, durations, speech_styles)
-    preflight_contract = _storyboard_preflight_contract(episode)
-    transition_options = "|".join(sorted(TRANSITIONS))
-    prompt = f"""任务：为漫剧第 {episode['episode_no']} 集《{episode['title']}》编写分镜脚本——按下方节拍表逐拍展开，第 i 镜实现第 i 拍。
-
-本集节拍表（戏剧骨架，已通过结构校验，禁止增删拍、合并拍或调整顺序）：
-{beat_table}
-
-对拍展开规则（代码校验）：
-A. 第 i 镜必须完整实现第 i 拍：画面呈现"事件"，让观众看懂"局势变化"，镜头结尾落在"结尾钩子"上——下一镜从这个钩子直接继续。
-B. scene_setting 必须逐字使用节拍表给定的场景标签，不要自己改写时间地点。
-C. characters 必须包含该拍的全部在场角色（可按画面需要增补圣经内角色，不可遗漏）。
-D. 局势变化优先用【台词 + 可见画面动作/表情】表达，把本拍"局势变化(turn)+结尾钩子(carry)"靠人物说的话和做的事带出来。narration 旁白默认留空，只在画面与台词都无法传达关键信息时（较大时间跳跃、必要内心独白、隐藏因果）才写一句短旁白；禁止复述画面、禁止堆人物前史（前史只允许必要时一句话带过）。
-
-{output_contract}
-
-{preflight_contract}
-
-专名锁定（只在脑内执行，不要输出到 JSON）：
-- 角色圣经姓名只能逐字使用 {', '.join(c.name for c in bible.characters) or '（角色圣经为空）'}；原文中的地名、书名、软件名、屏幕/纸条文字、人名必须逐字照抄，不要猜新名字、改字、换同音字或把普通称谓升级成新角色。
-- 专名出现在纸条、屏幕、新闻或旁白里，不等于它就是本镜头 characters；characters 只放实际可见/在场的人。
-- 如果原文用"我/他/她"，必须结合角色圣经和上下文还原为准确角色名；还原不了就用动作主体的普通称谓，不要编姓名。
-
-创作要求：
-- 【叙事主力=台词+画面，少用旁白】能用人物台词说清、用画面动作/表情演清的，就不要写旁白。narration 默认留空，仅在万不得已（画面+台词都带不出的关键因果/时间跳跃/内心独白）时写一句短旁白，可不写就不写；预计全集只有 0~2 个镜头需要旁白。
-- 【代入感·关键】把原文里最有冲击力的【关键台词/对白】尽量写进 dialogues，保留原著原话与语感；让观众靠人物对话和画面就能入戏，而不是听旁白干讲剧情梗概。不要把一切抽象成“他很愤怒/局势升级”这类干巴巴的总结。
-- 台词要多、要密：凡是有两个及以上角色在场、或有对话/质问/告白/冲突的镜头，必须写出人物台词（dialogues），用口语化短句承担冲突与信息。全集台词整体偏少时优先补台词，而不是补旁白。
-- 特效/光效服从剧情：日常对话和一般场景克制写实，不要每个镜头都堆光效/能量/光环；只有情绪高潮或力量爆发的镜头才用强特效，且不得遮挡人物面部表情。
-- 动作要符合现实物理与人体常识：单镜只演一个连续动作，人物位置/姿态/道具连续变化，不要瞬移、穿模、道具凭空出现或消失；复杂手势改成简单稳定的动作。
-- 场景描述能忽略就忽略：只保留最短时间地点标签；不要让薄雾、灯光、街道、杂物成为镜头主角。每个视频段的主角必须是人物、人物动作、人物反应和故事线索；场景只能服务于人物正在做什么、发现什么、失去什么、决定什么。
-- 每个镜头输出前完成自检：shot_no 连续、duration_s 全部为 10、characters 非空且姓名准确、action_desc 出现准确角色名、source_excerpt 已从原文逐字摘录、scene_setting 足够短、narration 留空或一句短旁白（不超 {NARRATION_TARGET_CHARS} 字，多数镜头应留空）、首尾帧同机位同场景仅动作推进、action_desc 是一个连贯主动作（无切到/闪回/分屏等切镜词）、台词 speaker 在本镜头 characters 中且不能是旁白、与上一镜有动作/道具/情绪/信息承接。
-
-镜头连贯铁律（成片是否连贯取决于此，逐条遵守）：
-- 整集成片由各镜拼接而成，上下镜必须自然衔接：每镜的开头要承接上一镜的结尾状态（人物位置、动作、情绪、道具）；上下镜的因果优先靠台词与画面动作衔接，必要时才用一句短旁白补缝，避免观感上句不接下句。
-- 同一场景内，continuity_from_prev=true，动作必须严格承接：上一镜头 action_desc 的结束状态，就是本镜头动作的起始状态（如上一镜"拔剑指向黑影"，本镜应从持剑指向的姿态继续，而不是另起炉灶）。
-- 视频生成会为每个场景起始镜（含第1镜、换场镜）预生成首图+尾图；同场景连续镜只预生成尾图，并用上一镜尾图作为本镜首帧。
-- 下一镜不要重新介绍同一场景，不要把上一镜已经完成的发现/动作重新讲一遍；必须推进到"因此发生了什么"。
-- 如果必须跨时间或跨地点，transition 必须选择一个明确换场，禁止"硬切"；普通时空跳转用"淡出淡入"，情绪/回忆延续用"声音延续+叠化"，悬疑冲击用"闪黑/闪白"，动作追逐用"甩镜/遮挡转场"，构图呼应用"匹配剪辑"。continuity_from_prev=false，并在 narration 或 action_desc 写清"次日/几小时后/与此同时/他带着某线索来到某处"这类承接语；换场镜会使用自己的首图开启新场景。
-- 每个场景的第一个镜头（continuity_from_prev=false）优先用远景或全景交代环境，再切近。
-- 切换场景时 transition 表示"从上一镜进入本镜"的方式；同场景内一律"硬切"。换场前一镜的 last_frame_desc 要写出对应结尾视觉（渐暗、闪白、遮挡、甩镜模糊、叠化余韵等），换场镜的 first_frame_desc 要落到新时间/新地点的建立画面。
-- 角色不得凭空出现：某角色若在场景中段才登场，须在 action_desc 中写明入场方式（推门而入/从暗处走出）。
-
-本集改编源文本：
-{source_text}
-
-分镜改编依据：只以以上原文全文、hook、悬念钩、角色圣经和上一集结尾为准；episode.synopsis 仅用于前端展示，禁止作为分镜剧情依据。
-角色圣经：{bible.model_dump_json()}
-上一集结尾：{prev_ending or "（本集为第一集）"}
-
-输出 JSON Schema：
-{{"episode_no": {episode['episode_no']}, "shots": [{{"shot_no": int, "duration_s": int, "shot_size": "远景|全景|中景|近景|特写", "camera_move": "固定|推近|拉远|横摇|跟随", "scene_setting": "短时间+地点标签", "characters": ["画面中实际可见/在场且属于角色圣经的准确姓名"], "action_desc": str, "first_frame_desc": "本镜开始的静止画面，25~50字，只写看得见的人物姿态/表情/手部/道具/光效", "last_frame_desc": "本镜结束的静止画面，25~50字，与首帧【同机位同场景同构图】，仅人物动作推进后的状态（不要换镜头/景别/场景）", "source_excerpt": "对应本镜头的小说原文逐字摘录，至少 {SOURCE_EXCERPT_MIN_CHARS} 字", "narration": "选填，默认空字符串\\"\\"；如写则一句短旁白（≤{NARRATION_TARGET_CHARS} 字，仅在画面与台词都无法表达关键信息时才写）", "dialogues": [{{"speaker": "必须是本镜头 characters 中的角色名", "line": str, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定"}}], "transition": "{transition_options}", "continuity_from_prev": bool}}]}}"""
-    synopsis = (episode.get("synopsis") or "").strip()
-    source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()[:16]
-    prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
-    log_provider_call(
-        "storyboard_prompt", config.MODEL_TEXT, "PROMPT_READY", None, 0,
-        meta={
-            "episode_id": episode.get("id"),
-            "episode_no": episode.get("episode_no"),
-            "source_chapters": episode.get("source_chapters"),
-            "source_chars": len(source_text),
-            "prompt_chars": len(prompt),
-            "source_hash": source_hash,
-            "prompt_hash": prompt_hash,
-            "contract_version": "storyboard_beat_chain_v12_dialogue_first_physics",
-            "narration_required": False,
-            "narration_policy": "optional_rare",
-            "beat_count": len(chain.beats),
-            "fixed_video_duration_s": config.FIXED_VIDEO_DURATION_S,
-            "text_upper_bound_enforced": False,
-            "oral_target_range": list(ORAL_TARGET_RANGE),
-            "scene_setting_max_chars": SCENE_SETTING_MAX_CHARS,
-            "characters_required": True,
-            "dialogue_speaker_narrator_allowed": False,
-            "shot_to_shot_handoff_required": True,
-            "first_prompt_preflight_rules": True,
-            "source_exact_in_prompt": source_text in prompt,
-            "source_tail_in_prompt": source_text[-200:] in prompt if source_text else False,
-            "synopsis_content_in_prompt": bool(synopsis and synopsis in prompt),
-        })
-    board = await _run_with_repair(
-        "分镜脚本", prompt, Storyboard,
-        lambda b: validate_storyboard_against_beats(b, bible, episode["target_duration_s"], chain),
-        temperature=0.7, max_tokens=16384, repair_user_prompt_limit=None, fallback_to_last=True)
-    # 兜底残余问题（节拍链 + 分镜脚本）合并后挂在 board 上，由 _storyboard_task 透出到 UI
-    residual = [f"节拍链：{e}" for e in getattr(chain, "residual_errors", []) or []]
-    residual += list(getattr(board, "residual_errors", []) or [])
-    if residual:
-        object.__setattr__(board, "residual_errors", residual)
-    return board
+                              prev_ending: str = "",
+                              screenplay: EpisodeScreenplay | None = None) -> Storyboard:
+    # 三段式：分集 → 完整剧本 → 分镜。分镜必须建立在整篇剧本之上。
+    if screenplay is None:
+        screenplay = await generate_screenplay(episode, source_text, bible, prev_ending=prev_ending)
+    if not (screenplay.full_script_text or "").strip():
+        raise StageError("分镜脚本", ["旧版拍卡剧本已下线，请先重新生成完整剧本，再进入分镜台"])
+    return await _generate_storyboard_from_full_script(episode, source_text, bible, prev_ending, screenplay)
 
 
 def _score_or_none(value) -> float | None:

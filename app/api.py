@@ -14,9 +14,10 @@ from app import config, worker
 from app.compiler import compile_prompt, shot_cost_cny
 from app.db import get_conn, get_setting, new_id, now, rows_to_dicts, set_setting
 from app.ingest import ingest_novel
-from app.schemas import Bible, Shot, Storyboard, schema_errors
-from app.stages import StageError, generate_bible, generate_plan_batch, generate_storyboard, summarize_chapters_concurrent
-from app.validators import normalize_action_desc, validate_storyboard
+from app.schemas import Bible, EpisodeScreenplay, Shot, Storyboard, schema_errors
+from app.stages import (StageError, generate_bible, generate_plan_batch, generate_screenplay,
+                        generate_storyboard, summarize_chapters_concurrent)
+from app.validators import normalize_action_desc, normalize_continuity, validate_screenplay, validate_storyboard
 
 router = APIRouter(prefix="/api")
 
@@ -100,6 +101,89 @@ def _storyboard_target_for_source(target_duration_s: int | None, source_chars: i
     return target
 
 
+def _episode_source_text(conn, ep) -> str:
+    source_chapters = json.loads(ep["source_chapters"] or "[]")
+    if not source_chapters:
+        return ""
+    placeholders = ",".join("?" for _ in source_chapters)
+    chapters = rows_to_dicts(conn.execute(
+        f"SELECT * FROM chapters WHERE project_id=? AND idx IN ({placeholders}) ORDER BY idx",
+        (ep["project_id"], *source_chapters)).fetchall())
+    return "\n\n".join(f"【{ch['title']}】\n{ch['content']}" for ch in chapters)
+
+
+def _load_screenplay(ep) -> EpisodeScreenplay | None:
+    if not ep["screenplay_json"]:
+        return None
+    return EpisodeScreenplay.model_validate(json.loads(ep["screenplay_json"]))
+
+
+LEGACY_SCREENPLAY_PURGED_ERROR = "旧版拍卡剧本已下线，请重新生成完整剧本。"
+
+
+def _source_text_range_label(source_chapters: list[int]) -> str:
+    if not source_chapters:
+        return ""
+    if len(source_chapters) == 1:
+        return f"第 {source_chapters[0]} 章"
+    return f"第 {source_chapters[0]}-{source_chapters[-1]} 章"
+
+
+def _screenplay_mode(script: EpisodeScreenplay | None) -> str:
+    if not script:
+        return "none"
+    return "full_script" if (script.full_script_text or "").strip() else "none"
+
+
+def _prepare_screenplay_for_storage(ep, script: EpisodeScreenplay, *, keep_existing_id: str | None = None,
+                                    keep_created_at: float | None = None) -> EpisodeScreenplay:
+    source_chapters = json.loads(ep["source_chapters"] or "[]")
+    stamp = now()
+    script.mode = "full_script"
+    script.id = script.id or keep_existing_id or new_id("script")
+    script.title = (script.title or ep["title"] or "").strip()
+    script.source_text_range = (script.source_text_range or _source_text_range_label(source_chapters)).strip()
+    script.logline = (script.logline or ep["synopsis"] or "").strip()
+    script.ending_hook = (script.ending_hook or ep["cliffhanger"] or "").strip()
+    script.created_at = keep_created_at or script.created_at or stamp
+    script.updated_at = stamp
+    script.beats = []
+    return script
+
+
+def purge_legacy_screenplays() -> int:
+    conn = get_conn()
+    episodes = rows_to_dicts(conn.execute(
+        "SELECT id, screenplay_json, screenplay_status FROM episodes WHERE screenplay_json IS NOT NULL AND TRIM(screenplay_json) != ''"
+    ).fetchall())
+    purged = 0
+    for ep in episodes:
+        try:
+            script = EpisodeScreenplay.model_validate(json.loads(ep["screenplay_json"]))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        if (script.full_script_text or "").strip():
+            continue
+        worker.delete_episode_shots(ep["id"])
+        conn.execute(
+            "UPDATE episodes SET screenplay_json=NULL, screenplay_status='pending', screenplay_error=?, status='planned', script_error=NULL WHERE id=?",
+            (LEGACY_SCREENPLAY_PURGED_ERROR, ep["id"]),
+        )
+        purged += 1
+    conn.commit()
+    return purged
+
+
+def _screenplay_ready(ep) -> bool:
+    if not (ep["screenplay_json"] and ep["screenplay_status"] == "ready"):
+        return False
+    try:
+        script = EpisodeScreenplay.model_validate(json.loads(ep["screenplay_json"]))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return False
+    return bool((script.full_script_text or "").strip())
+
+
 # ---------- 项目与摄入 ----------
 
 @router.post("/projects")
@@ -163,6 +247,21 @@ def project_detail(project_id: str):
         "SELECT * FROM episodes WHERE project_id=? ORDER BY episode_no", (project_id,)).fetchall())
     for ep in p["episodes"]:
         ep["source_chapters"] = json.loads(ep["source_chapters"] or "[]")
+        if ep.get("screenplay_json"):
+            try:
+                script = EpisodeScreenplay.model_validate(json.loads(ep["screenplay_json"]))
+                ep["screenplay_beats"] = len(script.beats)
+                ep["screenplay_mode"] = _screenplay_mode(script)
+                ep["screenplay_title"] = script.title or ep["title"]
+            except (json.JSONDecodeError, TypeError, ValueError):
+                ep["screenplay_beats"] = 0
+                ep["screenplay_mode"] = "unknown"
+                ep["screenplay_title"] = ep["title"]
+        else:
+            ep["screenplay_beats"] = 0
+            ep["screenplay_mode"] = "none"
+            ep["screenplay_title"] = ep["title"]
+        ep.pop("screenplay_json", None)
         ep["cost_cny"] = worker.episode_cost(ep["id"])
     return p
 
@@ -457,6 +556,162 @@ async def start_plan(project_id: str):
     return {"status": "running"}
 
 
+# ---------- 可拍剧本（分集之后、分镜之前） ----------
+
+_screenplay_tasks: dict[str, asyncio.Task] = {}
+
+
+def _screenplay_task_active(episode_id: str) -> bool:
+    task = _screenplay_tasks.get(episode_id)
+    return bool(task and not task.done())
+
+
+async def _screenplay_task(episode_id: str):
+    conn = get_conn()
+    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    try:
+        ep_data = dict(ep)
+        p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
+        bible = Bible.model_validate(json.loads(p["bible_json"]))
+        source_text = _episode_source_text(conn, ep)
+        compact_target = _storyboard_target_for_source(ep_data.get("target_duration_s"), len(source_text))
+        if compact_target != ep_data.get("target_duration_s"):
+            conn.execute("UPDATE episodes SET target_duration_s=? WHERE id=?", (compact_target, episode_id))
+            conn.commit()
+            ep_data["target_duration_s"] = compact_target
+        prev = conn.execute(
+            "SELECT cliffhanger FROM episodes WHERE project_id=? AND episode_no=?",
+            (ep["project_id"], ep["episode_no"] - 1)).fetchone()
+        script = await generate_screenplay(ep_data, source_text, bible,
+                                           prev_ending=prev["cliffhanger"] if prev else "")
+        old_script = _load_screenplay(ep)
+        script = _prepare_screenplay_for_storage(
+            ep, script,
+            keep_existing_id=(old_script.id if old_script else None),
+            keep_created_at=(old_script.created_at if old_script else None),
+        )
+        # 新剧本会让旧分镜/视频失效；保存前清空下游，确保后续必须重新展开。
+        worker.delete_episode_shots(episode_id)
+        residual = list(getattr(script, "residual_errors", []) or [])
+        note = None
+        if residual:
+            note = "已采用最后一次输出（修复次数用完，以下剧本问题未完全修复，可手动修改或重生）：" + "；".join(residual)
+        conn.execute(
+            "UPDATE episodes SET screenplay_json=?, screenplay_status='ready', screenplay_error=?, status='planned', script_error=NULL WHERE id=?",
+            (script.model_dump_json(), (note or "")[:800] or None, episode_id))
+        conn.commit()
+    except asyncio.CancelledError:
+        conn.execute(
+            "UPDATE episodes SET screenplay_status='failed', screenplay_error=? WHERE id=?",
+            ("剧本生成已取消，可重新发起。", episode_id))
+        conn.commit()
+        raise
+    except (StageError, Exception) as exc:  # noqa: BLE001
+        conn.execute(
+            "UPDATE episodes SET screenplay_status='failed', screenplay_error=? WHERE id=?",
+            (str(exc)[:800], episode_id))
+        conn.commit()
+
+
+@router.post("/episodes/{episode_id}/screenplay")
+async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
+    ep = _episode_or_404(episode_id)
+    if ep["status"] == "scripting":
+        raise HTTPException(409, "分镜正在生成中，不能同时重写剧本")
+    if ep["screenplay_status"] == "running" and _screenplay_task_active(episode_id):
+        raise HTTPException(409, "剧本正在生成中")
+    force = bool((body or {}).get("force"))
+    conn = get_conn()
+    has_shots = conn.execute("SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)).fetchone()["c"] > 0
+    if has_shots and not force:
+        raise HTTPException(409, "重新生成剧本会清空本集现有分镜、关键帧、视频和成片，请确认后重试")
+    conn.execute("UPDATE episodes SET screenplay_status='running', screenplay_error=NULL WHERE id=?", (episode_id,))
+    conn.commit()
+    task = asyncio.create_task(_screenplay_task(episode_id))
+    _screenplay_tasks[episode_id] = task
+    task.add_done_callback(lambda t, eid=episode_id: _screenplay_tasks.pop(eid, None))
+    return {"status": "running"}
+
+
+async def _screenplay_guarded(episode_id: str, sem: asyncio.Semaphore):
+    async with sem:
+        await _screenplay_task(episode_id)
+
+
+@router.post("/projects/{project_id}/screenplay-all")
+async def start_screenplay_all(project_id: str):
+    _project_or_404(project_id)
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id, screenplay_status, screenplay_json FROM episodes WHERE project_id=? ORDER BY episode_no",
+        (project_id,)).fetchall()
+    ids = [
+        r["id"] for r in rows
+        if not r["screenplay_json"]
+        or r["screenplay_status"] in ("pending", "failed")
+        or (r["screenplay_status"] == "running" and r["id"] not in _screenplay_tasks)
+    ]
+    if not ids:
+        raise HTTPException(409, "没有待生成剧本的剧集")
+    placeholders = ",".join("?" for _ in ids)
+    conn.execute(f"UPDATE episodes SET screenplay_status='running', screenplay_error=NULL WHERE id IN ({placeholders})", ids)
+    conn.commit()
+    sem = asyncio.Semaphore(max(int(get_setting("storyboard_concurrency") or 2), 1))
+    for eid in ids:
+        task = asyncio.create_task(_screenplay_guarded(eid, sem))
+        _screenplay_tasks[eid] = task
+        task.add_done_callback(lambda t, e=eid: _screenplay_tasks.pop(e, None))
+    return {"started": len(ids)}
+
+
+@router.post("/episodes/{episode_id}/screenplay/cancel")
+def cancel_screenplay(episode_id: str):
+    ep = _episode_or_404(episode_id)
+    if ep["screenplay_status"] != "running":
+        raise HTTPException(409, "当前没有正在进行的剧本生成")
+    task = _screenplay_tasks.pop(episode_id, None)
+    if task and not task.done():
+        task.cancel()
+    conn = get_conn()
+    fallback = "ready" if ep["screenplay_json"] else "pending"
+    conn.execute("UPDATE episodes SET screenplay_status=?, screenplay_error=NULL WHERE id=?", (fallback, episode_id))
+    conn.commit()
+    return {"status": fallback}
+
+
+@router.put("/episodes/{episode_id}/screenplay")
+def edit_screenplay(episode_id: str, body: dict):
+    ep = _episode_or_404(episode_id)
+    payload = body.get("screenplay", body)
+    force = bool(body.get("force"))
+    instance, errors = schema_errors(EpisodeScreenplay, payload)
+    if errors:
+        raise HTTPException(422, "；".join(errors))
+    conn = get_conn()
+    p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
+    bible = Bible.model_validate(json.loads(p["bible_json"]))
+    expected = max(1, int(ep["target_duration_s"]) // config.FIXED_VIDEO_DURATION_S)
+    errors = validate_screenplay(instance, bible, expected, episode_no=ep["episode_no"])
+    if errors:
+        raise HTTPException(422, "；".join(errors))
+    old_script = _load_screenplay(ep)
+    instance = _prepare_screenplay_for_storage(
+        ep, instance,
+        keep_existing_id=(old_script.id if old_script else None),
+        keep_created_at=(old_script.created_at if old_script else None),
+    )
+    has_shots = conn.execute("SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)).fetchone()["c"] > 0
+    if has_shots and not force:
+        raise HTTPException(409, "修改剧本会清空本集现有分镜、关键帧、视频和成片，请确认后重试")
+    if has_shots:
+        worker.delete_episode_shots(episode_id)
+    conn.execute(
+        "UPDATE episodes SET screenplay_json=?, screenplay_status='ready', screenplay_error=NULL, status='planned', script_error=NULL WHERE id=?",
+        (instance.model_dump_json(), episode_id))
+    conn.commit()
+    return {"saved": True, "beats": len(instance.beats), "downstream_cleared": has_shots}
+
+
 # ---------- 分镜脚本 ----------
 
 # 正在进行的分镜生成任务，按 episode_id 跟踪，便于手动取消
@@ -468,14 +723,12 @@ async def _storyboard_task(episode_id: str):
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     try:
         ep_data = dict(ep)
+        screenplay = _load_screenplay(ep)
+        if screenplay is None or ep["screenplay_status"] != "ready":
+            raise StageError("分镜脚本", ["请先生成并确认本集可拍剧本，再展开分镜"])
         p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
         bible = Bible.model_validate(json.loads(p["bible_json"]))
-        source_chapters = json.loads(ep["source_chapters"] or "[]")
-        placeholders = ",".join("?" for _ in source_chapters)
-        chapters = rows_to_dicts(conn.execute(
-            f"SELECT * FROM chapters WHERE project_id=? AND idx IN ({placeholders}) ORDER BY idx",
-            (ep["project_id"], *source_chapters)).fetchall())
-        source_text = "\n\n".join(f"【{ch['title']}】\n{ch['content']}" for ch in chapters)
+        source_text = _episode_source_text(conn, ep)
         compact_target = _storyboard_target_for_source(ep_data.get("target_duration_s"), len(source_text))
         if compact_target != ep_data.get("target_duration_s"):
             conn.execute("UPDATE episodes SET target_duration_s=? WHERE id=?", (compact_target, episode_id))
@@ -485,14 +738,19 @@ async def _storyboard_task(episode_id: str):
             "SELECT cliffhanger FROM episodes WHERE project_id=? AND episode_no=?",
             (ep["project_id"], ep["episode_no"] - 1)).fetchone()
         board = await generate_storyboard(ep_data, source_text, bible,
-                                          prev_ending=prev["cliffhanger"] if prev else "")
-        conn.execute("DELETE FROM shots WHERE episode_id=?", (episode_id,))
+                                          prev_ending=prev["cliffhanger"] if prev else "",
+                                          screenplay=screenplay)
+        worker.delete_episode_shots(episode_id)
+        # 连贯字段确定性归一（PROMPT_SPEC §C2 的"由代码从场景标签推导覆盖"机制）：
+        # 同场景=接上镜+硬切、换场=明确换场转场、首镜=false。即便修复轮次耗尽以最后一次输出兜底，
+        # 也保证落库的 continuity/transition 与场景标签自洽，不把断链/错转场直接做成视频。
+        normalize_continuity(board)
         for s in board.shots:
             s.action_desc = normalize_action_desc(s.action_desc)
             conn.execute(
-                "INSERT INTO shots(id, episode_id, shot_no, duration_s, shot_size, camera_move, scene_setting, characters, action_desc, first_frame_desc, last_frame_desc, source_excerpt, narration, dialogues, transition, continuity_from_prev) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (new_id("shot"), episode_id, s.shot_no, s.duration_s, s.shot_size, s.camera_move,
+                "INSERT INTO shots(id, episode_id, script_id, shot_no, duration_s, shot_size, camera_move, scene_setting, characters, action_desc, first_frame_desc, last_frame_desc, source_excerpt, narration, dialogues, transition, continuity_from_prev) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (new_id("shot"), episode_id, screenplay.id, s.shot_no, s.duration_s, s.shot_size, s.camera_move,
                  s.scene_setting, json.dumps(s.characters, ensure_ascii=False), s.action_desc,
                  s.first_frame_desc, s.last_frame_desc, s.source_excerpt, s.narration,
                  json.dumps([d.model_dump() for d in s.dialogues], ensure_ascii=False),
@@ -517,6 +775,8 @@ async def start_storyboard(episode_id: str):
     ep = _episode_or_404(episode_id)
     if ep["status"] == "scripting":
         raise HTTPException(409, "分镜正在生成中")
+    if not _screenplay_ready(ep):
+        raise HTTPException(409, "请先在剧本台生成本集可拍剧本")
     conn = get_conn()
     conn.execute("UPDATE episodes SET status='scripting', script_error=NULL WHERE id=?", (episode_id,))
     conn.commit()
@@ -541,12 +801,16 @@ async def start_storyboard_all(project_id: str):
     _project_or_404(project_id)
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id, status FROM episodes WHERE project_id=? AND status IN ('planned','scripting') ORDER BY episode_no",
+        "SELECT id, status, screenplay_status, screenplay_json FROM episodes WHERE project_id=? AND status IN ('planned','scripting','script_failed') ORDER BY episode_no",
         (project_id,)).fetchall()
     # 待分镜的；以及卡在“分镜中”却没有在跑任务的孤儿（需重新触发）
-    ids = [r["id"] for r in rows if r["status"] == "planned" or r["id"] not in _storyboard_tasks]
+    ids = [
+        r["id"] for r in rows
+        if r["screenplay_status"] == "ready" and r["screenplay_json"]
+        and (r["status"] in ("planned", "script_failed") or r["id"] not in _storyboard_tasks)
+    ]
     if not ids:
-        raise HTTPException(409, "没有待分镜的剧集（仅对“待分镜”或卡住的“分镜中”集生效）")
+        raise HTTPException(409, "没有可展开分镜的剧集（需先生成剧本，且状态为待分镜/分镜失败/卡住的分镜中）")
     placeholders = ",".join("?" for _ in ids)
     conn.execute(f"UPDATE episodes SET status='scripting', script_error=NULL WHERE id IN ({placeholders})", ids)
     conn.commit()
@@ -583,6 +847,10 @@ def episode_detail(episode_id: str):
     ep = dict(_episode_or_404(episode_id))
     conn = get_conn()
     ep["source_chapters"] = json.loads(ep["source_chapters"] or "[]")
+    script = _load_screenplay(ep)
+    ep["screenplay"] = script.model_dump() if script else None
+    ep["screenplay_mode"] = _screenplay_mode(script)
+    ep.pop("screenplay_json", None)
     ep["cost_cny"] = worker.episode_cost(episode_id)
     ep["cost_limit_cny"] = float(get_setting("episode_cost_limit_cny") or 100)
     shots = rows_to_dicts(conn.execute(
@@ -605,20 +873,22 @@ def episode_detail(episode_id: str):
         if s["continuity_from_prev"] and s["adopted_version_id"]:
             av = conn.execute("SELECT image_inputs FROM shot_versions WHERE id=?", (s["adopted_version_id"],)).fetchone()
             meta = json.loads((av["image_inputs"] if av else None) or "{}")
-            pred = shots_by_no.get(s["shot_no"] - 1)
-            expected_first = pred.get("approved_tail_scene_id") if pred else None
-            expected_last = s.get("approved_tail_scene_id")
-            if (expected_first and meta.get("first_frame_scene_id") != expected_first) or (
-                    expected_last and meta.get("last_frame_scene_id") != expected_last):
-                s["video_stale"] = True
+            if meta.get("mode") != "REFERENCE_IMAGE_MODE":
+                pred = shots_by_no.get(s["shot_no"] - 1)
+                expected_first = pred.get("approved_tail_scene_id") if pred else None
+                expected_last = s.get("approved_tail_scene_id")
+                if (expected_first and meta.get("first_frame_scene_id") != expected_first) or (
+                        expected_last and meta.get("last_frame_scene_id") != expected_last):
+                    s["video_stale"] = True
         elif s["adopted_version_id"]:
             av = conn.execute("SELECT image_inputs FROM shot_versions WHERE id=?", (s["adopted_version_id"],)).fetchone()
             meta = json.loads((av["image_inputs"] if av else None) or "{}")
-            expected_first = s.get("approved_head_scene_id")
-            expected_last = s.get("approved_tail_scene_id")
-            if (expected_first and meta.get("first_frame_scene_id") != expected_first) or (
-                    expected_last and meta.get("last_frame_scene_id") != expected_last):
-                s["video_stale"] = True
+            if meta.get("mode") != "REFERENCE_IMAGE_MODE":
+                expected_first = s.get("approved_head_scene_id")
+                expected_last = s.get("approved_tail_scene_id")
+                if (expected_first and meta.get("first_frame_scene_id") != expected_first) or (
+                        expected_last and meta.get("last_frame_scene_id") != expected_last):
+                    s["video_stale"] = True
         # 场景关键帧候选（图像评审阶段）
         scenes = rows_to_dicts(conn.execute(
             "SELECT id, version_no, kind, image_path, status, error, qa_json FROM shot_scenes WHERE shot_id=? ORDER BY kind, version_no DESC",
@@ -637,12 +907,28 @@ def episode_detail(episode_id: str):
             v["qa"] = json.loads(v["qa_json"]) if v["qa_json"] else None
             v.pop("qa_json", None)
             meta = json.loads(v.get("image_inputs") or "{}")
+            refs = []
+            for ref in meta.get("reference_images") or []:
+                item = dict(ref)
+                if item.get("path"):
+                    try:
+                        item["image_url"] = f"/media/{Path(item['path']).relative_to(PROJECTS_DIR).as_posix()}"
+                    except ValueError:
+                        item["image_url"] = None
+                refs.append(item)
             v["image_inputs"] = {"first_frame_used": bool(meta.get("first_frame_used")),
                                  "first_frame_src": meta.get("first_frame_src"),
                                  "first_frame_scene_id": meta.get("first_frame_scene_id"),
                                  "last_frame_used": bool(meta.get("last_frame_used")),
                                  "last_frame_src": meta.get("last_frame_src"),
-                                 "last_frame_scene_id": meta.get("last_frame_scene_id")}
+                                 "last_frame_scene_id": meta.get("last_frame_scene_id"),
+                                 "mode": meta.get("mode"),
+                                 "mode_decision": meta.get("mode_decision"),
+                                 "reference_image_used": bool(meta.get("reference_image_used")),
+                                 "reference_images": refs,
+                                 "reference_failure_logs": meta.get("reference_failure_logs") or [],
+                                 "fallback_reason": meta.get("fallback_reason"),
+                                 "retry_reason": meta.get("retry_reason")}
             if v["video_path"]:
                 rel_path = Path(v["video_path"]).relative_to(PROJECTS_DIR).as_posix()
                 v["video_url"] = f"/media/{rel_path}"
@@ -707,6 +993,15 @@ def confirm_episode_core(episode_id: str) -> dict:
         narration=r["narration"], dialogues=json.loads(r["dialogues"] or "[]"),
         transition=r["transition"] or "硬切", continuity_from_prev=bool(r["continuity_from_prev"])) for r in shots_rows]
     board = Storyboard(episode_no=ep["episode_no"], shots=shots)
+    # 确认门同样跑确定性连贯归一，并把修正后的 continuity/transition 写回库，
+    # 保证人工编辑过的分镜在进入生成前也满足"同场景接上镜/换场明确转场"的铁律。
+    before = [(s.continuity_from_prev, s.transition) for s in shots]
+    normalize_continuity(board)
+    for r, s, (old_cont, old_trans) in zip(shots_rows, shots, before):
+        if old_cont != s.continuity_from_prev or old_trans != s.transition:
+            conn.execute("UPDATE shots SET continuity_from_prev=?, transition=? WHERE id=?",
+                         (int(s.continuity_from_prev), s.transition, r["id"]))
+    conn.commit()
     errors = validate_storyboard(board, bible, compact_target)
     if errors:
         raise ValueError(json.dumps(errors, ensure_ascii=False))
@@ -845,6 +1140,7 @@ def generate_episode(episode_id: str, body: dict | None = None):
         "SELECT id, shot_no, continuity_from_prev FROM shots WHERE episode_id=? ORDER BY shot_no",
         (episode_id,)).fetchall())
     from_no = (body or {}).get("from_shot_no")
+    mode_override = (body or {}).get("mode_override")
     if from_no:
         selected = []
         for i, s in enumerate(shots):
@@ -872,7 +1168,7 @@ def generate_episode(episode_id: str, body: dict | None = None):
             pr = _shot_by_no(episode_id, s["shot_no"] - 1)
             after = pr["id"] if pr else None
         try:
-            r = worker.enqueue_shot(s["id"], after_shot_id=after)
+            r = worker.enqueue_shot(s["id"], after_shot_id=after, mode_override=mode_override)
             # 幂等命中（已有相同成片）：上面清空了采用版，这里把复用版重新采用回去
             if r.get("reused") and r.get("version_id"):
                 conn.execute("UPDATE shots SET adopted_version_id=? WHERE id=?", (r["version_id"], s["id"]))
@@ -915,7 +1211,8 @@ async def generate_shot(shot_id: str, body: dict | None = None):
             prompt_override=body.get("prompt_override"),
             extra_negative=body.get("extra_negative"),
             reroll=bool(body.get("reroll")) or bool(body.get("with_critique")),
-            critique=critique, after_shot_id=after)
+            critique=critique, after_shot_id=after,
+            mode_override=body.get("mode_override"))
     except ValueError as exc:
         raise HTTPException(409, str(exc))
 

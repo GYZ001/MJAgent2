@@ -18,6 +18,18 @@ import httpx
 from app import config
 from app.db import get_setting, log_provider_call
 
+BAILIAN_TEXT_FREE_MODELS = (
+    "qwen3.7-max-2026-06-08",
+    "qwen3.7-max-2026-05-20",
+    "qwen3.7-max-2026-05-17",
+    "qwen3.7-max-preview",
+    "qwen3.7-plus-2026-05-26",
+)
+BAILIAN_TEXT_BASE_MODELS = ("qwen3.7-max", "qwen3.7-plus")
+BAILIAN_VLM_FREE_MODELS = ("qwen3.7-plus-2026-05-26",)
+BAILIAN_VLM_BASE_MODELS = ("qwen3.7-plus",)
+_BAILIAN_FAILED_MODELS: dict[str, set[str]] = {"text": set(), "vlm": set()}
+
 
 class ProviderError(Exception):
     """对外调用失败。message 面向 UI，包含分类结论 + 原始报文摘要。"""
@@ -111,6 +123,39 @@ def active_model(kind: str, provider: str | None = None) -> str:
     return ""
 
 
+def _dedupe_models(models: list[str] | tuple[str, ...]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for model in models:
+        model = (model or "").strip()
+        if model and model not in seen:
+            seen.add(model)
+            ordered.append(model)
+    return ordered
+
+
+def _bailian_model_groups(kind: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    if kind == "vlm":
+        return BAILIAN_VLM_FREE_MODELS, BAILIAN_VLM_BASE_MODELS
+    return BAILIAN_TEXT_FREE_MODELS, BAILIAN_TEXT_BASE_MODELS
+
+
+def _remember_bailian_failure(kind: str, model: str) -> None:
+    _, base_models = _bailian_model_groups(kind)
+    if model.startswith("qwen3.7") and model not in base_models:
+        _BAILIAN_FAILED_MODELS.setdefault(kind, set()).add(model)
+
+
+def _bailian_fallback_models(kind: str, preferred: str) -> list[str]:
+    preferred = (preferred or "").strip()
+    free_models, base_models = _bailian_model_groups(kind)
+    if preferred and not preferred.startswith("qwen3.7"):
+        return [preferred]
+    candidates = _dedupe_models([preferred, *free_models, *base_models])
+    failed = _BAILIAN_FAILED_MODELS.setdefault(kind, set())
+    return [model for model in candidates if model not in failed or model in base_models]
+
+
 def _use_openrouter(kind: str = "text") -> bool:
     return active_provider(kind) == "openrouter" and bool(config.OPENROUTER_API_KEY)
 
@@ -160,6 +205,31 @@ async def _post_json(client: httpx.AsyncClient, url: str, payload: dict, *,
     raise last_err
 
 
+async def _post_bailian_chat_with_fallback(client: httpx.AsyncClient, payload: dict, *,
+                                           fallback_kind: str, log_kind: str,
+                                           preferred_model: str) -> tuple[dict, str]:
+    url = f"{config.BAILIAN_BASE_URL}/chat/completions"
+    headers = _bailian_headers()
+    models = _bailian_fallback_models(fallback_kind, preferred_model)
+    errors: list[str] = []
+    last_err: ProviderError | None = None
+    for candidate in models:
+        attempt_payload = {**payload, "model": candidate}
+        try:
+            data = await _post_json(client, url, attempt_payload, kind=log_kind, model=candidate,
+                                    headers=headers, key_name="BAILIAN_API_KEY")
+            return data, candidate
+        except ProviderError as exc:
+            _remember_bailian_failure(fallback_kind, candidate)
+            last_err = exc
+            errors.append(f"{candidate}: {exc}")
+    detail = "；".join(errors)[:500]
+    if last_err is None:
+        raise ProviderError("百炼模型候选列表为空，请检查模型配置")
+    raise ProviderError(f"百炼 {fallback_kind} 模型全部请求失败，已按降级序列尝试：{detail}",
+                        retryable=last_err.retryable, raw=last_err.raw)
+
+
 async def chat(messages: list[dict], *, model: str | None = None, temperature: float = 0.7,
                max_tokens: int = 8192) -> str:
     """文本 LLM 对话，返回 message.content（推理模型的 reasoning 一律丢弃）。
@@ -183,11 +253,10 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
         content = _chat_content(data, label="chat")
     elif provider == "bailian":
         bailian_model = active_model("text", "bailian")
-        payload = {"model": bailian_model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
+        payload = {"messages": messages, "temperature": temperature, "max_tokens": max_tokens}
         async with httpx.AsyncClient(timeout=timeout) as client:
-            data = await _post_json(client, f"{config.BAILIAN_BASE_URL}/chat/completions", payload,
-                                    kind="chat", model=bailian_model,
-                                    headers=_bailian_headers(), key_name="BAILIAN_API_KEY")
+            data, _ = await _post_bailian_chat_with_fallback(
+                client, payload, fallback_kind="text", log_kind="chat", preferred_model=bailian_model)
         content = _chat_content(data, label="chat")
     else:
         model = model or active_model("text", "hiagent")
@@ -292,8 +361,6 @@ async def vlm_check(frames_b64: list[str], expectation_text: str) -> str:
         headers, key_name = _openrouter_headers(), "OPENROUTER_API_KEY"
     elif provider == "bailian":
         model = active_model("vlm", "bailian")
-        url = f"{config.BAILIAN_BASE_URL}/chat/completions"
-        headers, key_name = _bailian_headers(), "BAILIAN_API_KEY"
     else:
         model = active_model("vlm", "hiagent")
         url = f"{config.HIAGENT_BASE_URL}/chat/completions"
@@ -303,8 +370,14 @@ async def vlm_check(frames_b64: list[str], expectation_text: str) -> str:
         payload["response_format"] = {"type": "json_object"}
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
-            data = await _post_json(client, url, payload, kind="vlm_qa", model=model,
-                                    headers=headers, key_name=key_name)
+            if provider == "bailian":
+                bailian_payload = {"messages": messages, "temperature": 0, "max_tokens": 2048}
+                data, _ = await _post_bailian_chat_with_fallback(
+                    client, bailian_payload, fallback_kind="vlm", log_kind="vlm_qa",
+                    preferred_model=model)
+            else:
+                data = await _post_json(client, url, payload, kind="vlm_qa", model=model,
+                                        headers=headers, key_name=key_name)
         except ProviderError as exc:
             raw = (exc.raw or str(exc)).lower()
             if provider == "openrouter" and "response_format" in payload and (
