@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import EpisodeCrumb from '../components/EpisodeCrumb'
-import { useEpisode } from '../App'
+import { useEpisode, useNav } from '../App'
 import { api, type Shot, type ShotVersion } from '../api'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 
@@ -95,8 +95,8 @@ function ImageGallery({ shot, onOpen }: { shot: Shot; onOpen: (src: string, labe
    WallPage
    ═══════════════════════════════════════════════════════════════ */
 export default function WallPage() {
-  const [episodeId, setEpisodeId] = useState<string | null>(null)
-  const { data: ep, refresh, err } = useEpisode(episodeId, 5000)
+  const { episodeId } = useNav()
+  const { data: ep, refresh, error } = useEpisode(episodeId || '', 5000)
   const shots = ep?.shots ?? []
   const [idx, setIdx] = useState(0)
   const [toast, setToast] = useState<string | null>(null)
@@ -122,8 +122,12 @@ export default function WallPage() {
   const keyframeTimer = useTaskTimer(`episode.${episodeId}.keyframes`, keyframeActive)
   const videoTimer = useTaskTimer(`episode.${episodeId}.videos`, videoActive)
 
+  const openLightbox = useCallback((src: string, label?: string) => {
+    setLightbox({ src, label })
+  }, [])
+
   if (!ep) return <div className="empty">展卷中……</div>
-  if (err) return <div className="empty">{err}</div>
+  if (error) return <div className="empty">{error}</div>
 
   const shot = shots[idx]
   const keyframeReady = shots.filter(s => s.scene_status === 'approved' || s.scenes.some(sc => sc.status === 'succeeded')).length
@@ -158,10 +162,6 @@ export default function WallPage() {
     } catch (e: unknown) { setToast(e instanceof Error ? e.message : String(e)) }
     finally { setGenMask(m => { const n = new Set(m); n.delete(shotId); return n }) }
   }
-
-  const openLightbox = useCallback((src: string, label?: string) => {
-    setLightbox({ src, label })
-  }, [])
 
   return (
     <main className="desk wall-page">

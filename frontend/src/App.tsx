@@ -139,6 +139,7 @@ export function usePoll<T>(fetcher: () => Promise<T>, intervalMs: number, deps: 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps)
   useEffect(() => {
+    if (deps.some(d => d == null)) return
     refresh()
     if (!intervalMs) return
     const t = window.setInterval(refresh, intervalMs)

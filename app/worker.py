@@ -499,6 +499,134 @@ async def _run_scene_job(job) -> None:
         _set_job(job["id"], "failed", f"关键帧生成失败：{exc}")
 
 
+async def _ensure_keyframes_for_fallback(conn, shot_row) -> tuple[bool, str]:
+    """当 reference image mode 失败需 fallback 到首尾帧模式时，确保关键帧已就绪。
+
+    处理三种情况：
+    1. 关键帧已存在且已过审 → 直接返回成功
+    2. 关键帧正在生成中 (scene_status='generating') → 等待完成
+    3. 关键帧不存在 → 触发补生成并等待
+
+    Returns:
+        (success: bool, message: str) — success 表示关键帧是否可用。
+    """
+    from app.refs import refs_as_image_inputs
+    from app.schemas import Bible
+
+    shot_id = _row_value(shot_row, "id")
+    required = required_keyframe_kinds(shot_row)
+    all_approved = all(_approved_keyframe(conn, shot_row, kind) for kind in required)
+    if all_approved:
+        return True, "所有 fallback 关键帧已存在且已通过评审"
+
+    scene_status = _row_value(shot_row, "scene_status", "")
+
+    # 情况2：关键帧正在生成中 — 轮询等待
+    if scene_status == "generating":
+        log_provider_call(
+            "keyframe_fallback_wait", config.MODEL_TEXT, "KEYFRAME_GENERATING",
+            None, 0, meta={"shot_id": shot_id, "scene_status": scene_status})
+
+        max_wait = 300  # 5 分钟超时
+        waited = 0
+        while waited < max_wait:
+            await asyncio.sleep(3)
+            waited += 3
+            refreshed = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
+            status = _row_value(refreshed, "scene_status", "")
+            if status in ("approved", "review", "failed"):
+                break
+
+        if waited >= max_wait:
+            return False, f"等待关键帧生成超时（已等待 {max_wait}s）"
+
+        refreshed = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
+        all_approved = all(_approved_keyframe(conn, refreshed, kind) for kind in required)
+        if all_approved:
+            return True, "关键帧生成完成，全部通过评审（等待后确认）"
+        return False, f"关键帧生成完毕但未全部通过评审（scene_status={_row_value(refreshed, 'scene_status', '')}）"
+
+    # 情况3：关键帧不存在 — 只补生成【缺失】的关键帧，不重新生成已通过评审的
+    missing_kinds = [k for k in required if not _approved_keyframe(conn, shot_row, k)]
+    log_provider_call(
+        "keyframe_fallback_generate", config.MODEL_TEXT, "KEYFRAME_TRIGGERED",
+        None, 0, meta={
+            "shot_id": shot_id, "scene_status": scene_status,
+            "required_kinds": required,
+            "missing_kinds": missing_kinds,
+            "already_approved": [k for k in required if k not in missing_kinds],
+        })
+
+    if not missing_kinds:
+        # 理论上不会到这里（上面 all_approved 已检查），但做防御性保护
+        return True, "所有关键帧均已存在（防御性检查）"
+
+    # 检查是否已有排队的场景生成任务
+    pending_job = conn.execute(
+        """SELECT id FROM jobs WHERE shot_id=? AND kind='scene'
+           AND status IN ('queued', 'running') LIMIT 1""",
+        (shot_id,),
+    ).fetchone()
+
+    if not pending_job:
+        ep = conn.execute(
+            "SELECT * FROM episodes WHERE id=?",
+            (_row_value(shot_row, "episode_id"),),
+        ).fetchone()
+        project = conn.execute(
+            "SELECT * FROM projects WHERE id=?",
+            (ep["project_id"],),
+        ).fetchone()
+        virtual_job = {
+            "id": new_id("job_fallback"),
+            "shot_id": shot_id,
+            "episode_id": ep["id"],
+            "project_id": project["id"],
+            "scene_kinds": json.dumps(missing_kinds),
+        }
+        conn.execute(
+            """INSERT INTO jobs(id, kind, shot_id, episode_id, project_id,
+               status, created_at, updated_at, scene_kinds)
+               VALUES(?, 'scene', ?, ?, ?, 'running', ?, ?, ?)""",
+            (virtual_job["id"], shot_id, ep["id"], project["id"],
+             now(), now(), json.dumps(missing_kinds)))
+        conn.execute("UPDATE shots SET scene_status='generating' WHERE id=?", (shot_id,))
+        conn.commit()
+
+        try:
+            await _run_scene_job(virtual_job)
+        except Exception as exc:
+            return False, f"补生成关键帧执行异常：{exc}"
+    else:
+        # 已有排队任务，等待其完成
+        log_provider_call(
+            "keyframe_fallback_existing_job", config.MODEL_TEXT, "JOB_EXISTS",
+            None, 0, meta={"shot_id": shot_id, "existing_job_id": pending_job["id"]})
+        max_wait = 300
+        waited = 0
+        while waited < max_wait:
+            await asyncio.sleep(3)
+            waited += 3
+            refreshed = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
+            status = _row_value(refreshed, "scene_status", "")
+            if status in ("approved", "review", "failed"):
+                break
+        if waited >= max_wait:
+            return False, f"等待已有关键帧任务完成超时（已等待 {max_wait}s）"
+
+    # 最终确认关键帧状态
+    refreshed = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
+    all_approved = all(_approved_keyframe(conn, refreshed, kind) for kind in required)
+    if all_approved:
+        log_provider_call(
+            "keyframe_fallback_success", config.MODEL_TEXT, "KEYFRAME_READY",
+            None, 0, meta={"shot_id": shot_id})
+        return True, "补生成关键帧成功，全部通过评审"
+
+    final_status = _row_value(refreshed, "scene_status", "")
+    return False, f"补生成关键帧后仍未通过评审（scene_status={final_status}）"
+
+
 async def critique_version(version_id: str) -> list[str]:
     """取某视频版本的问题清单（AI 评语）：优先用已存的 QA issues；
     若该版本还没质检过，则现场抽帧跑一次 VLM 评审，并回存。供「带评语重生」避免重复犯错。"""
@@ -662,46 +790,55 @@ async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dic
             "fell back to reference image mode."
         )
 
+    # ── 第 1 次尝试：生成参考图 ──
+    shot_id = job["shot_id"]
+    rejection_details: list[dict[str, Any]] = []
     assets = await video_modes.build_reference_assets(
         conn=conn, project_id=job["project_id"], episode_no=ep["episode_no"], episode_id=job["episode_id"],
-        shot_id=job["shot_id"], shot=shot_model, bible=bible, decision=decision, prev_shot=prev_shot)
-    if not assets:
-        from app.compiler import compile_prompt
+        shot_id=shot_id, shot=shot_model, bible=bible, decision=decision, prev_shot=prev_shot,
+        rejection_details=rejection_details)
 
-        meta["reference_failure_logs"] = (meta.get("reference_failure_logs") or []) + [{
-            "mode": video_modes.REFERENCE_IMAGE_MODE,
-            "reason": "No quality-approved reference images.",
-            "prompt": prompt_text[:500],
-        }]
-        meta["mode"] = video_modes.FIRST_LAST_FRAME_MODE
-        meta["fallback_reason"] = "Reference image preparation produced no approved assets."
-        first_scene, first_src, _ = _first_keyframe_for_video(conn, shot, meta.get("after_shot_id"))
-        last_scene = _approved_keyframe(conn, shot, KEYFRAME_TAIL)
-        if not first_scene or not last_scene:
-            raise ProviderError("Reference image mode failed and first/last fallback keyframes are not ready.")
-        meta.update({
-            "first_frame_scene_id": first_scene["id"],
-            "first_frame_path": first_scene["image_path"],
-            "first_frame_src": first_src,
-            "last_frame_scene_id": last_scene["id"],
-            "last_frame_path": last_scene["image_path"],
-            "last_frame_src": "tail_keyframe",
-        })
-        outgoing = meta.get("outgoing_transition") or {}
-        prompt_text = ensure_source_excerpt_in_prompt(
-            compile_prompt(
-                shot_model, bible,
-                from_scene=not bool(meta.get("after_shot_id")),
-                chained=bool(meta.get("after_shot_id")),
-                with_last_frame=True,
-                incoming_transition=meta.get("incoming_transition"),
-                outgoing_transition=outgoing.get("transition") if isinstance(outgoing, dict) else None,
-                next_scene=outgoing.get("next_scene") if isinstance(outgoing, dict) else None,
-                next_first_frame_desc=outgoing.get("next_first_frame_desc") if isinstance(outgoing, dict) else None,
-            ),
-            shot_model,
-        )
-    else:
+    # ── 第 1 次失败：记录原始失败原因并重试 1 次 ──
+    if not assets:
+        original_failure_detail = {
+            "attempt": 1,
+            "rejection_count": len(rejection_details),
+            "rejection_details": rejection_details[:5],
+        }
+        log_provider_call(
+            "reference_image_mode_attempt_1_failed", config.MODEL_TEXT, "REFERENCE_ATTEMPT_FAILED",
+            None, 0, meta={
+                "shot_id": shot_id,
+                "attempt": 1,
+                "original_failure_reason": f"第 1 次参考图生成未产出可用资产（{len(rejection_details)} 张被拒绝）",
+                "rejection_details": rejection_details[:5],
+            })
+
+        # ── 第 2 次尝试：重试 ──
+        retry_rejection: list[dict[str, Any]] = []
+        assets = await video_modes.build_reference_assets(
+            conn=conn, project_id=job["project_id"], episode_no=ep["episode_no"], episode_id=job["episode_id"],
+            shot_id=shot_id, shot=shot_model, bible=bible, decision=decision, prev_shot=prev_shot,
+            rejection_details=retry_rejection)
+        rejection_details.extend(retry_rejection)
+
+        if assets:
+            log_provider_call(
+                "reference_image_mode_retry_success", config.MODEL_TEXT, "REFERENCE_RETRY_SUCCESS",
+                None, 0, meta={"shot_id": shot_id, "attempt": 2, "count": len(assets)})
+        else:
+            log_provider_call(
+                "reference_image_mode_retry_failed", config.MODEL_TEXT, "REFERENCE_RETRY_FAILED",
+                None, 0, meta={
+                    "shot_id": shot_id,
+                    "attempt": 2,
+                    "total_rejection_count": len(rejection_details),
+                    "rejection_details": rejection_details[:10],
+                    "original_failure_reason": f"参考图模式 2 次尝试均未产出可用资产（共 {len(rejection_details)} 张被拒绝）",
+                })
+
+    # ── 参考图模式成功 ──
+    if assets:
         meta["mode"] = video_modes.REFERENCE_IMAGE_MODE
         meta["mode_decision"] = video_modes.decision_to_dict(decision)
         meta["reference_images"] = [a.public_dict() for a in assets]
@@ -710,6 +847,130 @@ async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dic
         meta.pop("first_frame_scene_id", None)
         meta.pop("last_frame_scene_id", None)
         prompt_text = video_modes.append_reference_prompt_notes(prompt_text, assets)
+        _set_version(version["id"], image_inputs=json.dumps(meta, ensure_ascii=False), prompt_text=prompt_text)
+        return meta, prompt_text
+
+    # ── 参考图模式彻底失败（2 次均失败）—— 记录原始失败原因 ──
+    ref_failure_reason = (
+        f"参考图模式 2 次尝试均未产出可用资产 "
+        f"（共 {len(rejection_details)} 张被拒绝）"
+    )
+    log_provider_call(
+        "reference_image_mode_original_failure", config.MODEL_TEXT, "REFERENCE_MODE_ORIGINAL_FAILURE",
+        None, 0, meta={
+            "shot_id": shot_id,
+            "original_failure_reason": ref_failure_reason,
+            "rejection_count": len(rejection_details),
+            "rejection_details": rejection_details[:10],
+        })
+
+    # ── 尝试 fallback 到首尾帧模式 ──
+    from app.compiler import compile_prompt
+
+    meta["reference_failure_logs"] = (meta.get("reference_failure_logs") or []) + [{
+        "mode": video_modes.REFERENCE_IMAGE_MODE,
+        "original_failure_reason": ref_failure_reason,
+        "rejection_count": len(rejection_details),
+        "rejection_details": rejection_details[:10],
+        "prompt": prompt_text[:500],
+    }]
+
+    # 检查首尾帧是否已就绪
+    first_scene, first_src, _ = _first_keyframe_for_video(conn, shot, meta.get("after_shot_id"))
+    last_scene = _approved_keyframe(conn, shot, KEYFRAME_TAIL)
+    keyframes_ready = bool(first_scene and last_scene)
+
+    if not keyframes_ready:
+        # ── 首尾帧缺失：记录 fallback 缺失状态 ──
+        log_provider_call(
+            "fallback_keyframe_missing", config.MODEL_TEXT, "FALLBACK_KEYFRAMES_MISSING",
+            None, 0, meta={
+                "shot_id": shot_id,
+                "original_failure_reason": ref_failure_reason,
+                "first_frame_available": bool(first_scene),
+                "last_frame_available": bool(last_scene),
+                "scene_status": _row_value(shot, "scene_status", ""),
+            })
+
+        # ── 触发首尾帧补生成并等待 ──
+        kf_success, kf_message = await _ensure_keyframes_for_fallback(conn, shot)
+        log_provider_call(
+            "keyframe_generation_result", config.MODEL_TEXT,
+            "KEYFRAME_GENERATION_SUCCESS" if kf_success else "KEYFRAME_GENERATION_FAILED",
+            None, 0, meta={
+                "shot_id": shot_id,
+                "keyframe_generation_success": kf_success,
+                "keyframe_generation_message": kf_message,
+            })
+
+        if not kf_success:
+            # ── 首尾帧补生成也失败 —— 最终失败 ──
+            final_msg = (
+                f"视频生成任务失败：参考图模式失败（{ref_failure_reason}）且"
+                f"首尾帧补生成失败（{kf_message}）"
+            )
+            log_provider_call(
+                "video_generation_final_failure", config.MODEL_TEXT, "VIDEO_GENERATION_FINAL_FAILURE",
+                None, 0, meta={
+                    "shot_id": shot_id,
+                    "original_ref_failure": ref_failure_reason,
+                    "keyframe_gen_failure": kf_message,
+                    "final_message": final_msg,
+                })
+            raise ProviderError(final_msg)
+
+        # ── 首尾帧补生成成功：重新从 DB 读取 ──
+        log_provider_call(
+            "keyframe_generation_succeeded_proceeding", config.MODEL_TEXT, "KEYFRAME_GENERATION_SUCCESS",
+            None, 0, meta={"shot_id": shot_id, "message": kf_message})
+        shot = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
+        first_scene, first_src, _ = _first_keyframe_for_video(conn, shot, meta.get("after_shot_id"))
+        last_scene = _approved_keyframe(conn, shot, KEYFRAME_TAIL)
+        if not first_scene or not last_scene:
+            # 补生成声称成功但 DB 中仍无可用帧 — 极端情况
+            final_msg = (
+                f"视频生成任务失败：参考图模式失败（{ref_failure_reason}）且"
+                f"首尾帧补生成后仍无可用关键帧"
+            )
+            log_provider_call(
+                "video_generation_final_failure_post_gen", config.MODEL_TEXT,
+                "VIDEO_GENERATION_FINAL_FAILURE", None, 0, meta={
+                    "shot_id": shot_id, "final_message": final_msg})
+            raise ProviderError(final_msg)
+    else:
+        log_provider_call(
+            "fallback_keyframe_already_ready", config.MODEL_TEXT, "FALLBACK_KEYFRAMES_READY",
+            None, 0, meta={
+                "shot_id": shot_id,
+                "first_frame_scene_id": first_scene["id"],
+                "last_frame_scene_id": last_scene["id"],
+            })
+
+    # ── 使用首尾帧 fallback 模式 ──
+    meta["mode"] = video_modes.FIRST_LAST_FRAME_MODE
+    meta["fallback_reason"] = ref_failure_reason
+    meta.update({
+        "first_frame_scene_id": first_scene["id"],
+        "first_frame_path": first_scene["image_path"],
+        "first_frame_src": first_src,
+        "last_frame_scene_id": last_scene["id"],
+        "last_frame_path": last_scene["image_path"],
+        "last_frame_src": "tail_keyframe",
+    })
+    outgoing = meta.get("outgoing_transition") or {}
+    prompt_text = ensure_source_excerpt_in_prompt(
+        compile_prompt(
+            shot_model, bible,
+            from_scene=not bool(meta.get("after_shot_id")),
+            chained=bool(meta.get("after_shot_id")),
+            with_last_frame=True,
+            incoming_transition=meta.get("incoming_transition"),
+            outgoing_transition=outgoing.get("transition") if isinstance(outgoing, dict) else None,
+            next_scene=outgoing.get("next_scene") if isinstance(outgoing, dict) else None,
+            next_first_frame_desc=outgoing.get("next_first_frame_desc") if isinstance(outgoing, dict) else None,
+        ),
+        shot_model,
+    )
     _set_version(version["id"], image_inputs=json.dumps(meta, ensure_ascii=False), prompt_text=prompt_text)
     return meta, prompt_text
 

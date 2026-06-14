@@ -27,6 +27,36 @@ export const api = {
   del: (path: string) => fetch(`/api${path}`, { method: 'DELETE' }).then(handle),
   upload: (path: string, form: FormData) =>
     fetch(`/api${path}`, { method: 'POST', body: form }).then(handle),
+
+  /* ── 便捷方法 ── */
+  episodeGenerate: (episodeId: string) =>
+    fetch(`/api/episodes/${episodeId}/generate`, { method: 'POST' }).then(handle),
+  sceneGenerate: (shotId: string, kinds?: ('head' | 'tail')[]) =>
+    fetch(`/api/shots/${shotId}/scene`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kinds }),
+    }).then(handle),
+  shotGenerate: (shotId: string, promptOverride?: string, reroll?: boolean, withCritique?: boolean, modeOverride?: string) =>
+    fetch(`/api/shots/${shotId}/generate`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt_override: promptOverride, reroll, with_critique: withCritique, mode_override: modeOverride,
+      }),
+    }).then(handle),
+  sceneApprove: (shotId: string, sceneId: string, kind: string) =>
+    fetch(`/api/shots/${shotId}/scene/approve`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scene_id: sceneId, kind }),
+    }).then(handle),
+  sceneDelete: (sceneId: string) =>
+    fetch(`/api/scenes/${sceneId}`, { method: 'DELETE' }).then(handle),
+  adoptVersion: (shotId: string, versionId: string) =>
+    fetch(`/api/shots/${shotId}/adopt`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ version_id: versionId }),
+    }).then(handle),
+  deleteVersion: (versionId: string) =>
+    fetch(`/api/versions/${versionId}`, { method: 'DELETE' }).then(handle),
 }
 
 export interface Dialogue { speaker: string; line: string; emotion: string }
@@ -103,7 +133,7 @@ export interface ShotVersion {
       qualityScore?: number | null; selectedForSeedance?: boolean
       rejectReason?: string | null; qa?: { overall?: number; issues?: string[] } | null
     }[]
-    reference_failure_logs?: { reason?: string; qa?: { overall?: number; issues?: string[] } }[]
+    reference_failure_logs?: { type?: string; reason?: string; error?: string; fallback?: string; qa?: { overall?: number; issues?: string[] } }[]
     fallback_reason?: string | null
     retry_reason?: string | null
   }
