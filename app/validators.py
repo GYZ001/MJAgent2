@@ -3,11 +3,12 @@
 """
 from __future__ import annotations
 
+import difflib
 import math
 import re
 
 from app import config
-from app.schemas import (BEAT_TYPES, Beat, BeatChain, Bible, Shot, Storyboard,
+from app.schemas import (BEAT_TYPES, Beat, BeatChain, Bible, EpisodeScreenplay, Shot, Storyboard,
                          SHOT_SIZES, CAMERA_MOVES, TIME_OF_DAY_ORDER, TRANSITIONS)
 
 
@@ -91,13 +92,18 @@ def _explicit_cut_markers(text: str | None) -> list[str]:
 
 
 def _too_similar(a: str, b: str) -> bool:
-    """首尾帧描述是否过于相似（字符集合 Jaccard 相似度 ≥0.8 视为几乎相同）。"""
-    sa, sb = set(a), set(b)
-    if not sa or not sb:
+    """首尾帧描述是否过于相似（几乎是同一句、看不出动作推进）。
+
+    旧实现用【字符集合】Jaccard≥0.8：但首尾帧本就要求"同机位同构图、只让动作推进"，
+    天然高词汇重叠，集合 Jaccard 会把"描写到位但动作确有变化"的合规首尾帧误判为雷同，
+    反逼模型把首尾写成两个不同镜头/景别——正好制造它想避免的跳变。
+    改用序列相似度（difflib，计入顺序与长度），只拦近乎逐字重复的真雷同。"""
+    a, b = (a or "").strip(), (b or "").strip()
+    if not a or not b:
         return False
-    inter = len(sa & sb)
-    union = len(sa | sb)
-    return union > 0 and inter / union >= 0.8
+    if a == b:
+        return True
+    return difflib.SequenceMatcher(None, a, b).ratio() >= 0.85
 
 
 def _has_transition_hint(*parts: str | None) -> bool:
@@ -286,10 +292,14 @@ def validate_storyboard(board: Storyboard, bible: Bible, target_duration_s: int)
 _DAY_NAMES = ("首日", "次日", "第三日", "第四日", "第五日", "第六日", "第七日")
 
 
+def _scene_label(day_offset: int, time_of_day: str, location: str) -> str:
+    day = _DAY_NAMES[day_offset] if day_offset < len(_DAY_NAMES) else f"第{day_offset + 1}日"
+    return f"{day}{time_of_day}，{location.strip()}"
+
+
 def beat_scene_label(beat: Beat) -> str:
     """节拍 → 场景标签（代码生成，分镜阶段逐字使用，保证时间线与场景标签稳定）。"""
-    day = _DAY_NAMES[beat.day_offset] if beat.day_offset < len(_DAY_NAMES) else f"第{beat.day_offset + 1}日"
-    return f"{day}{beat.time_of_day}，{beat.location.strip()}"
+    return _scene_label(beat.day_offset, beat.time_of_day, beat.location)
 
 
 def validate_beat_chain(chain: BeatChain, bible: Bible, expected_beats: int) -> list[str]:
@@ -341,7 +351,81 @@ def validate_beat_chain(chain: BeatChain, bible: Bible, expected_beats: int) -> 
     return errors
 
 
-# ---------- C2 对拍展开 ----------
+# ---------- C1.5 可拍剧本 ----------
+
+FULL_SCRIPT_FORBIDDEN_TERMS = (
+    "拍01", "拍1", "拍 01", "拍 1", "镜头", "景别", "运镜", "首帧", "尾帧", "参考图", "提示词", "prompt",
+)
+SCRIPT_SCENE_HEADING_RE = re.compile(r"【场\s*\d+】")
+SCRIPT_DIALOGUE_LINE_RE = re.compile(r"^[^\n：]{1,16}(?:（[^）]{1,12}）)?：", re.M)
+
+def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats: int,
+                        episode_no: int | None = None) -> list[str]:
+    """剧本层校验：剧本台只接受完整剧本格式，不再兼容旧拍卡结构。"""
+    errors: list[str] = []
+    if episode_no is not None and script.episode_no != episode_no:
+        errors.append(f"episode_no={script.episode_no}，必须等于 {episode_no}")
+    if (script.mode or "full_script") != "full_script":
+        errors.append(f"mode=「{script.mode}」非法；剧本台仅支持 full_script")
+    if len((script.title or "").strip()) < 2:
+        errors.append("title 过短或缺失；请填写本集标题")
+    if len((script.logline or "").strip()) < 8:
+        errors.append("logline 过短或缺失；请用一句话概括本集核心事件")
+    if len((script.script_format_note or "").strip()) < 6:
+        errors.append("script_format_note 过短或缺失；请说明正文采用的台本格式")
+    scenes = script.scene_outline or []
+    if not 3 <= len(scenes) <= 6:
+        errors.append(f"scene_outline 场次数量为 {len(scenes)}；生产级剧本稿需提供 3~6 场连续场次结构")
+    bible_names = {c.name for c in bible.characters}
+    for i, scene in enumerate(scenes, start=1):
+        tag = f"scene_outline[{i - 1}]"
+        if scene.scene_no != i:
+            errors.append(f"{tag}.scene_no 必须从 1 连续递增；当前为 {scene.scene_no}")
+        if len((scene.scene_heading or "").strip()) < 4:
+            errors.append(f"{tag}.scene_heading 过短；请写成可读的场次标题")
+        if len((scene.story_function or "").strip()) < 6:
+            errors.append(f"{tag}.story_function 过短；请说明本场戏剧功能")
+        if len((scene.summary or "").strip()) < 16:
+            errors.append(f"{tag}.summary 过短；请概括本场具体戏剧内容")
+        if len((scene.turn or "").strip()) < 4:
+            errors.append(f"{tag}.turn 过短；请说明本场交给下一场的状态变化")
+        if len((scene.source_basis or "").strip()) < 8:
+            errors.append(f"{tag}.source_basis 过短；请保留本场原文依据")
+        if not scene.characters:
+            errors.append(f"{tag}.characters 不能为空；请写本场实际参与角色")
+        unknown = [name for name in scene.characters if name not in bible_names]
+        if unknown:
+            errors.append(f"{tag}.characters 含角色圣经外角色：{unknown}")
+    full_text = (script.full_script_text or "").strip()
+    min_script_chars = max(220, expected_beats * 55)
+    if len(full_text) < min_script_chars:
+        errors.append(f"full_script_text 过短；当前仅 {len(full_text)} 字，至少需要 {min_script_chars} 字的生产级剧本正文")
+    for term in FULL_SCRIPT_FORBIDDEN_TERMS:
+        if term in full_text:
+            errors.append(f"full_script_text 含禁用词「{term}」；剧本台正文不能写拍卡/分镜/执行语言")
+    heading_matches = SCRIPT_SCENE_HEADING_RE.findall(full_text)
+    if len(heading_matches) < 3:
+        errors.append("full_script_text 缺少足够的场次标题；请使用“【场1】...”这类场次化台本格式")
+    elif scenes and len(heading_matches) != len(scenes):
+        errors.append(f"full_script_text 场次标题数 {len(heading_matches)} 与 scene_outline 场次数 {len(scenes)} 不一致")
+    blocks = [block for block in re.split(r"\n\s*\n", full_text) if block.strip()]
+    if len(blocks) < 6:
+        errors.append("full_script_text 段落过少；请按场次、动作段、对白段分段书写，不要挤成梗概")
+    dialogue_lines = SCRIPT_DIALOGUE_LINE_RE.findall(full_text)
+    if len(dialogue_lines) < 2:
+        errors.append("full_script_text 对白行过少；请按“角色名：台词”写出真正可演的对白")
+    if len((script.emotional_curve or "").strip()) < 6:
+        errors.append("emotional_curve 过短或缺失；请说明本集情绪推进")
+    if len((script.ending_hook or "").strip()) < 6:
+        errors.append("ending_hook 过短或缺失；请明确本集结尾钩子")
+    if len((script.source_basis or "").strip()) < 12:
+        errors.append("source_basis 过短或缺失；请概括本集原文依据与关键事件")
+    if script.beats:
+        errors.append("剧本台不再接受 beats 拍卡结构；请重新生成完整剧本")
+    return errors
+
+
+# ---------- C2 基于完整剧本的分镜校验 ----------
 
 def normalize_continuity(board: Storyboard) -> None:
     """continuity/transition 由场景标签代码推导覆盖（不依赖模型自觉，消除一整类返工）。"""

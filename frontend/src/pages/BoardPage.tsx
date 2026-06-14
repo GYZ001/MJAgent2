@@ -27,7 +27,7 @@ export default function BoardPage() {
     <>
       <header className="desk-head">
         <div className="crumb">
-          <a style={{ cursor: 'pointer' }} onClick={() => go('bible', projectId, null)}>人物谱</a> / 第{numToCn(ep.episode_no)}集
+          <a style={{ cursor: 'pointer' }} onClick={() => go('script', projectId, episodeId)}>剧本台</a> / 第{numToCn(ep.episode_no)}集
         </div>
         <h1>分镜台 <span className="sub">《{ep.title}》 · 脚本免费可改，确认后才花钱</span></h1>
         <hr className="rule" />
@@ -36,10 +36,19 @@ export default function BoardPage() {
       <section className="card">
         <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
           <EpStamp status={ep.status} />
-          <button className="btn" disabled={busy || ep.status === 'scripting'}
-            onClick={() => act(() => api.post(`/episodes/${ep.id}/storyboard`), '分镜生成已开始（约 2~5 分钟，含校验修复回路）')}>
+          <span className={`stamp ${ep.screenplay_status === 'ready' ? 'green' : ep.screenplay_status === 'running' ? 'gold' : ep.screenplay_status === 'failed' ? 'red' : 'grey'}`}>
+            {ep.screenplay_status === 'ready' ? '剧本成' : ep.screenplay_status === 'running' ? '剧本中' : ep.screenplay_status === 'failed' ? '剧本败' : '待剧本'}
+          </span>
+          {ep.screenplay_mode === 'full_script' && <span className="stamp grey">完整剧本</span>}
+          <button className="btn" disabled={busy || ep.status === 'scripting' || ep.screenplay_status !== 'ready'}
+            onClick={() => act(() => api.post(`/episodes/${ep.id}/storyboard`), '分镜生成已开始（按剧本拆分分镜卡）')}>
             {ep.shots?.length ? '重新生成分镜' : '生成分镜脚本'}
           </button>
+          {ep.screenplay_status !== 'ready' && (
+            <button className="btn primary" disabled={busy} onClick={() => go('script', projectId, ep.id)}>
+              先去剧本台
+            </button>
+          )}
           {ep.status === 'scripting' && (
             <button className="btn ghost" disabled={busy}
               onClick={() => act(() => api.post(`/episodes/${ep.id}/storyboard/cancel`), '已取消分镜生成请求，可重新发起')}>
@@ -64,7 +73,8 @@ export default function BoardPage() {
             共 {ep.shots?.length ?? 0} 镜 · 总时长 {totalDur}s / 目标 {ep.target_duration_s}s · 已耗 ¥{ep.cost_cny.toFixed(1)}
           </span>
         </div>
-        {ep.status === 'scripting' && <div style={{ marginTop: 10 }}><span className="stamp gold">分镜中</span> <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>正在写作固定 10s 视频段并通过校验器，失败会自动带错误修复重试……</span></div>}
+        {ep.screenplay_status !== 'ready' && <div className="error-banner">本集还没有可用剧本。请先到剧本台生成/保存完整剧本，再展开分镜。</div>}
+        {ep.status === 'scripting' && <div style={{ marginTop: 10 }}><span className="stamp gold">分镜中</span> <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>正在根据最新剧本拆分固定 10s 分镜卡，并通过校验器自动修复重试……</span></div>}
         {ep.script_error && (
           <div className="error-banner">
             {ep.status === 'script_failed' ? `分镜失败（错误已列明，修改源头或重试）：\n${ep.script_error}` : ep.script_error}

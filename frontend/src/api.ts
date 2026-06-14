@@ -31,6 +31,56 @@ export const api = {
 
 export interface Dialogue { speaker: string; line: string; emotion: string }
 
+export interface ScreenplayBeat {
+  beat_no: number
+  day_offset: number
+  time_of_day: string
+  location: string
+  characters: string[]
+  dramatic_event: string
+  visible_action: string
+  key_dialogues: string[]
+  turn: string
+  carry: string
+  beat_type: string
+  source_excerpt: string
+}
+
+export interface ScriptScene {
+  scene_no: number
+  scene_heading: string
+  story_function: string
+  characters: string[]
+  summary: string
+  conflict?: string
+  turn?: string
+  source_basis?: string
+}
+
+export interface EpisodeScreenplay {
+  id?: string | null
+  episode_no: number
+  mode?: 'full_script' | string
+  title?: string
+  source_text_range?: string
+  logline?: string
+  script_format_note?: string
+  scene_outline?: ScriptScene[]
+  full_script_text?: string
+  character_state_changes?: string[]
+  emotional_curve?: string
+  ending_hook?: string
+  source_basis?: string
+  adaptation_direction?: string
+  opening?: string
+  development?: string
+  conflict?: string
+  climax?: string
+  created_at?: number | null
+  updated_at?: number | null
+  beats: ScreenplayBeat[]
+}
+
 export interface ShotVersion {
   id: string; version_no: number; prompt_text: string; status: string
   error?: string; video_url?: string; qa?: { overall: number; issues: string[] } | null
@@ -38,6 +88,23 @@ export interface ShotVersion {
   image_inputs?: {
     first_frame_used: boolean; first_frame_src?: string | null; first_frame_scene_id?: string | null
     last_frame_used?: boolean; last_frame_src?: string | null; last_frame_scene_id?: string | null
+    mode?: 'FIRST_LAST_FRAME_MODE' | 'REFERENCE_IMAGE_MODE' | string | null
+    mode_decision?: {
+      mode?: string; reason?: string; confidence?: number
+      needReusePreviousScene?: boolean; needGenerateNewReferences?: boolean
+      referenceImagePlan?: {
+        totalCount?: number; reusePreviousSceneCount?: number; generateNewCount?: number; types?: string[]
+      }
+    } | null
+    reference_image_used?: boolean
+    reference_images?: {
+      id: string; image_url?: string | null; type: string; source: string
+      qualityScore?: number | null; selectedForSeedance?: boolean
+      rejectReason?: string | null; qa?: { overall?: number; issues?: string[] } | null
+    }[]
+    reference_failure_logs?: { reason?: string; qa?: { overall?: number; issues?: string[] } }[]
+    fallback_reason?: string | null
+    retry_reason?: string | null
   }
 }
 
@@ -50,7 +117,7 @@ export interface SceneCandidate {
 }
 
 export interface Shot {
-  id: string; episode_id: string; shot_no: number; duration_s: number; shot_size: string; camera_move: string
+  id: string; episode_id: string; script_id?: string | null; shot_no: number; duration_s: number; shot_size: string; camera_move: string
   scene_setting: string; characters: string[]; action_desc: string
   first_frame_desc: string; last_frame_desc: string
   source_excerpt: string
@@ -67,6 +134,8 @@ export interface Episode {
   id: string; episode_no: number; title: string; hook: string; cliffhanger: string
   synopsis: string; source_chapters: number[]; target_duration_s: number
   status: string; script_error?: string; cost_cny: number; cost_limit_cny?: number
+  screenplay_status: string; screenplay_error?: string | null; screenplay_beats?: number; screenplay_mode?: string
+  screenplay?: EpisodeScreenplay | null
   shots?: Shot[]
 }
 
@@ -112,6 +181,7 @@ export interface Project {
 export interface AutoProgress {
   bible?: string; refs?: string; plan?: string
   episodes_total?: number; episodes_done?: number
+  screenplays_ready?: number
   shots_total?: number; shots_keyframed?: number; shots_video?: number
 }
 export interface AutoStatus {

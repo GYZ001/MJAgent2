@@ -239,9 +239,38 @@ async def generate_episode_audio(episode_id: str, *, concurrency: int = 4) -> di
 
 # ---------- 整集配音轨（每镜补齐到 10s 后按镜序拼接），供成片混音 ----------
 
+def _probe_duration(path: str) -> float | None:
+    """用 ffprobe 取媒体真实时长（秒）。失败返回 None。"""
+    try:
+        raw = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
+            capture_output=True, text=True, check=True).stdout.strip()
+        d = float(raw) if raw else 0.0
+        return d if d > 0 else None
+    except (subprocess.CalledProcessError, ValueError, OSError):
+        return None
+
+
+def _adopted_video_durations(conn, episode_id: str) -> dict[str, float]:
+    """每镜【已采用视频】的真实时长（秒），用于把配音逐镜对齐到对应视频段，避免累积失步。"""
+    rows = rows_to_dicts(conn.execute(
+        """SELECT s.id AS shot_id, v.video_path
+           FROM shots s JOIN shot_versions v ON v.id = s.adopted_version_id
+           WHERE s.episode_id=? AND v.status='succeeded' AND v.video_path IS NOT NULL""",
+        (episode_id,)).fetchall())
+    out: dict[str, float] = {}
+    for r in rows:
+        if r["video_path"] and Path(r["video_path"]).exists():
+            d = _probe_duration(r["video_path"])
+            if d:
+                out[r["shot_id"]] = d
+    return out
+
+
 def build_episode_audio_track(episode_id: str, out_path: Path) -> Path | None:
-    """把各镜配音按镜序拼成整集音轨：每镜补静音到固定 10s，与对应视频段对齐。
-    没有任何可用配音则返回 None。需要 ffmpeg。"""
+    """把各镜配音按镜序拼成整集音轨：每镜补静音/截断到【该镜已采用视频的真实时长】，逐镜与视频段对齐。
+    Seedance 出片常非精确 10.0s，若刚性按 10s 铺音轨会逐镜累积失步、并被成片 -shortest 截尾，
+    因此优先按 ffprobe 实测时长对齐；拿不到时退回固定 10s。没有任何可用配音则返回 None。需要 ffmpeg。"""
     if not shutil.which("ffmpeg"):
         return None
     conn = get_conn()
@@ -249,7 +278,8 @@ def build_episode_audio_track(episode_id: str, out_path: Path) -> Path | None:
         "SELECT s.shot_no, s.id FROM shots s WHERE s.episode_id=? ORDER BY s.shot_no", (episode_id,)).fetchall())
     if not shots:
         return None
-    dur = config.FIXED_VIDEO_DURATION_S
+    fallback_dur = float(config.FIXED_VIDEO_DURATION_S)
+    video_durations = _adopted_video_durations(conn, episode_id)
     audio_by_shot = {a["shot_id"]: a for a in rows_to_dicts(conn.execute(
         "SELECT shot_id, audio_path, status FROM shot_audio WHERE episode_id=?", (episode_id,)).fetchall())}
     if not any(a.get("audio_path") and Path(a["audio_path"]).exists() for a in audio_by_shot.values()):
@@ -258,16 +288,17 @@ def build_episode_audio_track(episode_id: str, out_path: Path) -> Path | None:
         segs = []
         for s in shots:
             seg = Path(td) / f"seg{s['shot_no']}.wav"
+            dur = f"{video_durations.get(s['id'], fallback_dur):.3f}"
             a = audio_by_shot.get(s["id"])
             ap = a.get("audio_path") if a else None
             if ap and Path(ap).exists():
-                # 配音补静音到 10s（apad），超过 10s 截断（-t），统一采样率/声道
+                # 配音补静音到该镜视频时长（apad），超长则截断（-t），统一采样率/声道
                 subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", ap,
-                                "-af", "apad", "-t", str(dur), "-ar", "44100", "-ac", "2", str(seg)],
+                                "-af", "apad", "-t", dur, "-ar", "44100", "-ac", "2", str(seg)],
                                check=True, capture_output=True)
             else:
                 subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
-                                "-i", "anullsrc=r=44100:cl=stereo", "-t", str(dur), str(seg)],
+                                "-i", "anullsrc=r=44100:cl=stereo", "-t", dur, str(seg)],
                                check=True, capture_output=True)
             segs.append(seg)
         listfile = Path(td) / "alist.txt"

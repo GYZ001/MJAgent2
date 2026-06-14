@@ -89,6 +89,60 @@ class BeatChain(BaseModel):
     beats: list[Beat]
 
 
+# 可拍剧本（分集之后、分镜之前）：把小说叙述改写为每 10s 一拍的场次剧本。
+# 它不写景别/运镜/首尾帧，只锁定人物在场、可见动作、关键台词、局势变化和下一拍钩子。
+class ScreenplayBeat(BaseModel):
+    beat_no: int
+    day_offset: int
+    time_of_day: str
+    location: str
+    characters: list[str] = Field(default_factory=list)
+    dramatic_event: str
+    visible_action: str
+    key_dialogues: list[str] = Field(default_factory=list)
+    turn: str
+    carry: str
+    beat_type: str
+    source_excerpt: str = ""
+
+
+class ScriptScene(BaseModel):
+    scene_no: int
+    scene_heading: str
+    story_function: str
+    characters: list[str] = Field(default_factory=list)
+    summary: str
+    conflict: str = ""
+    turn: str = ""
+    source_basis: str = ""
+
+
+class EpisodeScreenplay(BaseModel):
+    episode_no: int
+    # 完整剧本源数据（新格式）
+    id: str | None = None
+    mode: str = "full_script"
+    title: str = ""
+    source_text_range: str = ""
+    logline: str = ""
+    script_format_note: str = ""
+    scene_outline: list[ScriptScene] = Field(default_factory=list)
+    full_script_text: str = ""
+    character_state_changes: list[str] = Field(default_factory=list)
+    emotional_curve: str = ""
+    ending_hook: str = ""
+    source_basis: str = ""
+    adaptation_direction: str = ""
+    opening: str = ""
+    development: str = ""
+    conflict: str = ""
+    climax: str = ""
+    created_at: float | None = None
+    updated_at: float | None = None
+    # 历史兼容：旧格式仍按 beat 列表存储
+    beats: list[ScreenplayBeat] = Field(default_factory=list)
+
+
 class Dialogue(BaseModel):
     speaker: str
     line: str

@@ -96,6 +96,15 @@ DEFAULT_SETTINGS = {
     "max_repair_attempts": "8",  # LLM 输出校验失败的最大修复重试次数（含首次）；模型不可用不走此重试
     "model_route": "hiagent",           # 文本/质检模型路由：hiagent（火山）| openrouter
     "storyboard_concurrency": "2",      # 手动批量分镜的并发上限
+    "video_generation_enable_reference_image_mode": "true",
+    "video_generation_default_mode": "AUTO",
+    "video_reference_max_images": "8",
+    "video_reference_first_shot_default_count": "4",
+    "video_reference_first_shot_complex_count": "8",
+    "video_reference_reuse_previous_scene_max_count": "4",
+    "video_reference_quality_threshold": "0.75",
+    "video_reference_fallback_failures": "2",
+    "video_mode_selector_confidence_threshold": "0.7",
     "auto_concurrency": "24",           # 一键全自动：图像/视频 worker 并发槽数（公网网关吞吐强，可调大）
     "auto_storyboard_concurrency": "8", # 一键全自动：同时进行的分镜 LLM 数（各集流水线并行，分镜阶段单独限流）
     # ---- 音频（TTS 配音 + ASR 校验）总开关与参数；关闭时全流程跳过音频，保持现有无声链路 ----

@@ -126,11 +126,96 @@ def _split_video_args(prompt_text: str) -> tuple[str, str]:
     return normalized.strip(), args
 
 
+def _replace_age(match: re.Match) -> str:
+    suffix = match.group(2) or ""
+    if suffix in {"少女", "女孩"}:
+        return "年轻女性角色"
+    if suffix in {"男孩", "少年", "少男"}:
+        return "少年感年轻角色"
+    return "年轻角色"
+
+
+# 通用安全降级（题材无关，首发即生效）：脏话软化 + 未成年/年龄安全归一。
+# 这些不改变场景与情绪语义，只规避平台审核与未成年风险。
+_ALWAYS_REPLACEMENTS = (
+    ("我草", "可恶"),
+    ("卧槽", "可恶"),
+    ("我操", "可恶"),
+    ("他妈的", "可恶"),
+    ("他妈", "可恶"),
+    ("妈的", "可恶"),
+    ("该死", "可恶"),
+    ("骂了一句", "低声抱怨一句"),
+)
+# 题材专用的措辞降级（修真/玄幻语境的场景与情绪改写）。这些会篡改画面场景（卧室→修炼静室）
+# 与人物情绪（愤怒→不甘），对都市/言情/悬疑等题材是降质的——因此【默认不启用】，
+# 只在平台已返回 InputTextSensitiveContentDetected 后的 aggressive 重提里启用。
+_AGGRESSIVE_REPLACEMENTS = (
+    ("床榻上", "修炼蒲团上"),
+    ("床榻", "修炼蒲团"),
+    ("床上", "室内蒲团上"),
+    ("卧室", "修炼静室"),
+    ("口鼻钻入体内", "从周围缓缓汇聚并融入经脉"),
+    ("钻入体内", "融入经脉"),
+    ("涌入体内", "汇入经脉"),
+    ("进入体内", "融入经脉"),
+    ("吸收殆尽", "悄然吸收"),
+    ("死死捏紧拳头", "用力握拳"),
+    ("死死攥紧拳头", "用力握拳"),
+    ("死死", "用力"),
+    ("愤怒地", "神情不甘地"),
+    ("愤怒", "不甘"),
+    ("暴怒", "强烈不甘"),
+    ("诡异", "神秘"),
+    ("邪异", "神秘"),
+)
+
+
+def _rewrite_sensitive_terms(text: str, *, aggressive: bool = False) -> str:
+    out = text
+    for old, new in _ALWAYS_REPLACEMENTS:
+        out = out.replace(old, new)
+    if aggressive:
+        for old, new in _AGGRESSIVE_REPLACEMENTS:
+            out = out.replace(old, new)
+    # 年龄/未成年安全归一始终生效（与题材无关的合规护栏）
+    out = re.sub(r"(?:\d{1,3}|[一二两三四五六七八九十]{1,4})岁(清秀|稚嫩|年少)?(少年|少女|男孩|女孩|少男)?", _replace_age, out)
+    out = re.sub(r"未成年(?:人)?", "年轻角色", out)
+    out = re.sub(r"草([！!。,.，、？?])", r"可恶\1", out)
+    return out
+
+
+def sanitize_seedance_prompt(prompt_text: str, *, aggressive: bool = False,
+                             extra_terms: tuple[tuple[str, str], ...] | None = None) -> str:
+    """降低 Seedance 文本安全误拦截概率。
+
+    普通模式只做确定性措辞降级；aggressive=True 用于平台已经返回
+    InputTextSensitiveContentDetected 后的自动重提，会移除原文兜底和露骨台词原句。
+    extra_terms：额外的字面替换（如版权角色专名→中性代称），用于版权限制后的重提。
+    """
+    body, args = _split_video_args(prompt_text)
+    if extra_terms:
+        for old, new in extra_terms:
+            if old:
+                body = body.replace(old, new)
+    body = _rewrite_sensitive_terms(body, aggressive=aggressive)
+    if aggressive:
+        body = re.sub(rf"{re.escape(SOURCE_EXCERPT_MARKER)}[^。；]*[。；]?", "", body)
+        body = re.sub(
+            r"台词信息：[^。]{0,220}",
+            "台词信息：角色以短促口型和压抑情绪表达懊恼，不生成字幕文字",
+            body,
+        )
+        body = re.sub(r"[^。；]{0,18}低声[^。；]{0,80}可恶[^。；]{0,30}", "角色低声表达懊恼", body)
+    body = re.sub(r"\s+", " ", body).strip(" 。；")
+    return f"{body}{args}" if body else args.strip()
+
+
 def ensure_source_excerpt_in_prompt(prompt_text: str, shot: Shot) -> str:
     """给旧版本/手写 prompt 补上原文兜底，保证真正发往 Seedance 的文本不漏。"""
     text = normalize_video_args(prompt_text)
     if SOURCE_EXCERPT_MARKER in text:
-        return text
+        return sanitize_seedance_prompt(text)
 
     body, args = _split_video_args(text)
     for max_chars in (SOURCE_EXCERPT_PROMPT_MAX, 180, 120, 80, 40):
@@ -140,7 +225,7 @@ def ensure_source_excerpt_in_prompt(prompt_text: str, shot: Shot) -> str:
         candidate_body = f"{body.rstrip('。')}。{source_line}" if body else source_line
         candidate = candidate_body + args
         if len(candidate) <= config.PROMPT_CHAR_LIMIT:
-            return candidate
+            return sanitize_seedance_prompt(candidate)
 
     source_line = _source_excerpt_line(shot, 24)
     if not source_line:
@@ -148,7 +233,7 @@ def ensure_source_excerpt_in_prompt(prompt_text: str, shot: Shot) -> str:
     max_body_len = config.PROMPT_CHAR_LIMIT - len(args) - len(source_line) - 1
     trimmed_body = body[:max(0, max_body_len)].rstrip("。；，,; ")
     candidate_body = f"{trimmed_body}。{source_line}" if trimmed_body else source_line
-    return candidate_body + args
+    return sanitize_seedance_prompt(candidate_body + args)
 
 
 def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = None,
@@ -187,6 +272,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     # 关键纠偏：单镜只表现“一个连贯流畅的动作”，不再要求 10s 内塞入多个小镜头/快速切景
     # （多动作快切是当前成片崩坏与画风漂移的主因）。剧情密度交给旁白承载，画面只演一件事。
     subject = "；".join(anchors)
+    scene_env_line = (f"环境（弱化，仅作背景空间参考，不要抢人物主体）：{scene_hint}" if scene_hint else "")
     core_parts = [
         f"9:16 竖屏动态漫画短剧分镜，单镜约 {dur} 秒，只表现一个连贯流畅的动作过程，全程一镜到底，不要在一个镜头里快速切换多个不相关画面",
         f"画面主体：{subject}" if subject else "",
@@ -195,14 +281,11 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         "首帧与尾帧是同一机位、同一场景的同一个动作的开始与结束，两帧之间只做这一个动作的自然过渡，绝不切换场景或机位、不要让画面跳变或形变",
         "特效与光效服从剧情：日常对话与一般场景写实克制、不要满屏光效或能量粒子，仅在情绪高潮或力量爆发的镜头才用强烈特效，且不得遮挡人物面部表情",
         f"景别：{shot.shot_size}；运镜：{shot.camera_move}，镜头运动缓慢平稳",
-        f"环境（弱化，仅作背景空间参考，不要抢人物主体）：{scene_hint}" if scene_hint else "",
         *story_cues,
         "把台词与（如有）旁白转化为人物可见的表情、口型、肢体动作与道具反应，不在画面上生成任何字幕文字",
         source_excerpt,
         # 画风锚点：全集逐字一致、显式禁止跨镜漂移（与具体画风无关，只强调统一）
         f"全片统一画风（每个镜头严格一致，禁止风格漂移）：{bible.world.visual_style_canonical}",
-        QUALITY_SUFFIX,
-        NO_BGM_SUFFIX,
     ]
     incoming_line = _incoming_transition_line(incoming_transition)
     if incoming_line:
@@ -242,24 +325,37 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         core_parts.append(lead)
     if with_refs:
         core_parts.append("严格保持人物发型、服装、五官与画风和参考图完全一致")
+    # 可裁剪的修饰部件：超长时从【末尾】依次丢弃（先丢价值最低的 NO_BGM，再丢质量套话，最后丢环境）。
+    # 锚点串/动作/物理与首尾帧纪律/负向词永不在此被裁——尤其是重生针对性负词（extra_negative），
+    # 它正是本次必须改正项，旧逻辑把它第一个砍掉等于让重生白做、伪影回潮。
+    filler_parts = [p for p in (scene_env_line, QUALITY_SUFFIX, NO_BGM_SUFFIX) if p and p.strip()]
     args = f" --ratio 9:16 --dur {config.FIXED_VIDEO_DURATION_S}"
 
-    def assemble(neg: str) -> str:
-        body = "。".join(p.strip().rstrip("。") for p in core_parts if p.strip())
+    def assemble(parts: list[str], neg: str) -> str:
+        body = "。".join(p.strip().rstrip("。") for p in parts if p and p.strip())
         if neg:
             body += "。" + neg
         return body + args
 
-    text = assemble(negative)
-    if len(text) > config.PROMPT_CHAR_LIMIT:
-        text = assemble(NEGATIVE_SUFFIX)
-    if len(text) > config.PROMPT_CHAR_LIMIT:
-        text = assemble("")
-    if len(text) > config.PROMPT_CHAR_LIMIT:
+    def fits(t: str) -> bool:
+        return len(t) <= config.PROMPT_CHAR_LIMIT
+
+    # 1) 先丢弃低价值修饰，始终保留完整负向词（含 extra_negative）。
+    text = assemble(core_parts + filler_parts, negative)
+    while not fits(text) and filler_parts:
+        filler_parts.pop()
+        text = assemble(core_parts + filler_parts, negative)
+    # 2) 仍超长：退一步丢弃重生附加负词，但保留基础负向词表。
+    if not fits(text):
+        text = assemble(core_parts + filler_parts, NEGATIVE_SUFFIX)
+    # 3) 最后兜底：丢弃全部负向词（锚点串/动作永不裁剪）。
+    if not fits(text):
+        text = assemble(core_parts + filler_parts, "")
+    if not fits(text):
         raise CompileError(
             f"镜头 {shot.shot_no} prompt 长度 {len(text)} 超过上限 {config.PROMPT_CHAR_LIMIT}，"
             f"且锚点串不可裁剪。请拆分为更细镜头，或在不丢失关键动作与场景锚点的前提下调整 action_desc/scene_setting")
-    return text
+    return sanitize_seedance_prompt(text)
 
 
 # 场景关键帧（Seedream 静帧）负面词：静帧不需要“快速跳切”这类视频负面，但要禁文字/畸形/多人/换装漂移

@@ -47,6 +47,9 @@ CREATE TABLE IF NOT EXISTS episodes (
     synopsis TEXT,
     source_chapters TEXT,
     target_duration_s INTEGER DEFAULT 50,
+    screenplay_json TEXT,
+    screenplay_status TEXT DEFAULT 'pending',
+    screenplay_error TEXT,
     status TEXT DEFAULT 'planned',
     script_error TEXT,
     created_at REAL NOT NULL
@@ -54,6 +57,7 @@ CREATE TABLE IF NOT EXISTS episodes (
 CREATE TABLE IF NOT EXISTS shots (
     id TEXT PRIMARY KEY,
     episode_id TEXT NOT NULL,
+    script_id TEXT,
     shot_no INTEGER NOT NULL,
     duration_s INTEGER NOT NULL,
     shot_size TEXT,
@@ -195,6 +199,10 @@ MIGRATIONS = (
     "ALTER TABLE shot_scenes ADD COLUMN kind TEXT DEFAULT 'tail'",
     "ALTER TABLE shots ADD COLUMN first_frame_desc TEXT DEFAULT ''",
     "ALTER TABLE shots ADD COLUMN last_frame_desc TEXT DEFAULT ''",
+    "ALTER TABLE shots ADD COLUMN script_id TEXT",
+    "ALTER TABLE episodes ADD COLUMN screenplay_json TEXT",
+    "ALTER TABLE episodes ADD COLUMN screenplay_status TEXT DEFAULT 'pending'",
+    "ALTER TABLE episodes ADD COLUMN screenplay_error TEXT",
 )
 
 

@@ -1,13 +1,13 @@
 """一键全自动成片编排器。
 
 把整条流水线串起来：
-  人物谱 → 定妆照 + 分集（并行）→ 每集[分镜 → 自动确认 → 关键帧 → 视频] 并行 → 合成成片。
+  人物谱 → 定妆照 + 分集（并行）→ 每集[剧本 → 分镜 → 自动确认 → 关键帧 → 视频] 并行 → 合成成片。
 
 两条核心原则：
 1. 自适应：每一步先看 DB 当前进度，只补做缺失的部分；已完成的跳过，绝不重复花钱/重复请求。
    因此随时可以重复点击「一键全自动」，它会从断点继续，而不是从头再来。
 2. 高并发：图像/视频走 worker 共享队列（auto_concurrency 个常驻 worker 同时消费）；
-   分镜 LLM 由 auto_storyboard_concurrency 限流；各集流水线作为协程并行推进，互不阻塞。
+   剧本/分镜 LLM 由 auto_storyboard_concurrency 限流；各集流水线作为协程并行推进，互不阻塞。
 
 成本护栏：视频是花钱环节（¥0.8/秒）。沿用「每集成本上限」（episode_cost_limit_cny），
 某集触顶则该集视频暂停并在进度里报红，其余集继续——不静默吞掉（PRD 原则 P2）。
@@ -74,7 +74,7 @@ def _progress(pid: str) -> dict:
     p = conn.execute("SELECT bible_status, plan_status, refs_status FROM projects WHERE id=?", (pid,)).fetchone()
     if not p:
         return {}
-    eps = rows_to_dicts(conn.execute("SELECT id, status FROM episodes WHERE project_id=?", (pid,)).fetchall())
+    eps = rows_to_dicts(conn.execute("SELECT id, status, screenplay_status, screenplay_json FROM episodes WHERE project_id=?", (pid,)).fetchall())
     shots = rows_to_dicts(conn.execute(
         "SELECT s.* FROM shots s JOIN episodes e ON e.id=s.episode_id WHERE e.project_id=?", (pid,)).fetchall())
     kf = sum(1 for s in shots if worker.shot_keyframes_ready(s))
@@ -82,6 +82,7 @@ def _progress(pid: str) -> dict:
     return {
         "bible": p["bible_status"], "refs": p["refs_status"], "plan": p["plan_status"],
         "episodes_total": len(eps), "episodes_done": sum(1 for e in eps if e["status"] == "done"),
+        "screenplays_ready": sum(1 for e in eps if e["screenplay_status"] == "ready" and e["screenplay_json"]),
         "shots_total": len(shots), "shots_keyframed": kf, "shots_video": vid,
     }
 
@@ -248,7 +249,19 @@ async def _episode_pipeline(pid: str, eid: str, epno: int, sb_sem: asyncio.Semap
     from app import api
     conn = get_conn()
     try:
-        # 1) 分镜：仅对「待分镜/分镜中/分镜失败」的集生成
+        # 1) 剧本：分集之后先把小说改写成可拍剧本
+        ep = conn.execute("SELECT status, screenplay_status, screenplay_json, screenplay_error FROM episodes WHERE id=?", (eid,)).fetchone()
+        if not ep["screenplay_json"] or ep["screenplay_status"] in ("pending", "failed", "running"):
+            async with sb_sem:
+                _log(pid, f"第{epno}集：生成可拍剧本")
+                conn.execute("UPDATE episodes SET screenplay_status='running', screenplay_error=NULL WHERE id=?", (eid,))
+                conn.commit()
+                await api._screenplay_task(eid)
+            ep = conn.execute("SELECT screenplay_status, screenplay_error FROM episodes WHERE id=?", (eid,)).fetchone()
+            if ep["screenplay_status"] != "ready":
+                raise _Skip(f"第{epno}集剧本失败，跳过：{ep['screenplay_error']}")
+
+        # 2) 分镜：仅对「待分镜/分镜中/分镜失败」的集生成
         ep = conn.execute("SELECT status FROM episodes WHERE id=?", (eid,)).fetchone()
         if ep["status"] in ("planned", "scripting", "script_failed"):
             async with sb_sem:
@@ -260,7 +273,7 @@ async def _episode_pipeline(pid: str, eid: str, epno: int, sb_sem: asyncio.Semap
             if ep["status"] not in ("scripted", "confirmed", "generating", "done"):
                 raise _Skip(f"第{epno}集分镜失败，跳过：{ep['script_error']}")
 
-        # 2) 确认（自动跳过人工门）：仅对「待确认」的集
+        # 3) 确认（自动跳过人工门）：仅对「待确认」的集
         ep = conn.execute("SELECT status FROM episodes WHERE id=?", (eid,)).fetchone()
         if ep["status"] == "scripted":
             try:
@@ -269,7 +282,7 @@ async def _episode_pipeline(pid: str, eid: str, epno: int, sb_sem: asyncio.Semap
             except ValueError as ve:
                 raise _Skip(f"第{epno}集未通过确认校验，跳过（请到分镜台人工修订后重跑）：{str(ve)[:200]}")
 
-        # 3) 关键帧 → 4) 视频 → 5) 配音(可选) → 6) 合成
+        # 4) 关键帧 → 5) 视频 → 6) 配音(可选) → 7) 合成
         await _ensure_keyframes(pid, eid, epno)
         await _ensure_videos(pid, eid, epno)
         await _ensure_audio(pid, eid, epno)

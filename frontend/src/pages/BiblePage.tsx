@@ -360,7 +360,7 @@ function AutoCard({ projectId, auto, busy, onStart, onCancel }: {
   return (
     <section className="card" style={{ borderLeft: '3px solid var(--cinnabar)' }}>
       <h3>一键全自动成片
-        <span className="hint">人物谱 → 定妆照+分集 → 每集（分镜→自动确认→关键帧→视频）→ 合成导出 · 自动跳过已完成步骤</span>
+        <span className="hint">人物谱 → 定妆照+分集 → 每集（剧本→分镜→自动确认→关键帧→视频）→ 合成导出 · 自动跳过已完成步骤</span>
       </h3>
 
       <label className="f">成片导出目录</label>
@@ -413,6 +413,7 @@ function AutoCard({ projectId, auto, busy, onStart, onCancel }: {
           <span>分集 {stat(pr.plan)}</span>
           <span>剧集 {pr.episodes_done ?? 0}/{pr.episodes_total ?? 0} 成片</span>
           <span>关键帧 {pr.shots_keyframed ?? 0}/{pr.shots_total ?? 0} 镜</span>
+          <span>剧本 {pr.screenplays_ready ?? 0}/{pr.episodes_total ?? 0} 集</span>
           <span>视频 {pr.shots_video ?? 0}/{pr.shots_total ?? 0} 镜</span>
         </div>
       ) : null}
