@@ -1,12 +1,16 @@
-import { useState } from 'react'
-import { api, Bible, Character, numToCn } from '../api'
-import { useNav, useProject } from '../App'
+import { type CSSProperties, useCallback, useEffect, useState } from 'react'
+import { api, AutoStatus, Bible, BrowseResult, Character } from '../api'
+import { useNav, useProject, usePoll } from '../App'
 
 export default function BiblePage() {
-  const { projectId, go, toast } = useNav()
+  const { projectId, toast } = useNav()
   const { data: p, refresh } = useProject(projectId!)
+  const { data: auto, refresh: refreshAuto } = usePoll<AutoStatus>(
+    () => api.get(`/projects/${projectId}/auto/status`), 3000, [projectId])
   const [editing, setEditing] = useState<Bible | null>(null)
   const [busy, setBusy] = useState(false)
+  const [rebibleOpen, setRebibleOpen] = useState(false)
+  const [rebibleFeedback, setRebibleFeedback] = useState('')
 
   if (!p) return <div className="empty">展卷中……</div>
 
@@ -18,6 +22,21 @@ export default function BiblePage() {
   }
 
   const bible = editing ?? p.bible
+  const startBible = async (feedback = '') => {
+    const note = feedback.trim()
+    setBusy(true)
+    try {
+      await api.post(`/projects/${p.id}/bible`, note ? { feedback: note } : undefined)
+      toast(note ? '已打回人物谱，正在按要求重新生成' : '人物谱生成已开始')
+      setRebibleOpen(false)
+      setRebibleFeedback('')
+      refresh()
+    } catch (e: unknown) {
+      toast((e as Error).message, true)
+    } finally {
+      setBusy(false)
+    }
+  }
 
   return (
     <>
@@ -31,14 +50,49 @@ export default function BiblePage() {
         <h3>原著 <span className="hint">{(p.novel_chars / 10000).toFixed(1)} 万字 · {p.chapters?.length} 章</span></h3>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
           <button className="btn primary" disabled={busy || p.bible_status === 'running'}
-            onClick={() => act(() => api.post(`/projects/${p.id}/bible`))}>
-            {p.bible ? '重新谱写人物谱' : '谱写人物谱'}
+            onClick={() => p.bible ? setRebibleOpen(v => !v) : startBible()}>
+            {p.bible ? '打回重新生成人物谱' : '谱写人物谱'}
           </button>
           {p.bible_status === 'running' && <span className="stamp gold">谱写中（约 1~3 分钟）</span>}
           {p.bible && <span className="stamp green">第 {`${p.bible_version ?? ''}`} 稿</span>}
         </div>
+        {p.bible && rebibleOpen && (
+          <div className="rebible-panel">
+            <label className="f">打回要求</label>
+            <textarea rows={4} maxLength={2000} value={rebibleFeedback}
+              onChange={e => setRebibleFeedback(e.target.value)}
+              placeholder="写清需要补收或修正的人物、称谓、关系、外观等，例如：漏掉药老和纳兰嫣然；萧战应为萧炎父亲；不要把药尘和药老拆成两人。" />
+            <div className="rebible-actions">
+              <button className="btn small primary" disabled={busy || !rebibleFeedback.trim() || p.bible_status === 'running'}
+                onClick={() => startBible(rebibleFeedback)}>
+                提交打回并重生
+              </button>
+              <button className="btn small ghost" disabled={busy} onClick={() => {
+                setRebibleOpen(false)
+                setRebibleFeedback('')
+              }}>取消</button>
+              <span className="hint">{rebibleFeedback.length}/2000</span>
+            </div>
+          </div>
+        )}
         {p.bible_status === 'failed' && <div className="error-banner">人物谱生成失败（原始错误如下，不做静默兜底）：{'\n'}{p.bible_error}</div>}
       </section>
+
+      <AutoCard projectId={p.id} auto={auto} busy={busy}
+        onStart={async (exportDir: string) => {
+          setBusy(true)
+          try { await api.post(`/projects/${p.id}/auto`, { export_dir: exportDir }); toast('已启动一键全自动成片，可离开页面，进度在此实时显示'); refreshAuto() }
+          catch (e: unknown) { toast((e as Error).message, true) }
+          finally { setBusy(false) }
+        }}
+        onCancel={async () => {
+          setBusy(true)
+          try { await api.post(`/projects/${p.id}/auto/cancel`); toast('已请求停止（已入队的镜头会继续跑完）'); refreshAuto() }
+          catch (e: unknown) { toast((e as Error).message, true) }
+          finally { setBusy(false) }
+        }} />
+
+      <PronunciationCard projectId={p.id} />
 
       {bible && (
         <section className="card">
@@ -48,7 +102,13 @@ export default function BiblePage() {
               ? <button className="btn small" style={{ marginLeft: 14 }} onClick={() => setEditing(JSON.parse(JSON.stringify(p.bible)))}>修订</button>
               : <>
                 <button className="btn small primary" style={{ marginLeft: 14 }} disabled={busy}
-                  onClick={() => act(async () => { await api.put(`/projects/${p.id}/bible`, editing); setEditing(null) }, '人物谱已定稿，版本 +1')}>定稿</button>
+                  onClick={() => act(async () => {
+                    const r = await api.put(`/projects/${p.id}/bible`, editing) as { style_changed?: boolean; purged?: { versions: number } | null }
+                    setEditing(null)
+                    toast(r.style_changed
+                      ? `画风已变更：旧画风定妆照与已生成视频（${r.purged?.versions ?? 0} 个版本）已全部作废，请重新生成定妆照后再生成视频`
+                      : '人物谱已定稿，版本 +1')
+                  })}>定稿</button>
                 <button className="btn small ghost" style={{ marginLeft: 8 }} onClick={() => setEditing(null)}>放弃</button>
               </>}
           </h3>
@@ -107,38 +167,6 @@ export default function BiblePage() {
         </section>
       )}
 
-      {p.bible && (
-        <section className="card">
-          <h3>分集 <span className="hint">覆盖全书全部 {p.chapters?.length} 章，分批续写，每集 60~90 秒</span></h3>
-          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8 }}>
-            <button className="btn primary" disabled={busy || p.plan_status === 'running'}
-              onClick={() => act(() => api.post(`/projects/${p.id}/plan`))}>
-              {p.episodes?.length ? '重新分集' : '开始分集'}
-            </button>
-            {p.plan_status === 'running' && <span className="stamp gold">分集中（含全书章节摘要，篇幅长时需数分钟）</span>}
-          </div>
-          {p.plan_status === 'failed' && <div className="error-banner">分集失败：{'\n'}{p.plan_error}</div>}
-
-          {p.episodes?.map(ep => (
-            <div key={ep.id} className="episode-row">
-              <div className="ep-no">第{numToCn(ep.episode_no)}集</div>
-              <div className="ep-body">
-                <div className="ep-title">{ep.title}</div>
-                <div className="ep-hook">钩子：{ep.hook}</div>
-                <div className="ep-syn">{ep.synopsis}</div>
-                <div className="ep-hook">尾钩：{ep.cliffhanger}</div>
-              </div>
-              <div className="ep-side">
-                源章 {ep.source_chapters[0]}–{ep.source_chapters[ep.source_chapters.length - 1]}<br />
-                目标 {ep.target_duration_s}s · 已耗 ¥{ep.cost_cny.toFixed(1)}<br />
-                <EpStamp status={ep.status} /><br />
-                <button className="btn small" style={{ marginTop: 4 }} onClick={() => go('board', p.id, ep.id)}>入分镜台 →</button>
-              </div>
-            </div>
-          ))}
-        </section>
-      )}
-
       {!!p.key_timeline?.length && (
         <section className="card">
           <h3>全书关键事件线 <span className="hint">防长篇伏笔丢失</span></h3>
@@ -148,6 +176,258 @@ export default function BiblePage() {
         </section>
       )}
     </>
+  )
+}
+
+interface PronRow { term: string; tts_alias: string; asr_aliases: string; level: string }
+
+function PronunciationCard({ projectId }: { projectId: string }) {
+  const { toast } = useNav()
+  const [rows, setRows] = useState<PronRow[] | null>(null)
+  const [saving, setSaving] = useState(false)
+
+  const load = useCallback(() => {
+    api.get(`/projects/${projectId}/pronunciation`)
+      .then((d: { terms: { term: string; tts_alias: string; asr_aliases: string[]; level: string }[] }) =>
+        setRows(d.terms.map(t => ({ term: t.term, tts_alias: t.tts_alias || '', asr_aliases: (t.asr_aliases || []).join('，'), level: t.level || 'A' }))))
+      .catch((e: Error) => toast(e.message, true))
+  }, [projectId, toast])
+  useEffect(() => { load() }, [load])
+
+  const upd = (i: number, k: keyof PronRow, v: string) =>
+    setRows(rs => (rs ?? []).map((r, j) => j === i ? { ...r, [k]: v } : r))
+  const addRow = () => setRows(rs => [...(rs ?? []), { term: '', tts_alias: '', asr_aliases: '', level: 'A' }])
+  const delRow = (i: number) => setRows(rs => (rs ?? []).filter((_, j) => j !== i))
+
+  const save = async () => {
+    setSaving(true)
+    try {
+      const terms = (rows ?? []).filter(r => r.term.trim()).map(r => ({
+        term: r.term.trim(), tts_alias: r.tts_alias.trim(),
+        asr_aliases: r.asr_aliases.split(/[,，\s]+/).map(s => s.trim()).filter(Boolean), level: r.level,
+      }))
+      const r = await api.put(`/projects/${projectId}/pronunciation`, { terms }) as { saved: number }
+      toast(`正音词库已保存（${r.saved} 条）`); load()
+    } catch (e: unknown) { toast((e as Error).message, true) }
+    finally { setSaving(false) }
+  }
+
+  return (
+    <section className="card">
+      <h3>正音词库 <span className="hint">人名/术语的读音矫正：TTS 别名保证读对，ASR 别字归一回标准词（仅配音开启时生效）</span></h3>
+      <table className="ledger" style={{ fontSize: 13 }}>
+        <thead><tr>
+          <th style={{ width: '22%' }}>标准词（画面显示）</th>
+          <th style={{ width: '22%' }}>TTS 别名（怎么读）</th>
+          <th style={{ width: '34%' }}>ASR 别字（逗号分隔）</th>
+          <th style={{ width: '12%' }}>等级</th>
+          <th style={{ width: '10%' }}></th>
+        </tr></thead>
+        <tbody>
+          {(rows ?? []).map((r, i) => (
+            <tr key={i}>
+              <td><input style={{ width: '100%' }} value={r.term} placeholder="萧炎" onChange={e => upd(i, 'term', e.target.value)} /></td>
+              <td><input style={{ width: '100%' }} value={r.tts_alias} placeholder="肖炎" onChange={e => upd(i, 'tts_alias', e.target.value)} /></td>
+              <td><input style={{ width: '100%' }} value={r.asr_aliases} placeholder="肖炎，小炎" onChange={e => upd(i, 'asr_aliases', e.target.value)} /></td>
+              <td>
+                <select value={r.level} onChange={e => upd(i, 'level', e.target.value)}>
+                  <option value="S">S 必读对</option>
+                  <option value="A">A 重要</option>
+                  <option value="B">B 一般</option>
+                </select>
+              </td>
+              <td><button className="btn small ghost" onClick={() => delRow(i)}>删</button></td>
+            </tr>
+          ))}
+          {rows && !rows.length && (
+            <tr><td colSpan={5} style={{ color: 'var(--ink-faint)', padding: 12 }}>暂无词条。加入人名、功法、宗门、丹药等易读错的专名。</td></tr>
+          )}
+        </tbody>
+      </table>
+      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+        <button className="btn small" onClick={addRow}>+ 加一行</button>
+        <button className="btn small primary" onClick={save} disabled={saving || !rows}>保存词库</button>
+      </div>
+    </section>
+  )
+}
+
+function DirPicker({ initial, onPick, onClose }: {
+  initial: string; onPick: (p: string) => void; onClose: () => void
+}) {
+  const { toast } = useNav()
+  const [data, setData] = useState<BrowseResult | null>(null)
+  const [cur, setCur] = useState('')
+  const [newName, setNewName] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  const load = useCallback((path: string) => {
+    setLoading(true)
+    api.get(`/system/browse?path=${encodeURIComponent(path)}`)
+      .then((d: BrowseResult) => { setData(d); setCur(d.path) })
+      .catch((e: Error) => toast(e.message, true))
+      .finally(() => setLoading(false))
+  }, [toast])
+
+  // 从初始目录的父级开始浏览（这样能直接看到并改选同级目录）；没有则从盘符/根开始
+  useEffect(() => { load(initial || '') }, [load, initial])
+
+  const mkdir = async () => {
+    const name = newName.trim()
+    if (!name || !cur) return
+    try {
+      const r = await api.post('/system/mkdir', { path: cur, name }) as { path: string }
+      setNewName(''); toast('已创建文件夹'); load(r.path)
+    } catch (e: unknown) { toast((e as Error).message, true) }
+  }
+
+  const overlay: CSSProperties = {
+    position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)', zIndex: 1000,
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+  }
+  const panel: CSSProperties = {
+    width: 'min(640px, 92vw)', maxHeight: '82vh', background: 'var(--paper, #faf7f0)',
+    borderRadius: 10, boxShadow: '0 12px 40px rgba(0,0,0,0.3)', display: 'flex',
+    flexDirection: 'column', overflow: 'hidden',
+  }
+
+  return (
+    <div style={overlay} onClick={onClose}>
+      <div style={panel} onClick={e => e.stopPropagation()}>
+        <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--hairline, #e5e0d5)' }}>
+          <h3 style={{ margin: 0 }}>选择成片导出目录</h3>
+          <div style={{ fontSize: 12.5, color: 'var(--ink-faint)', marginTop: 4, fontFamily: 'ui-monospace, monospace',
+                        wordBreak: 'break-all' }}>
+            当前：{cur || '（盘符 / 根目录）'}
+          </div>
+        </div>
+
+        <div style={{ padding: '10px 18px', display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center',
+                      borderBottom: '1px solid var(--hairline, #e5e0d5)' }}>
+          {data?.drives?.map(d => (
+            <button key={d} className="btn small" onClick={() => load(d)}>{d}</button>
+          ))}
+          {data?.parent != null && <button className="btn small" onClick={() => load(data.parent!)}>⬆ 上级</button>}
+          {data?.parent == null && data?.drives?.length ? <span style={{ fontSize: 12, color: 'var(--ink-faint)' }}>（已在盘符列表）</span> : null}
+        </div>
+
+        <div style={{ flex: 1, overflowY: 'auto', padding: '6px 0', minHeight: 180 }}>
+          {loading && <div style={{ padding: '12px 18px', color: 'var(--ink-faint)' }}>读取中……</div>}
+          {!loading && data?.dirs?.length === 0 && (
+            <div style={{ padding: '12px 18px', color: 'var(--ink-faint)' }}>此目录下没有子文件夹（可直接「选定此目录」或新建）</div>
+          )}
+          {!loading && data?.dirs?.map(d => (
+            <button key={d.path} onClick={() => load(d.path)}
+              style={{ display: 'block', width: '100%', textAlign: 'left', padding: '8px 18px', border: 'none',
+                       background: 'transparent', cursor: 'pointer', fontSize: 13.5, color: 'var(--ink, #333)' }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'rgba(181,68,52,0.07)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+              📁 {d.name}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ padding: '10px 18px', borderTop: '1px solid var(--hairline, #e5e0d5)', display: 'flex', gap: 8 }}>
+          <input type="text" value={newName} onChange={e => setNewName(e.target.value)}
+            placeholder="新建文件夹名" disabled={!cur}
+            onKeyDown={e => { if (e.key === 'Enter') mkdir() }}
+            style={{ flex: 1, fontSize: 13 }} />
+          <button className="btn small" disabled={!cur || !newName.trim()} onClick={mkdir}>新建</button>
+        </div>
+
+        <div style={{ padding: '12px 18px', borderTop: '1px solid var(--hairline, #e5e0d5)', display: 'flex',
+                      gap: 10, justifyContent: 'flex-end' }}>
+          <button className="btn ghost" onClick={onClose}>取消</button>
+          <button className="btn primary" disabled={!cur} onClick={() => onPick(cur)}>选定此目录</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function AutoCard({ projectId, auto, busy, onStart, onCancel }: {
+  projectId: string; auto: AutoStatus | null; busy: boolean
+  onStart: (exportDir: string) => void; onCancel: () => void
+}) {
+  void projectId
+  const running = !!auto?.running
+  const pr = auto?.progress
+  const stat = (s?: string) => (s === 'ready' ? '✓' : s === 'running' ? '…' : s === 'failed' ? '✗' : '—')
+  // 导出目录：用户未编辑时显示服务端记忆值；一旦选择/输入则以其为准（避免每 3 秒轮询把它冲掉）
+  const [dir, setDir] = useState<string | null>(null)
+  const [picking, setPicking] = useState(false)
+  const dirValue = dir ?? auto?.export_dir ?? ''
+  return (
+    <section className="card" style={{ borderLeft: '3px solid var(--cinnabar)' }}>
+      <h3>一键全自动成片
+        <span className="hint">人物谱 → 定妆照+分集 → 每集（分镜→自动确认→关键帧→视频）→ 合成导出 · 自动跳过已完成步骤</span>
+      </h3>
+
+      <label className="f">成片导出目录</label>
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 4 }}>
+        <button className="btn" disabled={running} onClick={() => setPicking(true)}>
+          {dirValue ? '更换目录' : '选择目录'}
+        </button>
+        {dirValue ? (
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '5px 10px',
+                         background: 'rgba(91,114,83,0.08)', borderRadius: 6, fontSize: 12.5,
+                         fontFamily: 'ui-monospace, monospace', color: 'var(--ink-soft)',
+                         maxWidth: '100%', overflow: 'hidden' }}>
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>📁 {dirValue}</span>
+            {!running && (
+              <button onClick={() => setDir('')} title="清除"
+                style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--ink-faint)',
+                         fontSize: 14, lineHeight: 1, padding: 0 }}>✕</button>
+            )}
+          </span>
+        ) : (
+          <span style={{ fontSize: 12.5, color: 'var(--ink-faint)' }}>未选择 · 仅在成片台生成，不另存到外部文件夹</span>
+        )}
+      </div>
+      <p style={{ fontSize: 12, color: 'var(--ink-faint)', margin: '0 0 14px' }}>
+        每集合成后另存为「书名第N集.mp4」，同名已存在则跳过。
+      </p>
+      {picking && (
+        <DirPicker initial={dirValue}
+          onClose={() => setPicking(false)}
+          onPick={(p) => { setDir(p); setPicking(false) }} />
+      )}
+
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+        <button className="btn primary" disabled={busy || running} onClick={() => onStart(dirValue.trim())}>
+          {running ? '自动成片进行中…' : '一键全自动成片'}
+        </button>
+        {running && <button className="btn ghost" disabled={busy} onClick={onCancel}>停止</button>}
+        {auto?.phase && <span className={`stamp ${running ? 'gold' : auto.error ? 'red' : 'green'}`}>{auto.phase}</span>}
+      </div>
+      <p style={{ fontSize: 12.5, color: 'var(--ink-faint)', marginTop: 8 }}>
+        视频是花钱环节（¥0.8/秒），自动化会跳过人工确认直接出片；每集设有成本上限，触顶则该集暂停并在日志报红，其余集继续。
+      </p>
+
+      {auto?.error && <div className="error-banner">自动成片中断（原始错误，不做静默兜底）：{'\n'}{auto.error}</div>}
+
+      {pr && (pr.episodes_total || pr.shots_total) ? (
+        <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', margin: '12px 0', fontSize: 13 }}>
+          <span>人物谱 {stat(pr.bible)}</span>
+          <span>定妆照 {stat(pr.refs)}</span>
+          <span>分集 {stat(pr.plan)}</span>
+          <span>剧集 {pr.episodes_done ?? 0}/{pr.episodes_total ?? 0} 成片</span>
+          <span>关键帧 {pr.shots_keyframed ?? 0}/{pr.shots_total ?? 0} 镜</span>
+          <span>视频 {pr.shots_video ?? 0}/{pr.shots_total ?? 0} 镜</span>
+        </div>
+      ) : null}
+
+      {auto?.log?.length ? (
+        <div style={{ maxHeight: 220, overflowY: 'auto', background: 'rgba(0,0,0,0.03)', borderRadius: 6,
+                      padding: '8px 12px', fontSize: 12, lineHeight: 1.8, fontFamily: 'ui-monospace, monospace' }}>
+          {auto.log.slice().reverse().map((l, i) => (
+            <div key={i} style={{ color: /失败|中断|跳过|暂停|报红|无法/.test(l.msg) ? 'var(--cinnabar)' : 'var(--ink-soft)' }}>
+              {new Date(l.t * 1000).toLocaleTimeString()} · {l.msg}
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </section>
   )
 }
 

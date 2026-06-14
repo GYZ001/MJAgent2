@@ -8,7 +8,19 @@ from pydantic import BaseModel, Field, ValidationError
 
 SHOT_SIZES = {"远景", "全景", "中景", "近景", "特写"}
 CAMERA_MOVES = {"固定", "推近", "拉远", "横摇", "跟随"}
-TRANSITIONS = {"硬切", "叠化", "黑场"}
+TRANSITIONS = {
+    "硬切",
+    "叠化",
+    "淡出淡入",
+    "黑场",
+    "闪黑",
+    "闪白",
+    "甩镜",
+    "遮挡转场",
+    "匹配剪辑",
+    "声音延续+叠化",
+    "声音先行+淡入",
+}
 EMOTIONS = {"平静", "愤怒", "悲伤", "惊恐", "喜悦", "讥讽", "坚定"}
 
 
@@ -91,6 +103,10 @@ class Shot(BaseModel):
     scene_setting: str
     characters: list[str] = Field(default_factory=list)
     action_desc: str
+    # 首尾帧画面描述：本镜【开始】与【结束】两个静止画面，必须明显不同（10s 视频的起点/终点）
+    first_frame_desc: str = ""
+    last_frame_desc: str = ""
+    source_excerpt: str = ""
     narration: str | None = None
     dialogues: list[Dialogue] = Field(default_factory=list)
     transition: str = "硬切"
@@ -112,17 +128,25 @@ class QaResult(BaseModel):
 
 def extract_json(text: str) -> dict:
     """从模型输出中提取第一个完整 JSON 对象。失败抛 ValueError（含原文摘要）。"""
-    cleaned = re.sub(r"```(?:json)?", "", text).strip()
-    start = cleaned.find("{")
-    if start == -1:
+    cleaned = re.sub(r"```(?:json)?\s*", "", text, flags=re.IGNORECASE).replace("```", "").strip()
+    first_start = cleaned.find("{")
+    if first_start == -1:
         raise ValueError(f"输出中找不到 JSON 对象。原文开头：{text[:200]}")
-    try:
-        obj, _ = json.JSONDecoder().raw_decode(cleaned[start:])
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"JSON 解析失败（{exc}）。片段：{cleaned[start:start + 200]}") from exc
-    if not isinstance(obj, dict):
+
+    first_error: json.JSONDecodeError | None = None
+    for match in re.finditer(r"{", cleaned):
+        start = match.start()
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(cleaned[start:])
+        except json.JSONDecodeError as exc:
+            first_error = first_error or exc
+            continue
+        if isinstance(obj, dict):
+            return obj
         raise ValueError(f"JSON 根节点不是对象。片段：{cleaned[start:start + 200]}")
-    return obj
+
+    detail = f"（{first_error}）" if first_error else ""
+    raise ValueError(f"JSON 解析失败{detail}。片段：{cleaned[first_start:first_start + 200]}")
 
 
 def schema_errors(model_cls: type[BaseModel], obj: dict) -> tuple[BaseModel | None, list[str]]:

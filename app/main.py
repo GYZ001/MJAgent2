@@ -17,7 +17,11 @@ from app.db import init_db
 async def lifespan(_: FastAPI):
     init_db()
     worker.recover_and_start()
-    yield
+    try:
+        yield
+    finally:
+        # 取消常驻 worker，保证 reload/退出能干净停机，不卡在 "Waiting for connections to close"
+        await worker.stop()
 
 
 app = FastAPI(title="漫剧 Agent 2.0", lifespan=lifespan)

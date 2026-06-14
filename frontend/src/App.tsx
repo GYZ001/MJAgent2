@@ -2,11 +2,13 @@ import { createContext, useCallback, useContext, useEffect, useState } from 'rea
 import { api, Episode, Project } from './api'
 import Studio from './pages/Studio'
 import BiblePage from './pages/BiblePage'
+import EpisodesPage from './pages/EpisodesPage'
 import BoardPage from './pages/BoardPage'
 import WallPage from './pages/WallPage'
+import CinemaPage from './pages/CinemaPage'
 import MonitorPage from './pages/MonitorPage'
 
-export type View = 'studio' | 'bible' | 'board' | 'wall' | 'monitor'
+export type View = 'studio' | 'bible' | 'episodes' | 'board' | 'wall' | 'cinema' | 'monitor'
 
 interface Nav {
   view: View
@@ -22,8 +24,10 @@ export const useNav = () => useContext(NavCtx)
 const SECTIONS: { key: View; label: string; needProject?: boolean; needEpisode?: boolean }[] = [
   { key: 'studio', label: '书房' },
   { key: 'bible', label: '人物谱', needProject: true },
+  { key: 'episodes', label: '分集', needProject: true },
   { key: 'board', label: '分镜台', needEpisode: true },
   { key: 'wall', label: '评审墙', needEpisode: true },
+  { key: 'cinema', label: '成片台', needEpisode: true },
   { key: 'monitor', label: '监制房' },
 ]
 
@@ -67,8 +71,10 @@ export default function App() {
       <main className="desk">
         {view === 'studio' && <Studio />}
         {view === 'bible' && projectId && <BiblePage key={projectId} />}
+        {view === 'episodes' && projectId && <EpisodesPage key={projectId} />}
         {view === 'board' && episodeId && <BoardPage key={episodeId} />}
         {view === 'wall' && episodeId && <WallPage key={episodeId} />}
+        {view === 'cinema' && episodeId && <CinemaPage key={episodeId} />}
         {view === 'monitor' && <MonitorPage />}
       </main>
       {toastMsg && <div className={`toast ${toastMsg.err ? 'err' : ''}`}>{toastMsg.text}</div>}

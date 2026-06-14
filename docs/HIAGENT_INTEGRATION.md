@@ -58,9 +58,9 @@ POST {base}/contents/generations/tasks
   "model": "<MODEL_VIDEO>",
   "content": [
     {"type": "text", "text": "<编译后的prompt> --ratio 9:16 --dur 10"},
-    // ⚠️ 以下参考图能力待验证（方舟协议形态）：
-    {"type": "image_url", "image_url": {"url": "<定妆照url或base64>"}, "role": "reference_image"},
-    {"type": "image_url", "image_url": {"url": "<上一镜头尾帧>"}, "role": "first_frame"}
+    // 当前视频链路只传首/尾关键图，不与 reference_image 混用：
+    {"type": "image_url", "image_url": {"url": "<本镜首图或上一镜尾图>"}, "role": "first_frame"},
+    {"type": "image_url", "image_url": {"url": "<本镜尾图>"}, "role": "last_frame"}
   ]
 }
 → 返回 {"id": "<task_id>", ...}
@@ -76,7 +76,7 @@ GET {base}/contents/generations/tasks/{task_id}
 **M0 验证结果（2026-06-12 实测回填）：**
 
 - [x] **模型确认**：`d7jf6nd5boeaebtfbdqg` 底层即 `doubao-seedance-2-0`（轮询响应 error 报文中透出），`implement: volcengine`，无需换 ID
-- [x] **轮询端点**：`GET {base}/contents/generations/tasks/{id}` ✅，响应字段：`status`（running/failed/succeeded…）、`content.video_url`、`content.last_frame_url`（**支持尾帧输出**，首尾帧衔接素材可得）、`error.message`、`expired_at`（创建后 7 天过期，**视频必须立即下载落盘**）
+- [x] **轮询端点**：`GET {base}/contents/generations/tasks/{id}` ✅，响应字段：`status`（running/failed/succeeded…）、`content.video_url`、`content.last_frame_url`、`error.message`、`expired_at`（创建后 7 天过期，**视频必须立即下载落盘**）
 - [x] **文本模型真身**：`d7ev7il5boeaebtf4sgg` = `doubao-seed-2-0-lite-260215`，是**推理模型**，响应含 `reasoning_content` 字段——JSON 提取必须只读 `message.content`
 - [x] **⚠️ 网关不做同步参数校验**：非法参数（如 `--dur 999`）创建仍返回 200 + task id，仅在轮询时异步 failed。**参数校验必须 100% 前置在编译器**，否则浪费任务额度且失败延迟发现
 - [x] **时长合法取值**：网关实测 `--dur 3` 非法、`4 / 12 / 15` 可创建；当前产品策略统一使用 **10s**，产品侧编译器只放行 `--dur 10`，并在 prompt 中要求模型在 10s 内尽可能塞入更多连续小镜头和剧情节点
@@ -89,8 +89,8 @@ GET {base}/contents/generations/tasks/{task_id}
 **一致性机制验证结果（2026-06-12 第二轮实测）：**
 
 - [x] **reference_image 端到端可用**：Seedream 定妆照以 base64 data URL 传入 `{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,..."},"role":"reference_image"}`，生成视频中角色发型/服装/五官与定妆照一致（目检通过，样片 `m0_samples/ref_test.mp4`）
-- [x] **⚠️ first_frame 与 reference_image 互斥**：混用返回 400 "first/last frame content cannot be mixed with reference media content" → 链头镜头用定妆照、链中镜头只用首帧，一致性沿链传递
-- [x] **⚠️ 成功任务不回传 last_frame_url**（succeeded 时该字段为空）→ 尾帧必须本地 ffmpeg 从落盘视频抽取（`-sseof -0.2 -vframes 1`）
+- [x] **⚠️ first_frame/last_frame 与 reference_image 互斥**：混用返回 400 "first/last frame content cannot be mixed with reference media content" → 视频阶段只传预生成首/尾关键图；角色一致性在关键帧生成阶段注入
+- [x] **⚠️ 成功任务不回传 last_frame_url**（succeeded 时该字段为空）→ 当前链路不再依赖回传或本地抽取尾帧，下一镜首帧直接使用上一镜预生成尾图
 - [x] **Seedream 尺寸下限 3,686,400 像素**（400 报文明示）；定妆照用 1440x2560（与视频 9:16 同比例），返回 `data[0].url`（JPEG）
 - [x] **HiAgent `/api/proxy/up/*` 文件接口（uploadraw/downloadkey）受 CSRF 保护**，程序化调用 403 EBADCSRFTOKEN，仅限控制台会话使用；本项目用 data URL 直传，不依赖文件托管
 - [x] `/api/proxy/api/v1/create_conversation`（Agent 会话 API，Apikey 头鉴权）可用，但视频生成保留直连 aigw 任务 API（结构化、可轮询）

@@ -35,14 +35,32 @@ export interface ShotVersion {
   id: string; version_no: number; prompt_text: string; status: string
   error?: string; video_url?: string; qa?: { overall: number; issues: string[] } | null
   cost_cny: number; latency_s: number
+  image_inputs?: {
+    first_frame_used: boolean; first_frame_src?: string | null; first_frame_scene_id?: string | null
+    last_frame_used?: boolean; last_frame_src?: string | null; last_frame_scene_id?: string | null
+  }
+}
+
+export interface SceneQa {
+  overall: number; expectation_match?: number; continuity?: number; clean_frame?: number; issues?: string[]
+}
+export interface SceneCandidate {
+  id: string; version_no: number; kind: 'head' | 'tail'; status: string; error?: string
+  qa?: SceneQa | null; image_url?: string
 }
 
 export interface Shot {
-  id: string; shot_no: number; duration_s: number; shot_size: string; camera_move: string
+  id: string; episode_id: string; shot_no: number; duration_s: number; shot_size: string; camera_move: string
   scene_setting: string; characters: string[]; action_desc: string
+  first_frame_desc: string; last_frame_desc: string
+  source_excerpt: string
   narration: string | null; dialogues: Dialogue[]; transition: string
   continuity_from_prev: number; adopted_version_id: string | null
   est_cost_cny: number; versions: ShotVersion[]
+  scene_status: string; approved_scene_id: string | null
+  approved_head_scene_id?: string | null; approved_tail_scene_id?: string | null
+  required_keyframes?: ('head' | 'tail')[]; scenes: SceneCandidate[]
+  video_stale: boolean
 }
 
 export interface Episode {
@@ -89,6 +107,29 @@ export interface Project {
   chapters?: { idx: number; title: string; char_count: number }[]
   episodes?: Episode[]
   chapter_count?: number; episode_count?: number
+}
+
+export interface AutoProgress {
+  bible?: string; refs?: string; plan?: string
+  episodes_total?: number; episodes_done?: number
+  shots_total?: number; shots_keyframed?: number; shots_video?: number
+}
+export interface AutoStatus {
+  running: boolean
+  phase?: string | null
+  error?: string | null
+  log?: { t: number; msg: string }[]
+  started_at?: number | null
+  updated_at?: number | null
+  export_dir?: string | null
+  progress?: AutoProgress
+}
+
+export interface BrowseResult {
+  path: string
+  parent: string | null
+  drives: string[]
+  dirs: { name: string; path: string }[]
 }
 
 export const numToCn = (n: number): string => {

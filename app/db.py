@@ -61,11 +61,16 @@ CREATE TABLE IF NOT EXISTS shots (
     scene_setting TEXT,
     characters TEXT,
     action_desc TEXT,
+    source_excerpt TEXT DEFAULT '',
     narration TEXT,
     dialogues TEXT,
     transition TEXT,
     continuity_from_prev INTEGER DEFAULT 0,
-    adopted_version_id TEXT
+    adopted_version_id TEXT,
+    approved_scene_id TEXT,
+    approved_head_scene_id TEXT,
+    approved_tail_scene_id TEXT,
+    scene_status TEXT DEFAULT 'none'
 );
 CREATE TABLE IF NOT EXISTS shot_versions (
     id TEXT PRIMARY KEY,
@@ -83,6 +88,19 @@ CREATE TABLE IF NOT EXISTS shot_versions (
     latency_s REAL DEFAULT 0,
     created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS shot_scenes (
+    id TEXT PRIMARY KEY,
+    shot_id TEXT NOT NULL,
+    version_no INTEGER NOT NULL,
+    kind TEXT DEFAULT 'tail',       -- head（场景起始镜的首图）/ tail（每镜的尾图，下一连续镜的首图）
+    prompt_text TEXT NOT NULL,
+    image_path TEXT,
+    status TEXT DEFAULT 'queued',   -- queued/running/succeeded/failed
+    error TEXT,
+    qa_json TEXT,                   -- {overall, issues, continuity}
+    cost_cny REAL DEFAULT 0,
+    created_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS jobs (
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -93,7 +111,10 @@ CREATE TABLE IF NOT EXISTS jobs (
     status TEXT DEFAULT 'queued',
     error TEXT,
     created_at REAL NOT NULL,
-    updated_at REAL NOT NULL
+    updated_at REAL NOT NULL,
+    after_shot_id TEXT,
+    after_version_id TEXT,
+    scene_kinds TEXT
 );
 CREATE TABLE IF NOT EXISTS provider_calls (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,12 +131,39 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS pronunciation (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT NOT NULL,
+    term TEXT NOT NULL,            -- 标准词（画面/字幕里显示的写法）
+    tts_alias TEXT,               -- 喂给 TTS 的安全写法（保证读音），为空则用 term
+    asr_aliases TEXT,             -- JSON 数组：ASR 可能识别成的别字，归一化时映射回 term
+    level TEXT DEFAULT 'A',       -- S/A/B：声音重要等级（S 人名/境界/结果，必须读对）
+    created_at REAL NOT NULL,
+    UNIQUE(project_id, term)
+);
+CREATE TABLE IF NOT EXISTS shot_audio (
+    shot_id TEXT PRIMARY KEY,
+    episode_id TEXT NOT NULL,
+    source_text TEXT,             -- 本镜口播标准文本（台词+旁白，标准词）
+    tts_text TEXT,                -- 实际喂 TTS 的安全文本（已套用正音别名）
+    audio_path TEXT,              -- 落盘配音文件
+    asr_text TEXT,                -- 成片/预检 ASR 识别（归一化后）
+    cer REAL DEFAULT -1,
+    level TEXT DEFAULT 'A',
+    status TEXT DEFAULT 'pending',-- pending/ok/failed/empty(无台词)
+    regen_count INTEGER DEFAULT 0,
+    error TEXT,
+    updated_at REAL NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_chapters_project ON chapters(project_id, idx);
 CREATE INDEX IF NOT EXISTS idx_episodes_project ON episodes(project_id, episode_no);
 CREATE INDEX IF NOT EXISTS idx_shots_episode ON shots(episode_id, shot_no);
 CREATE INDEX IF NOT EXISTS idx_versions_shot ON shot_versions(shot_id, version_no);
+CREATE INDEX IF NOT EXISTS idx_scenes_shot ON shot_scenes(shot_id, version_no);
 CREATE INDEX IF NOT EXISTS idx_versions_idem ON shot_versions(idem_key);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+CREATE INDEX IF NOT EXISTS idx_pron_project ON pronunciation(project_id);
+CREATE INDEX IF NOT EXISTS idx_shot_audio_episode ON shot_audio(episode_id);
 """
 
 
@@ -133,10 +181,20 @@ def get_conn() -> sqlite3.Connection:
 # 增量迁移：已有库上加列（首次建表时 SCHEMA 已含则忽略报错）
 MIGRATIONS = (
     "ALTER TABLE jobs ADD COLUMN after_shot_id TEXT",
+    "ALTER TABLE jobs ADD COLUMN after_version_id TEXT",
+    "ALTER TABLE jobs ADD COLUMN scene_kinds TEXT",
     "ALTER TABLE shot_versions ADD COLUMN image_inputs TEXT",
     "ALTER TABLE projects ADD COLUMN refs_status TEXT DEFAULT 'idle'",
     "ALTER TABLE projects ADD COLUMN refs_error TEXT",
     "ALTER TABLE projects ADD COLUMN refs_target TEXT",
+    "ALTER TABLE shots ADD COLUMN source_excerpt TEXT DEFAULT ''",
+    "ALTER TABLE shots ADD COLUMN approved_scene_id TEXT",
+    "ALTER TABLE shots ADD COLUMN approved_head_scene_id TEXT",
+    "ALTER TABLE shots ADD COLUMN approved_tail_scene_id TEXT",
+    "ALTER TABLE shots ADD COLUMN scene_status TEXT DEFAULT 'none'",  # none/generating/review/approved
+    "ALTER TABLE shot_scenes ADD COLUMN kind TEXT DEFAULT 'tail'",
+    "ALTER TABLE shots ADD COLUMN first_frame_desc TEXT DEFAULT ''",
+    "ALTER TABLE shots ADD COLUMN last_frame_desc TEXT DEFAULT ''",
 )
 
 

@@ -5,7 +5,7 @@ import { EpStamp } from './BiblePage'
 
 const SIZES = ['远景', '全景', '中景', '近景', '特写']
 const MOVES = ['固定', '推近', '拉远', '横摇', '跟随']
-const TRANS = ['硬切', '叠化', '黑场']
+const TRANS = ['硬切', '叠化', '淡出淡入', '黑场', '闪黑', '闪白', '甩镜', '遮挡转场', '匹配剪辑', '声音延续+叠化', '声音先行+淡入']
 
 export default function BoardPage() {
   const { episodeId, go, projectId, toast } = useNav()
@@ -22,7 +22,6 @@ export default function BoardPage() {
   }
 
   const totalDur = ep.shots?.reduce((s, x) => s + x.duration_s, 0) ?? 0
-  const estCost = ep.shots?.reduce((s, x) => s + x.est_cost_cny, 0) ?? 0
 
   return (
     <>
@@ -41,6 +40,12 @@ export default function BoardPage() {
             onClick={() => act(() => api.post(`/episodes/${ep.id}/storyboard`), '分镜生成已开始（约 2~5 分钟，含校验修复回路）')}>
             {ep.shots?.length ? '重新生成分镜' : '生成分镜脚本'}
           </button>
+          {ep.status === 'scripting' && (
+            <button className="btn ghost" disabled={busy}
+              onClick={() => act(() => api.post(`/episodes/${ep.id}/storyboard/cancel`), '已取消分镜生成请求，可重新发起')}>
+              取消生成
+            </button>
+          )}
           {ep.status === 'scripted' && (
             <button className="btn primary" disabled={busy}
               onClick={async () => {
@@ -50,11 +55,9 @@ export default function BoardPage() {
           )}
           {(ep.status === 'confirmed' || ep.status === 'generating') && (
             <button className="btn primary" disabled={busy}
-              onClick={async () => {
-                if (!window.confirm(`将为 ${ep.shots?.length} 个镜头创建生成任务，预估 ¥${estCost.toFixed(1)}（上限 ¥${ep.cost_limit_cny}）。继续？`)) return
-                await act(() => api.post(`/episodes/${ep.id}/generate`), '已入队，转到评审墙查看进度')
-                go('wall', projectId, ep.id)
-              }}>整集生成 ¥{estCost.toFixed(0)}</button>
+              onClick={() => go('wall', projectId, ep.id)}>
+              入评审墙（先出首尾关键帧 → 再生成视频）→
+            </button>
           )}
           <span style={{ flex: 1 }} />
           <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>
@@ -62,7 +65,11 @@ export default function BoardPage() {
           </span>
         </div>
         {ep.status === 'scripting' && <div style={{ marginTop: 10 }}><span className="stamp gold">分镜中</span> <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>正在写作固定 10s 视频段并通过校验器，失败会自动带错误修复重试……</span></div>}
-        {ep.script_error && <div className="error-banner">分镜失败（错误已列明，修改源头或重试）：{'\n'}{ep.script_error}</div>}
+        {ep.script_error && (
+          <div className="error-banner">
+            {ep.status === 'script_failed' ? `分镜失败（错误已列明，修改源头或重试）：\n${ep.script_error}` : ep.script_error}
+          </div>
+        )}
       </section>
 
       <div style={{ height: 20 }} />
@@ -87,6 +94,8 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
       await api.put(`/shots/${shot.id}`, {
         duration_s: 10, shot_size: edit.shot_size, camera_move: edit.camera_move,
         scene_setting: edit.scene_setting, characters: edit.characters, action_desc: edit.action_desc,
+        first_frame_desc: edit.first_frame_desc, last_frame_desc: edit.last_frame_desc,
+        source_excerpt: edit.source_excerpt,
         narration: edit.narration || null, dialogues: edit.dialogues, transition: edit.transition,
         continuity_from_prev: !!edit.continuity_from_prev,
       })
@@ -129,8 +138,14 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
             </div>
             <div className="full"><label className="f">场景标签（只写时间+地点，越短越好）</label>
               <textarea rows={1} value={edit.scene_setting} onChange={e => setEdit({ ...edit, scene_setting: e.target.value })} /></div>
-            <div className="full"><label className="f">画面描述（人物和剧情优先，10s 内 3~5 个连续小镜头/动作节点）</label>
+            <div className="full"><label className="f">画面描述（一个连贯动作，人物和剧情优先）</label>
               <textarea rows={3} value={edit.action_desc} onChange={e => setEdit({ ...edit, action_desc: e.target.value })} /></div>
+            <div><label className="f">首帧画面（本镜开始的静止画面）</label>
+              <textarea rows={2} value={edit.first_frame_desc ?? ''} onChange={e => setEdit({ ...edit, first_frame_desc: e.target.value })} /></div>
+            <div><label className="f">尾帧画面（结束的静止画面，须与首帧明显不同）</label>
+              <textarea rows={2} value={edit.last_frame_desc ?? ''} onChange={e => setEdit({ ...edit, last_frame_desc: e.target.value })} /></div>
+            <div className="full"><label className="f">对应小说原文（逐字摘录，给 Seedance 兜底参考）</label>
+              <textarea rows={3} value={edit.source_excerpt ?? ''} onChange={e => setEdit({ ...edit, source_excerpt: e.target.value })} /></div>
             <div className="full"><label className="f">旁白（可空）</label>
               <textarea rows={2} value={edit.narration ?? ''} onChange={e => setEdit({ ...edit, narration: e.target.value })} /></div>
             <div className="full">
@@ -154,6 +169,9 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
           <>
             <div className="kv full"><b>场景</b>{s.scene_setting}</div>
             <div className="kv full"><b>画面</b>{s.action_desc}</div>
+            {s.first_frame_desc && <div className="kv"><b>首帧</b>{s.first_frame_desc}</div>}
+            {s.last_frame_desc && <div className="kv"><b>尾帧</b>{s.last_frame_desc}</div>}
+            {s.source_excerpt && <div className="kv full"><b>原文</b>{s.source_excerpt}</div>}
             {s.narration && <div className="kv full"><b>旁白</b>{s.narration}</div>}
             {!!s.dialogues.length && (
               <div className="kv full"><b>台词</b>

@@ -11,25 +11,65 @@ from app.schemas import (BEAT_TYPES, Beat, BeatChain, Bible, Shot, Storyboard,
                          SHOT_SIZES, CAMERA_MOVES, TIME_OF_DAY_ORDER, TRANSITIONS)
 
 
-# 字数约束设计原则（实测教训，2026-06-12）：
-# ① 只有"上限"有物理意义：旁白+台词进 Seedance story_cues，未来 TTS 要在 10s 内念完，
-#    超过 ~7字/s 物理上念不完。"下限"是信息密度的代理指标，节拍表 turn 上线后已删除——
-#    代理指标会让模型在「凑字数」和「禁止注水」之间振荡（实测 8 轮修复拉锯）。
-# ② 提示词写目标值，校验器只卡 目标±30% 容差：LLM 数不准汉字（±30% 是常态），
-#    阈值=目标值 必然返工。TARGET 进 prompt，HARD 进校验。
-ORAL_TARGET_RANGE = (30, 50)        # 口播目标（prompt 用）：10s 念得完的量
-ORAL_HARD_MAX_PER_10S = 70          # 口播硬上限（校验用）：物理上念不完
-NARRATION_TARGET_CHARS = 45         # 旁白目标（prompt 用）
-NARRATION_HARD_CHARS = 60           # 旁白硬上限（校验用，目标+33%容差）
-ACTION_DESC_HARD_MIN = 50           # action_desc 硬下限（校验用；prompt 目标 70）
-ACTION_DESC_MIN_CHARS = 70
-VIDEO_SEGMENT_MIN_BEATS = 3
-SCENE_SETTING_MAX_CHARS = 18
+# 字数约束设计原则（2026-06-15 v12：旁白改为「选填且少用」）：
+# ① 叙事主力改为【台词 + 可见画面动作】；旁白(narration)默认留空，只在画面与台词都
+#    无法传达关键信息时（较大时间跳跃/必要内心独白/隐藏因果）才写一句短旁白。
+#    因此取消旁白下限校验、取消「纯画面空镜必须加旁白」的硬性要求。
+# ② 旁白仍保留上限校验：若写，必须短到 10s 念得完，避免又退回到旁白堆砌。
+# ③ 分镜模块不校验其它字数上限——台词/原文摘录/场景标签/节拍字段只设必要下限。
+ORAL_TARGET_RANGE = (35, 55)        # 口播目标（prompt 用，仅引导）：旁白+台词总量，10s 念得完
+NARRATION_TARGET_CHARS = 40         # 旁白目标上限（prompt 用）：若写则一句短旁白，10s 念得完
+NARRATION_TARGET_MIN_CHARS = 30     # 旧目标下限（保留供引用，旁白已改为选填）
+NARRATION_HARD_MAX = 52             # 旁白硬上限（校验用）：若写则 10s 配音念得完，目标 40 +30% 容差
+ACTION_DESC_HARD_MIN = 40           # action_desc 硬下限（校验用）：够把一个动作写清即可
+ACTION_DESC_MIN_CHARS = 70          # prompt 目标：把单一动作的起势/过程/收势与人物反应写清
+SOURCE_EXCERPT_MIN_CHARS = 8
+# 单镜=一个连贯动作（Seedance 实践）。下限 2 仅用于挡“半句话空动作”。
+# 注意：不再用“逗号分句数”当快切上限——一个动作写细了天然就有 5~7 个逗号分句，
+# 那样会把“描写充分的单一动作”误判成快切，导致模型永远改不对、无限重试。
+# 真正的“多镜头/快切”信号是显式的切镜/闪回/分屏词，用 _explicit_cut_markers 精确识别。
+VIDEO_SEGMENT_MIN_BEATS = 2
+# 显式多镜头/快切/蒙太奇标记：出现即判定为“一个镜头里塞多段”，高精度、低误伤。
+CUT_MARKERS = (
+    "切到", "切至", "切换到", "切换至", "镜头切", "画面切", "镜头转向", "镜头转到",
+    "闪回", "回忆画面", "回忆起", "蒙太奇", "分屏", "下一个镜头", "下一镜", "转场到", "→",
+)
+SCENE_SETTING_MAX_CHARS = 18        # 仅作 prompt 建议值，不再参与校验
 TRANSITION_HINTS = (
     "次日", "第二天", "当天", "清晨", "上午", "中午", "下午", "傍晚", "深夜", "夜里",
     "与此同时", "转场", "随后", "片刻后", "几小时后", "数小时后", "一夜后", "回到", "另一边",
     "带着", "顺着", "接着", "继续", "仍", "还", "已经",
 )
+
+SCENE_CUT_TRANSITIONS = TRANSITIONS - {"硬切"}
+EMOTIONAL_TRANSITIONS = {"叠化", "淡出淡入", "声音延续+叠化", "声音先行+淡入"}
+TRANSITION_VISUAL_HINTS = {
+    "叠化": ("叠化", "渐", "柔", "余韵", "模糊", "压低"),
+    "淡出淡入": ("淡出", "淡入", "渐暗", "渐黑", "渐亮", "压暗", "暗下"),
+    "黑场": ("黑场", "黑", "暗"),
+    "闪黑": ("闪黑", "黑", "暗"),
+    "闪白": ("闪白", "白", "强光", "亮", "刺眼"),
+    "甩镜": ("甩", "模糊", "横摇", "拖影", "运动"),
+    "遮挡转场": ("遮挡", "掠过", "遮住", "挡住", "黑影", "衣袖", "门"),
+    "匹配剪辑": ("匹配", "呼应", "相同", "同样", "圆", "构图"),
+    "声音延续+叠化": ("叠化", "余音", "话音", "声音", "回响", "渐"),
+    "声音先行+淡入": ("声音", "先行", "淡入", "渐", "传来"),
+}
+
+
+def default_scene_transition(prev: Shot | None, shot: Shot) -> str:
+    """根据换场关系给一个稳定默认值；具体创作仍允许模型/人工选择更贴合的转场。"""
+    if not prev:
+        return "硬切"
+    shared_chars = set(prev.characters) & set(shot.characters)
+    text = f"{prev.narration or ''}{shot.narration or ''}{prev.action_desc}{shot.action_desc}"
+    if shared_chars and any(k in text for k in ("回忆", "想起", "余音", "话音", "怔住", "眼眶", "沉默", "失神")):
+        return "声音延续+叠化"
+    if any(k in text for k in ("冲", "追", "逃", "奔", "扑", "甩")):
+        return "甩镜"
+    if any(k in text for k in ("惊", "爆", "强光", "刺眼", "斗气", "火光")):
+        return "闪白"
+    return "淡出淡入"
 
 
 def _text_budget(shot: Shot) -> int:
@@ -44,9 +84,44 @@ def _action_beat_count(text: str) -> int:
     return len(parts)
 
 
+def _explicit_cut_markers(text: str | None) -> list[str]:
+    """识别 action_desc 里真正的多镜头/快切/闪回标记（而非把逗号分句当快切）。"""
+    t = text or ""
+    return [m for m in CUT_MARKERS if m in t]
+
+
+def _too_similar(a: str, b: str) -> bool:
+    """首尾帧描述是否过于相似（字符集合 Jaccard 相似度 ≥0.8 视为几乎相同）。"""
+    sa, sb = set(a), set(b)
+    if not sa or not sb:
+        return False
+    inter = len(sa & sb)
+    union = len(sa | sb)
+    return union > 0 and inter / union >= 0.8
+
+
 def _has_transition_hint(*parts: str | None) -> bool:
     text = "".join(part or "" for part in parts)
     return any(hint in text for hint in TRANSITION_HINTS)
+
+
+def _has_transition_visual(transition: str, *parts: str | None) -> bool:
+    text = "".join(part or "" for part in parts)
+    hints = TRANSITION_VISUAL_HINTS.get(transition, (transition,))
+    return any(hint in text for hint in hints)
+
+
+_LEADING_ACTION_SEQUENCE_RE = re.compile(r"^\s*(?:先|首先)\s*(?:[，,、。；;：:]|…+|\.{2,})\s*")
+
+
+def normalize_action_desc(text: str | None) -> str:
+    """去掉模型把顺序提示词误写进 action_desc 句首的孤立标记。"""
+    normalized = (text or "").strip()
+    while True:
+        cleaned = _LEADING_ACTION_SEQUENCE_RE.sub("", normalized, count=1).lstrip()
+        if cleaned == normalized:
+            return normalized
+        normalized = cleaned
 
 
 def validate_storyboard(board: Storyboard, bible: Bible, target_duration_s: int) -> list[str]:
@@ -76,29 +151,49 @@ def validate_storyboard(board: Storyboard, bible: Bible, target_duration_s: int)
     prev_sizes: list[str] = []
     scene_last_seen: dict[str, int] = {}
     for i, shot in enumerate(shots):
+        shot.action_desc = normalize_action_desc(shot.action_desc)
         tag = f"shots[{i}](shot_no={shot.shot_no})"
         # V2 时长合法取值
         if shot.duration_s != fixed_duration:
             errors.append(f"{tag}.duration_s={shot.duration_s}，固定视频生成时长必须为 {fixed_duration}s")
-        # V3 口播带宽：只卡有物理意义的上限（10s 念不完）；下限已删除——信息密度由节拍表 turn 保证。
-        budget = _text_budget(shot)
-        oral_max = shot.duration_s * ORAL_HARD_MAX_PER_10S // 10
-        if budget > oral_max:
-            errors.append(
-                f"{tag} 旁白+台词共 {budget} 字，超过 {shot.duration_s}s 硬上限 {oral_max} 字——"
-                f"配音物理上念不完，请精简到 {ORAL_TARGET_RANGE[0]}~{ORAL_TARGET_RANGE[1]} 字，多余信息移入 action_desc")
-        # V8 画面丰富度：校验阈值低于 prompt 目标值（容差带，LLM 数不准汉字）。
+        # V8 画面清晰度：单镜只演一个连贯动作，把它写清即可（不再逼塞多个快切小镜头）。
         if len(shot.action_desc) < ACTION_DESC_HARD_MIN:
             errors.append(
                 f"{tag}.action_desc 仅 {len(shot.action_desc)} 字，低于硬下限 {ACTION_DESC_HARD_MIN} 字；"
-                f"请按目标 {ACTION_DESC_MIN_CHARS} 字写出连续小镜头、画面推进、角色反应和新信息")
+                f"请按目标 {ACTION_DESC_MIN_CHARS} 字把这一个动作的起势、过程、收势和人物表情/反应写清")
+        source_len = len((shot.source_excerpt or "").strip())
+        if source_len < SOURCE_EXCERPT_MIN_CHARS:
+            errors.append(
+                f"{tag}.source_excerpt 仅 {source_len} 字；每个分镜必须带对应小说原文摘录，"
+                f"请从本集原文中逐字摘录至少 {SOURCE_EXCERPT_MIN_CHARS} 字作为 Seedance 兜底参考")
         beat_count = _action_beat_count(shot.action_desc)
         if beat_count < VIDEO_SEGMENT_MIN_BEATS:
             errors.append(
-                f"{tag}.action_desc 只有 {beat_count} 个动作/信息节拍；10s 视频段至少需要 "
-                f"{VIDEO_SEGMENT_MIN_BEATS} 个连续节拍，请用逗号或分号写清先后推进")
-        if budget == 0:
-            errors.append(f"{tag} 是纯画面镜头；固定 10s 视频段必须加入旁白或台词来承载剧情信息")
+                f"{tag}.action_desc 只有 {beat_count} 个动作片段，几乎是空动作；"
+                "请把这一个连贯动作写出起势与收势（如「她攥紧衣角，眼泪无声砸落」）")
+        cut_markers = _explicit_cut_markers(shot.action_desc)
+        if cut_markers:
+            errors.append(
+                f"{tag}.action_desc 出现多镜头/快切标记 {cut_markers}；单镜只拍一个连贯动作，"
+                "请删掉切镜/闪回/分屏等跳切，把多余剧情或时间跳跃移入 narration")
+        # 首尾帧：必须填写且明显不同（否则生成的首图/尾图一模一样、视频没有动作）
+        ff = (shot.first_frame_desc or "").strip()
+        lf = (shot.last_frame_desc or "").strip()
+        if len(ff) < 10:
+            errors.append(f"{tag}.first_frame_desc 太短或缺失；请写本镜【开始】的静止画面（动作发生前，25~50字）")
+        if len(lf) < 10:
+            errors.append(f"{tag}.last_frame_desc 太短或缺失；请写本镜【结束】的静止画面（动作完成后，25~50字）")
+        if ff and lf and _too_similar(ff, lf):
+            errors.append(
+                f"{tag} 首帧与尾帧画面描述几乎相同；二者必须明显不同（动作前 vs 动作后，体现姿态/表情/手部/道具的可见变化），"
+                "否则首图尾图会一模一样、视频没有动作")
+        # 旁白选填、少用：不再要求每镜必填，也不再禁止纯画面/纯台词镜头；
+        # 若写了旁白则保留上限校验，避免重新退回旁白堆砌。
+        narration_len = len((shot.narration or "").strip())
+        if narration_len > NARRATION_HARD_MAX:
+            errors.append(
+                f"{tag}.narration 共 {narration_len} 字，超过硬上限 {NARRATION_HARD_MAX} 字——10s 配音念不完、读太快观感差；"
+                f"旁白请精简到 {NARRATION_TARGET_CHARS} 字以内（一句最关键的推进），或直接留空、改用台词与画面动作承载")
         # V4 角色合法性
         if not shot.characters:
             errors.append(f"{tag}.characters 为空；每个 10s 视频段必须以人物和剧情为主体，至少包含 1 个角色圣经中的角色")
@@ -126,12 +221,8 @@ def validate_storyboard(board: Storyboard, bible: Bible, target_duration_s: int)
             errors.append(f"{tag}.camera_move=「{shot.camera_move}」不在 {sorted(CAMERA_MOVES)}")
         if shot.transition not in TRANSITIONS:
             errors.append(f"{tag}.transition=「{shot.transition}」不在 {sorted(TRANSITIONS)}")
-        # V6 场景连续性
+        # V6 场景连续性（场景标签长度上限校验已取消）
         scene = shot.scene_setting.strip()
-        if len(scene) > SCENE_SETTING_MAX_CHARS:
-            errors.append(
-                f"{tag}.scene_setting 过长（{len(scene)} 字）；场景只作连续性标签，"
-                f"最多 {SCENE_SETTING_MAX_CHARS} 字，只保留时间+地点，删除氛围和环境描写")
         if scene in scene_last_seen and scene_last_seen[scene] != i - 1:
             errors.append(f"场景「{scene}」在 shots[{scene_last_seen[scene]}] 与 shots[{i}] 间被其他场景打断，同场景镜头必须连续排列")
         scene_last_seen[scene] = i
@@ -162,12 +253,20 @@ def validate_storyboard(board: Storyboard, bible: Bible, target_duration_s: int)
                     if shot.transition == "硬切":
                         errors.append(
                             f"{tag}.transition=硬切 但 scene_setting 从「{prev_scene}」切到「{scene}」；"
-                            "跨时间/地点请用「叠化」或「黑场」并写清承接")
+                            f"跨时间/地点请用 {sorted(SCENE_CUT_TRANSITIONS)} 之一，并写清承接")
+                    elif shot.transition not in SCENE_CUT_TRANSITIONS:
+                        errors.append(
+                            f"{tag}.transition=「{shot.transition}」不适合换场；"
+                            f"换场请用 {sorted(SCENE_CUT_TRANSITIONS)} 之一")
                     dialogue_text = "".join(d.line for d in shot.dialogues)
                     if not _has_transition_hint(scene, shot.action_desc, shot.narration, dialogue_text):
                         errors.append(
                             f"{tag} 从上一镜「{prev_scene}」切到「{scene}」但缺少承接说明；"
                             "请在 narration 或 action_desc 写清时间跳跃、线索带入或人物为何来到新场景")
+                    if not _has_transition_visual(shot.transition, prev.last_frame_desc, prev.action_desc):
+                        errors.append(
+                            f"shots[{i - 1}](shot_no={prev.shot_no}).last_frame_desc 未体现进入镜{shot.shot_no:02d}的「{shot.transition}」转场收尾；"
+                            "请在上一镜尾帧写出可见转场视觉，例如渐暗/闪白/遮挡/甩镜模糊/叠化余韵/匹配构图呼应")
         # V7 景别不三连
         prev_sizes.append(shot.shot_size)
         if len(prev_sizes) >= 3 and prev_sizes[-1] == prev_sizes[-2] == prev_sizes[-3]:
@@ -216,19 +315,19 @@ def validate_beat_chain(chain: BeatChain, bible: Bible, expected_beats: int) -> 
                     f"{tag} 时间({beat_scene_label(b)})早于上一拍——时间只能向前，禁止闪回；"
                     "前史改用第 1 拍 event/turn 一句话带过")
             prev_time = cur
-        if not 2 <= len(b.location.strip()) <= 10:
-            errors.append(f"{tag}.location=「{b.location}」要求 2~10 字主地点标签")
+        if len(b.location.strip()) < 2:
+            errors.append(f"{tag}.location=「{b.location}」要求至少 2 字主地点标签")
         if not b.characters:
             errors.append(f"{tag}.characters 为空；每拍必须有实际在场角色")
         for name in b.characters:
             if name not in bible_names:
                 errors.append(f"{tag}.characters 含「{name}」不在角色圣经：{'/'.join(sorted(bible_names))}")
-        if not 8 <= len(b.event) <= 50:
-            errors.append(f"{tag}.event 长度 {len(b.event)} 字，要求 8~50 字（谁做了什么，一句话）")
-        if not 4 <= len(b.turn) <= 40:
-            errors.append(f"{tag}.turn 长度 {len(b.turn)} 字，要求 4~40 字（局势变化/新信息）")
-        if not 4 <= len(b.carry) <= 30:
-            errors.append(f"{tag}.carry 长度 {len(b.carry)} 字，要求 4~30 字（留给下一拍的钩子）")
+        if len(b.event) < 8:
+            errors.append(f"{tag}.event 长度 {len(b.event)} 字，要求至少 8 字（谁做了什么，一句话）")
+        if len(b.turn) < 4:
+            errors.append(f"{tag}.turn 长度 {len(b.turn)} 字，要求至少 4 字（局势变化/新信息）")
+        if len(b.carry) < 4:
+            errors.append(f"{tag}.carry 长度 {len(b.carry)} 字，要求至少 4 字（留给下一拍的钩子）")
         if b.beat_type not in BEAT_TYPES:
             errors.append(f"{tag}.beat_type=「{b.beat_type}」不在 {sorted(BEAT_TYPES)}")
         if i > 0 and b.beat_type == "铺垫" and beats[i - 1].beat_type == "铺垫":
@@ -249,13 +348,14 @@ def normalize_continuity(board: Storyboard) -> None:
     for i, shot in enumerate(board.shots):
         if i == 0:
             shot.continuity_from_prev = False
+            shot.transition = "硬切"
             continue
         same_scene = shot.scene_setting.strip() == board.shots[i - 1].scene_setting.strip()
         shot.continuity_from_prev = same_scene
         if same_scene:
             shot.transition = "硬切"
         elif shot.transition == "硬切":
-            shot.transition = "叠化"
+            shot.transition = default_scene_transition(board.shots[i - 1], shot)
 
 
 def validate_storyboard_against_beats(board: Storyboard, bible: Bible, target_duration_s: int,
@@ -274,10 +374,6 @@ def validate_storyboard_against_beats(board: Storyboard, bible: Bible, target_du
         missing = [n for n in beat.characters if n not in shot.characters]
         if missing:
             errors.append(f"{tag}.characters 缺少第 {i + 1} 拍在场角色：{missing}")
-        if shot.narration and len(shot.narration) > NARRATION_HARD_CHARS:
-            errors.append(
-                f"{tag}.narration 共 {len(shot.narration)} 字，超过硬上限 {NARRATION_HARD_CHARS} 字——"
-                f"请按目标 ≤{NARRATION_TARGET_CHARS} 字精简：旁白只写画面拍不出的信息（时间跳跃/内心），剧情信息移入台词或 action_desc")
     return errors
 
 
@@ -299,14 +395,55 @@ def validate_bible(bible: Bible) -> list[str]:
     return errors
 
 
+def _snap_duration(value: int) -> int:
+    """把目标时长吸附到 [MIN, MAX] 内、STEP 的整数倍（40/50/60）。"""
+    step = config.EPISODE_TARGET_STEP_S
+    lo, hi = config.EPISODE_TARGET_MIN_S, config.EPISODE_TARGET_MAX_S
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        v = config.EPISODE_TARGET_DEFAULT_S
+    v = min(max(v, lo), hi)
+    v = round(v / step) * step
+    return min(max(v, lo), hi)
+
+
+def normalize_plan_chapters(plan_episodes: list, *, start_episode_no: int = 1,
+                            start_chapter: int = 1, chapter_count: int = 1) -> None:
+    """生产级兜底：用确定性代码强制 episode_no / source_chapters / target_duration_s 满足不变量，
+    而不是把“章节区间记账”这种 LLM 不擅长的活儿丢给模型反复重试。
+    创意内容（标题/钩子/梗概）仍由模型负责；本函数只就地修正结构字段，原地修改 plan_episodes。
+    规则：episode_no 连续；首集从 start_chapter 起；其后每集 [lo,hi] 连续、不倒退、不跳章、不越界，
+    允许同一章被连续多集共同覆盖。"""
+    prev_start = start_chapter
+    prev_end = start_chapter - 1
+    for i, ep in enumerate(plan_episodes):
+        ep.episode_no = start_episode_no + i
+        ep.target_duration_s = _snap_duration(getattr(ep, "target_duration_s", config.EPISODE_TARGET_DEFAULT_S))
+        chs = [c for c in (ep.source_chapters or []) if isinstance(c, int)]
+        lo = min(chs) if chs else (start_chapter if i == 0 else prev_end)
+        hi = max(chs) if chs else lo
+        if i == 0:
+            lo = start_chapter
+        else:
+            lo = min(max(lo, prev_start), prev_end + 1)   # 不早于上集起点、不跳章
+        hi = min(max(hi, lo, prev_end), chapter_count)    # 不早于上集终点、不越界、≥lo
+        lo = min(lo, chapter_count)
+        ep.source_chapters = list(range(lo, hi + 1))
+        prev_start, prev_end = lo, hi
+
+
 def validate_plan(plan_episodes: list, chapter_count: int,
                   *, start_episode_no: int = 1, start_chapter: int = 1) -> list[str]:
-    """校验一批剧集。批内 episode_no 从 start_episode_no 连续递增，
-    第一集须从 start_chapter 起，章节连续不重叠不跳，不越界。"""
+    """校验一批剧集。批内 episode_no 从 start_episode_no 连续递增，第一集须从 start_chapter 起，
+    章节只能向前推进（不倒退、不跳章），不越界。
+    允许同一章被连续多集共同覆盖——章节内容多时一章可拆成 2~3 集，是合理结构，
+    不能因“章节数 < 想要的集数”就逼模型必须每章独占一集（那会导致无法满足、无限重试）。"""
     errors = []
     if not plan_episodes:
         return ["本批未规划出任何剧集"]
-    prev_end = start_chapter - 1
+    prev_start = start_chapter      # 上一集的起始章（用于判断是否倒退）
+    prev_end = start_chapter - 1    # 已推进到的最后一章
     for i, ep in enumerate(plan_episodes):
         if ep.episode_no != start_episode_no + i:
             errors.append(f"episodes[{i}].episode_no={ep.episode_no}，本批要求从 {start_episode_no} 起连续递增")
@@ -316,15 +453,21 @@ def validate_plan(plan_episodes: list, chapter_count: int,
             continue
         if chs != list(range(chs[0], chs[-1] + 1)):
             errors.append(f"episodes[{i}].source_chapters={chs} 必须是连续区间")
-        if i == 0 and chs[0] != start_chapter:
-            errors.append(f"本批第一集 source_chapters 必须从第 {start_chapter} 章开始，当前为第 {chs[0]} 章")
-        if chs[0] <= prev_end:
-            errors.append(f"episodes[{i}].source_chapters 与上一集重叠（上一集止于第{prev_end}章）")
-        if chs[0] > prev_end + 1:
-            errors.append(f"episodes[{i}].source_chapters 跳过了第{prev_end + 1}~{chs[0] - 1}章，集间不允许跳章")
+        if i == 0:
+            if chs[0] != start_chapter:
+                errors.append(f"本批第一集 source_chapters 必须从第 {start_chapter} 章开始，当前为第 {chs[0]} 章")
+        else:
+            # 允许：续讲同一章（chs[0]==prev_end，把一章拆成多集）或顺接下一章（chs[0]==prev_end+1）。
+            if chs[0] < prev_start:
+                errors.append(f"episodes[{i}].source_chapters 起点第{chs[0]}章早于上一集起点第{prev_start}章，集间剧情不允许倒退")
+            elif chs[0] > prev_end + 1:
+                errors.append(f"episodes[{i}].source_chapters 跳过了第{prev_end + 1}~{chs[0] - 1}章，集间不允许跳章")
+            elif chs[-1] < prev_end:
+                errors.append(f"episodes[{i}].source_chapters 止于第{chs[-1]}章，早于上一集的第{prev_end}章，集间剧情不允许倒退")
         if chs[-1] > chapter_count:
             errors.append(f"episodes[{i}].source_chapters 引用第{chs[-1]}章，但全书只有 {chapter_count} 章")
-        prev_end = chs[-1]
+        prev_start = chs[0]
+        prev_end = max(prev_end, chs[-1])
         if not config.EPISODE_TARGET_MIN_S <= ep.target_duration_s <= config.EPISODE_TARGET_MAX_S:
             errors.append(
                 f"episodes[{i}].target_duration_s={ep.target_duration_s}，"

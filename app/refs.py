@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 from app import config, hiagent
 from app.db import get_conn
@@ -48,9 +49,15 @@ async def generate_refs(project_id: str, only_character: str | None = None) -> N
     errors: list[str] = []
     for c in targets:
         try:
+            path = ref_path(project_id, c.name)
+            # 重做前先删掉旧定妆照文件，确保不会残留上一版人物图
+            try:
+                Path(path).unlink()
+            except OSError:
+                pass
+            c.ref_image_path = None
             prompt = (c.portrait_prompt_override or "").strip() or portrait_prompt(style, c.appearance_canonical)
             item = await hiagent.generate_image(prompt, size=config.REF_IMAGE_SIZE)
-            path = ref_path(project_id, c.name)
             if item.get("url"):
                 await hiagent.download(item["url"], path)
             elif item.get("b64_json"):
