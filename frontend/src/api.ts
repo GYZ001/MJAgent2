@@ -117,6 +117,23 @@ export interface SceneCandidate {
   qa?: SceneQa | null; image_url?: string
 }
 
+export interface ModePlan {
+  mode: 'FIRST_LAST_FRAME_MODE' | 'REFERENCE_IMAGE_MODE' | string
+  reason: string
+  confidence: number
+  ruleMode?: string | null
+  llmUsed?: boolean
+  defaulted?: boolean
+  needReusePreviousScene?: boolean
+  needGenerateNewReferences?: boolean
+  referenceImagePlan?: {
+    totalCount: number
+    reusePreviousSceneCount: number
+    generateNewCount: number
+    types: string[]
+  } | null
+}
+
 export interface Shot {
   id: string; episode_id: string; script_id?: string | null; shot_no: number; duration_s: number; shot_size: string; camera_move: string
   scene_setting: string; characters: string[]; action_desc: string
@@ -129,6 +146,7 @@ export interface Shot {
   approved_head_scene_id?: string | null; approved_tail_scene_id?: string | null
   required_keyframes?: ('head' | 'tail')[]; scenes: SceneCandidate[]
   video_stale: boolean
+  mode_plan?: ModePlan | null
 }
 
 export interface Episode {

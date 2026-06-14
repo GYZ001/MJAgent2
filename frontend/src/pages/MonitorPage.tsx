@@ -71,6 +71,21 @@ const BAILIAN_MODEL_CHOICES: Record<'text' | 'vlm', ModelChoice[]> = {
   ],
 }
 
+const HIAGENT_MODEL_CHOICES: Record<ModelKind, ModelChoice[]> = {
+  text: [
+    { label: '文本推理模型（默认）', value: 'd2a5n9rnvvm49eucvnvg' },
+  ],
+  vlm: [
+    { label: '视觉质检模型（默认）', value: 'd7ev7il5boeaebtf4sgg' },
+  ],
+  video: [
+    { label: 'Seedance 视频生成（默认）', value: 'd7jf6nd5boeaebtfbdqg' },
+  ],
+  image: [
+    { label: 'Seedream 图像生成（默认）', value: 'd7ute7ppcc7n89uuqqp0' },
+  ],
+}
+
 function providerLabel(provider: ProviderKey) {
   return PROVIDERS.find(p => p.key === provider)?.label ?? provider
 }
@@ -114,7 +129,10 @@ function modelChoices(kind: ModelKind, provider: ProviderKey, currentModel: stri
     choices = [...OPENROUTER_MODEL_CHOICES[kind]]
   } else if (provider === 'bailian' && (kind === 'text' || kind === 'vlm')) {
     choices = [...BAILIAN_MODEL_CHOICES[kind]]
+  } else if (provider === 'hiagent') {
+    choices = [...HIAGENT_MODEL_CHOICES[kind]]
   }
+  // 当前配置的模型如果不在列表中，补充进去（兼容历史值）
   if (currentModel && !isDisallowedModel(kind, provider, currentModel) && !choices.some(choice => choice.value === currentModel)) {
     choices.unshift({ label: currentModel, value: currentModel })
   }
