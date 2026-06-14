@@ -203,6 +203,7 @@ MIGRATIONS = (
     "ALTER TABLE episodes ADD COLUMN screenplay_json TEXT",
     "ALTER TABLE episodes ADD COLUMN screenplay_status TEXT DEFAULT 'pending'",
     "ALTER TABLE episodes ADD COLUMN screenplay_error TEXT",
+    "ALTER TABLE shots ADD COLUMN mode_plan TEXT",
 )
 
 
