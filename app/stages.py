@@ -241,7 +241,7 @@ async def generate_bible(chapters: list[dict], rolling_summary: str = "",
 要求：
 1. 只收录出场 2 次以上或明显重要的角色，最多 8 个。
 2. appearance_canonical 是该角色的"固定外观锚点串"：40~60 字，必须包含 性别年龄感/发型发色/服装款式与颜色/1 个标志性特征。只写视觉可见信息，不写性格。原著未描写的部分，按题材合理补全并保持内部一致。
-3. visual_style_canonical：25~40 字的全局画风串，包含 美术风格/光线/色调，适配竖屏漫剧，必须依据本书题材定制。
+3. visual_style_canonical：25~40 字的全局画风串，包含 美术风格/光线/色调，适配竖屏漫剧，必须依据本书题材定制。【硬性约束】必须是 CG/动画/漫画/插画类的非真人风格（如 3D 渲染、3D 写实 CG、2D 动画、动态漫画、厚涂插画、国漫风等，写实质感/照片级/胶片颗粒等氛围词可以保留），但严禁"真人实拍/真人出镜/实拍摄影"这类真人风格描述（否则后续 Seedance 视频接口会因疑似真人而报错 InputImageSensitiveContentDetected）。核心是画面为 CG/动画渲染而非真人拍摄。
 4. speech_style 用于后续台词写作：句长习惯/口头禅/敬语习惯等，15~30 字。
 
 小说文本：
@@ -465,7 +465,7 @@ async def _generate_storyboard_from_full_script(episode: dict, source_text: str,
     transition_options = "|".join(sorted(TRANSITIONS))
     prompt = f"""任务：为漫剧第 {episode['episode_no']} 集《{episode['title']}》编写分镜脚本。
 
-你现在处于“分镜台”阶段，必须基于下方【已确认完整剧本】把连续故事拆成固定 10 秒视频段镜头卡，而不是回到剧本台重新写故事。
+你现在处于“分镜台”阶段，必须基于下方【已确认完整剧本】把连续故事拆成 5~10 秒视频段镜头卡，而不是回到剧本台重新写故事。每镜时长按动作密度自定：动作简单/静态的镜头给短时长，避免视频里人物停滞干等。
 
 已确认完整剧本：
 标题：{screenplay.title}
@@ -509,7 +509,7 @@ async def _generate_storyboard_from_full_script(episode: dict, source_text: str,
 7. 先从完整剧本文本逐行提取“角色对白 / 内心OS / 旁白 / 人群声或环境人声”，再分配到对应 shot；不能只抽动作，把声轨丢掉。
 8. 优先用台词+画面动作表达信息；必要内心OS必须放入 narration，并以“内心OS：……”或“内心：……”开头；非角色圣经人物的人群嘲讽、恭维、议论不要写进 dialogues，可写入 narration 或 action_desc。
 9. 每条 shot 都必须能追溯到完整剧本与原文依据，不要空泛扩写。
-10. 第 1 镜要尽快进入本集 hook：{episode['hook']}，若剧本开场有嘲讽、人声或内心独白，第 1 镜不能是无声画面。
+10. 第 1 镜处理：{'【本集是第一集】第 1 镜是全片开场建场镜，主任务是交代故事背景（世界观/主角处境/核心设定）为全片铺底，再自然带出本集 hook，详见硬性规范第 23 条；务必配背景旁白，不要是无声画面。' if int(episode.get('episode_no') or 0) == 1 else f"第 1 镜要尽快进入本集 hook：{episode['hook']}，若剧本开场有嘲讽、人声或内心独白，第 1 镜不能是无声画面。"}
 11. 最后 1 镜必须落到本集尾钩：{episode['cliffhanger']}，结尾悬念优先用旁白或角色低声台词明确抛出。
 12. 不要把 shot 写成拍卡编号摘要；要写成真正可执行的分镜卡。
 
@@ -567,6 +567,28 @@ def _render_beat_table(chain: BeatChain) -> str:
 
 # ---------- C2. 单集分镜脚本（基于完整剧本拆分） ----------
 
+def _first_shot_rule(episode: dict) -> str:
+    """第 1 镜的写作要求：常规集=直接进 hook；但【第一集第一镜】是全片开场，主要职责是交代故事背景
+    （世界观/主角处境/基本设定），为后续剧情铺底，而不是急着推进情节或抛冲突。"""
+    if int(episode.get("episode_no") or 0) == 1:
+        return (
+            f"23. 【第一集第一镜=全片开场建场镜，特殊规则，优先级最高】这一镜的主要任务是【交代故事背景】，"
+            f"不是推进剧情、不是抛冲突反转：用画面+旁白把【世界观/时代设定/主角是谁、身处什么处境、基本关系或核心设定】"
+            f"讲清楚，让没看过原著的观众迅速进入这个故事。\n"
+            f"    - action_desc 写一个能代表本片世界观/主角日常处境的【建立性画面】（establishing shot），"
+            f"人物动作克制、信息靠画面与旁白承载；不要在第一镜就让主角做剧烈动作或触发核心冲突。\n"
+            f"    - 必须配 narration 旁白做背景交代（世界观/设定/主角身份处境），旁白先于任何台词；"
+            f"shot_size 优先用远景/全景做开场建场，先把环境和主角位置交代清楚。\n"
+            f"    - 出片侧会把本镜强制为【远景 + 缓慢推近 + 较长时长（{config.ESTABLISHING_SHOT_DURATION_S}s）】，"
+            f"所以 action_desc/首尾帧请按\"远景缓慢推近、镜头从环境推向主角\"来写：首帧是交代环境的大远景，"
+            f"尾帧镜头推近到主角、但仍是同一机位的连续推进，人物动作保持克制连贯。\n"
+            f"    - 仍要包含本集 hook：{episode['hook']}，但以\"先立背景、再带出钩子\"的方式呈现，"
+            f"不要为了 hook 牺牲掉背景交代。\n"
+            f"    最后 1 个镜头必须呈现悬念钩：{episode['cliffhanger']}")
+    return (f"23. 第 1 个镜头必须呈现本集 hook：{episode['hook']}\n"
+            f"    最后 1 个镜头必须呈现悬念钩：{episode['cliffhanger']}")
+
+
 def _storyboard_output_contract(episode: dict, bible: Bible, durations: list[int],
                                 speech_styles: str) -> str:
     target = episode["target_duration_s"]
@@ -574,9 +596,12 @@ def _storyboard_output_contract(episode: dict, bible: Bible, durations: list[int
     character_names = "、".join(c.name for c in bible.characters) or "（角色圣经为空）"
     return f"""硬性输出规范（以下规则由代码校验，违反会被退回重写；请首轮直接满足）：
 1. episode_no 必须等于 {episode['episode_no']}；shots 按剧情顺序排列，shot_no 必须从 1 开始连续递增，不能跳号、重复或乱序。
-2. 总时长 = 所有 duration_s 之和，必须在 {target}±10% 秒内；不要只接近镜头数量，要实际相加检查。
-3. 每条 shot 是一个固定 10s 的视频段，本集必须正好 {expected_shots} 条 shot；不要输出 5/6/7/8/9s。
-4. duration_s 必须等于 {config.FIXED_VIDEO_DURATION_S}，这是最终 Seedance 视频生成参数 --dur 10。
+2. 总时长 = 所有 duration_s 之和，目标 ≈ {target} 秒；不要为凑数把简单镜头硬撑长。例外：台词较多的镜头必须给足念白时间（见第 4 条），因此总时长允许因台词刚需而适度超过目标，不要为压总时长而截短台词镜。
+3. 本集必须正好 {expected_shots} 条 shot（每条对应一个戏剧节拍）；镜头数固定，但每条时长由你按动作密度+台词长度决定。
+4. duration_s 取 {config.MIN_VIDEO_DURATION_S}~{config.MAX_VIDEO_DURATION_S} 的整数（这是 Seedance 的 --dur 参数）。先按动作密度定一个基准，再按台词长度抬高，取较大者：
+   - 动作密度基准：{config.MIN_VIDEO_DURATION_S}~6s 静态/简单动作（凝视、僵住、低头看、对话特写、单一表情变化，给长会让人物停滞干等）；7~9s 中等动作（走动、转身、拿放道具、一来一回对话）；10~{config.MAX_VIDEO_DURATION_S}s 复杂/强运动/连续多步动作或情绪爆发（打斗、奔跑、跌倒、剧烈挣扎）。
+   - 【硬性·音画同步】duration_s 必须 ≥ 本镜台词+旁白念完所需时间（中文约每 {config.SPEECH_CHARS_PER_SECOND} 字 1 秒，另加约 {int(config.SPEECH_LEAD_IN_S + config.SPEECH_TAIL_BUFFER_S)}s 开场留白与收势）。动作再简单，只要台词较长就要给足时长，否则动作演完了台词还没说完（如"趴下睡觉"只演 5s 但台词要 8s）会严重音画不同步。
+   - 【硬性·口播上限】单镜台词+旁白总字数不得超过 {config.MAX_SPOKEN_CHARS_PER_SHOT} 字（{config.MAX_VIDEO_DURATION_S}s 也念不完）；超了就把台词精简或拆到相邻镜头分担，绝不能一镜塞下念不完的台词。
 5. 关键：每条 shot 只表现【一个】连贯流畅的主动作（视频模型一镜到底拍这一件事），用一句话把它的"起势→过程→收势"和人物表情/反应写清楚（逗号分句多少不限，写细更好）。判定"多镜头快切"看的不是逗号数量，而是有没有出现切镜：严禁出现"切到/切至/镜头切/镜头转向/闪回/回忆画面/分屏/下一个镜头/→"这类词。
 6. 单镜要像一个真实可拍的连续动作（例如"她攥紧衣角，肩膀微颤，眼泪无声砸落，嘴角弧度僵在半空"是一个动作，没问题；"她哭→镜头切到门口→闪回六年前"才是错误的多段快切）。画面负责动作和表情，声轨负责冲突、态度、内心和悬念，二者必须共同推进剧情。
 7. 声轨纪律（重要）：分镜必须从【已确认完整剧本】保留角色对白、内心OS、旁白、人群嘲讽/恭维等可听见信息，不能把有声剧本压成纯画面卡。预计 40/50/60s 集至少约 75% 镜头应有 dialogues 或 narration；对白冲突镜优先写 dialogues，内心OS和非角色圣经人物的人群声写入 narration。禁止空泛情绪词注水，每一句声轨都要提供新信息。
@@ -590,6 +615,7 @@ def _storyboard_output_contract(episode: dict, bible: Bible, durations: list[int
 10. 字数只校验下限，不校验上限；目标值仅作写作引导。优先保证戏剧质量与因果连贯，不要为凑数字牺牲剧情。
 11. 信息密度靠"画面一个清晰动作 + 台词/内心OS承担冲突与信息（必要时一句短旁白补缝）"配合，而不是把多件事塞进同一个画面，也不是靠旁白硬讲剧情。禁止单纯场景氛围、人物呆立、重复上一镜内容。
 12. narration 可为空，但以下内容必须优先保留在 narration：必要内心独白、结尾悬念旁白、非角色圣经人物的人群嘲讽/恭维/议论声、画面与角色开口都无法表达的隐藏因果。若写则务必简短（一句话、≤{NARRATION_TARGET_CHARS} 字，10s 念得完），内心独白请以“内心OS：……”或“内心：……”开头。
+12b. 【声轨时序·重要】成片配音按“先旁白/内心、人物再开口”的听感顺序念：所以同一镜里 narration 是【铺垫情境/画外音/内心活动】，台词是人物【听到/看到后的反应】，二者必须前后承接、各讲各的信息，绝不能内容重复或自相矛盾（错例：narration 写“敌暗我明，谁在操控这一切”，台词又说“敌暗我明，这家伙是谁”——重复撞车）。只有全知视角的结尾悬念钩旁白（“可他不知道……/殊不知……/然而……”）才是念在台词之后的收尾。若本镜逻辑是“人物先反应、再补一句旁白”，就把旁白写成这种结尾钩句式，否则默认旁白先于台词。
 13. 角色名必须准确：characters 不能为空，只能使用角色圣经里的准确姓名：{character_names}。characters 只写本镜头画面中实际可见/实际在场的人物；幕后发消息者、纸条落款、屏幕昵称、AI 软件名不算出场角色，除非镜头真的拍到他本人。不要创造新名字，不要把姓名改成外号/称谓，不要用"无角色"。如果原文出现角色姓名，必须照抄原文和角色圣经中的姓名。
 14. action_desc 必须显式写出本镜头主要角色的准确姓名，不能只写"他/她/男人/女人/镜头/纸张"；每个动作节点都优先围绕人物表情、动作、道具反应和剧情后果展开。
 15. dialogues 只写人物实际开口台词，dialogues[*].speaker 必须在本镜头 characters 中；不要把纸条文字、屏幕文字、手机通知、内心独白或旁白写成 speaker="旁白"，这些内容放到 narration 或 action_desc。
@@ -600,8 +626,7 @@ def _storyboard_output_contract(episode: dict, bible: Bible, durations: list[int
 20. 连续 3 个镜头不得使用相同 shot_size；情绪高点优先用特写。
 21. 相邻镜头必须有明确上下文接力：同场景连续镜头 continuity_from_prev=true，下一镜 action_desc 的开头必须承接上一镜结尾的动作、道具、屏幕内容或情绪；换时间/地点时 continuity_from_prev=false，且 narration 或 action_desc 必须写清转场原因/时间跳跃。
 22. 转场设计：同场景连续镜只能用"硬切"；只要 scene_setting 与上一镜不同，就必须选择一个明确转场，禁止硬切。普通时空跳转优先"淡出淡入"；情绪/回忆延续优先"声音延续+叠化"；悬疑冲击用"闪黑/闪白"；动作追逐用"甩镜/遮挡转场"；有构图呼应时用"匹配剪辑"。换场前一镜的 last_frame_desc 必须带转场结尾（画面渐暗、闪白、遮挡、甩镜、叠化余韵等），换场镜的 first_frame_desc 必须是新时间/新地点的建立画面。
-23. 第 1 个镜头必须呈现本集 hook：{episode['hook']}
-    最后 1 个镜头必须呈现悬念钩：{episode['cliffhanger']}
+{_first_shot_rule(episode)}
 24. 特效/光效服从剧情，不要每个镜头都堆特效：日常对话与一般场景写实克制（不要满屏光效、能量、粒子、光环）；只有情绪高潮或力量爆发的镜头才用强特效，且特效不得遮挡人物面部表情。把"发生了什么/人物什么反应"写清楚，而不是靠光效撑场面。
 25. 动作必须符合现实物理与人体运动规律：一个镜头里人物的位置、姿态、所持道具是连续变化的，不要瞬移、不要凭空出现/消失道具、不要让手与道具脱节或穿模。复杂手势（如结印、捏取小物）改写成更稳的简单动作（掌心托物、握拳、伸手按住）。"""
 
@@ -611,7 +636,7 @@ def _storyboard_preflight_contract(episode: dict) -> str:
     expected_shots = max(1, math.ceil(target / config.FIXED_VIDEO_DURATION_S))
     hints = "、".join(TRANSITION_HINTS[:12])
     return f"""首轮输出前必须逐镜预检（这些就是代码校验器的具体判定条件，不要等返工）：
-1. 本集必须正好 {expected_shots} 条 shot，每条 duration_s=10，总时长={target}s；不要输出 5/6/7/8/9s，也不要多/少镜头。
+1. 本集必须正好 {expected_shots} 条 shot（镜头数固定）；每条 duration_s 取 {config.MIN_VIDEO_DURATION_S}~{config.MAX_VIDEO_DURATION_S} 的整数：先按动作密度定基准（静态/简单→短，复杂/强运动→长），再按台词长度抬高（约每 {config.SPEECH_CHARS_PER_SECOND} 字 1 秒），取较大者。简单又没台词的镜头别给长时长；台词较多就给足时长。单镜台词+旁白不超过 {config.MAX_SPOKEN_CHARS_PER_SHOT} 字。
 2. 第 1 镜 continuity_from_prev 必须为 false；第 2 镜开始逐条和上一镜比较 scene_setting。
 3. 如果本镜 scene_setting 与上一镜完全相同：
    - continuity_from_prev 必须为 true；

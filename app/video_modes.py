@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import re
+import shutil
+import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -12,9 +15,8 @@ from app.db import get_conn, get_setting, new_id
 from app.hiagent import ProviderError
 from app.schemas import Bible, Shot, extract_json
 
-FIRST_LAST_FRAME_MODE = "FIRST_LAST_FRAME_MODE"
 REFERENCE_IMAGE_MODE = "REFERENCE_IMAGE_MODE"
-VideoGenerationMode = Literal["FIRST_LAST_FRAME_MODE", "REFERENCE_IMAGE_MODE"]
+VideoGenerationMode = Literal["REFERENCE_IMAGE_MODE"]
 
 REFERENCE_IMAGE_TYPES = {
     "character",
@@ -45,7 +47,6 @@ class ShotVideoModeDecision:
     needReusePreviousScene: bool = False
     needGenerateNewReferences: bool = False
     referenceImagePlan: ReferenceImagePlan = field(default_factory=ReferenceImagePlan)
-    ruleMode: VideoGenerationMode | None = None
     llmUsed: bool = False
     defaulted: bool = False
 
@@ -65,6 +66,7 @@ class ReferenceImageAsset:
     selectedForSeedance: bool = False
     rejectReason: str | None = None
     qa: dict[str, Any] | None = None
+    deleted: bool = False  # 用户在素材画廊里手动废弃 → 不再喂给模型
 
     def public_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -103,79 +105,38 @@ def quality_threshold() -> float:
     return float_setting("video_reference_quality_threshold", 0.75)
 
 
-def fallback_failure_threshold() -> int:
-    return max(1, int_setting("video_reference_fallback_failures", 2))
+def min_generated_references() -> int:
+    """参考图模式下每镜至少新生成几张关键帧参考图（防止只剩定妆照）。"""
+    return max(0, int_setting("video_reference_min_generated", 1))
 
 
-def selector_confidence_threshold() -> float:
-    return float_setting("video_mode_selector_confidence_threshold", 0.7)
+def reference_gen_retries() -> int:
+    """单张参考图 QA 不达标时的额外重试次数。"""
+    return max(0, int_setting("video_reference_gen_retries", 2))
 
 
-def _text_for_rules(shot: Shot) -> str:
-    dialogue_text = " ".join(f"{d.speaker} {d.line} {d.emotion}" for d in shot.dialogues)
-    return " ".join([
-        shot.scene_setting or "",
-        shot.action_desc or "",
-        shot.first_frame_desc or "",
-        shot.last_frame_desc or "",
-        shot.transition or "",
-        dialogue_text,
-    ]).lower()
+def reference_prompt_async() -> bool:
+    """是否为每张新参考图用独立 LLM 调用并发生成提示词（防止一次性写多张时偷懒）。"""
+    return bool_setting("video_reference_prompt_async", True)
+
+
+def consistency_check_enabled() -> bool:
+    """Phase 2：是否对整组参考图做相对一致性检查（点名漂移图并 i2i 重生/剔除）。"""
+    return bool_setting("video_reference_consistency_check", True)
+
+
+def consistency_threshold() -> float:
+    """候选参考图与锚点（定妆照/上镜尾帧）的一致性达标线，低于此判为漂移。"""
+    return float_setting("video_reference_consistency_threshold", 0.7)
+
+
+def consistency_retries() -> int:
+    """漂移图从锚点 i2i 重生的最大次数；仍漂移则从喂给 Seedance 的集合里剔除。"""
+    return max(0, int_setting("video_reference_consistency_retries", 1))
 
 
 def _contains_any(text: str, words: list[str]) -> bool:
     return any(w.lower() in text for w in words)
-
-
-def _rule_mode(shot: Shot) -> tuple[VideoGenerationMode, str, float]:
-    text = _text_for_rules(shot)
-    strong_words = [
-        "fight", "battle", "explode", "explosion", "transform", "spell", "magic", "blast",
-        "打斗", "战斗", "搏斗", "爆气", "爆炸", "法术", "施法", "变身", "快速转身", "转场",
-        "过渡到", "落点", "结尾画面", "尾帧", "强控制", "冲刺", "闪现",
-    ]
-    light_words = [
-        "dialogue", "talk", "walk", "stand", "sit", "look back", "scene continues",
-        "对话", "说", "交谈", "站", "坐", "走", "回头", "场景延续", "连续出场",
-        "情绪", "环境", "展示", "看向", "轻声",
-    ]
-    if _contains_any(text, strong_words):
-        return FIRST_LAST_FRAME_MODE, "Rule matched strong action, transition, or end-state control.", 0.82
-    # 连贯镜头必须走首尾帧模式：它能拿上一镜尾图作为本镜 first_frame，实现剪辑点的逐帧接续
-    # （PRD §5.4 的链式衔接）。参考图模式与 first_frame 互斥，会丢掉这个确切接续，导致跳变。
-    if bool(shot.continuity_from_prev):
-        return FIRST_LAST_FRAME_MODE, "Scene continuity needs exact first-frame handoff from the previous shot.", 0.85
-    if shot.dialogues or _contains_any(text, light_words):
-        return REFERENCE_IMAGE_MODE, "Rule matched dialogue or light action without continuity.", 0.84
-    return REFERENCE_IMAGE_MODE, "Default ordinary story shot favors character and scene continuity.", 0.72
-
-
-def _scene_continues(prev_shot: Any | None, shot_row: Any | None, shot: Shot) -> bool:
-    if not prev_shot:
-        return bool(shot.continuity_from_prev)
-    prev_scene = (prev_shot["scene_setting"] if hasattr(prev_shot, "keys") else prev_shot.get("scene_setting", "")) or ""
-    cur_scene = (shot_row["scene_setting"] if shot_row is not None and hasattr(shot_row, "keys") else shot.scene_setting) or ""
-    return bool(shot.continuity_from_prev) or prev_scene.strip() == cur_scene.strip()
-
-
-def _reference_plan(shot: Shot, *, is_first_shot: bool, same_scene_as_prev: bool) -> ReferenceImagePlan:
-    max_refs = max_reference_images()
-    complex_shot = len(shot.characters) >= 2 or len((shot.scene_setting or "") + (shot.action_desc or "")) > 90
-    if is_first_shot:
-        total = int_setting("video_reference_first_shot_complex_count", 8) if complex_shot else int_setting("video_reference_first_shot_default_count", 4)
-        total = min(max(total, 4), max_refs)
-        return ReferenceImagePlan(totalCount=total, reusePreviousSceneCount=0, generateNewCount=total,
-                                  types=["character", "scene", "prop", "style", "plot_key_frame"])
-    if same_scene_as_prev:
-        reuse = min(int_setting("video_reference_reuse_previous_scene_max_count", 4), 4, max_refs)
-        generated = 1 if not complex_shot else 2
-        total = min(max(4, reuse + generated), max_refs)
-        generated = max(0, total - reuse)
-        return ReferenceImagePlan(totalCount=total, reusePreviousSceneCount=reuse, generateNewCount=generated,
-                                  types=["scene", "previous_shot_frame", "character", "plot_key_frame"])
-    total = min(8 if complex_shot else 4, max_refs)
-    return ReferenceImagePlan(totalCount=total, reusePreviousSceneCount=0, generateNewCount=total,
-                              types=["character", "scene", "plot_key_frame"])
 
 
 def _parse_ref_prompts(raw: Any) -> list[dict[str, str]]:
@@ -197,143 +158,22 @@ def _parse_ref_prompts(raw: Any) -> list[dict[str, str]]:
 
 
 class ShotVideoModeSelector:
-    def select_by_rules(self, shot: Shot, *, shot_row: Any | None = None, prev_shot: Any | None = None) -> ShotVideoModeDecision:
-        mode, reason, confidence = _rule_mode(shot)
-        is_first = int(getattr(shot, "shot_no", 0) or 0) <= 1
-        same_scene = _scene_continues(prev_shot, shot_row, shot)
-        plan = _reference_plan(shot, is_first_shot=is_first, same_scene_as_prev=same_scene)
-        if mode == FIRST_LAST_FRAME_MODE:
-            plan = ReferenceImagePlan(totalCount=0, reusePreviousSceneCount=0, generateNewCount=0, types=[])
-        return ShotVideoModeDecision(
-            mode=mode,
-            reason=reason,
-            confidence=confidence,
-            needReusePreviousScene=mode == REFERENCE_IMAGE_MODE and same_scene and not is_first,
-            needGenerateNewReferences=mode == REFERENCE_IMAGE_MODE and plan.generateNewCount > 0,
-            referenceImagePlan=plan,
-            ruleMode=mode,
-        )
-
     async def select(self, shot: Shot, bible: Bible, *, shot_row: Any | None = None,
                      prev_shot: Any | None = None) -> ShotVideoModeDecision:
-        rule = self.select_by_rules(shot, shot_row=shot_row, prev_shot=prev_shot)
-        if not reference_mode_enabled():
-            rule.mode = FIRST_LAST_FRAME_MODE
-            rule.reason = "Reference image mode is disabled by configuration."
-            rule.defaulted = True
-            rule.referenceImagePlan = ReferenceImagePlan(totalCount=0, reusePreviousSceneCount=0, generateNewCount=0, types=[])
-            return rule
-        configured = (get_setting("video_generation_default_mode") or "AUTO").strip().upper()
-        if configured in {FIRST_LAST_FRAME_MODE, REFERENCE_IMAGE_MODE}:
-            rule.mode = configured  # type: ignore[assignment]
-            rule.reason = f"Forced by video_generation_default_mode={configured}."
-            rule.defaulted = True
-            if configured == FIRST_LAST_FRAME_MODE:
-                rule.referenceImagePlan = ReferenceImagePlan(totalCount=0, reusePreviousSceneCount=0, generateNewCount=0, types=[])
-            return rule
-
-        try:
-            raw = await hiagent.chat([
-                {"role": "system", "content": "Return exactly one JSON object for video mode selection."},
-                {"role": "user", "content": _selector_prompt(shot, bible, rule)},
-            ], temperature=0, max_tokens=800)
-            data = extract_json(raw)
-            mode = data.get("mode")
-            conf = float(data.get("confidence", 0))
-            if mode not in {FIRST_LAST_FRAME_MODE, REFERENCE_IMAGE_MODE} or conf < selector_confidence_threshold():
-                rule.defaulted = True
-                return rule
-            rule.mode = mode
-            rule.reason = str(data.get("reason") or rule.reason)[:300]
-            rule.confidence = max(0.0, min(1.0, conf))
-            rule.needReusePreviousScene = bool(data.get("needReusePreviousScene", rule.needReusePreviousScene))
-            rule.needGenerateNewReferences = bool(data.get("needGenerateNewReferences", rule.needGenerateNewReferences))
-            if isinstance(data.get("referenceImagePlan"), dict) and mode == REFERENCE_IMAGE_MODE:
-                plan_data = data["referenceImagePlan"]
-                plan = ReferenceImagePlan(
-                    totalCount=int(plan_data.get("totalCount", rule.referenceImagePlan.totalCount)),
-                    reusePreviousSceneCount=int(plan_data.get("reusePreviousSceneCount", rule.referenceImagePlan.reusePreviousSceneCount)),
-                    generateNewCount=int(plan_data.get("generateNewCount", rule.referenceImagePlan.generateNewCount)),
-                    types=[t for t in plan_data.get("types", rule.referenceImagePlan.types) if t in REFERENCE_IMAGE_TYPES],
-                    prompts=_parse_ref_prompts(
-                        plan_data.get("prompts")
-                        or plan_data.get("newReferenceImages")
-                        or data.get("newReferenceImages")),
-                )
-                plan.totalCount = min(max(plan.totalCount, 1), max_reference_images())
-                plan.reusePreviousSceneCount = min(max(plan.reusePreviousSceneCount, 0), plan.totalCount)
-                plan.generateNewCount = min(max(plan.generateNewCount, 0), plan.totalCount - plan.reusePreviousSceneCount)
-                plan.prompts = plan.prompts[:plan.generateNewCount]
-                rule.referenceImagePlan = plan
-            if mode == FIRST_LAST_FRAME_MODE:
-                rule.referenceImagePlan = ReferenceImagePlan(totalCount=0, reusePreviousSceneCount=0, generateNewCount=0, types=[])
-            rule.llmUsed = True
-            return rule
-        except Exception:
-            rule.defaulted = True
-            return rule
+        """视频生成已固定为参考图模式；不再调用 LLM 做模式选择。"""
+        return default_reference_decision()
 
 
-def _selector_prompt(shot: Shot, bible: Bible, rule: ShotVideoModeDecision) -> str:
-    characters = ", ".join(shot.characters)
-    char_anchors = {c.name: c.appearance_canonical for c in bible.characters if c.name in shot.characters}
-    return json.dumps({
-        "task": (
-            "You are the video director. Read the shot's script and storyboard, then decide "
-            "(1) which Seedance 2.0 video generation mode fits, and (2) the full reference-image plan: "
-            "how many reference images this shot needs, where each one comes from (reuse a previous "
-            "shot's clean frame, the character asset library, or newly generated), and the exact image "
-            "prompt for every NEW reference image. Base every choice on the script content, not on fixed rules."
-        ),
-        "allowed_modes": [FIRST_LAST_FRAME_MODE, REFERENCE_IMAGE_MODE],
-        "mode_guidance": {
-            FIRST_LAST_FRAME_MODE: "Strong/precise motion, transformations, explosions, or exact end-state control, and continuity shots that must hand off the previous shot's tail frame.",
-            REFERENCE_IMAGE_MODE: "Dialogue, emotion, light action, or establishing shots where character & scene consistency matter more than frame-exact motion. Requires reference images.",
-        },
-        "reference_sources": {
-            "previous_shot_frame": "reuse a QA-passed clean frame from the previous shot (only when same scene continues)",
-            "asset_library": "character locked-design portrait from the bible (one per character on screen)",
-            "generate_new": "a freshly generated reference image you must write a prompt for",
-        },
-        "allowed_reference_types": sorted(t for t in REFERENCE_IMAGE_TYPES if t != "previous_shot_frame"),
-        "rule_recommendation": asdict(rule),
-        "shot": {
-            "shot_no": shot.shot_no,
-            "scene_setting": shot.scene_setting,
-            "characters": characters,
-            "character_appearance": char_anchors,
-            "action_desc": shot.action_desc,
-            "first_frame_desc": shot.first_frame_desc,
-            "last_frame_desc": shot.last_frame_desc,
-            "dialogues": [d.model_dump() if hasattr(d, "model_dump") else dict(d) for d in shot.dialogues],
-            "transition": shot.transition,
-            "continuity_from_prev": shot.continuity_from_prev,
-        },
-        "style": bible.world.visual_style_canonical,
-        "constraints": {
-            "max_total_reference_images": max_reference_images(),
-            "totalCount = reusePreviousSceneCount + generateNewCount": True,
-            "len(referenceImagePlan.prompts) must equal generateNewCount": True,
-            "prompts must be in English, 9:16, no text/watermark/extra limbs": True,
-        },
-        "output_schema": {
-            "mode": "REFERENCE_IMAGE_MODE or FIRST_LAST_FRAME_MODE",
-            "reason": "short reason grounded in the script",
-            "confidence": "0..1",
-            "needReusePreviousScene": True,
-            "needGenerateNewReferences": True,
-            "referenceImagePlan": {
-                "totalCount": 4,
-                "reusePreviousSceneCount": 2,
-                "generateNewCount": 2,
-                "types": ["scene", "character", "plot_key_frame"],
-                "prompts": [
-                    {"type": "scene", "prompt": "Concrete English prompt for new reference image #1 derived from the script ..."},
-                    {"type": "plot_key_frame", "prompt": "Concrete English prompt for new reference image #2 ..."},
-                ],
-            },
-        },
-    }, ensure_ascii=False)
+def default_reference_decision() -> ShotVideoModeDecision:
+    plan = ReferenceImagePlan()
+    return ShotVideoModeDecision(
+        mode=REFERENCE_IMAGE_MODE,
+        reason="已固定使用参考图模式生成视频。",
+        confidence=1.0,
+        needGenerateNewReferences=plan.generateNewCount > 0,
+        referenceImagePlan=plan,
+        defaulted=True,
+    )
 
 
 def decision_to_dict(decision: ShotVideoModeDecision) -> dict[str, Any]:
@@ -343,22 +183,26 @@ def decision_to_dict(decision: ShotVideoModeDecision) -> dict[str, Any]:
 
 def dict_to_decision(data: dict[str, Any]) -> ShotVideoModeDecision:
     plan_data = data.get("referenceImagePlan") or {}
+    default_plan = ReferenceImagePlan()
+    total = int(plan_data.get("totalCount", default_plan.totalCount) or default_plan.totalCount)
+    generate = int(plan_data.get("generateNewCount", default_plan.generateNewCount) or default_plan.generateNewCount)
+    reuse = int(plan_data.get("reusePreviousSceneCount", default_plan.reusePreviousSceneCount) or 0)
+    types = list(plan_data.get("types") or default_plan.types)
     return ShotVideoModeDecision(
-        mode=data.get("mode") if data.get("mode") in {FIRST_LAST_FRAME_MODE, REFERENCE_IMAGE_MODE} else REFERENCE_IMAGE_MODE,
-        reason=str(data.get("reason") or ""),
-        confidence=float(data.get("confidence", 0)),
+        mode=REFERENCE_IMAGE_MODE,
+        reason=str(data.get("reason") or default_reference_decision().reason),
+        confidence=float(data.get("confidence", 1.0)),
         needReusePreviousScene=bool(data.get("needReusePreviousScene")),
-        needGenerateNewReferences=bool(data.get("needGenerateNewReferences")),
+        needGenerateNewReferences=True,
         referenceImagePlan=ReferenceImagePlan(
-            totalCount=int(plan_data.get("totalCount", 0)),
-            reusePreviousSceneCount=int(plan_data.get("reusePreviousSceneCount", 0)),
-            generateNewCount=int(plan_data.get("generateNewCount", 0)),
-            types=list(plan_data.get("types") or []),
+            totalCount=total,
+            reusePreviousSceneCount=reuse,
+            generateNewCount=generate,
+            types=types,
             prompts=_parse_ref_prompts(plan_data.get("prompts")),
         ),
-        ruleMode=data.get("ruleMode"),
         llmUsed=bool(data.get("llmUsed")),
-        defaulted=bool(data.get("defaulted")),
+        defaulted=True,
     )
 
 
@@ -408,11 +252,7 @@ def _scene_qa_ok(scene_row: Any, threshold: float) -> tuple[bool, float | None, 
 def reusable_previous_assets(conn: Any, *, prev_shot: Any | None, limit: int, threshold: float) -> list[ReferenceImageAsset]:
     if not prev_shot or limit <= 0:
         return []
-    action = ((prev_shot["action_desc"] if hasattr(prev_shot, "keys") else prev_shot.get("action_desc", "")) or "").lower()
-    polluted = ["爆炸", "打斗", "爆气", "法术", "强特效", "explosion", "fight", "spell", "blast"]
-    if _contains_any(action, polluted):
-        # Only VLM/scene QA-passed frames below will be reused.
-        pass
+    # 只有通过 VLM/场景 QA 的干净帧才会被复用（见下方 _scene_qa_ok），不再用关键词预筛。
     shot_id = prev_shot["id"] if hasattr(prev_shot, "keys") else prev_shot.get("id")
     rows = conn.execute(
         """SELECT id, shot_id, kind, image_path, qa_json
@@ -442,14 +282,22 @@ def reusable_previous_assets(conn: Any, *, prev_shot: Any | None, limit: int, th
     return assets
 
 
-def character_reference_assets(bible: Bible, character_names: list[str], *, limit: int) -> list[ReferenceImageAsset]:
+def character_reference_assets(bible: Bible, character_names: list[str], *, limit: int,
+                               project_id: str | None = None,
+                               episode_no: int | None = None) -> list[ReferenceImageAsset]:
     assets: list[ReferenceImageAsset] = []
     by_name = {c.name: c for c in bible.characters}
     for name in character_names:
         if len(assets) >= limit:
             break
         c = by_name.get(name)
-        path = getattr(c, "ref_image_path", None) if c else None
+        # 按集号选用人物谱分段定妆照（覆盖该集的版本），未命中回退到初始 ref_image_path。
+        path = None
+        if c is not None and project_id is not None:
+            from app.portraits import portrait_for_episode
+            path = portrait_for_episode(project_id, name, episode_no)
+        if not path:
+            path = getattr(c, "ref_image_path", None) if c else None
         if not path or not Path(path).exists():
             continue
         try:
@@ -539,11 +387,121 @@ async def review_reference_image(image_b64: str, *, shot: Shot, bible: Bible, re
     return data
 
 
+# i2i 种子使用守则：参考图只锁「身份/服饰/环境」，姿态构图一律走文字——否则图生图会照搬
+# 种子的站姿/构图，导致同镜多张雷同、且照搬定妆照站姿（见 worker.py:355 关键帧系统的同款教训）。
+_SEED_USAGE_NOTE = (
+    " IMPORTANT: the provided reference images are identity/style anchors ONLY — use them to keep each "
+    "character's face, hairstyle and outfit identical and the scene's environment/lighting consistent. "
+    "Do NOT copy their pose, framing or composition; strictly follow THIS prompt's described pose, "
+    "action, expression and camera."
+)
+
+
+async def _generate_image_with_seed_fallback(prompt: str, seed_inputs: list[str] | None) -> dict[str, Any]:
+    """带 i2i 种子生成参考图；若网关不支持参考图（ProviderError）则去掉种子重试一次（对齐 worker._generate_one_scene）。"""
+    try:
+        return await hiagent.generate_image(prompt, size=config.REF_IMAGE_SIZE, image_inputs=seed_inputs or None)
+    except ProviderError:
+        if not seed_inputs:
+            raise
+        return await hiagent.generate_image(prompt, size=config.REF_IMAGE_SIZE)
+
+
+async def review_reference_consistency(*, candidates: list[ReferenceImageAsset],
+                                       anchors: list[ReferenceImageAsset],
+                                       shot: Shot, bible: Bible) -> dict[str, Any]:
+    """相对一致性检查 Agent（Phase 2）：把锚点图（定妆照/上镜尾帧=真值）与候选新参考图【一起】喂给 VLM，
+    逐张给候选打「与锚点的一致性」分并点名漂移维度（服饰/发型/长相/画风/环境）。
+
+    与逐图绝对质检 review_reference_image 的本质区别：它做组内相对比较，能抓到「同分镜两张互相打架」
+    「和上一镜没关系」这类单图质检结构上看不见的问题。姿态/表情/机位允许不同，不扣分。
+    VLM 异常或 JSON 解析失败时保守返回「全部达标」，避免误删好图。
+    返回 {"candidates": [{"asset_id", "consistency", "drift": [...], "issues": [...]}], "overall"}。"""
+    anchor_b64: list[str] = []
+    for a in anchors:
+        if a.path and Path(a.path).exists():
+            try:
+                anchor_b64.append(hiagent.encode_image_file(a.path))
+            except OSError:
+                continue
+    cand_pairs: list[tuple[ReferenceImageAsset, str]] = []
+    for c in candidates:
+        if c.path and Path(c.path).exists():
+            try:
+                cand_pairs.append((c, hiagent.encode_image_file(c.path)))
+            except OSError:
+                continue
+    if not cand_pairs or not anchor_b64:
+        return {"candidates": [], "overall": 1.0}
+
+    char_txt = "; ".join(f"{c.name}: {c.appearance_canonical}"
+                         for c in bible.characters if c.name in shot.characters)
+    k, n = len(anchor_b64), len(cand_pairs)
+    expectation = (
+        f"You are a reference-image CONSISTENCY reviewer for ONE anime-drama shot. I send {k + n} images "
+        f"in order. The FIRST {k} are ANCHOR images = ground truth for each character's face/hairstyle/outfit "
+        f"and for the scene environment/lighting. The NEXT {n} are CANDIDATE reference images for the SAME "
+        f"shot, numbered 1..{n} in the order sent (after the anchors). For EACH candidate, judge whether the "
+        "SAME character(s) keep an IDENTICAL face, hairstyle and outfit, and whether the art style / lighting "
+        "/ environment stay consistent with the anchors. Pose, expression, gesture and camera framing are "
+        "ALLOWED to differ — do NOT penalize those. "
+        f"Character appearance reference (text): {char_txt or '(none)'}. "
+        f"Art style: {bible.world.visual_style_canonical}. "
+        'Output exactly one JSON object: {"candidates":[{"n":<1-based int>,"consistency":<0..1>,'
+        '"drift":[<any of "costume","hair","face","style","environment">],"issues":[<short strings>]}],'
+        '"overall":<0..1>}. consistency=1 means perfectly consistent with the anchors; below 0.7 means a '
+        "clear outfit/hair/face/style change that would make the generated video inconsistent."
+    )
+    frames = anchor_b64 + [b for _, b in cand_pairs]
+    try:
+        raw = await hiagent.vlm_check(frames, expectation)
+        data = extract_json(raw)
+    except Exception:  # noqa: BLE001 VLM/解析失败保守放行，不误删
+        return {"candidates": [{"asset_id": c.id, "consistency": 1.0, "drift": [], "issues": []}
+                               for c, _ in cand_pairs], "overall": 1.0}
+
+    out: list[dict[str, Any]] = []
+    reported = data.get("candidates") if isinstance(data, dict) else None
+    if isinstance(reported, list):
+        for item in reported:
+            if not isinstance(item, dict):
+                continue
+            try:
+                pos = int(item.get("n"))
+            except (TypeError, ValueError):
+                continue
+            if not (1 <= pos <= n):
+                continue
+            cand = cand_pairs[pos - 1][0]
+            try:
+                cs = max(0.0, min(1.0, float(item.get("consistency", 1.0))))
+            except (TypeError, ValueError):
+                cs = 1.0
+            drift = [str(x).strip() for x in (item.get("drift") or []) if str(x).strip()]
+            issues = [str(x).strip() for x in (item.get("issues") or []) if str(x).strip()]
+            out.append({"asset_id": cand.id, "consistency": cs, "drift": drift, "issues": issues})
+    covered = {o["asset_id"] for o in out}
+    for c, _ in cand_pairs:  # 模型漏报的候选默认达标，不误删
+        if c.id not in covered:
+            out.append({"asset_id": c.id, "consistency": 1.0, "drift": [], "issues": []})
+    try:
+        overall = max(0.0, min(1.0, float(data.get("overall"))))
+    except (TypeError, ValueError):
+        overall = round(sum(o["consistency"] for o in out) / len(out), 3) if out else 1.0
+    return {"candidates": out, "overall": overall}
+
+
 async def _generate_one_reference(*, project_id: str, episode_no: int, shot: Shot, bible: Bible,
-                                  ref_type: str, index: int, content_override: str | None = None) -> ReferenceImageAsset:
+                                  ref_type: str, index: int, content_override: str | None = None,
+                                  seed_inputs: list[str] | None = None,
+                                  extra_instruction: str | None = None) -> ReferenceImageAsset:
     dest = reference_image_path(project_id, episode_no, shot.shot_no, ref_type, index)
     prompt = reference_generation_prompt(shot, bible, ref_type, index, content_override=content_override)
-    item = await hiagent.generate_image(prompt, size=config.REF_IMAGE_SIZE)
+    if seed_inputs:
+        prompt += _SEED_USAGE_NOTE
+    if extra_instruction:
+        prompt += " " + extra_instruction.strip()
+    item = await _generate_image_with_seed_fallback(prompt, seed_inputs)
     if item.get("url"):
         await hiagent.download(item["url"], str(dest))
     elif item.get("b64_json"):
@@ -564,25 +522,323 @@ async def _generate_one_reference(*, project_id: str, episode_no: int, shot: Sho
     return asset
 
 
+def _extract_last_frame(video_path: str, dest: Path) -> bool:
+    """用 ffmpeg 抽取视频最后一帧到 dest。成功返回 True。"""
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        return False
+    try:
+        dur = float(subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", video_path],
+            capture_output=True, text=True, check=True).stdout.strip() or 0)
+        if dur <= 0:
+            return False
+        ts = max(0.0, dur - 0.1)
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{ts:.2f}", "-i", video_path,
+             "-vframes", "1", "-q:v", "3", str(dest)],
+            check=True, capture_output=True)
+        return dest.exists()
+    except (subprocess.SubprocessError, ValueError, OSError):
+        return False
+
+
+def previous_tail_reference_asset(conn: Any, prev_shot: Any, *, dest_dir: Path) -> ReferenceImageAsset | None:
+    """取上一镜「尾帧」用作参考图（接上镜的连续性锚点）：
+    优先上一镜已过审尾关键帧；没有则从上一镜采用成片里抽最后一帧。"""
+    if prev_shot is None:
+        return None
+
+    def _g(key: str) -> Any:
+        if hasattr(prev_shot, "keys"):
+            return prev_shot[key] if key in prev_shot.keys() else None
+        return prev_shot.get(key)
+
+    prev_id = _g("id")
+    tail_id = _g("approved_tail_scene_id")
+    if tail_id:
+        row = conn.execute(
+            "SELECT image_path FROM shot_scenes WHERE id=? AND status='succeeded'", (tail_id,)).fetchone()
+        if row and row["image_path"] and Path(row["image_path"]).exists():
+            return _asset_from_path(
+                path=row["image_path"], ref_type="previous_shot_frame", source="previous_shot",
+                shot_id=prev_id, quality_score=1.0, qa={"overall": 1.0, "issues": ["forced_continuity"]})
+    adopted = _g("adopted_version_id")
+    if adopted:
+        v = conn.execute(
+            "SELECT video_path FROM shot_versions WHERE id=? AND status='succeeded'", (adopted,)).fetchone()
+        if v and v["video_path"] and Path(v["video_path"]).exists():
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest = dest_dir / "00_previous_tail.jpg"
+            if _extract_last_frame(v["video_path"], dest):
+                return _asset_from_path(
+                    path=str(dest), ref_type="previous_shot_frame", source="previous_shot",
+                    shot_id=prev_id, quality_score=1.0, qa={"overall": 1.0, "issues": ["forced_continuity"]})
+    return None
+
+
+async def write_reference_prompt(shot: Shot, bible: Bible, ref_type: str, *, intent: str | None = None) -> str:
+    """为【单张】新参考图独立写一条详尽的 Seedream 英文提示词（一图一次 LLM 调用）。
+    逐图独立调用 + 上游并发，避免一次性写多张时模型偷懒只给空泛短提示。失败返回空串（上游回退模板）。"""
+    anchors = {c.name: c.appearance_canonical for c in bible.characters if c.name in shot.characters}
+    payload = {
+        "task": (
+            "Write ONE detailed English image-generation prompt for a single Seedance reference image. "
+            "It must be concrete and faithful to this shot's script so it can anchor character & scene "
+            "consistency. Describe subject(s), pose/expression, key props, framing, lighting and background. "
+            "Do NOT write multiple images, do NOT be lazy or generic."
+        ),
+        "reference_type": ref_type,
+        "intent": intent or "",
+        "shot": {
+            "scene_setting": shot.scene_setting,
+            "characters": list(shot.characters),
+            "character_appearance": anchors,
+            "action_desc": shot.action_desc,
+            "first_frame_desc": shot.first_frame_desc,
+            "last_frame_desc": shot.last_frame_desc,
+            "dialogues": [d.model_dump() if hasattr(d, "model_dump") else dict(d) for d in shot.dialogues],
+        },
+        "style": bible.world.visual_style_canonical,
+        "constraints": [
+            "English only", "9:16 portrait", "no text/subtitle/watermark/logo",
+            "no extra limbs, no motion blur", "single coherent still image",
+            "keep character face/hair/clothing exactly as character_appearance",
+        ],
+        "output_schema": {"prompt": "the full English image prompt, one paragraph"},
+    }
+    try:
+        raw = await hiagent.chat([
+            {"role": "system", "content": "Return exactly one JSON object with a single 'prompt' string field. English only."},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ], temperature=0.3, max_tokens=500)
+        data = extract_json(raw)
+        return str(data.get("prompt") or "").strip()[:600]
+    except Exception:
+        return ""
+
+
+async def _generate_reference_keep_best(*, project_id: str, episode_no: int, shot: Shot, bible: Bible,
+                                        ref_type: str, index: int, content_override: str | None,
+                                        retries: int, seed_inputs: list[str] | None = None) -> tuple[ReferenceImageAsset | None, list[ReferenceImageAsset], list[dict[str, Any]]]:
+    """生成单张参考图，QA 不达标则重试；最终返回过审资产，或（全部不达标时）保留分数最高的一版兜底，
+    保证镜头至少有图，而不是因为 QA 卡掉直接没有参考图。
+    返回 (chosen_or_none, discarded_assets, rejection_details)：discarded_assets 是质检未通过、
+    未被选用的参考图（带各自图片文件），供评审墙「废弃照片画廊」展示。"""
+    rejections: list[dict[str, Any]] = []
+    attempts: list[ReferenceImageAsset] = []  # 全部质检未通过的资产（含图片），用于废弃画廊
+    best: ReferenceImageAsset | None = None
+    for attempt in range(retries + 1):
+        # 每次尝试写到不同文件名，避免后一次（更差）覆盖前一次的最佳图，导致 best.path 指向劣质图。
+        attempt_index = index * 100 + attempt
+        try:
+            asset = await _generate_one_reference(
+                project_id=project_id, episode_no=episode_no, shot=shot, bible=bible,
+                ref_type=ref_type, index=attempt_index, content_override=content_override,
+                seed_inputs=seed_inputs)
+        except Exception as exc:
+            rejections.append({"type": ref_type, "source": "seedream_generated", "reason": str(exc)[:240]})
+            continue
+        if not asset.rejectReason:
+            # 通过 QA：选它；本次之前生成的不达标图作为废弃图一并返回。
+            return asset, attempts, rejections
+        rejections.append({"type": ref_type, "source": "seedream_generated",
+                           "reason": asset.rejectReason, "quality_score": asset.qualityScore, "qa": asset.qa})
+        attempts.append(asset)
+        if best is None or (asset.qualityScore or 0) > (best.qualityScore or 0):
+            best = asset
+    # 全部不达标：保留分数最高的一版兜底，其余进废弃画廊。
+    discarded = [a for a in attempts if a is not best]
+    return best, discarded, rejections
+
+
+def _portrait_seed_inputs(bible: Bible, character_names: list[str], *, project_id: str | None,
+                          episode_no: int | None, limit: int = 2) -> list[str]:
+    """出场角色定妆照的 data URL，作为新参考图的 i2i 种子（锁长相/发型/服饰，姿态仍走文字）。
+    用 refs.refs_as_image_inputs 走「按集分段定妆照」选版，与喂给 Seedance 的人物锚点同源。"""
+    from app.refs import refs_as_image_inputs
+    return [url for url, _ in refs_as_image_inputs(
+        bible, list(character_names), max(limit, 0), project_id=project_id, episode_no=episode_no)]
+
+
+def _dedupe_str(values: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for v in values:
+        if v and v not in seen:
+            seen.add(v)
+            out.append(v)
+    return out
+
+
+def _consistency_scores(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """把 review_reference_consistency 的报告整理成 {asset_id: {consistency, drift, issues}}。"""
+    out: dict[str, dict[str, Any]] = {}
+    for c in (report or {}).get("candidates", []) or []:
+        aid = c.get("asset_id")
+        if not aid:
+            continue
+        try:
+            cs = max(0.0, min(1.0, float(c.get("consistency", 1.0))))
+        except (TypeError, ValueError):
+            cs = 1.0
+        out[aid] = {
+            "consistency": cs,
+            "drift": [str(x) for x in (c.get("drift") or []) if str(x).strip()],
+            "issues": [str(x) for x in (c.get("issues") or []) if str(x).strip()],
+        }
+    return out
+
+
+def _annotate_consistency(assets: list[ReferenceImageAsset], scores: dict[str, dict[str, Any]]) -> None:
+    for a in assets:
+        info = scores.get(a.id)
+        if info:
+            a.qa = {**(a.qa or {}), "consistency": info["consistency"], "drift": info["drift"]}
+
+
+def _record_consistency_rejection(rejection_details: list[dict[str, Any]] | None,
+                                  rejected_out: list[ReferenceImageAsset] | None,
+                                  asset: ReferenceImageAsset, *, reason: str,
+                                  drift: list[str] | None = None, consistency: float | None = None) -> None:
+    asset.selectedForSeedance = False
+    asset.rejectReason = reason
+    if rejected_out is not None and asset not in rejected_out:
+        rejected_out.append(asset)
+    if rejection_details is not None:
+        rejection_details.append({"type": asset.type, "source": asset.source, "reason": reason,
+                                  "drift": drift or [], "consistency": consistency})
+
+
+async def _regenerate_for_consistency(*, project_id: str, episode_no: int, shot: Shot, bible: Bible,
+                                      ref_type: str, index: int, seeds: list[str],
+                                      drift: list[str]) -> ReferenceImageAsset | None:
+    """漂移图从锚点 i2i 重生：强约束「服饰/发型/长相/画风/环境与锚点完全一致，只改姿态」。"""
+    note = ("Regenerate to FIX consistency versus the reference anchors"
+            + (": " + ", ".join(drift) if drift else "")
+            + ". Keep each character's face, hairstyle and outfit, the art style and the environment EXACTLY "
+              "identical to the reference images; only adapt pose and expression to this shot.")
+    try:
+        asset = await _generate_one_reference(
+            project_id=project_id, episode_no=episode_no, shot=shot, bible=bible,
+            ref_type=ref_type, index=index, content_override=None,
+            seed_inputs=seeds or None, extra_instruction=note)
+    except Exception:  # noqa: BLE001 单张重生失败不拖垮整镜
+        return None
+    return asset
+
+
+async def _enforce_reference_consistency(*, selected: list[ReferenceImageAsset], shot: Shot, bible: Bible,
+                                         project_id: str, episode_no: int,
+                                         rejection_details: list[dict[str, Any]] | None = None,
+                                         rejected_out: list[ReferenceImageAsset] | None = None
+                                         ) -> list[ReferenceImageAsset]:
+    """Phase 2 主流程：以锚点（定妆照/上镜尾帧/复用历史帧）为真值，检查生成的候选参考图是否风格/服饰漂移；
+    漂移的从锚点 i2i 重生，仍漂移则从喂给 Seedance 的集合里剔除（进废弃画廊）。无锚点时跳过（避免误删）。"""
+    if not consistency_check_enabled():
+        return selected
+    candidates = [a for a in selected if a.source == "seedream_generated"]
+    anchors = [a for a in selected if a.source in {"asset_library", "previous_shot"}]
+    if not candidates or not anchors:
+        return selected
+    seeds = _dedupe_str([a.url for a in anchors if a.url])
+    threshold = consistency_threshold()
+
+    current = list(candidates)
+    scores = _consistency_scores(await review_reference_consistency(
+        candidates=current, anchors=anchors, shot=shot, bible=bible))
+    _annotate_consistency(current, scores)
+
+    for attempt in range(consistency_retries()):
+        drifted = [c for c in current if scores.get(c.id, {}).get("consistency", 1.0) < threshold]
+        if not drifted:
+            break
+        changed = False
+        for i, cand in enumerate(drifted):
+            drift = scores.get(cand.id, {}).get("drift") or []
+            new_asset = await _regenerate_for_consistency(
+                project_id=project_id, episode_no=episode_no, shot=shot, bible=bible,
+                ref_type=cand.type, index=9000 + attempt * 100 + i, seeds=seeds, drift=drift)
+            if new_asset is None:
+                continue
+            _record_consistency_rejection(rejection_details, rejected_out, cand,
+                                          reason="consistency_drift", drift=drift,
+                                          consistency=scores.get(cand.id, {}).get("consistency"))
+            current = [new_asset if c is cand else c for c in current]
+            changed = True
+        if not changed:
+            break
+        scores = _consistency_scores(await review_reference_consistency(
+            candidates=current, anchors=anchors, shot=shot, bible=bible))
+        _annotate_consistency(current, scores)
+
+    kept: list[ReferenceImageAsset] = []
+    for c in current:
+        cs = scores.get(c.id, {}).get("consistency", 1.0)
+        if cs < threshold:
+            _record_consistency_rejection(rejection_details, rejected_out, c,
+                                          reason="consistency_drift_unfixable",
+                                          drift=scores.get(c.id, {}).get("drift"), consistency=cs)
+            continue
+        kept.append(c)
+
+    rebuilt = [a for a in selected if a.source != "seedream_generated"] + kept
+    if not rebuilt:  # 兜底：极端情况全被剔 → 留一致性最高的一版，保证每镜仍有参考图
+        best = max(current, key=lambda c: scores.get(c.id, {}).get("consistency", 0.0))
+        if best in (rejected_out or []):
+            rejected_out.remove(best)
+        best.selectedForSeedance = True
+        best.rejectReason = None
+        rebuilt = [best]
+    return rebuilt
+
+
 async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int, episode_id: str,
                                  shot_id: str, shot: Shot, bible: Bible,
                                  decision: ShotVideoModeDecision, prev_shot: Any | None = None,
-                                 rejection_details: list[dict[str, Any]] | None = None) -> list[ReferenceImageAsset]:
+                                 rejection_details: list[dict[str, Any]] | None = None,
+                                 rejected_out: list[ReferenceImageAsset] | None = None) -> list[ReferenceImageAsset]:
     plan = decision.referenceImagePlan
     threshold = quality_threshold()
     max_refs = max_reference_images()
-    selected: list[ReferenceImageAsset] = []
 
-    selected.extend(character_reference_assets(bible, shot.characters, limit=min(len(shot.characters), plan.totalCount)))
+    # 接上镜（continuity_from_prev）：强制把上一镜尾帧作为参考图注入，作为剪辑点连贯锚点。
+    # 不受 plan.reusePreviousSceneCount 计数与 QA 阈值限制；放在最前、确保不被裁掉。
+    forced: list[ReferenceImageAsset] = []
+    if shot.continuity_from_prev:
+        prev = prev_shot
+        if prev is None and int(getattr(shot, "shot_no", 0) or 0) > 1:
+            prev = conn.execute(
+                "SELECT * FROM shots WHERE episode_id=? AND shot_no=?",
+                (episode_id, int(shot.shot_no) - 1)).fetchone()
+        if prev is not None:
+            ref_dir = reference_image_path(project_id, episode_no, shot.shot_no, "previous_shot_frame", 0).parent
+            tail = previous_tail_reference_asset(conn, prev, dest_dir=ref_dir)
+            if tail:
+                forced.append(tail)
+
+    # 期望新生成的关键帧参考图数量：模型计划值与「每镜最少生成数」取大者（仅参考图模式），保证每镜都有生成图。
+    min_gen = min_generated_references() if decision.mode == REFERENCE_IMAGE_MODE else 0
+    want_gen = max(int(plan.generateNewCount or 0), min_gen)
+    # 先给强制连贯帧 + 生成位预留名额，剩余名额才给定妆照/复用帧，避免它们把生成位挤掉（否则只剩定妆照）。
+    reserve_for_gen = min(want_gen, max(0, max_refs - len(forced)))
+    non_gen_budget = max(0, max_refs - len(forced) - reserve_for_gen)
+
+    selected: list[ReferenceImageAsset] = list(forced)
+    selected.extend(character_reference_assets(bible, shot.characters, limit=min(len(shot.characters), non_gen_budget),
+                                               project_id=project_id, episode_no=episode_no))
+    selected = _dedupe_assets(selected)
     remaining_reuse = max(0, plan.reusePreviousSceneCount)
-    if remaining_reuse:
-        selected.extend(reusable_previous_assets(conn, prev_shot=prev_shot, limit=remaining_reuse, threshold=threshold))
+    room_for_reuse = max(0, max_refs - len(selected) - reserve_for_gen)
+    if remaining_reuse and room_for_reuse:
+        selected.extend(reusable_previous_assets(
+            conn, prev_shot=prev_shot, limit=min(remaining_reuse, room_for_reuse), threshold=threshold))
 
     selected = _dedupe_assets(selected)[:max_refs]
-    generated_needed = max(0, min(plan.totalCount, max_refs) - len(selected))
-    generated_needed = min(generated_needed, plan.generateNewCount if plan.generateNewCount > 0 else generated_needed)
+    room = max(0, max_refs - len(selected))
+    generated_needed = min(want_gen, room)
+
     type_cycle = [t for t in plan.types if t in REFERENCE_IMAGE_TYPES and t not in {"previous_shot_frame"}] or ["plot_key_frame"]
-    # 逐图规格：优先用模型按剧本写好的 (type, prompt)；不足时用类型轮换 + 模板提示词补齐。
+    # 逐图规格：优先用模型按剧本写好的 (type, prompt)；不足时用类型轮换补齐（prompt 留空，下面逐图异步补写）。
     model_specs = [p for p in (plan.prompts or []) if p.get("prompt")]
     specs: list[tuple[str, str | None]] = []
     for i in range(generated_needed):
@@ -591,44 +847,60 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
             specs.append((spec.get("type") or type_cycle[i % len(type_cycle)], spec.get("prompt")))
         else:
             specs.append((type_cycle[i % len(type_cycle)], None))
-    rejected: list[ReferenceImageAsset] = []
-    for i, (ref_type, content_override) in enumerate(specs):
-        try:
-            asset = await _generate_one_reference(
-                project_id=project_id, episode_no=episode_no, shot=shot, bible=bible,
-                ref_type=ref_type, index=i + 1, content_override=content_override,
-            )
-            if asset.rejectReason:
-                rejected.append(asset)
-                if rejection_details is not None:
-                    rejection_details.append({
-                        "type": ref_type, "source": "seedream_generated",
-                        "reason": asset.rejectReason,
-                        "quality_score": asset.qualityScore,
-                        "qa": asset.qa,
-                    })
-            else:
-                selected.append(asset)
-        except Exception as exc:
-            reason = str(exc)[:240]
-            rejected.append(ReferenceImageAsset(
-                id=new_id("ref"), url="", type=ref_type, source="seedream_generated",
-                rejectReason=reason,
-            ))
-            if rejection_details is not None:
-                rejection_details.append({
-                    "type": ref_type, "source": "seedream_generated",
-                    "reason": reason,
-                })
-        if len(selected) >= max_refs or len(selected) >= plan.totalCount:
-            break
 
-    selected = _dedupe_assets(selected)[:min(plan.totalCount, max_refs)]
+    # 逐图异步写提示词：每张图各起一次独立 LLM 调用并发生成详尽提示词（防止一次性写多张时偷懒）。
+    # 模型计划里若已带该图的简述，作为 intent 喂进去引导，但仍逐图单独成稿；调用失败才回退到原简述。
+    if specs and reference_prompt_async():
+        async def _resolve(ref_type: str, brief: str | None) -> str | None:
+            written = await write_reference_prompt(shot, bible, ref_type, intent=brief)
+            return written or brief or None
+        resolved = await asyncio.gather(*[_resolve(t, o) for t, o in specs])
+        specs = [(specs[i][0], resolved[i]) for i in range(len(specs))]
+
+    # i2i 种子（根因修复）：新生成的参考图不再裸跑文生图，而是以稳定锚点做图生图，姿态/动作仍走文字。
+    #   - 定妆照：锁长相/发型/服饰，喂给「含人物」的图（character / plot_key_frame）。
+    #   - 上一镜尾帧（continuity 镜的 forced 帧）：锁环境/光线/构图衔接，喂给本镜所有新图。
+    # 二者同源于实际喂给 Seedance 的锚点，保证「同分镜多张一致」「与上一镜衔接」。
+    portrait_seeds = _portrait_seed_inputs(bible, shot.characters, project_id=project_id, episode_no=episode_no)
+    env_seeds = [a.url for a in forced if a.type == "previous_shot_frame" and a.url]
+
+    def _seeds_for(ref_type: str) -> list[str]:
+        seeds = (portrait_seeds + env_seeds) if ref_type in {"character", "plot_key_frame"} else list(env_seeds)
+        return _dedupe_str(seeds)
+
+    # 并发生成所有参考图（每张带 QA 重试 + 全部不达标时保留最佳一版兜底）。
+    if specs:
+        results = await asyncio.gather(*[
+            _generate_reference_keep_best(
+                project_id=project_id, episode_no=episode_no, shot=shot, bible=bible,
+                ref_type=t, index=i + 1, content_override=o, retries=reference_gen_retries(),
+                seed_inputs=_seeds_for(t))
+            for i, (t, o) in enumerate(specs)
+        ])
+        for asset, discarded, rej in results:
+            if rejection_details is not None:
+                rejection_details.extend(rej)
+            if asset is not None:
+                selected.append(asset)
+            if rejected_out is not None:
+                rejected_out.extend(discarded)
+
+    # Phase 2：整组相对一致性检查——点名漂移的生成图，从锚点 i2i 重生；仍漂移则剔除（不喂 Seedance，进废弃画廊）。
+    selected = await _enforce_reference_consistency(
+        selected=selected, shot=shot, bible=bible, project_id=project_id, episode_no=episode_no,
+        rejection_details=rejection_details, rejected_out=rejected_out)
+
+    selected = _dedupe_assets(selected)[:max_refs]
     for asset in selected:
         asset.selectedForSeedance = True
         asset.shotId = asset.shotId or shot_id
         asset.episodeId = asset.episodeId or episode_id
-    # Rejected assets are not returned to Seedance, but callers may store them under reference_rejections.
+    # 质检未通过、未被选用的参考图（rejected_out）不喂给 Seedance，仅供评审墙废弃画廊展示。
+    if rejected_out is not None:
+        for asset in rejected_out:
+            asset.selectedForSeedance = False
+            asset.shotId = asset.shotId or shot_id
+            asset.episodeId = asset.episodeId or episode_id
     return selected
 
 
@@ -665,19 +937,19 @@ def append_reference_prompt_notes(prompt_text: str, assets: list[ReferenceImageA
 
 
 def build_seedance_image_inputs(meta: dict[str, Any]) -> list[tuple[str, str]]:
-    mode = meta.get("mode") or FIRST_LAST_FRAME_MODE
+    mode = meta.get("mode") or REFERENCE_IMAGE_MODE
     if mode == REFERENCE_IMAGE_MODE:
         if meta.get("first_frame_path") or meta.get("last_frame_path"):
             raise ProviderError("REFERENCE_IMAGE_MODE must not pass first_frame or last_frame.")
         refs = meta.get("reference_images") or []
         if not refs:
             raise ProviderError("REFERENCE_IMAGE_MODE requires at least one quality-approved reference image.")
-        if len(refs) > max_reference_images():
+        # 只取「选中且未被废弃」的参考图喂给模型：质检未通过或用户在素材画廊里删除的图都排除在外。
+        usable = [r for r in refs if r.get("selectedForSeedance") and not r.get("deleted")]
+        if len(usable) > max_reference_images():
             raise ProviderError("REFERENCE_IMAGE_MODE reference image count exceeds configured limit.")
         out: list[tuple[str, str]] = []
-        for ref in refs:
-            if not ref.get("selectedForSeedance"):
-                continue
+        for ref in usable:
             if ref.get("path"):
                 out.append((hiagent.data_url_from_file(ref["path"]), "reference_image"))
             elif ref.get("url"):
@@ -686,16 +958,7 @@ def build_seedance_image_inputs(meta: dict[str, Any]) -> list[tuple[str, str]]:
             raise ProviderError("REFERENCE_IMAGE_MODE has no selected reference images.")
         return out
 
-    if meta.get("reference_images"):
-        raise ProviderError("FIRST_LAST_FRAME_MODE must not pass reference images.")
-    first_path = meta.get("first_frame_path")
-    last_path = meta.get("last_frame_path")
-    if not first_path:
-        raise ProviderError("Video first frame is missing; regenerate keyframes before video generation.")
-    out = [(hiagent.data_url_from_file(first_path), "first_frame")]
-    if last_path:
-        out.append((hiagent.data_url_from_file(last_path), "last_frame"))
-    return out
+    raise ProviderError("视频生成已固定为参考图模式，不再支持首尾帧输入。")
 
 
 def is_character_consistency_failure(qa: dict[str, Any]) -> bool:

@@ -159,6 +159,20 @@ CREATE TABLE IF NOT EXISTS shot_audio (
     error TEXT,
     updated_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS character_portraits (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    character_name TEXT NOT NULL,
+    ep_start INTEGER NOT NULL,        -- 适用集左区间（含）
+    ep_end INTEGER,                   -- 适用集右区间（含）；NULL=当前最新版，开区间向后覆盖
+    appearance TEXT,                  -- 该定妆照对应的外观锚点串
+    prompt TEXT,                      -- 生成用 prompt
+    image_path TEXT,                  -- 落盘路径
+    base_portrait_id TEXT,            -- 图生图所基于的上一张定妆照（lineage）
+    bible_version INTEGER DEFAULT 0,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_portraits_proj_char ON character_portraits(project_id, character_name, ep_start);
 CREATE INDEX IF NOT EXISTS idx_chapters_project ON chapters(project_id, idx);
 CREATE INDEX IF NOT EXISTS idx_episodes_project ON episodes(project_id, episode_no);
 CREATE INDEX IF NOT EXISTS idx_shots_episode ON shots(episode_id, shot_no);
@@ -204,6 +218,9 @@ MIGRATIONS = (
     "ALTER TABLE episodes ADD COLUMN screenplay_status TEXT DEFAULT 'pending'",
     "ALTER TABLE episodes ADD COLUMN screenplay_error TEXT",
     "ALTER TABLE shots ADD COLUMN mode_plan TEXT",
+    "ALTER TABLE projects ADD COLUMN bible_feedback TEXT",  # 持久化重谱打回要求，供进程重启后恢复人物谱任务
+    "ALTER TABLE projects ADD COLUMN portraits_status TEXT DEFAULT 'idle'",  # 按集刷新定妆照任务状态
+    "ALTER TABLE projects ADD COLUMN portraits_error TEXT",
 )
 
 

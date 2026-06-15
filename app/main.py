@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from app import worker
-from app.api import purge_legacy_screenplays, router
+from app.api import purge_legacy_screenplays, recover_bible_tasks, router
 from app.config import PROJECTS_DIR, ROOT
 from app.db import init_db
 
@@ -18,6 +18,7 @@ async def lifespan(_: FastAPI):
     init_db()
     purge_legacy_screenplays()
     worker.recover_and_start()
+    recover_bible_tasks()  # 进程重启后续跑中断的人物谱任务，而非判孤儿报错
     try:
         yield
     finally:

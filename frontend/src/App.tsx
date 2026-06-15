@@ -8,14 +8,16 @@ import BoardPage from './pages/BoardPage'
 import WallPage from './pages/WallPage'
 import CinemaPage from './pages/CinemaPage'
 import MonitorPage from './pages/MonitorPage'
+import ReaderPage from './pages/ReaderPage'
 
-export type View = 'studio' | 'bible' | 'episodes' | 'script' | 'board' | 'wall' | 'cinema' | 'monitor'
+export type View = 'studio' | 'bible' | 'episodes' | 'script' | 'board' | 'wall' | 'cinema' | 'monitor' | 'reader'
 
 interface Nav {
   view: View
   projectId: string | null
   episodeId: string | null
-  go: (v: View, projectId?: string | null, episodeId?: string | null) => void
+  chapterIdx: number | null
+  go: (v: View, projectId?: string | null, episodeId?: string | null, chapterIdx?: number | null) => void
   toast: (msg: string, isErr?: boolean) => void
 }
 
@@ -37,6 +39,7 @@ export default function App() {
   const [view, setView] = useState<View>('studio')
   const [projectId, setProjectId] = useState<string | null>(null)
   const [episodeId, setEpisodeId] = useState<string | null>(null)
+  const [chapterIdx, setChapterIdx] = useState<number | null>(null)
   const [toastMsg, setToastMsg] = useState<{ text: string; err: boolean } | null>(null)
 
   const toast = useCallback((text: string, isErr = false) => {
@@ -44,9 +47,10 @@ export default function App() {
     window.setTimeout(() => setToastMsg(null), isErr ? 8000 : 3000)
   }, [])
 
-  const go = useCallback((v: View, pid?: string | null, eid?: string | null) => {
+  const go = useCallback((v: View, pid?: string | null, eid?: string | null, cidx?: number | null) => {
     if (pid !== undefined) setProjectId(pid)
     if (eid !== undefined) setEpisodeId(eid)
+    if (cidx !== undefined) setChapterIdx(cidx)
     setView(v)
   }, [])
 
@@ -74,7 +78,7 @@ export default function App() {
     return () => { cancelled = true }
   }, [projectId])
 
-  const nav: Nav = { view, projectId, episodeId, go, toast }
+  const nav: Nav = { view, projectId, episodeId, chapterIdx, go, toast }
   const visibleSections = projectId ? SECTIONS : SECTIONS.filter(s => s.key === 'studio')
 
   const openSection = (s: (typeof SECTIONS)[number]) => {
@@ -102,6 +106,7 @@ export default function App() {
         {view === 'studio' && <Studio />}
         {view === 'bible' && projectId && <BiblePage key={projectId} />}
         {view === 'episodes' && projectId && <EpisodesPage key={projectId} />}
+        {view === 'reader' && projectId && <ReaderPage key={projectId} />}
         {view === 'script' && (episodeId ? <ScriptPage key={episodeId} /> : <WorkspaceEmpty label="剧本台" />)}
         {view === 'board' && (episodeId ? <BoardPage key={episodeId} /> : <WorkspaceEmpty label="分镜台" />)}
         {view === 'wall' && (episodeId ? <WallPage key={episodeId} /> : <WorkspaceEmpty label="评审墙" />)}

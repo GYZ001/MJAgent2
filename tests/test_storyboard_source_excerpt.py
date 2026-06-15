@@ -18,6 +18,13 @@ def _bible() -> Bible:
     )
 
 
+def _empty_bible() -> Bible:
+    return Bible(
+        characters=[],
+        world=World(era="", genre="", visual_style_canonical="国漫风格，非真人CG渲染，统一电影感光影，暖灰色调"),
+    )
+
+
 def _shot(source_excerpt: str) -> Shot:
     return Shot(
         shot_no=1,
@@ -59,3 +66,25 @@ def test_legacy_seedance_prompt_is_patched_with_source_excerpt() -> None:
     assert "小说原文兜底参考：谷言攥着纸杯" in prompt
     assert prompt.endswith("--ratio 9:16 --dur 10")
     assert prompt.count("--ratio") == 1
+
+
+def test_storyboard_allows_characters_without_bible() -> None:
+    shot = Shot(
+        shot_no=1,
+        duration_s=10,
+        shot_size="中景",
+        camera_move="固定",
+        scene_setting="夜，旧宅回廊",
+        characters=["萧炎"],
+        action_desc="萧炎贴着回廊立柱侧身前探，萧炎先压住呼吸再抬手按住门框，目光紧盯门内暗处，脚下同时缓慢逼近准备先发制人。",
+        first_frame_desc="萧炎贴着回廊立柱侧身站定，右手刚抬到门框边，目光向门内探去。",
+        last_frame_desc="同一机位下萧炎已经半步逼近门框，右手压住门沿，肩背绷紧，视线更深地刺向暗处。",
+        source_excerpt="萧炎贴着回廊的柱影慢慢逼近门口，手掌按上门框，凝神望向里面。",
+        narration="门内迟迟没有回应，空气反而更沉了。",
+        dialogues=[],
+    )
+    board = Storyboard(episode_no=1, shots=[shot])
+
+    errors = validate_storyboard(board, _empty_bible(), 10)
+
+    assert not any("角色圣经中不存在" in error for error in errors)

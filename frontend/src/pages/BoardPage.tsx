@@ -8,11 +8,20 @@ import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 const SIZES = ['远景', '全景', '中景', '近景', '特写']
 const MOVES = ['固定', '推近', '拉远', '横摇', '跟随']
 const TRANS = ['硬切', '叠化', '淡出淡入', '黑场', '闪黑', '闪白', '甩镜', '遮挡转场', '匹配剪辑', '声音延续+叠化', '声音先行+淡入']
+const MIN_SHOT_DURATION_S = 5
+const MAX_SHOT_DURATION_S = 15
+
+function clampShotDuration(value: number | string) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return 10
+  return Math.max(MIN_SHOT_DURATION_S, Math.min(MAX_SHOT_DURATION_S, Math.round(n)))
+}
 
 export default function BoardPage() {
   const { episodeId, go, projectId, toast } = useNav()
   const { data: ep, refresh } = useEpisode(episodeId!)
   const [busy, setBusy] = useState(false)
+  const [durationOverrides, setDurationOverrides] = useState<Record<string, number>>({})
   const storyboardTimer = useTaskTimer(`episode.${episodeId}.storyboard`, ep?.status === 'scripting')
 
   if (!ep) return <div className="empty">展卷中……</div>
@@ -24,7 +33,7 @@ export default function BoardPage() {
     finally { setBusy(false) }
   }
 
-  const totalDur = ep.shots?.reduce((s, x) => s + x.duration_s, 0) ?? 0
+  const totalDur = ep.shots?.reduce((s, x) => s + (durationOverrides[x.id] ?? x.duration_s), 0) ?? 0
 
   return (
     <>
@@ -62,20 +71,20 @@ export default function BoardPage() {
           {ep.status === 'scripted' && (
             <button className="btn primary" disabled={busy}
               onClick={async () => {
-                const r = await act(() => api.post(`/episodes/${ep.id}/confirm`)) as { estimated_cost_cny: number } | undefined
-                if (r) toast(`分镜已确认。预估生成成本 ¥${r.estimated_cost_cny}，可入评审墙开始生成`)
+                const r = await act(() => api.post(`/episodes/${ep.id}/confirm`)) as { estimated_cost_cny: number; total_duration_s?: number } | undefined
+                if (r) toast(`分镜已确认。实际总时长 ${r.total_duration_s ?? totalDur}s，预估生成成本 ¥${r.estimated_cost_cny}，可入评审墙开始生成`)
               }}>确认分镜（解锁生成）</button>
           )}
           {(ep.status === 'confirmed' || ep.status === 'generating') && (
             <button className="btn primary" disabled={busy}
               onClick={() => go('wall', projectId, ep.id)}>
-              入评审墙（先出首尾关键帧 → 再生成视频）→
+              入评审墙生成视频 →
             </button>
           )}
           <span style={{ flex: 1 }} />
           <TaskTimer label="分镜" timer={storyboardTimer} />
           <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>
-            共 {ep.shots?.length ?? 0} 镜 · 总时长 {totalDur}s / 目标 {ep.target_duration_s}s · 已耗 ¥{ep.cost_cny.toFixed(1)}
+            共 {ep.shots?.length ?? 0} 镜 · 实际总时长 {totalDur}s / 规划目标 {ep.target_duration_s}s · 已耗 ¥{ep.cost_cny.toFixed(1)}
           </span>
         </div>
         {ep.screenplay_status !== 'ready' && <div className="error-banner">本集还没有可用剧本。请先到剧本台生成/保存完整剧本，再展开分镜。</div>}
@@ -91,29 +100,44 @@ export default function BoardPage() {
 
       {!ep.shots?.length
         ? <div className="empty"><div className="big">镜</div>尚无分镜<br />点击上方「生成分镜脚本」</div>
-        : ep.shots.map(shot => <ShotStrip key={shot.id} shot={shot} episode={ep} onChanged={refresh} disabled={busy} />)}
+        : ep.shots.map(shot => (
+          <ShotStrip
+            key={shot.id}
+            shot={shot}
+            durationOverride={durationOverrides[shot.id]}
+            episode={ep}
+            onDurationSaved={(shotId, duration) => setDurationOverrides(prev => ({ ...prev, [shotId]: duration }))}
+            onChanged={refresh}
+            disabled={busy}
+          />
+        ))}
     </>
   )
 }
 
-function ShotStrip({ shot, episode, onChanged, disabled }: {
-  shot: Shot; episode: Episode; onChanged: () => void; disabled: boolean
+function ShotStrip({ shot, durationOverride, episode, onDurationSaved, onChanged, disabled }: {
+  shot: Shot; durationOverride?: number; episode: Episode
+  onDurationSaved: (shotId: string, duration: number) => void
+  onChanged: () => void; disabled: boolean
 }) {
   const { toast } = useNav()
   const [edit, setEdit] = useState<Shot | null>(null)
-  const s = edit ?? shot
+  const currentShot = durationOverride == null ? shot : { ...shot, duration_s: durationOverride }
+  const s = edit ?? currentShot
 
   async function save() {
     if (!edit) return
+    const duration_s = clampShotDuration(edit.duration_s)
     try {
       await api.put(`/shots/${shot.id}`, {
-        duration_s: 10, shot_size: edit.shot_size, camera_move: edit.camera_move,
+        duration_s, shot_size: edit.shot_size, camera_move: edit.camera_move,
         scene_setting: edit.scene_setting, characters: edit.characters, action_desc: edit.action_desc,
         first_frame_desc: edit.first_frame_desc, last_frame_desc: edit.last_frame_desc,
         source_excerpt: edit.source_excerpt,
         narration: edit.narration || null, dialogues: edit.dialogues, transition: edit.transition,
         continuity_from_prev: !!edit.continuity_from_prev,
       })
+      onDurationSaved(shot.id, duration_s)
       toast(`镜 ${shot.shot_no} 已保存（剧集回到待确认状态）`)
       setEdit(null); onChanged()
     } catch (e: unknown) { toast((e as Error).message, true) }
@@ -128,7 +152,7 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
         <span style={{ flex: 1 }} />
         <span className="meta">¥{shot.est_cost_cny.toFixed(1)}</span>
         {!edit
-          ? <button className="btn small" disabled={disabled} onClick={() => setEdit({ ...JSON.parse(JSON.stringify(shot)), duration_s: 10 })}>修改</button>
+          ? <button className="btn small" disabled={disabled} onClick={() => setEdit(JSON.parse(JSON.stringify(currentShot)))}>修改</button>
           : <>
             <button className="btn small primary" onClick={save}>保存</button>
             <button className="btn small ghost" onClick={() => setEdit(null)}>放弃</button>
@@ -139,8 +163,8 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
           <>
             <div className="shot-edit-grid full">
               <div><label className="f">时长(s)</label>
-                <input type="number" min={10} max={10} step={10} readOnly style={{ width: '100%' }} value={10}
-                  onChange={() => setEdit({ ...edit, duration_s: 10 })} /></div>
+                <input type="number" min={MIN_SHOT_DURATION_S} max={MAX_SHOT_DURATION_S} step={1} style={{ width: '100%' }} value={edit.duration_s}
+                  onChange={e => setEdit({ ...edit, duration_s: clampShotDuration(e.target.value) })} /></div>
               <div><label className="f">景别</label>
                 <select style={{ width: '100%' }} value={edit.shot_size} onChange={e => setEdit({ ...edit, shot_size: e.target.value })}>
                   {SIZES.map(x => <option key={x}>{x}</option>)}</select></div>

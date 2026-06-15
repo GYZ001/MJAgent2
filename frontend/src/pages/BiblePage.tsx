@@ -1,7 +1,10 @@
 import { type CSSProperties, useCallback, useEffect, useState } from 'react'
-import { api, AutoStatus, Bible, BrowseResult, Character } from '../api'
+import { api, AutoStatus, Bible, BrowseResult, Character, Portrait } from '../api'
 import { useNav, useProject, usePoll } from '../App'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
+
+const CHAR_PAGE_SIZE = 6  // 人物谱每页展示的角色卡数
+const SHOW_PRONUNCIATION_CARD = false  // 词库功能先在前端隐藏
 
 export default function BiblePage() {
   const { projectId, toast } = useNav()
@@ -10,10 +13,11 @@ export default function BiblePage() {
     () => api.get(`/projects/${projectId}/auto/status`), 3000, [projectId])
   const [editing, setEditing] = useState<Bible | null>(null)
   const [busy, setBusy] = useState(false)
-  const [rebibleOpen, setRebibleOpen] = useState(false)
-  const [rebibleFeedback, setRebibleFeedback] = useState('')
+  const [charSearch, setCharSearch] = useState('')
+  const [charPage, setCharPage] = useState(0)
   const bibleTimer = useTaskTimer(`project.${projectId}.bible`, p?.bible_status === 'running')
   const refsTimer = useTaskTimer(`project.${projectId}.refs`, p?.refs_status === 'running')
+  const portraitsTimer = useTaskTimer(`project.${projectId}.portraits`, p?.portraits_status === 'running')
 
   if (!p) return <div className="empty">展卷中……</div>
 
@@ -25,15 +29,38 @@ export default function BiblePage() {
   }
 
   const bible = editing ?? p.bible
-  const startBible = async (feedback = '') => {
-    const note = feedback.trim()
+  // 角色卡分页（每页 6 张）+ 按名检索；保留原始下标 i 供编辑态写回 editing.characters[i]
+  const charQuery = charSearch.trim()
+  const indexedChars = (bible?.characters ?? []).map((c, i) => ({ c, i }))
+  const filteredChars = charQuery ? indexedChars.filter(({ c }) => c.name.includes(charQuery)) : indexedChars
+  const charPageCount = Math.max(1, Math.ceil(filteredChars.length / CHAR_PAGE_SIZE))
+  const curCharPage = Math.min(charPage, charPageCount - 1)
+  const pagedChars = filteredChars.slice(curCharPage * CHAR_PAGE_SIZE, curCharPage * CHAR_PAGE_SIZE + CHAR_PAGE_SIZE)
+  const generating = p.bible_status === 'running' || p.refs_status === 'running' || p.portraits_status === 'running'
+
+  const startBible = async () => {
     bibleTimer.start()
     setBusy(true)
     try {
-      await api.post(`/projects/${p.id}/bible`, note ? { feedback: note } : undefined)
-      toast(note ? '已打回人物谱，正在按要求重新生成' : '人物谱生成已开始')
-      setRebibleOpen(false)
-      setRebibleFeedback('')
+      await api.post(`/projects/${p.id}/bible`)
+      toast('人物谱与定妆照生成已开始')
+      refresh()
+    } catch (e: unknown) {
+      toast((e as Error).message, true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const stopGeneration = async () => {
+    setBusy(true)
+    try {
+      if (p.bible_status === 'running') {
+        await api.post(`/projects/${p.id}/bible/cancel`)
+      } else {
+        await api.post(`/projects/${p.id}/refs/cancel`)
+      }
+      toast('已停止当前人物谱/定妆照生成')
       refresh()
     } catch (e: unknown) {
       toast((e as Error).message, true)
@@ -53,31 +80,27 @@ export default function BiblePage() {
       <section className="card">
         <h3>原著 <span className="hint">{(p.novel_chars / 10000).toFixed(1)} 万字 · {p.chapters?.length} 章</span></h3>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-          <button className="btn primary" disabled={busy || p.bible_status === 'running'}
-            onClick={() => p.bible ? setRebibleOpen(v => !v) : startBible()}>
-            {p.bible ? '打回重新生成人物谱' : '谱写人物谱'}
-          </button>
+          {!p.bible && !generating && (
+            <button className="btn primary" disabled={busy} onClick={startBible}>
+              开始生成人物谱和定妆照
+            </button>
+          )}
+          {generating && (
+            <button className="btn ghost" disabled={busy} onClick={stopGeneration}>
+              停止
+            </button>
+          )}
           {p.bible_status === 'running' && <span className="stamp gold">谱写中（约 1~3 分钟）</span>}
+          {p.refs_status === 'running' && <span className="stamp gold">定妆中</span>}
+          {p.portraits_status === 'running' && <span className="stamp gold">按 20 集分段刷新中</span>}
           {p.bible && <span className="stamp green">第 {`${p.bible_version ?? ''}`} 稿</span>}
           <TaskTimer label="人物谱" timer={bibleTimer} />
+          <TaskTimer label="定妆照" timer={refsTimer} />
+          <TaskTimer label="分段定妆" timer={portraitsTimer} />
         </div>
-        {p.bible && rebibleOpen && (
-          <div className="rebible-panel">
-            <label className="f">打回要求</label>
-            <textarea rows={4} maxLength={2000} value={rebibleFeedback}
-              onChange={e => setRebibleFeedback(e.target.value)}
-              placeholder="写清需要补收或修正的人物、称谓、关系、外观等，例如：漏掉药老和纳兰嫣然；萧战应为萧炎父亲；不要把药尘和药老拆成两人。" />
-            <div className="rebible-actions">
-              <button className="btn small primary" disabled={busy || !rebibleFeedback.trim() || p.bible_status === 'running'}
-                onClick={() => startBible(rebibleFeedback)}>
-                提交打回并重生
-              </button>
-              <button className="btn small ghost" disabled={busy} onClick={() => {
-                setRebibleOpen(false)
-                setRebibleFeedback('')
-              }}>取消</button>
-              <span className="hint">{rebibleFeedback.length}/2000</span>
-            </div>
+        {!generating && p.bible && (
+          <div className="hint" style={{ marginTop: 10 }}>
+            已启动过后端持续生成人物谱链路；后续按 20 集一段自动判定是否需要更新定妆照，前端不再提供打回重生入口。
           </div>
         )}
         {p.bible_status === 'failed' && <div className="error-banner">人物谱生成失败（原始错误如下，不做静默兜底）：{'\n'}{p.bible_error}</div>}
@@ -97,7 +120,7 @@ export default function BiblePage() {
           finally { setBusy(false) }
         }} />
 
-      <PronunciationCard projectId={p.id} />
+      {SHOW_PRONUNCIATION_CARD && <PronunciationCard projectId={p.id} />}
 
       {bible && (
         <section className="card">
@@ -125,22 +148,26 @@ export default function BiblePage() {
 
           <div style={{ height: 16 }} />
           <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}>
-            <button className="btn" disabled={busy || p.refs_status === 'running'}
-              onClick={() => {
-                refsTimer.start()
-                act(() => api.post(`/projects/${p.id}/refs`), '定妆照生成已开始（每角色约 20 秒）')
-              }}>
-              生成全部定妆照
-            </button>
             {p.refs_status === 'running' && <span className="stamp gold">定妆中</span>}
-            <TaskTimer label="定妆照" timer={refsTimer} />
+            {p.portraits_status === 'running' && <span className="stamp gold">按 20 集分段刷新中</span>}
             <span style={{ fontSize: 12.5, color: 'var(--ink-faint)' }}>
-              定妆照随镜头注入 Seedance 参考图，是人物跨集一致性的视觉锚点（¥0.2/张）
+              启动后会先为全部角色生成初始定妆照；随后继续按 20 集分段判断外观是否大变，大变才图生图重绘，相同人物会自适应判断是否需要换新定妆，新登场重要人物会自动补人物卡并生成定妆照（¥0.2/张）
             </span>
           </div>
           {p.refs_status === 'failed' && <div className="error-banner">定妆照生成失败：{'\n'}{p.refs_error}</div>}
+          {p.portraits_status === 'failed' && <div className="error-banner">按集刷新定妆照失败：{'\n'}{p.portraits_error}</div>}
+          {p.portraits_status === 'ready' && p.portraits_error && <div className="error-banner">部分定妆照刷新有问题：{'\n'}{p.portraits_error}</div>}
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', margin: '4px 0 12px' }}>
+            <input type="text" value={charSearch}
+              onChange={e => { setCharSearch(e.target.value); setCharPage(0) }}
+              placeholder="搜索角色名…"
+              style={{ flex: '0 1 240px', fontSize: 13, padding: '6px 10px' }} />
+            <span style={{ fontSize: 12.5, color: 'var(--ink-faint)' }}>
+              共 {bible.characters.length} 个角色{charQuery ? ` · 命中 ${filteredChars.length}` : ''}
+            </span>
+          </div>
           <div className="figure-grid">
-            {bible.characters.map((c: Character, i: number) => {
+            {pagedChars.map(({ c, i }: { c: Character; i: number }) => {
               const fitting = p.refs_status === 'running' && (!p.refs_target || p.refs_target === c.name)
               return (
               <div key={c.name} className="figure">
@@ -153,6 +180,7 @@ export default function BiblePage() {
                     style={{ width: '100%', borderRadius: 8, border: '1px solid var(--hairline)', marginBottom: 8,
                              opacity: fitting ? 0.45 : 1, transition: 'opacity 0.3s' }} />
                 )}
+                {(c.portraits?.length ?? 0) > 1 && <PortraitStrip portraits={c.portraits!} />}
                 <label className="f">外观锚点串（40~60 字，定稿后锁定）</label>
                 {editing
                   ? <textarea rows={3} value={editing.characters[i].appearance_canonical}
@@ -173,6 +201,16 @@ export default function BiblePage() {
               </div>
             )})}
           </div>
+          {!pagedChars.length && (
+            <div className="empty">{charQuery ? `没有匹配「${charQuery}」的角色` : '暂无角色'}</div>
+          )}
+          {charPageCount > 1 && (
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', justifyContent: 'center', marginTop: 14 }}>
+              <button className="btn small" disabled={curCharPage <= 0} onClick={() => setCharPage(curCharPage - 1)}>← 上一页</button>
+              <span style={{ fontSize: 13, color: 'var(--ink-faint)' }}>第 {curCharPage + 1} / {charPageCount} 页</span>
+              <button className="btn small" disabled={curCharPage >= charPageCount - 1} onClick={() => setCharPage(curCharPage + 1)}>下一页 →</button>
+            </div>
+          )}
         </section>
       )}
 
@@ -370,7 +408,7 @@ function AutoCard({ projectId, auto, busy, onStart, onCancel }: {
   return (
     <section className="card" style={{ borderLeft: '3px solid var(--cinnabar)' }}>
       <h3>一键全自动成片
-        <span className="hint">人物谱 → 定妆照+分集 → 每集（剧本→分镜→自动确认→关键帧→视频）→ 合成导出 · 自动跳过已完成步骤</span>
+        <span className="hint">人物谱 → 定妆照+分集 → 每集（剧本→分镜→自动确认→参考图视频）→ 合成导出 · 自动跳过已完成步骤</span>
       </h3>
 
       <label className="f">成片导出目录</label>
@@ -426,7 +464,6 @@ function AutoCard({ projectId, auto, busy, onStart, onCancel }: {
           <span>定妆照 {stat(pr.refs)}</span>
           <span>分集 {stat(pr.plan)}</span>
           <span>剧集 {pr.episodes_done ?? 0}/{pr.episodes_total ?? 0} 成片</span>
-          <span>关键帧 {pr.shots_keyframed ?? 0}/{pr.shots_total ?? 0} 镜</span>
           <span>剧本 {pr.screenplays_ready ?? 0}/{pr.episodes_total ?? 0} 集</span>
           <span>视频 {pr.shots_video ?? 0}/{pr.shots_total ?? 0} 镜</span>
         </div>
@@ -496,6 +533,33 @@ function PortraitBlock({ projectId, character: c, disabled, onChanged, regenerat
           </div>
         </>
       )}
+    </div>
+  )
+}
+
+function portraitRangeLabel(start: number, end: number | null): string {
+  if (end == null) return `第${start}集起`
+  return start === end ? `第${start}集` : `第${start}~${end}集`
+}
+
+function PortraitStrip({ portraits }: { portraits: Portrait[] }) {
+  const sorted = [...portraits].sort((a, b) => a.ep_start - b.ep_start)
+  return (
+    <div style={{ margin: '2px 0 8px' }}>
+      <label className="f">定妆照分段（按适用集横向预览）</label>
+      <div style={{ display: 'flex', gap: 8, overflowX: 'auto', paddingBottom: 4 }}>
+        {sorted.map(pt => (
+          <div key={pt.id} style={{ flex: '0 0 auto', width: 92, textAlign: 'center' }}>
+            {pt.image_url
+              ? <img src={pt.image_url} alt={portraitRangeLabel(pt.ep_start, pt.ep_end)}
+                  style={{ width: 92, height: 164, objectFit: 'cover', borderRadius: 6, border: '1px solid var(--hairline)' }} />
+              : <div style={{ width: 92, height: 164, borderRadius: 6, border: '1px dashed var(--hairline)',
+                              display: 'flex', alignItems: 'center', justifyContent: 'center',
+                              fontSize: 11, color: 'var(--ink-faint)' }}>无图</div>}
+            <div style={{ fontSize: 11, color: 'var(--ink-soft)', marginTop: 3 }}>{portraitRangeLabel(pt.ep_start, pt.ep_end)}</div>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }

@@ -11,20 +11,41 @@ from pathlib import Path
 from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
 
 from app import config, worker
-from app.compiler import compile_prompt, shot_cost_cny
+from app.compiler import clip_duration_value, compile_prompt, shot_cost_cny
 from app.db import get_conn, get_setting, new_id, now, rows_to_dicts, set_setting
 from app.ingest import ingest_novel
 from app.schemas import Bible, EpisodeScreenplay, Shot, Storyboard, schema_errors
-from app.stages import (StageError, generate_bible, generate_plan_batch, generate_screenplay,
-                        generate_storyboard, summarize_chapters_concurrent)
-from app.validators import normalize_action_desc, normalize_continuity, validate_screenplay, validate_storyboard
+from app.stages import (StageError, generate_bible, generate_screenplay, generate_storyboard)
+from app.validators import (normalize_action_desc, normalize_continuity, normalize_durations_for_speech,
+                            normalize_episode_opening_shot, validate_screenplay, validate_storyboard)
 
 router = APIRouter(prefix="/api")
 
 BIBLE_TASK_TIMEOUT_S = 15 * 60
 BIBLE_INTERRUPTED_ERROR = "人物谱任务已中断（服务重载或后台任务丢失），请重新谱写。"
+FALLBACK_VISUAL_STYLE = "国漫风格，非真人CG渲染，统一电影感光影，暖灰色调"
 
 _bible_tasks: dict[str, asyncio.Task] = {}
+_refs_tasks: dict[str, asyncio.Task] = {}  # 定妆照（含按20集分段刷新）后台任务，供停止按钮取消
+
+
+def _placeholder_bible() -> Bible:
+    """剧本/分镜可在人物谱未完成时先独立跑；此处提供最小占位圣经供文本阶段使用。"""
+    return Bible.model_validate({
+        "characters": [],
+        "world": {
+            "era": "",
+            "genre": "",
+            "visual_style_canonical": FALLBACK_VISUAL_STYLE,
+        },
+    })
+
+
+def _project_bible_or_placeholder(project_row) -> Bible:
+    raw = (project_row["bible_json"] or "").strip() if project_row else ""
+    if raw:
+        return Bible.model_validate(json.loads(raw))
+    return _placeholder_bible()
 
 
 def _bible_task_active(project_id: str) -> bool:
@@ -60,6 +81,52 @@ def _recover_orphan_bible_dicts(conn, rows: list[dict]) -> None:
 def _track_bible_task(project_id: str, task: asyncio.Task) -> None:
     _bible_tasks[project_id] = task
     task.add_done_callback(lambda _t, pid=project_id: _bible_tasks.pop(pid, None))
+
+
+def _refs_task_active(project_id: str) -> bool:
+    task = _refs_tasks.get(project_id)
+    return bool(task and not task.done())
+
+
+def _start_refs_generation(project_id: str, only_character: str | None, *, with_segmentation: bool) -> bool:
+    """启动定妆照任务。
+
+    返回值表示是否成功启动；若已有同项目定妆任务在跑，则直接返回 False。
+    """
+    if _refs_task_active(project_id):
+        return False
+    conn = get_conn()
+    if only_character is None:
+        conn.execute(
+            "UPDATE projects SET refs_status='running', refs_error=NULL, refs_target=NULL, "
+            "portraits_status='idle', portraits_error=NULL WHERE id=?",
+            (project_id,),
+        )
+    else:
+        conn.execute(
+            "UPDATE projects SET refs_status='running', refs_error=NULL, refs_target=? WHERE id=?",
+            (only_character, project_id),
+        )
+    conn.commit()
+    task = asyncio.create_task(_refs_task(project_id, only_character, with_segmentation=with_segmentation))
+    _refs_tasks[project_id] = task
+    task.add_done_callback(lambda _t, pid=project_id: _refs_tasks.pop(pid, None))
+    return True
+
+
+def recover_bible_tasks() -> None:
+    """启动时恢复人物谱任务（对齐 worker.recover_and_start 的语义）：
+    进程重启/reload 会丢掉内存里的 asyncio.Task，但 DB 仍是 running。
+    与其在下次访问时判孤儿并报错，不如用持久化的 feedback 重新拉起任务续跑。"""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id, bible_feedback FROM projects WHERE bible_status='running'").fetchall()
+    for r in rows:
+        pid = r["id"]
+        if _bible_task_active(pid):
+            continue
+        feedback = r["bible_feedback"] or ""
+        _track_bible_task(pid, asyncio.get_running_loop().create_task(_bible_task(pid, feedback, trigger_full_refs=True)))
 
 
 def _project_or_404(project_id: str):
@@ -218,6 +285,31 @@ def list_projects():
     return rows
 
 
+def _media_url(path_str: str | None) -> str | None:
+    """把绝对落盘路径转成前端可取的 /media URL（带 mtime 版本号防缓存）。"""
+    from app.config import PROJECTS_DIR
+    if not path_str or not os.path.exists(path_str):
+        return None
+    rel_path = Path(path_str).relative_to(PROJECTS_DIR).as_posix()
+    return f"/media/{rel_path}?v={int(os.path.getmtime(path_str))}"
+
+
+def _attach_character_portraits(conn, project_id: str, bible: dict) -> None:
+    """为 bible.characters 挂上 character_portraits 表里的分段定妆照（按适用集左区间排序）。"""
+    rows = rows_to_dicts(conn.execute(
+        "SELECT id, character_name, ep_start, ep_end, appearance, base_portrait_id, image_path "
+        "FROM character_portraits WHERE project_id=? ORDER BY character_name, ep_start", (project_id,)).fetchall())
+    by_name: dict[str, list[dict]] = {}
+    for r in rows:
+        by_name.setdefault(r["character_name"], []).append({
+            "id": r["id"], "ep_start": r["ep_start"], "ep_end": r["ep_end"],
+            "appearance": r["appearance"], "base_portrait_id": r["base_portrait_id"],
+            "image_url": _media_url(r["image_path"]),
+        })
+    for c in bible.get("characters", []):
+        c["portraits"] = by_name.get(c.get("name"), [])
+
+
 @router.get("/projects/{project_id}")
 def project_detail(project_id: str):
     p = dict(_project_or_404(project_id))
@@ -241,8 +333,14 @@ def project_detail(project_id: str):
             c["portrait_prompt_effective"] = override or portrait_prompt(style, c.get("appearance_canonical", ""))
     p["key_timeline"] = json.loads(p["key_timeline"]) if p["key_timeline"] else []
     p["chapters"] = rows_to_dicts(conn.execute(
-        "SELECT idx, title, char_count, summary IS NOT NULL AS has_summary FROM chapters WHERE project_id=? ORDER BY idx",
+        "SELECT idx, title, char_count, summary IS NOT NULL AS has_summary, substr(content,1,200) AS preview "
+        "FROM chapters WHERE project_id=? ORDER BY idx",
         (project_id,)).fetchall())
+    for ch in p["chapters"]:
+        ch["preview"] = _chapter_preview(ch.pop("preview", ""))
+    # 把每个角色的定妆照分段（适用集区间 + 图生图谱系）挂到 bible.characters 上，供横向预览。
+    if p["bible"]:
+        _attach_character_portraits(conn, project_id, p["bible"])
     p["episodes"] = rows_to_dicts(conn.execute(
         "SELECT * FROM episodes WHERE project_id=? ORDER BY episode_no", (project_id,)).fetchall())
     for ep in p["episodes"]:
@@ -264,6 +362,27 @@ def project_detail(project_id: str):
         ep.pop("screenplay_json", None)
         ep["cost_cny"] = worker.episode_cost(ep["id"])
     return p
+
+
+@router.get("/projects/{project_id}/chapters/{idx}")
+def read_chapter(project_id: str, idx: int):
+    """看正文：返回某章完整正文 + 上一章/下一章索引，供沉浸式阅读页翻页。"""
+    _project_or_404(project_id)
+    conn = get_conn()
+    ch = conn.execute("SELECT idx, title, content FROM chapters WHERE project_id=? AND idx=?",
+                      (project_id, idx)).fetchone()
+    if not ch:
+        raise HTTPException(404, f"章节不存在：第 {idx} 章")
+    bounds = conn.execute(
+        "SELECT MIN(idx) AS lo, MAX(idx) AS hi, COUNT(*) AS n FROM chapters WHERE project_id=?",
+        (project_id,)).fetchone()
+    prev_idx = conn.execute("SELECT MAX(idx) AS m FROM chapters WHERE project_id=? AND idx<?",
+                            (project_id, idx)).fetchone()["m"]
+    next_idx = conn.execute("SELECT MIN(idx) AS m FROM chapters WHERE project_id=? AND idx>?",
+                            (project_id, idx)).fetchone()["m"]
+    return {"idx": ch["idx"], "title": ch["title"], "content": ch["content"],
+            "prev_idx": prev_idx, "next_idx": next_idx,
+            "first_idx": bounds["lo"], "last_idx": bounds["hi"], "total": bounds["n"]}
 
 
 @router.delete("/projects/{project_id}")
@@ -320,7 +439,7 @@ def cancel_auto(project_id: str):
 
 # ---------- 角色圣经 ----------
 
-async def _bible_task(project_id: str, feedback: str = ""):
+async def _bible_task(project_id: str, feedback: str = "", *, trigger_full_refs: bool = True):
     conn = get_conn()
     try:
         chapters = rows_to_dicts(conn.execute(
@@ -349,6 +468,8 @@ async def _bible_task(project_id: str, feedback: str = ""):
             "UPDATE projects SET bible_json=?, bible_version=bible_version+1, bible_status='ready', bible_error=NULL, status='bible_ready' WHERE id=?",
             (bible.model_dump_json(), project_id))
         conn.commit()
+        if trigger_full_refs:
+            _start_refs_generation(project_id, None, with_segmentation=True)
     except asyncio.TimeoutError:
         conn.execute(
             "UPDATE projects SET bible_status='failed', bible_error=? WHERE id=?",
@@ -356,11 +477,13 @@ async def _bible_task(project_id: str, feedback: str = ""):
         )
         conn.commit()
     except asyncio.CancelledError:
-        conn.execute(
-            "UPDATE projects SET bible_status='failed', bible_error=? WHERE id=?",
-            (BIBLE_INTERRUPTED_ERROR, project_id),
-        )
-        conn.commit()
+        row = conn.execute("SELECT bible_status FROM projects WHERE id=?", (project_id,)).fetchone()
+        if row and row["bible_status"] == "running":
+            conn.execute(
+                "UPDATE projects SET bible_status='failed', bible_error=? WHERE id=?",
+                (BIBLE_INTERRUPTED_ERROR, project_id),
+            )
+            conn.commit()
         raise
     except (StageError, Exception) as exc:  # noqa: BLE001
         conn.execute("UPDATE projects SET bible_status='failed', bible_error=? WHERE id=?", (str(exc)[:800], project_id))
@@ -372,14 +495,35 @@ async def start_bible(project_id: str, body: dict | None = Body(None)):
     p = _project_or_404(project_id)
     if p["bible_status"] == "running" and _bible_task_active(project_id):
         raise HTTPException(409, "角色圣经正在生成中")
+    if p["refs_status"] == "running" or p["portraits_status"] == "running":
+        raise HTTPException(409, "定妆照正在生成中，请先停止后再重生人物谱")
     feedback = str((body or {}).get("feedback") or "").strip()
     if len(feedback) > 2000:
         raise HTTPException(400, "打回要求过长，请控制在 2000 字以内")
     conn = get_conn()
-    conn.execute("UPDATE projects SET bible_status='running', bible_error=NULL WHERE id=?", (project_id,))
+    # 持久化 feedback：进程重启后 recover_bible_tasks 能用相同入参续跑，而非中断报错
+    conn.execute("UPDATE projects SET bible_status='running', bible_error=NULL, bible_feedback=? WHERE id=?",
+                 (feedback, project_id))
     conn.commit()
-    _track_bible_task(project_id, asyncio.create_task(_bible_task(project_id, feedback)))
+    _track_bible_task(project_id, asyncio.create_task(_bible_task(project_id, feedback, trigger_full_refs=True)))
     return {"status": "running"}
+
+
+@router.post("/projects/{project_id}/bible/cancel")
+def cancel_bible(project_id: str):
+    """停止人物谱生成。若人物谱尚未完成，停止后不会继续触发后续定妆照任务。"""
+    p = _project_or_404(project_id)
+    task = _bible_tasks.pop(project_id, None)
+    if task and not task.done():
+        task.cancel()
+    conn = get_conn()
+    conn.execute(
+        "UPDATE projects SET bible_status='idle', bible_error=NULL, bible_feedback=NULL WHERE id=?",
+        (project_id,),
+    )
+    conn.commit()
+    was_running = p["bible_status"] == "running"
+    return {"stopped": bool(task) or was_running}
 
 
 def _purge_for_style_change(project_id: str, instance: "Bible") -> dict:
@@ -396,8 +540,12 @@ def _purge_for_style_change(project_id: str, instance: "Bible") -> dict:
             c.ref_image_path = None
             refs_cleared += 1
     conn = get_conn()
+    # 画风变更 → 旧画风的分段定妆照与刷新进度全部作废，重新定妆后再分段。
+    conn.execute("DELETE FROM character_portraits WHERE project_id=?", (project_id,))
     conn.execute("UPDATE projects SET refs_status='idle' WHERE id=?", (project_id,))
     conn.commit()
+    from app.portraits import reset_processed_blocks
+    reset_processed_blocks(project_id)
     return {**purged, "refs_cleared": refs_cleared}
 
 
@@ -446,7 +594,32 @@ def edit_portrait_prompt(project_id: str, character_name: str, body: dict):
 
 # ---------- 角色定妆照（人物跨集一致性） ----------
 
-async def _refs_task(project_id: str, only_character: str | None):
+async def _segment_portraits(project_id: str) -> None:
+    """全量定妆成功后顺带按 20 集分段刷新定妆照：逐段判断各角色外观是否大变，大变才图生图重绘
+    并切分适用集区间。无分集或总集数 ≤ 一个间隔时自动跳过（此时初始定妆照已覆盖全片）。
+    分段刷新失败不影响已生成的初始定妆照，仅在 portraits_error 报出。"""
+    from app.portraits import update_portraits_for_blocks
+    conn = get_conn()
+    last = conn.execute("SELECT MAX(episode_no) AS m FROM episodes WHERE project_id=?",
+                        (project_id,)).fetchone()["m"] or 0
+    if last <= config.PORTRAIT_REFRESH_INTERVAL:
+        conn.execute("UPDATE projects SET portraits_status='idle', portraits_error=NULL WHERE id=?", (project_id,))
+        conn.commit()
+        return
+    conn.execute("UPDATE projects SET portraits_status='running', portraits_error=NULL WHERE id=?", (project_id,))
+    conn.commit()
+    try:
+        result = await update_portraits_for_blocks(project_id)
+        conn.execute("UPDATE projects SET portraits_status='ready', portraits_error=? WHERE id=?",
+                     ("；".join(result.get("errors") or [])[:800] or None, project_id))
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001 失败要响，但不回滚已生成的初始定妆照
+        conn.execute("UPDATE projects SET portraits_status='failed', portraits_error=? WHERE id=?",
+                     (str(exc)[:800], project_id))
+        conn.commit()
+
+
+async def _refs_task(project_id: str, only_character: str | None, *, with_segmentation: bool = False):
     from app.refs import generate_refs
     conn = get_conn()
     try:
@@ -466,6 +639,10 @@ async def _refs_task(project_id: str, only_character: str | None):
         conn.execute("UPDATE projects SET refs_status='failed', refs_error=? WHERE id=?",
                      (str(exc)[:800], project_id))
         conn.commit()
+        return
+    # 全量定妆（非单角色补定妆）后，顺带按 20 集分段刷新——把「初始定妆 + 每20集更新」并成一步。
+    if with_segmentation and only_character is None:
+        await _segment_portraits(project_id)
 
 
 @router.post("/projects/{project_id}/refs")
@@ -473,69 +650,59 @@ async def start_refs(project_id: str, body: dict | None = None):
     p = _project_or_404(project_id)
     if not p["bible_json"]:
         raise HTTPException(409, "请先生成角色圣经")
-    if p["refs_status"] == "running":
+    if _refs_task_active(project_id) or p["refs_status"] == "running":
         raise HTTPException(409, "定妆照正在生成中")
     only = (body or {}).get("character")
-    conn = get_conn()
-    conn.execute("UPDATE projects SET refs_status='running', refs_error=NULL, refs_target=? WHERE id=?",
-                 (only, project_id))
-    conn.commit()
-    asyncio.create_task(_refs_task(project_id, only))
+    # 全量定妆顺带做按 20 集分段刷新；单角色补定妆只生成该角色，不触发分段。
+    _start_refs_generation(project_id, only, with_segmentation=only is None)
     return {"status": "running"}
+
+
+@router.post("/projects/{project_id}/refs/cancel")
+def cancel_refs(project_id: str):
+    """停止定妆照生成（含按 20 集分段刷新）。已落盘的定妆照保留，状态置回空闲。"""
+    p = _project_or_404(project_id)
+    task = _refs_tasks.pop(project_id, None)
+    if task and not task.done():
+        task.cancel()
+    conn = get_conn()
+    conn.execute(
+        "UPDATE projects SET refs_status='idle', refs_error=NULL, refs_target=NULL, "
+        "portraits_status='idle', portraits_error=NULL WHERE id=?", (project_id,))
+    conn.commit()
+    was_running = p["refs_status"] == "running" or p["portraits_status"] == "running"
+    return {"stopped": bool(task) or was_running}
 
 
 # ---------- 剧集规划 ----------
 
+PLAN_PREVIEW_CHARS = 100  # 分集台每集预览取源章前 100 字
+
+
+def _chapter_preview(content: str | None, limit: int = PLAN_PREVIEW_CHARS) -> str:
+    """章节正文前 limit 字（归一空白）作为分集预览。"""
+    return re.sub(r"\s+", " ", (content or "")).strip()[:limit]
+
+
 async def _plan_task(project_id: str):
+    """正则分集（不依赖模型）：每章直接生成一集，源章 N–N，预览取该章前 100 字。"""
     conn = get_conn()
     try:
         chapters = rows_to_dicts(conn.execute(
             "SELECT * FROM chapters WHERE project_id=? ORDER BY idx", (project_id,)).fetchall())
-        new_summaries = await summarize_chapters_concurrent(chapters)
-        for idx, summary in new_summaries.items():
-            conn.execute("UPDATE chapters SET summary=? WHERE project_id=? AND idx=?", (summary, project_id, idx))
-        conn.commit()
-        chapters = rows_to_dicts(conn.execute(
-            "SELECT * FROM chapters WHERE project_id=? ORDER BY idx", (project_id,)).fetchall())
-        p = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
-        bible = Bible.model_validate(json.loads(p["bible_json"]))
-        chapter_count = len(chapters)
-        batch_size = max(int(get_setting("plan_episode_count") or 12), 1)
-        summaries = [(ch["idx"], ch["title"] or "", ch["summary"] or "") for ch in chapters]
-        # 传入原文（不止摘要）：分集质量取决于真实情节细节，仅靠 200 字摘要会丢钩子/反转/台词
-        chapter_texts = [(ch["idx"], ch["title"] or "", ch["content"] or "") for ch in chapters]
-
-        # 分批续写，铺满全书：每批从首个未覆盖章节起，直到最后一章被纳入（防长篇被截断/丢弃）
-        all_episodes = []
-        key_timeline: list[str] = []
-        start_chapter = chapters[0]["idx"] if chapters else 1
-        last_chapter = chapters[-1]["idx"] if chapters else 0
-        guard = 0
-        while start_chapter <= last_chapter and guard < 40:
-            guard += 1
-            batch = await generate_plan_batch(
-                summaries, bible,
-                start_episode_no=len(all_episodes) + 1, start_chapter=start_chapter,
-                chapter_count=chapter_count, batch_size=batch_size,
-                want_timeline=(guard == 1), chapter_texts=chapter_texts)
-            if guard == 1:
-                key_timeline = batch.key_timeline
-            advanced = batch.episodes[-1].source_chapters[-1]
-            if advanced < start_chapter:  # 无进展，避免死循环
-                raise StageError("剧集规划", [f"分批续写未推进（停在第 {start_chapter} 章），请重试"])
-            all_episodes.extend(batch.episodes)
-            start_chapter = advanced + 1
-
+        if not chapters:
+            raise StageError("剧集规划", ["没有可分集的章节，请先上传小说"])
         # 干净替换：清空本项目所有旧剧集及衍生数据，避免重复集/撞号
         worker.delete_project_episodes(project_id)
-        for ep in all_episodes:
+        for episode_no, ch in enumerate(chapters, start=1):
             conn.execute(
                 "INSERT INTO episodes(id, project_id, episode_no, title, hook, cliffhanger, synopsis, source_chapters, target_duration_s, status, created_at) "
                 "VALUES(?,?,?,?,?,?,?,?,?, 'planned', ?)",
-                (new_id("ep"), project_id, ep.episode_no, ep.title, ep.hook, ep.cliffhanger,
-                 ep.synopsis, json.dumps(ep.source_chapters), ep.target_duration_s, now()))
-        conn.execute("UPDATE projects SET plan_status='ready', plan_error=NULL, key_timeline=?, status='planned' WHERE id=?",
-                     (json.dumps(key_timeline, ensure_ascii=False), project_id))
+                (new_id("ep"), project_id, episode_no, ch["title"] or f"第{ch['idx']}章", "", "",
+                 _chapter_preview(ch["content"]), json.dumps([ch["idx"]]),
+                 config.EPISODE_TARGET_DEFAULT_S, now()))
+        conn.execute("UPDATE projects SET plan_status='ready', plan_error=NULL, key_timeline='[]', status='planned' WHERE id=?",
+                     (project_id,))
         conn.commit()
     except (StageError, Exception) as exc:  # noqa: BLE001
         conn.execute("UPDATE projects SET plan_status='failed', plan_error=? WHERE id=?", (str(exc)[:800], project_id))
@@ -544,9 +711,8 @@ async def _plan_task(project_id: str):
 
 @router.post("/projects/{project_id}/plan")
 async def start_plan(project_id: str):
+    # 正则分集不再依赖角色圣经；上传小说切分出章节后即可分集。
     p = _project_or_404(project_id)
-    if not p["bible_json"]:
-        raise HTTPException(409, "请先生成并确认角色圣经")
     if p["plan_status"] == "running":
         raise HTTPException(409, "剧集规划正在生成中")
     conn = get_conn()
@@ -572,7 +738,7 @@ async def _screenplay_task(episode_id: str):
     try:
         ep_data = dict(ep)
         p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
-        bible = Bible.model_validate(json.loads(p["bible_json"]))
+        bible = _project_bible_or_placeholder(p)
         source_text = _episode_source_text(conn, ep)
         compact_target = _storyboard_target_for_source(ep_data.get("target_duration_s"), len(source_text))
         if compact_target != ep_data.get("target_duration_s"):
@@ -664,6 +830,27 @@ async def start_screenplay_all(project_id: str):
     return {"started": len(ids)}
 
 
+@router.post("/projects/{project_id}/screenplay-all/cancel")
+def cancel_screenplay_all(project_id: str):
+    """停止本项目所有正在进行的剧本生成：取消在跑任务，未开跑的回退状态。"""
+    _project_or_404(project_id)
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id, screenplay_json FROM episodes WHERE project_id=? AND screenplay_status='running'",
+        (project_id,)).fetchall()
+    stopped = 0
+    for r in rows:
+        eid = r["id"]
+        task = _screenplay_tasks.pop(eid, None)
+        if task and not task.done():
+            task.cancel()
+        fallback = "ready" if r["screenplay_json"] else "pending"
+        conn.execute("UPDATE episodes SET screenplay_status=?, screenplay_error=NULL WHERE id=?", (fallback, eid))
+        stopped += 1
+    conn.commit()
+    return {"stopped": stopped}
+
+
 @router.post("/episodes/{episode_id}/screenplay/cancel")
 def cancel_screenplay(episode_id: str):
     ep = _episode_or_404(episode_id)
@@ -689,7 +876,7 @@ def edit_screenplay(episode_id: str, body: dict):
         raise HTTPException(422, "；".join(errors))
     conn = get_conn()
     p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
-    bible = Bible.model_validate(json.loads(p["bible_json"]))
+    bible = _project_bible_or_placeholder(p)
     expected = max(1, int(ep["target_duration_s"]) // config.FIXED_VIDEO_DURATION_S)
     errors = validate_screenplay(instance, bible, expected, episode_no=ep["episode_no"])
     if errors:
@@ -727,7 +914,17 @@ async def _storyboard_task(episode_id: str):
         if screenplay is None or ep["screenplay_status"] != "ready":
             raise StageError("分镜脚本", ["请先生成并确认本集可拍剧本，再展开分镜"])
         p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
-        bible = Bible.model_validate(json.loads(p["bible_json"]))
+        bible = _project_bible_or_placeholder(p)
+        # 新角色发现（反应式）：剧本里出现、人物谱里没有、且戏份够的角色，先补进人物谱再展开分镜——
+        # 否则 validate_storyboard 会因"角色圣经中不存在"把新角色从分镜里刷掉。发现失败不阻断分镜。
+        try:
+            from app.portraits import ensure_cards_for_screenplay
+            disc = await ensure_cards_for_screenplay(ep["project_id"], ep["episode_no"], screenplay, bible)
+            if disc.get("added"):
+                p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
+                bible = _project_bible_or_placeholder(p)
+        except Exception:  # noqa: BLE001 新角色发现是增强项，失败就按原人物谱继续分镜
+            pass
         source_text = _episode_source_text(conn, ep)
         compact_target = _storyboard_target_for_source(ep_data.get("target_duration_s"), len(source_text))
         if compact_target != ep_data.get("target_duration_s"):
@@ -745,6 +942,10 @@ async def _storyboard_task(episode_id: str):
         # 同场景=接上镜+硬切、换场=明确换场转场、首镜=false。即便修复轮次耗尽以最后一次输出兜底，
         # 也保证落库的 continuity/transition 与场景标签自洽，不把断链/错转场直接做成视频。
         normalize_continuity(board)
+        # 时长归一：把台词较长镜头的 duration_s 抬到能念完配音，杜绝"动作演完台词还没说完"的音画不同步。
+        normalize_durations_for_speech(board)
+        # 第一集第一镜=全片开场建场镜：拉长时长 + 强制远景建场 + 缓慢推近运镜（出片侧确定性差异化）。
+        normalize_episode_opening_shot(board)
         for s in board.shots:
             s.action_desc = normalize_action_desc(s.action_desc)
             conn.execute(
@@ -846,55 +1047,33 @@ _plan_tasks: dict[str, asyncio.Task] = {}
 
 
 async def _plan_modes_task(episode_id: str):
-    """后台任务：为全集镜头调用 LLM 规划视频生成模式和参考图计划。"""
-    from app.video_modes import ShotVideoModeSelector
+    """后台任务：为全集镜头写入固定参考图模式计划。"""
     conn = get_conn()
     shots = rows_to_dicts(conn.execute(
         "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)).fetchall())
     if not shots:
         return
-    p = conn.execute(
-        "SELECT bible_json FROM projects WHERE id=(SELECT project_id FROM episodes WHERE id=?)",
-        (episode_id,)).fetchone()
-    bible = Bible.model_validate(json.loads(p["bible_json"])) if p and p["bible_json"] else None
-    selector = ShotVideoModeSelector()
-    for i, shot_row in enumerate(shots):
-        prev_shot = shots[i - 1] if i > 0 else None
-        plan_dict = await _plan_one_shot(selector, shot_row, bible, prev_shot)
+    for shot_row in shots:
+        plan_dict = await _plan_one_shot(shot_row)
         conn.execute("UPDATE shots SET mode_plan=? WHERE id=?",
                      (json.dumps(plan_dict, ensure_ascii=False), shot_row["id"]))
     conn.commit()
 
 
-async def _plan_one_shot(selector, shot_row, bible, prev_shot) -> dict:
-    """对单个镜头跑（LLM）模式与参考图规划，返回可持久化的 mode_plan dict。
-    bible 缺失或 LLM 不可用时，select() 内部会回退到规则决策。"""
+async def _plan_one_shot(shot_row) -> dict:
+    """返回固定参考图模式计划；不再调用 LLM 做模式选择。"""
     from app import video_modes
-    shot_model = worker._load_shot_model(shot_row)
-    if bible is None:
-        plan = selector.select_by_rules(shot_model, shot_row=shot_row, prev_shot=prev_shot)
-    else:
-        plan = await selector.select(shot_model, bible, shot_row=shot_row, prev_shot=prev_shot)
-    return video_modes.decision_to_dict(plan)
+    return video_modes.decision_to_dict(video_modes.default_reference_decision())
 
 
 async def _ensure_shot_mode_plan(conn, shot_id: str, *, force: bool = False) -> None:
-    """生成前确保该镜已有模型决策（shots.mode_plan）。已存在且非强制时跳过。"""
-    from app.video_modes import ShotVideoModeSelector
+    """生成前确保该镜已有固定参考图模式计划。已存在且非强制时跳过。"""
     shot_row = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
     if not shot_row:
         return
     if not force and shot_row["mode_plan"]:
         return
-    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (shot_row["episode_id"],)).fetchone()
-    p = conn.execute("SELECT bible_json FROM projects WHERE id=?", (ep["project_id"],)).fetchone() if ep else None
-    bible = Bible.model_validate(json.loads(p["bible_json"])) if p and p["bible_json"] else None
-    prev_shot = None
-    if shot_row["shot_no"] > 1:
-        prev_shot = conn.execute(
-            "SELECT * FROM shots WHERE episode_id=? AND shot_no=?",
-            (shot_row["episode_id"], shot_row["shot_no"] - 1)).fetchone()
-    plan_dict = await _plan_one_shot(ShotVideoModeSelector(), shot_row, bible, prev_shot)
+    plan_dict = await _plan_one_shot(shot_row)
     conn.execute("UPDATE shots SET mode_plan=? WHERE id=?",
                  (json.dumps(plan_dict, ensure_ascii=False), shot_id))
     conn.commit()
@@ -902,10 +1081,10 @@ async def _ensure_shot_mode_plan(conn, shot_id: str, *, force: bool = False) -> 
 
 @router.post("/episodes/{episode_id}/plan-modes")
 async def start_plan_modes(episode_id: str):
-    """为全集镜头调用 LLM 规划视频生成模式与参考图计划。"""
+    """为全集镜头写入固定参考图模式计划（兼容旧入口，不调用 LLM）。"""
     _episode_or_404(episode_id)
     if episode_id in _plan_tasks and not _plan_tasks[episode_id].done():
-        raise HTTPException(409, "模式规划正在进行中")
+        raise HTTPException(409, "参考图计划写入中")
     conn = get_conn()
     conn.execute("UPDATE episodes SET status='confirming' WHERE id=? AND status='scripted'", (episode_id,))
     conn.commit()
@@ -1012,9 +1191,11 @@ def episode_detail(episode_id: str):
             v["image_inputs"] = {"first_frame_used": bool(meta.get("first_frame_used")),
                                  "first_frame_src": meta.get("first_frame_src"),
                                  "first_frame_scene_id": meta.get("first_frame_scene_id"),
+                                 "first_frame_image_url": _media_url(meta.get("first_frame_path")),
                                  "last_frame_used": bool(meta.get("last_frame_used")),
                                  "last_frame_src": meta.get("last_frame_src"),
                                  "last_frame_scene_id": meta.get("last_frame_scene_id"),
+                                 "last_frame_image_url": _media_url(meta.get("last_frame_path")),
                                  "mode": meta.get("mode"),
                                  "mode_decision": meta.get("mode_decision"),
                                  "reference_image_used": bool(meta.get("reference_image_used")),
@@ -1044,7 +1225,8 @@ def edit_shot(shot_id: str, body: dict):
                 "action_desc", "first_frame_desc", "last_frame_desc", "source_excerpt", "narration", "dialogues", "transition", "continuity_from_prev"):
         if key in body:
             merged[key] = body[key]
-    merged["duration_s"] = config.FIXED_VIDEO_DURATION_S
+    # 时长 clamp 到产品侧合法区间；缺省/非法时回退默认时长。
+    merged["duration_s"] = clip_duration_value(merged.get("duration_s"))
     instance, errors = schema_errors(Shot, {k: merged[k] for k in (
         "shot_no", "duration_s", "shot_size", "camera_move", "scene_setting", "characters",
         "action_desc", "first_frame_desc", "last_frame_desc", "source_excerpt", "narration", "dialogues", "transition", "continuity_from_prev")})
@@ -1076,7 +1258,8 @@ def confirm_episode_core(episode_id: str) -> dict:
         conn.execute("UPDATE episodes SET target_duration_s=? WHERE id=?", (compact_target, episode_id))
         conn.commit()
     p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
-    bible = Bible.model_validate(json.loads(p["bible_json"]))
+    has_real_bible = bool((p["bible_json"] or "").strip())
+    bible = _project_bible_or_placeholder(p)
     shots_rows = conn.execute("SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)).fetchall()
     if not shots_rows:
         raise ValueError("本集还没有分镜脚本")
@@ -1090,40 +1273,48 @@ def confirm_episode_core(episode_id: str) -> dict:
     board = Storyboard(episode_no=ep["episode_no"], shots=shots)
     # 确认门同样跑确定性连贯归一，并把修正后的 continuity/transition 写回库，
     # 保证人工编辑过的分镜在进入生成前也满足"同场景接上镜/换场明确转场"的铁律。
-    before = [(s.continuity_from_prev, s.transition) for s in shots]
+    before = [(s.continuity_from_prev, s.transition, s.duration_s, s.shot_size, s.camera_move) for s in shots]
     normalize_continuity(board)
-    for r, s, (old_cont, old_trans) in zip(shots_rows, shots, before):
-        if old_cont != s.continuity_from_prev or old_trans != s.transition:
-            conn.execute("UPDATE shots SET continuity_from_prev=?, transition=? WHERE id=?",
-                         (int(s.continuity_from_prev), s.transition, r["id"]))
+    # 确认门同样把每镜时长抬到能念完台词，并写回库，保证人工编辑/旧分镜进入生成前也满足音画同步。
+    normalize_durations_for_speech(board)
+    # 第一集第一镜=全片开场建场镜：拉长时长 + 强制远景建场 + 缓慢推近运镜，并写回库。
+    normalize_episode_opening_shot(board)
+    for r, s, (old_cont, old_trans, old_dur, old_size, old_move) in zip(shots_rows, shots, before):
+        if (old_cont != s.continuity_from_prev or old_trans != s.transition or old_dur != s.duration_s
+                or old_size != s.shot_size or old_move != s.camera_move):
+            conn.execute(
+                "UPDATE shots SET continuity_from_prev=?, transition=?, duration_s=?, shot_size=?, camera_move=? WHERE id=?",
+                (int(s.continuity_from_prev), s.transition, s.duration_s, s.shot_size, s.camera_move, r["id"]))
     conn.commit()
-    errors = validate_storyboard(board, bible, compact_target)
+    errors = validate_storyboard(board, bible, compact_target, enforce_total_duration=False)
     if errors:
         raise ValueError(json.dumps(errors, ensure_ascii=False))
     # 预编译全部 prompt，把参数错误拦在花钱之前
-    try:
-        for s in shots:
-            compile_prompt(s, bible)
-    except Exception as exc:  # noqa: BLE001
-        raise ValueError(f"Prompt 编译失败：{exc}")
+    if has_real_bible:
+        try:
+            for s in shots:
+                compile_prompt(s, bible)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"Prompt 编译失败：{exc}")
     est = sum(shot_cost_cny(s.duration_s) for s in shots)
     conn.execute("UPDATE episodes SET status='confirmed' WHERE id=?", (episode_id,))
     conn.commit()
-    return {"confirmed": True, "estimated_cost_cny": round(est, 2), "shot_count": len(shots)}
+    return {
+        "confirmed": True,
+        "estimated_cost_cny": round(est, 2),
+        "shot_count": len(shots),
+        "total_duration_s": sum(s.duration_s for s in shots),
+        "target_duration_s": compact_target,
+    }
 
 
 @router.post("/episodes/{episode_id}/confirm")
 async def confirm_episode(episode_id: str):
-    """人工确认门（PRD P3）：全量业务校验通过才进入 confirmed。
-    确认后后台预跑模型的模式/参考图规划，使评审墙能直接看到模型决策。"""
+    """人工确认门（PRD P3）：全量业务校验通过才进入 confirmed。"""
     try:
         result = confirm_episode_core(episode_id)
     except ValueError as exc:
         raise HTTPException(422, str(exc))
-    if episode_id not in _plan_tasks or _plan_tasks[episode_id].done():
-        task = asyncio.create_task(_plan_modes_task(episode_id))
-        _plan_tasks[episode_id] = task
-        task.add_done_callback(lambda t, eid=episode_id: _plan_tasks.pop(eid, None))
     return result
 
 
@@ -1189,6 +1380,22 @@ def delete_scene(scene_id: str):
     return {"deleted": scene_id, "scene_status": status, "video_purged": video_purged}
 
 
+@router.post("/episodes/{episode_id}/clear-artifacts")
+def clear_episode_artifacts(episode_id: str):
+    """清空整集所有镜头的参考图、视频与模型分析（mode_plan），保留关键帧，并回退到「已确认」。"""
+    _episode_or_404(episode_id)
+    return worker.clear_episode_artifacts(episode_id)
+
+
+@router.post("/shots/{shot_id}/clear-artifacts")
+def clear_shot_artifacts(shot_id: str):
+    """清空单个镜头的参考图、视频与模型分析（mode_plan），保留关键帧。"""
+    conn = get_conn()
+    if not conn.execute("SELECT id FROM shots WHERE id=?", (shot_id,)).fetchone():
+        raise HTTPException(404, "镜头不存在")
+    return worker.clear_shot_artifacts(shot_id)
+
+
 @router.delete("/versions/{version_id}")
 def delete_version(version_id: str):
     """删除一个已生成的视频版本（含文件）。若是采用版则清空采用、使本集成品失效。"""
@@ -1198,6 +1405,39 @@ def delete_version(version_id: str):
         raise HTTPException(404, "视频版本不存在")
     shot_id = worker.delete_video_version(version_id)
     return {"deleted": version_id, "shot_id": shot_id}
+
+
+def _set_reference_image_used(version_id: str, ref_id: str, *, use: bool) -> dict:
+    """素材画廊里把某张参考图标记为「废弃」或「恢复使用」。
+    废弃后该图不再喂给视频模型（见 video_modes.build_seedance_image_inputs），仅留作展示。"""
+    conn = get_conn()
+    v = conn.execute("SELECT image_inputs FROM shot_versions WHERE id=?", (version_id,)).fetchone()
+    if not v:
+        raise HTTPException(404, "视频版本不存在")
+    meta = json.loads(v["image_inputs"] or "{}")
+    refs = meta.get("reference_images") or []
+    target = next((r for r in refs if r.get("id") == ref_id), None)
+    if target is None:
+        raise HTTPException(404, "参考图不存在")
+    target["deleted"] = not use
+    target["selectedForSeedance"] = use
+    meta["reference_images"] = refs
+    conn.execute("UPDATE shot_versions SET image_inputs=? WHERE id=?",
+                 (json.dumps(meta, ensure_ascii=False), version_id))
+    conn.commit()
+    return {"version_id": version_id, "ref_id": ref_id, "deleted": not use}
+
+
+@router.delete("/versions/{version_id}/reference-images/{ref_id}")
+def discard_reference_image(version_id: str, ref_id: str):
+    """废弃一张参考图：移入废弃画廊，且后续调用视频模型时不再使用它。"""
+    return _set_reference_image_used(version_id, ref_id, use=False)
+
+
+@router.post("/versions/{version_id}/reference-images/{ref_id}/restore")
+def restore_reference_image(version_id: str, ref_id: str):
+    """把废弃画廊里的参考图恢复为可用（重新计入喂给视频模型的参考图）。"""
+    return _set_reference_image_used(version_id, ref_id, use=True)
 
 
 @router.post("/episodes/{episode_id}/scenes-all")
@@ -1221,7 +1461,7 @@ def generate_scenes_all(episode_id: str):
     return {"started": started}
 
 
-# ----- 视频生成（需首/尾关键帧通过评审后） -----
+# ----- 视频生成（固定参考图模式） -----
 
 def _shot_by_no(episode_id: str, shot_no: int):
     return get_conn().execute(
@@ -1230,8 +1470,7 @@ def _shot_by_no(episode_id: str, shot_no: int):
 
 @router.post("/episodes/{episode_id}/generate")
 async def generate_episode(episode_id: str, body: dict | None = None):
-    """批量生成整集视频（首尾关键帧）：同场景连续镜的首帧来自上一镜预生成尾图，
-    换场/首镜的首帧来自本镜预生成首图；所有镜头都使用本镜预生成尾图作为尾帧，可并行执行。
+    """批量生成整集视频（固定参考图模式）：每个视频任务内部生成/复用参考图并提交 Seedance。
     body.from_shot_no：只从该镜起、沿其连续段往后重生（中途改动后用）。"""
     ep = _episode_or_404(episode_id)
     if ep["status"] not in ("confirmed", "generating", "done"):
@@ -1241,7 +1480,6 @@ async def generate_episode(episode_id: str, body: dict | None = None):
         "SELECT id, shot_no, continuity_from_prev FROM shots WHERE episode_id=? ORDER BY shot_no",
         (episode_id,)).fetchall())
     from_no = (body or {}).get("from_shot_no")
-    mode_override = (body or {}).get("mode_override")
     if from_no:
         selected = []
         for i, s in enumerate(shots):
@@ -1257,12 +1495,12 @@ async def generate_episode(episode_id: str, body: dict | None = None):
             raise HTTPException(404, f"未找到镜 {from_no}")
     else:
         selected = shots
-    # 选中镜清空旧采用版，使新生成版被自动采用；下游连续镜使用的是预生成尾图，不再依赖上一镜视频。
+    # 选中镜清空旧采用版，使新生成版被自动采用。
     sel_ids = [s["id"] for s in selected]
     conn.execute(
         f"UPDATE shots SET adopted_version_id=NULL WHERE id IN ({','.join('?' for _ in sel_ids)})", sel_ids)
     conn.commit()
-    # 模式与参考图计划由模型按剧本决定：批量生成前确保每个选中镜都有 mode_plan。
+    # 固定参考图模式：批量生成前确保每个选中镜都有固定参考图计划。
     for s in selected:
         await _ensure_shot_mode_plan(conn, s["id"])
     results = []
@@ -1272,7 +1510,7 @@ async def generate_episode(episode_id: str, body: dict | None = None):
             pr = _shot_by_no(episode_id, s["shot_no"] - 1)
             after = pr["id"] if pr else None
         try:
-            r = worker.enqueue_shot(s["id"], after_shot_id=after, mode_override=mode_override)
+            r = worker.enqueue_shot(s["id"], after_shot_id=after)
             # 幂等命中（已有相同成片）：上面清空了采用版，这里把复用版重新采用回去
             if r.get("reused") and r.get("version_id"):
                 conn.execute("UPDATE shots SET adopted_version_id=? WHERE id=?", (r["version_id"], s["id"]))
@@ -1304,9 +1542,9 @@ async def generate_shot(shot_id: str, body: dict | None = None):
                 (shot_id,)).fetchone()
         if ref:
             critique = await worker.critique_version(ref["id"])
-    # 模式与参考图计划由模型按剧本决定：生成前确保已有 mode_plan。
+    # 固定参考图模式：生成前确保已有固定参考图计划。
     await _ensure_shot_mode_plan(conn, shot_id)
-    # 同场景接上镜的单镜重生使用上一镜已过审尾图作为首帧。
+    # 同场景接上镜时，参考图模式可复用上一镜可用素材作为参考。
     after = None
     if shot_row["continuity_from_prev"] and shot_row["shot_no"] > 1:
         pr = _shot_by_no(shot_row["episode_id"], shot_row["shot_no"] - 1)
@@ -1317,8 +1555,7 @@ async def generate_shot(shot_id: str, body: dict | None = None):
             prompt_override=body.get("prompt_override"),
             extra_negative=body.get("extra_negative"),
             reroll=bool(body.get("reroll")) or bool(body.get("with_critique")),
-            critique=critique, after_shot_id=after,
-            mode_override=body.get("mode_override"))
+            critique=critique, after_shot_id=after)
     except ValueError as exc:
         raise HTTPException(409, str(exc))
 

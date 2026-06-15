@@ -46,6 +46,10 @@ async def generate_refs(project_id: str, only_character: str | None = None) -> N
     if not targets:
         raise ValueError(f"角色不存在：{only_character}")
 
+    # 初始定妆照登记到 character_portraits（适用集 1~ 至今），供按集分段刷新与评审墙按集选图。
+    from app import portraits as _portraits
+    bible_version = project["bible_version"] or 0
+
     errors: list[str] = []
     for c in targets:
         try:
@@ -67,24 +71,42 @@ async def generate_refs(project_id: str, only_character: str | None = None) -> N
             else:
                 raise hiagent.ProviderError(f"图像响应缺少 url/b64_json：{list(item.keys())}")
             c.ref_image_path = path
+            _portraits.register_initial_portrait(
+                conn, project_id, c.name, path, c.appearance_canonical, prompt, bible_version)
         except Exception as exc:  # noqa: BLE001 失败要响：逐角色记录，最后汇总抛出
             errors.append(f"{c.name}：{exc}")
 
     conn.execute("UPDATE projects SET bible_json=? WHERE id=?", (bible.model_dump_json(), project_id))
     conn.commit()
+    # 全量重新定妆 → 旧的分段刷新进度作废，下次刷新从第二段重新判定。
+    if only_character is None:
+        _portraits.reset_processed_blocks(project_id)
     if errors:
         raise RuntimeError("部分定妆照失败：" + "；".join(errors)[:600])
 
 
-def refs_as_image_inputs(bible: Bible, character_names: list[str], limit: int) -> list[tuple[str, str]]:
-    """出场角色定妆照 →(data_url, role) 列表，按出场顺序最多 limit 张。"""
+def refs_as_image_inputs(bible: Bible, character_names: list[str], limit: int,
+                         *, project_id: str | None = None,
+                         episode_no: int | None = None) -> list[tuple[str, str]]:
+    """出场角色定妆照 →(data_url, role) 列表，按出场顺序最多 limit 张。
+
+    传入 project_id+episode_no 时，按集号选用 character_portraits 中覆盖该集的定妆照（人物谱按
+    20 集分段后的时间维一致性）；未命中或未传时回退到 bible 里的初始 ref_image_path。
+    """
     out: list[tuple[str, str]] = []
     by_name = {c.name: c for c in bible.characters}
     for name in character_names[:max(limit, 0)]:
         c = by_name.get(name)
-        if c and c.ref_image_path:
+        if not c:
+            continue
+        path = None
+        if project_id is not None:
+            from app.portraits import portrait_for_episode
+            path = portrait_for_episode(project_id, name, episode_no)
+        path = path or c.ref_image_path
+        if path:
             try:
-                out.append((hiagent.data_url_from_file(c.ref_image_path), "reference_image"))
+                out.append((hiagent.data_url_from_file(path), "reference_image"))
             except OSError:
                 continue  # 文件被手动删除时跳过该参考图（prompt 锚点串仍在兜底一致性）
     return out

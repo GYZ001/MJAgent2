@@ -17,6 +17,13 @@ def _bible() -> Bible:
     )
 
 
+def _empty_bible() -> Bible:
+    return Bible(
+        characters=[],
+        world=World(era="", genre="", visual_style_canonical="国漫风格，非真人CG渲染，统一电影感光影，暖灰色调"),
+    )
+
+
 def _beat(no: int, beat_type: str = "钩子", source_excerpt: str = "谷言攥着纸杯看向门口。") -> ScreenplayBeat:
     return ScreenplayBeat(
         beat_no=no,
@@ -109,3 +116,42 @@ def test_full_script_screenplay_rejects_shot_language() -> None:
     errors = validate_screenplay(script, _bible(), expected_beats=5, episode_no=1)
 
     assert any("禁用词" in error for error in errors)
+
+
+def test_full_script_screenplay_allows_new_names_without_bible() -> None:
+    full_script_text = "\n\n".join([
+        "【场1】夜 / 旧宅门口",
+        "萧炎站在门外盯着半开的门缝，掌心慢慢收紧，呼吸压得很低。",
+        "萧炎：门既然开了，就别躲着不见我。",
+        "【场2】夜 / 旧宅前厅",
+        "薰儿从暗处走出来，没有立刻解释，只把一枚染血的玉牌递到萧炎眼前，逼他先看清裂痕。",
+        "薰儿：先看这个，再决定该不该进去。",
+        "【场3】夜 / 旧宅回廊",
+        "两人一前一后沿着回廊逼近尽头，脚步声被风声吞掉，尽头那扇门却自己慢慢打开。",
+        "萧炎：里面的人，已经知道我们来了。",
+    ])
+    script = EpisodeScreenplay(
+        episode_no=1,
+        mode="full_script",
+        title="旧宅开门",
+        logline="萧炎夜探旧宅，薰儿递出血玉引出更深的埋伏。",
+        script_format_note="场次化台本稿，含场标、动作段与对白段",
+        scene_outline=[
+            _scene(1, "【场1】夜 / 旧宅门口", "萧炎夜探旧宅，在门口试探暗中的回应。").model_copy(update={"characters": ["萧炎"]}),
+            _scene(2, "【场2】夜 / 旧宅前厅", "薰儿现身递出血玉，逼迫萧炎先看线索再做选择。").model_copy(update={"characters": ["萧炎", "薰儿"]}),
+            _scene(3, "【场3】夜 / 旧宅回廊", "两人沿回廊逼近尽头，未知埋伏正式露出威胁。").model_copy(update={"characters": ["萧炎", "薰儿"]}),
+        ],
+        full_script_text=full_script_text,
+        emotional_curve="从试探压抑一路拉升到共同逼近危险的紧绷感。",
+        ending_hook="回廊尽头那扇门自己打开，门后的人却始终没有露面。",
+        source_basis="保留夜探旧宅、递出血玉、回廊逼近与暗门自开的关键推进。",
+        character_state_changes=["萧炎从试探转为警觉进逼", "薰儿从隐身观察转为主动示警"],
+        opening="夜探旧宅",
+        development="薰儿现身递出血玉",
+        conflict="两人必须决定是否继续深入",
+        climax="尽头暗门无声打开，危险被提前唤醒",
+    )
+
+    errors = validate_screenplay(script, _empty_bible(), expected_beats=5, episode_no=1)
+
+    assert not any("角色圣经外角色" in error for error in errors)

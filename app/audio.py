@@ -51,14 +51,38 @@ def load_lexicon(project_id: str) -> list[dict]:
 
 # ---------- 文本处理 ----------
 
-def spoken_text(shot_row) -> str:
-    """本镜口播标准文本：台词（按序）+ 旁白（若有）。这是要被念出来的内容。"""
+# 全知视角的结尾悬念钩旁白（"可他不知道…/殊不知…/然而…"）念在台词【之后】；
+# 其余旁白（情境画外音、人物内心OS、人群声）都是先给情境、人物再开口反应，必须念在台词【之前】。
+_NARRATION_AFTER_MARKERS = (
+    "可他", "可她", "可这", "可此时", "殊不知", "却不知", "然而", "但他不知", "但她不知",
+    "但谁也", "而此刻", "只是此时", "谁也没想到", "没有人注意到", "没人知道", "此时的他", "此时的她",
+)
+
+
+def narration_after_dialogue(narration: str) -> bool:
+    """该镜旁白是否应念在台词【之后】：仅全知结尾悬念钩旁白（"可他不知道…/殊不知…"）放最后，其余放台词前。
+    供配音合成与 Seedance prompt 共用，保证两条链路时序口径一致。"""
+    n = (narration or "").lstrip(" 　")
+    return any(n.startswith(m) for m in _NARRATION_AFTER_MARKERS)
+
+
+def spoken_segments(shot_row) -> list[dict]:
+    """本镜配音的【有序分段】，每段标注角色（role/speaker），供分音色合成：
+    role='narration' 旁白/画外音/内心OS 用旁白音色；role='dialogue' 角色台词用台词音色。
+    时序：默认旁白(情境/内心)在前、台词在后；仅全知结尾钩旁白排在台词之后。"""
     dialogues = shot_row["dialogues"] if not isinstance(shot_row["dialogues"], str) else json.loads(shot_row["dialogues"] or "[]")
-    parts = [d.get("line", "").strip() for d in (dialogues or []) if d.get("line", "").strip()]
+    dlg = [{"role": "dialogue", "speaker": (d.get("speaker") or "").strip(), "text": d.get("line", "").strip()}
+           for d in (dialogues or []) if d.get("line", "").strip()]
     narration = (shot_row["narration"] or "").strip()
-    if narration:
-        parts.append(narration)
-    return "。".join(p.rstrip("。") for p in parts if p)
+    if not narration:
+        return dlg
+    narr_seg = {"role": "narration", "speaker": "", "text": narration}
+    return [*dlg, narr_seg] if narration_after_dialogue(narration) else [narr_seg, *dlg]
+
+
+def spoken_text(shot_row) -> str:
+    """本镜口播标准文本（拼接后的全文），用于 ASR 预检比对。时序同 spoken_segments。"""
+    return "。".join(seg["text"].rstrip("。") for seg in spoken_segments(shot_row) if seg["text"])
 
 
 def tts_safe(text: str, lexicon: list[dict]) -> str:
@@ -148,6 +172,65 @@ def _emphasize(safe_text: str, missing_terms: list[dict]) -> str:
     return re.sub(r"，{2,}", "，", out)
 
 
+# ---------- 多音色分段合成（旁白音色 ≠ 角色台词音色） ----------
+
+_SEGMENT_GAP_S = 0.35  # 旁白与台词之间的停顿，避免不同音色连读糊在一起
+
+
+def _voice_for(role: str) -> str:
+    if role == "narration":
+        return get_setting("audio_narration_voice") or get_setting("audio_voice") or config.BAILIAN_TTS_VOICE
+    return get_setting("audio_voice") or config.BAILIAN_TTS_VOICE
+
+
+def _to_wav(src_bytes: bytes, fmt: str, dest: Path) -> None:
+    """把一段 TTS 字节（wav/mp3）统一转成 44100/立体声 wav。"""
+    tmp = dest.with_suffix(f".in.{fmt}")
+    tmp.write_bytes(src_bytes)
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(tmp),
+                    "-ar", "44100", "-ac", "2", str(dest)], check=True, capture_output=True)
+    tmp.unlink(missing_ok=True)
+
+
+async def _synthesize_segments(segs: list[dict]) -> tuple[bytes, str]:
+    """逐段按角色选音色 TTS，再拼成一条音轨（段间留微小停顿）。
+    单段直接返回原始 TTS 字节；多段用 ffmpeg 拼接并统一为 wav。无 ffmpeg 时退回单音色全文合成（至少有声）。
+    每段使用 seg['safe'] 作为实际念稿。"""
+    if len(segs) == 1:
+        audio = await hiagent.tts(segs[0]["safe"], voice=_voice_for(segs[0]["role"]))
+        return audio, ("wav" if audio[:4] == b"RIFF" else "mp3")
+    if not shutil.which("ffmpeg"):
+        joined = "。".join(s["safe"].rstrip("。") for s in segs if s["safe"])
+        audio = await hiagent.tts(joined, voice=_voice_for("dialogue"))
+        return audio, ("wav" if audio[:4] == b"RIFF" else "mp3")
+    rendered: list[tuple[bytes, str]] = []
+    for seg in segs:
+        audio = await hiagent.tts(seg["safe"], voice=_voice_for(seg["role"]))
+        rendered.append((audio, "wav" if audio[:4] == b"RIFF" else "mp3"))
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        gap = tdp / "gap.wav"
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+                        "-i", "anullsrc=r=44100:cl=stereo", "-t", f"{_SEGMENT_GAP_S:.3f}", str(gap)],
+                       check=True, capture_output=True)
+        wavs: list[Path] = []
+        for i, (audio, fmt) in enumerate(rendered):
+            w = tdp / f"seg{i}.wav"
+            _to_wav(audio, fmt, w)
+            if i:
+                wavs.append(gap)
+            wavs.append(w)
+        listfile = tdp / "list.txt"
+        listfile.write_text(
+            "\n".join(f"file '{str(p).replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}'" for p in wavs),
+            encoding="utf-8")
+        out = tdp / "out.wav"
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
+                        "-i", str(listfile), "-ar", "44100", "-ac", "2", str(out)],
+                       check=True, capture_output=True)
+        return out.read_bytes(), "wav"
+
+
 # ---------- 单镜配音生成（TTS + ASR 预检 + 自动改写重试） ----------
 
 def _audio_path(project_id: str, episode_no: int, shot_no: int) -> Path:
@@ -180,31 +263,36 @@ async def generate_shot_audio(shot_row, project_row) -> dict:
         return {"status": "empty"}
 
     lexicon = load_lexicon(project_row["id"])
-    safe = tts_safe(src, lexicon)
-    voice = get_setting("audio_voice") or config.BAILIAN_TTS_VOICE
+    # 分段：旁白(旁白音色) + 台词(角色音色)，按听感时序。每段单独 tts_safe 出念稿。
+    segs = spoken_segments(shot_row)
+    for seg in segs:
+        seg["safe"] = tts_safe(seg["text"], lexicon)
     max_regen = max(int(get_setting("audio_max_regen") or 2), 0)
     dest = _audio_path(project_row["id"], ep["episode_no"], shot_row["shot_no"])
     last = {"asr": "", "cer": -1, "level": "A"}
+    real_dest = dest.with_suffix(".wav")
     for attempt in range(max_regen + 1):
-        audio = await hiagent.tts(safe, voice=voice)
-        fmt = "wav" if audio[:4] == b"RIFF" else "mp3"
+        audio, fmt = await _synthesize_segments(segs)
         real_dest = dest.with_suffix(f".{fmt}")
         real_dest.write_bytes(audio)
         asr_raw = await hiagent.asr(audio, fmt=fmt)
         res = check(src, asr_raw, lexicon)
         last = {"asr": res["asr_normalized"], "cer": res["cer"], "level": res["level"]}
+        tts_text = " || ".join(s["safe"] for s in segs)
         if res["pass"]:
-            _save_shot_audio(shot_row["id"], shot_row["episode_id"], source_text=src, tts_text=safe,
+            _save_shot_audio(shot_row["id"], shot_row["episode_id"], source_text=src, tts_text=tts_text,
                              audio_path=str(real_dest), asr_text=res["asr_normalized"], cer=res["cer"],
                              level=res["level"], status="ok", regen_count=attempt, error=None)
             return {"status": "ok", **last}
-        # 失败 → 用词库对漏读/读错的词加停顿后重试
-        missing = present_terms(src, lexicon)
-        missing = [m for m in missing if m["term"] in res["missing_terms"]]
-        safe = _emphasize(safe, missing) if missing else safe
+        # 失败 → 用词库对漏读/读错的词在各段念稿里加停顿后重试
+        missing = [m for m in present_terms(src, lexicon) if m["term"] in res["missing_terms"]]
+        if missing:
+            for seg in segs:
+                seg["safe"] = _emphasize(seg["safe"], missing)
     # 用尽重试仍未通过：保留最后一版音频，但标红（失败要响），供人工补词库后重生
-    _save_shot_audio(shot_row["id"], shot_row["episode_id"], source_text=src, tts_text=safe,
-                     audio_path=str(dest.with_suffix(".mp3")) if dest.with_suffix(".mp3").exists() else str(dest.with_suffix(".wav")),
+    _save_shot_audio(shot_row["id"], shot_row["episode_id"], source_text=src,
+                     tts_text=" || ".join(s["safe"] for s in segs),
+                     audio_path=str(real_dest) if real_dest.exists() else None,
                      asr_text=last["asr"], cer=last["cer"], level=last["level"], status="failed",
                      regen_count=max_regen, error=f"ASR 预检未通过（CER={last['cer']}，疑似读错关键词）")
     return {"status": "failed", **last}
@@ -275,10 +363,9 @@ def build_episode_audio_track(episode_id: str, out_path: Path) -> Path | None:
         return None
     conn = get_conn()
     shots = rows_to_dicts(conn.execute(
-        "SELECT s.shot_no, s.id FROM shots s WHERE s.episode_id=? ORDER BY s.shot_no", (episode_id,)).fetchall())
+        "SELECT s.shot_no, s.id, s.duration_s FROM shots s WHERE s.episode_id=? ORDER BY s.shot_no", (episode_id,)).fetchall())
     if not shots:
         return None
-    fallback_dur = float(config.FIXED_VIDEO_DURATION_S)
     video_durations = _adopted_video_durations(conn, episode_id)
     audio_by_shot = {a["shot_id"]: a for a in rows_to_dicts(conn.execute(
         "SELECT shot_id, audio_path, status FROM shot_audio WHERE episode_id=?", (episode_id,)).fetchall())}
@@ -288,13 +375,18 @@ def build_episode_audio_track(episode_id: str, out_path: Path) -> Path | None:
         segs = []
         for s in shots:
             seg = Path(td) / f"seg{s['shot_no']}.wav"
+            # 优先用已采用视频的实测时长；拿不到时退回本镜分镜 duration_s（5~10s），而非固定 10s。
+            fallback_dur = float(s.get("duration_s") or config.FIXED_VIDEO_DURATION_S)
             dur = f"{video_durations.get(s['id'], fallback_dur):.3f}"
             a = audio_by_shot.get(s["id"])
             ap = a.get("audio_path") if a else None
             if ap and Path(ap).exists():
-                # 配音补静音到该镜视频时长（apad），超长则截断（-t），统一采样率/声道
+                # 开场留白：先延迟 SPEECH_LEAD_IN_S 让本镜动作建立，人声再起（adelay，单位毫秒）；
+                # 之后补静音到该镜视频时长（apad），超长则截断（-t），统一采样率/声道。
+                lead_ms = int(config.SPEECH_LEAD_IN_S * 1000)
+                af = f"adelay={lead_ms}:all=1,apad" if lead_ms > 0 else "apad"
                 subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", ap,
-                                "-af", "apad", "-t", dur, "-ar", "44100", "-ac", "2", str(seg)],
+                                "-af", af, "-t", dur, "-ar", "44100", "-ac", "2", str(seg)],
                                check=True, capture_output=True)
             else:
                 subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",

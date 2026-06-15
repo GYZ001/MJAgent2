@@ -1,7 +1,7 @@
 """一键全自动成片编排器。
 
 把整条流水线串起来：
-  人物谱 → 定妆照 + 分集（并行）→ 每集[剧本 → 分镜 → 自动确认 → 关键帧 → 视频] 并行 → 合成成片。
+  人物谱 → 定妆照 + 分集（并行）→ 每集[剧本 → 分镜 → 自动确认 → 参考图视频] 并行 → 合成成片。
 
 两条核心原则：
 1. 自适应：每一步先看 DB 当前进度，只补做缺失的部分；已完成的跳过，绝不重复花钱/重复请求。
@@ -25,7 +25,7 @@ from app.db import get_conn, get_setting, now, rows_to_dicts, set_setting
 
 # 轮询 DB 等待队列阶段完成的间隔（秒）
 _POLL = 5.0
-# 单个镜头关键帧/视频在「无在跑任务且未完成」时的最大重试次数（应对偶发网关失败）
+# 单个镜头视频在「无在跑任务且未完成」时的最大重试次数（应对偶发网关失败）
 _MAX_RETRY = 2
 
 _tasks: dict[str, asyncio.Task] = {}
@@ -148,6 +148,8 @@ async def _run(pid: str) -> None:
         await _ensure_bible(pid)
         # 定妆照与分集互不依赖（都只需人物谱），并行推进
         await asyncio.gather(_ensure_refs(pid), _ensure_plan(pid))
+        # 分集 + 初始定妆照就绪后，按 20 集分段刷新定妆照（外观大变则图生图重绘并切分集区间）
+        await _ensure_portraits(pid)
 
         conn = get_conn()
         eps = rows_to_dicts(conn.execute(
@@ -201,7 +203,16 @@ async def _ensure_bible(pid: str) -> None:
     _log(pid, "开始谱写人物谱")
     conn.execute("UPDATE projects SET bible_status='running', bible_error=NULL WHERE id=?", (pid,))
     conn.commit()
-    await api._bible_task(pid)
+    # 把当前 auto 任务登记为该项目的人物谱在跑任务，否则 _recover_orphan_bible_* 会把
+    # 这个正在 inline await 的合法任务误判为孤儿、立刻翻成 failed（前端轮询 /projects 即触发）。
+    cur = asyncio.current_task()
+    if cur is not None:
+        api._track_bible_task(pid, cur)
+    try:
+        await api._bible_task(pid, trigger_full_refs=False)
+    finally:
+        if api._bible_tasks.get(pid) is cur:
+            api._bible_tasks.pop(pid, None)
     p = conn.execute("SELECT bible_status, bible_error FROM projects WHERE id=?", (pid,)).fetchone()
     if p["bible_status"] != "ready":
         raise RuntimeError(f"人物谱生成失败：{p['bible_error']}")
@@ -225,6 +236,33 @@ async def _ensure_refs(pid: str) -> None:
         _log(pid, f"定妆照未全部成功，继续（跨集一致性可能下降）：{p['refs_error']}")
     else:
         _log(pid, "定妆照完成")
+
+
+async def _ensure_portraits(pid: str) -> None:
+    """按 20 集分段刷新定妆照。只有一段（总集数 ≤ 间隔）时初始定妆照已覆盖，直接跳过。
+    失败不阻断出片：缺分段定妆照仍可用初始定妆照生成视频，仅时间维一致性下降。"""
+    conn = get_conn()
+    last = conn.execute("SELECT MAX(episode_no) AS m FROM episodes WHERE project_id=?", (pid,)).fetchone()["m"] or 0
+    if last <= config.PORTRAIT_REFRESH_INTERVAL:
+        return
+    _log(pid, f"按 {config.PORTRAIT_REFRESH_INTERVAL} 集分段刷新定妆照（判断角色外观是否大变）")
+    conn.execute("UPDATE projects SET portraits_status='running', portraits_error=NULL WHERE id=?", (pid,))
+    conn.commit()
+    try:
+        from app.portraits import update_portraits_for_blocks
+        result = await update_portraits_for_blocks(pid)
+        conn.execute("UPDATE projects SET portraits_status='ready', portraits_error=? WHERE id=?",
+                     ("；".join(result.get("errors") or [])[:800] or None, pid))
+        conn.commit()
+        for ch in result.get("changes") or []:
+            _log(pid, f"定妆照：{ch}")
+        if not result.get("changes"):
+            _log(pid, "定妆照：各角色外观无明显变化，沿用初始定妆照")
+    except Exception as exc:  # noqa: BLE001 不阻断出片
+        conn.execute("UPDATE projects SET portraits_status='failed', portraits_error=? WHERE id=?",
+                     (str(exc)[:800], pid))
+        conn.commit()
+        _log(pid, f"定妆照按集刷新失败（不阻断出片，沿用初始定妆照）：{exc}")
 
 
 async def _ensure_plan(pid: str) -> None:
@@ -282,8 +320,7 @@ async def _episode_pipeline(pid: str, eid: str, epno: int, sb_sem: asyncio.Semap
             except ValueError as ve:
                 raise _Skip(f"第{epno}集未通过确认校验，跳过（请到分镜台人工修订后重跑）：{str(ve)[:200]}")
 
-        # 4) 关键帧 → 5) 视频 → 6) 配音(可选) → 7) 合成
-        await _ensure_keyframes(pid, eid, epno)
+        # 4) 视频（参考图模式，任务内生成参考图）→ 5) 配音(可选) → 6) 合成
         await _ensure_videos(pid, eid, epno)
         await _ensure_audio(pid, eid, epno)
         await _ensure_concat(pid, eid, epno)
@@ -294,51 +331,6 @@ async def _episode_pipeline(pid: str, eid: str, epno: int, sb_sem: asyncio.Semap
         raise
     except Exception as exc:  # noqa: BLE001 单集失败不拖垮其它集
         _log(pid, f"第{epno}集失败：{exc}")
-
-
-async def _ensure_keyframes(pid: str, eid: str, epno: int) -> None:
-    conn = get_conn()
-    attempts: dict[str, int] = {}
-    logged = False
-    while True:
-        shots = rows_to_dicts(conn.execute(
-            "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (eid,)).fetchall())
-        if not shots:
-            raise RuntimeError(f"第{epno}集没有分镜镜头")
-        not_ready = []
-        for s in shots:
-            if worker.shot_keyframes_ready(s):
-                # 自动放行：自动化没有人工评审，已生成最佳候选即视为通过
-                if s["scene_status"] != "approved":
-                    conn.execute("UPDATE shots SET scene_status='approved' WHERE id=?", (s["id"],))
-            else:
-                not_ready.append(s)
-        conn.commit()
-        if not not_ready:
-            break
-        if not logged:
-            _log(pid, f"第{epno}集：生成关键帧（{len(not_ready)} 镜待生成）")
-            logged = True
-        active = conn.execute(
-            "SELECT COUNT(*) c FROM jobs WHERE episode_id=? AND kind='scene' AND status IN ('queued','running')",
-            (eid,)).fetchone()["c"]
-        if active == 0:
-            # 没有在跑的关键帧任务 → 首轮触发，或补跑偶发失败的镜
-            progressed = False
-            for s in not_ready:
-                a = attempts.get(s["id"], 0)
-                if a < _MAX_RETRY:
-                    try:
-                        worker.enqueue_scene(s["id"])
-                        attempts[s["id"]] = a + 1
-                        progressed = True
-                    except ValueError as e:
-                        _log(pid, f"第{epno}集 镜{s['shot_no']} 关键帧无法入队：{e}")
-            if not progressed:
-                raise RuntimeError(
-                    f"第{epno}集关键帧失败镜：{[s['shot_no'] for s in not_ready]}（已达重试上限）")
-        await asyncio.sleep(_POLL)
-    _log(pid, f"第{epno}集：关键帧全部就绪")
 
 
 def _shots_needing_video(conn, eid: str) -> list[dict]:
@@ -362,7 +354,7 @@ async def _ensure_videos(pid: str, eid: str, epno: int) -> None:
     conn.execute(
         f"UPDATE shots SET adopted_version_id=NULL WHERE id IN ({','.join('?' for _ in sel_ids)})", sel_ids)
     conn.commit()
-    # 模式与参考图计划由模型按剧本决定：入队前确保每镜都有 mode_plan
+    # 视频固定走参考图模式：入队前确保每镜都有固定参考图计划。
     from app.api import _ensure_shot_mode_plan
     for s in todo:
         await _ensure_shot_mode_plan(conn, s["id"])

@@ -138,7 +138,13 @@ def normalize_action_desc(text: str | None) -> str:
         normalized = cleaned
 
 
-def validate_storyboard(board: Storyboard, bible: Bible, target_duration_s: int) -> list[str]:
+def validate_storyboard(
+    board: Storyboard,
+    bible: Bible,
+    target_duration_s: int,
+    *,
+    enforce_total_duration: bool = True,
+) -> list[str]:
     errors: list[str] = []
     shots = board.shots
     if not shots:
@@ -148,19 +154,24 @@ def validate_storyboard(board: Storyboard, bible: Bible, target_duration_s: int)
 
     bible_names = {c.name for c in bible.characters}
 
-    # V1 总时长
-    total = sum(s.duration_s for s in shots)
-    lo, hi = int(target_duration_s * 0.9), int(target_duration_s * 1.1)
-    if not lo <= total <= hi:
-        errors.append(f"总时长 {total}s 超出 {lo}~{hi}s，请调整镜头时长或增删镜头")
     fixed_duration = config.FIXED_VIDEO_DURATION_S
+    min_dur, max_dur = config.MIN_VIDEO_DURATION_S, config.MAX_VIDEO_DURATION_S
     if target_duration_s % fixed_duration != 0:
         errors.append(
-            f"目标时长 {target_duration_s}s 不是 {fixed_duration}s 的整数倍；固定 10s 视频段要求目标取 40/50/60s")
+            f"目标时长 {target_duration_s}s 不是 {fixed_duration}s 的整数倍；节拍单元按 10s 换算要求目标取 40/50/60s")
+    # 镜头数仍与节拍 1:1（= 目标/10）；每镜时长由模型按动作密度和台词长度决定。
     expected_shots = max(1, math.ceil(target_duration_s / fixed_duration))
     if len(shots) != expected_shots:
         errors.append(
-            f"镜头数 {len(shots)} 不匹配；固定 {fixed_duration}s 视频段下，目标 {target_duration_s}s 必须正好 {expected_shots} 个镜头")
+            f"镜头数 {len(shots)} 不匹配；目标 {target_duration_s}s 下须正好 {expected_shots} 个镜头（每镜对应一个节拍）")
+    # 自动生成阶段需要用目标时长约束模型，避免它靠注水拉长；人工编辑确认阶段则不把
+    # 规划目标当硬上限，用户明确设置的实际总时长只要逐镜合法即可进入生成。
+    if enforce_total_duration:
+        total = sum(s.duration_s for s in shots)
+        enforced_floor_total = sum(enforced_min_duration(board, s) for s in shots)
+        hi = max(int(target_duration_s * 1.1), enforced_floor_total)
+        if total > hi:
+            errors.append(f"总时长 {total}s 超出上限 {hi}s，请缩短部分镜头时长")
 
     prev_sizes: list[str] = []
     scene_last_seen: dict[str, int] = {}
@@ -168,8 +179,8 @@ def validate_storyboard(board: Storyboard, bible: Bible, target_duration_s: int)
         shot.action_desc = normalize_action_desc(shot.action_desc)
         tag = f"shots[{i}](shot_no={shot.shot_no})"
         # V2 时长合法取值
-        if shot.duration_s != fixed_duration:
-            errors.append(f"{tag}.duration_s={shot.duration_s}，固定视频生成时长必须为 {fixed_duration}s")
+        if not min_dur <= shot.duration_s <= max_dur:
+            errors.append(f"{tag}.duration_s={shot.duration_s}，视频生成时长必须在 {min_dur}~{max_dur}s 之间")
         # V8 画面清晰度：单镜只演一个连贯动作，把它写清即可（不再逼塞多个快切小镜头）。
         if len(shot.action_desc) < ACTION_DESC_HARD_MIN:
             errors.append(
@@ -208,11 +219,19 @@ def validate_storyboard(board: Storyboard, bible: Bible, target_duration_s: int)
             errors.append(
                 f"{tag}.narration 共 {narration_len} 字，超过硬上限 {NARRATION_HARD_MAX} 字——10s 配音念不完、读太快观感差；"
                 f"旁白请精简到 {NARRATION_TARGET_CHARS} 字以内（一句最关键的推进），或直接留空、改用台词与画面动作承载")
+        # 口播总量必须能在视频最长时长内念完（含台词+旁白），否则配音会被截断、音画不同步。
+        spoken_chars = sum(len(re.sub(r"\s+", "", d.line or "")) for d in shot.dialogues) \
+            + len(re.sub(r"\s+", "", (shot.narration or "")))
+        if spoken_chars > config.MAX_SPOKEN_CHARS_PER_SHOT:
+            errors.append(
+                f"{tag} 台词+旁白共 {spoken_chars} 字，超过单镜口播上限 {config.MAX_SPOKEN_CHARS_PER_SHOT} 字"
+                f"（{config.MAX_VIDEO_DURATION_S}s 也念不完）；请精简这句台词，或把这一镜的台词拆到相邻镜头分担，"
+                "不要让一镜塞下念不完的台词")
         # V4 角色合法性
         if not shot.characters:
             errors.append(f"{tag}.characters 为空；每个 10s 视频段必须以人物和剧情为主体，至少包含 1 个角色圣经中的角色")
         for name in shot.characters:
-            if name not in bible_names:
+            if bible_names and name not in bible_names:
                 errors.append(f"{tag}.characters 含「{name}」，角色圣经中不存在。圣经角色为：{'/'.join(sorted(bible_names))}")
         named_mentions = [name for name in shot.characters if name in shot.action_desc]
         if shot.characters and not named_mentions:
@@ -404,7 +423,7 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         if not scene.characters:
             errors.append(f"{tag}.characters 不能为空；请写本场实际参与角色")
         unknown = [name for name in scene.characters if name not in bible_names]
-        if unknown:
+        if bible_names and unknown:
             errors.append(f"{tag}.characters 含角色圣经外角色：{unknown}")
     full_text = (script.full_script_text or "").strip()
     min_script_chars = max(220, expected_beats * 55)
@@ -500,6 +519,55 @@ def validate_storyboard_soundtrack(board: Storyboard, screenplay: EpisodeScreenp
 
 # ---------- C2 基于完整剧本的分镜校验 ----------
 
+def estimate_speech_seconds(shot) -> float:
+    """估算本镜配音（台词 + 旁白）从开场留白到念完所需秒数。口径与 audio.spoken_text 一致：标点也占停顿时间，
+    故按非空白字符计；并计入开场留白 SPEECH_LEAD_IN_S（人声前的动作建立）。返回 0 表示本镜无声轨。"""
+    parts = [(d.line or "").strip() for d in shot.dialogues]
+    narration = (shot.narration or "").strip()
+    if narration:
+        parts.append(narration)
+    chars = sum(len(re.sub(r"\s+", "", p)) for p in parts if p)
+    if chars <= 0:
+        return 0.0
+    return config.SPEECH_LEAD_IN_S + chars / config.SPEECH_CHARS_PER_SECOND + config.SPEECH_TAIL_BUFFER_S
+
+
+def normalize_durations_for_speech(board: Storyboard) -> None:
+    """确定性时长归一：把每镜 duration_s 抬到至少能念完本镜台词/旁白的长度，再 clamp 到 [MIN,MAX]。
+
+    动作密度给出的时长只是兜底下限；台词较长的镜头若沿用"动作简单=短时长"会让视频动作先于台词结束，
+    造成音画不同步（台词没说完人就做完动作）。与 normalize_continuity 同理由代码强制覆盖，不依赖模型自觉。
+    台词超过 MAX 秒数才念得完的镜头无法再加长（Seedance 上限），保持 MAX 并由 prompt 侧约束单镜台词不要过长。"""
+    min_dur = config.MIN_VIDEO_DURATION_S
+    for shot in board.shots:
+        floor = enforced_min_duration(board, shot)
+        shot.duration_s = max(int(shot.duration_s or min_dur), floor)
+
+
+def _is_episode_opening_shot(board: Storyboard, shot) -> bool:
+    """是否为全片开场镜：第一集（episode_no==1）的第一镜（shot_no==1）。"""
+    return int(getattr(board, "episode_no", 0) or 0) == 1 and int(getattr(shot, "shot_no", 0) or 0) == 1
+
+
+def enforced_min_duration(board: Storyboard, shot) -> int:
+    """本镜由代码强制保证的最小时长：取「配音念完所需」与「开场建场镜固定长时长」的较大者，clamp 到 [MIN,MAX]。
+    校验总时长上限与归一时长共用此口径，避免确定性覆盖把合法分镜误判超时退回。"""
+    need = math.ceil(estimate_speech_seconds(shot))
+    if _is_episode_opening_shot(board, shot):
+        need = max(need, config.ESTABLISHING_SHOT_DURATION_S)
+    return max(config.MIN_VIDEO_DURATION_S, min(config.MAX_VIDEO_DURATION_S, need))
+
+
+def normalize_episode_opening_shot(board: Storyboard) -> None:
+    """第一集第一镜=全片开场建场镜的出片侧确定性覆盖：拉长时长 + 强制远景建场 + 缓慢推近运镜。
+    与 normalize_continuity 同理由代码强制（不依赖模型自觉），保证开场镜稳定地"先立背景"。"""
+    for shot in board.shots:
+        if _is_episode_opening_shot(board, shot):
+            shot.duration_s = enforced_min_duration(board, shot)
+            shot.shot_size = config.ESTABLISHING_SHOT_SIZE
+            shot.camera_move = config.ESTABLISHING_CAMERA_MOVE
+
+
 def normalize_continuity(board: Storyboard) -> None:
     """continuity/transition 由场景标签代码推导覆盖（不依赖模型自觉，消除一整类返工）。"""
     for i, shot in enumerate(board.shots):
@@ -536,8 +604,9 @@ def validate_storyboard_against_beats(board: Storyboard, bible: Bible, target_du
 
 def validate_bible(bible: Bible) -> list[str]:
     errors = []
-    if not 1 <= len(bible.characters) <= 8:
-        errors.append(f"characters 数量 {len(bible.characters)}，要求 1~8 个")
+    # 初始人物谱由 prompt 约束为 ≤8 个；上限放宽到 60，给「按 20 集补录新登场角色」留出增长空间。
+    if not 1 <= len(bible.characters) <= 60:
+        errors.append(f"characters 数量 {len(bible.characters)}，要求 1~60 个")
     names = [c.name for c in bible.characters]
     if len(names) != len(set(names)):
         errors.append("characters.name 存在重复")

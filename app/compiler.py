@@ -8,6 +8,7 @@ import hashlib
 import re
 
 from app import config
+from app.audio import narration_after_dialogue
 from app.schemas import Bible, Shot
 
 NEGATIVE_SUFFIX = (
@@ -98,15 +99,37 @@ class CompileError(Exception):
     pass
 
 
-def normalize_video_args(prompt_text: str) -> str:
-    """确保手写/覆盖 prompt 也使用固定 10s 视频生成参数。"""
+def clip_duration_value(value: int | float | str | None) -> int:
+    """把任意时长吸附到 [MIN, MAX] 合法区间。非法值回退默认时长。"""
+    try:
+        d = int(round(float(value)))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return config.FIXED_VIDEO_DURATION_S
+    return max(config.MIN_VIDEO_DURATION_S, min(d, config.MAX_VIDEO_DURATION_S))
+
+
+def clip_duration(shot: Shot) -> int:
+    """本镜发往 Seedance 的视频时长（秒），由分镜 duration_s 按动作密度决定。"""
+    return clip_duration_value(getattr(shot, "duration_s", None))
+
+
+def _extract_duration(prompt_text: str) -> int | None:
+    """从已有 prompt 文本里解析 --dur 值（用于保留手写/历史 prompt 的时长）。"""
+    m = re.search(r"--dur\s+(\d+(?:\.\d+)?)", prompt_text)
+    return clip_duration_value(m.group(1)) if m else None
+
+
+def normalize_video_args(prompt_text: str, duration: int | None = None) -> str:
+    """确保手写/覆盖 prompt 带上正确的视频生成参数。
+    duration 显式给定时用之；否则保留文本里已有的 --dur；都没有则回退默认时长。"""
+    dur = clip_duration_value(duration) if duration is not None else (_extract_duration(prompt_text) or config.FIXED_VIDEO_DURATION_S)
     text = re.sub(r"\s--dur\s+\d+(?:\.\d+)?", "", prompt_text).strip()
     text = re.sub(r"\s--ratio\s+\S+", "", text).strip()
     if text:
         text += " --ratio 9:16"
     else:
         text = "--ratio 9:16"
-    return f"{text} --dur {config.FIXED_VIDEO_DURATION_S}"
+    return f"{text} --dur {dur}"
 
 
 def _source_excerpt_line(shot: Shot, max_chars: int = SOURCE_EXCERPT_PROMPT_MAX) -> str:
@@ -120,7 +143,8 @@ def _source_excerpt_line(shot: Shot, max_chars: int = SOURCE_EXCERPT_PROMPT_MAX)
 
 def _split_video_args(prompt_text: str) -> tuple[str, str]:
     normalized = normalize_video_args(prompt_text)
-    args = f" --ratio 9:16 --dur {config.FIXED_VIDEO_DURATION_S}"
+    dur = _extract_duration(normalized) or config.FIXED_VIDEO_DURATION_S
+    args = f" --ratio 9:16 --dur {dur}"
     if normalized.endswith(args):
         return normalized[:-len(args)].strip(), args
     return normalized.strip(), args
@@ -250,8 +274,11 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     missing = [n for n in shot.characters if n not in bible_map]
     if missing:
         raise CompileError(f"镜头 {shot.shot_no} 引用了圣经中不存在的角色：{missing}")
-    if shot.duration_s != config.FIXED_VIDEO_DURATION_S:
-        raise CompileError(f"镜头 {shot.shot_no} 时长 {shot.duration_s}s 不合法，视频生成统一要求 {config.FIXED_VIDEO_DURATION_S}s")
+    if not config.MIN_VIDEO_DURATION_S <= shot.duration_s <= config.MAX_VIDEO_DURATION_S:
+        raise CompileError(
+            f"镜头 {shot.shot_no} 时长 {shot.duration_s}s 不合法，视频生成时长须在 "
+            f"{config.MIN_VIDEO_DURATION_S}~{config.MAX_VIDEO_DURATION_S}s 之间")
+    shot_dur = clip_duration(shot)
 
     anchors = [bible_map[n].appearance_canonical for n in shot.characters]
     negative = NEGATIVE_SUFFIX
@@ -259,15 +286,30 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         negative += "，" + "，".join(x.strip() for x in extra_negative if x.strip())
     source_excerpt = _source_excerpt_line(shot)
 
-    # 锚点串（画风/场景/角色）永不裁剪；超长时先裁剪负向词表，再裁剪动作修饰
-    story_cues: list[str] = []
-    if shot.narration:
-        story_cues.append(f"旁白信息：{shot.narration}")
+    # 声轨（Seedance 直接据此生成人声）：旁白=画外音解说嗓音（与角色不同、不对口型），
+    # 台词=画面角色本人开口（用各自嗓音、对口型）。按听感时序排：情境/内心旁白在台词前、全知结尾钩旁白在台词后。
+    narration = (shot.narration or "").strip()
+    narration_cue = (
+        f"旁白（画外音解说，用一个与画面所有角色都不同的旁白嗓音念，不要让画面里的人物开口说这段、不要对口型）：{narration}"
+        if narration else "")
+    dialogue_cue = ""
     if shot.dialogues:
-        lines = "；".join(f"{d.speaker}说「{d.line}」" for d in shot.dialogues)
-        story_cues.append(f"台词信息：{lines}")
+        lines = "；".join(f"{d.speaker}（{d.emotion}）说「{d.line}」" for d in shot.dialogues)
+        dialogue_cue = f"台词（由画面中对应角色本人开口说出、对口型，每个角色用各自的嗓音）：{lines}"
+    story_cues: list[str] = []
+    if narration and narration_after_dialogue(narration):
+        story_cues += [c for c in (dialogue_cue, narration_cue) if c]
+    else:
+        story_cues += [c for c in (narration_cue, dialogue_cue) if c]
+    # 声轨时序总则：先念画外音旁白/内心，画面角色再开口；旁白与台词嗓音必须明显不同
+    if narration and shot.dialogues:
+        story_cues.append(
+            "声轨时序：先以画外音旁白嗓音念旁白（此时画面角色不开口），随后画面角色再用自己的嗓音说台词；"
+            "旁白嗓音与角色嗓音必须明显区分，旁白不能听起来像主角在自言自语"
+            if not narration_after_dialogue(narration) else
+            "声轨时序：画面角色先用自己的嗓音说完台词，结尾再由画外音旁白嗓音念这句收尾旁白；旁白嗓音与角色嗓音必须明显区分")
     scene_hint = shot.scene_setting.strip()
-    dur = config.FIXED_VIDEO_DURATION_S
+    dur = shot_dur
     # 提示词结构遵循 Seedance 实践公式：主体 + 动作 + 景别运镜 + 环境 + 画风 + 质量约束。
     # 关键纠偏：单镜只表现“一个连贯流畅的动作”，不再要求 10s 内塞入多个小镜头/快速切景
     # （多动作快切是当前成片崩坏与画风漂移的主因）。剧情密度交给旁白承载，画面只演一件事。
@@ -282,7 +324,11 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         "特效与光效服从剧情：日常对话与一般场景写实克制、不要满屏光效或能量粒子，仅在情绪高潮或力量爆发的镜头才用强烈特效，且不得遮挡人物面部表情",
         f"景别：{shot.shot_size}；运镜：{shot.camera_move}，镜头运动缓慢平稳",
         *story_cues,
-        "把台词与（如有）旁白转化为人物可见的表情、口型、肢体动作与道具反应，不在画面上生成任何字幕文字",
+        "台词由画面角色开口说出、对口型并配合表情与肢体反应；旁白是画外音解说（角色不开口、不对口型，只用表情/动作呼应）；不在画面上生成任何字幕文字",
+        # 音画同步：动作节奏要铺满整段时长、跟着台词走，避免话没说完动作就做完（如台词未结束就趴下/离开/睡着）
+        (f"音画同步要求：本镜约 {dur} 秒内人物始终处于说话/对话或情绪反应状态，口型与肢体随台词节奏自然推进，"
+         "动作要均匀铺满整段时长、缓慢延展，绝不能在台词念完之前就提前做完主要动作或停下、躺下、转身离开、闭眼睡着"
+         if (shot.dialogues or shot.narration) else ""),
         source_excerpt,
         # 画风锚点：全集逐字一致、显式禁止跨镜漂移（与具体画风无关，只强调统一）
         f"全片统一画风（每个镜头严格一致，禁止风格漂移）：{bible.world.visual_style_canonical}",
@@ -329,7 +375,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     # 锚点串/动作/物理与首尾帧纪律/负向词永不在此被裁——尤其是重生针对性负词（extra_negative），
     # 它正是本次必须改正项，旧逻辑把它第一个砍掉等于让重生白做、伪影回潮。
     filler_parts = [p for p in (scene_env_line, QUALITY_SUFFIX, NO_BGM_SUFFIX) if p and p.strip()]
-    args = f" --ratio 9:16 --dur {config.FIXED_VIDEO_DURATION_S}"
+    args = f" --ratio 9:16 --dur {shot_dur}"
 
     def assemble(parts: list[str], neg: str) -> str:
         body = "。".join(p.strip().rstrip("。") for p in parts if p and p.strip())

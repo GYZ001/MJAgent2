@@ -73,10 +73,13 @@ TIMEOUT_DOWNLOAD = 180.0
 VIDEO_POLL_INTERVAL = 10.0
 VIDEO_POLL_BUDGET = 15 * 60  # 单任务轮询总预算
 
-# Seedance 参数边界（M0 2026-06-12 实测：网关接受更宽范围，但当前产品策略固定 10s；
-# 网关无同步校验，必须前置。每个 10s 视频段内用 prompt 推动模型塞入更多小镜头和剧情节点。）
-FIXED_VIDEO_DURATION_S = 10
-ALLOWED_DURATIONS = {FIXED_VIDEO_DURATION_S}
+# Seedance 参数边界：单镜时长按动作密度在 [MIN, MAX] 间由模型逐镜决定（5~15s）。
+# 首尾帧模式下，简单/静态动作给短时长可避免人物停滞；强运动镜给长时长。
+# Seedance 2.0 官方 duration 支持 [4,15]s；产品侧仍用 5s 作为最小镜头时长。
+MIN_VIDEO_DURATION_S = 5
+MAX_VIDEO_DURATION_S = 15  # Seedance 2.0 实测可出 15s；台词较多的镜头需要更长时长才念得完
+FIXED_VIDEO_DURATION_S = 10  # 默认/兜底时长，也作为「每集节拍单元 ≈ 10s」的换算基准（镜头数=目标/10，不随上限变化）
+ALLOWED_DURATIONS = set(range(MIN_VIDEO_DURATION_S, MAX_VIDEO_DURATION_S + 1))
 EPISODE_TARGET_MIN_S = 40
 EPISODE_TARGET_MAX_S = 60
 EPISODE_TARGET_DEFAULT_S = 50
@@ -84,6 +87,19 @@ EPISODE_TARGET_STEP_S = FIXED_VIDEO_DURATION_S
 COMPACT_SHOT_MAX_DURATION = FIXED_VIDEO_DURATION_S
 LONG_SHOT_MIN_DURATION = FIXED_VIDEO_DURATION_S
 LONG_SHOT_MIN_CHARS_PER_SECOND = 4
+# 配音发声节奏：中文舒适念白约 4.5 字/秒（NARRATION_HARD_MAX=52 字判定为 10s 念不完，约 5.2 字/秒过快）。
+# 镜头视频时长 duration_s 必须 ≥ 本镜台词+旁白的发声时间，否则画面动作会先于台词结束 → 音画不同步。
+SPEECH_CHARS_PER_SECOND = 4.5
+SPEECH_TAIL_BUFFER_S = 1.0  # 末字念完后留一点收势/换气时间，避免话音一落画面就切走
+SPEECH_LEAD_IN_S = 0.8      # 开场留白：让本镜动作先建立一下，人物再开口/旁白再起，避免一上来就贴脸说话
+
+# 第一集第一镜=全片开场建场镜，出片侧也差异化：拉长时长 + 强制远景建场 + 缓慢推近运镜。
+ESTABLISHING_SHOT_DURATION_S = 12  # 固定较长时长，给足时间交代世界观/环境（介于常规与上限之间）
+ESTABLISHING_SHOT_SIZE = "远景"   # 强制远景建场（最能交代环境与主角处境）
+ESTABLISHING_CAMERA_MOVE = "推近"  # 缓慢推近：带观众从环境进入主角
+
+# 单镜口播字数上限：必须能在 MAX 时长内念完（扣掉开场留白与收势），超出则提示拆分/精简，避免被截断。
+MAX_SPOKEN_CHARS_PER_SHOT = int((MAX_VIDEO_DURATION_S - SPEECH_LEAD_IN_S - SPEECH_TAIL_BUFFER_S) * SPEECH_CHARS_PER_SECOND)
 MAX_SLOW_SHOT_SHARE_DENOMINATOR = 3
 MAX_LONG_SHOT_SHARE_DENOMINATOR = 5
 PROMPT_CHAR_LIMIT = 1500  # 保守值，触发真实上限后回填
@@ -93,12 +109,16 @@ VIDEO_PRICE_PER_SECOND = 0.8  # CNY，1.0 配置单价
 REF_IMAGE_SIZE = "1440x2560"
 IMAGE_PRICE_PER_UNIT = 0.2  # CNY
 
+# 人物谱定妆照按集分段刷新：每满 PORTRAIT_REFRESH_INTERVAL 集判断一次外观是否大变，
+# 大变则图生图重绘并切分适用集区间，否则沿用上一张定妆照（见 app/portraits.py）。
+PORTRAIT_REFRESH_INTERVAL = 20
+
 # 可在 settings 表覆盖的默认值
 DEFAULT_SETTINGS = {
     "video_concurrency": "2",
     "episode_cost_limit_cny": "100",
     "use_character_refs": "true",     # 出场角色定妆照随镜头注入 reference_image（跨集一致性核心）
-    "use_first_frame_chaining": "true",  # 兼容旧设置；当前链路使用预生成首/尾关键图衔接
+    "use_first_frame_chaining": "true",  # 兼容旧设置；当前视频链路固定使用参考图模式
     "max_ref_images": "2",            # 单镜头最多附几张定妆照
     "auto_qa": "true",
     "auto_retake_threshold": "0.6",
@@ -113,13 +133,18 @@ DEFAULT_SETTINGS = {
     "video_reference_first_shot_complex_count": "8",
     "video_reference_reuse_previous_scene_max_count": "4",
     "video_reference_quality_threshold": "0.75",
-    "video_reference_fallback_failures": "2",
-    "video_mode_selector_confidence_threshold": "0.7",
+    "video_reference_min_generated": "1",   # 参考图模式每镜至少新生成几张关键帧参考图（防止只剩定妆照）
+    "video_reference_gen_retries": "2",     # 单张生成参考图 QA 不达标时的额外重试次数；仍不达标保留最佳一版而非丢弃
+    "video_reference_prompt_async": "true", # 每张新参考图的提示词用独立 LLM 调用并发生成（防止一次性写多张时偷懒）
+    "video_reference_consistency_check": "true",       # Phase 2：整组参考图相对一致性检查 Agent（点名漂移图并 i2i 重生/剔除）
+    "video_reference_consistency_threshold": "0.7",    # 候选参考图与锚点（定妆照/上镜尾帧）的一致性达标线，低于则判漂移
+    "video_reference_consistency_retries": "1",        # 漂移图从锚点 i2i 重生的最大次数；仍漂移则剔除（不喂 Seedance）
     "auto_concurrency": "24",           # 一键全自动：图像/视频 worker 并发槽数（公网网关吞吐强，可调大）
     "auto_storyboard_concurrency": "8", # 一键全自动：同时进行的分镜 LLM 数（各集流水线并行，分镜阶段单独限流）
     # ---- 音频（TTS 配音 + ASR 校验）总开关与参数；关闭时全流程跳过音频，保持现有无声链路 ----
     "audio_enabled": "false",           # 总开关：开启后才生成配音并混入成片；关闭=维持现状（无声）
-    "audio_voice": "Cherry",            # TTS 音色（qwen-tts/qwen3-tts-flash 支持 Cherry/Chelsie/Ethan/Serena 等）
+    "audio_voice": "Cherry",            # 角色台词音色（qwen-tts/qwen3-tts-flash 支持 Cherry/Chelsie/Ethan/Serena 等）
+    "audio_narration_voice": "Ethan",   # 旁白/画外音/内心OS 独立音色，与角色台词区分，避免"主角在念旁白"
     "audio_max_regen": "2",             # 单镜配音 ASR 预检失败后的最大改写重试次数
     "asr_cer_s": "0.03",                # S 级（人名/境界/结果）字符错误率上限
     "asr_cer_a": "0.08",                # A 级（普通对白/旁白）上限

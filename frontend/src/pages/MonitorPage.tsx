@@ -74,6 +74,7 @@ const BAILIAN_MODEL_CHOICES: Record<'text' | 'vlm', ModelChoice[]> = {
 const HIAGENT_MODEL_CHOICES: Record<ModelKind, ModelChoice[]> = {
   text: [
     { label: '文本推理模型（默认）', value: 'd2a5n9rnvvm49eucvnvg' },
+    { label: 'Text 模型', value: 'd71l5c8nfdb167kligqg' },
   ],
   vlm: [
     { label: '视觉质检模型（默认）', value: 'd7ev7il5boeaebtf4sgg' },
@@ -269,7 +270,7 @@ export default function MonitorPage() {
     video_concurrency: '视频并发数',
     episode_cost_limit_cny: '单集成本上限（¥）',
     use_character_refs: '定妆照参考图（true/false，人物一致性）',
-    use_first_frame_chaining: '首尾帧衔接（兼容旧项；现已强制使用预生成首/尾关键图）',
+    use_first_frame_chaining: '参考图视频模式（固定启用；旧项保留兼容）',
     max_ref_images: '单镜头最多参考图数',
     auto_qa: '自动质检（true/false，需本机 ffmpeg）',
     auto_retake_threshold: '自动重抽阈值（QA 总分低于此值重抽一次）',

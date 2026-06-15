@@ -36,11 +36,11 @@ export const api = {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ kinds }),
     }).then(handle),
-  shotGenerate: (shotId: string, promptOverride?: string, reroll?: boolean, withCritique?: boolean, modeOverride?: string) =>
+  shotGenerate: (shotId: string, promptOverride?: string, reroll?: boolean, withCritique?: boolean) =>
     fetch(`/api/shots/${shotId}/generate`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        prompt_override: promptOverride, reroll, with_critique: withCritique, mode_override: modeOverride,
+        prompt_override: promptOverride, reroll, with_critique: withCritique,
       }),
     }).then(handle),
   sceneApprove: (shotId: string, sceneId: string, kind: string) =>
@@ -57,6 +57,14 @@ export const api = {
     }).then(handle),
   deleteVersion: (versionId: string) =>
     fetch(`/api/versions/${versionId}`, { method: 'DELETE' }).then(handle),
+  discardReferenceImage: (versionId: string, refId: string) =>
+    fetch(`/api/versions/${versionId}/reference-images/${refId}`, { method: 'DELETE' }).then(handle),
+  restoreReferenceImage: (versionId: string, refId: string) =>
+    fetch(`/api/versions/${versionId}/reference-images/${refId}/restore`, { method: 'POST' }).then(handle),
+  clearEpisodeArtifacts: (episodeId: string) =>
+    fetch(`/api/episodes/${episodeId}/clear-artifacts`, { method: 'POST' }).then(handle),
+  clearShotArtifacts: (shotId: string) =>
+    fetch(`/api/shots/${shotId}/clear-artifacts`, { method: 'POST' }).then(handle),
 }
 
 export interface Dialogue { speaker: string; line: string; emotion: string }
@@ -111,28 +119,19 @@ export interface EpisodeScreenplay {
   beats: ScreenplayBeat[]
 }
 
+export interface ReferenceImage {
+  id: string; image_url?: string | null; type: string; source: string
+  qualityScore?: number | null; selectedForSeedance?: boolean; deleted?: boolean
+  rejectReason?: string | null; qa?: { overall?: number; issues?: string[] } | null
+}
+
 export interface ShotVersion {
   id: string; version_no: number; prompt_text: string; status: string
   error?: string; video_url?: string; qa?: { overall: number; issues: string[] } | null
   cost_cny: number; latency_s: number
   image_inputs?: {
-    first_frame_used: boolean; first_frame_src?: string | null; first_frame_scene_id?: string | null
-    last_frame_used?: boolean; last_frame_src?: string | null; last_frame_scene_id?: string | null
-    mode?: 'FIRST_LAST_FRAME_MODE' | 'REFERENCE_IMAGE_MODE' | string | null
-    mode_decision?: {
-      mode?: string; reason?: string; confidence?: number
-      ruleMode?: string | null; llmUsed?: boolean; defaulted?: boolean
-      needReusePreviousScene?: boolean; needGenerateNewReferences?: boolean
-      referenceImagePlan?: {
-        totalCount?: number; reusePreviousSceneCount?: number; generateNewCount?: number; types?: string[]
-      }
-    } | null
     reference_image_used?: boolean
-    reference_images?: {
-      id: string; image_url?: string | null; type: string; source: string
-      qualityScore?: number | null; selectedForSeedance?: boolean
-      rejectReason?: string | null; qa?: { overall?: number; issues?: string[] } | null
-    }[]
+    reference_images?: ReferenceImage[]
     reference_failure_logs?: { type?: string; reason?: string; error?: string; fallback?: string; qa?: { overall?: number; issues?: string[] } }[]
     fallback_reason?: string | null
     retry_reason?: string | null
@@ -147,24 +146,6 @@ export interface SceneCandidate {
   qa?: SceneQa | null; image_url?: string
 }
 
-export interface ModePlan {
-  mode: 'FIRST_LAST_FRAME_MODE' | 'REFERENCE_IMAGE_MODE' | string
-  reason: string
-  confidence: number
-  ruleMode?: string | null
-  llmUsed?: boolean
-  defaulted?: boolean
-  needReusePreviousScene?: boolean
-  needGenerateNewReferences?: boolean
-  referenceImagePlan?: {
-    totalCount: number
-    reusePreviousSceneCount: number
-    generateNewCount: number
-    types: string[]
-    prompts?: { type: string; prompt: string }[]
-  } | null
-}
-
 export interface Shot {
   id: string; episode_id: string; script_id?: string | null; shot_no: number; duration_s: number; shot_size: string; camera_move: string
   scene_setting: string; characters: string[]; action_desc: string
@@ -177,7 +158,6 @@ export interface Shot {
   approved_head_scene_id?: string | null; approved_tail_scene_id?: string | null
   required_keyframes?: ('head' | 'tail')[]; scenes: SceneCandidate[]
   video_stale: boolean
-  mode_plan?: ModePlan | null
 }
 
 export interface Episode {
@@ -205,6 +185,15 @@ export interface MixResult {
   ffmpeg_missing?: boolean; note?: string
 }
 
+export interface Portrait {
+  id: string
+  ep_start: number
+  ep_end: number | null
+  appearance?: string | null
+  base_portrait_id?: string | null
+  image_url?: string | null
+}
+
 export interface Character {
   name: string; role: string; appearance_canonical: string
   personality: string; speech_style: string
@@ -213,6 +202,13 @@ export interface Character {
   ref_image_url?: string | null
   portrait_prompt_override?: string | null
   portrait_prompt_effective?: string
+  portraits?: Portrait[]
+}
+
+export interface ChapterContent {
+  idx: number; title: string; content: string
+  prev_idx: number | null; next_idx: number | null
+  first_idx: number; last_idx: number; total: number
 }
 
 export interface Bible { characters: Character[]; world: { era: string; genre: string; visual_style_canonical: string } }
@@ -222,8 +218,9 @@ export interface Project {
   bible_status: string; bible_error?: string; plan_status: string; plan_error?: string
   bible_version?: number; refs_status?: string; refs_error?: string
   refs_target?: string | null
+  portraits_status?: string; portraits_error?: string | null
   bible?: Bible | null; key_timeline?: string[]
-  chapters?: { idx: number; title: string; char_count: number }[]
+  chapters?: { idx: number; title: string; char_count: number; preview?: string }[]
   episodes?: Episode[]
   chapter_count?: number; episode_count?: number
 }
