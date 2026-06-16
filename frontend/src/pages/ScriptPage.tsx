@@ -190,7 +190,7 @@ export default function ScriptPage() {
                       </div>
                     )}
                     {!!script.key_lines?.length && (
-                      <div className="kv full"><b>必保留关键台词</b>
+                      <div className="kv full"><b>人物谱角色台词 / 必保留台词</b>
                         <ul className="key-list">{script.key_lines.map((l, i) => <li key={i}>{l}</li>)}</ul>
                       </div>
                     )}
@@ -238,7 +238,7 @@ export default function ScriptPage() {
                     <div className="full"><label className="f">失败代价</label>
                       <textarea rows={2} value={draft?.stakes ?? ''}
                         onChange={e => updateScript({ stakes: e.target.value })} /></div>
-                    <div className="full"><label className="f">必保留关键台词（每行一条，分镜必须保留）</label>
+                    <div className="full"><label className="f">人物谱角色台词 / 必保留台词（每行一条，分镜必须保留）</label>
                       <textarea rows={4} value={(draft?.key_lines ?? []).join('\n')}
                         onChange={e => updateScript({ key_lines: splitLines(e.target.value) })} /></div>
                     <div className="full"><label className="f">必保留关键剧情点（每行一条，分镜必须保留）</label>

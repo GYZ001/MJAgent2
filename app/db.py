@@ -137,30 +137,6 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS pronunciation (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_id TEXT NOT NULL,
-    term TEXT NOT NULL,            -- 标准词（画面/字幕里显示的写法）
-    tts_alias TEXT,               -- 喂给 TTS 的安全写法（保证读音），为空则用 term
-    asr_aliases TEXT,             -- JSON 数组：ASR 可能识别成的别字，归一化时映射回 term
-    level TEXT DEFAULT 'A',       -- S/A/B：声音重要等级（S 人名/境界/结果，必须读对）
-    created_at REAL NOT NULL,
-    UNIQUE(project_id, term)
-);
-CREATE TABLE IF NOT EXISTS shot_audio (
-    shot_id TEXT PRIMARY KEY,
-    episode_id TEXT NOT NULL,
-    source_text TEXT,             -- 本镜口播标准文本（台词+旁白，标准词）
-    tts_text TEXT,                -- 实际喂 TTS 的安全文本（已套用正音别名）
-    audio_path TEXT,              -- 落盘配音文件
-    asr_text TEXT,                -- 成片/预检 ASR 识别（归一化后）
-    cer REAL DEFAULT -1,
-    level TEXT DEFAULT 'A',
-    status TEXT DEFAULT 'pending',-- pending/ok/failed/empty(无台词)
-    regen_count INTEGER DEFAULT 0,
-    error TEXT,
-    updated_at REAL NOT NULL
-);
 CREATE TABLE IF NOT EXISTS character_portraits (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
@@ -174,6 +150,21 @@ CREATE TABLE IF NOT EXISTS character_portraits (
     bible_version INTEGER DEFAULT 0,
     created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS scene_references (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    scene_name TEXT NOT NULL,
+    ep_start INTEGER NOT NULL,        -- 适用集左区间（含）
+    ep_end INTEGER,                   -- 适用集右区间（含）；NULL=当前最新版，开区间向后覆盖
+    scene_canonical TEXT,             -- 该场景图对应的场景锚点串
+    prompt TEXT,                      -- 生成用 prompt
+    image_path TEXT,                  -- 落盘路径
+    qa_json TEXT,                     -- {overall, issues}
+    base_scene_id TEXT,               -- 图生图所基于的上一张场景图（lineage）
+    bible_version INTEGER DEFAULT 0,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_scene_refs_proj_name ON scene_references(project_id, scene_name, ep_start);
 CREATE INDEX IF NOT EXISTS idx_portraits_proj_char ON character_portraits(project_id, character_name, ep_start);
 CREATE INDEX IF NOT EXISTS idx_chapters_project ON chapters(project_id, idx);
 CREATE INDEX IF NOT EXISTS idx_episodes_project ON episodes(project_id, episode_no);
@@ -182,8 +173,6 @@ CREATE INDEX IF NOT EXISTS idx_versions_shot ON shot_versions(shot_id, version_n
 CREATE INDEX IF NOT EXISTS idx_scenes_shot ON shot_scenes(shot_id, version_no);
 CREATE INDEX IF NOT EXISTS idx_versions_idem ON shot_versions(idem_key);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
-CREATE INDEX IF NOT EXISTS idx_pron_project ON pronunciation(project_id);
-CREATE INDEX IF NOT EXISTS idx_shot_audio_episode ON shot_audio(episode_id);
 """
 
 
@@ -226,6 +215,10 @@ MIGRATIONS = (
     "ALTER TABLE provider_calls ADD COLUMN request_json TEXT",
     "ALTER TABLE provider_calls ADD COLUMN response_json TEXT",
     "ALTER TABLE episodes ADD COLUMN storyboard_outline_json TEXT",  # 分镜大纲（先规划后逐镜填充），供前端展示进度 k/N
+    "ALTER TABLE projects ADD COLUMN scene_refs_status TEXT DEFAULT 'idle'",  # 场景图素材库生成任务状态
+    "ALTER TABLE projects ADD COLUMN scene_refs_error TEXT",
+    "ALTER TABLE projects ADD COLUMN scene_refs_target TEXT",
+    "ALTER TABLE shots ADD COLUMN scene_name TEXT",  # 归一化命中的库内规范场景名（渲染期取场景库图复用）
 )
 
 

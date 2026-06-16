@@ -1,7 +1,9 @@
 from app.schemas import Bible, Character, Dialogue, EpisodeScreenplay, Shot, Storyboard, World
 from app.validators import (_contiguous_scene_move, _has_movement_cue, _has_transition_hint,
                             normalize_action_desc, validate_storyboard,
-                            validate_storyboard_preserves_key_content)
+                            storyboard_shot_count_range,
+                            validate_storyboard_preserves_key_content,
+                            validate_storyboard_shot_covers_outline)
 
 
 def _bible() -> Bible:
@@ -116,8 +118,10 @@ def _compact_shot(no: int) -> Shot:
 
 
 def test_storyboard_allows_extra_split_shots_for_dense_dialogue() -> None:
-    """50s 基础是 5 镜，但分镜可多拆少量镜头承接长台词/关键内容。"""
-    board = Storyboard(episode_no=1, shots=[_compact_shot(i) for i in range(1, 7)])
+    """50s 基础是 5 镜，内容密时可拆到 10 镜（50s 上限），只要仍在总时长上限内。"""
+    board = Storyboard(episode_no=1, shots=[_compact_shot(i) for i in range(1, 11)])
+    for shot in board.shots:
+        shot.duration_s = 5
 
     errors = validate_storyboard(board, _bible(), target_duration_s=50)
 
@@ -125,7 +129,9 @@ def test_storyboard_allows_extra_split_shots_for_dense_dialogue() -> None:
 
 
 def test_storyboard_still_caps_excessive_split_shots() -> None:
-    board = Storyboard(episode_no=1, shots=[_compact_shot(i) for i in range(1, 9)])
+    board = Storyboard(episode_no=1, shots=[_compact_shot(i) for i in range(1, 20)])
+    for shot in board.shots:
+        shot.duration_s = 5
 
     errors = validate_storyboard(board, _bible(), target_duration_s=50)
 
@@ -143,6 +149,14 @@ def test_normalize_action_desc_strips_template_sequence_marker() -> None:
 def test_normalize_action_desc_keeps_real_words() -> None:
     assert normalize_action_desc("先前曲惜已经把纸杯放回桌面") == "先前曲惜已经把纸杯放回桌面"
     assert normalize_action_desc("先生推门而入，谷言抬头") == "先生推门而入，谷言抬头"
+
+
+def test_storyboard_count_range_scales_with_target_duration() -> None:
+    # 镜头数上限按「目标时长 / 单镜最短时长」折算，而非统一顶到 18 镜
+    assert storyboard_shot_count_range(40) == (4, 8)
+    assert storyboard_shot_count_range(50) == (5, 10)
+    assert storyboard_shot_count_range(70) == (7, 14)
+    assert storyboard_shot_count_range(90) == (9, 18)
 
 
 # ---------- 分镜防丢失：关键内容保留校验 ----------
@@ -205,3 +219,121 @@ def test_storyboard_preservation_noop_without_manifest() -> None:
         _board_preserving_key_content(),
         EpisodeScreenplay(episode_no=1, key_lines=[], key_plot_points=[]))
     assert errors == []
+
+
+def test_storyboard_shot_covers_outline_requires_current_shot_text() -> None:
+    shot = _board_preserving_key_content().shots[0]
+    errors = validate_storyboard_shot_covers_outline(
+        shot,
+        "中年测验员当众宣读萧炎斗之力三段并定性为低级",
+        shot.shot_no,
+    )
+    assert any("未落实本镜大纲 covers" in e for e in errors)
+
+    shot.action_desc += "，中年测验员当众宣读萧炎斗之力三段，并定性为低级。"
+    assert validate_storyboard_shot_covers_outline(
+        shot,
+        "中年测验员当众宣读萧炎斗之力三段并定性为低级",
+        shot.shot_no,
+    ) == []
+
+
+def test_shot_covers_reports_only_the_missing_atom() -> None:
+    """复合 covers 里本镜只落实了一部分事实——报错只点名缺失的那一条，不把已落实的也飘红。"""
+    shot = _board_preserving_key_content().shots[0]  # action_desc 含「碑面只亮起三段微光」
+    errors = validate_storyboard_shot_covers_outline(
+        shot, "碑面只亮起三段微光，引发全场哄笑讥讽不断", shot.shot_no)
+    assert len(errors) == 1
+    assert "引发全场哄笑讥讽不断" in errors[0]
+    assert "三段微光" not in errors[0]  # 已落实的事实不再点名
+
+
+def test_shot_covers_credits_prior_and_later_shots() -> None:
+    """承接放行：本镜未拍的原子，若已在前序镜头落实(向前)或大纲排给后续镜头(向后)，都不算本镜漏戏。"""
+    shot = _board_preserving_key_content().shots[0]
+    covers = "碑面只亮起三段微光，引发全场哄笑讥讽不断"
+    # 向前承接：上一镜已经拍了群嘲
+    assert validate_storyboard_shot_covers_outline(
+        shot, covers, shot.shot_no, prior_text="围观族人爆出一阵哄笑讥讽不断") == []
+    # 向后承接：大纲把群嘲排给了后面的镜头
+    assert validate_storyboard_shot_covers_outline(
+        shot, covers, shot.shot_no, later_planned_covers="引发全场哄笑讥讽不断") == []
+
+
+def test_shot_covers_tolerates_synonym_paraphrase() -> None:
+    """covers 写"被测验员当众宣告为低级"，本镜实际拍成"测验员…宣读…级别：低级"——
+    同一件事的同义改写不应判漏戏（避免逐字纠词把已落实的一拍卡死、反复重试到上限）。"""
+    shot = _board_preserving_key_content().shots[0]
+    shot.narration = "测验员漠然宣读：萧炎，斗之力，三段！级别：低级！"
+    errors = validate_storyboard_shot_covers_outline(
+        shot, "萧炎被测验员当众宣告为低级", shot.shot_no)
+    assert errors == [], errors
+
+
+def test_shot_covers_tolerates_abstract_to_concrete_paraphrase() -> None:
+    """covers 写抽象概括词（成绩/追捧），本镜拍成具体场景（测出七段/人群赞叹）——
+    同义改写不应判漏戏。这是镜03死循环的根因：模型把"萧媚七段成绩引发追捧"正确具象化为
+    "测出七段+人群赞叹"，但 2-gram 字面匹配认不出，误判为未落实 covers，反复重试到上限。"""
+    shot = _board_preserving_key_content().shots[0]
+    shot.action_desc = "萧媚小跑上前触摸魔石碑，碑面亮起'斗之气：七段！'，人群赞叹声浪骤起"
+    shot.narration = "人群赞叹：七段！真了不起！不愧是家族种子级人物！"
+    errors = validate_storyboard_shot_covers_outline(
+        shot, "萧媚七段成绩引发追捧", shot.shot_no)
+    assert errors == [], errors
+
+
+def test_scene_contiguity_key_ignores_sublocation_suffix() -> None:
+    """同一地点的子机位标签归一到同一主键：'广场' 与 '广场·中央石台' 不算两个场景。"""
+    from app.validators import _scene_contiguity_key
+    base = _scene_contiguity_key("日，乌坦城萧家测验广场")
+    assert _scene_contiguity_key("日，乌坦城萧家测验广场·中央石台") == base
+    assert _scene_contiguity_key("日，乌坦城萧家测验广场-树荫下") == base
+
+
+def test_continuity_same_scene_new_focus_char_with_movement_passes() -> None:
+    """同场景换焦点人物（群像戏"下一个上场的人"）：上一镜拍萧炎，本镜拍萧媚上前测验，
+    场景时间都没变，action_desc 写了"小跑上前"入场承接——不应因没有共同角色而误判接镜断裂。
+    这是镜03死循环根因：校验器只看共同角色，与错误文案"或在 action_desc 写明承接"自相矛盾。"""
+    board = Storyboard(
+        episode_no=1,
+        shots=[
+            Shot(shot_no=1, duration_s=12, shot_size="特写", camera_move="固定",
+                 scene_setting="日，萧家测验广场", characters=["萧炎"],
+                 action_desc="萧炎垂眸凝视紧攥的左手，血丝渗出，喉结滚动，未发一言",
+                 first_frame_desc="萧炎左手特写", last_frame_desc="同机位血丝渗出",
+                 source_excerpt="", narration="", dialogues=[],
+                 transition="硬切", continuity_from_prev=False),
+            Shot(shot_no=2, duration_s=13, shot_size="中景", camera_move="固定",
+                 scene_setting="日，萧家测验广场", characters=["萧媚"],
+                 action_desc="萧媚小跑上前，伸手轻触魔石碑，碑面亮起七段光芒，人群赞叹声浪骤起",
+                 first_frame_desc="萧媚触碑", last_frame_desc="萧媚转身",
+                 source_excerpt="", narration="人群赞叹：七段！真了不起！",
+                 dialogues=[], transition="硬切", continuity_from_prev=True),
+        ],
+    )
+    errors = validate_storyboard(board, _bible(), target_duration_s=50)
+    assert not any("没有共同角色" in e for e in errors), errors
+
+
+def test_continuity_same_scene_new_focus_char_without_movement_fails() -> None:
+    """同场景换焦点人物，但 action_desc 完全没写入场移动承接——此时才该报错，
+    提示模型补"上前/跑出"等承接动作。确保放宽不是无条件的。"""
+    board = Storyboard(
+        episode_no=1,
+        shots=[
+            Shot(shot_no=1, duration_s=12, shot_size="特写", camera_move="固定",
+                 scene_setting="日，萧家测验广场", characters=["萧炎"],
+                 action_desc="萧炎垂眸凝视紧攥的左手，血丝渗出，喉结滚动",
+                 first_frame_desc="萧炎左手特写", last_frame_desc="同机位血丝渗出",
+                 source_excerpt="", narration="", dialogues=[],
+                 transition="硬切", continuity_from_prev=False),
+            Shot(shot_no=2, duration_s=13, shot_size="中景", camera_move="固定",
+                 scene_setting="日，萧家测验广场", characters=["萧媚"],
+                 action_desc="萧媚立于碑前，碑面亮起七段光芒，人群赞叹",
+                 first_frame_desc="萧媚触碑", last_frame_desc="萧媚转身",
+                 source_excerpt="", narration="",
+                 dialogues=[], transition="硬切", continuity_from_prev=True),
+        ],
+    )
+    errors = validate_storyboard(board, _bible(), target_duration_s=50)
+    assert any("没有共同角色" in e for e in errors), errors

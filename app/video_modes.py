@@ -314,6 +314,29 @@ def character_reference_assets(bible: Bible, character_names: list[str], *, limi
     return assets
 
 
+def scene_reference_assets(bible: Bible, scene_name: str, *, project_id: str | None = None,
+                           episode_no: int | None = None) -> list[ReferenceImageAsset]:
+    """该镜场景的场景库图 →[ReferenceImageAsset]（ref_type="scene"，环境真值锚点）。
+    同一规范场景的所有镜头、所有集都取同一张图（按集分段），保证场景跨镜/跨集一致。"""
+    if not scene_name:
+        return []
+    from app.scenes import scene_ref_for_episode, scene_ref_qa_for_episode
+    path = scene_ref_for_episode(project_id, scene_name, episode_no) if project_id else None
+    if not path:
+        by_name = {s.name: s for s in (getattr(bible, "scenes", None) or [])}
+        sc = by_name.get(scene_name)
+        path = getattr(sc, "ref_image_path", None) if sc else None
+    if not path or not Path(path).exists():
+        return []
+    qa = scene_ref_qa_for_episode(project_id, scene_name, episode_no) if project_id else None
+    score = float(qa.get("overall", 1.0)) if isinstance(qa, dict) and qa.get("overall") is not None else 1.0
+    try:
+        return [_asset_from_path(path=path, ref_type="scene", source="asset_library",
+                                 quality_score=score, qa=qa or {"overall": score, "issues": []})]
+    except OSError:
+        return []
+
+
 def reference_generation_prompt(shot: Shot, bible: Bible, ref_type: str, index: int,
                                 *, content_override: str | None = None) -> str:
     anchors = []
@@ -824,7 +847,12 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
     non_gen_budget = max(0, max_refs - len(forced) - reserve_for_gen)
 
     selected: list[ReferenceImageAsset] = list(forced)
-    selected.extend(character_reference_assets(bible, shot.characters, limit=min(len(shot.characters), non_gen_budget),
+    # 场景库图（环境锚点）：同一规范场景跨镜/跨集复用同一张图，与定妆照同档优先注入。
+    scene_assets = scene_reference_assets(bible, getattr(shot, "scene_name", "") or "",
+                                          project_id=project_id, episode_no=episode_no)
+    selected.extend(scene_assets[:max(0, non_gen_budget)])
+    char_budget = max(0, non_gen_budget - len(scene_assets[:non_gen_budget]))
+    selected.extend(character_reference_assets(bible, shot.characters, limit=min(len(shot.characters), char_budget),
                                                project_id=project_id, episode_no=episode_no))
     selected = _dedupe_assets(selected)
     remaining_reuse = max(0, plan.reusePreviousSceneCount)
@@ -862,7 +890,9 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
     #   - 上一镜尾帧（continuity 镜的 forced 帧）：锁环境/光线/构图衔接，喂给本镜所有新图。
     # 二者同源于实际喂给 Seedance 的锚点，保证「同分镜多张一致」「与上一镜衔接」。
     portrait_seeds = _portrait_seed_inputs(bible, shot.characters, project_id=project_id, episode_no=episode_no)
+    # 环境种子：上一镜尾帧（衔接）+ 本镜场景库图（锁定环境/陈设/光线），喂给本镜所有新图。
     env_seeds = [a.url for a in forced if a.type == "previous_shot_frame" and a.url]
+    env_seeds += [a.url for a in scene_assets if a.url]
 
     def _seeds_for(ref_type: str) -> list[str]:
         seeds = (portrait_seeds + env_seeds) if ref_type in {"character", "plot_key_frame"} else list(env_seeds)

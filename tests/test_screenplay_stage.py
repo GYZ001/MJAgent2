@@ -268,6 +268,23 @@ def test_screenplay_rejects_key_line_absent_from_body() -> None:
     assert any("未真正写进 full_script_text" in e for e in errors)
 
 
+def test_screenplay_preserves_all_source_dialogues_from_bible_characters() -> None:
+    script = _valid_rainy_script()
+    source_text = "\n".join([
+        "谷言：还有十分钟，他要是再不来，我就走。",
+        "路人：雨这么大，还等人啊？",
+        "谷言：你这几天到底躲到哪去了？",
+        "谷言：别碰那只杯子。",
+        "谷言：你到底想说什么？",
+    ])
+
+    errors = validate_screenplay(script, _bible(), expected_beats=5, episode_no=1, source_text=source_text)
+
+    assert any("人物谱角色在原文中的台词" in e and "key_lines" in e for e in errors)
+    assert any("人物谱角色在原文中的台词" in e and "full_script_text" in e for e in errors)
+    assert not any("路人" in e for e in errors)
+
+
 def test_valid_rainy_script_passes() -> None:
     assert validate_screenplay(_valid_rainy_script(), _bible(), expected_beats=5, episode_no=1) == []
 

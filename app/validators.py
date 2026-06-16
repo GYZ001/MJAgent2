@@ -50,9 +50,8 @@ MOVEMENT_HINTS = (
     "登上", "爬上", "钻进", "前往", "折返", "驻足", "停在", "停步", "停下",
 )
 
-# 分镜镜头数不再与 target/10 死锁。target/10 是基础节拍数；当关键台词/内心OS导致单镜口播超限时，
-# 允许额外拆出少量镜头承接同一剧情，避免模型在“不能加镜头”和“不能超口播”之间反复失败。
-EXTRA_SPLIT_SHOTS = 2
+# 分镜镜头数不再与 target/10 死锁。target/10 是基础节拍数；上限由产品配置和 90s 总时长共同约束，
+# 让关键台词/剧情点密集的集数能继续补镜，而不是过早收尾。
 TARGET_DURATION_OVERAGE_RATIO = 1.2
 
 SCENE_CUT_TRANSITIONS = TRANSITIONS - {"硬切"}
@@ -96,27 +95,28 @@ def _text_budget(shot: Shot) -> int:
 def storyboard_shot_count_range(target_duration_s: int) -> tuple[int, int]:
     """返回自动分镜允许的镜头数范围。
 
-    下限仍是目标时长折算的基础节拍数；上限只放开少量额外拆分镜，用来承接口播过长、
-    必保留台词/剧情点过密的情况，不让模型把一集拆成过碎的流水账。
+    下限是目标时长折算的基础节拍数；上限按「目标时长 / 单镜最短时长」折算，
+    并受产品最大镜头数 STORYBOARD_MAX_SHOTS 约束。
+    这样 40s 目标最多拆 8 镜、90s 目标最多拆 18 镜，实事求是地匹配内容密度，
+    而不是无论目标多少都顶到 18 镜上限。
     """
     base = max(1, math.ceil(target_duration_s / config.FIXED_VIDEO_DURATION_S))
-    return base, base + EXTRA_SPLIT_SHOTS
+    duration_bound = max(base, target_duration_s // config.MIN_VIDEO_DURATION_S)
+    return base, min(config.STORYBOARD_MAX_SHOTS, duration_bound)
 
 
 def storyboard_duration_limit(target_duration_s: int, board: Storyboard | None = None) -> int:
     """自动分镜允许的整集总时长上限。
 
-    target_duration_s 是节奏目标，不是硬封顶；产品侧允许单集到 EPISODE_TARGET_MAX_S（当前 90s）。
-    口播刚需可能进一步抬高下限，避免"为卡目标时长而截短台词"。
+    总时长上限固定为 EPISODE_TARGET_MAX_S（90s），不随目标时长缩放——
+    目标时长只是节奏参考，模型判断不一定精确，统一留到 90s 给模型发挥空间，
+    不用 48/60 这种缩放值抑制模型能力。
+    口播刚需（enforced_floor_total）可进一步抬高上限，避免为卡上限而截短台词。
     """
     enforced_floor_total = 0
     if board is not None:
         enforced_floor_total = sum(enforced_min_duration(board, s) for s in board.shots)
-    return max(
-        int(target_duration_s * TARGET_DURATION_OVERAGE_RATIO),
-        config.EPISODE_TARGET_MAX_S,
-        enforced_floor_total,
-    )
+    return max(config.EPISODE_TARGET_MAX_S, enforced_floor_total)
 
 
 def _voiced_shot_count(shots: list[Shot]) -> int:
@@ -354,11 +354,14 @@ def validate_storyboard(
             errors.append(f"{tag}.camera_move=「{shot.camera_move}」不在 {sorted(CAMERA_MOVES)}")
         if shot.transition not in TRANSITIONS:
             errors.append(f"{tag}.transition=「{shot.transition}」不在 {sorted(TRANSITIONS)}")
-        # V6 场景连续性（场景标签长度上限校验已取消）
+        # V6 场景连续性（场景标签长度上限校验已取消）。
+        # 按主场景判定：同一地点的子机位标签（"广场" vs "广场·中央石台"）视为同一场景，
+        # 不算被打断——否则模型给同一地点加子机位后会误报"场景被打断"，逼出无谓重试。
         scene = shot.scene_setting.strip()
-        if scene in scene_last_seen and scene_last_seen[scene] != i - 1:
-            errors.append(f"场景「{scene}」在 shots[{scene_last_seen[scene]}] 与 shots[{i}] 间被其他场景打断，同场景镜头必须连续排列")
-        scene_last_seen[scene] = i
+        scene_key = _scene_contiguity_key(scene)
+        if scene_key in scene_last_seen and scene_last_seen[scene_key] != i - 1:
+            errors.append(f"场景「{scene}」在 shots[{scene_last_seen[scene_key]}] 与 shots[{i}] 间被其他场景打断，同场景镜头必须连续排列")
+        scene_last_seen[scene_key] = i
         # V6+ 连贯性：每个可变时长视频段都要像连续短片，不能每镜头重开一个摘要。
         if i == 0 and shot.continuity_from_prev:
             errors.append(f"{tag}.continuity_from_prev=true，但第一个镜头没有上一镜可承接")
@@ -372,9 +375,16 @@ def validate_storyboard(
                         f"{tag}.continuity_from_prev=true 但 scene_setting 从「{prev_scene}」变为「{scene}」；"
                         "接上镜必须沿用同一时间地点标签，换场请设为 false 并写清转场")
                 if not shared_chars:
-                    errors.append(
-                        f"{tag}.continuity_from_prev=true 但与上一镜没有共同角色；"
-                        "同场景接镜必须保留上一镜核心人物或在 action_desc 写明入场/离场承接")
+                    # 同场景换焦点人物（如群像戏"下一个上场的人"）是合理接镜：场景没变、时间没变，
+                    # 只是镜头跟随对象换了。此时只要 action_desc/narration 写了入场/离场移动承接
+                    # （上前/跑出/走进/穿过…），即视为已承接，不强制保留上一镜人物。
+                    # 兑现错误文案"或在 action_desc 写明入场/离场承接"的承诺——旧代码只看共同角色，
+                    # 与文案自相矛盾，导致模型写了承接仍被误判、重试到上限。
+                    if not _has_movement_cue(shot.action_desc, shot.narration):
+                        errors.append(
+                            f"{tag}.continuity_from_prev=true 但与上一镜没有共同角色；"
+                            "同场景接镜必须保留上一镜核心人物或在 action_desc 写明入场/离场承接"
+                            "（如「上前/跑出/走进/穿过」等移动动作）")
                 if shot.transition != "硬切":
                     errors.append(f"{tag}.transition=「{shot.transition}」，同场景接上镜应使用「硬切」")
             else:
@@ -419,6 +429,69 @@ def validate_storyboard(
     if actual != expected:
         errors.append(f"shot_no 必须为连续递增 1..{len(shots)}，当前为 {actual}")
 
+    # V12 场景必须落在场景图素材库内（库非空时；同时回填 shot.scene_name 供渲染期复用同一张场景图）
+    errors.extend(validate_storyboard_scenes(board, bible))
+
+    return errors
+
+
+# ---------- 场景图素材库：场景标签 → 库内规范场景的归一化匹配 ----------
+
+def _normalize_scene_label(s: str) -> str:
+    """去掉时间前缀/标点/空白，得到纯地点 token，用于场景标签的容错匹配。"""
+    return re.sub(r"[\s，,。.：:；;/、|]+", "", (s or "").strip())
+
+
+def _scene_contiguity_key(scene: str) -> str:
+    """场景连续性的归一化主键：剥掉子机位/子区域后缀（"·中央石台""-树荫下"等），
+    让同一地点的不同机位标签算同一场景，避免"加了子机位 = 场景被打断"的误报。"""
+    base = re.split(r"[·・·\-—/]", (scene or "").strip(), maxsplit=1)[0]
+    return _normalize_scene_label(base)
+
+
+def match_scene_name(scene_setting: str, scenes) -> str | None:
+    """把分镜 scene_setting 归一化匹配到 bible.scenes 中的规范场景名。
+    容错：去标点后规范名是 setting 的子串（或反之）即命中（最强）；否则取相似度最高且 ≥0.6 的场景。
+    返回命中的规范场景名，或 None（无库/无匹配）。"""
+    setting = (scene_setting or "").strip()
+    if not setting or not scenes:
+        return None
+    norm_setting = _normalize_scene_label(setting)
+    if not norm_setting:
+        return None
+    best: str | None = None
+    best_score = 0.0
+    for sc in scenes:
+        name = (getattr(sc, "name", "") or "").strip()
+        norm_name = _normalize_scene_label(name)
+        if not norm_name:
+            continue
+        if norm_name in norm_setting or norm_setting in norm_name:
+            return name  # 子串命中，最强
+        ratio = difflib.SequenceMatcher(None, norm_name, norm_setting).ratio()
+        if ratio > best_score:
+            best_score, best = ratio, name
+    return best if best_score >= 0.6 else None
+
+
+def validate_storyboard_scenes(board: Storyboard, bible: Bible) -> list[str]:
+    """V12：每个 shot.scene_setting 必须映射到场景图素材库（bible.scenes）里的规范场景，
+    命中则回填 shot.scene_name（渲染期据此为同一场景复用同一张场景库图，跨镜/跨集一致）。
+    务实优先：库为空（旧项目或尚未生成场景圣经）时直接放行，绝不误伤。"""
+    scenes = getattr(bible, "scenes", None) or []
+    if not scenes:
+        return []
+    errors: list[str] = []
+    names = "/".join(sc.name for sc in scenes if getattr(sc, "name", ""))
+    for i, shot in enumerate(board.shots):
+        matched = match_scene_name(shot.scene_setting, scenes)
+        if matched:
+            shot.scene_name = matched
+        else:
+            shot.scene_name = ""
+            errors.append(
+                f"shots[{i}](shot_no={shot.shot_no}).scene_setting=「{shot.scene_setting}」不在场景图素材库内；"
+                f"scene_setting 必须收敛到库内规范场景之一：{names}（若确为剧情需要的新场景，请沿用语义最接近的库内场景名）")
     return errors
 
 
@@ -454,6 +527,33 @@ def _strip_speaker(line: str) -> str:
     return _SPEAKER_PREFIX_RE.sub("", (line or "").strip(), count=1).strip()
 
 
+def _source_bible_dialogues(source_text: str | None, bible: Bible) -> list[str]:
+    """Extract source dialogue lines spoken by characters already present in the bible."""
+    if not source_text:
+        return []
+    bible_names = [c.name.strip() for c in bible.characters if c.name and c.name.strip()]
+    if not bible_names:
+        return []
+    names = "|".join(re.escape(name) for name in sorted(bible_names, key=len, reverse=True))
+    prefix_re = re.compile(
+        rf"^\s*({names})(?:[（(][^）)]{{1,12}}[）)])?\s*[:：]\s*(\S.+?)\s*$",
+        flags=re.MULTILINE,
+    )
+    found: list[str] = []
+    seen: set[str] = set()
+    for match in prefix_re.finditer(source_text):
+        speaker = match.group(1).strip()
+        line = match.group(2).strip().strip("“”\"'")
+        if len(_condense(line)) < 2:
+            continue
+        item = f"{speaker}：{line}"
+        key = _condense(item)
+        if key not in seen:
+            seen.add(key)
+            found.append(item)
+    return found
+
+
 def _condense(text: str) -> str:
     """压成纯内容字符串（去空白与标点），让匹配对标点/排版差异稳健。"""
     return _NON_CONTENT_RE.sub("", text or "")
@@ -487,8 +587,115 @@ def _bigram_coverage(needle: str, haystack: str) -> float:
     return len(nb & _bigram_set(haystack)) / len(nb)
 
 
+# 句读分隔：把一条复合的关键内容切成原子。纯标点驱动、与具体剧情无关，适用任意题材。
+_CLAIM_SPLIT_RE = re.compile(r"[；;。.！!？?，,、\n]+")
+
+
+def _atomize_claim(text: str) -> list[str]:
+    """把一条可能复合的关键内容（一句里含多个事实/动作/关系变化）按句读切成原子 claim。
+
+    复合 covers/剧情点如"测出三段，被宣告低级，引发哄笑"应逐条核对，避免"漏掉其中一件事"
+    时整句一起判失败、报错也指不到具体缺哪条。过短碎片（连接词等）丢弃，避免噪声。
+    """
+    atoms: list[str] = []
+    seen: set[str] = set()
+    for piece in _CLAIM_SPLIT_RE.split(text or ""):
+        atom = _strip_speaker(piece).strip()
+        key = _condense(atom)
+        if len(key) < 2 or key in seen:
+            continue
+        seen.add(key)
+        atoms.append(atom)
+    return atoms
+
+
+def _claim_present(atom: str, haystack: str) -> bool:
+    """一条原子 claim 是否已落进文本：主干连续保留 或 2-gram 覆盖达标，二者满足其一即算落实。"""
+    core = _strip_speaker(atom)
+    return (_longest_run_ratio(core, haystack) >= KEY_LINE_PRESENT_RATIO
+            or _bigram_coverage(core, haystack) >= KEY_POINT_COVERAGE)
+
+
+# 逐镜 covers 原子用更宽的"明显缺失"判定：covers 是模型自写的事实改写，连接词（"被…当众宣告为"）
+# 会拉低覆盖率，故只在"整件事几乎零命中"时才算漏，容忍同义改写，专拦真正被整段略过的事实。
+COVERS_ATOM_ABSENT_RUN = 0.3
+COVERS_ATOM_ABSENT_COVERAGE = 0.25
+# 方案 B：抽象概括词→具体同义改写兜底。covers 原子常写概括词（"引发全场哄笑与贬损议论"），
+# 模型在 action_desc/narration 里写成具体动作（"人群哄笑轰然炸开""摇头嗤声""耳语"），2-gram 覆盖率会被
+# 连接词拉低而误判缺失。这里给高频抽象词配同义词组：covers 原子含触发词、shot_text 含任一同义具体词
+# 即视为落实。只救同义改写，不救核心动作整段缺失。
+# 覆盖范围：人群声（哄笑/议论/嘲讽）、追捧赞叹、成绩段位、震惊错愕——这些是 covers 最常写抽象、
+# 模型最常具象化的高频词。新题材出现新抽象词时，按同样格式追加组即可。
+COVERS_CROWD_SEMANTIC_GROUPS = (
+    (("哄笑", "哄堂", "大笑"), ("哄笑", "大笑", "拍膝", "哗然", "轰然", "爆笑", "哄堂", "笑声", "哄笑")),
+    (("议论", "贬损", "非议"), ("议论", "耳语", "指点", "低语", "私语", "纷纷", "交头接耳", "窃窃私语", "指点", "议论")),
+    (("嘲讽", "嗤笑", "嘲笑", "讥笑", "耻笑"), ("嘲讽", "嗤笑", "嘲笑", "讥笑", "耻笑", "讥讽", "冷笑", "嗤声", "讥笑声")),
+    # 追捧/赞叹类：covers 写"引发追捧"，模型写成"赞叹""欢呼""喝彩""真了不起"
+    (("追捧", "赞颂", "称赞", "夸赞"), ("追捧", "赞叹", "欢呼", "喝彩", "叫好", "称赞", "夸赞", "赞颂", "了不起", "种子级")),
+    # 成绩/段位类：covers 写"七段成绩"，模型写成"测出七段""斗之气七段""七段！"
+    (("成绩", "结果", "测定"), ("成绩", "结果", "测出", "测得", "测定", "段位", "段", "级", "评")),
+    # 震惊/错愕类：covers 写"引发震惊"，模型写成"愕然""倒吸凉气""哗然""瞳孔骤缩"
+    (("震惊", "惊愕", "错愕", "惊诧"), ("震惊", "惊愕", "错愕", "惊诧", "愕然", "倒吸", "哗然", "瞳孔", "骤缩", "失色")),
+)
+
+# 方案 A/C 共用：covers 里"角色开口宣告"的动词与"人群声"的名词。
+# 用于判定某镜 covers 是否"不可单镜完成"——同时要求角色开口+人群声时，两类声轨叠加易超单镜口播上限；
+# 依赖圣经外角色开口时，逐镜阶段会陷入 characters 校验与 covers 落实相互锁死（镜03 死循环根因）。
+COVERS_SPOKEN_VERBS = ("宣告", "宣布", "宣读", "宣判", "公布")
+COVERS_CROWD_WORDS = ("哄笑", "哄堂", "嘲讽", "议论", "嗤笑", "嘲笑", "讥笑", "耻笑", "哗然", "群嘲")
+
+
+def _covers_has_spoken(covers: str) -> bool:
+    return any(v in covers for v in COVERS_SPOKEN_VERBS)
+
+
+def _covers_has_crowd(covers: str) -> bool:
+    return any(w in covers for w in COVERS_CROWD_WORDS)
+
+
+def _covers_outside_spoken(covers: str, bible_names: set[str]) -> list[str]:
+    """covers 里'被X宣告/X宣布'的 X 若不在角色圣经，返回这些圣经外角色名。
+
+    只看被动句「被X（当众）宣告」——「被」之后的 X 几乎总是人名，精度高、误伤低；
+    主动句「X宣告」里的 X 可能是「石碑/天空/系统」等非人名，不校验。
+    用于在大纲阶段拦截'依赖圣经外角色开口'的不可拍 covers，避免逐镜阶段 characters 校验与
+    covers 落实相互锁死。
+    """
+    if not bible_names or not covers:
+        return []
+    found: set[str] = set()
+    for m in re.finditer(r"被([\u4e00-\u9fa5]{2,6})(?:当众|高声|大声|公然)?(?:宣告|宣布|宣读|宣判|公布)", covers):
+        found.add(m.group(1))
+    return [n for n in found if n not in bible_names]
+
+
+def _crowd_semantic_hit(atom: str, haystack: str) -> bool:
+    """方案 B：covers 原子含人群声概括词（哄笑/议论/嘲讽），shot_text 含任一同义具体词即算落实。
+
+    专治"引发全场哄笑与贬损议论"→"人群哄笑轰然炸开...摇头嗤声...耳语"这类同义改写误判——
+    2-gram 覆盖率会被连接词拉低，但"哄笑/嗤声/耳语"确实是"哄笑与议论"的具体化，不该判缺失。
+    """
+    for triggers, synonyms in COVERS_CROWD_SEMANTIC_GROUPS:
+        if any(t in atom for t in triggers):
+            if any(s in haystack for s in synonyms):
+                return True
+    return False
+
+
+def _claim_clearly_absent(atom: str, haystack: str) -> bool:
+    """这条原子在文本里是否"几乎完全没出现"——主干连续命中和 2-gram 覆盖都低于宽松下限才算缺失。"""
+    core = _strip_speaker(atom)
+    if (_longest_run_ratio(core, haystack) >= COVERS_ATOM_ABSENT_RUN
+            or _bigram_coverage(core, haystack) >= COVERS_ATOM_ABSENT_COVERAGE):
+        return False
+    # 方案 B：人群声概括→具体同义改写兜底（哄笑/议论/嘲讽）
+    if _crowd_semantic_hit(core, haystack):
+        return False
+    return True
+
+
 def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats: int,
-                        episode_no: int | None = None) -> list[str]:
+                        episode_no: int | None = None, source_text: str | None = None) -> list[str]:
     """剧本层校验：剧本台只接受完整剧本格式，不再兼容旧拍卡结构。"""
     errors: list[str] = []
     if episode_no is not None and script.episode_no != episode_no:
@@ -569,6 +776,26 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         errors.append(
             f"key_lines 仅 {len(key_lines)} 条；请从原文挑出本集至少 {MIN_KEY_LINES} 条绝不能丢的关键台词"
             "（金句/决定性对白/情绪爆点），尽量保留人物说话风格")
+    # key_lines 只能含人物谱角色台词：测验员/围观者等非圣经角色台词会让分镜陷入死循环
+    # （分镜 characters 不允许填这些角色，但 key_lines 又要求逐条覆盖）。
+    bible_names = {c.name for c in bible.characters}
+    if bible_names:
+        non_bible_key_lines = []
+        for ln in key_lines:
+            m = _SPEAKER_PREFIX_RE.match(ln)
+            if not m:
+                continue
+            speaker = m.group(0).rstrip("：:（）()").strip()
+            if speaker and speaker not in bible_names:
+                non_bible_key_lines.append(ln)
+        if non_bible_key_lines:
+            shown = "；".join(non_bible_key_lines[:KEY_CONTENT_MAX_REPORT])
+            extra = (f"（另有 {len(non_bible_key_lines) - KEY_CONTENT_MAX_REPORT} 条从略）"
+                     if len(non_bible_key_lines) > KEY_CONTENT_MAX_REPORT else "")
+            errors.append(
+                f"key_lines 有 {len(non_bible_key_lines)} 条含非人物谱角色台词：{shown}{extra}"
+                f"；key_lines 只能保留角色圣经角色（{'、'.join(sorted(bible_names))}）的台词，"
+                "测验员/围观者/旁白等非人物谱角色台词可写进 full_script_text 但不得进入 key_lines")
     missing_in_script = [
         ln for ln in key_lines
         if _longest_run_ratio(_strip_speaker(ln), full_text) < KEY_LINE_PRESENT_RATIO
@@ -578,6 +805,66 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         errors.append(
             f"key_lines 有 {len(missing_in_script)} 条未真正写进 full_script_text：{shown}"
             "；关键台词必须在剧本正文里实际出现，不能只列在清单里")
+    # key_lines 的 speaker 必须与 full_script_text 中对白行的 speaker 一致：
+    # 防止"清单写张三说、正文却写李四说"的归属错位（去 speaker 后正文匹配通过，但归属已错）。
+    if bible_names:
+        script_speakers: dict[str, list[str]] = {}
+        for sm in SCRIPT_SOUND_LINE_RE.finditer(full_text):
+            sp = sm.group(1).strip()
+            line_text = sm.group(3).strip()
+            script_speakers.setdefault(sp, []).append(line_text)
+        mismatched = []
+        for ln in key_lines:
+            m = _SPEAKER_PREFIX_RE.match(ln)
+            if not m:
+                continue
+            kl_speaker = m.group(0).rstrip("：:（）()").strip()
+            if not kl_speaker or kl_speaker not in bible_names:
+                continue  # 非圣经角色已由上一条校验拦截
+            kl_text = _strip_speaker(ln)
+            # 在 full_script_text 中找台词主干能匹配的对白行，检查其 speaker 是否与 key_lines 一致
+            matched_speakers = {
+                sp for sp, texts in script_speakers.items()
+                if any(_longest_run_ratio(kl_text, t) >= KEY_LINE_PRESENT_RATIO
+                       or _bigram_coverage(kl_text, t) >= KEY_LINE_BIGRAM_COVERAGE
+                       for t in texts)
+            }
+            if matched_speakers and kl_speaker not in matched_speakers:
+                mismatched.append(f"{ln}（正文归属为：{'、'.join(sorted(matched_speakers))}）")
+        if mismatched:
+            shown = "；".join(mismatched[:KEY_CONTENT_MAX_REPORT])
+            extra = (f"（另有 {len(mismatched) - KEY_CONTENT_MAX_REPORT} 条从略）"
+                     if len(mismatched) > KEY_CONTENT_MAX_REPORT else "")
+            errors.append(
+                f"key_lines 有 {len(mismatched)} 条台词的说话人与 full_script_text 不一致：{shown}{extra}"
+                "；同一句台词在 key_lines 和 full_script_text 中必须由同一角色说出")
+    source_dialogues = _source_bible_dialogues(source_text, bible)
+    if source_dialogues:
+        key_text = "\n".join(key_lines)
+        missing_from_key_lines = [
+            ln for ln in source_dialogues
+            if _longest_run_ratio(_strip_speaker(ln), key_text) < KEY_LINE_PRESENT_RATIO
+            and _bigram_coverage(_strip_speaker(ln), key_text) < KEY_LINE_BIGRAM_COVERAGE
+        ]
+        if missing_from_key_lines:
+            shown = "；".join(missing_from_key_lines[:KEY_CONTENT_MAX_REPORT])
+            extra = (f"（另有 {len(missing_from_key_lines) - KEY_CONTENT_MAX_REPORT} 条从略）"
+                     if len(missing_from_key_lines) > KEY_CONTENT_MAX_REPORT else "")
+            errors.append(
+                f"key_lines 漏掉了 {len(missing_from_key_lines)} 条人物谱角色在原文中的台词：{shown}{extra}"
+                "；剧本台必须保留本集所有人物谱角色台词，不能只筛选重点台词")
+        missing_source_dialogues = [
+            ln for ln in source_dialogues
+            if _longest_run_ratio(_strip_speaker(ln), full_text) < KEY_LINE_PRESENT_RATIO
+            and _bigram_coverage(_strip_speaker(ln), full_text) < KEY_LINE_BIGRAM_COVERAGE
+        ]
+        if missing_source_dialogues:
+            shown = "；".join(missing_source_dialogues[:KEY_CONTENT_MAX_REPORT])
+            extra = (f"（另有 {len(missing_source_dialogues) - KEY_CONTENT_MAX_REPORT} 条从略）"
+                     if len(missing_source_dialogues) > KEY_CONTENT_MAX_REPORT else "")
+            errors.append(
+                f"full_script_text 漏掉了 {len(missing_source_dialogues)} 条人物谱角色在原文中的台词：{shown}{extra}"
+                "；请将这些台词按可拍台本格式写回正文，可轻微口语化但主干不能丢")
     key_points = [pt.strip() for pt in (script.key_plot_points or []) if pt and pt.strip()]
     if len(key_points) < MIN_KEY_PLOT_POINTS:
         errors.append(
@@ -700,10 +987,62 @@ def validate_storyboard_preserves_key_content(board: Storyboard,
     return errors
 
 
+def validate_storyboard_shot_covers_outline(
+    shot: Shot, covers: str, shot_no: int,
+    *, prior_text: str = "", later_planned_covers: str = "",
+) -> list[str]:
+    """逐镜填充阶段校验：大纲声明本镜要落实的 covers，必须真的进入本镜文本。
+
+    这比收尾时才跑整集必保留校验更早发现漏戏，避免模型第 6 镜才被告知第 2 镜漏了"低级"。
+
+    covers 是模型自写的复合事实改写（"测出三段，被宣告低级，引发哄笑"），按句读拆成原子逐条核对。
+    判定务实优先、只拦"整件事彻底没拍"：用更宽的"明显缺失"阈值（_claim_clearly_absent），
+    某条原子在本镜+前序里几乎零命中才算漏——避免"宣告→宣读"这类同义改写把本已落实的一拍卡死。
+    同义词组兜底（_crowd_semantic_hit）覆盖哄笑/议论/嘲讽/追捧赞叹/成绩段位/震惊错愕等高频抽象词，
+    模型把"成绩"写成"测出七段"、"追捧"写成"赞叹欢呼"都算落实。报错只点名真正缺失的那条。
+    两类"承接"不算本镜漏戏：
+    - 向前承接：该原子已在前序已通过镜头（prior_text）里体现；
+    - 向后承接：大纲把同一事实也排给了后续镜头（later_planned_covers），留给后面拍。
+    """
+    atoms = _atomize_claim(covers)
+    if not atoms:
+        return []
+
+    shot_text = (
+        (shot.action_desc or "")
+        + (shot.narration or "")
+        + "".join(d.line for d in shot.dialogues)
+    )
+    realized_text = shot_text + (prior_text or "")
+    later = later_planned_covers or ""
+    missing = [
+        atom for atom in atoms
+        if _claim_clearly_absent(atom, realized_text)
+        and not (later and not _claim_clearly_absent(atom, later))
+    ]
+    if not missing:
+        return []
+
+    shown = "；".join(missing[:KEY_CONTENT_MAX_REPORT])
+    extra = (f"（另有 {len(missing) - KEY_CONTENT_MAX_REPORT} 条从略）"
+             if len(missing) > KEY_CONTENT_MAX_REPORT else "")
+    return [
+        f"第 {shot_no} 镜未落实本镜大纲 covers：{shown}{extra}；"
+        "请把这些事实或台词明确写进本镜 action_desc、narration 或 dialogues，不能只停留在大纲里"
+    ]
+
+
 def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeScreenplay,
-                                target_duration_s: int) -> list[str]:
+                                target_duration_s: int, *,
+                                bible: Bible | None = None) -> list[str]:
     """校验分镜大纲：镜头数在范围内、shot_no 连续、每镜有推进、相邻镜不停留在同一节拍，
-    且全集必保留关键台词/剧情点都被分配到某一镜（防止规划阶段就把剧情铺一半、后段漏戏）。"""
+    且全集必保留关键台词/剧情点都被分配到某一镜（防止规划阶段就把剧情铺一半、后段漏戏）。
+
+    方案 A：新增 covers 可拍性预检——某镜 covers 若依赖角色圣经外角色开口（被X宣告），或同时要求
+    角色开口+人群声（两类声轨叠加必超单镜口播上限），直接在大纲阶段拦下并要求拆成相邻镜头。
+    避免逐镜阶段陷入'删角色→covers 落实不了 / 保留角色→characters 校验失败'的死循环（镜03 根因）。
+    bible 为空时跳过角色一致性校验（务实优先，旧数据放行）。
+    """
     errors: list[str] = []
     shots = outline.shots
     min_shots, max_shots = storyboard_shot_count_range(target_duration_s)
@@ -717,9 +1056,24 @@ def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeS
     actual = [s.shot_no for s in shots]
     if actual != list(range(1, len(shots) + 1)):
         errors.append(f"大纲 shot_no 必须为连续递增 1..{len(shots)}，当前为 {actual}")
+    bible_names = {c.name for c in bible.characters} if bible else set()
     for i, s in enumerate(shots):
         if len((s.beat or "").strip()) < 6:
             errors.append(f"大纲第 {i + 1} 镜 beat 过短或缺失；请用一句话写清本镜推进的剧情（谁做了什么/局势如何变化）")
+        # 方案 A：covers 可拍性预检
+        covers = (s.covers or "").strip()
+        if covers:
+            outside = _covers_outside_spoken(covers, bible_names)
+            if outside:
+                errors.append(
+                    f"大纲第 {i + 1} 镜 covers 依赖角色圣经外角色「{'/'.join(outside)}」开口宣告；"
+                    "请把该角色补入角色圣经，或改由圣经角色完成该宣告，或拆给相邻镜头用 narration 转述，"
+                    "不要让逐镜阶段在'删角色→covers 落实不了 / 保留角色→characters 校验失败'之间卡死")
+            if _covers_has_spoken(covers) and _covers_has_crowd(covers):
+                errors.append(
+                    f"大纲第 {i + 1} 镜 covers 同时要求角色开口宣告和人群哄笑议论，两类声轨叠加易超单镜口播上限"
+                    f"（{config.MAX_SPOKEN_CHARS_PER_SHOT} 字/{config.MAX_VIDEO_DURATION_S}s 也念不完）；"
+                    "请拆成相邻 2 镜分担：一镜落实宣告，下一镜落实哄笑议论")
     # 反停留：相邻两镜的 beat 几乎逐字相同 = 停在同一节拍上空转，必须推进到新剧情。
     for i in range(1, len(shots)):
         if _too_similar(shots[i - 1].beat, shots[i].beat):
@@ -756,8 +1110,8 @@ def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeS
 # ---------- C2 基于完整剧本的分镜校验 ----------
 
 def estimate_speech_seconds(shot) -> float:
-    """估算本镜配音（台词 + 旁白）从开场留白到念完所需秒数。口径与 audio.spoken_text 一致：标点也占停顿时间，
-    故按非空白字符计；并计入开场留白 SPEECH_LEAD_IN_S（人声前的动作建立）。返回 0 表示本镜无声轨。"""
+    """估算本镜台词 + 旁白从开场留白到念完所需秒数，用于校验 duration_s 是否够念完（音画同步）。
+    标点也占停顿时间，故按非空白字符计；并计入开场留白 SPEECH_LEAD_IN_S。返回 0 表示本镜无声轨。"""
     parts = [(d.line or "").strip() for d in shot.dialogues]
     narration = (shot.narration or "").strip()
     if narration:
@@ -874,6 +1228,24 @@ def validate_bible(bible: Bible) -> list[str]:
                 errors.append(f"characters[{i}]({c.name}).relationships 指向「{r.to}」不在角色列表中")
     if not 15 <= len(bible.world.visual_style_canonical) <= 60:
         errors.append(f"world.visual_style_canonical 长度 {len(bible.world.visual_style_canonical)} 字，要求 15~60 字")
+    return errors
+
+
+def validate_scene_bible(scenes: list) -> list[str]:
+    """场景圣经业务校验（与 validate_bible 同构）：数量 1~40、name 唯一非空、
+    scene_canonical 长度 30~80 字（足以稳定定场又不冗长）。"""
+    errors: list[str] = []
+    if not 1 <= len(scenes) <= 40:
+        errors.append(f"scenes 数量 {len(scenes)}，要求 1~40 个")
+    names = [(getattr(s, "name", "") or "").strip() for s in scenes]
+    if any(not n for n in names):
+        errors.append("scenes.name 不能为空")
+    if len(names) != len(set(names)):
+        errors.append("scenes.name 存在重复")
+    for i, s in enumerate(scenes):
+        canonical = getattr(s, "scene_canonical", "") or ""
+        if not 30 <= len(canonical) <= 80:
+            errors.append(f"scenes[{i}]({names[i] or '?'}).scene_canonical 长度 {len(canonical)} 字，要求 30~80 字")
     return errors
 
 

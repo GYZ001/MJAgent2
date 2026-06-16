@@ -4,7 +4,6 @@ import { useNav, useProject, usePoll } from '../App'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 
 const CHAR_PAGE_SIZE = 6  // 人物谱每页展示的角色卡数
-const SHOW_PRONUNCIATION_CARD = false  // 词库功能先在前端隐藏
 
 export default function BiblePage() {
   const { projectId, toast } = useNav()
@@ -117,8 +116,6 @@ export default function BiblePage() {
           finally { setBusy(false) }
         }} />
 
-      {SHOW_PRONUNCIATION_CARD && <PronunciationCard projectId={p.id} />}
-
       {bible && (
         <section className="card">
           <h3>世界观
@@ -217,79 +214,6 @@ export default function BiblePage() {
         </section>
       )}
     </>
-  )
-}
-
-interface PronRow { term: string; tts_alias: string; asr_aliases: string; level: string }
-
-function PronunciationCard({ projectId }: { projectId: string }) {
-  const { toast } = useNav()
-  const [rows, setRows] = useState<PronRow[] | null>(null)
-  const [saving, setSaving] = useState(false)
-
-  const load = useCallback(() => {
-    api.get(`/projects/${projectId}/pronunciation`)
-      .then((d: { terms: { term: string; tts_alias: string; asr_aliases: string[]; level: string }[] }) =>
-        setRows(d.terms.map(t => ({ term: t.term, tts_alias: t.tts_alias || '', asr_aliases: (t.asr_aliases || []).join('，'), level: t.level || 'A' }))))
-      .catch((e: Error) => toast(e.message, true))
-  }, [projectId, toast])
-  useEffect(() => { load() }, [load])
-
-  const upd = (i: number, k: keyof PronRow, v: string) =>
-    setRows(rs => (rs ?? []).map((r, j) => j === i ? { ...r, [k]: v } : r))
-  const addRow = () => setRows(rs => [...(rs ?? []), { term: '', tts_alias: '', asr_aliases: '', level: 'A' }])
-  const delRow = (i: number) => setRows(rs => (rs ?? []).filter((_, j) => j !== i))
-
-  const save = async () => {
-    setSaving(true)
-    try {
-      const terms = (rows ?? []).filter(r => r.term.trim()).map(r => ({
-        term: r.term.trim(), tts_alias: r.tts_alias.trim(),
-        asr_aliases: r.asr_aliases.split(/[,，\s]+/).map(s => s.trim()).filter(Boolean), level: r.level,
-      }))
-      const r = await api.put(`/projects/${projectId}/pronunciation`, { terms }) as { saved: number }
-      toast(`正音词库已保存（${r.saved} 条）`); load()
-    } catch (e: unknown) { toast((e as Error).message, true) }
-    finally { setSaving(false) }
-  }
-
-  return (
-    <section className="card">
-      <h3>正音词库 <span className="hint">人名/术语的读音矫正：TTS 别名保证读对，ASR 别字归一回标准词（仅配音开启时生效）</span></h3>
-      <table className="ledger" style={{ fontSize: 13 }}>
-        <thead><tr>
-          <th style={{ width: '22%' }}>标准词（画面显示）</th>
-          <th style={{ width: '22%' }}>TTS 别名（怎么读）</th>
-          <th style={{ width: '34%' }}>ASR 别字（逗号分隔）</th>
-          <th style={{ width: '12%' }}>等级</th>
-          <th style={{ width: '10%' }}></th>
-        </tr></thead>
-        <tbody>
-          {(rows ?? []).map((r, i) => (
-            <tr key={i}>
-              <td><input style={{ width: '100%' }} value={r.term} placeholder="萧炎" onChange={e => upd(i, 'term', e.target.value)} /></td>
-              <td><input style={{ width: '100%' }} value={r.tts_alias} placeholder="肖炎" onChange={e => upd(i, 'tts_alias', e.target.value)} /></td>
-              <td><input style={{ width: '100%' }} value={r.asr_aliases} placeholder="肖炎，小炎" onChange={e => upd(i, 'asr_aliases', e.target.value)} /></td>
-              <td>
-                <select value={r.level} onChange={e => upd(i, 'level', e.target.value)}>
-                  <option value="S">S 必读对</option>
-                  <option value="A">A 重要</option>
-                  <option value="B">B 一般</option>
-                </select>
-              </td>
-              <td><button className="btn small ghost" onClick={() => delRow(i)}>删</button></td>
-            </tr>
-          ))}
-          {rows && !rows.length && (
-            <tr><td colSpan={5} style={{ color: 'var(--ink-faint)', padding: 12 }}>暂无词条。加入人名、功法、宗门、丹药等易读错的专名。</td></tr>
-          )}
-        </tbody>
-      </table>
-      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-        <button className="btn small" onClick={addRow}>+ 加一行</button>
-        <button className="btn small primary" onClick={save} disabled={saving || !rows}>保存词库</button>
-      </div>
-    </section>
   )
 }
 

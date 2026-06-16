@@ -293,9 +293,8 @@ async def _episode_pipeline(pid: str, eid: str, epno: int, sb_sem: asyncio.Semap
             except ValueError as ve:
                 raise _Skip(f"第{epno}集未通过确认校验，跳过（请到分镜台人工修订后重跑）：{str(ve)[:200]}")
 
-        # 4) 视频（参考图模式，任务内生成参考图）→ 5) 配音(可选) → 6) 合成
+        # 4) 视频（参考图模式，任务内生成参考图）→ 5) 合成
         await _ensure_videos(pid, eid, epno)
-        await _ensure_audio(pid, eid, epno)
         await _ensure_concat(pid, eid, epno)
         _log(pid, f"第{epno}集：成片完成 ✅")
     except _Skip as s:
@@ -410,21 +409,6 @@ def _export_episode(pid: str, project_id: str, epno: int, final_path: Path) -> N
         _log(pid, f"第{epno}集：已保存到 {dest}")
     except OSError as e:
         _log(pid, f"第{epno}集：导出失败（{e}）")
-
-
-async def _ensure_audio(pid: str, eid: str, epno: int) -> None:
-    """配音（TTS）+ ASR 校验。总开关关闭时整步跳过，保持无声链路。"""
-    from app import audio as audio_mod
-    if not audio_mod.is_enabled():
-        return
-    _log(pid, f"第{epno}集：生成配音并 ASR 校验")
-    summary = await audio_mod.generate_episode_audio(eid)
-    ok, total, failed = summary.get("ok", 0), summary.get("total", 0), summary.get("failed", 0)
-    if failed:
-        _log(pid, f"第{epno}集：配音 {ok}/{total} 通过，{failed} 镜 ASR 预检未过"
-                  "（已混入最后一版，可在监制房补正音词库后重生该集）")
-    else:
-        _log(pid, f"第{epno}集：配音完成（{ok}/{total} 通过）")
 
 
 async def _ensure_concat(pid: str, eid: str, epno: int) -> None:

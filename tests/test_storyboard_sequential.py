@@ -89,11 +89,13 @@ def test_remaining_seconds_subtracts_completed_durations() -> None:
 
 
 def test_budget_block_pacing_switches_on_remaining() -> None:
-    nearly_full = [_shot(i) for i in range(1, 5)]  # 4 × 10s = 40s used, 剩 10s
-    low = _storyboard_budget_block(50, nearly_full, allow_finish=True)
-    assert "is_final=true" in low and "剩余可分配约 10s" in low
+    nearly_full = [_shot(i) for i in range(1, 14)]  # 13 × 5s = 65s used, 距离 90s 硬上限剩 25s
+    for shot in nearly_full:
+        shot.duration_s = 5
+    low = _storyboard_budget_block(90, nearly_full, allow_finish=True)
+    assert "is_final=true" in low and "距离硬上限剩余 25s" in low
     plenty = _storyboard_budget_block(50, [], allow_finish=False)
-    assert "较充裕" in plenty and "剩余可分配约 50s" in plenty
+    assert "较充裕" in plenty and "距离规划目标剩余 50s" in plenty
 
 
 # ---------- 单镜 QA 的整集级放行 / 收尾分支 ----------
@@ -105,6 +107,30 @@ def test_partial_nonfinal_skips_episode_level_checks() -> None:
     assert not any(e.startswith("镜头数 ") for e in errors)
     assert not any(e.startswith("分镜丢失了剧本标记的") for e in errors)
     assert not any("继续补镜" in e for e in errors)
+
+
+def test_current_outline_covers_are_checked_before_final_shot() -> None:
+    # 本镜大纲声明要落实的内容必须在当前镜正文中出现，不能拖到收尾时才发现漏戏。
+    errors = _validate(
+        _draft(_shot(1), is_final=False),
+        allow_finish=False,
+        must_finish=False,
+        screenplay=_screenplay(),
+    )
+    assert not any("未落实本镜大纲 covers" in e for e in errors)
+
+    errors = _validate_storyboard_shot_draft(
+        _draft(_shot(1), is_final=False),
+        episode=_episode(),
+        bible=_bible(),
+        screenplay=_screenplay(),
+        completed_shots=[],
+        shot_no=1,
+        allow_finish=False,
+        must_finish=False,
+        outline_covers="中年测验员宣读萧炎斗之力三段并定性为低级",
+    )
+    assert any("未落实本镜大纲 covers" in e for e in errors)
 
 
 def test_voluntary_final_with_missing_key_content_asks_to_continue() -> None:

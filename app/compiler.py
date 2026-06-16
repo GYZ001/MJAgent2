@@ -8,8 +8,20 @@ import hashlib
 import re
 
 from app import config
-from app.audio import narration_after_dialogue
 from app.schemas import Bible, Shot
+
+# 全知视角的结尾悬念钩旁白（"可他不知道…/殊不知…/然而…"）念在台词【之后】；
+# 其余旁白（情境画外音、人物内心OS、人群声）都是先给情境、人物再开口反应，必须念在台词【之前】。
+_NARRATION_AFTER_MARKERS = (
+    "可他", "可她", "可这", "可此时", "殊不知", "却不知", "然而", "但他不知", "但她不知",
+    "但谁也", "而此刻", "只是此时", "谁也没想到", "没有人注意到", "没人知道", "此时的他", "此时的她",
+)
+
+
+def narration_after_dialogue(narration: str) -> bool:
+    """该镜旁白是否应排在台词【之后】：仅全知结尾悬念钩旁白（"可他不知道…/殊不知…"）放最后，其余放台词前。"""
+    n = (narration or "").lstrip(" 　")
+    return any(n.startswith(m) for m in _NARRATION_AFTER_MARKERS)
 
 NEGATIVE_SUFFIX = (
     "避免出现：真人实拍，照片写实质感，画面内任何文字/字幕/水印/logo/乱码伪字，多余人物，"

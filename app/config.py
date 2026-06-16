@@ -49,7 +49,7 @@ OPENROUTER_MODEL_TEXT = os.environ.get("OPENROUTER_MODEL_TEXT", "anthropic/claud
 OPENROUTER_MODEL_VLM = os.environ.get("OPENROUTER_MODEL_VLM", "google/gemini-3.5-flash")
 OPENROUTER_TEXT_REASONING_EFFORT = os.environ.get("OPENROUTER_TEXT_REASONING_EFFORT", "high")
 
-# 阿里云百炼（DashScope）：文本 LLM（兼容模式 chat/completions），以及音频 TTS/ASR。
+# 阿里云百炼（DashScope）：文本 LLM（兼容模式 chat/completions）。
 BAILIAN_BASE_URL = os.environ.get("BAILIAN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1").rstrip("/")
 BAILIAN_API_KEY = os.environ.get("BAILIAN_API_KEY") or os.environ.get("DASHSCOPE_API_KEY", "")
 BAILIAN_MODEL_TEXT = os.environ.get("BAILIAN_MODEL_TEXT", "qwen3.7-max")
@@ -59,16 +59,6 @@ BAILIAN_MODEL_VLM = os.environ.get("BAILIAN_MODEL_VLM", "qwen3.7-plus")
 DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1").rstrip("/")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_MODEL_TEXT = os.environ.get("DEEPSEEK_MODEL_TEXT", "deepseek-v4-pro")
-
-# 音频（TTS 配音 + ASR 校验）走百炼/DashScope，独立于文本/VLM 路由，由 settings.audio_enabled 总开关控制。
-# TTS 用 DashScope 原生多模态生成端点（兼容模式无 /audio/speech，已实测 404）；ASR 用兼容模式 omni（base64 输入）。
-BAILIAN_NATIVE_TTS_URL = os.environ.get(
-    "BAILIAN_NATIVE_TTS_URL",
-    "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation")
-BAILIAN_TTS_MODEL = os.environ.get("BAILIAN_TTS_MODEL", "qwen3-tts-flash")
-BAILIAN_TTS_VOICE = os.environ.get("BAILIAN_TTS_VOICE", "Cherry")
-BAILIAN_ASR_MODEL = os.environ.get("BAILIAN_ASR_MODEL", "qwen3-omni-flash")
-TIMEOUT_AUDIO = 90.0
 
 # 超时（秒）——依据 1.0 实测延迟：LLM ~22s、VLM ~57-66s（见 docs/HIAGENT_INTEGRATION.md §2）
 TIMEOUT_CHAT_READ = 300.0
@@ -89,6 +79,8 @@ EPISODE_TARGET_MIN_S = 40
 EPISODE_TARGET_MAX_S = 90   # 放宽上限给模型更大质量保证空间：内容密/高潮集可取更长时长，简单集仍可短
 EPISODE_TARGET_DEFAULT_S = 50
 EPISODE_TARGET_STEP_S = FIXED_VIDEO_DURATION_S
+# 自动分镜最多允许拆到 18 镜；总时长仍由 EPISODE_TARGET_MAX_S 和单镜最短时长共同约束。
+STORYBOARD_MAX_SHOTS = 18
 # 集目标时长合法取值：[MIN, MAX] 内 STEP 的整数倍（当前 40/50/60/70/80/90）。prompt 与校验统一引用，避免各处硬编码漂移。
 EPISODE_TARGET_CHOICES = tuple(range(EPISODE_TARGET_MIN_S, EPISODE_TARGET_MAX_S + 1, EPISODE_TARGET_STEP_S))
 COMPACT_SHOT_MAX_DURATION = FIXED_VIDEO_DURATION_S
@@ -144,14 +136,6 @@ DEFAULT_SETTINGS = {
     "video_reference_consistency_retries": "1",        # 漂移图从锚点 i2i 重生的最大次数；仍漂移则剔除（不喂 Seedance）
     "auto_concurrency": "24",           # 一键全自动：图像/视频 worker 并发槽数（公网网关吞吐强，可调大）
     "auto_storyboard_concurrency": "8", # 一键全自动：同时进行的分镜 LLM 数（各集流水线并行，分镜阶段单独限流）
-    # ---- 音频（TTS 配音 + ASR 校验）总开关与参数；关闭时全流程跳过音频，保持现有无声链路 ----
-    "audio_enabled": "false",           # 总开关：开启后才生成配音并混入成片；关闭=维持现状（无声）
-    "audio_voice": "Cherry",            # 角色台词音色（qwen-tts/qwen3-tts-flash 支持 Cherry/Chelsie/Ethan/Serena 等）
-    "audio_narration_voice": "Ethan",   # 旁白/画外音/内心OS 独立音色，与角色台词区分，避免"主角在念旁白"
-    "audio_max_regen": "2",             # 单镜配音 ASR 预检失败后的最大改写重试次数
-    "asr_cer_s": "0.03",                # S 级（人名/境界/结果）字符错误率上限
-    "asr_cer_a": "0.08",                # A 级（普通对白/旁白）上限
-    "asr_cer_b": "0.18",                # B 级（群嘲/背景）上限
 }
 
 PROJECTS_DIR.mkdir(exist_ok=True)

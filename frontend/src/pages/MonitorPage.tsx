@@ -35,15 +35,9 @@ interface Health {
   bailian_key_configured: boolean
   deepseek_key_configured?: boolean
   models?: Record<ModelKind, ModelSelection>
-  audio_enabled?: boolean
-  audio_key_configured?: boolean
-  audio_tts_model?: string
-  audio_asr_model?: string
-  audio_voice?: string
   keys?: Record<ProviderKey, { configured: boolean; preview: string }>
 }
 
-const AUDIO_VOICES = ['Cherry', 'Chelsie', 'Ethan', 'Serena', 'Dylan', 'Jada']
 interface ModelChoice { label: string; value: string }
 
 const PROVIDERS: { key: ProviderKey; label: string }[] = [
@@ -249,9 +243,6 @@ function humanizeToken(raw: string) {
     failure: '失败',
     attempt: '尝试',
     scene: '关键帧',
-    audio: '音频',
-    tts: '配音',
-    asr: '语音识别',
   }
   return raw.split(/[_\-.]+/).map(part => tokenMap[part] ?? part).join(' / ')
 }
@@ -326,9 +317,6 @@ export default function MonitorPage() {
     try { await api.put('/settings', { [key]: value }); toast('已更新'); refreshSettings(); refreshHealth() }
     catch (e: unknown) { toast((e as Error).message, true) }
   }
-  const audioEnabled = (settings?.audio_enabled ?? (health?.audio_enabled ? 'true' : 'false')) === 'true'
-  const audioVoice = settings?.audio_voice ?? health?.audio_voice ?? 'Cherry'
-
   const selectionFor = (kind: ModelKind) => health?.models?.[kind] ?? fallbackSelection(kind, health)
 
   const providerFor = (kind: ModelKind, sel: ModelSelection) => {
@@ -526,35 +514,6 @@ export default function MonitorPage() {
             保存模型设置
           </button>
         </div>
-      </section>
-
-      <section className="card">
-        <h3>配音 / 音频 <span className="hint">TTS 配音 + ASR 校验（百炼）；关闭则成片无声、全流程自动跳过音频</span></h3>
-        <div style={{ display: 'flex', gap: 16, alignItems: 'flex-end', flexWrap: 'wrap' }}>
-          <label className="model-select-field">
-            <span>总开关</span>
-            <select value={audioEnabled ? 'true' : 'false'} onChange={e => setOne('audio_enabled', e.target.value)}>
-              <option value="false">关闭（无声）</option>
-              <option value="true">开启（生成配音并混入成片）</option>
-            </select>
-          </label>
-          <label className="model-select-field">
-            <span>音色</span>
-            <select value={audioVoice} onChange={e => setOne('audio_voice', e.target.value)}>
-              {AUDIO_VOICES.map(v => <option key={v} value={v}>{v}</option>)}
-              {audioVoice && !AUDIO_VOICES.includes(audioVoice) && <option value={audioVoice}>{audioVoice}</option>}
-            </select>
-          </label>
-          {audioEnabled && (
-            <span className={`stamp ${health?.audio_key_configured ? 'green' : 'red'}`}>
-              {health?.audio_key_configured ? '百炼 Key 已配置' : '未配置 BAILIAN_API_KEY'}
-            </span>
-          )}
-        </div>
-        <p style={{ fontSize: 12.5, color: 'var(--ink-faint)', marginTop: 8 }}>
-          TTS：{health?.audio_tts_model ?? '—'} · ASR：{health?.audio_asr_model ?? '—'}。
-          配音按镜生成、ASR 预检（关键词必须读对）后，在「整集合成」时混入成片。正音词库（人名/术语读音）在每本书的「人物谱」页维护。
-        </p>
       </section>
 
       <section className="card">

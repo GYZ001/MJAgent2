@@ -94,6 +94,81 @@ cd /Users/bytedance/Desktop/漫剧Agent2.0/frontend
 npm run build
 ```
 
+### 6. Windows 环境启动（PowerShell）
+
+`scripts/dev.sh` 是 bash 脚本，Windows 下无法直接使用。以下为在 Windows + PowerShell 下以
+**自动刷新模式**重启前后端的实测步骤与踩坑记录。
+
+#### 6.1 停掉占用端口的旧进程
+
+```powershell
+$ports = 8230, 5230
+foreach ($p in $ports) {
+  $conns = Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue
+  foreach ($c in $conns) {
+    try { Stop-Process -Id $c.OwningProcess -Force -ErrorAction Stop; "Killed pid $($c.OwningProcess) on port $p" }
+    catch { "No process on port $p or kill failed" }
+  }
+}
+```
+
+> 不要用 `lsof`（macOS/Linux 专属），Windows 用 `Get-NetTCPConnection`。
+
+#### 6.2 启动后端（uvicorn --reload）
+
+```powershell
+# uvicorn.exe 通常在用户级 Python 的 Scripts 目录下，按实际路径替换
+& 'C:\Users\<用户名>\AppData\Local\Programs\Python\Python310\Scripts\uvicorn.exe' `
+    app.main:app --host 127.0.0.1 --port 8230 --reload `
+    --reload-dir app `
+    --reload-exclude '__pycache__' --reload-exclude '*.pyc' `
+    --reload-delay 2
+```
+
+后端地址：`http://127.0.0.1:8230`，改动 `app/` 下代码 → 自动热重载。
+
+**踩坑（重要）**：
+
+- **不要让 `--reload` 默认监听整个项目根目录**。uvicorn 默认用 `WatchFiles` 监听 cwd，
+  会把 `tests/`、`__pycache__/`、`.pyc` 等都纳入监视。实测在 Windows 上：
+  - `tests/test_validators.py` 被改动（或 pytest 运行时写入缓存）会触发 reload，
+    但 reloader 在 Windows 下重启子进程时**偶发直接退出（exit code -1）而不拉起新进程**，
+    导致后端静默挂掉、端口不再监听。
+  - `__pycache__` 的 `.pyc` 在导入时生成，会引发**频繁误重载**。
+- **必须**用 `--reload-dir app` 把监视范围缩到 `app/`，并加 `--reload-exclude '__pycache__'`
+  与 `--reload-exclude '*.pyc'` 排除编译缓存。`--reload-delay 2` 进一步抑制抖动。
+- 启动前可先清一遍 `app/` 下的 `__pycache__`：
+  ```powershell
+  Get-ChildItem -Path 'app' -Recurse -Directory -Filter '__pycache__' -ErrorAction SilentlyContinue |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+  ```
+
+#### 6.3 启动前端（vite HMR）
+
+```powershell
+cd frontend
+npx vite --host 127.0.0.1
+```
+
+前端地址：`http://127.0.0.1:5230/`，改动前端代码 → 浏览器 HMR 自动刷新。
+
+> 注意：`npm run dev -- --host 127.0.0.1` 在某些 npm 版本下 `--host` 不会透传给 vite，
+> 会回退到默认 `5173` 端口且不绑 host。直接用 `npx vite --host 127.0.0.1` 最稳，
+> 端口由 `frontend/vite.config.ts` 固定为 `5230`，`/api`、`/media` 反代到后端 `:8230`。
+
+#### 6.4 验证两端都在监听
+
+```powershell
+$ports = 8230, 5230
+foreach ($p in $ports) {
+  $c = Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue
+  if ($c) { "Port $p -> LISTENING (pid $($c.OwningProcess -join ','))" }
+  else     { "Port $p -> NOT listening" }
+}
+```
+
+两端都应输出 `LISTENING`。后端日志若持续出现 `GET /api/... 200 OK` 即说明服务正常。
+
 ## 定妆照：按集反应式生成与漂移重绘（跨集一致性）
 
 定妆照（角色一致性锚点）**不再做"每 20 集全量轮询"**，改为在**分镜阶段按集反应式**维护，

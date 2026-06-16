@@ -22,7 +22,8 @@ from app.validators import (compact_durations_to_budget,
                             normalize_episode_opening_shot, normalize_transition_visuals,
                             storyboard_duration_limit, storyboard_shot_count_range,
                             validate_screenplay, validate_storyboard,
-                            validate_storyboard_preserves_key_content)
+                            validate_storyboard_preserves_key_content,
+                            validate_storyboard_soundtrack)
 
 router = APIRouter(prefix="/api")
 
@@ -32,6 +33,7 @@ FALLBACK_VISUAL_STYLE = "国漫风格，非真人CG渲染，统一电影感光�
 
 _bible_tasks: dict[str, asyncio.Task] = {}
 _refs_tasks: dict[str, asyncio.Task] = {}  # 定妆照生成后台任务，供停止按钮取消
+_scene_refs_tasks: dict[str, asyncio.Task] = {}  # 场景图素材库生成后台任务，供停止按钮取消
 
 
 def _placeholder_bible() -> Bible:
@@ -116,6 +118,53 @@ def _start_refs_generation(project_id: str, only_character: str | None) -> bool:
     _refs_tasks[project_id] = task
     task.add_done_callback(lambda _t, pid=project_id: _refs_tasks.pop(pid, None))
     return True
+
+
+def _scene_refs_task_active(project_id: str) -> bool:
+    task = _scene_refs_tasks.get(project_id)
+    return bool(task and not task.done())
+
+
+def _start_scene_refs_generation(project_id: str, only_scene: str | None) -> bool:
+    """启动场景图素材库生成任务。已有同项目任务在跑则返回 False。"""
+    if _scene_refs_task_active(project_id):
+        return False
+    conn = get_conn()
+    conn.execute(
+        "UPDATE projects SET scene_refs_status='running', scene_refs_error=NULL, scene_refs_target=? WHERE id=?",
+        (only_scene, project_id))
+    conn.commit()
+    task = asyncio.create_task(_scene_refs_task(project_id, only_scene))
+    _scene_refs_tasks[project_id] = task
+    task.add_done_callback(lambda _t, pid=project_id: _scene_refs_tasks.pop(pid, None))
+    return True
+
+
+async def _scene_bible_and_refs(project_id: str) -> None:
+    """场景圣经生成 + 落库 + 触发场景图批量出图（在人物谱定稿后调用，与定妆照并行）。
+    场景圣经是增强项：失败只记录到 scene_refs_error，不影响人物谱/分集主流程。"""
+    from app.stages import generate_scene_bible
+    conn = get_conn()
+    try:
+        p = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
+        if not p or not p["bible_json"]:
+            return
+        bible = Bible.model_validate(json.loads(p["bible_json"]))
+        chapters = rows_to_dicts(conn.execute(
+            "SELECT * FROM chapters WHERE project_id=? ORDER BY idx", (project_id,)).fetchall())
+        scenes = await generate_scene_bible(chapters, bible)
+        # 重读 bible（人物谱可能已被并发流程更新），只覆盖 scenes 字段后回写。
+        p2 = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
+        data = json.loads(p2["bible_json"]) if p2 and p2["bible_json"] else bible.model_dump()
+        data["scenes"] = [s.model_dump() for s in scenes]
+        conn.execute("UPDATE projects SET bible_json=? WHERE id=?",
+                     (json.dumps(data, ensure_ascii=False), project_id))
+        conn.commit()
+        _start_scene_refs_generation(project_id, None)
+    except Exception as exc:  # noqa: BLE001 场景圣经失败不阻断主流程，仅透出状态
+        conn.execute("UPDATE projects SET scene_refs_status='failed', scene_refs_error=? WHERE id=?",
+                     (f"场景圣经生成失败：{exc}"[:800], project_id))
+        conn.commit()
 
 
 def recover_bible_tasks() -> None:
@@ -314,6 +363,28 @@ def _attach_character_portraits(conn, project_id: str, bible: dict) -> None:
         c["portraits"] = by_name.get(c.get("name"), [])
 
 
+def _attach_scene_refs(conn, project_id: str, bible: dict) -> None:
+    """为 bible.scenes 挂上 scene_references 表里的分段场景图（含 QA 分数），按适用集左区间排序。"""
+    rows = rows_to_dicts(conn.execute(
+        "SELECT scene_name, ep_start, ep_end, scene_canonical, image_path, qa_json "
+        "FROM scene_references WHERE project_id=? ORDER BY scene_name, ep_start", (project_id,)).fetchall())
+    by_name: dict[str, list[dict]] = {}
+    for r in rows:
+        qa = None
+        if r["qa_json"]:
+            try:
+                qa = json.loads(r["qa_json"])
+            except (TypeError, ValueError):
+                qa = None
+        by_name.setdefault(r["scene_name"], []).append({
+            "ep_start": r["ep_start"], "ep_end": r["ep_end"],
+            "scene_canonical": r["scene_canonical"], "image_url": _media_url(r["image_path"]),
+            "qa": qa, "qa_overall": (qa or {}).get("overall") if isinstance(qa, dict) else None,
+        })
+    for s in bible.get("scenes", []):
+        s["scene_refs"] = by_name.get(s.get("name"), [])
+
+
 @router.get("/projects/{project_id}")
 def project_detail(project_id: str):
     p = dict(_project_or_404(project_id))
@@ -335,6 +406,17 @@ def project_detail(project_id: str):
                 c["ref_image_url"] = None
             override = (c.get("portrait_prompt_override") or "").strip()
             c["portrait_prompt_effective"] = override or portrait_prompt(style, c.get("appearance_canonical", ""))
+        # 场景图素材库：为每个规范场景挂上落盘图 url + QA + 有效生成词，供「场景图」菜单页展示。
+        from app.scenes import scene_ref_prompt
+        for s in p["bible"].get("scenes", []):
+            spath = s.get("ref_image_path")
+            if spath and os.path.exists(spath):
+                rel_path = Path(spath).relative_to(PROJECTS_DIR).as_posix()
+                s["ref_image_url"] = f"/media/{rel_path}?v={int(os.path.getmtime(spath))}"
+            else:
+                s["ref_image_url"] = None
+            soverride = (s.get("scene_prompt_override") or "").strip()
+            s["scene_prompt_effective"] = soverride or scene_ref_prompt(style, s.get("scene_canonical", ""))
     p["key_timeline"] = json.loads(p["key_timeline"]) if p["key_timeline"] else []
     p["chapters"] = rows_to_dicts(conn.execute(
         "SELECT idx, title, char_count, summary IS NOT NULL AS has_summary, substr(content,1,200) AS preview "
@@ -345,6 +427,7 @@ def project_detail(project_id: str):
     # 把每个角色的定妆照分段（适用集区间 + 图生图谱系）挂到 bible.characters 上，供横向预览。
     if p["bible"]:
         _attach_character_portraits(conn, project_id, p["bible"])
+        _attach_scene_refs(conn, project_id, p["bible"])
     p["episodes"] = rows_to_dicts(conn.execute(
         "SELECT * FROM episodes WHERE project_id=? ORDER BY episode_no", (project_id,)).fetchall())
     for ep in p["episodes"]:
@@ -480,6 +563,14 @@ async def _bible_task(project_id: str, feedback: str = "", *, trigger_full_refs:
         conn.commit()
         if trigger_full_refs:
             _start_refs_generation(project_id, None)
+            # 场景圣经 + 场景图素材库（与定妆照并行）：跨集场景一致性的底稿。增强项，整段失败都不能影响人物谱主流程。
+            try:
+                conn.execute("UPDATE projects SET scene_refs_status='running', scene_refs_error=NULL WHERE id=?",
+                             (project_id,))
+                conn.commit()
+                asyncio.create_task(_scene_bible_and_refs(project_id))
+            except Exception:  # noqa: BLE001 场景库是增强项，触发失败不影响人物谱定稿
+                pass
     except asyncio.TimeoutError:
         conn.execute(
             "UPDATE projects SET bible_status='failed', bible_error=? WHERE id=?",
@@ -549,12 +640,23 @@ def _purge_for_style_change(project_id: str, instance: "Bible") -> dict:
                 pass
             c.ref_image_path = None
             refs_cleared += 1
+    # 画风变更 → 旧画风场景图同样是强画风信号，连带作废（落盘文件 + 分段表），并清空 bible.scenes 的图路径。
+    scene_refs_cleared = 0
+    for sc in getattr(instance, "scenes", None) or []:
+        if sc.ref_image_path:
+            try:
+                Path(sc.ref_image_path).unlink()
+            except OSError:
+                pass
+            sc.ref_image_path = None
+            scene_refs_cleared += 1
     conn = get_conn()
     # 画风变更 → 旧画风的分段定妆照全部作废，重新定妆后由分镜阶段按集反应式重建分段。
     conn.execute("DELETE FROM character_portraits WHERE project_id=?", (project_id,))
-    conn.execute("UPDATE projects SET refs_status='idle' WHERE id=?", (project_id,))
+    conn.execute("DELETE FROM scene_references WHERE project_id=?", (project_id,))
+    conn.execute("UPDATE projects SET refs_status='idle', scene_refs_status='idle' WHERE id=?", (project_id,))
     conn.commit()
-    return {**purged, "refs_cleared": refs_cleared}
+    return {**purged, "refs_cleared": refs_cleared, "scene_refs_cleared": scene_refs_cleared}
 
 
 @router.put("/projects/{project_id}/bible")
@@ -652,6 +754,89 @@ def cancel_refs(project_id: str):
     conn.commit()
     was_running = p["refs_status"] == "running"
     return {"stopped": bool(task) or was_running}
+
+
+# ---------- 场景图素材库（跨集场景一致性） ----------
+# 注：初始批量出图在此（scenes.generate_scene_refs，适用集 1~ 至今）；库外新场景的反应式发现
+# 已挂在分镜阶段（见 scenes.ensure_scenes_for_storyboard），不在此轮询。
+
+
+async def _scene_refs_task(project_id: str, only_scene: str | None):
+    from app.scenes import generate_scene_refs
+    conn = get_conn()
+    try:
+        await generate_scene_refs(project_id, only_scene)
+        conn.execute("UPDATE projects SET scene_refs_status='ready', scene_refs_error=NULL WHERE id=?", (project_id,))
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001
+        conn.execute("UPDATE projects SET scene_refs_status='failed', scene_refs_error=? WHERE id=?",
+                     (str(exc)[:800], project_id))
+        conn.commit()
+
+
+@router.post("/projects/{project_id}/scene-bible")
+async def start_scene_bible(project_id: str):
+    """（重新）生成场景圣经并触发场景图批量出图。人物谱必须先就绪。"""
+    p = _project_or_404(project_id)
+    if not p["bible_json"]:
+        raise HTTPException(409, "请先生成角色圣经")
+    if _scene_refs_task_active(project_id) or p["scene_refs_status"] == "running":
+        raise HTTPException(409, "场景图正在生成中")
+    conn = get_conn()
+    conn.execute("UPDATE projects SET scene_refs_status='running', scene_refs_error=NULL WHERE id=?", (project_id,))
+    conn.commit()
+    asyncio.create_task(_scene_bible_and_refs(project_id))
+    return {"status": "running"}
+
+
+@router.post("/projects/{project_id}/scene-refs")
+async def start_scene_refs(project_id: str, body: dict | None = None):
+    """（重新）生成场景图。需先有场景圣经（bible.scenes 非空）。可带 only 单场景重做。"""
+    p = _project_or_404(project_id)
+    if not p["bible_json"] or not json.loads(p["bible_json"]).get("scenes"):
+        raise HTTPException(409, "还没有场景圣经，请先生成场景清单")
+    if _scene_refs_task_active(project_id) or p["scene_refs_status"] == "running":
+        raise HTTPException(409, "场景图正在生成中")
+    only = (body or {}).get("scene")
+    _start_scene_refs_generation(project_id, only)
+    return {"status": "running"}
+
+
+@router.post("/projects/{project_id}/scene-refs/cancel")
+def cancel_scene_refs(project_id: str):
+    """停止场景图生成。已落盘的场景图保留，状态置回空闲。"""
+    p = _project_or_404(project_id)
+    task = _scene_refs_tasks.pop(project_id, None)
+    if task and not task.done():
+        task.cancel()
+    conn = get_conn()
+    conn.execute(
+        "UPDATE projects SET scene_refs_status='idle', scene_refs_error=NULL, scene_refs_target=NULL WHERE id=?",
+        (project_id,))
+    conn.commit()
+    was_running = p["scene_refs_status"] == "running"
+    return {"stopped": bool(task) or was_running}
+
+
+@router.put("/projects/{project_id}/scenes/{scene_name}/prompt")
+def edit_scene_prompt(project_id: str, scene_name: str, body: dict):
+    """更新单个场景的场景图生成词。传空字符串/null 恢复为默认合成描述。"""
+    p = _project_or_404(project_id)
+    if not p["bible_json"]:
+        raise HTTPException(409, "请先生成角色圣经")
+    prompt_text = (body.get("scene_prompt") or "").strip()
+    if prompt_text and not 10 <= len(prompt_text) <= 400:
+        raise HTTPException(422, f"场景图描述长度 {len(prompt_text)} 字，要求 10~400 字（留空则恢复默认）")
+    bible = json.loads(p["bible_json"])
+    target = next((s for s in bible.get("scenes", []) if s.get("name") == scene_name), None)
+    if target is None:
+        raise HTTPException(404, f"场景不存在：{scene_name}")
+    target["scene_prompt_override"] = prompt_text or None
+    conn = get_conn()
+    conn.execute("UPDATE projects SET bible_json=? WHERE id=?",
+                 (json.dumps(bible, ensure_ascii=False), project_id))
+    conn.commit()
+    return {"saved": True, "reset_to_default": not prompt_text}
 
 
 # ---------- 剧集规划 ----------
@@ -889,10 +1074,10 @@ def _insert_storyboard_shot(conn, episode_id: str, screenplay: EpisodeScreenplay
     shot_id = new_id("shot")
     shot.action_desc = normalize_action_desc(shot.action_desc)
     conn.execute(
-        "INSERT INTO shots(id, episode_id, script_id, shot_no, duration_s, shot_size, camera_move, scene_setting, characters, action_desc, first_frame_desc, last_frame_desc, source_excerpt, narration, dialogues, transition, continuity_from_prev) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO shots(id, episode_id, script_id, shot_no, duration_s, shot_size, camera_move, scene_setting, scene_name, characters, action_desc, first_frame_desc, last_frame_desc, source_excerpt, narration, dialogues, transition, continuity_from_prev) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (shot_id, episode_id, screenplay.id, shot.shot_no, shot.duration_s, shot.shot_size, shot.camera_move,
-         shot.scene_setting, json.dumps(shot.characters, ensure_ascii=False), shot.action_desc,
+         shot.scene_setting, shot.scene_name or None, json.dumps(shot.characters, ensure_ascii=False), shot.action_desc,
          shot.first_frame_desc, shot.last_frame_desc, shot.source_excerpt, shot.narration,
          json.dumps([d.model_dump() for d in shot.dialogues], ensure_ascii=False),
          shot.transition, int(shot.continuity_from_prev)))
@@ -930,6 +1115,16 @@ async def _storyboard_task(episode_id: str):
                 p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
                 bible = _project_bible_or_placeholder(p)
         except Exception:  # noqa: BLE001 定妆照维护是增强项，失败就按原人物谱继续分镜
+            pass
+        # 场景图素材库按集反应式维护（分镜展开前）：剧本里出现、库里没有、够戏份的新场景 → 补入库 + 出图，
+        # 使分镜能命中库内场景、validate_storyboard_scenes 通过。失败不阻断分镜（按现有库继续）。
+        try:
+            from app.scenes import ensure_scenes_for_storyboard
+            sdisc = await ensure_scenes_for_storyboard(ep["project_id"], ep["episode_no"], screenplay, bible)
+            if sdisc.get("added"):
+                p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
+                bible = _project_bible_or_placeholder(p)
+        except Exception:  # noqa: BLE001 场景库维护是增强项，失败就按现有场景库继续分镜
             pass
         source_text = _episode_source_text(conn, ep)
         compact_target = _storyboard_target_for_source(ep_data.get("target_duration_s"), len(source_text))
@@ -983,15 +1178,27 @@ async def _storyboard_task(episode_id: str):
             conn.commit()
             residual = list(getattr(draft, "residual_errors", []) or [])
             if residual:
-                note = (
-                    f"镜{shot.shot_no:02d}已达到重试上限，已作为「需修改镜头」保留在分镜台；"
-                    "请修改该镜或点击「自动压缩时长」后再确认。残余问题："
-                    + "；".join(residual[:8])
+                can_continue = (
+                    bool(draft.is_final)
+                    and len(completed) < max_shots
+                    and len(residual) == 1
+                    and "暂不能收尾" in residual[0]
+                    and "继续补镜" in residual[0]
                 )
-                conn.execute("UPDATE episodes SET status='scripted', script_error=? WHERE id=?",
-                             (note[:800], episode_id))
-                conn.commit()
-                break
+                if can_continue:
+                    # 这类 residual 的意思是"本镜不能当最后一镜"，不是本镜结构坏了；
+                    # 保留它作为过渡镜，继续把缺失关键内容喂给后续镜头。
+                    object.__setattr__(draft, "is_final", False)
+                else:
+                    note = (
+                        f"镜{shot.shot_no:02d}已达到重试上限，已作为「需修改镜头」保留在分镜台；"
+                        + _storyboard_residual_hint(residual)
+                        + "。残余问题：" + "；".join(residual[:8])
+                    )
+                    conn.execute("UPDATE episodes SET status='scripted', script_error=? WHERE id=?",
+                                 (note[:800], episode_id))
+                    conn.commit()
+                    break
             if draft.is_final:
                 conn.execute("UPDATE episodes SET status='scripted', script_error=NULL WHERE id=?", (episode_id,))
                 conn.commit()
@@ -1309,6 +1516,27 @@ def edit_shot(shot_id: str, body: dict):
     return {"ok": True}
 
 
+def _storyboard_residual_hint(residual: list[str]) -> str:
+    """方案 D：按残余错误类型给可操作的修复建议，不再一律推「自动压缩时长」。
+
+    自动压缩时长只压缩 duration_s，解决不了角色圣经缺人、口播字数超限、covers 未落实——
+    但旧提示一律推「自动压缩时长」，对用户形成误导。这里按错误关键词分流到对应修复路径。
+    """
+    text = "；".join(residual)
+    hints: list[str] = []
+    if "口播上限" in text or "念不完" in text:
+        hints.append("请拆成相邻镜头分担台词，或精简人群议论旁白")
+    if "角色圣经中不存在" in text or "圣经角色为" in text:
+        hints.append("请在监制房把该角色补入角色圣经，或改由圣经角色完成该动作")
+    if "未落实本镜大纲 covers" in text or "只停留在大纲" in text:
+        hints.append("请在 action_desc/narration/dialogues 写出该事实，同义改写即可（如\"成绩\"可写成\"测出七段\"、\"追捧\"可写成\"赞叹欢呼\"）")
+    if "总时长" in text and "超出上限" in text:
+        hints.append("可点击「自动压缩时长」压缩冗余长镜")
+    if not hints:
+        hints.append("请修改该镜后重试，或点击「重新生成分镜」")
+    return "；".join(hints)
+
+
 @router.post("/episodes/{episode_id}/rebalance-durations")
 def rebalance_episode_durations(episode_id: str):
     ep = _episode_or_404(episode_id)
@@ -1385,6 +1613,10 @@ def confirm_episode_core(episode_id: str) -> dict:
                  s.last_frame_desc, r["id"]))
     conn.commit()
     errors = validate_storyboard(board, bible, compact_target, enforce_total_duration=False)
+    screenplay = _load_screenplay(ep)
+    if screenplay is not None:
+        errors.extend(validate_storyboard_soundtrack(board, screenplay, compact_target))
+        errors.extend(validate_storyboard_preserves_key_content(board, screenplay))
     if errors:
         raise ValueError(json.dumps(errors, ensure_ascii=False))
     # 预编译全部 prompt，把参数错误拦在花钱之前
@@ -1812,11 +2044,6 @@ def health():
         "bailian_model_text": hiagent.active_model("text", "bailian"),
         "bailian_model_vlm": hiagent.active_model("vlm", "bailian"),
         "deepseek_model_text": hiagent.active_model("text", "deepseek"),
-        "audio_enabled": (get_setting("audio_enabled") or "false") == "true",
-        "audio_key_configured": bool(config.BAILIAN_API_KEY),
-        "audio_tts_model": config.BAILIAN_TTS_MODEL,
-        "audio_asr_model": config.BAILIAN_ASR_MODEL,
-        "audio_voice": get_setting("audio_voice") or config.BAILIAN_TTS_VOICE,
         "models": models,
     }
 
@@ -1841,69 +2068,6 @@ def jobs_overview():
     return {"counts": counts, "recent": recent}
 
 
-# ---------- 正音词库 + 配音（仅在 audio_enabled 开启时进入生成流程） ----------
-
-@router.get("/projects/{project_id}/pronunciation")
-def list_pronunciation(project_id: str):
-    _project_or_404(project_id)
-    rows = rows_to_dicts(get_conn().execute(
-        "SELECT id, term, tts_alias, asr_aliases, level FROM pronunciation WHERE project_id=? ORDER BY id",
-        (project_id,)).fetchall())
-    for r in rows:
-        r["asr_aliases"] = json.loads(r["asr_aliases"] or "[]")
-    return {"terms": rows}
-
-
-@router.put("/projects/{project_id}/pronunciation")
-def save_pronunciation(project_id: str, body: dict):
-    """整表替换本项目正音词库。body.terms=[{term, tts_alias, asr_aliases:[], level}]。"""
-    _project_or_404(project_id)
-    terms = body.get("terms") or []
-    cleaned = []
-    for i, t in enumerate(terms):
-        term = (t.get("term") or "").strip()
-        if not term:
-            continue
-        level = (t.get("level") or "A").upper()
-        if level not in ("S", "A", "B"):
-            raise HTTPException(422, f"第 {i+1} 条 level=「{level}」非法，只能是 S/A/B")
-        aliases = t.get("asr_aliases") or []
-        if isinstance(aliases, str):
-            aliases = [a.strip() for a in re.split(r"[,，\s]+", aliases) if a.strip()]
-        cleaned.append((term, (t.get("tts_alias") or "").strip(),
-                        json.dumps(aliases, ensure_ascii=False), level))
-    conn = get_conn()
-    conn.execute("DELETE FROM pronunciation WHERE project_id=?", (project_id,))
-    conn.executemany(
-        "INSERT INTO pronunciation(project_id, term, tts_alias, asr_aliases, level, created_at) "
-        "VALUES(?,?,?,?,?,?)",
-        [(project_id, term, alias, aj, lv, now()) for term, alias, aj, lv in cleaned])
-    conn.commit()
-    return {"saved": len(cleaned)}
-
-
-@router.post("/episodes/{episode_id}/audio")
-async def generate_episode_audio(episode_id: str):
-    """为本集所有镜头生成配音并做 ASR 预检（需先开启 audio_enabled，且分镜已就绪）。"""
-    _episode_or_404(episode_id)
-    from app import audio as audio_mod
-    if not audio_mod.is_enabled():
-        raise HTTPException(409, "音频功能未开启，请先在监制房打开「配音/音频」开关")
-    if not config.BAILIAN_API_KEY:
-        raise HTTPException(409, "未配置 BAILIAN_API_KEY（百炼），无法生成配音")
-    try:
-        return await audio_mod.generate_episode_audio(episode_id)
-    except ValueError as exc:
-        raise HTTPException(409, str(exc))
-
-
-@router.get("/episodes/{episode_id}/audio")
-def episode_audio_status(episode_id: str):
-    _episode_or_404(episode_id)
-    from app import audio as audio_mod
-    return audio_mod.episode_audio_status(episode_id)
-
-
 @router.get("/settings")
 def get_settings():
     rows = get_conn().execute("SELECT key, value FROM settings").fetchall()
@@ -1923,10 +2087,6 @@ def put_settings(body: dict):
             raise HTTPException(422, f"{skey} 只能是 hiagent 或 openrouter")
         if skey in {"model_video_provider", "model_image_provider"} and sval != "hiagent":
             raise HTTPException(422, "当前视频/图像生成只支持火山 HiAgent")
-        if skey == "audio_enabled" and sval.lower() not in {"true", "false"}:
-            raise HTTPException(422, "audio_enabled 只能是 true 或 false")
-        if skey == "audio_enabled":
-            sval = sval.lower()
         set_setting(skey, sval)
         if skey == "model_route":
             set_setting("model_text_provider", sval)

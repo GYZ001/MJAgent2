@@ -50,6 +50,7 @@ def _load_shot_model(shot_row) -> "object":
     return Shot(
         shot_no=shot_row["shot_no"], duration_s=shot_row["duration_s"], shot_size=shot_row["shot_size"],
         camera_move=shot_row["camera_move"], scene_setting=shot_row["scene_setting"],
+        scene_name=(shot_row["scene_name"] if "scene_name" in shot_row.keys() else "") or "",
         characters=json.loads(shot_row["characters"] or "[]"), action_desc=shot_row["action_desc"],
         first_frame_desc=(shot_row["first_frame_desc"] if "first_frame_desc" in shot_row.keys() else "") or "",
         last_frame_desc=(shot_row["last_frame_desc"] if "last_frame_desc" in shot_row.keys() else "") or "",
@@ -416,7 +417,8 @@ async def _generate_one_scene(prompt: str, ref_inputs: list[str], dest: Path) ->
 async def _generate_keyframe_candidates(*, conn, job, shot, ep, project, bible, kind: str,
                                         char_refs: list[str], anchors: list[str],
                                         comparison_path: str | None,
-                                        comparison_b64: str | None) -> tuple[str | None, float]:
+                                        comparison_b64: str | None,
+                                        scene_refs: list[str] | None = None) -> tuple[str | None, float]:
     """为某个 kind 生成候选关键帧，返回最佳 scene_id 与分数。"""
     from app.compiler import compile_scene_prompt
     from app.stages import review_scene_image
@@ -450,9 +452,11 @@ async def _generate_keyframe_candidates(*, conn, job, shot, ep, project, bible, 
         # 关键：只用角色定妆照锚定“长相/发型/服饰”，【绝不】把首图/上一镜尾图当生成参考图——
         # 图生图会强力复制参考图，导致首尾帧一模一样、并照搬定妆照的站姿。姿态/构图一律以文字描述为准。
         extra = ""
-        refs = list(char_refs)
+        refs = list(char_refs) + list(scene_refs or [])
         if char_refs:
-            extra += "。参考图仅用于锁定人物的长相、发型与服饰，请严格按上述画面描述的姿态、动作、机位与构图作画，不要照搬参考图的站姿或构图"
+            extra += "。人物参考图仅用于锁定人物的长相、发型与服饰，请严格按上述画面描述的姿态、动作、机位与构图作画，不要照搬参考图的站姿或构图"
+        if scene_refs:
+            extra += "。场景参考图用于锁定本场景的环境、陈设、建筑与光线时段，请保持与场景参考图一致的场景外观（同一地点跨镜/跨集统一），但机位与构图仍以上述画面描述为准"
         if kind == KEYFRAME_TAIL:
             extra += "。本帧是本镜【结束】定格：人物姿态/手部/表情/道具必须清楚呈现动作完成后的结果，与本镜首图明显不同，切勿画成与首图相同的画面"
         if i > 0 and prev_issues:
@@ -509,6 +513,12 @@ async def _run_scene_job(job) -> None:
             bible, char_names, int(get_setting("max_ref_images") or 2),
             project_id=ep["project_id"], episode_no=ep["episode_no"])]
         anchors = [c.appearance_canonical for c in bible.characters if c.name in char_names]
+        # 场景库图：锁定本镜场景的环境/陈设/光线，作为关键帧 i2i 的环境锚点（同场景跨镜/跨集复用同一张）。
+        from app.scenes import scene_refs_as_image_inputs
+        scene_name = (shot["scene_name"] if "scene_name" in shot.keys() else "") or ""
+        scene_refs = [u for u, _ in scene_refs_as_image_inputs(
+            bible, [scene_name] if scene_name else [], 1,
+            project_id=ep["project_id"], episode_no=ep["episode_no"])]
 
         requested = None
         raw_kinds = _row_value(job, "scene_kinds")
@@ -521,7 +531,8 @@ async def _run_scene_job(job) -> None:
         if KEYFRAME_HEAD in required:
             head_id, head_score = await _generate_keyframe_candidates(
                 conn=conn, job=job, shot=shot, ep=ep, project=project, bible=bible, kind=KEYFRAME_HEAD,
-                char_refs=char_refs, anchors=anchors, comparison_path=None, comparison_b64=None)
+                char_refs=char_refs, anchors=anchors, comparison_path=None, comparison_b64=None,
+                scene_refs=scene_refs)
             if not head_id:
                 raise ProviderError("首图候选生成/评审失败")
             best[KEYFRAME_HEAD] = (head_id, head_score)
@@ -549,7 +560,8 @@ async def _run_scene_job(job) -> None:
         if KEYFRAME_TAIL in required:
             tail_id, tail_score = await _generate_keyframe_candidates(
                 conn=conn, job=job, shot=shot, ep=ep, project=project, bible=bible, kind=KEYFRAME_TAIL,
-                char_refs=char_refs, anchors=anchors, comparison_path=comparison_path, comparison_b64=comparison_b64)
+                char_refs=char_refs, anchors=anchors, comparison_path=comparison_path, comparison_b64=comparison_b64,
+                scene_refs=scene_refs)
             if not tail_id:
                 raise ProviderError("尾图候选生成/评审失败")
             best[KEYFRAME_TAIL] = (tail_id, tail_score)
@@ -1411,20 +1423,7 @@ def concatenate_episode(episode_id: str) -> dict:
                 concat_in + ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
                              "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(silent_video)],
                 check=True, capture_output=True)
-        # 配音混音：开启音频功能时把整集配音轨混入成片（Seedance 视频本身无声）。
-        # 没有可用配音/未装 ffmpeg 时 build 返回 None → 退回无声成片（合理跳过，非静默吞错）。
-        from app import audio as audio_mod
-        audio_track = (audio_mod.build_episode_audio_track(episode_id, _P(td) / "track.wav")
-                       if audio_mod.is_enabled() else None)
-        if audio_track:
-            subprocess.run(
-                ["ffmpeg", "-y", "-loglevel", "error",
-                 "-i", str(silent_video), "-i", str(audio_track),
-                 "-c:v", "copy", "-c:a", "aac", "-map", "0:v:0", "-map", "1:a:0",
-                 "-shortest", "-movflags", "+faststart", str(final_path)],
-                check=True, capture_output=True)
-        else:
-            shutil.copyfile(str(silent_video), str(final_path))
+        shutil.copyfile(str(silent_video), str(final_path))
 
     total_dur = 0
     try:

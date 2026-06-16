@@ -65,6 +65,21 @@ export const api = {
     fetch(`/api/episodes/${episodeId}/clear-artifacts`, { method: 'POST' }).then(handle),
   clearShotArtifacts: (shotId: string) =>
     fetch(`/api/shots/${shotId}/clear-artifacts`, { method: 'POST' }).then(handle),
+  /* 场景图素材库 */
+  genSceneBible: (projectId: string) =>
+    fetch(`/api/projects/${projectId}/scene-bible`, { method: 'POST' }).then(handle),
+  genSceneRefs: (projectId: string, scene?: string) =>
+    fetch(`/api/projects/${projectId}/scene-refs`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scene }),
+    }).then(handle),
+  cancelSceneRefs: (projectId: string) =>
+    fetch(`/api/projects/${projectId}/scene-refs/cancel`, { method: 'POST' }).then(handle),
+  editScenePrompt: (projectId: string, sceneName: string, scenePrompt: string) =>
+    fetch(`/api/projects/${projectId}/scenes/${encodeURIComponent(sceneName)}/prompt`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scene_prompt: scenePrompt }),
+    }).then(handle),
 }
 
 export interface Dialogue { speaker: string; line: string; emotion: string }
@@ -219,13 +234,38 @@ export interface ChapterContent {
   first_idx: number; last_idx: number; total: number
 }
 
-export interface Bible { characters: Character[]; world: { era: string; genre: string; visual_style_canonical: string } }
+export interface SceneRefSegment {
+  ep_start: number
+  ep_end: number | null
+  scene_canonical?: string | null
+  image_url?: string | null
+  qa?: { overall?: number; issues?: string[] } | null
+  qa_overall?: number | null
+}
+
+export interface Scene {
+  name: string
+  scene_canonical: string
+  location_kind?: string
+  ref_image_path?: string | null
+  ref_image_url?: string | null
+  scene_prompt_override?: string | null
+  scene_prompt_effective?: string
+  scene_refs?: SceneRefSegment[]
+}
+
+export interface Bible {
+  characters: Character[]
+  world: { era: string; genre: string; visual_style_canonical: string }
+  scenes?: Scene[]
+}
 
 export interface Project {
   id: string; name: string; status: string; novel_chars: number
   bible_status: string; bible_error?: string; plan_status: string; plan_error?: string
   bible_version?: number; refs_status?: string; refs_error?: string
   refs_target?: string | null
+  scene_refs_status?: string; scene_refs_error?: string; scene_refs_target?: string | null
   bible?: Bible | null; key_timeline?: string[]
   chapters?: { idx: number; title: string; char_count: number; preview?: string }[]
   episodes?: Episode[]

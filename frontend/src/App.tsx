@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useState } from 'rea
 import { api, Episode, Project } from './api'
 import Studio from './pages/Studio'
 import BiblePage from './pages/BiblePage'
+import ScenesPage from './pages/ScenesPage'
 import EpisodesPage from './pages/EpisodesPage'
 import ScriptPage from './pages/ScriptPage'
 import BoardPage from './pages/BoardPage'
@@ -10,7 +11,7 @@ import CinemaPage from './pages/CinemaPage'
 import MonitorPage from './pages/MonitorPage'
 import ReaderPage from './pages/ReaderPage'
 
-export type View = 'studio' | 'bible' | 'episodes' | 'script' | 'board' | 'wall' | 'cinema' | 'monitor' | 'reader'
+export type View = 'studio' | 'bible' | 'scenes' | 'episodes' | 'script' | 'board' | 'wall' | 'cinema' | 'monitor' | 'reader'
 
 interface Nav {
   view: View
@@ -27,6 +28,7 @@ export const useNav = () => useContext(NavCtx)
 const SECTIONS: { key: View; label: string; icon: string; needProject?: boolean; needEpisode?: boolean }[] = [
   { key: 'studio', label: '书房', icon: '书' },
   { key: 'bible', label: '人物谱', icon: '人', needProject: true },
+  { key: 'scenes', label: '场景图', icon: '景', needProject: true },
   { key: 'episodes', label: '分集', icon: '集', needProject: true },
   { key: 'script', label: '剧本台', icon: '剧', needEpisode: true },
   { key: 'board', label: '分镜台', icon: '镜', needEpisode: true },
@@ -118,6 +120,7 @@ export default function App() {
       <main className="desk">
         {view === 'studio' && <Studio />}
         {view === 'bible' && projectId && <BiblePage key={projectId} />}
+        {view === 'scenes' && projectId && <ScenesPage key={projectId} />}
         {view === 'episodes' && projectId && <EpisodesPage key={projectId} />}
         {view === 'reader' && projectId && <ReaderPage key={projectId} />}
         {view === 'script' && (episodeId ? <ScriptPage key={episodeId} /> : <WorkspaceEmpty label="剧本台" />)}

@@ -418,49 +418,6 @@ async def vlm_check(frames_b64: list[str], expectation_text: str) -> str:
     return _chat_content(data, label="VLM")
 
 
-# ---------- 音频：TTS（DashScope 原生多模态）/ ASR（兼容模式 omni，base64 输入） ----------
-
-async def tts(text: str, *, voice: str | None = None, model: str | None = None) -> bytes:
-    """文本转语音，返回音频字节。走 DashScope 原生 multimodal-generation（返回 audio.url 再下载）。
-    兼容模式无 /audio/speech（实测 404），故用原生端点。"""
-    model = model or config.BAILIAN_TTS_MODEL
-    voice = voice or config.BAILIAN_TTS_VOICE
-    payload = {"model": model, "input": {"text": text, "voice": voice}}
-    timeout = httpx.Timeout(connect=10, read=config.TIMEOUT_AUDIO, write=30, pool=10)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        data = await _post_json(client, config.BAILIAN_NATIVE_TTS_URL, payload,
-                                kind="tts", model=model,
-                                headers=_bailian_headers(), key_name="BAILIAN_API_KEY")
-        audio = ((data.get("output") or {}).get("audio") or {})
-        url = audio.get("url")
-        if not url:
-            b64 = audio.get("data")
-            if b64:
-                return base64.b64decode(b64)
-            raise ProviderError(f"TTS 响应缺少 audio.url/data：{json.dumps(data, ensure_ascii=False)[:300]}")
-        resp = await client.get(url)
-        if resp.status_code != 200:
-            raise ProviderError(f"TTS 音频下载失败 HTTP {resp.status_code}（链接可能已过期）")
-        return resp.content
-
-
-async def asr(audio_bytes: bytes, *, fmt: str = "wav", model: str | None = None) -> str:
-    """语音转文本（识别音频里到底念了什么）。走 DashScope 兼容模式 omni，base64 input_audio。"""
-    model = model or config.BAILIAN_ASR_MODEL
-    b64 = base64.b64encode(audio_bytes).decode("ascii")
-    messages = [{"role": "user", "content": [
-        {"type": "input_audio", "input_audio": {"data": f"data:;base64,{b64}", "format": fmt}},
-        {"type": "text", "text": "请逐字转写这段音频，只输出中文文字，不要标点解释、不要额外内容。"},
-    ]}]
-    payload = {"model": model, "modalities": ["text"], "messages": messages, "temperature": 0}
-    timeout = httpx.Timeout(connect=10, read=config.TIMEOUT_AUDIO, write=60, pool=10)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        data = await _post_json(client, f"{config.BAILIAN_BASE_URL}/chat/completions", payload,
-                                kind="asr", model=model,
-                                headers=_bailian_headers(), key_name="BAILIAN_API_KEY")
-    return _chat_content(data, label="ASR")
-
-
 def encode_image_file(path: str) -> str:
     with open(path, "rb") as f:
         return base64.b64encode(f.read()).decode("ascii")
