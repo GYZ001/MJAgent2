@@ -148,8 +148,8 @@ async def _run(pid: str) -> None:
         await _ensure_bible(pid)
         # 定妆照与分集互不依赖（都只需人物谱），并行推进
         await asyncio.gather(_ensure_refs(pid), _ensure_plan(pid))
-        # 分集 + 初始定妆照就绪后，按 20 集分段刷新定妆照（外观大变则图生图重绘并切分集区间）
-        await _ensure_portraits(pid)
+        # 注：已有角色的外观漂移已改为分镜阶段按集反应式重绘（见 portraits.ensure_cards_for_screenplay），
+        # 不再在这里做"每 20 集全量轮询"。
 
         conn = get_conn()
         eps = rows_to_dicts(conn.execute(
@@ -236,33 +236,6 @@ async def _ensure_refs(pid: str) -> None:
         _log(pid, f"定妆照未全部成功，继续（跨集一致性可能下降）：{p['refs_error']}")
     else:
         _log(pid, "定妆照完成")
-
-
-async def _ensure_portraits(pid: str) -> None:
-    """按 20 集分段刷新定妆照。只有一段（总集数 ≤ 间隔）时初始定妆照已覆盖，直接跳过。
-    失败不阻断出片：缺分段定妆照仍可用初始定妆照生成视频，仅时间维一致性下降。"""
-    conn = get_conn()
-    last = conn.execute("SELECT MAX(episode_no) AS m FROM episodes WHERE project_id=?", (pid,)).fetchone()["m"] or 0
-    if last <= config.PORTRAIT_REFRESH_INTERVAL:
-        return
-    _log(pid, f"按 {config.PORTRAIT_REFRESH_INTERVAL} 集分段刷新定妆照（判断角色外观是否大变）")
-    conn.execute("UPDATE projects SET portraits_status='running', portraits_error=NULL WHERE id=?", (pid,))
-    conn.commit()
-    try:
-        from app.portraits import update_portraits_for_blocks
-        result = await update_portraits_for_blocks(pid)
-        conn.execute("UPDATE projects SET portraits_status='ready', portraits_error=? WHERE id=?",
-                     ("；".join(result.get("errors") or [])[:800] or None, pid))
-        conn.commit()
-        for ch in result.get("changes") or []:
-            _log(pid, f"定妆照：{ch}")
-        if not result.get("changes"):
-            _log(pid, "定妆照：各角色外观无明显变化，沿用初始定妆照")
-    except Exception as exc:  # noqa: BLE001 不阻断出片
-        conn.execute("UPDATE projects SET portraits_status='failed', portraits_error=? WHERE id=?",
-                     (str(exc)[:800], pid))
-        conn.commit()
-        _log(pid, f"定妆照按集刷新失败（不阻断出片，沿用初始定妆照）：{exc}")
 
 
 async def _ensure_plan(pid: str) -> None:

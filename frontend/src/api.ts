@@ -103,6 +103,12 @@ export interface EpisodeScreenplay {
   source_text_range?: string
   logline?: string
   script_format_note?: string
+  dramatic_question?: string
+  protagonist_goal?: string
+  obstacle?: string
+  stakes?: string
+  key_lines?: string[]
+  key_plot_points?: string[]
   scene_outline?: ScriptScene[]
   full_script_text?: string
   character_state_changes?: string[]
@@ -167,6 +173,8 @@ export interface Episode {
   screenplay_status: string; screenplay_error?: string | null; screenplay_beats?: number; screenplay_mode?: string
   screenplay?: EpisodeScreenplay | null
   shots?: Shot[]
+  storyboard_planned_shots?: number | null
+  storyboard_duration_limit_s?: number
 }
 
 export interface MixShot {
@@ -218,7 +226,6 @@ export interface Project {
   bible_status: string; bible_error?: string; plan_status: string; plan_error?: string
   bible_version?: number; refs_status?: string; refs_error?: string
   refs_target?: string | null
-  portraits_status?: string; portraits_error?: string | null
   bible?: Bible | null; key_timeline?: string[]
   chapters?: { idx: number; title: string; char_count: number; preview?: string }[]
   episodes?: Episode[]

@@ -92,7 +92,7 @@ export default function ScriptPage() {
     const needGenerate = !ep.shots?.length || ['planned', 'script_failed'].includes(ep.status)
     if (needGenerate && ep.status !== 'scripting') {
       storyboardTimer.start()
-      await act(() => api.post(`/episodes/${ep.id}/storyboard`), '已进入分镜台，正在按最新剧本拆分分镜')
+      await act(() => api.post(`/episodes/${ep.id}/storyboard`), '已进入分镜台，正在逐镜头生成，QA 通过后陆续展示')
     }
     go('board', projectId, ep.id)
   }
@@ -183,6 +183,22 @@ export default function ScriptPage() {
                     <div className="kv full"><b>标题</b>{script.title || ep.title}</div>
                     <div className="kv full"><b>本集一句话梗概</b>{script.logline || ep.synopsis}</div>
                     {!!script.script_format_note && <div className="kv full"><b>稿件格式</b>{script.script_format_note}</div>}
+                    {!!script.dramatic_question && <div className="kv full"><b>本集戏剧问题</b>{script.dramatic_question}</div>}
+                    {(!!script.protagonist_goal || !!script.obstacle || !!script.stakes) && (
+                      <div className="kv full"><b>目标 / 阻力 / 代价</b>
+                        {[script.protagonist_goal, script.obstacle, script.stakes].filter(Boolean).join(' ｜ ')}
+                      </div>
+                    )}
+                    {!!script.key_lines?.length && (
+                      <div className="kv full"><b>必保留关键台词</b>
+                        <ul className="key-list">{script.key_lines.map((l, i) => <li key={i}>{l}</li>)}</ul>
+                      </div>
+                    )}
+                    {!!script.key_plot_points?.length && (
+                      <div className="kv full"><b>必保留关键剧情点</b>
+                        <ul className="key-list">{script.key_plot_points.map((p, i) => <li key={i}>{p}</li>)}</ul>
+                      </div>
+                    )}
                     <div className="kv full"><b>完整剧本文本</b>
                       <div className="script-manuscript">{script.full_script_text}</div>
                     </div>
@@ -210,6 +226,24 @@ export default function ScriptPage() {
                     <div className="full"><label className="f">稿件格式说明</label>
                       <input type="text" style={{ width: '100%' }} value={draft?.script_format_note ?? ''}
                         onChange={e => updateScript({ script_format_note: e.target.value })} /></div>
+                    <div className="full"><label className="f">本集戏剧问题</label>
+                      <input type="text" style={{ width: '100%' }} value={draft?.dramatic_question ?? ''}
+                        onChange={e => updateScript({ dramatic_question: e.target.value })} /></div>
+                    <div><label className="f">主角目标</label>
+                      <textarea rows={2} value={draft?.protagonist_goal ?? ''}
+                        onChange={e => updateScript({ protagonist_goal: e.target.value })} /></div>
+                    <div><label className="f">阻力（外部+内部）</label>
+                      <textarea rows={2} value={draft?.obstacle ?? ''}
+                        onChange={e => updateScript({ obstacle: e.target.value })} /></div>
+                    <div className="full"><label className="f">失败代价</label>
+                      <textarea rows={2} value={draft?.stakes ?? ''}
+                        onChange={e => updateScript({ stakes: e.target.value })} /></div>
+                    <div className="full"><label className="f">必保留关键台词（每行一条，分镜必须保留）</label>
+                      <textarea rows={4} value={(draft?.key_lines ?? []).join('\n')}
+                        onChange={e => updateScript({ key_lines: splitLines(e.target.value) })} /></div>
+                    <div className="full"><label className="f">必保留关键剧情点（每行一条，分镜必须保留）</label>
+                      <textarea rows={4} value={(draft?.key_plot_points ?? []).join('\n')}
+                        onChange={e => updateScript({ key_plot_points: splitLines(e.target.value) })} /></div>
                     <div className="full"><label className="f">完整剧本文本</label>
                       <textarea rows={18} value={draft?.full_script_text ?? ''}
                         onChange={e => updateScript({ full_script_text: e.target.value })} /></div>

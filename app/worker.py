@@ -90,6 +90,87 @@ def _row_value(row, key: str, default=None):
     return default
 
 
+def _usable_reference_dicts(meta: dict) -> list[dict]:
+    """Return reference images that would be sent to Seedance from stored gallery meta."""
+    refs = meta.get("reference_images") or []
+    return [r for r in refs if r.get("selectedForSeedance") and not r.get("deleted")]
+
+
+def _reference_fingerprint_item(ref: dict) -> str:
+    identity = ref.get("path") or ref.get("url") or ref.get("id") or ""
+    path = ref.get("path")
+    if path:
+        try:
+            p = Path(path)
+            st = p.stat()
+            identity = f"{identity}@{st.st_size}:{int(st.st_mtime_ns)}"
+        except OSError:
+            identity = f"{identity}@missing"
+    return "|".join([
+        str(ref.get("id") or ""),
+        str(ref.get("type") or ""),
+        str(ref.get("source") or ""),
+        identity,
+    ])
+
+
+def _reference_gallery_fingerprint(meta: dict) -> str:
+    """Stable-ish fingerprint for the current usable gallery set.
+
+    The gallery edit API toggles selected/deleted flags inside image_inputs. Those
+    flags change the actual images sent to Seedance, so they must affect reuse.
+    """
+    usable = _usable_reference_dicts(meta)
+    return json.dumps([_reference_fingerprint_item(r) for r in usable], ensure_ascii=False, sort_keys=True)
+
+
+def _load_edited_reference_gallery(conn, shot_row) -> dict | None:
+    """Return the current version gallery only after the user has edited it.
+
+    Unedited historical versions keep the old idem behavior, so a plain click on
+    "generate again" still reuses the existing succeeded version.
+    """
+    version_id = _row_value(shot_row, "adopted_version_id")
+    version = None
+    if version_id:
+        version = conn.execute(
+            "SELECT id, image_inputs FROM shot_versions WHERE id=? AND status='succeeded'",
+            (version_id,),
+        ).fetchone()
+    if not version:
+        version = conn.execute(
+            "SELECT id, image_inputs FROM shot_versions WHERE shot_id=? AND status='succeeded' ORDER BY version_no DESC LIMIT 1",
+            (_row_value(shot_row, "id"),),
+        ).fetchone()
+    if not version:
+        return None
+    try:
+        meta = json.loads(version["image_inputs"] or "{}")
+    except (TypeError, ValueError):
+        return None
+    if not meta.get("reference_gallery_revision"):
+        return None
+    return {
+        "source_version_id": version["id"],
+        "revision": meta.get("reference_gallery_revision"),
+        "reference_images": meta.get("reference_images") or [],
+        "fingerprint": _reference_gallery_fingerprint(meta),
+    }
+
+
+def _append_reference_notes_from_dicts(prompt_text: str, refs: list[dict]) -> str:
+    lines: list[str] = []
+    for idx, ref in enumerate(_usable_reference_dicts({"reference_images": refs}), start=1):
+        label = ref.get("type") or "reference"
+        source = str(ref.get("source") or "unknown").replace("_", " ")
+        chars = f"; related characters: {', '.join(ref.get('relatedCharacterIds') or [])}" if ref.get("relatedCharacterIds") else ""
+        lines.append(f"Reference image {idx}: use as {label}; source: {source}{chars}.")
+    if not lines:
+        return prompt_text
+    note = " Use the provided reference images as follows: " + " ".join(lines)
+    return prompt_text if note in prompt_text else prompt_text + note
+
+
 def required_keyframe_kinds(shot_row) -> list[str]:
     """场景起始镜需要首图+尾图；同场景连续镜只需要尾图。"""
     if int(_row_value(shot_row, "shot_no", 0) or 0) <= 1:
@@ -231,7 +312,16 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
                                   next_first_frame_desc=outgoing_transition["next_first_frame_desc"] if outgoing_transition else None))
     prompt_text = ensure_source_excerpt_in_prompt(prompt_text, shot)
 
+    edited_gallery = None if (reroll or prompt_override or critique) else _load_edited_reference_gallery(conn, shot_row)
+    if edited_gallery:
+        prompt_text = _append_reference_notes_from_dicts(prompt_text, edited_gallery["reference_images"])
+
     key_material = prompt_text + f"|mode:{video_modes.REFERENCE_IMAGE_MODE}|plan:{video_modes.decision_to_dict(decision)}|after:{after_shot_id or ''}"
+    if edited_gallery:
+        key_material += (
+            f"|reference_gallery:{edited_gallery['source_version_id']}"
+            f"@{edited_gallery['revision']}:{edited_gallery['fingerprint']}"
+        )
     if reroll:
         key = make_idem_key(key_material + f"#reroll{time.time()}")
     else:
@@ -254,6 +344,11 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
         "incoming_transition": incoming_transition,
         "outgoing_transition": outgoing_transition,
     }
+    if edited_gallery:
+        image_meta["reference_images"] = edited_gallery["reference_images"]
+        image_meta["reference_gallery_source_version_id"] = edited_gallery["source_version_id"]
+        image_meta["reference_gallery_revision"] = edited_gallery["revision"]
+        image_meta["reference_gallery_fingerprint"] = edited_gallery["fingerprint"]
     conn.execute(
         "INSERT INTO shot_versions(id, shot_id, version_no, prompt_text, idem_key, status, created_at, image_inputs) "
         "VALUES(?,?,?,?,?, 'queued', ?, ?)",
@@ -405,6 +500,9 @@ async def _run_scene_job(job) -> None:
     project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
     try:
         bible = Bible.model_validate(json.loads(project["bible_json"]))
+        # 用本集视图：角色外观锚点/参考图按集取覆盖该集的分段定妆照，与 refs_as_image_inputs 同段同源
+        from app.portraits import bible_for_episode
+        bible = bible_for_episode(ep["project_id"], bible, ep["episode_no"])
         threshold = float(get_setting("scene_qa_threshold") or 0.6)
         char_names = json.loads(shot["characters"] or "[]")
         char_refs = [u for u, _ in refs_as_image_inputs(
@@ -576,6 +674,9 @@ async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dic
 
     project = conn.execute("SELECT * FROM projects WHERE id=?", (job["project_id"],)).fetchone()
     bible = Bible.model_validate(json.loads(project["bible_json"]))
+    # 本集视图：关键帧文字锚点与参考图按集取覆盖该集的分段定妆照（同段同源）
+    from app.portraits import bible_for_episode
+    bible = bible_for_episode(job["project_id"], bible, ep["episode_no"])
     shot_model = _load_shot_model(shot)
     prev_shot = conn.execute("SELECT * FROM shots WHERE id=?", (meta.get("after_shot_id"),)).fetchone() if meta.get("after_shot_id") else None
     # 复用入队时已确定的模式决策，不在生成时再跑一次 LLM 选择：既省每镜一次文本调用，

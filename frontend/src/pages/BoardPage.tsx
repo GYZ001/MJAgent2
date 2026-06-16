@@ -53,7 +53,7 @@ export default function BoardPage() {
           <button className="btn" disabled={busy || ep.status === 'scripting' || ep.screenplay_status !== 'ready'}
             onClick={() => {
               storyboardTimer.start()
-              act(() => api.post(`/episodes/${ep.id}/storyboard`), '分镜生成已开始（按剧本拆分分镜卡）')
+              act(() => api.post(`/episodes/${ep.id}/storyboard`), '分镜生成已开始（先规划大纲，再逐镜填充，QA 通过后陆续展示）')
             }}>
             {ep.shots?.length ? '重新生成分镜' : '生成分镜脚本'}
           </button>
@@ -66,6 +66,18 @@ export default function BoardPage() {
             <button className="btn ghost" disabled={busy}
               onClick={() => act(() => api.post(`/episodes/${ep.id}/storyboard/cancel`), '已取消分镜生成请求，可重新发起')}>
               取消生成
+            </button>
+          )}
+          {!!ep.shots?.length && ep.status !== 'scripting' && (
+            <button className="btn" disabled={busy}
+              onClick={async () => {
+                const r = await act(() => api.post(`/episodes/${ep.id}/rebalance-durations`)) as { total_before: number; total_after: number; target_total: number } | undefined
+                if (r) {
+                  setDurationOverrides({})
+                  toast(`已自动压缩时长：${r.total_before}s → ${r.total_after}s（目标 ${r.target_total}s）`)
+                }
+              }}>
+              自动压缩时长
             </button>
           )}
           {ep.status === 'scripted' && (
@@ -84,14 +96,14 @@ export default function BoardPage() {
           <span style={{ flex: 1 }} />
           <TaskTimer label="分镜" timer={storyboardTimer} />
           <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>
-            共 {ep.shots?.length ?? 0} 镜 · 实际总时长 {totalDur}s / 规划目标 {ep.target_duration_s}s · 已耗 ¥{ep.cost_cny.toFixed(1)}
+            共 {ep.shots?.length ?? 0} 镜 · 实际 {totalDur}s / 目标 {ep.target_duration_s}s / 上限 {ep.storyboard_duration_limit_s ?? 90}s · 已耗 ¥{ep.cost_cny.toFixed(1)}
           </span>
         </div>
         {ep.screenplay_status !== 'ready' && <div className="error-banner">本集还没有可用剧本。请先到剧本台生成/保存完整剧本，再展开分镜。</div>}
-        {ep.status === 'scripting' && <div style={{ marginTop: 10 }}><span className="stamp gold">分镜中</span> <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>正在根据最新剧本拆分固定 10s 分镜卡，并通过校验器自动修复重试……</span></div>}
+        {ep.status === 'scripting' && <div style={{ marginTop: 10 }}><span className="stamp gold">分镜中</span> <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>{ep.storyboard_planned_shots ? `已按大纲规划 ${ep.storyboard_planned_shots} 镜，正在逐镜填充并 QA：已通过 ${ep.shots?.length ?? 0}/${ep.storyboard_planned_shots} 镜，通过后会继续下一镜……` : `正在逐镜头生成并 QA；已通过 ${ep.shots?.length ?? 0} 镜，通过后会继续下一镜……`}</span></div>}
         {ep.script_error && (
           <div className="error-banner">
-            {ep.status === 'script_failed' ? `分镜失败（错误已列明，修改源头或重试）：\n${ep.script_error}` : ep.script_error}
+            {ep.status === 'script_failed' ? `分镜失败（错误已列明，修改源头或重试）：\n${ep.script_error}` : `分镜提示：\n${ep.script_error}`}
           </div>
         )}
       </section>

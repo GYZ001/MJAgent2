@@ -1,7 +1,7 @@
 """全局配置：.env 加载 + 运行参数。禁止在代码中出现任何密钥字面量。
 
 API Key 通过前端「监制房」页面填写，保存到 .env，后续启动自动加载。
-用户只需提供三个 provider 的 Key，其他配置（base URL、模型名等）均有合理默认值。
+用户只需提供各 provider 的 Key，其他配置（base URL、模型名等）均有合理默认值。
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ DATA_DIR = ROOT / "data"
 DB_PATH = DATA_DIR / "manju.db"
 
 # 可通过前端管理的 API Key 列表
-MANAGED_KEYS = ("HIAGENT_API_KEY", "OPENROUTER_API_KEY", "BAILIAN_API_KEY")
+MANAGED_KEYS = ("HIAGENT_API_KEY", "OPENROUTER_API_KEY", "BAILIAN_API_KEY", "DEEPSEEK_API_KEY")
 
 _env_lock = threading.Lock()
 
@@ -55,6 +55,11 @@ BAILIAN_API_KEY = os.environ.get("BAILIAN_API_KEY") or os.environ.get("DASHSCOPE
 BAILIAN_MODEL_TEXT = os.environ.get("BAILIAN_MODEL_TEXT", "qwen3.7-max")
 BAILIAN_MODEL_VLM = os.environ.get("BAILIAN_MODEL_VLM", "qwen3.7-plus")
 
+# DeepSeek：仅作为 Text 模型路由，OpenAI 兼容 chat/completions。
+DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1").rstrip("/")
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+DEEPSEEK_MODEL_TEXT = os.environ.get("DEEPSEEK_MODEL_TEXT", "deepseek-v4-pro")
+
 # 音频（TTS 配音 + ASR 校验）走百炼/DashScope，独立于文本/VLM 路由，由 settings.audio_enabled 总开关控制。
 # TTS 用 DashScope 原生多模态生成端点（兼容模式无 /audio/speech，已实测 404）；ASR 用兼容模式 omni（base64 输入）。
 BAILIAN_NATIVE_TTS_URL = os.environ.get(
@@ -78,12 +83,14 @@ VIDEO_POLL_BUDGET = 15 * 60  # 单任务轮询总预算
 # Seedance 2.0 官方 duration 支持 [4,15]s；产品侧仍用 5s 作为最小镜头时长。
 MIN_VIDEO_DURATION_S = 5
 MAX_VIDEO_DURATION_S = 15  # Seedance 2.0 实测可出 15s；台词较多的镜头需要更长时长才念得完
-FIXED_VIDEO_DURATION_S = 10  # 默认/兜底时长，也作为「每集节拍单元 ≈ 10s」的换算基准（镜头数=目标/10，不随上限变化）
+FIXED_VIDEO_DURATION_S = 10  # 默认/兜底时长，也作为「每集基础节拍单元 ≈ 10s」的换算基准（可因口播压力额外拆镜）
 ALLOWED_DURATIONS = set(range(MIN_VIDEO_DURATION_S, MAX_VIDEO_DURATION_S + 1))
 EPISODE_TARGET_MIN_S = 40
-EPISODE_TARGET_MAX_S = 60
+EPISODE_TARGET_MAX_S = 90   # 放宽上限给模型更大质量保证空间：内容密/高潮集可取更长时长，简单集仍可短
 EPISODE_TARGET_DEFAULT_S = 50
 EPISODE_TARGET_STEP_S = FIXED_VIDEO_DURATION_S
+# 集目标时长合法取值：[MIN, MAX] 内 STEP 的整数倍（当前 40/50/60/70/80/90）。prompt 与校验统一引用，避免各处硬编码漂移。
+EPISODE_TARGET_CHOICES = tuple(range(EPISODE_TARGET_MIN_S, EPISODE_TARGET_MAX_S + 1, EPISODE_TARGET_STEP_S))
 COMPACT_SHOT_MAX_DURATION = FIXED_VIDEO_DURATION_S
 LONG_SHOT_MIN_DURATION = FIXED_VIDEO_DURATION_S
 LONG_SHOT_MIN_CHARS_PER_SECOND = 4
@@ -108,10 +115,6 @@ VIDEO_PRICE_PER_SECOND = 0.8  # CNY，1.0 配置单价
 # Seedream 定妆照（实测：尺寸下限 3,686,400 像素；1440x2560 与视频 9:16 同比例）
 REF_IMAGE_SIZE = "1440x2560"
 IMAGE_PRICE_PER_UNIT = 0.2  # CNY
-
-# 人物谱定妆照按集分段刷新：每满 PORTRAIT_REFRESH_INTERVAL 集判断一次外观是否大变，
-# 大变则图生图重绘并切分适用集区间，否则沿用上一张定妆照（见 app/portraits.py）。
-PORTRAIT_REFRESH_INTERVAL = 20
 
 # 可在 settings 表覆盖的默认值
 DEFAULT_SETTINGS = {
@@ -210,10 +213,11 @@ def save_keys_to_env(keys: dict[str, str]) -> list[str]:
 
 def _reload_keys() -> None:
     """从 os.environ 重新加载 API Key 相关的模块级变量。"""
-    global HIAGENT_API_KEY, OPENROUTER_API_KEY, BAILIAN_API_KEY
+    global HIAGENT_API_KEY, OPENROUTER_API_KEY, BAILIAN_API_KEY, DEEPSEEK_API_KEY
     HIAGENT_API_KEY = os.environ.get("HIAGENT_API_KEY", "")
     OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
     BAILIAN_API_KEY = os.environ.get("BAILIAN_API_KEY") or os.environ.get("DASHSCOPE_API_KEY", "")
+    DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 
 
 def get_key_status() -> dict[str, dict]:
@@ -228,6 +232,8 @@ def get_key_status() -> dict[str, dict]:
             label = "OpenRouter"
         elif provider == "bailian":
             label = "百炼（阿里云）"
+        elif provider == "deepseek":
+            label = "DeepSeek"
         else:
             label = provider
         result[provider] = {

@@ -148,3 +148,100 @@ def test_ensure_cards_for_screenplay_only_handles_unknown_names(monkeypatch) -> 
     # 萧炎 已在人物谱 → 跳过；美杜莎/纳兰嫣然 为未知，各处理一次（美杜莎去重）
     assert {n for n, _ in seen} == {"美杜莎", "纳兰嫣然"}
     assert out["checked"] == 2 and len(out["added"]) == 2
+
+
+def _insert_portrait(conn, pid, name, ep_start, ep_end, appearance, image_path) -> None:
+    conn.execute(
+        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end, appearance, "
+        "prompt, image_path, base_portrait_id, bible_version, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (f"po_{name}_{ep_start}", pid, name, ep_start, ep_end, appearance, "p", image_path, None, 1, 0.0))
+    conn.commit()
+
+
+def test_ensure_cards_for_screenplay_redraws_on_appearance_drift(monkeypatch) -> None:
+    conn = _make_conn()
+    _seed_project(conn, "萧炎一夜白头，玄色劲装染血，左眼覆着一道狰狞刀疤。萧炎冷然出手。" * 3)
+    _patch_settings(monkeypatch, conn)
+    # 已有开区间定妆照（适用集 1~ 至今）
+    _insert_portrait(conn, "p1", "萧炎", 1, None, "黑发少年，玄色劲装，目光坚定，身形修长", "/tmp/xiao_ep1.jpg")
+
+    async def fake_screen(entries, ep_label):
+        assert any(e["name"] == "萧炎" for e in entries) and "萧炎" in entries[0]["fragments"]
+        return {"萧炎": {"new_appearance": "白发青年，玄色染血劲装，左眼狰狞刀疤，目光冷峻", "reason": "白头+刀疤"}}
+
+    async def fake_redraw(project_id, name, style, appearance, *, base_path, ep_start):
+        assert base_path == "/tmp/xiao_ep1.jpg" and ep_start == 21  # 以旧图为底、新段从本集起
+        return (f"/tmp/{name}_ep{ep_start}.jpg", "redraw prompt")
+
+    monkeypatch.setattr(portraits, "screen_appearance_changes", fake_screen)
+    monkeypatch.setattr(portraits, "_redraw_portrait", fake_redraw)
+
+    class _Scene:
+        def __init__(self, chars): self.characters = chars
+
+    class _Screenplay:
+        scene_outline = [_Scene(["萧炎"])]
+        beats: list = []
+
+    bible = Bible.model_validate(json.loads(
+        conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"]))
+    out = asyncio.run(portraits.ensure_cards_for_screenplay("p1", 21, _Screenplay(), bible))
+
+    assert [r["name"] for r in out["redrawn"]] == ["萧炎"]
+    rows = conn.execute(
+        "SELECT ep_start, ep_end, appearance FROM character_portraits WHERE character_name='萧炎' ORDER BY ep_start"
+    ).fetchall()
+    # 旧段右区间关到本集-1，新开区间段从本集起
+    assert (rows[0]["ep_start"], rows[0]["ep_end"]) == (1, 20)
+    assert (rows[1]["ep_start"], rows[1]["ep_end"]) == (21, None)
+    assert "白发" in rows[1]["appearance"]
+    # bible 锚点同步成最新（供人物谱 UI 展示）
+    chars = json.loads(conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"])["characters"]
+    assert "白发" in next(c for c in chars if c["name"] == "萧炎")["appearance_canonical"]
+
+
+def test_no_drift_redraw_when_portrait_starts_at_or_after_this_episode(monkeypatch) -> None:
+    """本集（之后）才登场的定妆照天然是最新，不应再判漂移/重绘。"""
+    conn = _make_conn()
+    _seed_project(conn, "萧炎一夜白头，玄色劲装染血，左眼覆着一道狰狞刀疤。" * 3)
+    _patch_settings(monkeypatch, conn)
+    _insert_portrait(conn, "p1", "萧炎", 21, None, "黑发少年，玄色劲装，目光坚定", "/tmp/xiao_ep21.jpg")
+
+    calls = {"screen": 0}
+
+    async def fake_screen(entries, ep_label):
+        calls["screen"] += 1
+        return {}
+
+    monkeypatch.setattr(portraits, "screen_appearance_changes", fake_screen)
+
+    class _Scene:
+        def __init__(self, chars): self.characters = chars
+
+    class _Screenplay:
+        scene_outline = [_Scene(["萧炎"])]
+        beats: list = []
+
+    bible = Bible.model_validate(json.loads(
+        conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"]))
+    out = asyncio.run(portraits.ensure_cards_for_screenplay("p1", 21, _Screenplay(), bible))
+    assert out["redrawn"] == [] and calls["screen"] == 0  # ep_start>=本集 → 直接跳过，连判定都不调
+
+
+def test_bible_for_episode_picks_segment_anchor(monkeypatch) -> None:
+    conn = _make_conn()
+    _seed_project(conn, "x")
+    _patch_settings(monkeypatch, conn)
+    _insert_portrait(conn, "p1", "萧炎", 1, 20, "早期：黑发少年，玄色劲装，目光坚定", "/tmp/a.jpg")
+    _insert_portrait(conn, "p1", "萧炎", 21, None, "后期：白发青年，染血劲装，左眼刀疤", "/tmp/b.jpg")
+
+    bible = Bible.model_validate(json.loads(
+        conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"]))
+    original = bible.characters[0].appearance_canonical
+
+    v10 = portraits.bible_for_episode("p1", bible, 10)
+    v25 = portraits.bible_for_episode("p1", bible, 25)
+    assert "黑发少年" in v10.characters[0].appearance_canonical
+    assert "白发青年" in v25.characters[0].appearance_canonical
+    # 取本集视图不应改动传入的原 bible
+    assert bible.characters[0].appearance_canonical == original

@@ -46,8 +46,8 @@ def test_bible_task_starts_full_refs_after_success(monkeypatch) -> None:
 
     started: dict[str, object] = {}
 
-    def fake_start_refs(project_id: str, only_character: str | None, *, with_segmentation: bool) -> bool:
-        started["args"] = (project_id, only_character, with_segmentation)
+    def fake_start_refs(project_id: str, only_character: str | None) -> bool:
+        started["args"] = (project_id, only_character)
         return True
 
     monkeypatch.setattr(api, "get_conn", lambda: conn)
@@ -60,4 +60,4 @@ def test_bible_task_starts_full_refs_after_success(monkeypatch) -> None:
     assert row["bible_status"] == "ready"
     assert row["status"] == "bible_ready"
     assert row["bible_version"] == 1
-    assert started["args"] == ("proj_test", None, True)
+    assert started["args"] == ("proj_test", None)

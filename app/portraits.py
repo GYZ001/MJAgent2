@@ -1,13 +1,16 @@
-"""人物定妆照按集分段刷新（跨集一致性增强，PRD §5.4 第 2 层的时间维扩展）。
+"""人物定妆照（跨集一致性增强，PRD §5.4 第 2 层的时间维扩展）。
 
-每满 config.PORTRAIT_REFRESH_INTERVAL 集为一段。对每个角色，从该段对应章节里抽取提及该角色的
-原文片段，交给模型判断外观相比【当前定妆照】是否发生明显视觉变化：
-  - 变化不大 → 沿用当前定妆照（其适用集为开区间，自然向后覆盖），不重绘、不花钱；
-  - 变化很大 → 关闭当前定妆照右区间（= 本段起点-1），并以当前定妆照为底【图生图】重绘新定妆照，
-    左区间 = 本段起点、右区间开放。
+定妆照按"适用集区间"分段存于 character_portraits（ep_start/ep_end，ep_end=NULL 表示开区间=当前最新版）。
+两条反应式产生路径，都挂在【分镜阶段】（ensure_cards_for_screenplay，分镜展开前），按需触发、不做全量轮询：
+  ① 新角色发现：剧本里出现、人物谱里没有、戏份够的角色 → 建卡 + 定妆，适用集从首次出场那集起开放。
+  ② 已有角色按集漂移：剧本里出现、本集之前已有定妆照的角色 → 用【本集源文】判断外观相比当前锚点
+     是否明显变化：
+       - 变化不大 → 沿用当前定妆照（开区间自然向后覆盖），不重绘、不花钱；
+       - 变化很大 → 关闭当前定妆照右区间（= 本集-1），以当前定妆照为底【图生图】重绘新定妆照
+         （左区间=本集、右区间开放），并把 bible 该角色锚点同步成最新（供人物谱 UI 展示）。
 
-定妆照写入 character_portraits 表（ep_start/ep_end/base_portrait_id）。评审墙出视频时按集号选用
-覆盖该集的定妆照（见 app.refs.refs_as_image_inputs / video_modes.character_reference_assets）。
+评审墙/关键帧出图时按集号选用覆盖该集的定妆照与外观锚点：图走 portrait_for_episode，文字锚点走
+bible_for_episode（把 bible 换成"本集视图"），二者同段同源（见 app.refs / app.video_modes / app.worker）。
 """
 from __future__ import annotations
 
@@ -20,7 +23,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from app import config, hiagent
-from app.db import get_conn, get_setting, new_id, now, rows_to_dicts, set_setting
+from app.db import get_conn, get_setting, new_id, now, set_setting
 from app.refs import _safe_name, portrait_prompt
 from app.schemas import Bible, Character, extract_json
 
@@ -28,10 +31,6 @@ FRAGMENT_WINDOW = 220   # 命中角色名前后各取多少字
 FRAGMENT_BUDGET = 4000  # 单角色单段送审片段总字数预算
 APPEARANCE_MIN = 30     # 外观锚点串下限（与 validate_bible 一致）
 APPEARANCE_MAX = 80     # 外观锚点串上限
-
-
-def _processed_through_key(project_id: str) -> str:
-    return f"portrait_block_done:{project_id}"
 
 
 # ---------- 原文片段抽取（纯本地，不调模型） ----------
@@ -65,36 +64,49 @@ def extract_character_fragments(text: str, name: str, *, window: int = FRAGMENT_
     return "\n……\n".join(out)
 
 
-# ---------- 外观变化判定（调模型） ----------
+# ---------- 外观变化判定（调模型，按集一次批量判定） ----------
 
-async def judge_appearance_change(name: str, current_appearance: str, fragments: str,
-                                  ep_range_label: str) -> dict:
-    """问模型：相比当前定妆照外观锚点，这一段原文里该角色外观是否明显变化。
-    返回 {changed: bool, new_appearance: str, reason: str}。"""
-    prompt = f"""任务：判断小说人物「{name}」的【外观】在新一段剧情（{ep_range_label}）里相比既有定妆照是否发生【明显视觉变化】。
+async def screen_appearance_changes(entries: list[dict], ep_label: str) -> dict[str, dict]:
+    """一次调用，批量判断本集里哪些【已有定妆照】角色外观相比各自当前锚点发生【明显视觉变化】。
 
-既有定妆照外观锚点（当前画的样子）：
-{current_appearance or '（无）'}
+    entries: [{"name", "current_appearance", "fragments"}]（fragments 为空者会被忽略）。
+    返回 {name: {"new_appearance", "reason"}}，仅含确实变化、且给出了新锚点的角色。"""
+    entries = [e for e in entries if (e.get("fragments") or "").strip()]
+    if not entries:
+        return {}
+    blocks = []
+    for i, e in enumerate(entries, 1):
+        blocks.append(
+            f"角色{i}「{e['name']}」\n当前定妆照外观锚点：{e.get('current_appearance') or '（无）'}\n"
+            f"本集提及该角色的原文片段：\n{(e.get('fragments') or '')[:FRAGMENT_BUDGET]}")
+    body = "\n\n".join(blocks)
+    prompt = f"""任务：逐个判断下列小说人物在新一段剧情（{ep_label}）里，外观相比各自【既有定妆照】是否发生【明显视觉变化】。
 
-新一段原文中提及「{name}」的片段：
-{fragments or '（本段未明显提及该角色）'}
+{body}
 
 判断口径（只看会改变定妆照画面的外观要素）：
 - 算明显变化：发型/发色大改、换了标志性服装造型、明显变老或变小、增加显著外观标记（疤痕/义眼/纹身/残肢等）、整体形象转变（如落魄→华服、人→异化形态）。
 - 不算明显变化：表情、姿态、临时脏污/受伤、光线、心情、所处场景，以及原文本段没有正面描写其外观时。
-- 没有把握时一律判为未明显变化（changed=false），避免无意义重绘。
+- 没有把握时一律判为未明显变化，避免无意义重绘。
 
-若 changed=true，请给出整合后的【新外观锚点串】new_appearance：40~60 字，沿用既有锚点未变部分，只改真正变化处；保留性别年龄感/发型发色/服装款式与颜色/标志性特征。
+对 changed=true 的角色，给出整合后的【新外观锚点串】new_appearance：40~60 字，沿用既有锚点未变部分，只改真正变化处；保留性别年龄感/发型发色/服装款式与颜色/标志性特征。
 
-只输出一个 JSON 对象：{{"changed": true/false, "new_appearance": "", "reason": "一句话依据"}}"""
-    raw = await hiagent.chat([{"role": "user", "content": prompt}], temperature=0.2, max_tokens=600)
+只输出一个 JSON 对象：{{"changes": [{{"name": "角色名", "changed": true/false, "new_appearance": "", "reason": "一句话依据"}}]}}"""
+    raw = await hiagent.chat([{"role": "user", "content": prompt}], temperature=0.2, max_tokens=1200)
     obj = extract_json(raw)
-    changed = bool(obj.get("changed"))
-    new_appearance = (obj.get("new_appearance") or "").strip()
-    if changed and not new_appearance:
-        changed = False  # 说变了却没给新锚点 → 保守沿用，不重绘
-    return {"changed": changed, "new_appearance": new_appearance,
-            "reason": (obj.get("reason") or "").strip()}
+    valid = {e["name"] for e in entries}
+    out: dict[str, dict] = {}
+    for item in (obj.get("changes") or []):
+        if not isinstance(item, dict):
+            continue
+        name = (item.get("name") or "").strip()
+        if name not in valid or not bool(item.get("changed")):
+            continue
+        new_app = (item.get("new_appearance") or "").strip()
+        if not new_app:
+            continue  # 说变了却没给新锚点 → 保守沿用，不重绘
+        out[name] = {"new_appearance": new_app[:APPEARANCE_MAX], "reason": (item.get("reason") or "").strip()}
+    return out
 
 
 # ---------- 新角色发现（剧本阶段反应式：按需检索原文判断戏份，够分量才建卡） ----------
@@ -265,9 +277,65 @@ async def ensure_character_card(project_id: str, name: str, from_episode_no: int
         return {"status": "added", "name": name, "has_portrait": bool(new_path), "reason": verdict["reason"]}
 
 
+def _episode_source_text(conn, project_id: str, episode_no: int) -> str:
+    """本集对应源章节的正文（按集做漂移判定的依据）。"""
+    ep = conn.execute(
+        "SELECT source_chapters FROM episodes WHERE project_id=? AND episode_no=?",
+        (project_id, episode_no)).fetchone()
+    src = json.loads(ep["source_chapters"] or "[]") if ep and ep["source_chapters"] else []
+    if not src:
+        return ""
+    rows = conn.execute(
+        "SELECT content FROM chapters WHERE project_id=? AND idx>=? AND idx<=? ORDER BY idx",
+        (project_id, min(src), max(src))).fetchall()
+    return "\n".join((r["content"] or "") for r in rows)
+
+
+def _update_bible_appearance(conn, project_id: str, name: str, appearance: str, ref_image_path: str) -> None:
+    """漂移重绘后把 bible 里该角色的外观锚点/参考图同步成最新版（供人物谱 UI 展示）。
+    真正驱动按集渲染的是 character_portraits 分段表 + bible_for_episode 的本集视图，所以这里只是展示用。"""
+    row = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
+    if not row or not row["bible_json"]:
+        return
+    data = json.loads(row["bible_json"])
+    for c in data.get("characters", []):
+        if c.get("name") == name:
+            c["appearance_canonical"] = appearance
+            c["ref_image_path"] = ref_image_path
+            break
+    conn.execute("UPDATE projects SET bible_json=? WHERE id=?", (json.dumps(data, ensure_ascii=False), project_id))
+
+
+async def _refresh_portrait_on_drift(project_id: str, name: str, episode_no: int,
+                                     new_appearance: str, style: str, bible_version: int) -> dict | None:
+    """外观明显变化：关闭当前开区间段（ep_end=本集-1），以旧图【图生图】重绘新开区间段（ep_start=本集），
+    并把 bible 该角色锚点/参考图同步成最新。带 (project,name) 锁、幂等可并发。
+    返回 {ep_start, image_path} 或 None（已被并发处理 / 没有可切分的旧段）。"""
+    lock = await _card_lock(project_id, name)
+    async with lock:
+        conn = get_conn()
+        cur = _open_portrait(conn, project_id, name)
+        if not cur or cur["ep_start"] >= episode_no:
+            return None  # 并发已处理，或本集（之后）才登场的图，无需切分
+        new_path, new_prompt = await _redraw_portrait(
+            project_id, name, style, new_appearance, base_path=cur["image_path"], ep_start=episode_no)
+        conn.execute("UPDATE character_portraits SET ep_end=? WHERE id=?", (episode_no - 1, cur["id"]))
+        conn.execute(
+            "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end, appearance, "
+            "prompt, image_path, base_portrait_id, bible_version, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (new_id("portrait"), project_id, name, episode_no, None, new_appearance,
+             new_prompt, new_path, cur["id"], bible_version, now()))
+        _update_bible_appearance(conn, project_id, name, new_appearance, new_path)
+        conn.commit()
+        return {"ep_start": episode_no, "image_path": new_path}
+
+
 async def ensure_cards_for_screenplay(project_id: str, episode_no: int, screenplay, bible) -> dict:
-    """剧本就绪后：把剧本里出现、人物谱里没有、且戏份够的角色补进人物谱（在分镜展开前调用）。
-    逐个吞错——某个角色发现失败不应阻断分镜。返回 {checked, added:[...]}。"""
+    """剧本就绪后（分镜展开前）反应式维护本集出场角色的定妆照：
+      ① 新角色发现：剧本里出现、人物谱里没有、戏份够的角色 → 建卡 + 定妆；
+      ② 已有角色漂移：剧本里出现、本集之前已有定妆照的角色 → 用本集源文判断外观是否相比当前锚点
+         明显变化，变了就图生图重绘新段并把 bible 锚点同步成最新。
+    逐项吞错——单角色失败不阻断分镜。返回 {checked, added:[...], redrawn:[...], errors:[...]}。"""
     bible_names = {c.name for c in bible.characters}
     names: list[str] = []
     seen: set[str] = set()
@@ -284,6 +352,9 @@ async def ensure_cards_for_screenplay(project_id: str, episode_no: int, screenpl
     for b in getattr(screenplay, "beats", None) or []:
         _collect(getattr(b, "characters", None))
 
+    errors: list[str] = []
+
+    # ① 新角色（人物谱里没有）
     unknown = [n for n in names if n not in bible_names]
     added: list[dict] = []
     for n in unknown:
@@ -293,7 +364,46 @@ async def ensure_cards_for_screenplay(project_id: str, episode_no: int, screenpl
             res = {"status": "error", "name": n, "reason": str(exc)[:200]}
         if res.get("status") == "added":
             added.append(res)
-    return {"checked": len(unknown), "added": added}
+        elif res.get("status") == "error":
+            errors.append(f"{n}：发现失败 {res.get('reason')}")
+
+    # ② 已有角色按集漂移（只判本集之前就已有定妆照的角色；本集新建的天然是最新）
+    conn = get_conn()
+    by_name = {c.name: c for c in bible.characters}
+    src_text = _episode_source_text(conn, project_id, episode_no)
+    entries: list[dict] = []
+    if src_text:
+        for n in (x for x in names if x in bible_names):
+            cur = _open_portrait(conn, project_id, n)
+            if not cur or cur["ep_start"] >= episode_no:
+                continue
+            frags = extract_character_fragments(src_text, n)
+            if not frags:
+                continue  # 本集没正面提到 → 沿用，开区间自然覆盖
+            entries.append({"name": n, "fragments": frags,
+                            "current_appearance": cur["appearance"] or by_name[n].appearance_canonical})
+
+    redrawn: list[dict] = []
+    if entries:
+        proj = conn.execute("SELECT bible_version FROM projects WHERE id=?", (project_id,)).fetchone()
+        bible_version = (proj["bible_version"] if proj else 0) or 0
+        style = bible.world.visual_style_canonical
+        try:
+            verdicts = await screen_appearance_changes(entries, f"第 {episode_no} 集")
+        except Exception as exc:  # noqa: BLE001 判定失败不阻断分镜
+            verdicts = {}
+            errors.append(f"漂移判定失败@第{episode_no}集：{str(exc)[:160]}")
+        for name, v in verdicts.items():
+            try:
+                res = await _refresh_portrait_on_drift(
+                    project_id, name, episode_no, v["new_appearance"], style, bible_version)
+            except Exception as exc:  # noqa: BLE001 单角色重绘失败不阻断分镜
+                errors.append(f"{name}@第{episode_no}集重绘失败：{str(exc)[:160]}")
+                continue
+            if res:
+                redrawn.append({"name": name, "reason": v["reason"], **res})
+
+    return {"checked": len(unknown), "added": added, "redrawn": redrawn, "errors": errors}
 
 
 # ---------- 定妆照落盘 / 登记 ----------
@@ -331,11 +441,6 @@ def register_initial_portrait(conn, project_id: str, name: str, image_path: str,
     conn.commit()
 
 
-def reset_processed_blocks(project_id: str) -> None:
-    """重新全量定妆 / 画风变更后调用：清空"已处理到第几集"，让下次刷新从第二段重新判定。"""
-    set_setting(_processed_through_key(project_id), "0")
-
-
 def _open_portrait(conn, project_id: str, name: str):
     """该角色当前开区间（ep_end IS NULL）的最新定妆照。"""
     return conn.execute(
@@ -355,6 +460,34 @@ def portrait_for_episode(project_id: str, name: str, episode_no: int | None) -> 
     if row and row["image_path"] and Path(row["image_path"]).exists():
         return row["image_path"]
     return None
+
+
+def appearance_for_episode(project_id: str, name: str, episode_no: int | None) -> str | None:
+    """返回覆盖该集的定妆照外观锚点串；未命中返回 None（调用方回退到 bible 初始锚点）。"""
+    if episode_no is None:
+        return None
+    row = get_conn().execute(
+        "SELECT appearance FROM character_portraits "
+        "WHERE project_id=? AND character_name=? AND ep_start<=? AND (ep_end IS NULL OR ep_end>=?) "
+        "ORDER BY ep_start DESC LIMIT 1",
+        (project_id, name, episode_no, episode_no)).fetchone()
+    return row["appearance"] if row and row["appearance"] else None
+
+
+def bible_for_episode(project_id: str, bible: "Bible", episode_no: int | None) -> "Bible":
+    """返回 bible 的【本集视图】：每个角色的 appearance_canonical / ref_image_path 用覆盖该集的分段
+    定妆照覆盖（未命中保留原值）。让关键帧文字锚点与参考图同段同源——同一集永远是同一套外观描述+图。"""
+    if episode_no is None:
+        return bible
+    view = bible.model_copy(deep=True)
+    for c in view.characters:
+        anchor = appearance_for_episode(project_id, c.name, episode_no)
+        if anchor:
+            c.appearance_canonical = anchor
+        img = portrait_for_episode(project_id, c.name, episode_no)
+        if img:
+            c.ref_image_path = img
+    return view
 
 
 def redraw_prompt(style: str, appearance: str) -> str:
@@ -401,87 +534,3 @@ def _append_character_to_bible(conn, project_id: str, char: dict) -> None:
     conn.execute("UPDATE projects SET bible_json=? WHERE id=?",
                  (json.dumps(data, ensure_ascii=False), project_id))
     conn.commit()
-
-
-# ---------- 主流程：按段刷新 ----------
-
-async def update_portraits_for_blocks(project_id: str) -> dict:
-    """按 20 集分段刷新【已有角色】定妆照——只处理外观随剧情明显漂移、需要图生图重绘的情况。
-    新角色发现已下放到剧本阶段（ensure_cards_for_screenplay）。幂等：用 setting 记录已处理到第几集。"""
-    conn = get_conn()
-    project = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
-    if not project or not project["bible_json"]:
-        raise ValueError("项目不存在或还没有角色圣经")
-    bible = Bible.model_validate(json.loads(project["bible_json"]))
-    bible_version = project["bible_version"] or 0
-    style = bible.world.visual_style_canonical
-    eps = rows_to_dicts(conn.execute(
-        "SELECT episode_no, source_chapters FROM episodes WHERE project_id=? ORDER BY episode_no",
-        (project_id,)).fetchall())
-    if not eps:
-        raise ValueError("还没有分集，请先分集后再刷新定妆照")
-    last_ep = eps[-1]["episode_no"]
-    interval = max(int(config.PORTRAIT_REFRESH_INTERVAL), 1)
-
-    ch_text = {r["idx"]: (r["content"] or "")
-               for r in conn.execute("SELECT idx, content FROM chapters WHERE project_id=?", (project_id,)).fetchall()}
-
-    def block_source_text(lo: int, hi: int) -> str:
-        idxs: list[int] = []
-        for e in eps:
-            if lo <= e["episode_no"] <= hi:
-                for i in json.loads(e["source_chapters"] or "[]"):
-                    if i not in idxs:
-                        idxs.append(i)
-        return "\n".join(ch_text.get(i, "") for i in idxs)
-
-    done_key = _processed_through_key(project_id)
-    processed_through = int(get_setting(done_key) or 0)
-
-    changes: list[str] = []
-    errors: list[str] = []
-    # 第一段（1~interval）由初始定妆照覆盖、不判定；从第二段起逐段处理，已处理过的段跳过。
-    block_start = max(interval + 1, processed_through + 1)
-    while block_start <= last_ep:
-        block_end = min(block_start + interval - 1, last_ep)
-        label = f"第 {block_start}~{block_end} 集"
-        src = block_source_text(block_start, block_end)
-        # ① 已有角色：判断外观是否大变（大变才图生图重绘并切分适用集）
-        for c in list(bible.characters):
-            cur = _open_portrait(conn, project_id, c.name)
-            if not cur:
-                continue  # 该角色尚无定妆照（未定妆）→ 跳过
-            fragments = extract_character_fragments(src, c.name)
-            if not fragments:
-                continue  # 本段没提到该角色 → 沿用，开区间自然覆盖
-            try:
-                verdict = await judge_appearance_change(
-                    c.name, cur["appearance"] or c.appearance_canonical, fragments, label)
-            except Exception as exc:  # noqa: BLE001 单角色判定失败不拖垮整段
-                errors.append(f"{c.name}@{label}：判定失败 {exc}")
-                continue
-            if not verdict["changed"]:
-                continue
-            try:
-                new_path, new_prompt = await _redraw_portrait(
-                    project_id, c.name, style, verdict["new_appearance"],
-                    base_path=cur["image_path"], ep_start=block_start)
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"{c.name}@{label}：重绘失败 {exc}")
-                continue
-            # 外观明显变化：关闭当前段右区间，登记图生图重绘的新段。
-            conn.execute("UPDATE character_portraits SET ep_end=? WHERE id=?", (block_start - 1, cur["id"]))
-            conn.execute(
-                "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end, appearance, "
-                "prompt, image_path, base_portrait_id, bible_version, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (new_id("portrait"), project_id, c.name, block_start, None, verdict["new_appearance"],
-                 new_prompt, new_path, cur["id"], bible_version, now()))
-            conn.commit()
-            changes.append(f"{c.name}：{label} 外观明显变化，已图生图重绘（{verdict['reason']}）")
-
-        # 注：新角色发现已移到剧本阶段反应式处理（见 ensure_cards_for_screenplay / ensure_character_card），
-        # 本段只负责"已有角色外观随剧情漂移"的重绘，不再在这里扫描新角色。
-        set_setting(done_key, str(block_end))
-        block_start = block_end + 1
-
-    return {"changes": changes, "errors": errors, "blocks_through": int(get_setting(done_key) or 0)}

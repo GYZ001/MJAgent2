@@ -77,15 +77,21 @@ def _bailian_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {config.BAILIAN_API_KEY}", "Content-Type": "application/json"}
 
 
+def _deepseek_headers() -> dict[str, str]:
+    if not config.DEEPSEEK_API_KEY:
+        raise ProviderError("未配置 DEEPSEEK_API_KEY，请在项目根目录 .env 中填写，或在监制房切回其他文本模型")
+    return {"Authorization": f"Bearer {config.DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
+
+
 def _model_route() -> str:
     return (get_setting("model_route") or "hiagent").strip()
 
 
 def active_provider(kind: str) -> str:
     configured = (get_setting(f"model_{kind}_provider") or "").strip()
-    if configured in {"hiagent", "openrouter"}:
+    if kind == "text" and configured in {"hiagent", "openrouter", "bailian", "deepseek"}:
         return configured
-    if kind in {"text", "vlm"} and configured == "bailian":
+    if kind == "vlm" and configured in {"hiagent", "openrouter", "bailian"}:
         return configured
     if kind in {"text", "vlm"}:
         route = _model_route()
@@ -100,6 +106,10 @@ def _model_setting(key: str, fallback: str) -> str:
 
 def active_model(kind: str, provider: str | None = None) -> str:
     provider = provider or active_provider(kind)
+    if provider == "deepseek":
+        if kind == "text":
+            return _model_setting("deepseek_model_text", config.DEEPSEEK_MODEL_TEXT)
+        return ""
     if provider == "bailian":
         if kind == "text":
             return _model_setting("bailian_model_text", config.BAILIAN_MODEL_TEXT)
@@ -184,21 +194,27 @@ async def _post_json(client: httpx.AsyncClient, url: str, payload: dict, *,
             resp = await client.post(url, json=payload, headers=req_headers)
             latency = int((time.time() - start) * 1000)
             if resp.status_code == 200:
-                log_provider_call(kind, model, "OK", 200, latency)
-                return resp.json()
+                data = resp.json()
+                log_provider_call(kind, model, "OK", 200, latency,
+                                  request_json=payload, response_json=data)
+                return data
             err = _classify_http_error(resp.status_code, resp.text, key_name)
-            log_provider_call(kind, model, "FAILED", resp.status_code, latency, error=str(err))
+            log_provider_call(kind, model, "FAILED", resp.status_code, latency, error=str(err),
+                              request_json=payload,
+                              response_json={"status_code": resp.status_code, "body": resp.text})
             if not err.retryable:
                 raise err
             last_err = err
         except httpx.TimeoutException as exc:
             latency = int((time.time() - start) * 1000)
             last_err = ProviderError(f"调用超时（{latency}ms）：{exc}", retryable=True)
-            log_provider_call(kind, model, "TIMEOUT", None, latency, error=str(exc))
+            log_provider_call(kind, model, "TIMEOUT", None, latency, error=str(exc),
+                              request_json=payload)
         except httpx.HTTPError as exc:
             latency = int((time.time() - start) * 1000)
             last_err = ProviderError(f"网络错误：{exc}", retryable=True)
-            log_provider_call(kind, model, "NETWORK_ERROR", None, latency, error=str(exc))
+            log_provider_call(kind, model, "NETWORK_ERROR", None, latency, error=str(exc),
+                              request_json=payload)
         if attempt < retries:
             await asyncio.sleep(1.5 * (2 ** attempt))
     assert last_err is not None
@@ -233,7 +249,7 @@ async def _post_bailian_chat_with_fallback(client: httpx.AsyncClient, payload: d
 async def chat(messages: list[dict], *, model: str | None = None, temperature: float = 0.7,
                max_tokens: int = 8192) -> str:
     """文本 LLM 对话，返回 message.content（推理模型的 reasoning 一律丢弃）。
-    按设置在火山 HiAgent、OpenRouter、阿里云百炼之间路由（仅文本可走百炼，质检可走 OpenRouter，
+    按设置在火山 HiAgent、OpenRouter、阿里云百炼、DeepSeek 之间路由（DeepSeek 仅文本，
     图像/视频始终走火山）。"""
     timeout = httpx.Timeout(connect=10, read=config.TIMEOUT_CHAT_READ, write=30, pool=10)
     provider = active_provider("text")
@@ -257,6 +273,14 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
         async with httpx.AsyncClient(timeout=timeout) as client:
             data, _ = await _post_bailian_chat_with_fallback(
                 client, payload, fallback_kind="text", log_kind="chat", preferred_model=bailian_model)
+        content = _chat_content(data, label="chat")
+    elif provider == "deepseek":
+        deepseek_model = active_model("text", "deepseek")
+        payload = {"model": deepseek_model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            data = await _post_json(client, f"{config.DEEPSEEK_BASE_URL}/chat/completions", payload,
+                                    kind="chat", model=deepseek_model,
+                                    headers=_deepseek_headers(), key_name="DEEPSEEK_API_KEY")
         content = _chat_content(data, label="chat")
     else:
         model = model or active_model("text", "hiagent")
@@ -298,14 +322,18 @@ async def poll_video_task(task_id: str) -> dict:
     if resp.status_code != 200:
         model = active_model("video", "hiagent")
         err = _classify_http_error(resp.status_code, resp.text)
-        log_provider_call("video_poll", model, "FAILED", resp.status_code, latency, error=str(err))
+        log_provider_call("video_poll", model, "FAILED", resp.status_code, latency, error=str(err),
+                          request_json={"method": "GET", "url": f"{config.HIAGENT_BASE_URL}/contents/generations/tasks/{task_id}"},
+                          response_json={"status_code": resp.status_code, "body": resp.text})
         raise err
     data = resp.json()
     status = data.get("status", "")
     error_obj = data.get("error") or {}
     if status == "failed":
         log_provider_call("video_poll", active_model("video", "hiagent"), "TASK_FAILED", 200, latency,
-                          error=error_obj.get("message", ""))
+                          error=error_obj.get("message", ""),
+                          request_json={"method": "GET", "url": f"{config.HIAGENT_BASE_URL}/contents/generations/tasks/{task_id}"},
+                          response_json=data)
     return {
         "status": status,
         "video_url": (data.get("content") or {}).get("video_url", ""),

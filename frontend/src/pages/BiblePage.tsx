@@ -17,7 +17,6 @@ export default function BiblePage() {
   const [charPage, setCharPage] = useState(0)
   const bibleTimer = useTaskTimer(`project.${projectId}.bible`, p?.bible_status === 'running')
   const refsTimer = useTaskTimer(`project.${projectId}.refs`, p?.refs_status === 'running')
-  const portraitsTimer = useTaskTimer(`project.${projectId}.portraits`, p?.portraits_status === 'running')
 
   if (!p) return <div className="empty">展卷中……</div>
 
@@ -36,7 +35,7 @@ export default function BiblePage() {
   const charPageCount = Math.max(1, Math.ceil(filteredChars.length / CHAR_PAGE_SIZE))
   const curCharPage = Math.min(charPage, charPageCount - 1)
   const pagedChars = filteredChars.slice(curCharPage * CHAR_PAGE_SIZE, curCharPage * CHAR_PAGE_SIZE + CHAR_PAGE_SIZE)
-  const generating = p.bible_status === 'running' || p.refs_status === 'running' || p.portraits_status === 'running'
+  const generating = p.bible_status === 'running' || p.refs_status === 'running'
 
   const startBible = async () => {
     bibleTimer.start()
@@ -92,15 +91,13 @@ export default function BiblePage() {
           )}
           {p.bible_status === 'running' && <span className="stamp gold">谱写中（约 1~3 分钟）</span>}
           {p.refs_status === 'running' && <span className="stamp gold">定妆中</span>}
-          {p.portraits_status === 'running' && <span className="stamp gold">按 20 集分段刷新中</span>}
           {p.bible && <span className="stamp green">第 {`${p.bible_version ?? ''}`} 稿</span>}
           <TaskTimer label="人物谱" timer={bibleTimer} />
           <TaskTimer label="定妆照" timer={refsTimer} />
-          <TaskTimer label="分段定妆" timer={portraitsTimer} />
         </div>
         {!generating && p.bible && (
           <div className="hint" style={{ marginTop: 10 }}>
-            已启动过后端持续生成人物谱链路；后续按 20 集一段自动判定是否需要更新定妆照，前端不再提供打回重生入口。
+            已启动过后端持续生成人物谱链路；后续在分镜阶段按集自动判定角色外观是否变化、按需重绘定妆照，前端不再提供打回重生入口。
           </div>
         )}
         {p.bible_status === 'failed' && <div className="error-banner">人物谱生成失败（原始错误如下，不做静默兜底）：{'\n'}{p.bible_error}</div>}
@@ -149,14 +146,11 @@ export default function BiblePage() {
           <div style={{ height: 16 }} />
           <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}>
             {p.refs_status === 'running' && <span className="stamp gold">定妆中</span>}
-            {p.portraits_status === 'running' && <span className="stamp gold">按 20 集分段刷新中</span>}
             <span style={{ fontSize: 12.5, color: 'var(--ink-faint)' }}>
-              启动后会先为全部角色生成初始定妆照；随后继续按 20 集分段判断外观是否大变，大变才图生图重绘，相同人物会自适应判断是否需要换新定妆，新登场重要人物会自动补人物卡并生成定妆照（¥0.2/张）
+              启动后会先为全部角色生成初始定妆照；随后在分镜阶段按集判断角色外观是否相比当前定妆照大变，大变才图生图重绘并切分适用集，新登场重要人物会自动补人物卡并生成定妆照（¥0.2/张）
             </span>
           </div>
           {p.refs_status === 'failed' && <div className="error-banner">定妆照生成失败：{'\n'}{p.refs_error}</div>}
-          {p.portraits_status === 'failed' && <div className="error-banner">按集刷新定妆照失败：{'\n'}{p.portraits_error}</div>}
-          {p.portraits_status === 'ready' && p.portraits_error && <div className="error-banner">部分定妆照刷新有问题：{'\n'}{p.portraits_error}</div>}
           <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', margin: '4px 0 12px' }}>
             <input type="text" value={charSearch}
               onChange={e => { setCharSearch(e.target.value); setCharPage(0) }}

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { Fragment, useState } from 'react'
 import { api } from '../api'
 import { useNav, usePoll } from '../App'
 
@@ -6,9 +6,21 @@ interface JobsView {
   counts: Record<string, number>
   recent: { id: string; status: string; error?: string; shot_no?: number; episode_no?: number; episode_title?: string; project_name?: string; updated_at: number }[]
 }
-interface Call { id: number; ts: number; kind: string; model: string; status: string; http_status?: number; latency_ms: number; error?: string }
+interface Call {
+  id: number
+  ts: number
+  kind: string
+  model: string
+  status: string
+  http_status?: number
+  latency_ms: number
+  error?: string
+  meta?: string
+  request_json?: string
+  response_json?: string
+}
 
-type ProviderKey = 'hiagent' | 'openrouter' | 'bailian'
+type ProviderKey = 'hiagent' | 'openrouter' | 'bailian' | 'deepseek'
 type ModelKind = 'text' | 'vlm' | 'video' | 'image'
 interface ModelOption { provider: ProviderKey; model: string; available: boolean }
 interface ModelSelection {
@@ -21,6 +33,7 @@ interface ModelSelection {
 interface Health {
   openrouter_key_configured: boolean
   bailian_key_configured: boolean
+  deepseek_key_configured?: boolean
   models?: Record<ModelKind, ModelSelection>
   audio_enabled?: boolean
   audio_key_configured?: boolean
@@ -37,6 +50,7 @@ const PROVIDERS: { key: ProviderKey; label: string }[] = [
   { key: 'hiagent', label: '火山' },
   { key: 'openrouter', label: 'OpenRouter' },
   { key: 'bailian', label: '百炼' },
+  { key: 'deepseek', label: 'DeepSeek' },
 ]
 
 const MODEL_ROWS: { key: ModelKind; label: string; note: string }[] = [
@@ -71,6 +85,12 @@ const BAILIAN_MODEL_CHOICES: Record<'text' | 'vlm', ModelChoice[]> = {
   ],
 }
 
+const DEEPSEEK_MODEL_CHOICES: Record<'text', ModelChoice[]> = {
+  text: [
+    { label: 'DeepSeek V4 Pro', value: 'deepseek-v4-pro' },
+  ],
+}
+
 const HIAGENT_MODEL_CHOICES: Record<ModelKind, ModelChoice[]> = {
   text: [
     { label: '文本推理模型（默认）', value: 'd2a5n9rnvvm49eucvnvg' },
@@ -101,6 +121,10 @@ function modelSettingKey(kind: ModelKind, provider: ProviderKey) {
     if (kind === 'vlm') return 'bailian_model_vlm'
     return ''
   }
+  if (provider === 'deepseek') {
+    if (kind === 'text') return 'deepseek_model_text'
+    return ''
+  }
   if (provider === 'openrouter') {
     if (kind === 'text') return 'openrouter_model_text'
     if (kind === 'vlm') return 'openrouter_model_vlm'
@@ -120,6 +144,7 @@ function fallbackSelection(kind: ModelKind, health?: Health | null): ModelSelect
       { provider: 'hiagent', model: '', available: true },
       { provider: 'openrouter', model: '', available: kind === 'text' || kind === 'vlm' },
       { provider: 'bailian', model: '', available: kind === 'text' || kind === 'vlm' },
+      { provider: 'deepseek', model: '', available: kind === 'text' },
     ],
   }
 }
@@ -130,6 +155,8 @@ function modelChoices(kind: ModelKind, provider: ProviderKey, currentModel: stri
     choices = [...OPENROUTER_MODEL_CHOICES[kind]]
   } else if (provider === 'bailian' && (kind === 'text' || kind === 'vlm')) {
     choices = [...BAILIAN_MODEL_CHOICES[kind]]
+  } else if (provider === 'deepseek' && kind === 'text') {
+    choices = [...DEEPSEEK_MODEL_CHOICES.text]
   } else if (provider === 'hiagent') {
     choices = [...HIAGENT_MODEL_CHOICES[kind]]
   }
@@ -151,6 +178,98 @@ function selectedModelValue(choices: ModelChoice[], currentModel: string) {
   return choices.some(choice => choice.value === currentModel) ? currentModel : choices[0]?.value ?? ''
 }
 
+function prettyJson(raw?: string | null) {
+  if (!raw) return '暂无记录'
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2)
+  } catch {
+    return raw
+  }
+}
+
+const CALL_KIND_LABELS: Record<string, string> = {
+  chat: '文本模型调用',
+  vlm: '视觉模型调用',
+  vlm_qa: '视频质检',
+  video_create: '创建视频任务',
+  video_poll: '轮询视频结果',
+  image_generate: '生成图片',
+  image_edit: '图生图',
+  scene_image: '关键帧生成',
+  storyboard_prompt: '整集分镜提示词',
+  storyboard_shot_prompt: '逐镜分镜提示词',
+  storyboard_outline_prompt: '分镜大纲提示词',
+  screenplay_prompt: '剧本提示词',
+  plan_prompt: '分集提示词',
+  bible_prompt: '人物谱提示词',
+  references_prompt: '参考图提示词',
+  reference_image_mode_attempt_1_failed: '参考图模式首轮失败',
+  reference_image_mode_retry_success: '参考图模式重试成功',
+  reference_image_mode_retry_failed: '参考图模式重试失败',
+  reference_image_mode_original_failure: '参考图模式最终失败',
+}
+
+const CALL_STATUS_LABELS: Record<string, string> = {
+  OK: '成功',
+  FAILED: '失败',
+  TIMEOUT: '超时',
+  NETWORK_ERROR: '网络错误',
+  TASK_FAILED: '任务失败',
+  QA_ERROR: '质检异常',
+  REPAIR_STALLED: '修复停滞',
+  FALLBACK_LAST_OUTPUT: '采用最后输出',
+  PROMPT_READY: '提示词已生成',
+  REFERENCE_ATTEMPT_FAILED: '参考图首轮失败',
+  REFERENCE_RETRY_SUCCESS: '参考图重试成功',
+  REFERENCE_RETRY_FAILED: '参考图重试失败',
+  REFERENCE_MODE_ORIGINAL_FAILURE: '参考图最终失败',
+}
+
+function humanizeToken(raw: string) {
+  const tokenMap: Record<string, string> = {
+    chat: '文本',
+    vlm: '视觉',
+    qa: '质检',
+    prompt: '提示词',
+    storyboard: '分镜',
+    shot: '镜头',
+    outline: '大纲',
+    screenplay: '剧本',
+    bible: '人物谱',
+    plan: '分集',
+    video: '视频',
+    poll: '轮询',
+    image: '图片',
+    reference: '参考图',
+    mode: '模式',
+    retry: '重试',
+    success: '成功',
+    failed: '失败',
+    original: '原始',
+    failure: '失败',
+    attempt: '尝试',
+    scene: '关键帧',
+    audio: '音频',
+    tts: '配音',
+    asr: '语音识别',
+  }
+  return raw.split(/[_\-.]+/).map(part => tokenMap[part] ?? part).join(' / ')
+}
+
+function callKindLabel(kind: string) {
+  return CALL_KIND_LABELS[kind] ?? humanizeToken(kind)
+}
+
+function callStatusLabel(status: string) {
+  return CALL_STATUS_LABELS[status] ?? humanizeToken(status.toLowerCase())
+}
+
+function callStatusColor(status: string) {
+  if (status === 'OK' || status.endsWith('SUCCESS') || status === 'PROMPT_READY') return 'green'
+  if (status === 'TIMEOUT' || status === 'NETWORK_ERROR' || status.includes('FAILED') || status.includes('ERROR')) return 'red'
+  return 'gold'
+}
+
 interface KeyInfo { configured: boolean; preview: string; label: string; key_name: string }
 type KeyStatus = Record<ProviderKey, KeyInfo>
 
@@ -158,6 +277,7 @@ const KEY_PROVIDERS: { key: ProviderKey; label: string; placeholder: string }[] 
   { key: 'hiagent', label: '火山引擎（HiAgent）', placeholder: '填写火山引擎 API Key' },
   { key: 'openrouter', label: 'OpenRouter', placeholder: 'sk-or-v1-...' },
   { key: 'bailian', label: '百炼（阿里云 DashScope）', placeholder: 'sk-...' },
+  { key: 'deepseek', label: 'DeepSeek', placeholder: 'sk-...' },
 ]
 
 export default function MonitorPage() {
@@ -171,6 +291,7 @@ export default function MonitorPage() {
   const [modelDraft, setModelDraft] = useState<Record<string, string>>({})
   const [keyDraft, setKeyDraft] = useState<Record<string, string>>({})
   const [savingKeys, setSavingKeys] = useState(false)
+  const [expandedCallId, setExpandedCallId] = useState<number | null>(null)
 
   const refreshModelState = () => {
     refreshSettings()
@@ -459,19 +580,54 @@ export default function MonitorPage() {
       <section className="card">
         <h3>对外调用账本 <span className="hint">每一次模型调用都在此留痕</span></h3>
         <table className="ledger">
-          <thead><tr><th>时间</th><th>类型</th><th>模型</th><th>状态</th><th>HTTP</th><th>延迟</th><th>错误</th></tr></thead>
+          <thead><tr><th>时间</th><th>类型</th><th>模型</th><th>状态</th><th>HTTP 状态</th><th>延迟</th><th>错误</th></tr></thead>
           <tbody>
-            {calls?.map(c => (
-              <tr key={c.id}>
-                <td className="mono">{fmtTime(c.ts)}</td>
-                <td>{c.kind}</td>
-                <td className="mono">{c.model}</td>
-                <td><span className={`stamp ${c.status === 'OK' ? 'green' : 'red'}`}>{c.status}</span></td>
-                <td className="mono">{c.http_status ?? '—'}</td>
-                <td className="mono">{(c.latency_ms / 1000).toFixed(1)}s</td>
-                <td style={{ color: 'var(--cinnabar-deep)', fontSize: 12, maxWidth: 360, wordBreak: 'break-all' }}>{c.error ?? ''}</td>
-              </tr>
-            ))}
+            {calls?.map(c => {
+              const expanded = expandedCallId === c.id
+              return (
+                <Fragment key={c.id}>
+                  <tr
+                    className={`ledger-clickable ${expanded ? 'expanded' : ''}`}
+                    tabIndex={0}
+                    onClick={() => setExpandedCallId(expanded ? null : c.id)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        setExpandedCallId(expanded ? null : c.id)
+                      }
+                    }}
+                  >
+                    <td className="mono">{fmtTime(c.ts)}</td>
+                    <td title={c.kind}>{callKindLabel(c.kind)}</td>
+                    <td className="mono">{c.model}</td>
+                    <td><span className={`stamp ${callStatusColor(c.status)}`} title={c.status}>{callStatusLabel(c.status)}</span></td>
+                    <td className="mono">{c.http_status ? `HTTP ${c.http_status}` : '未返回'}</td>
+                    <td className="mono">{(c.latency_ms / 1000).toFixed(1)}s</td>
+                    <td style={{ color: 'var(--cinnabar-deep)', fontSize: 12, maxWidth: 360, wordBreak: 'break-all' }}>{c.error ?? ''}</td>
+                  </tr>
+                  {expanded && (
+                    <tr className="ledger-detail-row">
+                      <td colSpan={7}>
+                        <div className="call-detail">
+                          <div className="call-json-pane">
+                            <b>发送内容</b>
+                            <pre>{prettyJson(c.request_json)}</pre>
+                          </div>
+                          <div className="call-json-pane">
+                            <b>接收内容</b>
+                            <pre>{prettyJson(c.response_json)}</pre>
+                          </div>
+                          <div className="call-json-pane">
+                            <b>元信息</b>
+                            <pre>{prettyJson(c.meta)}</pre>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              )
+            })}
           </tbody>
         </table>
       </section>

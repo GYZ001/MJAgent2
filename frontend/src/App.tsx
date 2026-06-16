@@ -24,15 +24,15 @@ interface Nav {
 const NavCtx = createContext<Nav>(null as unknown as Nav)
 export const useNav = () => useContext(NavCtx)
 
-const SECTIONS: { key: View; label: string; needProject?: boolean; needEpisode?: boolean }[] = [
-  { key: 'studio', label: '书房' },
-  { key: 'bible', label: '人物谱', needProject: true },
-  { key: 'episodes', label: '分集', needProject: true },
-  { key: 'script', label: '剧本台', needEpisode: true },
-  { key: 'board', label: '分镜台', needEpisode: true },
-  { key: 'wall', label: '评审墙', needEpisode: true },
-  { key: 'cinema', label: '成片台', needEpisode: true },
-  { key: 'monitor', label: '监制房' },
+const SECTIONS: { key: View; label: string; icon: string; needProject?: boolean; needEpisode?: boolean }[] = [
+  { key: 'studio', label: '书房', icon: '书' },
+  { key: 'bible', label: '人物谱', icon: '人', needProject: true },
+  { key: 'episodes', label: '分集', icon: '集', needProject: true },
+  { key: 'script', label: '剧本台', icon: '剧', needEpisode: true },
+  { key: 'board', label: '分镜台', icon: '镜', needEpisode: true },
+  { key: 'wall', label: '评审墙', icon: '审', needEpisode: true },
+  { key: 'cinema', label: '成片台', icon: '片', needEpisode: true },
+  { key: 'monitor', label: '监制房', icon: '控' },
 ]
 
 export default function App() {
@@ -41,6 +41,7 @@ export default function App() {
   const [episodeId, setEpisodeId] = useState<string | null>(null)
   const [chapterIdx, setChapterIdx] = useState<number | null>(null)
   const [toastMsg, setToastMsg] = useState<{ text: string; err: boolean } | null>(null)
+  const [spineCollapsed, setSpineCollapsed] = useState(false)
 
   const toast = useCallback((text: string, isErr = false) => {
     setToastMsg({ text, err: isErr })
@@ -87,16 +88,28 @@ export default function App() {
 
   return (
     <NavCtx.Provider value={nav}>
-      <aside className="spine">
-        <div className="seal">漫</div>
+      <aside className={`spine ${spineCollapsed ? 'collapsed' : ''}`}>
+        <div className="spine-top">
+          <button
+            className="seal"
+            type="button"
+            aria-label={spineCollapsed ? '展开菜单栏' : '隐藏菜单栏'}
+            aria-expanded={!spineCollapsed}
+            onClick={() => setSpineCollapsed(v => !v)}
+          >
+            漫
+          </button>
+        </div>
         <nav>
           {visibleSections.map(s => (
             <button
               key={s.key}
               className={`spine-item ${view === s.key ? 'active' : ''}`}
               onClick={() => openSection(s)}
+              title={spineCollapsed ? s.label : undefined}
             >
-              {s.label}
+              <span className="spine-icon" aria-hidden="true">{s.icon}</span>
+              <span className="spine-label">{s.label}</span>
             </button>
           ))}
         </nav>

@@ -129,6 +129,8 @@ CREATE TABLE IF NOT EXISTS provider_calls (
     http_status INTEGER,
     latency_ms INTEGER,
     error TEXT,
+    request_json TEXT,
+    response_json TEXT,
     meta TEXT
 );
 CREATE TABLE IF NOT EXISTS settings (
@@ -221,6 +223,9 @@ MIGRATIONS = (
     "ALTER TABLE projects ADD COLUMN bible_feedback TEXT",  # 持久化重谱打回要求，供进程重启后恢复人物谱任务
     "ALTER TABLE projects ADD COLUMN portraits_status TEXT DEFAULT 'idle'",  # 按集刷新定妆照任务状态
     "ALTER TABLE projects ADD COLUMN portraits_error TEXT",
+    "ALTER TABLE provider_calls ADD COLUMN request_json TEXT",
+    "ALTER TABLE provider_calls ADD COLUMN response_json TEXT",
+    "ALTER TABLE episodes ADD COLUMN storyboard_outline_json TEXT",  # 分镜大纲（先规划后逐镜填充），供前端展示进度 k/N
 )
 
 
@@ -260,12 +265,40 @@ def set_setting(key: str, value: str) -> None:
     conn.commit()
 
 
+def _trim_for_call_log(value: Any, *, max_string: int = 120_000) -> Any:
+    if isinstance(value, dict):
+        return {k: _trim_for_call_log(v, max_string=max_string) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_trim_for_call_log(v, max_string=max_string) for v in value]
+    if isinstance(value, str):
+        if ";base64," in value[:80]:
+            prefix = value.split(";base64,", 1)[0]
+            return f"{prefix};base64,[omitted {len(value)} chars]"
+        if len(value) > max_string:
+            return f"{value[:max_string]}\n...[truncated {len(value) - max_string} chars]"
+    return value
+
+
+def _dump_call_json(value: Any) -> str | None:
+    if value is None:
+        return None
+    try:
+        compact = _trim_for_call_log(value)
+        return json.dumps(compact, ensure_ascii=False)
+    except TypeError:
+        return json.dumps(str(value), ensure_ascii=False)
+
+
 def log_provider_call(kind: str, model: str, status: str, http_status: int | None,
-                      latency_ms: int, error: str | None = None, meta: dict | None = None) -> None:
+                      latency_ms: int, error: str | None = None, meta: dict | None = None,
+                      request_json: Any | None = None, response_json: Any | None = None) -> None:
     conn = get_conn()
     conn.execute(
-        "INSERT INTO provider_calls(ts, kind, model, status, http_status, latency_ms, error, meta) VALUES(?,?,?,?,?,?,?,?)",
+        """INSERT INTO provider_calls(
+            ts, kind, model, status, http_status, latency_ms, error, request_json, response_json, meta
+        ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
         (now(), kind, model, status, http_status, latency_ms,
-         (error or "")[:500] or None, json.dumps(meta or {}, ensure_ascii=False)[:800]),
+         (error or "")[:500] or None, _dump_call_json(request_json), _dump_call_json(response_json),
+         json.dumps(meta or {}, ensure_ascii=False)[:800]),
     )
     conn.commit()

@@ -68,27 +68,6 @@ class EpisodePlan(BaseModel):
     episodes: list[EpisodePlanItem]
 
 
-# 节拍链（C1 阶段）：分镜的戏剧骨架。时间用 day_offset+time_of_day 数值化，校验单调，从机制上禁掉闪回。
-TIME_OF_DAY_ORDER = ("清晨", "上午", "中午", "下午", "傍晚", "夜晚", "深夜")
-BEAT_TYPES = {"钩子", "铺垫", "升级", "反转", "高潮", "尾钩"}
-
-
-class Beat(BaseModel):
-    beat_no: int
-    day_offset: int          # 0=本集第一天，只能向前
-    time_of_day: str         # TIME_OF_DAY_ORDER 之一
-    location: str            # ≤10 字主地点标签
-    characters: list[str] = Field(default_factory=list)
-    event: str               # 谁做了什么（一句话，用圣经准确姓名）
-    turn: str                # 这一拍改变了什么局势/揭示了什么新信息
-    carry: str               # 留给下一拍的钩子/未完成动作
-    beat_type: str           # BEAT_TYPES 之一
-
-
-class BeatChain(BaseModel):
-    beats: list[Beat]
-
-
 # 可拍剧本（分集之后、分镜之前）：把小说叙述改写为每 10s 一拍的场次剧本。
 # 它不写景别/运镜/首尾帧，只锁定人物在场、可见动作、关键台词、局势变化和下一拍钩子。
 class ScreenplayBeat(BaseModel):
@@ -126,6 +105,17 @@ class EpisodeScreenplay(BaseModel):
     source_text_range: str = ""
     logline: str = ""
     script_format_note: str = ""
+    # 单集戏剧契约（对齐调研文档 §3.4/§3.5）：用于把"故事为什么发生、主角要什么、阻力与代价"
+    # 显式锁定，避免压缩成 50s 时把方向性信息一起丢掉。
+    dramatic_question: str = ""      # 本集观众心里追问的那个问题（§3.4）
+    protagonist_goal: str = ""       # 主角本集外在目标（看得见、可完成）（§3.5）
+    obstacle: str = ""               # 外部+内部阻力（§3.5）
+    stakes: str = ""                 # 失败代价/成功代价（§3.5）
+    # 必保留清单（防丢失核心）：剧本台先显式挑出"绝不能丢"的关键内容，
+    # 写进正文后由 key-content 校验确认其在 full_script_text 中真实出现；
+    # 分镜台再据此逐条落实到镜头，避免重要台词/剧情在压缩中被静默丢弃。
+    key_lines: list[str] = Field(default_factory=list)        # 关键台词（金句/决定性对白/情绪爆点），含说话人更佳（§2.9/§3.11）
+    key_plot_points: list[str] = Field(default_factory=list)  # 关键剧情点/反转/信息揭示（§3.6）
     scene_outline: list[ScriptScene] = Field(default_factory=list)
     full_script_text: str = ""
     character_state_changes: list[str] = Field(default_factory=list)
@@ -170,6 +160,23 @@ class Shot(BaseModel):
 class Storyboard(BaseModel):
     episode_no: int
     shots: list[Shot]
+
+
+class StoryboardOutlineShot(BaseModel):
+    """分镜大纲里的一条镜头节拍：只规划"本镜推进什么剧情"，不写执行细节。
+    逐镜填充阶段据此把整集剧情均匀铺满，避免多镜停留在同一情绪/同一句原文。"""
+
+    shot_no: int
+    scene_setting: str = ""   # 时间+地点短标签
+    beat: str = ""            # 本镜推进的剧情（一句话：谁做了什么 / 局势如何变化 / 与上一镜的区别）
+    covers: str = ""          # 本镜落实的必保留关键台词/剧情点（可空）
+
+
+class StoryboardOutline(BaseModel):
+    """整集分镜大纲：一次性把剧本铺成有序的 N 条镜头节拍，先定全局节奏再逐镜填充。"""
+
+    episode_no: int
+    shots: list[StoryboardOutlineShot] = Field(default_factory=list)
 
 
 class QaResult(BaseModel):

@@ -78,9 +78,6 @@ async def generate_refs(project_id: str, only_character: str | None = None) -> N
 
     conn.execute("UPDATE projects SET bible_json=? WHERE id=?", (bible.model_dump_json(), project_id))
     conn.commit()
-    # 全量重新定妆 → 旧的分段刷新进度作废，下次刷新从第二段重新判定。
-    if only_character is None:
-        _portraits.reset_processed_blocks(project_id)
     if errors:
         raise RuntimeError("部分定妆照失败：" + "；".join(errors)[:600])
 
@@ -90,8 +87,8 @@ def refs_as_image_inputs(bible: Bible, character_names: list[str], limit: int,
                          episode_no: int | None = None) -> list[tuple[str, str]]:
     """出场角色定妆照 →(data_url, role) 列表，按出场顺序最多 limit 张。
 
-    传入 project_id+episode_no 时，按集号选用 character_portraits 中覆盖该集的定妆照（人物谱按
-    20 集分段后的时间维一致性）；未命中或未传时回退到 bible 里的初始 ref_image_path。
+    传入 project_id+episode_no 时，按集号选用 character_portraits 中覆盖该集的定妆照（分镜阶段按集
+    反应式重绘形成的分段，时间维一致性）；未命中或未传时回退到 bible 里的初始 ref_image_path。
     """
     out: list[tuple[str, str]] = []
     by_name = {c.name: c for c in bible.characters}
