@@ -18,7 +18,8 @@ from pydantic import BaseModel
 from app import config, hiagent
 from app.db import get_setting, log_provider_call
 from app.schemas import (Bible, CAMERA_MOVES, EMOTIONS, EpisodePlan, EpisodeScreenplay,
-                         SHOT_SIZES, Scene, Shot, Storyboard, StoryboardOutline, TRANSITIONS,
+                         SHOT_SIZES, Scene, Shot, Storyboard, StoryboardOutline,
+                         StoryboardOutlineShot, TRANSITIONS,
                          extract_json, schema_errors)
 from app.validators import (ACTION_DESC_MIN_CHARS, NARRATION_TARGET_CHARS,
                             NARRATION_TARGET_MIN_CHARS,
