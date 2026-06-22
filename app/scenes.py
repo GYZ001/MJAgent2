@@ -17,13 +17,17 @@ import json
 from pathlib import Path
 
 from app import config, hiagent
-from app.db import get_conn, get_setting, new_id, now
+from app.errors import code_ref
+from app.db import get_conn, new_id, now
 from app.refs import _safe_name
 from app.schemas import Bible, Scene, extract_json
 from app.validators import match_scene_name
 
 SCENE_CANONICAL_MIN = 30
 SCENE_CANONICAL_MAX = 80
+
+# 初始场景图只覆盖前 N 章的场景（按钮批量出图的范围）；更靠后才出现的新场景留到分镜阶段反应式补图。
+SCENE_BIBLE_CHAPTER_WINDOW = 20
 
 
 # ---------- 落盘 / 提示词 ----------
@@ -58,48 +62,32 @@ async def _save_image_item(item: dict, dest: str) -> None:
         raise hiagent.ProviderError(f"图像响应缺少 url/b64_json：{list(item.keys())}")
 
 
-def _scene_qa_threshold() -> float:
-    try:
-        return float(get_setting("scene_qa_threshold") or 0.6)
-    except (TypeError, ValueError):
-        return 0.6
+def same_scene_anchor(conn, project_id: str, name: str) -> str | None:
+    """该场景【自己】已落盘的最新一张图路径，作为同名场景跨集/重出时的 i2i 锚点；无则 None。
 
-
-def scene_style_anchor(conn, project_id: str, threshold: float | None = None,
-                       *, exclude_name: str | None = None) -> str | None:
-    """返回首张【QA 通过】的场景图落盘路径，作为后续场景图图生图(i2i)的风格锚点；无则 None。
-
-    "第一个 QA 通过的场景渲染后，后续场景图都以它做图生图" —— 取 scene_references 里最早建立、
-    QA overall 达标且文件仍在的那一张。exclude_name 用于重生成某场景时不拿它自己的旧图当锚点。"""
-    thr = _scene_qa_threshold() if threshold is None else threshold
+    只在同名场景内部参考——绝不跨场景。Seedream 的参考图是【全图 i2i】，会把锚点的构图与陈设整体带过来：
+    同一地点（如某场景跨集演化、或重出微调）拿自己的旧图当锚点能保持一致；但拿【别的场景】的图当锚点
+    会把那个场景的石碑/围栏等带进来导致撞图，是错的。"""
     rows = conn.execute(
-        "SELECT scene_name, image_path, qa_json FROM scene_references WHERE project_id=? "
-        "ORDER BY created_at ASC, id ASC", (project_id,)).fetchall()
+        "SELECT image_path FROM scene_references WHERE project_id=? AND scene_name=? "
+        "ORDER BY ep_start DESC, id DESC", (project_id, name)).fetchall()
     for r in rows:
-        if exclude_name and r["scene_name"] == exclude_name:
-            continue
-        path = r["image_path"]
-        if not path or not Path(path).exists():
-            continue
-        try:
-            qa = json.loads(r["qa_json"]) if r["qa_json"] else {}
-        except (TypeError, ValueError):
-            qa = {}
-        if float(qa.get("overall", -1)) >= thr:
-            return path
+        if r["image_path"] and Path(r["image_path"]).exists():
+            return r["image_path"]
     return None
 
 
-async def _generate_scene_image(prompt: str, anchor_path: str | None) -> dict:
-    """出一张场景图：有风格锚点则做图生图(i2i)以统一全片场景风格，网关不支持参考图时回退纯文生图。"""
-    if anchor_path and Path(anchor_path).exists():
+async def _generate_scene_image(prompt: str, anchor_url: str | None = None, *,
+                                call_meta: dict | None = None) -> dict:
+    """出一张场景图。anchor_url 仅用于【同场景】的 i2i 锚点（由 same_scene_anchor 取该场景自己的旧图），
+    绝不传别的场景的图。带参考图失败则回退纯文生图（与 generate_image 文档约定一致）。"""
+    if anchor_url:
         try:
             return await hiagent.generate_image(
-                prompt, size=config.REF_IMAGE_SIZE,
-                image_inputs=[hiagent.data_url_from_file(anchor_path)])
-        except Exception:  # noqa: BLE001 带参考图失败 → 不带重试（与 generate_image 文档约定一致）
+                prompt, size=config.REF_IMAGE_SIZE, image_inputs=[anchor_url], call_meta=call_meta)
+        except Exception:  # noqa: BLE001 带参考图失败 → 不带重试
             pass
-    return await hiagent.generate_image(prompt, size=config.REF_IMAGE_SIZE)
+    return await hiagent.generate_image(prompt, size=config.REF_IMAGE_SIZE, call_meta=call_meta)
 
 
 async def _review_scene_ref(image_path: str, scene: "Scene | dict") -> dict:
@@ -126,6 +114,15 @@ def register_initial_scene_ref(conn, project_id: str, name: str, image_path: str
         (new_id("scene"), project_id, name, 1, None, scene_canonical, prompt, image_path,
          json.dumps(qa, ensure_ascii=False), None, bible_version, now()))
     conn.commit()
+
+
+def scene_ref_exists(conn, project_id: str, name: str) -> bool:
+    """该场景是否已有一张落盘可用的场景图（已登记 scene_references 且文件还在）。
+    批量出图据此跳过已生成的场景，使按钮可幂等重复点击。"""
+    rows = conn.execute(
+        "SELECT image_path FROM scene_references WHERE project_id=? AND scene_name=?",
+        (project_id, name)).fetchall()
+    return any(r["image_path"] and Path(r["image_path"]).exists() for r in rows)
 
 
 def _open_scene_ref(conn, project_id: str, name: str):
@@ -208,20 +205,33 @@ async def generate_scene_refs(project_id: str, only_scene: str | None = None) ->
     if not targets:
         raise ValueError(f"场景不存在：{only_scene}")
 
-    threshold = _scene_qa_threshold()
+    # 批量出图（only_scene=None）：只补还没出过图的场景，已生成的跳过 → 按钮可重复点击而不重复出图。
+    # 单场景重做（only_scene 指定）：强制重出，不跳过。
+    if only_scene is None:
+        targets = [s for s in targets if not scene_ref_exists(conn, project_id, s.name)]
+        if not targets:
+            return  # 当前场景库里的场景图都已就绪，无需重出
+
     errors: list[str] = []
     for sc in targets:
         try:
             path = scene_ref_path(project_id, sc.name)
+            # 重出=纯文生图，绝不拿该场景【自己的旧图】做 i2i 锚点：旧图可能本就画错/串味（如早期跨场景 i2i
+            # 把别的场景的围栏带了进来），自参考会把错误复制下去、越修越像。跨场景一致性交给画风串保证。
             try:
                 Path(path).unlink()
             except OSError:
                 pass
             sc.ref_image_path = None
             prompt = (sc.scene_prompt_override or "").strip() or scene_ref_prompt(style, sc.scene_canonical)
-            # 第一张 QA 通过的场景图渲染后，后续场景图都以它做图生图，统一全片场景风格。
-            anchor = scene_style_anchor(conn, project_id, threshold, exclude_name=sc.name)
-            item = await _generate_scene_image(prompt, anchor)
+            item = await _generate_scene_image(
+                prompt,
+                call_meta={
+                    "asset_kind": "scene_reference",
+                    "scene_name": sc.name,
+                    "episode_no": 1,
+                    "scene_ref_mode": "initial",
+                })
             await _save_image_item(item, path)
             sc.ref_image_path = path
             qa = await _review_scene_ref(path, sc)
@@ -299,10 +309,19 @@ async def _generate_and_register_scene(project_id: str, name: str, scene_canonic
     prompt = scene_ref_prompt(style, scene_canonical)
     dest = scene_ref_path(project_id, name, ep_start)
     conn = get_conn()
-    # 第一张 QA 通过的场景图渲染后，新发现场景也以它做图生图，统一全片场景风格。
-    anchor = scene_style_anchor(conn, project_id, exclude_name=name)
+    # 同场景参考：若该场景已有更早分段的图（同一地点跨集演化），以它做 i2i 锚点保持一致；全新场景则为 None → 纯文生图。
+    prior = same_scene_anchor(conn, project_id, name)
+    anchor_url = hiagent.data_url_from_file(prior) if prior else None
     try:
-        item = await _generate_scene_image(prompt, anchor)
+        item = await _generate_scene_image(
+            prompt,
+            anchor_url,
+            call_meta={
+                "asset_kind": "scene_reference",
+                "scene_name": name,
+                "episode_no": ep_start,
+                "scene_ref_mode": "reactive",
+            })
         await _save_image_item(item, dest)
     except Exception:  # noqa: BLE001 出图失败仍入库（文字锚点兜底），按集选图时回退
         return None
@@ -361,7 +380,9 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
                 label, context, style=style, known_names=[s.name for s in scenes],
                 ep_label=f"第 {episode_no} 集")
         except Exception as exc:  # noqa: BLE001
-            errors.append(f"{label}：评估失败 {str(exc)[:160]}")
+            errors.append(f"{label}：评估失败"
+                          + code_ref(exc, action="assess_new_scene",
+                                     context={"project_id": project_id, "scene": label, "episode_no": episode_no}))
             continue
         if not verdict["important"]:
             continue
@@ -378,7 +399,9 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
                 ep_start=episode_no, bible_version=bible_version)
             new_scene["ref_image_path"] = path
         except Exception as exc:  # noqa: BLE001 出图失败不阻断，文字锚点仍入库
-            errors.append(f"{name}@第{episode_no}集出图失败：{str(exc)[:160]}")
+            errors.append(f"{name}@第{episode_no}集出图失败"
+                          + code_ref(exc, action="generate_scene_image",
+                                     context={"project_id": project_id, "scene": name, "episode_no": episode_no}))
         if _append_scene_to_bible(conn, project_id, new_scene):
             scenes.append(Scene.model_validate(new_scene))
             added.append({"name": name, "reason": verdict["reason"], "has_image": bool(new_scene["ref_image_path"])})

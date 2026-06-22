@@ -10,13 +10,46 @@ import time
 from pathlib import Path
 from typing import Any
 
-from app import config, hiagent, video_modes
+from app import config, errors, hiagent, video_modes
 from app.compiler import ensure_source_excerpt_in_prompt, idem_key as make_idem_key, sanitize_seedance_prompt, shot_cost_cny
 from app.db import get_conn, get_setting, log_provider_call, new_id, now, rows_to_dicts
 from app.hiagent import ProviderError
 
 _queue: asyncio.Queue[str] = asyncio.Queue()
 _workers: list[asyncio.Task] = []
+# 上游瞬时故障的 job 级重试计数（内存态；进程重启后 recover_and_start 会重排并重置预算，符合预期）。
+_job_retry_counts: dict[str, int] = {}
+# 延迟重排任务的强引用，避免被 GC 回收（asyncio 不持有后台任务的引用）。
+_retry_tasks: set[asyncio.Task] = set()
+
+
+async def _requeue_after(job_id: str, delay: float) -> None:
+    """冷却 delay 秒后把 job 重新投入队列。状态已先置回 queued，故进程重启时
+    recover_and_start 也能兜底重排，不依赖本协程存活。"""
+    try:
+        await asyncio.sleep(delay)
+        _queue.put_nowait(job_id)
+    except asyncio.CancelledError:
+        pass
+
+
+def _schedule_job_retry(job_id: str, exc: ProviderError) -> bool:
+    """瞬时（可重试）上游故障时把 job 延迟重排，返回是否已安排重试。
+    超过 VIDEO_JOB_MAX_RETRIES 后返回 False，交由调用方走永久失败逻辑。"""
+    if not getattr(exc, "retryable", False):
+        return False
+    attempt = _job_retry_counts.get(job_id, 0) + 1
+    if attempt > config.VIDEO_JOB_MAX_RETRIES:
+        return False
+    _job_retry_counts[job_id] = attempt
+    delay = config.VIDEO_JOB_RETRY_BASE_DELAY * (2 ** (attempt - 1))
+    note = (f"大模型/外部服务瞬时故障，已自动排队第 {attempt}/{config.VIDEO_JOB_MAX_RETRIES} 次重试"
+            f"（约 {int(delay)} 秒后）。无需处理；若多次重试后仍失败才需关注错误码。")
+    _set_job(job_id, "queued", note)
+    task = asyncio.get_running_loop().create_task(_requeue_after(job_id, delay))
+    _retry_tasks.add(task)
+    task.add_done_callback(_retry_tasks.discard)
+    return True
 
 
 # ---------- 落盘路径 ----------
@@ -169,7 +202,8 @@ def _append_reference_notes_from_dicts(prompt_text: str, refs: list[dict]) -> st
         lines.append(f"Reference image {idx}: use as {label}; source: {source}{chars}.")
     if not lines:
         return prompt_text
-    note = " Use the provided reference images as follows: " + " ".join(lines)
+    note = (" Use the provided reference images as follows: " + " ".join(lines)
+            + video_modes.REFERENCE_SINGLE_INSTANCE_NOTE)
     return prompt_text if note in prompt_text else prompt_text + note
 
 
@@ -398,14 +432,16 @@ def enqueue_scene(shot_id: str, *, kinds: list[str] | None = None) -> dict:
     return {"job_id": job_id, "kinds": target_kinds}
 
 
-async def _generate_one_scene(prompt: str, ref_inputs: list[str], dest: Path) -> None:
+async def _generate_one_scene(prompt: str, ref_inputs: list[str], dest: Path, *,
+                              call_meta: dict | None = None) -> None:
     """生成单张关键帧，带参考图；若网关不支持参考图（报错）则去掉参考图重试一次。"""
     try:
-        item = await hiagent.generate_image(prompt, size=config.REF_IMAGE_SIZE, image_inputs=ref_inputs or None)
+        item = await hiagent.generate_image(
+            prompt, size=config.REF_IMAGE_SIZE, image_inputs=ref_inputs or None, call_meta=call_meta)
     except hiagent.ProviderError:
         if not ref_inputs:
             raise
-        item = await hiagent.generate_image(prompt, size=config.REF_IMAGE_SIZE)
+        item = await hiagent.generate_image(prompt, size=config.REF_IMAGE_SIZE, call_meta=call_meta)
     if item.get("url"):
         await hiagent.download(item["url"], str(dest))
     elif item.get("b64_json"):
@@ -471,7 +507,16 @@ async def _generate_keyframe_candidates(*, conn, job, shot, ep, project, bible, 
             "VALUES(?,?,?,?,?, 'running', ?)", (sid, job["shot_id"], vno, kind, prompt, now()))
         conn.commit()
         try:
-            await _generate_one_scene(prompt, refs, dest)
+            await _generate_one_scene(
+                prompt, refs, dest,
+                call_meta={
+                    "asset_kind": "keyframe",
+                    "frame_kind": kind,
+                    "episode_id": ep["id"],
+                    "episode_no": ep["episode_no"],
+                    "shot_id": shot["id"],
+                    "shot_no": shot["shot_no"],
+                })
             qa = await review_scene_image(
                 hiagent.encode_image_file(str(dest)), frame_desc, shot["scene_setting"],
                 anchors, prev_image_b64=comparison_b64, kind=kind)
@@ -485,7 +530,8 @@ async def _generate_keyframe_candidates(*, conn, job, shot, ep, project, bible, 
             prev_img_path = str(dest)
             prev_issues = list(qa.get("issues") or [])
         except Exception as exc:  # noqa: BLE001 单次失败不拖垮整轮
-            conn.execute("UPDATE shot_scenes SET status='failed', error=? WHERE id=?", (str(exc)[:500], sid))
+            public = errors.record_and_format(exc, action="keyframe_candidate_generate", context={"shot_scene_id": sid})
+            conn.execute("UPDATE shot_scenes SET status='failed', error=? WHERE id=?", (public, sid))
             conn.commit()
 
     ok = [c for c in candidates if c[1] >= 0]
@@ -586,9 +632,11 @@ async def _run_scene_job(job) -> None:
         conn.commit()
         _set_job(job["id"], "succeeded")
     except Exception as exc:  # noqa: BLE001
+        public = errors.record_and_format(exc, action="keyframe_generate",
+                                          context={"shot_id": job["shot_id"], "job_id": job["id"]})
         conn.execute("UPDATE shots SET scene_status='review' WHERE id=?", (job["shot_id"],))
         conn.commit()
-        _set_job(job["id"], "failed", f"关键帧生成失败：{exc}")
+        _set_job(job["id"], "failed", public)
 
 
 async def critique_version(version_id: str) -> list[str]:
@@ -842,7 +890,18 @@ async def _run_job(job_id: str) -> None:
                         meta["last_frame_used"] = any(role == "last_frame" for _, role in image_inputs)
                     _set_version(version["id"], image_inputs=json.dumps(meta, ensure_ascii=False))
                 try:
-                    task_id = await hiagent.create_video_task(prompt_text, image_urls=image_inputs)
+                    task_id = await hiagent.create_video_task(
+                        prompt_text,
+                        image_urls=image_inputs,
+                        call_meta={
+                            "asset_kind": "video",
+                            "episode_id": ep["id"],
+                            "episode_no": ep["episode_no"],
+                            "shot_id": shot["id"],
+                            "shot_no": shot["shot_no"],
+                            "version_id": version["id"],
+                            "version_no": version["version_no"],
+                        })
                 except ProviderError as exc:
                     if _is_seedance_text_sensitive(str(exc)) and not safety_retry_used:
                         prompt_text = sanitize_seedance_prompt(prompt_text, aggressive=True)
@@ -869,7 +928,18 @@ async def _run_job(job_id: str) -> None:
             deadline = time.time() + config.VIDEO_POLL_BUDGET
             result = None
             while time.time() < deadline:
-                result = await hiagent.poll_video_task(task_id)
+                result = await hiagent.poll_video_task(
+                    task_id,
+                    call_meta={
+                        "asset_kind": "video",
+                        "episode_id": ep["id"],
+                        "episode_no": ep["episode_no"],
+                        "shot_id": shot["id"],
+                        "shot_no": shot["shot_no"],
+                        "version_id": version["id"],
+                        "version_no": version["version_no"],
+                        "task_id": task_id,
+                    })
                 if result["status"] in ("succeeded", "failed"):
                     break
                 await asyncio.sleep(config.VIDEO_POLL_INTERVAL)
@@ -907,6 +977,7 @@ async def _run_job(job_id: str) -> None:
         cost = shot_cost_cny(shot["duration_s"])
         _set_version(version["id"], status="succeeded", video_path=str(dest),
                      last_frame_url=result["last_frame_url"], cost_cny=cost, latency_s=latency)
+        _job_retry_counts.pop(job_id, None)
         _set_job(job_id, "succeeded")
         # 无已采用版本时自动采用本次成功版本
         conn.execute("UPDATE shots SET adopted_version_id=? WHERE id=? AND adopted_version_id IS NULL",
@@ -915,10 +986,18 @@ async def _run_job(job_id: str) -> None:
         # 评审墙产生了新片段，旧的整集合成视频即过期 → 删除，避免成片台展示陈旧成品
         _invalidate_final_video(job["project_id"], ep["episode_no"])
         await _maybe_auto_qa(job, version["id"], str(dest))
-    except (ProviderError, Exception) as exc:  # noqa: BLE001 失败要响：原样透出
-        message = str(exc)[:500]
-        _set_version(version["id"], status="failed", error=message)
-        _set_job(job_id, "failed", message)
+    except (ProviderError, Exception) as exc:  # noqa: BLE001 失败要响：原文进日志，前端给码+分类
+        public = errors.record_and_format(
+            exc, action="shot_video_generate",
+            context={"shot_id": job["shot_id"], "version_id": version["id"], "job_id": job_id})
+        # 上游瞬时故障（超时/网络/限流/5xx）先 job 级延迟重排，扛过分钟级抖动；
+        # 重试次数耗尽或不可重试的错误才永久判失败。
+        if isinstance(exc, ProviderError) and _schedule_job_retry(job_id, exc):
+            _set_version(version["id"], status="queued")
+            return
+        _job_retry_counts.pop(job_id, None)
+        _set_version(version["id"], status="failed", error=public)
+        _set_job(job_id, "failed", public)
 
 
 def _promote_if_better_qa(job, version_id: str, qa: dict) -> None:
@@ -969,6 +1048,13 @@ async def _maybe_auto_qa(job, version_id: str, video_path: str) -> None:
         from app.stages import qa_shot
         qa = await qa_shot(frames, shot["action_desc"], shot["scene_setting"], anchors)
         _set_version(version_id, qa_json=json.dumps(qa, ensure_ascii=False))
+        # QA 非标准输出虽可恢复部分分数，但证据不足以触发付费重抽。
+        # 这种情况保留结果供人工确认，避免把 VLM 格式错误当成视频质量错误。
+        if qa.get("qa_recovered"):
+            log_provider_call(
+                "vlm_qa", config.MODEL_VLM, "QA_RECOVERED_NO_RETAKE", None, 0,
+                meta={"shot_id": job["shot_id"], "version_id": version_id, "qa": qa})
+            return
         # 重生版若质检分更高，立即提升为采用版（避免更差的首版长期占位）
         _promote_if_better_qa(job, version_id, qa)
         threshold = float(get_setting("auto_retake_threshold") or 0.6)
@@ -1028,7 +1114,8 @@ async def _worker_loop(name: str) -> None:
         try:
             await _run_job(job_id)
         except Exception as exc:  # noqa: BLE001 worker 永不死亡，但错误必须落库
-            _set_job(job_id, "failed", f"worker 异常：{exc}")
+            public = errors.record_and_format(exc, action="worker_loop", context={"job_id": job_id})
+            _set_job(job_id, "failed", public)
         finally:
             _queue.task_done()
 

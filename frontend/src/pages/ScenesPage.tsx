@@ -56,14 +56,8 @@ export default function ScenesPage() {
             )}
             {scenes.length > 0 && !generating && (
               <button className="btn" disabled={busy}
-                onClick={() => act(() => api.genSceneRefs(p.id), '已开始重新生成全部场景图')}>
-                重新生成全部场景图
-              </button>
-            )}
-            {scenes.length > 0 && !generating && (
-              <button className="btn ghost" disabled={busy}
-                onClick={() => act(() => api.genSceneBible(p.id), '已重新提取场景清单并出图')}>
-                重新提取场景清单
+                onClick={() => act(() => api.genSceneRefs(p.id), '已开始检查并补齐场景图')}>
+                检查并补齐场景图
               </button>
             )}
             {generating && (

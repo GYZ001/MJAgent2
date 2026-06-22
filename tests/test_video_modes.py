@@ -270,10 +270,10 @@ def test_runtime_reference_mode_uses_stored_decision(monkeypatch) -> None:
     assert not out_meta.get("fallback_reason")
 
 
-def test_build_reference_assets_min_generated_and_keep_best(monkeypatch) -> None:
-    """参考图模式下：即便模型计划 generateNewCount=0、且所有生成图 QA 都不达标，
-    也要保证每镜至少有 1 张新生成关键帧（取分数最高的一版兜底），不会只剩定妆照；
-    且每张新图的提示词是逐图独立异步生成的。"""
+def test_build_reference_assets_fallback_keyframe_yields_to_clean_portrait(monkeypatch) -> None:
+    """Change 2：当本镜唯一的生成关键帧只是「兜底」（QA 低于阈值、地板以上）时，含人物名额优先留给
+    干净定妆照（QA 满分），兜底关键帧被抑制进废弃画廊——脏兜底图压过满分定妆照得不偿失。
+    生成仍会发生（逐图异步写提示词），只是兜底关键帧最终不喂模型。"""
     bible = _bible()
     shot = _shot(shot_no=3, narration="次日清晨，新闻和昨晚补的细节吻合",
                  dialogues=[{"speaker": "A", "line": "这不可能", "emotion": "惊恐"}])
@@ -298,7 +298,7 @@ def test_build_reference_assets_min_generated_and_keep_best(monkeypatch) -> None
 
     async def fake_gen_one(*, project_id, episode_no, shot, bible, ref_type, index, content_override=None, seed_inputs=None):
         assert content_override, "每张图必须带逐图异步生成的提示词"
-        score = 0.5 + 0.1 * (index % 3)  # 始终低于默认阈值 0.75
+        score = 0.5 + 0.1 * (index % 3)  # 0.5/0.6/0.7：均低于阈值 0.75，但高于地板 0.4
         asset = ReferenceImageAsset(id=f"g{index}", url="u", type=ref_type, source="seedream_generated",
                                     path=f"/tmp/g{index}.jpg", qualityScore=score, qa={"overall": score, "issues": []})
         asset.rejectReason = "quality_below_threshold"
@@ -310,17 +310,60 @@ def test_build_reference_assets_min_generated_and_keep_best(monkeypatch) -> None
         mode=REFERENCE_IMAGE_MODE, reason="对白", confidence=0.9,
         referenceImagePlan=ReferenceImagePlan(totalCount=1, reusePreviousSceneCount=0,
                                               generateNewCount=0, types=["plot_key_frame"], prompts=[]))
-    rejections: list = []
+    rejected: list = []
     assets = asyncio.run(video_modes.build_reference_assets(
         conn=None, project_id="p", episode_no=1, episode_id="e", shot_id="s",
-        shot=shot, bible=bible, decision=decision, prev_shot=None, rejection_details=rejections))
+        shot=shot, bible=bible, decision=decision, prev_shot=None, rejected_out=rejected))
 
-    generated = [a for a in assets if a.source == "seedream_generated"]
-    assert len(generated) >= 1, "min_generated 未生效，应至少保留一张生成关键帧"
-    assert generated[0].qualityScore == 0.7, "keep-best 应保留分数最高的一版"
-    assert prompt_calls["n"] == 1, "应逐图独立异步写提示词（本例 1 张）"
-    assert all(a.selectedForSeedance for a in assets)
-    assert any(a.source == "asset_library" for a in assets), "定妆照仍应保留"
+    fed = [a for a in assets if a.selectedForSeedance]
+    assert [a.source for a in fed] == ["asset_library"], "兜底关键帧应让位给干净定妆照"
+    assert all(a.qualityScore == 1.0 for a in fed)
+    assert prompt_calls["n"] == 1, "生成仍发生（逐图异步写提示词，本例 1 张）"
+    # 兜底关键帧被抑制进废弃画廊、不喂模型
+    suppressed = [a for a in rejected if a.source == "seedream_generated"]
+    assert suppressed and all(not a.selectedForSeedance for a in suppressed)
+    assert any(a.rejectReason == "duplicate_character_suppressed" for a in suppressed)
+
+
+def test_build_reference_assets_subfloor_fallback_not_fed(monkeypatch) -> None:
+    """Change 1：生成图全不达标且最佳一版仍低于质量地板（quality_floor=0.4）时，一张都不喂模型，
+    只靠定妆照/场景锚点撑住；所有尝试进废弃画廊（脏图当参考反而拖累成片）。"""
+    bible = _bible()
+    shot = _shot(shot_no=5, narration="夜里独白",
+                 dialogues=[{"speaker": "A", "line": "为什么", "emotion": "悲伤"}])
+
+    monkeypatch.setattr(video_modes, "character_reference_assets",
+                        lambda b, names, *, limit, project_id=None, episode_no=None: ([ReferenceImageAsset(
+                            id="c1", url="u", type="character", source="asset_library",
+                            path="/tmp/a.jpg", relatedCharacterIds=["A"], qualityScore=1.0)] if limit > 0 else []))
+    monkeypatch.setattr(video_modes, "reusable_previous_assets", lambda *a, **k: [])
+    monkeypatch.setattr(video_modes, "min_generated_references", lambda: 1)
+    monkeypatch.setattr(video_modes, "reference_gen_retries", lambda: 2)
+    monkeypatch.setattr(video_modes, "reference_prompt_async", lambda: False)
+
+    async def fake_gen_one(*, project_id, episode_no, shot, bible, ref_type, index, content_override=None, seed_inputs=None):
+        score = 0.2 + 0.05 * (index % 3)  # 0.20/0.25/0.30：均低于地板 0.4
+        asset = ReferenceImageAsset(id=f"g{index}", url="u", type=ref_type, source="seedream_generated",
+                                    path=f"/tmp/g{index}.jpg", qualityScore=score, qa={"overall": score, "issues": []})
+        asset.rejectReason = "quality_below_threshold"
+        return asset
+
+    monkeypatch.setattr(video_modes, "_generate_one_reference", fake_gen_one)
+
+    decision = ShotVideoModeDecision(
+        mode=REFERENCE_IMAGE_MODE, reason="对白", confidence=0.9,
+        referenceImagePlan=ReferenceImagePlan(totalCount=1, reusePreviousSceneCount=0,
+                                              generateNewCount=0, types=["plot_key_frame"], prompts=[]))
+    rejected: list = []
+    assets = asyncio.run(video_modes.build_reference_assets(
+        conn=None, project_id="p", episode_no=1, episode_id="e", shot_id="s",
+        shot=shot, bible=bible, decision=decision, prev_shot=None, rejected_out=rejected))
+
+    fed = [a for a in assets if a.selectedForSeedance]
+    assert [a.source for a in fed] == ["asset_library"], "低于地板的兜底图不喂，只留定妆照锚点"
+    assert not any(a.source == "seedream_generated" for a in fed), "低于地板的生成图一律不喂"
+    gen_rejected = [a for a in rejected if a.source == "seedream_generated"]
+    assert len(gen_rejected) == 3 and all(not a.selectedForSeedance for a in gen_rejected), "全部尝试进废弃画廊"
 
 
 def test_generated_references_get_i2i_seeds(monkeypatch) -> None:

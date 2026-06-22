@@ -6,7 +6,7 @@ from app import hiagent
 def test_deepseek_chat_uses_deepseek_route(monkeypatch) -> None:
     calls: list[tuple[str, str, str]] = []
 
-    async def fake_post_json(client, url, payload, *, kind, model, retries=2, headers=None, key_name=""):
+    async def fake_post_json(client, url, payload, *, kind, model, retries=2, headers=None, key_name="", meta=None):
         calls.append((url, model, key_name))
         return {"choices": [{"message": {"content": "ok"}}]}
 

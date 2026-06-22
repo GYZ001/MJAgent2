@@ -24,6 +24,7 @@ from pydantic import ValidationError
 
 from app import config, hiagent
 from app.db import get_conn, get_setting, new_id, now, set_setting
+from app.errors import code_ref
 from app.refs import _safe_name, portrait_prompt
 from app.schemas import Bible, Character, extract_json
 
@@ -242,7 +243,9 @@ async def ensure_character_card(project_id: str, name: str, from_episode_no: int
         try:
             verdict = await assess_new_character(name, fragments, style=style, known_names=known, ep_label=ep_label)
         except Exception as exc:  # noqa: BLE001
-            return {"status": "error", "name": name, "reason": str(exc)[:240]}
+            return {"status": "error", "name": name,
+                    "reason": "新角色评估失败" + code_ref(exc, action="assess_new_character",
+                                                          context={"project_id": project_id, "name": name})}
         if not verdict["important"]:
             set_setting(_discovery_skip_key(project_id, name), str(from_episode_no))
             return {"status": "skipped_minor", "name": name, "reason": verdict["reason"]}
@@ -361,7 +364,9 @@ async def ensure_cards_for_screenplay(project_id: str, episode_no: int, screenpl
         try:
             res = await ensure_character_card(project_id, n, episode_no)
         except Exception as exc:  # noqa: BLE001
-            res = {"status": "error", "name": n, "reason": str(exc)[:200]}
+            res = {"status": "error", "name": n,
+                   "reason": "建卡失败" + code_ref(exc, action="ensure_character_card",
+                                                  context={"project_id": project_id, "name": n})}
         if res.get("status") == "added":
             added.append(res)
         elif res.get("status") == "error":
@@ -392,13 +397,17 @@ async def ensure_cards_for_screenplay(project_id: str, episode_no: int, screenpl
             verdicts = await screen_appearance_changes(entries, f"第 {episode_no} 集")
         except Exception as exc:  # noqa: BLE001 判定失败不阻断分镜
             verdicts = {}
-            errors.append(f"漂移判定失败@第{episode_no}集：{str(exc)[:160]}")
+            errors.append(f"漂移判定失败@第{episode_no}集"
+                          + code_ref(exc, action="screen_appearance_changes",
+                                     context={"project_id": project_id, "episode_no": episode_no}))
         for name, v in verdicts.items():
             try:
                 res = await _refresh_portrait_on_drift(
                     project_id, name, episode_no, v["new_appearance"], style, bible_version)
             except Exception as exc:  # noqa: BLE001 单角色重绘失败不阻断分镜
-                errors.append(f"{name}@第{episode_no}集重绘失败：{str(exc)[:160]}")
+                errors.append(f"{name}@第{episode_no}集重绘失败"
+                              + code_ref(exc, action="refresh_portrait_on_drift",
+                                         context={"project_id": project_id, "name": name, "episode_no": episode_no}))
                 continue
             if res:
                 redrawn.append({"name": name, "reason": v["reason"], **res})
@@ -506,7 +515,16 @@ async def _redraw_portrait(project_id: str, name: str, style: str, appearance: s
     image_inputs = None
     if base_path and Path(base_path).exists():
         image_inputs = [hiagent.data_url_from_file(base_path)]
-    item = await hiagent.generate_image(prompt, size=config.REF_IMAGE_SIZE, image_inputs=image_inputs)
+    item = await hiagent.generate_image(
+        prompt,
+        size=config.REF_IMAGE_SIZE,
+        image_inputs=image_inputs,
+        call_meta={
+            "asset_kind": "portrait",
+            "character_name": name,
+            "episode_no": ep_start,
+            "portrait_mode": "redraw",
+        })
     dest = _new_portrait_path(project_id, name, ep_start)
     await _save_image_item(item, dest)
     return dest, prompt
@@ -516,7 +534,15 @@ async def _generate_fresh_portrait(project_id: str, name: str, style: str, appea
                                    *, ep_start: int) -> tuple[str, str]:
     """为新登场角色生成一张全新定妆照（无底图，不走图生图），落盘。返回 (落盘路径, 生成 prompt)。"""
     prompt = portrait_prompt(style, appearance)
-    item = await hiagent.generate_image(prompt, size=config.REF_IMAGE_SIZE)
+    item = await hiagent.generate_image(
+        prompt,
+        size=config.REF_IMAGE_SIZE,
+        call_meta={
+            "asset_kind": "portrait",
+            "character_name": name,
+            "episode_no": ep_start,
+            "portrait_mode": "fresh",
+        })
     dest = _new_portrait_path(project_id, name, ep_start)
     await _save_image_item(item, dest)
     return dest, prompt

@@ -642,7 +642,13 @@ COVERS_CROWD_SEMANTIC_GROUPS = (
 # 用于判定某镜 covers 是否"不可单镜完成"——同时要求角色开口+人群声时，两类声轨叠加易超单镜口播上限；
 # 依赖圣经外角色开口时，逐镜阶段会陷入 characters 校验与 covers 落实相互锁死（镜03 死循环根因）。
 COVERS_SPOKEN_VERBS = ("宣告", "宣布", "宣读", "宣判", "公布")
-COVERS_CROWD_WORDS = ("哄笑", "哄堂", "嘲讽", "议论", "嗤笑", "嘲笑", "讥笑", "耻笑", "哗然", "群嘲")
+COVERS_CROWD_WORDS = ("哄笑", "哄堂", "嘲讽", "议论", "嗤笑", "嘲笑", "讥笑", "耻笑", "哗然", "群嘲",
+                      "私语", "耳语", "窃窃", "起哄", "喝彩", "欢呼", "惊呼", "惊叹", "赞叹", "唏嘘")
+
+# 单镜口播"留给搭配旁白/第二句台词"的安全余量：一句关键台词若已逼近 (上限 - 余量)，
+# 这镜就不该再塞别的声轨；超过就该拆到相邻镜。① 大纲确定性拆分 / ③ 大纲口播预检共用此口径。
+SPOKEN_BUDGET_RESERVE = 14
+COMFORTABLE_SPOKEN_CHARS = max(8, config.MAX_SPOKEN_CHARS_PER_SHOT - SPOKEN_BUDGET_RESERVE)
 
 
 def _covers_has_spoken(covers: str) -> bool:
@@ -651,6 +657,83 @@ def _covers_has_spoken(covers: str) -> bool:
 
 def _covers_has_crowd(covers: str) -> bool:
     return any(w in covers for w in COVERS_CROWD_WORDS)
+
+
+# 被动宣告句式「被X（当众/高声）宣告」：group(1)=宣告者，group(2)=宣告动词。
+# 判定（_covers_outside_spoken）与改写（downgrade_outline_offbible_spoken）共用此正则，口径必然一致。
+# 角色名用非贪婪 {2,6}?，避免把后面的「当众/高声」等修饰词吞进角色名（否则圣经内角色「萧战当众」
+# 会被误判为圣经外、进而被误降级）。
+_OUTSIDE_SPOKEN_RE = re.compile(
+    r"被([一-龥]{2,6}?)(?:当众|高声|大声|公然)?(宣告|宣布|宣读|宣判|公布)")
+
+
+def downgrade_outline_offbible_spoken(outline: StoryboardOutline,
+                                      bible: Bible | None) -> list[dict]:
+    """方案 A2：把大纲 covers 里"被圣经外角色开口宣告"的句式确定性降级为【旁白转述】。
+
+    根因：原文常有"测验员"等次要角色开口的关键台词，但其不在角色圣经里。covers 若写成
+    "被测验员宣布为低级"，逐镜阶段会卡在"保留测验员→characters 校验失败 / 删测验员→covers
+    落实不了"之间死循环（修复停滞根因）。与其反复要求模型自己 reroute（实测会连刷多轮同一错误
+    直至修复停滞兜底），不如在校验前就地改写：
+    - covers 里"被{圣经外角色}{宣告动词}"去掉角色名（及当众/高声等修饰）→ "被{宣告动词}"，
+      事实保留、不再要求该角色开口；改写后判定正则不再命中，方案 A 的硬性报错自然不再触发；
+    - 同时在 beat 末尾追加一句旁白转述指令，让逐镜阶段把该宣告交给旁白、不安排该角色出镜。
+    只改写【圣经外】角色（圣经内角色的"被X宣告"合法可拍，原样保留）。
+    就地修改 outline，返回已改写镜头记录（供监控日志）。
+    """
+    bible_names = {c.name for c in bible.characters} if bible else set()
+    if not bible_names:
+        return []
+    changed: list[dict] = []
+    for s in outline.shots:
+        covers = s.covers or ""
+        if not covers:
+            continue
+        outside: list[str] = []
+
+        def _sub(m: "re.Match") -> str:
+            name, verb = m.group(1), m.group(2)
+            if name in bible_names:
+                return m.group(0)  # 圣经内角色：合法宣告者，保留原句
+            outside.append(name)
+            return "被" + verb     # 去掉圣经外角色名与修饰，仅留被动宣告
+
+        new_covers = _OUTSIDE_SPOKEN_RE.sub(_sub, covers)
+        if not outside:
+            continue
+        names = "/".join(dict.fromkeys(outside))  # 去重保序
+        s.covers = new_covers
+        directive = f"（{names}不在角色圣经：相关宣告改由旁白转述交代，勿安排其出镜或开口）"
+        if directive not in (s.beat or ""):
+            s.beat = (s.beat or "").rstrip() + directive
+        changed.append({"shot_no": s.shot_no, "names": list(dict.fromkeys(outside)),
+                        "before": covers[:80], "after": new_covers[:80]})
+    return changed
+
+
+def defer_establishing_covers(outline: StoryboardOutline, episode_no: int) -> list[dict]:
+    """减重试 #2：第一集第 1 镜被 _first_shot_rule 强制为「开场建场镜」——只交代世界观/主角处境、
+    动作克制、不抛核心冲突。但大纲常把判决/反转类 covers（如「全场最低」）也派给第 1 镜，于是逐镜
+    阶段陷入两条硬指令对冲：照建场写→漏 covers（报「未落实本镜大纲」）；硬塞判决→只能借测验员/
+    围观者开口→characters 圣经校验失败。实测会先漏 covers、再引入圣经外角色，连打两轮修复。
+
+    这里把第 1 镜的 covers 顺延合并到第 2 镜：建场镜不再被要求落实关键内容（brief.covers 清空，
+    模型可专心建场），关键内容仍留在大纲（第 2 镜）里、整集 covers 覆盖校验不会判漏；第 2 镜不受
+    建场约束，可正常把判决拍出来/念出来。只对第一集生效；常规集第 1 镜是 hook 镜、不受建场约束，
+    原样保留。就地修改 outline，返回调整记录供监控日志。"""
+    if int(episode_no or 0) != 1:
+        return []
+    shots = outline.shots
+    if len(shots) < 2:
+        return []
+    first, second = shots[0], shots[1]
+    moved = (first.covers or "").strip()
+    if not moved:
+        return []
+    first.covers = ""
+    existing = (second.covers or "").strip()
+    second.covers = f"{moved}；{existing}" if existing else moved
+    return [{"shot_no": 1, "deferred_to": 2, "covers": moved[:80]}]
 
 
 def _covers_outside_spoken(covers: str, bible_names: set[str]) -> list[str]:
@@ -663,9 +746,7 @@ def _covers_outside_spoken(covers: str, bible_names: set[str]) -> list[str]:
     """
     if not bible_names or not covers:
         return []
-    found: set[str] = set()
-    for m in re.finditer(r"被([\u4e00-\u9fa5]{2,6})(?:当众|高声|大声|公然)?(?:宣告|宣布|宣读|宣判|公布)", covers):
-        found.add(m.group(1))
+    found = {m.group(1) for m in _OUTSIDE_SPOKEN_RE.finditer(covers)}
     return [n for n in found if n not in bible_names]
 
 
@@ -713,7 +794,9 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         errors.append(f"scene_outline 场次数量为 {len(scenes)}；生产级剧本稿需提供 3~6 场连续场次结构")
     bible_names = {c.name for c in bible.characters}
     for i, scene in enumerate(scenes, start=1):
-        tag = f"scene_outline[{i - 1}]"
+        # 报错锚点用 1-based 场序（模型按 scene_no 思考），并附场标，避免之前 0-based 索引让模型改错场而陷入打回循环。
+        heading = (scene.scene_heading or "").strip()
+        tag = f"scene_outline 第{i}场" + (f"「{heading}」" if heading else "")
         if scene.scene_no != i:
             errors.append(f"{tag}.scene_no 必须从 1 连续递增；当前为 {scene.scene_no}")
         if len((scene.scene_heading or "").strip()) < 4:
@@ -1074,6 +1157,15 @@ def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeS
                     f"大纲第 {i + 1} 镜 covers 同时要求角色开口宣告和人群哄笑议论，两类声轨叠加易超单镜口播上限"
                     f"（{config.MAX_SPOKEN_CHARS_PER_SHOT} 字/{config.MAX_VIDEO_DURATION_S}s 也念不完）；"
                     "请拆成相邻 2 镜分担：一镜落实宣告，下一镜落实哄笑议论")
+            # ③ 口播预算预检：某条关键台词若是【单个不可再按句读拆分的长句】且已超单镜口播上限，
+            # 逐镜阶段拆不动（① 按标点拆需要句内有句读），必须在剧本/大纲里改写或断句，否则后段必卡死。
+            over_atoms = [a for a in _atomize_claim(covers)
+                          if len(_condense(a)) > config.MAX_SPOKEN_CHARS_PER_SHOT]
+            if over_atoms:
+                errors.append(
+                    f"大纲第 {i + 1} 镜 covers 含单句「{over_atoms[0][:24]}…」已 {len(_condense(over_atoms[0]))} 字、"
+                    f"超过单镜口播上限 {config.MAX_SPOKEN_CHARS_PER_SHOT} 字，且无句读可拆；"
+                    "请在 covers/剧本里给这句加上分句标点或精简，使其能拆到相邻镜分段念白")
     # 反停留：相邻两镜的 beat 几乎逐字相同 = 停在同一节拍上空转，必须推进到新剧情。
     for i in range(1, len(shots)):
         if _too_similar(shots[i - 1].beat, shots[i].beat):
@@ -1173,6 +1265,29 @@ def compact_durations_to_budget(board: Storyboard, target_duration_s: int, *,
     }
 
 
+def compress_durations_within_floors(board: Storyboard, target_total_s: int,
+                                     floors: dict[int, int]) -> bool:
+    """把整集总时长压到 target_total_s 以内：每镜不得低于 floors[shot_no]（缺省视作可压到 0），
+    每轮挑冗余（当前时长 - 下限）最多的镜削减。返回是否压到了 ≤ target_total_s。
+
+    floors 传「口播/开场保底」即硬压缩（一定能达成，因上限 ≥ 保底之和）；传「保底与不超 20% 的较大者」
+    即限幅压缩（达不成时返回 False，交由调用方再退到硬压缩）。只改 duration_s，不改内容。"""
+    def _total() -> int:
+        return sum(int(s.duration_s or 0) for s in board.shots)
+
+    while _total() > target_total_s:
+        candidates = [(int(s.duration_s or 0) - floors.get(s.shot_no, 0), i)
+                      for i, s in enumerate(board.shots)
+                      if int(s.duration_s or 0) > floors.get(s.shot_no, 0)]
+        if not candidates:
+            return False
+        _, idx = max(candidates)
+        shot = board.shots[idx]
+        need = _total() - target_total_s
+        shot.duration_s = max(floors.get(shot.shot_no, 0), int(shot.duration_s or 0) - need)
+    return True
+
+
 def _is_episode_opening_shot(board: Storyboard, shot) -> bool:
     """是否为全片开场镜：第一集（episode_no==1）的第一镜（shot_no==1）。"""
     return int(getattr(board, "episode_no", 0) or 0) == 1 and int(getattr(shot, "shot_no", 0) or 0) == 1
@@ -1210,6 +1325,136 @@ def normalize_continuity(board: Storyboard) -> None:
             shot.transition = "硬切"
         elif shot.transition == "硬切":
             shot.transition = default_scene_transition(board.shots[i - 1], shot)
+
+
+def spoken_char_count(shot) -> int:
+    """本镜台词+旁白的纯发声字数（去空白），与单镜口播上限校验同口径。"""
+    return len(re.sub(r"\s+", "", _soundtrack_text(shot)))
+
+
+def _narration_is_crowd_ambient(narration: str) -> bool:
+    """旁白是否是'人群声/环境声'类（哄笑/议论/嘲讽/惊呼…）而非角色内心OS或全知收尾钩。
+    这类声音本是环境氛围，不必占用人物口播——可降级成 action_desc 的画面描写，信息仍在画面里。"""
+    n = (narration or "").strip()
+    if not n:
+        return False
+    if any(m in n for m in INNER_VOICE_MARKERS):
+        return False
+    return _covers_has_crowd(n)
+
+
+def relieve_spoken_overflow(board: Storyboard) -> list[dict]:
+    """确定性卸载单镜口播超限：把'人群议论/哄笑/惊呼'类旁白降级为 action_desc 画面描写，
+    使本镜台词+旁白回落到口播上限内（治本届 shots[*] 台词+旁白共 N 字超限报错的最常见来源）。
+
+    人群声本是环境氛围、不必让旁白嗓音念出来；降级后它仍留在 action_desc——画面里看得见，
+    且防丢失校验的 all_text 仍涵盖它，关键剧情点不会因此判丢。
+    只动'人群声旁白'：绝不删角色台词、不删内心OS、不删全知收尾钩旁白；
+    这些情况它改不动就原样返回，交给 ① 大纲拆分或逐镜重试处理。返回实际调整供日志。"""
+    changes: list[dict] = []
+    limit = config.MAX_SPOKEN_CHARS_PER_SHOT
+    for shot in board.shots:
+        if spoken_char_count(shot) <= limit:
+            continue
+        narration = (shot.narration or "").strip()
+        if narration and _narration_is_crowd_ambient(narration):
+            merged = (shot.action_desc or "").rstrip("。； ")
+            addition = narration.rstrip("。；")
+            shot.action_desc = f"{merged}；{addition}。" if merged else f"{addition}。"
+            shot.narration = ""
+            changes.append({"shot_no": shot.shot_no, "demoted_crowd_narration": addition[:40]})
+    return changes
+
+
+def _canonical_bible_name(name: str, bible_names: set[str]) -> str | None:
+    """把疑似别名/简称/错字的角色名【唯一】对应到圣经正名；无唯一命中返回 None（按路人剥离）。
+
+    只认包含关系：圣经名是该名子串（"萧炎少爷"→"萧炎"）或该名（≥2字）是圣经名子串（"萧薰"→"萧薰儿"）。
+    命中多于一个圣经名（如"萧"同时命中萧炎/萧媚）视为不可判定，返回 None——宁可剥离也不错配。"""
+    name = (name or "").strip()
+    if not name:
+        return None
+    hits = {b for b in bible_names if b in name or (len(name) >= 2 and name in b)}
+    return next(iter(hits)) if len(hits) == 1 else None
+
+
+def _rename_shot_character(shot: Shot, old: str, new: str) -> None:
+    """把镜头里某个角色名整体改写为圣经正名：characters 之外，dialogues.speaker 与画面文本一并替换，
+    避免改了 characters 却漏改 speaker/action_desc 触发其它校验。
+
+    仅当别名不是正名的子串时才替换画面文本——否则 replace('萧薰','萧薰儿') 会把文本里已有的
+    '萧薰儿'撑成'萧薰儿儿'。speaker 是精确等值匹配、不受此问题影响，照常改。"""
+    if old not in new:
+        for field in ("action_desc", "first_frame_desc", "last_frame_desc", "narration"):
+            val = getattr(shot, field, None)
+            if val:
+                setattr(shot, field, val.replace(old, new))
+    for d in shot.dialogues:
+        if d.speaker == old:
+            d.speaker = new
+
+
+def _offload_extra_character_voice(shot: Shot, name: str) -> None:
+    """把被剥离路人（测验员/围观者甲等）的台词移出 dialogues，内容不丢、降级承载：
+    人群声类（哄笑/议论/嘲讽…）并入 action_desc 当画面群像（与 relieve_spoken_overflow 同口径）；
+    其余（如宣告）转写进 narration 保持可听见，但仅在不超单镜口播上限时；否则同样并入 action_desc，
+    避免反而触发口播超限的新一轮重试。其在 action_desc 等画面文本中的提及保留原样（在场群像，合法）。"""
+    moved = [(d.line or "").strip() for d in shot.dialogues if d.speaker == name and (d.line or "").strip()]
+    shot.dialogues = [d for d in shot.dialogues if d.speaker != name]
+    if not moved:
+        return
+    text = "；".join(moved)
+
+    def _into_action() -> None:
+        merged = (shot.action_desc or "").rstrip("。； ")
+        shot.action_desc = f"{merged}；{name}{text}。" if merged else f"{name}{text}。"
+
+    if _covers_has_crowd(text):
+        _into_action()
+        return
+    existing = (shot.narration or "").strip()
+    candidate = f"{existing}；{name}：{text}" if existing else f"{name}：{text}"
+    spoken_after = len(re.sub(r"\s+", "", candidate + "".join(d.line for d in shot.dialogues)))
+    if spoken_after <= config.MAX_SPOKEN_CHARS_PER_SHOT:
+        shot.narration = candidate
+    else:
+        _into_action()
+
+
+def normalize_offbible_characters(board: Storyboard, bible: Bible | None) -> list[dict]:
+    """确定性规范分镜里的「角色圣经外」角色名，避免逐镜阶段为这类名字硬打一轮 LLM 修复（减重试 #1）。
+
+    根因：原文里的测验员/围观者甲等次要在场人物会被模型写进 characters / dialogues.speaker，但它们不在
+    角色圣经里 → validate_storyboard 报「角色圣经中不存在」→ 触发整轮修复（实测会与 covers 落实相互
+    拉扯成多轮重试）。分镜展开前的反应式定妆照维护已把真正重要的新角色提进圣经，所以到这一步仍残留的
+    圣经外名一定是路人，可在校验前就地处理、不必再问模型：
+    - 能唯一对应到某圣经角色（别名/简称/错字）→ 规范成圣经正名（characters、speaker、画面文本一并替换）；
+    - 纯路人 → 从 characters 剥离，其台词降级为画面/旁白（不丢内容，见 _offload_extra_character_voice）。
+    就地修改 board，返回调整记录供监控日志。bible 为空时跳过（务实优先，旧数据放行）。"""
+    if not bible or not bible.characters:
+        return []
+    bible_names = {c.name for c in bible.characters}
+    changes: list[dict] = []
+    for shot in board.shots:
+        if not shot.characters:
+            continue
+        kept: list[str] = []
+        for name in shot.characters:
+            if name in bible_names:
+                kept.append(name)
+                continue
+            canon = _canonical_bible_name(name, bible_names)
+            if canon:
+                _rename_shot_character(shot, name, canon)
+                kept.append(canon)
+                changes.append({"shot_no": shot.shot_no, "renamed": f"{name}→{canon}"})
+            else:
+                _offload_extra_character_voice(shot, name)
+                changes.append({"shot_no": shot.shot_no, "stripped": name})
+        # 去重保序（规范后可能与既有正名重复）
+        seen: set[str] = set()
+        shot.characters = [n for n in kept if not (n in seen or seen.add(n))]
+    return changes
 
 
 def validate_bible(bible: Bible) -> list[str]:

@@ -23,3 +23,16 @@ def test_extract_json_skips_non_json_braces_before_payload() -> None:
 def test_extract_json_reports_missing_object() -> None:
     with pytest.raises(ValueError, match="找不到 JSON"):
         extract_json("没有对象")
+
+
+def test_extract_json_does_not_accept_nested_object_from_broken_root() -> None:
+    text = '''{
+  "episode_no": 1,
+  "shot": {
+    "source_excerpt": "少女轻声唤他"萧炎哥哥。"随后弯腰",
+    "dialogues": [{"speaker": "萧薰儿", "line": "萧炎哥哥。"}]
+  }
+}'''
+
+    with pytest.raises(ValueError, match="JSON 解析失败"):
+        extract_json(text)

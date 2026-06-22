@@ -9,6 +9,7 @@
 
 from app.schemas import Bible, Character, Dialogue, EpisodeScreenplay, Shot, World
 from app.stages import (StoryboardShotDraft, _remaining_storyboard_seconds, _storyboard_budget_block,
+                        _relevant_text_windows, _render_completed_shots_context,
                         _validate_storyboard_shot_draft)
 
 KEY_LINE = "我一定要查清斗气消失的真相。"
@@ -96,6 +97,23 @@ def test_budget_block_pacing_switches_on_remaining() -> None:
     assert "is_final=true" in low and "距离硬上限剩余 25s" in low
     plenty = _storyboard_budget_block(50, [], allow_finish=False)
     assert "较充裕" in plenty and "距离规划目标剩余 50s" in plenty
+
+
+def test_completed_context_keeps_only_last_two_shots_in_full_detail() -> None:
+    shots = [_shot(i) for i in range(1, 5)]
+    rendered = _render_completed_shots_context(shots)
+
+    assert rendered.count('"last_frame_desc"') == 2
+    assert '"progress"' in rendered
+    assert all(f'"shot_no": {i}' in rendered for i in range(1, 5))
+
+
+def test_relevant_text_windows_keeps_current_hint_and_caps_context() -> None:
+    text = "开场铺垫。" * 900 + "谷言终于拿起储物柜钥匙。" + "尾声铺垫。" * 900
+    result = _relevant_text_windows(text, ["谷言拿起储物柜钥匙"], max_chars=1800)
+
+    assert "储物柜钥匙" in result
+    assert len(result) <= 1850  # 含窗口之间的省略标记
 
 
 # ---------- 单镜 QA 的整集级放行 / 收尾分支 ----------

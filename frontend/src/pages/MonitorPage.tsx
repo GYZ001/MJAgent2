@@ -4,7 +4,7 @@ import { useNav, usePoll } from '../App'
 
 interface JobsView {
   counts: Record<string, number>
-  recent: { id: string; status: string; error?: string; shot_no?: number; episode_no?: number; episode_title?: string; project_name?: string; updated_at: number }[]
+  recent: { id: string; kind?: string; status: string; error?: string; shot_no?: number; episode_no?: number; episode_title?: string; project_name?: string; updated_at: number }[]
 }
 interface Call {
   id: number
@@ -20,7 +20,7 @@ interface Call {
   response_json?: string
 }
 
-type ProviderKey = 'hiagent' | 'openrouter' | 'bailian' | 'deepseek'
+type ProviderKey = 'hiagent' | 'openrouter' | 'bailian' | 'deepseek' | 'zhipu'
 type ModelKind = 'text' | 'vlm' | 'video' | 'image'
 interface ModelOption { provider: ProviderKey; model: string; available: boolean }
 interface ModelSelection {
@@ -34,6 +34,7 @@ interface Health {
   openrouter_key_configured: boolean
   bailian_key_configured: boolean
   deepseek_key_configured?: boolean
+  zhipu_key_configured?: boolean
   models?: Record<ModelKind, ModelSelection>
   keys?: Record<ProviderKey, { configured: boolean; preview: string }>
 }
@@ -45,6 +46,7 @@ const PROVIDERS: { key: ProviderKey; label: string }[] = [
   { key: 'openrouter', label: 'OpenRouter' },
   { key: 'bailian', label: '百炼' },
   { key: 'deepseek', label: 'DeepSeek' },
+  { key: 'zhipu', label: '智谱' },
 ]
 
 const MODEL_ROWS: { key: ModelKind; label: string; note: string }[] = [
@@ -56,6 +58,7 @@ const MODEL_ROWS: { key: ModelKind; label: string; note: string }[] = [
 
 const OPENROUTER_MODEL_CHOICES: Record<'text' | 'vlm', ModelChoice[]> = {
   text: [
+    { label: 'GLM 5.2', value: 'z-ai/glm-5.2' },
     { label: 'Claude Opus 4.8', value: 'anthropic/claude-opus-4.8' },
   ],
   vlm: [
@@ -82,6 +85,12 @@ const BAILIAN_MODEL_CHOICES: Record<'text' | 'vlm', ModelChoice[]> = {
 const DEEPSEEK_MODEL_CHOICES: Record<'text', ModelChoice[]> = {
   text: [
     { label: 'DeepSeek V4 Pro', value: 'deepseek-v4-pro' },
+  ],
+}
+
+const ZHIPU_MODEL_CHOICES: Record<'text', ModelChoice[]> = {
+  text: [
+    { label: 'GLM 5.2', value: 'glm-5.2' },
   ],
 }
 
@@ -119,6 +128,10 @@ function modelSettingKey(kind: ModelKind, provider: ProviderKey) {
     if (kind === 'text') return 'deepseek_model_text'
     return ''
   }
+  if (provider === 'zhipu') {
+    if (kind === 'text') return 'zhipu_model_text'
+    return ''
+  }
   if (provider === 'openrouter') {
     if (kind === 'text') return 'openrouter_model_text'
     if (kind === 'vlm') return 'openrouter_model_vlm'
@@ -139,6 +152,7 @@ function fallbackSelection(kind: ModelKind, health?: Health | null): ModelSelect
       { provider: 'openrouter', model: '', available: kind === 'text' || kind === 'vlm' },
       { provider: 'bailian', model: '', available: kind === 'text' || kind === 'vlm' },
       { provider: 'deepseek', model: '', available: kind === 'text' },
+      { provider: 'zhipu', model: '', available: kind === 'text' },
     ],
   }
 }
@@ -151,6 +165,8 @@ function modelChoices(kind: ModelKind, provider: ProviderKey, currentModel: stri
     choices = [...BAILIAN_MODEL_CHOICES[kind]]
   } else if (provider === 'deepseek' && kind === 'text') {
     choices = [...DEEPSEEK_MODEL_CHOICES.text]
+  } else if (provider === 'zhipu' && kind === 'text') {
+    choices = [...ZHIPU_MODEL_CHOICES.text]
   } else if (provider === 'hiagent') {
     choices = [...HIAGENT_MODEL_CHOICES[kind]]
   }
@@ -181,6 +197,56 @@ function prettyJson(raw?: string | null) {
   }
 }
 
+type JsonRecord = Record<string, unknown>
+
+function parseJsonRecord(raw?: string | null): JsonRecord {
+  if (!raw) return {}
+  try {
+    const parsed = JSON.parse(raw)
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as JsonRecord
+  } catch {
+    // ignore malformed json in legacy logs
+  }
+  return {}
+}
+
+function readString(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return ''
+}
+
+function readNumber(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value)) return value
+    if (typeof value === 'string' && value.trim()) {
+      const n = Number(value)
+      if (Number.isFinite(n)) return n
+    }
+  }
+  return undefined
+}
+
+function inferReferenceType(prompt: string) {
+  const match = prompt.match(/Reference type:\s*([a-z_]+)/i)
+  return match?.[1]?.trim() ?? ''
+}
+
+function inferShotNo(prompt: string) {
+  const match = prompt.match(/\bShot\s+(\d+)\b/i)
+  if (!match) return undefined
+  const n = Number(match[1])
+  return Number.isFinite(n) ? n : undefined
+}
+
+function formatEpisodeShot(episodeNo?: number, shotNo?: number) {
+  if (episodeNo !== undefined && shotNo !== undefined) return `第${episodeNo}集第${shotNo}镜`
+  if (episodeNo !== undefined) return `第${episodeNo}集`
+  if (shotNo !== undefined) return `第${shotNo}镜`
+  return ''
+}
+
 const CALL_KIND_LABELS: Record<string, string> = {
   chat: '文本模型调用',
   vlm: '视觉模型调用',
@@ -203,7 +269,32 @@ const CALL_KIND_LABELS: Record<string, string> = {
   reference_image_mode_original_failure: '参考图模式最终失败',
 }
 
+const REFERENCE_TYPE_LABELS: Record<string, string> = {
+  character: '角色参考图',
+  scene: '场景参考图',
+  plot_key_frame: '剧情参考图',
+  previous_shot_frame: '承接参考图',
+}
+
+const FRAME_KIND_LABELS: Record<string, string> = {
+  head: '首关键帧',
+  tail: '尾关键帧',
+}
+
+const CALLER_LABELS: Record<string, string> = {
+  'stages.summarize_chapter': '章节摘要',
+  'stages.review_scene_image': '关键帧评审',
+  'stages.qa_shot': '视频自动质检',
+  'video_modes.review_reference_image': '参考图单图质检',
+  'video_modes.review_reference_consistency': '参考图一致性质检',
+  'video_modes.write_reference_prompt': '参考图提示词生成',
+  'portraits.assess_new_character': '新角色建卡评估',
+  'scenes.assess_new_scene': '新场景评估',
+}
+
 const CALL_STATUS_LABELS: Record<string, string> = {
+  RUNNING: '调用中',
+  INTERRUPTED: '已中断',
   OK: '成功',
   FAILED: '失败',
   TIMEOUT: '超时',
@@ -212,6 +303,8 @@ const CALL_STATUS_LABELS: Record<string, string> = {
   QA_ERROR: '质检异常',
   REPAIR_STALLED: '修复停滞',
   FALLBACK_LAST_OUTPUT: '采用最后输出',
+  COVERS_SPLIT: '大纲自动拆分',
+  COVERS_DOWNGRADED: '圣经外台词转旁白',
   PROMPT_READY: '提示词已生成',
   REFERENCE_ATTEMPT_FAILED: '参考图首轮失败',
   REFERENCE_RETRY_SUCCESS: '参考图重试成功',
@@ -251,6 +344,122 @@ function callKindLabel(kind: string) {
   return CALL_KIND_LABELS[kind] ?? humanizeToken(kind)
 }
 
+function callerKey(meta: JsonRecord) {
+  const moduleName = readString(meta.caller_module).replace(/^app\./, '')
+  const functionName = readString(meta.caller_function)
+  if (!moduleName || !functionName) return ''
+  return `${moduleName}.${functionName}`
+}
+
+function callerLabel(meta: JsonRecord) {
+  const key = callerKey(meta)
+  if (!key) return ''
+  return CALLER_LABELS[key] ?? humanizeToken(key.replace(/\./g, '_').replace(/^_+/, ''))
+}
+
+function withScope(scope: string, label: string) {
+  return scope ? `${scope}${label}` : label
+}
+
+function callInitiatorLabel(call: Call, meta: JsonRecord, scope: string) {
+  const stage = readString(meta.stage)
+  const roleLabel = readString(meta.call_role_label)
+  if (stage) {
+    const stageLabel = roleLabel ? `${stage}${roleLabel}` : stage
+    return withScope(scope, stageLabel)
+  }
+
+  const explicit = readString(meta.initiator_label)
+  if (explicit) return withScope(scope, explicit)
+
+  const caller = callerLabel(meta)
+  if (!caller) return ''
+  if (call.kind === 'chat' || call.kind === 'vlm_qa') return withScope(scope, caller)
+  return caller
+}
+
+// 修复重试为何被触发：把上一轮输出的校验错误（meta.latest_errors）透出，
+// 否则"主生成 成功 HTTP 200"后紧跟两条"修复重试"会让人误以为主生成内容已通过——
+// 实际是 HTTP 通了、内容没过校验。有了它，运营一眼能看清重试根因（如 episode_no 漏写），不必再翻库。
+function callRepairTrigger(meta: JsonRecord): string {
+  if (readString(meta.call_role) !== 'stage_repair') return ''
+  const errs = meta.latest_errors
+  if (!Array.isArray(errs)) return ''
+  const texts = errs.filter((e): e is string => typeof e === 'string' && e.trim().length > 0)
+  if (!texts.length) return ''
+  const shown = texts.slice(0, 3).join('；')
+  return texts.length > 3 ? `${shown}（另有 ${texts.length - 3} 条）` : shown
+}
+
+function callFunctionLabel(call: Call) {
+  const meta = parseJsonRecord(call.meta)
+  const request = parseJsonRecord(call.request_json)
+  const prompt = readString(request.prompt)
+  const episodeNo = readNumber(meta.episode_no, request.episode_no)
+  const shotNo = readNumber(meta.shot_no, inferShotNo(prompt))
+  const scope = formatEpisodeShot(episodeNo, shotNo)
+  const assetKind = readString(meta.asset_kind)
+  const frameKind = readString(meta.frame_kind)
+  const referenceType = readString(meta.reference_type, inferReferenceType(prompt))
+  const characterName = readString(meta.character_name)
+  const sceneName = readString(meta.scene_name)
+  const initiatorLabel = callInitiatorLabel(call, meta, scope)
+
+  switch (call.kind) {
+    case 'chat':
+      return initiatorLabel || (scope ? `${scope}文本模型调用` : CALL_KIND_LABELS.chat)
+    case 'screenplay_prompt':
+      return episodeNo !== undefined ? `第${episodeNo}集剧本` : '剧本'
+    case 'storyboard_outline_prompt':
+      return episodeNo !== undefined ? `第${episodeNo}集分镜大纲` : '分镜大纲'
+    case 'storyboard_shot_prompt':
+      return scope ? `${scope}分镜` : '分镜'
+    case 'storyboard_outline_split':
+      return scope ? `${scope}分镜拆分` : '分镜拆分'
+    case 'storyboard_outline_downgrade':
+      return scope ? `${scope}大纲降级` : '大纲降级'
+    case 'plan_prompt':
+      return '分集规划'
+    case 'bible_prompt':
+      return '人物谱'
+    case 'references_prompt':
+      return scope ? `${scope}参考图规划` : (episodeNo !== undefined ? `第${episodeNo}集参考图规划` : '参考图规划')
+    case 'video_create':
+      return scope ? `${scope}的视频` : '视频'
+    case 'video_poll':
+      return scope ? `${scope}的视频轮询` : '视频轮询'
+    case 'vlm_qa':
+      return initiatorLabel || (scope ? `${scope}视频质检` : CALL_KIND_LABELS.vlm_qa)
+    case 'reference_image_mode_attempt_1_failed':
+    case 'reference_image_mode_retry_success':
+    case 'reference_image_mode_retry_failed':
+    case 'reference_image_mode_original_failure':
+      return scope ? `${scope}参考图模式` : '参考图模式'
+    case 'image_generate':
+    case 'image_edit':
+    case 'image':
+      if (assetKind === 'keyframe') {
+        const frameLabel = FRAME_KIND_LABELS[frameKind] ?? '关键帧'
+        return scope ? `${scope}${frameLabel}` : frameLabel
+      }
+      if (assetKind === 'reference_image') {
+        const refLabel = REFERENCE_TYPE_LABELS[referenceType] ?? '参考图'
+        return scope ? `${scope}的${refLabel}` : refLabel
+      }
+      if (assetKind === 'portrait') {
+        const prefix = episodeNo !== undefined ? `第${episodeNo}集起` : ''
+        return `${prefix}${characterName || '角色'}定妆照`
+      }
+      if (assetKind === 'scene_reference') {
+        const prefix = episodeNo !== undefined ? `第${episodeNo}集起` : ''
+        return `${prefix}${sceneName || '场景'}素材图`
+      }
+      return initiatorLabel || callKindLabel(call.kind)
+    default:
+      return initiatorLabel || callKindLabel(call.kind)
+  }
+}
+
 function callStatusLabel(status: string) {
   return CALL_STATUS_LABELS[status] ?? humanizeToken(status.toLowerCase())
 }
@@ -269,6 +478,7 @@ const KEY_PROVIDERS: { key: ProviderKey; label: string; placeholder: string }[] 
   { key: 'openrouter', label: 'OpenRouter', placeholder: 'sk-or-v1-...' },
   { key: 'bailian', label: '百炼（阿里云 DashScope）', placeholder: 'sk-...' },
   { key: 'deepseek', label: 'DeepSeek', placeholder: 'sk-...' },
+  { key: 'zhipu', label: '智谱（官方 API）', placeholder: '填写智谱 API Key' },
 ]
 
 export default function MonitorPage() {
@@ -526,7 +736,7 @@ export default function MonitorPage() {
                 <tr key={j.id}>
                   <td className="mono">{fmtTime(j.updated_at)}</td>
                   <td>{j.project_name}</td>
-                  <td>第{j.episode_no}集 · 镜{j.shot_no}</td>
+                  <td>{j.kind === 'screenplay' ? `第${j.episode_no}集 · 剧本` : `第${j.episode_no}集 · 镜${j.shot_no}`}</td>
                   <td><span className={`stamp ${j.status === 'succeeded' ? 'green' : j.status === 'failed' || j.status === 'paused_budget' ? 'red' : j.status === 'running' ? 'gold' : 'grey'}`}>{j.status}</span></td>
                   <td style={{ color: 'var(--cinnabar-deep)', fontSize: 12, maxWidth: 380, wordBreak: 'break-all' }}>{j.error ?? ''}</td>
                 </tr>
@@ -539,10 +749,12 @@ export default function MonitorPage() {
       <section className="card">
         <h3>对外调用账本 <span className="hint">每一次模型调用都在此留痕</span></h3>
         <table className="ledger">
-          <thead><tr><th>时间</th><th>类型</th><th>模型</th><th>状态</th><th>HTTP 状态</th><th>延迟</th><th>错误</th></tr></thead>
+          <thead><tr><th>时间</th><th>功能定位</th><th>模型</th><th>状态</th><th>HTTP 状态</th><th>延迟</th><th>错误</th></tr></thead>
           <tbody>
             {calls?.map(c => {
               const expanded = expandedCallId === c.id
+              const functionLabel = callFunctionLabel(c)
+              const repairTrigger = callRepairTrigger(parseJsonRecord(c.meta))
               return (
                 <Fragment key={c.id}>
                   <tr
@@ -557,7 +769,12 @@ export default function MonitorPage() {
                     }}
                   >
                     <td className="mono">{fmtTime(c.ts)}</td>
-                    <td title={c.kind}>{callKindLabel(c.kind)}</td>
+                    <td title={`${functionLabel} ｜ 原始类型：${c.kind}${repairTrigger ? ` ｜ 触发原因：${repairTrigger}` : ''}`}>
+                      {functionLabel}
+                      {repairTrigger && (
+                        <div className="hint" style={{ marginTop: 2, color: 'var(--cinnabar-deep)' }}>触发：{repairTrigger}</div>
+                      )}
+                    </td>
                     <td className="mono">{c.model}</td>
                     <td><span className={`stamp ${callStatusColor(c.status)}`} title={c.status}>{callStatusLabel(c.status)}</span></td>
                     <td className="mono">{c.http_status ? `HTTP ${c.http_status}` : '未返回'}</td>

@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS episodes (
     screenplay_json TEXT,
     screenplay_status TEXT DEFAULT 'pending',
     screenplay_error TEXT,
+    screenplay_started_at REAL,
+    screenplay_updated_at REAL,
     status TEXT DEFAULT 'planned',
     script_error TEXT,
     created_at REAL NOT NULL
@@ -173,6 +175,22 @@ CREATE INDEX IF NOT EXISTS idx_versions_shot ON shot_versions(shot_id, version_n
 CREATE INDEX IF NOT EXISTS idx_scenes_shot ON shot_scenes(shot_id, version_no);
 CREATE INDEX IF NOT EXISTS idx_versions_idem ON shot_versions(idem_key);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+CREATE TABLE IF NOT EXISTS error_logs (
+    id TEXT PRIMARY KEY,             -- 错误ID（ERR-YYYYMMDD-xxxxxx），前端展示 + 后端定位的唯一句柄
+    ts REAL NOT NULL,
+    category TEXT NOT NULL,          -- 分类 key（validation/conflict/provider/generation/...）
+    category_label TEXT,             -- 分类中文名（展示用）
+    code TEXT NOT NULL,              -- 报错码（VAL-422/CON-409/LLM/GEN/SYS...）
+    is_technical INTEGER DEFAULT 0,  -- 1=技术类（原文脱敏），0=业务类（原文可展示）
+    http_status INTEGER,
+    action TEXT,                     -- 请求动作：'POST /api/...' 或后台任务标签
+    context_json TEXT,               -- 请求上下文（method/path/path_params/query/body/关联id），已脱敏截断
+    message TEXT,                    -- 原始报错信息 str(exc)
+    traceback TEXT,                  -- 完整堆栈
+    exc_type TEXT,                   -- 异常类名
+    meta_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_error_logs_ts ON error_logs(ts);
 """
 
 
@@ -208,6 +226,8 @@ MIGRATIONS = (
     "ALTER TABLE episodes ADD COLUMN screenplay_json TEXT",
     "ALTER TABLE episodes ADD COLUMN screenplay_status TEXT DEFAULT 'pending'",
     "ALTER TABLE episodes ADD COLUMN screenplay_error TEXT",
+    "ALTER TABLE episodes ADD COLUMN screenplay_started_at REAL",
+    "ALTER TABLE episodes ADD COLUMN screenplay_updated_at REAL",
     "ALTER TABLE shots ADD COLUMN mode_plan TEXT",
     "ALTER TABLE projects ADD COLUMN bible_feedback TEXT",  # 持久化重谱打回要求，供进程重启后恢复人物谱任务
     "ALTER TABLE projects ADD COLUMN portraits_status TEXT DEFAULT 'idle'",  # 按集刷新定妆照任务状态
@@ -232,6 +252,11 @@ def init_db() -> None:
             pass  # 列已存在
     for key, value in DEFAULT_SETTINGS.items():
         conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", (key, value))
+    # 进程重启时，旧进程不可能再回写这些请求；不能让监控页永久显示“调用中”。
+    conn.execute(
+        "UPDATE provider_calls SET status='INTERRUPTED', error=COALESCE(error, '服务重启，调用结果未回写') "
+        "WHERE status='RUNNING'"
+    )
     conn.commit()
 
 
@@ -293,5 +318,54 @@ def log_provider_call(kind: str, model: str, status: str, http_status: int | Non
         (now(), kind, model, status, http_status, latency_ms,
          (error or "")[:500] or None, _dump_call_json(request_json), _dump_call_json(response_json),
          json.dumps(meta or {}, ensure_ascii=False)[:800]),
+    )
+    conn.commit()
+
+
+def start_provider_call(kind: str, model: str, *, meta: dict | None = None,
+                        request_json: Any | None = None) -> int:
+    """请求发出前先写入账本，让长请求立即在监制房显示。"""
+    conn = get_conn()
+    cur = conn.execute(
+        """INSERT INTO provider_calls(
+            ts, kind, model, status, http_status, latency_ms, error, request_json, response_json, meta
+        ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (now(), kind, model, "RUNNING", None, 0, None, _dump_call_json(request_json), None,
+         json.dumps(meta or {}, ensure_ascii=False)[:800]),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def finish_provider_call(call_id: int, status: str, http_status: int | None,
+                         latency_ms: int, *, error: str | None = None,
+                         response_json: Any | None = None) -> None:
+    """原地更新已开始的调用，避免“调用中 + 成功”被误认为两次模型花费。"""
+    conn = get_conn()
+    conn.execute(
+        """UPDATE provider_calls
+           SET status=?, http_status=?, latency_ms=?, error=?, response_json=?
+           WHERE id=?""",
+        (status, http_status, latency_ms, (error or "")[:500] or None,
+         _dump_call_json(response_json), call_id),
+    )
+    conn.commit()
+
+
+def insert_error_log(error_id: str, *, category: str, category_label: str, code: str,
+                     is_technical: bool, http_status: int | None, action: str | None,
+                     context: Any | None, message: str | None, traceback_text: str | None,
+                     exc_type: str | None, meta: dict | None = None) -> None:
+    """落库一条报错日志。原文/堆栈/上下文全留后端，前端只拿 error_id+code+category。"""
+    conn = get_conn()
+    conn.execute(
+        """INSERT OR REPLACE INTO error_logs(
+            id, ts, category, category_label, code, is_technical, http_status,
+            action, context_json, message, traceback, exc_type, meta_json
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (error_id, now(), category, category_label, code, 1 if is_technical else 0, http_status,
+         action, _dump_call_json(context), (message or "")[:20_000] or None,
+         (traceback_text or "")[:40_000] or None, exc_type,
+         json.dumps(meta or {}, ensure_ascii=False)[:1000]),
     )
     conn.commit()

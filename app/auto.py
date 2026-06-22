@@ -20,7 +20,7 @@ import re
 import shutil
 from pathlib import Path
 
-from app import config, worker
+from app import config, errors, worker
 from app.db import get_conn, get_setting, now, rows_to_dicts, set_setting
 
 # 轮询 DB 等待队列阶段完成的间隔（秒）
@@ -173,9 +173,12 @@ async def _run(pid: str) -> None:
         _log(pid, "已取消（已入队的关键帧/视频会继续跑完，可稍后重新点击从断点续做）")
         raise
     except Exception as exc:  # noqa: BLE001 失败要响
-        st["error"] = str(exc)[:800]
+        rec = errors.log_error(exc, action="auto_pipeline", context={"project_id": pid})
+        # RuntimeError 由流水线主动抛出、消息已是安全中文（且内嵌下游错误码）；其它异常按技术类脱敏。
+        public = (str(exc)[:760] + f"（{rec.error_id}）") if isinstance(exc, RuntimeError) else rec.public
+        st["error"] = public[:800]
         _phase(pid, "中断")
-        _log(pid, f"流水线中断：{exc}")
+        _log(pid, f"流水线中断：{public}")
     finally:
         st["running"] = False
         st["updated_at"] = now()
@@ -265,7 +268,10 @@ async def _episode_pipeline(pid: str, eid: str, epno: int, sb_sem: asyncio.Semap
         if not ep["screenplay_json"] or ep["screenplay_status"] in ("pending", "failed", "running"):
             async with sb_sem:
                 _log(pid, f"第{epno}集：生成可拍剧本")
-                conn.execute("UPDATE episodes SET screenplay_status='running', screenplay_error=NULL WHERE id=?", (eid,))
+                started_at = now()
+                conn.execute(
+                    "UPDATE episodes SET screenplay_status='running', screenplay_error=NULL, screenplay_started_at=?, screenplay_updated_at=? WHERE id=?",
+                    (started_at, started_at, eid))
                 conn.commit()
                 await api._screenplay_task(eid)
             ep = conn.execute("SELECT screenplay_status, screenplay_error FROM episodes WHERE id=?", (eid,)).fetchone()
@@ -288,6 +294,8 @@ async def _episode_pipeline(pid: str, eid: str, epno: int, sb_sem: asyncio.Semap
         ep = conn.execute("SELECT status FROM episodes WHERE id=?", (eid,)).fetchone()
         if ep["status"] == "scripted":
             try:
+                # 与人工确认同口径：超 90s 上限时先跑内置时间 agent 按内容压缩时长（单镜不超 20%）。
+                await api._time_agent_rebalance_durations(eid)
                 api.confirm_episode_core(eid)
                 _log(pid, f"第{epno}集：分镜已自动确认")
             except ValueError as ve:
@@ -302,7 +310,10 @@ async def _episode_pipeline(pid: str, eid: str, epno: int, sb_sem: asyncio.Semap
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # noqa: BLE001 单集失败不拖垮其它集
-        _log(pid, f"第{epno}集失败：{exc}")
+        rec = errors.log_error(exc, action="auto_episode_pipeline",
+                               context={"project_id": pid, "episode_id": eid, "episode_no": epno})
+        detail = f"{str(exc)[:400]}（{rec.error_id}）" if isinstance(exc, RuntimeError) else rec.public
+        _log(pid, f"第{epno}集失败：{detail}")
 
 
 def _shots_needing_video(conn, eid: str) -> list[dict]:

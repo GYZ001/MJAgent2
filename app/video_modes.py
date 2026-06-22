@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 from app import config, hiagent
 from app.db import get_conn, get_setting, new_id
+from app.errors import code_ref
 from app.hiagent import ProviderError
 from app.schemas import Bible, Shot, extract_json
 
@@ -105,6 +106,12 @@ def quality_threshold() -> float:
     return float_setting("video_reference_quality_threshold", 0.75)
 
 
+def quality_floor() -> float:
+    """兜底图质量地板：生成图全不达标时，最佳一版仍低于此分则不喂模型——此时定妆照/场景锚点已能锁身份与环境，
+    一张带水印/畸形的脏图当参考反而拖累成片。介于地板与阈值之间才作兜底喂入。"""
+    return float_setting("video_reference_quality_floor", 0.4)
+
+
 def min_generated_references() -> int:
     """参考图模式下每镜至少新生成几张关键帧参考图（防止只剩定妆照）。"""
     return max(0, int_setting("video_reference_min_generated", 1))
@@ -133,6 +140,13 @@ def consistency_threshold() -> float:
 def consistency_retries() -> int:
     """漂移图从锚点 i2i 重生的最大次数；仍漂移则从喂给 Seedance 的集合里剔除。"""
     return max(0, int_setting("video_reference_consistency_retries", 1))
+
+
+def max_character_reference_images() -> int:
+    """喂给视频模型时，「含同一角色」的参考图最多几张。
+    根因防穿模/分身：多张不同尺度的含人物图（尤其纯背景全身定妆照与入戏关键帧并存）是 Seedance
+    把同一角色画两遍/生成前景巨人的结构性触发器。默认 1（场景/环境图不受此限）。"""
+    return max(1, int_setting("video_reference_max_character_images", 1))
 
 
 def _contains_any(text: str, words: list[str]) -> bool:
@@ -395,7 +409,14 @@ async def review_reference_image(image_b64: str, *, shot: Shot, bible: Bible, re
             "issues": [],
         },
     }
-    raw = await hiagent.vlm_check([image_b64], json.dumps(expectation, ensure_ascii=False))
+    raw = await hiagent.vlm_check(
+        [image_b64], json.dumps(expectation, ensure_ascii=False),
+        call_meta={
+            "initiator_label": "参考图单图质检",
+            "reference_type": ref_type,
+            "shot_no": shot.shot_no,
+            "scene_setting": shot.scene_setting,
+        })
     data = extract_json(raw)
     keys = ["character_match", "costume_match", "hair_match", "prop_match", "scene_match", "clean_frame", "seedance_reference_fit"]
     for key in keys + ["overall"]:
@@ -420,14 +441,16 @@ _SEED_USAGE_NOTE = (
 )
 
 
-async def _generate_image_with_seed_fallback(prompt: str, seed_inputs: list[str] | None) -> dict[str, Any]:
+async def _generate_image_with_seed_fallback(prompt: str, seed_inputs: list[str] | None, *,
+                                             call_meta: dict | None = None) -> dict[str, Any]:
     """带 i2i 种子生成参考图；若网关不支持参考图（ProviderError）则去掉种子重试一次（对齐 worker._generate_one_scene）。"""
     try:
-        return await hiagent.generate_image(prompt, size=config.REF_IMAGE_SIZE, image_inputs=seed_inputs or None)
+        return await hiagent.generate_image(
+            prompt, size=config.REF_IMAGE_SIZE, image_inputs=seed_inputs or None, call_meta=call_meta)
     except ProviderError:
         if not seed_inputs:
             raise
-        return await hiagent.generate_image(prompt, size=config.REF_IMAGE_SIZE)
+        return await hiagent.generate_image(prompt, size=config.REF_IMAGE_SIZE, call_meta=call_meta)
 
 
 async def review_reference_consistency(*, candidates: list[ReferenceImageAsset],
@@ -477,7 +500,14 @@ async def review_reference_consistency(*, candidates: list[ReferenceImageAsset],
     )
     frames = anchor_b64 + [b for _, b in cand_pairs]
     try:
-        raw = await hiagent.vlm_check(frames, expectation)
+        raw = await hiagent.vlm_check(
+            frames, expectation,
+            call_meta={
+                "initiator_label": "参考图一致性质检",
+                "shot_no": shot.shot_no,
+                "candidate_count": len(cand_pairs),
+                "anchor_count": len(anchor_b64),
+            })
         data = extract_json(raw)
     except Exception:  # noqa: BLE001 VLM/解析失败保守放行，不误删
         return {"candidates": [{"asset_id": c.id, "consistency": 1.0, "drift": [], "issues": []}
@@ -524,7 +554,16 @@ async def _generate_one_reference(*, project_id: str, episode_no: int, shot: Sho
         prompt += _SEED_USAGE_NOTE
     if extra_instruction:
         prompt += " " + extra_instruction.strip()
-    item = await _generate_image_with_seed_fallback(prompt, seed_inputs)
+    item = await _generate_image_with_seed_fallback(
+        prompt,
+        seed_inputs,
+        call_meta={
+            "asset_kind": "reference_image",
+            "episode_no": episode_no,
+            "shot_no": shot.shot_no,
+            "reference_type": ref_type,
+            "reference_index": index,
+        })
     if item.get("url"):
         await hiagent.download(item["url"], str(dest))
     elif item.get("b64_json"):
@@ -633,7 +672,8 @@ async def write_reference_prompt(shot: Shot, bible: Bible, ref_type: str, *, int
         raw = await hiagent.chat([
             {"role": "system", "content": "Return exactly one JSON object with a single 'prompt' string field. English only."},
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-        ], temperature=0.3, max_tokens=500)
+        ], temperature=0.3, max_tokens=500,
+            call_meta={"initiator_label": "参考图提示词生成", "reference_type": ref_type, "shot_no": shot.shot_no})
         data = extract_json(raw)
         return str(data.get("prompt") or "").strip()[:600]
     except Exception:
@@ -644,7 +684,8 @@ async def _generate_reference_keep_best(*, project_id: str, episode_no: int, sho
                                         ref_type: str, index: int, content_override: str | None,
                                         retries: int, seed_inputs: list[str] | None = None) -> tuple[ReferenceImageAsset | None, list[ReferenceImageAsset], list[dict[str, Any]]]:
     """生成单张参考图，QA 不达标则重试；最终返回过审资产，或（全部不达标时）保留分数最高的一版兜底，
-    保证镜头至少有图，而不是因为 QA 卡掉直接没有参考图。
+    保证镜头至少有图，而不是因为 QA 卡掉直接没有参考图。但兜底图有质量地板（quality_floor）：
+    最佳一版仍低于地板则一律不喂（返回 None，全部进废弃画廊），改由定妆照/场景锚点撑住——脏图当参考反而拖累成片。
     返回 (chosen_or_none, discarded_assets, rejection_details)：discarded_assets 是质检未通过、
     未被选用的参考图（带各自图片文件），供评审墙「废弃照片画廊」展示。"""
     rejections: list[dict[str, Any]] = []
@@ -659,7 +700,11 @@ async def _generate_reference_keep_best(*, project_id: str, episode_no: int, sho
                 ref_type=ref_type, index=attempt_index, content_override=content_override,
                 seed_inputs=seed_inputs)
         except Exception as exc:
-            rejections.append({"type": ref_type, "source": "seedream_generated", "reason": str(exc)[:240]})
+            rejections.append({"type": ref_type, "source": "seedream_generated",
+                               "reason": "参考图生成异常" + code_ref(
+                                   exc, action="generate_reference_image",
+                                   context={"project_id": project_id, "episode_no": episode_no,
+                                            "shot_id": getattr(shot, "id", None), "ref_type": ref_type})})
             continue
         if not asset.rejectReason:
             # 通过 QA：选它；本次之前生成的不达标图作为废弃图一并返回。
@@ -669,7 +714,10 @@ async def _generate_reference_keep_best(*, project_id: str, episode_no: int, sho
         attempts.append(asset)
         if best is None or (asset.qualityScore or 0) > (best.qualityScore or 0):
             best = asset
-    # 全部不达标：保留分数最高的一版兜底，其余进废弃画廊。
+    # 全部不达标：最佳一版若仍低于质量地板，直接不喂（全部进废弃画廊），只靠定妆照/场景锚点。
+    if best is not None and (best.qualityScore or 0) < quality_floor():
+        return None, list(attempts), rejections
+    # 否则保留分数最高的一版兜底，其余进废弃画廊。
     discarded = [a for a in attempts if a is not best]
     return best, discarded, rejections
 
@@ -921,6 +969,12 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
         rejection_details=rejection_details, rejected_out=rejected_out)
 
     selected = _dedupe_assets(selected)[:max_refs]
+    # 根因防穿模/分身：限制「含同一角色」的参考图数量。多张不同尺度的含人物图（尤其纯背景全身定妆照
+    # 与入戏关键帧并存）是 Seedance 把同一角色画两遍/生成前景巨人的结构性触发器。被压下的图（多为裸
+    # 定妆照）仍作为 i2i 种子参与了参考图生成，身份不丢；它们进废弃画廊、不喂模型，用户可手动启用。
+    selected, suppressed = _limit_character_references(selected, limit=max_character_reference_images())
+    if rejected_out is not None:
+        rejected_out.extend(suppressed)
     for asset in selected:
         asset.selectedForSeedance = True
         asset.shotId = asset.shotId or shot_id
@@ -934,6 +988,43 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
     return selected
 
 
+def _is_character_bearing(asset: ReferenceImageAsset) -> bool:
+    """该参考图里是否含人物（会参与构图、可能被模型当成额外主体复制）。纯场景/环境图返回 False。"""
+    return asset.type in {"character", "plot_key_frame", "previous_shot_frame"} or bool(asset.relatedCharacterIds)
+
+
+def _limit_character_references(selected: list[ReferenceImageAsset], *, limit: int
+                                ) -> tuple[list[ReferenceImageAsset], list[ReferenceImageAsset]]:
+    """限制喂给 Seedance 的「含人物参考图」数量，避免同一角色被画两遍/前景巨人/穿模。
+    优先级：上一镜尾帧（连贯锚点）> 过审的入戏生成关键帧 > 干净裸定妆照 > 兜底（低于阈值）的生成关键帧。
+    干净生成关键帧仍排在定妆照前（定妆照直接喂视频最易变前景巨人）；但当生成图本身只是兜底废图时，
+    宁可让位给干净定妆照——脏兜底图压过满分定妆照得不偿失。超出名额的移出喂模型集合（仍作为 i2i 种子，身份不丢），
+    进废弃画廊供用户手动启用。返回 (kept, suppressed)。"""
+    char_refs = [a for a in selected if _is_character_bearing(a)]
+    if len(char_refs) <= limit:
+        return selected, []
+
+    def _priority(a: ReferenceImageAsset) -> int:
+        if a.type == "previous_shot_frame":
+            return 0   # 连贯尾帧优先保留
+        if a.source == "seedream_generated":
+            # 过审的入戏关键帧最优；兜底（带 rejectReason、低于阈值）的生成图让位给干净定妆照
+            return 1 if not a.rejectReason else 3
+        return 2       # 干净裸定妆照（直接喂视频较易变前景巨人，故排在过审生成图后）
+
+    keep_ids = {id(a) for a in sorted(char_refs, key=_priority)[:limit]}
+    kept: list[ReferenceImageAsset] = []
+    suppressed: list[ReferenceImageAsset] = []
+    for a in selected:
+        if _is_character_bearing(a) and id(a) not in keep_ids:
+            a.selectedForSeedance = False
+            a.rejectReason = "duplicate_character_suppressed"
+            suppressed.append(a)
+        else:
+            kept.append(a)
+    return kept, suppressed
+
+
 def _dedupe_assets(assets: list[ReferenceImageAsset]) -> list[ReferenceImageAsset]:
     out: list[ReferenceImageAsset] = []
     seen: set[str] = set()
@@ -944,6 +1035,15 @@ def _dedupe_assets(assets: list[ReferenceImageAsset]) -> list[ReferenceImageAsse
         seen.add(key)
         out.append(asset)
     return out
+
+
+# 反分身/单实例约束（真正发给 Seedance 视频的 prompt 用）：参考图只锁「身份+环境」，绝不能被当成额外主体
+# 再画一遍。不加这句时，满屏全身定妆照常被模型原样贴进画面 → 前景巨人 + 脚本里的小人 = 同一角色两份/穿模。
+REFERENCE_SINGLE_INSTANCE_NOTE = (
+    " 重要：以上参考图仅用于锁定每个角色的长相/发型/服装与场景的环境/光线；"
+    "每个角色在整个画面里只能出现一次，严禁把参考图里的人物当作额外的前景或背景对象再画一遍，"
+    "不要分身/复制/双重同一角色，不要出现一个贴满画面的巨大人物剪影遮挡主体，不要人物与人物穿模重叠。"
+)
 
 
 def append_reference_prompt_notes(prompt_text: str, assets: list[ReferenceImageAsset]) -> str:
@@ -962,7 +1062,7 @@ def append_reference_prompt_notes(prompt_text: str, assets: list[ReferenceImageA
         lines.append(f"Reference image {idx}: use as {label}; source: {source}{chars}.")
     if not lines:
         return prompt_text
-    note = " Use the provided reference images as follows: " + " ".join(lines)
+    note = " Use the provided reference images as follows: " + " ".join(lines) + REFERENCE_SINGLE_INSTANCE_NOTE
     return prompt_text + note
 
 

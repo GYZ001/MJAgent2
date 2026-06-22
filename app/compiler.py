@@ -25,9 +25,10 @@ def narration_after_dialogue(narration: str) -> bool:
 
 NEGATIVE_SUFFIX = (
     "避免出现：真人实拍，照片写实质感，画面内任何文字/字幕/水印/logo/乱码伪字，多余人物，"
+    "同一角色重复出现/分身/双重人物/画面里多出一个一模一样的人，前景出现贴满画面的巨大人物剪影遮挡主体，"
     "畸形手/多指缺指/手指粘连，肢体错位/穿模/关节扭曲，面部扭曲，五官崩坏/中途换脸，"
     "角色换发型换服装/年龄体型漂移，名人长相，道具凭空出现或消失/与手脱节，"
-    "动作违反重力与人体运动规律/瞬移，画面变形 morphing/渐变扭曲，镜头中途无故切场景或跳切，"
+    "角色凭空出现或消失，动作违反重力与人体运动规律/瞬移，画面变形 morphing/渐变扭曲，镜头中途无故切场景或跳切，"
     "画面闪烁，画风突变，满屏光效/特效遮挡面部")
 # 正向质量/稳定锚点（Seedance 最佳实践：显式给出稳定与质量约束，比单纯负面词更有效）
 QUALITY_SUFFIX = (
@@ -272,6 +273,20 @@ def ensure_source_excerpt_in_prompt(prompt_text: str, shot: Shot) -> str:
     return sanitize_seedance_prompt(candidate_body + args)
 
 
+def _framing_scale_hint(shot_size: str) -> str:
+    """景别 → 人物在画面中的尺度/数量锚定，消解“景别说远景、参考图却是满屏全身像”导致的尺度打架
+    （模型两种尺度都画 → 前景巨人 + 远景小人 = 同一角色两份/穿模）。"""
+    s = (shot_size or "").strip()
+    if "远景" in s:  # 含大远景/远景
+        return ("人物在画面中占比小、完整置于环境空间内（全身可见但绝不顶满画面），"
+                "画面里只有这一个主体，严禁出现贴满画面的巨大人物")
+    if "全景" in s:
+        return "人物全身完整入画、约占画面高度三分之二，处于场景空间中，单一主体不重复"
+    if "中景" in s:
+        return "取人物腰部以上半身，单一主体，人物比例自然、不顶满画面"
+    return ""
+
+
 def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = None,
                    *, with_refs: bool = False, chained: bool = False,
                    prev_action: str | None = None, from_scene: bool = False,
@@ -326,15 +341,24 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     # 关键纠偏：单镜只表现“一个连贯流畅的动作”，不再要求 10s 内塞入多个小镜头/快速切景
     # （多动作快切是当前成片崩坏与画风漂移的主因）。剧情密度交给旁白承载，画面只演一件事。
     subject = "；".join(anchors)
+    visible_names = "、".join(shot.characters)
+    scale_hint = _framing_scale_hint(shot.shot_size)
+    frame_discipline = (
+        f"本镜允许出现在画面中的角色仅限：{visible_names}；不要生成名单外人物、路人特写或无关人影。"
+        "名单内角色必须从开场就有合理画面位置，或按镜头动作从门口/画边/人群中自然进入；"
+        "任何角色都不能凭空从无到有，也不能无原因突然消失或突然开口"
+        if visible_names else "")
     scene_env_line = (f"环境（弱化，仅作背景空间参考，不要抢人物主体）：{scene_hint}" if scene_hint else "")
     core_parts = [
         f"9:16 竖屏动态漫画短剧分镜，单镜约 {dur} 秒，只表现一个连贯流畅的动作过程，全程一镜到底，不要在一个镜头里快速切换多个不相关画面",
         f"画面主体：{subject}" if subject else "",
+        frame_discipline,
         f"镜头动作（只演这一件事，动作要有清晰的起势、过程与收势）：{shot.action_desc}",
         "动作遵循现实物理与人体运动规律、自然连续，禁止瞬移/穿模/肢体扭曲/物体凭空出现或消失；"
-        "首帧与尾帧是同一机位、同一场景的同一个动作的开始与结束，两帧之间只做这一个动作的自然过渡，绝不切换场景或机位、不要让画面跳变或形变",
+        "禁止人物凭空出现或消失；首帧与尾帧是同一机位、同一场景的同一个动作的开始与结束，两帧之间只做这一个动作的自然过渡，绝不切换场景或机位、不要让画面跳变或形变",
         "特效与光效服从剧情：日常对话与一般场景写实克制、不要满屏光效或能量粒子，仅在情绪高潮或力量爆发的镜头才用强烈特效，且不得遮挡人物面部表情",
-        f"景别：{shot.shot_size}；运镜：{shot.camera_move}，镜头运动缓慢平稳",
+        (f"景别：{shot.shot_size}；运镜：{shot.camera_move}，镜头运动缓慢平稳"
+         + (f"。{scale_hint}" if scale_hint else "")),
         *story_cues,
         "台词由画面角色开口说出、对口型并配合表情与肢体反应；旁白是画外音解说（角色不开口、不对口型，只用表情/动作呼应）；不在画面上生成任何字幕文字",
         # 音画同步：动作节奏要铺满整段时长、跟着台词走，避免话没说完动作就做完（如台词未结束就趴下/离开/睡着）
@@ -427,6 +451,11 @@ SCENE_QUALITY = (
 # 角色不漂移 + 同镜两帧同机位 + 特效克制（与视频侧一致，三者是 10s 成片稳定的关键）
 SCENE_CONSISTENCY = "人物形象严格遵循上方角色锚点串与参考图：同一张脸、同一发型、同一服装、同一年龄与体型，跨镜不漂移"
 SCENE_SAME_FRAMING = "本帧与本镜另一张关键帧（首图/尾图）保持同一机位、同一构图、同一场景布置与光线方向，只有人物动作所处的瞬间不同，不要换机位或重新构图"
+# 动作/互动保真：把"摸石碑"画成"正面端站、手悬空、与石碑互不相干"是当前关键帧最常见的失真。
+SCENE_ACTION_FIDELITY = (
+    "严格按上方画面描述还原人物的动作与朝向：若描述中人物在触碰/按压/拿取/递出/挥击/指向/注视/搀扶某个对象或另一个人，"
+    "必须画出明确的接触或明确朝向该对象——人物的身体、肩线、面部与视线随动作转向目标，手部真实搭在/握住/伸向目标，"
+    "人物与对象形成清晰可读的互动关系；切勿把有互动的动作画成正面端站、双手垂放、目视镜头、与对象彼此无关的摆拍站姿")
 SCENE_EFFECT_RESTRAINT = "光效/特效服从剧情：日常场景克制写实、不要满屏光效或能量粒子，仅在情绪高潮或力量爆发瞬间才用强特效且不遮挡面部表情"
 
 
@@ -443,6 +472,11 @@ def compile_scene_prompt(shot: Shot, bible: Bible, *, kind: str = "tail",
     if missing:
         raise CompileError(f"镜头 {shot.shot_no} 关键帧引用了圣经中不存在的角色：{missing}")
     anchors = "；".join(bible_map[n].appearance_canonical for n in shot.characters)
+    visible_names = "、".join(shot.characters)
+    visible_roster = (
+        f"本帧只允许出现这些画面人物：{visible_names}；不得添加名单外人物、无关路人或多余人影，"
+        "人物位置必须符合本镜首尾帧描述和动作调度"
+        if visible_names else "")
     scene_hint = shot.scene_setting.strip()
     # 优先用分镜给出的“首帧/尾帧画面描述”（两者明显不同）；缺失时退回 action_desc + 起势/收势框定
     ff = (shot.first_frame_desc or "").strip()
@@ -460,9 +494,11 @@ def compile_scene_prompt(shot: Shot, bible: Bible, *, kind: str = "tail",
     parts = [
         f"统一画风：{bible.world.visual_style_canonical}",
         f"画面人物：{anchors}" if anchors else "",
+        visible_roster,
         SCENE_CONSISTENCY if anchors else "",
         f"场景：{scene_hint}" if scene_hint else "",
         frame_desc,
+        SCENE_ACTION_FIDELITY if anchors else "",
         SCENE_SAME_FRAMING,
         SCENE_EFFECT_RESTRAINT,
         transition_frame_hint,

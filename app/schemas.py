@@ -215,11 +215,18 @@ def extract_json(text: str) -> dict:
     first_error: json.JSONDecodeError | None = None
     for match in re.finditer(r"{", cleaned):
         start = match.start()
+        # 只把形如 JSON 对象开头的花括号当候选；这样仍能跳过说明文字里的
+        # “{不是 JSON}”。一旦遇到第一个真正的 JSON 根对象候选，就必须以它
+        # 为准：若它因字符串内双引号未转义等原因损坏，应把解析错误回喂模型，
+        # 不能继续向内扫描并误把 dialogues 中的小对象当成整份输出。
+        remainder = cleaned[start + 1:].lstrip()
+        if remainder and not (remainder.startswith('"') or remainder.startswith("}")):
+            continue
         try:
             obj, _ = json.JSONDecoder().raw_decode(cleaned[start:])
         except json.JSONDecodeError as exc:
-            first_error = first_error or exc
-            continue
+            first_error = exc
+            break
         if isinstance(obj, dict):
             return obj
         raise ValueError(f"JSON 根节点不是对象。片段：{cleaned[start:start + 200]}")

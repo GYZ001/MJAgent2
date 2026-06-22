@@ -71,10 +71,14 @@ export default function BoardPage() {
           {!!ep.shots?.length && ep.status !== 'scripting' && (
             <button className="btn" disabled={busy}
               onClick={async () => {
-                const r = await act(() => api.post(`/episodes/${ep.id}/rebalance-durations`)) as { total_before: number; total_after: number; target_total: number } | undefined
+                const r = await act(() => api.post(`/episodes/${ep.id}/rebalance-durations`)) as { total_before: number; total_after: number; target_total: number; limit: number } | undefined
                 if (r) {
                   setDurationOverrides({})
-                  toast(`已自动压缩时长：${r.total_before}s → ${r.total_after}s（目标 ${r.target_total}s）`)
+                  if (r.total_after < r.total_before) {
+                    toast(`已自动压缩时长：${r.total_before}s → ${r.total_after}s（目标 ${r.target_total}s）`)
+                  } else {
+                    toast(`各镜已是台词念得完的最短时长（音画同步下限 ${r.limit}s），无法再压缩；如需更短请精简台词/旁白后重试`)
+                  }
                 }
               }}>
               自动压缩时长
@@ -83,8 +87,11 @@ export default function BoardPage() {
           {ep.status === 'scripted' && (
             <button className="btn primary" disabled={busy}
               onClick={async () => {
-                const r = await act(() => api.post(`/episodes/${ep.id}/confirm`)) as { estimated_cost_cny: number; total_duration_s?: number } | undefined
-                if (r) toast(`分镜已确认。实际总时长 ${r.total_duration_s ?? totalDur}s，预估生成成本 ¥${r.estimated_cost_cny}，可入评审墙开始生成`)
+                const r = await act(() => api.post(`/episodes/${ep.id}/confirm`)) as { estimated_cost_cny: number; total_duration_s?: number; time_agent?: { total_before: number; total_after: number; limit: number } } | undefined
+                if (r) {
+                  const ta = r.time_agent ? `时间助手已将总时长从 ${r.time_agent.total_before}s 压到 ${r.time_agent.total_after}s（上限 ${r.time_agent.limit}s）；` : ''
+                  toast(`分镜已确认。${ta}实际总时长 ${r.total_duration_s ?? totalDur}s，预估生成成本 ¥${r.estimated_cost_cny}，可入评审墙开始生成`)
+                }
               }}>确认分镜（解锁生成）</button>
           )}
           {(ep.status === 'confirmed' || ep.status === 'generating') && (

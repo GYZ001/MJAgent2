@@ -44,6 +44,13 @@ raise StageFailed(errors)                     # 失败要响，禁止兜底
 所有内容使用简体中文。
 ```
 
+### 0.3 上下文与修复成本预算
+
+- 首轮生成必须显式携带代码校验的硬规则；不允许只在 validator 里新增规则、却不同步生成 prompt。
+- 逐镜生成只携带“当前大纲任务相关的剧本/原文窗口”；完整剧情由场次结构和整集大纲保底。
+- 历史镜头只保留最近 2 镜的完整承接信息，更早镜头压缩为防重复摘要，避免第 N 镜输入呈二次增长。
+- 修复轮只回传“错误历史 + 最近输出 + 当前任务精简上下文”，不重发整本原文。
+
 ## A. 角色圣经
 
 **输入**：前 5 章原文（每章截断至 6000 字）+ 如有更多章节则附滚动摘要。
@@ -307,7 +314,7 @@ raise StageFailed(errors)                     # 失败要响，禁止兜底
 
 | # | 规则 | 错误消息模板 |
 |---|---|---|
-| V1 | Σduration ∈ target±10% | `总时长{x}s 超出 {lo}~{hi}s，请调整镜头时长或增删镜头` |
+| V1 | 自动生成总时长不超过 90s（口播硬下限可抬高上限）；规划 target 作节奏目标 | `总时长{x}s超出上限{hi}s，请缩短部分镜头时长` |
 | V2 | duration 为 Seedance 可生成整数时长（当前 5~15s） | `shots[i].duration_s={x}，视频生成时长必须在 5~15s 之间` |
 | V3 | （v12 改）narration **选填**：不再校验下限、不再要求每镜必填，也不再禁止纯画面/纯台词镜头；若写则卡上限 52 字。source_excerpt 仍必填且至少 8 字 | `shots[i].narration 共{x}字，超过硬上限 52 字` / `shots[i].source_excerpt 仅{x}字` |
 | V4 | 角色合法性；characters 非空；speaker 必须在本镜头 characters 中，旁白只能进 narration | `shots[i].characters 含"{x}"不在圣经中` |
@@ -315,7 +322,7 @@ raise StageFailed(errors)                     # 失败要响，禁止兜底
 | V6 | 场景连续性；scene_setting 只作时间+地点标签（长度不校验）；同场景必须接上镜，换场必须写承接 | `scene_setting"{x}"在 shots[i] 与 shots[j] 间被打断` / `缺少承接说明` |
 | V7 | shot_no 连续 / 景别不三连 / 枚举值合法 | 同模板 |
 | V8 | 单镜一个连贯动作：action_desc 目标 70 字（硬下限 40，够写清一个动作即可） | `action_desc 仅{x}字，低于硬下限 40 字` |
-| V9 | 目标时长对应基础镜头数 ceil(target/10)，允许额外 2 条拆分镜承接口播/关键内容 | `镜头数{x}不匹配；目标{target}s下基础镜头数为{min}个，口播/关键内容过密时可拆分到最多{max}个镜头` |
+| V9 | 基础镜头数 `ceil(target/10)`；上限由 `target/5` 与产品上限 18 共同决定，给口播/关键内容留拆镜空间 | `镜头数{x}不匹配；目标{target}s下基础镜头数为{min}个，可拆分到最多{max}个镜头` |
 | V10 | 完整剧本声轨保留：若剧本含对白/内心OS/旁白/人群声，分镜至少约 75% 镜头应有 dialogues 或 narration，且必须保留内心OS | `分镜声轨过少` / `完整剧本含{x}处内心OS，但分镜未保留任何内心声轨` |
 | V11 | （2026-06-16 新增·防丢失核心）必保留清单：剧本台 `key_lines`/`key_plot_points` 的每一条都必须在分镜里仍能找到——关键台词在 dialogues/narration（找不到再退到 action_desc 兜底），关键剧情点在 action_desc/声轨。模糊匹配只拦明显丢失（`_longest_run_ratio≥0.5` / `_bigram_coverage≥0.34`）；剧本未声明清单时放行 | `分镜丢失了剧本标记的{x}条关键台词：…` / `分镜丢失了剧本标记的{x}条关键剧情点：…` |
 
@@ -337,7 +344,7 @@ def compile_prompt(shot, bible, style) -> str:
     text = "。".join(parts)
     text = enforce_length(text, LIMIT)    # 超长按 动作>场景>风格 之外的修饰语裁剪，
                                           # 角色锚点串永不裁剪
-    return f"{text} --ratio 9:16 --dur 10"  # 视频生成统一 10s
+    return f"{text} --ratio 9:16 --dur {clip(shot.duration_s, 5, 15)}"
 ```
 
 负向词表（全局一份，随版本管理）：
@@ -362,12 +369,17 @@ def compile_prompt(shot, bible, style) -> str:
 2. action_match     画面内容与预期动作相符
 3. clean_frame      无文字/水印/多余人物/肢体畸形
 
+评分硬规则：
+- `action_match` 和 `character_match` 是主项；核心动作未出现、错人或明显换脸/换装时，对应主项必须 ≤0.4。
+- `overall <= min(character_match, action_match)`，画面干净不能掩盖错人或错动作。
+- `issues` 只写可见、可定向修复的问题；达标时为空数组。
+
 输出：{"character_match": float, "action_match": float, "clean_frame": float,
       "overall": float, "issues": [str]}    // issues 用一句话描述具体问题，
                                             // 将被拼入重生成 prompt 的负向区
 ```
 
-**结果使用**：overall <0.6 且自动重试次数 <1 → 将 issues 翻译为负向描述追加重生成；否则进人工评审墙并展示分数与 issues。
+**结果使用**：overall <0.6 且自动重试次数 <1 → 将 issues 追加到重生 prompt；否则进人工评审墙。若 VLM 输出非标准 JSON 或缺少必需评分，标记 `qa_recovered=true`：可展示恢复结果，但不得据此触发付费重抽。
 
 ## F. 金样回归（提示词变更的准入门槛）
 

@@ -4,12 +4,25 @@
 - _render_storyboard_outline / _outline_brief：把大纲渲染进逐镜 prompt 并标出"本镜"。
 """
 
-from app.schemas import EpisodeScreenplay, StoryboardOutline, StoryboardOutlineShot
+from app.schemas import (Bible, Character, EpisodeScreenplay, StoryboardOutline,
+                         StoryboardOutlineShot, World)
 from app.stages import _outline_brief, _render_storyboard_outline
-from app.validators import validate_storyboard_outline
+from app.validators import (_covers_outside_spoken, downgrade_outline_offbible_spoken,
+                            validate_storyboard_outline)
 
 KEY_LINE = "我一定要查清斗气消失的真相。"
 KEY_POINT = "萧炎测出斗之力三段被族人嘲讽"
+
+
+def _bible_with(*names: str) -> Bible:
+    return Bible(
+        characters=[
+            Character(name=n, role="角色", appearance_canonical=f"{n}的外貌设定，发型服饰眼神齐全",
+                      personality="坚韧")
+            for n in names
+        ],
+        world=World(era="玄幻古代", genre="玄幻", visual_style_canonical="国风玄幻漫剧厚涂风"),
+    )
 
 
 def _screenplay() -> EpisodeScreenplay:
@@ -96,3 +109,44 @@ def test_outline_brief_lookup() -> None:
     assert _outline_brief(outline, 5).covers == KEY_LINE
     assert _outline_brief(outline, 99) is None
     assert _outline_brief(None, 1) is None
+
+
+def test_downgrade_offbible_spoken_rewrites_covers_and_clears_flag() -> None:
+    """复现修复停滞根因：covers 写"被测验员宣布为低级"，测验员不在角色圣经。
+    降级后去掉角色名、beat 追加旁白转述指令，圣经外判定随之清零（方案 A 报错不再触发）。"""
+    bible = _bible_with("萧炎", "萧薰儿")
+    names = {c.name for c in bible.characters}
+    outline = _outline(_valid_beats(),
+                       covers={3: "萧炎测验斗之气仅三段，被测验员宣布为低级"})
+    assert _covers_outside_spoken(outline.shots[2].covers, names) == ["测验员"]
+
+    changed = downgrade_outline_offbible_spoken(outline, bible)
+    assert [c["shot_no"] for c in changed] == [3]
+    assert changed[0]["names"] == ["测验员"]
+    assert outline.shots[2].covers == "萧炎测验斗之气仅三段，被宣布为低级"
+    assert "旁白转述" in outline.shots[2].beat
+    assert _covers_outside_spoken(outline.shots[2].covers, names) == []
+    # 降级后整份大纲校验通过（不再报"依赖角色圣经外角色开口"）
+    assert validate_storyboard_outline(outline, _screenplay(), 50, bible=bible) == []
+
+
+def test_downgrade_preserves_inbible_speaker_and_is_idempotent() -> None:
+    """圣经内角色的"被X当众宣告"合法可拍，不应被降级；非贪婪匹配不把"当众"吞进角色名。
+    二次运行不再改写，beat 指令不重复追加。"""
+    bible = _bible_with("萧炎", "萧战")
+    names = {c.name for c in bible.characters}
+    outline = _outline(_valid_beats(),
+                       covers={3: "萧炎被萧战当众宣告为废物"})
+    assert _covers_outside_spoken(outline.shots[2].covers, names) == []  # 萧战 在圣经内
+
+    changed = downgrade_outline_offbible_spoken(outline, bible)
+    assert changed == []
+    assert outline.shots[2].covers == "萧炎被萧战当众宣告为废物"  # 原样保留
+
+    # 圣经外角色降级后，重复运行幂等
+    off = _bible_with("萧炎")
+    o2 = _outline(_valid_beats(), covers={3: "萧炎被测验员当众宣告为低级"})
+    assert downgrade_outline_offbible_spoken(o2, off)  # 首次有改写
+    assert o2.shots[2].covers == "萧炎被宣告为低级"
+    assert downgrade_outline_offbible_spoken(o2, off) == []  # 再跑无改写
+    assert o2.shots[2].beat.count("改由旁白转述") == 1

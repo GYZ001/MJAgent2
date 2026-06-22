@@ -15,7 +15,7 @@ DATA_DIR = ROOT / "data"
 DB_PATH = DATA_DIR / "manju.db"
 
 # 可通过前端管理的 API Key 列表
-MANAGED_KEYS = ("HIAGENT_API_KEY", "OPENROUTER_API_KEY", "BAILIAN_API_KEY", "DEEPSEEK_API_KEY")
+MANAGED_KEYS = ("HIAGENT_API_KEY", "OPENROUTER_API_KEY", "BAILIAN_API_KEY", "DEEPSEEK_API_KEY", "ZHIPU_API_KEY")
 
 _env_lock = threading.Lock()
 
@@ -60,13 +60,35 @@ DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.co
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_MODEL_TEXT = os.environ.get("DEEPSEEK_MODEL_TEXT", "deepseek-v4-pro")
 
+# 智谱官方 API：仅作为 Text 模型路由，兼容 chat/completions。
+ZHIPU_BASE_URL = os.environ.get("ZHIPU_BASE_URL", "https://open.bigmodel.cn/api/paas/v4").rstrip("/")
+ZHIPU_API_KEY = os.environ.get("ZHIPU_API_KEY", "")
+ZHIPU_MODEL_TEXT = os.environ.get("ZHIPU_MODEL_TEXT", "glm-5.2")
+
 # 超时（秒）——依据 1.0 实测延迟：LLM ~22s、VLM ~57-66s（见 docs/HIAGENT_INTEGRATION.md §2）
 TIMEOUT_CHAT_READ = 300.0
 TIMEOUT_VIDEO_CREATE = 30.0
 TIMEOUT_VIDEO_POLL = 30.0
 TIMEOUT_DOWNLOAD = 180.0
+# Base64 图片上传需要独立的写超时；不应沿用 httpx 默认的 30/60s。
+# 图片生成与 VLM 共用并发门，避免多个视频 job 同时上传大体积 Base64 抢占带宽。
+TIMEOUT_IMAGE_READ = float(os.environ.get("TIMEOUT_IMAGE_READ", "180"))
+TIMEOUT_IMAGE_WRITE = float(os.environ.get("TIMEOUT_IMAGE_WRITE", "120"))
+TIMEOUT_VLM_READ = float(os.environ.get("TIMEOUT_VLM_READ", "300"))
+TIMEOUT_VLM_WRITE = float(os.environ.get("TIMEOUT_VLM_WRITE", "120"))
+MEDIA_REQUEST_CONCURRENCY = max(1, int(os.environ.get("MEDIA_REQUEST_CONCURRENCY", "2")))
+# 仅压缩上传给图生图/VLM 的输入，不改变 Seedream 输出分辨率。
+MEDIA_INPUT_MAX_EDGE = max(512, int(os.environ.get("MEDIA_INPUT_MAX_EDGE", "1280")))
+# ffmpeg JPEG qscale：2 最高质量，31 最低质量。
+MEDIA_INPUT_JPEG_QUALITY = min(31, max(2, int(os.environ.get("MEDIA_INPUT_JPEG_QUALITY", "5"))))
 VIDEO_POLL_INTERVAL = 10.0
 VIDEO_POLL_BUDGET = 15 * 60  # 单任务轮询总预算
+
+# 上游瞬时故障（超时/网络/限流/5xx）的 job 级自动重试。_post_json 的单次调用内重试只覆盖约 90s，
+# 扛不住分钟级的上游抖动；没有 job 级兜底时，一次可恢复的瞬时故障会把整镜任务永久判失败、逼人工重试。
+# 退避按 BASE * 2^(attempt-1) 秒：30s / 60s / 120s，三次合计 ~3.5min，足以越过常见的上游瞬时抖动。
+VIDEO_JOB_MAX_RETRIES = 3
+VIDEO_JOB_RETRY_BASE_DELAY = 30.0
 
 # Seedance 参数边界：单镜时长按动作密度在 [MIN, MAX] 间由模型逐镜决定（5~15s）。
 # 首尾帧模式下，简单/静态动作给短时长可避免人物停滞；强运动镜给长时长。
@@ -128,6 +150,7 @@ DEFAULT_SETTINGS = {
     "video_reference_first_shot_complex_count": "8",
     "video_reference_reuse_previous_scene_max_count": "4",
     "video_reference_quality_threshold": "0.75",
+    "video_reference_quality_floor": "0.4", # 兜底图质量地板：生成图全不达标时，最佳一版仍低于此分则不喂模型，只靠定妆照/场景锚点（脏图反而拖累成片）
     "video_reference_min_generated": "1",   # 参考图模式每镜至少新生成几张关键帧参考图（防止只剩定妆照）
     "video_reference_gen_retries": "2",     # 单张生成参考图 QA 不达标时的额外重试次数；仍不达标保留最佳一版而非丢弃
     "video_reference_prompt_async": "true", # 每张新参考图的提示词用独立 LLM 调用并发生成（防止一次性写多张时偷懒）
@@ -197,11 +220,12 @@ def save_keys_to_env(keys: dict[str, str]) -> list[str]:
 
 def _reload_keys() -> None:
     """从 os.environ 重新加载 API Key 相关的模块级变量。"""
-    global HIAGENT_API_KEY, OPENROUTER_API_KEY, BAILIAN_API_KEY, DEEPSEEK_API_KEY
+    global HIAGENT_API_KEY, OPENROUTER_API_KEY, BAILIAN_API_KEY, DEEPSEEK_API_KEY, ZHIPU_API_KEY
     HIAGENT_API_KEY = os.environ.get("HIAGENT_API_KEY", "")
     OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
     BAILIAN_API_KEY = os.environ.get("BAILIAN_API_KEY") or os.environ.get("DASHSCOPE_API_KEY", "")
     DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+    ZHIPU_API_KEY = os.environ.get("ZHIPU_API_KEY", "")
 
 
 def get_key_status() -> dict[str, dict]:
@@ -218,6 +242,8 @@ def get_key_status() -> dict[str, dict]:
             label = "百炼（阿里云）"
         elif provider == "deepseek":
             label = "DeepSeek"
+        elif provider == "zhipu":
+            label = "智谱（官方）"
         else:
             label = provider
         result[provider] = {

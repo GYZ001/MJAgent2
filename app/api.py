@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import re
 import string
@@ -10,16 +11,18 @@ from pathlib import Path
 
 from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
 
-from app import config, worker
+from app import config, errors, worker
 from app.compiler import clip_duration_value, compile_prompt, shot_cost_cny
-from app.db import get_conn, get_setting, new_id, now, rows_to_dicts, set_setting
+from app.db import get_conn, get_setting, log_provider_call, new_id, now, rows_to_dicts, set_setting
 from app.ingest import ingest_novel
 from app.schemas import Bible, EpisodeScreenplay, Shot, Storyboard, schema_errors
 from app.stages import (StageError, generate_bible, generate_screenplay, generate_storyboard_next_shot,
-                        generate_storyboard_outline)
-from app.validators import (compact_durations_to_budget,
+                        generate_storyboard_outline, time_agent_compress_durations)
+from app.validators import (compact_durations_to_budget, compress_durations_within_floors,
+                            enforced_min_duration, relieve_spoken_overflow,
                             normalize_action_desc, normalize_continuity, normalize_durations_for_speech,
-                            normalize_episode_opening_shot, normalize_transition_visuals,
+                            normalize_episode_opening_shot, normalize_offbible_characters,
+                            normalize_transition_visuals,
                             storyboard_duration_limit, storyboard_shot_count_range,
                             validate_screenplay, validate_storyboard,
                             validate_storyboard_preserves_key_content,
@@ -150,8 +153,11 @@ async def _scene_bible_and_refs(project_id: str) -> None:
         if not p or not p["bible_json"]:
             return
         bible = Bible.model_validate(json.loads(p["bible_json"]))
+        # 初始场景清单只取前 N 章：避免一上来就铺满全片场景；更靠后的新场景留到分镜阶段反应式补图。
+        from app.scenes import SCENE_BIBLE_CHAPTER_WINDOW
         chapters = rows_to_dicts(conn.execute(
-            "SELECT * FROM chapters WHERE project_id=? ORDER BY idx", (project_id,)).fetchall())
+            "SELECT * FROM chapters WHERE project_id=? ORDER BY idx LIMIT ?",
+            (project_id, SCENE_BIBLE_CHAPTER_WINDOW)).fetchall())
         scenes = await generate_scene_bible(chapters, bible)
         # 重读 bible（人物谱可能已被并发流程更新），只覆盖 scenes 字段后回写。
         p2 = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
@@ -162,8 +168,9 @@ async def _scene_bible_and_refs(project_id: str) -> None:
         conn.commit()
         _start_scene_refs_generation(project_id, None)
     except Exception as exc:  # noqa: BLE001 场景圣经失败不阻断主流程，仅透出状态
+        public = errors.record_and_format(exc, action="scene_bible_generate", context={"project_id": project_id})
         conn.execute("UPDATE projects SET scene_refs_status='failed', scene_refs_error=? WHERE id=?",
-                     (f"场景圣经生成失败：{exc}"[:800], project_id))
+                     (public, project_id))
         conn.commit()
 
 
@@ -382,7 +389,14 @@ def _attach_scene_refs(conn, project_id: str, bible: dict) -> None:
             "qa": qa, "qa_overall": (qa or {}).get("overall") if isinstance(qa, dict) else None,
         })
     for s in bible.get("scenes", []):
-        s["scene_refs"] = by_name.get(s.get("name"), [])
+        segs = by_name.get(s.get("name"), [])
+        s["scene_refs"] = segs
+        # scene_references 是场景图的权威存储；bible 的 ref_image_path 只是回退，二者会因
+        # 重新提取场景清单/反应式补图而分叉。bible 没路径时用最新分段的落盘图回填出图状态与主图。
+        if not s.get("ref_image_url"):
+            latest = next((seg for seg in reversed(segs) if seg.get("image_url")), None)
+            if latest:
+                s["ref_image_url"] = latest["image_url"]
 
 
 @router.get("/projects/{project_id}")
@@ -587,7 +601,8 @@ async def _bible_task(project_id: str, feedback: str = "", *, trigger_full_refs:
             conn.commit()
         raise
     except (StageError, Exception) as exc:  # noqa: BLE001
-        conn.execute("UPDATE projects SET bible_status='failed', bible_error=? WHERE id=?", (str(exc)[:800], project_id))
+        public = errors.record_and_format(exc, action="bible_generate", context={"project_id": project_id})
+        conn.execute("UPDATE projects SET bible_status='failed', bible_error=? WHERE id=?", (public, project_id))
         conn.commit()
 
 
@@ -724,8 +739,9 @@ async def _refs_task(project_id: str, only_character: str | None):
         conn.execute("UPDATE projects SET refs_status='ready', refs_error=NULL WHERE id=?", (project_id,))
         conn.commit()
     except Exception as exc:  # noqa: BLE001
+        public = errors.record_and_format(exc, action="refs_generate", context={"project_id": project_id})
         conn.execute("UPDATE projects SET refs_status='failed', refs_error=? WHERE id=?",
-                     (str(exc)[:800], project_id))
+                     (public, project_id))
         conn.commit()
 
 
@@ -769,8 +785,9 @@ async def _scene_refs_task(project_id: str, only_scene: str | None):
         conn.execute("UPDATE projects SET scene_refs_status='ready', scene_refs_error=NULL WHERE id=?", (project_id,))
         conn.commit()
     except Exception as exc:  # noqa: BLE001
+        public = errors.record_and_format(exc, action="scene_refs_generate", context={"project_id": project_id})
         conn.execute("UPDATE projects SET scene_refs_status='failed', scene_refs_error=? WHERE id=?",
-                     (str(exc)[:800], project_id))
+                     (public, project_id))
         conn.commit()
 
 
@@ -870,7 +887,8 @@ async def _plan_task(project_id: str):
                      (project_id,))
         conn.commit()
     except (StageError, Exception) as exc:  # noqa: BLE001
-        conn.execute("UPDATE projects SET plan_status='failed', plan_error=? WHERE id=?", (str(exc)[:800], project_id))
+        public = errors.record_and_format(exc, action="plan_generate", context={"project_id": project_id})
+        conn.execute("UPDATE projects SET plan_status='failed', plan_error=? WHERE id=?", (public, project_id))
         conn.commit()
 
 
@@ -895,6 +913,26 @@ _screenplay_tasks: dict[str, asyncio.Task] = {}
 def _screenplay_task_active(episode_id: str) -> bool:
     task = _screenplay_tasks.get(episode_id)
     return bool(task and not task.done())
+
+
+def recover_screenplay_tasks() -> None:
+    """服务热更/重启后续跑状态为 running 的剧本任务，避免 UI 卡在生成中却没有真实调用。"""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id FROM episodes WHERE screenplay_status='running'"
+    ).fetchall()
+    for row in rows:
+        episode_id = row["id"]
+        if _screenplay_task_active(episode_id):
+            continue
+        stamp = now()
+        conn.execute(
+            "UPDATE episodes SET screenplay_started_at=COALESCE(screenplay_started_at, ?), screenplay_updated_at=? WHERE id=?",
+            (stamp, stamp, episode_id))
+        task = asyncio.get_running_loop().create_task(_screenplay_task(episode_id))
+        _screenplay_tasks[episode_id] = task
+        task.add_done_callback(lambda _t, eid=episode_id: _screenplay_tasks.pop(eid, None))
+    conn.commit()
 
 
 async def _screenplay_task(episode_id: str):
@@ -928,19 +966,20 @@ async def _screenplay_task(episode_id: str):
         if residual:
             note = "已采用最后一次输出（修复次数用完，以下剧本问题未完全修复，可手动修改或重生）：" + "；".join(residual)
         conn.execute(
-            "UPDATE episodes SET screenplay_json=?, screenplay_status='ready', screenplay_error=?, status='planned', script_error=NULL WHERE id=?",
-            (script.model_dump_json(), (note or "")[:800] or None, episode_id))
+            "UPDATE episodes SET screenplay_json=?, screenplay_status='ready', screenplay_error=?, screenplay_updated_at=?, status='planned', script_error=NULL WHERE id=?",
+            (script.model_dump_json(), (note or "")[:800] or None, now(), episode_id))
         conn.commit()
     except asyncio.CancelledError:
         conn.execute(
-            "UPDATE episodes SET screenplay_status='failed', screenplay_error=? WHERE id=?",
-            ("剧本生成已取消，可重新发起。", episode_id))
+            "UPDATE episodes SET screenplay_status='failed', screenplay_error=?, screenplay_updated_at=? WHERE id=?",
+            ("剧本生成已取消，可重新发起。", now(), episode_id))
         conn.commit()
         raise
     except (StageError, Exception) as exc:  # noqa: BLE001
+        public = errors.record_and_format(exc, action="screenplay_generate", context={"episode_id": episode_id})
         conn.execute(
-            "UPDATE episodes SET screenplay_status='failed', screenplay_error=? WHERE id=?",
-            (str(exc)[:800], episode_id))
+            "UPDATE episodes SET screenplay_status='failed', screenplay_error=?, screenplay_updated_at=? WHERE id=?",
+            (public, now(), episode_id))
         conn.commit()
 
 
@@ -956,7 +995,10 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
     has_shots = conn.execute("SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)).fetchone()["c"] > 0
     if has_shots and not force:
         raise HTTPException(409, "重新生成剧本会清空本集现有分镜、关键帧、视频和成片，请确认后重试")
-    conn.execute("UPDATE episodes SET screenplay_status='running', screenplay_error=NULL WHERE id=?", (episode_id,))
+    started_at = now()
+    conn.execute(
+        "UPDATE episodes SET screenplay_status='running', screenplay_error=NULL, screenplay_started_at=?, screenplay_updated_at=? WHERE id=?",
+        (started_at, started_at, episode_id))
     conn.commit()
     task = asyncio.create_task(_screenplay_task(episode_id))
     _screenplay_tasks[episode_id] = task
@@ -985,7 +1027,10 @@ async def start_screenplay_all(project_id: str):
     if not ids:
         raise HTTPException(409, "没有待生成剧本的剧集")
     placeholders = ",".join("?" for _ in ids)
-    conn.execute(f"UPDATE episodes SET screenplay_status='running', screenplay_error=NULL WHERE id IN ({placeholders})", ids)
+    started_at = now()
+    conn.execute(
+        f"UPDATE episodes SET screenplay_status='running', screenplay_error=NULL, screenplay_started_at=?, screenplay_updated_at=? WHERE id IN ({placeholders})",
+        [started_at, started_at, *ids])
     conn.commit()
     sem = asyncio.Semaphore(max(int(get_setting("storyboard_concurrency") or 2), 1))
     for eid in ids:
@@ -1010,7 +1055,9 @@ def cancel_screenplay_all(project_id: str):
         if task and not task.done():
             task.cancel()
         fallback = "ready" if r["screenplay_json"] else "pending"
-        conn.execute("UPDATE episodes SET screenplay_status=?, screenplay_error=NULL WHERE id=?", (fallback, eid))
+        conn.execute(
+            "UPDATE episodes SET screenplay_status=?, screenplay_error=NULL, screenplay_updated_at=? WHERE id=?",
+            (fallback, now(), eid))
         stopped += 1
     conn.commit()
     return {"stopped": stopped}
@@ -1026,7 +1073,9 @@ def cancel_screenplay(episode_id: str):
         task.cancel()
     conn = get_conn()
     fallback = "ready" if ep["screenplay_json"] else "pending"
-    conn.execute("UPDATE episodes SET screenplay_status=?, screenplay_error=NULL WHERE id=?", (fallback, episode_id))
+    conn.execute(
+        "UPDATE episodes SET screenplay_status=?, screenplay_error=NULL, screenplay_updated_at=? WHERE id=?",
+        (fallback, now(), episode_id))
     conn.commit()
     return {"status": fallback}
 
@@ -1166,6 +1215,13 @@ async def _storyboard_task(episode_id: str):
             # 与单镜 QA 使用同一套确定性归一口径后再落库。
             board = Storyboard(episode_no=ep_data["episode_no"], shots=[*completed, draft.shot])
             normalize_continuity(board)
+            # 与逐镜 QA 同口径：圣经外路人剥离/规范，落库前去掉非圣经角色。把这次确定性处理记入账本，
+            # 让监控里能看到"本该触发一轮『角色圣经中不存在』修复、已被平台就地消化"（减重试 #1）。
+            for c in normalize_offbible_characters(board, bible):
+                log_provider_call(
+                    "storyboard_offbible_character", config.MODEL_TEXT, "OFFBIBLE_NORMALIZED", None, 0,
+                    meta={"episode_id": episode_id, "episode_no": ep_data["episode_no"], "stage": "分镜脚本", **c})
+            relieve_spoken_overflow(board)  # 与逐镜 QA 同口径：人群旁白降级为画面，单镜口播压回上限内
             normalize_durations_for_speech(board)
             normalize_episode_opening_shot(board)
             compact_durations_to_budget(board, ep_data["target_duration_s"])
@@ -1210,17 +1266,18 @@ async def _storyboard_task(episode_id: str):
             final_feedback = validate_storyboard_preserves_key_content(
                 Storyboard(episode_no=ep_data["episode_no"], shots=list(completed)), screenplay) or None
     except (StageError, Exception) as exc:  # noqa: BLE001
+        rec = errors.log_error(exc, action="storyboard_generate", context={"episode_id": episode_id})
         saved = conn.execute("SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)).fetchone()["c"]
         if saved:
             note = (
                 f"追加镜生成失败，已保留前 {saved} 个 QA 通过镜头，可人工补写最后一镜、修改后确认，"
-                f"或重新生成分镜。原错误：{str(exc)}"
+                f"或重新生成分镜。（{rec.code} · {rec.error_id}）"
             )
             conn.execute("UPDATE episodes SET status='scripted', script_error=? WHERE id=?",
                          (note[:800], episode_id))
         else:
             conn.execute("UPDATE episodes SET status='script_failed', script_error=? WHERE id=?",
-                         (str(exc)[:800], episode_id))
+                         (rec.public, episode_id))
         conn.commit()
 
 
@@ -1385,11 +1442,15 @@ def episode_detail(episode_id: str):
     ep.pop("storyboard_outline_json", None)
     ep["storyboard_outline"] = outline
     ep["storyboard_planned_shots"] = len(outline["shots"]) if outline and outline.get("shots") else None
-    ep["storyboard_duration_limit_s"] = storyboard_duration_limit(ep["target_duration_s"])
+    shot_rows = conn.execute(
+        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)).fetchall()
+    # 上限须带 board 计算：台词密集集的口播保底会把真实生效上限抬到 90s 以上；
+    # 不带 board 会少算成固定 90s，与确认/压缩时的实际判断口径不一致，让用户误以为"超了却压不动"。
+    board_for_limit = _board_from_shot_rows(shot_rows, ep["episode_no"]) if shot_rows else None
+    ep["storyboard_duration_limit_s"] = storyboard_duration_limit(ep["target_duration_s"], board_for_limit)
     ep["cost_cny"] = worker.episode_cost(episode_id)
     ep["cost_limit_cny"] = float(get_setting("episode_cost_limit_cny") or 100)
-    shots = rows_to_dicts(conn.execute(
-        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)).fetchall())
+    shots = rows_to_dicts(shot_rows)
     from app.config import PROJECTS_DIR
     shots_by_no = {s["shot_no"]: s for s in shots}
     for s in shots:
@@ -1537,6 +1598,79 @@ def _storyboard_residual_hint(residual: list[str]) -> str:
     return "；".join(hints)
 
 
+def _board_from_shot_rows(rows, episode_no: int) -> Storyboard:
+    """把 shots 表行还原成 Storyboard（确认门 / 压缩时长 / 时间 agent 共用，避免构造逻辑分叉）。"""
+    shots = [Shot(
+        shot_no=r["shot_no"], duration_s=r["duration_s"], shot_size=r["shot_size"], camera_move=r["camera_move"],
+        scene_setting=r["scene_setting"], characters=json.loads(r["characters"] or "[]"),
+        action_desc=r["action_desc"], first_frame_desc=r["first_frame_desc"] or "", last_frame_desc=r["last_frame_desc"] or "",
+        source_excerpt=r["source_excerpt"] or "",
+        narration=r["narration"], dialogues=json.loads(r["dialogues"] or "[]"),
+        transition=r["transition"] or "硬切", continuity_from_prev=bool(r["continuity_from_prev"])) for r in rows]
+    return Storyboard(episode_no=episode_no, shots=shots)
+
+
+async def _time_agent_rebalance_durations(episode_id: str) -> dict | None:
+    """确认分镜前的内置「时间 agent」：把口播保底归一后仍超上限（默认 90s）的整集，
+    交给 LLM 依据各镜内容挑选可压缩的镜头削减时长——单镜削减不超过 20% 且不低于口播/开场保底，
+    使总时长回到上限内。LLM 失败/越界都有确定性兜底，绝不阻断确认。
+
+    返回调整摘要 dict；无需调整（未超上限）时返回 None。在 /confirm 与一键全自动确认前调用。"""
+    conn = get_conn()
+    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    if not ep:
+        return None
+    rows = conn.execute("SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)).fetchall()
+    if not rows:
+        return None
+    board = _board_from_shot_rows(rows, ep["episode_no"])
+    # 与确认门同口径：先把每镜抬到能念完台词 / 开场建场的保底时长，再据此判断是否超上限。
+    normalize_durations_for_speech(board)
+    normalize_episode_opening_shot(board)
+    limit = storyboard_duration_limit(ep["target_duration_s"], board)
+    total_before = sum(int(s.duration_s or 0) for s in board.shots)
+    if total_before <= limit:
+        return None  # 未超上限：时间 agent 不介入
+
+    floors = {s.shot_no: enforced_min_duration(board, s) for s in board.shots}
+    originals = {s.shot_no: int(s.duration_s or 0) for s in board.shots}
+    # 单镜最多压缩 20%（向上取整保留更长），且不得低于口播/开场保底。
+    caps = {no: max(floors[no], math.ceil(originals[no] * 0.8)) for no in originals}
+
+    try:
+        plan = await time_agent_compress_durations(board, limit, caps)
+    except Exception:  # noqa: BLE001 时间 agent 不可用 → 纯确定性兜底，不阻断确认
+        plan = {}
+    for s in board.shots:
+        proposed = plan.get(s.shot_no)
+        if proposed is not None:  # 模型给的值一律 clamp 回 [20% 帽, 原时长]，绝不盲信
+            s.duration_s = max(caps[s.shot_no], min(originals[s.shot_no], int(proposed)))
+
+    # 兜底①：在 20% 帽内继续削冗余最多的镜，凑到上限内（模型可能没削够）。
+    within_cap = compress_durations_within_floors(board, limit, caps)
+    # 兜底②：20% 帽都压不到上限（极端长台词/镜头过多）→ 退到口播保底硬压缩，保证 ≤ 上限。
+    if not within_cap:
+        compress_durations_within_floors(board, limit, floors)
+
+    changes: list[dict] = []
+    for r, s in zip(rows, board.shots):
+        if r["duration_s"] != s.duration_s:
+            conn.execute("UPDATE shots SET duration_s=? WHERE id=?", (s.duration_s, r["id"]))
+        # 报告口径与 total_before 一致：相对「口播保底归一后」的基线计削减，不混入归一本身的抬升。
+        if originals[s.shot_no] != s.duration_s:
+            changes.append({"shot_no": s.shot_no, "before": originals[s.shot_no], "after": s.duration_s})
+    conn.commit()
+    return {
+        "rebalanced": True,
+        "used_time_agent": bool(plan),
+        "within_20pct_cap": within_cap,
+        "total_before": total_before,
+        "total_after": sum(int(s.duration_s or 0) for s in board.shots),
+        "limit": limit,
+        "changes": changes,
+    }
+
+
 @router.post("/episodes/{episode_id}/rebalance-durations")
 def rebalance_episode_durations(episode_id: str):
     ep = _episode_or_404(episode_id)
@@ -1546,14 +1680,7 @@ def rebalance_episode_durations(episode_id: str):
     rows = conn.execute("SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)).fetchall()
     if not rows:
         raise HTTPException(409, "本集还没有可压缩的分镜")
-    shots = [Shot(
-        shot_no=r["shot_no"], duration_s=r["duration_s"], shot_size=r["shot_size"], camera_move=r["camera_move"],
-        scene_setting=r["scene_setting"], characters=json.loads(r["characters"] or "[]"),
-        action_desc=r["action_desc"], first_frame_desc=r["first_frame_desc"] or "", last_frame_desc=r["last_frame_desc"] or "",
-        source_excerpt=r["source_excerpt"] or "",
-        narration=r["narration"], dialogues=json.loads(r["dialogues"] or "[]"),
-        transition=r["transition"] or "硬切", continuity_from_prev=bool(r["continuity_from_prev"])) for r in rows]
-    board = Storyboard(episode_no=ep["episode_no"], shots=shots)
+    board = _board_from_shot_rows(rows, ep["episode_no"])
     normalize_continuity(board)
     normalize_durations_for_speech(board)
     normalize_episode_opening_shot(board)
@@ -1586,14 +1713,8 @@ def confirm_episode_core(episode_id: str) -> dict:
     shots_rows = conn.execute("SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)).fetchall()
     if not shots_rows:
         raise ValueError("本集还没有分镜脚本")
-    shots = [Shot(
-        shot_no=r["shot_no"], duration_s=r["duration_s"], shot_size=r["shot_size"], camera_move=r["camera_move"],
-        scene_setting=r["scene_setting"], characters=json.loads(r["characters"] or "[]"),
-        action_desc=r["action_desc"], first_frame_desc=r["first_frame_desc"] or "", last_frame_desc=r["last_frame_desc"] or "",
-        source_excerpt=r["source_excerpt"] or "",
-        narration=r["narration"], dialogues=json.loads(r["dialogues"] or "[]"),
-        transition=r["transition"] or "硬切", continuity_from_prev=bool(r["continuity_from_prev"])) for r in shots_rows]
-    board = Storyboard(episode_no=ep["episode_no"], shots=shots)
+    board = _board_from_shot_rows(shots_rows, ep["episode_no"])
+    shots = board.shots
     # 确认门同样跑确定性连贯归一，并把修正后的 continuity/transition 写回库，
     # 保证人工编辑过的分镜在进入生成前也满足"同场景接上镜/换场明确转场"的铁律。
     before = [(s.continuity_from_prev, s.transition, s.duration_s, s.shot_size, s.camera_move) for s in shots]
@@ -1640,11 +1761,18 @@ def confirm_episode_core(episode_id: str) -> dict:
 
 @router.post("/episodes/{episode_id}/confirm")
 async def confirm_episode(episode_id: str):
-    """人工确认门（PRD P3）：全量业务校验通过才进入 confirmed。"""
+    """人工确认门（PRD P3）：全量业务校验通过才进入 confirmed。
+
+    确认前先跑内置「时间 agent」：整集总时长超上限（默认 90s）时按内容压缩部分镜头时长（单镜不超 20%），
+    把总时长拉回上限内，再进入确定性校验与确认。"""
+    _episode_or_404(episode_id)
     try:
+        rebalance = await _time_agent_rebalance_durations(episode_id)
         result = confirm_episode_core(episode_id)
     except ValueError as exc:
         raise HTTPException(422, str(exc))
+    if rebalance:
+        result["time_agent"] = rebalance
     return result
 
 
@@ -1850,7 +1978,9 @@ async def generate_episode(episode_id: str, body: dict | None = None):
                 conn.execute("UPDATE shots SET adopted_version_id=? WHERE id=?", (r["version_id"], s["id"]))
             results.append({"shot_id": s["id"], **r})
         except Exception as exc:  # noqa: BLE001
-            results.append({"shot_id": s["id"], "error": str(exc)})
+            public = errors.record_and_format(exc, action="enqueue_shot",
+                                              context={"shot_id": s["id"], "episode_id": episode_id})
+            results.append({"shot_id": s["id"], "error": public})
     conn.commit()
     return {"enqueued": results}
 
@@ -2012,6 +2142,7 @@ def health():
             option("openrouter", hiagent.active_model("text", "openrouter"), bool(config.OPENROUTER_API_KEY)),
             option("bailian", hiagent.active_model("text", "bailian"), bool(config.BAILIAN_API_KEY)),
             option("deepseek", hiagent.active_model("text", "deepseek"), bool(config.DEEPSEEK_API_KEY)),
+            option("zhipu", hiagent.active_model("text", "zhipu"), bool(config.ZHIPU_API_KEY)),
         ]),
         "vlm": selected("vlm", "VLM 模型", [
             option("hiagent", hiagent.active_model("vlm", "hiagent"), bool(config.HIAGENT_API_KEY)),
@@ -2035,6 +2166,7 @@ def health():
         "openrouter_key_configured": bool(config.OPENROUTER_API_KEY),
         "bailian_key_configured": bool(config.BAILIAN_API_KEY),
         "deepseek_key_configured": bool(config.DEEPSEEK_API_KEY),
+        "zhipu_key_configured": bool(config.ZHIPU_API_KEY),
         "hiagent_model_text": hiagent.active_model("text", "hiagent"),
         "hiagent_model_vlm": hiagent.active_model("vlm", "hiagent"),
         "hiagent_model_video": hiagent.active_model("video", "hiagent"),
@@ -2044,6 +2176,7 @@ def health():
         "bailian_model_text": hiagent.active_model("text", "bailian"),
         "bailian_model_vlm": hiagent.active_model("vlm", "bailian"),
         "deepseek_model_text": hiagent.active_model("text", "deepseek"),
+        "zhipu_model_text": hiagent.active_model("text", "zhipu"),
         "models": models,
     }
 
@@ -2053,6 +2186,24 @@ def recent_calls(limit: int = 30):
     rows = rows_to_dicts(get_conn().execute(
         "SELECT * FROM provider_calls ORDER BY id DESC LIMIT ?", (min(limit, 200),)).fetchall())
     return rows
+
+
+@router.get("/system/errors")
+def recent_errors(limit: int = 50):
+    """最近报错码列表（不含原文/堆栈，只给概览）。凭 id 调下方详情接口查根因。"""
+    rows = rows_to_dicts(get_conn().execute(
+        """SELECT id, ts, category, category_label, code, is_technical, http_status, action, exc_type
+           FROM error_logs ORDER BY ts DESC LIMIT ?""", (min(limit, 200),)).fetchall())
+    return rows
+
+
+@router.get("/system/errors/{error_id}")
+def error_detail(error_id: str):
+    """凭错误ID查全文：请求动作上下文 + 原始报错 + 堆栈，定位根因用。"""
+    row = get_conn().execute("SELECT * FROM error_logs WHERE id=?", (error_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, f"错误ID不存在：{error_id}")
+    return dict(row)
 
 
 @router.get("/system/jobs")
@@ -2065,6 +2216,24 @@ def jobs_overview():
            FROM jobs j LEFT JOIN shots s ON s.id=j.shot_id
            LEFT JOIN episodes e ON e.id=j.episode_id LEFT JOIN projects p ON p.id=j.project_id
            ORDER BY j.updated_at DESC LIMIT 40""").fetchall())
+    screenplay_recent = rows_to_dicts(conn.execute(
+        """SELECT 'screenplay_' || e.id AS id, 'screenplay' AS kind,
+                  e.id AS episode_id, e.project_id, NULL AS shot_id,
+                  CASE e.screenplay_status
+                    WHEN 'running' THEN 'running'
+                    WHEN 'ready' THEN 'succeeded'
+                    WHEN 'failed' THEN 'failed'
+                    ELSE e.screenplay_status
+                  END AS status,
+                  e.screenplay_error AS error, e.episode_no, e.title AS episode_title,
+                  p.name AS project_name, NULL AS shot_no,
+                  COALESCE(e.screenplay_updated_at, e.screenplay_started_at, e.created_at) AS updated_at
+           FROM episodes e JOIN projects p ON p.id=e.project_id
+           WHERE e.screenplay_started_at IS NOT NULL
+           ORDER BY updated_at DESC LIMIT 40""").fetchall())
+    recent = sorted([*recent, *screenplay_recent], key=lambda row: row.get("updated_at") or 0, reverse=True)[:40]
+    for row in screenplay_recent:
+        counts[row["status"]] = counts.get(row["status"], 0) + 1
     return {"counts": counts, "recent": recent}
 
 
@@ -2079,8 +2248,8 @@ def put_settings(body: dict):
     for key, value in body.items():
         skey = str(key)
         sval = str(value).strip()
-        if skey == "model_text_provider" and sval not in {"hiagent", "openrouter", "bailian", "deepseek"}:
-            raise HTTPException(422, f"{skey} 只能是 hiagent、openrouter、bailian 或 deepseek")
+        if skey == "model_text_provider" and sval not in {"hiagent", "openrouter", "bailian", "deepseek", "zhipu"}:
+            raise HTTPException(422, f"{skey} 只能是 hiagent、openrouter、bailian、deepseek 或 zhipu")
         if skey == "model_vlm_provider" and sval not in {"hiagent", "openrouter", "bailian"}:
             raise HTTPException(422, f"{skey} 只能是 hiagent、openrouter 或 bailian")
         if skey == "model_route" and sval not in {"hiagent", "openrouter"}:
@@ -2114,6 +2283,7 @@ def put_keys(body: dict):
         "openrouter": "OPENROUTER_API_KEY",
         "bailian": "BAILIAN_API_KEY",
         "deepseek": "DEEPSEEK_API_KEY",
+        "zhipu": "ZHIPU_API_KEY",
     }
     env_keys: dict[str, str] = {}
     for provider, value in body.items():

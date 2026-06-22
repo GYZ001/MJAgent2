@@ -1,15 +1,34 @@
 export class ApiError extends Error {
-  constructor(public status: number, message: string) { super(message) }
+  // code/category/errorId 来自后端报错码系统：技术类报错前端只拿到这三样，原文留后端日志。
+  constructor(
+    public status: number,
+    message: string,
+    public code?: string,
+    public category?: string,
+    public errorId?: string,
+  ) { super(message) }
 }
 
 async function handle(resp: Response) {
   if (resp.ok) return resp.json()
   let detail = `HTTP ${resp.status}`
+  let code: string | undefined
+  let category: string | undefined
+  let errorId: string | undefined
   try {
     const body = await resp.json()
     detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail ?? body)
+    code = typeof body.code === 'string' ? body.code : undefined
+    category = typeof body.category === 'string' ? body.category : undefined
+    errorId = typeof body.error_id === 'string' ? body.error_id : undefined
   } catch { /* keep default */ }
-  throw new ApiError(resp.status, detail)
+  // 后端已把展示串拼进 detail（业务类=友好提示+码；技术类=安全提示+码+ID）；
+  // 兜底：万一旧响应只有 code/category 而 detail 不含码，补一段可读后缀。
+  let message = detail
+  if (code && errorId && !detail.includes(errorId)) {
+    message = `${detail}（${category ?? ''}${category ? ' · ' : ''}${code} · ${errorId}）`
+  }
+  throw new ApiError(resp.status, message, code, category, errorId)
 }
 
 export const api = {

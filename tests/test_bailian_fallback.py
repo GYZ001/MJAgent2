@@ -28,7 +28,7 @@ def test_bailian_chat_tries_next_model_after_request_failure(monkeypatch) -> Non
     second = "qwen3.7-max-2026-05-20"
     calls: list[str] = []
 
-    async def fake_post_json(client, url, payload, *, kind, model, retries=2, headers=None, key_name=""):
+    async def fake_post_json(client, url, payload, *, kind, model, retries=2, headers=None, key_name="", meta=None):
         calls.append(model)
         if model == first:
             raise hiagent.ProviderError("quota exhausted")
