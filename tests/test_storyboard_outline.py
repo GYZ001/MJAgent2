@@ -63,10 +63,10 @@ def test_valid_outline_passes() -> None:
     assert validate_storyboard_outline(outline, _screenplay(), 50) == []
 
 
-def test_outline_rejects_too_few_shots() -> None:
+def test_outline_does_not_enforce_target_derived_shot_count() -> None:
     outline = _outline(_valid_beats()[:2], covers={2: KEY_LINE})
     errors = validate_storyboard_outline(outline, _screenplay(), 50)
-    assert any("大纲镜头数" in e for e in errors)
+    assert not any("大纲镜头数" in e for e in errors)
 
 
 def test_outline_rejects_noncontinuous_shot_no() -> None:

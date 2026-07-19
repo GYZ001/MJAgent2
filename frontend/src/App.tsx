@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
 import { api, Episode, Project } from './api'
 import Studio from './pages/Studio'
 import BiblePage from './pages/BiblePage'
@@ -10,6 +10,7 @@ import WallPage from './pages/WallPage'
 import CinemaPage from './pages/CinemaPage'
 import MonitorPage from './pages/MonitorPage'
 import ReaderPage from './pages/ReaderPage'
+import RunDock from './components/harness/RunDock'
 
 export type View = 'studio' | 'bible' | 'scenes' | 'episodes' | 'script' | 'board' | 'wall' | 'cinema' | 'monitor' | 'reader'
 
@@ -82,7 +83,7 @@ export default function App() {
   }, [projectId])
 
   const nav: Nav = { view, projectId, episodeId, chapterIdx, go, toast }
-  const visibleSections = projectId ? SECTIONS : SECTIONS.filter(s => s.key === 'studio')
+  const visibleSections = projectId ? SECTIONS : SECTIONS.filter(s => s.key === 'studio' || s.key === 'monitor')
 
   const openSection = (s: (typeof SECTIONS)[number]) => {
     setView(s.key)
@@ -129,6 +130,7 @@ export default function App() {
         {view === 'cinema' && (episodeId ? <CinemaPage key={episodeId} /> : <WorkspaceEmpty label="成片台" />)}
         {view === 'monitor' && <MonitorPage />}
       </main>
+      <RunDock projectId={projectId} onOpen={() => setView('monitor')} />
       {toastMsg && <div className={`toast ${toastMsg.err ? 'err' : ''}`}>{toastMsg.text}</div>}
     </NavCtx.Provider>
   )
@@ -151,26 +153,61 @@ function WorkspaceEmpty({ label }: { label: string }) {
   )
 }
 
-/** 轮询某资源；interval=0 不轮询 */
-export function usePoll<T>(fetcher: () => Promise<T>, intervalMs: number, deps: unknown[] = []) {
+/** 轮询某资源；interval=0 或函数返回 0 不轮询。intervalMs 传函数时可按最新数据动态调间隔
+ *  （例如只在有运行态任务时高频轮询，空闲时不轮询），避免反复拉取大 payload 拖垮页面。 */
+export function usePoll<T>(
+  fetcher: () => Promise<T>,
+  intervalMs: number | ((data: T | null) => number),
+  deps: unknown[] = [],
+) {
   const [data, setData] = useState<T | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const fetcherRef = useRef(fetcher); fetcherRef.current = fetcher
+  const intervalRef = useRef(intervalMs); intervalRef.current = intervalMs
+  const dataRef = useRef<T | null>(null); dataRef.current = data
   const refresh = useCallback(() => {
-    fetcher().then(d => { setData(d); setError(null) }).catch(e => setError(String(e.message || e)))
+    fetcherRef.current()
+      .then(d => { setData(d); dataRef.current = d; setError(null) })
+      .catch(e => setError(String(e.message || e)))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps)
   useEffect(() => {
     if (deps.some(d => d == null)) return
     refresh()
-    if (!intervalMs) return
-    const t = window.setInterval(refresh, intervalMs)
-    return () => window.clearInterval(t)
-  }, [refresh, intervalMs])
+    let timer: number | undefined
+    const tick = () => {
+      const ms = typeof intervalRef.current === 'function'
+        ? intervalRef.current(dataRef.current)
+        : intervalRef.current
+      if (ms > 0) {
+        timer = window.setTimeout(async () => {
+          await refresh()
+          tick()
+        }, ms)
+      }
+    }
+    tick()
+    return () => { if (timer) window.clearTimeout(timer) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refresh])
   return { data, error, refresh }
 }
 
 export const useProject = (projectId: string, intervalMs = 4000) =>
   usePoll<Project>(() => api.get(`/projects/${projectId}`), intervalMs, [projectId])
 
-export const useEpisode = (episodeId: string, intervalMs = 4000) =>
+/** 分集是否处于运行态（编剧/分镜/生成中）—— 决定是否需要高频轮询。
+ *  空闲时彻底停轮询，避免反复拉取 1MB+ 的分集 payload 拖垮页面。 */
+export const episodeBusy = (ep: Episode | null): boolean => {
+  if (!ep) return true  // 首次未拿到数据时，按可能忙碌处理触发首次拉取后的轮询
+  if (ep.screenplay_status === 'running') return true
+  if (ep.status === 'scripting' || ep.status === 'drafting') return true
+  if (ep.shots?.some(s => s.scene_status === 'generating')) return true
+  return false
+}
+
+export const useEpisode = (
+  episodeId: string,
+  intervalMs: number | ((ep: Episode | null) => number) = (ep) => episodeBusy(ep) ? 5000 : 0,
+) =>
   usePoll<Episode>(() => api.get(`/episodes/${episodeId}`), intervalMs, [episodeId])

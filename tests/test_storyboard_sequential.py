@@ -8,7 +8,7 @@
 """
 
 from app.schemas import Bible, Character, Dialogue, EpisodeScreenplay, Shot, World
-from app.stages import (StoryboardShotDraft, _remaining_storyboard_seconds, _storyboard_budget_block,
+from app.stages import (StoryboardShotDraft, _storyboard_progress_block,
                         _relevant_text_windows, _render_completed_shots_context,
                         _validate_storyboard_shot_draft)
 
@@ -44,7 +44,7 @@ def _screenplay(*, key_lines: list[str] | None = None) -> EpisodeScreenplay:
 def _shot(no: int, *, narration: str | None = None, dialogues: list[Dialogue] | None = None) -> Shot:
     return Shot(
         shot_no=no,
-        duration_s=10,
+        duration_s=5,
         shot_size="中景",
         camera_move="固定",
         scene_setting="日，萧家广场",
@@ -80,23 +80,14 @@ def _validate(draft: StoryboardShotDraft, *, allow_finish: bool, must_finish: bo
     )
 
 
-# ---------- 剩余时长预算 ----------
-
-def test_remaining_seconds_subtracts_completed_durations() -> None:
-    completed = [_shot(1), _shot(2), _shot(3)]
-    completed[0].duration_s, completed[1].duration_s, completed[2].duration_s = 10, 8, 12
-    assert _remaining_storyboard_seconds(90, completed) == 60
-    assert _remaining_storyboard_seconds(90, []) == 90
-
-
-def test_budget_block_pacing_switches_on_remaining() -> None:
-    nearly_full = [_shot(i) for i in range(1, 14)]  # 13 × 5s = 65s used, 距离 90s 硬上限剩 25s
+def test_progress_block_has_no_episode_duration_limit() -> None:
+    nearly_full = [_shot(i) for i in range(1, 14)]
     for shot in nearly_full:
         shot.duration_s = 5
-    low = _storyboard_budget_block(90, nearly_full, allow_finish=True)
-    assert "is_final=true" in low and "距离硬上限剩余 25s" in low
-    plenty = _storyboard_budget_block(50, [], allow_finish=False)
-    assert "较充裕" in plenty and "距离规划目标剩余 50s" in plenty
+    low = _storyboard_progress_block(nearly_full)
+    assert "13" in low and "65s" in low and "duration_s" in low and "5s" in low
+    plenty = _storyboard_progress_block([])
+    assert "duration_s" in plenty and "is_final=true" in plenty
 
 
 def test_completed_context_keeps_only_last_two_shots_in_full_detail() -> None:

@@ -36,7 +36,7 @@ def test_bailian_chat_tries_next_model_after_request_failure(monkeypatch) -> Non
 
     monkeypatch.setattr(hiagent, "active_provider", lambda kind: "bailian")
     monkeypatch.setattr(hiagent, "active_model", lambda kind, provider=None: first)
-    monkeypatch.setattr(hiagent, "_bailian_headers", lambda: {})
+    monkeypatch.setattr(hiagent, "_model_connection", lambda *args: ("https://bailian.test/v1", {}))
     monkeypatch.setattr(hiagent, "_post_json", fake_post_json)
 
     content = asyncio.run(hiagent.chat([{"role": "user", "content": "hi"}]))

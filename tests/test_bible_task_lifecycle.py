@@ -1,8 +1,8 @@
 import asyncio
 import sqlite3
 
-from app import api
-from app.api import BIBLE_INTERRUPTED_ERROR, _bible_tasks, _recover_orphan_bible_row
+from app import api, task_registry
+from app.api import BIBLE_INTERRUPTED_ERROR, _recover_orphan_bible_row
 from app.schemas import Bible, Character, World
 
 
@@ -14,7 +14,7 @@ def test_orphan_running_bible_status_is_recovered() -> None:
         "INSERT INTO projects(id, bible_status, bible_error) VALUES('proj_test', 'running', NULL)"
     )
     conn.commit()
-    _bible_tasks.pop("proj_test", None)
+    task_registry.cancel("bible", "proj_test")
 
     row = conn.execute("SELECT * FROM projects WHERE id='proj_test'").fetchone()
     recovered = _recover_orphan_bible_row(conn, row)

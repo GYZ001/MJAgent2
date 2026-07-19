@@ -49,7 +49,8 @@ def test_edited_reference_gallery_changes_enqueue_idempotency(monkeypatch) -> No
     conn = _conn()
     _seed_project(conn)
     monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(compiler, "compile_prompt", lambda *a, **k: "PROMPT --dur 10")
+    monkeypatch.setattr(worker, "ensure_media_trace", lambda **_kwargs: (None, None))
+    monkeypatch.setattr(compiler, "compile_prompt", lambda *a, **k: "PROMPT --dur 5")
 
     first = worker.enqueue_shot("s1")
     assert first["reused"] is False

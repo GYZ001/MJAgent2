@@ -28,7 +28,7 @@ def _empty_bible() -> Bible:
 def _shot(source_excerpt: str) -> Shot:
     return Shot(
         shot_no=1,
-        duration_s=10,
+        duration_s=5,
         shot_size="中景",
         camera_move="推近",
         scene_setting="首日上午，咖啡厅",
@@ -59,19 +59,19 @@ def test_compile_prompt_includes_source_excerpt() -> None:
 
 def test_legacy_seedance_prompt_is_patched_with_source_excerpt() -> None:
     prompt = ensure_source_excerpt_in_prompt(
-        "固定10秒竖屏漫剧视频段，谷言低头攥紧纸杯。弱背景提示：咖啡厅 --ratio 9:16 --dur 10",
+        "固定5秒竖屏漫剧视频段，谷言低头攥紧纸杯。弱背景提示：咖啡厅 --ratio 9:16 --dur 5",
         _shot("谷言攥着纸杯，听见曲惜说出那个名字，脸色骤然沉下去。"),
     )
 
     assert "小说原文兜底参考：谷言攥着纸杯" in prompt
-    assert prompt.endswith("--ratio 9:16 --dur 10")
+    assert prompt.endswith("--ratio 9:16 --dur 5")
     assert prompt.count("--ratio") == 1
 
 
 def test_storyboard_allows_characters_without_bible() -> None:
     shot = Shot(
         shot_no=1,
-        duration_s=10,
+        duration_s=5,
         shot_size="中景",
         camera_move="固定",
         scene_setting="夜，旧宅回廊",

@@ -40,7 +40,7 @@ def test_tail_keyframe_prompt_targets_ending_moment() -> None:
     )
     shot = Shot(
         shot_no=2,
-        duration_s=10,
+        duration_s=5,
         shot_size="中景",
         camera_move="推近",
         scene_setting="当日，咖啡厅",

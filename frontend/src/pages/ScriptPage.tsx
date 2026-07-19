@@ -4,12 +4,14 @@ import { useEpisode, useNav } from '../App'
 import { EpStamp } from './BiblePage'
 import EpisodeCrumb from '../components/EpisodeCrumb'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
+import EvidenceDrawer from '../components/harness/EvidenceDrawer'
 
 function ScreenplayStamp({ status }: { status: string }) {
   const map: Record<string, [string, string]> = {
     pending: ['待剧本', 'grey'],
     running: ['剧本中', 'gold'],
     ready: ['剧本成', 'green'],
+    warning: ['候选待修', 'red'],
     failed: ['剧本败', 'red'],
   }
   const [label, color] = map[status] ?? [status, 'grey']
@@ -136,7 +138,7 @@ export default function ScriptPage() {
             </button>
           )}
           {ep.screenplay && !editing && (
-            <button className="btn" disabled={busy || ep.screenplay_status !== 'ready'} onClick={() => setDraft(cloneScript(ep.screenplay))}>
+            <button className="btn" disabled={busy || !['ready', 'warning'].includes(ep.screenplay_status)} onClick={() => setDraft(cloneScript(ep.screenplay))}>
               修改剧本
             </button>
           )}
@@ -154,6 +156,7 @@ export default function ScriptPage() {
             </>
           )}
           <span style={{ flex: 1 }} />
+          {ep.screenplay_evidence && <EvidenceDrawer evidence={ep.screenplay_evidence} label="剧本证据" />}
           <TaskTimer label="剧本" timer={screenplayTimer} />
           <TaskTimer label="分镜" timer={storyboardTimer} />
           <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>
@@ -164,9 +167,10 @@ export default function ScriptPage() {
           <div className="kv"><b>当前分集</b>第{numToCn(ep.episode_no)}集</div>
           <div className="kv"><b>原文来源范围</b>{script?.source_text_range || sourceRangeText(ep.source_chapters)}</div>
           <div className="kv"><b>目标时长</b>{ep.target_duration_s}s</div>
-          <div className="kv"><b>剧本状态</b>{ep.screenplay_status === 'ready' ? '已生成' : ep.screenplay_status === 'running' ? '生成中' : ep.screenplay_status === 'failed' ? '生成失败' : '待生成'}</div>
+          <div className="kv"><b>剧本状态</b>{ep.screenplay_status === 'ready' ? '已通过门禁' : ep.screenplay_status === 'warning' ? '候选待修复' : ep.screenplay_status === 'running' ? '生成中' : ep.screenplay_status === 'failed' ? '生成失败' : '待生成'}</div>
         </div>
         {ep.screenplay_status === 'running' && <div style={{ marginTop: 10 }}><span className="stamp gold">剧本中</span> <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>正在生成整集完整剧本，完成后再进入分镜拆分……</span></div>}
+        {ep.screenplay_status === 'warning' && <div className="error-banner">当前剧本只是可编辑候选，仍有 blocker，不能进入分镜。请打开「剧本证据」按问题修复并保存。</div>}
         {ep.screenplay_error && <div className="error-banner">剧本提示：{'\n'}{ep.screenplay_error}</div>}
         {ep.script_error && <div className="error-banner">分镜提示：{'\n'}{ep.script_error}</div>}
       </section>

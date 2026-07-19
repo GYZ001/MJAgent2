@@ -26,7 +26,7 @@ def _bible() -> Bible:
 def _shot(shot_no: int, scene: str, chars: list[str], action: str, **kwargs) -> Shot:
     return Shot(
         shot_no=shot_no,
-        duration_s=10,
+        duration_s=5,
         shot_size="中景",
         camera_move="固定",
         scene_setting=scene,

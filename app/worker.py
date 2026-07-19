@@ -11,14 +11,29 @@ from pathlib import Path
 from typing import Any
 
 from app import config, errors, hiagent, video_modes
+from app.artifacts import (_adopted_video_paths, _invalidate_final_video,
+                           clear_episode_artifacts, clear_shot_artifacts,
+                           delete_episode_shots, delete_project_episodes,
+                           delete_video_version, invalidate_episode_final,
+                           invalidate_shot_video_derivatives,
+                           purge_character_video_artifacts,
+                           purge_project_video_artifacts, purge_shot_videos)
 from app.compiler import ensure_source_excerpt_in_prompt, idem_key as make_idem_key, sanitize_seedance_prompt, shot_cost_cny
 from app.db import get_conn, get_setting, log_provider_call, new_id, now, rows_to_dicts
 from app.hiagent import ProviderError
+from app.evidence import media as media_evidence
+from app.orchestration import media_scheduler
+from app.orchestration.media_runs import ensure_media_trace, mark_media_job_state
+
+__all__ = [
+    "clear_episode_artifacts", "clear_shot_artifacts", "delete_episode_shots",
+    "delete_project_episodes", "delete_video_version", "invalidate_episode_final",
+    "invalidate_shot_video_derivatives", "purge_character_video_artifacts",
+    "purge_project_video_artifacts", "purge_shot_videos",
+]
 
 _queue: asyncio.Queue[str] = asyncio.Queue()
 _workers: list[asyncio.Task] = []
-# 上游瞬时故障的 job 级重试计数（内存态；进程重启后 recover_and_start 会重排并重置预算，符合预期）。
-_job_retry_counts: dict[str, int] = {}
 # 延迟重排任务的强引用，避免被 GC 回收（asyncio 不持有后台任务的引用）。
 _retry_tasks: set[asyncio.Task] = set()
 
@@ -38,14 +53,28 @@ def _schedule_job_retry(job_id: str, exc: ProviderError) -> bool:
     超过 VIDEO_JOB_MAX_RETRIES 后返回 False，交由调用方走永久失败逻辑。"""
     if not getattr(exc, "retryable", False):
         return False
-    attempt = _job_retry_counts.get(job_id, 0) + 1
-    if attempt > config.VIDEO_JOB_MAX_RETRIES:
+    conn = get_conn()
+    row = conn.execute("SELECT retry_count, max_retries FROM jobs WHERE id=?", (job_id,)).fetchone()
+    attempt = int(row["retry_count"] or 0) + 1 if row else 1
+    max_retries = int(row["max_retries"] or config.VIDEO_JOB_MAX_RETRIES) if row else config.VIDEO_JOB_MAX_RETRIES
+    if attempt > max_retries:
         return False
-    _job_retry_counts[job_id] = attempt
     delay = config.VIDEO_JOB_RETRY_BASE_DELAY * (2 ** (attempt - 1))
-    note = (f"大模型/外部服务瞬时故障，已自动排队第 {attempt}/{config.VIDEO_JOB_MAX_RETRIES} 次重试"
+    note = (f"大模型/外部服务瞬时故障，已自动排队第 {attempt}/{max_retries} 次重试"
             f"（约 {int(delay)} 秒后）。无需处理；若多次重试后仍失败才需关注错误码。")
-    _set_job(job_id, "queued", note)
+    conn.execute(
+        """UPDATE jobs SET status='queued', error=?, retry_count=?, next_retry_at=?,
+                  lease_owner=NULL, lease_expires_at=NULL, updated_at=? WHERE id=?""",
+        (note, attempt, now() + delay, now(), job_id),
+    )
+    conn.execute(
+        "UPDATE budget_reservations SET status='reserved' WHERE job_id=? AND status='running'",
+        (job_id,),
+    )
+    conn.commit()
+    job = conn.execute("SELECT run_id, step_run_id FROM jobs WHERE id=?", (job_id,)).fetchone()
+    if job:
+        mark_media_job_state(job["run_id"], job["step_run_id"], "queued", note)
     task = asyncio.get_running_loop().create_task(_requeue_after(job_id, delay))
     _retry_tasks.add(task)
     task.add_done_callback(_retry_tasks.discard)
@@ -70,11 +99,6 @@ def episode_cost(episode_id: str) -> float:
         (episode_id,),
     ).fetchone()
     return float(row["c"])
-
-
-def _budget_exceeded(episode_id: str) -> bool:
-    limit = float(get_setting("episode_cost_limit_cny") or 100)
-    return episode_cost(episode_id) >= limit
 
 
 # ---------- 入队 ----------
@@ -259,13 +283,6 @@ def shot_keyframes_ready(shot_row) -> bool:
     return all(_approved_keyframe(conn, shot_row, kind) for kind in required_keyframe_kinds(shot_row))
 
 
-def _first_keyframe_for_video(conn, shot_row, after_shot_id: str | None):
-    if after_shot_id:
-        prev = conn.execute("SELECT * FROM shots WHERE id=?", (after_shot_id,)).fetchone()
-        return _approved_keyframe(conn, prev, KEYFRAME_TAIL), "prev_tail_keyframe", prev
-    return _approved_keyframe(conn, shot_row, KEYFRAME_HEAD), "head_keyframe", None
-
-
 def _transition_value(shot_row) -> str:
     transition = (_row_value(shot_row, "transition") or "硬切").strip()
     return transition or "硬切"
@@ -313,6 +330,8 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
         raise ValueError(f"镜头不存在：{shot_id}")
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (shot_row["episode_id"],)).fetchone()
     project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
+    if not bool(_row_value(project, "harness_engine_enabled", 1)):
+        raise ValueError("该项目的 Harness Engine 已由灰度开关隔离")
     if ep["status"] not in ("confirmed", "generating", "done"):
         raise ValueError("分镜脚本未确认，不能生成视频（PRD 原则 P3：贵的环节前人工把关）")
 
@@ -391,12 +410,32 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
         (version_id, shot_id, version_no, prompt_text, key, now(),
          json.dumps(image_meta, ensure_ascii=False)))
     job_id = new_id("job")
+    budget_limit = float(get_setting("episode_cost_limit_cny") or 100)
+    run_id, step_run_id = ensure_media_trace(
+        workflow_type="video_generation", scope_id=shot_id,
+        input_value={"prompt": prompt_text, "version": version_no}, budget_limit_cny=budget_limit,
+    )
     conn.execute(
-        "INSERT INTO jobs(id, kind, shot_id, version_id, episode_id, project_id, status, created_at, updated_at, after_shot_id) "
-        "VALUES(?, 'video', ?, ?, ?, ?, 'queued', ?, ?, ?)",
-        (job_id, shot_id, version_id, ep["id"], project["id"], now(), now(), after_shot_id))
+        "INSERT INTO jobs(id, kind, shot_id, version_id, episode_id, project_id, status, created_at, "
+        "updated_at, after_shot_id, run_id, step_run_id) "
+        "VALUES(?, 'video', ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)",
+        (
+            job_id, shot_id, version_id, ep["id"], project["id"], now(), now(), after_shot_id,
+            run_id, step_run_id,
+        ))
     conn.execute("UPDATE episodes SET status='generating' WHERE id=? AND status='confirmed'", (ep["id"],))
     conn.commit()
+    estimate = shot_cost_cny(shot.duration_s) + config.IMAGE_PRICE_PER_UNIT * 2
+    reserved = media_scheduler.reserve_budget(
+        job_id, ep["id"], estimate, budget_limit, conn=conn
+    )
+    if not reserved:
+        _set_version(version_id, status="paused_budget")
+        _set_job(job_id, "paused_budget", "集预算不足，任务已暂停")
+        return {
+            "reused": False, "version_id": version_id, "job_id": job_id,
+            "paused_budget": True,
+        }
     _queue.put_nowait(job_id)
     return {"reused": False, "version_id": version_id, "job_id": job_id}
 
@@ -417,17 +456,37 @@ def enqueue_scene(shot_id: str, *, kinds: list[str] | None = None) -> dict:
     if not shot_row:
         raise ValueError(f"镜头不存在：{shot_id}")
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (shot_row["episode_id"],)).fetchone()
+    project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
+    if not bool(_row_value(project, "harness_engine_enabled", 1)):
+        raise ValueError("该项目的 Harness Engine 已由灰度开关隔离")
     if ep["status"] not in ("scripted", "confirmed", "generating", "done"):
         raise ValueError("请先确认分镜脚本，再生成关键帧")
     target_kinds = scene_generation_kinds(shot_row, kinds)
     conn.execute("UPDATE shots SET scene_status='generating' WHERE id=?", (shot_id,))
     job_id = new_id("job")
+    budget_limit = float(get_setting("episode_cost_limit_cny") or 100)
+    run_id, step_run_id = ensure_media_trace(
+        workflow_type="scene_generation", scope_id=shot_id,
+        input_value={"kinds": target_kinds}, budget_limit_cny=budget_limit,
+    )
     conn.execute(
-        "INSERT INTO jobs(id, kind, shot_id, episode_id, project_id, status, created_at, updated_at, scene_kinds) "
-        "VALUES(?, 'scene', ?, ?, ?, 'queued', ?, ?, ?)",
+        "INSERT INTO jobs(id, kind, shot_id, episode_id, project_id, status, created_at, updated_at, "
+        "scene_kinds, run_id, step_run_id) "
+        "VALUES(?, 'scene', ?, ?, ?, 'queued', ?, ?, ?, ?, ?)",
         (job_id, shot_id, ep["id"], ep["project_id"], now(), now(),
-         json.dumps(target_kinds, ensure_ascii=False)))
+         json.dumps(target_kinds, ensure_ascii=False), run_id, step_run_id))
     conn.commit()
+    estimate = config.IMAGE_PRICE_PER_UNIT * max(
+        1, int(get_setting("scene_max_attempts") or 3) * len(target_kinds)
+    )
+    reserved = media_scheduler.reserve_budget(
+        job_id, ep["id"], estimate, budget_limit, conn=conn
+    )
+    if not reserved:
+        conn.execute("UPDATE shots SET scene_status='review' WHERE id=?", (shot_id,))
+        conn.commit()
+        _set_job(job_id, "paused_budget", "集预算不足，任务已暂停")
+        return {"job_id": job_id, "kinds": target_kinds, "paused_budget": True}
     _queue.put_nowait(job_id)
     return {"job_id": job_id, "kinds": target_kinds}
 
@@ -522,7 +581,12 @@ async def _generate_keyframe_candidates(*, conn, job, shot, ep, project, bible, 
                 anchors, prev_image_b64=comparison_b64, kind=kind)
             conn.execute("UPDATE shot_scenes SET status='succeeded', image_path=?, qa_json=? WHERE id=?",
                          (str(dest), json.dumps(qa, ensure_ascii=False), sid))
+            conn.execute("UPDATE shot_scenes SET cost_cny=? WHERE id=?", (config.IMAGE_PRICE_PER_UNIT, sid))
             conn.commit()
+            try:
+                media_evidence.record_scene_candidate(sid, step_run_id=_row_value(job, "step_run_id"))
+            except (OSError, ValueError):
+                pass
             score = float(qa.get("overall", -1))
             candidates.append((sid, score, str(dest), qa))
             if score >= threshold:
@@ -617,11 +681,16 @@ async def _run_scene_job(job) -> None:
             conn.execute("UPDATE shots SET scene_status='review' WHERE id=?", (job["shot_id"],))
             conn.commit()
             _set_job(job["id"], "failed", "关键帧生成/评审失败，请重试或手动处理")
+            media_scheduler.settle_budget(job["id"], 0.0, success=False)
             return
 
         if KEYFRAME_HEAD in best:
+            reason = _scene_adoption_reason(conn, job["shot_id"], KEYFRAME_HEAD, best[KEYFRAME_HEAD][0])
+            conn.execute("UPDATE shot_scenes SET adoption_reason=? WHERE id=?", (reason, best[KEYFRAME_HEAD][0]))
             conn.execute("UPDATE shots SET approved_head_scene_id=? WHERE id=?", (best[KEYFRAME_HEAD][0], job["shot_id"]))
         if KEYFRAME_TAIL in best:
+            reason = _scene_adoption_reason(conn, job["shot_id"], KEYFRAME_TAIL, best[KEYFRAME_TAIL][0])
+            conn.execute("UPDATE shot_scenes SET adoption_reason=? WHERE id=?", (reason, best[KEYFRAME_TAIL][0]))
             conn.execute(
                 "UPDATE shots SET approved_tail_scene_id=?, approved_scene_id=? WHERE id=?",
                 (best[KEYFRAME_TAIL][0], best[KEYFRAME_TAIL][0], job["shot_id"]))
@@ -631,12 +700,39 @@ async def _run_scene_job(job) -> None:
         conn.execute("UPDATE shots SET scene_status=? WHERE id=?", (scene_status, job["shot_id"]))
         conn.commit()
         _set_job(job["id"], "succeeded")
+        actual_cost = conn.execute(
+            "SELECT COALESCE(SUM(cost_cny),0) AS c FROM shot_scenes WHERE shot_id=?",
+            (job["shot_id"],),
+        ).fetchone()["c"]
+        media_scheduler.settle_budget(job["id"], float(actual_cost), success=True)
     except Exception as exc:  # noqa: BLE001
         public = errors.record_and_format(exc, action="keyframe_generate",
                                           context={"shot_id": job["shot_id"], "job_id": job["id"]})
         conn.execute("UPDATE shots SET scene_status='review' WHERE id=?", (job["shot_id"],))
         conn.commit()
         _set_job(job["id"], "failed", public)
+        media_scheduler.settle_budget(job["id"], 0.0, success=False)
+
+
+def _scene_adoption_reason(conn, shot_id: str, kind: str, selected_id: str) -> str:
+    rows = conn.execute(
+        "SELECT id, version_no, qa_json FROM shot_scenes WHERE shot_id=? AND kind=? AND status='succeeded'",
+        (shot_id, kind),
+    ).fetchall()
+    scores: list[tuple[str, int, float]] = []
+    for row in rows:
+        try:
+            score = float((json.loads(row["qa_json"] or "{}") or {}).get("overall", -1))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            score = -1
+        scores.append((row["id"], row["version_no"], score))
+    chosen = next((item for item in scores if item[0] == selected_id), (selected_id, 0, -1))
+    ordered = sorted(scores, key=lambda item: (item[2], item[1]), reverse=True)
+    margin = chosen[2] - ordered[1][2] if len(ordered) > 1 else chosen[2]
+    return (
+        f"自动比较 {len(scores)} 个 {kind} 候选；选择 v{chosen[1]}，"
+        f"VLM 分 {chosen[2]:.3f}，领先次优 {margin:.3f}。"
+    )
 
 
 async def critique_version(version_id: str) -> list[str]:
@@ -674,8 +770,21 @@ async def critique_version(version_id: str) -> list[str]:
 
 def _set_job(job_id: str, status: str, error: str | None = None) -> None:
     conn = get_conn()
-    conn.execute("UPDATE jobs SET status=?, error=?, updated_at=? WHERE id=?", (status, error, now(), job_id))
+    terminal = status in {"succeeded", "failed", "cancelled", "abandoned", "paused_budget"}
+    if terminal:
+        conn.execute(
+            "UPDATE jobs SET status=?, error=?, updated_at=?, lease_owner=NULL, lease_expires_at=NULL WHERE id=?",
+            (status, error, now(), job_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE jobs SET status=?, error=?, updated_at=? WHERE id=?",
+            (status, error, now(), job_id),
+        )
     conn.commit()
+    row = conn.execute("SELECT run_id, step_run_id FROM jobs WHERE id=?", (job_id,)).fetchone()
+    if row:
+        mark_media_job_state(row["run_id"], row["step_run_id"], status, error)
 
 
 def _set_version(version_id: str, **fields) -> None:
@@ -757,11 +866,6 @@ async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dic
 
     # ── 第 1 次失败：记录原始失败原因并重试 1 次 ──
     if not assets:
-        original_failure_detail = {
-            "attempt": 1,
-            "rejection_count": len(rejection_details),
-            "rejection_details": rejection_details[:5],
-        }
         log_provider_call(
             "reference_image_mode_attempt_1_failed", config.MODEL_TEXT, "REFERENCE_ATTEMPT_FAILED",
             None, 0, meta={
@@ -835,13 +939,21 @@ async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dic
     raise ProviderError(f"视频生成任务失败：参考图模式未产出可用参考图（{ref_failure_reason}）")
 
 
-async def _run_job(job_id: str) -> None:
+async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
     conn = get_conn()
+    owner = lease_owner or f"direct-{id(asyncio.current_task())}"
+    if lease_owner is None:
+        if not media_scheduler.claim_job(job_id, owner, lease_seconds=180.0):
+            return
+        run_row = conn.execute(
+            "SELECT run_id, step_run_id FROM jobs WHERE id=?", (job_id,)
+        ).fetchone()
+        if run_row:
+            mark_media_job_state(run_row["run_id"], run_row["step_run_id"], "running")
     job = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
-    if not job or job["status"] not in ("queued", "running"):
+    if not job or job["status"] != "running" or job["lease_owner"] != owner:
         return
     if job["kind"] == "scene":
-        _set_job(job_id, "running")
         await _run_scene_job(job)
         return
     version = conn.execute("SELECT * FROM shot_versions WHERE id=?", (job["version_id"],)).fetchone()
@@ -850,14 +962,7 @@ async def _run_job(job_id: str) -> None:
 
     # 视频固定参考图模式：不再使用首/尾帧作为 Seedance 输入。
     meta = json.loads(version["image_inputs"] or "{}")
-    after_shot_id = meta.get("after_shot_id")
 
-    if _budget_exceeded(job["episode_id"]):
-        _set_job(job_id, "paused_budget", f"本集成本已达上限 ¥{get_setting('episode_cost_limit_cny')}，队列暂停。可在设置中调高后重试")
-        _set_version(version["id"], status="paused_budget")
-        return
-
-    _set_job(job_id, "running")
     started = time.time()
     try:
         task_id = version["provider_task_id"]
@@ -924,10 +1029,19 @@ async def _run_job(job_id: str) -> None:
                         continue
                     raise
                 _set_version(version["id"], provider_task_id=task_id)
+                conn.execute("UPDATE jobs SET provider_non_cancellable=1 WHERE id=?", (job_id,))
+                conn.commit()
 
             deadline = time.time() + config.VIDEO_POLL_BUDGET
             result = None
             while time.time() < deadline:
+                state = conn.execute(
+                    "SELECT cancellation_requested FROM jobs WHERE id=?", (job_id,)
+                ).fetchone()
+                if state and state["cancellation_requested"]:
+                    media_scheduler.settle_budget(job_id, 0.0, success=False)
+                    return
+                media_scheduler.renew_lease(job_id, owner, lease_seconds=180.0)
                 result = await hiagent.poll_video_task(
                     task_id,
                     call_meta={
@@ -977,15 +1091,20 @@ async def _run_job(job_id: str) -> None:
         cost = shot_cost_cny(shot["duration_s"])
         _set_version(version["id"], status="succeeded", video_path=str(dest),
                      last_frame_url=result["last_frame_url"], cost_cny=cost, latency_s=latency)
-        _job_retry_counts.pop(job_id, None)
-        _set_job(job_id, "succeeded")
-        # 无已采用版本时自动采用本次成功版本
-        conn.execute("UPDATE shots SET adopted_version_id=? WHERE id=? AND adopted_version_id IS NULL",
-                     (version["id"], job["shot_id"]))
-        conn.commit()
         # 评审墙产生了新片段，旧的整集合成视频即过期 → 删除，避免成片台展示陈旧成品
         _invalidate_final_video(job["project_id"], ep["episode_no"])
         await _maybe_auto_qa(job, version["id"], str(dest))
+        media_evidence.record_video_candidate(
+            version["id"], step_run_id=_row_value(job, "step_run_id")
+        )
+        technical = json.loads(conn.execute(
+            "SELECT technical_validation_json FROM shot_versions WHERE id=?", (version["id"],)
+        ).fetchone()["technical_validation_json"] or "{}")
+        if not technical.get("passed"):
+            raise ProviderError("视频文件技术校验失败，候选不可采用")
+        media_evidence.select_best_video_candidate(job["shot_id"])
+        _set_job(job_id, "succeeded")
+        media_scheduler.settle_budget(job_id, cost, success=True)
     except (ProviderError, Exception) as exc:  # noqa: BLE001 失败要响：原文进日志，前端给码+分类
         public = errors.record_and_format(
             exc, action="shot_video_generate",
@@ -995,42 +1114,9 @@ async def _run_job(job_id: str) -> None:
         if isinstance(exc, ProviderError) and _schedule_job_retry(job_id, exc):
             _set_version(version["id"], status="queued")
             return
-        _job_retry_counts.pop(job_id, None)
         _set_version(version["id"], status="failed", error=public)
         _set_job(job_id, "failed", public)
-
-
-def _promote_if_better_qa(job, version_id: str, qa: dict) -> None:
-    """自动模式下，若本版质检分高于当前采用版，则改采用本版。
-    否则首版成功即占住 adopted_version_id，QA 触发的重生版永远不会被采用——重生纯属花钱不见效。
-    仅在分数严格更高（或当前采用版没有有效质检分）时切换，并使旧成片失效。"""
-    conn = get_conn()
-    v = conn.execute("SELECT status FROM shot_versions WHERE id=?", (version_id,)).fetchone()
-    if not v or v["status"] != "succeeded":
-        return
-    new_overall = qa.get("overall", -1)
-    if new_overall is None or new_overall < 0:
-        return
-    shot = conn.execute("SELECT adopted_version_id FROM shots WHERE id=?", (job["shot_id"],)).fetchone()
-    adopted = shot["adopted_version_id"] if shot else None
-    if adopted == version_id:
-        return
-    if not adopted:
-        conn.execute("UPDATE shots SET adopted_version_id=? WHERE id=? AND adopted_version_id IS NULL",
-                     (version_id, job["shot_id"]))
-        conn.commit()
-        return
-    av = conn.execute("SELECT qa_json FROM shot_versions WHERE id=?", (adopted,)).fetchone()
-    try:
-        cur_overall = (json.loads(av["qa_json"]) or {}).get("overall", -1) if av and av["qa_json"] else -1
-    except (TypeError, ValueError, json.JSONDecodeError):
-        cur_overall = -1
-    if new_overall > cur_overall:
-        conn.execute("UPDATE shots SET adopted_version_id=? WHERE id=?", (version_id, job["shot_id"]))
-        conn.commit()
-        ep = conn.execute("SELECT episode_no FROM episodes WHERE id=?", (job["episode_id"],)).fetchone()
-        if ep:
-            _invalidate_final_video(job["project_id"], ep["episode_no"])
+        media_scheduler.settle_budget(job_id, 0.0, success=False)
 
 
 async def _maybe_auto_qa(job, version_id: str, video_path: str) -> None:
@@ -1055,17 +1141,21 @@ async def _maybe_auto_qa(job, version_id: str, video_path: str) -> None:
                 "vlm_qa", config.MODEL_VLM, "QA_RECOVERED_NO_RETAKE", None, 0,
                 meta={"shot_id": job["shot_id"], "version_id": version_id, "qa": qa})
             return
-        # 重生版若质检分更高，立即提升为采用版（避免更差的首版长期占位）
-        _promote_if_better_qa(job, version_id, qa)
         threshold = float(get_setting("auto_retake_threshold") or 0.6)
         version = conn.execute("SELECT * FROM shot_versions WHERE id=?", (version_id,)).fetchone()
         meta = json.loads(version["image_inputs"] or "{}") if version else {}
         if 0 <= qa.get("overall", -1) < threshold and meta.get("mode") == video_modes.REFERENCE_IMAGE_MODE:
             logs = meta.get("reference_failure_logs") or []
+            # 只留轻量元信息做审计；绝不把带 base64 url 的参考图整份塞进日志，
+            # 否则会在 image_inputs 里成倍堆积 base64，撑爆单集响应体积。
+            log_refs = [
+                {k: v for k, v in (r or {}).items() if k not in ("url", "path")}
+                for r in (meta.get("reference_images") or [])
+            ]
             logs.append({
                 "mode": video_modes.REFERENCE_IMAGE_MODE,
                 "reason": "Video QA failed after reference image mode.",
-                "reference_images": meta.get("reference_images") or [],
+                "reference_images": log_refs,
                 "prompt": version["prompt_text"][:500],
                 "qa": qa,
             })
@@ -1089,7 +1179,6 @@ def _extract_frames(video_path: str) -> list[str]:
     with tempfile.TemporaryDirectory() as td:
         for i, pos in enumerate(("0", "50%", "99%")):
             out = Path(td) / f"f{i}.jpg"
-            vf = "select=eq(n\\,0)" if pos == "0" else None
             cmd = ["ffmpeg", "-y", "-loglevel", "error"]
             if pos == "0":
                 cmd += ["-i", video_path, "-vf", "select=eq(n\\,0)", "-vframes", "1"]
@@ -1112,23 +1201,164 @@ async def _worker_loop(name: str) -> None:
     while True:
         job_id = await _queue.get()
         try:
-            await _run_job(job_id)
+            claim = media_scheduler.claim_job(job_id, name, lease_seconds=180.0)
+            if claim:
+                row = get_conn().execute(
+                    "SELECT run_id, step_run_id FROM jobs WHERE id=?", (job_id,)
+                ).fetchone()
+                if row:
+                    mark_media_job_state(row["run_id"], row["step_run_id"], "running")
+                await _run_job(job_id, lease_owner=name)
         except Exception as exc:  # noqa: BLE001 worker 永不死亡，但错误必须落库
             public = errors.record_and_format(exc, action="worker_loop", context={"job_id": job_id})
             _set_job(job_id, "failed", public)
+            media_scheduler.settle_budget(job_id, 0.0, success=False)
         finally:
             _queue.task_done()
 
 
 def recover_and_start(loop_concurrency: int | None = None) -> None:
     """启动时恢复队列（PRD §4.5 验收：中途杀进程重启后队列状态可恢复）。"""
-    conn = get_conn()
-    rows = conn.execute("SELECT id FROM jobs WHERE status IN ('queued', 'running') ORDER BY created_at").fetchall()
-    for r in rows:
-        _queue.put_nowait(r["id"])
+    for job_id, delay in media_scheduler.recoverable_jobs():
+        if delay <= 0:
+            _queue.put_nowait(job_id)
+        else:
+            task = asyncio.get_running_loop().create_task(_requeue_after(job_id, delay))
+            _retry_tasks.add(task)
+            task.add_done_callback(_retry_tasks.discard)
     n = loop_concurrency or int(get_setting("video_concurrency") or 2)
     for i in range(n):
         _workers.append(asyncio.get_running_loop().create_task(_worker_loop(f"w{i}")))
+
+
+def _recover_one_media_job(
+    conn, job_id: str, run_id: str | None, step_run_id: str | None, reason: str
+) -> bool:
+    """把一个卡住的媒体 job 复位回 queued 并入队：
+    - jobs.status='running' → 'queued'，清空 lease/error/next_retry_at，并入队
+    - workflow_runs 保持当前状态（PAUSED_EXTERNAL/RUNNING 等）不动：worker 接管时
+      mark_media_job_state('running') 会 CAS 把 PAUSED_EXTERNAL/RUNNING 转回 RUNNING，
+      并自动清掉 failure_message。预先 transition 反而会撞上状态图不允许的边
+      （如 PAUSED_EXTERNAL→WAITING_RETRY 不在 RUN_TRANSITIONS 中）
+    - step_runs 若被 init_db 在重启时置为 FAILED（终态无法走 transition_step），
+      直接 SQL 复位回 RUNNING 并清错误字段，否则 mark_media_job_state('succeeded')
+      会因为 step.status != RUNNING 而无法收尾
+    返回 True 表示实际复位过；False 表示 job 已不存在或被并发改动（调用方忽略）。"""
+    cursor = conn.execute(
+        "UPDATE jobs SET status='queued', lease_owner=NULL, lease_expires_at=NULL, "
+        "next_retry_at=NULL, error=NULL, updated_at=? "
+        "WHERE id=? AND status='running' AND cancellation_requested=0 AND abandoned=0",
+        (now(), job_id),
+    )
+    if cursor.rowcount != 1:
+        return False
+    if step_run_id:
+        # FAILED 是终态，state_machine 不允许走出；这里直接 SQL 复位，仅限 service_restart 场景
+        conn.execute(
+            "UPDATE step_runs SET status='RUNNING', finished_at=NULL, "
+            "exit_reason=COALESCE(exit_reason, 'service_restart → recovered'), "
+            "error_code=NULL, error_message=NULL WHERE id=? AND status='FAILED'",
+            (step_run_id,),
+        )
+    _queue.put_nowait(job_id)
+    return True
+
+
+def recover_media_jobs() -> int:
+    """启动时恢复因服务重启被中断的媒体任务。
+
+    init_db() 在重启时把所有 status='RUNNING' 的 workflow_runs 标为 PAUSED_EXTERNAL +
+    failure_code='SERVICE_RESTART'，同时把对应 step_runs 标 FAILED；但底层 jobs 表的
+    lease（默认 180s）在重启那一刻往往还没过期，media_scheduler.recoverable_jobs()
+    只扫 status='running' AND lease_expires_at<now 的 job，因此不会重新入队——
+    结果就是用户看到的"任务卡在'服务重启，可从安全检查点恢复'"。
+
+    本函数把这些 job 显式复位回 queued 并重新入队；run 从 PAUSED_EXTERNAL 转回
+    WAITING_RETRY、step 从 FAILED 复位回 RUNNING，让 worker 接管后能正常完成。
+
+    边界：不恢复 PAUSED_BUDGET（预算不足，需显式 retry_paused 释放预算后重试）；
+         不恢复 FAILED/CANCELLED（真正报错或人工取消）。"""
+    conn = get_conn()
+    rows = rows_to_dicts(conn.execute(
+        """SELECT j.id AS job_id, j.run_id, j.step_run_id
+           FROM jobs j
+           JOIN workflow_runs wr ON wr.id=j.run_id
+           WHERE j.status='running'
+             AND wr.status='PAUSED_EXTERNAL'
+             AND wr.failure_code='SERVICE_RESTART'
+             AND j.cancellation_requested=0
+             AND j.abandoned=0""",
+    ))
+    resumed = 0
+    for r in rows:
+        if _recover_one_media_job(
+            conn, r["job_id"], r["run_id"], r["step_run_id"], "服务重启后自动恢复任务"
+        ):
+            resumed += 1
+    if resumed:
+        conn.commit()
+    return resumed
+
+
+_SWEEPER_INTERVAL_SECONDS = 60.0
+_sweeper_task: asyncio.Task | None = None
+
+
+async def _stale_lease_sweeper(interval_seconds: float = _SWEEPER_INTERVAL_SECONDS) -> None:
+    """周期性回收卡死的媒体 job 的过期 lease。
+
+    worker 进程被 kill -9、容器 OOM、协程异常退出等情况会让 job 卡在
+    status='running' 且 lease_expires_at<now；recoverable_jobs() 只在启动时扫一次，
+    启动后过期的 lease 不会被自动回收。本协程每 interval_seconds 秒扫一次，
+    把过期 lease 的 job 复位回 queued 并重新入队。
+
+    幂等：多次扫到同一 job 时，第二次 CAS 会因 status 已是 'queued' 而 rowcount=0，
+    不会重复入队。"""
+    try:
+        while True:
+            await asyncio.sleep(interval_seconds)
+            try:
+                conn = get_conn()
+                stamp = now()
+                rows = rows_to_dicts(conn.execute(
+                    """SELECT id, run_id, step_run_id FROM jobs
+                       WHERE status='running'
+                         AND lease_expires_at IS NOT NULL
+                         AND lease_expires_at < ?
+                         AND cancellation_requested=0
+                         AND abandoned=0""",
+                    (stamp,),
+                ))
+                if not rows:
+                    continue
+                resumed = 0
+                for r in rows:
+                    if _recover_one_media_job(
+                        conn, r["id"], r["run_id"], r["step_run_id"],
+                        "lease 过期，自动回收并重新入队",
+                    ):
+                        resumed += 1
+                if resumed:
+                    conn.commit()
+            except Exception:  # noqa: BLE001 周期任务不能死
+                pass
+    except asyncio.CancelledError:
+        return
+
+
+def start_stale_lease_sweeper(interval_seconds: float = _SWEEPER_INTERVAL_SECONDS) -> None:
+    """启动周期 lease 回收协程；多次调用幂等（已有任务在跑则不重启）。
+    覆盖 worker 崩溃/OOM 等非服务重启场景下的中断恢复需求。"""
+    global _sweeper_task
+    if _sweeper_task is not None and not _sweeper_task.done():
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    _sweeper_task = loop.create_task(_stale_lease_sweeper(interval_seconds))
+    _retry_tasks.add(_sweeper_task)
+    _sweeper_task.add_done_callback(_retry_tasks.discard)
 
 
 def ensure_workers(n: int) -> None:
@@ -1142,13 +1372,17 @@ def ensure_workers(n: int) -> None:
         _workers.append(loop.create_task(_worker_loop(f"w{len(_workers)}")))
 
 
-def worker_count() -> int:
-    return len(_workers)
-
-
 async def stop() -> None:
     """优雅停机：取消常驻 worker 循环。否则 uvicorn --reload/退出时会卡在
     'Waiting for connections to close'——常驻 while-True 任务不退出，停机就挂起。"""
+    global _sweeper_task
+    if _sweeper_task is not None:
+        _sweeper_task.cancel()
+    for t in _retry_tasks:
+        t.cancel()
+    if _retry_tasks:
+        await asyncio.gather(*tuple(_retry_tasks), return_exceptions=True)
+    _retry_tasks.clear()
     for t in _workers:
         t.cancel()
     for t in _workers:
@@ -1162,12 +1396,27 @@ async def stop() -> None:
 def retry_paused(episode_id: str) -> int:
     """成本上限调高后，恢复因预算暂停的任务。"""
     conn = get_conn()
-    rows = conn.execute("SELECT id FROM jobs WHERE episode_id=? AND status='paused_budget'", (episode_id,)).fetchall()
+    rows = conn.execute(
+        "SELECT id, reserved_cost_cny, kind FROM jobs WHERE episode_id=? AND status='paused_budget'",
+        (episode_id,),
+    ).fetchall()
+    resumed = 0
     for r in rows:
-        conn.execute("UPDATE jobs SET status='queued', error=NULL, updated_at=? WHERE id=?", (now(), r["id"]))
-        _queue.put_nowait(r["id"])
-    conn.commit()
-    return len(rows)
+        estimate = float(r["reserved_cost_cny"] or 0)
+        if estimate <= 0:
+            estimate = config.IMAGE_PRICE_PER_UNIT if r["kind"] == "scene" else 1.0
+        if media_scheduler.reserve_budget(
+            r["id"], episode_id, estimate,
+            float(get_setting("episode_cost_limit_cny") or 100), conn=conn,
+        ):
+            conn.execute(
+                "UPDATE jobs SET status='queued', error=NULL, next_retry_at=NULL, updated_at=? WHERE id=?",
+                (now(), r["id"]),
+            )
+            conn.commit()
+            _queue.put_nowait(r["id"])
+            resumed += 1
+    return resumed
 
 
 # ---------- 成片台：汇总状态 / 拼接 / 导出 ----------
@@ -1223,238 +1472,6 @@ def _final_video_path(project_id: str, episode_no: int) -> Path:
     return d / "episode.mp4"
 
 
-def _delete_version_files(video_path: str | None) -> None:
-    """删除版本视频及旧链路遗留的缓存尾帧。"""
-    if not video_path:
-        return
-    p = Path(video_path)
-    for f in (p, Path(str(p.with_suffix("")) + "_last.jpg")):
-        try:
-            f.unlink()
-        except OSError:
-            pass
-
-
-def _purge_shots(conn, shots: list[dict]) -> tuple[int, set[str]]:
-    """删除给定镜头的全部版本、关键帧、任务与采用标记。
-    返回 (删除版本数, 受影响剧集 id 集合)。"""
-    versions_removed = 0
-    affected_eps: set[str] = set()
-    for s in shots:
-        affected_eps.add(s["episode_id"])
-        versions = conn.execute(
-            "SELECT id, video_path FROM shot_versions WHERE shot_id=?", (s["id"],)).fetchall()
-        for v in versions:
-            _delete_version_files(v["video_path"])
-        scenes = conn.execute("SELECT image_path FROM shot_scenes WHERE shot_id=?", (s["id"],)).fetchall()
-        for sc in scenes:
-            if sc["image_path"]:
-                try:
-                    Path(sc["image_path"]).unlink()
-                except OSError:
-                    pass
-        conn.execute("DELETE FROM shot_versions WHERE shot_id=?", (s["id"],))
-        conn.execute("DELETE FROM shot_scenes WHERE shot_id=?", (s["id"],))
-        conn.execute("DELETE FROM jobs WHERE shot_id=?", (s["id"],))
-        conn.execute(
-            "UPDATE shots SET adopted_version_id=NULL, approved_scene_id=NULL, "
-            "approved_head_scene_id=NULL, approved_tail_scene_id=NULL, scene_status='none' WHERE id=?",
-            (s["id"],))
-        versions_removed += len(versions)
-    return versions_removed, affected_eps
-
-
-def _rollback_episodes(conn, ep_ids: set[str]) -> None:
-    for ep_id in ep_ids:
-        ep = conn.execute(
-            "SELECT project_id, episode_no FROM episodes WHERE id=?", (ep_id,)).fetchone()
-        if ep:
-            _invalidate_final_video(ep["project_id"], ep["episode_no"])
-        conn.execute("UPDATE episodes SET status='confirmed' WHERE id=? AND status IN ('generating','done')", (ep_id,))
-
-
-def purge_character_video_artifacts(project_id: str, character_names: list[str]) -> dict:
-    """角色定妆照重做后，清理所有用到该角色的镜头已生成产物：
-    评审墙关键帧、各版本视频、相关任务、整集成品，并把对应剧集回退到“已确认”，
-    强制后续基于新定妆照重新生成，避免新旧画风/形象混用。"""
-    targets = {n for n in character_names if n}
-    if not targets:
-        return {"shots": 0, "versions": 0, "episodes": 0}
-    conn = get_conn()
-    shots = rows_to_dicts(conn.execute(
-        """SELECT s.id, s.episode_id, s.characters
-           FROM shots s JOIN episodes e ON e.id = s.episode_id
-           WHERE e.project_id = ?""", (project_id,)).fetchall())
-    affected_shots = [s for s in shots if set(json.loads(s["characters"] or "[]")) & targets]
-    versions_removed, affected_eps = _purge_shots(conn, affected_shots)
-    _rollback_episodes(conn, affected_eps)
-    conn.commit()
-    return {"shots": len(affected_shots), "versions": versions_removed, "episodes": len(affected_eps)}
-
-
-def delete_project_episodes(project_id: str) -> int:
-    """重新分集时整体清空本项目所有剧集及其衍生数据（镜头/版本/视频/任务/成片目录）。
-    旧逻辑只删 status='planned' 的剧集，导致已进入分镜/确认的旧集残留、与新集 episode_no 撞号，
-    前端就出现“同一集号有两三条、剧情重复”。重新分集应是干净替换。"""
-    conn = get_conn()
-    eps = conn.execute("SELECT id, episode_no FROM episodes WHERE project_id=?", (project_id,)).fetchall()
-    shots = rows_to_dicts(conn.execute(
-        "SELECT s.id, s.episode_id FROM shots s JOIN episodes e ON e.id=s.episode_id WHERE e.project_id=?",
-        (project_id,)).fetchall())
-    _purge_shots(conn, shots)  # 删版本文件/尾帧、jobs、清采用标记
-    conn.execute("DELETE FROM shots WHERE episode_id IN (SELECT id FROM episodes WHERE project_id=?)", (project_id,))
-    conn.execute("DELETE FROM episodes WHERE project_id=?", (project_id,))
-    conn.commit()
-    ep_dir = config.PROJECTS_DIR / project_id / "episodes"
-    if ep_dir.exists():
-        shutil.rmtree(ep_dir, ignore_errors=True)
-    return len(eps)
-
-
-def delete_episode_shots(episode_id: str) -> int:
-    """清空单集分镜及其衍生产物。用于剧本重生/编辑后让下游重新展开。"""
-    conn = get_conn()
-    ep = conn.execute("SELECT project_id, episode_no FROM episodes WHERE id=?", (episode_id,)).fetchone()
-    shots = rows_to_dicts(conn.execute(
-        "SELECT id, episode_id FROM shots WHERE episode_id=?", (episode_id,)).fetchall())
-    _purge_shots(conn, shots)
-    conn.execute("DELETE FROM shots WHERE episode_id=?", (episode_id,))
-    conn.execute("DELETE FROM jobs WHERE episode_id=?", (episode_id,))
-    conn.execute(
-        "UPDATE episodes SET status='planned', script_error=NULL WHERE id=? AND status NOT IN ('planned','scripting','script_failed')",
-        (episode_id,))
-    conn.commit()
-    if ep:
-        _invalidate_final_video(ep["project_id"], ep["episode_no"])
-    return len(shots)
-
-
-def purge_project_video_artifacts(project_id: str) -> dict:
-    """画风切换后全项目作废：旧画风的定妆照、旧关键帧与旧视频
-    是比文字 prompt 更强的画风信号，残留任何一环都会把新画风拉回旧画风，必须整体清理。"""
-    conn = get_conn()
-    shots = rows_to_dicts(conn.execute(
-        """SELECT s.id, s.episode_id FROM shots s JOIN episodes e ON e.id = s.episode_id
-           WHERE e.project_id = ?""", (project_id,)).fetchall())
-    versions_removed, affected_eps = _purge_shots(conn, shots)
-    _rollback_episodes(conn, affected_eps)
-    conn.commit()
-    return {"shots": len(shots), "versions": versions_removed, "episodes": len(affected_eps)}
-
-
-def delete_video_version(version_id: str) -> str | None:
-    """删除单个视频版本（含视频/尾帧文件、相关任务）；若是采用版则清空采用并使该集成品失效。
-    返回所属 shot_id。"""
-    conn = get_conn()
-    v = conn.execute("SELECT * FROM shot_versions WHERE id=?", (version_id,)).fetchone()
-    if not v:
-        return None
-    shot_id = v["shot_id"]
-    _delete_version_files(v["video_path"])
-    conn.execute("DELETE FROM shot_versions WHERE id=?", (version_id,))
-    conn.execute("DELETE FROM jobs WHERE version_id=?", (version_id,))
-    conn.execute("UPDATE shots SET adopted_version_id=NULL WHERE id=? AND adopted_version_id=?", (shot_id, version_id))
-    shot = conn.execute("SELECT episode_id FROM shots WHERE id=?", (shot_id,)).fetchone()
-    if shot:
-        ep = conn.execute("SELECT project_id, episode_no FROM episodes WHERE id=?", (shot["episode_id"],)).fetchone()
-        if ep:
-            _invalidate_final_video(ep["project_id"], ep["episode_no"])
-    conn.commit()
-    return shot_id
-
-
-def purge_shot_videos(shot_id: str) -> int:
-    """删除某镜的全部视频版本（含视频/尾帧文件、相关任务），清空采用标记，并使该集成品失效。
-    用于：该镜关键帧被删空后，旧成片已无首尾帧依据，应一并删除。返回删除的版本数。"""
-    conn = get_conn()
-    shot = conn.execute("SELECT episode_id FROM shots WHERE id=?", (shot_id,)).fetchone()
-    if not shot:
-        return 0
-    versions = conn.execute("SELECT id, video_path FROM shot_versions WHERE shot_id=?", (shot_id,)).fetchall()
-    for v in versions:
-        _delete_version_files(v["video_path"])
-    conn.execute("DELETE FROM shot_versions WHERE shot_id=?", (shot_id,))
-    conn.execute("DELETE FROM jobs WHERE shot_id=? AND kind='video'", (shot_id,))
-    conn.execute("UPDATE shots SET adopted_version_id=NULL WHERE id=?", (shot_id,))
-    ep = conn.execute("SELECT project_id, episode_no FROM episodes WHERE id=?", (shot["episode_id"],)).fetchone()
-    if ep:
-        _invalidate_final_video(ep["project_id"], ep["episode_no"])
-    conn.commit()
-    return len(versions)
-
-
-def _delete_shot_reference_dir(conn, shot_row) -> int:
-    """删除某镜的参考图目录（REFERENCE_IMAGE_MODE 生成的参考图都落在此处）。返回删除的文件数。"""
-    ep = conn.execute(
-        "SELECT project_id, episode_no FROM episodes WHERE id=?", (shot_row["episode_id"],)).fetchone()
-    if not ep:
-        return 0
-    ref_dir = (config.PROJECTS_DIR / ep["project_id"] / "episodes" / str(ep["episode_no"])
-               / "shots" / str(shot_row["shot_no"]) / "references")
-    if not ref_dir.exists():
-        return 0
-    count = sum(1 for p in ref_dir.glob("*") if p.is_file())
-    shutil.rmtree(ref_dir, ignore_errors=True)
-    return count
-
-
-def clear_shot_artifacts(shot_id: str) -> dict:
-    """清空单镜的参考图、关键帧（首/尾图）、视频版本与模型分析（mode_plan），并使该集成品失效。
-    用于评审墙的「清空」操作。"""
-    conn = get_conn()
-    shot = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
-    if not shot:
-        return {"shot_id": shot_id, "videos": 0, "references": 0,
-                "keyframes_cleared": False, "mode_plan_cleared": False}
-    refs = _delete_shot_reference_dir(conn, shot)
-    versions, affected_eps = _purge_shots(conn, [dict(shot)])  # 视频+关键帧+任务、采用/审批标记、scene_status 复位
-    conn.execute("UPDATE shots SET mode_plan=NULL WHERE id=?", (shot_id,))
-    _rollback_episodes(conn, affected_eps)  # 整集成品失效 + generating/done → confirmed
-    conn.commit()
-    return {"shot_id": shot_id, "videos": versions, "references": refs,
-            "keyframes_cleared": True, "mode_plan_cleared": True}
-
-
-def clear_episode_artifacts(episode_id: str) -> dict:
-    """清空整集每个镜头的参考图、关键帧、视频版本与模型分析（mode_plan），并把该集回退到「已确认」。
-    用于评审墙的「清空本集」操作。"""
-    conn = get_conn()
-    shots = rows_to_dicts(conn.execute(
-        "SELECT * FROM shots WHERE episode_id=?", (episode_id,)).fetchall())
-    refs = 0
-    for s in shots:
-        refs += _delete_shot_reference_dir(conn, s)
-        conn.execute("UPDATE shots SET mode_plan=NULL WHERE id=?", (s["id"],))
-    versions, affected_eps = _purge_shots(conn, shots)
-    _rollback_episodes(conn, affected_eps or {episode_id})
-    conn.commit()
-    return {"episode_id": episode_id, "shots": len(shots), "videos": versions, "references": refs}
-
-
-def _invalidate_final_video(project_id: str, episode_no: int) -> None:
-    """删除某集已合成的整集成品（如存在）。在评审墙产生新片段后调用，
-    使成片台回到“需重新合成”的状态，而非展示与当前片段不一致的旧成品。"""
-    final_path = config.PROJECTS_DIR / project_id / "episodes" / str(episode_no) / "final" / "episode.mp4"
-    try:
-        if final_path.exists():
-            final_path.unlink()
-    except OSError:
-        pass
-
-
-def _adopted_video_paths(episode_id: str) -> list[tuple[int, str]]:
-    """按镜头顺序返回 (shot_no, video_path)，仅含已有成片的镜头。"""
-    conn = get_conn()
-    rows = conn.execute(
-        """SELECT s.shot_no, v.video_path
-           FROM shots s
-           JOIN shot_versions v ON v.id = s.adopted_version_id
-           WHERE s.episode_id=? AND v.status='succeeded' AND v.video_path IS NOT NULL
-           ORDER BY s.shot_no""",
-        (episode_id,)).fetchall()
-    return [(r["shot_no"], r["video_path"]) for r in rows]
-
-
 def concatenate_episode(episode_id: str) -> dict:
     """把本集所有已采用的镜头顺序拼接成一个 MP4。
     返回 {video_url, shots, total_duration_s}。若系统未装 ffmpeg 则返回占位说明。
@@ -1468,7 +1485,7 @@ def concatenate_episode(episode_id: str) -> dict:
     if not pieces:
         raise ValueError("本集没有任何已采用的视频片段，先生成/采用后再试")
 
-    # 各镜时长 5~10s 不一，拿不到实测时长时用分镜 duration_s 之和兜底（不再固定 ×10）。
+    # 各镜时长 5~5s 不一，拿不到实测时长时用分镜 duration_s 之和兜底（不再固定 ×10）。
     est_total_dur = conn.execute(
         """SELECT COALESCE(SUM(s.duration_s), 0) AS d
            FROM shots s WHERE s.episode_id=? AND s.adopted_version_id IS NOT NULL""",

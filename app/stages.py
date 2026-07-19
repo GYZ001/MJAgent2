@@ -6,7 +6,6 @@
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import math
@@ -17,26 +16,26 @@ from pydantic import BaseModel
 
 from app import config, hiagent
 from app.db import get_setting, log_provider_call
-from app.schemas import (Bible, CAMERA_MOVES, EMOTIONS, EpisodePlan, EpisodeScreenplay,
+from app.evaluations.issues import issues_from_messages
+from app.harness import model_gateway
+from app.loops import AgentLoop, AgentLoopFailure, AgentLoopPolicy
+from app.schemas import (Bible, CAMERA_MOVES, EMOTIONS, EpisodeScreenplay,
                          SHOT_SIZES, Scene, Shot, Storyboard, StoryboardOutline,
                          StoryboardOutlineShot, TRANSITIONS,
                          extract_json, schema_errors)
 from app.validators import (ACTION_DESC_MIN_CHARS, NARRATION_TARGET_CHARS,
-                            NARRATION_TARGET_MIN_CHARS,
-                            ORAL_TARGET_RANGE, SCENE_SETTING_MAX_CHARS,
+                            SCENE_SETTING_MAX_CHARS,
                             SOURCE_EXCERPT_MIN_CHARS,
-                            COMFORTABLE_SPOKEN_CHARS,
                             defer_establishing_covers,
                             downgrade_outline_offbible_spoken,
                             TRANSITION_HINTS, _atomize_claim, _condense, _covers_has_crowd,
                             _covers_has_spoken, _covers_outside_spoken,
-                            _too_similar, compact_durations_to_budget, estimate_speech_seconds,
-                            normalize_action_desc, normalize_continuity, normalize_durations_for_speech,
-                            normalize_episode_opening_shot, normalize_offbible_characters,
-                            normalize_plan_chapters, normalize_transition_visuals,
+                            _too_similar,
+                            normalize_action_desc, normalize_continuity, normalize_fixed_durations,
+                            normalize_offbible_characters, normalize_transition_visuals,
                             relieve_spoken_overflow,
-                            storyboard_duration_limit, storyboard_shot_count_range,
-                            validate_bible, validate_plan, validate_screenplay,
+                            storyboard_shot_count_range,
+                            validate_bible, validate_screenplay,
                             validate_scene_bible,
                             validate_storyboard,
                             validate_storyboard_shot_covers_outline,
@@ -88,121 +87,141 @@ def _render_error_history(error_history: list[list[str]]) -> str:
     return "\n".join(blocks)
 
 
-async def _run_with_repair(stage: str, user_prompt: str, model_cls: type[BaseModel],
-                           business_validate: Callable[[BaseModel], list[str]],
-                           *, temperature: float = 0.7, max_tokens: int = 8192,
-                           repair_user_prompt_limit: int | None = 3000,
-                           repair_context: str | None = None,
-                           fallback_to_last: bool = False,
-                           prefill: dict | None = None) -> BaseModel:
-    # 校验类失败持续让模型修复，直到通过或耗尽 max_repair_attempts。
-    # hiagent.ProviderError（模型不可用）不在此捕获，直接透传——对这类错误重试无意义。
-    # fallback_to_last=True：次数耗尽后以最后一次结构合法的输出为准（残余校验问题挂在
-    # instance.residual_errors 上由调用方展示），而不是整体失败。
-    max_attempts = max(int(get_setting("max_repair_attempts") or 8), 1)
-    messages = [{"role": "system", "content": SYSTEM_PREFIX}, {"role": "user", "content": user_prompt}]
-    base_call_meta = {"stage": stage, "initiator_label": stage, "initiator_scope": "stage_pipeline"}
-    draft = await hiagent.chat(
-        messages, temperature=temperature, max_tokens=max_tokens,
-        call_meta={**base_call_meta, "call_role": "stage_generate", "call_role_label": "主生成", "repair_round": 0})
-    last_errors: list[str] = []
-    error_history: list[list[str]] = []
-    last_instance: BaseModel | None = None
-    for attempt in range(max_attempts):  # 首次 + (max_attempts-1) 次修复
-        try:
-            obj = extract_json(draft)
-        except ValueError as exc:
-            last_errors = [str(exc)]
-        else:
-            # 确定性修复优先于 LLM 修复：后端拥有权威值的字段（如 episode_no/mode）若模型漏写或写错，
-            # 在校验前就地回填/纠正，绝不为一个代码本就知道的值再多打一轮模型（实测 episode_no 漏写
-            # 曾连刷 2 轮修复才恢复）。同时消除"schema 仅因已知字段缺失而失败→instance 为 None→
-            # 没有兜底候选→整段 StageError"的隐患：补齐后 schema 能过，business 兜底才有候选。
-            if prefill and isinstance(obj, dict):
-                obj.update(prefill)
-            instance, errors = schema_errors(model_cls, obj)
-            if instance is not None:
-                errors = business_validate(instance)
-                if not errors:
-                    return instance
-                last_instance = instance  # 结构合法但有业务问题——兜底候选
-            last_errors = errors
-        error_history.append(list(last_errors))
-        if attempt >= max_attempts - 1:
-            break
-        # 提前收手：最近 STALL_ROUNDS 轮问题完全相同 = 模型卡死，继续重试无意义。
-        if len(error_history) >= STALL_ROUNDS and all(
-                error_history[-1] == error_history[-k] for k in range(2, STALL_ROUNDS + 1)):
-            log_provider_call(
-                f"{stage}_stall", config.MODEL_TEXT, "REPAIR_STALLED", None, 0,
-                meta={"stage": stage, "rounds": len(error_history), "errors": last_errors[:10]})
-            break
-        # 反复失败说明模型陷在同一处：升高温度跳出定式，并逐次加重措辞。
-        repair_temp = 0.2 if attempt < 2 else min(0.2 + 0.15 * (attempt - 1), 0.8)
-        emphasis = ("" if attempt < 2 else
-                    f"\n\n【第 {attempt + 1} 次修复】历史记录中的问题你已多次未改正。请逐条对照硬性约束逐字修改，"
-                    "确保全部满足，且不要引入新的违规。例如信息密度不足就必须补充原文细节、角色反应或关键线索，"
-                    "相邻镜头断裂就必须承接上一镜尾状态，角色名错误就必须回到角色圣经和原文专名逐字修正。")
-        # 修复轮的核心是“具体错误 + 最近输出”，不应每次重发几万字原文。
-        # 长链路可传 repair_context，只保留当前任务、可用枚举和相关原文窗口；
-        # 其他阶段仍保留原有截断策略。
+async def _run_with_agent_loop(
+    stage: str,
+    stage_key: str,
+    user_prompt: str,
+    model_cls: type[BaseModel],
+    business_validate: Callable[[BaseModel], list[str]],
+    *,
+    loop: AgentLoop,
+    temperature: float = 0.7,
+    max_tokens: int = 8192,
+    repair_user_prompt_limit: int | None = 3000,
+    repair_context: str | None = None,
+    prefill: dict | None = None,
+) -> BaseModel:
+    """Phase 2 loop adapter: structured issues, bounded repair and persisted iterations."""
+    base_call_meta = {
+        "stage": stage,
+        "initiator_label": stage,
+        "initiator_scope": "agent_loop",
+        "contract_version": loop.contract.version,
+    }
+
+    async def producer(
+        iteration_no: int,
+        previous_raw: str | None,
+        latest_issues,
+        issue_history,
+    ) -> str:
+        if iteration_no == 1:
+            return await model_gateway.chat(
+                [{"role": "system", "content": SYSTEM_PREFIX}, {"role": "user", "content": user_prompt}],
+                temperature=temperature,
+                max_tokens=max_tokens,
+                call_meta={
+                    **base_call_meta,
+                    "call_role": "stage_generate",
+                    "call_role_label": "主生成",
+                    "repair_round": 0,
+                },
+            )
+        error_history = [[issue.message for issue in issues] for issues in issue_history]
+        repair_index = iteration_no - 1
+        repair_temp = 0.2 if repair_index < 3 else min(0.2 + 0.15 * (repair_index - 2), 0.8)
+        emphasis = (
+            ""
+            if repair_index < 3
+            else (
+                f"\n\n【第 {repair_index} 次修复】历史问题已多次未解决。"
+                "必须逐条定向修改，且不得引入新的合同违规。"
+            )
+        )
         if repair_context is not None:
             original_task = repair_context
         else:
-            original_task = user_prompt if repair_user_prompt_limit is None else user_prompt[:repair_user_prompt_limit]
+            original_task = (
+                user_prompt
+                if repair_user_prompt_limit is None
+                else user_prompt[:repair_user_prompt_limit]
+            )
         repair_prompt = (
-            "你此前的输出未通过校验。下面是你历次输出的完整问题记录（按时间顺序，最后一轮即最近一次输出）。\n"
-            "修复最近一轮的问题时，必须同时对照更早轮次的记录，确保曾犯过的错误不再复发：\n"
+            "你此前的输出未通过校验。以下问题均为结构化硬门禁，不是泛泛建议：\n"
             + _render_error_history(error_history)
             + emphasis
-            + "\n\n请修复后重新输出完整 JSON（不要解释，不要 Markdown）。"
-            + "\n\n原任务要求：\n" + original_task
-            + "\n\n你的最近一次输出：\n" + draft[:6000]
+            + "\n\n只修复上述问题，然后重新输出完整 JSON（不要解释，不要 Markdown）。"
+            + "\n\n原任务要求：\n"
+            + original_task
+            + "\n\n最近一次候选：\n"
+            + (previous_raw or "")[:6000]
         )
-        draft = await hiagent.chat(
+        return await model_gateway.chat(
             [{"role": "system", "content": SYSTEM_PREFIX}, {"role": "user", "content": repair_prompt}],
-            temperature=repair_temp, max_tokens=max_tokens,
+            temperature=repair_temp,
+            max_tokens=max_tokens,
             call_meta={
                 **base_call_meta,
                 "call_role": "stage_repair",
-                "call_role_label": "修复重试",
-                "repair_round": attempt + 1,
-                "latest_errors": last_errors[:10],
-            })
-    if fallback_to_last and last_instance is not None:
-        # 兜底：以最后一次结构合法的输出为准，残余问题透出给调用方/UI，不再整体失败。
-        object.__setattr__(last_instance, "residual_errors", list(last_errors))
+                "call_role_label": "定向修复",
+                "repair_round": repair_index,
+                "latest_issue_codes": [issue.code for issue in latest_issues[:10]],
+                "latest_errors": [issue.message for issue in latest_issues[:10]],
+            },
+        )
+
+    def evaluator(raw: str):
+        try:
+            obj = extract_json(raw)
+        except ValueError as exc:
+            messages = [str(exc)]
+            return None, issues_from_messages(messages, subject=f"{loop.scope_type}:{loop.scope_id}")
+        if prefill and isinstance(obj, dict):
+            obj.update(prefill)
+        instance, messages = schema_errors(model_cls, obj)
+        if instance is not None:
+            messages = business_validate(instance)
+        return (
+            instance,
+            issues_from_messages(messages, subject=f"{loop.scope_type}:{loop.scope_id}"),
+        )
+
+    try:
+        result = await loop.run(producer, evaluator)
+    except AgentLoopFailure as exc:
         log_provider_call(
-            f"{stage}_fallback", config.MODEL_TEXT, "FALLBACK_LAST_OUTPUT", None, 0,
-            meta={"stage": stage, "attempts": len(error_history), "residual_errors": last_errors[:10]})
-        return last_instance
-    raise StageError(stage, last_errors + [f"已修复 {len(error_history)} 次仍未通过校验，可点击重试，或在监制房调高「修复重试上限」"])
-
-
-# ---------- 章节摘要（滚动摘要的原料） ----------
-
-async def summarize_chapter(title: str, content: str) -> str:
-    prompt = (
-        f"用不超过 200 字概括本章剧情，保留：人物名、关键事件、冲突与悬念。只输出摘要正文。\n\n"
-        f"章节《{title}》：\n{content[:8000]}"
-    )
-    text = await hiagent.chat(
-        [{"role": "user", "content": prompt}], temperature=0.3, max_tokens=512,
-        call_meta={"initiator_label": "章节摘要", "chapter_title": title[:80]})
-    return text.strip()[:300]
-
-
-async def summarize_chapters_concurrent(chapters: list[dict], concurrency: int = 4) -> dict[int, str]:
-    """对缺摘要的章节并发生成。返回 {idx: summary}。"""
-    sem = asyncio.Semaphore(concurrency)
-
-    async def one(ch: dict) -> tuple[int, str]:
-        async with sem:
-            return ch["idx"], await summarize_chapter(ch["title"] or f"第{ch['idx']}章", ch["content"])
-
-    pending = [ch for ch in chapters if not ch.get("summary")]
-    results = await asyncio.gather(*(one(ch) for ch in pending))
-    return dict(results)
+            f"{stage}_loop", config.MODEL_TEXT, "LOOP_FAILED", None, 0,
+            meta={
+                "stage": stage,
+                "iterations": exc.iterations,
+                "exit_reason": exc.exit_reason,
+                "issue_codes": [issue.code for issue in exc.issues[:10]],
+            },
+        )
+        raise StageError(
+            stage,
+            [issue.message for issue in exc.issues]
+            + [f"Agent Loop 退出：{exc.exit_reason}（{exc.iterations} 轮）"],
+        ) from exc
+    if result.status == "warning":
+        object.__setattr__(result.value, "residual_errors", [issue.message for issue in result.issues])
+        object.__setattr__(
+            result.value, "residual_issues",
+            [issue.model_dump(mode="json") for issue in result.issues],
+        )
+        log_provider_call(
+            f"{stage}_loop", config.MODEL_TEXT, "WARNING_CANDIDATE", None, 0,
+            meta={
+                "stage": stage,
+                "iterations": result.iterations,
+                "exit_reason": result.exit_reason,
+                "artifact_id": result.artifact_id,
+                "issue_codes": [issue.code for issue in result.issues[:10]],
+            },
+        )
+    object.__setattr__(result.value, "loop_exit_reason", result.exit_reason)
+    object.__setattr__(result.value, "evidence_artifact_id", result.artifact_id)
+    return result.value
 
 
 # ---------- A. 角色圣经 ----------
@@ -264,10 +283,9 @@ def _render_bible_source(chapters: list[dict], budget: int = BIBLE_SOURCE_BUDGET
     return "\n\n".join(blocks)
 
 
-async def generate_bible(chapters: list[dict], rolling_summary: str = "",
-                         feedback: str = "", previous_bible: dict | None = None) -> Bible:
+async def generate_bible(chapters: list[dict], feedback: str = "", previous_bible: dict | None = None,
+                         project_id: str | None = None) -> Bible:
     chapters_text = _render_bible_source(chapters)
-    summary_part = f"\n后续章节滚动摘要：\n{rolling_summary}\n" if rolling_summary else ""
     previous_part = ""
     if previous_bible:
         names = "、".join(
@@ -297,11 +315,29 @@ async def generate_bible(chapters: list[dict], rolling_summary: str = "",
 6. relationships 只描述【已收录角色之间】的关系：relationships.to 必须逐字等于本次 characters 里某个角色的 name，不要指向未收录的人物（否则代码校验会因「关系指向未知角色」退回重写）。与圈外人物的关系请省略，或并入 personality 文字描述。
 
 小说文本：
-{chapters_text}{summary_part}{previous_part}{feedback_part}
+{chapters_text}{previous_part}{feedback_part}
 
 输出 JSON Schema：
 {{"characters": [{{"name": str, "role": "主角|重要配角|反派", "appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}]}}], "world": {{"era": str, "genre": str, "visual_style_canonical": str}}}}"""
-    return await _run_with_repair("角色圣经", prompt, Bible, validate_bible, temperature=0.5)
+    loop = AgentLoop(
+        stage_key="character_bible",
+        contract_key="character_bible",
+        goal="从原文章节生成来源可追溯、视觉锚点完整的人物圣经",
+        scope_type="project",
+        scope_id=project_id or hashlib.sha256(chapters_text.encode("utf-8")).hexdigest()[:16],
+        artifact_type="character_bible",
+        policy=AgentLoopPolicy(
+            max_iterations=min(max(int(get_setting("max_repair_attempts") or 4), 1), 4),
+            stall_rounds=2,
+            min_quality_gain=0.03,
+            no_gain_rounds=2,
+            allow_warning_candidate=True,
+        ),
+    )
+    return await _run_with_agent_loop(
+        "角色圣经", "character_bible", prompt, Bible, validate_bible,
+        loop=loop, temperature=0.5, max_tokens=16384,
+    )
 
 
 # ---------- A2. 场景圣经（场景图素材库的规范场景，跨集场景一致性核心） ----------
@@ -313,12 +349,11 @@ class _SceneBibleDraft(BaseModel):
 
 
 async def generate_scene_bible(chapters: list[dict], bible: Bible,
-                               rolling_summary: str = "", feedback: str = "") -> list[Scene]:
+                               feedback: str = "", project_id: str | None = None) -> list[Scene]:
     """从原文提取「规范场景」清单，作为场景图素材库的底稿（与 generate_bible 同构）。
     每个场景给 name（稳定短标签）+ scene_canonical（固定场景锚点串，画风约束与人物锚点一致：
     必须 CG/动画/漫画类非真人风格，否则后续 Seedance/Seedream 易因疑似真人报错）。"""
     chapters_text = _render_bible_source(chapters)
-    summary_part = f"\n后续章节滚动摘要：\n{rolling_summary}\n" if rolling_summary else ""
     style = bible.world.visual_style_canonical
     genre = bible.world.genre or ""
     feedback_part = ""
@@ -337,112 +372,32 @@ async def generate_scene_bible(chapters: list[dict], bible: Bible,
 5. location_kind 取"室内/室外/其他"之一。
 
 小说文本：
-{chapters_text}{summary_part}{feedback_part}
+{chapters_text}{feedback_part}
 
 输出 JSON Schema：
 {{"scenes": [{{"name": str, "scene_canonical": str, "location_kind": "室内|室外|其他"}}]}}"""
-    draft = await _run_with_repair(
-        "场景圣经", prompt, _SceneBibleDraft,
-        lambda d: validate_scene_bible(d.scenes), temperature=0.5, fallback_to_last=True)
+    loop = AgentLoop(
+        stage_key="scene_bible",
+        contract_key="scene_bible",
+        goal="从原文章节提取跨集复用、来源可追溯的规范场景",
+        scope_type="project",
+        scope_id=project_id or hashlib.sha256((chapters_text + style).encode("utf-8")).hexdigest()[:16],
+        artifact_type="scene_bible",
+        policy=AgentLoopPolicy(
+            max_iterations=min(max(int(get_setting("max_repair_attempts") or 4), 1), 4),
+            stall_rounds=2,
+            min_quality_gain=0.03,
+            no_gain_rounds=2,
+            allow_warning_candidate=False,
+        ),
+    )
+    draft = await _run_with_agent_loop(
+        "场景圣经", "scene_bible", prompt, _SceneBibleDraft,
+        lambda d: validate_scene_bible(d.scenes), loop=loop, temperature=0.5,
+    )
     return list(draft.scenes)
 
 
-# ---------- B. 剧集规划 ----------
-
-PLAN_SOURCE_BUDGET_CHARS = 40000  # 分集 prompt 内原文预算：短篇可全量带，长篇按 start_chapter 起截断
-
-
-def _render_plan_source(chapter_texts: list[tuple[int, str, str]] | None, start_chapter: int) -> str:
-    """从 start_chapter 起，按字数预算拼接原文全文（优先让模型看真实情节，而非摘要）。"""
-    if not chapter_texts:
-        return ""
-    blocks: list[str] = []
-    used = 0
-    included: list[int] = []
-    for idx, title, content in chapter_texts:
-        if idx < start_chapter:
-            continue
-        text = (content or "").strip()
-        if not text:
-            continue
-        remain = PLAN_SOURCE_BUDGET_CHARS - used
-        if remain <= 200:
-            break
-        clipped = text[:remain]
-        blocks.append(f"【第{idx}章 {title}】\n{clipped}{'……（原文过长已截断）' if len(text) > remain else ''}")
-        used += len(clipped)
-        included.append(idx)
-    if not blocks:
-        return ""
-    head = f"本批可用原文（第 {included[0]}~{included[-1]} 章，请优先依据原文真实情节/对白/反转来分集，摘要仅作全书索引）："
-    return head + "\n" + "\n\n".join(blocks)
-
-
-async def generate_plan_batch(chapter_summaries: list[tuple[int, str, str]], bible: Bible,
-                              *, start_episode_no: int, start_chapter: int,
-                              chapter_count: int, batch_size: int,
-                              want_timeline: bool,
-                              chapter_texts: list[tuple[int, str, str]] | None = None) -> EpisodePlan:
-    """规划一批剧集：从第 start_chapter 章起、至多 batch_size 集。
-    全书可能需要多批续写直至覆盖最后一章（避免长篇被截断/丢弃，见 _plan_task 循环）。
-    chapter_texts 提供原文全文（按预算注入），分集依据原文而非仅摘要。
-    """
-    summaries_text = "\n".join(f"第{idx}章《{title}》：{summary}" for idx, title, summary in chapter_summaries)
-    source_text = _render_plan_source(chapter_texts, start_chapter)
-    timeline_req = (
-        "key_timeline：用 10~20 条概括全书关键事件时间线（防伏笔丢失）。"
-        if want_timeline else "key_timeline：本批留空数组 []。")
-    last_batch_hint = (
-        f"若剩余章节（第 {start_chapter}~{chapter_count} 章）能在本批 {batch_size} 集内讲完，"
-        f"则最后一集的 source_chapters 必须包含第 {chapter_count} 章（全书收尾）。")
-    prompt = f"""任务：将小说规划为竖屏漫剧剧集（每集 {config.EPISODE_TARGET_MIN_S}~{config.EPISODE_TARGET_MAX_S} 秒成片，默认约 {config.EPISODE_TARGET_DEFAULT_S} 秒）。全书共 {chapter_count} 章。
-
-漫剧节奏铁律：
-1. 每集开头 3 秒必须是钩子：冲突爆发点/悬念/反转，绝不从平铺直叙开场。
-2. 每集只讲一个核心事件，有一个情绪高点。
-3. 每集结尾留下一集的悬念钩。
-4. 节奏宁快勿慢：删除原著中的过渡性内容，跳跃叙事靠旁白补缝。
-5. 成本优先：不要把简单动作或场景交代拉长；一集宁可短而密，不要慢而水。
-
-本批规划要求：
-- 从第 {start_chapter} 章开始，规划接下来的【至多 {batch_size} 集】（剩余章节够多就规划满 {batch_size} 集）。
-- episode_no 从 {start_episode_no} 开始连续递增。
-- 第一集的 source_chapters 必须从第 {start_chapter} 章开始。
-- source_chapters 是连续区间，剧情只能向前推进（不倒退、不跳章）。一集可覆盖多章（通常 1~3 章）；
-  当某一章内容较多、足够拆成多集时，允许连续 2~3 集共同覆盖同一章（如第 5 章拆成两集：前半事件一集、后续余波一集），章节号可以重复，只要剧情顺序不回放即可。章节数少于想要的集数时，就这样拆章而不是硬凑。
-- 不要超出第 {chapter_count} 章。{last_batch_hint}
-- {timeline_req}
-
-章节摘要（全书索引，用于把握整体走向）：
-{summaries_text}
-
-{source_text}
-
-角色圣经：
-{bible.model_dump_json()}
-
-写作要求（提升分集质量，避免空洞重复）：
-- 必须依据上方原文的真实情节、对白、动作与反转来切分，不要只复述摘要；synopsis 里要落到具体场景与细节，禁止用“两人发生争执/情感升温”这类空泛概括。
-- 相邻集不得讲同一件事或重复同一情绪点；每集必须有独立的核心事件与新进展。
-- hook、cliffhanger 取材于原文里最有张力的瞬间（具体动作/台词/反转），不要套模板。
-
-输出 JSON Schema：
-{{"key_timeline": [str], "episodes": [{{"episode_no": int, "title": str, "hook": str, "source_chapters": [int], "synopsis": str, "cliffhanger": str, "target_duration_s": int}}]}}
-其中 hook=开头3秒画面+一句话；synopsis 80~150字；target_duration_s 只能取 {"/".join(str(x) for x in config.EPISODE_TARGET_CHOICES)}（10 的整数倍），按本集剧情密度与戏剧张力自定：信息密集、转折多或情绪高潮的集可放宽到更长时长（最高 {config.EPISODE_TARGET_MAX_S}s）以保证质量，简单过渡集可取下限 {config.EPISODE_TARGET_MIN_S}s，常规集约 {config.EPISODE_TARGET_DEFAULT_S}s。"""
-    def _check(p: EpisodePlan) -> list[str]:
-        # 生产级：先用确定性代码修正章节区间/编号/时长（LLM 不擅长记账），再校验残余问题。
-        # 这样把“章节重叠/跳章/越界”这类最常见的返工源头直接消灭，几乎不再触发重试。
-        normalize_plan_chapters(p.episodes, start_episode_no=start_episode_no,
-                                start_chapter=start_chapter, chapter_count=chapter_count)
-        return validate_plan(p.episodes, chapter_count,
-                             start_episode_no=start_episode_no, start_chapter=start_chapter)
-
-    return await _run_with_repair(
-        "剧集规划", prompt, EpisodePlan, _check,
-        temperature=0.7, max_tokens=65535, fallback_to_last=True)
-
-
-# 剧本台源文预算：覆盖多章的集若超预算会被截断，旧实现固定 16000 字且无标记——
 # 模型以为看到了全部，把后半章静默丢掉。改为命名常量 + 截断标记，让模型知道"后文还有，按依据补全"。
 SCREENPLAY_SOURCE_BUDGET_CHARS = 24000
 
@@ -466,7 +421,6 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
     """
     speech_styles = "；".join(f"{c.name}：{c.speech_style}" for c in bible.characters if c.speech_style)
     bible_names_inline = "、".join(c.name for c in bible.characters) or "（角色圣经为空）"
-    expected_storyboard_shots = storyboard_shot_count_range(episode["target_duration_s"])
     prompt = f"""任务：为漫剧第 {episode['episode_no']} 集《{episode['title']}》把小说改写成【完整剧本】。
 
 你现在处于“剧本台”阶段，不是分镜阶段。你的职责是先写出一整集完整、连续、可阅读、可拆镜的【生产级剧本稿】。
@@ -476,8 +430,8 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
 2. 保证剧情连贯、人物情绪连贯、因果关系连贯。
 3. 输出能直接进入导演/分镜阶段的剧本稿，不要只写成长梗概。
 4. 保留原文依据，并明确改编方向。
-5. 输出适合后续拆成 {expected_storyboard_shots[0]}~{expected_storyboard_shots[1]} 个、每段 5~15 秒的视频分镜的连续剧本；
-   基础节拍约 10 秒，但会按动作密度和口播长度动态调整，不能按固定 10 秒或固定 4~6 段写死。
+5. 输出适合后续拆成若干个固定 5 秒视频分镜的连续剧本；镜头数和整集时长不设上限，以完整演绎剧情为准；
+   动作或口播无法在 5 秒内完整表达时，必须拆成连续相邻镜头，不得修改单镜 5 秒合同。
 6. 不在正文里输出“拍01/拍02/拍03”，不写景别、运镜、首尾帧、参考图、提示词。
 
 【导演级连续性要求】你要像现场导演一样先把戏调顺，而不是只改写对白：
@@ -486,7 +440,7 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
 - 每场结尾必须留下清楚的“人物位置 + 情绪状态 + 关键道具状态”，供下一场/下一镜自然承接。
 - 人物行为要符合动机和情绪递进：先看到/听到/意识到，再反应、开口或行动；禁止无因果地突然爆发、突然换态度。
 
-【最重要·防丢失】本集会被压缩到约 {episode['target_duration_s']} 秒，压缩中最容易丢的就是关键台词和关键剧情。
+【最重要·防丢失】{episode['target_duration_s']} 秒只作为初始节拍参考；不得为了追目标时长删除关键台词、关键剧情或结尾钩子。
 所以你必须先做"必保留清单"，再写正文，并保证清单里的每一条都真实写进了正文：
 - `key_lines`：只保留本集源文中【已在人物谱中的角色】（{bible_names_inline}）说出口的台词，不允许只挑金句/关键句；若同一角色台词很多，也要逐条列入并在正文中写回。可在不改变主干信息的前提下轻微口语化、压缩赘字，但人物态度、信息点和情绪锋芒不能丢。【硬性】key_lines 不得包含测验员/围观者/旁白等非人物谱角色的台词——这些台词可以写进 full_script_text 的对白行，但绝不能进入 key_lines，否则后续分镜会因 characters 字段无法承载这些角色而陷入死循环。没有人物谱角色台词时，才从原文里挑出 3~8 条绝不能丢的关键台词。
 - `key_plot_points`：列出本集【绝不能丢】的关键剧情点 3~8 条——核心事件、关键反转、信息揭示、关系变化。每条都必须在 `full_script_text` 里真的发生。
@@ -543,13 +497,29 @@ B. `full_script_text`：真正的剧本正文，必须是带场标、动作段�
 
 输出 JSON Schema：
 {{"episode_no": {episode['episode_no']}, "mode": "full_script", "title": str, "logline": str, "script_format_note": "一句话说明正文采用的台本格式", "dramatic_question": "本集戏剧问题（一句话）", "protagonist_goal": "主角外在目标", "obstacle": "外部+内部阻力", "stakes": "失败代价", "key_lines": ["本集所有人物谱角色台词；无此类台词时列3~8条关键台词；均需在正文出现"], "key_plot_points": ["本集绝不能丢的关键剧情点/反转，3~8条"], "scene_outline": [{{"scene_no": int, "scene_heading": "场次标题，如「日 / 萧家测验广场」，不少于4字", "story_function": "本场戏剧功能：一句话说明这场在整集里推进/升级/转折/收束了什么，不少于6字，不要只写「高潮转折」这类四字标签", "characters": [str], "summary": "本场具体戏剧内容概括，不少于16字", "conflict": str, "turn": "本场交给下一场的状态变化（人物位置/情绪/信息），不少于4字", "source_basis": "本场改编依据的原文信息，不少于8字"}}], "full_script_text": str, "character_state_changes": [str], "emotional_curve": str, "ending_hook": str, "source_basis": str, "adaptation_direction": str, "opening": str, "development": str, "conflict": str, "climax": str}}"""
-    script = await _run_with_repair(
-        "可拍剧本", prompt, EpisodeScreenplay,
+    configured_iterations = max(int(get_setting("max_repair_attempts") or 4), 1)
+    loop = AgentLoop(
+        stage_key="screenplay",
+        contract_key="screenplay",
+        goal=f"生成第 {episode['episode_no']} 集可拍剧本并通过全部确定性门禁",
+        scope_type="episode",
+        scope_id=str(episode.get("id") or f"episode-{episode['episode_no']}"),
+        artifact_type="episode_screenplay",
+        policy=AgentLoopPolicy(
+            max_iterations=min(configured_iterations, 4),
+            stall_rounds=2,
+            min_quality_gain=0.03,
+            no_gain_rounds=2,
+            allow_warning_candidate=True,
+        ),
+    )
+    script = await _run_with_agent_loop(
+        "可拍剧本", "screenplay", prompt, EpisodeScreenplay,
         lambda s: validate_screenplay(s, bible, max(1, episode["target_duration_s"] // config.FIXED_VIDEO_DURATION_S),
                                       episode_no=episode["episode_no"], source_text=source_text),
-        temperature=0.7, max_tokens=65535, fallback_to_last=True,
+        loop=loop, temperature=0.7, max_tokens=65535,
         # episode_no/mode 是后端权威值（validator 也要求 episode_no 必须等于本集号），模型给的值不可信，
-        # 直接确定性回填，避免再为这两个已知字段空转修复轮（见 _run_with_repair 里的说明）。
+        # 直接确定性回填，避免再为这两个已知字段空转修复轮。
         prefill={"episode_no": episode["episode_no"], "mode": "full_script"})
     return script
 
@@ -687,47 +657,12 @@ def _relevant_text_windows(text: str, hints: list[str], *, max_chars: int) -> st
     return "\n……（无关段落已省略）……\n".join(chunks)
 
 
-def _remaining_storyboard_seconds(target_duration_s: int, completed_shots: list[Shot]) -> int:
-    """距离规划目标还剩多少秒。该值用于节奏提示，不是硬上限。"""
-    used = sum(int(getattr(s, "duration_s", 0) or 0) for s in completed_shots)
-    return int(target_duration_s) - used
-
-
-def _next_shot_duration_budget(target_duration_s: int, completed_shots: list[Shot], *,
-                               allow_finish: bool) -> int:
-    """逐镜生成的当前镜建议上限。
-
-    校验器允许整集适度超目标，但如果已进入可收尾区间，下一镜还继续长时长/长口播，
-    就会出现"上一批镜头都过了，追加镜反复把总时长顶爆"。这里给模型和校验器一个当前镜闸门。
-    """
-    used = sum(int(getattr(s, "duration_s", 0) or 0) for s in completed_shots)
-    limit = storyboard_duration_limit(target_duration_s)
-    if not allow_finish and used < limit:
-        return config.MAX_VIDEO_DURATION_S
-    # 如果前序镜头已经超过硬上限，当前镜仍保底允许最短镜头收尾，但必须压到最短。
-    remaining = max(config.MIN_VIDEO_DURATION_S, limit - used)
-    return min(config.MAX_VIDEO_DURATION_S, remaining)
-
-
-def _storyboard_budget_block(target_duration_s: int, completed_shots: list[Shot], *,
-                             allow_finish: bool) -> str:
-    used = sum(int(getattr(s, "duration_s", 0) or 0) for s in completed_shots)
-    target_remaining = int(target_duration_s) - used
-    limit = storyboard_duration_limit(target_duration_s)
-    limit_remaining = limit - used
-    max_this_shot = _next_shot_duration_budget(target_duration_s, completed_shots, allow_finish=allow_finish)
-    pacing = (
-        "- 剩余时长已不多，请尽快把剧情收束到尾钩并设置 is_final=true，不要为凑时长注水。\n"
-        if allow_finish and limit_remaining <= config.MAX_VIDEO_DURATION_S * 2
-        else "- 剩余时长仍较充裕，应继续推进剧情、把戏做足，不要过早收尾。\n"
-    )
+def _storyboard_progress_block(completed_shots: list[Shot]) -> str:
+    used = len(completed_shots) * config.FIXED_VIDEO_DURATION_S
     return (
-        f"\n【本集时长预算】规划目标 {int(target_duration_s)}s；允许硬上限 {limit}s；"
-        f"已通过 {len(completed_shots)} 镜累计 {used}s；距离规划目标剩余 {target_remaining}s，距离硬上限剩余 {limit_remaining}s。\n"
-        f"- 本镜 duration_s 建议不超过 {max_this_shot}s（单镜合法范围 {config.MIN_VIDEO_DURATION_S}~{config.MAX_VIDEO_DURATION_S}s）；"
-        "若硬上限剩余很小，请把本镜压短、压缩台词或直接收尾，避免整集超时。\n"
-        f"- 若本镜是收尾镜，台词+旁白必须能在 {max_this_shot}s 内念完；不要把解释、抒情和尾钩全塞进最后一镜。\n"
-        f"{pacing}"
+        f"\n【分镜进度】已通过 {len(completed_shots)} 镜、累计 {used}s；整集不设时长上限。\n"
+        f"- 本镜 duration_s 固定为 {config.FIXED_VIDEO_DURATION_S}s；5 秒演不完或说不完就拆到后续镜头。\n"
+        "- 继续按剧本推进，完整覆盖全部剧情和尾钩后才能设置 is_final=true。\n"
     )
 
 
@@ -766,66 +701,11 @@ def _normalized_candidate_board(episode_no: int, completed_shots: list[Shot], sh
     # ② 确定性卸载：把人群议论/哄笑类旁白降级为画面，先把单镜口播压回上限内，
     # 再据此算时长——避免"角色台词+人群旁白共 67 字超限"这类报错耗尽逐镜重试。
     relieve_spoken_overflow(board)
-    normalize_durations_for_speech(board)
-    normalize_episode_opening_shot(board)
-    if target_duration_s is not None:
-        compact_durations_to_budget(board, target_duration_s)
+    normalize_fixed_durations(board)
     normalize_transition_visuals(board)
     for s in board.shots:
         s.action_desc = normalize_action_desc(s.action_desc)
     return board
-
-
-def _time_agent_shot_brief(shot: Shot) -> str:
-    """时间 agent 用的单镜内容摘要：景别/运镜 + 口播字数 + 画面，供模型判断哪些镜头有压缩空间。"""
-    spoken = "".join([(shot.narration or ""), *(d.line for d in shot.dialogues)])
-    spoken_chars = len(re.sub(r"\s+", "", spoken))
-    action = (shot.action_desc or "").strip().replace("\n", " ")
-    if len(action) > 60:
-        action = action[:60] + "…"
-    return f"景别{shot.shot_size}/运镜{shot.camera_move}；口播{spoken_chars}字；画面：{action}"
-
-
-async def time_agent_compress_durations(board: Storyboard, limit_s: int,
-                                        min_allowed: dict[int, int]) -> dict[int, int]:
-    """内置「时间 agent」：整集超时（总时长 > limit_s）时，依据各镜内容挑选信息密度低/可精简的镜头
-    削减时长，使总时长 ≤ limit_s。单镜不得低于 min_allowed[shot_no]（已含口播保底与「不超 20%」的限幅）。
-
-    返回 {shot_no: 新 duration_s}，只含模型实际调整的镜。调用方对模型越界/缺漏都有确定性兜底，
-    故此处只做解析、不做强校验；模型不可用时由调用方走纯确定性压缩。"""
-    total = sum(int(s.duration_s or 0) for s in board.shots)
-    lines = [
-        f"- 镜{s.shot_no:02d}：当前 {s.duration_s}s，最多可压到 {min_allowed.get(s.shot_no, s.duration_s)}s；"
-        f"{_time_agent_shot_brief(s)}"
-        for s in board.shots
-    ]
-    prompt = (
-        f"下面是一集竖屏漫剧的分镜时长表，整集总时长 {total}s，超过了上限 {limit_s}s，"
-        f"需要把总时长压到 {limit_s}s 以内。\n"
-        "请作为节奏师，依据每个镜头的内容判断哪些镜头有冗余、可以缩短："
-        "信息量小、纯过渡、无台词的空镜或运镜简单的镜头优先压缩；"
-        "台词密集、关键剧情、情绪高潮的镜头尽量少动或不动。\n"
-        "硬约束：\n"
-        f"1) 调整后所有镜头 duration_s 之和必须 ≤ {limit_s}。\n"
-        "2) 每个镜头都不得低于它标注的「最多可压到」秒数"
-        "（这是念完台词/建场所需的下限，且已含单镜最多压缩 20% 的限制）。\n"
-        "3) 只能缩短或保持，不能加长；duration_s 是 5~15 的整数。\n"
-        "4) 不必每个镜头都改，优先集中压缩少数冗余镜头。\n\n"
-        "分镜时长表：\n" + "\n".join(lines) +
-        '\n\n只输出一个 JSON 对象：{"durations": [{"shot_no": 整数, "duration_s": 整数}, ...]}，'
-        "只列出你实际缩短的镜头。")
-    raw = await hiagent.chat(
-        [{"role": "system", "content": SYSTEM_PREFIX}, {"role": "user", "content": prompt}],
-        temperature=0.2, max_tokens=1200,
-        call_meta={"initiator_label": "分镜时长压缩", "shot_count": len(shots), "duration_limit_s": limit_s})
-    obj = extract_json(raw)
-    out: dict[int, int] = {}
-    for item in (obj.get("durations") or []):
-        try:
-            out[int(item["shot_no"])] = int(item["duration_s"])
-        except (KeyError, TypeError, ValueError):
-            continue
-    return out
 
 
 def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict, bible: Bible,
@@ -854,18 +734,6 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
     target = episode["target_duration_s"]
     board = _normalized_candidate_board(episode["episode_no"], completed_shots, draft.shot, bible, target)
     current = board.shots[-1]
-    duration_limit = storyboard_duration_limit(target, board)
-    compacted_prev_used = sum(int(s.duration_s or 0) for s in board.shots[:-1])
-    max_this_shot = min(config.MAX_VIDEO_DURATION_S, max(config.MIN_VIDEO_DURATION_S, duration_limit - compacted_prev_used))
-    if allow_finish and int(current.duration_s or 0) > max_this_shot:
-        errors.append(
-            f"第 {shot_no} 镜 duration_s={current.duration_s}s 超出当前剩余预算建议上限 {max_this_shot}s；"
-            "请压短动作、精简台词/旁白，或只保留尾钩所需信息")
-    speech_need = math.ceil(estimate_speech_seconds(current))
-    if allow_finish and speech_need > max_this_shot:
-        errors.append(
-            f"第 {shot_no} 镜台词+旁白约需 {speech_need}s 才能念完，但当前剩余预算建议上限只有 {max_this_shot}s；"
-            "请删掉解释性旁白、拆短长台词，只保留推动剧情和尾钩的核心句")
     partial_errors = validate_storyboard(board, bible, target, enforce_total_duration=False)
     errors.extend(_filter_partial_storyboard_errors(partial_errors, current_index=len(completed_shots)))
     # 向前承接：复合 covers 里已在前序镜头落实的事实不再算本镜漏戏（呼应大纲"可拆到相邻多镜"）。
@@ -887,8 +755,6 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
         validate_storyboard_soundtrack(board, screenplay, target)
         + validate_storyboard_preserves_key_content(board, screenplay)
     )
-    # 整集时长上限：收尾镜必须让全集落在预算内（可由缩短本镜修复，故始终硬校验）。
-    errors.extend(e for e in validate_storyboard(board, bible, target) if e.startswith("总时长"))
     if episode_errors:
         if must_finish:
             errors.extend(episode_errors)
@@ -945,7 +811,7 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
 
 {key_content_block}
 {scene_library_block}硬性约束：
-1. 镜头数 N 取 {min_shots}~{max_shots}（按剧情密度自定）；shot_no 从 1 起连续递增。每镜时长按动作密度与台词长度在 {config.MIN_VIDEO_DURATION_S}~{config.MAX_VIDEO_DURATION_S}s 间灵活取值，让总时长自然接近目标 {target}s——不要靠堆最大镜头数把每镜压到最短 {config.MIN_VIDEO_DURATION_S}s，简单动作可给长一些以减少切镜、强运动或长台词镜才需要拆短。同时刻同一动作不硬拆；不同时刻/人物/场景的关键内容必须分到不同镜，不能漏拆；也不能因为目标 {target}s 就删剧情。
+1. 镜头数 N 不设上限，按完整剧本逐个拆出所有必要镜头；shot_no 从 1 起连续递增，每镜 duration_s 固定为 5 秒。复杂动作、长台词或不同节拍必须继续拆成相邻镜头，绝不能为了控制总时长合并或删减剧情；只有完整覆盖剧本并落到结尾钩子才可收束。
 2. 每条只写一行 beat：本镜推进的剧情（谁做了什么 / 局势如何变化 / 与上一镜的区别），不少于 6 字。
 3. 相邻两镜剧情必须不同、持续前进，严禁停留或复述同一节拍。
 4. 上方"必保留关键台词/关键剧情点"清单里的每一条，都必须分配到某一镜的 covers，全集覆盖、不得遗漏（代码逐条校验）。同一时刻同一动作里同时发生的多件事（如"碑亮+测出三段+宣告低级+全场哄笑"本就是宣判这一拍），放进同一镜 covers 即可，不要硬拆成多镜空耗时长；但发生在不同时刻/不同人物/不同场景的事（如萧媚七段、萧薰儿九段、树荫对话）必须分到不同镜，每镜 covers 只写该镜能实际拍出来、说出来的部分；不要把"萧媚七段+萧薰儿九段+反衬萧炎失格"整段塞给只拍萧媚的一镜。
@@ -978,9 +844,24 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
                       "stage": "分镜大纲", **c})
         return validate_storyboard_outline(o, screenplay, target, bible=bible)
 
-    outline = await _run_with_repair(
-        "分镜大纲", prompt, StoryboardOutline, _check,
-        temperature=0.6, max_tokens=4096, repair_user_prompt_limit=None, fallback_to_last=True)
+    outline_loop = AgentLoop(
+        stage_key="storyboard_outline",
+        contract_key="storyboard",
+        goal=f"规划第 {episode['episode_no']} 集完整逐镜节奏与必保留内容分配",
+        scope_type="episode",
+        scope_id=str(episode.get("id") or f"episode-{episode['episode_no']}"),
+        artifact_type="storyboard_outline",
+        policy=AgentLoopPolicy(
+            max_iterations=4, stall_rounds=2, min_quality_gain=0.03,
+            no_gain_rounds=2, allow_warning_candidate=True,
+        ),
+    )
+    outline = await _run_with_agent_loop(
+        "分镜大纲", "storyboard_outline", prompt, StoryboardOutline, _check,
+        loop=outline_loop, temperature=0.6, max_tokens=4096,
+        repair_user_prompt_limit=None,
+        prefill={"episode_no": episode["episode_no"]},
+    )
     # 减重试 #2：第一集第 1 镜是强制建场镜，把派给它的判决/反转类 covers 顺延合并到第 2 镜，
     # 避免逐镜阶段"照建场写→漏 covers / 硬塞判决→引入圣经外角色"的连环重试。
     # 在校验通过后做确定性顺延，不扰动大纲修复回路。
@@ -1092,7 +973,7 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
     scene_library_block = _scene_library_block(bible)
     min_shots, max_shots = storyboard_shot_count_range(episode["target_duration_s"])
     shot_no = len(completed_shots) + 1
-    must_finish = shot_no >= max_shots
+    must_finish = False
     # 方案 C：当前镜大纲 covers 若"不可单镜完成"（依赖圣经外角色开口 或 同时要求角色开口+人群声），
     # 在调用 LLM 前自动拆成两段、插入新节拍承载后半，让本镜只落实前半——避免逐镜阶段 8 次重试打转。
     # 拆分后 outline.shots 变长，下方 expected_total / allow_finish 自动按新长度计算。
@@ -1102,11 +983,7 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
     # 无大纲时回退到基础镜头数下限。
     expected_total = len(outline.shots) if (outline and outline.shots) else min_shots
     allow_finish = shot_no >= max(min_shots if not (outline and outline.shots) else expected_total, 1)
-    remaining_duration = _remaining_storyboard_seconds(episode["target_duration_s"], completed_shots)
-    duration_limit = storyboard_duration_limit(episode["target_duration_s"])
-    used_duration = sum(int(getattr(s, "duration_s", 0) or 0) for s in completed_shots)
-    limit_remaining = duration_limit - used_duration
-    budget_block = _storyboard_budget_block(episode["target_duration_s"], completed_shots, allow_finish=allow_finish)
+    budget_block = _storyboard_progress_block(completed_shots)
     outline_block = _render_storyboard_outline(outline, shot_no)
     brief = _outline_brief(outline, shot_no)
     brief_block = ""
@@ -1187,7 +1064,7 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
 {brief_block}{budget_block}{feedback_block}
 当前镜头约束：
 1. 只输出第 {shot_no} 镜，shot.shot_no 必须等于 {shot_no}。
-2. 本集计划共 {expected_total} 镜，最多 {max_shots}；规划目标剩余 {remaining_duration}s，硬上限剩余 {limit_remaining}s（硬上限 {duration_limit}s）。本镜必须落实大纲第 {shot_no} 条、推进到新剧情，不得停留或复述已通过镜头已覆盖的内容。当前{"必须收束为最后一镜" if must_finish else ("可以在剧情已完整落到尾钩时设置 is_final=true，否则继续保持 false" if allow_finish else "不能设置为最后一镜，is_final 必须为 false（剧情尚未铺到计划的收尾镜）")}。
+2. 本集不设镜头数和总时长上限；当前按完整大纲推进到第 {shot_no}/{expected_total} 镜。本镜必须落实大纲第 {shot_no} 条、推进到新剧情，不得停留或复述已覆盖内容。{"只有剧情已完整落到尾钩时才可设置 is_final=true，否则必须继续生成" if allow_finish else "剧情尚未铺到计划收尾，is_final 必须为 false"}。
 3. 从第 2 镜开始，必须明确承接上一镜的 last_frame_desc、动作结果、道具状态、人物位置、情绪或声轨信息；如果换场，要写清线索带入或时间跳转。
 4. 如果 is_final=true，本镜必须落到本集尾钩：{episode['cliffhanger']}，并且整集必保留关键台词/剧情点都已经在已通过镜头或本镜中体现。
 5. 如果 is_final=false，本镜结尾要留下清楚的动作/情绪/信息状态，供下一镜继续。
@@ -1223,7 +1100,6 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
             "episode_no": episode.get("episode_no"),
             "shot_no": shot_no,
             "completed_shots": len(completed_shots),
-            "remaining_duration_s": remaining_duration,
             "expected_total": expected_total,
             "has_outline_brief": brief is not None,
             "source_chapters": episode.get("source_chapters"),
@@ -1238,7 +1114,7 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
 本镜大纲：{brief.beat if brief is not None else '（按完整大纲继续推进）'}
 本镜必落内容：{brief.covers if brief is not None else '（无单列项）'}
 可用角色：{'/'.join(c.name for c in bible.characters)}
-合法时长：{config.MIN_VIDEO_DURATION_S}~{config.MAX_VIDEO_DURATION_S}s；单镜口播上限：{config.MAX_SPOKEN_CHARS_PER_SHOT}字。
+合法时长：固定 {config.FIXED_VIDEO_DURATION_S}s；单镜口播上限：{config.MAX_SPOKEN_CHARS_PER_SHOT}字。
 合法景别：{'|'.join(sorted(SHOT_SIZES))}；合法运镜：{'|'.join(sorted(CAMERA_MOVES))}；合法转场：{transition_options}。
 上一镜详细承接：{_render_completed_shots_context(completed_shots[-1:])}
 本镜相关剧本：
@@ -1246,10 +1122,20 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
 本镜可逐字摘录原文：
 {source_window}
 修复时必须保留最近输出中已经正确的字段，只修正错误清单点名的问题。"""
-    draft = await _run_with_repair(
-        "分镜脚本",
-        prompt,
-        StoryboardShotDraft,
+    shot_loop = AgentLoop(
+        stage_key=f"storyboard_shot_{shot_no}",
+        contract_key="storyboard",
+        goal=f"生成第 {shot_no} 镜并通过逐镜合同，保留已通过 checkpoint",
+        scope_type="storyboard_checkpoint",
+        scope_id=f"{episode.get('id') or episode['episode_no']}:{shot_no}",
+        artifact_type="storyboard_shot",
+        policy=AgentLoopPolicy(
+            max_iterations=4, stall_rounds=2, min_quality_gain=0.03,
+            no_gain_rounds=2, allow_warning_candidate=True,
+        ),
+    )
+    draft = await _run_with_agent_loop(
+        "分镜脚本", "storyboard", prompt, StoryboardShotDraft,
         lambda d: _validate_storyboard_shot_draft(
             d,
             episode=episode,
@@ -1265,10 +1151,11 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
                 (s.covers or "") for s in (outline.shots[shot_no:] if (outline and outline.shots) else [])
             ),
         ),
+        loop=shot_loop,
         temperature=0.7,
         max_tokens=65535,
         repair_context=repair_context,
-        fallback_to_last=True,
+        prefill={"episode_no": episode["episode_no"]},
     )
     _normalized_candidate_board(episode["episode_no"], completed_shots, draft.shot, bible, episode["target_duration_s"])
     return draft
@@ -1288,7 +1175,7 @@ def _first_shot_rule(episode: dict) -> str:
             f"人物动作克制、信息靠画面与旁白承载；不要在第一镜就让主角做剧烈动作或触发核心冲突。\n"
             f"    - 必须配 narration 旁白做背景交代（世界观/设定/主角身份处境），旁白先于任何台词；"
             f"shot_size 优先用远景/全景做开场建场，先把环境和主角位置交代清楚。\n"
-            f"    - 出片侧会把本镜强制为【远景 + 缓慢推近 + 较长时长（{config.ESTABLISHING_SHOT_DURATION_S}s）】，"
+            "    - 开场需要更长铺陈时，拆成连续多个 5 秒建场镜，逐步完成环境建立与人物入场，"
             f"所以 action_desc/首尾帧请按\"远景缓慢推近、镜头从环境推向主角\"来写：首帧是交代环境的大远景，"
             f"尾帧镜头推近到主角、但仍是同一机位的连续推进，人物动作保持克制连贯。\n"
             f"    - 仍要包含本集 hook：{episode['hook']}，但以\"先立背景、再带出钩子\"的方式呈现，"
@@ -1305,20 +1192,18 @@ def _storyboard_output_contract(episode: dict, bible: Bible, durations: list[int
     character_names = "、".join(c.name for c in bible.characters) or "（角色圣经为空）"
     return f"""硬性输出规范（以下规则由代码校验，违反会被退回重写；请首轮直接满足）：
 1. episode_no 必须等于 {episode['episode_no']}；shots 按剧情顺序排列，shot_no 必须从 1 开始连续递增，不能跳号、重复或乱序。
-2. 总时长 = 所有 duration_s 之和，目标 ≈ {target} 秒；自动校验允许到约 {storyboard_duration_limit(target)} 秒或口播刚需时长。不要为凑数把简单镜头硬撑长；台词较多的镜头必须给足念白时间，不要为压总时长而截短台词镜。
-3. 本集基础镜头数为 {min_shots} 条 shot；如果必保留关键台词/内心OS/关键剧情点导致单镜口播超限，必须新增相邻镜头拆分承接，最多 {max_shots} 条。不要把多句长对白硬塞进一镜，也不要无理由少于基础镜头数。
-4. duration_s 取 {config.MIN_VIDEO_DURATION_S}~{config.MAX_VIDEO_DURATION_S} 的整数（这是 Seedance 的 --dur 参数）。先按动作密度定一个基准，再按台词长度抬高，取较大者：
-   - 动作密度基准：{config.MIN_VIDEO_DURATION_S}~6s 静态/简单动作（凝视、僵住、低头看、对话特写、单一表情变化，给长会让人物停滞干等）；7~9s 中等动作（走动、转身、拿放道具、一来一回对话）；10~{config.MAX_VIDEO_DURATION_S}s 复杂/强运动/连续多步动作或情绪爆发（打斗、奔跑、跌倒、剧烈挣扎）。
-   - 【节奏硬约束】不要习惯性给 12~15s：无声轨或短旁白镜默认 5~8s；只有台词+旁白确实需要、或画面有强运动/高潮爆发，才允许 10~15s。前中段镜头若都给 13~15s，会挤掉尾钩镜头并导致整集超时。
-   - 【硬性·音画同步】duration_s 必须 ≥ 本镜台词+旁白念完所需时间（中文约每 {config.SPEECH_CHARS_PER_SECOND} 字 1 秒，另加约 {int(config.SPEECH_LEAD_IN_S + config.SPEECH_TAIL_BUFFER_S)}s 开场留白与收势）。动作再简单，只要台词较长就要给足时长，否则动作演完了台词还没说完（如"趴下睡觉"只演 5s 但台词要 8s）会严重音画不同步。
-   - 【硬性·口播上限】单镜台词+旁白总字数不得超过 {config.MAX_SPOKEN_CHARS_PER_SHOT} 字（{config.MAX_VIDEO_DURATION_S}s 也念不完）；超了就优先拆到新增/相邻镜头分担，其次再精简非关键口水话，绝不能一镜塞下念不完的台词。
+2. 整集不设总时长上限，完整演绎剧本、因果链、情绪推进、关键台词和结尾钩子后才能结束。
+3. 本集镜头数不设上限；复杂动作、长台词、不同时间或不同人物节拍必须拆成更多相邻镜头，不得合并删戏。
+4. duration_s 必须固定为 5（这是每个 Seedance 视频段的时长上限）。任何 5 秒内演不完或说不完的内容都要继续拆镜。
+   - 【硬性·音画同步】 duration_s 固定为 5秒?单镜说不完或演不完时，必须拆成连续相邻镜头，不得延长 duration_s?
+   - 【硬性·口播上限】单镜台词+旁白总字数不得超过 {config.MAX_SPOKEN_CHARS_PER_SHOT} 字（{config.FIXED_VIDEO_DURATION_S}s 也念不完）；超了就优先拆到新增/相邻镜头分担，其次再精简非关键口水话，绝不能一镜塞下念不完的台词。
 5. 关键：每条 shot 只表现【一个】连贯流畅的主动作（视频模型一镜到底拍这一件事），用一句话把它的"起势→过程→收势"和人物表情/反应写清楚（逗号分句多少不限，写细更好）。判定"多镜头快切"看的不是逗号数量，而是有没有出现切镜：严禁出现"切到/切至/镜头切/镜头转向/闪回/回忆画面/分屏/下一个镜头/→"这类词。
 6. 单镜要像一个真实可拍的连续动作（例如"她攥紧衣角，肩膀微颤，眼泪无声砸落，嘴角弧度僵在半空"是一个动作，没问题；"她哭→镜头切到门口→闪回六年前"才是错误的多段快切）。画面负责动作和表情，声轨负责冲突、态度、内心和悬念，二者必须共同推进剧情。
 7. 声轨纪律（重要）：分镜必须从【已确认完整剧本】保留角色对白、内心OS、旁白、人群嘲讽/恭维等可听见信息，不能把有声剧本压成纯画面卡。全集至少约 75% 镜头应有 dialogues 或 narration；对白冲突镜优先写 dialogues，内心OS和非角色圣经人物的人群声写入 narration。禁止空泛情绪词注水，每一句声轨都要提供新信息。
 8. action_desc 目标 ≥{ACTION_DESC_MIN_CHARS} 字（不设上限）：写清这一个动作的主体姓名、动作起止、力度/速度、表情与道具反应；不要罗列多个镜头，不要写运镜术语（景别/运镜由独立字段给出）。
-8b. 【关键·首尾帧=同一镜头的起止，决定 10s 视频是否自然】每条 shot 必须给出 first_frame_desc（本镜开始的静止画面）与 last_frame_desc（本镜结束的静止画面），它们是这 10s 视频的起点帧和终点帧：
+8b. 【关键·首尾帧=同一镜头的起止，决定 5s 视频是否自然】每条 shot 必须给出 first_frame_desc（本镜开始的静止画面）与 last_frame_desc（本镜结束的静止画面），它们是这 5s 视频的起点帧和终点帧：
    - 二者必须是【同一机位、同一场景、同一构图】下，这一个连贯动作的开始瞬间与结束瞬间：背景、镜头框取、人物在画面中的位置与形象保持一致，只有人物的姿态/表情/手部/道具状态随这一个动作自然推进。
-   - 要能看出动作发生了变化（首尾不能写成完全相同的一句），但【绝不是换机位、换构图、换场景、换人物形象】——否则 10s 视频会在两帧之间出现不合常理的跳变/形变/瞬移（这是当前成片最严重的问题，务必避免）。
+   - 要能看出动作发生了变化（首尾不能写成完全相同的一句），但【绝不是换机位、换构图、换场景、换人物形象】——否则 5s 视频会在两帧之间出现不合常理的跳变/形变/瞬移（这是当前成片最严重的问题，务必避免）。
    - 正例（同机位、仅动作推进）：首帧「角色A手掌刚贴上石碑，神情平静，碑面无光」；尾帧「同一机位，角色A手掌仍贴在石碑上，碑面微微亮起，他眉头骤紧、掌心收力」。反例（错误，等于换了镜头）：首帧拍人脸特写、尾帧却拍远处大厅全景。
    - 各 25~50 字，只写画面里看得见的东西（人物姿态/表情/手部/关键道具/光效），同一场景、同一人物形象；不要写出旁白/字幕文字、不要写运镜。
 8c. 【导演调度·人物不能凭空出现】每条 shot 都要像现场调度表一样写清人物在画面中的合理存在：
@@ -1329,7 +1214,7 @@ def _storyboard_output_contract(episode: dict, bible: Bible, durations: list[int
 9. source_excerpt 必填：每条 shot 必须带对应小说原文摘录，至少 {SOURCE_EXCERPT_MIN_CHARS} 字、不设上限，必须从下方"本集改编源文本"逐字摘录；可以截取最相关的连续段落，不要改写成摘要，不要写分镜解释。它会作为 Seedance prompt 的兜底参考。
 10. 字数只校验下限，不校验上限；目标值仅作写作引导。优先保证戏剧质量与因果连贯，不要为凑数字牺牲剧情。
 11. 信息密度靠"画面一个清晰动作 + 台词/内心OS承担冲突与信息（必要时一句短旁白补缝）"配合，而不是把多件事塞进同一个画面，也不是靠旁白硬讲剧情。禁止单纯场景氛围、人物呆立、重复上一镜内容。
-12. narration 可为空，但以下内容必须优先保留在 narration：必要内心独白、结尾悬念旁白、非角色圣经人物的人群嘲讽/恭维/议论声、画面与角色开口都无法表达的隐藏因果。若写则务必简短（一句话、≤{NARRATION_TARGET_CHARS} 字，10s 念得完），内心独白请以“内心OS：……”或“内心：……”开头。
+12. narration 可为空，但以下内容必须优先保留在 narration：必要内心独白、结尾悬念旁白、非角色圣经人物的人群嘲讽/恭维/议论声、画面与角色开口都无法表达的隐藏因果。若写则务必简短（一句话、≤{NARRATION_TARGET_CHARS} 字，5s 念得完），内心独白请以“内心OS：……”或“内心：……”开头。
 12a. 【口播优先·重要】单镜台词+旁白总字数受第 4 条上限约束（{config.MAX_SPOKEN_CHARS_PER_SHOT} 字）。若本镜已有接近上限的角色台词或关键长台词，就【不要】再把人群嘲讽/议论/哄笑/惊呼这类环境群像声塞进 narration 占用口播——请改写进 action_desc 当画面群像（如“周围人群哄笑、交头接耳地议论”）。环境群像声写进画面同样能被观众看到，不必占用念白时间；本镜旁白可留空或只留一句最关键的内心OS/尾钩。
 12b. 【声轨时序·重要】成片配音按“先旁白/内心、人物再开口”的听感顺序念：所以同一镜里 narration 是【铺垫情境/画外音/内心活动】，台词是人物【听到/看到后的反应】，二者必须前后承接、各讲各的信息，绝不能内容重复或自相矛盾（错例：narration 写“敌暗我明，谁在操控这一切”，台词又说“敌暗我明，这家伙是谁”——重复撞车）。只有全知视角的结尾悬念钩旁白（“可他不知道……/殊不知……/然而……”）才是念在台词之后的收尾。若本镜逻辑是“人物先反应、再补一句旁白”，就把旁白写成这种结尾钩句式，否则默认旁白先于台词。
 13. 角色名必须准确：characters 不能为空，只能使用角色圣经里的准确姓名：{character_names}。characters 只写本镜头画面中实际可见/实际在场的人物；幕后发消息者、纸条落款、屏幕昵称、AI 软件名不算出场角色，除非镜头真的拍到他本人。不要创造新名字，不要把姓名改成外号/称谓，不要用"无角色"。如果原文出现角色姓名，必须照抄原文和角色圣经中的姓名。
@@ -1352,7 +1237,7 @@ def _storyboard_preflight_contract(episode: dict) -> str:
     min_shots, max_shots = storyboard_shot_count_range(target)
     hints = "、".join(TRANSITION_HINTS[:12])
     return f"""首轮输出前必须逐镜预检（这些就是代码校验器的具体判定条件，不要等返工）：
-1. 本集基础 {min_shots} 条 shot；若某镜单镜台词+旁白会超过 {config.MAX_SPOKEN_CHARS_PER_SHOT} 字，或必保留关键台词/剧情点塞不下，必须新增相邻镜头拆分承接，最多 {max_shots} 条。每条 duration_s 取 {config.MIN_VIDEO_DURATION_S}~{config.MAX_VIDEO_DURATION_S} 的整数：先按动作密度定基准（静态/简单→短，复杂/强运动→长），再按台词长度抬高（约每 {config.SPEECH_CHARS_PER_SECOND} 字 1 秒），取较大者。简单又没台词的镜头别给长时长；台词较多就给足时长。
+1. 镜头数和整集总时长不设上限；每条 duration_s 固定为 5。若单镜台词+旁白超过 {config.MAX_SPOKEN_CHARS_PER_SHOT} 字，或动作/关键剧情 5 秒内演不完，必须新增相邻镜头拆分，直到完整演绎剧本。
 2. 第 1 镜 continuity_from_prev 必须为 false；第 2 镜开始逐条和上一镜比较 scene_setting。
 3. 如果本镜 scene_setting 与上一镜完全相同：
    - continuity_from_prev 必须为 true；
@@ -1524,6 +1409,49 @@ async def review_scene_image(image_b64: str, frame_desc: str, scene_setting: str
     em = _score_or_none(result.get("expectation_match"))
     if em is not None:
         result["overall"] = round(min(float(result["overall"]), em), 3)
+    return result
+
+
+async def review_portrait_image(image_b64: str, appearance_anchor: str) -> dict:
+    """Review a character reference without imposing ordinary-human posing rules.
+
+    Portrait anchors can describe spirits, creatures, floating bodies, props, or
+    a non-neutral expression.  Those anchor-specific requirements take priority
+    over the conventional front-facing model-sheet pose.
+    """
+    expectation = f"""你是漫剧角色定妆照评审 agent。请只对照角色锚点检查这张单角色全身设定图，输出 JSON。
+
+角色锚点：{appearance_anchor}
+
+检查项（各 0~1 评分）：
+1. expectation_match  年龄、性别、发型、服装、体态、材质/透明度、表情、指定道具及空间关系是否与锚点一致
+2. continuity         当前没有历史参考图，固定给 1
+3. clean_frame        无文字/水印/多余人物/肢体畸形/五官崩坏，主体与锚点要求的道具完整可见
+
+评分硬规则（务必遵守）：
+- 锚点优先于普通定妆照惯例。若锚点要求透明、魂体、悬浮、指定表情或与道具的空间关系，必须按锚点核对；不要反过来要求双脚着地、中性表情或普通实体人站姿。
+- 锚点要求的非实体形态、表情或道具空间关系缺失时，expectation_match 必须 ≤0.4。
+- 锚点没有要求的火焰、斗气光环、文字或其他主体都属于多余元素，应写入 issues。
+- overall 不得高于 expectation_match；issues 必须指出可直接用于下一轮修图的具体差异。
+
+只输出 JSON：{{"expectation_match": float, "continuity": 1.0, "clean_frame": float, "overall": float, "issues": [str]}}"""
+    raw = await hiagent.vlm_check(
+        [image_b64],
+        expectation,
+        call_meta={
+            "initiator_label": "角色定妆照评审",
+            "asset_kind": "portrait",
+            "has_prev_frame": False,
+        },
+    )
+    result = _parse_qa_result(
+        raw,
+        ["expectation_match", "continuity", "clean_frame"],
+        defaults={"continuity": 1.0},
+    )
+    expectation_match = _score_or_none(result.get("expectation_match"))
+    if expectation_match is not None:
+        result["overall"] = round(min(float(result["overall"]), expectation_match), 3)
     return result
 
 

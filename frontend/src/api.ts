@@ -62,17 +62,17 @@ export const api = {
         prompt_override: promptOverride, reroll, with_critique: withCritique,
       }),
     }).then(handle),
-  sceneApprove: (shotId: string, sceneId: string, kind: string) =>
+  sceneApprove: (shotId: string, sceneId: string, kind: string, reason?: string) =>
     fetch(`/api/shots/${shotId}/scene/approve`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ scene_id: sceneId, kind }),
+      body: JSON.stringify({ scene_id: sceneId, kind, reason }),
     }).then(handle),
   sceneDelete: (sceneId: string) =>
     fetch(`/api/scenes/${sceneId}`, { method: 'DELETE' }).then(handle),
-  adoptVersion: (shotId: string, versionId: string) =>
+  adoptVersion: (shotId: string, versionId: string, reason?: string) =>
     fetch(`/api/shots/${shotId}/adopt`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ version_id: versionId }),
+      body: JSON.stringify({ version_id: versionId, reason }),
     }).then(handle),
   deleteVersion: (versionId: string) =>
     fetch(`/api/versions/${versionId}`, { method: 'DELETE' }).then(handle),
@@ -99,6 +99,85 @@ export const api = {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ scene_prompt: scenePrompt }),
     }).then(handle),
+}
+
+export interface RunSummary {
+  id: string
+  workflow_type: string
+  scope_type: string
+  scope_id: string
+  status: string
+  current_step_key?: string | null
+  cost_cny: number
+  budget_limit_cny?: number | null
+  started_at?: number | null
+  updated_at: number
+  finished_at?: number | null
+  failure_code?: string | null
+  failure_message?: string | null
+  resume_from_step?: string | null
+}
+
+export interface StepRun {
+  id: string
+  run_id: string
+  step_key: string
+  iteration_no: number
+  status: string
+  decision?: string | null
+  exit_reason?: string | null
+  started_at?: number | null
+  finished_at?: number | null
+  latency_ms: number
+  output_artifact_id?: string | null
+  error_message?: string | null
+}
+
+export interface RunEvent {
+  id: string
+  run_id: string
+  step_run_id?: string | null
+  ts: number
+  event_type: string
+  severity: string
+  message: string
+  payload?: Record<string, unknown>
+}
+
+export interface EvidenceIssue {
+  code: string
+  severity: 'info' | 'warning' | 'blocker'
+  subject: string
+  message: string
+  repair_hint?: string | null
+  repairable: boolean
+}
+
+export interface EvaluationSummary {
+  id: string
+  evaluator_type: string
+  evaluator_name: string
+  evaluator_version: string
+  status: string
+  hard_gate_passed: number | boolean
+  score?: number | null
+  issues?: EvidenceIssue[]
+  evidence?: Record<string, unknown>
+  recovered: number | boolean
+}
+
+export interface ArtifactEvidence {
+  id: string
+  type: string
+  version: number
+  status: string
+  trust_level: string
+  content_hash: string
+  contract_version?: string | null
+  prompt_version?: string | null
+  parent_artifact_ids?: string[]
+  stale_reason?: string | null
+  evaluations: EvaluationSummary[]
 }
 
 export interface Dialogue { speaker: string; line: string; emotion: string }
@@ -169,6 +248,8 @@ export interface ShotVersion {
   id: string; version_no: number; prompt_text: string; status: string
   error?: string; video_url?: string; qa?: { overall: number; issues: string[] } | null
   cost_cny: number; latency_s: number
+  artifact_id?: string | null; adoption_reason?: string | null
+  technical_validation_json?: string | null
   image_inputs?: {
     reference_image_used?: boolean
     reference_images?: ReferenceImage[]
@@ -184,6 +265,7 @@ export interface SceneQa {
 export interface SceneCandidate {
   id: string; version_no: number; kind: 'head' | 'tail'; status: string; error?: string
   qa?: SceneQa | null; image_url?: string
+  artifact_id?: string | null; adoption_reason?: string | null
 }
 
 export interface Shot {
@@ -194,10 +276,13 @@ export interface Shot {
   narration: string | null; dialogues: Dialogue[]; transition: string
   continuity_from_prev: number; adopted_version_id: string | null
   est_cost_cny: number; versions: ShotVersion[]
+  scene_est_cost_cny?: number
   scene_status: string; approved_scene_id: string | null
   approved_head_scene_id?: string | null; approved_tail_scene_id?: string | null
   required_keyframes?: ('head' | 'tail')[]; scenes: SceneCandidate[]
   video_stale: boolean
+  storyboard_artifact_id?: string | null
+  storyboard_evidence?: ArtifactEvidence | null
 }
 
 export interface Episode {
@@ -206,9 +291,36 @@ export interface Episode {
   status: string; script_error?: string; cost_cny: number; cost_limit_cny?: number
   screenplay_status: string; screenplay_error?: string | null; screenplay_beats?: number; screenplay_mode?: string
   screenplay?: EpisodeScreenplay | null
+  screenplay_artifact_id?: string | null
+  screenplay_evidence?: ArtifactEvidence | null
   shots?: Shot[]
   storyboard_planned_shots?: number | null
-  storyboard_duration_limit_s?: number
+  storyboard_artifact_id?: string | null
+  storyboard_evidence?: ArtifactEvidence | null
+  delivery_artifact_id?: string | null
+  delivery_status?: string
+}
+
+export interface DeliveryCheck {
+  key: string; passed: boolean; message: string; evidence?: unknown
+}
+
+export interface DeliveryReadiness {
+  episode_id: string; ready: boolean; evidence_coverage: number
+  checks: DeliveryCheck[]; blockers: DeliveryCheck[]
+  warnings: { code?: string; message?: string; shot_no?: number }[]
+}
+
+export interface DeliveryPackage {
+  package_id: string; artifact_id: string; trust_level: string
+  status: string; package_path: string
+  archive_path?: string
+  manifest: Record<string, unknown>; quality_report: Record<string, unknown>
+}
+
+export interface DeliveryPackageRecord {
+  id: string; episode_id: string; artifact_id: string; status: string
+  package_path: string; created_at: number; approved_at?: number | null
 }
 
 export interface MixShot {
@@ -260,6 +372,17 @@ export interface SceneRefSegment {
   image_url?: string | null
   qa?: { overall?: number; issues?: string[] } | null
   qa_overall?: number | null
+  artifact_id?: string | null
+  evidence?: ArtifactEvidence | null
+}
+
+export interface SceneReferenceCandidate {
+  artifact_id: string
+  status: string
+  trust_level: string
+  attempt?: number | null
+  image_url?: string | null
+  evidence?: ArtifactEvidence | null
 }
 
 export interface Scene {
@@ -271,6 +394,7 @@ export interface Scene {
   scene_prompt_override?: string | null
   scene_prompt_effective?: string
   scene_refs?: SceneRefSegment[]
+  scene_candidates?: SceneReferenceCandidate[]
 }
 
 export interface Bible {
@@ -289,6 +413,9 @@ export interface Project {
   chapters?: { idx: number; title: string; char_count: number; preview?: string }[]
   episodes?: Episode[]
   chapter_count?: number; episode_count?: number
+  bible_artifact_id?: string | null
+  bible_evidence?: ArtifactEvidence | null
+  harness_engine_enabled?: number | boolean
 }
 
 export interface AutoProgress {

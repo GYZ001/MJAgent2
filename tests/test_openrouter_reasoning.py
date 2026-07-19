@@ -24,7 +24,7 @@ def test_openrouter_retries_without_reasoning_when_budget_is_exhausted(monkeypat
     monkeypatch.setattr(hiagent, "active_provider", lambda kind: "openrouter")
     monkeypatch.setattr(hiagent, "active_model", lambda kind, provider=None: "z-ai/glm-5.2")
     monkeypatch.setattr(hiagent.config, "OPENROUTER_TEXT_REASONING_EFFORT", "high")
-    monkeypatch.setattr(hiagent, "_openrouter_headers", lambda: {"Authorization": "Bearer test"})
+    monkeypatch.setattr(hiagent, "_model_connection", lambda *args: ("https://openrouter.test/api/v1", {"Authorization": "Bearer test"}))
     monkeypatch.setattr(hiagent, "_post_json", fake_post_json)
 
     content = asyncio.run(hiagent.chat(
@@ -57,7 +57,7 @@ def test_openrouter_does_not_retry_unrelated_empty_content(monkeypatch) -> None:
     monkeypatch.setattr(hiagent, "active_provider", lambda kind: "openrouter")
     monkeypatch.setattr(hiagent, "active_model", lambda kind, provider=None: "z-ai/glm-5.2")
     monkeypatch.setattr(hiagent.config, "OPENROUTER_TEXT_REASONING_EFFORT", "high")
-    monkeypatch.setattr(hiagent, "_openrouter_headers", lambda: {"Authorization": "Bearer test"})
+    monkeypatch.setattr(hiagent, "_model_connection", lambda *args: ("https://openrouter.test/api/v1", {"Authorization": "Bearer test"}))
     monkeypatch.setattr(hiagent, "_post_json", fake_post_json)
 
     try:

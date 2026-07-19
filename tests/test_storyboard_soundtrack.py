@@ -5,7 +5,7 @@ from app.validators import validate_storyboard_soundtrack
 def _shot(no: int, narration: str | None = None, dialogues: list[Dialogue] | None = None) -> Shot:
     return Shot(
         shot_no=no,
-        duration_s=10,
+        duration_s=5,
         shot_size="中景",
         camera_move="固定",
         scene_setting="日，萧家广场",

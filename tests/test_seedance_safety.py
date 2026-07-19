@@ -10,7 +10,7 @@ def test_sanitize_nonaggressive_only_softens_safety_terms() -> None:
         "画面主体：十五岁清秀少年。镜头动作：萧炎闭目盘腿坐在床榻上，"
         "淡淡的白色气流顺着口鼻钻入体内，古朴黑戒指诡异发光将气流吸收殆尽，"
         "萧炎愤怒地死死捏紧拳头。我草！"
-        "--ratio 9:16 --dur 10"
+        "--ratio 9:16 --dur 5"
     )
 
     safe = sanitize_seedance_prompt(prompt)
@@ -27,7 +27,7 @@ def test_sanitize_nonaggressive_only_softens_safety_terms() -> None:
     assert "诡异" in safe
     assert "愤怒" in safe
     assert "死死" in safe
-    assert safe.endswith("--ratio 9:16 --dur 10")
+    assert safe.endswith("--ratio 9:16 --dur 5")
 
 
 def test_aggressive_sanitize_rewrites_genre_terms() -> None:
@@ -35,7 +35,7 @@ def test_aggressive_sanitize_rewrites_genre_terms() -> None:
     prompt = (
         "镜头动作：萧炎闭目盘腿坐在床榻上，气流顺着口鼻钻入体内，"
         "黑戒指诡异发光将气流吸收殆尽，萧炎愤怒地死死捏紧拳头。"
-        "--ratio 9:16 --dur 10"
+        "--ratio 9:16 --dur 5"
     )
 
     safe = sanitize_seedance_prompt(prompt, aggressive=True)
@@ -47,14 +47,14 @@ def test_aggressive_sanitize_rewrites_genre_terms() -> None:
     assert "诡异" not in safe
     assert "愤怒" not in safe
     assert "死死" not in safe
-    assert safe.endswith("--ratio 9:16 --dur 10")
+    assert safe.endswith("--ratio 9:16 --dur 5")
 
 
 def test_aggressive_sanitize_removes_source_excerpt_and_direct_dialogue() -> None:
     prompt = (
         "台词信息：萧炎说「好不容易修炼而来的斗之气，又在消失……我草！」。"
         f"{SOURCE_EXCERPT_MARKER}手指上那古朴的黑色戒指，再次诡异的微微发光。"
-        "--ratio 9:16 --dur 10"
+        "--ratio 9:16 --dur 5"
     )
 
     safe = sanitize_seedance_prompt(prompt, aggressive=True)
@@ -82,7 +82,7 @@ def test_seedance_copyright_error_detection() -> None:
 
 def test_extra_terms_genericize_copyright_names() -> None:
     """版权重提：用中性代称替换角色专名，降低输出与原 IP 的相似度。"""
-    prompt = "镜头动作：萧薰儿快步追上萧炎，走到他身侧。--ratio 9:16 --dur 10"
+    prompt = "镜头动作：萧薰儿快步追上萧炎，走到他身侧。--ratio 9:16 --dur 5"
 
     safe = sanitize_seedance_prompt(
         prompt, aggressive=True, extra_terms=(("萧薰儿", "角色甲"), ("萧炎", "角色乙")))
@@ -91,4 +91,4 @@ def test_extra_terms_genericize_copyright_names() -> None:
     assert "萧炎" not in safe
     assert "角色甲" in safe
     assert "角色乙" in safe
-    assert safe.endswith("--ratio 9:16 --dur 10")
+    assert safe.endswith("--ratio 9:16 --dur 5")

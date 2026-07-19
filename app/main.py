@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
@@ -11,27 +10,56 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app import errors, worker
-from app.api import purge_legacy_screenplays, recover_bible_tasks, recover_screenplay_tasks, router
+from app import errors, task_registry, worker
+from app.api import (purge_legacy_screenplays, recover_bible_tasks,
+                     recover_scene_ref_tasks, recover_screenplay_tasks,
+                     recover_storyboard_tasks, router)
 from app.config import PROJECTS_DIR, ROOT
 from app.db import init_db
+from app.planning import recover_plan_tasks, router as planning_router
+from app.orchestration.api import router as orchestration_router
+from app.system_api import router as system_router
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
     purge_legacy_screenplays()
+    # recover_media_jobs 必须在 recover_and_start 之前跑：init_db 把 RUNNING 的
+    # workflow_runs 翻成 PAUSED_EXTERNAL，但底层 jobs 表的 lease 往往还没过期，
+    # recoverable_jobs() 不会重排——本调用把这些 job 显式复位并入队，
+    # 让随后启动的 worker 池能立即消费。
+    worker.recover_media_jobs()
     worker.recover_and_start()
+    # 启动后周期性扫一次过期 lease，覆盖 worker 崩溃/OOM 等非服务重启场景下的中断恢复
+    worker.start_stale_lease_sweeper()
     recover_bible_tasks()  # 进程重启后续跑中断的人物谱任务，而非判孤儿报错
+    recover_scene_ref_tasks()  # 补齐已通过候选后的剩余场景，避免假 running
+    recover_plan_tasks()
     recover_screenplay_tasks()  # 剧本热更后续跑，避免状态假 running 却无模型调用
+    recover_storyboard_tasks()
     try:
         yield
     finally:
         # 取消常驻 worker，保证 reload/退出能干净停机，不卡在 "Waiting for connections to close"
+        await task_registry.stop_all()
         await worker.stop()
 
 
 app = FastAPI(title="漫剧 Agent 2.0", lifespan=lifespan)
+
+
+_SENSITIVE_KEYS = {"api_key", "apikey", "authorization", "password", "secret", "token", "access_token"}
+
+
+def _redact_sensitive(value: Any) -> Any:
+    """递归清理错误上下文，任何密钥都不得进入 error_logs。"""
+    if isinstance(value, dict):
+        return {key: ("***" if str(key).lower() in _SENSITIVE_KEYS else _redact_sensitive(item))
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_sensitive(item) for item in value]
+    return value
 
 
 async def _request_context(request: Request) -> dict[str, Any]:
@@ -48,7 +76,7 @@ async def _request_context(request: Request) -> dict[str, Any]:
         raw = await request.body()
         if raw:
             try:
-                ctx["body"] = json.loads(raw)
+                ctx["body"] = _redact_sensitive(json.loads(raw))
             except Exception:  # noqa: BLE001 非 JSON 体，截断存原文
                 ctx["body"] = raw[:2000].decode("utf-8", "replace")
     except Exception:  # noqa: BLE001 取不到 body 不影响主流程
@@ -96,6 +124,9 @@ async def _on_unhandled(request: Request, exc: Exception):
 
 
 app.include_router(router)
+app.include_router(planning_router)
+app.include_router(orchestration_router)
+app.include_router(system_router)
 app.mount("/media", StaticFiles(directory=PROJECTS_DIR), name="media")
 
 frontend_dist = ROOT / "frontend" / "dist"

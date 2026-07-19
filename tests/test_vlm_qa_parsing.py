@@ -1,7 +1,7 @@
 import asyncio
 
 from app import hiagent
-from app.stages import _parse_qa_result, qa_shot
+from app.stages import _parse_qa_result, qa_shot, review_portrait_image
 
 
 def test_parse_qa_result_recovers_scores_from_truncated_json() -> None:
@@ -79,3 +79,20 @@ def test_video_qa_caps_overall_at_character_and_action_main_scores(monkeypatch) 
 
     assert qa["overall"] == 0.35
     assert qa["qa_recovered"] is False
+
+
+def test_portrait_qa_uses_anchor_specific_nonhuman_rules(monkeypatch) -> None:
+    async def fake_vlm_check(images, expectation, *, call_meta=None):
+        assert "锚点优先于普通定妆照惯例" in expectation
+        assert "不要反过来要求双脚着地" in expectation
+        assert call_meta["asset_kind"] == "portrait"
+        return (
+            '{"expectation_match": 0.35, "continuity": 1, "clean_frame": 1, '
+            '"overall": 0.9, "issues": ["未呈现透明悬浮形态"]}'
+        )
+
+    monkeypatch.setattr(hiagent, "vlm_check", fake_vlm_check)
+    qa = asyncio.run(review_portrait_image("frame", "透明苍老人影，悬浮于戒指上方，神态戏谑"))
+
+    assert qa["overall"] == 0.35
+    assert qa["continuity"] == 1.0

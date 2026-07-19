@@ -113,29 +113,18 @@ class CompileError(Exception):
 
 
 def clip_duration_value(value: int | float | str | None) -> int:
-    """把任意时长吸附到 [MIN, MAX] 合法区间。非法值回退默认时长。"""
-    try:
-        d = int(round(float(value)))  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return config.FIXED_VIDEO_DURATION_S
-    return max(config.MIN_VIDEO_DURATION_S, min(d, config.MAX_VIDEO_DURATION_S))
+    """视频供应商合同固定为 5 秒；忽略模型、旧数据和人工传入的其它值。"""
+    return config.FIXED_VIDEO_DURATION_S
 
 
 def clip_duration(shot: Shot) -> int:
-    """本镜发往 Seedance 的视频时长（秒），由分镜 duration_s 按动作密度决定。"""
+    """返回供应商合同规定的固定视频时长。"""
     return clip_duration_value(getattr(shot, "duration_s", None))
 
 
-def _extract_duration(prompt_text: str) -> int | None:
-    """从已有 prompt 文本里解析 --dur 值（用于保留手写/历史 prompt 的时长）。"""
-    m = re.search(r"--dur\s+(\d+(?:\.\d+)?)", prompt_text)
-    return clip_duration_value(m.group(1)) if m else None
-
-
 def normalize_video_args(prompt_text: str, duration: int | None = None) -> str:
-    """确保手写/覆盖 prompt 带上正确的视频生成参数。
-    duration 显式给定时用之；否则保留文本里已有的 --dur；都没有则回退默认时长。"""
-    dur = clip_duration_value(duration) if duration is not None else (_extract_duration(prompt_text) or config.FIXED_VIDEO_DURATION_S)
+    """移除历史参数并强制写入当前固定比例和 5 秒时长。"""
+    dur = config.FIXED_VIDEO_DURATION_S
     text = re.sub(r"\s--dur\s+\d+(?:\.\d+)?", "", prompt_text).strip()
     text = re.sub(r"\s--ratio\s+\S+", "", text).strip()
     if text:
@@ -156,7 +145,7 @@ def _source_excerpt_line(shot: Shot, max_chars: int = SOURCE_EXCERPT_PROMPT_MAX)
 
 def _split_video_args(prompt_text: str) -> tuple[str, str]:
     normalized = normalize_video_args(prompt_text)
-    dur = _extract_duration(normalized) or config.FIXED_VIDEO_DURATION_S
+    dur = config.FIXED_VIDEO_DURATION_S
     args = f" --ratio 9:16 --dur {dur}"
     if normalized.endswith(args):
         return normalized[:-len(args)].strip(), args
@@ -301,10 +290,10 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     missing = [n for n in shot.characters if n not in bible_map]
     if missing:
         raise CompileError(f"镜头 {shot.shot_no} 引用了圣经中不存在的角色：{missing}")
-    if not config.MIN_VIDEO_DURATION_S <= shot.duration_s <= config.MAX_VIDEO_DURATION_S:
+    if shot.duration_s != config.FIXED_VIDEO_DURATION_S:
         raise CompileError(
-            f"镜头 {shot.shot_no} 时长 {shot.duration_s}s 不合法，视频生成时长须在 "
-            f"{config.MIN_VIDEO_DURATION_S}~{config.MAX_VIDEO_DURATION_S}s 之间")
+            f"镜头 {shot.shot_no} 时长 {shot.duration_s}s 不合法，视频生成时长固定为 "
+            f"{config.FIXED_VIDEO_DURATION_S}s")
     shot_dur = clip_duration(shot)
 
     anchors = [bible_map[n].appearance_canonical for n in shot.characters]
@@ -338,7 +327,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     scene_hint = shot.scene_setting.strip()
     dur = shot_dur
     # 提示词结构遵循 Seedance 实践公式：主体 + 动作 + 景别运镜 + 环境 + 画风 + 质量约束。
-    # 关键纠偏：单镜只表现“一个连贯流畅的动作”，不再要求 10s 内塞入多个小镜头/快速切景
+    # 关键纠偏：单镜只表现“一个连贯流畅的动作”，不再要求 5s 内塞入多个小镜头/快速切景
     # （多动作快切是当前成片崩坏与画风漂移的主因）。剧情密度交给旁白承载，画面只演一件事。
     subject = "；".join(anchors)
     visible_names = "、".join(shot.characters)
@@ -448,7 +437,7 @@ SCENE_NEGATIVE = (
 SCENE_QUALITY = (
     "竖屏 9:16 单帧定格画面，构图完整，人物五官清晰稳定、表情自然，手部与所持道具关系正常稳定，"
     "光影与色调统一，电影质感，高清")
-# 角色不漂移 + 同镜两帧同机位 + 特效克制（与视频侧一致，三者是 10s 成片稳定的关键）
+# 角色不漂移 + 同镜两帧同机位 + 特效克制（与视频侧一致，三者是 5s 成片稳定的关键）
 SCENE_CONSISTENCY = "人物形象严格遵循上方角色锚点串与参考图：同一张脸、同一发型、同一服装、同一年龄与体型，跨镜不漂移"
 SCENE_SAME_FRAMING = "本帧与本镜另一张关键帧（首图/尾图）保持同一机位、同一构图、同一场景布置与光线方向，只有人物动作所处的瞬间不同，不要换机位或重新构图"
 # 动作/互动保真：把"摸石碑"画成"正面端站、手悬空、与石碑互不相干"是当前关键帧最常见的失真。
@@ -507,16 +496,6 @@ def compile_scene_prompt(shot: Shot, bible: Bible, *, kind: str = "tail",
         SCENE_NEGATIVE,
     ]
     return "。".join(p.strip().rstrip("。") for p in parts if p.strip())
-
-
-def scene_candidate_count(shot: Shot) -> int:
-    """按分镜复杂度自适应决定场景关键帧候选数量（1~3）：人物多/动作描述长/特殊景别 → 多候选。"""
-    k = 1
-    if len(shot.characters) >= 2:
-        k += 1
-    if len((shot.action_desc or "")) >= 110 or shot.shot_size in ("远景", "全景"):
-        k += 1
-    return max(1, min(k, 3))
 
 
 def idem_key(prompt_text: str, image_urls: list[tuple[str, str]] | None = None) -> str:

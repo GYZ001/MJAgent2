@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 from app import config, hiagent
-from app.db import get_conn, get_setting, new_id
+from app.harness import model_gateway
+from app.db import get_setting, new_id
 from app.errors import code_ref
 from app.hiagent import ProviderError
 from app.schemas import Bible, Shot, extract_json
@@ -91,10 +92,6 @@ def float_setting(key: str, default: float) -> float:
         return float(get_setting(key) or default)
     except (TypeError, ValueError):
         return default
-
-
-def reference_mode_enabled() -> bool:
-    return bool_setting("video_generation_enable_reference_image_mode", True)
 
 
 def max_reference_images() -> int:
@@ -669,7 +666,7 @@ async def write_reference_prompt(shot: Shot, bible: Bible, ref_type: str, *, int
         "output_schema": {"prompt": "the full English image prompt, one paragraph"},
     }
     try:
-        raw = await hiagent.chat([
+        raw = await model_gateway.chat([
             {"role": "system", "content": "Return exactly one JSON object with a single 'prompt' string field. English only."},
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ], temperature=0.3, max_tokens=500,
@@ -1089,13 +1086,3 @@ def build_seedance_image_inputs(meta: dict[str, Any]) -> list[tuple[str, str]]:
         return out
 
     raise ProviderError("视频生成已固定为参考图模式，不再支持首尾帧输入。")
-
-
-def is_character_consistency_failure(qa: dict[str, Any]) -> bool:
-    issues = " ".join(str(x) for x in qa.get("issues") or []).lower()
-    if any(w in issues for w in ["character", "costume", "hair", "face", "角色", "服装", "发型", "五官", "一致"]):
-        return True
-    try:
-        return float(qa.get("character_match", 1)) < quality_threshold()
-    except (TypeError, ValueError):
-        return False

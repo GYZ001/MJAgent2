@@ -4,24 +4,16 @@ import { useEpisode, useNav } from '../App'
 import { EpStamp } from './BiblePage'
 import EpisodeCrumb from '../components/EpisodeCrumb'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
+import EvidenceDrawer from '../components/harness/EvidenceDrawer'
+import ImpactDialog, { ImpactSummary } from '../components/harness/ImpactDialog'
 
 const SIZES = ['远景', '全景', '中景', '近景', '特写']
 const MOVES = ['固定', '推近', '拉远', '横摇', '跟随']
 const TRANS = ['硬切', '叠化', '淡出淡入', '黑场', '闪黑', '闪白', '甩镜', '遮挡转场', '匹配剪辑', '声音延续+叠化', '声音先行+淡入']
-const MIN_SHOT_DURATION_S = 5
-const MAX_SHOT_DURATION_S = 15
-
-function clampShotDuration(value: number | string) {
-  const n = Number(value)
-  if (!Number.isFinite(n)) return 10
-  return Math.max(MIN_SHOT_DURATION_S, Math.min(MAX_SHOT_DURATION_S, Math.round(n)))
-}
-
 export default function BoardPage() {
   const { episodeId, go, projectId, toast } = useNav()
   const { data: ep, refresh } = useEpisode(episodeId!)
   const [busy, setBusy] = useState(false)
-  const [durationOverrides, setDurationOverrides] = useState<Record<string, number>>({})
   const storyboardTimer = useTaskTimer(`episode.${episodeId}.storyboard`, ep?.status === 'scripting')
 
   if (!ep) return <div className="empty">展卷中……</div>
@@ -33,7 +25,7 @@ export default function BoardPage() {
     finally { setBusy(false) }
   }
 
-  const totalDur = ep.shots?.reduce((s, x) => s + (durationOverrides[x.id] ?? x.duration_s), 0) ?? 0
+  const totalDur = ep.shots?.reduce((s, x) => s + x.duration_s, 0) ?? 0
 
   return (
     <>
@@ -46,8 +38,8 @@ export default function BoardPage() {
       <section className="card">
         <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
           <EpStamp status={ep.status} />
-          <span className={`stamp ${ep.screenplay_status === 'ready' ? 'green' : ep.screenplay_status === 'running' ? 'gold' : ep.screenplay_status === 'failed' ? 'red' : 'grey'}`}>
-            {ep.screenplay_status === 'ready' ? '剧本成' : ep.screenplay_status === 'running' ? '剧本中' : ep.screenplay_status === 'failed' ? '剧本败' : '待剧本'}
+          <span className={`stamp ${ep.screenplay_status === 'ready' ? 'green' : ep.screenplay_status === 'running' ? 'gold' : ep.screenplay_status === 'failed' || ep.screenplay_status === 'warning' ? 'red' : 'grey'}`}>
+            {ep.screenplay_status === 'ready' ? '剧本成' : ep.screenplay_status === 'warning' ? '剧本有阻塞' : ep.screenplay_status === 'running' ? '剧本中' : ep.screenplay_status === 'failed' ? '剧本败' : '待剧本'}
           </span>
           {ep.screenplay_mode === 'full_script' && <span className="stamp grey">完整剧本</span>}
           <button className="btn" disabled={busy || ep.status === 'scripting' || ep.screenplay_status !== 'ready'}
@@ -68,29 +60,12 @@ export default function BoardPage() {
               取消生成
             </button>
           )}
-          {!!ep.shots?.length && ep.status !== 'scripting' && (
-            <button className="btn" disabled={busy}
-              onClick={async () => {
-                const r = await act(() => api.post(`/episodes/${ep.id}/rebalance-durations`)) as { total_before: number; total_after: number; target_total: number; limit: number } | undefined
-                if (r) {
-                  setDurationOverrides({})
-                  if (r.total_after < r.total_before) {
-                    toast(`已自动压缩时长：${r.total_before}s → ${r.total_after}s（目标 ${r.target_total}s）`)
-                  } else {
-                    toast(`各镜已是台词念得完的最短时长（音画同步下限 ${r.limit}s），无法再压缩；如需更短请精简台词/旁白后重试`)
-                  }
-                }
-              }}>
-              自动压缩时长
-            </button>
-          )}
           {ep.status === 'scripted' && (
             <button className="btn primary" disabled={busy}
               onClick={async () => {
-                const r = await act(() => api.post(`/episodes/${ep.id}/confirm`)) as { estimated_cost_cny: number; total_duration_s?: number; time_agent?: { total_before: number; total_after: number; limit: number } } | undefined
+                const r = await act(() => api.post(`/episodes/${ep.id}/confirm`)) as { estimated_cost_cny: number; total_duration_s?: number } | undefined
                 if (r) {
-                  const ta = r.time_agent ? `时间助手已将总时长从 ${r.time_agent.total_before}s 压到 ${r.time_agent.total_after}s（上限 ${r.time_agent.limit}s）；` : ''
-                  toast(`分镜已确认。${ta}实际总时长 ${r.total_duration_s ?? totalDur}s，预估生成成本 ¥${r.estimated_cost_cny}，可入评审墙开始生成`)
+                  toast(`分镜已确认。实际总时长 ${r.total_duration_s ?? totalDur}s，预估生成成本 ¥${r.estimated_cost_cny}，可入评审墙开始生成`)
                 }
               }}>确认分镜（解锁生成）</button>
           )}
@@ -102,12 +77,13 @@ export default function BoardPage() {
           )}
           <span style={{ flex: 1 }} />
           <TaskTimer label="分镜" timer={storyboardTimer} />
+          {ep.storyboard_evidence && <EvidenceDrawer evidence={ep.storyboard_evidence} label="分镜证据" />}
           <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>
-            共 {ep.shots?.length ?? 0} 镜 · 实际 {totalDur}s / 目标 {ep.target_duration_s}s / 上限 {ep.storyboard_duration_limit_s ?? 90}s · 已耗 ¥{ep.cost_cny.toFixed(1)}
+            共 {ep.shots?.length ?? 0} 镜 · 每镜 5s · 当前总时长 {totalDur}s（不设上限）· 已耗 ¥{ep.cost_cny.toFixed(1)}
           </span>
         </div>
         {ep.screenplay_status !== 'ready' && <div className="error-banner">本集还没有可用剧本。请先到剧本台生成/保存完整剧本，再展开分镜。</div>}
-        {ep.status === 'scripting' && <div style={{ marginTop: 10 }}><span className="stamp gold">分镜中</span> <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>{ep.storyboard_planned_shots ? `已按大纲规划 ${ep.storyboard_planned_shots} 镜，正在逐镜填充并 QA：已通过 ${ep.shots?.length ?? 0}/${ep.storyboard_planned_shots} 镜，通过后会继续下一镜……` : `正在逐镜头生成并 QA；已通过 ${ep.shots?.length ?? 0} 镜，通过后会继续下一镜……`}</span></div>}
+        {ep.status === 'scripting' && <div style={{ marginTop: 10 }}><span className="stamp gold">分镜中</span> <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>{ep.storyboard_planned_shots ? `已规划约 ${ep.storyboard_planned_shots} 镜（会随逐镜细化增减），已通过 ${ep.shots?.length ?? 0} 镜，通过后会继续下一镜……` : `正在逐镜头生成并 QA；已通过 ${ep.shots?.length ?? 0} 镜，通过后会继续下一镜……`}</span></div>}
         {ep.script_error && (
           <div className="error-banner">
             {ep.status === 'script_failed' ? `分镜失败（错误已列明，修改源头或重试）：\n${ep.script_error}` : `分镜提示：\n${ep.script_error}`}
@@ -123,9 +99,7 @@ export default function BoardPage() {
           <ShotStrip
             key={shot.id}
             shot={shot}
-            durationOverride={durationOverrides[shot.id]}
             episode={ep}
-            onDurationSaved={(shotId, duration) => setDurationOverrides(prev => ({ ...prev, [shotId]: duration }))}
             onChanged={refresh}
             disabled={busy}
           />
@@ -134,30 +108,28 @@ export default function BoardPage() {
   )
 }
 
-function ShotStrip({ shot, durationOverride, episode, onDurationSaved, onChanged, disabled }: {
-  shot: Shot; durationOverride?: number; episode: Episode
-  onDurationSaved: (shotId: string, duration: number) => void
+function ShotStrip({ shot, episode, onChanged, disabled }: {
+  shot: Shot; episode: Episode
   onChanged: () => void; disabled: boolean
 }) {
   const { toast } = useNav()
   const [edit, setEdit] = useState<Shot | null>(null)
-  const currentShot = durationOverride == null ? shot : { ...shot, duration_s: durationOverride }
-  const s = edit ?? currentShot
+  const [impactOpen, setImpactOpen] = useState(false)
+  const s = edit ?? shot
 
   async function save() {
     if (!edit) return
-    const duration_s = clampShotDuration(edit.duration_s)
     try {
-      await api.put(`/shots/${shot.id}`, {
-        duration_s, shot_size: edit.shot_size, camera_move: edit.camera_move,
+      const result = await api.put(`/shots/${shot.id}`, {
+        shot_size: edit.shot_size, camera_move: edit.camera_move,
         scene_setting: edit.scene_setting, characters: edit.characters, action_desc: edit.action_desc,
         first_frame_desc: edit.first_frame_desc, last_frame_desc: edit.last_frame_desc,
         source_excerpt: edit.source_excerpt,
         narration: edit.narration || null, dialogues: edit.dialogues, transition: edit.transition,
         continuity_from_prev: !!edit.continuity_from_prev,
       })
-      onDurationSaved(shot.id, duration_s)
-      toast(`镜 ${shot.shot_no} 已保存（剧集回到待确认状态）`)
+      const impact = (result as { impact?: ImpactSummary }).impact
+      toast(`镜 ${shot.shot_no} 已保存；${impact?.stale_descendant_ids?.length ?? 0} 个下游证据已标记失效`)
       setEdit(null); onChanged()
     } catch (e: unknown) { toast((e as Error).message, true) }
   }
@@ -170,10 +142,11 @@ function ShotStrip({ shot, durationOverride, episode, onDurationSaved, onChanged
         <span className="meta" style={{ color: 'var(--indigo)' }}>{s.characters.join(' / ') || '缺角色（需修改）'}</span>
         <span style={{ flex: 1 }} />
         <span className="meta">¥{shot.est_cost_cny.toFixed(1)}</span>
+        {shot.storyboard_evidence && <EvidenceDrawer evidence={shot.storyboard_evidence} label="本镜证据" />}
         {!edit
-          ? <button className="btn small" disabled={disabled} onClick={() => setEdit(JSON.parse(JSON.stringify(currentShot)))}>修改</button>
+          ? <button className="btn small" disabled={disabled} onClick={() => setEdit(JSON.parse(JSON.stringify(shot)))}>修改</button>
           : <>
-            <button className="btn small primary" onClick={save}>保存</button>
+            <button className="btn small primary" onClick={() => setImpactOpen(true)}>保存</button>
             <button className="btn small ghost" onClick={() => setEdit(null)}>放弃</button>
           </>}
       </div>
@@ -181,9 +154,6 @@ function ShotStrip({ shot, durationOverride, episode, onDurationSaved, onChanged
         {edit ? (
           <>
             <div className="shot-edit-grid full">
-              <div><label className="f">时长(s)</label>
-                <input type="number" min={MIN_SHOT_DURATION_S} max={MAX_SHOT_DURATION_S} step={1} style={{ width: '100%' }} value={edit.duration_s}
-                  onChange={e => setEdit({ ...edit, duration_s: clampShotDuration(e.target.value) })} /></div>
               <div><label className="f">景别</label>
                 <select style={{ width: '100%' }} value={edit.shot_size} onChange={e => setEdit({ ...edit, shot_size: e.target.value })}>
                   {SIZES.map(x => <option key={x}>{x}</option>)}</select></div>
@@ -241,6 +211,13 @@ function ShotStrip({ shot, durationOverride, episode, onDurationSaved, onChanged
           </>
         )}
       </div>
+      <ImpactDialog
+        open={impactOpen}
+        title={`保存镜 ${shot.shot_no} 并传播影响`}
+        impact={{ requires_reconfirm: true, paid_media_invalidated: true }}
+        onClose={() => setImpactOpen(false)}
+        onConfirm={() => { setImpactOpen(false); void save() }}
+      />
     </div>
   )
 }

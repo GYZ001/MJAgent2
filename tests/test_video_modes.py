@@ -32,7 +32,7 @@ def _bible() -> Bible:
 def _shot(**kwargs) -> Shot:
     data = {
         "shot_no": 1,
-        "duration_s": 10,
+        "duration_s": 5,
         "shot_size": "中景",
         "camera_move": "固定",
         "scene_setting": "室内",
@@ -49,12 +49,9 @@ def _shot(**kwargs) -> Shot:
     return Shot(**data)
 
 
-def test_selector_forced_reference_mode_from_config(monkeypatch) -> None:
-    """监制房把 video_generation_default_mode 强制为参考图模式时，select() 直接返回该模式（不调 LLM），
-    并给出默认参考图计划。"""
-    _fake_settings(monkeypatch,
-                   video_generation_enable_reference_image_mode="true",
-                   video_generation_default_mode=REFERENCE_IMAGE_MODE)
+def test_selector_always_uses_reference_mode(monkeypatch) -> None:
+    """The removed mode switch cannot reactivate an obsolete video path."""
+    _fake_settings(monkeypatch)
 
     async def fail_chat(*a, **k):
         raise AssertionError("强制模式不应调用 LLM 选择")
@@ -64,15 +61,6 @@ def test_selector_forced_reference_mode_from_config(monkeypatch) -> None:
 
     assert decision.mode == REFERENCE_IMAGE_MODE
     assert decision.defaulted is True and decision.llmUsed is False
-    assert decision.referenceImagePlan.totalCount > 0
-
-
-def test_selector_disabled_still_returns_reference(monkeypatch) -> None:
-    """视频生成已固定参考图模式，即使旧配置关闭参考图也不回退首尾帧。"""
-    _fake_settings(monkeypatch, video_generation_enable_reference_image_mode="false")
-    decision = asyncio.run(ShotVideoModeSelector().select(_shot(), _bible()))
-
-    assert decision.mode == REFERENCE_IMAGE_MODE
     assert decision.referenceImagePlan.totalCount > 0
 
 
@@ -212,7 +200,7 @@ class _FakeConn:
 def _shot_row(**kwargs) -> dict:
     row = {
         "shot_no": 1,
-        "duration_s": 10,
+        "duration_s": 5,
         "shot_size": "特写",
         "camera_move": "推近",
         "scene_setting": "日, 萧家广场",
@@ -245,7 +233,6 @@ def test_runtime_reference_mode_uses_stored_decision(monkeypatch) -> None:
 
     # 运行期一旦调用 LLM 选择即视为回归（应已被移除）
     monkeypatch.setattr(ShotVideoModeSelector, "select", fail_select)
-    monkeypatch.setattr(worker, "_first_keyframe_for_video", lambda conn, shot, after: (None, "head_keyframe", None))
     monkeypatch.setattr(worker, "_approved_keyframe", lambda conn, shot, kind: None)
     monkeypatch.setattr(worker, "_set_version", lambda *a, **k: None)
     monkeypatch.setattr(video_modes, "build_reference_assets", fake_build_reference_assets)

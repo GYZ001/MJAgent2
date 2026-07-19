@@ -1,7 +1,9 @@
 import { useState } from 'react'
-import { api, Scene, SceneRefSegment } from '../api'
+import { api, Scene, SceneRefSegment, SceneReferenceCandidate } from '../api'
 import { useNav, useProject } from '../App'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
+import SearchField from '../components/SearchField'
+import EvidenceDrawer from '../components/harness/EvidenceDrawer'
 
 const SCENE_PAGE_SIZE = 6
 
@@ -84,10 +86,8 @@ export default function ScenesPage() {
       {scenes.length > 0 && (
         <section className="card">
           <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', margin: '4px 0 12px' }}>
-            <input type="text" value={search}
-              onChange={e => { setSearch(e.target.value); setPage(0) }}
-              placeholder="搜索场景名…"
-              style={{ flex: '0 1 240px', fontSize: 13, padding: '6px 10px' }} />
+            <SearchField value={search} onChange={value => { setSearch(value); setPage(0) }}
+              placeholder="搜索场景名…" ariaLabel="搜索场景" className="library-search" />
             <span style={{ fontSize: 12.5, color: 'var(--ink-faint)' }}>
               共 {scenes.length} 个场景{query ? ` · 命中 ${filtered.length}` : ''}
             </span>
@@ -112,6 +112,9 @@ export default function ScenesPage() {
                     <QaLine overall={qaOverall} issues={s.scene_refs?.[0]?.qa?.issues} />
                   )}
                   {(s.scene_refs?.length ?? 0) > 1 && <SceneRefStrip segments={s.scene_refs!} />}
+                  {(s.scene_candidates?.length ?? 0) > 0 && (
+                    <SceneCandidateStrip candidates={s.scene_candidates!} />
+                  )}
                   <label className="f">场景锚点串（30~60 字，定稿后锁定）</label>
                   <div className="f-anchor">{s.scene_canonical}</div>
                   <ScenePromptBlock projectId={p.id} scene={s} disabled={busy || generating}
@@ -134,6 +137,26 @@ export default function ScenesPage() {
         </section>
       )}
     </>
+  )
+}
+
+function SceneCandidateStrip({ candidates }: { candidates: SceneReferenceCandidate[] }) {
+  return (
+    <div className="candidate-compare" style={{ margin: '8px 0' }}>
+      <div className="candidate-compare-head"><b>场景候选证据</b><span>{candidates.length} 版</span></div>
+      <div className="candidate-row">
+        {candidates.map((candidate) => (
+          <div className={`candidate-card${candidate.status === 'approved' ? ' adopted' : ''}`}
+            key={candidate.artifact_id}>
+            {candidate.image_url && <img src={candidate.image_url} alt={candidate.artifact_id} />}
+            <div className="hint">
+              尝试 {candidate.attempt ?? '—'} · {candidate.trust_level} · {candidate.status}
+            </div>
+            {candidate.evidence && <EvidenceDrawer evidence={candidate.evidence} label="查看证据" />}
+          </div>
+        ))}
+      </div>
+    </div>
   )
 }
 

@@ -16,12 +16,10 @@ from app.schemas import (Bible, EpisodeScreenplay, Shot, Storyboard,
 # ① 叙事主力改为【台词 + 可见画面动作】；旁白(narration)默认留空，只在画面与台词都
 #    无法传达关键信息时（较大时间跳跃/必要内心独白/隐藏因果）才写一句短旁白。
 #    因此取消旁白下限校验、取消「纯画面空镜必须加旁白」的硬性要求。
-# ② 旁白仍保留上限校验：若写，必须短到 10s 念得完，避免又退回到旁白堆砌。
+# ② 旁白仍保留上限校验：若写，必须短到 5s 念得完，避免又退回到旁白堆砌。
 # ③ 分镜模块不校验其它字数上限——台词/原文摘录/场景标签/节拍字段只设必要下限。
-ORAL_TARGET_RANGE = (35, 55)        # 口播目标（prompt 用，仅引导）：旁白+台词总量，10s 念得完
-NARRATION_TARGET_CHARS = 40         # 旁白目标上限（prompt 用）：若写则一句短旁白，10s 念得完
-NARRATION_TARGET_MIN_CHARS = 30     # 旧目标下限（保留供引用，旁白已改为选填）
-NARRATION_HARD_MAX = 52             # 旁白硬上限（校验用）：若写则 10s 配音念得完，目标 40 +30% 容差
+NARRATION_TARGET_CHARS = 12
+NARRATION_HARD_MAX = 14
 ACTION_DESC_HARD_MIN = 40           # action_desc 硬下限（校验用）：够把一个动作写清即可
 ACTION_DESC_MIN_CHARS = 70          # prompt 目标：把单一动作的起势/过程/收势与人物反应写清
 SOURCE_EXCERPT_MIN_CHARS = 8
@@ -50,8 +48,7 @@ MOVEMENT_HINTS = (
     "登上", "爬上", "钻进", "前往", "折返", "驻足", "停在", "停步", "停下",
 )
 
-# 分镜镜头数不再与 target/10 死锁。target/10 是基础节拍数；上限由产品配置和 90s 总时长共同约束，
-# 让关键台词/剧情点密集的集数能继续补镜，而不是过早收尾。
+# 目标时长只提供初始节拍参考；剧情未完整覆盖时可继续补 5 秒镜头。
 TARGET_DURATION_OVERAGE_RATIO = 1.2
 
 SCENE_CUT_TRANSITIONS = TRANSITIONS - {"硬切"}
@@ -85,38 +82,9 @@ def default_scene_transition(prev: Shot | None, shot: Shot) -> str:
     return "淡出淡入"
 
 
-def _text_budget(shot: Shot) -> int:
-    total = len(shot.narration or "")
-    for d in shot.dialogues:
-        total += len(d.line)
-    return total
-
-
 def storyboard_shot_count_range(target_duration_s: int) -> tuple[int, int]:
-    """返回自动分镜允许的镜头数范围。
-
-    下限是目标时长折算的基础节拍数；上限按「目标时长 / 单镜最短时长」折算，
-    并受产品最大镜头数 STORYBOARD_MAX_SHOTS 约束。
-    这样 40s 目标最多拆 8 镜、90s 目标最多拆 18 镜，实事求是地匹配内容密度，
-    而不是无论目标多少都顶到 18 镜上限。
-    """
-    base = max(1, math.ceil(target_duration_s / config.FIXED_VIDEO_DURATION_S))
-    duration_bound = max(base, target_duration_s // config.MIN_VIDEO_DURATION_S)
-    return base, min(config.STORYBOARD_MAX_SHOTS, duration_bound)
-
-
-def storyboard_duration_limit(target_duration_s: int, board: Storyboard | None = None) -> int:
-    """自动分镜允许的整集总时长上限。
-
-    总时长上限固定为 EPISODE_TARGET_MAX_S（90s），不随目标时长缩放——
-    目标时长只是节奏参考，模型判断不一定精确，统一留到 90s 给模型发挥空间，
-    不用 48/60 这种缩放值抑制模型能力。
-    口播刚需（enforced_floor_total）可进一步抬高上限，避免为卡上限而截短台词。
-    """
-    enforced_floor_total = 0
-    if board is not None:
-        enforced_floor_total = sum(enforced_min_duration(board, s) for s in board.shots)
-    return max(config.EPISODE_TARGET_MAX_S, enforced_floor_total)
+    """至少一镜；第二项只是防异常无限循环的技术熔断值，不是产品上限。"""
+    return 1, config.STORYBOARD_MAX_SHOTS
 
 
 def _voiced_shot_count(shots: list[Shot]) -> int:
@@ -245,33 +213,16 @@ def validate_storyboard(
     errors: list[str] = []
     shots = board.shots
     if not shots:
-        min_shots, max_shots = storyboard_shot_count_range(target_duration_s)
-        return [
-            f"shots 为空；目标 {target_duration_s}s 至少需要 {min_shots} 个基础镜头；"
-            f"遇到口播/关键内容过密可拆到最多 {max_shots} 个镜头"
-        ]
+        return ["shots 为空；请按完整剧本至少生成一个 5 秒镜头"]
 
     bible_names = {c.name for c in bible.characters}
 
     fixed_duration = config.FIXED_VIDEO_DURATION_S
-    min_dur, max_dur = config.MIN_VIDEO_DURATION_S, config.MAX_VIDEO_DURATION_S
     if target_duration_s % fixed_duration != 0:
         errors.append(
             f"目标时长 {target_duration_s}s 不是 {fixed_duration}s 的整数倍；"
-            f"节拍单元按 10s 换算要求目标取 {'/'.join(str(x) for x in config.EPISODE_TARGET_CHOICES)}s")
-    # 镜头数以 target/10 为基础节拍，允许额外拆少量镜头分担口播与必保留关键内容。
-    min_shots, max_shots = storyboard_shot_count_range(target_duration_s)
-    if not min_shots <= len(shots) <= max_shots:
-        errors.append(
-            f"镜头数 {len(shots)} 不匹配；目标 {target_duration_s}s 下基础镜头数为 {min_shots} 个，"
-            f"口播/关键内容过密时可拆分到最多 {max_shots} 个镜头；请增删镜头并保持 shot_no 连续")
-    # 自动生成阶段需要用目标时长约束模型，避免它靠注水拉长；人工编辑确认阶段则不把
-    # 规划目标当硬上限，用户明确设置的实际总时长只要逐镜合法即可进入生成。
-    if enforce_total_duration:
-        total = sum(s.duration_s for s in shots)
-        hi = storyboard_duration_limit(target_duration_s, board)
-        if total > hi:
-            errors.append(f"总时长 {total}s 超出上限 {hi}s，请缩短部分镜头时长")
+            f"节拍单元按 5s 换算要求目标取 {'/'.join(str(x) for x in config.EPISODE_TARGET_CHOICES)}s")
+    # 镜头数量和整集总时长不设产品上限；完整覆盖剧本是唯一收束条件。
 
     prev_sizes: list[str] = []
     scene_last_seen: dict[str, int] = {}
@@ -279,8 +230,8 @@ def validate_storyboard(
         shot.action_desc = normalize_action_desc(shot.action_desc)
         tag = f"shots[{i}](shot_no={shot.shot_no})"
         # V2 时长合法取值
-        if not min_dur <= shot.duration_s <= max_dur:
-            errors.append(f"{tag}.duration_s={shot.duration_s}，视频生成时长必须在 {min_dur}~{max_dur}s 之间")
+        if shot.duration_s != fixed_duration:
+            errors.append(f"{tag}.duration_s={shot.duration_s}，视频生成时长固定为 {fixed_duration}s")
         # V8 画面清晰度：单镜只演一个连贯动作，把它写清即可（不再逼塞多个快切小镜头）。
         if len(shot.action_desc) < ACTION_DESC_HARD_MIN:
             errors.append(
@@ -317,7 +268,7 @@ def validate_storyboard(
         narration_len = len((shot.narration or "").strip())
         if narration_len > NARRATION_HARD_MAX:
             errors.append(
-                f"{tag}.narration 共 {narration_len} 字，超过硬上限 {NARRATION_HARD_MAX} 字——10s 配音念不完、读太快观感差；"
+                f"{tag}.narration 共 {narration_len} 字，超过硬上限 {NARRATION_HARD_MAX} 字——5s 配音念不完、读太快观感差；"
                 f"旁白请精简到 {NARRATION_TARGET_CHARS} 字以内（一句最关键的推进），或直接留空、改用台词与画面动作承载")
         # 口播总量必须能在视频最长时长内念完（含台词+旁白），否则配音会被截断、音画不同步。
         spoken_chars = sum(len(re.sub(r"\s+", "", d.line or "")) for d in shot.dialogues) \
@@ -325,11 +276,11 @@ def validate_storyboard(
         if spoken_chars > config.MAX_SPOKEN_CHARS_PER_SHOT:
             errors.append(
                 f"{tag} 台词+旁白共 {spoken_chars} 字，超过单镜口播上限 {config.MAX_SPOKEN_CHARS_PER_SHOT} 字"
-                f"（{config.MAX_VIDEO_DURATION_S}s 也念不完）；请新增或利用相邻镜头分担这段台词，必要时再精简非关键口水话，"
+                f"（{config.FIXED_VIDEO_DURATION_S}s 也念不完）；请新增或利用相邻镜头分担这段台词，必要时再精简非关键口水话，"
                 "不要让一镜塞下念不完的台词")
         # V4 角色合法性
         if not shot.characters:
-            errors.append(f"{tag}.characters 为空；每个 10s 视频段必须以人物和剧情为主体，至少包含 1 个角色圣经中的角色")
+            errors.append(f"{tag}.characters 为空；每个 5s 视频段必须以人物和剧情为主体，至少包含 1 个角色圣经中的角色")
         for name in shot.characters:
             if bible_names and name not in bible_names:
                 errors.append(f"{tag}.characters 含「{name}」，角色圣经中不存在。圣经角色为：{'/'.join(sorted(bible_names))}")
@@ -344,7 +295,7 @@ def validate_storyboard(
                 errors.append(
                     f"{tag}.dialogues[{j}].speaker=「{d.speaker}」不在该镜头 characters 中；"
                     "dialogues 只写人物实际开口台词，旁白请放 narration")
-        # V5：10s 视频段允许多个连续动作/小镜头，禁止回到单一低信息动作。
+        # V5：5s 视频段允许多个连续动作/小镜头，禁止回到单一低信息动作。
         if len(shot.action_desc) < 10:
             errors.append(f"{tag}.action_desc 长度 {len(shot.action_desc)} 字，要求至少 10 字")
         # 枚举值
@@ -433,7 +384,6 @@ def validate_storyboard(
     errors.extend(validate_storyboard_scenes(board, bible))
 
     return errors
-
 
 # ---------- 场景图素材库：场景标签 → 库内规范场景的归一化匹配 ----------
 
@@ -607,13 +557,6 @@ def _atomize_claim(text: str) -> list[str]:
         seen.add(key)
         atoms.append(atom)
     return atoms
-
-
-def _claim_present(atom: str, haystack: str) -> bool:
-    """一条原子 claim 是否已落进文本：主干连续保留 或 2-gram 覆盖达标，二者满足其一即算落实。"""
-    core = _strip_speaker(atom)
-    return (_longest_run_ratio(core, haystack) >= KEY_LINE_PRESENT_RATIO
-            or _bigram_coverage(core, haystack) >= KEY_POINT_COVERAGE)
 
 
 # 逐镜 covers 原子用更宽的"明显缺失"判定：covers 是模型自写的事实改写，连接词（"被…当众宣告为"）
@@ -992,7 +935,8 @@ def validate_storyboard_soundtrack(board: Storyboard, screenplay: EpisodeScreenp
     if script_sound_cues == 0:
         return errors
 
-    expected_shots = max(1, math.ceil(target_duration_s / config.FIXED_VIDEO_DURATION_S))
+    # 整集不再由 target_duration_s 推导镜头数；声轨密度按实际分镜数量判断。
+    expected_shots = max(1, len(shots))
     voiced_count = _voiced_shot_count(shots)
     min_voiced = min(len(shots), max(2, math.ceil(expected_shots * 0.75)))
     if voiced_count < min_voiced:
@@ -1128,14 +1072,8 @@ def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeS
     """
     errors: list[str] = []
     shots = outline.shots
-    min_shots, max_shots = storyboard_shot_count_range(target_duration_s)
     if not shots:
-        return [f"分镜大纲为空；目标 {target_duration_s}s 需规划 {min_shots}~{max_shots} 条镜头节拍，"
-                "请把整集剧情从头到尾铺成有序镜头列表"]
-    if not min_shots <= len(shots) <= max_shots:
-        errors.append(
-            f"大纲镜头数 {len(shots)} 不在 {min_shots}~{max_shots} 之间；"
-            "请按剧情密度在该区间内取值，并把整集剧情均匀铺满，不要前松后紧或半途收尾")
+        return ["分镜大纲为空；请按完整剧本规划连续的 5 秒镜头并从头到尾覆盖剧情"]
     actual = [s.shot_no for s in shots]
     if actual != list(range(1, len(shots) + 1)):
         errors.append(f"大纲 shot_no 必须为连续递增 1..{len(shots)}，当前为 {actual}")
@@ -1155,7 +1093,7 @@ def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeS
             if _covers_has_spoken(covers) and _covers_has_crowd(covers):
                 errors.append(
                     f"大纲第 {i + 1} 镜 covers 同时要求角色开口宣告和人群哄笑议论，两类声轨叠加易超单镜口播上限"
-                    f"（{config.MAX_SPOKEN_CHARS_PER_SHOT} 字/{config.MAX_VIDEO_DURATION_S}s 也念不完）；"
+                    f"（{config.MAX_SPOKEN_CHARS_PER_SHOT} 字/{config.FIXED_VIDEO_DURATION_S}s 也念不完）；"
                     "请拆成相邻 2 镜分担：一镜落实宣告，下一镜落实哄笑议论")
             # ③ 口播预算预检：某条关键台词若是【单个不可再按句读拆分的长句】且已超单镜口播上限，
             # 逐镜阶段拆不动（① 按标点拆需要句内有句读），必须在剧本/大纲里改写或断句，否则后段必卡死。
@@ -1201,115 +1139,10 @@ def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeS
 
 # ---------- C2 基于完整剧本的分镜校验 ----------
 
-def estimate_speech_seconds(shot) -> float:
-    """估算本镜台词 + 旁白从开场留白到念完所需秒数，用于校验 duration_s 是否够念完（音画同步）。
-    标点也占停顿时间，故按非空白字符计；并计入开场留白 SPEECH_LEAD_IN_S。返回 0 表示本镜无声轨。"""
-    parts = [(d.line or "").strip() for d in shot.dialogues]
-    narration = (shot.narration or "").strip()
-    if narration:
-        parts.append(narration)
-    chars = sum(len(re.sub(r"\s+", "", p)) for p in parts if p)
-    if chars <= 0:
-        return 0.0
-    return config.SPEECH_LEAD_IN_S + chars / config.SPEECH_CHARS_PER_SECOND + config.SPEECH_TAIL_BUFFER_S
-
-
-def normalize_durations_for_speech(board: Storyboard) -> None:
-    """确定性时长归一：把每镜 duration_s 抬到至少能念完本镜台词/旁白的长度，再 clamp 到 [MIN,MAX]。
-
-    动作密度给出的时长只是兜底下限；台词较长的镜头若沿用"动作简单=短时长"会让视频动作先于台词结束，
-    造成音画不同步（台词没说完人就做完动作）。与 normalize_continuity 同理由代码强制覆盖，不依赖模型自觉。
-    台词超过 MAX 秒数才念得完的镜头无法再加长（Seedance 上限），保持 MAX 并由 prompt 侧约束单镜台词不要过长。"""
-    min_dur = config.MIN_VIDEO_DURATION_S
+def normalize_fixed_durations(board: Storyboard) -> None:
+    """Seedance 视频段统一固定为 5 秒；更长内容必须拆镜。"""
     for shot in board.shots:
-        floor = enforced_min_duration(board, shot)
-        shot.duration_s = max(int(shot.duration_s or min_dur), floor)
-
-
-def compact_durations_to_budget(board: Storyboard, target_duration_s: int, *,
-                                desired_total_s: int | None = None) -> dict:
-    """只压缩 duration_s，不改内容。
-
-    每镜最多压到 enforced_min_duration（口播能念完 + 开场镜保底），优先压缩冗余最多的长镜。
-    desired_total_s 用于人工/按钮希望尽量回到目标；不传则只保证不超过硬上限。
-    """
-    limit = storyboard_duration_limit(target_duration_s, board)
-    total_before = sum(int(s.duration_s or 0) for s in board.shots)
-    target_total = min(desired_total_s or limit, limit)
-    target_total = max(target_total, sum(enforced_min_duration(board, s) for s in board.shots))
-    changes: list[dict] = []
-
-    while sum(int(s.duration_s or 0) for s in board.shots) > target_total:
-        candidates = []
-        for i, shot in enumerate(board.shots):
-            floor = enforced_min_duration(board, shot)
-            slack = int(shot.duration_s or 0) - floor
-            if slack > 0:
-                candidates.append((slack, int(shot.duration_s or 0), i, floor))
-        if not candidates:
-            break
-        _, _, idx, floor = max(candidates)
-        shot = board.shots[idx]
-        before = int(shot.duration_s or 0)
-        need = sum(int(s.duration_s or 0) for s in board.shots) - target_total
-        after = max(floor, before - need)
-        shot.duration_s = after
-        changes.append({"shot_no": shot.shot_no, "before": before, "after": after})
-
-    return {
-        "total_before": total_before,
-        "total_after": sum(int(s.duration_s or 0) for s in board.shots),
-        "target_total": target_total,
-        "limit": limit,
-        "changes": changes,
-    }
-
-
-def compress_durations_within_floors(board: Storyboard, target_total_s: int,
-                                     floors: dict[int, int]) -> bool:
-    """把整集总时长压到 target_total_s 以内：每镜不得低于 floors[shot_no]（缺省视作可压到 0），
-    每轮挑冗余（当前时长 - 下限）最多的镜削减。返回是否压到了 ≤ target_total_s。
-
-    floors 传「口播/开场保底」即硬压缩（一定能达成，因上限 ≥ 保底之和）；传「保底与不超 20% 的较大者」
-    即限幅压缩（达不成时返回 False，交由调用方再退到硬压缩）。只改 duration_s，不改内容。"""
-    def _total() -> int:
-        return sum(int(s.duration_s or 0) for s in board.shots)
-
-    while _total() > target_total_s:
-        candidates = [(int(s.duration_s or 0) - floors.get(s.shot_no, 0), i)
-                      for i, s in enumerate(board.shots)
-                      if int(s.duration_s or 0) > floors.get(s.shot_no, 0)]
-        if not candidates:
-            return False
-        _, idx = max(candidates)
-        shot = board.shots[idx]
-        need = _total() - target_total_s
-        shot.duration_s = max(floors.get(shot.shot_no, 0), int(shot.duration_s or 0) - need)
-    return True
-
-
-def _is_episode_opening_shot(board: Storyboard, shot) -> bool:
-    """是否为全片开场镜：第一集（episode_no==1）的第一镜（shot_no==1）。"""
-    return int(getattr(board, "episode_no", 0) or 0) == 1 and int(getattr(shot, "shot_no", 0) or 0) == 1
-
-
-def enforced_min_duration(board: Storyboard, shot) -> int:
-    """本镜由代码强制保证的最小时长：取「配音念完所需」与「开场建场镜固定长时长」的较大者，clamp 到 [MIN,MAX]。
-    校验总时长上限与归一时长共用此口径，避免确定性覆盖把合法分镜误判超时退回。"""
-    need = math.ceil(estimate_speech_seconds(shot))
-    if _is_episode_opening_shot(board, shot):
-        need = max(need, config.ESTABLISHING_SHOT_DURATION_S)
-    return max(config.MIN_VIDEO_DURATION_S, min(config.MAX_VIDEO_DURATION_S, need))
-
-
-def normalize_episode_opening_shot(board: Storyboard) -> None:
-    """第一集第一镜=全片开场建场镜的出片侧确定性覆盖：拉长时长 + 强制远景建场 + 缓慢推近运镜。
-    与 normalize_continuity 同理由代码强制（不依赖模型自觉），保证开场镜稳定地"先立背景"。"""
-    for shot in board.shots:
-        if _is_episode_opening_shot(board, shot):
-            shot.duration_s = enforced_min_duration(board, shot)
-            shot.shot_size = config.ESTABLISHING_SHOT_SIZE
-            shot.camera_move = config.ESTABLISHING_CAMERA_MOVE
+        shot.duration_s = config.FIXED_VIDEO_DURATION_S
 
 
 def normalize_continuity(board: Storyboard) -> None:
@@ -1491,88 +1324,4 @@ def validate_scene_bible(scenes: list) -> list[str]:
         canonical = getattr(s, "scene_canonical", "") or ""
         if not 30 <= len(canonical) <= 80:
             errors.append(f"scenes[{i}]({names[i] or '?'}).scene_canonical 长度 {len(canonical)} 字，要求 30~80 字")
-    return errors
-
-
-def _snap_duration(value: int) -> int:
-    """把目标时长吸附到 [MIN, MAX] 内、STEP 的整数倍（40/50/60/70/80/90）。"""
-    step = config.EPISODE_TARGET_STEP_S
-    lo, hi = config.EPISODE_TARGET_MIN_S, config.EPISODE_TARGET_MAX_S
-    try:
-        v = int(value)
-    except (TypeError, ValueError):
-        v = config.EPISODE_TARGET_DEFAULT_S
-    v = min(max(v, lo), hi)
-    v = round(v / step) * step
-    return min(max(v, lo), hi)
-
-
-def normalize_plan_chapters(plan_episodes: list, *, start_episode_no: int = 1,
-                            start_chapter: int = 1, chapter_count: int = 1) -> None:
-    """生产级兜底：用确定性代码强制 episode_no / source_chapters / target_duration_s 满足不变量，
-    而不是把“章节区间记账”这种 LLM 不擅长的活儿丢给模型反复重试。
-    创意内容（标题/钩子/梗概）仍由模型负责；本函数只就地修正结构字段，原地修改 plan_episodes。
-    规则：episode_no 连续；首集从 start_chapter 起；其后每集 [lo,hi] 连续、不倒退、不跳章、不越界，
-    允许同一章被连续多集共同覆盖。"""
-    prev_start = start_chapter
-    prev_end = start_chapter - 1
-    for i, ep in enumerate(plan_episodes):
-        ep.episode_no = start_episode_no + i
-        ep.target_duration_s = _snap_duration(getattr(ep, "target_duration_s", config.EPISODE_TARGET_DEFAULT_S))
-        chs = [c for c in (ep.source_chapters or []) if isinstance(c, int)]
-        lo = min(chs) if chs else (start_chapter if i == 0 else prev_end)
-        hi = max(chs) if chs else lo
-        if i == 0:
-            lo = start_chapter
-        else:
-            lo = min(max(lo, prev_start), prev_end + 1)   # 不早于上集起点、不跳章
-        hi = min(max(hi, lo, prev_end), chapter_count)    # 不早于上集终点、不越界、≥lo
-        lo = min(lo, chapter_count)
-        ep.source_chapters = list(range(lo, hi + 1))
-        prev_start, prev_end = lo, hi
-
-
-def validate_plan(plan_episodes: list, chapter_count: int,
-                  *, start_episode_no: int = 1, start_chapter: int = 1) -> list[str]:
-    """校验一批剧集。批内 episode_no 从 start_episode_no 连续递增，第一集须从 start_chapter 起，
-    章节只能向前推进（不倒退、不跳章），不越界。
-    允许同一章被连续多集共同覆盖——章节内容多时一章可拆成 2~3 集，是合理结构，
-    不能因“章节数 < 想要的集数”就逼模型必须每章独占一集（那会导致无法满足、无限重试）。"""
-    errors = []
-    if not plan_episodes:
-        return ["本批未规划出任何剧集"]
-    prev_start = start_chapter      # 上一集的起始章（用于判断是否倒退）
-    prev_end = start_chapter - 1    # 已推进到的最后一章
-    for i, ep in enumerate(plan_episodes):
-        if ep.episode_no != start_episode_no + i:
-            errors.append(f"episodes[{i}].episode_no={ep.episode_no}，本批要求从 {start_episode_no} 起连续递增")
-        chs = ep.source_chapters
-        if not chs:
-            errors.append(f"episodes[{i}].source_chapters 为空")
-            continue
-        if chs != list(range(chs[0], chs[-1] + 1)):
-            errors.append(f"episodes[{i}].source_chapters={chs} 必须是连续区间")
-        if i == 0:
-            if chs[0] != start_chapter:
-                errors.append(f"本批第一集 source_chapters 必须从第 {start_chapter} 章开始，当前为第 {chs[0]} 章")
-        else:
-            # 允许：续讲同一章（chs[0]==prev_end，把一章拆成多集）或顺接下一章（chs[0]==prev_end+1）。
-            if chs[0] < prev_start:
-                errors.append(f"episodes[{i}].source_chapters 起点第{chs[0]}章早于上一集起点第{prev_start}章，集间剧情不允许倒退")
-            elif chs[0] > prev_end + 1:
-                errors.append(f"episodes[{i}].source_chapters 跳过了第{prev_end + 1}~{chs[0] - 1}章，集间不允许跳章")
-            elif chs[-1] < prev_end:
-                errors.append(f"episodes[{i}].source_chapters 止于第{chs[-1]}章，早于上一集的第{prev_end}章，集间剧情不允许倒退")
-        if chs[-1] > chapter_count:
-            errors.append(f"episodes[{i}].source_chapters 引用第{chs[-1]}章，但全书只有 {chapter_count} 章")
-        prev_start = chs[0]
-        prev_end = max(prev_end, chs[-1])
-        if not config.EPISODE_TARGET_MIN_S <= ep.target_duration_s <= config.EPISODE_TARGET_MAX_S:
-            errors.append(
-                f"episodes[{i}].target_duration_s={ep.target_duration_s}，"
-                f"要求 {config.EPISODE_TARGET_MIN_S}~{config.EPISODE_TARGET_MAX_S}")
-        elif ep.target_duration_s % config.EPISODE_TARGET_STEP_S != 0:
-            errors.append(
-                f"episodes[{i}].target_duration_s={ep.target_duration_s}，"
-                f"集目标时长需按 {config.EPISODE_TARGET_STEP_S}s 步进取值")
     return errors

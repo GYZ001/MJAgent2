@@ -2,6 +2,9 @@ import { type CSSProperties, useCallback, useEffect, useState } from 'react'
 import { api, AutoStatus, Bible, BrowseResult, Character, Portrait } from '../api'
 import { useNav, useProject, usePoll } from '../App'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
+import SearchField from '../components/SearchField'
+import EvidenceDrawer from '../components/harness/EvidenceDrawer'
+import ImpactDialog, { ImpactSummary } from '../components/harness/ImpactDialog'
 
 const CHAR_PAGE_SIZE = 6  // 人物谱每页展示的角色卡数
 
@@ -14,6 +17,7 @@ export default function BiblePage() {
   const [busy, setBusy] = useState(false)
   const [charSearch, setCharSearch] = useState('')
   const [charPage, setCharPage] = useState(0)
+  const [impactOpen, setImpactOpen] = useState(false)
   const bibleTimer = useTaskTimer(`project.${projectId}.bible`, p?.bible_status === 'running')
   const refsTimer = useTaskTimer(`project.${projectId}.refs`, p?.refs_status === 'running')
 
@@ -67,6 +71,19 @@ export default function BiblePage() {
     }
   }
 
+  const saveBible = async () => {
+    if (!editing) return
+    await act(async () => {
+      const r = await api.put(`/projects/${p.id}/bible`, editing) as {
+        style_changed?: boolean; purged?: { versions: number } | null; impact?: ImpactSummary
+      }
+      setEditing(null)
+      toast(r.style_changed
+        ? `画风已变更：旧画风定妆照与已生成视频（${r.purged?.versions ?? 0} 个版本）已全部作废，请重新生成定妆照后再生成视频`
+        : `人物谱已定稿；${r.impact?.stale_descendant_ids?.length ?? 0} 个下游证据已标记失效`)
+    })
+  }
+
   return (
     <>
       <header className="desk-head">
@@ -91,6 +108,7 @@ export default function BiblePage() {
           {p.bible_status === 'running' && <span className="stamp gold">谱写中（约 1~3 分钟）</span>}
           {p.refs_status === 'running' && <span className="stamp gold">定妆中</span>}
           {p.bible && <span className="stamp green">第 {`${p.bible_version ?? ''}`} 稿</span>}
+          {p.bible_evidence && <EvidenceDrawer evidence={p.bible_evidence} label="人物谱证据" />}
           <TaskTimer label="人物谱" timer={bibleTimer} />
           <TaskTimer label="定妆照" timer={refsTimer} />
         </div>
@@ -100,6 +118,7 @@ export default function BiblePage() {
           </div>
         )}
         {p.bible_status === 'failed' && <div className="error-banner">人物谱生成失败（原始错误如下，不做静默兜底）：{'\n'}{p.bible_error}</div>}
+        {p.bible_status === 'warning' && <div className="error-banner">人物谱存在未解决的门禁问题，下游已暂停：{'\n'}{p.bible_error}</div>}
       </section>
 
       <AutoCard projectId={p.id} auto={auto} busy={busy}
@@ -124,13 +143,7 @@ export default function BiblePage() {
               ? <button className="btn small" style={{ marginLeft: 14 }} onClick={() => setEditing(JSON.parse(JSON.stringify(p.bible)))}>修订</button>
               : <>
                 <button className="btn small primary" style={{ marginLeft: 14 }} disabled={busy}
-                  onClick={() => act(async () => {
-                    const r = await api.put(`/projects/${p.id}/bible`, editing) as { style_changed?: boolean; purged?: { versions: number } | null }
-                    setEditing(null)
-                    toast(r.style_changed
-                      ? `画风已变更：旧画风定妆照与已生成视频（${r.purged?.versions ?? 0} 个版本）已全部作废，请重新生成定妆照后再生成视频`
-                      : '人物谱已定稿，版本 +1')
-                  })}>定稿</button>
+                  onClick={() => setImpactOpen(true)}>定稿</button>
                 <button className="btn small ghost" style={{ marginLeft: 8 }} onClick={() => setEditing(null)}>放弃</button>
               </>}
           </h3>
@@ -149,10 +162,8 @@ export default function BiblePage() {
           </div>
           {p.refs_status === 'failed' && <div className="error-banner">定妆照生成失败：{'\n'}{p.refs_error}</div>}
           <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', margin: '4px 0 12px' }}>
-            <input type="text" value={charSearch}
-              onChange={e => { setCharSearch(e.target.value); setCharPage(0) }}
-              placeholder="搜索角色名…"
-              style={{ flex: '0 1 240px', fontSize: 13, padding: '6px 10px' }} />
+            <SearchField value={charSearch} onChange={value => { setCharSearch(value); setCharPage(0) }}
+              placeholder="搜索角色名…" ariaLabel="搜索角色" className="library-search" />
             <span style={{ fontSize: 12.5, color: 'var(--ink-faint)' }}>
               共 {bible.characters.length} 个角色{charQuery ? ` · 命中 ${filteredChars.length}` : ''}
             </span>
@@ -213,6 +224,13 @@ export default function BiblePage() {
           </ol>
         </section>
       )}
+      <ImpactDialog
+        open={impactOpen}
+        title="定稿人物谱并传播影响"
+        impact={{ requires_reconfirm: true, paid_media_invalidated: true }}
+        onClose={() => setImpactOpen(false)}
+        onConfirm={() => { setImpactOpen(false); void saveBible() }}
+      />
     </>
   )
 }

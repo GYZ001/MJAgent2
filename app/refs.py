@@ -12,7 +12,8 @@ import re
 from pathlib import Path
 
 from app import config, hiagent
-from app.db import get_conn
+from app.db import get_conn, new_id
+from app.evidence.media import record_reference_asset
 from app.schemas import Bible
 
 
@@ -27,9 +28,49 @@ def ref_path(project_id: str, character_name: str) -> str:
 
 
 def portrait_prompt(visual_style: str, anchor: str) -> str:
+    spectral_tokens = ("透明", "半透明", "虚影", "魂体", "灵魂", "幽灵", "悬浮", "漂浮", "人影")
+    is_spectral = any(token in anchor for token in spectral_tokens)
+    if is_spectral:
+        refinements: list[str] = [
+            "这是超自然角色概念设定图，不要套用普通人的站立证件照姿态",
+            "锚点指定的非实体形态、悬浮关系和神态优先级最高",
+        ]
+        if any(token in anchor for token in ("透明", "半透明", "虚影", "魂体", "灵魂", "幽灵", "人影")):
+            refinements.append("身体必须明显半透明，背景能透过身体看见，禁止实体皮肤质感")
+        if any(token in anchor for token in ("悬浮", "漂浮")):
+            refinements.append("双脚离地，明确表现悬浮，禁止站在地面")
+        if "戒指" in anchor:
+            refinements.append("戒指完整清晰地置于画面底部中央，角色垂直悬浮在戒指正上方")
+        if "戏谑" in anchor:
+            refinements.append("嘴角微扬、眼神狡黠，明确表现戏谑，禁止严肃皱眉或中性表情")
+        return (
+            f"{visual_style}。单角色全身概念定妆设定图：{anchor}。"
+            + "；".join(refinements)
+            + "。纯浅米色背景，全身与关联道具完整可见。"
+              "仅保留锚点明确要求的特效，禁止额外火焰、斗气光环、文字、水印和 logo"
+        )
     return (
         f"{visual_style}。全身角色立绘定妆照：{anchor}。"
-        "正面站立，中性表情，双臂自然下垂，纯浅米色背景，全身完整可见，无文字无水印"
+        "正面站立，中性表情，双臂自然下垂，纯浅米色背景，全身完整可见。"
+        "仅保留锚点明确要求的特效，禁止额外火焰、斗气光环、文字、水印和 logo"
+    )
+
+
+def _merge_generated_portraits(conn, project_id: str, characters) -> None:
+    """Merge accepted portrait paths into the latest concurrent Bible snapshot."""
+    accepted = {item.name: item.ref_image_path for item in characters if item.ref_image_path}
+    if not accepted:
+        return
+    row = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
+    if not row or not row["bible_json"]:
+        return
+    latest = json.loads(row["bible_json"])
+    for item in latest.get("characters", []):
+        if item.get("name") in accepted:
+            item["ref_image_path"] = accepted[item["name"]]
+    conn.execute(
+        "UPDATE projects SET bible_json=? WHERE id=?",
+        (json.dumps(latest, ensure_ascii=False), project_id),
     )
 
 
@@ -53,41 +94,80 @@ async def generate_refs(project_id: str, only_character: str | None = None) -> N
     errors: list[str] = []
     for c in targets:
         try:
-            path = ref_path(project_id, c.name)
-            # 重做前先删掉旧定妆照文件，确保不会残留上一版人物图
-            try:
-                Path(path).unlink()
-            except OSError:
-                pass
             c.ref_image_path = None
-            prompt = (c.portrait_prompt_override or "").strip() or portrait_prompt(style, c.appearance_canonical)
-            item = await hiagent.generate_image(
-                prompt,
-                size=config.REF_IMAGE_SIZE,
-                call_meta={
-                    "asset_kind": "portrait",
-                    "character_name": c.name,
-                    "episode_no": 1,
-                    "portrait_mode": "initial",
-                })
-            if item.get("url"):
-                await hiagent.download(item["url"], path)
-            elif item.get("b64_json"):
-                import base64
-                with open(path, "wb") as f:
-                    f.write(base64.b64decode(item["b64_json"]))
-            else:
-                raise hiagent.ProviderError(f"图像响应缺少 url/b64_json：{list(item.keys())}")
-            c.ref_image_path = path
-            _portraits.register_initial_portrait(
-                conn, project_id, c.name, path, c.appearance_canonical, prompt, bible_version)
+            from app.stages import review_portrait_image
+            base_prompt = ((c.portrait_prompt_override or "").strip()
+                           or portrait_prompt(style, c.appearance_canonical))
+            last_error: Exception | None = None
+            critique = ""
+            for attempt in range(1, 3):
+                path = str(Path(ref_path(project_id, c.name)).with_name(
+                    f"{_safe_name(c.name)}__{new_id('candidate')}.jpg"
+                ))
+                prompt = base_prompt
+                if critique:
+                    prompt += f"。上一版一致性检查问题：{critique}。本版必须逐条修复。"
+                try:
+                    item = await hiagent.generate_image(
+                        prompt,
+                        size=config.REF_IMAGE_SIZE,
+                        call_meta={
+                            "asset_kind": "portrait",
+                            "character_name": c.name,
+                            "episode_no": 1,
+                            "portrait_mode": "initial",
+                            "attempt": attempt,
+                        })
+                    if item.get("url"):
+                        await hiagent.download(item["url"], path)
+                    elif item.get("b64_json"):
+                        import base64
+                        with open(path, "wb") as f:
+                            f.write(base64.b64decode(item["b64_json"]))
+                    else:
+                        raise hiagent.ProviderError(f"图像响应缺少 url/b64_json：{list(item.keys())}")
+                    qa = await review_portrait_image(
+                        hiagent.encode_image_file(path), c.appearance_canonical,
+                    )
+                    artifact = record_reference_asset(
+                        asset_type="character_portrait",
+                        scope_id=f"{project_id}:{c.name}:1",
+                        file_path=path,
+                        content={
+                            "character_name": c.name,
+                            "appearance": c.appearance_canonical,
+                            "prompt": prompt,
+                            "attempt": attempt,
+                        },
+                        parent_artifact_ids=(
+                            [project["bible_artifact_id"]] if project["bible_artifact_id"] else []
+                        ),
+                        qa=qa,
+                    )
+                    if artifact["status"] != "approved":
+                        critique = "；".join(str(item) for item in (qa.get("issues") or []))[:400]
+                        last_error = hiagent.ProviderError(
+                            f"定妆照一致性检查未通过：{c.name}（第 {attempt} 次）"
+                        )
+                        continue
+                    c.ref_image_path = path
+                    _portraits.register_initial_portrait(
+                        conn, project_id, c.name, path, c.appearance_canonical, prompt,
+                        bible_version, artifact_id=artifact["id"])
+                    break
+                except Exception as exc:  # noqa: BLE001 候选失败后在有界循环内修复
+                    last_error = exc
+            if not c.ref_image_path:
+                raise last_error or hiagent.ProviderError(f"定妆照生成失败：{c.name}")
         except Exception as exc:  # noqa: BLE001 失败要响：逐角色记录，最后汇总抛出
             errors.append(f"{c.name}：{exc}")
 
-    conn.execute("UPDATE projects SET bible_json=? WHERE id=?", (bible.model_dump_json(), project_id))
+    # Scene Bible generation runs in parallel with portraits.  Merge only the
+    # fields owned by this task so its old snapshot cannot erase newly added scenes.
+    _merge_generated_portraits(conn, project_id, targets)
     conn.commit()
     if errors:
-        raise RuntimeError("部分定妆照失败：" + "；".join(errors)[:600])
+        raise hiagent.ProviderError("部分定妆照失败：" + "；".join(errors)[:600])
 
 
 def refs_as_image_inputs(bible: Bible, character_names: list[str], limit: int,

@@ -1,10 +1,27 @@
-import { Fragment, useState } from 'react'
+import { Fragment, useMemo, useState } from 'react'
 import { api } from '../api'
 import { useNav, usePoll } from '../App'
+import RunCenter from '../components/harness/RunCenter'
+import SearchField from '../components/SearchField'
 
 interface JobsView {
   counts: Record<string, number>
-  recent: { id: string; kind?: string; status: string; error?: string; shot_no?: number; episode_no?: number; episode_title?: string; project_name?: string; updated_at: number }[]
+  recent: {
+    id: string
+    source?: 'run' | 'job' | 'screenplay'
+    kind?: string
+    workflow_type?: string
+    scope_type?: string
+    scope_id?: string
+    status: string
+    raw_status?: string
+    error?: string
+    shot_no?: number
+    episode_no?: number
+    episode_title?: string
+    project_name?: string
+    updated_at: number
+  }[]
 }
 interface Call {
   id: number
@@ -20,7 +37,7 @@ interface Call {
   response_json?: string
 }
 
-type ProviderKey = 'hiagent' | 'openrouter' | 'bailian' | 'deepseek' | 'zhipu'
+type ProviderKey = string
 type ModelKind = 'text' | 'vlm' | 'video' | 'image'
 interface ModelOption { provider: ProviderKey; model: string; available: boolean }
 interface ModelSelection {
@@ -40,6 +57,18 @@ interface Health {
 }
 
 interface ModelChoice { label: string; value: string }
+interface CatalogModel {
+  id: string
+  provider: ProviderKey
+  model: string
+  label: string
+  kinds: ModelKind[]
+  builtin: boolean
+  provider_label?: string
+  base_url?: string
+  key_configured?: boolean
+}
+interface ModelCatalog { items: CatalogModel[] }
 
 const PROVIDERS: { key: ProviderKey; label: string }[] = [
   { key: 'hiagent', label: '火山' },
@@ -119,6 +148,7 @@ function modelProviderSettingKey(kind: ModelKind) {
 }
 
 function modelSettingKey(kind: ModelKind, provider: ProviderKey) {
+  if (provider.startsWith('custom:')) return ''
   if (provider === 'bailian') {
     if (kind === 'text') return 'bailian_model_text'
     if (kind === 'vlm') return 'bailian_model_vlm'
@@ -157,7 +187,7 @@ function fallbackSelection(kind: ModelKind, health?: Health | null): ModelSelect
   }
 }
 
-function modelChoices(kind: ModelKind, provider: ProviderKey, currentModel: string): ModelChoice[] {
+function modelChoices(kind: ModelKind, provider: ProviderKey, currentModel: string, catalog: CatalogModel[] = []): ModelChoice[] {
   let choices: ModelChoice[] = []
   if (provider === 'openrouter' && (kind === 'text' || kind === 'vlm')) {
     choices = [...OPENROUTER_MODEL_CHOICES[kind]]
@@ -169,6 +199,11 @@ function modelChoices(kind: ModelKind, provider: ProviderKey, currentModel: stri
     choices = [...ZHIPU_MODEL_CHOICES.text]
   } else if (provider === 'hiagent') {
     choices = [...HIAGENT_MODEL_CHOICES[kind]]
+  }
+  for (const item of catalog) {
+    if (item.provider === provider && item.kinds.includes(kind) && !choices.some(choice => choice.value === item.model)) {
+      choices.push({ label: item.label, value: item.model })
+    }
   }
   // 当前配置的模型如果不在列表中，补充进去（兼容历史值）
   if (currentModel && !isDisallowedModel(kind, provider, currentModel) && !choices.some(choice => choice.value === currentModel)) {
@@ -259,6 +294,7 @@ const CALL_KIND_LABELS: Record<string, string> = {
   storyboard_prompt: '整集分镜提示词',
   storyboard_shot_prompt: '逐镜分镜提示词',
   storyboard_outline_prompt: '分镜大纲提示词',
+  storyboard_plan_revised: '分镜计划修订',
   screenplay_prompt: '剧本提示词',
   plan_prompt: '分集提示词',
   bible_prompt: '人物谱提示词',
@@ -304,6 +340,7 @@ const CALL_STATUS_LABELS: Record<string, string> = {
   REPAIR_STALLED: '修复停滞',
   FALLBACK_LAST_OUTPUT: '采用最后输出',
   COVERS_SPLIT: '大纲自动拆分',
+  PLAN_REVISED: '分镜计划修订',
   COVERS_DOWNGRADED: '圣经外台词转旁白',
   PROMPT_READY: '提示词已生成',
   REFERENCE_ATTEMPT_FAILED: '参考图首轮失败',
@@ -416,6 +453,8 @@ function callFunctionLabel(call: Call) {
       return scope ? `${scope}分镜` : '分镜'
     case 'storyboard_outline_split':
       return scope ? `${scope}分镜拆分` : '分镜拆分'
+    case 'storyboard_plan_revised':
+      return episodeNo !== undefined ? `第${episodeNo}集分镜计划修订` : '分镜计划修订'
     case 'storyboard_outline_downgrade':
       return scope ? `${scope}大纲降级` : '大纲降级'
     case 'plan_prompt':
@@ -470,57 +509,217 @@ function callStatusColor(status: string) {
   return 'gold'
 }
 
-interface KeyInfo { configured: boolean; preview: string; label: string; key_name: string }
-type KeyStatus = Record<ProviderKey, KeyInfo>
+const JOB_STATUS_LABELS: Record<string, string> = {
+  queued: '排队中', running: '运行中', waiting_retry: '等待重试', waiting_human: '等待人工确认',
+  succeeded: '已完成', partial: '部分完成', failed: '失败', paused_budget: '预算暂停',
+  paused_external: '外部中断', cancelled: '已取消',
+}
 
-const KEY_PROVIDERS: { key: ProviderKey; label: string; placeholder: string }[] = [
-  { key: 'hiagent', label: '火山引擎（HiAgent）', placeholder: '填写火山引擎 API Key' },
-  { key: 'openrouter', label: 'OpenRouter', placeholder: 'sk-or-v1-...' },
-  { key: 'bailian', label: '百炼（阿里云 DashScope）', placeholder: 'sk-...' },
-  { key: 'deepseek', label: 'DeepSeek', placeholder: 'sk-...' },
-  { key: 'zhipu', label: '智谱（官方 API）', placeholder: '填写智谱 API Key' },
+function jobStatusLabel(status: string) {
+  return JOB_STATUS_LABELS[status] ?? status
+}
+
+const WORKFLOW_LABELS: Record<string, string> = {
+  auto_project: '全自动制作', character_bible: '人物谱', character_references: '人物定妆照',
+  scene_bible: '场景圣经', scene_references: '场景参考图', episode_mapping: '分集映射',
+  screenplay: '剧本', storyboard: '分镜', scene_generation: '关键帧生成',
+  video_generation: '视频生成', delivery: '交付',
+}
+
+function jobWorkLabel(job: JobsView['recent'][number]) {
+  const kind = job.workflow_type || job.kind || '任务'
+  const label = WORKFLOW_LABELS[kind] || kind
+  if (job.episode_no != null && job.shot_no != null) return `第${job.episode_no}集 · 镜${job.shot_no} · ${label}`
+  if (job.episode_no != null) return `第${job.episode_no}集 · ${label}`
+  return label
+}
+
+function jobStampClass(status: string) {
+  if (status === 'succeeded') return 'green'
+  if (['failed', 'partial', 'paused_budget', 'paused_external'].includes(status)) return 'red'
+  if (['running', 'queued', 'waiting_retry', 'waiting_human'].includes(status)) return 'gold'
+  return 'grey'
+}
+
+type MonitorSection = 'overview' | 'runs' | 'jobs' | 'models' | 'calls' | 'settings'
+
+const MONITOR_SECTIONS: { key: MonitorSection; label: string; description: string }[] = [
+  { key: 'overview', label: '总览', description: '关键状态与异常' },
+  { key: 'runs', label: '运行中心', description: '步骤与人工门禁' },
+  { key: 'jobs', label: '任务队列', description: '生成任务与失败' },
+  { key: 'models', label: '模型中心', description: '模型分配与连接' },
+  { key: 'calls', label: '调用日志', description: '请求、响应与耗时' },
+  { key: 'settings', label: '系统设置', description: '并发、预算与保留期' },
 ]
+
+function Pagination({
+  page,
+  pageSize,
+  total,
+  onPageChange,
+  onPageSizeChange,
+}: {
+  page: number
+  pageSize: number
+  total: number
+  onPageChange: (page: number) => void
+  onPageSizeChange: (pageSize: number) => void
+}) {
+  const pageCount = Math.max(1, Math.ceil(total / pageSize))
+  const currentPage = Math.min(page, pageCount)
+  const start = total ? (currentPage - 1) * pageSize + 1 : 0
+  const end = Math.min(currentPage * pageSize, total)
+  return (
+    <div className="monitor-pagination" aria-label="分页">
+      <span>显示 {start}–{end} / 共 {total} 条</span>
+      <label>
+        每页
+        <select value={pageSize} onChange={e => onPageSizeChange(Number(e.target.value))}>
+          {[10, 20, 40, 80].map(size => <option value={size} key={size}>{size}</option>)}
+        </select>
+      </label>
+      <button type="button" disabled={currentPage <= 1} onClick={() => onPageChange(currentPage - 1)}>上一页</button>
+      <b>{currentPage} / {pageCount}</b>
+      <button type="button" disabled={currentPage >= pageCount} onClick={() => onPageChange(currentPage + 1)}>下一页</button>
+    </div>
+  )
+}
 
 export default function MonitorPage() {
   const { toast } = useNav()
   const { data: jobs } = usePoll<JobsView>(() => api.get('/system/jobs'), 4000)
-  const { data: calls } = usePoll<Call[]>(() => api.get('/system/calls?limit=40'), 6000)
+  const { data: calls } = usePoll<Call[]>(() => api.get('/system/calls?limit=200'), 6000)
   const { data: settings, refresh: refreshSettings } = usePoll<Record<string, string>>(() => api.get('/settings'), 0)
   const { data: health, refresh: refreshHealth } = usePoll<Health>(() => api.get('/system/health'), 0)
-  const { data: keyStatus, refresh: refreshKeys } = usePoll<KeyStatus>(() => api.get('/keys'), 0)
+  const { data: modelCatalog, refresh: refreshModelCatalog } = usePoll<ModelCatalog>(() => api.get('/models'), 0)
   const [draft, setDraft] = useState<Record<string, string>>({})
   const [modelDraft, setModelDraft] = useState<Record<string, string>>({})
-  const [keyDraft, setKeyDraft] = useState<Record<string, string>>({})
-  const [savingKeys, setSavingKeys] = useState(false)
   const [expandedCallId, setExpandedCallId] = useState<number | null>(null)
+  const [showAddModel, setShowAddModel] = useState(false)
+  const [showModelLibrary, setShowModelLibrary] = useState(false)
+  const [libraryMessage, setLibraryMessage] = useState('')
+  const [addingModel, setAddingModel] = useState(false)
+  const [editingModel, setEditingModel] = useState<CatalogModel | null>(null)
+  const [connectionTest, setConnectionTest] = useState<{ status: 'idle' | 'testing' | 'ok' | 'error'; message: string; signature?: string }>({ status: 'idle', message: '' })
+  const [newModel, setNewModel] = useState<{ label: string; model: string; provider: ProviderKey; provider_label: string; base_url: string; api_key: string; kinds: ModelKind[] }>({
+    label: '', model: '', provider: 'custom', provider_label: '', base_url: '', api_key: '', kinds: ['text'],
+  })
+  const [credentialModel, setCredentialModel] = useState<CatalogModel | null>(null)
+  const [credentialDraft, setCredentialDraft] = useState({ base_url: '', api_key: '' })
+  const [credentialTest, setCredentialTest] = useState<{ status: 'idle' | 'testing' | 'ok' | 'error'; message: string; signature?: string }>({ status: 'idle', message: '' })
+  const [activeSection, setActiveSection] = useState<MonitorSection>('overview')
+  const [jobSearch, setJobSearch] = useState('')
+  const [jobStatus, setJobStatus] = useState('all')
+  const [jobPage, setJobPage] = useState(1)
+  const [jobPageSize, setJobPageSize] = useState(20)
+  const [callSearch, setCallSearch] = useState('')
+  const [callStatus, setCallStatus] = useState('all')
+  const [callPage, setCallPage] = useState(1)
+  const [callPageSize, setCallPageSize] = useState(20)
 
   const refreshModelState = () => {
     refreshSettings()
     refreshHealth()
-    refreshKeys()
+    refreshModelCatalog()
   }
 
-  const saveKeys = async () => {
-    const payload: Record<string, string> = {}
-    for (const p of KEY_PROVIDERS) {
-      const v = (keyDraft[p.key] || '').trim()
-      if (v) payload[p.key] = v
+  const toggleNewModelKind = (kind: ModelKind) => {
+    setConnectionTest({ status: 'idle', message: '' })
+    setNewModel(prev => ({
+      ...prev,
+      kinds: prev.kinds.includes(kind) ? prev.kinds.filter(k => k !== kind) : [...prev.kinds, kind],
+    }))
+  }
+
+  const modelDraftSignature = () => JSON.stringify({
+    model: newModel.model.trim(), base_url: newModel.base_url.trim().replace(/\/$/, ''), api_key: newModel.api_key,
+  })
+
+  const testNewModel = async () => {
+    setConnectionTest({ status: 'testing', message: '正在连接模型…' })
+    try {
+      const result = editingModel
+        ? await api.post(`/models/${encodeURIComponent(editingModel.id)}/test`, newModel)
+        : await api.post('/models/test', newModel)
+      setConnectionTest({ status: 'ok', message: `${result.preview || '连接成功'} · ${result.latency_ms} ms`, signature: modelDraftSignature() })
+    } catch (e: unknown) {
+      setConnectionTest({ status: 'error', message: (e as Error).message })
     }
-    if (!Object.keys(payload).length) {
-      toast('请至少填写一个 Key')
+  }
+
+  const editModel = (item: CatalogModel) => {
+    setShowModelLibrary(false)
+    setEditingModel(item)
+    setNewModel({
+      label: item.label, model: item.model, provider: item.provider.startsWith('custom:') ? 'custom' : item.provider,
+      provider_label: item.provider_label || providerLabel(item.provider), base_url: item.base_url || '', api_key: '', kinds: [...item.kinds],
+    })
+    setConnectionTest({ status: 'idle', message: '' })
+    setShowAddModel(true)
+  }
+
+  const addModel = async () => {
+    if (!newModel.label.trim() || !newModel.model.trim() || !newModel.kinds.length) {
+      toast('请填写模型名称、模型 ID，并至少选择一种能力', true)
       return
     }
-    setSavingKeys(true)
+    if (connectionTest.status !== 'ok' || connectionTest.signature !== modelDraftSignature()) {
+      toast('请先测试连接，确认当前配置可用', true)
+      return
+    }
+    setAddingModel(true)
     try {
-      await api.put('/keys', payload)
-      toast('密钥已保存，立即生效')
-      setKeyDraft({})
-      refreshModelState()
+      if (editingModel) {
+        await api.put(`/models/${encodeURIComponent(editingModel.id)}`, { ...newModel, label: newModel.label.trim(), model: newModel.model.trim() })
+        toast('模型配置已更新')
+      } else {
+        await api.post('/models', { ...newModel, label: newModel.label.trim(), model: newModel.model.trim() })
+        toast('模型已加入模型库')
+      }
+      setShowAddModel(false)
+      setEditingModel(null)
+      setConnectionTest({ status: 'idle', message: '' })
+      setNewModel({ label: '', model: '', provider: 'custom', provider_label: '', base_url: '', api_key: '', kinds: ['text'] })
+      refreshModelCatalog()
     } catch (e: unknown) {
       toast((e as Error).message, true)
     } finally {
-      setSavingKeys(false)
+      setAddingModel(false)
     }
+  }
+
+  const removeModel = async (item: CatalogModel) => {
+    if (!confirm(`确认从模型库移除「${item.label}」？`)) return
+    try {
+      await api.del(`/models/${encodeURIComponent(item.id)}`)
+      toast('模型已移除')
+      refreshModelCatalog()
+    } catch (e: unknown) { toast((e as Error).message, true) }
+  }
+
+  const saveModelCredentials = async () => {
+    if (!credentialModel) return
+    const signature = JSON.stringify(credentialDraft)
+    if (credentialTest.status !== 'ok' || credentialTest.signature !== signature) {
+      toast('请先测试当前连接配置', true)
+      return
+    }
+    try {
+      await api.put(`/models/${encodeURIComponent(credentialModel.id)}/credentials`, credentialDraft)
+      toast('模型连接配置已保存')
+      setCredentialModel(null)
+      setCredentialDraft({ base_url: '', api_key: '' })
+      refreshModelCatalog()
+    } catch (e: unknown) { toast((e as Error).message, true) }
+  }
+
+  const testModelCredentials = async () => {
+    if (!credentialModel) return
+    setCredentialTest({ status: 'testing', message: '正在测试…' })
+    try {
+      const result = await api.post(`/models/${encodeURIComponent(credentialModel.id)}/test`, credentialDraft)
+      setCredentialTest({ status: 'ok', message: `${result.preview || '连接成功'} · ${result.latency_ms} ms`, signature: JSON.stringify(credentialDraft) })
+    } catch (e: unknown) { setCredentialTest({ status: 'error', message: (e as Error).message }) }
   }
 
   const setOne = async (key: string, value: string) => {
@@ -549,7 +748,7 @@ export default function MonitorPage() {
       const option = sel.options.find(opt => opt.provider === provider)
       let modelValue = (modelDraft[settingKey] ?? option?.model ?? '').trim()
       if (isDisallowedModel(row.key, provider, modelValue)) {
-        modelValue = modelChoices(row.key, provider, '')[0]?.value ?? ''
+        modelValue = modelChoices(row.key, provider, '', modelCatalog?.items)[0]?.value ?? ''
       }
       if (modelDraft[settingKey] !== undefined && !modelValue) {
         return { error: `${row.label} 模型不能为空`, payload }
@@ -583,78 +782,178 @@ export default function MonitorPage() {
   const modelSavePreview = buildModelPayload()
   const hasModelChanges = Object.keys(modelSavePreview.payload).length > 0
 
-  const fmtTime = (t: number) => new Date(t * 1000).toLocaleTimeString('zh-CN', { hour12: false })
+  const fmtTime = (t: number) => new Date(t * 1000).toLocaleString('zh-CN', {
+    month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  })
 
   const SETTING_LABELS: Record<string, string> = {
     video_concurrency: '视频并发数',
     episode_cost_limit_cny: '单集成本上限（¥）',
     use_character_refs: '定妆照参考图（true/false，人物一致性）',
-    use_first_frame_chaining: '参考图视频模式（固定启用；旧项保留兼容）',
     max_ref_images: '单镜头最多参考图数',
     auto_qa: '自动质检（true/false，需本机 ffmpeg）',
     auto_retake_threshold: '自动重抽阈值（QA 总分低于此值重抽一次）',
-    plan_episode_count: '分集每批集数（自动续写铺满全书）',
     max_repair_attempts: '修复重试上限（校验失败时让模型反复修正的次数）',
+    provider_call_retention_days: '模型调用日志保留天数',
+    error_log_retention_days: '错误日志保留天数',
+  }
+
+  const jobStatuses = useMemo(
+    () => Array.from(new Set((jobs?.recent ?? []).map(job => job.status))).sort(),
+    [jobs?.recent],
+  )
+  const filteredJobs = useMemo(() => {
+    const keyword = jobSearch.trim().toLowerCase()
+    return (jobs?.recent ?? []).filter(job => {
+      if (jobStatus !== 'all' && job.status !== jobStatus) return false
+      if (!keyword) return true
+      return [job.id, job.kind, job.workflow_type, job.scope_type, job.scope_id, job.status,
+        job.project_name, job.episode_title, job.error, job.episode_no, job.shot_no, jobWorkLabel(job)]
+        .some(value => String(value ?? '').toLowerCase().includes(keyword))
+    })
+  }, [jobs?.recent, jobSearch, jobStatus])
+  const jobPageCount = Math.max(1, Math.ceil(filteredJobs.length / jobPageSize))
+  const safeJobPage = Math.min(jobPage, jobPageCount)
+  const pagedJobs = filteredJobs.slice((safeJobPage - 1) * jobPageSize, safeJobPage * jobPageSize)
+
+  const callStatuses = useMemo(
+    () => Array.from(new Set((calls ?? []).map(call => call.status))).sort(),
+    [calls],
+  )
+  const filteredCalls = useMemo(() => {
+    const keyword = callSearch.trim().toLowerCase()
+    return (calls ?? []).filter(call => {
+      if (callStatus !== 'all' && call.status !== callStatus) return false
+      if (!keyword) return true
+      return [call.id, call.kind, call.model, call.status, call.http_status, call.error, callFunctionLabel(call)]
+        .some(value => String(value ?? '').toLowerCase().includes(keyword))
+    })
+  }, [calls, callSearch, callStatus])
+  const callPageCount = Math.max(1, Math.ceil(filteredCalls.length / callPageSize))
+  const safeCallPage = Math.min(callPage, callPageCount)
+  const pagedCalls = filteredCalls.slice((safeCallPage - 1) * callPageSize, safeCallPage * callPageSize)
+  const failedCalls = (calls ?? []).filter(call => callStatusColor(call.status) === 'red')
+  const configuredModels = modelCatalog?.items.filter(item => item.key_configured).length ?? 0
+
+  const openSection = (section: MonitorSection) => {
+    setActiveSection(section)
+    window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
   return (
-    <>
+    <div className="monitor-page">
       <header className="desk-head">
         <div className="crumb">漫剧案头 / 监制房</div>
-        <h1>监制房 <span className="sub">队列 · 成本 · 对外调用，失败必须在这里看得见</span></h1>
+        <h1>监制房 <span className="sub">运行、任务、模型与日志各归其位</span></h1>
         <hr className="rule" />
       </header>
 
-      <div className="stat-row">
-        {(['queued', 'running', 'succeeded', 'failed', 'paused_budget'] as const).map(k => (
-          <div className="stat-cell" key={k}>
-            <div className="s-label">{({ queued: '排队', running: '生成中', succeeded: '成片', failed: '失败', paused_budget: '预算暂停' })[k]}</div>
-            <div className="cost-ink" style={k === 'failed' && (jobs?.counts[k] ?? 0) > 0 ? { color: 'var(--cinnabar)' } : undefined}>
-              {jobs?.counts[k] ?? 0}
-            </div>
+      <nav className="monitor-subnav" aria-label="监制房子菜单">
+        {MONITOR_SECTIONS.map(section => {
+          const badge = section.key === 'jobs'
+            ? (jobs?.counts.running ?? 0) + (jobs?.counts.queued ?? 0)
+              + (jobs?.counts.waiting_retry ?? 0) + (jobs?.counts.waiting_human ?? 0)
+              + (jobs?.counts.paused_budget ?? 0) + (jobs?.counts.paused_external ?? 0)
+            : section.key === 'calls' ? failedCalls.length : undefined
+          return (
+            <button
+              type="button"
+              key={section.key}
+              className={activeSection === section.key ? 'active' : ''}
+              aria-current={activeSection === section.key ? 'page' : undefined}
+              onClick={() => openSection(section.key)}
+            >
+              <span>{section.label}{badge !== undefined && badge > 0 && <em>{badge}</em>}</span>
+              <small>{section.description}</small>
+            </button>
+          )
+        })}
+      </nav>
+
+      {activeSection === 'overview' && (
+        <div className="monitor-section">
+          <div className="monitor-section-head">
+            <div><span className="eyebrow">CONTROL OVERVIEW</span><h2>制作运行总览</h2></div>
+            <p>先看异常，再进入对应子菜单处理。</p>
           </div>
-        ))}
-      </div>
-
-      <div style={{ height: 20 }} />
-
-      <section className="card">
-        <h3>密钥管理 <span className="hint">填写后保存到 .env，下次启动自动加载；留空表示不修改</span></h3>
-        <div className="model-grid">
-          {KEY_PROVIDERS.map(p => {
-            const info = keyStatus?.[p.key]
-            const isConfigured = info?.configured ?? false
-            return (
-              <div className="model-row" key={p.key}>
-                <div className="model-name">
-                  <b>{p.label}</b>
-                  <span className={`stamp ${isConfigured ? 'green' : 'red'}`}>
-                    {isConfigured ? `已配置 ${info?.preview || ''}` : '未配置'}
-                  </span>
+          <div className="stat-row monitor-stats">
+            {[
+              { key: 'queued', label: '排队', count: (jobs?.counts.queued ?? 0) + (jobs?.counts.waiting_retry ?? 0) },
+              { key: 'running', label: '运行中', count: jobs?.counts.running ?? 0 },
+              { key: 'succeeded', label: '已完成', count: jobs?.counts.succeeded ?? 0 },
+              { key: 'failed', label: '失败 / 部分', count: (jobs?.counts.failed ?? 0) + (jobs?.counts.partial ?? 0) },
+              { key: 'waiting_human', label: '待人工', count: jobs?.counts.waiting_human ?? 0 },
+              { key: 'paused', label: '已暂停', count: (jobs?.counts.paused_budget ?? 0) + (jobs?.counts.paused_external ?? 0) },
+            ].map(item => (
+              <button type="button" className="stat-cell" key={item.key} onClick={() => openSection('jobs')}>
+                <div className="s-label">{item.label}</div>
+                <div className="cost-ink" style={item.key === 'failed' && item.count > 0 ? { color: 'var(--cinnabar)' } : undefined}>
+                  {item.count}
                 </div>
-                <div className="model-selects" style={{ flex: 1 }}>
-                  <input
-                    type="password"
-                    autoComplete="off"
-                    placeholder={p.placeholder}
-                    value={keyDraft[p.key] || ''}
-                    onChange={e => setKeyDraft(prev => ({ ...prev, [p.key]: e.target.value }))}
-                    style={{ width: '100%', padding: '6px 10px', fontSize: 13 }}
-                  />
+                <span>查看任务队列 →</span>
+              </button>
+            ))}
+          </div>
+          <div className="monitor-overview-grid">
+            <section className="card monitor-overview-card">
+              <div className="monitor-card-head"><div><span className="eyebrow">EXCEPTIONS</span><h3>需要关注</h3></div><button type="button" onClick={() => openSection('calls')}>查看全部</button></div>
+              {!failedCalls.length ? <div className="monitor-ok">当前没有失败的模型调用</div> : (
+                <div className="monitor-brief-list">
+                  {failedCalls.slice(0, 5).map(call => (
+                    <button type="button" key={call.id} onClick={() => { setCallStatus(call.status); setCallPage(1); openSection('calls') }}>
+                      <span><b>{callFunctionLabel(call)}</b><small>{call.model || '未记录模型'}</small></span>
+                      <span className="stamp red">{callStatusLabel(call.status)}</span>
+                    </button>
+                  ))}
                 </div>
-              </div>
-            )
-          })}
+              )}
+            </section>
+            <section className="card monitor-overview-card">
+              <div className="monitor-card-head"><div><span className="eyebrow">RECENT JOBS</span><h3>最近任务</h3></div><button type="button" onClick={() => openSection('jobs')}>查看全部</button></div>
+              {!jobs?.recent.length ? <div className="monitor-ok">当前没有生成任务</div> : (
+                <div className="monitor-brief-list">
+                  {jobs.recent.slice(0, 5).map(job => (
+                    <button type="button" key={job.id} onClick={() => { setJobStatus(job.status); setJobPage(1); openSection('jobs') }}>
+                      <span><b>{job.project_name || '未命名项目'}</b><small>{jobWorkLabel(job)}</small></span>
+                      <span className={`stamp ${jobStampClass(job.status)}`}>{jobStatusLabel(job.status)}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </section>
+            <section className="card monitor-overview-card monitor-system-card">
+              <div className="monitor-card-head"><div><span className="eyebrow">SYSTEM</span><h3>配置概况</h3></div><button type="button" onClick={() => openSection('models')}>管理模型</button></div>
+              <dl>
+                <div><dt>已配置连接</dt><dd>{configuredModels} / {modelCatalog?.items.length ?? 0}</dd></div>
+                <div><dt>视频并发</dt><dd>{settings?.video_concurrency ?? '—'}</dd></div>
+                <div><dt>单集预算</dt><dd>¥ {settings?.episode_cost_limit_cny ?? '—'}</dd></div>
+                <div><dt>日志保留</dt><dd>{settings?.provider_call_retention_days ?? '—'} 天</dd></div>
+              </dl>
+            </section>
+          </div>
         </div>
-        <div className="model-actions">
-          <button className="btn primary small" onClick={saveKeys} disabled={savingKeys || !Object.keys(keyDraft).some(k => keyDraft[k]?.trim())}>
-            {savingKeys ? '保存中…' : '保存密钥'}
+      )}
+
+      {activeSection === 'runs' && <div className="monitor-section"><RunCenter /></div>}
+
+      {activeSection === 'models' && <section className="card model-hub monitor-section">
+        <div className="model-hub-head">
+          <div>
+            <h3>模型中心</h3>
+            <p>按工作类型分配模型。新增模型后会立即出现在对应的选择器中。</p>
+          </div>
+          <button className="btn primary small model-add-btn" type="button" onClick={() => {
+            setEditingModel(null)
+            setNewModel({ label: '', model: '', provider: 'custom', provider_label: '', base_url: '', api_key: '', kinds: ['text'] })
+            setConnectionTest({ status: 'idle', message: '' })
+            setShowAddModel(true)
+          }}>
+            <span aria-hidden="true">＋</span> 添加模型
+          </button>
+          <button className="btn small model-library-btn" type="button" onClick={() => { setLibraryMessage(''); setShowModelLibrary(true) }}>
+            管理模型
           </button>
         </div>
-      </section>
-
-      <section className="card">
-        <h3>模型选择 <span className="hint">每类任务单独选择服务和模型；视频和图像当前由火山生成</span></h3>
 
         <div className="model-grid">
           {MODEL_ROWS.map(row => {
@@ -663,14 +962,21 @@ export default function MonitorPage() {
             const option = sel.options.find(opt => opt.provider === provider)
             const settingKey = modelSettingKey(row.key, provider)
             const currentModel = modelDraft[settingKey] ?? option?.model ?? ''
-            const choices = modelChoices(row.key, provider, currentModel)
+            const choices = modelChoices(row.key, provider, currentModel, modelCatalog?.items)
             const selectedModel = selectedModelValue(choices, currentModel)
             const providerDisabled = row.key === 'video' || row.key === 'image'
             const modelDisabled = !settingKey || !option?.available
-            const providerChoices = PROVIDERS.filter(p => sel.options.some(opt => opt.provider === p.key))
+            const providerChoices = sel.options.map(opt => ({
+              key: opt.provider,
+              label: modelCatalog?.items.find(item => item.provider === opt.provider)?.provider_label ?? providerLabel(opt.provider),
+            }))
+            const activeCatalogModel = modelCatalog?.items.find(item => item.provider === provider && item.model === selectedModel)
             return (
               <div className="model-row" key={row.key}>
                 <div className="model-name">
+                  <span className={`model-kind-icon ${row.key}`} aria-hidden="true">
+                    {({ text: 'T', vlm: 'V', video: '▶', image: '◇' } as Record<ModelKind, string>)[row.key]}
+                  </span>
                   <b>{row.label}</b>
                   <span>{row.note}</span>
                 </div>
@@ -711,7 +1017,17 @@ export default function MonitorPage() {
                   </label>
                 </div>
                 <div className="model-current">
-                  当前：{providerLabel(sel.provider)} · {sel.model || '未配置'}
+                  <span className="model-live-dot" /> 当前运行
+                  <strong>{modelCatalog?.items.find(item => item.provider === sel.provider)?.provider_label ?? providerLabel(sel.provider)}</strong>
+                  <code>{sel.model || '未配置'}</code>
+                  {activeCatalogModel && (
+                    <button className="model-connect-btn" type="button" onClick={() => {
+                      const defaults: Record<string, string> = { hiagent: '', openrouter: 'https://openrouter.ai/api/v1', bailian: 'https://dashscope.aliyuncs.com/compatible-mode/v1', deepseek: 'https://api.deepseek.com/v1', zhipu: 'https://open.bigmodel.cn/api/paas/v4' }
+                      setCredentialModel(activeCatalogModel)
+                      setCredentialDraft({ base_url: activeCatalogModel.base_url || defaults[activeCatalogModel.provider] || '', api_key: '' })
+                      setCredentialTest({ status: 'idle', message: '' })
+                    }}>{activeCatalogModel.key_configured ? '更新连接' : '配置连接'}</button>
+                  )}
                 </div>
               </div>
             )
@@ -724,34 +1040,231 @@ export default function MonitorPage() {
             保存模型设置
           </button>
         </div>
-      </section>
+      </section>}
 
-      <section className="card">
-        <h3>近期任务</h3>
-        {!jobs?.recent.length ? <div className="empty" style={{ padding: 30 }}>暂无任务</div> : (
-          <table className="ledger">
-            <thead><tr><th>时间</th><th>项目</th><th>集/镜</th><th>状态</th><th>错误（原始报文）</th></tr></thead>
-            <tbody>
-              {jobs.recent.map(j => (
-                <tr key={j.id}>
-                  <td className="mono">{fmtTime(j.updated_at)}</td>
-                  <td>{j.project_name}</td>
-                  <td>{j.kind === 'screenplay' ? `第${j.episode_no}集 · 剧本` : `第${j.episode_no}集 · 镜${j.shot_no}`}</td>
-                  <td><span className={`stamp ${j.status === 'succeeded' ? 'green' : j.status === 'failed' || j.status === 'paused_budget' ? 'red' : j.status === 'running' ? 'gold' : 'grey'}`}>{j.status}</span></td>
-                  <td style={{ color: 'var(--cinnabar-deep)', fontSize: 12, maxWidth: 380, wordBreak: 'break-all' }}>{j.error ?? ''}</td>
-                </tr>
+      {showAddModel && (
+        <div className="model-modal-backdrop" role="presentation" onMouseDown={e => {
+          if (e.currentTarget === e.target) setShowAddModel(false)
+        }}>
+          <section className="model-modal" role="dialog" aria-modal="true" aria-labelledby="add-model-title">
+            <div className="model-modal-head">
+              <div>
+                <span className="eyebrow">MODEL CATALOG</span>
+                <h2 id="add-model-title">{editingModel ? '编辑模型' : '添加模型'}</h2>
+                <p>模型参数保存在本机；密钥仍由上方的服务密钥统一管理。</p>
+              </div>
+              <button className="model-modal-close" type="button" aria-label="关闭" onClick={() => { setShowAddModel(false); setEditingModel(null) }}>×</button>
+            </div>
+            <div className="model-form-grid">
+              <label className="model-form-field">
+                <span>显示名称</span>
+                <input autoFocus value={newModel.label} placeholder="例如 Claude Sonnet" onChange={e => setNewModel(prev => ({ ...prev, label: e.target.value }))} />
+              </label>
+              <label className="model-form-field">
+                <span>服务商</span>
+                <select value={newModel.provider} onChange={e => {
+                  const provider = e.target.value as ProviderKey
+                  const allowed = provider === 'hiagent' ? MODEL_ROWS.map(r => r.key) : provider === 'openrouter' || provider === 'bailian' || provider === 'custom' ? ['text', 'vlm'] as ModelKind[] : ['text'] as ModelKind[]
+                  setNewModel(prev => ({ ...prev, provider, kinds: prev.kinds.filter(k => allowed.includes(k)).length ? prev.kinds.filter(k => allowed.includes(k)) : [allowed[0]] }))
+                }}>
+                  <option value="custom">自定义 OpenAI 兼容服务</option>
+                  {PROVIDERS.map(p => <option key={p.key} value={p.key}>{p.label}</option>)}
+                </select>
+              </label>
+              {newModel.provider === 'custom' && <>
+                <label className="model-form-field">
+                  <span>服务名称</span>
+                  <input value={newModel.provider_label} placeholder="例如 公司内部网关" onChange={e => setNewModel(prev => ({ ...prev, provider_label: e.target.value }))} />
+                </label>
+                <label className="model-form-field">
+                  <span>Base URL</span>
+                  <input className="mono" value={newModel.base_url} placeholder="https://api.example.com/v1" onChange={e => setNewModel(prev => ({ ...prev, base_url: e.target.value }))} />
+                </label>
+                <label className="model-form-field model-form-wide">
+                  <span>该模型的 API Key</span>
+                  <input type="password" autoComplete="new-password" value={newModel.api_key} placeholder="仅保存，不会在页面回显" onChange={e => setNewModel(prev => ({ ...prev, api_key: e.target.value }))} />
+                </label>
+              </>}
+              <label className="model-form-field model-form-wide">
+                <span>模型 ID</span>
+                <input className="mono" value={newModel.model} placeholder="例如 anthropic/claude-sonnet-4" onChange={e => setNewModel(prev => ({ ...prev, model: e.target.value }))} />
+                <small>请填写服务商 API 实际接收的 model 字段，不要填网页展示名。</small>
+              </label>
+              <div className="model-form-field model-form-wide">
+                <span>模型能力</span>
+                <div className="capability-picker">
+                  {MODEL_ROWS.map(row => {
+                    const allowed = newModel.provider === 'hiagent' || ((newModel.provider === 'openrouter' || newModel.provider === 'bailian' || newModel.provider === 'custom') && (row.key === 'text' || row.key === 'vlm')) || ((newModel.provider === 'deepseek' || newModel.provider === 'zhipu') && row.key === 'text')
+                    return (
+                      <button type="button" key={row.key} disabled={!allowed} className={newModel.kinds.includes(row.key) ? 'active' : ''} onClick={() => toggleNewModelKind(row.key)}>
+                        {row.label}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            </div>
+            {!!modelCatalog?.items.some(item => !item.builtin) && (
+              <div className="custom-model-list">
+                <span>已添加模型</span>
+                {modelCatalog.items.filter(item => !item.builtin).map(item => (
+                  <div className="custom-model-item" key={item.id}>
+                    <div><b>{item.label}</b><code>{providerLabel(item.provider)} · {item.model}</code></div>
+                    <div className="custom-model-actions">
+                      <button type="button" onClick={() => editModel(item)}>编辑</button>
+                      <button type="button" onClick={async () => {
+                        setConnectionTest({ status: 'testing', message: `正在测试 ${item.label}…` })
+                        try {
+                          const result = await api.post(`/models/${encodeURIComponent(item.id)}/test`)
+                          setConnectionTest({ status: 'ok', message: `${item.label} 可用 · ${result.latency_ms} ms` })
+                        } catch (e: unknown) { setConnectionTest({ status: 'error', message: (e as Error).message }) }
+                      }}>测试</button>
+                      <button type="button" onClick={() => removeModel(item)}>删除</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="model-modal-actions">
+              <span className={`connection-test-result ${connectionTest.status}`}>{connectionTest.message || '保存前需要先通过连接测试'}</span>
+              <button className="btn small" type="button" disabled={connectionTest.status === 'testing'} onClick={testNewModel}>{connectionTest.status === 'testing' ? '测试中…' : '测试连接'}</button>
+              <button className="btn primary small" type="button" disabled={addingModel || connectionTest.status !== 'ok' || connectionTest.signature !== modelDraftSignature()} onClick={addModel}>{addingModel ? '保存中…' : editingModel ? '保存修改' : '添加到模型库'}</button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {showModelLibrary && (
+        <div className="model-modal-backdrop" role="presentation" onMouseDown={e => {
+          if (e.currentTarget === e.target) setShowModelLibrary(false)
+        }}>
+          <section className="model-modal model-library-modal" role="dialog" aria-modal="true" aria-labelledby="model-library-title">
+            <div className="model-modal-head">
+              <div>
+                <span className="eyebrow">MODEL LIBRARY</span>
+                <h2 id="model-library-title">管理模型</h2>
+                <p>共 {modelCatalog?.items.length ?? 0} 个模型；每个模型独立维护连接和密钥。</p>
+              </div>
+              <button className="model-modal-close" type="button" aria-label="关闭" onClick={() => setShowModelLibrary(false)}>×</button>
+            </div>
+            <div className="model-library-list">
+              {modelCatalog?.items.map(item => (
+                <div className="model-library-item" key={item.id}>
+                  <div className="model-library-main">
+                    <div><b>{item.label}</b>{!item.builtin && <span className="stamp gold">自定义</span>}</div>
+                    <code>{item.provider_label ?? providerLabel(item.provider)} · {item.model}</code>
+                    <span>{item.kinds.map(kind => MODEL_ROWS.find(row => row.key === kind)?.label).join(' / ')}</span>
+                  </div>
+                  <span className={`stamp ${item.key_configured ? 'green' : 'red'}`}>{item.key_configured ? '连接已配置' : '待配置'}</span>
+                  <div className="model-library-actions">
+                    <button type="button" onClick={async () => {
+                      setLibraryMessage(`正在测试「${item.label}」…`)
+                      try {
+                        const result = await api.post(`/models/${encodeURIComponent(item.id)}/test`)
+                        setLibraryMessage(`「${item.label}」${result.preview || '连接成功'} · ${result.latency_ms} ms`)
+                      } catch (e: unknown) { setLibraryMessage((e as Error).message) }
+                    }}>测试</button>
+                    <button type="button" onClick={() => {
+                      const defaults: Record<string, string> = { hiagent: '', openrouter: 'https://openrouter.ai/api/v1', bailian: 'https://dashscope.aliyuncs.com/compatible-mode/v1', deepseek: 'https://api.deepseek.com/v1', zhipu: 'https://open.bigmodel.cn/api/paas/v4' }
+                      setShowModelLibrary(false)
+                      setCredentialModel(item)
+                      setCredentialDraft({ base_url: item.base_url || defaults[item.provider] || '', api_key: '' })
+                      setCredentialTest({ status: 'idle', message: '' })
+                    }}>连接</button>
+                    {!item.builtin && <button type="button" onClick={() => editModel(item)}>编辑</button>}
+                    {!item.builtin && <button className="danger" type="button" onClick={() => removeModel(item)}>删除</button>}
+                  </div>
+                </div>
               ))}
-            </tbody>
-          </table>
-        )}
-      </section>
+            </div>
+            {libraryMessage && <div className="model-library-feedback">{libraryMessage}</div>}
+          </section>
+        </div>
+      )}
 
-      <section className="card">
-        <h3>对外调用账本 <span className="hint">每一次模型调用都在此留痕</span></h3>
-        <table className="ledger">
+      {credentialModel && (
+        <div className="model-modal-backdrop" role="presentation" onMouseDown={e => {
+          if (e.currentTarget === e.target) setCredentialModel(null)
+        }}>
+          <section className="model-modal model-credential-modal" role="dialog" aria-modal="true" aria-labelledby="credential-title">
+            <div className="model-modal-head">
+              <div>
+                <span className="eyebrow">PER-MODEL CONNECTION</span>
+                <h2 id="credential-title">配置模型连接</h2>
+                <p>{credentialModel.label} · {credentialModel.model}</p>
+              </div>
+              <button className="model-modal-close" type="button" aria-label="关闭" onClick={() => setCredentialModel(null)}>×</button>
+            </div>
+            <div className="model-form-grid">
+              <label className="model-form-field model-form-wide">
+                <span>Base URL</span>
+                <input className="mono" value={credentialDraft.base_url} placeholder="https://api.example.com/v1" onChange={e => { setCredentialDraft(prev => ({ ...prev, base_url: e.target.value })); setCredentialTest({ status: 'idle', message: '' }) }} />
+              </label>
+              <label className="model-form-field model-form-wide">
+                <span>该模型专用 API Key</span>
+                <input autoFocus type="password" autoComplete="new-password" value={credentialDraft.api_key} placeholder={credentialModel.key_configured ? '输入新 Key 以替换当前配置' : '输入该模型的 API Key'} onChange={e => { setCredentialDraft(prev => ({ ...prev, api_key: e.target.value })); setCredentialTest({ status: 'idle', message: '' }) }} />
+                <small>密钥只会发送给这个模型配置的 Base URL，接口不会返回原始值。</small>
+              </label>
+            </div>
+            <div className="model-modal-actions">
+              <span className={`connection-test-result ${credentialTest.status}`}>{credentialTest.message || '保存前需要先通过连接测试'}</span>
+              <button className="btn small" type="button" onClick={() => setCredentialModel(null)}>取消</button>
+              <button className="btn small" type="button" onClick={testModelCredentials}>{credentialTest.status === 'testing' ? '测试中…' : '测试连接'}</button>
+              <button className="btn primary small" type="button" disabled={credentialTest.status !== 'ok' || credentialTest.signature !== JSON.stringify(credentialDraft)} onClick={saveModelCredentials}>保存连接</button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {activeSection === 'jobs' && (
+        <section className="card monitor-section">
+          <div className="monitor-section-head compact">
+            <div><span className="eyebrow">JOB QUEUE</span><h2>任务队列</h2></div>
+            <p>按状态或项目定位生成任务，失败原因直接保留在列表中。</p>
+          </div>
+          <div className="monitor-toolbar">
+            <div className="monitor-search"><span>搜索</span><SearchField value={jobSearch} placeholder="搜索项目、集数、镜号或错误" ariaLabel="搜索任务" onChange={value => { setJobSearch(value); setJobPage(1) }} /></div>
+            <label><span>状态</span><select value={jobStatus} onChange={e => { setJobStatus(e.target.value); setJobPage(1) }}><option value="all">全部状态</option>{jobStatuses.map(status => <option value={status} key={status}>{jobStatusLabel(status)}</option>)}</select></label>
+            {(jobSearch || jobStatus !== 'all') && <button type="button" className="monitor-clear" onClick={() => { setJobSearch(''); setJobStatus('all'); setJobPage(1) }}>清除筛选</button>}
+          </div>
+          {!filteredJobs.length ? <div className="empty monitor-table-empty">没有符合条件的任务</div> : (
+            <div className="monitor-table-wrap">
+              <table className="ledger monitor-ledger jobs-ledger">
+                <thead><tr><th>更新时间</th><th>项目</th><th>工作项</th><th>状态</th><th>错误（原始报文）</th></tr></thead>
+                <tbody>
+                  {pagedJobs.map(job => (
+                    <tr key={job.id}>
+                      <td className="mono">{fmtTime(job.updated_at)}</td>
+                      <td>{job.project_name || '—'}</td>
+                      <td>{jobWorkLabel(job)}</td>
+                      <td><span className={`stamp ${jobStampClass(job.status)}`}>{jobStatusLabel(job.status)}</span></td>
+                      <td className="monitor-error-cell">{job.error ?? ''}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <Pagination page={safeJobPage} pageSize={jobPageSize} total={filteredJobs.length} onPageChange={setJobPage} onPageSizeChange={size => { setJobPageSize(size); setJobPage(1) }} />
+        </section>
+      )}
+
+      {activeSection === 'calls' && (
+      <section className="card monitor-section">
+        <div className="monitor-section-head compact">
+          <div><span className="eyebrow">PROVIDER CALLS</span><h2>调用日志</h2></div>
+          <p>每一次模型请求都可展开查看发送内容、返回结果和元信息。</p>
+        </div>
+        <div className="monitor-toolbar">
+          <div className="monitor-search"><span>搜索</span><SearchField value={callSearch} placeholder="搜索功能、模型、HTTP 或错误" ariaLabel="搜索调用日志" onChange={value => { setCallSearch(value); setCallPage(1) }} /></div>
+          <label><span>状态</span><select value={callStatus} onChange={e => { setCallStatus(e.target.value); setCallPage(1) }}><option value="all">全部状态</option>{callStatuses.map(status => <option value={status} key={status}>{callStatusLabel(status)}</option>)}</select></label>
+          {(callSearch || callStatus !== 'all') && <button type="button" className="monitor-clear" onClick={() => { setCallSearch(''); setCallStatus('all'); setCallPage(1) }}>清除筛选</button>}
+        </div>
+        {!filteredCalls.length ? <div className="empty monitor-table-empty">没有符合条件的调用记录</div> : <div className="monitor-table-wrap">
+        <table className="ledger monitor-ledger calls-ledger">
           <thead><tr><th>时间</th><th>功能定位</th><th>模型</th><th>状态</th><th>HTTP 状态</th><th>延迟</th><th>错误</th></tr></thead>
           <tbody>
-            {calls?.map(c => {
+            {pagedCalls.map(c => {
               const expanded = expandedCallId === c.id
               const functionLabel = callFunctionLabel(c)
               const repairTrigger = callRepairTrigger(parseJsonRecord(c.meta))
@@ -779,7 +1292,7 @@ export default function MonitorPage() {
                     <td><span className={`stamp ${callStatusColor(c.status)}`} title={c.status}>{callStatusLabel(c.status)}</span></td>
                     <td className="mono">{c.http_status ? `HTTP ${c.http_status}` : '未返回'}</td>
                     <td className="mono">{(c.latency_ms / 1000).toFixed(1)}s</td>
-                    <td style={{ color: 'var(--cinnabar-deep)', fontSize: 12, maxWidth: 360, wordBreak: 'break-all' }}>{c.error ?? ''}</td>
+                    <td className="monitor-error-cell">{c.error ?? ''}</td>
                   </tr>
                   {expanded && (
                     <tr className="ledger-detail-row">
@@ -806,22 +1319,35 @@ export default function MonitorPage() {
             })}
           </tbody>
         </table>
+        </div>}
+        <Pagination page={safeCallPage} pageSize={callPageSize} total={filteredCalls.length} onPageChange={setCallPage} onPageSizeChange={size => { setCallPageSize(size); setCallPage(1) }} />
       </section>
+      )}
 
-      <section className="card">
-        <h3>定例 <span className="hint">修改即生效，写入数据库</span></h3>
-        {settings && Object.keys(SETTING_LABELS).map(key => (
-          <div key={key} style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 10 }}>
-            <span style={{ width: 330, fontSize: 13.5 }}>{SETTING_LABELS[key]}</span>
-            <input type="text" style={{ width: 140 }} value={draft[key] ?? settings[key] ?? ''}
-              onChange={e => setDraft({ ...draft, [key]: e.target.value })} />
+      {activeSection === 'settings' && (
+        <section className="card monitor-section monitor-settings">
+          <div className="monitor-section-head compact">
+            <div><span className="eyebrow">SYSTEM POLICY</span><h2>系统设置</h2></div>
+            <p>修改会写入数据库；保存前可一次核对全部改动。</p>
           </div>
-        ))}
-        <button className="btn primary small" onClick={async () => {
-          try { await api.put('/settings', draft); toast('定例已更新'); setDraft({}); refreshSettings() }
-          catch (e: unknown) { toast((e as Error).message, true) }
-        }} disabled={!Object.keys(draft).length}>存定例</button>
-      </section>
-    </>
+          <div className="monitor-settings-grid">
+            {settings && Object.keys(SETTING_LABELS).map(key => (
+              <label key={key}>
+                <span>{SETTING_LABELS[key]}</span>
+                <input type="text" value={draft[key] ?? settings[key] ?? ''} onChange={e => setDraft({ ...draft, [key]: e.target.value })} />
+                <code>{key}</code>
+              </label>
+            ))}
+          </div>
+          <div className="monitor-settings-actions">
+            <span>{Object.keys(draft).length ? `${Object.keys(draft).length} 项待保存` : '当前没有未保存修改'}</span>
+            <button className="btn primary small" onClick={async () => {
+              try { await api.put('/settings', draft); toast('系统设置已更新'); setDraft({}); refreshSettings() }
+              catch (e: unknown) { toast((e as Error).message, true) }
+            }} disabled={!Object.keys(draft).length}>保存系统设置</button>
+          </div>
+        </section>
+      )}
+    </div>
   )
 }

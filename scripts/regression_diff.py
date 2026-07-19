@@ -48,7 +48,7 @@ def _bible() -> Bible:
 
 def _shot(**kw) -> Shot:
     base = dict(
-        shot_no=1, duration_s=10, shot_size="中景", camera_move="固定",
+        shot_no=1, duration_s=5, shot_size="中景", camera_move="固定",
         scene_setting="夜晚，出租屋", characters=["萧炎"],
         action_desc="萧炎盘坐在卧室床上，淡白气流顺着口鼻钻入体内，他愤怒地攥紧拳头，神色诡异地盯着戒指。",
         first_frame_desc="萧炎盘坐床上，掌心托着黑色戒指，神情平静。",
@@ -230,12 +230,12 @@ def section_c_trim() -> bool:
 # ---------- #4 整集音轨逐镜对齐 ----------
 
 def section_d_audio() -> bool:
-    _hr("D. 整集音轨逐镜对齐 diff（#4 ffprobe 实测时长 vs 刚性 10s）")
-    # Seedance 出片常非精确 10.0s，模拟 5 镜真实时长
-    clip_durations = [10.0, 10.30, 9.80, 10.20, 10.10]
-    fixed = 10.0
+    _hr("D. 整集音轨逐镜对齐 diff（#4 ffprobe 实测时长 vs 刚性 5s）")
+    # Seedance 出片可能并非精确 5.0s，模拟 5 镜真实时长
+    clip_durations = [5.0, 5.15, 4.90, 5.10, 5.05]
+    fixed = 5.0
     print(f"模拟 5 镜真实视频时长（秒）：{clip_durations}")
-    print(f"\n{'镜':<3} {'视频时长':<8} {'旧音轨段(10s)':<14} {'旧累计起点':<10} {'新音轨段(实测)':<14} {'新累计起点':<10} {'旧漂移'}")
+    print(f"\n{'镜':<3} {'视频时长':<8} {'旧音轨段(5s)':<14} {'旧累计起点':<10} {'新音轨段(实测)':<14} {'新累计起点':<10} {'旧漂移'}")
     old_off = 0.0
     new_off = 0.0
     max_drift = 0.0

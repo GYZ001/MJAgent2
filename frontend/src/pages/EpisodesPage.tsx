@@ -9,6 +9,7 @@ function ScreenplayStamp({ status }: { status: string }) {
     pending: ['待剧本', 'grey'],
     running: ['剧本中', 'gold'],
     ready: ['剧本成', 'green'],
+    warning: ['候选待修', 'red'],
     failed: ['剧本败', 'red'],
   }
   const [label, color] = map[status] ?? [status, 'grey']
@@ -23,7 +24,7 @@ export default function EpisodesPage() {
   const [busy, setBusy] = useState(false)
   const [page, setPage] = useState(0)
   const eps = p?.episodes ?? []
-  const screenplayTodoCount = eps.filter(e => e.screenplay_status === 'pending' || e.screenplay_status === 'failed' || !e.screenplay_mode || e.screenplay_mode === 'none').length
+  const screenplayTodoCount = eps.filter(e => ['pending', 'failed', 'warning'].includes(e.screenplay_status) || !e.screenplay_mode || e.screenplay_mode === 'none').length
   const screenplayRunningCount = eps.filter(e => e.screenplay_status === 'running').length
   const storyboardReadyCount = eps.filter(e => e.screenplay_status === 'ready' && ['planned', 'script_failed'].includes(e.status)).length
   const scriptingCount = eps.filter(e => e.status === 'scripting').length

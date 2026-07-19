@@ -11,7 +11,7 @@ def _bible() -> Bible:
 
 
 def _shot(**kw) -> Shot:
-    data = dict(shot_no=2, duration_s=10, shot_size="中景", camera_move="固定",
+    data = dict(shot_no=2, duration_s=5, shot_size="中景", camera_move="固定",
                 scene_setting="次日清晨,出租屋", characters=["王浩"],
                 action_desc="王浩端着咖啡盯着屏幕，猛地瞪大眼睛，咖啡呛出",
                 first_frame_desc="王浩端咖啡看屏幕", last_frame_desc="王浩瞪大眼睛咖啡呛出",

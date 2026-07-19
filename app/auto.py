@@ -20,40 +20,48 @@ import re
 import shutil
 from pathlib import Path
 
-from app import config, errors, worker
+from app import config, errors, planning, task_registry, worker
 from app.db import get_conn, get_setting, now, rows_to_dicts, set_setting
+from app.evidence import repository as evidence_repository
+from app.harness.types import Evaluation, EvidenceArtifact
+from app.orchestration.engine import WorkflowRecorder, fingerprint
 
 # 轮询 DB 等待队列阶段完成的间隔（秒）
 _POLL = 5.0
 # 单个镜头视频在「无在跑任务且未完成」时的最大重试次数（应对偶发网关失败）
 _MAX_RETRY = 2
 
-_tasks: dict[str, asyncio.Task] = {}
-_states: dict[str, dict] = {}
-
-
 # ---------- 状态与日志（供前端轮询展示） ----------
 
-def _state(pid: str) -> dict:
-    return _states.setdefault(pid, {"running": False, "phase": None, "log": [], "error": None,
-                                    "started_at": None, "updated_at": None})
+def _latest_auto_run(pid: str):
+    return get_conn().execute(
+        "SELECT * FROM workflow_runs WHERE workflow_type='auto_project' AND scope_type='project' "
+        "AND scope_id=? ORDER BY updated_at DESC LIMIT 1",
+        (pid,),
+    ).fetchone()
 
 
 def is_running(pid: str) -> bool:
-    t = _tasks.get(pid)
-    return bool(t and not t.done())
+    return task_registry.active("auto", pid)
 
 
 def _log(pid: str, msg: str) -> None:
-    st = _state(pid)
-    st["log"].append({"t": now(), "msg": msg})
-    st["log"] = st["log"][-120:]
-    st["updated_at"] = now()
+    run = _latest_auto_run(pid)
+    if run:
+        evidence_repository.append_event(run["id"], "AUTO_LOG", "info", msg)
 
 
 def _phase(pid: str, phase: str) -> None:
-    _state(pid)["phase"] = phase
-    _state(pid)["updated_at"] = now()
+    run = _latest_auto_run(pid)
+    if not run:
+        return
+    conn = get_conn()
+    conn.execute(
+        "UPDATE workflow_runs SET current_step_key=?, updated_at=? WHERE id=?",
+        (phase, now(), run["id"]),
+    )
+    conn.commit()
+    evidence_repository.append_event(run["id"], "AUTO_PHASE", "info", phase)
 
 
 class _Skip(Exception):
@@ -92,14 +100,19 @@ def _export_dir(pid: str) -> str:
 
 
 def status(pid: str) -> dict:
-    st = _state(pid)
+    run = _latest_auto_run(pid)
+    events = evidence_repository.get_events(run["id"], limit=120) if run else []
     return {
         "running": is_running(pid),
-        "phase": st.get("phase"),
-        "error": st.get("error"),
-        "log": st.get("log", [])[-40:],
-        "started_at": st.get("started_at"),
-        "updated_at": st.get("updated_at"),
+        "phase": run["current_step_key"] if run else None,
+        "error": run["failure_message"] if run else None,
+        "log": [
+            {"t": event["ts"], "msg": event["message"]}
+            for event in events if event["event_type"] in {"AUTO_LOG", "AUTO_PHASE"}
+        ][-40:],
+        "started_at": run["started_at"] if run else None,
+        "updated_at": run["updated_at"] if run else None,
+        "run_id": run["id"] if run else None,
         "export_dir": _export_dir(pid),
         "progress": _progress(pid),
     }
@@ -107,34 +120,62 @@ def status(pid: str) -> dict:
 
 # ---------- 启动 / 取消 ----------
 
-def start(pid: str, export_dir: str | None = None) -> None:
+def _input_fingerprint(pid: str) -> str:
+    conn = get_conn()
+    project = conn.execute(
+        "SELECT id, bible_version, plan_status FROM projects WHERE id=?", (pid,)
+    ).fetchone()
+    chapters = rows_to_dicts(conn.execute(
+        "SELECT idx, title, content FROM chapters WHERE project_id=? ORDER BY idx", (pid,)
+    ).fetchall())
+    return fingerprint(dict(project) if project else {"id": pid}, chapters)
+
+
+def start(
+    pid: str,
+    export_dir: str | None = None,
+    *,
+    requested_by: str = "user",
+    trigger_type: str = "manual",
+    parent_run_id: str | None = None,
+) -> str:
     if export_dir is not None:
         # 记住导出目录，供本次运行与下次预填使用（空串=清除）
         set_setting(f"export_dir:{pid}", export_dir.strip())
-    st = _state(pid)
-    st.update(running=True, error=None, phase="启动", log=[], started_at=now(), updated_at=now())
-    t = asyncio.create_task(_run(pid))
-    _tasks[pid] = t
-    t.add_done_callback(lambda _t, p=pid: _tasks.pop(p, None))
+    recorder = WorkflowRecorder.create(
+        workflow_type="auto_project",
+        scope_type="project",
+        scope_id=pid,
+        input_fingerprint=_input_fingerprint(pid),
+        requested_by=requested_by,
+        trigger_type=trigger_type,
+        policy_snapshot={
+            "auto_concurrency": get_setting("auto_concurrency"),
+            "auto_storyboard_concurrency": get_setting("auto_storyboard_concurrency"),
+            "episode_cost_limit_cny": get_setting("episode_cost_limit_cny"),
+            "video_retry_limit": _MAX_RETRY,
+        },
+        config_snapshot={"shot_duration_s": config.FIXED_VIDEO_DURATION_S},
+        # episode_cost_limit_cny is a per-episode guard, not a project-run budget.
+        # Keep it in the policy snapshot and do not mislabel it as the run hard limit.
+        budget_limit_cny=None,
+        parent_run_id=parent_run_id,
+    )
+    task_registry.spawn("auto", pid, _run(pid, recorder), project_id=pid)
+    return recorder.run_id
 
 
-def cancel(pid: str) -> bool:
-    t = _tasks.get(pid)
-    if t and not t.done():
-        t.cancel()
-        st = _state(pid)
-        st["running"] = False
-        st["phase"] = "已取消"
-        st["updated_at"] = now()
+async def cancel(pid: str) -> bool:
+    if await task_registry.cancel_and_wait("auto", pid):
         return True
     return False
 
 
 # ---------- 主流程 ----------
 
-async def _run(pid: str) -> None:
-    st = _state(pid)
+async def _run(pid: str, recorder: WorkflowRecorder) -> None:
     try:
+        recorder.start()
         worker.ensure_workers(max(int(get_setting("auto_concurrency") or 24), 1))
         export_dir = _export_dir(pid)
         if export_dir:
@@ -145,9 +186,51 @@ async def _run(pid: str) -> None:
             _log(pid, f"成片将自动导出到：{export_dir}")
         else:
             _log(pid, "未设置导出目录：只在成片台生成整集成品，不另存到外部文件夹")
-        await _ensure_bible(pid)
+        bible_step_id, _ = await recorder.step(
+            "character_bible", lambda: _ensure_bible(pid), contract_key="character_bible",
+            agent_name="character_bible",
+        )
+        project = get_conn().execute(
+            "SELECT bible_json, bible_version, bible_artifact_id FROM projects WHERE id=?", (pid,)
+        ).fetchone()
+        bible_artifact = (
+            evidence_repository.get_artifact(project["bible_artifact_id"])
+            if project and project["bible_artifact_id"] else None
+        )
         # 定妆照与分集互不依赖（都只需人物谱），并行推进
-        await asyncio.gather(_ensure_refs(pid), _ensure_plan(pid))
+        (_, _), (plan_step_id, _) = await asyncio.gather(
+            recorder.step("character_references", lambda: _ensure_refs(pid), agent_name="reference_assets"),
+            recorder.step(
+                "episode_mapping", lambda: _ensure_plan(pid), contract_key="episode_mapping",
+                agent_name="deterministic_regex",
+            ),
+        )
+        episodes_for_artifact = rows_to_dicts(get_conn().execute(
+            "SELECT id, episode_no, title, source_chapters FROM episodes WHERE project_id=? ORDER BY episode_no",
+            (pid,),
+        ).fetchall())
+        mapping_content = [
+            {**episode, "source_chapters": json.loads(episode["source_chapters"] or "[]")}
+            for episode in episodes_for_artifact
+        ]
+        mapping_artifact = recorder.artifact(
+            plan_step_id,
+            EvidenceArtifact(
+                type="episode_mapping", scope_type="project", scope_id=pid,
+                status="validated", trust_level="T2", content=mapping_content,
+                contract_version="1.0.0",
+                parent_artifact_ids=[bible_artifact["id"]] if bible_artifact else [],
+            ),
+        )
+        evidence_repository.create_evaluation(
+            mapping_artifact["id"],
+            Evaluation(
+                evaluator_type="deterministic", evaluator_name="one_chapter_one_episode",
+                evaluator_version="1.0.0", status="passed", hard_gate_passed=True,
+                score=100, evidence={"episode_count": len(mapping_content), "model_calls": 0},
+            ),
+            step_run_id=plan_step_id,
+        )
         # 注：已有角色的外观漂移已改为分镜阶段按集反应式重绘（见 portraits.ensure_cards_for_screenplay），
         # 不再在这里做"每 20 集全量轮询"。
 
@@ -158,30 +241,42 @@ async def _run(pid: str) -> None:
             raise RuntimeError("分集后没有任何剧集")
         _phase(pid, f"逐集成片（共 {len(eps)} 集，并行）")
         sb_sem = asyncio.Semaphore(max(int(get_setting("auto_storyboard_concurrency") or 8), 1))
-        await asyncio.gather(*[_episode_pipeline(pid, e["id"], e["episode_no"], sb_sem) for e in eps])
+        await asyncio.gather(*[
+            recorder.step(
+                f"episode:{e['episode_no']}:pipeline",
+                lambda e=e: _episode_pipeline(pid, e["id"], e["episode_no"], sb_sem),
+                agent_name="episode_pipeline",
+                input_artifact_ids=[
+                    mapping_artifact["id"],
+                    *([bible_artifact["id"]] if bible_artifact else []),
+                ],
+                context_manifest={"episode_id": e["id"], "episode_no": e["episode_no"]},
+            )
+            for e in eps
+        ])
 
         prog = _progress(pid)
         done, total = prog.get("episodes_done", 0), prog.get("episodes_total", 0)
         if done >= total:
             _phase(pid, "全部完成 ✅")
             _log(pid, f"全自动成片完成：{total} 集已出片")
+            recorder.succeed(f"全自动成片完成：{total} 集已出片")
         else:
             _phase(pid, f"完成（{done}/{total} 集出片，其余见日志）")
             _log(pid, f"部分集需人工处理：已出片 {done}/{total}，未完成的集请查看上方日志/各工作台")
+            recorder.partial(f"部分完成：{done}/{total} 集已出片")
     except asyncio.CancelledError:
         _phase(pid, "已取消")
         _log(pid, "已取消（已入队的关键帧/视频会继续跑完，可稍后重新点击从断点续做）")
+        recorder.cancel()
         raise
     except Exception as exc:  # noqa: BLE001 失败要响
         rec = errors.log_error(exc, action="auto_pipeline", context={"project_id": pid})
         # RuntimeError 由流水线主动抛出、消息已是安全中文（且内嵌下游错误码）；其它异常按技术类脱敏。
         public = (str(exc)[:760] + f"（{rec.error_id}）") if isinstance(exc, RuntimeError) else rec.public
-        st["error"] = public[:800]
         _phase(pid, "中断")
         _log(pid, f"流水线中断：{public}")
-    finally:
-        st["running"] = False
-        st["updated_at"] = now()
+        recorder.fail(exc)
 
 
 # ---------- 各阶段 ----------
@@ -210,12 +305,12 @@ async def _ensure_bible(pid: str) -> None:
     # 这个正在 inline await 的合法任务误判为孤儿、立刻翻成 failed（前端轮询 /projects 即触发）。
     cur = asyncio.current_task()
     if cur is not None:
-        api._track_bible_task(pid, cur)
+        task_registry.register("bible", pid, cur, project_id=pid)
     try:
         await api._bible_task(pid, trigger_full_refs=False)
     finally:
-        if api._bible_tasks.get(pid) is cur:
-            api._bible_tasks.pop(pid, None)
+        if cur is not None:
+            task_registry.unregister("bible", pid, task=cur)
     p = conn.execute("SELECT bible_status, bible_error FROM projects WHERE id=?", (pid,)).fetchone()
     if p["bible_status"] != "ready":
         raise RuntimeError(f"人物谱生成失败：{p['bible_error']}")
@@ -242,7 +337,6 @@ async def _ensure_refs(pid: str) -> None:
 
 
 async def _ensure_plan(pid: str) -> None:
-    from app import api
     conn = get_conn()
     n = conn.execute("SELECT COUNT(*) c FROM episodes WHERE project_id=?", (pid,)).fetchone()["c"]
     if n > 0:
@@ -251,7 +345,7 @@ async def _ensure_plan(pid: str) -> None:
     _log(pid, "开始分集规划")
     conn.execute("UPDATE projects SET plan_status='running', plan_error=NULL WHERE id=?", (pid,))
     conn.commit()
-    await api._plan_task(pid)
+    await planning.run_regex_plan(pid)
     p = conn.execute("SELECT plan_status, plan_error FROM projects WHERE id=?", (pid,)).fetchone()
     if p["plan_status"] != "ready":
         raise RuntimeError(f"分集失败：{p['plan_error']}")
@@ -265,7 +359,7 @@ async def _episode_pipeline(pid: str, eid: str, epno: int, sb_sem: asyncio.Semap
     try:
         # 1) 剧本：分集之后先把小说改写成可拍剧本
         ep = conn.execute("SELECT status, screenplay_status, screenplay_json, screenplay_error FROM episodes WHERE id=?", (eid,)).fetchone()
-        if not ep["screenplay_json"] or ep["screenplay_status"] in ("pending", "failed", "running"):
+        if not ep["screenplay_json"] or ep["screenplay_status"] in ("pending", "failed", "warning", "running"):
             async with sb_sem:
                 _log(pid, f"第{epno}集：生成可拍剧本")
                 started_at = now()
@@ -294,8 +388,6 @@ async def _episode_pipeline(pid: str, eid: str, epno: int, sb_sem: asyncio.Semap
         ep = conn.execute("SELECT status FROM episodes WHERE id=?", (eid,)).fetchone()
         if ep["status"] == "scripted":
             try:
-                # 与人工确认同口径：超 90s 上限时先跑内置时间 agent 按内容压缩时长（单镜不超 20%）。
-                await api._time_agent_rebalance_durations(eid)
                 api.confirm_episode_core(eid)
                 _log(pid, f"第{epno}集：分镜已自动确认")
             except ValueError as ve:

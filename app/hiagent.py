@@ -17,6 +17,7 @@ import subprocess
 import time
 import weakref
 from typing import Any
+from urllib.parse import urljoin
 
 import httpx
 
@@ -149,24 +150,6 @@ def _headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {config.HIAGENT_API_KEY}", "Content-Type": "application/json"}
 
 
-def _openrouter_headers() -> dict[str, str]:
-    if not config.OPENROUTER_API_KEY:
-        raise ProviderError("未配置 OPENROUTER_API_KEY，请在项目根目录 .env 中填写，或在监制房切回火山路由")
-    return {
-        "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-        # OpenRouter 可选归因头（用于其排行榜/用量页，不影响功能）
-        "HTTP-Referer": "http://127.0.0.1:8230",
-        "X-Title": "MJAgent2",
-    }
-
-
-def _bailian_headers() -> dict[str, str]:
-    if not config.BAILIAN_API_KEY:
-        raise ProviderError("未配置 BAILIAN_API_KEY，请在项目根目录 .env 中填写，或在监制房切回其他文本模型")
-    return {"Authorization": f"Bearer {config.BAILIAN_API_KEY}", "Content-Type": "application/json"}
-
-
 def _deepseek_headers() -> dict[str, str]:
     if not config.DEEPSEEK_API_KEY:
         raise ProviderError("未配置 DEEPSEEK_API_KEY，请在项目根目录 .env 中填写，或在监制房切回其他文本模型")
@@ -185,6 +168,8 @@ def _model_route() -> str:
 
 def active_provider(kind: str) -> str:
     configured = (get_setting(f"model_{kind}_provider") or "").strip()
+    if configured.startswith("custom:"):
+        return configured
     if kind == "text" and configured in {"hiagent", "openrouter", "bailian", "deepseek", "zhipu"}:
         return configured
     if kind == "vlm" and configured in {"hiagent", "openrouter", "bailian"}:
@@ -200,8 +185,45 @@ def _model_setting(key: str, fallback: str) -> str:
     return (get_setting(key) or fallback or "").strip()
 
 
+def _model_connection(provider: str, model: str, fallback_url: str = "", fallback_key: str = "") -> tuple[str, dict[str, str]]:
+    """读取单模型连接信息；旧环境变量仅作为尚未迁移时的兼容兜底。"""
+    try:
+        custom = json.loads(get_setting("custom_models") or "[]")
+    except (TypeError, json.JSONDecodeError):
+        custom = []
+    item = next((m for m in custom if m.get("provider") == provider and m.get("model") == model), {})
+    item_id = item.get("id") or f"builtin:{provider}:{model}"
+    try:
+        credentials = json.loads(get_setting("model_credentials") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        credentials = {}
+    saved = credentials.get(item_id, {}) if isinstance(credentials, dict) else {}
+    base_url = str(saved.get("base_url") or item.get("base_url") or fallback_url).strip().rstrip("/")
+    api_key = str(saved.get("api_key") or item.get("api_key") or fallback_key).strip()
+    if not base_url:
+        raise ProviderError(f"模型 {model} 未配置 Base URL")
+    if not api_key:
+        raise ProviderError(f"模型 {model} 未配置 API Key，请在模型中心配置")
+    return base_url, {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+
+def _absolute_provider_url(value: str, base_url: str) -> str:
+    """媒体网关有时返回站内相对地址，下载前统一补成完整 URL。"""
+    value = (value or "").strip()
+    if not value or value.startswith(("http://", "https://", "data:")):
+        return value
+    return urljoin(base_url.rstrip("/") + "/", value)
+
+
 def active_model(kind: str, provider: str | None = None) -> str:
     provider = provider or active_provider(kind)
+    if provider.startswith("custom:"):
+        try:
+            custom = json.loads(get_setting("custom_models") or "[]")
+        except (TypeError, json.JSONDecodeError):
+            custom = []
+        item = next((m for m in custom if m.get("provider") == provider and kind in m.get("kinds", [])), None)
+        return str(item.get("model") or "").strip() if item else ""
     if provider == "zhipu":
         if kind == "text":
             return _model_setting("zhipu_model_text", config.ZHIPU_MODEL_TEXT)
@@ -264,10 +286,6 @@ def _bailian_fallback_models(kind: str, preferred: str) -> list[str]:
     candidates = _dedupe_models([preferred, *free_models, *base_models])
     failed = _BAILIAN_FAILED_MODELS.setdefault(kind, set())
     return [model for model in candidates if model not in failed or model in base_models]
-
-
-def _use_openrouter(kind: str = "text") -> bool:
-    return active_provider(kind) == "openrouter" and bool(config.OPENROUTER_API_KEY)
 
 
 def _chat_content(data: dict, *, label: str = "chat") -> str:
@@ -410,8 +428,8 @@ async def _post_bailian_chat_with_fallback(client: httpx.AsyncClient, payload: d
                                            fallback_kind: str, log_kind: str,
                                            preferred_model: str,
                                            meta: dict | None = None) -> tuple[dict, str]:
-    url = f"{config.BAILIAN_BASE_URL}/chat/completions"
-    headers = _bailian_headers()
+    base_url, headers = _model_connection("bailian", preferred_model, config.BAILIAN_BASE_URL, config.BAILIAN_API_KEY)
+    url = f"{base_url}/chat/completions"
     models = _bailian_fallback_models(fallback_kind, preferred_model)
     errors: list[str] = []
     last_err: ProviderError | None = None
@@ -467,6 +485,7 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
     async with httpx.AsyncClient(timeout=timeout) as client:
         if provider == "openrouter":
             or_model = active_model("text", "openrouter")
+            base_url, model_headers = _model_connection("openrouter", or_model, config.OPENROUTER_BASE_URL, config.OPENROUTER_API_KEY)
             payload: dict[str, Any] = {"model": or_model, "messages": messages, "max_tokens": max_tokens}
             effort = (config.OPENROUTER_TEXT_REASONING_EFFORT or "").strip().lower()
             if effort and effort != "none":
@@ -474,8 +493,8 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
             else:
                 payload["temperature"] = temperature
             content = await _chat_with_reasoning_fallback(
-                client, f"{config.OPENROUTER_BASE_URL}/chat/completions", payload,
-                kind="chat", model=or_model, headers=_openrouter_headers(),
+                client, f"{base_url}/chat/completions", payload,
+                kind="chat", model=or_model, headers=model_headers,
                 key_name="OPENROUTER_API_KEY", temperature=temperature, call_meta=call_meta)
         elif provider == "bailian":
             bailian_model = active_model("text", "bailian")
@@ -486,23 +505,41 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
             content = _chat_content(data, label="chat")
         elif provider == "deepseek":
             deepseek_model = active_model("text", "deepseek")
+            try:
+                base_url, model_headers = _model_connection("deepseek", deepseek_model, config.DEEPSEEK_BASE_URL, config.DEEPSEEK_API_KEY)
+            except ProviderError:
+                base_url, model_headers = config.DEEPSEEK_BASE_URL, _deepseek_headers()
             payload = {"model": deepseek_model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
             content = await _chat_with_reasoning_fallback(
-                client, f"{config.DEEPSEEK_BASE_URL}/chat/completions", payload,
-                kind="chat", model=deepseek_model, headers=_deepseek_headers(),
+                client, f"{base_url}/chat/completions", payload,
+                kind="chat", model=deepseek_model, headers=model_headers,
                 key_name="DEEPSEEK_API_KEY", temperature=temperature, call_meta=call_meta)
         elif provider == "zhipu":
             zhipu_model = active_model("text", "zhipu")
+            try:
+                base_url, model_headers = _model_connection("zhipu", zhipu_model, config.ZHIPU_BASE_URL, config.ZHIPU_API_KEY)
+            except ProviderError:
+                base_url, model_headers = config.ZHIPU_BASE_URL, _zhipu_headers()
             payload = {"model": zhipu_model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
             content = await _chat_with_reasoning_fallback(
-                client, f"{config.ZHIPU_BASE_URL}/chat/completions", payload,
-                kind="chat", model=zhipu_model, headers=_zhipu_headers(),
+                client, f"{base_url}/chat/completions", payload,
+                kind="chat", model=zhipu_model, headers=model_headers,
                 key_name="ZHIPU_API_KEY", temperature=temperature, call_meta=call_meta)
+        elif provider.startswith("custom:"):
+            custom_model = active_model("text", provider)
+            base_url, headers = _model_connection(provider, custom_model)
+            payload = {"model": custom_model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
+            data = await _post_json(client, f"{base_url}/chat/completions", payload,
+                                    kind="chat", model=custom_model, headers=headers,
+                                    key_name=f"model:{custom_model}", meta=call_meta)
+            content = _chat_content(data, label="custom chat")
         else:
             model = model or active_model("text", "hiagent")
+            base_url, model_headers = _model_connection("hiagent", model, config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY)
             payload = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
-            data = await _post_json(client, f"{config.HIAGENT_BASE_URL}/chat/completions", payload,
-                                    kind="chat", model=model, meta=call_meta)
+            data = await _post_json(client, f"{base_url}/chat/completions", payload,
+                                    kind="chat", model=model, headers=model_headers,
+                                    key_name=f"model:{model}", meta=call_meta)
             content = _chat_content(data, label="chat")
 
     if not content or not content.strip():
@@ -517,11 +554,13 @@ async def create_video_task(prompt_text: str, *, image_urls: list[tuple[str, str
     for url, role in image_urls or []:
         content.append({"type": "image_url", "image_url": {"url": url}, "role": role})
     model = active_model("video", "hiagent")
+    base_url, model_headers = _model_connection("hiagent", model, config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY)
     payload = {"model": model, "content": content}
     timeout = httpx.Timeout(connect=10, read=config.TIMEOUT_VIDEO_CREATE, write=30, pool=10)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        data = await _post_json(client, f"{config.HIAGENT_BASE_URL}/contents/generations/tasks", payload,
-                                kind="video_create", model=model, meta=call_meta)
+        data = await _post_json(client, f"{base_url}/contents/generations/tasks", payload,
+                                kind="video_create", model=model, headers=model_headers,
+                                key_name=f"model:{model}", meta=call_meta)
     task_id = data.get("id")
     if not task_id:
         raise ProviderError(f"视频任务创建响应缺少 id：{json.dumps(data, ensure_ascii=False)[:300]}")
@@ -532,9 +571,10 @@ async def poll_video_task(task_id: str, *, call_meta: dict | None = None) -> dic
     """轮询单次。返回 {status, video_url, last_frame_url, error}。"""
     timeout = httpx.Timeout(connect=10, read=config.TIMEOUT_VIDEO_POLL, write=10, pool=10)
     start = time.time()
+    model = active_model("video", "hiagent")
+    base_url, model_headers = _model_connection("hiagent", model, config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.get(f"{config.HIAGENT_BASE_URL}/contents/generations/tasks/{task_id}",
-                                headers=_headers())
+        resp = await client.get(f"{base_url}/contents/generations/tasks/{task_id}", headers=model_headers)
     latency = int((time.time() - start) * 1000)
     if resp.status_code != 200:
         model = active_model("video", "hiagent")
@@ -542,7 +582,7 @@ async def poll_video_task(task_id: str, *, call_meta: dict | None = None) -> dic
         merged_meta = _merge_call_meta(call_meta)
         log_provider_call("video_poll", model, "FAILED", resp.status_code, latency, error=str(err),
                           meta=merged_meta,
-                          request_json={"method": "GET", "url": f"{config.HIAGENT_BASE_URL}/contents/generations/tasks/{task_id}"},
+                          request_json={"method": "GET", "url": f"{base_url}/contents/generations/tasks/{task_id}"},
                           response_json={"status_code": resp.status_code, "body": resp.text})
         raise err
     data = resp.json()
@@ -553,12 +593,12 @@ async def poll_video_task(task_id: str, *, call_meta: dict | None = None) -> dic
         log_provider_call("video_poll", active_model("video", "hiagent"), "TASK_FAILED", 200, latency,
                           meta=merged_meta,
                           error=error_obj.get("message", ""),
-                          request_json={"method": "GET", "url": f"{config.HIAGENT_BASE_URL}/contents/generations/tasks/{task_id}"},
+                          request_json={"method": "GET", "url": f"{base_url}/contents/generations/tasks/{task_id}"},
                           response_json=data)
     return {
         "status": status,
-        "video_url": (data.get("content") or {}).get("video_url", ""),
-        "last_frame_url": (data.get("content") or {}).get("last_frame_url", ""),
+        "video_url": _absolute_provider_url((data.get("content") or {}).get("video_url", ""), base_url),
+        "last_frame_url": _absolute_provider_url((data.get("content") or {}).get("last_frame_url", ""), base_url),
         "error": error_obj.get("message", ""),
     }
 
@@ -581,6 +621,7 @@ async def generate_image(prompt: str, *, size: str = "1024x1024",
     image_inputs：可选的参考图（data URL 列表），用于让生成图保持角色/场景一致性。
     网关是否支持参考图未知，调用方应 try-with-fallback（带参考图失败则不带重试）。"""
     model = active_model("image", "hiagent")
+    base_url, model_headers = _model_connection("hiagent", model, config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY)
     payload: dict[str, Any] = {"model": model, "prompt": prompt, "n": 1, "size": size}
     media_meta: dict[str, Any] = {}
     if image_inputs:
@@ -592,12 +633,16 @@ async def generate_image(prompt: str, *, size: str = "1024x1024",
     async with _media_semaphore():
         async with httpx.AsyncClient(timeout=timeout) as client:
             data = await _post_json(
-                client, f"{config.HIAGENT_BASE_URL}/images/generations", payload,
-                kind=kind, model=model, meta={**(call_meta or {}), **media_meta})
+                client, f"{base_url}/images/generations", payload,
+                kind=kind, model=model, headers=model_headers, key_name=f"model:{model}",
+                meta={**(call_meta or {}), **media_meta})
     items = data.get("data") or []
     if not items:
         raise ProviderError(f"图像生成响应为空：{json.dumps(data, ensure_ascii=False)[:300]}")
-    return items[0]
+    item = dict(items[0])
+    if item.get("url"):
+        item["url"] = _absolute_provider_url(item["url"], base_url)
+    return item
 
 
 async def vlm_check(frames_b64: list[str], expectation_text: str,
@@ -616,14 +661,21 @@ async def vlm_check(frames_b64: list[str], expectation_text: str,
     provider = active_provider("vlm")
     if provider == "openrouter":
         model = active_model("vlm", "openrouter")
-        url = f"{config.OPENROUTER_BASE_URL}/chat/completions"
-        headers, key_name = _openrouter_headers(), "OPENROUTER_API_KEY"
+        base_url, headers = _model_connection("openrouter", model, config.OPENROUTER_BASE_URL, config.OPENROUTER_API_KEY)
+        url = f"{base_url}/chat/completions"
+        key_name = f"model:{model}"
     elif provider == "bailian":
         model = active_model("vlm", "bailian")
+    elif provider.startswith("custom:"):
+        model = active_model("vlm", provider)
+        base_url, headers = _model_connection(provider, model)
+        url = f"{base_url}/chat/completions"
+        key_name = f"model:{model}"
     else:
         model = active_model("vlm", "hiagent")
-        url = f"{config.HIAGENT_BASE_URL}/chat/completions"
-        headers, key_name = None, "HIAGENT_API_KEY"
+        base_url, headers = _model_connection("hiagent", model, config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY)
+        url = f"{base_url}/chat/completions"
+        key_name = f"model:{model}"
     prepared_urls, media_meta = await _prepare_image_data_urls(
         [f"data:image/jpeg;base64,{b64}" for b64 in frames_b64])
     content[:] = [content[0], *[

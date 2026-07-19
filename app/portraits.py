@@ -24,7 +24,9 @@ from pydantic import ValidationError
 
 from app import config, hiagent
 from app.db import get_conn, get_setting, new_id, now, set_setting
+from app.evidence.media import record_reference_asset
 from app.errors import code_ref
+from app.harness import model_gateway
 from app.refs import _safe_name, portrait_prompt
 from app.schemas import Bible, Character, extract_json
 
@@ -93,7 +95,10 @@ async def screen_appearance_changes(entries: list[dict], ep_label: str) -> dict[
 对 changed=true 的角色，给出整合后的【新外观锚点串】new_appearance：40~60 字，沿用既有锚点未变部分，只改真正变化处；保留性别年龄感/发型发色/服装款式与颜色/标志性特征。
 
 只输出一个 JSON 对象：{{"changes": [{{"name": "角色名", "changed": true/false, "new_appearance": "", "reason": "一句话依据"}}]}}"""
-    raw = await hiagent.chat([{"role": "user", "content": prompt}], temperature=0.2, max_tokens=1200)
+    raw = await model_gateway.chat(
+        [{"role": "user", "content": prompt}], temperature=0.2, max_tokens=1200,
+        call_meta={"stage": "screen_appearance_changes"},
+    )
     obj = extract_json(raw)
     valid = {e["name"] for e in entries}
     out: dict[str, dict] = {}
@@ -179,7 +184,10 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
 
 只输出一个 JSON 对象：
 {{"important": true/false, "reason": "一句话依据", "role": "主角|重要配角|反派", "appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}]}}"""
-    raw = await hiagent.chat([{"role": "user", "content": prompt}], temperature=0.3, max_tokens=900)
+    raw = await model_gateway.chat(
+        [{"role": "user", "content": prompt}], temperature=0.3, max_tokens=900,
+        call_meta={"stage": "assess_new_character", "character_name": name},
+    )
     obj = extract_json(raw)
     important = bool(obj.get("important"))
     appearance = (obj.get("appearance_canonical") or "").strip()
@@ -229,7 +237,13 @@ async def ensure_character_card(project_id: str, name: str, from_episode_no: int
                 last = 0
             if 0 < from_episode_no - last < DISCOVERY_REJUDGE_WINDOW:
                 return {"status": "skipped_minor", "name": name, "reason": "recently judged minor"}
-        project = conn.execute("SELECT bible_json, bible_version FROM projects WHERE id=?", (project_id,)).fetchone()
+        bible_artifact_supported = _has_column(conn, "projects", "bible_artifact_id")
+        select_cols = "bible_json, bible_version"
+        if bible_artifact_supported:
+            select_cols += ", bible_artifact_id"
+        project = conn.execute(
+            f"SELECT {select_cols} FROM projects WHERE id=?", (project_id,),
+        ).fetchone()
         if not project or not project["bible_json"]:
             return {"status": "skipped", "name": name, "reason": "no bible"}
         bible = Bible.model_validate(json.loads(project["bible_json"]))
@@ -268,12 +282,50 @@ async def ensure_character_card(project_id: str, name: str, from_episode_no: int
             except Exception:  # noqa: BLE001
                 continue
         if new_path:
+            artifact_supported = _has_column(conn, "character_portraits", "artifact_id")
+            artifact = None
+            if artifact_supported:
+                parent_id = project["bible_artifact_id"] if bible_artifact_supported else None
+                for qa_attempt in range(1, 3):
+                    qa = await _review_portrait_asset(new_path, char_obj.appearance_canonical)
+                    artifact = record_reference_asset(
+                        asset_type="character_portrait",
+                        scope_id=f"{project_id}:{name}:{from_episode_no}",
+                        file_path=new_path,
+                        content={"character_name": name, "appearance": char_obj.appearance_canonical,
+                                 "prompt": new_prompt, "episode_start": from_episode_no,
+                                 "attempt": qa_attempt},
+                        parent_artifact_ids=[parent_id] if parent_id else [],
+                        qa=qa,
+                    )
+                    if artifact["status"] == "approved":
+                        break
+                    if qa_attempt < 2:
+                        try:
+                            new_path, new_prompt = await _generate_fresh_portrait(
+                                project_id, name, style, char_obj.appearance_canonical,
+                                ep_start=from_episode_no,
+                            )
+                        except Exception:  # noqa: BLE001 补卡仍继续，但不采用未过门禁的图片
+                            break
+                if not artifact or artifact["status"] != "approved":
+                    new_path = new_prompt = None
+            if not new_path:
+                artifact_supported = False
+        if new_path:
             char_obj.ref_image_path = new_path
-            conn.execute(
-                "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end, appearance, "
-                "prompt, image_path, base_portrait_id, bible_version, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (new_id("portrait"), project_id, name, from_episode_no, None, char_obj.appearance_canonical,
-                 new_prompt, new_path, None, bible_version, now()))
+            if artifact_supported:
+                conn.execute(
+                    "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end, appearance, "
+                    "prompt, image_path, base_portrait_id, bible_version, artifact_id, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (new_id("portrait"), project_id, name, from_episode_no, None, char_obj.appearance_canonical,
+                     new_prompt, new_path, None, bible_version, artifact["id"], now()))
+            else:
+                conn.execute(
+                    "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end, appearance, "
+                    "prompt, image_path, base_portrait_id, bible_version, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (new_id("portrait"), project_id, name, from_episode_no, None, char_obj.appearance_canonical,
+                     new_prompt, new_path, None, bible_version, now()))
             conn.commit()
         _append_character_to_bible(conn, project_id, char_obj.model_dump())
         set_setting(_discovery_skip_key(project_id, name), "")  # 已建卡，清掉历史负缓存
@@ -322,12 +374,51 @@ async def _refresh_portrait_on_drift(project_id: str, name: str, episode_no: int
             return None  # 并发已处理，或本集（之后）才登场的图，无需切分
         new_path, new_prompt = await _redraw_portrait(
             project_id, name, style, new_appearance, base_path=cur["image_path"], ep_start=episode_no)
+        artifact_supported = _has_column(conn, "character_portraits", "artifact_id")
+        artifact = None
+        if artifact_supported:
+            project = conn.execute(
+                "SELECT bible_artifact_id FROM projects WHERE id=?", (project_id,)
+            ).fetchone()
+            parent_ids = [
+                artifact_id for artifact_id in (
+                    cur["artifact_id"], project["bible_artifact_id"] if project else None,
+                ) if artifact_id
+            ]
+            for attempt in range(1, 3):
+                qa = await _review_portrait_asset(new_path, new_appearance)
+                artifact = record_reference_asset(
+                    asset_type="character_portrait",
+                    scope_id=f"{project_id}:{name}:{episode_no}",
+                    file_path=new_path,
+                    content={"character_name": name, "appearance": new_appearance,
+                             "prompt": new_prompt, "episode_start": episode_no,
+                             "attempt": attempt},
+                    parent_artifact_ids=parent_ids,
+                    qa=qa,
+                )
+                if artifact["status"] == "approved":
+                    break
+                if attempt < 2:
+                    new_path, new_prompt = await _redraw_portrait(
+                        project_id, name, style, new_appearance,
+                        base_path=cur["image_path"], ep_start=episode_no,
+                    )
+            if not artifact or artifact["status"] != "approved":
+                raise hiagent.ProviderError(f"角色漂移重绘一致性检查未通过：{name}")
         conn.execute("UPDATE character_portraits SET ep_end=? WHERE id=?", (episode_no - 1, cur["id"]))
-        conn.execute(
-            "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end, appearance, "
-            "prompt, image_path, base_portrait_id, bible_version, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            (new_id("portrait"), project_id, name, episode_no, None, new_appearance,
-             new_prompt, new_path, cur["id"], bible_version, now()))
+        if artifact_supported:
+            conn.execute(
+                "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end, appearance, "
+                "prompt, image_path, base_portrait_id, bible_version, artifact_id, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (new_id("portrait"), project_id, name, episode_no, None, new_appearance,
+                 new_prompt, new_path, cur["id"], bible_version, artifact["id"], now()))
+        else:
+            conn.execute(
+                "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end, appearance, "
+                "prompt, image_path, base_portrait_id, bible_version, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (new_id("portrait"), project_id, name, episode_no, None, new_appearance,
+                 new_prompt, new_path, cur["id"], bible_version, now()))
         _update_bible_appearance(conn, project_id, name, new_appearance, new_path)
         conn.commit()
         return {"ep_start": episode_no, "image_path": new_path}
@@ -435,19 +526,43 @@ def _portrait_dir(project_id: str) -> Path:
 
 
 def _new_portrait_path(project_id: str, name: str, ep_start: int) -> str:
-    return str(_portrait_dir(project_id) / f"{_safe_name(name)}__ep{ep_start}.jpg")
+    return str(
+        _portrait_dir(project_id)
+        / f"{_safe_name(name)}__ep{ep_start}__{new_id('candidate')}.jpg"
+    )
+
+
+async def _review_portrait_asset(image_path: str, appearance: str) -> dict:
+    """对反应式人物锚点执行与初始定妆照相同的保守一致性门禁。"""
+    from app.stages import review_scene_image
+
+    try:
+        return await review_scene_image(
+            hiagent.encode_image_file(image_path), appearance,
+            "角色定妆立绘", [appearance], kind="head",
+        )
+    except Exception as exc:  # noqa: BLE001 评估失败不能伪装成通过
+        return {
+            "overall": 0.0,
+            "issues": [f"角色一致性评估未完成：{type(exc).__name__}"],
+            "qa_recovered": True,
+        }
 
 
 def register_initial_portrait(conn, project_id: str, name: str, image_path: str,
-                              appearance: str, prompt: str, bible_version: int) -> None:
+                              appearance: str, prompt: str, bible_version: int,
+                              artifact_id: str | None = None) -> str:
     """初次定妆后登记角色首张定妆照（适用集 1~ 至今）。覆盖式：先清掉该角色全部旧分段。"""
     conn.execute("DELETE FROM character_portraits WHERE project_id=? AND character_name=?",
                  (project_id, name))
+    portrait_id = new_id("portrait")
     conn.execute(
         "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end, appearance, "
-        "prompt, image_path, base_portrait_id, bible_version, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-        (new_id("portrait"), project_id, name, 1, None, appearance, prompt, image_path, None, bible_version, now()))
+        "prompt, image_path, base_portrait_id, bible_version, artifact_id, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        (portrait_id, project_id, name, 1, None, appearance, prompt, image_path, None,
+         bible_version, artifact_id, now()))
     conn.commit()
+    return portrait_id
 
 
 def _open_portrait(conn, project_id: str, name: str):
@@ -560,3 +675,6 @@ def _append_character_to_bible(conn, project_id: str, char: dict) -> None:
     conn.execute("UPDATE projects SET bible_json=? WHERE id=?",
                  (json.dumps(data, ensure_ascii=False), project_id))
     conn.commit()
+def _has_column(conn, table: str, column: str) -> bool:
+    """Support focused tests/old snapshots before app.db runs migrations."""
+    return any(row[1] == column for row in conn.execute(f"PRAGMA table_info({table})").fetchall())

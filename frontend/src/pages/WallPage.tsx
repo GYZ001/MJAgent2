@@ -141,7 +141,7 @@ function ShotMaterialGallery({ shot, onOpen, onRefresh, onToast }: {
    ═══════════════════════════════════════════════════════════════ */
 export default function WallPage() {
   const { episodeId } = useNav()
-  const { data: ep, refresh, error } = useEpisode(episodeId || '', 5000)
+  const { data: ep, refresh, error } = useEpisode(episodeId || '')
   const shots = ep?.shots ?? []
   const [idx, setIdx] = useState(0)
   const [toast, setToast] = useState<string | null>(null)
@@ -332,6 +332,7 @@ function ShotSlide({ shot, episodeStatus, generating,
         {/* 左栏：剧本/台词/参考图 + 操作按钮 */}
         <div className="slide-left">
           <InfoSection shot={shot} />
+          <KeyframeCompare shot={shot} onRefresh={onRefresh} onToast={onToast} />
           <VideoControls
             shot={shot} episodeStatus={episodeStatus} current={current}
             generating={generating}
@@ -442,6 +443,60 @@ function VideoPlayer({ current }: { current?: ShotVersion }) {
   )
 }
 
+function KeyframeCompare({ shot, onRefresh, onToast }: {
+  shot: Shot; onRefresh: () => void; onToast: (message: string) => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const required = shot.required_keyframes ?? ['head', 'tail']
+  const approved = { head: shot.approved_head_scene_id, tail: shot.approved_tail_scene_id }
+  const adopt = async (sceneId: string, kind: 'head' | 'tail') => {
+    const reason = window.prompt('请填写采用理由（应说明与其它候选的比较结果）', '画面与分镜意图最匹配，连续性和清晰度最佳')
+    if (!reason?.trim()) return
+    try { await api.sceneApprove(shot.id, sceneId, kind, reason.trim()); onRefresh() }
+    catch (e) { onToast((e as Error).message) }
+  }
+  const regenerate = async (kind?: 'head' | 'tail') => {
+    setBusy(true)
+    try {
+      await api.sceneGenerate(shot.id, kind ? [kind] : required)
+      onToast(`已提交${kind === 'head' ? '首帧' : kind === 'tail' ? '尾帧' : '关键帧'}定向重生`)
+      onRefresh()
+    } catch (e) { onToast((e as Error).message) }
+    finally { setBusy(false) }
+  }
+  return (
+    <section className="candidate-compare">
+      <div className="candidate-compare-head">
+        <b>关键帧候选横向比较</b>
+        <span>本轮最高预估 ￥{(shot.scene_est_cost_cny ?? 0).toFixed(2)}</span>
+        <button className="btn small" disabled={busy} onClick={() => regenerate()}>生成所需关键帧</button>
+      </div>
+      {required.map(kind => {
+        const items = shot.scenes.filter(item => item.kind === kind && item.status === 'succeeded')
+        return <div className="candidate-kind" key={kind}>
+          <div className="candidate-kind-label">
+            <b>{kind === 'head' ? '首帧' : '尾帧'}</b>
+            <button className="btn small ghost" disabled={busy} onClick={() => regenerate(kind)}>定向重生</button>
+          </div>
+          <div className="candidate-row">
+            {!items.length && <span className="hint">尚无候选</span>}
+            {items.map(item => {
+              const isApproved = approved[kind] === item.id
+              return <div className={`candidate-card${isApproved ? ' adopted' : ''}`} key={item.id}>
+                {item.image_url && <img src={item.image_url} alt={`${kind} v${item.version_no}`} />}
+                <div><b>v{item.version_no}</b><span>QA {item.qa?.overall?.toFixed(2) ?? '—'}</span></div>
+                {item.qa?.issues?.[0] && <small>{item.qa.issues[0]}</small>}
+                {item.adoption_reason && <small className="adoption-reason">{item.adoption_reason}</small>}
+                {isApproved ? <span className="stamp green">已采用</span> : <button className="btn small" onClick={() => adopt(item.id, kind)}>比较后采用</button>}
+              </div>
+            })}
+          </div>
+        </div>
+      })}
+    </section>
+  )
+}
+
 /* ═══════════════════════════════════════════════════════════════
    VideoControls — 操作按钮 + 版本历史（左栏）
    ═══════════════════════════════════════════════════════════════ */
@@ -456,7 +511,9 @@ function VideoControls({ shot, episodeStatus, current, generating,
   const disabled = generating
 
   const doAdopt = async (vid: string) => {
-    try { await api.adoptVersion(shot.id, vid); onRefresh() }
+    const reason = window.prompt('请填写采用理由（应说明质量、成本或版本比较）', '技术门禁通过，横向比较后质量分最佳')
+    if (!reason?.trim()) return
+    try { await api.adoptVersion(shot.id, vid, reason.trim()); onRefresh() }
     catch (e: unknown) { onToast(e instanceof Error ? e.message : String(e)) }
   }
   const doDelete = async (vid: string) => {
@@ -510,6 +567,21 @@ function VideoControls({ shot, episodeStatus, current, generating,
           {current && !hasAdopted && (
             <button className="btn small ghost" disabled={disabled} onClick={() => doDelete(current.id)}>删除此版</button>
           )}
+        </div>
+      </div>
+      <div className="version-history candidate-compare">
+        <div className="candidate-compare-head"><b>视频候选横向比较</b><span>单次预估 ￥{shot.est_cost_cny.toFixed(2)}</span></div>
+        <div className="version-compare-grid">
+          {shot.versions.map(version => {
+            const adopted = version.id === shot.adopted_version_id
+            return <div className={`version-compare-card${adopted ? ' adopted' : ''}`} key={version.id}>
+              <div><b>v{version.version_no}</b><span className={`stamp ${version.status === 'succeeded' ? 'green' : 'grey'}`}>{version.status}</span></div>
+              <span>QA {version.qa?.overall?.toFixed(2) ?? '未评估'} · ￥{version.cost_cny.toFixed(2)} · {version.latency_s.toFixed(1)}s</span>
+              {version.qa?.issues?.[0] && <small>{version.qa.issues[0]}</small>}
+              {version.adoption_reason && <small className="adoption-reason">采用理由：{version.adoption_reason}</small>}
+              {adopted ? <span className="stamp green">当前采用</span> : version.video_url && <button className="btn small" onClick={() => doAdopt(version.id)}>比较后采用</button>}
+            </div>
+          })}
         </div>
       </div>
     </div>

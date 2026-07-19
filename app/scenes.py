@@ -19,6 +19,8 @@ from pathlib import Path
 from app import config, hiagent
 from app.errors import code_ref
 from app.db import get_conn, new_id, now
+from app.evidence.media import record_reference_asset
+from app.harness import model_gateway
 from app.refs import _safe_name
 from app.schemas import Bible, Scene, extract_json
 from app.validators import match_scene_name
@@ -49,6 +51,62 @@ def scene_ref_prompt(visual_style: str, scene_canonical: str) -> str:
         f"{visual_style}。场景定场图（环境为主、画面中不出现任何人物）：{scene_canonical}。"
         "9:16 竖屏，构图完整的环境定场镜头，空间纵深清晰，光影与色调统一，电影质感，高清，"
         "无人物，无文字，无字幕，无水印，无 logo"
+    )
+
+
+def _restore_approved_scene_bible(conn, project_id: str, bible_data: dict) -> bool:
+    """Restore scenes lost by an older concurrent full-Bible write.
+
+    The immutable approved scene-bible artifact is the recovery source.  Current
+    entries win by name, preserving manual edits and reactively added scenes.
+    """
+    try:
+        row = conn.execute(
+            """SELECT content_json FROM artifacts
+               WHERE type='scene_bible' AND scope_type='project' AND scope_id=?
+                 AND status='approved'
+               ORDER BY version DESC LIMIT 1""",
+            (project_id,),
+        ).fetchone()
+    except Exception:  # noqa: BLE001 legacy/minimal test schemas may not have artifacts
+        return False
+    if not row or not row["content_json"]:
+        return False
+    try:
+        approved = json.loads(row["content_json"])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    current = bible_data.setdefault("scenes", [])
+    known = {item.get("name") for item in current}
+    missing = [item for item in approved.get("scenes", []) if item.get("name") not in known]
+    if not missing:
+        return False
+    current.extend(missing)
+    conn.execute(
+        "UPDATE projects SET bible_json=? WHERE id=?",
+        (json.dumps(bible_data, ensure_ascii=False), project_id),
+    )
+    conn.commit()
+    return True
+
+
+def _merge_generated_scene_refs(conn, project_id: str, generated_scenes) -> None:
+    """Merge accepted scene paths without overwriting concurrent Bible changes."""
+    accepted = {
+        item.name: item.ref_image_path for item in generated_scenes if item.ref_image_path
+    }
+    if not accepted:
+        return
+    row = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
+    if not row or not row["bible_json"]:
+        return
+    latest = json.loads(row["bible_json"])
+    for item in latest.get("scenes", []):
+        if item.get("name") in accepted:
+            item["ref_image_path"] = accepted[item["name"]]
+    conn.execute(
+        "UPDATE projects SET bible_json=? WHERE id=?",
+        (json.dumps(latest, ensure_ascii=False), project_id),
     )
 
 
@@ -91,29 +149,36 @@ async def _generate_scene_image(prompt: str, anchor_url: str | None = None, *,
 
 
 async def _review_scene_ref(image_path: str, scene: "Scene | dict") -> dict:
-    """复用 stages.review_scene_image 对场景图做 QA（无人物，锚点传空）。失败时返回保守满分，不阻断。"""
+    """复用 stages.review_scene_image 对场景图做 QA（无人物，锚点传空）。"""
     from app.stages import review_scene_image
     name = scene["name"] if isinstance(scene, dict) else scene.name
     canonical = scene["scene_canonical"] if isinstance(scene, dict) else scene.scene_canonical
     try:
         return await review_scene_image(
             hiagent.encode_image_file(image_path), canonical, name, [], kind="head")
-    except Exception:  # noqa: BLE001 QA 失败不阻断入库（与定妆照一致：图能用就用）
-        return {"overall": 1.0, "issues": ["qa_skipped"]}
+    except Exception as exc:  # noqa: BLE001 评估器失败不能伪装成通过
+        return {
+            "overall": 0.0,
+            "issues": [f"场景一致性评估未完成：{type(exc).__name__}"],
+            "qa_recovered": True,
+        }
 
 
 # ---------- scene_references 分段表读写（对照 app.portraits） ----------
 
 def register_initial_scene_ref(conn, project_id: str, name: str, image_path: str,
-                               scene_canonical: str, prompt: str, qa: dict, bible_version: int) -> None:
+                               scene_canonical: str, prompt: str, qa: dict, bible_version: int,
+                               artifact_id: str | None = None) -> str:
     """初次出图后登记场景图（适用集 1~ 至今）。覆盖式：先清掉该场景全部旧分段。"""
     conn.execute("DELETE FROM scene_references WHERE project_id=? AND scene_name=?", (project_id, name))
+    scene_id = new_id("scene")
     conn.execute(
         "INSERT INTO scene_references(id, project_id, scene_name, ep_start, ep_end, scene_canonical, "
-        "prompt, image_path, qa_json, base_scene_id, bible_version, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-        (new_id("scene"), project_id, name, 1, None, scene_canonical, prompt, image_path,
-         json.dumps(qa, ensure_ascii=False), None, bible_version, now()))
+        "prompt, image_path, qa_json, base_scene_id, bible_version, artifact_id, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (scene_id, project_id, name, 1, None, scene_canonical, prompt, image_path,
+         json.dumps(qa, ensure_ascii=False), None, bible_version, artifact_id, now()))
     conn.commit()
+    return scene_id
 
 
 def scene_ref_exists(conn, project_id: str, name: str) -> bool:
@@ -123,12 +188,6 @@ def scene_ref_exists(conn, project_id: str, name: str) -> bool:
         "SELECT image_path FROM scene_references WHERE project_id=? AND scene_name=?",
         (project_id, name)).fetchall()
     return any(r["image_path"] and Path(r["image_path"]).exists() for r in rows)
-
-
-def _open_scene_ref(conn, project_id: str, name: str):
-    return conn.execute(
-        "SELECT * FROM scene_references WHERE project_id=? AND scene_name=? AND ep_end IS NULL "
-        "ORDER BY ep_start DESC LIMIT 1", (project_id, name)).fetchone()
 
 
 def scene_ref_for_episode(project_id: str, name: str, episode_no: int | None) -> str | None:
@@ -195,7 +254,9 @@ async def generate_scene_refs(project_id: str, only_scene: str | None = None) ->
     project = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
     if not project or not project["bible_json"]:
         raise ValueError("项目不存在或还没有角色圣经")
-    bible = Bible.model_validate(json.loads(project["bible_json"]))
+    bible_data = json.loads(project["bible_json"])
+    _restore_approved_scene_bible(conn, project_id, bible_data)
+    bible = Bible.model_validate(bible_data)
     if not bible.scenes:
         raise ValueError("还没有场景圣经，请先生成场景清单")
     style = bible.world.visual_style_canonical
@@ -215,35 +276,70 @@ async def generate_scene_refs(project_id: str, only_scene: str | None = None) ->
     errors: list[str] = []
     for sc in targets:
         try:
-            path = scene_ref_path(project_id, sc.name)
-            # 重出=纯文生图，绝不拿该场景【自己的旧图】做 i2i 锚点：旧图可能本就画错/串味（如早期跨场景 i2i
-            # 把别的场景的围栏带了进来），自参考会把错误复制下去、越修越像。跨场景一致性交给画风串保证。
-            try:
-                Path(path).unlink()
-            except OSError:
-                pass
             sc.ref_image_path = None
-            prompt = (sc.scene_prompt_override or "").strip() or scene_ref_prompt(style, sc.scene_canonical)
-            item = await _generate_scene_image(
-                prompt,
-                call_meta={
-                    "asset_kind": "scene_reference",
-                    "scene_name": sc.name,
-                    "episode_no": 1,
-                    "scene_ref_mode": "initial",
-                })
-            await _save_image_item(item, path)
-            sc.ref_image_path = path
-            qa = await _review_scene_ref(path, sc)
-            register_initial_scene_ref(conn, project_id, sc.name, path, sc.scene_canonical,
-                                       prompt, qa, bible_version)
+            base_prompt = ((sc.scene_prompt_override or "").strip()
+                           or scene_ref_prompt(style, sc.scene_canonical))
+            last_error: Exception | None = None
+            critique = ""
+            for attempt in range(1, 3):
+                path = str(Path(scene_ref_path(project_id, sc.name)).with_name(
+                    f"{_safe_name(sc.name)}__{new_id('candidate')}.jpg"
+                ))
+                prompt = base_prompt
+                if critique:
+                    prompt += f"。上一版一致性检查问题：{critique}。本版必须逐条修复。"
+                try:
+                    item = await _generate_scene_image(
+                        prompt,
+                        call_meta={
+                            "asset_kind": "scene_reference",
+                            "scene_name": sc.name,
+                            "episode_no": 1,
+                            "scene_ref_mode": "initial",
+                            "attempt": attempt,
+                        })
+                    await _save_image_item(item, path)
+                    qa = await _review_scene_ref(path, sc)
+                    artifact = record_reference_asset(
+                        asset_type="scene_reference",
+                        scope_id=f"{project_id}:{sc.name}:1",
+                        file_path=path,
+                        content={
+                            "scene_name": sc.name,
+                            "canonical": sc.scene_canonical,
+                            "prompt": prompt,
+                            "attempt": attempt,
+                        },
+                        parent_artifact_ids=(
+                            [project["bible_artifact_id"]] if project["bible_artifact_id"] else []
+                        ),
+                        qa=qa,
+                    )
+                    if artifact["status"] != "approved":
+                        critique = "；".join(str(item) for item in (qa.get("issues") or []))[:400]
+                        last_error = hiagent.ProviderError(
+                            f"场景图一致性检查未通过：{sc.name}（第 {attempt} 次）"
+                        )
+                        continue
+                    sc.ref_image_path = path
+                    register_initial_scene_ref(
+                        conn, project_id, sc.name, path, sc.scene_canonical,
+                        prompt, qa, bible_version, artifact_id=artifact["id"],
+                    )
+                    break
+                except Exception as exc:  # noqa: BLE001 候选失败后在有界循环内修复
+                    last_error = exc
+            if not sc.ref_image_path:
+                raise last_error or hiagent.ProviderError(f"场景图生成失败：{sc.name}")
         except Exception as exc:  # noqa: BLE001 失败要响：逐场景记录，最后汇总抛出
             errors.append(f"{sc.name}：{exc}")
 
-    conn.execute("UPDATE projects SET bible_json=? WHERE id=?", (bible.model_dump_json(), project_id))
+    # Portrait generation and reactive scene discovery can update the Bible in
+    # parallel.  Only merge paths owned by this batch.
+    _merge_generated_scene_refs(conn, project_id, targets)
     conn.commit()
     if errors:
-        raise RuntimeError("部分场景图失败：" + "；".join(errors)[:600])
+        raise hiagent.ProviderError("部分场景图失败：" + "；".join(errors)[:600])
 
 
 # ---------- 分镜阶段反应式发现新场景（对照 portraits.ensure_character_card 的新角色路径） ----------
@@ -270,7 +366,10 @@ async def assess_new_scene(label: str, context: str, *, style: str,
 
 只输出一个 JSON 对象：
 {{"important": true/false, "reason": "一句话依据", "name": str, "scene_canonical": str, "location_kind": "室内|室外|其他"}}"""
-    raw = await hiagent.chat([{"role": "user", "content": prompt}], temperature=0.3, max_tokens=600)
+    raw = await model_gateway.chat(
+        [{"role": "user", "content": prompt}], temperature=0.3, max_tokens=600,
+        call_meta={"stage": "assess_new_scene", "scene_label": label},
+    )
     obj = extract_json(raw)
     important = bool(obj.get("important"))
     name = (obj.get("name") or "").strip() or label.strip()
@@ -306,31 +405,70 @@ def _append_scene_to_bible(conn, project_id: str, scene: dict) -> bool:
 async def _generate_and_register_scene(project_id: str, name: str, scene_canonical: str,
                                        style: str, *, ep_start: int, bible_version: int) -> str | None:
     """为新场景出一张定场图并登记到 scene_references（适用集 ep_start~ 至今）。出图失败返回 None。"""
-    prompt = scene_ref_prompt(style, scene_canonical)
-    dest = scene_ref_path(project_id, name, ep_start)
+    base_prompt = scene_ref_prompt(style, scene_canonical)
     conn = get_conn()
     # 同场景参考：若该场景已有更早分段的图（同一地点跨集演化），以它做 i2i 锚点保持一致；全新场景则为 None → 纯文生图。
     prior = same_scene_anchor(conn, project_id, name)
     anchor_url = hiagent.data_url_from_file(prior) if prior else None
-    try:
-        item = await _generate_scene_image(
-            prompt,
-            anchor_url,
-            call_meta={
-                "asset_kind": "scene_reference",
-                "scene_name": name,
-                "episode_no": ep_start,
-                "scene_ref_mode": "reactive",
-            })
-        await _save_image_item(item, dest)
-    except Exception:  # noqa: BLE001 出图失败仍入库（文字锚点兜底），按集选图时回退
+    project = conn.execute(
+        "SELECT bible_artifact_id FROM projects WHERE id=?", (project_id,)
+    ).fetchone()
+    prior_row = conn.execute(
+        "SELECT artifact_id FROM scene_references WHERE project_id=? AND scene_name=? ORDER BY ep_start DESC LIMIT 1",
+        (project_id, name),
+    ).fetchone()
+    parent_ids = [
+        artifact_id for artifact_id in (
+            prior_row["artifact_id"] if prior_row else None,
+            project["bible_artifact_id"] if project else None,
+        ) if artifact_id
+    ]
+    dest = ""
+    prompt = base_prompt
+    qa: dict = {}
+    artifact = None
+    critique = ""
+    for attempt in range(1, 3):
+        prompt = base_prompt
+        if critique:
+            prompt += f"。上一版一致性检查问题：{critique}。本版必须逐条修复。"
+        dest = str(Path(scene_ref_path(project_id, name, ep_start)).with_name(
+            f"{_safe_name(name)}__ep{ep_start}__{new_id('candidate')}.jpg"
+        ))
+        try:
+            item = await _generate_scene_image(
+                prompt,
+                anchor_url,
+                call_meta={
+                    "asset_kind": "scene_reference",
+                    "scene_name": name,
+                    "episode_no": ep_start,
+                    "scene_ref_mode": "reactive",
+                    "attempt": attempt,
+                })
+            await _save_image_item(item, dest)
+            qa = await _review_scene_ref(dest, {"name": name, "scene_canonical": scene_canonical})
+            artifact = record_reference_asset(
+                asset_type="scene_reference",
+                scope_id=f"{project_id}:{name}:{ep_start}",
+                file_path=dest,
+                content={"scene_name": name, "canonical": scene_canonical,
+                         "prompt": prompt, "episode_start": ep_start, "attempt": attempt},
+                parent_artifact_ids=parent_ids,
+                qa=qa,
+            )
+            if artifact["status"] == "approved":
+                break
+            critique = "；".join(str(item) for item in (qa.get("issues") or []))[:400]
+        except Exception:  # noqa: BLE001 出图失败仍允许一次有界重试
+            continue
+    if not artifact or artifact["status"] != "approved":
         return None
-    qa = await _review_scene_ref(dest, {"name": name, "scene_canonical": scene_canonical})
     conn.execute(
         "INSERT INTO scene_references(id, project_id, scene_name, ep_start, ep_end, scene_canonical, "
-        "prompt, image_path, qa_json, base_scene_id, bible_version, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        "prompt, image_path, qa_json, base_scene_id, bible_version, artifact_id, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (new_id("scene"), project_id, name, ep_start, None, scene_canonical, prompt, dest,
-         json.dumps(qa, ensure_ascii=False), None, bible_version, now()))
+         json.dumps(qa, ensure_ascii=False), None, bible_version, artifact["id"], now()))
     conn.commit()
     return dest
 

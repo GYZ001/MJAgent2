@@ -60,7 +60,7 @@ def test_match_scene_name_no_match_returns_none() -> None:
 # ---------- validate_storyboard_scenes ----------
 
 def _shot(no: int, scene_setting: str) -> Shot:
-    return Shot(shot_no=no, duration_s=10, shot_size="全景", camera_move="固定",
+    return Shot(shot_no=no, duration_s=5, shot_size="全景", camera_move="固定",
                 scene_setting=scene_setting, characters=["萧炎"],
                 action_desc="萧炎站在场景中，缓缓抬头环视四周，眼神逐渐变得坚定，握紧了拳头",
                 first_frame_desc="萧炎立于场景中神情平静", last_frame_desc="萧炎握拳神情坚定",

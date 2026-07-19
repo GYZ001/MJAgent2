@@ -35,7 +35,6 @@ def test_retryable_error_requeues_job(monkeypatch) -> None:
     conn = _conn()
     _seed_job(conn)
     monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    worker._job_retry_counts.clear()
 
     requeued: list[str] = []
     monkeypatch.setattr(worker._queue, "put_nowait", lambda jid: requeued.append(jid))
@@ -51,10 +50,10 @@ def test_retryable_error_requeues_job(monkeypatch) -> None:
 
     scheduled = asyncio.run(run())
     assert scheduled is True
-    assert worker._job_retry_counts["j1"] == 1
     assert requeued == ["j1"]
-    row = conn.execute("SELECT status, error FROM jobs WHERE id='j1'").fetchone()
+    row = conn.execute("SELECT status, error, retry_count, next_retry_at FROM jobs WHERE id='j1'").fetchone()
     assert row["status"] == "queued"
+    assert row["retry_count"] == 1 and row["next_retry_at"] is not None
     assert "自动排队" in row["error"]
 
 
@@ -62,13 +61,12 @@ def test_non_retryable_error_not_requeued(monkeypatch) -> None:
     conn = _conn()
     _seed_job(conn)
     monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    worker._job_retry_counts.clear()
 
     async def run() -> bool:
         return worker._schedule_job_retry("j1", ProviderError("Seedance 任务失败：版权受限"))
 
     assert asyncio.run(run()) is False
-    assert "j1" not in worker._job_retry_counts
+    assert conn.execute("SELECT retry_count FROM jobs WHERE id='j1'").fetchone()["retry_count"] == 0
 
 
 def test_retry_budget_exhausts(monkeypatch) -> None:
@@ -78,7 +76,6 @@ def test_retry_budget_exhausts(monkeypatch) -> None:
     monkeypatch.setattr(config, "VIDEO_JOB_RETRY_BASE_DELAY", 0.0)
     monkeypatch.setattr(config, "VIDEO_JOB_MAX_RETRIES", 3)
     monkeypatch.setattr(worker._queue, "put_nowait", lambda jid: None)
-    worker._job_retry_counts.clear()
 
     async def run() -> list[bool]:
         results = []
@@ -93,4 +90,4 @@ def test_retry_budget_exhausts(monkeypatch) -> None:
     results = asyncio.run(run())
     # 前 3 次安排重试，第 4 次预算耗尽 → 交回永久失败逻辑
     assert results == [True, True, True, False]
-    assert worker._job_retry_counts["j1"] == 3
+    assert conn.execute("SELECT retry_count FROM jobs WHERE id='j1'").fetchone()["retry_count"] == 3

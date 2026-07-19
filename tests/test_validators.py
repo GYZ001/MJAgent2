@@ -1,3 +1,4 @@
+from app import config
 from app.schemas import Bible, Character, Dialogue, EpisodeScreenplay, Shot, Storyboard, World
 from app.validators import (_contiguous_scene_move, _has_movement_cue, _has_transition_hint,
                             normalize_action_desc, validate_storyboard,
@@ -44,14 +45,14 @@ def test_storyboard_no_false_missing_transition_for_walk_to_adjacent_area() -> N
     board = Storyboard(
         episode_no=1,
         shots=[
-            Shot(shot_no=1, duration_s=10, shot_size="全景", camera_move="固定",
+            Shot(shot_no=1, duration_s=5, shot_size="全景", camera_move="固定",
                  scene_setting="日，萧家测验广场边缘", characters=["萧炎", "萧薰儿"],
                  action_desc="萧薰儿走到广场边缘的萧炎面前站定，微微弯腰唤他萧炎哥哥，萧炎扯了扯嘴角",
                  first_frame_desc="日光下萧炎独自立在广场边缘，神情自嘲，萧薰儿正走近",
                  last_frame_desc="萧薰儿在萧炎面前微微弯腰，萧炎侧脸僵硬，画面渐暗",
                  source_excerpt="萧薰儿走到萧炎面前，唤他萧炎哥哥。",
                  narration="", transition="硬切", continuity_from_prev=False),
-            Shot(shot_no=2, duration_s=10, shot_size="中景", camera_move="跟随",
+            Shot(shot_no=2, duration_s=5, shot_size="中景", camera_move="跟随",
                  scene_setting="日，萧家测验广场外小路", characters=["萧炎", "萧薰儿"],
                  action_desc="萧炎不愿留在广场受人议论，转身离开测验广场，走到外侧的小路上，萧薰儿快步跟上",
                  first_frame_desc="广场外小路上，萧炎背对人群迈步，萧薰儿在身后跟来",
@@ -72,14 +73,14 @@ def test_storyboard_still_flags_unexplained_scene_jump() -> None:
     board = Storyboard(
         episode_no=1,
         shots=[
-            Shot(shot_no=1, duration_s=10, shot_size="全景", camera_move="固定",
+            Shot(shot_no=1, duration_s=5, shot_size="全景", camera_move="固定",
                  scene_setting="夜，地下密室", characters=["萧炎"],
                  action_desc="萧炎盯着密室石壁上的古老纹路，眉头紧锁，指尖缓缓抚过冰冷的刻痕",
                  first_frame_desc="昏暗密室里萧炎独自站在石壁前，神情凝重",
                  last_frame_desc="萧炎收回手掌，垂眸沉思，密室一片死寂",
                  source_excerpt="萧炎在密室中观察石壁纹路。",
                  narration="", transition="硬切", continuity_from_prev=False),
-            Shot(shot_no=2, duration_s=10, shot_size="远景", camera_move="固定",
+            Shot(shot_no=2, duration_s=5, shot_size="远景", camera_move="固定",
                  scene_setting="日，城外山巅", characters=["萧炎"],
                  action_desc="萧炎独自伫立在山巅之上，望着翻涌的云海，神情复杂，衣袍无风自动",
                  first_frame_desc="开阔山巅上萧炎背对镜头眺望远方云海",
@@ -98,7 +99,7 @@ def _compact_shot(no: int) -> Shot:
     sizes = ["远景", "中景", "特写"]
     return Shot(
         shot_no=no,
-        duration_s=8,
+        duration_s=5,
         shot_size=sizes[(no - 1) % len(sizes)],
         camera_move="固定",
         scene_setting="日，萧家测验广场",
@@ -128,14 +129,14 @@ def test_storyboard_allows_extra_split_shots_for_dense_dialogue() -> None:
     assert not any("镜头数" in e for e in errors), errors
 
 
-def test_storyboard_still_caps_excessive_split_shots() -> None:
+def test_storyboard_allows_as_many_split_shots_as_story_requires() -> None:
     board = Storyboard(episode_no=1, shots=[_compact_shot(i) for i in range(1, 20)])
     for shot in board.shots:
         shot.duration_s = 5
 
     errors = validate_storyboard(board, _bible(), target_duration_s=50)
 
-    assert any("镜头数" in e for e in errors), errors
+    assert not any("镜头数" in e for e in errors), errors
 
 
 def test_normalize_action_desc_strips_template_sequence_marker() -> None:
@@ -151,12 +152,9 @@ def test_normalize_action_desc_keeps_real_words() -> None:
     assert normalize_action_desc("先生推门而入，谷言抬头") == "先生推门而入，谷言抬头"
 
 
-def test_storyboard_count_range_scales_with_target_duration() -> None:
-    # 镜头数上限按「目标时长 / 单镜最短时长」折算，而非统一顶到 18 镜
-    assert storyboard_shot_count_range(40) == (4, 8)
-    assert storyboard_shot_count_range(50) == (5, 10)
-    assert storyboard_shot_count_range(70) == (7, 14)
-    assert storyboard_shot_count_range(90) == (9, 18)
+def test_storyboard_count_range_is_not_derived_from_target_duration() -> None:
+    for target in (40, 50, 70, 90):
+        assert storyboard_shot_count_range(target) == (1, config.STORYBOARD_MAX_SHOTS)
 
 
 # ---------- 分镜防丢失：关键内容保留校验 ----------
@@ -175,7 +173,7 @@ def _board_preserving_key_content() -> Storyboard:
     return Storyboard(
         episode_no=1,
         shots=[
-            Shot(shot_no=1, duration_s=10, shot_size="全景", camera_move="固定",
+            Shot(shot_no=1, duration_s=5, shot_size="全景", camera_move="固定",
                  scene_setting="日，萧家测验广场", characters=["萧炎"],
                  action_desc="萧炎站在测验石碑前，碑面只亮起三段微光，萧炎垂手攥拳，脸色铁青",
                  first_frame_desc="测验广场上萧炎手贴石碑，神情紧绷",
@@ -183,7 +181,7 @@ def _board_preserving_key_content() -> Storyboard:
                  source_excerpt="测验石碑只亮起三段斗气，全场哗然。",
                  dialogues=[Dialogue(speaker="萧炎", line="三年斗气十段，废物也配姓萧？", emotion="愤怒")],
                  transition="硬切", continuity_from_prev=False),
-            Shot(shot_no=2, duration_s=10, shot_size="中景", camera_move="跟随",
+            Shot(shot_no=2, duration_s=5, shot_size="中景", camera_move="跟随",
                  scene_setting="日，萧家测验广场", characters=["萧炎", "萧薰儿"],
                  action_desc="萧薰儿在众人嘲讽中走到萧炎身边，伸手扶住他手臂为他解围，萧炎抬眼",
                  first_frame_desc="萧薰儿快步走近被孤立的萧炎",
@@ -297,13 +295,13 @@ def test_continuity_same_scene_new_focus_char_with_movement_passes() -> None:
     board = Storyboard(
         episode_no=1,
         shots=[
-            Shot(shot_no=1, duration_s=12, shot_size="特写", camera_move="固定",
+            Shot(shot_no=1, duration_s=5, shot_size="特写", camera_move="固定",
                  scene_setting="日，萧家测验广场", characters=["萧炎"],
                  action_desc="萧炎垂眸凝视紧攥的左手，血丝渗出，喉结滚动，未发一言",
                  first_frame_desc="萧炎左手特写", last_frame_desc="同机位血丝渗出",
                  source_excerpt="", narration="", dialogues=[],
                  transition="硬切", continuity_from_prev=False),
-            Shot(shot_no=2, duration_s=13, shot_size="中景", camera_move="固定",
+            Shot(shot_no=2, duration_s=5, shot_size="中景", camera_move="固定",
                  scene_setting="日，萧家测验广场", characters=["萧媚"],
                  action_desc="萧媚小跑上前，伸手轻触魔石碑，碑面亮起七段光芒，人群赞叹声浪骤起",
                  first_frame_desc="萧媚触碑", last_frame_desc="萧媚转身",
@@ -321,13 +319,13 @@ def test_continuity_same_scene_new_focus_char_without_movement_fails() -> None:
     board = Storyboard(
         episode_no=1,
         shots=[
-            Shot(shot_no=1, duration_s=12, shot_size="特写", camera_move="固定",
+            Shot(shot_no=1, duration_s=5, shot_size="特写", camera_move="固定",
                  scene_setting="日，萧家测验广场", characters=["萧炎"],
                  action_desc="萧炎垂眸凝视紧攥的左手，血丝渗出，喉结滚动",
                  first_frame_desc="萧炎左手特写", last_frame_desc="同机位血丝渗出",
                  source_excerpt="", narration="", dialogues=[],
                  transition="硬切", continuity_from_prev=False),
-            Shot(shot_no=2, duration_s=13, shot_size="中景", camera_move="固定",
+            Shot(shot_no=2, duration_s=5, shot_size="中景", camera_move="固定",
                  scene_setting="日，萧家测验广场", characters=["萧媚"],
                  action_desc="萧媚立于碑前，碑面亮起七段光芒，人群赞叹",
                  first_frame_desc="萧媚触碑", last_frame_desc="萧媚转身",

@@ -4,7 +4,7 @@ import sqlite3
 
 import httpx
 
-from app import api, hiagent, video_modes
+from app import hiagent, system_api, video_modes
 
 
 class _Response:
@@ -118,23 +118,74 @@ def test_jobs_overview_includes_running_screenplay(monkeypatch) -> None:
         CREATE TABLE jobs(
             id TEXT, kind TEXT, shot_id TEXT, version_id TEXT, episode_id TEXT,
             project_id TEXT, status TEXT, error TEXT, created_at REAL, updated_at REAL,
-            after_shot_id TEXT, after_version_id TEXT, scene_kinds TEXT
+            after_shot_id TEXT, after_version_id TEXT, scene_kinds TEXT, run_id TEXT
         );
-        CREATE TABLE shots(id TEXT, shot_no INTEGER);
+        CREATE TABLE shots(id TEXT, episode_id TEXT, shot_no INTEGER);
         CREATE TABLE projects(id TEXT, name TEXT);
         CREATE TABLE episodes(
             id TEXT, project_id TEXT, episode_no INTEGER, title TEXT,
             screenplay_status TEXT, screenplay_error TEXT, screenplay_started_at REAL,
             screenplay_updated_at REAL, created_at REAL
         );
+        CREATE TABLE workflow_runs(
+            id TEXT, workflow_type TEXT, scope_type TEXT, scope_id TEXT,
+            status TEXT, current_step_key TEXT, updated_at REAL,
+            failure_message TEXT
+        );
         INSERT INTO projects VALUES('p1', '测试项目');
         INSERT INTO episodes VALUES('e1', 'p1', 1, '第一集', 'running', NULL, 100, 120, 10);
     """)
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    monkeypatch.setattr(system_api, "get_conn", lambda: conn)
 
-    result = api.jobs_overview()
+    result = system_api.jobs_overview()
 
     assert result["recent"][0]["kind"] == "screenplay"
     assert result["recent"][0]["status"] == "running"
     assert result["recent"][0]["episode_no"] == 1
     assert result["counts"]["running"] == 1
+
+
+def test_jobs_overview_includes_harness_runs_and_deduplicates_linked_work(monkeypatch) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE jobs(
+            id TEXT, kind TEXT, shot_id TEXT, version_id TEXT, episode_id TEXT,
+            project_id TEXT, status TEXT, error TEXT, created_at REAL, updated_at REAL,
+            run_id TEXT
+        );
+        CREATE TABLE shots(id TEXT, episode_id TEXT, shot_no INTEGER);
+        CREATE TABLE projects(id TEXT, name TEXT);
+        CREATE TABLE episodes(
+            id TEXT, project_id TEXT, episode_no INTEGER, title TEXT,
+            screenplay_status TEXT, screenplay_error TEXT, screenplay_started_at REAL,
+            screenplay_updated_at REAL, created_at REAL
+        );
+        CREATE TABLE workflow_runs(
+            id TEXT, workflow_type TEXT, scope_type TEXT, scope_id TEXT,
+            status TEXT, current_step_key TEXT, updated_at REAL,
+            failure_message TEXT
+        );
+        INSERT INTO projects VALUES('p1', 'Project');
+        INSERT INTO episodes VALUES('e1', 'p1', 1, 'Episode', 'ready', NULL, 100, 120, 10);
+        INSERT INTO workflow_runs VALUES(
+            'run_refs', 'character_references', 'project', 'p1',
+            'RUNNING', 'character_references', 200, NULL
+        );
+        INSERT INTO workflow_runs VALUES(
+            'run_script', 'screenplay', 'episode', 'e1',
+            'SUCCEEDED', 'screenplay', 190, NULL
+        );
+        INSERT INTO jobs(
+            id, kind, episode_id, project_id, status, created_at, updated_at, run_id
+        ) VALUES('job_linked', 'video', 'e1', 'p1', 'running', 180, 180, 'run_refs');
+    """)
+    monkeypatch.setattr(system_api, "get_conn", lambda: conn)
+
+    result = system_api.jobs_overview()
+
+    assert result["counts"] == {"running": 1, "succeeded": 1}
+    assert [row["id"] for row in result["recent"]] == ["run_refs", "run_script"]
+    assert result["recent"][0]["kind"] == "character_references"
+    assert result["recent"][0]["project_name"] == "Project"
+    assert all(row["id"] not in {"job_linked", "screenplay_e1"} for row in result["recent"])
