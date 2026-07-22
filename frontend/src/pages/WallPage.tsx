@@ -311,10 +311,25 @@ function ShotSlide({ shot, episodeStatus, generating,
   onGenVideo: (opts?: { promptOverride?: string; reroll?: boolean; withCritique?: boolean; actionLabel?: string }) => void
   onRefresh: () => void; onToast: (m: string) => void
 }) {
+  const [previewVersionId, setPreviewVersionId] = useState<string | null>(null)
   const adopted = shot.versions.find(v => v.id === shot.adopted_version_id)
   const latest = shot.versions[0]
   const current = adopted || latest
+  const preview = previewVersionId
+    ? shot.versions.find(v => v.id === previewVersionId)
+    : undefined
+  const playing = preview || current
   const hasAnyVersion = shot.versions.length > 0
+
+  useEffect(() => {
+    setPreviewVersionId(null)
+  }, [shot.id])
+
+  useEffect(() => {
+    if (previewVersionId && !shot.versions.some(v => v.id === previewVersionId)) {
+      setPreviewVersionId(null)
+    }
+  }, [previewVersionId, shot.versions])
 
   return (
     <div className="slide-card">
@@ -335,15 +350,17 @@ function ShotSlide({ shot, episodeStatus, generating,
           <KeyframeCompare shot={shot} onRefresh={onRefresh} onToast={onToast} />
           <VideoControls
             shot={shot} episodeStatus={episodeStatus} current={current}
+            previewVersionId={preview?.id ?? null}
             generating={generating}
             onGenVideo={onGenVideo}
+            onPreview={setPreviewVersionId}
             onRefresh={onRefresh} onToast={onToast}
           />
         </div>
 
         {/* 右栏：仅视频播放 */}
         <div className="slide-right">
-          <VideoPlayer current={current} />
+          <VideoPlayer current={playing} previewing={!!preview && preview.id !== current?.id} />
         </div>
       </div>
     </div>
@@ -428,11 +445,14 @@ function InfoSection({ shot }: { shot: Shot }) {
 /* ═══════════════════════════════════════════════════════════════
    VideoPlayer — 视频播放（右栏，仅播放器）
    ═══════════════════════════════════════════════════════════════ */
-function VideoPlayer({ current }: { current?: ShotVersion }) {
+function VideoPlayer({ current, previewing }: { current?: ShotVersion; previewing?: boolean }) {
   return (
     <div className="video-player-area">
+      {previewing && current && (
+        <div className="vp-preview-badge">预览 v{current.version_no}</div>
+      )}
       {current?.video_url ? (
-        <video src={current.video_url} controls className="rev-video" />
+        <video key={current.id} src={current.video_url} controls className="rev-video" />
       ) : (
         <div className="vp-empty">
           <span>{current?.status === 'queued' || current?.status === 'running' ? '⏳ 生成中…' : '暂无视频'}</span>
@@ -500,11 +520,13 @@ function KeyframeCompare({ shot, onRefresh, onToast }: {
 /* ═══════════════════════════════════════════════════════════════
    VideoControls — 操作按钮 + 版本历史（左栏）
    ═══════════════════════════════════════════════════════════════ */
-function VideoControls({ shot, episodeStatus, current, generating,
-  onGenVideo, onRefresh, onToast }: {
+function VideoControls({ shot, episodeStatus, current, previewVersionId, generating,
+  onGenVideo, onPreview, onRefresh, onToast }: {
   shot: Shot; episodeStatus: string; current?: ShotVersion
+  previewVersionId: string | null
   generating: boolean
   onGenVideo: (opts?: { promptOverride?: string; reroll?: boolean; withCritique?: boolean; actionLabel?: string }) => void
+  onPreview: (versionId: string) => void
   onRefresh: () => void; onToast: (m: string) => void
 }) {
   const hasAdopted = !!shot.adopted_version_id
@@ -570,17 +592,40 @@ function VideoControls({ shot, episodeStatus, current, generating,
         </div>
       </div>
       <div className="version-history candidate-compare">
-        <div className="candidate-compare-head"><b>视频候选横向比较</b><span>单次预估 ￥{shot.est_cost_cny.toFixed(2)}</span></div>
+        <div className="candidate-compare-head">
+          <b>视频候选横向比较</b>
+          <span>单次预估 ￥{shot.est_cost_cny.toFixed(2)} · 点击方框可预览</span>
+        </div>
         <div className="version-compare-grid">
           {shot.versions.map(version => {
             const adopted = version.id === shot.adopted_version_id
-            return <div className={`version-compare-card${adopted ? ' adopted' : ''}`} key={version.id}>
-              <div><b>v{version.version_no}</b><span className={`stamp ${version.status === 'succeeded' ? 'green' : 'grey'}`}>{version.status}</span></div>
-              <span>QA {version.qa?.overall?.toFixed(2) ?? '未评估'} · ￥{version.cost_cny.toFixed(2)} · {version.latency_s.toFixed(1)}s</span>
-              {version.qa?.issues?.[0] && <small>{version.qa.issues[0]}</small>}
-              {version.adoption_reason && <small className="adoption-reason">采用理由：{version.adoption_reason}</small>}
-              {adopted ? <span className="stamp green">当前采用</span> : version.video_url && <button className="btn small" onClick={() => doAdopt(version.id)}>比较后采用</button>}
-            </div>
+            const previewing = version.id === previewVersionId
+            const canPreview = !!version.video_url
+            return (
+              <div
+                className={`version-compare-card${adopted ? ' adopted' : ''}${previewing ? ' previewing' : ''}${canPreview ? ' clickable' : ''}`}
+                key={version.id}
+                role={canPreview ? 'button' : undefined}
+                tabIndex={canPreview ? 0 : undefined}
+                onClick={() => { if (canPreview) onPreview(version.id) }}
+                onKeyDown={e => {
+                  if (!canPreview) return
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    onPreview(version.id)
+                  }
+                }}
+              >
+                <div><b>v{version.version_no}</b><span className={`stamp ${version.status === 'succeeded' ? 'green' : 'grey'}`}>{version.status}</span></div>
+                <span>QA {version.qa?.overall?.toFixed(2) ?? '未评估'} · ￥{version.cost_cny.toFixed(2)} · {version.latency_s.toFixed(1)}s</span>
+                {version.qa?.issues?.[0] && <small>{version.qa.issues[0]}</small>}
+                {version.adoption_reason && <small className="adoption-reason">采用理由：{version.adoption_reason}</small>}
+                {previewing && !adopted && <span className="stamp blue">预览中</span>}
+                {adopted ? <span className="stamp green">当前采用</span> : version.video_url && (
+                  <button className="btn small" onClick={e => { e.stopPropagation(); doAdopt(version.id) }}>比较后采用</button>
+                )}
+              </div>
+            )
           })}
         </div>
       </div>

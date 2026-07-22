@@ -1173,7 +1173,11 @@ button.btn.ghost.danger:hover { background: var(--cinnabar); color: #fdf8ef; }
 
 /* ─── 视频区 ─── */
 .video-section { min-height: 0; min-width: 0; max-width: 100%; overflow: hidden; padding-right: 0; }
-.video-player-area { height: 100%; min-height: 0; display: flex; justify-content: center; align-items: center; }
+.video-player-area { height: 100%; min-height: 0; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 8px; position: relative; }
+.vp-preview-badge {
+  font-size: 11px; color: #3d5f8a; background: rgba(70,110,160,.12);
+  border: 1px solid rgba(70,110,160,.28); border-radius: 999px; padding: 2px 10px;
+}
 .video-player-area .rev-video,
 .video-player-area .vp-empty {
   width: auto; height: 100%; max-width: 100%; aspect-ratio: 9 / 16;
@@ -1369,7 +1373,10 @@ button.btn.ghost.danger:hover { background: var(--cinnabar); color: #fdf8ef; }
 .candidate-kind-label { display: grid; align-content: start; gap: 6px; font-size: 11px; }
 .candidate-row, .version-compare-grid { display: flex; gap: 8px; overflow-x: auto; min-width: 0; padding-bottom: 4px; }
 .candidate-card, .version-compare-card { flex: 0 0 150px; display: grid; gap: 5px; padding: 7px; border: 1px solid var(--hairline); border-radius: 7px; background: var(--card); }
+.version-compare-card.clickable { cursor: pointer; transition: border-color .15s ease, box-shadow .15s ease; }
+.version-compare-card.clickable:hover { border-color: rgba(70,110,160,.45); }
 .candidate-card.adopted, .version-compare-card.adopted { border-color: rgba(91,114,83,.55); box-shadow: inset 0 0 0 1px rgba(91,114,83,.15); }
+.version-compare-card.previewing { border-color: rgba(70,110,160,.6); box-shadow: inset 0 0 0 1px rgba(70,110,160,.18); }
 .candidate-card img { width: 100%; aspect-ratio: 9/16; object-fit: cover; border-radius: 5px; }
 .candidate-card > div, .version-compare-card > div { display: flex; justify-content: space-between; gap: 6px; }
 .candidate-card span, .candidate-card small, .version-compare-card span, .version-compare-card small { font-size: 10.5px; color: var(--ink-faint); }
