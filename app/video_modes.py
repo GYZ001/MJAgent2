@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from app import config, hiagent
+from app.atomic_io import atomic_write_bytes
 from app.harness import model_gateway
 from app.db import get_setting, new_id
 from app.errors import code_ref
@@ -564,7 +565,7 @@ async def _generate_one_reference(*, project_id: str, episode_no: int, shot: Sho
     if item.get("url"):
         await hiagent.download(item["url"], str(dest))
     elif item.get("b64_json"):
-        dest.write_bytes(base64.b64decode(item["b64_json"]))
+        atomic_write_bytes(dest, base64.b64decode(item["b64_json"]))
     else:
         raise ProviderError(f"Reference image response missing url/b64_json: {list(item.keys())}")
     qa = await review_reference_image(hiagent.encode_image_file(str(dest)), shot=shot, bible=bible, ref_type=ref_type)

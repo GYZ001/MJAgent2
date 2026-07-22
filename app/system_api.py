@@ -380,6 +380,14 @@ def health():
 def recent_calls(limit: int = 30):
     rows = rows_to_dicts(get_conn().execute(
         "SELECT * FROM provider_calls ORDER BY id DESC LIMIT ?", (min(limit, 200),)).fetchall())
+    for row in rows:
+        effective = row["status"]
+        if row["status"] == "INTERRUPTED":
+            if row.get("recovery_disposition") == "RETRIED_SUCCESSFULLY":
+                effective = "RECOVERED"
+            elif row.get("recovery_disposition") in {"RETRY_STARTED", "RETRYING_INTERRUPTED"}:
+                effective = "RETRYING"
+        row["effective_status"] = effective
     return rows
 
 
@@ -421,12 +429,31 @@ def jobs_overview():
     def add_count(status: str, amount: int = 1) -> None:
         counts[status] = counts.get(status, 0) + amount
 
+    def effective_run_status(row: dict) -> str:
+        if row.get("recovered_by_run_id"):
+            return "recovered"
+        linked = row.get("linked_job_status")
+        if row.get("status") == "PAUSED_EXTERNAL" and linked == "queued":
+            return "recovering"
+        if row.get("status") == "PAUSED_EXTERNAL" and linked == "running":
+            return "running"
+        if (row.get("status") == "WAITING_RETRY"
+                and row.get("failure_code") == "SERVICE_RESTART"):
+            return "recovering"
+        return run_statuses.get(row.get("status"), str(row.get("status") or "").lower())
+
     # workflow_runs is the authoritative business-task ledger.  Resolve its scope
     # back to project/episode/shot labels so the legacy queue UI can present every
     # Harness workflow, including bible/reference generation that never creates a
     # row in the low-level media jobs table.
     run_recent = rows_to_dicts(conn.execute(
         """SELECT wr.*,
+                  CASE
+                    WHEN wr.status IN ('PAUSED_EXTERNAL', 'WAITING_RETRY') THEN (
+                      SELECT j.status FROM jobs j WHERE j.run_id=wr.id
+                      ORDER BY j.updated_at DESC LIMIT 1
+                    )
+                  END AS linked_job_status,
                   CASE wr.scope_type
                     WHEN 'project' THEN wr.scope_id
                     WHEN 'episode' THEN scope_episode.project_id
@@ -454,10 +481,23 @@ def jobs_overview():
         row["run_id"] = row["id"]
         row["kind"] = row["workflow_type"]
         row["raw_status"] = row["status"]
-        row["status"] = run_statuses.get(row["status"], row["status"].lower())
-        row["error"] = row.get("failure_message")
-    for row in conn.execute("SELECT status, COUNT(*) c FROM workflow_runs GROUP BY status"):
-        add_count(run_statuses.get(row["status"], row["status"].lower()), row["c"])
+        row["status"] = effective_run_status(row)
+        row["error"] = (
+            "服务重启后已自动重新排队，等待 worker 领取"
+            if row["status"] == "recovering" else row.get("failure_message")
+        )
+    count_rows = rows_to_dicts(conn.execute(
+        """SELECT wr.*,
+                  CASE
+                    WHEN wr.status IN ('PAUSED_EXTERNAL', 'WAITING_RETRY') THEN (
+                      SELECT j.status FROM jobs j WHERE j.run_id=wr.id
+                      ORDER BY j.updated_at DESC LIMIT 1
+                    )
+                  END AS linked_job_status
+           FROM workflow_runs wr"""
+    ).fetchall())
+    for row in count_rows:
+        add_count(effective_run_status(row))
 
     # Keep legacy/untraced media jobs visible, but omit jobs already represented
     # by a valid Run so one business task is never counted twice.
@@ -506,7 +546,8 @@ def jobs_overview():
         key=lambda row: row.get("updated_at") or 0,
         reverse=True,
     )[:200]
-    return {"counts": counts, "recent": recent}
+    from app.recovery import last_report
+    return {"counts": counts, "recent": recent, "startup_recovery": last_report()}
 
 
 @router.get("/settings")

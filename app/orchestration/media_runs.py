@@ -61,6 +61,8 @@ def mark_media_job_state(run_id: str | None, step_id: str | None, status: str, m
         if status == "running":
             if run["status"] in {"WAITING_RETRY", "PAUSED_BUDGET", "PAUSED_EXTERNAL"}:
                 transition_run(run_id, run["status"], "RUNNING", "媒体任务继续执行")
+            if step["status"] == "READY":
+                transition_step(step_id, "READY", "RUNNING", "恢复后的媒体任务开始执行")
             return
         if status == "queued":
             if run["status"] == "RUNNING":

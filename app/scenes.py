@@ -17,6 +17,7 @@ import json
 from pathlib import Path
 
 from app import config, hiagent
+from app.atomic_io import atomic_write_bytes
 from app.errors import code_ref
 from app.db import get_conn, new_id, now
 from app.evidence.media import record_reference_asset
@@ -114,8 +115,7 @@ async def _save_image_item(item: dict, dest: str) -> None:
     if item.get("url"):
         await hiagent.download(item["url"], dest)
     elif item.get("b64_json"):
-        with open(dest, "wb") as f:
-            f.write(base64.b64decode(item["b64_json"]))
+        atomic_write_bytes(dest, base64.b64decode(item["b64_json"]))
     else:
         raise hiagent.ProviderError(f"图像响应缺少 url/b64_json：{list(item.keys())}")
 
@@ -248,7 +248,12 @@ def scene_refs_as_image_inputs(bible: Bible, scene_names: list[str], limit: int,
 
 # ---------- 初始批量出图 ----------
 
-async def generate_scene_refs(project_id: str, only_scene: str | None = None) -> None:
+async def generate_scene_refs(
+    project_id: str,
+    only_scene: str | None = None,
+    *,
+    resume: bool = False,
+) -> None:
     """为项目全部（或指定）场景生成定场图，写回 bible_json 的 scenes[*].ref_image_path。"""
     conn = get_conn()
     project = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
@@ -268,7 +273,7 @@ async def generate_scene_refs(project_id: str, only_scene: str | None = None) ->
 
     # 批量出图（only_scene=None）：只补还没出过图的场景，已生成的跳过 → 按钮可重复点击而不重复出图。
     # 单场景重做（only_scene 指定）：强制重出，不跳过。
-    if only_scene is None:
+    if only_scene is None or resume:
         targets = [s for s in targets if not scene_ref_exists(conn, project_id, s.name)]
         if not targets:
             return  # 当前场景库里的场景图都已就绪，无需重出

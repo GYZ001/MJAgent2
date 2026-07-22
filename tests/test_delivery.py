@@ -76,8 +76,22 @@ def test_delivery_package_reaches_t5_and_feedback_preserves_snapshot(tmp_path, m
 
     readiness = delivery.delivery_readiness("e")
     assert readiness["ready"] is True and readiness["evidence_coverage"] == 1
-    draft = delivery.build_delivery_package("e")
+    draft = delivery.build_delivery_package(
+        "e", package_id="delivery_crash_window", operation_started_at=42,
+    )
     draft_manifest = Path(draft["package_path"], "manifest.json").read_bytes()
+    draft_hash = repository.get_artifact(draft["artifact_id"])["content_hash"]
+    # Simulate a hard exit after the immutable artifact commit but before the
+    # delivery_packages pointer commit.  The stable operation must reconstruct
+    # the pointer without changing evidence or duplicating its file evaluation.
+    conn.execute("DELETE FROM delivery_packages WHERE id=?", (draft["package_id"],))
+    conn.commit()
+    recovered_draft = delivery.build_delivery_package(
+        "e", package_id="delivery_crash_window", operation_started_at=42,
+    )
+    assert recovered_draft["artifact_id"] == draft["artifact_id"]
+    assert repository.get_artifact(draft["artifact_id"])["content_hash"] == draft_hash
+    assert len(repository.get_evaluations(draft["artifact_id"])) == 1
     package = delivery.approve_delivery(
         "e", decided_by="reviewer", decision="approve", reason="复验通过",
     )

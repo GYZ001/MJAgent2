@@ -17,10 +17,10 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import shutil
 from pathlib import Path
 
 from app import config, errors, planning, task_registry, worker
+from app.atomic_io import atomic_copy
 from app.db import get_conn, get_setting, now, rows_to_dicts, set_setting
 from app.evidence import repository as evidence_repository
 from app.harness.types import Evaluation, EvidenceArtifact
@@ -166,6 +166,48 @@ def start(
     )
     task_registry.spawn("auto", pid, _run(pid, recorder), project_id=pid)
     return recorder.run_id
+
+
+def recover_auto_tasks() -> int:
+    """Resume the latest interrupted project DAG before child-stage recovery runs.
+
+    The pipeline is intentionally adaptive: every stage checks committed business
+    output before doing work, so a new attempt can safely continue the same logical
+    project without replaying completed paid media jobs.
+    """
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT wr.id, wr.scope_id
+           FROM workflow_runs wr
+           WHERE wr.workflow_type='auto_project'
+             AND wr.scope_type='project'
+             AND wr.status='PAUSED_EXTERNAL'
+             AND wr.failure_code='SERVICE_RESTART'
+             AND wr.recovered_by_run_id IS NULL
+             AND NOT EXISTS (
+                 SELECT 1 FROM workflow_runs newer
+                 WHERE newer.workflow_type='auto_project'
+                   AND newer.scope_type='project'
+                   AND newer.scope_id=wr.scope_id
+                   AND newer.updated_at>wr.updated_at
+                   AND newer.status IN ('CREATED','RUNNING','WAITING_RETRY','WAITING_HUMAN',
+                                        'PAUSED_BUDGET','PAUSED_EXTERNAL')
+             )
+           ORDER BY wr.updated_at"""
+    ).fetchall()
+    resumed = 0
+    for row in rows:
+        project_id = row["scope_id"]
+        if is_running(project_id):
+            continue
+        start(
+            project_id,
+            requested_by="system",
+            trigger_type="resume",
+            parent_run_id=row["id"],
+        )
+        resumed += 1
+    return resumed
 
 
 async def cancel(pid: str) -> bool:
@@ -327,10 +369,26 @@ async def _ensure_refs(pid: str) -> None:
     if _all_refs_ready(p):
         _log(pid, "定妆照已齐备，跳过")
         return
+    recovering = p["refs_status"] == "running"
+    parent = None
+    if recovering:
+        parent = conn.execute(
+            "SELECT id FROM workflow_runs WHERE workflow_type='character_references' "
+            "AND scope_type='project' AND scope_id=? AND status='PAUSED_EXTERNAL' "
+            "AND recovered_by_run_id IS NULL ORDER BY updated_at DESC LIMIT 1",
+            (pid,),
+        ).fetchone()
     _log(pid, "开始生成定妆照")
     conn.execute("UPDATE projects SET refs_status='running', refs_error=NULL, refs_target=NULL WHERE id=?", (pid,))
     conn.commit()
-    await api._refs_task(pid, None)
+    await api._refs_task(
+        pid,
+        None,
+        resume=recovering,
+        parent_run_id=parent["id"] if parent else None,
+        requested_by="system" if recovering else "user",
+        trigger_type="resume" if recovering else "manual",
+    )
     p = conn.execute("SELECT refs_status, refs_error FROM projects WHERE id=?", (pid,)).fetchone()
     if p["refs_status"] != "ready":
         # 定妆照失败不硬停整条流水线：关键帧没有参考图仍能生成，只是跨集一致性下降
@@ -511,7 +569,7 @@ def _export_episode(pid: str, project_id: str, epno: int, final_path: Path) -> N
         return
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(final_path, dest)
+        atomic_copy(final_path, dest)
         _log(pid, f"第{epno}集：已保存到 {dest}")
     except OSError as e:
         _log(pid, f"第{epno}集：导出失败（{e}）")

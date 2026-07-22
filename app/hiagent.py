@@ -22,7 +22,9 @@ from urllib.parse import urljoin
 import httpx
 
 from app import config
-from app.db import finish_provider_call, get_setting, log_provider_call, start_provider_call
+from app.atomic_io import atomic_write_bytes
+from app.db import (finish_provider_call, get_setting, log_provider_call,
+                    provider_operation_id, start_provider_call)
 
 BAILIAN_TEXT_FREE_MODELS = (
     "qwen3.7-max-2026-06-08",
@@ -367,10 +369,16 @@ def _merge_call_meta(meta: dict | None) -> dict | None:
 async def _post_json(client: httpx.AsyncClient, url: str, payload: dict, *,
                      kind: str, model: str, retries: int = 2,
                      headers: dict | None = None, key_name: str = "HIAGENT_API_KEY",
-                     meta: dict | None = None) -> dict:
+                     meta: dict | None = None,
+                     idempotency_key: str | None = None) -> dict:
     last_err: ProviderError | None = None
     merged_meta = _merge_call_meta(meta)
-    req_headers = headers or _headers()
+    req_headers = dict(headers or _headers())
+    if idempotency_key:
+        # Providers that implement the conventional header deduplicate the
+        # accept-before-local-commit crash window; providers that ignore it still
+        # receive the same durable operation identifier in observability metadata.
+        req_headers["Idempotency-Key"] = idempotency_key
     request_bytes = _request_size_bytes(payload)
     for attempt in range(retries + 1):
         start = time.time()
@@ -556,11 +564,17 @@ async def create_video_task(prompt_text: str, *, image_urls: list[tuple[str, str
     model = active_model("video", "hiagent")
     base_url, model_headers = _model_connection("hiagent", model, config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY)
     payload = {"model": model, "content": content}
+    if call_meta and call_meta.get("version_id"):
+        operation_id = f"video-create-{call_meta['version_id']}"
+    else:
+        operation_id = provider_operation_id("video_create", model, payload)
+    call_meta = {**(call_meta or {}), "operation_id": operation_id}
     timeout = httpx.Timeout(connect=10, read=config.TIMEOUT_VIDEO_CREATE, write=30, pool=10)
     async with httpx.AsyncClient(timeout=timeout) as client:
         data = await _post_json(client, f"{base_url}/contents/generations/tasks", payload,
                                 kind="video_create", model=model, headers=model_headers,
-                                key_name=f"model:{model}", meta=call_meta)
+                                key_name=f"model:{model}", meta=call_meta,
+                                idempotency_key=operation_id)
     task_id = data.get("id")
     if not task_id:
         raise ProviderError(f"视频任务创建响应缺少 id：{json.dumps(data, ensure_ascii=False)[:300]}")
@@ -609,8 +623,7 @@ async def download(url: str, dest_path: str) -> None:
         resp = await client.get(url)
         if resp.status_code != 200:
             raise ProviderError(f"视频下载失败 HTTP {resp.status_code}（URL 可能已过期，有效期 7 天）")
-        with open(dest_path, "wb") as f:
-            f.write(resp.content)
+        atomic_write_bytes(dest_path, resp.content)
 
 
 async def generate_image(prompt: str, *, size: str = "1024x1024",

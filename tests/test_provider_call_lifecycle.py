@@ -4,7 +4,7 @@ import sqlite3
 
 import httpx
 
-from app import hiagent, system_api, video_modes
+from app import db, hiagent, system_api, video_modes
 
 
 class _Response:
@@ -76,6 +76,109 @@ def test_post_json_write_timeout_is_logged_and_not_retried(monkeypatch) -> None:
     assert events[0][1]["request_bytes"] > 0
     assert "WriteTimeout" in events[1][2]
     assert "phase=write" in events[1][2]
+
+
+def test_interrupted_provider_operation_links_to_successful_retry(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-recovery.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+
+    first = db.start_provider_call(
+        "video_create", "model", request_json={"prompt": "same"},
+        meta={"operation_id": "video-create-v1"},
+    )
+    # Simulate the next process startup marking the in-flight socket attempt.
+    db.get_conn().execute(
+        "UPDATE provider_calls SET status='INTERRUPTED', recovery_disposition='AWAITING_RETRY' WHERE id=?",
+        (first,),
+    )
+    db.get_conn().commit()
+
+    second = db.start_provider_call(
+        "video_create", "model", request_json={"prompt": "same"},
+        meta={"operation_id": "video-create-v1"},
+    )
+    db.finish_provider_call(second, "OK", 200, 25, response_json={"id": "provider-task"})
+
+    old = db.get_conn().execute(
+        "SELECT superseded_by_call_id, recovery_disposition FROM provider_calls WHERE id=?",
+        (first,),
+    ).fetchone()
+    new = db.get_conn().execute(
+        "SELECT operation_id, attempt_no, supersedes_call_id FROM provider_calls WHERE id=?",
+        (second,),
+    ).fetchone()
+    assert dict(old) == {
+        "superseded_by_call_id": second,
+        "recovery_disposition": "RETRIED_SUCCESSFULLY",
+    }
+    assert dict(new) == {
+        "operation_id": "video-create-v1", "attempt_no": 2, "supersedes_call_id": first,
+    }
+
+
+def test_late_response_from_old_process_cannot_overwrite_interrupted_call(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-fence.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    call_id = db.start_provider_call(
+        "chat", "model", request_json={"prompt": "same"},
+    )
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE provider_calls SET status='INTERRUPTED', "
+        "recovery_disposition='AWAITING_RETRY' WHERE id=?",
+        (call_id,),
+    )
+    conn.commit()
+
+    db.finish_provider_call(call_id, "OK", 200, 25, response_json={"late": True})
+
+    row = conn.execute(
+        "SELECT status, response_json, recovery_disposition FROM provider_calls WHERE id=?",
+        (call_id,),
+    ).fetchone()
+    assert dict(row) == {
+        "status": "INTERRUPTED", "response_json": None,
+        "recovery_disposition": "AWAITING_RETRY",
+    }
+
+
+def test_video_create_sends_stable_idempotency_key(monkeypatch) -> None:
+    seen_headers: list[dict[str, str]] = []
+
+    class Response:
+        status_code = 200
+        text = '{"id":"task-1"}'
+
+        def json(self):
+            return {"id": "task-1"}
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _url, *, json, headers):
+            seen_headers.append(headers)
+            return Response()
+
+    monkeypatch.setattr(hiagent.httpx, "AsyncClient", lambda **_kwargs: Client())
+    monkeypatch.setattr(hiagent, "_model_connection", lambda *_args: ("https://provider", {"x": "y"}))
+    monkeypatch.setattr(hiagent, "active_model", lambda *_args: "video-model")
+    monkeypatch.setattr(hiagent, "start_provider_call", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(hiagent, "finish_provider_call", lambda *_args, **_kwargs: None)
+
+    task_id = asyncio.run(hiagent.create_video_task(
+        "prompt", call_meta={"version_id": "ver_1"},
+    ))
+
+    assert task_id == "task-1"
+    assert seen_headers[0]["Idempotency-Key"] == "video-create-ver_1"
 
 
 def test_prepare_image_data_urls_records_compression_stats(monkeypatch) -> None:

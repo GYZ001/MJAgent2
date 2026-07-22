@@ -9,6 +9,8 @@ import os
 import threading
 from pathlib import Path
 
+from app.atomic_io import atomic_write_text
+
 ROOT = Path(__file__).resolve().parent.parent
 PROJECTS_DIR = ROOT / "projects"
 DATA_DIR = ROOT / "data"
@@ -208,7 +210,7 @@ def save_keys_to_env(keys: dict[str, str]) -> list[str]:
                 existing_lines.append(f"{k}={v}")
 
         # 写回 .env
-        env_file.write_text("\n".join(existing_lines) + "\n", encoding="utf-8")
+        atomic_write_text(env_file, "\n".join(existing_lines) + "\n")
 
         # 更新 os.environ 和模块级变量
         for k, v in to_write.items():

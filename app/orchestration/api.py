@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 from fastapi import APIRouter, Body, HTTPException, Query
 from fastapi.responses import FileResponse
 
 from app import config, task_registry
-from app.db import get_conn
+from app.db import get_conn, new_id, now
 from app.evidence import repository
 from app.orchestration.engine import WorkflowRecorder, fingerprint
 
@@ -296,7 +297,9 @@ def get_delivery_readiness(episode_id: str):
 async def create_delivery_package(episode_id: str, body: dict | None = Body(None)):
     from app.delivery import build_delivery_package
 
-    payload = body or {}
+    payload = dict(body or {})
+    payload.setdefault("package_id", new_id("delivery"))
+    payload.setdefault("operation_started_at", now())
     if not get_conn().execute("SELECT 1 FROM episodes WHERE id=?", (episode_id,)).fetchone():
         raise HTTPException(404, "剧集不存在")
     recorder = WorkflowRecorder.create(
@@ -311,6 +314,7 @@ async def create_delivery_package(episode_id: str, body: dict | None = Body(None
             "shot_duration_decided_by": "model",
             "immutable_snapshot": True,
         },
+        config_snapshot={"recovery_payload": payload},
     )
     recorder.start()
     try:
@@ -318,10 +322,12 @@ async def create_delivery_package(episode_id: str, body: dict | None = Body(None
             return await asyncio.to_thread(
                 build_delivery_package,
                 episode_id,
+                package_id=payload["package_id"],
                 decided_by=payload.get("decided_by"),
                 decision=payload.get("decision"),
                 reason=str(payload.get("reason") or ""),
                 accepted_risk=payload.get("accepted_risk"),
+                operation_started_at=payload["operation_started_at"],
             )
 
         _, result = await recorder.step(
@@ -390,14 +396,18 @@ async def decide_delivery(episode_id: str, body: dict = Body(...)):
 
     if not get_conn().execute("SELECT 1 FROM episodes WHERE id=?", (episode_id,)).fetchone():
         raise HTTPException(404, "剧集不存在")
+    payload = dict(body)
+    payload.setdefault("approved_package_id", new_id("delivery"))
+    payload.setdefault("operation_started_at", now())
     recorder = WorkflowRecorder.create(
         workflow_type="delivery_approval",
         scope_type="episode",
         scope_id=episode_id,
-        input_fingerprint=fingerprint(episode_id, body),
-        requested_by=str(body.get("decided_by") or "user"),
+        input_fingerprint=fingerprint(episode_id, payload),
+        requested_by=str(payload.get("decided_by") or "user"),
         trigger_type="human_gate",
         policy_snapshot={"immutable_snapshot": True},
+        config_snapshot={"recovery_payload": payload},
     )
     recorder.start()
     try:
@@ -405,16 +415,18 @@ async def decide_delivery(episode_id: str, body: dict = Body(...)):
             return await asyncio.to_thread(
                 approve_delivery,
                 episode_id,
-                decided_by=str(body.get("decided_by") or "user"),
-                decision=str(body.get("decision") or ""),
-                reason=str(body.get("reason") or ""),
-                accepted_risk=body.get("accepted_risk"),
+                decided_by=str(payload.get("decided_by") or "user"),
+                decision=str(payload.get("decision") or ""),
+                reason=str(payload.get("reason") or ""),
+                accepted_risk=payload.get("accepted_risk"),
+                approved_package_id=payload["approved_package_id"],
+                operation_started_at=payload["operation_started_at"],
             )
 
         _, result = await recorder.step(
             "apply_delivery_gate", operation,
             agent_name="delivery_loop",
-            context_manifest={"decision": body.get("decision"), "immutable_snapshot": True},
+            context_manifest={"decision": payload.get("decision"), "immutable_snapshot": True},
         )
         recorder.succeed("交付门禁已处理")
         return {**result, "run_id": recorder.run_id}
@@ -424,6 +436,128 @@ async def decide_delivery(episode_id: str, body: dict = Body(...)):
     except Exception as exc:
         recorder.fail(exc)
         raise
+
+
+async def _resume_delivery_package(
+    episode_id: str, payload: dict, recorder: WorkflowRecorder
+) -> None:
+    from app.delivery import build_delivery_package
+
+    recorder.start()
+    try:
+        async def operation():
+            return await asyncio.to_thread(
+                build_delivery_package,
+                episode_id,
+                package_id=payload["package_id"],
+                decided_by=payload.get("decided_by"),
+                decision=payload.get("decision"),
+                reason=str(payload.get("reason") or ""),
+                accepted_risk=payload.get("accepted_risk"),
+                operation_started_at=payload["operation_started_at"],
+            )
+
+        await recorder.step(
+            "build_delivery_snapshot", operation,
+            agent_name="delivery_loop",
+            context_manifest={"immutable_snapshot": True, "recovered": True},
+        )
+        recorder.succeed("交付快照已从服务重启中恢复")
+    except asyncio.CancelledError:
+        recorder.cancel("交付快照恢复已取消")
+        raise
+    except Exception as exc:  # noqa: BLE001 recovery failure must remain visible
+        recorder.fail(exc)
+
+
+async def _resume_delivery_approval(
+    episode_id: str, payload: dict, recorder: WorkflowRecorder
+) -> None:
+    from app.delivery import approve_delivery
+
+    recorder.start()
+    try:
+        async def operation():
+            existing = get_conn().execute(
+                "SELECT id FROM delivery_packages WHERE id=? AND status='approved'",
+                (payload["approved_package_id"],),
+            ).fetchone()
+            if existing:
+                return {"package_id": existing["id"], "already_committed": True}
+            return await asyncio.to_thread(
+                approve_delivery,
+                episode_id,
+                decided_by=str(payload.get("decided_by") or "user"),
+                decision=str(payload.get("decision") or ""),
+                reason=str(payload.get("reason") or ""),
+                accepted_risk=payload.get("accepted_risk"),
+                approved_package_id=payload["approved_package_id"],
+                operation_started_at=payload["operation_started_at"],
+            )
+
+        await recorder.step(
+            "apply_delivery_gate", operation,
+            agent_name="delivery_loop",
+            context_manifest={
+                "decision": payload.get("decision"),
+                "immutable_snapshot": True,
+                "recovered": True,
+            },
+        )
+        recorder.succeed("交付门禁已从服务重启中恢复")
+    except asyncio.CancelledError:
+        recorder.cancel("交付门禁恢复已取消")
+        raise
+    except Exception as exc:  # noqa: BLE001 recovery failure must remain visible
+        recorder.fail(exc)
+
+
+def recover_delivery_tasks() -> int:
+    """Resume file-building HTTP tasks whose client connection died on restart."""
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT wr.*, e.project_id
+           FROM workflow_runs wr
+           JOIN episodes e ON wr.scope_type='episode' AND e.id=wr.scope_id
+           WHERE wr.workflow_type IN ('delivery_package','delivery_approval')
+             AND wr.status='PAUSED_EXTERNAL'
+             AND wr.failure_code='SERVICE_RESTART'
+             AND wr.recovered_by_run_id IS NULL
+           ORDER BY wr.updated_at"""
+    ).fetchall()
+    resumed = 0
+    for row in rows:
+        try:
+            snapshot = json.loads(row["config_snapshot_json"] or "{}")
+            payload = snapshot["recovery_payload"]
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            conn.execute(
+                "UPDATE workflow_runs SET failure_message=? WHERE id=?",
+                ("旧任务缺少可重放参数，需人工重新发起", row["id"]),
+            )
+            conn.commit()
+            continue
+        recorder = WorkflowRecorder.create(
+            workflow_type=row["workflow_type"],
+            scope_type="episode",
+            scope_id=row["scope_id"],
+            input_fingerprint=row["input_fingerprint"],
+            requested_by="system",
+            trigger_type="resume",
+            policy_snapshot=json.loads(row["policy_snapshot_json"] or "{}"),
+            config_snapshot={"recovery_payload": payload},
+            parent_run_id=row["id"],
+        )
+        operation = (
+            _resume_delivery_package(row["scope_id"], payload, recorder)
+            if row["workflow_type"] == "delivery_package"
+            else _resume_delivery_approval(row["scope_id"], payload, recorder)
+        )
+        task_registry.spawn(
+            "run", recorder.run_id, operation, project_id=row["project_id"]
+        )
+        resumed += 1
+    return resumed
 
 
 @router.post("/episodes/{episode_id}/customer-feedback")

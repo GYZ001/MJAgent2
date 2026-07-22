@@ -20,8 +20,21 @@
 
 ## 故障恢复
 
-- 启动时会把过期运行 lease 置回队列，并为尚未到 `next_retry_at` 的任务重新建立定时器。
+- 启动时由单一恢复协调器先做数据库对账，再恢复 worker 和业务编排。覆盖自动项目、人物谱、
+  人物/场景参考图、分集规划、剧本、逐镜分镜、关键帧/视频和交付包。父编排先恢复，子阶段会跳过已被父编排
+  接管的 scope，避免双重续跑。
+- 过期运行 lease 会置回队列，尚未到 `next_retry_at` 的任务会重新建立定时器。旧的失败 Run/Step 不会
+  被改回运行中；续跑会创建新迭代并通过 `parent_run_id` / `parent_step_run_id` 保留恢复链。
 - 已拿到 provider task id 的视频任务只恢复轮询，不再次创建付费任务。
+- 视频创建请求使用基于 version 的稳定 operation/idempotency key，并持久化 `submitting/unknown/accepted`
+  创建状态。这能在上游支持幂等键时抑制重复创建；若上游不支持幂等且连接在“提交成功、回包前”中断，
+  系统会在监控中标记结果未知，不宣称绝对 exactly-once。
+- 供应商调用按稳定 `operation_id` 记录尝试链。重启时未回写的 `RUNNING` 记为 `INTERRUPTED`；
+  后续尝试会链接为“重试中/已恢复”，不再永久显示一条孤立的“服务重启、结果未回写”。
+- 旧进程的迟到回包不能覆盖新进程写下的 `INTERRUPTED`；worker 一旦失去 lease，就不能再完成、重排或改写
+  新 owner 的任务。`scripts/dev.sh restart` 会按独立进程组停止旧服务，避免热重载长请求造成新旧实例重叠。
+- 图片、JSON、文本、导出文件和 ZIP 复制采用同目录临时文件 + `fsync` + 原子替换；启动会清理
+  遗留的 `.part` 文件，业务层不会看到半写入成品。
 - provider 不可取消时，用户取消会把本地任务标为 `abandoned`；上游结果不再采用，预算预留释放。
 - 预算暂停后先调整单集上限，再调用剧集恢复接口；原 job 和 reservation 被复用。
 - Storyboard 按逐镜 Artifact checkpoint 恢复，已通过镜头不重做。
@@ -31,6 +44,16 @@
 - 文本 provider 的可重试 429/网络/5xx 在 Harness 网关按 30s / 60s / 120s 有界退避；
   独占 Run 进入 `WAITING_RETRY` 并记录调度/恢复事件。若冷却期间服务重启，旧 Run 明确转为
   `PAUSED_EXTERNAL`，Storyboard 启动恢复器从最后一个逐镜 checkpoint 创建续跑 Run。
+
+重启后先执行：
+
+```bash
+scripts/dev.sh status
+curl -fsS http://127.0.0.1:8230/api/system/jobs
+```
+
+`startup_recovery` 应列出本次各工作流的接管数；存量任务应显示“恢复中”或新尝试的运行状态，不应只留在
+“外部中断”。还可用 `GET /api/system/calls` 查看 `operation_id` 的旧尝试与新尝试链接。
 
 ## 发布门禁与双轨基准
 

@@ -77,10 +77,25 @@ def test_restart_interrupted_job_is_resumed(monkeypatch) -> None:
     assert job["lease_expires_at"] is None
     assert job["error"] is None
 
-    step = conn.execute("SELECT status, error_code, error_message FROM step_runs WHERE id='step_test1'").fetchone()
-    assert step["status"] == "RUNNING"
-    assert step["error_code"] is None
-    assert step["error_message"] is None
+    old_step = conn.execute(
+        "SELECT status, error_code, error_message FROM step_runs WHERE id='step_test1'"
+    ).fetchone()
+    assert old_step["status"] == "FAILED"
+    assert old_step["error_code"] == "SERVICE_RESTART"
+
+    job_step_id = conn.execute("SELECT step_run_id FROM jobs WHERE id='j1'").fetchone()["step_run_id"]
+    assert job_step_id != "step_test1"
+    retry_step = conn.execute(
+        "SELECT status, iteration_no, parent_step_run_id FROM step_runs WHERE id=?", (job_step_id,)
+    ).fetchone()
+    assert dict(retry_step) == {
+        "status": "READY", "iteration_no": 2, "parent_step_run_id": "step_test1",
+    }
+    run = conn.execute(
+        "SELECT status, failure_message FROM workflow_runs WHERE id='run_test1'"
+    ).fetchone()
+    assert run["status"] == "WAITING_RETRY"
+    assert "自动恢复" in run["failure_message"]
 
 
 def test_paused_budget_jobs_are_not_resumed(monkeypatch) -> None:

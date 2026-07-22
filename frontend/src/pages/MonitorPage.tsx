@@ -6,6 +6,7 @@ import SearchField from '../components/SearchField'
 
 interface JobsView {
   counts: Record<string, number>
+  startup_recovery?: Record<string, number>
   recent: {
     id: string
     source?: 'run' | 'job' | 'screenplay'
@@ -29,6 +30,10 @@ interface Call {
   kind: string
   model: string
   status: string
+  effective_status?: string
+  recovery_disposition?: string
+  supersedes_call_id?: number
+  superseded_by_call_id?: number
   http_status?: number
   latency_ms: number
   error?: string
@@ -331,6 +336,8 @@ const CALLER_LABELS: Record<string, string> = {
 const CALL_STATUS_LABELS: Record<string, string> = {
   RUNNING: '调用中',
   INTERRUPTED: '已中断',
+  RETRYING: '已自动重试',
+  RECOVERED: '续跑已成功',
   OK: '成功',
   FAILED: '失败',
   TIMEOUT: '超时',
@@ -503,8 +510,12 @@ function callStatusLabel(status: string) {
   return CALL_STATUS_LABELS[status] ?? humanizeToken(status.toLowerCase())
 }
 
+function displayCallStatus(call: Call) {
+  return call.effective_status || call.status
+}
+
 function callStatusColor(status: string) {
-  if (status === 'OK' || status.endsWith('SUCCESS') || status === 'PROMPT_READY') return 'green'
+  if (status === 'OK' || status === 'RECOVERED' || status.endsWith('SUCCESS') || status === 'PROMPT_READY') return 'green'
   if (status === 'TIMEOUT' || status === 'NETWORK_ERROR' || status.includes('FAILED') || status.includes('ERROR')) return 'red'
   return 'gold'
 }
@@ -513,6 +524,13 @@ const JOB_STATUS_LABELS: Record<string, string> = {
   queued: '排队中', running: '运行中', waiting_retry: '等待重试', waiting_human: '等待人工确认',
   succeeded: '已完成', partial: '部分完成', failed: '失败', paused_budget: '预算暂停',
   paused_external: '外部中断', cancelled: '已取消',
+  recovering: '恢复排队中', recovered: '已自动续跑',
+}
+
+const RECOVERY_WORKFLOW_LABELS: Record<string, string> = {
+  media: '关键帧/视频', auto_project: '全自动项目', character_bible: '人物谱',
+  character_references: '人物参考图', scene_references: '场景参考图', episode_mapping: '分集规划',
+  screenplay: '剧本', storyboard: '分镜', delivery: '交付包',
 }
 
 function jobStatusLabel(status: string) {
@@ -535,9 +553,9 @@ function jobWorkLabel(job: JobsView['recent'][number]) {
 }
 
 function jobStampClass(status: string) {
-  if (status === 'succeeded') return 'green'
+  if (status === 'succeeded' || status === 'recovered') return 'green'
   if (['failed', 'partial', 'paused_budget', 'paused_external'].includes(status)) return 'red'
-  if (['running', 'queued', 'waiting_retry', 'waiting_human'].includes(status)) return 'gold'
+  if (['running', 'queued', 'recovering', 'waiting_retry', 'waiting_human'].includes(status)) return 'gold'
   return 'grey'
 }
 
@@ -811,24 +829,28 @@ export default function MonitorPage() {
   const jobPageCount = Math.max(1, Math.ceil(filteredJobs.length / jobPageSize))
   const safeJobPage = Math.min(jobPage, jobPageCount)
   const pagedJobs = filteredJobs.slice((safeJobPage - 1) * jobPageSize, safeJobPage * jobPageSize)
+  const startupRecoveryEntries = Object.entries(jobs?.startup_recovery ?? {})
+    .filter(([key, value]) => key !== 'abandoned_partial_files_removed' && Number(value) > 0)
+  const startupRecoveryCount = startupRecoveryEntries.reduce((total, [, value]) => total + Number(value), 0)
+  const removedPartialFiles = jobs?.startup_recovery?.abandoned_partial_files_removed ?? 0
 
   const callStatuses = useMemo(
-    () => Array.from(new Set((calls ?? []).map(call => call.status))).sort(),
+    () => Array.from(new Set((calls ?? []).map(displayCallStatus))).sort(),
     [calls],
   )
   const filteredCalls = useMemo(() => {
     const keyword = callSearch.trim().toLowerCase()
     return (calls ?? []).filter(call => {
-      if (callStatus !== 'all' && call.status !== callStatus) return false
+      if (callStatus !== 'all' && displayCallStatus(call) !== callStatus) return false
       if (!keyword) return true
-      return [call.id, call.kind, call.model, call.status, call.http_status, call.error, callFunctionLabel(call)]
+      return [call.id, call.kind, call.model, call.status, displayCallStatus(call), call.http_status, call.error, callFunctionLabel(call)]
         .some(value => String(value ?? '').toLowerCase().includes(keyword))
     })
   }, [calls, callSearch, callStatus])
   const callPageCount = Math.max(1, Math.ceil(filteredCalls.length / callPageSize))
   const safeCallPage = Math.min(callPage, callPageCount)
   const pagedCalls = filteredCalls.slice((safeCallPage - 1) * callPageSize, safeCallPage * callPageSize)
-  const failedCalls = (calls ?? []).filter(call => callStatusColor(call.status) === 'red')
+  const failedCalls = (calls ?? []).filter(call => callStatusColor(displayCallStatus(call)) === 'red')
   const configuredModels = modelCatalog?.items.filter(item => item.key_configured).length ?? 0
 
   const openSection = (section: MonitorSection) => {
@@ -848,6 +870,7 @@ export default function MonitorPage() {
         {MONITOR_SECTIONS.map(section => {
           const badge = section.key === 'jobs'
             ? (jobs?.counts.running ?? 0) + (jobs?.counts.queued ?? 0)
+              + (jobs?.counts.recovering ?? 0)
               + (jobs?.counts.waiting_retry ?? 0) + (jobs?.counts.waiting_human ?? 0)
               + (jobs?.counts.paused_budget ?? 0) + (jobs?.counts.paused_external ?? 0)
             : section.key === 'calls' ? failedCalls.length : undefined
@@ -874,7 +897,7 @@ export default function MonitorPage() {
           </div>
           <div className="stat-row monitor-stats">
             {[
-              { key: 'queued', label: '排队', count: (jobs?.counts.queued ?? 0) + (jobs?.counts.waiting_retry ?? 0) },
+              { key: 'queued', label: '排队', count: (jobs?.counts.queued ?? 0) + (jobs?.counts.recovering ?? 0) + (jobs?.counts.waiting_retry ?? 0) },
               { key: 'running', label: '运行中', count: jobs?.counts.running ?? 0 },
               { key: 'succeeded', label: '已完成', count: jobs?.counts.succeeded ?? 0 },
               { key: 'failed', label: '失败 / 部分', count: (jobs?.counts.failed ?? 0) + (jobs?.counts.partial ?? 0) },
@@ -896,9 +919,9 @@ export default function MonitorPage() {
               {!failedCalls.length ? <div className="monitor-ok">当前没有失败的模型调用</div> : (
                 <div className="monitor-brief-list">
                   {failedCalls.slice(0, 5).map(call => (
-                    <button type="button" key={call.id} onClick={() => { setCallStatus(call.status); setCallPage(1); openSection('calls') }}>
+                    <button type="button" key={call.id} onClick={() => { setCallStatus(displayCallStatus(call)); setCallPage(1); openSection('calls') }}>
                       <span><b>{callFunctionLabel(call)}</b><small>{call.model || '未记录模型'}</small></span>
-                      <span className="stamp red">{callStatusLabel(call.status)}</span>
+                      <span className="stamp red">{callStatusLabel(displayCallStatus(call))}</span>
                     </button>
                   ))}
                 </div>
@@ -1218,6 +1241,17 @@ export default function MonitorPage() {
             <div><span className="eyebrow">JOB QUEUE</span><h2>任务队列</h2></div>
             <p>按状态或项目定位生成任务，失败原因直接保留在列表中。</p>
           </div>
+          {jobs?.startup_recovery && (
+            <div className={`monitor-recovery-summary ${startupRecoveryCount > 0 ? 'active' : ''}`}>
+              <div><b>启动恢复对账已完成</b><span>{startupRecoveryCount > 0
+                ? `本次服务启动已自动接管 ${startupRecoveryCount} 项未完成任务`
+                : '本次启动未发现需要续跑的任务'}</span></div>
+              <small>{[
+                ...startupRecoveryEntries.map(([key, value]) => `${RECOVERY_WORKFLOW_LABELS[key] ?? humanizeToken(key)} ${value}`),
+                ...(removedPartialFiles > 0 ? [`清理未完整临时文件 ${removedPartialFiles}`] : []),
+              ].join(' · ') || '持久化队列、Run/Step 和上游调用已对账'}</small>
+            </div>
+          )}
           <div className="monitor-toolbar">
             <div className="monitor-search"><span>搜索</span><SearchField value={jobSearch} placeholder="搜索项目、集数、镜号或错误" ariaLabel="搜索任务" onChange={value => { setJobSearch(value); setJobPage(1) }} /></div>
             <label><span>状态</span><select value={jobStatus} onChange={e => { setJobStatus(e.target.value); setJobPage(1) }}><option value="all">全部状态</option>{jobStatuses.map(status => <option value={status} key={status}>{jobStatusLabel(status)}</option>)}</select></label>
@@ -1285,7 +1319,7 @@ export default function MonitorPage() {
                       )}
                     </td>
                     <td className="mono">{c.model}</td>
-                    <td><span className={`stamp ${callStatusColor(c.status)}`} title={c.status}>{callStatusLabel(c.status)}</span></td>
+                    <td><span className={`stamp ${callStatusColor(displayCallStatus(c))}`} title={c.status}>{callStatusLabel(displayCallStatus(c))}</span></td>
                     <td className="mono">{c.http_status ? `HTTP ${c.http_status}` : '未返回'}</td>
                     <td className="mono">{(c.latency_ms / 1000).toFixed(1)}s</td>
                     <td className="monitor-error-cell">{c.error ?? ''}</td>
@@ -1304,7 +1338,7 @@ export default function MonitorPage() {
                           </div>
                           <div className="call-json-pane">
                             <b>元信息</b>
-                            <pre>{prettyJson(c.meta)}</pre>
+                            <pre>{prettyJson(c.meta)}{c.superseded_by_call_id ? `\n\n续跑结果：调用 #${c.superseded_by_call_id}` : ''}{c.supersedes_call_id ? `\n\n续接自：调用 #${c.supersedes_call_id}` : ''}</pre>
                           </div>
                         </div>
                       </td>

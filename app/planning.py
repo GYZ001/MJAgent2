@@ -59,14 +59,20 @@ async def run_regex_plan(project_id: str) -> None:
         conn.commit()
 
 
-def recover_plan_tasks() -> None:
+def recover_plan_tasks() -> int:
     conn = get_conn()
+    resumed = 0
     for row in conn.execute("SELECT id FROM projects WHERE plan_status='running'").fetchall():
         project_id = row["id"]
+        from app import auto
+        if auto.is_running(project_id):
+            continue
         if not task_registry.active("plan", project_id):
             task_registry.spawn(
                 "plan", project_id, run_regex_plan(project_id), project_id=project_id
             )
+            resumed += 1
+    return resumed
 
 
 @router.post("/projects/{project_id}/plan")

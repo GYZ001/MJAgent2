@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from app import config
+from app.atomic_io import atomic_copy, atomic_write_text, atomic_zip_directory
 from app.db import get_conn, new_id, now, rows_to_dicts
 from app.evidence import repository
 from app.evidence.media import record_video_candidate, validate_video_file
@@ -203,24 +204,25 @@ def delivery_readiness(episode_id: str) -> dict[str, Any]:
 
 
 def _write_json(path: Path, value: Any) -> None:
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(path, json.dumps(value, ensure_ascii=False, indent=2))
 
 
 def _copy_if_present(source: str | None, destination: Path) -> Path | None:
     if not source or not Path(source).is_file():
         return None
     destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, destination)
-    return destination
+    return atomic_copy(source, destination)
 
 
 def build_delivery_package(
     episode_id: str,
     *,
+    package_id: str | None = None,
     decided_by: str | None = None,
     decision: str | None = None,
     reason: str = "",
     accepted_risk: str | None = None,
+    operation_started_at: float | None = None,
 ) -> dict[str, Any]:
     readiness = delivery_readiness(episode_id)
     if readiness["blockers"]:
@@ -232,11 +234,33 @@ def build_delivery_package(
     conn = get_conn()
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
-    package_id = new_id("delivery")
+    package_id = package_id or new_id("delivery")
+    operation_started_at = operation_started_at or now()
+    existing = conn.execute(
+        "SELECT * FROM delivery_packages WHERE id=?", (package_id,)
+    ).fetchone()
+    if existing:
+        return {
+            "package_id": existing["id"],
+            "artifact_id": existing["artifact_id"],
+            "trust_level": (repository.get_artifact(existing["artifact_id"]) or {}).get("trust_level", "T3"),
+            "status": existing["status"],
+            "package_path": existing["package_path"],
+            "archive_path": str(existing["package_path"]) + ".zip",
+            "manifest": json.loads(existing["manifest_json"]),
+            "quality_report": json.loads(existing["quality_report_json"]),
+        }
     package_dir = (
         config.PROJECTS_DIR / ep["project_id"] / "episodes" / str(ep["episode_no"])
         / "delivery" / package_id
     )
+    # A directory without its database pointer is an uncommitted crash remnant.
+    # Rebuilding the same operation id is safe and avoids exposing a half package.
+    if package_dir.exists():
+        shutil.rmtree(package_dir)
+    archive_candidate = Path(str(package_dir) + ".zip")
+    if archive_candidate.exists():
+        archive_candidate.unlink()
     package_dir.mkdir(parents=True, exist_ok=False)
     snapshots = package_dir / "snapshots"
     snapshots.mkdir()
@@ -283,7 +307,7 @@ def build_delivery_package(
         "schema_version": "1.0.0",
         "package_id": package_id,
         "episode": {"id": episode_id, "number": ep["episode_no"], "title": ep["title"]},
-        "created_at": now(),
+        "created_at": operation_started_at,
         "source_artifacts": readiness["source_artifacts"],
         "files": files,
         "reproducibility": {
@@ -319,7 +343,7 @@ def build_delivery_package(
         + "</ul><h2>人工决定</h2>"
         + f"<p>{html.escape(decision or '等待人工门禁')} · {html.escape(reason or '')}</p>"
     )
-    (package_dir / "quality-report.html").write_text(report_html, encoding="utf-8")
+    atomic_write_text(package_dir / "quality-report.html", report_html)
     known_lines = ["# Known Issues", ""]
     if readiness["warnings"]:
         known_lines.extend(f"- {item.get('message', item.get('code', '未知风险'))}" for item in readiness["warnings"])
@@ -327,7 +351,7 @@ def build_delivery_package(
         known_lines.append("- 无已知残余问题。")
     if accepted_risk:
         known_lines.extend(["", "## Accepted Risk", "", f"- {accepted_risk}"])
-    (package_dir / "known-issues.md").write_text("\n".join(known_lines), encoding="utf-8")
+    atomic_write_text(package_dir / "known-issues.md", "\n".join(known_lines))
     _assert_no_delivery_secrets(package_dir)
     for role, filename in (
         ("quality_report_json", "quality-report.json"),
@@ -348,21 +372,32 @@ def build_delivery_package(
     _write_json(package_dir / "manifest.json", manifest)
     _assert_no_delivery_secrets(package_dir)
     # 先完成客户可下载的文件，再提交数据库指针；ZIP 失败不能留下“已批准但不可下载”的记录。
-    archive_path = shutil.make_archive(str(package_dir), "zip", root_dir=package_dir)
+    archive_path = atomic_zip_directory(package_dir, archive_candidate)
 
     parent_ids = [artifact["id"] for artifact in readiness["source_artifacts"]]
     parent_ids.extend(item["artifact_id"] for item in readiness["videos"] if item.get("artifact_id"))
-    artifact = repository.create_artifact(EvidenceArtifact(
-        type="delivery_package",
-        scope_type="episode",
-        scope_id=episode_id,
-        status="validated",
-        trust_level="T3",
-        content={"package_id": package_id, "manifest": manifest, "quality_report": quality_report},
-        file_path=str(package_dir / "manifest.json"),
-        parent_artifact_ids=parent_ids,
-        contract_version="delivery-1.0.0",
-    ))
+    artifact_id = f"art_delivery_{package_id.removeprefix('delivery_')}"
+    artifact_content = {
+        "package_id": package_id, "manifest": manifest, "quality_report": quality_report,
+    }
+    artifact = repository.get_artifact(artifact_id)
+    if artifact and artifact["content_hash"] != repository.content_hash(
+        artifact_content, str(package_dir / "manifest.json")
+    ):
+        raise ValueError("同一交付操作的恢复输入已变化，已停止覆盖原证据")
+    if not artifact:
+        artifact = repository.create_artifact(EvidenceArtifact(
+            id=artifact_id,
+            type="delivery_package",
+            scope_type="episode",
+            scope_id=episode_id,
+            status="validated",
+            trust_level="T3",
+            content=artifact_content,
+            file_path=str(package_dir / "manifest.json"),
+            parent_artifact_ids=parent_ids,
+            contract_version="delivery-1.0.0",
+        ))
     file_eval = Evaluation(
         evaluator_type="file",
         evaluator_name="delivery_manifest_validator",
@@ -390,17 +425,29 @@ def build_delivery_package(
             )] if decision == "approve_with_risk" else [],
             evidence={"decision": decision, "reason": reason, "accepted_risk": accepted_risk},
         )
-        artifact = repository.commit_artifact(None, artifact["id"], [file_eval, human_eval])
+        if artifact["status"] != "approved":
+            artifact = repository.commit_artifact(None, artifact["id"], [file_eval, human_eval])
         conn.execute(
             """INSERT INTO gate_decisions(
                    id, artifact_id, gate_key, decision, decided_by, reason, accepted_risk, created_at
-               ) VALUES(?,?,?,?,?,?,?,?)""",
-            (new_id("gate"), artifact["id"], "delivery", decision, decided_by or "user", reason, accepted_risk, now()),
+               ) SELECT ?,?,?,?,?,?,?,?
+                 WHERE NOT EXISTS (
+                   SELECT 1 FROM gate_decisions WHERE artifact_id=? AND gate_key='delivery'
+                 )""",
+            (
+                new_id("gate"), artifact["id"], "delivery", decision, decided_by or "user",
+                reason, accepted_risk, now(), artifact["id"],
+            ),
         )
         status = "approved"
         approved_at = now()
     else:
-        repository.create_evaluation(artifact["id"], file_eval)
+        existing_file_eval = conn.execute(
+            "SELECT 1 FROM evaluations WHERE artifact_id=? AND evaluator_name='delivery_manifest_validator'",
+            (artifact["id"],),
+        ).fetchone()
+        if not existing_file_eval:
+            repository.create_evaluation(artifact["id"], file_eval)
     conn.execute(
         """INSERT INTO delivery_packages(
                id, episode_id, artifact_id, status, package_path, manifest_json,
@@ -409,7 +456,7 @@ def build_delivery_package(
         (
             package_id, episode_id, artifact["id"], status, str(package_dir),
             json.dumps(manifest, ensure_ascii=False), json.dumps(quality_report, ensure_ascii=False),
-            "\n".join(known_lines), now(), approved_at,
+            "\n".join(known_lines), operation_started_at, approved_at,
         ),
     )
     conn.execute(
@@ -436,6 +483,8 @@ def approve_delivery(
     decision: str,
     reason: str,
     accepted_risk: str | None = None,
+    approved_package_id: str | None = None,
+    operation_started_at: float | None = None,
 ) -> dict[str, Any]:
     conn = get_conn()
     row = conn.execute(
@@ -473,10 +522,12 @@ def approve_delivery(
     try:
         approved = build_delivery_package(
             episode_id,
+            package_id=approved_package_id,
             decided_by=decided_by,
             decision=decision,
             reason=reason,
             accepted_risk=accepted_risk,
+            operation_started_at=operation_started_at,
         )
     except Exception:
         conn.execute(

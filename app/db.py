@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 import threading
 import time
@@ -151,6 +152,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     reserved_cost_cny REAL NOT NULL DEFAULT 0,
     cancellation_requested INTEGER NOT NULL DEFAULT 0,
     provider_non_cancellable INTEGER NOT NULL DEFAULT 0,
+    provider_operation_id TEXT,
+    provider_create_state TEXT NOT NULL DEFAULT 'not_started',
     abandoned INTEGER NOT NULL DEFAULT 0,
     attempt_started_at REAL,
     FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
@@ -172,7 +175,14 @@ CREATE TABLE IF NOT EXISTS provider_calls (
     meta TEXT,
     run_id TEXT,
     step_run_id TEXT,
-    trace_id TEXT
+    trace_id TEXT,
+    operation_id TEXT,
+    attempt_no INTEGER NOT NULL DEFAULT 1,
+    supersedes_call_id INTEGER,
+    superseded_by_call_id INTEGER,
+    recovery_disposition TEXT,
+    FOREIGN KEY(supersedes_call_id) REFERENCES provider_calls(id),
+    FOREIGN KEY(superseded_by_call_id) REFERENCES provider_calls(id)
 );
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
@@ -242,7 +252,11 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
     failure_code TEXT,
     failure_message TEXT,
     resume_from_step TEXT,
-    FOREIGN KEY(parent_run_id) REFERENCES workflow_runs(id)
+    recovered_by_run_id TEXT,
+    recovered_at REAL,
+    recovery_count INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY(parent_run_id) REFERENCES workflow_runs(id),
+    FOREIGN KEY(recovered_by_run_id) REFERENCES workflow_runs(id)
 );
 CREATE TABLE IF NOT EXISTS step_runs (
     id TEXT PRIMARY KEY,
@@ -499,6 +513,8 @@ MIGRATIONS = (
     "ALTER TABLE jobs ADD COLUMN reserved_cost_cny REAL NOT NULL DEFAULT 0",
     "ALTER TABLE jobs ADD COLUMN cancellation_requested INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE jobs ADD COLUMN provider_non_cancellable INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE jobs ADD COLUMN provider_operation_id TEXT",
+    "ALTER TABLE jobs ADD COLUMN provider_create_state TEXT NOT NULL DEFAULT 'not_started'",
     "ALTER TABLE jobs ADD COLUMN abandoned INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE jobs ADD COLUMN attempt_started_at REAL",
     "ALTER TABLE character_portraits ADD COLUMN artifact_id TEXT",
@@ -506,6 +522,14 @@ MIGRATIONS = (
     "ALTER TABLE benchmark_runs ADD COLUMN is_real_project INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE benchmark_runs ADD COLUMN attested_by TEXT",
     "ALTER TABLE benchmark_runs ADD COLUMN attestation_note TEXT",
+    "ALTER TABLE provider_calls ADD COLUMN operation_id TEXT",
+    "ALTER TABLE provider_calls ADD COLUMN attempt_no INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE provider_calls ADD COLUMN supersedes_call_id INTEGER",
+    "ALTER TABLE provider_calls ADD COLUMN superseded_by_call_id INTEGER",
+    "ALTER TABLE provider_calls ADD COLUMN recovery_disposition TEXT",
+    "ALTER TABLE workflow_runs ADD COLUMN recovered_by_run_id TEXT",
+    "ALTER TABLE workflow_runs ADD COLUMN recovered_at REAL",
+    "ALTER TABLE workflow_runs ADD COLUMN recovery_count INTEGER NOT NULL DEFAULT 0",
 )
 
 
@@ -513,6 +537,8 @@ INTEGRITY_SCHEMA = """
 -- This index depends on columns added by MIGRATIONS for legacy databases, so it
 -- must be created only after the additive migration pass has completed.
 CREATE INDEX IF NOT EXISTS idx_jobs_claim ON jobs(status, next_retry_at, lease_expires_at, created_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_run ON jobs(run_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_provider_calls_operation ON provider_calls(operation_id, attempt_no);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_chapters_project_idx ON chapters(project_id, idx);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_episodes_project_no ON episodes(project_id, episode_no);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_shots_episode_no ON shots(episode_id, shot_no);
@@ -758,7 +784,9 @@ def init_db() -> None:
     _prune_observability_logs(conn)
     # 进程重启时，旧进程不可能再回写这些请求；不能让监控页永久显示“调用中”。
     conn.execute(
-        "UPDATE provider_calls SET status='INTERRUPTED', error=COALESCE(error, '服务重启，调用结果未回写') "
+        "UPDATE provider_calls SET status='INTERRUPTED', "
+        "error=COALESCE(error, '服务重启，调用结果未回写'), "
+        "recovery_disposition=COALESCE(recovery_disposition, 'AWAITING_RETRY') "
         "WHERE status='RUNNING'"
     )
     # A process restart cannot leave a persisted run pretending to be active.
@@ -837,22 +865,68 @@ def _dump_call_json(value: Any) -> str | None:
         return json.dumps(str(value), ensure_ascii=False)
 
 
+def provider_operation_id(kind: str, model: str, request_json: Any | None) -> str:
+    """Stable business-operation fingerprint shared by retries and process restarts."""
+    payload = _dump_call_json(request_json) or "null"
+    digest = hashlib.sha256(
+        f"{kind}\0{model}\0{payload}".encode("utf-8", "replace")
+    ).hexdigest()
+    return f"op_{digest[:32]}"
+
+
+def _provider_recovery_ledger_available(conn: sqlite3.Connection) -> bool:
+    """Allow observability writes during rolling upgrades and isolated legacy tests."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(provider_calls)")}
+    return {
+        "operation_id", "attempt_no", "supersedes_call_id",
+        "superseded_by_call_id", "recovery_disposition",
+    }.issubset(columns)
+
+
 def log_provider_call(kind: str, model: str, status: str, http_status: int | None,
                       latency_ms: int, error: str | None = None, meta: dict | None = None,
-                      request_json: Any | None = None, response_json: Any | None = None) -> None:
+                      request_json: Any | None = None, response_json: Any | None = None,
+                      operation_id: str | None = None) -> None:
     from app.observability.tracing import current_trace
 
     trace = current_trace()
     conn = get_conn()
-    conn.execute(
+    if not _provider_recovery_ledger_available(conn):
+        conn.execute(
+            """INSERT INTO provider_calls(
+                ts, kind, model, status, http_status, latency_ms, error, request_json, response_json,
+                meta, run_id, step_run_id, trace_id
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (now(), kind, model, status, http_status, latency_ms,
+             (error or "")[:500] or None, _dump_call_json(request_json),
+             _dump_call_json(response_json), json.dumps(meta or {}, ensure_ascii=False)[:800],
+             trace.run_id, trace.step_run_id, trace.trace_id),
+        )
+        conn.commit()
+        return
+    op_id = operation_id or str((meta or {}).get("operation_id") or "") \
+        or provider_operation_id(kind, model, request_json)
+    previous = conn.execute(
+        "SELECT id, attempt_no FROM provider_calls WHERE operation_id=? ORDER BY id DESC LIMIT 1",
+        (op_id,),
+    ).fetchone()
+    attempt_no = int(previous["attempt_no"] or 0) + 1 if previous else 1
+    cur = conn.execute(
         """INSERT INTO provider_calls(
             ts, kind, model, status, http_status, latency_ms, error, request_json, response_json, meta,
-            run_id, step_run_id, trace_id
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            run_id, step_run_id, trace_id, operation_id, attempt_no, supersedes_call_id
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (now(), kind, model, status, http_status, latency_ms,
          (error or "")[:500] or None, _dump_call_json(request_json), _dump_call_json(response_json),
-         json.dumps(meta or {}, ensure_ascii=False)[:800], trace.run_id, trace.step_run_id, trace.trace_id),
+         json.dumps(meta or {}, ensure_ascii=False)[:800], trace.run_id, trace.step_run_id, trace.trace_id,
+         op_id, attempt_no, previous["id"] if previous else None),
     )
+    if previous and status in {"OK", "SUCCEEDED", "SUCCESS"}:
+        conn.execute(
+            "UPDATE provider_calls SET superseded_by_call_id=?, recovery_disposition='RETRIED_SUCCESSFULLY' "
+            "WHERE id=? AND status='INTERRUPTED'",
+            (int(cur.lastrowid), previous["id"]),
+        )
     conn.commit()
 
 
@@ -863,14 +937,41 @@ def start_provider_call(kind: str, model: str, *, meta: dict | None = None,
 
     trace = current_trace()
     conn = get_conn()
+    if not _provider_recovery_ledger_available(conn):
+        cur = conn.execute(
+            """INSERT INTO provider_calls(
+                ts, kind, model, status, http_status, latency_ms, error, request_json, response_json,
+                meta, run_id, step_run_id, trace_id
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (now(), kind, model, "RUNNING", None, 0, None, _dump_call_json(request_json), None,
+             json.dumps(meta or {}, ensure_ascii=False)[:800], trace.run_id, trace.step_run_id,
+             trace.trace_id),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+    op_id = str((meta or {}).get("operation_id") or "") \
+        or provider_operation_id(kind, model, request_json)
+    previous = conn.execute(
+        "SELECT id, attempt_no, status FROM provider_calls WHERE operation_id=? ORDER BY id DESC LIMIT 1",
+        (op_id,),
+    ).fetchone()
+    attempt_no = int(previous["attempt_no"] or 0) + 1 if previous else 1
     cur = conn.execute(
         """INSERT INTO provider_calls(
             ts, kind, model, status, http_status, latency_ms, error, request_json, response_json, meta,
-            run_id, step_run_id, trace_id
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            run_id, step_run_id, trace_id, operation_id, attempt_no, supersedes_call_id,
+            recovery_disposition
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (now(), kind, model, "RUNNING", None, 0, None, _dump_call_json(request_json), None,
-         json.dumps(meta or {}, ensure_ascii=False)[:800], trace.run_id, trace.step_run_id, trace.trace_id),
+         json.dumps(meta or {}, ensure_ascii=False)[:800], trace.run_id, trace.step_run_id, trace.trace_id,
+         op_id, attempt_no, previous["id"] if previous else None,
+         "RETRYING_INTERRUPTED" if previous and previous["status"] == "INTERRUPTED" else None),
     )
+    if previous and previous["status"] == "INTERRUPTED":
+        conn.execute(
+            "UPDATE provider_calls SET superseded_by_call_id=?, recovery_disposition='RETRY_STARTED' WHERE id=?",
+            (int(cur.lastrowid), previous["id"]),
+        )
     conn.commit()
     return int(cur.lastrowid)
 
@@ -880,13 +981,33 @@ def finish_provider_call(call_id: int, status: str, http_status: int | None,
                          response_json: Any | None = None) -> None:
     """原地更新已开始的调用，避免“调用中 + 成功”被误认为两次模型花费。"""
     conn = get_conn()
-    conn.execute(
+    updated = conn.execute(
         """UPDATE provider_calls
            SET status=?, http_status=?, latency_ms=?, error=?, response_json=?
-           WHERE id=?""",
+           WHERE id=? AND status='RUNNING'""",
         (status, http_status, latency_ms, (error or "")[:500] or None,
          _dump_call_json(response_json), call_id),
     )
+    # A previous process may finish a socket after the replacement process has
+    # fenced it as INTERRUPTED.  Its late result must not rewrite restart audit
+    # state or race the recovery attempt.
+    if updated.rowcount != 1:
+        conn.commit()
+        return
+    if not _provider_recovery_ledger_available(conn):
+        conn.commit()
+        return
+    if status in {"OK", "SUCCEEDED", "SUCCESS"}:
+        row = conn.execute(
+            "SELECT supersedes_call_id FROM provider_calls WHERE id=?", (call_id,)
+        ).fetchone()
+        if row and row["supersedes_call_id"]:
+            conn.execute(
+                "UPDATE provider_calls SET superseded_by_call_id=?, "
+                "recovery_disposition='RETRIED_SUCCESSFULLY' "
+                "WHERE id=? AND status='INTERRUPTED'",
+                (call_id, row["supersedes_call_id"]),
+            )
     conn.commit()
 
 

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api, numToCn } from '../api'
 import { useNav, useProject } from '../App'
 import { EpStamp } from './BiblePage'
@@ -23,6 +23,8 @@ export default function EpisodesPage() {
   const { data: p, refresh } = useProject(projectId!)
   const [busy, setBusy] = useState(false)
   const [page, setPage] = useState(0)
+  const [pageDraft, setPageDraft] = useState('1')
+  const pageInputFocused = useRef(false)
   const eps = p?.episodes ?? []
   const screenplayTodoCount = eps.filter(e => ['pending', 'failed', 'warning'].includes(e.screenplay_status) || !e.screenplay_mode || e.screenplay_mode === 'none').length
   const screenplayRunningCount = eps.filter(e => e.screenplay_status === 'running').length
@@ -31,6 +33,15 @@ export default function EpisodesPage() {
   const planTimer = useTaskTimer(`project.${projectId}.plan`, p?.plan_status === 'running')
   const screenplayAllTimer = useTaskTimer(`project.${projectId}.screenplay-all`, screenplayRunningCount > 0)
   const storyboardAllTimer = useTaskTimer(`project.${projectId}.storyboard-all`, scriptingCount > 0)
+  const pageCount = Math.max(1, Math.ceil(eps.length / PAGE_SIZE))
+  const curPage = Math.min(page, pageCount - 1)
+
+  useEffect(() => {
+    // 输入框聚焦编辑时不要被轮询/钳位覆盖草稿，否则正在输入的页码会被悄悄清空。
+    if (!pageInputFocused.current) {
+      setPageDraft(String(curPage + 1))
+    }
+  }, [curPage])
 
   if (!p) return <div className="empty">展卷中……</div>
 
@@ -51,9 +62,19 @@ export default function EpisodesPage() {
 
   // 分页（每页 10 集）+ 章节预览映射（按源章号取该章前 100 字）
   const chapterPreview = new Map((p.chapters ?? []).map(c => [c.idx, c.preview ?? '']))
-  const pageCount = Math.max(1, Math.ceil(eps.length / PAGE_SIZE))
-  const curPage = Math.min(page, pageCount - 1)
   const pageEps = eps.slice(curPage * PAGE_SIZE, curPage * PAGE_SIZE + PAGE_SIZE)
+
+  const jumpToPage = () => {
+    const raw = Number.parseInt(pageDraft.trim(), 10)
+    if (!Number.isFinite(raw)) {
+      setPageDraft(String(curPage + 1))
+      return
+    }
+    const next = Math.min(pageCount, Math.max(1, raw))
+    pageInputFocused.current = false
+    setPage(next - 1)
+    setPageDraft(String(next))
+  }
 
   const replan = () => {
     if (eps.length && !window.confirm('重新分集会清空本项目当前所有剧集（含已生成的分镜与视频），用全新方案替换。确定继续？')) return
@@ -150,10 +171,53 @@ export default function EpisodesPage() {
         )})}
 
         {pageCount > 1 && (
-          <div style={{ display: 'flex', gap: 10, alignItems: 'center', justifyContent: 'center', marginTop: 14 }}>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', justifyContent: 'center', marginTop: 14, flexWrap: 'wrap' }}>
             <button className="btn small" disabled={curPage <= 0} onClick={() => setPage(curPage - 1)}>← 上一页</button>
             <span style={{ fontSize: 13, color: 'var(--ink-faint)' }}>第 {curPage + 1} / {pageCount} 页 · 共 {eps.length} 集</span>
             <button className="btn small" disabled={curPage >= pageCount - 1} onClick={() => setPage(curPage + 1)}>下一页 →</button>
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--ink-faint)' }}>
+              跳至
+              <input
+                type="number"
+                min={1}
+                max={pageCount}
+                inputMode="numeric"
+                value={pageDraft}
+                aria-label={`跳至页码，范围 1 到 ${pageCount}`}
+                onFocus={() => { pageInputFocused.current = true }}
+                onChange={e => setPageDraft(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    jumpToPage()
+                  }
+                }}
+                onBlur={() => {
+                  pageInputFocused.current = false
+                  // 失焦只还原显示，不自动跳页，避免点「上一页/下一页/跳转」时被 blur 抢先改页。
+                  setPageDraft(String(curPage + 1))
+                }}
+                style={{
+                  width: 56,
+                  padding: '4px 6px',
+                  border: '1px solid var(--hairline)',
+                  borderRadius: 6,
+                  background: 'var(--card)',
+                  color: 'var(--ink)',
+                  font: '13px "SF Mono", Menlo, monospace',
+                  textAlign: 'center',
+                }}
+              />
+              / {pageCount} 页
+            </label>
+            <button
+              className="btn small"
+              type="button"
+              onMouseDown={e => e.preventDefault()}
+              onClick={jumpToPage}
+            >
+              跳转
+            </button>
           </div>
         )}
       </section>

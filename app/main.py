@@ -11,12 +11,11 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import errors, task_registry, worker
-from app.api import (purge_legacy_screenplays, recover_bible_tasks,
-                     recover_scene_ref_tasks, recover_screenplay_tasks,
-                     recover_storyboard_tasks, router)
+from app.api import purge_legacy_screenplays, router
 from app.config import PROJECTS_DIR, ROOT
 from app.db import init_db
-from app.planning import recover_plan_tasks, router as planning_router
+from app.planning import router as planning_router
+from app.recovery import recover_all
 from app.orchestration.api import router as orchestration_router
 from app.system_api import router as system_router
 
@@ -25,19 +24,7 @@ from app.system_api import router as system_router
 async def lifespan(_: FastAPI):
     init_db()
     purge_legacy_screenplays()
-    # recover_media_jobs 必须在 recover_and_start 之前跑：init_db 把 RUNNING 的
-    # workflow_runs 翻成 PAUSED_EXTERNAL，但底层 jobs 表的 lease 往往还没过期，
-    # recoverable_jobs() 不会重排——本调用把这些 job 显式复位并入队，
-    # 让随后启动的 worker 池能立即消费。
-    worker.recover_media_jobs()
-    worker.recover_and_start()
-    # 启动后周期性扫一次过期 lease，覆盖 worker 崩溃/OOM 等非服务重启场景下的中断恢复
-    worker.start_stale_lease_sweeper()
-    recover_bible_tasks()  # 进程重启后续跑中断的人物谱任务，而非判孤儿报错
-    recover_scene_ref_tasks()  # 补齐已通过候选后的剩余场景，避免假 running
-    recover_plan_tasks()
-    recover_screenplay_tasks()  # 剧本热更后续跑，避免状态假 running 却无模型调用
-    recover_storyboard_tasks()
+    await recover_all()
     try:
         yield
     finally:

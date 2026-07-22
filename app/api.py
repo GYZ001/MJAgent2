@@ -94,7 +94,13 @@ def _refs_task_active(project_id: str) -> bool:
     return task_registry.active("refs", project_id)
 
 
-def _start_refs_generation(project_id: str, only_character: str | None) -> bool:
+def _start_refs_generation(
+    project_id: str,
+    only_character: str | None,
+    *,
+    resume: bool = False,
+    parent_run_id: str | None = None,
+) -> bool:
     """启动定妆照任务。
 
     返回值表示是否成功启动；若已有同项目定妆任务在跑，则直接返回 False。
@@ -113,7 +119,15 @@ def _start_refs_generation(project_id: str, only_character: str | None) -> bool:
             (only_character, project_id),
         )
     conn.commit()
-    task_registry.spawn("refs", project_id, _refs_task(project_id, only_character), project_id=project_id)
+    task_registry.spawn(
+        "refs", project_id,
+        _refs_task(
+            project_id, only_character, resume=resume, parent_run_id=parent_run_id,
+            requested_by="system" if resume else "user",
+            trigger_type="resume" if resume else "manual",
+        ),
+        project_id=project_id,
+    )
     return True
 
 
@@ -133,7 +147,13 @@ def _scene_assets_task_active(project_id: str) -> bool:
     return _scene_refs_task_active(project_id) or task_registry.active("scene_bible", project_id)
 
 
-def _start_scene_refs_generation(project_id: str, only_scene: str | None) -> bool:
+def _start_scene_refs_generation(
+    project_id: str,
+    only_scene: str | None,
+    *,
+    resume: bool = False,
+    parent_run_id: str | None = None,
+) -> bool:
     """启动场景图素材库生成任务。已有同项目任务在跑则返回 False。"""
     if _scene_refs_task_active(project_id):
         return False
@@ -143,7 +163,13 @@ def _start_scene_refs_generation(project_id: str, only_scene: str | None) -> boo
         (only_scene, project_id))
     conn.commit()
     task_registry.spawn(
-        "scene_refs", project_id, _scene_refs_task(project_id, only_scene), project_id=project_id
+        "scene_refs", project_id,
+        _scene_refs_task(
+            project_id, only_scene, resume=resume, parent_run_id=parent_run_id,
+            requested_by="system" if resume else "user",
+            trigger_type="resume" if resume else "manual",
+        ),
+        project_id=project_id,
     )
     return True
 
@@ -199,28 +225,72 @@ async def _scene_bible_and_refs(project_id: str) -> None:
         conn.commit()
 
 
-def recover_bible_tasks() -> None:
+def recover_bible_tasks() -> int:
     """启动时恢复人物谱任务（对齐 worker.recover_and_start 的语义）：
     进程重启/reload 会丢掉内存里的 asyncio.Task，但 DB 仍是 running。
     与其在下次访问时判孤儿并报错，不如用持久化的 feedback 重新拉起任务续跑。"""
     conn = get_conn()
     rows = conn.execute(
         "SELECT id, bible_feedback FROM projects WHERE bible_status='running'").fetchall()
+    resumed = 0
     for r in rows:
         pid = r["id"]
+        from app import auto
+        if auto.is_running(pid):
+            continue
         if _bible_task_active(pid):
             continue
         feedback = r["bible_feedback"] or ""
-        recorder = _new_bible_recorder(pid, trigger_type="resume", requested_by="system")
+        parent = conn.execute(
+            "SELECT id FROM workflow_runs WHERE workflow_type='character_bible' "
+            "AND scope_type='project' AND scope_id=? AND status='PAUSED_EXTERNAL' "
+            "AND recovered_by_run_id IS NULL ORDER BY updated_at DESC LIMIT 1",
+            (pid,),
+        ).fetchone()
+        recorder = _new_bible_recorder(
+            pid, trigger_type="resume", requested_by="system",
+            parent_run_id=parent["id"] if parent else None,
+        )
         _track_bible_task(
             pid,
             asyncio.get_running_loop().create_task(
                 _recorded_bible_task(pid, feedback, recorder, trigger_full_refs=True)
             ),
         )
+        resumed += 1
+    return resumed
 
 
-def recover_scene_ref_tasks() -> None:
+def recover_character_ref_tasks() -> int:
+    """Resume initial portrait batches and skip per-character committed checkpoints."""
+    from app import auto
+
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id, refs_target FROM projects WHERE refs_status='running'"
+    ).fetchall()
+    resumed = 0
+    for row in rows:
+        project_id = row["id"]
+        if auto.is_running(project_id) or _refs_task_active(project_id):
+            continue
+        parent = conn.execute(
+            "SELECT id FROM workflow_runs WHERE workflow_type='character_references' "
+            "AND scope_type='project' AND scope_id=? AND status='PAUSED_EXTERNAL' "
+            "AND recovered_by_run_id IS NULL ORDER BY updated_at DESC LIMIT 1",
+            (project_id,),
+        ).fetchone()
+        if _start_refs_generation(
+            project_id,
+            row["refs_target"],
+            resume=True,
+            parent_run_id=parent["id"] if parent else None,
+        ):
+            resumed += 1
+    return resumed
+
+
+def recover_scene_ref_tasks() -> int:
     """Resume persisted scene-asset work after a reload or process restart.
 
     Scene generation is idempotent: approved references are skipped, so an
@@ -229,25 +299,43 @@ def recover_scene_ref_tasks() -> None:
     """
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id, bible_json, bible_status FROM projects WHERE scene_refs_status='running'"
+        "SELECT id, bible_json, bible_status, scene_refs_target "
+        "FROM projects WHERE scene_refs_status='running'"
     ).fetchall()
+    resumed = 0
     for row in rows:
         project_id = row["id"]
+        from app import auto
         # A recovered character-bible task will start a fresh scene pipeline
         # after committing its new Bible.  Starting from the old Bible here
         # would race it and could generate obsolete assets.
-        if row["bible_status"] == "running" or _scene_assets_task_active(project_id):
+        if (auto.is_running(project_id) or row["bible_status"] == "running"
+                or _scene_assets_task_active(project_id)):
             continue
         try:
             bible = json.loads(row["bible_json"] or "{}")
         except (TypeError, ValueError, json.JSONDecodeError):
             bible = {}
         if bible.get("scenes"):
-            _start_scene_refs_generation(project_id, None)
+            parent = conn.execute(
+                "SELECT id FROM workflow_runs WHERE workflow_type='scene_references' "
+                "AND scope_type='project' AND scope_id=? AND status='PAUSED_EXTERNAL' "
+                "AND recovered_by_run_id IS NULL ORDER BY updated_at DESC LIMIT 1",
+                (project_id,),
+            ).fetchone()
+            if _start_scene_refs_generation(
+                project_id,
+                row["scene_refs_target"],
+                resume=True,
+                parent_run_id=parent["id"] if parent else None,
+            ):
+                resumed += 1
             continue
         task_registry.spawn(
             "scene_bible", project_id, _scene_bible_and_refs(project_id), project_id=project_id
         )
+        resumed += 1
+    return resumed
 
 
 def _project_or_404(project_id: str):
@@ -1007,7 +1095,15 @@ def edit_portrait_prompt(project_id: str, character_name: str, body: dict):
 # 按集反应式处理（见 portraits.ensure_cards_for_screenplay），不再有"每 20 集全量轮询"步骤。
 
 
-async def _refs_task(project_id: str, only_character: str | None):
+async def _refs_task(
+    project_id: str,
+    only_character: str | None,
+    *,
+    resume: bool = False,
+    parent_run_id: str | None = None,
+    requested_by: str = "user",
+    trigger_type: str = "manual",
+):
     from app.refs import generate_refs
     conn = get_conn()
     recorder = WorkflowRecorder.create(
@@ -1015,8 +1111,10 @@ async def _refs_task(project_id: str, only_character: str | None):
         scope_type="project",
         scope_id=project_id,
         input_fingerprint=fingerprint(project_id, only_character, "character_references"),
-        requested_by="user",
+        requested_by=requested_by,
+        trigger_type=trigger_type,
         budget_limit_cny=float(get_setting("episode_cost_limit_cny") or 100),
+        parent_run_id=parent_run_id,
     )
     try:
         recorder.start()
@@ -1028,10 +1126,11 @@ async def _refs_task(project_id: str, only_character: str | None):
             names = [c["name"] for c in json.loads(p["bible_json"]).get("characters", [])]
         else:
             names = []
-        worker.purge_character_video_artifacts(project_id, names)
+        if not resume:
+            worker.purge_character_video_artifacts(project_id, names)
         await recorder.step(
             "character_references",
-            lambda: generate_refs(project_id, only_character),
+            lambda: generate_refs(project_id, only_character, resume=resume),
             agent_name="reference_asset_loop",
         )
         conn.execute("UPDATE projects SET refs_status='ready', refs_error=NULL WHERE id=?", (project_id,))
@@ -1078,7 +1177,15 @@ async def cancel_refs(project_id: str):
 # 已挂在分镜阶段（见 scenes.ensure_scenes_for_storyboard），不在此轮询。
 
 
-async def _scene_refs_task(project_id: str, only_scene: str | None):
+async def _scene_refs_task(
+    project_id: str,
+    only_scene: str | None,
+    *,
+    resume: bool = False,
+    parent_run_id: str | None = None,
+    requested_by: str = "user",
+    trigger_type: str = "manual",
+):
     from app.scenes import generate_scene_refs
     conn = get_conn()
     recorder = WorkflowRecorder.create(
@@ -1086,14 +1193,16 @@ async def _scene_refs_task(project_id: str, only_scene: str | None):
         scope_type="project",
         scope_id=project_id,
         input_fingerprint=fingerprint(project_id, only_scene, "scene_references"),
-        requested_by="user",
+        requested_by=requested_by,
+        trigger_type=trigger_type,
         budget_limit_cny=float(get_setting("episode_cost_limit_cny") or 100),
+        parent_run_id=parent_run_id,
     )
     try:
         recorder.start()
         await recorder.step(
             "scene_references",
-            lambda: generate_scene_refs(project_id, only_scene),
+            lambda: generate_scene_refs(project_id, only_scene, resume=resume),
             agent_name="reference_asset_loop",
         )
         conn.execute("UPDATE projects SET scene_refs_status='ready', scene_refs_error=NULL WHERE id=?", (project_id,))
@@ -1193,14 +1302,18 @@ def _screenplay_fallback_status(ep) -> str:
     return "ready" if artifact and artifact["status"] == "approved" else "warning"
 
 
-def recover_screenplay_tasks() -> None:
+def recover_screenplay_tasks() -> int:
     """服务热更/重启后续跑状态为 running 的剧本任务，避免 UI 卡在生成中却没有真实调用。"""
     conn = get_conn()
     rows = conn.execute(
         "SELECT id, project_id FROM episodes WHERE screenplay_status='running'"
     ).fetchall()
+    resumed = 0
     for row in rows:
         episode_id = row["id"]
+        from app import auto
+        if auto.is_running(row["project_id"]):
+            continue
         if _screenplay_task_active(episode_id):
             continue
         stamp = now()
@@ -1224,7 +1337,9 @@ def recover_screenplay_tasks() -> None:
             _recorded_screenplay_task(episode_id, recorder),
             project_id=row["project_id"],
         )
+        resumed += 1
     conn.commit()
+    return resumed
 
 
 async def _screenplay_task(episode_id: str) -> EpisodeScreenplay | None:
@@ -2000,23 +2115,36 @@ async def _storyboard_task(episode_id: str, *, resume: bool = True):
         conn.commit()
 
 
-def recover_storyboard_tasks() -> None:
+def recover_storyboard_tasks() -> int:
     """恢复中断的分镜任务；从最后一个已提交的逐镜 checkpoint 继续。"""
     conn = get_conn()
     rows = conn.execute(
         "SELECT id, project_id FROM episodes "
         "WHERE status='scripting' AND screenplay_status='ready' AND screenplay_json IS NOT NULL"
     ).fetchall()
+    resumed = 0
     for row in rows:
+        from app import auto
+        if auto.is_running(row["project_id"]):
+            continue
         if not task_registry.active("storyboard", row["id"]):
+            parent = conn.execute(
+                "SELECT id FROM workflow_runs WHERE workflow_type='storyboard' "
+                "AND scope_type='episode' AND scope_id=? AND status='PAUSED_EXTERNAL' "
+                "AND recovered_by_run_id IS NULL ORDER BY updated_at DESC LIMIT 1",
+                (row["id"],),
+            ).fetchone()
             recorder = _new_storyboard_recorder(
-                row["id"], requested_by="system", trigger_type="resume"
+                row["id"], requested_by="system", trigger_type="resume",
+                parent_run_id=parent["id"] if parent else None,
             )
             task_registry.spawn(
                 "storyboard", row["id"],
                 _recorded_storyboard_task(row["id"], recorder, resume=True),
                 project_id=row["project_id"],
             )
+            resumed += 1
+    return resumed
 
 
 def _new_storyboard_recorder(

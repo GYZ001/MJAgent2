@@ -23,6 +23,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from app import config, hiagent
+from app.atomic_io import atomic_write_bytes
 from app.db import get_conn, get_setting, new_id, now, set_setting
 from app.evidence.media import record_reference_asset
 from app.errors import code_ref
@@ -513,8 +514,7 @@ async def _save_image_item(item: dict, dest: str) -> None:
     if item.get("url"):
         await hiagent.download(item["url"], dest)
     elif item.get("b64_json"):
-        with open(dest, "wb") as f:
-            f.write(base64.b64decode(item["b64_json"]))
+        atomic_write_bytes(dest, base64.b64decode(item["b64_json"]))
     else:
         raise hiagent.ProviderError(f"图像响应缺少 url/b64_json：{list(item.keys())}")
 

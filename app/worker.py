@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from app import config, errors, hiagent, video_modes
+from app.atomic_io import atomic_copy, atomic_write_bytes
 from app.artifacts import (_adopted_video_paths, _invalidate_final_video,
                            clear_episode_artifacts, clear_shot_artifacts,
                            delete_episode_shots, delete_project_episodes,
@@ -38,6 +39,15 @@ _workers: list[asyncio.Task] = []
 _retry_tasks: set[asyncio.Task] = set()
 
 
+class LeaseLost(RuntimeError):
+    """The current process was fenced by recovery or another worker claim."""
+
+
+def _assert_job_lease(job_id: str, owner: str, *, lease_seconds: float = 180.0) -> None:
+    if not media_scheduler.renew_lease(job_id, owner, lease_seconds=lease_seconds):
+        raise LeaseLost(f"job lease lost: {job_id} / {owner}")
+
+
 async def _requeue_after(job_id: str, delay: float) -> None:
     """冷却 delay 秒后把 job 重新投入队列。状态已先置回 queued，故进程重启时
     recover_and_start 也能兜底重排，不依赖本协程存活。"""
@@ -48,13 +58,19 @@ async def _requeue_after(job_id: str, delay: float) -> None:
         pass
 
 
-def _schedule_job_retry(job_id: str, exc: ProviderError) -> bool:
+def _schedule_job_retry(
+    job_id: str, exc: ProviderError, *, lease_owner: str | None = None
+) -> bool:
     """瞬时（可重试）上游故障时把 job 延迟重排，返回是否已安排重试。
     超过 VIDEO_JOB_MAX_RETRIES 后返回 False，交由调用方走永久失败逻辑。"""
     if not getattr(exc, "retryable", False):
         return False
     conn = get_conn()
-    row = conn.execute("SELECT retry_count, max_retries FROM jobs WHERE id=?", (job_id,)).fetchone()
+    row = conn.execute(
+        "SELECT retry_count, max_retries, lease_owner FROM jobs WHERE id=?", (job_id,)
+    ).fetchone()
+    if lease_owner and (not row or row["lease_owner"] != lease_owner):
+        return False
     attempt = int(row["retry_count"] or 0) + 1 if row else 1
     max_retries = int(row["max_retries"] or config.VIDEO_JOB_MAX_RETRIES) if row else config.VIDEO_JOB_MAX_RETRIES
     if attempt > max_retries:
@@ -62,11 +78,15 @@ def _schedule_job_retry(job_id: str, exc: ProviderError) -> bool:
     delay = config.VIDEO_JOB_RETRY_BASE_DELAY * (2 ** (attempt - 1))
     note = (f"大模型/外部服务瞬时故障，已自动排队第 {attempt}/{max_retries} 次重试"
             f"（约 {int(delay)} 秒后）。无需处理；若多次重试后仍失败才需关注错误码。")
-    conn.execute(
+    updated = conn.execute(
         """UPDATE jobs SET status='queued', error=?, retry_count=?, next_retry_at=?,
-                  lease_owner=NULL, lease_expires_at=NULL, updated_at=? WHERE id=?""",
-        (note, attempt, now() + delay, now(), job_id),
+                  lease_owner=NULL, lease_expires_at=NULL, updated_at=? WHERE id=?"""
+        + (" AND lease_owner=?" if lease_owner else ""),
+        (note, attempt, now() + delay, now(), job_id, *([lease_owner] if lease_owner else [])),
     )
+    if updated.rowcount != 1:
+        conn.rollback()
+        return False
     conn.execute(
         "UPDATE budget_reservations SET status='reserved' WHERE job_id=? AND status='running'",
         (job_id,),
@@ -505,7 +525,7 @@ async def _generate_one_scene(prompt: str, ref_inputs: list[str], dest: Path, *,
         await hiagent.download(item["url"], str(dest))
     elif item.get("b64_json"):
         import base64
-        dest.write_bytes(base64.b64decode(item["b64_json"]))
+        atomic_write_bytes(dest, base64.b64decode(item["b64_json"]))
     else:
         raise hiagent.ProviderError(f"图像响应缺少 url/b64_json：{list(item.keys())}")
 
@@ -514,7 +534,8 @@ async def _generate_keyframe_candidates(*, conn, job, shot, ep, project, bible, 
                                         char_refs: list[str], anchors: list[str],
                                         comparison_path: str | None,
                                         comparison_b64: str | None,
-                                        scene_refs: list[str] | None = None) -> tuple[str | None, float]:
+                                        scene_refs: list[str] | None = None,
+                                        lease_owner: str) -> tuple[str | None, float]:
     """为某个 kind 生成候选关键帧，返回最佳 scene_id 与分数。"""
     from app.compiler import compile_scene_prompt
     from app.stages import review_scene_image
@@ -542,6 +563,7 @@ async def _generate_keyframe_candidates(*, conn, job, shot, ep, project, bible, 
     prev_img_path = None
     prev_issues: list[str] = []
     for i in range(max_attempts):
+        _assert_job_lease(job["id"], lease_owner)
         vno = base_v + i + 1
         sid = new_id("scn")
         dest = _scene_image_path(project["id"], ep["episode_no"], shot["shot_no"], kind, vno)
@@ -576,9 +598,11 @@ async def _generate_keyframe_candidates(*, conn, job, shot, ep, project, bible, 
                     "shot_id": shot["id"],
                     "shot_no": shot["shot_no"],
                 })
+            _assert_job_lease(job["id"], lease_owner)
             qa = await review_scene_image(
                 hiagent.encode_image_file(str(dest)), frame_desc, shot["scene_setting"],
                 anchors, prev_image_b64=comparison_b64, kind=kind)
+            _assert_job_lease(job["id"], lease_owner)
             conn.execute("UPDATE shot_scenes SET status='succeeded', image_path=?, qa_json=? WHERE id=?",
                          (str(dest), json.dumps(qa, ensure_ascii=False), sid))
             conn.execute("UPDATE shot_scenes SET cost_cny=? WHERE id=?", (config.IMAGE_PRICE_PER_UNIT, sid))
@@ -593,6 +617,8 @@ async def _generate_keyframe_candidates(*, conn, job, shot, ep, project, bible, 
                 break
             prev_img_path = str(dest)
             prev_issues = list(qa.get("issues") or [])
+        except LeaseLost:
+            raise
         except Exception as exc:  # noqa: BLE001 单次失败不拖垮整轮
             public = errors.record_and_format(exc, action="keyframe_candidate_generate", context={"shot_scene_id": sid})
             conn.execute("UPDATE shot_scenes SET status='failed', error=? WHERE id=?", (public, sid))
@@ -605,7 +631,7 @@ async def _generate_keyframe_candidates(*, conn, job, shot, ep, project, bible, 
     return best_id, best_score
 
 
-async def _run_scene_job(job) -> None:
+async def _run_scene_job(job, lease_owner: str) -> None:
     """生成本镜所需关键帧：场景起始镜生成首图+尾图，连续镜只生成尾图。"""
     from app.refs import refs_as_image_inputs
     from app.schemas import Bible
@@ -614,6 +640,7 @@ async def _run_scene_job(job) -> None:
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (job["episode_id"],)).fetchone()
     project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
     try:
+        _assert_job_lease(job["id"], lease_owner)
         bible = Bible.model_validate(json.loads(project["bible_json"]))
         # 用本集视图：角色外观锚点/参考图按集取覆盖该集的分段定妆照，与 refs_as_image_inputs 同段同源
         from app.portraits import bible_for_episode
@@ -643,7 +670,7 @@ async def _run_scene_job(job) -> None:
             head_id, head_score = await _generate_keyframe_candidates(
                 conn=conn, job=job, shot=shot, ep=ep, project=project, bible=bible, kind=KEYFRAME_HEAD,
                 char_refs=char_refs, anchors=anchors, comparison_path=None, comparison_b64=None,
-                scene_refs=scene_refs)
+                scene_refs=scene_refs, lease_owner=lease_owner)
             if not head_id:
                 raise ProviderError("首图候选生成/评审失败")
             best[KEYFRAME_HEAD] = (head_id, head_score)
@@ -672,7 +699,7 @@ async def _run_scene_job(job) -> None:
             tail_id, tail_score = await _generate_keyframe_candidates(
                 conn=conn, job=job, shot=shot, ep=ep, project=project, bible=bible, kind=KEYFRAME_TAIL,
                 char_refs=char_refs, anchors=anchors, comparison_path=comparison_path, comparison_b64=comparison_b64,
-                scene_refs=scene_refs)
+                scene_refs=scene_refs, lease_owner=lease_owner)
             if not tail_id:
                 raise ProviderError("尾图候选生成/评审失败")
             best[KEYFRAME_TAIL] = (tail_id, tail_score)
@@ -680,10 +707,14 @@ async def _run_scene_job(job) -> None:
         if any(kind not in best for kind in required):
             conn.execute("UPDATE shots SET scene_status='review' WHERE id=?", (job["shot_id"],))
             conn.commit()
-            _set_job(job["id"], "failed", "关键帧生成/评审失败，请重试或手动处理")
-            media_scheduler.settle_budget(job["id"], 0.0, success=False)
+            if _set_job(
+                job["id"], "failed", "关键帧生成/评审失败，请重试或手动处理",
+                lease_owner=lease_owner,
+            ):
+                media_scheduler.settle_budget(job["id"], 0.0, success=False)
             return
 
+        _assert_job_lease(job["id"], lease_owner)
         if KEYFRAME_HEAD in best:
             reason = _scene_adoption_reason(conn, job["shot_id"], KEYFRAME_HEAD, best[KEYFRAME_HEAD][0])
             conn.execute("UPDATE shot_scenes SET adoption_reason=? WHERE id=?", (reason, best[KEYFRAME_HEAD][0]))
@@ -699,19 +730,24 @@ async def _run_scene_job(job) -> None:
         scene_status = "approved" if auto_passed and shot_keyframes_ready(refreshed) else "review"
         conn.execute("UPDATE shots SET scene_status=? WHERE id=?", (scene_status, job["shot_id"]))
         conn.commit()
-        _set_job(job["id"], "succeeded")
+        committed = _set_job(job["id"], "succeeded", lease_owner=lease_owner)
         actual_cost = conn.execute(
             "SELECT COALESCE(SUM(cost_cny),0) AS c FROM shot_scenes WHERE shot_id=?",
             (job["shot_id"],),
         ).fetchone()["c"]
-        media_scheduler.settle_budget(job["id"], float(actual_cost), success=True)
+        if committed:
+            media_scheduler.settle_budget(job["id"], float(actual_cost), success=True)
+    except LeaseLost:
+        return
     except Exception as exc:  # noqa: BLE001
+        if not media_scheduler.renew_lease(job["id"], lease_owner, lease_seconds=180.0):
+            return
         public = errors.record_and_format(exc, action="keyframe_generate",
                                           context={"shot_id": job["shot_id"], "job_id": job["id"]})
         conn.execute("UPDATE shots SET scene_status='review' WHERE id=?", (job["shot_id"],))
         conn.commit()
-        _set_job(job["id"], "failed", public)
-        media_scheduler.settle_budget(job["id"], 0.0, success=False)
+        if _set_job(job["id"], "failed", public, lease_owner=lease_owner):
+            media_scheduler.settle_budget(job["id"], 0.0, success=False)
 
 
 def _scene_adoption_reason(conn, shot_id: str, kind: str, selected_id: str) -> str:
@@ -768,23 +804,35 @@ async def critique_version(version_id: str) -> list[str]:
 
 # ---------- 执行 ----------
 
-def _set_job(job_id: str, status: str, error: str | None = None) -> None:
+def _set_job(
+    job_id: str,
+    status: str,
+    error: str | None = None,
+    *,
+    lease_owner: str | None = None,
+) -> bool:
     conn = get_conn()
     terminal = status in {"succeeded", "failed", "cancelled", "abandoned", "paused_budget"}
     if terminal:
-        conn.execute(
-            "UPDATE jobs SET status=?, error=?, updated_at=?, lease_owner=NULL, lease_expires_at=NULL WHERE id=?",
-            (status, error, now(), job_id),
+        cursor = conn.execute(
+            "UPDATE jobs SET status=?, error=?, updated_at=?, lease_owner=NULL, lease_expires_at=NULL "
+            "WHERE id=?" + (" AND lease_owner=?" if lease_owner else ""),
+            (status, error, now(), job_id, *([lease_owner] if lease_owner else [])),
         )
     else:
-        conn.execute(
-            "UPDATE jobs SET status=?, error=?, updated_at=? WHERE id=?",
-            (status, error, now(), job_id),
+        cursor = conn.execute(
+            "UPDATE jobs SET status=?, error=?, updated_at=? WHERE id=?"
+            + (" AND lease_owner=?" if lease_owner else ""),
+            (status, error, now(), job_id, *([lease_owner] if lease_owner else [])),
         )
+    if cursor.rowcount != 1:
+        conn.rollback()
+        return False
     conn.commit()
     row = conn.execute("SELECT run_id, step_run_id FROM jobs WHERE id=?", (job_id,)).fetchone()
     if row:
         mark_media_job_state(row["run_id"], row["step_run_id"], status, error)
+    return True
 
 
 def _set_version(version_id: str, **fields) -> None:
@@ -954,7 +1002,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
     if not job or job["status"] != "running" or job["lease_owner"] != owner:
         return
     if job["kind"] == "scene":
-        await _run_scene_job(job)
+        await _run_scene_job(job, owner)
         return
     version = conn.execute("SELECT * FROM shot_versions WHERE id=?", (job["version_id"],)).fetchone()
     shot = conn.execute("SELECT * FROM shots WHERE id=?", (job["shot_id"],)).fetchone()
@@ -967,6 +1015,14 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
     try:
         task_id = version["provider_task_id"]
         result = None
+        provider_operation_id = f"video-create-{version['id']}"
+        if task_id:
+            conn.execute(
+                "UPDATE jobs SET provider_operation_id=?, provider_create_state='accepted', "
+                "provider_non_cancellable=1 WHERE id=?",
+                (provider_operation_id, job_id),
+            )
+            conn.commit()
         _set_version(version["id"], status="running")
         prompt_text = ensure_source_excerpt_in_prompt(version["prompt_text"], _load_shot_model(shot))
         if prompt_text != version["prompt_text"]:
@@ -977,12 +1033,14 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         meta.pop("first_frame_scene_id", None)
         meta.pop("last_frame_scene_id", None)
         meta, prompt_text = await _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta, prompt_text)
+        _assert_job_lease(job_id, owner)
         safety_retry_used = bool(meta.get("seedance_safety_retry"))
         copyright_retries = int(meta.get("seedance_copyright_retries") or 0)
         image_inputs: list[tuple[str, str]] | None = None
 
         while True:
             if not task_id:  # 重启恢复时可能已有 task_id，直接续轮询
+                _assert_job_lease(job_id, owner)
                 if image_inputs is None:
                     # first_frame + last_frame 均来自已过审关键图；缺任一张即失败，不做艺术兜底替换。
                     image_inputs = _video_image_inputs_from_meta(meta)
@@ -995,6 +1053,12 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                         meta["last_frame_used"] = any(role == "last_frame" for _, role in image_inputs)
                     _set_version(version["id"], image_inputs=json.dumps(meta, ensure_ascii=False))
                 try:
+                    conn.execute(
+                        "UPDATE jobs SET provider_operation_id=?, provider_create_state='submitting', "
+                        "updated_at=? WHERE id=?",
+                        (provider_operation_id, now(), job_id),
+                    )
+                    conn.commit()
                     task_id = await hiagent.create_video_task(
                         prompt_text,
                         image_urls=image_inputs,
@@ -1006,8 +1070,16 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                             "shot_no": shot["shot_no"],
                             "version_id": version["id"],
                             "version_no": version["version_no"],
+                            "operation_id": provider_operation_id,
                         })
+                    _assert_job_lease(job_id, owner)
                 except ProviderError as exc:
+                    _assert_job_lease(job_id, owner)
+                    conn.execute(
+                        "UPDATE jobs SET provider_create_state=?, updated_at=? WHERE id=?",
+                        ("unknown" if exc.retryable else "not_started", now(), job_id),
+                    )
+                    conn.commit()
                     if _is_seedance_text_sensitive(str(exc)) and not safety_retry_used:
                         prompt_text = sanitize_seedance_prompt(prompt_text, aggressive=True)
                         safety_retry_used = True
@@ -1028,8 +1100,18 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                                      image_inputs=json.dumps(meta, ensure_ascii=False))
                         continue
                     raise
-                _set_version(version["id"], provider_task_id=task_id)
-                conn.execute("UPDATE jobs SET provider_non_cancellable=1 WHERE id=?", (job_id,))
+                # Persist the paid provider handle and the non-cancellable flag in
+                # one local transaction. The stable Idempotency-Key covers the
+                # unavoidable provider-accepted/local-commit crash window.
+                conn.execute(
+                    "UPDATE shot_versions SET provider_task_id=? WHERE id=?",
+                    (task_id, version["id"]),
+                )
+                conn.execute(
+                    "UPDATE jobs SET provider_operation_id=?, provider_create_state='accepted', "
+                    "provider_non_cancellable=1, updated_at=? WHERE id=?",
+                    (provider_operation_id, now(), job_id),
+                )
                 conn.commit()
 
             deadline = time.time() + config.VIDEO_POLL_BUDGET
@@ -1041,7 +1123,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                 if state and state["cancellation_requested"]:
                     media_scheduler.settle_budget(job_id, 0.0, success=False)
                     return
-                media_scheduler.renew_lease(job_id, owner, lease_seconds=180.0)
+                _assert_job_lease(job_id, owner)
                 result = await hiagent.poll_video_task(
                     task_id,
                     call_meta={
@@ -1054,6 +1136,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                         "version_no": version["version_no"],
                         "task_id": task_id,
                     })
+                _assert_job_lease(job_id, owner)
                 if result["status"] in ("succeeded", "failed"):
                     break
                 await asyncio.sleep(config.VIDEO_POLL_INTERVAL)
@@ -1085,15 +1168,25 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                 raise ProviderError(f"Seedance 任务失败：{error_text}")
             break
 
+        _assert_job_lease(job_id, owner)
         dest = _video_path(job["project_id"], ep["episode_no"], shot["shot_no"], version["version_no"])
         await hiagent.download(result["video_url"], str(dest))
+        _assert_job_lease(job_id, owner)
         latency = round(time.time() - started, 1)
         cost = shot_cost_cny(shot["duration_s"])
         _set_version(version["id"], status="succeeded", video_path=str(dest),
                      last_frame_url=result["last_frame_url"], cost_cny=cost, latency_s=latency)
         # 评审墙产生了新片段，旧的整集合成视频即过期 → 删除，避免成片台展示陈旧成品
         _invalidate_final_video(job["project_id"], ep["episode_no"])
+        # 自动 QA 可能跑满 VLM 读超时（默认 300s），超过默认 180s lease 会被 sweeper
+        # 抢占：原协程仍会跑完但无法 settle，新 worker 则对已成功版本重跑付费链路。
+        _assert_job_lease(
+            job_id,
+            owner,
+            lease_seconds=max(180.0, float(config.TIMEOUT_VLM_READ) + 60.0),
+        )
         await _maybe_auto_qa(job, version["id"], str(dest))
+        _assert_job_lease(job_id, owner)
         media_evidence.record_video_candidate(
             version["id"], step_run_id=_row_value(job, "step_run_id")
         )
@@ -1103,20 +1196,26 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         if not technical.get("passed"):
             raise ProviderError("视频文件技术校验失败，候选不可采用")
         media_evidence.select_best_video_candidate(job["shot_id"])
-        _set_job(job_id, "succeeded")
-        media_scheduler.settle_budget(job_id, cost, success=True)
+        if _set_job(job_id, "succeeded", lease_owner=owner):
+            media_scheduler.settle_budget(job_id, cost, success=True)
+    except LeaseLost:
+        return
     except (ProviderError, Exception) as exc:  # noqa: BLE001 失败要响：原文进日志，前端给码+分类
+        if not media_scheduler.renew_lease(job_id, owner, lease_seconds=180.0):
+            return
         public = errors.record_and_format(
             exc, action="shot_video_generate",
             context={"shot_id": job["shot_id"], "version_id": version["id"], "job_id": job_id})
         # 上游瞬时故障（超时/网络/限流/5xx）先 job 级延迟重排，扛过分钟级抖动；
         # 重试次数耗尽或不可重试的错误才永久判失败。
-        if isinstance(exc, ProviderError) and _schedule_job_retry(job_id, exc):
+        if isinstance(exc, ProviderError) and _schedule_job_retry(
+            job_id, exc, lease_owner=owner
+        ):
             _set_version(version["id"], status="queued")
             return
         _set_version(version["id"], status="failed", error=public)
-        _set_job(job_id, "failed", public)
-        media_scheduler.settle_budget(job_id, 0.0, success=False)
+        if _set_job(job_id, "failed", public, lease_owner=owner):
+            media_scheduler.settle_budget(job_id, 0.0, success=False)
 
 
 async def _maybe_auto_qa(job, version_id: str, video_path: str) -> None:
@@ -1211,8 +1310,8 @@ async def _worker_loop(name: str) -> None:
                 await _run_job(job_id, lease_owner=name)
         except Exception as exc:  # noqa: BLE001 worker 永不死亡，但错误必须落库
             public = errors.record_and_format(exc, action="worker_loop", context={"job_id": job_id})
-            _set_job(job_id, "failed", public)
-            media_scheduler.settle_budget(job_id, 0.0, success=False)
+            if _set_job(job_id, "failed", public, lease_owner=name):
+                media_scheduler.settle_budget(job_id, 0.0, success=False)
         finally:
             _queue.task_done()
 
@@ -1235,31 +1334,81 @@ def _recover_one_media_job(
     conn, job_id: str, run_id: str | None, step_run_id: str | None, reason: str
 ) -> bool:
     """把一个卡住的媒体 job 复位回 queued 并入队：
-    - jobs.status='running' → 'queued'，清空 lease/error/next_retry_at，并入队
-    - workflow_runs 保持当前状态（PAUSED_EXTERNAL/RUNNING 等）不动：worker 接管时
-      mark_media_job_state('running') 会 CAS 把 PAUSED_EXTERNAL/RUNNING 转回 RUNNING，
-      并自动清掉 failure_message。预先 transition 反而会撞上状态图不允许的边
-      （如 PAUSED_EXTERNAL→WAITING_RETRY 不在 RUN_TRANSITIONS 中）
-    - step_runs 若被 init_db 在重启时置为 FAILED（终态无法走 transition_step），
-      直接 SQL 复位回 RUNNING 并清错误字段，否则 mark_media_job_state('succeeded')
-      会因为 step.status != RUNNING 而无法收尾
+    - running/queued job 统一回到 queued，清空旧 lease；持久化 retry 到期时间保留
+    - Run 立即进入 WAITING_RETRY，监控页显示“恢复排队中”
+    - 被中断的 Step 保持 FAILED 审计终态，并创建 iteration+1 的 READY attempt
     返回 True 表示实际复位过；False 表示 job 已不存在或被并发改动（调用方忽略）。"""
     cursor = conn.execute(
         "UPDATE jobs SET status='queued', lease_owner=NULL, lease_expires_at=NULL, "
-        "next_retry_at=NULL, error=NULL, updated_at=? "
-        "WHERE id=? AND status='running' AND cancellation_requested=0 AND abandoned=0",
+        "error=NULL, updated_at=? "
+        "WHERE id=? AND status IN ('running','queued') AND cancellation_requested=0 AND abandoned=0",
         (now(), job_id),
     )
     if cursor.rowcount != 1:
         return False
-    if step_run_id:
-        # FAILED 是终态，state_machine 不允许走出；这里直接 SQL 复位，仅限 service_restart 场景
-        conn.execute(
-            "UPDATE step_runs SET status='RUNNING', finished_at=NULL, "
-            "exit_reason=COALESCE(exit_reason, 'service_restart → recovered'), "
-            "error_code=NULL, error_message=NULL WHERE id=? AND status='FAILED'",
-            (step_run_id,),
-        )
+    try:
+        from app.orchestration.state_machine import transition_run, transition_step
+
+        run = conn.execute(
+            "SELECT status FROM workflow_runs WHERE id=?", (run_id,)
+        ).fetchone() if run_id else None
+        if run and run["status"] in {"RUNNING", "PAUSED_EXTERNAL"}:
+            transition_run(
+                run_id, run["status"], "WAITING_RETRY", reason,
+                failure_code=(
+                    "SERVICE_RESTART" if run["status"] == "PAUSED_EXTERNAL" else "LEASE_EXPIRED"
+                ),
+                conn=conn,
+            )
+        old_step = conn.execute(
+            "SELECT * FROM step_runs WHERE id=?", (step_run_id,)
+        ).fetchone() if step_run_id else None
+        if old_step:
+            previous_status = old_step["status"]
+            if previous_status == "RUNNING":
+                transition_step(
+                    step_run_id, "RUNNING", "FAILED", reason,
+                    decision="retry", error_code="LEASE_EXPIRED", conn=conn,
+                )
+            if previous_status in {"RUNNING", "FAILED"}:
+                iteration = conn.execute(
+                    "SELECT COALESCE(MAX(iteration_no),0)+1 AS n FROM step_runs "
+                    "WHERE run_id=? AND step_key=?",
+                    (run_id, old_step["step_key"]),
+                ).fetchone()["n"]
+                new_step_id = new_id("step")
+                conn.execute(
+                    """INSERT INTO step_runs(
+                           id, run_id, step_key, iteration_no, parent_step_run_id, status,
+                           agent_name, contract_version, prompt_version, policy_version,
+                           input_artifact_ids_json, context_manifest_json
+                       ) VALUES(?,?,?,?,?,'PENDING',?,?,?,?,?,?)""",
+                    (
+                        new_step_id, run_id, old_step["step_key"], int(iteration), step_run_id,
+                        old_step["agent_name"], old_step["contract_version"],
+                        old_step["prompt_version"], old_step["policy_version"],
+                        old_step["input_artifact_ids_json"] or "[]",
+                        old_step["context_manifest_json"] or "{}",
+                    ),
+                )
+                transition_step(new_step_id, "PENDING", "READY", reason, conn=conn)
+                conn.execute(
+                    "UPDATE jobs SET step_run_id=? WHERE id=?", (new_step_id, job_id)
+                )
+                conn.execute(
+                    "INSERT INTO run_events(id, run_id, step_run_id, ts, event_type, severity, "
+                    "message, payload_json) VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        new_id("evt"), run_id, new_step_id, now(), "MEDIA_RECOVERY_QUEUED",
+                        "warning", reason,
+                        json.dumps(
+                            {"job_id": job_id, "previous_step_run_id": step_run_id},
+                            ensure_ascii=False,
+                        ),
+                    ),
+                )
+    except Exception:  # noqa: BLE001 legacy/minimal schemas still recover the durable job itself
+        pass
     _queue.put_nowait(job_id)
     return True
 
@@ -1274,7 +1423,7 @@ def recover_media_jobs() -> int:
     结果就是用户看到的"任务卡在'服务重启，可从安全检查点恢复'"。
 
     本函数把这些 job 显式复位回 queued 并重新入队；run 从 PAUSED_EXTERNAL 转回
-    WAITING_RETRY、step 从 FAILED 复位回 RUNNING，让 worker 接管后能正常完成。
+    WAITING_RETRY，旧 FAILED step 保留为审计历史，并创建 iteration+1 的 READY step 供 worker 接管。
 
     边界：不恢复 PAUSED_BUDGET（预算不足，需显式 retry_paused 释放预算后重试）；
          不恢复 FAILED/CANCELLED（真正报错或人工取消）。"""
@@ -1283,7 +1432,7 @@ def recover_media_jobs() -> int:
         """SELECT j.id AS job_id, j.run_id, j.step_run_id
            FROM jobs j
            JOIN workflow_runs wr ON wr.id=j.run_id
-           WHERE j.status='running'
+           WHERE j.status IN ('running','queued')
              AND wr.status='PAUSED_EXTERNAL'
              AND wr.failure_code='SERVICE_RESTART'
              AND j.cancellation_requested=0
@@ -1528,7 +1677,7 @@ def concatenate_episode(episode_id: str) -> dict:
                 concat_in + ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
                              "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(silent_video)],
                 check=True, capture_output=True)
-        shutil.copyfile(str(silent_video), str(final_path))
+        atomic_copy(silent_video, final_path)
 
     total_dur = 0
     try:

@@ -78,8 +78,28 @@ def create_run(
             _json(config_snapshot or {}), budget_limit_cny, stamp,
         ),
     )
+    if parent_run_id:
+        # Keep the interrupted attempt immutable and link it to the new attempt.
+        # This lets monitoring show "resumed" instead of leaving the parent as a
+        # permanently actionable PAUSED_EXTERNAL row.
+        conn.execute(
+            """UPDATE workflow_runs
+               SET recovered_by_run_id=?, recovered_at=?,
+                   recovery_count=COALESCE(recovery_count,0)+1,
+                   failure_message=CASE
+                       WHEN status='PAUSED_EXTERNAL' THEN '服务重启后已自动创建续跑任务'
+                       ELSE failure_message
+                   END
+               WHERE id=? AND recovered_by_run_id IS NULL""",
+            (run_id, stamp, parent_run_id),
+        )
     conn.commit()
     append_event(run_id, "RUN_CREATED", "info", f"创建运行：{workflow_type}")
+    if parent_run_id:
+        append_event(
+            parent_run_id, "RUN_RECOVERED", "info", "已自动创建续跑任务",
+            payload={"recovered_by_run_id": run_id},
+        )
     return run_id
 
 

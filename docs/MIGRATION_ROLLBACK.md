@@ -6,4 +6,8 @@
 
 禁止通过删除 job、provider task id 或 budget reservation“修复”卡住状态；这可能造成重复付费。应先查看 lease、`next_retry_at`、provider task id 和 RunEvent，再按运行手册恢复。
 
+重启恢复新增的 `workflow_runs.recovered_*`、`provider_calls.operation_id/attempt_no/supersedes_*`
+以及 `jobs.provider_operation_id/provider_create_state` 都是只增列迁移。回滚旧版应保留这些列；不要为了回滚
+把旧尝试、恢复链或上游任务号清空。
+
 T5 交付包和客户反馈是审计快照，不参与原地回滚。需要修改时创建新的上游 Artifact 和修订 Run，旧交付包保持可复验。

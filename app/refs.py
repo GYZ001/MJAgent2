@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 
 from app import config, hiagent
+from app.atomic_io import atomic_write_bytes
 from app.db import get_conn, new_id
 from app.evidence.media import record_reference_asset
 from app.schemas import Bible
@@ -74,7 +75,12 @@ def _merge_generated_portraits(conn, project_id: str, characters) -> None:
     )
 
 
-async def generate_refs(project_id: str, only_character: str | None = None) -> None:
+async def generate_refs(
+    project_id: str,
+    only_character: str | None = None,
+    *,
+    resume: bool = False,
+) -> None:
     """为项目全部（或指定）角色生成定妆照，写回 bible_json 的 ref_image_path。"""
     conn = get_conn()
     project = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
@@ -90,6 +96,29 @@ async def generate_refs(project_id: str, only_character: str | None = None) -> N
     # 初始定妆照登记到 character_portraits（适用集 1~ 至今），供按集分段刷新与评审墙按集选图。
     from app import portraits as _portraits
     bible_version = project["bible_version"] or 0
+
+    if resume:
+        # A candidate is committed per character before the batch-level Bible merge.
+        # Rehydrate those committed paths first, then regenerate only missing assets.
+        committed: dict[str, str] = {}
+        for character in targets:
+            row = conn.execute(
+                "SELECT image_path FROM character_portraits "
+                "WHERE project_id=? AND character_name=? AND ep_start=1 "
+                "ORDER BY created_at DESC LIMIT 1",
+                (project_id, character.name),
+            ).fetchone()
+            if row and row["image_path"] and Path(row["image_path"]).is_file():
+                character.ref_image_path = row["image_path"]
+                committed[character.name] = row["image_path"]
+        if committed:
+            _merge_generated_portraits(
+                conn, project_id, [c for c in targets if c.name in committed]
+            )
+            conn.commit()
+        targets = [c for c in targets if c.name not in committed]
+        if not targets:
+            return
 
     errors: list[str] = []
     for c in targets:
@@ -122,8 +151,7 @@ async def generate_refs(project_id: str, only_character: str | None = None) -> N
                         await hiagent.download(item["url"], path)
                     elif item.get("b64_json"):
                         import base64
-                        with open(path, "wb") as f:
-                            f.write(base64.b64decode(item["b64_json"]))
+                        atomic_write_bytes(path, base64.b64decode(item["b64_json"]))
                     else:
                         raise hiagent.ProviderError(f"图像响应缺少 url/b64_json：{list(item.keys())}")
                     qa = await review_portrait_image(

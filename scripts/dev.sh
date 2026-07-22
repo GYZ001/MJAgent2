@@ -16,11 +16,31 @@ FRONTEND_LOG="/tmp/manju2_frontend.log"
 listeners() { lsof -nP -iTCP:"$1" -sTCP:LISTEN -t 2>/dev/null || true; }
 
 stop_one() {
-  local port="$1" name="$2" pids
+  local port="$1" name="$2" pids current_pgid pgid groups="" alive=""
   pids=$(listeners "$port")
   if [ -n "$pids" ]; then
-    kill $pids 2>/dev/null || true
-    echo "已停止 ${name}（:${port}，pid ${pids//$'\n'/ }）"
+    current_pgid=$(ps -o pgid= -p $$ | tr -d ' ')
+    for pid in $pids; do
+      pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
+      if [ -n "$pgid" ] && [ "$pgid" != "$current_pgid" ]; then
+        case " $groups " in *" $pgid "*) ;; *) groups="$groups $pgid" ;; esac
+      fi
+    done
+    for pgid in $groups; do kill -TERM -- "-$pgid" 2>/dev/null || true; done
+    for _ in {1..50}; do
+      alive=""
+      for pgid in $groups; do
+        kill -0 -- "-$pgid" 2>/dev/null && alive="$alive $pgid"
+      done
+      [ -z "$alive" ] && break
+      sleep 0.1
+    done
+    if [ -n "$alive" ]; then
+      for pgid in $alive; do kill -KILL -- "-$pgid" 2>/dev/null || true; done
+      echo "已强制结束 ${name} 的未退出请求（:${port}，pgid${alive}）"
+    else
+      echo "已停止 ${name}（:${port}，pgid${groups}）"
+    fi
   else
     echo "${name}（:${port}）未在运行"
   fi
@@ -40,9 +60,8 @@ do_status() {
 
 do_start() {
   # 仅释放本项目端口，绝不影响其它项目（如 :5173 的另一套前端）
-  for port in 8230 5230; do
-    pids=$(listeners "$port"); [ -n "$pids" ] && { kill $pids 2>/dev/null || true; }
-  done
+  [ -n "$(listeners 8230)" ] && stop_one 8230 后端
+  [ -n "$(listeners 5230)" ] && stop_one 5230 前端
   sleep 1
   # 用 Python 的 start_new_session 彻底脱离当前会话与进程组
   "$ROOT/.venv/bin/python" - "$ROOT" "$BACKEND_LOG" "$FRONTEND_LOG" <<'PY'

@@ -91,3 +91,41 @@ def test_retry_budget_exhausts(monkeypatch) -> None:
     # 前 3 次安排重试，第 4 次预算耗尽 → 交回永久失败逻辑
     assert results == [True, True, True, False]
     assert conn.execute("SELECT retry_count FROM jobs WHERE id='j1'").fetchone()["retry_count"] == 3
+
+
+def test_fenced_worker_cannot_finish_or_requeue_new_owner_job(monkeypatch) -> None:
+    conn = _conn()
+    _seed_job(conn)
+    conn.execute(
+        "UPDATE jobs SET lease_owner='new-worker', lease_expires_at=9999999999 WHERE id='j1'"
+    )
+    conn.commit()
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+
+    assert worker._set_job("j1", "succeeded", lease_owner="old-worker") is False
+    assert worker._schedule_job_retry(
+        "j1", ProviderError("超时", retryable=True), lease_owner="old-worker",
+    ) is False
+    row = conn.execute(
+        "SELECT status, lease_owner, retry_count FROM jobs WHERE id='j1'"
+    ).fetchone()
+    assert dict(row) == {
+        "status": "running", "lease_owner": "new-worker", "retry_count": 0,
+    }
+
+
+def test_assert_job_lease_can_extend_ttl_for_long_qa_window(monkeypatch) -> None:
+    """成功尾段的自动 QA 可能超过默认 180s lease，续租必须支持拉长 TTL。"""
+    seen: list[float] = []
+
+    def fake_renew(job_id: str, owner: str, *, lease_seconds: float = 180.0) -> bool:
+        assert (job_id, owner) == ("j1", "worker-a")
+        seen.append(lease_seconds)
+        return True
+
+    monkeypatch.setattr(worker.media_scheduler, "renew_lease", fake_renew)
+    worker._assert_job_lease("j1", "worker-a", lease_seconds=360.0)
+    assert seen == [360.0]
+    # 默认路径仍保持 180s，避免无关续租被意外拉长。
+    worker._assert_job_lease("j1", "worker-a")
+    assert seen == [360.0, 180.0]
