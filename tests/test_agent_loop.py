@@ -5,7 +5,7 @@ import json
 
 from pydantic import BaseModel
 
-from app import api, db
+from app import api, db, stages
 from app.evaluations.issues import issues_from_messages
 from app.evidence import repository
 from app.harness.context import ContextPack
@@ -13,6 +13,7 @@ from app.harness.types import EvidenceArtifact
 from app.loops import AgentLoop, AgentLoopPolicy
 from app.orchestration.engine import WorkflowRecorder
 from app.schemas import EpisodeScreenplay
+from app.stages import StoryboardShotDraft
 
 
 class Candidate(BaseModel):
@@ -139,6 +140,128 @@ def test_agent_loop_persists_iterations_candidates_and_evaluations(tmp_path, mon
     assert artifacts[-1]["status"] == "approved"
     assert json.loads(artifacts[-1]["parent_artifact_ids_json"]) == [source_artifact["id"]]
     assert len(evaluations) == 2
+
+
+def test_warning_fallback_keeps_value_issues_and_artifact_from_same_iteration(
+    tmp_path, monkeypatch
+) -> None:
+    """A later T0 repair must not be linked to an earlier schema-valid value."""
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "agent-loop-coherence.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    recorder = WorkflowRecorder.create(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="input-v1",
+    )
+    recorder.start()
+    outputs = ['{"value": 1}', '{"broken": 1}', '{"broken": 2}']
+
+    async def producer(iteration, *_args):
+        return outputs[iteration - 1]
+
+    def evaluator(raw: str):
+        payload = json.loads(raw)
+        if "value" in payload:
+            value = Candidate.model_validate(payload)
+            return value, issues_from_messages(
+                ["candidate business problem"], subject="episode:e1"
+            )
+        return None, issues_from_messages(
+            [f"字段 value：第 {payload['broken']} 次修复缺失"],
+            subject=f"episode:broken-{payload['broken']}",
+        )
+
+    async def operation():
+        return await _loop(allow_warning=True).run(producer, evaluator)
+
+    _, result = asyncio.run(
+        recorder.step("screenplay", operation, contract_key="screenplay")
+    )
+    recorder.succeed()
+    artifacts = db.rows_to_dicts(db.get_conn().execute(
+        "SELECT * FROM artifacts WHERE scope_id='e1' AND type='episode_screenplay' "
+        "ORDER BY version"
+    ).fetchall())
+    evaluations = db.rows_to_dicts(db.get_conn().execute(
+        "SELECT * FROM evaluations ORDER BY created_at"
+    ).fetchall())
+
+    assert result.status == "warning"
+    assert result.exit_reason == "no_quality_gain"
+    assert result.value.value == 1
+    assert result.issues[0].message == "candidate business problem"
+    assert result.artifact_id == artifacts[0]["id"]
+    assert [artifact["trust_level"] for artifact in artifacts] == ["T1", "T0", "T0"]
+    assert [row["score"] for row in evaluations] == [50.0, 0.0, 0.0]
+
+
+def test_storyboard_plural_shots_gets_targeted_repair_and_singular_contract(
+    monkeypatch,
+) -> None:
+    shot = {
+        "shot_no": 1,
+        "duration_s": 5,
+        "shot_size": "中景",
+        "camera_move": "固定",
+        "scene_setting": "日，庭院",
+        "characters": ["萧炎"],
+        "action_desc": "萧炎站在庭院中央缓缓握紧拳头。",
+        "first_frame_desc": "萧炎站在庭院中央，双手自然垂落。",
+        "last_frame_desc": "同一机位，萧炎握紧拳头，目光变得坚定。",
+        "source_excerpt": "萧炎站在庭院里，沉默地握紧了自己的拳头。",
+        "narration": "",
+        "dialogues": [],
+        "transition": "硬切",
+        "continuity_from_prev": False,
+    }
+    outputs = [
+        json.dumps(
+            {"episode_no": 1, "is_final": False, "shots": [shot, {**shot, "shot_no": 2}]},
+            ensure_ascii=False,
+        ),
+        json.dumps(
+            {"episode_no": 1, "is_final": False, "shot": shot},
+            ensure_ascii=False,
+        ),
+    ]
+    prompts: list[str] = []
+
+    async def fake_chat(messages, **_kwargs):
+        prompts.append(messages[-1]["content"])
+        return outputs[len(prompts) - 1]
+
+    monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
+    loop = AgentLoop(
+        stage_key="storyboard_shot_1",
+        contract_key="storyboard",
+        goal="one shot",
+        scope_type="storyboard_checkpoint",
+        scope_id="e1:1",
+        artifact_type="storyboard_shot",
+    )
+    result = asyncio.run(stages._run_with_agent_loop(
+        "分镜脚本",
+        "storyboard",
+        "只生成第一镜",
+        StoryboardShotDraft,
+        lambda _draft: [],
+        loop=loop,
+        repair_output_contract="根对象只能包含单数 shot；禁止 shots 数组。",
+        prefill={"episode_no": 1},
+    ))
+
+    assert result.shot.shot_no == 1
+    assert len(prompts) == 2
+    assert "逐镜合同只允许单数 shot 对象" in prompts[1]
+    assert prompts[1].endswith("根对象只能包含单数 shot；禁止 shots 数组。")
+
+
+def test_storyboard_loop_exit_message_reflects_actual_reason() -> None:
+    assert api._storyboard_loop_exit_text("max_iterations") == "已达到重试上限"
+    assert "无质量提升" in api._storyboard_loop_exit_text("no_quality_gain")
+    assert "相同问题" in api._storyboard_loop_exit_text("stalled")
 
 
 def test_context_pack_records_hash_and_truncation_without_hiding_it() -> None:

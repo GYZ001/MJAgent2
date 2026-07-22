@@ -10,6 +10,7 @@ import ImpactDialog, { ImpactSummary } from '../components/harness/ImpactDialog'
 const SIZES = ['远景', '全景', '中景', '近景', '特写']
 const MOVES = ['固定', '推近', '拉远', '横摇', '跟随']
 const TRANS = ['硬切', '叠化', '淡出淡入', '黑场', '闪黑', '闪白', '甩镜', '遮挡转场', '匹配剪辑', '声音延续+叠化', '声音先行+淡入']
+const DURATIONS = [5, 6, 7, 8, 9, 10]
 export default function BoardPage() {
   const { episodeId, go, projectId, toast } = useNav()
   const { data: ep, refresh } = useEpisode(episodeId!)
@@ -26,6 +27,13 @@ export default function BoardPage() {
   }
 
   const totalDur = ep.shots?.reduce((s, x) => s + x.duration_s, 0) ?? 0
+  // 与后端 /storyboard/resume 对齐：有已落库镜头 + 未完成提示，即视为可续跑 checkpoint。
+  // 不依赖具体失败文案（「需修改镜头」「追加镜生成失败」「逐镜 checkpoint」等都会变）。
+  const canResumeCheckpoint = Boolean(
+    ep.shots?.length &&
+    ep.script_error &&
+    (ep.status === 'scripted' || ep.status === 'script_failed')
+  )
 
   return (
     <>
@@ -45,10 +53,24 @@ export default function BoardPage() {
           <button className="btn" disabled={busy || ep.status === 'scripting' || ep.screenplay_status !== 'ready'}
             onClick={() => {
               storyboardTimer.start()
-              act(() => api.post(`/episodes/${ep.id}/storyboard`), '分镜生成已开始（先规划大纲，再逐镜填充，QA 通过后陆续展示）')
+              act(
+                () => api.post(`/episodes/${ep.id}/storyboard${canResumeCheckpoint ? '/resume' : ''}`),
+                canResumeCheckpoint
+                  ? `已从前 ${ep.shots?.length ?? 0} 镜 checkpoint 继续生成`
+                  : '分镜生成已开始（先规划大纲，再逐镜填充，QA 通过后陆续展示）',
+              )
             }}>
-            {ep.shots?.length ? '重新生成分镜' : '生成分镜脚本'}
+            {canResumeCheckpoint ? `从镜${String((ep.shots?.length ?? 0) + 1).padStart(2, '0')}继续` : ep.shots?.length ? '重新生成分镜' : '生成分镜脚本'}
           </button>
+          {canResumeCheckpoint && (
+            <button className="btn ghost" disabled={busy || ep.status === 'scripting'}
+              onClick={() => {
+                storyboardTimer.start()
+                act(() => api.post(`/episodes/${ep.id}/storyboard`), '已放弃旧 checkpoint，开始重新生成整版分镜')
+              }}>
+              重新生成整版
+            </button>
+          )}
           {ep.screenplay_status !== 'ready' && (
             <button className="btn primary" disabled={busy} onClick={() => go('script', projectId, ep.id)}>
               先去剧本台
@@ -79,7 +101,7 @@ export default function BoardPage() {
           <TaskTimer label="分镜" timer={storyboardTimer} />
           {ep.storyboard_evidence && <EvidenceDrawer evidence={ep.storyboard_evidence} label="分镜证据" />}
           <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>
-            共 {ep.shots?.length ?? 0} 镜 · 每镜 5s · 当前总时长 {totalDur}s（不设上限）· 已耗 ¥{ep.cost_cny.toFixed(1)}
+            共 {ep.shots?.length ?? 0} 镜 · 每镜 5~10s（模型按内容判断）· 当前总时长 {totalDur}s（不设上限）· 已耗 ¥{ep.cost_cny.toFixed(1)}
           </span>
         </div>
         {ep.screenplay_status !== 'ready' && <div className="error-banner">本集还没有可用剧本。请先到剧本台生成/保存完整剧本，再展开分镜。</div>}
@@ -121,7 +143,7 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
     if (!edit) return
     try {
       const result = await api.put(`/shots/${shot.id}`, {
-        shot_size: edit.shot_size, camera_move: edit.camera_move,
+        duration_s: edit.duration_s, shot_size: edit.shot_size, camera_move: edit.camera_move,
         scene_setting: edit.scene_setting, characters: edit.characters, action_desc: edit.action_desc,
         first_frame_desc: edit.first_frame_desc, last_frame_desc: edit.last_frame_desc,
         source_excerpt: edit.source_excerpt,
@@ -154,6 +176,9 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
         {edit ? (
           <>
             <div className="shot-edit-grid full">
+              <div><label className="f">时长（5~10s）</label>
+                <select style={{ width: '100%' }} value={edit.duration_s} onChange={e => setEdit({ ...edit, duration_s: Number(e.target.value) })}>
+                  {DURATIONS.map(x => <option key={x} value={x}>{x}s</option>)}</select></div>
               <div><label className="f">景别</label>
                 <select style={{ width: '100%' }} value={edit.shot_size} onChange={e => setEdit({ ...edit, shot_size: e.target.value })}>
                   {SIZES.map(x => <option key={x}>{x}</option>)}</select></div>

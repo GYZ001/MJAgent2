@@ -8,7 +8,7 @@
 
 ### v1.1 修订说明
 
-本版已按 2026-07-18 最新代码重新校准，不再把以下已经完成的工作列为未来整改项：数据库唯一约束/父子校验/级联与孤儿修复、后台任务统一注册与停机清理、派生媒体统一失效、固定 5 秒视频合同、正则“一章一集”、开发依赖、CI 和基础回归验证。
+本版已按当前代码重新校准，不再把以下已经完成的工作列为未来整改项：数据库唯一约束/父子校验/级联与孤儿修复、后台任务统一注册与停机清理、派生媒体统一失效、模型判断 5~10 秒视频合同、正则“一章一集”、开发依赖、CI 和基础回归验证。
 
 当前已实测：148 项测试通过、Ruff 通过、Python 全量编译通过、TypeScript/Vite 构建通过。现有备份与隔离资产也已核实位于 `data/backups/`。
 
@@ -97,7 +97,7 @@ Delivery Manifest + 验收报告 + 可复验交付包
 | 后台任务统一注册/取消/等待/停机 | `app/task_registry.py` | 进程内 Task Runtime，后续由持久化 Engine 包装 |
 | 派生关键帧、视频、成片统一失效 | `app/artifacts.py` | Runtime Asset Cleanup，不等同于证据 Artifact Store |
 | 唯一约束、父子校验、级联和历史修复 | `app/db.py` | Data Integrity Foundation |
-| 固定 5 秒视频合同 | `app/config.py`、Schema、编译器、Prompt、测试 | Shot Contract 硬约束 |
+| 模型判断 5~10 秒视频合同 | `app/config.py`、Schema、编译器、Prompt、测试 | Shot Contract 硬约束 |
 | 开发依赖与 CI | `requirements-dev.txt`、`pyproject.toml`、`.github/workflows/ci.yml` | Release Gate 基础 |
 | 前端监控与评审入口 | `MonitorPage`、`BoardPage`、`WallPage`、`CinemaPage` | Run Center + Evidence Panel + Delivery Gate |
 
@@ -160,7 +160,7 @@ Delivery Manifest + 验收报告 + 可复验交付包
 
 #### I. 产品合同已改，但规范文档仍有漂移
 
-代码已采用正则“一章一集”和固定 5 秒镜头，但当前 `PRD.md` 仍保留滚动章节摘要、LLM Episode Plan、`target_duration_s/10`、15 秒口播预算和“最多额外 2 镜”等旧描述；`docs/PROMPT_SPEC.md` 也仍保留 Episode Plan 章节、滚动摘要、15 秒口播与部分旧时长规则。它们会误导后续开发或 Agent 再次引入已删除逻辑。
+代码已采用正则“一章一集”和模型判断 5~10 秒镜头，但规范文档中的旧分集、滚动摘要、固定时长或 15 秒口播描述仍可能误导后续开发或 Agent 再次引入已删除逻辑。
 
 处理原则：H0 阶段必须将 PRD、Prompt Spec、README、Schema、运行时代码和测试视为同一 Contract Surface，一次性消除冲突；CI 增加静态合同扫描，禁止旧关键词重新出现。
 
@@ -339,7 +339,7 @@ UI 对每个 Artifact 展示明确等级：
 
 任何以下条件失败，结果一律不可交付，不能被平均分抵消：
 
-- 文件不存在、不可读取、视频无法解码，或单镜时长偏离固定 5 秒合同；
+- 文件不存在、不可读取、视频无法解码，或单镜实测时长偏离分镜模型选择的 5~10 秒合同值；
 - 上游 Artifact 已 stale；
 - 角色、专名、源章节、镜头编号、台词归属等确定性合同失败；
 - 有未解决 blocker；
@@ -567,7 +567,7 @@ Chapter Set Artifact
 ```text
 Screenplay T2/T4
 → 生成 Storyboard Outline Artifact
-→ 覆盖率/顺序/声轨/固定 5 秒拆镜预检
+→ 覆盖率/顺序/声轨/模型判断 5~10 秒与拆镜预检
 → 每镜 Observe（大纲项 + 上一镜尾状态 + 剩余预算）
 → 生成候选镜头
 → 局部 + 全局增量校验
@@ -598,7 +598,7 @@ Screenplay T2/T4
 Storyboard Shot + Compiled Prompt + Reference Set
 → 参数/长度/预算/输入文件 preflight
 → provider 创建与轮询
-→ 下载并校验 hash、容器、时长约等于 5 秒、分辨率、解码
+→ 下载并校验 hash、容器、时长约等于分镜选择值、分辨率、解码
 → VLM 对角色/动作/干净画面评分
 → 基于具体 issue 选择：换参考图 / 改 prompt / 重抽 seed / 人工处理
 → 比较全部成功版本
@@ -611,7 +611,7 @@ Storyboard Shot + Compiled Prompt + Reference Set
 
 ```text
 全部 adopted shot videos
-→ 顺序/缺口/文件/单镜 5 秒合同与总时长检查
+→ 顺序/缺口/文件/单镜 5~10 秒合同与总时长检查
 → 合成或生成镜头序列
 → 全集视觉连续性与关键剧情覆盖抽检
 → 计算硬门禁、质量卡、证据覆盖率
@@ -779,7 +779,7 @@ Run Dock 展示：
 | `ScenesPage` 场景图 | 场景图血缘、一致性结果、stale 标记、候选对比 | 能区分“当前使用”“已过期”“质检未通过” |
 | `EpisodesPage` 分集 | 明示“正则一章一集、0 LLM”、章节覆盖率和每集就绪状态 | 不再等待或误解 AI 分集，来源关系清晰 |
 | `ScriptPage` 剧本台 | Contract 检查、来源证据、Issue 定位、修复前后 diff | 不只看到生成失败，而是跳到具体字段修改 |
-| `BoardPage` 分镜台 | 每镜 T 等级、5 秒合同、剧情/声轨覆盖、上下游影响 | 编辑镜头前知道会作废哪些关键帧、视频和成片 |
+| `BoardPage` 分镜台 | 每镜 T 等级、5~10 秒模型选时长合同、剧情/声轨覆盖、上下游影响 | 编辑镜头前知道会作废哪些关键帧、视频和成片 |
 | `WallPage` 评审墙 | 候选版本横向比较、QA 证据、采用理由、重生目标和成本 | 知道为什么推荐这一版、重生要解决什么问题 |
 | `CinemaPage` 成片台 | Delivery Readiness、缺失镜头、stale 检查、质量卡、manifest | 在导出前明确看到“可交付/不可交付”及原因 |
 | `MonitorPage` 监制房 | Run Center、门禁队列、恢复和 trace | 能跨项目掌握后台执行与异常 |
@@ -1000,7 +1000,7 @@ Verified Delivery Rate
 
 ## 14. 分阶段实施路线
 
-以下工期按 1 名熟悉项目的后端/全栈开发估算。数据库完整性、任务注册、派生失效、固定时长、开发依赖和 CI 已作为前置工程基线完成，不再重复建设。
+以下工期按 1 名熟悉项目的后端/全栈开发估算。数据库完整性、任务注册、派生失效、镜头时长合同、开发依赖和 CI 已作为前置工程基线完成，不再重复建设。
 
 ### Phase H0：兼容残留热修与新基线封板（1~2 天）
 
@@ -1008,11 +1008,11 @@ Verified Delivery Rate
 
 - 修复 `auto.py` 对 `api._bible_tasks`、`api._plan_task` 的残留引用，改用 `task_registry` 与 `planning.run_regex_plan` 的正式接口；
 - 新增“一键全自动从空项目启动”的端到端回归；
-- 清理 `PRD.md`、`docs/PROMPT_SPEC.md` 中残留的 AI 分集、滚动章节摘要、动态镜头时长、15 秒口播和旧镜头数规则；
-- 在 CI 增加 Contract Surface 扫描，保证“一章一集/单镜 5 秒/超长动作与口播拆镜”在代码、Prompt、文档和测试中一致；
+- 清理 `PRD.md`、`docs/PROMPT_SPEC.md` 中残留的 AI 分集、滚动章节摘要、固定镜头时长、15 秒口播和旧镜头数规则；
+- 在 CI 增加 Contract Surface 扫描，保证“一章一集/模型判断单镜 5~10 秒/超长动作与口播拆镜”在代码、Prompt、文档和测试中一致；
 - 将 148 tests、Ruff、compileall、前端 build 记录为 v1.1 工程基线；
 - 为本轮完整性修复生成机器可读报告：备份路径、孤儿/重复计数、隔离目录和最终计数；
-- 冻结“一章一集”和“单镜固定 5 秒”为不可被 Agent 修改的产品合同。
+- 冻结“一章一集”和“单镜由分镜模型判断 5~10 秒整数时长”为产品合同。
 
 退出标准：全自动空项目路径不访问任何已删除 API；旧 Plan/摘要/动态时长合同在活跃文档和代码中无残留；现有验证全部通过；完整性修复有可追溯报告。
 
@@ -1049,7 +1049,7 @@ Verified Delivery Rate
 
 - jobs 增加 lease、持久 retry_count/next_retry_at、预算预留；保留 `task_registry` 负责当前进程句柄；
 - 迁移参考图生成、一致性检测、视频生成、视频 QA；
-- 文件级技术校验，单镜必须满足固定 5 秒合同；
+- 文件级技术校验，单镜必须匹配分镜选择的 5~10 秒合同值；
 - 候选比较后采用，不再默认首个成功版本；
 - 取消和 provider 不可取消任务语义落地。
 - 在场景图和评审墙接入候选横向比较、采用理由、重生目标与成本预估。
@@ -1086,7 +1086,7 @@ Verified Delivery Rate
 1. **PR-01 全自动兼容热修**：移除 `auto.py` 对已删除 API 的引用，补空项目全链路回归。
 2. **PR-02 Contract Surface 对齐**：清理 PRD/Prompt Spec/README/代码中的旧 Plan、摘要、动态时长和口播规则，增加 CI 漂移扫描。
 3. **PR-03 完整性修复报告**：记录备份、修复/隔离计数、ID 摘要和迁移版本；重复执行必须幂等。
-4. **PR-04 Issue 与 Contract 类型**：不改业务行为，让 validators 返回结构化 Issue 的兼容层；固化一章一集与 5 秒合同。
+4. **PR-04 Issue 与 Contract 类型**：不改业务行为，让 validators 返回结构化 Issue 的兼容层；固化一章一集与模型判断 5~10 秒合同。
 5. **PR-05 Run/Step/Event Schema**：迁移、repository、CAS 状态机单测。
 6. **PR-06 Evidence Artifact/Evaluation Schema**：hash、血缘、tombstone、失效传播单测；不与现有 `artifacts.py` 混名。
 7. **PR-07 Provider Trace 贯通**：`run_id/step_run_id/trace_id` 进入 provider_calls/jobs。
@@ -1095,7 +1095,7 @@ Verified Delivery Rate
 10. **PR-10 通用 AgentLoop + Script Evidence**：先迁移 Screenplay，并在剧本台呈现 Contract、Issue 和修复 diff。
 11. **PR-11 Storyboard Checkpoint + Board Evidence**：逐镜持久化、恢复、局部修复和修改影响预览。
 12. **PR-12 Lease Scheduler**：在 `task_registry` 之上补持久 lease/retry，而不是替换 registry。
-13. **PR-13 Media Candidate Selection + Wall Compare**：5 秒文件校验、独立评估、版本比较和明确采用策略。
+13. **PR-13 Media Candidate Selection + Wall Compare**：按分镜选择时长做文件校验、独立评估、版本比较和明确采用策略。
 14. **PR-14 统一 ImpactDialog 与 Gate UI**：覆盖人物谱、场景图、分镜、评审墙的失效/付费操作。
 15. **PR-15 Delivery Manifest、Cinema Readiness、T5 门禁与客户反馈闭环**。
 16. **PR-16 新旧双轨 Benchmark 与旧编排删除**。
@@ -1146,7 +1146,7 @@ Verified Delivery Rate
 如果本周只做最有价值的工作，建议按以下顺序：
 
 1. 热修 `auto.py` 的 `_bible_tasks/_plan_task` 兼容残留，并补“一键全自动空项目”回归。
-2. 清理 PRD、Prompt Spec 和代码中的旧 AI 分集、滚动摘要、动态时长与 15 秒口播合同，并用 CI 防止漂移回归。
+2. 清理 PRD、Prompt Spec 和代码中的旧 AI 分集、滚动摘要、固定时长与 15 秒口播合同，并用 CI 防止漂移回归。
 3. 将本轮数据库清理结果固化为可机器读取的 integrity report；后续修复必须先备份、后记录、再清理/隔离。
 4. 定义 `Issue / StageContract / EvidenceArtifact / Evaluation / Decision` 五个核心类型，避免与现有清理模块 `artifacts.py` 混淆。
 5. 新增 `workflow_runs / step_runs / artifacts / evaluations / run_events`，其中 Artifact 表用于证据与血缘，现有 `artifacts.py` 继续负责运行时清理。

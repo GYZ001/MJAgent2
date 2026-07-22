@@ -30,6 +30,12 @@ def test_sanitize_nonaggressive_only_softens_safety_terms() -> None:
     assert safe.endswith("--ratio 9:16 --dur 5")
 
 
+def test_sanitize_preserves_model_selected_duration() -> None:
+    safe = sanitize_seedance_prompt("镜头动作：角色缓慢起身。--ratio 9:16 --dur 8")
+
+    assert safe.endswith("--ratio 9:16 --dur 8")
+
+
 def test_aggressive_sanitize_rewrites_genre_terms() -> None:
     """aggressive 模式（平台已判敏感后的重提）才启用题材专用措辞降级。"""
     prompt = (

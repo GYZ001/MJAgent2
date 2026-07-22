@@ -124,18 +124,6 @@ class WorkflowRecorder:
         )
         return step_id, result
 
-    def skip_step(self, step_key: str, reason: str, *, contract_key: str | None = None) -> str:
-        contract = get_contract(contract_key) if contract_key else None
-        step_id = repository.create_step(
-            self.run_id, step_key, contract_version=contract.version if contract else None
-        )
-        transition_step(step_id, "PENDING", "SKIPPED", reason, decision="accept")
-        repository.append_event(
-            self.run_id, "STEP_SKIPPED", "info", f"步骤跳过：{step_key}",
-            step_run_id=step_id, payload={"reason": reason},
-        )
-        return step_id
-
     def artifact(self, step_run_id: str, artifact: EvidenceArtifact) -> dict[str, Any]:
         created = repository.create_artifact(artifact, step_run_id=step_run_id)
         conn = get_conn()

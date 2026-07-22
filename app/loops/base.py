@@ -92,7 +92,8 @@ class AgentLoop(Generic[T]):
         previous_quality: float | None = None
         no_gain_count = 0
         last_value: T | None = None
-        last_artifact_id: str | None = None
+        last_value_issues: list[Issue] = []
+        last_value_artifact_id: str | None = None
         exit_reason = "max_iterations"
 
         for iteration_no in range(1, self.policy.max_iterations + 1):
@@ -128,19 +129,25 @@ class AgentLoop(Generic[T]):
             issue_history.append(issues)
             fingerprint = issue_fingerprint(issues)
             fingerprint_history.append(fingerprint)
-            quality = _quality(issues)
+            # A schema-invalid response is not a usable candidate, even when it
+            # happens to have fewer reported issues than a schema-valid draft.
+            # Scoring it as zero prevents malformed JSON from looking like a
+            # quality tie with a repairable business-rule violation.
+            quality = _quality(issues) if value is not None else 0.0
             if previous_quality is not None:
                 gain = quality - previous_quality
                 no_gain_count = no_gain_count + 1 if gain < self.policy.min_quality_gain else 0
             previous_quality = quality
-            if value is not None:
-                last_value = value
-
             artifact_id = self._record_candidate(
                 iteration_step_id, iteration_no, raw, value, issues, quality
             )
-            if artifact_id:
-                last_artifact_id = artifact_id
+            if value is not None:
+                # Keep the fallback value, its evaluation, and its artifact as
+                # one coherent snapshot.  A later T0 response must never be
+                # attached to an earlier schema-valid value.
+                last_value = value
+                last_value_issues = list(issues)
+                last_value_artifact_id = artifact_id
 
             if not issues and value is not None:
                 if iteration_step_id:
@@ -194,9 +201,9 @@ class AgentLoop(Generic[T]):
                 value=last_value,
                 status="warning",
                 exit_reason=exit_reason,
-                issues=issue_history[-1],
+                issues=last_value_issues,
                 iterations=len(issue_history),
-                artifact_id=last_artifact_id,
+                artifact_id=last_value_artifact_id,
             )
         raise AgentLoopFailure(
             self.stage_key,

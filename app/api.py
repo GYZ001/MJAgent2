@@ -12,6 +12,7 @@ from app import config, errors, task_registry, worker
 from app.compiler import clip_duration_value, compile_prompt, shot_cost_cny
 from app.db import get_conn, get_setting, log_provider_call, new_id, now, rows_to_dicts
 from app.evidence import repository as evidence_repository
+from app.harness.contracts import get_contract
 from app.harness.types import Evaluation, EvidenceArtifact
 from app.harness.context import ContextPack
 from app.ingest import ingest_novel
@@ -23,7 +24,7 @@ from app.stages import (SCREENPLAY_SOURCE_BUDGET_CHARS, StageError, generate_bib
                         generate_screenplay, generate_storyboard_next_shot,
                         generate_storyboard_outline)
 from app.validators import (relieve_spoken_overflow,
-                            normalize_action_desc, normalize_continuity, normalize_fixed_durations,
+                            normalize_action_desc, normalize_continuity,
                             normalize_offbible_characters,
                             normalize_transition_visuals,
                             storyboard_shot_count_range,
@@ -1528,7 +1529,7 @@ def edit_screenplay(episode_id: str, body: dict):
     conn = get_conn()
     p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
     bible = _project_bible_or_placeholder(p)
-    expected = max(1, int(ep["target_duration_s"]) // config.FIXED_VIDEO_DURATION_S)
+    expected = max(1, int(ep["target_duration_s"]) // config.VIDEO_DURATION_MIN_S)
     errors = validate_screenplay(instance, bible, expected, episode_no=ep["episode_no"])
     if errors:
         raise HTTPException(422, "；".join(errors))
@@ -1617,6 +1618,102 @@ def _sync_storyboard_shot_timing(conn, episode_id: str, board: Storyboard) -> No
         )
 
 
+def _persist_storyboard_character_policy_repairs(
+    conn, episode_id: str, board: Storyboard, changes: list[dict]
+) -> list[str]:
+    """Persist deterministic repairs as derived T1 candidates, preserving lineage.
+
+    The character-policy evaluation only proves this normalization, not every storyboard
+    gate, so the derived artifact must not be committed as T2 on its own.
+    """
+    material = [change for change in changes if change.get("mutated")]
+    if not material:
+        return []
+    contract_version = get_contract("storyboard").version
+    artifact_ids: list[str] = []
+    by_shot = {shot.shot_no: shot for shot in board.shots}
+    for shot_no in dict.fromkeys(int(change["shot_no"]) for change in material):
+        row = conn.execute(
+            "SELECT id, storyboard_artifact_id FROM shots WHERE episode_id=? AND shot_no=?",
+            (episode_id, shot_no),
+        ).fetchone()
+        shot = by_shot.get(shot_no)
+        if row is None or shot is None:
+            continue
+        shot_changes = [change for change in material if int(change["shot_no"]) == shot_no]
+        previous_artifact_id = row["storyboard_artifact_id"]
+        artifact = evidence_repository.create_artifact(EvidenceArtifact(
+            type="storyboard_shot",
+            scope_type="storyboard_checkpoint",
+            scope_id=f"{episode_id}:{shot_no}",
+            status="candidate",
+            trust_level="T1",
+            content=shot.model_dump(mode="json"),
+            parent_artifact_ids=[previous_artifact_id] if previous_artifact_id else [],
+            contract_version=contract_version,
+        ))
+        evidence_repository.create_evaluation(
+            artifact["id"],
+            Evaluation(
+                evaluator_type="deterministic",
+                evaluator_name="storyboard_character_policy",
+                evaluator_version=contract_version,
+                status="passed",
+                hard_gate_passed=True,
+                score=100,
+                evidence={
+                    "policy": "functional_extra_v1",
+                    "scope": "character_policy_only",
+                    "changes": shot_changes,
+                },
+            ),
+        )
+        if previous_artifact_id:
+            evidence_repository.invalidate_descendants(
+                previous_artifact_id,
+                f"镜头角色合同已由 {artifact['id']} 修订",
+                exclude_ids={str(artifact["id"])},
+            )
+        has_runtime_derivatives = conn.execute(
+            """SELECT EXISTS(SELECT 1 FROM shot_versions WHERE shot_id=?)
+                      OR EXISTS(SELECT 1 FROM shot_scenes WHERE shot_id=?) AS present""",
+            (row["id"], row["id"]),
+        ).fetchone()["present"]
+        if has_runtime_derivatives:
+            worker.clear_shot_artifacts(row["id"])
+        conn.execute(
+            """UPDATE shots SET characters=?, action_desc=?, first_frame_desc=?,
+               last_frame_desc=?, narration=?, dialogues=?, storyboard_artifact_id=? WHERE id=?""",
+            (
+                json.dumps(shot.characters, ensure_ascii=False),
+                shot.action_desc,
+                shot.first_frame_desc,
+                shot.last_frame_desc,
+                shot.narration,
+                json.dumps([dialogue.model_dump() for dialogue in shot.dialogues], ensure_ascii=False),
+                artifact["id"],
+                row["id"],
+            ),
+        )
+        artifact_ids.append(str(artifact["id"]))
+        log_provider_call(
+            "storyboard_character_policy",
+            config.MODEL_TEXT,
+            "CHARACTER_POLICY_REPAIRED",
+            None,
+            0,
+            meta={
+                "episode_id": episode_id,
+                "shot_no": shot_no,
+                "contract_version": contract_version,
+                "artifact_id": artifact["id"],
+                "changes": shot_changes,
+            },
+        )
+    conn.commit()
+    return artifact_ids
+
+
 def _finalize_storyboard_evidence(episode_id: str, board: Storyboard) -> str:
     conn = get_conn()
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
@@ -1630,6 +1727,7 @@ def _finalize_storyboard_evidence(episode_id: str, board: Storyboard) -> str:
             *(row["storyboard_artifact_id"] for row in shot_rows),
         ) if artifact_id
     ]
+    contract_version = get_contract("storyboard").version
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type="storyboard",
         scope_type="episode",
@@ -1638,18 +1736,19 @@ def _finalize_storyboard_evidence(episode_id: str, board: Storyboard) -> str:
         trust_level="T2",
         content=board.model_dump(mode="json"),
         parent_artifact_ids=parents,
-        contract_version="1.0.0",
+        contract_version=contract_version,
     ))
     evaluation = Evaluation(
         evaluator_type="deterministic",
         evaluator_name="storyboard_full_gate",
-        evaluator_version="1.0.0",
+        evaluator_version=contract_version,
         status="passed",
         hard_gate_passed=True,
         score=100,
         evidence={
             "shot_count": len(board.shots),
-            "fixed_duration_s": config.FIXED_VIDEO_DURATION_S,
+            "duration_range_s": [config.VIDEO_DURATION_MIN_S, config.VIDEO_DURATION_MAX_S],
+            "duration_decided_by": "model",
             "checkpoint_artifact_ids": parents,
         },
     )
@@ -1667,7 +1766,7 @@ def _reconcile_storyboard_plan(conn, episode_id: str, episode_no: int,
     """让落库大纲成为唯一事实源，消除"规划十几镜却分镜24"的困惑。
 
     逐镜阶段大纲会被就地改写：①covers 不可单镜完成时 _maybe_split_outline_covers 会插入新节拍；
-    ②模型按"5秒演不完就拆"继续拆镜、镜头数超出计划长度。两种情况下内存 outline 都会领先于
+    ②模型判断单镜超过 10 秒仍演不完而继续拆镜、镜头数超出计划长度。两种情况下内存 outline 都会领先于
     落库的 storyboard_outline_json，导致前端 storyboard_planned_shots 显示陈旧的初始估算。
 
     本函数在每提交一镜后把当前计划追平实际镜头数并回写 DB，使规划数随逐镜细化实时自更新、
@@ -1781,10 +1880,19 @@ async def _storyboard_task(episode_id: str, *, resume: bool = True):
             list(_board_from_shot_rows(existing_rows, ep_data["episode_no"]).shots)
             if existing_rows else []
         )
+        if completed:
+            recovered_board = Storyboard(
+                episode_no=ep_data["episode_no"], shots=list(completed)
+            )
+            character_changes = normalize_offbible_characters(recovered_board, bible)
+            _persist_storyboard_character_policy_repairs(
+                conn, episode_id, recovered_board, character_changes
+            )
+            completed = list(recovered_board.shots)
         if completed and outline and len(completed) >= len(outline.shots):
             recovered_board = Storyboard(episode_no=ep_data["episode_no"], shots=list(completed))
             recovered_errors = validate_storyboard(
-                recovered_board, bible, ep_data["target_duration_s"], enforce_total_duration=False
+                recovered_board, bible, ep_data["target_duration_s"]
             )
             recovered_errors.extend(validate_storyboard_soundtrack(
                 recovered_board, screenplay, ep_data["target_duration_s"]
@@ -1813,14 +1921,16 @@ async def _storyboard_task(episode_id: str, *, resume: bool = True):
             # 与单镜 QA 使用同一套确定性归一口径后再落库。
             board = Storyboard(episode_no=ep_data["episode_no"], shots=[*completed, draft.shot])
             normalize_continuity(board)
-            # 与逐镜 QA 同口径：圣经外路人剥离/规范，落库前去掉非圣经角色。把这次确定性处理记入账本，
-            # 让监控里能看到"本该触发一轮『角色圣经中不存在』修复、已被平台就地消化"（减重试 #1）。
+            # 与逐镜 QA 同口径：实名角色服从角色圣经；功能性路人按确定性合同保留，其它圣经外名字剥离。
+            # 每次分类都写入账本，避免“放宽角色限制”变成不可审计的静默绕过。
             for c in normalize_offbible_characters(board, bible):
+                allowed_extra = bool(c.get("allowed_functional_extra"))
                 log_provider_call(
-                    "storyboard_offbible_character", config.MODEL_TEXT, "OFFBIBLE_NORMALIZED", None, 0,
+                    "storyboard_character_policy", config.MODEL_TEXT,
+                    "FUNCTIONAL_EXTRA_ALLOWED" if allowed_extra else "OFFBIBLE_NORMALIZED",
+                    None, 0,
                     meta={"episode_id": episode_id, "episode_no": ep_data["episode_no"], "stage": "分镜脚本", **c})
             relieve_spoken_overflow(board)  # 与逐镜 QA 同口径：人群旁白降级为画面，单镜口播压回上限内
-            normalize_fixed_durations(board)
             normalize_transition_visuals(board)
             _sync_storyboard_shot_timing(conn, episode_id, board)
             shot = board.shots[-1]
@@ -1851,7 +1961,8 @@ async def _storyboard_task(episode_id: str, *, resume: bool = True):
                     object.__setattr__(draft, "is_final", False)
                 else:
                     note = (
-                        f"镜{shot.shot_no:02d}已达到重试上限，已作为「需修改镜头」保留在分镜台；"
+                        f"镜{shot.shot_no:02d}{_storyboard_loop_exit_text(getattr(draft, 'loop_exit_reason', ''))}，"
+                        "已作为「需修改镜头」保留在分镜台（逐镜 checkpoint 已保存，可从下一镜继续）；"
                         + _storyboard_residual_hint(residual)
                         + "。残余问题：" + "；".join(residual[:8])
                     )
@@ -1921,6 +2032,7 @@ def _new_storyboard_recorder(
         "SELECT shot_no, storyboard_artifact_id FROM shots WHERE episode_id=? ORDER BY shot_no",
         (episode_id,),
     ).fetchall())
+    contract = get_contract("storyboard")
     return WorkflowRecorder.create(
         workflow_type="storyboard",
         scope_type="episode",
@@ -1930,7 +2042,16 @@ def _new_storyboard_recorder(
         ),
         requested_by=requested_by,
         trigger_type=trigger_type,
-        policy_snapshot={"checkpoint": "per_shot", "max_iterations_per_shot": 4},
+        policy_snapshot={
+            "checkpoint": "per_shot",
+            "max_iterations_per_shot": contract.max_iterations,
+            "provider_retry": {
+                "max_retries_per_call": config.TEXT_PROVIDER_MAX_RETRIES,
+                "base_delay_s": config.TEXT_PROVIDER_RETRY_BASE_DELAY,
+                "strategy": "bounded_exponential_backoff_same_request",
+            },
+        },
+        config_snapshot={"storyboard_shot_max_tokens": config.STORYBOARD_SHOT_MAX_TOKENS},
         parent_run_id=parent_run_id,
     )
 
@@ -2002,6 +2123,50 @@ async def start_storyboard(episode_id: str):
         project_id=ep["project_id"],
     )
     return {"status": "scripting", "run_id": recorder.run_id}
+
+
+@router.post("/episodes/{episode_id}/storyboard/resume")
+async def resume_storyboard(episode_id: str):
+    """Continue after the last committed per-shot checkpoint without deleting it."""
+    ep = _episode_or_404(episode_id)
+    _require_harness_engine(ep["project_id"])
+    if ep["status"] == "scripting" or task_registry.active("storyboard", episode_id):
+        raise HTTPException(409, "分镜正在生成中")
+    if not _screenplay_ready(ep):
+        raise HTTPException(409, "请先在剧本台生成本集可拍剧本")
+    conn = get_conn()
+    saved = conn.execute(
+        "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)
+    ).fetchone()["c"]
+    if not saved:
+        raise HTTPException(409, "当前没有可恢复的逐镜 checkpoint，请重新生成分镜")
+    parent = conn.execute(
+        """SELECT id FROM workflow_runs
+           WHERE workflow_type='storyboard' AND scope_type='episode' AND scope_id=?
+           ORDER BY updated_at DESC LIMIT 1""",
+        (episode_id,),
+    ).fetchone()
+    conn.execute(
+        "UPDATE episodes SET status='scripting', script_error=NULL WHERE id=?", (episode_id,)
+    )
+    conn.commit()
+    recorder = _new_storyboard_recorder(
+        episode_id,
+        trigger_type="resume",
+        parent_run_id=parent["id"] if parent else None,
+    )
+    task_registry.spawn(
+        "storyboard",
+        episode_id,
+        _recorded_storyboard_task(episode_id, recorder, resume=True),
+        project_id=ep["project_id"],
+    )
+    return {
+        "status": "scripting",
+        "run_id": recorder.run_id,
+        "resumed_from_shot": int(saved),
+        "next_shot_no": int(saved) + 1,
+    }
 
 
 async def _storyboard_guarded(episode_id: str, sem: asyncio.Semaphore):
@@ -2137,7 +2302,7 @@ def episode_detail(episode_id: str):
     ep["storyboard_planned_shots"] = len(outline["shots"]) if outline and outline.get("shots") else None
     shot_rows = conn.execute(
         "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)).fetchall()
-    # 预估只按实际分镜累计；单集不设总时长产品上限，固定 5 秒合同逐镜生效。
+    # 预估只按模型选择的实际分镜时长累计；单集不设总时长产品上限。
     ep["cost_cny"] = worker.episode_cost(episode_id)
     ep["cost_limit_cny"] = float(get_setting("episode_cost_limit_cny") or 100)
     shots = rows_to_dicts(shot_rows)
@@ -2280,7 +2445,7 @@ def edit_shot(shot_id: str, body: dict):
         trust_level="T4",
         content=instance.model_dump(mode="json"),
         parent_artifact_ids=[previous_artifact_id] if previous_artifact_id else [],
-        contract_version="1.0.0",
+        contract_version=get_contract("storyboard").version,
     ))
     manual_artifact = evidence_repository.commit_artifact(
         None,
@@ -2326,13 +2491,22 @@ def _storyboard_residual_hint(residual: list[str]) -> str:
     hints: list[str] = []
     if "口播上限" in text or "念不完" in text:
         hints.append("请拆成相邻镜头分担台词，或精简人群议论旁白")
-    if "角色圣经中不存在" in text or "圣经角色为" in text:
+    if "角色圣经中不存在" in text or "既不在角色圣经" in text or "圣经角色为" in text:
         hints.append("请在监制房把该角色补入角色圣经，或改由圣经角色完成该动作")
     if "未落实本镜大纲 covers" in text or "只停留在大纲" in text:
         hints.append("请在 action_desc/narration/dialogues 写出该事实，同义改写即可（如\"成绩\"可写成\"测出七段\"、\"追捧\"可写成\"赞叹欢呼\"）")
     if not hints:
-        hints.append("请修改该镜后重试，或点击「重新生成分镜」")
+        hints.append("请修改该镜后从下一镜继续，或点击「重新生成整版」")
     return "；".join(hints)
+
+
+def _storyboard_loop_exit_text(exit_reason: str) -> str:
+    """Translate the actual AgentLoop exit reason without misreporting exhaustion."""
+    return {
+        "max_iterations": "已达到重试上限",
+        "no_quality_gain": "连续修复无质量提升，修复循环已停止",
+        "stalled": "连续输出相同问题，修复循环已停止",
+    }.get(exit_reason, "修复循环未通过")
 
 
 def _board_from_shot_rows(rows, episode_no: int) -> Storyboard:
@@ -2364,23 +2538,28 @@ def confirm_episode_core(episode_id: str) -> dict:
         raise ValueError("本集还没有分镜脚本")
     board = _board_from_shot_rows(shots_rows, ep["episode_no"])
     shots = board.shots
+    character_changes = normalize_offbible_characters(board, bible)
+    character_artifact_ids = _persist_storyboard_character_policy_repairs(
+        conn, episode_id, board, character_changes
+    )
     # 确认门同样跑确定性连贯归一，并把修正后的 continuity/transition 写回库，
     # 保证人工编辑过的分镜在进入生成前也满足"同场景接上镜/换场明确转场"的铁律。
     before = [(s.continuity_from_prev, s.transition, s.duration_s, s.shot_size, s.camera_move) for s in shots]
     normalize_continuity(board)
-    # 确认门同样把每镜时长抬到能念完台词，并写回库，保证人工编辑/旧分镜进入生成前也满足音画同步。
-    normalize_fixed_durations(board)
+    # 确认门保留模型/人工选择的时长，由全量校验验证 5~10s 合同与对应口播预算。
     normalize_transition_visuals(board)
+    normalized_fields_changed = False
     for r, s, (old_cont, old_trans, old_dur, old_size, old_move) in zip(shots_rows, shots, before):
         if (old_cont != s.continuity_from_prev or old_trans != s.transition or old_dur != s.duration_s
                 or old_size != s.shot_size or old_move != s.camera_move
                 or (r["last_frame_desc"] or "") != s.last_frame_desc):
+            normalized_fields_changed = True
             conn.execute(
                 "UPDATE shots SET continuity_from_prev=?, transition=?, duration_s=?, shot_size=?, camera_move=?, last_frame_desc=? WHERE id=?",
                 (int(s.continuity_from_prev), s.transition, s.duration_s, s.shot_size, s.camera_move,
                  s.last_frame_desc, r["id"]))
     conn.commit()
-    errors = validate_storyboard(board, bible, compact_target, enforce_total_duration=False)
+    errors = validate_storyboard(board, bible, compact_target)
     screenplay = _load_screenplay(ep)
     if screenplay is not None:
         errors.extend(validate_storyboard_soundtrack(board, screenplay, compact_target))
@@ -2396,6 +2575,10 @@ def confirm_episode_core(episode_id: str) -> dict:
             raise ValueError(f"Prompt 编译失败：{exc}")
     est = sum(shot_cost_cny(s.duration_s) for s in shots)
     storyboard_artifact_id = ep["storyboard_artifact_id"]
+    if character_artifact_ids or normalized_fields_changed or not storyboard_artifact_id:
+        # Any deterministic rewrite changes the adopted content hash. Rebuild the full-board
+        # T2 artifact from current checkpoint parents before attaching the human T4 decision.
+        storyboard_artifact_id = _finalize_storyboard_evidence(episode_id, board)
     if storyboard_artifact_id:
         human_eval = Evaluation(
             evaluator_type="human",

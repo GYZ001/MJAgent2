@@ -4,9 +4,12 @@
 - 单镜（非收尾）QA 只拦当前镜与承接问题，整集级检查（镜头数/总时长/关键内容）放行；
 - 自愿收尾时若整集必保留内容还没补齐，不硬塞单镜而是要求继续补镜；
 - 撞到最大镜头数（must_finish）才对整集缺口硬失败；
-- 剩余时长预算 = 规划目标 − 已通过镜头时长之和。
+- 分镜进度按已通过镜头的模型选择时长求和。
 """
 
+import asyncio
+
+from app import config, stages
 from app.schemas import Bible, Character, Dialogue, EpisodeScreenplay, Shot, World
 from app.stages import (StoryboardShotDraft, _storyboard_progress_block,
                         _relevant_text_windows, _render_completed_shots_context,
@@ -85,7 +88,7 @@ def test_progress_block_has_no_episode_duration_limit() -> None:
     for shot in nearly_full:
         shot.duration_s = 5
     low = _storyboard_progress_block(nearly_full)
-    assert "13" in low and "65s" in low and "duration_s" in low and "5s" in low
+    assert "13" in low and "65s" in low and "duration_s" in low and "5~10s" in low
     plenty = _storyboard_progress_block([])
     assert "duration_s" in plenty and "is_final=true" in plenty
 
@@ -105,6 +108,35 @@ def test_relevant_text_windows_keeps_current_hint_and_caps_context() -> None:
 
     assert "储物柜钥匙" in result
     assert len(result) <= 1850  # 含窗口之间的省略标记
+
+
+def test_next_shot_uses_bounded_single_shot_output_budget(monkeypatch) -> None:
+    captured: dict[str, int] = {}
+
+    async def fake_agent_loop(*_args, **kwargs):
+        captured["max_tokens"] = kwargs["max_tokens"]
+        return _draft(_shot(1), is_final=False)
+
+    monkeypatch.setattr(stages, "_run_with_agent_loop", fake_agent_loop)
+    result = asyncio.run(stages.generate_storyboard_next_shot(
+        {
+            "id": "e2",
+            "episode_no": 2,
+            "title": "测试集",
+            "hook": "碑石亮起",
+            "cliffhanger": "真相仍未揭开",
+            "target_duration_s": 50,
+        },
+        "少年面无表情，唇角有着一抹自嘲，缓缓攥紧了手掌。",
+        _bible(),
+        "",
+        _screenplay(),
+        [],
+    ))
+
+    assert result.shot.shot_no == 1
+    assert captured["max_tokens"] == config.STORYBOARD_SHOT_MAX_TOKENS == 8192
+    assert captured["max_tokens"] < 65535
 
 
 # ---------- 单镜 QA 的整集级放行 / 收尾分支 ----------

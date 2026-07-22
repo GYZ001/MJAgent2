@@ -8,6 +8,7 @@ import math
 import re
 
 from app import config
+from app.character_policy import is_functional_extra
 from app.schemas import (Bible, EpisodeScreenplay, Shot, Storyboard,
                          StoryboardOutline, SHOT_SIZES, CAMERA_MOVES, TRANSITIONS)
 
@@ -16,7 +17,7 @@ from app.schemas import (Bible, EpisodeScreenplay, Shot, Storyboard,
 # ① 叙事主力改为【台词 + 可见画面动作】；旁白(narration)默认留空，只在画面与台词都
 #    无法传达关键信息时（较大时间跳跃/必要内心独白/隐藏因果）才写一句短旁白。
 #    因此取消旁白下限校验、取消「纯画面空镜必须加旁白」的硬性要求。
-# ② 旁白仍保留上限校验：若写，必须短到 5s 念得完，避免又退回到旁白堆砌。
+# ② 旁白仍保留上限校验：若写，必须短到最短 5s 镜头也能念完，避免又退回到旁白堆砌。
 # ③ 分镜模块不校验其它字数上限——台词/原文摘录/场景标签/节拍字段只设必要下限。
 NARRATION_TARGET_CHARS = 12
 NARRATION_HARD_MAX = 14
@@ -48,11 +49,8 @@ MOVEMENT_HINTS = (
     "登上", "爬上", "钻进", "前往", "折返", "驻足", "停在", "停步", "停下",
 )
 
-# 目标时长只提供初始节拍参考；剧情未完整覆盖时可继续补 5 秒镜头。
-TARGET_DURATION_OVERAGE_RATIO = 1.2
-
+# 目标时长只提供初始节拍参考；剧情未完整覆盖时可继续补 5~10 秒镜头。
 SCENE_CUT_TRANSITIONS = TRANSITIONS - {"硬切"}
-EMOTIONAL_TRANSITIONS = {"叠化", "淡出淡入", "声音延续+叠化", "声音先行+淡入"}
 TRANSITION_VISUAL_HINTS = {
     "叠化": ("叠化", "渐", "柔", "余韵", "模糊", "压低"),
     "淡出淡入": ("淡出", "淡入", "渐暗", "渐黑", "渐亮", "压暗", "暗下"),
@@ -207,20 +205,18 @@ def validate_storyboard(
     board: Storyboard,
     bible: Bible,
     target_duration_s: int,
-    *,
-    enforce_total_duration: bool = True,
 ) -> list[str]:
     errors: list[str] = []
     shots = board.shots
     if not shots:
-        return ["shots 为空；请按完整剧本至少生成一个 5 秒镜头"]
+        return ["shots 为空；请按完整剧本至少生成一个 5~10 秒镜头"]
 
     bible_names = {c.name for c in bible.characters}
 
-    fixed_duration = config.FIXED_VIDEO_DURATION_S
-    if target_duration_s % fixed_duration != 0:
+    beat_unit = config.VIDEO_DURATION_MIN_S
+    if target_duration_s % beat_unit != 0:
         errors.append(
-            f"目标时长 {target_duration_s}s 不是 {fixed_duration}s 的整数倍；"
+            f"目标时长 {target_duration_s}s 不是 {beat_unit}s 的整数倍；"
             f"节拍单元按 5s 换算要求目标取 {'/'.join(str(x) for x in config.EPISODE_TARGET_CHOICES)}s")
     # 镜头数量和整集总时长不设产品上限；完整覆盖剧本是唯一收束条件。
 
@@ -230,8 +226,10 @@ def validate_storyboard(
         shot.action_desc = normalize_action_desc(shot.action_desc)
         tag = f"shots[{i}](shot_no={shot.shot_no})"
         # V2 时长合法取值
-        if shot.duration_s != fixed_duration:
-            errors.append(f"{tag}.duration_s={shot.duration_s}，视频生成时长固定为 {fixed_duration}s")
+        if shot.duration_s not in config.ALLOWED_DURATIONS:
+            errors.append(
+                f"{tag}.duration_s={shot.duration_s}，必须由模型按本镜动作与口播判断为 "
+                f"{config.VIDEO_DURATION_MIN_S}~{config.VIDEO_DURATION_MAX_S}s 的整数")
         # V8 画面清晰度：单镜只演一个连贯动作，把它写清即可（不再逼塞多个快切小镜头）。
         if len(shot.action_desc) < ACTION_DESC_HARD_MIN:
             errors.append(
@@ -268,34 +266,52 @@ def validate_storyboard(
         narration_len = len((shot.narration or "").strip())
         if narration_len > NARRATION_HARD_MAX:
             errors.append(
-                f"{tag}.narration 共 {narration_len} 字，超过硬上限 {NARRATION_HARD_MAX} 字——5s 配音念不完、读太快观感差；"
+                f"{tag}.narration 共 {narration_len} 字，超过硬上限 {NARRATION_HARD_MAX} 字——最短镜头配音念不完、读太快观感差；"
                 f"旁白请精简到 {NARRATION_TARGET_CHARS} 字以内（一句最关键的推进），或直接留空、改用台词与画面动作承载")
         # 口播总量必须能在视频最长时长内念完（含台词+旁白），否则配音会被截断、音画不同步。
         spoken_chars = sum(len(re.sub(r"\s+", "", d.line or "")) for d in shot.dialogues) \
             + len(re.sub(r"\s+", "", (shot.narration or "")))
-        if spoken_chars > config.MAX_SPOKEN_CHARS_PER_SHOT:
+        spoken_limit = config.max_spoken_chars_for_duration(shot.duration_s)
+        if spoken_chars > spoken_limit:
             errors.append(
-                f"{tag} 台词+旁白共 {spoken_chars} 字，超过单镜口播上限 {config.MAX_SPOKEN_CHARS_PER_SHOT} 字"
-                f"（{config.FIXED_VIDEO_DURATION_S}s 也念不完）；请新增或利用相邻镜头分担这段台词，必要时再精简非关键口水话，"
+                f"{tag} 台词+旁白共 {spoken_chars} 字，超过本镜 {shot.duration_s}s 的口播上限 {spoken_limit} 字；"
+                f"可在动作仍是同一连续节拍时把 duration_s 调到最多 {config.VIDEO_DURATION_MAX_S}s，"
+                "否则请新增或利用相邻镜头分担这段台词，必要时再精简非关键口水话，"
                 "不要让一镜塞下念不完的台词")
         # V4 角色合法性
         if not shot.characters:
-            errors.append(f"{tag}.characters 为空；每个 5s 视频段必须以人物和剧情为主体，至少包含 1 个角色圣经中的角色")
+            errors.append(
+                f"{tag}.characters 为空；每个视频段至少包含 1 个画面角色，"
+                "可以是角色圣经成员或功能性路人"
+            )
         for name in shot.characters:
-            if bible_names and name not in bible_names:
-                errors.append(f"{tag}.characters 含「{name}」，角色圣经中不存在。圣经角色为：{'/'.join(sorted(bible_names))}")
+            if bible_names and name not in bible_names and not is_functional_extra(name):
+                errors.append(
+                    f"{tag}.characters 含「{name}」，既不在角色圣经中，也不是允许的功能性路人标签；"
+                    f"圣经角色为：{'/'.join(sorted(bible_names))}。无姓名群演请使用测验员、守卫、"
+                    "路人甲/乙/丙、族人甲、弟子乙等通用身份标签"
+                )
         named_mentions = [name for name in shot.characters if name in shot.action_desc]
         if shot.characters and not named_mentions:
             errors.append(
-                f"{tag}.action_desc 未出现本镜头角色名；必须用角色圣经的准确姓名写人物动作，"
-                "不要只写他/她/纸张/镜头/场景")
+                f"{tag}.action_desc 未出现本镜头角色名；必须用 characters 中的准确姓名"
+                "（角色圣经成员或功能性路人标签）写人物动作，不要只写他/她/纸张/镜头/场景")
+        visual_text = "".join(
+            (shot.action_desc or "", shot.first_frame_desc or "", shot.last_frame_desc or "")
+        )
+        for name in (item for item in shot.characters if is_functional_extra(item)):
+            if name not in visual_text:
+                errors.append(
+                    f"{tag}.characters 中的功能性路人「{name}」未在 action_desc/首尾帧中明确入画；"
+                    "路人可以不进角色圣经，但必须看得见其位置、动作或开口过程"
+                )
         speakers_ok = set(shot.characters)
         for j, d in enumerate(shot.dialogues):
             if d.speaker not in speakers_ok:
                 errors.append(
                     f"{tag}.dialogues[{j}].speaker=「{d.speaker}」不在该镜头 characters 中；"
                     "dialogues 只写人物实际开口台词，旁白请放 narration")
-        # V5：5s 视频段允许多个连续动作/小镜头，禁止回到单一低信息动作。
+        # V5：可变时长视频段只允许一个连续动作，禁止回到低信息空动作。
         if len(shot.action_desc) < 10:
             errors.append(f"{tag}.action_desc 长度 {len(shot.action_desc)} 字，要求至少 10 字")
         # 枚举值
@@ -583,16 +599,10 @@ COVERS_CROWD_SEMANTIC_GROUPS = (
 
 # 方案 A/C 共用：covers 里"角色开口宣告"的动词与"人群声"的名词。
 # 用于判定某镜 covers 是否"不可单镜完成"——同时要求角色开口+人群声时，两类声轨叠加易超单镜口播上限；
-# 依赖圣经外角色开口时，逐镜阶段会陷入 characters 校验与 covers 落实相互锁死（镜03 死循环根因）。
+# 依赖非路人的圣经外角色开口时，会与 characters 合同相互锁死；功能性路人由独立合同承载。
 COVERS_SPOKEN_VERBS = ("宣告", "宣布", "宣读", "宣判", "公布")
 COVERS_CROWD_WORDS = ("哄笑", "哄堂", "嘲讽", "议论", "嗤笑", "嘲笑", "讥笑", "耻笑", "哗然", "群嘲",
                       "私语", "耳语", "窃窃", "起哄", "喝彩", "欢呼", "惊呼", "惊叹", "赞叹", "唏嘘")
-
-# 单镜口播"留给搭配旁白/第二句台词"的安全余量：一句关键台词若已逼近 (上限 - 余量)，
-# 这镜就不该再塞别的声轨；超过就该拆到相邻镜。① 大纲确定性拆分 / ③ 大纲口播预检共用此口径。
-SPOKEN_BUDGET_RESERVE = 14
-COMFORTABLE_SPOKEN_CHARS = max(8, config.MAX_SPOKEN_CHARS_PER_SHOT - SPOKEN_BUDGET_RESERVE)
-
 
 def _covers_has_spoken(covers: str) -> bool:
     return any(v in covers for v in COVERS_SPOKEN_VERBS)
@@ -612,7 +622,7 @@ _OUTSIDE_SPOKEN_RE = re.compile(
 
 def downgrade_outline_offbible_spoken(outline: StoryboardOutline,
                                       bible: Bible | None) -> list[dict]:
-    """方案 A2：把大纲 covers 里"被圣经外角色开口宣告"的句式确定性降级为【旁白转述】。
+    """把不属于角色圣经、也不是功能性路人的宣告者降级为旁白转述。
 
     根因：原文常有"测验员"等次要角色开口的关键台词，但其不在角色圣经里。covers 若写成
     "被测验员宣布为低级"，逐镜阶段会卡在"保留测验员→characters 校验失败 / 删测验员→covers
@@ -621,7 +631,7 @@ def downgrade_outline_offbible_spoken(outline: StoryboardOutline,
     - covers 里"被{圣经外角色}{宣告动词}"去掉角色名（及当众/高声等修饰）→ "被{宣告动词}"，
       事实保留、不再要求该角色开口；改写后判定正则不再命中，方案 A 的硬性报错自然不再触发；
     - 同时在 beat 末尾追加一句旁白转述指令，让逐镜阶段把该宣告交给旁白、不安排该角色出镜。
-    只改写【圣经外】角色（圣经内角色的"被X宣告"合法可拍，原样保留）。
+    角色圣经成员与功能性路人（如测验员）都可合法出镜开口，原样保留。
     就地修改 outline，返回已改写镜头记录（供监控日志）。
     """
     bible_names = {c.name for c in bible.characters} if bible else set()
@@ -636,8 +646,8 @@ def downgrade_outline_offbible_spoken(outline: StoryboardOutline,
 
         def _sub(m: "re.Match") -> str:
             name, verb = m.group(1), m.group(2)
-            if name in bible_names:
-                return m.group(0)  # 圣经内角色：合法宣告者，保留原句
+            if name in bible_names or is_functional_extra(name):
+                return m.group(0)
             outside.append(name)
             return "被" + verb     # 去掉圣经外角色名与修饰，仅留被动宣告
 
@@ -680,7 +690,7 @@ def defer_establishing_covers(outline: StoryboardOutline, episode_no: int) -> li
 
 
 def _covers_outside_spoken(covers: str, bible_names: set[str]) -> list[str]:
-    """covers 里'被X宣告/X宣布'的 X 若不在角色圣经，返回这些圣经外角色名。
+    """返回既不在角色圣经、也不是功能性路人的宣告者。
 
     只看被动句「被X（当众）宣告」——「被」之后的 X 几乎总是人名，精度高、误伤低；
     主动句「X宣告」里的 X 可能是「石碑/天空/系统」等非人名，不校验。
@@ -690,7 +700,7 @@ def _covers_outside_spoken(covers: str, bible_names: set[str]) -> list[str]:
     if not bible_names or not covers:
         return []
     found = {m.group(1) for m in _OUTSIDE_SPOKEN_RE.finditer(covers)}
-    return [n for n in found if n not in bible_names]
+    return [n for n in found if n not in bible_names and not is_functional_extra(n)]
 
 
 def _crowd_semantic_hit(atom: str, haystack: str) -> bool:
@@ -1073,7 +1083,7 @@ def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeS
     errors: list[str] = []
     shots = outline.shots
     if not shots:
-        return ["分镜大纲为空；请按完整剧本规划连续的 5 秒镜头并从头到尾覆盖剧情"]
+        return ["分镜大纲为空；请按完整剧本规划连续镜头并从头到尾覆盖剧情"]
     actual = [s.shot_no for s in shots]
     if actual != list(range(1, len(shots) + 1)):
         errors.append(f"大纲 shot_no 必须为连续递增 1..{len(shots)}，当前为 {actual}")
@@ -1093,17 +1103,8 @@ def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeS
             if _covers_has_spoken(covers) and _covers_has_crowd(covers):
                 errors.append(
                     f"大纲第 {i + 1} 镜 covers 同时要求角色开口宣告和人群哄笑议论，两类声轨叠加易超单镜口播上限"
-                    f"（{config.MAX_SPOKEN_CHARS_PER_SHOT} 字/{config.FIXED_VIDEO_DURATION_S}s 也念不完）；"
+                    f"（最长 {config.VIDEO_DURATION_MAX_S}s 最多 {config.MAX_SPOKEN_CHARS_PER_SHOT} 字）；"
                     "请拆成相邻 2 镜分担：一镜落实宣告，下一镜落实哄笑议论")
-            # ③ 口播预算预检：某条关键台词若是【单个不可再按句读拆分的长句】且已超单镜口播上限，
-            # 逐镜阶段拆不动（① 按标点拆需要句内有句读），必须在剧本/大纲里改写或断句，否则后段必卡死。
-            over_atoms = [a for a in _atomize_claim(covers)
-                          if len(_condense(a)) > config.MAX_SPOKEN_CHARS_PER_SHOT]
-            if over_atoms:
-                errors.append(
-                    f"大纲第 {i + 1} 镜 covers 含单句「{over_atoms[0][:24]}…」已 {len(_condense(over_atoms[0]))} 字、"
-                    f"超过单镜口播上限 {config.MAX_SPOKEN_CHARS_PER_SHOT} 字，且无句读可拆；"
-                    "请在 covers/剧本里给这句加上分句标点或精简，使其能拆到相邻镜分段念白")
     # 反停留：相邻两镜的 beat 几乎逐字相同 = 停在同一节拍上空转，必须推进到新剧情。
     for i in range(1, len(shots)):
         if _too_similar(shots[i - 1].beat, shots[i].beat):
@@ -1138,12 +1139,6 @@ def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeS
 
 
 # ---------- C2 基于完整剧本的分镜校验 ----------
-
-def normalize_fixed_durations(board: Storyboard) -> None:
-    """Seedance 视频段统一固定为 5 秒；更长内容必须拆镜。"""
-    for shot in board.shots:
-        shot.duration_s = config.FIXED_VIDEO_DURATION_S
-
 
 def normalize_continuity(board: Storyboard) -> None:
     """continuity/transition 由场景标签代码推导覆盖（不依赖模型自觉，消除一整类返工）。"""
@@ -1185,8 +1180,8 @@ def relieve_spoken_overflow(board: Storyboard) -> list[dict]:
     只动'人群声旁白'：绝不删角色台词、不删内心OS、不删全知收尾钩旁白；
     这些情况它改不动就原样返回，交给 ① 大纲拆分或逐镜重试处理。返回实际调整供日志。"""
     changes: list[dict] = []
-    limit = config.MAX_SPOKEN_CHARS_PER_SHOT
     for shot in board.shots:
+        limit = config.max_spoken_chars_for_duration(shot.duration_s)
         if spoken_char_count(shot) <= limit:
             continue
         narration = (shot.narration or "").strip()
@@ -1248,45 +1243,68 @@ def _offload_extra_character_voice(shot: Shot, name: str) -> None:
     existing = (shot.narration or "").strip()
     candidate = f"{existing}；{name}：{text}" if existing else f"{name}：{text}"
     spoken_after = len(re.sub(r"\s+", "", candidate + "".join(d.line for d in shot.dialogues)))
-    if spoken_after <= config.MAX_SPOKEN_CHARS_PER_SHOT:
+    if spoken_after <= config.max_spoken_chars_for_duration(shot.duration_s):
         shot.narration = candidate
     else:
         _into_action()
 
 
 def normalize_offbible_characters(board: Storyboard, bible: Bible | None) -> list[dict]:
-    """确定性规范分镜里的「角色圣经外」角色名，避免逐镜阶段为这类名字硬打一轮 LLM 修复（减重试 #1）。
+    """按角色圣经与功能性路人合同确定性规范镜头角色。
 
     根因：原文里的测验员/围观者甲等次要在场人物会被模型写进 characters / dialogues.speaker，但它们不在
     角色圣经里 → validate_storyboard 报「角色圣经中不存在」→ 触发整轮修复（实测会与 covers 落实相互
-    拉扯成多轮重试）。分镜展开前的反应式定妆照维护已把真正重要的新角色提进圣经，所以到这一步仍残留的
-    圣经外名一定是路人，可在校验前就地处理、不必再问模型：
+    拉扯成多轮重试）。真正重要的新角色仍必须进入角色圣经；无姓名、无需跨集定妆的功能性路人可以按
+    通用身份标签留在镜头中：
     - 能唯一对应到某圣经角色（别名/简称/错字）→ 规范成圣经正名（characters、speaker、画面文本一并替换）；
-    - 纯路人 → 从 characters 剥离，其台词降级为画面/旁白（不丢内容，见 _offload_extra_character_voice）。
-    就地修改 board，返回调整记录供监控日志。bible 为空时跳过（务实优先，旧数据放行）。"""
-    if not bible or not bible.characters:
-        return []
-    bible_names = {c.name for c in bible.characters}
+    - 功能性路人（测验员、路人甲等）→ 保留在 characters；若只作为 dialogue speaker 出现则补入 characters；
+    - 其它圣经外名字 → 从 characters 剥离，其台词降级为画面/旁白。
+    就地修改 board，返回带分类依据的调整记录供监控与 Harness 留痕。"""
+    bible_names = {c.name for c in bible.characters} if bible else set()
     changes: list[dict] = []
     for shot in board.shots:
-        if not shot.characters:
-            continue
         kept: list[str] = []
         for name in shot.characters:
-            if name in bible_names:
+            if not bible_names or name in bible_names:
                 kept.append(name)
                 continue
             canon = _canonical_bible_name(name, bible_names)
             if canon:
                 _rename_shot_character(shot, name, canon)
                 kept.append(canon)
-                changes.append({"shot_no": shot.shot_no, "renamed": f"{name}→{canon}"})
+                changes.append({
+                    "shot_no": shot.shot_no,
+                    "renamed": f"{name}→{canon}",
+                    "mutated": True,
+                })
+            elif is_functional_extra(name):
+                kept.append(name)
+                changes.append({
+                    "shot_no": shot.shot_no,
+                    "allowed_functional_extra": name,
+                    "source": "characters",
+                    "mutated": False,
+                })
             else:
                 _offload_extra_character_voice(shot, name)
-                changes.append({"shot_no": shot.shot_no, "stripped": name})
+                changes.append({
+                    "shot_no": shot.shot_no,
+                    "stripped": name,
+                    "mutated": True,
+                })
         # 去重保序（规范后可能与既有正名重复）
         seen: set[str] = set()
         shot.characters = [n for n in kept if not (n in seen or seen.add(n))]
+        for dialogue in shot.dialogues:
+            speaker = (dialogue.speaker or "").strip()
+            if speaker and speaker not in shot.characters and is_functional_extra(speaker):
+                shot.characters.append(speaker)
+                changes.append({
+                    "shot_no": shot.shot_no,
+                    "allowed_functional_extra": speaker,
+                    "source": "dialogue_speaker",
+                    "mutated": True,
+                })
     return changes
 
 

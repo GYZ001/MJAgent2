@@ -68,7 +68,7 @@ def classify(exc: BaseException | None, http_status: int | None = None) -> tuple
     name = type(exc).__name__ if exc is not None else ""
     if name == "ProviderError":
         return "provider", "LLM"
-    if name == "StageError":
+    if name in {"StageError", "CompileError"}:
         return "generation", "GEN"
     status = http_status if http_status is not None else getattr(exc, "status_code", None)
     if status is not None:

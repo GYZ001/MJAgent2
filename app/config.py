@@ -90,9 +90,26 @@ VIDEO_POLL_BUDGET = 15 * 60  # 单任务轮询总预算
 VIDEO_JOB_MAX_RETRIES = 3
 VIDEO_JOB_RETRY_BASE_DELAY = 30.0
 
-# 分镜与供应商请求统一采用固定 5 秒镜头；单集不按总时长或镜头数裁剪剧情。
-FIXED_VIDEO_DURATION_S = 5
-ALLOWED_DURATIONS = {FIXED_VIDEO_DURATION_S}
+# 文本模型调用由 Harness 网关做外层有界重试。provider adapter 内部的 1.5s / 3s
+# 快速重试只处理瞬时网络抖动，跨不过按分钟计算的 TPM 限流窗口；外层退避仍重放
+# 同一份请求，因此不会额外消耗 AgentLoop 的内容修复轮次。
+TEXT_PROVIDER_MAX_RETRIES = max(0, int(os.environ.get("TEXT_PROVIDER_MAX_RETRIES", "3")))
+TEXT_PROVIDER_RETRY_BASE_DELAY = max(
+    0.0, float(os.environ.get("TEXT_PROVIDER_RETRY_BASE_DELAY", "30"))
+)
+
+# 逐镜生成一次只输出一个 Shot JSON。沿用整集剧本的 65535 输出预算会把短请求
+# 计入过高的 TPM 配额并触发 429；8192 足够容纳单镜候选及定向修复，同时保留余量。
+STORYBOARD_SHOT_MAX_TOKENS = max(
+    1024, min(int(os.environ.get("STORYBOARD_SHOT_MAX_TOKENS", "8192")), 16384)
+)
+
+# 分镜时长由模型按单镜动作与口播密度判断；供应商只接受 5~10 秒整数时长。
+# DEFAULT 仅用于人工输入缺省值，模型输出必须经校验器显式落在合法区间内。
+VIDEO_DURATION_MIN_S = 5
+VIDEO_DURATION_MAX_S = 10
+DEFAULT_VIDEO_DURATION_S = VIDEO_DURATION_MIN_S
+ALLOWED_DURATIONS = frozenset(range(VIDEO_DURATION_MIN_S, VIDEO_DURATION_MAX_S + 1))
 EPISODE_TARGET_MIN_S = 40
 EPISODE_TARGET_MAX_S = 90   # 放宽上限给模型更大质量保证空间：内容密/高潮集可取更长时长，简单集仍可短
 EPISODE_TARGET_DEFAULT_S = 50
@@ -101,8 +118,17 @@ EPISODE_TARGET_STEP_S = 10  # 分集规划字段仅保留为节奏参考，不�
 STORYBOARD_MAX_SHOTS = 1_000_000
 # 集目标时长合法取值：[MIN, MAX] 内 STEP 的整数倍（当前 40/50/60/70/80/90）。prompt 与校验统一引用，避免各处硬编码漂移。
 EPISODE_TARGET_CHOICES = tuple(range(EPISODE_TARGET_MIN_S, EPISODE_TARGET_MAX_S + 1, EPISODE_TARGET_STEP_S))
-# Every provider video segment is exactly five seconds; longer speech must be split.
-MAX_SPOKEN_CHARS_PER_SHOT = 14
+# 口播预算随模型选择的镜头时长线性增长：5 秒 14 字，10 秒 28 字。
+# 超过 10 秒所能承载的口播仍必须拆镜，不能靠延长 duration_s 合并不同节拍。
+SPOKEN_CHARS_PER_5_SECONDS = 14
+
+
+def max_spoken_chars_for_duration(duration_s: int) -> int:
+    duration = min(max(int(duration_s), VIDEO_DURATION_MIN_S), VIDEO_DURATION_MAX_S)
+    return duration * SPOKEN_CHARS_PER_5_SECONDS // VIDEO_DURATION_MIN_S
+
+
+MAX_SPOKEN_CHARS_PER_SHOT = max_spoken_chars_for_duration(VIDEO_DURATION_MAX_S)
 PROMPT_CHAR_LIMIT = 1500  # 保守值，触发真实上限后回填
 VIDEO_PRICE_PER_SECOND = 0.8  # CNY，1.0 配置单价
 

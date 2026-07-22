@@ -155,7 +155,10 @@ def start(
             "episode_cost_limit_cny": get_setting("episode_cost_limit_cny"),
             "video_retry_limit": _MAX_RETRY,
         },
-        config_snapshot={"shot_duration_s": config.FIXED_VIDEO_DURATION_S},
+        config_snapshot={
+            "shot_duration_range_s": [config.VIDEO_DURATION_MIN_S, config.VIDEO_DURATION_MAX_S],
+            "shot_duration_decided_by": "model",
+        },
         # episode_cost_limit_cny is a per-episode guard, not a project-run budget.
         # Keep it in the policy snapshot and do not mislabel it as the run hard limit.
         budget_limit_cny=None,
@@ -186,7 +189,7 @@ async def _run(pid: str, recorder: WorkflowRecorder) -> None:
             _log(pid, f"成片将自动导出到：{export_dir}")
         else:
             _log(pid, "未设置导出目录：只在成片台生成整集成品，不另存到外部文件夹")
-        bible_step_id, _ = await recorder.step(
+        await recorder.step(
             "character_bible", lambda: _ensure_bible(pid), contract_key="character_bible",
             agent_name="character_bible",
         )

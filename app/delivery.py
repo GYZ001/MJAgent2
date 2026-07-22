@@ -94,19 +94,20 @@ def delivery_readiness(episode_id: str) -> dict[str, Any]:
     check("shots_present", bool(shots), "至少存在一个分镜", {"count": len(shots)})
     numbers = [shot["shot_no"] for shot in shots]
     check("shot_order", numbers == list(range(1, len(shots) + 1)), "镜号从 1 连续递增", numbers)
-    invalid_durations = [shot["shot_no"] for shot in shots if shot["duration_s"] != config.FIXED_VIDEO_DURATION_S]
+    invalid_durations = [shot["shot_no"] for shot in shots if shot["duration_s"] not in config.ALLOWED_DURATIONS]
     check(
-        "fixed_duration",
+        "shot_duration_range",
         not invalid_durations,
-        f"每镜固定 {config.FIXED_VIDEO_DURATION_S} 秒",
+        f"每镜时长为模型选择的 {config.VIDEO_DURATION_MIN_S}~{config.VIDEO_DURATION_MAX_S} 秒整数",
         {"invalid_shots": invalid_durations},
     )
+    expected_total_duration = sum(shot["duration_s"] for shot in shots)
     final_path = (
         config.PROJECTS_DIR / ep["project_id"] / "episodes" / str(ep["episode_no"])
         / "final" / "episode.mp4"
     )
     final_technical = validate_video_file(
-        str(final_path), expected_duration_s=len(shots) * config.FIXED_VIDEO_DURATION_S
+        str(final_path), expected_duration_s=expected_total_duration
     )
     final_technical = {
         **final_technical,
@@ -119,7 +120,7 @@ def delivery_readiness(episode_id: str) -> dict[str, Any]:
     check(
         "final_video",
         final_valid,
-        f"整集成片可解码且时长约为 {len(shots) * config.FIXED_VIDEO_DURATION_S} 秒",
+        f"整集成片可解码且时长约为 {expected_total_duration} 秒",
         final_technical,
     )
     video_items: list[dict[str, Any]] = []
@@ -144,7 +145,9 @@ def delivery_readiness(episode_id: str) -> dict[str, Any]:
                     version = conn.execute("SELECT * FROM shot_versions WHERE id=?", (version["id"],)).fetchone()
                     technical = json.loads(version["technical_validation_json"] or "{}")
                 except (OSError, ValueError):
-                    technical = validate_video_file(version["video_path"])
+                    technical = validate_video_file(
+                        version["video_path"], expected_duration_s=shot["duration_s"]
+                    )
             item.update({
                 "ready": bool(technical.get("passed")),
                 "path": version["video_path"],
@@ -285,7 +288,8 @@ def build_delivery_package(
         "files": files,
         "reproducibility": {
             "input_fingerprint": fingerprint(readiness["source_artifacts"], files),
-            "fixed_shot_duration_s": config.FIXED_VIDEO_DURATION_S,
+            "shot_duration_range_s": [config.VIDEO_DURATION_MIN_S, config.VIDEO_DURATION_MAX_S],
+            "shot_duration_decided_by": "model",
         },
     }
     quality_report = {

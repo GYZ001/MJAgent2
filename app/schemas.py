@@ -68,7 +68,7 @@ class Bible(BaseModel):
     scenes: list[Scene] = Field(default_factory=list)
 
 
-# 可拍剧本（分集之后、分镜之前）：把小说叙述改写为每 5s 一拍的场次剧本。
+# 可拍剧本（分集之后、分镜之前）：把小说叙述改写为可继续拆成 5~10s 分镜的场次剧本。
 # 它不写景别/运镜/首尾帧，只锁定人物在场、可见动作、关键台词、局势变化和下一拍钩子。
 class ScreenplayBeat(BaseModel):
     beat_no: int
@@ -150,7 +150,7 @@ class Shot(BaseModel):
     scene_name: str = ""
     characters: list[str] = Field(default_factory=list)
     action_desc: str
-    # 首尾帧画面描述：本镜【开始】与【结束】两个静止画面，必须明显不同（5s 视频的起点/终点）
+    # 首尾帧画面描述：本镜【开始】与【结束】两个静止画面，必须明显不同（5~10s 视频的起点/终点）
     first_frame_desc: str = ""
     last_frame_desc: str = ""
     source_excerpt: str = ""

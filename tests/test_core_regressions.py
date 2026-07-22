@@ -6,8 +6,6 @@ import pytest
 
 from app import artifacts, db, planning, task_registry, worker
 from app.compiler import clip_duration_value
-from app.schemas import Shot, Storyboard
-from app.validators import normalize_fixed_durations
 
 
 def test_fresh_database_enforces_parent_links_and_cascades(tmp_path, monkeypatch) -> None:
@@ -168,23 +166,9 @@ def test_video_derivatives_are_removed_when_visual_basis_changes(tmp_path, monke
     assert row["adopted_version_id"] is None and row["mode_plan"] is None
 
 
-def test_all_duration_inputs_normalize_to_five_seconds() -> None:
-    assert clip_duration_value(None) == clip_duration_value(15) == 5
-    shot = Shot(
-        shot_no=1,
-        duration_s=15,
-        shot_size="中景",
-        camera_move="固定",
-        scene_setting="day, room",
-        characters=["A"],
-        action_desc="A performs one continuous and visible action from start to finish.",
-        first_frame_desc="A starts the action.",
-        last_frame_desc="A completes the action.",
-        source_excerpt="A performs the action.",
-        dialogues=[],
-        transition="硬切",
-        continuity_from_prev=False,
-    )
-    board = Storyboard(episode_no=1, shots=[shot])
-    normalize_fixed_durations(board)
-    assert board.shots[0].duration_s == 5
+def test_manual_duration_inputs_clamp_to_supported_range() -> None:
+    assert clip_duration_value(None) == 5
+    assert clip_duration_value(4) == 5
+    assert clip_duration_value(7) == 7
+    assert clip_duration_value("9") == 9
+    assert clip_duration_value(15) == 10

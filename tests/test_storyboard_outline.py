@@ -4,10 +4,14 @@
 - _render_storyboard_outline / _outline_brief：把大纲渲染进逐镜 prompt 并标出"本镜"。
 """
 
+from app import config
 from app.schemas import (Bible, Character, EpisodeScreenplay, StoryboardOutline,
                          StoryboardOutlineShot, World)
-from app.stages import _outline_brief, _render_storyboard_outline
-from app.validators import (_covers_outside_spoken, downgrade_outline_offbible_spoken,
+from app.stages import (_maybe_split_outline_covers, _outline_brief,
+                        _split_atoms_to_content_budget,
+                        _render_storyboard_outline)
+from app.validators import (_atomize_claim, _condense, _covers_outside_spoken,
+                            downgrade_outline_offbible_spoken,
                             validate_storyboard_outline)
 
 KEY_LINE = "我一定要查清斗气消失的真相。"
@@ -111,22 +115,17 @@ def test_outline_brief_lookup() -> None:
     assert _outline_brief(None, 1) is None
 
 
-def test_downgrade_offbible_spoken_rewrites_covers_and_clears_flag() -> None:
-    """复现修复停滞根因：covers 写"被测验员宣布为低级"，测验员不在角色圣经。
-    降级后去掉角色名、beat 追加旁白转述指令，圣经外判定随之清零（方案 A 报错不再触发）。"""
+def test_functional_extra_spoken_is_preserved_in_outline() -> None:
+    """测验员是允许开口的功能性路人，不应被降级为旁白。"""
     bible = _bible_with("萧炎", "萧薰儿")
     names = {c.name for c in bible.characters}
     outline = _outline(_valid_beats(),
                        covers={3: "萧炎测验斗之气仅三段，被测验员宣布为低级"})
-    assert _covers_outside_spoken(outline.shots[2].covers, names) == ["测验员"]
+    assert _covers_outside_spoken(outline.shots[2].covers, names) == []
 
     changed = downgrade_outline_offbible_spoken(outline, bible)
-    assert [c["shot_no"] for c in changed] == [3]
-    assert changed[0]["names"] == ["测验员"]
-    assert outline.shots[2].covers == "萧炎测验斗之气仅三段，被宣布为低级"
-    assert "旁白转述" in outline.shots[2].beat
-    assert _covers_outside_spoken(outline.shots[2].covers, names) == []
-    # 降级后整份大纲校验通过（不再报"依赖角色圣经外角色开口"）
+    assert changed == []
+    assert outline.shots[2].covers == "萧炎测验斗之气仅三段，被测验员宣布为低级"
     assert validate_storyboard_outline(outline, _screenplay(), 50, bible=bible) == []
 
 
@@ -143,10 +142,71 @@ def test_downgrade_preserves_inbible_speaker_and_is_idempotent() -> None:
     assert changed == []
     assert outline.shots[2].covers == "萧炎被萧战当众宣告为废物"  # 原样保留
 
-    # 圣经外角色降级后，重复运行幂等
+    # 既非圣经角色、也非功能性路人的具体人物仍会降级，且重复运行幂等。
     off = _bible_with("萧炎")
-    o2 = _outline(_valid_beats(), covers={3: "萧炎被测验员当众宣告为低级"})
+    o2 = _outline(_valid_beats(), covers={3: "萧炎被黑袍老者当众宣告为低级"})
     assert downgrade_outline_offbible_spoken(o2, off)  # 首次有改写
     assert o2.shots[2].covers == "萧炎被宣告为低级"
     assert downgrade_outline_offbible_spoken(o2, off) == []  # 再跑无改写
     assert o2.shots[2].beat.count("改由旁白转述") == 1
+
+
+def test_over_budget_covers_are_split_into_enough_singular_shots() -> None:
+    """复现镜12：长 covers 应在模型调用前拆完，而不是逼模型返回 shots 数组。"""
+    covers = (
+        "萧炎低声说我会查清真相；他回望测验台；族人仍在哄笑；"
+        "萧薰儿穿过人群走来；她让众人闭嘴；萧炎压下怒意；"
+        "他转身离开广场；心中立誓夺回失去的斗气"
+    )
+    outline = _outline(
+        ["萧炎承受嘲讽并离开", "下一段原有剧情"],
+        covers={1: covers},
+    )
+
+    assert _maybe_split_outline_covers(outline, 1, _bible_with("萧炎", "萧薰儿"), 20)
+    split = outline.shots[:-1]
+
+    assert len(split) >= 3
+    assert all(
+        len(_condense(shot.covers)) <= config.MAX_SPOKEN_CHARS_PER_SHOT
+        for shot in split
+    )
+    assert _condense("".join(shot.covers for shot in split)) == _condense(
+        "".join(_atomize_claim(covers))
+    )
+    assert [shot.shot_no for shot in outline.shots] == list(range(1, len(outline.shots) + 1))
+
+
+def test_single_long_cover_atom_is_split_without_content_loss() -> None:
+    covers = "萧炎" + "握紧拳头凝视石碑决心查清斗气消失真相" * 3
+    outline = _outline(["萧炎立誓", "下一段原有剧情"], covers={1: covers})
+
+    assert _maybe_split_outline_covers(outline, 1, _bible_with("萧炎"), 20)
+    split = outline.shots[:-1]
+
+    assert len(split) > 1
+    assert all(
+        len(_condense(shot.covers)) <= config.MAX_SPOKEN_CHARS_PER_SHOT
+        for shot in split
+    )
+    assert _condense("".join(shot.covers for shot in split)) == _condense(
+        "".join(_atomize_claim(covers))
+    )
+
+
+def test_outline_allows_long_atom_for_deterministic_pre_split() -> None:
+    covers = KEY_LINE + "萧炎握紧拳头决心查清斗气消失真相" * 3
+    outline = _outline(_valid_beats(), covers={5: covers})
+
+    assert validate_storyboard_outline(outline, _screenplay(), 50) == []
+
+
+def test_real_shot_12_cover_split_avoids_tiny_tail() -> None:
+    covers = "萧炎哥哥；以前你曾经与薰儿说过；要能放下；才能拿起；提放自如；是自在人"
+
+    chunks = _split_atoms_to_content_budget(
+        _atomize_claim(covers), config.MAX_SPOKEN_CHARS_PER_SHOT
+    )
+
+    assert [len(_condense(chunk)) for chunk in chunks] == [14, 16]
+    assert _condense("".join(chunks)) == _condense("".join(_atomize_claim(covers)))

@@ -118,6 +118,29 @@ def _compact_shot(no: int) -> Shot:
     )
 
 
+def test_storyboard_accepts_model_selected_duration_and_scales_spoken_budget() -> None:
+    shot = _compact_shot(1)
+    shot.duration_s = 10
+    shot.dialogues = [Dialogue(speaker="萧炎", line="我一定会查清真相，让所有人知道当年究竟发生了什么", emotion="坚定")]
+    board = Storyboard(episode_no=1, shots=[shot])
+
+    ten_second_errors = validate_storyboard(board, _bible(), target_duration_s=50)
+    assert not any("duration_s" in error or "口播上限" in error for error in ten_second_errors), ten_second_errors
+
+    shot.duration_s = 5
+    five_second_errors = validate_storyboard(board, _bible(), target_duration_s=50)
+    assert any("本镜 5s 的口播上限" in error for error in five_second_errors), five_second_errors
+
+
+def test_storyboard_rejects_duration_outside_model_contract() -> None:
+    shot = _compact_shot(1)
+    shot.duration_s = 11
+
+    errors = validate_storyboard(Storyboard(episode_no=1, shots=[shot]), _bible(), target_duration_s=50)
+
+    assert any("duration_s=11" in error and "5~10s" in error for error in errors), errors
+
+
 def test_storyboard_allows_extra_split_shots_for_dense_dialogue() -> None:
     """50s 基础是 5 镜，内容密时可拆到 10 镜（50s 上限），只要仍在总时长上限内。"""
     board = Storyboard(episode_no=1, shots=[_compact_shot(i) for i in range(1, 11)])

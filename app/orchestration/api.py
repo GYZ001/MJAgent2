@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter, Body, HTTPException, Query
 from fastapi.responses import FileResponse
 
-from app import task_registry
+from app import config, task_registry
 from app.db import get_conn
 from app.evidence import repository
 from app.orchestration.engine import WorkflowRecorder, fingerprint
@@ -306,7 +306,11 @@ async def create_delivery_package(episode_id: str, body: dict | None = Body(None
         input_fingerprint=fingerprint(episode_id, payload),
         requested_by=str(payload.get("decided_by") or "user"),
         trigger_type="manual",
-        policy_snapshot={"fixed_shot_duration_s": 5, "immutable_snapshot": True},
+        policy_snapshot={
+            "shot_duration_range_s": [config.VIDEO_DURATION_MIN_S, config.VIDEO_DURATION_MAX_S],
+            "shot_duration_decided_by": "model",
+            "immutable_snapshot": True,
+        },
     )
     recorder.start()
     try:

@@ -2,6 +2,9 @@
 .venv/
 __pycache__/
 *.pyc
+.ruff_cache/
+*.tsbuildinfo
+.claude/settings.local.json
 data/
 projects/
 m0_samples/

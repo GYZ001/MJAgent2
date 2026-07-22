@@ -8,6 +8,7 @@ import hashlib
 import re
 
 from app import config
+from app.character_policy import functional_extra_anchor, is_functional_extra
 from app.schemas import Bible, Shot
 
 # 全知视角的结尾悬念钩旁白（"可他不知道…/殊不知…/然而…"）念在台词【之后】；
@@ -108,23 +109,35 @@ def _scene_tail_transition_line(transition: str | None, next_scene: str | None =
     )
 
 
-class CompileError(Exception):
+class CompileError(ValueError):
+    """可在生成前纠正的 prompt 编译错误。
+
+    继承 ValueError 让单镜生成路由按 409 业务冲突返回，而不是被全局异常处理器
+    误报为 500 系统内部错误。
+    """
     pass
 
 
 def clip_duration_value(value: int | float | str | None) -> int:
-    """视频供应商合同固定为 5 秒；忽略模型、旧数据和人工传入的其它值。"""
-    return config.FIXED_VIDEO_DURATION_S
+    """把人工/历史输入收敛到供应商支持的 5~10 秒整数区间。"""
+    try:
+        duration = int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return config.DEFAULT_VIDEO_DURATION_S
+    return min(max(duration, config.VIDEO_DURATION_MIN_S), config.VIDEO_DURATION_MAX_S)
 
 
 def clip_duration(shot: Shot) -> int:
-    """返回供应商合同规定的固定视频时长。"""
+    """返回供应商合同支持的镜头时长。"""
     return clip_duration_value(getattr(shot, "duration_s", None))
 
 
 def normalize_video_args(prompt_text: str, duration: int | None = None) -> str:
-    """移除历史参数并强制写入当前固定比例和 5 秒时长。"""
-    dur = config.FIXED_VIDEO_DURATION_S
+    """移除历史参数并写入当前固定比例与模型选择的合法时长。"""
+    if duration is None:
+        matches = re.findall(r"(?:^|\s)--dur\s+(\d+(?:\.\d+)?)", prompt_text)
+        duration = matches[-1] if matches else config.DEFAULT_VIDEO_DURATION_S
+    dur = clip_duration_value(duration)
     text = re.sub(r"\s--dur\s+\d+(?:\.\d+)?", "", prompt_text).strip()
     text = re.sub(r"\s--ratio\s+\S+", "", text).strip()
     if text:
@@ -143,9 +156,10 @@ def _source_excerpt_line(shot: Shot, max_chars: int = SOURCE_EXCERPT_PROMPT_MAX)
     return f"{SOURCE_EXCERPT_MARKER}{source_excerpt}"
 
 
-def _split_video_args(prompt_text: str) -> tuple[str, str]:
-    normalized = normalize_video_args(prompt_text)
-    dur = config.FIXED_VIDEO_DURATION_S
+def _split_video_args(prompt_text: str, duration: int | None = None) -> tuple[str, str]:
+    normalized = normalize_video_args(prompt_text, duration)
+    dur_match = re.search(r"--dur\s+(\d+)$", normalized)
+    dur = int(dur_match.group(1)) if dur_match else config.DEFAULT_VIDEO_DURATION_S
     args = f" --ratio 9:16 --dur {dur}"
     if normalized.endswith(args):
         return normalized[:-len(args)].strip(), args
@@ -239,11 +253,11 @@ def sanitize_seedance_prompt(prompt_text: str, *, aggressive: bool = False,
 
 def ensure_source_excerpt_in_prompt(prompt_text: str, shot: Shot) -> str:
     """给旧版本/手写 prompt 补上原文兜底，保证真正发往 Seedance 的文本不漏。"""
-    text = normalize_video_args(prompt_text)
+    text = normalize_video_args(prompt_text, shot.duration_s)
     if SOURCE_EXCERPT_MARKER in text:
         return sanitize_seedance_prompt(text)
 
-    body, args = _split_video_args(text)
+    body, args = _split_video_args(text, shot.duration_s)
     for max_chars in (SOURCE_EXCERPT_PROMPT_MAX, 180, 120, 80, 40):
         source_line = _source_excerpt_line(shot, max_chars)
         if not source_line:
@@ -284,19 +298,28 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
                    with_last_frame: bool = False,
                    incoming_transition: str | None = None,
                    outgoing_transition: str | None = None,
-                   next_scene: str | None = None,
-                   next_first_frame_desc: str | None = None) -> str:
+    next_scene: str | None = None,
+    next_first_frame_desc: str | None = None) -> str:
     bible_map = {c.name: c for c in bible.characters}
-    missing = [n for n in shot.characters if n not in bible_map]
+    missing = [
+        name for name in shot.characters
+        if name not in bible_map and not is_functional_extra(name)
+    ]
     if missing:
-        raise CompileError(f"镜头 {shot.shot_no} 引用了圣经中不存在的角色：{missing}")
-    if shot.duration_s != config.FIXED_VIDEO_DURATION_S:
         raise CompileError(
-            f"镜头 {shot.shot_no} 时长 {shot.duration_s}s 不合法，视频生成时长固定为 "
-            f"{config.FIXED_VIDEO_DURATION_S}s")
+            f"镜头 {shot.shot_no} 引用了既不在角色圣经、也不是功能性路人的角色：{missing}"
+        )
+    if shot.duration_s not in config.ALLOWED_DURATIONS:
+        raise CompileError(
+            f"镜头 {shot.shot_no} 时长 {shot.duration_s}s 不合法，视频生成时长必须为 "
+            f"{config.VIDEO_DURATION_MIN_S}~{config.VIDEO_DURATION_MAX_S}s 的整数")
     shot_dur = clip_duration(shot)
 
-    anchors = [bible_map[n].appearance_canonical for n in shot.characters]
+    anchors = [
+        bible_map[name].appearance_canonical
+        if name in bible_map else functional_extra_anchor(name)
+        for name in shot.characters
+    ]
     negative = NEGATIVE_SUFFIX
     if extra_negative:
         negative += "，" + "，".join(x.strip() for x in extra_negative if x.strip())
@@ -327,7 +350,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     scene_hint = shot.scene_setting.strip()
     dur = shot_dur
     # 提示词结构遵循 Seedance 实践公式：主体 + 动作 + 景别运镜 + 环境 + 画风 + 质量约束。
-    # 关键纠偏：单镜只表现“一个连贯流畅的动作”，不再要求 5s 内塞入多个小镜头/快速切景
+    # 关键纠偏：单镜只表现“一个连贯流畅的动作”，不在可变时长内塞入多个小镜头/快速切景
     # （多动作快切是当前成片崩坏与画风漂移的主因）。剧情密度交给旁白承载，画面只演一件事。
     subject = "；".join(anchors)
     visible_names = "、".join(shot.characters)
@@ -338,22 +361,41 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         "任何角色都不能凭空从无到有，也不能无原因突然消失或突然开口"
         if visible_names else "")
     scene_env_line = (f"环境（弱化，仅作背景空间参考，不要抢人物主体）：{scene_hint}" if scene_hint else "")
+    video_intro = (
+        f"9:16 竖屏动态漫画短剧分镜，单镜约 {dur} 秒，只表现一个连贯流畅的动作过程，"
+        "全程一镜到底，不要在一个镜头里快速切换多个不相关画面"
+    )
+    motion_discipline = (
+        "动作遵循现实物理与人体运动规律、自然连续，禁止瞬移/穿模/肢体扭曲/物体凭空出现或消失；"
+        "禁止人物凭空出现或消失；首帧与尾帧是同一机位、同一场景的同一个动作的开始与结束，"
+        "两帧之间只做这一个动作的自然过渡，绝不切换场景或机位、不要让画面跳变或形变"
+    )
+    effects_discipline = (
+        "特效与光效服从剧情：日常对话与一般场景写实克制、不要满屏光效或能量粒子，"
+        "仅在情绪高潮或力量爆发的镜头才用强烈特效，且不得遮挡人物面部表情"
+    )
+    dialogue_role_discipline = (
+        "台词由画面角色开口说出、对口型并配合表情与肢体反应；"
+        "旁白是画外音解说（角色不开口、不对口型，只用表情/动作呼应）；不在画面上生成任何字幕文字"
+    )
+    audio_sync_discipline = (
+        f"音画同步要求：本镜约 {dur} 秒内人物始终处于说话/对话或情绪反应状态，口型与肢体随台词节奏自然推进，"
+        "动作要均匀铺满整段时长、缓慢延展，绝不能在台词念完之前就提前做完主要动作或停下、躺下、转身离开、闭眼睡着"
+        if (shot.dialogues or shot.narration) else ""
+    )
     core_parts = [
-        f"9:16 竖屏动态漫画短剧分镜，单镜约 {dur} 秒，只表现一个连贯流畅的动作过程，全程一镜到底，不要在一个镜头里快速切换多个不相关画面",
+        video_intro,
         f"画面主体：{subject}" if subject else "",
         frame_discipline,
         f"镜头动作（只演这一件事，动作要有清晰的起势、过程与收势）：{shot.action_desc}",
-        "动作遵循现实物理与人体运动规律、自然连续，禁止瞬移/穿模/肢体扭曲/物体凭空出现或消失；"
-        "禁止人物凭空出现或消失；首帧与尾帧是同一机位、同一场景的同一个动作的开始与结束，两帧之间只做这一个动作的自然过渡，绝不切换场景或机位、不要让画面跳变或形变",
-        "特效与光效服从剧情：日常对话与一般场景写实克制、不要满屏光效或能量粒子，仅在情绪高潮或力量爆发的镜头才用强烈特效，且不得遮挡人物面部表情",
+        motion_discipline,
+        effects_discipline,
         (f"景别：{shot.shot_size}；运镜：{shot.camera_move}，镜头运动缓慢平稳"
          + (f"。{scale_hint}" if scale_hint else "")),
         *story_cues,
-        "台词由画面角色开口说出、对口型并配合表情与肢体反应；旁白是画外音解说（角色不开口、不对口型，只用表情/动作呼应）；不在画面上生成任何字幕文字",
+        dialogue_role_discipline,
         # 音画同步：动作节奏要铺满整段时长、跟着台词走，避免话没说完动作就做完（如台词未结束就趴下/离开/睡着）
-        (f"音画同步要求：本镜约 {dur} 秒内人物始终处于说话/对话或情绪反应状态，口型与肢体随台词节奏自然推进，"
-         "动作要均匀铺满整段时长、缓慢延展，绝不能在台词念完之前就提前做完主要动作或停下、躺下、转身离开、闭眼睡着"
-         if (shot.dialogues or shot.narration) else ""),
+        audio_sync_discipline,
         source_excerpt,
         # 画风锚点：全集逐字一致、显式禁止跨镜漂移（与具体画风无关，只强调统一）
         f"全片统一画风（每个镜头严格一致，禁止风格漂移）：{bible.world.visual_style_canonical}",
@@ -416,10 +458,54 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     while not fits(text) and filler_parts:
         filler_parts.pop()
         text = assemble(core_parts + filler_parts, negative)
-    # 2) 仍超长：退一步丢弃重生附加负词，但保留基础负向词表。
+
+    # 2) 仍超长：只缩短可回查的原文兜底摘录，不动角色锚点、镜头动作和台词。
+    current_source_excerpt = source_excerpt
+    for max_chars in (180, 120, 80, 40, 24):
+        if fits(text) or not current_source_excerpt:
+            break
+        shorter_source_excerpt = _source_excerpt_line(shot, max_chars)
+        if shorter_source_excerpt == current_source_excerpt:
+            continue
+        try:
+            source_index = core_parts.index(current_source_excerpt)
+        except ValueError:
+            break
+        core_parts[source_index] = shorter_source_excerpt
+        current_source_excerpt = shorter_source_excerpt
+        text = assemble(core_parts + filler_parts, negative)
+
+    # 3) 再将与基础负面词重复的通用说明收紧为等价短句。剧情内容不参与裁剪。
+    compactable_parts = (
+        (motion_discipline,
+         "动作符合现实物理且自然连续，禁止瞬移、穿模、肢体扭曲或人物物体凭空出现消失；"
+         "首尾同机位同场景，只自然推进本镜动作，不跳切、不形变"),
+        (dialogue_role_discipline,
+         "台词由角色本人开口并对口型；旁白用不同嗓音的画外音且不对口型；禁止画面字幕文字"),
+        (effects_discipline,
+         "日常场景光效克制；只在情绪或力量爆发时使用特效，不得遮挡面部"),
+        (audio_sync_discipline,
+         f"口型和肢体随台词自然推进，动作均匀铺满 {dur} 秒，不得在台词完成前收势" if audio_sync_discipline else ""),
+        (video_intro, f"9:16 竖屏动态漫画短剧，单镜约 {dur} 秒，只演一个连贯动作，全程一镜到底"),
+    )
+    for verbose, compact in compactable_parts:
+        if fits(text):
+            break
+        # 无台词/旁白时 audio_sync_discipline 为空串，必须跳过而不是提前结束；
+        # 否则排在后面的 video_intro 等压缩候选永远不会被尝试。
+        if not verbose:
+            continue
+        try:
+            part_index = core_parts.index(verbose)
+        except ValueError:
+            continue
+        core_parts[part_index] = compact
+        text = assemble(core_parts + filler_parts, negative)
+
+    # 4) 仍超长：退一步丢弃重生附加负词，但保留基础负向词表。
     if not fits(text):
         text = assemble(core_parts + filler_parts, NEGATIVE_SUFFIX)
-    # 3) 最后兜底：丢弃全部负向词（锚点串/动作永不裁剪）。
+    # 5) 最后兜底：丢弃全部负向词（锚点串/动作永不裁剪）。
     if not fits(text):
         text = assemble(core_parts + filler_parts, "")
     if not fits(text):
@@ -437,7 +523,7 @@ SCENE_NEGATIVE = (
 SCENE_QUALITY = (
     "竖屏 9:16 单帧定格画面，构图完整，人物五官清晰稳定、表情自然，手部与所持道具关系正常稳定，"
     "光影与色调统一，电影质感，高清")
-# 角色不漂移 + 同镜两帧同机位 + 特效克制（与视频侧一致，三者是 5s 成片稳定的关键）
+# 角色不漂移 + 同镜两帧同机位 + 特效克制（与视频侧一致，三者是 5~10s 成片稳定的关键）
 SCENE_CONSISTENCY = "人物形象严格遵循上方角色锚点串与参考图：同一张脸、同一发型、同一服装、同一年龄与体型，跨镜不漂移"
 SCENE_SAME_FRAMING = "本帧与本镜另一张关键帧（首图/尾图）保持同一机位、同一构图、同一场景布置与光线方向，只有人物动作所处的瞬间不同，不要换机位或重新构图"
 # 动作/互动保真：把"摸石碑"画成"正面端站、手悬空、与石碑互不相干"是当前关键帧最常见的失真。
@@ -457,10 +543,19 @@ def compile_scene_prompt(shot: Shot, bible: Bible, *, kind: str = "tail",
     if kind not in ("head", "tail"):
         raise CompileError(f"未知关键帧类型：{kind}")
     bible_map = {c.name: c for c in bible.characters}
-    missing = [n for n in shot.characters if n not in bible_map]
+    missing = [
+        name for name in shot.characters
+        if name not in bible_map and not is_functional_extra(name)
+    ]
     if missing:
-        raise CompileError(f"镜头 {shot.shot_no} 关键帧引用了圣经中不存在的角色：{missing}")
-    anchors = "；".join(bible_map[n].appearance_canonical for n in shot.characters)
+        raise CompileError(
+            f"镜头 {shot.shot_no} 关键帧引用了既不在角色圣经、也不是功能性路人的角色：{missing}"
+        )
+    anchors = "；".join(
+        bible_map[name].appearance_canonical
+        if name in bible_map else functional_extra_anchor(name)
+        for name in shot.characters
+    )
     visible_names = "、".join(shot.characters)
     visible_roster = (
         f"本帧只允许出现这些画面人物：{visible_names}；不得添加名单外人物、无关路人或多余人影，"

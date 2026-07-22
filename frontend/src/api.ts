@@ -1,4 +1,4 @@
-export class ApiError extends Error {
+class ApiError extends Error {
   // code/category/errorId 来自后端报错码系统：技术类报错前端只拿到这三样，原文留后端日志。
   constructor(
     public status: number,
@@ -67,8 +67,6 @@ export const api = {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ scene_id: sceneId, kind, reason }),
     }).then(handle),
-  sceneDelete: (sceneId: string) =>
-    fetch(`/api/scenes/${sceneId}`, { method: 'DELETE' }).then(handle),
   adoptVersion: (shotId: string, versionId: string, reason?: string) =>
     fetch(`/api/shots/${shotId}/adopt`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -153,7 +151,7 @@ export interface EvidenceIssue {
   repairable: boolean
 }
 
-export interface EvaluationSummary {
+interface EvaluationSummary {
   id: string
   evaluator_type: string
   evaluator_name: string
@@ -180,9 +178,9 @@ export interface ArtifactEvidence {
   evaluations: EvaluationSummary[]
 }
 
-export interface Dialogue { speaker: string; line: string; emotion: string }
+interface Dialogue { speaker: string; line: string; emotion: string }
 
-export interface ScreenplayBeat {
+interface ScreenplayBeat {
   beat_no: number
   day_offset: number
   time_of_day: string
@@ -259,10 +257,10 @@ export interface ShotVersion {
   }
 }
 
-export interface SceneQa {
+interface SceneQa {
   overall: number; expectation_match?: number; continuity?: number; clean_frame?: number; issues?: string[]
 }
-export interface SceneCandidate {
+interface SceneCandidate {
   id: string; version_no: number; kind: 'head' | 'tail'; status: string; error?: string
   qa?: SceneQa | null; image_url?: string
   artifact_id?: string | null; adoption_reason?: string | null
@@ -301,7 +299,7 @@ export interface Episode {
   delivery_status?: string
 }
 
-export interface DeliveryCheck {
+interface DeliveryCheck {
   key: string; passed: boolean; message: string; evidence?: unknown
 }
 
@@ -323,7 +321,7 @@ export interface DeliveryPackageRecord {
   package_path: string; created_at: number; approved_at?: number | null
 }
 
-export interface MixShot {
+interface MixShot {
   shot_id: string; shot_no: number; duration_s: number
   video_url: string | null; has_adopted: boolean
 }
@@ -418,7 +416,7 @@ export interface Project {
   harness_engine_enabled?: number | boolean
 }
 
-export interface AutoProgress {
+interface AutoProgress {
   bible?: string; refs?: string; plan?: string
   episodes_total?: number; episodes_done?: number
   screenplays_ready?: number

@@ -170,8 +170,8 @@ function modelSettingKey(kind: ModelKind, provider: ProviderKey) {
   return `hiagent_model_${kind}`
 }
 
-function fallbackSelection(kind: ModelKind, health?: Health | null): ModelSelection {
-  const provider = kind === 'video' || kind === 'image' ? 'hiagent' : 'hiagent'
+function fallbackSelection(kind: ModelKind): ModelSelection {
+  const provider = 'hiagent'
   return {
     key: kind,
     label: MODEL_ROWS.find(r => r.key === kind)?.label ?? kind,
@@ -206,7 +206,7 @@ function modelChoices(kind: ModelKind, provider: ProviderKey, currentModel: stri
     }
   }
   // 当前配置的模型如果不在列表中，补充进去（兼容历史值）
-  if (currentModel && !isDisallowedModel(kind, provider, currentModel) && !choices.some(choice => choice.value === currentModel)) {
+  if (currentModel && !isDisallowedModel(provider, currentModel) && !choices.some(choice => choice.value === currentModel)) {
     choices.unshift({ label: currentModel, value: currentModel })
   }
   if (!choices.length) {
@@ -215,7 +215,7 @@ function modelChoices(kind: ModelKind, provider: ProviderKey, currentModel: stri
   return choices
 }
 
-function isDisallowedModel(kind: ModelKind, provider: ProviderKey, model: string) {
+function isDisallowedModel(provider: ProviderKey, model: string) {
   return provider === 'openrouter' && model === 'qwen/qwen3.7-max'
 }
 
@@ -722,11 +722,7 @@ export default function MonitorPage() {
     } catch (e: unknown) { setCredentialTest({ status: 'error', message: (e as Error).message }) }
   }
 
-  const setOne = async (key: string, value: string) => {
-    try { await api.put('/settings', { [key]: value }); toast('已更新'); refreshSettings(); refreshHealth() }
-    catch (e: unknown) { toast((e as Error).message, true) }
-  }
-  const selectionFor = (kind: ModelKind) => health?.models?.[kind] ?? fallbackSelection(kind, health)
+  const selectionFor = (kind: ModelKind) => health?.models?.[kind] ?? fallbackSelection(kind)
 
   const providerFor = (kind: ModelKind, sel: ModelSelection) => {
     if (kind === 'video' || kind === 'image') return 'hiagent'
@@ -747,7 +743,7 @@ export default function MonitorPage() {
       if (!settingKey) continue
       const option = sel.options.find(opt => opt.provider === provider)
       let modelValue = (modelDraft[settingKey] ?? option?.model ?? '').trim()
-      if (isDisallowedModel(row.key, provider, modelValue)) {
+      if (isDisallowedModel(provider, modelValue)) {
         modelValue = modelChoices(row.key, provider, '', modelCatalog?.items)[0]?.value ?? ''
       }
       if (modelDraft[settingKey] !== undefined && !modelValue) {

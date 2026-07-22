@@ -43,18 +43,28 @@ _CONTRACTS: dict[str, StageContract] = {
     ),
     "storyboard": StageContract(
         key="storyboard",
-        version="1.0.0",
+        version="2.1.1",
         input_types=["episode_screenplay"],
         output_type="storyboard",
-        invariants=["every shot duration is exactly 5 seconds", "shot numbers are contiguous"],
+        invariants=[
+            "the model selects each shot duration as an integer from 5 through 10 seconds",
+            "spoken-content budget scales with the selected shot duration",
+            "shot numbers are contiguous",
+            "sequential generation emits exactly one singular shot per iteration",
+            "single-shot output tokens are bounded independently from full-screenplay generation",
+            "functional extras use deterministic generic labels and never mint persistent bible identities",
+        ],
         max_iterations=4,
     ),
     "video": StageContract(
         key="video",
-        version="1.0.0",
+        version="2.0.0",
         input_types=["storyboard", "compiled_prompt", "shot_reference_set"],
         output_type="shot_video",
-        invariants=["video is decodable", "duration is approximately 5 seconds"],
+        invariants=[
+            "video is decodable",
+            "duration approximately matches the storyboard-selected value between 5 and 10 seconds",
+        ],
         max_iterations=2,
     ),
 }
@@ -65,7 +75,3 @@ def get_contract(key: str) -> StageContract:
         return _CONTRACTS[key].model_copy(deep=True)
     except KeyError as exc:
         raise KeyError(f"unknown stage contract: {key}") from exc
-
-
-def list_contracts() -> list[StageContract]:
-    return [contract.model_copy(deep=True) for contract in _CONTRACTS.values()]

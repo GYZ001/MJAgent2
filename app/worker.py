@@ -1485,7 +1485,7 @@ def concatenate_episode(episode_id: str) -> dict:
     if not pieces:
         raise ValueError("本集没有任何已采用的视频片段，先生成/采用后再试")
 
-    # 各镜时长 5~5s 不一，拿不到实测时长时用分镜 duration_s 之和兜底（不再固定 ×10）。
+    # 各镜时长 5~10s 不一，拿不到实测时长时用分镜 duration_s 之和兜底。
     est_total_dur = conn.execute(
         """SELECT COALESCE(SUM(s.duration_s), 0) AS d
            FROM shots s WHERE s.episode_id=? AND s.adopted_version_id IS NOT NULL""",
@@ -1500,7 +1500,7 @@ def concatenate_episode(episode_id: str) -> dict:
         return {
             "video_url": f"/media/{rel_path}",
             "shots": len(pieces),
-            "total_duration_s": est_total_dur or config.FIXED_VIDEO_DURATION_S * len(pieces),
+            "total_duration_s": est_total_dur or config.DEFAULT_VIDEO_DURATION_S * len(pieces),
             "ffmpeg_missing": True,
             "note": "服务端缺少 ffmpeg，已临时回退为首个片段的直链；请安装 ffmpeg 后重新合成",
         }
@@ -1539,7 +1539,7 @@ def concatenate_episode(episode_id: str) -> dict:
             ).stdout.strip()
             total_dur += float(raw) if raw else 0
     except (subprocess.CalledProcessError, ValueError):
-        total_dur = est_total_dur or config.FIXED_VIDEO_DURATION_S * len(pieces)
+        total_dur = est_total_dur or config.DEFAULT_VIDEO_DURATION_S * len(pieces)
 
     from app.config import PROJECTS_DIR
     rel_path = final_path.relative_to(PROJECTS_DIR).as_posix()

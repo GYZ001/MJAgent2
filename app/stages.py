@@ -15,6 +15,7 @@ from typing import Callable
 from pydantic import BaseModel
 
 from app import config, hiagent
+from app.character_policy import functional_extra_policy_text
 from app.db import get_setting, log_provider_call
 from app.evaluations.issues import issues_from_messages
 from app.harness import model_gateway
@@ -31,7 +32,7 @@ from app.validators import (ACTION_DESC_MIN_CHARS, NARRATION_TARGET_CHARS,
                             TRANSITION_HINTS, _atomize_claim, _condense, _covers_has_crowd,
                             _covers_has_spoken, _covers_outside_spoken,
                             _too_similar,
-                            normalize_action_desc, normalize_continuity, normalize_fixed_durations,
+                            normalize_action_desc, normalize_continuity,
                             normalize_offbible_characters, normalize_transition_visuals,
                             relieve_spoken_overflow,
                             storyboard_shot_count_range,
@@ -67,10 +68,6 @@ class StoryboardShotDraft(BaseModel):
     is_final: bool = False
 
 
-# 连续 STALL_ROUNDS 轮问题集完全相同 = 模型已卡死，再重试只是烧钱/拖时间，提前收手。
-STALL_ROUNDS = 3
-
-
 def _render_error_history(error_history: list[list[str]]) -> str:
     """渲染历次输出的问题记录（让模型看到自己反复犯的错）。
     与上一轮完全相同的轮次折叠成一行，避免把同样的错误抄 7 遍、把 prompt 撑爆。"""
@@ -99,11 +96,13 @@ async def _run_with_agent_loop(
     max_tokens: int = 8192,
     repair_user_prompt_limit: int | None = 3000,
     repair_context: str | None = None,
+    repair_output_contract: str | None = None,
     prefill: dict | None = None,
 ) -> BaseModel:
     """Phase 2 loop adapter: structured issues, bounded repair and persisted iterations."""
     base_call_meta = {
         "stage": stage,
+        "stage_key": stage_key,
         "initiator_label": stage,
         "initiator_scope": "agent_loop",
         "contract_version": loop.contract.version,
@@ -155,6 +154,11 @@ async def _run_with_agent_loop(
             + original_task
             + "\n\n最近一次候选：\n"
             + (previous_raw or "")[:6000]
+            + (
+                "\n\n本轮输出合同（最高优先级）：\n" + repair_output_contract
+                if repair_output_contract
+                else ""
+            )
         )
         return await model_gateway.chat(
             [{"role": "system", "content": SYSTEM_PREFIX}, {"role": "user", "content": repair_prompt}],
@@ -178,7 +182,19 @@ async def _run_with_agent_loop(
             return None, issues_from_messages(messages, subject=f"{loop.scope_type}:{loop.scope_id}")
         if prefill and isinstance(obj, dict):
             obj.update(prefill)
-        instance, messages = schema_errors(model_cls, obj)
+        if (
+            model_cls is StoryboardShotDraft
+            and isinstance(obj, dict)
+            and "shot" not in obj
+            and isinstance(obj.get("shots"), list)
+        ):
+            messages = [
+                "字段 shot：逐镜合同只允许单数 shot 对象，禁止 shots 数组；"
+                f"当前一次输出了 {len(obj['shots'])} 个镜头。只保留当前镜，后续内容留给下一轮生成"
+            ]
+            instance = None
+        else:
+            instance, messages = schema_errors(model_cls, obj)
         if instance is not None:
             messages = business_validate(instance)
         return (
@@ -430,8 +446,8 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
 2. 保证剧情连贯、人物情绪连贯、因果关系连贯。
 3. 输出能直接进入导演/分镜阶段的剧本稿，不要只写成长梗概。
 4. 保留原文依据，并明确改编方向。
-5. 输出适合后续拆成若干个固定 5 秒视频分镜的连续剧本；镜头数和整集时长不设上限，以完整演绎剧情为准；
-   动作或口播无法在 5 秒内完整表达时，必须拆成连续相邻镜头，不得修改单镜 5 秒合同。
+5. 输出适合后续拆成若干个 5~10 秒视频分镜的连续剧本；镜头数和整集时长不设上限，以完整演绎剧情为准；
+   分镜模型会按单镜动作与口播判断具体时长；动作或口播超过 10 秒仍无法完整表达时，必须拆成连续相邻镜头。
 6. 不在正文里输出“拍01/拍02/拍03”，不写景别、运镜、首尾帧、参考图、提示词。
 
 【导演级连续性要求】你要像现场导演一样先把戏调顺，而不是只改写对白：
@@ -515,7 +531,7 @@ B. `full_script_text`：真正的剧本正文，必须是带场标、动作段�
     )
     script = await _run_with_agent_loop(
         "可拍剧本", "screenplay", prompt, EpisodeScreenplay,
-        lambda s: validate_screenplay(s, bible, max(1, episode["target_duration_s"] // config.FIXED_VIDEO_DURATION_S),
+        lambda s: validate_screenplay(s, bible, max(1, episode["target_duration_s"] // config.VIDEO_DURATION_MIN_S),
                                       episode_no=episode["episode_no"], source_text=source_text),
         loop=loop, temperature=0.7, max_tokens=65535,
         # episode_no/mode 是后端权威值（validator 也要求 episode_no 必须等于本集号），模型给的值不可信，
@@ -658,10 +674,11 @@ def _relevant_text_windows(text: str, hints: list[str], *, max_chars: int) -> st
 
 
 def _storyboard_progress_block(completed_shots: list[Shot]) -> str:
-    used = len(completed_shots) * config.FIXED_VIDEO_DURATION_S
+    used = sum(shot.duration_s for shot in completed_shots)
     return (
         f"\n【分镜进度】已通过 {len(completed_shots)} 镜、累计 {used}s；整集不设时长上限。\n"
-        f"- 本镜 duration_s 固定为 {config.FIXED_VIDEO_DURATION_S}s；5 秒演不完或说不完就拆到后续镜头。\n"
+        f"- 本镜 duration_s 由你按内容判断为 {config.VIDEO_DURATION_MIN_S}~{config.VIDEO_DURATION_MAX_S}s 整数；"
+        "选择能自然完成单一动作和口播的最短时长，超过 10 秒仍放不下才拆到后续镜头。\n"
         "- 继续按剧本推进，完整覆盖全部剧情和尾钩后才能设置 is_final=true。\n"
     )
 
@@ -694,14 +711,12 @@ def _normalized_candidate_board(episode_no: int, completed_shots: list[Shot], sh
                                 target_duration_s: int | None = None) -> Storyboard:
     board = Storyboard(episode_no=episode_no, shots=[*completed_shots, shot])
     normalize_continuity(board)
-    # ① 确定性规范圣经外角色：测验员/围观者甲等路人从 characters 剥离、台词降级为画面/旁白，
-    # 让 validate_storyboard 不再报"角色圣经中不存在"而硬打一轮 LLM 修复（减重试 #1）。
-    # 须在 relieve_spoken_overflow 之前——剥离可能把人群台词转写进 narration，紧接着由它降级到画面。
+    # ① 确定性角色分类：功能性路人保留并补入 characters；具体姓名服从角色圣经；其它未知角色剥离。
+    # 须在 relieve_spoken_overflow 之前——未知角色剥离可能把人群台词转写进 narration。
     normalize_offbible_characters(board, bible)
     # ② 确定性卸载：把人群议论/哄笑类旁白降级为画面，先把单镜口播压回上限内，
-    # 再据此算时长——避免"角色台词+人群旁白共 67 字超限"这类报错耗尽逐镜重试。
+    # 再按模型已选择的时长校验——避免"角色台词+人群旁白共 67 字超限"这类报错耗尽逐镜重试。
     relieve_spoken_overflow(board)
-    normalize_fixed_durations(board)
     normalize_transition_visuals(board)
     for s in board.shots:
         s.action_desc = normalize_action_desc(s.action_desc)
@@ -734,7 +749,7 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
     target = episode["target_duration_s"]
     board = _normalized_candidate_board(episode["episode_no"], completed_shots, draft.shot, bible, target)
     current = board.shots[-1]
-    partial_errors = validate_storyboard(board, bible, target, enforce_total_duration=False)
+    partial_errors = validate_storyboard(board, bible, target)
     errors.extend(_filter_partial_storyboard_errors(partial_errors, current_index=len(completed_shots)))
     # 向前承接：复合 covers 里已在前序镜头落实的事实不再算本镜漏戏（呼应大纲"可拆到相邻多镜"）。
     prior_text = "".join(
@@ -811,7 +826,7 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
 
 {key_content_block}
 {scene_library_block}硬性约束：
-1. 镜头数 N 不设上限，按完整剧本逐个拆出所有必要镜头；shot_no 从 1 起连续递增，每镜 duration_s 固定为 5 秒。复杂动作、长台词或不同节拍必须继续拆成相邻镜头，绝不能为了控制总时长合并或删减剧情；只有完整覆盖剧本并落到结尾钩子才可收束。
+1. 镜头数 N 不设上限，按完整剧本逐个拆出所有必要镜头；shot_no 从 1 起连续递增。大纲阶段不输出 duration_s，逐镜阶段由模型按每镜动作与口播在 5~10 秒内判断具体时长。复杂动作、超长台词或不同节拍必须继续拆成相邻镜头，绝不能为了控制总时长合并或删减剧情；只有完整覆盖剧本并落到结尾钩子才可收束。
 2. 每条只写一行 beat：本镜推进的剧情（谁做了什么 / 局势如何变化 / 与上一镜的区别），不少于 6 字。
 3. 相邻两镜剧情必须不同、持续前进，严禁停留或复述同一节拍。
 4. 上方"必保留关键台词/关键剧情点"清单里的每一条，都必须分配到某一镜的 covers，全集覆盖、不得遗漏（代码逐条校验）。同一时刻同一动作里同时发生的多件事（如"碑亮+测出三段+宣告低级+全场哄笑"本就是宣判这一拍），放进同一镜 covers 即可，不要硬拆成多镜空耗时长；但发生在不同时刻/不同人物/不同场景的事（如萧媚七段、萧薰儿九段、树荫对话）必须分到不同镜，每镜 covers 只写该镜能实际拍出来、说出来的部分；不要把"萧媚七段+萧薰儿九段+反衬萧炎失格"整段塞给只拍萧媚的一镜。
@@ -893,14 +908,79 @@ def _outline_brief(outline: StoryboardOutline | None, shot_no: int):
     return None
 
 
+def _split_text_by_content_budget(text: str, budget: int) -> list[str]:
+    """按 ``_condense`` 的计数口径切文本，并保留原有字符顺序。"""
+    if budget <= 0:
+        raise ValueError("budget must be positive")
+    chunks: list[str] = []
+    buffer: list[str] = []
+    content_chars = 0
+    for char in text.strip():
+        char_cost = len(_condense(char))
+        if buffer and char_cost and content_chars + char_cost > budget:
+            chunk = "".join(buffer).strip()
+            if chunk:
+                chunks.append(chunk)
+            buffer = []
+            content_chars = 0
+        buffer.append(char)
+        content_chars += char_cost
+    chunk = "".join(buffer).strip()
+    if chunk:
+        chunks.append(chunk)
+    return chunks
+
+
+def _split_atoms_to_content_budget(atoms: list[str], budget: int) -> list[str]:
+    """尽量沿句读贪心分组；单个长句仍超限时再确定性硬切。"""
+    pieces = [
+        piece
+        for atom in atoms
+        for piece in _split_text_by_content_budget(atom, budget)
+    ]
+    groups: list[list[str]] = []
+    current: list[str] = []
+    for piece in pieces:
+        candidate = "；".join([*current, piece])
+        if current and len(_condense(candidate)) > budget:
+            groups.append(current)
+            current = [piece]
+        else:
+            current.append(piece)
+    if current:
+        groups.append(current)
+
+    # 贪心装箱可能留下极短尾段（真实镜12曾得到 26/4）。在不越预算且不改变
+    # 原顺序的前提下，把边界处的完整语义原子后移，使相邻镜头更均衡、更可拍。
+    changed = True
+    while changed:
+        changed = False
+        for index in range(len(groups) - 1):
+            left, right = groups[index], groups[index + 1]
+            if len(left) <= 1:
+                continue
+            before = abs(
+                len(_condense("；".join(left))) - len(_condense("；".join(right)))
+            )
+            shifted_left = left[:-1]
+            shifted_right = [left[-1], *right]
+            right_cost = len(_condense("；".join(shifted_right)))
+            after = abs(
+                len(_condense("；".join(shifted_left))) - right_cost
+            )
+            if right_cost <= budget and after < before:
+                groups[index] = shifted_left
+                groups[index + 1] = shifted_right
+                changed = True
+    return ["；".join(group) for group in groups]
+
+
 def _maybe_split_outline_covers(outline: StoryboardOutline | None, shot_no: int,
                                 bible: Bible, max_shots: int) -> bool:
-    """方案 C：当前镜大纲 covers 若"不可单镜完成"（依赖圣经外角色开口 或 同时要求角色开口+人群声），
-    逐镜阶段会陷入"删角色→covers 落实不了 / 保留角色→characters 校验失败"的死循环（镜03 根因）。
+    """把单镜不可完成的 covers 预拆成可由逐镜合同逐个生成的相邻节拍。
 
-    在调用 LLM 前自动把该镜 covers 按句读拆成两段，插入一条新大纲节拍承载后半，让当前镜只落实前半——
-    模型有出路，不再 8 次重试打转。拆分后重排 shot_no；超过 max_shots 则不拆（保底不破坏镜头数上限）。
-    返回是否做了拆分（调用方据此重新读取 brief 与 expected_total）。
+    口播超预算时会一次拆成足够多段，并保证每段都不超过最长 10 秒的口播上限；
+    这样模型无需用非法的 ``shots`` 数组自行加镜。拆分后会重排 shot_no。
     """
     if not outline or not outline.shots:
         return False
@@ -915,42 +995,50 @@ def _maybe_split_outline_covers(outline: StoryboardOutline | None, shot_no: int,
     bible_names = {c.name for c in bible.characters}
     outside = _covers_outside_spoken(covers, bible_names)
     both_tracks = _covers_has_spoken(covers) and _covers_has_crowd(covers)
-    # ① 口播超预算：covers 整体落到声轨后明显超过单镜口播上限（且句内有句读可拆）时，
-    # 这镜无论如何塞不下，逐镜阶段会在"保留全句→超限 / 删字→判丢失"之间死循环。
-    # 在调 LLM 前按句读拆成两段、插一条新节拍承接后半，让本镜只念前半，从源头消灭这类死循环。
-    over_budget = len(_condense(covers)) > config.MAX_SPOKEN_CHARS_PER_SHOT and len(_atomize_claim(covers)) >= 2
+    over_budget = len(_condense(covers)) > config.MAX_SPOKEN_CHARS_PER_SHOT
     if not outside and not both_tracks and not over_budget:
         return False
-    # 按句读拆成两段：尽量让"宣告/测出"落前半，"哄笑/议论"落后半。
     atoms = _atomize_claim(covers)
-    if len(atoms) < 2:
+    if not atoms:
         return False
-    # 找一个切分点：让前半含 spoken 动词、后半含 crowd 词；找不到就按中点切。
-    split_at = len(atoms) // 2
-    for idx in range(1, len(atoms)):
-        front = "".join(atoms[:idx])
-        back = "".join(atoms[idx:])
-        if _covers_has_spoken(front) and _covers_has_crowd(back):
-            split_at = idx
-            break
-    front = "；".join(atoms[:split_at])
-    back = "；".join(atoms[split_at:])
-    if not front or not back:
+    if over_budget:
+        chunks = _split_atoms_to_content_budget(
+            atoms, config.MAX_SPOKEN_CHARS_PER_SHOT
+        )
+    else:
+        if len(atoms) < 2:
+            return False
+        # 尽量让角色宣告落前半、人群反馈落后半；找不到则按中点拆。
+        split_at = len(atoms) // 2
+        for idx in range(1, len(atoms)):
+            front = "".join(atoms[:idx])
+            back = "".join(atoms[idx:])
+            if _covers_has_spoken(front) and _covers_has_crowd(back):
+                split_at = idx
+                break
+        chunks = ["；".join(atoms[:split_at]), "；".join(atoms[split_at:])]
+    chunks = [chunk for chunk in chunks if chunk]
+    if len(chunks) < 2:
         return False
-    current.covers = front
-    new_shot = StoryboardOutlineShot(
-        shot_no=shot_no + 1,
-        scene_setting=current.scene_setting,
-        beat=f"（自动拆分自第{shot_no}镜后半段）{back}",
-        covers=back,
-    )
-    outline.shots.insert(shot_no, new_shot)
+    if len(outline.shots) + len(chunks) - 1 > max_shots:
+        return False
+    current.covers = chunks[0]
+    for offset, chunk in enumerate(chunks[1:], start=1):
+        outline.shots.insert(
+            shot_no - 1 + offset,
+            StoryboardOutlineShot(
+                shot_no=shot_no + offset,
+                scene_setting=current.scene_setting,
+                beat=f"（自动拆分自第{shot_no}镜第{offset + 1}段）{chunk}",
+                covers=chunk,
+            ),
+        )
     for i, s in enumerate(outline.shots):
         s.shot_no = i + 1
     log_provider_call(
         "storyboard_outline_split", config.MODEL_TEXT, "COVERS_SPLIT", None, 0,
         meta={"shot_no": shot_no, "outside": outside, "both_tracks": both_tracks,
-              "over_budget": over_budget, "front": front[:80], "back": back[:80],
+              "over_budget": over_budget, "chunks": [chunk[:80] for chunk in chunks],
               "new_total": len(outline.shots)})
     return True
 
@@ -965,6 +1053,7 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
         raise StageError("分镜脚本", ["旧版拍卡剧本已下线，请先重新生成完整剧本，再进入分镜台"])
 
     speech_styles = "；".join(f"{c.name}：{c.speech_style}" for c in bible.characters if c.speech_style)
+    extra_policy = functional_extra_policy_text()
     durations = sorted(config.ALLOWED_DURATIONS)
     output_contract = _storyboard_output_contract(episode, bible, durations, speech_styles)
     preflight_contract = _storyboard_preflight_contract(episode)
@@ -975,10 +1064,9 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
     shot_no = len(completed_shots) + 1
     must_finish = False
     # 方案 C：当前镜大纲 covers 若"不可单镜完成"（依赖圣经外角色开口 或 同时要求角色开口+人群声），
-    # 在调用 LLM 前自动拆成两段、插入新节拍承载后半，让本镜只落实前半——避免逐镜阶段 8 次重试打转。
+    # 在调用 LLM 前自动拆成足够多段并插入相邻节拍，让本镜只落实当前段，避免逐镜修复打转。
     # 拆分后 outline.shots 变长，下方 expected_total / allow_finish 自动按新长度计算。
-    if _maybe_split_outline_covers(outline, shot_no, bible, max_shots):
-        pass  # 拆分已就地完成，后续读取 brief/expected_total 自然用新值
+    _maybe_split_outline_covers(outline, shot_no, bible, max_shots)
     # 有大纲时由计划的镜头数决定收尾时机（执行完整份大纲，避免提前收尾把后段剧情挤掉）；
     # 无大纲时回退到基础镜头数下限。
     expected_total = len(outline.shots) if (outline and outline.shots) else min_shots
@@ -1069,6 +1157,7 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
 4. 如果 is_final=true，本镜必须落到本集尾钩：{episode['cliffhanger']}，并且整集必保留关键台词/剧情点都已经在已通过镜头或本镜中体现。
 5. 如果 is_final=false，本镜结尾要留下清楚的动作/情绪/信息状态，供下一镜继续。
 6. 人物入画/出画必须符合导演调度：characters 里新增的人物，必须在 action_desc、first_frame_desc 或 narration 中写清他/她从哪里来、如何进入画面或如何被镜头发现；上一镜在场但本镜不再可见的人物，必须有退开、离开、被遮挡、留在画外或换场的可见原因。禁止“上一镜没有，下一镜突然站在画面里/突然开口”。
+7. 功能性路人合同：{extra_policy}。
 
 拆分原则：
 1. 按完整剧本的因果链继续往后拆，不能跳过中间关键事件，也不能重写已通过镜头已经覆盖的内容。
@@ -1090,7 +1179,7 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
 上一集结尾：{prev_ending or "（本集为第一集）"}
 
 输出 JSON Schema：
-{{"episode_no": {episode['episode_no']}, "is_final": bool, "shot": {{"shot_no": {shot_no}, "duration_s": int, "shot_size": "远景|全景|中景|近景|特写", "camera_move": "固定|推近|拉远|横摇|跟随", "scene_setting": "短时间+地点标签", "characters": ["画面中实际可见/在场且属于角色圣经的准确姓名"], "action_desc": str, "first_frame_desc": "本镜开始的静止画面，25~50字，只写看得见的人物姿态/表情/手部/道具/光效", "last_frame_desc": "本镜结束的静止画面，25~50字，与首帧【同机位同场景同构图】，仅人物动作推进后的状态（不要换镜头/景别/场景）", "source_excerpt": "对应本镜头的小说原文逐字摘录，至少 {SOURCE_EXCERPT_MIN_CHARS} 字", "narration": "可空；用于保留内心OS、结尾悬念旁白、非角色圣经人物的人群声/议论声，≤{NARRATION_TARGET_CHARS} 字", "dialogues": [{{"speaker": "必须是本镜头 characters 中的角色名", "line": str, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定"}}], "transition": "{transition_options}", "continuity_from_prev": bool}}}}"""
+{{"episode_no": {episode['episode_no']}, "is_final": bool, "shot": {{"shot_no": {shot_no}, "duration_s": int, "shot_size": "远景|全景|中景|近景|特写", "camera_move": "固定|推近|拉远|横摇|跟随", "scene_setting": "短时间+地点标签", "characters": ["画面中实际可见的角色圣经姓名或合法功能性路人标签"], "action_desc": str, "first_frame_desc": "本镜开始的静止画面，25~50字，只写看得见的人物姿态/表情/手部/道具/光效", "last_frame_desc": "本镜结束的静止画面，25~50字，与首帧【同机位同场景同构图】，仅人物动作推进后的状态（不要换镜头/景别/场景）", "source_excerpt": "对应本镜头的小说原文逐字摘录，至少 {SOURCE_EXCERPT_MIN_CHARS} 字", "narration": "可空；用于保留内心OS、结尾悬念旁白、非角色圣经人物的人群声/议论声，建议≤{NARRATION_TARGET_CHARS} 字", "dialogues": [{{"speaker": "必须是本镜头 characters 中的可见角色名或功能性路人标签", "line": str, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定"}}], "transition": "{transition_options}", "continuity_from_prev": bool}}}}"""
     source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()[:16]
     prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
     log_provider_call(
@@ -1107,14 +1196,19 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
             "prompt_chars": len(prompt),
             "source_hash": source_hash,
             "prompt_hash": prompt_hash,
-            "contract_version": "storyboard_sequential_shot_v2_outline",
+            "contract_version": "storyboard_sequential_shot_v5_functional_extras",
             "screenplay_mode": "full_script",
         })
+    repair_output_contract = f"""只输出一个 JSON 根对象，根字段为 episode_no、is_final、shot。
+shot 必须是单数对象，shot.shot_no 必须等于 {shot_no}；禁止输出 shots 数组，禁止附带下一镜。
+如果当前内容仍超过最长 {config.VIDEO_DURATION_MAX_S}s 的容量，只压缩本镜到大纲已分配的内容；后续节拍由系统在下一轮逐镜生成。"""
     repair_context = f"""当前仅修复第 {shot_no} 镜，不得输出其他镜头。
 本镜大纲：{brief.beat if brief is not None else '（按完整大纲继续推进）'}
 本镜必落内容：{brief.covers if brief is not None else '（无单列项）'}
-可用角色：{'/'.join(c.name for c in bible.characters)}
-合法时长：固定 {config.FIXED_VIDEO_DURATION_S}s；单镜口播上限：{config.MAX_SPOKEN_CHARS_PER_SHOT}字。
+角色圣经成员：{'/'.join(c.name for c in bible.characters)}
+功能性路人：{extra_policy}。
+合法时长：{config.VIDEO_DURATION_MIN_S}~{config.VIDEO_DURATION_MAX_S}s 整数，由模型按动作与口播选择最短可用时长；
+口播上限随时长变化（5s={config.max_spoken_chars_for_duration(5)}字，10s={config.max_spoken_chars_for_duration(10)}字）。
 合法景别：{'|'.join(sorted(SHOT_SIZES))}；合法运镜：{'|'.join(sorted(CAMERA_MOVES))}；合法转场：{transition_options}。
 上一镜详细承接：{_render_completed_shots_context(completed_shots[-1:])}
 本镜相关剧本：
@@ -1153,8 +1247,9 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
         ),
         loop=shot_loop,
         temperature=0.7,
-        max_tokens=65535,
+        max_tokens=config.STORYBOARD_SHOT_MAX_TOKENS,
         repair_context=repair_context,
+        repair_output_contract=repair_output_contract,
         prefill={"episode_no": episode["episode_no"]},
     )
     _normalized_candidate_board(episode["episode_no"], completed_shots, draft.shot, bible, episode["target_duration_s"])
@@ -1175,7 +1270,7 @@ def _first_shot_rule(episode: dict) -> str:
             f"人物动作克制、信息靠画面与旁白承载；不要在第一镜就让主角做剧烈动作或触发核心冲突。\n"
             f"    - 必须配 narration 旁白做背景交代（世界观/设定/主角身份处境），旁白先于任何台词；"
             f"shot_size 优先用远景/全景做开场建场，先把环境和主角位置交代清楚。\n"
-            "    - 开场需要更长铺陈时，拆成连续多个 5 秒建场镜，逐步完成环境建立与人物入场，"
+            "    - 开场需要更长铺陈时，可为单一连续建场动作选择 5~10 秒；超过 10 秒或进入新节拍时拆成相邻建场镜，逐步完成环境建立与人物入场，"
             f"所以 action_desc/首尾帧请按\"远景缓慢推近、镜头从环境推向主角\"来写：首帧是交代环境的大远景，"
             f"尾帧镜头推近到主角、但仍是同一机位的连续推进，人物动作保持克制连贯。\n"
             f"    - 仍要包含本集 hook：{episode['hook']}，但以\"先立背景、再带出钩子\"的方式呈现，"
@@ -1190,20 +1285,26 @@ def _storyboard_output_contract(episode: dict, bible: Bible, durations: list[int
     target = episode["target_duration_s"]
     min_shots, max_shots = storyboard_shot_count_range(target)
     character_names = "、".join(c.name for c in bible.characters) or "（角色圣经为空）"
+    duration_options = "/".join(str(value) for value in durations)
+    speech_budgets = "、".join(
+        f"{value}s≤{config.max_spoken_chars_for_duration(value)}字" for value in durations
+    )
+    extra_policy = functional_extra_policy_text()
     return f"""硬性输出规范（以下规则由代码校验，违反会被退回重写；请首轮直接满足）：
 1. episode_no 必须等于 {episode['episode_no']}；shots 按剧情顺序排列，shot_no 必须从 1 开始连续递增，不能跳号、重复或乱序。
 2. 整集不设总时长上限，完整演绎剧本、因果链、情绪推进、关键台词和结尾钩子后才能结束。
 3. 本集镜头数不设上限；复杂动作、长台词、不同时间或不同人物节拍必须拆成更多相邻镜头，不得合并删戏。
-4. duration_s 必须固定为 5（这是每个 Seedance 视频段的时长上限）。任何 5 秒内演不完或说不完的内容都要继续拆镜。
-   - 【硬性·音画同步】 duration_s 固定为 5秒?单镜说不完或演不完时，必须拆成连续相邻镜头，不得延长 duration_s?
-   - 【硬性·口播上限】单镜台词+旁白总字数不得超过 {config.MAX_SPOKEN_CHARS_PER_SHOT} 字（{config.FIXED_VIDEO_DURATION_S}s 也念不完）；超了就优先拆到新增/相邻镜头分担，其次再精简非关键口水话，绝不能一镜塞下念不完的台词。
+4. duration_s 必须由你根据【本镜单一连续动作的完成时间 + 台词/旁白的自然语速】自主判断，只能取整数 {duration_options} 秒。
+   - 【选择原则】选择能完整、自然呈现本镜内容的最短时长：5~6s 用于简单动作/无口播或极短口播；7~8s 用于常规对话、情绪反应或有起承转合的连续动作；9~10s 只用于确实需要铺陈的连续动作或较长口播。禁止所有镜头机械取同一时长，也禁止无内容地拉长到 10s。
+   - 【硬性·音画同步】口播预算随 duration_s 增长：{speech_budgets}。选择时长后，动作与口播必须都能在该时长内自然完成。
+   - 【硬性·拆镜边界】不同时间、地点、主动作或剧情节拍必须拆镜；单一内容超过 10s 仍演不完/说不完，也必须拆成连续相邻镜头，不得用 10s 强塞多个节拍。
 5. 关键：每条 shot 只表现【一个】连贯流畅的主动作（视频模型一镜到底拍这一件事），用一句话把它的"起势→过程→收势"和人物表情/反应写清楚（逗号分句多少不限，写细更好）。判定"多镜头快切"看的不是逗号数量，而是有没有出现切镜：严禁出现"切到/切至/镜头切/镜头转向/闪回/回忆画面/分屏/下一个镜头/→"这类词。
 6. 单镜要像一个真实可拍的连续动作（例如"她攥紧衣角，肩膀微颤，眼泪无声砸落，嘴角弧度僵在半空"是一个动作，没问题；"她哭→镜头切到门口→闪回六年前"才是错误的多段快切）。画面负责动作和表情，声轨负责冲突、态度、内心和悬念，二者必须共同推进剧情。
 7. 声轨纪律（重要）：分镜必须从【已确认完整剧本】保留角色对白、内心OS、旁白、人群嘲讽/恭维等可听见信息，不能把有声剧本压成纯画面卡。全集至少约 75% 镜头应有 dialogues 或 narration；对白冲突镜优先写 dialogues，内心OS和非角色圣经人物的人群声写入 narration。禁止空泛情绪词注水，每一句声轨都要提供新信息。
 8. action_desc 目标 ≥{ACTION_DESC_MIN_CHARS} 字（不设上限）：写清这一个动作的主体姓名、动作起止、力度/速度、表情与道具反应；不要罗列多个镜头，不要写运镜术语（景别/运镜由独立字段给出）。
-8b. 【关键·首尾帧=同一镜头的起止，决定 5s 视频是否自然】每条 shot 必须给出 first_frame_desc（本镜开始的静止画面）与 last_frame_desc（本镜结束的静止画面），它们是这 5s 视频的起点帧和终点帧：
+8b. 【关键·首尾帧=同一镜头的起止，决定 5~10s 视频是否自然】每条 shot 必须给出 first_frame_desc（本镜开始的静止画面）与 last_frame_desc（本镜结束的静止画面），它们是本镜视频的起点帧和终点帧：
    - 二者必须是【同一机位、同一场景、同一构图】下，这一个连贯动作的开始瞬间与结束瞬间：背景、镜头框取、人物在画面中的位置与形象保持一致，只有人物的姿态/表情/手部/道具状态随这一个动作自然推进。
-   - 要能看出动作发生了变化（首尾不能写成完全相同的一句），但【绝不是换机位、换构图、换场景、换人物形象】——否则 5s 视频会在两帧之间出现不合常理的跳变/形变/瞬移（这是当前成片最严重的问题，务必避免）。
+   - 要能看出动作发生了变化（首尾不能写成完全相同的一句），但【绝不是换机位、换构图、换场景、换人物形象】——否则视频会在两帧之间出现不合常理的跳变/形变/瞬移（这是当前成片最严重的问题，务必避免）。
    - 正例（同机位、仅动作推进）：首帧「角色A手掌刚贴上石碑，神情平静，碑面无光」；尾帧「同一机位，角色A手掌仍贴在石碑上，碑面微微亮起，他眉头骤紧、掌心收力」。反例（错误，等于换了镜头）：首帧拍人脸特写、尾帧却拍远处大厅全景。
    - 各 25~50 字，只写画面里看得见的东西（人物姿态/表情/手部/关键道具/光效），同一场景、同一人物形象；不要写出旁白/字幕文字、不要写运镜。
 8c. 【导演调度·人物不能凭空出现】每条 shot 都要像现场调度表一样写清人物在画面中的合理存在：
@@ -1214,10 +1315,10 @@ def _storyboard_output_contract(episode: dict, bible: Bible, durations: list[int
 9. source_excerpt 必填：每条 shot 必须带对应小说原文摘录，至少 {SOURCE_EXCERPT_MIN_CHARS} 字、不设上限，必须从下方"本集改编源文本"逐字摘录；可以截取最相关的连续段落，不要改写成摘要，不要写分镜解释。它会作为 Seedance prompt 的兜底参考。
 10. 字数只校验下限，不校验上限；目标值仅作写作引导。优先保证戏剧质量与因果连贯，不要为凑数字牺牲剧情。
 11. 信息密度靠"画面一个清晰动作 + 台词/内心OS承担冲突与信息（必要时一句短旁白补缝）"配合，而不是把多件事塞进同一个画面，也不是靠旁白硬讲剧情。禁止单纯场景氛围、人物呆立、重复上一镜内容。
-12. narration 可为空，但以下内容必须优先保留在 narration：必要内心独白、结尾悬念旁白、非角色圣经人物的人群嘲讽/恭维/议论声、画面与角色开口都无法表达的隐藏因果。若写则务必简短（一句话、≤{NARRATION_TARGET_CHARS} 字，5s 念得完），内心独白请以“内心OS：……”或“内心：……”开头。
-12a. 【口播优先·重要】单镜台词+旁白总字数受第 4 条上限约束（{config.MAX_SPOKEN_CHARS_PER_SHOT} 字）。若本镜已有接近上限的角色台词或关键长台词，就【不要】再把人群嘲讽/议论/哄笑/惊呼这类环境群像声塞进 narration 占用口播——请改写进 action_desc 当画面群像（如“周围人群哄笑、交头接耳地议论”）。环境群像声写进画面同样能被观众看到，不必占用念白时间；本镜旁白可留空或只留一句最关键的内心OS/尾钩。
+12. narration 可为空，但以下内容必须优先保留在 narration：必要内心独白、结尾悬念旁白、非角色圣经人物的人群嘲讽/恭维/议论声、画面与角色开口都无法表达的隐藏因果。若写则务必简短（一句话、建议≤{NARRATION_TARGET_CHARS} 字），内心独白请以“内心OS：……”或“内心：……”开头。
+12a. 【口播优先·重要】单镜台词+旁白总字数受第 4 条按时长预算约束（最长 10s 也不得超过 {config.MAX_SPOKEN_CHARS_PER_SHOT} 字）。若本镜已有接近对应时长上限的角色台词或关键长台词，就【不要】再把人群嘲讽/议论/哄笑/惊呼这类环境群像声塞进 narration 占用口播——请改写进 action_desc 当画面群像（如“周围人群哄笑、交头接耳地议论”）。环境群像声写进画面同样能被观众看到，不必占用念白时间；本镜旁白可留空或只留一句最关键的内心OS/尾钩。
 12b. 【声轨时序·重要】成片配音按“先旁白/内心、人物再开口”的听感顺序念：所以同一镜里 narration 是【铺垫情境/画外音/内心活动】，台词是人物【听到/看到后的反应】，二者必须前后承接、各讲各的信息，绝不能内容重复或自相矛盾（错例：narration 写“敌暗我明，谁在操控这一切”，台词又说“敌暗我明，这家伙是谁”——重复撞车）。只有全知视角的结尾悬念钩旁白（“可他不知道……/殊不知……/然而……”）才是念在台词之后的收尾。若本镜逻辑是“人物先反应、再补一句旁白”，就把旁白写成这种结尾钩句式，否则默认旁白先于台词。
-13. 角色名必须准确：characters 不能为空，只能使用角色圣经里的准确姓名：{character_names}。characters 只写本镜头画面中实际可见/实际在场的人物；幕后发消息者、纸条落款、屏幕昵称、AI 软件名不算出场角色，除非镜头真的拍到他本人。不要创造新名字，不要把姓名改成外号/称谓，不要用"无角色"。如果原文出现角色姓名，必须照抄原文和角色圣经中的姓名。
+13. 角色名必须准确：characters 不能为空；有姓名、重要或跨镜持续的角色只能使用角色圣经准确姓名：{character_names}。{extra_policy}。characters 只写本镜头实际可见/在场的人物；幕后发消息者、纸条落款、屏幕昵称、AI 软件名不算出场角色，除非镜头真的拍到他本人。不要创造具体姓名，不要把姓名改成外号/称谓，不要用"无角色"。
 14. action_desc 必须显式写出本镜头主要角色的准确姓名，不能只写"他/她/男人/女人/镜头/纸张"；每个动作节点都优先围绕人物表情、动作、道具反应和剧情后果展开。
 15. dialogues 只写人物实际开口台词，dialogues[*].speaker 必须在本镜头 characters 中；不要把纸条文字、屏幕文字、手机通知、内心独白或旁白写成 speaker="旁白"，这些内容放到 narration 或 action_desc。
 16. 单句台词可按人物语气灵活长短，但【单镜】台词+旁白总口播必须满足第 4 条上限；关键长台词请拆成连续相邻镜头分段说。emotion 只能取：{'|'.join(sorted(EMOTIONS))}。台词从原著提炼为口语化短句，但优先保留关键细节和人物说话风格：{speech_styles or '（无额外说话风格）'}。
@@ -1237,7 +1338,7 @@ def _storyboard_preflight_contract(episode: dict) -> str:
     min_shots, max_shots = storyboard_shot_count_range(target)
     hints = "、".join(TRANSITION_HINTS[:12])
     return f"""首轮输出前必须逐镜预检（这些就是代码校验器的具体判定条件，不要等返工）：
-1. 镜头数和整集总时长不设上限；每条 duration_s 固定为 5。若单镜台词+旁白超过 {config.MAX_SPOKEN_CHARS_PER_SHOT} 字，或动作/关键剧情 5 秒内演不完，必须新增相邻镜头拆分，直到完整演绎剧本。
+1. 镜头数和整集总时长不设上限；每条 duration_s 必须按内容判断为 {config.VIDEO_DURATION_MIN_S}~{config.VIDEO_DURATION_MAX_S} 的整数，并选择能完成单一动作与口播的最短时长。口播预算按 `duration_s × {config.SPOKEN_CHARS_PER_5_SECONDS}/5` 向下取整；超过 10s 容量或包含不同节拍时必须新增相邻镜头拆分，直到完整演绎剧本。
 2. 第 1 镜 continuity_from_prev 必须为 false；第 2 镜开始逐条和上一镜比较 scene_setting。
 3. 如果本镜 scene_setting 与上一镜完全相同：
    - continuity_from_prev 必须为 true；
@@ -1252,8 +1353,8 @@ def _storyboard_preflight_contract(episode: dict) -> str:
    - 上一镜 last_frame_desc 必须带这个转场的结尾视觉，本镜 first_frame_desc 必须是新时间/新地点的建立画面；
    - 如果只是同一段连续动作里从房间走到门口/楼道/桌边/窗前，不要改 scene_setting，继续沿用上一镜主场景标签，把移动写进 action_desc。
 5. scene_setting 是稳定短标签，不是镜头内容：同一连续时空统一写同一个"时间，主地点"，例如"当日，场景A"；不要在相邻镜头里改成"当日，场景A楼道外/桌前/门口"导致断链。
-6. characters 只写本镜头实际可见/在场且已交代入画原因的人；屏幕发信人、纸条落款、新闻里提到的人、AI 软件名不算 characters。它们只能写在 action_desc 或 narration。
-7. 每条 action_desc 必须显式写出 characters 中每个角色的准确姓名、画面位置和动作反应，把这【一个】连贯动作写清（写细无妨，但不要出现切到/闪回/镜头转向/分屏等切镜词）；不要只写纸张、屏幕、镜头、场景自己在动。
+6. characters 只写本镜头实际可见/在场且已交代入画原因的人；允许第 13 条定义的功能性路人，具体姓名仍必须来自角色圣经。屏幕发信人、纸条落款、新闻里提到的人、AI 软件名不算 characters。
+7. 每条 action_desc 必须显式写出 characters 中每个角色的角色圣经姓名或功能性路人标签、画面位置和动作反应，把这【一个】连贯动作写清（写细无妨，但不要出现切到/闪回/镜头转向/分屏等切镜词）；不要只写纸张、屏幕、镜头、场景自己在动。
 8. 每条 shot 的 source_excerpt 必填，必须从本集原文逐字摘录至少 {SOURCE_EXCERPT_MIN_CHARS} 字（不设上限），作为 Seedance 生成兜底参考。
 9. 声轨预检：若完整剧本对应段落有“角色名：台词”，本镜必须写 dialogues；若有“角色名（内心/OS）：台词”，本镜必须写 narration 并以“内心OS：……”或“内心：……”开头；若有人群嘲讽/恭维/旁白但说话者不在角色圣经，写入 narration 或 action_desc，不能丢掉。整集至少约 75% 镜头要有 dialogues 或 narration，避免纯画面哑剧。
 10. first_frame_desc 与 last_frame_desc 必须同机位、同场景、同构图，只让人物动作从"开始"推进到"结束"；不要让首尾帧变成两个不同的镜头/景别/场景。

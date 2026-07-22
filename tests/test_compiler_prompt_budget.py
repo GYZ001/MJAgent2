@@ -1,0 +1,132 @@
+from app import config, errors
+from app.compiler import CompileError, compile_prompt
+from app.schemas import Bible, Character, Dialogue, Shot, World
+
+
+def _bible() -> Bible:
+    return Bible(
+        characters=[
+            Character(
+                name="萧炎",
+                role="主角",
+                appearance_canonical=(
+                    "十五岁左右男性少年，墨色利落短发，常穿灰黑色劲装，"
+                    "左手指戴古朴黑色戒指，面容清秀眼神坚韧"
+                ),
+                personality="坚韧",
+            ),
+            Character(
+                name="萧薰儿",
+                role="女主",
+                appearance_canonical=(
+                    "十五岁左右少女，青丝挽成云髻，月白襦裙配淡金纹样，"
+                    "眉目清丽，气质温婉沉静"
+                ),
+                personality="聪慧",
+            ),
+            Character(
+                name="萧战",
+                role="配角",
+                appearance_canonical=(
+                    "中年男子，短须利落，玄色劲装外罩黑甲，肩宽腰直，"
+                    "眼神刚毅沉稳"
+                ),
+                personality="刚正",
+            ),
+        ],
+        world=World(
+            era="架空玄幻古代",
+            genre="高武玄幻",
+            visual_style_canonical=(
+                "3D国漫风，光线层次分明，色调浓郁鲜亮，人物建模精致，场景贴合玄幻东方古风"
+            ),
+        ),
+    )
+
+
+def test_long_reference_prompt_compacts_without_losing_story_anchors() -> None:
+    """回归 ERR-20260721-773e80：四个画面人物 + 上镜承接 + 长原文不应让生成入队失败。"""
+    action = (
+        "承接上一镜，石碑表面骤然亮起刺眼白光，浮现斗之力三段。测验员抬头朝人群公布成绩，"
+        "话音刚落周围人群骚动，路人甲嗤笑摇头，路人乙掩嘴窃语。萧炎按在石碑上的手微微收紧，"
+        "指甲刺入掌心，嘴角浮现一抹苦涩的自嘲。"
+    )
+    shot = Shot(
+        shot_no=2,
+        duration_s=8,
+        shot_size="近景",
+        camera_move="推近",
+        scene_setting="日，萧家测验广场",
+        characters=["萧炎", "测验员", "路人甲", "路人乙"],
+        action_desc=action,
+        first_frame_desc="萧炎按住石碑，测验员低头等待结果。",
+        last_frame_desc="测验员公布成绩，萧炎按碑的手微微收紧。",
+        source_excerpt=(
+            "测验员看了一眼碑上所显示出来的信息，语气漠然地将之公布了出来。"
+            "中年男子话刚刚脱口，便在人头汹涌的广场上带起一阵嘲讽的骚动。" * 3
+        ),
+        dialogues=[Dialogue(speaker="测验员", line="萧炎，斗之力，三段！级别：低级！", emotion="平静")],
+        continuity_from_prev=True,
+    )
+
+    prompt = compile_prompt(
+        shot,
+        _bible(),
+        with_refs=True,
+        prev_tail_action=(
+            "萧家测验广场上人头攒动，萧炎独自走到碑前，抬起右手缓缓按在石碑表面，"
+            "面无表情地垂眸等待。"
+        ),
+    )
+
+    assert len(prompt) <= config.PROMPT_CHAR_LIMIT
+    assert action in prompt
+    assert all(name in prompt for name in shot.characters)
+    assert "测验员（平静）说「萧炎，斗之力，三段！级别：低级！」" in prompt
+    assert "小说原文兜底参考：" in prompt
+    assert "避免出现：" in prompt
+    assert "严格保持人物发型、服装、五官与画风和参考图完全一致" in prompt
+    assert prompt.endswith("--ratio 9:16 --dur 8")
+
+
+def test_silent_shot_skips_empty_audio_discipline_and_compacts_intro(monkeypatch) -> None:
+    """无台词/旁白时 audio_sync_discipline 为空，必须 continue 而不是 break，否则无法压缩 video_intro。"""
+    monkeypatch.setattr(config, "PROMPT_CHAR_LIMIT", 920)
+    action = (
+        "萧炎抬手按上冰冷石碑，指节因用力而微微发白，碑面光纹向外扩散，萧薰儿侧身注视，"
+        "萧战立于边缘压抑呼吸，三人神情绷紧，动作连贯不跳切。"
+    ) * 3
+    shot = Shot(
+        shot_no=3,
+        duration_s=10,
+        shot_size="全景",
+        camera_move="推近",
+        scene_setting="日，萧家测验广场",
+        characters=["萧炎", "萧薰儿", "萧战"],
+        action_desc=action,
+        first_frame_desc="萧炎按碑，萧薰儿侧视，萧战立于边缘。",
+        last_frame_desc="光纹铺满碑面，三人神情更紧。",
+        source_excerpt="原文。" * 40,
+        dialogues=[],
+        narration="",
+        continuity_from_prev=True,
+    )
+
+    prompt = compile_prompt(
+        shot,
+        _bible(),
+        with_refs=True,
+        prev_tail_action="萧炎走到碑前站定，抬起右手缓缓按向石碑，萧薰儿与萧战各自在原位注视。",
+        extra_negative="避免出现：" + "伪影，" * 30 + "手指畸形",
+    )
+
+    assert len(prompt) <= 920
+    assert action in prompt
+    assert "只演一个连贯动作" in prompt
+    assert "口型和肢体随台词自然推进" not in prompt
+    assert prompt.endswith("--ratio 9:16 --dur 10")
+
+
+def test_compile_error_is_correctable_generation_error() -> None:
+    assert issubclass(CompileError, ValueError)
+    assert errors.classify(CompileError("prompt too long")) == ("generation", "GEN")

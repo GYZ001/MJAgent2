@@ -198,7 +198,7 @@ export const useProject = (projectId: string, intervalMs = 4000) =>
 
 /** 分集是否处于运行态（编剧/分镜/生成中）—— 决定是否需要高频轮询。
  *  空闲时彻底停轮询，避免反复拉取 1MB+ 的分集 payload 拖垮页面。 */
-export const episodeBusy = (ep: Episode | null): boolean => {
+const episodeBusy = (ep: Episode | null): boolean => {
   if (!ep) return true  // 首次未拿到数据时，按可能忙碌处理触发首次拉取后的轮询
   if (ep.screenplay_status === 'running') return true
   if (ep.status === 'scripting' || ep.status === 'drafting') return true

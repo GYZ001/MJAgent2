@@ -98,10 +98,20 @@ def transition_run(
         "updated_at": stamp,
         "finished_at": stamp if terminal else None,
         "failure_code": failure_code,
-        "failure_message": reason if to in {"FAILED", "PARTIAL", "PAUSED_EXTERNAL", "PAUSED_BUDGET"} else None,
+        # ``failure_message`` is also the persisted user-facing wait reason for
+        # active non-terminal states in the Run dock.
+        "failure_message": reason if to in {
+            "FAILED", "PARTIAL", "WAITING_RETRY", "WAITING_HUMAN",
+            "PAUSED_EXTERNAL", "PAUSED_BUDGET",
+        } else None,
     }
     if to == "RUNNING":
-        assignments["started_at"] = stamp
+        # Resuming WAITING_RETRY/paused work must not reset elapsed time in the
+        # Harness UI or destroy the original execution start timestamp.
+        row = db.execute(
+            "SELECT started_at FROM workflow_runs WHERE id=?", (run_id,)
+        ).fetchone()
+        assignments["started_at"] = row["started_at"] if row and row["started_at"] else stamp
     _cas_status(
         db, table="workflow_runs", entity="run", entity_id=run_id,
         expected=expected, target=to, assignments=assignments,

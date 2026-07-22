@@ -57,6 +57,16 @@ def test_compile_prompt_includes_source_excerpt() -> None:
     assert "小说原文兜底参考：谷言攥着纸杯" in prompt
 
 
+def test_compile_prompt_preserves_model_selected_duration() -> None:
+    shot = _shot("谷言攥着纸杯，听见曲惜说出那个名字，脸色骤然沉下去。")
+    shot.duration_s = 8
+
+    prompt = compile_prompt(shot, _bible())
+
+    assert "单镜约 8 秒" in prompt
+    assert prompt.endswith("--ratio 9:16 --dur 8")
+
+
 def test_legacy_seedance_prompt_is_patched_with_source_excerpt() -> None:
     prompt = ensure_source_excerpt_in_prompt(
         "固定5秒竖屏漫剧视频段，谷言低头攥紧纸杯。弱背景提示：咖啡厅 --ratio 9:16 --dur 5",

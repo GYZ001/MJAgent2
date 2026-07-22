@@ -276,7 +276,7 @@ def reusable_previous_assets(conn: Any, *, prev_shot: Any | None, limit: int, th
     for row in rows:
         if len(assets) >= limit:
             break
-        ok, score, qa, reject = _scene_qa_ok(row, threshold)
+        ok, score, qa, _ = _scene_qa_ok(row, threshold)
         if not ok:
             continue
         if not Path(row["image_path"]).exists():

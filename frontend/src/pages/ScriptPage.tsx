@@ -91,10 +91,23 @@ export default function ScriptPage() {
   }
 
   const enterBoard = async () => {
+    const canResumeCheckpoint = Boolean(
+      ep.shots?.length &&
+      ep.script_error &&
+      (ep.status === 'scripted' || ep.status === 'script_failed')
+    )
     const needGenerate = !ep.shots?.length || ['planned', 'script_failed'].includes(ep.status)
     if (needGenerate && ep.status !== 'scripting') {
       storyboardTimer.start()
-      await act(() => api.post(`/episodes/${ep.id}/storyboard`), '已进入分镜台，正在逐镜头生成，QA 通过后陆续展示')
+      const path = canResumeCheckpoint
+        ? `/episodes/${ep.id}/storyboard/resume`
+        : `/episodes/${ep.id}/storyboard`
+      await act(
+        () => api.post(path),
+        canResumeCheckpoint
+          ? `已进入分镜台，从前 ${ep.shots?.length ?? 0} 镜 checkpoint 继续生成`
+          : '已进入分镜台，正在逐镜头生成，QA 通过后陆续展示',
+      )
     }
     go('board', projectId, ep.id)
   }

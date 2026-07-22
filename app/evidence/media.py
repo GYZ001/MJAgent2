@@ -6,7 +6,6 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from app import config
 from app.db import get_conn
 from app.evidence import repository
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
@@ -67,7 +66,7 @@ def validate_video_file(path: str, *, expected_duration_s: float = 5.0) -> dict[
             if abs(duration - expected_duration_s) > tolerance:
                 issues.append(_issue(
                     "VIDEO_DURATION_CONTRACT",
-                    f"视频实测 {duration:.2f}s，不符合固定 {expected_duration_s:.0f}s 合同",
+                    f"视频实测 {duration:.2f}s，不符合分镜选择的 {expected_duration_s:.0f}s 合同",
                     str(file_path),
                 ))
         except (OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
@@ -79,7 +78,7 @@ def validate_video_file(path: str, *, expected_duration_s: float = 5.0) -> dict[
         evidence["duration_verified"] = False
         issues.append(_issue(
             "VIDEO_DURATION_UNVERIFIED",
-            "当前环境缺少 ffprobe，固定 5 秒时长尚未独立复验",
+            f"当前环境缺少 ffprobe，分镜选择的 {expected_duration_s:.0f} 秒时长尚未独立复验",
             str(file_path),
             blocker=False,
         ))
@@ -146,7 +145,7 @@ def _model_evaluation(qa: dict[str, Any] | None, *, subject: str, evaluator_name
 def record_video_candidate(version_id: str, *, step_run_id: str | None = None) -> dict[str, Any]:
     conn = get_conn()
     row = conn.execute(
-        """SELECT v.*, s.episode_id, s.storyboard_artifact_id
+        """SELECT v.*, s.episode_id, s.duration_s, s.storyboard_artifact_id
            FROM shot_versions v JOIN shots s ON s.id=v.shot_id WHERE v.id=?""",
         (version_id,),
     ).fetchone()
@@ -156,7 +155,7 @@ def record_video_candidate(version_id: str, *, step_run_id: str | None = None) -
         artifact = repository.get_artifact(row["artifact_id"])
         if artifact:
             return artifact
-    technical = validate_video_file(row["video_path"], expected_duration_s=config.FIXED_VIDEO_DURATION_S)
+    technical = validate_video_file(row["video_path"], expected_duration_s=row["duration_s"])
     qa = json.loads(row["qa_json"] or "{}")
     artifact = repository.create_artifact(
         EvidenceArtifact(
@@ -173,7 +172,7 @@ def record_video_candidate(version_id: str, *, step_run_id: str | None = None) -
                 "provider_task_id": row["provider_task_id"],
             },
             parent_artifact_ids=[row["storyboard_artifact_id"]] if row["storyboard_artifact_id"] else [],
-            contract_version="video-1.0.0",
+            contract_version="video-2.0.0",
         ),
         step_run_id=step_run_id,
     )

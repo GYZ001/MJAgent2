@@ -7,14 +7,10 @@ from app.db import get_conn, new_id, now
 
 
 ACTIVE_RESERVATIONS = {"reserved", "running"}
-TERMINAL_JOB_STATUSES = {"succeeded", "failed", "cancelled", "abandoned"}
 
 
 @dataclass(frozen=True, slots=True)
 class Claim:
-    job_id: str
-    owner: str
-    lease_expires_at: float
     recovered: bool = False
 
 
@@ -114,7 +110,7 @@ def claim_job(job_id: str, owner: str, *, lease_seconds: float = 120.0) -> Claim
         (job_id,),
     )
     db.commit()
-    return Claim(job_id=job_id, owner=owner, lease_expires_at=expires, recovered=recovered)
+    return Claim(recovered=recovered)
 
 
 def renew_lease(job_id: str, owner: str, *, lease_seconds: float = 120.0) -> bool:
@@ -216,8 +212,3 @@ def recoverable_jobs() -> list[tuple[str, float]]:
         (str(row["id"]), max(0.0, float(row["next_retry_at"] or stamp) - stamp))
         for row in rows
     ]
-
-
-def recoverable_job_ids() -> list[str]:
-    """Compatibility view used by diagnostics and older callers."""
-    return [job_id for job_id, delay in recoverable_jobs() if delay <= 0]

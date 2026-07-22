@@ -156,7 +156,6 @@ def test_stale_lease_sweeper_reclaims_expired_lease(monkeypatch) -> None:
     async def run() -> list[str]:
         # 直接调用 sweeper 的一次循环逻辑（不等 sleep）
         from app.db import now as db_now
-        import sqlite3 as _sql
         rows = worker.rows_to_dicts(conn.execute(
             "SELECT id, run_id, step_run_id FROM jobs WHERE status='running' "
             "AND lease_expires_at IS NOT NULL AND lease_expires_at < ? "

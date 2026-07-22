@@ -716,7 +716,7 @@ def _repair_integrity(conn: sqlite3.Connection) -> dict[str, Any]:
         (row[2] for row in conn.execute("PRAGMA database_list").fetchall() if row[1] == "main"),
         "",
     )
-    if database_path:
+    if database_path and repair_count:
         report_dir = DATA_DIR / "integrity_reports"
         report_dir.mkdir(parents=True, exist_ok=True)
         report_path = report_dir / f"integrity-{stamp}.json"
@@ -772,7 +772,8 @@ def init_db() -> None:
     conn.execute(
         "UPDATE workflow_runs SET status='PAUSED_EXTERNAL', updated_at=?, "
         "failure_code='SERVICE_RESTART', failure_message='服务重启，可从安全检查点恢复', "
-        "resume_from_step=COALESCE(resume_from_step, current_step_key) WHERE status='RUNNING'",
+        "resume_from_step=COALESCE(resume_from_step, current_step_key) "
+        "WHERE status IN ('RUNNING','WAITING_RETRY')",
         (now(),),
     )
     # 审批进程可能在不可变 T5 快照生成前后退出。已有更新批准包则旧草稿只保留审计状态；
