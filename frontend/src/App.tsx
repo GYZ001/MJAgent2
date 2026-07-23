@@ -26,25 +26,63 @@ interface Nav {
 const NavCtx = createContext<Nav>(null as unknown as Nav)
 export const useNav = () => useContext(NavCtx)
 
-const SECTIONS: { key: View; label: string; icon: string; needProject?: boolean; needEpisode?: boolean }[] = [
-  { key: 'studio', label: '书房', icon: '书' },
-  { key: 'bible', label: '人物谱', icon: '人', needProject: true },
-  { key: 'scenes', label: '场景图', icon: '景', needProject: true },
-  { key: 'episodes', label: '分集', icon: '集', needProject: true },
-  { key: 'script', label: '剧本台', icon: '剧', needEpisode: true },
-  { key: 'board', label: '分镜台', icon: '镜', needEpisode: true },
-  { key: 'wall', label: '评审墙', icon: '审', needEpisode: true },
-  { key: 'cinema', label: '成片台', icon: '片', needEpisode: true },
-  { key: 'monitor', label: '监制房', icon: '控' },
+const SECTIONS: { key: View; label: string; icon: string; group: string; needProject?: boolean; needEpisode?: boolean }[] = [
+  { key: 'studio', label: '项目中心', icon: '书', group: '项目' },
+  { key: 'bible', label: '人物谱', icon: '人', group: '前期准备', needProject: true },
+  { key: 'scenes', label: '场景库', icon: '景', group: '前期准备', needProject: true },
+  { key: 'episodes', label: '分集规划', icon: '集', group: '前期准备', needProject: true },
+  { key: 'script', label: '剧本台', icon: '剧', group: '内容制作', needEpisode: true },
+  { key: 'board', label: '分镜台', icon: '镜', group: '内容制作', needEpisode: true },
+  { key: 'wall', label: '评审墙', icon: '审', group: '质量交付', needEpisode: true },
+  { key: 'cinema', label: '成片台', icon: '片', group: '质量交付', needEpisode: true },
+  { key: 'monitor', label: '监制房', icon: '控', group: '系统' },
 ]
 
+const decodePart = (value?: string) => value ? decodeURIComponent(value) : null
+
+function readLocation(): Pick<Nav, 'view' | 'projectId' | 'episodeId' | 'chapterIdx'> {
+  const parts = window.location.pathname.split('/').filter(Boolean)
+  if (parts[0] === 'monitor') return { view: 'monitor', projectId: null, episodeId: null, chapterIdx: null }
+  if (parts[0] !== 'projects' || !parts[1]) {
+    return { view: 'studio', projectId: null, episodeId: null, chapterIdx: null }
+  }
+  const projectId = decodePart(parts[1])
+  if (parts[2] === 'reader') {
+    const idx = Number(parts[3])
+    return { view: 'reader', projectId, episodeId: null, chapterIdx: Number.isFinite(idx) ? idx : 1 }
+  }
+  if (parts[2] === 'episodes' && parts[3]) {
+    const episodeId = decodePart(parts[3])
+    const page = parts[4]
+    const view: View = page === 'board' || page === 'wall' || page === 'cinema' ? page : 'script'
+    return { view, projectId, episodeId, chapterIdx: null }
+  }
+  const view: View = parts[2] === 'scenes' || parts[2] === 'episodes' || parts[2] === 'bible'
+    ? parts[2] : 'bible'
+  return { view, projectId, episodeId: null, chapterIdx: null }
+}
+
+function locationFor(view: View, projectId: string | null, episodeId: string | null, chapterIdx: number | null) {
+  if (view === 'studio') return '/'
+  if (view === 'monitor') return '/monitor'
+  if (!projectId) return '/'
+  const project = `/projects/${encodeURIComponent(projectId)}`
+  if (view === 'reader') return `${project}/reader/${chapterIdx ?? 1}`
+  if (view === 'script' || view === 'board' || view === 'wall' || view === 'cinema') {
+    return episodeId ? `${project}/episodes/${encodeURIComponent(episodeId)}/${view}` : `${project}/episodes`
+  }
+  return `${project}/${view}`
+}
+
 export default function App() {
-  const [view, setView] = useState<View>('studio')
-  const [projectId, setProjectId] = useState<string | null>(null)
-  const [episodeId, setEpisodeId] = useState<string | null>(null)
-  const [chapterIdx, setChapterIdx] = useState<number | null>(null)
+  const initial = readLocation()
+  const [view, setView] = useState<View>(initial.view)
+  const [projectId, setProjectId] = useState<string | null>(initial.projectId)
+  const [episodeId, setEpisodeId] = useState<string | null>(initial.episodeId)
+  const [chapterIdx, setChapterIdx] = useState<number | null>(initial.chapterIdx)
   const [toastMsg, setToastMsg] = useState<{ text: string; err: boolean } | null>(null)
   const [spineCollapsed, setSpineCollapsed] = useState(false)
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
 
   const toast = useCallback((text: string, isErr = false) => {
     setToastMsg({ text, err: isErr })
@@ -52,10 +90,33 @@ export default function App() {
   }, [])
 
   const go = useCallback((v: View, pid?: string | null, eid?: string | null, cidx?: number | null) => {
-    if (pid !== undefined) setProjectId(pid)
-    if (eid !== undefined) setEpisodeId(eid)
-    if (cidx !== undefined) setChapterIdx(cidx)
+    const nextProjectId = pid === undefined ? projectId : pid
+    const nextEpisodeId = eid === undefined ? episodeId : eid
+    const nextChapterIdx = cidx === undefined ? chapterIdx : cidx
+    const target = locationFor(v, nextProjectId, nextEpisodeId, nextChapterIdx)
+    if (`${window.location.pathname}${window.location.search}` !== target) {
+      window.history.pushState({}, '', target)
+    }
+    setProjectId(nextProjectId)
+    setEpisodeId(nextEpisodeId)
+    setChapterIdx(nextChapterIdx)
     setView(v)
+    setMobileNavOpen(false)
+    window.scrollTo({ top: 0, behavior: 'auto' })
+  }, [chapterIdx, episodeId, projectId])
+
+  useEffect(() => {
+    const onPopState = () => {
+      const next = readLocation()
+      setView(next.view)
+      setProjectId(next.projectId)
+      setEpisodeId(next.episodeId)
+      setChapterIdx(next.chapterIdx)
+      setMobileNavOpen(false)
+      window.scrollTo({ top: 0, behavior: 'auto' })
+    }
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
   }, [])
 
   useEffect(() => {
@@ -85,13 +146,18 @@ export default function App() {
   const nav: Nav = { view, projectId, episodeId, chapterIdx, go, toast }
   const visibleSections = projectId ? SECTIONS : SECTIONS.filter(s => s.key === 'studio' || s.key === 'monitor')
 
-  const openSection = (s: (typeof SECTIONS)[number]) => {
-    setView(s.key)
-  }
+  const openSection = (s: (typeof SECTIONS)[number]) => go(s.key)
+
+  const groupedSections = visibleSections.reduce<Record<string, typeof visibleSections>>((groups, section) => {
+    ;(groups[section.group] ??= []).push(section)
+    return groups
+  }, {})
 
   return (
     <NavCtx.Provider value={nav}>
-      <aside className={`spine ${spineCollapsed ? 'collapsed' : ''}`}>
+      <button className="mobile-nav-trigger" type="button" aria-label="打开导航" onClick={() => setMobileNavOpen(true)}>☰</button>
+      {mobileNavOpen && <button className="mobile-nav-backdrop" type="button" aria-label="关闭导航" onClick={() => setMobileNavOpen(false)} />}
+      <aside className={`spine ${spineCollapsed ? 'collapsed' : ''} ${mobileNavOpen ? 'mobile-open' : ''}`}>
         <div className="spine-top">
           <button
             className="seal"
@@ -102,21 +168,28 @@ export default function App() {
           >
             漫
           </button>
+          <div className="brand-copy"><b>漫剧案头</b><span>AI PRODUCTION</span></div>
+          <button className="spine-close" type="button" aria-label="关闭导航" onClick={() => setMobileNavOpen(false)}>×</button>
         </div>
         <nav>
-          {visibleSections.map(s => (
-            <button
-              key={s.key}
-              className={`spine-item ${view === s.key ? 'active' : ''}`}
-              onClick={() => openSection(s)}
-              title={spineCollapsed ? s.label : undefined}
-            >
-              <span className="spine-icon" aria-hidden="true">{s.icon}</span>
-              <span className="spine-label">{s.label}</span>
-            </button>
+          {Object.entries(groupedSections).map(([group, sections]) => (
+            <div className="spine-group" key={group}>
+              <div className="spine-group-label">{group}</div>
+              {sections.map(s => (
+                <button
+                  key={s.key}
+                  className={`spine-item ${view === s.key ? 'active' : ''}`}
+                  onClick={() => openSection(s)}
+                  title={spineCollapsed ? s.label : undefined}
+                >
+                  <span className="spine-icon" aria-hidden="true">{s.icon}</span>
+                  <span className="spine-label">{s.label}</span>
+                </button>
+              ))}
+            </div>
           ))}
         </nav>
-        <div className="spine-foot">漫剧案头 · 贰</div>
+        <div className="spine-foot">MANJU STUDIO · 2.0</div>
       </aside>
       <main className="desk">
         {view === 'studio' && <Studio />}
@@ -130,8 +203,8 @@ export default function App() {
         {view === 'cinema' && (episodeId ? <CinemaPage key={episodeId} /> : <WorkspaceEmpty label="成片台" />)}
         {view === 'monitor' && <MonitorPage />}
       </main>
-      <RunDock projectId={projectId} onOpen={() => setView('monitor')} />
-      {toastMsg && <div className={`toast ${toastMsg.err ? 'err' : ''}`}>{toastMsg.text}</div>}
+      <RunDock projectId={projectId} onOpen={() => go('monitor')} />
+      {toastMsg && <div role="status" className={`toast ${toastMsg.err ? 'err' : ''}`}>{toastMsg.text}</div>}
     </NavCtx.Provider>
   )
 }

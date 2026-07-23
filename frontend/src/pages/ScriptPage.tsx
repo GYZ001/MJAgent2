@@ -132,11 +132,11 @@ export default function ScriptPage() {
     <>
       <header className="desk-head">
         <EpisodeCrumb label="剧本台" view="script" episodeNo={ep.episode_no} />
-        <h1>剧本台 <span className="sub">《{ep.title}》 · 小说先转可拍剧本，再展开分镜</span></h1>
+        <h1>剧本台 <span className="sub">《{ep.title}》 · 先完成可拍剧本，再进入镜头设计</span></h1>
         <hr className="rule" />
       </header>
 
-      <section className="card">
+      <section className="card script-toolbar">
         <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
           <ScreenplayStamp status={ep.screenplay_status} />
           <EpStamp status={ep.status} />
@@ -188,13 +188,13 @@ export default function ScriptPage() {
         {ep.script_error && <div className="error-banner">分镜提示：{'\n'}{ep.script_error}</div>}
       </section>
 
-      <div style={{ height: 20 }} />
+      <div className="workspace-gap" />
 
       {!script
         ? <div className="empty"><div className="big">剧</div>尚无剧本<br />点击上方「生成剧本」</div>
         : (
             <>
-              <section className="card">
+              <section className={`card script-editor${editing ? ' editing' : ''}`}>
                 {!editing ? (
                   <>
                     <div className="kv full"><b>标题</b>{script.title || ep.title}</div>

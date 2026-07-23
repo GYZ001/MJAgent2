@@ -37,7 +37,7 @@ export default function ScenesPage() {
     <>
       <header className="desk-head">
         <div className="crumb">书房 / 《{p.name}》</div>
-        <h1>场景图 <span className="sub">场景锚点一旦定稿，同场景所有镜头、跨集逐字复用同一张场景图，保持场景一致</span></h1>
+        <h1>场景库 <span className="sub">以视觉资产为中心管理场景锚点、版本与跨集一致性</span></h1>
         <hr className="rule" />
       </header>
 
@@ -84,7 +84,7 @@ export default function ScenesPage() {
       </section>
 
       {scenes.length > 0 && (
-        <section className="card">
+        <section className="card scene-library">
           <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', margin: '4px 0 12px' }}>
             <SearchField value={search} onChange={value => { setSearch(value); setPage(0) }}
               placeholder="搜索场景名…" ariaLabel="搜索场景" className="library-search" />
@@ -97,16 +97,15 @@ export default function ScenesPage() {
               const fitting = generating && (!p.scene_refs_target || p.scene_refs_target === s.name)
               const qaOverall = s.scene_refs?.[0]?.qa_overall
               return (
-                <div key={s.name} className="figure">
+                <article key={s.name} className="figure scene-card">
                   <div className="f-name">{s.name}
                     {s.location_kind ? <span className="f-role">{s.location_kind}</span> : null}
                     {fitting ? <span className="stamp gold">生成中</span>
                       : s.ref_image_url ? <span className="stamp green">已出图</span> : <span className="stamp grey">未出图</span>}
                   </div>
                   {s.ref_image_url && (
-                    <img src={s.ref_image_url} alt={s.name}
-                      style={{ width: '100%', borderRadius: 8, border: '1px solid var(--hairline)', marginBottom: 8,
-                               opacity: fitting ? 0.45 : 1, transition: 'opacity 0.3s' }} />
+                    <div className="scene-visual"><img src={s.ref_image_url} alt={s.name}
+                      style={{ opacity: fitting ? 0.45 : 1, transition: 'opacity 0.3s' }} /></div>
                   )}
                   {typeof qaOverall === 'number' && (
                     <QaLine overall={qaOverall} issues={s.scene_refs?.[0]?.qa?.issues} />
@@ -117,10 +116,13 @@ export default function ScenesPage() {
                   )}
                   <label className="f">场景锚点串（30~60 字，定稿后锁定）</label>
                   <div className="f-anchor">{s.scene_canonical}</div>
-                  <ScenePromptBlock projectId={p.id} scene={s} disabled={busy || generating}
-                    onChanged={refresh}
-                    regenerate={() => act(() => api.genSceneRefs(p.id, s.name), `正在为「${s.name}」重新出图`)} />
-                </div>
+                  <details className="scene-details">
+                    <summary>生成参数与重绘</summary>
+                    <ScenePromptBlock projectId={p.id} scene={s} disabled={busy || generating}
+                      onChanged={refresh}
+                      regenerate={() => act(() => api.genSceneRefs(p.id, s.name), `正在为「${s.name}」重新出图`)} />
+                  </details>
+                </article>
               )
             })}
           </div>

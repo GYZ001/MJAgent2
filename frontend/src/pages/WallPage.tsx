@@ -220,7 +220,7 @@ export default function WallPage() {
   }
 
   return (
-    <main className="desk wall-page">
+    <div className="wall-page">
       {/* ── 顶栏 ── */}
       <div className="wall-topbar">
         <div className="wall-topbar-left">
@@ -298,7 +298,7 @@ export default function WallPage() {
 
       {toast && <div className="toast">{toast}</div>}
       {lightbox && <Lightbox src={lightbox.src} alt={lightbox.label || ''} onClose={() => setLightbox(null)} />}
-    </main>
+    </div>
   )
 }
 

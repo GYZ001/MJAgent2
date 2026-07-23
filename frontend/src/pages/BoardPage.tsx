@@ -15,6 +15,7 @@ export default function BoardPage() {
   const { episodeId, go, projectId, toast } = useNav()
   const { data: ep, refresh } = useEpisode(episodeId!)
   const [busy, setBusy] = useState(false)
+  const [selectedShotId, setSelectedShotId] = useState<string | null>(null)
   const storyboardTimer = useTaskTimer(`episode.${episodeId}.storyboard`, ep?.status === 'scripting')
 
   if (!ep) return <div className="empty">展卷中……</div>
@@ -34,16 +35,17 @@ export default function BoardPage() {
     ep.script_error &&
     (ep.status === 'scripted' || ep.status === 'script_failed')
   )
+  const selectedShot = ep.shots?.find(shot => shot.id === selectedShotId) ?? ep.shots?.[0]
 
   return (
     <>
       <header className="desk-head">
         <EpisodeCrumb label="分镜台" view="board" episodeNo={ep.episode_no} />
-        <h1>分镜台 <span className="sub">《{ep.title}》 · 脚本免费可改，确认后才花钱</span></h1>
+        <h1>分镜台 <span className="sub">《{ep.title}》 · 总览镜头节奏，聚焦编辑当前一镜</span></h1>
         <hr className="rule" />
       </header>
 
-      <section className="card">
+      <section className="card board-toolbar">
         <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
           <EpStamp status={ep.status} />
           <span className={`stamp ${ep.screenplay_status === 'ready' ? 'green' : ep.screenplay_status === 'running' ? 'gold' : ep.screenplay_status === 'failed' || ep.screenplay_status === 'warning' ? 'red' : 'grey'}`}>
@@ -113,19 +115,27 @@ export default function BoardPage() {
         )}
       </section>
 
-      <div style={{ height: 20 }} />
+      <div className="workspace-gap" />
 
       {!ep.shots?.length
         ? <div className="empty"><div className="big">镜</div>尚无分镜<br />点击上方「生成分镜脚本」</div>
-        : ep.shots.map(shot => (
-          <ShotStrip
-            key={shot.id}
-            shot={shot}
-            episode={ep}
-            onChanged={refresh}
-            disabled={busy}
-          />
-        ))}
+        : <div className="board-workspace">
+            <aside className="shot-navigator" aria-label="镜头列表">
+              <div className="shot-navigator-head"><b>镜头列表</b><span>{ep.shots.length} 镜 · {totalDur}s</span></div>
+              <div className="shot-navigator-list">
+                {ep.shots.map(shot => (
+                  <button key={shot.id} type="button" className={shot.id === selectedShot?.id ? 'active' : ''} onClick={() => setSelectedShotId(shot.id)}>
+                    <span className="shot-nav-no">{String(shot.shot_no).padStart(2, '0')}</span>
+                    <span className="shot-nav-main"><b>{shot.shot_size} · {shot.camera_move}</b><small>{shot.scene_setting}</small></span>
+                    <span className="shot-nav-meta">{shot.duration_s}s</span>
+                  </button>
+                ))}
+              </div>
+            </aside>
+            <section className="shot-editor-pane">
+              {selectedShot && <ShotStrip key={selectedShot.id} shot={selectedShot} episode={ep} onChanged={refresh} disabled={busy} />}
+            </section>
+          </div>}
     </>
   )
 }

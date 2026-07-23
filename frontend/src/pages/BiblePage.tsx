@@ -88,7 +88,7 @@ export default function BiblePage() {
     <>
       <header className="desk-head">
         <div className="crumb">书房 / 《{p.name}》</div>
-        <h1>人物谱 <span className="sub">角色锚点一旦定稿，所有镜头逐字复用，不可漂移</span></h1>
+        <h1>人物谱 <span className="sub">角色资产与定妆版本中心 · 保持跨镜头、跨分集一致</span></h1>
         <hr className="rule" />
       </header>
 
@@ -136,7 +136,7 @@ export default function BiblePage() {
         }} />
 
       {bible && (
-        <section className="card">
+        <section className="card bible-library">
           <h3>世界观
             <span className="hint">era {bible.world.era} · genre {bible.world.genre}</span>
             {!editing
@@ -172,15 +172,14 @@ export default function BiblePage() {
             {pagedChars.map(({ c, i }: { c: Character; i: number }) => {
               const fitting = p.refs_status === 'running' && (!p.refs_target || p.refs_target === c.name)
               return (
-              <div key={c.name} className="figure">
+              <article key={c.name} className="figure character-card">
                 <div className="f-name">{c.name} <span className="f-role">{c.role}</span>
                   {fitting ? <span className="stamp gold">定妆中</span>
                     : c.ref_image_url ? <span className="stamp green">已定妆</span> : <span className="stamp grey">未定妆</span>}
                 </div>
                 {c.ref_image_url && (
-                  <img src={c.ref_image_url} alt={c.name}
-                    style={{ width: '100%', borderRadius: 8, border: '1px solid var(--hairline)', marginBottom: 8,
-                             opacity: fitting ? 0.45 : 1, transition: 'opacity 0.3s' }} />
+                  <div className="character-portrait"><img src={c.ref_image_url} alt={c.name}
+                    style={{ opacity: fitting ? 0.45 : 1, transition: 'opacity 0.3s' }} /></div>
                 )}
                 {(c.portraits?.length ?? 0) > 1 && <PortraitStrip portraits={c.portraits!} />}
                 <label className="f">外观锚点串（40~60 字，定稿后锁定）</label>
@@ -192,15 +191,18 @@ export default function BiblePage() {
                         setEditing(next)
                       }} />
                   : <div className="f-anchor">{c.appearance_canonical}</div>}
-                <div className="f-misc">
-                  性格：{c.personality}<br />
-                  语风：{c.speech_style}<br />
-                  {c.relationships.map(r => `${r.relation}→${r.to}`).join('；')}
-                </div>
-                <PortraitBlock projectId={p.id} character={c} disabled={busy || p.refs_status === 'running'}
-                  onChanged={refresh} regenerate={() =>
-                    act(() => api.post(`/projects/${p.id}/refs`, { character: c.name }), `正在为「${c.name}」重新定妆`)} />
-              </div>
+                <details className="character-details" open={!!editing}>
+                  <summary>角色设定与生成参数</summary>
+                  <div className="f-misc">
+                    <b>性格</b>{c.personality}<br />
+                    <b>语风</b>{c.speech_style}<br />
+                    {!!c.relationships.length && <><b>关系</b>{c.relationships.map(r => `${r.relation}→${r.to}`).join('；')}</>}
+                  </div>
+                  <PortraitBlock projectId={p.id} character={c} disabled={busy || p.refs_status === 'running'}
+                    onChanged={refresh} regenerate={() =>
+                      act(() => api.post(`/projects/${p.id}/refs`, { character: c.name }), `正在为「${c.name}」重新定妆`)} />
+                </details>
+              </article>
             )})}
           </div>
           {!pagedChars.length && (
@@ -217,7 +219,7 @@ export default function BiblePage() {
       )}
 
       {!!p.key_timeline?.length && (
-        <section className="card">
+        <section className="card world-card">
           <h3>全书关键事件线 <span className="hint">防长篇伏笔丢失</span></h3>
           <ol style={{ paddingLeft: 22, fontSize: 13.5, color: 'var(--ink-soft)' }}>
             {p.key_timeline.map((k, i) => <li key={i}>{k}</li>)}
@@ -342,7 +344,7 @@ function AutoCard({ projectId, auto, busy, onStart, onCancel }: {
   const [picking, setPicking] = useState(false)
   const dirValue = dir ?? auto?.export_dir ?? ''
   return (
-    <section className="card" style={{ borderLeft: '3px solid var(--cinnabar)' }}>
+    <section className="card auto-card" style={{ borderLeft: '3px solid var(--cinnabar)' }}>
       <h3>一键全自动成片
         <span className="hint">人物谱 → 定妆照+分集 → 每集（剧本→分镜→自动确认→参考图视频）→ 合成导出 · 自动跳过已完成步骤</span>
       </h3>

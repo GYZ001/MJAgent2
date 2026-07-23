@@ -3,6 +3,7 @@ import { api, numToCn } from '../api'
 import { useNav, useProject } from '../App'
 import { EpStamp } from './BiblePage'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
+import SearchField from '../components/SearchField'
 
 function ScreenplayStamp({ status }: { status: string }) {
   const map: Record<string, [string, string]> = {
@@ -16,7 +17,7 @@ function ScreenplayStamp({ status }: { status: string }) {
   return <span className={`stamp ${color}`}>{label}</span>
 }
 
-const PAGE_SIZE = 10  // 分集台每页展示的剧集数（= 章数）
+const PAGE_SIZE = 15
 
 export default function EpisodesPage() {
   const { projectId, go, toast } = useNav()
@@ -24,6 +25,8 @@ export default function EpisodesPage() {
   const [busy, setBusy] = useState(false)
   const [page, setPage] = useState(0)
   const [pageDraft, setPageDraft] = useState('1')
+  const [search, setSearch] = useState('')
+  const [statusFilter, setStatusFilter] = useState('all')
   const pageInputFocused = useRef(false)
   const eps = p?.episodes ?? []
   const screenplayTodoCount = eps.filter(e => ['pending', 'failed', 'warning'].includes(e.screenplay_status) || !e.screenplay_mode || e.screenplay_mode === 'none').length
@@ -33,7 +36,16 @@ export default function EpisodesPage() {
   const planTimer = useTaskTimer(`project.${projectId}.plan`, p?.plan_status === 'running')
   const screenplayAllTimer = useTaskTimer(`project.${projectId}.screenplay-all`, screenplayRunningCount > 0)
   const storyboardAllTimer = useTaskTimer(`project.${projectId}.storyboard-all`, scriptingCount > 0)
-  const pageCount = Math.max(1, Math.ceil(eps.length / PAGE_SIZE))
+  const query = search.trim().toLowerCase()
+  const filteredEps = eps.filter(ep => {
+    if (query && !`${ep.episode_no} ${ep.title} ${ep.source_chapters.join(' ')}`.toLowerCase().includes(query)) return false
+    if (statusFilter === 'running') return ep.screenplay_status === 'running' || ep.status === 'scripting' || ep.status === 'generating'
+    if (statusFilter === 'failed') return ep.screenplay_status === 'failed' || ep.screenplay_status === 'warning' || ep.status.includes('failed') || !!ep.screenplay_error
+    if (statusFilter === 'done') return ep.status === 'done'
+    if (statusFilter === 'pending') return ep.screenplay_status === 'pending' || ['planned', 'drafting'].includes(ep.status)
+    return true
+  })
+  const pageCount = Math.max(1, Math.ceil(filteredEps.length / PAGE_SIZE))
   const curPage = Math.min(page, pageCount - 1)
 
   useEffect(() => {
@@ -62,7 +74,7 @@ export default function EpisodesPage() {
 
   // 分页（每页 10 集）+ 章节预览映射（按源章号取该章前 100 字）
   const chapterPreview = new Map((p.chapters ?? []).map(c => [c.idx, c.preview ?? '']))
-  const pageEps = eps.slice(curPage * PAGE_SIZE, curPage * PAGE_SIZE + PAGE_SIZE)
+  const pageEps = filteredEps.slice(curPage * PAGE_SIZE, curPage * PAGE_SIZE + PAGE_SIZE)
 
   const jumpToPage = () => {
     const raw = Number.parseInt(pageDraft.trim(), 10)
@@ -86,47 +98,52 @@ export default function EpisodesPage() {
     <>
       <header className="desk-head">
         <div className="crumb">书房 / 《{p.name}》</div>
-        <h1>分集台 <span className="sub">按章正则切分，全书 {p.chapters?.length} 章 · 每章一集，预览取该章前 100 字</span></h1>
+        <h1>分集规划 <span className="sub">{p.chapters?.length} 章 · {eps.length} 集 · 追踪每集从剧本到成片的制作状态</span></h1>
         <hr className="rule" />
       </header>
 
-      <section className="card">
-        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8 }}>
-          <button className="btn primary" disabled={busy || p.plan_status === 'running'}
-            onClick={replan}>
-            {eps.length ? '重新分集' : '开始分集'}
-          </button>
-          <button className="btn" disabled={busy || p.plan_status === 'running' || screenplayTodoCount === 0}
-            onClick={() => act(async () => {
-              const needsConfirm = eps.some(e => ['scripted', 'confirmed', 'generating', 'done'].includes(e.status))
-              if (needsConfirm && !window.confirm('批量生成剧本可能清空已有分镜、关键帧、视频和成片。确定继续？')) return
-              screenplayAllTimer.start()
-              const r = await api.post(`/projects/${p.id}/screenplay-all`) as { started: number }
-              toast(`已为 ${r.started} 集发起剧本生成（完成后再展开分镜）`)
-            })}>
-            生成所有剧本{screenplayTodoCount ? `（${screenplayTodoCount} 集）` : ''}
-          </button>
-          {screenplayRunningCount > 0 && (
-            <button className="btn ghost" disabled={busy}
-              onClick={() => act(async () => {
-                const r = await api.post(`/projects/${p.id}/screenplay-all/cancel`) as { stopped: number }
-                toast(`已停止 ${r.stopped} 集剧本生成`)
-              })}>
-              停止剧本
-            </button>
-          )}
-          <button className="btn" disabled={busy || p.plan_status === 'running' || pendingCount === 0}
-            onClick={() => act(async () => {
-              storyboardAllTimer.start()
-              const r = await api.post(`/projects/${p.id}/storyboard-all`) as { started: number }
-              toast(`已为 ${r.started} 集发起分镜生成（按剧本逐拍展开）`)
-            })}>
-            生成所有分镜{pendingCount ? `（${pendingCount} 集）` : ''}
-          </button>
-          <button className="btn" disabled={!p.chapters?.length}
-            onClick={() => go('reader', p.id, undefined, p.chapters?.[0]?.idx ?? 1)}>
-            看正文
-          </button>
+      <section className="episode-overview">
+        <div><span>全部分集</span><b>{eps.length}</b><small>每章一集</small></div>
+        <div><span>待写剧本</span><b>{screenplayTodoCount}</b><small>可批量生成</small></div>
+        <div><span>制作进行中</span><b>{screenplayRunningCount + scriptingCount}</b><small>剧本 / 分镜</small></div>
+        <div><span>已成片</span><b>{eps.filter(ep => ep.status === 'done').length}</b><small>可进入交付</small></div>
+      </section>
+
+      <section className="card episode-workspace">
+        <div className="episode-toolbar">
+          <SearchField value={search} onChange={value => { setSearch(value); setPage(0) }} placeholder="搜索集数、标题或章节…" ariaLabel="搜索分集" />
+          <select aria-label="按制作状态筛选" value={statusFilter} onChange={event => { setStatusFilter(event.target.value); setPage(0) }}>
+            <option value="all">全部状态</option><option value="pending">待制作</option><option value="running">进行中</option>
+            <option value="failed">需要处理</option><option value="done">已成片</option>
+          </select>
+          <button className="btn" disabled={!p.chapters?.length} onClick={() => go('reader', p.id, undefined, p.chapters?.[0]?.idx ?? 1)}>阅读原著</button>
+          <details className="batch-actions">
+            <summary className="btn primary">批量操作</summary>
+            <div className="batch-actions-menu">
+              <b>批量制作</b><span>操作前会再次确认影响范围</span>
+              <button className="btn" disabled={busy || p.plan_status === 'running'} onClick={replan}>{eps.length ? '重新分集' : '开始分集'}</button>
+              <button className="btn" disabled={busy || p.plan_status === 'running' || screenplayTodoCount === 0}
+                onClick={() => act(async () => {
+                  const needsConfirm = eps.some(e => ['scripted', 'confirmed', 'generating', 'done'].includes(e.status))
+                  if (needsConfirm && !window.confirm(`将为 ${screenplayTodoCount} 集生成剧本，可能使对应下游素材失效。确定继续？`)) return
+                  screenplayAllTimer.start()
+                  const r = await api.post(`/projects/${p.id}/screenplay-all`) as { started: number }
+                  toast(`已为 ${r.started} 集发起剧本生成`)
+                })}>生成待办剧本（{screenplayTodoCount} 集）</button>
+              <button className="btn" disabled={busy || p.plan_status === 'running' || pendingCount === 0}
+                onClick={() => act(async () => {
+                  if (!window.confirm(`将为 ${pendingCount} 集展开分镜。确定继续？`)) return
+                  storyboardAllTimer.start()
+                  const r = await api.post(`/projects/${p.id}/storyboard-all`) as { started: number }
+                  toast(`已为 ${r.started} 集发起分镜生成`)
+                })}>生成待办分镜（{pendingCount} 集）</button>
+              {screenplayRunningCount > 0 && <button className="btn ghost" disabled={busy} onClick={() => act(async () => {
+                const r = await api.post(`/projects/${p.id}/screenplay-all/cancel`) as { stopped: number }; toast(`已停止 ${r.stopped} 集剧本生成`)
+              })}>停止批量剧本</button>}
+            </div>
+          </details>
+        </div>
+        <div className="episode-active-tasks">
           {p.plan_status === 'running' && <span className="stamp gold">分集中（依据原文规划，篇幅长时需数分钟）</span>}
           {screenplayRunningCount > 0 && <span className="stamp gold">剧本中（{screenplayRunningCount} 集）</span>}
           {scriptingCount > 0 && <span className="stamp gold">分镜中（{scriptingCount} 集）</span>}
@@ -136,16 +153,23 @@ export default function EpisodesPage() {
         </div>
         {p.plan_status === 'failed' && <div className="error-banner">分集失败：{'\n'}{p.plan_error}</div>}
 
+        <div className="episode-list-head"><span>分集与章节</span><span>{query || statusFilter !== 'all' ? `找到 ${filteredEps.length} 集` : `共 ${eps.length} 集`}</span></div>
+
         {pageEps.map(ep => {
           const firstCh = ep.source_chapters[0]
           const preview = (chapterPreview.get(firstCh) ?? ep.synopsis ?? '').trim()
+          const destination = ep.status === 'done' ? 'cinema'
+            : ['confirmed', 'generating', 'paused_budget'].includes(ep.status) ? 'wall'
+              : ep.screenplay_status === 'ready' ? 'board' : 'script'
+          const destinationLabel = destination === 'cinema' ? '查看成片' : destination === 'wall' ? '继续评审' : destination === 'board' ? '继续分镜' : '继续剧本'
           return (
           <div key={ep.id} className="episode-row">
             <div className="ep-main">
               <div className="ep-no">第{numToCn(ep.episode_no)}集</div>
               <div className="ep-body">
                 <div className="ep-title">{ep.title}</div>
-                <div className="ep-syn">{preview ? `${preview}…` : '（本章无正文预览）'}</div>
+                <div className="ep-syn">{preview || '本章暂无正文预览'}</div>
+                <button className="episode-read" type="button" onClick={() => go('reader', p.id, undefined, firstCh)}>阅读原章</button>
               </div>
             </div>
             <div className="ep-side">
@@ -160,11 +184,14 @@ export default function EpisodesPage() {
                 {ep.screenplay_mode === 'full_script' && <span className="ep-note">完整剧本</span>}
                 {ep.screenplay_error && <span className="ep-note err">剧本失败</span>}
               </div>
+              <div className="episode-pipeline" aria-label="制作进度">
+                <span className={ep.screenplay_status === 'ready' ? 'done' : ep.screenplay_status === 'running' ? 'active' : ''}>剧本</span>
+                <i /><span className={['scripted','confirmed','generating','done'].includes(ep.status) ? 'done' : ep.status === 'scripting' ? 'active' : ''}>分镜</span>
+                <i /><span className={['confirmed','generating','done'].includes(ep.status) ? 'done' : ''}>视频</span>
+                <i /><span className={ep.status === 'done' ? 'done' : ''}>成片</span>
+              </div>
               <div className="ep-actions">
-                <button className="btn small" onClick={() => go('reader', p.id, undefined, firstCh)}>看正文 →</button>
-                <button className="btn small" onClick={() => go('script', p.id, ep.id)}>入剧本台 →</button>
-                <button className="btn small" disabled={ep.screenplay_status !== 'ready'}
-                  onClick={() => go('board', p.id, ep.id)}>入分镜台 →</button>
+                <button className="btn small primary" onClick={() => go(destination, p.id, ep.id)}>{destinationLabel} →</button>
               </div>
             </div>
           </div>
@@ -173,7 +200,7 @@ export default function EpisodesPage() {
         {pageCount > 1 && (
           <div style={{ display: 'flex', gap: 10, alignItems: 'center', justifyContent: 'center', marginTop: 14, flexWrap: 'wrap' }}>
             <button className="btn small" disabled={curPage <= 0} onClick={() => setPage(curPage - 1)}>← 上一页</button>
-            <span style={{ fontSize: 13, color: 'var(--ink-faint)' }}>第 {curPage + 1} / {pageCount} 页 · 共 {eps.length} 集</span>
+            <span style={{ fontSize: 13, color: 'var(--ink-faint)' }}>第 {curPage + 1} / {pageCount} 页 · 共 {filteredEps.length} 集</span>
             <button className="btn small" disabled={curPage >= pageCount - 1} onClick={() => setPage(curPage + 1)}>下一页 →</button>
             <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--ink-faint)' }}>
               跳至
