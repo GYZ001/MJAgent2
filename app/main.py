@@ -11,9 +11,14 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import errors, task_registry, worker
+from app.agent.api import router as agent_conversation_router
+from app.agent_api import router as agent_capabilities_router
 from app.api import purge_legacy_screenplays, router
+from app.capabilities import ensure_catalog_loaded
 from app.config import PROJECTS_DIR, ROOT
 from app.db import init_db
+from app.mcp import router as mcp_router
+from app.mcp.auth import ensure_bootstrap_token
 from app.planning import router as planning_router
 from app.recovery import recover_all
 from app.orchestration.api import router as orchestration_router
@@ -23,6 +28,8 @@ from app.system_api import router as system_router
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    ensure_catalog_loaded()
+    ensure_bootstrap_token()
     purge_legacy_screenplays()
     await recover_all()
     try:
@@ -114,6 +121,10 @@ app.include_router(router)
 app.include_router(planning_router)
 app.include_router(orchestration_router)
 app.include_router(system_router)
+app.include_router(agent_capabilities_router, prefix="/api")
+app.include_router(agent_conversation_router, prefix="/api")
+# /mcp 必须在 StaticFiles("/") 挂载之前注册，否则会被前端静态资源路由抢先吞掉。
+app.include_router(mcp_router)
 app.mount("/media", StaticFiles(directory=PROJECTS_DIR), name="media")
 
 frontend_dist = ROOT / "frontend" / "dist"

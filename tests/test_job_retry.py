@@ -69,6 +69,38 @@ def test_non_retryable_error_not_requeued(monkeypatch) -> None:
     assert conn.execute("SELECT retry_count FROM jobs WHERE id='j1'").fetchone()["retry_count"] == 0
 
 
+def test_running_provider_task_is_deferred_without_consuming_retry_budget(monkeypatch) -> None:
+    conn = _conn()
+    _seed_job(conn)
+    conn.execute(
+        "UPDATE jobs SET lease_owner='worker-a', lease_expires_at=9999999999 "
+        "WHERE id='j1'"
+    )
+    conn.commit()
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker._queue, "put_nowait", lambda _jid: None)
+
+    async def run() -> bool:
+        scheduled = worker._defer_provider_poll(
+            "j1", "provider-task-1", lease_owner="worker-a", delay=0,
+        )
+        await asyncio.sleep(0)
+        if worker._retry_tasks:
+            await asyncio.gather(*list(worker._retry_tasks))
+        return scheduled
+
+    assert asyncio.run(run()) is True
+    row = conn.execute(
+        "SELECT status, error, retry_count, next_retry_at, lease_owner "
+        "FROM jobs WHERE id='j1'"
+    ).fetchone()
+    assert row["status"] == "queued"
+    assert row["retry_count"] == 0
+    assert row["next_retry_at"] is not None
+    assert row["lease_owner"] is None
+    assert "不会重复提交" in row["error"]
+
+
 def test_retry_budget_exhausts(monkeypatch) -> None:
     conn = _conn()
     _seed_job(conn)

@@ -198,6 +198,18 @@ def test_full_script_screenplay_still_rejects_synopsis_blob() -> None:
     assert any("段落过少" in error for error in errors)
 
 
+def test_screenplay_rejects_named_speaker_missing_from_bible() -> None:
+    script = _valid_rainy_script()
+    script.full_script_text = script.full_script_text.replace(
+        "谷言（猛地起身）：你这几天到底躲到哪去了？",
+        "陌生杀手（冷笑）：你这几天到底躲到哪去了？",
+    )
+
+    errors = validate_screenplay(script, _bible(), expected_beats=5, episode_no=1)
+
+    assert any("未进入人物谱的具名说话人" in error and "陌生杀手" in error for error in errors)
+
+
 def _valid_rainy_script(**overrides) -> EpisodeScreenplay:
     """构造一份完全合法的"雨夜敲门"剧本，供单点变异测试复用。"""
     full_script_text = "\n".join([

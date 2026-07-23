@@ -166,26 +166,52 @@ def request_cancel(job_id: str) -> dict[str, object]:
     ).fetchone()
     if not row:
         raise KeyError(job_id)
+    if row["status"] not in {"queued", "running", "paused_budget"}:
+        return {
+            "job_id": job_id,
+            "status": row["status"],
+            "provider_may_continue": bool(row["provider_non_cancellable"]),
+            "cancelled": False,
+        }
     non_cancellable = bool(row["provider_non_cancellable"])
     # A crashed process may already have recovered a provider-backed job from
     # running to queued. provider_non_cancellable remains the durable truth that
     # paid upstream work can still complete, so cancellation must stay abandoned.
     status = "abandoned" if non_cancellable else "cancelled"
-    db.execute(
+    cursor = db.execute(
         """UPDATE jobs SET cancellation_requested=1, abandoned=?, status=?,
-                  lease_owner=NULL, lease_expires_at=NULL, updated_at=? WHERE id=?""",
+                  lease_owner=NULL, lease_expires_at=NULL, next_retry_at=NULL, updated_at=?
+           WHERE id=? AND status IN ('queued','running','paused_budget')""",
         (int(status == "abandoned"), status, now(), job_id),
     )
+    if cursor.rowcount != 1:
+        db.rollback()
+        current = db.execute(
+            "SELECT status, provider_non_cancellable FROM jobs WHERE id=?", (job_id,)
+        ).fetchone()
+        if not current:
+            raise KeyError(job_id)
+        return {
+            "job_id": job_id,
+            "status": current["status"],
+            "provider_may_continue": bool(current["provider_non_cancellable"]),
+            "cancelled": False,
+        }
     if row["version_id"]:
         db.execute(
-            "UPDATE shot_versions SET status=? WHERE id=? AND status IN ('queued','running')",
-            (status, row["version_id"]),
+            "UPDATE shot_versions SET status=?, error=? WHERE id=? AND status IN ('queued','running','paused_budget')",
+            (status, "用户已停止视频任务", row["version_id"]),
         )
     db.commit()
     settle_budget(job_id, 0.0, success=False)
     from app.orchestration.media_runs import mark_media_job_state
     mark_media_job_state(row["run_id"], row["step_run_id"], status, "用户取消媒体任务")
-    return {"job_id": job_id, "status": status, "provider_may_continue": non_cancellable}
+    return {
+        "job_id": job_id,
+        "status": status,
+        "provider_may_continue": non_cancellable,
+        "cancelled": True,
+    }
 
 
 def recoverable_jobs() -> list[tuple[str, float]]:

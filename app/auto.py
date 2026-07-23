@@ -85,13 +85,12 @@ def _progress(pid: str) -> dict:
     eps = rows_to_dicts(conn.execute("SELECT id, status, screenplay_status, screenplay_json FROM episodes WHERE project_id=?", (pid,)).fetchall())
     shots = rows_to_dicts(conn.execute(
         "SELECT s.* FROM shots s JOIN episodes e ON e.id=s.episode_id WHERE e.project_id=?", (pid,)).fetchall())
-    kf = sum(1 for s in shots if worker.shot_keyframes_ready(s))
     vid = sum(1 for s in shots if _video_ok(conn, s["adopted_version_id"]))
     return {
         "bible": p["bible_status"], "refs": p["refs_status"], "plan": p["plan_status"],
         "episodes_total": len(eps), "episodes_done": sum(1 for e in eps if e["status"] == "done"),
         "screenplays_ready": sum(1 for e in eps if e["screenplay_status"] == "ready" and e["screenplay_json"]),
-        "shots_total": len(shots), "shots_keyframed": kf, "shots_video": vid,
+        "shots_total": len(shots), "shots_video": vid,
     }
 
 
@@ -485,11 +484,7 @@ async def _ensure_videos(pid: str, eid: str, epno: int) -> None:
         _log(pid, f"第{epno}集：视频已就绪，跳过")
         return
     _log(pid, f"第{epno}集：生成视频（{len(todo)} 镜）")
-    # 清空待生成镜的旧采用版，使新成功版被自动采用（沿用 generate_episode 的语义）
-    sel_ids = [s["id"] for s in todo]
-    conn.execute(
-        f"UPDATE shots SET adopted_version_id=NULL WHERE id IN ({','.join('?' for _ in sel_ids)})", sel_ids)
-    conn.commit()
+    # 不预先清空 adopted_version_id：失败时保留原采用；成功后由 select_best 比较切换。
     # 视频固定走参考图模式：入队前确保每镜都有固定参考图计划。
     from app.api import _ensure_shot_mode_plan
     for s in todo:
@@ -502,7 +497,14 @@ async def _ensure_videos(pid: str, eid: str, epno: int) -> None:
         try:
             r = worker.enqueue_shot(s["id"], after_shot_id=after)
             if r.get("reused") and r.get("version_id"):
-                conn.execute("UPDATE shots SET adopted_version_id=? WHERE id=?", (r["version_id"], s["id"]))
+                row = conn.execute(
+                    "SELECT adopted_version_id FROM shots WHERE id=?", (s["id"],)
+                ).fetchone()
+                if not row or not row["adopted_version_id"]:
+                    conn.execute(
+                        "UPDATE shots SET adopted_version_id=? WHERE id=?",
+                        (r["version_id"], s["id"]),
+                    )
         except ValueError as e:
             _log(pid, f"第{epno}集 镜{s['shot_no']} 视频入队失败：{e}")
     conn.commit()

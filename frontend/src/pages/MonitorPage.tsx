@@ -85,9 +85,9 @@ const PROVIDERS: { key: ProviderKey; label: string }[] = [
 
 const MODEL_ROWS: { key: ModelKind; label: string; note: string }[] = [
   { key: 'text', label: 'Text 模型', note: '分集 / 剧本 / 分镜 / 文本修复' },
-  { key: 'vlm', label: 'VLM 模型', note: '关键帧评审 / 视频质检' },
+  { key: 'vlm', label: 'VLM 模型', note: '参考图评审 / 视频质检' },
   { key: 'video', label: '视频模型', note: 'Seedance 视频生成' },
-  { key: 'image', label: '图像模型', note: 'Seedream 关键帧 / 定妆照' },
+  { key: 'image', label: '图像模型', note: 'Seedream 参考图 / 定妆照' },
 ]
 
 const OPENROUTER_MODEL_CHOICES: Record<'text' | 'vlm', ModelChoice[]> = {
@@ -329,6 +329,7 @@ const CALLER_LABELS: Record<string, string> = {
   'video_modes.review_reference_image': '参考图单图质检',
   'video_modes.review_reference_consistency': '参考图一致性质检',
   'video_modes.write_reference_prompt': '参考图提示词生成',
+  'portraits.discover_character_candidates': '剧本新角色预检',
   'portraits.assess_new_character': '新角色建卡评估',
   'scenes.assess_new_scene': '新场景评估',
 }
@@ -528,7 +529,7 @@ const JOB_STATUS_LABELS: Record<string, string> = {
 }
 
 const RECOVERY_WORKFLOW_LABELS: Record<string, string> = {
-  media: '关键帧/视频', auto_project: '全自动项目', character_bible: '人物谱',
+  media: '参考图/视频', auto_project: '全自动项目', character_bible: '人物谱',
   character_references: '人物参考图', scene_references: '场景参考图', episode_mapping: '分集规划',
   screenplay: '剧本', storyboard: '分镜', delivery: '交付包',
 }
@@ -605,8 +606,17 @@ function Pagination({
 
 export default function MonitorPage() {
   const { toast } = useNav()
-  const { data: jobs } = usePoll<JobsView>(() => api.get('/system/jobs'), 4000)
-  const { data: calls } = usePoll<Call[]>(() => api.get('/system/calls?limit=200'), 6000)
+  const [activeSection, setActiveSection] = useState<MonitorSection>('overview')
+  const { data: jobs } = usePoll<JobsView>(
+    () => api.get('/system/jobs'),
+    activeSection === 'jobs' || activeSection === 'overview' ? 4000 : 0,
+    [activeSection],
+  )
+  const { data: calls } = usePoll<Call[]>(
+    () => api.get('/system/calls?limit=200'),
+    activeSection === 'calls' || activeSection === 'overview' ? 6000 : 0,
+    [activeSection],
+  )
   const { data: settings, refresh: refreshSettings } = usePoll<Record<string, string>>(() => api.get('/settings'), 0)
   const { data: health, refresh: refreshHealth } = usePoll<Health>(() => api.get('/system/health'), 0)
   const { data: modelCatalog, refresh: refreshModelCatalog } = usePoll<ModelCatalog>(() => api.get('/models'), 0)
@@ -625,7 +635,6 @@ export default function MonitorPage() {
   const [credentialModel, setCredentialModel] = useState<CatalogModel | null>(null)
   const [credentialDraft, setCredentialDraft] = useState({ base_url: '', api_key: '' })
   const [credentialTest, setCredentialTest] = useState<{ status: 'idle' | 'testing' | 'ok' | 'error'; message: string; signature?: string }>({ status: 'idle', message: '' })
-  const [activeSection, setActiveSection] = useState<MonitorSection>('overview')
   const [jobSearch, setJobSearch] = useState('')
   const [jobStatus, setJobStatus] = useState('all')
   const [jobPage, setJobPage] = useState(1)
@@ -650,7 +659,12 @@ export default function MonitorPage() {
   }
 
   const modelDraftSignature = () => JSON.stringify({
-    model: newModel.model.trim(), base_url: newModel.base_url.trim().replace(/\/$/, ''), api_key: newModel.api_key,
+    provider: newModel.provider,
+    provider_label: newModel.provider_label.trim(),
+    model: newModel.model.trim(),
+    base_url: newModel.base_url.trim().replace(/\/$/, ''),
+    api_key: newModel.api_key,
+    kinds: [...newModel.kinds].sort(),
   })
 
   const testNewModel = async () => {

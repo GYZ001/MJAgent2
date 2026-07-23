@@ -21,7 +21,7 @@ const PAGE_SIZE = 15
 
 export default function EpisodesPage() {
   const { projectId, go, toast } = useNav()
-  const { data: p, refresh } = useProject(projectId!)
+  const { data: p, refresh, error, loading } = useProject(projectId!)
   const [busy, setBusy] = useState(false)
   const [page, setPage] = useState(0)
   const [pageDraft, setPageDraft] = useState('1')
@@ -55,6 +55,8 @@ export default function EpisodesPage() {
     }
   }, [curPage])
 
+  if (error && !p) return <div className="empty">{error}</div>
+  if (loading && !p) return <div className="empty">展卷中……</div>
   if (!p) return <div className="empty">展卷中……</div>
 
   const act = async (fn: () => Promise<unknown>, doneMsg?: string) => {

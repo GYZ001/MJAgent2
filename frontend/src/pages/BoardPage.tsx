@@ -3,6 +3,7 @@ import { api, Episode, Shot } from '../api'
 import { useEpisode, useNav } from '../App'
 import { EpStamp } from './BiblePage'
 import EpisodeCrumb from '../components/EpisodeCrumb'
+import AsyncButton from '../components/AsyncButton'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 import EvidenceDrawer from '../components/harness/EvidenceDrawer'
 import ImpactDialog, { ImpactSummary } from '../components/harness/ImpactDialog'
@@ -13,11 +14,13 @@ const TRANS = ['硬切', '叠化', '淡出淡入', '黑场', '闪黑', '闪白',
 const DURATIONS = [5, 6, 7, 8, 9, 10]
 export default function BoardPage() {
   const { episodeId, go, projectId, toast } = useNav()
-  const { data: ep, refresh } = useEpisode(episodeId!)
+  const { data: ep, refresh, error, loading } = useEpisode(episodeId!)
   const [busy, setBusy] = useState(false)
   const [selectedShotId, setSelectedShotId] = useState<string | null>(null)
   const storyboardTimer = useTaskTimer(`episode.${episodeId}.storyboard`, ep?.status === 'scripting')
 
+  if (error && !ep) return <div className="empty">{error}</div>
+  if (loading && !ep) return <div className="empty">展卷中……</div>
   if (!ep) return <div className="empty">展卷中……</div>
 
   const act = async (fn: () => Promise<unknown>, doneMsg?: string) => {
@@ -37,6 +40,34 @@ export default function BoardPage() {
   )
   const selectedShot = ep.shots?.find(shot => shot.id === selectedShotId) ?? ep.shots?.[0]
 
+  const confirmRegenerateStoryboard = (mode: 'fresh' | 'resume') => {
+    if (mode === 'resume') {
+      storyboardTimer.start()
+      void act(
+        () => api.post(`/episodes/${ep.id}/storyboard/resume`),
+        `已从前 ${ep.shots?.length ?? 0} 镜 checkpoint 继续生成`,
+      ).then(r => { if (r === undefined) storyboardTimer.clear() })
+      return
+    }
+    const shotCount = ep.shots?.length ?? 0
+    const hasDownstream = shotCount > 0
+    const ok = window.confirm(
+      hasDownstream
+        ? `重新生成分镜将删除本集全部 ${shotCount} 个镜头，以及其参考图、视频版本与成片依赖。\n`
+          + `费用：会重新消耗文本模型额度；已产生的视频费用不会退回。\n`
+          + `此操作不可恢复。确定继续？`
+        : '将开始生成分镜脚本（先规划大纲，再逐镜填充）。确定继续？',
+    )
+    if (!ok) return
+    storyboardTimer.start()
+    void act(
+      () => api.post(`/episodes/${ep.id}/storyboard`),
+      hasDownstream
+        ? '已删除旧分镜，开始重新生成整版分镜'
+        : '分镜生成已开始（先规划大纲，再逐镜填充，QA 通过后陆续展示）',
+    ).then(r => { if (r === undefined) storyboardTimer.clear() })
+  }
+
   return (
     <>
       <header className="desk-head">
@@ -53,25 +84,15 @@ export default function BoardPage() {
           </span>
           {ep.screenplay_mode === 'full_script' && <span className="stamp grey">完整剧本</span>}
           <button className="btn" disabled={busy || ep.status === 'scripting' || ep.screenplay_status !== 'ready'}
-            onClick={() => {
-              storyboardTimer.start()
-              act(
-                () => api.post(`/episodes/${ep.id}/storyboard${canResumeCheckpoint ? '/resume' : ''}`),
-                canResumeCheckpoint
-                  ? `已从前 ${ep.shots?.length ?? 0} 镜 checkpoint 继续生成`
-                  : '分镜生成已开始（先规划大纲，再逐镜填充，QA 通过后陆续展示）',
-              )
-            }}>
+            onClick={() => confirmRegenerateStoryboard(canResumeCheckpoint ? 'resume' : 'fresh')}>
             {canResumeCheckpoint ? `从镜${String((ep.shots?.length ?? 0) + 1).padStart(2, '0')}继续` : ep.shots?.length ? '重新生成分镜' : '生成分镜脚本'}
           </button>
           {canResumeCheckpoint && (
-            <button className="btn ghost" disabled={busy || ep.status === 'scripting'}
-              onClick={() => {
-                storyboardTimer.start()
-                act(() => api.post(`/episodes/${ep.id}/storyboard`), '已放弃旧 checkpoint，开始重新生成整版分镜')
-              }}>
+            <AsyncButton className="btn ghost" disabled={busy || ep.status === 'scripting'}
+              busyLabel="提交中…"
+              onAction={async () => { confirmRegenerateStoryboard('fresh') }}>
               重新生成整版
-            </button>
+            </AsyncButton>
           )}
           {ep.screenplay_status !== 'ready' && (
             <button className="btn primary" disabled={busy} onClick={() => go('script', projectId, ep.id)}>
@@ -169,18 +190,21 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
   return (
     <div className="shot-strip">
       <div className="shot-head">
-        <span className="sn">镜{String(shot.shot_no).padStart(2, '0')}</span>
-        <span className="meta">{s.duration_s}s · {s.shot_size} · {s.camera_move} · {s.transition}{s.continuity_from_prev ? ' · 接上镜' : ''}</span>
-        <span className="meta" style={{ color: 'var(--indigo)' }}>{s.characters.join(' / ') || '缺角色（需修改）'}</span>
-        <span style={{ flex: 1 }} />
-        <span className="meta">¥{shot.est_cost_cny.toFixed(1)}</span>
-        {shot.storyboard_evidence && <EvidenceDrawer evidence={shot.storyboard_evidence} label="本镜证据" />}
-        {!edit
-          ? <button className="btn small" disabled={disabled} onClick={() => setEdit(JSON.parse(JSON.stringify(shot)))}>修改</button>
-          : <>
-            <button className="btn small primary" onClick={() => setImpactOpen(true)}>保存</button>
-            <button className="btn small ghost" onClick={() => setEdit(null)}>放弃</button>
-          </>}
+        <div className="shot-head-copy">
+          <span className="sn">镜{String(shot.shot_no).padStart(2, '0')}</span>
+          <span className="meta">{s.duration_s}s · {s.shot_size} · {s.camera_move} · {s.transition}{s.continuity_from_prev ? ' · 接上镜' : ''}</span>
+          <span className="meta shot-characters">{s.characters.join(' / ') || '缺角色（需修改）'}</span>
+        </div>
+        <div className="shot-head-actions">
+          <span className="meta">¥{shot.est_cost_cny.toFixed(1)}</span>
+          {shot.storyboard_evidence && <EvidenceDrawer evidence={shot.storyboard_evidence} label="本镜证据" />}
+          {!edit
+            ? <button className="btn small" disabled={disabled} onClick={() => setEdit(JSON.parse(JSON.stringify(shot)))}>修改</button>
+            : <>
+              <button className="btn small primary" onClick={() => setImpactOpen(true)}>保存</button>
+              <button className="btn small ghost" onClick={() => setEdit(null)}>放弃</button>
+            </>}
+        </div>
       </div>
       <div className="shot-body">
         {edit ? (
@@ -249,7 +273,14 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
       <ImpactDialog
         open={impactOpen}
         title={`保存镜 ${shot.shot_no} 并传播影响`}
-        impact={{ requires_reconfirm: true, paid_media_invalidated: true }}
+        impact={{
+          requires_reconfirm: true,
+          paid_media_invalidated: (shot.versions?.length ?? 0) > 0,
+        }}
+        knownEffects={[
+          (shot.versions?.length ?? 0) > 0 ? `本镜 ${shot.versions.length} 个视频版本将被清空` : '本镜暂无视频版本',
+          '精确失效 Artifact 数量将在保存后由服务端计算并回传',
+        ]}
         onClose={() => setImpactOpen(false)}
         onConfirm={() => { setImpactOpen(false); void save() }}
       />

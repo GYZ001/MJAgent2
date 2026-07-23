@@ -247,51 +247,9 @@ def _asset_from_path(*, path: str, ref_type: str, source: str, shot_id: str | No
     )
 
 
-def _scene_qa_ok(scene_row: Any, threshold: float) -> tuple[bool, float | None, dict[str, Any] | None, str | None]:
-    qa = json.loads(scene_row["qa_json"]) if scene_row["qa_json"] else {}
-    score = qa.get("overall")
-    if score is None:
-        return False, None, qa, "missing_quality_score"
-    if float(score) < threshold:
-        return False, float(score), qa, "quality_below_threshold"
-    issues = " ".join(str(x) for x in qa.get("issues") or [])
-    banned = ["watermark", "subtitle", "text", "blur", "collapse", "deformed", "字幕", "水印", "模糊", "崩", "畸形", "错误文字"]
-    if _contains_any(issues.lower(), banned):
-        return False, float(score), qa, "quality_issue_blocks_reuse"
-    return True, float(score), qa, None
-
-
 def reusable_previous_assets(conn: Any, *, prev_shot: Any | None, limit: int, threshold: float) -> list[ReferenceImageAsset]:
-    if not prev_shot or limit <= 0:
-        return []
-    # 只有通过 VLM/场景 QA 的干净帧才会被复用（见下方 _scene_qa_ok），不再用关键词预筛。
-    shot_id = prev_shot["id"] if hasattr(prev_shot, "keys") else prev_shot.get("id")
-    rows = conn.execute(
-        """SELECT id, shot_id, kind, image_path, qa_json
-           FROM shot_scenes
-           WHERE shot_id=? AND status='succeeded' AND image_path IS NOT NULL
-           ORDER BY CASE kind WHEN 'head' THEN 0 WHEN 'tail' THEN 1 ELSE 2 END, version_no DESC""",
-        (shot_id,),
-    ).fetchall()
-    assets: list[ReferenceImageAsset] = []
-    for row in rows:
-        if len(assets) >= limit:
-            break
-        ok, score, qa, _ = _scene_qa_ok(row, threshold)
-        if not ok:
-            continue
-        if not Path(row["image_path"]).exists():
-            continue
-        assets.append(_asset_from_path(
-            path=row["image_path"],
-            ref_type="scene" if row["kind"] == "head" else "previous_shot_frame",
-            source="previous_shot",
-            shot_id=row["shot_id"],
-            scene_id=row["id"],
-            quality_score=score,
-            qa=qa,
-        ))
-    return assets
+    """旧关键帧候选不再进入参考图集合。连续性只复用上一镜实际采用视频的尾帧。"""
+    return []
 
 
 def character_reference_assets(bible: Bible, character_names: list[str], *, limit: int,
@@ -603,8 +561,7 @@ def _extract_last_frame(video_path: str, dest: Path) -> bool:
 
 
 def previous_tail_reference_asset(conn: Any, prev_shot: Any, *, dest_dir: Path) -> ReferenceImageAsset | None:
-    """取上一镜「尾帧」用作参考图（接上镜的连续性锚点）：
-    优先上一镜已过审尾关键帧；没有则从上一镜采用成片里抽最后一帧。"""
+    """从上一镜实际采用成片抽尾帧，作为连续镜的参考图锚点。"""
     if prev_shot is None:
         return None
 
@@ -614,14 +571,6 @@ def previous_tail_reference_asset(conn: Any, prev_shot: Any, *, dest_dir: Path) 
         return prev_shot.get(key)
 
     prev_id = _g("id")
-    tail_id = _g("approved_tail_scene_id")
-    if tail_id:
-        row = conn.execute(
-            "SELECT image_path FROM shot_scenes WHERE id=? AND status='succeeded'", (tail_id,)).fetchone()
-        if row and row["image_path"] and Path(row["image_path"]).exists():
-            return _asset_from_path(
-                path=row["image_path"], ref_type="previous_shot_frame", source="previous_shot",
-                shot_id=prev_id, quality_score=1.0, qa={"overall": 1.0, "issues": ["forced_continuity"]})
     adopted = _g("adopted_version_id")
     if adopted:
         v = conn.execute(

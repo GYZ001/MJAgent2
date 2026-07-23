@@ -2,8 +2,8 @@ import asyncio
 import json
 import sqlite3
 
-from app import portraits
-from app.schemas import Bible, Character, World
+from app import api, db, portraits
+from app.schemas import Bible, Character, EpisodeScreenplay, ScriptScene, World
 
 
 def _make_conn() -> sqlite3.Connection:
@@ -63,6 +63,7 @@ def test_ensure_character_card_adds_prominent_new_character(monkeypatch) -> None
     names = [c["name"] for c in json.loads(
         conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"])["characters"]]
     assert "美杜莎" in names
+    assert conn.execute("SELECT bible_version FROM projects WHERE id='p1'").fetchone()["bible_version"] == 2
     row = conn.execute("SELECT * FROM character_portraits WHERE character_name='美杜莎'").fetchone()
     assert row["ep_start"] == 21 and row["ep_end"] is None
 
@@ -245,3 +246,133 @@ def test_bible_for_episode_picks_segment_anchor(monkeypatch) -> None:
     assert "白发青年" in v25.characters[0].appearance_canonical
     # 取本集视图不应改动传入的原 bible
     assert bible.characters[0].appearance_canonical == original
+
+
+def test_discover_character_candidates_filters_functional_extras_and_unseen_names(monkeypatch) -> None:
+    bible = Bible(
+        world=World(visual_style_canonical="国风"),
+        characters=[Character(
+            name="萧炎",
+            role="主角",
+            appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰佩火纹玉佩",
+        )],
+    )
+
+    async def fake_chat(*_args, **_kwargs):
+        return json.dumps({
+            "characters": [
+                {"name": "魂天帝", "kind": "onscreen", "evidence": "魂天帝踏着血云现身"},
+                {"name": "萧炎", "kind": "onscreen", "evidence": "萧炎迎空而起"},
+                {"name": "守卫", "kind": "onscreen", "evidence": "守卫后退"},
+                {"name": "不存在的人", "kind": "onscreen", "evidence": "模型臆造"},
+            ],
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
+    result = asyncio.run(portraits.discover_character_candidates(
+        "魂天帝踏着血云现身，萧炎迎空而起，守卫仓促后退。",
+        bible,
+        1926,
+    ))
+
+    assert [item["name"] for item in result] == ["魂天帝", "萧炎"]
+
+
+def test_late_episode_screenplay_discovers_character_before_generation(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "late-episode-character.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    conn = db.get_conn()
+    bible = Bible(
+        world=World(visual_style_canonical="国风"),
+        characters=[Character(
+            name="萧炎",
+            role="主角",
+            appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰佩火纹玉佩",
+        )],
+    )
+    conn.execute(
+        "INSERT INTO projects(id,name,status,bible_json,bible_version,bible_status,created_at) "
+        "VALUES('p1','斗破苍穹','planned',?,1,'ready',1)",
+        (bible.model_dump_json(),),
+    )
+    conn.execute(
+        "INSERT INTO chapters(project_id,idx,title,content,char_count) VALUES(?,?,?,?,?)",
+        ("p1", 1926, "第一千六百二十二章 双帝之战",
+         "魂天帝踏着血云现身。魂天帝与萧炎在中州上空连续交锋。" * 8, 240),
+    )
+    conn.execute(
+        """INSERT INTO episodes(
+            id,project_id,episode_no,title,hook,cliffhanger,synopsis,source_chapters,
+            target_duration_s,screenplay_status,status,created_at
+        ) VALUES('e1926','p1',1926,'双帝之战','','','魂天帝现身','[1926]',50,'running','planned',1)"""
+    )
+    conn.commit()
+
+    async def fake_candidates(source_text, current_bible, episode_no, *, draft_text=""):
+        assert episode_no == 1926
+        assert "魂天帝" in source_text
+        return [{"name": "魂天帝", "kind": "onscreen", "evidence": "魂天帝踏着血云现身"}]
+
+    async def fake_assess(*_args, **_kwargs):
+        return {
+            "important": True,
+            "reason": "本章核心反派并反复出场",
+            "role": "反派",
+            "appearance_canonical": "中年男性，黑色长发披肩，暗红帝袍覆身，血色双瞳冷漠，周身缠绕血云",
+            "personality": "冷酷",
+            "speech_style": "低沉威压",
+            "relationships": [{"to": "萧炎", "relation": "决战对手"}],
+        }
+
+    async def portrait_failure(*_args, **_kwargs):
+        raise RuntimeError("image provider unavailable")
+
+    generated_with: list[set[str]] = []
+
+    async def fake_generate(ep_data, source_text, current_bible, prev_ending=""):
+        names = {character.name for character in current_bible.characters}
+        generated_with.append(names)
+        assert "魂天帝" in names
+        scenes = [
+            ScriptScene(
+                scene_no=index,
+                scene_heading=f"【场{index}】日 / 中州天际",
+                story_function="推进双帝决战并交接下一场冲突",
+                characters=["萧炎", "魂天帝"],
+                summary="萧炎与魂天帝在中州天际正面交锋，帝境力量持续碰撞。",
+                conflict="双方争夺天地存亡的最终胜负",
+                turn="帝境交锋进一步升级",
+                source_basis="保留魂天帝现身并与萧炎连续交锋的原文事件",
+            )
+            for index in range(1, 4)
+        ]
+        return EpisodeScreenplay(
+            episode_no=ep_data["episode_no"],
+            title="双帝之战",
+            scene_outline=scenes,
+            full_script_text="【场1】魂天帝：今日便结束一切。\n萧炎：那就一战。",
+        )
+
+    monkeypatch.setattr(portraits, "discover_character_candidates", fake_candidates)
+    monkeypatch.setattr(portraits, "assess_new_character", fake_assess)
+    monkeypatch.setattr(portraits, "_generate_fresh_portrait", portrait_failure)
+    monkeypatch.setattr(api, "generate_screenplay", fake_generate)
+
+    result = asyncio.run(api._screenplay_task("e1926"))
+
+    project = conn.execute(
+        "SELECT bible_json,bible_version FROM projects WHERE id='p1'"
+    ).fetchone()
+    names = {
+        item["name"] for item in json.loads(project["bible_json"])["characters"]
+    }
+    episode = conn.execute(
+        "SELECT screenplay_status,screenplay_json FROM episodes WHERE id='e1926'"
+    ).fetchone()
+    assert result is not None
+    assert names == {"萧炎", "魂天帝"}
+    assert project["bible_version"] == 2
+    assert generated_with == [{"萧炎", "魂天帝"}]
+    assert episode["screenplay_status"] == "ready"
+    assert "魂天帝" in episode["screenplay_json"]

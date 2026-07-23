@@ -50,11 +50,6 @@ export const api = {
   /* ── 便捷方法 ── */
   episodeGenerate: (episodeId: string) =>
     fetch(`/api/episodes/${episodeId}/generate`, { method: 'POST' }).then(handle),
-  sceneGenerate: (shotId: string, kinds?: ('head' | 'tail')[]) =>
-    fetch(`/api/shots/${shotId}/scene`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ kinds }),
-    }).then(handle),
   shotGenerate: (shotId: string, promptOverride?: string, reroll?: boolean, withCritique?: boolean) =>
     fetch(`/api/shots/${shotId}/generate`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -62,11 +57,8 @@ export const api = {
         prompt_override: promptOverride, reroll, with_critique: withCritique,
       }),
     }).then(handle),
-  sceneApprove: (shotId: string, sceneId: string, kind: string, reason?: string) =>
-    fetch(`/api/shots/${shotId}/scene/approve`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ scene_id: sceneId, kind, reason }),
-    }).then(handle),
+  stopShotVideo: (shotId: string): Promise<StopShotVideoResult> =>
+    fetch(`/api/shots/${shotId}/video/stop`, { method: 'POST' }).then(handle),
   adoptVersion: (shotId: string, versionId: string, reason?: string) =>
     fetch(`/api/shots/${shotId}/adopt`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -76,8 +68,12 @@ export const api = {
     fetch(`/api/versions/${versionId}`, { method: 'DELETE' }).then(handle),
   discardReferenceImage: (versionId: string, refId: string) =>
     fetch(`/api/versions/${versionId}/reference-images/${refId}`, { method: 'DELETE' }).then(handle),
-  restoreReferenceImage: (versionId: string, refId: string) =>
-    fetch(`/api/versions/${versionId}/reference-images/${refId}/restore`, { method: 'POST' }).then(handle),
+  restoreReferenceImage: (versionId: string, refId: string, overrideReason?: string) =>
+    fetch(`/api/versions/${versionId}/reference-images/${refId}/restore`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ override_reason: overrideReason }),
+    }).then(handle),
   clearEpisodeArtifacts: (episodeId: string) =>
     fetch(`/api/episodes/${episodeId}/clear-artifacts`, { method: 'POST' }).then(handle),
   clearShotArtifacts: (shotId: string) =>
@@ -257,13 +253,17 @@ export interface ShotVersion {
   }
 }
 
-interface SceneQa {
-  overall: number; expectation_match?: number; continuity?: number; clean_frame?: number; issues?: string[]
-}
-interface SceneCandidate {
-  id: string; version_no: number; kind: 'head' | 'tail'; status: string; error?: string
-  qa?: SceneQa | null; image_url?: string
-  artifact_id?: string | null; adoption_reason?: string | null
+export interface StopShotVideoResult {
+  shot_id: string
+  stopped_count: number
+  provider_may_continue: boolean
+  resume_supported: false
+  jobs: {
+    job_id: string
+    status: string
+    provider_may_continue: boolean
+    cancelled: boolean
+  }[]
 }
 
 export interface Shot {
@@ -274,10 +274,6 @@ export interface Shot {
   narration: string | null; dialogues: Dialogue[]; transition: string
   continuity_from_prev: number; adopted_version_id: string | null
   est_cost_cny: number; versions: ShotVersion[]
-  scene_est_cost_cny?: number
-  scene_status: string; approved_scene_id: string | null
-  approved_head_scene_id?: string | null; approved_tail_scene_id?: string | null
-  required_keyframes?: ('head' | 'tail')[]; scenes: SceneCandidate[]
   video_stale: boolean
   storyboard_artifact_id?: string | null
   storyboard_evidence?: ArtifactEvidence | null
@@ -420,7 +416,7 @@ interface AutoProgress {
   bible?: string; refs?: string; plan?: string
   episodes_total?: number; episodes_done?: number
   screenplays_ready?: number
-  shots_total?: number; shots_keyframed?: number; shots_video?: number
+  shots_total?: number; shots_video?: number
 }
 export interface AutoStatus {
   running: boolean

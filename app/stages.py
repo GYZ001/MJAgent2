@@ -458,7 +458,7 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
 
 【最重要·防丢失】{episode['target_duration_s']} 秒只作为初始节拍参考；不得为了追目标时长删除关键台词、关键剧情或结尾钩子。
 所以你必须先做"必保留清单"，再写正文，并保证清单里的每一条都真实写进了正文：
-- `key_lines`：只保留本集源文中【已在人物谱中的角色】（{bible_names_inline}）说出口的台词，不允许只挑金句/关键句；若同一角色台词很多，也要逐条列入并在正文中写回。可在不改变主干信息的前提下轻微口语化、压缩赘字，但人物态度、信息点和情绪锋芒不能丢。【硬性】key_lines 不得包含测验员/围观者/旁白等非人物谱角色的台词——这些台词可以写进 full_script_text 的对白行，但绝不能进入 key_lines，否则后续分镜会因 characters 字段无法承载这些角色而陷入死循环。没有人物谱角色台词时，才从原文里挑出 3~8 条绝不能丢的关键台词。
+- `key_lines`：只保留本集源文中【已在人物谱中的角色】（{bible_names_inline}）说出口的台词，不允许只挑金句/关键句；若同一角色台词很多，也要逐条列入并在正文中写回。可在不改变主干信息的前提下轻微口语化、压缩赘字，但人物态度、信息点和情绪锋芒不能丢。【硬性】key_lines 不得包含测验员/围观者/旁白等功能性角色的台词——这些台词可以写进 full_script_text 的对白行，但绝不能进入 key_lines。除功能性身份外，任何具名说话人都必须使用人物谱中的准确姓名。没有人物谱角色台词时，才从原文里挑出 3~8 条绝不能丢的关键台词。
 - `key_plot_points`：列出本集【绝不能丢】的关键剧情点 3~8 条——核心事件、关键反转、信息揭示、关系变化。每条都必须在 `full_script_text` 里真的发生。
 - 这两个清单是后续分镜台的"必须保留项"，分镜会逐条校验它们是否仍在镜头里。清单越准，成片越不会丢戏。
 
@@ -487,7 +487,7 @@ B. `full_script_text`：真正的剧本正文，必须是带场标、动作段�
    dramatic_question / protagonist_goal / obstacle / stakes 必填（单集戏剧契约）；
    key_lines 至少 3 条、key_plot_points 至少 3 条；若源文里出现“人物谱角色名：台词”，这些台词必须全部进入 key_lines 且都必须能在 full_script_text 中找到（主干一致）；且 key_lines 中每条台词标注的说话人，必须与 full_script_text 中该句对白行的说话人一致（不能清单写某角色说、正文却由另一角色说）。
 3. `scene_outline` 必须是 3~6 场的连续场次结构，scene_no 从 1 连续递增。
-   【硬性·角色圣经】scene_outline[*].characters 只能填角色圣经里的角色名（{bible_names_inline}），不能填测验员/围观者/旁白等非人物谱角色；这些非主角在场人物请写进 summary 描述，不要放进 characters 数组。
+   【硬性·角色圣经】scene_outline[*].characters 中的具名角色只能填角色圣经准确姓名（{bible_names_inline}）；无需跨集定妆的临时人物允许使用测验员、守卫、围观者、路人甲等通用功能性身份标签。不得把具体姓名改成身份标签来绕过人物谱，也不要填旁白。
 4. full_script_text 必须是一篇连续故事正文，且必须带场次标题、动作段、对白段，不能写成 beat 列表、卡片列表、分镜表或镜头说明。正文里的「【场N】」场次标题数量必须与 scene_outline 的场次数完全一致（scene_outline 有几场，正文就写几个【场N】，按 scene_no 顺序一一对应），不要把多场并成一段，也不要额外多拆场。
 5. full_script_text 不能是一大段梗概；必须像台本，至少拆成多场、多段、多行。
 6. full_script_text 中禁止出现：拍01、拍1、拍 01、镜头、景别、运镜、首帧、尾帧、参考图、提示词、prompt。

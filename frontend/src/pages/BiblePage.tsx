@@ -1,27 +1,44 @@
-import { type CSSProperties, useCallback, useEffect, useState } from 'react'
+import { type CSSProperties, useCallback, useEffect, useRef, useState } from 'react'
 import { api, AutoStatus, Bible, BrowseResult, Character, Portrait } from '../api'
 import { useNav, useProject, usePoll } from '../App'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 import SearchField from '../components/SearchField'
 import EvidenceDrawer from '../components/harness/EvidenceDrawer'
 import ImpactDialog, { ImpactSummary } from '../components/harness/ImpactDialog'
-
-const CHAR_PAGE_SIZE = 6  // 人物谱每页展示的角色卡数
+import QueryState from '../components/QueryState'
+import { useFillPageSize } from '../hooks/useFillPageSize'
 
 export default function BiblePage() {
   const { projectId, toast } = useNav()
-  const { data: p, refresh } = useProject(projectId!)
+  const { data: p, refresh, error, loading } = useProject(projectId!)
   const { data: auto, refresh: refreshAuto } = usePoll<AutoStatus>(
-    () => api.get(`/projects/${projectId}/auto/status`), 3000, [projectId])
+    () => api.get(`/projects/${projectId}/auto/status`),
+    (status) => (status?.running ? 3000 : 0),
+    [projectId],
+  )
   const [editing, setEditing] = useState<Bible | null>(null)
   const [busy, setBusy] = useState(false)
   const [charSearch, setCharSearch] = useState('')
   const [charPage, setCharPage] = useState(0)
   const [impactOpen, setImpactOpen] = useState(false)
+  const pageSize = useFillPageSize({ minCardWidth: 270, rows: 3, floor: 8, ceiling: 24 })
   const bibleTimer = useTaskTimer(`project.${projectId}.bible`, p?.bible_status === 'running')
   const refsTimer = useTaskTimer(`project.${projectId}.refs`, p?.refs_status === 'running')
 
-  if (!p) return <div className="empty">展卷中……</div>
+  const biblePreview = editing ?? p?.bible
+  const charQuery = charSearch.trim()
+  const indexedCharsPreview = (biblePreview?.characters ?? []).map((c, i) => ({ c, i }))
+  const filteredCharsPreview = charQuery
+    ? indexedCharsPreview.filter(({ c }) => c.name.includes(charQuery))
+    : indexedCharsPreview
+  const charPageCount = Math.max(1, Math.ceil(filteredCharsPreview.length / pageSize))
+
+  useEffect(() => {
+    if (charPage > charPageCount - 1) setCharPage(Math.max(0, charPageCount - 1))
+  }, [charPage, charPageCount])
+
+  if (error && !p) return <QueryState loading={false} error={error} hasData={false}>{null}</QueryState>
+  if (!p) return <QueryState loading={loading !== false} error={null} hasData={false}>{null}</QueryState>
 
   const act = async (fn: () => Promise<unknown>, doneMsg?: string) => {
     setBusy(true)
@@ -31,13 +48,11 @@ export default function BiblePage() {
   }
 
   const bible = editing ?? p.bible
-  // 角色卡分页（每页 6 张）+ 按名检索；保留原始下标 i 供编辑态写回 editing.characters[i]
-  const charQuery = charSearch.trim()
+  // 角色卡分页：按视口列数×行数铺满再分页；保留原始下标 i 供编辑态写回
   const indexedChars = (bible?.characters ?? []).map((c, i) => ({ c, i }))
   const filteredChars = charQuery ? indexedChars.filter(({ c }) => c.name.includes(charQuery)) : indexedChars
-  const charPageCount = Math.max(1, Math.ceil(filteredChars.length / CHAR_PAGE_SIZE))
   const curCharPage = Math.min(charPage, charPageCount - 1)
-  const pagedChars = filteredChars.slice(curCharPage * CHAR_PAGE_SIZE, curCharPage * CHAR_PAGE_SIZE + CHAR_PAGE_SIZE)
+  const pagedChars = filteredChars.slice(curCharPage * pageSize, curCharPage * pageSize + pageSize)
   const generating = p.bible_status === 'running' || p.refs_status === 'running'
 
   const startBible = async () => {
@@ -177,11 +192,7 @@ export default function BiblePage() {
                   {fitting ? <span className="stamp gold">定妆中</span>
                     : c.ref_image_url ? <span className="stamp green">已定妆</span> : <span className="stamp grey">未定妆</span>}
                 </div>
-                {c.ref_image_url && (
-                  <div className="character-portrait"><img src={c.ref_image_url} alt={c.name}
-                    style={{ opacity: fitting ? 0.45 : 1, transition: 'opacity 0.3s' }} /></div>
-                )}
-                {(c.portraits?.length ?? 0) > 1 && <PortraitStrip portraits={c.portraits!} />}
+                {c.ref_image_url && <CharacterPortraitGallery character={c} fitting={fitting} />}
                 <label className="f">外观锚点串（40~60 字，定稿后锁定）</label>
                 {editing
                   ? <textarea rows={3} value={editing.characters[i].appearance_canonical}
@@ -230,6 +241,10 @@ export default function BiblePage() {
         open={impactOpen}
         title="定稿人物谱并传播影响"
         impact={{ requires_reconfirm: true, paid_media_invalidated: true }}
+        knownEffects={[
+          '下游分集剧本、分镜、参考图与视频可能需要重新生成',
+          '精确失效 Artifact 数量将在保存后由服务端计算并回传',
+        ]}
         onClose={() => setImpactOpen(false)}
         onConfirm={() => { setImpactOpen(false); void saveBible() }}
       />
@@ -475,29 +490,53 @@ function PortraitBlock({ projectId, character: c, disabled, onChanged, regenerat
   )
 }
 
-function portraitRangeLabel(start: number, end: number | null): string {
-  if (end == null) return `第${start}集起`
-  return start === end ? `第${start}集` : `第${start}~${end}集`
+function portraitVersionLabel(portrait: Portrait): string {
+  if (!portrait.base_portrait_id) {
+    return portrait.ep_start > 1 ? `第${portrait.ep_start}集首次定妆` : '初始定妆'
+  }
+  return `第${portrait.ep_start}集更新`
 }
 
-function PortraitStrip({ portraits }: { portraits: Portrait[] }) {
-  const sorted = [...portraits].sort((a, b) => a.ep_start - b.ep_start)
+function CharacterPortraitGallery({ character, fitting }: { character: Character; fitting: boolean }) {
+  const trackRef = useRef<HTMLDivElement>(null)
+  // 当前版本排在第一张；旧图只是定妆版本历史，不代表对应集数已经投入生产。
+  const portraits = [...(character.portraits ?? [])]
+    .filter(portrait => !!portrait.image_url)
+    .sort((a, b) => b.ep_start - a.ep_start)
+  const hasVersions = portraits.length > 0
+  const count = hasVersions ? portraits.length : 1
+
+  const scroll = (direction: -1 | 1) => {
+    const track = trackRef.current
+    if (!track) return
+    track.scrollBy({ left: direction * track.clientWidth, behavior: 'smooth' })
+  }
+
   return (
-    <div style={{ margin: '2px 0 8px' }}>
-      <label className="f">定妆照分段（按适用集横向预览）</label>
-      <div style={{ display: 'flex', gap: 8, overflowX: 'auto', paddingBottom: 4 }}>
-        {sorted.map(pt => (
-          <div key={pt.id} style={{ flex: '0 0 auto', width: 92, textAlign: 'center' }}>
-            {pt.image_url
-              ? <img src={pt.image_url} alt={portraitRangeLabel(pt.ep_start, pt.ep_end)}
-                  style={{ width: 92, height: 164, objectFit: 'cover', borderRadius: 6, border: '1px solid var(--hairline)' }} />
-              : <div style={{ width: 92, height: 164, borderRadius: 6, border: '1px dashed var(--hairline)',
-                              display: 'flex', alignItems: 'center', justifyContent: 'center',
-                              fontSize: 11, color: 'var(--ink-faint)' }}>无图</div>}
-            <div style={{ fontSize: 11, color: 'var(--ink-soft)', marginTop: 3 }}>{portraitRangeLabel(pt.ep_start, pt.ep_end)}</div>
-          </div>
-        ))}
+    <div className="character-portrait">
+      <div ref={trackRef} className="character-portrait-track" aria-label={`${character.name}定妆照版本`}>
+        {hasVersions ? portraits.map((portrait, index) => (
+          <figure key={portrait.id} className="character-portrait-slide">
+            <img src={portrait.image_url!} alt={`${character.name} · ${portraitVersionLabel(portrait)}`}
+              style={{ opacity: fitting ? 0.45 : 1, transition: 'opacity 0.3s' }} />
+            <figcaption className="portrait-version-label">
+              {portraitVersionLabel(portrait)}{index === 0 && portrait.ep_end == null ? <em>当前</em> : null}
+            </figcaption>
+          </figure>
+        )) : (
+          <figure className="character-portrait-slide">
+            <img src={character.ref_image_url!} alt={character.name}
+              style={{ opacity: fitting ? 0.45 : 1, transition: 'opacity 0.3s' }} />
+          </figure>
+        )}
       </div>
+      {count > 1 && (
+        <div className="portrait-scroll-controls" aria-label="切换定妆照">
+          <span>{count} 张 · 横滑</span>
+          <button type="button" onClick={() => scroll(-1)} aria-label="上一张定妆照">‹</button>
+          <button type="button" onClick={() => scroll(1)} aria-label="下一张定妆照">›</button>
+        </div>
+      )}
     </div>
   )
 }

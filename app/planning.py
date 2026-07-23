@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException
 
 from app import config, errors, task_registry, worker
 from app.db import get_conn, new_id, now, rows_to_dicts
+from app.ingest import dedupe_stub_chapters
 
 router = APIRouter(prefix="/api")
 PLAN_PREVIEW_CHARS = 100
@@ -30,6 +31,10 @@ async def run_regex_plan(project_id: str) -> None:
         ).fetchall())
         if not chapters:
             raise ValueError("没有可分集的章节，请先上传小说")
+        # Existing projects may predate ingestion-time stub deduplication. Filter
+        # adjacent title-only duplicates during an explicit replan while preserving
+        # the original chapter idx values used by the reader/source mapping.
+        chapters, _ = dedupe_stub_chapters(chapters, reindex=False)
         worker.delete_project_episodes(project_id)
         for episode_no, chapter in enumerate(chapters, start=1):
             conn.execute(
@@ -75,8 +80,8 @@ def recover_plan_tasks() -> int:
     return resumed
 
 
-@router.post("/projects/{project_id}/plan")
-async def start_plan(project_id: str):
+async def start_plan(project_id: str) -> dict:
+    """启动分集规划的领域逻辑，供 REST 路由与 ``episode.plan`` Command Handler 共用。"""
     conn = get_conn()
     project = conn.execute("SELECT id, plan_status FROM projects WHERE id=?", (project_id,)).fetchone()
     if not project:
@@ -89,3 +94,12 @@ async def start_plan(project_id: str):
     conn.commit()
     task_registry.spawn("plan", project_id, run_regex_plan(project_id), project_id=project_id)
     return {"status": "running", "planner": "regex", "rule": "one_chapter_one_episode"}
+
+
+@router.post("/projects/{project_id}/plan")
+async def start_plan_route(project_id: str):
+    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+
+    result = await dispatch("episode.plan", {"project_id": project_id}, initiator="ui")
+    raise_if_failed(result)
+    return result_http_payload(result)

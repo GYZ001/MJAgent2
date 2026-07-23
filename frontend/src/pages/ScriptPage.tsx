@@ -48,12 +48,14 @@ const sceneOutlineText = (sceneOutline: ScriptScene[] | undefined) =>
 
 export default function ScriptPage() {
   const { episodeId, projectId, go, toast } = useNav()
-  const { data: ep, refresh } = useEpisode(episodeId!)
+  const { data: ep, refresh, error, loading } = useEpisode(episodeId!)
   const [busy, setBusy] = useState(false)
   const [draft, setDraft] = useState<EpisodeScreenplay | null>(null)
   const screenplayTimer = useTaskTimer(`episode.${episodeId}.screenplay`, ep?.screenplay_status === 'running')
   const storyboardTimer = useTaskTimer(`episode.${episodeId}.storyboard`, ep?.status === 'scripting')
 
+  if (error && !ep) return <div className="empty">{error}</div>
+  if (loading && !ep) return <div className="empty">展卷中……</div>
   if (!ep) return <div className="empty">展卷中……</div>
 
   const act = async (fn: () => Promise<unknown>, doneMsg?: string) => {
@@ -75,19 +77,22 @@ export default function ScriptPage() {
   const generate = () => {
     const isRegenerate = !!ep.screenplay
     if ((isRegenerate || hasDownstream) &&
-      !window.confirm('重新生成剧本会清空本集已有分镜、关键帧、视频和成片，需要后续重新展开。确定继续？')) return
+      !window.confirm('重新生成剧本会清空本集已有分镜、参考图、视频和成片，需要后续重新展开。确定继续？')) return
     screenplayTimer.start()
-    act(() => api.post(`/episodes/${ep.id}/screenplay`, { force: isRegenerate || hasDownstream }),
-      '剧本生成已开始（完成后可在本页编辑，再进入分镜）')
+    void act(() => api.post(`/episodes/${ep.id}/screenplay`, { force: isRegenerate || hasDownstream }),
+      '剧本生成已开始（完成后可在本页编辑，再进入分镜）').then(r => {
+      if (r === undefined) screenplayTimer.clear()
+    })
   }
 
   const saveDraft = async () => {
     if (!draft) return
     if (hasDownstream &&
-      !window.confirm('保存剧本修改会清空本集已有分镜、关键帧、视频和成片，需要重新生成分镜。确定保存？')) return
-    await act(() => api.put(`/episodes/${ep.id}/screenplay`, { screenplay: draft, force: hasDownstream }),
+      !window.confirm('保存剧本修改会清空本集已有分镜、参考图、视频和成片，需要重新生成分镜。确定保存？')) return
+    const r = await act(() => api.put(`/episodes/${ep.id}/screenplay`, { screenplay: draft, force: hasDownstream }),
       hasDownstream ? '剧本已保存，下游分镜已清空' : '剧本已保存')
-    setDraft(null)
+    // 仅成功后清空草稿，失败时保留用户编辑
+    if (r !== undefined) setDraft(null)
   }
 
   const enterBoard = async () => {
@@ -102,12 +107,16 @@ export default function ScriptPage() {
       const path = canResumeCheckpoint
         ? `/episodes/${ep.id}/storyboard/resume`
         : `/episodes/${ep.id}/storyboard`
-      await act(
+      const r = await act(
         () => api.post(path),
         canResumeCheckpoint
           ? `已进入分镜台，从前 ${ep.shots?.length ?? 0} 镜 checkpoint 继续生成`
           : '已进入分镜台，正在逐镜头生成，QA 通过后陆续展示',
       )
+      if (r === undefined) {
+        storyboardTimer.clear()
+        return
+      }
     }
     go('board', projectId, ep.id)
   }

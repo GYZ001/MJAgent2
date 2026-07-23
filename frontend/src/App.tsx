@@ -11,6 +11,8 @@ import CinemaPage from './pages/CinemaPage'
 import MonitorPage from './pages/MonitorPage'
 import ReaderPage from './pages/ReaderPage'
 import RunDock from './components/harness/RunDock'
+import AgentDrawer from './agent/AgentDrawer'
+import type { ContextEnvelope } from './agent/types'
 
 export type View = 'studio' | 'bible' | 'scenes' | 'episodes' | 'script' | 'board' | 'wall' | 'cinema' | 'monitor' | 'reader'
 
@@ -83,10 +85,13 @@ export default function App() {
   const [toastMsg, setToastMsg] = useState<{ text: string; err: boolean } | null>(null)
   const [spineCollapsed, setSpineCollapsed] = useState(false)
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const [agentOpen, setAgentOpen] = useState(false)
+  const toastTimerRef = useRef<number>()
 
   const toast = useCallback((text: string, isErr = false) => {
     setToastMsg({ text, err: isErr })
-    window.setTimeout(() => setToastMsg(null), isErr ? 8000 : 3000)
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current)
+    toastTimerRef.current = window.setTimeout(() => setToastMsg(null), isErr ? 8000 : 3000)
   }, [])
 
   const go = useCallback((v: View, pid?: string | null, eid?: string | null, cidx?: number | null) => {
@@ -120,6 +125,13 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      window.scrollTo({ top: 0, left: 0, behavior: 'auto' })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [view, projectId, episodeId, chapterIdx])
+
+  useEffect(() => {
     if (!projectId) {
       setEpisodeId(null)
       return
@@ -145,6 +157,12 @@ export default function App() {
 
   const nav: Nav = { view, projectId, episodeId, chapterIdx, go, toast }
   const visibleSections = projectId ? SECTIONS : SECTIONS.filter(s => s.key === 'studio' || s.key === 'monitor')
+  const agentContext: ContextEnvelope = {
+    route: view,
+    project_id: projectId,
+    episode_id: episodeId,
+    unsaved_draft: false,
+  }
 
   const openSection = (s: (typeof SECTIONS)[number]) => go(s.key)
 
@@ -204,6 +222,15 @@ export default function App() {
         {view === 'monitor' && <MonitorPage />}
       </main>
       <RunDock projectId={projectId} onOpen={() => go('monitor')} />
+      <button
+        type="button"
+        className={`agent-fab ${agentOpen ? 'active' : ''}`}
+        aria-label="打开案头助手"
+        onClick={() => setAgentOpen(v => !v)}
+      >
+        助
+      </button>
+      <AgentDrawer open={agentOpen} onClose={() => setAgentOpen(false)} context={agentContext} />
       {toastMsg && <div role="status" className={`toast ${toastMsg.err ? 'err' : ''}`}>{toastMsg.text}</div>}
     </NavCtx.Provider>
   )
@@ -227,7 +254,8 @@ function WorkspaceEmpty({ label }: { label: string }) {
 }
 
 /** 轮询某资源；interval=0 或函数返回 0 不轮询。intervalMs 传函数时可按最新数据动态调间隔
- *  （例如只在有运行态任务时高频轮询，空闲时不轮询），避免反复拉取大 payload 拖垮页面。 */
+ *  （例如只在有运行态任务时高频轮询，空闲时不轮询），避免反复拉取大 payload 拖垮页面。
+ *  内置单飞、序号乱序保护：慢请求不会覆盖更新的响应；refresh 返回真实 Promise。 */
 export function usePoll<T>(
   fetcher: () => Promise<T>,
   intervalMs: number | ((data: T | null) => number),
@@ -235,47 +263,93 @@ export function usePoll<T>(
 ) {
   const [data, setData] = useState<T | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
   const fetcherRef = useRef(fetcher); fetcherRef.current = fetcher
   const intervalRef = useRef(intervalMs); intervalRef.current = intervalMs
   const dataRef = useRef<T | null>(null); dataRef.current = data
-  const refresh = useCallback(() => {
-    fetcherRef.current()
-      .then(d => { setData(d); dataRef.current = d; setError(null) })
-      .catch(e => setError(String(e.message || e)))
+  const seqRef = useRef(0)
+  const inFlightRef = useRef<Promise<T | null> | null>(null)
+
+  const refresh = useCallback((): Promise<T | null> => {
+    if (inFlightRef.current) return inFlightRef.current
+    const seq = ++seqRef.current
+    const request = fetcherRef.current()
+      .then(d => {
+        if (seq !== seqRef.current) return dataRef.current
+        setData(d)
+        dataRef.current = d
+        setError(null)
+        setLoading(false)
+        return d
+      })
+      .catch((e: unknown) => {
+        if (seq !== seqRef.current) return dataRef.current
+        setError(String((e as Error).message || e))
+        setLoading(false)
+        return null
+      })
+      .finally(() => {
+        if (inFlightRef.current === request) inFlightRef.current = null
+      })
+    inFlightRef.current = request
+    return request
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps)
+
   useEffect(() => {
     if (deps.some(d => d == null)) return
-    refresh()
+    let cancelled = false
     let timer: number | undefined
-    const tick = () => {
+    const run = async () => {
+      if (cancelled) return
+      await refresh()
+      if (cancelled) return
       const ms = typeof intervalRef.current === 'function'
         ? intervalRef.current(dataRef.current)
         : intervalRef.current
-      if (ms > 0) {
-        timer = window.setTimeout(async () => {
-          await refresh()
-          tick()
-        }, ms)
-      }
+      if (ms > 0) timer = window.setTimeout(run, ms)
     }
-    tick()
-    return () => { if (timer) window.clearTimeout(timer) }
+    void run()
+    return () => {
+      cancelled = true
+      seqRef.current += 1
+      inFlightRef.current = null
+      if (timer) window.clearTimeout(timer)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refresh])
-  return { data, error, refresh }
+
+  return { data, error, loading, refresh }
 }
 
-export const useProject = (projectId: string, intervalMs = 4000) =>
+/** 项目是否处于运行态——空闲时停轮询，避免反复拉取数 MB 的项目 payload。 */
+const projectBusy = (p: Project | null): boolean => {
+  if (!p) return true
+  if (p.bible_status === 'running' || p.plan_status === 'running') return true
+  if (p.refs_status === 'running' || p.scene_refs_status === 'running') return true
+  if (p.episodes?.some(ep =>
+    ep.screenplay_status === 'running'
+    || ep.status === 'scripting'
+    || ep.status === 'generating'
+  )) return true
+  return false
+}
+
+export const useProject = (
+  projectId: string,
+  intervalMs: number | ((p: Project | null) => number) = (p) => projectBusy(p) ? 5000 : 0,
+) =>
   usePoll<Project>(() => api.get(`/projects/${projectId}`), intervalMs, [projectId])
 
-/** 分集是否处于运行态（编剧/分镜/生成中）—— 决定是否需要高频轮询。
+/** 分集是否处于运行态（编剧/分镜/参考图视频）—— 决定是否需要高频轮询。
  *  空闲时彻底停轮询，避免反复拉取 1MB+ 的分集 payload 拖垮页面。 */
 const episodeBusy = (ep: Episode | null): boolean => {
   if (!ep) return true  // 首次未拿到数据时，按可能忙碌处理触发首次拉取后的轮询
   if (ep.screenplay_status === 'running') return true
-  if (ep.status === 'scripting' || ep.status === 'drafting') return true
-  if (ep.shots?.some(s => s.scene_status === 'generating')) return true
+  if (ep.status === 'scripting' || ep.status === 'drafting' || ep.status === 'generating') return true
+  if (ep.shots?.some(s =>
+    s.versions?.some(v => v.status === 'queued' || v.status === 'running')
+  )) return true
   return false
 }
 

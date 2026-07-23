@@ -1,56 +1,39 @@
-from app.compiler import compile_scene_prompt
-from app.schemas import Bible, Character, Shot, World
+"""旧关键帧分支已下线：所有可用入口必须收敛到参考图视频链路。"""
+import asyncio
+import json
+import sqlite3
+
 import pytest
 
-from app.worker import required_keyframe_kinds, scene_generation_kinds
+from app import api, worker
 
 
-def _shot(shot_no: int, continuity: bool) -> dict:
-    return {"shot_no": shot_no, "continuity_from_prev": int(continuity)}
+def test_keyframe_http_routes_are_removed() -> None:
+    paths = {route.path for route in api.router.routes}
+
+    assert "/api/shots/{shot_id}/scene" not in paths
+    assert "/api/shots/{shot_id}/scene/approve" not in paths
+    assert "/api/scenes/{scene_id}" not in paths
+    assert "/api/episodes/{episode_id}/scenes-all" not in paths
 
 
-def test_keyframe_requirements_for_scene_heads_and_continuous_shots() -> None:
-    assert required_keyframe_kinds(_shot(1, False)) == ["head", "tail"]
-    assert required_keyframe_kinds(_shot(2, False)) == ["head", "tail"]
-    assert required_keyframe_kinds(_shot(2, True)) == ["tail"]
+def test_legacy_keyframe_enqueue_is_rejected_with_video_guidance() -> None:
+    with pytest.raises(ValueError, match="参考图视频入口"):
+        worker.enqueue_scene("legacy-shot")
 
 
-def test_scene_generation_kinds_can_target_one_required_keyframe() -> None:
-    assert scene_generation_kinds(_shot(1, False), ["tail"]) == ["tail"]
-    assert scene_generation_kinds(_shot(1, False), ["head"]) == ["head"]
-    assert scene_generation_kinds(_shot(1, False), None) == ["head", "tail"]
-
-
-def test_scene_generation_kinds_rejects_unneeded_head_for_continuous_shot() -> None:
-    with pytest.raises(ValueError):
-        scene_generation_kinds(_shot(2, True), ["head"])
-
-
-def test_tail_keyframe_prompt_targets_ending_moment() -> None:
-    bible = Bible(
-        characters=[
-            Character(
-                name="谷言",
-                role="主角",
-                appearance_canonical="二十八岁男性，黑色短发，深灰西装，腕戴银色手表",
-                personality="冷静",
-            )
-        ],
-        world=World(era="现代", genre="都市", visual_style_canonical="都市漫剧厚涂风，柔和侧光"),
-    )
-    shot = Shot(
-        shot_no=2,
-        duration_s=5,
-        shot_size="中景",
-        camera_move="推近",
-        scene_setting="当日，咖啡厅",
-        characters=["谷言"],
-        action_desc="谷言攥紧纸杯看向门口，脸色沉下去",
-        source_excerpt="谷言攥紧纸杯看向门口。",
-        continuity_from_prev=True,
+def test_legacy_mode_plan_is_upgraded_before_video_generation() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE shots(id TEXT PRIMARY KEY, mode_plan TEXT)")
+    conn.execute(
+        "INSERT INTO shots(id, mode_plan) VALUES(?, ?)",
+        ("shot-8", json.dumps({"mode": "FIRST_LAST_FRAME_MODE"})),
     )
 
-    prompt = compile_scene_prompt(shot, bible, kind="tail")
+    asyncio.run(api._ensure_shot_mode_plan(conn, "shot-8"))
 
-    assert "结束的瞬间" in prompt
-    assert "动作结果清晰可见" in prompt
+    stored = json.loads(
+        conn.execute("SELECT mode_plan FROM shots WHERE id='shot-8'").fetchone()["mode_plan"]
+    )
+    assert stored["mode"] == "REFERENCE_IMAGE_MODE"

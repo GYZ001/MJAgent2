@@ -557,6 +557,14 @@ def get_settings():
 
 
 @router.put("/settings")
+async def put_settings_route(body: dict):
+    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+
+    result = await dispatch("system.update_settings", {"patch": body}, initiator="ui")
+    raise_if_failed(result)
+    return result_http_payload(result)
+
+
 def put_settings(body: dict):
     for key, value in body.items():
         skey = str(key)
@@ -619,3 +627,49 @@ def put_keys(body: dict):
         raise HTTPException(422, "没有提供有效的 Key")
     updated_providers = [k.replace("_API_KEY", "").lower() for k in updated]
     return {"ok": True, "updated": updated_providers}
+
+
+# ---------- MCP 对外接入：Token 管理（PRD AGENT_MCP_CAPABILITY §9.6） ----------
+#
+# 有意不通过 Capability Registry / Command Bus：这是签发/撤销 MCP 访问凭证本身的
+# 运维端点，绝不能被 Agent/外部 MCP 客户端自己调用去给自己签发更高权限的 token。
+# 覆盖扫描豁免见 app/capabilities/catalog.py 的 rest_exemptions。
+
+@router.post("/system/mcp-tokens")
+def create_mcp_token(body: dict):
+    """创建一枚新 MCP token；明文只在这次响应里返回一次。"""
+    from app.mcp import auth as mcp_auth
+
+    scopes = body.get("scopes")
+    if scopes is not None:
+        if not isinstance(scopes, list) or not all(isinstance(s, str) for s in scopes):
+            raise HTTPException(422, "scopes 必须是字符串数组")
+    ttl_s = body.get("ttl_s")
+    if ttl_s is not None:
+        try:
+            ttl_s = int(ttl_s)
+        except (TypeError, ValueError):
+            raise HTTPException(422, "ttl_s 必须是整数秒数") from None
+    name = str(body.get("name") or "").strip()[:80] or None
+    try:
+        token, record = mcp_auth.create_token(scopes=scopes, ttl_s=ttl_s, name=name)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"token": token, **record}
+
+
+@router.get("/system/mcp-tokens")
+def list_mcp_tokens():
+    """列出已创建的 MCP token（脱敏：不返回明文/hash）。"""
+    from app.mcp import auth as mcp_auth
+
+    return {"items": mcp_auth.list_tokens()}
+
+
+@router.delete("/system/mcp-tokens/{token_id}")
+def delete_mcp_token(token_id: str):
+    from app.mcp import auth as mcp_auth
+
+    if not mcp_auth.revoke_token(token_id):
+        raise HTTPException(404, "token 不存在")
+    return {"ok": True}

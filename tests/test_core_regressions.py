@@ -107,6 +107,56 @@ def test_regex_planner_creates_exactly_one_episode_per_chapter(monkeypatch) -> N
     assert conn.execute("SELECT plan_status FROM projects WHERE id='p1'").fetchone()[0] == "ready"
 
 
+def test_regex_replan_skips_existing_title_only_duplicate(monkeypatch) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE projects(
+          id TEXT PRIMARY KEY, plan_status TEXT, plan_error TEXT,
+          key_timeline TEXT, status TEXT
+        );
+        CREATE TABLE chapters(
+          project_id TEXT, idx INTEGER, title TEXT, content TEXT
+        );
+        CREATE TABLE episodes(
+          id TEXT, project_id TEXT, episode_no INTEGER, title TEXT, hook TEXT,
+          cliffhanger TEXT, synopsis TEXT, source_chapters TEXT,
+          target_duration_s INTEGER, status TEXT, created_at REAL
+        );
+        INSERT INTO projects VALUES('p1','running',NULL,NULL,'ingested');
+        INSERT INTO chapters VALUES(
+          'p1',1926,'第一千六百二十二章 双帝之战！（上）',
+          '第一千六百二十二章 双帝之战！（上） 正文 第一千六百二十二章 双帝之战！（上）'
+        );
+        INSERT INTO chapters VALUES(
+          'p1',1927,'第一千六百二十二章双帝之战',
+          '第一千六百二十二章双帝之战 魂天帝踏着血云现身，萧炎迎空而起。'
+        );
+        """
+    )
+    rich_body = "魂天帝与萧炎连续交锋，天地在帝境力量下震颤。" * 12
+    conn.execute(
+        "UPDATE chapters SET content=content || ? WHERE idx=1927",
+        (rich_body,),
+    )
+    conn.commit()
+    monkeypatch.setattr(planning, "get_conn", lambda: conn)
+    monkeypatch.setattr(
+        planning.worker,
+        "delete_project_episodes",
+        lambda project_id: conn.execute(
+            "DELETE FROM episodes WHERE project_id=?", (project_id,)
+        ).rowcount,
+    )
+
+    asyncio.run(planning.run_regex_plan("p1"))
+
+    rows = conn.execute("SELECT * FROM episodes ORDER BY episode_no").fetchall()
+    assert len(rows) == 1
+    assert json.loads(rows[0]["source_chapters"]) == [1927]
+
+
 def test_task_registry_cancels_and_waits_before_returning() -> None:
     async def scenario() -> None:
         finished = asyncio.Event()

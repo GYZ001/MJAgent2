@@ -587,8 +587,28 @@ async def poll_video_task(task_id: str, *, call_meta: dict | None = None) -> dic
     start = time.time()
     model = active_model("video", "hiagent")
     base_url, model_headers = _model_connection("hiagent", model, config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.get(f"{base_url}/contents/generations/tasks/{task_id}", headers=model_headers)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(
+                f"{base_url}/contents/generations/tasks/{task_id}", headers=model_headers)
+    except httpx.RequestError as exc:
+        latency = int((time.time() - start) * 1000)
+        err = ProviderError(
+            f"视频任务状态查询网络异常：{type(exc).__name__}: {exc}",
+            retryable=True,
+            raw=repr(exc),
+            timeout_phase=_timeout_phase(exc) if isinstance(exc, httpx.TimeoutException) else None,
+        )
+        merged_meta = _merge_call_meta(call_meta)
+        log_provider_call(
+            "video_poll", model, "FAILED", None, latency, error=str(err),
+            meta=merged_meta,
+            request_json={
+                "method": "GET",
+                "url": f"{base_url}/contents/generations/tasks/{task_id}",
+            },
+        )
+        raise err from exc
     latency = int((time.time() - start) * 1000)
     if resp.status_code != 200:
         model = active_model("video", "hiagent")

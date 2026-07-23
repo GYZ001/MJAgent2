@@ -1,7 +1,8 @@
 """人物定妆照（跨集一致性增强，PRD §5.4 第 2 层的时间维扩展）。
 
 定妆照按"适用集区间"分段存于 character_portraits（ep_start/ep_end，ep_end=NULL 表示开区间=当前最新版）。
-两条反应式产生路径，都挂在【分镜阶段】（ensure_cards_for_screenplay，分镜展开前），按需触发、不做全量轮询：
+两条反应式产生路径都按集触发、不做全量轮询。新角色发现挂在【剧本阶段】并在正式剧本校验前完成，
+分镜阶段保留幂等兜底；已有角色外观漂移仍在分镜展开前处理：
   ① 新角色发现：剧本里出现、人物谱里没有、戏份够的角色 → 建卡 + 定妆，适用集从首次出场那集起开放。
   ② 已有角色按集漂移：剧本里出现、本集之前已有定妆照的角色 → 用【本集源文】判断外观相比当前锚点
      是否明显变化：
@@ -24,10 +25,14 @@ from pydantic import ValidationError
 
 from app import config, hiagent
 from app.atomic_io import atomic_write_bytes
+from app.character_policy import is_functional_extra
 from app.db import get_conn, get_setting, new_id, now, set_setting
+from app.evidence import repository as evidence_repository
 from app.evidence.media import record_reference_asset
 from app.errors import code_ref
 from app.harness import model_gateway
+from app.harness.types import EvidenceArtifact
+from app.ingest import chapter_is_stub, chapter_titles_match
 from app.refs import _safe_name, portrait_prompt
 from app.schemas import Bible, Character, extract_json
 
@@ -35,6 +40,8 @@ FRAGMENT_WINDOW = 220   # 命中角色名前后各取多少字
 FRAGMENT_BUDGET = 4000  # 单角色单段送审片段总字数预算
 APPEARANCE_MIN = 30     # 外观锚点串下限（与 validate_bible 一致）
 APPEARANCE_MAX = 80     # 外观锚点串上限
+CAST_DISCOVERY_SOURCE_BUDGET = 18000
+CAST_DISCOVERY_DRAFT_BUDGET = 14000
 
 
 # ---------- 原文片段抽取（纯本地，不调模型） ----------
@@ -128,6 +135,8 @@ DISCOVERY_REJUDGE_WINDOW = 20     # 判过"戏份不足"的名字，隔多少集
 # 同名角色卡的建卡互斥锁（逐集分镜并行时，两集可能同时发现同一新角色）。
 _card_locks: dict[tuple[str, str], asyncio.Lock] = {}
 _card_locks_guard = asyncio.Lock()
+_bible_locks: dict[str, asyncio.Lock] = {}
+_bible_locks_guard = asyncio.Lock()
 
 
 async def _card_lock(project_id: str, name: str) -> asyncio.Lock:
@@ -137,6 +146,15 @@ async def _card_lock(project_id: str, name: str) -> asyncio.Lock:
         if lock is None:
             lock = asyncio.Lock()
             _card_locks[key] = lock
+        return lock
+
+
+async def _bible_lock(project_id: str) -> asyncio.Lock:
+    async with _bible_locks_guard:
+        lock = _bible_locks.get(project_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _bible_locks[project_id] = lock
         return lock
 
 
@@ -163,6 +181,113 @@ def _forward_fragments(conn, project_id: str, name: str, from_episode_no: int) -
         (project_id, lo, hi + DISCOVERY_FORWARD_CHAPTERS)).fetchall()
     text = "\n".join((r["content"] or "") for r in rows)
     return extract_character_fragments(text, name), f"第 {from_episode_no} 集相关章节 +{DISCOVERY_FORWARD_CHAPTERS} 章"
+
+
+async def discover_character_candidates(
+    source_text: str,
+    bible: Bible,
+    episode_no: int,
+    *,
+    draft_text: str = "",
+) -> list[dict]:
+    """Extract concrete named cast candidates before/after screenplay generation.
+
+    This stage deliberately does not decide importance.  It only supplies exact
+    candidate names plus evidence; ``ensure_character_card`` remains the single
+    authority for source traceability, alias rejection, prominence, and card fields.
+    """
+    known_names = [c.name for c in bible.characters if c.name]
+    known = "、".join(known_names) or "（无）"
+    prompt = f"""任务：为第 {episode_no} 集做人物卡增量预检，从给定原文和可选剧本草稿中找出【具体、具名、实际出场或开口】的人物。
+
+当前人物谱已有角色：
+{known}
+
+本集原文：
+{(source_text or "")[:CAST_DISCOVERY_SOURCE_BUDGET]}
+
+剧本草稿（可能为空；若与原文冲突，以原文为准）：
+{(draft_text or "")[:CAST_DISCOVERY_DRAFT_BUDGET]}
+
+规则：
+1. 输出原文中的准确姓名，不要把称谓、外号、势力、地名、功法、物品、种族或境界当成人名。
+2. 已有人物也可以输出，后端会去重；不要为了凑数创造人物。
+3. 测验员、守卫、围观者、路人甲等无需跨集定妆的功能性身份不要输出。
+4. 只被提及、没有实际出场且不说话的人，kind="mentioned"；实际出场或开口的人，kind="onscreen"。
+5. evidence 给出不超过 40 字的原文或草稿依据；没有依据就不要输出。
+
+只输出一个 JSON 对象：
+{{"characters": [{{"name": "准确姓名", "kind": "onscreen|mentioned", "evidence": "简短依据"}}]}}"""
+    raw = await model_gateway.chat(
+        [{"role": "user", "content": prompt}],
+        temperature=0.1,
+        max_tokens=1200,
+        call_meta={"stage": "discover_character_candidates", "episode_no": episode_no},
+    )
+    obj = extract_json(raw)
+    haystack = f"{source_text or ''}\n{draft_text or ''}"
+    seen: set[str] = set()
+    candidates: list[dict] = []
+    for item in obj.get("characters") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if (
+            not name
+            or len(name) > 16
+            or name in seen
+            or is_functional_extra(name)
+            or name not in haystack
+        ):
+            continue
+        seen.add(name)
+        candidates.append({
+            "name": name,
+            "kind": "mentioned" if item.get("kind") == "mentioned" else "onscreen",
+            "evidence": str(item.get("evidence") or "").strip()[:80],
+        })
+    return candidates
+
+
+async def ensure_cards_for_text(
+    project_id: str,
+    episode_no: int,
+    source_text: str,
+    bible: Bible,
+    *,
+    draft_text: str = "",
+) -> dict:
+    """Discover and incrementally add important off-bible cast for one screenplay pass."""
+    candidates = await discover_character_candidates(
+        source_text, bible, episode_no, draft_text=draft_text,
+    )
+    known = {c.name for c in bible.characters}
+    unknown = [
+        item for item in candidates
+        if item["name"] not in known
+    ]
+    added: list[dict] = []
+    skipped: list[dict] = []
+    errors: list[str] = []
+    warnings: list[str] = []
+    for item in unknown:
+        result = await ensure_character_card(project_id, item["name"], episode_no)
+        if result.get("status") == "added":
+            added.append(result)
+            if not result.get("has_portrait"):
+                warnings.append(f"{item['name']}：人物卡已添加，定妆照生成失败，需稍后重试")
+        elif result.get("status") in {"skipped_minor", "exists"}:
+            skipped.append(result)
+        else:
+            errors.append(f"{item['name']}：{result.get('reason') or result.get('status') or '补卡失败'}")
+    return {
+        "checked": len(unknown),
+        "candidates": candidates,
+        "added": added,
+        "skipped": skipped,
+        "errors": errors,
+        "warnings": warnings,
+    }
 
 
 async def assess_new_character(name: str, fragments: str, *, style: str,
@@ -272,7 +397,7 @@ async def ensure_character_card(project_id: str, name: str, from_episode_no: int
                 "relationships": verdict["relationships"], "portrait_prompt_override": None})
         except ValidationError as exc:
             return {"status": "error", "name": name, "reason": f"card invalid {exc}"[:240]}
-        bible_version = project["bible_version"] or 0
+        bible_version = (project["bible_version"] or 0) + 1
         # 出图失败也要补卡（重试一次吸收瞬时失败）：定妆照适用集从 from_episode_no 起。
         new_path = new_prompt = None
         for attempt in range(2):
@@ -328,7 +453,9 @@ async def ensure_character_card(project_id: str, name: str, from_episode_no: int
                     (new_id("portrait"), project_id, name, from_episode_no, None, char_obj.appearance_canonical,
                      new_prompt, new_path, None, bible_version, now()))
             conn.commit()
-        _append_character_to_bible(conn, project_id, char_obj.model_dump())
+        bible_lock = await _bible_lock(project_id)
+        async with bible_lock:
+            _append_character_to_bible(conn, project_id, char_obj.model_dump())
         set_setting(_discovery_skip_key(project_id, name), "")  # 已建卡，清掉历史负缓存
         return {"status": "added", "name": name, "has_portrait": bool(new_path), "reason": verdict["reason"]}
 
@@ -341,9 +468,18 @@ def _episode_source_text(conn, project_id: str, episode_no: int) -> str:
     src = json.loads(ep["source_chapters"] or "[]") if ep and ep["source_chapters"] else []
     if not src:
         return ""
+    has_title = _has_column(conn, "chapters", "title")
+    select_cols = "idx, content" + (", title" if has_title else "")
     rows = conn.execute(
-        "SELECT content FROM chapters WHERE project_id=? AND idx>=? AND idx<=? ORDER BY idx",
+        f"SELECT {select_cols} FROM chapters WHERE project_id=? AND idx>=? AND idx<=? ORDER BY idx",
         (project_id, min(src), max(src))).fetchall()
+    if has_title and len(rows) == 1 and chapter_is_stub(dict(rows[0])):
+        following = conn.execute(
+            "SELECT idx, title, content FROM chapters WHERE project_id=? AND idx>? ORDER BY idx LIMIT 1",
+            (project_id, rows[0]["idx"]),
+        ).fetchone()
+        if following and not chapter_is_stub(dict(following)) and chapter_titles_match(dict(rows[0]), dict(following)):
+            rows = [following]
     return "\n".join((r["content"] or "") for r in rows)
 
 
@@ -450,8 +586,9 @@ async def ensure_cards_for_screenplay(project_id: str, episode_no: int, screenpl
     errors: list[str] = []
 
     # ① 新角色（人物谱里没有）
-    unknown = [n for n in names if n not in bible_names]
+    unknown = [n for n in names if n not in bible_names and not is_functional_extra(n)]
     added: list[dict] = []
+    blocking_errors: list[str] = []
     for n in unknown:
         try:
             res = await ensure_character_card(project_id, n, episode_no)
@@ -462,7 +599,9 @@ async def ensure_cards_for_screenplay(project_id: str, episode_no: int, screenpl
         if res.get("status") == "added":
             added.append(res)
         elif res.get("status") == "error":
-            errors.append(f"{n}：发现失败 {res.get('reason')}")
+            message = f"{n}：发现失败 {res.get('reason')}"
+            errors.append(message)
+            blocking_errors.append(message)
 
     # ② 已有角色按集漂移（只判本集之前就已有定妆照的角色；本集新建的天然是最新）
     conn = get_conn()
@@ -504,7 +643,13 @@ async def ensure_cards_for_screenplay(project_id: str, episode_no: int, screenpl
             if res:
                 redrawn.append({"name": name, "reason": v["reason"], **res})
 
-    return {"checked": len(unknown), "added": added, "redrawn": redrawn, "errors": errors}
+    return {
+        "checked": len(unknown),
+        "added": added,
+        "redrawn": redrawn,
+        "errors": errors,
+        "blocking_errors": blocking_errors,
+    }
 
 
 # ---------- 定妆照落盘 / 登记 ----------
@@ -663,18 +808,64 @@ async def _generate_fresh_portrait(project_id: str, name: str, style: str, appea
     return dest, prompt
 
 
-def _append_character_to_bible(conn, project_id: str, char: dict) -> None:
-    """把新发现的角色追加进 bible_json.characters（按名去重，重读再写以免覆盖并发编辑的其它字段）。"""
-    row = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
+def _append_character_to_bible(conn, project_id: str, char: dict) -> bool:
+    """Atomically append a discovered character and advance bible lineage/version."""
+    artifact_supported = (
+        _has_column(conn, "projects", "bible_artifact_id")
+        and _has_table(conn, "artifacts")
+    )
+    select_cols = "bible_json, bible_version"
+    if artifact_supported:
+        select_cols += ", bible_artifact_id"
+    row = conn.execute(f"SELECT {select_cols} FROM projects WHERE id=?", (project_id,)).fetchone()
     if not row or not row["bible_json"]:
-        return
+        return False
     data = json.loads(row["bible_json"])
     if char.get("name") in {c.get("name") for c in data.get("characters", [])}:
-        return
+        return False
     data.setdefault("characters", []).append(char)
-    conn.execute("UPDATE projects SET bible_json=? WHERE id=?",
-                 (json.dumps(data, ensure_ascii=False), project_id))
+    payload = json.dumps(data, ensure_ascii=False)
+    conn.execute(
+        "UPDATE projects SET bible_json=?, bible_version=COALESCE(bible_version,0)+1 WHERE id=?",
+        (payload, project_id),
+    )
     conn.commit()
+    if artifact_supported:
+        try:
+            previous_id = row["bible_artifact_id"]
+            artifact = evidence_repository.create_artifact(EvidenceArtifact(
+                type="character_bible",
+                scope_type="project",
+                scope_id=project_id,
+                status="approved",
+                trust_level="T3",
+                content=data,
+                parent_artifact_ids=[previous_id] if previous_id else [],
+                contract_version="character-bible-1.0.0",
+                prompt_version="incremental-character-discovery-1.0.0",
+                model_snapshot={"operation": "incremental_add", "character_name": char.get("name")},
+            ))
+            conn.execute(
+                "UPDATE projects SET bible_artifact_id=? WHERE id=?",
+                (artifact["id"], project_id),
+            )
+            conn.commit()
+        except Exception as exc:  # noqa: BLE001 -- card/version is authoritative even if lineage recording fails
+            code_ref(
+                exc,
+                action="append_character_bible_artifact",
+                context={"project_id": project_id, "character_name": char.get("name")},
+            )
+    return True
+
+
 def _has_column(conn, table: str, column: str) -> bool:
     """Support focused tests/old snapshots before app.db runs migrations."""
     return any(row[1] == column for row in conn.execute(f"PRAGMA table_info({table})").fetchall())
+
+
+def _has_table(conn, table: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone() is not None

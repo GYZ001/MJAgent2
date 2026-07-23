@@ -181,6 +181,42 @@ def test_video_create_sends_stable_idempotency_key(monkeypatch) -> None:
     assert seen_headers[0]["Idempotency-Key"] == "video-create-ver_1"
 
 
+def test_video_poll_network_error_is_retryable(monkeypatch) -> None:
+    calls: list[tuple] = []
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url, *, headers):
+            request = httpx.Request("GET", url, headers=headers)
+            raise httpx.ConnectError("temporary TLS failure", request=request)
+
+    monkeypatch.setattr(hiagent.httpx, "AsyncClient", lambda **_kwargs: Client())
+    monkeypatch.setattr(
+        hiagent, "_model_connection",
+        lambda *_args: ("https://provider.invalid", {"x": "y"}),
+    )
+    monkeypatch.setattr(hiagent, "active_model", lambda *_args: "video-model")
+    monkeypatch.setattr(
+        hiagent, "log_provider_call",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    try:
+        asyncio.run(hiagent.poll_video_task("task-1"))
+    except hiagent.ProviderError as exc:
+        assert exc.retryable is True
+        assert "ConnectError" in str(exc)
+    else:
+        raise AssertionError("expected ProviderError")
+
+    assert calls[0][0][:3] == ("video_poll", "video-model", "FAILED")
+
+
 def test_prepare_image_data_urls_records_compression_stats(monkeypatch) -> None:
     raw = b"large-image-payload"
     monkeypatch.setattr(hiagent, "_compress_image_bytes", lambda value: b"small" if value == raw else value)

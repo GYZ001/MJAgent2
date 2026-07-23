@@ -15,7 +15,7 @@ from app.evidence import repository as evidence_repository
 from app.harness.contracts import get_contract
 from app.harness.types import Evaluation, EvidenceArtifact
 from app.harness.context import ContextPack
-from app.ingest import ingest_novel
+from app.ingest import chapter_is_stub, chapter_titles_match, ingest_novel
 from app.orchestration.engine import WorkflowRecorder, fingerprint
 from app.planning import chapter_preview
 from app.schemas import (Bible, EpisodeScreenplay, Shot, Storyboard,
@@ -393,6 +393,21 @@ def _episode_source_text(conn, ep) -> str:
     chapters = rows_to_dicts(conn.execute(
         f"SELECT * FROM chapters WHERE project_id=? AND idx IN ({placeholders}) ORDER BY idx",
         (ep["project_id"], *source_chapters)).fetchall())
+    # Backward-compatible repair for already imported projects: if an episode points
+    # at a title-only duplicate, use the adjacent rich copy with the same normalized
+    # heading. New uploads are deduplicated in app.ingest before reaching the DB.
+    if len(chapters) == 1 and chapter_is_stub(chapters[0]):
+        following = conn.execute(
+            "SELECT * FROM chapters WHERE project_id=? AND idx>? ORDER BY idx LIMIT 1",
+            (ep["project_id"], chapters[0]["idx"]),
+        ).fetchone()
+        if following:
+            following_dict = dict(following)
+            if (
+                not chapter_is_stub(following_dict)
+                and chapter_titles_match(chapters[0], following_dict)
+            ):
+                chapters = [following_dict]
     return "\n\n".join(f"【{ch['title']}】\n{ch['content']}" for ch in chapters)
 
 
@@ -470,9 +485,8 @@ def _screenplay_ready(ep) -> bool:
 
 # ---------- 项目与摄入 ----------
 
-@router.post("/projects")
-async def create_project(name: str = Form(...), file: UploadFile = File(...)):
-    raw = await file.read()
+def _create_project_core(name: str | None, filename: str, raw: bytes) -> dict:
+    """导入小说的领域逻辑，供 REST 路由与 ``project.import_novel`` Command Handler 共用。"""
     if not raw:
         raise HTTPException(400, "文件为空")
     report = ingest_novel(raw)
@@ -482,12 +496,55 @@ async def create_project(name: str = Form(...), file: UploadFile = File(...)):
     project_id = new_id("proj")
     conn.execute(
         "INSERT INTO projects(id, name, status, novel_chars, created_at) VALUES(?,?,'ingested',?,?)",
-        (project_id, name.strip() or file.filename, report["total_chars"], now()))
+        (project_id, (name or "").strip() or filename, report["total_chars"], now()))
     conn.executemany(
         "INSERT INTO chapters(project_id, idx, title, content, char_count) VALUES(?,?,?,?,?)",
         [(project_id, ch["idx"], ch["title"], ch["content"], len(ch["content"])) for ch in report["chapters"]])
     conn.commit()
-    return {"project_id": project_id, "ingestion": {k: report[k] for k in ("total_chars", "removed_lines", "chapter_count", "auto_split")}}
+    return {
+        "project_id": project_id,
+        "ingestion": {
+            key: report[key]
+            for key in (
+                "total_chars",
+                "removed_lines",
+                "chapter_count",
+                "deduplicated_stub_chapters",
+                "auto_split",
+            )
+        },
+    }
+
+
+@router.post("/attachments/novel")
+async def upload_novel_attachment(file: UploadFile = File(...)):
+    """用户在系统文件选择器中挑选 TXT 后，前端立即换发短时效 attachment_token（不暴露真实路径）。"""
+    from app.capabilities.attachments import store_upload
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, "文件为空")
+    token = store_upload(file.filename or "novel.txt", raw, content_type=file.content_type)
+    return {"attachment_token": token, "filename": file.filename}
+
+
+@router.post("/projects")
+async def create_project(name: str = Form(...), file: UploadFile = File(...)):
+    """页面上传入口：内部换发 attachment_token 后统一走 Command Bus，与 Agent/MCP 同一实现。"""
+    from app.capabilities.attachments import store_upload
+    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, "文件为空")
+    token = store_upload(file.filename or "novel.txt", raw)
+    result = await dispatch(
+        "project.import_novel",
+        {"attachment_token": token, "name": name},
+        initiator="ui",
+    )
+    raise_if_failed(result)
+    return result_http_payload(result)
 
 
 @router.get("/projects")
@@ -722,10 +779,10 @@ def read_chapter(project_id: str, idx: int):
             "first_idx": bounds["lo"], "last_idx": bounds["hi"], "total": bounds["n"]}
 
 
-@router.delete("/projects/{project_id}")
-async def delete_project(project_id: str):
+async def _delete_project_core(project_id: str) -> dict:
+    """删除项目的领域逻辑，供 REST 路由与 ``project.delete`` Command Handler 共用。"""
     _project_or_404(project_id)
-    # 先停止并等待所有项目级后台协程退出，防止删库后任务继续回写孤儿版本/关键帧。
+    # 先停止并等待所有项目级后台协程退出，防止删库后任务继续回写孤儿版本/参考图。
     cancelled_tasks = await task_registry.cancel_project(project_id)
     conn = get_conn()
     # 文件和衍生产物由同一权威清理函数处理；数据库级联负责关系完整性。
@@ -742,21 +799,42 @@ async def delete_project(project_id: str):
     return {"deleted": project_id, "cancelled_tasks": cancelled_tasks}
 
 
+@router.delete("/projects/{project_id}")
+async def delete_project(project_id: str):
+    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+
+    result = await dispatch("project.delete", {"project_id": project_id}, initiator="ui")
+    raise_if_failed(result)
+    return result_http_payload(result)
+
+
 # ---------- 一键全自动成片 ----------
 
-@router.post("/projects/{project_id}/auto")
-async def start_auto(project_id: str, body: dict | None = Body(None)):
-    """启动全流程自动化：人物谱→定妆照+分集→每集（分镜→确认→关键帧→视频）→合成。
-    自适应跳过已完成步骤，可重复点击从断点续做。
-    body.export_dir：可选导出目录，每集成片合成后另存为「书名第N集.mp4」（同名已存在则跳过）。"""
+async def _start_auto_core(project_id: str, export_dir: str | None) -> dict:
+    """启动全流程自动化的领域逻辑，供 REST 路由与 ``production.auto_start`` Command Handler 共用。
+    人物谱→定妆照+分集→每集（分镜→确认→参考图视频）→合成。自适应跳过已完成步骤，可重复点击从断点续做。
+    export_dir：可选导出目录，每集成片合成后另存为「书名第N集.mp4」（同名已存在则跳过）。"""
     _project_or_404(project_id)
     _require_harness_engine(project_id)
     from app import auto
     if auto.is_running(project_id):
         raise HTTPException(409, "该项目的自动成片已在进行中")
-    export_dir = (body or {}).get("export_dir")
     run_id = auto.start(project_id, export_dir=export_dir)
     return {"status": "running", "run_id": run_id}
+
+
+@router.post("/projects/{project_id}/auto")
+async def start_auto(project_id: str, body: dict | None = Body(None)):
+    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+
+    export_dir = (body or {}).get("export_dir")
+    result = await dispatch(
+        "production.auto_start",
+        {"project_id": project_id, "directory_grant": export_dir},
+        initiator="ui",
+    )
+    raise_if_failed(result)
+    return result_http_payload(result)
 
 
 @router.get("/projects/{project_id}/auto/status")
@@ -768,9 +846,11 @@ def auto_status(project_id: str):
 
 @router.post("/projects/{project_id}/auto/cancel")
 async def cancel_auto(project_id: str):
-    _project_or_404(project_id)
-    from app import auto
-    return {"cancelled": await auto.cancel(project_id)}
+    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+
+    result = await dispatch("production.auto_cancel", {"project_id": project_id}, initiator="ui")
+    raise_if_failed(result)
+    return result_http_payload(result)
 
 
 # ---------- 角色圣经 ----------
@@ -931,15 +1011,15 @@ async def _recorded_bible_task(
         raise
 
 
-@router.post("/projects/{project_id}/bible")
-async def start_bible(project_id: str, body: dict | None = Body(None)):
+async def _start_bible_core(project_id: str, feedback: str) -> dict:
+    """启动人物谱生成的领域逻辑，供 REST 路由与 ``bible.generate`` Command Handler 共用。"""
     p = _project_or_404(project_id)
     _require_harness_engine(project_id)
     if p["bible_status"] == "running" and _bible_task_active(project_id):
         raise HTTPException(409, "角色圣经正在生成中")
     if p["refs_status"] == "running":
         raise HTTPException(409, "定妆照正在生成中，请先停止后再重生人物谱")
-    feedback = str((body or {}).get("feedback") or "").strip()
+    feedback = feedback.strip()
     if len(feedback) > 2000:
         raise HTTPException(400, "打回要求过长，请控制在 2000 字以内")
     conn = get_conn()
@@ -957,9 +1037,21 @@ async def start_bible(project_id: str, body: dict | None = Body(None)):
     return {"status": "running", "run_id": recorder.run_id}
 
 
-@router.post("/projects/{project_id}/bible/cancel")
-async def cancel_bible(project_id: str):
-    """停止人物谱生成。若人物谱尚未完成，停止后不会继续触发后续定妆照任务。"""
+@router.post("/projects/{project_id}/bible")
+async def start_bible(project_id: str, body: dict | None = Body(None)):
+    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+
+    feedback = str((body or {}).get("feedback") or "")
+    result = await dispatch(
+        "bible.generate", {"project_id": project_id, "feedback": feedback}, initiator="ui"
+    )
+    raise_if_failed(result)
+    return result_http_payload(result)
+
+
+async def _cancel_bible_core(project_id: str) -> dict:
+    """停止人物谱生成的领域逻辑，供 REST 路由与 ``bible.cancel`` Command Handler 共用。
+    若人物谱尚未完成，停止后不会继续触发后续定妆照任务。"""
     p = _project_or_404(project_id)
     stopped = await task_registry.cancel_and_wait("bible", project_id)
     conn = get_conn()
@@ -970,6 +1062,15 @@ async def cancel_bible(project_id: str):
     conn.commit()
     was_running = p["bible_status"] == "running"
     return {"stopped": stopped or was_running}
+
+
+@router.post("/projects/{project_id}/bible/cancel")
+async def cancel_bible(project_id: str):
+    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+
+    result = await dispatch("bible.cancel", {"project_id": project_id}, initiator="ui")
+    raise_if_failed(result)
+    return result_http_payload(result)
 
 
 def _purge_for_style_change(project_id: str, instance: "Bible") -> dict:
@@ -1342,7 +1443,56 @@ def recover_screenplay_tasks() -> int:
     return resumed
 
 
-async def _screenplay_task(episode_id: str) -> EpisodeScreenplay | None:
+async def _screenplay_character_discovery(
+    episode_id: str,
+    source_text: str,
+    *,
+    draft_text: str = "",
+) -> dict:
+    """Run the required incremental cast pass for one screenplay generation."""
+    conn = get_conn()
+    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    if not ep:
+        raise StageError("新人物发现", ["剧集不存在"])
+    project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
+    if not project or not (project["bible_json"] or "").strip():
+        # Preserve the existing placeholder-bible workflow. Projects with a real
+        # bible must pass discovery; placeholder projects can still draft text.
+        return {
+            "checked": 0, "candidates": [], "added": [], "skipped": [],
+            "errors": [], "warnings": ["项目尚无人物谱，已跳过增量人物发现"],
+        }
+    bible = _project_bible_or_placeholder(project)
+    from app.portraits import ensure_cards_for_text
+
+    result = await ensure_cards_for_text(
+        ep["project_id"],
+        ep["episode_no"],
+        source_text,
+        bible,
+        draft_text=draft_text,
+    )
+    if result.get("errors"):
+        raise StageError("新人物发现", list(result["errors"]))
+    for warning in result.get("warnings") or []:
+        errors.log_error(
+            None,
+            action="screenplay_character_discovery_warning",
+            context={
+                "project_id": ep["project_id"],
+                "episode_id": episode_id,
+                "episode_no": ep["episode_no"],
+            },
+            message=warning,
+        )
+    return result
+
+
+async def _screenplay_task(
+    episode_id: str,
+    *,
+    preflight_result: dict | None = None,
+) -> EpisodeScreenplay | None:
     conn = get_conn()
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     try:
@@ -1350,6 +1500,11 @@ async def _screenplay_task(episode_id: str) -> EpisodeScreenplay | None:
         p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
         bible = _project_bible_or_placeholder(p)
         source_text = _episode_source_text(conn, ep)
+        if preflight_result is None:
+            preflight_result = await _screenplay_character_discovery(episode_id, source_text)
+        if preflight_result.get("added"):
+            p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
+            bible = _project_bible_or_placeholder(p)
         compact_target = _storyboard_target_for_source(ep_data.get("target_duration_s"), len(source_text))
         if compact_target != ep_data.get("target_duration_s"):
             conn.execute("UPDATE episodes SET target_duration_s=? WHERE id=?", (compact_target, episode_id))
@@ -1360,6 +1515,26 @@ async def _screenplay_task(episode_id: str) -> EpisodeScreenplay | None:
             (ep["project_id"], ep["episode_no"] - 1)).fetchone()
         script = await generate_screenplay(ep_data, source_text, bible,
                                            prev_ending=prev["cliffhanger"] if prev else "")
+        # Second guard: audit the actual generated body, not only the source preflight.
+        # This catches named people that the model placed in prose/dialogue while
+        # omitting them from scene_outline.characters (the historical deadlock).
+        draft_audit = await _screenplay_character_discovery(
+            episode_id,
+            source_text,
+            draft_text=script.model_dump_json(),
+        )
+        if draft_audit.get("added"):
+            p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
+            bible = _project_bible_or_placeholder(p)
+            # Regenerate at most once with the expanded bible so the final outline,
+            # dialogue attribution, relationships, and speech styles all share the
+            # same authoritative cast.
+            script = await generate_screenplay(
+                ep_data,
+                source_text,
+                bible,
+                prev_ending=prev["cliffhanger"] if prev else "",
+            )
         old_script = _load_screenplay(ep)
         script = _prepare_screenplay_for_storage(
             ep, script,
@@ -1488,8 +1663,8 @@ async def _recorded_screenplay_task(
     episode_id: str,
     recorder: WorkflowRecorder,
 ) -> EpisodeScreenplay | None:
-    async def operation() -> EpisodeScreenplay:
-        generated = await _screenplay_task(episode_id)
+    async def operation(preflight: dict) -> EpisodeScreenplay:
+        generated = await _screenplay_task(episode_id, preflight_result=preflight)
         if generated is None:
             row = get_conn().execute(
                 "SELECT screenplay_error FROM episodes WHERE id=?", (episode_id,)
@@ -1499,10 +1674,47 @@ async def _recorded_screenplay_task(
 
     try:
         recorder.start()
+        discovery_source = _episode_source_text(
+            get_conn(),
+            get_conn().execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone(),
+        )
+        _, preflight = await recorder.step(
+            "character_discovery",
+            lambda: _screenplay_character_discovery(episode_id, discovery_source),
+            agent_name="screenplay_character_discovery",
+            context_manifest={
+                "episode_id": episode_id,
+                "source_chars": len(discovery_source),
+                "phase": "before_screenplay",
+            },
+        )
+        # Discovery may advance bible_version. Refresh the persisted fingerprint and
+        # context pack before the screenplay step so evidence describes the inputs
+        # actually used by generation.
+        fingerprint_ep = get_conn().execute(
+            "SELECT * FROM episodes WHERE id=?", (episode_id,)
+        ).fetchone()
+        fingerprint_project = get_conn().execute(
+            "SELECT bible_version FROM projects WHERE id=?", (fingerprint_ep["project_id"],)
+        ).fetchone()
+        get_conn().execute(
+            "UPDATE workflow_runs SET input_fingerprint=?, updated_at=? WHERE id=?",
+            (
+                fingerprint(
+                    episode_id,
+                    fingerprint_ep["source_chapters"],
+                    discovery_source,
+                    fingerprint_project["bible_version"] if fingerprint_project else 0,
+                ),
+                now(),
+                recorder.run_id,
+            ),
+        )
+        get_conn().commit()
         input_artifact_ids, context_manifest = _screenplay_context_pack(episode_id)
         _, script = await recorder.step(
             "screenplay",
-            operation,
+            lambda: operation(preflight),
             contract_key="screenplay",
             agent_name="screenplay_agent_loop",
             input_artifact_ids=input_artifact_ids,
@@ -1522,6 +1734,20 @@ async def _recorded_screenplay_task(
         recorder.cancel("剧本生成已取消")
         raise
     except Exception as exc:  # noqa: BLE001 -- failure is persisted for Run Center
+        row = get_conn().execute(
+            "SELECT screenplay_status FROM episodes WHERE id=?", (episode_id,)
+        ).fetchone()
+        if row and row["screenplay_status"] == "running":
+            public = errors.record_and_format(
+                exc,
+                action="screenplay_generate",
+                context={"episode_id": episode_id, "phase": "character_discovery"},
+            )
+            get_conn().execute(
+                "UPDATE episodes SET screenplay_status='failed', screenplay_error=?, screenplay_updated_at=? WHERE id=?",
+                (public, now(), episode_id),
+            )
+            get_conn().commit()
         recorder.fail(exc)
         return None
 
@@ -1538,7 +1764,7 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
     conn = get_conn()
     has_shots = conn.execute("SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)).fetchone()["c"] > 0
     if has_shots and not force:
-        raise HTTPException(409, "重新生成剧本会清空本集现有分镜、关键帧、视频和成片，请确认后重试")
+        raise HTTPException(409, "重新生成剧本会清空本集现有分镜、参考图、视频和成片，请确认后重试")
     started_at = now()
     conn.execute(
         "UPDATE episodes SET screenplay_status='running', screenplay_error=NULL, screenplay_started_at=?, screenplay_updated_at=? WHERE id=?",
@@ -1656,7 +1882,7 @@ def edit_screenplay(episode_id: str, body: dict):
     )
     has_shots = conn.execute("SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)).fetchone()["c"] > 0
     if has_shots and not force:
-        raise HTTPException(409, "修改剧本会清空本集现有分镜、关键帧、视频和成片，请确认后重试")
+        raise HTTPException(409, "修改剧本会清空本集现有分镜、参考图、视频和成片，请确认后重试")
     if has_shots:
         worker.delete_episode_shots(episode_id)
     candidate = evidence_repository.create_artifact(
@@ -1931,15 +2157,27 @@ async def _storyboard_task(episode_id: str, *, resume: bool = True):
         bible = _project_bible_or_placeholder(p)
         # 定妆照按集反应式维护（在分镜展开前）：①新角色发现并补进人物谱——否则 validate_storyboard 会因
         # "角色圣经中不存在"把新角色从分镜里刷掉；②已有角色外观漂移则图生图重绘新段并同步 bible 锚点。
-        # 任一失败都不阻断分镜，按原人物谱继续。
-        try:
-            from app.portraits import ensure_cards_for_screenplay
-            disc = await ensure_cards_for_screenplay(ep["project_id"], ep["episode_no"], screenplay, bible)
-            if disc.get("added") or disc.get("redrawn"):
-                p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
-                bible = _project_bible_or_placeholder(p)
-        except Exception:  # noqa: BLE001 定妆照维护是增强项，失败就按原人物谱继续分镜
-            pass
+        # 新人物补卡失败是阻塞问题；已有角色漂移重绘失败是可见的非阻塞警告。
+        from app.portraits import ensure_cards_for_screenplay
+        disc = await ensure_cards_for_screenplay(
+            ep["project_id"], ep["episode_no"], screenplay, bible,
+        )
+        if disc.get("blocking_errors"):
+            raise StageError("新人物发现", list(disc["blocking_errors"]))
+        for warning in disc.get("errors") or []:
+            errors.log_error(
+                None,
+                action="storyboard_character_maintenance_warning",
+                context={
+                    "project_id": ep["project_id"],
+                    "episode_id": episode_id,
+                    "episode_no": ep["episode_no"],
+                },
+                message=warning,
+            )
+        if disc.get("added") or disc.get("redrawn"):
+            p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
+            bible = _project_bible_or_placeholder(p)
         # 场景图素材库按集反应式维护（分镜展开前）：剧本里出现、库里没有、够戏份的新场景 → 补入库 + 出图，
         # 使分镜能命中库内场景、validate_storyboard_scenes 通过。失败不阻断分镜（按现有库继续）。
         try:
@@ -2380,12 +2618,21 @@ async def _plan_one_shot(shot_row) -> dict:
 
 
 async def _ensure_shot_mode_plan(conn, shot_id: str, *, force: bool = False) -> None:
-    """生成前确保该镜已有固定参考图模式计划。已存在且非强制时跳过。"""
+    """生成前确保该镜已有固定参考图模式计划。
+
+    旧版可能残留首/尾关键帧模式计划；这类计划不能因为字段非空就被复用，
+    必须原地升级为固定参考图模式，保证所有新视频只走同一条链路。
+    """
     shot_row = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
     if not shot_row:
         return
     if not force and shot_row["mode_plan"]:
-        return
+        try:
+            existing = json.loads(shot_row["mode_plan"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            existing = None
+        if isinstance(existing, dict) and existing.get("mode") == "REFERENCE_IMAGE_MODE":
+            return
     plan_dict = await _plan_one_shot(shot_row)
     conn.execute("UPDATE shots SET mode_plan=? WHERE id=?",
                  (json.dumps(plan_dict, ensure_ascii=False), shot_id))
@@ -2435,17 +2682,10 @@ def episode_detail(episode_id: str):
     ep["cost_limit_cny"] = float(get_setting("episode_cost_limit_cny") or 100)
     shots = rows_to_dicts(shot_rows)
     from app.config import PROJECTS_DIR
-    shots_by_no = {s["shot_no"]: s for s in shots}
     for s in shots:
         s["characters"] = json.loads(s["characters"] or "[]")
         s["dialogues"] = json.loads(s["dialogues"] or "[]")
         s["est_cost_cny"] = shot_cost_cny(s["duration_s"])
-        s["scene_est_cost_cny"] = round(
-            config.IMAGE_PRICE_PER_UNIT
-            * max(int(get_setting("scene_max_attempts") or 3), 1)
-            * len(worker.required_keyframe_kinds(s)),
-            2,
-        )
         if s.get("storyboard_artifact_id"):
             shot_artifact = evidence_repository.get_artifact(s["storyboard_artifact_id"])
             if shot_artifact:
@@ -2457,51 +2697,17 @@ def episode_detail(episode_id: str):
             s["storyboard_evidence"] = shot_artifact
         else:
             s["storyboard_evidence"] = None
-        s["required_keyframes"] = worker.required_keyframe_kinds(s)
         # mode_plan 存的是 JSON 文本，解析成对象供前端只读展示模型决策
         try:
             s["mode_plan"] = json.loads(s["mode_plan"]) if s.get("mode_plan") else None
         except (TypeError, ValueError):
             s["mode_plan"] = None
-        if s["scene_status"] != "generating":
-            ready = worker.shot_keyframes_ready(s)
-            if ready and s["scene_status"] == "approved":
-                s["scene_status"] = "approved"
-            elif not ready and s["scene_status"] == "approved":
-                s["scene_status"] = "review"
-        # 链失效：视频使用的首/尾关键图已不是当前过审图 → 需从本镜往后重生
+        # 新链路只使用参考图；旧关键帧字段仅保留在数据库中做历史兼容，不再对外暴露或参与状态判断。
+        for legacy_key in (
+            "approved_scene_id", "approved_head_scene_id", "approved_tail_scene_id", "scene_status",
+        ):
+            s.pop(legacy_key, None)
         s["video_stale"] = False
-        if s["continuity_from_prev"] and s["adopted_version_id"]:
-            av = conn.execute("SELECT image_inputs FROM shot_versions WHERE id=?", (s["adopted_version_id"],)).fetchone()
-            meta = json.loads((av["image_inputs"] if av else None) or "{}")
-            if meta.get("mode") != "REFERENCE_IMAGE_MODE":
-                pred = shots_by_no.get(s["shot_no"] - 1)
-                expected_first = pred.get("approved_tail_scene_id") if pred else None
-                expected_last = s.get("approved_tail_scene_id")
-                if (expected_first and meta.get("first_frame_scene_id") != expected_first) or (
-                        expected_last and meta.get("last_frame_scene_id") != expected_last):
-                    s["video_stale"] = True
-        elif s["adopted_version_id"]:
-            av = conn.execute("SELECT image_inputs FROM shot_versions WHERE id=?", (s["adopted_version_id"],)).fetchone()
-            meta = json.loads((av["image_inputs"] if av else None) or "{}")
-            if meta.get("mode") != "REFERENCE_IMAGE_MODE":
-                expected_first = s.get("approved_head_scene_id")
-                expected_last = s.get("approved_tail_scene_id")
-                if (expected_first and meta.get("first_frame_scene_id") != expected_first) or (
-                        expected_last and meta.get("last_frame_scene_id") != expected_last):
-                    s["video_stale"] = True
-        # 场景关键帧候选（图像评审阶段）
-        scenes = rows_to_dicts(conn.execute(
-            "SELECT id, version_no, kind, image_path, status, error, qa_json, artifact_id, adoption_reason FROM shot_scenes WHERE shot_id=? ORDER BY kind, version_no DESC",
-            (s["id"],)).fetchall())
-        for sc in scenes:
-            sc["qa"] = json.loads(sc["qa_json"]) if sc["qa_json"] else None
-            sc.pop("qa_json", None)
-            if sc.get("image_path"):
-                rel = Path(sc["image_path"]).relative_to(PROJECTS_DIR).as_posix()
-                sc["image_url"] = f"/media/{rel}"
-            sc.pop("image_path", None)
-        s["scenes"] = scenes
         versions = rows_to_dicts(conn.execute(
             "SELECT * FROM shot_versions WHERE shot_id=? ORDER BY version_no DESC", (s["id"],)).fetchall())
         for v in versions:
@@ -2593,7 +2799,7 @@ def edit_shot(shot_id: str, body: dict):
         (manual_artifact["id"], shot_id),
     )
     conn.commit()
-    # 任一分镜字段都参与关键帧、参考图或视频 prompt。保存后统一清理全部旧衍生产物，
+    # 任一分镜字段都参与参考图或视频 prompt。保存后统一清理全部旧衍生产物，
     # 避免 done/generating 状态继续展示旧成片；剧集必须重新确认后才能花钱生成。
     invalidated = worker.clear_shot_artifacts(shot_id)
     conn.execute("UPDATE episodes SET status='scripted' WHERE id=?", (shot["episode_id"],))
@@ -2739,130 +2945,25 @@ def confirm_episode_core(episode_id: str) -> dict:
 
 
 @router.post("/episodes/{episode_id}/confirm")
-def confirm_episode(episode_id: str):
+async def confirm_episode(episode_id: str):
     """运行确定性确认门；校验通过后把剧集推进到 confirmed。"""
-    _episode_or_404(episode_id)
-    try:
-        return confirm_episode_core(episode_id)
-    except ValueError as exc:
-        raise HTTPException(422, str(exc))
+    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
 
-
-# ---------- 场景关键帧与评审 ----------
-
-# ----- 场景关键帧（视频前置：图像生成 + 评审门） -----
-
-@router.post("/shots/{shot_id}/scene")
-def generate_scene(shot_id: str, body: dict | None = Body(None)):
-    """为单个镜头生成场景关键帧候选（1~3 张）并自动评审。"""
-    try:
-        return worker.enqueue_scene(shot_id, kinds=(body or {}).get("kinds"))
-    except ValueError as exc:
-        raise HTTPException(409, str(exc))
-
-
-@router.post("/shots/{shot_id}/scene/approve")
-def approve_scene(shot_id: str, body: dict):
-    """人工选定某张关键帧候选（首图或尾图）。"""
-    scene_id = body.get("scene_id")
-    conn = get_conn()
-    sc = conn.execute("SELECT * FROM shot_scenes WHERE id=? AND shot_id=?", (scene_id, shot_id)).fetchone()
-    if not sc or sc["status"] != "succeeded" or not sc["image_path"]:
-        raise HTTPException(409, "该场景候选不存在或未成功")
-    from app.evidence import media as media_evidence
-
-    try:
-        artifact = media_evidence.record_scene_candidate(scene_id)
-    except (OSError, ValueError) as exc:
-        raise HTTPException(409, f"候选证据创建失败：{exc}") from exc
-    reason = str(body.get("reason") or "人工横向比较后采用").strip()
-    evidence_repository.commit_artifact(
-        None,
-        artifact["id"],
-        [Evaluation(
-            evaluator_type="human", evaluator_name=str(body.get("decided_by") or "user"),
-            evaluator_version="1.0.0", status="passed", hard_gate_passed=True,
-            score=100, evidence={"decision": "adopt", "reason": reason},
-        )],
-    )
-    shot_before = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
-    previous_id = (shot_before["approved_head_scene_id"] if sc["kind"] == "head"
-                   else shot_before["approved_tail_scene_id"])
-    if sc["kind"] == "head":
-        conn.execute("UPDATE shots SET approved_head_scene_id=? WHERE id=?", (scene_id, shot_id))
-    elif sc["kind"] == "tail":
-        conn.execute("UPDATE shots SET approved_tail_scene_id=?, approved_scene_id=? WHERE id=?", (scene_id, scene_id, shot_id))
-    else:
-        raise HTTPException(409, f"未知关键帧类型：{sc['kind']}")
-    shot = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
-    status = "approved" if worker.shot_keyframes_ready(shot) else "review"
-    conn.execute("UPDATE shots SET scene_status=? WHERE id=?", (status, shot_id))
-    conn.execute("UPDATE shot_scenes SET adoption_reason=? WHERE id=?", (reason, scene_id))
-    conn.execute(
-        """INSERT INTO gate_decisions(
-               id, artifact_id, gate_key, decision, decided_by, reason, created_at
-           ) VALUES(?,?,?,?,?,?,?)""",
-        (
-            new_id("gate"), artifact["id"], "keyframe_adoption", "approve",
-            str(body.get("decided_by") or "user"), reason, now(),
-        ),
-    )
-    conn.commit()
-    invalidated = None
-    if previous_id != scene_id:
-        invalidated = worker.invalidate_shot_video_derivatives(shot_id)
-    return {"approved_scene_id": scene_id, "kind": sc["kind"], "scene_status": status,
-            "invalidated": invalidated, "artifact_id": artifact["id"], "reason": reason}
-
-
-@router.delete("/scenes/{scene_id}")
-def delete_scene(scene_id: str):
-    """删除一张关键帧候选（含图片文件）。若删的是已采用的首/尾图，则清空该采用并重算场景状态。"""
-    conn = get_conn()
-    sc = conn.execute("SELECT * FROM shot_scenes WHERE id=?", (scene_id,)).fetchone()
-    if not sc:
-        raise HTTPException(404, "关键帧不存在")
-    shot_id = sc["shot_id"]
-    shot_before = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
-    was_approved = bool(
-        shot_before and scene_id in {
-            shot_before["approved_scene_id"],
-            shot_before["approved_head_scene_id"],
-            shot_before["approved_tail_scene_id"],
-        }
-    )
-    if sc["image_path"]:
-        try:
-            Path(sc["image_path"]).unlink()
-        except OSError:
-            pass
-    conn.execute("DELETE FROM shot_scenes WHERE id=?", (scene_id,))
-    conn.execute("UPDATE shots SET approved_head_scene_id=NULL WHERE id=? AND approved_head_scene_id=?", (shot_id, scene_id))
-    conn.execute("UPDATE shots SET approved_tail_scene_id=NULL, approved_scene_id=NULL WHERE id=? AND approved_tail_scene_id=?", (shot_id, scene_id))
-    shot = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
-    remaining = conn.execute("SELECT COUNT(*) AS c FROM shot_scenes WHERE shot_id=?", (shot_id,)).fetchone()["c"]
-    status = "approved" if worker.shot_keyframes_ready(shot) else ("review" if remaining else "none")
-    conn.execute("UPDATE shots SET scene_status=? WHERE id=?", (status, shot_id))
-    conn.commit()
-    invalidated = None
-    if was_approved:
-        invalidated = worker.invalidate_shot_video_derivatives(shot_id)
-    elif remaining == 0:
-        invalidated = worker.invalidate_shot_video_derivatives(shot_id)
-    video_purged = int((invalidated or {}).get("videos", 0))
-    return {"deleted": scene_id, "scene_status": status, "video_purged": video_purged}
+    result = await dispatch("storyboard.confirm", {"episode_id": episode_id}, initiator="ui")
+    raise_if_failed(result)
+    return result_http_payload(result)
 
 
 @router.post("/episodes/{episode_id}/clear-artifacts")
 def clear_episode_artifacts(episode_id: str):
-    """清空整集所有镜头的参考图、视频与模型分析（mode_plan），保留关键帧，并回退到「已确认」。"""
+    """清空整集所有镜头的参考图、视频与模型分析，并回退到「已确认」。"""
     _episode_or_404(episode_id)
     return worker.clear_episode_artifacts(episode_id)
 
 
 @router.post("/shots/{shot_id}/clear-artifacts")
 def clear_shot_artifacts(shot_id: str):
-    """清空单个镜头的参考图、视频与模型分析（mode_plan），保留关键帧。"""
+    """清空单个镜头的参考图、视频与模型分析。"""
     conn = get_conn()
     if not conn.execute("SELECT id FROM shots WHERE id=?", (shot_id,)).fetchone():
         raise HTTPException(404, "镜头不存在")
@@ -2880,7 +2981,9 @@ def delete_version(version_id: str):
     return {"deleted": version_id, "shot_id": shot_id}
 
 
-def _set_reference_image_used(version_id: str, ref_id: str, *, use: bool) -> dict:
+def _set_reference_image_used(
+    version_id: str, ref_id: str, *, use: bool, override_reason: str | None = None,
+) -> dict:
     """素材画廊里把某张参考图标记为「废弃」或「恢复使用」。
     废弃后该图不再喂给视频模型（见 video_modes.build_seedance_image_inputs），仅留作展示。"""
     conn = get_conn()
@@ -2892,9 +2995,15 @@ def _set_reference_image_used(version_id: str, ref_id: str, *, use: bool) -> dic
     target = next((r for r in refs if r.get("id") == ref_id), None)
     if target is None:
         raise HTTPException(404, "参考图不存在")
+    if use and target.get("rejectReason") and not (override_reason or "").strip():
+        raise HTTPException(400, "恢复质检淘汰的参考图必须填写覆盖理由")
     changed = target.get("deleted") != (not use) or target.get("selectedForSeedance") != use
     target["deleted"] = not use
     target["selectedForSeedance"] = use
+    if use and (override_reason or "").strip():
+        target["restoreOverrideReason"] = override_reason.strip()
+        target["restoredAt"] = now()
+        changed = True
     meta["reference_images"] = refs
     if changed:
         meta["reference_gallery_revision"] = now()
@@ -2902,7 +3011,12 @@ def _set_reference_image_used(version_id: str, ref_id: str, *, use: bool) -> dic
     conn.execute("UPDATE shot_versions SET image_inputs=? WHERE id=?",
                  (json.dumps(meta, ensure_ascii=False), version_id))
     conn.commit()
-    return {"version_id": version_id, "ref_id": ref_id, "deleted": not use}
+    return {
+        "version_id": version_id,
+        "ref_id": ref_id,
+        "deleted": not use,
+        "override_reason": (override_reason or "").strip() or None,
+    }
 
 
 @router.delete("/versions/{version_id}/reference-images/{ref_id}")
@@ -2912,30 +3026,13 @@ def discard_reference_image(version_id: str, ref_id: str):
 
 
 @router.post("/versions/{version_id}/reference-images/{ref_id}/restore")
-def restore_reference_image(version_id: str, ref_id: str):
-    """把废弃画廊里的参考图恢复为可用（重新计入喂给视频模型的参考图）。"""
-    return _set_reference_image_used(version_id, ref_id, use=True)
-
-
-@router.post("/episodes/{episode_id}/scenes-all")
-def generate_scenes_all(episode_id: str):
-    """为本集所有【尚无通过评审首/尾关键帧】的镜头批量生成关键帧。"""
-    _episode_or_404(episode_id)
-    conn = get_conn()
-    rows = rows_to_dicts(conn.execute(
-        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
-        (episode_id,)).fetchall()
+def restore_reference_image(version_id: str, ref_id: str, body: dict | None = Body(None)):
+    """把废弃画廊里的参考图恢复为可用（重新计入喂给视频模型的参考图）。
+    若该图曾被 QA 淘汰，body.override_reason 必填，写入审计字段。"""
+    body = body or {}
+    return _set_reference_image_used(
+        version_id, ref_id, use=True, override_reason=body.get("override_reason"),
     )
-    targets = [r for r in rows if r["scene_status"] != "approved" or not worker.shot_keyframes_ready(r)]
-    started = 0
-    for r in targets:
-        try:
-            worker.enqueue_scene(r["id"]); started += 1
-        except ValueError:
-            pass
-    if not started:
-        raise HTTPException(409, "没有需要生成关键帧的镜头（首/尾图都已通过评审）")
-    return {"started": started}
 
 
 # ----- 视频生成（固定参考图模式） -----
@@ -2972,11 +3069,8 @@ async def generate_episode(episode_id: str, body: dict | None = None):
             raise HTTPException(404, f"未找到镜 {from_no}")
     else:
         selected = shots
-    # 选中镜清空旧采用版，使新生成版被自动采用。
-    sel_ids = [s["id"] for s in selected]
-    conn.execute(
-        f"UPDATE shots SET adopted_version_id=NULL WHERE id IN ({','.join('?' for _ in sel_ids)})", sel_ids)
-    conn.commit()
+    # 不再预先清空 adopted_version_id：新版本成功并通过技术门禁后由
+    # select_best_video_candidate 比较切换；任务失败时保留原可交付采用结果。
     # 固定参考图模式：批量生成前确保每个选中镜都有固定参考图计划。
     for s in selected:
         await _ensure_shot_mode_plan(conn, s["id"])
@@ -2988,9 +3082,16 @@ async def generate_episode(episode_id: str, body: dict | None = None):
             after = pr["id"] if pr else None
         try:
             r = worker.enqueue_shot(s["id"], after_shot_id=after)
-            # 幂等命中（已有相同成片）：上面清空了采用版，这里把复用版重新采用回去
+            # 幂等命中（已有相同成片）：若当前无采用版，把复用版标为采用
             if r.get("reused") and r.get("version_id"):
-                conn.execute("UPDATE shots SET adopted_version_id=? WHERE id=?", (r["version_id"], s["id"]))
+                row = conn.execute(
+                    "SELECT adopted_version_id FROM shots WHERE id=?", (s["id"],)
+                ).fetchone()
+                if not row or not row["adopted_version_id"]:
+                    conn.execute(
+                        "UPDATE shots SET adopted_version_id=? WHERE id=?",
+                        (r["version_id"], s["id"]),
+                    )
             results.append({"shot_id": s["id"], **r})
         except Exception as exc:  # noqa: BLE001
             public = errors.record_and_format(exc, action="enqueue_shot",
@@ -3000,9 +3101,8 @@ async def generate_episode(episode_id: str, body: dict | None = None):
     return {"enqueued": results}
 
 
-@router.post("/shots/{shot_id}/generate")
-async def generate_shot(shot_id: str, body: dict | None = None):
-    body = body or {}
+async def _generate_shot_core(shot_id: str, body: dict) -> dict:
+    """单镜生成视频的领域逻辑，供 REST 路由与 ``video.generate_shot`` Command Handler 共用。"""
     conn = get_conn()
     shot_row = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
     if not shot_row:
@@ -3039,8 +3139,36 @@ async def generate_shot(shot_id: str, body: dict | None = None):
         raise HTTPException(409, str(exc))
 
 
-@router.post("/shots/{shot_id}/adopt")
-def adopt_version(shot_id: str, body: dict):
+@router.post("/shots/{shot_id}/generate")
+async def generate_shot(shot_id: str, body: dict | None = None):
+    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+
+    body = body or {}
+    result = await dispatch(
+        "video.generate_shot",
+        {
+            "shot_id": shot_id,
+            "prompt_override": body.get("prompt_override"),
+            "reroll": bool(body.get("reroll")),
+            "critique": "with_critique" if body.get("with_critique") else None,
+        },
+        initiator="ui",
+    )
+    raise_if_failed(result)
+    return result_http_payload(result)
+
+
+@router.post("/shots/{shot_id}/video/stop")
+def stop_shot_video(shot_id: str):
+    """立即停止本镜全部排队中或运行中的视频任务；重复调用安全。"""
+    try:
+        return worker.stop_shot_video_tasks(shot_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+def _adopt_version_core(shot_id: str, body: dict) -> dict:
+    """人工采用视频版本的领域逻辑，供 REST 路由与 ``video.adopt_version`` Command Handler 共用。"""
     version_id = body.get("version_id")
     conn = get_conn()
     v = conn.execute("SELECT * FROM shot_versions WHERE id=? AND shot_id=?", (version_id, shot_id)).fetchone()
@@ -3086,6 +3214,19 @@ def adopt_version(shot_id: str, body: dict):
     if shot and shot["adopted_version_id"] != version_id:
         worker.invalidate_episode_final(shot["episode_id"])
     return {"adopted": version_id, "artifact_id": artifact["id"], "reason": reason}
+
+
+@router.post("/shots/{shot_id}/adopt")
+async def adopt_version(shot_id: str, body: dict):
+    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+
+    result = await dispatch(
+        "video.adopt_version",
+        {"shot_id": shot_id, "version_id": body.get("version_id"), "reason": body.get("reason")},
+        initiator="ui",
+    )
+    raise_if_failed(result)
+    return result_http_payload(result)
 
 
 @router.post("/episodes/{episode_id}/resume")

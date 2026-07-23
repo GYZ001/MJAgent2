@@ -154,6 +154,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     provider_non_cancellable INTEGER NOT NULL DEFAULT 0,
     provider_operation_id TEXT,
     provider_create_state TEXT NOT NULL DEFAULT 'not_started',
+    provider_submitted_at REAL,
     abandoned INTEGER NOT NULL DEFAULT 0,
     attempt_started_at REAL,
     FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
@@ -440,13 +441,103 @@ CREATE TABLE IF NOT EXISTS error_logs (
     meta_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_error_logs_ts ON error_logs(ts);
+CREATE TABLE IF NOT EXISTS agent_conversations (
+  id TEXT PRIMARY KEY,
+  title TEXT,
+  project_id TEXT,
+  created_by TEXT,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at REAL NOT NULL,
+  updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS agent_messages (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  turn_id TEXT,
+  role TEXT NOT NULL,
+  content_json TEXT NOT NULL,
+  model_visible INTEGER NOT NULL DEFAULT 1,
+  created_at REAL NOT NULL,
+  FOREIGN KEY(conversation_id) REFERENCES agent_conversations(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS agent_turns (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  context_envelope_json TEXT,
+  model_provider TEXT,
+  model TEXT,
+  prompt_version TEXT,
+  started_at REAL NOT NULL,
+  finished_at REAL,
+  failure_code TEXT,
+  failure_message TEXT,
+  FOREIGN KEY(conversation_id) REFERENCES agent_conversations(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS agent_tool_calls (
+  id TEXT PRIMARY KEY,
+  turn_id TEXT NOT NULL,
+  command_name TEXT NOT NULL,
+  command_version TEXT,
+  arguments_json TEXT NOT NULL,
+  risk TEXT,
+  status TEXT NOT NULL,
+  idempotency_key TEXT,
+  approval_id TEXT,
+  command_id TEXT,
+  run_id TEXT,
+  result_summary_json TEXT,
+  error_id TEXT,
+  started_at REAL,
+  finished_at REAL,
+  FOREIGN KEY(turn_id) REFERENCES agent_turns(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS agent_approvals (
+  id TEXT PRIMARY KEY,
+  tool_call_id TEXT NOT NULL,
+  decision TEXT,
+  impact_snapshot_json TEXT,
+  state_fingerprint TEXT,
+  token_hash TEXT,
+  decided_by TEXT,
+  reason TEXT,
+  expires_at REAL,
+  used_at REAL,
+  created_at REAL NOT NULL,
+  FOREIGN KEY(tool_call_id) REFERENCES agent_tool_calls(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS agent_turn_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  turn_id TEXT NOT NULL,
+  event_id INTEGER NOT NULL,
+  event_type TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at REAL NOT NULL,
+  UNIQUE(turn_id, event_id),
+  FOREIGN KEY(turn_id) REFERENCES agent_turns(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_agent_messages_conv ON agent_messages(conversation_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_agent_turns_conv ON agent_turns(conversation_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_agent_tool_calls_turn ON agent_tool_calls(turn_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_agent_events_turn ON agent_turn_events(turn_id, event_id);
+CREATE TABLE IF NOT EXISTS mcp_tokens (
+    id TEXT PRIMARY KEY,
+    name TEXT,
+    token_hash TEXT NOT NULL,
+    scopes_json TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    expires_at REAL,
+    revoked_at REAL,
+    last_used_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_mcp_tokens_hash ON mcp_tokens(token_hash);
 """
 
 
 def get_conn() -> sqlite3.Connection:
     conn = getattr(_local, "conn", None)
     if conn is None:
-        conn = sqlite3.connect(DB_PATH, timeout=30)
+        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
@@ -515,6 +606,7 @@ MIGRATIONS = (
     "ALTER TABLE jobs ADD COLUMN provider_non_cancellable INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE jobs ADD COLUMN provider_operation_id TEXT",
     "ALTER TABLE jobs ADD COLUMN provider_create_state TEXT NOT NULL DEFAULT 'not_started'",
+    "ALTER TABLE jobs ADD COLUMN provider_submitted_at REAL",
     "ALTER TABLE jobs ADD COLUMN abandoned INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE jobs ADD COLUMN attempt_started_at REAL",
     "ALTER TABLE character_portraits ADD COLUMN artifact_id TEXT",

@@ -144,6 +144,99 @@ def test_cancelled_jobs_are_not_resumed(monkeypatch) -> None:
     assert resumed == 0
 
 
+def test_legacy_keyframe_jobs_are_cancelled_instead_of_recovered(monkeypatch) -> None:
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO shots(id, episode_id, shot_no, duration_s, scene_status) "
+        "VALUES('shot_scene', 'ep_x', 1, 5, 'generating')"
+    )
+    conn.execute(
+        "INSERT INTO jobs(id, kind, shot_id, episode_id, project_id, status, "
+        "created_at, updated_at) "
+        "VALUES('j_scene', 'scene', 'shot_scene', 'ep_x', 'proj_x', 'queued', 1.0, 1.0)"
+    )
+    conn.commit()
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker.media_scheduler, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker._queue, "put_nowait", lambda jid: None)
+
+    resumed = worker.recover_media_jobs()
+
+    assert resumed == 0
+    job = conn.execute(
+        "SELECT status, cancellation_requested FROM jobs WHERE id='j_scene'"
+    ).fetchone()
+    assert dict(job) == {"status": "cancelled", "cancellation_requested": 1}
+    assert conn.execute(
+        "SELECT scene_status FROM shots WHERE id='shot_scene'"
+    ).fetchone()["scene_status"] == "none"
+
+
+def test_provider_poll_budget_uses_original_submission_time_after_restart(monkeypatch) -> None:
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO jobs(id, kind, status, provider_operation_id, attempt_started_at, "
+        "created_at, updated_at) "
+        "VALUES('j_poll', 'video', 'running', 'video-create-v1', 50.0, 50.0, 999.0)"
+    )
+    conn.execute(
+        "INSERT INTO provider_calls(ts, kind, status, operation_id) "
+        "VALUES(100.0, 'video_create', 'OK', 'video-create-v1')"
+    )
+    conn.commit()
+
+    submitted_at = worker._provider_submitted_at(
+        conn,
+        conn.execute("SELECT * FROM jobs WHERE id='j_poll'").fetchone(),
+        "provider-task-1",
+    )
+
+    assert submitted_at == 100.0
+    assert conn.execute(
+        "SELECT provider_submitted_at FROM jobs WHERE id='j_poll'"
+    ).fetchone()["provider_submitted_at"] == 100.0
+
+
+def test_episode_leaves_generating_when_no_video_job_is_active(monkeypatch) -> None:
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO episodes(id, project_id, episode_no, title, hook, cliffhanger, "
+        "source_chapters, target_duration_s, status, created_at) "
+        "VALUES('ep_idle', 'proj_x', 1, 't', 'h', 'c', '[]', 60, 'generating', 1.0)"
+    )
+    conn.execute(
+        "INSERT INTO jobs(id, kind, episode_id, status, created_at, updated_at) "
+        "VALUES('j_failed', 'video', 'ep_idle', 'failed', 1.0, 1.0)"
+    )
+    conn.commit()
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+
+    assert worker.reconcile_episode_generation_status("ep_idle") is True
+    assert conn.execute(
+        "SELECT status FROM episodes WHERE id='ep_idle'"
+    ).fetchone()["status"] == "confirmed"
+
+
+def test_episode_stays_generating_while_a_video_job_is_active(monkeypatch) -> None:
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO episodes(id, project_id, episode_no, title, hook, cliffhanger, "
+        "source_chapters, target_duration_s, status, created_at) "
+        "VALUES('ep_busy', 'proj_x', 1, 't', 'h', 'c', '[]', 60, 'generating', 1.0)"
+    )
+    conn.execute(
+        "INSERT INTO jobs(id, kind, episode_id, status, created_at, updated_at) "
+        "VALUES('j_running', 'video', 'ep_busy', 'running', 1.0, 1.0)"
+    )
+    conn.commit()
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+
+    assert worker.reconcile_episode_generation_status("ep_busy") is False
+    assert conn.execute(
+        "SELECT status FROM episodes WHERE id='ep_busy'"
+    ).fetchone()["status"] == "generating"
+
+
 def test_stale_lease_sweeper_reclaims_expired_lease(monkeypatch) -> None:
     """worker 崩溃/OOM 后 lease 过期的 job 被周期 sweeper 回收。"""
     conn = _conn()

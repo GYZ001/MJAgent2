@@ -84,7 +84,13 @@ MEDIA_INPUT_MAX_EDGE = max(512, int(os.environ.get("MEDIA_INPUT_MAX_EDGE", "1280
 # ffmpeg JPEG qscale：2 最高质量，31 最低质量。
 MEDIA_INPUT_JPEG_QUALITY = min(31, max(2, int(os.environ.get("MEDIA_INPUT_JPEG_QUALITY", "5"))))
 VIDEO_POLL_INTERVAL = 10.0
-VIDEO_POLL_BUDGET = 15 * 60  # 单任务轮询总预算
+# 单个 worker 连续占用的轮询窗口。窗口结束而供应商仍在运行时，任务会释放
+# worker 并持久化延迟重排；这不是失败截止线。
+VIDEO_POLL_BUDGET = 15 * 60
+VIDEO_POLL_RESUME_DELAY = float(os.environ.get("VIDEO_POLL_RESUME_DELAY", "30"))
+# 供应商任务允许的总墙钟时间。用于防止上游永远停在 running；正常长任务跨越
+# 多个轮询窗口继续等待，不会再因 15 分钟窗口被误判失败。
+VIDEO_PROVIDER_MAX_WAIT = float(os.environ.get("VIDEO_PROVIDER_MAX_WAIT", str(6 * 60 * 60)))
 
 # 上游瞬时故障（超时/网络/限流/5xx）的 job 级自动重试。_post_json 的单次调用内重试只覆盖约 90s，
 # 扛不住分钟级的上游抖动；没有 job 级兜底时，一次可恢复的瞬时故障会把整镜任务永久判失败、逼人工重试。
@@ -162,6 +168,9 @@ DEFAULT_SETTINGS = {
     "auto_storyboard_concurrency": "8", # 一键全自动：同时进行的分镜 LLM 数（各集流水线并行，分镜阶段单独限流）
     "provider_call_retention_days": "30",
     "error_log_retention_days": "30",
+    "agent_enabled": "true",            # 内嵌对话 Agent 总开关（PRD M1）
+    "agent_max_tool_calls_per_turn": "8",
+    "agent_max_consecutive_same_error": "2",
 }
 
 PROJECTS_DIR.mkdir(exist_ok=True)

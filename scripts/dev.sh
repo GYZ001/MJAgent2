@@ -70,7 +70,8 @@ root, be_log, fe_log = sys.argv[1], sys.argv[2], sys.argv[3]
 dn = open(os.devnull, "rb")
 be = open(be_log, "ab"); fe = open(fe_log, "ab")
 b = subprocess.Popen(
-    ["./.venv/bin/uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8230", "--reload"],
+    ["./.venv/bin/uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8230",
+     "--reload", "--reload-dir", "app"],
     cwd=root, stdin=dn, stdout=be, stderr=be, start_new_session=True)
 f = subprocess.Popen(
     ["npm", "run", "dev", "--", "--host", "127.0.0.1"],

@@ -1,20 +1,37 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { api, Scene, SceneRefSegment, SceneReferenceCandidate } from '../api'
 import { useNav, useProject } from '../App'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 import SearchField from '../components/SearchField'
 import EvidenceDrawer from '../components/harness/EvidenceDrawer'
-
-const SCENE_PAGE_SIZE = 6
+import { useFillPageSize } from '../hooks/useFillPageSize'
 
 export default function ScenesPage() {
   const { projectId, toast } = useNav()
-  const { data: p, refresh } = useProject(projectId!)
+  const { data: p, refresh, error, loading } = useProject(projectId!)
   const [busy, setBusy] = useState(false)
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(0)
+  const [candidatePreview, setCandidatePreview] = useState<{
+    sceneName: string
+    candidates: SceneReferenceCandidate[]
+    adoptedArtifactId?: string | null
+  } | null>(null)
+  const pageSize = useFillPageSize({ minCardWidth: 270, rows: 3, floor: 8, ceiling: 24 })
   const sceneTimer = useTaskTimer(`project.${projectId}.scene_refs`, p?.scene_refs_status === 'running')
 
+  const scenes = p?.bible?.scenes ?? []
+  const query = search.trim()
+  const filtered = query ? scenes.filter(s => s.name.includes(query)) : scenes
+  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize))
+  const curPage = Math.min(page, pageCount - 1)
+
+  useEffect(() => {
+    if (page > pageCount - 1) setPage(Math.max(0, pageCount - 1))
+  }, [page, pageCount])
+
+  if (error && !p) return <div className="empty">{error}</div>
+  if (loading && !p) return <div className="empty">展卷中……</div>
   if (!p) return <div className="empty">展卷中……</div>
 
   const act = async (fn: () => Promise<unknown>, doneMsg?: string) => {
@@ -24,12 +41,7 @@ export default function ScenesPage() {
     finally { setBusy(false) }
   }
 
-  const scenes = p.bible?.scenes ?? []
-  const query = search.trim()
-  const filtered = query ? scenes.filter(s => s.name.includes(query)) : scenes
-  const pageCount = Math.max(1, Math.ceil(filtered.length / SCENE_PAGE_SIZE))
-  const curPage = Math.min(page, pageCount - 1)
-  const paged = filtered.slice(curPage * SCENE_PAGE_SIZE, curPage * SCENE_PAGE_SIZE + SCENE_PAGE_SIZE)
+  const paged = filtered.slice(curPage * pageSize, curPage * pageSize + pageSize)
   const generating = p.scene_refs_status === 'running'
   const hasBible = !!p.bible
 
@@ -95,24 +107,41 @@ export default function ScenesPage() {
           <div className="figure-grid">
             {paged.map(s => {
               const fitting = generating && (!p.scene_refs_target || p.scene_refs_target === s.name)
-              const qaOverall = s.scene_refs?.[0]?.qa_overall
+              const approvedRefs = (s.scene_refs ?? []).filter(sceneRefPassedQa)
+              const activeRef = approvedRefs.find(ref => ref.image_url === s.ref_image_url)
+                ?? [...approvedRefs].sort((a, b) => b.ep_start - a.ep_start)[0]
+              const qaOverall = activeRef?.qa_overall
+              const adoptedImageUrl = activeRef?.image_url
+              const candidates = s.scene_candidates ?? []
               return (
                 <article key={s.name} className="figure scene-card">
                   <div className="f-name">{s.name}
                     {s.location_kind ? <span className="f-role">{s.location_kind}</span> : null}
                     {fitting ? <span className="stamp gold">生成中</span>
-                      : s.ref_image_url ? <span className="stamp green">已出图</span> : <span className="stamp grey">未出图</span>}
+                      : adoptedImageUrl ? <span className="stamp green">已采纳</span>
+                        : s.ref_image_url ? <span className="stamp gold">待通过 QA</span>
+                          : <span className="stamp grey">未出图</span>}
                   </div>
-                  {s.ref_image_url && (
-                    <div className="scene-visual"><img src={s.ref_image_url} alt={s.name}
+                  {adoptedImageUrl && (
+                    <div className="scene-visual"><img src={adoptedImageUrl} alt={s.name}
                       style={{ opacity: fitting ? 0.45 : 1, transition: 'opacity 0.3s' }} /></div>
                   )}
-                  {typeof qaOverall === 'number' && (
-                    <QaLine overall={qaOverall} issues={s.scene_refs?.[0]?.qa?.issues} />
-                  )}
-                  {(s.scene_refs?.length ?? 0) > 1 && <SceneRefStrip segments={s.scene_refs!} />}
-                  {(s.scene_candidates?.length ?? 0) > 0 && (
-                    <SceneCandidateStrip candidates={s.scene_candidates!} />
+                  <div className="scene-quality-row">
+                    {typeof qaOverall === 'number' && (
+                      <QaLine overall={qaOverall} issues={activeRef?.qa?.issues} />
+                    )}
+                    {candidates.length > 0 && (
+                      <button className="scene-candidates-trigger" type="button" onClick={() => setCandidatePreview({
+                        sceneName: s.name,
+                        candidates,
+                        adoptedArtifactId: activeRef?.artifact_id,
+                      })}>
+                        查看候选 <span>{candidates.length}</span>
+                      </button>
+                    )}
+                  </div>
+                  {approvedRefs.length > 1 && (
+                    <SceneRefStrip segments={approvedRefs} />
                   )}
                   <label className="f">场景锚点串（30~60 字，定稿后锁定）</label>
                   <div className="f-anchor">{s.scene_canonical}</div>
@@ -138,26 +167,97 @@ export default function ScenesPage() {
           )}
         </section>
       )}
+      {candidatePreview && (
+        <SceneCandidateModal {...candidatePreview} onClose={() => setCandidatePreview(null)} />
+      )}
     </>
   )
 }
 
-function SceneCandidateStrip({ candidates }: { candidates: SceneReferenceCandidate[] }) {
+const SCENE_QA_PASS_SCORE = 0.6
+
+function sceneRefPassedQa(ref: SceneRefSegment): boolean {
+  if (!ref.image_url) return false
+  const evaluationPassed = ref.evidence?.evaluations.some(evaluation =>
+    evaluation.evaluator_name.includes('consistency_qa') && !!evaluation.hard_gate_passed)
+  const scorePassed = typeof ref.qa_overall === 'number' && ref.qa_overall >= SCENE_QA_PASS_SCORE
+  const adopted = !ref.artifact_id || ref.evidence?.status === 'approved'
+  return adopted && (scorePassed || !!evaluationPassed)
+}
+
+function candidateQaScore(candidate: SceneReferenceCandidate): number | null {
+  const evaluation = candidate.evidence?.evaluations.find(item =>
+    item.evaluator_name.includes('consistency_qa'))
+  return typeof evaluation?.score === 'number' ? evaluation.score / 100 : null
+}
+
+function SceneCandidateModal({ sceneName, candidates, adoptedArtifactId, onClose }: {
+  sceneName: string
+  candidates: SceneReferenceCandidate[]
+  adoptedArtifactId?: string | null
+  onClose: () => void
+}) {
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    document.body.style.overflow = 'hidden'
+    window.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      window.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [onClose])
+
   return (
-    <div className="candidate-compare" style={{ margin: '8px 0' }}>
-      <div className="candidate-compare-head"><b>场景候选证据</b><span>{candidates.length} 版</span></div>
-      <div className="candidate-row">
-        {candidates.map((candidate) => (
-          <div className={`candidate-card${candidate.status === 'approved' ? ' adopted' : ''}`}
-            key={candidate.artifact_id}>
-            {candidate.image_url && <img src={candidate.image_url} alt={candidate.artifact_id} />}
-            <div className="hint">
-              尝试 {candidate.attempt ?? '—'} · {candidate.trust_level} · {candidate.status}
-            </div>
-            {candidate.evidence && <EvidenceDrawer evidence={candidate.evidence} label="查看证据" />}
+    <div className="scene-candidate-backdrop" role="presentation" onMouseDown={event => {
+      if (event.currentTarget === event.target) onClose()
+    }}>
+      <section className={`scene-candidate-modal${candidates.length === 1 ? ' single' : candidates.length === 2 ? ' double' : ''}`}
+        role="dialog" aria-modal="true"
+        aria-labelledby="scene-candidate-title">
+        <header className="scene-candidate-modal-head">
+          <div>
+            <span className="eyebrow">SCENE CANDIDATES</span>
+            <h2 id="scene-candidate-title">{sceneName}</h2>
+            <p>候选仅供追溯；场景库主图只采用 QA 通过并已提交的版本。</p>
           </div>
-        ))}
-      </div>
+          <button type="button" aria-label="关闭候选预览" onClick={onClose}>×</button>
+        </header>
+        <div className="scene-candidate-modal-body">
+          {candidates.map(candidate => {
+            const isCurrent = candidate.artifact_id === adoptedArtifactId
+            const passed = candidate.status === 'approved'
+            const score = candidateQaScore(candidate)
+            return (
+              <article className={`scene-candidate-preview${isCurrent ? ' current' : passed ? ' passed' : ' rejected'}`}
+                key={candidate.artifact_id}>
+                <div className="scene-candidate-image">
+                  {candidate.image_url
+                    ? <img src={candidate.image_url} alt={`${sceneName}候选 ${candidate.attempt ?? ''}`} />
+                    : <div className="scene-candidate-empty">图片不可用</div>}
+                  <span>{isCurrent ? '当前采用' : passed ? 'QA 通过' : '未采用'}</span>
+                </div>
+                <div className="scene-candidate-meta">
+                  <div>
+                    <b>尝试 {candidate.attempt ?? '—'}</b>
+                    <small>{candidate.trust_level} · {candidate.status}</small>
+                  </div>
+                  <strong className={score != null && score >= SCENE_QA_PASS_SCORE ? 'passed' : 'failed'}>
+                    QA {score == null ? '—' : score.toFixed(2)}
+                  </strong>
+                </div>
+                {candidate.evidence && <EvidenceDrawer evidence={candidate.evidence} label="查看 QA 证据" />}
+              </article>
+            )
+          })}
+        </div>
+        <footer>
+          <span>共 {candidates.length} 个候选</span>
+          <button className="btn" type="button" onClick={onClose}>完成</button>
+        </footer>
+      </section>
     </div>
   )
 }
@@ -165,7 +265,7 @@ function SceneCandidateStrip({ candidates }: { candidates: SceneReferenceCandida
 function QaLine({ overall, issues }: { overall: number; issues?: string[] }) {
   const color = overall >= 0.75 ? 'var(--moss)' : overall >= 0.6 ? 'var(--gold, #b8860b)' : 'var(--cinnabar)'
   return (
-    <div style={{ fontSize: 12, color: 'var(--ink-soft)', margin: '2px 0 8px' }}>
+    <div className="scene-qa-line">
       <span>QA：<b style={{ color }}>{overall.toFixed(2)}</b></span>
       {issues?.length ? <span style={{ color: 'var(--ink-faint)' }}>　{issues.slice(0, 2).join('；')}</span> : null}
     </div>

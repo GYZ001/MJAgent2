@@ -1,27 +1,37 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { api, ChapterContent } from '../api'
 import { useNav } from '../App'
 
 export default function ReaderPage() {
   const { projectId, chapterIdx, go, toast } = useNav()
-  const [idx, setIdx] = useState<number>(chapterIdx ?? 1)
   const [data, setData] = useState<ChapterContent | null>(null)
   const [loading, setLoading] = useState(false)
-  const scrollRef = useRef<HTMLDivElement>(null)
+  const [error, setError] = useState<string | null>(null)
+  const idx = chapterIdx ?? 1
 
   useEffect(() => {
     if (!projectId) return
     let cancelled = false
     setLoading(true)
+    setError(null)
     api.get(`/projects/${projectId}/chapters/${idx}`)
-      .then((d: ChapterContent) => { if (!cancelled) { setData(d); scrollRef.current?.scrollTo({ top: 0 }) } })
-      .catch((e: Error) => { if (!cancelled) toast(e.message, true) })
+      .then((d: ChapterContent) => {
+        if (cancelled) return
+        setData(d)
+        window.scrollTo({ top: 0, behavior: 'auto' })
+      })
+      .catch((e: Error) => {
+        if (cancelled) return
+        setError(e.message)
+        toast(e.message, true)
+      })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
   }, [projectId, idx, toast])
 
   const goChapter = (target: number | null | undefined) => {
-    if (target != null) setIdx(target)
+    if (target == null || !projectId) return
+    go('reader', projectId, null, target)
   }
 
   const paragraphs = (data?.content ?? '').split(/\n+/).map(s => s.trim()).filter(Boolean)
@@ -51,19 +61,17 @@ export default function ReaderPage() {
         <hr className="rule" />
       </header>
 
-      <section className="card">
+      <section className="card reader-card">
         <Nav top />
-        <div ref={scrollRef} style={{ maxHeight: '68vh', overflowY: 'auto', padding: '4px 4px 8px' }}>
-          {loading && !data ? (
+        <div className="reader-scroll">
+          {error && !data ? (
+            <div className="empty">{error}</div>
+          ) : loading && !data ? (
             <div className="empty">展卷中……</div>
           ) : (
-            <article style={{
-              maxWidth: 760, margin: '0 auto', fontSize: 17, lineHeight: 2.05,
-              color: 'var(--ink, #2b2b2b)', letterSpacing: '0.02em',
-              fontFamily: '"Songti SC", "STSong", "Noto Serif SC", serif',
-            }}>
+            <article className="reader-article">
               {paragraphs.length ? paragraphs.map((p, i) => (
-                <p key={i} style={{ textIndent: '2em', margin: '0 0 1.1em' }}>{p}</p>
+                <p key={i}>{p}</p>
               )) : <div className="empty">本章暂无正文</div>}
             </article>
           )}

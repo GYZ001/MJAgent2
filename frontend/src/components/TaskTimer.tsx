@@ -78,7 +78,21 @@ export function useTaskTimer(key: string, active: boolean) {
     const next = {}
     saveRecord(storageKey, next)
     setRecord(next)
+    sawActive.current = false
   }
+
+  // 点了 start() 但服务端从未进入运行态（请求失败）：超时后清掉，避免下次耗时从旧时间累计
+  useEffect(() => {
+    if (active || !record.startAt || sawActive.current) return
+    const t = window.setTimeout(() => {
+      if (!sawActive.current) {
+        const next = {}
+        saveRecord(storageKey, next)
+        setRecord(next)
+      }
+    }, 12000)
+    return () => window.clearTimeout(t)
+  }, [active, record.startAt, storageKey])
 
   const elapsedMs = record.startAt ? now - record.startAt : 0
   return {

@@ -70,6 +70,14 @@ def get_events(
 
 
 @router.post("/runs/{run_id}/cancel")
+async def cancel_run_route(run_id: str):
+    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+
+    result = await dispatch("run.control", {"run_id": run_id, "action": "cancel"}, initiator="ui")
+    raise_if_failed(result)
+    return result_http_payload(result)
+
+
 async def cancel_run(run_id: str):
     run = repository.get_run(run_id)
     if not run:
@@ -234,6 +242,14 @@ def _restart_run(run_id: str, trigger_type: str):
 
 
 @router.post("/runs/{run_id}/resume")
+async def resume_run_route(run_id: str):
+    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+
+    result = await dispatch("run.control", {"run_id": run_id, "action": "resume"}, initiator="ui")
+    raise_if_failed(result)
+    return result_http_payload(result)
+
+
 async def resume_run(run_id: str):
     run = repository.get_run(run_id)
     if not run:
@@ -244,6 +260,14 @@ async def resume_run(run_id: str):
 
 
 @router.post("/runs/{run_id}/retry")
+async def retry_run_route(run_id: str):
+    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+
+    result = await dispatch("run.control", {"run_id": run_id, "action": "retry"}, initiator="ui")
+    raise_if_failed(result)
+    return result_http_payload(result)
+
+
 async def retry_run(run_id: str):
     run = repository.get_run(run_id)
     if not run:
@@ -421,6 +445,7 @@ async def decide_delivery(episode_id: str, body: dict = Body(...)):
                 accepted_risk=payload.get("accepted_risk"),
                 approved_package_id=payload["approved_package_id"],
                 operation_started_at=payload["operation_started_at"],
+                package_id=payload.get("package_id"),
             )
 
         _, result = await recorder.step(
@@ -634,11 +659,20 @@ def set_project_engine(project_id: str, body: dict = Body(...)):
     return {"project_id": project_id, "harness_engine_enabled": enabled}
 
 
-@router.post("/jobs/{job_id}/cancel")
-def cancel_media_job(job_id: str):
+def cancel_media_job(job_id: str) -> dict:
+    """取消媒体 Job 的领域逻辑，供 REST 路由与 ``job.cancel`` Command Handler 共用。"""
     from app.orchestration.media_scheduler import request_cancel
 
     try:
         return request_cancel(job_id)
     except KeyError as exc:
         raise HTTPException(404, "媒体任务不存在") from exc
+
+
+@router.post("/jobs/{job_id}/cancel")
+async def cancel_media_job_route(job_id: str):
+    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+
+    result = await dispatch("job.cancel", {"job_id": job_id}, initiator="ui")
+    raise_if_failed(result)
+    return result_http_payload(result)

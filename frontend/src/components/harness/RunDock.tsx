@@ -31,6 +31,7 @@ export default function RunDock({
   const [runs, setRuns] = useState<RunSummary[]>([])
   const [error, setError] = useState('')
   const [dismissedNotice, setDismissedNotice] = useState<string | null>(null)
+  const [actionBusy, setActionBusy] = useState(false)
 
   const refresh = useCallback(() => {
     const query = projectId
@@ -47,16 +48,25 @@ export default function RunDock({
     return () => window.clearInterval(timer)
   }, [refresh])
 
+  const runAction = async (fn: () => Promise<unknown>) => {
+    if (actionBusy) return
+    setActionBusy(true)
+    try {
+      await fn()
+      refresh()
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
   const run = runs[0]
   const noticeKey = run
     ? [run.id, run.status, run.failure_message || ''].join(':')
     : null
   if (!run || dismissedNotice === noticeKey) {
-    return (
-      <button className="run-dock run-dock-idle" type="button" onClick={onOpen} title={error || '打开运行中心'}>
-        <span className="run-dot" />运行中心
-      </button>
-    )
+    return null
   }
   const blocked = ['FAILED', 'WAITING_HUMAN', 'PAUSED_BUDGET', 'PAUSED_EXTERNAL'].includes(run.status)
   return (
@@ -81,28 +91,25 @@ export default function RunDock({
         </div>
       </div>
       {run.failure_message && <p>{run.failure_message}</p>}
+      {error && <p>{error}</p>}
       <div className="run-dock-actions">
         <button type="button" onClick={onOpen}>查看详情</button>
         {run.status === 'RUNNING' && (
           <button
             type="button"
-            onClick={async () => {
-              await api.post('/runs/' + run.id + '/cancel')
-              refresh()
-            }}
+            disabled={actionBusy}
+            onClick={() => runAction(() => api.post('/runs/' + run.id + '/cancel'))}
           >
-            取消
+            {actionBusy ? '处理中…' : '取消'}
           </button>
         )}
         {['PAUSED_EXTERNAL', 'PAUSED_BUDGET', 'WAITING_RETRY', 'WAITING_HUMAN'].includes(run.status) && (
           <button
             type="button"
-            onClick={async () => {
-              await api.post('/runs/' + run.id + '/resume')
-              refresh()
-            }}
+            disabled={actionBusy}
+            onClick={() => runAction(() => api.post('/runs/' + run.id + '/resume'))}
           >
-            从检查点恢复
+            {actionBusy ? '处理中…' : '从检查点恢复'}
           </button>
         )}
       </div>

@@ -485,16 +485,31 @@ def approve_delivery(
     accepted_risk: str | None = None,
     approved_package_id: str | None = None,
     operation_started_at: float | None = None,
+    package_id: str | None = None,
 ) -> dict[str, Any]:
     conn = get_conn()
-    row = conn.execute(
-        "SELECT * FROM delivery_packages WHERE episode_id=? AND status='waiting_human' ORDER BY created_at DESC LIMIT 1",
-        (episode_id,),
-    ).fetchone()
+    if package_id:
+        row = conn.execute(
+            "SELECT * FROM delivery_packages WHERE id=? AND episode_id=?",
+            (package_id, episode_id),
+        ).fetchone()
+        if not row:
+            raise ValueError("指定的交付包不存在")
+        if row["status"] != "waiting_human":
+            raise ValueError(f"交付包当前状态为 {row['status']}，不可审核")
+    else:
+        row = conn.execute(
+            "SELECT * FROM delivery_packages WHERE episode_id=? AND status='waiting_human' ORDER BY created_at DESC LIMIT 1",
+            (episode_id,),
+        ).fetchone()
     if not row:
         raise ValueError("没有等待人工门禁的交付包")
     if decision not in {"approve", "approve_with_risk", "reject"}:
         raise ValueError("未知门禁决定")
+    if not (decided_by or "").strip():
+        raise ValueError("必须填写审核人")
+    if not (reason or "").strip():
+        raise ValueError("必须填写审核意见")
     if decision == "approve_with_risk" and not (accepted_risk or "").strip():
         raise ValueError("带风险批准必须填写 accepted_risk")
     if decision == "reject":
@@ -508,7 +523,7 @@ def approve_delivery(
             (new_id("gate"), row["artifact_id"], "delivery", decision, decided_by, reason, accepted_risk, now()),
         )
         conn.commit()
-        return {"artifact_id": row["artifact_id"], "decision": decision, "trust_level": "T3"}
+        return {"artifact_id": row["artifact_id"], "decision": decision, "trust_level": "T3", "package_id": row["id"]}
 
     # CAS 领取草稿，避免用户重复点击并发生成两份 T5；失败时恢复为 waiting_human。
     claimed = conn.execute(

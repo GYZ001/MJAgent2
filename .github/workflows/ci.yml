@@ -21,6 +21,7 @@ jobs:
       - run: python -m pip install -r requirements-dev.txt
       - run: ruff check app tests
       - run: python scripts/check_contract_surface.py
+      - run: python scripts/check_capability_coverage.py
       - run: python -m compileall -q app
       - run: pytest -q
       - run: npm ci

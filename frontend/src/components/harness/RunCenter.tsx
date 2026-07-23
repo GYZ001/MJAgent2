@@ -25,6 +25,7 @@ export default function RunCenter() {
   const [events, setEvents] = useState<RunEvent[]>([])
   const [gates, setGates] = useState<GateArtifact[]>([])
   const [gateEvidence, setGateEvidence] = useState<Record<string, ArtifactEvidence>>({})
+  const [openGateId, setOpenGateId] = useState<string | null>(null)
 
   useEffect(() => {
     const refresh = () => api.get('/runs?limit=50').then((items: RunSummary[]) => {
@@ -33,11 +34,6 @@ export default function RunCenter() {
     })
     const refreshGates = () => api.get('/gates?limit=100').then((items: GateArtifact[]) => {
       setGates(items)
-      items.forEach(item => {
-        api.get(`/artifacts/${item.id}`).then((evidence: ArtifactEvidence) => {
-          setGateEvidence(current => ({ ...current, [item.id]: evidence }))
-        }).catch(() => undefined)
-      })
     })
     refresh()
     refreshGates()
@@ -45,6 +41,16 @@ export default function RunCenter() {
     const gateTimer = window.setInterval(refreshGates, 5000)
     return () => { window.clearInterval(timer); window.clearInterval(gateTimer) }
   }, [])
+
+  // 仅在用户打开某个门禁时拉取证据，避免每次轮询对全部 gate 发起 N+1 请求
+  useEffect(() => {
+    if (!openGateId || gateEvidence[openGateId]) return
+    let cancelled = false
+    api.get(`/artifacts/${openGateId}`).then((evidence: ArtifactEvidence) => {
+      if (!cancelled) setGateEvidence(current => ({ ...current, [openGateId]: evidence }))
+    }).catch(() => undefined)
+    return () => { cancelled = true }
+  }, [openGateId, gateEvidence])
 
   useEffect(() => {
     if (!selected) {
@@ -81,7 +87,18 @@ export default function RunCenter() {
           <div className="gate-item" key={item.id}>
             <div><b>{item.type}</b><span>{item.episode_no ? `第 ${item.episode_no} 集 · ${item.episode_title || ''}` : `${item.scope_type}:${item.scope_id}`}</span></div>
             <code>{item.id}</code>
-            {gateEvidence[item.id] && <EvidenceDrawer evidence={gateEvidence[item.id]} label="定位问题与证据" />}
+            <button
+              type="button"
+              className="btn small ghost"
+              onClick={() => setOpenGateId(current => current === item.id ? null : item.id)}
+            >
+              {openGateId === item.id ? '收起证据' : '定位问题与证据'}
+            </button>
+            {openGateId === item.id && (
+              gateEvidence[item.id]
+                ? <EvidenceDrawer evidence={gateEvidence[item.id]} label="定位问题与证据" />
+                : <span className="hint">加载证据…</span>
+            )}
           </div>
         ))}
       </div>

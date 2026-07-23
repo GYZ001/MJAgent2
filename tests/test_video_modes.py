@@ -233,7 +233,6 @@ def test_runtime_reference_mode_uses_stored_decision(monkeypatch) -> None:
 
     # 运行期一旦调用 LLM 选择即视为回归（应已被移除）
     monkeypatch.setattr(ShotVideoModeSelector, "select", fail_select)
-    monkeypatch.setattr(worker, "_approved_keyframe", lambda conn, shot, kind: None)
     monkeypatch.setattr(worker, "_set_version", lambda *a, **k: None)
     monkeypatch.setattr(video_modes, "build_reference_assets", fake_build_reference_assets)
 

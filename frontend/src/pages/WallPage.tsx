@@ -3,8 +3,29 @@ import EpisodeCrumb from '../components/EpisodeCrumb'
 import { useEpisode, useNav } from '../App'
 import { api, type Shot, type ShotVersion, type ReferenceImage } from '../api'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
+import { countAdoptedVideos, shotVideoState } from '../shotStatus'
+import AsyncButton from '../components/AsyncButton'
+import QueryState from '../components/QueryState'
 
 /* ─── 常量 ─── */
+type ReviewTab = 'text' | 'references' | 'videos'
+
+const REVIEW_TABS: { id: ReviewTab; label: string }[] = [
+  { id: 'text', label: '文字内容' },
+  { id: 'references', label: '参考图' },
+  { id: 'videos', label: '视频对比' },
+]
+
+const VIDEO_VERSION_STATUS_LABEL: Record<string, string> = {
+  queued: '排队中',
+  running: '生成中',
+  succeeded: '已完成',
+  failed: '失败',
+  cancelled: '已停止',
+  abandoned: '已停止',
+  paused_budget: '预算暂停',
+}
+
 /* ─── Lightbox 图片预览 ─── */
 function Lightbox({ src, alt, onClose }: { src: string; alt: string; onClose: () => void }) {
   useEffect(() => {
@@ -23,11 +44,26 @@ function Lightbox({ src, alt, onClose }: { src: string; alt: string; onClose: ()
   )
 }
 
-/* ─── 取本镜当前版本（采用版优先）的参考图集合 ─── */
-function currentVersionRefs(shot: Shot): { versionId: string; refs: ReferenceImage[] } | null {
-  const v = shot.versions.find(x => x.id === shot.adopted_version_id) || shot.versions[0]
+/* ─── 取本镜参考图：当前版本尚未写入时，回退到最近一个有图的版本 ─── */
+function currentVersionRefs(shot: Shot): {
+  versionId: string
+  versionNo: number
+  refs: ReferenceImage[]
+  isFallback: boolean
+} | null {
+  const adopted = shot.versions.find(x => x.id === shot.adopted_version_id)
+  const preferred = adopted || shot.versions[0]
+  const hasRefs = (version: ShotVersion) => (version.image_inputs?.reference_images?.length ?? 0) > 0
+  const v = preferred && hasRefs(preferred)
+    ? preferred
+    : shot.versions.find(hasRefs) || preferred
   if (!v) return null
-  return { versionId: v.id, refs: v.image_inputs?.reference_images ?? [] }
+  return {
+    versionId: v.id,
+    versionNo: v.version_no,
+    refs: v.image_inputs?.reference_images ?? [],
+    isFallback: !!preferred && v.id !== preferred.id,
+  }
 }
 
 function refSourceLabel(source?: string): string {
@@ -103,6 +139,11 @@ function ShotMaterialGallery({ shot, onOpen, onRefresh, onToast }: {
 
   return (
     <>
+      {data?.isFallback && (
+        <div className="material-fallback-note">
+          当前版本的参考图尚未就绪，暂时展示最近一次有图版本 v{data.versionNo}
+        </div>
+      )}
       {used.length ? (
         <div className="material-strip">
           {used.map(r => (
@@ -127,7 +168,21 @@ function ShotMaterialGallery({ shot, onOpen, onRefresh, onToast }: {
           <div className="material-strip">
             {discarded.map(r => (
               <RefCard key={r.id} r={r} onOpen={onOpen} discarded actionLabel="恢复使用"
-                onAction={versionId ? act(() => api.restoreReferenceImage(versionId, r.id)) : undefined} />
+                onAction={versionId ? act(async () => {
+                  const qaRejected = !!r.rejectReason
+                  if (qaRejected) {
+                    const reason = window.prompt(
+                      `该图曾因「${rejectReasonLabel(r.rejectReason)}」被淘汰。\n请填写覆盖理由（将写入审计记录），留空则取消：`,
+                      '',
+                    )
+                    if (!reason?.trim()) return
+                    await api.restoreReferenceImage(versionId, r.id, reason.trim())
+                  } else if (!window.confirm('确认恢复使用该参考图？')) {
+                    return
+                  } else {
+                    await api.restoreReferenceImage(versionId, r.id)
+                  }
+                }) : undefined} />
             ))}
           </div>
         </div>
@@ -141,25 +196,24 @@ function ShotMaterialGallery({ shot, onOpen, onRefresh, onToast }: {
    ═══════════════════════════════════════════════════════════════ */
 export default function WallPage() {
   const { episodeId } = useNav()
-  const { data: ep, refresh, error } = useEpisode(episodeId || '')
+  const { data: ep, refresh, error, loading } = useEpisode(episodeId || '')
   const shots = ep?.shots ?? []
   const [idx, setIdx] = useState(0)
   const [toast, setToast] = useState<string | null>(null)
   const [genMask, setGenMask] = useState<Set<string>>(new Set())
   const [lightbox, setLightbox] = useState<{ src: string; label?: string } | null>(null)
-  const [showGallery, setShowGallery] = useState(true)
   const [clearMenuOpen, setClearMenuOpen] = useState(false)
-  const carouselRef = useRef<HTMLDivElement>(null)
+  const toastTimerRef = useRef<number>()
+
+  const showToast = useCallback((msg: string) => {
+    setToast(msg)
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current)
+    toastTimerRef.current = window.setTimeout(() => setToast(null), 3200)
+  }, [])
 
   useEffect(() => {
     if (shots.length && idx >= shots.length) setIdx(shots.length - 1)
   }, [shots.length, idx])
-
-  useEffect(() => {
-    if (!carouselRef.current || !shots.length) return
-    const el = carouselRef.current.children[idx] as HTMLElement | undefined
-    el?.scrollIntoView({ behavior: 'smooth', inline: 'start', block: 'nearest' })
-  }, [idx, shots.length])
 
   const videoActive = shots.some(s => s.versions.some(v => v.status === 'queued' || v.status === 'running'))
   const videoTimer = useTaskTimer(`episode.${episodeId}.videos`, videoActive)
@@ -168,37 +222,60 @@ export default function WallPage() {
     setLightbox({ src, label })
   }, [])
 
-  if (!ep) return <div className="empty">展卷中……</div>
-  if (error) return <div className="empty">{error}</div>
+  if (error && !ep) return <QueryState loading={false} error={error} hasData={false}>{null}</QueryState>
+  if (!ep) return <QueryState loading={loading !== false} error={null} hasData={false}>{null}</QueryState>
 
   const shot = shots[idx]
-  const videoReady = shots.filter(s => s.versions.some(v => v.status === 'succeeded')).length
+  const videoReady = countAdoptedVideos(shots)
 
   const t = async (fn: () => Promise<unknown>, msg: string) => {
-    try { await fn(); setToast(`${msg} 成功`); refresh() }
-    catch (e: unknown) { setToast(e instanceof Error ? e.message : String(e)) }
-    setTimeout(() => setToast(null), 3200)
+    try {
+      await fn()
+      showToast(`${msg} 成功`)
+      refresh()
+      return true
+    } catch (e: unknown) {
+      showToast(e instanceof Error ? e.message : String(e))
+      return false
+    }
   }
 
   const canGenerate = ep.status === 'confirmed' || ep.status === 'generating' || ep.status === 'done'
+  const adoptedCount = videoReady
 
   const doGenerateEpisode = async () => {
-    if (!canGenerate) { setToast('请先在分镜台确认本集分镜'); return }
-    if (!confirm(`即将生成全片 ${shots.length} 个镜头的视频，是否继续？`)) return
+    if (!canGenerate) { showToast('请先在分镜台确认本集分镜'); return }
+    const ok = confirm(
+      `即将为全片 ${shots.length} 个镜头生成新视频版本。\n\n`
+      + `影响范围：\n`
+      + `· 每个镜头会新建（或复用）一个视频版本并入队\n`
+      + `· 当前已采用的 ${adoptedCount} 个成片在新版本成功前会保留\n`
+      + `· 新版本成功并通过技术门禁后，系统会自动比较并可能切换采用版\n`
+      + `· 若任务失败，原采用结果不变，可继续交付\n\n`
+      + `是否继续？`,
+    )
+    if (!ok) return
     videoTimer.start()
-    await t(() => api.episodeGenerate(ep.id), '全片生成已启动')
+    const started = await t(() => api.episodeGenerate(ep.id), '全片生成已启动')
+    if (!started) videoTimer.clear()
   }
 
   const doClearEpisode = async () => {
     setClearMenuOpen(false)
-    if (!confirm(`确认清空第 ${ep.episode_no} 集全部 ${shots.length} 镜的参考图、关键帧、视频与模型分析结果？\n（操作不可恢复）`)) return
+    if (!confirm(
+      `确认清空第 ${ep.episode_no} 集全部 ${shots.length} 镜的参考图、视频与模型分析结果？\n`
+      + `（操作不可恢复）`,
+    )) return
     await t(() => api.clearEpisodeArtifacts(ep.id), '本集已清空')
   }
 
   const doClearShot = async () => {
     setClearMenuOpen(false)
     if (!shot) return
-    if (!confirm(`确认清空第 ${shot.shot_no} 镜的参考图、关键帧、视频与模型分析结果？\n（操作不可恢复）`)) return
+    if (!confirm(
+      `确认清空第 ${shot.shot_no} 镜的参考图、视频与模型分析结果？\n`
+      + `（操作不可恢复）`,
+    )) return
     await t(() => api.clearShotArtifacts(shot.id), `镜 ${shot.shot_no} 已清空`)
   }
 
@@ -209,13 +286,16 @@ export default function WallPage() {
     setGenMask(m => new Set(m).add(shotId)); videoTimer.start()
     try {
       const actionLabel = opts?.actionLabel || '视频生成'
-      setToast(`${actionLabel}已提交，正在处理…`)
+      showToast(`${actionLabel}已提交，正在处理…`)
       const r = await api.shotGenerate(shotId, opts?.promptOverride, opts?.reroll, opts?.withCritique) as { reused?: boolean }
-      setToast(r.reused
+      showToast(r.reused
         ? `${actionLabel}未新建任务：当前内容未变化，已复用已有版本；如需强制重出请点「原词重抽」`
         : `${actionLabel}已开始，正在生成新版本`)
       refresh()
-    } catch (e: unknown) { setToast(e instanceof Error ? e.message : String(e)) }
+    } catch (e: unknown) {
+      showToast(e instanceof Error ? e.message : String(e))
+      videoTimer.clear()
+    }
     finally { setGenMask(m => { const n = new Set(m); n.delete(shotId); return n }) }
   }
 
@@ -235,7 +315,9 @@ export default function WallPage() {
             {{ confirmed: '已确认', generating: '生成中', done: '已完成', paused_budget: '预算暂停' }[ep.status] ?? ep.status}
           </span>
           {canGenerate && (
-            <button className="btn primary small" onClick={doGenerateEpisode}>一键生成所有视频</button>
+            <AsyncButton className="btn primary small" busyLabel="提交中…" onAction={doGenerateEpisode}>
+              一键生成所有视频
+            </AsyncButton>
           )}
           <div className="clear-menu-wrap">
             <button className="btn ghost small danger" onClick={() => setClearMenuOpen(o => !o)}>清空 ▾</button>
@@ -257,8 +339,30 @@ export default function WallPage() {
         </div>
       </div>
 
+      {/* ── 镜头状态导航：快速定位问题镜头 ── */}
+      {shots.length > 0 && (
+        <nav className="wall-shot-rail" aria-label="镜头状态导航">
+          {shots.map((item, itemIdx) => {
+            const state = shotVideoState(item)
+            return (
+              <button
+                key={item.id}
+                type="button"
+                className={`${itemIdx === idx ? 'active ' : ''}${state.railClass}`}
+                onClick={() => setIdx(itemIdx)}
+                aria-current={itemIdx === idx ? 'true' : undefined}
+                title={`镜 ${item.shot_no} · ${state.label}`}
+              >
+                <b>{String(item.shot_no).padStart(2, '0')}</b>
+                <span>{state.label}</span>
+              </button>
+            )
+          })}
+        </nav>
+      )}
+
       {/* ── 轮播主体 ── */}
-      <div className="shot-carousel" ref={carouselRef}>
+      <div className="shot-carousel">
         {shot && (
           <div className="shot-slide" key={shot.id}>
             <ShotSlide
@@ -266,8 +370,9 @@ export default function WallPage() {
               episodeStatus={ep.status}
               generating={genMask.has(shot.id) || shot.versions.some(v => v.status === 'queued' || v.status === 'running')}
               onGenVideo={(opts) => doGenerateVideo(shot.id, opts)}
+              onOpen={openLightbox}
               onRefresh={refresh}
-              onToast={setToast}
+              onToast={showToast}
             />
           </div>
         )}
@@ -282,20 +387,6 @@ export default function WallPage() {
         </div>
       )}
 
-      {/* ── 当前镜素材画廊（仅展示本镜，关键帧管理 + 横向滑动） ── */}
-      {shot && (() => {
-        return (
-          <div className="wall-global-gallery">
-            <button className="gallery-toggle" onClick={() => setShowGallery(g => !g)}>
-              {showGallery ? '▾' : '▸'} 镜 {shot.shot_no} · 素材画廊
-            </button>
-            {showGallery && (
-              <ShotMaterialGallery shot={shot} onOpen={openLightbox} onRefresh={refresh} onToast={setToast} />
-            )}
-          </div>
-        )
-      })()}
-
       {toast && <div className="toast">{toast}</div>}
       {lightbox && <Lightbox src={lightbox.src} alt={lightbox.label || ''} onClose={() => setLightbox(null)} />}
     </div>
@@ -306,23 +397,25 @@ export default function WallPage() {
    ShotSlide — 单镜卡片
    ═══════════════════════════════════════════════════════════════ */
 function ShotSlide({ shot, episodeStatus, generating,
-  onGenVideo, onRefresh, onToast }: {
+  onGenVideo, onOpen, onRefresh, onToast }: {
   shot: Shot; episodeStatus: string; generating: boolean
   onGenVideo: (opts?: { promptOverride?: string; reroll?: boolean; withCritique?: boolean; actionLabel?: string }) => void
+  onOpen: (src: string, label?: string) => void
   onRefresh: () => void; onToast: (m: string) => void
 }) {
   const [previewVersionId, setPreviewVersionId] = useState<string | null>(null)
-  const adopted = shot.versions.find(v => v.id === shot.adopted_version_id)
-  const latest = shot.versions[0]
-  const current = adopted || latest
+  const [reviewTab, setReviewTab] = useState<ReviewTab>('text')
+  const videoState = shotVideoState(shot)
+  const adopted = videoState.adopted
+  const current = adopted || videoState.latest
   const preview = previewVersionId
     ? shot.versions.find(v => v.id === previewVersionId)
     : undefined
-  const playing = preview || current
-  const hasAnyVersion = shot.versions.length > 0
+  const playing = preview || videoState.playing
 
   useEffect(() => {
     setPreviewVersionId(null)
+    setReviewTab('text')
   }, [shot.id])
 
   useEffect(() => {
@@ -339,16 +432,78 @@ function ShotSlide({ shot, episodeStatus, generating,
         <span className="meta">{shot.shot_size} · {shot.camera_move} · {shot.duration_s}s · {shot.transition}</span>
         <span className="meta">{shot.scene_setting}</span>
         {shot.continuity_from_prev ? <span className="stamp blue">接上镜</span> : <span className="stamp grey">新场景</span>}
-        {adopted ? <span className="stamp green">已采用</span> : hasAnyVersion && <span className="stamp grey">待采用</span>}
-        {shot.video_stale && <span className="stamp red">视频需重生</span>}
+        <span className={`stamp ${
+          videoState.phase === 'adopted' ? 'green'
+            : videoState.phase === 'working' ? 'gold'
+              : videoState.phase === 'failed' || videoState.phase === 'stale' ? 'red'
+                : 'grey'
+        }`}>{videoState.label}</span>
       </div>
 
       <div className="slide-body">
-        {/* 左栏：剧本/台词/参考图 + 操作按钮 */}
+        {/* 左栏：以成片为第一视觉焦点 */}
+        <div className="slide-right">
+          <VideoPlayer current={playing} previewing={!!preview && preview.id !== current?.id} phase={videoState.phase} />
+        </div>
+
+        {/* 右栏：横向菜单切换评审依据，操作按钮固定在底部 */}
         <div className="slide-left">
-          <InfoSection shot={shot} />
-          <KeyframeCompare shot={shot} onRefresh={onRefresh} onToast={onToast} />
+          <nav className="review-tabs" role="tablist" aria-label={`镜 ${shot.shot_no} 评审内容`}>
+            {REVIEW_TABS.map(tab => (
+              <button
+                key={tab.id}
+                id={`review-tab-${shot.id}-${tab.id}`}
+                type="button"
+                role="tab"
+                className={reviewTab === tab.id ? 'active' : ''}
+                aria-selected={reviewTab === tab.id}
+                aria-controls={`review-panel-${shot.id}-${tab.id}`}
+                onClick={() => setReviewTab(tab.id)}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </nav>
+
+          <div
+            key={reviewTab}
+            id={`review-panel-${shot.id}-${reviewTab}`}
+            className="review-tab-content"
+            role="tabpanel"
+            aria-labelledby={`review-tab-${shot.id}-${reviewTab}`}
+          >
+            {reviewTab === 'text' && <InfoSection shot={shot} />}
+
+            {reviewTab === 'references' && (
+              <section className="candidate-compare">
+                <div className="candidate-compare-head">
+                  <b>本镜参考图</b>
+                  <span>生成视频时，系统会先生成或复用参考图，再提交视频模型</span>
+                </div>
+                <ShotMaterialGallery
+                  shot={shot}
+                  onOpen={onOpen}
+                  onRefresh={onRefresh}
+                  onToast={onToast}
+                />
+              </section>
+            )}
+
+            {reviewTab === 'videos' && (
+              <VideoControls
+                mode="comparison"
+                shot={shot} episodeStatus={episodeStatus} current={current}
+                previewVersionId={preview?.id ?? null}
+                generating={generating}
+                onGenVideo={onGenVideo}
+                onPreview={setPreviewVersionId}
+                onRefresh={onRefresh} onToast={onToast}
+              />
+            )}
+          </div>
+
           <VideoControls
+            mode="actions"
             shot={shot} episodeStatus={episodeStatus} current={current}
             previewVersionId={preview?.id ?? null}
             generating={generating}
@@ -356,11 +511,6 @@ function ShotSlide({ shot, episodeStatus, generating,
             onPreview={setPreviewVersionId}
             onRefresh={onRefresh} onToast={onToast}
           />
-        </div>
-
-        {/* 右栏：仅视频播放 */}
-        <div className="slide-right">
-          <VideoPlayer current={playing} previewing={!!preview && preview.id !== current?.id} />
         </div>
       </div>
     </div>
@@ -384,12 +534,12 @@ function InfoSection({ shot }: { shot: Shot }) {
 
   return (
     <div className="info-section">
-      {!!shot.source_excerpt && (
-        <section className="script-card">
-          <div className="script-card-head">原文摘录</div>
-          <div className="script-source">{shot.source_excerpt}</div>
-        </section>
-      )}
+      <section className="script-card">
+        <div className="script-card-head">原文摘录</div>
+        <div className={`script-source${shot.source_excerpt ? '' : ' empty'}`}>
+          {shot.source_excerpt || '暂无原文摘录'}
+        </div>
+      </section>
 
       <section className="script-card">
         <div className="script-card-head">镜头信息</div>
@@ -424,20 +574,6 @@ function InfoSection({ shot }: { shot: Shot }) {
           )}
         </div>
       </section>
-      {shot.dialogues.length > 0 && (
-        <section className="script-card">
-          <div className="script-card-head">台词明细</div>
-          <div className="dlg-list">
-            {shot.dialogues.map((d, i) => (
-              <div key={i} className="dlg-line">
-                <span className="dlg-speaker">{d.speaker}</span>
-                <span className="dlg-text">{d.line}</span>
-                {d.emotion && d.emotion !== '平静' && <span className="dlg-emotion">{d.emotion}</span>}
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
     </div>
   )
 }
@@ -445,7 +581,14 @@ function InfoSection({ shot }: { shot: Shot }) {
 /* ═══════════════════════════════════════════════════════════════
    VideoPlayer — 视频播放（右栏，仅播放器）
    ═══════════════════════════════════════════════════════════════ */
-function VideoPlayer({ current, previewing }: { current?: ShotVersion; previewing?: boolean }) {
+function VideoPlayer({ current, previewing, phase }: {
+  current?: ShotVersion; previewing?: boolean; phase?: string
+}) {
+  const emptyLabel = phase === 'working' || current?.status === 'queued' || current?.status === 'running'
+    ? '⏳ 生成中…'
+    : phase === 'failed' || current?.status === 'failed'
+      ? '生成失败'
+      : '暂无视频'
   return (
     <div className="video-player-area">
       {previewing && current && (
@@ -455,7 +598,7 @@ function VideoPlayer({ current, previewing }: { current?: ShotVersion; previewin
         <video key={current.id} src={current.video_url} controls className="rev-video" />
       ) : (
         <div className="vp-empty">
-          <span>{current?.status === 'queued' || current?.status === 'running' ? '⏳ 生成中…' : '暂无视频'}</span>
+          <span>{emptyLabel}</span>
           {current?.error && <span className="err-text">{current.error}</span>}
         </div>
       )}
@@ -463,65 +606,12 @@ function VideoPlayer({ current, previewing }: { current?: ShotVersion; previewin
   )
 }
 
-function KeyframeCompare({ shot, onRefresh, onToast }: {
-  shot: Shot; onRefresh: () => void; onToast: (message: string) => void
-}) {
-  const [busy, setBusy] = useState(false)
-  const required = shot.required_keyframes ?? ['head', 'tail']
-  const approved = { head: shot.approved_head_scene_id, tail: shot.approved_tail_scene_id }
-  const adopt = async (sceneId: string, kind: 'head' | 'tail') => {
-    const reason = window.prompt('请填写采用理由（应说明与其它候选的比较结果）', '画面与分镜意图最匹配，连续性和清晰度最佳')
-    if (!reason?.trim()) return
-    try { await api.sceneApprove(shot.id, sceneId, kind, reason.trim()); onRefresh() }
-    catch (e) { onToast((e as Error).message) }
-  }
-  const regenerate = async (kind?: 'head' | 'tail') => {
-    setBusy(true)
-    try {
-      await api.sceneGenerate(shot.id, kind ? [kind] : required)
-      onToast(`已提交${kind === 'head' ? '首帧' : kind === 'tail' ? '尾帧' : '关键帧'}定向重生`)
-      onRefresh()
-    } catch (e) { onToast((e as Error).message) }
-    finally { setBusy(false) }
-  }
-  return (
-    <section className="candidate-compare">
-      <div className="candidate-compare-head">
-        <b>关键帧候选横向比较</b>
-        <span>本轮最高预估 ￥{(shot.scene_est_cost_cny ?? 0).toFixed(2)}</span>
-        <button className="btn small" disabled={busy} onClick={() => regenerate()}>生成所需关键帧</button>
-      </div>
-      {required.map(kind => {
-        const items = shot.scenes.filter(item => item.kind === kind && item.status === 'succeeded')
-        return <div className="candidate-kind" key={kind}>
-          <div className="candidate-kind-label">
-            <b>{kind === 'head' ? '首帧' : '尾帧'}</b>
-            <button className="btn small ghost" disabled={busy} onClick={() => regenerate(kind)}>定向重生</button>
-          </div>
-          <div className="candidate-row">
-            {!items.length && <span className="hint">尚无候选</span>}
-            {items.map(item => {
-              const isApproved = approved[kind] === item.id
-              return <div className={`candidate-card${isApproved ? ' adopted' : ''}`} key={item.id}>
-                {item.image_url && <img src={item.image_url} alt={`${kind} v${item.version_no}`} />}
-                <div><b>v{item.version_no}</b><span>QA {item.qa?.overall?.toFixed(2) ?? '—'}</span></div>
-                {item.qa?.issues?.[0] && <small>{item.qa.issues[0]}</small>}
-                {item.adoption_reason && <small className="adoption-reason">{item.adoption_reason}</small>}
-                {isApproved ? <span className="stamp green">已采用</span> : <button className="btn small" onClick={() => adopt(item.id, kind)}>比较后采用</button>}
-              </div>
-            })}
-          </div>
-        </div>
-      })}
-    </section>
-  )
-}
-
 /* ═══════════════════════════════════════════════════════════════
    VideoControls — 操作按钮 + 版本历史（左栏）
    ═══════════════════════════════════════════════════════════════ */
-function VideoControls({ shot, episodeStatus, current, previewVersionId, generating,
+function VideoControls({ mode, shot, episodeStatus, current, previewVersionId, generating,
   onGenVideo, onPreview, onRefresh, onToast }: {
+  mode: 'actions' | 'comparison'
   shot: Shot; episodeStatus: string; current?: ShotVersion
   previewVersionId: string | null
   generating: boolean
@@ -531,6 +621,10 @@ function VideoControls({ shot, episodeStatus, current, previewVersionId, generat
 }) {
   const hasAdopted = !!shot.adopted_version_id
   const disabled = generating
+  const hasActiveVideoTask = shot.versions.some(
+    version => version.status === 'queued' || version.status === 'running',
+  )
+  const videoState = shotVideoState(shot)
 
   const doAdopt = async (vid: string) => {
     const reason = window.prompt('请填写采用理由（应说明质量、成本或版本比较）', '技术门禁通过，横向比较后质量分最佳')
@@ -543,7 +637,22 @@ function VideoControls({ shot, episodeStatus, current, previewVersionId, generat
     try { await api.deleteVersion(vid); onRefresh() }
     catch (e: unknown) { onToast(e instanceof Error ? e.message : String(e)) }
   }
-  const doWithCritique = () => onGenVideo({ withCritique: true, actionLabel: '带评语重生' })
+  const doWithCritique = () => onGenVideo({ withCritique: true, reroll: true, actionLabel: '带评语重生' })
+  const doStop = async () => {
+    try {
+      const result = await api.stopShotVideo(shot.id)
+      if (result.stopped_count === 0) {
+        onToast('视频任务已经结束，无需停止')
+      } else if (result.provider_may_continue) {
+        onToast('已停止本地任务；视频平台已接单，平台侧可能仍继续执行并计费')
+      } else {
+        onToast('视频任务已停止，可稍后重新生成')
+      }
+      onRefresh()
+    } catch (error: unknown) {
+      onToast(error instanceof Error ? error.message : String(error))
+    }
+  }
   const doRewrite = () => {
     const initial = (current?.prompt_text || '').trim()
     const next = window.prompt('请输入新的生成词。留空则取消。', initial)
@@ -560,17 +669,29 @@ function VideoControls({ shot, episodeStatus, current, previewVersionId, generat
     onGenVideo({ promptOverride, actionLabel: '改词重生' })
   }
 
-  return (
-    <div className="video-section">
-      {/* 控制面板 */}
-      <div className="video-controls">
-        {/* 操作按钮 */}
+  if (mode === 'actions') {
+    return (
+      <div className="review-action-footer" aria-label="本镜操作">
         <div className="action-row">
           {(episodeStatus === 'confirmed' || episodeStatus === 'generating' || episodeStatus === 'done') && (
             <button className="btn primary small" disabled={disabled}
-              onClick={() => onGenVideo({ actionLabel: hasAdopted ? '重生成视频' : '生成本镜视频' })}>
-              {generating ? '生成中…' : hasAdopted ? '重生成视频' : '生成本镜视频'}
+              onClick={() => onGenVideo({
+                // 已有采用版时强制重抽，避免幂等复用旧版本形成死循环
+                reroll: hasAdopted || videoState.phase === 'stale',
+                actionLabel: hasAdopted || videoState.phase === 'stale' ? '重生成视频' : '生成本镜视频',
+              })}>
+              {generating ? '生成中…' : hasAdopted || videoState.phase === 'stale' ? '重生成视频' : '生成本镜视频'}
             </button>
+          )}
+          {hasActiveVideoTask && (
+            <AsyncButton
+              className="btn ghost small danger"
+              busyLabel="停止中…"
+              onAction={doStop}
+              title="立即停止本镜当前视频任务；已被视频平台接单的任务可能无法撤回"
+            >
+              停止任务
+            </AsyncButton>
           )}
           {current?.video_url && !hasAdopted && (
             <button className="btn small" disabled={disabled} onClick={() => doAdopt(current.id)}>采用此版</button>
@@ -582,7 +703,7 @@ function VideoControls({ shot, episodeStatus, current, previewVersionId, generat
           )}
           {hasAdopted && <button className="btn small" disabled={disabled} onClick={doRewrite}>改词重生</button>}
           {hasAdopted && current?.qa && <button className="btn small" disabled={disabled} onClick={doWithCritique}>带评语重生</button>}
-          {shot.versions.length > 1 && (
+          {(hasAdopted || shot.versions.length > 0) && (
             <button className="btn small ghost" disabled={disabled}
               onClick={() => onGenVideo({ reroll: true, actionLabel: '原词重抽' })}>原词重抽</button>
           )}
@@ -591,43 +712,65 @@ function VideoControls({ shot, episodeStatus, current, previewVersionId, generat
           )}
         </div>
       </div>
+    )
+  }
+
+  return (
+    <div className="video-section video-comparison-panel">
       <div className="version-history candidate-compare">
         <div className="candidate-compare-head">
-          <b>视频候选横向比较</b>
-          <span>单次预估 ￥{shot.est_cost_cny.toFixed(2)} · 点击方框可预览</span>
+          <b>视频候选版本比较</b>
+          <span>单次预估 ￥{shot.est_cost_cny.toFixed(2)} · 点击方框可预览 · 本镜状态：{videoState.label}</span>
         </div>
-        <div className="version-compare-grid">
-          {shot.versions.map(version => {
-            const adopted = version.id === shot.adopted_version_id
-            const previewing = version.id === previewVersionId
-            const canPreview = !!version.video_url
-            return (
-              <div
-                className={`version-compare-card${adopted ? ' adopted' : ''}${previewing ? ' previewing' : ''}${canPreview ? ' clickable' : ''}`}
-                key={version.id}
-                role={canPreview ? 'button' : undefined}
-                tabIndex={canPreview ? 0 : undefined}
-                onClick={() => { if (canPreview) onPreview(version.id) }}
-                onKeyDown={e => {
-                  if (!canPreview) return
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault()
-                    onPreview(version.id)
-                  }
-                }}
-              >
-                <div><b>v{version.version_no}</b><span className={`stamp ${version.status === 'succeeded' ? 'green' : 'grey'}`}>{version.status}</span></div>
-                <span>QA {version.qa?.overall?.toFixed(2) ?? '未评估'} · ￥{version.cost_cny.toFixed(2)} · {version.latency_s.toFixed(1)}s</span>
-                {version.qa?.issues?.[0] && <small>{version.qa.issues[0]}</small>}
-                {version.adoption_reason && <small className="adoption-reason">采用理由：{version.adoption_reason}</small>}
-                {previewing && !adopted && <span className="stamp blue">预览中</span>}
-                {adopted ? <span className="stamp green">当前采用</span> : version.video_url && (
-                  <button className="btn small" onClick={e => { e.stopPropagation(); doAdopt(version.id) }}>比较后采用</button>
-                )}
-              </div>
-            )
-          })}
-        </div>
+        {shot.versions.length > 0 ? (
+          <div className="version-compare-grid">
+            {shot.versions.map(version => {
+              const adopted = version.id === shot.adopted_version_id
+              const previewing = version.id === previewVersionId
+              const canPreview = !!version.video_url
+              const stampClass = version.status === 'succeeded' ? 'green'
+                : version.status === 'queued' || version.status === 'running' ? 'gold'
+                  : version.status === 'failed' ? 'red' : 'grey'
+              return (
+                <div
+                  className={`version-compare-card${adopted ? ' adopted' : ''}${previewing ? ' previewing' : ''}${canPreview ? ' clickable' : ''}`}
+                  key={version.id}
+                  role={canPreview ? 'button' : undefined}
+                  tabIndex={canPreview ? 0 : undefined}
+                  onClick={() => { if (canPreview) onPreview(version.id) }}
+                  onKeyDown={e => {
+                    if (!canPreview) return
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      onPreview(version.id)
+                    }
+                  }}
+                >
+                  <div className="version-compare-details">
+                    <div className="version-compare-heading">
+                      <b>v{version.version_no}</b>
+                      <span className={`stamp ${stampClass}`}>
+                        {VIDEO_VERSION_STATUS_LABEL[version.status] ?? version.status}
+                      </span>
+                    </div>
+                    <span>QA {version.qa?.overall?.toFixed(2) ?? '未评估'} · ￥{version.cost_cny.toFixed(2)} · {version.latency_s.toFixed(1)}s</span>
+                    {version.qa?.issues?.[0] && <small>{version.qa.issues[0]}</small>}
+                    {version.error && <small>{version.error}</small>}
+                    {version.adoption_reason && <small className="adoption-reason">采用理由：{version.adoption_reason}</small>}
+                  </div>
+                  <div className="version-compare-actions">
+                    {previewing && !adopted && <span className="stamp blue">预览中</span>}
+                    {adopted ? <span className="stamp green">当前采用</span> : version.video_url && (
+                      <button className="btn small" onClick={e => { e.stopPropagation(); doAdopt(version.id) }}>比较后采用</button>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        ) : (
+          <div className="review-empty">暂无视频版本，请使用下方按钮生成本镜视频</div>
+        )}
       </div>
     </div>
   )

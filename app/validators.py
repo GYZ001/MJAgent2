@@ -764,7 +764,10 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
             errors.append(f"{tag}.source_basis 过短；请保留本场原文依据")
         if not scene.characters:
             errors.append(f"{tag}.characters 不能为空；请写本场实际参与角色")
-        unknown = [name for name in scene.characters if name not in bible_names]
+        unknown = [
+            name for name in scene.characters
+            if name not in bible_names and not is_functional_extra(name)
+        ]
         if bible_names and unknown:
             errors.append(f"{tag}.characters 含角色圣经外角色：{unknown}")
     full_text = (script.full_script_text or "").strip()
@@ -791,6 +794,20 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
     dialogue_lines = SCRIPT_DIALOGUE_LINE_RE.findall(full_text)
     if len(dialogue_lines) < 2:
         errors.append("full_script_text 对白行过少；请按“角色名：台词”写出真正可演的对白")
+    if bible_names:
+        offbible_speakers = sorted({
+            match.group(1).strip()
+            for match in SCRIPT_SOUND_LINE_RE.finditer(full_text)
+            if match.group(1).strip() != "旁白"
+            and match.group(1).strip() not in bible_names
+            and not is_functional_extra(match.group(1).strip())
+        })
+        if offbible_speakers:
+            errors.append(
+                "full_script_text 含未进入人物谱的具名说话人："
+                f"{offbible_speakers}；重要具名角色必须先由人物发现步骤补进人物谱，"
+                "无需定妆的临时角色请改用测验员/守卫/围观者等功能性身份标签"
+            )
     if len((script.emotional_curve or "").strip()) < 6:
         errors.append("emotional_curve 过短或缺失；请说明本集情绪推进")
     if len((script.ending_hook or "").strip()) < 6:
@@ -831,7 +848,8 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
             errors.append(
                 f"key_lines 有 {len(non_bible_key_lines)} 条含非人物谱角色台词：{shown}{extra}"
                 f"；key_lines 只能保留角色圣经角色（{'、'.join(sorted(bible_names))}）的台词，"
-                "测验员/围观者/旁白等非人物谱角色台词可写进 full_script_text 但不得进入 key_lines")
+                "功能性路人/旁白台词可写进 full_script_text 但不得进入 key_lines；"
+                "其他具名角色必须先补进人物谱")
     missing_in_script = [
         ln for ln in key_lines
         if _longest_run_ratio(_strip_speaker(ln), full_text) < KEY_LINE_PRESENT_RATIO
