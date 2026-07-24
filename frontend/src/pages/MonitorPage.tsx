@@ -826,7 +826,6 @@ export default function MonitorPage() {
     episode_video_inflight_limit: '单集上游在途上限',
     project_video_inflight_limit: '单项目上游在途上限',
     reference_prepared_backlog: '参考图领先视频槽位数',
-    media_pipeline_v2_enabled: '媒体流水线 V2（true/false）',
     video_concurrency: '（兼容）视频并发数',
     auto_concurrency: '（兼容）全自动并发',
     episode_cost_limit_cny: '单集成本上限（¥）',

@@ -94,8 +94,6 @@ VIDEO_POLL_RESUME_DELAY = float(os.environ.get("VIDEO_POLL_RESUME_DELAY", "10"))
 # 供应商任务允许的总墙钟时间。用于防止上游永远停在 running；正常长任务跨越
 # 多次 waiting_provider 轮询继续等待。
 VIDEO_PROVIDER_MAX_WAIT = float(os.environ.get("VIDEO_PROVIDER_MAX_WAIT", str(6 * 60 * 60)))
-# 灰度：参考图分池 / media_tasks 依赖调度；Phase 1 非阻塞轮询全量生效。
-MEDIA_PIPELINE_V2_ENABLED = os.environ.get("MEDIA_PIPELINE_V2_ENABLED", "true").lower() in {"1", "true", "yes"}
 
 # 上游瞬时故障（超时/网络/限流/5xx）的 job 级自动重试。_post_json 的单次调用内重试只覆盖约 90s，
 # 扛不住分钟级的上游抖动；没有 job 级兜底时，一次可恢复的瞬时故障会把整镜任务永久判失败、逼人工重试。
@@ -165,7 +163,6 @@ DEFAULT_SETTINGS = {
     "episode_video_inflight_limit": "8",
     "project_video_inflight_limit": "12",
     "reference_prepared_backlog": "8",
-    "media_pipeline_v2_enabled": "true",
     "episode_cost_limit_cny": "100",
     "use_character_refs": "true",     # 出场角色定妆照随镜头注入 reference_image（跨集一致性核心）
     "max_ref_images": "2",            # 单镜头最多附几张定妆照
@@ -186,7 +183,7 @@ DEFAULT_SETTINGS = {
     "auto_storyboard_concurrency": "8", # 一键全自动：同时进行的分镜 LLM 数（各集流水线并行，分镜阶段单独限流）
     "provider_call_retention_days": "30",
     "error_log_retention_days": "30",
-    "agent_enabled": "true",            # 内嵌对话 Agent 总开关（PRD M1）
+    "agent_enabled": "true",            # 预留：内嵌对话 Agent 总开关（当前 API 未读取，Phase 1 接线或删除）
     "agent_max_tool_calls_per_turn": "8",
     "agent_max_consecutive_same_error": "2",
 }

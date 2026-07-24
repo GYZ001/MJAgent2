@@ -47,9 +47,9 @@ def ensure_registered() -> None:
 
 
 def _bind_handlers(registry) -> None:
-    """仅补挂仍缺 handler 的命令；不覆盖 catalog 已声明的 ``h_*`` 实现。
+    """仅补挂仍缺 handler / preflight 的命令；不覆盖 catalog 已声明的实现。
 
-    ``domain.HANDLER_MAP`` 保留作兼容/测试补丁入口，但优先以 catalog 模块化 handler 为准。
+    ``domain.HANDLER_MAP`` 已掏空，仅作测试补丁兼容；生产 handler 一律在 ``_register_commands`` 声明。
     """
     from dataclasses import replace
 
