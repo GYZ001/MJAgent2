@@ -1,4 +1,8 @@
-"""视频生成队列（PRD §4.5）：asyncio worker、幂等、成本熔断、重启恢复、自动质检与重抽。"""
+"""媒体执行共享导言与队列状态。
+
+后续 media_exec 切片通过 ``exec`` 注入同一命名空间，因此这里的 import 看似未使用，
+实际供 enqueue/run_job/concat 等切片复用。勿用 ruff 自动删 import。
+"""
 from __future__ import annotations
 
 import asyncio
@@ -30,7 +34,7 @@ __all__ = [
     "clear_episode_artifacts", "clear_shot_artifacts", "delete_episode_shots",
     "delete_project_episodes", "delete_video_version", "invalidate_episode_final",
     "invalidate_shot_video_derivatives", "purge_character_video_artifacts",
-    "purge_project_video_artifacts", "purge_shot_videos", "stop_shot_video_tasks",
+    "purge_project_video_artifacts", "purge_shot_videos",
 ]
 
 _queue: asyncio.Queue[str] = asyncio.Queue()

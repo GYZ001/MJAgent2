@@ -1,4 +1,8 @@
-"""REST API。文本阶段（圣经/规划/分镜）为后台任务 + 状态轮询；视频阶段走 worker 队列。"""
+"""REST API 共享导言。
+
+后续 domain 切片通过 ``exec`` 注入同一命名空间，因此这里的 import 看似未使用，
+实际供 projects/bible/storyboard 等切片复用。勿用 ruff 自动删 import。
+"""
 from __future__ import annotations
 
 import asyncio
