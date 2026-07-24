@@ -183,7 +183,7 @@ DEFAULT_SETTINGS = {
     "auto_storyboard_concurrency": "8", # 一键全自动：同时进行的分镜 LLM 数（各集流水线并行，分镜阶段单独限流）
     "provider_call_retention_days": "30",
     "error_log_retention_days": "30",
-    "agent_enabled": "true",            # 预留：内嵌对话 Agent 总开关（当前 API 未读取，Phase 1 接线或删除）
+    "agent_enabled": "true",            # 内嵌对话 Agent 总开关（API 入口会检查）
     "agent_max_tool_calls_per_turn": "8",
     "agent_max_consecutive_same_error": "2",
 }

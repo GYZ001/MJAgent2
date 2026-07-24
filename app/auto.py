@@ -134,10 +134,13 @@ def start(
     pid: str,
     export_dir: str | None = None,
     *,
+    mode: str = "to_storyboard",
     requested_by: str = "user",
     trigger_type: str = "manual",
     parent_run_id: str | None = None,
 ) -> str:
+    if mode not in ("to_storyboard", "full"):
+        raise ValueError(f"无效的自动成片模式：{mode}")
     if export_dir is not None:
         # 记住导出目录，供本次运行与下次预填使用（空串=清除）
         set_setting(f"export_dir:{pid}", export_dir.strip())
@@ -153,17 +156,19 @@ def start(
             "auto_storyboard_concurrency": get_setting("auto_storyboard_concurrency"),
             "episode_cost_limit_cny": get_setting("episode_cost_limit_cny"),
             "video_retry_limit": _MAX_RETRY,
+            "auto_mode": mode,
         },
         config_snapshot={
             "shot_duration_range_s": [config.VIDEO_DURATION_MIN_S, config.VIDEO_DURATION_MAX_S],
             "shot_duration_decided_by": "model",
+            "auto_mode": mode,
         },
         # episode_cost_limit_cny is a per-episode guard, not a project-run budget.
         # Keep it in the policy snapshot and do not mislabel it as the run hard limit.
         budget_limit_cny=None,
         parent_run_id=parent_run_id,
     )
-    task_registry.spawn("auto", pid, _run(pid, recorder), project_id=pid)
+    task_registry.spawn("auto", pid, _run(pid, recorder, mode=mode), project_id=pid)
     return recorder.run_id
 
 
@@ -176,7 +181,7 @@ def recover_auto_tasks() -> int:
     """
     conn = get_conn()
     rows = conn.execute(
-        """SELECT wr.id, wr.scope_id
+        """SELECT wr.id, wr.scope_id, wr.policy_snapshot_json
            FROM workflow_runs wr
            WHERE wr.workflow_type='auto_project'
              AND wr.scope_type='project'
@@ -199,8 +204,16 @@ def recover_auto_tasks() -> int:
         project_id = row["scope_id"]
         if is_running(project_id):
             continue
+        mode = "to_storyboard"
+        try:
+            snap = json.loads(row["policy_snapshot_json"] or "{}")
+            if snap.get("auto_mode") in ("to_storyboard", "full"):
+                mode = snap["auto_mode"]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
         start(
             project_id,
+            mode=mode,
             requested_by="system",
             trigger_type="resume",
             parent_run_id=row["id"],
@@ -217,7 +230,7 @@ async def cancel(pid: str) -> bool:
 
 # ---------- 主流程 ----------
 
-async def _run(pid: str, recorder: WorkflowRecorder) -> None:
+async def _run(pid: str, recorder: WorkflowRecorder, *, mode: str = "to_storyboard") -> None:
     try:
         recorder.start()
         from app.media_pipeline.concurrency import channel_limit, reload_limits_from_settings
@@ -226,14 +239,16 @@ async def _run(pid: str, recorder: WorkflowRecorder) -> None:
         # 全自动按上游在途上限扩 worker，不再用模糊的 auto_concurrency=24 假高并发
         worker.ensure_workers(channel_limit(media_stages.RESOURCE_VIDEO_INFLIGHT))
         export_dir = _export_dir(pid)
-        if export_dir:
+        if mode == "full" and export_dir:
             try:
                 Path(export_dir).mkdir(parents=True, exist_ok=True)
             except OSError as e:
                 raise RuntimeError(f"导出目录不可用：{export_dir}（{e}）")
             _log(pid, f"成片将自动导出到：{export_dir}")
-        else:
+        elif mode == "full":
             _log(pid, "未设置导出目录：只在成片台生成整集成品，不另存到外部文件夹")
+        else:
+            _log(pid, "模式：生成到分镜待确认（不会自动确认或烧视频）")
         await recorder.step(
             "character_bible", lambda: _ensure_bible(pid), contract_key="character_bible",
             agent_name="character_bible",
@@ -287,12 +302,12 @@ async def _run(pid: str, recorder: WorkflowRecorder) -> None:
             "SELECT id, episode_no FROM episodes WHERE project_id=? ORDER BY episode_no", (pid,)).fetchall())
         if not eps:
             raise RuntimeError("分集后没有任何剧集")
-        _phase(pid, f"逐集成片（共 {len(eps)} 集，并行）")
+        _phase(pid, f"逐集{'成片' if mode == 'full' else '剧本+分镜'}（共 {len(eps)} 集，并行）")
         sb_sem = asyncio.Semaphore(max(int(get_setting("auto_storyboard_concurrency") or 8), 1))
         await asyncio.gather(*[
             recorder.step(
                 f"episode:{e['episode_no']}:pipeline",
-                lambda e=e: _episode_pipeline(pid, e["id"], e["episode_no"], sb_sem),
+                lambda e=e: _episode_pipeline(pid, e["id"], e["episode_no"], sb_sem, mode=mode),
                 agent_name="episode_pipeline",
                 input_artifact_ids=[
                     mapping_artifact["id"],
@@ -303,16 +318,27 @@ async def _run(pid: str, recorder: WorkflowRecorder) -> None:
             for e in eps
         ])
 
-        prog = _progress(pid)
-        done, total = prog.get("episodes_done", 0), prog.get("episodes_total", 0)
-        if done >= total:
-            _phase(pid, "全部完成 ✅")
-            _log(pid, f"全自动成片完成：{total} 集已出片")
-            recorder.succeed(f"全自动成片完成：{total} 集已出片")
+        if mode == "to_storyboard":
+            conn = get_conn()
+            scripted = conn.execute(
+                "SELECT COUNT(*) AS c FROM episodes WHERE project_id=? AND status='scripted'",
+                (pid,),
+            ).fetchone()["c"]
+            total = len(eps)
+            _phase(pid, f"案头完成（{scripted}/{total} 集待确认分镜）")
+            _log(pid, "已全部生成到分镜；请到分镜台确认后再生成视频（P3）")
+            recorder.succeed(f"案头阶段完成：{scripted}/{total} 集分镜待人工确认")
         else:
-            _phase(pid, f"完成（{done}/{total} 集出片，其余见日志）")
-            _log(pid, f"部分集需人工处理：已出片 {done}/{total}，未完成的集请查看上方日志/各工作台")
-            recorder.partial(f"部分完成：{done}/{total} 集已出片")
+            prog = _progress(pid)
+            done, total = prog.get("episodes_done", 0), prog.get("episodes_total", 0)
+            if done >= total:
+                _phase(pid, "全部完成 ✅")
+                _log(pid, f"全自动成片完成：{total} 集已出片")
+                recorder.succeed(f"全自动成片完成：{total} 集已出片")
+            else:
+                _phase(pid, f"完成（{done}/{total} 集出片，其余见日志）")
+                _log(pid, f"部分集需人工处理：已出片 {done}/{total}，未完成的集请查看上方日志/各工作台")
+                recorder.partial(f"部分完成：{done}/{total} 集已出片")
     except asyncio.CancelledError:
         _phase(pid, "已取消")
         _log(pid, "已取消（已入队的关键帧/视频会继续跑完，可稍后重新点击从断点续做）")
@@ -417,7 +443,7 @@ async def _ensure_plan(pid: str) -> None:
     _log(pid, f"分集完成：共 {n} 集")
 
 
-async def _episode_pipeline(pid: str, eid: str, epno: int, sb_sem: asyncio.Semaphore) -> None:
+async def _episode_pipeline(pid: str, eid: str, epno: int, sb_sem: asyncio.Semaphore, *, mode: str = "to_storyboard") -> None:
     from app import api
     conn = get_conn()
     try:
@@ -448,12 +474,17 @@ async def _episode_pipeline(pid: str, eid: str, epno: int, sb_sem: asyncio.Semap
             if ep["status"] not in ("scripted", "confirmed", "generating", "done"):
                 raise _Skip(f"第{epno}集分镜失败，跳过：{ep['script_error']}")
 
-        # 3) 确认（自动跳过人工门）：仅对「待确认」的集
+        # 3) 确认门：to_storyboard 停在 scripted；full 才自动确认并烧视频
         ep = conn.execute("SELECT status FROM episodes WHERE id=?", (eid,)).fetchone()
+        if mode != "full":
+            if ep["status"] == "scripted":
+                _log(pid, f"第{epno}集：分镜已就绪，等待人工确认（未自动出片）")
+            return
+
         if ep["status"] == "scripted":
             try:
                 api.confirm_episode_core(eid)
-                _log(pid, f"第{epno}集：分镜已自动确认")
+                _log(pid, f"第{epno}集：分镜已自动确认（full 模式）")
             except ValueError as ve:
                 raise _Skip(f"第{epno}集未通过确认校验，跳过（请到分镜台人工修订后重跑）：{str(ve)[:200]}")
 

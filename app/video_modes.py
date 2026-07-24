@@ -170,9 +170,10 @@ def _parse_ref_prompts(raw: Any) -> list[dict[str, str]]:
 
 
 class ShotVideoModeSelector:
+    """兼容壳：模式已锁死 REFERENCE_IMAGE_MODE，select 直接返回 default_reference_decision。"""
+
     async def select(self, shot: Shot, bible: Bible, *, shot_row: Any | None = None,
                      prev_shot: Any | None = None) -> ShotVideoModeDecision:
-        """视频生成已固定为参考图模式；不再调用 LLM 做模式选择。"""
         return default_reference_decision()
 
 

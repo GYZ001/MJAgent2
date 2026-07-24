@@ -4,6 +4,7 @@ import { useNav, useProject } from '../App'
 import { EpStamp } from './BiblePage'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 import SearchField from '../components/SearchField'
+import PrepSubnav from '../components/PrepSubnav'
 
 function ScreenplayStamp({ status }: { status: string }) {
   const map: Record<string, [string, string]> = {
@@ -101,6 +102,7 @@ export default function EpisodesPage() {
       <header className="desk-head">
         <div className="crumb">书房 / 《{p.name}》</div>
         <h1>分集规划 <span className="sub">{p.chapters?.length} 章 · {eps.length} 集 · 追踪每集从剧本到成片的制作状态</span></h1>
+        <PrepSubnav current="episodes" />
         <hr className="rule" />
       </header>
 

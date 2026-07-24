@@ -6,6 +6,7 @@ import SearchField from '../components/SearchField'
 import EvidenceDrawer from '../components/harness/EvidenceDrawer'
 import ImpactDialog, { ImpactSummary } from '../components/harness/ImpactDialog'
 import QueryState from '../components/QueryState'
+import PrepSubnav from '../components/PrepSubnav'
 import { useFillPageSize } from '../hooks/useFillPageSize'
 
 export default function BiblePage() {
@@ -104,6 +105,7 @@ export default function BiblePage() {
       <header className="desk-head">
         <div className="crumb">书房 / 《{p.name}》</div>
         <h1>人物谱 <span className="sub">角色资产与定妆版本中心 · 保持跨镜头、跨分集一致</span></h1>
+        <PrepSubnav current="bible" />
         <hr className="rule" />
       </header>
 
@@ -137,9 +139,15 @@ export default function BiblePage() {
       </section>
 
       <AutoCard projectId={p.id} auto={auto} busy={busy}
-        onStart={async (exportDir: string) => {
+        onStart={async (exportDir: string, mode: 'to_storyboard' | 'full') => {
           setBusy(true)
-          try { await api.post(`/projects/${p.id}/auto`, { export_dir: exportDir }); toast('已启动一键全自动成片，可离开页面，进度在此实时显示'); refreshAuto() }
+          try {
+            await api.post(`/projects/${p.id}/auto`, { export_dir: exportDir, mode })
+            toast(mode === 'full'
+              ? '已启动含视频全自动（将自动确认分镜）'
+              : '已启动：生成到分镜待确认（不会自动烧视频）')
+            refreshAuto()
+          }
           catch (e: unknown) { toast((e as Error).message, true) }
           finally { setBusy(false) }
         }}
@@ -347,24 +355,23 @@ function DirPicker({ initial, onPick, onClose }: {
 
 function AutoCard({ projectId, auto, busy, onStart, onCancel }: {
   projectId: string; auto: AutoStatus | null; busy: boolean
-  onStart: (exportDir: string) => void; onCancel: () => void
+  onStart: (exportDir: string, mode: 'to_storyboard' | 'full') => void; onCancel: () => void
 }) {
   void projectId
   const running = !!auto?.running
   const pr = auto?.progress
   const autoTimer = useTaskTimer(`project.${projectId}.auto`, running)
   const stat = (s?: string) => (s === 'ready' ? '✓' : s === 'running' ? '…' : s === 'failed' ? '✗' : '—')
-  // 导出目录：用户未编辑时显示服务端记忆值；一旦选择/输入则以其为准（避免每 3 秒轮询把它冲掉）
   const [dir, setDir] = useState<string | null>(null)
   const [picking, setPicking] = useState(false)
   const dirValue = dir ?? auto?.export_dir ?? ''
   return (
     <section className="card auto-card" style={{ borderLeft: '3px solid var(--cinnabar)' }}>
-      <h3>一键全自动成片
-        <span className="hint">人物谱 → 定妆照+分集 → 每集（剧本→分镜→自动确认→参考图视频）→ 合成导出 · 自动跳过已完成步骤</span>
+      <h3>一键自动制作
+        <span className="hint">人物谱 → 定妆照+分集 → 每集剧本+分镜；视频需显式选择「含视频」模式</span>
       </h3>
 
-      <label className="f">成片导出目录</label>
+      <label className="f">成片导出目录（仅「含视频全自动」使用）</label>
       <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 4 }}>
         <button className="btn" disabled={running} onClick={() => setPicking(true)}>
           {dirValue ? '更换目录' : '选择目录'}
@@ -391,22 +398,29 @@ function AutoCard({ projectId, auto, busy, onStart, onCancel }: {
       {picking && (
         <DirPicker initial={dirValue}
           onClose={() => setPicking(false)}
-          onPick={(p) => { setDir(p); setPicking(false) }} />
+          onPick={(picked) => { setDir(picked); setPicking(false) }} />
       )}
 
       <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
         <button className="btn primary" disabled={busy || running} onClick={() => {
           autoTimer.start()
-          onStart(dirValue.trim())
+          onStart(dirValue.trim(), 'to_storyboard')
         }}>
-          {running ? '自动成片进行中…' : '一键全自动成片'}
+          {running ? '自动制作进行中…' : '生成到分镜待确认'}
+        </button>
+        <button className="btn" disabled={busy || running} onClick={() => {
+          if (!window.confirm('将自动确认全部分镜并调用 Seedance 出片（¥0.8/秒）。确定继续？')) return
+          autoTimer.start()
+          onStart(dirValue.trim(), 'full')
+        }}>
+          含视频全自动
         </button>
         {running && <button className="btn ghost" disabled={busy} onClick={onCancel}>停止</button>}
         {auto?.phase && <span className={`stamp ${running ? 'gold' : auto.error ? 'red' : 'green'}`}>{auto.phase}</span>}
-        <TaskTimer label="自动成片" timer={autoTimer} />
+        <TaskTimer label="自动制作" timer={autoTimer} />
       </div>
       <p style={{ fontSize: 12.5, color: 'var(--ink-faint)', marginTop: 8 }}>
-        视频是花钱环节（¥0.8/秒），自动化会跳过人工确认直接出片；每集设有成本上限，触顶则该集暂停并在日志报红，其余集继续。
+        默认「生成到分镜待确认」遵守人工门禁；「含视频全自动」会跳过确认直接烧钱，请仅在你已审过同类样片时使用。
       </p>
 
       {auto?.error && <div className="error-banner">自动成片中断（原始错误，不做静默兜底）：{'\n'}{auto.error}</div>}
@@ -426,7 +440,7 @@ function AutoCard({ projectId, auto, busy, onStart, onCancel }: {
         <div style={{ maxHeight: 220, overflowY: 'auto', background: 'rgba(0,0,0,0.03)', borderRadius: 6,
                       padding: '8px 12px', fontSize: 12, lineHeight: 1.8, fontFamily: 'ui-monospace, monospace' }}>
           {auto.log.slice().reverse().map((l, i) => (
-            <div key={i} style={{ color: /失败|中断|跳过|暂停|报红|无法/.test(l.msg) ? 'var(--cinnabar)' : 'var(--ink-soft)' }}>
+            <div key={i} style={{ color: /失败|中断|跳过|暂停|报红|无法|待确认/.test(l.msg) ? 'var(--cinnabar)' : 'var(--ink-soft)' }}>
               {new Date(l.t * 1000).toLocaleTimeString()} · {l.msg}
             </div>
           ))}

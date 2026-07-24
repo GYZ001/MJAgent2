@@ -533,6 +533,8 @@ CREATE TABLE IF NOT EXISTS mcp_tokens (
 CREATE INDEX IF NOT EXISTS idx_mcp_tokens_hash ON mcp_tokens(token_hash);
 
 CREATE TABLE IF NOT EXISTS media_tasks (
+    -- DEPRECATED / UNUSED (2026-07)：表已建但全仓库无 DML；现行媒体调度走 jobs + media_scheduler。
+    -- 禁止再接新调度器到此表；后续迁移可 DROP。保留仅为兼容旧库文件。
     id TEXT PRIMARY KEY,
     job_id TEXT NOT NULL,
     stage TEXT NOT NULL,
@@ -692,6 +694,8 @@ MIGRATIONS = (
     "ALTER TABLE workflow_runs ADD COLUMN recovered_by_run_id TEXT",
     "ALTER TABLE workflow_runs ADD COLUMN recovered_at REAL",
     "ALTER TABLE workflow_runs ADD COLUMN recovery_count INTEGER NOT NULL DEFAULT 0",
+    # 分镜增强项降级可见（大纲失败/场景库维护失败），不覆盖 script_error
+    "ALTER TABLE episodes ADD COLUMN storyboard_warning TEXT",
 )
 
 
