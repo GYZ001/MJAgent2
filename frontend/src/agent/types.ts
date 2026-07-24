@@ -66,6 +66,7 @@ export interface ApprovalCardData {
 
 export interface AgentStreamEvent {
   event_id: number
+  turn_id?: string
   event_type: string
   payload: Record<string, unknown>
 }

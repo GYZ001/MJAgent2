@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { reduceEvents } from './transcript'
+import { emptyTurnState, mergeTurnState, reduceEvents, type TranscriptItem } from './transcript'
 import type { AgentStreamEvent } from './types'
 
 function event(event_type: string, payload: Record<string, unknown> = {}, event_id = 1): AgentStreamEvent {
@@ -64,5 +64,34 @@ describe('reduceEvents', () => {
     const cancelled = reduceEvents([event('turn.cancelled', { reply: '已停止' })])
     expect(cancelled.status).toBe('cancelled')
     expect(cancelled.answer).toBe('已停止')
+  })
+})
+
+describe('mergeTurnState', () => {
+  const history: TranscriptItem[] = [
+    { kind: 'user', id: 'u-old', text: '旧问题', createdAt: 1 },
+    {
+      kind: 'assistant', id: 'a-old', turnId: 'turn-old', createdAt: 2,
+      ...emptyTurnState(), status: 'done', answer: '旧答案必须保留',
+    },
+  ]
+
+  it('新消息 reset SSE 时不用空 streaming 快照覆盖上一轮', () => {
+    const merged = mergeTurnState(history, 'turn-old', null, 0, emptyTurnState())
+
+    expect(merged).toBe(history)
+    expect(merged[1]).toMatchObject({ status: 'done', answer: '旧答案必须保留' })
+  })
+
+  it('仅把有事件且 turn 归属一致的快照写回目标消息', () => {
+    const current: TranscriptItem = {
+      kind: 'assistant', id: 'a-new', turnId: 'turn-new', createdAt: 3,
+      ...emptyTurnState(),
+    }
+    const state = { ...emptyTurnState(), thinking: '正在查询', answer: '新答案' }
+    const merged = mergeTurnState([...history, current], 'turn-new', 'turn-new', 2, state)
+
+    expect(merged[1]).toMatchObject({ status: 'done', answer: '旧答案必须保留' })
+    expect(merged[2]).toMatchObject({ status: 'streaming', thinking: '正在查询', answer: '新答案' })
   })
 })

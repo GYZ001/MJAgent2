@@ -8,6 +8,7 @@ import ContextChips from './ContextChips'
 import MessageBubble from './MessageBubble'
 import {
   emptyTurnState,
+  mergeTurnState,
   reduceEvents,
   type AssistantTranscriptItem,
   type TranscriptItem,
@@ -85,7 +86,7 @@ export default function AgentDrawer({
   const [error, setError] = useState<string | null>(null)
 
   const streaming = Boolean(turnId) && sending
-  const { events, status: streamStatus, reset: resetStream } = useAgentStream(turnId, Boolean(turnId))
+  const { events, streamTurnId, status: streamStatus, reset: resetStream } = useAgentStream(turnId, Boolean(turnId))
   const turnState = useMemo(() => reduceEvents(events), [events])
 
   // 切换项目后立即切换会话作用域，避免把新项目的消息发进旧项目会话。
@@ -155,20 +156,10 @@ export default function AgentDrawer({
 
   // 把当前 turn 的事件流折叠进对应的 assistant 消息（不覆盖历史，其它消息原样保留）。
   useEffect(() => {
-    if (!turnId) return
-    setMessages(prev => {
-      let hit = false
-      const next = prev.map(m => {
-        if (m.kind === 'assistant' && m.turnId === turnId) {
-          hit = true
-          return { ...m, ...turnState }
-        }
-        return m
-      })
-      return hit ? next : prev
-    })
+    if (!turnId || streamTurnId !== turnId || events.length === 0) return
+    setMessages(prev => mergeTurnState(prev, turnId, streamTurnId, events.length, turnState))
     if (turnState.status !== 'streaming') setSending(false)
-  }, [turnState, turnId])
+  }, [events.length, streamTurnId, turnState, turnId])
 
   // 贴底滚动：仅当用户本就在底部附近时才自动跟随，避免打断向上翻阅。
   const onTranscriptScroll = useCallback(() => {
@@ -194,6 +185,8 @@ export default function AgentDrawer({
     setMessages(prev => [...prev, userItem, assistantItem])
     setInput('')
     stickRef.current = true
+    // 先解除上一轮关联，再清空 SSE；否则空事件会被写回上一轮。
+    setTurnId(null)
     resetStream()
     try {
       const resp = await api.post(`/agent/conversations/${conversationId}/messages`, {

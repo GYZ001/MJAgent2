@@ -58,6 +58,29 @@ export function emptyTurnState(): AssistantTurnState {
   }
 }
 
+/**
+ * 只把确实属于目标 turn 的非空事件快照写回对话。
+ *
+ * 发送新消息时 SSE 会先 reset。如果用这份空快照去更新上一个 turn，
+ * 会把已完成答案清空并改回 streaming。这里作为纯函数门禁，防止该类竞态。
+ */
+export function mergeTurnState(
+  items: TranscriptItem[],
+  targetTurnId: string | null,
+  streamTurnId: string | null,
+  eventCount: number,
+  turnState: AssistantTurnState,
+): TranscriptItem[] {
+  if (!targetTurnId || streamTurnId !== targetTurnId || eventCount === 0) return items
+  let hit = false
+  const next = items.map(item => {
+    if (item.kind !== 'assistant' || item.turnId !== targetTurnId) return item
+    hit = true
+    return { ...item, ...turnState }
+  })
+  return hit ? next : items
+}
+
 const str = (v: unknown): string => (v == null ? '' : String(v))
 
 function appendSegment(existing: string, addition: string): string {
