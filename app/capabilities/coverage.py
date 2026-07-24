@@ -103,7 +103,8 @@ def build_coverage_report() -> dict[str, Any]:
 
 def write_coverage_json(target: Path | None = None) -> Path:
     report = build_coverage_report()
-    out = target or (ROOT / "capability-coverage.json")
+    out = target or (ROOT / "data" / "reports" / "capability-coverage.json")
+    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return out
 

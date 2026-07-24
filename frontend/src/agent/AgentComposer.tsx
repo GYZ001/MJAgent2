@@ -1,5 +1,3 @@
-import { QUICK_PROMPTS } from './types'
-
 export default function AgentComposer({
   value,
   onChange,
@@ -17,19 +15,6 @@ export default function AgentComposer({
 }) {
   return (
     <div className="agent-composer">
-      <div className="agent-quick">
-        {QUICK_PROMPTS.map(prompt => (
-          <button
-            key={prompt}
-            type="button"
-            className="agent-chip"
-            disabled={disabled}
-            onClick={() => onChange(prompt)}
-          >
-            {prompt}
-          </button>
-        ))}
-      </div>
       <textarea
         className="agent-input"
         rows={3}

@@ -4,8 +4,8 @@
 
 | 附录 | 内容 |
 |---|---|
-| [docs/HIAGENT_INTEGRATION.md](docs/HIAGENT_INTEGRATION.md) | HiAgent 网关集成规范（已从 1.0 验证的真实 API 形态、模型 ID、延迟数据） |
-| [docs/PROMPT_SPEC.md](docs/PROMPT_SPEC.md) | 全部 LLM 阶段的提示词设计、JSON Schema、校验与修复回路 |
+| [docs/HIAGENT_INTEGRATION.md](../docs/HIAGENT_INTEGRATION.md) | HiAgent 网关集成规范（已从 1.0 验证的真实 API 形态、模型 ID、延迟数据） |
+| [docs/PROMPT_SPEC.md](../docs/PROMPT_SPEC.md) | 全部 LLM 阶段的提示词设计、JSON Schema、校验与修复回路 |
 
 ---
 
@@ -195,7 +195,7 @@ continuity       衔接标记：是否沿用上一镜头尾帧
 
 ### 4.6 P0-6 视频生成（HiAgent Seedance 2.0）
 
-详细 API 形态见 [docs/HIAGENT_INTEGRATION.md](docs/HIAGENT_INTEGRATION.md)。要求：
+详细 API 形态见 [docs/HIAGENT_INTEGRATION.md](../docs/HIAGENT_INTEGRATION.md)。要求：
 
 - **异步任务模式**：创建任务 → 轮询状态 → 下载视频到项目目录 `projects/<id>/episodes/<n>/shots/<m>/v<k>.mp4`
 - **本地队列**：并发上限可配（默认 2，1.0 配置经验值），FIFO + 失败重试 2 次（指数退避），429 自动降速
@@ -267,7 +267,7 @@ projects/<project_id>/
 ### 5.4 一致性三层机制（对应 R6；2026-06-12 已全部实测落地）
 
 1. **锚点串逐字注入**：角色外观/画风/场景串生成一次、人工校订、锁定，编译器逐字拼接，LLM 永不复述改写（改写=漂移）
-2. **Seedream 定妆照**：圣经定稿后，对每个角色按锚点串生成全身立绘（1440x2560，与视频同比例）存入 `refs/`；以 base64 data URL 作为 `reference_image` 传给 Seedance。实测角色发型/服装/五官与定妆照保持一致（样片 `m0_samples/ref_test.mp4`）
+2. **Seedream 定妆照**：圣经定稿后，对每个角色按锚点串生成全身立绘（1440x2560，与视频同比例）存入 `refs/`；以 base64 data URL 作为 `reference_image` 传给 Seedance。实测角色发型/服装/五官与定妆照保持一致（样片 `data/m0_samples/ref_test.mp4`）
 3. **首尾帧链式衔接**：`continuity_from_prev=true` 的镜头与上一镜头构成依赖链——等上一镜成片后本地 ffmpeg 抽尾帧（网关不回传 last_frame_url），以 data URL 作为 `first_frame` 输入下一镜
 
 **实测约束（决定机制拓扑）**：`first_frame` 与 `reference_image` 不能同时使用（网关 400）。因此：**链头镜头带定妆照锚定角色身份，链中镜头只带首帧**——角色一致性由链头注入，沿帧序传递；分镜阶段铁律要求同场景内除首镜外全部成链。

@@ -11,9 +11,9 @@ export default function RunProgressCard({
 }) {
   return (
     <section className="agent-card run-card">
-      <div className="tool-card-head">
+      <div className="run-card-head">
         <strong>Run {runId.slice(0, 12)}</strong>
-        {status && <span className={`tool-status status-${status}`}>{status}</span>}
+        {status && <span className={`run-status status-${status}`}>{status}</span>}
       </div>
       {summary && <p>{summary}</p>}
       {onOpen && (

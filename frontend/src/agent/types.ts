@@ -69,10 +69,3 @@ export interface AgentStreamEvent {
   event_type: string
   payload: Record<string, unknown>
 }
-
-export const QUICK_PROMPTS = [
-  '这个项目下一步该做什么？',
-  '最近失败的 Run 在哪里？帮我定位证据。',
-  '检查当前分集能否交付，并列出阻塞项。',
-  '估算生成当前集待办镜头的费用（先不要执行）。',
-] as const

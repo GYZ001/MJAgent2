@@ -88,7 +88,7 @@ GET {base}/contents/generations/tasks/{task_id}
 
 **一致性机制验证结果（2026-06-12 第二轮实测）：**
 
-- [x] **reference_image 端到端可用**：Seedream 定妆照以 base64 data URL 传入 `{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,..."},"role":"reference_image"}`，生成视频中角色发型/服装/五官与定妆照一致（目检通过，样片 `m0_samples/ref_test.mp4`）
+- [x] **reference_image 端到端可用**：Seedream 定妆照以 base64 data URL 传入 `{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,..."},"role":"reference_image"}`，生成视频中角色发型/服装/五官与定妆照一致（目检通过，样片 `data/m0_samples/ref_test.mp4`）
 - [x] **⚠️ first_frame/last_frame 与 reference_image 互斥**：混用返回 400 "first/last frame content cannot be mixed with reference media content" → 视频阶段只传预生成首/尾关键图；角色一致性在关键帧生成阶段注入
 - [x] **⚠️ 成功任务不回传 last_frame_url**（succeeded 时该字段为空）→ 当前链路不再依赖回传或本地抽取尾帧，下一镜首帧直接使用上一镜预生成尾图
 - [x] **Seedream 尺寸下限 3,686,400 像素**（400 报文明示）；定妆照用 1440x2560（与视频 9:16 同比例），返回 `data[0].url`（JPEG）

@@ -3,10 +3,9 @@ import EvidenceCitation from './EvidenceCitation'
 import Markdown from './Markdown'
 import RunProgressCard from './RunProgressCard'
 import ThinkingBlock from './ThinkingBlock'
-import ToolCallCard from './ToolCallCard'
 import type { AssistantTranscriptItem } from './transcript'
 
-/** 渲染一条 assistant 消息：思考过程 + 正文 Markdown + 归属本轮的工具/审批/Run/证据卡。 */
+/** 渲染一条 assistant 消息：思考过程 + 正文 Markdown + 归属本轮的审批/Run/证据卡。 */
 export default function AssistantTurnView({
   item,
   onApprove,
@@ -24,8 +23,8 @@ export default function AssistantTurnView({
 }) {
   const streaming = item.status === 'streaming'
   const hasBody = Boolean(
-    item.thinking.trim() || item.answer.trim() || item.tools.length ||
-    item.approvals.length || item.runs.length || item.citations.length,
+    item.thinking.trim() || item.answer.trim() || item.approvals.length ||
+    item.runs.length || item.citations.length,
   )
 
   return (
@@ -42,10 +41,6 @@ export default function AssistantTurnView({
           <span className="agent-typing"><i /><i /><i /></span>
         </div>
       ) : null}
-
-      {item.tools.map(card => (
-        <ToolCallCard key={card.id} {...card} />
-      ))}
 
       {item.approvals.map(card => (
         <ApprovalCard

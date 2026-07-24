@@ -4,21 +4,12 @@
  * 把一个 turn 的 SSE 事件序列折叠成「一条 assistant 消息」的展示状态：
  * - thinking：模型思考过程（reasoning 流 + 调用工具前的中间叙述），分段追加，不覆盖。
  * - answer：最终答复（流式逐 token，结束时以后端 reply 为权威覆盖，修正任何流式漂移）。
- * - tools / approvals / runs / citations：归属本轮的内联卡片。
+ * - approvals / runs / citations：归属本轮的内联卡片。
  *
  * 设计要点：reduceEvents 每次都从完整事件数组重算，天然幂等、断线续传安全，也让归约逻辑
  * 独立于 React 组件，可直接单测。
  */
 import type { AgentStreamEvent, ApprovalCardData, UiIntent } from './types'
-
-export interface ToolCardState {
-  id: string
-  name: string
-  status: string
-  summary?: string
-  runId?: string
-  risk?: string
-}
 
 export interface RunCardState {
   runId: string
@@ -30,7 +21,6 @@ export type TurnStatus = 'streaming' | 'done' | 'failed' | 'cancelled'
 export interface AssistantTurnState {
   thinking: string
   answer: string
-  tools: ToolCardState[]
   approvals: ApprovalCardData[]
   runs: RunCardState[]
   citations: string[]
@@ -59,7 +49,6 @@ export function emptyTurnState(): AssistantTurnState {
   return {
     thinking: '',
     answer: '',
-    tools: [],
     approvals: [],
     runs: [],
     citations: [],
@@ -76,19 +65,6 @@ function appendSegment(existing: string, addition: string): string {
   if (!add) return existing
   if (!existing) return add
   return `${existing}\n\n${add}`
-}
-
-function upsertTool(tools: ToolCardState[], next: ToolCardState): ToolCardState[] {
-  const idx = tools.findIndex(t => t.id === next.id)
-  if (idx < 0) return [...tools, next]
-  const merged = { ...tools[idx], ...next }
-  // 已有的 summary/runId/risk 不应被后续空值覆盖
-  merged.summary = next.summary ?? tools[idx].summary
-  merged.runId = next.runId ?? tools[idx].runId
-  merged.risk = next.risk ?? tools[idx].risk
-  const copy = tools.slice()
-  copy[idx] = merged
-  return copy
 }
 
 /** 把一个 turn 的完整事件序列折叠成 assistant 展示状态。 */
@@ -125,29 +101,9 @@ export function reduceEvents(events: AgentStreamEvent[]): AssistantTurnState {
         break
       }
       case 'tool.proposed':
-      case 'tool.started': {
-        const id = str(p.tool_call_id ?? p.id) || `ev-${str(p.tool ?? p.name)}`
-        state.tools = upsertTool(state.tools, {
-          id,
-          name: str(p.command ?? p.tool ?? p.name) || 'tool',
-          status: str(p.status ?? ev.event_type),
-          summary: p.summary != null ? str(p.summary) : undefined,
-          risk: p.risk != null ? str(p.risk) : undefined,
-          runId: p.run_id != null ? str(p.run_id) : undefined,
-        })
-        break
-      }
+      case 'tool.started':
       case 'tool.progress': {
-        const id = str(p.tool_call_id ?? p.id)
-        if (id) {
-          state.tools = upsertTool(state.tools, {
-            id,
-            name: str(p.command ?? p.tool ?? p.name) || 'tool',
-            status: p.status != null ? str(p.status) : 'tool.progress',
-            summary: p.summary != null ? str(p.summary)
-              : p.message != null ? str(p.message) : undefined,
-          })
-        }
+        // 工具过程是内部执行细节，不进入用户对话展示。
         break
       }
       case 'tool.completed':
@@ -156,13 +112,6 @@ export function reduceEvents(events: AgentStreamEvent[]): AssistantTurnState {
         const failed = ev.event_type === 'tool.failed'
         if (id) {
           resolvedToolCalls.add(id)
-          state.tools = upsertTool(state.tools, {
-            id,
-            name: str(p.command ?? p.tool ?? p.name) || 'tool',
-            status: failed ? (str(p.status) || 'failed') : (str(p.status) || 'succeeded'),
-            summary: p.summary != null ? str(p.summary) : undefined,
-            runId: p.run_id != null ? str(p.run_id) : undefined,
-          })
         }
         if (Array.isArray(p.resource_uris)) {
           for (const uri of p.resource_uris) {

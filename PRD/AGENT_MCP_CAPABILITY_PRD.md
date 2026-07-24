@@ -4,7 +4,7 @@
 > 日期：2026-07-23  
 > 状态：待评审  
 > 适用范围：React 前端、FastAPI 后端、Workflow Engine、Evidence Harness、MCP 接入层  
-> 关联文档：[`../PRD.md`](../PRD.md)、[`../HARNESS_AGENT_LOOP_REFACTOR_PLAN.md`](../HARNESS_AGENT_LOOP_REFACTOR_PLAN.md)、[`../docs/HARNESS_RUNBOOK.md`](../docs/HARNESS_RUNBOOK.md)
+> 关联文档：[`README.md`](README.md)、[`HARNESS_AGENT_LOOP_REFACTOR_PLAN.md`](HARNESS_AGENT_LOOP_REFACTOR_PLAN.md)、[`../docs/HARNESS_RUNBOOK.md`](../docs/HARNESS_RUNBOOK.md)
 
 ---
 
@@ -335,7 +335,7 @@ Agent 修改内容时首选结构化 Patch，而不是返回整份剧本/分镜�
 2. 指定 risk、confirmation、idempotency、scopes、preconditions；
 3. 增加页面调用与 Agent 调用的合同一致性测试；
 4. 若不向 Agent 暴露，必须填写原因；
-5. CI 生成 `capability-coverage.json`，未分类的 mutating endpoint 使构建失败。
+5. CI 生成 `data/reports/capability-coverage.json`，未分类的 mutating endpoint 使构建失败。
 
 ---
 
@@ -754,7 +754,6 @@ frontend/src/agent/
   AgentComposer.tsx
   ContextChips.tsx
   PlanCard.tsx
-  ToolCallCard.tsx
   ApprovalCard.tsx
   RunProgressCard.tsx
   EvidenceCitation.tsx

@@ -2288,7 +2288,7 @@ label.f { color: var(--ink-soft); font: 600 12px var(--ui); letter-spacing: .02e
 }
 .agent-drawer-head b { font-size: 16px; margin-right: 8px; }
 .agent-stream-status { font-size: 11px; color: var(--ink-faint); }
-.agent-context-chips, .agent-quick {
+.agent-context-chips {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
@@ -2301,8 +2301,8 @@ label.f { color: var(--ink-soft); font: 600 12px var(--ui); letter-spacing: .02e
   border-radius: 999px;
   padding: 4px 10px;
   font-size: 12px;
-  cursor: pointer;
 }
+.agent-context-chips .agent-chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-chip.warn { color: var(--cinnabar); border-color: rgba(181,68,52,.35); }
 .agent-chip-x { border: 0; background: transparent; margin-left: 4px; cursor: pointer; color: inherit; }
 .agent-transcript {
@@ -2324,10 +2324,9 @@ label.f { color: var(--ink-soft); font: 600 12px var(--ui); letter-spacing: .02e
 .agent-card h4 { font-size: 13px; margin-bottom: 6px; }
 .agent-card ol { padding-left: 18px; font-size: 13px; color: var(--ink-soft); }
 .agent-assistant-text { white-space: pre-wrap; font-size: 14px; line-height: 1.7; }
-.tool-card-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
-.tool-status { font-size: 11px; color: var(--ink-faint); }
-.tool-status.status-failed, .tool-status.status-tool\.failed { color: var(--cinnabar); }
-.tool-meta { font-size: 11px; color: var(--ink-faint); margin-top: 4px; }
+.run-card-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+.run-status { font-size: 11px; color: var(--ink-faint); }
+.run-status.status-failed { color: var(--cinnabar); }
 .approval-card { border-color: rgba(181,68,52,.35); }
 .agent-reason { display: grid; gap: 6px; font-size: 12px; color: var(--ink-soft); margin: 8px 0; }
 .agent-reason textarea, .agent-input {

@@ -34,7 +34,7 @@ describe('reduceEvents', () => {
     expect(state.answer).toBe('')
   })
 
-  it('合并工具进度、Run 和证据，工具终态后移除待审批卡', () => {
+  it('不暴露工具状态，但保留 Run、证据和审批收尾逻辑', () => {
     const state = reduceEvents([
       event('tool.proposed', { tool_call_id: 'tc1', tool: 'episode.check', risk: 'R2' }, 1),
       event('approval.required', {
@@ -48,9 +48,7 @@ describe('reduceEvents', () => {
       }, 5),
     ])
 
-    expect(state.tools).toEqual([expect.objectContaining({
-      id: 'tc1', name: 'episode.check', status: 'succeeded', summary: '完成', risk: 'R2',
-    })])
+    expect('tools' in state).toBe(false)
     expect(state.approvals).toEqual([])
     expect(state.runs).toEqual([{ runId: 'run1', summary: '处理中' }])
     expect(state.citations).toEqual(['art1'])

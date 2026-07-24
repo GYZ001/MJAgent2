@@ -44,7 +44,7 @@ user 气泡
   └─ assistant 轮次
        ├─ 💭 思考过程（reasoning，默认折叠，流式追加，带光标）
        ├─ 正文（Markdown）
-       └─ 内联卡片：工具卡 / 审批卡 / Run 进度卡 / 证据引用（归属本轮）
+       └─ 内联卡片：审批卡 / Run 进度卡 / 证据引用（归属本轮）
 user 气泡
   └─ assistant 轮次 …
 ```
@@ -65,8 +65,8 @@ user 气泡
 | `thinking.delta` | `{text}` | **新增**：reasoning 逐 token | **新增** |
 | `assistant.delta` | `{text}` | 正文逐 token | 前端已监听，后端将补发 |
 | `plan.updated` | `{reply, tool_calls, done}` | 每次循环的边界/兼容标记 | 有，保留 |
-| `tool.proposed/started/completed/failed` | `{tool_call_id, ...}` | 工具卡 | 有 |
-| `tool.progress` | `{tool_call_id, ...}` | **前端补渲染** | 后端有事件位、前端未渲染 |
+| `tool.proposed/started/completed/failed` | `{tool_call_id, ...}` | 内部执行事件，不向用户展示技术卡片 | 有 |
+| `tool.progress` | `{tool_call_id, ...}` | 内部进度，仅用于收尾对账 | 有 |
 | `approval.required` | approval payload | 审批卡 | 有 |
 | `run.linked` | `{run_id}` | Run 进度卡 | 有 |
 | `ui.intent` | `{intent}` | 定位建议 | 有 |
@@ -83,8 +83,8 @@ user 气泡
 4. **状态文案**：Header 把 `connecting/open/closed` 映射为 `连接中/思考中/已完成`。
 
 ### P1 · 前端重构（约 1 天，中风险）
-5. **新增 `frontend/src/agent/transcript.ts`**：纯函数归约器 `reduceEvent(state, ev)`，把散在 `AgentDrawer` 的 `useEffect`（`:69-155`）搬入，按 turn 累积、思考/正文分段 append、补 `tool.progress` 处理。
-   - 状态模型：`messages: TranscriptItem[]`，`TranscriptItem = UserMsg | AssistantTurn`；`AssistantTurn = { turnId, thinking: string, answer: string, tools[], approvals[], runs[], citations[], status }`。
+5. **新增 `frontend/src/agent/transcript.ts`**：纯函数归约器 `reduceEvent(state, ev)`，把散在 `AgentDrawer` 的 `useEffect`（`:69-155`）搬入，按 turn 累积、思考/正文分段 append；工具事件仅保留审批收尾和证据归属。
+   - 状态模型：`messages: TranscriptItem[]`，`TranscriptItem = UserMsg | AssistantTurn`；`AssistantTurn = { turnId, thinking: string, answer: string, approvals[], runs[], citations[], status }`。
 6. **重写 `AgentDrawer.tsx`**：用 `messages` 取代 `assistantText/planSteps/toolCards/…` 一堆并列 state；开抽屉/拿到 `conversationId` 后 `GET /conversations/{id}` 回填历史。
 7. **新增组件**：`MessageBubble.tsx`（用户气泡）、`ThinkingBlock.tsx`（💭 可折叠、流式展开、结束折叠、打字光标）、`AssistantTurn.tsx`（正文 Markdown + 内联卡片）。
 8. **正文 Markdown**：轻量渲染（段落/列表/代码/加粗），替换裸 `<p>`。
@@ -118,7 +118,7 @@ user 气泡
 1. 发送后立即看到自己的气泡；重开抽屉/刷新后历史仍在。
 2. 多轮按序堆叠，旧轮不被新轮抹掉。
 3. 思考过程是真实 `reasoning`，独立可折叠、逐 token 追加不覆盖；正文 Markdown 正常。
-4. 工具/审批/Run/证据卡归属对应轮次；`tool.progress` 有可见反馈。
+4. 审批/Run/证据卡归属对应轮次；工具名与技术状态不进入用户对话。
 5. 正文与思考逐字流式（打字机）；Header 状态为人话。
 6. `agent_stream_tokens` 关闭时自动回退非流式且功能正常；SSE 断线续传（Last-Event-ID）行为不回退。
 

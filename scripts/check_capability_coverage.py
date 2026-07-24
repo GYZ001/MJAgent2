@@ -1,4 +1,4 @@
-"""CI：未分类 mutating endpoint 使构建失败；写出 capability-coverage.json。"""
+"""CI：未分类 mutating endpoint 使构建失败；写出 data/reports/capability-coverage.json。"""
 from __future__ import annotations
 
 import sys
@@ -16,7 +16,7 @@ def main() -> None:
     if integrity:
         raise SystemExit("Capability catalog integrity errors:\n- " + "\n- ".join(integrity))
     report = assert_full_coverage()
-    out = write_coverage_json(ROOT / "capability-coverage.json")
+    out = write_coverage_json(ROOT / "data" / "reports" / "capability-coverage.json")
     counts = report["prd_section5_checklist"]
     print(
         "Capability coverage OK: "

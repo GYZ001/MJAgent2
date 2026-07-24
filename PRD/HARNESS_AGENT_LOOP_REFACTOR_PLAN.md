@@ -1008,7 +1008,7 @@ Verified Delivery Rate
 
 - 修复 `auto.py` 对 `api._bible_tasks`、`api._plan_task` 的残留引用，改用 `task_registry` 与 `planning.run_regex_plan` 的正式接口；
 - 新增“一键全自动从空项目启动”的端到端回归；
-- 清理 `PRD.md`、`docs/PROMPT_SPEC.md` 中残留的 AI 分集、滚动章节摘要、固定镜头时长、15 秒口播和旧镜头数规则；
+- 清理 `PRD/README.md`、`docs/PROMPT_SPEC.md` 中残留的 AI 分集、滚动章节摘要、固定镜头时长、15 秒口播和旧镜头数规则；
 - 在 CI 增加 Contract Surface 扫描，保证“一章一集/模型判断单镜 5~10 秒/超长动作与口播拆镜”在代码、Prompt、文档和测试中一致；
 - 将 148 tests、Ruff、compileall、前端 build 记录为 v1.1 工程基线；
 - 为本轮完整性修复生成机器可读报告：备份路径、孤儿/重复计数、隔离目录和最终计数；

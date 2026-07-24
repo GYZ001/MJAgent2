@@ -4,7 +4,7 @@
 
 本项目是 1.0（`~/Desktop/漫剧Agent`）的重新设计版。1.0 失败复盘与 2.0 全部设计见：
 
-- **[PRD.md](PRD.md)** — 唯一主文档：失败复盘、目标与 DoD、功能需求、架构、里程碑
+- **[PRD/README.md](PRD/README.md)** — 唯一主文档：失败复盘、目标与 DoD、功能需求、架构、里程碑
 - [docs/HIAGENT_INTEGRATION.md](docs/HIAGENT_INTEGRATION.md) — HiAgent 网关集成规范（含 1.0 已验证的真实 API 形态与延迟数据）
 - [docs/PROMPT_SPEC.md](docs/PROMPT_SPEC.md) — 提示词链、JSON Schema、校验与修复回路、金样回归
 
