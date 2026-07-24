@@ -37,8 +37,14 @@ _queue: asyncio.Queue[str] = asyncio.Queue()
 _poll_queue: asyncio.Queue[str] = asyncio.Queue()
 _workers: list[asyncio.Task] = []
 _poll_workers: list[asyncio.Task] = []
+_worker_target = 0
+_poll_worker_target = 0
+_dispatcher_task: asyncio.Task | None = None
 # 延迟重排任务的强引用，避免被 GC 回收（asyncio 不持有后台任务的引用）。
 _retry_tasks: set[asyncio.Task] = set()
+
+_DISPATCH_INTERVAL_SECONDS = 1.0
+_DISPATCH_BACKLOG_PER_WORKER = 2
 
 
 class LeaseLost(RuntimeError):
@@ -58,10 +64,155 @@ def _enqueue_for_current_status(job_id: str) -> None:
     whole episode of image generation before it can be downloaded and adopted.
     """
     row = get_conn().execute(
-        "SELECT status FROM jobs WHERE id=?", (job_id,)
+        """SELECT j.status, v.provider_task_id
+           FROM jobs j LEFT JOIN shot_versions v ON v.id=j.version_id
+           WHERE j.id=?""",
+        (job_id,),
     ).fetchone()
-    target = _poll_queue if row and row["status"] == "waiting_provider" else _queue
+    target = (
+        _poll_queue
+        if row and (row["status"] == "waiting_provider" or row["provider_task_id"])
+        else _queue
+    )
     target.put_nowait(job_id)
+
+
+def _reference_gallery_ready(raw_meta: str | None) -> bool:
+    try:
+        meta = json.loads(raw_meta or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return bool(meta.get("reference_images")) and meta.get("reference_generation_complete") is not False
+
+
+def _auto_retake(raw_meta: str | None) -> bool:
+    try:
+        return int(json.loads(raw_meta or "{}").get("auto_retake_count") or 0) > 0
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def _dispatch_due_jobs() -> dict[str, int]:
+    """Continuously rebuild the runnable queues from durable job state.
+
+    Priority is intentionally stage-aware:
+    1. provider handles are always routed to the isolated poll queue;
+    2. continuity-unblocked first-pass shots outrank auto retakes;
+    3. blocked shots may prepare references only as spare bounded work;
+    4. blocked shots whose references are already ready stay out of the hot
+       queue until their predecessor succeeds, avoiding 15-second bounce loops.
+    """
+    conn = get_conn()
+    stamp = now()
+    rows = rows_to_dicts(conn.execute(
+        """SELECT j.id, j.status, j.created_at, j.after_shot_id,
+                  v.provider_task_id, v.image_inputs, s.shot_no
+           FROM jobs j
+           LEFT JOIN shot_versions v ON v.id=j.version_id
+           LEFT JOIN shots s ON s.id=j.shot_id
+           WHERE j.kind='video'
+             AND j.status IN ('queued','waiting_provider')
+             AND (j.next_retry_at IS NULL OR j.next_retry_at<=?)
+             AND j.cancellation_requested=0 AND j.abandoned=0""",
+        (stamp,),
+    ).fetchall())
+
+    poll_candidates: list[dict[str, Any]] = []
+    main_candidates: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    blocked_reference_candidates: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    continuity_cache: dict[str, bool] = {}
+
+    for row in rows:
+        if row.get("status") == "waiting_provider" or row.get("provider_task_id"):
+            poll_candidates.append(row)
+            continue
+        after_shot_id = row.get("after_shot_id")
+        if after_shot_id:
+            ready = continuity_cache.get(after_shot_id)
+            if ready is None:
+                from app.media_pipeline.scheduler import continuity_anchor_ready
+                ready = continuity_anchor_ready(conn, after_shot_id)[0]
+                continuity_cache[after_shot_id] = ready
+        else:
+            ready = True
+        refs_ready = _reference_gallery_ready(row.get("image_inputs"))
+        is_retake = _auto_retake(row.get("image_inputs"))
+        age_key = float(row.get("created_at") or stamp)
+        shot_key = int(row.get("shot_no") or 10**9)
+        if ready:
+            # First pass before retake; among first-pass jobs, a prepared gallery
+            # can submit immediately and therefore gets the shortest path.
+            rank = 2 if is_retake else (0 if refs_ready else 1)
+            main_candidates.append(((rank, age_key, shot_key), row))
+        elif not refs_ready:
+            # Useful speculative work, but never ahead of a runnable video.
+            rank = 1 if is_retake else 0
+            blocked_reference_candidates.append(((rank, age_key, shot_key), row))
+
+    poll_candidates.sort(key=lambda row: float(row.get("created_at") or stamp))
+    main_candidates.sort(key=lambda item: item[0])
+    blocked_reference_candidates.sort(key=lambda item: item[0])
+
+    poll_capacity = max(1, _poll_worker_target or 1) * _DISPATCH_BACKLOG_PER_WORKER
+    poll_slots = max(0, poll_capacity - _poll_queue.qsize())
+    main_capacity = max(1, _worker_target or 1) * _DISPATCH_BACKLOG_PER_WORKER
+    main_slots = max(0, main_capacity - _queue.qsize())
+
+    poll_enqueued = 0
+    for row in poll_candidates[:poll_slots]:
+        _poll_queue.put_nowait(row["id"])
+        poll_enqueued += 1
+
+    chosen = [row for _, row in main_candidates[:main_slots]]
+    remaining = max(0, main_slots - len(chosen))
+    if remaining:
+        from app.media_pipeline.retry_policy import prepared_reference_backlog
+        speculative_limit = min(remaining, prepared_reference_backlog())
+        chosen.extend(row for _, row in blocked_reference_candidates[:speculative_limit])
+    for row in chosen:
+        _queue.put_nowait(row["id"])
+
+    return {"poll": poll_enqueued, "main": len(chosen), "due": len(rows)}
+
+
+async def _durable_dispatcher() -> None:
+    """DB-backed dispatcher; in-memory queue loss heals within one interval."""
+    try:
+        while True:
+            try:
+                _dispatch_due_jobs()
+                # Recreate an unexpectedly dead worker without changing the
+                # configured target. Worker loops catch job errors themselves,
+                # so this is primarily protection against lifecycle regressions.
+                if _worker_target > 0:
+                    ensure_workers(_worker_target)
+            except Exception as exc:  # noqa: BLE001 dispatcher must remain alive
+                errors.record_and_format(exc, action="durable_media_dispatch")
+            await asyncio.sleep(_DISPATCH_INTERVAL_SECONDS)
+    except asyncio.CancelledError:
+        return
+
+
+def _start_durable_dispatcher() -> None:
+    global _dispatcher_task
+    if _dispatcher_task is not None and not _dispatcher_task.done():
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    _dispatcher_task = loop.create_task(_durable_dispatcher(), name="durable-media-dispatcher")
+
+
+def _drain_memory_queue(queue: asyncio.Queue[str]) -> None:
+    """Drop startup duplicates; every durable row is rediscovered immediately."""
+    while True:
+        try:
+            queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return
+        else:
+            queue.task_done()
 
 
 async def _requeue_after(job_id: str, delay: float) -> None:
@@ -194,7 +345,8 @@ def reconcile_episode_generation_status(episode_id: str) -> bool:
     conn = get_conn()
     active = conn.execute(
         """SELECT COUNT(*) AS c FROM jobs
-           WHERE episode_id=? AND kind='video' AND status IN ('queued','running')""",
+           WHERE episode_id=? AND kind='video'
+             AND status IN ('queued','running','waiting_provider','waiting_retry')""",
         (episode_id,),
     ).fetchone()["c"]
     if active:
@@ -221,7 +373,8 @@ def stop_shot_video_tasks(shot_id: str) -> dict[str, object]:
         raise ValueError(f"镜头不存在：{shot_id}")
     rows = conn.execute(
         """SELECT id FROM jobs
-           WHERE shot_id=? AND kind='video' AND status IN ('queued','running')
+           WHERE shot_id=? AND kind='video'
+             AND status IN ('queued','running','waiting_provider','waiting_retry')
            ORDER BY created_at DESC""",
         (shot_id,),
     ).fetchall()
@@ -554,7 +707,7 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
             "reused": False, "version_id": version_id, "job_id": job_id,
             "paused_budget": True,
         }
-    _queue.put_nowait(job_id)
+    _enqueue_for_current_status(job_id)
     return {"reused": False, "version_id": version_id, "job_id": job_id}
 
 
@@ -608,7 +761,7 @@ def enqueue_scene(shot_id: str, *, kinds: list[str] | None = None) -> dict:
         conn.commit()
         _set_job(job_id, "paused_budget", "集预算不足，任务已暂停")
         return {"job_id": job_id, "kinds": target_kinds, "paused_budget": True}
-    _queue.put_nowait(job_id)
+    _enqueue_for_current_status(job_id)
     return {"job_id": job_id, "kinds": target_kinds}
 
 
@@ -1589,13 +1742,12 @@ def recover_and_start(loop_concurrency: int | None = None) -> None:
 
     start_media_pipeline()
     decommission_legacy_keyframe_jobs()
-    for job_id, delay in media_scheduler.recoverable_jobs():
-        if delay <= 0:
-            _enqueue_for_current_status(job_id)
-        else:
-            task = asyncio.get_running_loop().create_task(_requeue_after(job_id, delay))
-            _retry_tasks.add(task)
-            task.add_done_callback(_retry_tasks.discard)
+    # Reconcile expired durable leases, then rebuild scheduling exclusively from
+    # DB state. Startup recovery may have pre-enqueued dozens of duplicate IDs;
+    # discarding those in-memory copies is safe because jobs are durable.
+    media_scheduler.recoverable_jobs()
+    _drain_memory_queue(_queue)
+    _drain_memory_queue(_poll_queue)
     conn = get_conn()
     generating_episode_ids = [
         row["id"] for row in conn.execute(
@@ -1604,14 +1756,19 @@ def recover_and_start(loop_concurrency: int | None = None) -> None:
     ]
     for episode_id in generating_episode_ids:
         reconcile_episode_generation_status(episode_id)
-    n = loop_concurrency or channel_limit(media_stages.RESOURCE_VIDEO_SUBMIT)
+    n = loop_concurrency or max(
+        channel_limit(media_stages.RESOURCE_VIDEO_SUBMIT),
+        channel_limit(media_stages.RESOURCE_REFERENCE),
+    )
     ensure_workers(n)
+    _start_durable_dispatcher()
+    _dispatch_due_jobs()
 
 
 def _recover_one_media_job(
     conn, job_id: str, run_id: str | None, step_run_id: str | None, reason: str
 ) -> bool:
-    """把一个卡住的媒体 job 复位回 queued 并入队：
+    """把一个卡住的媒体 job 复位回 queued，等待持久调度器接管：
     - running/queued job 统一回到 queued，清空旧 lease；持久化 retry 到期时间保留
     - Run 立即进入 WAITING_RETRY，监控页显示“恢复排队中”
     - 被中断的 Step 保持 FAILED 审计终态，并创建 iteration+1 的 READY attempt
@@ -1688,7 +1845,8 @@ def _recover_one_media_job(
                 )
     except Exception:  # noqa: BLE001 legacy/minimal schemas still recover the durable job itself
         pass
-    _queue.put_nowait(job_id)
+    # The durable dispatcher will see this row within one second. Avoid directly
+    # flooding the FIFO when startup/sweeper recovers an entire episode.
     return True
 
 
@@ -1732,8 +1890,9 @@ def recover_media_jobs() -> int:
     只扫 status='running' AND lease_expires_at<now 的 job，因此不会重新入队——
     结果就是用户看到的"任务卡在'服务重启，可从安全检查点恢复'"。
 
-    本函数把这些 job 显式复位回 queued 并重新入队；run 从 PAUSED_EXTERNAL 转回
-    WAITING_RETRY，旧 FAILED step 保留为审计历史，并创建 iteration+1 的 READY step 供 worker 接管。
+    本函数把这些 job 显式复位回 queued；数据库驱动的持久调度器会在下一轮重新
+    发现它们。run 从 PAUSED_EXTERNAL 转回 WAITING_RETRY，旧 FAILED step 保留为
+    审计历史，并创建 iteration+1 的 READY step 供 worker 接管。
 
     边界：不恢复 PAUSED_BUDGET（预算不足，需显式 retry_paused 释放预算后重试）；
          不恢复 FAILED/CANCELLED（真正报错或人工取消）。"""
@@ -1770,10 +1929,10 @@ async def _stale_lease_sweeper(interval_seconds: float = _SWEEPER_INTERVAL_SECON
     worker 进程被 kill -9、容器 OOM、协程异常退出等情况会让 job 卡在
     status='running' 且 lease_expires_at<now；recoverable_jobs() 只在启动时扫一次，
     启动后过期的 lease 不会被自动回收。本协程每 interval_seconds 秒扫一次，
-    把过期 lease 的 job 复位回 queued 并重新入队。
+    把过期 lease 的 job 复位回 queued，交给持久调度器在下一轮重新发现。
 
     幂等：多次扫到同一 job 时，第二次 CAS 会因 status 已是 'queued' 而 rowcount=0，
-    不会重复入队。"""
+    不会重复恢复。"""
     try:
         while True:
             await asyncio.sleep(interval_seconds)
@@ -1823,7 +1982,9 @@ def start_stale_lease_sweeper(interval_seconds: float = _SWEEPER_INTERVAL_SECOND
 
 def ensure_workers(n: int) -> None:
     """把常驻生成 worker 池扩容或缩容到目标 n，并同步独立轮询 worker。"""
+    global _worker_target, _poll_worker_target
     n = max(0, int(n))
+    _worker_target = n
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -1841,6 +2002,7 @@ def ensure_workers(n: int) -> None:
     from app.media_pipeline.concurrency import channel_limit
 
     poll_n = channel_limit(media_stages.RESOURCE_VIDEO_POLL)
+    _poll_worker_target = poll_n
     alive_poll = [t for t in _poll_workers if not t.done()]
     _poll_workers.clear()
     _poll_workers.extend(alive_poll)
@@ -1855,7 +2017,7 @@ def ensure_workers(n: int) -> None:
 async def stop() -> None:
     """优雅停机：取消常驻 worker 循环。否则 uvicorn --reload/退出时会卡在
     'Waiting for connections to close'——常驻 while-True 任务不退出，停机就挂起。"""
-    global _sweeper_task
+    global _sweeper_task, _dispatcher_task, _worker_target, _poll_worker_target
     try:
         from app.media_pipeline.bootstrap import stop_media_pipeline
         await stop_media_pipeline()
@@ -1863,6 +2025,13 @@ async def stop() -> None:
         pass
     if _sweeper_task is not None:
         _sweeper_task.cancel()
+    if _dispatcher_task is not None:
+        _dispatcher_task.cancel()
+        try:
+            await _dispatcher_task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+        _dispatcher_task = None
     for t in _retry_tasks:
         t.cancel()
     if _retry_tasks:
@@ -1879,6 +2048,10 @@ async def stop() -> None:
             pass
     _workers.clear()
     _poll_workers.clear()
+    _worker_target = 0
+    _poll_worker_target = 0
+    _drain_memory_queue(_queue)
+    _drain_memory_queue(_poll_queue)
 
 
 def retry_paused(episode_id: str) -> int:
@@ -1902,7 +2075,7 @@ def retry_paused(episode_id: str) -> int:
                 (now(), r["id"]),
             )
             conn.commit()
-            _queue.put_nowait(r["id"])
+            _enqueue_for_current_status(r["id"])
             resumed += 1
     return resumed
 

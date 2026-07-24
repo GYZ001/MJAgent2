@@ -181,6 +181,41 @@ def test_video_create_sends_stable_idempotency_key(monkeypatch) -> None:
     assert seen_headers[0]["Idempotency-Key"] == "video-create-ver_1"
 
 
+def test_image_generation_sends_stable_idempotency_key(monkeypatch) -> None:
+    seen_headers: list[dict[str, str]] = []
+
+    class Response:
+        status_code = 200
+        text = '{"data":[{"url":"https://provider/image.jpg"}]}'
+
+        def json(self):
+            return {"data": [{"url": "https://provider/image.jpg"}]}
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _url, *, json, headers):
+            seen_headers.append(headers)
+            return Response()
+
+    monkeypatch.setattr(hiagent.httpx, "AsyncClient", lambda **_kwargs: Client())
+    monkeypatch.setattr(hiagent, "_model_connection", lambda *_args: ("https://provider", {"x": "y"}))
+    monkeypatch.setattr(hiagent, "active_model", lambda *_args: "image-model")
+    monkeypatch.setattr(hiagent, "start_provider_call", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(hiagent, "finish_provider_call", lambda *_args, **_kwargs: None)
+
+    first = asyncio.run(hiagent.generate_image("same prompt", call_meta={"shot_no": 2}))
+    second = asyncio.run(hiagent.generate_image("same prompt", call_meta={"shot_no": 2}))
+
+    assert first == second
+    assert seen_headers[0]["Idempotency-Key"] == seen_headers[1]["Idempotency-Key"]
+    assert seen_headers[0]["Idempotency-Key"].startswith("op_")
+
+
 def test_video_poll_network_error_is_retryable(monkeypatch) -> None:
     calls: list[tuple] = []
 

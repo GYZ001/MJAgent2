@@ -3,9 +3,9 @@
 背景：init_db() 在重启时把 RUNNING 的 workflow_runs 标为 PAUSED_EXTERNAL +
 failure_code='SERVICE_RESTART'，但底层 jobs 表的 lease（默认 180s）在重启那一刻
 往往还没过期，media_scheduler.recoverable_jobs() 只扫 status='running' AND
-lease_expires_at<now 的 job，因此不会重新入队——结果用户看到的"任务卡在
+lease_expires_at<now 的 job，因此不会恢复——结果用户看到的"任务卡在
 '服务重启，可从安全检查点恢复'"。recover_media_jobs() 把这些 job 显式复位回
-queued 并重新入队，让 worker 池能立即消费。
+queued，随后由数据库驱动的持久调度器在下一轮重新发现并交给 worker。
 """
 import asyncio
 import sqlite3
@@ -69,6 +69,10 @@ def test_restart_interrupted_job_is_resumed(monkeypatch) -> None:
 
     resumed = worker.recover_media_jobs()
     assert resumed == 1
+    # Recovery only repairs durable state; the DB-backed dispatcher owns queue
+    # reconstruction so a 50-shot restart cannot flood an arbitrary FIFO order.
+    assert enqueued == []
+    worker._dispatch_due_jobs()
     assert enqueued == ["j1"]
 
     job = conn.execute("SELECT status, lease_owner, lease_expires_at, error FROM jobs WHERE id='j1'").fetchone()
@@ -276,6 +280,8 @@ def test_stale_lease_sweeper_reclaims_expired_lease(monkeypatch) -> None:
                 "lease 过期，自动回收并重新入队",
             )
         conn.commit()
+        assert enqueued == []
+        worker._dispatch_due_jobs()
         return enqueued
 
     result = asyncio.run(run())

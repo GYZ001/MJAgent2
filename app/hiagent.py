@@ -1289,6 +1289,10 @@ async def generate_image(prompt: str, *, size: str = "1024x1024",
         prepared_inputs, media_meta = await _prepare_image_data_urls(image_inputs)
         payload["image"] = prepared_inputs if len(prepared_inputs) > 1 else prepared_inputs[0]
     kind = log_kind or ("image_edit" if image_inputs else "image_generate")
+    operation_id = (
+        str((call_meta or {}).get("operation_id") or "").strip()
+        or provider_operation_id(kind, model, payload)
+    )
     timeout = httpx.Timeout(connect=10, read=config.TIMEOUT_IMAGE_READ,
                             write=config.TIMEOUT_IMAGE_WRITE, pool=10)
     async with _image_semaphore():
@@ -1296,7 +1300,8 @@ async def generate_image(prompt: str, *, size: str = "1024x1024",
             data = await _post_json(
                 client, f"{base_url}/images/generations", payload,
                 kind=kind, model=model, headers=model_headers, key_name=f"model:{model}",
-                meta={**(call_meta or {}), **media_meta})
+                meta={**(call_meta or {}), **media_meta, "operation_id": operation_id},
+                idempotency_key=operation_id)
     items = data.get("data") or []
     if not items:
         raise ProviderError(f"图像生成响应为空：{json.dumps(data, ensure_ascii=False)[:300]}")
