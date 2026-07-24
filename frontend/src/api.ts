@@ -356,7 +356,7 @@ export interface Shot {
 export interface Episode {
   id: string; episode_no: number; title: string; hook: string; cliffhanger: string
   synopsis: string; source_chapters: number[]; target_duration_s: number
-  status: string; script_error?: string; cost_cny: number; cost_limit_cny?: number
+  status: string; script_error?: string; storyboard_warning?: string | null; cost_cny: number; cost_limit_cny?: number
   screenplay_status: string; screenplay_error?: string | null; screenplay_beats?: number; screenplay_mode?: string
   screenplay?: EpisodeScreenplay | null
   screenplay_artifact_id?: string | null

@@ -207,6 +207,24 @@ body {
   display: flex; align-items: baseline; gap: 14px;
 }
 .desk-head h1 .sub { font-size: 14px; color: var(--ink-soft); font-weight: 400; letter-spacing: 0.05em; }
+.prep-subnav {
+  display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px;
+}
+.prep-subnav-tab {
+  border: 1px solid var(--hairline);
+  background: transparent;
+  color: var(--ink-soft);
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.prep-subnav-tab:hover { color: var(--ink); background: var(--paper-deep); }
+.prep-subnav-tab.active {
+  color: var(--cinnabar);
+  border-color: rgba(181,68,52,0.35);
+  background: rgba(181,68,52,0.06);
+}
 .rule { border: none; border-top: 1px solid var(--hairline); margin: 18px 0 0; position: relative; }
 .rule::after {
   content: ""; position: absolute; left: 0; top: -1px;

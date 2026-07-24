@@ -8,3 +8,8 @@ line-length = 120
 
 [tool.ruff.lint]
 select = ["E9", "F401", "F63", "F7", "F82", "F841"]
+
+# domain/media_exec 的 common.py 是 exec 切片共享导言：import 供后续切片使用，对本文件表现为 F401。
+[tool.ruff.lint.per-file-ignores]
+"app/domain/common.py" = ["F401"]
+"app/media_exec/common.py" = ["F401"]

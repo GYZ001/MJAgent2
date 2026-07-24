@@ -27,12 +27,13 @@ export function applyUiIntent(
       return { ok: true }
     }
     case 'select_version': {
-      extras?.toast?.(`请在评审墙查看版本 ${intent.version_id}`)
+      // 版本选择必须在评审墙人工完成；意图只做导航提示，避免假闭环。
+      go('wall')
+      extras?.toast?.(`请在评审墙人工选择版本 ${intent.version_id}`)
       return { ok: true }
     }
     case 'open_evidence': {
       extras?.onOpenEvidence?.(intent.artifact_id)
-      extras?.toast?.(`打开证据 ${intent.artifact_id}`)
       return { ok: true }
     }
     case 'open_delivery': {
@@ -58,7 +59,8 @@ export function applyUiIntent(
       return { ok: true }
     }
     case 'preview': {
-      extras?.toast?.('请在当前页面预览对应媒体')
+      // 未接线深链：降级为明确提示，避免假按钮感。
+      extras?.toast?.('请在当前页面预览对应媒体（助手暂不支持内嵌预览）')
       return { ok: true }
     }
     case 'request_directory_grant': {

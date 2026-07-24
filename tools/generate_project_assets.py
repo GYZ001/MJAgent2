@@ -1,3 +1,4 @@
+"""项目资产批处理脚本：仅支持现行参考图视频入口（关键帧阶段已下线）。"""
 from __future__ import annotations
 
 import argparse
@@ -22,38 +23,6 @@ def _log(event: str, **payload) -> None:
         LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with LOG_PATH.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
-
-
-def _project_shots(project_id: str) -> list[dict]:
-    conn = get_conn()
-    return rows_to_dicts(conn.execute(
-        """SELECT s.*, e.episode_no
-           FROM shots s
-           JOIN episodes e ON e.id=s.episode_id
-           WHERE e.project_id=?
-           ORDER BY e.episode_no, s.shot_no""",
-        (project_id,),
-    ).fetchall())
-
-
-def _scene_summary(project_id: str) -> dict:
-    conn = get_conn()
-    rows = _project_shots(project_id)
-    ready = sum(1 for r in rows if worker.shot_keyframes_ready(r))
-    approved = sum(1 for r in rows if r["scene_status"] == "approved" and worker.shot_keyframes_ready(r))
-    by_status = {
-        r["status"]: r["c"]
-        for r in conn.execute(
-            """SELECT j.status, COUNT(*) c
-               FROM jobs j
-               JOIN shots s ON s.id=j.shot_id
-               JOIN episodes e ON e.id=s.episode_id
-               WHERE e.project_id=? AND j.kind='scene'
-               GROUP BY j.status""",
-            (project_id,),
-        ).fetchall()
-    }
-    return {"shots": len(rows), "keyframes_ready": ready, "scene_approved": approved, "jobs": by_status}
 
 
 def _video_summary(project_id: str) -> dict:
@@ -92,41 +61,11 @@ async def _run_workers(concurrency: int) -> None:
     await worker.stop()
 
 
-async def generate_scenes(project_id: str, concurrency: int) -> None:
-    init_db()
-    conn = get_conn()
-    shots = _project_shots(project_id)
-    started = 0
-    for shot in shots:
-        if shot["scene_status"] == "approved" and worker.shot_keyframes_ready(shot):
-            continue
-        try:
-            worker.enqueue_scene(shot["id"])
-            started += 1
-        except ValueError as exc:
-            _log("scene_enqueue_error", episode_no=shot["episode_no"], shot_no=shot["shot_no"], error=str(exc))
-    _log("scenes_enqueued", started=started, summary=_scene_summary(project_id))
-    if started:
-        await _run_workers(concurrency)
-    _log("scenes_finished", summary=_scene_summary(project_id))
-    failed = rows_to_dicts(conn.execute(
-        """SELECT e.episode_no, s.shot_no, j.status, j.error
-           FROM jobs j
-           JOIN shots s ON s.id=j.shot_id
-           JOIN episodes e ON e.id=s.episode_id
-           WHERE e.project_id=? AND j.kind='scene' AND j.status='failed'
-           ORDER BY e.episode_no, s.shot_no""",
-        (project_id,),
-    ).fetchall())
-    if failed:
-        _log("scene_failed_jobs", failed=failed[-20:])
-
-
 async def drain(project_id: str, concurrency: int) -> None:
     init_db()
-    _log("drain_started", concurrency=concurrency, scene_summary=_scene_summary(project_id), video_summary=_video_summary(project_id))
+    _log("drain_started", concurrency=concurrency, video_summary=_video_summary(project_id))
     await _run_workers(concurrency)
-    _log("drain_finished", scene_summary=_scene_summary(project_id), video_summary=_video_summary(project_id))
+    _log("drain_finished", video_summary=_video_summary(project_id))
 
 
 async def generate_videos(project_id: str, concurrency: int) -> None:
@@ -134,18 +73,19 @@ async def generate_videos(project_id: str, concurrency: int) -> None:
     from app.api import generate_episode
 
     conn = get_conn()
-    not_ready = [
-        {"episode_no": s["episode_no"], "shot_no": s["shot_no"], "scene_status": s["scene_status"]}
-        for s in _project_shots(project_id)
-        if s["scene_status"] != "approved" or not worker.shot_keyframes_ready(s)
-    ]
-    if not_ready:
-        _log("videos_blocked_keyframes_not_approved", count=len(not_ready), examples=not_ready[:20])
-        return
     episodes = conn.execute(
-        "SELECT id, episode_no FROM episodes WHERE project_id=? ORDER BY episode_no",
+        "SELECT id, episode_no, status FROM episodes WHERE project_id=? ORDER BY episode_no",
         (project_id,),
     ).fetchall()
+    blocked = [dict(ep) for ep in episodes if ep["status"] not in ("confirmed", "generating", "done")]
+    if blocked:
+        _log(
+            "videos_blocked_unconfirmed",
+            count=len(blocked),
+            examples=[{"episode_no": e["episode_no"], "status": e["status"]} for e in blocked[:20]],
+            hint="请先在分镜台确认分镜，或仅对已确认集调用本脚本",
+        )
+        return
     started = 0
     for ep in episodes:
         result = generate_episode(ep["id"], {})
@@ -172,9 +112,11 @@ async def generate_videos(project_id: str, concurrency: int) -> None:
 
 
 async def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="批处理项目视频队列。关键帧阶段已下线，请使用 --phase videos|drain。",
+    )
     parser.add_argument("project_id")
-    parser.add_argument("--phase", choices=("scenes", "videos", "all", "drain"), default="all")
+    parser.add_argument("--phase", choices=("videos", "drain", "all"), default="videos")
     parser.add_argument("--concurrency", type=int, default=2)
     parser.add_argument("--log", default="")
     args = parser.parse_args()
@@ -185,10 +127,7 @@ async def main() -> None:
     if args.phase == "drain":
         await drain(args.project_id, args.concurrency)
         return
-    if args.phase in ("scenes", "all"):
-        await generate_scenes(args.project_id, args.concurrency)
-    if args.phase in ("videos", "all"):
-        await generate_videos(args.project_id, args.concurrency)
+    await generate_videos(args.project_id, args.concurrency)
 
 
 if __name__ == "__main__":

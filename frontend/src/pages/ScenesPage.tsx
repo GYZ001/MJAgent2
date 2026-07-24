@@ -4,6 +4,7 @@ import { useNav, useProject } from '../App'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 import SearchField from '../components/SearchField'
 import EvidenceDrawer from '../components/harness/EvidenceDrawer'
+import PrepSubnav from '../components/PrepSubnav'
 import { useFillPageSize } from '../hooks/useFillPageSize'
 
 export default function ScenesPage() {
@@ -50,6 +51,7 @@ export default function ScenesPage() {
       <header className="desk-head">
         <div className="crumb">书房 / 《{p.name}》</div>
         <h1>场景库 <span className="sub">以视觉资产为中心管理场景锚点、版本与跨集一致性</span></h1>
+        <PrepSubnav current="scenes" />
         <hr className="rule" />
       </header>
 

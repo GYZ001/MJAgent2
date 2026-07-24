@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, RunSummary } from '../../api'
+import { AdaptivePoller } from '../../adaptivePoller'
 
 const STATUS_LABELS: Record<string, string> = {
   CREATED: '待启动',
@@ -21,6 +22,10 @@ function elapsed(startedAt?: number | null) {
   return String(Math.floor(seconds / 60)) + ' 分 ' + String(seconds % 60) + ' 秒'
 }
 
+const ACTIVE = new Set([
+  'CREATED', 'RUNNING', 'WAITING_RETRY', 'WAITING_HUMAN', 'PAUSED_BUDGET', 'PAUSED_EXTERNAL',
+])
+
 export default function RunDock({
   projectId,
   onOpen,
@@ -33,19 +38,30 @@ export default function RunDock({
   const [dismissedNotice, setDismissedNotice] = useState<string | null>(null)
   const [actionBusy, setActionBusy] = useState(false)
 
-  const refresh = useCallback(() => {
+  const refresh = useCallback(async () => {
     const query = projectId
       ? '/runs?active=true&project_id=' + encodeURIComponent(projectId) + '&limit=10'
       : '/runs?active=true&limit=10'
-    api.get(query)
-      .then((items: RunSummary[]) => { setRuns(items); setError('') })
-      .catch((reason: Error) => setError(reason.message))
+    const items = await api.get(query) as RunSummary[]
+    setRuns(items)
+    setError('')
+    return items
   }, [projectId])
 
   useEffect(() => {
-    refresh()
-    const timer = window.setInterval(refresh, 2500)
-    return () => window.clearInterval(timer)
+    const poller = new AdaptivePoller(
+      refresh,
+      (data) => {
+        const list = data ?? []
+        return list.some(r => ACTIVE.has(r.status)) ? 4000 : 0
+      },
+      {
+        onData: setRuns,
+        onError: (reason) => setError(reason instanceof Error ? reason.message : String(reason)),
+      },
+    )
+    poller.start()
+    return () => poller.stop()
   }, [refresh])
 
   const runAction = async (fn: () => Promise<unknown>) => {
@@ -53,7 +69,7 @@ export default function RunDock({
     setActionBusy(true)
     try {
       await fn()
-      refresh()
+      await refresh()
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {

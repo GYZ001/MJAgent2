@@ -12,6 +12,7 @@ from app.agent.schemas import (
     CreateConversationRequest,
     SendMessageRequest,
 )
+from app.db import get_setting
 from app.local_session import require_local_session
 
 router = APIRouter(
@@ -24,13 +25,21 @@ _SSE_TAIL_POLL_ROUNDS = 20
 _SSE_TAIL_POLL_INTERVAL_S = 0.25
 
 
+def _require_agent_enabled() -> None:
+    raw = (get_setting("agent_enabled") or "true").strip().lower()
+    if raw not in {"1", "true", "yes", "on"}:
+        raise HTTPException(403, "案头助手已关闭（settings.agent_enabled=false）")
+
+
 @router.post("/conversations")
 def create_conversation(body: CreateConversationRequest):
+    _require_agent_enabled()
     return store.create_conversation(title=body.title, project_id=body.project_id, created_by=body.created_by)
 
 
 @router.get("/conversations/{conversation_id}")
 def get_conversation(conversation_id: str):
+    _require_agent_enabled()
     conversation = store.get_conversation(conversation_id)
     if not conversation:
         raise HTTPException(404, "会话不存在")
@@ -47,6 +56,7 @@ async def send_message(
     background_tasks: BackgroundTasks,
 ):
     """立即返回 turn_id；Agent 循环作为后台任务运行，前端用 SSE 订阅并可随时停止。"""
+    _require_agent_enabled()
     try:
         outcome = await orchestrator.prepare_user_message(conversation_id, body.content, body.context)
     except KeyError as exc:

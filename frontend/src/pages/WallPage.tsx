@@ -223,6 +223,21 @@ export default function WallPage() {
     if (shots.length && idx >= shots.length) setIdx(shots.length - 1)
   }, [shots.length, idx])
 
+  useEffect(() => {
+    if (!episodeId || !shots.length) return
+    try {
+      const raw = sessionStorage.getItem('manju:select_shot')
+      if (!raw) return
+      const payload = JSON.parse(raw) as { episodeId?: string; shotId?: string }
+      if (payload.episodeId && payload.episodeId !== episodeId) return
+      const found = shots.findIndex(s => s.id === payload.shotId)
+      if (found >= 0) {
+        setIdx(found)
+        sessionStorage.removeItem('manju:select_shot')
+      }
+    } catch { /* ignore */ }
+  }, [episodeId, shots])
+
   const videoActive = shots.some(s =>
     s.versions.some(v => v.status === 'queued' || v.status === 'running' || v.status === 'waiting_provider')
     || (s.pipeline != null && ['queued', 'running', 'waiting_provider', 'blocked'].includes(s.pipeline.pipeline_status))

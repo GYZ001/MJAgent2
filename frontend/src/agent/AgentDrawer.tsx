@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { api } from '../api'
+import { api, type ArtifactEvidence } from '../api'
+import EvidenceDrawer from '../components/harness/EvidenceDrawer'
 import { useNav } from '../App'
 import { useScrollContainment } from '../useScrollContainment'
 import AgentComposer from './AgentComposer'
@@ -234,11 +235,32 @@ export default function AgentDrawer({
     }
   }, [toast])
 
+  const [evidence, setEvidence] = useState<ArtifactEvidence | null>(null)
+
+  const openEvidence = useCallback(async (artifactId: string) => {
+    try {
+      const art = await api.get(`/artifacts/${encodeURIComponent(artifactId)}`) as ArtifactEvidence
+      setEvidence(art)
+    } catch (err) {
+      toast(err instanceof Error ? err.message : String(err), true)
+    }
+  }, [toast])
+
   const followIntent = useCallback((intent: UiIntent | null) => {
     if (!intent) return
-    const result = applyUiIntent(intent, go, { toast })
+    const result = applyUiIntent(intent, go, {
+      toast,
+      onOpenEvidence: (id) => { void openEvidence(id) },
+      onSelectShot: (episodeId, shotId) => {
+        try {
+          sessionStorage.setItem('manju:select_shot', JSON.stringify({ episodeId, shotId }))
+        } catch { /* ignore quota */ }
+        go('wall', undefined, episodeId)
+      },
+      onOpenCredentials: () => go('monitor'),
+    })
     if (!result.ok) toast(result.message || '定位失败', true)
-  }, [go, toast])
+  }, [go, toast, openEvidence])
 
   const activeTurn = useMemo(
     () => messages.find((m): m is AssistantTranscriptItem => m.kind === 'assistant' && m.turnId === turnId),
@@ -290,7 +312,7 @@ export default function AgentDrawer({
 
         {messages.length === 0 && (
           <div className="agent-empty">
-            <p>我是案头助手。描述你想做的制作动作，我会读取证据、必要时请你确认后再执行。</p>
+            <p>我是案头助手：默认先帮你诊断状态并指路到对应工作台；付费/破坏性写入会请你确认，也可直接在页面按钮完成。</p>
           </div>
         )}
 
@@ -304,7 +326,7 @@ export default function AgentDrawer({
                 onApprove={approve}
                 onReject={reject}
                 onOpenRun={() => go('monitor')}
-                onOpenEvidence={id => toast(`证据 ${id}`)}
+                onOpenEvidence={id => { void openEvidence(id) }}
                 onFollowIntent={() => followIntent(item.intent)}
               />
             )
@@ -319,6 +341,15 @@ export default function AgentDrawer({
         disabled={sending || !conversationId}
         stopping={streaming}
       />
+      {evidence && (
+        <div className="agent-evidence-host" style={{ padding: '0 12px 12px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+            <span className="hint">证据 {evidence.id}</span>
+            <button type="button" className="btn small ghost" onClick={() => setEvidence(null)}>关闭</button>
+          </div>
+          <EvidenceDrawer evidence={evidence} label="打开证据抽屉" />
+        </div>
+      )}
     </aside>
   )
 }

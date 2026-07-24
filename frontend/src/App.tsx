@@ -31,11 +31,9 @@ interface Nav {
 const NavCtx = createContext<Nav>(null as unknown as Nav)
 export const useNav = () => useContext(NavCtx)
 
-const SECTIONS: { key: View; label: string; icon: string; group: string; needProject?: boolean; needEpisode?: boolean }[] = [
+const SECTIONS: { key: View; label: string; icon: string; group: string; needProject?: boolean; needEpisode?: boolean; matchViews?: View[] }[] = [
   { key: 'studio', label: '项目中心', icon: '书', group: '项目' },
-  { key: 'bible', label: '人物谱', icon: '人', group: '前期准备', needProject: true },
-  { key: 'scenes', label: '场景库', icon: '景', group: '前期准备', needProject: true },
-  { key: 'episodes', label: '分集规划', icon: '集', group: '前期准备', needProject: true },
+  { key: 'bible', label: '前期准备', icon: '备', group: '前期准备', needProject: true, matchViews: ['bible', 'scenes', 'episodes'] },
   { key: 'script', label: '剧本台', icon: '剧', group: '内容制作', needEpisode: true },
   { key: 'board', label: '分镜台', icon: '镜', group: '内容制作', needEpisode: true },
   { key: 'wall', label: '评审墙', icon: '审', group: '质量交付', needEpisode: true },
@@ -89,9 +87,19 @@ export default function App() {
   const [spineCollapsed, setSpineCollapsed] = useState(false)
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const [agentOpen, setAgentOpen] = useState(false)
+  const [agentEnabled, setAgentEnabled] = useState(true)
   const toastTimerRef = useRef<number>()
   const spineRef = useRef<HTMLElement | null>(null)
   useScrollContainment(spineRef, true)
+
+  useEffect(() => {
+    api.get('/settings')
+      .then((settings: Record<string, string>) => {
+        const raw = String(settings.agent_enabled ?? 'true').trim().toLowerCase()
+        setAgentEnabled(['1', 'true', 'yes', 'on'].includes(raw))
+      })
+      .catch(() => setAgentEnabled(true))
+  }, [])
 
   const toast = useCallback((text: string, isErr = false) => {
     setToastMsg({ text, err: isErr })
@@ -207,17 +215,20 @@ export default function App() {
           {Object.entries(groupedSections).map(([group, sections]) => (
             <div className="spine-group" key={group}>
               <div className="spine-group-label">{group}</div>
-              {sections.map(s => (
+              {sections.map(s => {
+                const active = (s.matchViews ? s.matchViews.includes(view) : view === s.key)
+                return (
                 <button
                   key={s.key}
-                  className={`spine-item ${view === s.key ? 'active' : ''}`}
+                  className={`spine-item ${active ? 'active' : ''}`}
                   onClick={() => openSection(s)}
                   title={spineCollapsed ? s.label : undefined}
                 >
                   <span className="spine-icon" aria-hidden="true">{s.icon}</span>
                   <span className="spine-label">{s.label}</span>
                 </button>
-              ))}
+                )
+              })}
             </div>
           ))}
         </nav>
@@ -236,7 +247,7 @@ export default function App() {
         {view === 'monitor' && <MonitorPage />}
       </main>
       <RunDock projectId={projectId} onOpen={() => go('monitor')} />
-      {!agentOpen && (
+      {agentEnabled && !agentOpen && (
         <button
           type="button"
           className="agent-toggle"
@@ -252,7 +263,9 @@ export default function App() {
           </svg>
         </button>
       )}
-      <AgentDrawer open={agentOpen} onClose={() => setAgentOpen(false)} context={agentContext} />
+      {agentEnabled && (
+        <AgentDrawer open={agentOpen} onClose={() => setAgentOpen(false)} context={agentContext} />
+      )}
       <CapabilityApprovalHost />
       {toastMsg && <div role="status" className={`toast ${toastMsg.err ? 'err' : ''}`}>{toastMsg.text}</div>}
     </NavCtx.Provider>

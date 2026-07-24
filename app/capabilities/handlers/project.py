@@ -37,12 +37,20 @@ async def delete_project(args: I.ProjectDeleteInput) -> CommandResult:
 async def auto_start(args: I.ProductionAutoStartInput) -> CommandResult:
     from app import api
 
-    outcome = await call_guarded(api._start_auto_core, args.project_id, args.directory_grant)
+    outcome = await call_guarded(
+        api._start_auto_core, args.project_id, args.directory_grant, args.mode,
+    )
     if isinstance(outcome, CommandResult):
         return outcome
     run_id = outcome.get("run_id")
+    mode = outcome.get("mode") or args.mode
+    summary = (
+        "一键全自动成片已启动（含视频）"
+        if mode == "full"
+        else "已启动：生成到分镜待确认（不会自动烧视频）"
+    )
     return succeeded(
-        "一键全自动成片已启动，可在运行台跟踪进度",
+        summary,
         data=outcome,
         run_id=run_id,
         resource_uris=[f"manju://runs/{run_id}"] if run_id else [],

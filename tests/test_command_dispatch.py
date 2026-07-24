@@ -65,10 +65,8 @@ async def test_ui_can_execute_after_explicit_approval_token(monkeypatch):
         return CommandResult(status=CommandStatus.SUCCEEDED, summary="deleted", data={"deleted": args.project_id})
 
     from dataclasses import replace
-    from app.capabilities.handlers.domain import HANDLER_MAP
 
     registry = get_registry()
-    HANDLER_MAP["project.delete"] = fake_handler
     registry.commands["project.delete"] = replace(
         registry.get_command("project.delete"), handler=fake_handler
     )
