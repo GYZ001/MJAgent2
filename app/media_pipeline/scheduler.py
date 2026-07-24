@@ -2,52 +2,14 @@
 from __future__ import annotations
 
 import json
-from typing import Any
 
-from app.db import get_conn, now
+from app.db import get_conn
 from app.media_pipeline import stages as S
 from app.media_pipeline.retry_policy import (
     episode_inflight_cap,
     first_pass_retake_slot_fraction,
     project_inflight_cap,
 )
-
-
-def _aging_bonus(created_at: float | None) -> float:
-    if not created_at:
-        return 0.0
-    waited_min = max(0.0, (now() - float(created_at)) / 60.0)
-    return min(20.0, waited_min)  # 每分钟 +1，封顶 20
-
-
-def base_priority(*, manual: bool, is_retake: bool, is_finalize: bool, continuity_unblocked: bool) -> int:
-    if is_finalize:
-        return S.PRIORITY_FINALIZE
-    if manual and not is_retake:
-        return S.PRIORITY_MANUAL
-    if is_retake:
-        return S.PRIORITY_AUTO_RETAKE
-    if continuity_unblocked:
-        return S.PRIORITY_CONTINUITY_NEXT
-    return S.PRIORITY_FIRST_PASS
-
-
-def score_job(row: dict[str, Any], *, manual: bool = False) -> float:
-    meta = {}
-    try:
-        # priority / flags 可落在 jobs.error 旁路；优先读 media_tasks
-        pass
-    except Exception:
-        meta = {}
-    is_retake = bool(row.get("is_retake") or meta.get("auto_retake"))
-    is_finalize = bool(row.get("provider_task_id") and row.get("status") == S.QUEUED)
-    p = base_priority(
-        manual=manual or bool(row.get("manual")),
-        is_retake=is_retake,
-        is_finalize=is_finalize,
-        continuity_unblocked=bool(row.get("continuity_unblocked")),
-    )
-    return float(p) + _aging_bonus(row.get("created_at"))
 
 
 def continuity_anchor_ready(conn, after_shot_id: str | None) -> tuple[bool, str | None]:
@@ -190,63 +152,3 @@ def can_admit_video_submit(
         if inflight >= global_cap:
             return False, "上游槽位已满，优先首轮覆盖"
     return True, None
-
-
-def create_media_task(
-    conn,
-    *,
-    job_id: str,
-    stage: str,
-    resource_class: str,
-    priority: int,
-    input_fingerprint: str | None = None,
-    max_attempts: int = 3,
-    available_at: float | None = None,
-    depends_on: list[str] | None = None,
-) -> str:
-    from app.db import new_id
-
-    task_id = new_id("mtask")
-    status = S.BLOCKED if depends_on else S.QUEUED
-    conn.execute(
-        """INSERT INTO media_tasks(
-               id, job_id, stage, resource_class, status, priority, available_at,
-               attempt, max_attempts, input_fingerprint, created_at, updated_at
-           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (
-            task_id, job_id, stage, resource_class, status, int(priority),
-            available_at, 0, max_attempts, input_fingerprint, now(), now(),
-        ),
-    )
-    for dep in depends_on or []:
-        conn.execute(
-            """INSERT INTO media_task_dependencies(id, task_id, depends_on_task_id, created_at)
-               VALUES(?,?,?,?)""",
-            (new_id("mtdep"), task_id, dep, now()),
-        )
-    return task_id
-
-
-def unblock_dependents(conn, succeeded_task_id: str) -> list[str]:
-    """上游成功后解除依赖；全部依赖满足则 blocked→queued。"""
-    rows = conn.execute(
-        "SELECT task_id FROM media_task_dependencies WHERE depends_on_task_id=?",
-        (succeeded_task_id,),
-    ).fetchall()
-    ready: list[str] = []
-    for row in rows:
-        tid = row["task_id"]
-        pending = conn.execute(
-            """SELECT COUNT(*) c FROM media_task_dependencies d
-               JOIN media_tasks t ON t.id=d.depends_on_task_id
-               WHERE d.task_id=? AND t.status != 'succeeded'""",
-            (tid,),
-        ).fetchone()["c"]
-        if pending == 0:
-            conn.execute(
-                """UPDATE media_tasks SET status='queued', updated_at=?
-                   WHERE id=? AND status='blocked'""",
-                (now(), tid),
-            )
-            ready.append(tid)
-    return ready

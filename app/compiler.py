@@ -138,8 +138,8 @@ def normalize_video_args(prompt_text: str, duration: int | None = None) -> str:
         matches = re.findall(r"(?:^|\s)--dur\s+(\d+(?:\.\d+)?)", prompt_text)
         duration = matches[-1] if matches else config.DEFAULT_VIDEO_DURATION_S
     dur = clip_duration_value(duration)
-    text = re.sub(r"\s--dur\s+\d+(?:\.\d+)?", "", prompt_text).strip()
-    text = re.sub(r"\s--ratio\s+\S+", "", text).strip()
+    text = re.sub(r"(?:^|\s)--dur\s+\d+(?:\.\d+)?", "", prompt_text).strip()
+    text = re.sub(r"(?:^|\s)--ratio\s+\S+", "", text).strip()
     if text:
         text += " --ratio 9:16"
     else:

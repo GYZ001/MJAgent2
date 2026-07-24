@@ -324,10 +324,18 @@ async def create_delivery_package(episode_id: str, body: dict | None = Body(None
     routed = await ui_route("delivery.create_package", {"episode_id": episode_id})
     if routed is not None:
         return routed
-    from app.delivery import build_delivery_package
+    from app.delivery import build_delivery_package, validate_package_id
 
     payload = dict(body or {})
-    payload.setdefault("package_id", new_id("delivery"))
+    # package_id 必须服务端可控：忽略客户端自带路径穿越载荷，仅允许恢复场景沿用已校验 id。
+    raw_package_id = payload.get("package_id")
+    if raw_package_id:
+        try:
+            payload["package_id"] = validate_package_id(str(raw_package_id))
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+    else:
+        payload["package_id"] = new_id("delivery")
     payload.setdefault("operation_started_at", now())
     if not get_conn().execute("SELECT 1 FROM episodes WHERE id=?", (episode_id,)).fetchone():
         raise HTTPException(404, "剧集不存在")
@@ -434,12 +442,18 @@ async def decide_delivery(episode_id: str, body: dict = Body(...)):
     )
     if routed is not None:
         return routed
-    from app.delivery import approve_delivery
+    from app.delivery import approve_delivery, validate_package_id
 
     if not get_conn().execute("SELECT 1 FROM episodes WHERE id=?", (episode_id,)).fetchone():
         raise HTTPException(404, "剧集不存在")
     payload = dict(body)
-    payload.setdefault("approved_package_id", new_id("delivery"))
+    # 批准产出的新快照 id 一律服务端生成，禁止客户端注入路径。
+    payload["approved_package_id"] = new_id("delivery")
+    if payload.get("package_id"):
+        try:
+            payload["package_id"] = validate_package_id(str(payload["package_id"]))
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
     payload.setdefault("operation_started_at", now())
     recorder = WorkflowRecorder.create(
         workflow_type="delivery_approval",
@@ -536,6 +550,7 @@ async def _resume_delivery_approval(
                 accepted_risk=payload.get("accepted_risk"),
                 approved_package_id=payload["approved_package_id"],
                 operation_started_at=payload["operation_started_at"],
+                package_id=payload.get("package_id"),
             )
 
         await recorder.step(

@@ -5,7 +5,6 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 
-from app import config
 from app.db import get_setting, set_setting
 from app.media_pipeline import stages as S
 

@@ -16,6 +16,17 @@ from app.evidence.media import record_video_candidate, validate_video_file
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
 from app.orchestration.engine import fingerprint
 
+# 仅允许 new_id("delivery") / 测试稳定 id 形态，禁止路径分隔与穿越。
+_PACKAGE_ID_RE = re.compile(r"^delivery_[A-Za-z0-9_-]+$")
+
+
+def validate_package_id(package_id: str) -> str:
+    """校验交付包 id，防止被拼进文件系统路径时发生穿越。"""
+    value = (package_id or "").strip()
+    if not value or not _PACKAGE_ID_RE.fullmatch(value):
+        raise ValueError("非法的 package_id")
+    return value
+
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -234,7 +245,10 @@ def build_delivery_package(
     conn = get_conn()
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
-    package_id = package_id or new_id("delivery")
+    if package_id is not None:
+        package_id = validate_package_id(package_id)
+    else:
+        package_id = validate_package_id(new_id("delivery"))
     operation_started_at = operation_started_at or now()
     existing = conn.execute(
         "SELECT * FROM delivery_packages WHERE id=?", (package_id,)
@@ -250,10 +264,12 @@ def build_delivery_package(
             "manifest": json.loads(existing["manifest_json"]),
             "quality_report": json.loads(existing["quality_report_json"]),
         }
-    package_dir = (
-        config.PROJECTS_DIR / ep["project_id"] / "episodes" / str(ep["episode_no"])
-        / "delivery" / package_id
-    )
+    delivery_root = (
+        config.PROJECTS_DIR / ep["project_id"] / "episodes" / str(ep["episode_no"]) / "delivery"
+    ).resolve()
+    package_dir = (delivery_root / package_id).resolve()
+    if not package_dir.is_relative_to(delivery_root):
+        raise ValueError("非法的 package_id")
     # A directory without its database pointer is an uncommitted crash remnant.
     # Rebuilding the same operation id is safe and avoids exposing a half package.
     if package_dir.exists():
@@ -489,6 +505,7 @@ def approve_delivery(
 ) -> dict[str, Any]:
     conn = get_conn()
     if package_id:
+        package_id = validate_package_id(package_id)
         row = conn.execute(
             "SELECT * FROM delivery_packages WHERE id=? AND episode_id=?",
             (package_id, episode_id),
@@ -512,6 +529,7 @@ def approve_delivery(
         raise ValueError("必须填写审核意见")
     if decision == "approve_with_risk" and not (accepted_risk or "").strip():
         raise ValueError("带风险批准必须填写 accepted_risk")
+    approved_package_id = validate_package_id(approved_package_id or new_id("delivery"))
     if decision == "reject":
         conn.execute("UPDATE artifacts SET status='rejected' WHERE id=?", (row["artifact_id"],))
         conn.execute("UPDATE delivery_packages SET status='rejected' WHERE id=?", (row["id"],))

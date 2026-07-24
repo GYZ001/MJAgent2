@@ -645,9 +645,13 @@ def put_settings(body: dict):
         # 视频执行 worker 数跟随 submit 通道；设置变更即时升降
         if any(k in body for k in (*SETTING_KEYS.values(), "video_concurrency", "auto_concurrency")):
             worker.ensure_workers(channel_limit(media_stages.RESOURCE_VIDEO_SUBMIT))
-    except Exception:  # noqa: BLE001 热更新失败不阻断设置保存
-        pass
-    return {"ok": True}
+    except Exception as exc:  # noqa: BLE001 热更新失败不阻断设置保存，但必须回传可见警告
+        return {
+            "ok": True,
+            "warning": f"设置已保存，但运行时热更新失败：{exc}",
+            "runtime_reload_ok": False,
+        }
+    return {"ok": True, "runtime_reload_ok": True}
 
 
 # ---------- API Key 管理：前端填写 → 持久化 .env ----------

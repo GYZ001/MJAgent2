@@ -365,7 +365,15 @@ async def _run_loop(conversation_id: str, turn_id: str, state: _LoopState) -> No
                 return
             tc = state.pending_tool_calls[0]
             state.tool_call_count += 1
-            outcome, result_text = await _execute_tool_call(conversation_id, turn_id, state, tc)
+            try:
+                outcome, result_text = await _execute_tool_call(conversation_id, turn_id, state, tc)
+            except Exception as exc:  # noqa: BLE001 工具执行异常必须终止本轮，禁止留下 running 幽灵 turn
+                _finish_turn(
+                    conversation_id, turn_id, status="failed",
+                    reply=f"工具 {tc.name} 执行异常：{exc}",
+                    failure_code="tool_execution_failed",
+                )
+                return
             if outcome == "paused":
                 return  # 挂起等待批准；pending_tool_calls[0] 仍是该调用，恢复后继续
             state.pending_tool_calls.pop(0)
@@ -512,9 +520,18 @@ async def approve_tool_call(tool_call_id: str, *, decided_by: str | None = None,
     with _paused_lock:
         state = _PAUSED_LOOPS.pop(turn["id"], None)
     if state is None or not state.pending_tool_calls:
-        # 找不到挂起的循环状态（例如进程重启）：仍要给出真实结果，不能假装继续对话。
+        # 找不到挂起的循环状态（例如进程重启）：仍要给出真实结果与终态 SSE，不能假装继续对话。
         final_status = "completed" if result.status in (CommandStatus.SUCCEEDED, CommandStatus.ACCEPTED) else "failed"
-        store.update_turn(turn["id"], status=final_status, finished_at=time.time())
+        reply = (
+            result_text if final_status == "completed"
+            else f"批准后执行失败：{result_text}"
+        )
+        _finish_turn(
+            turn["conversation_id"], turn["id"],
+            status=final_status,
+            reply=reply,
+            failure_code=(None if final_status == "completed" else (result.error_code or "tool_call_failed")),
+        )
         return {"tool_call": store.get_tool_call(tool_call_id), "turn": store.get_turn(turn["id"])}
 
     # 挂起时暂停在 pending_tool_calls[0]（即本次被批准的调用），用它的 id 回填 tool 结果消息，
@@ -557,7 +574,12 @@ async def reject_tool_call(tool_call_id: str, *, decided_by: str | None = None, 
             state = _PAUSED_LOOPS.pop(turn["id"], None)
     if state is None or not state.pending_tool_calls:
         if turn:
-            store.update_turn(turn["id"], status="failed", finished_at=time.time(), failure_code="tool_call_rejected")
+            _finish_turn(
+                turn["conversation_id"], turn["id"],
+                status="failed",
+                reply=f"用户拒绝执行。原因：{reason or '未说明'}",
+                failure_code="tool_call_rejected",
+            )
         return {"tool_call": store.get_tool_call(tool_call_id)}
 
     # 拒绝后仍要给被拒调用回填一条 role=tool 消息（否则 assistant.tool_calls 有未回应的 id），

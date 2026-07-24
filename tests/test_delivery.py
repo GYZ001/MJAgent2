@@ -112,3 +112,12 @@ def test_delivery_package_reaches_t5_and_feedback_preserves_snapshot(tmp_path, m
     assert feedback["revision_run_id"]
     assert repository.get_artifact(package["artifact_id"])["content_hash"] == artifact_before["content_hash"]
     assert any(item["evaluator_name"] == "customer_feedback" for item in repository.get_evaluations(package["artifact_id"]))
+
+
+def test_delivery_package_id_rejects_path_traversal() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="非法的 package_id"):
+        delivery.validate_package_id("../../etc/passwd")
+    with pytest.raises(ValueError, match="非法的 package_id"):
+        delivery.validate_package_id("delivery_../escape")

@@ -379,7 +379,9 @@ export default function WallPage() {
             <ShotSlide
               shot={shot}
               episodeStatus={ep.status}
-              generating={genMask.has(shot.id) || shot.versions.some(v => v.status === 'queued' || v.status === 'running')}
+              generating={genMask.has(shot.id) || shot.versions.some(v =>
+                v.status === 'queued' || v.status === 'running' || v.status === 'waiting_provider'
+              )}
               onGenVideo={(opts) => doGenerateVideo(shot.id, opts)}
               onOpen={openLightbox}
               onRefresh={refresh}
@@ -633,7 +635,7 @@ function VideoControls({ mode, shot, episodeStatus, current, previewVersionId, g
   const hasAdopted = !!shot.adopted_version_id
   const disabled = generating
   const hasActiveVideoTask = shot.versions.some(
-    version => version.status === 'queued' || version.status === 'running',
+    version => version.status === 'queued' || version.status === 'running' || version.status === 'waiting_provider',
   )
   const videoState = shotVideoState(shot)
 
@@ -740,7 +742,7 @@ function VideoControls({ mode, shot, episodeStatus, current, previewVersionId, g
               const previewing = version.id === previewVersionId
               const canPreview = !!version.video_url
               const stampClass = version.status === 'succeeded' ? 'green'
-                : version.status === 'queued' || version.status === 'running' ? 'gold'
+                : version.status === 'queued' || version.status === 'running' || version.status === 'waiting_provider' ? 'gold'
                   : version.status === 'failed' ? 'red' : 'grey'
               return (
                 <div

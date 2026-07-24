@@ -129,21 +129,36 @@ class CommandBus:
         if gated is not None:
             return gated
 
-        if spec.handler is None:
-            result = CommandResult(
-                status=CommandStatus.FAILED,
-                summary=f"命令 {name} 尚未接入领域 handler（M0 仅注册合同）",
-                command=name,
-                command_id=f"cmd_{uuid.uuid4().hex[:12]}",
-                preflight=preflight,
-                error_code="handler_not_implemented",
-            )
-        else:
-            result = outcome_resolver(spec, args, preflight)
-
+        claimed = False
         if idem_key:
-            idem_store.store(idem_key, command=name, result=result)
-        return result
+            raced = idem_store.claim(idem_key, command=name)
+            if raced is not None:
+                return raced
+            claimed = True
+
+        try:
+            if spec.handler is None:
+                result = CommandResult(
+                    status=CommandStatus.FAILED,
+                    summary=f"命令 {name} 尚未接入领域 handler（M0 仅注册合同）",
+                    command=name,
+                    command_id=f"cmd_{uuid.uuid4().hex[:12]}",
+                    preflight=preflight,
+                    error_code="handler_not_implemented",
+                )
+            else:
+                result = outcome_resolver(spec, args, preflight)
+
+            if idem_key:
+                if result.status in {CommandStatus.ACCEPTED, CommandStatus.SUCCEEDED}:
+                    idem_store.store(idem_key, command=name, result=result)
+                elif claimed:
+                    idem_store.release_if_running(idem_key)
+            return result
+        except Exception:
+            if claimed and idem_key:
+                idem_store.release_if_running(idem_key)
+            raise
 
     async def _run_pipeline_async(self, name, raw_args, *, session_id, outcome_resolver) -> CommandResult:
         spec = self.registry.get_command(name)
@@ -160,21 +175,36 @@ class CommandBus:
         if gated is not None:
             return gated
 
-        if spec.handler is None:
-            result = CommandResult(
-                status=CommandStatus.FAILED,
-                summary=f"命令 {name} 尚未接入领域 handler（M0 仅注册合同）",
-                command=name,
-                command_id=f"cmd_{uuid.uuid4().hex[:12]}",
-                preflight=preflight,
-                error_code="handler_not_implemented",
-            )
-        else:
-            result = await outcome_resolver(spec, args, preflight)
-
+        claimed = False
         if idem_key:
-            idem_store.store(idem_key, command=name, result=result)
-        return result
+            raced = idem_store.claim(idem_key, command=name)
+            if raced is not None:
+                return raced
+            claimed = True
+
+        try:
+            if spec.handler is None:
+                result = CommandResult(
+                    status=CommandStatus.FAILED,
+                    summary=f"命令 {name} 尚未接入领域 handler（M0 仅注册合同）",
+                    command=name,
+                    command_id=f"cmd_{uuid.uuid4().hex[:12]}",
+                    preflight=preflight,
+                    error_code="handler_not_implemented",
+                )
+            else:
+                result = await outcome_resolver(spec, args, preflight)
+
+            if idem_key:
+                if result.status in {CommandStatus.ACCEPTED, CommandStatus.SUCCEEDED}:
+                    idem_store.store(idem_key, command=name, result=result)
+                elif claimed:
+                    idem_store.release_if_running(idem_key)
+            return result
+        except Exception:
+            if claimed and idem_key:
+                idem_store.release_if_running(idem_key)
+            raise
 
     def _gate(
         self,
@@ -185,14 +215,6 @@ class CommandBus:
         *,
         session_id: str | None,
     ) -> CommandResult | None:
-        if args.dry_run:
-            return CommandResult(
-                status=CommandStatus.SUCCEEDED,
-                summary=preflight.summary,
-                command=name,
-                preflight=preflight,
-                data={"dry_run": True},
-            )
         if not preflight.allowed:
             return CommandResult(
                 status=CommandStatus.REJECTED,
@@ -200,6 +222,14 @@ class CommandBus:
                 command=name,
                 preflight=preflight,
                 error_code=preflight.denial_code or "policy_denied",
+            )
+        if args.dry_run:
+            return CommandResult(
+                status=CommandStatus.SUCCEEDED,
+                summary=preflight.summary,
+                command=name,
+                preflight=preflight,
+                data={"dry_run": True},
             )
         if not preflight.requires_confirmation:
             return None
