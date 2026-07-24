@@ -207,27 +207,25 @@ def test_approval_token_requires_bound_session() -> None:
         )
 
 
-def test_bus_dry_run_rejects_when_preflight_denies(monkeypatch) -> None:
-    from app.capabilities.schemas import PreflightResult as PF
-
+def test_bus_dry_run_rejects_when_preflight_denies() -> None:
     bus = get_command_bus()
-
-    def deny(_args):
-        return PF(
-            command="project.delete",
-            allowed=False,
-            risk=RiskLevel.R3_DESTRUCTIVE,
-            summary="禁止删除",
-            state_fingerprint="sha256:deny",
-            denial_code="policy_denied",
-            denial_message="策略拒绝",
-        )
-
-    monkeypatch.setattr(bus.registry.get_command("project.delete"), "preflight", deny)
-    result = bus.execute(
-        "project.delete",
-        {"project_id": "proj_x", "dry_run": True, "idempotency_key": "dry-deny"},
+    args = bus.registry.get_command("project.delete").input_model.model_validate(
+        {"project_id": "proj_x", "dry_run": True, "idempotency_key": "dry-deny"}
     )
+    denied = PreflightResult(
+        command="project.delete",
+        allowed=False,
+        risk=RiskLevel.R3_DESTRUCTIVE,
+        summary="禁止删除",
+        state_fingerprint="sha256:deny",
+        denial_code="policy_denied",
+        denial_message="策略拒绝",
+        requires_confirmation=False,
+    )
+    result = bus._gate(
+        "project.delete", args, args.model_dump(mode="json"), denied, session_id=None,
+    )
+    assert result is not None
     assert result.status == CommandStatus.REJECTED
     assert result.error_code == "policy_denied"
 

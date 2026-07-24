@@ -993,7 +993,11 @@ def rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
 
 
 def get_setting(key: str) -> str:
-    row = get_conn().execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    try:
+        row = get_conn().execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    except sqlite3.OperationalError:
+        # 测试/首次启动尚未跑完 SCHEMA 时，回落到内置默认值，避免把缺表当成业务失败。
+        return DEFAULT_SETTINGS.get(key, "")
     return row["value"] if row else DEFAULT_SETTINGS.get(key, "")
 
 

@@ -404,7 +404,7 @@ async def _post_json(client: httpx.AsyncClient, url: str, payload: dict, *,
                      idempotency_key: str | None = None) -> dict:
     last_err: ProviderError | None = None
     merged_meta = _merge_call_meta(meta)
-    req_headers = dict(headers or _headers())
+    req_headers = dict(_headers() if headers is None else headers)
     if idempotency_key:
         # Providers that implement the conventional header deduplicate the
         # accept-before-local-commit crash window; providers that ignore it still
@@ -1022,7 +1022,7 @@ async def _stream_chat_completion(
     不做重试：流式一旦开始产出 token，重发会重复推送；失败交由上层决定是否降级为非流式。
     """
     merged_meta = _merge_call_meta(meta)
-    req_headers = dict(headers or _headers())
+    req_headers = dict(_headers() if headers is None else headers)
     stream_payload = {**payload, "stream": True, "stream_options": {"include_usage": True}}
     request_bytes = _request_size_bytes(stream_payload)
     start = time.time()
