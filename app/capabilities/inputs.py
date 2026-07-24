@@ -81,6 +81,14 @@ class ScreenplayGenerateInput(StandardCommandInput):
 class ScreenplayUpdateInput(StandardCommandInput):
     episode_id: str
     screenplay: dict[str, Any]
+    force: bool = False
+
+
+class ScreenplayCancelInput(StandardCommandInput):
+    """单集取消传 ``episode_id``；批量取消传 ``project_id``。"""
+
+    episode_id: str | None = None
+    project_id: str | None = None
 
 
 class StoryboardGenerateInput(StandardCommandInput):
@@ -126,7 +134,7 @@ class ReferenceReviewInput(StandardCommandInput):
 
 class DeliveryReviewInput(StandardCommandInput):
     episode_id: str
-    package_id: str
+    package_id: str | None = None
     decision: Literal["approve", "approve_with_risk", "reject"]
     accepted_risk: str | None = None
 

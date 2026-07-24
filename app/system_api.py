@@ -53,8 +53,20 @@ def browse_dir(path: str = ""):
 
 
 @router.post("/system/mkdir")
-def make_dir(body: dict):
+async def make_dir_route(body: dict):
     """在指定父目录下新建文件夹，供选择器「新建文件夹」使用。"""
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route(
+        "system.mkdir",
+        {"parent_grant": (body.get("path") or "").strip(), "name": (body.get("name") or "").strip()},
+    )
+    if routed is not None:
+        return routed
+    return make_dir(body)
+
+
+def make_dir(body: dict):
+    """领域实现：创建子目录（供 Command Handler 与路由共用）。"""
     parent = (body.get("path") or "").strip()
     name = (body.get("name") or "").strip()
     if not parent or not name:
@@ -133,6 +145,14 @@ def get_models():
 
 
 @router.post("/models")
+async def add_model_route(body: dict):
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route("system.model_create", {"model": body})
+    if routed is not None:
+        return routed
+    return add_model(body)
+
+
 def add_model(body: dict):
     provider = str(body.get("provider") or "").strip().lower()
     model = str(body.get("model") or "").strip()
@@ -219,12 +239,24 @@ async def _probe_openai_model(base_url: str, api_key: str, model: str, kind: str
 
 @router.post("/models/test")
 async def test_model_connection(body: dict):
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route("system.model_test", {"draft": body})
+    if routed is not None:
+        return routed
     return await _probe_openai_model(
         str(body.get("base_url") or ""), str(body.get("api_key") or ""),
         str(body.get("model") or ""), str(body.get("kind") or "text"))
 
 
 @router.put("/models/{model_id}")
+async def update_model_route(model_id: str, body: dict):
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route("system.model_update", {"model_id": model_id, "patch": body})
+    if routed is not None:
+        return routed
+    return update_model(model_id, body)
+
+
 def update_model(model_id: str, body: dict):
     custom = _custom_models()
     item = next((m for m in custom if m.get("id") == model_id), None)
@@ -252,6 +284,12 @@ def update_model(model_id: str, body: dict):
 
 @router.post("/models/{model_id}/test")
 async def test_saved_model(model_id: str, body: dict | None = None):
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route(
+        "system.model_test", {"model_id": model_id, "draft": body or {}},
+    )
+    if routed is not None:
+        return routed
     item = next((m for m in _model_catalog() if m.get("id") == model_id), None)
     if not item:
         raise HTTPException(404, "模型不存在")
@@ -270,6 +308,14 @@ async def test_saved_model(model_id: str, body: dict | None = None):
 
 
 @router.delete("/models/{model_id}")
+async def delete_model_route(model_id: str):
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route("system.model_delete", {"model_id": model_id})
+    if routed is not None:
+        return routed
+    return delete_model(model_id)
+
+
 def delete_model(model_id: str):
     custom = _custom_models()
     item = next((m for m in custom if m.get("id") == model_id), None)
@@ -558,11 +604,10 @@ def get_settings():
 
 @router.put("/settings")
 async def put_settings_route(body: dict):
-    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+    from app.capabilities.dispatch import dispatch, respond_ui
 
     result = await dispatch("system.update_settings", {"patch": body}, initiator="ui")
-    raise_if_failed(result)
-    return result_http_payload(result)
+    return respond_ui(result)
 
 
 def put_settings(body: dict):
@@ -590,6 +635,18 @@ def put_settings(body: dict):
         if skey == "model_route":
             set_setting("model_text_provider", sval)
             set_setting("model_vlm_provider", sval)
+    try:
+        from app.media_pipeline.concurrency import (
+            SETTING_KEYS, channel_limit, reload_limits_from_settings,
+        )
+        from app.media_pipeline import stages as media_stages
+        from app import worker
+        reload_limits_from_settings()
+        # 视频执行 worker 数跟随 submit 通道；设置变更即时升降
+        if any(k in body for k in (*SETTING_KEYS.values(), "video_concurrency", "auto_concurrency")):
+            worker.ensure_workers(channel_limit(media_stages.RESOURCE_VIDEO_SUBMIT))
+    except Exception:  # noqa: BLE001 热更新失败不阻断设置保存
+        pass
     return {"ok": True}
 
 

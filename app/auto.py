@@ -220,7 +220,11 @@ async def cancel(pid: str) -> bool:
 async def _run(pid: str, recorder: WorkflowRecorder) -> None:
     try:
         recorder.start()
-        worker.ensure_workers(max(int(get_setting("auto_concurrency") or 24), 1))
+        from app.media_pipeline.concurrency import channel_limit, reload_limits_from_settings
+        from app.media_pipeline import stages as media_stages
+        reload_limits_from_settings()
+        # 全自动按上游在途上限扩 worker，不再用模糊的 auto_concurrency=24 假高并发
+        worker.ensure_workers(channel_limit(media_stages.RESOURCE_VIDEO_INFLIGHT))
         export_dir = _export_dir(pid)
         if export_dir:
             try:
@@ -509,7 +513,6 @@ async def _ensure_videos(pid: str, eid: str, epno: int) -> None:
             _log(pid, f"第{epno}集 镜{s['shot_no']} 视频入队失败：{e}")
     conn.commit()
 
-    attempts: dict[str, int] = {}
     while True:
         pending = _shots_needing_video(conn, eid)
         if not pending:
@@ -521,29 +524,26 @@ async def _ensure_videos(pid: str, eid: str, epno: int) -> None:
             raise RuntimeError(
                 f"第{epno}集已达成本上限 ¥{get_setting('episode_cost_limit_cny')}，{paused} 个视频暂停。"
                 "可在监制房调高「每集成本上限」后重新点击一键全自动（会从断点续做）")
+        # 媒体流水线负责重试/重抽；编排层只等待，不再第二套 enqueue
         active = conn.execute(
-            "SELECT COUNT(*) c FROM jobs WHERE episode_id=? AND kind='video' AND status IN ('queued','running')",
+            "SELECT COUNT(*) c FROM jobs WHERE episode_id=? AND kind='video' "
+            "AND status IN ('queued','running','waiting_provider','waiting_retry','waiting_human') "
+            "AND cancellation_requested=0 AND abandoned=0",
             (eid,)).fetchone()["c"]
         if active == 0:
-            by_no = {s["shot_no"]: s for s in rows_to_dicts(conn.execute(
-                "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (eid,)).fetchall())}
-            progressed = False
-            for s in pending:
-                a = attempts.get(s["id"], 0)
-                if a < _MAX_RETRY:
-                    after = None
-                    if s["continuity_from_prev"] and s["shot_no"] > 1:
-                        pr = by_no.get(s["shot_no"] - 1)
-                        after = pr["id"] if pr else None
-                    try:
-                        worker.enqueue_shot(s["id"], reroll=True, after_shot_id=after)
-                        attempts[s["id"]] = a + 1
-                        progressed = True
-                    except ValueError as e:
-                        _log(pid, f"第{epno}集 镜{s['shot_no']} 视频重试失败：{e}")
-            if not progressed:
+            # 无活跃任务且仍有未采用镜头：可能全部失败或待人工。不再自动 reroll，
+            # 避免与 worker QA 自动重抽叠加重复付费。
+            failed_nos = [s["shot_no"] for s in pending]
+            waiting_human = conn.execute(
+                "SELECT COUNT(*) c FROM jobs WHERE episode_id=? AND kind='video' "
+                "AND status='waiting_human' AND cancellation_requested=0",
+                (eid,),
+            ).fetchone()["c"]
+            if waiting_human:
+                _log(pid, f"第{epno}集：{waiting_human} 镜待人工处理，编排层继续等待")
+            else:
                 raise RuntimeError(
-                    f"第{epno}集视频失败镜：{[s['shot_no'] for s in pending]}（已达重试上限）")
+                    f"第{epno}集视频未完成镜：{failed_nos}（已无活跃任务，请到评审墙查看失败/待人工）")
         await asyncio.sleep(_POLL)
     _log(pid, f"第{epno}集：视频全部就绪")
 

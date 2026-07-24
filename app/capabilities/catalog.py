@@ -47,18 +47,26 @@ def ensure_registered() -> None:
 
 
 def _bind_handlers(registry) -> None:
-    """把领域 handler 挂到已注册 CommandSpec（可重复调用，便于热重载）。"""
+    """仅补挂仍缺 handler 的命令；不覆盖 catalog 已声明的 ``h_*`` 实现。
+
+    ``domain.HANDLER_MAP`` 保留作兼容/测试补丁入口，但优先以 catalog 模块化 handler 为准。
+    """
     from dataclasses import replace
 
     from app.capabilities.handlers.domain import HANDLER_MAP
+    from app.capabilities.preflight import PREFLIGHT_MAP
 
     for name, handler in HANDLER_MAP.items():
         spec = registry.commands.get(name)
-        if spec is None:
-            continue
-        if spec.handler is handler:
+        if spec is None or spec.handler is not None:
             continue
         registry.commands[name] = replace(spec, handler=handler)
+
+    for name, preflight_fn in PREFLIGHT_MAP.items():
+        spec = registry.commands.get(name)
+        if spec is None or spec.preflight is not None:
+            continue
+        registry.commands[name] = replace(spec, preflight=preflight_fn)
 
 def _cmd(
     name: str,
@@ -540,7 +548,7 @@ def _register_commands(registry) -> None:
             "screenplay.cancel",
             title="取消剧本生成",
             description="取消单集或批量剧本任务",
-            input_model=I.EpisodeScopedInput,
+            input_model=I.ScreenplayCancelInput,
             risk=RiskLevel.R1_REVERSIBLE,
             confirmation=ConfirmationPolicy.NEVER,
             idempotency=IdempotencyPolicy.RECOMMENDED,

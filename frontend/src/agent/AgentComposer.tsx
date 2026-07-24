@@ -45,7 +45,7 @@ export default function AgentComposer({
         }}
       />
       <div className="agent-composer-actions">
-        <button type="button" className="btn" disabled={!stopping && !disabled} onClick={onStop}>
+        <button type="button" className="btn" disabled={!stopping} onClick={onStop}>
           停止本轮
         </button>
         <button type="button" className="btn primary" disabled={disabled || !value.trim()} onClick={onSend}>

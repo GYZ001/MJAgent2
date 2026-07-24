@@ -21,11 +21,26 @@ ORIGIN = "http://localhost:5230"
 
 @pytest.fixture(autouse=True)
 def _isolated_mcp_state(tmp_path, monkeypatch):
+    from app import db
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "mcp-test.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
     ensure_catalog_loaded()
     reset_approvals_for_tests()
     reset_command_bus_for_tests()
     monkeypatch.setattr(mcp_auth, "TOKENS_PATH", tmp_path / "mcp_tokens.json")
     rate_limit.reset_rate_limiter_for_tests()
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO projects(id, name, status, created_at) VALUES(?,?,?,?)",
+        ("proj_x", "测试项目", "created", db.now()),
+    )
+    conn.execute(
+        "INSERT INTO episodes(id, project_id, episode_no, title, status, created_at) VALUES(?,?,?,?,?,?)",
+        ("ep_x", "proj_x", 1, "第一集", "scripted", db.now()),
+    )
+    conn.commit()
     yield
     rate_limit.reset_rate_limiter_for_tests()
 
@@ -173,6 +188,8 @@ def test_tools_call_destructive_without_approval_waits_and_includes_preflight(cl
     assert structured["status"] == "waiting_approval"
     assert structured["preflight"] is not None
     assert "approval_id" in structured["data"]
+    # P0：MCP 响应绝不能携带可直接重放的 approval_token
+    assert "approval_token" not in (structured.get("data") or {})
     # 未批准就等于未执行，绝不能假装已经删除了项目
     assert structured["status"] != "succeeded"
 

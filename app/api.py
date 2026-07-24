@@ -532,7 +532,7 @@ async def upload_novel_attachment(file: UploadFile = File(...)):
 async def create_project(name: str = Form(...), file: UploadFile = File(...)):
     """页面上传入口：内部换发 attachment_token 后统一走 Command Bus，与 Agent/MCP 同一实现。"""
     from app.capabilities.attachments import store_upload
-    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+    from app.capabilities.dispatch import dispatch, respond_ui
 
     raw = await file.read()
     if not raw:
@@ -543,8 +543,7 @@ async def create_project(name: str = Form(...), file: UploadFile = File(...)):
         {"attachment_token": token, "name": name},
         initiator="ui",
     )
-    raise_if_failed(result)
-    return result_http_payload(result)
+    return respond_ui(result)
 
 
 @router.get("/projects")
@@ -801,11 +800,10 @@ async def _delete_project_core(project_id: str) -> dict:
 
 @router.delete("/projects/{project_id}")
 async def delete_project(project_id: str):
-    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+    from app.capabilities.dispatch import dispatch, respond_ui
 
     result = await dispatch("project.delete", {"project_id": project_id}, initiator="ui")
-    raise_if_failed(result)
-    return result_http_payload(result)
+    return respond_ui(result)
 
 
 # ---------- 一键全自动成片 ----------
@@ -825,7 +823,7 @@ async def _start_auto_core(project_id: str, export_dir: str | None) -> dict:
 
 @router.post("/projects/{project_id}/auto")
 async def start_auto(project_id: str, body: dict | None = Body(None)):
-    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+    from app.capabilities.dispatch import dispatch, respond_ui
 
     export_dir = (body or {}).get("export_dir")
     result = await dispatch(
@@ -833,8 +831,7 @@ async def start_auto(project_id: str, body: dict | None = Body(None)):
         {"project_id": project_id, "directory_grant": export_dir},
         initiator="ui",
     )
-    raise_if_failed(result)
-    return result_http_payload(result)
+    return respond_ui(result)
 
 
 @router.get("/projects/{project_id}/auto/status")
@@ -846,11 +843,10 @@ def auto_status(project_id: str):
 
 @router.post("/projects/{project_id}/auto/cancel")
 async def cancel_auto(project_id: str):
-    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+    from app.capabilities.dispatch import dispatch, respond_ui
 
     result = await dispatch("production.auto_cancel", {"project_id": project_id}, initiator="ui")
-    raise_if_failed(result)
-    return result_http_payload(result)
+    return respond_ui(result)
 
 
 # ---------- 角色圣经 ----------
@@ -1039,14 +1035,13 @@ async def _start_bible_core(project_id: str, feedback: str) -> dict:
 
 @router.post("/projects/{project_id}/bible")
 async def start_bible(project_id: str, body: dict | None = Body(None)):
-    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+    from app.capabilities.dispatch import dispatch, respond_ui
 
     feedback = str((body or {}).get("feedback") or "")
     result = await dispatch(
         "bible.generate", {"project_id": project_id, "feedback": feedback}, initiator="ui"
     )
-    raise_if_failed(result)
-    return result_http_payload(result)
+    return respond_ui(result)
 
 
 async def _cancel_bible_core(project_id: str) -> dict:
@@ -1066,11 +1061,10 @@ async def _cancel_bible_core(project_id: str) -> dict:
 
 @router.post("/projects/{project_id}/bible/cancel")
 async def cancel_bible(project_id: str):
-    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+    from app.capabilities.dispatch import dispatch, respond_ui
 
     result = await dispatch("bible.cancel", {"project_id": project_id}, initiator="ui")
-    raise_if_failed(result)
-    return result_http_payload(result)
+    return respond_ui(result)
 
 
 def _purge_for_style_change(project_id: str, instance: "Bible") -> dict:
@@ -1106,9 +1100,30 @@ def _purge_for_style_change(project_id: str, instance: "Bible") -> dict:
 
 
 @router.put("/projects/{project_id}/bible")
-def edit_bible(project_id: str, body: dict):
+async def edit_bible(project_id: str, body: dict):
+    from app.capabilities.dispatch import ui_route
+
+    expected_version = body.get("expected_version")
+    if "bible" in body and isinstance(body.get("bible"), dict):
+        bible_body = dict(body["bible"])
+    else:
+        bible_body = {k: v for k, v in body.items() if k != "expected_version"}
+    if "expected_version" in bible_body:
+        expected_version = bible_body.pop("expected_version", expected_version)
+
+    routed = await ui_route(
+        "bible.update",
+        {"project_id": project_id, "bible": bible_body, "expected_version": expected_version},
+    )
+    if routed is not None:
+        return routed
     p = _project_or_404(project_id)
-    instance, errors = schema_errors(Bible, body)
+    if expected_version is not None and int(expected_version) != int(p.get("bible_version") or 0):
+        raise HTTPException(
+            409,
+            f"人物谱版本冲突：当前版本 {p.get('bible_version')}，请求基于 {expected_version}，请刷新后重试",
+        )
+    instance, errors = schema_errors(Bible, bible_body)
     if errors:
         raise HTTPException(422, "；".join(errors))
     from app.validators import validate_bible
@@ -1171,8 +1186,15 @@ def edit_bible(project_id: str, body: dict):
 
 
 @router.put("/projects/{project_id}/characters/{character_name}/portrait")
-def edit_portrait_prompt(project_id: str, character_name: str, body: dict):
+async def edit_portrait_prompt(project_id: str, character_name: str, body: dict):
     """更新单个角色的画像描述（定妆照生成词）。传空字符串/null 恢复为默认合成描述。"""
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route(
+        "portrait.update_prompt",
+        {"project_id": project_id, "character": character_name, "prompt": (body.get("portrait_prompt") or "")},
+    )
+    if routed is not None:
+        return routed
     p = _project_or_404(project_id)
     if not p["bible_json"]:
         raise HTTPException(409, "请先生成角色圣经")
@@ -1250,6 +1272,13 @@ async def _refs_task(
 
 @router.post("/projects/{project_id}/refs")
 async def start_refs(project_id: str, body: dict | None = None):
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route(
+        "portrait.generate",
+        {"project_id": project_id, "character": (body or {}).get("character")},
+    )
+    if routed is not None:
+        return routed
     p = _project_or_404(project_id)
     if not p["bible_json"]:
         raise HTTPException(409, "请先生成角色圣经")
@@ -1263,6 +1292,10 @@ async def start_refs(project_id: str, body: dict | None = None):
 @router.post("/projects/{project_id}/refs/cancel")
 async def cancel_refs(project_id: str):
     """停止定妆照生成。已落盘的定妆照保留，状态置回空闲。"""
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route("portrait.cancel", {"project_id": project_id})
+    if routed is not None:
+        return routed
     p = _project_or_404(project_id)
     stopped = await task_registry.cancel_and_wait("refs", project_id)
     conn = get_conn()
@@ -1323,6 +1356,10 @@ async def _scene_refs_task(
 @router.post("/projects/{project_id}/scene-bible")
 async def start_scene_bible(project_id: str):
     """（重新）生成场景圣经并触发场景图批量出图。人物谱必须先就绪。"""
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route("scene.generate_bible", {"project_id": project_id})
+    if routed is not None:
+        return routed
     p = _project_or_404(project_id)
     if not p["bible_json"]:
         raise HTTPException(409, "请先生成角色圣经")
@@ -1340,6 +1377,13 @@ async def start_scene_bible(project_id: str):
 @router.post("/projects/{project_id}/scene-refs")
 async def start_scene_refs(project_id: str, body: dict | None = None):
     """（重新）生成场景图。需先有场景圣经（bible.scenes 非空）。可带 only 单场景重做。"""
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route(
+        "scene.generate_refs",
+        {"project_id": project_id, "scene_name": (body or {}).get("scene")},
+    )
+    if routed is not None:
+        return routed
     p = _project_or_404(project_id)
     if not p["bible_json"] or not json.loads(p["bible_json"]).get("scenes"):
         raise HTTPException(409, "还没有场景圣经，请先生成场景清单")
@@ -1353,6 +1397,10 @@ async def start_scene_refs(project_id: str, body: dict | None = None):
 @router.post("/projects/{project_id}/scene-refs/cancel")
 async def cancel_scene_refs(project_id: str):
     """停止场景图生成。已落盘的场景图保留，状态置回空闲。"""
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route("scene.cancel_refs", {"project_id": project_id})
+    if routed is not None:
+        return routed
     p = _project_or_404(project_id)
     stopped_bible = await task_registry.cancel_and_wait("scene_bible", project_id)
     stopped_refs = await task_registry.cancel_and_wait("scene_refs", project_id)
@@ -1367,8 +1415,15 @@ async def cancel_scene_refs(project_id: str):
 
 
 @router.put("/projects/{project_id}/scenes/{scene_name}/prompt")
-def edit_scene_prompt(project_id: str, scene_name: str, body: dict):
+async def edit_scene_prompt(project_id: str, scene_name: str, body: dict):
     """更新单个场景的场景图生成词。传空字符串/null 恢复为默认合成描述。"""
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route(
+        "scene.update_prompt",
+        {"project_id": project_id, "scene_name": scene_name, "prompt": (body.get("scene_prompt") or "")},
+    )
+    if routed is not None:
+        return routed
     p = _project_or_404(project_id)
     if not p["bible_json"]:
         raise HTTPException(409, "请先生成角色圣经")
@@ -1754,6 +1809,13 @@ async def _recorded_screenplay_task(
 
 @router.post("/episodes/{episode_id}/screenplay")
 async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route(
+        "screenplay.generate",
+        {"episode_id": episode_id, "force": bool((body or {}).get("force"))},
+    )
+    if routed is not None:
+        return routed
     ep = _episode_or_404(episode_id)
     _require_harness_engine(ep["project_id"])
     if ep["status"] == "scripting":
@@ -1791,6 +1853,10 @@ async def _screenplay_guarded(
 
 @router.post("/projects/{project_id}/screenplay-all")
 async def start_screenplay_all(project_id: str):
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route("screenplay.generate_batch", {"project_id": project_id})
+    if routed is not None:
+        return routed
     _project_or_404(project_id)
     _require_harness_engine(project_id)
     conn = get_conn()
@@ -1825,6 +1891,10 @@ async def start_screenplay_all(project_id: str):
 @router.post("/projects/{project_id}/screenplay-all/cancel")
 async def cancel_screenplay_all(project_id: str):
     """停止本项目所有正在进行的剧本生成：取消在跑任务，未开跑的回退状态。"""
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route("screenplay.cancel", {"project_id": project_id})
+    if routed is not None:
+        return routed
     _project_or_404(project_id)
     conn = get_conn()
     rows = conn.execute(
@@ -1846,6 +1916,10 @@ async def cancel_screenplay_all(project_id: str):
 
 @router.post("/episodes/{episode_id}/screenplay/cancel")
 async def cancel_screenplay(episode_id: str):
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route("screenplay.cancel", {"episode_id": episode_id})
+    if routed is not None:
+        return routed
     ep = _episode_or_404(episode_id)
     if ep["screenplay_status"] != "running":
         raise HTTPException(409, "当前没有正在进行的剧本生成")
@@ -1860,8 +1934,29 @@ async def cancel_screenplay(episode_id: str):
 
 
 @router.put("/episodes/{episode_id}/screenplay")
-def edit_screenplay(episode_id: str, body: dict):
+async def edit_screenplay(episode_id: str, body: dict):
+    from app.capabilities.dispatch import ui_route
+    payload = body.get("screenplay", body)
+    expected_version = body.get("expected_version")
+    routed = await ui_route(
+        "screenplay.update",
+        {
+            "episode_id": episode_id,
+            "screenplay": payload,
+            "force": bool(body.get("force")),
+            "reason": body.get("reason"),
+            "expected_version": expected_version,
+        },
+    )
+    if routed is not None:
+        return routed
     ep = _episode_or_404(episode_id)
+    current_version = ep.get("screenplay_artifact_id") or ""
+    if expected_version is not None and str(expected_version) != str(current_version):
+        raise HTTPException(
+            409,
+            f"剧本版本冲突：当前版本 {current_version or '空'}，请求基于 {expected_version}，请刷新后重试",
+        )
     payload = body.get("screenplay", body)
     force = bool(body.get("force"))
     instance, errors = schema_errors(EpisodeScreenplay, payload)
@@ -2473,6 +2568,12 @@ async def _recorded_storyboard_task(
 
 @router.post("/episodes/{episode_id}/storyboard")
 async def start_storyboard(episode_id: str):
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route(
+        "storyboard.generate", {"episode_id": episode_id, "mode": "fresh"},
+    )
+    if routed is not None:
+        return routed
     ep = _episode_or_404(episode_id)
     _require_harness_engine(ep["project_id"])
     if ep["status"] == "scripting":
@@ -2494,6 +2595,12 @@ async def start_storyboard(episode_id: str):
 @router.post("/episodes/{episode_id}/storyboard/resume")
 async def resume_storyboard(episode_id: str):
     """Continue after the last committed per-shot checkpoint without deleting it."""
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route(
+        "storyboard.generate", {"episode_id": episode_id, "mode": "resume"},
+    )
+    if routed is not None:
+        return routed
     ep = _episode_or_404(episode_id)
     _require_harness_engine(ep["project_id"])
     if ep["status"] == "scripting" or task_registry.active("storyboard", episode_id):
@@ -2549,6 +2656,10 @@ async def start_storyboard_all(project_id: str):
     必须是 async def：sync 路由跑在无事件循环的线程池里，asyncio.create_task 会抛
     'no running event loop'，导致状态已置为 scripting 但任务从未启动（前端显示分镜中、模型却收不到请求）。
     同时回收状态卡在 scripting 但无在跑任务的孤儿集，便于一键修复。"""
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route("storyboard.generate_batch", {"project_id": project_id})
+    if routed is not None:
+        return routed
     _project_or_404(project_id)
     _require_harness_engine(project_id)
     conn = get_conn()
@@ -2591,6 +2702,10 @@ async def _storyboard_guarded_recorded(
 async def cancel_storyboard(episode_id: str):
     """手动取消正在进行的分镜生成请求，解除 scripting 锁定，便于重新发起。
     用于模型侧卡死/异常导致状态长期停留在“分镜中”的情况。"""
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route("storyboard.cancel", {"episode_id": episode_id})
+    if routed is not None:
+        return routed
     ep = _episode_or_404(episode_id)
     if ep["status"] != "scripting":
         raise HTTPException(409, "当前没有正在进行的分镜生成")
@@ -2736,16 +2851,41 @@ def episode_detail(episode_id: str):
                 rel_path = Path(v["video_path"]).relative_to(PROJECTS_DIR).as_posix()
                 v["video_url"] = f"/media/{rel_path}"
         s["versions"] = versions
+        try:
+            from app.media_pipeline.status import shot_pipeline_status
+            s["pipeline"] = shot_pipeline_status(s["id"], conn=conn)
+        except Exception:  # noqa: BLE001
+            s["pipeline"] = None
     ep["shots"] = shots
+    try:
+        from app.media_pipeline.status import episode_pipeline_summary
+        ep["pipeline_summary"] = episode_pipeline_summary(episode_id, conn=conn)
+    except Exception:  # noqa: BLE001
+        ep["pipeline_summary"] = None
     return ep
 
 
 @router.put("/shots/{shot_id}")
-def edit_shot(shot_id: str, body: dict):
+async def edit_shot(shot_id: str, body: dict):
+    from app.capabilities.dispatch import ui_route
+    expected_version = body.get("expected_version")
+    patch = {k: v for k, v in body.items() if k != "expected_version"}
+    routed = await ui_route(
+        "shot.update",
+        {"shot_id": shot_id, "patch": patch, "expected_version": expected_version},
+    )
+    if routed is not None:
+        return routed
     conn = get_conn()
     shot = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
     if not shot:
         raise HTTPException(404, "镜头不存在")
+    current_version = shot["storyboard_artifact_id"] or ""
+    if expected_version is not None and str(expected_version) != str(current_version):
+        raise HTTPException(
+            409,
+            f"镜头版本冲突：当前版本 {current_version or '空'}，请求基于 {expected_version}，请刷新后重试",
+        )
     merged = dict(shot)
     merged["characters"] = json.loads(merged["characters"] or "[]")
     merged["dialogues"] = json.loads(merged["dialogues"] or "[]")
@@ -2947,23 +3087,30 @@ def confirm_episode_core(episode_id: str) -> dict:
 @router.post("/episodes/{episode_id}/confirm")
 async def confirm_episode(episode_id: str):
     """运行确定性确认门；校验通过后把剧集推进到 confirmed。"""
-    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+    from app.capabilities.dispatch import dispatch, respond_ui
 
     result = await dispatch("storyboard.confirm", {"episode_id": episode_id}, initiator="ui")
-    raise_if_failed(result)
-    return result_http_payload(result)
+    return respond_ui(result)
 
 
 @router.post("/episodes/{episode_id}/clear-artifacts")
-def clear_episode_artifacts(episode_id: str):
+async def clear_episode_artifacts(episode_id: str):
     """清空整集所有镜头的参考图、视频与模型分析，并回退到「已确认」。"""
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route("video.clear_episode", {"episode_id": episode_id})
+    if routed is not None:
+        return routed
     _episode_or_404(episode_id)
     return worker.clear_episode_artifacts(episode_id)
 
 
 @router.post("/shots/{shot_id}/clear-artifacts")
-def clear_shot_artifacts(shot_id: str):
+async def clear_shot_artifacts(shot_id: str):
     """清空单个镜头的参考图、视频与模型分析。"""
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route("video.clear_shot", {"shot_id": shot_id})
+    if routed is not None:
+        return routed
     conn = get_conn()
     if not conn.execute("SELECT id FROM shots WHERE id=?", (shot_id,)).fetchone():
         raise HTTPException(404, "镜头不存在")
@@ -2971,8 +3118,12 @@ def clear_shot_artifacts(shot_id: str):
 
 
 @router.delete("/versions/{version_id}")
-def delete_version(version_id: str):
+async def delete_version(version_id: str):
     """删除一个已生成的视频版本（含文件）。若是采用版则清空采用、使本集成品失效。"""
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route("video.delete_version", {"version_id": version_id})
+    if routed is not None:
+        return routed
     conn = get_conn()
     v = conn.execute("SELECT id FROM shot_versions WHERE id=?", (version_id,)).fetchone()
     if not v:
@@ -3020,16 +3171,35 @@ def _set_reference_image_used(
 
 
 @router.delete("/versions/{version_id}/reference-images/{ref_id}")
-def discard_reference_image(version_id: str, ref_id: str):
+async def discard_reference_image(version_id: str, ref_id: str):
     """废弃一张参考图：移入废弃画廊，且后续调用视频模型时不再使用它。"""
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route(
+        "reference.review",
+        {"version_id": version_id, "ref_id": ref_id, "action": "discard"},
+    )
+    if routed is not None:
+        return routed
     return _set_reference_image_used(version_id, ref_id, use=False)
 
 
 @router.post("/versions/{version_id}/reference-images/{ref_id}/restore")
-def restore_reference_image(version_id: str, ref_id: str, body: dict | None = Body(None)):
+async def restore_reference_image(version_id: str, ref_id: str, body: dict | None = Body(None)):
     """把废弃画廊里的参考图恢复为可用（重新计入喂给视频模型的参考图）。
     若该图曾被 QA 淘汰，body.override_reason 必填，写入审计字段。"""
+    from app.capabilities.dispatch import ui_route
     body = body or {}
+    routed = await ui_route(
+        "reference.review",
+        {
+            "version_id": version_id,
+            "ref_id": ref_id,
+            "action": "restore",
+            "override_reason": body.get("override_reason"),
+        },
+    )
+    if routed is not None:
+        return routed
     return _set_reference_image_used(
         version_id, ref_id, use=True, override_reason=body.get("override_reason"),
     )
@@ -3046,6 +3216,10 @@ def _shot_by_no(episode_id: str, shot_no: int):
 async def generate_episode(episode_id: str, body: dict | None = None):
     """批量生成整集视频（固定参考图模式）：每个视频任务内部生成/复用参考图并提交 Seedance。
     body.from_shot_no：只从该镜起、沿其连续段往后重生（中途改动后用）。"""
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route("video.generate_episode", {"episode_id": episode_id})
+    if routed is not None:
+        return routed
     ep = _episode_or_404(episode_id)
     if ep["status"] not in ("confirmed", "generating", "done"):
         raise HTTPException(409, "分镜脚本未确认（先在工作台点击确认分镜）")
@@ -3141,7 +3315,7 @@ async def _generate_shot_core(shot_id: str, body: dict) -> dict:
 
 @router.post("/shots/{shot_id}/generate")
 async def generate_shot(shot_id: str, body: dict | None = None):
-    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+    from app.capabilities.dispatch import dispatch, respond_ui
 
     body = body or {}
     result = await dispatch(
@@ -3154,13 +3328,16 @@ async def generate_shot(shot_id: str, body: dict | None = None):
         },
         initiator="ui",
     )
-    raise_if_failed(result)
-    return result_http_payload(result)
+    return respond_ui(result)
 
 
 @router.post("/shots/{shot_id}/video/stop")
-def stop_shot_video(shot_id: str):
+async def stop_shot_video(shot_id: str):
     """立即停止本镜全部排队中或运行中的视频任务；重复调用安全。"""
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route("video.stop_shot", {"shot_id": shot_id})
+    if routed is not None:
+        return routed
     try:
         return worker.stop_shot_video_tasks(shot_id)
     except ValueError as exc:
@@ -3218,19 +3395,22 @@ def _adopt_version_core(shot_id: str, body: dict) -> dict:
 
 @router.post("/shots/{shot_id}/adopt")
 async def adopt_version(shot_id: str, body: dict):
-    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+    from app.capabilities.dispatch import dispatch, respond_ui
 
     result = await dispatch(
         "video.adopt_version",
         {"shot_id": shot_id, "version_id": body.get("version_id"), "reason": body.get("reason")},
         initiator="ui",
     )
-    raise_if_failed(result)
-    return result_http_payload(result)
+    return respond_ui(result)
 
 
 @router.post("/episodes/{episode_id}/resume")
-def resume_episode(episode_id: str):
+async def resume_episode(episode_id: str):
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route("video.resume_episode", {"episode_id": episode_id})
+    if routed is not None:
+        return routed
     _episode_or_404(episode_id)
     return {"resumed_jobs": worker.retry_paused(episode_id)}
 
@@ -3245,8 +3425,12 @@ def mix_status(episode_id: str):
 
 
 @router.post("/episodes/{episode_id}/concatenate")
-def concatenate(episode_id: str):
+async def concatenate(episode_id: str):
     """把本集所有已采用的视频片段按镜号顺序拼接成一个 MP4。"""
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route("delivery.concatenate", {"episode_id": episode_id})
+    if routed is not None:
+        return routed
     _episode_or_404(episode_id)
     try:
         return worker.concatenate_episode(episode_id)

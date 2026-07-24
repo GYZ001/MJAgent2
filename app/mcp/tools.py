@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from app.capabilities import ensure_catalog_loaded, get_command_bus, get_registry
 from app.capabilities.registry import CommandSpec
 from app.capabilities.schemas import CommandStatus, IdempotencyPolicy, RiskLevel
+from app.capabilities.tool_schemas import command_input_schema
 from app.mcp.errors import ForbiddenError, McpError
 
 if TYPE_CHECKING:
@@ -17,11 +18,14 @@ if TYPE_CHECKING:
 
 
 def _tool_definition(spec: CommandSpec) -> dict[str, Any]:
+    from app.capabilities.schemas import CommandResult
+
     return {
         "name": spec.name,
         "title": spec.title,
         "description": spec.description,
-        "inputSchema": spec.input_model.model_json_schema(),
+        "inputSchema": command_input_schema(spec),
+        "outputSchema": CommandResult.model_json_schema(),
         "annotations": {
             "title": spec.title,
             "readOnlyHint": spec.risk == RiskLevel.R0_READ,
@@ -71,6 +75,10 @@ async def call_tool(name: str, arguments: dict[str, Any], *, claims: "TokenClaim
         raise McpError(-32602, str(exc)) from exc
 
     payload = result.model_dump(mode="json")
+    # P0：绝不把可直接消费的 approval_token 返回给 MCP Client。
+    # 否则客户端拿到 token 后原样重调即可执行 R2/R3，绕过本机用户批准。
+    if isinstance(payload.get("data"), dict) and "approval_token" in payload["data"]:
+        payload["data"] = {k: v for k, v in payload["data"].items() if k != "approval_token"}
     is_error = result.status in {
         CommandStatus.FAILED,
         CommandStatus.REJECTED,
@@ -79,7 +87,11 @@ async def call_tool(name: str, arguments: dict[str, Any], *, claims: "TokenClaim
     lines = [f"[{result.status.value}] {result.summary}"]
     if result.status == CommandStatus.WAITING_APPROVAL:
         approval_id = (payload.get("data") or {}).get("approval_id")
-        lines.append(f"需要用户批准后才能执行（approval_id={approval_id}），当前未执行任何业务变更。")
+        lines.append(
+            f"需要本机用户在漫剧控制台批准后才能执行（approval_id={approval_id}），"
+            "当前未执行任何业务变更；MCP 响应不含可重放的批准令牌。"
+        )
+    # PRD §9.3：提供 outputSchema 对应的结构化结果；annotations 不能降级服务端风险。
     return {
         "content": [{"type": "text", "text": "\n".join(lines)}],
         "structuredContent": payload,

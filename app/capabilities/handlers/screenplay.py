@@ -30,9 +30,17 @@ async def generate_batch(args: I.SelectorInput) -> CommandResult:
     return succeeded(f"已批量启动 {outcome.get('started', 0)} 个剧集的剧本生成", data=outcome)
 
 
-async def cancel(args: I.EpisodeScopedInput) -> CommandResult:
+async def cancel(args: I.ScreenplayCancelInput) -> CommandResult:
     from app import api
+    from app.capabilities.handlers.common import failed
 
+    if args.project_id and not args.episode_id:
+        outcome = await call_guarded(api.cancel_screenplay_all, args.project_id)
+        if isinstance(outcome, CommandResult):
+            return outcome
+        return succeeded(f"已停止本项目 {outcome.get('stopped', 0)} 个剧本任务", data=outcome)
+    if not args.episode_id:
+        return failed("必须提供 episode_id 或 project_id", error_code="invalid_input")
     outcome = await call_guarded(api.cancel_screenplay, args.episode_id)
     if isinstance(outcome, CommandResult):
         return outcome
@@ -40,12 +48,13 @@ async def cancel(args: I.EpisodeScopedInput) -> CommandResult:
 
 
 async def update(args: I.ScreenplayUpdateInput) -> CommandResult:
-    """结构化保存剧本。写命令语义即「确认覆盖」，因此始终按 force 处理下游清理。"""
+    """结构化保存剧本。页面经 REST 传入 ``force``；Agent/MCP 批准后应传 ``force=True``。"""
     from app import api
 
-    outcome = await call_guarded(
-        api.edit_screenplay, args.episode_id, {"screenplay": args.screenplay, "force": True}
-    )
+    body: dict = {"screenplay": args.screenplay, "force": bool(args.force)}
+    if args.expected_version is not None:
+        body["expected_version"] = args.expected_version
+    outcome = await call_guarded(api.edit_screenplay, args.episode_id, body)
     if isinstance(outcome, CommandResult):
         return outcome
     return succeeded(

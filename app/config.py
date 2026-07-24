@@ -78,19 +78,24 @@ TIMEOUT_IMAGE_READ = float(os.environ.get("TIMEOUT_IMAGE_READ", "180"))
 TIMEOUT_IMAGE_WRITE = float(os.environ.get("TIMEOUT_IMAGE_WRITE", "120"))
 TIMEOUT_VLM_READ = float(os.environ.get("TIMEOUT_VLM_READ", "300"))
 TIMEOUT_VLM_WRITE = float(os.environ.get("TIMEOUT_VLM_WRITE", "120"))
+# 兼容旧环境变量；媒体流水线 V2 已拆成 image / vlm 独立通道（见 DEFAULT_SETTINGS）。
 MEDIA_REQUEST_CONCURRENCY = max(1, int(os.environ.get("MEDIA_REQUEST_CONCURRENCY", "2")))
+IMAGE_REQUEST_CONCURRENCY = max(1, int(os.environ.get("IMAGE_REQUEST_CONCURRENCY", "4")))
+VLM_REQUEST_CONCURRENCY = max(1, int(os.environ.get("VLM_REQUEST_CONCURRENCY", "6")))
 # 仅压缩上传给图生图/VLM 的输入，不改变 Seedream 输出分辨率。
 MEDIA_INPUT_MAX_EDGE = max(512, int(os.environ.get("MEDIA_INPUT_MAX_EDGE", "1280")))
 # ffmpeg JPEG qscale：2 最高质量，31 最低质量。
 MEDIA_INPUT_JPEG_QUALITY = min(31, max(2, int(os.environ.get("MEDIA_INPUT_JPEG_QUALITY", "5"))))
 VIDEO_POLL_INTERVAL = 10.0
-# 单个 worker 连续占用的轮询窗口。窗口结束而供应商仍在运行时，任务会释放
-# worker 并持久化延迟重排；这不是失败截止线。
-VIDEO_POLL_BUDGET = 15 * 60
-VIDEO_POLL_RESUME_DELAY = float(os.environ.get("VIDEO_POLL_RESUME_DELAY", "30"))
+# Phase 1：提交后单次查询即释放 worker；不再用 15 分钟连续占槽窗口。
+# 保留 VIDEO_POLL_BUDGET 仅作兼容旧测试/文档，实际轮询路径不再占用该预算。
+VIDEO_POLL_BUDGET = 0
+VIDEO_POLL_RESUME_DELAY = float(os.environ.get("VIDEO_POLL_RESUME_DELAY", "10"))
 # 供应商任务允许的总墙钟时间。用于防止上游永远停在 running；正常长任务跨越
-# 多个轮询窗口继续等待，不会再因 15 分钟窗口被误判失败。
+# 多次 waiting_provider 轮询继续等待。
 VIDEO_PROVIDER_MAX_WAIT = float(os.environ.get("VIDEO_PROVIDER_MAX_WAIT", str(6 * 60 * 60)))
+# 灰度：参考图分池 / media_tasks 依赖调度；Phase 1 非阻塞轮询全量生效。
+MEDIA_PIPELINE_V2_ENABLED = os.environ.get("MEDIA_PIPELINE_V2_ENABLED", "true").lower() in {"1", "true", "yes"}
 
 # 上游瞬时故障（超时/网络/限流/5xx）的 job 级自动重试。_post_json 的单次调用内重试只覆盖约 90s，
 # 扛不住分钟级的上游抖动；没有 job 级兜底时，一次可恢复的瞬时故障会把整镜任务永久判失败、逼人工重试。
@@ -146,7 +151,21 @@ IMAGE_PRICE_PER_UNIT = 0.2  # CNY
 
 # 可在 settings 表覆盖的默认值
 DEFAULT_SETTINGS = {
-    "video_concurrency": "2",
+    # 兼容旧键；新调度以分通道为准（见 media_pipeline.concurrency）
+    "video_concurrency": "4",
+    "auto_concurrency": "8",
+    "reference_pipeline_concurrency": "6",
+    "image_request_concurrency": "4",
+    "vlm_request_concurrency": "6",
+    "video_submit_concurrency": "4",
+    "video_inflight_limit": "8",
+    "video_poll_concurrency": "8",
+    "download_concurrency": "3",
+    "finalize_concurrency": "4",
+    "episode_video_inflight_limit": "8",
+    "project_video_inflight_limit": "12",
+    "reference_prepared_backlog": "8",
+    "media_pipeline_v2_enabled": "true",
     "episode_cost_limit_cny": "100",
     "use_character_refs": "true",     # 出场角色定妆照随镜头注入 reference_image（跨集一致性核心）
     "max_ref_images": "2",            # 单镜头最多附几张定妆照
@@ -164,7 +183,6 @@ DEFAULT_SETTINGS = {
     "video_reference_consistency_check": "true",       # Phase 2：整组参考图相对一致性检查 Agent（点名漂移图并 i2i 重生/剔除）
     "video_reference_consistency_threshold": "0.7",    # 候选参考图与锚点（定妆照/上镜尾帧）的一致性达标线，低于则判漂移
     "video_reference_consistency_retries": "1",        # 漂移图从锚点 i2i 重生的最大次数；仍漂移则剔除（不喂 Seedance）
-    "auto_concurrency": "24",           # 一键全自动：图像/视频 worker 并发槽数（公网网关吞吐强，可调大）
     "auto_storyboard_concurrency": "8", # 一键全自动：同时进行的分镜 LLM 数（各集流水线并行，分镜阶段单独限流）
     "provider_call_retention_days": "30",
     "error_log_retention_days": "30",

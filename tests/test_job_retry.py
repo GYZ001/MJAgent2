@@ -94,7 +94,7 @@ def test_running_provider_task_is_deferred_without_consuming_retry_budget(monkey
         "SELECT status, error, retry_count, next_retry_at, lease_owner "
         "FROM jobs WHERE id='j1'"
     ).fetchone()
-    assert row["status"] == "queued"
+    assert row["status"] == "waiting_provider"
     assert row["retry_count"] == 0
     assert row["next_retry_at"] is not None
     assert row["lease_owner"] is None

@@ -531,6 +531,76 @@ CREATE TABLE IF NOT EXISTS mcp_tokens (
     last_used_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_mcp_tokens_hash ON mcp_tokens(token_hash);
+
+CREATE TABLE IF NOT EXISTS media_tasks (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    resource_class TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    priority INTEGER NOT NULL DEFAULT 50,
+    available_at REAL,
+    lease_owner TEXT,
+    lease_expires_at REAL,
+    attempt INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 3,
+    input_fingerprint TEXT,
+    provider_operation_id TEXT,
+    provider_task_id TEXT,
+    provider_submitted_at REAL,
+    next_poll_at REAL,
+    started_at REAL,
+    finished_at REAL,
+    error_code TEXT,
+    error_message TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_media_tasks_job ON media_tasks(job_id, stage);
+CREATE INDEX IF NOT EXISTS idx_media_tasks_sched ON media_tasks(status, resource_class, priority DESC, available_at);
+
+CREATE TABLE IF NOT EXISTS media_task_dependencies (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    depends_on_task_id TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    FOREIGN KEY(task_id) REFERENCES media_tasks(id) ON DELETE CASCADE,
+    FOREIGN KEY(depends_on_task_id) REFERENCES media_tasks(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_media_task_deps_task ON media_task_dependencies(task_id);
+CREATE INDEX IF NOT EXISTS idx_media_task_deps_up ON media_task_dependencies(depends_on_task_id);
+
+CREATE TABLE IF NOT EXISTS reference_sets (
+    id TEXT PRIMARY KEY,
+    shot_id TEXT NOT NULL,
+    source_version_id TEXT,
+    revision INTEGER NOT NULL DEFAULT 1,
+    fingerprint TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ready',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    FOREIGN KEY(shot_id) REFERENCES shots(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_reference_sets_shot ON reference_sets(shot_id, revision DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reference_sets_fp ON reference_sets(shot_id, fingerprint);
+
+CREATE TABLE IF NOT EXISTS reference_assets (
+    id TEXT PRIMARY KEY,
+    reference_set_id TEXT NOT NULL,
+    asset_type TEXT NOT NULL,
+    source TEXT,
+    path TEXT,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    quality_score REAL,
+    consistency_score REAL,
+    selected INTEGER NOT NULL DEFAULT 1,
+    deleted INTEGER NOT NULL DEFAULT 0,
+    qa_json TEXT,
+    created_at REAL NOT NULL,
+    FOREIGN KEY(reference_set_id) REFERENCES reference_sets(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_reference_assets_set ON reference_assets(reference_set_id, sort_order);
 """
 
 

@@ -1,3 +1,5 @@
+import { requestCapabilityApproval } from './capabilityApproval'
+
 class ApiError extends Error {
   // code/category/errorId 来自后端报错码系统：技术类报错前端只拿到这三样，原文留后端日志。
   constructor(
@@ -7,6 +9,36 @@ class ApiError extends Error {
     public category?: string,
     public errorId?: string,
   ) { super(message) }
+}
+
+const SESSION_HEADER = 'X-Manju-Session'
+const APPROVAL_HEADER = 'X-Manju-Approval-Token'
+
+let sessionToken: string | null = null
+let sessionReady: Promise<void> | null = null
+
+async function ensureSession(): Promise<void> {
+  if (sessionToken) return
+  if (!sessionReady) {
+    sessionReady = fetch('/api/session')
+      .then(async resp => {
+        if (!resp.ok) throw new Error(`无法领取本机会话凭证：HTTP ${resp.status}`)
+        const body = await resp.json() as { session_token?: string }
+        sessionToken = body.session_token || null
+      })
+      .catch(err => {
+        sessionReady = null
+        throw err
+      })
+  }
+  await sessionReady
+}
+
+function baseHeaders(extra?: HeadersInit, approvalToken?: string): Headers {
+  const headers = new Headers(extra)
+  if (sessionToken) headers.set(SESSION_HEADER, sessionToken)
+  if (approvalToken) headers.set(APPROVAL_HEADER, approvalToken)
+  return headers
 }
 
 async function handle(resp: Response) {
@@ -22,8 +54,6 @@ async function handle(resp: Response) {
     category = typeof body.category === 'string' ? body.category : undefined
     errorId = typeof body.error_id === 'string' ? body.error_id : undefined
   } catch { /* keep default */ }
-  // 后端已把展示串拼进 detail（业务类=友好提示+码；技术类=安全提示+码+ID）；
-  // 兜底：万一旧响应只有 code/category 而 detail 不含码，补一段可读后缀。
   let message = detail
   if (code && errorId && !detail.includes(errorId)) {
     message = `${detail}（${category ?? ''}${category ? ' · ' : ''}${code} · ${errorId}）`
@@ -31,68 +61,87 @@ async function handle(resp: Response) {
   throw new ApiError(resp.status, message, code, category, errorId)
 }
 
+async function request(
+  method: string,
+  path: string,
+  body?: unknown,
+  options?: { form?: FormData; approvalToken?: string; _retried?: boolean },
+): Promise<any> {
+  await ensureSession()
+  const isForm = Boolean(options?.form)
+  const headers = baseHeaders(
+    (!isForm && body !== undefined) ? { 'Content-Type': 'application/json' } : undefined,
+    options?.approvalToken,
+  )
+  const resp = await fetch(`/api${path}`, {
+    method,
+    headers,
+    body: isForm ? options?.form : (body !== undefined ? JSON.stringify(body) : undefined),
+  })
+
+  if (resp.status === 202) {
+    const payload = await resp.json()
+    if (payload?.status === 'waiting_approval') {
+      if (options?._retried) {
+        throw new ApiError(403, '批准后仍未通过，请刷新页面后重试')
+      }
+      if (!payload.approval_token) {
+        throw new ApiError(403, '需要批准但未返回令牌，请在控制台确认后重试')
+      }
+      const approved = await requestCapabilityApproval(payload)
+      if (!approved) throw new ApiError(403, '已取消操作')
+      return request(method, path, body, {
+        ...options,
+        approvalToken: String(payload.approval_token),
+        _retried: true,
+      })
+    }
+  }
+
+  return handle(resp)
+}
+
 export const api = {
-  get: (path: string) => fetch(`/api${path}`).then(handle),
-  post: (path: string, body?: unknown) =>
-    fetch(`/api${path}`, {
-      method: 'POST',
-      headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    }).then(handle),
-  put: (path: string, body: unknown) =>
-    fetch(`/api${path}`, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    }).then(handle),
-  del: (path: string) => fetch(`/api${path}`, { method: 'DELETE' }).then(handle),
-  upload: (path: string, form: FormData) =>
-    fetch(`/api${path}`, { method: 'POST', body: form }).then(handle),
+  get: (path: string) => request('GET', path),
+  post: (path: string, body?: unknown) => request('POST', path, body),
+  put: (path: string, body: unknown) => request('PUT', path, body),
+  del: (path: string) => request('DELETE', path),
+  upload: (path: string, form: FormData) => request('POST', path, undefined, { form }),
 
   /* ── 便捷方法 ── */
   episodeGenerate: (episodeId: string) =>
-    fetch(`/api/episodes/${episodeId}/generate`, { method: 'POST' }).then(handle),
+    request('POST', `/episodes/${episodeId}/generate`),
   shotGenerate: (shotId: string, promptOverride?: string, reroll?: boolean, withCritique?: boolean) =>
-    fetch(`/api/shots/${shotId}/generate`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        prompt_override: promptOverride, reroll, with_critique: withCritique,
-      }),
-    }).then(handle),
+    request('POST', `/shots/${shotId}/generate`, {
+      prompt_override: promptOverride, reroll, with_critique: withCritique,
+    }),
   stopShotVideo: (shotId: string): Promise<StopShotVideoResult> =>
-    fetch(`/api/shots/${shotId}/video/stop`, { method: 'POST' }).then(handle),
+    request('POST', `/shots/${shotId}/video/stop`),
   adoptVersion: (shotId: string, versionId: string, reason?: string) =>
-    fetch(`/api/shots/${shotId}/adopt`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ version_id: versionId, reason }),
-    }).then(handle),
+    request('POST', `/shots/${shotId}/adopt`, { version_id: versionId, reason }),
   deleteVersion: (versionId: string) =>
-    fetch(`/api/versions/${versionId}`, { method: 'DELETE' }).then(handle),
+    request('DELETE', `/versions/${versionId}`),
   discardReferenceImage: (versionId: string, refId: string) =>
-    fetch(`/api/versions/${versionId}/reference-images/${refId}`, { method: 'DELETE' }).then(handle),
+    request('DELETE', `/versions/${versionId}/reference-images/${refId}`),
   restoreReferenceImage: (versionId: string, refId: string, overrideReason?: string) =>
-    fetch(`/api/versions/${versionId}/reference-images/${refId}/restore`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ override_reason: overrideReason }),
-    }).then(handle),
+    request('POST', `/versions/${versionId}/reference-images/${refId}/restore`, {
+      override_reason: overrideReason,
+    }),
   clearEpisodeArtifacts: (episodeId: string) =>
-    fetch(`/api/episodes/${episodeId}/clear-artifacts`, { method: 'POST' }).then(handle),
+    request('POST', `/episodes/${episodeId}/clear-artifacts`),
   clearShotArtifacts: (shotId: string) =>
-    fetch(`/api/shots/${shotId}/clear-artifacts`, { method: 'POST' }).then(handle),
+    request('POST', `/shots/${shotId}/clear-artifacts`),
   /* 场景图素材库 */
   genSceneBible: (projectId: string) =>
-    fetch(`/api/projects/${projectId}/scene-bible`, { method: 'POST' }).then(handle),
+    request('POST', `/projects/${projectId}/scene-bible`),
   genSceneRefs: (projectId: string, scene?: string) =>
-    fetch(`/api/projects/${projectId}/scene-refs`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ scene }),
-    }).then(handle),
+    request('POST', `/projects/${projectId}/scene-refs`, { scene }),
   cancelSceneRefs: (projectId: string) =>
-    fetch(`/api/projects/${projectId}/scene-refs/cancel`, { method: 'POST' }).then(handle),
+    request('POST', `/projects/${projectId}/scene-refs/cancel`),
   editScenePrompt: (projectId: string, sceneName: string, scenePrompt: string) =>
-    fetch(`/api/projects/${projectId}/scenes/${encodeURIComponent(sceneName)}/prompt`, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ scene_prompt: scenePrompt }),
-    }).then(handle),
+    request('PUT', `/projects/${projectId}/scenes/${encodeURIComponent(sceneName)}/prompt`, {
+      scene_prompt: scenePrompt,
+    }),
 }
 
 export interface RunSummary {
@@ -253,6 +302,30 @@ export interface ShotVersion {
   }
 }
 
+export interface ShotPipelineStatus {
+  pipeline_status: string
+  current_stage?: string | null
+  stage_label?: string | null
+  queue_position?: number | null
+  provider_elapsed_s?: number | null
+  reference_progress?: { done: number; total: number } | null
+  candidate_count: number
+  retake_count: number
+  blocked_reason?: string | null
+  estimated_start_at?: number | null
+  estimated_finish_at?: number | null
+}
+
+export interface EpisodePipelineSummary {
+  shots_total: number
+  adopted: number
+  with_candidate: number
+  upstream_generating: number
+  preparing_references: number
+  queued: number
+  waiting_human: number
+}
+
 export interface StopShotVideoResult {
   shot_id: string
   stopped_count: number
@@ -277,6 +350,7 @@ export interface Shot {
   video_stale: boolean
   storyboard_artifact_id?: string | null
   storyboard_evidence?: ArtifactEvidence | null
+  pipeline?: ShotPipelineStatus | null
 }
 
 export interface Episode {
@@ -293,6 +367,7 @@ export interface Episode {
   storyboard_evidence?: ArtifactEvidence | null
   delivery_artifact_id?: string | null
   delivery_status?: string
+  pipeline_summary?: EpisodePipelineSummary | null
 }
 
 interface DeliveryCheck {

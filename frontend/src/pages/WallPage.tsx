@@ -3,7 +3,7 @@ import EpisodeCrumb from '../components/EpisodeCrumb'
 import { useEpisode, useNav } from '../App'
 import { api, type Shot, type ShotVersion, type ReferenceImage } from '../api'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
-import { countAdoptedVideos, shotVideoState } from '../shotStatus'
+import { countAdoptedVideos, formatPipelineSummary, shotVideoState } from '../shotStatus'
 import AsyncButton from '../components/AsyncButton'
 import QueryState from '../components/QueryState'
 
@@ -19,11 +19,13 @@ const REVIEW_TABS: { id: ReviewTab; label: string }[] = [
 const VIDEO_VERSION_STATUS_LABEL: Record<string, string> = {
   queued: '排队中',
   running: '生成中',
+  waiting_provider: '上游生成中',
   succeeded: '已完成',
   failed: '失败',
   cancelled: '已停止',
   abandoned: '已停止',
   paused_budget: '预算暂停',
+  waiting_human: '待人工',
 }
 
 /* ─── Lightbox 图片预览 ─── */
@@ -215,7 +217,10 @@ export default function WallPage() {
     if (shots.length && idx >= shots.length) setIdx(shots.length - 1)
   }, [shots.length, idx])
 
-  const videoActive = shots.some(s => s.versions.some(v => v.status === 'queued' || v.status === 'running'))
+  const videoActive = shots.some(s =>
+    s.versions.some(v => v.status === 'queued' || v.status === 'running' || v.status === 'waiting_provider')
+    || (s.pipeline != null && ['queued', 'running', 'waiting_provider', 'blocked'].includes(s.pipeline.pipeline_status))
+  )
   const videoTimer = useTaskTimer(`episode.${episodeId}.videos`, videoActive)
 
   const openLightbox = useCallback((src: string, label?: string) => {
@@ -306,7 +311,7 @@ export default function WallPage() {
         <div className="wall-topbar-left">
           <EpisodeCrumb label="评审墙" view="wall" episodeNo={ep.episode_no} />
           <span className="wall-stats">
-            {shots.length} 镜 · 视频 {videoReady}/{shots.length}
+            {formatPipelineSummary(ep.pipeline_summary, shots.length)}
           </span>
         </div>
         <div className="wall-topbar-right">

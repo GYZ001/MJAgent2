@@ -55,6 +55,7 @@ body {
   height: 100dvh;
   overflow-y: auto;
   overflow-x: hidden;
+  overscroll-behavior: contain;
   z-index: 70;
   transition: width 0.18s ease, padding 0.18s ease;
 }
@@ -1637,6 +1638,7 @@ button, input, textarea, select { font-family: var(--ui); }
   border-right: 0;
   overflow-y: auto;
   overflow-x: hidden;
+  overscroll-behavior: contain;
   background:
     radial-gradient(260px 180px at 30% 0, rgba(181,72,56,.2), transparent 70%),
     linear-gradient(180deg, #20252d, #171b22);
@@ -1652,7 +1654,7 @@ button, input, textarea, select { font-family: var(--ui); }
 .brand-copy { min-width: 0; display: grid; line-height: 1.2; }
 .brand-copy b { font: 600 16px var(--serif); letter-spacing: .12em; color: #fff; }
 .brand-copy span { margin-top: 5px; color: #8993a0; font: 600 8px/1 var(--ui); letter-spacing: .18em; }
-.spine nav { gap: 13px; overflow-y: auto; overflow-x: hidden; }
+.spine nav { gap: 13px; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
 .spine-group { display: grid; gap: 3px; }
 .spine-group-label { padding: 0 11px 5px; color: #737d8a; font-size: 10px; font-weight: 700; letter-spacing: .16em; }
 .spine-item {
@@ -2193,35 +2195,89 @@ label.f { color: var(--ink-soft); font: 600 12px var(--ui); letter-spacing: .02e
 .monitor-ledger { font-size: 12px !important; }
 .monitor-ledger th { font-size: 10.5px !important; }
 
-/* ————— 案头助手 Agent Drawer ————— */
-.agent-fab {
-  position: fixed;
-  right: 22px;
-  bottom: 88px;
-  z-index: 85;
-  width: 46px;
-  height: 46px;
-  border-radius: 50%;
-  border: 1px solid var(--hairline);
-  background: linear-gradient(180deg, var(--card), var(--paper-deep));
-  color: var(--cinnabar);
-  font: 700 18px var(--serif);
-  cursor: pointer;
-  box-shadow: 0 8px 24px rgba(44, 38, 32, 0.12);
+/* ————— 案头助手：右侧推出并挤压主内容 ————— */
+:root { --agent-drawer-w: min(400px, 42vw); }
+
+#root {
+  transition: padding-right 0.32s cubic-bezier(0.22, 1, 0.36, 1);
 }
-.agent-fab.active { background: var(--cinnabar); color: #fff; border-color: var(--cinnabar-deep); }
+#root.agent-open {
+  padding-right: var(--agent-drawer-w);
+}
+
+.agent-toggle {
+  position: fixed;
+  top: 16px;
+  right: 20px;
+  z-index: 88;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--ink-soft);
+  cursor: pointer;
+  transition: color 0.18s ease;
+}
+.agent-toggle-icon,
+.agent-panel-toggle .agent-toggle-icon {
+  width: 22px;
+  height: 18px;
+  display: block;
+}
+.agent-toggle:hover,
+.agent-toggle:focus-visible,
+.agent-panel-toggle:hover,
+.agent-panel-toggle:focus-visible {
+  color: var(--cinnabar);
+  outline: none;
+}
+.agent-panel-toggle {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--ink-soft);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+#root.agent-open .run-dock {
+  right: calc(var(--agent-drawer-w) + 18px);
+  transition: right 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
 .agent-drawer {
   position: fixed;
   top: 0;
   right: 0;
   bottom: 0;
-  width: min(420px, 100vw);
+  width: var(--agent-drawer-w);
   z-index: 90;
   display: flex;
   flex-direction: column;
   background: linear-gradient(180deg, var(--card), var(--paper));
   border-left: 1px solid var(--hairline);
-  box-shadow: -12px 0 40px rgba(44, 38, 32, 0.08);
+  box-shadow: -10px 0 28px rgba(44, 38, 32, 0.06);
+  transform: translateX(100%);
+  transition: transform 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+  pointer-events: none;
+  visibility: hidden;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+.agent-drawer.open {
+  transform: translateX(0);
+  pointer-events: auto;
+  visibility: visible;
 }
 .agent-drawer-head {
   display: flex;
@@ -2251,7 +2307,9 @@ label.f { color: var(--ink-soft); font: 600 12px var(--ui); letter-spacing: .02e
 .agent-chip-x { border: 0; background: transparent; margin-left: 4px; cursor: pointer; color: inherit; }
 .agent-transcript {
   flex: 1;
+  min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
   padding: 8px 14px 16px;
   display: flex;
   flex-direction: column;
@@ -2306,7 +2364,126 @@ label.f { color: var(--ink-soft); font: 600 12px var(--ui); letter-spacing: .02e
   font-size: 12px;
   cursor: pointer;
 }
+/* ——— 消息流：用户气泡 / 助手轮次 / 思考区 / 流式光标 ——— */
+.agent-stream-status.live { display: inline-flex; align-items: center; gap: 5px; color: var(--cinnabar); }
+.agent-status-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--cinnabar);
+  animation: agent-pulse 1.1s ease-in-out infinite;
+}
+@keyframes agent-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }
+
+.agent-empty {
+  color: var(--ink-faint);
+  font-size: 13px;
+  line-height: 1.7;
+  padding: 12px 4px;
+}
+
+.agent-msg { display: flex; flex-direction: column; gap: 8px; }
+.agent-msg-user { align-items: flex-end; }
+.agent-msg-assistant { align-items: stretch; }
+.agent-bubble {
+  max-width: 86%;
+  background: var(--cinnabar);
+  color: #fff;
+  border-radius: 14px 14px 4px 14px;
+  padding: 9px 13px;
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  box-shadow: 0 1px 2px rgba(44, 38, 32, 0.08);
+}
+
+.agent-answer {
+  font-size: 14px;
+  line-height: 1.72;
+  color: var(--ink);
+  word-break: break-word;
+}
+.agent-answer .md > *:first-child { margin-top: 0; }
+.agent-answer .md > *:last-child { margin-bottom: 0; }
+
+/* 轻量 Markdown */
+.md-p { margin: 0 0 8px; }
+.md-h { font-size: 14px; font-weight: 600; margin: 12px 0 6px; color: var(--ink); }
+.md-ul, .md-ol { margin: 0 0 8px; padding-left: 20px; }
+.md-ul li, .md-ol li { margin: 2px 0; }
+.md code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  background: rgba(44, 38, 32, 0.07);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.md-pre {
+  background: rgba(44, 38, 32, 0.06);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 0 0 8px;
+}
+.md-pre code { background: transparent; padding: 0; font-size: 12.5px; white-space: pre; }
+
+/* 思考过程折叠区 */
+.agent-thinking {
+  border-left: 2px solid var(--hairline);
+  padding-left: 10px;
+  margin: 2px 0;
+}
+.agent-thinking-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-faint);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 0;
+}
+.agent-thinking-toggle:hover { color: var(--ink-soft); }
+.agent-thinking-caret { font-size: 10px; }
+.agent-thinking-body {
+  margin-top: 6px;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--ink-soft);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 流式光标 + 打字指示 */
+.agent-caret {
+  display: inline-block;
+  width: 6px;
+  height: 14px;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--cinnabar);
+  animation: agent-blink 1s steps(2, start) infinite;
+}
+@keyframes agent-blink { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }
+.agent-thinking-hint { padding: 4px 0; }
+.agent-typing { display: inline-flex; gap: 4px; align-items: center; }
+.agent-typing i {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--ink-faint);
+  animation: agent-typing 1.2s ease-in-out infinite;
+}
+.agent-typing i:nth-child(2) { animation-delay: 0.15s; }
+.agent-typing i:nth-child(3) { animation-delay: 0.3s; }
+@keyframes agent-typing { 0%, 60%, 100% { opacity: 0.3; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-3px); } }
+
+.agent-citations { display: flex; flex-wrap: wrap; gap: 6px; }
+.agent-intent-card { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.agent-intent-card p { font-size: 13px; color: var(--ink-soft); }
+
 @media (max-width: 720px) {
-  .agent-drawer { width: 100vw; }
-  .agent-fab { right: 14px; bottom: 76px; }
+  :root { --agent-drawer-w: 100vw; }
+  #root.agent-open { padding-right: 0; } /* 窄屏改覆盖，避免主内容被挤没 */
+  .agent-toggle { top: 14px; right: 14px; }
+  #root.agent-open .run-dock { right: 10px; }
 }

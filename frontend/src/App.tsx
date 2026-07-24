@@ -13,6 +13,8 @@ import ReaderPage from './pages/ReaderPage'
 import RunDock from './components/harness/RunDock'
 import AgentDrawer from './agent/AgentDrawer'
 import type { ContextEnvelope } from './agent/types'
+import CapabilityApprovalHost from './components/CapabilityApprovalHost'
+import { useScrollContainment } from './useScrollContainment'
 
 export type View = 'studio' | 'bible' | 'scenes' | 'episodes' | 'script' | 'board' | 'wall' | 'cinema' | 'monitor' | 'reader'
 
@@ -87,6 +89,8 @@ export default function App() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const [agentOpen, setAgentOpen] = useState(false)
   const toastTimerRef = useRef<number>()
+  const spineRef = useRef<HTMLElement | null>(null)
+  useScrollContainment(spineRef, true)
 
   const toast = useCallback((text: string, isErr = false) => {
     setToastMsg({ text, err: isErr })
@@ -132,6 +136,12 @@ export default function App() {
   }, [view, projectId, episodeId, chapterIdx])
 
   useEffect(() => {
+    const root = document.getElementById('root')
+    root?.classList.toggle('agent-open', agentOpen)
+    return () => { root?.classList.remove('agent-open') }
+  }, [agentOpen])
+
+  useEffect(() => {
     if (!projectId) {
       setEpisodeId(null)
       return
@@ -175,7 +185,10 @@ export default function App() {
     <NavCtx.Provider value={nav}>
       <button className="mobile-nav-trigger" type="button" aria-label="打开导航" onClick={() => setMobileNavOpen(true)}>☰</button>
       {mobileNavOpen && <button className="mobile-nav-backdrop" type="button" aria-label="关闭导航" onClick={() => setMobileNavOpen(false)} />}
-      <aside className={`spine ${spineCollapsed ? 'collapsed' : ''} ${mobileNavOpen ? 'mobile-open' : ''}`}>
+      <aside
+        ref={spineRef}
+        className={`spine ${spineCollapsed ? 'collapsed' : ''} ${mobileNavOpen ? 'mobile-open' : ''}`}
+      >
         <div className="spine-top">
           <button
             className="seal"
@@ -222,15 +235,24 @@ export default function App() {
         {view === 'monitor' && <MonitorPage />}
       </main>
       <RunDock projectId={projectId} onOpen={() => go('monitor')} />
-      <button
-        type="button"
-        className={`agent-fab ${agentOpen ? 'active' : ''}`}
-        aria-label="打开案头助手"
-        onClick={() => setAgentOpen(v => !v)}
-      >
-        助
-      </button>
+      {!agentOpen && (
+        <button
+          type="button"
+          className="agent-toggle"
+          aria-label="打开案头助手"
+          aria-expanded={false}
+          aria-controls="agent-drawer"
+          title="打开案头助手"
+          onClick={() => setAgentOpen(true)}
+        >
+          <svg className="agent-toggle-icon" viewBox="0 0 22 18" aria-hidden="true" focusable="false">
+            <rect x="1.25" y="1.25" width="19.5" height="15.5" rx="2.2" ry="2.2" fill="none" stroke="currentColor" strokeWidth="1.5" />
+            <path d="M15.25 1.25v15.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
+          </svg>
+        </button>
+      )}
       <AgentDrawer open={agentOpen} onClose={() => setAgentOpen(false)} context={agentContext} />
+      <CapabilityApprovalHost />
       {toastMsg && <div role="status" className={`toast ${toastMsg.err ? 'err' : ''}`}>{toastMsg.text}</div>}
     </NavCtx.Provider>
   )
@@ -348,7 +370,9 @@ const episodeBusy = (ep: Episode | null): boolean => {
   if (ep.screenplay_status === 'running') return true
   if (ep.status === 'scripting' || ep.status === 'drafting' || ep.status === 'generating') return true
   if (ep.shots?.some(s =>
-    s.versions?.some(v => v.status === 'queued' || v.status === 'running')
+    s.versions?.some(v =>
+      v.status === 'queued' || v.status === 'running' || v.status === 'waiting_provider'
+    ) || (s.pipeline != null && ['queued', 'running', 'waiting_provider', 'blocked'].includes(s.pipeline.pipeline_status))
   )) return true
   return false
 }

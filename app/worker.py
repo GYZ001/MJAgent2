@@ -110,12 +110,13 @@ def _defer_provider_poll(
 ) -> bool:
     """供应商仍在生成时释放 worker，并持久化安排下一次状态查询。
 
+    Phase 1：状态写入 waiting_provider（不再占 worker 槽）；单次 poll 后即调用本函数。
     这不是一次 provider retry：不会新建付费任务，也不消耗 retry_count。
-    provider_task_id 已持久化，下一次 worker 只会继续轮询同一个任务。
+    provider_task_id 已持久化，下一次只会继续轮询同一个任务。
     """
     conn = get_conn()
     wait = max(0.0, float(
-        config.VIDEO_POLL_RESUME_DELAY if delay is None else delay
+        config.VIDEO_POLL_INTERVAL if delay is None else delay
     ))
     due = now() + wait
     note = (
@@ -123,7 +124,7 @@ def _defer_provider_poll(
         f"约 {int(wait)} 秒后自动继续查询，不会重复提交或产生新任务。"
     )
     updated = conn.execute(
-        """UPDATE jobs SET status='queued', error=?, next_retry_at=?,
+        """UPDATE jobs SET status='waiting_provider', error=?, next_retry_at=?,
                   lease_owner=NULL, lease_expires_at=NULL, updated_at=?
            WHERE id=? AND status='running' AND lease_owner=?
              AND cancellation_requested=0 AND abandoned=0""",
@@ -1071,6 +1072,13 @@ async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dic
         meta.pop("first_frame_scene_id", None)
         meta.pop("last_frame_scene_id", None)
         prompt_text = video_modes.append_reference_prompt_notes(prompt_text, assets)
+        try:
+            from app.media_pipeline.reference_store import upsert_reference_set_from_meta
+            upsert_reference_set_from_meta(
+                shot_id=shot_id, version_id=version["id"], meta=meta, conn=conn,
+            )
+        except Exception:  # noqa: BLE001 参考图集落库失败不阻断视频
+            pass
         _set_version(version["id"], image_inputs=json.dumps(meta, ensure_ascii=False), prompt_text=prompt_text)
         return meta, prompt_text
 
@@ -1157,6 +1165,57 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         meta.pop("last_frame_scene_id", None)
         meta, prompt_text = await _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta, prompt_text)
         _assert_job_lease(job_id, owner)
+
+        # 连续镜调度级依赖：无可用尾帧时不得提交 Seedance
+        if job["after_shot_id"] and not version["provider_task_id"]:
+            from app.media_pipeline.scheduler import continuity_anchor_ready
+            ready, reason = continuity_anchor_ready(conn, job["after_shot_id"])
+            if not ready:
+                wait = 15.0
+                note = reason or "等待上一镜连续锚点"
+                status = "waiting_human" if "人工" in note else "queued"
+                conn.execute(
+                    """UPDATE jobs SET status=?, error=?, next_retry_at=?,
+                              lease_owner=NULL, lease_expires_at=NULL, updated_at=?
+                       WHERE id=? AND lease_owner=?""",
+                    (status, note, now() + wait, now(), job_id, owner),
+                )
+                conn.execute(
+                    "UPDATE budget_reservations SET status='reserved' WHERE job_id=? AND status='running'",
+                    (job_id,),
+                )
+                conn.commit()
+                if status == "queued":
+                    task = asyncio.get_running_loop().create_task(_requeue_after(job_id, wait))
+                    _retry_tasks.add(task)
+                    task.add_done_callback(_retry_tasks.discard)
+                return
+
+        # 视频提交配额：首轮优先，重抽限额
+        if not version["provider_task_id"]:
+            from app.media_pipeline.scheduler import can_admit_video_submit
+            is_retake = int(meta.get("auto_retake_count") or 0) > 0
+            ok, reason = can_admit_video_submit(
+                episode_id=job["episode_id"], project_id=job["project_id"], is_auto_retake=is_retake,
+            )
+            if not ok:
+                wait = 20.0
+                conn.execute(
+                    """UPDATE jobs SET status='queued', error=?, next_retry_at=?,
+                              lease_owner=NULL, lease_expires_at=NULL, updated_at=?
+                       WHERE id=? AND lease_owner=?""",
+                    (reason or "等待视频槽位", now() + wait, now(), job_id, owner),
+                )
+                conn.execute(
+                    "UPDATE budget_reservations SET status='reserved' WHERE job_id=? AND status='running'",
+                    (job_id,),
+                )
+                conn.commit()
+                task = asyncio.get_running_loop().create_task(_requeue_after(job_id, wait))
+                _retry_tasks.add(task)
+                task.add_done_callback(_retry_tasks.discard)
+                return
+
         safety_retry_used = bool(meta.get("seedance_safety_retry"))
         copyright_retries = int(meta.get("seedance_copyright_retries") or 0)
         image_inputs: list[tuple[str, str]] | None = None
@@ -1182,19 +1241,30 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                         (provider_operation_id, now(), job_id),
                     )
                     conn.commit()
-                    task_id = await hiagent.create_video_task(
-                        prompt_text,
-                        image_urls=image_inputs,
-                        call_meta={
-                            "asset_kind": "video",
-                            "episode_id": ep["id"],
-                            "episode_no": ep["episode_no"],
-                            "shot_id": shot["id"],
-                            "shot_no": shot["shot_no"],
-                            "version_id": version["id"],
-                            "version_no": version["version_no"],
-                            "operation_id": provider_operation_id,
-                        })
+                    from app.media_pipeline.concurrency import (
+                        report_congestion, report_healthy, semaphore_for,
+                    )
+                    from app.media_pipeline import stages as media_stages
+                    async with semaphore_for(media_stages.RESOURCE_VIDEO_SUBMIT):
+                        try:
+                            task_id = await hiagent.create_video_task(
+                                prompt_text,
+                                image_urls=image_inputs,
+                                call_meta={
+                                    "asset_kind": "video",
+                                    "episode_id": ep["id"],
+                                    "episode_no": ep["episode_no"],
+                                    "shot_id": shot["id"],
+                                    "shot_no": shot["shot_no"],
+                                    "version_id": version["id"],
+                                    "version_no": version["version_no"],
+                                    "operation_id": provider_operation_id,
+                                })
+                            report_healthy(media_stages.RESOURCE_VIDEO_SUBMIT)
+                        except ProviderError as submit_exc:
+                            if getattr(submit_exc, "retryable", False) or "429" in str(submit_exc):
+                                report_congestion(media_stages.RESOURCE_VIDEO_SUBMIT, reason="submit")
+                            raise
                     _assert_job_lease(job_id, owner)
                 except ProviderError as exc:
                     _assert_job_lease(job_id, owner)
@@ -1240,34 +1310,39 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                     "SELECT provider_submitted_at FROM jobs WHERE id=?", (job_id,)
                 ).fetchone()["provider_submitted_at"]
 
-            # 15 分钟只是单个 worker 的连续轮询窗口，不是供应商任务的失败线。
-            # 长任务跨窗口持久化重排，继续轮询同一个 provider_task_id。
-            deadline = time.time() + config.VIDEO_POLL_BUDGET
-            result = None
-            while time.time() < deadline:
-                state = conn.execute(
-                    "SELECT cancellation_requested FROM jobs WHERE id=?", (job_id,)
-                ).fetchone()
-                if state and state["cancellation_requested"]:
-                    media_scheduler.settle_budget(job_id, 0.0, success=False)
-                    return
-                _assert_job_lease(job_id, owner)
-                result = await hiagent.poll_video_task(
-                    task_id,
-                    call_meta={
-                        "asset_kind": "video",
-                        "episode_id": ep["id"],
-                        "episode_no": ep["episode_no"],
-                        "shot_id": shot["id"],
-                        "shot_no": shot["shot_no"],
-                        "version_id": version["id"],
-                        "version_no": version["version_no"],
-                        "task_id": task_id,
-                    })
-                _assert_job_lease(job_id, owner)
-                if result["status"] in ("succeeded", "failed"):
-                    break
-                await asyncio.sleep(config.VIDEO_POLL_INTERVAL)
+            # Phase 1：单次查询后立即释放 worker；供应商仍在跑则写入 waiting_provider。
+            # 不再用 15 分钟连续占槽窗口（VIDEO_POLL_BUDGET 已置 0）。
+            state = conn.execute(
+                "SELECT cancellation_requested FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            if state and state["cancellation_requested"]:
+                media_scheduler.settle_budget(job_id, 0.0, success=False)
+                return
+            _assert_job_lease(job_id, owner)
+            from app.media_pipeline.concurrency import (
+                report_congestion, report_healthy, semaphore_for,
+            )
+            from app.media_pipeline import stages as media_stages
+            async with semaphore_for(media_stages.RESOURCE_VIDEO_POLL):
+                try:
+                    result = await hiagent.poll_video_task(
+                        task_id,
+                        call_meta={
+                            "asset_kind": "video",
+                            "episode_id": ep["id"],
+                            "episode_no": ep["episode_no"],
+                            "shot_id": shot["id"],
+                            "shot_no": shot["shot_no"],
+                            "version_id": version["id"],
+                            "version_no": version["version_no"],
+                            "task_id": task_id,
+                        })
+                    report_healthy(media_stages.RESOURCE_VIDEO_POLL)
+                except ProviderError as poll_exc:
+                    if getattr(poll_exc, "retryable", False) or "429" in str(poll_exc):
+                        report_congestion(media_stages.RESOURCE_VIDEO_POLL, reason="poll")
+                    raise
+            _assert_job_lease(job_id, owner)
             if result is None or result["status"] not in ("succeeded", "failed"):
                 provider_age = time.time() - float(provider_submitted_at or time.time())
                 if provider_age >= config.VIDEO_PROVIDER_MAX_WAIT:
@@ -1401,18 +1476,26 @@ async def _maybe_auto_qa(job, version_id: str, video_path: str) -> None:
             meta["retry_reason"] = "视频质检未通过，已复用同一组参考图自动重抽视频。"
             _set_version(version_id, image_inputs=json.dumps(meta, ensure_ascii=False))
             auto_retake_count = int(meta.get("auto_retake_count") or 0)
-            if auto_retake_count < 1:
+            from app.media_pipeline.retry_policy import decide_qa_retake
+            decision = decide_qa_retake(
+                auto_retake_count=auto_retake_count,
+                qa_overall=float(qa.get("overall", -1)),
+                threshold=threshold,
+            )
+            if decision.allow:
                 enqueue_shot(
                     job["shot_id"],
                     extra_negative=qa.get("issues", [])[:3],
                     reroll=True,
                     after_shot_id=job["after_shot_id"],
-                    auto_retake_count=auto_retake_count + 1,
+                    auto_retake_count=decision.attempt,
                 )
             return
         if 0 <= qa.get("overall", -1) < threshold and version["version_no"] == 1 and qa.get("issues"):
-            enqueue_shot(job["shot_id"], extra_negative=qa["issues"][:3],
-                         after_shot_id=job["after_shot_id"])
+            # 旧非参考图路径兜底；参考图模式由上面统一策略覆盖
+            if meta.get("mode") != video_modes.REFERENCE_IMAGE_MODE:
+                enqueue_shot(job["shot_id"], extra_negative=qa["issues"][:3],
+                             after_shot_id=job["after_shot_id"])
     except Exception as exc:  # noqa: BLE001 QA 异常只记录，不影响已落盘的视频
         _set_version(version_id, qa_json=json.dumps({"overall": -1, "issues": [f"质检未完成：{exc}"]}, ensure_ascii=False))
         log_provider_call("vlm_qa", config.MODEL_VLM, "QA_ERROR", None, 0, error=str(exc))
@@ -1464,6 +1547,11 @@ async def _worker_loop(name: str) -> None:
 
 def recover_and_start(loop_concurrency: int | None = None) -> None:
     """启动时恢复队列（PRD §4.5 验收：中途杀进程重启后队列状态可恢复）。"""
+    from app.media_pipeline.bootstrap import start_media_pipeline
+    from app.media_pipeline.concurrency import channel_limit
+    from app.media_pipeline import stages as media_stages
+
+    start_media_pipeline()
     decommission_legacy_keyframe_jobs()
     for job_id, delay in media_scheduler.recoverable_jobs():
         if delay <= 0:
@@ -1480,9 +1568,8 @@ def recover_and_start(loop_concurrency: int | None = None) -> None:
     ]
     for episode_id in generating_episode_ids:
         reconcile_episode_generation_status(episode_id)
-    n = loop_concurrency or int(get_setting("video_concurrency") or 2)
-    for i in range(n):
-        _workers.append(asyncio.get_running_loop().create_task(_worker_loop(f"w{i}")))
+    n = loop_concurrency or channel_limit(media_stages.RESOURCE_VIDEO_SUBMIT)
+    ensure_workers(n)
 
 
 def _recover_one_media_job(
@@ -1496,7 +1583,8 @@ def _recover_one_media_job(
     cursor = conn.execute(
         "UPDATE jobs SET status='queued', lease_owner=NULL, lease_expires_at=NULL, "
         "error=NULL, updated_at=? "
-        "WHERE id=? AND status IN ('running','queued') AND cancellation_requested=0 AND abandoned=0",
+        "WHERE id=? AND status IN ('running','queued','waiting_provider') "
+        "AND cancellation_requested=0 AND abandoned=0",
         (now(), job_id),
     )
     if cursor.rowcount != 1:
@@ -1698,20 +1786,31 @@ def start_stale_lease_sweeper(interval_seconds: float = _SWEEPER_INTERVAL_SECOND
 
 
 def ensure_workers(n: int) -> None:
-    """把常驻 worker 池扩容到至少 n 个（只增不减）。一键全自动会按 auto_concurrency 调大，
-    让大量关键帧/视频任务并行消费同一队列；空闲 worker 只是 await 队列，不占资源。"""
+    """把常驻 worker 池扩容或缩容到目标 n。设置热更新与一键全自动均可调用。"""
+    n = max(0, int(n))
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return
-    while len(_workers) < max(n, 0):
+    alive = [t for t in _workers if not t.done()]
+    _workers.clear()
+    _workers.extend(alive)
+    while len(_workers) < n:
         _workers.append(loop.create_task(_worker_loop(f"w{len(_workers)}")))
+    while len(_workers) > n:
+        task = _workers.pop()
+        task.cancel()
 
 
 async def stop() -> None:
     """优雅停机：取消常驻 worker 循环。否则 uvicorn --reload/退出时会卡在
     'Waiting for connections to close'——常驻 while-True 任务不退出，停机就挂起。"""
     global _sweeper_task
+    try:
+        from app.media_pipeline.bootstrap import stop_media_pipeline
+        await stop_media_pipeline()
+    except Exception:  # noqa: BLE001
+        pass
     if _sweeper_task is not None:
         _sweeper_task.cancel()
     for t in _retry_tasks:

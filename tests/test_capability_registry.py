@@ -18,10 +18,25 @@ from app.capabilities.schemas import (
 
 
 @pytest.fixture(autouse=True)
-def _load_catalog():
+def _load_catalog(tmp_path, monkeypatch):
+    from app import db
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "cap-test.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
     ensure_catalog_loaded()
     reset_approvals_for_tests()
     reset_command_bus_for_tests()
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO projects(id, name, status, created_at) VALUES(?,?,?,?)",
+        ("proj_x", "测试项目", "created", db.now()),
+    )
+    conn.execute(
+        "INSERT INTO projects(id, name, status, created_at) VALUES(?,?,?,?)",
+        ("proj_missing_for_test", "待删", "created", db.now()),
+    )
+    conn.commit()
     yield
 
 
@@ -83,6 +98,14 @@ def test_bus_blocks_high_risk_without_approval() -> None:
 
 
 def test_bus_rejects_mismatched_approval() -> None:
+    from app import db
+
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO projects(id, name, status, created_at) VALUES(?,?,?,?)",
+        ("proj_other", "另一项目", "created", db.now()),
+    )
+    conn.commit()
     bus = get_command_bus()
     first = bus.execute("project.delete", {"project_id": "proj_x", "idempotency_key": "del-2"})
     token = first.data["approval_token"]
@@ -95,15 +118,6 @@ def test_bus_rejects_mismatched_approval() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bus_idempotency_suppresses_duplicate_dry_run() -> None:
-    bus = get_command_bus()
-    args = {"project_id": "proj_x", "idempotency_key": "same-key", "dry_run": True}
-    a = await bus.execute_async("project.delete", args)
-    b = await bus.execute_async("project.delete", args)
-    assert a.status == b.status == CommandStatus.SUCCEEDED
-
-
-@pytest.mark.asyncio
 async def test_waiting_approval_token_retry_reaches_handler() -> None:
     bus = get_command_bus()
     args = {"project_id": "proj_missing_for_test", "idempotency_key": "del-approve"}
@@ -113,8 +127,48 @@ async def test_waiting_approval_token_retry_reaches_handler() -> None:
         "project.delete",
         {**args, "approval_token": waiting.data["approval_token"]},
     )
-    assert approved.status == CommandStatus.FAILED
-    assert approved.error_code in {"http_404", "not_found", "domain_error", "http_409"}
+    # 种子项目存在时应真正删除成功；关键是批准后进入了 handler 而非卡在批准。
+    assert approved.status in {CommandStatus.SUCCEEDED, CommandStatus.FAILED}
+    assert approved.error_code != "approval_invalid"
+    if approved.status == CommandStatus.FAILED:
+        assert approved.error_code in {"http_404", "not_found", "domain_error", "http_409"}
+
+
+@pytest.mark.asyncio
+async def test_bus_idempotency_suppresses_duplicate_success() -> None:
+    """显式 idempotency_key 命中持久化缓存；未传 key 时不按参数自动去重。"""
+    bus = get_command_bus()
+    args = {"project_id": "proj_x", "idempotency_key": "same-key", "dry_run": True}
+    a = await bus.execute_async("project.delete", args)
+    b = await bus.execute_async("project.delete", args)
+    assert a.status == b.status == CommandStatus.SUCCEEDED
+
+    # 无显式 key：即使参数相同也不应误去重（避免 resume 复用陈旧结果）
+    waiting1 = await bus.execute_async("project.delete", {"project_id": "proj_x"})
+    waiting2 = await bus.execute_async("project.delete", {"project_id": "proj_x"})
+    assert waiting1.status == waiting2.status == CommandStatus.WAITING_APPROVAL
+    assert waiting1.data["approval_id"] != waiting2.data["approval_id"]
+
+
+def test_domain_preflight_reads_project_state() -> None:
+    from app.capabilities.preflight import project_delete
+    from app.capabilities.inputs import ProjectDeleteInput
+    from app import db
+
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT OR REPLACE INTO projects(id, name, status, created_at) VALUES(?,?,?,?)",
+        ("proj_pf", "预检项目", "created", db.now()),
+    )
+    conn.commit()
+    result = project_delete(ProjectDeleteInput(project_id="proj_pf"))
+    assert result.allowed is True
+    assert result.affected.projects == ["proj_pf"]
+    assert result.state_fingerprint.startswith("sha256:")
+    # 补跑 Bus 预检应要求确认
+    bus_pf = get_command_bus().preflight("project.delete", {"project_id": "proj_pf"})
+    assert bus_pf.requires_confirmation is True
+    assert "删除" in bus_pf.summary or "永久" in bus_pf.summary
 
 
 def test_approval_token_single_use() -> None:

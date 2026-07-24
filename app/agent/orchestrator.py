@@ -5,15 +5,16 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
-import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from app import hiagent
 from app.agent import approvals, events, resources, store
+from app.agent import tools as agent_tools
 from app.agent.redaction import redact_value
 from app.agent.schemas import ContextEnvelope
 from app.capabilities import ensure_catalog_loaded, get_command_bus, get_registry
@@ -33,17 +34,22 @@ _SYSTEM_PROMPT_HEADER = """你是漫剧制作控制台的对话助手，不是�
   不要编造成功或静默兜底。
 - 采用某版本、拒绝、带风险批准等人工决策必须要求用户给出明确理由。
 - 永远不要在对话中读取、回显、索要或猜测 API Key / Authorization / token 等密钥。
-- 每次回复必须且只能是一个 JSON 对象，不要有任何 Markdown 代码块标记或额外文字，字段如下：
-  {"reply": "给用户看的简短中文说明", "tool_calls": [{"tool": "工具名", "arguments": {...}}], "done": true 或 false}
-  tool_calls 最多包含 1 个元素；如已经可以回答用户或没有更多可执行动作，tool_calls 传空数组并令 done=true。
+- 需要读取业务事实或执行操作时，直接调用提供的工具（function calling）；只读查询用 resource.read，
+  领域动作用对应命令。可在一轮内调用一个或多个工具，收到工具结果后再继续；无更多动作时直接用自然语言回复用户。
 """
 
 
 @dataclass
 class _LoopState:
-    """一次 Turn 的可恢复循环状态（等待批准期间挂起，批准/拒绝后续跑）。"""
+    """一次 Turn 的可恢复循环状态（等待批准期间挂起，批准/拒绝后续跑）。
 
-    messages: list[dict[str, str]]
+    pending_tool_calls：当前 assistant 消息里尚未回填 tool 结果的调用队列。OpenAI 约定
+    assistant.tool_calls 的每个 id 都必须有对应 role=tool 回复才能继续下一轮，因此挂起等待
+    批准时用它记住「还差哪些没执行」，恢复后继续清空。（进程内保存，重启后走降级兜底。）
+    """
+
+    messages: list[dict[str, Any]]
+    pending_tool_calls: list[hiagent.ToolCall] = field(default_factory=list)
     tool_call_count: int = 0
     error_signature: tuple[str, str] | None = None
     error_streak: int = 0
@@ -51,6 +57,7 @@ class _LoopState:
 
 _paused_lock = threading.Lock()
 _PAUSED_LOOPS: dict[str, _LoopState] = {}
+_BACKGROUND_TASKS: dict[str, asyncio.Task] = {}
 
 
 def _int_setting(key: str, fallback: int) -> int:
@@ -60,24 +67,9 @@ def _int_setting(key: str, fallback: int) -> int:
         return fallback
 
 
-def _tool_catalog_text() -> str:
-    registry = get_registry()
-    lines = ["可用只读资源工具：resource.read(uri) —— uri 取自以下模板："]
-    for spec in registry.resources.values():
-        lines.append(f"  - {spec.uri_template}：{spec.title}（{spec.description}）")
-    lines.append("可用领域命令工具（tool 字段填命令名，arguments 按其参数）：")
-    for spec in registry.commands.values():
-        if not spec.mcp_exposed or spec.admin_only:
-            continue
-        lines.append(
-            f"  - {spec.name}（risk={spec.risk.value}, confirmation={spec.confirmation.value}）："
-            f"{spec.title} —— {spec.description}"
-        )
-    return "\n".join(lines)
-
-
 def _system_prompt() -> str:
-    return _SYSTEM_PROMPT_HEADER + "\n" + _tool_catalog_text()
+    """system prompt 仅保留注入防御与行为约束；工具目录改由原生 `tools` 数组下发。"""
+    return _SYSTEM_PROMPT_HEADER
 
 
 def _format_context(context: ContextEnvelope | None) -> str:
@@ -101,38 +93,6 @@ def _build_initial_messages(history: list[dict[str, Any]], context: ContextEnvel
         messages.append({"role": role, "content": text})
     messages.append({"role": "user", "content": content})
     return messages
-
-
-def _extract_json(text: str) -> dict[str, Any]:
-    """从模型输出中提取唯一 JSON 对象；容忍 ```json 代码块包裹。"""
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```[a-zA-Z]*\n?", "", cleaned)
-        cleaned = re.sub(r"```\s*$", "", cleaned).strip()
-    try:
-        parsed = json.loads(cleaned)
-        if isinstance(parsed, dict):
-            return parsed
-    except (json.JSONDecodeError, TypeError):
-        pass
-    start = cleaned.find("{")
-    if start == -1:
-        raise ValueError("模型未返回 JSON 对象")
-    depth = 0
-    for i in range(start, len(cleaned)):
-        if cleaned[i] == "{":
-            depth += 1
-        elif cleaned[i] == "}":
-            depth -= 1
-            if depth == 0:
-                try:
-                    parsed = json.loads(cleaned[start:i + 1])
-                except json.JSONDecodeError as exc:
-                    raise ValueError(f"模型 JSON 解析失败：{exc}") from exc
-                if isinstance(parsed, dict):
-                    return parsed
-                raise ValueError("模型返回的 JSON 不是对象")
-    raise ValueError("模型 JSON 未闭合")
 
 
 def _track_error(state: _LoopState, signature: tuple[str, str]) -> None:
@@ -293,10 +253,133 @@ def _finish_turn(conversation_id: str, turn_id: str, *, status: str, reply: str,
     events.append_event(turn_id, event_type, {"status": status, "reply": reply, "failure_code": failure_code})
 
 
+def _assistant_message_with_tool_calls(assistant: hiagent.AssistantTurn) -> dict[str, Any]:
+    """把模型回合回填成 OpenAI 格式 assistant 消息（含 tool_calls），供下一轮上下文使用。"""
+    return {
+        "role": "assistant",
+        "content": assistant.content or "",
+        "tool_calls": [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {
+                    "name": tc.name,
+                    "arguments": tc.arguments_raw if tc.arguments_raw is not None
+                    else json.dumps(tc.arguments, ensure_ascii=False),
+                },
+            }
+            for tc in assistant.tool_calls
+        ],
+    }
+
+
+def _observe_tool_result(state: _LoopState, name: str, result_text: str) -> None:
+    """把工具结果计入连续同类错误统计（连续失败达阈值即终止本轮）。"""
+    if '"error_code"' in result_text or '"error"' in result_text:
+        _track_error(state, (name, result_text[:80]))
+    else:
+        state.error_signature = None
+        state.error_streak = 0
+
+
+async def _execute_tool_call(
+    conversation_id: str, turn_id: str, state: _LoopState, tc: hiagent.ToolCall,
+) -> tuple[str, str]:
+    """执行单个工具调用；resource.read 走只读读取器，其余走 Command Bus。"""
+    if agent_tools.is_resource_read(tc.name):
+        result_text = await _execute_resource_read(turn_id, tc.arguments)
+        return "continue", result_text
+    return await _execute_domain_command(
+        conversation_id, turn_id, state, tc.name, tc.arguments, seq=state.tool_call_count,
+    )
+
+
+_STREAM_FLUSH_CHARS = 24
+_STREAM_EVENT = {"content": "assistant.delta", "reasoning": "thinking.delta"}
+
+
+class _StreamEmitter:
+    """把 hiagent 逐 token 回调合并成较少的 delta 事件（每 ~24 字或切换类别时落库一次），
+    既保留打字机体感，又避免每个 token 一次 SQLite 写入。"""
+
+    def __init__(self, turn_id: str) -> None:
+        self._turn_id = turn_id
+        self._buffers: dict[str, list[str]] = {"content": [], "reasoning": []}
+        self._seen: dict[str, list[str]] = {"content": [], "reasoning": []}
+
+    def _flush_kind(self, kind: str) -> None:
+        text = "".join(self._buffers[kind])
+        self._buffers[kind] = []
+        if text:
+            events.append_event(self._turn_id, _STREAM_EVENT[kind], {"text": text})
+
+    def on_token(self, kind: str, text: str) -> None:
+        if kind not in self._buffers or not text:
+            return
+        # 类别切换时先把另一类缓冲落库，保证事件顺序与模型输出一致（先思考后正文）。
+        other = "reasoning" if kind == "content" else "content"
+        if self._buffers[other]:
+            self._flush_kind(other)
+        self._seen[kind].append(text)
+        self._buffers[kind].append(text)
+        if sum(len(part) for part in self._buffers[kind]) >= _STREAM_FLUSH_CHARS:
+            self._flush_kind(kind)
+
+    def flush(self) -> None:
+        self._flush_kind("reasoning")
+        self._flush_kind("content")
+
+    def finish(self, *, content: str, reasoning: str) -> None:
+        """流式收尾对账；若 provider 在首帧前降级为非流式，一次性补齐完整文本。"""
+        self.flush()
+        complete = {"content": content or "", "reasoning": reasoning or ""}
+        for kind in ("reasoning", "content"):
+            seen = "".join(self._seen[kind])
+            full = complete[kind]
+            if not full or full == seen:
+                continue
+            # 正常情况只会缺少尾部；如 provider 流式与收尾文本完全不同，
+            # 不重放整段，最终正文仍由 plan.updated / turn.completed 权威校正。
+            missing = full[len(seen):] if full.startswith(seen) else (full if not seen else "")
+            if missing:
+                events.append_event(self._turn_id, _STREAM_EVENT[kind], {"text": missing})
+
+
+def _make_stream_emitter(turn_id: str) -> _StreamEmitter:
+    return _StreamEmitter(turn_id)
+
+
 async def _run_loop(conversation_id: str, turn_id: str, state: _LoopState) -> None:
     max_calls = _int_setting("agent_max_tool_calls_per_turn", 8)
     max_errors = _int_setting("agent_max_consecutive_same_error", 2)
     while True:
+        # 1) 先清空上一轮 assistant 产生的（或批准/拒绝恢复后残留的）待执行工具调用。
+        #    OpenAI 约定每个 assistant.tool_calls[i] 都要有对应 role=tool 回复才能再问模型。
+        while state.pending_tool_calls:
+            if state.tool_call_count >= max_calls:
+                _finish_turn(
+                    conversation_id, turn_id, status="failed",
+                    reply=f"已达到单轮最多 {max_calls} 次工具调用的上限，请拆分为更小的请求后再试。",
+                    failure_code="tool_call_budget_exhausted",
+                )
+                return
+            tc = state.pending_tool_calls[0]
+            state.tool_call_count += 1
+            outcome, result_text = await _execute_tool_call(conversation_id, turn_id, state, tc)
+            if outcome == "paused":
+                return  # 挂起等待批准；pending_tool_calls[0] 仍是该调用，恢复后继续
+            state.pending_tool_calls.pop(0)
+            state.messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_text})
+            _observe_tool_result(state, tc.name, result_text)
+            if state.error_streak > max_errors:
+                _finish_turn(
+                    conversation_id, turn_id, status="failed",
+                    reply=f"连续 {state.error_streak} 次调用 {tc.name} 遇到同类问题，已停止本轮，请检查后重试或换个说法。",
+                    failure_code="consecutive_error_limit",
+                )
+                return
+
+        # 2) 无待执行工具 → 请求模型
         if state.tool_call_count >= max_calls:
             _finish_turn(
                 conversation_id, turn_id, status="failed",
@@ -305,74 +388,51 @@ async def _run_loop(conversation_id: str, turn_id: str, state: _LoopState) -> No
             )
             return
 
+        stream_emitter = _make_stream_emitter(turn_id)
         try:
-            raw = await hiagent.chat(
+            assistant = await hiagent.chat_with_tools(
                 state.messages,
+                agent_tools.build_agent_tools(),
                 call_meta={"initiator": "agent", "conversation_id": conversation_id, "turn_id": turn_id},
+                on_token=stream_emitter.on_token,
             )
         except Exception as exc:  # noqa: BLE001 —— 上游异常必须如实终止，不能假装完成
+            stream_emitter.flush()
             _finish_turn(
                 conversation_id, turn_id, status="failed",
                 reply=f"对话模型调用失败：{exc}", failure_code="model_call_failed",
             )
             return
+        stream_emitter.finish(content=assistant.content, reasoning=assistant.reasoning)
 
-        try:
-            plan = _extract_json(raw)
-        except ValueError as exc:
-            state.messages.append({"role": "assistant", "content": raw})
-            state.messages.append({
-                "role": "user",
-                "content": f"你的上一条回复不是合法 JSON（{exc}）。请只返回一个 JSON 对象，字段为 reply/tool_calls/done。",
-            })
-            state.tool_call_count += 1  # 计入预算，避免模型持续输出非法格式导致死循环
-            continue
-
-        reply_text = str(plan.get("reply") or "").strip()
-        raw_tool_calls = plan.get("tool_calls")
-        tool_calls = raw_tool_calls if isinstance(raw_tool_calls, list) else []
         events.append_event(turn_id, "plan.updated", {
-            "reply": reply_text, "tool_calls": tool_calls, "done": bool(plan.get("done")),
+            "reply": assistant.content,
+            "tool_calls": [{"tool": tc.name, "arguments": tc.arguments} for tc in assistant.tool_calls],
+            "done": not assistant.tool_calls,
         })
-        state.messages.append({"role": "assistant", "content": json.dumps(plan, ensure_ascii=False)})
 
-        if not tool_calls:
-            _finish_turn(conversation_id, turn_id, status="completed", reply=reply_text or "已完成。")
+        if not assistant.tool_calls:
+            _finish_turn(conversation_id, turn_id, status="completed", reply=assistant.content or "已完成。")
             return
 
-        call = tool_calls[0] if isinstance(tool_calls[0], dict) else {}
-        name = str(call.get("tool") or call.get("name") or "").strip()
-        raw_arguments = call.get("arguments")
-        arguments = raw_arguments if isinstance(raw_arguments, dict) else {}
-        state.tool_call_count += 1
-
-        if name in ("resource.read", "resource_read", "read_resource"):
-            result_text = await _execute_resource_read(turn_id, arguments)
-            outcome = "continue"
-        else:
-            outcome, result_text = await _execute_domain_command(
-                conversation_id, turn_id, state, name, arguments, seq=state.tool_call_count,
-            )
-
-        if outcome == "paused":
-            return
-
-        state.messages.append({"role": "user", "content": f"[工具结果 {name}] {result_text}"})
-        if '"error_code"' in result_text or '"error"' in result_text:
-            _track_error(state, (name, result_text[:80]))
-        else:
-            state.error_signature = None
-            state.error_streak = 0
-        if state.error_streak > max_errors:
-            _finish_turn(
-                conversation_id, turn_id, status="failed",
-                reply=f"连续 {state.error_streak} 次调用 {name} 遇到同类问题，已停止本轮，请检查后重试或换个说法。",
-                failure_code="consecutive_error_limit",
-            )
-            return
+        state.messages.append(_assistant_message_with_tool_calls(assistant))
+        state.pending_tool_calls = list(assistant.tool_calls)
 
 
 async def handle_user_message(conversation_id: str, content: str, context: ContextEnvelope | None) -> dict[str, Any]:
+    """同步跑完一整轮（测试/兼容）；生产 HTTP 入口请用 prepare + BackgroundTasks。"""
+    prepared = await prepare_user_message(conversation_id, content, context)
+    await run_prepared_turn(conversation_id, prepared["turn"]["id"], prepared["state"])
+    return {
+        "turn": store.get_turn(prepared["turn"]["id"]),
+        "user_message": prepared["user_message"],
+    }
+
+
+async def prepare_user_message(
+    conversation_id: str, content: str, context: ContextEnvelope | None,
+) -> dict[str, Any]:
+    """创建 turn 与初始消息，不启动循环——供 HTTP 立即返回 turn_id。"""
     conversation = store.get_conversation(conversation_id)
     if not conversation:
         raise KeyError(f"会话不存在：{conversation_id}")
@@ -391,10 +451,32 @@ async def handle_user_message(conversation_id: str, content: str, context: Conte
     turn_id = turn["id"]
     events.append_event(turn_id, "turn.started", {"conversation_id": conversation_id})
     user_message = store.append_message(conversation_id, "user", content, turn_id=turn_id)
-
     state = _LoopState(messages=messages)
+    return {"turn": turn, "user_message": user_message, "state": state}
+
+
+async def run_prepared_turn(conversation_id: str, turn_id: str, state: _LoopState) -> None:
+    """执行已准备好的 Agent 循环（BackgroundTasks / 测试调用）。"""
+    turn = store.get_turn(turn_id)
+    if not turn or turn["status"] == "cancelled":
+        return
     await _run_loop(conversation_id, turn_id, state)
-    return {"turn": store.get_turn(turn_id), "user_message": user_message}
+
+
+async def start_user_message(conversation_id: str, content: str, context: ContextEnvelope | None) -> dict[str, Any]:
+    """兼容旧名：准备 turn 后在当前任务中启动循环（不等同于 HTTP 异步入口）。"""
+    prepared = await prepare_user_message(conversation_id, content, context)
+    task = asyncio.create_task(
+        run_prepared_turn(conversation_id, prepared["turn"]["id"], prepared["state"]),
+        name=f"agent-turn-{prepared['turn']['id']}",
+    )
+    _BACKGROUND_TASKS[prepared["turn"]["id"]] = task
+
+    def _cleanup(done: asyncio.Task) -> None:
+        _BACKGROUND_TASKS.pop(prepared["turn"]["id"], None)
+
+    task.add_done_callback(_cleanup)
+    return {"turn": prepared["turn"], "user_message": prepared["user_message"]}
 
 
 async def approve_tool_call(tool_call_id: str, *, decided_by: str | None = None, reason: str | None = None) -> dict[str, Any]:
@@ -429,16 +511,16 @@ async def approve_tool_call(tool_call_id: str, *, decided_by: str | None = None,
 
     with _paused_lock:
         state = _PAUSED_LOOPS.pop(turn["id"], None)
-    if state is None:
+    if state is None or not state.pending_tool_calls:
         # 找不到挂起的循环状态（例如进程重启）：仍要给出真实结果，不能假装继续对话。
         final_status = "completed" if result.status in (CommandStatus.SUCCEEDED, CommandStatus.ACCEPTED) else "failed"
         store.update_turn(turn["id"], status=final_status, finished_at=time.time())
         return {"tool_call": store.get_tool_call(tool_call_id), "turn": store.get_turn(turn["id"])}
 
-    state.messages.append({
-        "role": "user",
-        "content": f"[工具结果 {tool_call['command_name']}（用户已批准）] {result_text}",
-    })
+    # 挂起时暂停在 pending_tool_calls[0]（即本次被批准的调用），用它的 id 回填 tool 结果消息，
+    # 与 assistant.tool_calls 一一配对，再继续清空其余待执行调用。
+    paused_tc = state.pending_tool_calls.pop(0)
+    state.messages.append({"role": "tool", "tool_call_id": paused_tc.id, "content": result_text})
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED, CommandStatus.CONFLICT):
         _track_error(state, (tool_call["command_name"], result.error_code or result.status.value))
     else:
@@ -473,14 +555,17 @@ async def reject_tool_call(tool_call_id: str, *, decided_by: str | None = None, 
     if turn and turn["status"] != "cancelled":
         with _paused_lock:
             state = _PAUSED_LOOPS.pop(turn["id"], None)
-    if state is None:
+    if state is None or not state.pending_tool_calls:
         if turn:
             store.update_turn(turn["id"], status="failed", finished_at=time.time(), failure_code="tool_call_rejected")
         return {"tool_call": store.get_tool_call(tool_call_id)}
 
+    # 拒绝后仍要给被拒调用回填一条 role=tool 消息（否则 assistant.tool_calls 有未回应的 id），
+    # 再让循环继续清空其余待执行调用并请模型据此收尾。
+    paused_tc = state.pending_tool_calls.pop(0)
     state.messages.append({
-        "role": "user",
-        "content": f"[工具结果 {tool_call['command_name']}] 用户拒绝执行。原因：{reason or '未说明'}",
+        "role": "tool", "tool_call_id": paused_tc.id,
+        "content": f"用户拒绝执行。原因：{reason or '未说明'}",
     })
     store.update_turn(turn["id"], status="running")
     await _run_loop(turn["conversation_id"], turn["id"], state)
@@ -497,6 +582,10 @@ def cancel_turn(turn_id: str) -> dict[str, Any]:
         raise KeyError(f"turn 不存在：{turn_id}")
     if turn["status"] in ("completed", "failed", "cancelled"):
         return turn
+
+    task = _BACKGROUND_TASKS.pop(turn_id, None)
+    if task is not None and not task.done():
+        task.cancel()
 
     with _paused_lock:
         _PAUSED_LOOPS.pop(turn_id, None)

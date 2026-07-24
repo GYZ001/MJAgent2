@@ -1,16 +1,64 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api'
 import { useNav } from '../App'
+import { useScrollContainment } from '../useScrollContainment'
 import AgentComposer from './AgentComposer'
-import ApprovalCard from './ApprovalCard'
+import AssistantTurnView from './AssistantTurnView'
 import ContextChips from './ContextChips'
-import EvidenceCitation from './EvidenceCitation'
-import PlanCard from './PlanCard'
-import RunProgressCard from './RunProgressCard'
-import ToolCallCard from './ToolCallCard'
-import type { ApprovalCardData, ContextEnvelope, UiIntent } from './types'
+import MessageBubble from './MessageBubble'
+import {
+  emptyTurnState,
+  reduceEvents,
+  type AssistantTranscriptItem,
+  type TranscriptItem,
+} from './transcript'
+import type { ContextEnvelope, UiIntent } from './types'
 import { applyUiIntent } from './uiBridge'
 import { useAgentStream } from './useAgentStream'
+
+let _uidSeq = 0
+function uid(prefix: string): string {
+  _uidSeq += 1
+  return `${prefix}-${Date.now().toString(36)}-${_uidSeq}`
+}
+
+function convKey(projectId?: string | null): string {
+  return `manju:agent:conv:${projectId ?? 'global'}`
+}
+
+function contentToText(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (content && typeof content === 'object') {
+    const obj = content as Record<string, unknown>
+    if (typeof obj.text === 'string') return obj.text
+    if (typeof obj.reply === 'string') return obj.reply
+    return JSON.stringify(content)
+  }
+  return content == null ? '' : String(content)
+}
+
+interface ApiMessage {
+  id: string
+  role: string
+  content: unknown
+  turn_id?: string | null
+  created_at: number
+}
+
+function mapHistory(msgs: ApiMessage[]): TranscriptItem[] {
+  const items: TranscriptItem[] = []
+  for (const m of msgs) {
+    if (m.role === 'user') {
+      items.push({ kind: 'user', id: m.id, text: contentToText(m.content), createdAt: m.created_at })
+    } else if (m.role === 'assistant') {
+      items.push({
+        kind: 'assistant', id: m.id, turnId: m.turn_id ?? null,
+        ...emptyTurnState(), status: 'done', answer: contentToText(m.content), createdAt: m.created_at,
+      })
+    }
+  }
+  return items
+}
 
 export default function AgentDrawer({
   open,
@@ -22,148 +70,146 @@ export default function AgentDrawer({
   context: ContextEnvelope
 }) {
   const { go, toast } = useNav()
+  const drawerRef = useRef<HTMLElement | null>(null)
+  const transcriptRef = useRef<HTMLDivElement | null>(null)
+  const stickRef = useRef(true)
+  const conversationScope = convKey(context.project_id)
+  const scopeRef = useRef(conversationScope)
+  useScrollContainment(drawerRef, open)
+
   const [conversationId, setConversationId] = useState<string | null>(null)
   const [turnId, setTurnId] = useState<string | null>(null)
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
-  const [assistantText, setAssistantText] = useState('')
-  const [planSteps, setPlanSteps] = useState<string[]>([])
-  const [approvals, setApprovals] = useState<ApprovalCardData[]>([])
-  const [pendingIntent, setPendingIntent] = useState<UiIntent | null>(null)
-  const [toolCards, setToolCards] = useState<{
-    id: string; name: string; status: string; summary?: string; runId?: string; risk?: string
-  }[]>([])
-  const [linkedRuns, setLinkedRuns] = useState<{ runId: string; summary?: string }[]>([])
-  const [citations, setCitations] = useState<string[]>([])
+  const [messages, setMessages] = useState<TranscriptItem[]>([])
   const [error, setError] = useState<string | null>(null)
 
   const streaming = Boolean(turnId) && sending
   const { events, status: streamStatus, reset: resetStream } = useAgentStream(turnId, Boolean(turnId))
+  const turnState = useMemo(() => reduceEvents(events), [events])
 
+  // 切换项目后立即切换会话作用域，避免把新项目的消息发进旧项目会话。
+  useEffect(() => {
+    if (scopeRef.current === conversationScope) return
+    scopeRef.current = conversationScope
+    resetStream()
+    setConversationId(null)
+    setTurnId(null)
+    setSending(false)
+    setMessages([])
+    setError(null)
+  }, [conversationScope, resetStream])
+
+  // Esc 收起
+  useEffect(() => {
+    if (!open) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open, onClose])
+
+  // 会话引导：优先复用本机上次会话（含历史回填），失败或不存在则新建。
   useEffect(() => {
     if (!open || conversationId) return
     let cancelled = false
-    api.post('/agent/conversations', {
-      project_id: context.project_id ?? null,
-      title: context.project_id ? `项目 ${context.project_id.slice(0, 8)}` : '案头助手',
-    }).then((conv: { id: string }) => {
-      if (!cancelled) setConversationId(conv.id)
-    }).catch((err: Error) => {
-      if (!cancelled) setError(err.message)
-    })
-    return () => { cancelled = true }
-  }, [open, conversationId, context.project_id])
+    const key = conversationScope
 
-  useEffect(() => {
-    for (const ev of events) {
-      const p = ev.payload || {}
-      if (ev.event_type === 'assistant.delta') {
-        const delta = String(p.text ?? p.delta ?? p.reply ?? '')
-        if (delta) setAssistantText(prev => prev + delta)
-      }
-      if (ev.event_type === 'plan.updated') {
-        const steps = Array.isArray(p.steps) ? p.steps.map(String) : []
-        if (steps.length) setPlanSteps(steps)
-        else if (p.reply) setAssistantText(String(p.reply))
-      }
-      if (ev.event_type === 'tool.proposed' || ev.event_type === 'tool.started') {
-        const id = String(p.tool_call_id ?? p.id ?? `${ev.event_id}`)
-        const name = String(p.command ?? p.tool ?? p.name ?? 'tool')
-        setToolCards(prev => {
-          if (prev.some(t => t.id === id)) {
-            return prev.map(t => t.id === id ? {
-              ...t,
-              status: String(p.status ?? ev.event_type),
-              summary: p.summary ? String(p.summary) : t.summary,
-            } : t)
-          }
-          return [...prev, {
-            id,
-            name,
-            status: String(p.status ?? ev.event_type),
-            summary: p.summary ? String(p.summary) : undefined,
-            risk: p.risk ? String(p.risk) : undefined,
-            runId: p.run_id ? String(p.run_id) : undefined,
-          }]
-        })
-      }
-      if (ev.event_type === 'tool.completed' || ev.event_type === 'tool.failed') {
-        const id = String(p.tool_call_id ?? p.id ?? '')
-        setToolCards(prev => prev.map(t => t.id === id ? {
-          ...t,
-          status: ev.event_type === 'tool.failed' ? 'failed' : String(p.status ?? 'succeeded'),
-          summary: p.summary ? String(p.summary) : t.summary,
-          runId: p.run_id ? String(p.run_id) : t.runId,
-        } : t))
-        if (Array.isArray(p.resource_uris)) {
-          for (const uri of p.resource_uris) {
-            const s = String(uri)
-            if (s.includes('/artifacts/')) {
-              const aid = s.split('/artifacts/')[1]
-              if (aid) setCitations(prev => prev.includes(aid) ? prev : [...prev, aid])
-            }
-          }
-        }
-      }
-      if (ev.event_type === 'approval.required') {
-        const card: ApprovalCardData = {
-          tool_call_id: String(p.tool_call_id),
-          command: String(p.command ?? p.tool ?? ''),
-          title: String(p.title ?? p.command ?? p.tool ?? '操作'),
-          summary: String(p.summary ?? ''),
-          risk: String(p.risk ?? 'R2'),
-          estimated_cost_cny: typeof p.estimated_cost_cny === 'number' ? p.estimated_cost_cny : null,
-          warnings: Array.isArray(p.warnings) ? p.warnings.map(String) : [],
-          approval_token: p.approval_token ? String(p.approval_token) : undefined,
-          expires_at: typeof p.expires_at === 'number' ? p.expires_at : undefined,
-          affected: typeof p.affected === 'object' && p.affected ? p.affected as Record<string, unknown> : undefined,
-        }
-        setApprovals(prev => prev.some(a => a.tool_call_id === card.tool_call_id) ? prev : [...prev, card])
-      }
-      if (ev.event_type === 'run.linked') {
-        const runId = String(p.run_id ?? '')
-        if (runId) {
-          setLinkedRuns(prev => prev.some(r => r.runId === runId) ? prev : [...prev, {
-            runId,
-            summary: p.summary ? String(p.summary) : undefined,
-          }])
-        }
-      }
-      if (ev.event_type === 'ui.intent' && (p.intent || p.ui_intent)) {
-        setPendingIntent((p.intent ?? p.ui_intent) as UiIntent)
-      }
-      if (ev.event_type === 'turn.completed' || ev.event_type === 'turn.cancelled') {
-        setSending(false)
-        if (p.reply || p.message) setAssistantText(String(p.reply ?? p.message))
-      }
-      if (ev.event_type === 'tool.failed' && p.error_id) {
-        setError(`工具失败 · ${p.error_code ?? ''} · ${p.error_id}`)
-      }
+    const createNew = async () => {
+      const conv = await api.post('/agent/conversations', {
+        project_id: context.project_id ?? null,
+        title: context.project_id ? `项目 ${context.project_id.slice(0, 8)}` : '案头助手',
+      }) as { id: string }
+      if (cancelled) return
+      try { localStorage.setItem(key, conv.id) } catch { /* 隐私模式忽略 */ }
+      setConversationId(conv.id)
+      setMessages([])
     }
-  }, [events])
+
+    ;(async () => {
+      let stored: string | null = null
+      try { stored = localStorage.getItem(key) } catch { stored = null }
+      if (stored) {
+        try {
+          const data = await api.get(`/agent/conversations/${stored}`) as {
+            conversation: { id: string }; messages: ApiMessage[]
+          }
+          if (cancelled) return
+          setConversationId(data.conversation.id)
+          setMessages(mapHistory(data.messages || []))
+          return
+        } catch {
+          /* 会话已不存在（如 DB 重置）→ 落到新建 */
+        }
+      }
+      try {
+        await createNew()
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err))
+      }
+    })()
+
+    return () => { cancelled = true }
+  }, [open, conversationId, context.project_id, conversationScope])
+
+  // 把当前 turn 的事件流折叠进对应的 assistant 消息（不覆盖历史，其它消息原样保留）。
+  useEffect(() => {
+    if (!turnId) return
+    setMessages(prev => {
+      let hit = false
+      const next = prev.map(m => {
+        if (m.kind === 'assistant' && m.turnId === turnId) {
+          hit = true
+          return { ...m, ...turnState }
+        }
+        return m
+      })
+      return hit ? next : prev
+    })
+    if (turnState.status !== 'streaming') setSending(false)
+  }, [turnState, turnId])
+
+  // 贴底滚动：仅当用户本就在底部附近时才自动跟随，避免打断向上翻阅。
+  const onTranscriptScroll = useCallback(() => {
+    const el = transcriptRef.current
+    if (!el) return
+    stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+  }, [])
+  useEffect(() => {
+    const el = transcriptRef.current
+    if (el && stickRef.current) el.scrollTop = el.scrollHeight
+  }, [messages])
 
   const send = useCallback(async () => {
-    if (!conversationId || !input.trim() || sending) return
+    const text = input.trim()
+    if (!conversationId || !text || sending) return
     setSending(true)
     setError(null)
-    setAssistantText('')
-    setPlanSteps([])
-    setApprovals([])
-    setToolCards([])
-    setLinkedRuns([])
-    setCitations([])
-    setPendingIntent(null)
+    const userItem: TranscriptItem = { kind: 'user', id: uid('u'), text, createdAt: Date.now() / 1000 }
+    const assistantId = uid('a')
+    const assistantItem: AssistantTranscriptItem = {
+      kind: 'assistant', id: assistantId, turnId: null, ...emptyTurnState(), createdAt: Date.now() / 1000,
+    }
+    setMessages(prev => [...prev, userItem, assistantItem])
+    setInput('')
+    stickRef.current = true
     resetStream()
     try {
       const resp = await api.post(`/agent/conversations/${conversationId}/messages`, {
-        content: input.trim(),
+        content: text,
         context,
       }) as { turn_id: string }
-      setInput('')
+      setMessages(prev => prev.map(m =>
+        m.kind === 'assistant' && m.id === assistantId ? { ...m, turnId: resp.turn_id } : m))
       setTurnId(resp.turn_id)
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setMessages(prev => prev.map(m =>
+        m.kind === 'assistant' && m.id === assistantId
+          ? { ...m, status: 'failed', error: msg } : m))
       setSending(false)
-      setError(err instanceof Error ? err.message : String(err))
+      setError(msg)
     }
   }, [conversationId, input, sending, context, resetStream])
 
@@ -180,75 +226,98 @@ export default function AgentDrawer({
   }, [turnId, toast])
 
   const approve = useCallback(async (toolCallId: string, reason: string) => {
-    await api.post(`/agent/tool-calls/${toolCallId}/approve`, { reason })
-    setApprovals(prev => prev.filter(a => a.tool_call_id !== toolCallId))
-  }, [])
+    try {
+      await api.post(`/agent/tool-calls/${toolCallId}/approve`, { reason })
+    } catch (err) {
+      toast(err instanceof Error ? err.message : String(err), true)
+    }
+  }, [toast])
 
   const reject = useCallback(async (toolCallId: string, reason: string) => {
-    await api.post(`/agent/tool-calls/${toolCallId}/reject`, { reason })
-    setApprovals(prev => prev.filter(a => a.tool_call_id !== toolCallId))
-  }, [])
+    try {
+      await api.post(`/agent/tool-calls/${toolCallId}/reject`, { reason })
+    } catch (err) {
+      toast(err instanceof Error ? err.message : String(err), true)
+    }
+  }, [toast])
 
-  const followIntent = useCallback(() => {
-    if (!pendingIntent) return
-    const result = applyUiIntent(pendingIntent, go, { toast })
+  const followIntent = useCallback((intent: UiIntent | null) => {
+    if (!intent) return
+    const result = applyUiIntent(intent, go, { toast })
     if (!result.ok) toast(result.message || '定位失败', true)
-  }, [pendingIntent, go, toast])
+  }, [go, toast])
 
-  const header = useMemo(() => (
-    <div className="agent-drawer-head">
-      <div>
-        <b>案头助手</b>
-        <span className="agent-stream-status">{streamStatus}</span>
-      </div>
-      <button type="button" className="btn" onClick={onClose} aria-label="关闭助手">收起</button>
-    </div>
-  ), [onClose, streamStatus])
+  const activeTurn = useMemo(
+    () => messages.find((m): m is AssistantTranscriptItem => m.kind === 'assistant' && m.turnId === turnId),
+    [messages, turnId],
+  )
 
-  if (!open) return null
+  const statusLabel = useMemo(() => {
+    if (activeTurn && activeTurn.approvals.length > 0) return '待批准'
+    if (sending) return streamStatus === 'connecting' ? '连接中…' : '生成中…'
+    return ''
+  }, [activeTurn, sending, streamStatus])
 
   return (
-    <aside className="agent-drawer" aria-label="案头助手">
-      {header}
+    <aside
+      id="agent-drawer"
+      ref={drawerRef}
+      className={`agent-drawer ${open ? 'open' : ''}`}
+      aria-label="案头助手"
+      aria-hidden={!open}
+    >
+      <div className="agent-drawer-head">
+        <div>
+          <b>案头助手</b>
+          {statusLabel && (
+            <span className={`agent-stream-status ${sending ? 'live' : ''}`}>
+              {sending && <span className="agent-status-dot" aria-hidden="true" />}
+              {statusLabel}
+            </span>
+          )}
+        </div>
+        <button
+          type="button"
+          className="agent-panel-toggle"
+          aria-label="收起案头助手"
+          title="收起案头助手"
+          onClick={onClose}
+        >
+          <svg className="agent-toggle-icon" viewBox="0 0 22 18" aria-hidden="true" focusable="false">
+            <rect x="1.25" y="1.25" width="19.5" height="15.5" rx="2.2" ry="2.2" fill="none" stroke="currentColor" strokeWidth="1.5" />
+            <path d="M6.75 1.25v15.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
+          </svg>
+        </button>
+      </div>
+
       <ContextChips context={context} />
-      <div className="agent-transcript">
+
+      <div className="agent-transcript" ref={transcriptRef} onScroll={onTranscriptScroll}>
         {error && <div className="agent-error" role="alert">{error}</div>}
-        <PlanCard steps={planSteps} />
-        {assistantText && (
-          <section className="agent-card assistant-card">
-            <h4>助手</h4>
-            <p className="agent-assistant-text">{assistantText}</p>
-          </section>
-        )}
-        {toolCards.map(card => (
-          <ToolCallCard key={card.id} {...card} />
-        ))}
-        {approvals.map(card => (
-          <ApprovalCard
-            key={card.tool_call_id}
-            data={card}
-            onApprove={reason => approve(card.tool_call_id, reason)}
-            onReject={reason => reject(card.tool_call_id, reason)}
-          />
-        ))}
-        {linkedRuns.map(run => (
-          <RunProgressCard
-            key={run.runId}
-            runId={run.runId}
-            summary={run.summary}
-            onOpen={() => go('monitor')}
-          />
-        ))}
-        {citations.map(id => (
-          <EvidenceCitation key={id} artifactId={id} onOpen={() => toast(`证据 ${id}`)} />
-        ))}
-        {pendingIntent && (
-          <div className="agent-card">
-            <p>助手建议定位到页面</p>
-            <button type="button" className="btn primary" onClick={followIntent}>定位</button>
+
+        {messages.length === 0 && (
+          <div className="agent-empty">
+            <p>我是案头助手。描述你想做的制作动作，我会读取证据、必要时请你确认后再执行。</p>
           </div>
         )}
+
+        {messages.map(item => (
+          item.kind === 'user'
+            ? <MessageBubble key={item.id} text={item.text} />
+            : (
+              <AssistantTurnView
+                key={item.id}
+                item={item}
+                onApprove={approve}
+                onReject={reject}
+                onOpenRun={() => go('monitor')}
+                onOpenEvidence={id => toast(`证据 ${id}`)}
+                onFollowIntent={() => followIntent(item.intent)}
+              />
+            )
+        ))}
       </div>
+
       <AgentComposer
         value={input}
         onChange={setInput}

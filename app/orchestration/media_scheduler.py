@@ -85,7 +85,7 @@ def settle_budget(job_id: str, actual_cost_cny: float, *, success: bool) -> None
 
 
 def claim_job(job_id: str, owner: str, *, lease_seconds: float = 120.0) -> Claim | None:
-    """CAS claim a due queued job, or reclaim an expired lease."""
+    """CAS claim a due queued / waiting_provider job, or reclaim an expired lease."""
     db = get_conn()
     stamp = now()
     expires = stamp + max(5.0, float(lease_seconds))
@@ -97,7 +97,7 @@ def claim_job(job_id: str, owner: str, *, lease_seconds: float = 120.0) -> Claim
         """UPDATE jobs SET status='running', lease_owner=?, lease_expires_at=?,
                   attempt_started_at=COALESCE(attempt_started_at, ?), updated_at=?
            WHERE id=? AND cancellation_requested=0 AND abandoned=0 AND (
-               (status='queued' AND (next_retry_at IS NULL OR next_retry_at<=?)) OR
+               (status IN ('queued','waiting_provider') AND (next_retry_at IS NULL OR next_retry_at<=?)) OR
                (status='running' AND (lease_expires_at IS NULL OR lease_expires_at<?))
            )""",
         (owner, expires, stamp, stamp, job_id, stamp, stamp),
@@ -166,7 +166,7 @@ def request_cancel(job_id: str) -> dict[str, object]:
     ).fetchone()
     if not row:
         raise KeyError(job_id)
-    if row["status"] not in {"queued", "running", "paused_budget"}:
+    if row["status"] not in {"queued", "running", "paused_budget", "waiting_provider", "waiting_retry"}:
         return {
             "job_id": job_id,
             "status": row["status"],
@@ -181,7 +181,7 @@ def request_cancel(job_id: str) -> dict[str, object]:
     cursor = db.execute(
         """UPDATE jobs SET cancellation_requested=1, abandoned=?, status=?,
                   lease_owner=NULL, lease_expires_at=NULL, next_retry_at=NULL, updated_at=?
-           WHERE id=? AND status IN ('queued','running','paused_budget')""",
+           WHERE id=? AND status IN ('queued','running','paused_budget','waiting_provider','waiting_retry')""",
         (int(status == "abandoned"), status, now(), job_id),
     )
     if cursor.rowcount != 1:
@@ -203,7 +203,21 @@ def request_cancel(job_id: str) -> dict[str, object]:
             (status, "用户已停止视频任务", row["version_id"]),
         )
     db.commit()
-    settle_budget(job_id, 0.0, success=False)
+    # 上游已接单：预算从 reserved/running 转为 committed 口径——保留 settled 审计，
+    # 金额记为预估（不可真正取消上游时不能直接释放为 0 假装没花钱）。
+    if non_cancellable:
+        reserved = db.execute(
+            "SELECT amount_cny FROM budget_reservations WHERE job_id=?", (job_id,)
+        ).fetchone()
+        estimate = float(reserved["amount_cny"]) if reserved else 0.0
+        db.execute(
+            "UPDATE budget_reservations SET status='settled', settled_at=?, actual_cost_cny=? WHERE job_id=?",
+            (now(), estimate, job_id),
+        )
+        db.execute("UPDATE jobs SET reserved_cost_cny=0 WHERE id=?", (job_id,))
+        db.commit()
+    else:
+        settle_budget(job_id, 0.0, success=False)
     from app.orchestration.media_runs import mark_media_job_state
     mark_media_job_state(row["run_id"], row["step_run_id"], status, "用户取消媒体任务")
     return {
@@ -219,18 +233,39 @@ def recoverable_jobs() -> list[tuple[str, float]]:
 
     Including future retry timestamps is essential: after a process restart no
     in-memory timer exists to enqueue those jobs later.
+    waiting_provider 任务同样需要恢复轮询，否则重启后上游视频无人收尾。
     """
     db = get_conn()
     stamp = now()
-    db.execute(
-        """UPDATE jobs SET status='queued', lease_owner=NULL, lease_expires_at=NULL,
-                  updated_at=? WHERE status='running' AND (lease_expires_at IS NULL OR lease_expires_at<?)
-                  AND cancellation_requested=0 AND abandoned=0""",
-        (stamp, stamp),
-    )
+    # 过期 lease 的 running：若上游已接单，回到 waiting_provider；否则回 queued
+    expired = db.execute(
+        """SELECT id, provider_non_cancellable, provider_create_state, version_id FROM jobs
+           WHERE status='running' AND (lease_expires_at IS NULL OR lease_expires_at<?)
+             AND cancellation_requested=0 AND abandoned=0""",
+        (stamp,),
+    ).fetchall()
+    for row in expired:
+        has_provider = False
+        if row["version_id"]:
+            v = db.execute(
+                "SELECT provider_task_id FROM shot_versions WHERE id=?", (row["version_id"],)
+            ).fetchone()
+            has_provider = bool(v and v["provider_task_id"])
+        new_status = (
+            "waiting_provider"
+            if has_provider or (
+                bool(row["provider_non_cancellable"]) and row["provider_create_state"] == "accepted"
+            )
+            else "queued"
+        )
+        db.execute(
+            """UPDATE jobs SET status=?, lease_owner=NULL, lease_expires_at=NULL, updated_at=?
+               WHERE id=? AND status='running'""",
+            (new_status, stamp, row["id"]),
+        )
     rows = db.execute(
         """SELECT id, next_retry_at FROM jobs
-           WHERE status='queued' AND cancellation_requested=0 AND abandoned=0
+           WHERE status IN ('queued','waiting_provider') AND cancellation_requested=0 AND abandoned=0
            ORDER BY created_at""",
     ).fetchall()
     db.commit()

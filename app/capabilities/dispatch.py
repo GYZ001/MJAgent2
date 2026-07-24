@@ -1,24 +1,20 @@
 """统一执行入口（PRD M2+M3）。
 
-- ``initiator="ui"``：页面 REST 复用。为保持单次请求体验，若预检要求确认，
-  在同一次调用内自动签发并消费 approval token 再执行，页面无需二次往返。
-  这不弱化风控——审批仍由服务端 Policy 强制签发/校验，只是把「批准」这一步
-  从「用户点两次」收敛为「页面点一次」，因为页面本身就是已确认的用户操作入口。
-- ``initiator="agent" | "mcp"``：不自动批准，遇到需要确认的命令原样返回
-  ``WAITING_APPROVAL``，交由对话 Agent / 外部 MCP Client 走标准批准流程。
+所有 initiator（ui / agent / mcp）共用同一套 Policy：需要确认时返回
+``WAITING_APPROVAL``，由调用方展示 Impact 后再带 ``approval_token`` 重试。
+页面不可再「同请求内自动签发并消费」批准令牌——否则直接调 REST 与点击无法区分，
+会绕过「展示 Impact → 用户批准」（PRD §3.2 / §8）。
 """
 from __future__ import annotations
 
 from typing import Any
 
 from fastapi import HTTPException
+from fastapi.responses import JSONResponse
 
 from app.capabilities import ensure_catalog_loaded
 from app.capabilities.bus import get_command_bus
 from app.capabilities.schemas import CommandResult, CommandStatus
-
-# 只有页面发起的调用被视为「已经过用户点击确认」，可代为完成一次性批准。
-_AUTO_APPROVE_INITIATORS = {"ui"}
 
 _ERROR_CODE_HTTP_STATUS: dict[str, int] = {
     "not_found": 404,
@@ -28,13 +24,13 @@ _ERROR_CODE_HTTP_STATUS: dict[str, int] = {
     "policy_denied": 403,
     "approval_invalid": 403,
     "handler_not_implemented": 501,
+    "version_conflict": 409,
 }
 
 _STATUS_HTTP: dict[CommandStatus, int] = {
     CommandStatus.REJECTED: 409,
     CommandStatus.CONFLICT: 409,
     CommandStatus.CANCELLED: 409,
-    CommandStatus.WAITING_APPROVAL: 202,
 }
 
 
@@ -45,26 +41,31 @@ async def dispatch(
     initiator: str = "ui",
     session_id: str | None = None,
 ) -> CommandResult:
-    """执行一次领域命令。UI initiator 在同一请求内完成「预检→自动批准→执行」。"""
+    """执行一次领域命令。任何 initiator 都不会自动批准。"""
+    del initiator  # 保留参数以兼容旧调用方；策略已统一。
     ensure_catalog_loaded()
     bus = get_command_bus()
-    result = await bus.execute_async(name, args, session_id=session_id)
-    if result.status != CommandStatus.WAITING_APPROVAL or initiator not in _AUTO_APPROVE_INITIATORS:
-        return result
-    approval_token = (result.data or {}).get("approval_token")
-    if not approval_token:
-        return result
-    approved_args = {**args, "approval_token": approval_token}
-    return await bus.execute_async(name, approved_args, session_id=session_id)
+    return await bus.execute_async(name, args, session_id=session_id)
+
+
+def waiting_approval_payload(result: CommandResult) -> dict[str, Any]:
+    """页面二次确认所需的完整载荷（含 approval_token；仅同源 UI 可见）。"""
+    data = dict(result.data or {})
+    payload: dict[str, Any] = {
+        "ok": False,
+        "status": result.status.value,
+        "summary": result.summary,
+        "command": result.command,
+        "approval_id": data.get("approval_id"),
+        "approval_token": data.get("approval_token"),
+        "expires_at": data.get("expires_at"),
+        "preflight": result.preflight.model_dump(mode="json") if result.preflight else None,
+    }
+    return payload
 
 
 def result_http_payload(result: CommandResult) -> dict[str, Any]:
-    """把 CommandResult 转成可直接被 FastAPI 路由返回的 dict，尽量贴近既有 REST 响应形状。
-
-    ``result.data`` 是 handler 产出的领域字段（大多是原路由本来就会返回的 dict），
-    在此基础上补齐 ``ok/summary/run_id/command_id/ui_intent`` 等通用元信息，
-    不覆盖 handler 已经给出的同名业务字段。
-    """
+    """把 CommandResult 转成可直接被 FastAPI 路由返回的 dict，尽量贴近既有 REST 响应形状。"""
     payload: dict[str, Any] = dict(result.data or {})
     payload.setdefault("ok", result.status in {CommandStatus.SUCCEEDED, CommandStatus.ACCEPTED})
     payload.setdefault("summary", result.summary)
@@ -90,15 +91,34 @@ def _http_status_for(result: CommandResult) -> int | None:
 
 
 def raise_if_failed(result: CommandResult) -> None:
-    """非成功态时抛出 HTTPException，保持既有 REST 错误语义；成功/已受理态放行。
-
-    ``WAITING_APPROVAL`` 理论上不会出现在 ``initiator="ui"`` 路径（已自动批准），
-    真出现时说明批准签发失败或预检拒绝——同样必须报错，不能被前端当作成功处理。
-    """
+    """非成功态时抛出 HTTPException；``WAITING_APPROVAL`` 由 ``ui_route`` 单独处理为 202。"""
+    if result.status == CommandStatus.WAITING_APPROVAL:
+        return
     status_code = _http_status_for(result)
     if status_code is not None:
         raise HTTPException(status_code, result.summary)
 
 
-# 兼容 PRD 示例中使用的命名。
 raise_for_command_result = raise_if_failed
+
+
+def respond_ui(result: CommandResult) -> dict[str, Any] | JSONResponse:
+    """dispatch 之后的统一 REST 收尾：待批准 → 202；失败 → HTTPException；成功 → payload。"""
+    if result.status == CommandStatus.WAITING_APPROVAL:
+        return JSONResponse(status_code=202, content=waiting_approval_payload(result))
+    raise_if_failed(result)
+    return result_http_payload(result)
+
+
+async def ui_route(name: str, args: dict[str, Any]) -> dict[str, Any] | JSONResponse | None:
+    """REST 入口统一走 Command Bus；Handler 内再次进入同名函数时返回 ``None`` 以执行领域逻辑。
+
+    需要用户批准时返回 HTTP 202 + Impact/token，前端展示后再带
+    ``X-Manju-Approval-Token`` 重试。
+    """
+    from app.capabilities.direct import in_handler
+
+    if in_handler():
+        return None
+    result = await dispatch(name, args, initiator="ui")
+    return respond_ui(result)

@@ -1,0 +1,140 @@
+"""参考图集持久化：从 shot_versions.image_inputs 拆出独立资产表，视频重抽复用 reference_set_id。"""
+from __future__ import annotations
+
+import hashlib
+import json
+from typing import Any
+
+from app.db import get_conn, new_id, now
+
+
+def _fingerprint(shot_id: str, refs: list[dict]) -> str:
+    material = []
+    for ref in refs:
+        material.append({
+            "id": ref.get("id"),
+            "type": ref.get("type"),
+            "source": ref.get("source"),
+            "path": ref.get("path") or ref.get("image_path"),
+            "selected": bool(ref.get("selectedForSeedance", True)),
+            "deleted": bool(ref.get("deleted")),
+        })
+    raw = json.dumps({"shot_id": shot_id, "refs": material}, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+def upsert_reference_set_from_meta(
+    *,
+    shot_id: str,
+    version_id: str | None,
+    meta: dict[str, Any],
+    conn=None,
+) -> str | None:
+    """把 image_inputs 里的参考图画廊写入 reference_sets / reference_assets。
+
+    返回 reference_set_id；若无可持久化参考图则返回 None。
+    原 JSON 仍由调用方保留写入，作兼容读取。
+    """
+    refs = list(meta.get("reference_images") or [])
+    if not refs:
+        existing = meta.get("reference_set_id")
+        return existing
+    db = conn or get_conn()
+    fp = meta.get("reference_gallery_fingerprint") or _fingerprint(shot_id, refs)
+    revision = int(meta.get("reference_gallery_revision") or int(now()))
+    # 已有同 fingerprint 则复用
+    row = db.execute(
+        "SELECT id FROM reference_sets WHERE shot_id=? AND fingerprint=? ORDER BY revision DESC LIMIT 1",
+        (shot_id, fp),
+    ).fetchone()
+    if row:
+        set_id = row["id"]
+        if version_id:
+            db.execute(
+                "UPDATE reference_sets SET source_version_id=COALESCE(source_version_id, ?) WHERE id=?",
+                (version_id, set_id),
+            )
+        meta["reference_set_id"] = set_id
+        meta["reference_gallery_fingerprint"] = fp
+        return set_id
+
+    set_id = new_id("refset")
+    db.execute(
+        """INSERT INTO reference_sets(
+               id, shot_id, source_version_id, revision, fingerprint, status,
+               created_at, updated_at
+           ) VALUES(?,?,?,?,?,'ready',?,?)""",
+        (set_id, shot_id, version_id, revision, fp, now(), now()),
+    )
+    for i, ref in enumerate(refs):
+        asset_id = ref.get("id") or new_id("refasset")
+        path = ref.get("path") or ref.get("image_path")
+        db.execute(
+            """INSERT INTO reference_assets(
+                   id, reference_set_id, asset_type, source, path, sort_order,
+                   quality_score, consistency_score, selected, deleted, qa_json, created_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                asset_id, set_id,
+                ref.get("type") or "generated",
+                ref.get("source") or "pipeline",
+                path,
+                i,
+                ref.get("qualityScore"),
+                ref.get("consistencyScore"),
+                int(bool(ref.get("selectedForSeedance", True))),
+                int(bool(ref.get("deleted"))),
+                json.dumps(ref.get("qa") or {}, ensure_ascii=False) if ref.get("qa") else None,
+                now(),
+            ),
+        )
+    meta["reference_set_id"] = set_id
+    meta["reference_gallery_fingerprint"] = fp
+    meta["reference_gallery_revision"] = revision
+    if conn is None:
+        db.commit()
+    return set_id
+
+
+def load_reference_set(set_id: str, *, conn=None) -> dict[str, Any] | None:
+    db = conn or get_conn()
+    row = db.execute("SELECT * FROM reference_sets WHERE id=?", (set_id,)).fetchone()
+    if not row:
+        return None
+    assets = db.execute(
+        "SELECT * FROM reference_assets WHERE reference_set_id=? ORDER BY sort_order, created_at",
+        (set_id,),
+    ).fetchall()
+    refs = []
+    for a in assets:
+        refs.append({
+            "id": a["id"],
+            "type": a["asset_type"],
+            "source": a["source"],
+            "path": a["path"],
+            "qualityScore": a["quality_score"],
+            "consistencyScore": a["consistency_score"],
+            "selectedForSeedance": bool(a["selected"]),
+            "deleted": bool(a["deleted"]),
+            "qa": json.loads(a["qa_json"]) if a["qa_json"] else None,
+        })
+    return {
+        "id": row["id"],
+        "shot_id": row["shot_id"],
+        "revision": row["revision"],
+        "fingerprint": row["fingerprint"],
+        "status": row["status"],
+        "reference_images": refs,
+    }
+
+
+def apply_set_to_meta(meta: dict[str, Any], set_id: str, *, conn=None) -> dict[str, Any]:
+    loaded = load_reference_set(set_id, conn=conn)
+    if not loaded:
+        return meta
+    meta = dict(meta)
+    meta["reference_set_id"] = set_id
+    meta["reference_images"] = loaded["reference_images"]
+    meta["reference_gallery_fingerprint"] = loaded["fingerprint"]
+    meta["reference_gallery_revision"] = loaded["revision"]
+    return meta

@@ -33,7 +33,12 @@ async def cancel(args: I.ProjectScopedInput) -> CommandResult:
 async def update(args: I.BibleUpdateInput) -> CommandResult:
     from app import api
 
-    outcome = await call_guarded(api.edit_bible, args.project_id, args.bible)
+    body = dict(args.bible or {})
+    if args.expected_version is not None:
+        body = {"bible": args.bible, "expected_version": args.expected_version}
+    else:
+        body = args.bible
+    outcome = await call_guarded(api.edit_bible, args.project_id, body)
     if isinstance(outcome, CommandResult):
         return outcome
     return succeeded(

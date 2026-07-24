@@ -16,6 +16,8 @@ import shutil
 import subprocess
 import time
 import weakref
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urljoin
 
@@ -38,6 +40,8 @@ BAILIAN_VLM_FREE_MODELS = ("qwen3.7-plus-2026-05-26",)
 BAILIAN_VLM_BASE_MODELS = ("qwen3.7-plus",)
 _BAILIAN_FAILED_MODELS: dict[str, set[str]] = {"text": set(), "vlm": set()}
 _MEDIA_SEMAPHORES: weakref.WeakKeyDictionary[Any, asyncio.Semaphore] = weakref.WeakKeyDictionary()
+_IMAGE_SEMAPHORES: weakref.WeakKeyDictionary[Any, asyncio.Semaphore] = weakref.WeakKeyDictionary()
+_VLM_SEMAPHORES: weakref.WeakKeyDictionary[Any, asyncio.Semaphore] = weakref.WeakKeyDictionary()
 
 
 class ProviderError(Exception):
@@ -51,16 +55,43 @@ class ProviderError(Exception):
         self.timeout_phase = timeout_phase
 
 
-def _media_semaphore() -> asyncio.Semaphore:
-    """图生图与 VLM 共用同一并发门。按 event loop 存放，避免测试/worker
-    使用多个 asyncio.run 时将 Semaphore 绑到已关闭的 loop。
-    """
+def _channel_semaphore(
+    store: weakref.WeakKeyDictionary[Any, asyncio.Semaphore],
+    limit: int,
+) -> asyncio.Semaphore:
     loop = asyncio.get_running_loop()
-    semaphore = _MEDIA_SEMAPHORES.get(loop)
-    if semaphore is None:
-        semaphore = asyncio.Semaphore(config.MEDIA_REQUEST_CONCURRENCY)
-        _MEDIA_SEMAPHORES[loop] = semaphore
+    semaphore = store.get(loop)
+    desired = max(1, int(limit))
+    if semaphore is None or getattr(semaphore, "_mj_limit", None) != desired:
+        semaphore = asyncio.Semaphore(desired)
+        semaphore._mj_limit = desired  # type: ignore[attr-defined]
+        store[loop] = semaphore
     return semaphore
+
+
+def _media_semaphore() -> asyncio.Semaphore:
+    """兼容旧调用：回退到 image 通道。"""
+    return _image_semaphore()
+
+
+def _image_semaphore() -> asyncio.Semaphore:
+    try:
+        from app.media_pipeline.concurrency import channel_limit
+        from app.media_pipeline import stages as media_stages
+        limit = channel_limit(media_stages.RESOURCE_IMAGE)
+    except Exception:  # noqa: BLE001
+        limit = getattr(config, "IMAGE_REQUEST_CONCURRENCY", config.MEDIA_REQUEST_CONCURRENCY)
+    return _channel_semaphore(_IMAGE_SEMAPHORES, limit)
+
+
+def _vlm_semaphore() -> asyncio.Semaphore:
+    try:
+        from app.media_pipeline.concurrency import channel_limit
+        from app.media_pipeline import stages as media_stages
+        limit = channel_limit(media_stages.RESOURCE_VLM)
+    except Exception:  # noqa: BLE001
+        limit = getattr(config, "VLM_REQUEST_CONCURRENCY", config.MEDIA_REQUEST_CONCURRENCY)
+    return _channel_semaphore(_VLM_SEMAPHORES, limit)
 
 
 def _timeout_phase(exc: httpx.TimeoutException) -> str:
@@ -458,6 +489,53 @@ async def _post_bailian_chat_with_fallback(client: httpx.AsyncClient, payload: d
                         retryable=last_err.retryable, raw=last_err.raw)
 
 
+async def _stream_bailian_chat_with_fallback(
+    client: httpx.AsyncClient, payload: dict, *, fallback_kind: str, log_kind: str,
+    preferred_model: str, meta: dict | None,
+    on_token: Callable[[str, str], None],
+) -> tuple[dict, str]:
+    """百炼的逐模型流式降级链。
+
+    某候选在尚未产出 token 时失败，可安全尝试下一个模型；一旦已经向前端
+    推送过内容就立即报错，禁止换模型重放导致文字重复。
+    """
+    base_url, headers = _model_connection(
+        "bailian", preferred_model, config.BAILIAN_BASE_URL, config.BAILIAN_API_KEY)
+    url = f"{base_url}/chat/completions"
+    models = _bailian_fallback_models(fallback_kind, preferred_model)
+    errors: list[str] = []
+    last_err: ProviderError | None = None
+    emitted = 0
+
+    def _forward(kind: str, text: str) -> None:
+        nonlocal emitted
+        emitted += 1
+        on_token(kind, text)
+
+    for candidate in models:
+        attempt_payload = {**payload, "model": candidate}
+        try:
+            data = await _stream_or_fallback(
+                client, url, attempt_payload, kind=log_kind, model=candidate,
+                headers=headers, key_name="BAILIAN_API_KEY", meta=meta,
+                on_token=_forward,
+            )
+            return data, candidate
+        except ProviderError as exc:
+            if emitted:
+                raise
+            _remember_bailian_failure(fallback_kind, candidate)
+            last_err = exc
+            errors.append(f"{candidate}: {exc}")
+    detail = "；".join(errors)[:500]
+    if last_err is None:
+        raise ProviderError("百炼模型候选列表为空，请检查模型配置")
+    raise ProviderError(
+        f"百炼 {fallback_kind} 模型全部请求失败，已按降级序列尝试：{detail}",
+        retryable=last_err.retryable, raw=last_err.raw,
+    )
+
+
 async def _chat_with_reasoning_fallback(client: httpx.AsyncClient, url: str, payload: dict, *,
                                      kind: str, model: str, headers: dict | None, key_name: str,
                                      temperature: float, call_meta: dict | None = None) -> str:
@@ -553,6 +631,556 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
     if not content or not content.strip():
         raise ProviderError(f"模型返回空内容（content 为空；{_empty_content_detail(data)}）")
     return content
+
+
+# ---------------------------------------------------------------------------
+# 原生工具调用（OpenAI function calling）。现有 `chat` 保持不变；此处新增，供对话
+# Agent 编排器使用。工具*执行*仍由 Command Bus 负责，本层只做协议解析。
+# ---------------------------------------------------------------------------
+
+# 已知支持 OpenAI 原生 function calling 的文本供应商。其余（或网关能力未知）时可通过
+# 设置 agent_native_tools=off 强制回退到手写 JSON 协议（见 _chat_tools_via_json_protocol）。
+_NATIVE_TOOL_PROVIDERS = frozenset({"openrouter", "bailian", "deepseek", "zhipu", "hiagent"})
+
+_JSON_PROTOCOL_INSTRUCTION = (
+    "本网关不支持原生工具调用。请严格只返回一个 JSON 对象，不要 Markdown 代码块或任何额外文字：\n"
+    '{"reply": "给用户看的简短中文说明", "tool_calls": [{"tool": "工具名", "arguments": {...}}], "done": true 或 false}\n'
+    "tool_calls 最多 1 个元素；若已可回答用户或无更多可执行动作，tool_calls 传空数组并令 done=true。"
+)
+
+
+@dataclass
+class ToolCall:
+    """模型请求的一次工具调用（已解析）。"""
+
+    id: str
+    name: str
+    arguments: dict[str, Any] = field(default_factory=dict)
+    # 原始 arguments JSON 串：回填 assistant 消息时优先使用，避免重新序列化产生漂移。
+    arguments_raw: str | None = None
+
+
+@dataclass
+class AssistantTurn:
+    """一次带工具能力的模型回合结果。tool_calls 为空表示这是最终回复（content）。
+
+    reasoning：推理模型的思考过程原文（OpenAI 兼容 `reasoning`/`reasoning_content`）。
+    过去被一律丢弃；现在保留下来供对话助手展示「思考过程」。
+    """
+
+    content: str = ""
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    finish_reason: str | None = None
+    reasoning: str = ""
+
+
+def _provider_supports_tools(provider: str) -> bool:
+    override = (get_setting("agent_native_tools") or "").strip().lower()
+    if override in {"0", "off", "false", "no", "disabled"}:
+        return False
+    if override in {"1", "on", "true", "yes", "enabled"}:
+        return True
+    if provider.startswith("custom:"):
+        return True
+    return provider in _NATIVE_TOOL_PROVIDERS
+
+
+def _looks_like_tools_unsupported(exc: ProviderError) -> bool:
+    """网关以客户端错误明确拒绝 tools 字段时才回退，避免把限流/故障误判为不支持。"""
+    if exc.retryable:
+        return False
+    blob = f"{exc} {exc.raw}".lower()
+    return ("tool" in blob or "function" in blob) and (
+        "support" in blob or "unknown" in blob or "unrecognized" in blob or "invalid" in blob
+    )
+
+
+def _resolve_text_connection(
+    provider: str, model_override: str | None = None
+) -> tuple[str, str, dict[str, str], str]:
+    """返回 (chat_completions_url, model, headers, key_name)。bailian 需多模型回退，另行处理。"""
+    if provider == "openrouter":
+        model = active_model("text", "openrouter")
+        base_url, headers = _model_connection(
+            "openrouter", model, config.OPENROUTER_BASE_URL, config.OPENROUTER_API_KEY)
+        return f"{base_url}/chat/completions", model, headers, "OPENROUTER_API_KEY"
+    if provider == "deepseek":
+        model = active_model("text", "deepseek")
+        try:
+            base_url, headers = _model_connection(
+                "deepseek", model, config.DEEPSEEK_BASE_URL, config.DEEPSEEK_API_KEY)
+        except ProviderError:
+            base_url, headers = config.DEEPSEEK_BASE_URL, _deepseek_headers()
+        return f"{base_url}/chat/completions", model, headers, "DEEPSEEK_API_KEY"
+    if provider == "zhipu":
+        model = active_model("text", "zhipu")
+        try:
+            base_url, headers = _model_connection(
+                "zhipu", model, config.ZHIPU_BASE_URL, config.ZHIPU_API_KEY)
+        except ProviderError:
+            base_url, headers = config.ZHIPU_BASE_URL, _zhipu_headers()
+        return f"{base_url}/chat/completions", model, headers, "ZHIPU_API_KEY"
+    if provider.startswith("custom:"):
+        model = active_model("text", provider)
+        base_url, headers = _model_connection(provider, model)
+        return f"{base_url}/chat/completions", model, headers, f"model:{model}"
+    model = model_override or active_model("text", "hiagent")
+    base_url, headers = _model_connection("hiagent", model, config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY)
+    return f"{base_url}/chat/completions", model, headers, f"model:{model}"
+
+
+def _parse_tool_arguments(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if not raw or not isinstance(raw, str):
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        try:
+            from app.schemas import extract_json
+
+            parsed = extract_json(raw)
+        except ValueError:
+            return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _parse_assistant_turn(data: dict, *, label: str) -> AssistantTurn:
+    try:
+        choice = data["choices"][0]
+        message = choice["message"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise ProviderError(f"{label} 响应结构异常：{json.dumps(data, ensure_ascii=False)[:300]}") from exc
+    content = message.get("content") or ""
+    if isinstance(content, list):
+        content = "".join(
+            part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text")
+    tool_calls: list[ToolCall] = []
+    for idx, raw_call in enumerate(message.get("tool_calls") or []):
+        if not isinstance(raw_call, dict):
+            continue
+        fn = raw_call.get("function") or {}
+        name = str(fn.get("name") or "").strip()
+        if not name:
+            continue
+        args_raw = fn.get("arguments")
+        tool_calls.append(ToolCall(
+            id=str(raw_call.get("id") or f"call_{idx}"),
+            name=name,
+            arguments=_parse_tool_arguments(args_raw),
+            arguments_raw=args_raw if isinstance(args_raw, str) else None,
+        ))
+    if not tool_calls and not (content or "").strip():
+        raise ProviderError(f"模型返回空内容且无工具调用（{_empty_content_detail(data)}）")
+    reasoning = message.get("reasoning") or message.get("reasoning_content") or ""
+    return AssistantTurn(
+        content=content or "", tool_calls=tool_calls, finish_reason=choice.get("finish_reason"),
+        reasoning=reasoning if isinstance(reasoning, str) else "",
+    )
+
+
+def _tools_as_text(tools: list[dict[str, Any]]) -> str:
+    lines = ["可用工具（tool 字段填工具名，arguments 按其参数）："]
+    for tool in tools:
+        fn = tool.get("function") or {}
+        params = (fn.get("parameters") or {}).get("properties") or {}
+        arg_names = "、".join(params.keys()) or "无"
+        lines.append(f"  - {fn.get('name')}（参数：{arg_names}）：{fn.get('description', '')}")
+    return "\n".join(lines)
+
+
+def _flatten_tool_messages(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """把原生格式（含 role=tool、assistant.tool_calls）压平成纯文本对话，供 JSON 回退协议使用。"""
+    flat: list[dict[str, str]] = []
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content")
+        text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False, default=str)
+        if role == "tool":
+            flat.append({"role": "user", "content": f"[工具结果] {text}"})
+        elif role == "assistant" and msg.get("tool_calls"):
+            names = "、".join(str((tc.get("function") or {}).get("name") or "") for tc in msg["tool_calls"])
+            flat.append({"role": "assistant", "content": f"{text}（已请求调用工具：{names}）".strip()})
+        else:
+            flat.append({"role": role or "user", "content": text or ""})
+    return flat
+
+
+async def _chat_tools_via_json_protocol(
+    messages: list[dict[str, Any]], tools: list[dict[str, Any]], *,
+    temperature: float, max_tokens: int, call_meta: dict | None,
+    on_token: Callable[[str, str], None] | None = None,
+) -> AssistantTurn:
+    """回退协议：网关不支持原生 tools 时，用手写 JSON 协议模拟一次工具调用回合。"""
+    from app.schemas import extract_json
+
+    flat = _flatten_tool_messages(messages)
+    flat.append({"role": "system", "content": _JSON_PROTOCOL_INSTRUCTION + "\n" + _tools_as_text(tools)})
+    fallback_meta = {**(call_meta or {}), "tool_protocol": "json_fallback"}
+    want_stream = on_token is not None and _streaming_enabled()
+    streamed_reply = False
+    if want_stream:
+        assert on_token is not None
+        reply_streamer = _JsonReplyStreamer(on_token)
+        raw = await _stream_plain_chat(
+            flat, temperature=temperature, max_tokens=max_tokens,
+            call_meta=fallback_meta, on_token=reply_streamer.feed,
+        )
+        streamed_reply = reply_streamer.emitted
+    else:
+        raw = await chat(
+            flat, temperature=temperature, max_tokens=max_tokens,
+            call_meta=fallback_meta)
+    try:
+        plan = extract_json(raw)
+    except ValueError:
+        if want_stream and on_token is not None and not streamed_reply and raw.strip():
+            on_token("content", raw.strip())
+        return AssistantTurn(content=raw.strip(), tool_calls=[])
+    tool_calls: list[ToolCall] = []
+    raw_calls = plan.get("tool_calls")
+    if isinstance(raw_calls, list):
+        for idx, call in enumerate(raw_calls):
+            if not isinstance(call, dict):
+                continue
+            name = str(call.get("tool") or call.get("name") or "").strip()
+            if not name:
+                continue
+            args = call.get("arguments")
+            tool_calls.append(ToolCall(id=f"call_{idx}", name=name,
+                                       arguments=args if isinstance(args, dict) else {}))
+    reply = str(plan.get("reply") or "").strip()
+    # 流式网关在首帧前降级为非流式时不会触发 feed，收尾时补发一次，
+    # 保证前端的事件契约不因 provider 能力而改变。
+    if want_stream and on_token is not None and not streamed_reply and reply:
+        on_token("content", reply)
+    return AssistantTurn(content=reply, tool_calls=tool_calls)
+
+
+class _JsonReplyStreamer:
+    """从 JSON 协议的原始 token 中只抽取 `reply` 字符串，避免把工具 JSON 露给 UI。"""
+
+    def __init__(self, on_token: Callable[[str, str], None]) -> None:
+        self._on_token = on_token
+        self._raw = ""
+        self._sent = 0
+
+    @property
+    def emitted(self) -> bool:
+        return self._sent > 0
+
+    @staticmethod
+    def _decoded_reply_prefix(raw: str) -> str:
+        import re
+
+        match = re.search(r'"reply"\s*:\s*"', raw)
+        if not match:
+            return ""
+        source = raw[match.end():]
+        out: list[str] = []
+        i = 0
+        escapes = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f",
+                   "n": "\n", "r": "\r", "t": "\t"}
+        while i < len(source):
+            char = source[i]
+            if char == '"':
+                break
+            if char != "\\":
+                out.append(char)
+                i += 1
+                continue
+            if i + 1 >= len(source):
+                break
+            marker = source[i + 1]
+            if marker in escapes:
+                out.append(escapes[marker])
+                i += 2
+                continue
+            if marker == "u":
+                digits = source[i + 2:i + 6]
+                if len(digits) < 4:
+                    break
+                try:
+                    out.append(chr(int(digits, 16)))
+                except ValueError:
+                    break
+                i += 6
+                continue
+            # 非法转义：不猜测，等最终 extract_json 给出明确结果。
+            break
+        return "".join(out)
+
+    def feed(self, _kind: str, text: str) -> None:
+        if _kind != "content":
+            return
+        self._raw += text
+        decoded = self._decoded_reply_prefix(self._raw)
+        if len(decoded) <= self._sent:
+            return
+        delta = decoded[self._sent:]
+        self._sent = len(decoded)
+        self._on_token("content", delta)
+
+
+def _streaming_enabled() -> bool:
+    """对话助手逐 token 流式开关；默认开启，可用 agent_stream_tokens=off 一键回退非流式。"""
+    val = (get_setting("agent_stream_tokens") or "").strip().lower()
+    return val not in {"0", "off", "false", "no", "disabled"}
+
+
+def _accumulate_stream_chunk(
+    chunk: dict[str, Any], *,
+    content_parts: list[str], reasoning_parts: list[str],
+    tool_slots: dict[int, dict[str, Any]], state: dict[str, Any],
+    on_token: Callable[[str, str], None] | None,
+) -> None:
+    """把一帧 SSE delta 累积进重组缓冲，并按需触发 on_token（content / reasoning）。"""
+    usage = chunk.get("usage")
+    if isinstance(usage, dict):
+        state["usage"] = usage
+    choices = chunk.get("choices") or []
+    if not choices:
+        return
+    choice = choices[0] or {}
+    delta = choice.get("delta") or {}
+    content = delta.get("content")
+    if isinstance(content, str) and content:
+        content_parts.append(content)
+        if on_token:
+            on_token("content", content)
+    reasoning = delta.get("reasoning")
+    if not isinstance(reasoning, str) or not reasoning:
+        reasoning = delta.get("reasoning_content")
+    if isinstance(reasoning, str) and reasoning:
+        reasoning_parts.append(reasoning)
+        if on_token:
+            on_token("reasoning", reasoning)
+    for raw_call in delta.get("tool_calls") or []:
+        if not isinstance(raw_call, dict):
+            continue
+        idx = raw_call.get("index")
+        idx = int(idx) if isinstance(idx, int) else 0
+        slot = tool_slots.setdefault(idx, {"id": None, "name": None, "args": []})
+        if raw_call.get("id"):
+            slot["id"] = str(raw_call["id"])
+        fn = raw_call.get("function") or {}
+        if fn.get("name"):
+            slot["name"] = str(fn["name"])
+        args_piece = fn.get("arguments")
+        if isinstance(args_piece, str) and args_piece:
+            slot["args"].append(args_piece)
+    if choice.get("finish_reason"):
+        state["finish_reason"] = choice["finish_reason"]
+
+
+def _reconstruct_stream_data(
+    content_parts: list[str], reasoning_parts: list[str],
+    tool_slots: dict[int, dict[str, Any]], state: dict[str, Any],
+) -> dict[str, Any]:
+    """把流式增量重组成与非流式 `data` 等价的结构，交给 `_parse_assistant_turn` 复用。"""
+    message: dict[str, Any] = {"role": "assistant", "content": "".join(content_parts)}
+    reasoning_text = "".join(reasoning_parts)
+    if reasoning_text:
+        message["reasoning"] = reasoning_text
+    if tool_slots:
+        message["tool_calls"] = [
+            {
+                "id": slot["id"] or f"call_{idx}",
+                "type": "function",
+                "function": {"name": slot["name"] or "", "arguments": "".join(slot["args"])},
+            }
+            for idx, slot in sorted(tool_slots.items())
+        ]
+    data: dict[str, Any] = {"choices": [{"index": 0, "finish_reason": state.get("finish_reason"), "message": message}]}
+    if state.get("usage"):
+        data["usage"] = state["usage"]
+    return data
+
+
+async def _stream_chat_completion(
+    client: httpx.AsyncClient, url: str, payload: dict, *,
+    kind: str, model: str, headers: dict | None = None, key_name: str = "HIAGENT_API_KEY",
+    meta: dict | None = None, on_token: Callable[[str, str], None] | None = None,
+) -> dict:
+    """SSE 流式消费 chat/completions，逐 token 回调 on_token，最终重组为非流式等价 `data`。
+
+    不做重试：流式一旦开始产出 token，重发会重复推送；失败交由上层决定是否降级为非流式。
+    """
+    merged_meta = _merge_call_meta(meta)
+    req_headers = dict(headers or _headers())
+    stream_payload = {**payload, "stream": True, "stream_options": {"include_usage": True}}
+    request_bytes = _request_size_bytes(stream_payload)
+    start = time.time()
+    attempt_meta = {
+        "http_attempt": 1, "http_attempts_max": 1, "request_bytes": request_bytes,
+        "streaming": True, **(merged_meta or {}),
+    }
+    call_id = start_provider_call(kind, model, meta=attempt_meta, request_json=stream_payload)
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    tool_slots: dict[int, dict[str, Any]] = {}
+    state: dict[str, Any] = {}
+    try:
+        async with client.stream("POST", url, json=stream_payload, headers=req_headers) as resp:
+            if resp.status_code != 200:
+                body = await resp.aread()
+                text = body.decode("utf-8", "replace")
+                err = _classify_http_error(resp.status_code, text, key_name)
+                finish_provider_call(
+                    call_id, "FAILED", resp.status_code, int((time.time() - start) * 1000),
+                    error=str(err), response_json={"status_code": resp.status_code, "body": text})
+                raise err
+            async for line in resp.aiter_lines():
+                if not line or not line.startswith("data:"):
+                    continue
+                chunk_str = line[len("data:"):].strip()
+                if not chunk_str or chunk_str == "[DONE]":
+                    if chunk_str == "[DONE]":
+                        break
+                    continue
+                try:
+                    chunk = json.loads(chunk_str)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                _accumulate_stream_chunk(
+                    chunk, content_parts=content_parts, reasoning_parts=reasoning_parts,
+                    tool_slots=tool_slots, state=state, on_token=on_token)
+        latency = int((time.time() - start) * 1000)
+        data = _reconstruct_stream_data(content_parts, reasoning_parts, tool_slots, state)
+        finish_provider_call(call_id, "OK", 200, latency, response_json=data)
+        return data
+    except ProviderError:
+        raise
+    except httpx.TimeoutException as exc:
+        latency = int((time.time() - start) * 1000)
+        phase = _timeout_phase(exc)
+        detail = f"{type(exc).__name__}(phase={phase}, latency_ms={latency}): {exc!r}"
+        finish_provider_call(call_id, "TIMEOUT", None, latency, error=detail)
+        raise ProviderError(f"流式调用{phase}阶段超时（{latency}ms）", retryable=True, raw=detail, timeout_phase=phase)
+    except httpx.HTTPError as exc:
+        latency = int((time.time() - start) * 1000)
+        finish_provider_call(call_id, "NETWORK_ERROR", None, latency, error=str(exc))
+        raise ProviderError(f"流式网络错误：{exc}", retryable=True)
+
+
+async def _stream_or_fallback(
+    client: httpx.AsyncClient, url: str, payload: dict, *,
+    kind: str, model: str, headers: dict | None, key_name: str,
+    meta: dict | None, on_token: Callable[[str, str], None],
+) -> dict:
+    """优先流式；若尚未推送任何 token 就失败，则安全降级为非流式（避免重复推送）。"""
+    emitted = 0
+
+    def _wrapped(token_kind: str, text: str) -> None:
+        nonlocal emitted
+        emitted += 1
+        on_token(token_kind, text)
+
+    try:
+        return await _stream_chat_completion(
+            client, url, payload, kind=kind, model=model, headers=headers,
+            key_name=key_name, meta=meta, on_token=_wrapped)
+    except ProviderError as exc:
+        if emitted > 0 or _looks_like_tools_unsupported(exc):
+            raise
+        fallback_meta = {**(meta or {}), "stream_degraded": True, "stream_degraded_cause": str(exc)[:120]}
+        return await _post_json(client, url, payload, kind=kind, model=model,
+                                headers=headers, key_name=key_name, meta=fallback_meta)
+
+
+async def _stream_plain_chat(
+    messages: list[dict[str, Any]], *, temperature: float, max_tokens: int,
+    call_meta: dict | None, on_token: Callable[[str, str], None],
+) -> str:
+    """无原生 tools 的流式文本调用，仅供 Agent JSON 协议回退使用。"""
+    provider = active_provider("text")
+    timeout = httpx.Timeout(connect=10, read=config.TIMEOUT_CHAT_READ, write=30, pool=10)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        if provider == "bailian":
+            preferred = active_model("text", "bailian")
+            payload: dict[str, Any] = {
+                "messages": messages, "temperature": temperature, "max_tokens": max_tokens,
+            }
+            data, _ = await _stream_bailian_chat_with_fallback(
+                client, payload, fallback_kind="text", log_kind="chat_tools_json_fallback",
+                preferred_model=preferred, meta=call_meta, on_token=on_token,
+            )
+        else:
+            url, resolved_model, headers, key_name = _resolve_text_connection(provider)
+            payload = {
+                "model": resolved_model, "messages": messages,
+                "temperature": temperature, "max_tokens": max_tokens,
+            }
+            if provider == "openrouter":
+                effort = (config.OPENROUTER_TEXT_REASONING_EFFORT or "").strip().lower()
+                if effort and effort != "none":
+                    payload["reasoning"] = {"effort": effort}
+            data = await _stream_or_fallback(
+                client, url, payload, kind="chat_tools_json_fallback", model=resolved_model,
+                headers=headers, key_name=key_name, meta=call_meta, on_token=on_token,
+            )
+    return _chat_content(data, label="chat_tools_json_fallback")
+
+
+async def chat_with_tools(
+    messages: list[dict[str, Any]], tools: list[dict[str, Any]], *,
+    tool_choice: str = "auto", model: str | None = None, temperature: float = 0.7,
+    max_tokens: int = 65535, call_meta: dict | None = None,
+    on_token: Callable[[str, str], None] | None = None,
+) -> AssistantTurn:
+    """带原生工具调用的文本对话。返回 AssistantTurn（content + reasoning + 已解析的 tool_calls）。
+
+    - 供应商路由复用 `chat` 的连接解析；payload 携带 `tools` / `tool_choice`。
+    - 供应商不支持 `tools`（能力标志关闭或网关以客户端错误拒绝）时，回退到手写 JSON 协议，
+      对上层返回同一种 AssistantTurn，编排器无需感知差异。
+    - 传入 `on_token(kind, text)` 且未关闭 agent_stream_tokens 时，走 SSE 流式并逐 token 回调
+      （kind ∈ {"content","reasoning"}）；流式在推送前失败会自动降级为非流式。百炼多模型回退路径
+      与 JSON 回退协议暂不流式，最终结果一致。
+    """
+    provider = active_provider("text")
+    if not _provider_supports_tools(provider):
+        return await _chat_tools_via_json_protocol(
+            messages, tools, temperature=temperature, max_tokens=max_tokens,
+            call_meta=call_meta, on_token=on_token)
+    timeout = httpx.Timeout(connect=10, read=config.TIMEOUT_CHAT_READ, write=30, pool=10)
+    stream = on_token is not None and _streaming_enabled()
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        try:
+            if provider == "bailian":
+                bailian_model = active_model("text", "bailian")
+                payload: dict[str, Any] = {
+                    "messages": messages, "temperature": temperature, "max_tokens": max_tokens,
+                    "tools": tools, "tool_choice": tool_choice,
+                }
+                if stream:
+                    data, _ = await _stream_bailian_chat_with_fallback(
+                        client, payload, fallback_kind="text", log_kind="chat_tools",
+                        preferred_model=bailian_model, meta=call_meta, on_token=on_token)
+                else:
+                    data, _ = await _post_bailian_chat_with_fallback(
+                        client, payload, fallback_kind="text", log_kind="chat_tools",
+                        preferred_model=bailian_model, meta=call_meta)
+            else:
+                url, resolved_model, headers, key_name = _resolve_text_connection(provider, model)
+                payload = {
+                    "model": resolved_model, "messages": messages, "temperature": temperature,
+                    "max_tokens": max_tokens, "tools": tools, "tool_choice": tool_choice,
+                }
+                if stream:
+                    data = await _stream_or_fallback(
+                        client, url, payload, kind="chat_tools", model=resolved_model,
+                        headers=headers, key_name=key_name, meta=call_meta, on_token=on_token)
+                else:
+                    data = await _post_json(client, url, payload, kind="chat_tools", model=resolved_model,
+                                            headers=headers, key_name=key_name, meta=call_meta)
+        except ProviderError as exc:
+            if _looks_like_tools_unsupported(exc):
+                return await _chat_tools_via_json_protocol(
+                    messages, tools, temperature=temperature, max_tokens=max_tokens,
+                    call_meta=call_meta, on_token=on_token)
+            raise
+    return _parse_assistant_turn(data, label="chat_tools")
 
 
 async def create_video_task(prompt_text: str, *, image_urls: list[tuple[str, str]] | None = None,
@@ -663,7 +1291,7 @@ async def generate_image(prompt: str, *, size: str = "1024x1024",
     kind = log_kind or ("image_edit" if image_inputs else "image_generate")
     timeout = httpx.Timeout(connect=10, read=config.TIMEOUT_IMAGE_READ,
                             write=config.TIMEOUT_IMAGE_WRITE, pool=10)
-    async with _media_semaphore():
+    async with _image_semaphore():
         async with httpx.AsyncClient(timeout=timeout) as client:
             data = await _post_json(
                 client, f"{base_url}/images/generations", payload,
@@ -718,7 +1346,7 @@ async def vlm_check(frames_b64: list[str], expectation_text: str,
     if provider == "openrouter":
         payload["response_format"] = {"type": "json_object"}
     merged_call_meta = {**(call_meta or {}), **media_meta}
-    async with _media_semaphore():
+    async with _vlm_semaphore():
         async with httpx.AsyncClient(timeout=timeout) as client:
             try:
                 if provider == "bailian":

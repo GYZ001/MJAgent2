@@ -61,7 +61,10 @@ async def confirm(args: I.StoryboardConfirmInput) -> CommandResult:
 async def shot_update(args: I.ShotUpdateInput) -> CommandResult:
     from app import api
 
-    outcome = await call_guarded(api.edit_shot, args.shot_id, args.patch)
+    patch = dict(args.patch or {})
+    if args.expected_version is not None:
+        patch["expected_version"] = args.expected_version
+    outcome = await call_guarded(api.edit_shot, args.shot_id, patch)
     if isinstance(outcome, CommandResult):
         return outcome
     return succeeded(

@@ -815,7 +815,20 @@ export default function MonitorPage() {
   })
 
   const SETTING_LABELS: Record<string, string> = {
-    video_concurrency: '视频并发数',
+    video_submit_concurrency: '视频提交并发',
+    video_inflight_limit: '上游视频在途上限',
+    video_poll_concurrency: '视频轮询并发',
+    reference_pipeline_concurrency: '参考图流水线并发',
+    image_request_concurrency: '图片请求并发',
+    vlm_request_concurrency: 'VLM 质检并发',
+    download_concurrency: '下载并发',
+    finalize_concurrency: '落盘/校验并发',
+    episode_video_inflight_limit: '单集上游在途上限',
+    project_video_inflight_limit: '单项目上游在途上限',
+    reference_prepared_backlog: '参考图领先视频槽位数',
+    media_pipeline_v2_enabled: '媒体流水线 V2（true/false）',
+    video_concurrency: '（兼容）视频并发数',
+    auto_concurrency: '（兼容）全自动并发',
     episode_cost_limit_cny: '单集成本上限（¥）',
     use_character_refs: '定妆照参考图（true/false，人物一致性）',
     max_ref_images: '单镜头最多参考图数',
@@ -958,7 +971,8 @@ export default function MonitorPage() {
               <div className="monitor-card-head"><div><span className="eyebrow">SYSTEM</span><h3>配置概况</h3></div><button type="button" onClick={() => openSection('models')}>管理模型</button></div>
               <dl>
                 <div><dt>已配置连接</dt><dd>{configuredModels} / {modelCatalog?.items.length ?? 0}</dd></div>
-                <div><dt>视频并发</dt><dd>{settings?.video_concurrency ?? '—'}</dd></div>
+                <div><dt>上游在途上限</dt><dd>{settings?.video_inflight_limit ?? settings?.auto_concurrency ?? '—'}</dd></div>
+                <div><dt>视频提交并发</dt><dd>{settings?.video_submit_concurrency ?? settings?.video_concurrency ?? '—'}</dd></div>
                 <div><dt>单集预算</dt><dd>¥ {settings?.episode_cost_limit_cny ?? '—'}</dd></div>
                 <div><dt>日志保留</dt><dd>{settings?.provider_call_retention_days ?? '—'} 天</dd></div>
               </dl>

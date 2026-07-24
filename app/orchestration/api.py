@@ -18,6 +18,10 @@ router = APIRouter(prefix="/api")
 
 @router.post("/runs")
 async def create_run(body: dict = Body(...)):
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route("run.create", {"payload": body})
+    if routed is not None:
+        return routed
     workflow_type = str(body.get("workflow_type") or "").strip()
     scope_type = str(body.get("scope_type") or "project").strip()
     scope_id = str(body.get("scope_id") or "").strip()
@@ -71,11 +75,10 @@ def get_events(
 
 @router.post("/runs/{run_id}/cancel")
 async def cancel_run_route(run_id: str):
-    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+    from app.capabilities.dispatch import dispatch, respond_ui
 
     result = await dispatch("run.control", {"run_id": run_id, "action": "cancel"}, initiator="ui")
-    raise_if_failed(result)
-    return result_http_payload(result)
+    return respond_ui(result)
 
 
 async def cancel_run(run_id: str):
@@ -243,11 +246,10 @@ def _restart_run(run_id: str, trigger_type: str):
 
 @router.post("/runs/{run_id}/resume")
 async def resume_run_route(run_id: str):
-    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+    from app.capabilities.dispatch import dispatch, respond_ui
 
     result = await dispatch("run.control", {"run_id": run_id, "action": "resume"}, initiator="ui")
-    raise_if_failed(result)
-    return result_http_payload(result)
+    return respond_ui(result)
 
 
 async def resume_run(run_id: str):
@@ -261,11 +263,10 @@ async def resume_run(run_id: str):
 
 @router.post("/runs/{run_id}/retry")
 async def retry_run_route(run_id: str):
-    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+    from app.capabilities.dispatch import dispatch, respond_ui
 
     result = await dispatch("run.control", {"run_id": run_id, "action": "retry"}, initiator="ui")
-    raise_if_failed(result)
-    return result_http_payload(result)
+    return respond_ui(result)
 
 
 async def retry_run(run_id: str):
@@ -319,6 +320,10 @@ def get_delivery_readiness(episode_id: str):
 
 @router.post("/episodes/{episode_id}/delivery/package")
 async def create_delivery_package(episode_id: str, body: dict | None = Body(None)):
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route("delivery.create_package", {"episode_id": episode_id})
+    if routed is not None:
+        return routed
     from app.delivery import build_delivery_package
 
     payload = dict(body or {})
@@ -416,6 +421,19 @@ def download_delivery_archive(package_id: str):
 
 @router.post("/episodes/{episode_id}/delivery/approve")
 async def decide_delivery(episode_id: str, body: dict = Body(...)):
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route(
+        "delivery.review",
+        {
+            "episode_id": episode_id,
+            "package_id": body.get("package_id"),
+            "decision": body.get("decision"),
+            "reason": body.get("reason"),
+            "accepted_risk": body.get("accepted_risk"),
+        },
+    )
+    if routed is not None:
+        return routed
     from app.delivery import approve_delivery
 
     if not get_conn().execute("SELECT 1 FROM episodes WHERE id=?", (episode_id,)).fetchone():
@@ -586,7 +604,19 @@ def recover_delivery_tasks() -> int:
 
 
 @router.post("/episodes/{episode_id}/customer-feedback")
-def create_customer_feedback(episode_id: str, body: dict = Body(...)):
+async def create_customer_feedback(episode_id: str, body: dict = Body(...)):
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route(
+        "delivery.submit_feedback",
+        {
+            "episode_id": episode_id,
+            "package_id": body.get("package_id"),
+            "feedback": body.get("message") or body.get("feedback") or "",
+            "request_revision": bool(body.get("request_revision", True)),
+        },
+    )
+    if routed is not None:
+        return routed
     from app.delivery import add_customer_feedback
 
     message = str(body.get("message") or "").strip()
@@ -606,7 +636,11 @@ def create_customer_feedback(episode_id: str, body: dict = Body(...)):
 
 
 @router.post("/benchmarks")
-def run_benchmark(body: dict = Body(...)):
+async def run_benchmark(body: dict = Body(...)):
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route("system.run_benchmark", {"payload": body})
+    if routed is not None:
+        return routed
     from app.benchmarks import project_quality_metrics, record_benchmark
 
     project_id = body.get("project_id")
@@ -647,7 +681,14 @@ def get_release_gate():
 
 
 @router.put("/projects/{project_id}/engine")
-def set_project_engine(project_id: str, body: dict = Body(...)):
+async def set_project_engine(project_id: str, body: dict = Body(...)):
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route(
+        "system.set_engine",
+        {"project_id": project_id, "enabled": bool(body.get("enabled"))},
+    )
+    if routed is not None:
+        return routed
     enabled = bool(body.get("enabled"))
     conn = get_conn()
     cursor = conn.execute(
@@ -671,8 +712,7 @@ def cancel_media_job(job_id: str) -> dict:
 
 @router.post("/jobs/{job_id}/cancel")
 async def cancel_media_job_route(job_id: str):
-    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+    from app.capabilities.dispatch import dispatch, respond_ui
 
     result = await dispatch("job.cancel", {"job_id": job_id}, initiator="ui")
-    raise_if_failed(result)
-    return result_http_payload(result)
+    return respond_ui(result)

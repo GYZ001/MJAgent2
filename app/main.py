@@ -18,6 +18,8 @@ from app.capabilities import ensure_catalog_loaded
 from app.config import PROJECTS_DIR, ROOT
 from app.db import init_db
 from app.mcp import router as mcp_router
+from app.capabilities.bus import set_request_approval_token
+from app.local_session import APPROVAL_HEADER, ensure_session_secret, public_session_payload
 from app.mcp.auth import ensure_bootstrap_token
 from app.planning import router as planning_router
 from app.recovery import recover_all
@@ -30,6 +32,7 @@ async def lifespan(_: FastAPI):
     init_db()
     ensure_catalog_loaded()
     ensure_bootstrap_token()
+    ensure_session_secret()
     purge_legacy_screenplays()
     await recover_all()
     try:
@@ -41,6 +44,23 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="漫剧 Agent 2.0", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def _inject_approval_token(request: Request, call_next):
+    """页面二次确认时通过请求头携带 approval_token，注入 Command Bus 上下文。"""
+    token = request.headers.get(APPROVAL_HEADER)
+    set_request_approval_token(token)
+    try:
+        return await call_next(request)
+    finally:
+        set_request_approval_token(None)
+
+
+@app.get("/api/session")
+def get_local_session():
+    """本机前端领取会话秘密，用于后续 /api/agent/* 请求（PRD §12.2）。"""
+    return public_session_payload()
 
 
 _SENSITIVE_KEYS = {"api_key", "apikey", "authorization", "password", "secret", "token", "access_token"}

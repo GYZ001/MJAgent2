@@ -98,8 +98,7 @@ async def start_plan(project_id: str) -> dict:
 
 @router.post("/projects/{project_id}/plan")
 async def start_plan_route(project_id: str):
-    from app.capabilities.dispatch import dispatch, raise_if_failed, result_http_payload
+    from app.capabilities.dispatch import dispatch, respond_ui
 
     result = await dispatch("episode.plan", {"project_id": project_id}, initiator="ui")
-    raise_if_failed(result)
-    return result_http_payload(result)
+    return respond_ui(result)
