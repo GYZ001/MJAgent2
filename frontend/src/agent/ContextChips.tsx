@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api, numToCn, type Project } from '../api'
+import { api, type Project } from '../api'
 import type { AgentView, ContextEnvelope } from './types'
 
 const PAGE_LABELS: Record<AgentView, string> = {
@@ -53,9 +53,7 @@ export default function ContextChips({
         setNames({
           loading: false,
           project: project.name?.replace(/\s+/g, ' ').trim() || '当前项目',
-          episode: episode
-            ? `第${numToCn(episode.episode_no)}集${episodeTitle ? ` · ${episodeTitle}` : ''}`
-            : null,
+          episode: episode ? episodeTitle || '当前章节' : null,
           shot: shot ? `第${shot.shot_no}镜` : null,
         })
       })
@@ -69,10 +67,10 @@ export default function ContextChips({
 
   const chips: { key: string; label: string; onRemove?: () => void }[] = []
   if (context.project_id) {
-    chips.push({ key: 'project', label: `项目 ${names.loading ? '加载中…' : names.project ?? '当前项目'}` })
+    chips.push({ key: 'project', label: names.loading ? '加载中…' : names.project ?? '当前项目' })
   }
   if (context.episode_id) {
-    chips.push({ key: 'episode', label: `分集 ${names.loading ? '加载中…' : names.episode ?? '当前分集'}` })
+    chips.push({ key: 'episode', label: names.loading ? '加载中…' : names.episode ?? '当前章节' })
   }
   if (context.selected_shot_id) {
     chips.push({
@@ -81,7 +79,7 @@ export default function ContextChips({
       onRemove: onClearShot,
     })
   }
-  chips.push({ key: 'route', label: `页面 ${PAGE_LABELS[context.route]}` })
+  chips.push({ key: 'route', label: PAGE_LABELS[context.route] })
   if (context.unsaved_draft) chips.push({ key: 'draft', label: '有未保存草稿' })
 
   return (

@@ -15,6 +15,7 @@ import AgentDrawer from './agent/AgentDrawer'
 import type { ContextEnvelope } from './agent/types'
 import CapabilityApprovalHost from './components/CapabilityApprovalHost'
 import { useScrollContainment } from './useScrollContainment'
+import { AdaptivePoller, type PollInterval } from './adaptivePoller'
 
 export type View = 'studio' | 'bible' | 'scenes' | 'episodes' | 'script' | 'board' | 'wall' | 'cinema' | 'monitor' | 'reader'
 
@@ -275,71 +276,64 @@ function WorkspaceEmpty({ label }: { label: string }) {
   )
 }
 
-/** 轮询某资源；interval=0 或函数返回 0 不轮询。intervalMs 传函数时可按最新数据动态调间隔
- *  （例如只在有运行态任务时高频轮询，空闲时不轮询），避免反复拉取大 payload 拖垮页面。
- *  内置单飞、序号乱序保护：慢请求不会覆盖更新的响应；refresh 返回真实 Promise。 */
+/** 轮询某资源；interval=0 或函数返回 0 不轮询。intervalMs 传函数时可按最新数据动态调间隔。
+ *  手动 refresh 会重新唤醒并计算轮询间隔，覆盖 idle → running 的异步任务状态切换。
+ *  内置单飞、卸载后响应保护；页面重新获得焦点时立即追平一次后端状态。 */
 export function usePoll<T>(
   fetcher: () => Promise<T>,
-  intervalMs: number | ((data: T | null) => number),
+  intervalMs: PollInterval<T>,
   deps: unknown[] = [],
 ) {
   const [data, setData] = useState<T | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
-  const fetcherRef = useRef(fetcher); fetcherRef.current = fetcher
-  const intervalRef = useRef(intervalMs); intervalRef.current = intervalMs
-  const dataRef = useRef<T | null>(null); dataRef.current = data
-  const seqRef = useRef(0)
-  const inFlightRef = useRef<Promise<T | null> | null>(null)
-
-  const refresh = useCallback((): Promise<T | null> => {
-    if (inFlightRef.current) return inFlightRef.current
-    const seq = ++seqRef.current
-    const request = fetcherRef.current()
-      .then(d => {
-        if (seq !== seqRef.current) return dataRef.current
-        setData(d)
-        dataRef.current = d
+  const pollerRef = useRef<AdaptivePoller<T>>()
+  if (!pollerRef.current) {
+    pollerRef.current = new AdaptivePoller(fetcher, intervalMs, {
+      onData: next => {
+        setData(next)
         setError(null)
         setLoading(false)
-        return d
-      })
-      .catch((e: unknown) => {
-        if (seq !== seqRef.current) return dataRef.current
+      },
+      onError: (e: unknown) => {
         setError(String((e as Error).message || e))
         setLoading(false)
-        return null
-      })
-      .finally(() => {
-        if (inFlightRef.current === request) inFlightRef.current = null
-      })
-    inFlightRef.current = request
-    return request
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps)
+      },
+    })
+  }
+  pollerRef.current.update(fetcher, intervalMs, {
+    onData: next => {
+      setData(next)
+      setError(null)
+      setLoading(false)
+    },
+    onError: (e: unknown) => {
+      setError(String((e as Error).message || e))
+      setLoading(false)
+    },
+  })
+
+  const refresh = useCallback(
+    (): Promise<T | null> => pollerRef.current!.refresh(),
+    [],
+  )
 
   useEffect(() => {
     if (deps.some(d => d == null)) return
-    let cancelled = false
-    let timer: number | undefined
-    const run = async () => {
-      if (cancelled) return
-      await refresh()
-      if (cancelled) return
-      const ms = typeof intervalRef.current === 'function'
-        ? intervalRef.current(dataRef.current)
-        : intervalRef.current
-      if (ms > 0) timer = window.setTimeout(run, ms)
+    const poller = pollerRef.current!
+    void poller.start()
+    const catchUp = () => {
+      if (document.visibilityState === 'visible') void poller.refresh()
     }
-    void run()
+    window.addEventListener('focus', catchUp)
+    document.addEventListener('visibilitychange', catchUp)
     return () => {
-      cancelled = true
-      seqRef.current += 1
-      inFlightRef.current = null
-      if (timer) window.clearTimeout(timer)
+      window.removeEventListener('focus', catchUp)
+      document.removeEventListener('visibilitychange', catchUp)
+      poller.stop()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refresh])
+  }, deps)
 
   return { data, error, loading, refresh }
 }
@@ -359,7 +353,7 @@ const projectBusy = (p: Project | null): boolean => {
 
 export const useProject = (
   projectId: string,
-  intervalMs: number | ((p: Project | null) => number) = (p) => projectBusy(p) ? 5000 : 0,
+  intervalMs: PollInterval<Project> = (p) => projectBusy(p) ? 3000 : 0,
 ) =>
   usePoll<Project>(() => api.get(`/projects/${projectId}`), intervalMs, [projectId])
 
@@ -379,6 +373,6 @@ const episodeBusy = (ep: Episode | null): boolean => {
 
 export const useEpisode = (
   episodeId: string,
-  intervalMs: number | ((ep: Episode | null) => number) = (ep) => episodeBusy(ep) ? 5000 : 0,
+  intervalMs: PollInterval<Episode> = (ep) => episodeBusy(ep) ? 2000 : 0,
 ) =>
   usePoll<Episode>(() => api.get(`/episodes/${episodeId}`), intervalMs, [episodeId])

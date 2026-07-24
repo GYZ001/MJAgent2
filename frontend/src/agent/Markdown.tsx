@@ -1,7 +1,7 @@
 import { type ReactNode } from 'react'
 
 /**
- * 轻量 Markdown 渲染：段落、标题、有序/无序列表、围栏代码块、行内 `代码` 与 **粗体**。
+ * 轻量 Markdown 渲染：段落、标题、表格、有序/无序列表、围栏代码块、行内 `代码` 与 **粗体**。
  * 全部渲染为 React 元素（不使用 dangerouslySetInnerHTML），天然防 XSS。
  * 目的只是让助手正文可读，不追求完整 CommonMark。
  */
@@ -28,6 +28,16 @@ function renderInline(text: string, keyBase: string): ReactNode[] {
   return nodes
 }
 
+function tableCells(line: string): string[] {
+  const trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '')
+  return trimmed.split('|').map(cell => cell.trim())
+}
+
+function isTableDivider(line: string): boolean {
+  const cells = tableCells(line)
+  return cells.length > 0 && cells.every(cell => /^:?-{3,}:?$/.test(cell))
+}
+
 export default function Markdown({ text }: { text: string }) {
   const lines = text.replace(/\r\n/g, '\n').split('\n')
   const blocks: ReactNode[] = []
@@ -49,6 +59,35 @@ export default function Markdown({ text }: { text: string }) {
       i += 1 // 跳过收尾 ```
       blocks.push(
         <pre key={`k${key++}`} className="md-pre"><code>{code.join('\n')}</code></pre>,
+      )
+      continue
+    }
+
+    // GFM 表格：避免模型返回的 `| 字段 | 值 |` 以原始管道字符展示。
+    if (i + 1 < lines.length && line.includes('|') && isTableDivider(lines[i + 1])) {
+      const headers = tableCells(line)
+      const rows: string[][] = []
+      i += 2
+      while (i < lines.length && lines[i].trim() && lines[i].includes('|')) {
+        rows.push(tableCells(lines[i]))
+        i += 1
+      }
+      const blockKey = `k${key++}`
+      blocks.push(
+        <div key={blockKey} className="md-table-wrap">
+          <table className="md-table">
+            <thead><tr>{headers.map((cell, idx) => <th key={idx}>{renderInline(cell, `${blockKey}-h${idx}`)}</th>)}</tr></thead>
+            <tbody>
+              {rows.map((row, rowIdx) => (
+                <tr key={rowIdx}>
+                  {headers.map((_, cellIdx) => (
+                    <td key={cellIdx}>{renderInline(row[cellIdx] ?? '', `${blockKey}-r${rowIdx}c${cellIdx}`)}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
       )
       continue
     }

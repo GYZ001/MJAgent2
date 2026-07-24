@@ -22,10 +22,6 @@ export default function AssistantTurnView({
   onFollowIntent: () => void
 }) {
   const streaming = item.status === 'streaming'
-  const hasBody = Boolean(
-    item.thinking.trim() || item.answer.trim() || item.approvals.length ||
-    item.runs.length || item.citations.length,
-  )
 
   return (
     <div className="agent-msg agent-msg-assistant">
@@ -35,10 +31,6 @@ export default function AssistantTurnView({
         <div className="agent-answer">
           <Markdown text={item.answer} />
           {streaming && <span className="agent-caret" aria-hidden="true" />}
-        </div>
-      ) : streaming && !hasBody ? (
-        <div className="agent-answer agent-thinking-hint">
-          <span className="agent-typing"><i /><i /><i /></span>
         </div>
       ) : null}
 
