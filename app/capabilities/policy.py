@@ -124,7 +124,7 @@ def consume_approval(
         raise PermissionError("approval_token args mismatch")
     if payload.state_fingerprint != state_fingerprint_now:
         raise PermissionError("approval_token state fingerprint mismatch")
-    if payload.session_id and session_id and payload.session_id != session_id:
+    if payload.session_id is not None and payload.session_id != session_id:
         raise PermissionError("approval_token session mismatch")
     payload.used_at = time.time()
     payload.decision = ApprovalDecision.APPROVE

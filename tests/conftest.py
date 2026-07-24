@@ -14,6 +14,13 @@ def _reset_capability_runtime():
     from app.capabilities.bus import reset_command_bus_for_tests
     from app.capabilities.idempotency import clear_for_tests
     from app.capabilities.policy import reset_approvals_for_tests
+    from app import db
+
+    # 幂等清理会打开进程级 DB；若此前被建成空库，先补齐 SCHEMA，避免无 settings 表。
+    try:
+        db.get_conn().execute("SELECT 1 FROM settings LIMIT 1").fetchone()
+    except Exception:  # noqa: BLE001
+        db.init_db()
 
     reset_command_bus_for_tests()
     reset_approvals_for_tests()

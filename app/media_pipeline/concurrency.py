@@ -54,7 +54,10 @@ _loop_semaphores: dict[tuple[int, str], asyncio.Semaphore] = {}
 
 
 def _int_setting(key: str, default: int) -> int:
-    raw = get_setting(key)
+    try:
+        raw = get_setting(key)
+    except Exception:  # noqa: BLE001 设置表未就绪时回落到通道默认值
+        return max(1, int(default))
     if raw is None or raw == "":
         return max(1, int(default))
     try:

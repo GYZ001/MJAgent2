@@ -424,7 +424,21 @@ async def _post_json(client: httpx.AsyncClient, url: str, payload: dict, *,
             resp = await client.post(url, json=payload, headers=req_headers)
             latency = int((time.time() - start) * 1000)
             if resp.status_code == 200:
-                data = resp.json()
+                try:
+                    data = resp.json()
+                except ValueError as exc:
+                    snippet = (resp.text or "")[:500]
+                    err = ProviderError(
+                        f"上游返回非法 JSON：{exc}",
+                        retryable=True,
+                        raw=snippet,
+                    )
+                    finish_provider_call(
+                        call_id, "FAILED", 200, latency, error=str(err),
+                        response_json={"status_code": 200, "body": snippet},
+                    )
+                    last_err = err
+                    continue
                 finish_provider_call(call_id, "OK", 200, latency, response_json=data)
                 return data
             err = _classify_http_error(resp.status_code, resp.text, key_name)

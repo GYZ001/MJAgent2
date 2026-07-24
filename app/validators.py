@@ -476,7 +476,7 @@ INNER_VOICE_MARKERS = ("内心", "心声", "OS", "os", "独白")
 # 防丢失校验的共用底座：剧本台/分镜台都要判断"某条关键台词/剧情点是否仍真实存在于文本里"。
 # 务实优先（本次定调）：只拦【明显丢失】，用模糊匹配容忍口语化改写/标点差异，绝不逐字比对，
 # 避免像历史 false-positive 那样空耗修复轮次。
-_SPEAKER_PREFIX_RE = re.compile(r"^[^\n：:]{1,16}(?:（[^）]{0,12}）)?[：:]")
+_SPEAKER_PREFIX_RE = re.compile(r"^([^\n：（(:]{1,16})(?:（[^）]{0,12}）)?[：:]")
 _NON_CONTENT_RE = re.compile(r"""[\s，。、；;：:！!？?“”"'‘’（）()【】\[\]《》〈〉—…·.,~\-]+""")
 # 关键台词主干连续保留过半即视为"仍在"（容忍前后改写，只要核心句仍出现）。
 KEY_LINE_PRESENT_RATIO = 0.4
@@ -491,6 +491,14 @@ MIN_KEY_PLOT_POINTS = 3          # 必保留关键剧情点下限
 def _strip_speaker(line: str) -> str:
     """去掉"角色名（情绪）："前缀，取台词正文本身用于匹配。"""
     return _SPEAKER_PREFIX_RE.sub("", (line or "").strip(), count=1).strip()
+
+
+def _speaker_name(line: str) -> str | None:
+    """提取 key_lines / 对白中的说话人姓名（不含情绪括号）。"""
+    m = _SPEAKER_PREFIX_RE.match((line or "").strip())
+    if not m:
+        return None
+    return m.group(1).strip() or None
 
 
 def _source_bible_dialogues(source_text: str | None, bible: Bible) -> list[str]:
@@ -835,11 +843,10 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
     if bible_names:
         non_bible_key_lines = []
         for ln in key_lines:
-            m = _SPEAKER_PREFIX_RE.match(ln)
-            if not m:
+            speaker = _speaker_name(ln)
+            if not speaker:
                 continue
-            speaker = m.group(0).rstrip("：:（）()").strip()
-            if speaker and speaker not in bible_names:
+            if speaker not in bible_names:
                 non_bible_key_lines.append(ln)
         if non_bible_key_lines:
             shown = "；".join(non_bible_key_lines[:KEY_CONTENT_MAX_REPORT])
@@ -869,10 +876,7 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
             script_speakers.setdefault(sp, []).append(line_text)
         mismatched = []
         for ln in key_lines:
-            m = _SPEAKER_PREFIX_RE.match(ln)
-            if not m:
-                continue
-            kl_speaker = m.group(0).rstrip("：:（）()").strip()
+            kl_speaker = _speaker_name(ln)
             if not kl_speaker or kl_speaker not in bible_names:
                 continue  # 非圣经角色已由上一条校验拦截
             kl_text = _strip_speaker(ln)

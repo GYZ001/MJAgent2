@@ -24,7 +24,10 @@ export type WaitingApprovalPayload = {
 
 type Resolver = (approved: boolean) => void
 
-let pending: { payload: WaitingApprovalPayload; resolve: Resolver } | null = null
+type PendingApproval = { payload: WaitingApprovalPayload; resolve: Resolver }
+
+let pending: PendingApproval | null = null
+const queue: PendingApproval[] = []
 const listeners = new Set<() => void>()
 
 export function subscribeApprovalPrompt(listener: () => void) {
@@ -40,10 +43,20 @@ function notify() {
   listeners.forEach(fn => fn())
 }
 
+function promoteNext() {
+  pending = queue.shift() ?? null
+  notify()
+}
+
 export function requestCapabilityApproval(payload: WaitingApprovalPayload): Promise<boolean> {
   return new Promise(resolve => {
-    pending = { payload, resolve }
-    notify()
+    const item: PendingApproval = { payload, resolve }
+    if (!pending) {
+      pending = item
+      notify()
+    } else {
+      queue.push(item)
+    }
   })
 }
 
@@ -51,8 +64,8 @@ export function resolveCapabilityApproval(approved: boolean) {
   if (!pending) return
   const { resolve } = pending
   pending = null
-  notify()
   resolve(approved)
+  promoteNext()
 }
 
 export function describeImpact(payload: WaitingApprovalPayload): string[] {

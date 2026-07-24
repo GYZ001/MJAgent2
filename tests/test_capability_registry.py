@@ -187,6 +187,49 @@ def test_approval_token_single_use() -> None:
         consume_approval(token, command="project.delete", args=args, state_fingerprint_now="sha256:abc")
 
 
+def test_approval_token_requires_bound_session() -> None:
+    preflight = PreflightResult(
+        command="project.delete",
+        allowed=True,
+        risk=RiskLevel.R3_DESTRUCTIVE,
+        summary="删除项目",
+        state_fingerprint="sha256:abc",
+        requires_confirmation=True,
+    )
+    args = {"project_id": "proj_x"}
+    token, _ = issue_approval(
+        command="project.delete", args=args, preflight=preflight, session_id="sess-1",
+    )
+    with pytest.raises(PermissionError, match="session mismatch"):
+        consume_approval(
+            token, command="project.delete", args=args,
+            state_fingerprint_now="sha256:abc", session_id=None,
+        )
+
+
+def test_bus_dry_run_rejects_when_preflight_denies() -> None:
+    bus = get_command_bus()
+    args = bus.registry.get_command("project.delete").input_model.model_validate(
+        {"project_id": "proj_x", "dry_run": True, "idempotency_key": "dry-deny"}
+    )
+    denied = PreflightResult(
+        command="project.delete",
+        allowed=False,
+        risk=RiskLevel.R3_DESTRUCTIVE,
+        summary="禁止删除",
+        state_fingerprint="sha256:deny",
+        denial_code="policy_denied",
+        denial_message="策略拒绝",
+        requires_confirmation=False,
+    )
+    result = bus._gate(
+        "project.delete", args, args.model_dump(mode="json"), denied, session_id=None,
+    )
+    assert result is not None
+    assert result.status == CommandStatus.REJECTED
+    assert result.error_code == "policy_denied"
+
+
 def test_core_commands_have_handlers_bound() -> None:
     registry = get_registry()
     for name in ("bible.generate", "project.delete", "video.generate_shot", "delivery.review", "run.control"):

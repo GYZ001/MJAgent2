@@ -63,10 +63,15 @@ def _load() -> dict[str, Any]:
         return {"tokens": {}}
     try:
         data = json.loads(TOKENS_PATH.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {"tokens": {}}
+    except (json.JSONDecodeError, OSError) as exc:
+        # 文件存在但不可读/损坏时 fail closed，禁止当作「首次启动」去签发 bootstrap token。
+        raise RuntimeError(
+            f"MCP token 存储损坏或不可读：{TOKENS_PATH}；请人工修复或删除后重启"
+        ) from exc
     if not isinstance(data, dict) or not isinstance(data.get("tokens"), dict):
-        return {"tokens": {}}
+        raise RuntimeError(
+            f"MCP token 存储格式非法：{TOKENS_PATH}；请人工修复或删除后重启"
+        )
     return data
 
 

@@ -96,14 +96,6 @@ export function countAdoptedVideos(shots: Shot[]): number {
   }).length
 }
 
-export function countCandidateVideos(shots: Shot[]): number {
-  return shots.filter(s => {
-    if (s.adopted_version_id) return true
-    if ((s.pipeline?.candidate_count ?? 0) > 0) return true
-    return (s.versions ?? []).some(v => v.status === 'succeeded' && !!v.video_url)
-  }).length
-}
-
 export function formatPipelineSummary(summary: import('./api').EpisodePipelineSummary | null | undefined, shotsTotal: number): string {
   if (!summary) {
     return `已采用 —/${shotsTotal}`

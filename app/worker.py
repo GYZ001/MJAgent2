@@ -643,8 +643,13 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
         key = make_idem_key(key_material + f"#reroll{time.time()}")
     else:
         key = make_idem_key(key_material)
+        # 复用成功版；同时挡住仍在排队/运行中的同键任务，避免双击重复付费。
         existing = conn.execute(
-            "SELECT * FROM shot_versions WHERE shot_id=? AND idem_key=? AND status='succeeded' LIMIT 1",
+            "SELECT * FROM shot_versions WHERE shot_id=? AND idem_key=? "
+            "AND status IN ('succeeded','queued','running','waiting_provider',"
+            "'waiting_retry','waiting_human','paused_budget') "
+            "ORDER BY CASE status WHEN 'succeeded' THEN 0 ELSE 1 END, version_no DESC "
+            "LIMIT 1",
             (shot_id, key)).fetchone()
         if existing:
             return {"reused": True, "version_id": existing["id"]}

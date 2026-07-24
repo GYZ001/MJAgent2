@@ -527,23 +527,24 @@ async def _ensure_videos(pid: str, eid: str, epno: int) -> None:
         # 媒体流水线负责重试/重抽；编排层只等待，不再第二套 enqueue
         active = conn.execute(
             "SELECT COUNT(*) c FROM jobs WHERE episode_id=? AND kind='video' "
-            "AND status IN ('queued','running','waiting_provider','waiting_retry','waiting_human') "
+            "AND status IN ('queued','running','waiting_provider','waiting_retry') "
             "AND cancellation_requested=0 AND abandoned=0",
             (eid,)).fetchone()["c"]
+        waiting_human = conn.execute(
+            "SELECT COUNT(*) c FROM jobs WHERE episode_id=? AND kind='video' "
+            "AND status='waiting_human' AND cancellation_requested=0 AND abandoned=0",
+            (eid,),
+        ).fetchone()["c"]
+        if waiting_human:
+            raise RuntimeError(
+                f"第{epno}集：{waiting_human} 镜待人工处理，自动流水线已停止。"
+                "请到评审墙处理后再重新点击一键全自动（会从断点续做）")
         if active == 0:
-            # 无活跃任务且仍有未采用镜头：可能全部失败或待人工。不再自动 reroll，
+            # 无活跃任务且仍有未采用镜头：可能全部失败。不再自动 reroll，
             # 避免与 worker QA 自动重抽叠加重复付费。
             failed_nos = [s["shot_no"] for s in pending]
-            waiting_human = conn.execute(
-                "SELECT COUNT(*) c FROM jobs WHERE episode_id=? AND kind='video' "
-                "AND status='waiting_human' AND cancellation_requested=0",
-                (eid,),
-            ).fetchone()["c"]
-            if waiting_human:
-                _log(pid, f"第{epno}集：{waiting_human} 镜待人工处理，编排层继续等待")
-            else:
-                raise RuntimeError(
-                    f"第{epno}集视频未完成镜：{failed_nos}（已无活跃任务，请到评审墙查看失败/待人工）")
+            raise RuntimeError(
+                f"第{epno}集视频未完成镜：{failed_nos}（已无活跃任务，请到评审墙查看失败/待人工）")
         await asyncio.sleep(_POLL)
     _log(pid, f"第{epno}集：视频全部就绪")
 
