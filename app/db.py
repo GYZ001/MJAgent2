@@ -993,12 +993,12 @@ def rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
 
 
 def get_setting(key: str) -> str:
+    """读取 settings；表未建或测试用内存库缺表时回退 DEFAULT_SETTINGS，避免拖垮主流程。"""
     try:
         row = get_conn().execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else DEFAULT_SETTINGS.get(key, "")
     except sqlite3.OperationalError:
-        # 测试/首次启动尚未跑完 SCHEMA 时，回落到内置默认值，避免把缺表当成业务失败。
         return DEFAULT_SETTINGS.get(key, "")
-    return row["value"] if row else DEFAULT_SETTINGS.get(key, "")
 
 
 def set_setting(key: str, value: str) -> None:
@@ -1057,6 +1057,32 @@ def log_provider_call(kind: str, model: str, status: str, http_status: int | Non
 
     trace = current_trace()
     conn = get_conn()
+    try:
+        _log_provider_call_inner(
+            conn, trace, kind, model, status, http_status, latency_ms,
+            error=error, meta=meta, request_json=request_json,
+            response_json=response_json, operation_id=operation_id,
+        )
+    except sqlite3.OperationalError:
+        # 观测写入为 best-effort：滚动升级或隔离单测库缺表时不应阻断业务。
+        pass
+
+
+def _log_provider_call_inner(
+    conn: sqlite3.Connection,
+    trace: Any,
+    kind: str,
+    model: str,
+    status: str,
+    http_status: int | None,
+    latency_ms: int,
+    *,
+    error: str | None = None,
+    meta: dict | None = None,
+    request_json: Any | None = None,
+    response_json: Any | None = None,
+    operation_id: str | None = None,
+) -> None:
     if not _provider_recovery_ledger_available(conn):
         conn.execute(
             """INSERT INTO provider_calls(
@@ -1103,6 +1129,23 @@ def start_provider_call(kind: str, model: str, *, meta: dict | None = None,
 
     trace = current_trace()
     conn = get_conn()
+    try:
+        return _start_provider_call_inner(
+            conn, trace, kind, model, meta=meta, request_json=request_json,
+        )
+    except sqlite3.OperationalError:
+        return 0
+
+
+def _start_provider_call_inner(
+    conn: sqlite3.Connection,
+    trace: Any,
+    kind: str,
+    model: str,
+    *,
+    meta: dict | None = None,
+    request_json: Any | None = None,
+) -> int:
     if not _provider_recovery_ledger_available(conn):
         cur = conn.execute(
             """INSERT INTO provider_calls(
@@ -1146,7 +1189,28 @@ def finish_provider_call(call_id: int, status: str, http_status: int | None,
                          latency_ms: int, *, error: str | None = None,
                          response_json: Any | None = None) -> None:
     """原地更新已开始的调用，避免“调用中 + 成功”被误认为两次模型花费。"""
+    if not call_id:
+        return
     conn = get_conn()
+    try:
+        _finish_provider_call_inner(
+            conn, call_id, status, http_status, latency_ms,
+            error=error, response_json=response_json,
+        )
+    except sqlite3.OperationalError:
+        pass
+
+
+def _finish_provider_call_inner(
+    conn: sqlite3.Connection,
+    call_id: int,
+    status: str,
+    http_status: int | None,
+    latency_ms: int,
+    *,
+    error: str | None = None,
+    response_json: Any | None = None,
+) -> None:
     updated = conn.execute(
         """UPDATE provider_calls
            SET status=?, http_status=?, latency_ms=?, error=?, response_json=?

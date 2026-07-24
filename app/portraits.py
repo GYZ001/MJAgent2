@@ -19,6 +19,7 @@ import asyncio
 import base64
 import json
 import re
+import sqlite3
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -721,11 +722,14 @@ def portrait_for_episode(project_id: str, name: str, episode_no: int | None) -> 
     """返回覆盖该集的定妆照落盘路径；未命中返回 None（调用方回退到 bible.ref_image_path）。"""
     if episode_no is None:
         return None
-    row = get_conn().execute(
-        "SELECT image_path FROM character_portraits "
-        "WHERE project_id=? AND character_name=? AND ep_start<=? AND (ep_end IS NULL OR ep_end>=?) "
-        "ORDER BY ep_start DESC LIMIT 1",
-        (project_id, name, episode_no, episode_no)).fetchone()
+    try:
+        row = get_conn().execute(
+            "SELECT image_path FROM character_portraits "
+            "WHERE project_id=? AND character_name=? AND ep_start<=? AND (ep_end IS NULL OR ep_end>=?) "
+            "ORDER BY ep_start DESC LIMIT 1",
+            (project_id, name, episode_no, episode_no)).fetchone()
+    except sqlite3.OperationalError:
+        return None
     if row and row["image_path"] and Path(row["image_path"]).exists():
         return row["image_path"]
     return None
@@ -735,11 +739,14 @@ def appearance_for_episode(project_id: str, name: str, episode_no: int | None) -
     """返回覆盖该集的定妆照外观锚点串；未命中返回 None（调用方回退到 bible 初始锚点）。"""
     if episode_no is None:
         return None
-    row = get_conn().execute(
-        "SELECT appearance FROM character_portraits "
-        "WHERE project_id=? AND character_name=? AND ep_start<=? AND (ep_end IS NULL OR ep_end>=?) "
-        "ORDER BY ep_start DESC LIMIT 1",
-        (project_id, name, episode_no, episode_no)).fetchone()
+    try:
+        row = get_conn().execute(
+            "SELECT appearance FROM character_portraits "
+            "WHERE project_id=? AND character_name=? AND ep_start<=? AND (ep_end IS NULL OR ep_end>=?) "
+            "ORDER BY ep_start DESC LIMIT 1",
+            (project_id, name, episode_no, episode_no)).fetchone()
+    except sqlite3.OperationalError:
+        return None
     return row["appearance"] if row and row["appearance"] else None
 
 
