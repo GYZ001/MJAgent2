@@ -226,14 +226,17 @@ def test_runtime_reference_mode_uses_stored_decision(monkeypatch) -> None:
         raise AssertionError("生成期不应再调用 LLM 模式选择")
 
     async def fake_build_reference_assets(**kwargs):
-        return [ReferenceImageAsset(
+        assets = [ReferenceImageAsset(
             id="r1", url="data:image/jpeg;base64,abc", type="character",
             source="seedream_generated", selectedForSeedance=True,
         )]
+        kwargs["on_progress"](assets, [])
+        return assets
 
     # 运行期一旦调用 LLM 选择即视为回归（应已被移除）
     monkeypatch.setattr(ShotVideoModeSelector, "select", fail_select)
-    monkeypatch.setattr(worker, "_set_version", lambda *a, **k: None)
+    writes: list[dict] = []
+    monkeypatch.setattr(worker, "_set_version", lambda *a, **k: writes.append(k))
     monkeypatch.setattr(video_modes, "build_reference_assets", fake_build_reference_assets)
 
     reference_decision = decision_to_dict(ShotVideoModeDecision(
@@ -253,7 +256,72 @@ def test_runtime_reference_mode_uses_stored_decision(monkeypatch) -> None:
 
     assert out_meta["mode"] == REFERENCE_IMAGE_MODE
     assert out_meta.get("reference_images")
+    streamed = [
+        json.loads(write["image_inputs"])
+        for write in writes
+        if write.get("image_inputs")
+    ]
+    assert any(item.get("reference_generation_complete") is False for item in streamed)
+    assert streamed[-1]["reference_generation_complete"] is True
     assert not out_meta.get("fallback_reason")
+
+
+def test_reference_assets_publish_each_completed_image_without_waiting_for_slowest(monkeypatch) -> None:
+    """快图完成后应先进入画廊，不能被同批慢图的生成/QA 阻塞。"""
+    monkeypatch.setattr(video_modes, "character_reference_assets", lambda *a, **k: [])
+    monkeypatch.setattr(video_modes, "scene_reference_assets", lambda *a, **k: [])
+    monkeypatch.setattr(video_modes, "reusable_previous_assets", lambda *a, **k: [])
+    monkeypatch.setattr(video_modes, "_portrait_seed_inputs", lambda *a, **k: [])
+    monkeypatch.setattr(video_modes, "reference_prompt_async", lambda: False)
+    monkeypatch.setattr(video_modes, "reference_gen_retries", lambda: 0)
+    monkeypatch.setattr(video_modes, "min_generated_references", lambda: 0)
+    monkeypatch.setattr(video_modes, "max_character_reference_images", lambda: 2)
+
+    async def fake_generate(*, index, **kwargs):
+        await asyncio.sleep(0.03 if index == 1 else 0.001)
+        return (
+            ReferenceImageAsset(
+                id=f"g{index}", url=f"u{index}", type="plot_key_frame",
+                source="seedream_generated", qualityScore=0.9,
+            ),
+            [],
+            [],
+        )
+
+    async def skip_consistency(*, selected, **kwargs):
+        return selected
+
+    monkeypatch.setattr(video_modes, "_generate_reference_keep_best", fake_generate)
+    monkeypatch.setattr(video_modes, "_enforce_reference_consistency", skip_consistency)
+
+    snapshots: list[list[str]] = []
+    decision = ShotVideoModeDecision(
+        mode=REFERENCE_IMAGE_MODE,
+        reason="x",
+        confidence=1.0,
+        referenceImagePlan=ReferenceImagePlan(
+            totalCount=2,
+            generateNewCount=2,
+            types=["plot_key_frame"],
+        ),
+    )
+
+    result = asyncio.run(video_modes.build_reference_assets(
+        conn=None,
+        project_id="p",
+        episode_no=1,
+        episode_id="e",
+        shot_id="s",
+        shot=_shot(),
+        bible=_bible(),
+        decision=decision,
+        on_progress=lambda current, _rejected: snapshots.append([a.id for a in current]),
+    ))
+
+    generated_snapshots = [ids for ids in snapshots if ids]
+    assert generated_snapshots[0] == ["g2"]
+    assert set(generated_snapshots[1]) == {"g1", "g2"}
+    assert {a.id for a in result} == {"g1", "g2"}
 
 
 def test_build_reference_assets_fallback_keyframe_yields_to_clean_portrait(monkeypatch) -> None:

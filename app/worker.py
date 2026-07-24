@@ -34,7 +34,9 @@ __all__ = [
 ]
 
 _queue: asyncio.Queue[str] = asyncio.Queue()
+_poll_queue: asyncio.Queue[str] = asyncio.Queue()
 _workers: list[asyncio.Task] = []
+_poll_workers: list[asyncio.Task] = []
 # 延迟重排任务的强引用，避免被 GC 回收（asyncio 不持有后台任务的引用）。
 _retry_tasks: set[asyncio.Task] = set()
 
@@ -48,12 +50,26 @@ def _assert_job_lease(job_id: str, owner: str, *, lease_seconds: float = 180.0) 
         raise LeaseLost(f"job lease lost: {job_id} / {owner}")
 
 
+def _enqueue_for_current_status(job_id: str) -> None:
+    """Route provider polling away from expensive reference/video preparation.
+
+    Both queues still use the same durable job row and CAS lease.  The split is
+    only scheduling priority: a completed provider task must not sit behind a
+    whole episode of image generation before it can be downloaded and adopted.
+    """
+    row = get_conn().execute(
+        "SELECT status FROM jobs WHERE id=?", (job_id,)
+    ).fetchone()
+    target = _poll_queue if row and row["status"] == "waiting_provider" else _queue
+    target.put_nowait(job_id)
+
+
 async def _requeue_after(job_id: str, delay: float) -> None:
     """冷却 delay 秒后把 job 重新投入队列。状态已先置回 queued，故进程重启时
     recover_and_start 也能兜底重排，不依赖本协程存活。"""
     try:
         await asyncio.sleep(delay)
-        _queue.put_nowait(job_id)
+        _enqueue_for_current_status(job_id)
     except asyncio.CancelledError:
         pass
 
@@ -999,7 +1015,10 @@ def _video_image_inputs_from_meta(meta: dict) -> list[tuple[str, str]]:
 async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dict, prompt_text: str) -> tuple[dict, str]:
     if meta.get("mode") != video_modes.REFERENCE_IMAGE_MODE:
         return meta, prompt_text
-    if meta.get("reference_images"):
+    # Historical galleries predate this marker and are complete.  A gallery
+    # explicitly marked incomplete is a streamed checkpoint from an interrupted
+    # generation and must resume instead of being mistaken for the final set.
+    if meta.get("reference_images") and meta.get("reference_generation_complete") is not False:
         return meta, prompt_text
     from app.schemas import Bible
 
@@ -1020,10 +1039,23 @@ async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dic
     shot_id = job["shot_id"]
     rejection_details: list[dict[str, Any]] = []
     rejected_assets: list = []  # 质检未通过的参考图（带图片），存入 meta 供废弃画廊展示
+
+    def _persist_reference_progress(current_assets: list, current_rejected: list) -> None:
+        """Checkpoint each completed reference so the polling UI can render it."""
+        meta["mode"] = video_modes.REFERENCE_IMAGE_MODE
+        meta["mode_decision"] = video_modes.decision_to_dict(decision)
+        meta["reference_generation_complete"] = False
+        meta["reference_images"] = (
+            [a.public_dict() for a in current_assets]
+            + [a.public_dict() for a in current_rejected]
+        )
+        _set_version(version["id"], image_inputs=json.dumps(meta, ensure_ascii=False))
+
     assets = await video_modes.build_reference_assets(
         conn=conn, project_id=job["project_id"], episode_no=ep["episode_no"], episode_id=job["episode_id"],
         shot_id=shot_id, shot=shot_model, bible=bible, decision=decision, prev_shot=prev_shot,
-        rejection_details=rejection_details, rejected_out=rejected_assets)
+        rejection_details=rejection_details, rejected_out=rejected_assets,
+        on_progress=_persist_reference_progress)
 
     # ── 第 1 次失败：记录原始失败原因并重试 1 次 ──
     if not assets:
@@ -1043,7 +1075,8 @@ async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dic
         assets = await video_modes.build_reference_assets(
             conn=conn, project_id=job["project_id"], episode_no=ep["episode_no"], episode_id=job["episode_id"],
             shot_id=shot_id, shot=shot_model, bible=bible, decision=decision, prev_shot=prev_shot,
-            rejection_details=retry_rejection, rejected_out=rejected_assets)
+            rejection_details=retry_rejection, rejected_out=rejected_assets,
+            on_progress=_persist_reference_progress)
         rejection_details.extend(retry_rejection)
 
         if assets:
@@ -1067,6 +1100,7 @@ async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dic
         meta["mode_decision"] = video_modes.decision_to_dict(decision)
         # 选用图 + 质检未通过的废弃图（selectedForSeedance=False）一并存档：前者喂模型，后者只展示。
         meta["reference_images"] = [a.public_dict() for a in assets] + [a.public_dict() for a in rejected_assets]
+        meta["reference_generation_complete"] = True
         meta.pop("first_frame_path", None)
         meta.pop("last_frame_path", None)
         meta.pop("first_frame_scene_id", None)
@@ -1103,6 +1137,7 @@ async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dic
         "rejection_details": rejection_details[:10],
         "prompt": prompt_text[:500],
     }]
+    meta["reference_generation_complete"] = True
     _set_version(version["id"], image_inputs=json.dumps(meta, ensure_ascii=False), prompt_text=prompt_text)
     raise ProviderError(f"视频生成任务失败：参考图模式未产出可用参考图（{ref_failure_reason}）")
 
@@ -1525,9 +1560,10 @@ def _extract_frames(video_path: str) -> list[str]:
 
 # ---------- worker 生命周期 ----------
 
-async def _worker_loop(name: str) -> None:
+async def _worker_loop(name: str, queue: asyncio.Queue[str] | None = None) -> None:
+    work_queue = queue or _queue
     while True:
-        job_id = await _queue.get()
+        job_id = await work_queue.get()
         try:
             claim = media_scheduler.claim_job(job_id, name, lease_seconds=180.0)
             if claim:
@@ -1542,7 +1578,7 @@ async def _worker_loop(name: str) -> None:
             if _set_job(job_id, "failed", public, lease_owner=name):
                 media_scheduler.settle_budget(job_id, 0.0, success=False)
         finally:
-            _queue.task_done()
+            work_queue.task_done()
 
 
 def recover_and_start(loop_concurrency: int | None = None) -> None:
@@ -1555,7 +1591,7 @@ def recover_and_start(loop_concurrency: int | None = None) -> None:
     decommission_legacy_keyframe_jobs()
     for job_id, delay in media_scheduler.recoverable_jobs():
         if delay <= 0:
-            _queue.put_nowait(job_id)
+            _enqueue_for_current_status(job_id)
         else:
             task = asyncio.get_running_loop().create_task(_requeue_after(job_id, delay))
             _retry_tasks.add(task)
@@ -1786,7 +1822,7 @@ def start_stale_lease_sweeper(interval_seconds: float = _SWEEPER_INTERVAL_SECOND
 
 
 def ensure_workers(n: int) -> None:
-    """把常驻 worker 池扩容或缩容到目标 n。设置热更新与一键全自动均可调用。"""
+    """把常驻生成 worker 池扩容或缩容到目标 n，并同步独立轮询 worker。"""
     n = max(0, int(n))
     try:
         loop = asyncio.get_running_loop()
@@ -1799,6 +1835,20 @@ def ensure_workers(n: int) -> None:
         _workers.append(loop.create_task(_worker_loop(f"w{len(_workers)}")))
     while len(_workers) > n:
         task = _workers.pop()
+        task.cancel()
+
+    from app.media_pipeline import stages as media_stages
+    from app.media_pipeline.concurrency import channel_limit
+
+    poll_n = channel_limit(media_stages.RESOURCE_VIDEO_POLL)
+    alive_poll = [t for t in _poll_workers if not t.done()]
+    _poll_workers.clear()
+    _poll_workers.extend(alive_poll)
+    while len(_poll_workers) < poll_n:
+        index = len(_poll_workers)
+        _poll_workers.append(loop.create_task(_worker_loop(f"poll{index}", _poll_queue)))
+    while len(_poll_workers) > poll_n:
+        task = _poll_workers.pop()
         task.cancel()
 
 
@@ -1820,12 +1870,15 @@ async def stop() -> None:
     _retry_tasks.clear()
     for t in _workers:
         t.cancel()
-    for t in _workers:
+    for t in _poll_workers:
+        t.cancel()
+    for t in (*_workers, *_poll_workers):
         try:
             await t
         except (asyncio.CancelledError, Exception):  # noqa: BLE001
             pass
     _workers.clear()
+    _poll_workers.clear()
 
 
 def retry_paused(episode_id: str) -> int:

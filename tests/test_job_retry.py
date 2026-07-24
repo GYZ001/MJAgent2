@@ -78,7 +78,10 @@ def test_running_provider_task_is_deferred_without_consuming_retry_budget(monkey
     )
     conn.commit()
     monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker._queue, "put_nowait", lambda _jid: None)
+    main_requeued: list[str] = []
+    poll_requeued: list[str] = []
+    monkeypatch.setattr(worker._queue, "put_nowait", main_requeued.append)
+    monkeypatch.setattr(worker._poll_queue, "put_nowait", poll_requeued.append)
 
     async def run() -> bool:
         scheduled = worker._defer_provider_poll(
@@ -99,6 +102,8 @@ def test_running_provider_task_is_deferred_without_consuming_retry_budget(monkey
     assert row["next_retry_at"] is not None
     assert row["lease_owner"] is None
     assert "不会重复提交" in row["error"]
+    assert main_requeued == []
+    assert poll_requeued == ["j1"]
 
 
 def test_retry_budget_exhausts(monkeypatch) -> None:

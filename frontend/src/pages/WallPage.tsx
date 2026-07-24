@@ -47,15 +47,21 @@ function Lightbox({ src, alt, onClose }: { src: string; alt: string; onClose: ()
 }
 
 /* ─── 取本镜参考图：当前版本尚未写入时，回退到最近一个有图的版本 ─── */
-function currentVersionRefs(shot: Shot): {
+export function currentVersionRefs(shot: Shot): {
   versionId: string
   versionNo: number
   refs: ReferenceImage[]
   isFallback: boolean
 } | null {
   const adopted = shot.versions.find(x => x.id === shot.adopted_version_id)
-  const preferred = adopted || shot.versions[0]
   const hasRefs = (version: ShotVersion) => (version.image_inputs?.reference_images?.length ?? 0) > 0
+  // A running version streams references into image_inputs one by one. Prefer
+  // that live gallery once its first image exists; otherwise an adopted version
+  // would hide all progress until the new video finished.
+  const live = shot.versions.find(version =>
+    ['queued', 'running', 'waiting_provider'].includes(version.status) && hasRefs(version)
+  )
+  const preferred = live || adopted || shot.versions[0]
   const v = preferred && hasRefs(preferred)
     ? preferred
     : shot.versions.find(hasRefs) || preferred

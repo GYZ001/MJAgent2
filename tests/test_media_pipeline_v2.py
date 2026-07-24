@@ -33,7 +33,10 @@ def test_defer_sets_waiting_provider(monkeypatch) -> None:
     )
     conn.commit()
     monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker._queue, "put_nowait", lambda _jid: None)
+    main_requeued: list[str] = []
+    poll_requeued: list[str] = []
+    monkeypatch.setattr(worker._queue, "put_nowait", main_requeued.append)
+    monkeypatch.setattr(worker._poll_queue, "put_nowait", poll_requeued.append)
 
     async def run() -> bool:
         ok = worker._defer_provider_poll("j1", "pt-1", lease_owner="w0", delay=0)
@@ -45,6 +48,8 @@ def test_defer_sets_waiting_provider(monkeypatch) -> None:
     assert asyncio.run(run()) is True
     row = conn.execute("SELECT status FROM jobs WHERE id='j1'").fetchone()
     assert row["status"] == "waiting_provider"
+    assert main_requeued == []
+    assert poll_requeued == ["j1"]
 
 
 def test_channel_defaults_balanced() -> None:

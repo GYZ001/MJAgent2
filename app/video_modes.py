@@ -8,7 +8,7 @@ import shutil
 import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from app import config, hiagent
 from app.atomic_io import atomic_write_bytes
@@ -814,7 +814,10 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
                                  shot_id: str, shot: Shot, bible: Bible,
                                  decision: ShotVideoModeDecision, prev_shot: Any | None = None,
                                  rejection_details: list[dict[str, Any]] | None = None,
-                                 rejected_out: list[ReferenceImageAsset] | None = None) -> list[ReferenceImageAsset]:
+                                 rejected_out: list[ReferenceImageAsset] | None = None,
+                                 on_progress: Callable[
+                                     [list[ReferenceImageAsset], list[ReferenceImageAsset]], None
+                                 ] | None = None) -> list[ReferenceImageAsset]:
     plan = decision.referenceImagePlan
     threshold = quality_threshold()
     max_refs = max_reference_images()
@@ -860,6 +863,29 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
     room = max(0, max_refs - len(selected))
     generated_needed = min(want_gen, room)
 
+    def _publish_progress() -> None:
+        """Expose the best-known gallery without waiting for every concurrent image.
+
+        The final consistency pass may still replace or suppress an item.  Until
+        then, generated candidates are safe to show as the current provisional
+        gallery and rejected attempts stay in the discarded section.
+        """
+        if on_progress is None:
+            return
+        for asset in selected:
+            asset.selectedForSeedance = True
+            asset.shotId = asset.shotId or shot_id
+            asset.episodeId = asset.episodeId or episode_id
+        visible_rejected = rejected_out or []
+        for asset in visible_rejected:
+            asset.selectedForSeedance = False
+            asset.shotId = asset.shotId or shot_id
+            asset.episodeId = asset.episodeId or episode_id
+        on_progress(list(selected), list(visible_rejected))
+
+    # Existing character/scene/continuity anchors can be rendered immediately.
+    _publish_progress()
+
     type_cycle = [t for t in plan.types if t in REFERENCE_IMAGE_TYPES and t not in {"previous_shot_frame"}] or ["plot_key_frame"]
     # 逐图规格：优先用模型按剧本写好的 (type, prompt)；不足时用类型轮换补齐（prompt 留空，下面逐图异步补写）。
     model_specs = [p for p in (plan.prompts or []) if p.get("prompt")]
@@ -895,20 +921,24 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
 
     # 并发生成所有参考图（每张带 QA 重试 + 全部不达标时保留最佳一版兜底）。
     if specs:
-        results = await asyncio.gather(*[
-            _generate_reference_keep_best(
+        tasks = [
+            asyncio.create_task(_generate_reference_keep_best(
                 project_id=project_id, episode_no=episode_no, shot=shot, bible=bible,
                 ref_type=t, index=i + 1, content_override=o, retries=reference_gen_retries(),
-                seed_inputs=_seeds_for(t))
+                seed_inputs=_seeds_for(t)))
             for i, (t, o) in enumerate(specs)
-        ])
-        for asset, discarded, rej in results:
+        ]
+        # Do not use gather here: it withholds fast results until the slowest
+        # reference (including its QA retries) finishes.
+        for completed in asyncio.as_completed(tasks):
+            asset, discarded, rej = await completed
             if rejection_details is not None:
                 rejection_details.extend(rej)
             if asset is not None:
                 selected.append(asset)
             if rejected_out is not None:
                 rejected_out.extend(discarded)
+            _publish_progress()
 
     # Phase 2：整组相对一致性检查——点名漂移的生成图，从锚点 i2i 重生；仍漂移则剔除（不喂 Seedance，进废弃画廊）。
     selected = await _enforce_reference_consistency(
@@ -932,6 +962,7 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
             asset.selectedForSeedance = False
             asset.shotId = asset.shotId or shot_id
             asset.episodeId = asset.episodeId or episode_id
+    _publish_progress()
     return selected
 
 
