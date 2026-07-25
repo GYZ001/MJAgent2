@@ -79,6 +79,33 @@ async def cancel_run(run_id: str):
             WorkflowRecorder(run_id).cancel("已取消暂停中的运行")
             cancelled = True
         return {"cancelled": cancelled, "run": repository.get_run(run_id)}
+    if run["workflow_type"] == "episode_video_completion":
+        from app.completion_grant import revoke_grant
+        from app.video_supervisor import load_latest_checkpoint, save_checkpoint
+
+        cancelled = await task_registry.cancel_and_wait("video_completion", run["scope_id"])
+        cp = load_latest_checkpoint(run["scope_id"])
+        if cp:
+            if cp.grant_id:
+                try:
+                    revoke_grant(cp.grant_id)
+                except Exception:  # noqa: BLE001
+                    pass
+            cp.phase = "CANCELLED"
+            cp.outcome = "CANCELLED"
+            save_checkpoint(cp, run_id=run_id)
+        if not cancelled:
+            WorkflowRecorder(run_id).cancel("已取消视频补齐")
+            cancelled = True
+        try:
+            get_conn().execute(
+                "UPDATE episodes SET video_completion_mode='quick' WHERE id=?",
+                (run["scope_id"],),
+            )
+            get_conn().commit()
+        except Exception:  # noqa: BLE001
+            pass
+        return {"cancelled": cancelled, "run": repository.get_run(run_id)}
     task = task_registry.get("run", run_id)
     if task and not task.done():
         await task_registry.cancel_and_wait("run", run_id)
@@ -248,16 +275,23 @@ async def pause_run(run_id: str):
         raise HTTPException(404, "运行不存在")
     if run["status"] not in repository.ACTIVE_RUN_STATUSES:
         raise HTTPException(409, "运行已结束，不能暂停")
-    if run["workflow_type"] != "storyboard":
-        raise HTTPException(400, "当前仅分镜 Supervisor 支持暂停")
-    from app.storyboard_control import request_control
-
-    request_control(run["scope_id"], "pause")
-    repository.append_event(
-        run_id, "SUPERVISOR_PAUSE_REQUESTED", "info", "已请求暂停（当前安全步骤后生效）",
-        payload={"episode_id": run["scope_id"]},
-    )
-    return {"paused_requested": True, "run": repository.get_run(run_id)}
+    if run["workflow_type"] == "storyboard":
+        from app.storyboard_control import request_control
+        request_control(run["scope_id"], "pause")
+        repository.append_event(
+            run_id, "SUPERVISOR_PAUSE_REQUESTED", "info", "已请求暂停（当前安全步骤后生效）",
+            payload={"episode_id": run["scope_id"]},
+        )
+        return {"paused_requested": True, "run": repository.get_run(run_id)}
+    if run["workflow_type"] == "episode_video_completion":
+        from app.video_control import request_control
+        request_control(run["scope_id"], "pause")
+        repository.append_event(
+            run_id, "VIDEO_SUPERVISOR_PAUSED", "info", "已请求暂停视频补齐",
+            payload={"episode_id": run["scope_id"]},
+        )
+        return {"paused_requested": True, "run": repository.get_run(run_id)}
+    raise HTTPException(400, "当前工作流不支持暂停")
 
 
 @router.post("/runs/{run_id}/handoff")
@@ -273,8 +307,33 @@ async def handoff_run(run_id: str):
     run = repository.get_run(run_id)
     if not run:
         raise HTTPException(404, "运行不存在")
+    if run["workflow_type"] == "episode_video_completion":
+        from app.video_control import request_control
+        from app.video_supervisor import load_latest_checkpoint, save_checkpoint
+        from app.orchestration.state_machine import transition_run
+
+        request_control(run["scope_id"], "handoff")
+        repository.append_event(
+            run_id, "VIDEO_SUPERVISOR_HANDOFF", "info", "已请求转人工",
+            payload={"episode_id": run["scope_id"]},
+        )
+        if run["status"] in {"PAUSED_EXTERNAL", "WAITING_RETRY", "WAITING_HUMAN"} or not task_registry.active(
+            "video_completion", run["scope_id"]
+        ):
+            cp = load_latest_checkpoint(run["scope_id"])
+            if cp:
+                cp.phase = "WAITING_HUMAN"
+                save_checkpoint(cp, run_id=run_id)
+            try:
+                if run["status"] == "RUNNING":
+                    transition_run(run_id, "RUNNING", "WAITING_HUMAN", "user_handoff")
+                elif run["status"] in {"PAUSED_EXTERNAL", "WAITING_RETRY"}:
+                    transition_run(run_id, run["status"], "WAITING_HUMAN", "user_handoff")
+            except Exception:  # noqa: BLE001
+                pass
+        return {"handoff_requested": True, "run": repository.get_run(run_id)}
     if run["workflow_type"] != "storyboard":
-        raise HTTPException(400, "当前仅分镜 Supervisor 支持转人工")
+        raise HTTPException(400, "当前仅分镜/视频 Supervisor 支持转人工")
     from app.storyboard_control import request_control
 
     request_control(run["scope_id"], "handoff")

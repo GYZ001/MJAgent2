@@ -14,6 +14,8 @@
 | [剧本分镜主线压缩与视频能力适配方案.md](./剧本分镜主线压缩与视频能力适配方案.md) | Renderability First：剧本/分镜只保主线、适配 Seedance 能力边界，废止全量细节防丢失 |
 | [剧本分镜与Seedance视频连续性整改方案.md](./剧本分镜与Seedance视频连续性整改方案.md) | 连续性状态链、一镜一主动作、禁止原文进 Seedance |
 | [视频生成流水线调度与阶段可视化整改方案.md](./视频生成流水线调度与阶段可视化整改方案.md) | QPSP 分阶段调度与进度可视化 |
+| [分镜全集Supervisor-AgentLoop与自动确认方案.md](./分镜全集Supervisor-AgentLoop与自动确认方案.md) | 集级分镜 Supervisor：自动修复、重规划、全量校验后自动确认 |
+| [评审墙全片视频Supervisor-AgentLoop与全覆盖补齐方案.md](./评审墙全片视频Supervisor-AgentLoop与全覆盖补齐方案.md) | 集级视频 Supervisor：可用视频三级判定、Issue 路由修复、预算内自主补齐到全片可用 |
 
 ---
 

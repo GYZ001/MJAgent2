@@ -1184,6 +1184,16 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             lease_seconds=max(180.0, float(config.TIMEOUT_VLM_READ) + 60.0),
         )
         force_best = await _maybe_auto_qa(job, version["id"], str(dest))
+        # 补齐模式下 B 级兜底由 Supervisor 显式决定，禁止 _maybe_auto_qa 隐式 force_best
+        try:
+            ep_mode = get_conn().execute(
+                "SELECT video_completion_mode FROM episodes WHERE id=?",
+                (job["episode_id"],),
+            ).fetchone()
+            if ep_mode and ep_mode["video_completion_mode"] == "complete":
+                force_best = False
+        except Exception:  # noqa: BLE001
+            pass
         _assert_job_lease(job_id, owner)
         media_evidence.record_video_candidate(
             version["id"], step_run_id=_row_value(job, "step_run_id")
@@ -1192,6 +1202,44 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             "SELECT technical_validation_json FROM shot_versions WHERE id=?", (version["id"],)
         ).fetchone()["technical_validation_json"] or "{}")
         if not technical.get("passed"):
+            # 技术校验失败：在 technical_resubmit_limit 内自动新建版本重提
+            from app.media_pipeline.retry_policy import technical_resubmit_limit
+            resubmits = 0
+            try:
+                meta = json.loads(version["image_inputs"] or "{}")
+                resubmits = int(meta.get("technical_resubmit_count") or 0)
+            except Exception:  # noqa: BLE001
+                resubmits = 0
+            if resubmits < technical_resubmit_limit():
+                enqueue_shot(
+                    job["shot_id"],
+                    reroll=True,
+                    after_shot_id=job["after_shot_id"],
+                    auto_retake_count=resubmits + 1,
+                )
+                # 标记新版本的 technical_resubmit_count（尽力而为）
+                try:
+                    new_ver = get_conn().execute(
+                        """SELECT id, image_inputs FROM shot_versions
+                           WHERE shot_id=? ORDER BY version_no DESC LIMIT 1""",
+                        (job["shot_id"],),
+                    ).fetchone()
+                    if new_ver:
+                        import json as _json
+                        m = _json.loads(new_ver["image_inputs"] or "{}")
+                        if isinstance(m, dict):
+                            m["technical_resubmit_count"] = resubmits + 1
+                            get_conn().execute(
+                                "UPDATE shot_versions SET image_inputs=? WHERE id=?",
+                                (_json.dumps(m, ensure_ascii=False), new_ver["id"]),
+                            )
+                            get_conn().commit()
+                except Exception:  # noqa: BLE001
+                    pass
+                if _set_job(job_id, "succeeded", lease_owner=owner):
+                    media_scheduler.settle_budget(job_id, cost, success=True)
+                    reconcile_episode_generation_status(job["episode_id"])
+                return
             raise ProviderError("视频文件技术校验失败，候选不可采用")
         media_evidence.select_best_video_candidate(
             job["shot_id"], force_best=force_best

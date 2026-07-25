@@ -245,6 +245,108 @@ def _qa_overall(qa: dict[str, Any]) -> float | None:
         return None
 
 
+def grade_shot_video(
+    shot_id: str | None = None,
+    *,
+    technical: dict[str, Any] | None = None,
+    qa: dict[str, Any] | None = None,
+    version_row: dict[str, Any] | None = None,
+    continuity_degraded: bool = False,
+) -> dict[str, Any]:
+    """可用视频三级判定（A/B/C），确定性、不调用模型。
+
+    可传入已加载的 technical/qa，或 shot_id（读采用版/最佳成功版）。
+    """
+    from app.video_issues import fatal_failure_types, is_fatal_failure_code
+
+    conn = get_conn()
+    row = version_row
+    if row is None and shot_id:
+        shot = conn.execute(
+            "SELECT adopted_version_id FROM shots WHERE id=?", (shot_id,)
+        ).fetchone()
+        vid = shot["adopted_version_id"] if shot else None
+        if vid:
+            row = conn.execute("SELECT * FROM shot_versions WHERE id=?", (vid,)).fetchone()
+        if row is None and shot_id:
+            row = conn.execute(
+                """SELECT * FROM shot_versions
+                   WHERE shot_id=? AND status='succeeded'
+                   ORDER BY version_no DESC LIMIT 1""",
+                (shot_id,),
+            ).fetchone()
+    if row is not None and not isinstance(row, dict):
+        row = dict(row)
+
+    if technical is None and row is not None:
+        technical = json.loads(row.get("technical_validation_json") or "{}")
+    if qa is None and row is not None:
+        qa = json.loads(row.get("qa_json") or "{}")
+    technical = technical or {}
+    qa = qa or {}
+
+    if row is not None and not continuity_degraded:
+        try:
+            meta = json.loads(row.get("image_inputs") or "{}")
+            continuity_degraded = bool(meta.get("continuity_degraded"))
+        except (TypeError, ValueError):
+            pass
+
+    try:
+        threshold = float(get_setting("auto_retake_threshold") or 0.6)
+    except (TypeError, ValueError):
+        threshold = 0.6
+
+    hard_failures = classify_video_hard_failures(qa, technical=technical) if technical or qa else []
+    fatal = [f for f in hard_failures if is_fatal_failure_code(f)]
+    non_fatal = [f for f in hard_failures if f not in fatal]
+    score = _qa_overall(qa)
+    qa_recovered = bool(qa.get("qa_recovered"))
+    passed = bool(technical.get("passed"))
+    version_id = (row or {}).get("id") if row else None
+
+    fallback_reason: str | None = None
+    if not passed or fatal:
+        grade = "C"
+    elif continuity_degraded:
+        grade = "B"
+        fallback_reason = "连续性已降链（纯参考图模式），衔接可能变弱"
+    elif (
+        not fatal
+        and not qa_recovered
+        and not non_fatal
+        and score is not None
+        and score >= threshold
+    ):
+        grade = "A"
+    elif passed and not fatal:
+        grade = "B"
+        reasons = []
+        if score is None or score < threshold:
+            reasons.append(f"QA {score if score is not None else 'n/a'} < 阈值 {threshold:.2f}")
+        if non_fatal:
+            reasons.append("非致命硬失败：" + ",".join(non_fatal))
+        if qa_recovered:
+            reasons.append("QA 结果为 recovered 占位")
+        fallback_reason = "；".join(reasons) or "技术合格但未达 A 级标准"
+    else:
+        grade = "C"
+
+    return {
+        "grade": grade,
+        "version_id": version_id,
+        "technical_passed": passed,
+        "hard_failures": hard_failures,
+        "fatal_failures": fatal,
+        "qa_overall": score,
+        "threshold": threshold,
+        "qa_recovered": qa_recovered,
+        "continuity_degraded": continuity_degraded,
+        "fallback_reason": fallback_reason,
+        "fatal_failure_types": sorted(fatal_failure_types()),
+    }
+
+
 def _shot_retakes_exhausted(conn: Any, shot_id: str) -> bool:
     """自动重抽名额是否已用尽（任一成功版本的 auto_retake_count ≥ 上限）。"""
     from app.media_pipeline.retry_policy import auto_retake_limit
@@ -363,11 +465,37 @@ def select_best_video_candidate(
         shot = conn.execute("SELECT episode_id FROM shots WHERE id=?", (shot_id,)).fetchone()
         if shot:
             invalidate_episode_final(shot["episode_id"])
+    image_inputs = "{}"
+    try:
+        img_row = conn.execute(
+            "SELECT image_inputs FROM shot_versions WHERE id=?", (best["id"],)
+        ).fetchone()
+        if img_row:
+            image_inputs = img_row["image_inputs"] or "{}"
+    except Exception:  # noqa: BLE001 旧库无 image_inputs 列
+        image_inputs = "{}"
+    tech_row = conn.execute(
+        "SELECT technical_validation_json FROM shot_versions WHERE id=?",
+        (best["id"],),
+    ).fetchone()
+    graded = grade_shot_video(
+        shot_id,
+        technical=json.loads((tech_row["technical_validation_json"] if tech_row else None) or "{}"),
+        qa=best.get("qa") or {},
+        version_row={"id": best["id"], "image_inputs": image_inputs},
+    )
+    grade = graded["grade"]
+    # force_best 兜底最多 B 级（不可伪装成 A）
+    if fallback and grade == "A":
+        grade = "B"
+        graded["fallback_reason"] = reason
     return {
         "version_id": best["id"],
         "reason": reason,
         "comparison": ordered,
         "fallback": fallback,
+        "grade": grade,
+        "fallback_reason": graded.get("fallback_reason") if grade == "B" else None,
     }
 
 

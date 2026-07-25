@@ -220,6 +220,22 @@ def video_generate_episode(args) -> PreflightResult:
             denial_code="not_found",
             denial_message="剧集不存在",
         )
+    try:
+        from app import task_registry
+        if task_registry.active("video_completion", args.episode_id):
+            return PreflightResult(
+                command="video.generate_episode",
+                allowed=False,
+                risk=RiskLevel.R2_MATERIAL,
+                summary="全片补齐 Supervisor 运行中",
+                state_fingerprint=_fp({"episode_id": args.episode_id, "supervisor": True}),
+                requires_confirmation=False,
+                confirmation_policy=ConfirmationPolicy.ALWAYS,
+                denial_code="conflict",
+                denial_message="全片补齐 Supervisor 运行中，请等待完成或取消后再用快速生成",
+            )
+    except Exception:  # noqa: BLE001
+        pass
     pending = conn.execute(
         """SELECT COUNT(*) AS c FROM shots
            WHERE episode_id=? AND (adopted_version_id IS NULL OR adopted_version_id='')""",
@@ -249,6 +265,190 @@ def video_generate_episode(args) -> PreflightResult:
         }),
         requires_confirmation=True,
         confirmation_policy=ConfirmationPolicy.ALWAYS,
+    )
+
+
+def video_complete_episode(args) -> PreflightResult:
+    import math
+    conn = get_conn()
+    ep = conn.execute(
+        "SELECT id, episode_no, status, storyboard_artifact_id FROM episodes WHERE id=?",
+        (args.episode_id,),
+    ).fetchone()
+    if not ep:
+        return PreflightResult(
+            command="video.complete_episode",
+            allowed=False,
+            risk=RiskLevel.R2_MATERIAL,
+            summary="剧集不存在",
+            state_fingerprint=_fp({"episode_id": args.episode_id, "missing": True}),
+            requires_confirmation=False,
+            confirmation_policy=ConfirmationPolicy.ALWAYS,
+            denial_code="not_found",
+            denial_message="剧集不存在",
+        )
+    # Supervisor 已在跑时，resume/抬额允许；fresh 仍可被核心拒绝
+    total = conn.execute(
+        "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (args.episode_id,)
+    ).fetchone()["c"]
+    uncovered = conn.execute(
+        """SELECT COUNT(*) AS c FROM shots
+           WHERE episode_id=? AND (adopted_version_id IS NULL OR adopted_version_id='')""",
+        (args.episode_id,),
+    ).fetchone()["c"]
+    grades = {"A": 0, "B": 0, "C": int(uncovered or 0)}
+    try:
+        from app.video_supervisor import rebuild_coverage_ledger
+        ledger = rebuild_coverage_ledger(args.episode_id)
+        uncovered = ledger.grades.get("C", uncovered)
+        grades = ledger.grades
+    except Exception:  # noqa: BLE001
+        pass
+    estimated = round(max(int(uncovered or 0), 1) * 3.6 * 1.6, 2)
+    try:
+        from app.video_cost_model import predict_episode_completion_cost
+        from app.video_supervisor import rebuild_coverage_ledger
+        ledger = rebuild_coverage_ledger(args.episode_id)
+        uncovered_ids = [e.shot_id for e in ledger.entries if e.grade == "C" or e.video_stale or e.chain_stale]
+        pred = predict_episode_completion_cost(args.episode_id, uncovered_shot_ids=uncovered_ids)
+        if pred.get("expected_cny"):
+            estimated = float(pred["expected_cny"])
+    except Exception:  # noqa: BLE001
+        pass
+    confirmed = ep["status"] in {"confirmed", "generating", "done", "mixed"}
+    allow_edit = bool(getattr(args, "allow_storyboard_edit", False))
+    risk = RiskLevel.R3_DESTRUCTIVE if allow_edit else RiskLevel.R2_MATERIAL
+    cap = getattr(args, "budget_cap_cny", None) or 150.0
+    wall = getattr(args, "wall_clock_cap_s", None) or 14400
+    fallback = getattr(args, "max_fallback_shots", None)
+    if fallback is None:
+        fallback = max(1, int(math.ceil(int(total or 0) * 0.2)))
+    summary = (
+        f"补齐第 {ep['episode_no']} 集到全片可用："
+        f"当前 A={grades.get('A', 0)} B={grades.get('B', 0)} 未覆盖={grades.get('C', uncovered)}；"
+        f"授权预算 ¥{float(cap):.0f}，时长墙 {float(wall)/3600:.0f}h，B 级配额 {fallback}"
+    )
+    if allow_edit:
+        summary += "；已授权微调分镜"
+    summary += "。不会自动拼接成片或创建交付包。"
+    return PreflightResult(
+        command="video.complete_episode",
+        allowed=True,
+        risk=risk,
+        summary=summary,
+        estimated_cost_cny=min(estimated, float(cap)),
+        affected=AffectedScope(episodes=[args.episode_id], shot_count=int(uncovered or 0)),
+        preconditions=[
+            PreconditionCheck(
+                key="storyboard_confirmed",
+                passed=confirmed,
+                message="分镜已确认" if confirmed else "分镜未确认",
+            ),
+            PreconditionCheck(
+                key="has_shots",
+                passed=int(total or 0) > 0,
+                message=f"共 {total} 镜",
+            ),
+        ],
+        state_fingerprint=_fp({
+            "episode_id": args.episode_id,
+            "status": ep["status"],
+            "storyboard_artifact_id": ep["storyboard_artifact_id"],
+            "grades": grades,
+            "budget_cap_cny": cap,
+            "wall_clock_cap_s": wall,
+            "max_fallback_shots": fallback,
+            "allow_storyboard_edit": allow_edit,
+        }),
+        requires_confirmation=True,
+        confirmation_policy=ConfirmationPolicy.ALWAYS,
+    )
+
+
+def video_complete_project(args) -> PreflightResult:
+    conn = get_conn()
+    project = conn.execute(
+        "SELECT id, name FROM projects WHERE id=?", (args.project_id,)
+    ).fetchone()
+    if not project:
+        return PreflightResult(
+            command="video.complete_project",
+            allowed=False,
+            risk=RiskLevel.R2_MATERIAL,
+            summary="项目不存在",
+            state_fingerprint=_fp({"project_id": args.project_id, "missing": True}),
+            requires_confirmation=False,
+            confirmation_policy=ConfirmationPolicy.ALWAYS,
+            denial_code="not_found",
+            denial_message="项目不存在",
+        )
+    rows = conn.execute(
+        """SELECT id, episode_no, status FROM episodes
+           WHERE project_id=? ORDER BY episode_no""",
+        (args.project_id,),
+    ).fetchall()
+    episode_ids = getattr(args, "episode_ids", None)
+    if episode_ids:
+        wanted = set(episode_ids)
+        rows = [r for r in rows if r["id"] in wanted]
+    eligible = [r for r in rows if r["status"] in {"confirmed", "generating", "done", "mixed"}]
+    global_cap = float(getattr(args, "global_budget_cap_cny", None) or 500)
+    per_cap = float(getattr(args, "per_episode_cap_cny", None) or 150)
+    allow_edit = bool(getattr(args, "allow_storyboard_edit", False))
+    estimated = round(min(global_cap, max(1, len(eligible)) * per_cap * 0.65), 2)
+    try:
+        from app.video_cost_model import predict_episode_completion_cost
+        from app.video_supervisor import rebuild_coverage_ledger
+        total_est = 0.0
+        for r in eligible:
+            ledger = rebuild_coverage_ledger(r["id"])
+            if ledger.covered_within_quota():
+                continue
+            uncovered_ids = [
+                e.shot_id for e in ledger.entries
+                if e.grade == "C" or e.video_stale or e.chain_stale
+            ]
+            pred = predict_episode_completion_cost(r["id"], uncovered_shot_ids=uncovered_ids)
+            total_est += float(pred.get("expected_cny") or 0)
+        if total_est > 0:
+            estimated = min(global_cap, total_est)
+    except Exception:  # noqa: BLE001
+        pass
+    risk = RiskLevel.R3_DESTRUCTIVE if allow_edit else RiskLevel.R2_MATERIAL
+    summary = (
+        f"跨集补齐「{project['name']}」："
+        f"{len(eligible)}/{len(rows)} 集可补齐，全局预算 ¥{global_cap:.0f}，"
+        f"单集上限 ¥{per_cap:.0f}。串行启动，不自动成片/交付。"
+    )
+    return PreflightResult(
+        command="video.complete_project",
+        allowed=bool(eligible),
+        risk=risk,
+        summary=summary if eligible else "没有可补齐的已确认剧集",
+        estimated_cost_cny=estimated if eligible else 0,
+        affected=AffectedScope(
+            projects=[args.project_id],
+            episodes=[r["id"] for r in eligible],
+            shot_count=0,
+        ),
+        preconditions=[
+            PreconditionCheck(
+                key="has_eligible_episodes",
+                passed=bool(eligible),
+                message=f"可补齐 {len(eligible)} 集" if eligible else "无可补齐剧集",
+            ),
+        ],
+        state_fingerprint=_fp({
+            "project_id": args.project_id,
+            "episode_ids": [r["id"] for r in eligible],
+            "global_budget_cap_cny": global_cap,
+            "per_episode_cap_cny": per_cap,
+            "allow_storyboard_edit": allow_edit,
+        }),
+        requires_confirmation=True,
+        confirmation_policy=ConfirmationPolicy.ALWAYS,
+        denial_code=None if eligible else "no_eligible_episodes",
+        denial_message=None if eligible else "没有可补齐的已确认剧集",
     )
 
 
@@ -481,6 +681,8 @@ PREFLIGHT_MAP: dict[str, Any] = {
     "video.clear_shot": video_clear_shot,
     "video.generate_shot": video_generate_shot,
     "video.generate_episode": video_generate_episode,
+    "video.complete_episode": video_complete_episode,
+    "video.complete_project": video_complete_project,
     "storyboard.confirm": storyboard_confirm,
     "shot.update": shot_update,
     "screenplay.update": screenplay_update,

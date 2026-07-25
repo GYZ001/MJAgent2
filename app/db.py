@@ -726,6 +726,9 @@ MIGRATIONS = (
     "ALTER TABLE episodes ADD COLUMN storyboard_warning TEXT",
     "ALTER TABLE episodes ADD COLUMN active_storyboard_run_id TEXT",
     "ALTER TABLE episodes ADD COLUMN storyboard_completion_mode TEXT NOT NULL DEFAULT 'ready_for_manual_confirm'",
+    "ALTER TABLE episodes ADD COLUMN active_video_run_id TEXT",
+    "ALTER TABLE episodes ADD COLUMN video_completion_mode TEXT NOT NULL DEFAULT 'quick'",
+    "ALTER TABLE episodes ADD COLUMN video_control_json TEXT",
     # QPSP：权威阶段字段与参考图槽位检查点
     "ALTER TABLE jobs ADD COLUMN pipeline_stage TEXT",
     "ALTER TABLE jobs ADD COLUMN stage_status TEXT",

@@ -5,7 +5,6 @@ import { EpStamp } from './BiblePage'
 import EpisodeCrumb from '../components/EpisodeCrumb'
 import AsyncButton from '../components/AsyncButton'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
-import EvidenceDrawer from '../components/harness/EvidenceDrawer'
 import ImpactDialog, { ImpactSummary } from '../components/harness/ImpactDialog'
 import SupervisorPanel from '../components/SupervisorPanel'
 
@@ -16,45 +15,59 @@ const DURATIONS = [5, 6, 7, 8, 9, 10]
 const CONTINUITY_MODES = ['action_continuation', 'same_scene_cut', 'reaction_cut', 'reverse_angle', 'insert_detail', 'scene_change']
 
 const ARTIFACT_STATUS_LABEL: Record<string, string> = {
-  candidate: '草稿候选',
+  candidate: '草稿',
   needs_revision: '待修改',
-  validated: '业务通过',
-  approved: '人工确认',
+  validated: '已通过',
+  approved: '已确认',
   rejected: '已拒绝',
   superseded: '已替代',
   stale: '已失效',
 }
 
-const SPOKEN_STATUS_LABEL: Record<string, string> = {
-  coherent: '口播一致',
-  conflict: '口播冲突',
-  legacy: '旧口播',
+const CONTINUITY_MODE_LABEL: Record<string, string> = {
+  action_continuation: '动作延续',
+  same_scene_cut: '同场切换',
+  reaction_cut: '反应镜头',
+  reverse_angle: '反打',
+  insert_detail: '细节插入',
+  scene_change: '转场换景',
 }
 
+/** 分镜台只露出「需要用户处理」的状态；正常通过不堆徽章。 */
 function ShotLifecycleBadges({ shot }: { shot: Shot }) {
   const ev = shot.storyboard_evidence
   const artifactStatus = ev?.status || ''
   const spoken = shot.spoken_contract_status || ''
-  const hardGate = Array.isArray(ev?.evaluations)
-    ? ev!.evaluations.some(e => e.hard_gate_passed)
-    : false
+  const problemStatuses = new Set(['needs_revision', 'rejected', 'stale', 'superseded', 'candidate'])
+  const badges: Array<{ key: string; label: string; className: string }> = []
+
+  if (spoken === 'conflict') {
+    badges.push({ key: 'spoken', label: '口播冲突', className: 'shot-badge spoken-conflict' })
+  }
+  if (problemStatuses.has(artifactStatus)) {
+    badges.push({
+      key: 'status',
+      label: ARTIFACT_STATUS_LABEL[artifactStatus] || artifactStatus,
+      className: `shot-badge status-${artifactStatus}`,
+    })
+  }
+  if (shot.legacy_unvalidated) {
+    badges.push({ key: 'legacy', label: '待补全', className: 'shot-badge legacy' })
+  }
+  if (!badges.length) return null
   return (
     <span className="shot-lifecycle-badges" aria-label="镜头状态">
-      {artifactStatus && (
-        <span className={`shot-badge status-${artifactStatus}`}>
-          {ARTIFACT_STATUS_LABEL[artifactStatus] || artifactStatus}
-        </span>
-      )}
-      {spoken && (
-        <span className={`shot-badge spoken-${spoken}`}>
-          {SPOKEN_STATUS_LABEL[spoken] || spoken}
-        </span>
-      )}
-      {ev?.trust_level && <span className="shot-badge trust">{ev.trust_level}</span>}
-      {hardGate && <span className="shot-badge gate">硬门通过</span>}
-      {shot.legacy_unvalidated && <span className="shot-badge legacy">待补 ID</span>}
+      {badges.map(b => (
+        <span key={b.key} className={b.className}>{b.label}</span>
+      ))}
     </span>
   )
+}
+
+function continuityLabel(mode?: string | null, fromPrev?: boolean): string {
+  if (mode && CONTINUITY_MODE_LABEL[mode]) return CONTINUITY_MODE_LABEL[mode]
+  if (mode) return mode
+  return fromPrev ? '接上镜' : ''
 }
 
 function ShotMetaTokens({ values, tone }: { values?: string[]; tone: 'visible' | 'audio' | 'information' }) {
@@ -203,31 +216,34 @@ export default function BoardPage() {
         <div className="board-toolbar-row">
           <div className="board-status-group">
           <EpStamp status={ep.status} />
-          <span className={`stamp ${ep.screenplay_status === 'ready' ? 'green' : ep.screenplay_status === 'running' ? 'gold' : ep.screenplay_status === 'failed' || ep.screenplay_status === 'warning' ? 'red' : 'grey'}`}>
-            {ep.screenplay_status === 'ready' ? '剧本成' : ep.screenplay_status === 'warning' ? '剧本有阻塞' : ep.screenplay_status === 'running' ? '剧本中' : ep.screenplay_status === 'failed' ? '剧本败' : '待剧本'}
-          </span>
-          {ep.screenplay_mode === 'full_script' && <span className="stamp grey">完整剧本</span>}
+          {ep.screenplay_status !== 'ready' && (
+            <span className={`stamp ${ep.screenplay_status === 'running' ? 'gold' : ep.screenplay_status === 'failed' || ep.screenplay_status === 'warning' ? 'red' : 'grey'}`}>
+              {ep.screenplay_status === 'warning' ? '剧本有阻塞' : ep.screenplay_status === 'running' ? '剧本中' : ep.screenplay_status === 'failed' ? '剧本败' : '待剧本'}
+            </span>
+          )}
           </div>
           <div className="board-action-group">
-          <button className="btn" disabled={busy || ep.status === 'scripting' || ep.screenplay_status !== 'ready'}
-            onClick={() => confirmRegenerateStoryboard(canResumeCheckpoint ? 'resume' : 'fresh')}>
-            {canResumeCheckpoint ? `从镜${String((ep.shots?.length ?? 0) + 1).padStart(2, '0')}继续` : ep.shots?.length ? '重新生成分镜' : '生成并等待确认'}
-          </button>
-          {!canResumeCheckpoint && ep.screenplay_status === 'ready' && (
-            <button className="btn ghost" disabled={busy || ep.status === 'scripting'}
+          {ep.status !== 'scripting' && (
+            <button className="btn" disabled={busy || ep.screenplay_status !== 'ready'}
+              onClick={() => confirmRegenerateStoryboard(canResumeCheckpoint ? 'resume' : 'fresh')}>
+              {canResumeCheckpoint ? `从镜${String((ep.shots?.length ?? 0) + 1).padStart(2, '0')}继续` : ep.shots?.length ? '重新生成分镜' : '生成并等待确认'}
+            </button>
+          )}
+          {ep.status !== 'scripting' && !canResumeCheckpoint && ep.screenplay_status === 'ready' && (
+            <button className="btn ghost" disabled={busy}
               onClick={() => confirmRegenerateStoryboard('fresh', 'auto_confirm')}>
               生成完成后自动确认
             </button>
           )}
-          {canResumeCheckpoint && (
-            <AsyncButton className="btn ghost" disabled={busy || ep.status === 'scripting'}
+          {ep.status !== 'scripting' && canResumeCheckpoint && (
+            <AsyncButton className="btn ghost" disabled={busy}
               busyLabel="提交中…"
               onAction={async () => { confirmRegenerateStoryboard('fresh') }}>
               重新生成整版
             </AsyncButton>
           )}
-          {canResumeCheckpoint && (
-            <button className="btn ghost" disabled={busy || ep.status === 'scripting'}
+          {ep.status !== 'scripting' && canResumeCheckpoint && (
+            <button className="btn ghost" disabled={busy}
               onClick={() => confirmRegenerateStoryboard('fresh', 'auto_confirm')}>
               重生成并自动确认
             </button>
@@ -253,25 +269,22 @@ export default function BoardPage() {
               }}>确认分镜（解锁生成）</button>
           )}
           {(ep.status === 'confirmed' || ep.status === 'generating') && (
-            <>
-              <span className="stamp green" style={{ alignSelf: 'center' }}>分镜已确认 · 尚未产生视频费用</span>
-              <button className="btn primary" disabled={busy}
-                onClick={() => go('wall', projectId, ep.id)}>
-                入评审墙生成视频 →
-              </button>
-            </>
+            <button className="btn primary" disabled={busy}
+              onClick={() => go('wall', projectId, ep.id)}>
+              入评审墙生成视频 →
+            </button>
           )}
           </div>
           <div className="board-toolbar-meta">
-          <TaskTimer label="分镜" timer={storyboardTimer} />
-          {ep.storyboard_evidence && <EvidenceDrawer evidence={ep.storyboard_evidence} label="分镜证据" />}
+          {ep.status === 'scripting' && <TaskTimer label="分镜" timer={storyboardTimer} />}
           </div>
         </div>
         <div className="board-stat-strip" aria-label="分镜统计">
           <span><b>{ep.shots?.length ?? 0}</b> 镜头</span>
           <span><b>{totalDur}s</b> 总时长</span>
-          <span><b>默认 5s</b> · &gt;5s 需 AI 审核</span>
-          <span><b>¥{ep.cost_cny.toFixed(1)}</b> 已耗</span>
+          {ep.supervisor?.expected_total ? (
+            <span><b>{ep.supervisor.expected_total}</b> 计划镜数</span>
+          ) : null}
         </div>
         {ep.screenplay_status !== 'ready' && <div className="error-banner">本集还没有可用剧本。请先到剧本台生成/保存完整剧本，再展开分镜。</div>}
         {(ep.status === 'scripting' || ep.supervisor || ['WAITING_HUMAN', 'PAUSED_EXTERNAL', 'WAITING_AUTHORIZATION', 'WAITING_RETRY'].includes(ep.supervisor?.phase || '')) && (
@@ -283,16 +296,6 @@ export default function BoardPage() {
             scripting={ep.status === 'scripting'}
             onChanged={() => { void refresh() }}
           />
-        )}
-        {ep.status === 'scripting' && !ep.supervisor && (
-          <div style={{ marginTop: 10 }}>
-            <span className="stamp gold">分镜中</span>{' '}
-            <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>
-              {ep.storyboard_planned_shots
-                ? `已规划约 ${ep.storyboard_planned_shots} 镜（会随逐镜细化增减），已通过 ${ep.shots?.length ?? 0} 镜，通过后会继续下一镜……`
-                : `正在逐镜头生成并 QA；已通过 ${ep.shots?.length ?? 0} 镜，通过后会继续下一镜……`}
-            </span>
-          </div>
         )}
         {ep.storyboard_warning && (
           <div className="error-banner" style={{ borderColor: 'var(--gold, #b08d57)', background: 'rgba(176,141,87,0.08)' }}>
@@ -313,7 +316,7 @@ export default function BoardPage() {
         : <div className="board-workspace">
             <section className="shot-navigator" aria-label="镜头轨道">
               <div className="shot-navigator-head">
-                <div><b>镜头轨道</b><span>点击镜头聚焦编辑</span></div>
+              <div><b>镜头轨道</b></div>
                 <div className="shot-navigator-actions">
                   <span>{selectedShotIndex + 1} / {ep.shots.length}</span>
                   <button type="button" aria-label="上一镜" disabled={selectedShotIndex === 0} onClick={() => selectRelativeShot(-1)}>←</button>
@@ -363,6 +366,7 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
   const [conflictOpen, setConflictOpen] = useState(false)
   const [conflictBusy, setConflictBusy] = useState(false)
   const s = edit ?? shot
+  const contLabel = continuityLabel(s.continuity_mode, s.continuity_from_prev)
 
   async function save() {
     if (!edit) return
@@ -432,13 +436,11 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
       <div className="shot-head">
         <div className="shot-head-copy">
           <span className="sn">镜{String(shot.shot_no).padStart(2, '0')}</span>
-          <span className="meta">{s.duration_s}s · {s.shot_size} · {s.camera_move} · {s.transition}{s.continuity_mode ? ` · ${s.continuity_mode}` : s.continuity_from_prev ? ' · 接上镜' : ''}</span>
+          <span className="meta">{s.duration_s}s · {s.shot_size} · {s.camera_move} · {s.transition}{contLabel ? ` · ${contLabel}` : ''}</span>
           <span className="meta shot-characters">{s.characters.join(' / ') || '缺角色（需修改）'}</span>
           <ShotLifecycleBadges shot={shot} />
         </div>
         <div className="shot-head-actions">
-          <span className="meta">¥{shot.est_cost_cny.toFixed(1)}</span>
-          {shot.storyboard_evidence && <EvidenceDrawer evidence={shot.storyboard_evidence} label="本镜证据" />}
           {shot.spoken_contract_status === 'conflict' && (
             <button className="btn small ghost" disabled={disabled || conflictBusy} onClick={() => setConflictOpen(true)}>
               解决口播冲突
@@ -490,25 +492,25 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
             <div className="full"><label className="f">画面描述（一个连贯动作，人物和剧情优先）</label>
               <textarea rows={3} value={edit.action_desc} onChange={e => setEdit({ ...edit, action_desc: e.target.value })} /></div>
             <div className="full">
-              <label className="f">Seedance 连续性（state_in → primary_action → state_out）</label>
+              <label className="f">连续性（进入 → 动作 → 离开）</label>
               <div className="shot-frame-pair shot-continuity-chain">
-                <div className="shot-frame-card"><span className="shot-frame-label"><strong>进入状态</strong><code>state_in</code></span><textarea rows={2} value={edit.state_in ?? ''} onChange={e => setEdit({ ...edit, state_in: e.target.value })} /></div>
+                <div className="shot-frame-card"><span className="shot-frame-label"><strong>进入状态</strong></span><textarea rows={2} value={edit.state_in ?? ''} onChange={e => setEdit({ ...edit, state_in: e.target.value })} /></div>
                 <div className="shot-frame-flow" aria-hidden="true">→</div>
-                <div className="shot-frame-card"><span className="shot-frame-label"><strong>镜头动作</strong><code>primary_action</code></span><textarea rows={2} value={edit.primary_action ?? ''} onChange={e => setEdit({ ...edit, primary_action: e.target.value })} /></div>
+                <div className="shot-frame-card"><span className="shot-frame-label"><strong>镜头动作</strong></span><textarea rows={2} value={edit.primary_action ?? ''} onChange={e => setEdit({ ...edit, primary_action: e.target.value })} /></div>
                 <div className="shot-frame-flow" aria-hidden="true">→</div>
-                <div className="shot-frame-card"><span className="shot-frame-label"><strong>离开状态</strong><code>state_out</code></span><textarea rows={2} value={edit.state_out ?? ''} onChange={e => setEdit({ ...edit, state_out: e.target.value })} /></div>
+                <div className="shot-frame-card"><span className="shot-frame-label"><strong>离开状态</strong></span><textarea rows={2} value={edit.state_out ?? ''} onChange={e => setEdit({ ...edit, state_out: e.target.value })} /></div>
               </div>
             </div>
-            <div><label className="f">continuity_mode</label>
+            <div><label className="f">与上镜关系</label>
               <select style={{ width: '100%' }} value={edit.continuity_mode ?? ''} onChange={e => setEdit({ ...edit, continuity_mode: e.target.value })}>
                 <option value="">自动/未设定</option>
-                {CONTINUITY_MODES.map(x => <option key={x} value={x}>{x}</option>)}
+                {CONTINUITY_MODES.map(x => <option key={x} value={x}>{CONTINUITY_MODE_LABEL[x] || x}</option>)}
               </select></div>
             <div><label className="f">画面可见角色（逗号分隔）</label>
               <input type="text" value={(edit.characters_visible ?? []).join(', ')} onChange={e => setEdit({ ...edit, characters_visible: parseCommaList(e.target.value) })} /></div>
             <div><label className="f">声音角色（逗号分隔）</label>
               <input type="text" value={(edit.audio_cast ?? []).join(', ')} onChange={e => setEdit({ ...edit, audio_cast: parseCommaList(e.target.value) })} /></div>
-            <div><label className="f">new_information_ids</label>
+            <div><label className="f">本镜新信息编号（高级）</label>
               <input type="text" value={(edit.new_information_ids ?? []).join(', ')} onChange={e => setEdit({ ...edit, new_information_ids: parseCommaList(e.target.value) })} /></div>
             <div><label className="f">首帧画面（本镜开始的静止画面）</label>
               <textarea rows={2} value={edit.first_frame_desc ?? ''} onChange={e => setEdit({ ...edit, first_frame_desc: e.target.value })} /></div>
@@ -550,16 +552,16 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
                 <div><dt>景别</dt><dd>{s.shot_size}</dd></div>
                 <div><dt>运镜</dt><dd>{s.camera_move}</dd></div>
                 <div><dt>转场</dt><dd>{s.transition}</dd></div>
-                <div className="shot-spec-wide"><dt>连续性</dt><dd>{s.continuity_mode || (s.continuity_from_prev ? '接上镜' : '新场景')}</dd></div>
+                <div className="shot-spec-wide"><dt>连续性</dt><dd>{contLabel || '新场景'}</dd></div>
               </dl>
             </div>
 
-            <div className="shot-frame-pair shot-continuity-chain full" aria-label="Seedance 状态链">
-              <div className="shot-frame-card"><span className="shot-frame-label"><strong>进入状态</strong><code>state_in</code></span><p>{s.state_in || s.first_frame_desc || '未设置'}</p></div>
+            <div className="shot-frame-pair shot-continuity-chain full" aria-label="镜头状态链">
+              <div className="shot-frame-card"><span className="shot-frame-label"><strong>进入状态</strong></span><p>{s.state_in || s.first_frame_desc || '未设置'}</p></div>
               <div className="shot-frame-flow" aria-hidden="true">→</div>
-              <div className="shot-frame-card"><span className="shot-frame-label"><strong>镜头动作</strong><code>primary_action</code></span><p>{s.primary_action || s.action_desc || '未设置'}</p></div>
+              <div className="shot-frame-card"><span className="shot-frame-label"><strong>镜头动作</strong></span><p>{s.primary_action || s.action_desc || '未设置'}</p></div>
               <div className="shot-frame-flow" aria-hidden="true">→</div>
-              <div className="shot-frame-card"><span className="shot-frame-label"><strong>离开状态</strong><code>state_out</code></span><p>{s.state_out || s.last_frame_desc || '未设置'}</p></div>
+              <div className="shot-frame-card"><span className="shot-frame-label"><strong>离开状态</strong></span><p>{s.state_out || s.last_frame_desc || '未设置'}</p></div>
             </div>
 
             <section className="shot-spoken-panel full" aria-labelledby={`shot-spoken-${shot.id}`}>
@@ -588,7 +590,7 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
               <div className="shot-context-panel">
                 <header className="shot-context-head">
                   <span id={`shot-context-${shot.id}`} className="shot-section-label">镜头要素</span>
-                  <span>参与角色与本镜信息交付</span>
+                  <span>参与角色与本镜信息</span>
                 </header>
                 <dl className="shot-context-grid">
                   <div className="shot-context-card">

@@ -112,6 +112,29 @@ describe('shotVideoState', () => {
     expect(shotVideoState(s).phase).toBe('ready')
     expect(shotVideoState(s).playing?.id).toBe('v2')
   })
+
+  it('B 级采用 → fallback rail 与兜底原因', () => {
+    const s = shot({
+      adopted_version_id: 'v1',
+      video_grade: 'B',
+      fallback_reason: 'attempt budget 用尽，技术合格兜底',
+      versions: [version({ id: 'v1', status: 'succeeded', video_url: '/b.mp4' })],
+    })
+    const state = shotVideoState(s)
+    expect(state.grade).toBe('B')
+    expect(state.railClass).toBe('fallback')
+    expect(state.fallbackReason).toContain('兜底')
+  })
+
+  it('衔接降级标记透出', () => {
+    const s = shot({
+      adopted_version_id: 'v1',
+      video_grade: 'B',
+      continuity_degraded: true,
+      versions: [version({ id: 'v1', status: 'succeeded', video_url: '/d.mp4' })],
+    })
+    expect(shotVideoState(s).continuityDegraded).toBe(true)
+  })
 })
 
 describe('countAdoptedVideos', () => {

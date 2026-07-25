@@ -6,6 +6,7 @@ import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 import { countAdoptedVideos, formatPipelineSummary, shotVideoState } from '../shotStatus'
 import AsyncButton from '../components/AsyncButton'
 import QueryState from '../components/QueryState'
+import VideoSupervisorPanel from '../components/VideoSupervisorPanel'
 
 /* ─── 常量 ─── */
 type ReviewTab = 'text' | 'references' | 'videos'
@@ -226,6 +227,7 @@ export default function WallPage() {
   const [reviewShot, setReviewShot] = useState<Shot | null>(null)
   const [lightbox, setLightbox] = useState<{ src: string; label?: string } | null>(null)
   const [clearMenuOpen, setClearMenuOpen] = useState(false)
+  const [genMenuOpen, setGenMenuOpen] = useState(false)
   const toastTimerRef = useRef<number>()
 
   const showToast = useCallback((msg: string) => {
@@ -317,7 +319,7 @@ export default function WallPage() {
   const doGenerateEpisode = async () => {
     if (!canGenerate) { showToast('请先在分镜台确认本集分镜'); return }
     const ok = confirm(
-      `即将为全片 ${shots.length} 个镜头生成新视频版本。\n\n`
+      `即将为全片 ${shots.length} 个镜头生成新视频版本（快速模式，不自动补齐）。\n\n`
       + `影响范围：\n`
       + `· 每个镜头会新建（或复用）一个视频版本并入队\n`
       + `· 当前已采用的 ${adoptedCount} 个成片在新版本成功前会保留\n`
@@ -328,6 +330,33 @@ export default function WallPage() {
     if (!ok) return
     videoTimer.start()
     const started = await t(() => api.episodeGenerate(ep.id), '全片生成已启动')
+    if (!started) videoTimer.clear()
+  }
+
+  const doCompleteEpisode = async () => {
+    if (!canGenerate) { showToast('请先在分镜台确认本集分镜'); return }
+    const budget = window.prompt('授权预算上限（元，默认 150）', '150')
+    if (budget === null) return
+    const wallH = window.prompt('授权时长墙（小时，默认 4）', '4')
+    if (wallH === null) return
+    const allowEdit = window.confirm('是否授权 Supervisor 微调分镜时长？（默认否，点取消=不授权）')
+    const startOk = window.confirm(
+      `确认启动「补齐到全片可用」？\n`
+      + `预算 ¥${budget || 150} · ${wallH || 4}h · 微调分镜：${allowEdit ? '是' : '否'}\n`
+      + `不会自动拼接成片或创建交付包。`,
+    )
+    if (!startOk) return
+    videoTimer.start()
+    const started = await t(
+      () => api.episodeVideoCompletion(ep.id, {
+        mode: 'fresh',
+        budget_cap_cny: Number(budget) || 150,
+        wall_clock_cap_s: (Number(wallH) || 4) * 3600,
+        allow_fallback_adopt: true,
+        allow_storyboard_edit: allowEdit,
+      }),
+      '全片补齐已启动',
+    )
     if (!started) videoTimer.clear()
   }
 
@@ -386,9 +415,25 @@ export default function WallPage() {
             {{ confirmed: '已确认', generating: '生成中', done: '已完成', paused_budget: '预算暂停' }[ep.status] ?? ep.status}
           </span>
           {canGenerate && (
-            <AsyncButton className="btn primary small" busyLabel="提交中…" onAction={doGenerateEpisode}>
-              一键生成所有视频
-            </AsyncButton>
+            <div className="clear-menu-wrap">
+              <button className="btn primary small" onClick={() => setGenMenuOpen(o => !o)}>
+                一键生成所有视频 ▾
+              </button>
+              {genMenuOpen && (
+                <>
+                  <div className="clear-menu-backdrop" onClick={() => setGenMenuOpen(false)} />
+                  <div className="clear-menu">
+                    <div className="clear-menu-hint">选择生成模式</div>
+                    <button className="clear-menu-item" onClick={() => { setGenMenuOpen(false); void doGenerateEpisode() }}>
+                      快速生成全部（不自动补齐）
+                    </button>
+                    <button className="clear-menu-item" onClick={() => { setGenMenuOpen(false); void doCompleteEpisode() }}>
+                      补齐到全片可用（Supervisor）
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
           )}
           <div className="clear-menu-wrap">
             <button className="btn ghost small danger" onClick={() => setClearMenuOpen(o => !o)}>清空 ▾</button>
@@ -410,6 +455,17 @@ export default function WallPage() {
         </div>
       </div>
 
+      {(ep.video_supervisor || ep.video_completion_mode === 'complete' || ep.active_video_run_id) && (
+        <VideoSupervisorPanel
+          api={api}
+          episodeId={ep.id}
+          runId={ep.active_video_run_id}
+          supervisor={ep.video_supervisor as import('../components/VideoSupervisorPanel').VideoSupervisorSnapshot | null}
+          running={ep.video_completion_mode === 'complete' && ep.status === 'generating'}
+          onChanged={() => void refreshAll()}
+        />
+      )}
+
       {/* ── 镜头状态导航：快速定位问题镜头 ── */}
       {shots.length > 0 && (
         <nav className="wall-shot-rail" aria-label="镜头状态导航">
@@ -419,13 +475,19 @@ export default function WallPage() {
               <button
                 key={item.id}
                 type="button"
+                data-grade={state.grade || undefined}
                 className={`${itemIdx === idx ? 'active ' : ''}${state.railClass}`}
                 onClick={() => setIdx(itemIdx)}
                 aria-current={itemIdx === idx ? 'true' : undefined}
-                title={`镜 ${item.shot_no} · ${state.label}`}
+                title={
+                  state.grade === 'B' && state.fallbackReason
+                    ? `镜 ${item.shot_no} · ${state.label}：${state.fallbackReason}`
+                    : `镜 ${item.shot_no} · ${state.label}`
+                }
               >
                 <b>{String(item.shot_no).padStart(2, '0')}</b>
                 <span>{state.label}</span>
+                {state.continuityDegraded ? <i className="continuity-degraded-badge">衔接降级</i> : null}
               </button>
             )
           })}
@@ -508,11 +570,16 @@ function ShotSlide({ shot, episodeStatus, generating,
           ? <span className="stamp blue">{shot.continuity_mode}</span>
           : shot.continuity_from_prev ? <span className="stamp blue">接上镜</span> : <span className="stamp grey">新场景</span>}
         <span className={`stamp ${
-          videoState.phase === 'adopted' ? 'green'
-            : videoState.phase === 'working' ? 'gold'
-              : videoState.phase === 'failed' || videoState.phase === 'stale' ? 'red'
-                : 'grey'
+          videoState.grade === 'B' || videoState.railClass === 'fallback' ? 'gold'
+            : videoState.phase === 'adopted' ? 'green'
+              : videoState.phase === 'working' ? 'gold'
+                : videoState.phase === 'failed' || videoState.phase === 'stale' ? 'red'
+                  : 'grey'
         }`}>{videoState.label}</span>
+        {videoState.continuityDegraded ? <span className="continuity-degraded-badge">衔接已降级</span> : null}
+        {videoState.grade === 'B' && videoState.fallbackReason ? (
+          <span className="meta" title={videoState.fallbackReason}>兜底原因：{videoState.fallbackReason}</span>
+        ) : null}
       </div>
 
       <div className="slide-body">

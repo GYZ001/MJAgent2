@@ -39,6 +39,11 @@ async def recover_all() -> dict[str, Any]:
     report["episode_mapping"] = recover_plan_tasks()
     report["screenplay"] = recover_screenplay_tasks()
     report["storyboard"] = recover_storyboard_tasks()
+    try:
+        from app.video_supervisor import recover_video_completion_runs
+        report["video_completion"] = recover_video_completion_runs()
+    except Exception as exc:  # noqa: BLE001
+        report["video_completion"] = {"error": str(exc)}
     report["delivery"] = recover_delivery_tasks()
 
     global _last_report

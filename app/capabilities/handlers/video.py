@@ -20,6 +20,55 @@ async def generate_episode(args: I.EpisodeScopedInput) -> CommandResult:
     )
 
 
+async def complete_episode(args: I.VideoCompleteEpisodeInput) -> CommandResult:
+    from app import api
+
+    body = {
+        "mode": args.mode,
+        "budget_cap_cny": args.budget_cap_cny,
+        "wall_clock_cap_s": args.wall_clock_cap_s,
+        "allow_fallback_adopt": args.allow_fallback_adopt,
+        "max_fallback_shots": args.max_fallback_shots,
+        "allow_storyboard_edit": args.allow_storyboard_edit,
+        "completion_grant_id": args.completion_grant_id,
+        "add_budget_cny": args.add_budget_cny,
+        "add_wall_clock_s": args.add_wall_clock_s,
+    }
+    outcome = await call_guarded(api._complete_episode_core, args.episode_id, body)
+    if isinstance(outcome, CommandResult):
+        return outcome
+    return succeeded(
+        "已启动全片视频补齐 Supervisor",
+        data=outcome,
+        resource_uris=[
+            f"manju://episodes/{args.episode_id}/storyboard",
+            outcome.get("resource_uri") or f"manju://runs/{outcome.get('run_id')}",
+        ],
+    )
+
+
+async def complete_project(args: I.VideoCompleteProjectInput) -> CommandResult:
+    from app import api
+
+    body = {
+        "episode_ids": args.episode_ids,
+        "global_budget_cap_cny": args.global_budget_cap_cny,
+        "per_episode_cap_cny": args.per_episode_cap_cny,
+        "wall_clock_cap_s": args.wall_clock_cap_s,
+        "allow_fallback_adopt": args.allow_fallback_adopt,
+        "allow_storyboard_edit": args.allow_storyboard_edit,
+    }
+    outcome = await call_guarded(api._complete_project_videos_core, args.project_id, body)
+    if isinstance(outcome, CommandResult):
+        return outcome
+    started = outcome.get("started") or []
+    return succeeded(
+        f"已启动跨集补齐编排（立即启动 {len(started)} 集）",
+        data=outcome,
+        resource_uris=[f"manju://projects/{args.project_id}"],
+    )
+
+
 async def generate_shot(args: I.VideoGenerateShotInput) -> CommandResult:
     from app import api
 

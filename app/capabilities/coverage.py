@@ -158,7 +158,7 @@ def validate_catalog_integrity() -> list[str]:
         "episode.plan",
         "screenplay.generate", "screenplay.generate_batch", "screenplay.update", "screenplay.cancel",
         "storyboard.generate", "storyboard.generate_batch", "shot.update", "storyboard.confirm", "storyboard.cancel",
-        "video.generate_episode", "video.generate_shot", "video.stop_shot", "video.adopt_version",
+        "video.generate_episode", "video.complete_episode", "video.complete_project", "video.generate_shot", "video.stop_shot", "video.adopt_version",
         "video.clear_episode", "video.clear_shot", "video.delete_version", "reference.review",
         "delivery.concatenate", "delivery.check", "delivery.create_package", "delivery.review",
         "delivery.submit_feedback", "run.control", "system.model_test",

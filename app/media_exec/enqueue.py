@@ -421,7 +421,15 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
         (version_id, shot_id, version_no, prompt_text, key, now(),
          json.dumps(image_meta, ensure_ascii=False)))
     job_id = new_id("job")
+    # 补齐模式：优先读视频 grant 的 budget_cap_cny
     budget_limit = float(get_setting("episode_cost_limit_cny") or 100)
+    try:
+        from app.completion_grant import active_video_grant_budget_cap
+        grant_cap = active_video_grant_budget_cap(ep["id"])
+        if grant_cap is not None:
+            budget_limit = float(grant_cap)
+    except Exception:  # noqa: BLE001
+        pass
     run_id, step_run_id = ensure_media_trace(
         workflow_type="video_generation", scope_id=shot_id,
         input_value={"prompt": prompt_text, "version": version_no}, budget_limit_cny=budget_limit,

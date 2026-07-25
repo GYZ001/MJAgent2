@@ -138,6 +138,12 @@ export const api = {
   /* ── 便捷方法 ── */
   episodeGenerate: (episodeId: string) =>
     request('POST', `/episodes/${episodeId}/generate`),
+  episodeVideoCompletion: (episodeId: string, body?: Record<string, unknown>) =>
+    request('POST', `/episodes/${episodeId}/video-completion`, body || {}),
+  getVideoCompletion: (episodeId: string) =>
+    request('GET', `/episodes/${episodeId}/video-completion`),
+  projectVideoCompletion: (projectId: string, body?: Record<string, unknown>) =>
+    request('POST', `/projects/${projectId}/video-completion`, body || {}),
   shotGenerate: (shotId: string, promptOverride?: string, reroll?: boolean, withCritique?: boolean) =>
     request('POST', `/shots/${shotId}/generate`, {
       prompt_override: promptOverride, reroll, with_critique: withCritique,
@@ -468,6 +474,9 @@ export interface Shot {
   est_cost_cny: number; versions: ShotVersion[]
   version_count?: number
   video_stale: boolean
+  video_grade?: 'A' | 'B' | 'C' | null
+  fallback_reason?: string | null
+  continuity_degraded?: boolean
   storyboard_artifact_id?: string | null
   storyboard_evidence?: ArtifactEvidence | null
   pipeline?: ShotPipelineStatus | null
@@ -488,6 +497,9 @@ export interface Episode {
   storyboard_evidence?: ArtifactEvidence | null
   active_storyboard_run_id?: string | null
   storyboard_completion_mode?: string | null
+  active_video_run_id?: string | null
+  video_completion_mode?: string | null
+  video_supervisor?: Record<string, unknown> | null
   supervisor?: {
     phase: string
     goal?: string

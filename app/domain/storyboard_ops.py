@@ -445,6 +445,40 @@ def recover_storyboard_tasks() -> int:
     return resumed
 
 
+def _shot_video_is_stale(conn, shot_row, episode_storyboard_id: str | None) -> bool:
+    """比较镜头采用版本的 parent_artifact 与当前分镜 Artifact，不一致即 stale。"""
+    try:
+        adopted = shot_row["adopted_version_id"]
+    except (KeyError, IndexError, TypeError):
+        adopted = None
+    if not adopted:
+        return False
+    try:
+        shot_art = shot_row["storyboard_artifact_id"]
+    except (KeyError, IndexError, TypeError):
+        shot_art = None
+    if episode_storyboard_id and shot_art and shot_art != episode_storyboard_id:
+        return True
+    ver = conn.execute(
+        "SELECT artifact_id FROM shot_versions WHERE id=?", (adopted,)
+    ).fetchone()
+    if not ver or not ver["artifact_id"]:
+        return False
+    art = conn.execute(
+        "SELECT parent_artifact_ids_json FROM artifacts WHERE id=?",
+        (ver["artifact_id"],),
+    ).fetchone()
+    if not art:
+        return False
+    try:
+        parents = json.loads(art["parent_artifact_ids_json"] or "[]")
+    except (TypeError, ValueError):
+        parents = []
+    if not episode_storyboard_id or not parents:
+        return False
+    return episode_storyboard_id not in parents
+
+
 def _new_storyboard_recorder(
     episode_id: str,
     *,
@@ -1031,7 +1065,7 @@ def episode_detail(episode_id: str, view: str | None = None):
             "approved_scene_id", "approved_head_scene_id", "approved_tail_scene_id", "scene_status",
         ):
             s.pop(legacy_key, None)
-        s["video_stale"] = False
+        s["video_stale"] = _shot_video_is_stale(conn, s, ep.get("storyboard_artifact_id"))
         if view == "board":
             s["version_count"] = version_counts.get(s["id"], 0)
             s["versions"] = []
@@ -1040,8 +1074,32 @@ def episode_detail(episode_id: str, view: str | None = None):
 
         s["versions"] = _public_shot_versions(conn, s["id"], include_inputs=full)
         s["pipeline"] = pipeline_statuses.get(s["id"])
+        # 透出 grade / fallback，供评审墙 A/B 分色
+        try:
+            from app.evidence.media import grade_shot_video
+            graded = grade_shot_video(s["id"])
+            s["video_grade"] = graded.get("grade")
+            s["fallback_reason"] = graded.get("fallback_reason")
+            s["continuity_degraded"] = bool(graded.get("continuity_degraded"))
+        except Exception:  # noqa: BLE001
+            s["video_grade"] = None
+            s["fallback_reason"] = None
+            s["continuity_degraded"] = False
     ep["shots"] = shots
     ep["pipeline_summary"] = pipeline_summary
+    # 视频补齐 Supervisor 面板（评审墙）
+    if full or view == "wall":
+        try:
+            from app.video_supervisor import load_latest_checkpoint, public_checkpoint_projection
+            vcp = load_latest_checkpoint(episode_id)
+            ep["video_supervisor"] = public_checkpoint_projection(vcp)
+            try:
+                ep["active_video_run_id"] = ep.get("active_video_run_id")
+                ep["video_completion_mode"] = ep.get("video_completion_mode") or "quick"
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception:  # noqa: BLE001
+            ep["video_supervisor"] = None
     return ep
 
 
@@ -1063,7 +1121,9 @@ def shot_review_detail(shot_id: str):
     screenplay = _load_screenplay(dict(episode_row)) if episode_row else None
     shot["new_information_items"] = information_items_for_shot(shot, screenplay)
     shot["est_cost_cny"] = shot_cost_cny(shot["duration_s"])
-    shot["video_stale"] = False
+    shot["video_stale"] = _shot_video_is_stale(
+        conn, shot, episode_row["storyboard_artifact_id"] if episode_row else None
+    )
     for legacy_key in (
         "approved_scene_id", "approved_head_scene_id", "approved_tail_scene_id", "scene_status",
     ):
@@ -1079,6 +1139,16 @@ def shot_review_detail(shot_id: str):
         shot["pipeline"] = shot_pipeline_status(shot_id, conn=conn)
     except Exception:  # noqa: BLE001
         shot["pipeline"] = None
+    try:
+        from app.evidence.media import grade_shot_video
+        graded = grade_shot_video(shot_id)
+        shot["video_grade"] = graded.get("grade")
+        shot["fallback_reason"] = graded.get("fallback_reason")
+        shot["continuity_degraded"] = bool(graded.get("continuity_degraded"))
+    except Exception:  # noqa: BLE001
+        shot["video_grade"] = None
+        shot["fallback_reason"] = None
+        shot["continuity_degraded"] = False
     return shot
 
 

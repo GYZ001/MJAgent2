@@ -14,10 +14,13 @@ export type ShotVideoPhase =
 export interface ShotVideoState {
   phase: ShotVideoPhase
   label: string
-  railClass: 'empty' | 'working' | 'ready' | 'failed'
+  railClass: 'empty' | 'working' | 'ready' | 'failed' | 'fallback'
   adopted: ShotVersion | undefined
   latest: ShotVersion | undefined
   playing: ShotVersion | undefined
+  grade?: 'A' | 'B' | 'C' | null
+  fallbackReason?: string | null
+  continuityDegraded?: boolean
 }
 
 const PHASE_LABEL: Record<ShotVideoPhase, string> = {
@@ -84,12 +87,39 @@ export function shotVideoState(shot: Shot): ShotVideoState {
   }
 
   const adoptedOk = adopted?.status === 'succeeded' && !!adopted.video_url
+  const grade = (shot as { video_grade?: 'A' | 'B' | 'C' | null }).video_grade
+    ?? (shot as { grade?: 'A' | 'B' | 'C' | null }).grade
+    ?? null
+  const fallbackReason = (shot as { fallback_reason?: string | null }).fallback_reason ?? null
+  const continuityDegraded = !!(shot as { continuity_degraded?: boolean }).continuity_degraded
+
   if (adoptedOk) {
     if (shot.video_stale) {
-      return { phase: 'stale', label: PHASE_LABEL.stale, railClass: 'failed', adopted, latest, playing: adopted }
+      return {
+        phase: 'stale', label: PHASE_LABEL.stale, railClass: 'failed',
+        adopted, latest, playing: adopted, grade: grade || 'C', fallbackReason, continuityDegraded,
+      }
     }
-    // 已采用版可交付；若同时有新版本在跑，上面 working 分支会优先
-    return { phase: 'adopted', label: PHASE_LABEL.adopted, railClass: 'ready', adopted, latest, playing: adopted }
+    if (grade === 'B' || fallbackReason) {
+      return {
+        phase: 'adopted',
+        label: continuityDegraded ? '已采用（兜底·衔接降级）' : '已采用（兜底）',
+        railClass: 'fallback',
+        adopted, latest, playing: adopted,
+        grade: 'B',
+        fallbackReason,
+        continuityDegraded,
+      }
+    }
+    return {
+      phase: 'adopted',
+      label: PHASE_LABEL.adopted,
+      railClass: 'ready',
+      adopted, latest, playing: adopted,
+      grade: grade || 'A',
+      fallbackReason: null,
+      continuityDegraded,
+    }
   }
 
   const succeeded = versions.find(v => v.status === 'succeeded' && !!v.video_url)

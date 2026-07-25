@@ -112,6 +112,29 @@ class VideoGenerateShotInput(StandardCommandInput):
     reroll: bool = False
 
 
+class VideoCompleteEpisodeInput(StandardCommandInput):
+    episode_id: str
+    mode: Literal["fresh", "resume"] = "fresh"
+    budget_cap_cny: float | None = None
+    wall_clock_cap_s: float | None = None
+    allow_fallback_adopt: bool = True
+    max_fallback_shots: int | None = None
+    allow_storyboard_edit: bool = False
+    completion_grant_id: str | None = None
+    add_budget_cny: float | None = None
+    add_wall_clock_s: float | None = None
+
+
+class VideoCompleteProjectInput(StandardCommandInput):
+    project_id: str
+    episode_ids: list[str] | None = None
+    global_budget_cap_cny: float | None = None
+    per_episode_cap_cny: float | None = None
+    wall_clock_cap_s: float | None = None
+    allow_fallback_adopt: bool = True
+    allow_storyboard_edit: bool = False
+
+
 class ShotScopedInput(StandardCommandInput):
     shot_id: str
 

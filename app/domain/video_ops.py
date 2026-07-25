@@ -388,6 +388,13 @@ async def generate_episode(episode_id: str, body: dict | None = None):
     ep = _episode_or_404(episode_id)
     if ep["status"] not in ("confirmed", "generating", "done"):
         raise HTTPException(409, "分镜脚本未确认（先在工作台点击确认分镜）")
+    # Supervisor 运行期间拒绝快速模式，避免重复付费
+    try:
+        mode = ep["video_completion_mode"]
+    except (KeyError, IndexError, TypeError):
+        mode = None
+    if mode == "complete" and task_registry.active("video_completion", episode_id):
+        raise HTTPException(409, "全片补齐 Supervisor 运行中，请使用补齐模式或等待完成")
     conn = get_conn()
     shots_rows = conn.execute(
         "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
@@ -445,7 +452,27 @@ async def generate_episode(episode_id: str, body: dict | None = None):
         except Exception as exc:  # noqa: BLE001
             public = errors.record_and_format(exc, action="enqueue_shot",
                                               context={"shot_id": s["row"]["id"], "episode_id": episode_id})
-            results.append({"shot_id": s["row"]["id"], "error": public})
+            issue_codes: list[str] = []
+            try:
+                from app.video_issues import issues_from_enqueue_error, persist_shot_issue
+                issues = issues_from_enqueue_error(
+                    exc, shot_id=s["row"]["id"], shot_no=s["row"]["shot_no"],
+                )
+                issue_codes = [i.code for i in issues]
+                persist_shot_issue(
+                    episode_id=episode_id,
+                    shot_id=s["row"]["id"],
+                    shot_no=s["row"]["shot_no"],
+                    issues=issues,
+                    source="generate_episode_enqueue",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            results.append({
+                "shot_id": s["row"]["id"],
+                "error": public,
+                "issue_codes": issue_codes,
+            })
     conn.commit()
     return {"enqueued": results}
 
@@ -604,6 +631,419 @@ async def resume_episode(episode_id: str):
         return routed
     _episode_or_404(episode_id)
     return {"resumed_jobs": worker.retry_paused(episode_id)}
+
+
+def _ensure_video_episode_columns(conn=None) -> None:
+    db = conn or get_conn()
+    for stmt in (
+        "ALTER TABLE episodes ADD COLUMN active_video_run_id TEXT",
+        "ALTER TABLE episodes ADD COLUMN video_completion_mode TEXT NOT NULL DEFAULT 'quick'",
+        "ALTER TABLE episodes ADD COLUMN video_control_json TEXT",
+    ):
+        try:
+            db.execute(stmt)
+            db.commit()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def _recorded_video_completion_task(
+    episode_id: str,
+    recorder,
+    *,
+    resume: bool,
+    grant_id: str | None,
+    budget_cap_cny: float | None = None,
+    wall_clock_cap_s: float | None = None,
+    allow_fallback_adopt: bool = True,
+    max_fallback_shots: int | None = None,
+    allow_storyboard_edit: bool = False,
+):
+    import asyncio
+    from app.video_supervisor import run_video_completion_supervisor
+    recorder.start()
+    try:
+        result = await run_video_completion_supervisor(
+            episode_id,
+            resume=resume,
+            grant_id=grant_id,
+            run_id=recorder.run_id,
+            budget_cap_cny=budget_cap_cny,
+            wall_clock_cap_s=wall_clock_cap_s,
+            allow_fallback_adopt=allow_fallback_adopt,
+            max_fallback_shots=max_fallback_shots,
+            allow_storyboard_edit=allow_storyboard_edit,
+        )
+        if result.phase == "SUCCEEDED_COVERED":
+            recorder.succeed(result.outcome or "SUCCEEDED_COVERED")
+        elif result.phase == "CANCELLED":
+            recorder.cancel()
+        else:
+            recorder.partial(result.outcome or result.phase)
+        return result
+    except asyncio.CancelledError:
+        recorder.cancel()
+        raise
+    except Exception as exc:
+        recorder.fail(exc)
+        raise
+
+
+@router.post("/episodes/{episode_id}/video-completion")
+async def complete_episode(episode_id: str, body: dict | None = None):
+    """启动集级视频补齐 Supervisor（补齐到全片可用）。"""
+    from app.capabilities.dispatch import ui_route
+    payload = {"episode_id": episode_id, **(body or {})}
+    routed = await ui_route("video.complete_episode", payload)
+    if routed is not None:
+        return routed
+    return await _complete_episode_core(episode_id, body or {})
+
+
+async def _complete_episode_core(episode_id: str, body: dict) -> dict:
+    from app.completion_grant import (
+        DEFAULT_VIDEO_BUDGET_CAP_CNY,
+        DEFAULT_VIDEO_WALL_CLOCK_CAP_S,
+        default_max_fallback_shots,
+        issue_video_completion_grant,
+        bump_video_grant_budget,
+        get_video_grant,
+    )
+    from app.orchestration.engine import WorkflowRecorder, fingerprint
+    from app.video_supervisor import (
+        FIRST_PASS_BUDGET_FRACTION,
+        MAX_ATTEMPTS_PER_SHOT,
+        MAX_CHAIN_CASCADE_DEPTH,
+        MAX_REPAIR_EPOCHS,
+        MIN_ATTEMPTS_PER_SHOT,
+    )
+
+    ep = _episode_or_404(episode_id)
+    if ep["status"] not in ("confirmed", "generating", "done"):
+        raise HTTPException(409, "分镜脚本未确认（先在工作台点击确认分镜）")
+    _ensure_video_episode_columns()
+    mode = body.get("mode") or "fresh"
+    if mode not in {"fresh", "resume"}:
+        raise HTTPException(422, "mode 只能是 fresh 或 resume")
+
+    if task_registry.active("video_completion", episode_id):
+        raise HTTPException(409, "全片补齐 Supervisor 已在运行")
+
+    conn = get_conn()
+    shots_total = conn.execute(
+        "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)
+    ).fetchone()["c"]
+    if int(shots_total or 0) <= 0:
+        raise HTTPException(409, "本集尚无分镜")
+
+    budget_cap = body.get("budget_cap_cny")
+    wall_cap = body.get("wall_clock_cap_s")
+    allow_fallback = body.get("allow_fallback_adopt", True)
+    max_fallback = body.get("max_fallback_shots")
+    allow_edit = bool(body.get("allow_storyboard_edit", False))
+    grant_id = body.get("completion_grant_id")
+
+    # resume + 追加预算
+    add_budget = body.get("add_budget_cny")
+    add_wall = body.get("add_wall_clock_s")
+    if mode == "resume" and grant_id and (add_budget or add_wall):
+        bump_video_grant_budget(
+            grant_id,
+            add_cny=float(add_budget or 0),
+            add_wall_s=float(add_wall or 0),
+        )
+
+    if mode == "fresh" or not grant_id:
+        grant, _token = issue_video_completion_grant(
+            episode_id=episode_id,
+            project_id=ep["project_id"],
+            storyboard_artifact_id=ep["storyboard_artifact_id"] or "",
+            budget_cap_cny=float(budget_cap) if budget_cap is not None else DEFAULT_VIDEO_BUDGET_CAP_CNY,
+            wall_clock_cap_s=float(wall_cap) if wall_cap is not None else DEFAULT_VIDEO_WALL_CLOCK_CAP_S,
+            allow_fallback_adopt=bool(allow_fallback),
+            max_fallback_shots=(
+                int(max_fallback) if max_fallback is not None
+                else default_max_fallback_shots(int(shots_total))
+            ),
+            allow_storyboard_edit=allow_edit,
+            shots_total=int(shots_total),
+            impact_snapshot={
+                "mode": "complete_episode_video",
+                "auto_concatenate": False,
+                "auto_delivery": False,
+            },
+        )
+        grant_id = grant.grant_id
+        budget_cap = grant.budget_cap_cny
+        wall_cap = grant.wall_clock_cap_s
+        max_fallback = grant.max_fallback_shots
+    else:
+        existing = get_video_grant(grant_id)
+        if existing:
+            budget_cap = existing.budget_cap_cny
+            wall_cap = existing.wall_clock_cap_s
+            max_fallback = existing.max_fallback_shots
+            allow_fallback = existing.allow_fallback_adopt
+            allow_edit = existing.allow_storyboard_edit
+
+    conn.execute(
+        "UPDATE episodes SET video_completion_mode='complete', active_video_run_id=NULL WHERE id=?",
+        (episode_id,),
+    )
+    conn.commit()
+
+    cap = float(budget_cap if budget_cap is not None else DEFAULT_VIDEO_BUDGET_CAP_CNY)
+    recorder = WorkflowRecorder.create(
+        workflow_type="episode_video_completion",
+        scope_type="episode",
+        scope_id=episode_id,
+        input_fingerprint=fingerprint(
+            ep["storyboard_artifact_id"], grant_id, mode,
+        ),
+        requested_by="user",
+        trigger_type="manual",
+        budget_limit_cny=cap,
+        policy_snapshot={
+            "supervisor": "video_completion",
+            "budget_cap_cny": cap,
+            "wall_clock_cap_s": float(wall_cap if wall_cap is not None else DEFAULT_VIDEO_WALL_CLOCK_CAP_S),
+            "first_pass_budget_fraction": FIRST_PASS_BUDGET_FRACTION,
+            "min_attempts_per_shot": MIN_ATTEMPTS_PER_SHOT,
+            "max_attempts_per_shot": MAX_ATTEMPTS_PER_SHOT,
+            "max_repair_epochs": MAX_REPAIR_EPOCHS,
+            "max_chain_cascade_depth": MAX_CHAIN_CASCADE_DEPTH,
+            "allow_fallback_adopt": bool(allow_fallback),
+            "max_fallback_shots": int(max_fallback or 0),
+            "allow_storyboard_edit": allow_edit,
+        },
+    )
+    conn.execute(
+        "UPDATE episodes SET active_video_run_id=? WHERE id=?",
+        (recorder.run_id, episode_id),
+    )
+    conn.commit()
+
+    task_registry.spawn(
+        "video_completion", episode_id,
+        _recorded_video_completion_task(
+            episode_id, recorder,
+            resume=(mode == "resume"),
+            grant_id=grant_id,
+            budget_cap_cny=cap,
+            wall_clock_cap_s=float(wall_cap) if wall_cap is not None else None,
+            allow_fallback_adopt=bool(allow_fallback),
+            max_fallback_shots=int(max_fallback) if max_fallback is not None else None,
+            allow_storyboard_edit=allow_edit,
+        ),
+        project_id=ep["project_id"],
+    )
+    return {
+        "status": "accepted",
+        "run_id": recorder.run_id,
+        "goal": "complete_episode_video",
+        "completion_grant_id": grant_id,
+        "resource_uri": f"manju://runs/{recorder.run_id}",
+    }
+
+
+@router.get("/episodes/{episode_id}/video-completion")
+def get_video_completion(episode_id: str):
+    """只读：最新 checkpoint 公开投影 + 覆盖台账。"""
+    _episode_or_404(episode_id)
+    _ensure_video_episode_columns()
+    from app.video_supervisor import (
+        load_latest_checkpoint,
+        public_checkpoint_projection,
+        rebuild_coverage_ledger,
+    )
+    from app.video_cost_model import predict_episode_completion_cost
+    cp = load_latest_checkpoint(episode_id)
+    ledger = rebuild_coverage_ledger(episode_id, cp=cp)
+    proj = public_checkpoint_projection(cp) or {}
+    proj["ledger"] = {
+        "shots_total": ledger.shots_total,
+        "grades": ledger.grades,
+        "coverage_rate": ledger.coverage_rate,
+        "fallback_quota": ledger.fallback_quota,
+        "cost_spent": ledger.cost_spent,
+        "entries": [e.model_dump(mode="json") for e in ledger.entries],
+    }
+    try:
+        uncovered_ids = [e.shot_id for e in ledger.entries if e.grade == "C"]
+        proj["cost_forecast"] = predict_episode_completion_cost(
+            episode_id, uncovered_shot_ids=uncovered_ids,
+        )
+    except Exception:  # noqa: BLE001
+        proj["cost_forecast"] = None
+    conn = get_conn()
+    ep = conn.execute(
+        "SELECT active_video_run_id, video_completion_mode FROM episodes WHERE id=?",
+        (episode_id,),
+    ).fetchone()
+    try:
+        proj["active_video_run_id"] = ep["active_video_run_id"] if ep else None
+        proj["video_completion_mode"] = ep["video_completion_mode"] if ep else "quick"
+    except (KeyError, IndexError, TypeError):
+        proj["active_video_run_id"] = None
+        proj["video_completion_mode"] = "quick"
+    proj["running"] = task_registry.active("video_completion", episode_id)
+    return proj
+
+
+@router.post("/projects/{project_id}/video-completion")
+async def complete_project_videos(project_id: str, body: dict | None = None):
+    """跨集批量补齐：在全局预算内按集顺序启动 Supervisor。"""
+    from app.capabilities.dispatch import ui_route
+    payload = {"project_id": project_id, **(body or {})}
+    routed = await ui_route("video.complete_project", payload)
+    if routed is not None:
+        return routed
+    return await _complete_project_videos_core(project_id, body or {})
+
+
+async def _complete_project_videos_core(project_id: str, body: dict) -> dict:
+    """全局预算编排：按 episode_no 顺序分配 per-episode cap，串行启动未覆盖集。"""
+    import asyncio
+    conn = get_conn()
+    project = conn.execute("SELECT id FROM projects WHERE id=?", (project_id,)).fetchone()
+    if not project:
+        raise HTTPException(404, "项目不存在")
+
+    global_cap = float(body.get("global_budget_cap_cny") or 500)
+    per_cap = float(body.get("per_episode_cap_cny") or 150)
+    wall_cap = float(body.get("wall_clock_cap_s") or 4 * 3600)
+    allow_fallback = bool(body.get("allow_fallback_adopt", True))
+    allow_edit = bool(body.get("allow_storyboard_edit", False))
+    episode_ids = body.get("episode_ids")
+
+    rows = conn.execute(
+        """SELECT id, episode_no, status, storyboard_artifact_id FROM episodes
+           WHERE project_id=? ORDER BY episode_no""",
+        (project_id,),
+    ).fetchall()
+    if episode_ids:
+        wanted = set(episode_ids)
+        rows = [r for r in rows if r["id"] in wanted]
+    eligible = [
+        r for r in rows
+        if r["status"] in {"confirmed", "generating", "done"}
+    ]
+    if not eligible:
+        raise HTTPException(409, "没有可补齐的已确认剧集")
+
+    spent_row = conn.execute(
+        """SELECT COALESCE(SUM(v.cost_cny),0) AS c
+           FROM shot_versions v
+           JOIN shots s ON s.id=v.shot_id
+           JOIN episodes e ON e.id=s.episode_id
+           WHERE e.project_id=? AND v.status='succeeded'""",
+        (project_id,),
+    ).fetchone()
+    project_spent = float(spent_row["c"] if spent_row else 0)
+    remaining_global = max(0.0, global_cap - project_spent)
+
+    plan = []
+    allocated = 0.0
+    from app.video_supervisor import rebuild_coverage_ledger
+    for r in eligible:
+        if task_registry.active("video_completion", r["id"]):
+            plan.append({
+                "episode_id": r["id"], "episode_no": r["episode_no"],
+                "status": "already_running", "allocated_cny": 0,
+            })
+            continue
+        try:
+            ledger = rebuild_coverage_ledger(r["id"])
+            if ledger.covered_within_quota():
+                plan.append({
+                    "episode_id": r["id"], "episode_no": r["episode_no"],
+                    "status": "already_covered", "allocated_cny": 0,
+                })
+                continue
+        except Exception:  # noqa: BLE001
+            pass
+        room = remaining_global - allocated
+        if room < 5:
+            plan.append({
+                "episode_id": r["id"], "episode_no": r["episode_no"],
+                "status": "skipped_budget", "allocated_cny": 0,
+            })
+            continue
+        ep_cap = min(per_cap, room)
+        plan.append({
+            "episode_id": r["id"], "episode_no": r["episode_no"],
+            "status": "queued", "allocated_cny": ep_cap,
+        })
+        allocated += ep_cap
+
+    started = []
+    queue = [p for p in plan if p["status"] == "queued"]
+
+    async def _run_one(item: dict) -> dict:
+        room_now = max(0.0, global_cap - _project_video_spent(project_id))
+        if room_now < 5:
+            item["status"] = "skipped_budget"
+            return item
+        item["allocated_cny"] = min(float(item["allocated_cny"]), room_now)
+        result = await _complete_episode_core(item["episode_id"], {
+            "mode": "fresh",
+            "budget_cap_cny": item["allocated_cny"],
+            "wall_clock_cap_s": wall_cap,
+            "allow_fallback_adopt": allow_fallback,
+            "allow_storyboard_edit": allow_edit,
+        })
+        item["status"] = "started"
+        item["run_id"] = result.get("run_id")
+        item["completion_grant_id"] = result.get("completion_grant_id")
+        return item
+
+    if queue:
+        first = await _run_one(queue[0])
+        started.append(first)
+        rest = queue[1:]
+        if rest:
+            async def _chain(items=rest):
+                for item in items:
+                    # 等待项目内任意集级 supervisor 空闲
+                    while any(
+                        task_registry.active("video_completion", p["episode_id"])
+                        for p in plan
+                        if p.get("episode_id") and p.get("status") in {"queued", "started", "already_running"}
+                    ):
+                        await asyncio.sleep(5)
+                    try:
+                        await _run_one(item)
+                    except Exception as exc:  # noqa: BLE001
+                        item["status"] = "failed"
+                        item["error"] = str(exc)[:200]
+                    while task_registry.active("video_completion", item["episode_id"]):
+                        await asyncio.sleep(8)
+
+            task_registry.spawn(
+                "video_completion_project", project_id, _chain(), project_id=project_id,
+            )
+
+    return {
+        "status": "accepted",
+        "project_id": project_id,
+        "global_budget_cap_cny": global_cap,
+        "project_spent_cny": project_spent,
+        "remaining_cny": remaining_global,
+        "plan": plan,
+        "started": started,
+    }
+
+
+def _project_video_spent(project_id: str) -> float:
+    row = get_conn().execute(
+        """SELECT COALESCE(SUM(v.cost_cny),0) AS c
+           FROM shot_versions v
+           JOIN shots s ON s.id=v.shot_id
+           JOIN episodes e ON e.id=s.episode_id
+           WHERE e.project_id=? AND v.status='succeeded'""",
+        (project_id,),
+    ).fetchone()
+    return float(row["c"] if row else 0)
 
 
 # ---------- 成片台：预览 / 拼接 / 导出 ----------
