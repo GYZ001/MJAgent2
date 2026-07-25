@@ -6,7 +6,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from app.db import get_conn
+from app.continuity import classify_video_hard_failures
+from app.db import get_conn, get_setting
 from app.evidence import repository
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
 
@@ -142,6 +143,35 @@ def _model_evaluation(qa: dict[str, Any] | None, *, subject: str, evaluator_name
     )
 
 
+def _video_hard_gate_enabled() -> bool:
+    return str(get_setting("video_hard_gate_enabled") or "true").strip().lower() not in {
+        "0", "false", "no", "off"
+    }
+
+
+def merge_observed_state_out_into_shot_contract(shot_id: str, observed_state_out: str) -> None:
+    observed = (observed_state_out or "").strip()
+    if not observed:
+        return
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT shot_contract_json FROM shots WHERE id=?", (shot_id,)
+    ).fetchone()
+    contract: dict[str, Any] = {}
+    if row and row["shot_contract_json"]:
+        try:
+            loaded = json.loads(row["shot_contract_json"])
+            if isinstance(loaded, dict):
+                contract = loaded
+        except (TypeError, ValueError):
+            contract = {}
+    contract["observed_state_out"] = observed
+    conn.execute(
+        "UPDATE shots SET observed_state_out=?, shot_contract_json=? WHERE id=?",
+        (observed, json.dumps(contract, ensure_ascii=False), shot_id),
+    )
+
+
 def record_video_candidate(version_id: str, *, step_run_id: str | None = None) -> dict[str, Any]:
     conn = get_conn()
     row = conn.execute(
@@ -222,6 +252,7 @@ def select_best_video_candidate(shot_id: str) -> dict[str, Any] | None:
         "SELECT * FROM shot_versions WHERE shot_id=? AND status='succeeded' ORDER BY version_no",
         (shot_id,),
     ).fetchall()
+    hard_gate_enabled = _video_hard_gate_enabled()
     candidates: list[dict[str, Any]] = []
     for row in rows:
         technical = json.loads(row["technical_validation_json"] or "{}")
@@ -235,25 +266,37 @@ def select_best_video_candidate(shot_id: str) -> dict[str, Any] | None:
         qa = json.loads(row["qa_json"] or "{}")
         if not technical.get("passed") or qa.get("qa_recovered"):
             continue
-        try:
-            score = float(qa.get("overall")) if qa else 0.5
-        except (TypeError, ValueError):
-            score = 0.5
-        if qa and score < threshold:
+        hard_failures = classify_video_hard_failures(qa, technical=technical) if hard_gate_enabled else []
+        if hard_failures:
             continue
-        candidates.append({"id": row["id"], "version_no": row["version_no"], "score": score})
+        try:
+            score = float(qa.get("overall"))
+        except (TypeError, ValueError):
+            continue
+        if score < threshold:
+            continue
+        candidates.append({
+            "id": row["id"],
+            "version_no": row["version_no"],
+            "score": score,
+            "qa": qa,
+            "hard_failures": hard_failures,
+        })
     if not candidates:
         return None
     ordered = sorted(candidates, key=lambda item: (item["score"], item["version_no"]), reverse=True)
     best = ordered[0]
     margin = best["score"] - ordered[1]["score"] if len(ordered) > 1 else best["score"]
     reason = (
-        f"自动比较 {len(ordered)} 个技术门禁通过候选；选择 v{best['version_no']}，"
-        f"质量分 {best['score']:.3f}，领先次优 {margin:.3f}。"
+        f"自动比较 {len(ordered)} 个技术门禁和连续性硬门禁通过候选；选择 v{best['version_no']}，"
+        f"硬门禁通过，质量分 {best['score']:.3f}（阈值 {threshold:.3f}），领先次优 {margin:.3f}。"
     )
     previous = conn.execute(
         "SELECT adopted_version_id FROM shots WHERE id=?", (shot_id,)
     ).fetchone()
+    observed_state_out = (best.get("qa") or {}).get("observed_state_out")
+    if observed_state_out:
+        merge_observed_state_out_into_shot_contract(shot_id, str(observed_state_out))
     conn.execute("UPDATE shots SET adopted_version_id=? WHERE id=?", (best["id"], shot_id))
     conn.execute("UPDATE shot_versions SET adoption_reason=? WHERE id=?", (reason, best["id"]))
     conn.commit()

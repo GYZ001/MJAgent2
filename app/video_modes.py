@@ -827,10 +827,11 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
     threshold = quality_threshold()
     max_refs = max_reference_images()
 
-    # 接上镜（continuity_from_prev）：强制把上一镜尾帧作为参考图注入，作为剪辑点连贯锚点。
+    # 只有 action_continuation 才把上一镜尾帧作为强制参考图和剪辑点连贯锚点。
     # 不受 plan.reusePreviousSceneCount 计数与 QA 阈值限制；放在最前、确保不被裁掉。
     forced: list[ReferenceImageAsset] = []
-    if shot.continuity_from_prev:
+    from app.continuity import derive_continuity_mode, uses_previous_tail_frame
+    if uses_previous_tail_frame(derive_continuity_mode(shot)):
         prev = prev_shot
         if prev is None and int(getattr(shot, "shot_no", 0) or 0) > 1:
             prev = conn.execute(

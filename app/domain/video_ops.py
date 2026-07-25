@@ -10,6 +10,15 @@ try:
 except NameError:  # pragma: no cover - direct module import
     from app.domain.storyboard_ops import _board_from_shot_rows
 
+def _shot_contract_json(shot: Shot) -> str:
+    from app.continuity import shot_contract_dict
+    return json.dumps(shot_contract_dict(shot), ensure_ascii=False)
+
+
+def _uses_previous_tail_frame_for_model(shot: Shot, prev: Shot | None = None) -> bool:
+    from app.continuity import derive_continuity_mode, uses_previous_tail_frame
+    return uses_previous_tail_frame(derive_continuity_mode(shot, prev))
+
 def confirm_episode_core(episode_id: str) -> dict:
     """人工确认门（PRD P3）的纯逻辑：全量业务校验通过才进入 confirmed。
     失败抛 ValueError（消息面向 UI）；供路由复用，避免逻辑分叉。"""
@@ -33,20 +42,29 @@ def confirm_episode_core(episode_id: str) -> dict:
     )
     # 确认门同样跑确定性连贯归一，并把修正后的 continuity/transition 写回库，
     # 保证人工编辑过的分镜在进入生成前也满足"同场景接上镜/换场明确转场"的铁律。
-    before = [(s.continuity_from_prev, s.transition, s.duration_s, s.shot_size, s.camera_move) for s in shots]
+    before = [
+        (
+            s.continuity_from_prev, s.transition, s.duration_s, s.shot_size, s.camera_move,
+            s.continuity_mode, s.observed_state_out,
+            (r["shot_contract_json"] if "shot_contract_json" in r.keys() else "") or "",
+        )
+        for r, s in zip(shots_rows, shots)
+    ]
     normalize_continuity(board)
     # 确认门保留模型/人工选择的时长，由全量校验验证 5~10s 合同与对应口播预算。
     normalize_transition_visuals(board)
     normalized_fields_changed = False
-    for r, s, (old_cont, old_trans, old_dur, old_size, old_move) in zip(shots_rows, shots, before):
+    for r, s, (old_cont, old_trans, old_dur, old_size, old_move, old_mode, old_observed, old_contract) in zip(shots_rows, shots, before):
         if (old_cont != s.continuity_from_prev or old_trans != s.transition or old_dur != s.duration_s
                 or old_size != s.shot_size or old_move != s.camera_move
+                or old_mode != s.continuity_mode or old_observed != s.observed_state_out
+                or old_contract != _shot_contract_json(s)
                 or (r["last_frame_desc"] or "") != s.last_frame_desc):
             normalized_fields_changed = True
             conn.execute(
-                "UPDATE shots SET continuity_from_prev=?, transition=?, duration_s=?, shot_size=?, camera_move=?, last_frame_desc=? WHERE id=?",
+                "UPDATE shots SET continuity_from_prev=?, transition=?, duration_s=?, shot_size=?, camera_move=?, last_frame_desc=?, shot_contract_json=?, continuity_mode=?, observed_state_out=? WHERE id=?",
                 (int(s.continuity_from_prev), s.transition, s.duration_s, s.shot_size, s.camera_move,
-                 s.last_frame_desc, r["id"]))
+                 s.last_frame_desc, _shot_contract_json(s), s.continuity_mode, s.observed_state_out, r["id"]))
     conn.commit()
     errors = validate_storyboard(board, bible, compact_target)
     screenplay = _load_screenplay(ep)
@@ -239,17 +257,27 @@ async def generate_episode(episode_id: str, body: dict | None = None):
     if ep["status"] not in ("confirmed", "generating", "done"):
         raise HTTPException(409, "分镜脚本未确认（先在工作台点击确认分镜）")
     conn = get_conn()
-    shots = rows_to_dicts(conn.execute(
-        "SELECT id, shot_no, continuity_from_prev FROM shots WHERE episode_id=? ORDER BY shot_no",
-        (episode_id,)).fetchall())
+    shots_rows = conn.execute(
+        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
+        (episode_id,)).fetchall()
+    board = _board_from_shot_rows(shots_rows, ep["episode_no"])
+    shots = [
+        {"row": dict(row), "shot": board.shots[idx], "prev": board.shots[idx - 1] if idx > 0 else None}
+        for idx, row in enumerate(shots_rows)
+    ]
     from_no = (body or {}).get("from_shot_no")
+    if from_no is not None:
+        try:
+            from_no = int(from_no)
+        except (TypeError, ValueError):
+            pass
     if from_no:
         selected = []
         for i, s in enumerate(shots):
-            if s["shot_no"] == from_no:
+            if s["row"]["shot_no"] == from_no:
                 selected = [s]
                 for nxt in shots[i + 1:]:
-                    if nxt["continuity_from_prev"]:
+                    if _uses_previous_tail_frame_for_model(nxt["shot"], nxt["prev"]):
                         selected.append(nxt)
                     else:
                         break
@@ -262,30 +290,30 @@ async def generate_episode(episode_id: str, body: dict | None = None):
     # select_best_video_candidate 比较切换；任务失败时保留原可交付采用结果。
     # 固定参考图模式：批量生成前确保每个选中镜都有固定参考图计划。
     for s in selected:
-        await _ensure_shot_mode_plan(conn, s["id"])
+        await _ensure_shot_mode_plan(conn, s["row"]["id"])
     results = []
     for s in selected:
         after = None
-        if s["continuity_from_prev"] and s["shot_no"] > 1:
-            pr = _shot_by_no(episode_id, s["shot_no"] - 1)
+        if _uses_previous_tail_frame_for_model(s["shot"], s["prev"]) and s["row"]["shot_no"] > 1:
+            pr = _shot_by_no(episode_id, s["row"]["shot_no"] - 1)
             after = pr["id"] if pr else None
         try:
-            r = worker.enqueue_shot(s["id"], after_shot_id=after)
+            r = worker.enqueue_shot(s["row"]["id"], after_shot_id=after)
             # 幂等命中（已有相同成片）：若当前无采用版，把复用版标为采用
             if r.get("reused") and r.get("version_id"):
                 row = conn.execute(
-                    "SELECT adopted_version_id FROM shots WHERE id=?", (s["id"],)
+                    "SELECT adopted_version_id FROM shots WHERE id=?", (s["row"]["id"],)
                 ).fetchone()
                 if not row or not row["adopted_version_id"]:
                     conn.execute(
                         "UPDATE shots SET adopted_version_id=? WHERE id=?",
-                        (r["version_id"], s["id"]),
+                        (r["version_id"], s["row"]["id"]),
                     )
-            results.append({"shot_id": s["id"], **r})
+            results.append({"shot_id": s["row"]["id"], **r})
         except Exception as exc:  # noqa: BLE001
             public = errors.record_and_format(exc, action="enqueue_shot",
-                                              context={"shot_id": s["id"], "episode_id": episode_id})
-            results.append({"shot_id": s["id"], "error": public})
+                                              context={"shot_id": s["row"]["id"], "episode_id": episode_id})
+            results.append({"shot_id": s["row"]["id"], "error": public})
     conn.commit()
     return {"enqueued": results}
 
@@ -314,7 +342,19 @@ async def _generate_shot_core(shot_id: str, body: dict) -> dict:
     await _ensure_shot_mode_plan(conn, shot_id)
     # 同场景接上镜时，参考图模式可复用上一镜可用素材作为参考。
     after = None
-    if shot_row["continuity_from_prev"] and shot_row["shot_no"] > 1:
+    prev_row = None
+    prev_shot = None
+    if shot_row["shot_no"] > 1:
+        prev_row = conn.execute(
+            "SELECT * FROM shots WHERE episode_id=? AND shot_no=?",
+            (shot_row["episode_id"], shot_row["shot_no"] - 1),
+        ).fetchone()
+    if prev_row:
+        models = _board_from_shot_rows([prev_row, shot_row], 0).shots
+        prev_shot, shot_model = models[0], models[1]
+    else:
+        shot_model = _board_from_shot_rows([shot_row], 0).shots[0]
+    if _uses_previous_tail_frame_for_model(shot_model, prev_shot) and shot_row["shot_no"] > 1:
         pr = _shot_by_no(shot_row["episode_id"], shot_row["shot_no"] - 1)
         after = pr["id"] if pr else None
     try:
@@ -380,6 +420,10 @@ def _adopt_version_core(shot_id: str, body: dict) -> dict:
         technical = json.loads(refreshed["technical_validation_json"] or "{}")
     if not technical.get("passed"):
         raise HTTPException(409, "视频技术门禁未通过，不能人工采用")
+    qa = json.loads(v["qa_json"] or "{}")
+    observed_state_out = qa.get("observed_state_out")
+    if observed_state_out:
+        media_evidence.merge_observed_state_out_into_shot_contract(shot_id, str(observed_state_out))
     reason = str(body.get("reason") or "人工横向比较后采用").strip()
     evidence_repository.commit_artifact(
         None,

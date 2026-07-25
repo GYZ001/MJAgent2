@@ -240,40 +240,35 @@ def sanitize_seedance_prompt(prompt_text: str, *, aggressive: bool = False,
                 body = body.replace(old, new)
     body = _rewrite_sensitive_terms(body, aggressive=aggressive)
     if aggressive:
-        body = re.sub(rf"{re.escape(SOURCE_EXCERPT_MARKER)}[^。；]*[。；]?", "", body)
+        body = re.sub(rf"{re.escape(SOURCE_EXCERPT_MARKER)}[^。；\n]*[。；\n]?", "", body)
         body = re.sub(
-            r"台词信息：[^。]{0,220}",
+            r"台词信息：[^。\n]{0,220}",
             "台词信息：角色以短促口型和压抑情绪表达懊恼，不生成字幕文字",
             body,
         )
-        body = re.sub(r"[^。；]{0,18}低声[^。；]{0,80}可恶[^。；]{0,30}", "角色低声表达懊恼", body)
-    body = re.sub(r"\s+", " ", body).strip(" 。；")
+        body = re.sub(r"[^。；\n]{0,18}低声[^。；\n]{0,80}可恶[^。；\n]{0,30}", "角色低声表达懊恼", body)
+    # 保留段落换行（新 Seedance 分段协议）；仅压缩行内空白与多余空行
+    if "[" in body and "]" in body and "\n" in body:
+        lines = []
+        for line in body.splitlines():
+            lines.append(re.sub(r"[ \t]+", " ", line).strip())
+        body = "\n".join(lines)
+        body = re.sub(r"\n{3,}", "\n\n", body).strip(" \n。；")
+    else:
+        body = re.sub(r"\s+", " ", body).strip(" 。；")
     return f"{body}{args}" if body else args.strip()
 
 
 def ensure_source_excerpt_in_prompt(prompt_text: str, shot: Shot) -> str:
-    """给旧版本/手写 prompt 补上原文兜底，保证真正发往 Seedance 的文本不漏。"""
+    """兼容旧调用点：PRD 禁止把原文章节送入 Seedance，因此只做规范化与消毒，不再注入原文。"""
     text = normalize_video_args(prompt_text, shot.duration_s)
+    # 若历史 prompt 仍含原文标记，主动剥离
     if SOURCE_EXCERPT_MARKER in text:
-        return sanitize_seedance_prompt(text)
-
-    body, args = _split_video_args(text, shot.duration_s)
-    for max_chars in (SOURCE_EXCERPT_PROMPT_MAX, 180, 120, 80, 40):
-        source_line = _source_excerpt_line(shot, max_chars)
-        if not source_line:
-            return text
-        candidate_body = f"{body.rstrip('。')}。{source_line}" if body else source_line
-        candidate = candidate_body + args
-        if len(candidate) <= config.PROMPT_CHAR_LIMIT:
-            return sanitize_seedance_prompt(candidate)
-
-    source_line = _source_excerpt_line(shot, 24)
-    if not source_line:
-        return text
-    max_body_len = config.PROMPT_CHAR_LIMIT - len(args) - len(source_line) - 1
-    trimmed_body = body[:max(0, max_body_len)].rstrip("。；，,; ")
-    candidate_body = f"{trimmed_body}。{source_line}" if trimmed_body else source_line
-    return sanitize_seedance_prompt(candidate_body + args)
+        body, args = _split_video_args(text, shot.duration_s)
+        body = re.sub(rf"{re.escape(SOURCE_EXCERPT_MARKER)}[^。；\n]*[。；\n]?", "", body)
+        body = re.sub(r"\s+", " ", body).strip(" 。；")
+        text = f"{body}{args}" if body else args.strip()
+    return sanitize_seedance_prompt(text)
 
 
 def _framing_scale_hint(shot_size: str) -> str:
@@ -290,6 +285,116 @@ def _framing_scale_hint(shot_size: str) -> str:
     return ""
 
 
+
+def _compile_text_policy(shot: Shot) -> str:
+    required = getattr(shot, "required_text", None)
+    if required is not None and (getattr(required, "exact_text", None) or "").strip():
+        exact = required.exact_text.strip()
+        surface = (required.surface or "画面指定表面").strip()
+        style = (required.style or "清晰可读").strip()
+        start = getattr(required, "appear_start_s", 0.0) or 0.0
+        until = getattr(required, "stable_until_s", None)
+        until_s = f"{until}s" if until is not None else "镜头结束"
+        return (
+            f"仅在{surface}上于 {start}s 起稳定显示指定文字「{exact}」，保持到 {until_s}；"
+            f"文字样式：{style}。禁止出现任何其他文字、字幕、标志、水印或乱码。"
+        )
+    return "画面中不出现任何文字、字幕、标志或水印。"
+
+
+def _compile_audio_timeline(shot: Shot, voice_bible: list | None = None) -> str:
+    from app.continuity import build_audio_timeline_from_legacy, ensure_audio_timeline
+    ensure_audio_timeline(shot, voice_bible)
+    lines: list[str] = []
+    for item in shot.audio_timeline:
+        span = f"{item.start_s:g}–{item.end_s:g} 秒"
+        if item.type == "ambient_sound":
+            lines.append(f"{span}：{item.text or '自然环境声'}")
+            continue
+        speaker = item.speaker_id or "未知"
+        voice = (item.voice_canonical or "").strip()
+        voice_bit = f"，声音特征：{voice}" if voice else ""
+        lip = "需要对口型" if item.lip_sync else "不在画面中或无需口型"
+        emotion = item.emotion or "平静"
+        if item.type == "narration":
+            lines.append(
+                f"{span}：旁白用独立叙述者嗓音念「{item.text}」{voice_bit}；不对口型，不要让画面人物说这段。"
+            )
+        elif item.type == "offscreen_voice":
+            lines.append(
+                f"{span}：{speaker}在画外以{emotion}语气说「{item.text}」{voice_bit}；{lip}；"
+                "保持该角色声音身份，不得改成通用旁白。"
+            )
+        else:
+            lines.append(
+                f"{span}：画面中的{speaker}以{emotion}语气开口说「{item.text}」{voice_bit}；{lip}。"
+            )
+    lines.append("所有对白和必要声音必须由本条视频直接生成并在片段结束前完整结束；只生成指定说话人和指定台词。")
+    return "\n".join(lines)
+
+
+def _compile_reference_roles(shot: Shot, *, continuity_mode: str, with_refs: bool,
+                             chained: bool) -> str:
+    from app.continuity import reference_role_plan, uses_previous_tail_frame
+    roles = reference_role_plan(shot, continuity_mode=continuity_mode)
+    lines: list[str] = []
+    if uses_previous_tail_frame(continuity_mode) and (chained or "start_state_reference" in roles):
+        lines.append(
+            "参考图 A 是上一镜真实结束帧，也是本视频 0.0 秒的强制起始状态。"
+            "保持其中人物数量、身份、服装、位置、朝向、手势、道具状态和光线；"
+            "从该状态继续当前动作，不重复上一镜已经完成的动作。"
+        )
+    if continuity_mode in {"same_scene_cut", "reaction_cut", "reverse_angle", "insert_detail"}:
+        lines.append(
+            "场景参考仅用于建筑、材质、光线和色调一致；当前镜头需要重新构图。"
+            "人物参考仅用于身份和服装一致，不复制参考图中的姿势与画面布局。"
+        )
+    elif continuity_mode == "scene_change":
+        lines.append("使用新场景标准参考建立稳定开场；不继承上一镜环境构图。")
+    if with_refs and not lines:
+        lines.append("只按参考素材角色使用图片；不得把参考图中的构图、额外人物或上一镜主体复制到当前镜头。")
+    if not lines:
+        lines.append("无参考图时仍保持人物身份与场景不变量一致。")
+    # 显式角色映射摘要
+    if roles:
+        lines.append("参考角色映射：" + "、".join(roles) + "。")
+    lines.append("只按上述角色使用参考素材；不得把参考图中的构图、额外人物或上一镜主体复制到当前镜头。")
+    return "\n".join(lines)
+
+
+def _compile_negative_constraints(shot: Shot, extra_negative: list[str] | None,
+                                  continuity_mode: str) -> str:
+    from app.continuity import effective_characters_visible, uses_previous_tail_frame
+    parts = [
+        "不要重演前序剧情",
+        "不要提前表演下一镜内容",
+        "不要生成字幕、乱码或水印" if not (shot.required_text and (shot.required_text.exact_text or "").strip())
+        else f"除「{(shot.required_text.exact_text or '').strip()}」外不要出现任何其他文字",
+        "不要出现镜头内未指定的人物",
+        "不要复制人物或生成分身",
+    ]
+    for item in shot.do_not_repeat or []:
+        if item and item.strip():
+            parts.append(f"不要重复：{item.strip()}")
+    for tag in shot.risk_tags or []:
+        if tag == "crowd_consistency":
+            parts.append("人群数量与朝向保持稳定，不要随机增减人脸")
+        elif tag == "offscreen_voice":
+            parts.append("画外说话人不要入画，也不要用旁白腔替代")
+    visible = effective_characters_visible(shot)
+    if visible:
+        parts.append(f"画面可见角色仅限：{'、'.join(visible)}")
+    if not uses_previous_tail_frame(continuity_mode):
+        parts.append("不要沿用上一镜完整构图或主体尾帧姿势")
+    if extra_negative:
+        parts.extend(x.strip() for x in extra_negative if x and x.strip())
+    # 保留关键安全负面词（精简，避免与条件文字策略冲突）
+    parts.append(
+        "避免真人实拍、畸形手、肢体错位、面部崩坏、角色换装漂移、动作瞬移、画风突变、满屏光效遮挡面部"
+    )
+    return "；".join(dict.fromkeys(parts))
+
+
 def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = None,
                    *, with_refs: bool = False, chained: bool = False,
                    prev_action: str | None = None, from_scene: bool = False,
@@ -298,8 +403,27 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
                    with_last_frame: bool = False,
                    incoming_transition: str | None = None,
                    outgoing_transition: str | None = None,
-    next_scene: str | None = None,
-    next_first_frame_desc: str | None = None) -> str:
+                   next_scene: str | None = None,
+                   next_first_frame_desc: str | None = None,
+                   continuity_mode: str | None = None,
+                   prev_state_out: str | None = None,
+                   voice_bible: list | None = None,
+                   visual_style: str | None = None,
+                   aspect_ratio: str = "9:16") -> str:
+    """编译 Seedance 最终提示词（PRD §11）：最小完备、固定段落、禁止原文/前镜完整动作/未来剧情。"""
+    from app.continuity import (
+        build_audio_timeline_from_legacy,
+        derive_continuity_mode,
+        effective_primary_action,
+        effective_state_in,
+        effective_state_out,
+        planned_state_out,
+        reference_role_plan,
+        sync_shot_continuity_fields,
+        uses_previous_tail_frame,
+    )
+    from app.schemas import PROMPT_CONTRACT_VERSION
+
     bible_map = {c.name: c for c in bible.characters}
     missing = [
         name for name in shot.characters
@@ -313,206 +437,189 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         raise CompileError(
             f"镜头 {shot.shot_no} 时长 {shot.duration_s}s 不合法，视频生成时长必须为 "
             f"{config.VIDEO_DURATION_MIN_S}~{config.VIDEO_DURATION_MAX_S}s 的整数")
+
+    sync_shot_continuity_fields(shot)
+    mode = (continuity_mode or derive_continuity_mode(shot)).strip()
+    if mode not in {"action_continuation", "same_scene_cut", "reaction_cut",
+                    "reverse_angle", "insert_detail", "scene_change"}:
+        mode = derive_continuity_mode(shot)
+    shot.continuity_mode = mode
+    shot.prompt_contract_version = PROMPT_CONTRACT_VERSION
+    if not shot.audio_timeline:
+        shot.audio_timeline = build_audio_timeline_from_legacy(shot, voice_bible)
+    shot.reference_roles = reference_role_plan(shot, continuity_mode=mode)
+
     shot_dur = clip_duration(shot)
+    state_in = effective_state_in(shot)
+    if uses_previous_tail_frame(mode) and (prev_state_out or "").strip():
+        # 连续动作：以实际/计划尾状态为强制起点（不使用上一镜完整 action_desc）
+        state_in = prev_state_out.strip()
+        shot.state_in = state_in
+    state_out = planned_state_out(shot)
+    primary = effective_primary_action(shot)
+    if not state_in or not primary or not state_out:
+        raise CompileError(
+            f"镜头 {shot.shot_no} 缺少 state_in/primary_action/state_out，无法编译最小完备提示词"
+        )
 
-    anchors = [
-        bible_map[name].appearance_canonical
-        if name in bible_map else functional_extra_anchor(name)
-        for name in shot.characters
-    ]
-    negative = NEGATIVE_SUFFIX
-    if extra_negative:
-        negative += "，" + "，".join(x.strip() for x in extra_negative if x.strip())
-    source_excerpt = _source_excerpt_line(shot)
-
-    # 声轨（Seedance 直接据此生成人声）：旁白=画外音解说嗓音（与角色不同、不对口型），
-    # 台词=画面角色本人开口（用各自嗓音、对口型）。按听感时序排：情境/内心旁白在台词前、全知结尾钩旁白在台词后。
-    narration = (shot.narration or "").strip()
-    narration_cue = (
-        f"旁白（画外音解说，用一个与画面所有角色都不同的旁白嗓音念，不要让画面里的人物开口说这段、不要对口型）：{narration}"
-        if narration else "")
-    dialogue_cue = ""
-    if shot.dialogues:
-        lines = "；".join(f"{d.speaker}（{d.emotion}）说「{d.line}」" for d in shot.dialogues)
-        dialogue_cue = f"台词（由画面中对应角色本人开口说出、对口型，每个角色用各自的嗓音）：{lines}"
-    story_cues: list[str] = []
-    if narration and narration_after_dialogue(narration):
-        story_cues += [c for c in (dialogue_cue, narration_cue) if c]
-    else:
-        story_cues += [c for c in (narration_cue, dialogue_cue) if c]
-    # 声轨时序总则：先念画外音旁白/内心，画面角色再开口；旁白与台词嗓音必须明显不同
-    if narration and shot.dialogues:
-        story_cues.append(
-            "声轨时序：先以画外音旁白嗓音念旁白（此时画面角色不开口），随后画面角色再用自己的嗓音说台词；"
-            "旁白嗓音与角色嗓音必须明显区分，旁白不能听起来像主角在自言自语"
-            if not narration_after_dialogue(narration) else
-            "声轨时序：画面角色先用自己的嗓音说完台词，结尾再由画外音旁白嗓音念这句收尾旁白；旁白嗓音与角色嗓音必须明显区分")
-    scene_hint = shot.scene_setting.strip()
-    dur = shot_dur
-    # 提示词结构遵循 Seedance 实践公式：主体 + 动作 + 景别运镜 + 环境 + 画风 + 质量约束。
-    # 关键纠偏：单镜只表现“一个连贯流畅的动作”，不在可变时长内塞入多个小镜头/快速切景
-    # （多动作快切是当前成片崩坏与画风漂移的主因）。剧情密度交给旁白承载，画面只演一件事。
-    subject = "；".join(anchors)
-    visible_names = "、".join(shot.characters)
+    style = (visual_style or bible.world.visual_style_canonical or "写实国风玄幻动画").strip()
     scale_hint = _framing_scale_hint(shot.shot_size)
-    frame_discipline = (
-        f"本镜允许出现在画面中的角色仅限：{visible_names}；不要生成名单外人物、路人特写或无关人影。"
-        "名单内角色必须从开场就有合理画面位置，或按镜头动作从门口/画边/人群中自然进入；"
-        "任何角色都不能凭空从无到有，也不能无原因突然消失或突然开口"
-        if visible_names else "")
-    scene_env_line = (f"环境（弱化，仅作背景空间参考，不要抢人物主体）：{scene_hint}" if scene_hint else "")
-    video_intro = (
-        f"9:16 竖屏动态漫画短剧分镜，单镜约 {dur} 秒，只表现一个连贯流畅的动作过程，"
-        "全程一镜到底，不要在一个镜头里快速切换多个不相关画面"
+    camera_line = (
+        f"{shot.shot_size}；{(shot.camera_angle or '平视').strip()}；{shot.camera_move}"
+        + (f"。{scale_hint}" if scale_hint else "")
     )
-    motion_discipline = (
-        "动作遵循现实物理与人体运动规律、自然连续，禁止瞬移/穿模/肢体扭曲/物体凭空出现或消失；"
-        "禁止人物凭空出现或消失；首帧与尾帧是同一机位、同一场景的同一个动作的开始与结束，"
-        "两帧之间只做这一个动作的自然过渡，绝不切换场景或机位、不要让画面跳变或形变"
-    )
-    effects_discipline = (
-        "特效与光效服从剧情：日常对话与一般场景写实克制、不要满屏光效或能量粒子，"
-        "仅在情绪高潮或力量爆发的镜头才用强烈特效，且不得遮挡人物面部表情"
-    )
-    dialogue_role_discipline = (
-        "台词由画面角色开口说出、对口型并配合表情与肢体反应；"
-        "旁白是画外音解说（角色不开口、不对口型，只用表情/动作呼应）；不在画面上生成任何字幕文字"
-    )
-    audio_sync_discipline = (
-        f"音画同步要求：本镜约 {dur} 秒内人物始终处于说话/对话或情绪反应状态，口型与肢体随台词节奏自然推进，"
-        "动作要均匀铺满整段时长、缓慢延展，绝不能在台词念完之前就提前做完主要动作或停下、躺下、转身离开、闭眼睡着"
-        if (shot.dialogues or shot.narration) else ""
-    )
-    core_parts = [
-        video_intro,
-        f"画面主体：{subject}" if subject else "",
-        frame_discipline,
-        f"镜头动作（只演这一件事，动作要有清晰的起势、过程与收势）：{shot.action_desc}",
-        motion_discipline,
-        effects_discipline,
-        (f"景别：{shot.shot_size}；运镜：{shot.camera_move}，镜头运动缓慢平稳"
-         + (f"。{scale_hint}" if scale_hint else "")),
-        *story_cues,
-        dialogue_role_discipline,
-        # 音画同步：动作节奏要铺满整段时长、跟着台词走，避免话没说完动作就做完（如台词未结束就趴下/离开/睡着）
-        audio_sync_discipline,
-        source_excerpt,
-        # 画风锚点：全集逐字一致、显式禁止跨镜漂移（与具体画风无关，只强调统一）
-        f"全片统一画风（每个镜头严格一致，禁止风格漂移）：{bible.world.visual_style_canonical}",
-    ]
-    incoming_line = _incoming_transition_line(incoming_transition)
-    if incoming_line:
-        core_parts.insert(1, incoming_line)
-    outgoing_line = _outgoing_transition_line(outgoing_transition, next_scene, next_first_frame_desc)
-    if outgoing_line:
-        core_parts.append(outgoing_line)
-    # 跨镜连贯：本镜承接上一镜的结束状态，让拼接后上下句自然衔接（不是各拍各的）
-    if prev_tail_action:
-        core_parts.insert(3, f"承接上一镜：上一镜结束于「{prev_tail_action[:50]}」，本镜从这个状态自然延续，情绪与场面连贯，不要另起炉灶")
-    # AI 评语返工：把上一版被指出的问题作为本次必须改正项，避免重复犯错
-    if critique:
-        core_parts.append("上一版视频存在以下问题，本次必须逐条改正、其余保持不变：" + "；".join(c.strip() for c in critique[:6] if c.strip()))
-    if from_scene:
-        # 首帧来自本镜“首图关键帧”；若同时给尾帧，则以本镜“尾图关键帧”为结束画面。
-        if with_last_frame:
-            core_parts.append(
-                "以给定首帧（本镜首图关键帧）为起始画面，以给定尾帧（本镜尾图关键帧）为结束画面，"
-                "在单镜头内自然完成上述动作，严格保持人物形象、服装、发型、场景布置、光影与画风一致，"
-                "不要重新构图、不要改变风格、不要跳切")
-        else:
-            core_parts.append(
-                "以给定首帧（本镜场景关键帧）为起始画面，让画面中的人物自然做出上述镜头动作，"
-                "严格保持人物形象、服装、发型、场景布置、光影与画风和首帧完全一致，"
-                "只做连贯的动作与镜头延展，不要重新构图、不要改变风格、不要跳切")
-    elif chained:
-        # 首帧来自上一镜预生成尾图；若同时给尾帧，则以本镜预生成尾图为结束画面。
-        if with_last_frame:
-            lead = ("以给定首帧（上一镜尾图关键帧）为起始画面，以给定尾帧（本镜尾图关键帧）为结束画面，"
-                    "自然延续动作并完成上述镜头内容，严格保持人物形象、服装、发型、光影与画风一致，"
-                    "不要重新构图、不要改变风格、不要跳切")
-        else:
-            lead = ("以给定首帧为起始画面自然延续动作，严格保持人物形象、服装、发型、光影与画风和首帧完全一致，"
-                    "只做连贯的动作与镜头延展，不要重新构图、不要改变风格、不要跳切")
-        if prev_action:
-            lead += f"（上一镜结束于「{prev_action[:40]}」，本镜紧接其后）"
-        core_parts.append(lead)
-    if with_refs:
-        core_parts.append("严格保持人物发型、服装、五官与画风和参考图完全一致")
-    # 可裁剪的修饰部件：超长时从【末尾】依次丢弃（先丢价值最低的 NO_BGM，再丢质量套话，最后丢环境）。
-    # 锚点串/动作/物理与首尾帧纪律/负向词永不在此被裁——尤其是重生针对性负词（extra_negative），
-    # 它正是本次必须改正项，旧逻辑把它第一个砍掉等于让重生白做、伪影回潮。
-    filler_parts = [p for p in (scene_env_line, QUALITY_SUFFIX, NO_BGM_SUFFIX) if p and p.strip()]
-    args = f" --ratio 9:16 --dur {shot_dur}"
+    spatial = (shot.spatial_anchor or shot.scene_setting or "").strip()
+    if spatial:
+        camera_line += f"。保持空间轴线和人物方位：{spatial}"
 
-    def assemble(parts: list[str], neg: str) -> str:
-        body = "。".join(p.strip().rstrip("。") for p in parts if p and p.strip())
-        if neg:
-            body += "。" + neg
+    # 角色/场景锚点（短）
+    anchors = []
+    for name in shot.characters:
+        if name in bible_map:
+            anchors.append(f"{name}：{bible_map[name].appearance_canonical}")
+        else:
+            anchors.append(f"{name}：{functional_extra_anchor(name)}")
+    character_anchor = "；".join(anchors[:4]) if anchors else "保持人物身份服装一致"
+    scene_anchor = f"场景：{shot.scene_setting}" if shot.scene_setting else ""
+    prop_anchor = ""
+    if shot.required_text and (shot.required_text.surface or "").strip():
+        prop_anchor = f"文字承载面：{shot.required_text.surface.strip()}"
+
+    # 转场：仅描述本镜可完成的视觉出口/入口，不注入下一镜详细剧情
+    transition_bits: list[str] = []
+    if incoming_transition and _clean_transition(incoming_transition):
+        transition_bits.append(
+            f"本镜开头以「{_clean_transition(incoming_transition)}」进入并尽快落稳到起始状态；"
+            "不要误以为仍在上一地点。"
+        )
+    if outgoing_transition and _clean_transition(outgoing_transition):
+        # 不写入 next_first_frame_desc / 下一镜详细内容（PRD 禁止未来剧情）
+        target = f"，为切换到「{next_scene.strip()}」留出视觉出口" if next_scene and next_scene.strip() else ""
+        transition_bits.append(
+            f"本镜结尾以「{_clean_transition(outgoing_transition)}」收束{target}；"
+            f"{_transition_hint(_clean_transition(outgoing_transition))}；"
+            "不要把下一场景完整拍成本镜内容。"
+        )
+
+    format_block = (
+        f"生成 {shot_dur} 秒、{aspect_ratio}、{style} 的完整可直接采用视频。"
+        "不得依赖后期裁切、配音、字幕叠加或音效补充。"
+        "全程不要任何背景音乐或 BGM；声音只保留指定人声与必要环境音。"
+    )
+    reference_block = _compile_reference_roles(
+        shot, continuity_mode=mode, with_refs=with_refs,
+        chained=chained or uses_previous_tail_frame(mode),
+    )
+    # 兼容旧 chained/from_scene 调用：仅 action_continuation 才强调尾帧起点
+    if uses_previous_tail_frame(mode) and (chained or from_scene or with_last_frame):
+        if "强制起始状态" not in reference_block:
+            reference_block = (
+                "参考图 A 是上一镜真实结束帧，也是本视频 0.0 秒的强制起始状态。\n"
+                + reference_block
+            )
+
+    action_block = primary
+    if transition_bits:
+        action_block = primary + "。" + "".join(transition_bits)
+    action_block += "。只完成这一项主要动作，不重演前序剧情，不提前表演下一镜内容。"
+
+    # 明确忽略 prev_action / prev_tail_action 中的完整动作描述（API 兼容保留参数）
+    _ = prev_action
+    _ = prev_tail_action
+
+    audio_block = _compile_audio_timeline(shot, voice_bible)
+    text_block = _compile_text_policy(shot)
+    consistency_parts = [character_anchor, scene_anchor, prop_anchor, f"全片统一画风：{style}"]
+    consistency_block = "\n".join(p for p in consistency_parts if p)
+    negative_block = _compile_negative_constraints(shot, extra_negative, mode)
+    if critique:
+        negative_block += "；上一版必须改正：" + "；".join(
+            c.strip() for c in critique[:6] if c and c.strip()
+        )
+
+    # 固定段落顺序（PRD §11.1）；超长时按优先级压缩，不得截断台词/文字/首尾状态
+    sections: list[tuple[str, str, int]] = [
+        ("FORMAT", format_block, 5),
+        ("REFERENCE ROLES", reference_block, 3),
+        ("START STATE | 0.0s", state_in, 1),
+        ("ONE CURRENT ACTION", action_block, 1),
+        (f"END STATE | {shot_dur}.0s", state_out + "。最后状态稳定、清楚、可作为下一镜的叙事依据。", 1),
+        ("CAMERA", camera_line, 4),
+        ("AUDIO TIMELINE", audio_block, 2),
+        ("ON-SCREEN TEXT", text_block, 2),
+        ("CONSISTENCY", consistency_block, 4),
+        ("DO NOT", negative_block, 5),
+    ]
+
+    args = f" --ratio {aspect_ratio} --dur {shot_dur}"
+
+    def render(active: list[tuple[str, str, int]]) -> str:
+        body = "\n\n".join(f"[{title}]\n{content.strip()}" for title, content, _ in active if content.strip())
         return body + args
+
+    active = list(sections)
+    text = render(active)
 
     def fits(t: str) -> bool:
         return len(t) <= config.PROMPT_CHAR_LIMIT
 
-    # 1) 先丢弃低价值修饰，始终保留完整负向词（含 extra_negative）。
-    text = assemble(core_parts + filler_parts, negative)
-    while not fits(text) and filler_parts:
-        filler_parts.pop()
-        text = assemble(core_parts + filler_parts, negative)
-
-    # 2) 仍超长：只缩短可回查的原文兜底摘录，不动角色锚点、镜头动作和台词。
-    current_source_excerpt = source_excerpt
-    for max_chars in (180, 120, 80, 40, 24):
-        if fits(text) or not current_source_excerpt:
-            break
-        shorter_source_excerpt = _source_excerpt_line(shot, max_chars)
-        if shorter_source_excerpt == current_source_excerpt:
-            continue
-        try:
-            source_index = core_parts.index(current_source_excerpt)
-        except ValueError:
-            break
-        core_parts[source_index] = shorter_source_excerpt
-        current_source_excerpt = shorter_source_excerpt
-        text = assemble(core_parts + filler_parts, negative)
-
-    # 3) 再将与基础负面词重复的通用说明收紧为等价短句。剧情内容不参与裁剪。
-    compactable_parts = (
-        (motion_discipline,
-         "动作符合现实物理且自然连续，禁止瞬移、穿模、肢体扭曲或人物物体凭空出现消失；"
-         "首尾同机位同场景，只自然推进本镜动作，不跳切、不形变"),
-        (dialogue_role_discipline,
-         "台词由角色本人开口并对口型；旁白用不同嗓音的画外音且不对口型；禁止画面字幕文字"),
-        (effects_discipline,
-         "日常场景光效克制；只在情绪或力量爆发时使用特效，不得遮挡面部"),
-        (audio_sync_discipline,
-         f"口型和肢体随台词自然推进，动作均匀铺满 {dur} 秒，不得在台词完成前收势" if audio_sync_discipline else ""),
-        (video_intro, f"9:16 竖屏动态漫画短剧，单镜约 {dur} 秒，只演一个连贯动作，全程一镜到底"),
-    )
-    for verbose, compact in compactable_parts:
+    # 压缩策略：先压低优先级段落（通用风格/重复锚点），永不删除优先级 1/2
+    compact_map = {
+        "CONSISTENCY": "保持人物身份服装与场景材质光线一致。",
+        "REFERENCE ROLES": (
+            "仅按角色映射使用参考图；连续动作才把尾帧当 0 秒起点，其余模式重新构图。"
+            if uses_previous_tail_frame(mode) else
+            "场景/人物参考只锁材质与身份，重新构图，不复制姿势布局。"
+        ),
+        "FORMAT": f"生成 {shot_dur} 秒、{aspect_ratio}、{style} 完整可直接采用视频；禁止后期。",
+        "DO NOT": "；".join(negative_block.split("；")[:6]),
+        "CAMERA": f"{shot.shot_size}；{shot.camera_move}",
+    }
+    for priority in (5, 4, 3):
         if fits(text):
             break
-        # 无台词/旁白时 audio_sync_discipline 为空串，必须跳过而不是提前结束；
-        # 否则排在后面的 video_intro 等压缩候选永远不会被尝试。
-        if not verbose:
-            continue
-        try:
-            part_index = core_parts.index(verbose)
-        except ValueError:
-            continue
-        core_parts[part_index] = compact
-        text = assemble(core_parts + filler_parts, negative)
+        for idx, (title, content, pri) in enumerate(active):
+            if pri != priority:
+                continue
+            key = title.split("|")[0].strip() if "|" in title else title
+            # FORMAT / DO NOT / REFERENCE / CONSISTENCY / CAMERA
+            for cand_key, compact in compact_map.items():
+                if title.startswith(cand_key) or key == cand_key:
+                    active[idx] = (title, compact, pri)
+                    break
+            text = render(active)
 
-    # 4) 仍超长：退一步丢弃重生附加负词，但保留基础负向词表。
+    # 仍超长：压缩音频时间线描述（保留台词原文）
     if not fits(text):
-        text = assemble(core_parts + filler_parts, NEGATIVE_SUFFIX)
-    # 5) 最后兜底：丢弃全部负向词（锚点串/动作永不裁剪）。
+        short_audio_lines = []
+        for item in shot.audio_timeline:
+            if item.type == "ambient_sound":
+                short_audio_lines.append(f"{item.start_s:g}–{item.end_s:g}s 环境声")
+            else:
+                short_audio_lines.append(
+                    f"{item.start_s:g}–{item.end_s:g}s {item.speaker_id or item.type}「{item.text}」"
+                )
+        for idx, (title, content, pri) in enumerate(active):
+            if title == "AUDIO TIMELINE":
+                active[idx] = (title, "；".join(short_audio_lines), pri)
+        text = render(active)
+
     if not fits(text):
-        text = assemble(core_parts + filler_parts, "")
-    if not fits(text):
+        # 镜头任务过载：不得截断必填字段
         raise CompileError(
-            f"镜头 {shot.shot_no} prompt 长度 {len(text)} 超过上限 {config.PROMPT_CHAR_LIMIT}，"
-            f"且锚点串不可裁剪。请拆分为更细镜头，或在不丢失关键动作与场景锚点的前提下调整 action_desc/scene_setting")
+            f"镜头 {shot.shot_no} 必填提示词段落总长 {len(text)} 超过上限 {config.PROMPT_CHAR_LIMIT}；"
+            "说明镜头任务过载，请回到分镜阶段拆分，不得截断台词/文字/首尾状态或否定条件"
+        )
+
+    # 最终不得含原文标记
+    if SOURCE_EXCERPT_MARKER in text:
+        text = re.sub(rf"{re.escape(SOURCE_EXCERPT_MARKER)}[^。；\n]*[。；\n]?", "", text)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        if not text.endswith(args):
+            text = text.rstrip() + args
+
     return sanitize_seedance_prompt(text)
+
 
 
 # 场景关键帧（Seedream 静帧）负面词：静帧不需要“快速跳切”这类视频负面，但要禁文字/畸形/多人/换装漂移
