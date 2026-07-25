@@ -12,6 +12,7 @@ from app.stages import (_maybe_split_outline_covers, _outline_brief,
                         _render_storyboard_outline)
 from app.validators import (_atomize_claim, _condense, _covers_outside_spoken,
                             downgrade_outline_offbible_spoken,
+                            rewrite_outline_abstract_covers,
                             validate_storyboard_outline)
 
 KEY_LINE = "我一定要查清斗气消失的真相。"
@@ -222,3 +223,42 @@ def test_real_shot_12_cover_split_avoids_tiny_tail() -> None:
 
     assert [len(_condense(chunk)) for chunk in chunks] == [14, 16]
     assert _condense("".join(chunks)) == _condense("".join(_atomize_claim(covers)))
+
+
+def test_outline_rejects_abstract_directing_covers() -> None:
+    """P0：covers 写纯导演抽象（与萧炎形成反差）必须在大纲阶段硬拦。"""
+    outline = _outline(_valid_beats(), covers={5: "与萧炎形成反差"})
+    errors = validate_storyboard_outline(outline, _screenplay(), 50)
+    assert any("导演抽象" in e and "反差" in e for e in errors), errors
+
+
+def test_rewrite_outline_abstract_covers_strips_and_is_idempotent() -> None:
+    """P1：确定性剥离纯抽象 covers，写入 beat 改写指引；二次运行幂等。"""
+    outline = _outline(
+        _valid_beats(),
+        covers={5: f"{KEY_LINE}；与萧炎形成反差"},
+    )
+    changed = rewrite_outline_abstract_covers(outline)
+    assert changed
+    # atomize 会按句号切开，covers 重拼后可能无句末标点；比 condensed 内容即可。
+    assert _condense(outline.shots[4].covers) == _condense(KEY_LINE)
+    assert "反差" not in outline.shots[4].covers
+    assert "导演意图不得写在 covers" in outline.shots[4].beat
+    assert "双方可见状态" in outline.shots[4].beat
+    assert rewrite_outline_abstract_covers(outline) == []
+    assert validate_storyboard_outline(outline, _screenplay(), 50) == []
+
+
+def test_rewrite_outline_abstract_covers_keeps_concrete_residue() -> None:
+    """混合 covers：剥离「形成反差」后保留具体事实残段。"""
+    outline = _outline(
+        _valid_beats(),
+        covers={4: "薰儿测出七段并与萧炎形成反差"},
+    )
+    # 关键台词仍需覆盖，挂在第 5 镜。
+    outline.shots[4].covers = KEY_LINE
+    changed = rewrite_outline_abstract_covers(outline)
+    assert changed
+    assert "形成反差" not in outline.shots[3].covers
+    assert "薰儿测出七段" in outline.shots[3].covers
+    assert validate_storyboard_outline(outline, _screenplay(), 50) == []

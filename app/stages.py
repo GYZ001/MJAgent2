@@ -32,6 +32,7 @@ from app.validators import (ACTION_DESC_MIN_CHARS,
                             SOURCE_EXCERPT_MIN_CHARS,
                             defer_establishing_covers,
                             downgrade_outline_offbible_spoken,
+                            rewrite_outline_abstract_covers,
                             TRANSITION_HINTS, _atomize_claim, _condense, _covers_has_crowd,
                             _covers_has_spoken, _covers_outside_spoken,
                             _too_similar,
@@ -1018,21 +1019,23 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
 2. 每条保留 beat/covers 兼容旧流程，但重点必须填写 state_in、primary_action、state_out、continuity_mode、story_event_id、new_information_ids、duration_s、characters_visible、audio_cast。beat 只作为一句话摘要，不得替代状态字段。
 3. 相邻两镜 state_out -> state_in 必须能承接，且 primary_action 必须不同、持续前进，严禁停留或复述同一节拍。
 4. 上方主线台词/剧情点/spine 必须分配到 covers 或 new_information_ids；drop_list 禁止分配。new_information_ids 只能引用 screenplay.information_ledger 已有 info_id。同一拍内可合并相关事实，不要硬拆空耗时长。
-5. {first_rule}
-6. 每条 scene_setting 写时间+地点短标签；同一连续空间必须保持同一个标签，不要因为人物走到门口/桌边/人群前就改标签。
-7. beat 必须写清人物调度：入画/出画用走、停、转身等大动作原因。
-8. continuity_mode 必须从 action_continuation / same_scene_cut / reaction_cut / reverse_angle / insert_detail / scene_change 中选择；只有 action_continuation 表示承接上一镜同一动作尾状态，其他同场景切换不得冒充动作连续。
+5. covers 只写本镜必须拍出/说出的具体事实（可见动作、可听台词、可感知反应、可核对信息点）；禁止写「反差/对比/衬托/呼应/强调/暗示/氛围」等导演意图——意图写入 beat/primary_action/state_out，事实写成双方可见状态（如「薰儿测出七段、人群赞叹；萧炎低头不语」）。
+6. {first_rule}
+7. 每条 scene_setting 写时间+地点短标签；同一连续空间必须保持同一个标签，不要因为人物走到门口/桌边/人群前就改标签。
+8. beat 必须写清人物调度：入画/出画用走、停、转身等大动作原因。
+9. continuity_mode 必须从 action_continuation / same_scene_cut / reaction_cut / reverse_angle / insert_detail / scene_change 中选择；只有 action_continuation 表示承接上一镜同一动作尾状态，其他同场景切换不得冒充动作连续。
 
 本集目标时长 {target}s。上一集结尾：{prev_ending or "（本集为第一集）"}
 
 输出 JSON（不要解释、不要 Markdown）：
-{{"episode_no": {episode['episode_no']}, "shots": [{{"shot_no": int, "scene_setting": "时间+地点短标签", "beat": "兼容字段：本镜推进的剧情一句话", "covers": "兼容字段：本镜落实的关键台词/剧情点，可空", "state_in": "本镜开始时人物/道具/信息状态", "primary_action": "本镜唯一主动作/主交付", "state_out": "本镜结束时的新状态", "continuity_mode": "action_continuation|same_scene_cut|reaction_cut|reverse_angle|insert_detail|scene_change", "story_event_id": "对应 screenplay.events[].event_id 或空", "new_information_ids": ["本镜首次交付的信息ID，可空"], "duration_s": 5, "characters_visible": ["本镜画面可见角色"], "audio_cast": ["本镜发声角色/旁白/功能性声音，可空"]}}]}}"""
+{{"episode_no": {episode['episode_no']}, "shots": [{{"shot_no": int, "scene_setting": "时间+地点短标签", "beat": "兼容字段：本镜推进的剧情一句话", "covers": "本镜必须拍出/说出的具体事实（禁止反差/对比等导演抽象）", "state_in": "本镜开始时人物/道具/信息状态", "primary_action": "本镜唯一主动作/主交付", "state_out": "本镜结束时的新状态", "continuity_mode": "action_continuation|same_scene_cut|reaction_cut|reverse_angle|insert_detail|scene_change", "story_event_id": "对应 screenplay.events[].event_id 或空", "new_information_ids": ["本镜首次交付的信息ID，可空"], "duration_s": 5, "characters_visible": ["本镜画面可见角色"], "audio_cast": ["本镜发声角色/旁白/功能性声音，可空"]}}]}}"""
     log_provider_call(
         "storyboard_outline_prompt", config.MODEL_TEXT, "PROMPT_READY", None, 0,
         meta={"episode_id": episode.get("id"), "episode_no": episode.get("episode_no"),
               "target_duration_s": target, "shot_range": [min_shots, max_shots],
               "prompt_chars": len(prompt), "contract_version": "renderability_v1"})
     logged_downgrades: set[tuple[int, str]] = set()
+    logged_abstract_rewrites: set[tuple[int, str]] = set()
 
     def _check(o: StoryboardOutline) -> list[str]:
         # 方案 A2：校验前先确定性降级——把 covers 里"被圣经外角色开口宣告"改写为旁白转述，
@@ -1044,6 +1047,16 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
             logged_downgrades.add(key)
             log_provider_call(
                 "storyboard_outline_downgrade", config.MODEL_TEXT, "COVERS_DOWNGRADED", None, 0,
+                meta={"episode_id": episode.get("id"), "episode_no": episode.get("episode_no"),
+                      "stage": "分镜大纲", **c})
+        # P1：剥离 covers 导演抽象（反差/对比等），写入 beat 可拍改写指引，避免逐镜词匹配死循环。
+        for c in rewrite_outline_abstract_covers(o):
+            key = (c["shot_no"], c["after"])
+            if key in logged_abstract_rewrites:
+                continue
+            logged_abstract_rewrites.add(key)
+            log_provider_call(
+                "storyboard_outline_abstract_covers", config.MODEL_TEXT, "COVERS_ABSTRACT_REWRITTEN", None, 0,
                 meta={"episode_id": episode.get("id"), "episode_no": episode.get("episode_no"),
                       "stage": "分镜大纲", **c})
         return validate_storyboard_outline(o, screenplay, target, bible=bible)

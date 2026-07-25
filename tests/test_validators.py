@@ -311,6 +311,27 @@ def test_shot_covers_tolerates_abstract_to_concrete_paraphrase() -> None:
     assert errors == [], errors
 
 
+def test_shot_covers_soft_passes_abstract_contrast_when_states_present() -> None:
+    """P1：covers 残留「与萧炎形成反差」，但正文已写出落势+高势可见状态——软放行。"""
+    shot = _board_preserving_key_content().shots[0]
+    shot.action_desc = (
+        "萧薰儿触碑后碑面亮起七段光芒，人群赞叹欢呼；"
+        "萧炎低头不语握拳，立于人群外侧沉默"
+    )
+    errors = validate_storyboard_shot_covers_outline(
+        shot, "与萧炎形成反差", shot.shot_no)
+    assert errors == [], errors
+
+
+def test_shot_covers_still_flags_abstract_contrast_without_states() -> None:
+    """抽象反差 covers 且正文无双方状态对比线索——仍报未落实。"""
+    shot = _board_preserving_key_content().shots[0]
+    shot.action_desc = "萧炎站在测验台前，目光平视前方，未发一言"
+    errors = validate_storyboard_shot_covers_outline(
+        shot, "与萧炎形成反差", shot.shot_no)
+    assert any("未落实本镜大纲 covers" in e and "反差" in e for e in errors), errors
+
+
 def test_scene_contiguity_key_ignores_sublocation_suffix() -> None:
     """同一地点的子机位标签归一到同一主键：'广场' 与 '广场·中央石台' 不算两个场景。"""
     from app.validators import _scene_contiguity_key

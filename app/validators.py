@@ -708,12 +708,133 @@ COVERS_SPOKEN_VERBS = ("宣告", "宣布", "宣读", "宣判", "公布")
 COVERS_CROWD_WORDS = ("哄笑", "哄堂", "嘲讽", "议论", "嗤笑", "嘲笑", "讥笑", "耻笑", "哗然", "群嘲",
                       "私语", "耳语", "窃窃", "起哄", "喝彩", "欢呼", "惊呼", "惊叹", "赞叹", "唏嘘")
 
+# P0/P1：导演抽象词不得作为 covers 原子。covers 只承载可拍/可念/可核对事实；
+# 「反差/对比/衬托」等意图应写进 beat/primary_action/state_out，否则逐镜词匹配会死循环
+# （实测镜05：「与萧炎形成反差」反复修仍无质量提升）。
+COVERS_ABSTRACT_DIRECTING_TERMS = (
+    "形成反差", "形成对比", "形成对照", "相互映衬", "彼此映衬",
+    "反差", "对比", "对照", "衬托", "呼应", "烘托",
+    "强调", "暗示", "渲染氛围", "营造氛围", "氛围感",
+)
+COVERS_ABSTRACT_FILLERS = (
+    "形成", "产生", "造成", "之间", "彼此", "相互", "互相",
+    "的", "与", "和", "并", "而", "来", "去", "出",
+)
+COVERS_ABSTRACT_REWRITE_DIRECTIVE = (
+    "（导演意图不得写在 covers：请把反差/对比写成双方可见状态——"
+    "如「甲测出七段、人群赞叹；乙低头不语握拳」，写入 action_desc/narration/dialogues）"
+)
+# 逐镜软放行：正文同时出现「落势」与「高势」状态线索，视为抽象反差已具象落实。
+COVERS_CONTRAST_LOW_CUES = (
+    "低头", "不语", "沉默", "落寞", "握拳", "屈辱", "咬牙", "黯然",
+    "冷脸", "垂眸", "攥紧", "咬唇", "后退", "避开",
+)
+COVERS_CONTRAST_HIGH_CUES = (
+    "赞叹", "欢呼", "喝彩", "亮起", "得意", "微笑", "骄傲", "惊呼",
+    "高光", "七段", "叫好", "光芒", "起立", "簇拥",
+)
+
+
 def _covers_has_spoken(covers: str) -> bool:
     return any(v in covers for v in COVERS_SPOKEN_VERBS)
 
 
 def _covers_has_crowd(covers: str) -> bool:
     return any(w in covers for w in COVERS_CROWD_WORDS)
+
+
+def _strip_abstract_directing_phrases(text: str) -> str:
+    """从 covers 文本剥离导演抽象短语，保留可拍事实残段。"""
+    out = text or ""
+    for term in sorted(COVERS_ABSTRACT_DIRECTING_TERMS, key=len, reverse=True):
+        out = out.replace(term, "")
+    out = re.sub(r"[；;]{2,}", "；", out)
+    out = re.sub(r"[，,]{2,}", "，", out)
+    out = out.strip(" \t\r\n；;，,、")
+    out = re.sub(r"^[与和并对而的]+", "", out)
+    out = re.sub(r"[与和并对而的]+$", "", out)
+    return out.strip(" \t\r\n；;，,、")
+
+
+def _is_abstract_directing_atom(atom: str) -> bool:
+    """原子是否几乎全是导演抽象意图（剥离抽象词后几乎无具体事实）。"""
+    text = (atom or "").strip()
+    if not text or not any(t in text for t in COVERS_ABSTRACT_DIRECTING_TERMS):
+        return False
+    remainder = _strip_abstract_directing_phrases(text)
+    for filler in COVERS_ABSTRACT_FILLERS:
+        remainder = remainder.replace(filler, "")
+    return len(_condense(remainder)) < 4
+
+
+def _covers_abstract_atoms(covers: str) -> list[str]:
+    return [a for a in _atomize_claim(covers) if _is_abstract_directing_atom(a)]
+
+
+def _shot_shows_contrast_states(shot_text: str) -> bool:
+    """正文是否同时含落势与高势可见状态——用作抽象反差 covers 的具象落实证据。"""
+    text = shot_text or ""
+    return (
+        any(c in text for c in COVERS_CONTRAST_LOW_CUES)
+        and any(c in text for c in COVERS_CONTRAST_HIGH_CUES)
+    )
+
+
+def _abstract_contrast_realized_in_shot(atom: str, shot_text: str) -> bool:
+    """P1 兜底：抽象反差/对比原子若正文已写出双方可见状态对比，视为已落实。"""
+    if not any(t in (atom or "") for t in COVERS_ABSTRACT_DIRECTING_TERMS):
+        return False
+    return _shot_shows_contrast_states(shot_text)
+
+
+def rewrite_outline_abstract_covers(outline: StoryboardOutline) -> list[dict]:
+    """P1：确定性剥离 covers 中的导演抽象原子/短语，并写入 beat 改写指引。
+
+    - 纯抽象原子整段删除（避免逐镜词匹配「形成反差」死循环）；
+    - 混合原子剥离抽象短语、保留具体事实残段；
+    - beat 追加可拍改写模板（幂等，不重复追加）。
+    就地修改 outline，返回改写记录供监控日志。
+    """
+    changed: list[dict] = []
+    for s in outline.shots:
+        covers = (s.covers or "").strip()
+        if not covers or not any(t in covers for t in COVERS_ABSTRACT_DIRECTING_TERMS):
+            continue
+        atoms = _atomize_claim(covers)
+        kept: list[str] = []
+        removed: list[str] = []
+        for atom in atoms:
+            if _is_abstract_directing_atom(atom):
+                removed.append(atom)
+                continue
+            if any(t in atom for t in COVERS_ABSTRACT_DIRECTING_TERMS):
+                cleaned = _strip_abstract_directing_phrases(atom)
+                removed.append(atom)
+                if cleaned and len(_condense(cleaned)) >= 2:
+                    kept.append(cleaned)
+            else:
+                kept.append(atom)
+        new_covers = "；".join(kept)
+        if not removed and new_covers == covers:
+            # 句读未切开、但仍含抽象短语：整段剥离一次。
+            cleaned_all = _strip_abstract_directing_phrases(covers)
+            if cleaned_all == covers:
+                continue
+            new_covers = cleaned_all
+            removed = [covers]
+        if new_covers == covers:
+            continue
+        before = covers
+        s.covers = new_covers
+        if COVERS_ABSTRACT_REWRITE_DIRECTIVE not in (s.beat or ""):
+            s.beat = (s.beat or "").rstrip() + COVERS_ABSTRACT_REWRITE_DIRECTIVE
+        changed.append({
+            "shot_no": s.shot_no,
+            "before": before[:80],
+            "after": new_covers[:80],
+            "removed": [r[:40] for r in removed[:4]],
+        })
+    return changed
 
 
 # 被动宣告句式「被X（当众/高声）宣告」：group(1)=宣告者，group(2)=宣告动词。
@@ -1373,6 +1494,7 @@ def validate_storyboard_shot_covers_outline(
     某条原子在本镜+前序里几乎零命中才算漏——避免"宣告→宣读"这类同义改写把本已落实的一拍卡死。
     同义词组兜底（_crowd_semantic_hit）覆盖哄笑/议论/嘲讽/追捧赞叹/成绩段位/震惊错愕等高频抽象词，
     模型把"成绩"写成"测出七段"、"追捧"写成"赞叹欢呼"都算落实。报错只点名真正缺失的那条。
+    P1 兜底：纯导演抽象（反差/对比）若正文已写出双方可见状态对比，视为已落实，避免修复死循环。
     两类"承接"不算本镜漏戏：
     - 向前承接：该原子已在前序已通过镜头（prior_text）里体现；
     - 向后承接：大纲把同一事实也排给了后续镜头（later_planned_covers），留给后面拍。
@@ -1392,6 +1514,8 @@ def validate_storyboard_shot_covers_outline(
         atom for atom in atoms
         if _claim_clearly_absent(atom, realized_text)
         and not (later and not _claim_clearly_absent(atom, later))
+        # P1 兜底：抽象反差/对比若正文已写出双方可见状态，不再当漏戏硬拦。
+        and not _abstract_contrast_realized_in_shot(atom, shot_text)
     ]
     if not missing:
         return []
@@ -1414,6 +1538,7 @@ def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeS
     方案 A：新增 covers 可拍性预检——某镜 covers 若依赖角色圣经外角色开口（被X宣告），或同时要求
     角色开口+人群声（两类声轨叠加必超单镜口播上限），直接在大纲阶段拦下并要求拆成相邻镜头。
     避免逐镜阶段陷入'删角色→covers 落实不了 / 保留角色→characters 校验失败'的死循环（镜03 根因）。
+    P0：covers 含纯导演抽象（反差/对比/衬托等）时硬拦，要求改成双方可见状态等可拍事实。
     bible 为空时跳过角色一致性校验（务实优先，旧数据放行）。
     """
     errors: list[str] = []
@@ -1442,6 +1567,15 @@ def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeS
                     f"大纲第 {i + 1} 镜 covers 同时要求角色开口宣告和人群哄笑议论，两类声轨叠加易超单镜口播上限"
                     f"（最长 {config.VIDEO_DURATION_MAX_S}s 最多 {config.MAX_SPOKEN_CHARS_PER_SHOT} 字）；"
                     "请拆成相邻 2 镜分担：一镜落实宣告，下一镜落实哄笑议论")
+            # P0：纯导演抽象不得进 covers（rewrite_outline_abstract_covers 会先剥离；此处拦残余）
+            abstract = _covers_abstract_atoms(covers)
+            if abstract:
+                shown = "；".join(abstract[:3])
+                errors.append(
+                    f"大纲第 {i + 1} 镜 covers 含导演抽象意图「{shown}」；"
+                    "covers 只写可拍/可念/可核对的具体事实（动作、台词、可见反应、信息点），"
+                    "反差/对比/衬托/呼应/强调等意图请写入 beat/primary_action/state_out，"
+                    "并改成双方可见状态（如「薰儿测出七段、人群赞叹；萧炎低头不语」）")
     # 反停留：相邻两镜的 beat 几乎逐字相同 = 停在同一节拍上空转，必须推进到新剧情。
     for i in range(1, len(shots)):
         if _too_similar(shots[i - 1].beat, shots[i].beat):

@@ -16,3 +16,5 @@ logs/
 .uploads/
 .pytest_cache/
 .benchmarks/
+# 本地临时/调试产物（仓库根目录 _ 开头；不影响子目录 __init__.py）
+/_*
