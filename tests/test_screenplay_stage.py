@@ -1,4 +1,4 @@
-from app.schemas import Bible, Character, EpisodeScreenplay, ScreenplayBeat, ScriptScene, World
+from app.schemas import Bible, Character, EpisodeScreenplay, ScreenplayBeat, ScriptScene, World, PlotSpine, PlotSpineBeat
 from app.validators import validate_screenplay
 
 
@@ -69,6 +69,18 @@ def _contract() -> dict:
         protagonist_goal="弄清旧友这几天的去向并拿到他要交付的东西",
         obstacle="旧友闪烁其词、门外似乎有人尾随，谷言又难辨真假",
         stakes="若信错人或被发现，谷言会被卷进危险甚至送命",
+        plot_spine=PlotSpine(
+            episode_premise="谷言要在不被牵连的情况下问出旧友失踪的真相",
+            spine_beats=[
+                PlotSpineBeat(beat_id="S01", who="谷言", does="独自在咖啡厅等待旧友", turn="等待升级为不安", must_keep=True),
+                PlotSpineBeat(beat_id="S02", who="旧友", does="带血迹推门现身", turn="谷言震惊起身追问", must_keep=True),
+                PlotSpineBeat(beat_id="S03", who="旧友", does="把储物柜钥匙推到谷言手边", turn="谷言被迫接手线索", must_keep=True),
+                PlotSpineBeat(beat_id="S04", who="谷言", does="追问旧友到底想说什么", turn="示警信息即将说清", must_keep=True),
+                PlotSpineBeat(beat_id="S05", who="门外", does="再次响起更重的敲门声", turn="危险当场逼近并收束本章", must_keep=True),
+            ],
+            must_keep_ending="门外再次敲门，危险逼近，本章当场收束",
+            drop_list=["咖啡厅其他顾客闲聊", "雨水与玻璃的散文级材质描写"],
+        ),
         events=[{
             "event_id": "E1",
             "source_span": "雨夜会面",
@@ -87,7 +99,7 @@ def _contract() -> dict:
     )
 
 
-# 与各自 full_script_text 主干一致的必保留台词/剧情点（雨夜敲门样本）。
+# 与各自 full_script_text 主干一致的主线台词/剧情点（雨夜敲门样本）。
 _RAINY_KEY_LINES = [
     "还有十分钟，他要是再不来，我就走。",
     "你这几天到底躲到哪去了？",
@@ -97,6 +109,7 @@ _RAINY_KEY_POINTS = [
     "谷言独自守在咖啡厅最里侧等待迟迟未到的旧友",
     "失踪多日的旧友带着血迹现身咖啡厅门口",
     "旧友把储物柜钥匙推到谷言手边并低声示警",
+    "门外再次响起敲门声，危险逼近",
 ]
 
 
@@ -295,7 +308,8 @@ def test_screenplay_rejects_key_line_absent_from_body() -> None:
     assert any("未真正写进 full_script_text" in e for e in errors)
 
 
-def test_screenplay_preserves_all_source_dialogues_from_bible_characters() -> None:
+def test_screenplay_allows_dropping_non_spine_source_dialogues() -> None:
+    """Renderability：不再要求人物谱原文台词全量进 key_lines / 正文。"""
     script = _valid_rainy_script()
     source_text = "\n".join([
         "谷言：还有十分钟，他要是再不来，我就走。",
@@ -307,9 +321,13 @@ def test_screenplay_preserves_all_source_dialogues_from_bible_characters() -> No
 
     errors = validate_screenplay(script, _bible(), expected_beats=5, episode_no=1, source_text=source_text)
 
-    assert any("人物谱角色在原文中的台词" in e and "key_lines" in e for e in errors)
-    assert any("人物谱角色在原文中的台词" in e and "full_script_text" in e for e in errors)
-    assert not any("路人" in e for e in errors)
+    assert not any("人物谱角色在原文中的台词" in e for e in errors)
+
+
+def test_screenplay_rejects_missing_plot_spine() -> None:
+    script = _valid_rainy_script(plot_spine=None)
+    errors = validate_screenplay(script, _bible(), expected_beats=5, episode_no=1)
+    assert any("plot_spine 缺失" in e for e in errors)
 
 
 def test_valid_rainy_script_passes() -> None:
@@ -370,7 +388,20 @@ def test_full_script_screenplay_allows_new_names_without_bible() -> None:
             "萧炎夜探旧宅在门口试探暗中的回应",
             "薰儿现身把染血的玉牌递到萧炎眼前逼他先看线索",
             "回廊尽头那扇门自己慢慢打开",
+            "两人沿回廊逼近尽头面对未知埋伏",
         ],
+        plot_spine=PlotSpine(
+            episode_premise="萧炎要安全查清旧宅血玉背后的真相",
+            spine_beats=[
+                PlotSpineBeat(beat_id="S01", who="萧炎", does="夜探旧宅门口试探", turn="确认门后有人", must_keep=True),
+                PlotSpineBeat(beat_id="S02", who="薰儿", does="现身递出血玉", turn="萧炎被迫先看线索", must_keep=True),
+                PlotSpineBeat(beat_id="S03", who="两人", does="沿回廊逼近尽头", turn="危险感升级", must_keep=True),
+                PlotSpineBeat(beat_id="S04", who="暗门", does="自己慢慢打开", turn="埋伏被提前唤醒", must_keep=True),
+                PlotSpineBeat(beat_id="S05", who="萧炎", does="停在门前警戒", turn="本章收束于未知门后", must_keep=True),
+            ],
+            must_keep_ending="暗门自开，危险逼近，本章当场收束",
+            drop_list=["回廊风声的散文描写", "无关路人对话"],
+        ),
         dramatic_question="萧炎能否在看清血玉线索后安全闯过这座旧宅？",
         protagonist_goal="进入旧宅查清薰儿示警背后的真相",
         obstacle="暗处埋伏未明、血玉线索可疑，萧炎又急于求证",

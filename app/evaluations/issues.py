@@ -8,9 +8,13 @@ from app.harness.types import Issue, IssueSeverity
 
 _CODE_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("SCHEMA_INVALID", re.compile(r"字段|schema|JSON|解析|类型|必填", re.I)),
-    ("SOURCE_FIDELITY", re.compile(r"原文|来源|source|依据|凭空|台词", re.I)),
+    ("SOURCE_FIDELITY", re.compile(r"原文|来源|source|依据|凭空", re.I)),
     ("CONTRACT_FIELD_INVALID", re.compile(r"episode_no|mode|5~10 秒|5-10 秒|时长", re.I)),
-    ("KEY_CONTENT_MISSING", re.compile(r"key_lines|key_plot_points|关键剧情|关键台词", re.I)),
+    ("KEY_CONTENT_MISSING", re.compile(r"key_lines|key_plot_points|主线台词|主线剧情|关键剧情|关键台词", re.I)),
+    ("PLOT_SPINE_INVALID", re.compile(r"plot_spine|spine_beats|must_keep_ending|drop_list|主线骨架", re.I)),
+    ("OVERDETAIL", re.compile(r"超纲细节|微微|衣角|指节|泪珠|写细", re.I)),
+    ("LEDGER_INVALID", re.compile(r"information_ledger|events\[|event_id", re.I)),
+    ("SHOT_BUDGET", re.compile(r"软预算|硬上限|镜头数|合并反应镜", re.I)),
     ("CHARACTER_CONSISTENCY", re.compile(r"人物谱|角色圣经|角色名|说话人|characters", re.I)),
     ("DRAMATIC_CONTRACT_INCOMPLETE", re.compile(
         r"dramatic_question|protagonist_goal|obstacle|stakes|戏剧", re.I

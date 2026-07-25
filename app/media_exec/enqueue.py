@@ -430,6 +430,12 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
             job_id, shot_id, version_id, ep["id"], project["id"], now(), now(), chain_after_shot_id,
             run_id, step_run_id,
         ))
+    try:
+        from app.media_pipeline import stages as media_stages
+        from app.media_pipeline.stage_state import set_pipeline_stage
+        set_pipeline_stage(job_id, media_stages.STAGE_JOB_QUEUED, conn=conn)
+    except Exception:  # noqa: BLE001
+        pass
     conn.execute("UPDATE episodes SET status='generating' WHERE id=? AND status='confirmed'", (ep["id"],))
     conn.commit()
     estimate = shot_cost_cny(shot.duration_s) + config.IMAGE_PRICE_PER_UNIT * 2

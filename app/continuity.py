@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from typing import Any
 
 from app import config
@@ -176,7 +177,7 @@ def action_capacity_errors(shot: Shot) -> list[str]:
     if beats > limit:
         errors.append(
             f"shot_no={shot.shot_no} 含约 {beats} 个顺序动作节拍，超过 {shot.duration_s}s 镜头容量上限 {limit}；"
-            "请拆成具有独立 state_in/state_out 的原子镜头，不要把叫名/出列/触碑/结果/反应塞进同一镜"
+            "请删减超纲动作，优先保留单一主线动作；确需拆镜时最多 +1 相邻镜，禁止无限拆碎"
         )
     return errors
 
@@ -188,21 +189,32 @@ def speech_capacity_budget(duration_s: int, *, lead_in: float = 0.3, lead_out: f
     return max(0.5, duration - lead_in - lead_out - action_reserve)
 
 
+def content_char_count(text: str | None) -> int:
+    """口播纯文字字数：去空白与 Unicode 标点，只计汉字/字母/数字等。"""
+    total = 0
+    for ch in text or "":
+        if ch.isspace():
+            continue
+        if unicodedata.category(ch).startswith("P"):
+            continue
+        total += 1
+    return total
+
+
 def max_speech_chars(duration_s: int) -> int:
-    """中文约 4.0 字/秒上限（PRD §9.3）。"""
-    return int(speech_capacity_budget(duration_s) * 4.0)
+    """单镜台词纯文字上限；与 config.max_spoken_chars_for_duration 同口径。"""
+    return config.max_spoken_chars_for_duration(duration_s)
 
 
 def spoken_chars_from_shot(shot: Shot) -> int:
+    """本镜真实台词纯文字字数（不计标点、不计旁白）。"""
     if shot.audio_timeline:
         total = 0
         for item in shot.audio_timeline:
-            if item.type in {"spoken_dialogue", "offscreen_voice", "narration"}:
-                total += len(re.sub(r"\s+", "", item.text or ""))
+            if item.type in {"spoken_dialogue", "offscreen_voice"}:
+                total += content_char_count(item.text)
         return total
-    total = sum(len(re.sub(r"\s+", "", d.line or "")) for d in shot.dialogues or [])
-    total += len(re.sub(r"\s+", "", (shot.narration or "")))
-    return total
+    return sum(content_char_count(d.line) for d in shot.dialogues or [])
 
 
 def speech_capacity_errors(shot: Shot) -> list[str]:
@@ -211,8 +223,8 @@ def speech_capacity_errors(shot: Shot) -> list[str]:
     limit = max_speech_chars(shot.duration_s)
     if chars > limit:
         errors.append(
-            f"shot_no={shot.shot_no} 台词/旁白共 {chars} 字，超过 {shot.duration_s}s 可用说话容量 {limit} 字"
-            f"（约 4 字/秒，已预留起音/收音/动作空间）；请缩短台词、拆镜或增加合理时长"
+            f"shot_no={shot.shot_no} 台词纯文字 {chars} 字（不计标点），超过 {shot.duration_s}s 口播上限 {limit} 字；"
+            f"请缩短台词、拆镜或增加合理时长"
         )
     # 多主说话人抢占
     speakers: list[str] = []
@@ -237,20 +249,20 @@ def speech_capacity_errors(shot: Shot) -> list[str]:
 
 def build_audio_timeline_from_legacy(shot: Shot, voice_bible: list[VoiceCanonical] | None = None
                                      ) -> list[AudioTimelineItem]:
-    """从 dialogues/narration 推导音频时间线（无显式 timeline 时）。"""
+    """从 dialogues 推导音频时间线（产品禁止旁白，不再写入 narration 轨）。"""
     if shot.audio_timeline:
-        return list(shot.audio_timeline)
+        # 历史脏数据：丢掉 narration 轨，只保留真实台词与环境声
+        return [item for item in shot.audio_timeline if item.type != "narration"]
     voice_map = {v.speaker_id: v.voice_canonical for v in (voice_bible or [])}
     dur = float(shot.duration_s or config.DEFAULT_VIDEO_DURATION_S)
     items: list[AudioTimelineItem] = []
     cursor = 0.3
-    narration = (shot.narration or "").strip()
     dialogues = list(shot.dialogues or [])
 
     def _consume(text: str, typ: str, speaker: str | None, lip: bool, emotion: str) -> None:
         nonlocal cursor
-        chars = len(re.sub(r"\s+", "", text))
-        need = max(0.8, chars / 3.5)
+        chars = content_char_count(text)
+        need = max(0.8, chars / 3.5) if chars else 0.8
         end = min(dur - 0.2, cursor + need)
         if end <= cursor:
             end = min(dur, cursor + 0.6)
@@ -266,21 +278,16 @@ def build_audio_timeline_from_legacy(shot: Shot, voice_bible: list[VoiceCanonica
         ))
         cursor = end
 
-    # 默认：非结尾钩旁白在台词前
-    from app.compiler import narration_after_dialogue
-    put_narration_after = bool(narration) and narration_after_dialogue(narration)
-    if narration and not put_narration_after:
-        _consume(narration, "narration", "旁白", False, "平静")
     for d in dialogues:
         delivery = getattr(d, "delivery", None) or "spoken_dialogue"
-        if delivery not in AUDIO_TIMELINE_TYPES:
+        if delivery == "narration":
+            delivery = "offscreen_voice"
+        if delivery not in AUDIO_TIMELINE_TYPES or delivery == "narration":
             delivery = "spoken_dialogue"
         visible = set(effective_characters_visible(shot))
         if delivery == "spoken_dialogue" and d.speaker not in visible:
             delivery = "offscreen_voice"
         _consume(d.line, delivery, d.speaker, delivery == "spoken_dialogue", d.emotion or "平静")
-    if narration and put_narration_after:
-        _consume(narration, "narration", "旁白", False, "平静")
     if not items:
         items.append(AudioTimelineItem(
             start_s=0.0, end_s=dur, type="ambient_sound",
@@ -297,6 +304,10 @@ def build_audio_timeline_from_legacy(shot: Shot, voice_bible: list[VoiceCanonica
 def ensure_audio_timeline(shot: Shot, voice_bible: list[VoiceCanonical] | None = None) -> None:
     if not shot.audio_timeline:
         shot.audio_timeline = build_audio_timeline_from_legacy(shot, voice_bible)
+    else:
+        shot.audio_timeline = [item for item in shot.audio_timeline if item.type != "narration"]
+        if not shot.audio_timeline:
+            shot.audio_timeline = build_audio_timeline_from_legacy(shot, voice_bible)
     if not shot.audio_cast:
         shot.audio_cast = effective_audio_cast(shot)
 
@@ -743,14 +754,15 @@ def outline_atomic_errors(outline: StoryboardOutline) -> list[str]:
         tag = f"outline.shots[{i}](shot_no={shot.shot_no})"
         if (shot.state_in or "").strip() and (shot.state_out or "").strip():
             if (shot.state_in or "").strip() == (shot.state_out or "").strip():
-                errors.append(f"{tag} state_in 与 state_out 相同；原子镜头必须有可见状态变化")
+                errors.append(f"{tag} state_in 与 state_out 相同；主线镜头必须有可见/可听状态变化")
         mode = (shot.continuity_mode or "").strip()
         if mode and mode not in CONTINUITY_MODES:
             errors.append(f"{tag}.continuity_mode=「{mode}」不合法")
         action = (shot.primary_action or shot.beat or "").strip()
         if action and count_sequential_action_beats(action) > 2:
             errors.append(
-                f"{tag} 主动作过载（{action[:40]}…）；大纲阶段就应拆成多个状态变化镜头"
+                f"{tag} 主动作过载（{action[:40]}…）；请压缩为单一主线动作，"
+                "确需拆镜时计入 8~16 软预算，禁止为细节无限拆碎"
             )
     return errors
 

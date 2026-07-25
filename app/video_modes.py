@@ -105,13 +105,139 @@ def max_reference_images() -> int:
 
 
 def quality_threshold() -> float:
-    return float_setting("video_reference_quality_threshold", 0.75)
+    """综合 QA 分门禁：≥此分必须留在「使用中」。默认 0.8。"""
+    return float_setting("video_reference_quality_threshold", 0.8)
 
 
 def quality_floor() -> float:
     """兜底图质量地板：生成图全不达标时，最佳一版仍低于此分则不喂模型——此时定妆照/场景锚点已能锁身份与环境，
     一张带水印/畸形的脏图当参考反而拖累成片。介于地板与阈值之间才作兜底喂入。"""
     return float_setting("video_reference_quality_floor", 0.4)
+
+
+# 综合分权重：绝对质检与相对一致性；冗余只做软惩罚，不单独硬剔。
+_SCORE_W_ABS = 0.55
+_SCORE_W_CONS = 0.35
+_SCORE_W_SUM = _SCORE_W_ABS + _SCORE_W_CONS  # 0.90
+_MAX_REDUNDANCY_PENALTY = 0.15
+_HARD_FAILURE_MULTIPLIER = 0.3
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def compose_reference_score(*, absolute_quality: float, consistency: float = 1.0,
+                            redundancy_penalty: float = 0.0,
+                            hard_failures: list[Any] | None = None) -> dict[str, Any]:
+    """把绝对质检、相对一致性、人物冗余软惩罚与硬伤乘数合成一张 overall。
+
+    overall = hard_multiplier * absolute * (w_abs + w_cons * consistency) / (w_abs + w_cons)
+              - redundancy_penalty
+
+    consistency=1 时 overall==absolute（未测一致性不抬分）；consistency 下降只降分不抬分。
+    """
+    abs_q = _clamp01(absolute_quality)
+    cons = _clamp01(consistency)
+    hard_list = [x for x in (hard_failures or []) if str(x).strip()]
+    hard_mult = _HARD_FAILURE_MULTIPLIER if hard_list else 1.0
+    # 一致性作为绝对分的折扣因子，避免「未测一致性默认 1.0」把低绝对分抬过门禁
+    weighted = abs_q * (_SCORE_W_ABS + _SCORE_W_CONS * cons) / _SCORE_W_SUM
+    penalty = _clamp01(min(_MAX_REDUNDANCY_PENALTY, max(0.0, float(redundancy_penalty or 0.0))))
+    overall = _clamp01(hard_mult * weighted - penalty)
+    return {
+        "overall": round(overall, 3),
+        "absolute_quality": round(abs_q, 3),
+        "consistency": round(cons, 3),
+        "redundancy_penalty": round(penalty, 3),
+        "hard_multiplier": hard_mult,
+        "hard_failures": hard_list,
+    }
+
+
+def _absolute_quality_of(asset: ReferenceImageAsset) -> float:
+    qa = asset.qa or {}
+    if qa.get("absolute_quality") is not None:
+        try:
+            return _clamp01(float(qa["absolute_quality"]))
+        except (TypeError, ValueError):
+            pass
+    if asset.qualityScore is not None and qa.get("consistency") is None and qa.get("redundancy_penalty") is None:
+        # 尚未合成过：qualityScore 即绝对分
+        try:
+            return _clamp01(float(asset.qualityScore))
+        except (TypeError, ValueError):
+            pass
+    if qa.get("overall") is not None and qa.get("absolute_quality") is None and qa.get("consistency") is None:
+        try:
+            return _clamp01(float(qa["overall"]))
+        except (TypeError, ValueError):
+            pass
+    try:
+        return _clamp01(float(asset.qualityScore or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _consistency_of(asset: ReferenceImageAsset) -> float:
+    qa = asset.qa or {}
+    if qa.get("consistency") is not None:
+        try:
+            return _clamp01(float(qa["consistency"]))
+        except (TypeError, ValueError):
+            return 1.0
+    return 1.0
+
+
+def _hard_failures_of(asset: ReferenceImageAsset) -> list[Any]:
+    qa = asset.qa or {}
+    raw = qa.get("hard_failures")
+    if isinstance(raw, list) and raw:
+        return raw
+    issues = qa.get("issues") or []
+    if not isinstance(issues, list):
+        return []
+    # 仅把明显硬伤词视为一票否决因子；普通 issues 不压 hard_multiplier
+    markers = ("watermark", "水印", "broken", "畸形", "extra limb", "多余肢体", "logo", "字幕", "subtitle")
+    return [x for x in issues if any(m in str(x).lower() for m in markers)]
+
+
+def recompose_asset_score(asset: ReferenceImageAsset, *, consistency: float | None = None,
+                          redundancy_penalty: float | None = None) -> float:
+    """按最新维度重写 asset.qualityScore / qa.overall，返回综合分。"""
+    abs_q = _absolute_quality_of(asset)
+    cons = _consistency_of(asset) if consistency is None else _clamp01(consistency)
+    penalty = 0.0 if redundancy_penalty is None else float(redundancy_penalty)
+    if redundancy_penalty is None and asset.qa and asset.qa.get("redundancy_penalty") is not None:
+        try:
+            penalty = float(asset.qa["redundancy_penalty"])
+        except (TypeError, ValueError):
+            penalty = 0.0
+    composed = compose_reference_score(
+        absolute_quality=abs_q, consistency=cons, redundancy_penalty=penalty,
+        hard_failures=_hard_failures_of(asset))
+    prev = dict(asset.qa or {})
+    # 保留非评分字段（issues / drift / batch 标记等）
+    asset.qa = {**prev, **composed}
+    asset.qualityScore = composed["overall"]
+    return composed["overall"]
+
+
+def apply_keep_gate(asset: ReferenceImageAsset, *, threshold: float | None = None) -> bool:
+    """统一门禁：综合分 ≥ 阈值则留下，否则仅标 quality_below_threshold。返回是否留下。"""
+    thr = quality_threshold() if threshold is None else float(threshold)
+    score = asset.qualityScore
+    if score is None:
+        asset.selectedForSeedance = False
+        asset.rejectReason = "missing_quality_score"
+        return False
+    if float(score) < thr:
+        asset.selectedForSeedance = False
+        asset.rejectReason = "quality_below_threshold"
+        return False
+    asset.selectedForSeedance = True
+    asset.rejectReason = None
+    return True
 
 
 def min_generated_references() -> int:
@@ -126,28 +252,46 @@ def reference_gen_retries() -> int:
 
 def reference_prompt_async() -> bool:
     """是否为每张新参考图用独立 LLM 调用并发生成提示词（防止一次性写多张时偷懒）。"""
+    # 批量合同开启时默认走一镜一次；仍可用 video_reference_prompt_async 强制逐图
+    from app.media_pipeline.retry_policy import batch_prompt_enabled
+    if batch_prompt_enabled() and not bool_setting("video_reference_force_per_image_prompt", False):
+        return False
     return bool_setting("video_reference_prompt_async", True)
 
 
+def batch_prompt_enabled() -> bool:
+    from app.media_pipeline.retry_policy import batch_prompt_enabled as _bp
+    return _bp()
+
+
+def batch_qa_enabled() -> bool:
+    from app.media_pipeline.retry_policy import batch_qa_enabled as _bq
+    return _bq()
+
+
+def role_adaptive_enabled() -> bool:
+    from app.media_pipeline.retry_policy import role_adaptive_enabled as _ra
+    return _ra()
+
+
 def consistency_check_enabled() -> bool:
-    """Phase 2：是否对整组参考图做相对一致性检查（点名漂移图并 i2i 重生/剔除）。"""
+    """Phase 2：是否对整组参考图做相对一致性检查（扣分进综合分，低分可触发 i2i 重生提分）。"""
     return bool_setting("video_reference_consistency_check", True)
 
 
 def consistency_threshold() -> float:
-    """候选参考图与锚点（定妆照/上镜尾帧）的一致性达标线，低于此判为漂移。"""
+    """仅触发 i2i 重生尝试的内部线；不再单独决定废弃（废弃只看综合分门禁）。"""
     return float_setting("video_reference_consistency_threshold", 0.7)
 
 
 def consistency_retries() -> int:
-    """漂移图从锚点 i2i 重生的最大次数；仍漂移则从喂给 Seedance 的集合里剔除。"""
+    """漂移图从锚点 i2i 重生的最大次数；仍漂移则只靠综合分门禁决定去留。"""
     return max(0, int_setting("video_reference_consistency_retries", 1))
 
 
 def max_character_reference_images() -> int:
-    """喂给视频模型时，「含同一角色」的参考图最多几张。
-    根因防穿模/分身：多张不同尺度的含人物图（尤其纯背景全身定妆照与入戏关键帧并存）是 Seedance
-    把同一角色画两遍/生成前景巨人的结构性触发器。默认 1（场景/环境图不受此限）。"""
+    """喂给视频模型时偏好的「含人物参考图」上限（装箱偏好 / 冗余惩罚参考，不再硬剔除）。
+    多张不同尺度含人物图易触发分身/前景巨人；超额者扣分并在装箱时让位给更高分图。"""
     return max(1, int_setting("video_reference_max_character_images", 1))
 
 
@@ -508,7 +652,8 @@ async def review_reference_consistency(*, candidates: list[ReferenceImageAsset],
 async def _generate_one_reference(*, project_id: str, episode_no: int, shot: Shot, bible: Bible,
                                   ref_type: str, index: int, content_override: str | None = None,
                                   seed_inputs: list[str] | None = None,
-                                  extra_instruction: str | None = None) -> ReferenceImageAsset:
+                                  extra_instruction: str | None = None,
+                                  skip_inline_qa: bool = False) -> ReferenceImageAsset:
     dest = reference_image_path(project_id, episode_no, shot.shot_no, ref_type, index)
     prompt = reference_generation_prompt(shot, bible, ref_type, index, content_override=content_override)
     if seed_inputs:
@@ -531,17 +676,30 @@ async def _generate_one_reference(*, project_id: str, episode_no: int, shot: Sho
         atomic_write_bytes(dest, base64.b64decode(item["b64_json"]))
     else:
         raise ProviderError(f"Reference image response missing url/b64_json: {list(item.keys())}")
+    if skip_inline_qa:
+        qa = {"overall": 1.0, "deferred_batch_qa": True, "issues": []}
+        asset = _asset_from_path(
+            path=str(dest),
+            ref_type=ref_type,
+            source="seedream_generated",
+            quality_score=1.0,
+            qa=qa,
+            related_character_ids=list(shot.characters) if ref_type in {"character", "plot_key_frame"} else [],
+        )
+        return asset
     qa = await review_reference_image(hiagent.encode_image_file(str(dest)), shot=shot, bible=bible, ref_type=ref_type)
+    abs_score = float(qa.get("overall", 0))
+    qa = {**qa, "absolute_quality": abs_score}
     asset = _asset_from_path(
         path=str(dest),
         ref_type=ref_type,
         source="seedream_generated",
-        quality_score=float(qa.get("overall", 0)),
+        quality_score=abs_score,
         qa=qa,
         related_character_ids=list(shot.characters) if ref_type in {"character", "plot_key_frame"} else [],
     )
-    if asset.qualityScore is None or asset.qualityScore < quality_threshold():
-        asset.rejectReason = "quality_below_threshold"
+    recompose_asset_score(asset)
+    apply_keep_gate(asset)
     return asset
 
 
@@ -632,25 +790,182 @@ async def write_reference_prompt(shot: Shot, bible: Bible, ref_type: str, *, int
         return ""
 
 
+_SLOT_ROLE_CYCLE = [
+    ("identity_action", "character"),
+    ("environment", "scene"),
+    ("action_key", "plot_key_frame"),
+    ("emotion_composition", "plot_key_frame"),
+]
+
+
+async def write_reference_prompt_batch(
+    shot: Shot, bible: Bible, slots: list[tuple[str, str]], *, intents: list[str | None] | None = None,
+) -> list[str]:
+    """一镜一次返回全部槽位提示词合同（P1）。缺项/重复时仅对异常槽回退单图调用。"""
+    anchors = {c.name: c.appearance_canonical for c in bible.characters if c.name in shot.characters}
+    planned = []
+    for i, (slot_key, ref_type) in enumerate(slots):
+        planned.append({
+            "slot": slot_key,
+            "type": ref_type,
+            "intent": (intents[i] if intents and i < len(intents) else None) or "",
+        })
+    payload = {
+        "task": (
+            "Write DISTINCT detailed English image-generation prompts for EACH planned Seedance "
+            "reference slot in one JSON. Cover identity/action, environment, action key frame and "
+            "emotion/composition without near-duplicate text. Do NOT invent a previous-shot tail frame."
+        ),
+        "slots": planned,
+        "shot": {
+            "scene_setting": shot.scene_setting,
+            "characters": list(shot.characters),
+            "character_appearance": anchors,
+            "action_desc": shot.action_desc,
+            "first_frame_desc": shot.first_frame_desc,
+            "last_frame_desc": shot.last_frame_desc,
+        },
+        "style": bible.world.visual_style_canonical,
+        "constraints": [
+            "English only", "9:16 portrait", "no text/subtitle/watermark",
+            "each slot must be visually distinct", "no spoilers for later shots",
+        ],
+        "output_schema": {
+            "slots": [{"slot": "identity_action", "type": "character", "prompt": "..."}],
+        },
+    }
+    prompts: list[str] = [""] * len(slots)
+    try:
+        raw = await model_gateway.chat([
+            {"role": "system", "content": "Return exactly one JSON object with a 'slots' array. English prompts only."},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ], temperature=0.3, max_tokens=1600,
+            call_meta={"initiator_label": "参考图批量提示词合同", "shot_no": shot.shot_no, "slot_count": len(slots)})
+        data = extract_json(raw)
+        by_slot = {}
+        for item in data.get("slots") or []:
+            key = str(item.get("slot") or "")
+            prompt = str(item.get("prompt") or "").strip()[:600]
+            if key and prompt:
+                by_slot[key] = prompt
+        for i, (slot_key, _) in enumerate(slots):
+            prompts[i] = by_slot.get(slot_key, "")
+    except Exception:
+        pass
+    # 缺项定向修复
+    for i, (slot_key, ref_type) in enumerate(slots):
+        if prompts[i]:
+            continue
+        intent = intents[i] if intents and i < len(intents) else None
+        prompts[i] = await write_reference_prompt(shot, bible, ref_type, intent=intent)
+    # 近重复检测：若两槽文本高度相似，重写后者
+    for i in range(len(prompts)):
+        for j in range(i):
+            a, b = prompts[i], prompts[j]
+            if a and b and a.lower()[:80] == b.lower()[:80]:
+                prompts[i] = await write_reference_prompt(
+                    shot, bible, slots[i][1], intent=f"distinct from slot {slots[j][0]}"
+                ) or prompts[i]
+    return prompts
+
+
+async def review_reference_images_batch(
+    items: list[tuple[str, str, str]], *, shot: Shot, bible: Bible,
+) -> dict[str, Any]:
+    """一次多图结构化评估（P1）。items: [(slot, ref_type, image_b64), ...]。
+
+    返回 {"items":[{slot, overall, ..., hard_failures, repair_instruction}], "group_consistency": float}
+    缺项或置信不足时由调用方对异常图回退单图 VLM。
+    """
+    if not items:
+        return {"items": [], "group_consistency": 1.0}
+    anchors = []
+    by_name = {c.name: c for c in bible.characters}
+    for name in shot.characters:
+        if name in by_name:
+            anchors.append(f"{name}: {by_name[name].appearance_canonical}")
+    expectation = {
+        "task": "Quality-check multiple Seedance reference images in one response.",
+        "shot": {
+            "scene": shot.scene_setting,
+            "action": shot.action_desc,
+            "characters": anchors,
+            "style": bible.world.visual_style_canonical,
+        },
+        "image_order": [{"index": i, "slot": s, "ref_type": t} for i, (s, t, _) in enumerate(items)],
+        "output_schema": {
+            "items": [{
+                "slot": "action_key",
+                "technical_quality": 0.0,
+                "prompt_alignment": 0.0,
+                "identity_consistency": 0.0,
+                "scene_consistency": 0.0,
+                "overall": 0.0,
+                "hard_failures": [],
+                "repair_instruction": None,
+            }],
+            "group_consistency": 0.0,
+        },
+    }
+    images = [b64 for _, _, b64 in items]
+    try:
+        raw = await hiagent.vlm_check(
+            images, json.dumps(expectation, ensure_ascii=False),
+            call_meta={
+                "initiator_label": "参考图批量质检",
+                "shot_no": shot.shot_no,
+                "image_count": len(images),
+            })
+        data = extract_json(raw)
+    except Exception:
+        return {"items": [], "group_consistency": None, "failed": True}
+
+    out_items = []
+    by_slot = {str(it.get("slot") or ""): it for it in (data.get("items") or []) if isinstance(it, dict)}
+    for slot, ref_type, _ in items:
+        it = by_slot.get(slot) or {}
+        if not it:
+            out_items.append({"slot": slot, "missing": True})
+            continue
+        for key in ("technical_quality", "prompt_alignment", "identity_consistency",
+                    "scene_consistency", "overall"):
+            try:
+                it[key] = max(0.0, min(1.0, float(it.get(key, 0))))
+            except (TypeError, ValueError):
+                it[key] = 0.0
+        if not it.get("overall"):
+            vals = [it.get(k, 0) for k in (
+                "technical_quality", "prompt_alignment", "identity_consistency", "scene_consistency"
+            )]
+            it["overall"] = round(sum(float(v) for v in vals) / max(len(vals), 1), 3)
+        it["slot"] = slot
+        it["ref_type"] = ref_type
+        if not isinstance(it.get("hard_failures"), list):
+            it["hard_failures"] = []
+        out_items.append(it)
+    try:
+        group = max(0.0, min(1.0, float(data.get("group_consistency", 0.8))))
+    except (TypeError, ValueError):
+        group = 0.8
+    return {"items": out_items, "group_consistency": group, "failed": False}
+
+
 async def _generate_reference_keep_best(*, project_id: str, episode_no: int, shot: Shot, bible: Bible,
                                         ref_type: str, index: int, content_override: str | None,
-                                        retries: int, seed_inputs: list[str] | None = None) -> tuple[ReferenceImageAsset | None, list[ReferenceImageAsset], list[dict[str, Any]]]:
-    """生成单张参考图，QA 不达标则重试；最终返回过审资产，或（全部不达标时）保留分数最高的一版兜底，
-    保证镜头至少有图，而不是因为 QA 卡掉直接没有参考图。但兜底图有质量地板（quality_floor）：
-    最佳一版仍低于地板则一律不喂（返回 None，全部进废弃画廊），改由定妆照/场景锚点撑住——脏图当参考反而拖累成片。
-    返回 (chosen_or_none, discarded_assets, rejection_details)：discarded_assets 是质检未通过、
-    未被选用的参考图（带各自图片文件），供评审墙「废弃照片画廊」展示。"""
+                                        retries: int, seed_inputs: list[str] | None = None,
+                                        skip_inline_qa: bool = False) -> tuple[ReferenceImageAsset | None, list[ReferenceImageAsset], list[dict[str, Any]]]:
+    """生成单张参考图，QA 不达标则重试；最终返回过审资产，或（全部不达标时）保留分数最高的一版兜底。
+    skip_inline_qa=True 时生成后不跑单图 VLM（交给批量 QA）。"""
     rejections: list[dict[str, Any]] = []
-    attempts: list[ReferenceImageAsset] = []  # 全部质检未通过的资产（含图片），用于废弃画廊
+    attempts: list[ReferenceImageAsset] = []
     best: ReferenceImageAsset | None = None
     for attempt in range(retries + 1):
-        # 每次尝试写到不同文件名，避免后一次（更差）覆盖前一次的最佳图，导致 best.path 指向劣质图。
         attempt_index = index * 100 + attempt
         try:
             asset = await _generate_one_reference(
                 project_id=project_id, episode_no=episode_no, shot=shot, bible=bible,
                 ref_type=ref_type, index=attempt_index, content_override=content_override,
-                seed_inputs=seed_inputs)
+                seed_inputs=seed_inputs, skip_inline_qa=skip_inline_qa)
         except Exception as exc:
             rejections.append({"type": ref_type, "source": "seedream_generated",
                                "reason": "参考图生成异常" + code_ref(
@@ -658,18 +973,17 @@ async def _generate_reference_keep_best(*, project_id: str, episode_no: int, sho
                                    context={"project_id": project_id, "episode_no": episode_no,
                                             "shot_id": getattr(shot, "id", None), "ref_type": ref_type})})
             continue
+        if skip_inline_qa:
+            return asset, attempts, rejections
         if not asset.rejectReason:
-            # 通过 QA：选它；本次之前生成的不达标图作为废弃图一并返回。
             return asset, attempts, rejections
         rejections.append({"type": ref_type, "source": "seedream_generated",
                            "reason": asset.rejectReason, "quality_score": asset.qualityScore, "qa": asset.qa})
         attempts.append(asset)
         if best is None or (asset.qualityScore or 0) > (best.qualityScore or 0):
             best = asset
-    # 全部不达标：最佳一版若仍低于质量地板，直接不喂（全部进废弃画廊），只靠定妆照/场景锚点。
     if best is not None and (best.qualityScore or 0) < quality_floor():
         return None, list(attempts), rejections
-    # 否则保留分数最高的一版兜底，其余进废弃画廊。
     discarded = [a for a in attempts if a is not best]
     return best, discarded, rejections
 
@@ -717,19 +1031,26 @@ def _annotate_consistency(assets: list[ReferenceImageAsset], scores: dict[str, d
         info = scores.get(a.id)
         if info:
             a.qa = {**(a.qa or {}), "consistency": info["consistency"], "drift": info["drift"]}
+            recompose_asset_score(a, consistency=info["consistency"])
 
 
-def _record_consistency_rejection(rejection_details: list[dict[str, Any]] | None,
-                                  rejected_out: list[ReferenceImageAsset] | None,
-                                  asset: ReferenceImageAsset, *, reason: str,
-                                  drift: list[str] | None = None, consistency: float | None = None) -> None:
-    asset.selectedForSeedance = False
-    asset.rejectReason = reason
+def _mark_below_threshold(rejection_details: list[dict[str, Any]] | None,
+                          rejected_out: list[ReferenceImageAsset] | None,
+                          asset: ReferenceImageAsset, *, consistency: float | None = None,
+                          drift: list[str] | None = None) -> None:
+    """综合分不达标时统一记 quality_below_threshold（不再暴露 consistency_drift 等内部代号）。"""
+    apply_keep_gate(asset)
+    if asset.selectedForSeedance:
+        return
     if rejected_out is not None and asset not in rejected_out:
         rejected_out.append(asset)
     if rejection_details is not None:
-        rejection_details.append({"type": asset.type, "source": asset.source, "reason": reason,
-                                  "drift": drift or [], "consistency": consistency})
+        rejection_details.append({
+            "type": asset.type, "source": asset.source,
+            "reason": asset.rejectReason or "quality_below_threshold",
+            "drift": drift or [], "consistency": consistency,
+            "quality_score": asset.qualityScore,
+        })
 
 
 async def _regenerate_for_consistency(*, project_id: str, episode_no: int, shot: Shot, bible: Bible,
@@ -755,8 +1076,10 @@ async def _enforce_reference_consistency(*, selected: list[ReferenceImageAsset],
                                          rejection_details: list[dict[str, Any]] | None = None,
                                          rejected_out: list[ReferenceImageAsset] | None = None
                                          ) -> list[ReferenceImageAsset]:
-    """Phase 2 主流程：以锚点（定妆照/上镜尾帧/复用历史帧）为真值，检查生成的候选参考图是否风格/服饰漂移；
-    漂移的从锚点 i2i 重生，仍漂移则从喂给 Seedance 的集合里剔除（进废弃画廊）。无锚点时跳过（避免误删）。"""
+    """Phase 2：以锚点为真值检查候选一致性；低一致性格分并可选 i2i 重生提分。
+
+    不再因 consistency_drift 硬剔：去留只由综合分门禁决定。无锚点时跳过。
+    """
     if not consistency_check_enabled():
         return selected
     candidates = [a for a in selected if a.source == "seedream_generated"]
@@ -764,15 +1087,16 @@ async def _enforce_reference_consistency(*, selected: list[ReferenceImageAsset],
     if not candidates or not anchors:
         return selected
     seeds = _dedupe_str([a.url for a in anchors if a.url])
-    threshold = consistency_threshold()
+    regen_line = consistency_threshold()
 
     current = list(candidates)
+    extras_kept: list[ReferenceImageAsset] = []
     scores = _consistency_scores(await review_reference_consistency(
         candidates=current, anchors=anchors, shot=shot, bible=bible))
     _annotate_consistency(current, scores)
 
     for attempt in range(consistency_retries()):
-        drifted = [c for c in current if scores.get(c.id, {}).get("consistency", 1.0) < threshold]
+        drifted = [c for c in current if scores.get(c.id, {}).get("consistency", 1.0) < regen_line]
         if not drifted:
             break
         changed = False
@@ -783,9 +1107,15 @@ async def _enforce_reference_consistency(*, selected: list[ReferenceImageAsset],
                 ref_type=cand.type, index=9000 + attempt * 100 + i, seeds=seeds, drift=drift)
             if new_asset is None:
                 continue
-            _record_consistency_rejection(rejection_details, rejected_out, cand,
-                                          reason="consistency_drift", drift=drift,
-                                          consistency=scores.get(cand.id, {}).get("consistency"))
+            # 原图：按已扣一致性重算；≥门禁则仍留下，否则进废弃（理由仅为分数不足）
+            recompose_asset_score(cand, consistency=scores.get(cand.id, {}).get("consistency", 1.0))
+            if not apply_keep_gate(cand):
+                _mark_below_threshold(
+                    rejection_details, rejected_out, cand,
+                    consistency=scores.get(cand.id, {}).get("consistency"),
+                    drift=drift)
+            elif cand not in extras_kept:
+                extras_kept.append(cand)
             current = [new_asset if c is cand else c for c in current]
             changed = True
         if not changed:
@@ -794,24 +1124,20 @@ async def _enforce_reference_consistency(*, selected: list[ReferenceImageAsset],
             candidates=current, anchors=anchors, shot=shot, bible=bible))
         _annotate_consistency(current, scores)
 
-    kept: list[ReferenceImageAsset] = []
+    # 最终候选全部按一致性重算分数；不因一致性硬剔
     for c in current:
-        cs = scores.get(c.id, {}).get("consistency", 1.0)
-        if cs < threshold:
-            _record_consistency_rejection(rejection_details, rejected_out, c,
-                                          reason="consistency_drift_unfixable",
-                                          drift=scores.get(c.id, {}).get("drift"), consistency=cs)
-            continue
-        kept.append(c)
+        info = scores.get(c.id) or {}
+        recompose_asset_score(c, consistency=info.get("consistency", _consistency_of(c)))
 
-    rebuilt = [a for a in selected if a.source != "seedream_generated"] + kept
-    if not rebuilt:  # 兜底：极端情况全被剔 → 留一致性最高的一版，保证每镜仍有参考图
-        best = max(current, key=lambda c: scores.get(c.id, {}).get("consistency", 0.0))
-        if best in (rejected_out or []):
-            rejected_out.remove(best)
-        best.selectedForSeedance = True
-        best.rejectReason = None
-        rebuilt = [best]
+    rebuilt = [a for a in selected if a.source != "seedream_generated"] + current
+    for extra in extras_kept:
+        if extra not in rebuilt and (extra.qualityScore or 0) >= quality_threshold():
+            rebuilt.append(extra)
+    if not any(a.source == "seedream_generated" for a in rebuilt) and current:
+        # 极端：生成图全低于门禁时仍留综合分最高的一张作兜底候选（后续 gate/floor 再裁）
+        best = max(current, key=lambda c: c.qualityScore or 0.0)
+        if best not in rebuilt:
+            rebuilt.append(best)
     return rebuilt
 
 
@@ -822,16 +1148,22 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
                                  rejected_out: list[ReferenceImageAsset] | None = None,
                                  on_progress: Callable[
                                      [list[ReferenceImageAsset], list[ReferenceImageAsset]], None
-                                 ] | None = None) -> list[ReferenceImageAsset]:
+                                 ] | None = None,
+                                 allow_missing_continuity_tail: bool = False,
+                                 job_id: str | None = None,
+                                 existing_meta: dict[str, Any] | None = None) -> list[ReferenceImageAsset]:
     plan = decision.referenceImagePlan
     threshold = quality_threshold()
     max_refs = max_reference_images()
+    existing_meta = existing_meta or {}
+    slot_state: dict[str, Any] = dict(existing_meta.get("reference_slots") or {})
 
     # 只有 action_continuation 才把上一镜尾帧作为强制参考图和剪辑点连贯锚点。
     # 不受 plan.reusePreviousSceneCount 计数与 QA 阈值限制；放在最前、确保不被裁掉。
     forced: list[ReferenceImageAsset] = []
     from app.continuity import derive_continuity_mode, uses_previous_tail_frame
-    if uses_previous_tail_frame(derive_continuity_mode(shot)):
+    needs_tail = uses_previous_tail_frame(derive_continuity_mode(shot))
+    if needs_tail:
         prev = prev_shot
         if prev is None and int(getattr(shot, "shot_no", 0) or 0) > 1:
             prev = conn.execute(
@@ -842,10 +1174,22 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
             tail = previous_tail_reference_asset(conn, prev, dest_dir=ref_dir)
             if tail:
                 forced.append(tail)
+            elif not allow_missing_continuity_tail:
+                # 旧行为：缺尾帧仍继续静态准备
+                pass
 
     # 期望新生成的关键帧参考图数量：模型计划值与「每镜最少生成数」取大者（仅参考图模式），保证每镜都有生成图。
     min_gen = min_generated_references() if decision.mode == REFERENCE_IMAGE_MODE else 0
     want_gen = max(int(plan.generateNewCount or 0), min_gen)
+
+    # P2：质量角色自适应——定妆照/场景/尾帧已覆盖的角色可少生成（实验开关）
+    if role_adaptive_enabled() and decision.mode == REFERENCE_IMAGE_MODE:
+        covered = 0
+        if forced:
+            covered += 1  # continuity
+        # 场景与定妆在后面注入；这里先按计划保留，生成后再裁
+        want_gen = max(min_gen, min(want_gen, 4 - min(covered, 2)))
+
     # 先给强制连贯帧 + 生成位预留名额，剩余名额才给定妆照/复用帧，避免它们把生成位挤掉（否则只剩定妆照）。
     reserve_for_gen = min(want_gen, max(0, max_refs - len(forced)))
     non_gen_budget = max(0, max_refs - len(forced) - reserve_for_gen)
@@ -869,13 +1213,13 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
     room = max(0, max_refs - len(selected))
     generated_needed = min(want_gen, room)
 
-    def _publish_progress() -> None:
-        """Expose the best-known gallery without waiting for every concurrent image.
+    # P1-3：槽位级恢复——已通过槽位不重复生成
+    passed_slots = {
+        k: v for k, v in slot_state.items()
+        if isinstance(v, dict) and v.get("status") == "passed" and v.get("path")
+    }
 
-        The final consistency pass may still replace or suppress an item.  Until
-        then, generated candidates are safe to show as the current provisional
-        gallery and rejected attempts stay in the discarded section.
-        """
+    def _publish_progress() -> None:
         if on_progress is None:
             return
         for asset in selected:
@@ -889,35 +1233,56 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
             asset.episodeId = asset.episodeId or episode_id
         on_progress(list(selected), list(visible_rejected))
 
-    # Existing character/scene/continuity anchors can be rendered immediately.
     _publish_progress()
 
     type_cycle = [t for t in plan.types if t in REFERENCE_IMAGE_TYPES and t not in {"previous_shot_frame"}] or ["plot_key_frame"]
-    # 逐图规格：优先用模型按剧本写好的 (type, prompt)；不足时用类型轮换补齐（prompt 留空，下面逐图异步补写）。
     model_specs = [p for p in (plan.prompts or []) if p.get("prompt")]
-    specs: list[tuple[str, str | None]] = []
+    specs: list[tuple[str, str, str | None]] = []  # slot_key, ref_type, prompt
     for i in range(generated_needed):
+        role = _SLOT_ROLE_CYCLE[i % len(_SLOT_ROLE_CYCLE)]
+        slot_key = role[0] if i < len(_SLOT_ROLE_CYCLE) else f"extra_{i}"
+        if slot_key in passed_slots:
+            # 复用已通过槽位
+            prev = passed_slots[slot_key]
+            path = prev.get("path")
+            if path and Path(path).exists():
+                asset = _asset_from_path(
+                    path=path,
+                    ref_type=prev.get("type") or role[1],
+                    source="seedream_generated",
+                    quality_score=float(prev.get("quality_score") or 1.0),
+                    qa=prev.get("qa") or {"overall": 1.0, "resumed": True},
+                )
+                selected.append(asset)
+                continue
         if i < len(model_specs):
             spec = model_specs[i]
-            specs.append((spec.get("type") or type_cycle[i % len(type_cycle)], spec.get("prompt")))
+            specs.append((slot_key, spec.get("type") or type_cycle[i % len(type_cycle)], spec.get("prompt")))
         else:
-            specs.append((type_cycle[i % len(type_cycle)], None))
+            specs.append((slot_key, type_cycle[i % len(type_cycle)], None))
 
-    # 逐图异步写提示词：每张图各起一次独立 LLM 调用并发生成详尽提示词（防止一次性写多张时偷懒）。
-    # 模型计划里若已带该图的简述，作为 intent 喂进去引导，但仍逐图单独成稿；调用失败才回退到原简述。
-    if specs and reference_prompt_async():
+    # 提示词：批量合同或逐图异步
+    if specs and batch_prompt_enabled():
+        prompts = await write_reference_prompt_batch(
+            shot, bible, [(s, t) for s, t, _ in specs],
+            intents=[o for _, _, o in specs],
+        )
+        specs = [(specs[i][0], specs[i][1], prompts[i] or specs[i][2]) for i in range(len(specs))]
+        for slot_key, ref_type, prompt in specs:
+            slot_state[slot_key] = {
+                **(slot_state.get(slot_key) or {}),
+                "status": "prompt_ready", "type": ref_type, "prompt": prompt,
+            }
+        if existing_meta is not None:
+            existing_meta["reference_slots"] = slot_state
+    elif specs and reference_prompt_async():
         async def _resolve(ref_type: str, brief: str | None) -> str | None:
             written = await write_reference_prompt(shot, bible, ref_type, intent=brief)
             return written or brief or None
-        resolved = await asyncio.gather(*[_resolve(t, o) for t, o in specs])
-        specs = [(specs[i][0], resolved[i]) for i in range(len(specs))]
+        resolved = await asyncio.gather(*[_resolve(t, o) for _, t, o in specs])
+        specs = [(specs[i][0], specs[i][1], resolved[i]) for i in range(len(specs))]
 
-    # i2i 种子（根因修复）：新生成的参考图不再裸跑文生图，而是以稳定锚点做图生图，姿态/动作仍走文字。
-    #   - 定妆照：锁长相/发型/服饰，喂给「含人物」的图（character / plot_key_frame）。
-    #   - 上一镜尾帧（continuity 镜的 forced 帧）：锁环境/光线/构图衔接，喂给本镜所有新图。
-    # 二者同源于实际喂给 Seedance 的锚点，保证「同分镜多张一致」「与上一镜衔接」。
     portrait_seeds = _portrait_seed_inputs(bible, shot.characters, project_id=project_id, episode_no=episode_no)
-    # 环境种子：上一镜尾帧（衔接）+ 本镜场景库图（锁定环境/陈设/光线），喂给本镜所有新图。
     env_seeds = [a.url for a in forced if a.type == "previous_shot_frame" and a.url]
     env_seeds += [a.url for a in scene_assets if a.url]
 
@@ -925,50 +1290,174 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
         seeds = (portrait_seeds + env_seeds) if ref_type in {"character", "plot_key_frame"} else list(env_seeds)
         return _dedupe_str(seeds)
 
-    # 并发生成所有参考图（每张带 QA 重试 + 全部不达标时保留最佳一版兜底）。
     if specs:
-        tasks = [
-            asyncio.create_task(_generate_reference_keep_best(
+        async def _run_one(slot_key: str, ref_type: str, override: str | None, index: int):
+            asset, discarded, rej = await _generate_reference_keep_best(
                 project_id=project_id, episode_no=episode_no, shot=shot, bible=bible,
-                ref_type=t, index=i + 1, content_override=o, retries=reference_gen_retries(),
-                seed_inputs=_seeds_for(t)))
-            for i, (t, o) in enumerate(specs)
+                ref_type=ref_type, index=index, content_override=override,
+                retries=reference_gen_retries(), seed_inputs=_seeds_for(ref_type),
+                skip_inline_qa=batch_qa_enabled())
+            return slot_key, asset, discarded, rej
+
+        wrapped = [
+            asyncio.create_task(_run_one(slot_key, ref_type, override, i + 1))
+            for i, (slot_key, ref_type, override) in enumerate(specs)
         ]
-        # Do not use gather here: it withholds fast results until the slowest
-        # reference (including its QA retries) finishes.
-        for completed in asyncio.as_completed(tasks):
-            asset, discarded, rej = await completed
+        pending_qa: list[tuple[str, str, ReferenceImageAsset]] = []
+        for completed in asyncio.as_completed(wrapped):
+            slot_key, asset, discarded, rej = await completed
             if rejection_details is not None:
                 rejection_details.extend(rej)
             if asset is not None:
                 selected.append(asset)
+                slot_state[slot_key] = {
+                    "status": "qa_pending" if batch_qa_enabled() else "passed",
+                    "type": asset.type,
+                    "path": asset.path,
+                    "quality_score": asset.qualityScore,
+                    "qa": asset.qa,
+                }
+                if batch_qa_enabled():
+                    pending_qa.append((slot_key, asset.type, asset))
+                else:
+                    slot_state[slot_key]["status"] = "passed" if not asset.rejectReason else "rejected"
             if rejected_out is not None:
                 rejected_out.extend(discarded)
+            if existing_meta is not None:
+                existing_meta["reference_slots"] = slot_state
             _publish_progress()
 
-    # Phase 2：整组相对一致性检查——点名漂移的生成图，从锚点 i2i 重生；仍漂移则剔除（不喂 Seedance，进废弃画廊）。
+        # P1-2：批量 QA；缺项回退单图
+        if pending_qa and batch_qa_enabled():
+            b64_items = []
+            for slot_key, ref_type, asset in pending_qa:
+                if asset.path and Path(asset.path).exists():
+                    try:
+                        b64_items.append((slot_key, ref_type, hiagent.encode_image_file(asset.path)))
+                    except OSError:
+                        continue
+            report = await review_reference_images_batch(b64_items, shot=shot, bible=bible)
+            by_slot = {it.get("slot"): it for it in report.get("items") or []}
+            for slot_key, ref_type, asset in pending_qa:
+                it = by_slot.get(slot_key) or {}
+                if it.get("missing") or report.get("failed"):
+                    qa = await review_reference_image(
+                        hiagent.encode_image_file(asset.path), shot=shot, bible=bible, ref_type=ref_type,
+                    )
+                    overall = float(qa.get("overall") or 0)
+                else:
+                    overall = float(it.get("overall") or 0)
+                    qa = {
+                        "overall": overall,
+                        "character_match": it.get("identity_consistency"),
+                        "scene_match": it.get("scene_consistency"),
+                        "issues": it.get("hard_failures") or [],
+                        "repair_instruction": it.get("repair_instruction"),
+                        "batch_qa": True,
+                    }
+                asset.qa = qa
+                asset.qualityScore = overall
+                if "absolute_quality" not in qa:
+                    qa["absolute_quality"] = overall
+                    asset.qa = qa
+                recompose_asset_score(asset)
+                if not apply_keep_gate(asset):
+                    if rejected_out is not None and asset not in rejected_out:
+                        rejected_out.append(asset)
+                    if asset in selected:
+                        selected.remove(asset)
+                    slot_state[slot_key] = {
+                        **(slot_state.get(slot_key) or {}),
+                        "status": "rejected", "qa": asset.qa, "quality_score": asset.qualityScore,
+                    }
+                else:
+                    slot_state[slot_key] = {
+                        **(slot_state.get(slot_key) or {}),
+                        "status": "passed", "qa": asset.qa, "quality_score": asset.qualityScore,
+                        "path": asset.path,
+                    }
+            if existing_meta is not None:
+                existing_meta["reference_slots"] = slot_state
+            _publish_progress()
+
+    # Phase 2：整组相对一致性检查
+    if job_id:
+        try:
+            from app.media_pipeline import stages as media_stages
+            from app.media_pipeline.stage_state import set_pipeline_stage
+            set_pipeline_stage(job_id, media_stages.STAGE_REFERENCE_CONSISTENCY)
+        except Exception:  # noqa: BLE001
+            pass
     selected = await _enforce_reference_consistency(
         selected=selected, shot=shot, bible=bible, project_id=project_id, episode_no=episode_no,
         rejection_details=rejection_details, rejected_out=rejected_out)
 
-    selected = _dedupe_assets(selected)[:max_refs]
-    # 根因防穿模/分身：限制「含同一角色」的参考图数量。多张不同尺度的含人物图（尤其纯背景全身定妆照
-    # 与入戏关键帧并存）是 Seedance 把同一角色画两遍/生成前景巨人的结构性触发器。被压下的图（多为裸
-    # 定妆照）仍作为 i2i 种子参与了参考图生成，身份不丢；它们进废弃画廊、不喂模型，用户可手动启用。
-    selected, suppressed = _limit_character_references(selected, limit=max_character_reference_images())
-    if rejected_out is not None:
-        rejected_out.extend(suppressed)
+    selected = _dedupe_assets(selected)
+    selected = _finalize_reference_selection(
+        selected, rejected_out=rejected_out, rejection_details=rejection_details)
     for asset in selected:
         asset.selectedForSeedance = True
         asset.shotId = asset.shotId or shot_id
         asset.episodeId = asset.episodeId or episode_id
-    # 质检未通过、未被选用的参考图（rejected_out）不喂给 Seedance，仅供评审墙废弃画廊展示。
     if rejected_out is not None:
         for asset in rejected_out:
             asset.selectedForSeedance = False
             asset.shotId = asset.shotId or shot_id
             asset.episodeId = asset.episodeId or episode_id
+    if existing_meta is not None:
+        existing_meta["reference_slots"] = slot_state
     _publish_progress()
+    return selected
+
+
+async def assemble_continuity_tail(
+    *, conn: Any, project_id: str, episode_no: int, episode_id: str, shot_id: str,
+    shot: Shot, bible: Bible, meta: dict[str, Any], prev_shot: Any | None,
+    rejection_details: list[dict[str, Any]] | None = None,
+    rejected_out: list[ReferenceImageAsset] | None = None,
+) -> list[ReferenceImageAsset]:
+    """尾帧到达后：装配连续性参考并做最终组门禁；不重跑已通过静态槽位。"""
+    refs = list(meta.get("reference_images") or [])
+    selected: list[ReferenceImageAsset] = []
+    for ref in refs:
+        path = ref.get("path") or ref.get("image_path")
+        if not path or not Path(path).exists():
+            continue
+        if ref.get("type") == "previous_shot_frame":
+            continue  # 用最新尾帧替换
+        selected.append(_asset_from_path(
+            path=path,
+            ref_type=ref.get("type") or "plot_key_frame",
+            source=ref.get("source") or "pipeline",
+            quality_score=ref.get("qualityScore"),
+            qa=ref.get("qa"),
+            related_character_ids=list(ref.get("relatedCharacterIds") or []),
+        ))
+        selected[-1].selectedForSeedance = bool(ref.get("selectedForSeedance", True))
+        selected[-1].id = ref.get("id") or selected[-1].id
+
+    prev = prev_shot
+    if prev is None and int(getattr(shot, "shot_no", 0) or 0) > 1:
+        prev = conn.execute(
+            "SELECT * FROM shots WHERE episode_id=? AND shot_no=?",
+            (episode_id, int(shot.shot_no) - 1)).fetchone()
+    if prev is not None:
+        ref_dir = reference_image_path(project_id, episode_no, shot.shot_no, "previous_shot_frame", 0).parent
+        tail = previous_tail_reference_asset(conn, prev, dest_dir=ref_dir)
+        if tail:
+            selected = [tail] + [a for a in selected if a.type != "previous_shot_frame"]
+
+    selected = await _enforce_reference_consistency(
+        selected=selected, shot=shot, bible=bible, project_id=project_id, episode_no=episode_no,
+        rejection_details=rejection_details, rejected_out=rejected_out,
+    )
+    selected = _dedupe_assets(selected)
+    selected = _finalize_reference_selection(
+        selected, rejected_out=rejected_out, rejection_details=rejection_details)
+    for asset in selected:
+        asset.selectedForSeedance = True
+        asset.shotId = shot_id
+        asset.episodeId = episode_id
     return selected
 
 
@@ -977,36 +1466,112 @@ def _is_character_bearing(asset: ReferenceImageAsset) -> bool:
     return asset.type in {"character", "plot_key_frame", "previous_shot_frame"} or bool(asset.relatedCharacterIds)
 
 
-def _limit_character_references(selected: list[ReferenceImageAsset], *, limit: int
-                                ) -> tuple[list[ReferenceImageAsset], list[ReferenceImageAsset]]:
-    """限制喂给 Seedance 的「含人物参考图」数量，避免同一角色被画两遍/前景巨人/穿模。
-    优先级：上一镜尾帧（连贯锚点）> 过审的入戏生成关键帧 > 干净裸定妆照 > 兜底（低于阈值）的生成关键帧。
-    干净生成关键帧仍排在定妆照前（定妆照直接喂视频最易变前景巨人）；但当生成图本身只是兜底废图时，
-    宁可让位给干净定妆照——脏兜底图压过满分定妆照得不偿失。超出名额的移出喂模型集合（仍作为 i2i 种子，身份不丢），
-    进废弃画廊供用户手动启用。返回 (kept, suppressed)。"""
-    char_refs = [a for a in selected if _is_character_bearing(a)]
-    if len(char_refs) <= limit:
-        return selected, []
+def _is_character_bearing_ref(ref: dict[str, Any]) -> bool:
+    return (ref.get("type") in {"character", "plot_key_frame", "previous_shot_frame"}
+            or bool(ref.get("relatedCharacterIds")))
 
-    def _priority(a: ReferenceImageAsset) -> int:
+
+def _apply_redundancy_penalties(assets: list[ReferenceImageAsset]) -> None:
+    """对超额含人物图施加 0～0.15 软惩罚并写入综合分；不直接踢出。"""
+    char_refs = [a for a in assets if _is_character_bearing(a)]
+    if len(char_refs) <= 1:
+        for a in assets:
+            recompose_asset_score(a, redundancy_penalty=0.0)
+        return
+
+    def _rank_key(a: ReferenceImageAsset) -> tuple:
+        # 与旧优先级对齐：尾帧 > 过审生成 > 定妆照 > 兜底生成；同分看当前分
         if a.type == "previous_shot_frame":
-            return 0   # 连贯尾帧优先保留
-        if a.source == "seedream_generated":
-            # 过审的入戏关键帧最优；兜底（带 rejectReason、低于阈值）的生成图让位给干净定妆照
-            return 1 if not a.rejectReason else 3
-        return 2       # 干净裸定妆照（直接喂视频较易变前景巨人，故排在过审生成图后）
-
-    keep_ids = {id(a) for a in sorted(char_refs, key=_priority)[:limit]}
-    kept: list[ReferenceImageAsset] = []
-    suppressed: list[ReferenceImageAsset] = []
-    for a in selected:
-        if _is_character_bearing(a) and id(a) not in keep_ids:
-            a.selectedForSeedance = False
-            a.rejectReason = "duplicate_character_suppressed"
-            suppressed.append(a)
+            pri = 0
+        elif a.source == "seedream_generated":
+            pri = 1 if not a.rejectReason else 3
         else:
-            kept.append(a)
-    return kept, suppressed
+            pri = 2
+        return (pri, -(a.qualityScore or 0.0))
+
+    ranked = sorted(char_refs, key=_rank_key)
+    prefer = max_character_reference_images()
+    penalties: dict[int, float] = {}
+    for i, a in enumerate(ranked):
+        if i < prefer:
+            penalties[id(a)] = 0.0
+        else:
+            excess = i - prefer + 1
+            penalties[id(a)] = min(_MAX_REDUNDANCY_PENALTY, 0.05 * excess)
+
+    for a in assets:
+        recompose_asset_score(a, redundancy_penalty=penalties.get(id(a), 0.0))
+
+
+def _finalize_reference_selection(
+    assets: list[ReferenceImageAsset],
+    *,
+    rejected_out: list[ReferenceImageAsset] | None = None,
+    rejection_details: list[dict[str, Any]] | None = None,
+) -> list[ReferenceImageAsset]:
+    """冗余软惩罚 → 综合分门禁：≥阈值一律留下；低于则进废弃（仅 quality_below_threshold）。"""
+    if not assets:
+        return []
+    _apply_redundancy_penalties(assets)
+    kept: list[ReferenceImageAsset] = []
+    for asset in assets:
+        if apply_keep_gate(asset):
+            kept.append(asset)
+            continue
+        # 地板以上的生成兜底：若本镜尚无任何留下的图，允许暂留最高分一张
+        if rejected_out is not None and asset not in rejected_out:
+            rejected_out.append(asset)
+        if rejection_details is not None:
+            rejection_details.append({
+                "type": asset.type, "source": asset.source,
+                "reason": asset.rejectReason or "quality_below_threshold",
+                "quality_score": asset.qualityScore,
+            })
+    if kept:
+        return kept
+    # 极端兜底：全部低于门禁时，若最佳仍 ≥ quality_floor，留下一张以免无参考
+    ranked = sorted(assets, key=lambda a: a.qualityScore or 0.0, reverse=True)
+    best = ranked[0] if ranked else None
+    if best is not None and (best.qualityScore or 0) >= quality_floor():
+        best.selectedForSeedance = True
+        # 仍保留 rejectReason 作为「兜底」标记，前端可显示分数
+        if rejected_out is not None and best in rejected_out:
+            rejected_out.remove(best)
+        return [best]
+    return []
+
+
+def pack_reference_images_for_seedance(
+    refs: list[dict[str, Any]], *, max_images: int | None = None,
+) -> list[dict[str, Any]]:
+    """按综合分 Top-N 装箱喂模型；不改 selectedForSeedance。含人物图受偏好上限约束。"""
+    usable = [r for r in refs if r.get("selectedForSeedance") and not r.get("deleted")]
+    if not usable:
+        return []
+    limit = max_images if max_images is not None else max_reference_images()
+    char_limit = max_character_reference_images()
+
+    def _score(r: dict[str, Any]) -> float:
+        try:
+            if r.get("qualityScore") is not None:
+                return float(r["qualityScore"])
+            qa = r.get("qa") or {}
+            return float(qa.get("overall") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    ordered = sorted(usable, key=_score, reverse=True)
+    packed: list[dict[str, Any]] = []
+    char_count = 0
+    for ref in ordered:
+        if len(packed) >= limit:
+            break
+        if _is_character_bearing_ref(ref):
+            if char_count >= char_limit:
+                continue
+            char_count += 1
+        packed.append(ref)
+    return packed
 
 
 def _dedupe_assets(assets: list[ReferenceImageAsset]) -> list[ReferenceImageAsset]:
@@ -1058,10 +1623,10 @@ def build_seedance_image_inputs(meta: dict[str, Any]) -> list[tuple[str, str]]:
         refs = meta.get("reference_images") or []
         if not refs:
             raise ProviderError("REFERENCE_IMAGE_MODE requires at least one quality-approved reference image.")
-        # 只取「选中且未被废弃」的参考图喂给模型：质检未通过或用户在素材画廊里删除的图都排除在外。
-        usable = [r for r in refs if r.get("selectedForSeedance") and not r.get("deleted")]
-        if len(usable) > max_reference_images():
-            raise ProviderError("REFERENCE_IMAGE_MODE reference image count exceeds configured limit.")
+        # 使用中的图按综合分 Top-N 装箱；截断不改 selected，高分未入选仍留在画廊。
+        usable = pack_reference_images_for_seedance(refs)
+        if not usable:
+            raise ProviderError("REFERENCE_IMAGE_MODE has no selected reference images.")
         out: list[tuple[str, str]] = []
         for ref in usable:
             if ref.get("path"):

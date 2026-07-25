@@ -9,6 +9,7 @@ import re
 
 from app import config
 from app.character_policy import functional_extra_anchor, is_functional_extra
+from app.renderability import strip_overdetail_terms
 from app.schemas import Bible, Shot
 
 # 全知视角的结尾悬念钩旁白（"可他不知道…/殊不知…/然而…"）念在台词【之后】；
@@ -239,6 +240,7 @@ def sanitize_seedance_prompt(prompt_text: str, *, aggressive: bool = False,
             if old:
                 body = body.replace(old, new)
     body = _rewrite_sensitive_terms(body, aggressive=aggressive)
+    body = strip_overdetail_terms(body)
     if aggressive:
         body = re.sub(rf"{re.escape(SOURCE_EXCERPT_MARKER)}[^。；\n]*[。；\n]?", "", body)
         body = re.sub(
@@ -416,10 +418,10 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
                    aspect_ratio: str = "9:16") -> str:
     """编译 Seedance 最终提示词（PRD §11）：最小完备、固定段落、禁止原文/前镜完整动作/未来剧情。"""
     from app.continuity import (
-        build_audio_timeline_from_legacy,
         derive_continuity_mode,
         effective_primary_action,
         effective_state_in,
+        ensure_audio_timeline,
         planned_state_out,
         reference_role_plan,
         sync_shot_continuity_fields,
@@ -448,8 +450,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         mode = derive_continuity_mode(shot)
     shot.continuity_mode = mode
     shot.prompt_contract_version = PROMPT_CONTRACT_VERSION
-    if not shot.audio_timeline:
-        shot.audio_timeline = build_audio_timeline_from_legacy(shot, voice_bible)
+    ensure_audio_timeline(shot, voice_bible)
     shot.reference_roles = reference_role_plan(shot, continuity_mode=mode)
 
     shot_dur = clip_duration(shot)

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { api, EpisodeScreenplay, ScriptScene, numToCn } from '../api'
+import { api, EpisodeScreenplay, PlotSpine, ScriptScene, numToCn } from '../api'
 import { useEpisode, useNav } from '../App'
 import { EpStamp } from './BiblePage'
 import EpisodeCrumb from '../components/EpisodeCrumb'
@@ -46,12 +46,35 @@ const sceneOutlineText = (sceneOutline: ScriptScene[] | undefined) =>
     .map(scene => [scene.scene_heading, scene.story_function, scene.summary, scene.conflict ?? '', scene.turn ?? '', scene.source_basis ?? '', (scene.characters ?? []).join('、')].join(' | '))
     .join('\n')
 
+const emptySpine = (): PlotSpine => ({
+  episode_premise: '',
+  spine_beats: [],
+  must_keep_ending: '',
+  drop_list: [],
+})
+
+const restoreDropItem = (script: EpisodeScreenplay, dropText: string): EpisodeScreenplay => {
+  const spine = { ...(script.plot_spine ?? emptySpine()) }
+  const drops = [...(spine.drop_list ?? [])]
+  const idx = drops.findIndex(d => d === dropText)
+  if (idx < 0) return script
+  drops.splice(idx, 1)
+  spine.drop_list = drops
+  const points = [...(script.key_plot_points ?? [])]
+  if (!points.includes(dropText)) points.push(dropText)
+  const approved = [...(script.approved_adaptations ?? [])]
+  const mark = `恢复拍摄：${dropText}`
+  if (!approved.includes(mark)) approved.push(mark)
+  return { ...script, plot_spine: spine, key_plot_points: points, approved_adaptations: approved }
+}
+
 export default function ScriptPage() {
   const { episodeId, projectId, go, toast } = useNav()
   const { data: ep, refresh, error, loading } = useEpisode(episodeId!, 'script')
   const [busy, setBusy] = useState(false)
   const [draft, setDraft] = useState<EpisodeScreenplay | null>(null)
   const [manuscriptExpanded, setManuscriptExpanded] = useState(false)
+  const [restoreEnabled, setRestoreEnabled] = useState(false)
   const screenplayTimer = useTaskTimer(`episode.${episodeId}.screenplay`, ep?.screenplay_status === 'running')
   const storyboardTimer = useTaskTimer(`episode.${episodeId}.storyboard`, ep?.status === 'scripting')
 
@@ -92,15 +115,18 @@ export default function ScriptPage() {
       !window.confirm('保存剧本修改会清空本集已有分镜、参考图、视频和成片，需要重新生成分镜。确定保存？')) return
     const r = await act(() => api.put(`/episodes/${ep.id}/screenplay`, { screenplay: draft, force: hasDownstream }),
       hasDownstream ? '剧本已保存，下游分镜已清空' : '剧本已保存')
-    // 仅成功后清空草稿，失败时保留用户编辑
-    if (r !== undefined) setDraft(null)
+    if (r !== undefined) {
+      setDraft(null)
+      setRestoreEnabled(false)
+    }
   }
 
   const enterBoard = async () => {
     const canResumeCheckpoint = Boolean(
       (ep.shot_count ?? 0) > 0 &&
       ep.script_error &&
-      (ep.status === 'scripted' || ep.status === 'script_failed')
+      (ep.status === 'scripted' || ep.status === 'script_failed') &&
+      !(ep.shots?.length && ep.shots[ep.shots.length - 1]?.is_final)
     )
     const needGenerate = (ep.shot_count ?? 0) === 0 || ['planned', 'script_failed'].includes(ep.status)
     if (needGenerate && ep.status !== 'scripting') {
@@ -124,10 +150,16 @@ export default function ScriptPage() {
 
   const script = draft ?? ep.screenplay ?? null
   const editing = !!draft
+  const spine = script?.plot_spine
 
   const updateScript = (patch: Partial<EpisodeScreenplay>) => {
     if (!draft) return
     setDraft({ ...draft, ...patch })
+  }
+
+  const updateSpine = (patch: Partial<PlotSpine>) => {
+    if (!draft) return
+    setDraft({ ...draft, plot_spine: { ...(draft.plot_spine ?? emptySpine()), ...patch } })
   }
 
   const structureItems = [
@@ -168,22 +200,20 @@ export default function ScriptPage() {
           {editing && (
             <>
               <button className="btn primary" disabled={busy} onClick={saveDraft}>保存剧本</button>
-              <button className="btn ghost" disabled={busy} onClick={() => setDraft(null)}>放弃</button>
+              <button className="btn ghost" disabled={busy} onClick={() => { setDraft(null); setRestoreEnabled(false) }}>放弃</button>
             </>
           )}
           {ep.screenplay_status === 'ready' && !editing && (
-            <>
-              <button className="btn primary" disabled={busy} onClick={enterBoard}>
-                进入分镜台 →
-              </button>
-            </>
+            <button className="btn primary" disabled={busy} onClick={enterBoard}>
+              进入分镜台 →
+            </button>
           )}
           <span style={{ flex: 1 }} />
           {ep.screenplay_evidence && <EvidenceDrawer evidence={ep.screenplay_evidence} label="剧本证据" />}
           <TaskTimer label="剧本" timer={screenplayTimer} />
           <TaskTimer label="分镜" timer={storyboardTimer} />
           <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>
-            目标 {ep.target_duration_s}s · 完整剧本视图
+            目标 {ep.target_duration_s}s · renderability_v1
           </span>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10, marginTop: 12 }}>
@@ -204,6 +234,95 @@ export default function ScriptPage() {
         ? <div className="empty"><div className="big">剧</div>尚无剧本<br />点击上方「生成剧本」</div>
         : (
             <>
+              {(spine || editing) && (
+                <section className="card spine-card">
+                  <div className="shot-head" style={{ marginBottom: 10 }}>
+                    <span className="sn">主线骨架</span>
+                    <span className="meta">只拍这些；drop_list 默认不拍 · 合同 renderability_v1</span>
+                  </div>
+                  {!editing ? (
+                    <div className="shot-body">
+                      {!!spine?.episode_premise && (
+                        <div className="kv full"><b>本集前提</b>{spine.episode_premise}</div>
+                      )}
+                      {!!spine?.spine_beats?.length && (
+                        <div className="kv full"><b>主线节拍</b>
+                          <ol className="spine-beat-list">
+                            {spine.spine_beats.map((b, i) => (
+                              <li key={b.beat_id || i}>
+                                <code>{b.beat_id || `S${i + 1}`}</code>
+                                <span>{b.who}｜{b.does}→{b.turn}</span>
+                                {b.must_keep === false && <em className="spine-optional">可删过渡</em>}
+                              </li>
+                            ))}
+                          </ol>
+                        </div>
+                      )}
+                      {!!spine?.must_keep_ending && (
+                        <div className="kv full"><b>必须收束</b>{spine.must_keep_ending}</div>
+                      )}
+                      {!!spine?.drop_list?.length && (
+                        <div className="kv full"><b>本集不拍</b>
+                          <ul className="key-list drop-list">
+                            {spine.drop_list.map((d, i) => <li key={i}>{d}</li>)}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="shot-body">
+                      <div className="full"><label className="f">本集前提（一句话）</label>
+                        <input type="text" style={{ width: '100%' }} value={draft?.plot_spine?.episode_premise ?? ''}
+                          onChange={e => updateSpine({ episode_premise: e.target.value })} /></div>
+                      <div className="full"><label className="f">主线节拍（每行：beat_id | who | does | turn）</label>
+                        <textarea rows={6} value={(draft?.plot_spine?.spine_beats ?? []).map(b =>
+                          [b.beat_id, b.who ?? '', b.does ?? '', b.turn ?? ''].join(' | ')).join('\n')}
+                          onChange={e => updateSpine({
+                            spine_beats: splitLines(e.target.value).map((line, i) => {
+                              const [beat_id = `S${String(i + 1).padStart(2, '0')}`, who = '', does = '', turn = ''] = line.split('|').map(p => p.trim())
+                              return { beat_id, who, does, turn, must_keep: true }
+                            }),
+                          })} /></div>
+                      <div className="full"><label className="f">必须收束</label>
+                        <textarea rows={2} value={draft?.plot_spine?.must_keep_ending ?? ''}
+                          onChange={e => updateSpine({ must_keep_ending: e.target.value })} /></div>
+                      <div className="full">
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 6 }}>
+                          <label className="f" style={{ margin: 0 }}>本集不拍（drop_list）</label>
+                          <label style={{ fontSize: 13, color: 'var(--ink-soft)', display: 'flex', gap: 6, alignItems: 'center' }}>
+                            <input type="checkbox" checked={restoreEnabled}
+                              onChange={e => setRestoreEnabled(e.target.checked)} />
+                            启用「恢复一条 drop」授权
+                          </label>
+                        </div>
+                        <textarea rows={3} value={(draft?.plot_spine?.drop_list ?? []).join('\n')}
+                          onChange={e => updateSpine({ drop_list: splitLines(e.target.value) })} />
+                        {restoreEnabled && !!(draft?.plot_spine?.drop_list?.length) && (
+                          <ul className="drop-restore-list">
+                            {(draft?.plot_spine?.drop_list ?? []).map((d, i) => (
+                              <li key={`${d}-${i}`}>
+                                <span>{d}</span>
+                                <button type="button" className="btn ghost" style={{ fontSize: 12 }}
+                                  onClick={() => {
+                                    if (!draft) return
+                                    if (!window.confirm(`确认恢复拍摄「${d}」？将移出 drop_list 并写入关键剧情点，保存后才会进分镜。`)) return
+                                    setDraft(restoreDropItem(draft, d))
+                                    toast('已标记恢复；请保存剧本后再进分镜')
+                                  }}>
+                                  恢复拍摄
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </section>
+              )}
+
+              <div style={{ height: 16 }} />
+
               <section className={`card script-editor${editing ? ' editing' : ''}`}>
                 {!editing ? (
                   <>
@@ -217,12 +336,12 @@ export default function ScriptPage() {
                       </div>
                     )}
                     {!!script.key_lines?.length && (
-                      <div className="kv full"><b>人物谱角色台词 / 必保留台词</b>
+                      <div className="kv full"><b>主线台词</b>
                         <ul className="key-list">{script.key_lines.map((l, i) => <li key={i}>{l}</li>)}</ul>
                       </div>
                     )}
                     {!!script.key_plot_points?.length && (
-                      <div className="kv full"><b>必保留关键剧情点</b>
+                      <div className="kv full"><b>主线剧情点</b>
                         <ul className="key-list">{script.key_plot_points.map((p, i) => <li key={i}>{p}</li>)}</ul>
                       </div>
                     )}
@@ -292,10 +411,10 @@ export default function ScriptPage() {
                     <div className="full"><label className="f">失败代价</label>
                       <textarea rows={2} value={draft?.stakes ?? ''}
                         onChange={e => updateScript({ stakes: e.target.value })} /></div>
-                    <div className="full"><label className="f">人物谱角色台词 / 必保留台词（每行一条，分镜必须保留）</label>
+                    <div className="full"><label className="f">主线台词（每行一条，最多 6 条）</label>
                       <textarea rows={4} value={(draft?.key_lines ?? []).join('\n')}
                         onChange={e => updateScript({ key_lines: splitLines(e.target.value) })} /></div>
-                    <div className="full"><label className="f">必保留关键剧情点（每行一条，分镜必须保留）</label>
+                    <div className="full"><label className="f">主线剧情点（每行一条）</label>
                       <textarea rows={4} value={(draft?.key_plot_points ?? []).join('\n')}
                         onChange={e => updateScript({ key_plot_points: splitLines(e.target.value) })} /></div>
                     <div className="full"><label className="f">完整剧本文本</label>

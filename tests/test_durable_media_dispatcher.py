@@ -40,6 +40,7 @@ def _seed_job(
     meta = {
         "reference_images": ([{"id": f"ref-{version_id}"}] if refs_ready else []),
         "reference_generation_complete": refs_ready,
+        "video_input_manifest_frozen": refs_ready,
         "auto_retake_count": 1 if retake else 0,
     }
     conn.execute(
@@ -80,19 +81,67 @@ def test_dispatch_prioritizes_poll_and_unblocked_first_pass(monkeypatch) -> None
     conn.commit()
 
     main: list[str] = []
+    video_ready: list[str] = []
     poll: list[str] = []
     monkeypatch.setattr(worker, "get_conn", lambda: conn)
     monkeypatch.setattr(worker._queue, "put_nowait", main.append)
+    monkeypatch.setattr(worker._video_ready_queue, "put_nowait", video_ready.append)
     monkeypatch.setattr(worker._poll_queue, "put_nowait", poll.append)
     monkeypatch.setattr(worker, "_worker_target", 2)
+    monkeypatch.setattr(worker, "_reference_worker_target", 2)
+    monkeypatch.setattr(worker, "_video_ready_worker_target", 2)
     monkeypatch.setattr(worker, "_poll_worker_target", 1)
+    monkeypatch.setattr("app.media_pipeline.retry_policy.scheduler_policy", lambda: "stage_aware")
+    monkeypatch.setattr("app.db.get_setting", lambda key: {
+        "media_scheduler_policy": "stage_aware",
+        "video_ready_low_watermark": "2",
+        "video_ready_high_watermark": "6",
+        "reference_shot_cohort_limit": "2",
+        "reference_prepared_backlog": "8",
+    }.get(key, ""))
 
     result = worker._dispatch_due_jobs()
 
     assert poll == ["j-poll"]
+    # 就绪镜头进 video_ready；未准备参考图的进 reference；阻塞连续镜不入队
+    assert "j2" in video_ready
+    assert "j-retake" in video_ready or "j-retake" in main
+    assert "j4" in main
+    assert "j3-blocked" not in main and "j3-blocked" not in video_ready
+    assert result["poll"] == 1
+    assert result["due"] == 5
+
+
+def test_dispatch_legacy_keeps_single_main_queue(monkeypatch) -> None:
+    conn = _conn()
+    conn.execute("INSERT INTO projects(id,name,status,created_at) VALUES('p1','P','created',1)")
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,status,created_at) "
+        "VALUES('e1','p1',1,'generating',1)"
+    )
+    for shot_no in range(1, 5):
+        _seed_shot(conn, f"s{shot_no}", shot_no)
+    conn.execute(
+        "INSERT INTO shot_versions(id,shot_id,version_no,prompt_text,idem_key,status,video_path,"
+        "created_at) VALUES('v-anchor','s1',9,'p','anchor','succeeded','/tmp/v1.mp4',1)"
+    )
+    _seed_job(conn, job_id="j2", shot_id="s2", version_id="v2",
+              after_shot_id="s1", refs_ready=True)
+    _seed_job(conn, job_id="j4", shot_id="s4", version_id="v4")
+    _seed_job(conn, job_id="j-retake", shot_id="s1", version_id="v-retake",
+              refs_ready=True, retake=True)
+    conn.commit()
+
+    main: list[str] = []
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker._queue, "put_nowait", main.append)
+    monkeypatch.setattr(worker, "_worker_target", 2)
+    monkeypatch.setattr(worker, "_poll_worker_target", 1)
+    monkeypatch.setattr("app.media_pipeline.retry_policy.scheduler_policy", lambda: "legacy")
+
+    result = worker._dispatch_due_jobs_legacy()
     assert main == ["j2", "j4", "j-retake"]
-    assert "j3-blocked" not in main
-    assert result == {"poll": 1, "main": 3, "due": 5}
+    assert result["main"] == 3
 
 
 def test_dispatcher_rebuilds_a_lost_in_memory_queue(monkeypatch) -> None:
@@ -103,16 +152,52 @@ def test_dispatcher_rebuilds_a_lost_in_memory_queue(monkeypatch) -> None:
     )
     conn.commit()
     main: asyncio.Queue[str] = asyncio.Queue()
+    video_ready: asyncio.Queue[str] = asyncio.Queue()
     poll: asyncio.Queue[str] = asyncio.Queue()
     monkeypatch.setattr(worker, "get_conn", lambda: conn)
     monkeypatch.setattr(worker, "_queue", main)
+    monkeypatch.setattr(worker, "_video_ready_queue", video_ready)
     monkeypatch.setattr(worker, "_poll_queue", poll)
     monkeypatch.setattr(worker, "_worker_target", 1)
+    monkeypatch.setattr(worker, "_reference_worker_target", 1)
+    monkeypatch.setattr(worker, "_video_ready_worker_target", 1)
     monkeypatch.setattr(worker, "_poll_worker_target", 1)
+    monkeypatch.setattr("app.media_pipeline.retry_policy.scheduler_policy", lambda: "stage_aware")
 
     worker._dispatch_due_jobs()
     assert main.get_nowait() == "j1"
     main.task_done()
-    # Simulate an in-memory loss before claim_job changed durable state.
     worker._dispatch_due_jobs()
     assert main.get_nowait() == "j1"
+
+
+def test_video_ready_preempts_reference_when_slot_free(monkeypatch) -> None:
+    """有 VIDEO_READY 且有槽时，必须进 video_ready 队列而非参考图队列。"""
+    conn = _conn()
+    conn.execute("INSERT INTO projects(id,name,status,created_at) VALUES('p1','P','created',1)")
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,status,created_at) "
+        "VALUES('e1','p1',1,'generating',1)"
+    )
+    _seed_shot(conn, "s1", 1)
+    _seed_shot(conn, "s2", 2)
+    _seed_job(conn, job_id="j-ready", shot_id="s1", version_id="v1", refs_ready=True)
+    _seed_job(conn, job_id="j-ref", shot_id="s2", version_id="v2", refs_ready=False)
+    conn.commit()
+
+    ref_q: list[str] = []
+    ready_q: list[str] = []
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker._queue, "put_nowait", ref_q.append)
+    monkeypatch.setattr(worker._video_ready_queue, "put_nowait", ready_q.append)
+    monkeypatch.setattr(worker._poll_queue, "put_nowait", lambda *_: None)
+    monkeypatch.setattr(worker, "_worker_target", 2)
+    monkeypatch.setattr(worker, "_reference_worker_target", 2)
+    monkeypatch.setattr(worker, "_video_ready_worker_target", 2)
+    monkeypatch.setattr(worker, "_poll_worker_target", 1)
+    monkeypatch.setattr("app.media_pipeline.retry_policy.scheduler_policy", lambda: "stage_aware")
+
+    worker._dispatch_due_jobs()
+    assert "j-ready" in ready_q
+    assert "j-ready" not in ref_q
+    assert "j-ref" in ref_q

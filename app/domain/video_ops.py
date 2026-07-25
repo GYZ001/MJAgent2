@@ -51,8 +51,15 @@ def confirm_episode_core(episode_id: str) -> dict:
         for r, s in zip(shots_rows, shots)
     ]
     normalize_continuity(board)
-    # 确认门保留模型/人工选择的时长，由全量校验验证 5~10s 合同与对应口播预算。
+    # Renderability：能 5s 的压回 5s；>5 打审核标记。确认门同步把集目标时长收到实际总时长档位。
+    from app.validators import prefer_default_shot_durations
+    prefer_default_shot_durations(board)
     normalize_transition_visuals(board)
+    actual_total = sum(int(s.duration_s or 0) for s in shots)
+    synced_target = _compact_episode_target(actual_total or compact_target)
+    if synced_target != compact_target:
+        compact_target = synced_target
+        conn.execute("UPDATE episodes SET target_duration_s=? WHERE id=?", (compact_target, episode_id))
     normalized_fields_changed = False
     for r, s, (old_cont, old_trans, old_dur, old_size, old_move, old_mode, old_observed, old_contract) in zip(shots_rows, shots, before):
         if (old_cont != s.continuity_from_prev or old_trans != s.transition or old_dur != s.duration_s

@@ -1,4 +1,4 @@
-"""Seedance prompt 声轨指令：旁白=画外音解说嗓音、台词=角色本音对口型，并按时序排列。"""
+"""Seedance prompt 声轨：只保留真实台词；旁白不再进入时间线。"""
 from app.compiler import compile_prompt
 from app.schemas import Bible, Character, Shot, World
 
@@ -21,26 +21,13 @@ def _shot(**kw) -> Shot:
     return Shot(**data)
 
 
-def test_narration_marked_as_offscreen_voiceover():
-    """旁白必须标注为画外音、用与角色不同的嗓音、不对口型——避免主角声音念旁白。"""
+def test_dialogue_only_audio_timeline_ignores_narration_field():
+    """历史 narration 字段不得进入编译声轨；只输出角色真实台词。"""
     p = compile_prompt(_shot(narration="次日清晨，新闻和昨晚补的细节吻合",
                              dialogues=[{"speaker": "王浩", "line": "这不可能", "emotion": "惊恐"}]), _bible())
-    assert "旁白" in p and "不对口型" in p
-    assert "叙述者" in p or "嗓音" in p
-    assert "王浩" in p and "这不可能" in p
+    assert "这不可能" in p
     assert "开口" in p or "对口型" in p
-
-
-def test_setup_narration_ordered_before_dialogue():
-    p = compile_prompt(_shot(narration="次日清晨，新闻和昨晚补的细节吻合",
-                             dialogues=[{"speaker": "王浩", "line": "这不可能", "emotion": "惊恐"}]), _bible())
-    assert p.index("旁白") < p.index("这不可能")
-
-
-def test_ending_hook_narration_ordered_after_dialogue():
-    p = compile_prompt(_shot(narration="可他不知道，危险才刚刚开始",
-                             dialogues=[{"speaker": "王浩", "line": "我一定查清楚", "emotion": "坚定"}]), _bible())
-    assert p.index("我一定查清楚") < p.index("可他不知道")
+    assert "旁白用独立叙述者嗓音念「次日清晨" not in p
 
 
 def test_audio_timeline_covers_spoken_content():

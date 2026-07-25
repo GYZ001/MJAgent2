@@ -242,7 +242,7 @@ def test_low_qa_video_stops_auto_retake_after_limit(monkeypatch) -> None:
     )
     conn.commit()
 
-    asyncio.run(worker._maybe_auto_qa({
+    force_best = asyncio.run(worker._maybe_auto_qa({
         "id": "j1",
         "shot_id": "s1",
         "project_id": "p1",
@@ -250,3 +250,4 @@ def test_low_qa_video_stops_auto_retake_after_limit(monkeypatch) -> None:
     }, version, "/tmp/v.mp4"))
 
     assert enqueued == []
+    assert force_best is True

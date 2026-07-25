@@ -11,7 +11,7 @@ def _shot_contract_json(shot: Shot) -> str:
 
 
 def _apply_contract_to_public_shot(target: dict) -> None:
-    from app.continuity import apply_shot_contract
+    from app.continuity import apply_shot_contract, max_speech_chars, spoken_chars_from_shot
     shot = Shot(
         shot_no=target["shot_no"],
         duration_s=target["duration_s"],
@@ -42,6 +42,9 @@ def _apply_contract_to_public_shot(target: dict) -> None:
             "spatial_anchor", "is_final",
         }:
             target[key] = value
+    target["spoken_content_chars"] = spoken_chars_from_shot(shot)
+    target["spoken_limit"] = max_speech_chars(int(target.get("duration_s") or shot.duration_s))
+    target["has_legacy_narration"] = bool((target.get("narration") or "").strip())
 
 
 def _insert_storyboard_shot(conn, episode_id: str, screenplay: EpisodeScreenplay, shot: Shot) -> str:
@@ -317,7 +320,11 @@ async def _storyboard_task(episode_id: str, *, resume: bool = True):
             )
             conn.commit()
         source_text = _episode_source_text(conn, ep)
-        compact_target = _storyboard_target_for_source(ep_data.get("target_duration_s"), len(source_text))
+        screenplay = _load_screenplay(ep)
+        spine_n = len((screenplay.plot_spine.spine_beats if screenplay and screenplay.plot_spine else None) or [])
+        compact_target = _storyboard_target_for_source(
+            ep_data.get("target_duration_s"), len(source_text), spine_beat_count=spine_n or None
+        )
         if compact_target != ep_data.get("target_duration_s"):
             conn.execute("UPDATE episodes SET target_duration_s=? WHERE id=?", (compact_target, episode_id))
             conn.commit()
@@ -427,10 +434,15 @@ async def _storyboard_task(episode_id: str, *, resume: bool = True):
                     "FUNCTIONAL_EXTRA_ALLOWED" if allowed_extra else "OFFBIBLE_NORMALIZED",
                     None, 0,
                     meta={"episode_id": episode_id, "episode_no": ep_data["episode_no"], "stage": "分镜脚本", **c})
-            relieve_spoken_overflow(board)  # 与逐镜 QA 同口径：人群旁白降级为画面，单镜口播压回上限内
+            relieve_spoken_overflow(board)  # 清空旁白/内心OS；口播只保留真实台词
+            from app.renderability import SHOT_SOFT_MAX
+            from app.validators import prefer_default_shot_durations
+            prefer_default_shot_durations(board)
             normalize_transition_visuals(board)
             _sync_storyboard_shot_timing(conn, episode_id, board)
             shot = board.shots[-1]
+            shot.is_final = bool(draft.is_final)
+            shot.prompt_contract_version = "renderability_v1"
             object.__setattr__(
                 shot, "evidence_artifact_id", getattr(draft, "evidence_artifact_id", None)
             )
@@ -445,9 +457,11 @@ async def _storyboard_task(episode_id: str, *, resume: bool = True):
                 planned_persisted = revision[1]
             residual = list(getattr(draft, "residual_errors", []) or [])
             if residual:
+                # Renderability：到软预算后不再因「继续补镜」清掉 is_final 硬往后续塞幻觉镜。
                 can_continue = (
                     bool(draft.is_final)
                     and len(completed) < max_shots
+                    and len(completed) < SHOT_SOFT_MAX
                     and len(residual) == 1
                     and "暂不能收尾" in residual[0]
                     and "继续补镜" in residual[0]
@@ -456,6 +470,7 @@ async def _storyboard_task(episode_id: str, *, resume: bool = True):
                     # 这类 residual 的意思是"本镜不能当最后一镜"，不是本镜结构坏了；
                     # 保留它作为过渡镜，继续把缺失关键内容喂给后续镜头。
                     object.__setattr__(draft, "is_final", False)
+                    shot.is_final = False
                 else:
                     note = (
                         f"镜{shot.shot_no:02d}{_storyboard_loop_exit_text(getattr(draft, 'loop_exit_reason', ''))}，"
@@ -468,7 +483,13 @@ async def _storyboard_task(episode_id: str, *, resume: bool = True):
                     conn.commit()
                     break
             if draft.is_final:
-                conn.execute("UPDATE episodes SET status='scripted', script_error=NULL WHERE id=?", (episode_id,))
+                # 收束后按实际总时长回写集目标，避免「内容少了时长仍是旧的 50/90」。
+                actual_total = sum(int(s.duration_s or 0) for s in completed)
+                synced = _compact_episode_target(actual_total or ep_data["target_duration_s"])
+                conn.execute(
+                    "UPDATE episodes SET status='scripted', script_error=NULL, target_duration_s=? WHERE id=?",
+                    (synced, episode_id),
+                )
                 conn.commit()
                 _finalize_storyboard_evidence(
                     episode_id,
@@ -479,8 +500,12 @@ async def _storyboard_task(episode_id: str, *, resume: bool = True):
                 raise StageError("分镜脚本", [f"已生成 {len(completed)} 镜但模型仍未收束到尾钩，请重试或人工补写最后一镜"])
             # 把"整集必保留台词/剧情点里还没落到镜头的部分"作为下一镜的补镜反馈，
             # 让缺口在后续镜头里逐步补齐，而不是拖到收尾镜才发现、再硬塞进单镜导致卡死。
-            final_feedback = validate_storyboard_preserves_key_content(
-                Storyboard(episode_no=ep_data["episode_no"], shots=list(completed)), screenplay) or None
+            # Renderability：软预算已满时不再用缺失氛围声轨逼补镜。
+            if len(completed) >= SHOT_SOFT_MAX:
+                final_feedback = None
+            else:
+                final_feedback = validate_storyboard_preserves_key_content(
+                    Storyboard(episode_no=ep_data["episode_no"], shots=list(completed)), screenplay) or None
     except (StageError, Exception) as exc:  # noqa: BLE001
         rec = errors.log_error(exc, action="storyboard_generate", context={"episode_id": episode_id})
         saved = conn.execute("SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)).fetchone()["c"]
@@ -659,6 +684,21 @@ async def resume_storyboard(episode_id: str):
     ).fetchone()["c"]
     if not saved:
         raise HTTPException(409, "当前没有可恢复的逐镜 checkpoint，请重新生成分镜")
+    last_row = conn.execute(
+        "SELECT shot_no, shot_contract_json FROM shots WHERE episode_id=? ORDER BY shot_no DESC LIMIT 1",
+        (episode_id,),
+    ).fetchone()
+    if last_row and last_row["shot_contract_json"]:
+        try:
+            last_contract = json.loads(last_row["shot_contract_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            last_contract = {}
+        if bool(last_contract.get("is_final")):
+            raise HTTPException(
+                409,
+                f"第 {last_row['shot_no']} 镜已标记收束（is_final），禁止再续跑追加镜头；"
+                "若要重做请点击「重新生成分镜」",
+            )
     parent = conn.execute(
         """SELECT id FROM workflow_runs
            WHERE workflow_type='storyboard' AND scope_type='episode' AND scope_id=?
@@ -1079,6 +1119,10 @@ async def edit_shot(shot_id: str, body: dict):
     if errors:
         raise HTTPException(422, "；".join(errors))
     instance.action_desc = normalize_action_desc(instance.action_desc)
+    # 产品禁止旁白：保存时强制清空 narration，并从 timeline 剥离 narration 轨。
+    instance.narration = ""
+    if instance.audio_timeline:
+        instance.audio_timeline = [item for item in instance.audio_timeline if item.type != "narration"]
     conn.execute(
         "UPDATE shots SET duration_s=?, shot_size=?, camera_move=?, scene_setting=?, characters=?, action_desc=?, first_frame_desc=?, last_frame_desc=?, source_excerpt=?, narration=?, dialogues=?, transition=?, continuity_from_prev=?, shot_contract_json=?, continuity_mode=?, observed_state_out=? WHERE id=?",
         (instance.duration_s, instance.shot_size, instance.camera_move, instance.scene_setting,
@@ -1142,7 +1186,7 @@ def _storyboard_residual_hint(residual: list[str]) -> str:
     text = "；".join(residual)
     hints: list[str] = []
     if "口播上限" in text or "念不完" in text:
-        hints.append("请拆成相邻镜头分担台词，或精简人群议论旁白")
+        hints.append("请拆成相邻镜头分担台词，或精简非关键口水话（口播只计台词纯文字、不计标点）")
     if "角色圣经中不存在" in text or "既不在角色圣经" in text or "圣经角色为" in text:
         hints.append("请在监制房把该角色补入角色圣经，或改由圣经角色完成该动作")
     if "未落实本镜大纲 covers" in text or "只停留在大纲" in text:

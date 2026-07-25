@@ -449,16 +449,18 @@ function callFunctionLabel(call: Call) {
   const characterName = readString(meta.character_name)
   const sceneName = readString(meta.scene_name)
   const initiatorLabel = callInitiatorLabel(call, meta, scope)
+  const contract = readString(meta.contract_version)
+  const withContract = (label: string) => (contract ? `${label} · ${contract}` : label)
 
   switch (call.kind) {
     case 'chat':
-      return initiatorLabel || (scope ? `${scope}文本模型调用` : CALL_KIND_LABELS.chat)
+      return withContract(initiatorLabel || (scope ? `${scope}文本模型调用` : CALL_KIND_LABELS.chat))
     case 'screenplay_prompt':
-      return episodeNo !== undefined ? `第${episodeNo}集剧本` : '剧本'
+      return withContract(episodeNo !== undefined ? `第${episodeNo}集剧本` : '剧本')
     case 'storyboard_outline_prompt':
-      return episodeNo !== undefined ? `第${episodeNo}集分镜大纲` : '分镜大纲'
+      return withContract(episodeNo !== undefined ? `第${episodeNo}集分镜大纲` : '分镜大纲')
     case 'storyboard_shot_prompt':
-      return scope ? `${scope}分镜` : '分镜'
+      return withContract(scope ? `${scope}分镜` : '分镜')
     case 'storyboard_outline_split':
       return scope ? `${scope}分镜拆分` : '分镜拆分'
     case 'storyboard_plan_revised':
@@ -820,6 +822,13 @@ export default function MonitorPage() {
     video_poll_concurrency: '视频轮询并发',
     reference_pipeline_concurrency: '参考图流水线并发',
     image_request_concurrency: '图片请求并发',
+    video_ready_low_watermark: '视频就绪低水位',
+    video_ready_high_watermark: '视频就绪高水位',
+    reference_shot_cohort_limit: '参考图镜头批次上限',
+    media_scheduler_policy: '调度策略(legacy/stage_aware)',
+    video_reference_batch_prompt: '批量参考图提示词',
+    video_reference_batch_qa: '批量参考图QA',
+    video_reference_role_adaptive: '质量角色自适应(实验)',
     vlm_request_concurrency: 'VLM 质检并发',
     download_concurrency: '下载并发',
     finalize_concurrency: '落盘/校验并发',

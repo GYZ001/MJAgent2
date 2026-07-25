@@ -396,7 +396,7 @@ const episodeBusy = (ep: Episode | null): boolean => {
   if (ep.shots?.some(s =>
     s.versions?.some(v =>
       v.status === 'queued' || v.status === 'running' || v.status === 'waiting_provider'
-    ) || (s.pipeline != null && ['queued', 'running', 'waiting_provider', 'blocked'].includes(s.pipeline.pipeline_status))
+    ) || (s.pipeline != null && ['queued', 'running', 'waiting', 'waiting_provider', 'blocked'].includes(s.pipeline.pipeline_status))
   )) return true
   return false
 }

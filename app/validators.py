@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import difflib
-import math
 import re
 
 from app import config
@@ -22,27 +21,47 @@ from app.continuity import (
     max_speech_chars,
     spoken_chars_from_shot,
 )
-from app.schemas import (Bible, EpisodeScreenplay, Shot, Storyboard,
-                         StoryboardOutline, SHOT_SIZES, CAMERA_MOVES, TRANSITIONS,
+from app.schemas import (Bible, EpisodeScreenplay, InformationItem, Shot, Storyboard,
+                         StoryboardOutline, StoryEvent, SHOT_SIZES, CAMERA_MOVES, TRANSITIONS,
                          CONTINUITY_MODES, DELIVERY_OWNERS)
+from app.renderability import (
+    ACTION_DESC_HARD_MIN,
+    ACTION_DESC_TARGET_MAX,
+    ACTION_DESC_TARGET_MIN,
+    DROP_LIST_MIN,
+    DURATION_REVIEW_RISK_TAG,
+    KEY_LINES_MAX,
+    KEY_LINES_MIN,
+    KEY_PLOT_POINTS_MAX,
+    KEY_PLOT_POINTS_MIN,
+    PREFERRED_SHOT_DURATION_S,
+    SCENE_OUTLINE_MAX,
+    SCENE_OUTLINE_MIN,
+    SHOT_HARD_MAX,
+    SHOT_SOFT_MAX,
+    SHOT_SOFT_MIN,
+    SPINE_BEATS_MAX,
+    SPINE_BEATS_MIN,
+    duration_gt5_errors,
+    overdetail_errors,
+    shot_count_budget_errors,
+    shot_duration_should_prefer_five,
+)
 
 
-# 字数约束设计原则（2026-06-15 v12：旁白改为「选填且少用」）：
+# 字数约束设计原则（2026-06-15 v12：旁白改为「选填且少用」；2026-07-25 Renderability First）：
 # ① 叙事主力改为【台词 + 可见画面动作】；旁白(narration)默认留空，只在画面与台词都
 #    无法传达关键信息时（较大时间跳跃/必要内心独白/隐藏因果）才写一句短旁白。
 #    因此取消旁白下限校验、取消「纯画面空镜必须加旁白」的硬性要求。
 # ② 旁白仍保留上限校验：若写，必须短到最短 5s 镜头也能念完，避免又退回到旁白堆砌。
-# ③ 分镜模块不校验其它字数上限——台词/原文摘录/场景标签/节拍字段只设必要下限。
+# ③ action_desc 只要求单主动作可读（硬下限约 18 字，目标 25~55），禁止堆微细节。
 NARRATION_TARGET_CHARS = 12
 NARRATION_HARD_MAX = 14
-ACTION_DESC_HARD_MIN = 40           # action_desc 硬下限（校验用）：够把一个动作写清即可
-ACTION_DESC_MIN_CHARS = 70          # prompt 目标：把单一动作的起势/过程/收势与人物反应写清
+# 兼容旧 import：目标字数取区间中位偏下，prompt 引导用
+ACTION_DESC_MIN_CHARS = ACTION_DESC_TARGET_MIN
 SOURCE_EXCERPT_MIN_CHARS = 8
-# 单镜=一个连贯动作（Seedance 实践）。下限 2 仅用于挡“半句话空动作”。
-# 注意：不再用“逗号分句数”当快切上限——一个动作写细了天然就有 5~7 个逗号分句，
-# 那样会把“描写充分的单一动作”误判成快切，导致模型永远改不对、无限重试。
-# 真正的“多镜头/快切”信号是显式的切镜/闪回/分屏词，用 _explicit_cut_markers 精确识别。
-VIDEO_SEGMENT_MIN_BEATS = 2
+# 已废除「至少 2 个动作片段」硬门槛；保留符号供旧测试 import 时不崩，值为 0 表示不校验。
+VIDEO_SEGMENT_MIN_BEATS = 0
 # 显式多镜头/快切/蒙太奇标记：出现即判定为“一个镜头里塞多段”，高精度、低误伤。
 CUT_MARKERS = (
     "切到", "切至", "切换到", "切换至", "镜头切", "画面切", "镜头转向", "镜头转到",
@@ -100,8 +119,9 @@ def default_scene_transition(prev: Shot | None, shot: Shot) -> str:
 
 
 def storyboard_shot_count_range(target_duration_s: int) -> tuple[int, int]:
-    """至少一镜；第二项只是防异常无限循环的技术熔断值，不是产品上限。"""
-    return 1, config.STORYBOARD_MAX_SHOTS
+    """Renderability First：软预算约 8~16，硬上限 20（防碎镜）；不再使用百万级熔断当产品上限。"""
+    _ = target_duration_s
+    return SHOT_SOFT_MIN, SHOT_HARD_MAX
 
 
 def _voiced_shot_count(shots: list[Shot]) -> int:
@@ -249,26 +269,49 @@ def validate_storyboard(
             errors.append(
                 f"{tag}.duration_s={shot.duration_s}，必须由模型按本镜动作与口播判断为 "
                 f"{config.VIDEO_DURATION_MIN_S}~{config.VIDEO_DURATION_MAX_S}s 的整数")
-        # V8 画面清晰度：单镜只演一个连贯动作，把它写清即可（不再逼塞多个快切小镜头）。
+        spoken_for_dur = spoken_chars_from_shot(shot)
+        action_beats_for_dur = count_sequential_action_beats(
+            (shot.primary_action or shot.action_desc or "").strip()
+        )
+        errors.extend(duration_gt5_errors(
+            shot_no=shot.shot_no,
+            duration_s=shot.duration_s,
+            spoken_chars=spoken_for_dur,
+            action_beats=action_beats_for_dur,
+        ))
+        if (
+            int(shot.duration_s or 0) > PREFERRED_SHOT_DURATION_S
+            and not shot_duration_should_prefer_five(
+                spoken_chars=spoken_for_dur, action_beats=action_beats_for_dur
+            )
+            and DURATION_REVIEW_RISK_TAG not in (shot.risk_tags or [])
+        ):
+            tags = list(shot.risk_tags or [])
+            tags.append(DURATION_REVIEW_RISK_TAG)
+            shot.risk_tags = tags
+        # V8 画面清晰度：单镜只演一个连贯主动作（Renderability：硬下限约 18，目标 25~55）。
         if len(shot.action_desc) < ACTION_DESC_HARD_MIN:
             errors.append(
                 f"{tag}.action_desc 仅 {len(shot.action_desc)} 字，低于硬下限 {ACTION_DESC_HARD_MIN} 字；"
-                f"请按目标 {ACTION_DESC_MIN_CHARS} 字把这一个动作的起势、过程、收势和人物表情/反应写清")
+                f"请用 {ACTION_DESC_TARGET_MIN}~{ACTION_DESC_TARGET_MAX} 字写清这一个大形体主动作（谁做了什么），"
+                "禁止堆微表情/手指/衣褶细节")
+        elif len(shot.action_desc) > ACTION_DESC_TARGET_MAX + 40:
+            errors.append(
+                f"{tag}.action_desc 共 {len(shot.action_desc)} 字，过长易塞入超纲细节；"
+                f"请压缩到约 {ACTION_DESC_TARGET_MAX} 字以内，只保留单主动作")
         source_len = len((shot.source_excerpt or "").strip())
         if source_len < SOURCE_EXCERPT_MIN_CHARS:
             errors.append(
                 f"{tag}.source_excerpt 仅 {source_len} 字；每个分镜必须带对应小说原文摘录，"
                 f"请从本集原文中逐字摘录至少 {SOURCE_EXCERPT_MIN_CHARS} 字作为上游改编证据与审核追溯，不得送入 Seedance")
-        beat_count = _action_beat_count(shot.action_desc)
-        if beat_count < VIDEO_SEGMENT_MIN_BEATS:
-            errors.append(
-                f"{tag}.action_desc 只有 {beat_count} 个动作片段，几乎是空动作；"
-                "请把这一个连贯动作写出起势与收势（如「她攥紧衣角，眼泪无声砸落」）")
+        errors.extend(overdetail_errors(shot.action_desc, f"{tag}.action_desc"))
+        errors.extend(overdetail_errors(shot.first_frame_desc, f"{tag}.first_frame_desc"))
+        errors.extend(overdetail_errors(shot.last_frame_desc, f"{tag}.last_frame_desc"))
         cut_markers = _explicit_cut_markers(shot.action_desc)
         if cut_markers:
             errors.append(
                 f"{tag}.action_desc 出现多镜头/快切标记 {cut_markers}；单镜只拍一个连贯动作，"
-                "请删掉切镜/闪回/分屏等跳切，把多余剧情或时间跳跃移入 narration")
+                "请删掉切镜/闪回/分屏等跳切，把多余剧情拆到相邻镜或写入画面动作")
         # 首尾帧：必须填写且明显不同（否则生成的首图/尾图一模一样、视频没有动作）
         ff = (shot.first_frame_desc or "").strip()
         lf = (shot.last_frame_desc or "").strip()
@@ -282,19 +325,18 @@ def validate_storyboard(
                 "否则首图尾图会一模一样、视频没有动作")
         errors.extend(action_capacity_errors(shot))
         errors.extend(speech_capacity_errors(shot))
-        # 旁白选填、少用：不再要求每镜必填，也不再禁止纯画面/纯台词镜头；
-        # 若写了旁白则保留上限校验，避免重新退回旁白堆砌。
+        # 产品合同：禁止一切旁白/内心OS；信息由真实台词或画面动作承载。
         narration_len = len((shot.narration or "").strip())
-        if narration_len > NARRATION_HARD_MAX:
+        if narration_len > 0:
             errors.append(
-                f"{tag}.narration 共 {narration_len} 字，超过硬上限 {NARRATION_HARD_MAX} 字——最短镜头配音念不完、读太快观感差；"
-                f"旁白请精简到 {NARRATION_TARGET_CHARS} 字以内（一句最关键的推进），或直接留空、改用台词与画面动作承载")
-        # 口播总量必须能在视频最长时长内念完（含台词+旁白），否则配音会被截断、音画不同步。
+                f"{tag}.narration 非空（{narration_len} 字）；禁止旁白/内心OS，请删空 narration，"
+                "改用 dialogues 真实台词或 action_desc 画面动作")
+        # 口播总量只计真实台词纯文字（不计标点），必须能在本镜时长内念完。
         spoken_chars = spoken_chars_from_shot(shot)
         spoken_limit = max_speech_chars(shot.duration_s)
         if spoken_chars > spoken_limit:
             errors.append(
-                f"{tag} 台词+旁白共 {spoken_chars} 字，超过本镜 {shot.duration_s}s 的口播上限 {spoken_limit} 字；"
+                f"{tag} 台词纯文字 {spoken_chars} 字（不计标点），超过本镜 {shot.duration_s}s 的口播上限 {spoken_limit} 字；"
                 f"可在动作仍是同一连续节拍时把 duration_s 调到最多 {config.VIDEO_DURATION_MAX_S}s，"
                 "否则请新增或利用相邻镜头分担这段台词，必要时再精简非关键口水话，"
                 "不要让一镜塞下念不完的台词")
@@ -303,6 +345,16 @@ def validate_storyboard(
             errors.append(
                 f"{tag}.characters 为空；每个视频段至少包含 1 个画面角色，"
                 "可以是角色圣经成员或功能性路人"
+            )
+        elif len(shot.characters) > 3:
+            errors.append(
+                f"{tag}.characters 共 {len(shot.characters)} 人，超过单镜可渲染上限 3；"
+                "请减少画面角色或拆到相邻镜，禁止群戏调度"
+            )
+        speakers = [d.speaker for d in (shot.dialogues or []) if (d.speaker or "").strip()]
+        if len({s for s in speakers}) > 2:
+            errors.append(
+                f"{tag} 开口说话人超过 2 个；单镜最多 2 人开口，其余改旁白/下一镜"
             )
         for name in shot.characters:
             if bible_names and name not in bible_names and not is_functional_extra(name):
@@ -439,6 +491,7 @@ def validate_storyboard(
     # V12 场景必须落在场景图素材库内（库非空时；同时回填 shot.scene_name 供渲染期复用同一张场景图）
     errors.extend(validate_storyboard_scenes(board, bible))
     errors.extend(state_chain_errors(board))
+    errors.extend(shot_count_budget_errors(len(shots), context="分镜"))
 
     return errors
 
@@ -525,8 +578,10 @@ KEY_LINE_BIGRAM_COVERAGE = 0.42
 # 关键剧情点是描述而非逐字，故用 2-gram 覆盖率判定："过三分之一被涵盖"即视为"已落实"。
 KEY_POINT_COVERAGE = 0.34
 KEY_CONTENT_MAX_REPORT = 4       # 单条错误最多点名几条，避免错误列表过长把 prompt 撑爆
-MIN_KEY_LINES = 3                # 必保留关键台词下限（漫剧基本都有对白，floor=3 不易误伤）
-MIN_KEY_PLOT_POINTS = 3          # 必保留关键剧情点下限
+MIN_KEY_LINES = KEY_LINES_MIN
+MAX_KEY_LINES = KEY_LINES_MAX
+MIN_KEY_PLOT_POINTS = KEY_PLOT_POINTS_MIN
+MAX_KEY_PLOT_POINTS = KEY_PLOT_POINTS_MAX
 
 
 def _strip_speaker(line: str) -> str:
@@ -777,14 +832,173 @@ def _claim_clearly_absent(atom: str, haystack: str) -> bool:
     return True
 
 
+def normalize_screenplay_ledgers(script: EpisodeScreenplay) -> EpisodeScreenplay:
+    """Renderability：清洗空壳 events/ledger，必要时从 plot_spine 确定性回填。
+
+    模型常输出「有壳无肉」的 information_ledger（content/event_id 为空），旧 QA 会硬拦并卡在
+    WARNING 候选。主线权威是 plot_spine；台账只是下游拆镜索引，允许从 spine 合成最小完备集。
+    """
+    spine = script.plot_spine
+    # 1) 清洗 events：丢掉缺 id / 缺状态链的空壳
+    cleaned_events: list[StoryEvent] = []
+    seen_eids: set[str] = set()
+    for event in script.events or []:
+        eid = (event.event_id or "").strip()
+        if not eid or eid in seen_eids:
+            continue
+        if len((event.visible_change or "").strip()) < 2 and len((event.state_out or "").strip()) < 2:
+            continue
+        seen_eids.add(eid)
+        cleaned_events.append(event)
+
+    # 2) 若 events 过稀且有 spine → 按 must_keep 节拍合成
+    must_beats = [b for b in (spine.spine_beats if spine else []) if b.must_keep] or list(
+        (spine.spine_beats if spine else []) or []
+    )
+    if spine and must_beats and len(cleaned_events) < min(3, len(must_beats)):
+        cleaned_events = []
+        for i, beat in enumerate(must_beats, start=1):
+            cleaned_events.append(StoryEvent(
+                event_id=f"E{i}",
+                source_span=(beat.beat_id or f"S{i:02d}"),
+                source_fact=f"{(beat.who or '').strip()}{(beat.does or '').strip()}".strip() or f"主线节拍{i}",
+                state_in="节拍开始",
+                trigger=(beat.does or "").strip() or "主线推进",
+                visible_change=f"{(beat.who or '').strip()}{(beat.does or '').strip()}".strip() or f"主线动作{i}",
+                state_out=(beat.turn or "").strip() or "局势变化",
+                must_keep=bool(beat.must_keep),
+            ))
+    script.events = cleaned_events
+    event_ids = {(e.event_id or "").strip() for e in cleaned_events if (e.event_id or "").strip()}
+
+    # 3) 清洗 ledger：丢掉无中文 content 的空壳；event_id 空/非法时按序号挂到事件
+    cleaned_ledger: list[InformationItem] = []
+    seen_iids: set[str] = set()
+    event_list = list(cleaned_events)
+    for idx, item in enumerate(script.information_ledger or []):
+        content = (item.content or "").strip()
+        if len(content) < 4 or not re.search(r"[\u3400-\u9fff]", content):
+            continue
+        iid = (item.info_id or "").strip() or f"I{idx + 1}"
+        if not re.fullmatch(r"I\d{1,4}", iid, flags=re.IGNORECASE):
+            iid = f"I{idx + 1}"
+        if iid in seen_iids:
+            continue
+        eid = (item.event_id or "").strip()
+        if eid not in event_ids:
+            eid = event_list[min(idx, len(event_list) - 1)].event_id if event_list else ""
+        if not eid:
+            continue
+        seen_iids.add(iid)
+        cleaned_ledger.append(InformationItem(
+            info_id=iid,
+            event_id=eid,
+            content=content,
+            delivery_owner=item.delivery_owner if item.delivery_owner in DELIVERY_OWNERS else "visual_action",
+            speaker_id=item.speaker_id,
+            exact_text=item.exact_text,
+            reinforcement_allowed=bool(item.reinforcement_allowed),
+            status=(item.status or "unassigned"),
+            assigned_shot_no=item.assigned_shot_no,
+        ))
+
+    # 4) ledger 仍空且有 events → 每事件一条主线信息
+    if not cleaned_ledger and cleaned_events:
+        for i, event in enumerate(cleaned_events, start=1):
+            content = (
+                (event.visible_change or "").strip()
+                or (event.source_fact or "").strip()
+                or (event.state_out or "").strip()
+                or f"主线信息{i}"
+            )
+            if not re.search(r"[\u3400-\u9fff]", content):
+                content = f"主线节拍{i}的局势变化"
+            cleaned_ledger.append(InformationItem(
+                info_id=f"I{i}",
+                event_id=event.event_id,
+                content=content[:80],
+                delivery_owner="visual_action",
+                status="unassigned",
+            ))
+
+    # 5) 加帽：≤ spine×2
+    spine_n = len(must_beats) if must_beats else 0
+    if spine_n:
+        cap = max(SPINE_BEATS_MIN, spine_n * 2)
+        cleaned_ledger = cleaned_ledger[:cap]
+
+    script.information_ledger = cleaned_ledger
+    if not (script.episode_premise or "").strip() and spine and (spine.episode_premise or "").strip():
+        script.episode_premise = spine.episode_premise.strip()
+    return script
+
+
+def validate_plot_spine(script: EpisodeScreenplay) -> list[str]:
+    """先校验主线骨架，再允许正文通过（Renderability First）。"""
+    errors: list[str] = []
+    spine = script.plot_spine
+    if spine is None:
+        errors.append(
+            "plot_spine 缺失；请先输出主线骨架（episode_premise / spine_beats / must_keep_ending / drop_list），"
+            "再写正文——只保改变局势的主线，禁止抠细节"
+        )
+        return errors
+    if len((spine.episode_premise or "").strip()) < 8:
+        errors.append("plot_spine.episode_premise 过短；请用一句话写本集主角要什么、碰到什么阻力")
+    beats = spine.spine_beats or []
+    if not SPINE_BEATS_MIN <= len(beats) <= SPINE_BEATS_MAX:
+        errors.append(
+            f"plot_spine.spine_beats 共 {len(beats)} 条；必须在 {SPINE_BEATS_MIN}~{SPINE_BEATS_MAX} 条，"
+            "每条写清谁做了什么→局势变化"
+        )
+    beat_ids: set[str] = set()
+    must_keep_count = 0
+    for i, beat in enumerate(beats):
+        tag = f"plot_spine.spine_beats[{i}]"
+        bid = (beat.beat_id or "").strip()
+        if not bid:
+            errors.append(f"{tag}.beat_id 不能为空")
+        elif bid in beat_ids:
+            errors.append(f"{tag}.beat_id=「{bid}」重复")
+        else:
+            beat_ids.add(bid)
+        if len((beat.who or "").strip()) < 1:
+            errors.append(f"{tag}.who 不能为空")
+        if len((beat.does or "").strip()) < 4:
+            errors.append(f"{tag}.does 过短；请写可见/可听的主动作")
+        if len((beat.turn or "").strip()) < 4:
+            errors.append(f"{tag}.turn 过短；请写局势变化")
+        if beat.must_keep:
+            must_keep_count += 1
+        errors.extend(overdetail_errors(
+            f"{beat.who}{beat.does}{beat.turn}", tag))
+    if beats and must_keep_count < 3:
+        errors.append(
+            f"plot_spine 中 must_keep=true 仅 {must_keep_count} 条；主线因果至少保留 3 条必拍节拍"
+        )
+    if len((spine.must_keep_ending or "").strip()) < 8:
+        errors.append(
+            "plot_spine.must_keep_ending 过短；请锁定本章收束（与原文本章结局同向，禁止发明下一章钩子）"
+        )
+    drops = [d.strip() for d in (spine.drop_list or []) if d and d.strip()]
+    if len(drops) < DROP_LIST_MIN:
+        errors.append(
+            f"plot_spine.drop_list 仅 {len(drops)} 条；至少列出 {DROP_LIST_MIN} 条「本章有但不拍」的支线/气氛戏"
+        )
+    return errors
+
+
 def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats: int,
                         episode_no: int | None = None, source_text: str | None = None) -> list[str]:
-    """剧本层校验：剧本台只接受完整剧本格式，不再兼容旧拍卡结构。"""
+    """剧本层校验：Renderability First——先 spine，再正文；主线台词有上限，禁止全量原文台词入库。"""
     errors: list[str] = []
+    # 先清洗/回填空壳台账，避免模型「有壳无肉」的 ledger 把整集卡在 WARNING 候选。
+    normalize_screenplay_ledgers(script)
     if episode_no is not None and script.episode_no != episode_no:
         errors.append(f"episode_no={script.episode_no}，必须等于 {episode_no}")
     if (script.mode or "full_script") != "full_script":
         errors.append(f"mode=「{script.mode}」非法；剧本台仅支持 full_script")
+    errors.extend(validate_plot_spine(script))
     if len((script.title or "").strip()) < 2:
         errors.append("title 过短或缺失；请填写本集标题")
     if len((script.logline or "").strip()) < 8:
@@ -792,11 +1006,13 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
     if len((script.script_format_note or "").strip()) < 6:
         errors.append("script_format_note 过短或缺失；请说明正文采用的台本格式")
     scenes = script.scene_outline or []
-    if not 3 <= len(scenes) <= 6:
-        errors.append(f"scene_outline 场次数量为 {len(scenes)}；生产级剧本稿需提供 3~6 场连续场次结构")
+    if not SCENE_OUTLINE_MIN <= len(scenes) <= SCENE_OUTLINE_MAX:
+        errors.append(
+            f"scene_outline 场次数量为 {len(scenes)}；只演主线时需提供 "
+            f"{SCENE_OUTLINE_MIN}~{SCENE_OUTLINE_MAX} 场连续场次结构"
+        )
     bible_names = {c.name for c in bible.characters}
     for i, scene in enumerate(scenes, start=1):
-        # 报错锚点用 1-based 场序（模型按 scene_no 思考），并附场标，避免之前 0-based 索引让模型改错场而陷入打回循环。
         heading = (scene.scene_heading or "").strip()
         tag = f"scene_outline 第{i}场" + (f"「{heading}」" if heading else "")
         if scene.scene_no != i:
@@ -819,10 +1035,17 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         ]
         if bible_names and unknown:
             errors.append(f"{tag}.characters 含角色圣经外角色：{unknown}")
+        errors.extend(overdetail_errors(
+            f"{scene.summary}{scene.conflict}{scene.turn}", tag))
     full_text = (script.full_script_text or "").strip()
-    min_script_chars = max(220, expected_beats * 55)
+    spine_n = len((script.plot_spine.spine_beats if script.plot_spine else None) or [])
+    min_script_chars = max(160, spine_n * 36 if spine_n else max(160, expected_beats * 30))
     if len(full_text) < min_script_chars:
-        errors.append(f"full_script_text 过短；当前仅 {len(full_text)} 字，至少需要 {min_script_chars} 字的生产级剧本正文")
+        errors.append(
+            f"full_script_text 过短；当前仅 {len(full_text)} 字，至少需要 {min_script_chars} 字"
+            "（只演主线骨架，勿注水细节）"
+        )
+    errors.extend(overdetail_errors(full_text, "full_script_text"))
     for term in FULL_SCRIPT_FORBIDDEN_TERMS:
         if term in full_text:
             errors.append(f"full_script_text 含禁用词「{term}」；剧本台正文不能写拍卡/分镜/执行语言")
@@ -831,11 +1054,6 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         errors.append("full_script_text 缺少足够的场次标题；请使用“【场1】...”这类场次化台本格式")
     elif scenes and len(heading_matches) != len(scenes):
         errors.append(f"full_script_text 场次标题数 {len(heading_matches)} 与 scene_outline 场次数 {len(scenes)} 不一致")
-    # 段落充分性：旧实现按「空行分隔的段落块」(re.split \n\s*\n) 计数、要求 ≥6 块。但模型通常只在
-    # 【场次之间】空行、场次内各动作/对白行用单换行分隔——这是合规台本写法（prompt 要求“分行”不是“空行”），
-    # 于是 3~5 场的合格台本只被算成 3~5 块、误判“段落过少”，白白耗尽修复轮次（实测此项是剧本台首位失败原因）。
-    # 改为按【非空文本行】计数（任意换行都算分行）：既贴合 prompt 的“分行书写”，又能稳定区分真正挤成一段的梗概块
-    # （梗概只有 1~3 行，台本有几十行）。门槛随场次数缩放，避免少场次时门槛偏高。
     content_lines = [ln for ln in full_text.splitlines() if ln.strip()]
     min_lines = max(6, len(scenes) * 2)
     if len(content_lines) < min_lines:
@@ -866,7 +1084,6 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         errors.append("ending_hook 过短或缺失；请明确本集结尾钩子")
     if len((script.source_basis or "").strip()) < 12:
         errors.append("source_basis 过短或缺失；请概括本集原文依据与关键事件")
-    # 单集戏剧契约（调研文档 §3.4/§3.5）：方向性信息必须显式存在，避免压缩到 50s 时被一起丢掉。
     if len((script.dramatic_question or "").strip()) < 6:
         errors.append("dramatic_question 过短或缺失；请用一句话写出本集观众心里追问的戏剧问题")
     if len((script.protagonist_goal or "").strip()) < 4:
@@ -875,14 +1092,16 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         errors.append("obstacle 过短或缺失；请写本集阻力（外部对手/规则 + 内部恐惧/执念）")
     if len((script.stakes or "").strip()) < 4:
         errors.append("stakes 过短或缺失；请写失败代价（输了会失去什么关系/尊严/目标）")
-    # 必保留清单（防丢失核心）：先卡数量，再确认每条关键台词【真的写进了正文】，否则清单形同虚设。
     key_lines = [ln.strip() for ln in (script.key_lines or []) if ln and ln.strip()]
     if len(key_lines) < MIN_KEY_LINES:
         errors.append(
-            f"key_lines 仅 {len(key_lines)} 条；请从原文挑出本集至少 {MIN_KEY_LINES} 条绝不能丢的关键台词"
-            "（金句/决定性对白/情绪爆点），尽量保留人物说话风格")
-    # key_lines 只能含人物谱角色台词：测验员/围观者等非圣经角色台词会让分镜陷入死循环
-    # （分镜 characters 不允许填这些角色，但 key_lines 又要求逐条覆盖）。
+            f"key_lines 仅 {len(key_lines)} 条；请挑出至少 {MIN_KEY_LINES} 条推动主线的台词"
+            f"（上限 {MAX_KEY_LINES}，不要全量搬原文）")
+    if len(key_lines) > MAX_KEY_LINES:
+        errors.append(
+            f"key_lines 共 {len(key_lines)} 条，超过上限 {MAX_KEY_LINES}；"
+            "只保留推动 spine 的主线台词，支线对白请放入 drop_list"
+        )
     bible_names = {c.name for c in bible.characters}
     if bible_names:
         non_bible_key_lines = []
@@ -909,9 +1128,7 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         shown = "；".join(missing_in_script[:KEY_CONTENT_MAX_REPORT])
         errors.append(
             f"key_lines 有 {len(missing_in_script)} 条未真正写进 full_script_text：{shown}"
-            "；关键台词必须在剧本正文里实际出现，不能只列在清单里")
-    # key_lines 的 speaker 必须与 full_script_text 中对白行的 speaker 一致：
-    # 防止"清单写张三说、正文却写李四说"的归属错位（去 speaker 后正文匹配通过，但归属已错）。
+            "；主线台词必须在剧本正文里实际出现，不能只列在清单里")
     if bible_names:
         script_speakers: dict[str, list[str]] = {}
         for sm in SCRIPT_SOUND_LINE_RE.finditer(full_text):
@@ -922,9 +1139,8 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         for ln in key_lines:
             kl_speaker = _speaker_name(ln)
             if not kl_speaker or kl_speaker not in bible_names:
-                continue  # 非圣经角色已由上一条校验拦截
+                continue
             kl_text = _strip_speaker(ln)
-            # 在 full_script_text 中找台词主干能匹配的对白行，检查其 speaker 是否与 key_lines 一致
             matched_speakers = {
                 sp for sp, texts in script_speakers.items()
                 if any(_longest_run_ratio(kl_text, t) >= KEY_LINE_PRESENT_RATIO
@@ -940,38 +1156,17 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
             errors.append(
                 f"key_lines 有 {len(mismatched)} 条台词的说话人与 full_script_text 不一致：{shown}{extra}"
                 "；同一句台词在 key_lines 和 full_script_text 中必须由同一角色说出")
-    source_dialogues = _source_bible_dialogues(source_text, bible)
-    if source_dialogues:
-        key_text = "\n".join(key_lines)
-        missing_from_key_lines = [
-            ln for ln in source_dialogues
-            if _longest_run_ratio(_strip_speaker(ln), key_text) < KEY_LINE_PRESENT_RATIO
-            and _bigram_coverage(_strip_speaker(ln), key_text) < KEY_LINE_BIGRAM_COVERAGE
-        ]
-        if missing_from_key_lines:
-            shown = "；".join(missing_from_key_lines[:KEY_CONTENT_MAX_REPORT])
-            extra = (f"（另有 {len(missing_from_key_lines) - KEY_CONTENT_MAX_REPORT} 条从略）"
-                     if len(missing_from_key_lines) > KEY_CONTENT_MAX_REPORT else "")
-            errors.append(
-                f"key_lines 漏掉了 {len(missing_from_key_lines)} 条人物谱角色在原文中的台词：{shown}{extra}"
-                "；剧本台必须保留本集所有人物谱角色台词，不能只筛选重点台词")
-        missing_source_dialogues = [
-            ln for ln in source_dialogues
-            if _longest_run_ratio(_strip_speaker(ln), full_text) < KEY_LINE_PRESENT_RATIO
-            and _bigram_coverage(_strip_speaker(ln), full_text) < KEY_LINE_BIGRAM_COVERAGE
-        ]
-        if missing_source_dialogues:
-            shown = "；".join(missing_source_dialogues[:KEY_CONTENT_MAX_REPORT])
-            extra = (f"（另有 {len(missing_source_dialogues) - KEY_CONTENT_MAX_REPORT} 条从略）"
-                     if len(missing_source_dialogues) > KEY_CONTENT_MAX_REPORT else "")
-            errors.append(
-                f"full_script_text 漏掉了 {len(missing_source_dialogues)} 条人物谱角色在原文中的台词：{shown}{extra}"
-                "；请将这些台词按可拍台本格式写回正文，可轻微口语化但主干不能丢")
+    _ = source_text  # 保留参数兼容；全量原文台词入库已废止
     key_points = [pt.strip() for pt in (script.key_plot_points or []) if pt and pt.strip()]
     if len(key_points) < MIN_KEY_PLOT_POINTS:
         errors.append(
-            f"key_plot_points 仅 {len(key_points)} 条；请列出本集至少 {MIN_KEY_PLOT_POINTS} 条绝不能丢的关键剧情点"
-            "（核心事件/反转/信息揭示）")
+            f"key_plot_points 仅 {len(key_points)} 条；请列出至少 {MIN_KEY_PLOT_POINTS} 条与 spine 对齐的局势变化"
+            f"（上限 {MAX_KEY_PLOT_POINTS}）")
+    if len(key_points) > MAX_KEY_PLOT_POINTS:
+        errors.append(
+            f"key_plot_points 共 {len(key_points)} 条，超过上限 {MAX_KEY_PLOT_POINTS}；"
+            "只保留主线局势变化，细节支线放入 drop_list"
+        )
     if script.beats:
         errors.append("剧本台不再接受 beats 拍卡结构；请重新生成完整剧本")
     event_ids: set[str] = set()
@@ -989,10 +1184,19 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         for field in ("state_in", "visible_change", "state_out"):
             if len((getattr(event, field, "") or "").strip()) < 4:
                 errors.append(f"{tag}.{field} 缺失或过短；事件必须写清状态输入、可见变化和状态输出")
+        errors.extend(overdetail_errors(
+            f"{event.visible_change}{event.state_in}{event.state_out}", tag))
     info_ids: set[str] = set()
     if not script.information_ledger:
         errors.append("information_ledger 不能为空；必须为观众需要获得的剧情信息建立中文交付台账")
-    for i, item in enumerate(script.information_ledger or []):
+    ledger = script.information_ledger or []
+    ledger_cap = max(SPINE_BEATS_MIN * 2, (spine_n or len(script.events or [])) * 2)
+    if spine_n and len(ledger) > ledger_cap:
+        errors.append(
+            f"information_ledger 共 {len(ledger)} 条，超过主线容量上限 {ledger_cap}"
+            f"（≤ spine_beats×2）；请只登记主线信息，禁止为气氛声拆 info"
+        )
+    for i, item in enumerate(ledger):
         tag = f"information_ledger[{i}]"
         info_id = (item.info_id or "").strip()
         if not info_id:
@@ -1014,9 +1218,22 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
             errors.append(f"{tag}.event_id=「{event_id}」未对应 events 中的有效事件")
         if item.delivery_owner and item.delivery_owner not in DELIVERY_OWNERS:
             errors.append(f"信息 {item.info_id} 的 delivery_owner={item.delivery_owner} 不合法")
+    if script.plot_spine and script.plot_spine.drop_list:
+        drop_hits = []
+        for drop in script.plot_spine.drop_list:
+            d = (drop or "").strip()
+            if len(_condense(d)) < 6:
+                continue
+            if _bigram_coverage(d, full_text) >= 0.55:
+                drop_hits.append(d)
+        if drop_hits:
+            shown = "；".join(drop_hits[:KEY_CONTENT_MAX_REPORT])
+            errors.append(
+                f"full_script_text 又写回了 drop_list 中的内容：{shown}；"
+                "已声明不拍的支线/气氛戏不得出现在正文"
+            )
     errors.extend(adaptation_hook_errors(script))
     return list(dict.fromkeys(errors))
-
 
 def _screenplay_sound_stats(script: EpisodeScreenplay) -> dict[str, int]:
     full_text = (script.full_script_text or "").strip()
@@ -1057,20 +1274,16 @@ def validate_storyboard_soundtrack(board: Storyboard, screenplay: EpisodeScreenp
     script_dialogue_targets = stats["dialogues"] + stats["quoted_voice"]
     if script_dialogue_targets >= 2:
         dialogue_count = sum(len(shot.dialogues) for shot in shots)
-        min_dialogues = min(script_dialogue_targets, max(2, math.ceil(expected_shots * 0.5)))
+        # Renderability：只要求覆盖主线口播密度，不再按「剧本对白处数 × 50% 镜头」硬逼。
+        key_line_n = len([ln for ln in (screenplay.key_lines or []) if ln and str(ln).strip()])
+        min_dialogues = max(1, min(script_dialogue_targets, key_line_n or 2, 4))
         if dialogue_count < min_dialogues:
             errors.append(
-                f"分镜对白不足：完整剧本至少有 {script_dialogue_targets} 处角色开口/人声信息，"
-                f"但分镜 dialogues 只有 {dialogue_count} 句；请把关键对白写入 dialogues，"
-                "非角色圣经里的群嘲/恭维声可改写到 narration 或 action_desc")
+                f"分镜对白不足：主线至少需要约 {min_dialogues} 句角色开口"
+                f"（当前 dialogues={dialogue_count}）；请把 key_lines/主线对白写入 dialogues，"
+                "群嘲等环境声可写进 action_desc，不要为密度硬塞碎镜")
 
-    if stats["inner"] > 0:
-        soundtrack = "".join(_soundtrack_text(shot) for shot in shots)
-        if not any(marker in soundtrack for marker in INNER_VOICE_MARKERS):
-            errors.append(
-                f"完整剧本含 {stats['inner']} 处内心OS，但分镜未保留任何内心声轨；"
-                "请在对应镜头 narration 中写“内心OS：……”或“内心：……”，"
-                "把主角无法说出口的屈辱、怀疑或决心保留下来")
+    # 产品合同禁止旁白/内心OS：剧本中的内心描写改由画面姿态表达，不再强制落到 narration。
     return errors
 
 
@@ -1088,10 +1301,8 @@ def validate_storyboard_preserves_key_content(board: Storyboard,
         return errors
     key_lines = [ln.strip() for ln in (screenplay.key_lines or []) if ln and ln.strip()]
     key_points = [pt.strip() for pt in (screenplay.key_plot_points or []) if pt and pt.strip()]
-    if not key_lines and not key_points:
-        return errors
 
-    # 关键台词优先在声轨（台词+旁白）里找，找不到再退到画面动作/原文摘录里兜底（动作里复述也算保留）。
+    # 主线台词优先在声轨里找，找不到再退到画面动作/原文摘录。
     spoken_text = "".join(_soundtrack_text(s) for s in shots)
     all_text = spoken_text + "".join((s.action_desc or "") + (s.source_excerpt or "") for s in shots)
 
@@ -1109,8 +1320,8 @@ def validate_storyboard_preserves_key_content(board: Storyboard,
         extra = (f"（另有 {len(missing_lines) - KEY_CONTENT_MAX_REPORT} 条从略）"
                  if len(missing_lines) > KEY_CONTENT_MAX_REPORT else "")
         errors.append(
-            f"分镜丢失了剧本标记的 {len(missing_lines)} 条关键台词：{shown}{extra}；"
-            "请把它们写进对应镜头的 dialogues（人物开口）或 narration（内心OS/结尾旁白），不要在压缩中丢弃")
+            f"分镜丢失了剧本标记的 {len(missing_lines)} 条主线台词：{shown}{extra}；"
+            "请把它们写进对应镜头的 dialogues（人物开口），不要在压缩中丢弃")
 
     missing_points = [pt for pt in key_points if _bigram_coverage(pt, all_text) < KEY_POINT_COVERAGE]
     if missing_points:
@@ -1118,8 +1329,34 @@ def validate_storyboard_preserves_key_content(board: Storyboard,
         extra = (f"（另有 {len(missing_points) - KEY_CONTENT_MAX_REPORT} 条从略）"
                  if len(missing_points) > KEY_CONTENT_MAX_REPORT else "")
         errors.append(
-            f"分镜丢失了剧本标记的 {len(missing_points)} 条关键剧情点：{shown}{extra}；"
-            "请在对应镜头的 action_desc 或声轨中体现这些剧情，不能整段略过")
+            f"分镜丢失了剧本标记的 {len(missing_points)} 条主线剧情点：{shown}{extra}；"
+            "请在对应镜头的 action_desc 或声轨中体现这些局势变化，不能整段略过")
+
+    spine = screenplay.plot_spine
+    if spine and spine.spine_beats:
+        missing_beats = []
+        for beat in spine.spine_beats:
+            if not beat.must_keep:
+                continue
+            claim = f"{beat.who}{beat.does}{beat.turn}"
+            if _bigram_coverage(claim, all_text) < KEY_POINT_COVERAGE:
+                missing_beats.append(f"{beat.beat_id}:{beat.does}")
+        if missing_beats:
+            shown = "；".join(missing_beats[:KEY_CONTENT_MAX_REPORT])
+            extra = (f"（另有 {len(missing_beats) - KEY_CONTENT_MAX_REPORT} 条从略）"
+                     if len(missing_beats) > KEY_CONTENT_MAX_REPORT else "")
+            errors.append(
+                f"分镜未覆盖 {len(missing_beats)} 条 must_keep 主线节拍：{shown}{extra}；"
+                "每条 spine 至少落地一镜")
+        for drop in spine.drop_list or []:
+            d = (drop or "").strip()
+            if len(_condense(d)) < 6:
+                continue
+            if _bigram_coverage(d, all_text) >= 0.55:
+                errors.append(
+                    f"分镜又拍回了 drop_list 内容「{d[:40]}」；已声明不拍的支线不得进入分镜"
+                )
+                break
     return errors
 
 
@@ -1182,7 +1419,8 @@ def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeS
     errors: list[str] = []
     shots = outline.shots
     if not shots:
-        return ["分镜大纲为空；请按完整剧本规划连续镜头并从头到尾覆盖剧情"]
+        return ["分镜大纲为空；请按主线骨架规划连续镜头并覆盖 must_keep spine"]
+    errors.extend(shot_count_budget_errors(len(shots), context="分镜大纲"))
     actual = [s.shot_no for s in shots]
     if actual != list(range(1, len(shots) + 1)):
         errors.append(f"大纲 shot_no 必须为连续递增 1..{len(shots)}，当前为 {actual}")
@@ -1232,8 +1470,19 @@ def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeS
         extra = (f"（另有 {len(missing_points) - KEY_CONTENT_MAX_REPORT} 条从略）"
                  if len(missing_points) > KEY_CONTENT_MAX_REPORT else "")
         errors.append(
-            f"大纲未安排 {len(missing_points)} 条必保留关键剧情点：{shown}{extra}；"
-            "请把每个剧情点分配到对应镜头的 beat/covers，确保后段不漏戏")
+            f"大纲未安排 {len(missing_points)} 条主线剧情点：{shown}{extra}；"
+            "请把每个剧情点分配到对应镜头的 beat/covers；drop_list 内容禁止安排")
+    spine = screenplay.plot_spine
+    if spine and spine.drop_list:
+        for drop in spine.drop_list:
+            d = (drop or "").strip()
+            if len(_condense(d)) < 6:
+                continue
+            if _bigram_coverage(d, plan_text) >= 0.55:
+                errors.append(
+                    f"大纲安排了 drop_list 内容「{d[:40]}」；已声明不拍的支线不得进入大纲"
+                )
+                break
     errors.extend(outline_atomic_errors(outline))
     return errors
 
@@ -1263,8 +1512,36 @@ def validate_storyboard_continuity_contract(
 
 
 def spoken_char_count(shot) -> int:
-    """本镜台词+旁白的纯发声字数（去空白），与单镜口播上限校验同口径。"""
+    """本镜真实台词纯文字字数（去空白与标点），与单镜口播上限校验同口径。"""
     return spoken_chars_from_shot(shot)
+
+
+def strip_all_narration(board: Storyboard) -> list[dict]:
+    """确定性清空旁白：产品禁止 narration / 内心OS / timeline narration 轨。
+
+    不清空内容翻译成台词（避免发明对白）；信息改由已有 dialogues 或 action_desc 画面承载。
+    """
+    changes: list[dict] = []
+    for shot in board.shots:
+        changed = False
+        narration = (shot.narration or "").strip()
+        if narration:
+            shot.narration = ""
+            changed = True
+            changes.append({"shot_no": shot.shot_no, "cleared_narration": narration[:40]})
+        if shot.audio_timeline:
+            kept = [item for item in shot.audio_timeline if item.type != "narration"]
+            if len(kept) != len(shot.audio_timeline):
+                shot.audio_timeline = kept
+                changed = True
+                if not any(c.get("shot_no") == shot.shot_no and "cleared_narration" in c for c in changes):
+                    changes.append({"shot_no": shot.shot_no, "stripped_timeline_narration": True})
+            elif changed and not kept:
+                shot.audio_timeline = []
+        if changed and not (shot.narration or "").strip():
+            # 确保字段为规范化空值
+            shot.narration = ""
+    return changes
 
 
 def _narration_is_crowd_ambient(narration: str) -> bool:
@@ -1279,25 +1556,43 @@ def _narration_is_crowd_ambient(narration: str) -> bool:
 
 
 def relieve_spoken_overflow(board: Storyboard) -> list[dict]:
-    """确定性卸载单镜口播超限：把'人群议论/哄笑/惊呼'类旁白降级为 action_desc 画面描写，
-    使本镜台词+旁白回落到口播上限内（治本届 shots[*] 台词+旁白共 N 字超限报错的最常见来源）。
+    """兼容旧调用：先清空全部旁白，再按口播上限检查（旁白不再参与口播）。"""
+    return strip_all_narration(board)
 
-    人群声本是环境氛围、不必让旁白嗓音念出来；降级后它仍留在 action_desc——画面里看得见，
-    且防丢失校验的 all_text 仍涵盖它，关键剧情点不会因此判丢。
-    只动'人群声旁白'：绝不删角色台词、不删内心OS、不删全知收尾钩旁白；
-    这些情况它改不动就原样返回，交给 ① 大纲拆分或逐镜重试处理。返回实际调整供日志。"""
+
+def prefer_default_shot_durations(board: Storyboard) -> list[dict]:
+    """主线压缩：能 5s 讲完的镜压回 5s；仍需 6~10s 的镜打上 AI 审核标记。"""
     changes: list[dict] = []
     for shot in board.shots:
-        limit = config.max_spoken_chars_for_duration(shot.duration_s)
-        if spoken_char_count(shot) <= limit:
+        spoken = spoken_char_count(shot)
+        beats = count_sequential_action_beats(
+            (shot.primary_action or shot.action_desc or "").strip()
+        )
+        tags = list(shot.risk_tags or [])
+        if shot_duration_should_prefer_five(spoken_chars=spoken, action_beats=beats):
+            if int(shot.duration_s or 0) != PREFERRED_SHOT_DURATION_S:
+                changes.append({
+                    "shot_no": shot.shot_no,
+                    "from": shot.duration_s,
+                    "to": PREFERRED_SHOT_DURATION_S,
+                    "reason": "content_fits_5s",
+                })
+                shot.duration_s = PREFERRED_SHOT_DURATION_S
+            if DURATION_REVIEW_RISK_TAG in tags:
+                tags = [t for t in tags if t != DURATION_REVIEW_RISK_TAG]
+                shot.risk_tags = tags
             continue
-        narration = (shot.narration or "").strip()
-        if narration and _narration_is_crowd_ambient(narration):
-            merged = (shot.action_desc or "").rstrip("。； ")
-            addition = narration.rstrip("。；")
-            shot.action_desc = f"{merged}；{addition}。" if merged else f"{addition}。"
-            shot.narration = ""
-            changes.append({"shot_no": shot.shot_no, "demoted_crowd_narration": addition[:40]})
+        if int(shot.duration_s or 0) > PREFERRED_SHOT_DURATION_S:
+            if DURATION_REVIEW_RISK_TAG not in tags:
+                tags.append(DURATION_REVIEW_RISK_TAG)
+                shot.risk_tags = tags
+                changes.append({
+                    "shot_no": shot.shot_no,
+                    "duration_s": shot.duration_s,
+                    "reason": "needs_ai_duration_review",
+                })
+        elif DURATION_REVIEW_RISK_TAG in tags:
+            shot.risk_tags = [t for t in tags if t != DURATION_REVIEW_RISK_TAG]
     return changes
 
 
@@ -1330,30 +1625,17 @@ def _rename_shot_character(shot: Shot, old: str, new: str) -> None:
 
 
 def _offload_extra_character_voice(shot: Shot, name: str) -> None:
-    """把被剥离路人（测验员/围观者甲等）的台词移出 dialogues，内容不丢、降级承载：
-    人群声类（哄笑/议论/嘲讽…）并入 action_desc 当画面群像（与 relieve_spoken_overflow 同口径）；
-    其余（如宣告）转写进 narration 保持可听见，但仅在不超单镜口播上限时；否则同样并入 action_desc，
-    避免反而触发口播超限的新一轮重试。其在 action_desc 等画面文本中的提及保留原样（在场群像，合法）。"""
+    """把被剥离路人（测验员/围观者甲等）的台词移出 dialogues，内容不丢、降级为 action_desc。
+
+    产品禁止旁白：不再转写进 narration。人群声与宣告一律并入 action_desc 画面描写。
+    """
     moved = [(d.line or "").strip() for d in shot.dialogues if d.speaker == name and (d.line or "").strip()]
     shot.dialogues = [d for d in shot.dialogues if d.speaker != name]
     if not moved:
         return
     text = "；".join(moved)
-
-    def _into_action() -> None:
-        merged = (shot.action_desc or "").rstrip("。； ")
-        shot.action_desc = f"{merged}；{name}{text}。" if merged else f"{name}{text}。"
-
-    if _covers_has_crowd(text):
-        _into_action()
-        return
-    existing = (shot.narration or "").strip()
-    candidate = f"{existing}；{name}：{text}" if existing else f"{name}：{text}"
-    spoken_after = len(re.sub(r"\s+", "", candidate + "".join(d.line for d in shot.dialogues)))
-    if spoken_after <= config.max_spoken_chars_for_duration(shot.duration_s):
-        shot.narration = candidate
-    else:
-        _into_action()
+    merged = (shot.action_desc or "").rstrip("。； ")
+    shot.action_desc = f"{merged}；{name}{text}。" if merged else f"{name}{text}。"
 
 
 def normalize_offbible_characters(board: Storyboard, bible: Bible | None) -> list[dict]:

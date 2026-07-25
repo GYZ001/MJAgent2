@@ -1670,6 +1670,18 @@ table.calls-ledger th:nth-child(4), table.calls-ledger th:nth-child(5), table.ca
 /* 必保留关键台词/剧情点清单（剧本台只读视图） */
 .key-list { margin: 4px 0 0; padding-left: 18px; }
 .key-list li { margin: 2px 0; line-height: 1.5; }
+.spine-beat-list { margin: 6px 0 0; padding-left: 22px; }
+.spine-beat-list li { margin: 6px 0; line-height: 1.45; display: flex; gap: 8px; flex-wrap: wrap; align-items: baseline; }
+.spine-beat-list code { font-size: 12px; color: var(--cinnabar-deep); min-width: 2.5em; }
+.spine-optional { font-size: 12px; color: var(--ink-soft); font-style: normal; }
+.drop-list li { color: var(--ink-soft); }
+.drop-restore-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
+.drop-restore-list li { display: flex; gap: 10px; align-items: center; justify-content: space-between; padding: 8px 10px; border: 1px solid #e4e1da; border-radius: 8px; background: #faf9f6; }
+.spine-card { margin-bottom: 0; }
+.spine-card .shot-body { display: grid; gap: 10px; }
+
+
+
 
 /* ═══════════════════════════════════════════════════════════════
    2026 工作台视觉与交互整改层
@@ -2352,6 +2364,26 @@ label.f { color: var(--ink-soft); font: 600 12px var(--ui); letter-spacing: .02e
 .shot-context-tokens.information > span { border-radius: 6px; background: rgba(181,72,56,.075); color: var(--cinnabar-deep); font-family: var(--ui); font-weight: 500; line-height: 1.55; }
 .shot-context-tokens > span.empty { background: transparent; color: var(--ink-faint); font-family: var(--ui); font-weight: 400; }
 .shot-script-grid { display: grid; grid-template-columns: minmax(0,1.15fr) minmax(330px,.85fr); min-height: 150px; background: #fff; }
+.shot-spoken-panel {
+  margin-top: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--line, #e6e2da);
+  background: #f8f6f2;
+}
+.shot-spoken-panel .shot-context-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+  margin-bottom: 10px;
+}
+.shot-spoken-list { padding: 0; background: transparent; }
+.shot-spoken-warn {
+  margin: 0 0 10px;
+  color: #9a3412;
+  font: 500 12px/1.5 var(--ui);
+}
+.shot-spoken-warn-inline b { color: #9a3412; }
 .shot-script-copy, .shot-audio-copy { padding: 16px 20px; }
 .shot-script-copy { border-right: 1px solid #e4e1da; }
 .shot-script-copy > p { color: #56595f; font: 400 12.5px/1.8 var(--ui); }

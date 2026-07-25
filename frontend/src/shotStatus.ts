@@ -1,4 +1,5 @@
-/** 镜头视频统一状态机：轨道 / 标题 / 播放器 / 版本卡必须共用同一判定 */
+/** 镜头视频统一状态机：轨道 / 标题 / 播放器 / 版本卡必须共用同一判定。
+ * 执行阶段只读后端 shot.pipeline，不再用 versions 状态二次推断活动阶段。 */
 import type { Shot, ShotVersion } from './api'
 
 export type ShotVideoPhase =
@@ -29,16 +30,23 @@ const PHASE_LABEL: Record<ShotVideoPhase, string> = {
   waiting_human: '待人工',
 }
 
+const ACTIVE_PIPELINE = new Set([
+  'queued', 'running', 'waiting', 'waiting_provider', 'blocked', 'waiting_human',
+])
+
 export function shotVideoState(shot: Shot): ShotVideoState {
   const versions = shot.versions ?? []
   const adopted = versions.find(v => v.id === shot.adopted_version_id)
   const latest = versions[0]
   const pipeline = shot.pipeline
-  const working = versions.some(v =>
-    v.status === 'queued' || v.status === 'running' || v.status === 'waiting_provider'
-  ) || (pipeline != null && ['queued', 'running', 'waiting_provider', 'blocked'].includes(pipeline.pipeline_status))
 
-  // 后端真实阶段文案优先
+  // 权威阶段：只信后端 pipeline；versions 仅用于播放/采用
+  const pipelineActive = pipeline != null && ACTIVE_PIPELINE.has(pipeline.pipeline_status)
+  const legacyVersionWorking = !pipeline && versions.some(v =>
+    v.status === 'queued' || v.status === 'running' || v.status === 'waiting_provider'
+  )
+  const working = pipelineActive || legacyVersionWorking
+
   if (pipeline?.stage_label && (
     working
     || pipeline.pipeline_status === 'waiting_human'
@@ -65,7 +73,14 @@ export function shotVideoState(shot: Shot): ShotVideoState {
     const playing = versions.find(v =>
       v.status === 'queued' || v.status === 'running' || v.status === 'waiting_provider'
     ) || adopted || latest
-    return { phase: 'working', label: PHASE_LABEL.working, railClass: 'working', adopted, latest, playing }
+    return {
+      phase: 'working',
+      label: pipeline?.stage_label || PHASE_LABEL.working,
+      railClass: 'working',
+      adopted,
+      latest,
+      playing,
+    }
   }
 
   const adoptedOk = adopted?.status === 'succeeded' && !!adopted.video_url
@@ -73,6 +88,7 @@ export function shotVideoState(shot: Shot): ShotVideoState {
     if (shot.video_stale) {
       return { phase: 'stale', label: PHASE_LABEL.stale, railClass: 'failed', adopted, latest, playing: adopted }
     }
+    // 已采用版可交付；若同时有新版本在跑，上面 working 分支会优先
     return { phase: 'adopted', label: PHASE_LABEL.adopted, railClass: 'ready', adopted, latest, playing: adopted }
   }
 
@@ -81,8 +97,15 @@ export function shotVideoState(shot: Shot): ShotVideoState {
     return { phase: 'ready', label: PHASE_LABEL.ready, railClass: 'ready', adopted, latest, playing: succeeded }
   }
 
-  if (latest?.status === 'failed' || versions.some(v => v.status === 'failed')) {
-    return { phase: 'failed', label: PHASE_LABEL.failed, railClass: 'failed', adopted, latest, playing: latest }
+  if (pipeline?.pipeline_status === 'failed' || latest?.status === 'failed' || versions.some(v => v.status === 'failed')) {
+    return {
+      phase: 'failed',
+      label: pipeline?.stage_label || PHASE_LABEL.failed,
+      railClass: 'failed',
+      adopted,
+      latest,
+      playing: latest,
+    }
   }
 
   return { phase: 'empty', label: PHASE_LABEL.empty, railClass: 'empty', adopted, latest, playing: latest }
@@ -100,12 +123,16 @@ export function formatPipelineSummary(summary: import('./api').EpisodePipelineSu
   if (!summary) {
     return `已采用 —/${shotsTotal}`
   }
-  return [
-    `已采用 ${summary.adopted}/${summary.shots_total}`,
-    `已有候选 ${summary.with_candidate}/${summary.shots_total}`,
-    `上游生成 ${summary.upstream_generating}`,
-    `准备参考图 ${summary.preparing_references}`,
-    `排队 ${summary.queued}`,
-    `待人工 ${summary.waiting_human}`,
-  ].join(' · ')
+  const parts = [
+    `${summary.shots_total} 镜`,
+    `已采用 ${summary.adopted}`,
+    `视频生成中 ${summary.upstream_generating}`,
+  ]
+  if (summary.video_ready != null) parts.push(`视频就绪待槽 ${summary.video_ready}`)
+  parts.push(`参考图制作 ${summary.preparing_references}`)
+  if (summary.waiting_continuity != null) parts.push(`等连续性 ${summary.waiting_continuity}`)
+  if (summary.video_qa != null) parts.push(`视频质检 ${summary.video_qa}`)
+  parts.push(`待人工 ${summary.waiting_human}`)
+  if (summary.failed != null) parts.push(`失败 ${summary.failed}`)
+  return parts.join(' · ')
 }

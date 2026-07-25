@@ -47,9 +47,9 @@ def test_storyboard_no_false_missing_transition_for_walk_to_adjacent_area() -> N
         shots=[
             Shot(shot_no=1, duration_s=5, shot_size="全景", camera_move="固定",
                  scene_setting="日，萧家测验广场边缘", characters=["萧炎", "萧薰儿"],
-                 action_desc="萧薰儿走到广场边缘的萧炎面前站定，微微弯腰唤他萧炎哥哥，萧炎扯了扯嘴角",
+                 action_desc="萧薰儿走到广场边缘的萧炎面前站定，唤他萧炎哥哥，萧炎扯出一个自嘲表情",
                  first_frame_desc="日光下萧炎独自立在广场边缘，神情自嘲，萧薰儿正走近",
-                 last_frame_desc="萧薰儿在萧炎面前微微弯腰，萧炎侧脸僵硬，画面渐暗",
+                 last_frame_desc="萧薰儿在萧炎面前弯腰示意，萧炎侧脸僵硬，画面渐暗",
                  source_excerpt="萧薰儿走到萧炎面前，唤他萧炎哥哥。",
                  narration="", transition="硬切", continuity_from_prev=False),
             Shot(shot_no=2, duration_s=5, shot_size="中景", camera_move="跟随",
@@ -58,7 +58,7 @@ def test_storyboard_no_false_missing_transition_for_walk_to_adjacent_area() -> N
                  first_frame_desc="广场外小路上，萧炎背对人群迈步，萧薰儿在身后跟来",
                  last_frame_desc="小路尽头，萧炎停下脚步，萧薰儿立在他身侧",
                  source_excerpt="萧炎转身离开广场，走上外侧的小路。",
-                 narration="人人都弃他如敝履，三年斗气倒退的秘密究竟藏着什么玄机。",
+                 narration="",
                  transition="淡出淡入", continuity_from_prev=False),
         ],
     )
@@ -176,8 +176,10 @@ def test_normalize_action_desc_keeps_real_words() -> None:
 
 
 def test_storyboard_count_range_is_not_derived_from_target_duration() -> None:
+    """Renderability：镜数软预算固定约 8~20，不再按目标时长线性换算。"""
+    from app.renderability import SHOT_HARD_MAX, SHOT_SOFT_MIN
     for target in (40, 50, 70, 90):
-        assert storyboard_shot_count_range(target) == (1, config.STORYBOARD_MAX_SHOTS)
+        assert storyboard_shot_count_range(target) == (SHOT_SOFT_MIN, SHOT_HARD_MAX)
 
 
 # ---------- 分镜防丢失：关键内容保留校验 ----------
@@ -231,7 +233,9 @@ def test_storyboard_preservation_flags_dropped_key_line() -> None:
 
     errors = validate_storyboard_preserves_key_content(board, _screenplay_with_manifest())
 
-    assert any("关键台词" in e for e in errors), errors
+    assert any("主线台词" in e or "关键台词" in e for e in errors), errors
+    assert any("dialogues" in e for e in errors), errors
+    assert not any("narration" in e for e in errors), errors
 
 
 def test_storyboard_preservation_noop_without_manifest() -> None:
@@ -285,7 +289,12 @@ def test_shot_covers_tolerates_synonym_paraphrase() -> None:
     """covers 写"被测验员当众宣告为低级"，本镜实际拍成"测验员…宣读…级别：低级"——
     同一件事的同义改写不应判漏戏（避免逐字纠词把已落实的一拍卡死、反复重试到上限）。"""
     shot = _board_preserving_key_content().shots[0]
-    shot.narration = "测验员漠然宣读：萧炎，斗之力，三段！级别：低级！"
+    shot.dialogues = [
+        Dialogue(speaker="测验员", line="萧炎，斗之力，三段！级别：低级！", emotion="平静")
+    ]
+    shot.action_desc = (
+        "测验员当众宣读萧炎结果，碑面只亮起三段微光，萧炎站在石碑前一动不动"
+    )
     errors = validate_storyboard_shot_covers_outline(
         shot, "萧炎被测验员当众宣告为低级", shot.shot_no)
     assert errors == [], errors
@@ -297,7 +306,6 @@ def test_shot_covers_tolerates_abstract_to_concrete_paraphrase() -> None:
     "测出七段+人群赞叹"，但 2-gram 字面匹配认不出，误判为未落实 covers，反复重试到上限。"""
     shot = _board_preserving_key_content().shots[0]
     shot.action_desc = "萧媚小跑上前触摸魔石碑，碑面亮起'斗之气：七段！'，人群赞叹声浪骤起"
-    shot.narration = "人群赞叹：七段！真了不起！不愧是家族种子级人物！"
     errors = validate_storyboard_shot_covers_outline(
         shot, "萧媚七段成绩引发追捧", shot.shot_no)
     assert errors == [], errors
@@ -318,15 +326,15 @@ def test_continuity_same_scene_new_focus_char_with_movement_passes() -> None:
         shots=[
             Shot(shot_no=1, duration_s=5, shot_size="特写", camera_move="固定",
                  scene_setting="日，萧家测验广场", characters=["萧炎"],
-                 action_desc="萧炎垂眸凝视紧攥的左手，血丝渗出，喉结滚动，未发一言，肩背微微绷紧",
-                 first_frame_desc="萧炎左手特写，指节发白", last_frame_desc="同机位血丝渗出，他仍低头",
+                 action_desc="萧炎垂眸凝视紧攥的左手，血丝渗出，喉结滚动，未发一言，肩背绷紧",
+                 first_frame_desc="萧炎左手特写，掌心发力", last_frame_desc="同机位血丝渗出，他仍低头",
                  source_excerpt="萧炎看着自己的手，一言不发。", narration="", dialogues=[],
                  transition="硬切", continuity_from_prev=False, continuity_mode="same_scene_cut"),
             Shot(shot_no=2, duration_s=5, shot_size="中景", camera_move="固定",
                  scene_setting="日，萧家测验广场", characters=["萧媚"],
                  action_desc="萧媚小跑上前，伸手轻触魔石碑，碑面亮起七段光芒，人群赞叹声浪骤起",
                  first_frame_desc="萧媚从人群侧面上前", last_frame_desc="萧媚触碑后转身，碑面仍亮",
-                 source_excerpt="萧媚走上前去，伸手触碰魔石碑。", narration="人群赞叹：七段！真了不起！",
+                 source_excerpt="萧媚走上前去，伸手触碰魔石碑。", narration="",
                  dialogues=[], transition="硬切", continuity_from_prev=False,
                  continuity_mode="reaction_cut"),
         ],
@@ -343,8 +351,8 @@ def test_action_continuation_without_shared_char_or_movement_fails() -> None:
         shots=[
             Shot(shot_no=1, duration_s=5, shot_size="特写", camera_move="固定",
                  scene_setting="日，萧家测验广场", characters=["萧炎"],
-                 action_desc="萧炎垂眸凝视紧攥的左手，血丝渗出，喉结滚动，肩背微微绷紧",
-                 first_frame_desc="萧炎左手特写，指节发白", last_frame_desc="同机位血丝渗出，他仍低头",
+                 action_desc="萧炎垂眸凝视紧攥的左手，血丝渗出，喉结滚动，肩背绷紧",
+                 first_frame_desc="萧炎左手特写，掌心发力", last_frame_desc="同机位血丝渗出，他仍低头",
                  source_excerpt="萧炎看着自己的手，一言不发。", narration="", dialogues=[],
                  transition="硬切", continuity_from_prev=False, continuity_mode="same_scene_cut"),
             Shot(shot_no=2, duration_s=5, shot_size="中景", camera_move="固定",

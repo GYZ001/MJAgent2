@@ -77,5 +77,57 @@ def project_inflight_cap() -> int:
 
 
 def prepared_reference_backlog() -> int:
-    """参考图可领先视频槽位的镜数。"""
+    """参考图可领先视频槽位的镜数（legacy 兼容；stage_aware 用高低水位）。"""
     return int(get_setting("reference_prepared_backlog") or 8)
+
+
+def video_ready_low_watermark() -> int:
+    return max(0, int(get_setting("video_ready_low_watermark") or 2))
+
+
+def video_ready_high_watermark() -> int:
+    high = int(get_setting("video_ready_high_watermark") or 6)
+    return max(video_ready_low_watermark(), high)
+
+
+def reference_shot_cohort_limit() -> int:
+    """同时占用图片通道的镜头批次数。"""
+    raw = get_setting("reference_shot_cohort_limit")
+    if raw not in (None, ""):
+        try:
+            return max(1, int(raw))
+        except (TypeError, ValueError):
+            pass
+    # 默认：floor(image_concurrency / target_refs)；目标新图默认 4
+    from app.media_pipeline.concurrency import channel_limit
+    from app.media_pipeline import stages as S
+    image_n = channel_limit(S.RESOURCE_IMAGE)
+    target_refs = 4
+    try:
+        target_refs = max(1, int(get_setting("video_reference_min_generated") or 4))
+    except (TypeError, ValueError):
+        target_refs = 4
+    # PRD：cohort_limit = max(1, floor(image / target_generated_refs))
+    # 但 min_generated 默认常为 1，这里用计划默认 4 更符合「一次做完一镜」
+    planned = 4
+    return max(1, image_n // planned)
+
+
+def scheduler_policy() -> str:
+    value = (get_setting("media_scheduler_policy") or "stage_aware").strip().lower()
+    return value if value in {"legacy", "stage_aware"} else "stage_aware"
+
+
+def batch_prompt_enabled() -> bool:
+    value = (get_setting("video_reference_batch_prompt") or "true").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def batch_qa_enabled() -> bool:
+    value = (get_setting("video_reference_batch_qa") or "true").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def role_adaptive_enabled() -> bool:
+    value = (get_setting("video_reference_role_adaptive") or "false").strip().lower()
+    return value in {"1", "true", "yes", "on"}

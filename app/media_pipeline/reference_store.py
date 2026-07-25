@@ -29,6 +29,9 @@ def upsert_reference_set_from_meta(
     version_id: str | None,
     meta: dict[str, Any],
     conn=None,
+    static_ready: bool | None = None,
+    continuity_ready: bool | None = None,
+    group_gate_passed: bool | None = None,
 ) -> str | None:
     """把 image_inputs 里的参考图画廊写入 reference_sets / reference_assets。
 
@@ -42,6 +45,16 @@ def upsert_reference_set_from_meta(
     db = conn or get_conn()
     fp = meta.get("reference_gallery_fingerprint") or _fingerprint(shot_id, refs)
     revision = int(meta.get("reference_gallery_revision") or int(now()))
+    static_flag = int(bool(
+        static_ready if static_ready is not None else meta.get("reference_static_ready")
+    ))
+    continuity_flag = int(bool(
+        continuity_ready if continuity_ready is not None else meta.get("continuity_anchor_ready")
+    ))
+    gate_flag = int(bool(
+        group_gate_passed if group_gate_passed is not None else meta.get("reference_group_gate_passed")
+    ))
+    input_fp = meta.get("video_input_fingerprint") or fp
     # 已有同 fingerprint 则复用
     row = db.execute(
         "SELECT id FROM reference_sets WHERE shot_id=? AND fingerprint=? ORDER BY revision DESC LIMIT 1",
@@ -54,40 +67,94 @@ def upsert_reference_set_from_meta(
                 "UPDATE reference_sets SET source_version_id=COALESCE(source_version_id, ?) WHERE id=?",
                 (version_id, set_id),
             )
+        try:
+            db.execute(
+                """UPDATE reference_sets SET static_ready=?, continuity_ready=?, group_gate_passed=?,
+                          input_fingerprint=?, updated_at=? WHERE id=?""",
+                (static_flag, continuity_flag, gate_flag, input_fp, now(), set_id),
+            )
+        except Exception:  # noqa: BLE001 旧库缺列
+            pass
         meta["reference_set_id"] = set_id
         meta["reference_gallery_fingerprint"] = fp
         return set_id
 
     set_id = new_id("refset")
-    db.execute(
-        """INSERT INTO reference_sets(
-               id, shot_id, source_version_id, revision, fingerprint, status,
-               created_at, updated_at
-           ) VALUES(?,?,?,?,?,'ready',?,?)""",
-        (set_id, shot_id, version_id, revision, fp, now(), now()),
-    )
+    try:
+        db.execute(
+            """INSERT INTO reference_sets(
+                   id, shot_id, source_version_id, revision, fingerprint, status,
+                   static_ready, continuity_ready, group_gate_passed, input_fingerprint,
+                   created_at, updated_at
+               ) VALUES(?,?,?,?,?,'ready',?,?,?,?,?,?)""",
+            (set_id, shot_id, version_id, revision, fp,
+             static_flag, continuity_flag, gate_flag, input_fp, now(), now()),
+        )
+    except Exception:  # noqa: BLE001 旧库缺列时回退
+        db.execute(
+            """INSERT INTO reference_sets(
+                   id, shot_id, source_version_id, revision, fingerprint, status,
+                   created_at, updated_at
+               ) VALUES(?,?,?,?,?,'ready',?,?)""",
+            (set_id, shot_id, version_id, revision, fp, now(), now()),
+        )
+    slot_state = meta.get("reference_slots") or {}
     for i, ref in enumerate(refs):
         asset_id = ref.get("id") or new_id("refasset")
         path = ref.get("path") or ref.get("image_path")
-        db.execute(
-            """INSERT INTO reference_assets(
-                   id, reference_set_id, asset_type, source, path, sort_order,
-                   quality_score, consistency_score, selected, deleted, qa_json, created_at
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                asset_id, set_id,
-                ref.get("type") or "generated",
-                ref.get("source") or "pipeline",
-                path,
-                i,
-                ref.get("qualityScore"),
-                ref.get("consistencyScore"),
-                int(bool(ref.get("selectedForSeedance", True))),
-                int(bool(ref.get("deleted"))),
-                json.dumps(ref.get("qa") or {}, ensure_ascii=False) if ref.get("qa") else None,
-                now(),
-            ),
-        )
+        slot_key = None
+        attempt_no = 1
+        gen_status = None
+        qa_status = None
+        for sk, sv in slot_state.items():
+            if isinstance(sv, dict) and sv.get("path") == path:
+                slot_key = sk
+                gen_status = sv.get("status")
+                qa_status = "passed" if sv.get("status") == "passed" else sv.get("status")
+                break
+        try:
+            db.execute(
+                """INSERT INTO reference_assets(
+                       id, reference_set_id, asset_type, source, path, sort_order,
+                       quality_score, consistency_score, selected, deleted, qa_json,
+                       slot_key, attempt_no, generation_status, qa_status, input_fingerprint,
+                       created_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    asset_id, set_id,
+                    ref.get("type") or "generated",
+                    ref.get("source") or "pipeline",
+                    path,
+                    i,
+                    ref.get("qualityScore"),
+                    ref.get("consistencyScore"),
+                    int(bool(ref.get("selectedForSeedance", True))),
+                    int(bool(ref.get("deleted"))),
+                    json.dumps(ref.get("qa") or {}, ensure_ascii=False) if ref.get("qa") else None,
+                    slot_key, attempt_no, gen_status, qa_status, input_fp,
+                    now(),
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            db.execute(
+                """INSERT INTO reference_assets(
+                       id, reference_set_id, asset_type, source, path, sort_order,
+                       quality_score, consistency_score, selected, deleted, qa_json, created_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    asset_id, set_id,
+                    ref.get("type") or "generated",
+                    ref.get("source") or "pipeline",
+                    path,
+                    i,
+                    ref.get("qualityScore"),
+                    ref.get("consistencyScore"),
+                    int(bool(ref.get("selectedForSeedance", True))),
+                    int(bool(ref.get("deleted"))),
+                    json.dumps(ref.get("qa") or {}, ensure_ascii=False) if ref.get("qa") else None,
+                    now(),
+                ),
+            )
     meta["reference_set_id"] = set_id
     meta["reference_gallery_fingerprint"] = fp
     meta["reference_gallery_revision"] = revision

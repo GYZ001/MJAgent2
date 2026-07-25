@@ -115,7 +115,7 @@ STORYBOARD_SHOT_MAX_TOKENS = max(
     1024, min(int(os.environ.get("STORYBOARD_SHOT_MAX_TOKENS", "8192")), 16384)
 )
 
-# 分镜时长由模型按单镜动作与口播密度判断；供应商只接受 5~10 秒整数时长。
+# 分镜时长：默认 5s（PREFERRED）；6~10s 仅当口播/连续动作需要，并进入 AI 审核。
 # DEFAULT 仅用于人工输入缺省值，模型输出必须经校验器显式落在合法区间内。
 VIDEO_DURATION_MIN_S = 5
 VIDEO_DURATION_MAX_S = 10
@@ -124,17 +124,18 @@ ALLOWED_DURATIONS = frozenset(range(VIDEO_DURATION_MIN_S, VIDEO_DURATION_MAX_S +
 EPISODE_TARGET_MIN_S = 40
 EPISODE_TARGET_MAX_S = 90   # 放宽上限给模型更大质量保证空间：内容密/高潮集可取更长时长，简单集仍可短
 EPISODE_TARGET_DEFAULT_S = 50
-EPISODE_TARGET_STEP_S = 10  # 分集规划字段仅保留为节奏参考，不再约束分镜总时长
+EPISODE_TARGET_STEP_S = 10  # 分集规划字段仅保留为节奏参考；主线压缩后按 spine 下调
 # 仅用于防止异常模型无限循环的技术熔断，不是产品镜头数上限。
 STORYBOARD_MAX_SHOTS = 1_000_000
 # 集目标时长合法取值：[MIN, MAX] 内 STEP 的整数倍（当前 40/50/60/70/80/90）。prompt 与校验统一引用，避免各处硬编码漂移。
 EPISODE_TARGET_CHOICES = tuple(range(EPISODE_TARGET_MIN_S, EPISODE_TARGET_MAX_S + 1, EPISODE_TARGET_STEP_S))
-# 口播预算随模型选择的镜头时长线性增长：5 秒 14 字，10 秒 28 字。
+# 口播预算（纯文字、不计标点）：5 秒 18 字，10 秒 36 字。
 # 超过 10 秒所能承载的口播仍必须拆镜，不能靠延长 duration_s 合并不同节拍。
-SPOKEN_CHARS_PER_5_SECONDS = 14
+SPOKEN_CHARS_PER_5_SECONDS = 18
 
 
 def max_spoken_chars_for_duration(duration_s: int) -> int:
+    """单镜口播纯文字上限；与 continuity.max_speech_chars 同口径。"""
     duration = min(max(int(duration_s), VIDEO_DURATION_MIN_S), VIDEO_DURATION_MAX_S)
     return duration * SPOKEN_CHARS_PER_5_SECONDS // VIDEO_DURATION_MIN_S
 
@@ -163,6 +164,16 @@ DEFAULT_SETTINGS = {
     "episode_video_inflight_limit": "8",
     "project_video_inflight_limit": "12",
     "reference_prepared_backlog": "8",
+    # QPSP 调度：高低水位 / cohort / 策略开关
+    "media_scheduler_policy": "stage_aware",  # legacy | stage_aware
+    "video_ready_low_watermark": "2",
+    "video_ready_high_watermark": "6",
+    "reference_shot_cohort_limit": "1",
+    "video_qa_reserved_concurrency": "2",
+    "video_control_reserved_concurrency": "2",
+    "video_reference_batch_prompt": "true",   # P1：一镜一次提示词合同
+    "video_reference_batch_qa": "true",       # P1：批量参考图 QA
+    "video_reference_role_adaptive": "false", # P2：质量角色自适应（实验，默认关）
     "episode_cost_limit_cny": "100",
     "use_character_refs": "true",     # 出场角色定妆照随镜头注入 reference_image（跨集一致性核心）
     "max_ref_images": "2",            # 单镜头最多附几张定妆照
@@ -173,14 +184,14 @@ DEFAULT_SETTINGS = {
     "model_route": "hiagent",           # 文本/质检模型路由：hiagent（火山）| openrouter
     "storyboard_concurrency": "2",      # 手动批量分镜的并发上限
     "video_reference_max_images": "8",
-    "video_reference_quality_threshold": "0.75",
+    "video_reference_quality_threshold": "0.8",  # 综合 QA 分门禁：≥此分必须留在「使用中」
     "video_reference_quality_floor": "0.4", # 兜底图质量地板：生成图全不达标时，最佳一版仍低于此分则不喂模型，只靠定妆照/场景锚点（脏图反而拖累成片）
     "video_reference_min_generated": "1",   # 参考图模式每镜至少新生成几张关键帧参考图（防止只剩定妆照）
     "video_reference_gen_retries": "2",     # 单张生成参考图 QA 不达标时的额外重试次数；仍不达标保留最佳一版而非丢弃
     "video_reference_prompt_async": "true", # 每张新参考图的提示词用独立 LLM 调用并发生成（防止一次性写多张时偷懒）
-    "video_reference_consistency_check": "true",       # Phase 2：整组参考图相对一致性检查 Agent（点名漂移图并 i2i 重生/剔除）
-    "video_reference_consistency_threshold": "0.7",    # 候选参考图与锚点（定妆照/上镜尾帧）的一致性达标线，低于则判漂移
-    "video_reference_consistency_retries": "1",        # 漂移图从锚点 i2i 重生的最大次数；仍漂移则剔除（不喂 Seedance）
+    "video_reference_consistency_check": "true",       # Phase 2：整组参考图相对一致性检查（扣分 + 可选 i2i 重生提分）
+    "video_reference_consistency_threshold": "0.7",    # 仅触发 i2i 重生尝试的内部线，不再单独决定废弃
+    "video_reference_consistency_retries": "1",        # 漂移图从锚点 i2i 重生的最大次数；仍漂移则只靠综合分门禁
     "provider_call_retention_days": "30",
     "error_log_retention_days": "30",
     "agent_enabled": "true",            # 内嵌对话 Agent 总开关（API 入口会检查）

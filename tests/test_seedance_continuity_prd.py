@@ -171,8 +171,8 @@ def test_speech_over_capacity_fails_speech_capacity_and_preflight() -> None:
     direct = speech_capacity_errors(shot)
     preflight = preflight_seedance_gates(shot)
 
-    assert any("超过 5s 可用说话容量" in err for err in direct)
-    assert any("超过 5s 可用说话容量" in err for err in preflight)
+    assert any("超过 5s 口播上限" in err for err in direct)
+    assert any("超过 5s 口播上限" in err for err in preflight)
 
 
 def test_repeated_info_id_without_reinforcement_fails_ledger_and_preflight() -> None:
@@ -300,30 +300,110 @@ def test_classify_video_hard_failures_detects_story_repeat_and_related_failures(
 
 
 def test_select_best_video_candidate_rejects_below_threshold_and_hard_failures(monkeypatch) -> None:
+    """重抽尚未用尽时：未达阈值 / 硬门禁失败的候选不自动采纳。"""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript("""
       CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT);
       CREATE TABLE shots(id TEXT PRIMARY KEY,episode_id TEXT,adopted_version_id TEXT);
       CREATE TABLE shot_versions(id TEXT PRIMARY KEY,shot_id TEXT,version_no INTEGER,status TEXT,
-        technical_validation_json TEXT,qa_json TEXT,adoption_reason TEXT);
+        technical_validation_json TEXT,qa_json TEXT,adoption_reason TEXT,image_inputs TEXT);
       INSERT INTO settings VALUES('auto_retake_threshold','0.8');
+      INSERT INTO settings VALUES('video_auto_retake_limit','2');
       INSERT INTO shots VALUES('s','e',NULL);
     """)
     technical = json.dumps({"passed": True})
     conn.execute(
-        "INSERT INTO shot_versions VALUES('low','s',1,'succeeded',?,?,NULL)",
-        (technical, json.dumps({"overall": 0.7})),
+        "INSERT INTO shot_versions VALUES('low','s',1,'succeeded',?,?,NULL,?)",
+        (technical, json.dumps({"overall": 0.7}), json.dumps({"auto_retake_count": 0})),
     )
     conn.execute(
-        "INSERT INTO shot_versions VALUES('hard','s',2,'succeeded',?,?,NULL)",
-        (technical, json.dumps({"overall": 0.95, "failure_types": ["story_repeat"]})),
+        "INSERT INTO shot_versions VALUES('hard','s',2,'succeeded',?,?,NULL,?)",
+        (
+            technical,
+            json.dumps({"overall": 0.95, "failure_types": ["story_repeat"]}),
+            json.dumps({"auto_retake_count": 0}),
+        ),
     )
     conn.commit()
     monkeypatch.setattr(media, "get_conn", lambda: conn)
-    monkeypatch.setattr(media, "get_setting", lambda key: "true" if key == "video_hard_gate_enabled" else None)
+    monkeypatch.setattr(media, "get_setting", lambda key: {
+        "video_hard_gate_enabled": "true",
+        "video_auto_retake_limit": "2",
+    }.get(key))
 
     selected = media.select_best_video_candidate("s")
 
     assert selected is None
     assert conn.execute("SELECT adopted_version_id FROM shots WHERE id='s'").fetchone()[0] is None
+
+
+def test_select_best_video_candidate_force_adopts_highest_when_retakes_exhausted(monkeypatch) -> None:
+    """重抽名额用尽后：即使未过 QA / 有硬门禁，也采纳技术合格中最高分（即使只有一个）。"""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+      CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT);
+      CREATE TABLE shots(id TEXT PRIMARY KEY,episode_id TEXT,adopted_version_id TEXT);
+      CREATE TABLE shot_versions(id TEXT PRIMARY KEY,shot_id TEXT,version_no INTEGER,status TEXT,
+        technical_validation_json TEXT,qa_json TEXT,adoption_reason TEXT,image_inputs TEXT);
+      INSERT INTO settings VALUES('auto_retake_threshold','0.8');
+      INSERT INTO settings VALUES('video_auto_retake_limit','2');
+      INSERT INTO shots VALUES('s','e',NULL);
+    """)
+    technical = json.dumps({"passed": True})
+    conn.execute(
+        "INSERT INTO shot_versions VALUES('low','s',1,'succeeded',?,?,NULL,?)",
+        (technical, json.dumps({"overall": 0.55}), json.dumps({"auto_retake_count": 1})),
+    )
+    conn.execute(
+        "INSERT INTO shot_versions VALUES('best_low','s',2,'succeeded',?,?,NULL,?)",
+        (
+            technical,
+            json.dumps({"overall": 0.72, "failure_types": ["story_repeat"]}),
+            json.dumps({"auto_retake_count": 2}),
+        ),
+    )
+    conn.commit()
+    monkeypatch.setattr(media, "get_conn", lambda: conn)
+    monkeypatch.setattr(media, "get_setting", lambda key: {
+        "video_hard_gate_enabled": "true",
+        "video_auto_retake_limit": "2",
+    }.get(key))
+    import app.artifacts
+    monkeypatch.setattr(app.artifacts, "invalidate_episode_final", lambda _: False)
+
+    selected = media.select_best_video_candidate("s")
+
+    assert selected and selected["version_id"] == "best_low"
+    assert selected["fallback"] is True
+    assert "重抽名额已用尽" in selected["reason"]
+    assert conn.execute("SELECT adopted_version_id FROM shots WHERE id='s'").fetchone()[0] == "best_low"
+
+
+def test_select_best_video_candidate_force_best_adopts_single_below_threshold(monkeypatch) -> None:
+    """显式 force_best：仅一个未达标视频时也采纳。"""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+      CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT);
+      CREATE TABLE shots(id TEXT PRIMARY KEY,episode_id TEXT,adopted_version_id TEXT);
+      CREATE TABLE shot_versions(id TEXT PRIMARY KEY,shot_id TEXT,version_no INTEGER,status TEXT,
+        technical_validation_json TEXT,qa_json TEXT,adoption_reason TEXT,image_inputs TEXT);
+      INSERT INTO settings VALUES('auto_retake_threshold','0.8');
+      INSERT INTO shots VALUES('s','e',NULL);
+    """)
+    technical = json.dumps({"passed": True})
+    conn.execute(
+        "INSERT INTO shot_versions VALUES('only','s',1,'succeeded',?,?,NULL,?)",
+        (technical, json.dumps({"overall": 0.4}), json.dumps({"auto_retake_count": 0})),
+    )
+    conn.commit()
+    monkeypatch.setattr(media, "get_conn", lambda: conn)
+    monkeypatch.setattr(media, "get_setting", lambda key: "true" if key == "video_hard_gate_enabled" else None)
+
+    assert media.select_best_video_candidate("s") is None
+    selected = media.select_best_video_candidate("s", force_best=True)
+    assert selected and selected["version_id"] == "only"
+    assert selected["fallback"] is True
+    assert conn.execute("SELECT adopted_version_id FROM shots WHERE id='s'").fetchone()[0] == "only"

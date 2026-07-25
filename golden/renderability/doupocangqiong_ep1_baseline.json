@@ -1,0 +1,9 @@
+{
+  "label": "legacy_doupocangqiong_ep1",
+  "title": "斗破苍穹 第1集（旧合同对照基线）",
+  "source": "PRD/剧本分镜主线压缩与视频能力适配方案.md §4.2",
+  "shot_count": 24,
+  "total_duration_s": 144,
+  "notes": "旧版约 24 镜；新合同目标 ≤70% 镜数（≤16）且总时长随主线压缩下降。真实 A/B 需同章同模型再跑一轮后写入 golden/runs/。",
+  "contract_version": "legacy_pre_renderability"
+}

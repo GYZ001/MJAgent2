@@ -238,8 +238,47 @@ def record_video_candidate(version_id: str, *, step_run_id: str | None = None) -
     return artifact
 
 
-def select_best_video_candidate(shot_id: str) -> dict[str, Any] | None:
-    """Compare every technically valid candidate and persist an explicit adoption reason."""
+def _qa_overall(qa: dict[str, Any]) -> float | None:
+    try:
+        return float(qa.get("overall"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _shot_retakes_exhausted(conn: Any, shot_id: str) -> bool:
+    """自动重抽名额是否已用尽（任一成功版本的 auto_retake_count ≥ 上限）。"""
+    from app.media_pipeline.retry_policy import auto_retake_limit
+
+    limit = auto_retake_limit()
+    rows = conn.execute(
+        "SELECT image_inputs FROM shot_versions WHERE shot_id=? AND status='succeeded'",
+        (shot_id,),
+    ).fetchall()
+    for row in rows:
+        try:
+            meta = json.loads(row["image_inputs"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(meta, dict):
+            continue
+        try:
+            count = int(meta.get("auto_retake_count") or 0)
+        except (TypeError, ValueError):
+            count = 0
+        if count >= limit:
+            return True
+    return False
+
+
+def select_best_video_candidate(
+    shot_id: str, *, force_best: bool = False
+) -> dict[str, Any] | None:
+    """比较技术合格候选并落盘采用理由。
+
+    默认只采纳「硬门禁通过且 QA ≥ 阈值」的最高分。
+    若无一达标，且 ``force_best`` 或重抽名额已用尽，则兜底采纳技术合格中分数最高的版本
+    （即使未过 QA / 有硬门禁问题），避免槽位用尽后镜头无成片。
+    """
     conn = get_conn()
     threshold_row = conn.execute(
         "SELECT value FROM settings WHERE key='auto_retake_threshold'"
@@ -253,7 +292,8 @@ def select_best_video_candidate(shot_id: str) -> dict[str, Any] | None:
         (shot_id,),
     ).fetchall()
     hard_gate_enabled = _video_hard_gate_enabled()
-    candidates: list[dict[str, Any]] = []
+    qualified: list[dict[str, Any]] = []
+    technical_pool: list[dict[str, Any]] = []
     for row in rows:
         technical = json.loads(row["technical_validation_json"] or "{}")
         if not technical:
@@ -263,34 +303,51 @@ def select_best_video_candidate(shot_id: str) -> dict[str, Any] | None:
                 continue
             row = conn.execute("SELECT * FROM shot_versions WHERE id=?", (row["id"],)).fetchone()
             technical = json.loads(row["technical_validation_json"] or "{}")
+        if not technical.get("passed"):
+            continue
         qa = json.loads(row["qa_json"] or "{}")
-        if not technical.get("passed") or qa.get("qa_recovered"):
-            continue
-        hard_failures = classify_video_hard_failures(qa, technical=technical) if hard_gate_enabled else []
-        if hard_failures:
-            continue
-        try:
-            score = float(qa.get("overall"))
-        except (TypeError, ValueError):
-            continue
-        if score < threshold:
-            continue
-        candidates.append({
+        score = _qa_overall(qa)
+        hard_failures = (
+            classify_video_hard_failures(qa, technical=technical) if hard_gate_enabled else []
+        )
+        entry = {
             "id": row["id"],
             "version_no": row["version_no"],
-            "score": score,
+            "score": score if score is not None else -1.0,
             "qa": qa,
             "hard_failures": hard_failures,
-        })
-    if not candidates:
-        return None
+            "qa_recovered": bool(qa.get("qa_recovered")),
+        }
+        technical_pool.append(entry)
+        if entry["qa_recovered"] or hard_failures or score is None or score < threshold:
+            continue
+        qualified.append(entry)
+
+    fallback = False
+    if qualified:
+        candidates = qualified
+    else:
+        if not force_best and not _shot_retakes_exhausted(conn, shot_id):
+            return None
+        if not technical_pool:
+            return None
+        candidates = technical_pool
+        fallback = True
+
     ordered = sorted(candidates, key=lambda item: (item["score"], item["version_no"]), reverse=True)
     best = ordered[0]
     margin = best["score"] - ordered[1]["score"] if len(ordered) > 1 else best["score"]
-    reason = (
-        f"自动比较 {len(ordered)} 个技术门禁和连续性硬门禁通过候选；选择 v{best['version_no']}，"
-        f"硬门禁通过，质量分 {best['score']:.3f}（阈值 {threshold:.3f}），领先次优 {margin:.3f}。"
-    )
+    if fallback:
+        reason = (
+            f"重抽名额已用尽（或强制兜底），自动比较 {len(ordered)} 个技术合格视频；"
+            f"采纳最高分 v{best['version_no']}，质量分 {best['score']:.3f}"
+            f"（未达阈值 {threshold:.3f} 或未过硬门禁），领先次优 {margin:.3f}。"
+        )
+    else:
+        reason = (
+            f"自动比较 {len(ordered)} 个技术门禁和连续性硬门禁通过候选；选择 v{best['version_no']}，"
+            f"硬门禁通过，质量分 {best['score']:.3f}（阈值 {threshold:.3f}），领先次优 {margin:.3f}。"
+        )
     previous = conn.execute(
         "SELECT adopted_version_id FROM shots WHERE id=?", (shot_id,)
     ).fetchone()
@@ -306,7 +363,12 @@ def select_best_video_candidate(shot_id: str) -> dict[str, Any] | None:
         shot = conn.execute("SELECT episode_id FROM shots WHERE id=?", (shot_id,)).fetchone()
         if shot:
             invalidate_episode_final(shot["episode_id"])
-    return {"version_id": best["id"], "reason": reason, "comparison": ordered}
+    return {
+        "version_id": best["id"],
+        "reason": reason,
+        "comparison": ordered,
+        "fallback": fallback,
+    }
 
 
 def record_scene_candidate(scene_id: str, *, step_run_id: str | None = None) -> dict[str, Any]:

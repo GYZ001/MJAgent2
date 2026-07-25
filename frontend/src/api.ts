@@ -285,6 +285,21 @@ export interface ScriptScene {
   source_basis?: string
 }
 
+export interface PlotSpineBeat {
+  beat_id: string
+  who?: string
+  does?: string
+  turn?: string
+  must_keep?: boolean
+}
+
+export interface PlotSpine {
+  episode_premise?: string
+  spine_beats?: PlotSpineBeat[]
+  must_keep_ending?: string
+  drop_list?: string[]
+}
+
 export interface EpisodeScreenplay {
   id?: string | null
   episode_no: number
@@ -299,6 +314,7 @@ export interface EpisodeScreenplay {
   stakes?: string
   key_lines?: string[]
   key_plot_points?: string[]
+  plot_spine?: PlotSpine | null
   scene_outline?: ScriptScene[]
   full_script_text?: string
   character_state_changes?: string[]
@@ -351,14 +367,26 @@ export interface ShotVersion {
 
 export interface ShotPipelineStatus {
   pipeline_status: string
+  pipeline_stage?: string | null
   current_stage?: string | null
   stage_label?: string | null
+  stage_progress?: { current?: number; total?: number; unit?: string; attempt?: number; attempt_limit?: number } | null
   queue_position?: number | null
   provider_elapsed_s?: number | null
+  stage_elapsed_s?: number | null
+  stage_started_at?: number | null
   reference_progress?: { done: number; total: number } | null
   candidate_count: number
   retake_count: number
+  attempt?: number
+  attempt_limit?: number
   blocked_reason?: string | null
+  reason_code?: string | null
+  reason_text?: string | null
+  scheduler_lane?: string | null
+  blocked_by_shot_id?: string | null
+  next_stage?: string | null
+  state_revision?: number
   estimated_start_at?: number | null
   estimated_finish_at?: number | null
 }
@@ -369,8 +397,12 @@ export interface EpisodePipelineSummary {
   with_candidate: number
   upstream_generating: number
   preparing_references: number
+  video_ready?: number
+  waiting_continuity?: number
+  video_qa?: number
   queued: number
   waiting_human: number
+  failed?: number
 }
 
 export interface StopShotVideoResult {
@@ -392,6 +424,9 @@ export interface Shot {
   first_frame_desc: string; last_frame_desc: string
   source_excerpt: string
   narration: string | null; dialogues: Dialogue[]; transition: string
+  spoken_content_chars?: number
+  spoken_limit?: number
+  has_legacy_narration?: boolean
   continuity_from_prev: number; adopted_version_id: string | null
   story_event_id?: string
   purpose?: string
@@ -412,6 +447,7 @@ export interface Shot {
   risk_tags?: string[]
   prompt_contract_version?: string
   legacy_unvalidated?: boolean
+  is_final?: boolean
   preflight_errors?: string[]
   prompt_preview?: string
   est_cost_cny: number; versions: ShotVersion[]

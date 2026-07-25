@@ -37,11 +37,17 @@ __all__ = [
     "purge_project_video_artifacts", "purge_shot_videos",
 ]
 
-_queue: asyncio.Queue[str] = asyncio.Queue()
+_queue: asyncio.Queue[str] = asyncio.Queue()  # 兼容别名 → 参考图通道
+_reference_queue: asyncio.Queue[str] = _queue
+_video_ready_queue: asyncio.Queue[str] = asyncio.Queue()
 _poll_queue: asyncio.Queue[str] = asyncio.Queue()
 _workers: list[asyncio.Task] = []
+_reference_workers: list[asyncio.Task] = _workers  # 同列表，命名清晰
+_video_ready_workers: list[asyncio.Task] = []
 _poll_workers: list[asyncio.Task] = []
 _worker_target = 0
+_reference_worker_target = 0
+_video_ready_worker_target = 0
 _poll_worker_target = 0
 _dispatcher_task: asyncio.Task | None = None
 # 延迟重排任务的强引用，避免被 GC 回收（asyncio 不持有后台任务的引用）。

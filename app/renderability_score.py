@@ -1,0 +1,153 @@
+"""Renderability 金样对照打分（PRD §4.2）。
+
+不调用 LLM；对已落库/导出的剧本+分镜 JSON 做确定性指标对照。
+"""
+from __future__ import annotations
+
+from typing import Any
+
+from app.renderability import (
+    KEY_LINES_MAX,
+    PREFERRED_SHOT_DURATION_S,
+    SHOT_HARD_MAX,
+    SHOT_SOFT_MAX,
+    SHOT_SOFT_MIN,
+    SPINE_BEATS_MAX,
+    SPINE_BEATS_MIN,
+    find_overdetail_hits,
+)
+
+
+def _spine_beats(screenplay: dict[str, Any] | None) -> list[dict[str, Any]]:
+    spine = (screenplay or {}).get("plot_spine") or {}
+    return list(spine.get("spine_beats") or [])
+
+
+def _drop_list(screenplay: dict[str, Any] | None) -> list[str]:
+    spine = (screenplay or {}).get("plot_spine") or {}
+    return [str(x).strip() for x in (spine.get("drop_list") or []) if str(x).strip()]
+
+
+def score_renderability_sample(
+    *,
+    screenplay: dict[str, Any] | None,
+    storyboard: dict[str, Any] | None,
+    baseline: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """按 PRD §4.2 打分；返回 metrics / gates / vs_baseline。"""
+    shots = list((storyboard or {}).get("shots") or [])
+    n_shots = len(shots)
+    beats = _spine_beats(screenplay)
+    key_lines = [x for x in ((screenplay or {}).get("key_lines") or []) if str(x).strip()]
+    drops = _drop_list(screenplay)
+    must_keep = [b for b in beats if b.get("must_keep", True)]
+    total_dur = sum(int(s.get("duration_s") or 0) for s in shots)
+    gt5 = [s for s in shots if int(s.get("duration_s") or 0) > PREFERRED_SHOT_DURATION_S]
+
+    overdetail_hits: list[str] = []
+    for s in shots:
+        for field in ("action_desc", "first_frame_desc", "last_frame_desc"):
+            overdetail_hits.extend(find_overdetail_hits(s.get(field)))
+    full_text = (screenplay or {}).get("full_script_text") or ""
+    overdetail_hits.extend(find_overdetail_hits(full_text))
+    overdetail_hits = list(dict.fromkeys(overdetail_hits))
+
+    # drop 回流粗检：drop 文案大段出现在分镜 action/covers
+    board_text = "\n".join(
+        f"{s.get('action_desc') or ''} {s.get('covers') or ''} {s.get('beat') or ''}"
+        for s in shots
+    )
+    drop_reappear = [
+        d for d in drops
+        if len(d) >= 6 and d[:8] in board_text
+    ]
+
+    # spine 覆盖：beat 的 who+does 是否在分镜文本里有痕迹
+    uncovered = []
+    for b in must_keep:
+        token = f"{b.get('who') or ''}{b.get('does') or ''}".strip()
+        core = token[:6] if len(token) >= 6 else token
+        if core and core not in board_text:
+            uncovered.append(b.get("beat_id") or token)
+
+    metrics = {
+        "shot_count": n_shots,
+        "total_duration_s": total_dur,
+        "spine_beat_count": len(beats),
+        "must_keep_count": len(must_keep),
+        "key_lines_count": len(key_lines),
+        "drop_list_count": len(drops),
+        "duration_gt5_count": len(gt5),
+        "preferred_duration_s": PREFERRED_SHOT_DURATION_S,
+        "overdetail_hit_count": len(overdetail_hits),
+        "overdetail_hits": overdetail_hits[:12],
+        "drop_reappear_count": len(drop_reappear),
+        "spine_uncovered_count": len(uncovered),
+        "spine_uncovered": uncovered[:8],
+        "contract_version": "renderability_v1",
+    }
+
+    gates = {
+        "shot_count_in_soft_budget": SHOT_SOFT_MIN <= n_shots <= SHOT_SOFT_MAX,
+        "shot_count_within_hard_max": n_shots <= SHOT_HARD_MAX,
+        "spine_beats_in_range": SPINE_BEATS_MIN <= len(beats) <= SPINE_BEATS_MAX,
+        "key_lines_within_cap": len(key_lines) <= KEY_LINES_MAX,
+        "no_overdetail": len(overdetail_hits) == 0,
+        "no_drop_reappear": len(drop_reappear) == 0,
+        "spine_fully_covered": len(uncovered) == 0 and bool(must_keep),
+    }
+    gates["all_hard_pass"] = all(
+        gates[k] for k in (
+            "shot_count_within_hard_max",
+            "spine_beats_in_range",
+            "key_lines_within_cap",
+            "no_overdetail",
+            "no_drop_reappear",
+        )
+    )
+
+    vs_baseline: dict[str, Any] = {}
+    if baseline:
+        base_shots = int(baseline.get("shot_count") or 0)
+        vs_baseline = {
+            "baseline_label": baseline.get("label") or "legacy",
+            "baseline_shot_count": base_shots,
+            "candidate_shot_count": n_shots,
+            "shot_count_ratio": (round(n_shots / base_shots, 3) if base_shots else None),
+            "shot_count_le_70pct_baseline": (
+                n_shots <= int(base_shots * 0.7) if base_shots else None
+            ),
+            "baseline_total_duration_s": baseline.get("total_duration_s"),
+            "candidate_total_duration_s": total_dur,
+        }
+
+    return {
+        "metrics": metrics,
+        "gates": gates,
+        "vs_baseline": vs_baseline,
+        "passed": bool(gates.get("all_hard_pass")),
+    }
+
+
+def compare_with_baseline(
+    candidate: dict[str, Any],
+    baseline: dict[str, Any],
+) -> dict[str, Any]:
+    """candidate / baseline 均为 score_renderability_sample 的输出，或含 shot_count 的简表。"""
+    c_shots = int(
+        (candidate.get("metrics") or candidate).get("shot_count")
+        or candidate.get("shot_count")
+        or 0
+    )
+    b_shots = int(
+        (baseline.get("metrics") or baseline).get("shot_count")
+        or baseline.get("shot_count")
+        or 0
+    )
+    return {
+        "candidate_shot_count": c_shots,
+        "baseline_shot_count": b_shots,
+        "shot_count_ratio": round(c_shots / b_shots, 3) if b_shots else None,
+        "meets_70pct_goal": (c_shots <= int(b_shots * 0.7)) if b_shots else None,
+        "contract_version": "renderability_v1",
+    }

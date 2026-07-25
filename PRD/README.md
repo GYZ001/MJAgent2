@@ -7,6 +7,14 @@
 | [docs/HIAGENT_INTEGRATION.md](../docs/HIAGENT_INTEGRATION.md) | HiAgent 网关集成规范（已从 1.0 验证的真实 API 形态、模型 ID、延迟数据） |
 | [docs/PROMPT_SPEC.md](../docs/PROMPT_SPEC.md) | 全部 LLM 阶段的提示词设计、JSON Schema、校验与修复回路 |
 
+### 工程整改方案（本目录增补，不替代上文主 PRD）
+
+| 文档 | 内容 |
+|---|---|
+| [剧本分镜主线压缩与视频能力适配方案.md](./剧本分镜主线压缩与视频能力适配方案.md) | Renderability First：剧本/分镜只保主线、适配 Seedance 能力边界，废止全量细节防丢失 |
+| [剧本分镜与Seedance视频连续性整改方案.md](./剧本分镜与Seedance视频连续性整改方案.md) | 连续性状态链、一镜一主动作、禁止原文进 Seedance |
+| [视频生成流水线调度与阶段可视化整改方案.md](./视频生成流水线调度与阶段可视化整改方案.md) | QPSP 分阶段调度与进度可视化 |
+
 ---
 
 ## 1. 背景：1.0 为什么失败（复盘）

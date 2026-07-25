@@ -149,6 +149,24 @@ async def _screenplay_task(
                 prev_ending=prev["cliffhanger"] if prev else "",
             )
         old_script = _load_screenplay(ep)
+        # Renderability：入库前再清洗并用最新门禁复检，消化空壳 ledger 等可自动修复项。
+        from app.validators import normalize_screenplay_ledgers, validate_screenplay
+        normalize_screenplay_ledgers(script)
+        # 主线压缩后：集目标时长跟 spine 走（不再因原文长而抬高）。
+        spine_n = len((script.plot_spine.spine_beats if script.plot_spine else None) or [])
+        spine_target = _storyboard_target_for_source(
+            ep_data.get("target_duration_s"), len(source_text), spine_beat_count=spine_n or None
+        )
+        if spine_target != ep_data.get("target_duration_s"):
+            conn.execute("UPDATE episodes SET target_duration_s=? WHERE id=?", (spine_target, episode_id))
+            conn.commit()
+            ep_data["target_duration_s"] = spine_target
+        expected = max(1, int(ep_data.get("target_duration_s") or ep["target_duration_s"]) // config.VIDEO_DURATION_MIN_S)
+        residual = validate_screenplay(
+            script, bible, expected,
+            episode_no=ep["episode_no"], source_text=source_text,
+        )
+        object.__setattr__(script, "residual_errors", residual)
         script = _prepare_screenplay_for_storage(
             ep, script,
             keep_existing_id=(old_script.id if old_script else None),

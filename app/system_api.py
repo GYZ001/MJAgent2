@@ -642,9 +642,11 @@ def put_settings(body: dict):
         from app.media_pipeline import stages as media_stages
         from app import worker
         reload_limits_from_settings()
-        # 视频执行 worker 数跟随 submit 通道；设置变更即时升降
-        if any(k in body for k in (*SETTING_KEYS.values(), "video_concurrency", "auto_concurrency")):
-            worker.ensure_workers(channel_limit(media_stages.RESOURCE_VIDEO_SUBMIT))
+        # 三通道 worker 分别跟随各自并发配置热更新
+        if any(k in body for k in (*SETTING_KEYS.values(), "video_concurrency", "auto_concurrency",
+                                   "media_scheduler_policy", "video_ready_low_watermark",
+                                   "video_ready_high_watermark", "reference_shot_cohort_limit")):
+            worker.ensure_workers()
     except Exception as exc:  # noqa: BLE001 热更新失败不阻断设置保存，但必须回传可见警告
         return {
             "ok": True,

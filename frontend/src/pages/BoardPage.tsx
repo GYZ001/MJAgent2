@@ -51,6 +51,12 @@ function parseCommaList(value: string): string[] {
   return value.split(/[，,]/).map(x => x.trim()).filter(Boolean)
 }
 
+/** 与后端 content_char_count 同口径的前端兜底：去空白与常见标点。 */
+function countSpokenContentChars(shot: Shot): number {
+  const punct = /[\s\u2000-\u206F\u3000-\u303F\uFF00-\uFFEF!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~，。！？：；、…—·「」『』【】（）《》〈〉“”‘’]/g
+  return (shot.dialogues ?? []).reduce((sum, d) => sum + (d.line || '').replace(punct, '').length, 0)
+}
+
 export default function BoardPage() {
   const { episodeId, go, projectId, toast } = useNav()
   const { data: ep, refresh, error, loading } = useEpisode(episodeId!, 'board')
@@ -77,12 +83,15 @@ export default function BoardPage() {
   }
 
   const totalDur = ep.shots?.reduce((s, x) => s + x.duration_s, 0) ?? 0
-  // 与后端 /storyboard/resume 对齐：有已落库镜头 + 未完成提示，即视为可续跑 checkpoint。
-  // 不依赖具体失败文案（「需修改镜头」「追加镜生成失败」「逐镜 checkpoint」等都会变）。
+  const lastShot = ep.shots?.length ? ep.shots[ep.shots.length - 1] : null
+  const storyboardAlreadyFinal = Boolean(lastShot?.is_final)
+  // 与后端 /storyboard/resume 对齐：有已落库镜头 + 未完成提示，且最后一镜未收束，才可续跑。
+  // 已 is_final 的集禁止「从下一镜继续」，避免幻觉补镜。
   const canResumeCheckpoint = Boolean(
     ep.shots?.length &&
     ep.script_error &&
-    (ep.status === 'scripted' || ep.status === 'script_failed')
+    (ep.status === 'scripted' || ep.status === 'script_failed') &&
+    !storyboardAlreadyFinal
   )
   const selectedShot = ep.shots?.find(shot => shot.id === selectedShotId) ?? ep.shots?.[0]
   const selectedShotIndex = Math.max(0, ep.shots?.findIndex(shot => shot.id === selectedShot?.id) ?? 0)
@@ -185,7 +194,7 @@ export default function BoardPage() {
         <div className="board-stat-strip" aria-label="分镜统计">
           <span><b>{ep.shots?.length ?? 0}</b> 镜头</span>
           <span><b>{totalDur}s</b> 总时长</span>
-          <span><b>5–10s</b> 单镜时长</span>
+          <span><b>默认 5s</b> · &gt;5s 需 AI 审核</span>
           <span><b>¥{ep.cost_cny.toFixed(1)}</b> 已耗</span>
         </div>
         {ep.screenplay_status !== 'ready' && <div className="error-banner">本集还没有可用剧本。请先到剧本台生成/保存完整剧本，再展开分镜。</div>}
@@ -266,7 +275,7 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
         scene_setting: edit.scene_setting, characters: edit.characters, action_desc: edit.action_desc,
         first_frame_desc: edit.first_frame_desc, last_frame_desc: edit.last_frame_desc,
         source_excerpt: edit.source_excerpt,
-        narration: edit.narration || null, dialogues: edit.dialogues, transition: edit.transition,
+        narration: null, dialogues: edit.dialogues, transition: edit.transition,
         continuity_from_prev: !!edit.continuity_from_prev,
         continuity_mode: edit.continuity_mode || '',
         state_in: edit.state_in || '',
@@ -305,7 +314,7 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
         {edit ? (
           <>
             <div className="shot-edit-grid full">
-              <div><label className="f">时长（5~10s）</label>
+              <div><label className="f">时长（默认 5s；&gt;5 需 AI 审核）</label>
                 <select style={{ width: '100%' }} value={edit.duration_s} onChange={e => setEdit({ ...edit, duration_s: Number(e.target.value) })}>
                   {DURATIONS.map(x => <option key={x} value={x}>{x}s</option>)}</select></div>
               <div><label className="f">景别</label>
@@ -349,8 +358,10 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
               <textarea rows={2} value={edit.last_frame_desc ?? ''} onChange={e => setEdit({ ...edit, last_frame_desc: e.target.value })} /></div>
             <div className="full"><label className="f">上游改编证据（不送 Seedance）</label>
               <textarea rows={3} value={edit.source_excerpt ?? ''} onChange={e => setEdit({ ...edit, source_excerpt: e.target.value })} /></div>
-            <div className="full"><label className="f">旁白（可空）</label>
-              <textarea rows={2} value={edit.narration ?? ''} onChange={e => setEdit({ ...edit, narration: e.target.value })} /></div>
+            <div className="full"><label className="f">旁白（已废弃，保存时强制清空）</label>
+              <textarea rows={2} value={edit.narration ?? ''} readOnly placeholder="禁止旁白/内心OS；请改用台词或画面" />
+              {(edit.narration || '').trim() ? <p className="shot-spoken-warn">检测到历史旁白，保存后将自动清空</p> : null}
+            </div>
             <div className="full">
               <label className="f">台词</label>
               {edit.dialogues.map((d, i) => (
@@ -392,6 +403,29 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
               <div className="shot-frame-flow" aria-hidden="true">→</div>
               <div className="shot-frame-card"><span className="shot-frame-label"><strong>离开状态</strong><code>state_out</code></span><p>{s.state_out || s.last_frame_desc || '未设置'}</p></div>
             </div>
+
+            <section className="shot-spoken-panel full" aria-labelledby={`shot-spoken-${shot.id}`}>
+              <header className="shot-context-head">
+                <span id={`shot-spoken-${shot.id}`} className="shot-section-label">本镜台词</span>
+                <span>
+                  纯文字 {(s.spoken_content_chars ?? countSpokenContentChars(s))} /
+                  上限 {s.spoken_limit ?? '—'}（不计标点）
+                </span>
+              </header>
+              {(s.has_legacy_narration || !!(s.narration || '').trim()) && (
+                <div className="shot-spoken-warn" role="status">旁白已废弃：请清空后保存；口播只保留真实台词</div>
+              )}
+              {s.dialogues.length ? (
+                <div className="shot-audio-copy shot-spoken-list">
+                  {s.dialogues.map((d, i) => (
+                    <div key={i} className="shot-audio-line"><b>{d.speaker}<small>{d.emotion}</small></b><p>「{d.line}」</p></div>
+                  ))}
+                </div>
+              ) : (
+                <div className="shot-audio-empty">本镜无台词</div>
+              )}
+            </section>
+
             <section className="shot-context-summary full" aria-labelledby={`shot-context-${shot.id}`}>
               <div className="shot-context-panel">
                 <header className="shot-context-head">
@@ -433,11 +467,13 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
                   <p>{s.source_excerpt || '暂无对应原文'}</p>
                 </div>
                 <div className="shot-audio-copy">
-                  {s.narration && <div className="shot-audio-line"><b>旁白</b><p>{s.narration}</p></div>}
+                  {(s.has_legacy_narration || !!(s.narration || '').trim()) && (
+                    <div className="shot-audio-line"><b>旁白（废弃）</b><p>{s.narration}</p></div>
+                  )}
                   {!!s.dialogues.length && s.dialogues.map((d, i) => (
                     <div key={i} className="shot-audio-line"><b>{d.speaker}<small>{d.emotion}</small></b><p>「{d.line}」</p></div>
                   ))}
-                  {!s.narration && !s.dialogues.length && <div className="shot-audio-empty">本镜无旁白或台词</div>}
+                  {!s.dialogues.length && !(s.narration || '').trim() && <div className="shot-audio-empty">本镜无台词</div>}
                 </div>
               </div>
             )}

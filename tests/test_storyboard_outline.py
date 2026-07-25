@@ -199,6 +199,13 @@ def test_single_long_cover_atom_is_not_char_split() -> None:
     assert outline.shots[0].covers == covers
 
 
+def test_outline_rejects_over_hard_shot_budget() -> None:
+    beats = [f"主线推进节拍第{i}镜发生局势变化" for i in range(1, 22)]
+    outline = _outline(beats, covers={21: KEY_LINE})
+    errors = validate_storyboard_outline(outline, _screenplay(), 50)
+    assert any("硬上限" in e for e in errors)
+
+
 def test_outline_allows_long_atom_for_deterministic_pre_split() -> None:
     covers = KEY_LINE + "萧炎握紧拳头决心查清斗气消失真相" * 3
     outline = _outline(_valid_beats(), covers={5: covers})

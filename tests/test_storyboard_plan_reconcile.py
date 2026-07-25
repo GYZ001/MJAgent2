@@ -19,7 +19,7 @@ def _shot(no: int) -> Shot:
         characters=["萧炎"],
         action_desc=f"萧炎在测验碑前推进第 {no} 段剧情，掌心收力，眼神转冷。",
         first_frame_desc="萧炎站在测验碑前，手掌贴着碑面，神情平静。",
-        last_frame_desc="同一机位，萧炎手掌攥成拳，指节发白。",
+        last_frame_desc="同一机位，萧炎手掌攥成拳。",
         source_excerpt="少年面无表情，唇角有着一抹自嘲，缓缓攥紧了手掌。",
     )
 

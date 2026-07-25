@@ -161,6 +161,25 @@ class VoiceCanonical(BaseModel):
     role_type: str = "named_character"  # named_character | functional_character | narrator
 
 
+class PlotSpineBeat(BaseModel):
+    """主线骨架节拍：谁做了什么 → 局势变化（Renderability First）。"""
+
+    beat_id: str
+    who: str = ""
+    does: str = ""
+    turn: str = ""
+    must_keep: bool = True
+
+
+class PlotSpine(BaseModel):
+    """嵌入剧本输出的主线骨架：只保改变局势的事件，显式列出不拍内容。"""
+
+    episode_premise: str = ""
+    spine_beats: list[PlotSpineBeat] = Field(default_factory=list)
+    must_keep_ending: str = ""
+    drop_list: list[str] = Field(default_factory=list)
+
+
 class EpisodeScreenplay(BaseModel):
     episode_no: int
     # 完整剧本源数据（新格式）
@@ -176,11 +195,10 @@ class EpisodeScreenplay(BaseModel):
     protagonist_goal: str = ""       # 主角本集外在目标（看得见、可完成）（§3.5）
     obstacle: str = ""               # 外部+内部阻力（§3.5）
     stakes: str = ""                 # 失败代价/成功代价（§3.5）
-    # 必保留清单（防丢失核心）：剧本台先显式挑出"绝不能丢"的关键内容，
-    # 写进正文后由 key-content 校验确认其在 full_script_text 中真实出现；
-    # 分镜台再据此逐条落实到镜头，避免重要台词/剧情在压缩中被静默丢弃。
-    key_lines: list[str] = Field(default_factory=list)        # 关键台词（金句/决定性对白/情绪爆点），含说话人更佳（§2.9/§3.11）
-    key_plot_points: list[str] = Field(default_factory=list)  # 关键剧情点/反转/信息揭示（§3.6）
+    # 主线台词/剧情点（Renderability First）：只保留推动 spine 的内容，禁止全量原文台词入库。
+    key_lines: list[str] = Field(default_factory=list)        # 主线台词 ≤6，含说话人更佳
+    key_plot_points: list[str] = Field(default_factory=list)  # 与 spine 对齐的局势变化
+    plot_spine: PlotSpine | None = None
     scene_outline: list[ScriptScene] = Field(default_factory=list)
     full_script_text: str = ""
     character_state_changes: list[str] = Field(default_factory=list)

@@ -52,9 +52,9 @@ def _shot(no: int, *, narration: str | None = None, dialogues: list[Dialogue] | 
         camera_move="固定",
         scene_setting="日，萧家广场",
         characters=["萧炎"],
-        action_desc="萧炎站在测验碑前缓缓攥紧手掌，萧炎抬眼扫过四周议论的人群，掌心因用力微微发白。",
+        action_desc="萧炎站在测验碑前缓缓攥紧手掌，萧炎抬眼扫过四周议论的人群，掌心因用力而发白。",
         first_frame_desc="萧炎站在测验碑前，手掌贴着碑面，神情平静。",
-        last_frame_desc="同一机位，萧炎手掌攥成拳，指节发白，眼神转冷。",
+        last_frame_desc="同一机位，萧炎手掌攥成拳，眼神转冷。",
         source_excerpt="少年面无表情，唇角有着一抹自嘲，缓缓攥紧了手掌。",
         narration=narration,
         dialogues=dialogues or [],
@@ -88,7 +88,8 @@ def test_progress_block_has_no_episode_duration_limit() -> None:
     for shot in nearly_full:
         shot.duration_s = 5
     low = _storyboard_progress_block(nearly_full)
-    assert "13" in low and "65s" in low and "duration_s" in low and "5~10s" in low
+    assert "13" in low and "65s" in low and "duration_s" in low
+    assert "默认 5s" in low and "软预算" in low
     plenty = _storyboard_progress_block([])
     assert "duration_s" in plenty and "is_final=true" in plenty
 
@@ -196,13 +197,13 @@ def test_must_finish_hard_fails_on_missing_key_content() -> None:
     assert not any("继续补镜" in e for e in errors)
 
 
-def test_rejects_shot_reusing_previous_source_excerpt() -> None:
-    # 反停留：本镜原文摘录与上一镜几乎逐字相同（典型"多镜演同一句话"）→ 退回要求推进。
+def test_allows_shot_reusing_previous_source_excerpt() -> None:
+    # Renderability：相邻镜允许共享同一主线段落 source_excerpt，不再因此拒收。
     prev = _shot(1)
     cur = _shot(2)  # 与 prev 用同一段 source_excerpt
     errors = _validate(_draft(cur, is_final=False),
                        allow_finish=False, must_finish=False, screenplay=_screenplay(), completed=[prev])
-    assert any("source_excerpt 与上一镜几乎相同" in e for e in errors)
+    assert not any("source_excerpt 与上一镜几乎相同" in e for e in errors)
 
 
 def test_final_passes_when_key_content_present() -> None:

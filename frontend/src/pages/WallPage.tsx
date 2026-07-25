@@ -90,18 +90,25 @@ function refSourceLabel(source?: string): string {
 }
 
 function rejectReasonLabel(reason?: string | null): string {
-  if (!reason) return '质检未通过'
-  return ({
-    quality_below_threshold: '质检分低于阈值',
-    missing_quality_score: '缺少质检分',
-    quality_issue_blocks_reuse: '质检问题不可复用',
-  } as Record<string, string>)[reason] ?? reason
+  if (!reason) return '分数不足'
+  // 用户只关心分数：内部代号一律折叠为「分数不足」；手动废弃另议
+  if (reason === 'missing_quality_score') return '缺少质检分'
+  if (
+    reason === 'quality_below_threshold'
+    || reason === 'quality_issue_blocks_reuse'
+    || reason === 'consistency_drift'
+    || reason === 'consistency_drift_unfixable'
+    || reason === 'duplicate_character_suppressed'
+  ) return '分数不足'
+  return '分数不足'
 }
 
 function refScore(r: ReferenceImage): number | null {
   const s = r.qualityScore ?? r.qa?.overall
   return typeof s === 'number' ? s : null
 }
+
+const QA_KEEP_THRESHOLD = 0.8
 
 /* ─── 单张参考图卡片：图 + QA 打分 + 来源 + 操作 ─── */
 function RefCard({ r, onOpen, onAction, actionLabel, discarded }: {
@@ -111,22 +118,21 @@ function RefCard({ r, onOpen, onAction, actionLabel, discarded }: {
   const score = refScore(r)
   const src = r.image_url || undefined
   const label = refSourceLabel(r.source)
-  const issue = (r.qa?.issues ?? []).filter(Boolean)[0]
   return (
     <figure className={`material-card${discarded ? ' material-card-discarded' : ''}`} title={label}>
       <div className="mc-thumb" onClick={() => src && onOpen(src, label)}>
         {src ? <img src={src} alt={label} loading="lazy" /> : <div className="mc-noimg">无图</div>}
         {score != null && (
-          <span className={`mc-qa-badge${score < 0.75 ? ' bad' : ''}`}>QA {score.toFixed(2)}</span>
+          <span className={`mc-qa-badge${score < QA_KEEP_THRESHOLD ? ' bad' : ''}`}>QA {score.toFixed(2)}</span>
         )}
       </div>
       <figcaption>
         <span className="mc-label">{label}</span>
         {discarded
-          ? <span className="mc-reject">{rejectReasonLabel(r.rejectReason)}</span>
+          ? <span className="mc-reject">{r.deleted ? '已手动废弃' : rejectReasonLabel(r.rejectReason)}</span>
           : (r.rejectReason
             ? <span className="mc-reject warn">兜底·{rejectReasonLabel(r.rejectReason)}</span>
-            : issue ? <span className="mc-reject warn">{issue}</span> : null)}
+            : null)}
         {onAction && (
           <button className={`mc-action ${discarded ? 'restore' : 'discard'}`} onClick={onAction}>
             {actionLabel}
@@ -179,7 +185,7 @@ function ShotMaterialGallery({ shot, onOpen, onRefresh, onToast }: {
         <div className="discard-gallery">
           <div className="discard-gallery-head">
             废弃照片画廊 · {discarded.length} 张
-            <span className="discard-gallery-hint">质检未通过 / 已废弃，不会喂给视频模型</span>
+            <span className="discard-gallery-hint">分数不足 / 已手动废弃，不会喂给视频模型</span>
           </div>
           <div className="material-strip">
             {discarded.map(r => (
@@ -272,8 +278,8 @@ export default function WallPage() {
   }, [episodeId, shots])
 
   const videoActive = shots.some(s =>
-    s.versions.some(v => v.status === 'queued' || v.status === 'running' || v.status === 'waiting_provider')
-    || (s.pipeline != null && ['queued', 'running', 'waiting_provider', 'blocked'].includes(s.pipeline.pipeline_status))
+    (s.pipeline != null && ['queued', 'running', 'waiting', 'waiting_provider', 'blocked'].includes(s.pipeline.pipeline_status))
+    || (!s.pipeline && s.versions.some(v => v.status === 'queued' || v.status === 'running' || v.status === 'waiting_provider'))
   )
   const videoTimer = useTaskTimer(`episode.${episodeId}.videos`, videoActive)
 

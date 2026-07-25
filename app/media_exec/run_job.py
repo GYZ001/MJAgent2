@@ -11,30 +11,49 @@ def _assert_job_lease(job_id: str, owner: str, *, lease_seconds: float = 180.0) 
 
 
 def _enqueue_for_current_status(job_id: str) -> None:
-    """Route provider polling away from expensive reference/video preparation.
+    """按阶段路由到 finalize / video-ready / reference 通道。
 
-    Both queues still use the same durable job row and CAS lease.  The split is
-    only scheduling priority: a completed provider task must not sit behind a
-    whole episode of image generation before it can be downloaded and adopted.
+    三通道仍共用同一 durable job 行与 CAS lease；拆分只影响调度优先级：
+    已接单/待收尾绝不能排在整集参考图后面。
     """
     row = get_conn().execute(
-        """SELECT j.status, v.provider_task_id
+        """SELECT j.status, j.pipeline_stage, v.provider_task_id, v.image_inputs, j.after_shot_id
            FROM jobs j LEFT JOIN shot_versions v ON v.id=j.version_id
            WHERE j.id=?""",
         (job_id,),
     ).fetchone()
-    target = (
-        _poll_queue
-        if row and (row["status"] == "waiting_provider" or row["provider_task_id"])
-        else _queue
+    if not row:
+        return
+    if row["status"] == "waiting_provider" or row["provider_task_id"]:
+        _poll_queue.put_nowait(job_id)
+        return
+    from app.media_pipeline.scheduler import continuity_anchor_ready, is_true_video_ready, scheduler_policy
+    from app.media_pipeline import stages as media_stages
+    meta = {}
+    try:
+        meta = json.loads(row["image_inputs"] or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        meta = {}
+    continuity_ok = True
+    if row["after_shot_id"]:
+        continuity_ok = continuity_anchor_ready(get_conn(), row["after_shot_id"])[0]
+    stage = row["pipeline_stage"]
+    ready = (
+        stage == media_stages.STAGE_VIDEO_READY
+        or is_true_video_ready(meta, continuity_ok=continuity_ok)
     )
-    target.put_nowait(job_id)
+    if scheduler_policy() == "stage_aware" and ready:
+        _video_ready_queue.put_nowait(job_id)
+    else:
+        _queue.put_nowait(job_id)
 
 
 def _reference_gallery_ready(raw_meta: str | None) -> bool:
     try:
         meta = json.loads(raw_meta or "{}")
     except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if meta.get("reference_static_ready") and meta.get("reference_generation_complete") is False:
         return False
     return bool(meta.get("reference_images")) and meta.get("reference_generation_complete") is not False
 
@@ -46,16 +65,20 @@ def _auto_retake(raw_meta: str | None) -> bool:
         return False
 
 
-def _dispatch_due_jobs() -> dict[str, int]:
-    """Continuously rebuild the runnable queues from durable job state.
+def _completed_reference_slots(raw_meta: str | None) -> int:
+    try:
+        meta = json.loads(raw_meta or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return 0
+    slots = meta.get("reference_slots") or {}
+    if isinstance(slots, dict):
+        return sum(1 for s in slots.values() if (s or {}).get("status") == "passed")
+    refs = meta.get("reference_images") or []
+    return len([r for r in refs if r.get("selectedForSeedance", True) and not r.get("deleted")])
 
-    Priority is intentionally stage-aware:
-    1. provider handles are always routed to the isolated poll queue;
-    2. continuity-unblocked first-pass shots outrank auto retakes;
-    3. blocked shots may prepare references only as spare bounded work;
-    4. blocked shots whose references are already ready stay out of the hot
-       queue until their predecessor succeeds, avoiding 15-second bounce loops.
-    """
+
+def _dispatch_due_jobs_legacy() -> dict[str, int]:
+    """旧调度：poll 优先 + 主队列混合参考图/视频提交。"""
     conn = get_conn()
     stamp = now()
     rows = rows_to_dicts(conn.execute(
@@ -94,12 +117,9 @@ def _dispatch_due_jobs() -> dict[str, int]:
         age_key = float(row.get("created_at") or stamp)
         shot_key = int(row.get("shot_no") or 10**9)
         if ready:
-            # First pass before retake; among first-pass jobs, a prepared gallery
-            # can submit immediately and therefore gets the shortest path.
             rank = 2 if is_retake else (0 if refs_ready else 1)
             main_candidates.append(((rank, age_key, shot_key), row))
         elif not refs_ready:
-            # Useful speculative work, but never ahead of a runnable video.
             rank = 1 if is_retake else 0
             blocked_reference_candidates.append(((rank, age_key, shot_key), row))
 
@@ -126,7 +146,178 @@ def _dispatch_due_jobs() -> dict[str, int]:
     for row in chosen:
         _queue.put_nowait(row["id"])
 
-    return {"poll": poll_enqueued, "main": len(chosen), "due": len(rows)}
+    return {"poll": poll_enqueued, "main": len(chosen), "due": len(rows), "video_ready": 0, "reference": len(chosen)}
+
+
+def _dispatch_due_jobs_stage_aware() -> dict[str, int]:
+    """QPSP：finalize > video_ready > reference(cohort) > retake；高低水位背压。"""
+    from app.media_pipeline import stages as media_stages
+    from app.media_pipeline.scheduler import (
+        classify_scheduler_lane,
+        continuity_anchor_ready,
+        continuity_chain_remaining,
+        is_true_video_ready,
+        job_scheduler_score,
+        should_start_more_reference_work,
+    )
+    from app.media_pipeline.stage_state import set_pipeline_stage
+
+    conn = get_conn()
+    stamp = now()
+    rows = rows_to_dicts(conn.execute(
+        """SELECT j.id, j.status, j.created_at, j.after_shot_id, j.episode_id, j.pipeline_stage,
+                  v.provider_task_id, v.image_inputs, s.shot_no, s.id AS shot_pk
+           FROM jobs j
+           LEFT JOIN shot_versions v ON v.id=j.version_id
+           LEFT JOIN shots s ON s.id=j.shot_id
+           WHERE j.kind='video'
+             AND j.status IN ('queued','waiting_provider')
+             AND (j.next_retry_at IS NULL OR j.next_retry_at<=?)
+             AND j.cancellation_requested=0 AND j.abandoned=0""",
+        (stamp,),
+    ).fetchall())
+
+    poll_candidates: list[dict[str, Any]] = []
+    video_ready: list[tuple[float, dict[str, Any]]] = []
+    reference_critical: list[tuple[float, dict[str, Any]]] = []
+    reference_normal: list[tuple[float, dict[str, Any]]] = []
+    retake_jobs: list[tuple[float, dict[str, Any]]] = []
+    continuity_cache: dict[str, bool] = {}
+
+    for row in rows:
+        if row.get("status") == "waiting_provider" or row.get("provider_task_id"):
+            poll_candidates.append(row)
+            continue
+        after_shot_id = row.get("after_shot_id")
+        if after_shot_id:
+            ready = continuity_cache.get(after_shot_id)
+            if ready is None:
+                ready = continuity_anchor_ready(conn, after_shot_id)[0]
+                continuity_cache[after_shot_id] = ready
+        else:
+            ready = True
+        meta = {}
+        try:
+            meta = json.loads(row.get("image_inputs") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            meta = {}
+        refs_ready = _reference_gallery_ready(row.get("image_inputs"))
+        static_waiting = bool(meta.get("reference_static_ready")) and not refs_ready
+        true_ready = (
+            row.get("pipeline_stage") == media_stages.STAGE_VIDEO_READY
+            or is_true_video_ready(meta, continuity_ok=ready)
+        )
+        is_retake = _auto_retake(row.get("image_inputs"))
+        age_min = max(0.0, (stamp - float(row.get("created_at") or stamp)) / 60.0)
+        chain = 0
+        if row.get("episode_id") and row.get("shot_pk"):
+            chain = continuity_chain_remaining(conn, row["episode_id"], row["shot_pk"])
+        completed = _completed_reference_slots(row.get("image_inputs"))
+        score = job_scheduler_score(
+            first_pass=not is_retake,
+            continuity_remaining=chain,
+            completed_slots=completed,
+            wait_age_minutes=age_min,
+            auto_retake=is_retake,
+        )
+        critical = chain > 0 or bool(after_shot_id)
+        lane = classify_scheduler_lane(
+            refs_ready=true_ready or refs_ready,
+            continuity_ok=ready,
+            is_retake=is_retake,
+            static_ready_waiting=static_waiting,
+            critical_path=critical,
+        )
+        # 持久化车道（轻量，失败忽略）
+        try:
+            if true_ready and ready:
+                set_pipeline_stage(
+                    row["id"], media_stages.STAGE_VIDEO_READY,
+                    scheduler_lane=media_stages.LANE_VIDEO_READY,
+                    priority_class="first_pass" if not is_retake else "retake",
+                    conn=conn,
+                )
+            elif not ready and (refs_ready or static_waiting):
+                set_pipeline_stage(
+                    row["id"], media_stages.STAGE_WAITING_CONTINUITY,
+                    reason_code="WAITING_CONTINUITY_ANCHOR",
+                    reason_text=f"等待镜尾帧（{after_shot_id}）" if after_shot_id else "等待上一镜尾帧",
+                    scheduler_lane=media_stages.LANE_REFERENCE_CRITICAL,
+                    conn=conn,
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
+        if true_ready and ready:
+            video_ready.append((score, row))
+        elif is_retake:
+            retake_jobs.append((score, row))
+        elif not ready and refs_ready:
+            # 参考已齐但等尾帧：不占参考图 cohort，也不进 video_ready
+            continue
+        elif lane == media_stages.LANE_REFERENCE_CRITICAL or critical:
+            reference_critical.append((score, row))
+        else:
+            reference_normal.append((score, row))
+
+    conn.commit()
+
+    poll_candidates.sort(key=lambda row: float(row.get("created_at") or stamp))
+    video_ready.sort(key=lambda item: -item[0])
+    reference_critical.sort(key=lambda item: -item[0])
+    reference_normal.sort(key=lambda item: -item[0])
+    retake_jobs.sort(key=lambda item: -item[0])
+
+    poll_capacity = max(1, _poll_worker_target or 1) * _DISPATCH_BACKLOG_PER_WORKER
+    poll_slots = max(0, poll_capacity - _poll_queue.qsize())
+    vr_capacity = max(1, _video_ready_worker_target or 1) * _DISPATCH_BACKLOG_PER_WORKER
+    vr_slots = max(0, vr_capacity - _video_ready_queue.qsize())
+    ref_capacity = max(1, _reference_worker_target or _worker_target or 1) * _DISPATCH_BACKLOG_PER_WORKER
+    ref_slots = max(0, ref_capacity - _queue.qsize())
+
+    poll_enqueued = 0
+    for row in poll_candidates[:poll_slots]:
+        _poll_queue.put_nowait(row["id"])
+        poll_enqueued += 1
+
+    vr_enqueued = 0
+    for _, row in video_ready[:vr_slots]:
+        _video_ready_queue.put_nowait(row["id"])
+        vr_enqueued += 1
+
+    # 参考图：cohort + 高低水位；关键路径优先
+    allow, demand = should_start_more_reference_work(conn=conn)
+    ref_enqueued = 0
+    if allow and demand > 0 and ref_slots > 0:
+        budget = min(demand, ref_slots)
+        ordered = reference_critical + reference_normal + retake_jobs
+        for _, row in ordered[:budget]:
+            _queue.put_nowait(row["id"])
+            ref_enqueued += 1
+    elif ref_slots > 0 and reference_critical:
+        # 水位满时仍允许完成已接近完成的关键路径（只取 critical，且仅当已有 slot 进度）
+        for _, row in reference_critical:
+            if ref_enqueued >= ref_slots:
+                break
+            if _completed_reference_slots(row.get("image_inputs")) > 0:
+                _queue.put_nowait(row["id"])
+                ref_enqueued += 1
+
+    return {
+        "poll": poll_enqueued,
+        "main": vr_enqueued + ref_enqueued,
+        "due": len(rows),
+        "video_ready": vr_enqueued,
+        "reference": ref_enqueued,
+    }
+
+
+def _dispatch_due_jobs() -> dict[str, int]:
+    """Continuously rebuild the runnable queues from durable job state."""
+    from app.media_pipeline.scheduler import scheduler_policy
+    if scheduler_policy() == "legacy":
+        return _dispatch_due_jobs_legacy()
+    return _dispatch_due_jobs_stage_aware()
 
 
 async def _durable_dispatcher() -> None:
@@ -138,8 +329,8 @@ async def _durable_dispatcher() -> None:
                 # Recreate an unexpectedly dead worker without changing the
                 # configured target. Worker loops catch job errors themselves,
                 # so this is primarily protection against lifecycle regressions.
-                if _worker_target > 0:
-                    ensure_workers(_worker_target)
+                if _worker_target > 0 or _video_ready_worker_target > 0:
+                    ensure_workers()
             except Exception as exc:  # noqa: BLE001 dispatcher must remain alive
                 errors.record_and_format(exc, action="durable_media_dispatch")
             await asyncio.sleep(_DISPATCH_INTERVAL_SECONDS)
@@ -419,6 +610,9 @@ async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dic
     if meta.get("reference_images") and meta.get("reference_generation_complete") is not False:
         return meta, prompt_text
     from app.schemas import Bible
+    from app.media_pipeline import stages as media_stages
+    from app.media_pipeline.stage_state import set_pipeline_stage
+    from app.continuity import derive_continuity_mode, uses_previous_tail_frame
 
     project = conn.execute("SELECT * FROM projects WHERE id=?", (job["project_id"],)).fetchone()
     bible = Bible.model_validate(json.loads(project["bible_json"]))
@@ -433,10 +627,10 @@ async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dic
     if decision.mode != video_modes.REFERENCE_IMAGE_MODE:
         decision = video_modes.default_reference_decision()
     meta["mode"] = video_modes.REFERENCE_IMAGE_MODE
-    # ── 第 1 次尝试：生成参考图 ──
     shot_id = job["shot_id"]
+    needs_tail = uses_previous_tail_frame(derive_continuity_mode(shot_model))
     rejection_details: list[dict[str, Any]] = []
-    rejected_assets: list = []  # 质检未通过的参考图（带图片），存入 meta 供废弃画廊展示
+    rejected_assets: list = []
 
     def _persist_reference_progress(current_assets: list, current_rejected: list) -> None:
         """Checkpoint each completed reference so the polling UI can render it."""
@@ -447,13 +641,104 @@ async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dic
             [a.public_dict() for a in current_assets]
             + [a.public_dict() for a in current_rejected]
         )
+        done = len([a for a in current_assets if getattr(a, "source", "") == "seedream_generated"
+                    or (getattr(a, "selectedForSeedance", False))])
+        set_pipeline_stage(
+            job["id"], media_stages.STAGE_REFERENCE_GENERATE,
+            stage_progress={"current": done, "total": max(done, 4), "unit": "reference_slots"},
+            scheduler_lane=media_stages.LANE_REFERENCE_CRITICAL if needs_tail else media_stages.LANE_REFERENCE_NORMAL,
+            conn=conn,
+        )
         _set_version(version["id"], image_inputs=json.dumps(meta, ensure_ascii=False))
+        conn.commit()
+
+    # 连续镜两段式：静态参考可预取；缺尾帧时不得宣称最终完成
+    set_pipeline_stage(job["id"], media_stages.STAGE_REFERENCE_PROMPT, conn=conn)
+    conn.commit()
+
+    # 若已静态就绪、仅等尾帧：只做装配，不重跑整组生成
+    if meta.get("reference_static_ready") and needs_tail and meta.get("reference_images"):
+        from app.media_pipeline.scheduler import continuity_anchor_ready
+        ready, reason = continuity_anchor_ready(conn, job["after_shot_id"] or (prev_shot["id"] if prev_shot else None))
+        if not ready:
+            set_pipeline_stage(
+                job["id"], media_stages.STAGE_WAITING_CONTINUITY,
+                reason_code="WAITING_CONTINUITY_ANCHOR",
+                reason_text=reason or "参考图已备齐，等待上一镜尾帧",
+                conn=conn,
+            )
+            conn.commit()
+            raise _ContinuityWait(reason or "参考图已备齐，等待上一镜尾帧")
+        set_pipeline_stage(job["id"], media_stages.STAGE_CONTINUITY_ASSEMBLING, conn=conn)
+        conn.commit()
+        assets = await video_modes.assemble_continuity_tail(
+            conn=conn, project_id=job["project_id"], episode_no=ep["episode_no"], episode_id=job["episode_id"],
+            shot_id=shot_id, shot=shot_model, bible=bible, meta=meta, prev_shot=prev_shot,
+            rejection_details=rejection_details, rejected_out=rejected_assets,
+        )
+        if assets:
+            meta["reference_images"] = [a.public_dict() for a in assets] + [a.public_dict() for a in rejected_assets]
+            meta["reference_generation_complete"] = True
+            meta["reference_static_ready"] = True
+            meta["continuity_anchor_ready"] = True
+            meta["reference_group_gate_passed"] = True
+            meta["video_input_manifest_frozen"] = True
+            meta.pop("first_frame_path", None)
+            meta.pop("last_frame_path", None)
+            prompt_text = video_modes.append_reference_prompt_notes(prompt_text, assets)
+            try:
+                from app.media_pipeline.reference_store import upsert_reference_set_from_meta
+                upsert_reference_set_from_meta(
+                    shot_id=shot_id, version_id=version["id"], meta=meta, conn=conn,
+                    static_ready=True, continuity_ready=True, group_gate_passed=True,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            set_pipeline_stage(
+                job["id"], media_stages.STAGE_VIDEO_READY,
+                scheduler_lane=media_stages.LANE_VIDEO_READY, ready_at=now(), conn=conn,
+            )
+            _set_version(version["id"], image_inputs=json.dumps(meta, ensure_ascii=False), prompt_text=prompt_text)
+            conn.commit()
+            return meta, prompt_text
 
     assets = await video_modes.build_reference_assets(
         conn=conn, project_id=job["project_id"], episode_no=ep["episode_no"], episode_id=job["episode_id"],
         shot_id=shot_id, shot=shot_model, bible=bible, decision=decision, prev_shot=prev_shot,
         rejection_details=rejection_details, rejected_out=rejected_assets,
-        on_progress=_persist_reference_progress)
+        on_progress=_persist_reference_progress,
+        allow_missing_continuity_tail=needs_tail,
+        job_id=job["id"],
+        existing_meta=meta,
+    )
+
+    # 静态完成但缺强制尾帧 → 停在 waiting_continuity，不标 complete
+    if assets and needs_tail:
+        has_tail = any(getattr(a, "type", None) == "previous_shot_frame" for a in assets)
+        if not has_tail:
+            meta["mode"] = video_modes.REFERENCE_IMAGE_MODE
+            meta["mode_decision"] = video_modes.decision_to_dict(decision)
+            meta["reference_images"] = [a.public_dict() for a in assets] + [a.public_dict() for a in rejected_assets]
+            meta["reference_static_ready"] = True
+            meta["reference_generation_complete"] = False
+            meta["continuity_anchor_ready"] = False
+            try:
+                from app.media_pipeline.reference_store import upsert_reference_set_from_meta
+                upsert_reference_set_from_meta(
+                    shot_id=shot_id, version_id=version["id"], meta=meta, conn=conn,
+                    static_ready=True, continuity_ready=False, group_gate_passed=False,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            set_pipeline_stage(
+                job["id"], media_stages.STAGE_WAITING_CONTINUITY,
+                reason_code="WAITING_CONTINUITY_ANCHOR",
+                reason_text="参考图已备齐，等待上一镜尾帧",
+                conn=conn,
+            )
+            _set_version(version["id"], image_inputs=json.dumps(meta, ensure_ascii=False), prompt_text=prompt_text)
+            conn.commit()
+            raise _ContinuityWait("参考图已备齐，等待上一镜尾帧")
 
     # ── 第 1 次失败：记录原始失败原因并重试 1 次 ──
     if not assets:
@@ -466,15 +751,17 @@ async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dic
                 "rejection_details": rejection_details[:5],
             })
 
-        # ── 第 2 次尝试：重试 ──
         retry_rejection: list[dict[str, Any]] = []
-        # 重试会覆盖第 1 次尝试写入的同名参考图文件，故重置废弃列表，只保留与最终 assets 对应的本轮废弃图。
         rejected_assets = []
         assets = await video_modes.build_reference_assets(
             conn=conn, project_id=job["project_id"], episode_no=ep["episode_no"], episode_id=job["episode_id"],
             shot_id=shot_id, shot=shot_model, bible=bible, decision=decision, prev_shot=prev_shot,
             rejection_details=retry_rejection, rejected_out=rejected_assets,
-            on_progress=_persist_reference_progress)
+            on_progress=_persist_reference_progress,
+            allow_missing_continuity_tail=needs_tail,
+            job_id=job["id"],
+            existing_meta=meta,
+        )
         rejection_details.extend(retry_rejection)
 
         if assets:
@@ -496,9 +783,12 @@ async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dic
     if assets:
         meta["mode"] = video_modes.REFERENCE_IMAGE_MODE
         meta["mode_decision"] = video_modes.decision_to_dict(decision)
-        # 选用图 + 质检未通过的废弃图（selectedForSeedance=False）一并存档：前者喂模型，后者只展示。
         meta["reference_images"] = [a.public_dict() for a in assets] + [a.public_dict() for a in rejected_assets]
         meta["reference_generation_complete"] = True
+        meta["reference_static_ready"] = True
+        meta["continuity_anchor_ready"] = True
+        meta["reference_group_gate_passed"] = True
+        meta["video_input_manifest_frozen"] = True
         meta.pop("first_frame_path", None)
         meta.pop("last_frame_path", None)
         meta.pop("first_frame_scene_id", None)
@@ -508,10 +798,16 @@ async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dic
             from app.media_pipeline.reference_store import upsert_reference_set_from_meta
             upsert_reference_set_from_meta(
                 shot_id=shot_id, version_id=version["id"], meta=meta, conn=conn,
+                static_ready=True, continuity_ready=True, group_gate_passed=True,
             )
         except Exception:  # noqa: BLE001 参考图集落库失败不阻断视频
             pass
+        set_pipeline_stage(
+            job["id"], media_stages.STAGE_VIDEO_READY,
+            scheduler_lane=media_stages.LANE_VIDEO_READY, ready_at=now(), conn=conn,
+        )
         _set_version(version["id"], image_inputs=json.dumps(meta, ensure_ascii=False), prompt_text=prompt_text)
+        conn.commit()
         return meta, prompt_text
 
     # ── 参考图模式彻底失败（2 次均失败）—— 记录原始失败原因 ──
@@ -536,8 +832,21 @@ async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dic
         "prompt": prompt_text[:500],
     }]
     meta["reference_generation_complete"] = True
+    set_pipeline_stage(
+        job["id"], media_stages.STAGE_FAILED,
+        reason_code="REFERENCE_MODE_FAILED", reason_text=ref_failure_reason, conn=conn,
+    )
     _set_version(version["id"], image_inputs=json.dumps(meta, ensure_ascii=False), prompt_text=prompt_text)
+    conn.commit()
     raise ProviderError(f"视频生成任务失败：参考图模式未产出可用参考图（{ref_failure_reason}）")
+
+
+class _ContinuityWait(Exception):
+    """静态参考已齐、等待上一镜尾帧；由 _run_job 转为排队等待。"""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
 
 
 async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
@@ -596,17 +905,45 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         meta.pop("last_frame_path", None)
         meta.pop("first_frame_scene_id", None)
         meta.pop("last_frame_scene_id", None)
-        meta, prompt_text = await _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta, prompt_text)
+        try:
+            meta, prompt_text = await _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta, prompt_text)
+        except _ContinuityWait as wait_exc:
+            wait = 15.0
+            note = wait_exc.reason
+            conn.execute(
+                """UPDATE jobs SET status='queued', error=?, next_retry_at=?,
+                          lease_owner=NULL, lease_expires_at=NULL, updated_at=?
+                   WHERE id=? AND lease_owner=?""",
+                (note, now() + wait, now(), job_id, owner),
+            )
+            conn.execute(
+                "UPDATE budget_reservations SET status='reserved' WHERE job_id=? AND status='running'",
+                (job_id,),
+            )
+            conn.commit()
+            task = asyncio.get_running_loop().create_task(_requeue_after(job_id, wait))
+            _retry_tasks.add(task)
+            task.add_done_callback(_retry_tasks.discard)
+            return
         _assert_job_lease(job_id, owner)
 
         # 连续镜调度级依赖：无可用尾帧时不得提交 Seedance
         if job["after_shot_id"] and not version["provider_task_id"]:
             from app.media_pipeline.scheduler import continuity_anchor_ready
+            from app.media_pipeline import stages as media_stages
+            from app.media_pipeline.stage_state import set_pipeline_stage
             ready, reason = continuity_anchor_ready(conn, job["after_shot_id"])
             if not ready:
                 wait = 15.0
                 note = reason or "等待上一镜连续锚点"
                 status = "waiting_human" if "人工" in note else "queued"
+                set_pipeline_stage(
+                    job_id,
+                    media_stages.STAGE_WAITING_HUMAN if status == "waiting_human" else media_stages.STAGE_WAITING_CONTINUITY,
+                    reason_code="WAITING_CONTINUITY_ANCHOR",
+                    reason_text=note,
+                    conn=conn,
+                )
                 conn.execute(
                     """UPDATE jobs SET status=?, error=?, next_retry_at=?,
                               lease_owner=NULL, lease_expires_at=NULL, updated_at=?
@@ -627,12 +964,20 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         # 视频提交配额：首轮优先，重抽限额
         if not version["provider_task_id"]:
             from app.media_pipeline.scheduler import can_admit_video_submit
+            from app.media_pipeline import stages as media_stages
+            from app.media_pipeline.stage_state import set_pipeline_stage
             is_retake = int(meta.get("auto_retake_count") or 0) > 0
             ok, reason = can_admit_video_submit(
                 episode_id=job["episode_id"], project_id=job["project_id"], is_auto_retake=is_retake,
             )
             if not ok:
                 wait = 20.0
+                set_pipeline_stage(
+                    job_id, media_stages.STAGE_WAITING_VIDEO_SLOT,
+                    reason_code="EPISODE_VIDEO_INFLIGHT_FULL",
+                    reason_text=reason or "等待视频槽位",
+                    conn=conn,
+                )
                 conn.execute(
                     """UPDATE jobs SET status='queued', error=?, next_retry_at=?,
                               lease_owner=NULL, lease_expires_at=NULL, updated_at=?
@@ -668,6 +1013,9 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                         meta["last_frame_used"] = any(role == "last_frame" for _, role in image_inputs)
                     _set_version(version["id"], image_inputs=json.dumps(meta, ensure_ascii=False))
                 try:
+                    from app.media_pipeline import stages as media_stages
+                    from app.media_pipeline.stage_state import set_pipeline_stage
+                    set_pipeline_stage(job_id, media_stages.STAGE_VIDEO_SUBMITTING, conn=conn)
                     conn.execute(
                         "UPDATE jobs SET provider_operation_id=?, provider_create_state='submitting', "
                         "updated_at=? WHERE id=?",
@@ -677,7 +1025,6 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                     from app.media_pipeline.concurrency import (
                         report_congestion, report_healthy, semaphore_for,
                     )
-                    from app.media_pipeline import stages as media_stages
                     async with semaphore_for(media_stages.RESOURCE_VIDEO_SUBMIT):
                         try:
                             task_id = await hiagent.create_video_task(
@@ -738,6 +1085,12 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                     "provider_non_cancellable=1, provider_submitted_at=?, updated_at=? WHERE id=?",
                     (provider_operation_id, now(), now(), job_id),
                 )
+                try:
+                    from app.media_pipeline import stages as media_stages
+                    from app.media_pipeline.stage_state import set_pipeline_stage
+                    set_pipeline_stage(job_id, media_stages.STAGE_VIDEO_GENERATING, conn=conn)
+                except Exception:  # noqa: BLE001
+                    pass
                 conn.commit()
                 provider_submitted_at = conn.execute(
                     "SELECT provider_submitted_at FROM jobs WHERE id=?", (job_id,)
@@ -830,7 +1183,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             owner,
             lease_seconds=max(180.0, float(config.TIMEOUT_VLM_READ) + 60.0),
         )
-        await _maybe_auto_qa(job, version["id"], str(dest))
+        force_best = await _maybe_auto_qa(job, version["id"], str(dest))
         _assert_job_lease(job_id, owner)
         media_evidence.record_video_candidate(
             version["id"], step_run_id=_row_value(job, "step_run_id")
@@ -840,7 +1193,9 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         ).fetchone()["technical_validation_json"] or "{}")
         if not technical.get("passed"):
             raise ProviderError("视频文件技术校验失败，候选不可采用")
-        media_evidence.select_best_video_candidate(job["shot_id"])
+        media_evidence.select_best_video_candidate(
+            job["shot_id"], force_best=force_best
+        )
         if _set_job(job_id, "succeeded", lease_owner=owner):
             media_scheduler.settle_budget(job_id, cost, success=True)
             reconcile_episode_generation_status(job["episode_id"])
@@ -865,10 +1220,14 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             reconcile_episode_generation_status(job["episode_id"])
 
 
-async def _maybe_auto_qa(job, version_id: str, video_path: str) -> None:
-    """自动质检 + 一次自动重抽（QA 失败不阻塞流程，只标记未质检）。"""
+async def _maybe_auto_qa(job, version_id: str, video_path: str) -> bool:
+    """自动质检 + 自动重抽。
+
+    返回 True 表示重抽已结束/不会再抽，调用方应 ``force_best`` 采纳最高分视频，
+    避免槽位用尽后镜头无成片。QA 异常不阻塞已落盘视频。
+    """
     if get_setting("auto_qa") != "true" or not shutil.which("ffmpeg"):
-        return
+        return False
     conn = get_conn()
     try:
         frames = _extract_frames(video_path)
@@ -907,15 +1266,20 @@ async def _maybe_auto_qa(job, version_id: str, video_path: str) -> None:
             anchors,
             state_in=effective_state_in(shot_model),
             state_out=planned_state_out(shot_model),
+            duration_s=int(shot_model.duration_s or shot["duration_s"] or 0) or None,
+            duration_needs_review=(
+                "duration_gt5_needs_review" in (shot_model.risk_tags or [])
+                or int(shot_model.duration_s or shot["duration_s"] or 0) > 5
+            ),
         )
         _set_version(version_id, qa_json=json.dumps(qa, ensure_ascii=False))
         # QA 非标准输出虽可恢复部分分数，但证据不足以触发付费重抽。
-        # 这种情况保留结果供人工确认，避免把 VLM 格式错误当成视频质量错误。
+        # 重抽不会发生：交由 force_best 在技术合格视频里挑最高分，避免无成片。
         if qa.get("qa_recovered"):
             log_provider_call(
                 "vlm_qa", config.MODEL_VLM, "QA_RECOVERED_NO_RETAKE", None, 0,
                 meta={"shot_id": job["shot_id"], "version_id": version_id, "qa": qa})
-            return
+            return True
         threshold = float(get_setting("auto_retake_threshold") or 0.6)
         version = conn.execute("SELECT * FROM shot_versions WHERE id=?", (version_id,)).fetchone()
         meta = json.loads(version["image_inputs"] or "{}") if version else {}
@@ -965,26 +1329,36 @@ async def _maybe_auto_qa(job, version_id: str, video_path: str) -> None:
                     after_shot_id=job["after_shot_id"],
                     auto_retake_count=decision.attempt,
                 )
-            else:
-                # 达上限：标记 waiting_human，停止自动烧钱
-                conn.execute(
-                    "UPDATE jobs SET status='waiting_human', error=? WHERE id=?",
-                    (decision.reason, job["id"]),
-                )
-                conn.commit()
-                log_provider_call(
-                    "vlm_qa", config.MODEL_VLM, "QA_RETAKE_EXHAUSTED", None, 0,
-                    meta={"shot_id": job["shot_id"], "hard_failures": hard_failures, "reason": decision.reason},
-                )
-            return
-        if 0 <= qa.get("overall", -1) < threshold and version["version_no"] == 1 and qa.get("issues"):
+                return False
+            # 达上限：停止烧钱，强制采纳当前最高分（即使未过 QA）
+            log_provider_call(
+                "vlm_qa", config.MODEL_VLM, "QA_RETAKE_EXHAUSTED", None, 0,
+                meta={
+                    "shot_id": job["shot_id"],
+                    "hard_failures": hard_failures,
+                    "reason": decision.reason,
+                    "force_best": True,
+                },
+            )
+            return True
+        if (
+            0 <= qa.get("overall", -1) < threshold
+            and version["version_no"] == 1
+            and qa.get("issues")
+            and meta.get("mode") != video_modes.REFERENCE_IMAGE_MODE
+        ):
             # 旧非参考图路径兜底；参考图模式由上面统一策略覆盖
-            if meta.get("mode") != video_modes.REFERENCE_IMAGE_MODE:
-                enqueue_shot(job["shot_id"], extra_negative=qa["issues"][:3],
-                             after_shot_id=job["after_shot_id"])
+            enqueue_shot(job["shot_id"], extra_negative=qa["issues"][:3],
+                         after_shot_id=job["after_shot_id"])
+            return False
+        if needs_retake:
+            # 不会再自动重抽（例如非参考图且非首版）：有视频则兜底采纳最高分
+            return True
+        return False
     except Exception as exc:  # noqa: BLE001 QA 异常只记录，不影响已落盘的视频
         _set_version(version_id, qa_json=json.dumps({"overall": -1, "issues": [f"质检未完成：{exc}"]}, ensure_ascii=False))
         log_provider_call("vlm_qa", config.MODEL_VLM, "QA_ERROR", None, 0, error=str(exc))
+        return True
 
 
 def _extract_frames(video_path: str) -> list[str]:
@@ -1045,6 +1419,7 @@ def recover_and_start(loop_concurrency: int | None = None) -> None:
     # discarding those in-memory copies is safe because jobs are durable.
     media_scheduler.recoverable_jobs()
     _drain_memory_queue(_queue)
+    _drain_memory_queue(_video_ready_queue)
     _drain_memory_queue(_poll_queue)
     conn = get_conn()
     generating_episode_ids = [
@@ -1054,10 +1429,8 @@ def recover_and_start(loop_concurrency: int | None = None) -> None:
     ]
     for episode_id in generating_episode_ids:
         reconcile_episode_generation_status(episode_id)
-    n = loop_concurrency or max(
-        channel_limit(media_stages.RESOURCE_VIDEO_SUBMIT),
-        channel_limit(media_stages.RESOURCE_REFERENCE),
-    )
+    # 启动时按通道分别取并发，不再用 max(submit, reference) 混成一个池
+    n = loop_concurrency  # 若显式传入，仍作为参考图 worker 目标
     ensure_workers(n)
     _start_durable_dispatcher()
     _dispatch_due_jobs()
@@ -1246,44 +1619,50 @@ def start_stale_lease_sweeper(interval_seconds: float = _SWEEPER_INTERVAL_SECOND
     _sweeper_task.add_done_callback(_retry_tasks.discard)
 
 
-def ensure_workers(n: int) -> None:
-    """把常驻生成 worker 池扩容或缩容到目标 n，并同步独立轮询 worker。"""
-    global _worker_target, _poll_worker_target
-    n = max(0, int(n))
-    _worker_target = n
+def ensure_workers(n: int | None = None) -> None:
+    """分别维护参考图 / 视频提交 / 轮询三通道 worker。
+
+    ``n`` 若给出，覆盖参考图通道目标；视频提交与 poll 始终读通道配置，
+    修复「热更新只跟 video_submit、启动却取 max」的不一致。
+    """
+    global _worker_target, _reference_worker_target, _video_ready_worker_target, _poll_worker_target
+    from app.media_pipeline import stages as media_stages
+    from app.media_pipeline.concurrency import channel_limit
+
+    ref_n = max(0, int(n if n is not None else channel_limit(media_stages.RESOURCE_REFERENCE)))
+    video_n = max(0, int(channel_limit(media_stages.RESOURCE_VIDEO_SUBMIT)))
+    poll_n = max(0, int(channel_limit(media_stages.RESOURCE_VIDEO_POLL)))
+
+    _reference_worker_target = ref_n
+    _worker_target = ref_n  # 兼容旧字段：代表参考图 worker
+    _video_ready_worker_target = video_n
+    _poll_worker_target = poll_n
+
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return
-    alive = [t for t in _workers if not t.done()]
-    _workers.clear()
-    _workers.extend(alive)
-    while len(_workers) < n:
-        _workers.append(loop.create_task(_worker_loop(f"w{len(_workers)}")))
-    while len(_workers) > n:
-        task = _workers.pop()
-        task.cancel()
 
-    from app.media_pipeline import stages as media_stages
-    from app.media_pipeline.concurrency import channel_limit
+    def _resize(pool: list[asyncio.Task], target: int, prefix: str, queue: asyncio.Queue[str]) -> None:
+        alive = [t for t in pool if not t.done()]
+        pool.clear()
+        pool.extend(alive)
+        while len(pool) < target:
+            pool.append(loop.create_task(_worker_loop(f"{prefix}{len(pool)}", queue)))
+        while len(pool) > target:
+            task = pool.pop()
+            task.cancel()
 
-    poll_n = channel_limit(media_stages.RESOURCE_VIDEO_POLL)
-    _poll_worker_target = poll_n
-    alive_poll = [t for t in _poll_workers if not t.done()]
-    _poll_workers.clear()
-    _poll_workers.extend(alive_poll)
-    while len(_poll_workers) < poll_n:
-        index = len(_poll_workers)
-        _poll_workers.append(loop.create_task(_worker_loop(f"poll{index}", _poll_queue)))
-    while len(_poll_workers) > poll_n:
-        task = _poll_workers.pop()
-        task.cancel()
+    _resize(_workers, ref_n, "ref", _queue)
+    _resize(_video_ready_workers, video_n, "vr", _video_ready_queue)
+    _resize(_poll_workers, poll_n, "poll", _poll_queue)
 
 
 async def stop() -> None:
     """优雅停机：取消常驻 worker 循环。否则 uvicorn --reload/退出时会卡在
     'Waiting for connections to close'——常驻 while-True 任务不退出，停机就挂起。"""
     global _sweeper_task, _dispatcher_task, _worker_target, _poll_worker_target
+    global _reference_worker_target, _video_ready_worker_target
     try:
         from app.media_pipeline.bootstrap import stop_media_pipeline
         await stop_media_pipeline()
@@ -1303,20 +1682,22 @@ async def stop() -> None:
     if _retry_tasks:
         await asyncio.gather(*tuple(_retry_tasks), return_exceptions=True)
     _retry_tasks.clear()
-    for t in _workers:
+    for t in (*_workers, *_video_ready_workers, *_poll_workers):
         t.cancel()
-    for t in _poll_workers:
-        t.cancel()
-    for t in (*_workers, *_poll_workers):
+    for t in (*_workers, *_video_ready_workers, *_poll_workers):
         try:
             await t
         except (asyncio.CancelledError, Exception):  # noqa: BLE001
             pass
     _workers.clear()
+    _video_ready_workers.clear()
     _poll_workers.clear()
     _worker_target = 0
+    _reference_worker_target = 0
+    _video_ready_worker_target = 0
     _poll_worker_target = 0
     _drain_memory_queue(_queue)
+    _drain_memory_queue(_video_ready_queue)
     _drain_memory_queue(_poll_queue)
 
 

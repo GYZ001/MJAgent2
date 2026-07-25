@@ -41,7 +41,7 @@ def _screenplay() -> EpisodeScreenplay:
 
 
 def test_storyboard_soundtrack_allows_ambient_only_reaction_shots() -> None:
-    """PRD：不再强制约 75% 镜头有对白/旁白；安静反应镜可只有环境声。"""
+    """PRD：不再强制约 75% 镜头有对白/旁白；安静反应镜可只有环境声。禁止内心OS强制。"""
     board = Storyboard(
         episode_no=1,
         shots=[
@@ -56,16 +56,15 @@ def test_storyboard_soundtrack_allows_ambient_only_reaction_shots() -> None:
     errors = validate_storyboard_soundtrack(board, _screenplay(), 50)
 
     assert not any("分镜声轨过少" in error for error in errors)
-    # 剧本有内心OS时仍要求至少保留一处内心声轨
-    assert any("内心OS" in error for error in errors)
+    assert not any("内心OS" in error for error in errors)
 
 
-def test_storyboard_soundtrack_accepts_dialogue_and_inner_os_coverage() -> None:
+def test_storyboard_soundtrack_accepts_dialogue_coverage_without_narration() -> None:
     board = Storyboard(
         episode_no=1,
         shots=[
-            _shot(1, "人群嘲笑声压过广场：三段斗之气，让萧家蒙羞。"),
-            _shot(2, "内心OS：这就是现实，弱肉强食，人情冷暖。"),
+            _shot(1, dialogues=[Dialogue(speaker="萧炎", line="三段。", emotion="平静")]),
+            _shot(2, dialogues=[Dialogue(speaker="萧炎", line="这就是现实。", emotion="平静")]),
             _shot(3, dialogues=[Dialogue(speaker="萧炎", line="我现在还有资格让你这么叫么？", emotion="讥讽")]),
             _shot(4, dialogues=[Dialogue(speaker="萧炎", line="我不会一直这样。", emotion="坚定")]),
             _shot(5, dialogues=[Dialogue(speaker="萧炎", line="斗气为什么会消失，我一定会查清。", emotion="坚定")]),
@@ -75,3 +74,4 @@ def test_storyboard_soundtrack_accepts_dialogue_and_inner_os_coverage() -> None:
     errors = validate_storyboard_soundtrack(board, _screenplay(), 50)
 
     assert errors == []
+    assert not any("内心OS" in error for error in errors)
