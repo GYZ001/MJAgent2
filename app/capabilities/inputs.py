@@ -89,6 +89,11 @@ class ScreenplayCancelInput(StandardCommandInput):
 class StoryboardGenerateInput(StandardCommandInput):
     episode_id: str
     mode: Literal["fresh", "resume"] = "fresh"
+    completion_mode: Literal[
+        "ready_for_manual_confirm",
+        "auto_confirm",
+    ] = "ready_for_manual_confirm"
+    completion_grant_id: str | None = None
 
 
 class ShotUpdateInput(StandardCommandInput):
@@ -143,7 +148,7 @@ class DeliveryFeedbackInput(StandardCommandInput):
 
 class RunControlInput(StandardCommandInput):
     run_id: str
-    action: Literal["cancel", "resume", "retry"]
+    action: Literal["cancel", "resume", "retry", "pause", "handoff"]
 
 
 class JobCancelInput(StandardCommandInput):

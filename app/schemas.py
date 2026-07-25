@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 import re
 
-from pydantic import BaseModel, Field, ValidationError
+from typing import TypeVar
+
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 SHOT_SIZES = {"远景", "全景", "中景", "近景", "特写"}
 CAMERA_MOVES = {"固定", "推近", "拉远", "横摇", "跟随"}
@@ -50,6 +52,30 @@ AUDIO_TIMELINE_TYPES = {
 }
 
 PROMPT_CONTRACT_VERSION = "seedance_continuity_v1"
+
+# 主线节拍 ID（S*）与剧本事件 ID（E*）长得像但语义不同，历史数据把 S07 写进了 story_event_id。
+# 这两个正则是四类 ID 分离（PRD VAL-422 §4.4.1）的判定底座。
+SPINE_BEAT_ID_RE = re.compile(r"^S\d{1,3}$", re.I)
+STORY_EVENT_ID_RE = re.compile(r"^E\d{1,3}(?:\.\d{1,3})?$", re.I)
+KEY_LINE_ID_RE = re.compile(r"^KL\d{1,3}$", re.I)
+
+_IdCarrier = TypeVar("_IdCarrier", bound=BaseModel)
+
+
+def _normalize_information_ids(model: _IdCarrier) -> _IdCarrier:
+    """把 `new_information_ids` 归一到 `information_ids`，两侧保持同一份内容。
+
+    PRD §7.1 要求兼容旧字段一个版本周期，但内部立即以 `information_ids` 为准。
+    双向同步而不是单向覆盖，才能让仍在读旧字段的调用方继续正确工作。
+    """
+    new_ids = [str(x).strip() for x in (model.new_information_ids or []) if str(x).strip()]
+    info_ids = [str(x).strip() for x in (model.information_ids or []) if str(x).strip()]
+    merged = list(dict.fromkeys([*info_ids, *new_ids]))
+    if merged != info_ids:
+        model.information_ids = merged
+    if merged != new_ids:
+        model.new_information_ids = merged
+    return model
 
 
 class Relationship(BaseModel):
@@ -169,6 +195,9 @@ class PlotSpineBeat(BaseModel):
     does: str = ""
     turn: str = ""
     must_keep: bool = True
+    # VAL-422 §4.4.3：可选绑定信息原子/关键台词；跨镜聚合校验时按这些 ID 核对交付。
+    information_ids: list[str] = Field(default_factory=list)
+    key_line_ids: list[str] = Field(default_factory=list)
 
 
 class PlotSpine(BaseModel):
@@ -273,8 +302,15 @@ class Shot(BaseModel):
     # ---- PRD 连续性生产契约（缺省时由 first/last_frame / action_desc / characters 回填）----
     story_event_id: str = ""
     purpose: str = ""
+    # PRD VAL-422 §4.4.1：E/S/I/KL 四类 ID 分属四个空间，禁止互相混写。
+    # story_event_id 只放剧本事件 E*；主线节拍走 spine_beat_ids；关键台词走 key_line_ids。
+    spine_beat_ids: list[str] = Field(default_factory=list)
+    key_line_ids: list[str] = Field(default_factory=list)
+    information_ids: list[str] = Field(default_factory=list)
+    # 兼容旧字段一个版本周期；内部立即归一到 information_ids（见 _sync_information_ids）。
     new_information_ids: list[str] = Field(default_factory=list)
     reinforcement_info_ids: list[str] = Field(default_factory=list)
+    spoken_contract_status: str = "legacy"  # coherent | conflict | legacy
     state_in: str = ""
     primary_action: str = ""
     emotion_beat: str = ""
@@ -294,6 +330,10 @@ class Shot(BaseModel):
     spatial_anchor: str = ""
     is_final: bool = False
 
+    @model_validator(mode="after")
+    def _sync_information_ids(self) -> "Shot":
+        return _normalize_information_ids(self)
+
 
 class Storyboard(BaseModel):
     episode_no: int
@@ -310,6 +350,11 @@ class StoryboardOutlineShot(BaseModel):
     covers: str = ""          # 本镜落实的必保留关键台词/剧情点（可空）
     # 原子分镜规划字段（PRD §7）：大纲阶段即锁定状态链与连续性模式
     story_event_id: str = ""
+    # PRD VAL-422 §4.2：大纲阶段就把关键台词/主线节拍按稳定 ID 分配到镜头，
+    # 容量预检据此判断「这一镜的必保留口播是否念得完」。
+    spine_beat_ids: list[str] = Field(default_factory=list)
+    key_line_ids: list[str] = Field(default_factory=list)
+    information_ids: list[str] = Field(default_factory=list)
     new_information_ids: list[str] = Field(default_factory=list)
     state_in: str = ""
     primary_action: str = ""
@@ -319,6 +364,10 @@ class StoryboardOutlineShot(BaseModel):
     duration_s: int | None = None
     characters_visible: list[str] = Field(default_factory=list)
     audio_cast: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _sync_information_ids(self) -> "StoryboardOutlineShot":
+        return _normalize_information_ids(self)
 
 
 class StoryboardOutline(BaseModel):

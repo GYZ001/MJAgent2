@@ -12,7 +12,7 @@ from app.db import get_conn
 from app.evaluations.issues import issue_fingerprint
 from app.evidence import repository
 from app.harness.contracts import get_contract
-from app.harness.types import Evaluation, EvidenceArtifact, Issue
+from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
 from app.observability.tracing import bind_trace, current_trace
 from app.orchestration.state_machine import transition_step
 
@@ -198,14 +198,44 @@ class AgentLoop(Generic[T]):
                 break
 
         if self.policy.allow_warning_candidate and last_value is not None:
-            return AgentLoopResult(
-                value=last_value,
-                status="warning",
-                exit_reason=exit_reason,
-                issues=last_value_issues,
-                iterations=len(issue_history),
-                artifact_id=last_value_artifact_id,
-            )
+            blockers = [
+                issue for issue in last_value_issues
+                if issue.severity == IssueSeverity.BLOCKER
+            ]
+            # PRD VAL-422：warning candidate 只能接受非 blocker；带 blocker 不得冒充通过。
+            if not blockers:
+                return AgentLoopResult(
+                    value=last_value,
+                    status="warning",
+                    exit_reason=exit_reason,
+                    issues=last_value_issues,
+                    iterations=len(issue_history),
+                    artifact_id=last_value_artifact_id,
+                )
+            # 不可满足容量等 blocker 连续 stalled：标记 NEEDS_REPLAN，由 Supervisor 接管。
+            needs_replan = exit_reason in {"stalled", "no_quality_gain", "max_iterations"}
+            capacity_codes = {
+                "SPOKEN_CAPACITY_EXCEEDED",
+                "SHOT_OUTLINE_COVERAGE",
+                "KEY_LINE_MISSING",
+                "SPINE_MISSING",
+            }
+            if needs_replan and any(
+                issue.code in capacity_codes
+                or "口播" in issue.message
+                or "容量" in issue.message
+                or ("超过" in issue.message and "字" in issue.message)
+                for issue in blockers
+            ):
+                object.__setattr__(last_value, "disposition", "NEEDS_REPLAN")
+                return AgentLoopResult(
+                    value=last_value,
+                    status="needs_replan",
+                    exit_reason="needs_replan",
+                    issues=blockers,
+                    iterations=len(issue_history),
+                    artifact_id=last_value_artifact_id,
+                )
         raise AgentLoopFailure(
             self.stage_key,
             issue_history[-1] if issue_history else [],

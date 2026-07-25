@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, Episode, Shot } from '../api'
+import { api, ApiError, Episode, Shot } from '../api'
 import { useEpisode, useNav } from '../App'
 import { EpStamp } from './BiblePage'
 import EpisodeCrumb from '../components/EpisodeCrumb'
@@ -7,12 +7,55 @@ import AsyncButton from '../components/AsyncButton'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 import EvidenceDrawer from '../components/harness/EvidenceDrawer'
 import ImpactDialog, { ImpactSummary } from '../components/harness/ImpactDialog'
+import SupervisorPanel from '../components/SupervisorPanel'
 
 const SIZES = ['远景', '全景', '中景', '近景', '特写']
 const MOVES = ['固定', '推近', '拉远', '横摇', '跟随']
 const TRANS = ['硬切', '叠化', '淡出淡入', '黑场', '闪黑', '闪白', '甩镜', '遮挡转场', '匹配剪辑', '声音延续+叠化', '声音先行+淡入']
 const DURATIONS = [5, 6, 7, 8, 9, 10]
 const CONTINUITY_MODES = ['action_continuation', 'same_scene_cut', 'reaction_cut', 'reverse_angle', 'insert_detail', 'scene_change']
+
+const ARTIFACT_STATUS_LABEL: Record<string, string> = {
+  candidate: '草稿候选',
+  needs_revision: '待修改',
+  validated: '业务通过',
+  approved: '人工确认',
+  rejected: '已拒绝',
+  superseded: '已替代',
+  stale: '已失效',
+}
+
+const SPOKEN_STATUS_LABEL: Record<string, string> = {
+  coherent: '口播一致',
+  conflict: '口播冲突',
+  legacy: '旧口播',
+}
+
+function ShotLifecycleBadges({ shot }: { shot: Shot }) {
+  const ev = shot.storyboard_evidence
+  const artifactStatus = ev?.status || ''
+  const spoken = shot.spoken_contract_status || ''
+  const hardGate = Array.isArray(ev?.evaluations)
+    ? ev!.evaluations.some(e => e.hard_gate_passed)
+    : false
+  return (
+    <span className="shot-lifecycle-badges" aria-label="镜头状态">
+      {artifactStatus && (
+        <span className={`shot-badge status-${artifactStatus}`}>
+          {ARTIFACT_STATUS_LABEL[artifactStatus] || artifactStatus}
+        </span>
+      )}
+      {spoken && (
+        <span className={`shot-badge spoken-${spoken}`}>
+          {SPOKEN_STATUS_LABEL[spoken] || spoken}
+        </span>
+      )}
+      {ev?.trust_level && <span className="shot-badge trust">{ev.trust_level}</span>}
+      {hardGate && <span className="shot-badge gate">硬门通过</span>}
+      {shot.legacy_unvalidated && <span className="shot-badge legacy">待补 ID</span>}
+    </span>
+  )
+}
 
 function ShotMetaTokens({ values, tone }: { values?: string[]; tone: 'visible' | 'audio' | 'information' }) {
   const items = (values ?? []).filter(Boolean)
@@ -102,31 +145,49 @@ export default function BoardPage() {
     setSelectedShotId(ep.shots[nextIndex].id)
   }
 
-  const confirmRegenerateStoryboard = (mode: 'fresh' | 'resume') => {
+  const confirmRegenerateStoryboard = (
+    mode: 'fresh' | 'resume',
+    completionMode: 'ready_for_manual_confirm' | 'auto_confirm' = 'ready_for_manual_confirm',
+  ) => {
     if (mode === 'resume') {
       storyboardTimer.start()
       void act(
-        () => api.post(`/episodes/${ep.id}/storyboard/resume`),
+        () => api.post(`/episodes/${ep.id}/storyboard/resume`, { completion_mode: completionMode }),
         `已从前 ${ep.shots?.length ?? 0} 镜 checkpoint 继续生成`,
       ).then(r => { if (r === undefined) storyboardTimer.clear() })
       return
     }
     const shotCount = ep.shots?.length ?? 0
     const hasDownstream = shotCount > 0
+    const autoConfirmNote = completionMode === 'auto_confirm'
+      ? `\n\n【自动确认授权】\n`
+        + `· 剧集：第 ${ep.episode_no} 集《${ep.title}》\n`
+        + `· 将自动修改/重排的范围仅限本集分镜\n`
+        + `· 全量校验通过后将自动确认，解锁付费视频能力\n`
+        + `· 本任务不会自动提交任何付费视频生成\n`
+        + `· 可随时取消`
+      : ''
     const ok = window.confirm(
-      hasDownstream
+      (hasDownstream
         ? `重新生成分镜将删除本集全部 ${shotCount} 个镜头，以及其参考图、视频版本与成片依赖。\n`
           + `费用：会重新消耗文本模型额度；已产生的视频费用不会退回。\n`
           + `此操作不可恢复。确定继续？`
-        : '将开始生成分镜脚本（先规划大纲，再逐镜填充）。确定继续？',
+        : completionMode === 'auto_confirm'
+          ? '将生成全部分镜并在通过后自动确认。确定继续？'
+          : '将开始生成分镜脚本（先规划大纲，再逐镜填充）。确定继续？')
+      + autoConfirmNote,
     )
     if (!ok) return
     storyboardTimer.start()
     void act(
-      () => api.post(`/episodes/${ep.id}/storyboard`),
+      () => api.post(`/episodes/${ep.id}/storyboard`, { completion_mode: completionMode }),
       hasDownstream
-        ? '已删除旧分镜，开始重新生成整版分镜'
-        : '分镜生成已开始（先规划大纲，再逐镜填充，QA 通过后陆续展示）',
+        ? (completionMode === 'auto_confirm'
+          ? '已删除旧分镜，开始重新生成并自动确认'
+          : '已删除旧分镜，开始重新生成整版分镜')
+        : (completionMode === 'auto_confirm'
+          ? '分镜生成已开始（通过后将自动确认；尚未产生视频费用）'
+          : '分镜生成已开始（先规划大纲，再逐镜填充，QA 通过后陆续展示）'),
     ).then(r => { if (r === undefined) storyboardTimer.clear() })
   }
 
@@ -150,14 +211,26 @@ export default function BoardPage() {
           <div className="board-action-group">
           <button className="btn" disabled={busy || ep.status === 'scripting' || ep.screenplay_status !== 'ready'}
             onClick={() => confirmRegenerateStoryboard(canResumeCheckpoint ? 'resume' : 'fresh')}>
-            {canResumeCheckpoint ? `从镜${String((ep.shots?.length ?? 0) + 1).padStart(2, '0')}继续` : ep.shots?.length ? '重新生成分镜' : '生成分镜脚本'}
+            {canResumeCheckpoint ? `从镜${String((ep.shots?.length ?? 0) + 1).padStart(2, '0')}继续` : ep.shots?.length ? '重新生成分镜' : '生成并等待确认'}
           </button>
+          {!canResumeCheckpoint && ep.screenplay_status === 'ready' && (
+            <button className="btn ghost" disabled={busy || ep.status === 'scripting'}
+              onClick={() => confirmRegenerateStoryboard('fresh', 'auto_confirm')}>
+              生成完成后自动确认
+            </button>
+          )}
           {canResumeCheckpoint && (
             <AsyncButton className="btn ghost" disabled={busy || ep.status === 'scripting'}
               busyLabel="提交中…"
               onAction={async () => { confirmRegenerateStoryboard('fresh') }}>
               重新生成整版
             </AsyncButton>
+          )}
+          {canResumeCheckpoint && (
+            <button className="btn ghost" disabled={busy || ep.status === 'scripting'}
+              onClick={() => confirmRegenerateStoryboard('fresh', 'auto_confirm')}>
+              重生成并自动确认
+            </button>
           )}
           {ep.screenplay_status !== 'ready' && (
             <button className="btn primary" disabled={busy} onClick={() => go('script', projectId, ep.id)}>
@@ -180,10 +253,13 @@ export default function BoardPage() {
               }}>确认分镜（解锁生成）</button>
           )}
           {(ep.status === 'confirmed' || ep.status === 'generating') && (
-            <button className="btn primary" disabled={busy}
-              onClick={() => go('wall', projectId, ep.id)}>
-              入评审墙生成视频 →
-            </button>
+            <>
+              <span className="stamp green" style={{ alignSelf: 'center' }}>分镜已确认 · 尚未产生视频费用</span>
+              <button className="btn primary" disabled={busy}
+                onClick={() => go('wall', projectId, ep.id)}>
+                入评审墙生成视频 →
+              </button>
+            </>
           )}
           </div>
           <div className="board-toolbar-meta">
@@ -198,7 +274,26 @@ export default function BoardPage() {
           <span><b>¥{ep.cost_cny.toFixed(1)}</b> 已耗</span>
         </div>
         {ep.screenplay_status !== 'ready' && <div className="error-banner">本集还没有可用剧本。请先到剧本台生成/保存完整剧本，再展开分镜。</div>}
-        {ep.status === 'scripting' && <div style={{ marginTop: 10 }}><span className="stamp gold">分镜中</span> <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>{ep.storyboard_planned_shots ? `已规划约 ${ep.storyboard_planned_shots} 镜（会随逐镜细化增减），已通过 ${ep.shots?.length ?? 0} 镜，通过后会继续下一镜……` : `正在逐镜头生成并 QA；已通过 ${ep.shots?.length ?? 0} 镜，通过后会继续下一镜……`}</span></div>}
+        {(ep.status === 'scripting' || ep.supervisor || ['WAITING_HUMAN', 'PAUSED_EXTERNAL', 'WAITING_AUTHORIZATION', 'WAITING_RETRY'].includes(ep.supervisor?.phase || '')) && (
+          <SupervisorPanel
+            api={api}
+            episodeId={ep.id}
+            runId={ep.active_storyboard_run_id}
+            supervisor={ep.supervisor}
+            scripting={ep.status === 'scripting'}
+            onChanged={() => { void refresh() }}
+          />
+        )}
+        {ep.status === 'scripting' && !ep.supervisor && (
+          <div style={{ marginTop: 10 }}>
+            <span className="stamp gold">分镜中</span>{' '}
+            <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>
+              {ep.storyboard_planned_shots
+                ? `已规划约 ${ep.storyboard_planned_shots} 镜（会随逐镜细化增减），已通过 ${ep.shots?.length ?? 0} 镜，通过后会继续下一镜……`
+                : `正在逐镜头生成并 QA；已通过 ${ep.shots?.length ?? 0} 镜，通过后会继续下一镜……`}
+            </span>
+          </div>
+        )}
         {ep.storyboard_warning && (
           <div className="error-banner" style={{ borderColor: 'var(--gold, #b08d57)', background: 'rgba(176,141,87,0.08)' }}>
             {ep.storyboard_warning}
@@ -214,7 +309,7 @@ export default function BoardPage() {
       <div className="workspace-gap" />
 
       {!ep.shots?.length
-        ? <div className="empty"><div className="big">镜</div>尚无分镜<br />点击上方「生成分镜脚本」</div>
+        ? <div className="empty"><div className="big">镜</div>尚无分镜<br />点击上方「生成并等待确认」或「生成完成后自动确认」</div>
         : <div className="board-workspace">
             <section className="shot-navigator" aria-label="镜头轨道">
               <div className="shot-navigator-head">
@@ -265,6 +360,8 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
   const [edit, setEdit] = useState<Shot | null>(null)
   const [impactOpen, setImpactOpen] = useState(false)
   const [detailTab, setDetailTab] = useState<'frames' | 'script'>('frames')
+  const [conflictOpen, setConflictOpen] = useState(false)
+  const [conflictBusy, setConflictBusy] = useState(false)
   const s = edit ?? shot
 
   async function save() {
@@ -284,11 +381,50 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
         characters_visible: edit.characters_visible ?? [],
         audio_cast: edit.audio_cast ?? [],
         new_information_ids: edit.new_information_ids ?? [],
+        audio_timeline: edit.audio_timeline ?? [],
+        spine_beat_ids: edit.spine_beat_ids ?? [],
+        key_line_ids: edit.key_line_ids ?? [],
+        expected_version: shot.storyboard_artifact_id || undefined,
       })
       const impact = (result as { impact?: ImpactSummary }).impact
       toast(`镜 ${shot.shot_no} 已保存；${impact?.stale_descendant_ids?.length ?? 0} 个下游证据已标记失效`)
       setEdit(null); onChanged()
-    } catch (e: unknown) { toast((e as Error).message, true) }
+    } catch (e: unknown) {
+      if (e instanceof ApiError && e.status === 422) {
+        const detail = e.detail as { code?: string; checkpoint_preserved?: boolean; draft_artifact_id?: string; issues?: string[] } | undefined
+        if (detail?.code === 'SHOT_EDIT_VALIDATION_FAILED' || /分叉|口播/.test(e.message)) {
+          toast(
+            detail?.checkpoint_preserved
+              ? `保存未通过业务校验（已保留草稿，未覆盖已通过版本）：${e.message}`
+              : e.message,
+            true,
+          )
+          if (shot.spoken_contract_status === 'conflict' || /分叉|冲突/.test(e.message)) {
+            setConflictOpen(true)
+          }
+          return
+        }
+      }
+      toast((e as Error).message, true)
+    }
+  }
+
+  async function resolveConflict(choice: 'rebuild_timeline_from_dialogues' | 'rebuild_dialogues_from_timeline') {
+    setConflictBusy(true)
+    try {
+      await api.post(`/shots/${shot.id}/resolve-spoken-conflict`, {
+        choice,
+        invalidate_media: true,
+      })
+      toast(choice === 'rebuild_timeline_from_dialogues' ? '已按台词重建时间轴' : '已按时间轴重建台词')
+      setConflictOpen(false)
+      setEdit(null)
+      onChanged()
+    } catch (e: unknown) {
+      toast((e as Error).message, true)
+    } finally {
+      setConflictBusy(false)
+    }
   }
 
   return (
@@ -298,10 +434,16 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
           <span className="sn">镜{String(shot.shot_no).padStart(2, '0')}</span>
           <span className="meta">{s.duration_s}s · {s.shot_size} · {s.camera_move} · {s.transition}{s.continuity_mode ? ` · ${s.continuity_mode}` : s.continuity_from_prev ? ' · 接上镜' : ''}</span>
           <span className="meta shot-characters">{s.characters.join(' / ') || '缺角色（需修改）'}</span>
+          <ShotLifecycleBadges shot={shot} />
         </div>
         <div className="shot-head-actions">
           <span className="meta">¥{shot.est_cost_cny.toFixed(1)}</span>
           {shot.storyboard_evidence && <EvidenceDrawer evidence={shot.storyboard_evidence} label="本镜证据" />}
+          {shot.spoken_contract_status === 'conflict' && (
+            <button className="btn small ghost" disabled={disabled || conflictBusy} onClick={() => setConflictOpen(true)}>
+              解决口播冲突
+            </button>
+          )}
           {!edit
             ? <button className="btn small" disabled={disabled} onClick={() => setEdit(JSON.parse(JSON.stringify(shot)))}>修改</button>
             : <>
@@ -310,6 +452,22 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
             </>}
         </div>
       </div>
+      {conflictOpen && (
+        <div className="shot-conflict-panel" role="dialog" aria-label="口播冲突修复">
+          <p>本镜 dialogues 与 audio_timeline 分叉。请选择以哪一侧为准；若已有视频将一并失效。</p>
+          <div className="shot-conflict-actions">
+            <button className="btn small primary" disabled={conflictBusy}
+              onClick={() => void resolveConflict('rebuild_timeline_from_dialogues')}>
+              以台词为准重建时间轴
+            </button>
+            <button className="btn small" disabled={conflictBusy}
+              onClick={() => void resolveConflict('rebuild_dialogues_from_timeline')}>
+              以时间轴为准重建台词
+            </button>
+            <button className="btn small ghost" disabled={conflictBusy} onClick={() => setConflictOpen(false)}>取消</button>
+          </div>
+        </div>
+      )}
       <div className={`shot-body ${edit ? 'editing' : 'reviewing'}`}>
         {edit ? (
           <>

@@ -6,15 +6,16 @@ from __future__ import annotations
 
 import json
 import re
-import unicodedata
 from typing import Any
 
 from app import config
 from app.schemas import (
-    AUDIO_TIMELINE_TYPES,
     CONTINUITY_MODES,
     DELIVERY_OWNERS,
+    KEY_LINE_ID_RE,
     PROMPT_CONTRACT_VERSION,
+    SPINE_BEAT_ID_RE,
+    STORY_EVENT_ID_RE,
     AudioTimelineItem,
     EpisodeScreenplay,
     RequiredOnScreenText,
@@ -22,6 +23,20 @@ from app.schemas import (
     Storyboard,
     StoryboardOutline,
     VoiceCanonical,
+)
+from app.spoken_contract import (
+    RULE_SPOKEN_CAPACITY,
+    build_timeline_from_segments,
+    capacity_issue,
+    content_char_count,
+    effective_spoken_segments,
+    max_speech_chars,
+    segments_from_dialogues,
+    spoken_char_total,
+    spoken_speakers,
+    spoken_text_of,
+    synchronize_spoken_contract,
+    validate_spoken_contract,
 )
 
 # 多动作过载：5 秒镜头超过 2 个独立顺序节拍即拒绝（PRD §7.1 / §14.1）
@@ -56,19 +71,10 @@ def effective_characters_visible(shot: Shot) -> list[str]:
 
 
 def effective_audio_cast(shot: Shot) -> list[str]:
+    """声轨说话人唯一口径：显式 audio_cast 优先，否则读有效口播段。"""
     if shot.audio_cast:
         return list(shot.audio_cast)
-    cast: list[str] = []
-    for item in shot.audio_timeline or []:
-        if item.speaker_id and item.speaker_id not in cast:
-            cast.append(item.speaker_id)
-    for d in shot.dialogues or []:
-        if d.speaker and d.speaker not in cast:
-            cast.append(d.speaker)
-    if (shot.narration or "").strip() and "旁白" not in cast:
-        # 真正旁白不强制进 audio_cast；保留角色画外音 speaker
-        pass
-    return cast
+    return spoken_speakers(shot)
 
 
 def uses_previous_tail_frame(mode: str) -> bool:
@@ -76,12 +82,18 @@ def uses_previous_tail_frame(mode: str) -> bool:
 
 
 def derive_continuity_mode(shot: Shot, prev: Shot | None = None) -> str:
-    """解析连续性模式。旧 continuity_from_prev 不得直接映射为 action_continuation。"""
+    """解析连续性模式。旧 continuity_from_prev 不得直接映射为 action_continuation。
+
+    无上一镜时不得保留 action_continuation：单镜 preflight / 缺 prev 入队会把该镜
+    当成链首，否则会误报「第一个镜头没有上一镜可承接」。
+    """
     mode = (shot.continuity_mode or "").strip()
+    if prev is None:
+        if mode == "action_continuation" or mode not in CONTINUITY_MODES:
+            return "scene_change" if int(shot.shot_no or 0) == 1 else "same_scene_cut"
+        return mode
     if mode in CONTINUITY_MODES:
         return mode
-    if prev is None:
-        return "scene_change" if shot.shot_no == 1 else "same_scene_cut"
     same_scene = (shot.scene_setting or "").strip() == (prev.scene_setting or "").strip()
     if not same_scene:
         return "scene_change"
@@ -189,62 +201,86 @@ def speech_capacity_budget(duration_s: int, *, lead_in: float = 0.3, lead_out: f
     return max(0.5, duration - lead_in - lead_out - action_reserve)
 
 
-def content_char_count(text: str | None) -> int:
-    """口播纯文字字数：去空白与 Unicode 标点，只计汉字/字母/数字等。"""
-    total = 0
-    for ch in text or "":
-        if ch.isspace():
-            continue
-        if unicodedata.category(ch).startswith("P"):
-            continue
-        total += 1
-    return total
-
-
-def max_speech_chars(duration_s: int) -> int:
-    """单镜台词纯文字上限；与 config.max_spoken_chars_for_duration 同口径。"""
-    return config.max_spoken_chars_for_duration(duration_s)
-
-
 def spoken_chars_from_shot(shot: Shot) -> int:
-    """本镜真实台词纯文字字数（不计标点、不计旁白）。"""
-    if shot.audio_timeline:
-        total = 0
-        for item in shot.audio_timeline:
-            if item.type in {"spoken_dialogue", "offscreen_voice"}:
-                total += content_char_count(item.text)
-        return total
-    return sum(content_char_count(d.line) for d in shot.dialogues or [])
+    """本镜真实台词纯文字字数（不计标点、不计旁白）。
+
+    统一读取有效口播段：字数、关键台词覆盖、声轨统计、prompt 编译共用同一口径，
+    杜绝「容量从 timeline 统计、丢词从 dialogues 统计」的矛盾诊断（VAL-422 根因 R1）。
+    """
+    return spoken_char_total(shot)
 
 
 def speech_capacity_errors(shot: Shot) -> list[str]:
+    """口播容量与主说话人数量的唯一实现（PRD §4.7）。"""
     errors: list[str] = []
-    chars = spoken_chars_from_shot(shot)
-    limit = max_speech_chars(shot.duration_s)
-    if chars > limit:
+    capacity = capacity_issue(shot)
+    if capacity is not None:
+        errors.append(capacity.message)
+    speakers = spoken_speakers(shot)
+    # 允许一主一短应，但同一镜优先单说话人；超过 2 硬失败
+    if len(speakers) > 2:
         errors.append(
-            f"shot_no={shot.shot_no} 台词纯文字 {chars} 字（不计标点），超过 {shot.duration_s}s 口播上限 {limit} 字；"
-            f"请缩短台词、拆镜或增加合理时长"
+            f"shot_no={shot.shot_no} 有多个主要说话人 {speakers}；一条视频优先只有一个主要说话人"
         )
-    # 多主说话人抢占
-    speakers: list[str] = []
-    if shot.audio_timeline:
-        for item in shot.audio_timeline:
-            if item.type in {"spoken_dialogue", "offscreen_voice"} and item.speaker_id:
-                if item.speaker_id not in speakers:
-                    speakers.append(item.speaker_id)
-    else:
-        for d in shot.dialogues or []:
-            delivery = getattr(d, "delivery", "spoken_dialogue") or "spoken_dialogue"
-            if delivery in {"spoken_dialogue", "offscreen_voice"} and d.speaker not in speakers:
-                speakers.append(d.speaker)
-    if len(speakers) > 1:
-        # 允许一主一短应，但同一镜优先单说话人；超过 2 硬失败
-        if len(speakers) > 2:
+    return errors
+
+
+def spoken_contract_coherence_errors(shot: Shot) -> list[str]:
+    """口播字段一致性与时间轴合法性；容量由 speech_capacity_errors 单独负责，避免重复报告。"""
+    return [
+        issue.message for issue in validate_spoken_contract(shot)
+        if issue.rule_id != RULE_SPOKEN_CAPACITY
+    ]
+
+
+def shot_id_space_errors(shot: Shot) -> list[str]:
+    """E/S/I/KL 四类 ID 不得混用（PRD VAL-422 §4.4.1）。
+
+    事故里 `story_event_id` 存的是 S07 这种主线节拍 ID，导致「按事件归属聚合」根本无从建立，
+    主线覆盖只能退回全局字面匹配。这里在写入侧就把混用拦下来。
+    """
+    errors: list[str] = []
+    event_id = (shot.story_event_id or "").strip()
+    if event_id and SPINE_BEAT_ID_RE.match(event_id):
+        errors.append(
+            f"shot_no={shot.shot_no}.story_event_id=「{event_id}」是主线节拍 ID；"
+            "story_event_id 只能写剧本事件 E*，主线节拍请写入 spine_beat_ids"
+        )
+    elif event_id and not STORY_EVENT_ID_RE.match(event_id):
+        errors.append(
+            f"shot_no={shot.shot_no}.story_event_id=「{event_id}」不是合法剧本事件 ID；"
+            "请写 screenplay.events[].event_id（形如 E1/E5），或留空"
+        )
+    for beat_id in shot.spine_beat_ids or []:
+        if not SPINE_BEAT_ID_RE.match(str(beat_id).strip()):
             errors.append(
-                f"shot_no={shot.shot_no} 有多个主要说话人 {speakers}；一条视频优先只有一个主要说话人"
+                f"shot_no={shot.shot_no}.spine_beat_ids 含「{beat_id}」；"
+                "只能引用 plot_spine.spine_beats[].beat_id（形如 S04）"
+            )
+    for key_line_id in shot.key_line_ids or []:
+        if not KEY_LINE_ID_RE.match(str(key_line_id).strip()):
+            errors.append(
+                f"shot_no={shot.shot_no}.key_line_ids 含「{key_line_id}」；"
+                "关键台词只能引用形如 KL01 的稳定 ID"
             )
     return errors
+
+
+def migrate_shot_id_spaces(shot: Shot) -> list[str]:
+    """旧数据只读迁移（PRD §6.2）：把误存进 story_event_id 的 S* 移到 spine_beat_ids。
+
+    无法确定真正 E* 时置空并标记 legacy_unvalidated，不靠猜测合并多个事件。
+    """
+    actions: list[str] = []
+    event_id = (shot.story_event_id or "").strip()
+    if event_id and SPINE_BEAT_ID_RE.match(event_id):
+        beat_id = event_id.upper()
+        if beat_id not in (shot.spine_beat_ids or []):
+            shot.spine_beat_ids = [*(shot.spine_beat_ids or []), beat_id]
+        shot.story_event_id = ""
+        shot.legacy_unvalidated = True
+        actions.append(f"moved_story_event_id_{beat_id}_to_spine_beat_ids")
+    return actions
 
 
 def build_audio_timeline_from_legacy(shot: Shot, voice_bible: list[VoiceCanonical] | None = None
@@ -253,61 +289,19 @@ def build_audio_timeline_from_legacy(shot: Shot, voice_bible: list[VoiceCanonica
     if shot.audio_timeline:
         # 历史脏数据：丢掉 narration 轨，只保留真实台词与环境声
         return [item for item in shot.audio_timeline if item.type != "narration"]
-    voice_map = {v.speaker_id: v.voice_canonical for v in (voice_bible or [])}
-    dur = float(shot.duration_s or config.DEFAULT_VIDEO_DURATION_S)
-    items: list[AudioTimelineItem] = []
-    cursor = 0.3
-    dialogues = list(shot.dialogues or [])
-
-    def _consume(text: str, typ: str, speaker: str | None, lip: bool, emotion: str) -> None:
-        nonlocal cursor
-        chars = content_char_count(text)
-        need = max(0.8, chars / 3.5) if chars else 0.8
-        end = min(dur - 0.2, cursor + need)
-        if end <= cursor:
-            end = min(dur, cursor + 0.6)
-        items.append(AudioTimelineItem(
-            start_s=round(cursor, 2),
-            end_s=round(end, 2),
-            type=typ,
-            speaker_id=speaker,
-            text=text,
-            lip_sync=lip,
-            emotion=emotion,
-            voice_canonical=voice_map.get(speaker or "", ""),
-        ))
-        cursor = end
-
-    for d in dialogues:
-        delivery = getattr(d, "delivery", None) or "spoken_dialogue"
-        if delivery == "narration":
-            delivery = "offscreen_voice"
-        if delivery not in AUDIO_TIMELINE_TYPES or delivery == "narration":
-            delivery = "spoken_dialogue"
-        visible = set(effective_characters_visible(shot))
-        if delivery == "spoken_dialogue" and d.speaker not in visible:
-            delivery = "offscreen_voice"
-        _consume(d.line, delivery, d.speaker, delivery == "spoken_dialogue", d.emotion or "平静")
-    if not items:
-        items.append(AudioTimelineItem(
-            start_s=0.0, end_s=dur, type="ambient_sound",
-            text="仅保留与画面匹配的自然环境声，不要额外台词或旁白",
-        ))
-    elif cursor < dur - 0.2:
-        items.append(AudioTimelineItem(
-            start_s=round(cursor, 2), end_s=dur, type="ambient_sound",
-            text="收束为自然环境声，不新增台词",
-        ))
-    return items
+    return build_timeline_from_segments(
+        shot, segments_from_dialogues(shot, voice_bible), voice_bible
+    )
 
 
 def ensure_audio_timeline(shot: Shot, voice_bible: list[VoiceCanonical] | None = None) -> None:
-    if not shot.audio_timeline:
-        shot.audio_timeline = build_audio_timeline_from_legacy(shot, voice_bible)
-    else:
-        shot.audio_timeline = [item for item in shot.audio_timeline if item.type != "narration"]
-        if not shot.audio_timeline:
-            shot.audio_timeline = build_audio_timeline_from_legacy(shot, voice_bible)
+    """收敛口播合同并保证 timeline/audio_cast 可用。
+
+    旧实现只补空字段，两侧分叉时静默放行——这正是第 9 镜「timeline 有关键台词、dialogues 没有」
+    却一路走到确认门的原因。现在改为调用 `synchronize_spoken_contract`：能确定性派生就派生，
+    真冲突则标记 `spoken_contract_status=conflict`，交由校验器拦截，不静默覆盖任何一侧。
+    """
+    synchronize_spoken_contract(shot, voice_bible=voice_bible)
     if not shot.audio_cast:
         shot.audio_cast = effective_audio_cast(shot)
 
@@ -496,15 +490,47 @@ def required_text_conflict_errors(shot: Shot, prompt_text: str | None = None) ->
     return errors
 
 
+def _allowed_prompt_verbatim_texts(shot: Shot) -> list[str]:
+    """最终提示词中允许原样出现的文本（台词 / 画面必现字），不视为 source_excerpt 泄漏。"""
+    allowed: list[str] = []
+    for dialogue in shot.dialogues or []:
+        line = (getattr(dialogue, "line", None) or "").strip()
+        if line:
+            allowed.append(line)
+    for item in shot.audio_timeline or []:
+        if isinstance(item, dict):
+            text = (item.get("text") or "").strip()
+        else:
+            text = (getattr(item, "text", None) or "").strip()
+        if text:
+            allowed.append(text)
+    required = shot.required_text
+    if required is not None:
+        exact = (getattr(required, "exact_text", None) or "").strip()
+        if exact:
+            allowed.append(exact)
+    # 长句优先剔除，避免短句先替换导致长句残留
+    return sorted(dict.fromkeys(allowed), key=len, reverse=True)
+
+
 def forbidden_prompt_content_errors(prompt_text: str, shot: Shot) -> list[str]:
-    """最终提示词不得含原文/完整前镜动作/未来剧情。"""
+    """最终提示词不得含原文/完整前镜动作/未来剧情。
+
+    台词与画面必现字可以与 source_excerpt 重合；从 prompt 中剔除这些允许文本后再扫原文前缀。
+    """
     errors: list[str] = []
     text = prompt_text or ""
     if "小说原文兜底参考：" in text or "SOURCE_EXCERPT" in text:
         errors.append(f"shot_no={shot.shot_no} 最终提示词包含原文章节摘录")
-    if (shot.source_excerpt or "").strip() and (shot.source_excerpt or "").strip()[:24] in text:
+    excerpt = (shot.source_excerpt or "").strip()
+    if excerpt:
+        remainder = text
+        for allowed in _allowed_prompt_verbatim_texts(shot):
+            if allowed:
+                remainder = remainder.replace(allowed, "")
         # 允许极短偶然重合；超过 24 字连续命中视为注入原文
-        errors.append(f"shot_no={shot.shot_no} 最终提示词包含 source_excerpt 原文内容")
+        if excerpt[:24] in remainder:
+            errors.append(f"shot_no={shot.shot_no} 最终提示词包含 source_excerpt 原文内容")
     return errors
 
 
@@ -541,8 +567,9 @@ def preflight_seedance_gates(
     errors.extend(action_capacity_errors(shot))
     errors.extend(speech_capacity_errors(shot))
     errors.extend(state_chain_errors(Storyboard(episode_no=0, shots=([prev, shot] if prev else [shot]))))
-    # 过滤只属于 prev 的报错
-    errors = [e for e in errors if f"shot_no={shot.shot_no}" in e or "shots[" not in e]
+    # 只保留本镜报错，避免上一镜 shot_no=N 的状态链错误漏进当前生成
+    shot_tag = f"shot_no={shot.shot_no}"
+    errors = [e for e in errors if shot_tag in e]
 
     delivered = delivered_info_ids or set()
     for info_id in shot.new_information_ids or []:
@@ -601,8 +628,12 @@ def shot_contract_dict(shot: Shot) -> dict[str, Any]:
     return {
         "story_event_id": shot.story_event_id,
         "purpose": shot.purpose,
+        "spine_beat_ids": list(shot.spine_beat_ids or []),
+        "key_line_ids": list(shot.key_line_ids or []),
+        "information_ids": list(shot.information_ids or []),
         "new_information_ids": list(shot.new_information_ids or []),
         "reinforcement_info_ids": list(shot.reinforcement_info_ids or []),
+        "spoken_contract_status": shot.spoken_contract_status or "legacy",
         "state_in": shot.state_in,
         "primary_action": shot.primary_action,
         "emotion_beat": shot.emotion_beat,
@@ -631,16 +662,21 @@ def apply_shot_contract(shot: Shot, payload: dict[str, Any] | str | None) -> Sho
     for key in (
         "story_event_id", "purpose", "state_in", "primary_action", "emotion_beat",
         "state_out", "observed_state_out", "continuity_mode", "prompt_contract_version",
-        "camera_angle", "spatial_anchor",
+        "camera_angle", "spatial_anchor", "spoken_contract_status",
     ):
         if data.get(key) not in (None, ""):
             setattr(shot, key, data[key])
     for key in (
+        "spine_beat_ids", "key_line_ids", "information_ids",
         "new_information_ids", "reinforcement_info_ids", "characters_visible",
         "audio_cast", "reference_roles", "do_not_repeat", "risk_tags",
     ):
         if key in data and data[key] is not None:
             setattr(shot, key, list(data[key] or []))
+    # 旧 payload 只有 new_information_ids；schema 校验器已双向归一，此处补齐直接 setattr 的分支。
+    merged_info = list(dict.fromkeys([*(shot.information_ids or []), *(shot.new_information_ids or [])]))
+    shot.information_ids = merged_info
+    shot.new_information_ids = merged_info
     if "audio_timeline" in data and data["audio_timeline"] is not None:
         shot.audio_timeline = [AudioTimelineItem.model_validate(x) for x in data["audio_timeline"]]
     if "required_text" in data:

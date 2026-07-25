@@ -311,10 +311,11 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
         decision = video_modes.default_reference_decision()
 
     # 跨镜连贯只继承上一镜的实际/计划尾状态；不得把上一镜完整动作描述塞进 prompt。
+    # after_shot_id 无效时回退到 shot_no-1，避免 action_continuation 在缺 prev 时被当成链首误杀。
     prev_row = None
     if after_shot_id:
         prev_row = conn.execute("SELECT * FROM shots WHERE id=?", (after_shot_id,)).fetchone()
-    elif int(shot_row["shot_no"]) > 1:
+    if prev_row is None and int(shot_row["shot_no"]) > 1:
         prev_row = conn.execute(
             "SELECT * FROM shots WHERE episode_id=? AND shot_no=?",
             (shot_row["episode_id"], int(shot_row["shot_no"]) - 1),
@@ -326,7 +327,10 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
     prompt_prev_state_out = prev_state_out if uses_previous_tail_frame(continuity_mode) else None
     if prompt_prev_state_out:
         shot.state_in = prompt_prev_state_out
-    chain_after_shot_id = after_shot_id if uses_previous_tail_frame(continuity_mode) else None
+    chain_after_shot_id = (
+        (prev_row["id"] if prev_row else None)
+        if uses_previous_tail_frame(continuity_mode) else None
+    )
 
     outgoing_transition = _outgoing_transition_context(conn, shot_row)
     incoming_transition = None

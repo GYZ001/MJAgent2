@@ -1,0 +1,89 @@
+"""Repair Router 单元测试。"""
+from __future__ import annotations
+
+from app.harness.types import Issue, IssueSeverity
+from app.repair_router import (
+    bump_fingerprint_count,
+    compute_invalidation_frontier,
+    preferred_level_for_code,
+    route_issues,
+    upgrade_level,
+)
+
+
+def _issue(code: str, message: str, shot_no: int = 9) -> Issue:
+    return Issue(
+        code=code,
+        severity=IssueSeverity.BLOCKER,
+        subject=f"shot:{shot_no}",
+        message=message,
+        evidence={"shot_no": shot_no, "path": f"shot_no={shot_no}", "rule_id": code},
+        repairable=True,
+    )
+
+
+def test_preferred_levels():
+    assert preferred_level_for_code("SCHEMA_INVALID") == "L1"
+    assert preferred_level_for_code("STATE_CHAIN_INVALID") == "L2"
+    assert preferred_level_for_code("SPINE_MISSING") == "L3"
+    assert preferred_level_for_code("PLAN_EXHAUSTED_NOT_FINAL") == "L4"
+
+
+def test_route_spoken_capacity_to_replan_when_must_keep():
+    """容量超限首轮走相邻插镜；升到 L4 后整集重规划。"""
+    issues = [_issue("SPOKEN_CAPACITY_EXCEEDED", "第 9 镜必保留台词超过 10 秒容量，请拆镜")]
+    first = route_issues(issues, validated_prefix_end=8, next_shot_no=9)
+    assert first.level == "L1"
+    assert first.strategy == "split_adjacent_shot"
+    assert first.invalidation_frontier <= 9
+
+    replan = route_issues(
+        issues,
+        validated_prefix_end=8,
+        next_shot_no=9,
+        current_level="L4",
+    )
+    assert replan.level == "L4"
+    assert replan.strategy == "replan_outline"
+
+
+def test_route_state_chain_window():
+    plan = route_issues([
+        _issue("STATE_CHAIN_INVALID", "shot_no=8 与 shot_no=9 状态链不承接", 8),
+    ], validated_prefix_end=9)
+    assert plan.level == "L2"
+    assert plan.strategy == "repair_window"
+    assert plan.invalidation_frontier <= 8
+
+
+def test_fingerprint_stall_upgrades():
+    issues = [_issue("SCHEMA_INVALID", "字段 shot.action_desc：类型错误", 4)]
+    first = route_issues(issues, validated_prefix_end=3, next_shot_no=4)
+    counts = bump_fingerprint_count({}, first.fingerprint)
+    counts = bump_fingerprint_count(counts, first.fingerprint)
+    stalled = route_issues(
+        issues,
+        validated_prefix_end=3,
+        next_shot_no=4,
+        issue_fingerprint_counts=counts,
+        current_level=first.level,
+    )
+    assert stalled.level != "L1" or stalled.pause_state == "WAITING_HUMAN"
+    # 两轮后至少升级一层
+    assert upgrade_level("L1") == "L2"
+
+
+def test_frontier_from_message():
+    issues = [_issue("KEY_LINE_MISSING", "分镜丢失了剧本标记的 1 条主线台词：薰儿相信", 5)]
+    frontier = compute_invalidation_frontier(
+        issues, level="L2", validated_prefix_end=10, next_shot_no=11,
+    )
+    assert frontier <= 5
+
+
+def test_provider_pauses_external():
+    plan = route_issues([
+        _issue("PROVIDER_UNAVAILABLE", "provider timeout", 3),
+    ], validated_prefix_end=2)
+    assert plan.pause_state == "PAUSED_EXTERNAL"
+    assert plan.strategy == "waiting_retry"

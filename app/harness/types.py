@@ -51,7 +51,9 @@ class EvidenceArtifact(BaseModel):
     type: str
     scope_type: str
     scope_id: str
-    status: Literal["candidate", "validated", "approved", "rejected", "superseded", "stale"]
+    status: Literal[
+        "candidate", "needs_revision", "validated", "approved", "rejected", "superseded", "stale"
+    ]
     trust_level: Literal["T0", "T1", "T2", "T3", "T4", "T5"]
     content: Any | None = None
     file_path: str | None = None

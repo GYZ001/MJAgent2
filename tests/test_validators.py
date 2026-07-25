@@ -129,7 +129,7 @@ def test_storyboard_accepts_model_selected_duration_and_scales_spoken_budget() -
 
     shot.duration_s = 5
     five_second_errors = validate_storyboard(board, _bible(), target_duration_s=50)
-    assert any("本镜 5s 的口播上限" in error for error in five_second_errors), five_second_errors
+    assert any("口播上限" in error and "5s" in error for error in five_second_errors), five_second_errors
 
 
 def test_storyboard_rejects_duration_outside_model_contract() -> None:
@@ -200,7 +200,7 @@ def _board_preserving_key_content() -> Storyboard:
         shots=[
             Shot(shot_no=1, duration_s=5, shot_size="全景", camera_move="固定",
                  scene_setting="日，萧家测验广场", characters=["萧炎"],
-                 action_desc="萧炎站在测验石碑前，碑面只亮起三段微光，萧炎垂手攥拳，脸色铁青",
+                 action_desc="萧炎站在测验石碑前测验斗气，碑面只亮起三段斗气微光，他被当众羞辱，垂手攥拳脸色铁青",
                  first_frame_desc="测验广场上萧炎手贴石碑，神情紧绷",
                  last_frame_desc="石碑仅亮三段，萧炎攥拳垂眸，画面定在羞辱一刻",
                  source_excerpt="测验石碑只亮起三段斗气，全场哗然。",
@@ -208,7 +208,7 @@ def _board_preserving_key_content() -> Storyboard:
                  transition="硬切", continuity_from_prev=False),
             Shot(shot_no=2, duration_s=5, shot_size="中景", camera_move="跟随",
                  scene_setting="日，萧家测验广场", characters=["萧炎", "萧薰儿"],
-                 action_desc="萧薰儿在众人嘲讽中走到萧炎身边，伸手扶住他手臂为他解围，萧炎抬眼",
+                 action_desc="萧薰儿在众人嘲讽中走到萧炎身边为他解围，伸手扶住他手臂，萧炎抬眼",
                  first_frame_desc="萧薰儿快步走近被孤立的萧炎",
                  last_frame_desc="萧薰儿立在萧炎身侧，萧炎眼神重新聚起",
                  source_excerpt="萧薰儿排开众人，走到萧炎身边。",

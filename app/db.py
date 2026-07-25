@@ -724,6 +724,8 @@ MIGRATIONS = (
     "ALTER TABLE workflow_runs ADD COLUMN recovery_count INTEGER NOT NULL DEFAULT 0",
     # 分镜增强项降级可见（大纲失败/场景库维护失败），不覆盖 script_error
     "ALTER TABLE episodes ADD COLUMN storyboard_warning TEXT",
+    "ALTER TABLE episodes ADD COLUMN active_storyboard_run_id TEXT",
+    "ALTER TABLE episodes ADD COLUMN storyboard_completion_mode TEXT NOT NULL DEFAULT 'ready_for_manual_confirm'",
     # QPSP：权威阶段字段与参考图槽位检查点
     "ALTER TABLE jobs ADD COLUMN pipeline_stage TEXT",
     "ALTER TABLE jobs ADD COLUMN stage_status TEXT",
@@ -993,6 +995,12 @@ def init_db() -> None:
         except sqlite3.OperationalError as exc:
             if "duplicate column name" not in str(exc).lower():
                 raise
+    # 分镜自动确认授权表（Supervisor Completion Grant）
+    try:
+        from app.completion_grant import ensure_completion_grants_table
+        ensure_completion_grants_table(conn)
+    except Exception:  # noqa: BLE001
+        pass
     _repair_integrity(conn)
     for key, value in DEFAULT_SETTINGS.items():
         conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", (key, value))

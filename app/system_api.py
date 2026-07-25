@@ -437,6 +437,28 @@ def recent_calls(limit: int = 30):
     return rows
 
 
+@router.get("/system/val422-metrics")
+def val422_metrics(limit: int = 500):
+    """聚合 VAL-422 指标（provider_calls.kind=val422_metric）。"""
+    rows = rows_to_dicts(get_conn().execute(
+        """SELECT id, ts, response_preview, meta_json FROM provider_calls
+           WHERE kind='val422_metric' ORDER BY id DESC LIMIT ?""",
+        (min(limit, 2000),),
+    ).fetchall())
+    totals: dict[str, int] = {}
+    for row in rows:
+        meta = {}
+        try:
+            meta = json.loads(row.get("meta_json") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            meta = {}
+        name = str(meta.get("metric") or "")
+        if not name:
+            continue
+        totals[name] = totals.get(name, 0) + int(meta.get("value") or 1)
+    return {"totals": totals, "samples": len(rows)}
+
+
 @router.get("/system/errors")
 def recent_errors(limit: int = 50):
     """最近报错码列表（不含原文/堆栈，只给概览）。凭 id 调下方详情接口查根因。"""

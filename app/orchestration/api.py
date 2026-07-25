@@ -126,24 +126,47 @@ def _restart_screenplay_run(run_id: str, trigger_type: str):
 def _restart_storyboard_run(run_id: str, trigger_type: str):
     run = repository.get_run(run_id)
     from app import api as domain_api
+    from app.storyboard_supervisor import load_latest_checkpoint
 
     episode = get_conn().execute(
-        "SELECT id, project_id FROM episodes WHERE id=?", (run["scope_id"],)
+        "SELECT * FROM episodes WHERE id=?", (run["scope_id"],)
     ).fetchone()
     if not episode:
         raise HTTPException(404, "剧集不存在")
     if task_registry.active("storyboard", episode["id"]):
         raise HTTPException(409, "该剧集已有分镜任务在运行")
+    try:
+        completion_mode = episode["storyboard_completion_mode"] or "ready_for_manual_confirm"
+    except (KeyError, IndexError, TypeError):
+        completion_mode = "ready_for_manual_confirm"
+    cp = load_latest_checkpoint(episode["id"])
+    grant_id = cp.completion_grant_id if cp else None
     get_conn().execute(
         "UPDATE episodes SET status='scripting', script_error=NULL WHERE id=?", (episode["id"],)
     )
     get_conn().commit()
     recorder = domain_api._new_storyboard_recorder(
-        episode["id"], requested_by="api", trigger_type=trigger_type, parent_run_id=run_id
+        episode["id"],
+        requested_by="api",
+        trigger_type=trigger_type,
+        parent_run_id=run_id,
+        completion_mode=completion_mode,
     )
+    try:
+        get_conn().execute(
+            "UPDATE episodes SET active_storyboard_run_id=? WHERE id=?",
+            (recorder.run_id, episode["id"]),
+        )
+        get_conn().commit()
+    except Exception:  # noqa: BLE001
+        pass
     task_registry.spawn(
         "storyboard", episode["id"],
-        domain_api._recorded_storyboard_task(episode["id"], recorder, resume=True),
+        domain_api._recorded_storyboard_task(
+            episode["id"], recorder, resume=True,
+            completion_mode=completion_mode,
+            completion_grant_id=grant_id,
+        ),
         project_id=episode["project_id"],
     )
     return repository.get_run(recorder.run_id)
@@ -202,9 +225,87 @@ async def resume_run(run_id: str):
     run = repository.get_run(run_id)
     if not run:
         raise HTTPException(404, "运行不存在")
-    if run["status"] not in {"PAUSED_EXTERNAL", "PAUSED_BUDGET", "WAITING_RETRY", "WAITING_HUMAN"}:
+    if run["status"] not in {
+        "PAUSED_EXTERNAL", "PAUSED_BUDGET", "WAITING_RETRY",
+        "WAITING_HUMAN", "WAITING_AUTHORIZATION",
+    }:
         raise HTTPException(409, "当前状态不能恢复")
     return _restart_run(run_id, "resume")
+
+
+@router.post("/runs/{run_id}/pause")
+async def pause_run_route(run_id: str):
+    from app.capabilities.dispatch import dispatch, respond_ui
+
+    result = await dispatch("run.control", {"run_id": run_id, "action": "pause"}, initiator="ui")
+    return respond_ui(result)
+
+
+async def pause_run(run_id: str):
+    """协作式暂停：当前安全步骤完成后进入 PAUSED_EXTERNAL。"""
+    run = repository.get_run(run_id)
+    if not run:
+        raise HTTPException(404, "运行不存在")
+    if run["status"] not in repository.ACTIVE_RUN_STATUSES:
+        raise HTTPException(409, "运行已结束，不能暂停")
+    if run["workflow_type"] != "storyboard":
+        raise HTTPException(400, "当前仅分镜 Supervisor 支持暂停")
+    from app.storyboard_control import request_control
+
+    request_control(run["scope_id"], "pause")
+    repository.append_event(
+        run_id, "SUPERVISOR_PAUSE_REQUESTED", "info", "已请求暂停（当前安全步骤后生效）",
+        payload={"episode_id": run["scope_id"]},
+    )
+    return {"paused_requested": True, "run": repository.get_run(run_id)}
+
+
+@router.post("/runs/{run_id}/handoff")
+async def handoff_run_route(run_id: str):
+    from app.capabilities.dispatch import dispatch, respond_ui
+
+    result = await dispatch("run.control", {"run_id": run_id, "action": "handoff"}, initiator="ui")
+    return respond_ui(result)
+
+
+async def handoff_run(run_id: str):
+    """停止自动修复，转人工；保留已验证 checkpoint 与问题清单。"""
+    run = repository.get_run(run_id)
+    if not run:
+        raise HTTPException(404, "运行不存在")
+    if run["workflow_type"] != "storyboard":
+        raise HTTPException(400, "当前仅分镜 Supervisor 支持转人工")
+    from app.storyboard_control import request_control
+
+    request_control(run["scope_id"], "handoff")
+    repository.append_event(
+        run_id, "SUPERVISOR_HANDOFF_REQUESTED", "info", "已请求转人工",
+        payload={"episode_id": run["scope_id"]},
+    )
+    # 若任务已不在跑（已在 WAITING_*），直接标记
+    if run["status"] in {"PAUSED_EXTERNAL", "WAITING_RETRY", "WAITING_HUMAN"} or not task_registry.active(
+        "storyboard", run["scope_id"]
+    ):
+        from app.storyboard_supervisor import load_latest_checkpoint, save_checkpoint
+        from app.orchestration.state_machine import transition_run
+
+        cp = load_latest_checkpoint(run["scope_id"])
+        if cp:
+            cp.phase = "WAITING_HUMAN"
+            save_checkpoint(cp, run_id=run_id)
+        try:
+            if run["status"] == "RUNNING":
+                transition_run(run_id, "RUNNING", "WAITING_HUMAN", "user_handoff")
+            elif run["status"] in {"PAUSED_EXTERNAL", "WAITING_RETRY"}:
+                transition_run(run_id, run["status"], "WAITING_HUMAN", "user_handoff")
+        except Exception:  # noqa: BLE001
+            pass
+        get_conn().execute(
+            "UPDATE episodes SET status='scripted', script_error=? WHERE id=?",
+            ("已转人工处理：自动修复已停止，已验证镜头与问题清单已保留", run["scope_id"]),
+        )
+        get_conn().commit()
+    return {"handoff_requested": True, "run": repository.get_run(run_id)}
 
 
 @router.post("/runs/{run_id}/retry")
@@ -222,6 +323,73 @@ async def retry_run(run_id: str):
     if run["status"] not in {"FAILED", "PARTIAL", "CANCELLED"}:
         raise HTTPException(409, "只有失败、部分完成或已取消的运行可以受控重试")
     return _restart_run(run_id, "retry")
+
+
+@router.get("/projects/{project_id}/storyboard-metrics")
+def project_storyboard_metrics(project_id: str):
+    """批量分镜并发与 Supervisor 指标（EpisodesPage 运行条）。"""
+    conn = get_conn()
+    project = conn.execute("SELECT id FROM projects WHERE id=?", (project_id,)).fetchone()
+    if not project:
+        raise HTTPException(404, "项目不存在")
+    episodes = conn.execute(
+        "SELECT id, episode_no, title, status, script_error, active_storyboard_run_id, "
+        "storyboard_completion_mode FROM episodes WHERE project_id=? ORDER BY episode_no",
+        (project_id,),
+    ).fetchall()
+    from app.storyboard_supervisor import load_latest_checkpoint
+
+    # storyboard run 的 scope_type=episode，不能用 list_runs(project_id=…)（那只匹配 project scope）
+    active_run_ids: set[str] = set()
+    for ep in episodes:
+        rid = ep["active_storyboard_run_id"]
+        if rid:
+            run = repository.get_run(rid)
+            if run and run.get("status") in repository.ACTIVE_RUN_STATUSES:
+                active_run_ids.add(rid)
+    rows = []
+    phase_counts: dict[str, int] = {}
+    for ep in episodes:
+        cp = load_latest_checkpoint(ep["id"])
+        phase = cp.phase if cp else None
+        tracked = ep["status"] == "scripting" or (
+            phase and phase not in {"SUCCEEDED", "CANCELLED", "CREATED"}
+        )
+        if not tracked:
+            continue
+        if phase:
+            phase_counts[phase] = phase_counts.get(phase, 0) + 1
+        mode = None
+        try:
+            mode = ep["storyboard_completion_mode"]
+        except (KeyError, IndexError, TypeError):
+            mode = None
+        rows.append({
+            "episode_id": ep["id"],
+            "episode_no": ep["episode_no"],
+            "title": ep["title"],
+            "status": ep["status"],
+            "phase": phase,
+            "repair_epoch": cp.repair_epoch if cp else 0,
+            "validated_prefix_end": cp.validated_prefix_end if cp else 0,
+            "expected_total": cp.expected_total if cp else 0,
+            "run_id": ep["active_storyboard_run_id"] or None,
+            "completion_mode": mode,
+        })
+    return {
+        "project_id": project_id,
+        "active_storyboard_runs": len(active_run_ids),
+        "scripting_episodes": sum(1 for e in episodes if e["status"] == "scripting"),
+        "phase_counts": phase_counts,
+        "waiting_human": phase_counts.get("WAITING_HUMAN", 0),
+        "paused": (
+            phase_counts.get("PAUSED_EXTERNAL", 0)
+            + phase_counts.get("PAUSED_BUDGET", 0)
+        ),
+        "waiting_authorization": phase_counts.get("WAITING_AUTHORIZATION", 0),
+        "repairing": phase_counts.get("REPAIRING", 0),
+        "episodes": rows,
+    }
 
 
 @router.get("/artifacts/{artifact_id}")

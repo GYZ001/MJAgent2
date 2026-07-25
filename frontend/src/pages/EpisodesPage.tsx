@@ -51,6 +51,28 @@ export default function EpisodesPage() {
   const planTimer = useTaskTimer(`project.${projectId}.plan`, p?.plan_status === 'running')
   const screenplayAllTimer = useTaskTimer(`project.${projectId}.screenplay-all`, screenplayRunningCount > 0)
   const storyboardAllTimer = useTaskTimer(`project.${projectId}.storyboard-all`, scriptingCount > 0)
+  const [sbMetrics, setSbMetrics] = useState<{
+    active_storyboard_runs: number
+    scripting_episodes: number
+    waiting_human: number
+    paused: number
+    repairing: number
+    waiting_authorization?: number
+    phase_counts: Record<string, number>
+  } | null>(null)
+
+  useEffect(() => {
+    if (!projectId) return
+    let cancelled = false
+    const load = () => {
+      api.get(`/projects/${projectId}/storyboard-metrics`).then((m: any) => {
+        if (!cancelled) setSbMetrics(m)
+      }).catch(() => { /* ignore */ })
+    }
+    load()
+    const id = window.setInterval(load, scriptingCount > 0 ? 4000 : 15000)
+    return () => { cancelled = true; window.clearInterval(id) }
+  }, [projectId, scriptingCount])
   const filteredEps = eps
   const filteredTotal = p?.episodes_total ?? eps.length
   const pageCount = p?.episodes_page_count ?? 1
@@ -158,6 +180,15 @@ export default function EpisodesPage() {
           {p.plan_status === 'running' && <span className="stamp gold">分集中（依据原文规划，篇幅长时需数分钟）</span>}
           {screenplayRunningCount > 0 && <span className="stamp gold">剧本中（{screenplayRunningCount} 集）</span>}
           {scriptingCount > 0 && <span className="stamp gold">分镜中（{scriptingCount} 集）</span>}
+          {sbMetrics && (sbMetrics.active_storyboard_runs > 0 || sbMetrics.waiting_human > 0 || sbMetrics.paused > 0 || sbMetrics.repairing > 0) && (
+            <span className="stamp grey" title={JSON.stringify(sbMetrics.phase_counts || {})}>
+              Supervisor 并发 {sbMetrics.active_storyboard_runs}
+              {sbMetrics.repairing > 0 ? ` · 修复 ${sbMetrics.repairing}` : ''}
+              {sbMetrics.paused > 0 ? ` · 暂停 ${sbMetrics.paused}` : ''}
+              {sbMetrics.waiting_human > 0 ? ` · 待人工 ${sbMetrics.waiting_human}` : ''}
+              {(sbMetrics.waiting_authorization || 0) > 0 ? ` · 待授权 ${sbMetrics.waiting_authorization}` : ''}
+            </span>
+          )}
           <TaskTimer label="分集" timer={planTimer} />
           <TaskTimer label="批量剧本" timer={screenplayAllTimer} />
           <TaskTimer label="批量分镜" timer={storyboardAllTimer} />

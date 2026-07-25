@@ -8,6 +8,7 @@ class ApiError extends Error {
     public code?: string,
     public category?: string,
     public errorId?: string,
+    public detail?: unknown,
   ) { super(message) }
 }
 
@@ -48,18 +49,28 @@ async function handle(resp: Response) {
   let code: string | undefined
   let category: string | undefined
   let errorId: string | undefined
+  let rawDetail: unknown
   try {
     const body = await resp.json()
-    detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail ?? body)
-    code = typeof body.code === 'string' ? body.code : undefined
-    category = typeof body.category === 'string' ? body.category : undefined
+    rawDetail = body.detail ?? body
+    detail = typeof body.detail === 'string'
+      ? body.detail
+      : (typeof body.detail?.message === 'string'
+        ? body.detail.message
+        : JSON.stringify(body.detail ?? body))
+    code = typeof body.code === 'string'
+      ? body.code
+      : (typeof body.detail?.code === 'string' ? body.detail.code : undefined)
+    category = typeof body.category === 'string'
+      ? body.category
+      : (typeof body.detail?.category === 'string' ? body.detail.category : undefined)
     errorId = typeof body.error_id === 'string' ? body.error_id : undefined
   } catch { /* keep default */ }
   let message = detail
   if (code && errorId && !detail.includes(errorId)) {
     message = `${detail}（${category ?? ''}${category ? ' · ' : ''}${code} · ${errorId}）`
   }
-  throw new ApiError(resp.status, message, code, category, errorId)
+  throw new ApiError(resp.status, message, code, category, errorId, rawDetail)
 }
 
 async function request(
@@ -427,6 +438,10 @@ export interface Shot {
   spoken_content_chars?: number
   spoken_limit?: number
   has_legacy_narration?: boolean
+  spoken_contract_status?: 'coherent' | 'conflict' | 'legacy' | string
+  spine_beat_ids?: string[]
+  key_line_ids?: string[]
+  information_ids?: string[]
   continuity_from_prev: number; adopted_version_id: string | null
   story_event_id?: string
   purpose?: string
@@ -471,6 +486,24 @@ export interface Episode {
   storyboard_planned_shots?: number | null
   storyboard_artifact_id?: string | null
   storyboard_evidence?: ArtifactEvidence | null
+  active_storyboard_run_id?: string | null
+  storyboard_completion_mode?: string | null
+  supervisor?: {
+    phase: string
+    goal?: string
+    completion_mode?: string
+    repair_epoch: number
+    validated_prefix_end: number
+    next_shot_no: number
+    expected_total: number
+    outcome?: string | null
+    strategy?: string
+    frontier?: number
+    issue_codes?: string[]
+    last_repair?: Record<string, unknown> | null
+    completion_grant_id?: string | null
+    pending_control?: { action: string; pending: boolean } | null
+  } | null
   delivery_artifact_id?: string | null
   delivery_status?: string
   pipeline_summary?: EpisodePipelineSummary | null
@@ -607,3 +640,5 @@ export const numToCn = (n: number): string => {
   if (n < 100) return cn[Math.floor(n / 10)] + '十' + (n % 10 ? cn[n % 10] : '')
   return String(n)
 }
+
+export { ApiError }

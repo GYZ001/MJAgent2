@@ -6,13 +6,15 @@ from __future__ import annotations
 import difflib
 import re
 
-from app import config
+from app import config, textmatch
 from app.character_policy import is_functional_extra
 from app.continuity import (
     normalize_board_continuity,
     state_chain_errors,
     action_capacity_errors,
     speech_capacity_errors,
+    spoken_contract_coherence_errors,
+    shot_id_space_errors,
     information_ledger_errors,
     outline_atomic_errors,
     adaptation_hook_errors,
@@ -21,6 +23,7 @@ from app.continuity import (
     max_speech_chars,
     spoken_chars_from_shot,
 )
+from app.spoken_contract import spoken_text_of, content_char_count
 from app.schemas import (Bible, EpisodeScreenplay, InformationItem, Shot, Storyboard,
                          StoryboardOutline, StoryEvent, SHOT_SIZES, CAMERA_MOVES, TRANSITIONS,
                          CONTINUITY_MODES, DELIVERY_OWNERS)
@@ -324,22 +327,18 @@ def validate_storyboard(
                 f"{tag} 首帧与尾帧画面描述几乎相同；二者必须明显不同（动作前 vs 动作后，体现姿态/表情/手部/道具的可见变化），"
                 "否则首图尾图会一模一样、视频没有动作")
         errors.extend(action_capacity_errors(shot))
+        # 口播容量只在 speech_capacity_errors 里实现一次；此处曾重复计算同一规则，
+        # 导致同一根因在确认门输出两条不同文案（VAL-422 根因 R5）。
         errors.extend(speech_capacity_errors(shot))
+        # 同一镜头只能有一套有效口播：dialogues 与 audio_timeline 分叉即 blocker。
+        errors.extend(spoken_contract_coherence_errors(shot))
         # 产品合同：禁止一切旁白/内心OS；信息由真实台词或画面动作承载。
         narration_len = len((shot.narration or "").strip())
         if narration_len > 0:
             errors.append(
                 f"{tag}.narration 非空（{narration_len} 字）；禁止旁白/内心OS，请删空 narration，"
                 "改用 dialogues 真实台词或 action_desc 画面动作")
-        # 口播总量只计真实台词纯文字（不计标点），必须能在本镜时长内念完。
-        spoken_chars = spoken_chars_from_shot(shot)
-        spoken_limit = max_speech_chars(shot.duration_s)
-        if spoken_chars > spoken_limit:
-            errors.append(
-                f"{tag} 台词纯文字 {spoken_chars} 字（不计标点），超过本镜 {shot.duration_s}s 的口播上限 {spoken_limit} 字；"
-                f"可在动作仍是同一连续节拍时把 duration_s 调到最多 {config.VIDEO_DURATION_MAX_S}s，"
-                "否则请新增或利用相邻镜头分担这段台词，必要时再精简非关键口水话，"
-                "不要让一镜塞下念不完的台词")
+        errors.extend(shot_id_space_errors(shot))
         # V4 角色合法性
         if not shot.characters:
             errors.append(
@@ -406,10 +405,9 @@ def validate_storyboard(
             errors.append(f"场景「{scene}」在 shots[{scene_last_seen[scene_key]}] 与 shots[{i}] 间被其他场景打断，同场景镜头必须连续排列")
         scene_last_seen[scene_key] = i
         # V6+ 连贯性：使用 continuity_mode 表达“是否使用上一镜尾帧”，不再把同场景布尔等同动作连续。
-        mode = (shot.continuity_mode or "").strip()
-        if not mode:
-            prev_for_mode = shots[i - 1] if i > 0 else None
-            mode = sync_shot_continuity_fields(shot, prev_for_mode)
+        # 始终 sync：无 prev 时会降级 action_continuation，与 derive_continuity_mode / 入队门禁一致。
+        prev_for_mode = shots[i - 1] if i > 0 else None
+        mode = sync_shot_continuity_fields(shot, prev_for_mode)
         if mode not in CONTINUITY_MODES:
             errors.append(f"{tag}.continuity_mode=「{mode}」不在 {sorted(CONTINUITY_MODES)}")
         if i == 0:
@@ -570,13 +568,11 @@ INNER_VOICE_MARKERS = ("内心", "心声", "OS", "os", "独白")
 # 防丢失校验的共用底座：剧本台/分镜台都要判断"某条关键台词/剧情点是否仍真实存在于文本里"。
 # 务实优先（本次定调）：只拦【明显丢失】，用模糊匹配容忍口语化改写/标点差异，绝不逐字比对，
 # 避免像历史 false-positive 那样空耗修复轮次。
-_SPEAKER_PREFIX_RE = re.compile(r"^([^\n：（(:]{1,16})(?:（[^）]{0,12}）)?[：:]")
-_NON_CONTENT_RE = re.compile(r"""[\s，。、；;：:！!？?“”"'‘’（）()【】\[\]《》〈〉—…·.,~\-]+""")
-# 关键台词主干连续保留过半即视为"仍在"（容忍前后改写，只要核心句仍出现）。
-KEY_LINE_PRESENT_RATIO = 0.4
-KEY_LINE_BIGRAM_COVERAGE = 0.42
-# 关键剧情点是描述而非逐字，故用 2-gram 覆盖率判定："过三分之一被涵盖"即视为"已落实"。
-KEY_POINT_COVERAGE = 0.34
+_SPEAKER_PREFIX_RE = textmatch._SPEAKER_PREFIX_RE
+_NON_CONTENT_RE = textmatch._NON_CONTENT_RE
+KEY_LINE_PRESENT_RATIO = textmatch.KEY_LINE_PRESENT_RATIO
+KEY_LINE_BIGRAM_COVERAGE = textmatch.KEY_LINE_BIGRAM_COVERAGE
+KEY_POINT_COVERAGE = textmatch.KEY_POINT_COVERAGE
 KEY_CONTENT_MAX_REPORT = 4       # 单条错误最多点名几条，避免错误列表过长把 prompt 撑爆
 MIN_KEY_LINES = KEY_LINES_MIN
 MAX_KEY_LINES = KEY_LINES_MAX
@@ -584,17 +580,8 @@ MIN_KEY_PLOT_POINTS = KEY_PLOT_POINTS_MIN
 MAX_KEY_PLOT_POINTS = KEY_PLOT_POINTS_MAX
 
 
-def _strip_speaker(line: str) -> str:
-    """去掉"角色名（情绪）："前缀，取台词正文本身用于匹配。"""
-    return _SPEAKER_PREFIX_RE.sub("", (line or "").strip(), count=1).strip()
-
-
-def _speaker_name(line: str) -> str | None:
-    """提取 key_lines / 对白中的说话人姓名（不含情绪括号）。"""
-    m = _SPEAKER_PREFIX_RE.match((line or "").strip())
-    if not m:
-        return None
-    return m.group(1).strip() or None
+_strip_speaker = textmatch.strip_speaker
+_speaker_name = textmatch.speaker_name
 
 
 def _source_bible_dialogues(source_text: str | None, bible: Bible) -> list[str]:
@@ -624,59 +611,12 @@ def _source_bible_dialogues(source_text: str | None, bible: Bible) -> list[str]:
     return found
 
 
-def _condense(text: str) -> str:
-    """压成纯内容字符串（去空白与标点），让匹配对标点/排版差异稳健。"""
-    return _NON_CONTENT_RE.sub("", text or "")
-
-
-def _longest_run_ratio(needle: str, haystack: str) -> float:
-    """needle 核心字符在 haystack 中的最长连续公共块长度 ÷ needle 长度。
-    用于判断"一句关键台词是否大体保留"：只要主干连续出现就算保留。"""
-    n, h = _condense(needle), _condense(haystack)
-    if not n:
-        return 1.0
-    if n in h:
-        return 1.0
-    block = difflib.SequenceMatcher(None, n, h).find_longest_match(0, len(n), 0, len(h))
-    return block.size / len(n)
-
-
-def _bigram_set(text: str) -> set[str]:
-    c = _condense(text)
-    if len(c) < 2:
-        return {c} if c else set()
-    return {c[i:i + 2] for i in range(len(c) - 1)}
-
-
-def _bigram_coverage(needle: str, haystack: str) -> float:
-    """needle 的 2-gram 有多大比例出现在 haystack 里。
-    用于判断"一条关键剧情点是否被涵盖"（剧情点是描述、非逐字，用覆盖率而非连续块）。"""
-    nb = _bigram_set(needle)
-    if not nb:
-        return 1.0
-    return len(nb & _bigram_set(haystack)) / len(nb)
-
-
-# 句读分隔：把一条复合的关键内容切成原子。纯标点驱动、与具体剧情无关，适用任意题材。
-_CLAIM_SPLIT_RE = re.compile(r"[；;。.！!？?，,、\n]+")
-
-
-def _atomize_claim(text: str) -> list[str]:
-    """把一条可能复合的关键内容（一句里含多个事实/动作/关系变化）按句读切成原子 claim。
-
-    复合 covers/剧情点如"测出三段，被宣告低级，引发哄笑"应逐条核对，避免"漏掉其中一件事"
-    时整句一起判失败、报错也指不到具体缺哪条。过短碎片（连接词等）丢弃，避免噪声。
-    """
-    atoms: list[str] = []
-    seen: set[str] = set()
-    for piece in _CLAIM_SPLIT_RE.split(text or ""):
-        atom = _strip_speaker(piece).strip()
-        key = _condense(atom)
-        if len(key) < 2 or key in seen:
-            continue
-        seen.add(key)
-        atoms.append(atom)
-    return atoms
+_condense = textmatch.condense
+_longest_run_ratio = textmatch.longest_run_ratio
+_bigram_set = textmatch.bigram_set
+_bigram_coverage = textmatch.bigram_coverage
+_CLAIM_SPLIT_RE = textmatch._CLAIM_SPLIT_RE
+_atomize_claim = textmatch.atomize_claim
 
 
 # 逐镜 covers 原子用更宽的"明显缺失"判定：covers 是模型自写的事实改写，连接词（"被…当众宣告为"）
@@ -1423,17 +1363,17 @@ def validate_storyboard_preserves_key_content(board: Storyboard,
     key_lines = [ln.strip() for ln in (screenplay.key_lines or []) if ln and ln.strip()]
     key_points = [pt.strip() for pt in (screenplay.key_plot_points or []) if pt and pt.strip()]
 
-    # 主线台词优先在声轨里找，找不到再退到画面动作/原文摘录。
-    spoken_text = "".join(_soundtrack_text(s) for s in shots)
-    all_text = spoken_text + "".join((s.action_desc or "") + (s.source_excerpt or "") for s in shots)
+    # 关键台词只认有效口播（spoken_text_of）；source_excerpt 是审计证据，不能证明「已说出」。
+    spoken_text = "".join(spoken_text_of(s) for s in shots)
+    # 剧情点/画面覆盖可用动作描述；仍不含 source_excerpt，避免把摘录当已拍证据。
+    visual_text = spoken_text + "".join((s.action_desc or "") for s in shots)
 
     missing_lines = []
     for ln in key_lines:
         core = _strip_speaker(ln)
         if (
             _longest_run_ratio(core, spoken_text) < KEY_LINE_PRESENT_RATIO
-            and _longest_run_ratio(core, all_text) < KEY_LINE_PRESENT_RATIO
-            and _bigram_coverage(core, all_text) < KEY_LINE_BIGRAM_COVERAGE
+            and _bigram_coverage(core, spoken_text) < KEY_LINE_BIGRAM_COVERAGE
         ):
             missing_lines.append(ln)
     if missing_lines:
@@ -1444,7 +1384,7 @@ def validate_storyboard_preserves_key_content(board: Storyboard,
             f"分镜丢失了剧本标记的 {len(missing_lines)} 条主线台词：{shown}{extra}；"
             "请把它们写进对应镜头的 dialogues（人物开口），不要在压缩中丢弃")
 
-    missing_points = [pt for pt in key_points if _bigram_coverage(pt, all_text) < KEY_POINT_COVERAGE]
+    missing_points = [pt for pt in key_points if _bigram_coverage(pt, visual_text) < KEY_POINT_COVERAGE]
     if missing_points:
         shown = "；".join(missing_points[:KEY_CONTENT_MAX_REPORT])
         extra = (f"（另有 {len(missing_points) - KEY_CONTENT_MAX_REPORT} 条从略）"
@@ -1455,29 +1395,164 @@ def validate_storyboard_preserves_key_content(board: Storyboard,
 
     spine = screenplay.plot_spine
     if spine and spine.spine_beats:
-        missing_beats = []
-        for beat in spine.spine_beats:
-            if not beat.must_keep:
-                continue
-            claim = f"{beat.who}{beat.does}{beat.turn}"
-            if _bigram_coverage(claim, all_text) < KEY_POINT_COVERAGE:
-                missing_beats.append(f"{beat.beat_id}:{beat.does}")
-        if missing_beats:
-            shown = "；".join(missing_beats[:KEY_CONTENT_MAX_REPORT])
-            extra = (f"（另有 {len(missing_beats) - KEY_CONTENT_MAX_REPORT} 条从略）"
-                     if len(missing_beats) > KEY_CONTENT_MAX_REPORT else "")
-            errors.append(
-                f"分镜未覆盖 {len(missing_beats)} 条 must_keep 主线节拍：{shown}{extra}；"
-                "每条 spine 至少落地一镜")
+        errors.extend(validate_spine_delivery_ledger(board, screenplay))
         for drop in spine.drop_list or []:
             d = (drop or "").strip()
             if len(_condense(d)) < 6:
                 continue
-            if _bigram_coverage(d, all_text) >= 0.55:
+            if _bigram_coverage(d, visual_text) >= 0.55:
                 errors.append(
                     f"分镜又拍回了 drop_list 内容「{d[:40]}」；已声明不拍的支线不得进入分镜"
                 )
                 break
+    return errors
+
+
+def key_line_delivery_errors(shot: Shot, screenplay: EpisodeScreenplay | None = None) -> list[str]:
+    """单镜声明的 key_line_ids 必须真实出现在有效口播段中（source_excerpt 不算交付）。"""
+    kids = [str(k).strip().upper() for k in (shot.key_line_ids or []) if str(k).strip()]
+    if not kids:
+        return []
+    catalog = key_line_catalog(screenplay) if screenplay is not None else {}
+    spoken = spoken_text_of(shot)
+    errors: list[str] = []
+    for kid in kids:
+        text = catalog.get(kid)
+        if text:
+            core = _strip_speaker(text)
+            if (
+                _longest_run_ratio(core, spoken) < KEY_LINE_PRESENT_RATIO
+                and _bigram_coverage(core, spoken) < KEY_LINE_BIGRAM_COVERAGE
+            ):
+                errors.append(
+                    f"shot_no={shot.shot_no} 声明了 {kid} 但有效口播未说出「{core[:36]}」；"
+                    "关键台词必须出现在 dialogues/audio_timeline，source_excerpt 不算交付"
+                )
+        # 无剧本 catalog 时只校验 ID 格式（格式已由 shot_id_space_errors 负责）
+    return errors
+
+
+def validate_spine_delivery_ledger(
+    board: Storyboard, screenplay: EpisodeScreenplay
+) -> list[str]:
+    """结构化主线覆盖（PRD VAL-422 §4.4.3）：以 spine_beat_ids + I*/KL* 台账为主判据。
+
+    - 至少一个镜头声明对应 spine_beat_id 即视为节拍落地（允许跨相邻镜拆分）；
+    - 若 beat 绑定了 information_ids/key_line_ids，则这些原子必须由声明该 spine 的镜头
+      （或其相邻镜头）交付；
+    - 全集没有任何结构化 ID 时，二元字组失败只产生 LEGACY_COVERAGE_UNCERTAIN，
+      不得单独冒充 must_keep missing blocker。
+    """
+    spine = screenplay.plot_spine
+    if not spine or not spine.spine_beats:
+        return []
+    shots = board.shots or []
+    delivered_ids: set[str] = set()
+    shots_for_beat: dict[str, list[Shot]] = {}
+    for s in shots:
+        for beat_id in s.spine_beat_ids or []:
+            bid = str(beat_id).strip().upper()
+            if not bid:
+                continue
+            delivered_ids.add(bid)
+            shots_for_beat.setdefault(bid, []).append(s)
+
+    structured_mode = bool(delivered_ids) or any(
+        (s.key_line_ids or s.information_ids) for s in shots
+    )
+    catalog = key_line_catalog(screenplay)
+    ledger_by_id = {
+        (item.info_id or "").strip().upper(): item
+        for item in (screenplay.information_ledger or [])
+        if (item.info_id or "").strip()
+    }
+    visual_text = "".join(spoken_text_of(s) + (s.action_desc or "") for s in shots)
+    errors: list[str] = []
+    missing_beats: list[str] = []
+    legacy_uncertain: list[str] = []
+    missing_atoms: list[str] = []
+
+    for beat in spine.spine_beats:
+        if not beat.must_keep:
+            continue
+        beat_id = (beat.beat_id or "").strip().upper()
+        claim = f"{beat.who}{beat.does}{beat.turn}"
+        if beat_id and beat_id in delivered_ids:
+            owners = shots_for_beat.get(beat_id) or []
+            # 允许相邻镜共同交付：把声明该 spine 的镜号 ±1 一并纳入窗口。
+            owner_nos = {s.shot_no for s in owners}
+            window = [
+                s for s in shots
+                if s.shot_no in owner_nos
+                or any(abs(s.shot_no - n) == 1 for n in owner_nos)
+            ]
+            window_spoken = "".join(spoken_text_of(s) for s in window)
+            window_visual = window_spoken + "".join((s.action_desc or "") for s in window)
+            for kid in (beat.key_line_ids or []):
+                kid_u = str(kid).strip().upper()
+                text = catalog.get(kid_u)
+                if not text:
+                    continue
+                core = _strip_speaker(text)
+                if (
+                    _longest_run_ratio(core, window_spoken) < KEY_LINE_PRESENT_RATIO
+                    and _bigram_coverage(core, window_spoken) < KEY_LINE_BIGRAM_COVERAGE
+                ):
+                    missing_atoms.append(f"{beat_id}/{kid_u}")
+            for iid in (beat.information_ids or []):
+                iid_u = str(iid).strip().upper()
+                item = ledger_by_id.get(iid_u)
+                content = (item.content if item else "") or iid_u
+                owner = (item.delivery_owner if item else "visual_action") or "visual_action"
+                haystack = window_spoken if owner == "spoken_dialogue" else window_visual
+                if item and item.exact_text:
+                    if (
+                        _longest_run_ratio(item.exact_text, haystack) < KEY_LINE_PRESENT_RATIO
+                        and _bigram_coverage(item.exact_text, haystack) < KEY_LINE_BIGRAM_COVERAGE
+                    ):
+                        missing_atoms.append(f"{beat_id}/{iid_u}")
+                elif _bigram_coverage(content, haystack) < KEY_POINT_COVERAGE:
+                    missing_atoms.append(f"{beat_id}/{iid_u}")
+            continue
+
+        # 无 spine_beat_id：结构化模式下硬失败；legacy 模式字面命中放行，否则 uncertain。
+        if structured_mode:
+            missing_beats.append(f"{beat_id or '?'}:{beat.does}")
+            continue
+        if _bigram_coverage(claim, visual_text) >= KEY_POINT_COVERAGE:
+            continue
+        legacy_uncertain.append(f"{beat_id or '?'}:{beat.does}")
+
+    if missing_beats:
+        shown = "；".join(missing_beats[:KEY_CONTENT_MAX_REPORT])
+        extra = (f"（另有 {len(missing_beats) - KEY_CONTENT_MAX_REPORT} 条从略）"
+                 if len(missing_beats) > KEY_CONTENT_MAX_REPORT else "")
+        errors.append(
+            f"分镜未覆盖 {len(missing_beats)} 条 must_keep 主线节拍：{shown}{extra}；"
+            "请在对应镜头写入 spine_beat_ids，允许相邻多镜共同交付同一 S*"
+        )
+    if missing_atoms:
+        shown = "；".join(missing_atoms[:KEY_CONTENT_MAX_REPORT])
+        extra = (f"（另有 {len(missing_atoms) - KEY_CONTENT_MAX_REPORT} 条从略）"
+                 if len(missing_atoms) > KEY_CONTENT_MAX_REPORT else "")
+        errors.append(
+            f"主线节拍缺少必需信息原子/关键台词：{shown}{extra}；"
+            "请在声明该 spine_beat_id 的镜头或其相邻镜交付对应 information_id/key_line_id"
+        )
+    if legacy_uncertain:
+        shown = "；".join(legacy_uncertain[:KEY_CONTENT_MAX_REPORT])
+        extra = (f"（另有 {len(legacy_uncertain) - KEY_CONTENT_MAX_REPORT} 条从略）"
+                 if len(legacy_uncertain) > KEY_CONTENT_MAX_REPORT else "")
+        msg = (
+            f"LEGACY_COVERAGE_UNCERTAIN：{len(legacy_uncertain)} 条 must_keep 主线节拍缺少 "
+            f"spine_beat_ids 且字面证据不足：{shown}{extra}；请补 ID 或人工复核，"
+            "二元字组匹配不得单独判定 must_keep missing"
+        )
+        from app.observability.metrics import inc, spine_structured_hard_gate
+        inc("spine_coverage_legacy_fallback_total", count=len(legacy_uncertain))
+        if spine_structured_hard_gate():
+            errors.append(msg)
+        # flag 关闭时仅记指标，不阻断确认
     return errors
 
 
@@ -1503,11 +1578,9 @@ def validate_storyboard_shot_covers_outline(
     if not atoms:
         return []
 
-    shot_text = (
-        (shot.action_desc or "")
-        + (shot.narration or "")
-        + "".join(d.line for d in shot.dialogues)
-    )
+    # 口播只认有效口播段；source_excerpt / 旁白不得充当「已说出」证据（VAL-422）。
+    spoken = spoken_text_of(shot)
+    shot_text = (shot.action_desc or "") + spoken
     realized_text = shot_text + (prior_text or "")
     later = later_planned_covers or ""
     missing = [
@@ -1525,8 +1598,212 @@ def validate_storyboard_shot_covers_outline(
              if len(missing) > KEY_CONTENT_MAX_REPORT else "")
     return [
         f"第 {shot_no} 镜未落实本镜大纲 covers：{shown}{extra}；"
-        "请把这些事实或台词明确写进本镜 action_desc、narration 或 dialogues，不能只停留在大纲里"
+        "请把这些事实或台词明确写进本镜 action_desc 或有效口播（dialogues/audio_timeline），不能只停留在大纲里"
     ]
+
+
+def key_line_catalog(screenplay: EpisodeScreenplay) -> dict[str, str]:
+    """剧本 key_lines 的稳定 ID 映射：按出现顺序 KL01..KLnn。"""
+    catalog: dict[str, str] = {}
+    for idx, line in enumerate(screenplay.key_lines or [], start=1):
+        text = (line or "").strip()
+        if not text:
+            continue
+        catalog[f"KL{idx:02d}"] = text
+    return catalog
+
+
+def outline_key_line_capacity_errors(
+    outline: StoryboardOutline, screenplay: EpisodeScreenplay
+) -> list[str]:
+    """大纲阶段：分配到同一镜的必保留台词字数不得超过该镜最大口播容量。"""
+    catalog = key_line_catalog(screenplay)
+    if not catalog:
+        return []
+    errors: list[str] = []
+    assigned: set[str] = set()
+    for shot in outline.shots or []:
+        duration = int(shot.duration_s or config.DEFAULT_VIDEO_DURATION_S)
+        capacity = max_speech_chars(duration)
+        kids = [str(k).strip().upper() for k in (shot.key_line_ids or []) if str(k).strip()]
+        required_chars = 0
+        lines_for_msg: list[str] = []
+        for kid in kids:
+            text = catalog.get(kid)
+            if not text:
+                errors.append(
+                    f"大纲第 {shot.shot_no} 镜 key_line_ids 含未知「{kid}」；"
+                    f"合法范围：{', '.join(catalog)}"
+                )
+                continue
+            assigned.add(kid)
+            chars = content_char_count(_strip_speaker(text))
+            required_chars += chars
+            lines_for_msg.append(f"{kid}({chars}字)")
+        if required_chars > capacity:
+            errors.append(
+                f"大纲第 {shot.shot_no} 镜必保留台词约 {required_chars} 字，"
+                f"超过 {duration}s 口播上限 {capacity} 字（{', '.join(lines_for_msg)}）；"
+                "请拆镜或把部分 key_line_ids 挪到相邻镜头，禁止把不可满足合同交给逐镜修复"
+            )
+    # 未分配的关键台词：若大纲声明了任何 key_line_ids，则要求全集覆盖
+    if any((s.key_line_ids or []) for s in (outline.shots or [])):
+        missing = [kid for kid in catalog if kid not in assigned]
+        if missing:
+            errors.append(
+                f"大纲未分配关键台词 ID：{', '.join(missing)}；"
+                "请把每条 KL* 写入某一镜的 key_line_ids"
+            )
+    return errors
+
+
+def assign_outline_delivery_ids(
+    outline: StoryboardOutline, screenplay: EpisodeScreenplay
+) -> list[dict]:
+    """确定性回填大纲 spine_beat_ids / key_line_ids（LLM 漏填时的安全网）。
+
+    按 covers/beat 与剧本台账的模糊匹配把 KL*/S* 分配到镜头；已有 ID 不覆盖。
+    返回变更日志供可观测性。
+    """
+    changes: list[dict] = []
+    catalog = key_line_catalog(screenplay)
+    spine = screenplay.plot_spine
+    beats = list(spine.spine_beats or []) if spine else []
+    assigned_kl: set[str] = set()
+    for shot in outline.shots or []:
+        for kid in shot.key_line_ids or []:
+            assigned_kl.add(str(kid).strip().upper())
+    for shot in outline.shots or []:
+        plan = ((shot.covers or "") + (shot.beat or "")).strip()
+        if not plan:
+            continue
+        if catalog and not (shot.key_line_ids or []):
+            matched: list[str] = []
+            for kid, text in catalog.items():
+                if kid in assigned_kl:
+                    continue
+                core = _strip_speaker(text)
+                if (
+                    _longest_run_ratio(core, plan) >= KEY_LINE_PRESENT_RATIO
+                    or _bigram_coverage(core, plan) >= KEY_LINE_BIGRAM_COVERAGE
+                ):
+                    matched.append(kid)
+            if matched:
+                shot.key_line_ids = matched
+                assigned_kl.update(matched)
+                changes.append({"shot_no": shot.shot_no, "key_line_ids": matched})
+        if beats and not (shot.spine_beat_ids or []):
+            matched_beats: list[str] = []
+            for beat in beats:
+                bid = (beat.beat_id or "").strip().upper()
+                if not bid:
+                    continue
+                claim = f"{beat.who}{beat.does}{beat.turn}"
+                if _bigram_coverage(claim, plan) >= KEY_POINT_COVERAGE:
+                    matched_beats.append(bid)
+            if matched_beats:
+                shot.spine_beat_ids = matched_beats
+                changes.append({"shot_no": shot.shot_no, "spine_beat_ids": matched_beats})
+    return changes
+
+
+def split_outline_over_key_line_capacity(
+    outline: StoryboardOutline,
+    screenplay: EpisodeScreenplay,
+    *,
+    max_shots: int,
+) -> list[dict]:
+    """把超出口播容量的 key_line_ids 拆到相邻镜头（PRD §4.2）。
+
+    在进入逐镜生成前执行；拆分后重排 shot_no。返回每次拆分的遥测记录。
+    """
+    from app.schemas import StoryboardOutlineShot
+
+    catalog = key_line_catalog(screenplay)
+    if not catalog or not outline.shots:
+        return []
+    events: list[dict] = []
+    # 反复拆直到不再超容或触顶；单轮最多拆 len(shots) 次避免死循环。
+    for _ in range(max(1, len(outline.shots))):
+        if len(outline.shots) >= max_shots:
+            break
+        overflow_index: int | None = None
+        overflow_kids: list[str] = []
+        capacity = 0
+        required = 0
+        for idx, shot in enumerate(outline.shots):
+            duration = int(shot.duration_s or config.DEFAULT_VIDEO_DURATION_S)
+            capacity = max_speech_chars(duration)
+            kids = [str(k).strip().upper() for k in (shot.key_line_ids or []) if str(k).strip()]
+            required = sum(
+                content_char_count(_strip_speaker(catalog[k]))
+                for k in kids if k in catalog
+            )
+            if required > capacity and len(kids) >= 2:
+                overflow_index = idx
+                overflow_kids = kids
+                break
+        if overflow_index is None:
+            break
+        # 尽量让前半不超过容量：从后往前挪出可移动的 KL*。
+        keep: list[str] = []
+        move: list[str] = []
+        running = 0
+        for kid in overflow_kids:
+            chars = content_char_count(_strip_speaker(catalog.get(kid, "")))
+            if not keep or running + chars <= capacity:
+                keep.append(kid)
+                running += chars
+            else:
+                move.append(kid)
+        if not move:
+            # 单条已超容：仍拆出最后一条，逼迫下游用 adapted_line / 人工处理。
+            keep, move = overflow_kids[:-1] or overflow_kids[:1], overflow_kids[-1:]
+        current = outline.shots[overflow_index]
+        before_count = len(outline.shots)
+        current.key_line_ids = keep
+        # covers 也按句读拆半，避免新镜 covers 空。
+        atoms = _atomize_claim(current.covers or "")
+        if len(atoms) >= 2:
+            split_at = max(1, len(atoms) // 2)
+            front, back = "；".join(atoms[:split_at]), "；".join(atoms[split_at:])
+            current.covers = front
+        else:
+            back = current.covers or "；".join(move)
+        insert_at = overflow_index + 1
+        outline.shots.insert(
+            insert_at,
+            StoryboardOutlineShot(
+                shot_no=current.shot_no + 1,
+                scene_setting=current.scene_setting,
+                beat=f"（容量拆分：承接第{current.shot_no}镜关键台词）{back}",
+                covers=back,
+                key_line_ids=move,
+                spine_beat_ids=list(current.spine_beat_ids or []),
+                information_ids=list(current.information_ids or []),
+                story_event_id=current.story_event_id,
+                state_in=current.state_out or current.state_in,
+                primary_action=back[:40] or current.primary_action,
+                state_out=current.state_out,
+                continuity_mode=current.continuity_mode or "same_scene_cut",
+                duration_s=current.duration_s or config.DEFAULT_VIDEO_DURATION_S,
+                characters_visible=list(current.characters_visible or []),
+                audio_cast=list(current.audio_cast or []),
+            ),
+        )
+        for i, s in enumerate(outline.shots):
+            s.shot_no = i + 1
+        events.append({
+            "shot_no": current.shot_no,
+            "required_chars": required,
+            "capacity": capacity,
+            "kept_key_line_ids": keep,
+            "moved_key_line_ids": move,
+            "shots_before": before_count,
+            "shots_after": len(outline.shots),
+            "reason": "required_spoken_chars_exceed_max_capacity",
+        })
+    return events
 
 
 def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeScreenplay,
@@ -1617,6 +1894,7 @@ def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeS
                     f"大纲安排了 drop_list 内容「{d[:40]}」；已声明不拍的支线不得进入大纲"
                 )
                 break
+    errors.extend(outline_key_line_capacity_errors(outline, screenplay))
     errors.extend(outline_atomic_errors(outline))
     return errors
 

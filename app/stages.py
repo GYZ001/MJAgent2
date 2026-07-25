@@ -334,6 +334,7 @@ async def _run_with_agent_loop(
             result.value, "residual_issues",
             [issue.model_dump(mode="json") for issue in result.issues],
         )
+        object.__setattr__(result.value, "disposition", "WARNING")
         log_provider_call(
             f"{stage}_loop", config.MODEL_TEXT, "WARNING_CANDIDATE", None, 0,
             meta={
@@ -344,6 +345,25 @@ async def _run_with_agent_loop(
                 "issue_codes": [issue.code for issue in result.issues[:10]],
             },
         )
+    elif result.status == "needs_replan":
+        object.__setattr__(result.value, "residual_errors", [issue.message for issue in result.issues])
+        object.__setattr__(
+            result.value, "residual_issues",
+            [issue.model_dump(mode="json") for issue in result.issues],
+        )
+        object.__setattr__(result.value, "disposition", "NEEDS_REPLAN")
+        log_provider_call(
+            f"{stage}_loop", config.MODEL_TEXT, "NEEDS_REPLAN", None, 0,
+            meta={
+                "stage": stage,
+                "iterations": result.iterations,
+                "exit_reason": result.exit_reason,
+                "artifact_id": result.artifact_id,
+                "issue_codes": [issue.code for issue in result.issues[:10]],
+            },
+        )
+    else:
+        object.__setattr__(result.value, "disposition", "PASS")
     object.__setattr__(result.value, "loop_exit_reason", result.exit_reason)
     object.__setattr__(result.value, "evidence_artifact_id", result.artifact_id)
     return result.value
@@ -710,7 +730,12 @@ def _storyboard_key_content_block(screenplay: EpisodeScreenplay) -> str:
         f"- 失败代价：{screenplay.stakes}" if screenplay.stakes else "",
     ]
     contract_text = "\n".join(c for c in contract if c)
-    lines_text = "\n".join(f"- {ln}" for ln in key_lines) or "（剧本未单列，请从完整剧本文本中提取主线对白）"
+    from app.validators import key_line_catalog
+    catalog = key_line_catalog(screenplay)
+    if catalog:
+        lines_text = "\n".join(f"- {kid}｜{text}" for kid, text in catalog.items())
+    else:
+        lines_text = "\n".join(f"- {ln}" for ln in key_lines) or "（剧本未单列，请从完整剧本文本中提取主线对白）"
     points_text = "\n".join(f"- {pt}" for pt in key_points) or "（剧本未单列，请从完整剧本文本中提取主线剧情）"
     blocks: list[str] = []
     spine = screenplay.plot_spine
@@ -735,10 +760,10 @@ def _storyboard_key_content_block(screenplay: EpisodeScreenplay) -> str:
     if contract_text:
         blocks.extend(["【单集戏剧契约】（指导取舍：服务它们的内容优先保留）：", contract_text, ""])
     blocks.extend([
-        "【本集主线台词】（每条必须写进某镜的 dialogues，代码逐条校验）：",
+        "【本集主线台词】（每条必须写进某镜有效口播，并在大纲填 key_line_ids=KL*；代码逐条校验）：",
         lines_text,
         "",
-        "【本集主线剧情点】（每条必须在某镜的 action_desc 或声轨中体现，代码逐条校验）：",
+        "【本集主线剧情点】（每条必须在某镜的 action_desc 或有效口播中体现，代码逐条校验）：",
         points_text,
     ])
     return "\n".join(blocks) + "\n"
@@ -923,8 +948,9 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
     errors.extend(_filter_partial_storyboard_errors(partial_errors, current_index=len(completed_shots)))
     errors.extend(information_ledger_errors(board, screenplay))
     # 向前承接：复合 covers 里已在前序镜头落实的事实不再算本镜漏戏（呼应大纲"可拆到相邻多镜"）。
+    from app.spoken_contract import spoken_text_of as _spoken_text_of
     prior_text = "".join(
-        (s.action_desc or "") + (s.narration or "") + "".join(d.line for d in s.dialogues)
+        (s.action_desc or "") + _spoken_text_of(s)
         for s in board.shots[:-1]
     )
     errors.extend(validate_storyboard_shot_covers_outline(
@@ -1016,19 +1042,20 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
 {key_content_block}
 {scene_library_block}硬性约束：
 1. 镜头数目标 {SHOT_SOFT_MIN}~{SHOT_SOFT_MAX}，硬上限 {SHOT_HARD_MAX}；shot_no 从 1 连续递增。大纲 duration_s **默认 5**；仅必要时取 6~10（>5 进 AI 审核）。同 spine 事件通常 1~2 镜；禁止为细节无限拆镜，超预算必须合并。
-2. 每条保留 beat/covers 兼容旧流程，但重点必须填写 state_in、primary_action、state_out、continuity_mode、story_event_id、new_information_ids、duration_s、characters_visible、audio_cast。beat 只作为一句话摘要，不得替代状态字段。
+2. 每条保留 beat/covers 兼容旧流程，但重点必须填写 state_in、primary_action、state_out、continuity_mode、story_event_id、spine_beat_ids、key_line_ids、new_information_ids、duration_s、characters_visible、audio_cast。beat 只作为一句话摘要，不得替代状态字段。
 3. 相邻两镜 state_out -> state_in 必须能承接，且 primary_action 必须不同、持续前进，严禁停留或复述同一节拍。
-4. 上方主线台词/剧情点/spine 必须分配到 covers 或 new_information_ids；drop_list 禁止分配。new_information_ids 只能引用 screenplay.information_ledger 已有 info_id。同一拍内可合并相关事实，不要硬拆空耗时长。
+4. 上方主线台词/剧情点/spine 必须分配到 covers，并填写 key_line_ids（KL01..）与 spine_beat_ids（S01..）；drop_list 禁止分配。new_information_ids 只能引用 screenplay.information_ledger 已有 info_id。同一镜必保留口播字数不得超过该镜 duration_s 容量（10s≤{config.MAX_SPOKEN_CHARS_PER_SHOT}字），超限必须拆到相邻镜。
 5. covers 只写本镜必须拍出/说出的具体事实（可见动作、可听台词、可感知反应、可核对信息点）；禁止写「反差/对比/衬托/呼应/强调/暗示/氛围」等导演意图——意图写入 beat/primary_action/state_out，事实写成双方可见状态（如「薰儿测出七段、人群赞叹；萧炎低头不语」）。
 6. {first_rule}
 7. 每条 scene_setting 写时间+地点短标签；同一连续空间必须保持同一个标签，不要因为人物走到门口/桌边/人群前就改标签。
 8. beat 必须写清人物调度：入画/出画用走、停、转身等大动作原因。
 9. continuity_mode 必须从 action_continuation / same_scene_cut / reaction_cut / reverse_angle / insert_detail / scene_change 中选择；只有 action_continuation 表示承接上一镜同一动作尾状态，其他同场景切换不得冒充动作连续。
+10. story_event_id 只写剧本事件 E*；主线节拍写 spine_beat_ids（S*）；禁止把 S* 写入 story_event_id。
 
 本集目标时长 {target}s。上一集结尾：{prev_ending or "（本集为第一集）"}
 
 输出 JSON（不要解释、不要 Markdown）：
-{{"episode_no": {episode['episode_no']}, "shots": [{{"shot_no": int, "scene_setting": "时间+地点短标签", "beat": "兼容字段：本镜推进的剧情一句话", "covers": "本镜必须拍出/说出的具体事实（禁止反差/对比等导演抽象）", "state_in": "本镜开始时人物/道具/信息状态", "primary_action": "本镜唯一主动作/主交付", "state_out": "本镜结束时的新状态", "continuity_mode": "action_continuation|same_scene_cut|reaction_cut|reverse_angle|insert_detail|scene_change", "story_event_id": "对应 screenplay.events[].event_id 或空", "new_information_ids": ["本镜首次交付的信息ID，可空"], "duration_s": 5, "characters_visible": ["本镜画面可见角色"], "audio_cast": ["本镜发声角色/旁白/功能性声音，可空"]}}]}}"""
+{{"episode_no": {episode['episode_no']}, "shots": [{{"shot_no": int, "scene_setting": "时间+地点短标签", "beat": "兼容字段：本镜推进的剧情一句话", "covers": "本镜必须拍出/说出的具体事实（禁止反差/对比等导演抽象）", "state_in": "本镜开始时人物/道具/信息状态", "primary_action": "本镜唯一主动作/主交付", "state_out": "本镜结束时的新状态", "continuity_mode": "action_continuation|same_scene_cut|reaction_cut|reverse_angle|insert_detail|scene_change", "story_event_id": "对应 screenplay.events[].event_id（E*）或空", "spine_beat_ids": ["S01"], "key_line_ids": ["KL01"], "new_information_ids": ["本镜首次交付的信息ID，可空"], "duration_s": 5, "characters_visible": ["本镜画面可见角色"], "audio_cast": ["本镜发声角色/功能性声音，可空"]}}]}}"""
     log_provider_call(
         "storyboard_outline_prompt", config.MODEL_TEXT, "PROMPT_READY", None, 0,
         meta={"episode_id": episode.get("id"), "episode_no": episode.get("episode_no"),
@@ -1059,6 +1086,23 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
                 "storyboard_outline_abstract_covers", config.MODEL_TEXT, "COVERS_ABSTRACT_REWRITTEN", None, 0,
                 meta={"episode_id": episode.get("id"), "episode_no": episode.get("episode_no"),
                       "stage": "分镜大纲", **c})
+        # VAL-422：回填 KL*/S*，并在超容时确定性拆镜，再跑大纲校验。
+        from app.validators import (
+            assign_outline_delivery_ids,
+            split_outline_over_key_line_capacity,
+        )
+        for c in assign_outline_delivery_ids(o, screenplay):
+            log_provider_call(
+                "storyboard_outline_assign_ids", config.MODEL_TEXT, "DELIVERY_IDS_ASSIGNED", None, 0,
+                meta={"episode_id": episode.get("id"), "episode_no": episode.get("episode_no"),
+                      "stage": "分镜大纲", **c},
+            )
+        for ev in split_outline_over_key_line_capacity(o, screenplay, max_shots=max_shots):
+            log_provider_call(
+                "storyboard_outline_capacity_split", config.MODEL_TEXT, "KEY_LINE_CAPACITY_SPLIT", None, 0,
+                meta={"episode_id": episode.get("id"), "episode_no": episode.get("episode_no"),
+                      "stage": "分镜大纲", **ev},
+            )
         return validate_storyboard_outline(o, screenplay, target, bible=bible)
 
     outline_loop = AgentLoop(
@@ -1087,6 +1131,18 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
             "storyboard_outline_defer_covers", config.MODEL_TEXT, "COVERS_DEFERRED", None, 0,
             meta={"episode_id": episode.get("id"), "episode_no": episode.get("episode_no"),
                   "stage": "分镜大纲", **c})
+    # 顺延 covers 后再次做容量拆镜，避免建场镜顺延把多条 KL 堆回同一镜。
+    from app.validators import (
+        assign_outline_delivery_ids,
+        split_outline_over_key_line_capacity,
+    )
+    assign_outline_delivery_ids(outline, screenplay)
+    for ev in split_outline_over_key_line_capacity(outline, screenplay, max_shots=max_shots):
+        log_provider_call(
+            "storyboard_outline_capacity_split", config.MODEL_TEXT, "KEY_LINE_CAPACITY_SPLIT", None, 0,
+            meta={"episode_id": episode.get("id"), "episode_no": episode.get("episode_no"),
+                  "stage": "分镜大纲", "phase": "post_defer", **ev},
+        )
     return outline
 
 
@@ -1273,6 +1329,14 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
     # 在调用 LLM 前自动拆成足够多段并插入相邻节拍，让本镜只落实当前段，避免逐镜修复打转。
     # 拆分后 outline.shots 变长，下方 expected_total / allow_finish / must_finish 自动按新长度计算。
     _maybe_split_outline_covers(outline, shot_no, bible, max_shots)
+    # VAL-422：关键台词字数超单镜容量时，在逐镜生成前拆镜并重排 shot_no。
+    if outline is not None:
+        from app.validators import split_outline_over_key_line_capacity
+        for ev in split_outline_over_key_line_capacity(outline, screenplay, max_shots=max_shots):
+            log_provider_call(
+                "storyboard_outline_capacity_split", config.MODEL_TEXT, "KEY_LINE_CAPACITY_SPLIT", None, 0,
+                meta={"episode_id": episode.get("id"), "shot_no": shot_no, "phase": "pre_shot", **ev},
+            )
     # 有大纲时由计划的镜头数决定收尾时机（执行完整份大纲，避免提前收尾把后段剧情挤掉）；
     # 无大纲时回退到基础镜头数下限。
     expected_total = len(outline.shots) if (outline and outline.shots) else min_shots
@@ -1314,12 +1378,14 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
             + (f"- 状态链：{brief.state_in or '（未填）'} -> {brief.primary_action or brief.beat} -> {brief.state_out or '（未填）'}\n")
             + (f"- continuity_mode：{brief.continuity_mode or '（按规则选择）'}\n")
             + (f"- story_event_id：{brief.story_event_id}\n" if (brief.story_event_id or '').strip() else "")
+            + (f"- spine_beat_ids：{', '.join(brief.spine_beat_ids)}\n" if brief.spine_beat_ids else "")
+            + (f"- key_line_ids：{', '.join(brief.key_line_ids)}\n" if brief.key_line_ids else "")
             + (f"- 本镜新交付信息ID：{', '.join(current_info_ids)}\n" if current_info_ids else "")
             + (f"- 建议时长：{brief.duration_s}s\n" if brief.duration_s else "")
             + (f"- 画面可见角色：{', '.join(brief.characters_visible)}\n" if brief.characters_visible else "")
             + (f"- 声音演员/声源：{', '.join(brief.audio_cast)}\n" if brief.audio_cast else "")
             + (f"- 落实关键内容：{brief.covers}\n"
-               "  这些内容必须明确写进本镜 action_desc、narration 或 dialogues；"
+               "  这些内容必须明确写进本镜 action_desc 或有效口播（dialogues/audio_timeline）；"
                "只出现在 covers/source_excerpt 里不算完成。\n" if (brief.covers or '').strip() else "")
             + (f"- 计划场景：{brief.scene_setting}\n" if (brief.scene_setting or '').strip() else "")
         )
@@ -1423,7 +1489,7 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
 上一集结尾：{prev_ending or "（本集为第一集）"}
 
 输出 JSON Schema：
-{{"episode_no": {episode['episode_no']}, "is_final": bool, "shot": {{"shot_no": {shot_no}, "duration_s": int, "shot_size": "远景|全景|中景|近景|特写", "camera_move": "固定|推近|拉远|横摇|跟随", "scene_setting": "短时间+地点标签", "characters": ["画面中实际可见的角色圣经姓名或合法功能性路人标签"], "characters_visible": ["本镜画面可见角色，通常等于 characters"], "action_desc": str, "state_in": "本镜开始的精确人物/道具/信息状态", "primary_action": "本镜唯一主动作/主交付", "state_out": "本镜结束后交给下一镜的精确状态", "continuity_mode": "action_continuation|same_scene_cut|reaction_cut|reverse_angle|insert_detail|scene_change", "story_event_id": "对应 screenplay.events[].event_id；没有对应事件时必须输出空字符串，禁止输出 null", "new_information_ids": ["仅填写 information_ledger 中已有的 I1/I2 等内部编号"], "do_not_repeat": ["只能填写已交付信息的中文内容，禁止裸 ID"], "audio_cast": ["本镜发声角色/功能性声音"], "audio_timeline": [{{"start_s": float, "end_s": float, "type": "spoken_dialogue|offscreen_voice|ambient_sound", "speaker_id": "角色名/功能性身份或null", "text": str, "lip_sync": bool, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定", "voice_canonical": str}}], "required_text": {{"surface": "道具/屏幕/牌匾等承载面", "exact_text": "需要画面准确出现的文字；无则为空", "appear_start_s": 0.0, "stable_until_s": null, "style": "", "allow_other_text": false}}, "first_frame_desc": "本镜开始的静止画面，25~50字，只写看得见的人物姿态/表情/手部/道具/光效", "last_frame_desc": "本镜结束的静止画面，25~50字，与首帧【同机位同场景同构图】，仅人物动作推进后的状态（不要换镜头/景别/场景）", "source_excerpt": "对应本镜头的小说原文逐字摘录，至少 {SOURCE_EXCERPT_MIN_CHARS} 字，仅作审计证据；其中双引号必须按 JSON 规范转义", "narration": "", "dialogues": [{{"speaker": "必须是本镜头 characters 中的可见角色名或功能性路人标签", "line": str, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定", "delivery": "spoken_dialogue|offscreen_voice"}}], "transition": "{transition_options}"}}}}"""
+{{"episode_no": {episode['episode_no']}, "is_final": bool, "shot": {{"shot_no": {shot_no}, "duration_s": int, "shot_size": "远景|全景|中景|近景|特写", "camera_move": "固定|推近|拉远|横摇|跟随", "scene_setting": "短时间+地点标签", "characters": ["画面中实际可见的角色圣经姓名或合法功能性路人标签"], "characters_visible": ["本镜画面可见角色，通常等于 characters"], "action_desc": str, "state_in": "本镜开始的精确人物/道具/信息状态", "primary_action": "本镜唯一主动作/主交付", "state_out": "本镜结束后交给下一镜的精确状态", "continuity_mode": "action_continuation|same_scene_cut|reaction_cut|reverse_angle|insert_detail|scene_change", "story_event_id": "对应 screenplay.events[].event_id（E*）；没有对应事件时必须输出空字符串，禁止输出 null，禁止写 S*", "spine_beat_ids": ["本镜落地的主线节拍 S*，可空"], "key_line_ids": ["本镜说出的关键台词 KL*，可空"], "new_information_ids": ["仅填写 information_ledger 中已有的 I1/I2 等内部编号"], "do_not_repeat": ["只能填写已交付信息的中文内容，禁止裸 ID"], "audio_cast": ["本镜发声角色/功能性声音"], "audio_timeline": [{{"start_s": float, "end_s": float, "type": "spoken_dialogue|offscreen_voice|ambient_sound", "speaker_id": "角色名/功能性身份或null", "text": str, "lip_sync": bool, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定", "voice_canonical": str}}], "required_text": {{"surface": "道具/屏幕/牌匾等承载面", "exact_text": "需要画面准确出现的文字；无则为空", "appear_start_s": 0.0, "stable_until_s": null, "style": "", "allow_other_text": false}}, "first_frame_desc": "本镜开始的静止画面，25~50字，只写看得见的人物姿态/表情/手部/道具/光效", "last_frame_desc": "本镜结束的静止画面，25~50字，与首帧【同机位同场景同构图】，仅人物动作推进后的状态（不要换镜头/景别/场景）", "source_excerpt": "对应本镜头的小说原文逐字摘录，至少 {SOURCE_EXCERPT_MIN_CHARS} 字，仅作审计证据；其中双引号必须按 JSON 规范转义", "narration": "", "dialogues": [{{"speaker": "必须是本镜头 characters 中的可见角色名或功能性路人标签", "line": str, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定", "delivery": "spoken_dialogue|offscreen_voice"}}], "transition": "{transition_options}"}}}}"""
     source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()[:16]
     prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
     log_provider_call(
@@ -1506,6 +1572,15 @@ source_excerpt 内的双引号必须按 JSON 规范转义，或改用中文引�
     )
     sync_shot_continuity_fields(draft.shot, completed_shots[-1] if completed_shots else None)
     ensure_audio_timeline(draft.shot, screenplay.voice_bible)
+    # 大纲已分配的结构化 ID：模型漏填时从 brief 回填，保证主线台账可跨镜聚合。
+    if brief is not None:
+        if not draft.shot.spine_beat_ids and brief.spine_beat_ids:
+            draft.shot.spine_beat_ids = list(brief.spine_beat_ids)
+        if not draft.shot.key_line_ids and brief.key_line_ids:
+            draft.shot.key_line_ids = list(brief.key_line_ids)
+        if not draft.shot.information_ids and brief.information_ids:
+            draft.shot.information_ids = list(brief.information_ids)
+            draft.shot.new_information_ids = list(brief.information_ids)
     # 防重复约束是给后续创作/视频模型理解的中文语义，不持久化裸内部 ID。
     draft.shot.do_not_repeat = list(ledger_context.get("do_not_repeat") or [])
     _normalized_candidate_board(episode["episode_no"], completed_shots, draft.shot, bible, episode["target_duration_s"])

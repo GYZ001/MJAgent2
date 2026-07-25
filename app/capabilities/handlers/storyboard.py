@@ -9,14 +9,33 @@ from app.capabilities.schemas import CommandResult
 async def generate(args: I.StoryboardGenerateInput) -> CommandResult:
     from app import api
 
-    func = api.resume_storyboard if args.mode == "resume" else api.start_storyboard
-    outcome = await call_guarded(func, args.episode_id)
+    if args.mode == "resume":
+        outcome = await call_guarded(
+            api.resume_storyboard,
+            args.episode_id,
+            {
+                "completion_mode": args.completion_mode,
+                "completion_grant_id": args.completion_grant_id,
+            },
+        )
+    else:
+        outcome = await call_guarded(
+            api.start_storyboard,
+            args.episode_id,
+            {
+                "completion_mode": args.completion_mode,
+                "completion_grant_id": args.completion_grant_id,
+            },
+        )
     if isinstance(outcome, CommandResult):
         return outcome
     run_id = outcome.get("run_id")
     verb = "续跑" if args.mode == "resume" else "重新生成"
+    goal = outcome.get("goal") or (
+        "generate_and_confirm" if args.completion_mode == "auto_confirm" else "generate_ready"
+    )
     return succeeded(
-        f"分镜{verb}已启动",
+        f"分镜{verb}已启动（{goal}）",
         data=outcome,
         run_id=run_id,
         resource_uris=[f"manju://runs/{run_id}"] if run_id else [],

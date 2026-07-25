@@ -34,7 +34,8 @@ def _apply_contract_to_public_shot(target: dict) -> None:
     apply_shot_contract(shot, target.get("shot_contract_json"))
     for key, value in shot.model_dump(mode="json").items():
         if key in target or key in {
-            "story_event_id", "purpose", "new_information_ids", "reinforcement_info_ids",
+            "story_event_id", "purpose", "spine_beat_ids", "key_line_ids", "information_ids",
+            "new_information_ids", "reinforcement_info_ids", "spoken_contract_status",
             "state_in", "primary_action", "emotion_beat", "state_out", "observed_state_out",
             "continuity_mode", "characters_visible", "audio_cast", "audio_timeline",
             "required_text", "reference_roles", "do_not_repeat", "risk_tags",
@@ -295,7 +296,14 @@ def _reconcile_storyboard_plan(conn, episode_id: str, episode_no: int,
     return (persisted_total, to_total, reason)
 
 
-async def _storyboard_task(episode_id: str, *, resume: bool = True):
+async def _storyboard_task(
+    episode_id: str,
+    *,
+    resume: bool = True,
+    completion_mode: str = "ready_for_manual_confirm",
+    completion_grant_id: str | None = None,
+    run_id: str | None = None,
+):
     conn = get_conn()
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     try:
@@ -307,9 +315,7 @@ async def _storyboard_task(episode_id: str, *, resume: bool = True):
             raise StageError("分镜脚本", ["请先生成并确认本集可拍剧本，再展开分镜"])
         p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
         bible = _project_bible_or_placeholder(p)
-        # 定妆照按集反应式维护（在分镜展开前）：①新角色发现并补进人物谱——否则 validate_storyboard 会因
-        # "角色圣经中不存在"把新角色从分镜里刷掉；②已有角色外观漂移则图生图重绘新段并同步 bible 锚点。
-        # 新人物补卡失败是阻塞问题；已有角色漂移重绘失败是可见的非阻塞警告。
+        # 定妆照按集反应式维护（在分镜展开前）
         from app.portraits import ensure_cards_for_screenplay
         disc = await ensure_cards_for_screenplay(
             ep["project_id"], ep["episode_no"], screenplay, bible,
@@ -330,15 +336,13 @@ async def _storyboard_task(episode_id: str, *, resume: bool = True):
         if disc.get("added") or disc.get("redrawn"):
             p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
             bible = _project_bible_or_placeholder(p)
-        # 场景图素材库按集反应式维护（分镜展开前）：剧本里出现、库里没有、够戏份的新场景 → 补入库 + 出图，
-        # 使分镜能命中库内场景、validate_storyboard_scenes 通过。失败不阻断分镜（按现有库继续）。
         try:
             from app.scenes import ensure_scenes_for_storyboard
             sdisc = await ensure_scenes_for_storyboard(ep["project_id"], ep["episode_no"], screenplay, bible)
             if sdisc.get("added"):
                 p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
                 bible = _project_bible_or_placeholder(p)
-        except Exception as exc:  # noqa: BLE001 场景库维护失败可见，但不阻断分镜
+        except Exception as exc:  # noqa: BLE001
             public = errors.record_and_format(
                 exc,
                 action="storyboard_scene_lib_degraded",
@@ -353,235 +357,35 @@ async def _storyboard_task(episode_id: str, *, resume: bool = True):
                 (f"场景库维护失败，已按现有库继续分镜：{public}", episode_id),
             )
             conn.commit()
-        source_text = _episode_source_text(conn, ep)
-        screenplay = _load_screenplay(ep)
-        spine_n = len((screenplay.plot_spine.spine_beats if screenplay and screenplay.plot_spine else None) or [])
-        compact_target = _storyboard_target_for_source(
-            ep_data.get("target_duration_s"), len(source_text), spine_beat_count=spine_n or None
-        )
-        if compact_target != ep_data.get("target_duration_s"):
-            conn.execute("UPDATE episodes SET target_duration_s=? WHERE id=?", (compact_target, episode_id))
-            conn.commit()
-            ep_data["target_duration_s"] = compact_target
-        prev = conn.execute(
-            "SELECT cliffhanger FROM episodes WHERE project_id=? AND episode_no=?",
-            (ep["project_id"], ep["episode_no"] - 1)).fetchone()
 
-        existing_rows = conn.execute(
-            "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
-        ).fetchall()
-        if not resume:
-            worker.delete_episode_shots(episode_id)
-            conn.execute(
-                "UPDATE episodes SET storyboard_outline_json=NULL, storyboard_artifact_id=NULL WHERE id=?",
-                (episode_id,),
-            )
-            conn.commit()
-            existing_rows = []
-        # 先出整集分镜大纲定全局节奏，再逐镜按大纲填充——避免多镜停留同一情绪、剧情推进过慢。
-        # 大纲是增强项：规划失败（如模型不可用）就回退到无大纲的纯逐镜生成，不阻断分镜。
-        outline = None
-        if resume and ep["storyboard_outline_json"]:
-            try:
-                from app.schemas import StoryboardOutline
-
-                outline = StoryboardOutline.model_validate_json(ep["storyboard_outline_json"])
-            except (TypeError, ValueError):
-                outline = None
-        if outline is None:
-            try:
-                outline = await generate_storyboard_outline(
-                    ep_data, source_text, bible,
-                    prev_ending=prev["cliffhanger"] if prev else "", screenplay=screenplay)
-                conn.execute(
-                    "UPDATE episodes SET storyboard_outline_json=?, storyboard_warning=NULL WHERE id=?",
-                    (outline.model_dump_json(), episode_id),
-                )
-                conn.commit()
-            except Exception as exc:  # noqa: BLE001 大纲失败不阻断，但必须可见
-                public = errors.record_and_format(
-                    exc,
-                    action="storyboard_outline_degraded",
-                    context={
-                        "project_id": ep["project_id"],
-                        "episode_id": episode_id,
-                        "episode_no": ep["episode_no"],
-                    },
-                )
-                conn.execute(
-                    "UPDATE episodes SET storyboard_warning=? WHERE id=?",
-                    (f"分镜大纲失败，已退回纯逐镜生成：{public}", episode_id),
-                )
-                conn.commit()
-                outline = None
-        completed: list[Shot] = (
-            list(_board_from_shot_rows(existing_rows, ep_data["episode_no"]).shots)
-            if existing_rows else []
+        # 集级 Supervisor：大纲 → 逐镜 → 整集校验 → 修复 / 自动确认
+        from app.storyboard_supervisor import run_storyboard_supervisor
+        mode = completion_mode if completion_mode in {
+            "ready_for_manual_confirm", "auto_confirm",
+        } else "ready_for_manual_confirm"
+        # 从 episode 列回读（API 启动时写入）
+        try:
+            ep_mode = ep["storyboard_completion_mode"]
+            if ep_mode in {"ready_for_manual_confirm", "auto_confirm"}:
+                mode = ep_mode
+        except (KeyError, IndexError, TypeError):
+            pass
+        grant_id = completion_grant_id
+        await run_storyboard_supervisor(
+            episode_id,
+            resume=resume,
+            completion_mode=mode,  # type: ignore[arg-type]
+            completion_grant_id=grant_id,
+            run_id=run_id,
+            preflight_done=True,
         )
-        if completed:
-            recovered_board = Storyboard(
-                episode_no=ep_data["episode_no"], shots=list(completed)
-            )
-            character_changes = normalize_offbible_characters(recovered_board, bible)
-            _persist_storyboard_character_policy_repairs(
-                conn, episode_id, recovered_board, character_changes
-            )
-            completed = list(recovered_board.shots)
-        if completed and outline and len(completed) >= len(outline.shots):
-            recovered_board = Storyboard(episode_no=ep_data["episode_no"], shots=list(completed))
-            recovered_errors = validate_storyboard(
-                recovered_board, bible, ep_data["target_duration_s"]
-            )
-            recovered_errors.extend(validate_storyboard_soundtrack(
-                recovered_board, screenplay, ep_data["target_duration_s"]
-            ))
-            recovered_errors.extend(validate_storyboard_preserves_key_content(recovered_board, screenplay))
-            if not recovered_errors:
-                _finalize_storyboard_evidence(episode_id, recovered_board)
-                conn.execute(
-                    "UPDATE episodes SET status='scripted', script_error=NULL WHERE id=?", (episode_id,)
-                )
-                conn.commit()
-                return
-        final_feedback: list[str] | None = None
-        _, max_shots = storyboard_shot_count_range(ep_data["target_duration_s"])
-        # 落库大纲的当前长度（内存与 DB 此刻一致：resume 从 DB 加载、新规划刚回写）。
-        planned_persisted = len(outline.shots) if (outline and outline.shots) else 0
-        while True:
-            draft = await generate_storyboard_next_shot(
-                ep_data, source_text, bible,
-                prev_ending=prev["cliffhanger"] if prev else "",
-                screenplay=screenplay,
-                completed_shots=completed,
-                final_feedback=final_feedback,
-                outline=outline,
-            )
-            # 与单镜 QA 使用同一套确定性归一口径后再落库。
-            board = Storyboard(episode_no=ep_data["episode_no"], shots=[*completed, draft.shot])
-            normalize_continuity(board)
-            # 与逐镜 QA 同口径：实名角色服从角色圣经；功能性路人按确定性合同保留，其它圣经外名字剥离。
-            # 每次分类都写入账本，避免“放宽角色限制”变成不可审计的静默绕过。
-            for c in normalize_offbible_characters(board, bible):
-                allowed_extra = bool(c.get("allowed_functional_extra"))
-                log_provider_call(
-                    "storyboard_character_policy", config.MODEL_TEXT,
-                    "FUNCTIONAL_EXTRA_ALLOWED" if allowed_extra else "OFFBIBLE_NORMALIZED",
-                    None, 0,
-                    meta={"episode_id": episode_id, "episode_no": ep_data["episode_no"], "stage": "分镜脚本", **c})
-            relieve_spoken_overflow(board)  # 清空旁白/内心OS；口播只保留真实台词
-            from app.renderability import SHOT_SOFT_MAX
-            from app.validators import prefer_default_shot_durations
-            prefer_default_shot_durations(board)
-            normalize_transition_visuals(board)
-            _sync_storyboard_shot_timing(conn, episode_id, board)
-            shot = board.shots[-1]
-            shot.is_final = bool(draft.is_final)
-            shot.prompt_contract_version = "renderability_v1"
-            object.__setattr__(
-                shot, "evidence_artifact_id", getattr(draft, "evidence_artifact_id", None)
-            )
-            _insert_storyboard_shot(conn, episode_id, screenplay, shot)
-            completed = list(board.shots)
-            conn.execute("UPDATE episodes SET status='scripting', script_error=NULL WHERE id=?", (episode_id,))
-            conn.commit()
-            # 计划自更新：把落库大纲追平实际镜头数，让前端"规划 N 镜"随逐镜拆镜细化实时更新（harness 事件留痕）。
-            revision = _reconcile_storyboard_plan(
-                conn, episode_id, ep_data["episode_no"], outline, completed, planned_persisted)
-            if revision is not None:
-                planned_persisted = revision[1]
-            residual = list(getattr(draft, "residual_errors", []) or [])
-            planned_now = len(outline.shots) if (outline and outline.shots) else 0
-            if residual:
-                # Renderability：到软预算后、或大纲计划已跑完后，不再因「继续补镜」清掉 is_final
-                # 硬往后续塞幻觉镜（生产事故：12/12 通过后仍冒出无剧情第 13 镜）。
-                can_continue = _can_continue_for_soft_gap(
-                    is_final=bool(draft.is_final),
-                    completed_count=len(completed),
-                    planned_count=planned_now,
-                    max_shots=max_shots,
-                    residual=residual,
-                )
-                if can_continue:
-                    # 这类 residual 的意思是"本镜不能当最后一镜"，不是本镜结构坏了；
-                    # 保留它作为过渡镜，继续把缺失关键内容喂给后续镜头。
-                    object.__setattr__(draft, "is_final", False)
-                    shot.is_final = False
-                elif (
-                    bool(draft.is_final)
-                    and _soft_gap_continue_residual(residual)
-                    and (
-                        (planned_now > 0 and len(completed) >= planned_now)
-                        or len(completed) >= SHOT_SOFT_MAX
-                    )
-                ):
-                    # 计划已执行完 / 软预算已满：接受收束，软缺口写入 warning，不发明续镜。
-                    warn = (
-                        f"分镜已按大纲收束（{len(completed)} 镜），仍有软校验缺口未再补镜："
-                        + residual[0][:240]
-                    )
-                    conn.execute(
-                        "UPDATE episodes SET storyboard_warning=? WHERE id=?",
-                        (warn[:800], episode_id),
-                    )
-                    conn.commit()
-                else:
-                    note = (
-                        f"镜{shot.shot_no:02d}{_storyboard_loop_exit_text(getattr(draft, 'loop_exit_reason', ''))}，"
-                        "已作为「需修改镜头」保留在分镜台（逐镜 checkpoint 已保存，可从下一镜继续）；"
-                        + _storyboard_residual_hint(residual)
-                        + "。残余问题：" + "；".join(residual[:8])
-                    )
-                    conn.execute("UPDATE episodes SET status='scripted', script_error=? WHERE id=?",
-                                 (note[:800], episode_id))
-                    conn.commit()
-                    break
-            if draft.is_final:
-                # 收束后按实际总时长回写集目标，避免「内容少了时长仍是旧的 50/90」。
-                actual_total = sum(int(s.duration_s or 0) for s in completed)
-                synced = _compact_episode_target(actual_total or ep_data["target_duration_s"])
-                conn.execute(
-                    "UPDATE episodes SET status='scripted', script_error=NULL, target_duration_s=? WHERE id=?",
-                    (synced, episode_id),
-                )
-                conn.commit()
-                _finalize_storyboard_evidence(
-                    episode_id,
-                    Storyboard(episode_no=ep_data["episode_no"], shots=list(completed)),
-                )
-                break
-            # P0 硬停：当前大纲节拍已全部落地，即使模型漏标 is_final 也不再开无大纲任务的下一镜。
-            # covers 语义拆分只会在「生成下一镜之前」胀长 outline；此处 completed>=planned 即计划已尽。
-            if planned_now > 0 and len(completed) >= planned_now:
-                actual_total = sum(int(s.duration_s or 0) for s in completed)
-                synced = _compact_episode_target(actual_total or ep_data["target_duration_s"])
-                warn = (
-                    f"分镜已执行完大纲全部 {planned_now} 镜；末镜未标收束，系统已强制收束，"
-                    "禁止继续生成计划外镜头。"
-                )
-                conn.execute(
-                    "UPDATE episodes SET status='scripted', script_error=NULL, "
-                    "target_duration_s=?, storyboard_warning=? WHERE id=?",
-                    (synced, warn[:800], episode_id),
-                )
-                conn.commit()
-                _finalize_storyboard_evidence(
-                    episode_id,
-                    Storyboard(episode_no=ep_data["episode_no"], shots=list(completed)),
-                )
-                break
-            if len(completed) >= max_shots:
-                raise StageError("分镜脚本", [f"已生成 {len(completed)} 镜但模型仍未收束到尾钩，请重试或人工补写最后一镜"])
-            # 把"整集必保留台词/剧情点里还没落到镜头的部分"作为下一镜的补镜反馈，
-            # 让缺口在后续镜头里逐步补齐，而不是拖到收尾镜才发现、再硬塞进单镜导致卡死。
-            # Renderability：软预算已满时不再用缺失氛围声轨逼补镜。
-            if len(completed) >= SHOT_SOFT_MAX:
-                final_feedback = None
-            else:
-                final_feedback = validate_storyboard_preserves_key_content(
-                    Storyboard(episode_no=ep_data["episode_no"], shots=list(completed)), screenplay) or None
     except (StageError, Exception) as exc:  # noqa: BLE001
         rec = errors.log_error(exc, action="storyboard_generate", context={"episode_id": episode_id})
         saved = conn.execute("SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)).fetchone()["c"]
+        # Supervisor 已把 WAITING_* 写为 scripted+script_error；此处只处理未捕获异常
+        ep_now = conn.execute("SELECT status, script_error FROM episodes WHERE id=?", (episode_id,)).fetchone()
+        if ep_now and ep_now["status"] in {"scripted", "confirmed", "scripting"} and ep_now["script_error"]:
+            return
         if saved:
             note = (
                 f"追加镜生成失败，已保留前 {saved} 个 QA 通过镜头，可人工补写最后一镜、修改后确认，"
@@ -596,7 +400,7 @@ async def _storyboard_task(episode_id: str, *, resume: bool = True):
 
 
 def recover_storyboard_tasks() -> int:
-    """恢复中断的分镜任务；从最后一个已提交的逐镜 checkpoint 继续。"""
+    """恢复中断的分镜任务；优先读 Supervisor Checkpoint。"""
     conn = get_conn()
     rows = conn.execute(
         "SELECT id, project_id FROM episodes "
@@ -611,6 +415,23 @@ def recover_storyboard_tasks() -> int:
                 "AND recovered_by_run_id IS NULL ORDER BY updated_at DESC LIMIT 1",
                 (row["id"],),
             ).fetchone()
+            # 用户取消的 run 永不自动恢复
+            cancelled = conn.execute(
+                """SELECT id FROM workflow_runs
+                   WHERE workflow_type='storyboard' AND scope_type='episode' AND scope_id=?
+                     AND status='CANCELLED' ORDER BY updated_at DESC LIMIT 1""",
+                (row["id"],),
+            ).fetchone()
+            if cancelled and not parent:
+                # 若最近是取消且无 PAUSED_EXTERNAL，跳过
+                latest = conn.execute(
+                    """SELECT status FROM workflow_runs
+                       WHERE workflow_type='storyboard' AND scope_type='episode' AND scope_id=?
+                       ORDER BY updated_at DESC LIMIT 1""",
+                    (row["id"],),
+                ).fetchone()
+                if latest and latest["status"] == "CANCELLED":
+                    continue
             recorder = _new_storyboard_recorder(
                 row["id"], requested_by="system", trigger_type="resume",
                 parent_run_id=parent["id"] if parent else None,
@@ -630,6 +451,7 @@ def _new_storyboard_recorder(
     requested_by: str = "user",
     trigger_type: str = "manual",
     parent_run_id: str | None = None,
+    completion_mode: str = "ready_for_manual_confirm",
 ) -> WorkflowRecorder:
     conn = get_conn()
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
@@ -648,8 +470,13 @@ def _new_storyboard_recorder(
         requested_by=requested_by,
         trigger_type=trigger_type,
         policy_snapshot={
-            "checkpoint": "per_shot",
+            "supervisor": True,
+            "completion_mode": completion_mode,
+            "checkpoint": "supervisor_and_per_shot",
             "max_iterations_per_shot": contract.max_iterations,
+            "max_inner_iterations": 4,
+            "max_repair_epochs_per_activation": 6,
+            "blocker_warning_candidate_allowed": False,
             "provider_retry": {
                 "max_retries_per_call": config.TEXT_PROVIDER_MAX_RETRIES,
                 "base_delay_s": config.TEXT_PROVIDER_RETRY_BASE_DELAY,
@@ -666,6 +493,8 @@ async def _recorded_storyboard_task(
     recorder: WorkflowRecorder,
     *,
     resume: bool,
+    completion_mode: str = "ready_for_manual_confirm",
+    completion_grant_id: str | None = None,
 ) -> None:
     recorder.start()
     try:
@@ -678,7 +507,7 @@ async def _recorded_storyboard_task(
                 ep["screenplay_artifact_id"],
             ) if artifact_id
         ]
-        context = ContextPack(goal="按已确认剧本逐镜生成分镜并从 checkpoint 恢复")
+        context = ContextPack(goal="集级 Supervisor：生成整集分镜直至通过并可自动确认")
         if ep["screenplay_json"]:
             context.add_text(
                 "screenplay", ep["screenplay_json"],
@@ -686,9 +515,15 @@ async def _recorded_storyboard_task(
             )
         await recorder.step(
             "storyboard",
-            lambda: _storyboard_task(episode_id, resume=resume),
+            lambda: _storyboard_task(
+                episode_id,
+                resume=resume,
+                completion_mode=completion_mode,
+                completion_grant_id=completion_grant_id,
+                run_id=recorder.run_id,
+            ),
             contract_key="storyboard",
-            agent_name="storyboard",
+            agent_name="storyboard_supervisor",
             input_artifact_ids=input_ids,
             context_manifest=context.manifest(),
         )
@@ -696,10 +531,15 @@ async def _recorded_storyboard_task(
             "SELECT status, script_error, storyboard_artifact_id FROM episodes WHERE id=?",
             (episode_id,),
         ).fetchone()
-        if result and result["status"] == "scripted" and result["storyboard_artifact_id"]:
-            recorder.succeed("分镜已完成并提交整版 Artifact")
-        elif result and result["status"] == "scripted":
-            recorder.partial(result["script_error"] or "分镜含需人工修订 checkpoint")
+        if result and result["status"] == "confirmed":
+            recorder.succeed("分镜已自动确认（尚未产生视频费用）")
+        elif result and result["status"] == "scripted" and result["storyboard_artifact_id"] and not result["script_error"]:
+            recorder.succeed("分镜已完成，等待人工确认")
+        elif result and result["status"] == "scripted" and result["script_error"]:
+            # WAITING_HUMAN / 授权失效等：不是 PARTIAL 业务伪造成功，记为等待态成功保留
+            recorder.partial(result["script_error"])
+        elif result and result["status"] == "scripting":
+            recorder.partial(result["script_error"] or "Supervisor 暂停，待恢复")
         else:
             recorder.fail(RuntimeError(result["script_error"] if result else "分镜生成失败"))
     except asyncio.CancelledError:
@@ -711,11 +551,10 @@ async def _recorded_storyboard_task(
 
 
 @router.post("/episodes/{episode_id}/storyboard")
-async def start_storyboard(episode_id: str):
+async def start_storyboard(episode_id: str, body: dict | None = Body(None)):
     from app.capabilities.dispatch import ui_route
-    routed = await ui_route(
-        "storyboard.generate", {"episode_id": episode_id, "mode": "fresh"},
-    )
+    payload = {"episode_id": episode_id, "mode": "fresh", **(body or {})}
+    routed = await ui_route("storyboard.generate", payload)
     if routed is not None:
         return routed
     ep = _episode_or_404(episode_id)
@@ -724,25 +563,74 @@ async def start_storyboard(episode_id: str):
         raise HTTPException(409, "分镜正在生成中")
     if not _screenplay_ready(ep):
         raise HTTPException(409, "请先在剧本台生成本集可拍剧本")
+    body = body or {}
+    completion_mode = body.get("completion_mode") or "ready_for_manual_confirm"
+    if completion_mode not in {"ready_for_manual_confirm", "auto_confirm"}:
+        raise HTTPException(422, "completion_mode 只能是 ready_for_manual_confirm 或 auto_confirm")
+    completion_grant_id = body.get("completion_grant_id")
     conn = get_conn()
-    conn.execute("UPDATE episodes SET status='scripting', script_error=NULL WHERE id=?", (episode_id,))
+    if completion_mode == "auto_confirm":
+        from app.completion_grant import issue_completion_grant
+        p = conn.execute("SELECT bible_artifact_id FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
+        grant, _token = issue_completion_grant(
+            episode_id=episode_id,
+            project_id=ep["project_id"],
+            screenplay_artifact_id=ep["screenplay_artifact_id"] or "",
+            bible_artifact_id=p["bible_artifact_id"] if p else None,
+            impact_snapshot={
+                "unlocks_paid_video": True,
+                "auto_submit_video": False,
+                "scope": "episode_storyboard_only",
+            },
+        )
+        completion_grant_id = grant.grant_id
+    # 迁移列可能尚未存在：容错写入
+    try:
+        conn.execute(
+            "UPDATE episodes SET status='scripting', script_error=NULL, "
+            "storyboard_completion_mode=?, active_storyboard_run_id=NULL WHERE id=?",
+            (completion_mode, episode_id),
+        )
+    except Exception:  # noqa: BLE001
+        conn.execute(
+            "UPDATE episodes SET status='scripting', script_error=NULL WHERE id=?",
+            (episode_id,),
+        )
     conn.commit()
-    recorder = _new_storyboard_recorder(episode_id)
+    recorder = _new_storyboard_recorder(episode_id, completion_mode=completion_mode)
+    try:
+        conn.execute(
+            "UPDATE episodes SET active_storyboard_run_id=? WHERE id=?",
+            (recorder.run_id, episode_id),
+        )
+        conn.commit()
+    except Exception:  # noqa: BLE001
+        pass
     task_registry.spawn(
         "storyboard", episode_id,
-        _recorded_storyboard_task(episode_id, recorder, resume=False),
+        _recorded_storyboard_task(
+            episode_id, recorder, resume=False,
+            completion_mode=completion_mode,
+            completion_grant_id=completion_grant_id,
+        ),
         project_id=ep["project_id"],
     )
-    return {"status": "scripting", "run_id": recorder.run_id}
+    return {
+        "status": "accepted" if completion_mode == "auto_confirm" else "scripting",
+        "run_id": recorder.run_id,
+        "goal": "generate_and_confirm" if completion_mode == "auto_confirm" else "generate_ready",
+        "completion_mode": completion_mode,
+        "completion_grant_id": completion_grant_id,
+        "resource_uri": f"manju://runs/{recorder.run_id}",
+    }
 
 
 @router.post("/episodes/{episode_id}/storyboard/resume")
-async def resume_storyboard(episode_id: str):
-    """Continue after the last committed per-shot checkpoint without deleting it."""
+async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
+    """从 Supervisor Checkpoint / 已验证前缀恢复。"""
     from app.capabilities.dispatch import ui_route
-    routed = await ui_route(
-        "storyboard.generate", {"episode_id": episode_id, "mode": "resume"},
-    )
+    payload = {"episode_id": episode_id, "mode": "resume", **(body or {})}
+    routed = await ui_route("storyboard.generate", payload)
     if routed is not None:
         return routed
     ep = _episode_or_404(episode_id)
@@ -755,29 +643,42 @@ async def resume_storyboard(episode_id: str):
     saved = conn.execute(
         "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)
     ).fetchone()["c"]
-    if not saved:
-        raise HTTPException(409, "当前没有可恢复的逐镜 checkpoint，请重新生成分镜")
+    from app.storyboard_supervisor import load_latest_checkpoint
+    cp = load_latest_checkpoint(episode_id)
+    if not saved and (cp is None or cp.validated_prefix_end <= 0):
+        raise HTTPException(409, "当前没有可恢复的 Supervisor / 逐镜 checkpoint，请重新生成分镜")
     last_row = conn.execute(
         "SELECT shot_no, shot_contract_json FROM shots WHERE episode_id=? ORDER BY shot_no DESC LIMIT 1",
         (episode_id,),
     ).fetchone()
-    if last_row and last_row["shot_contract_json"]:
+    if last_row and last_row["shot_contract_json"] and not (cp and cp.phase in {
+        "WAITING_HUMAN", "WAITING_AUTHORIZATION", "PAUSED_EXTERNAL", "REPAIRING", "CONFIRMING",
+    }):
         try:
             last_contract = json.loads(last_row["shot_contract_json"])
         except (TypeError, ValueError, json.JSONDecodeError):
             last_contract = {}
-        if bool(last_contract.get("is_final")):
-            raise HTTPException(
-                409,
-                f"第 {last_row['shot_no']} 镜已标记收束（is_final），禁止再续跑追加镜头；"
-                "若要重做请点击「重新生成分镜」",
-            )
+        if bool(last_contract.get("is_final")) and ep["status"] not in {"scripted"}:
+            pass  # Supervisor 可能需要整集校验/确认，允许恢复
+        elif bool(last_contract.get("is_final")) and not (body or {}).get("force"):
+            # 已收束且无待修复时，默认禁止盲目续跑加镜
+            if cp is None or cp.phase == "SUCCEEDED":
+                raise HTTPException(
+                    409,
+                    f"第 {last_row['shot_no']} 镜已标记收束（is_final），禁止再续跑追加镜头；"
+                    "若要重做请点击「重新生成分镜」",
+                )
     parent = conn.execute(
         """SELECT id FROM workflow_runs
            WHERE workflow_type='storyboard' AND scope_type='episode' AND scope_id=?
            ORDER BY updated_at DESC LIMIT 1""",
         (episode_id,),
     ).fetchone()
+    try:
+        completion_mode = ep["storyboard_completion_mode"] or "ready_for_manual_confirm"
+    except (KeyError, IndexError, TypeError):
+        completion_mode = (body or {}).get("completion_mode") or "ready_for_manual_confirm"
+    grant_id = (body or {}).get("completion_grant_id") or (cp.completion_grant_id if cp else None)
     conn.execute(
         "UPDATE episodes SET status='scripting', script_error=NULL WHERE id=?", (episode_id,)
     )
@@ -786,11 +687,16 @@ async def resume_storyboard(episode_id: str):
         episode_id,
         trigger_type="resume",
         parent_run_id=parent["id"] if parent else None,
+        completion_mode=completion_mode,
     )
     task_registry.spawn(
         "storyboard",
         episode_id,
-        _recorded_storyboard_task(episode_id, recorder, resume=True),
+        _recorded_storyboard_task(
+            episode_id, recorder, resume=True,
+            completion_mode=completion_mode,
+            completion_grant_id=grant_id,
+        ),
         project_id=ep["project_id"],
     )
     return {
@@ -798,6 +704,7 @@ async def resume_storyboard(episode_id: str):
         "run_id": recorder.run_id,
         "resumed_from_shot": int(saved),
         "next_shot_no": int(saved) + 1,
+        "completion_mode": completion_mode,
     }
 
 
@@ -869,6 +776,8 @@ async def cancel_storyboard(episode_id: str):
     if ep["status"] != "scripting":
         raise HTTPException(409, "当前没有正在进行的分镜生成")
     await task_registry.cancel_and_wait("storyboard", episode_id)
+    from app.completion_grant import revoke_active_grants_for_episode
+    revoke_active_grants_for_episode(episode_id)
     conn = get_conn()
     has_shots = conn.execute(
         "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)).fetchone()["c"]
@@ -1030,6 +939,37 @@ def episode_detail(episode_id: str, view: str | None = None):
     ep.pop("storyboard_outline_json", None)
     ep["storyboard_outline"] = outline
     ep["storyboard_planned_shots"] = len(outline["shots"]) if outline and outline.get("shots") else None
+    # Supervisor 运行面板数据（PRD §14.2）
+    if full or view == "board":
+        from app.storyboard_supervisor import load_latest_checkpoint
+        from app.storyboard_control import control_snapshot
+
+        cp = load_latest_checkpoint(episode_id)
+        ep["supervisor"] = None
+        if cp is not None:
+            repair = cp.last_repair or {}
+            ep["supervisor"] = {
+                "phase": cp.phase,
+                "goal": cp.goal,
+                "completion_mode": cp.completion_mode,
+                "repair_epoch": cp.repair_epoch,
+                "validated_prefix_end": cp.validated_prefix_end,
+                "next_shot_no": cp.next_shot_no,
+                "expected_total": cp.expected_total or ep["storyboard_planned_shots"] or 0,
+                "outcome": cp.outcome,
+                "last_repair": repair,
+                "strategy": repair.get("strategy"),
+                "frontier": repair.get("invalidation_frontier"),
+                "issue_codes": repair.get("issue_codes") or [],
+                "completion_grant_id": cp.completion_grant_id,
+                "pending_control": control_snapshot(episode_id),
+            }
+        try:
+            ep["active_storyboard_run_id"] = ep.get("active_storyboard_run_id")
+            ep["storyboard_completion_mode"] = ep.get("storyboard_completion_mode") or "ready_for_manual_confirm"
+        except Exception:  # noqa: BLE001
+            ep["active_storyboard_run_id"] = None
+            ep["storyboard_completion_mode"] = "ready_for_manual_confirm"
     shot_count = int(conn.execute(
         "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)
     ).fetchone()["c"])
@@ -1168,27 +1108,26 @@ async def edit_shot(shot_id: str, body: dict):
     merged["dialogues"] = json.loads(merged["dialogues"] or "[]")
     merged["continuity_from_prev"] = bool(merged["continuity_from_prev"])
     _apply_contract_to_public_shot(merged)
-    for key in ("duration_s", "shot_size", "camera_move", "scene_setting", "characters",
-                "action_desc", "first_frame_desc", "last_frame_desc", "source_excerpt", "narration", "dialogues", "transition", "continuity_from_prev",
-                "story_event_id", "purpose", "new_information_ids", "reinforcement_info_ids",
-                "state_in", "primary_action", "emotion_beat", "state_out", "observed_state_out",
-                "continuity_mode", "characters_visible", "audio_cast", "audio_timeline",
-                "required_text", "reference_roles", "do_not_repeat", "risk_tags",
-                "prompt_contract_version", "legacy_unvalidated", "camera_angle",
-                "spatial_anchor", "is_final"):
+    editable_keys = (
+        "duration_s", "shot_size", "camera_move", "scene_setting", "characters",
+        "action_desc", "first_frame_desc", "last_frame_desc", "source_excerpt", "narration",
+        "dialogues", "transition", "continuity_from_prev",
+        "story_event_id", "purpose", "spine_beat_ids", "key_line_ids", "information_ids",
+        "new_information_ids", "reinforcement_info_ids", "spoken_contract_status",
+        "state_in", "primary_action", "emotion_beat", "state_out", "observed_state_out",
+        "continuity_mode", "characters_visible", "audio_cast", "audio_timeline",
+        "required_text", "reference_roles", "do_not_repeat", "risk_tags",
+        "prompt_contract_version", "legacy_unvalidated", "camera_angle",
+        "spatial_anchor", "is_final",
+    )
+    for key in editable_keys:
         if key in body:
             merged[key] = body[key]
     # 时长 clamp 到产品侧合法区间；缺省/非法时回退默认时长。
     merged["duration_s"] = clip_duration_value(merged.get("duration_s"))
     instance, errors = schema_errors(Shot, {k: merged[k] for k in (
-        "shot_no", "duration_s", "shot_size", "camera_move", "scene_setting", "characters",
-        "action_desc", "first_frame_desc", "last_frame_desc", "source_excerpt", "narration", "dialogues", "transition", "continuity_from_prev",
-        "story_event_id", "purpose", "new_information_ids", "reinforcement_info_ids",
-        "state_in", "primary_action", "emotion_beat", "state_out", "observed_state_out",
-        "continuity_mode", "characters_visible", "audio_cast", "audio_timeline",
-        "required_text", "reference_roles", "do_not_repeat", "risk_tags",
-        "prompt_contract_version", "legacy_unvalidated", "camera_angle",
-        "spatial_anchor", "is_final")})
+        "shot_no", *editable_keys,
+    )})
     if errors:
         raise HTTPException(422, "；".join(errors))
     instance.action_desc = normalize_action_desc(instance.action_desc)
@@ -1196,6 +1135,141 @@ async def edit_shot(shot_id: str, body: dict):
     instance.narration = ""
     if instance.audio_timeline:
         instance.audio_timeline = [item for item in instance.audio_timeline if item.type != "narration"]
+    # VAL-422：人工编辑必须重新通过确定性业务校验；「人改过」≠ hard gate 通过。
+    from app.continuity import (
+        speech_capacity_errors, spoken_contract_coherence_errors, shot_id_space_errors,
+        state_chain_errors,
+    )
+    from app.spoken_contract import (
+        RULE_SPOKEN_CAPACITY,
+        synchronize_spoken_contract,
+        spoken_text_of,
+    )
+    from app.validators import (
+        validate_storyboard_shot_covers_outline,
+        validate_storyboard_preserves_key_content,
+        key_line_delivery_errors,
+    )
+    episode_id = shot["episode_id"]
+    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    screenplay = _load_screenplay(ep) if ep is not None else None
+    sync = synchronize_spoken_contract(
+        instance,
+        changed_fields={k for k in ("dialogues", "audio_timeline") if k in body},
+    )
+    # 容量只走 speech_capacity_errors，避免与 sync 内 capacity_issue 重复报告。
+    business_errors: list[str] = [
+        issue.message for issue in sync.issues
+        if issue.severity == "blocker" and issue.rule_id != RULE_SPOKEN_CAPACITY
+    ]
+    business_errors.extend(speech_capacity_errors(instance))
+    business_errors.extend(spoken_contract_coherence_errors(instance))
+    business_errors.extend(shot_id_space_errors(instance))
+    business_errors.extend(key_line_delivery_errors(instance, screenplay))
+
+    outline = None
+    if ep is not None and ep["storyboard_outline_json"]:
+        try:
+            outline = StoryboardOutline.model_validate_json(ep["storyboard_outline_json"])
+        except Exception:  # noqa: BLE001
+            outline = None
+    rows = conn.execute(
+        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
+    ).fetchall()
+    board = _board_from_shot_rows(rows, ep["episode_no"] if ep else 1)
+    # 用编辑后的镜头替换同号位，再跑相邻状态链 / 大纲 covers / 收束整集校验。
+    replaced = False
+    for idx, existing in enumerate(board.shots):
+        if existing.shot_no == instance.shot_no:
+            board.shots[idx] = instance
+            replaced = True
+            break
+    if not replaced:
+        board.shots.append(instance)
+        board.shots.sort(key=lambda s: s.shot_no)
+
+    if outline and outline.shots:
+        brief = next((s for s in outline.shots if s.shot_no == instance.shot_no), None)
+        if brief is not None and (brief.covers or "").strip():
+            prior_text = "".join(
+                (s.action_desc or "") + spoken_text_of(s)
+                for s in board.shots if s.shot_no < instance.shot_no
+            )
+            later = "；".join(
+                (s.covers or "") for s in outline.shots if s.shot_no > instance.shot_no
+            )
+            business_errors.extend(validate_storyboard_shot_covers_outline(
+                instance, brief.covers, instance.shot_no,
+                prior_text=prior_text, later_planned_covers=later,
+            ))
+
+    # 相邻窗口状态链：只保留「本镜」相关诊断，避免旧邻镜缺字段误伤本次保存。
+    neighbor_nos = {instance.shot_no - 1, instance.shot_no, instance.shot_no + 1}
+    neighbor_board = Storyboard(
+        episode_no=board.episode_no,
+        shots=[s for s in board.shots if s.shot_no in neighbor_nos],
+    )
+    if neighbor_board.shots and (
+        (instance.state_in or "").strip() or (instance.state_out or "").strip()
+    ):
+        tag = f"shot_no={instance.shot_no}"
+        business_errors.extend(
+            err for err in state_chain_errors(neighbor_board) if tag in err
+        )
+
+    is_final_edit = bool(instance.is_final) or (
+        outline is not None and outline.shots
+        and instance.shot_no >= len(outline.shots)
+    )
+    if is_final_edit and screenplay is not None:
+        business_errors.extend(validate_storyboard_preserves_key_content(board, screenplay))
+
+    # 去重：同一文案只报一次
+    deduped: list[str] = []
+    seen_err: set[str] = set()
+    for msg in business_errors:
+        if msg in seen_err:
+            continue
+        seen_err.add(msg)
+        deduped.append(msg)
+    if deduped:
+        # 失败时保留草稿 Artifact，不覆盖已通过 checkpoint。
+        draft_artifact = evidence_repository.create_artifact(EvidenceArtifact(
+            type="storyboard_shot",
+            scope_type="storyboard_checkpoint",
+            scope_id=f"{episode_id}:{shot['shot_no']}",
+            status="needs_revision",
+            trust_level="T1",
+            content=instance.model_dump(mode="json"),
+            parent_artifact_ids=[shot["storyboard_artifact_id"]] if shot["storyboard_artifact_id"] else [],
+            contract_version=get_contract("storyboard").version,
+        ))
+        evidence_repository.create_evaluation(
+            draft_artifact["id"],
+            Evaluation(
+                evaluator_type="human",
+                evaluator_name="storyboard_editor",
+                evaluator_version="1.0.0",
+                status="failed",
+                hard_gate_passed=False,
+                score=0,
+                evidence={
+                    "decision": "authored_or_reviewed",
+                    "shot_id": shot_id,
+                    "issues": deduped[:12],
+                },
+            ),
+        )
+        raise HTTPException(422, {
+            "code": "SHOT_EDIT_VALIDATION_FAILED",
+            "category": "validation",
+            "message": "；".join(deduped),
+            "issues": deduped,
+            "draft_artifact_id": draft_artifact["id"],
+            "checkpoint_preserved": True,
+        })
+
+    # 业务硬校验已通过：人工证据只记录 authored；hard gate 由确定性 Evaluation 单独证明。
     conn.execute(
         "UPDATE shots SET duration_s=?, shot_size=?, camera_move=?, scene_setting=?, characters=?, action_desc=?, first_frame_desc=?, last_frame_desc=?, source_excerpt=?, narration=?, dialogues=?, transition=?, continuity_from_prev=?, shot_contract_json=?, continuity_mode=?, observed_state_out=? WHERE id=?",
         (instance.duration_s, instance.shot_size, instance.camera_move, instance.scene_setting,
@@ -1209,25 +1283,37 @@ async def edit_shot(shot_id: str, body: dict):
     manual_artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type="storyboard_shot",
         scope_type="storyboard_checkpoint",
-        scope_id=f"{shot['episode_id']}:{shot['shot_no']}",
+        scope_id=f"{episode_id}:{shot['shot_no']}",
         status="validated",
-        trust_level="T4",
+        trust_level="T2",
         content=instance.model_dump(mode="json"),
         parent_artifact_ids=[previous_artifact_id] if previous_artifact_id else [],
         contract_version=get_contract("storyboard").version,
     ))
+    contract_version = get_contract("storyboard").version
     manual_artifact = evidence_repository.commit_artifact(
         None,
         manual_artifact["id"],
-        [Evaluation(
-            evaluator_type="human",
-            evaluator_name="storyboard_editor",
-            evaluator_version="1.0.0",
-            status="passed",
-            hard_gate_passed=True,
-            score=100,
-            evidence={"decision": "manual_edit", "shot_id": shot_id},
-        )],
+        [
+            Evaluation(
+                evaluator_type="human",
+                evaluator_name="storyboard_editor",
+                evaluator_version="1.0.0",
+                status="passed",
+                hard_gate_passed=False,
+                score=100,
+                evidence={"decision": "authored_or_reviewed", "shot_id": shot_id},
+            ),
+            Evaluation(
+                evaluator_type="deterministic",
+                evaluator_name="storyboard_shot_business_gate",
+                evaluator_version=contract_version,
+                status="passed",
+                hard_gate_passed=True,
+                score=100,
+                evidence={"shot_id": shot_id, "spoken_contract_status": instance.spoken_contract_status},
+            ),
+        ],
     )
     conn.execute(
         "UPDATE shots SET storyboard_artifact_id=? WHERE id=?",
@@ -1237,7 +1323,7 @@ async def edit_shot(shot_id: str, body: dict):
     # 任一分镜字段都参与参考图或视频 prompt。保存后统一清理全部旧衍生产物，
     # 避免 done/generating 状态继续展示旧成片；剧集必须重新确认后才能花钱生成。
     invalidated = worker.clear_shot_artifacts(shot_id)
-    conn.execute("UPDATE episodes SET status='scripted' WHERE id=?", (shot["episode_id"],))
+    conn.execute("UPDATE episodes SET status='scripted' WHERE id=?", (episode_id,))
     conn.commit()
     impact = evidence_repository.get_lineage(previous_artifact_id or manual_artifact["id"])
     return {
@@ -1252,6 +1338,137 @@ async def edit_shot(shot_id: str, body: dict):
             "paid_media_invalidated": bool(invalidated),
         },
     }
+
+
+@router.get("/episodes/{episode_id}/spoken-contract/audit")
+def audit_episode_spoken_contract(episode_id: str):
+    """只读审计本集口播合同（PRD §6.1）：不写库。"""
+    _episode_or_404(episode_id)
+    from app.spoken_contract import audit_legacy_spoken_contract, validate_spoken_contract
+    from app.observability.metrics import inc
+
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
+    ).fetchall()
+    board = _board_from_shot_rows(rows, 1)
+    results = []
+    conflict_count = 0
+    for shot in board.shots:
+        status = audit_legacy_spoken_contract(shot)
+        issues = [i.model_dump(mode="json") for i in validate_spoken_contract(shot)]
+        if status == "conflict" or any(i["code"] == "SPOKEN_CONTRACT_CONFLICT" for i in issues):
+            conflict_count += 1
+            inc("spoken_contract_conflict_total", episode_id=episode_id, shot_no=shot.shot_no, source="audit")
+        results.append({
+            "shot_no": shot.shot_no,
+            "spoken_contract_status": status,
+            "legacy_unvalidated": bool(shot.legacy_unvalidated),
+            "issues": issues,
+            "repair_options": [
+                "rebuild_timeline_from_dialogues",
+                "rebuild_dialogues_from_timeline",
+            ] if status == "conflict" else [],
+        })
+    return {
+        "episode_id": episode_id,
+        "conflict_count": conflict_count,
+        "shots": results,
+    }
+
+
+@router.post("/episodes/{episode_id}/migrate-shot-ids")
+def migrate_episode_shot_ids(episode_id: str, body: dict | None = Body(None)):
+    """把误写入 story_event_id 的 S* 迁移到 spine_beat_ids（PRD §6.2）。"""
+    _episode_or_404(episode_id)
+    dry_run = bool((body or {}).get("dry_run", False))
+    from app.continuity import migrate_shot_id_spaces, shot_contract_dict
+
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
+    ).fetchall()
+    board = _board_from_shot_rows(rows, 1)
+    by_no = {int(r["shot_no"]): r for r in rows}
+    changed = []
+    for shot in board.shots:
+        actions = migrate_shot_id_spaces(shot)
+        if not actions:
+            continue
+        changed.append({"shot_no": shot.shot_no, "actions": actions})
+        if dry_run:
+            continue
+        row = by_no.get(shot.shot_no)
+        if row is None:
+            continue
+        conn.execute(
+            "UPDATE shots SET shot_contract_json=?, continuity_mode=?, observed_state_out=? WHERE id=?",
+            (
+                json.dumps(shot_contract_dict(shot), ensure_ascii=False),
+                shot.continuity_mode,
+                shot.observed_state_out,
+                row["id"],
+            ),
+        )
+    if not dry_run and changed:
+        conn.commit()
+    return {"episode_id": episode_id, "dry_run": dry_run, "changed": changed}
+
+
+@router.post("/shots/{shot_id}/resolve-spoken-conflict")
+async def resolve_spoken_conflict(shot_id: str, body: dict):
+    """人工选择口播基准并同步（PRD §6.1 / §7.2）。
+
+    choice:
+      - rebuild_timeline_from_dialogues
+      - rebuild_dialogues_from_timeline
+    若镜头已有付费视频，必须 set invalidate_media=true，否则 409。
+    """
+    choice = (body or {}).get("choice") or ""
+    invalidate_media = bool((body or {}).get("invalidate_media", False))
+    if choice not in {"rebuild_timeline_from_dialogues", "rebuild_dialogues_from_timeline"}:
+        raise HTTPException(422, "choice 必须是 rebuild_timeline_from_dialogues 或 rebuild_dialogues_from_timeline")
+    conn = get_conn()
+    shot = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
+    if not shot:
+        raise HTTPException(404, "镜头不存在")
+    has_paid = conn.execute(
+        "SELECT EXISTS(SELECT 1 FROM shot_versions WHERE shot_id=? AND status IN ('done','generating','pending')) AS present",
+        (shot_id,),
+    ).fetchone()["present"]
+    if has_paid and not invalidate_media:
+        raise HTTPException(
+            409,
+            "本镜已有付费视频产物；请确认 invalidate_media=true 使旧视频失效后再改口播基准",
+        )
+    # 复用 edit_shot：只改一侧字段，触发 synchronize_spoken_contract 定向重建。
+    patch: dict = {"expected_version": shot["storyboard_artifact_id"]}
+    if choice == "rebuild_timeline_from_dialogues":
+        patch["dialogues"] = json.loads(shot["dialogues"] or "[]")
+    else:
+        from app.continuity import apply_shot_contract
+        temp = Shot(
+            shot_no=shot["shot_no"], duration_s=shot["duration_s"], shot_size=shot["shot_size"],
+            camera_move=shot["camera_move"], scene_setting=shot["scene_setting"],
+            characters=json.loads(shot["characters"] or "[]"),
+            action_desc=shot["action_desc"], first_frame_desc=shot["first_frame_desc"] or "",
+            last_frame_desc=shot["last_frame_desc"] or "", source_excerpt=shot["source_excerpt"] or "",
+            narration=shot["narration"], dialogues=json.loads(shot["dialogues"] or "[]"),
+            transition=shot["transition"] or "硬切",
+            continuity_from_prev=bool(shot["continuity_from_prev"]),
+        )
+        apply_shot_contract(temp, shot["shot_contract_json"] if "shot_contract_json" in shot.keys() else None)
+        patch["audio_timeline"] = [item.model_dump(mode="json") for item in (temp.audio_timeline or [])]
+    result = await edit_shot(shot_id, patch)
+    from app.observability.metrics import inc
+    inc(
+        "spoken_contract_conflict_total",
+        episode_id=shot["episode_id"],
+        shot_no=shot["shot_no"],
+        source="resolved",
+        choice=choice,
+    )
+    return {"ok": True, "choice": choice, **(result if isinstance(result, dict) else {})}
 
 
 def _storyboard_residual_hint(residual: list[str]) -> str:

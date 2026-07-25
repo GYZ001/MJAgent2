@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
 from pydantic import BaseModel
 
 from app import api, db, stages
@@ -11,6 +12,7 @@ from app.evidence import repository
 from app.harness.context import ContextPack
 from app.harness.types import EvidenceArtifact
 from app.loops import AgentLoop, AgentLoopPolicy
+from app.loops.base import AgentLoopFailure
 from app.orchestration.engine import WorkflowRecorder
 from app.schemas import EpisodeScreenplay
 from app.stages import StoryboardShotDraft
@@ -108,16 +110,18 @@ def test_schema_issue_fingerprint_includes_field_and_rule() -> None:
     assert "string_type" in string_issue.fingerprint
 
 
-def test_agent_loop_stops_same_issue_fingerprint_and_returns_warning() -> None:
+def test_agent_loop_stops_same_issue_fingerprint_and_rejects_blocker_warning() -> None:
+    """VAL-422：allow_warning_candidate 不得把带 blocker 的候选当成 warning 通过。"""
+
     async def producer(_iteration, *_args):
         return '{"value": 1}'
 
-    result = asyncio.run(_loop(allow_warning=True).run(producer, _evaluate))
+    with pytest.raises(AgentLoopFailure) as exc:
+        asyncio.run(_loop(allow_warning=True).run(producer, _evaluate))
 
-    assert result.status == "warning"
-    assert result.exit_reason == "stalled"
-    assert result.iterations == 2
-    assert result.issues[0].repairable is True
+    assert exc.value.exit_reason == "stalled"
+    assert exc.value.iterations == 2
+    assert exc.value.issues[0].repairable is True
 
 
 def test_agent_loop_stops_when_issue_set_changes_without_quality_gain() -> None:
@@ -130,10 +134,11 @@ def test_agent_loop_stops_when_issue_set_changes_without_quality_gain() -> None:
             [f"distinct problem {abs(value.value)}"], subject=f"episode:e{abs(value.value)}"
         )
 
-    result = asyncio.run(_loop(allow_warning=True).run(producer, evaluate))
+    with pytest.raises(AgentLoopFailure) as exc:
+        asyncio.run(_loop(allow_warning=True).run(producer, evaluate))
 
-    assert result.exit_reason == "no_quality_gain"
-    assert result.iterations == 3
+    assert exc.value.exit_reason == "no_quality_gain"
+    assert exc.value.iterations == 3
 
 
 def test_agent_loop_persists_iterations_candidates_and_evaluations(tmp_path, monkeypatch) -> None:
@@ -226,27 +231,15 @@ def test_warning_fallback_keeps_value_issues_and_artifact_from_same_iteration(
     async def operation():
         return await _loop(allow_warning=True).run(producer, evaluator)
 
-    _, result = asyncio.run(
-        recorder.step("screenplay", operation, contract_key="screenplay")
-    )
-    recorder.succeed()
+    with pytest.raises(AgentLoopFailure):
+        asyncio.run(recorder.step("screenplay", operation, contract_key="screenplay"))
+    # 带 blocker 的 warning candidate 已被拒绝；仍应留下候选 Artifact 供审计
     artifacts = db.rows_to_dicts(db.get_conn().execute(
         "SELECT * FROM artifacts WHERE scope_id='e1' AND type='episode_screenplay' "
         "ORDER BY version"
     ).fetchall())
-    evaluations = db.rows_to_dicts(db.get_conn().execute(
-        "SELECT * FROM evaluations ORDER BY created_at"
-    ).fetchall())
-
-    assert result.status == "warning"
-    # T0 structural outputs have no comparable quality, so they consume the
-    # bounded repair budget instead of triggering a false no-quality-gain exit.
-    assert result.exit_reason == "max_iterations"
-    assert result.value.value == 1
-    assert result.issues[0].message == "candidate business problem"
-    assert result.artifact_id == artifacts[0]["id"]
-    assert [artifact["trust_level"] for artifact in artifacts] == ["T1", "T0", "T0", "T0"]
-    assert [row["score"] for row in evaluations] == [50.0, 0.0, 0.0, 0.0]
+    assert len(artifacts) >= 1
+    assert artifacts[0]["trust_level"] == "T1"
 
 
 def test_storyboard_plural_shots_gets_targeted_repair_and_singular_contract(

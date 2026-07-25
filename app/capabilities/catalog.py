@@ -549,7 +549,7 @@ def _register_commands(registry) -> None:
         _cmd(
             "storyboard.generate",
             title="生成分镜",
-            description="fresh 重建或 resume 从 checkpoint 续跑",
+            description="fresh 重建或 resume 从 Supervisor Checkpoint 续跑；可选择自动确认",
             input_model=I.StoryboardGenerateInput,
             risk=RiskLevel.R2_MATERIAL,
             confirmation=ConfirmationPolicy.WHEN_IMPACT,
@@ -826,7 +826,7 @@ def _register_commands(registry) -> None:
         _cmd(
             "run.control",
             title="控制 Workflow Run",
-            description="cancel / resume / retry 统一入口",
+            description="cancel / resume / retry / pause / handoff 统一入口",
             input_model=I.RunControlInput,
             risk=RiskLevel.R2_MATERIAL,
             confirmation=ConfirmationPolicy.WHEN_IMPACT,
@@ -838,6 +838,8 @@ def _register_commands(registry) -> None:
                 "POST /api/runs/{run_id}/cancel",
                 "POST /api/runs/{run_id}/resume",
                 "POST /api/runs/{run_id}/retry",
+                "POST /api/runs/{run_id}/pause",
+                "POST /api/runs/{run_id}/handoff",
             ),
             tags=("run",),
         ),

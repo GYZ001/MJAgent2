@@ -2384,6 +2384,46 @@ label.f { color: var(--ink-soft); font: 600 12px var(--ui); letter-spacing: .02e
   font: 500 12px/1.5 var(--ui);
 }
 .shot-spoken-warn-inline b { color: #9a3412; }
+.shot-lifecycle-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+.shot-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 4px;
+  border: 1px solid #d7d2c8;
+  background: #f4f1ea;
+  color: #5c574e;
+  font: 500 10.5px/1.4 var(--ui);
+  letter-spacing: 0.02em;
+}
+.shot-badge.status-candidate { background: #eef2ff; border-color: #c7d2fe; color: #3730a3; }
+.shot-badge.status-needs_revision { background: #fff7ed; border-color: #fed7aa; color: #9a3412; }
+.shot-badge.status-validated { background: #ecfdf5; border-color: #a7f3d0; color: #065f46; }
+.shot-badge.status-approved { background: #ecfeff; border-color: #a5f3fc; color: #155e75; }
+.shot-badge.spoken-conflict { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+.shot-badge.spoken-coherent { background: #f0fdf4; border-color: #bbf7d0; color: #166534; }
+.shot-badge.spoken-legacy { background: #fafaf9; border-color: #d6d3d1; color: #57534e; }
+.shot-badge.gate { background: #f5f3ff; border-color: #ddd6fe; color: #5b21b6; }
+.shot-badge.legacy { background: #fffbeb; border-color: #fde68a; color: #92400e; }
+.shot-conflict-panel {
+  margin: 0 16px 12px;
+  padding: 12px 14px;
+  border: 1px solid #fecaca;
+  background: #fff7f7;
+  border-radius: 8px;
+}
+.shot-conflict-panel p {
+  margin: 0 0 10px;
+  color: #7f1d1d;
+  font: 500 12.5px/1.55 var(--ui);
+}
+.shot-conflict-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .shot-script-copy, .shot-audio-copy { padding: 16px 20px; }
 .shot-script-copy { border-right: 1px solid #e4e1da; }
 .shot-script-copy > p { color: #56595f; font: 400 12.5px/1.8 var(--ui); }

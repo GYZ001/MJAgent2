@@ -8,6 +8,8 @@ from app.compiler import CompileError, SOURCE_EXCERPT_MARKER, compile_prompt
 from app.continuity import (
     action_capacity_errors,
     classify_video_hard_failures,
+    derive_continuity_mode,
+    forbidden_prompt_content_errors,
     information_items_for_shot,
     information_ledger_errors,
     preflight_seedance_gates,
@@ -407,3 +409,109 @@ def test_select_best_video_candidate_force_best_adopts_single_below_threshold(mo
     assert selected and selected["version_id"] == "only"
     assert selected["fallback"] is True
     assert conn.execute("SELECT adopted_version_id FROM shots WHERE id='s'").fetchone()[0] == "only"
+
+
+def test_action_continuation_without_prev_downgrades_instead_of_chain_head_error() -> None:
+    """ERR-20260725-f8d7ad：缺 prev 时不得保留 action_continuation，也不应报「第一个镜头」。"""
+    shot = _shot(
+        shot_no=2,
+        continuity_mode="action_continuation",
+        continuity_from_prev=True,
+        state_in="林风按住铜环，目光锁住门缝里的微光。",
+        primary_action="林风慢慢推开山门，侧耳听门内动静。",
+        state_out="山门半开，林风停在门缝旁。",
+        action_desc="林风慢慢推开山门，侧耳听门内动静。",
+        first_frame_desc="林风按住铜环，目光锁住门缝里的微光。",
+        last_frame_desc="山门半开，林风停在门缝旁。",
+    )
+
+    assert derive_continuity_mode(shot, prev=None) == "same_scene_cut"
+    preflight = preflight_seedance_gates(shot, prev=None)
+    assert not any("第一个镜头没有上一镜可承接" in err for err in preflight)
+    assert shot.continuity_mode == "same_scene_cut"
+    assert shot.continuity_from_prev is False
+
+
+def test_action_continuation_with_prev_still_allowed() -> None:
+    first = _shot(
+        shot_no=1,
+        continuity_mode="scene_change",
+        state_out="林风按住铜环，目光锁住门缝里的微光。",
+        last_frame_desc="林风按住铜环，目光锁住门缝里的微光。",
+    )
+    second = _shot(
+        shot_no=2,
+        continuity_mode="action_continuation",
+        continuity_from_prev=True,
+        state_in="林风按住铜环，目光锁住门缝里的微光。",
+        primary_action="林风慢慢推开山门，侧耳听门内动静。",
+        state_out="山门半开，林风停在门缝旁。",
+        action_desc="林风慢慢推开山门，侧耳听门内动静。",
+        first_frame_desc="林风按住铜环，目光锁住门缝里的微光。",
+        last_frame_desc="山门半开，林风停在门缝旁。",
+        scene_setting=first.scene_setting,
+        characters=["林风"],
+        characters_visible=["林风"],
+    )
+
+    assert derive_continuity_mode(second, prev=first) == "action_continuation"
+    preflight = preflight_seedance_gates(second, prev=first)
+    assert not any("第一个镜头没有上一镜可承接" in err for err in preflight)
+    assert second.continuity_mode == "action_continuation"
+
+
+def test_dialogue_matching_source_excerpt_prefix_is_not_forbidden_leak() -> None:
+    """ERR-20260725-f24b91：台词与 source_excerpt 前缀相同且只出现在对白中，不得误杀。"""
+    line = "萧炎哥哥，以前你曾经与薰儿说过，要能放下，才能拿起，提放自如，是自在人！"
+    excerpt = line + "萧薰儿微笑着柔声道，略微稚嫩的嗓音，却是暖人心肺。"
+    shot = _shot(
+        shot_no=10,
+        characters=["林风", "苏婉"],
+        characters_visible=["林风", "苏婉"],
+        source_excerpt=excerpt,
+        dialogues=[Dialogue(speaker="苏婉", line=line, emotion="坚定")],
+        continuity_mode="same_scene_cut",
+        duration_s=10,
+        primary_action="苏婉认真注视林风，开口引用他曾经说过的话。",
+        action_desc="苏婉认真注视林风，开口引用他曾经说过的话。",
+        state_in="林风低着头；苏婉站在他面前准备回应。",
+        state_out="苏婉说完，目光坚定望着林风。",
+        first_frame_desc="苏婉站在林风面前，认真注视着低头的他。",
+        last_frame_desc="苏婉目光坚定望着林风，嘴唇微合刚说完话。",
+    )
+
+    prompt = compile_prompt(shot, _bible(), continuity_mode="same_scene_cut")
+    assert line in prompt
+    assert SOURCE_EXCERPT_MARKER not in prompt
+    assert not any("source_excerpt 原文内容" in err for err in forbidden_prompt_content_errors(prompt, shot))
+    assert not any("source_excerpt 原文内容" in err for err in preflight_seedance_gates(shot, prompt_text=prompt))
+
+
+def test_source_excerpt_in_action_block_still_forbidden() -> None:
+    excerpt = "林风按住铜环，听见门后传来细微响动，这段原文不得进入画面描述。"
+    shot = _shot(
+        source_excerpt=excerpt,
+        primary_action=excerpt,
+        action_desc=excerpt,
+        continuity_mode="same_scene_cut",
+    )
+    prompt = compile_prompt(shot, _bible(), continuity_mode="same_scene_cut")
+    assert any("source_excerpt 原文内容" in err for err in forbidden_prompt_content_errors(prompt, shot))
+
+
+def test_preflight_does_not_leak_prev_shot_errors() -> None:
+    """上一镜若误带 action_continuation，不应污染当前镜 preflight。"""
+    prev = _shot(
+        shot_no=1,
+        continuity_mode="action_continuation",
+        continuity_from_prev=True,
+    )
+    cur = _shot(
+        shot_no=2,
+        continuity_mode="same_scene_cut",
+        state_in="林风按住铜环，目光锁住门缝里的微光。",
+        scene_setting=prev.scene_setting,
+    )
+    errors = preflight_seedance_gates(cur, prev=prev)
+    assert not any("shot_no=1" in err for err in errors)
+    assert not any("第一个镜头没有上一镜可承接" in err for err in errors)

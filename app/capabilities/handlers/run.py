@@ -9,8 +9,16 @@ _ACTION_FUNCS = {
     "cancel": "cancel_run",
     "resume": "resume_run",
     "retry": "retry_run",
+    "pause": "pause_run",
+    "handoff": "handoff_run",
 }
-_ACTION_LABEL = {"cancel": "已取消", "resume": "已恢复", "retry": "已重试"}
+_ACTION_LABEL = {
+    "cancel": "已取消",
+    "resume": "已恢复",
+    "retry": "已重试",
+    "pause": "已请求暂停",
+    "handoff": "已转人工",
+}
 
 
 async def control(args: I.RunControlInput) -> CommandResult:

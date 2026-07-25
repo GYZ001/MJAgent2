@@ -1,6 +1,9 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "golden: 真人 LLM / 本地数据库 golden E2E（默认跳过，需 MANJU_GOLDEN_LIVE=1）",
+]
 
 [tool.ruff]
 target-version = "py311"

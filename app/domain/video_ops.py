@@ -19,9 +19,97 @@ def _uses_previous_tail_frame_for_model(shot: Shot, prev: Shot | None = None) ->
     from app.continuity import derive_continuity_mode, uses_previous_tail_frame
     return uses_previous_tail_frame(derive_continuity_mode(shot, prev))
 
-def confirm_episode_core(episode_id: str) -> dict:
-    """人工确认门（PRD P3）的纯逻辑：全量业务校验通过才进入 confirmed。
-    失败抛 ValueError（消息面向 UI）；供路由复用，避免逻辑分叉。"""
+
+class ConfirmationEvaluation:
+    """只读确认评估结果；不写数据库。"""
+
+    __slots__ = ("passed", "errors", "issues", "board", "compact_target", "estimated_cost_cny")
+
+    def __init__(
+        self,
+        *,
+        passed: bool,
+        errors: list[str],
+        issues: list,
+        board: Storyboard,
+        compact_target: int,
+        estimated_cost_cny: float,
+    ):
+        self.passed = passed
+        self.errors = errors
+        self.issues = issues
+        self.board = board
+        self.compact_target = compact_target
+        self.estimated_cost_cny = estimated_cost_cny
+
+
+def evaluate_storyboard_for_confirmation(
+    episode,
+    storyboard: Storyboard,
+    screenplay: EpisodeScreenplay | None,
+    bible: Bible,
+    *,
+    has_real_bible: bool = True,
+    target_duration_s: int | None = None,
+) -> ConfirmationEvaluation:
+    """与 confirm_episode_core 同源的只读确认评估（不写库）。
+
+    Supervisor 与确认门必须共用此函数，避免「Supervisor 认为通过、确认门又用另一套规则失败」。
+    """
+    from app.evaluations.issues import issues_from_messages
+    from app.validators import prefer_default_shot_durations
+
+    board = Storyboard(episode_no=storyboard.episode_no, shots=list(storyboard.shots))
+    normalize_offbible_characters(board, bible)
+    normalize_continuity(board)
+    prefer_default_shot_durations(board)
+    normalize_transition_visuals(board)
+    compact_target = _compact_episode_target(
+        target_duration_s if target_duration_s is not None else episode["target_duration_s"]
+    )
+    actual_total = sum(int(s.duration_s or 0) for s in board.shots)
+    compact_target = _compact_episode_target(actual_total or compact_target)
+
+    errors = validate_storyboard(board, bible, compact_target)
+    if screenplay is not None:
+        errors.extend(validate_storyboard_soundtrack(board, screenplay, compact_target))
+        errors.extend(validate_storyboard_preserves_key_content(board, screenplay))
+    if has_real_bible and not errors:
+        try:
+            for s in board.shots:
+                compile_prompt(s, bible)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"Prompt 编译失败：{exc}")
+    try:
+        ep_id = episode["id"]
+    except Exception:  # noqa: BLE001
+        ep_id = getattr(episode, "id", "") or ""
+    # VAL-422 可观测性：确认门才首次发现的容量/口播冲突（理想应为 0）。
+    try:
+        from app.observability.metrics import inc
+        for err in errors:
+            if "口播上限" in err or "台词纯文字" in err:
+                inc("confirm_first_seen_capacity_error_total", episode_id=ep_id)
+            if "分叉" in err or "SPOKEN_CONTRACT" in err or "口播合同" in err:
+                inc("confirm_first_seen_spoken_conflict_total", episode_id=ep_id)
+    except Exception:  # noqa: BLE001
+        pass
+    issues = issues_from_messages(errors, subject=f"episode:{ep_id}")
+    est = sum(shot_cost_cny(s.duration_s) for s in board.shots)
+    return ConfirmationEvaluation(
+        passed=not errors,
+        errors=errors,
+        issues=issues,
+        board=board,
+        compact_target=compact_target,
+        estimated_cost_cny=round(est, 2),
+    )
+
+
+def confirm_episode_core(episode_id: str, *, decided_by: str = "user", reason: str | None = None) -> dict:
+    """人工/自动确认门：全量业务校验通过才进入 confirmed。
+    失败抛 ValueError（消息面向 UI）；供路由与 Supervisor 复用。
+    """
     ep = _episode_or_404(episode_id)
     conn = get_conn()
     compact_target = _compact_episode_target(ep["target_duration_s"])
@@ -40,8 +128,6 @@ def confirm_episode_core(episode_id: str) -> dict:
     character_artifact_ids = _persist_storyboard_character_policy_repairs(
         conn, episode_id, board, character_changes
     )
-    # 确认门同样跑确定性连贯归一，并把修正后的 continuity/transition 写回库，
-    # 保证人工编辑过的分镜在进入生成前也满足"同场景接上镜/换场明确转场"的铁律。
     before = [
         (
             s.continuity_from_prev, s.transition, s.duration_s, s.shot_size, s.camera_move,
@@ -51,7 +137,6 @@ def confirm_episode_core(episode_id: str) -> dict:
         for r, s in zip(shots_rows, shots)
     ]
     normalize_continuity(board)
-    # Renderability：能 5s 的压回 5s；>5 打审核标记。确认门同步把集目标时长收到实际总时长档位。
     from app.validators import prefer_default_shot_durations
     prefer_default_shot_durations(board)
     normalize_transition_visuals(board)
@@ -73,27 +158,61 @@ def confirm_episode_core(episode_id: str) -> dict:
                 (int(s.continuity_from_prev), s.transition, s.duration_s, s.shot_size, s.camera_move,
                  s.last_frame_desc, _shot_contract_json(s), s.continuity_mode, s.observed_state_out, r["id"]))
     conn.commit()
-    errors = validate_storyboard(board, bible, compact_target)
+
     screenplay = _load_screenplay(ep)
-    if screenplay is not None:
-        errors.extend(validate_storyboard_soundtrack(board, screenplay, compact_target))
-        errors.extend(validate_storyboard_preserves_key_content(board, screenplay))
-    if errors:
-        raise ValueError(json.dumps(errors, ensure_ascii=False))
-    # 预编译全部 prompt，把参数错误拦在花钱之前
-    if has_real_bible:
-        try:
-            for s in shots:
-                compile_prompt(s, bible)
-        except Exception as exc:  # noqa: BLE001
-            raise ValueError(f"Prompt 编译失败：{exc}")
-    est = sum(shot_cost_cny(s.duration_s) for s in shots)
+    # 重新从当前（可能已归一）镜头构建 board，再跑同源只读评估。
+    board = _board_from_shot_rows(
+        conn.execute("SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)).fetchall(),
+        ep["episode_no"],
+    )
+    evaluation = evaluate_storyboard_for_confirmation(
+        ep, board, screenplay, bible,
+        has_real_bible=has_real_bible,
+        target_duration_s=compact_target,
+    )
+    if not evaluation.passed:
+        raise ValueError(json.dumps(evaluation.errors, ensure_ascii=False))
+    board = evaluation.board
+    compact_target = evaluation.compact_target
+    est = evaluation.estimated_cost_cny
+    shots = board.shots
+
+    # 幂等：已 confirmed 且 artifact hash 相同 → 直接成功；hash 不同则拒绝覆盖。
     storyboard_artifact_id = ep["storyboard_artifact_id"]
+    content_hash = None
     if character_artifact_ids or normalized_fields_changed or not storyboard_artifact_id:
-        # Any deterministic rewrite changes the adopted content hash. Rebuild the full-board
-        # T2 artifact from current checkpoint parents before attaching the human T4 decision.
         storyboard_artifact_id = _finalize_storyboard_evidence(episode_id, board)
     if storyboard_artifact_id:
+        art = conn.execute(
+            "SELECT content_hash FROM artifacts WHERE id=?", (storyboard_artifact_id,)
+        ).fetchone()
+        content_hash = art["content_hash"] if art else None
+
+    if ep["status"] == "confirmed":
+        if storyboard_artifact_id and content_hash:
+            existing_gate = conn.execute(
+                "SELECT id FROM gate_decisions WHERE artifact_id=? AND gate_key='storyboard' AND decision='approve'",
+                (storyboard_artifact_id,),
+            ).fetchone()
+            if existing_gate:
+                return {
+                    "confirmed": True,
+                    "idempotent": True,
+                    "estimated_cost_cny": est,
+                    "shot_count": len(shots),
+                    "total_duration_s": sum(s.duration_s for s in shots),
+                    "target_duration_s": compact_target,
+                }
+        raise ValueError(
+            "本集已确认但分镜内容已变化；禁止覆盖已确认分镜，请先撤销确认或新建修订"
+        )
+
+    idempotency_key = f"{episode_id}:{content_hash or storyboard_artifact_id or 'none'}"
+    existing = conn.execute(
+        "SELECT id FROM gate_decisions WHERE artifact_id=? AND gate_key='storyboard' AND decision='approve'",
+        (storyboard_artifact_id,),
+    ).fetchone() if storyboard_artifact_id else None
+    if storyboard_artifact_id and not existing:
         human_eval = Evaluation(
             evaluator_type="human",
             evaluator_name="storyboard_reviewer",
@@ -101,7 +220,12 @@ def confirm_episode_core(episode_id: str) -> dict:
             status="passed",
             hard_gate_passed=True,
             score=100,
-            evidence={"decision": "approve", "shot_count": len(shots)},
+            evidence={
+                "decision": "approve",
+                "shot_count": len(shots),
+                "decided_by": decided_by,
+                "idempotency_key": idempotency_key,
+            },
         )
         evidence_repository.commit_artifact(None, storyboard_artifact_id, [human_eval])
         conn.execute(
@@ -109,18 +233,19 @@ def confirm_episode_core(episode_id: str) -> dict:
                    id, artifact_id, gate_key, decision, decided_by, reason, created_at
                ) VALUES(?,?,?,?,?,?,?)""",
             (
-                new_id("gate"), storyboard_artifact_id, "storyboard", "approve", "user",
-                "分镜全量确定性校验通过并人工确认", now(),
+                new_id("gate"), storyboard_artifact_id, "storyboard", "approve", decided_by,
+                reason or "分镜全量确定性校验通过并确认", now(),
             ),
         )
     conn.execute("UPDATE episodes SET status='confirmed' WHERE id=?", (episode_id,))
     conn.commit()
     return {
         "confirmed": True,
-        "estimated_cost_cny": round(est, 2),
+        "estimated_cost_cny": est,
         "shot_count": len(shots),
         "total_duration_s": sum(s.duration_s for s in shots),
         "target_duration_s": compact_target,
+        "idempotency_key": idempotency_key,
     }
 
 
