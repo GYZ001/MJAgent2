@@ -387,12 +387,26 @@ export const useProject = (
     [projectId, view],
   )
 
+const VIDEO_SUPERVISOR_TERMINAL = new Set(['SUCCEEDED_COVERED', 'CANCELLED'])
+
+/** 全片补齐 Supervisor 仍在协调时视为忙碌（即使镜头队列暂时为空）。 */
+function videoSupervisorBusy(ep: Episode): boolean {
+  const phase = ep.video_supervisor && typeof ep.video_supervisor.phase === 'string'
+    ? ep.video_supervisor.phase
+    : ''
+  if (phase && VIDEO_SUPERVISOR_TERMINAL.has(phase)) return false
+  if (ep.video_completion_mode === 'complete' && ep.active_video_run_id) return true
+  if (ep.video_supervisor && phase) return true
+  return false
+}
+
 /** 分集是否处于运行态（编剧/分镜/参考图视频）—— 决定是否需要高频轮询。
  *  空闲时彻底停轮询，避免反复拉取 1MB+ 的分集 payload 拖垮页面。 */
 const episodeBusy = (ep: Episode | null): boolean => {
   if (!ep) return true  // 首次未拿到数据时，按可能忙碌处理触发首次拉取后的轮询
   if (ep.screenplay_status === 'running') return true
   if (ep.status === 'scripting' || ep.status === 'drafting' || ep.status === 'generating') return true
+  if (videoSupervisorBusy(ep)) return true
   if (ep.shots?.some(s =>
     s.versions?.some(v =>
       v.status === 'queued' || v.status === 'running' || v.status === 'waiting_provider'

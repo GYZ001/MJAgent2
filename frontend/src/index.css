@@ -677,9 +677,23 @@ label.f { display: block; font-size: 12px; color: var(--ink-soft); letter-spacin
   border: 1px solid var(--hairline); border-radius: 12px;
   background: linear-gradient(180deg, rgba(71,112,90,.06), rgba(255,254,250,.9));
 }
+.video-supervisor-panel.is-live {
+  border-color: rgba(201,162,39,.45);
+  background: linear-gradient(180deg, rgba(201,162,39,.10), rgba(255,254,250,.95));
+}
 .vsp-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.vsp-pulse {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--gold);
+  animation: supervisor-pulse 1.8s ease-out infinite;
+}
 .vsp-phase { color: var(--ink-soft); font-size: 13px; }
 .vsp-epoch { font-size: 12px; color: var(--gold); }
+.vsp-live-tag {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.04em;
+  color: var(--gold); border: 1px solid rgba(201,162,39,.45);
+  border-radius: 999px; padding: 1px 8px;
+}
 .vsp-coverage-bar {
   display: flex; height: 8px; width: 100%; overflow: hidden;
   background: rgba(0,0,0,.06); border-radius: 2px;

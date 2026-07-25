@@ -27,6 +27,7 @@ def reconcile_episode_generation_status(episode_id: str) -> bool:
     """视频队列已无活动任务时，把剧集从假“生成中”恢复为“已确认”。
 
     单镜失败或预算暂停不应让整集永久处于运行态；真正完成并合成后仍由交付流程置为 done。
+    全片补齐 Supervisor 仍在协调（含预检/等待授权）时不得降回 confirmed，否则评审墙会误判为空闲。
     """
     conn = get_conn()
     active = conn.execute(
@@ -37,6 +38,24 @@ def reconcile_episode_generation_status(episode_id: str) -> bool:
     ).fetchone()["c"]
     if active:
         return False
+    ep = conn.execute(
+        "SELECT video_completion_mode FROM episodes WHERE id=?",
+        (episode_id,),
+    ).fetchone()
+    if ep and (ep["video_completion_mode"] or "quick") == "complete":
+        try:
+            from app import task_registry
+            if task_registry.active("video_completion", episode_id):
+                return False
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from app.video_supervisor import load_latest_checkpoint
+            cp = load_latest_checkpoint(episode_id)
+            if cp is not None and cp.phase not in {"SUCCEEDED_COVERED", "CANCELLED"}:
+                return False
+        except Exception:  # noqa: BLE001
+            return False
     changed = conn.execute(
         "UPDATE episodes SET status='confirmed' WHERE id=? AND status='generating'",
         (episode_id,),

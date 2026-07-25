@@ -680,6 +680,9 @@ async def _recorded_video_completion_task(
             recorder.cancel()
         else:
             recorder.partial(result.outcome or result.phase)
+        if result.phase in {"SUCCEEDED_COVERED", "CANCELLED"}:
+            from app.media_exec.enqueue import reconcile_episode_generation_status
+            reconcile_episode_generation_status(episode_id)
         return result
     except asyncio.CancelledError:
         recorder.cancel()
@@ -787,7 +790,11 @@ async def _complete_episode_core(episode_id: str, body: dict) -> dict:
             allow_edit = existing.allow_storyboard_edit
 
     conn.execute(
-        "UPDATE episodes SET video_completion_mode='complete', active_video_run_id=NULL WHERE id=?",
+        """UPDATE episodes
+           SET video_completion_mode='complete',
+               status='generating',
+               active_video_run_id=NULL
+           WHERE id=?""",
         (episode_id,),
     )
     conn.commit()

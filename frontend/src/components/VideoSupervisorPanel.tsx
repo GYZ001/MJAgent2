@@ -73,6 +73,8 @@ const PHASE_LABEL: Record<string, string> = {
   CANCELLED: '已取消',
 }
 
+const TERMINAL = new Set(['SUCCEEDED_COVERED', 'CANCELLED'])
+
 export default function VideoSupervisorPanel({
   api,
   episodeId,
@@ -99,14 +101,14 @@ export default function VideoSupervisorPanel({
       }).catch(() => { /* ignore */ })
     }
     load()
-    const id = window.setInterval(load, running ? 5000 : 15000)
+    const id = window.setInterval(load, running ? 3000 : 10000)
     return () => { cancelled = true; window.clearInterval(id) }
   }, [api, episodeId, running])
 
   const snap = live || supervisor
   if (!snap && !running) return null
 
-  const phase = snap?.phase || (running ? 'DISPATCHING' : '')
+  const phase = snap?.phase || (running ? 'PREFLIGHT' : '')
   const cov = snap?.coverage || {}
   const total = cov.total || 0
   const a = cov.A || 0
@@ -122,6 +124,11 @@ export default function VideoSupervisorPanel({
   const waitingAuth = phase === 'WAITING_AUTHORIZATION'
   const succeeded = phase === 'SUCCEEDED_COVERED'
   const pausedLike = ['PAUSED_EXTERNAL', 'PAUSED_BUDGET', 'WAITING_HUMAN', 'WAITING_AUTHORIZATION'].includes(phase)
+  const activelyRunning = Boolean(
+    running
+    || snap?.running
+    || (phase && !TERMINAL.has(phase) && !pausedLike),
+  )
 
   const uncovered = (snap?.ledger?.entries || []).filter(e => e.grade === 'C').slice(0, 6)
 
@@ -148,13 +155,19 @@ export default function VideoSupervisorPanel({
   }
 
   return (
-    <div className="video-supervisor-panel" data-phase={phase}>
+    <div
+      className={`video-supervisor-panel${activelyRunning ? ' is-live' : ''}`}
+      data-phase={phase}
+      aria-live="polite"
+    >
       <div className="vsp-head">
+        {activelyRunning && <span className="vsp-pulse" aria-hidden />}
         <strong>补齐到全片可用</strong>
-        <span className="vsp-phase">{PHASE_LABEL[phase] || phase || '运行中'}</span>
+        <span className="vsp-phase">{PHASE_LABEL[phase] || phase || '启动中…'}</span>
         {typeof snap?.repair_epoch === 'number' && snap.repair_epoch > 0 && (
           <span className="vsp-epoch">修复周期 {snap.repair_epoch}</span>
         )}
+        {activelyRunning && <span className="vsp-live-tag">运行中</span>}
       </div>
 
       <div className="vsp-coverage-bar" title={`A ${a} · B ${b} · 未覆盖 ${c}`}>
@@ -165,6 +178,7 @@ export default function VideoSupervisorPanel({
       <div className="vsp-cov-label">
         覆盖 {pct}% · A 级 {a} / B 级 {b} / 未覆盖 {c}
         {cov.fallback_quota != null ? `（B 配额 ${cov.fallback_quota}）` : ''}
+        {!snap?.phase && activelyRunning ? ' · 正在预检与建账…' : ''}
       </div>
 
       <div className="vsp-budget">

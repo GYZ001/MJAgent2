@@ -228,6 +228,7 @@ export default function WallPage() {
   const [lightbox, setLightbox] = useState<{ src: string; label?: string } | null>(null)
   const [clearMenuOpen, setClearMenuOpen] = useState(false)
   const [genMenuOpen, setGenMenuOpen] = useState(false)
+  const [supervisorKickoff, setSupervisorKickoff] = useState(false)
   const toastTimerRef = useRef<number>()
 
   const showToast = useCallback((msg: string) => {
@@ -279,11 +280,32 @@ export default function WallPage() {
     } catch { /* ignore */ }
   }, [episodeId, shots])
 
-  const videoActive = shots.some(s =>
+  const supervisorPhase = typeof ep?.video_supervisor?.phase === 'string'
+    ? ep.video_supervisor.phase
+    : ''
+  const supervisorTerminal = supervisorPhase === 'SUCCEEDED_COVERED' || supervisorPhase === 'CANCELLED'
+  const supervisorLive = Boolean(
+    supervisorKickoff
+    || (
+      !supervisorTerminal
+      && (
+        ep?.video_completion_mode === 'complete'
+        || ep?.active_video_run_id
+        || ep?.video_supervisor
+      )
+    ),
+  )
+  const videoActive = supervisorLive || shots.some(s =>
     (s.pipeline != null && ['queued', 'running', 'waiting', 'waiting_provider', 'blocked'].includes(s.pipeline.pipeline_status))
     || (!s.pipeline && s.versions.some(v => v.status === 'queued' || v.status === 'running' || v.status === 'waiting_provider'))
   )
   const videoTimer = useTaskTimer(`episode.${episodeId}.videos`, videoActive)
+
+  useEffect(() => {
+    if (supervisorTerminal || (ep?.video_supervisor && ep.video_completion_mode === 'complete')) {
+      setSupervisorKickoff(false)
+    }
+  }, [supervisorTerminal, ep?.video_supervisor, ep?.video_completion_mode])
 
   const openLightbox = useCallback((src: string, label?: string) => {
     setLightbox({ src, label })
@@ -346,18 +368,24 @@ export default function WallPage() {
       + `不会自动拼接成片或创建交付包。`,
     )
     if (!startOk) return
+    showToast('正在启动全片补齐 Supervisor…')
+    setSupervisorKickoff(true)
     videoTimer.start()
-    const started = await t(
-      () => api.episodeVideoCompletion(ep.id, {
+    try {
+      await api.episodeVideoCompletion(ep.id, {
         mode: 'fresh',
         budget_cap_cny: Number(budget) || 150,
         wall_clock_cap_s: (Number(wallH) || 4) * 3600,
         allow_fallback_adopt: true,
         allow_storyboard_edit: allowEdit,
-      }),
-      '全片补齐已启动',
-    )
-    if (!started) videoTimer.clear()
+      })
+      showToast('全片补齐 Supervisor 已启动 — 请看顶部进度面板')
+      void refreshAll()
+    } catch (e: unknown) {
+      setSupervisorKickoff(false)
+      videoTimer.clear()
+      showToast(e instanceof Error ? e.message : String(e))
+    }
   }
 
   const doClearEpisode = async () => {
@@ -411,8 +439,13 @@ export default function WallPage() {
         </div>
         <div className="wall-topbar-right">
           <TaskTimer label="视频" timer={videoTimer} />
-          <span className={`stamp ${ep.status === 'confirmed' || ep.status === 'done' ? 'green' : ep.status === 'generating' ? 'gold' : 'grey'}`}>
-            {{ confirmed: '已确认', generating: '生成中', done: '已完成', paused_budget: '预算暂停' }[ep.status] ?? ep.status}
+          <span className={`stamp ${ep.status === 'done' && !supervisorLive ? 'green' : (ep.status === 'confirmed' && !supervisorLive) ? 'green' : (ep.status === 'generating' || supervisorLive) ? 'gold' : 'grey'}`}>
+            {supervisorLive
+              ? (supervisorPhase === 'WAITING_AUTHORIZATION' ? '等待授权'
+                : supervisorPhase === 'WAITING_HUMAN' ? '待人工'
+                : supervisorPhase === 'PAUSED_EXTERNAL' || supervisorPhase === 'PAUSED_BUDGET' ? '已暂停'
+                : '补齐中')
+              : ({ confirmed: '已确认', generating: '生成中', done: '已完成', paused_budget: '预算暂停' }[ep.status] ?? ep.status)}
           </span>
           {canGenerate && (
             <div className="clear-menu-wrap">
@@ -455,13 +488,13 @@ export default function WallPage() {
         </div>
       </div>
 
-      {(ep.video_supervisor || ep.video_completion_mode === 'complete' || ep.active_video_run_id) && (
+      {(supervisorLive || ep.video_supervisor || ep.video_completion_mode === 'complete' || ep.active_video_run_id) && (
         <VideoSupervisorPanel
           api={api}
           episodeId={ep.id}
           runId={ep.active_video_run_id}
           supervisor={ep.video_supervisor as import('../components/VideoSupervisorPanel').VideoSupervisorSnapshot | null}
-          running={ep.video_completion_mode === 'complete' && ep.status === 'generating'}
+          running={supervisorLive || ep.status === 'generating'}
           onChanged={() => void refreshAll()}
         />
       )}
