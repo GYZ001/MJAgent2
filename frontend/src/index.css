@@ -1891,13 +1891,15 @@ label.f { color: var(--ink-soft); font: 600 12px var(--ui); letter-spacing: .02e
     border: 1px solid rgba(108,113,121,.22); border-radius: 11px; background: rgba(255,254,250,.94); color: var(--ink);
     box-shadow: var(--shadow-sm); font-size: 18px;
   }
+  /* Backdrop must sit below the open spine so menu buttons remain clickable.
+     Blank area outside the spine still receives clicks and closes the drawer. */
   .mobile-nav-backdrop { display: block; position: fixed; z-index: 79; inset: 0; border: 0; background: rgba(20,25,32,.46); backdrop-filter: blur(2px); }
   #root, #root:has(.spine.collapsed) { padding-left: 0; }
   .spine {
     position: fixed; left: 0; top: 0; bottom: 0; width: min(286px, 86vw); height: 100vh; height: 100dvh; padding: 18px 14px;
     transform: translateX(-102%); transition: transform .2s ease; box-shadow: 18px 0 50px rgba(12,16,22,.28);
   }
-  .spine.mobile-open { transform: translateX(0); }
+  .spine.mobile-open { transform: translateX(0); z-index: 80; }
   .spine .brand-copy, .spine .spine-group-label, .spine .spine-label, .spine .spine-foot { display: initial; }
   .spine .brand-copy { display: grid; }
   .spine .spine-top { justify-content: flex-start; padding: 0 4px; }
