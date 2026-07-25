@@ -312,49 +312,49 @@ def test_scene_contiguity_key_ignores_sublocation_suffix() -> None:
 
 
 def test_continuity_same_scene_new_focus_char_with_movement_passes() -> None:
-    """同场景换焦点人物（群像戏"下一个上场的人"）：上一镜拍萧炎，本镜拍萧媚上前测验，
-    场景时间都没变，action_desc 写了"小跑上前"入场承接——不应因没有共同角色而误判接镜断裂。
-    这是镜03死循环根因：校验器只看共同角色，与错误文案"或在 action_desc 写明承接"自相矛盾。"""
+    """同场景换焦点人物用 same_scene_cut/reaction_cut：不要求共同角色，也不误用尾帧。"""
     board = Storyboard(
         episode_no=1,
         shots=[
             Shot(shot_no=1, duration_s=5, shot_size="特写", camera_move="固定",
                  scene_setting="日，萧家测验广场", characters=["萧炎"],
-                 action_desc="萧炎垂眸凝视紧攥的左手，血丝渗出，喉结滚动，未发一言",
-                 first_frame_desc="萧炎左手特写", last_frame_desc="同机位血丝渗出",
-                 source_excerpt="", narration="", dialogues=[],
-                 transition="硬切", continuity_from_prev=False),
+                 action_desc="萧炎垂眸凝视紧攥的左手，血丝渗出，喉结滚动，未发一言，肩背微微绷紧",
+                 first_frame_desc="萧炎左手特写，指节发白", last_frame_desc="同机位血丝渗出，他仍低头",
+                 source_excerpt="萧炎看着自己的手，一言不发。", narration="", dialogues=[],
+                 transition="硬切", continuity_from_prev=False, continuity_mode="same_scene_cut"),
             Shot(shot_no=2, duration_s=5, shot_size="中景", camera_move="固定",
                  scene_setting="日，萧家测验广场", characters=["萧媚"],
                  action_desc="萧媚小跑上前，伸手轻触魔石碑，碑面亮起七段光芒，人群赞叹声浪骤起",
-                 first_frame_desc="萧媚触碑", last_frame_desc="萧媚转身",
-                 source_excerpt="", narration="人群赞叹：七段！真了不起！",
-                 dialogues=[], transition="硬切", continuity_from_prev=True),
+                 first_frame_desc="萧媚从人群侧面上前", last_frame_desc="萧媚触碑后转身，碑面仍亮",
+                 source_excerpt="萧媚走上前去，伸手触碰魔石碑。", narration="人群赞叹：七段！真了不起！",
+                 dialogues=[], transition="硬切", continuity_from_prev=False,
+                 continuity_mode="reaction_cut"),
         ],
     )
     errors = validate_storyboard(board, _bible(), target_duration_s=50)
     assert not any("没有共同角色" in e for e in errors), errors
+    assert not any("continuity_from_prev=true 但 continuity_mode=reaction_cut" in e for e in errors), errors
 
 
-def test_continuity_same_scene_new_focus_char_without_movement_fails() -> None:
-    """同场景换焦点人物，但 action_desc 完全没写入场移动承接——此时才该报错，
-    提示模型补"上前/跑出"等承接动作。确保放宽不是无条件的。"""
+def test_action_continuation_without_shared_char_or_movement_fails() -> None:
+    """仅 action_continuation 才要求共同角色或移动承接；否则应失败。"""
     board = Storyboard(
         episode_no=1,
         shots=[
             Shot(shot_no=1, duration_s=5, shot_size="特写", camera_move="固定",
                  scene_setting="日，萧家测验广场", characters=["萧炎"],
-                 action_desc="萧炎垂眸凝视紧攥的左手，血丝渗出，喉结滚动",
-                 first_frame_desc="萧炎左手特写", last_frame_desc="同机位血丝渗出",
-                 source_excerpt="", narration="", dialogues=[],
-                 transition="硬切", continuity_from_prev=False),
+                 action_desc="萧炎垂眸凝视紧攥的左手，血丝渗出，喉结滚动，肩背微微绷紧",
+                 first_frame_desc="萧炎左手特写，指节发白", last_frame_desc="同机位血丝渗出，他仍低头",
+                 source_excerpt="萧炎看着自己的手，一言不发。", narration="", dialogues=[],
+                 transition="硬切", continuity_from_prev=False, continuity_mode="same_scene_cut"),
             Shot(shot_no=2, duration_s=5, shot_size="中景", camera_move="固定",
                  scene_setting="日，萧家测验广场", characters=["萧媚"],
-                 action_desc="萧媚立于碑前，碑面亮起七段光芒，人群赞叹",
-                 first_frame_desc="萧媚触碑", last_frame_desc="萧媚转身",
-                 source_excerpt="", narration="",
-                 dialogues=[], transition="硬切", continuity_from_prev=True),
+                 action_desc="萧媚立于碑前，碑面亮起七段光芒，人群赞叹，她抬眼扫过周围",
+                 first_frame_desc="萧媚立于碑前静立", last_frame_desc="萧媚抬眼，碑面仍亮",
+                 source_excerpt="萧媚站在碑前，碑面亮起光。", narration="",
+                 dialogues=[], transition="硬切", continuity_from_prev=True,
+                 continuity_mode="action_continuation"),
         ],
     )
     errors = validate_storyboard(board, _bible(), target_duration_s=50)
-    assert any("没有共同角色" in e for e in errors), errors
+    assert any("没有共同角色" in e or "可见移动承接" in e for e in errors), errors

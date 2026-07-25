@@ -86,17 +86,16 @@ TRANSITION_VISUAL_HINTS = {
 
 
 def default_scene_transition(prev: Shot | None, shot: Shot) -> str:
-    """根据换场关系给一个稳定默认值；具体创作仍允许模型/人工选择更贴合的转场。"""
+    """根据换场关系给一个稳定默认值。禁止选用依赖后期声画桥的转场。"""
     if not prev:
         return "硬切"
-    shared_chars = set(prev.characters) & set(shot.characters)
     text = f"{prev.narration or ''}{shot.narration or ''}{prev.action_desc}{shot.action_desc}"
-    if shared_chars and any(k in text for k in ("回忆", "想起", "余音", "话音", "怔住", "眼眶", "沉默", "失神")):
-        return "声音延续+叠化"
     if any(k in text for k in ("冲", "追", "逃", "奔", "扑", "甩")):
         return "甩镜"
     if any(k in text for k in ("惊", "爆", "强光", "刺眼", "斗气", "火光")):
         return "闪白"
+    if any(k in text for k in ("回忆", "想起", "余音", "话音", "怔住", "眼眶", "沉默", "失神")):
+        return "叠化"
     return "淡出淡入"
 
 

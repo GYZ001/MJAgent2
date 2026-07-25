@@ -151,8 +151,8 @@ def test_downgrade_preserves_inbible_speaker_and_is_idempotent() -> None:
     assert o2.shots[2].beat.count("改由旁白转述") == 1
 
 
-def test_over_budget_covers_are_split_into_enough_singular_shots() -> None:
-    """复现镜12：长 covers 应在模型调用前拆完，而不是逼模型返回 shots 数组。"""
+def test_over_budget_covers_are_not_mechanically_split() -> None:
+    """PRD：废除按文本长度机械拆镜；仅超口播字数时不得自动插入无状态碎片。"""
     covers = (
         "萧炎低声说我会查清真相；他回望测验台；族人仍在哄笑；"
         "萧薰儿穿过人群走来；她让众人闭嘴；萧炎压下怒意；"
@@ -162,36 +162,31 @@ def test_over_budget_covers_are_split_into_enough_singular_shots() -> None:
         ["萧炎承受嘲讽并离开", "下一段原有剧情"],
         covers={1: covers},
     )
+    before = len(outline.shots)
 
-    assert _maybe_split_outline_covers(outline, 1, _bible_with("萧炎", "萧薰儿"), 20)
-    split = outline.shots[:-1]
+    assert _maybe_split_outline_covers(outline, 1, _bible_with("萧炎", "萧薰儿"), 20) is False
+    assert len(outline.shots) == before
+    assert outline.shots[0].covers == covers
 
-    assert len(split) >= 3
-    assert all(
-        len(_condense(shot.covers)) <= config.MAX_SPOKEN_CHARS_PER_SHOT
-        for shot in split
-    )
-    assert _condense("".join(shot.covers for shot in split)) == _condense(
-        "".join(_atomize_claim(covers))
-    )
+
+def test_semantic_spoken_and_crowd_covers_can_still_split() -> None:
+    """语义原因（角色开口 + 人群声同镜）仍允许拆分，不属于字符机械拆镜。"""
+    covers = "萧炎公布斗之气三段；周围人群哄笑嘲讽四起"
+    outline = _outline(["萧炎成绩公布", "下一段原有剧情"], covers={1: covers})
+
+    assert _maybe_split_outline_covers(outline, 1, _bible_with("萧炎"), 20)
+    assert len(outline.shots) >= 3
     assert [shot.shot_no for shot in outline.shots] == list(range(1, len(outline.shots) + 1))
 
 
-def test_single_long_cover_atom_is_split_without_content_loss() -> None:
+def test_single_long_cover_atom_is_not_char_split() -> None:
     covers = "萧炎" + "握紧拳头凝视石碑决心查清斗气消失真相" * 3
     outline = _outline(["萧炎立誓", "下一段原有剧情"], covers={1: covers})
+    before = len(outline.shots)
 
-    assert _maybe_split_outline_covers(outline, 1, _bible_with("萧炎"), 20)
-    split = outline.shots[:-1]
-
-    assert len(split) > 1
-    assert all(
-        len(_condense(shot.covers)) <= config.MAX_SPOKEN_CHARS_PER_SHOT
-        for shot in split
-    )
-    assert _condense("".join(shot.covers for shot in split)) == _condense(
-        "".join(_atomize_claim(covers))
-    )
+    assert _maybe_split_outline_covers(outline, 1, _bible_with("萧炎"), 20) is False
+    assert len(outline.shots) == before
+    assert outline.shots[0].covers == covers
 
 
 def test_outline_allows_long_atom_for_deterministic_pre_split() -> None:

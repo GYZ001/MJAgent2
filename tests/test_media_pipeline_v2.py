@@ -60,11 +60,18 @@ def test_channel_defaults_balanced() -> None:
     assert channel_limit(S.RESOURCE_VIDEO_SUBMIT) >= 1
 
 
-def test_qa_retake_policy_caps_at_one() -> None:
+def test_qa_retake_policy_caps_at_two() -> None:
+    """PRD：连续失败 2 次后停止自动重抽并转人工。"""
     d0 = decide_qa_retake(auto_retake_count=0, qa_overall=0.2, threshold=0.6)
     assert d0.allow and d0.create_new_version
     d1 = decide_qa_retake(auto_retake_count=1, qa_overall=0.2, threshold=0.6)
-    assert not d1.allow
+    assert d1.allow and d1.attempt == 2
+    d2 = decide_qa_retake(auto_retake_count=2, qa_overall=0.2, threshold=0.6)
+    assert not d2.allow
+    d_hard = decide_qa_retake(
+        auto_retake_count=0, qa_overall=0.8, threshold=0.6, hard_failures=["story_repeat"]
+    )
+    assert d_hard.allow
 
 
 def test_reference_set_persist(monkeypatch) -> None:

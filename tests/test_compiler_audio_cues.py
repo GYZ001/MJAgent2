@@ -25,24 +25,26 @@ def test_narration_marked_as_offscreen_voiceover():
     """旁白必须标注为画外音、用与角色不同的嗓音、不对口型——避免主角声音念旁白。"""
     p = compile_prompt(_shot(narration="次日清晨，新闻和昨晚补的细节吻合",
                              dialogues=[{"speaker": "王浩", "line": "这不可能", "emotion": "惊恐"}]), _bible())
-    assert "画外音" in p and "不对口型" in p
-    assert "嗓音" in p
-    # 台词标注为角色本人开口、对口型
-    assert "对口型" in p and "王浩" in p
+    assert "旁白" in p and "不对口型" in p
+    assert "叙述者" in p or "嗓音" in p
+    assert "王浩" in p and "这不可能" in p
+    assert "开口" in p or "对口型" in p
 
 
 def test_setup_narration_ordered_before_dialogue():
     p = compile_prompt(_shot(narration="次日清晨，新闻和昨晚补的细节吻合",
                              dialogues=[{"speaker": "王浩", "line": "这不可能", "emotion": "惊恐"}]), _bible())
-    assert p.index("旁白") < p.index("台词（由画面")
+    assert p.index("旁白") < p.index("这不可能")
 
 
 def test_ending_hook_narration_ordered_after_dialogue():
     p = compile_prompt(_shot(narration="可他不知道，危险才刚刚开始",
                              dialogues=[{"speaker": "王浩", "line": "我一定查清楚", "emotion": "坚定"}]), _bible())
-    assert p.index("台词（由画面") < p.index("旁白（画外音")
+    assert p.index("我一定查清楚") < p.index("可他不知道")
 
 
-def test_audio_sync_pacing_present_when_spoken():
+def test_audio_timeline_covers_spoken_content():
     p = compile_prompt(_shot(dialogues=[{"speaker": "王浩", "line": "这不可能", "emotion": "惊恐"}]), _bible())
-    assert "音画同步" in p and "躺下" in p
+    assert "[AUDIO TIMELINE]" in p
+    assert "这不可能" in p
+    assert "片段结束前完整结束" in p

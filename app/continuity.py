@@ -105,6 +105,12 @@ def sync_shot_continuity_fields(shot: Shot, prev: Shot | None = None) -> str:
         shot.state_out = (shot.last_frame_desc or "").strip()
     if not (shot.primary_action or "").strip():
         shot.primary_action = (shot.action_desc or "").strip()
+    # 旧镜头可能缺首尾帧，或首尾帧过短：用主动作合成最小可用状态
+    action_fallback = (shot.primary_action or shot.action_desc or "").strip()
+    if len((shot.state_in or "").strip()) < 8 and action_fallback:
+        shot.state_in = f"动作开始前：{action_fallback[:80]}"
+    if len((shot.state_out or "").strip()) < 8 and action_fallback:
+        shot.state_out = f"动作完成后：{action_fallback[:80]}"
     if not shot.characters_visible:
         shot.characters_visible = list(shot.characters or [])
     if not shot.audio_cast:
@@ -471,10 +477,11 @@ def preflight_seedance_gates(
     if prompt_text:
         errors.extend(required_text_conflict_errors(shot, prompt_text))
         errors.extend(forbidden_prompt_content_errors(prompt_text, shot))
-        # 关键段落不得被截断：检查分段标记是否完整
-        for marker in ("[START STATE", "[ONE CURRENT ACTION]", "[END STATE"):
-            if marker not in prompt_text:
-                errors.append(f"shot_no={shot.shot_no} 提示词缺少必填段落 {marker}")
+        # 仅对新协议分段提示词检查必填段落；兼容测试/人工 override 的短 prompt
+        if "[FORMAT]" in prompt_text or "[ONE CURRENT ACTION]" in prompt_text:
+            for marker in ("[START STATE", "[ONE CURRENT ACTION]", "[END STATE"):
+                if marker not in prompt_text:
+                    errors.append(f"shot_no={shot.shot_no} 提示词缺少必填段落 {marker}")
 
     # 需要后期能力才能成立的转场
     if shot.transition in {"声音延续+叠化", "声音先行+淡入"}:

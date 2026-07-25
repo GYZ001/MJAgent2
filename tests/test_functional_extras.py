@@ -95,7 +95,8 @@ def test_functional_extra_compiles_without_persistent_bible_asset() -> None:
 
     assert "功能性路人「测验员」" in video_prompt
     assert "功能性路人「测验员」" in frame_prompt
-    assert "测验员（平静）说" in video_prompt
+    assert "测验员" in video_prompt and "萧炎，斗之力，三段" in video_prompt
+    assert "[AUDIO TIMELINE]" in video_prompt
 
 
 def test_functional_extra_must_be_visibly_staged() -> None:
