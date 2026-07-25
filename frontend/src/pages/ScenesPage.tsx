@@ -4,6 +4,7 @@ import { useNav, useProject } from '../App'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 import SearchField from '../components/SearchField'
 import EvidenceDrawer from '../components/harness/EvidenceDrawer'
+import GenerationParamsDialog from '../components/GenerationParamsDialog'
 import PrepSubnav from '../components/PrepSubnav'
 import { useFillPageSize } from '../hooks/useFillPageSize'
 
@@ -13,6 +14,7 @@ export default function ScenesPage() {
   const [busy, setBusy] = useState(false)
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(0)
+  const [paramsSceneName, setParamsSceneName] = useState<string | null>(null)
   const [candidatePreview, setCandidatePreview] = useState<{
     sceneName: string
     candidates: SceneReferenceCandidate[]
@@ -45,6 +47,7 @@ export default function ScenesPage() {
   const paged = filtered.slice(curPage * pageSize, curPage * pageSize + pageSize)
   const generating = p.scene_refs_status === 'running'
   const hasBible = !!p.bible
+  const paramsScene = paramsSceneName ? scenes.find(scene => scene.name === paramsSceneName) ?? null : null
 
   return (
     <>
@@ -147,12 +150,11 @@ export default function ScenesPage() {
                   )}
                   <label className="f">场景锚点串（30~60 字，定稿后锁定）</label>
                   <div className="f-anchor">{s.scene_canonical}</div>
-                  <details className="scene-details">
-                    <summary>生成参数与重绘</summary>
-                    <ScenePromptBlock projectId={p.id} scene={s} disabled={busy || generating}
-                      onChanged={refresh}
-                      regenerate={() => act(() => api.genSceneRefs(p.id, s.name), `正在为「${s.name}」重新出图`)} />
-                  </details>
+                  <div className="asset-params-action">
+                    <button className="asset-params-trigger" type="button" onClick={() => setParamsSceneName(s.name)}>
+                      生成参数与重绘 <span aria-hidden="true">→</span>
+                    </button>
+                  </div>
                 </article>
               )
             })}
@@ -171,6 +173,20 @@ export default function ScenesPage() {
       )}
       {candidatePreview && (
         <SceneCandidateModal {...candidatePreview} onClose={() => setCandidatePreview(null)} />
+      )}
+      {paramsScene && (
+        <GenerationParamsDialog
+          title={`${paramsScene.name} · 生成参数与重绘`}
+          subtitle="查看或调整场景图生成词，修改后可保存并重新出图。"
+          onClose={() => setParamsSceneName(null)}
+        >
+          <ScenePromptBlock projectId={p.id} scene={paramsScene} disabled={busy || generating}
+            onChanged={refresh}
+            regenerate={() => act(
+              () => api.genSceneRefs(p.id, paramsScene.name),
+              `正在为「${paramsScene.name}」重新出图`,
+            )} />
+        </GenerationParamsDialog>
       )}
     </>
   )

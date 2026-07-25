@@ -374,8 +374,12 @@ def _compile_negative_constraints(shot: Shot, extra_negative: list[str] | None,
         "不要复制人物或生成分身",
     ]
     for item in shot.do_not_repeat or []:
-        if item and item.strip():
-            parts.append(f"不要重复：{item.strip()}")
+        text = (item or "").strip()
+        # do_not_repeat may still contain historical internal IDs.  They are
+        # useful for ledger deduplication but meaningless to Seedance, so only
+        # forward resolved natural-language constraints.
+        if text and re.search(r"[\u3400-\u9fff]", text):
+            parts.append(f"不要重复：{text}")
     for tag in shot.risk_tags or []:
         if tag == "crowd_consistency":
             parts.append("人群数量与朝向保持稳定，不要随机增减人脸")

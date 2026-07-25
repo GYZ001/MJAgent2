@@ -129,15 +129,16 @@ class AgentLoop(Generic[T]):
             issue_history.append(issues)
             fingerprint = issue_fingerprint(issues)
             fingerprint_history.append(fingerprint)
-            # A schema-invalid response is not a usable candidate, even when it
-            # happens to have fewer reported issues than a schema-valid draft.
-            # Scoring it as zero prevents malformed JSON from looking like a
-            # quality tie with a repairable business-rule violation.
+            # Structural failures have no comparable candidate quality.  Do
+            # not count malformed JSON / schema-invalid output as a no-gain
+            # round: a later repair may expose a different structural issue,
+            # which is progress and must receive the remaining repair budget.
             quality = _quality(issues) if value is not None else 0.0
-            if previous_quality is not None:
-                gain = quality - previous_quality
-                no_gain_count = no_gain_count + 1 if gain < self.policy.min_quality_gain else 0
-            previous_quality = quality
+            if value is not None:
+                if previous_quality is not None:
+                    gain = quality - previous_quality
+                    no_gain_count = no_gain_count + 1 if gain < self.policy.min_quality_gain else 0
+                previous_quality = quality
             artifact_id = self._record_candidate(
                 iteration_step_id, iteration_no, raw, value, issues, quality
             )
@@ -167,7 +168,7 @@ class AgentLoop(Generic[T]):
                 len(fingerprint_history) >= self.policy.stall_rounds
                 and len(set(fingerprint_history[-self.policy.stall_rounds:])) == 1
             )
-            no_gain = no_gain_count >= self.policy.no_gain_rounds
+            no_gain = value is not None and no_gain_count >= self.policy.no_gain_rounds
             exhausted = iteration_no >= self.policy.max_iterations
             if stalled:
                 exit_reason = "stalled"

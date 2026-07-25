@@ -23,8 +23,15 @@ class Issue(BaseModel):
 
     @property
     def fingerprint(self) -> str:
-        span = self.evidence.get("span", "")
-        return f"{self.code}:{self.subject}:{span}"
+        # ``span`` used to be the only discriminator.  Compatibility adapters
+        # set it to the whole stage subject, so unrelated schema failures (for
+        # example broken JSON followed by a bad field type) looked identical
+        # and made the Agent Loop stop as ``stalled`` after two useful repairs.
+        # Prefer the canonical field/rule identity emitted by the evaluator;
+        # keep span as a fallback for older callers.
+        path = self.evidence.get("path") or self.evidence.get("span", "")
+        rule_id = self.evidence.get("rule_id", "")
+        return f"{self.code}:{self.subject}:{path}:{rule_id}"
 
 
 class StageContract(BaseModel):

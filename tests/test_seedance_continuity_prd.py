@@ -8,9 +8,11 @@ from app.compiler import CompileError, SOURCE_EXCERPT_MARKER, compile_prompt
 from app.continuity import (
     action_capacity_errors,
     classify_video_hard_failures,
+    information_items_for_shot,
     information_ledger_errors,
     preflight_seedance_gates,
     reference_role_plan,
+    resolve_do_not_repeat_texts,
     speech_capacity_errors,
     uses_previous_tail_frame,
 )
@@ -193,6 +195,59 @@ def test_repeated_info_id_without_reinforcement_fails_ledger_and_preflight() -> 
 
     assert any("重复交付" in err for err in ledger_errors)
     assert any("new_information_ids 含已交付信息 info-door" in err for err in preflight)
+
+
+def test_legacy_information_id_gets_chinese_display_content() -> None:
+    shot = _shot(
+        new_information_ids=["xiaoyan_test_result_3duan"],
+        purpose="公布萧炎的斗气测试结果为三段",
+    )
+
+    items = information_items_for_shot(shot)
+
+    assert items == [{
+        "info_id": "xiaoyan_test_result_3duan",
+        "content": "公布萧炎的斗气测试结果为三段",
+        "source": "derived",
+    }]
+
+
+def test_do_not_repeat_ids_resolve_to_chinese_before_seedance() -> None:
+    prior = _shot(
+        shot_no=1,
+        new_information_ids=["world_setup_qidou_mainland", "xiaoyan_status_testing"],
+        purpose="建立斗气大陆规则并交代萧炎正在接受测试",
+    )
+    current = _shot(
+        shot_no=2,
+        do_not_repeat=["world_setup_qidou_mainland", "xiaoyan_status_testing", "unknown_raw_id"],
+    )
+
+    resolved = resolve_do_not_repeat_texts(current, prior_shots=[prior])
+    current.do_not_repeat = resolved
+    prompt = compile_prompt(current, _bible())
+
+    assert resolved == ["建立斗气大陆规则并交代萧炎正在接受测试"]
+    assert "不要重复：建立斗气大陆规则并交代萧炎正在接受测试" in prompt
+    assert "world_setup_qidou_mainland" not in prompt
+    assert "xiaoyan_status_testing" not in prompt
+    assert "unknown_raw_id" not in prompt
+
+
+def test_ledger_chinese_content_takes_priority_over_legacy_fallback() -> None:
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        information_ledger=[InformationItem(
+            info_id="I1",
+            content="石碑显示萧炎的斗气测试结果为三段",
+        )],
+    )
+    shot = _shot(
+        new_information_ids=["I1"],
+        purpose="泛化的镜头目的",
+    )
+
+    assert information_items_for_shot(shot, screenplay)[0]["content"] == "石碑显示萧炎的斗气测试结果为三段"
 
 
 def test_required_prompt_sections_not_truncated_when_required_content_over_limit(monkeypatch) -> None:

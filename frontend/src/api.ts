@@ -396,6 +396,7 @@ export interface Shot {
   story_event_id?: string
   purpose?: string
   new_information_ids?: string[]
+  new_information_items?: { info_id: string; content: string; source?: 'ledger' | 'derived' }[]
   reinforcement_info_ids?: string[]
   state_in?: string
   primary_action?: string

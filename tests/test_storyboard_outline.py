@@ -108,6 +108,16 @@ def test_render_outline_marks_current_shot() -> None:
     assert marked.startswith("第3/5镜")
 
 
+def test_render_outline_hides_legacy_information_ids() -> None:
+    outline = _outline(_valid_beats(), covers={5: KEY_LINE})
+    outline.shots[0].new_information_ids = ["I1", "legacy_snake_case"]
+
+    rendered = _render_storyboard_outline(outline, current_shot_no=1, valid_info_ids={"I1"})
+
+    assert "info:I1" in rendered
+    assert "legacy_snake_case" not in rendered
+
+
 def test_outline_brief_lookup() -> None:
     outline = _outline(_valid_beats(), covers={5: KEY_LINE})
     assert _outline_brief(outline, 5).covers == KEY_LINE

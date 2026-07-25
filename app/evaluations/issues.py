@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 
 from app.harness.types import Issue, IssueSeverity
@@ -25,6 +26,47 @@ def issue_code(message: str) -> str:
     return "BUSINESS_RULE_FAILED"
 
 
+_FIELD_ERROR_RE = re.compile(r"^字段\s+([^：:]+)[：:]\s*(.+)$", re.I)
+
+
+def _canonical_issue_identity(code: str, message: str) -> tuple[str, str]:
+    """Return a stable (path, rule_id) pair for loop progress detection.
+
+    Human-readable messages are intentionally not used verbatim: validators
+    often include counts or indexes that change between otherwise identical
+    failures.  Schema errors get a precise field path and error rule, while
+    legacy business rules use a normalized message-template digest.
+    """
+    field_error = _FIELD_ERROR_RE.match(message.strip())
+    if field_error:
+        path, detail = field_error.groups()
+        normalized_detail = re.sub(r"\s+", " ", detail.strip().lower())
+        known_rules = (
+            ("valid string", "string_type"),
+            ("valid list", "list_type"),
+            ("valid integer", "int_type"),
+            ("valid number", "number_type"),
+            ("field required", "missing"),
+        )
+        rule_id = next(
+            (rule for marker, rule in known_rules if marker in normalized_detail),
+            "schema_" + hashlib.sha256(normalized_detail.encode("utf-8")).hexdigest()[:12],
+        )
+        return path.strip(), rule_id
+
+    lowered = message.lower()
+    if "json 解析失败" in lowered or "json解析失败" in lowered:
+        return "$", "json_decode"
+    if "找不到 json 对象" in lowered:
+        return "$", "json_object_missing"
+    if "json 根节点不是对象" in lowered:
+        return "$", "json_root_type"
+
+    # Remove volatile numeric literals while retaining the actual rule text.
+    template = re.sub(r"\d+(?:\.\d+)?", "#", re.sub(r"\s+", " ", lowered)).strip()
+    return "", "message_" + hashlib.sha256(template.encode("utf-8")).hexdigest()[:12]
+
+
 def issues_from_messages(
     messages: list[str],
     *,
@@ -32,18 +74,20 @@ def issues_from_messages(
     severity: IssueSeverity = IssueSeverity.BLOCKER,
 ) -> list[Issue]:
     """Compatibility layer while legacy validators still return human-readable strings."""
-    return [
-        Issue(
-            code=issue_code(message),
+    issues: list[Issue] = []
+    for message in messages:
+        code = issue_code(message)
+        path, rule_id = _canonical_issue_identity(code, message)
+        issues.append(Issue(
+            code=code,
             severity=severity,
             subject=subject,
             message=message,
-            evidence={"span": subject},
+            evidence={"span": subject, "path": path, "rule_id": rule_id},
             repair_hint=f"定向修复：{message}",
             repairable=True,
-        )
-        for message in messages
-    ]
+        ))
+    return issues
 
 
 def issue_fingerprint(issues: list[Issue]) -> str:

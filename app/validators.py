@@ -975,6 +975,8 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
     if script.beats:
         errors.append("剧本台不再接受 beats 拍卡结构；请重新生成完整剧本")
     event_ids: set[str] = set()
+    if not script.events:
+        errors.append("events 不能为空；必须把完整剧本拆成可追溯的状态变化事件")
     for i, event in enumerate(script.events or []):
         tag = f"events[{i}]"
         event_id = (event.event_id or "").strip()
@@ -988,6 +990,8 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
             if len((getattr(event, field, "") or "").strip()) < 4:
                 errors.append(f"{tag}.{field} 缺失或过短；事件必须写清状态输入、可见变化和状态输出")
     info_ids: set[str] = set()
+    if not script.information_ledger:
+        errors.append("information_ledger 不能为空；必须为观众需要获得的剧情信息建立中文交付台账")
     for i, item in enumerate(script.information_ledger or []):
         tag = f"information_ledger[{i}]"
         info_id = (item.info_id or "").strip()
@@ -997,6 +1001,17 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
             errors.append(f"{tag}.info_id=「{info_id}」重复；information_ledger.info_id 必须唯一")
         else:
             info_ids.add(info_id)
+        if info_id and not re.fullmatch(r"I\d{1,4}", info_id, flags=re.IGNORECASE):
+            errors.append(
+                f"{tag}.info_id=「{info_id}」不是稳定内部编号；请使用 I1、I2 这类编号，"
+                "不要使用英文 snake_case 剧情描述"
+            )
+        content = (item.content or "").strip()
+        if len(content) < 4 or not re.search(r"[\u3400-\u9fff]", content):
+            errors.append(f"{tag}.content 必须用简体中文写清观众获得的具体信息")
+        event_id = (item.event_id or "").strip()
+        if not event_id or event_id not in event_ids:
+            errors.append(f"{tag}.event_id=「{event_id}」未对应 events 中的有效事件")
         if item.delivery_owner and item.delivery_owner not in DELIVERY_OWNERS:
             errors.append(f"信息 {item.info_id} 的 delivery_owner={item.delivery_owner} 不合法")
     errors.extend(adaptation_hook_errors(script))

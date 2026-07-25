@@ -273,10 +273,11 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
         derive_continuity_mode,
         effective_state_out,
         preflight_seedance_gates,
+        resolve_do_not_repeat_texts,
         shot_contract_dict,
         uses_previous_tail_frame,
     )
-    from app.schemas import Bible
+    from app.schemas import Bible, EpisodeScreenplay
 
     conn = get_conn()
     shot_row = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
@@ -291,6 +292,20 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
 
     bible = Bible.model_validate(json.loads(project["bible_json"]))
     shot = _load_shot_model(shot_row)
+    screenplay = None
+    if _row_value(ep, "screenplay_json"):
+        try:
+            screenplay = EpisodeScreenplay.model_validate(json.loads(ep["screenplay_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            screenplay = None
+    prior_rows = conn.execute(
+        "SELECT * FROM shots WHERE episode_id=? AND shot_no<? ORDER BY shot_no",
+        (shot_row["episode_id"], int(shot_row["shot_no"])),
+    ).fetchall()
+    prior_shots = [_load_shot_model(row) for row in prior_rows]
+    # Persisted legacy boards may contain snake_case ledger IDs. Resolve them
+    # to Chinese semantics at the final model boundary; unresolved IDs vanish.
+    shot.do_not_repeat = resolve_do_not_repeat_texts(shot, screenplay, prior_shots)
     decision = _decision_from_mode_plan(shot_row) or video_modes.default_reference_decision()
     if decision.mode != video_modes.REFERENCE_IMAGE_MODE:
         decision = video_modes.default_reference_decision()

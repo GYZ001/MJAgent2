@@ -301,6 +301,83 @@ def ensure_audio_timeline(shot: Shot, voice_bible: list[VoiceCanonical] | None =
         shot.audio_cast = effective_audio_cast(shot)
 
 
+def _shot_value(shot: Shot | dict[str, Any], key: str, default: Any = None) -> Any:
+    if isinstance(shot, dict):
+        return shot.get(key, default)
+    return getattr(shot, key, default)
+
+
+def _has_chinese(text: str) -> bool:
+    return bool(re.search(r"[\u3400-\u9fff]", text or ""))
+
+
+def information_items_for_shot(
+    shot: Shot | dict[str, Any],
+    screenplay: EpisodeScreenplay | None = None,
+) -> list[dict[str, str]]:
+    """Resolve internal info IDs to user/model-facing Chinese content.
+
+    New productions use ``screenplay.information_ledger`` as the authority.  Legacy
+    boards may contain model-invented snake_case IDs and no ledger; for those, derive
+    one Chinese delivery description from the shot's own action/state instead of
+    exposing or forwarding the opaque ID.
+    """
+    ids = [str(x).strip() for x in (_shot_value(shot, "new_information_ids", []) or []) if str(x).strip()]
+    if not ids:
+        return []
+    ledger = {
+        item.info_id: (item.content or "").strip()
+        for item in (screenplay.information_ledger if screenplay else [])
+        if (item.info_id or "").strip()
+    }
+    derived = next((
+        str(_shot_value(shot, key, "") or "").strip()
+        for key in ("purpose", "primary_action", "state_out", "action_desc")
+        if _has_chinese(str(_shot_value(shot, key, "") or "").strip())
+    ), "本镜首次交付的剧情信息")
+    return [
+        {
+            "info_id": info_id,
+            "content": ledger.get(info_id) or derived,
+            "source": "ledger" if ledger.get(info_id) else "derived",
+        }
+        for info_id in ids
+    ]
+
+
+def resolve_do_not_repeat_texts(
+    shot: Shot | dict[str, Any],
+    screenplay: EpisodeScreenplay | None = None,
+    prior_shots: list[Shot] | None = None,
+) -> list[str]:
+    """Turn do-not-repeat IDs into Chinese semantic constraints for Seedance."""
+    lookup = {
+        item.info_id: (item.content or "").strip()
+        for item in (screenplay.information_ledger if screenplay else [])
+        if (item.info_id or "").strip() and (item.content or "").strip()
+    }
+    for prior in prior_shots or []:
+        for item in information_items_for_shot(prior, screenplay):
+            lookup.setdefault(item["info_id"], item["content"])
+
+    resolved: list[str] = []
+    for raw in _shot_value(shot, "do_not_repeat", []) or []:
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        content = lookup.get(value, "")
+        if not content:
+            parts = re.split(r"[:：]", value, maxsplit=1)
+            if len(parts) == 2 and _has_chinese(parts[1]):
+                content = parts[1].strip()
+            elif _has_chinese(value):
+                content = value
+        # 裸 snake_case / I001 只对内部去重有意义，不能作为视频模型指令。
+        if content and content not in resolved:
+            resolved.append(content)
+    return resolved
+
+
 def information_ledger_errors(
     board: Storyboard,
     screenplay: EpisodeScreenplay | None,
@@ -313,6 +390,12 @@ def information_ledger_errors(
     delivered: dict[str, int] = {}
     for shot in board.shots:
         for info_id in shot.new_information_ids or []:
+            if info_id not in ledger:
+                errors.append(
+                    f"shot_no={shot.shot_no} 使用了信息台账中不存在的 ID {info_id}；"
+                    "new_information_ids 只能引用 screenplay.information_ledger"
+                )
+                continue
             if info_id in delivered and info_id not in (shot.reinforcement_info_ids or []):
                 item = ledger.get(info_id)
                 reinforce = bool(item and item.reinforcement_allowed)
@@ -563,8 +646,8 @@ def ledger_context_for_shot(
     screenplay: EpisodeScreenplay,
     completed_shots: list[Shot],
     current_info_ids: list[str] | None = None,
-) -> dict[str, list[str]]:
-    """已交付 / 当前交付 / 待交付 三栏（只暴露 ID 与短禁止列表）。"""
+) -> dict[str, list[Any]]:
+    """已交付 / 当前交付 / 待交付三栏，同时提供稳定 ID 与中文语义。"""
     ledger = list(screenplay.information_ledger or [])
     delivered: list[str] = []
     for shot in completed_shots:
@@ -576,14 +659,44 @@ def ledger_context_for_shot(
         item.info_id for item in ledger
         if item.info_id not in delivered and item.info_id not in current
     ]
-    do_not_repeat = []
-    for item in ledger:
-        if item.info_id in delivered and not item.reinforcement_allowed:
-            do_not_repeat.append(f"{item.info_id}:{item.content[:24]}")
+    ledger_by_id = {item.info_id: item for item in ledger}
+    delivered_items = []
+    for info_id in delivered:
+        item = ledger_by_id.get(info_id)
+        if item and (item.content or "").strip():
+            delivered_items.append({"info_id": info_id, "content": item.content.strip()})
+            continue
+        source_shot = next(
+            (shot for shot in completed_shots if info_id in (shot.new_information_ids or [])),
+            None,
+        )
+        if source_shot:
+            match = next((x for x in information_items_for_shot(source_shot, screenplay)
+                          if x["info_id"] == info_id), None)
+            if match:
+                delivered_items.append({"info_id": info_id, "content": match["content"]})
+    current_items = [
+        {"info_id": info_id, "content": ledger_by_id[info_id].content}
+        for info_id in current if info_id in ledger_by_id
+    ]
+    pending_items = [
+        {"info_id": item.info_id, "content": item.content}
+        for item in ledger if item.info_id in pending
+    ]
+    do_not_repeat = list(dict.fromkeys(
+        item["content"] for item in delivered_items
+        if item["content"] and not (
+            ledger_by_id.get(item["info_id"])
+            and ledger_by_id[item["info_id"]].reinforcement_allowed
+        )
+    ))
     return {
         "delivered_ids": delivered,
         "current_ids": current,
         "pending_ids": pending,
+        "delivered_items": delivered_items,
+        "current_items": current_items,
+        "pending_items": pending_items,
         "do_not_repeat": do_not_repeat,
     }
 

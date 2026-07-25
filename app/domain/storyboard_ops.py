@@ -954,6 +954,8 @@ def episode_detail(episode_id: str, view: str | None = None):
         s["characters"] = json.loads(s["characters"] or "[]")
         s["dialogues"] = json.loads(s["dialogues"] or "[]")
         _apply_contract_to_public_shot(s)
+        from app.continuity import information_items_for_shot
+        s["new_information_items"] = information_items_for_shot(s, script)
         s["est_cost_cny"] = shot_cost_cny(s["duration_s"])
         if s.get("storyboard_artifact_id") and (full or view == "board"):
             shot_artifact = evidence_repository.get_artifact(s["storyboard_artifact_id"])
@@ -1001,6 +1003,12 @@ def shot_review_detail(shot_id: str):
     shot["characters"] = json.loads(shot["characters"] or "[]")
     shot["dialogues"] = json.loads(shot["dialogues"] or "[]")
     _apply_contract_to_public_shot(shot)
+    from app.continuity import information_items_for_shot
+    episode_row = conn.execute(
+        "SELECT * FROM episodes WHERE id=?", (shot["episode_id"],)
+    ).fetchone()
+    screenplay = _load_screenplay(dict(episode_row)) if episode_row else None
+    shot["new_information_items"] = information_items_for_shot(shot, screenplay)
     shot["est_cost_cny"] = shot_cost_cny(shot["duration_s"])
     shot["video_stale"] = False
     for legacy_key in (

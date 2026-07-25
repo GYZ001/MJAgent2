@@ -5,6 +5,7 @@ import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 import SearchField from '../components/SearchField'
 import EvidenceDrawer from '../components/harness/EvidenceDrawer'
 import ImpactDialog, { ImpactSummary } from '../components/harness/ImpactDialog'
+import GenerationParamsDialog from '../components/GenerationParamsDialog'
 import QueryState from '../components/QueryState'
 import PrepSubnav from '../components/PrepSubnav'
 import { useFillPageSize } from '../hooks/useFillPageSize'
@@ -16,6 +17,7 @@ export default function BiblePage() {
   const [busy, setBusy] = useState(false)
   const [charSearch, setCharSearch] = useState('')
   const [charPage, setCharPage] = useState(0)
+  const [paramsCharacterName, setParamsCharacterName] = useState<string | null>(null)
   const [impactOpen, setImpactOpen] = useState(false)
   const pageSize = useFillPageSize({ minCardWidth: 270, rows: 3, floor: 8, ceiling: 24 })
   const bibleTimer = useTaskTimer(`project.${projectId}.bible`, p?.bible_status === 'running')
@@ -50,6 +52,9 @@ export default function BiblePage() {
   const curCharPage = Math.min(charPage, charPageCount - 1)
   const pagedChars = filteredChars.slice(curCharPage * pageSize, curCharPage * pageSize + pageSize)
   const generating = p.bible_status === 'running' || p.refs_status === 'running'
+  const paramsCharacter = paramsCharacterName
+    ? bible?.characters.find(character => character.name === paramsCharacterName) ?? null
+    : null
 
   const startBible = async () => {
     bibleTimer.start()
@@ -185,17 +190,11 @@ export default function BiblePage() {
                         setEditing(next)
                       }} />
                   : <div className="f-anchor">{c.appearance_canonical}</div>}
-                <details className="character-details" open={!!editing}>
-                  <summary>角色设定与生成参数</summary>
-                  <div className="f-misc">
-                    <b>性格</b>{c.personality}<br />
-                    <b>语风</b>{c.speech_style}<br />
-                    {!!c.relationships.length && <><b>关系</b>{c.relationships.map(r => `${r.relation}→${r.to}`).join('；')}</>}
-                  </div>
-                  <PortraitBlock projectId={p.id} character={c} disabled={busy || p.refs_status === 'running'}
-                    onChanged={refresh} regenerate={() =>
-                      act(() => api.post(`/projects/${p.id}/refs`, { character: c.name }), `正在为「${c.name}」重新定妆`)} />
-                </details>
+                <div className="asset-params-action">
+                  <button className="asset-params-trigger" type="button" onClick={() => setParamsCharacterName(c.name)}>
+                    角色设定与生成参数 <span aria-hidden="true">→</span>
+                  </button>
+                </div>
               </article>
             )})}
           </div>
@@ -231,6 +230,27 @@ export default function BiblePage() {
         onClose={() => setImpactOpen(false)}
         onConfirm={() => { setImpactOpen(false); void saveBible() }}
       />
+      {paramsCharacter && (
+        <GenerationParamsDialog
+          title={`${paramsCharacter.name} · 角色设定与生成参数`}
+          subtitle="查看角色设定、调整定妆照生成词，或重新生成当前角色定妆照。"
+          onClose={() => setParamsCharacterName(null)}
+        >
+          <div className="character-param-summary">
+            <div><b>性格</b><p>{paramsCharacter.personality || '未设置'}</p></div>
+            <div><b>语风</b><p>{paramsCharacter.speech_style || '未设置'}</p></div>
+            <div className="wide"><b>关系</b><p>{paramsCharacter.relationships.length
+              ? paramsCharacter.relationships.map(r => `${r.relation}→${r.to}`).join('；')
+              : '未设置'}</p></div>
+          </div>
+          <PortraitBlock projectId={p.id} character={paramsCharacter}
+            disabled={busy || p.refs_status === 'running'} onChanged={refresh}
+            regenerate={() => act(
+              () => api.post(`/projects/${p.id}/refs`, { character: paramsCharacter.name }),
+              `正在为「${paramsCharacter.name}」重新定妆`,
+            )} />
+        </GenerationParamsDialog>
+      )}
     </>
   )
 }

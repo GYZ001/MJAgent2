@@ -58,6 +58,56 @@ def test_agent_loop_repairs_then_accepts() -> None:
     assert result.value.value == 2
 
 
+def test_agent_loop_keeps_repairing_when_structural_issue_changes() -> None:
+    """Regression for ERR-20260725-c8bb0d.
+
+    JSON syntax, one bad field type, and another bad field type are distinct
+    repair progress.  They must not share one coarse SCHEMA_INVALID stall
+    fingerprint or accumulate no-quality-gain while no candidate exists.
+    """
+    outputs = ["syntax", "event", "list", "valid"]
+
+    async def producer(iteration, *_args):
+        return outputs[iteration - 1]
+
+    def evaluate(raw: str):
+        if raw == "syntax":
+            return None, issues_from_messages(
+                ["JSON 解析失败（Expecting ',' delimiter）"], subject="storyboard_checkpoint:e1:2"
+            )
+        if raw == "event":
+            return None, issues_from_messages(
+                ["字段 shot.story_event_id：Input should be a valid string"],
+                subject="storyboard_checkpoint:e1:2",
+            )
+        if raw == "list":
+            return None, issues_from_messages(
+                ["字段 shot.new_information_ids：Input should be a valid list"],
+                subject="storyboard_checkpoint:e1:2",
+            )
+        return Candidate(value=2), []
+
+    result = asyncio.run(_loop(max_iterations=4).run(producer, evaluate))
+
+    assert result.status == "accepted"
+    assert result.iterations == 4
+
+
+def test_schema_issue_fingerprint_includes_field_and_rule() -> None:
+    subject = "storyboard_checkpoint:e1:2"
+    json_issue = issues_from_messages(["JSON 解析失败（坏引号）"], subject=subject)[0]
+    string_issue = issues_from_messages(
+        ["字段 shot.story_event_id：Input should be a valid string"], subject=subject
+    )[0]
+    list_issue = issues_from_messages(
+        ["字段 shot.new_information_ids：Input should be a valid list"], subject=subject
+    )[0]
+
+    assert len({json_issue.fingerprint, string_issue.fingerprint, list_issue.fingerprint}) == 3
+    assert "shot.story_event_id" in string_issue.fingerprint
+    assert "string_type" in string_issue.fingerprint
+
+
 def test_agent_loop_stops_same_issue_fingerprint_and_returns_warning() -> None:
     async def producer(_iteration, *_args):
         return '{"value": 1}'
@@ -156,7 +206,7 @@ def test_warning_fallback_keeps_value_issues_and_artifact_from_same_iteration(
         input_fingerprint="input-v1",
     )
     recorder.start()
-    outputs = ['{"value": 1}', '{"broken": 1}', '{"broken": 2}']
+    outputs = ['{"value": 1}', '{"broken": 1}', '{"broken": 2}', '{"broken": 3}']
 
     async def producer(iteration, *_args):
         return outputs[iteration - 1]
@@ -189,12 +239,14 @@ def test_warning_fallback_keeps_value_issues_and_artifact_from_same_iteration(
     ).fetchall())
 
     assert result.status == "warning"
-    assert result.exit_reason == "no_quality_gain"
+    # T0 structural outputs have no comparable quality, so they consume the
+    # bounded repair budget instead of triggering a false no-quality-gain exit.
+    assert result.exit_reason == "max_iterations"
     assert result.value.value == 1
     assert result.issues[0].message == "candidate business problem"
     assert result.artifact_id == artifacts[0]["id"]
-    assert [artifact["trust_level"] for artifact in artifacts] == ["T1", "T0", "T0"]
-    assert [row["score"] for row in evaluations] == [50.0, 0.0, 0.0]
+    assert [artifact["trust_level"] for artifact in artifacts] == ["T1", "T0", "T0", "T0"]
+    assert [row["score"] for row in evaluations] == [50.0, 0.0, 0.0, 0.0]
 
 
 def test_storyboard_plural_shots_gets_targeted_repair_and_singular_contract(

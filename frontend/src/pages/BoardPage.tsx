@@ -14,8 +14,37 @@ const TRANS = ['硬切', '叠化', '淡出淡入', '黑场', '闪黑', '闪白',
 const DURATIONS = [5, 6, 7, 8, 9, 10]
 const CONTINUITY_MODES = ['action_continuation', 'same_scene_cut', 'reaction_cut', 'reverse_angle', 'insert_detail', 'scene_change']
 
-function commaList(value?: string[]): string {
-  return (value ?? []).join('、') || '无'
+function ShotMetaTokens({ values, tone }: { values?: string[]; tone: 'visible' | 'audio' | 'information' }) {
+  const items = (values ?? []).filter(Boolean)
+  return (
+    <div className={`shot-context-tokens ${tone}`} role="list">
+      {items.length
+        ? items.map(item => <span key={item} role="listitem">{item}</span>)
+        : <span className="empty" role="listitem">无</span>}
+    </div>
+  )
+}
+
+function ShotInformationTokens({ shot }: { shot: Shot }) {
+  const grouped = new Map<string, string[]>()
+  for (const item of shot.new_information_items ?? []) {
+    const content = item.content?.trim()
+    if (!content) continue
+    grouped.set(content, [...(grouped.get(content) ?? []), item.info_id])
+  }
+  if (!grouped.size && (shot.new_information_ids?.length ?? 0) > 0) {
+    const fallback = shot.purpose || shot.primary_action || shot.state_out || '本镜首次交付的剧情信息'
+    grouped.set(fallback, shot.new_information_ids ?? [])
+  }
+  return (
+    <div className="shot-context-tokens information" role="list">
+      {grouped.size
+        ? [...grouped].map(([content, ids]) => (
+            <span key={content} role="listitem" title={ids.length ? `内部信息编号：${ids.join('、')}` : undefined}>{content}</span>
+          ))
+        : <span className="empty" role="listitem">无</span>}
+    </div>
+  )
 }
 
 function parseCommaList(value: string): string[] {
@@ -295,12 +324,12 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
               <textarea rows={3} value={edit.action_desc} onChange={e => setEdit({ ...edit, action_desc: e.target.value })} /></div>
             <div className="full">
               <label className="f">Seedance 连续性（state_in → primary_action → state_out）</label>
-              <div className="shot-frame-pair">
-                <div className="shot-frame-card"><span>起始状态</span><textarea rows={2} value={edit.state_in ?? ''} onChange={e => setEdit({ ...edit, state_in: e.target.value })} /></div>
+              <div className="shot-frame-pair shot-continuity-chain">
+                <div className="shot-frame-card"><span className="shot-frame-label"><strong>进入状态</strong><code>state_in</code></span><textarea rows={2} value={edit.state_in ?? ''} onChange={e => setEdit({ ...edit, state_in: e.target.value })} /></div>
                 <div className="shot-frame-flow" aria-hidden="true">→</div>
-                <div className="shot-frame-card"><span>主动作</span><textarea rows={2} value={edit.primary_action ?? ''} onChange={e => setEdit({ ...edit, primary_action: e.target.value })} /></div>
+                <div className="shot-frame-card"><span className="shot-frame-label"><strong>镜头动作</strong><code>primary_action</code></span><textarea rows={2} value={edit.primary_action ?? ''} onChange={e => setEdit({ ...edit, primary_action: e.target.value })} /></div>
                 <div className="shot-frame-flow" aria-hidden="true">→</div>
-                <div className="shot-frame-card"><span>结束状态</span><textarea rows={2} value={edit.state_out ?? ''} onChange={e => setEdit({ ...edit, state_out: e.target.value })} /></div>
+                <div className="shot-frame-card"><span className="shot-frame-label"><strong>离开状态</strong><code>state_out</code></span><textarea rows={2} value={edit.state_out ?? ''} onChange={e => setEdit({ ...edit, state_out: e.target.value })} /></div>
               </div>
             </div>
             <div><label className="f">continuity_mode</label>
@@ -352,22 +381,39 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
                 <div><dt>景别</dt><dd>{s.shot_size}</dd></div>
                 <div><dt>运镜</dt><dd>{s.camera_move}</dd></div>
                 <div><dt>转场</dt><dd>{s.transition}</dd></div>
-                <div><dt>连续性</dt><dd>{s.continuity_mode || (s.continuity_from_prev ? '接上镜' : '新场景')}</dd></div>
+                <div className="shot-spec-wide"><dt>连续性</dt><dd>{s.continuity_mode || (s.continuity_from_prev ? '接上镜' : '新场景')}</dd></div>
               </dl>
             </div>
 
-            <div className="shot-frame-pair full" aria-label="Seedance 状态链">
-              <div className="shot-frame-card"><span>state_in</span><p>{s.state_in || s.first_frame_desc || '未设置'}</p></div>
+            <div className="shot-frame-pair shot-continuity-chain full" aria-label="Seedance 状态链">
+              <div className="shot-frame-card"><span className="shot-frame-label"><strong>进入状态</strong><code>state_in</code></span><p>{s.state_in || s.first_frame_desc || '未设置'}</p></div>
               <div className="shot-frame-flow" aria-hidden="true">→</div>
-              <div className="shot-frame-card"><span>primary_action</span><p>{s.primary_action || s.action_desc || '未设置'}</p></div>
+              <div className="shot-frame-card"><span className="shot-frame-label"><strong>镜头动作</strong><code>primary_action</code></span><p>{s.primary_action || s.action_desc || '未设置'}</p></div>
               <div className="shot-frame-flow" aria-hidden="true">→</div>
-              <div className="shot-frame-card"><span>state_out</span><p>{s.state_out || s.last_frame_desc || '未设置'}</p></div>
+              <div className="shot-frame-card"><span className="shot-frame-label"><strong>离开状态</strong><code>state_out</code></span><p>{s.state_out || s.last_frame_desc || '未设置'}</p></div>
             </div>
-            <div className="script-meta-grid full" aria-label="Seedance 连续性摘要">
-              <div className="script-meta-item"><span className="script-meta-label">可见角色</span><span className="script-meta-value">{commaList(s.characters_visible)}</span></div>
-              <div className="script-meta-item"><span className="script-meta-label">声音角色</span><span className="script-meta-value">{commaList(s.audio_cast)}</span></div>
-              <div className="script-meta-item"><span className="script-meta-label">新信息</span><span className="script-meta-value">{commaList(s.new_information_ids)}</span></div>
-            </div>
+            <section className="shot-context-summary full" aria-labelledby={`shot-context-${shot.id}`}>
+              <div className="shot-context-panel">
+                <header className="shot-context-head">
+                  <span id={`shot-context-${shot.id}`} className="shot-section-label">镜头要素</span>
+                  <span>参与角色与本镜信息交付</span>
+                </header>
+                <dl className="shot-context-grid">
+                  <div className="shot-context-card">
+                    <dt>可见角色</dt>
+                    <dd><ShotMetaTokens values={s.characters_visible} tone="visible" /></dd>
+                  </div>
+                  <div className="shot-context-card">
+                    <dt>声音角色</dt>
+                    <dd><ShotMetaTokens values={s.audio_cast} tone="audio" /></dd>
+                  </div>
+                  <div className="shot-context-card information">
+                    <dt>本镜新信息</dt>
+                    <dd><ShotInformationTokens shot={s} /></dd>
+                  </div>
+                </dl>
+              </div>
+            </section>
 
             <div className="shot-detail-tabs full" role="tablist" aria-label="镜头详情">
               <button type="button" role="tab" aria-selected={detailTab === 'frames'} className={detailTab === 'frames' ? 'active' : ''} onClick={() => setDetailTab('frames')}>起止画面</button>

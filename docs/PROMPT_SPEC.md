@@ -175,7 +175,7 @@
 **禁止**：分镜阶段不得使用 episode.synopsis；它只是前端展示字段，避免概要压缩导致细节丢失。
 **温度**：0.7。每轮只输出一个镜头，使用独立、受控的单镜输出预算，不沿用整集剧本的超大 `max_tokens`。
 
-**活动逐镜合同（Storyboard 2.1.1）**：系统先生成整集大纲，再按 checkpoint 一次只请求一个镜头。模型每轮根对象必须是
+**活动逐镜合同（Storyboard 2.1.2）**：系统先生成整集大纲，再按 checkpoint 一次只请求一个镜头。模型每轮根对象必须是
 `{"episode_no": int, "is_final": bool, "shot": {...}}`，只允许单数 `shot`，禁止 `shots` 数组和顺带输出下一镜。
 大纲 `covers` 若超过最长 10 秒的 28 字口播容量，会在模型调用前按句读一次确定性拆成足够多的相邻节拍；单个无句读长句也会按同一计数口径切分，且不丢失内容。模型只负责当前镜，下一节拍由下一轮生成。
 修复轮会在候选之后再次声明这份输出合同；warning 回退必须让候选内容、残余 Issue 与 Artifact 来自同一次 schema-valid 迭代，退出提示按实际的 `stalled`、`no_quality_gain` 或 `max_iterations` 展示。
@@ -248,6 +248,7 @@
 - （v13 改）叙事主力=台词/内心OS+画面：能用角色对白说清的写 dialogues，无法说出口的内心变化写 narration，非角色圣经人物的人群声也写 narration 或 action_desc。少用的是解释性旁白，不是删掉剧本里已经存在的声音。
 - 特效/光效服从剧情、动作符合现实物理：日常镜头克制写实、不堆满屏光效，仅高潮/爆发用强特效且不遮脸；单镜一个连续动作，人物位置/姿态/道具连续变化，不要瞬移/穿模/道具凭空出现消失。
 - 场景描述能忽略就忽略：只保留最短时间地点标签；不要让薄雾、灯光、街道、杂物成为镜头主角。每个视频段的主角必须是人物、人物动作、人物反应和故事线索；场景只能服务于人物正在做什么、发现什么、失去什么、决定什么。
+- `story_event_id` 必须始终输出 JSON 字符串；没有对应事件时输出空字符串 `""`，禁止输出 `null`。`source_excerpt` 中的双引号必须按 JSON 规范转义，或使用中文引号，不能破坏根对象语法。
 - 每个镜头输出前完成自检：shot_no 连续、duration_s 全部为 5~10 秒整数且与动作/口播容量匹配、characters 非空且姓名准确、action_desc 出现准确角色名、source_excerpt 已从原文逐字摘录、scene_setting 足够短、文案满足信息密度下限且不检查上限、
   剧情载荷足够、action_desc 是一个连贯主动作（2~4 个动作片段、不塞快切）、台词 speaker 在本镜头 characters 中且不能是旁白、与上一镜有动作/道具/情绪/信息承接。
 
@@ -276,6 +277,8 @@
      "camera_move": "固定|推近|拉远|横摇|跟随",
      "scene_setting": str, "characters": [str], // 可见的角色圣经姓名或合法功能性路人标签
      "action_desc": str, "source_excerpt": str, // 对应本镜头的小说原文逐字摘录
+     "story_event_id": str, // 无对应事件时为 ""，不得为 null
+     "new_information_ids": [str], // 只引用 information_ledger 中的 I1/I2 等内部编号
      "narration": str|null,
      "dialogues": [{"speaker": str, "line": str,
                     "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定"}],
@@ -311,6 +314,8 @@
 视频最终 prompt 由 `app.compiler.compile_prompt` 确定性编译，合同版本写入 `prompt_contract_version=seedance_continuity_v1`。核心输入是 `continuity_mode` 与状态链：`state_in`、`primary_action`、`state_out`；仅 `action_continuation` 可使用上一镜尾帧作为 0 秒起点，其余模式必须重新构图。
 
 最终 prompt 固定包含 FORMAT、REFERENCE ROLES、START STATE、ONE CURRENT ACTION、END STATE、AUDIO TIMELINE、ON-SCREEN TEXT、DO NOT 等段落。`source_excerpt` 只作为上游改编证据与校验依据，禁止进入 Seedance 最终 prompt；最终文本也不得包含 `SOURCE_EXCERPT_MARKER` 或上一镜完整 action 描述。
+
+信息台账实行“内部编号、中文语义”双层合同：`new_information_ids` 只保存 `I1`、`I2` 这类稳定去重键，界面通过 `information_ledger[].content` 展示中文内容；历史 snake_case ID 可保留用于兼容，但会在接口层派生中文说明。生成视频前，`do_not_repeat` 必须解析成中文剧情约束；无法解析的裸 ID 会被过滤，绝不直接发送给 Seedance。
 
 ```python
 def compile_prompt(shot, bible, style) -> str:

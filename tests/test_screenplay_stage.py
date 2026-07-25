@@ -69,6 +69,21 @@ def _contract() -> dict:
         protagonist_goal="弄清旧友这几天的去向并拿到他要交付的东西",
         obstacle="旧友闪烁其词、门外似乎有人尾随，谷言又难辨真假",
         stakes="若信错人或被发现，谷言会被卷进危险甚至送命",
+        events=[{
+            "event_id": "E1",
+            "source_span": "雨夜会面",
+            "source_fact": "失踪旧友带血现身并递出储物柜钥匙",
+            "state_in": "谷言独自在咖啡厅等待旧友",
+            "trigger": "失踪旧友带着血迹推门出现",
+            "visible_change": "旧友坐下并把储物柜钥匙推到谷言手边",
+            "state_out": "谷言拿到钥匙并意识到危险正在逼近",
+        }],
+        information_ledger=[{
+            "info_id": "I1",
+            "event_id": "E1",
+            "content": "失踪旧友带血现身并向谷言交付储物柜钥匙",
+            "delivery_owner": "visual_action",
+        }],
     )
 
 
