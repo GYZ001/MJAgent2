@@ -9,8 +9,22 @@ import re
 
 from app import config
 from app.character_policy import is_functional_extra
+from app.continuity import (
+    normalize_board_continuity,
+    state_chain_errors,
+    action_capacity_errors,
+    speech_capacity_errors,
+    information_ledger_errors,
+    outline_atomic_errors,
+    adaptation_hook_errors,
+    sync_shot_continuity_fields,
+    count_sequential_action_beats,
+    max_speech_chars,
+    spoken_chars_from_shot,
+)
 from app.schemas import (Bible, EpisodeScreenplay, Shot, Storyboard,
-                         StoryboardOutline, SHOT_SIZES, CAMERA_MOVES, TRANSITIONS)
+                         StoryboardOutline, SHOT_SIZES, CAMERA_MOVES, TRANSITIONS,
+                         CONTINUITY_MODES, DELIVERY_OWNERS)
 
 
 # 字数约束设计原则（2026-06-15 v12：旁白改为「选填且少用」）：
@@ -51,6 +65,12 @@ MOVEMENT_HINTS = (
 
 # 目标时长只提供初始节拍参考；剧情未完整覆盖时可继续补 5~10 秒镜头。
 SCENE_CUT_TRANSITIONS = TRANSITIONS - {"硬切"}
+SAME_SCENE_CONTINUITY_MODES = {
+    "same_scene_cut",
+    "reaction_cut",
+    "reverse_angle",
+    "insert_detail",
+}
 TRANSITION_VISUAL_HINTS = {
     "叠化": ("叠化", "渐", "柔", "余韵", "模糊", "压低"),
     "淡出淡入": ("淡出", "淡入", "渐暗", "渐黑", "渐亮", "压暗", "暗下"),
@@ -95,7 +115,7 @@ def _soundtrack_text(shot: Shot) -> str:
 
 def _action_beat_count(text: str) -> int:
     parts = [p.strip() for p in re.split(r"[，。；;、\n]+", text) if len(p.strip()) >= 4]
-    return len(parts)
+    return max(len(parts), count_sequential_action_beats(text or ""))
 
 
 def _explicit_cut_markers(text: str | None) -> list[str]:
@@ -239,7 +259,7 @@ def validate_storyboard(
         if source_len < SOURCE_EXCERPT_MIN_CHARS:
             errors.append(
                 f"{tag}.source_excerpt 仅 {source_len} 字；每个分镜必须带对应小说原文摘录，"
-                f"请从本集原文中逐字摘录至少 {SOURCE_EXCERPT_MIN_CHARS} 字作为 Seedance 兜底参考")
+                f"请从本集原文中逐字摘录至少 {SOURCE_EXCERPT_MIN_CHARS} 字作为上游改编证据与审核追溯，不得送入 Seedance")
         beat_count = _action_beat_count(shot.action_desc)
         if beat_count < VIDEO_SEGMENT_MIN_BEATS:
             errors.append(
@@ -261,6 +281,8 @@ def validate_storyboard(
             errors.append(
                 f"{tag} 首帧与尾帧画面描述几乎相同；二者必须明显不同（动作前 vs 动作后，体现姿态/表情/手部/道具的可见变化），"
                 "否则首图尾图会一模一样、视频没有动作")
+        errors.extend(action_capacity_errors(shot))
+        errors.extend(speech_capacity_errors(shot))
         # 旁白选填、少用：不再要求每镜必填，也不再禁止纯画面/纯台词镜头；
         # 若写了旁白则保留上限校验，避免重新退回旁白堆砌。
         narration_len = len((shot.narration or "").strip())
@@ -269,9 +291,8 @@ def validate_storyboard(
                 f"{tag}.narration 共 {narration_len} 字，超过硬上限 {NARRATION_HARD_MAX} 字——最短镜头配音念不完、读太快观感差；"
                 f"旁白请精简到 {NARRATION_TARGET_CHARS} 字以内（一句最关键的推进），或直接留空、改用台词与画面动作承载")
         # 口播总量必须能在视频最长时长内念完（含台词+旁白），否则配音会被截断、音画不同步。
-        spoken_chars = sum(len(re.sub(r"\s+", "", d.line or "")) for d in shot.dialogues) \
-            + len(re.sub(r"\s+", "", (shot.narration or "")))
-        spoken_limit = config.max_spoken_chars_for_duration(shot.duration_s)
+        spoken_chars = spoken_chars_from_shot(shot)
+        spoken_limit = max_speech_chars(shot.duration_s)
         if spoken_chars > spoken_limit:
             errors.append(
                 f"{tag} 台词+旁白共 {spoken_chars} 字，超过本镜 {shot.duration_s}s 的口播上限 {spoken_limit} 字；"
@@ -305,12 +326,16 @@ def validate_storyboard(
                     f"{tag}.characters 中的功能性路人「{name}」未在 action_desc/首尾帧中明确入画；"
                     "路人可以不进角色圣经，但必须看得见其位置、动作或开口过程"
                 )
-        speakers_ok = set(shot.characters)
+        visible_speakers = set(shot.characters)
+        audio_cast = set(getattr(shot, "audio_cast", []) or [])
         for j, d in enumerate(shot.dialogues):
-            if d.speaker not in speakers_ok:
+            delivery = getattr(d, "delivery", "spoken_dialogue") or "spoken_dialogue"
+            if delivery == "offscreen_voice" or d.speaker in audio_cast:
+                continue
+            if d.speaker not in visible_speakers:
                 errors.append(
                     f"{tag}.dialogues[{j}].speaker=「{d.speaker}」不在该镜头 characters 中；"
-                    "dialogues 只写人物实际开口台词，旁白请放 narration")
+                    "画面开口台词必须由 characters 中的可见角色说出，画外音请设 delivery=offscreen_voice 或加入 audio_cast")
         # V5：可变时长视频段只允许一个连续动作，禁止回到低信息空动作。
         if len(shot.action_desc) < 10:
             errors.append(f"{tag}.action_desc 长度 {len(shot.action_desc)} 字，要求至少 10 字")
@@ -329,62 +354,78 @@ def validate_storyboard(
         if scene_key in scene_last_seen and scene_last_seen[scene_key] != i - 1:
             errors.append(f"场景「{scene}」在 shots[{scene_last_seen[scene_key]}] 与 shots[{i}] 间被其他场景打断，同场景镜头必须连续排列")
         scene_last_seen[scene_key] = i
-        # V6+ 连贯性：每个可变时长视频段都要像连续短片，不能每镜头重开一个摘要。
-        if i == 0 and shot.continuity_from_prev:
-            errors.append(f"{tag}.continuity_from_prev=true，但第一个镜头没有上一镜可承接")
-        if i > 0:
+        # V6+ 连贯性：使用 continuity_mode 表达“是否使用上一镜尾帧”，不再把同场景布尔等同动作连续。
+        mode = (shot.continuity_mode or "").strip()
+        if not mode:
+            prev_for_mode = shots[i - 1] if i > 0 else None
+            mode = sync_shot_continuity_fields(shot, prev_for_mode)
+        if mode not in CONTINUITY_MODES:
+            errors.append(f"{tag}.continuity_mode=「{mode}」不在 {sorted(CONTINUITY_MODES)}")
+        if i == 0:
+            if mode == "action_continuation":
+                errors.append(f"{tag}.continuity_mode=action_continuation，但第一个镜头没有上一镜可承接")
+            if shot.continuity_from_prev:
+                errors.append(f"{tag}.continuity_from_prev=true，但第一个镜头没有上一镜可承接")
+        elif mode in CONTINUITY_MODES:
             prev = shots[i - 1]
             prev_scene = prev.scene_setting.strip()
+            same_scene = scene == prev_scene
             shared_chars = set(prev.characters) & set(shot.characters)
-            if shot.continuity_from_prev:
-                if scene != prev_scene:
-                    errors.append(
-                        f"{tag}.continuity_from_prev=true 但 scene_setting 从「{prev_scene}」变为「{scene}」；"
-                        "接上镜必须沿用同一时间地点标签，换场请设为 false 并写清转场")
-                if not shared_chars:
-                    # 同场景换焦点人物（如群像戏"下一个上场的人"）是合理接镜：场景没变、时间没变，
-                    # 只是镜头跟随对象换了。此时只要 action_desc/narration 写了入场/离场移动承接
-                    # （上前/跑出/走进/穿过…），即视为已承接，不强制保留上一镜人物。
-                    # 兑现错误文案"或在 action_desc 写明入场/离场承接"的承诺——旧代码只看共同角色，
-                    # 与文案自相矛盾，导致模型写了承接仍被误判、重试到上限。
-                    if not _has_movement_cue(shot.action_desc, shot.narration):
-                        errors.append(
-                            f"{tag}.continuity_from_prev=true 但与上一镜没有共同角色；"
-                            "同场景接镜必须保留上一镜核心人物或在 action_desc 写明入场/离场承接"
-                            "（如「上前/跑出/走进/穿过」等移动动作）")
+            if same_scene and mode == "scene_change":
+                errors.append(f"{tag}.continuity_mode=scene_change 但 scene_setting 与上一镜同为「{scene}」")
+            if not same_scene and mode != "scene_change":
+                errors.append(
+                    f"{tag}.continuity_mode={mode} 但 scene_setting 从「{prev_scene}」变为「{scene}」；"
+                    "跨时间/地点必须使用 scene_change")
+            if mode == "action_continuation":
                 if shot.transition != "硬切":
-                    errors.append(f"{tag}.transition=「{shot.transition}」，同场景接上镜应使用「硬切」")
-            else:
-                if scene == prev_scene:
+                    errors.append(f"{tag}.transition=「{shot.transition}」，action_continuation 必须使用「硬切」")
+                if not shared_chars and not _has_movement_cue(
+                    prev.action_desc, prev.narration, shot.action_desc, shot.narration
+                ):
                     errors.append(
-                        f"{tag}.continuity_from_prev=false 但 scene_setting 与上一镜同为「{scene}」；"
-                        "同一场景内除首镜外必须接上镜，避免上下文断裂")
-                else:
-                    if shot.transition == "硬切":
-                        errors.append(
-                            f"{tag}.transition=硬切 但 scene_setting 从「{prev_scene}」切到「{scene}」；"
-                            f"跨时间/地点请用 {sorted(SCENE_CUT_TRANSITIONS)} 之一，并写清承接")
-                    elif shot.transition not in SCENE_CUT_TRANSITIONS:
-                        errors.append(
-                            f"{tag}.transition=「{shot.transition}」不适合换场；"
-                            f"换场请用 {sorted(SCENE_CUT_TRANSITIONS)} 之一")
-                    dialogue_text = "".join(d.line for d in shot.dialogues)
-                    # 承接说明判定（放宽，杜绝高频误伤）：满足以下任一即视为已写清承接——
-                    # ① 含时间/线索类承接词；② 动作/旁白写了人物移动（走过去/转身离开/来到=移动即承接）；
-                    # ③ 与上一镜是同一片连续空间的子区域移动（主地点相同）。三者都不满足才是真·无解释硬跳。
-                    move_explained = (
-                        _has_transition_hint(scene, shot.action_desc, shot.narration, dialogue_text)
-                        or _has_movement_cue(shot.action_desc, shot.narration)
-                        or _contiguous_scene_move(prev_scene, scene)
-                    )
-                    if not move_explained:
-                        errors.append(
-                            f"{tag} 从上一镜「{prev_scene}」切到「{scene}」但缺少承接说明；"
-                            "请在 narration 或 action_desc 写清时间跳跃、线索带入或人物为何来到新场景")
-                    if not _has_transition_visual(shot.transition, prev.last_frame_desc, prev.action_desc):
-                        errors.append(
-                            f"shots[{i - 1}](shot_no={prev.shot_no}).last_frame_desc 未体现进入镜{shot.shot_no:02d}的「{shot.transition}」转场收尾；"
-                            "请在上一镜尾帧写出可见转场视觉，例如渐暗/闪白/遮挡/甩镜模糊/叠化余韵/匹配构图呼应")
+                        f"{tag}.continuity_mode=action_continuation 但与上一镜没有共同角色或可见移动承接；"
+                        "动作连续必须保留上一镜核心人物，或在 action_desc/narration 写明入场、离场、跟随等移动线索")
+            elif mode in SAME_SCENE_CONTINUITY_MODES:
+                if not same_scene:
+                    errors.append(
+                        f"{tag}.continuity_mode={mode} 但 scene_setting 从「{prev_scene}」变为「{scene}」；"
+                        "同场景切换模式必须沿用同一时间地点")
+                if shot.transition != "硬切":
+                    errors.append(f"{tag}.transition=「{shot.transition}」，{mode} 必须使用「硬切」")
+                if shot.continuity_from_prev:
+                    errors.append(
+                        f"{tag}.continuity_from_prev=true 但 continuity_mode={mode}；"
+                        "只有 action_continuation 可以使用上一镜尾帧作为起始连续参考")
+            elif mode == "scene_change":
+                if shot.continuity_from_prev:
+                    errors.append(
+                        f"{tag}.continuity_from_prev=true 但 continuity_mode=scene_change；"
+                        "换场不得使用上一镜尾帧连续参考")
+                if shot.transition == "硬切":
+                    errors.append(
+                        f"{tag}.transition=硬切 但 continuity_mode=scene_change 且 scene_setting 从「{prev_scene}」切到「{scene}」；"
+                        f"跨时间/地点请用 {sorted(SCENE_CUT_TRANSITIONS)} 之一，并写清承接")
+                elif shot.transition not in SCENE_CUT_TRANSITIONS:
+                    errors.append(
+                        f"{tag}.transition=「{shot.transition}」不适合换场；"
+                        f"换场请用 {sorted(SCENE_CUT_TRANSITIONS)} 之一")
+                dialogue_text = "".join(d.line for d in shot.dialogues)
+                # 承接说明判定（放宽，杜绝高频误伤）：满足以下任一即视为已写清承接——
+                # ① 含时间/线索类承接词；② 动作/旁白写了人物移动；③ 同一片连续空间子区域移动。
+                move_explained = (
+                    _has_transition_hint(scene, shot.action_desc, shot.narration, dialogue_text)
+                    or _has_movement_cue(shot.action_desc, shot.narration)
+                    or _contiguous_scene_move(prev_scene, scene)
+                )
+                if not move_explained:
+                    errors.append(
+                        f"{tag} 从上一镜「{prev_scene}」切到「{scene}」但缺少承接说明；"
+                        "请在 narration 或 action_desc 写清时间跳跃、线索带入或人物为何来到新场景")
+                if not _has_transition_visual(shot.transition, prev.last_frame_desc, prev.action_desc):
+                    errors.append(
+                        f"shots[{i - 1}](shot_no={prev.shot_no}).last_frame_desc 未体现进入镜{shot.shot_no:02d}的「{shot.transition}」转场收尾；"
+                        "请在上一镜尾帧写出可见转场视觉，例如渐暗/闪白/遮挡/甩镜模糊/叠化余韵/匹配构图呼应")
         # V7 景别不三连
         prev_sizes.append(shot.shot_size)
         if len(prev_sizes) >= 3 and prev_sizes[-1] == prev_sizes[-2] == prev_sizes[-3]:
@@ -398,6 +439,7 @@ def validate_storyboard(
 
     # V12 场景必须落在场景图素材库内（库非空时；同时回填 shot.scene_name 供渲染期复用同一张场景图）
     errors.extend(validate_storyboard_scenes(board, bible))
+    errors.extend(state_chain_errors(board))
 
     return errors
 
@@ -818,7 +860,10 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
             )
     if len((script.emotional_curve or "").strip()) < 6:
         errors.append("emotional_curve 过短或缺失；请说明本集情绪推进")
-    if len((script.ending_hook or "").strip()) < 6:
+    ending_hook = (script.ending_hook or "").strip()
+    no_episode_hook_markers = {"无", "无钩子", "无集级钩子", "（无）"}
+    explicit_no_episode_hook = ending_hook in no_episode_hook_markers or ending_hook.startswith("无集级")
+    if len(ending_hook) < 6 and not explicit_no_episode_hook:
         errors.append("ending_hook 过短或缺失；请明确本集结尾钩子")
     if len((script.source_basis or "").strip()) < 12:
         errors.append("source_basis 过短或缺失；请概括本集原文依据与关键事件")
@@ -930,7 +975,33 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
             "（核心事件/反转/信息揭示）")
     if script.beats:
         errors.append("剧本台不再接受 beats 拍卡结构；请重新生成完整剧本")
-    return errors
+    event_ids: set[str] = set()
+    for i, event in enumerate(script.events or []):
+        tag = f"events[{i}]"
+        event_id = (event.event_id or "").strip()
+        if not event_id:
+            errors.append(f"{tag}.event_id 不能为空")
+        elif event_id in event_ids:
+            errors.append(f"{tag}.event_id=「{event_id}」重复；events.event_id 必须唯一")
+        else:
+            event_ids.add(event_id)
+        for field in ("state_in", "visible_change", "state_out"):
+            if len((getattr(event, field, "") or "").strip()) < 4:
+                errors.append(f"{tag}.{field} 缺失或过短；事件必须写清状态输入、可见变化和状态输出")
+    info_ids: set[str] = set()
+    for i, item in enumerate(script.information_ledger or []):
+        tag = f"information_ledger[{i}]"
+        info_id = (item.info_id or "").strip()
+        if not info_id:
+            errors.append(f"{tag}.info_id 不能为空")
+        elif info_id in info_ids:
+            errors.append(f"{tag}.info_id=「{info_id}」重复；information_ledger.info_id 必须唯一")
+        else:
+            info_ids.add(info_id)
+        if item.delivery_owner and item.delivery_owner not in DELIVERY_OWNERS:
+            errors.append(f"信息 {item.info_id} 的 delivery_owner={item.delivery_owner} 不合法")
+    errors.extend(adaptation_hook_errors(script))
+    return list(dict.fromkeys(errors))
 
 
 def _screenplay_sound_stats(script: EpisodeScreenplay) -> dict[str, int]:
@@ -955,7 +1026,8 @@ def validate_storyboard_soundtrack(board: Storyboard, screenplay: EpisodeScreenp
     """校验从完整剧本拆分出的分镜是否保留了可听见的剧情信息。
 
     通用 validate_storyboard 只管结构与画面可生成性；这里专门约束“剧本台已有台词/内心/旁白，
-    分镜台不能把它们压成纯画面卡”。错误会进入修复回路，让模型补齐声轨。
+    分镜台不能把它们压成纯画面卡”。反应镜头可仅保留环境声/氛围，不强制 75% 镜头都有口播。
+    错误会进入修复回路，让模型补齐关键声轨。
     """
     errors: list[str] = []
     shots = board.shots
@@ -967,16 +1039,7 @@ def validate_storyboard_soundtrack(board: Storyboard, screenplay: EpisodeScreenp
     if script_sound_cues == 0:
         return errors
 
-    # 整集不再由 target_duration_s 推导镜头数；声轨密度按实际分镜数量判断。
     expected_shots = max(1, len(shots))
-    voiced_count = _voiced_shot_count(shots)
-    min_voiced = min(len(shots), max(2, math.ceil(expected_shots * 0.75)))
-    if voiced_count < min_voiced:
-        errors.append(
-            f"分镜声轨过少：完整剧本含 {script_sound_cues} 处台词/内心OS/旁白/人群声音，"
-            f"但只有 {voiced_count}/{len(shots)} 个镜头写了 dialogues 或 narration；"
-            f"请至少让 {min_voiced} 个镜头保留可听见的剧情信息，避免生成纯画面哑剧")
-
     script_dialogue_targets = stats["dialogues"] + stats["quoted_voice"]
     if script_dialogue_targets >= 2:
         dialogue_count = sum(len(shot.dialogues) for shot in shots)
@@ -1157,29 +1220,37 @@ def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeS
         errors.append(
             f"大纲未安排 {len(missing_points)} 条必保留关键剧情点：{shown}{extra}；"
             "请把每个剧情点分配到对应镜头的 beat/covers，确保后段不漏戏")
+    errors.extend(outline_atomic_errors(outline))
     return errors
 
 
 # ---------- C2 基于完整剧本的分镜校验 ----------
 
 def normalize_continuity(board: Storyboard) -> None:
-    """continuity/transition 由场景标签代码推导覆盖（不依赖模型自觉，消除一整类返工）。"""
+    """保持旧调用入口；实际连续性归一化由 continuity 模块按 continuity_mode 执行。"""
     for i, shot in enumerate(board.shots):
-        if i == 0:
-            shot.continuity_from_prev = False
-            shot.transition = "硬切"
-            continue
-        same_scene = shot.scene_setting.strip() == board.shots[i - 1].scene_setting.strip()
-        shot.continuity_from_prev = same_scene
-        if same_scene:
-            shot.transition = "硬切"
-        elif shot.transition == "硬切":
-            shot.transition = default_scene_transition(board.shots[i - 1], shot)
+        prev = board.shots[i - 1] if i > 0 else None
+        sync_shot_continuity_fields(shot, prev)
+    normalize_board_continuity(board)
+
+
+def validate_storyboard_continuity_contract(
+    board: Storyboard,
+    screenplay: EpisodeScreenplay | None = None,
+) -> list[str]:
+    """PRD 连续性合同校验：状态链、信息台账、单镜动作/口播容量。"""
+    errors: list[str] = []
+    for shot in board.shots:
+        errors.extend(action_capacity_errors(shot))
+        errors.extend(speech_capacity_errors(shot))
+    errors.extend(state_chain_errors(board))
+    errors.extend(information_ledger_errors(board, screenplay))
+    return errors
 
 
 def spoken_char_count(shot) -> int:
     """本镜台词+旁白的纯发声字数（去空白），与单镜口播上限校验同口径。"""
-    return len(re.sub(r"\s+", "", _soundtrack_text(shot)))
+    return spoken_chars_from_shot(shot)
 
 
 def _narration_is_crowd_ambient(narration: str) -> bool:
