@@ -66,6 +66,25 @@ async def create_project(name: str = Form(...), file: UploadFile = File(...)):
     return respond_ui(result)
 
 
+@router.post("/projects/import")
+async def create_project_from_attachment(
+    attachment_token: str = Body(...),
+    name: str | None = Body(default=None),
+):
+    """用已上传的附件令牌导入小说，确保批准前后的命令参数保持不变。"""
+    from app.capabilities.dispatch import dispatch, respond_ui
+
+    result = await dispatch(
+        "project.import_novel",
+        {
+            "attachment_token": attachment_token,
+            "name": name,
+        },
+        initiator="ui",
+    )
+    return respond_ui(result)
+
+
 @router.get("/projects")
 def list_projects():
     conn = get_conn()

@@ -308,7 +308,7 @@ def _register_commands(registry) -> None:
             scopes={"manju:project-write"},
             side_effect="creates_project",
             handler=h_project.import_novel,
-            rest_routes=("POST /api/projects",),
+            rest_routes=("POST /api/projects", "POST /api/projects/import"),
             tags=("project",),
         ),
         _cmd(

@@ -49,7 +49,7 @@ def test_mutating_endpoints_fully_classified() -> None:
     assert report["mutating_routes"] >= 50
     assert report["missing"] == []
     routes = discover_mutating_routes()
-    assert "POST /api/projects" in routes
+    assert "POST /api/projects/import" in routes
     assert "PUT /api/keys" in routes
 
 

@@ -21,9 +21,12 @@ export default function Studio() {
     setUploading(true)
     try {
       const form = new FormData()
-      form.append('name', name || file.name.replace(/\.txt$/i, ''))
       form.append('file', file)
-      const res = await api.upload('/projects', form)
+      const attachment = await api.upload('/attachments/novel', form) as { attachment_token: string }
+      const res = await api.post('/projects/import', {
+        attachment_token: attachment.attachment_token,
+        name: name || file.name.replace(/\.txt$/i, ''),
+      })
       toast(`《${name || file.name}》已摄入：${res.ingestion.chapter_count} 章，${res.ingestion.total_chars} 字${res.ingestion.auto_split ? '（未识别到章节标题，已按字数切分）' : ''}`)
       setName('')
       setShowImport(false)
