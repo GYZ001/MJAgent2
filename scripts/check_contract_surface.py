@@ -45,7 +45,8 @@ FORBIDDEN = {
         "hiagent.chat", "_run_with_repair", "滚动摘要", "duration_s 全部为 10",
         "duration_s 固定为 5", "固定 5 秒视频分镜",
     ],
-    "app/auto.py": ["_states"],
+    # app/auto.py was removed in the slimdown; keep the legacy token listed only if the
+    # file reappears so CI fails when old auto-pipeline state machines return.
     "app/portraits.py": ["hiagent.chat"],
     "app/scenes.py": ["hiagent.chat"],
     "app/video_modes.py": ["hiagent.chat"],
@@ -59,11 +60,25 @@ FORBIDDEN = {
 def main() -> None:
     errors: list[str] = []
     for relative, tokens in REQUIRED.items():
-        text = (ROOT / relative).read_text(encoding="utf-8")
-        errors.extend(f"{relative}: missing required contract {token!r}" for token in tokens if token not in text)
+        path = ROOT / relative
+        if not path.exists():
+            errors.append(f"{relative}: required contract surface missing")
+            continue
+        text = path.read_text(encoding="utf-8")
+        errors.extend(
+            f"{relative}: missing required contract {token!r}"
+            for token in tokens if token not in text
+        )
     for relative, tokens in FORBIDDEN.items():
-        text = (ROOT / relative).read_text(encoding="utf-8")
-        errors.extend(f"{relative}: legacy contract found {token!r}" for token in tokens if token in text)
+        path = ROOT / relative
+        if not path.exists():
+            # Deleted modules cannot reintroduce forbidden legacy contracts.
+            continue
+        text = path.read_text(encoding="utf-8")
+        errors.extend(
+            f"{relative}: legacy contract found {token!r}"
+            for token in tokens if token in text
+        )
     if errors:
         raise SystemExit("Contract surface drift:\n- " + "\n- ".join(errors))
     print("Contract surface OK: one chapter/episode, model-selected 5-10s shots, AgentLoop-only text stages.")
