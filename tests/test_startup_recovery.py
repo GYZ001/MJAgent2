@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-from app import api, atomic_io, auto, db, planning, recovery, system_api, task_registry, worker
+from app import api, atomic_io, db, planning, recovery, system_api, task_registry, worker
 from app.evidence import repository
 from app.orchestration import api as orchestration_api
 
@@ -50,27 +50,6 @@ def _capture_spawn(monkeypatch):
     return spawned
 
 
-def test_auto_project_restart_creates_linked_resume_attempt(tmp_path, monkeypatch) -> None:
-    conn = _fresh_database(tmp_path, monkeypatch)
-    old_run = _paused_run("auto_project", "project", "p1")
-    spawned = _capture_spawn(monkeypatch)
-    monkeypatch.setattr(auto, "is_running", lambda _pid: False)
-
-    assert auto.recover_auto_tasks() == 1
-
-    child = conn.execute(
-        "SELECT id, parent_run_id, trigger_type FROM workflow_runs WHERE parent_run_id=?",
-        (old_run,),
-    ).fetchone()
-    parent = conn.execute(
-        "SELECT recovered_by_run_id, recovery_count FROM workflow_runs WHERE id=?",
-        (old_run,),
-    ).fetchone()
-    assert child["trigger_type"] == "resume"
-    assert dict(parent) == {"recovered_by_run_id": child["id"], "recovery_count": 1}
-    assert spawned == [("auto", "p1")]
-
-
 def test_character_reference_restart_preserves_target_and_parent(tmp_path, monkeypatch) -> None:
     conn = _fresh_database(tmp_path, monkeypatch)
     conn.execute(
@@ -78,7 +57,6 @@ def test_character_reference_restart_preserves_target_and_parent(tmp_path, monke
     )
     parent = _paused_run("character_references", "project", "p1")
     seen: list[dict] = []
-    monkeypatch.setattr(auto, "is_running", lambda _pid: False)
     monkeypatch.setattr(api, "_refs_task_active", lambda _pid: False)
     monkeypatch.setattr(
         api,
@@ -198,7 +176,6 @@ def test_unified_startup_recovery_runs_parent_before_all_child_adapters(monkeypa
     monkeypatch.setattr(worker, "recover_and_start", recover("worker_start", 0))
     monkeypatch.setattr(worker, "start_stale_lease_sweeper", recover("lease_sweeper", 0))
     monkeypatch.setattr(atomic_io, "cleanup_abandoned_parts", recover("partial_cleanup", 2))
-    monkeypatch.setattr(auto, "recover_auto_tasks", recover("auto_project"))
     monkeypatch.setattr(api, "recover_bible_tasks", recover("character_bible"))
     monkeypatch.setattr(api, "recover_character_ref_tasks", recover("character_references"))
     monkeypatch.setattr(api, "recover_scene_ref_tasks", recover("scene_references"))
@@ -210,12 +187,12 @@ def test_unified_startup_recovery_runs_parent_before_all_child_adapters(monkeypa
     report = asyncio.run(recovery.recover_all())
 
     assert calls == [
-        "media", "partial_cleanup", "worker_start", "lease_sweeper", "auto_project",
-        "character_bible", "character_references", "scene_references", "episode_mapping",
+        "media", "partial_cleanup", "worker_start", "lease_sweeper", "character_bible",
+        "character_references", "scene_references", "episode_mapping",
         "screenplay", "storyboard", "delivery",
     ]
     assert report == {
-        "media": 1, "abandoned_partial_files_removed": 2, "auto_project": 1,
-        "character_bible": 1, "character_references": 1, "scene_references": 1,
+        "media": 1, "abandoned_partial_files_removed": 2, "character_bible": 1,
+        "character_references": 1, "scene_references": 1,
         "episode_mapping": 1, "screenplay": 1, "storyboard": 1, "delivery": 1,
     }

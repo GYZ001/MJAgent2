@@ -13,10 +13,8 @@ from app.orchestration.state_machine import transition_run
 def _retry_can_pause_run(run_id: str, step_run_id: str | None, stage_key: str | None) -> bool:
     """Only pause a run when the traced step exclusively owns this stage.
 
-    An ``auto_project`` run executes several episode pipelines concurrently under
-    one parent step. Pausing that shared run for one throttled request would race
-    with its healthy siblings. Dedicated storyboard/screenplay runs have a step
-    key matching the model stage and can safely expose ``WAITING_RETRY``.
+    Dedicated storyboard/screenplay runs have a step key matching the model
+    stage and can safely expose ``WAITING_RETRY``.
     """
     if not step_run_id or not stage_key:
         return False

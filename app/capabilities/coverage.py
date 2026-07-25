@@ -151,7 +151,7 @@ def validate_catalog_integrity() -> list[str]:
             errors.append(f"{name}: human-only requires reason")
 
     required_tools = {
-        "project.import_novel", "project.delete", "production.auto_start", "production.auto_cancel",
+        "project.import_novel", "project.delete",
         "bible.generate", "bible.update", "bible.cancel",
         "portrait.update_prompt", "portrait.generate", "portrait.cancel",
         "scene.generate_bible", "scene.generate_refs", "scene.update_prompt", "scene.cancel_refs",

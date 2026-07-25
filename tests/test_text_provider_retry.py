@@ -106,7 +106,7 @@ def test_shared_auto_run_records_retry_without_pausing_siblings(tmp_path, monkey
     states_while_waiting: list[str] = []
 
     recorder = WorkflowRecorder.create(
-        workflow_type="auto_project",
+        workflow_type="storyboard",
         scope_type="project",
         scope_id="p1",
         input_fingerprint="concurrent-episodes",

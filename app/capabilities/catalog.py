@@ -2,7 +2,7 @@
 
 M2+M3：每个 CommandSpec 挂载真实领域 Handler（见 ``app.capabilities.handlers``），
 Handler 只调用现有 ``app.api`` / ``app.planning`` / ``app.orchestration.*`` /
-``app.delivery`` / ``app.worker`` / ``app.system_api`` / ``app.auto`` 函数，
+``app.delivery`` / ``app.worker`` / ``app.system_api`` 函数，
 禁止用 httpx 反向回调本机 REST。
 """
 from __future__ import annotations
@@ -296,7 +296,7 @@ def _register_human_only(registry) -> None:
 
 def _register_commands(registry) -> None:
     commands = [
-        # —— 项目 / 全自动 ——
+        # —— 项目 ——
         _cmd(
             "project.import_novel",
             title="导入小说",
@@ -324,35 +324,6 @@ def _register_commands(registry) -> None:
             handler=h_project.delete_project,
             rest_routes=("DELETE /api/projects/{project_id}",),
             tags=("project",),
-        ),
-        _cmd(
-            "production.auto_start",
-            title="一键全自动成片",
-            description="启动项目级自动制作流水线",
-            input_model=I.ProductionAutoStartInput,
-            risk=RiskLevel.R2_MATERIAL,
-            confirmation=ConfirmationPolicy.ALWAYS,
-            idempotency=IdempotencyPolicy.REQUIRED,
-            scopes={"manju:generation-text", "manju:generation-media", "manju:project-write"},
-            side_effect="creates_run_and_paid_work",
-            handler=h_project.auto_start,
-            rest_routes=("POST /api/projects/{project_id}/auto",),
-            supports_cancel=True,
-            tags=("production",),
-        ),
-        _cmd(
-            "production.auto_cancel",
-            title="停止一键全自动",
-            description="取消自动成片；已入队镜头可能仍继续",
-            input_model=I.ProjectScopedInput,
-            risk=RiskLevel.R1_REVERSIBLE,
-            confirmation=ConfirmationPolicy.NEVER,
-            idempotency=IdempotencyPolicy.RECOMMENDED,
-            scopes={"manju:project-write"},
-            side_effect="cancels_auto_pipeline",
-            handler=h_project.auto_cancel,
-            rest_routes=("POST /api/projects/{project_id}/auto/cancel",),
-            tags=("production",),
         ),
         # —— 人物谱 / 定妆 ——
         _cmd(
@@ -868,21 +839,6 @@ def _register_commands(registry) -> None:
                 "POST /api/runs/{run_id}/resume",
                 "POST /api/runs/{run_id}/retry",
             ),
-            tags=("run",),
-        ),
-        _cmd(
-            "run.create",
-            title="创建 Workflow Run",
-            description="创建通用 Workflow Run（低层入口，优先用领域命令）",
-            input_model=I.BenchmarkRunInput,  # 复用宽松 payload；M1 会拆专用模型
-            risk=RiskLevel.R2_MATERIAL,
-            confirmation=ConfirmationPolicy.ALWAYS,
-            idempotency=IdempotencyPolicy.REQUIRED,
-            scopes={"manju:project-write"},
-            side_effect="creates_run",
-            handler=h_run.create,
-            rest_routes=("POST /api/runs",),
-            mcp_exposed=False,
             tags=("run",),
         ),
         _cmd(

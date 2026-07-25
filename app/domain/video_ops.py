@@ -12,7 +12,7 @@ except NameError:  # pragma: no cover - direct module import
 
 def confirm_episode_core(episode_id: str) -> dict:
     """人工确认门（PRD P3）的纯逻辑：全量业务校验通过才进入 confirmed。
-    失败抛 ValueError（消息面向 UI）；供路由与一键全自动复用，避免逻辑分叉。"""
+    失败抛 ValueError（消息面向 UI）；供路由复用，避免逻辑分叉。"""
     ep = _episode_or_404(episode_id)
     conn = get_conn()
     compact_target = _compact_episode_target(ep["target_duration_s"])

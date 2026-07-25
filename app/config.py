@@ -180,7 +180,6 @@ DEFAULT_SETTINGS = {
     "video_reference_consistency_check": "true",       # Phase 2：整组参考图相对一致性检查 Agent（点名漂移图并 i2i 重生/剔除）
     "video_reference_consistency_threshold": "0.7",    # 候选参考图与锚点（定妆照/上镜尾帧）的一致性达标线，低于则判漂移
     "video_reference_consistency_retries": "1",        # 漂移图从锚点 i2i 重生的最大次数；仍漂移则剔除（不喂 Seedance）
-    "auto_storyboard_concurrency": "8", # 一键全自动：同时进行的分镜 LLM 数（各集流水线并行，分镜阶段单独限流）
     "provider_call_retention_days": "30",
     "error_log_retention_days": "30",
     "agent_enabled": "true",            # 内嵌对话 Agent 总开关（API 入口会检查）

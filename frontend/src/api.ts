@@ -16,6 +16,7 @@ const APPROVAL_HEADER = 'X-Manju-Approval-Token'
 
 let sessionToken: string | null = null
 let sessionReady: Promise<void> | null = null
+const inflightGets = new Map<string, Promise<any>>()
 
 async function ensureSession(): Promise<void> {
   if (sessionToken) return
@@ -101,11 +102,26 @@ async function request(
   return handle(resp)
 }
 
+function get(path: string): Promise<any> {
+  const active = inflightGets.get(path)
+  if (active) return active
+  const pending = request('GET', path)
+    .finally(() => {
+      if (inflightGets.get(path) === pending) inflightGets.delete(path)
+    })
+  inflightGets.set(path, pending)
+  return pending
+}
+
+function mutate(method: 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown) {
+  return request(method, path, body)
+}
+
 export const api = {
-  get: (path: string) => request('GET', path),
-  post: (path: string, body?: unknown) => request('POST', path, body),
-  put: (path: string, body: unknown) => request('PUT', path, body),
-  del: (path: string) => request('DELETE', path),
+  get,
+  post: (path: string, body?: unknown) => mutate('POST', path, body),
+  put: (path: string, body: unknown) => mutate('PUT', path, body),
+  del: (path: string) => mutate('DELETE', path),
   upload: (path: string, form: FormData) => request('POST', path, undefined, { form }),
 
   /* ── 便捷方法 ── */
@@ -347,6 +363,7 @@ export interface Shot {
   narration: string | null; dialogues: Dialogue[]; transition: string
   continuity_from_prev: number; adopted_version_id: string | null
   est_cost_cny: number; versions: ShotVersion[]
+  version_count?: number
   video_stale: boolean
   storyboard_artifact_id?: string | null
   storyboard_evidence?: ArtifactEvidence | null
@@ -359,6 +376,7 @@ export interface Episode {
   status: string; script_error?: string; storyboard_warning?: string | null; cost_cny: number; cost_limit_cny?: number
   screenplay_status: string; screenplay_error?: string | null; screenplay_beats?: number; screenplay_mode?: string
   screenplay?: EpisodeScreenplay | null
+  shot_count?: number
   screenplay_artifact_id?: string | null
   screenplay_evidence?: ArtifactEvidence | null
   shots?: Shot[]
@@ -481,34 +499,17 @@ export interface Project {
   bible?: Bible | null; key_timeline?: string[]
   chapters?: { idx: number; title: string; char_count: number; preview?: string }[]
   episodes?: Episode[]
+  episodes_total?: number; episodes_page?: number; episodes_page_count?: number
+  episodes_query?: string; episodes_status_filter?: string
+  episodes_busy?: boolean; first_chapter_idx?: number | null
+  episode_counts?: {
+    total: number; done: number; screenplay_running: number; scripting: number
+    screenplay_todo: number; storyboard_ready: number
+  }
   chapter_count?: number; episode_count?: number
   bible_artifact_id?: string | null
   bible_evidence?: ArtifactEvidence | null
   harness_engine_enabled?: number | boolean
-}
-
-interface AutoProgress {
-  bible?: string; refs?: string; plan?: string
-  episodes_total?: number; episodes_done?: number
-  screenplays_ready?: number
-  shots_total?: number; shots_video?: number
-}
-export interface AutoStatus {
-  running: boolean
-  phase?: string | null
-  error?: string | null
-  log?: { t: number; msg: string }[]
-  started_at?: number | null
-  updated_at?: number | null
-  export_dir?: string | null
-  progress?: AutoProgress
-}
-
-export interface BrowseResult {
-  path: string
-  parent: string | null
-  drives: string[]
-  dirs: { name: string; path: string }[]
 }
 
 export const numToCn = (n: number): string => {

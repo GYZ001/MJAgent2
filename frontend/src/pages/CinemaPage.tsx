@@ -6,7 +6,7 @@ import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 
 export default function CinemaPage() {
   const { episodeId, toast } = useNav()
-  const { data: ep, error, loading } = useEpisode(episodeId!)
+  const { data: ep, error, loading } = useEpisode(episodeId!, 'cinema')
   const [mix, setMix] = useState<MixStatus | null>(null)
   const [mixBusy, setMixBusy] = useState(false)
   const [deliveryBusy, setDeliveryBusy] = useState(false)
@@ -185,7 +185,7 @@ export default function CinemaPage() {
                 {mix.final_video_url && <span className="stamp green">最新合成版</span>}
               </div>
               {mix.final_video_url ? (
-                <video src={mix.final_video_url} controls playsInline />
+                <video src={mix.final_video_url} controls playsInline preload="metadata" />
               ) : (
                 <div className="cinema-preview-empty">
                   <span>▶</span>

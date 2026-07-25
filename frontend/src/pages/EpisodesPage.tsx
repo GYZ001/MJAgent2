@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
-import { api, numToCn } from '../api'
-import { useNav, useProject } from '../App'
+import { useDeferredValue, useEffect, useRef, useState } from 'react'
+import { api, numToCn, type Project } from '../api'
+import { useNav, usePoll } from '../App'
 import { EpStamp } from './BiblePage'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 import SearchField from '../components/SearchField'
@@ -22,31 +22,38 @@ const PAGE_SIZE = 15
 
 export default function EpisodesPage() {
   const { projectId, go, toast } = useNav()
-  const { data: p, refresh, error, loading } = useProject(projectId!)
   const [busy, setBusy] = useState(false)
   const [page, setPage] = useState(0)
   const [pageDraft, setPageDraft] = useState('1')
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('all')
+  const deferredSearch = useDeferredValue(search)
+  const query = deferredSearch.trim().toLowerCase()
+  const { data: p, refresh, error, loading } = usePoll<Project>(
+    () => api.get(
+      `/projects/${projectId}?view=episodes&page=${page + 1}&page_size=${PAGE_SIZE}`
+      + `&query=${encodeURIComponent(query)}&status_filter=${encodeURIComponent(statusFilter)}`,
+    ),
+    (project) => project?.episodes_busy ? 3000 : 0,
+    [projectId, page, query, statusFilter],
+  )
   const pageInputFocused = useRef(false)
-  const eps = p?.episodes ?? []
-  const screenplayTodoCount = eps.filter(e => ['pending', 'failed', 'warning'].includes(e.screenplay_status) || !e.screenplay_mode || e.screenplay_mode === 'none').length
-  const screenplayRunningCount = eps.filter(e => e.screenplay_status === 'running').length
-  const storyboardReadyCount = eps.filter(e => e.screenplay_status === 'ready' && ['planned', 'script_failed'].includes(e.status)).length
-  const scriptingCount = eps.filter(e => e.status === 'scripting').length
+  const responseMatches = p?.episodes_page === page + 1
+    && p?.episodes_query === query
+    && p?.episodes_status_filter === statusFilter
+  const eps = responseMatches ? (p?.episodes ?? []) : []
+  const counts = p?.episode_counts
+  const totalEpisodes = counts?.total ?? p?.episodes_total ?? eps.length
+  const screenplayTodoCount = counts?.screenplay_todo ?? eps.filter(e => ['pending', 'failed', 'warning'].includes(e.screenplay_status) || !e.screenplay_mode || e.screenplay_mode === 'none').length
+  const screenplayRunningCount = counts?.screenplay_running ?? eps.filter(e => e.screenplay_status === 'running').length
+  const storyboardReadyCount = counts?.storyboard_ready ?? eps.filter(e => e.screenplay_status === 'ready' && ['planned', 'script_failed'].includes(e.status)).length
+  const scriptingCount = counts?.scripting ?? eps.filter(e => e.status === 'scripting').length
   const planTimer = useTaskTimer(`project.${projectId}.plan`, p?.plan_status === 'running')
   const screenplayAllTimer = useTaskTimer(`project.${projectId}.screenplay-all`, screenplayRunningCount > 0)
   const storyboardAllTimer = useTaskTimer(`project.${projectId}.storyboard-all`, scriptingCount > 0)
-  const query = search.trim().toLowerCase()
-  const filteredEps = eps.filter(ep => {
-    if (query && !`${ep.episode_no} ${ep.title} ${ep.source_chapters.join(' ')}`.toLowerCase().includes(query)) return false
-    if (statusFilter === 'running') return ep.screenplay_status === 'running' || ep.status === 'scripting' || ep.status === 'generating'
-    if (statusFilter === 'failed') return ep.screenplay_status === 'failed' || ep.screenplay_status === 'warning' || ep.status.includes('failed') || !!ep.screenplay_error
-    if (statusFilter === 'done') return ep.status === 'done'
-    if (statusFilter === 'pending') return ep.screenplay_status === 'pending' || ['planned', 'drafting'].includes(ep.status)
-    return true
-  })
-  const pageCount = Math.max(1, Math.ceil(filteredEps.length / PAGE_SIZE))
+  const filteredEps = eps
+  const filteredTotal = p?.episodes_total ?? eps.length
+  const pageCount = p?.episodes_page_count ?? 1
   const curPage = Math.min(page, pageCount - 1)
 
   useEffect(() => {
@@ -77,7 +84,7 @@ export default function EpisodesPage() {
 
   // 分页（每页 10 集）+ 章节预览映射（按源章号取该章前 100 字）
   const chapterPreview = new Map((p.chapters ?? []).map(c => [c.idx, c.preview ?? '']))
-  const pageEps = filteredEps.slice(curPage * PAGE_SIZE, curPage * PAGE_SIZE + PAGE_SIZE)
+  const pageEps = filteredEps
 
   const jumpToPage = () => {
     const raw = Number.parseInt(pageDraft.trim(), 10)
@@ -92,7 +99,7 @@ export default function EpisodesPage() {
   }
 
   const replan = () => {
-    if (eps.length && !window.confirm('重新分集会清空本项目当前所有剧集（含已生成的分镜与视频），用全新方案替换。确定继续？')) return
+    if (totalEpisodes && !window.confirm('重新分集会清空本项目当前所有剧集（含已生成的分镜与视频），用全新方案替换。确定继续？')) return
     planTimer.start()
     act(() => api.post(`/projects/${p.id}/plan`))
   }
@@ -101,16 +108,16 @@ export default function EpisodesPage() {
     <>
       <header className="desk-head">
         <div className="crumb">书房 / 《{p.name}》</div>
-        <h1>分集规划 <span className="sub">{p.chapters?.length} 章 · {eps.length} 集 · 追踪每集从剧本到成片的制作状态</span></h1>
         <PrepSubnav current="episodes" />
+        <h1>分集规划 <span className="sub">{p.chapter_count ?? 0} 章 · {totalEpisodes} 集 · 追踪每集从剧本到成片的制作状态</span></h1>
         <hr className="rule" />
       </header>
 
       <section className="episode-overview">
-        <div><span>全部分集</span><b>{eps.length}</b><small>每章一集</small></div>
+        <div><span>全部分集</span><b>{totalEpisodes}</b><small>每章一集</small></div>
         <div><span>待写剧本</span><b>{screenplayTodoCount}</b><small>可批量生成</small></div>
         <div><span>制作进行中</span><b>{screenplayRunningCount + scriptingCount}</b><small>剧本 / 分镜</small></div>
-        <div><span>已成片</span><b>{eps.filter(ep => ep.status === 'done').length}</b><small>可进入交付</small></div>
+        <div><span>已成片</span><b>{counts?.done ?? eps.filter(ep => ep.status === 'done').length}</b><small>可进入交付</small></div>
       </section>
 
       <section className="card episode-workspace">
@@ -120,15 +127,15 @@ export default function EpisodesPage() {
             <option value="all">全部状态</option><option value="pending">待制作</option><option value="running">进行中</option>
             <option value="failed">需要处理</option><option value="done">已成片</option>
           </select>
-          <button className="btn" disabled={!p.chapters?.length} onClick={() => go('reader', p.id, undefined, p.chapters?.[0]?.idx ?? 1)}>阅读原著</button>
+          <button className="btn" disabled={!p.chapter_count} onClick={() => go('reader', p.id, undefined, p.first_chapter_idx ?? 1)}>阅读原著</button>
           <details className="batch-actions">
             <summary className="btn primary">批量操作</summary>
             <div className="batch-actions-menu">
               <b>批量制作</b><span>操作前会再次确认影响范围</span>
-              <button className="btn" disabled={busy || p.plan_status === 'running'} onClick={replan}>{eps.length ? '重新分集' : '开始分集'}</button>
+              <button className="btn" disabled={busy || p.plan_status === 'running'} onClick={replan}>{totalEpisodes ? '重新分集' : '开始分集'}</button>
               <button className="btn" disabled={busy || p.plan_status === 'running' || screenplayTodoCount === 0}
                 onClick={() => act(async () => {
-                  const needsConfirm = eps.some(e => ['scripted', 'confirmed', 'generating', 'done'].includes(e.status))
+                  const needsConfirm = totalEpisodes > screenplayTodoCount
                   if (needsConfirm && !window.confirm(`将为 ${screenplayTodoCount} 集生成剧本，可能使对应下游素材失效。确定继续？`)) return
                   screenplayAllTimer.start()
                   const r = await api.post(`/projects/${p.id}/screenplay-all`) as { started: number }
@@ -157,7 +164,7 @@ export default function EpisodesPage() {
         </div>
         {p.plan_status === 'failed' && <div className="error-banner">分集失败：{'\n'}{p.plan_error}</div>}
 
-        <div className="episode-list-head"><span>分集与章节</span><span>{query || statusFilter !== 'all' ? `找到 ${filteredEps.length} 集` : `共 ${eps.length} 集`}</span></div>
+        <div className="episode-list-head"><span>分集与章节</span><span>{query || statusFilter !== 'all' ? `找到 ${filteredTotal} 集` : `共 ${totalEpisodes} 集`}</span></div>
 
         {pageEps.map(ep => {
           const firstCh = ep.source_chapters[0]
@@ -204,7 +211,7 @@ export default function EpisodesPage() {
         {pageCount > 1 && (
           <div style={{ display: 'flex', gap: 10, alignItems: 'center', justifyContent: 'center', marginTop: 14, flexWrap: 'wrap' }}>
             <button className="btn small" disabled={curPage <= 0} onClick={() => setPage(curPage - 1)}>← 上一页</button>
-            <span style={{ fontSize: 13, color: 'var(--ink-faint)' }}>第 {curPage + 1} / {pageCount} 页 · 共 {filteredEps.length} 集</span>
+            <span style={{ fontSize: 13, color: 'var(--ink-faint)' }}>第 {curPage + 1} / {pageCount} 页 · 共 {filteredTotal} 集</span>
             <button className="btn small" disabled={curPage >= pageCount - 1} onClick={() => setPage(curPage + 1)}>下一页 →</button>
             <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--ink-faint)' }}>
               跳至

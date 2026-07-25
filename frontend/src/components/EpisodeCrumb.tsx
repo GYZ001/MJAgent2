@@ -13,7 +13,7 @@ const episodeLabel = (episodeNo: number, title: string) => `第${numToCn(episode
 
 export default function EpisodeCrumb({ label, view, episodeNo }: EpisodeCrumbProps) {
   const { projectId, episodeId, go } = useNav()
-  const { data: project } = useProject(projectId!, 0)
+  const { data: project } = useProject(projectId!, 0, 'picker')
   const episodes = project?.episodes ?? []
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')

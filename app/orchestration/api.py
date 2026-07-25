@@ -16,27 +16,6 @@ from app.orchestration.engine import WorkflowRecorder, fingerprint
 router = APIRouter(prefix="/api")
 
 
-@router.post("/runs")
-async def create_run(body: dict = Body(...)):
-    from app.capabilities.dispatch import ui_route
-    routed = await ui_route("run.create", {"payload": body})
-    if routed is not None:
-        return routed
-    workflow_type = str(body.get("workflow_type") or "").strip()
-    scope_type = str(body.get("scope_type") or "project").strip()
-    scope_id = str(body.get("scope_id") or "").strip()
-    if workflow_type != "auto_project" or scope_type != "project" or not scope_id:
-        raise HTTPException(400, "Phase 1 仅支持 workflow_type=auto_project 的项目级运行")
-    if not get_conn().execute("SELECT 1 FROM projects WHERE id=?", (scope_id,)).fetchone():
-        raise HTTPException(404, "项目不存在")
-    from app import auto
-
-    if auto.is_running(scope_id):
-        raise HTTPException(409, "该项目已有自动流水线在运行")
-    run_id = auto.start(scope_id, export_dir=body.get("export_dir"), requested_by="api")
-    return repository.get_run(run_id)
-
-
 @router.get("/runs")
 def list_runs(
     active: bool | None = Query(default=None),
@@ -87,18 +66,6 @@ async def cancel_run(run_id: str):
         raise HTTPException(404, "运行不存在")
     if run["status"] not in repository.ACTIVE_RUN_STATUSES:
         raise HTTPException(409, "运行已结束，不能取消")
-    if run["workflow_type"] == "auto_project":
-        from app import auto
-
-        current = auto.status(run["scope_id"])
-        if current["running"] and current["run_id"] != run_id:
-            raise HTTPException(409, "该项目已有另一条运行，不能用旧 Run 取消它")
-        if current["running"]:
-            cancelled = await auto.cancel(run["scope_id"])
-        else:
-            WorkflowRecorder(run_id).cancel("已取消暂停中的运行")
-            cancelled = True
-        return {"cancelled": cancelled, "run": repository.get_run(run_id)}
     if run["workflow_type"] == "screenplay":
         cancelled = await task_registry.cancel_and_wait("screenplay", run["scope_id"])
         if not cancelled:
@@ -117,25 +84,6 @@ async def cancel_run(run_id: str):
         await task_registry.cancel_and_wait("run", run_id)
         return {"cancelled": True, "run": repository.get_run(run_id)}
     raise HTTPException(409, "运行没有可取消的进程内任务")
-
-
-def _restart_auto_run(run_id: str, trigger_type: str):
-    run = repository.get_run(run_id)
-    if not run:
-        raise HTTPException(404, "运行不存在")
-    if run["workflow_type"] != "auto_project" or run["scope_type"] != "project":
-        raise HTTPException(400, "Phase 1 仅支持恢复项目自动流水线")
-    from app import auto
-
-    if auto.is_running(run["scope_id"]):
-        raise HTTPException(409, "该项目已有自动流水线在运行")
-    new_run_id = auto.start(
-        run["scope_id"],
-        requested_by="api",
-        trigger_type=trigger_type,
-        parent_run_id=run_id,
-    )
-    return repository.get_run(new_run_id)
 
 
 def _restart_screenplay_run(run_id: str, trigger_type: str):
@@ -233,8 +181,6 @@ def _restart_run(run_id: str, trigger_type: str):
     run = repository.get_run(run_id)
     if not run:
         raise HTTPException(404, "运行不存在")
-    if run["workflow_type"] == "auto_project":
-        return _restart_auto_run(run_id, trigger_type)
     if run["workflow_type"] == "screenplay":
         return _restart_screenplay_run(run_id, trigger_type)
     if run["workflow_type"] == "storyboard":

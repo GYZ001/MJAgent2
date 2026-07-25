@@ -73,6 +73,10 @@ class ReferenceImageAsset:
 
     def public_dict(self) -> dict[str, Any]:
         data = asdict(self)
+        # data URL 只用于当次供应商调用。图片已经落盘后，持久化路径即可；
+        # 把 base64 写进 shot_versions.image_inputs 会令每次重抽成倍膨胀数据库。
+        if data.get("path"):
+            data.pop("url", None)
         return data
 
 

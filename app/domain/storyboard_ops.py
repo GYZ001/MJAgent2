@@ -461,9 +461,6 @@ def recover_storyboard_tasks() -> int:
     ).fetchall()
     resumed = 0
     for row in rows:
-        from app import auto
-        if auto.is_running(row["project_id"]):
-            continue
         if not task_registry.active("storyboard", row["id"]):
             parent = conn.execute(
                 "SELECT id FROM workflow_runs WHERE workflow_type='storyboard' "
@@ -758,16 +755,95 @@ async def _ensure_shot_mode_plan(conn, shot_id: str, *, force: bool = False) -> 
     conn.commit()
 
 
+_MAX_PUBLIC_IMAGE_INPUT_CHARS = 1_000_000
+
+
+def _public_shot_versions(conn, shot_id: str, *, include_inputs: bool) -> list[dict]:
+    if include_inputs:
+        rows = conn.execute(
+            """SELECT id, shot_id, version_no, prompt_text, status, error,
+                      video_path, qa_json, cost_cny, latency_s, artifact_id,
+                      adoption_reason, technical_validation_json, created_at,
+                      provider_task_id,
+                      CASE WHEN length(image_inputs) <= ? THEN image_inputs END AS image_inputs,
+                      CASE WHEN length(image_inputs) > ? THEN 1 ELSE 0 END AS image_inputs_omitted
+               FROM shot_versions WHERE shot_id=? ORDER BY version_no DESC""",
+            (_MAX_PUBLIC_IMAGE_INPUT_CHARS, _MAX_PUBLIC_IMAGE_INPUT_CHARS, shot_id),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT id, shot_id, version_no, '' AS prompt_text, status, error,
+                      video_path, qa_json, cost_cny, latency_s, artifact_id,
+                      adoption_reason, technical_validation_json, created_at,
+                      provider_task_id, NULL AS image_inputs
+               FROM shot_versions WHERE shot_id=? ORDER BY version_no DESC""",
+            (shot_id,),
+        ).fetchall()
+    versions = rows_to_dicts(rows)
+    from app.config import PROJECTS_DIR
+    for version in versions:
+        version["qa"] = json.loads(version["qa_json"]) if version["qa_json"] else None
+        version.pop("qa_json", None)
+        meta = json.loads(version.get("image_inputs") or "{}") if include_inputs else {}
+        inputs_omitted = bool(version.pop("image_inputs_omitted", 0))
+        refs = [
+            _public_reference_image(ref)
+            for ref in (meta.get("reference_images") or [])
+            if isinstance(ref, dict)
+        ]
+        version["image_inputs"] = {
+            "first_frame_used": bool(meta.get("first_frame_used")),
+            "first_frame_src": meta.get("first_frame_src"),
+            "first_frame_scene_id": meta.get("first_frame_scene_id"),
+            "first_frame_image_url": _media_url(meta.get("first_frame_path")),
+            "last_frame_used": bool(meta.get("last_frame_used")),
+            "last_frame_src": meta.get("last_frame_src"),
+            "last_frame_scene_id": meta.get("last_frame_scene_id"),
+            "last_frame_image_url": _media_url(meta.get("last_frame_path")),
+            "mode": meta.get("mode"),
+            "mode_decision": meta.get("mode_decision"),
+            "reference_image_used": bool(meta.get("reference_image_used")),
+            "reference_images": refs,
+            "reference_failure_logs": [
+                _public_failure_log(item)
+                for item in (meta.get("reference_failure_logs") or [])
+                if isinstance(item, dict)
+            ],
+            "fallback_reason": meta.get("fallback_reason"),
+            "retry_reason": meta.get("retry_reason"),
+            "omitted_for_size": inputs_omitted,
+        }
+        if version.get("video_path"):
+            try:
+                rel_path = Path(version["video_path"]).relative_to(PROJECTS_DIR).as_posix()
+                version["video_url"] = f"/media/{rel_path}"
+            except ValueError:
+                version["video_url"] = None
+    return versions
+
+
 @router.get("/episodes/{episode_id}")
-def episode_detail(episode_id: str):
+def episode_detail(episode_id: str, view: str | None = None):
+    """Return episode data shaped for the requesting workspace.
+
+    The legacy/default response remains complete for MCP and API consumers.
+    UI workspaces opt into a narrow view so screenplay, storyboard, and cinema
+    pages never touch historical media JSON.
+    """
+    if view not in (None, "script", "board", "wall", "cinema"):
+        raise HTTPException(400, f"未知分集视图：{view}")
+    full = view is None
     ep = dict(_episode_or_404(episode_id))
     conn = get_conn()
     ep["source_chapters"] = json.loads(ep["source_chapters"] or "[]")
-    script = _load_screenplay(ep)
-    ep["screenplay"] = script.model_dump() if script else None
+    script = _load_screenplay(ep) if full or view in ("script", "board") else None
+    ep["screenplay"] = script.model_dump() if script and (full or view == "script") else None
     ep["screenplay_mode"] = _screenplay_mode(script)
     artifact_id = ep.get("screenplay_artifact_id")
-    artifact = evidence_repository.get_artifact(artifact_id) if artifact_id else None
+    artifact = (
+        evidence_repository.get_artifact(artifact_id)
+        if artifact_id and (full or view == "script") else None
+    )
     if artifact:
         artifact.pop("content_json", None)
         artifact.pop("content", None)
@@ -776,7 +852,7 @@ def episode_detail(episode_id: str):
     storyboard_artifact_id = ep.get("storyboard_artifact_id")
     storyboard_artifact = (
         evidence_repository.get_artifact(storyboard_artifact_id)
-        if storyboard_artifact_id else None
+        if storyboard_artifact_id and (full or view == "board") else None
     )
     if storyboard_artifact:
         storyboard_artifact.pop("content_json", None)
@@ -787,25 +863,53 @@ def episode_detail(episode_id: str):
     ep["storyboard_evidence"] = storyboard_artifact
     ep.pop("screenplay_json", None)
     # 分镜大纲（先规划后逐镜填充）：透出给前端做 已通过 k / 计划 N 镜 的进度展示
-    try:
-        outline = json.loads(ep.get("storyboard_outline_json") or "null")
-    except (TypeError, ValueError):
-        outline = None
+    outline = None
+    if full or view == "board":
+        try:
+            outline = json.loads(ep.get("storyboard_outline_json") or "null")
+        except (TypeError, ValueError):
+            outline = None
     ep.pop("storyboard_outline_json", None)
     ep["storyboard_outline"] = outline
     ep["storyboard_planned_shots"] = len(outline["shots"]) if outline and outline.get("shots") else None
+    shot_count = int(conn.execute(
+        "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)
+    ).fetchone()["c"])
+    ep["shot_count"] = shot_count
+    if view in ("script", "cinema"):
+        ep["shots"] = []
+        ep["pipeline_summary"] = None
+        return ep
+
     shot_rows = conn.execute(
         "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)).fetchall()
     # 预估只按模型选择的实际分镜时长累计；单集不设总时长产品上限。
     ep["cost_cny"] = worker.episode_cost(episode_id)
     ep["cost_limit_cny"] = float(get_setting("episode_cost_limit_cny") or 100)
     shots = rows_to_dicts(shot_rows)
-    from app.config import PROJECTS_DIR
+    version_counts = {}
+    if view == "board" and shots:
+        count_rows = conn.execute(
+            """SELECT v.shot_id, COUNT(*) AS version_count
+               FROM shot_versions v
+               JOIN shots s ON s.id=v.shot_id
+               WHERE s.episode_id=? GROUP BY v.shot_id""",
+            (episode_id,),
+        ).fetchall()
+        version_counts = {row["shot_id"]: int(row["version_count"]) for row in count_rows}
+    pipeline_statuses = {}
+    pipeline_summary = None
+    if full or view == "wall":
+        try:
+            from app.media_pipeline.status import episode_pipeline_statuses
+            pipeline_statuses, pipeline_summary = episode_pipeline_statuses(episode_id, conn=conn)
+        except Exception:  # noqa: BLE001
+            pipeline_statuses, pipeline_summary = {}, None
     for s in shots:
         s["characters"] = json.loads(s["characters"] or "[]")
         s["dialogues"] = json.loads(s["dialogues"] or "[]")
         s["est_cost_cny"] = shot_cost_cny(s["duration_s"])
-        if s.get("storyboard_artifact_id"):
+        if s.get("storyboard_artifact_id") and (full or view == "board"):
             shot_artifact = evidence_repository.get_artifact(s["storyboard_artifact_id"])
             if shot_artifact:
                 shot_artifact.pop("content_json", None)
@@ -827,46 +931,47 @@ def episode_detail(episode_id: str):
         ):
             s.pop(legacy_key, None)
         s["video_stale"] = False
-        versions = rows_to_dicts(conn.execute(
-            "SELECT * FROM shot_versions WHERE shot_id=? ORDER BY version_no DESC", (s["id"],)).fetchall())
-        for v in versions:
-            v["qa"] = json.loads(v["qa_json"]) if v["qa_json"] else None
-            v.pop("qa_json", None)
-            meta = json.loads(v.get("image_inputs") or "{}")
-            refs = []
-            for ref in meta.get("reference_images") or []:
-                refs.append(_public_reference_image(ref))
-            v["image_inputs"] = {"first_frame_used": bool(meta.get("first_frame_used")),
-                                 "first_frame_src": meta.get("first_frame_src"),
-                                 "first_frame_scene_id": meta.get("first_frame_scene_id"),
-                                 "first_frame_image_url": _media_url(meta.get("first_frame_path")),
-                                 "last_frame_used": bool(meta.get("last_frame_used")),
-                                 "last_frame_src": meta.get("last_frame_src"),
-                                 "last_frame_scene_id": meta.get("last_frame_scene_id"),
-                                 "last_frame_image_url": _media_url(meta.get("last_frame_path")),
-                                 "mode": meta.get("mode"),
-                                 "mode_decision": meta.get("mode_decision"),
-                                 "reference_image_used": bool(meta.get("reference_image_used")),
-                                 "reference_images": refs,
-                                 "reference_failure_logs": [_public_failure_log(x) for x in (meta.get("reference_failure_logs") or []) if isinstance(x, dict)],
-                                 "fallback_reason": meta.get("fallback_reason"),
-                                 "retry_reason": meta.get("retry_reason")}
-            if v["video_path"]:
-                rel_path = Path(v["video_path"]).relative_to(PROJECTS_DIR).as_posix()
-                v["video_url"] = f"/media/{rel_path}"
-        s["versions"] = versions
-        try:
-            from app.media_pipeline.status import shot_pipeline_status
-            s["pipeline"] = shot_pipeline_status(s["id"], conn=conn)
-        except Exception:  # noqa: BLE001
+        if view == "board":
+            s["version_count"] = version_counts.get(s["id"], 0)
+            s["versions"] = []
             s["pipeline"] = None
+            continue
+
+        s["versions"] = _public_shot_versions(conn, s["id"], include_inputs=full)
+        s["pipeline"] = pipeline_statuses.get(s["id"])
     ep["shots"] = shots
-    try:
-        from app.media_pipeline.status import episode_pipeline_summary
-        ep["pipeline_summary"] = episode_pipeline_summary(episode_id, conn=conn)
-    except Exception:  # noqa: BLE001
-        ep["pipeline_summary"] = None
+    ep["pipeline_summary"] = pipeline_summary
     return ep
+
+
+@router.get("/shots/{shot_id}/review")
+def shot_review_detail(shot_id: str):
+    """Load the expensive review gallery for one selected shot only."""
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "镜头不存在")
+    shot = dict(row)
+    shot["characters"] = json.loads(shot["characters"] or "[]")
+    shot["dialogues"] = json.loads(shot["dialogues"] or "[]")
+    shot["est_cost_cny"] = shot_cost_cny(shot["duration_s"])
+    shot["video_stale"] = False
+    for legacy_key in (
+        "approved_scene_id", "approved_head_scene_id", "approved_tail_scene_id", "scene_status",
+    ):
+        shot.pop(legacy_key, None)
+    try:
+        shot["mode_plan"] = json.loads(shot["mode_plan"]) if shot.get("mode_plan") else None
+    except (TypeError, ValueError):
+        shot["mode_plan"] = None
+    shot["storyboard_evidence"] = None
+    shot["versions"] = _public_shot_versions(conn, shot_id, include_inputs=True)
+    try:
+        from app.media_pipeline.status import shot_pipeline_status
+        shot["pipeline"] = shot_pipeline_status(shot_id, conn=conn)
+    except Exception:  # noqa: BLE001
+        shot["pipeline"] = None
+    return shot
 
 
 @router.put("/shots/{shot_id}")

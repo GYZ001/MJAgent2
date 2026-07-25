@@ -2,7 +2,7 @@
 
 约定：
 - Handler 只调用现有 Python 函数（``app.api`` / ``app.planning`` / ``app.orchestration.*`` /
-  ``app.delivery`` / ``app.worker`` / ``app.system_api`` / ``app.auto``），禁止用 httpx 回调本机 REST；
+  ``app.delivery`` / ``app.worker`` / ``app.system_api``），禁止用 httpx 回调本机 REST；
 - 领域函数抛出的 ``HTTPException``／``ValueError``／``KeyError`` 统一转成
   ``CommandResult(status=FAILED, error_code=...)``，不让异常穿透到 Command Bus；
 - ``dry_run`` 已由 Command Bus 统一处理，handler 内不需要再检查。

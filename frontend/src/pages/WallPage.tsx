@@ -204,11 +204,12 @@ function ShotMaterialGallery({ shot, onOpen, onRefresh, onToast }: {
    ═══════════════════════════════════════════════════════════════ */
 export default function WallPage() {
   const { episodeId } = useNav()
-  const { data: ep, refresh, error, loading } = useEpisode(episodeId || '')
+  const { data: ep, refresh, error, loading } = useEpisode(episodeId || '', 'wall')
   const shots = ep?.shots ?? []
   const [idx, setIdx] = useState(0)
   const [toast, setToast] = useState<string | null>(null)
   const [genMask, setGenMask] = useState<Set<string>>(new Set())
+  const [reviewShot, setReviewShot] = useState<Shot | null>(null)
   const [lightbox, setLightbox] = useState<{ src: string; label?: string } | null>(null)
   const [clearMenuOpen, setClearMenuOpen] = useState(false)
   const toastTimerRef = useRef<number>()
@@ -218,6 +219,30 @@ export default function WallPage() {
     if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current)
     toastTimerRef.current = window.setTimeout(() => setToast(null), 3200)
   }, [])
+
+  const selectedSummaryShot = shots[idx]
+
+  const loadReviewShot = useCallback(async (shotId: string) => {
+    const detail = await api.get(`/shots/${shotId}/review`) as Shot
+    setReviewShot(detail)
+    return detail
+  }, [])
+
+  useEffect(() => {
+    const shotId = selectedSummaryShot?.id
+    if (!shotId) {
+      setReviewShot(null)
+      return
+    }
+    let active = true
+    setReviewShot(null)
+    api.get(`/shots/${shotId}/review`)
+      .then((detail: Shot) => { if (active) setReviewShot(detail) })
+      .catch((reason: unknown) => {
+        if (active) showToast(reason instanceof Error ? reason.message : String(reason))
+      })
+    return () => { active = false }
+  }, [selectedSummaryShot?.id, showToast])
 
   useEffect(() => {
     if (shots.length && idx >= shots.length) setIdx(shots.length - 1)
@@ -251,14 +276,20 @@ export default function WallPage() {
   if (error && !ep) return <QueryState loading={false} error={error} hasData={false}>{null}</QueryState>
   if (!ep) return <QueryState loading={loading !== false} error={null} hasData={false}>{null}</QueryState>
 
-  const shot = shots[idx]
+  const shot = reviewShot?.id === selectedSummaryShot?.id ? reviewShot : selectedSummaryShot
   const videoReady = countAdoptedVideos(shots)
+
+  const refreshAll = async () => {
+    const next = await refresh()
+    const shotId = next?.shots?.[idx]?.id ?? selectedSummaryShot?.id
+    if (shotId) await loadReviewShot(shotId)
+  }
 
   const t = async (fn: () => Promise<unknown>, msg: string) => {
     try {
       await fn()
       showToast(`${msg} 成功`)
-      refresh()
+      void refreshAll()
       return true
     } catch (e: unknown) {
       showToast(e instanceof Error ? e.message : String(e))
@@ -317,7 +348,7 @@ export default function WallPage() {
       showToast(r.reused
         ? `${actionLabel}未新建任务：当前内容未变化，已复用已有版本；如需强制重出请点「原词重抽」`
         : `${actionLabel}已开始，正在生成新版本`)
-      refresh()
+      void refreshAll()
     } catch (e: unknown) {
       showToast(e instanceof Error ? e.message : String(e))
       videoTimer.clear()
@@ -399,7 +430,7 @@ export default function WallPage() {
               )}
               onGenVideo={(opts) => doGenerateVideo(shot.id, opts)}
               onOpen={openLightbox}
-              onRefresh={refresh}
+              onRefresh={() => { void refreshAll() }}
               onToast={showToast}
             />
           </div>
@@ -623,7 +654,7 @@ function VideoPlayer({ current, previewing, phase }: {
         <div className="vp-preview-badge">预览 v{current.version_no}</div>
       )}
       {current?.video_url ? (
-        <video key={current.id} src={current.video_url} controls className="rev-video" />
+        <video key={current.id} src={current.video_url} controls preload="metadata" className="rev-video" />
       ) : (
         <div className="vp-empty">
           <span>{emptyLabel}</span>

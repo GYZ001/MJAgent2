@@ -69,9 +69,6 @@ def recover_plan_tasks() -> int:
     resumed = 0
     for row in conn.execute("SELECT id FROM projects WHERE plan_status='running'").fetchall():
         project_id = row["id"]
-        from app import auto
-        if auto.is_running(project_id):
-            continue
         if not task_registry.active("plan", project_id):
             task_registry.spawn(
                 "plan", project_id, run_regex_plan(project_id), project_id=project_id

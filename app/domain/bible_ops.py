@@ -129,9 +129,6 @@ def recover_bible_tasks() -> int:
     resumed = 0
     for r in rows:
         pid = r["id"]
-        from app import auto
-        if auto.is_running(pid):
-            continue
         if _bible_task_active(pid):
             continue
         feedback = r["bible_feedback"] or ""
@@ -157,8 +154,6 @@ def recover_bible_tasks() -> int:
 
 def recover_character_ref_tasks() -> int:
     """Resume initial portrait batches and skip per-character committed checkpoints."""
-    from app import auto
-
     conn = get_conn()
     rows = conn.execute(
         "SELECT id, refs_target FROM projects WHERE refs_status='running'"
@@ -166,7 +161,7 @@ def recover_character_ref_tasks() -> int:
     resumed = 0
     for row in rows:
         project_id = row["id"]
-        if auto.is_running(project_id) or _refs_task_active(project_id):
+        if _refs_task_active(project_id):
             continue
         parent = conn.execute(
             "SELECT id FROM workflow_runs WHERE workflow_type='character_references' "
@@ -199,11 +194,10 @@ def recover_scene_ref_tasks() -> int:
     resumed = 0
     for row in rows:
         project_id = row["id"]
-        from app import auto
         # A recovered character-bible task will start a fresh scene pipeline
         # after committing its new Bible.  Starting from the old Bible here
         # would race it and could generate obsolete assets.
-        if (auto.is_running(project_id) or row["bible_status"] == "running"
+        if (row["bible_status"] == "running"
                 or _scene_assets_task_active(project_id)):
             continue
         try:

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api, Episode, Shot } from '../api'
 import { useEpisode, useNav } from '../App'
 import { EpStamp } from './BiblePage'
@@ -14,10 +14,17 @@ const TRANS = ['硬切', '叠化', '淡出淡入', '黑场', '闪黑', '闪白',
 const DURATIONS = [5, 6, 7, 8, 9, 10]
 export default function BoardPage() {
   const { episodeId, go, projectId, toast } = useNav()
-  const { data: ep, refresh, error, loading } = useEpisode(episodeId!)
+  const { data: ep, refresh, error, loading } = useEpisode(episodeId!, 'board')
   const [busy, setBusy] = useState(false)
   const [selectedShotId, setSelectedShotId] = useState<string | null>(null)
+  const timelineRef = useRef<HTMLDivElement>(null)
   const storyboardTimer = useTaskTimer(`episode.${episodeId}.storyboard`, ep?.status === 'scripting')
+
+  useEffect(() => {
+    timelineRef.current
+      ?.querySelector<HTMLElement>('[aria-current="true"]')
+      ?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' })
+  }, [selectedShotId, ep?.shots?.[0]?.id])
 
   if (error && !ep) return <div className="empty">{error}</div>
   if (loading && !ep) return <div className="empty">展卷中……</div>
@@ -39,6 +46,13 @@ export default function BoardPage() {
     (ep.status === 'scripted' || ep.status === 'script_failed')
   )
   const selectedShot = ep.shots?.find(shot => shot.id === selectedShotId) ?? ep.shots?.[0]
+  const selectedShotIndex = Math.max(0, ep.shots?.findIndex(shot => shot.id === selectedShot?.id) ?? 0)
+
+  const selectRelativeShot = (offset: number) => {
+    if (!ep.shots?.length) return
+    const nextIndex = Math.min(ep.shots.length - 1, Math.max(0, selectedShotIndex + offset))
+    setSelectedShotId(ep.shots[nextIndex].id)
+  }
 
   const confirmRegenerateStoryboard = (mode: 'fresh' | 'resume') => {
     if (mode === 'resume') {
@@ -77,12 +91,15 @@ export default function BoardPage() {
       </header>
 
       <section className="card board-toolbar">
-        <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+        <div className="board-toolbar-row">
+          <div className="board-status-group">
           <EpStamp status={ep.status} />
           <span className={`stamp ${ep.screenplay_status === 'ready' ? 'green' : ep.screenplay_status === 'running' ? 'gold' : ep.screenplay_status === 'failed' || ep.screenplay_status === 'warning' ? 'red' : 'grey'}`}>
             {ep.screenplay_status === 'ready' ? '剧本成' : ep.screenplay_status === 'warning' ? '剧本有阻塞' : ep.screenplay_status === 'running' ? '剧本中' : ep.screenplay_status === 'failed' ? '剧本败' : '待剧本'}
           </span>
           {ep.screenplay_mode === 'full_script' && <span className="stamp grey">完整剧本</span>}
+          </div>
+          <div className="board-action-group">
           <button className="btn" disabled={busy || ep.status === 'scripting' || ep.screenplay_status !== 'ready'}
             onClick={() => confirmRegenerateStoryboard(canResumeCheckpoint ? 'resume' : 'fresh')}>
             {canResumeCheckpoint ? `从镜${String((ep.shots?.length ?? 0) + 1).padStart(2, '0')}继续` : ep.shots?.length ? '重新生成分镜' : '生成分镜脚本'}
@@ -120,12 +137,17 @@ export default function BoardPage() {
               入评审墙生成视频 →
             </button>
           )}
-          <span style={{ flex: 1 }} />
+          </div>
+          <div className="board-toolbar-meta">
           <TaskTimer label="分镜" timer={storyboardTimer} />
           {ep.storyboard_evidence && <EvidenceDrawer evidence={ep.storyboard_evidence} label="分镜证据" />}
-          <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>
-            共 {ep.shots?.length ?? 0} 镜 · 每镜 5~10s（模型按内容判断）· 当前总时长 {totalDur}s（不设上限）· 已耗 ¥{ep.cost_cny.toFixed(1)}
-          </span>
+          </div>
+        </div>
+        <div className="board-stat-strip" aria-label="分镜统计">
+          <span><b>{ep.shots?.length ?? 0}</b> 镜头</span>
+          <span><b>{totalDur}s</b> 总时长</span>
+          <span><b>5–10s</b> 单镜时长</span>
+          <span><b>¥{ep.cost_cny.toFixed(1)}</b> 已耗</span>
         </div>
         {ep.screenplay_status !== 'ready' && <div className="error-banner">本集还没有可用剧本。请先到剧本台生成/保存完整剧本，再展开分镜。</div>}
         {ep.status === 'scripting' && <div style={{ marginTop: 10 }}><span className="stamp gold">分镜中</span> <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>{ep.storyboard_planned_shots ? `已规划约 ${ep.storyboard_planned_shots} 镜（会随逐镜细化增减），已通过 ${ep.shots?.length ?? 0} 镜，通过后会继续下一镜……` : `正在逐镜头生成并 QA；已通过 ${ep.shots?.length ?? 0} 镜，通过后会继续下一镜……`}</span></div>}
@@ -146,18 +168,39 @@ export default function BoardPage() {
       {!ep.shots?.length
         ? <div className="empty"><div className="big">镜</div>尚无分镜<br />点击上方「生成分镜脚本」</div>
         : <div className="board-workspace">
-            <aside className="shot-navigator" aria-label="镜头列表">
-              <div className="shot-navigator-head"><b>镜头列表</b><span>{ep.shots.length} 镜 · {totalDur}s</span></div>
-              <div className="shot-navigator-list">
+            <section className="shot-navigator" aria-label="镜头轨道">
+              <div className="shot-navigator-head">
+                <div><b>镜头轨道</b><span>点击镜头聚焦编辑</span></div>
+                <div className="shot-navigator-actions">
+                  <span>{selectedShotIndex + 1} / {ep.shots.length}</span>
+                  <button type="button" aria-label="上一镜" disabled={selectedShotIndex === 0} onClick={() => selectRelativeShot(-1)}>←</button>
+                  <button type="button" aria-label="下一镜" disabled={selectedShotIndex === ep.shots.length - 1} onClick={() => selectRelativeShot(1)}>→</button>
+                </div>
+              </div>
+              <div
+                ref={timelineRef}
+                className="shot-navigator-list"
+                tabIndex={0}
+                onKeyDown={event => {
+                  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+                  event.preventDefault()
+                  selectRelativeShot(event.key === 'ArrowLeft' ? -1 : 1)
+                }}
+              >
                 {ep.shots.map(shot => (
-                  <button key={shot.id} type="button" className={shot.id === selectedShot?.id ? 'active' : ''} onClick={() => setSelectedShotId(shot.id)}>
-                    <span className="shot-nav-no">{String(shot.shot_no).padStart(2, '0')}</span>
+                  <button
+                    key={shot.id}
+                    type="button"
+                    aria-current={shot.id === selectedShot?.id}
+                    className={shot.id === selectedShot?.id ? 'active' : ''}
+                    onClick={() => setSelectedShotId(shot.id)}
+                  >
+                    <span className="shot-nav-top"><span className="shot-nav-no">镜 {String(shot.shot_no).padStart(2, '0')}</span><span className="shot-nav-meta">{shot.duration_s}s</span></span>
                     <span className="shot-nav-main"><b>{shot.shot_size} · {shot.camera_move}</b><small>{shot.scene_setting}</small></span>
-                    <span className="shot-nav-meta">{shot.duration_s}s</span>
                   </button>
                 ))}
               </div>
-            </aside>
+            </section>
             <section className="shot-editor-pane">
               {selectedShot && <ShotStrip key={selectedShot.id} shot={selectedShot} episode={ep} onChanged={refresh} disabled={busy} />}
             </section>
@@ -173,6 +216,7 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
   const { toast } = useNav()
   const [edit, setEdit] = useState<Shot | null>(null)
   const [impactOpen, setImpactOpen] = useState(false)
+  const [detailTab, setDetailTab] = useState<'frames' | 'script'>('frames')
   const s = edit ?? shot
 
   async function save() {
@@ -211,7 +255,7 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
             </>}
         </div>
       </div>
-      <div className="shot-body">
+      <div className={`shot-body ${edit ? 'editing' : 'reviewing'}`}>
         {edit ? (
           <>
             <div className="shot-edit-grid full">
@@ -259,17 +303,44 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
           </>
         ) : (
           <>
-            <div className="kv full"><b>场景</b>{s.scene_setting}</div>
-            <div className="kv full"><b>画面</b>{s.action_desc}</div>
-            {s.first_frame_desc && <div className="kv"><b>首帧</b>{s.first_frame_desc}</div>}
-            {s.last_frame_desc && <div className="kv"><b>尾帧</b>{s.last_frame_desc}</div>}
-            {s.source_excerpt && <div className="kv full"><b>原文</b>{s.source_excerpt}</div>}
-            {s.narration && <div className="kv full"><b>旁白</b>{s.narration}</div>}
-            {!!s.dialogues.length && (
-              <div className="kv full"><b>台词</b>
-                {s.dialogues.map((d, i) => (
-                  <div key={i} className="dlg-line"><span className="dlg-speaker">{d.speaker}</span>「{d.line}」<span style={{ color: 'var(--ink-faint)', fontSize: 12 }}>{d.emotion}</span></div>
-                ))}
+            <div className="shot-overview full">
+              <div className="shot-visual-brief">
+                <span className="shot-section-label">画面设计</span>
+                <h2>{s.scene_setting}</h2>
+                <p>{s.action_desc}</p>
+              </div>
+              <dl className="shot-specs" aria-label="镜头参数">
+                <div><dt>时长</dt><dd>{s.duration_s}s</dd></div>
+                <div><dt>景别</dt><dd>{s.shot_size}</dd></div>
+                <div><dt>运镜</dt><dd>{s.camera_move}</dd></div>
+                <div><dt>转场</dt><dd>{s.transition}</dd></div>
+              </dl>
+            </div>
+
+            <div className="shot-detail-tabs full" role="tablist" aria-label="镜头详情">
+              <button type="button" role="tab" aria-selected={detailTab === 'frames'} className={detailTab === 'frames' ? 'active' : ''} onClick={() => setDetailTab('frames')}>起止画面</button>
+              <button type="button" role="tab" aria-selected={detailTab === 'script'} className={detailTab === 'script' ? 'active' : ''} onClick={() => setDetailTab('script')}>声音与原文{s.dialogues.length ? <i>{s.dialogues.length}</i> : null}</button>
+            </div>
+
+            {detailTab === 'frames' ? (
+              <div className="shot-frame-pair full" role="tabpanel">
+                <div className="shot-frame-card"><span>01 · 首帧</span><p>{s.first_frame_desc || '暂未描述首帧画面'}</p></div>
+                <div className="shot-frame-flow" aria-hidden="true">→</div>
+                <div className="shot-frame-card"><span>02 · 尾帧</span><p>{s.last_frame_desc || '暂未描述尾帧画面'}</p></div>
+              </div>
+            ) : (
+              <div className="shot-script-grid full" role="tabpanel">
+                <div className="shot-script-copy">
+                  <span className="shot-section-label">对应原文</span>
+                  <p>{s.source_excerpt || '暂无对应原文'}</p>
+                </div>
+                <div className="shot-audio-copy">
+                  {s.narration && <div className="shot-audio-line"><b>旁白</b><p>{s.narration}</p></div>}
+                  {!!s.dialogues.length && s.dialogues.map((d, i) => (
+                    <div key={i} className="shot-audio-line"><b>{d.speaker}<small>{d.emotion}</small></b><p>「{d.line}」</p></div>
+                  ))}
+                  {!s.narration && !s.dialogues.length && <div className="shot-audio-empty">本镜无旁白或台词</div>}
+                </div>
               </div>
             )}
           </>
@@ -280,10 +351,12 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
         title={`保存镜 ${shot.shot_no} 并传播影响`}
         impact={{
           requires_reconfirm: true,
-          paid_media_invalidated: (shot.versions?.length ?? 0) > 0,
+          paid_media_invalidated: (shot.version_count ?? shot.versions?.length ?? 0) > 0,
         }}
         knownEffects={[
-          (shot.versions?.length ?? 0) > 0 ? `本镜 ${shot.versions.length} 个视频版本将被清空` : '本镜暂无视频版本',
+          (shot.version_count ?? shot.versions?.length ?? 0) > 0
+            ? `本镜 ${shot.version_count ?? shot.versions.length} 个视频版本将被清空`
+            : '本镜暂无视频版本',
           '精确失效 Artifact 数量将在保存后由服务端计算并回传',
         ]}
         onClose={() => setImpactOpen(false)}

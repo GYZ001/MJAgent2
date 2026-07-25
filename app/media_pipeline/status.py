@@ -50,69 +50,41 @@ def _job_stage(job, version) -> tuple[str, str]:
     return status or "unknown", S.STAGE_VIDEO_SUBMIT
 
 
-def shot_pipeline_status(shot_id: str, *, conn=None) -> dict[str, Any]:
-    db = conn or get_conn()
-    shot = db.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
-    if not shot:
-        return {}
+def _status_from_rows(shot, *, candidate_count: int, retake_count: int, job,
+                      provider_task_id: str | None, queue_position: int | None,
+                      reference_progress: dict[str, int] | None, db) -> dict[str, Any]:
+    """Build UI status without loading shot_versions.image_inputs.
 
-    versions = db.execute(
-        "SELECT * FROM shot_versions WHERE shot_id=? ORDER BY version_no DESC",
-        (shot_id,),
-    ).fetchall()
-    candidate_count = sum(
-        1 for v in versions if v["status"] == "succeeded" and v["video_path"]
-    )
-    retake_count = 0
-    for v in versions:
-        meta = json.loads(v["image_inputs"] or "{}")
-        retake_count = max(retake_count, int(meta.get("auto_retake_count") or 0))
-
-    job = db.execute(
-        """SELECT * FROM jobs
-           WHERE shot_id=? AND kind='video'
-             AND status IN ('queued','running','waiting_provider','paused_budget','waiting_retry')
-             AND cancellation_requested=0 AND abandoned=0
-           ORDER BY created_at DESC LIMIT 1""",
-        (shot_id,),
-    ).fetchone()
-
+    Historical image_inputs rows may contain hundreds of megabytes of embedded
+    data URLs. Pipeline status only needs scalar version/job/reference facts, so
+    reading and decoding that JSON here is both unnecessary and dangerously
+    expensive.
+    """
     blocked_reason = None
-    queue_position = None
     provider_elapsed_s = None
-    reference_progress = None
     estimated_start_at = None
     estimated_finish_at = None
     pipeline_status = "idle"
     current_stage = None
 
     if job:
-        version = db.execute(
-            "SELECT * FROM shot_versions WHERE id=?", (job["version_id"],)
-        ).fetchone()
-        pipeline_status, current_stage = _job_stage(job, version)
-        if job["status"] == "queued":
-            earlier = db.execute(
-                """SELECT COUNT(*) c FROM jobs
-                   WHERE kind='video' AND status='queued'
-                     AND cancellation_requested=0 AND abandoned=0
-                     AND (next_retry_at IS NULL OR next_retry_at<=?)
-                     AND created_at < ?""",
-                (now(), job["created_at"]),
-            ).fetchone()["c"]
-            queue_position = int(earlier) + 1
+        status = job["status"]
+        if status == S.WAITING_PROVIDER:
+            pipeline_status, current_stage = "waiting_provider", S.STAGE_VIDEO_POLL
+        elif status == "paused_budget":
+            pipeline_status, current_stage = S.WAITING_BUDGET, S.STAGE_VIDEO_SUBMIT
+        elif status == "running":
+            pipeline_status = "running"
+            current_stage = S.STAGE_DOWNLOAD if provider_task_id else S.STAGE_REFERENCE
+        elif status == "queued":
+            pipeline_status = "queued"
+            current_stage = S.STAGE_DOWNLOAD if provider_task_id else S.STAGE_REFERENCE
+        else:
+            pipeline_status, current_stage = status or "unknown", S.STAGE_VIDEO_SUBMIT
         if job["provider_submitted_at"]:
             provider_elapsed_s = max(0.0, now() - float(job["provider_submitted_at"]))
         if job["error"] and "等待" in (job["error"] or ""):
             blocked_reason = job["error"]
-        # 参考图进度：已选中数 / 生成数
-        if version:
-            meta = json.loads(version["image_inputs"] or "{}")
-            refs = [r for r in (meta.get("reference_images") or []) if not r.get("deleted")]
-            selected = [r for r in refs if r.get("selectedForSeedance", True)]
-            if refs:
-                reference_progress = {"done": len(selected), "total": max(len(refs), 1)}
-        # ETA
         p50 = _STAGE_P50.get(current_stage or "", 60.0)
         if job["status"] == "queued" and job["next_retry_at"]:
             estimated_start_at = float(job["next_retry_at"])
@@ -126,9 +98,7 @@ def shot_pipeline_status(shot_id: str, *, conn=None) -> dict[str, Any]:
         estimated_finish_at = (estimated_start_at or now()) + remaining
 
         # 连续镜阻塞探测
-        if job["after_shot_id"] and job["status"] == "queued" and not (
-            version and version["provider_task_id"]
-        ):
+        if job["after_shot_id"] and job["status"] == "queued" and not provider_task_id:
             from app.media_pipeline.scheduler import continuity_anchor_ready
             ready, reason = continuity_anchor_ready(db, job["after_shot_id"])
             if not ready:
@@ -171,35 +141,117 @@ def shot_pipeline_status(shot_id: str, *, conn=None) -> dict[str, Any]:
     }
 
 
-def episode_pipeline_summary(episode_id: str, *, conn=None) -> dict[str, Any]:
+def episode_pipeline_statuses(episode_id: str, *, conn=None) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """Load all shot statuses for an episode with a fixed number of light queries."""
     db = conn or get_conn()
     shots = db.execute(
         "SELECT id, adopted_version_id FROM shots WHERE episode_id=? ORDER BY shot_no",
         (episode_id,),
     ).fetchall()
+    if not shots:
+        return {}, {
+            "shots_total": 0, "adopted": 0, "with_candidate": 0,
+            "upstream_generating": 0, "preparing_references": 0,
+            "queued": 0, "waiting_human": 0,
+        }
+
+    version_rows = db.execute(
+        """SELECT v.shot_id,
+                  SUM(CASE WHEN v.status='succeeded' AND v.video_path IS NOT NULL
+                           AND v.video_path!='' THEN 1 ELSE 0 END) AS candidate_count,
+                  MAX(v.version_no) AS latest_version_no
+           FROM shot_versions v
+           JOIN shots s ON s.id=v.shot_id
+           WHERE s.episode_id=?
+           GROUP BY v.shot_id""",
+        (episode_id,),
+    ).fetchall()
+    version_stats = {row["shot_id"]: row for row in version_rows}
+
+    job_rows = db.execute(
+        """SELECT j.*, v.provider_task_id
+           FROM jobs j
+           LEFT JOIN shot_versions v ON v.id=j.version_id
+           WHERE j.episode_id=? AND j.kind='video'
+             AND j.status IN ('queued','running','waiting_provider','paused_budget','waiting_retry')
+             AND j.cancellation_requested=0 AND j.abandoned=0
+           ORDER BY j.created_at DESC""",
+        (episode_id,),
+    ).fetchall()
+    jobs_by_shot = {}
+    for row in job_rows:
+        jobs_by_shot.setdefault(row["shot_id"], row)
+
+    queued_rows = db.execute(
+        """SELECT id FROM jobs
+           WHERE kind='video' AND status='queued'
+             AND cancellation_requested=0 AND abandoned=0
+             AND (next_retry_at IS NULL OR next_retry_at<=?)
+           ORDER BY created_at""",
+        (now(),),
+    ).fetchall()
+    queue_positions = {row["id"]: index + 1 for index, row in enumerate(queued_rows)}
+
+    reference_rows = db.execute(
+        """SELECT rs.shot_id,
+                  SUM(CASE WHEN ra.deleted=0 THEN 1 ELSE 0 END) AS total,
+                  SUM(CASE WHEN ra.deleted=0 AND ra.selected=1 THEN 1 ELSE 0 END) AS selected
+           FROM reference_sets rs
+           JOIN shots s ON s.id=rs.shot_id
+           LEFT JOIN reference_assets ra ON ra.reference_set_id=rs.id
+           WHERE s.episode_id=? AND rs.id IN (
+             SELECT newest.id FROM reference_sets newest
+             WHERE newest.revision=(
+               SELECT MAX(candidate.revision) FROM reference_sets candidate
+               WHERE candidate.shot_id=newest.shot_id
+             )
+           )
+           GROUP BY rs.shot_id""",
+        (episode_id,),
+    ).fetchall()
+    reference_stats = {row["shot_id"]: row for row in reference_rows}
+
+    statuses: dict[str, dict[str, Any]] = {}
     adopted = 0
     with_candidate = 0
-    upstream = 0
-    preparing_refs = 0
     queued = 0
     waiting_human = 0
     for s in shots:
-        st = shot_pipeline_status(s["id"], conn=db)
+        version = version_stats.get(s["id"])
+        candidate_count = int(version["candidate_count"] or 0) if version else 0
+        # The exact legacy auto-retake counter lives inside huge JSON. Version
+        # attempts are a safe lightweight approximation for display purposes.
+        retake_count = max(0, int(version["latest_version_no"] or 1) - 1) if version else 0
+        job = jobs_by_shot.get(s["id"])
+        refs = reference_stats.get(s["id"])
+        reference_progress = None
+        if refs and int(refs["total"] or 0) > 0:
+            reference_progress = {
+                "done": int(refs["selected"] or 0),
+                "total": int(refs["total"] or 0),
+            }
+        st = _status_from_rows(
+            s,
+            candidate_count=candidate_count,
+            retake_count=retake_count,
+            job=job,
+            provider_task_id=job["provider_task_id"] if job else None,
+            queue_position=queue_positions.get(job["id"]) if job else None,
+            reference_progress=reference_progress,
+            db=db,
+        )
+        statuses[s["id"]] = st
         if s["adopted_version_id"]:
             adopted += 1
         if st.get("candidate_count", 0) > 0 or s["adopted_version_id"]:
             with_candidate += 1
         ps = st.get("pipeline_status")
         stage = st.get("current_stage")
-        if ps == S.WAITING_PROVIDER:
-            upstream += 1
-        elif ps == "running" and stage == S.STAGE_REFERENCE:
-            preparing_refs += 1
-        elif ps == "queued":
+        if ps == "queued":
             queued += 1
         elif ps in (S.WAITING_HUMAN, S.BLOCKED):
             waiting_human += 1
-    # 再补上游：running 且已提交
+
     upstream = int(db.execute(
         """SELECT COUNT(*) c FROM jobs
            WHERE episode_id=? AND kind='video'
@@ -215,7 +267,7 @@ def episode_pipeline_summary(episode_id: str, *, conn=None) -> dict[str, Any]:
              AND j.cancellation_requested=0 AND j.abandoned=0""",
         (episode_id,),
     ).fetchone()["c"])
-    return {
+    summary = {
         "shots_total": len(shots),
         "adopted": adopted,
         "with_candidate": with_candidate,
@@ -224,3 +276,18 @@ def episode_pipeline_summary(episode_id: str, *, conn=None) -> dict[str, Any]:
         "queued": queued,
         "waiting_human": waiting_human,
     }
+    return statuses, summary
+
+
+def shot_pipeline_status(shot_id: str, *, conn=None) -> dict[str, Any]:
+    db = conn or get_conn()
+    row = db.execute("SELECT episode_id FROM shots WHERE id=?", (shot_id,)).fetchone()
+    if not row:
+        return {}
+    statuses, _ = episode_pipeline_statuses(row["episode_id"], conn=db)
+    return statuses.get(shot_id, {})
+
+
+def episode_pipeline_summary(episode_id: str, *, conn=None) -> dict[str, Any]:
+    _, summary = episode_pipeline_statuses(episode_id, conn=conn)
+    return summary

@@ -1,6 +1,6 @@
-import { type CSSProperties, useCallback, useEffect, useRef, useState } from 'react'
-import { api, AutoStatus, Bible, BrowseResult, Character, Portrait } from '../api'
-import { useNav, useProject, usePoll } from '../App'
+import { useEffect, useRef, useState } from 'react'
+import { api, Bible, Character, Portrait } from '../api'
+import { useNav, useProject } from '../App'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 import SearchField from '../components/SearchField'
 import EvidenceDrawer from '../components/harness/EvidenceDrawer'
@@ -11,12 +11,7 @@ import { useFillPageSize } from '../hooks/useFillPageSize'
 
 export default function BiblePage() {
   const { projectId, toast } = useNav()
-  const { data: p, refresh, error, loading } = useProject(projectId!)
-  const { data: auto, refresh: refreshAuto } = usePoll<AutoStatus>(
-    () => api.get(`/projects/${projectId}/auto/status`),
-    (status) => (status?.running ? 3000 : 0),
-    [projectId],
-  )
+  const { data: p, refresh, error, loading } = useProject(projectId!, undefined, 'bible')
   const [editing, setEditing] = useState<Bible | null>(null)
   const [busy, setBusy] = useState(false)
   const [charSearch, setCharSearch] = useState('')
@@ -104,13 +99,13 @@ export default function BiblePage() {
     <>
       <header className="desk-head">
         <div className="crumb">书房 / 《{p.name}》</div>
-        <h1>人物谱 <span className="sub">角色资产与定妆版本中心 · 保持跨镜头、跨分集一致</span></h1>
         <PrepSubnav current="bible" />
+        <h1>人物谱 <span className="sub">角色资产与定妆版本中心 · 保持跨镜头、跨分集一致</span></h1>
         <hr className="rule" />
       </header>
 
       <section className="card">
-        <h3>原著 <span className="hint">{(p.novel_chars / 10000).toFixed(1)} 万字 · {p.chapters?.length} 章</span></h3>
+        <h3>原著 <span className="hint">{(p.novel_chars / 10000).toFixed(1)} 万字 · {p.chapter_count ?? p.chapters?.length ?? 0} 章</span></h3>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
           {!p.bible && !generating && (
             <button className="btn primary" disabled={busy} onClick={startBible}>
@@ -137,26 +132,6 @@ export default function BiblePage() {
         {p.bible_status === 'failed' && <div className="error-banner">人物谱生成失败（原始错误如下，不做静默兜底）：{'\n'}{p.bible_error}</div>}
         {p.bible_status === 'warning' && <div className="error-banner">人物谱存在未解决的门禁问题，下游已暂停：{'\n'}{p.bible_error}</div>}
       </section>
-
-      <AutoCard projectId={p.id} auto={auto} busy={busy}
-        onStart={async (exportDir: string, mode: 'to_storyboard' | 'full') => {
-          setBusy(true)
-          try {
-            await api.post(`/projects/${p.id}/auto`, { export_dir: exportDir, mode })
-            toast(mode === 'full'
-              ? '已启动含视频全自动（将自动确认分镜）'
-              : '已启动：生成到分镜待确认（不会自动烧视频）')
-            refreshAuto()
-          }
-          catch (e: unknown) { toast((e as Error).message, true) }
-          finally { setBusy(false) }
-        }}
-        onCancel={async () => {
-          setBusy(true)
-          try { await api.post(`/projects/${p.id}/auto/cancel`); toast('已请求停止（已入队的镜头会继续跑完）'); refreshAuto() }
-          catch (e: unknown) { toast((e as Error).message, true) }
-          finally { setBusy(false) }
-        }} />
 
       {bible && (
         <section className="card bible-library">
@@ -257,196 +232,6 @@ export default function BiblePage() {
         onConfirm={() => { setImpactOpen(false); void saveBible() }}
       />
     </>
-  )
-}
-
-function DirPicker({ initial, onPick, onClose }: {
-  initial: string; onPick: (p: string) => void; onClose: () => void
-}) {
-  const { toast } = useNav()
-  const [data, setData] = useState<BrowseResult | null>(null)
-  const [cur, setCur] = useState('')
-  const [newName, setNewName] = useState('')
-  const [loading, setLoading] = useState(false)
-
-  const load = useCallback((path: string) => {
-    setLoading(true)
-    api.get(`/system/browse?path=${encodeURIComponent(path)}`)
-      .then((d: BrowseResult) => { setData(d); setCur(d.path) })
-      .catch((e: Error) => toast(e.message, true))
-      .finally(() => setLoading(false))
-  }, [toast])
-
-  // 从初始目录的父级开始浏览（这样能直接看到并改选同级目录）；没有则从盘符/根开始
-  useEffect(() => { load(initial || '') }, [load, initial])
-
-  const mkdir = async () => {
-    const name = newName.trim()
-    if (!name || !cur) return
-    try {
-      const r = await api.post('/system/mkdir', { path: cur, name }) as { path: string }
-      setNewName(''); toast('已创建文件夹'); load(r.path)
-    } catch (e: unknown) { toast((e as Error).message, true) }
-  }
-
-  const overlay: CSSProperties = {
-    position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)', zIndex: 1000,
-    display: 'flex', alignItems: 'center', justifyContent: 'center',
-  }
-  const panel: CSSProperties = {
-    width: 'min(640px, 92vw)', maxHeight: '82vh', background: 'var(--paper, #faf7f0)',
-    borderRadius: 10, boxShadow: '0 12px 40px rgba(0,0,0,0.3)', display: 'flex',
-    flexDirection: 'column', overflow: 'hidden',
-  }
-
-  return (
-    <div style={overlay} onClick={onClose}>
-      <div style={panel} onClick={e => e.stopPropagation()}>
-        <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--hairline, #e5e0d5)' }}>
-          <h3 style={{ margin: 0 }}>选择成片导出目录</h3>
-          <div style={{ fontSize: 12.5, color: 'var(--ink-faint)', marginTop: 4, fontFamily: 'ui-monospace, monospace',
-                        wordBreak: 'break-all' }}>
-            当前：{cur || '（盘符 / 根目录）'}
-          </div>
-        </div>
-
-        <div style={{ padding: '10px 18px', display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center',
-                      borderBottom: '1px solid var(--hairline, #e5e0d5)' }}>
-          {data?.drives?.map(d => (
-            <button key={d} className="btn small" onClick={() => load(d)}>{d}</button>
-          ))}
-          {data?.parent != null && <button className="btn small" onClick={() => load(data.parent!)}>⬆ 上级</button>}
-          {data?.parent == null && data?.drives?.length ? <span style={{ fontSize: 12, color: 'var(--ink-faint)' }}>（已在盘符列表）</span> : null}
-        </div>
-
-        <div style={{ flex: 1, overflowY: 'auto', padding: '6px 0', minHeight: 180 }}>
-          {loading && <div style={{ padding: '12px 18px', color: 'var(--ink-faint)' }}>读取中……</div>}
-          {!loading && data?.dirs?.length === 0 && (
-            <div style={{ padding: '12px 18px', color: 'var(--ink-faint)' }}>此目录下没有子文件夹（可直接「选定此目录」或新建）</div>
-          )}
-          {!loading && data?.dirs?.map(d => (
-            <button key={d.path} onClick={() => load(d.path)}
-              style={{ display: 'block', width: '100%', textAlign: 'left', padding: '8px 18px', border: 'none',
-                       background: 'transparent', cursor: 'pointer', fontSize: 13.5, color: 'var(--ink, #333)' }}
-              onMouseEnter={e => (e.currentTarget.style.background = 'rgba(181,68,52,0.07)')}
-              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
-              📁 {d.name}
-            </button>
-          ))}
-        </div>
-
-        <div style={{ padding: '10px 18px', borderTop: '1px solid var(--hairline, #e5e0d5)', display: 'flex', gap: 8 }}>
-          <input type="text" value={newName} onChange={e => setNewName(e.target.value)}
-            placeholder="新建文件夹名" disabled={!cur}
-            onKeyDown={e => { if (e.key === 'Enter') mkdir() }}
-            style={{ flex: 1, fontSize: 13 }} />
-          <button className="btn small" disabled={!cur || !newName.trim()} onClick={mkdir}>新建</button>
-        </div>
-
-        <div style={{ padding: '12px 18px', borderTop: '1px solid var(--hairline, #e5e0d5)', display: 'flex',
-                      gap: 10, justifyContent: 'flex-end' }}>
-          <button className="btn ghost" onClick={onClose}>取消</button>
-          <button className="btn primary" disabled={!cur} onClick={() => onPick(cur)}>选定此目录</button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function AutoCard({ projectId, auto, busy, onStart, onCancel }: {
-  projectId: string; auto: AutoStatus | null; busy: boolean
-  onStart: (exportDir: string, mode: 'to_storyboard' | 'full') => void; onCancel: () => void
-}) {
-  void projectId
-  const running = !!auto?.running
-  const pr = auto?.progress
-  const autoTimer = useTaskTimer(`project.${projectId}.auto`, running)
-  const stat = (s?: string) => (s === 'ready' ? '✓' : s === 'running' ? '…' : s === 'failed' ? '✗' : '—')
-  const [dir, setDir] = useState<string | null>(null)
-  const [picking, setPicking] = useState(false)
-  const dirValue = dir ?? auto?.export_dir ?? ''
-  return (
-    <section className="card auto-card" style={{ borderLeft: '3px solid var(--cinnabar)' }}>
-      <h3>一键自动制作
-        <span className="hint">人物谱 → 定妆照+分集 → 每集剧本+分镜；视频需显式选择「含视频」模式</span>
-      </h3>
-
-      <label className="f">成片导出目录（仅「含视频全自动」使用）</label>
-      <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 4 }}>
-        <button className="btn" disabled={running} onClick={() => setPicking(true)}>
-          {dirValue ? '更换目录' : '选择目录'}
-        </button>
-        {dirValue ? (
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '5px 10px',
-                         background: 'rgba(91,114,83,0.08)', borderRadius: 6, fontSize: 12.5,
-                         fontFamily: 'ui-monospace, monospace', color: 'var(--ink-soft)',
-                         maxWidth: '100%', overflow: 'hidden' }}>
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>📁 {dirValue}</span>
-            {!running && (
-              <button onClick={() => setDir('')} title="清除"
-                style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--ink-faint)',
-                         fontSize: 14, lineHeight: 1, padding: 0 }}>✕</button>
-            )}
-          </span>
-        ) : (
-          <span style={{ fontSize: 12.5, color: 'var(--ink-faint)' }}>未选择 · 仅在成片台生成，不另存到外部文件夹</span>
-        )}
-      </div>
-      <p style={{ fontSize: 12, color: 'var(--ink-faint)', margin: '0 0 14px' }}>
-        每集合成后另存为「书名第N集.mp4」，同名已存在则跳过。
-      </p>
-      {picking && (
-        <DirPicker initial={dirValue}
-          onClose={() => setPicking(false)}
-          onPick={(picked) => { setDir(picked); setPicking(false) }} />
-      )}
-
-      <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-        <button className="btn primary" disabled={busy || running} onClick={() => {
-          autoTimer.start()
-          onStart(dirValue.trim(), 'to_storyboard')
-        }}>
-          {running ? '自动制作进行中…' : '生成到分镜待确认'}
-        </button>
-        <button className="btn" disabled={busy || running} onClick={() => {
-          if (!window.confirm('将自动确认全部分镜并调用 Seedance 出片（¥0.8/秒）。确定继续？')) return
-          autoTimer.start()
-          onStart(dirValue.trim(), 'full')
-        }}>
-          含视频全自动
-        </button>
-        {running && <button className="btn ghost" disabled={busy} onClick={onCancel}>停止</button>}
-        {auto?.phase && <span className={`stamp ${running ? 'gold' : auto.error ? 'red' : 'green'}`}>{auto.phase}</span>}
-        <TaskTimer label="自动制作" timer={autoTimer} />
-      </div>
-      <p style={{ fontSize: 12.5, color: 'var(--ink-faint)', marginTop: 8 }}>
-        默认「生成到分镜待确认」遵守人工门禁；「含视频全自动」会跳过确认直接烧钱，请仅在你已审过同类样片时使用。
-      </p>
-
-      {auto?.error && <div className="error-banner">自动成片中断（原始错误，不做静默兜底）：{'\n'}{auto.error}</div>}
-
-      {pr && (pr.episodes_total || pr.shots_total) ? (
-        <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', margin: '12px 0', fontSize: 13 }}>
-          <span>人物谱 {stat(pr.bible)}</span>
-          <span>定妆照 {stat(pr.refs)}</span>
-          <span>分集 {stat(pr.plan)}</span>
-          <span>剧集 {pr.episodes_done ?? 0}/{pr.episodes_total ?? 0} 成片</span>
-          <span>剧本 {pr.screenplays_ready ?? 0}/{pr.episodes_total ?? 0} 集</span>
-          <span>视频 {pr.shots_video ?? 0}/{pr.shots_total ?? 0} 镜</span>
-        </div>
-      ) : null}
-
-      {auto?.log?.length ? (
-        <div style={{ maxHeight: 220, overflowY: 'auto', background: 'rgba(0,0,0,0.03)', borderRadius: 6,
-                      padding: '8px 12px', fontSize: 12, lineHeight: 1.8, fontFamily: 'ui-monospace, monospace' }}>
-          {auto.log.slice().reverse().map((l, i) => (
-            <div key={i} style={{ color: /失败|中断|跳过|暂停|报红|无法|待确认/.test(l.msg) ? 'var(--cinnabar)' : 'var(--ink-soft)' }}>
-              {new Date(l.t * 1000).toLocaleTimeString()} · {l.msg}
-            </div>
-          ))}
-        </div>
-      ) : null}
-    </section>
   )
 }
 

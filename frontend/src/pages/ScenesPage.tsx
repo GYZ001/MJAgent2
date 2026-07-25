@@ -9,7 +9,7 @@ import { useFillPageSize } from '../hooks/useFillPageSize'
 
 export default function ScenesPage() {
   const { projectId, toast } = useNav()
-  const { data: p, refresh, error, loading } = useProject(projectId!)
+  const { data: p, refresh, error, loading } = useProject(projectId!, undefined, 'scenes')
   const [busy, setBusy] = useState(false)
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(0)
@@ -50,8 +50,8 @@ export default function ScenesPage() {
     <>
       <header className="desk-head">
         <div className="crumb">书房 / 《{p.name}》</div>
-        <h1>场景库 <span className="sub">以视觉资产为中心管理场景锚点、版本与跨集一致性</span></h1>
         <PrepSubnav current="scenes" />
+        <h1>场景库 <span className="sub">以视觉资产为中心管理场景锚点、版本与跨集一致性</span></h1>
         <hr className="rule" />
       </header>
 

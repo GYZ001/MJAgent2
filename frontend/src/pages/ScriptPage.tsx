@@ -48,9 +48,10 @@ const sceneOutlineText = (sceneOutline: ScriptScene[] | undefined) =>
 
 export default function ScriptPage() {
   const { episodeId, projectId, go, toast } = useNav()
-  const { data: ep, refresh, error, loading } = useEpisode(episodeId!)
+  const { data: ep, refresh, error, loading } = useEpisode(episodeId!, 'script')
   const [busy, setBusy] = useState(false)
   const [draft, setDraft] = useState<EpisodeScreenplay | null>(null)
+  const [manuscriptExpanded, setManuscriptExpanded] = useState(false)
   const screenplayTimer = useTaskTimer(`episode.${episodeId}.screenplay`, ep?.screenplay_status === 'running')
   const storyboardTimer = useTaskTimer(`episode.${episodeId}.storyboard`, ep?.status === 'scripting')
 
@@ -72,7 +73,7 @@ export default function ScriptPage() {
     }
   }
 
-  const hasDownstream = !!ep.shots?.length || ['scripted', 'confirmed', 'generating', 'done'].includes(ep.status)
+  const hasDownstream = (ep.shot_count ?? 0) > 0 || ['scripted', 'confirmed', 'generating', 'done'].includes(ep.status)
 
   const generate = () => {
     const isRegenerate = !!ep.screenplay
@@ -97,11 +98,11 @@ export default function ScriptPage() {
 
   const enterBoard = async () => {
     const canResumeCheckpoint = Boolean(
-      ep.shots?.length &&
+      (ep.shot_count ?? 0) > 0 &&
       ep.script_error &&
       (ep.status === 'scripted' || ep.status === 'script_failed')
     )
-    const needGenerate = !ep.shots?.length || ['planned', 'script_failed'].includes(ep.status)
+    const needGenerate = (ep.shot_count ?? 0) === 0 || ['planned', 'script_failed'].includes(ep.status)
     if (needGenerate && ep.status !== 'scripting') {
       storyboardTimer.start()
       const path = canResumeCheckpoint
@@ -110,7 +111,7 @@ export default function ScriptPage() {
       const r = await act(
         () => api.post(path),
         canResumeCheckpoint
-          ? `已进入分镜台，从前 ${ep.shots?.length ?? 0} 镜 checkpoint 继续生成`
+          ? `已进入分镜台，从前 ${ep.shot_count ?? 0} 镜 checkpoint 继续生成`
           : '已进入分镜台，正在逐镜头生成，QA 通过后陆续展示',
       )
       if (r === undefined) {
@@ -225,8 +226,35 @@ export default function ScriptPage() {
                         <ul className="key-list">{script.key_plot_points.map((p, i) => <li key={i}>{p}</li>)}</ul>
                       </div>
                     )}
-                    <div className="kv full"><b>完整剧本文本</b>
-                      <div className="script-manuscript">{script.full_script_text}</div>
+                    <div className={`kv full script-manuscript-section ${manuscriptExpanded ? 'expanded' : 'collapsed'}`}>
+                      <div className="script-manuscript-head">
+                        <div>
+                          <b>完整剧本文本</b>
+                          <span>{(script.full_script_text ?? '').length.toLocaleString()} 字 · {(script.full_script_text ?? '').split('\n').filter(Boolean).length} 行</span>
+                        </div>
+                        <button
+                          type="button"
+                          className="script-manuscript-toggle"
+                          aria-expanded={manuscriptExpanded}
+                          aria-controls="full-script-manuscript"
+                          onClick={() => setManuscriptExpanded(value => !value)}
+                        >
+                          {manuscriptExpanded ? '收起全文 ↑' : '展开全文 ↓'}
+                        </button>
+                      </div>
+                      {manuscriptExpanded ? (
+                        <div id="full-script-manuscript" className="script-manuscript">{script.full_script_text || '暂无完整剧本文本'}</div>
+                      ) : (
+                        <button
+                          id="full-script-manuscript"
+                          type="button"
+                          className="script-manuscript-collapsed"
+                          onClick={() => setManuscriptExpanded(true)}
+                        >
+                          <span>正文已收起</span>
+                          <small>点击展开并阅读完整剧本</small>
+                        </button>
+                      )}
                     </div>
                     <div className="kv"><b>情绪曲线说明</b>{script.emotional_curve}</div>
                     <div className="kv"><b>结尾钩子</b>{script.ending_hook}</div>

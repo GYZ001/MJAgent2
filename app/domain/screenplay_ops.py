@@ -28,9 +28,6 @@ def recover_screenplay_tasks() -> int:
     resumed = 0
     for row in rows:
         episode_id = row["id"]
-        from app import auto
-        if auto.is_running(row["project_id"]):
-            continue
         if _screenplay_task_active(episode_id):
             continue
         stamp = now()

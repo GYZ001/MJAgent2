@@ -156,7 +156,7 @@ export default function App() {
       return
     }
     let cancelled = false
-    api.get(`/projects/${projectId}`)
+    api.get(`/projects/${projectId}?view=picker`)
       .then((project: Project) => {
         if (cancelled) return
         const episodes = project.episodes ?? []
@@ -234,7 +234,7 @@ export default function App() {
         </nav>
         <div className="spine-foot">MANJU STUDIO · 2.0</div>
       </aside>
-      <main className="desk">
+      <main className={`desk ${view === 'board' ? 'board-desk' : ''}`}>
         {view === 'studio' && <Studio />}
         {view === 'bible' && projectId && <BiblePage key={projectId} />}
         {view === 'scenes' && projectId && <ScenesPage key={projectId} />}
@@ -367,8 +367,13 @@ const projectBusy = (p: Project | null): boolean => {
 export const useProject = (
   projectId: string,
   intervalMs: PollInterval<Project> = (p) => projectBusy(p) ? 3000 : 0,
+  view?: 'bible' | 'scenes' | 'episodes' | 'picker',
 ) =>
-  usePoll<Project>(() => api.get(`/projects/${projectId}`), intervalMs, [projectId])
+  usePoll<Project>(
+    () => api.get(`/projects/${projectId}${view ? `?view=${view}` : ''}`),
+    intervalMs,
+    [projectId, view],
+  )
 
 /** 分集是否处于运行态（编剧/分镜/参考图视频）—— 决定是否需要高频轮询。
  *  空闲时彻底停轮询，避免反复拉取 1MB+ 的分集 payload 拖垮页面。 */
@@ -386,6 +391,11 @@ const episodeBusy = (ep: Episode | null): boolean => {
 
 export const useEpisode = (
   episodeId: string,
+  view?: 'script' | 'board' | 'wall' | 'cinema',
   intervalMs: PollInterval<Episode> = (ep) => episodeBusy(ep) ? 2000 : 0,
 ) =>
-  usePoll<Episode>(() => api.get(`/episodes/${episodeId}`), intervalMs, [episodeId])
+  usePoll<Episode>(
+    () => api.get(`/episodes/${episodeId}${view ? `?view=${view}` : ''}`),
+    intervalMs,
+    [episodeId, view],
+  )

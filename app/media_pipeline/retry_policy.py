@@ -14,7 +14,6 @@ class RetryKind(str, Enum):
     COPYRIGHT = "copyright"
     TECHNICAL = "technical"                    # 技术校验失败 → 可新建版本重提
     QA_RETAKE = "qa_retake"                    # 质量低分 → 同参考图集重抽
-    ORCHESTRATOR_GAP = "orchestrator_gap"      # 已废弃：不再由 auto 层触发
 
 
 @dataclass(frozen=True)

@@ -292,11 +292,11 @@ def test_cancel_turn_does_not_cancel_underlying_run(client) -> None:
     conv = store.create_conversation(title="t6", project_id=None, created_by="tester")
     turn = store.create_turn(conv["id"], context_envelope={}, model_provider="hiagent", model="x", prompt_version="v1")
     run_id = evidence_repository.create_run(
-        workflow_type="auto_project", scope_type="project", scope_id="proj_x",
+        workflow_type="storyboard", scope_type="episode", scope_id="episode_x",
         input_fingerprint="fp1",
     )
     tool_call = store.create_tool_call(
-        turn["id"], command_name="production.auto_start", command_version="1.0.0",
+        turn["id"], command_name="storyboard.generate", command_version="1.0.0",
         arguments={"project_id": "proj_x"}, risk="R2", status="waiting_approval",
     )
     store.update_tool_call(tool_call["id"], run_id=run_id)

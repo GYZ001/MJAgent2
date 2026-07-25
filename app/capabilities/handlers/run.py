@@ -29,23 +29,6 @@ async def control(args: I.RunControlInput) -> CommandResult:
         run_id=(outcome.get("run") or {}).get("id", args.run_id),
         resource_uris=[f"manju://runs/{args.run_id}"],
     )
-
-
-async def create(args: I.BenchmarkRunInput) -> CommandResult:
-    from app.orchestration import api as orch_api
-
-    outcome = await call_guarded(orch_api.create_run, body=args.payload)
-    if isinstance(outcome, CommandResult):
-        return outcome
-    run_id = outcome.get("id")
-    return succeeded(
-        "Workflow Run 已创建",
-        data=outcome,
-        run_id=run_id,
-        resource_uris=[f"manju://runs/{run_id}"] if run_id else [],
-    )
-
-
 async def job_cancel(args: I.JobCancelInput) -> CommandResult:
     from app.orchestration import api as orch_api
 

@@ -17,14 +17,6 @@ class ProjectDeleteInput(StandardCommandInput):
     project_id: str
 
 
-class ProductionAutoStartInput(StandardCommandInput):
-    project_id: str
-    directory_grant: str | None = None
-    # to_storyboard：停在 scripted，等人在分镜台确认（守 P3）
-    # full：自动确认后继续视频与合成（贵环节，需用户显式选择）
-    mode: Literal["to_storyboard", "full"] = "to_storyboard"
-
-
 class ProjectScopedInput(StandardCommandInput):
     project_id: str
     feedback: str = ""

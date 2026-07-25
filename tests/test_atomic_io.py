@@ -32,6 +32,25 @@ def test_atomic_write_failure_preserves_previous_target(tmp_path: Path, monkeypa
     assert list(tmp_path.glob(".*.part")) == []
 
 
+def test_atomic_copy_commits_complete_contents(tmp_path: Path) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video-bytes")
+    target = tmp_path / "final.mp4"
+
+    atomic_io.atomic_copy(source, target)
+
+    assert target.read_bytes() == b"video-bytes"
+    assert list(tmp_path.glob(".*.part")) == []
+
+
+def test_fsync_file_accepts_read_only_windows_paths(tmp_path: Path) -> None:
+    """Regression: Windows EBADF when fsync'ing a read-only open (ERR-20260725-2b2321)."""
+    path = tmp_path / "payload.bin"
+    path.write_bytes(b"payload")
+    atomic_io._fsync_file(path)
+    assert path.read_bytes() == b"payload"
+
+
 def test_cleanup_removes_only_atomic_part_files(tmp_path: Path) -> None:
     committed = tmp_path / "video.mp4"
     committed.write_bytes(b"ok")

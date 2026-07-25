@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 
 from app import errors, task_registry, worker
 from app.agent.api import router as agent_conversation_router
@@ -44,6 +45,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="漫剧 Agent 2.0", lifespan=lifespan)
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=3)
 
 
 @app.middleware("http")

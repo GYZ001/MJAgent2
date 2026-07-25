@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
-
 import pytest
 
-from app import auto, db
+from app import db
 from app.evidence import repository
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
 from app.orchestration.engine import WorkflowRecorder, fingerprint
@@ -219,9 +217,3 @@ def test_state_machine_uses_compare_and_set_and_restart_is_explicit(tmp_path, mo
     ).fetchone()
     assert run["status"] == "PAUSED_EXTERNAL"
     assert run["failure_code"] == "SERVICE_RESTART"
-
-
-def test_auto_no_longer_depends_on_removed_api_task_state() -> None:
-    source = inspect.getsource(auto)
-    assert "api._bible_tasks" not in source
-    assert "api._plan_task" not in source

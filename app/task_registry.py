@@ -47,22 +47,6 @@ def register(kind: str, key: str, task: asyncio.Task, *, project_id: str | None 
     return task
 
 
-def unregister(kind: str, key: str, *, task: asyncio.Task | None = None) -> bool:
-    """Forget an alias without cancelling the underlying task.
-
-    One coroutine may temporarily represent more than one business operation.  The
-    auto pipeline, for example, awaits bible generation inline and registers its
-    current task under the ``bible`` key so orphan recovery can see it.  Removing
-    that alias must not cancel the parent auto task.
-    """
-    token = (kind, key)
-    record = _records.get(token)
-    if record is None or (task is not None and record.task is not task):
-        return False
-    _records.pop(token, None)
-    return True
-
-
 def spawn(kind: str, key: str, coro: Coroutine[Any, Any, Any], *,
           project_id: str | None = None) -> asyncio.Task:
     if active(kind, key):

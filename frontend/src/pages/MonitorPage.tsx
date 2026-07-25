@@ -529,7 +529,7 @@ const JOB_STATUS_LABELS: Record<string, string> = {
 }
 
 const RECOVERY_WORKFLOW_LABELS: Record<string, string> = {
-  media: '参考图/视频', auto_project: '全自动项目', character_bible: '人物谱',
+  media: '参考图/视频', character_bible: '人物谱',
   character_references: '人物参考图', scene_references: '场景参考图', episode_mapping: '分集规划',
   screenplay: '剧本', storyboard: '分镜', delivery: '交付包',
 }
@@ -539,7 +539,7 @@ function jobStatusLabel(status: string) {
 }
 
 const WORKFLOW_LABELS: Record<string, string> = {
-  auto_project: '全自动制作', character_bible: '人物谱', character_references: '人物定妆照',
+  character_bible: '人物谱', character_references: '人物定妆照',
   scene_bible: '场景圣经', scene_references: '场景参考图', episode_mapping: '分集映射',
   screenplay: '剧本', storyboard: '分镜', scene_generation: '关键帧生成',
   video_generation: '视频生成', delivery: '交付',
@@ -827,7 +827,7 @@ export default function MonitorPage() {
     project_video_inflight_limit: '单项目上游在途上限',
     reference_prepared_backlog: '参考图领先视频槽位数',
     video_concurrency: '（兼容）视频并发数',
-    auto_concurrency: '（兼容）全自动并发',
+    auto_concurrency: '（兼容）旧版视频并发',
     episode_cost_limit_cny: '单集成本上限（¥）',
     use_character_refs: '定妆照参考图（true/false，人物一致性）',
     max_ref_images: '单镜头最多参考图数',

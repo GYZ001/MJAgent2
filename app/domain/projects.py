@@ -153,13 +153,24 @@ def _attach_scene_refs(conn, project_id: str, bible: dict) -> None:
 
 
 @router.get("/projects/{project_id}")
-def project_detail(project_id: str):
+def project_detail(
+    project_id: str,
+    view: str | None = None,
+    page: int = 1,
+    page_size: int = 15,
+    query: str = "",
+    status_filter: str = "all",
+):
+    if view not in (None, "bible", "scenes", "episodes", "picker"):
+        raise HTTPException(400, f"未知项目视图：{view}")
+    full = view is None
     p = dict(_project_or_404(project_id))
     conn = get_conn()
-    p["bible"] = json.loads(p["bible_json"]) if p["bible_json"] else None
+    include_bible = full or view in ("bible", "scenes")
+    p["bible"] = json.loads(p["bible_json"]) if include_bible and p["bible_json"] else None
     bible_artifact = (
         evidence_repository.get_artifact(p.get("bible_artifact_id"))
-        if p.get("bible_artifact_id") else None
+        if p.get("bible_artifact_id") and (full or view == "bible") else None
     )
     if bible_artifact:
         bible_artifact.pop("content_json", None)
@@ -195,19 +206,106 @@ def project_detail(project_id: str):
                 s["ref_image_url"] = None
             soverride = (s.get("scene_prompt_override") or "").strip()
             s["scene_prompt_effective"] = soverride or scene_ref_prompt(style, s.get("scene_canonical", ""))
-    p["key_timeline"] = json.loads(p["key_timeline"]) if p["key_timeline"] else []
-    p["chapters"] = rows_to_dicts(conn.execute(
-        "SELECT idx, title, char_count, summary IS NOT NULL AS has_summary, substr(content,1,200) AS preview "
-        "FROM chapters WHERE project_id=? ORDER BY idx",
-        (project_id,)).fetchall())
-    for ch in p["chapters"]:
-        ch["preview"] = chapter_preview(ch.pop("preview", ""))
+    p["key_timeline"] = (
+        json.loads(p["key_timeline"]) if p["key_timeline"] and (full or view == "bible") else []
+    )
+    p["chapter_count"] = int(conn.execute(
+        "SELECT COUNT(*) AS c FROM chapters WHERE project_id=?", (project_id,)
+    ).fetchone()["c"])
+    if full:
+        p["chapters"] = rows_to_dicts(conn.execute(
+            "SELECT idx, title, char_count, summary IS NOT NULL AS has_summary, substr(content,1,200) AS preview "
+            "FROM chapters WHERE project_id=? ORDER BY idx",
+            (project_id,)).fetchall())
+        for ch in p["chapters"]:
+            ch["preview"] = chapter_preview(ch.pop("preview", ""))
+    else:
+        p["chapters"] = []
     # 把每个角色的定妆照分段（适用集区间 + 图生图谱系）挂到 bible.characters 上，供横向预览。
-    if p["bible"]:
+    if p["bible"] and (full or view == "bible"):
         _attach_character_portraits(conn, project_id, p["bible"])
+    if p["bible"] and (full or view == "scenes"):
         _attach_scene_refs(conn, project_id, p["bible"])
-    p["episodes"] = rows_to_dicts(conn.execute(
-        "SELECT * FROM episodes WHERE project_id=? ORDER BY episode_no", (project_id,)).fetchall())
+
+    if view == "picker":
+        p["episodes"] = rows_to_dicts(conn.execute(
+            "SELECT id, episode_no, title FROM episodes WHERE project_id=? ORDER BY episode_no",
+            (project_id,),
+        ).fetchall())
+        return p
+    if view not in (None, "episodes"):
+        p["episodes"] = []
+        return p
+
+    if view == "episodes":
+        page = max(1, int(page))
+        page_size = max(1, min(int(page_size), 100))
+        clauses = ["project_id=?"]
+        params: list[object] = [project_id]
+        keyword = query.strip().lower()
+        if keyword:
+            clauses.append("(LOWER(title) LIKE ? OR CAST(episode_no AS TEXT) LIKE ? OR source_chapters LIKE ?)")
+            needle = f"%{keyword}%"
+            params.extend((needle, needle, needle))
+        if status_filter == "running":
+            clauses.append("(screenplay_status='running' OR status IN ('scripting','generating'))")
+        elif status_filter == "failed":
+            clauses.append("(screenplay_status IN ('failed','warning') OR status LIKE '%failed%')")
+        elif status_filter == "done":
+            clauses.append("status='done'")
+        elif status_filter == "pending":
+            clauses.append("(screenplay_status='pending' OR status IN ('planned','drafting'))")
+        elif status_filter != "all":
+            raise HTTPException(400, f"未知分集状态筛选：{status_filter}")
+        where = " AND ".join(clauses)
+        filtered_total = int(conn.execute(
+            f"SELECT COUNT(*) AS c FROM episodes WHERE {where}", params
+        ).fetchone()["c"])
+        offset = (page - 1) * page_size
+        p["episodes"] = rows_to_dicts(conn.execute(
+            f"SELECT * FROM episodes WHERE {where} ORDER BY episode_no LIMIT ? OFFSET ?",
+            [*params, page_size, offset],
+        ).fetchall())
+        p["episodes_total"] = filtered_total
+        p["episodes_page"] = page
+        p["episodes_page_count"] = max(1, (filtered_total + page_size - 1) // page_size)
+        p["episodes_query"] = keyword
+        p["episodes_status_filter"] = status_filter
+        counts = conn.execute(
+            """SELECT COUNT(*) AS total,
+                      SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) AS done,
+                      SUM(CASE WHEN screenplay_status='running' THEN 1 ELSE 0 END) AS screenplay_running,
+                      SUM(CASE WHEN status='scripting' THEN 1 ELSE 0 END) AS scripting,
+                      SUM(CASE WHEN screenplay_status IN ('pending','failed','warning')
+                                OR screenplay_json IS NULL THEN 1 ELSE 0 END) AS screenplay_todo,
+                      SUM(CASE WHEN screenplay_status='ready'
+                                AND status IN ('planned','script_failed') THEN 1 ELSE 0 END) AS storyboard_ready
+               FROM episodes WHERE project_id=?""",
+            (project_id,),
+        ).fetchone()
+        p["episode_counts"] = {key: int(counts[key] or 0) for key in counts.keys()}
+        p["episodes_busy"] = bool(
+            p["plan_status"] == "running"
+            or p["episode_counts"]["screenplay_running"]
+            or p["episode_counts"]["scripting"]
+        )
+    else:
+        p["episodes"] = rows_to_dicts(conn.execute(
+            "SELECT * FROM episodes WHERE project_id=? ORDER BY episode_no", (project_id,)).fetchall())
+    page_costs: dict[str, float] = {}
+    if view == "episodes" and p["episodes"]:
+        episode_ids = [ep["id"] for ep in p["episodes"]]
+        marks = ",".join("?" for _ in episode_ids)
+        cost_rows = conn.execute(
+            f"""SELECT s.episode_id, COALESCE(SUM(v.cost_cny), 0) AS cost_cny
+                 FROM shots s
+                 JOIN shot_versions v ON v.shot_id=s.id
+                 WHERE s.episode_id IN ({marks})
+                   AND v.status IN ('succeeded', 'running', 'queued')
+                 GROUP BY s.episode_id""",
+            episode_ids,
+        ).fetchall()
+        page_costs = {row["episode_id"]: float(row["cost_cny"] or 0) for row in cost_rows}
     for ep in p["episodes"]:
         ep["source_chapters"] = json.loads(ep["source_chapters"] or "[]")
         if ep.get("screenplay_json"):
@@ -231,7 +329,28 @@ def project_detail(project_id: str):
         except (TypeError, ValueError):
             _outline = None
         ep["storyboard_planned_shots"] = len(_outline["shots"]) if _outline and _outline.get("shots") else None
-        ep["cost_cny"] = worker.episode_cost(ep["id"])
+        ep["cost_cny"] = (
+            page_costs.get(ep["id"], 0.0)
+            if view == "episodes" else worker.episode_cost(ep["id"])
+        )
+    if view == "episodes":
+        chapter_ids = sorted({
+            int(ep["source_chapters"][0])
+            for ep in p["episodes"] if ep.get("source_chapters")
+        })
+        if chapter_ids:
+            marks = ",".join("?" for _ in chapter_ids)
+            p["chapters"] = rows_to_dicts(conn.execute(
+                f"SELECT idx, title, char_count, substr(content,1,200) AS preview "
+                f"FROM chapters WHERE project_id=? AND idx IN ({marks}) ORDER BY idx",
+                [project_id, *chapter_ids],
+            ).fetchall())
+            for chapter in p["chapters"]:
+                chapter["preview"] = chapter_preview(chapter.get("preview") or "")
+        first = conn.execute(
+            "SELECT MIN(idx) AS idx FROM chapters WHERE project_id=?", (project_id,)
+        ).fetchone()
+        p["first_chapter_idx"] = first["idx"]
     return p
 
 
@@ -283,53 +402,5 @@ async def delete_project(project_id: str):
     result = await dispatch("project.delete", {"project_id": project_id}, initiator="ui")
     return respond_ui(result)
 
-
-# ---------- 一键全自动成片 ----------
-
-async def _start_auto_core(
-    project_id: str,
-    export_dir: str | None,
-    mode: str = "to_storyboard",
-) -> dict:
-    """启动全流程自动化。mode=to_storyboard 停在分镜待确认；mode=full 自动确认并出片。"""
-    _project_or_404(project_id)
-    _require_harness_engine(project_id)
-    if mode not in ("to_storyboard", "full"):
-        raise HTTPException(400, f"无效的自动成片模式：{mode}")
-    from app import auto
-    if auto.is_running(project_id):
-        raise HTTPException(409, "该项目的自动成片已在进行中")
-    run_id = auto.start(project_id, export_dir=export_dir, mode=mode)
-    return {"status": "running", "run_id": run_id, "mode": mode}
-
-
-@router.post("/projects/{project_id}/auto")
-async def start_auto(project_id: str, body: dict | None = Body(None)):
-    from app.capabilities.dispatch import dispatch, respond_ui
-
-    body = body or {}
-    export_dir = body.get("export_dir")
-    mode = body.get("mode") or "to_storyboard"
-    result = await dispatch(
-        "production.auto_start",
-        {"project_id": project_id, "directory_grant": export_dir, "mode": mode},
-        initiator="ui",
-    )
-    return respond_ui(result)
-
-
-@router.get("/projects/{project_id}/auto/status")
-def auto_status(project_id: str):
-    _project_or_404(project_id)
-    from app import auto
-    return auto.status(project_id)
-
-
-@router.post("/projects/{project_id}/auto/cancel")
-async def cancel_auto(project_id: str):
-    from app.capabilities.dispatch import dispatch, respond_ui
-
-    result = await dispatch("production.auto_cancel", {"project_id": project_id}, initiator="ui")
-    return respond_ui(result)
 
 __all__ = [name for name in globals() if not name.startswith("__")]

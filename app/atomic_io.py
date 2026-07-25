@@ -21,6 +21,28 @@ def _sync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def _fsync_file(path: Path) -> None:
+    """Flush file contents to disk.
+
+    Windows ``FlushFileBuffers`` requires write access; opening in ``rb`` and
+    calling ``os.fsync`` raises ``OSError: [Errno 9] Bad file descriptor``.
+    Prefer ``O_RDWR``; fall back to best-effort if that is unavailable.
+    """
+    try:
+        descriptor = os.open(path, os.O_RDWR)
+    except OSError:
+        try:
+            descriptor = os.open(path, os.O_RDONLY)
+        except OSError:
+            return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
 def atomic_write_bytes(path: str | Path, value: bytes) -> Path:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -59,8 +81,7 @@ def atomic_copy(source: str | Path, destination: str | Path) -> Path:
     temporary = Path(temporary_name)
     try:
         shutil.copy2(source_path, temporary)
-        with temporary.open("rb") as handle:
-            os.fsync(handle.fileno())
+        _fsync_file(temporary)
         os.replace(temporary, target)
         _sync_directory(target.parent)
         return target
@@ -87,8 +108,7 @@ def atomic_zip_directory(source: str | Path, destination: str | Path) -> Path:
             for path in sorted(source_path.rglob("*")):
                 if path.is_file():
                     archive.write(path, path.relative_to(source_path).as_posix())
-        with temporary.open("rb") as handle:
-            os.fsync(handle.fileno())
+        _fsync_file(temporary)
         os.replace(temporary, target)
         _sync_directory(target.parent)
         return target
