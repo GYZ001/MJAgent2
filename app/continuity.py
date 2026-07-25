@@ -28,13 +28,9 @@ from app.spoken_contract import (
     RULE_SPOKEN_CAPACITY,
     build_timeline_from_segments,
     capacity_issue,
-    content_char_count,
-    effective_spoken_segments,
-    max_speech_chars,
     segments_from_dialogues,
     spoken_char_total,
     spoken_speakers,
-    spoken_text_of,
     synchronize_spoken_contract,
     validate_spoken_contract,
 )

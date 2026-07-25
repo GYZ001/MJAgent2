@@ -124,7 +124,6 @@ def _status_from_rows(shot, *, candidate_count: int, retake_count: int, job,
         next_stage = _NEXT.get(current_stage)
 
         try:
-            meta_attempt = 1
             # 轻量：不读巨型 image_inputs；retake_count 已由调用方传入
             attempt = max(1, int(retake_count) + 1)
             attempt_limit = 3

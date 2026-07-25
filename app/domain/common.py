@@ -42,6 +42,11 @@ BIBLE_TASK_TIMEOUT_S = 15 * 60
 BIBLE_INTERRUPTED_ERROR = "人物谱任务已中断（服务重载或后台任务丢失），请重新谱写。"
 FALLBACK_VISUAL_STYLE = "国漫风格，非真人CG渲染，统一电影感光影，暖灰色调"
 
+
+def _as_body_dict(body) -> dict:
+    """FastAPI ``Body(None)`` 在直接调用时会把默认值变成 Body 对象，不能当 dict 展开。"""
+    return body if isinstance(body, dict) else {}
+
 def _placeholder_bible() -> Bible:
     """剧本/分镜可在人物谱未完成时先独立跑；此处提供最小占位圣经供文本阶段使用。"""
     return Bible.model_validate({

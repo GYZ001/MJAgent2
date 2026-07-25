@@ -20,10 +20,9 @@ from app.continuity import (
     adaptation_hook_errors,
     sync_shot_continuity_fields,
     count_sequential_action_beats,
-    max_speech_chars,
     spoken_chars_from_shot,
 )
-from app.spoken_contract import spoken_text_of, content_char_count
+from app.spoken_contract import content_char_count, max_speech_chars, spoken_text_of
 from app.schemas import (Bible, EpisodeScreenplay, InformationItem, Shot, Storyboard,
                          StoryboardOutline, StoryEvent, SHOT_SIZES, CAMERA_MOVES, TRANSITIONS,
                          CONTINUITY_MODES, DELIVERY_OWNERS)
@@ -41,7 +40,6 @@ from app.renderability import (
     SCENE_OUTLINE_MAX,
     SCENE_OUTLINE_MIN,
     SHOT_HARD_MAX,
-    SHOT_SOFT_MAX,
     SHOT_SOFT_MIN,
     SPINE_BEATS_MAX,
     SPINE_BEATS_MIN,
@@ -561,7 +559,32 @@ FULL_SCRIPT_FORBIDDEN_TERMS = (
 SCRIPT_SCENE_HEADING_RE = re.compile(r"【场\s*\d+】")
 SCRIPT_DIALOGUE_LINE_RE = re.compile(r"^[^\n：]{1,16}(?:（[^）]{1,12}）)?：", re.M)
 SCRIPT_SOUND_LINE_RE = re.compile(r"^([^\n：（]{1,16})(?:（([^）]{1,12})）)?：(.+)$", re.M)
+# 模型偶发把「【场1】角色：台词」粘在同一行；剥场次标题后再识别说话人。
+_SCRIPT_GLUED_HEADING_DIALOGUE_RE = re.compile(
+    r"^【场\s*\d+】\s*([^\n：/（]{1,16})(?:（([^）]{1,12})）)?：(.+)$"
+)
 INNER_VOICE_MARKERS = ("内心", "心声", "OS", "os", "独白")
+
+
+def _iter_script_sound_matches(full_text: str):
+    """逐行提取剧本对白，避免把场次标题/地点梗概误判成说话人。"""
+    for raw_line in (full_text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if SCRIPT_SCENE_HEADING_RE.match(line):
+            glued = _SCRIPT_GLUED_HEADING_DIALOGUE_RE.match(line)
+            if glued and "/" not in glued.group(1):
+                yield glued
+            continue
+        match = SCRIPT_SOUND_LINE_RE.match(line)
+        if not match:
+            continue
+        speaker = match.group(1).strip()
+        # 地点梗概（含 /）或残留场次标记不是说话人
+        if "/" in speaker or "【" in speaker:
+            continue
+        yield match
 
 
 # ---------- 关键内容（必保留清单）模糊匹配工具 ----------
@@ -1119,13 +1142,15 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
     min_lines = max(6, len(scenes) * 2)
     if len(content_lines) < min_lines:
         errors.append("full_script_text 段落过少；请按场次标题、动作段、对白段分行书写，不要挤成一段梗概")
-    dialogue_lines = SCRIPT_DIALOGUE_LINE_RE.findall(full_text)
+    dialogue_lines = [
+        match.group(0) for match in _iter_script_sound_matches(full_text)
+    ]
     if len(dialogue_lines) < 2:
         errors.append("full_script_text 对白行过少；请按“角色名：台词”写出真正可演的对白")
     if bible_names:
         offbible_speakers = sorted({
             match.group(1).strip()
-            for match in SCRIPT_SOUND_LINE_RE.finditer(full_text)
+            for match in _iter_script_sound_matches(full_text)
             if match.group(1).strip() != "旁白"
             and match.group(1).strip() not in bible_names
             and not is_functional_extra(match.group(1).strip())
@@ -1192,7 +1217,7 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
             "；主线台词必须在剧本正文里实际出现，不能只列在清单里")
     if bible_names:
         script_speakers: dict[str, list[str]] = {}
-        for sm in SCRIPT_SOUND_LINE_RE.finditer(full_text):
+        for sm in _iter_script_sound_matches(full_text):
             sp = sm.group(1).strip()
             line_text = sm.group(3).strip()
             script_speakers.setdefault(sp, []).append(line_text)
@@ -1299,7 +1324,7 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
 def _screenplay_sound_stats(script: EpisodeScreenplay) -> dict[str, int]:
     full_text = (script.full_script_text or "").strip()
     stats = {"dialogues": 0, "inner": 0, "narration": 0, "quoted_voice": 0}
-    for match in SCRIPT_SOUND_LINE_RE.finditer(full_text):
+    for match in _iter_script_sound_matches(full_text):
         speaker = match.group(1).strip()
         parenthetical = (match.group(2) or "").strip()
         if speaker == "旁白":
@@ -1331,7 +1356,6 @@ def validate_storyboard_soundtrack(board: Storyboard, screenplay: EpisodeScreenp
     if script_sound_cues == 0:
         return errors
 
-    expected_shots = max(1, len(shots))
     script_dialogue_targets = stats["dialogues"] + stats["quoted_voice"]
     if script_dialogue_targets >= 2:
         dialogue_count = sum(len(shot.dialogues) for shot in shots)

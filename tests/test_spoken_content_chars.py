@@ -1,13 +1,9 @@
 """口播去标点 + 禁止旁白合同。"""
 from __future__ import annotations
 
-from app.continuity import (
-    content_char_count,
-    max_speech_chars,
-    speech_capacity_errors,
-    spoken_chars_from_shot,
-)
-from app.schemas import AudioTimelineItem, Dialogue, Shot, Storyboard
+from app.continuity import speech_capacity_errors, spoken_chars_from_shot
+from app.spoken_contract import content_char_count, max_speech_chars
+from app.schemas import AudioTimelineItem, Dialogue, Storyboard
 from app.validators import strip_all_narration, validate_storyboard
 from tests.test_validators import _bible, _compact_shot
 

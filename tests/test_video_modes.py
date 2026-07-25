@@ -603,6 +603,38 @@ def test_consistency_agent_skips_without_anchor(monkeypatch) -> None:
     assert [a.id for a in result] == ["g1"]
 
 
+def test_consistency_check_failure_does_not_fake_perfect_score(monkeypatch, tmp_path) -> None:
+    """VLM 失败时不得返回 consistency=1.0 伪造成「完美一致」。"""
+    bible, shot = _bible(), _shot(shot_no=2)
+    _consistency_settings(monkeypatch, retries=1)
+
+    async def boom(*_a, **_k):
+        raise RuntimeError("vlm down")
+
+    img = tmp_path / "x.jpg"
+    img.write_bytes(b"fake-image")
+    monkeypatch.setattr(video_modes.hiagent, "vlm_check", boom)
+    monkeypatch.setattr(video_modes.hiagent, "encode_image_file", lambda _p: "YmFzZTY0")
+    cand = ReferenceImageAsset(
+        id="g1", url="u", type="plot_key_frame", source="seedream_generated",
+        path=str(img), qualityScore=0.9, selectedForSeedance=True,
+    )
+    anchor = ReferenceImageAsset(
+        id="p1", url="u2", type="character_sheet", source="asset_library",
+        path=str(img), qualityScore=0.95, selectedForSeedance=True,
+    )
+    report = asyncio.run(video_modes.review_reference_consistency(
+        candidates=[cand], anchors=[anchor], shot=shot, bible=bible))
+    assert report.get("failed") is True
+    assert report["candidates"][0]["consistency"] is None
+    assert report["candidates"][0].get("check_failed") is True
+
+    kept = asyncio.run(video_modes._enforce_reference_consistency(
+        selected=[cand, anchor], shot=shot, bible=bible, project_id="p", episode_no=1))
+    assert {a.id for a in kept} == {"g1", "p1"}
+    assert (cand.qa or {}).get("consistency_check_failed") is True
+
+
 def test_compose_reference_score_weights() -> None:
     """综合分以绝对分为底，一致性只降不抬；硬伤压乘数；冗余软惩罚。"""
     base = video_modes.compose_reference_score(absolute_quality=0.7, consistency=1.0)

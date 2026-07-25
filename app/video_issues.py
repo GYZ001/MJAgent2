@@ -1,7 +1,6 @@
 """视频失败 → 标准 Issue 纯翻译层（无副作用、不写库）。"""
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from app.db import get_setting
@@ -321,7 +320,6 @@ def persist_shot_issue(
     """
     if not issues:
         return None
-    import json
     from app.evidence import repository as evidence_repository
     from app.harness.types import Evaluation, EvidenceArtifact
 

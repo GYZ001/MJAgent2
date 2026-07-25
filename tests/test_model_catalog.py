@@ -153,6 +153,28 @@ def test_media_probe_accepts_explicit_endpoint_type_mismatch(monkeypatch) -> Non
     assert result["probe"] == "model_recognition"
 
 
+def test_probe_openai_model_rejects_private_ssrf_targets() -> None:
+    for url in (
+        "http://127.0.0.1:8080/v1",
+        "http://localhost/v1",
+        "http://169.254.169.254/latest/meta-data",
+        "http://10.0.0.8/v1",
+    ):
+        try:
+            api._assert_public_http_url(url)
+            raise AssertionError(f"expected reject for {url}")
+        except HTTPException as exc:
+            assert exc.status_code == 422
+
+
+def test_browse_blocks_sensitive_system_paths() -> None:
+    try:
+        api.browse_dir("/etc")
+        raise AssertionError("expected /etc browse to fail")
+    except HTTPException as exc:
+        assert exc.status_code == 403
+
+
 def test_relative_media_url_is_resolved_against_provider_origin() -> None:
     resolved = hiagent._absolute_provider_url(
         "/api/proxy/down?key=abc", "https://hia.example.com/api/aigw/v1")

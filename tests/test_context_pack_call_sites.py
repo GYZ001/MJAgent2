@@ -12,6 +12,7 @@ class RecordingRecorder:
     def __init__(self) -> None:
         self.context_manifest: dict[str, Any] | None = None
         self.outcome: str | None = None
+        self.run_id: str = "run_test"
 
     def start(self) -> None:
         pass

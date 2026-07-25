@@ -399,7 +399,7 @@ async def restore_reference_image(version_id: str, ref_id: str, body: dict | Non
     """把废弃画廊里的参考图恢复为可用（重新计入喂给视频模型的参考图）。
     若该图曾被 QA 淘汰，body.override_reason 必填，写入审计字段。"""
     from app.capabilities.dispatch import ui_route
-    body = body or {}
+    body = _as_body_dict(body)
     routed = await ui_route(
         "reference.review",
         {

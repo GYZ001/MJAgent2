@@ -499,60 +499,6 @@ def select_best_video_candidate(
     }
 
 
-def record_scene_candidate(scene_id: str, *, step_run_id: str | None = None) -> dict[str, Any]:
-    conn = get_conn()
-    row = conn.execute(
-        """SELECT sc.*, s.storyboard_artifact_id FROM shot_scenes sc
-           JOIN shots s ON s.id=sc.shot_id WHERE sc.id=?""",
-        (scene_id,),
-    ).fetchone()
-    if not row or not row["image_path"]:
-        raise ValueError("关键帧候选尚未落盘")
-    if row["artifact_id"]:
-        artifact = repository.get_artifact(row["artifact_id"])
-        if artifact:
-            return artifact
-    technical = validate_image_file(row["image_path"])
-    qa = json.loads(row["qa_json"] or "{}")
-    artifact = repository.create_artifact(
-        EvidenceArtifact(
-            type="shot_keyframe",
-            scope_type="shot",
-            scope_id=row["shot_id"],
-            status="validated" if technical["passed"] else "candidate",
-            trust_level="T3" if technical["passed"] and qa and not qa.get("qa_recovered") else "T1",
-            file_path=row["image_path"],
-            content={"scene_id": scene_id, "kind": row["kind"], "version_no": row["version_no"]},
-            parent_artifact_ids=[row["storyboard_artifact_id"]] if row["storyboard_artifact_id"] else [],
-            contract_version="keyframe-1.0.0",
-        ),
-        step_run_id=step_run_id,
-    )
-    repository.create_evaluation(
-        artifact["id"],
-        Evaluation(
-            evaluator_type="file",
-            evaluator_name="image_technical_validator",
-            evaluator_version="1.0.0",
-            status="passed" if technical["passed"] else "failed",
-            hard_gate_passed=technical["passed"],
-            score=100 if technical["passed"] else 0,
-            issues=technical["issues"],
-            evidence=technical["evidence"],
-        ),
-        step_run_id=step_run_id,
-    )
-    if qa:
-        repository.create_evaluation(
-            artifact["id"],
-            _model_evaluation(qa, subject=scene_id, evaluator_name="keyframe_vlm_qa"),
-            step_run_id=step_run_id,
-        )
-    conn.execute("UPDATE shot_scenes SET artifact_id=? WHERE id=?", (artifact["id"], scene_id))
-    conn.commit()
-    return artifact
-
-
 def record_reference_asset(
     *,
     asset_type: str,

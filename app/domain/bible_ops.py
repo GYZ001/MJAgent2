@@ -419,7 +419,7 @@ async def _start_bible_core(project_id: str, feedback: str) -> dict:
 async def start_bible(project_id: str, body: dict | None = Body(None)):
     from app.capabilities.dispatch import dispatch, respond_ui
 
-    feedback = str((body or {}).get("feedback") or "")
+    feedback = str(_as_body_dict(body).get("feedback") or "")
     result = await dispatch(
         "bible.generate", {"project_id": project_id, "feedback": feedback}, initiator="ui"
     )

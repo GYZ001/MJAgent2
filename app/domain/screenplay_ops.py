@@ -395,9 +395,10 @@ async def _recorded_screenplay_task(
 @router.post("/episodes/{episode_id}/screenplay")
 async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
     from app.capabilities.dispatch import ui_route
+    body = _as_body_dict(body)
     routed = await ui_route(
         "screenplay.generate",
-        {"episode_id": episode_id, "force": bool((body or {}).get("force"))},
+        {"episode_id": episode_id, "force": bool(body.get("force"))},
     )
     if routed is not None:
         return routed
@@ -407,7 +408,7 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
         raise HTTPException(409, "分镜正在生成中，不能同时重写剧本")
     if ep["screenplay_status"] == "running" and _screenplay_task_active(episode_id):
         raise HTTPException(409, "剧本正在生成中")
-    force = bool((body or {}).get("force"))
+    force = bool(body.get("force"))
     conn = get_conn()
     has_shots = conn.execute("SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)).fetchone()["c"] > 0
     if has_shots and not force:

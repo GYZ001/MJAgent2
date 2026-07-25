@@ -7,7 +7,6 @@ from app.schemas import (
     InformationItem,
     PlotSpine,
     PlotSpineBeat,
-    Shot,
     Storyboard,
     StoryboardOutline,
     StoryboardOutlineShot,
