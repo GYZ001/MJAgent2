@@ -64,6 +64,43 @@ async def cancel_run(run_id: str):
     run = repository.get_run(run_id)
     if not run:
         raise HTTPException(404, "运行不存在")
+    # 视频补齐：即使 Run 已因崩溃结束，也要允许取消并复位集状态，否则评审墙会死锁
+    if run["workflow_type"] == "episode_video_completion":
+        from app.completion_grant import revoke_grant
+        from app.video_supervisor import load_latest_checkpoint, save_checkpoint
+
+        cancelled = False
+        if run["status"] in repository.ACTIVE_RUN_STATUSES:
+            cancelled = await task_registry.cancel_and_wait("video_completion", run["scope_id"])
+            if not cancelled:
+                WorkflowRecorder(run_id).cancel("已取消视频补齐")
+                cancelled = True
+        else:
+            cancelled = True
+        cp = load_latest_checkpoint(run["scope_id"])
+        if cp:
+            if cp.grant_id:
+                try:
+                    revoke_grant(cp.grant_id)
+                except Exception:  # noqa: BLE001
+                    pass
+            cp.phase = "CANCELLED"
+            cp.outcome = "CANCELLED"
+            save_checkpoint(cp, run_id=run_id)
+        try:
+            get_conn().execute(
+                """UPDATE episodes
+                   SET video_completion_mode='quick',
+                       active_video_run_id=NULL,
+                       video_control_json=NULL,
+                       status=CASE WHEN status='generating' THEN 'confirmed' ELSE status END
+                   WHERE id=?""",
+                (run["scope_id"],),
+            )
+            get_conn().commit()
+        except Exception:  # noqa: BLE001
+            pass
+        return {"cancelled": cancelled, "run": repository.get_run(run_id)}
     if run["status"] not in repository.ACTIVE_RUN_STATUSES:
         raise HTTPException(409, "运行已结束，不能取消")
     if run["workflow_type"] == "screenplay":
@@ -78,33 +115,6 @@ async def cancel_run(run_id: str):
         if not cancelled:
             WorkflowRecorder(run_id).cancel("已取消暂停中的运行")
             cancelled = True
-        return {"cancelled": cancelled, "run": repository.get_run(run_id)}
-    if run["workflow_type"] == "episode_video_completion":
-        from app.completion_grant import revoke_grant
-        from app.video_supervisor import load_latest_checkpoint, save_checkpoint
-
-        cancelled = await task_registry.cancel_and_wait("video_completion", run["scope_id"])
-        cp = load_latest_checkpoint(run["scope_id"])
-        if cp:
-            if cp.grant_id:
-                try:
-                    revoke_grant(cp.grant_id)
-                except Exception:  # noqa: BLE001
-                    pass
-            cp.phase = "CANCELLED"
-            cp.outcome = "CANCELLED"
-            save_checkpoint(cp, run_id=run_id)
-        if not cancelled:
-            WorkflowRecorder(run_id).cancel("已取消视频补齐")
-            cancelled = True
-        try:
-            get_conn().execute(
-                "UPDATE episodes SET video_completion_mode='quick' WHERE id=?",
-                (run["scope_id"],),
-            )
-            get_conn().commit()
-        except Exception:  # noqa: BLE001
-            pass
         return {"cancelled": cancelled, "run": repository.get_run(run_id)}
     task = task_registry.get("run", run_id)
     if task and not task.done():
@@ -274,6 +284,8 @@ async def pause_run(run_id: str):
     if not run:
         raise HTTPException(404, "运行不存在")
     if run["status"] not in repository.ACTIVE_RUN_STATUSES:
+        if run["workflow_type"] == "episode_video_completion":
+            raise HTTPException(409, "补齐运行已结束。请点「取消」复位面板，或清空本集后重试")
         raise HTTPException(409, "运行已结束，不能暂停")
     if run["workflow_type"] == "storyboard":
         from app.storyboard_control import request_control

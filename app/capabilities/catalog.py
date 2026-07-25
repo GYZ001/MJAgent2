@@ -1050,6 +1050,10 @@ def _register_exemptions(registry) -> None:
         "拒绝卡协议入口，不执行领域命令",
     )
     registry.exempt_rest(
+        "POST /api/episodes/{episode_id}/video-completion/reset",
+        "评审墙死锁解锁：强制停止补齐 Supervisor 并复位面板；不创建新付费任务",
+    )
+    registry.exempt_rest(
         "POST /mcp",
         "MCP JSON-RPC 传输端点；具体 tools/call 映射到 Capability Registry",
     )

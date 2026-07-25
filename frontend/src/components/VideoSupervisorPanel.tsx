@@ -74,6 +74,13 @@ const PHASE_LABEL: Record<string, string> = {
 }
 
 const TERMINAL = new Set(['SUCCEEDED_COVERED', 'CANCELLED'])
+const ACTION_OK: Record<string, string> = {
+  pause: '已请求暂停（下一轮生效）',
+  handoff: '已转交人工',
+  cancel: '已取消全片补齐',
+  resume: '已继续补齐',
+  topup: '已追加预算并继续',
+}
 
 export default function VideoSupervisorPanel({
   api,
@@ -82,6 +89,7 @@ export default function VideoSupervisorPanel({
   supervisor,
   running,
   onChanged,
+  onToast,
 }: {
   api: typeof import('../api').api
   episodeId: string
@@ -89,6 +97,7 @@ export default function VideoSupervisorPanel({
   supervisor: VideoSupervisorSnapshot | null | undefined
   running?: boolean
   onChanged?: () => void
+  onToast?: (msg: string) => void
 }) {
   const [busy, setBusy] = useState(false)
   const [live, setLive] = useState<VideoSupervisorSnapshot | null>(null)
@@ -98,7 +107,7 @@ export default function VideoSupervisorPanel({
     const load = () => {
       api.get(`/episodes/${episodeId}/video-completion`).then((data: VideoSupervisorSnapshot) => {
         if (!cancelled) setLive(data)
-      }).catch(() => { /* ignore */ })
+      }).catch(() => { /* 轮询失败时保留上次快照，避免刷屏 */ })
     }
     load()
     const id = window.setInterval(load, running ? 3000 : 10000)
@@ -123,7 +132,9 @@ export default function VideoSupervisorPanel({
   const bPct = total > 0 ? (b / total) * 100 : 0
   const waitingAuth = phase === 'WAITING_AUTHORIZATION'
   const succeeded = phase === 'SUCCEEDED_COVERED'
+  const cancelledPhase = phase === 'CANCELLED'
   const pausedLike = ['PAUSED_EXTERNAL', 'PAUSED_BUDGET', 'WAITING_HUMAN', 'WAITING_AUTHORIZATION'].includes(phase)
+  const resolvedRunId = runId || snap?.active_video_run_id || null
   const activelyRunning = Boolean(
     running
     || snap?.running
@@ -145,10 +156,27 @@ export default function VideoSupervisorPanel({
           body.add_wall_clock_s = 3600
         }
         await api.post(`/episodes/${episodeId}/video-completion`, body)
-      } else if (runId || snap?.active_video_run_id) {
-        await api.post(`/runs/${runId || snap?.active_video_run_id}/${action === 'cancel' ? 'cancel' : action}`)
+      } else if (action === 'cancel') {
+        if (resolvedRunId) {
+          try {
+            await api.post(`/runs/${resolvedRunId}/cancel`)
+          } catch {
+            await api.resetVideoCompletion(episodeId)
+          }
+        } else {
+          await api.resetVideoCompletion(episodeId)
+        }
+      } else if (resolvedRunId) {
+        await api.post(`/runs/${resolvedRunId}/${action}`)
+      } else {
+        throw new Error('没有可控制的补齐运行。请点「取消」复位，或清空本集后重试')
       }
+      onToast?.(ACTION_OK[action] || '操作已提交')
       onChanged?.()
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      onToast?.(msg)
+      throw e
     } finally {
       setBusy(false)
     }
@@ -199,7 +227,7 @@ export default function VideoSupervisorPanel({
         </div>
       )}
 
-      {uncovered.length > 0 && (
+      {uncovered.length > 0 && !cancelledPhase && (
         <ul className="vsp-issues">
           {uncovered.map(e => (
             <li key={e.shot_no}>
@@ -222,8 +250,12 @@ export default function VideoSupervisorPanel({
         </div>
       )}
 
+      {cancelledPhase && (
+        <div className="vsp-plan">补齐已取消。可重新启动，或清空本集回到空白状态。</div>
+      )}
+
       <div className="vsp-actions">
-        {!pausedLike && !succeeded && (runId || snap?.active_video_run_id) && (
+        {!pausedLike && !succeeded && !cancelledPhase && (
           <>
             <AsyncButton className="btn ghost small" busyLabel="…" onAction={() => runAction('pause')} disabled={busy}>暂停</AsyncButton>
             <AsyncButton className="btn ghost small" busyLabel="…" onAction={() => runAction('handoff')} disabled={busy}>转人工</AsyncButton>
@@ -231,9 +263,15 @@ export default function VideoSupervisorPanel({
           </>
         )}
         {(waitingAuth || phase === 'PAUSED_EXTERNAL' || phase === 'WAITING_HUMAN') && (
-          <AsyncButton className="btn primary small" busyLabel="…" onAction={() => runAction(waitingAuth ? 'topup' : 'resume')} disabled={busy}>
-            {waitingAuth ? '追加预算并继续' : '继续补齐'}
-          </AsyncButton>
+          <>
+            <AsyncButton className="btn primary small" busyLabel="…" onAction={() => runAction(waitingAuth ? 'topup' : 'resume')} disabled={busy}>
+              {waitingAuth ? '追加预算并继续' : '继续补齐'}
+            </AsyncButton>
+            <AsyncButton className="btn ghost small danger" busyLabel="…" onAction={() => runAction('cancel')} disabled={busy}>取消</AsyncButton>
+          </>
+        )}
+        {cancelledPhase && (
+          <AsyncButton className="btn ghost small" busyLabel="…" onAction={() => runAction('cancel')} disabled={busy}>关闭面板</AsyncButton>
         )}
       </div>
     </div>

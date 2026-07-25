@@ -392,8 +392,11 @@ export default function WallPage() {
     setClearMenuOpen(false)
     if (!confirm(
       `确认清空第 ${ep.episode_no} 集全部 ${shots.length} 镜的参考图、视频与模型分析结果？\n`
+      + `同时会停止全片补齐 Supervisor。\n`
       + `（操作不可恢复）`,
     )) return
+    setSupervisorKickoff(false)
+    videoTimer.clear()
     await t(() => api.clearEpisodeArtifacts(ep.id), '本集已清空')
   }
 
@@ -488,7 +491,10 @@ export default function WallPage() {
         </div>
       </div>
 
-      {(supervisorLive || ep.video_supervisor || ep.video_completion_mode === 'complete' || ep.active_video_run_id) && (
+      {(supervisorLive
+        || ep.video_completion_mode === 'complete'
+        || (ep.active_video_run_id && !supervisorTerminal)
+        || (ep.video_supervisor && !supervisorTerminal)) && (
         <VideoSupervisorPanel
           api={api}
           episodeId={ep.id}
@@ -496,6 +502,7 @@ export default function WallPage() {
           supervisor={ep.video_supervisor as import('../components/VideoSupervisorPanel').VideoSupervisorSnapshot | null}
           running={supervisorLive || ep.status === 'generating'}
           onChanged={() => void refreshAll()}
+          onToast={showToast}
         />
       )}
 

@@ -52,10 +52,14 @@ def reconcile_episode_generation_status(episode_id: str) -> bool:
         try:
             from app.video_supervisor import load_latest_checkpoint
             cp = load_latest_checkpoint(episode_id)
-            if cp is not None and cp.phase not in {"SUCCEEDED_COVERED", "CANCELLED"}:
+            # 仅在故意暂停/等待授权时保留 generating；崩溃中途不得锁死
+            if cp is not None and cp.phase in {
+                "PAUSED_EXTERNAL", "PAUSED_BUDGET",
+                "WAITING_AUTHORIZATION", "WAITING_HUMAN",
+            }:
                 return False
         except Exception:  # noqa: BLE001
-            return False
+            pass
     changed = conn.execute(
         "UPDATE episodes SET status='confirmed' WHERE id=? AND status='generating'",
         (episode_id,),

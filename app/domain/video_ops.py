@@ -266,7 +266,53 @@ async def clear_episode_artifacts(episode_id: str):
     if routed is not None:
         return routed
     _episode_or_404(episode_id)
+    await reset_video_completion_state(episode_id, reason="CLEARED")
     return worker.clear_episode_artifacts(episode_id)
+
+
+async def reset_video_completion_state(episode_id: str, *, reason: str = "CANCELLED") -> dict:
+    """停止全片补齐 Supervisor，并把集级补齐状态复位，避免评审墙死锁。"""
+    from app import task_registry
+    from app.completion_grant import revoke_grant
+    from app.video_control import request_control
+    from app.video_supervisor import load_latest_checkpoint, save_checkpoint
+
+    _ensure_video_episode_columns()
+    cancelled = await task_registry.cancel_and_wait("video_completion", episode_id)
+    try:
+        request_control(episode_id, "clear")
+    except Exception:  # noqa: BLE001
+        pass
+    cp = load_latest_checkpoint(episode_id)
+    if cp:
+        if cp.grant_id:
+            try:
+                revoke_grant(cp.grant_id)
+            except Exception:  # noqa: BLE001
+                pass
+        if cp.phase not in {"SUCCEEDED_COVERED", "CANCELLED"}:
+            cp.phase = "CANCELLED"
+            cp.outcome = reason
+            save_checkpoint(cp, run_id=cp.run_id)
+    conn = get_conn()
+    conn.execute(
+        """UPDATE episodes
+           SET video_completion_mode='quick',
+               active_video_run_id=NULL,
+               video_control_json=NULL,
+               status=CASE WHEN status='generating' THEN 'confirmed' ELSE status END
+           WHERE id=?""",
+        (episode_id,),
+    )
+    conn.commit()
+    return {"episode_id": episode_id, "cancelled_task": bool(cancelled), "reason": reason}
+
+
+@router.post("/episodes/{episode_id}/video-completion/reset")
+async def reset_video_completion(episode_id: str):
+    """强制结束补齐 Supervisor 并复位面板状态（不清空已有视频文件）。"""
+    _episode_or_404(episode_id)
+    return await reset_video_completion_state(episode_id, reason="RESET")
 
 
 @router.post("/shots/{shot_id}/clear-artifacts")
@@ -865,23 +911,29 @@ def get_video_completion(episode_id: str):
     )
     from app.video_cost_model import predict_episode_completion_cost
     cp = load_latest_checkpoint(episode_id)
-    ledger = rebuild_coverage_ledger(episode_id, cp=cp)
-    proj = public_checkpoint_projection(cp) or {}
-    proj["ledger"] = {
-        "shots_total": ledger.shots_total,
-        "grades": ledger.grades,
-        "coverage_rate": ledger.coverage_rate,
-        "fallback_quota": ledger.fallback_quota,
-        "cost_spent": ledger.cost_spent,
-        "entries": [e.model_dump(mode="json") for e in ledger.entries],
-    }
     try:
-        uncovered_ids = [e.shot_id for e in ledger.entries if e.grade == "C"]
-        proj["cost_forecast"] = predict_episode_completion_cost(
-            episode_id, uncovered_shot_ids=uncovered_ids,
-        )
-    except Exception:  # noqa: BLE001
+        ledger = rebuild_coverage_ledger(episode_id, cp=cp)
+        proj = public_checkpoint_projection(cp) or {}
+        proj["ledger"] = {
+            "shots_total": ledger.shots_total,
+            "grades": ledger.grades,
+            "coverage_rate": ledger.coverage_rate,
+            "fallback_quota": ledger.fallback_quota,
+            "cost_spent": ledger.cost_spent,
+            "entries": [e.model_dump(mode="json") for e in ledger.entries],
+        }
+        try:
+            uncovered_ids = [e.shot_id for e in ledger.entries if e.grade == "C"]
+            proj["cost_forecast"] = predict_episode_completion_cost(
+                episode_id, uncovered_shot_ids=uncovered_ids,
+            )
+        except Exception:  # noqa: BLE001
+            proj["cost_forecast"] = None
+    except Exception as exc:  # noqa: BLE001 — 台账失败时仍返回 checkpoint，避免面板整页 500
+        proj = public_checkpoint_projection(cp) or {}
+        proj["ledger"] = {"shots_total": 0, "grades": {}, "coverage_rate": 0.0, "entries": []}
         proj["cost_forecast"] = None
+        proj["ledger_error"] = str(exc)
     conn = get_conn()
     ep = conn.execute(
         "SELECT active_video_run_id, video_completion_mode FROM episodes WHERE id=?",

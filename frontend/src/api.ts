@@ -142,6 +142,8 @@ export const api = {
     request('POST', `/episodes/${episodeId}/video-completion`, body || {}),
   getVideoCompletion: (episodeId: string) =>
     request('GET', `/episodes/${episodeId}/video-completion`),
+  resetVideoCompletion: (episodeId: string) =>
+    request('POST', `/episodes/${episodeId}/video-completion/reset`),
   projectVideoCompletion: (projectId: string, body?: Record<string, unknown>) =>
     request('POST', `/projects/${projectId}/video-completion`, body || {}),
   shotGenerate: (shotId: string, promptOverride?: string, reroll?: boolean, withCritique?: boolean) =>

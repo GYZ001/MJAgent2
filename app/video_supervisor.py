@@ -252,6 +252,7 @@ def public_checkpoint_projection(cp: VideoSupervisorCheckpoint | None) -> dict[s
 
 
 def _human_adopted(conn, shot_id: str) -> bool:
+    """是否存在人工采用 Gate。``gate_decisions`` 表无 payload_json 列，勿查询该列。"""
     row = conn.execute(
         """SELECT id FROM gate_decisions
            WHERE gate_key='video_adoption' AND decision IN ('approve','approve_with_risk')
@@ -261,20 +262,7 @@ def _human_adopted(conn, shot_id: str) -> bool:
            LIMIT 1""",
         (shot_id,),
     ).fetchone()
-    if row:
-        return True
-    # 兼容：若迁移后存在 payload_json，按 shot_id 兜底匹配
-    try:
-        row2 = conn.execute(
-            """SELECT id FROM gate_decisions
-               WHERE gate_key='video_adoption' AND decision IN ('approve','approve_with_risk')
-                 AND (payload_json LIKE ? OR payload_json LIKE ?)
-               LIMIT 1""",
-            (f'%"{shot_id}"%', f"%{shot_id}%"),
-        ).fetchone()
-        return bool(row2)
-    except Exception:  # noqa: BLE001 — 列不存在时忽略
-        return False
+    return bool(row)
 
 
 def _compute_chains(shot_rows: list[Any]) -> dict[str, tuple[int, int, int]]:
