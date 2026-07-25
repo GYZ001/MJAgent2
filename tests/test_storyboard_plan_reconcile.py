@@ -105,3 +105,38 @@ def test_missing_outline_is_noop(tmp_path, monkeypatch) -> None:
     episode_id = _setup_db(tmp_path, monkeypatch, planned=3)
     conn = db.get_conn()
     assert api._reconcile_storyboard_plan(conn, episode_id, 2, None, [_shot(1)], 0) is None
+
+
+def test_soft_gap_continue_blocked_when_plan_exhausted() -> None:
+    """P0：12/12 大纲已跑完时，禁止因「继续补镜」再开第 13 镜。"""
+    residual = ["本集整集必保留内容/声轨尚未达标，第 12 镜暂不能收尾：请将 is_final 设为 false 继续补镜，在后续镜头补齐"]
+    assert api._can_continue_for_soft_gap(
+        is_final=True,
+        completed_count=12,
+        planned_count=12,
+        max_shots=20,
+        residual=residual,
+    ) is False
+
+
+def test_soft_gap_continue_allowed_while_plan_has_remaining_beats() -> None:
+    """计划尚未跑完（例如 covers 语义拆分胀到 13）时，软缺口仍可续跑下一计划镜。"""
+    residual = ["本集整集必保留内容/声轨尚未达标，第 12 镜暂不能收尾：请将 is_final 设为 false 继续补镜，在后续镜头补齐"]
+    assert api._can_continue_for_soft_gap(
+        is_final=True,
+        completed_count=12,
+        planned_count=13,
+        max_shots=20,
+        residual=residual,
+    ) is True
+
+
+def test_soft_gap_continue_blocked_at_soft_max_even_without_plan() -> None:
+    residual = ["本集整集必保留内容/声轨尚未达标，第 16 镜暂不能收尾：请将 is_final 设为 false 继续补镜，在后续镜头补齐"]
+    assert api._can_continue_for_soft_gap(
+        is_final=True,
+        completed_count=16,
+        planned_count=0,
+        max_shots=20,
+        residual=residual,
+    ) is False

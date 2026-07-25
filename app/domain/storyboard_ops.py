@@ -219,6 +219,40 @@ def _finalize_storyboard_evidence(episode_id: str, board: Storyboard) -> str:
     return str(artifact["id"])
 
 
+def _soft_gap_continue_residual(residual: list[str]) -> bool:
+    """是否仅为「暂不能收尾 / 继续补镜」软缺口（可清 is_final 续跑的那一类）。"""
+    return (
+        len(residual) == 1
+        and "暂不能收尾" in residual[0]
+        and "继续补镜" in residual[0]
+    )
+
+
+def _can_continue_for_soft_gap(
+    *,
+    is_final: bool,
+    completed_count: int,
+    planned_count: int,
+    max_shots: int,
+    residual: list[str],
+) -> bool:
+    """软缺口是否允许再开下一镜。
+
+    有大纲时：只有计划里还剩未执行节拍才允许续跑（covers 语义拆分胀长后 planned_count 会变大）。
+    计划已跑完、或已到软预算/硬上限时，禁止再发明大纲外幻觉镜。
+    """
+    from app.renderability import SHOT_SOFT_MAX
+
+    if not is_final:
+        return False
+    if completed_count >= max_shots or completed_count >= SHOT_SOFT_MAX:
+        return False
+    # planned_count>0：大纲驱动；已达当前计划长度则禁止计划外补镜。
+    if planned_count > 0 and completed_count >= planned_count:
+        return False
+    return _soft_gap_continue_residual(residual)
+
+
 def _reconcile_storyboard_plan(conn, episode_id: str, episode_no: int,
                               outline: StoryboardOutline | None, completed: list[Shot],
                               persisted_total: int) -> tuple[int, int, str] | None:
@@ -456,21 +490,40 @@ async def _storyboard_task(episode_id: str, *, resume: bool = True):
             if revision is not None:
                 planned_persisted = revision[1]
             residual = list(getattr(draft, "residual_errors", []) or [])
+            planned_now = len(outline.shots) if (outline and outline.shots) else 0
             if residual:
-                # Renderability：到软预算后不再因「继续补镜」清掉 is_final 硬往后续塞幻觉镜。
-                can_continue = (
-                    bool(draft.is_final)
-                    and len(completed) < max_shots
-                    and len(completed) < SHOT_SOFT_MAX
-                    and len(residual) == 1
-                    and "暂不能收尾" in residual[0]
-                    and "继续补镜" in residual[0]
+                # Renderability：到软预算后、或大纲计划已跑完后，不再因「继续补镜」清掉 is_final
+                # 硬往后续塞幻觉镜（生产事故：12/12 通过后仍冒出无剧情第 13 镜）。
+                can_continue = _can_continue_for_soft_gap(
+                    is_final=bool(draft.is_final),
+                    completed_count=len(completed),
+                    planned_count=planned_now,
+                    max_shots=max_shots,
+                    residual=residual,
                 )
                 if can_continue:
                     # 这类 residual 的意思是"本镜不能当最后一镜"，不是本镜结构坏了；
                     # 保留它作为过渡镜，继续把缺失关键内容喂给后续镜头。
                     object.__setattr__(draft, "is_final", False)
                     shot.is_final = False
+                elif (
+                    bool(draft.is_final)
+                    and _soft_gap_continue_residual(residual)
+                    and (
+                        (planned_now > 0 and len(completed) >= planned_now)
+                        or len(completed) >= SHOT_SOFT_MAX
+                    )
+                ):
+                    # 计划已执行完 / 软预算已满：接受收束，软缺口写入 warning，不发明续镜。
+                    warn = (
+                        f"分镜已按大纲收束（{len(completed)} 镜），仍有软校验缺口未再补镜："
+                        + residual[0][:240]
+                    )
+                    conn.execute(
+                        "UPDATE episodes SET storyboard_warning=? WHERE id=?",
+                        (warn[:800], episode_id),
+                    )
+                    conn.commit()
                 else:
                     note = (
                         f"镜{shot.shot_no:02d}{_storyboard_loop_exit_text(getattr(draft, 'loop_exit_reason', ''))}，"
@@ -489,6 +542,26 @@ async def _storyboard_task(episode_id: str, *, resume: bool = True):
                 conn.execute(
                     "UPDATE episodes SET status='scripted', script_error=NULL, target_duration_s=? WHERE id=?",
                     (synced, episode_id),
+                )
+                conn.commit()
+                _finalize_storyboard_evidence(
+                    episode_id,
+                    Storyboard(episode_no=ep_data["episode_no"], shots=list(completed)),
+                )
+                break
+            # P0 硬停：当前大纲节拍已全部落地，即使模型漏标 is_final 也不再开无大纲任务的下一镜。
+            # covers 语义拆分只会在「生成下一镜之前」胀长 outline；此处 completed>=planned 即计划已尽。
+            if planned_now > 0 and len(completed) >= planned_now:
+                actual_total = sum(int(s.duration_s or 0) for s in completed)
+                synced = _compact_episode_target(actual_total or ep_data["target_duration_s"])
+                warn = (
+                    f"分镜已执行完大纲全部 {planned_now} 镜；末镜未标收束，系统已强制收束，"
+                    "禁止继续生成计划外镜头。"
+                )
+                conn.execute(
+                    "UPDATE episodes SET status='scripted', script_error=NULL, "
+                    "target_duration_s=?, storyboard_warning=? WHERE id=?",
+                    (synced, warn[:800], episode_id),
                 )
                 conn.commit()
                 _finalize_storyboard_evidence(

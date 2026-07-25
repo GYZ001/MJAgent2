@@ -910,7 +910,9 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
     if draft.is_final and not allow_finish:
         errors.append(f"当前第 {shot_no} 镜还不能作为最后一镜；本集至少需要更多镜头承接完整剧情")
     if must_finish and not draft.is_final:
-        errors.append(f"当前已到本集最大镜头数，第 {shot_no} 镜必须收束到尾钩并设置 is_final=true")
+        errors.append(
+            f"当前已到本集收束位（大纲末镜/软预算/硬上限），第 {shot_no} 镜必须收束到尾钩并设置 is_final=true"
+        )
 
     # 相邻镜允许共享同一主线段落的 source_excerpt（Renderability：不再用「必须推进原文」逼碎镜）。
 
@@ -934,20 +936,18 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
 
     # 收尾镜才跑整集兜底校验。必保留台词/剧情点、声轨这类"靠后续镜头分担"的缺口，
     # 在自愿收尾时不硬塞进单镜（那会让修复回路卡死），而是要求改判 is_final=false 继续补镜；
-    # 只有撞到最大镜头数（must_finish）、再无后续镜头可分担时才硬失败。
-    # Renderability：已到软预算时，只硬拦 must_keep / 主线台词·剧情点缺口，不再用氛围声轨逼补幻觉镜。
+    # 撞到大纲末镜 / 软预算 / 硬上限（must_finish）时再无合法后续镜可分担——只硬拦主线缺口，
+    # 禁止再用氛围声轨逼出计划外幻觉镜。
     episode_errors = (
         validate_storyboard_soundtrack(board, screenplay, target)
         + validate_storyboard_preserves_key_content(board, screenplay)
     )
     if episode_errors:
-        if must_finish:
-            errors.extend(episode_errors)
-        elif shot_no >= SHOT_SOFT_MAX:
-            hard = [
-                e for e in episode_errors
-                if ("must_keep" in e) or ("主线台词" in e) or ("主线剧情点" in e) or ("主线节拍" in e)
-            ]
+        hard = [
+            e for e in episode_errors
+            if ("must_keep" in e) or ("主线台词" in e) or ("主线剧情点" in e) or ("主线节拍" in e)
+        ]
+        if must_finish or shot_no >= SHOT_SOFT_MAX:
             errors.extend(hard)
         else:
             errors.append(
@@ -1269,15 +1269,21 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
     scene_library_block = _scene_library_block(bible)
     min_shots, max_shots = storyboard_shot_count_range(episode["target_duration_s"])
     shot_no = len(completed_shots) + 1
-    must_finish = False
     # 方案 C：当前镜大纲 covers 若"不可单镜完成"（依赖圣经外角色开口 或 同时要求角色开口+人群声），
     # 在调用 LLM 前自动拆成足够多段并插入相邻节拍，让本镜只落实当前段，避免逐镜修复打转。
-    # 拆分后 outline.shots 变长，下方 expected_total / allow_finish 自动按新长度计算。
+    # 拆分后 outline.shots 变长，下方 expected_total / allow_finish / must_finish 自动按新长度计算。
     _maybe_split_outline_covers(outline, shot_no, bible, max_shots)
     # 有大纲时由计划的镜头数决定收尾时机（执行完整份大纲，避免提前收尾把后段剧情挤掉）；
     # 无大纲时回退到基础镜头数下限。
     expected_total = len(outline.shots) if (outline and outline.shots) else min_shots
     allow_finish = shot_no >= max(min_shots if not (outline and outline.shots) else expected_total, 1)
+    # P0：到达当前大纲末镜（或软预算上限）必须收束。禁止「计划已跑完仍 is_final=false /
+    # 继续补镜」发明大纲外幻觉镜头（生产事故：12 镜通过后冒出无剧情的第 13 镜）。
+    must_finish = bool(
+        (outline and outline.shots and shot_no >= expected_total)
+        or shot_no >= SHOT_SOFT_MAX
+        or shot_no >= max_shots
+    )
     episode_hook = (episode.get("hook") or "").strip()
     episode_cliffhanger = (episode.get("cliffhanger") or "").strip()
     final_shot_rule = (

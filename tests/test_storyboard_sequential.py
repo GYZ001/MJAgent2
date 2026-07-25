@@ -3,7 +3,7 @@
 覆盖 codex 新增的「按顺序逐镜生成 + 单镜 QA」改造与本次修复：
 - 单镜（非收尾）QA 只拦当前镜与承接问题，整集级检查（镜头数/总时长/关键内容）放行；
 - 自愿收尾时若整集必保留内容还没补齐，不硬塞单镜而是要求继续补镜；
-- 撞到最大镜头数（must_finish）才对整集缺口硬失败；
+- 撞到大纲末镜/软预算/硬上限（must_finish）才对主线缺口硬失败，禁止氛围声轨逼出计划外镜；
 - 分镜进度按已通过镜头的模型选择时长求和。
 """
 
@@ -190,11 +190,27 @@ def test_voluntary_final_with_missing_key_content_asks_to_continue() -> None:
 
 
 def test_must_finish_hard_fails_on_missing_key_content() -> None:
-    # 已到最大镜头数：没有后续镜头分担，关键台词缺失必须硬失败。
+    # 已到收束位：没有后续镜头分担，主线台词缺失必须硬失败。
     errors = _validate(_draft(_shot(1), is_final=True),
                        allow_finish=True, must_finish=True, screenplay=_screenplay())
     assert any(e.startswith("分镜丢失了剧本标记的") for e in errors)
     assert not any("继续补镜" in e for e in errors)
+
+
+def test_must_finish_does_not_ask_to_continue_for_soft_soundtrack_gap() -> None:
+    """大纲末镜 must_finish：氛围/对白密度软缺口不再逼「继续补镜」（防计划外幻觉镜）。"""
+    # 关键台词已落地，但若仅有声轨密度类缺口，must_finish 路径不应再发继续补镜。
+    shot = _shot(1, dialogues=[Dialogue(speaker="萧炎", line=KEY_LINE, emotion="坚定")])
+    errors = _validate(_draft(shot, is_final=True),
+                       allow_finish=True, must_finish=True, screenplay=_screenplay())
+    assert not any("继续补镜" in e for e in errors)
+
+
+def test_must_finish_rejects_missing_is_final_flag() -> None:
+    shot = _shot(1, dialogues=[Dialogue(speaker="萧炎", line=KEY_LINE, emotion="坚定")])
+    errors = _validate(_draft(shot, is_final=False),
+                       allow_finish=True, must_finish=True, screenplay=_screenplay())
+    assert any("必须收束" in e and "is_final=true" in e for e in errors)
 
 
 def test_allows_shot_reusing_previous_source_excerpt() -> None:
