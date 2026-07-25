@@ -14,8 +14,10 @@ import RunDock from './components/harness/RunDock'
 import AgentDrawer from './agent/AgentDrawer'
 import type { ContextEnvelope } from './agent/types'
 import CapabilityApprovalHost from './components/CapabilityApprovalHost'
+import EpisodeCrumb from './components/EpisodeCrumb'
 import { useScrollContainment } from './useScrollContainment'
 import { AdaptivePoller, type PollInterval } from './adaptivePoller'
+import { resolveEpisodeId } from './episodePicker'
 
 export type View = 'studio' | 'bible' | 'scenes' | 'episodes' | 'script' | 'board' | 'wall' | 'cinema' | 'monitor' | 'reader'
 
@@ -164,12 +166,10 @@ export default function App() {
           setEpisodeId(null)
           return
         }
-        setEpisodeId(current =>
-          current && episodes.some(ep => ep.id === current) ? current : episodes[0].id
-        )
+        setEpisodeId(current => resolveEpisodeId(episodes, current))
       })
       .catch(() => {
-        if (!cancelled) setEpisodeId(null)
+        // 临时请求失败不能等同于“项目没有分集”。保留当前选择，侧栏进入工作台时会重试。
       })
     return () => { cancelled = true }
   }, [projectId])
@@ -183,7 +183,23 @@ export default function App() {
     unsaved_draft: false,
   }
 
-  const openSection = (s: (typeof SECTIONS)[number]) => go(s.key)
+  const openSection = async (s: (typeof SECTIONS)[number]) => {
+    if (!s.needEpisode || !projectId) {
+      go(s.key)
+      return
+    }
+
+    try {
+      // 分集可能在项目打开后才生成，进入制作工作台前必须重新读取，不能依赖首次加载的快照。
+      const project = await api.get(`/projects/${projectId}?view=picker`) as Project
+      const nextEpisodeId = resolveEpisodeId(project.episodes ?? [], episodeId)
+      setEpisodeId(nextEpisodeId)
+      go(s.key, projectId, nextEpisodeId)
+    } catch (error) {
+      toast(`读取分集失败：${String((error as Error).message || error)}`, true)
+      go(s.key)
+    }
+  }
 
   const groupedSections = visibleSections.reduce<Record<string, typeof visibleSections>>((groups, section) => {
     ;(groups[section.group] ??= []).push(section)
@@ -221,7 +237,7 @@ export default function App() {
                 <button
                   key={s.key}
                   className={`spine-item ${active ? 'active' : ''}`}
-                  onClick={() => openSection(s)}
+                  onClick={() => { void openSection(s) }}
                   title={spineCollapsed ? s.label : undefined}
                 >
                   <span className="spine-icon" aria-hidden="true">{s.icon}</span>
@@ -240,10 +256,10 @@ export default function App() {
         {view === 'scenes' && projectId && <ScenesPage key={projectId} />}
         {view === 'episodes' && projectId && <EpisodesPage key={projectId} />}
         {view === 'reader' && projectId && <ReaderPage key={projectId} />}
-        {view === 'script' && (episodeId ? <ScriptPage key={episodeId} /> : <WorkspaceEmpty label="剧本台" />)}
-        {view === 'board' && (episodeId ? <BoardPage key={episodeId} /> : <WorkspaceEmpty label="分镜台" />)}
-        {view === 'wall' && (episodeId ? <WallPage key={episodeId} /> : <WorkspaceEmpty label="评审墙" />)}
-        {view === 'cinema' && (episodeId ? <CinemaPage key={episodeId} /> : <WorkspaceEmpty label="成片台" />)}
+        {view === 'script' && (episodeId ? <ScriptPage key={episodeId} /> : <WorkspaceEmpty label="剧本台" view="script" />)}
+        {view === 'board' && (episodeId ? <BoardPage key={episodeId} /> : <WorkspaceEmpty label="分镜台" view="board" />)}
+        {view === 'wall' && (episodeId ? <WallPage key={episodeId} /> : <WorkspaceEmpty label="评审墙" view="wall" />)}
+        {view === 'cinema' && (episodeId ? <CinemaPage key={episodeId} /> : <WorkspaceEmpty label="成片台" view="cinema" />)}
         {view === 'monitor' && <MonitorPage />}
       </main>
       <RunDock projectId={projectId} onOpen={() => go('monitor')} />
@@ -272,15 +288,11 @@ export default function App() {
   )
 }
 
-function WorkspaceEmpty({ label }: { label: string }) {
+function WorkspaceEmpty({ label, view }: { label: string; view: View }) {
   return (
     <>
       <header className="desk-head">
-        <div className="crumb crumb-switch">
-          <button className="crumb-btn" type="button">{label}</button>
-          <span className="crumb-sep">/</span>
-          <select className="episode-switch" aria-label="切换当前分集" value="" disabled />
-        </div>
+        <EpisodeCrumb label={label} view={view} />
         <h1>{label} <span className="sub">当前项目还没有可进入的分集</span></h1>
         <hr className="rule" />
       </header>

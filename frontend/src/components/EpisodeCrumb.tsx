@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { numToCn } from '../api'
 import { useNav, useProject } from '../App'
 import type { View } from '../App'
+import { filterEpisodeOptions } from '../episodePicker'
 
 interface EpisodeCrumbProps {
   label: string
@@ -13,7 +14,7 @@ const episodeLabel = (episodeNo: number, title: string) => `第${numToCn(episode
 
 export default function EpisodeCrumb({ label, view, episodeNo }: EpisodeCrumbProps) {
   const { projectId, episodeId, go } = useNav()
-  const { data: project } = useProject(projectId!, 0, 'picker')
+  const { data: project, error, loading, refresh } = useProject(projectId!, 0, 'picker')
   const episodes = project?.episodes ?? []
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
@@ -26,18 +27,40 @@ export default function EpisodeCrumb({ label, view, episodeNo }: EpisodeCrumbPro
     setQuery('')
   }, [episodeId])
 
+  useEffect(() => {
+    if (!open) return
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node | null)) setOpen(false)
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('pointerdown', closeOnOutsidePointer)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsidePointer)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [open])
+
   const matches = useMemo(() => {
-    const keyword = query.trim().toLowerCase()
-    const filtered = keyword
-      ? episodes.filter(ep => `${ep.episode_no} ${ep.title}`.toLowerCase().includes(keyword))
-      : episodes
-    return filtered.slice(0, 60)
+    return filterEpisodeOptions(episodes, query)
   }, [episodes, query])
 
   const choose = (id: string) => {
     setOpen(false)
     setQuery('')
     go(view, projectId, id)
+  }
+
+  const toggle = async () => {
+    if (episodes.length) {
+      setOpen(value => !value)
+      return
+    }
+    if (!error) return
+    const next = await refresh()
+    if (next?.episodes?.length) setOpen(true)
   }
 
   return (
@@ -51,22 +74,24 @@ export default function EpisodeCrumb({ label, view, episodeNo }: EpisodeCrumbPro
         disabled={currentIndex <= 0}
         onClick={() => currentIndex > 0 && choose(episodes[currentIndex - 1].id)}
       >←</button>
-      <div
-        className="episode-picker"
-        ref={rootRef}
-        onBlur={event => {
-          if (!rootRef.current?.contains(event.relatedTarget as Node | null)) setOpen(false)
-        }}
-      >
+      <div className="episode-picker" ref={rootRef}>
         <button
           className="episode-picker-trigger"
           type="button"
           aria-haspopup="listbox"
           aria-expanded={open}
-          disabled={!episodes.length}
-          onClick={() => setOpen(value => !value)}
+          disabled={!error && !loading && !episodes.length}
+          onClick={() => { void toggle() }}
         >
-          <span>{current ? episodeLabel(current.episode_no, current.title) : episodeNo ? `第${numToCn(episodeNo)}集` : '选择分集'}</span>
+          <span>{current
+            ? episodeLabel(current.episode_no, current.title)
+            : error
+              ? '分集加载失败，点击重试'
+              : loading
+                ? '正在加载分集…'
+                : episodeNo
+                  ? `第${numToCn(episodeNo)}集`
+                  : '暂无分集'}</span>
           <i aria-hidden="true">⌄</i>
         </button>
         {open && (
