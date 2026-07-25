@@ -15,15 +15,11 @@ from app.schemas import (
     DELIVERY_OWNERS,
     PROMPT_CONTRACT_VERSION,
     AudioTimelineItem,
-    Bible,
     EpisodeScreenplay,
-    InformationItem,
     RequiredOnScreenText,
     Shot,
-    StoryEvent,
     Storyboard,
     StoryboardOutline,
-    StoryboardOutlineShot,
     VoiceCanonical,
 )
 

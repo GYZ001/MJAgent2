@@ -303,7 +303,7 @@ def _compile_text_policy(shot: Shot) -> str:
 
 
 def _compile_audio_timeline(shot: Shot, voice_bible: list | None = None) -> str:
-    from app.continuity import build_audio_timeline_from_legacy, ensure_audio_timeline
+    from app.continuity import ensure_audio_timeline
     ensure_audio_timeline(shot, voice_bible)
     lines: list[str] = []
     for item in shot.audio_timeline:
@@ -416,7 +416,6 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         derive_continuity_mode,
         effective_primary_action,
         effective_state_in,
-        effective_state_out,
         planned_state_out,
         reference_role_plan,
         sync_shot_continuity_fields,
