@@ -246,7 +246,6 @@ def episode_pipeline_statuses(episode_id: str, *, conn=None) -> tuple[dict[str, 
         if st.get("candidate_count", 0) > 0 or s["adopted_version_id"]:
             with_candidate += 1
         ps = st.get("pipeline_status")
-        stage = st.get("current_stage")
         if ps == "queued":
             queued += 1
         elif ps in (S.WAITING_HUMAN, S.BLOCKED):

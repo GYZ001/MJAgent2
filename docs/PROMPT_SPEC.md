@@ -306,6 +306,12 @@
 
 ## D. Prompt 编译（确定性代码，非 LLM——列在此处仅为完整性）
 
+### D1. Seedance 连续性提示词合同（`seedance_continuity_v1`）
+
+视频最终 prompt 由 `app.compiler.compile_prompt` 确定性编译，合同版本写入 `prompt_contract_version=seedance_continuity_v1`。核心输入是 `continuity_mode` 与状态链：`state_in`、`primary_action`、`state_out`；仅 `action_continuation` 可使用上一镜尾帧作为 0 秒起点，其余模式必须重新构图。
+
+最终 prompt 固定包含 FORMAT、REFERENCE ROLES、START STATE、ONE CURRENT ACTION、END STATE、AUDIO TIMELINE、ON-SCREEN TEXT、DO NOT 等段落。`source_excerpt` 只作为上游改编证据与校验依据，禁止进入 Seedance 最终 prompt；最终文本也不得包含 `SOURCE_EXCERPT_MARKER` 或上一镜完整 action 描述。
+
 ```python
 def compile_prompt(shot, bible, style) -> str:
     parts = [
@@ -314,7 +320,7 @@ def compile_prompt(shot, bible, style) -> str:
         shot.scene_setting,                                 # 场景，同场景逐字复用
         *[bible[c].appearance_canonical for c in shot.characters],  # 角色锚点，逐字
         shot.action_desc,                                   # 动作
-        f"小说原文兜底参考：{shot.source_excerpt}",
+        # source_excerpt 不进入 Seedance prompt；仅保留在上游证据与校验链路。
     ]
     text = "。".join(parts)
     text = enforce_length(text, LIMIT)    # 超长按 动作>场景>风格 之外的修饰语裁剪，

@@ -1,4 +1,4 @@
-from app.compiler import ensure_source_excerpt_in_prompt, compile_prompt
+from app.compiler import ensure_source_excerpt_in_prompt, compile_prompt, SOURCE_EXCERPT_MARKER
 from app.schemas import Bible, Character, Shot, Storyboard, World
 from app.validators import validate_storyboard
 
@@ -37,6 +37,8 @@ def _shot(source_excerpt: str) -> Shot:
             "谷言抬起头看向门口，谷言攥紧手里的纸杯，谷言快步走到桌边，"
             "谷言把消息递给曲惜，谷言发现屏幕弹出新的提醒，谷言脸色沉下去准备追问真相"
         ),
+        first_frame_desc="谷言坐在咖啡厅桌边，双手握着纸杯，目光朝向门口。",
+        last_frame_desc="同一机位，谷言脸色沉下，纸杯被攥得变形，目光钉在屏幕提醒上。",
         source_excerpt=source_excerpt,
         narration="这条消息让谷言意识到局面已经失控，他必须立刻确认曲惜隐藏的真实目的。",
         dialogues=[],
@@ -49,12 +51,18 @@ def test_storyboard_requires_source_excerpt() -> None:
     errors = validate_storyboard(board, _bible(), 10)
 
     assert any("source_excerpt" in error for error in errors)
+    assert any("不得送入 Seedance" in error for error in errors)
 
 
-def test_compile_prompt_includes_source_excerpt() -> None:
-    prompt = compile_prompt(_shot("谷言攥着纸杯，听见曲惜说出那个名字，脸色骤然沉下去。"), _bible())
+def test_compile_prompt_excludes_source_excerpt() -> None:
+    """PRD：原文章节不得进入最终 Seedance 提示词。"""
+    excerpt = "谷言攥着纸杯，听见曲惜说出那个名字，脸色骤然沉下去。"
+    prompt = compile_prompt(_shot(excerpt), _bible())
 
-    assert "小说原文兜底参考：谷言攥着纸杯" in prompt
+    assert SOURCE_EXCERPT_MARKER not in prompt
+    assert excerpt not in prompt
+    assert "[START STATE" in prompt
+    assert "[ONE CURRENT ACTION]" in prompt
 
 
 def test_compile_prompt_preserves_model_selected_duration() -> None:
@@ -63,17 +71,19 @@ def test_compile_prompt_preserves_model_selected_duration() -> None:
 
     prompt = compile_prompt(shot, _bible())
 
-    assert "单镜约 8 秒" in prompt
+    assert "生成 8 秒" in prompt
     assert prompt.endswith("--ratio 9:16 --dur 8")
 
 
-def test_legacy_seedance_prompt_is_patched_with_source_excerpt() -> None:
-    prompt = ensure_source_excerpt_in_prompt(
-        "固定5秒竖屏漫剧视频段，谷言低头攥紧纸杯。弱背景提示：咖啡厅 --ratio 9:16 --dur 5",
-        _shot("谷言攥着纸杯，听见曲惜说出那个名字，脸色骤然沉下去。"),
+def test_legacy_seedance_prompt_strips_source_excerpt() -> None:
+    """兼容旧调用点：不再注入原文，若已有原文标记则剥离。"""
+    legacy = (
+        f"固定5秒竖屏漫剧视频段，谷言低头攥紧纸杯。{SOURCE_EXCERPT_MARKER}谷言攥着纸杯。"
+        "弱背景提示：咖啡厅 --ratio 9:16 --dur 5"
     )
+    prompt = ensure_source_excerpt_in_prompt(legacy, _shot("谷言攥着纸杯，听见曲惜说出那个名字。"))
 
-    assert "小说原文兜底参考：谷言攥着纸杯" in prompt
+    assert SOURCE_EXCERPT_MARKER not in prompt
     assert prompt.endswith("--ratio 9:16 --dur 5")
     assert prompt.count("--ratio") == 1
 

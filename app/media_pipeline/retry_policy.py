@@ -27,8 +27,11 @@ class RetryDecision:
 
 
 def auto_retake_limit() -> int:
-    """质量 QA 自动重抽默认 1 次。"""
-    return 1
+    """质量 QA 自动重抽：连续失败 2 次后停止烧钱转人工（PRD §14.3）。"""
+    try:
+        return max(1, int(get_setting("video_auto_retake_limit") or 2))
+    except (TypeError, ValueError):
+        return 2
 
 
 def technical_resubmit_limit() -> int:
@@ -39,21 +42,24 @@ def job_transient_max_retries() -> int:
     return int(config.VIDEO_JOB_MAX_RETRIES)
 
 
-def decide_qa_retake(*, auto_retake_count: int, qa_overall: float, threshold: float | None = None) -> RetryDecision:
+def decide_qa_retake(*, auto_retake_count: int, qa_overall: float, threshold: float | None = None,
+                     hard_failures: list[str] | None = None) -> RetryDecision:
     thr = threshold if threshold is not None else float(get_setting("auto_retake_threshold") or 0.6)
     limit = auto_retake_limit()
-    if qa_overall < 0:
+    failures = list(hard_failures or [])
+    if qa_overall < 0 and not failures:
         return RetryDecision(False, RetryKind.QA_RETAKE, False, "质检未完成", limit, auto_retake_count)
-    if qa_overall >= thr:
+    if not failures and qa_overall >= thr:
         return RetryDecision(False, RetryKind.QA_RETAKE, False, "已达标", limit, auto_retake_count)
     if auto_retake_count >= limit:
         return RetryDecision(
             False, RetryKind.QA_RETAKE, False,
-            "自动重抽已达上限，转待人工", limit, auto_retake_count,
+            "自动重抽已达上限，停止烧钱并转人工处理队列", limit, auto_retake_count,
         )
+    reason = "质检未达阈值，按失败类型定向重抽" if failures else "质检未达阈值，自动重抽"
     return RetryDecision(
         True, RetryKind.QA_RETAKE, True,
-        "质检未达阈值，自动重抽", limit, auto_retake_count + 1,
+        reason, limit, auto_retake_count + 1,
     )
 
 

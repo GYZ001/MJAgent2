@@ -54,29 +54,34 @@ def test_normalize_continuity_chooses_emotional_scene_transition() -> None:
     normalize_continuity(board)
 
     assert board.shots[0].transition == "硬切"
-    assert board.shots[1].transition == "声音延续+叠化"
+    assert board.shots[1].transition == "叠化"
     assert board.shots[1].continuity_from_prev is False
+    assert board.shots[1].continuity_mode == "scene_change"
 
 
 def test_video_prompt_contains_incoming_and_outgoing_transition() -> None:
     bible = _bible()
-    shot = _shot(4, "首日上午，广场", ["萧炎", "萧薰儿"], "萧炎背对石碑停住脚步，萧薰儿怔在原地。")
+    shot = _shot(
+        4, "首日上午，广场", ["萧炎", "萧薰儿"],
+        "萧炎背对石碑停住脚步，萧薰儿怔在原地。",
+        first_frame_desc="萧炎背对石碑停住，萧薰儿怔在原地。",
+        last_frame_desc="广场光影压暗，两人轮廓逐渐隐入暗部。",
+    )
 
     prompt = compile_prompt(
         shot,
         bible,
-        incoming_transition="声音延续+叠化",
+        incoming_transition="叠化",
         outgoing_transition="淡出淡入",
         next_scene="首日傍晚，藏书阁",
         next_first_frame_desc="藏书阁暖黄灯光下，萧薰儿独坐书案前。",
     )
 
-    assert "本镜开头转场" in prompt
-    assert "声音延续+叠化" in prompt
-    assert "本镜结尾转场" in prompt
-    assert "淡出淡入" in prompt
+    assert "本镜开头以「叠化」进入" in prompt
+    assert "本镜结尾以「淡出淡入」收束" in prompt
     assert "首日傍晚，藏书阁" in prompt
-
+    # 禁止把下一镜详细首帧剧情注入当前提示词
+    assert "萧薰儿独坐书案前" not in prompt
 
 def test_tail_keyframe_prompt_contains_transition_tail_requirement() -> None:
     bible = _bible()

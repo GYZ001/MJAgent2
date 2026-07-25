@@ -878,7 +878,36 @@ async def _maybe_auto_qa(job, version_id: str, video_path: str) -> None:
         anchor_map = {c["name"]: c["appearance_canonical"] for c in bible["characters"]}
         anchors = [anchor_map[n] for n in json.loads(shot["characters"] or "[]") if n in anchor_map]
         from app.stages import qa_shot
-        qa = await qa_shot(frames, shot["action_desc"], shot["scene_setting"], anchors)
+        from app.continuity import (
+            apply_shot_contract,
+            classify_video_hard_failures,
+            effective_primary_action,
+            effective_state_in,
+            planned_state_out,
+            retry_patch_for_failure,
+        )
+        from app.schemas import Shot
+        shot_model = Shot(
+            shot_no=shot["shot_no"], duration_s=shot["duration_s"], shot_size=shot["shot_size"] or "中景",
+            camera_move=shot["camera_move"] or "固定", scene_setting=shot["scene_setting"] or "",
+            characters=json.loads(shot["characters"] or "[]"), action_desc=shot["action_desc"] or "",
+            first_frame_desc=(shot["first_frame_desc"] if "first_frame_desc" in shot.keys() else "") or "",
+            last_frame_desc=(shot["last_frame_desc"] if "last_frame_desc" in shot.keys() else "") or "",
+            source_excerpt=shot["source_excerpt"] or "",
+            narration=shot["narration"], dialogues=json.loads(shot["dialogues"] or "[]"),
+            transition=shot["transition"] or "硬切",
+            continuity_from_prev=bool(shot["continuity_from_prev"]),
+        )
+        if "shot_contract_json" in shot.keys() and shot["shot_contract_json"]:
+            apply_shot_contract(shot_model, shot["shot_contract_json"])
+        qa = await qa_shot(
+            frames,
+            effective_primary_action(shot_model) or shot["action_desc"],
+            shot["scene_setting"],
+            anchors,
+            state_in=effective_state_in(shot_model),
+            state_out=planned_state_out(shot_model),
+        )
         _set_version(version_id, qa_json=json.dumps(qa, ensure_ascii=False))
         # QA 非标准输出虽可恢复部分分数，但证据不足以触发付费重抽。
         # 这种情况保留结果供人工确认，避免把 VLM 格式错误当成视频质量错误。
@@ -890,7 +919,9 @@ async def _maybe_auto_qa(job, version_id: str, video_path: str) -> None:
         threshold = float(get_setting("auto_retake_threshold") or 0.6)
         version = conn.execute("SELECT * FROM shot_versions WHERE id=?", (version_id,)).fetchone()
         meta = json.loads(version["image_inputs"] or "{}") if version else {}
-        if 0 <= qa.get("overall", -1) < threshold and meta.get("mode") == video_modes.REFERENCE_IMAGE_MODE:
+        hard_failures = classify_video_hard_failures(qa, technical=json.loads(version["technical_validation_json"] or "{}") if version else {})
+        needs_retake = bool(hard_failures) or (0 <= qa.get("overall", -1) < threshold)
+        if needs_retake and meta.get("mode") == video_modes.REFERENCE_IMAGE_MODE:
             logs = meta.get("reference_failure_logs") or []
             # 只留轻量元信息做审计；绝不把带 base64 url 的参考图整份塞进日志，
             # 否则会在 image_inputs 里成倍堆积 base64，撑爆单集响应体积。
@@ -904,9 +935,11 @@ async def _maybe_auto_qa(job, version_id: str, video_path: str) -> None:
                 "reference_images": log_refs,
                 "prompt": version["prompt_text"][:500],
                 "qa": qa,
+                "hard_failures": hard_failures,
             })
             meta["reference_failure_logs"] = logs
-            meta["retry_reason"] = "视频质检未通过，已复用同一组参考图自动重抽视频。"
+            meta["retry_reason"] = "视频质检未通过，已按失败类型定向重抽。"
+            meta["hard_failures"] = hard_failures
             _set_version(version_id, image_inputs=json.dumps(meta, ensure_ascii=False))
             auto_retake_count = int(meta.get("auto_retake_count") or 0)
             from app.media_pipeline.retry_policy import decide_qa_retake
@@ -914,14 +947,34 @@ async def _maybe_auto_qa(job, version_id: str, video_path: str) -> None:
                 auto_retake_count=auto_retake_count,
                 qa_overall=float(qa.get("overall", -1)),
                 threshold=threshold,
+                hard_failures=hard_failures,
             )
             if decision.allow:
+                extra_neg: list[str] = list(qa.get("issues", [])[:3])
+                critique: list[str] = []
+                for ft in hard_failures[:3]:
+                    patch = retry_patch_for_failure(ft)
+                    extra_neg.extend(patch.get("extra_negative") or [])
+                    if patch.get("hint"):
+                        critique.append(str(patch["hint"]))
                 enqueue_shot(
                     job["shot_id"],
-                    extra_negative=qa.get("issues", [])[:3],
+                    extra_negative=extra_neg[:8],
+                    critique=critique[:6] or None,
                     reroll=True,
                     after_shot_id=job["after_shot_id"],
                     auto_retake_count=decision.attempt,
+                )
+            else:
+                # 达上限：标记 waiting_human，停止自动烧钱
+                conn.execute(
+                    "UPDATE jobs SET status='waiting_human', error=? WHERE id=?",
+                    (decision.reason, job["id"]),
+                )
+                conn.commit()
+                log_provider_call(
+                    "vlm_qa", config.MODEL_VLM, "QA_RETAKE_EXHAUSTED", None, 0,
+                    meta={"shot_id": job["shot_id"], "hard_failures": hard_failures, "reason": decision.reason},
                 )
             return
         if 0 <= qa.get("overall", -1) < threshold and version["version_no"] == 1 and qa.get("issues"):

@@ -168,6 +168,7 @@ DEFAULT_SETTINGS = {
     "max_ref_images": "2",            # 单镜头最多附几张定妆照
     "auto_qa": "true",
     "auto_retake_threshold": "0.6",
+    "video_hard_gate_enabled": "true",
     "max_repair_attempts": "8",  # LLM 输出校验失败的最大修复重试次数（含首次）；模型不可用不走此重试
     "model_route": "hiagent",           # 文本/质检模型路由：hiagent（火山）| openrouter
     "storyboard_concurrency": "2",      # 手动批量分镜的并发上限

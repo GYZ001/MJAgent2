@@ -198,7 +198,7 @@ def test_auto_retake_count_is_persisted_on_child_video_version(monkeypatch) -> N
     assert meta["auto_retake_count"] == 1
 
 
-def test_low_qa_video_only_auto_retakes_once(monkeypatch) -> None:
+def test_low_qa_video_stops_auto_retake_after_limit(monkeypatch) -> None:
     conn = _conn()
     _seed_project(conn)
     monkeypatch.setattr(worker, "get_conn", lambda: conn)
@@ -209,7 +209,7 @@ def test_low_qa_video_only_auto_retakes_once(monkeypatch) -> None:
     monkeypatch.setattr(
         worker,
         "get_setting",
-        lambda key: {"auto_qa": "true", "auto_retake_threshold": "0.6"}.get(key),
+        lambda key: {"auto_qa": "true", "auto_retake_threshold": "0.6", "video_auto_retake_limit": "2"}.get(key),
     )
 
     async def low_qa(*_args, **_kwargs):
@@ -232,12 +232,18 @@ def test_low_qa_video_only_auto_retakes_once(monkeypatch) -> None:
         (version, json.dumps({
             "mode": "REFERENCE_IMAGE_MODE",
             "reference_images": [{"id": "r1", "selectedForSeedance": True}],
-            "auto_retake_count": 1,
+            "auto_retake_count": 2,
         })),
+    )
+    conn.execute(
+        """INSERT INTO jobs(id, kind, shot_id, version_id, episode_id, project_id, status, created_at, updated_at)
+           VALUES('j1','video','s1',?, 'e1','p1','succeeded',1.0,1.0)""",
+        (version,),
     )
     conn.commit()
 
     asyncio.run(worker._maybe_auto_qa({
+        "id": "j1",
         "shot_id": "s1",
         "project_id": "p1",
         "after_shot_id": None,

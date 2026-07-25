@@ -23,6 +23,34 @@ TRANSITIONS = {
 }
 EMOTIONS = {"平静", "愤怒", "悲伤", "惊恐", "喜悦", "讥讽", "坚定"}
 
+# 镜头连续性模式（PRD：删除「同场景即连续」布尔推断）
+CONTINUITY_MODES = {
+    "action_continuation",  # 同一人物同一动作跨镜延续；唯一可传上一镜尾帧
+    "same_scene_cut",       # 同场景换景别/构图
+    "reaction_cut",         # 切到另一人物或人群反应
+    "reverse_angle",        # 正反打
+    "insert_detail",        # 道具/手部/文字特写
+    "scene_change",         # 时间或地点改变
+}
+
+DELIVERY_OWNERS = {
+    "visual_action",
+    "spoken_dialogue",
+    "offscreen_voice",
+    "narration",
+    "on_screen_text",
+    "ambient_sound",
+}
+
+AUDIO_TIMELINE_TYPES = {
+    "spoken_dialogue",
+    "offscreen_voice",
+    "narration",
+    "ambient_sound",
+}
+
+PROMPT_CONTRACT_VERSION = "seedance_continuity_v1"
+
 
 class Relationship(BaseModel):
     to: str
@@ -96,6 +124,43 @@ class ScriptScene(BaseModel):
     source_basis: str = ""
 
 
+class StoryEvent(BaseModel):
+    """剧情事件台账：描述一次可见/可听的状态变化，而非原文摘要。"""
+
+    event_id: str
+    source_span: str = ""
+    source_fact: str = ""
+    state_in: str = ""
+    trigger: str = ""
+    visible_change: str = ""
+    state_out: str = ""
+    must_keep: bool = True
+    adaptation_addition: bool = False
+    adaptation_reason: str = ""
+    approved: bool = False
+
+
+class InformationItem(BaseModel):
+    """信息交付台账：每项观众必须获得的信息只能有一个主交付镜头。"""
+
+    info_id: str
+    event_id: str = ""
+    content: str = ""
+    delivery_owner: str = "visual_action"
+    speaker_id: str | None = None
+    exact_text: str | None = None
+    reinforcement_allowed: bool = False
+    status: str = "unassigned"  # unassigned | assigned | delivered
+    assigned_shot_no: int | None = None
+
+
+class VoiceCanonical(BaseModel):
+    speaker_id: str
+    voice_canonical: str
+    language: str = "普通话"
+    role_type: str = "named_character"  # named_character | functional_character | narrator
+
+
 class EpisodeScreenplay(BaseModel):
     episode_no: int
     # 完整剧本源数据（新格式）
@@ -127,6 +192,13 @@ class EpisodeScreenplay(BaseModel):
     development: str = ""
     conflict: str = ""
     climax: str = ""
+    # PRD：信息唯一归属契约（下游只消费结构化事件/台账，不把散文剧本当公共上下文）
+    episode_premise: str = ""
+    events: list[StoryEvent] = Field(default_factory=list)
+    information_ledger: list[InformationItem] = Field(default_factory=list)
+    voice_bible: list[VoiceCanonical] = Field(default_factory=list)
+    approved_adaptations: list[str] = Field(default_factory=list)
+    forbidden_additions: list[str] = Field(default_factory=list)
     created_at: float | None = None
     updated_at: float | None = None
     # 历史兼容：旧格式仍按 beat 列表存储
@@ -137,6 +209,28 @@ class Dialogue(BaseModel):
     speaker: str
     line: str
     emotion: str = "平静"
+    # 画外角色发声：保留 speaker 身份，但不要求画面口型
+    delivery: str = "spoken_dialogue"  # spoken_dialogue | offscreen_voice | narration
+
+
+class AudioTimelineItem(BaseModel):
+    start_s: float = 0.0
+    end_s: float = 0.0
+    type: str = "ambient_sound"
+    speaker_id: str | None = None
+    text: str = ""
+    lip_sync: bool = False
+    emotion: str = "平静"
+    voice_canonical: str = ""
+
+
+class RequiredOnScreenText(BaseModel):
+    surface: str = ""
+    exact_text: str = ""
+    appear_start_s: float = 0.0
+    stable_until_s: float | None = None
+    style: str = ""
+    allow_other_text: bool = False
 
 
 class Shot(BaseModel):
@@ -158,6 +252,29 @@ class Shot(BaseModel):
     dialogues: list[Dialogue] = Field(default_factory=list)
     transition: str = "硬切"
     continuity_from_prev: bool = False
+    # ---- PRD 连续性生产契约（缺省时由 first/last_frame / action_desc / characters 回填）----
+    story_event_id: str = ""
+    purpose: str = ""
+    new_information_ids: list[str] = Field(default_factory=list)
+    reinforcement_info_ids: list[str] = Field(default_factory=list)
+    state_in: str = ""
+    primary_action: str = ""
+    emotion_beat: str = ""
+    state_out: str = ""
+    observed_state_out: str = ""
+    continuity_mode: str = ""
+    characters_visible: list[str] = Field(default_factory=list)
+    audio_cast: list[str] = Field(default_factory=list)
+    audio_timeline: list[AudioTimelineItem] = Field(default_factory=list)
+    required_text: RequiredOnScreenText | None = None
+    reference_roles: list[str] = Field(default_factory=list)
+    do_not_repeat: list[str] = Field(default_factory=list)
+    risk_tags: list[str] = Field(default_factory=list)
+    prompt_contract_version: str = ""
+    legacy_unvalidated: bool = False
+    camera_angle: str = ""
+    spatial_anchor: str = ""
+    is_final: bool = False
 
 
 class Storyboard(BaseModel):
@@ -166,13 +283,24 @@ class Storyboard(BaseModel):
 
 
 class StoryboardOutlineShot(BaseModel):
-    """分镜大纲里的一条镜头节拍：只规划"本镜推进什么剧情"，不写执行细节。
+    """分镜大纲里的一条镜头节拍：按状态变化一次规划原子镜头。
     逐镜填充阶段据此把整集剧情均匀铺满，避免多镜停留在同一情绪/同一句原文。"""
 
     shot_no: int
     scene_setting: str = ""   # 时间+地点短标签
     beat: str = ""            # 本镜推进的剧情（一句话：谁做了什么 / 局势如何变化 / 与上一镜的区别）
     covers: str = ""          # 本镜落实的必保留关键台词/剧情点（可空）
+    # 原子分镜规划字段（PRD §7）：大纲阶段即锁定状态链与连续性模式
+    story_event_id: str = ""
+    new_information_ids: list[str] = Field(default_factory=list)
+    state_in: str = ""
+    primary_action: str = ""
+    emotion_beat: str = ""
+    state_out: str = ""
+    continuity_mode: str = ""
+    duration_s: int | None = None
+    characters_visible: list[str] = Field(default_factory=list)
+    audio_cast: list[str] = Field(default_factory=list)
 
 
 class StoryboardOutline(BaseModel):

@@ -40,7 +40,8 @@ def _screenplay() -> EpisodeScreenplay:
     )
 
 
-def test_storyboard_soundtrack_rejects_mostly_silent_full_script_split() -> None:
+def test_storyboard_soundtrack_allows_ambient_only_reaction_shots() -> None:
+    """PRD：不再强制约 75% 镜头有对白/旁白；安静反应镜可只有环境声。"""
     board = Storyboard(
         episode_no=1,
         shots=[
@@ -54,7 +55,8 @@ def test_storyboard_soundtrack_rejects_mostly_silent_full_script_split() -> None
 
     errors = validate_storyboard_soundtrack(board, _screenplay(), 50)
 
-    assert any("分镜声轨过少" in error for error in errors)
+    assert not any("分镜声轨过少" in error for error in errors)
+    # 剧本有内心OS时仍要求至少保留一处内心声轨
     assert any("内心OS" in error for error in errors)
 
 

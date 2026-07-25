@@ -12,6 +12,16 @@ const SIZES = ['远景', '全景', '中景', '近景', '特写']
 const MOVES = ['固定', '推近', '拉远', '横摇', '跟随']
 const TRANS = ['硬切', '叠化', '淡出淡入', '黑场', '闪黑', '闪白', '甩镜', '遮挡转场', '匹配剪辑', '声音延续+叠化', '声音先行+淡入']
 const DURATIONS = [5, 6, 7, 8, 9, 10]
+const CONTINUITY_MODES = ['action_continuation', 'same_scene_cut', 'reaction_cut', 'reverse_angle', 'insert_detail', 'scene_change']
+
+function commaList(value?: string[]): string {
+  return (value ?? []).join('、') || '无'
+}
+
+function parseCommaList(value: string): string[] {
+  return value.split(/[，,]/).map(x => x.trim()).filter(Boolean)
+}
+
 export default function BoardPage() {
   const { episodeId, go, projectId, toast } = useNav()
   const { data: ep, refresh, error, loading } = useEpisode(episodeId!, 'board')
@@ -229,6 +239,13 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
         source_excerpt: edit.source_excerpt,
         narration: edit.narration || null, dialogues: edit.dialogues, transition: edit.transition,
         continuity_from_prev: !!edit.continuity_from_prev,
+        continuity_mode: edit.continuity_mode || '',
+        state_in: edit.state_in || '',
+        primary_action: edit.primary_action || '',
+        state_out: edit.state_out || '',
+        characters_visible: edit.characters_visible ?? [],
+        audio_cast: edit.audio_cast ?? [],
+        new_information_ids: edit.new_information_ids ?? [],
       })
       const impact = (result as { impact?: ImpactSummary }).impact
       toast(`镜 ${shot.shot_no} 已保存；${impact?.stale_descendant_ids?.length ?? 0} 个下游证据已标记失效`)
@@ -241,7 +258,7 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
       <div className="shot-head">
         <div className="shot-head-copy">
           <span className="sn">镜{String(shot.shot_no).padStart(2, '0')}</span>
-          <span className="meta">{s.duration_s}s · {s.shot_size} · {s.camera_move} · {s.transition}{s.continuity_from_prev ? ' · 接上镜' : ''}</span>
+          <span className="meta">{s.duration_s}s · {s.shot_size} · {s.camera_move} · {s.transition}{s.continuity_mode ? ` · ${s.continuity_mode}` : s.continuity_from_prev ? ' · 接上镜' : ''}</span>
           <span className="meta shot-characters">{s.characters.join(' / ') || '缺角色（需修改）'}</span>
         </div>
         <div className="shot-head-actions">
@@ -276,11 +293,32 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
               <textarea rows={1} value={edit.scene_setting} onChange={e => setEdit({ ...edit, scene_setting: e.target.value })} /></div>
             <div className="full"><label className="f">画面描述（一个连贯动作，人物和剧情优先）</label>
               <textarea rows={3} value={edit.action_desc} onChange={e => setEdit({ ...edit, action_desc: e.target.value })} /></div>
+            <div className="full">
+              <label className="f">Seedance 连续性（state_in → primary_action → state_out）</label>
+              <div className="shot-frame-pair">
+                <div className="shot-frame-card"><span>起始状态</span><textarea rows={2} value={edit.state_in ?? ''} onChange={e => setEdit({ ...edit, state_in: e.target.value })} /></div>
+                <div className="shot-frame-flow" aria-hidden="true">→</div>
+                <div className="shot-frame-card"><span>主动作</span><textarea rows={2} value={edit.primary_action ?? ''} onChange={e => setEdit({ ...edit, primary_action: e.target.value })} /></div>
+                <div className="shot-frame-flow" aria-hidden="true">→</div>
+                <div className="shot-frame-card"><span>结束状态</span><textarea rows={2} value={edit.state_out ?? ''} onChange={e => setEdit({ ...edit, state_out: e.target.value })} /></div>
+              </div>
+            </div>
+            <div><label className="f">continuity_mode</label>
+              <select style={{ width: '100%' }} value={edit.continuity_mode ?? ''} onChange={e => setEdit({ ...edit, continuity_mode: e.target.value })}>
+                <option value="">自动/未设定</option>
+                {CONTINUITY_MODES.map(x => <option key={x} value={x}>{x}</option>)}
+              </select></div>
+            <div><label className="f">画面可见角色（逗号分隔）</label>
+              <input type="text" value={(edit.characters_visible ?? []).join(', ')} onChange={e => setEdit({ ...edit, characters_visible: parseCommaList(e.target.value) })} /></div>
+            <div><label className="f">声音角色（逗号分隔）</label>
+              <input type="text" value={(edit.audio_cast ?? []).join(', ')} onChange={e => setEdit({ ...edit, audio_cast: parseCommaList(e.target.value) })} /></div>
+            <div><label className="f">new_information_ids</label>
+              <input type="text" value={(edit.new_information_ids ?? []).join(', ')} onChange={e => setEdit({ ...edit, new_information_ids: parseCommaList(e.target.value) })} /></div>
             <div><label className="f">首帧画面（本镜开始的静止画面）</label>
               <textarea rows={2} value={edit.first_frame_desc ?? ''} onChange={e => setEdit({ ...edit, first_frame_desc: e.target.value })} /></div>
             <div><label className="f">尾帧画面（结束的静止画面，须与首帧明显不同）</label>
               <textarea rows={2} value={edit.last_frame_desc ?? ''} onChange={e => setEdit({ ...edit, last_frame_desc: e.target.value })} /></div>
-            <div className="full"><label className="f">对应小说原文（逐字摘录，给 Seedance 兜底参考）</label>
+            <div className="full"><label className="f">上游改编证据（不送 Seedance）</label>
               <textarea rows={3} value={edit.source_excerpt ?? ''} onChange={e => setEdit({ ...edit, source_excerpt: e.target.value })} /></div>
             <div className="full"><label className="f">旁白（可空）</label>
               <textarea rows={2} value={edit.narration ?? ''} onChange={e => setEdit({ ...edit, narration: e.target.value })} /></div>
@@ -314,7 +352,21 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
                 <div><dt>景别</dt><dd>{s.shot_size}</dd></div>
                 <div><dt>运镜</dt><dd>{s.camera_move}</dd></div>
                 <div><dt>转场</dt><dd>{s.transition}</dd></div>
+                <div><dt>连续性</dt><dd>{s.continuity_mode || (s.continuity_from_prev ? '接上镜' : '新场景')}</dd></div>
               </dl>
+            </div>
+
+            <div className="shot-frame-pair full" aria-label="Seedance 状态链">
+              <div className="shot-frame-card"><span>state_in</span><p>{s.state_in || s.first_frame_desc || '未设置'}</p></div>
+              <div className="shot-frame-flow" aria-hidden="true">→</div>
+              <div className="shot-frame-card"><span>primary_action</span><p>{s.primary_action || s.action_desc || '未设置'}</p></div>
+              <div className="shot-frame-flow" aria-hidden="true">→</div>
+              <div className="shot-frame-card"><span>state_out</span><p>{s.state_out || s.last_frame_desc || '未设置'}</p></div>
+            </div>
+            <div className="script-meta-grid full" aria-label="Seedance 连续性摘要">
+              <div className="script-meta-item"><span className="script-meta-label">可见角色</span><span className="script-meta-value">{commaList(s.characters_visible)}</span></div>
+              <div className="script-meta-item"><span className="script-meta-label">声音角色</span><span className="script-meta-value">{commaList(s.audio_cast)}</span></div>
+              <div className="script-meta-item"><span className="script-meta-label">新信息</span><span className="script-meta-value">{commaList(s.new_information_ids)}</span></div>
             </div>
 
             <div className="shot-detail-tabs full" role="tablist" aria-label="镜头详情">
@@ -331,7 +383,7 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
             ) : (
               <div className="shot-script-grid full" role="tabpanel">
                 <div className="shot-script-copy">
-                  <span className="shot-section-label">对应原文</span>
+                  <span className="shot-section-label">上游改编证据（不送 Seedance）</span>
                   <p>{s.source_excerpt || '暂无对应原文'}</p>
                 </div>
                 <div className="shot-audio-copy">

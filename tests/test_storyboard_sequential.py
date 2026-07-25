@@ -93,13 +93,19 @@ def test_progress_block_has_no_episode_duration_limit() -> None:
     assert "duration_s" in plenty and "is_final=true" in plenty
 
 
-def test_completed_context_keeps_only_last_two_shots_in_full_detail() -> None:
+def test_completed_context_exposes_state_handoff_not_full_action_history() -> None:
+    """逐镜上下文只传承接状态摘要，避免把完整 action_desc 历史喂给模型重演。"""
     shots = [_shot(i) for i in range(1, 5)]
+    for shot in shots:
+        shot.state_out = f"镜{shot.shot_no}结束状态：萧炎停在石碑前"
+        shot.continuity_mode = "same_scene_cut"
     rendered = _render_completed_shots_context(shots)
 
-    assert rendered.count('"last_frame_desc"') == 2
-    assert '"progress"' in rendered
+    assert '"承接状态"' in rendered
+    assert '"continuity_mode"' in rendered
+    assert '"action_desc"' not in rendered
     assert all(f'"shot_no": {i}' in rendered for i in range(1, 5))
+    assert "镜4结束状态" in rendered
 
 
 def test_relevant_text_windows_keeps_current_hint_and_caps_context() -> None:

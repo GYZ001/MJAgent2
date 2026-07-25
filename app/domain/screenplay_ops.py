@@ -165,12 +165,21 @@ async def _screenplay_task(
                 "但修复前不能进入分镜：" + "；".join(residual)
             )
         screenplay_status = "warning" if residual else "ready"
+        ledger_json = json.dumps({
+            "episode_premise": script.episode_premise,
+            "events": [e.model_dump() for e in (script.events or [])],
+            "information_ledger": [i.model_dump() for i in (script.information_ledger or [])],
+            "voice_bible": [v.model_dump() for v in (script.voice_bible or [])],
+            "approved_adaptations": list(script.approved_adaptations or []),
+            "forbidden_additions": list(script.forbidden_additions or []),
+        }, ensure_ascii=False)
         conn.execute(
             "UPDATE episodes SET screenplay_json=?, screenplay_status=?, screenplay_error=?, "
-            "screenplay_updated_at=?, screenplay_artifact_id=?, status='planned', script_error=NULL WHERE id=?",
+            "screenplay_updated_at=?, screenplay_artifact_id=?, story_ledger_json=?, "
+            "status='planned', script_error=NULL WHERE id=?",
             (
                 script.model_dump_json(), screenplay_status, (note or "")[:800] or None,
-                now(), artifact_id, episode_id,
+                now(), artifact_id, ledger_json, episode_id,
             ))
         conn.commit()
         return script

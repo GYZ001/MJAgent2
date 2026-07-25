@@ -28,6 +28,14 @@ const VIDEO_VERSION_STATUS_LABEL: Record<string, string> = {
   waiting_human: '待人工',
 }
 
+function commaList(value?: string[]): string {
+  return (value ?? []).join('、') || '无'
+}
+
+function truncateText(value: string, max = 800): string {
+  return value.length > max ? `${value.slice(0, max)}…` : value
+}
+
 /* ─── Lightbox 图片预览 ─── */
 function Lightbox({ src, alt, onClose }: { src: string; alt: string; onClose: () => void }) {
   useEffect(() => {
@@ -490,7 +498,9 @@ function ShotSlide({ shot, episodeStatus, generating,
         <span className="sn">镜 {shot.shot_no}</span>
         <span className="meta">{shot.shot_size} · {shot.camera_move} · {shot.duration_s}s · {shot.transition}</span>
         <span className="meta">{shot.scene_setting}</span>
-        {shot.continuity_from_prev ? <span className="stamp blue">接上镜</span> : <span className="stamp grey">新场景</span>}
+        {shot.continuity_mode
+          ? <span className="stamp blue">{shot.continuity_mode}</span>
+          : shot.continuity_from_prev ? <span className="stamp blue">接上镜</span> : <span className="stamp grey">新场景</span>}
         <span className={`stamp ${
           videoState.phase === 'adopted' ? 'green'
             : videoState.phase === 'working' ? 'gold'
@@ -531,7 +541,7 @@ function ShotSlide({ shot, episodeStatus, generating,
             role="tabpanel"
             aria-labelledby={`review-tab-${shot.id}-${reviewTab}`}
           >
-            {reviewTab === 'text' && <InfoSection shot={shot} />}
+            {reviewTab === 'text' && <InfoSection shot={shot} current={current} />}
 
             {reviewTab === 'references' && (
               <section className="candidate-compare">
@@ -586,10 +596,12 @@ function ScriptMeta({ label, value }: { label: string; value: string }) {
   )
 }
 
-function InfoSection({ shot }: { shot: Shot }) {
+function InfoSection({ shot, current }: { shot: Shot; current?: ShotVersion }) {
   const dialogueText = shot.dialogues
     .map(d => `${d.speaker}：${d.line}${d.emotion && d.emotion !== '平静' ? `（${d.emotion}）` : ''}`)
     .join('\n')
+  const promptPreview = current?.prompt_text || shot.prompt_preview || ''
+  const qa = current?.qa
 
   return (
     <div className="info-section">
@@ -608,7 +620,36 @@ function InfoSection({ shot }: { shot: Shot }) {
           <ScriptMeta label="时长" value={`${shot.duration_s}s`} />
           <ScriptMeta label="镜头" value={`${shot.shot_size} / ${shot.camera_move}`} />
           <ScriptMeta label="转场" value={shot.transition} />
-          <ScriptMeta label="衔接" value={shot.continuity_from_prev ? '接上镜' : '新场景'} />
+          <ScriptMeta label="衔接" value={shot.continuity_mode || (shot.continuity_from_prev ? '接上镜' : '新场景')} />
+          <ScriptMeta label="可见角色" value={commaList(shot.characters_visible)} />
+          <ScriptMeta label="声音角色" value={commaList(shot.audio_cast)} />
+        </div>
+      </section>
+
+      <section className="script-card">
+        <div className="script-card-head">Seedance 连续性</div>
+        <div className="script-block">
+          <div className="script-paragraph">
+            <span className="script-label">状态链</span>
+            <p>{shot.state_in || shot.first_frame_desc || '未设置'} → {shot.primary_action || shot.action_desc || '未设置'} → {shot.state_out || shot.last_frame_desc || '未设置'}</p>
+          </div>
+          <div className="script-paragraph">
+            <span className="script-label">可见/声音</span>
+            <p>画面：{commaList(shot.characters_visible)}；声音：{commaList(shot.audio_cast)}</p>
+          </div>
+          {promptPreview && (
+            <div className="script-paragraph">
+              <span className="script-label">prompt_text 预览</span>
+              <pre className="script-dialogues">{truncateText(promptPreview)}</pre>
+            </div>
+          )}
+          {(qa?.observed_state_out || qa?.failure_types?.length) && (
+            <div className="script-paragraph">
+              <span className="script-label">QA 连续性</span>
+              <p>{qa.observed_state_out ? `observed_state_out：${qa.observed_state_out}` : ''}</p>
+              {!!qa.failure_types?.length && <p>failure_types：{qa.failure_types.join('、')}</p>}
+            </div>
+          )}
         </div>
       </section>
 

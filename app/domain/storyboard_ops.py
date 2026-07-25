@@ -5,17 +5,57 @@ try:
 except NameError:  # pragma: no cover - used when importing this module directly
     from app.domain.common import *
 
+def _shot_contract_json(shot: Shot) -> str:
+    from app.continuity import shot_contract_dict
+    return json.dumps(shot_contract_dict(shot), ensure_ascii=False)
+
+
+def _apply_contract_to_public_shot(target: dict) -> None:
+    from app.continuity import apply_shot_contract
+    shot = Shot(
+        shot_no=target["shot_no"],
+        duration_s=target["duration_s"],
+        shot_size=target["shot_size"],
+        camera_move=target["camera_move"],
+        scene_setting=target["scene_setting"],
+        scene_name=target.get("scene_name") or "",
+        characters=target.get("characters") or [],
+        action_desc=target["action_desc"],
+        first_frame_desc=target.get("first_frame_desc") or "",
+        last_frame_desc=target.get("last_frame_desc") or "",
+        source_excerpt=target.get("source_excerpt") or "",
+        narration=target.get("narration"),
+        dialogues=target.get("dialogues") or [],
+        transition=target.get("transition") or "硬切",
+        continuity_from_prev=bool(target.get("continuity_from_prev")),
+        continuity_mode=target.get("continuity_mode") or "",
+        observed_state_out=target.get("observed_state_out") or "",
+    )
+    apply_shot_contract(shot, target.get("shot_contract_json"))
+    for key, value in shot.model_dump(mode="json").items():
+        if key in target or key in {
+            "story_event_id", "purpose", "new_information_ids", "reinforcement_info_ids",
+            "state_in", "primary_action", "emotion_beat", "state_out", "observed_state_out",
+            "continuity_mode", "characters_visible", "audio_cast", "audio_timeline",
+            "required_text", "reference_roles", "do_not_repeat", "risk_tags",
+            "prompt_contract_version", "legacy_unvalidated", "camera_angle",
+            "spatial_anchor", "is_final",
+        }:
+            target[key] = value
+
+
 def _insert_storyboard_shot(conn, episode_id: str, screenplay: EpisodeScreenplay, shot: Shot) -> str:
     shot_id = new_id("shot")
     shot.action_desc = normalize_action_desc(shot.action_desc)
     conn.execute(
-        "INSERT INTO shots(id, episode_id, script_id, shot_no, duration_s, shot_size, camera_move, scene_setting, scene_name, characters, action_desc, first_frame_desc, last_frame_desc, source_excerpt, narration, dialogues, transition, continuity_from_prev, storyboard_artifact_id) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO shots(id, episode_id, script_id, shot_no, duration_s, shot_size, camera_move, scene_setting, scene_name, characters, action_desc, first_frame_desc, last_frame_desc, source_excerpt, narration, dialogues, transition, continuity_from_prev, shot_contract_json, continuity_mode, observed_state_out, storyboard_artifact_id) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (shot_id, episode_id, screenplay.id, shot.shot_no, shot.duration_s, shot.shot_size, shot.camera_move,
          shot.scene_setting, shot.scene_name or None, json.dumps(shot.characters, ensure_ascii=False), shot.action_desc,
          shot.first_frame_desc, shot.last_frame_desc, shot.source_excerpt, shot.narration,
          json.dumps([d.model_dump() for d in shot.dialogues], ensure_ascii=False),
-         shot.transition, int(shot.continuity_from_prev),
+         shot.transition, int(shot.continuity_from_prev), _shot_contract_json(shot),
+         shot.continuity_mode, shot.observed_state_out,
          getattr(shot, "evidence_artifact_id", None)))
     return shot_id
 
@@ -23,8 +63,9 @@ def _insert_storyboard_shot(conn, episode_id: str, screenplay: EpisodeScreenplay
 def _sync_storyboard_shot_timing(conn, episode_id: str, board: Storyboard) -> None:
     for shot in board.shots:
         conn.execute(
-            "UPDATE shots SET duration_s=?, transition=?, continuity_from_prev=?, last_frame_desc=? WHERE episode_id=? AND shot_no=?",
+            "UPDATE shots SET duration_s=?, transition=?, continuity_from_prev=?, last_frame_desc=?, shot_contract_json=?, continuity_mode=?, observed_state_out=? WHERE episode_id=? AND shot_no=?",
             (shot.duration_s, shot.transition, int(shot.continuity_from_prev), shot.last_frame_desc,
+             _shot_contract_json(shot), shot.continuity_mode, shot.observed_state_out,
              episode_id, shot.shot_no),
         )
 
@@ -94,7 +135,8 @@ def _persist_storyboard_character_policy_repairs(
             worker.clear_shot_artifacts(row["id"])
         conn.execute(
             """UPDATE shots SET characters=?, action_desc=?, first_frame_desc=?,
-               last_frame_desc=?, narration=?, dialogues=?, storyboard_artifact_id=? WHERE id=?""",
+               last_frame_desc=?, narration=?, dialogues=?, shot_contract_json=?,
+               continuity_mode=?, observed_state_out=?, storyboard_artifact_id=? WHERE id=?""",
             (
                 json.dumps(shot.characters, ensure_ascii=False),
                 shot.action_desc,
@@ -102,6 +144,9 @@ def _persist_storyboard_character_policy_repairs(
                 shot.last_frame_desc,
                 shot.narration,
                 json.dumps([dialogue.model_dump() for dialogue in shot.dialogues], ensure_ascii=False),
+                _shot_contract_json(shot),
+                shot.continuity_mode,
+                shot.observed_state_out,
                 artifact["id"],
                 row["id"],
             ),
@@ -908,6 +953,7 @@ def episode_detail(episode_id: str, view: str | None = None):
     for s in shots:
         s["characters"] = json.loads(s["characters"] or "[]")
         s["dialogues"] = json.loads(s["dialogues"] or "[]")
+        _apply_contract_to_public_shot(s)
         s["est_cost_cny"] = shot_cost_cny(s["duration_s"])
         if s.get("storyboard_artifact_id") and (full or view == "board"):
             shot_artifact = evidence_repository.get_artifact(s["storyboard_artifact_id"])
@@ -954,6 +1000,7 @@ def shot_review_detail(shot_id: str):
     shot = dict(row)
     shot["characters"] = json.loads(shot["characters"] or "[]")
     shot["dialogues"] = json.loads(shot["dialogues"] or "[]")
+    _apply_contract_to_public_shot(shot)
     shot["est_cost_cny"] = shot_cost_cny(shot["duration_s"])
     shot["video_stale"] = False
     for legacy_key in (
@@ -999,25 +1046,39 @@ async def edit_shot(shot_id: str, body: dict):
     merged["characters"] = json.loads(merged["characters"] or "[]")
     merged["dialogues"] = json.loads(merged["dialogues"] or "[]")
     merged["continuity_from_prev"] = bool(merged["continuity_from_prev"])
+    _apply_contract_to_public_shot(merged)
     for key in ("duration_s", "shot_size", "camera_move", "scene_setting", "characters",
-                "action_desc", "first_frame_desc", "last_frame_desc", "source_excerpt", "narration", "dialogues", "transition", "continuity_from_prev"):
+                "action_desc", "first_frame_desc", "last_frame_desc", "source_excerpt", "narration", "dialogues", "transition", "continuity_from_prev",
+                "story_event_id", "purpose", "new_information_ids", "reinforcement_info_ids",
+                "state_in", "primary_action", "emotion_beat", "state_out", "observed_state_out",
+                "continuity_mode", "characters_visible", "audio_cast", "audio_timeline",
+                "required_text", "reference_roles", "do_not_repeat", "risk_tags",
+                "prompt_contract_version", "legacy_unvalidated", "camera_angle",
+                "spatial_anchor", "is_final"):
         if key in body:
             merged[key] = body[key]
     # 时长 clamp 到产品侧合法区间；缺省/非法时回退默认时长。
     merged["duration_s"] = clip_duration_value(merged.get("duration_s"))
     instance, errors = schema_errors(Shot, {k: merged[k] for k in (
         "shot_no", "duration_s", "shot_size", "camera_move", "scene_setting", "characters",
-        "action_desc", "first_frame_desc", "last_frame_desc", "source_excerpt", "narration", "dialogues", "transition", "continuity_from_prev")})
+        "action_desc", "first_frame_desc", "last_frame_desc", "source_excerpt", "narration", "dialogues", "transition", "continuity_from_prev",
+        "story_event_id", "purpose", "new_information_ids", "reinforcement_info_ids",
+        "state_in", "primary_action", "emotion_beat", "state_out", "observed_state_out",
+        "continuity_mode", "characters_visible", "audio_cast", "audio_timeline",
+        "required_text", "reference_roles", "do_not_repeat", "risk_tags",
+        "prompt_contract_version", "legacy_unvalidated", "camera_angle",
+        "spatial_anchor", "is_final")})
     if errors:
         raise HTTPException(422, "；".join(errors))
     instance.action_desc = normalize_action_desc(instance.action_desc)
     conn.execute(
-        "UPDATE shots SET duration_s=?, shot_size=?, camera_move=?, scene_setting=?, characters=?, action_desc=?, first_frame_desc=?, last_frame_desc=?, source_excerpt=?, narration=?, dialogues=?, transition=?, continuity_from_prev=? WHERE id=?",
+        "UPDATE shots SET duration_s=?, shot_size=?, camera_move=?, scene_setting=?, characters=?, action_desc=?, first_frame_desc=?, last_frame_desc=?, source_excerpt=?, narration=?, dialogues=?, transition=?, continuity_from_prev=?, shot_contract_json=?, continuity_mode=?, observed_state_out=? WHERE id=?",
         (instance.duration_s, instance.shot_size, instance.camera_move, instance.scene_setting,
          json.dumps(instance.characters, ensure_ascii=False), instance.action_desc, instance.first_frame_desc, instance.last_frame_desc,
          instance.source_excerpt, instance.narration,
          json.dumps([d.model_dump() for d in instance.dialogues], ensure_ascii=False),
-         instance.transition, int(instance.continuity_from_prev), shot_id))
+         instance.transition, int(instance.continuity_from_prev), _shot_contract_json(instance),
+         instance.continuity_mode, instance.observed_state_out, shot_id))
     conn.commit()
     previous_artifact_id = shot["storyboard_artifact_id"]
     manual_artifact = evidence_repository.create_artifact(EvidenceArtifact(
@@ -1094,13 +1155,23 @@ def _storyboard_loop_exit_text(exit_reason: str) -> str:
 
 def _board_from_shot_rows(rows, episode_no: int) -> Storyboard:
     """Restore a Storyboard from persisted shot rows for confirmation and validation."""
-    shots = [Shot(
-        shot_no=r["shot_no"], duration_s=r["duration_s"], shot_size=r["shot_size"], camera_move=r["camera_move"],
-        scene_setting=r["scene_setting"], characters=json.loads(r["characters"] or "[]"),
-        action_desc=r["action_desc"], first_frame_desc=r["first_frame_desc"] or "", last_frame_desc=r["last_frame_desc"] or "",
-        source_excerpt=r["source_excerpt"] or "",
-        narration=r["narration"], dialogues=json.loads(r["dialogues"] or "[]"),
-        transition=r["transition"] or "硬切", continuity_from_prev=bool(r["continuity_from_prev"])) for r in rows]
+    from app.continuity import apply_shot_contract
+    shots = []
+    for r in rows:
+        shot = Shot(
+            shot_no=r["shot_no"], duration_s=r["duration_s"], shot_size=r["shot_size"], camera_move=r["camera_move"],
+            scene_setting=r["scene_setting"], scene_name=(r["scene_name"] if "scene_name" in r.keys() else "") or "",
+            characters=json.loads(r["characters"] or "[]"),
+            action_desc=r["action_desc"], first_frame_desc=r["first_frame_desc"] or "", last_frame_desc=r["last_frame_desc"] or "",
+            source_excerpt=r["source_excerpt"] or "",
+            narration=r["narration"], dialogues=json.loads(r["dialogues"] or "[]"),
+            transition=r["transition"] or "硬切", continuity_from_prev=bool(r["continuity_from_prev"]),
+            continuity_mode=(r["continuity_mode"] if "continuity_mode" in r.keys() else "") or "",
+            observed_state_out=(r["observed_state_out"] if "observed_state_out" in r.keys() else "") or "",
+        )
+        if "shot_contract_json" in r.keys() and r["shot_contract_json"]:
+            apply_shot_contract(shot, r["shot_contract_json"])
+        shots.append(shot)
     return Storyboard(episode_no=episode_no, shots=shots)
 
 __all__ = [name for name in globals() if not name.startswith("__")]

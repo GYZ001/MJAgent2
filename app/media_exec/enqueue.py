@@ -81,18 +81,24 @@ def stop_shot_video_tasks(shot_id: str) -> dict[str, object]:
 # ---------- 入队 ----------
 
 def _load_shot_model(shot_row) -> "object":
+    from app.continuity import apply_shot_contract
     from app.schemas import Shot
-    return Shot(
+    shot = Shot(
         shot_no=shot_row["shot_no"], duration_s=shot_row["duration_s"], shot_size=shot_row["shot_size"],
         camera_move=shot_row["camera_move"], scene_setting=shot_row["scene_setting"],
         scene_name=(shot_row["scene_name"] if "scene_name" in shot_row.keys() else "") or "",
         characters=json.loads(shot_row["characters"] or "[]"), action_desc=shot_row["action_desc"],
         first_frame_desc=(shot_row["first_frame_desc"] if "first_frame_desc" in shot_row.keys() else "") or "",
         last_frame_desc=(shot_row["last_frame_desc"] if "last_frame_desc" in shot_row.keys() else "") or "",
-        source_excerpt=shot_row["source_excerpt"] or "",
+        source_excerpt=(shot_row["source_excerpt"] if "source_excerpt" in shot_row.keys() else "") or "",
         narration=shot_row["narration"], dialogues=json.loads(shot_row["dialogues"] or "[]"),
         transition=shot_row["transition"] or "硬切", continuity_from_prev=bool(shot_row["continuity_from_prev"]),
+        continuity_mode=(shot_row["continuity_mode"] if "continuity_mode" in shot_row.keys() else "") or "",
+        observed_state_out=(shot_row["observed_state_out"] if "observed_state_out" in shot_row.keys() else "") or "",
     )
+    if "shot_contract_json" in shot_row.keys() and shot_row["shot_contract_json"]:
+        apply_shot_contract(shot, shot_row["shot_contract_json"])
+    return shot
 
 
 def _decision_from_mode_plan(shot_row):
@@ -262,7 +268,14 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
     """为镜头创建参考图模式视频版本并入队。
     critique：上一版 AI 评语问题，作为本次必须改正项写入 prompt。
     幂等：相同 idem_key 的成功版本直接复用（reroll 时跳过复用）。"""
-    from app.compiler import compile_prompt
+    from app.compiler import CompileError, compile_prompt
+    from app.continuity import (
+        derive_continuity_mode,
+        effective_state_out,
+        preflight_seedance_gates,
+        shot_contract_dict,
+        uses_previous_tail_frame,
+    )
     from app.schemas import Bible
 
     conn = get_conn()
@@ -282,36 +295,57 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
     if decision.mode != video_modes.REFERENCE_IMAGE_MODE:
         decision = video_modes.default_reference_decision()
 
-    # 跨镜连贯：接上镜时把上一镜动作作为承接线索写入 prompt
-    prev_tail_action = None
+    # 跨镜连贯只继承上一镜的实际/计划尾状态；不得把上一镜完整动作描述塞进 prompt。
+    prev_row = None
     if after_shot_id:
-        pr = conn.execute("SELECT action_desc FROM shots WHERE id=?", (after_shot_id,)).fetchone()
-        prev_tail_action = pr["action_desc"] if pr else None
+        prev_row = conn.execute("SELECT * FROM shots WHERE id=?", (after_shot_id,)).fetchone()
+    elif int(shot_row["shot_no"]) > 1:
+        prev_row = conn.execute(
+            "SELECT * FROM shots WHERE episode_id=? AND shot_no=?",
+            (shot_row["episode_id"], int(shot_row["shot_no"]) - 1),
+        ).fetchone()
+    prev_shot = _load_shot_model(prev_row) if prev_row else None
+    continuity_mode = derive_continuity_mode(shot, prev_shot)
+    shot.continuity_mode = continuity_mode
+    prev_state_out = effective_state_out(prev_shot) if prev_shot else None
+    prompt_prev_state_out = prev_state_out if uses_previous_tail_frame(continuity_mode) else None
+    if prompt_prev_state_out:
+        shot.state_in = prompt_prev_state_out
+    chain_after_shot_id = after_shot_id if uses_previous_tail_frame(continuity_mode) else None
 
     outgoing_transition = _outgoing_transition_context(conn, shot_row)
     incoming_transition = None
-    if int(shot_row["shot_no"]) > 1 and not bool(shot_row["continuity_from_prev"]):
+    if int(shot_row["shot_no"]) > 1 and not uses_previous_tail_frame(continuity_mode):
         incoming_transition = _transition_value(shot_row)
         if incoming_transition == "硬切":
             incoming_transition = None
+
+    preflight_errors = preflight_seedance_gates(shot, prev=prev_shot, prompt_text=None)
+    if preflight_errors:
+        raise CompileError("；".join(preflight_errors))
 
     prompt_text = (prompt_override if prompt_override else
                    compile_prompt(shot, bible, extra_negative,
                                   with_refs=True,
                                   from_scene=False,
-                                  chained=False,
-                                  critique=critique, prev_tail_action=prev_tail_action,
+                                  chained=bool(chain_after_shot_id),
+                                  critique=critique, prev_tail_action=None,
                                   with_last_frame=False,
                                   incoming_transition=incoming_transition,
                                   outgoing_transition=outgoing_transition["transition"] if outgoing_transition else None,
                                   next_scene=outgoing_transition["next_scene"] if outgoing_transition else None,
-                                  next_first_frame_desc=outgoing_transition["next_first_frame_desc"] if outgoing_transition else None))
+                                  next_first_frame_desc=outgoing_transition["next_first_frame_desc"] if outgoing_transition else None,
+                                  continuity_mode=continuity_mode,
+                                  prev_state_out=prompt_prev_state_out))
     prompt_text = ensure_source_excerpt_in_prompt(prompt_text, shot)
+    preflight_errors = preflight_seedance_gates(shot, prev=prev_shot, prompt_text=prompt_text)
+    if preflight_errors:
+        raise CompileError("；".join(preflight_errors))
 
     # 参考图是分镜级素材。重抽、改词或带评语只创建新视频版本，不能重新跑参考图生成。
     reference_gallery = _load_reference_gallery(conn, shot_row)
 
-    key_material = prompt_text + f"|mode:{video_modes.REFERENCE_IMAGE_MODE}|plan:{video_modes.decision_to_dict(decision)}|after:{after_shot_id or ''}"
+    key_material = prompt_text + f"|mode:{video_modes.REFERENCE_IMAGE_MODE}|plan:{video_modes.decision_to_dict(decision)}|after:{chain_after_shot_id or ''}"
     # 只有人工编辑会改变视频输入并打破原幂等键；未编辑画廊沿用历史幂等行为，
     # 普通重复点击仍直接复用已有成功视频。
     if reference_gallery and reference_gallery["revision"] is not None:
@@ -345,11 +379,14 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
     image_meta = {
         "mode": decision.mode,
         "mode_decision": video_modes.decision_to_dict(decision),
-        "after_shot_id": after_shot_id,
+        "after_shot_id": chain_after_shot_id,
         "after_shot_no": None,
+        "continuity_mode": continuity_mode,
+        "prev_state_out": prompt_prev_state_out,
         "incoming_transition": incoming_transition,
         "outgoing_transition": outgoing_transition,
         "auto_retake_count": max(0, int(auto_retake_count)),
+        "shot_contract_json": json.dumps(shot_contract_dict(shot), ensure_ascii=False),
     }
     if reference_gallery:
         image_meta["reference_images"] = reference_gallery["reference_images"]
@@ -375,7 +412,7 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
         "updated_at, after_shot_id, run_id, step_run_id) "
         "VALUES(?, 'video', ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)",
         (
-            job_id, shot_id, version_id, ep["id"], project["id"], now(), now(), after_shot_id,
+            job_id, shot_id, version_id, ep["id"], project["id"], now(), now(), chain_after_shot_id,
             run_id, step_run_id,
         ))
     conn.execute("UPDATE episodes SET status='generating' WHERE id=? AND status='confirmed'", (ep["id"],))

@@ -241,6 +241,24 @@ export interface ArtifactEvidence {
 
 interface Dialogue { speaker: string; line: string; emotion: string }
 
+interface AudioTimelineItem {
+  start_s: number
+  end_s: number
+  type: string
+  speaker_id?: string | null
+  text: string
+  lip_sync?: boolean
+  emotion?: string
+}
+
+interface RequiredText {
+  surface: string
+  exact_text: string
+  appear_start_s?: number
+  stable_until_s?: number | null
+  style?: string
+}
+
 interface ScreenplayBeat {
   beat_no: number
   day_offset: number
@@ -292,6 +310,12 @@ export interface EpisodeScreenplay {
   development?: string
   conflict?: string
   climax?: string
+  episode_premise?: string
+  events?: Record<string, unknown>[]
+  information_ledger?: Record<string, unknown>[]
+  voice_bible?: Record<string, unknown>[]
+  approved_adaptations?: string[]
+  forbidden_additions?: string[]
   created_at?: number | null
   updated_at?: number | null
   beats: ScreenplayBeat[]
@@ -305,7 +329,14 @@ export interface ReferenceImage {
 
 export interface ShotVersion {
   id: string; version_no: number; prompt_text: string; status: string
-  error?: string; video_url?: string; qa?: { overall: number; issues: string[] } | null
+  error?: string; video_url?: string; qa?: {
+    overall: number
+    issues: string[]
+    failure_types?: string[]
+    observed_state_out?: string
+    start_state_match?: number | boolean
+    end_state_match?: number | boolean
+  } | null
   cost_cny: number; latency_s: number
   artifact_id?: string | null; adoption_reason?: string | null
   technical_validation_json?: string | null
@@ -362,6 +393,26 @@ export interface Shot {
   source_excerpt: string
   narration: string | null; dialogues: Dialogue[]; transition: string
   continuity_from_prev: number; adopted_version_id: string | null
+  story_event_id?: string
+  purpose?: string
+  new_information_ids?: string[]
+  reinforcement_info_ids?: string[]
+  state_in?: string
+  primary_action?: string
+  state_out?: string
+  observed_state_out?: string
+  continuity_mode?: string
+  characters_visible?: string[]
+  audio_cast?: string[]
+  audio_timeline?: AudioTimelineItem[]
+  required_text?: RequiredText | null
+  reference_roles?: string[]
+  do_not_repeat?: string[]
+  risk_tags?: string[]
+  prompt_contract_version?: string
+  legacy_unvalidated?: boolean
+  preflight_errors?: string[]
+  prompt_preview?: string
   est_cost_cny: number; versions: ShotVersion[]
   version_count?: number
   video_stale: boolean
