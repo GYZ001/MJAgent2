@@ -147,3 +147,112 @@ def test_high_watermark_blocks_new_reference(monkeypatch) -> None:
     allow, demand = should_start_more_reference_work(episode_id="e1", conn=conn)
     assert allow is False
     assert demand == 0
+
+
+def test_first_pass_incomplete_ignores_retake_ready_for_watermark(monkeypatch) -> None:
+    """首轮未完成时，大量排队自动重抽不得撑满水位、阻断新参考图。"""
+    conn = _conn()
+    conn.execute("INSERT INTO projects(id,name,status,created_at) VALUES('p1','P','created',1)")
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,status,created_at) VALUES('e1','p1',1,'generating',1)"
+    )
+    # 未覆盖首轮镜（无成功视频、无就绪任务）
+    conn.execute(
+        "INSERT INTO shots(id,episode_id,shot_no,duration_s,characters,dialogues) "
+        "VALUES('s_gap','e1',99,5,'[]','[]')"
+    )
+    for i in range(1, 8):
+        sid, vid0, vid1, jid = f"s{i}", f"v{i}a", f"v{i}b", f"j{i}"
+        conn.execute(
+            "INSERT INTO shots(id,episode_id,shot_no,duration_s,characters,dialogues) "
+            "VALUES(?,?,?,5,'[]','[]')",
+            (sid, "e1", i),
+        )
+        conn.execute(
+            "INSERT INTO shot_versions(id,shot_id,version_no,prompt_text,idem_key,status,created_at,video_path) "
+            "VALUES(?,?,1,'p',?,'succeeded',1,'/tmp/v.mp4')",
+            (vid0, sid, vid0),
+        )
+        meta = json.dumps({
+            "auto_retake_count": 1,
+            "reference_images": [{"id": f"r{i}"}],
+            "reference_generation_complete": True,
+            "video_input_manifest_frozen": True,
+        })
+        conn.execute(
+            "INSERT INTO shot_versions(id,shot_id,version_no,prompt_text,idem_key,status,created_at,image_inputs) "
+            "VALUES(?,?,2,'p',?,'queued',1,?)",
+            (vid1, sid, vid1, meta),
+        )
+        conn.execute(
+            "INSERT INTO jobs(id,kind,shot_id,version_id,episode_id,project_id,status,created_at,updated_at,pipeline_stage) "
+            "VALUES(?,'video',?,?, 'e1','p1','queued',1,1,?)",
+            (jid, sid, vid1, S.STAGE_VIDEO_READY),
+        )
+    conn.commit()
+    monkeypatch.setattr("app.media_pipeline.scheduler.get_conn", lambda: conn)
+    monkeypatch.setattr("app.media_pipeline.retry_policy.get_setting", lambda key: {
+        "media_scheduler_policy": "stage_aware",
+        "video_ready_low_watermark": "2",
+        "video_ready_high_watermark": "6",
+        "reference_shot_cohort_limit": "4",
+        "episode_video_inflight_limit": "8",
+    }.get(key))
+    # 含重抽时就绪很多；排除后水位应允许开工
+    assert count_true_video_ready_not_submitted(episode_id="e1", conn=conn) >= 6
+    assert count_true_video_ready_not_submitted(
+        episode_id="e1", conn=conn, exclude_auto_retakes=True,
+    ) == 0
+    allow, demand = should_start_more_reference_work(episode_id="e1", conn=conn)
+    assert allow is True
+    assert demand > 0
+
+
+def test_first_pass_ready_still_backs_pressure_when_high(monkeypatch) -> None:
+    """排除重抽后若首轮就绪仍达高水位，背压应继续生效。"""
+    conn = _conn()
+    conn.execute("INSERT INTO projects(id,name,status,created_at) VALUES('p1','P','created',1)")
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,status,created_at) VALUES('e1','p1',1,'generating',1)"
+    )
+    # 缺口镜，保证 first_pass_incomplete
+    conn.execute(
+        "INSERT INTO shots(id,episode_id,shot_no,duration_s,characters,dialogues) "
+        "VALUES('s_gap','e1',99,5,'[]','[]')"
+    )
+    for i in range(1, 8):
+        sid, vid, jid = f"s{i}", f"v{i}", f"j{i}"
+        conn.execute(
+            "INSERT INTO shots(id,episode_id,shot_no,duration_s,characters,dialogues) "
+            "VALUES(?,?,?,5,'[]','[]')",
+            (sid, "e1", i),
+        )
+        # 首轮就绪（auto_retake_count=0）
+        meta = json.dumps({
+            "auto_retake_count": 0,
+            "reference_images": [{"id": f"r{i}"}],
+            "reference_generation_complete": True,
+            "video_input_manifest_frozen": True,
+        })
+        conn.execute(
+            "INSERT INTO shot_versions(id,shot_id,version_no,prompt_text,idem_key,status,created_at,image_inputs) "
+            "VALUES(?,?,1,'p',?,'queued',1,?)",
+            (vid, sid, vid, meta),
+        )
+        conn.execute(
+            "INSERT INTO jobs(id,kind,shot_id,version_id,episode_id,project_id,status,created_at,updated_at,pipeline_stage) "
+            "VALUES(?,'video',?,?, 'e1','p1','queued',1,1,?)",
+            (jid, sid, vid, S.STAGE_VIDEO_READY),
+        )
+    conn.commit()
+    monkeypatch.setattr("app.media_pipeline.scheduler.get_conn", lambda: conn)
+    monkeypatch.setattr("app.media_pipeline.retry_policy.get_setting", lambda key: {
+        "media_scheduler_policy": "stage_aware",
+        "video_ready_low_watermark": "2",
+        "video_ready_high_watermark": "6",
+        "reference_shot_cohort_limit": "1",
+        "episode_video_inflight_limit": "8",
+    }.get(key))
+    allow, demand = should_start_more_reference_work(episode_id="e1", conn=conn)
+    assert allow is False
+    assert demand == 0

@@ -101,10 +101,43 @@ def count_inflight_videos(*, episode_id: str | None = None, project_id: str | No
     ).fetchone()["c"])
 
 
-def episode_first_pass_incomplete(episode_id: str) -> bool:
+def _parse_meta(raw: str | None) -> dict[str, Any]:
+    try:
+        return json.loads(raw or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def _is_auto_retake_meta(meta: dict[str, Any]) -> bool:
+    return int(meta.get("auto_retake_count") or 0) > 0
+
+
+def count_inflight_auto_retakes(episode_id: str, *, conn=None) -> int:
+    """本集真正占用上游视频槽的自动重抽数（与 count_inflight_videos 同口径）。
+
+    不含 queued / waiting_video_slot：本地排队不算在途，避免互相自锁。
+    """
+    db = conn or get_conn()
+    rows = db.execute(
+        """SELECT v.image_inputs FROM jobs j
+           JOIN shot_versions v ON v.id=j.version_id
+           WHERE j.episode_id=? AND j.kind='video'
+             AND j.status IN ('running','waiting_provider')
+             AND j.provider_non_cancellable=1
+             AND j.cancellation_requested=0 AND j.abandoned=0""",
+        (episode_id,),
+    ).fetchall()
+    count = 0
+    for row in rows:
+        if _is_auto_retake_meta(_parse_meta(row["image_inputs"])):
+            count += 1
+    return count
+
+
+def episode_first_pass_incomplete(episode_id: str, *, conn=None) -> bool:
     """是否仍有镜头没有任何成功候选视频。"""
-    conn = get_conn()
-    row = conn.execute(
+    db = conn or get_conn()
+    row = db.execute(
         """SELECT COUNT(*) c FROM shots s
            WHERE s.episode_id=?
              AND NOT EXISTS (
@@ -134,37 +167,16 @@ def can_admit_video_submit(
         return False, "本集上游视频槽位已满"
 
     if is_auto_retake and episode_first_pass_incomplete(episode_id):
-        # 重抽最多占 25% 在途槽
+        # 重抽最多占上游在途槽的 25%；只计真正已交上游的重抽
         inflight = count_inflight_videos(episode_id=episode_id)
         retake_cap = max(1, int(episode_inflight_cap() * first_pass_retake_slot_fraction()))
-        # 统计本集自动重抽在途
-        conn = get_conn()
-        retake_inflight = 0
-        rows = conn.execute(
-            """SELECT v.image_inputs FROM jobs j
-               JOIN shot_versions v ON v.id=j.version_id
-               WHERE j.episode_id=? AND j.kind='video'
-                 AND j.status IN ('running','waiting_provider','queued')
-                 AND j.cancellation_requested=0 AND j.abandoned=0""",
-            (episode_id,),
-        ).fetchall()
-        for r in rows:
-            meta = json.loads(r["image_inputs"] or "{}")
-            if int(meta.get("auto_retake_count") or 0) > 0:
-                retake_inflight += 1
+        retake_inflight = count_inflight_auto_retakes(episode_id)
         if retake_inflight >= retake_cap:
             return False, "首轮未覆盖完成，自动重抽槽位已满"
         # 额外：若在途已接近满且重抽会挤占，也拒绝
         if inflight >= global_cap:
             return False, "上游槽位已满，优先首轮覆盖"
     return True, None
-
-
-def _parse_meta(raw: str | None) -> dict[str, Any]:
-    try:
-        return json.loads(raw or "{}")
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return {}
 
 
 def is_true_video_ready(meta: dict[str, Any], *, continuity_ok: bool) -> bool:
@@ -182,7 +194,12 @@ def is_true_video_ready(meta: dict[str, Any], *, continuity_ok: bool) -> bool:
     return continuity_ok
 
 
-def count_true_video_ready_not_submitted(*, episode_id: str | None = None, conn=None) -> int:
+def count_true_video_ready_not_submitted(
+    *,
+    episode_id: str | None = None,
+    conn=None,
+    exclude_auto_retakes: bool = False,
+) -> int:
     """统计已 VIDEO_READY 但尚未获得 provider_task_id 的镜头数。"""
     db = conn or get_conn()
     sql = """SELECT j.id, j.after_shot_id, v.image_inputs, v.provider_task_id, j.pipeline_stage
@@ -200,10 +217,12 @@ def count_true_video_ready_not_submitted(*, episode_id: str | None = None, conn=
     count = 0
     cache: dict[str, bool] = {}
     for row in rows:
+        meta = _parse_meta(row["image_inputs"])
+        if exclude_auto_retakes and _is_auto_retake_meta(meta):
+            continue
         if row["pipeline_stage"] == S.STAGE_VIDEO_READY:
             count += 1
             continue
-        meta = _parse_meta(row["image_inputs"])
         after = row["after_shot_id"]
         if after:
             if after not in cache:
@@ -294,7 +313,11 @@ def should_start_more_reference_work(*, episode_id: str | None = None, conn=None
     db = conn or get_conn()
     if scheduler_policy() == "legacy":
         return True, prepared_reference_backlog()
-    ready = count_true_video_ready_not_submitted(episode_id=episode_id, conn=db)
+    # 首轮未覆盖时，排队/卡住的自动重抽不计入水位，避免压制未覆盖镜开工
+    exclude_retakes = bool(episode_id) and episode_first_pass_incomplete(episode_id, conn=db)
+    ready = count_true_video_ready_not_submitted(
+        episode_id=episode_id, conn=db, exclude_auto_retakes=exclude_retakes,
+    )
     high = video_ready_high_watermark()
     low = video_ready_low_watermark()
     if ready >= high:
@@ -335,6 +358,7 @@ def classify_scheduler_lane(
 __all__ = [
     "continuity_anchor_ready",
     "count_inflight_videos",
+    "count_inflight_auto_retakes",
     "episode_first_pass_incomplete",
     "can_admit_video_submit",
     "is_true_video_ready",
