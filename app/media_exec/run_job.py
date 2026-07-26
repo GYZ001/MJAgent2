@@ -526,7 +526,7 @@ async def critique_version(version_id: str) -> list[str]:
         bible = json.loads(project["bible_json"])
         anchor_map = {c["name"]: c["appearance_canonical"] for c in bible["characters"]}
         anchors = [anchor_map[n] for n in json.loads(shot["characters"] or "[]") if n in anchor_map]
-        frames = _extract_frames(v["video_path"])
+        frames = _extract_frames(v["video_path"], high_risk=_shot_high_risk_for_qa(shot))
         if not frames:
             return []
         meta = json.loads(v["image_inputs"] or "{}") if v["image_inputs"] else {}
@@ -1413,7 +1413,6 @@ async def _maybe_auto_qa(
         return False
     conn = get_conn()
     try:
-        frames = _extract_frames(video_path)
         shot = conn.execute("SELECT * FROM shots WHERE id=?", (job["shot_id"],)).fetchone()
         project = conn.execute("SELECT * FROM projects WHERE id=?", (job["project_id"],)).fetchone()
         bible = json.loads(project["bible_json"])
@@ -1442,6 +1441,7 @@ async def _maybe_auto_qa(
         )
         if "shot_contract_json" in shot.keys() and shot["shot_contract_json"]:
             apply_shot_contract(shot_model, shot["shot_contract_json"])
+        frames = _extract_frames(video_path, high_risk=_shot_high_risk_for_qa(shot, shot_model))
         version_row = conn.execute("SELECT * FROM shot_versions WHERE id=?", (version_id,)).fetchone()
         meta_for_qa = json.loads(version_row["image_inputs"] or "{}") if version_row and version_row["image_inputs"] else {}
         if meta_for_qa.get("reference_set_id"):
@@ -1562,26 +1562,37 @@ async def _maybe_auto_qa(
         return True
 
 
-def _extract_frames(video_path: str) -> list[str]:
-    """ffmpeg 抽 首/中/尾 3 帧，返回 base64 列表。"""
+def _extract_frames(video_path: str, *, high_risk: bool = False) -> list[str]:
+    """ffmpeg 抽帧，返回 base64 列表。普通镜头首/中/尾 3 帧；高风险镜头 0/25/50/75/95% 五帧。"""
+    from app.multiview import video_qa_sample_positions
+    positions = video_qa_sample_positions(high_risk=high_risk)
     frames = []
     with tempfile.TemporaryDirectory() as td:
-        for i, pos in enumerate(("0", "50%", "99%")):
+        dur = None
+        for i, frac in enumerate(positions):
             out = Path(td) / f"f{i}.jpg"
             cmd = ["ffmpeg", "-y", "-loglevel", "error"]
-            if pos == "0":
+            if frac <= 0.0:
                 cmd += ["-i", video_path, "-vf", "select=eq(n\\,0)", "-vframes", "1"]
             else:
-                # 用 ffprobe 拿时长再定位
-                dur = float(subprocess.run(
-                    ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", video_path],
-                    capture_output=True, text=True, check=True).stdout.strip() or 5)
-                ts = dur * (0.5 if pos == "50%" else 0.97)
+                if dur is None:
+                    dur = float(subprocess.run(
+                        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                         "-of", "csv=p=0", video_path],
+                        capture_output=True, text=True, check=True).stdout.strip() or 5)
+                ts = max(0.0, min(float(dur) * float(frac), max(float(dur) - 0.05, 0.0)))
                 cmd += ["-ss", f"{ts:.2f}", "-i", video_path, "-vframes", "1"]
             cmd += ["-q:v", "4", str(out)]
             subprocess.run(cmd, check=True, capture_output=True)
             frames.append(hiagent.encode_image_file(str(out)))
     return frames
+
+
+def _shot_high_risk_for_qa(shot_row, shot_model=None) -> bool:
+    from app.multiview import shot_needs_high_risk_frame_sample
+    if shot_model is not None and shot_needs_high_risk_frame_sample(shot_model):
+        return True
+    return shot_needs_high_risk_frame_sample(shot_row)
 
 
 # ---------- worker 生命周期 ----------

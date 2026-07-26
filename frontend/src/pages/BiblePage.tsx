@@ -180,7 +180,15 @@ export default function BiblePage() {
                   {fitting ? <span className="stamp gold">定妆中</span>
                     : c.ref_image_url ? <span className="stamp green">已定妆</span> : <span className="stamp grey">未定妆</span>}
                 </div>
-                {c.ref_image_url && <CharacterPortraitGallery character={c} fitting={fitting} />}
+                {c.ref_image_url && (
+                  <CharacterPortraitGallery
+                    projectId={p.id}
+                    character={c}
+                    fitting={fitting}
+                    disabled={busy || generating}
+                    onChanged={refresh}
+                  />
+                )}
                 <label className="f">外观锚点串（40~60 字，定稿后锁定）</label>
                 {editing
                   ? <textarea rows={3} value={editing.characters[i].appearance_canonical}
@@ -324,8 +332,16 @@ const VIEW_ROLE_LABELS: Record<string, string> = {
   face_closeup: '面部特写',
 }
 
-function CharacterPortraitGallery({ character, fitting }: { character: Character; fitting: boolean }) {
+function CharacterPortraitGallery({ projectId, character, fitting, disabled, onChanged }: {
+  projectId: string
+  character: Character
+  fitting: boolean
+  disabled?: boolean
+  onChanged?: () => void
+}) {
+  const { toast } = useNav()
   const trackRef = useRef<HTMLDivElement>(null)
+  const [redoing, setRedoing] = useState<string | null>(null)
   // 当前版本排在第一张；旧图只是定妆版本历史，不代表对应集数已经投入生产。
   const portraits = [...(character.portraits ?? [])]
     .filter(portrait => !!portrait.image_url || (portrait.views ?? []).some(v => v.image_url))
@@ -337,6 +353,21 @@ function CharacterPortraitGallery({ character, fitting }: { character: Character
     const track = trackRef.current
     if (!track) return
     track.scrollBy({ left: direction * track.clientWidth, behavior: 'smooth' })
+  }
+
+  const redoView = async (portraitId: string, viewRole: string) => {
+    const label = VIEW_ROLE_LABELS[viewRole] || viewRole
+    if (!window.confirm(`确认重做「${character.name}」的${label}视角？将重新付费生成并复跑整包 QA。`)) return
+    setRedoing(`${portraitId}:${viewRole}`)
+    try {
+      await api.regenerateCharacterView(projectId, character.name, portraitId, viewRole)
+      toast(`${label}视角已重做`)
+      onChanged?.()
+    } catch (e: unknown) {
+      toast(e instanceof Error ? e.message : String(e), true)
+    } finally {
+      setRedoing(null)
+    }
   }
 
   return (
@@ -361,6 +392,17 @@ function CharacterPortraitGallery({ character, fitting }: { character: Character
                   <div key={view.id} className="portrait-view-chip">
                     <img src={view.image_url} alt={view.view_role || 'view'} />
                     <span>{VIEW_ROLE_LABELS[view.view_role || ''] || view.view_role || '视角'}</span>
+                    {index === 0 && portrait.ep_end == null && view.view_role && (
+                      <button
+                        type="button"
+                        className="btn small ghost"
+                        style={{ fontSize: 10, padding: '1px 6px', marginTop: 2 }}
+                        disabled={disabled || !!redoing}
+                        onClick={() => redoView(portrait.id, view.view_role!)}
+                      >
+                        {redoing === `${portrait.id}:${view.view_role}` ? '重做中…' : '重做'}
+                      </button>
+                    )}
                   </div>
                 ) : null)}
               </div>

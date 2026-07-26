@@ -302,6 +302,11 @@ export default function WallPage() {
   const [genMenuOpen, setGenMenuOpen] = useState(false)
   const [supervisorKickoff, setSupervisorKickoff] = useState(false)
   const [supervisorPanelDismissed, setSupervisorPanelDismissed] = useState(false)
+  const [stalePreview, setStalePreview] = useState<{
+    stale_count: number
+    shots: Array<{ shot_id: string; shot_no: number; reasons: string[]; hint?: string }>
+  } | null>(null)
+  const [staleBusy, setStaleBusy] = useState(false)
   const toastTimerRef = useRef<number>()
 
   const showToast = useCallback((msg: string) => {
@@ -418,6 +423,44 @@ export default function WallPage() {
 
   const canGenerate = ep.status === 'confirmed' || ep.status === 'generating' || ep.status === 'done'
   const adoptedCount = videoReady
+
+  const staleShots = shots.filter(s => s.video_stale)
+  const staleCount = stalePreview?.stale_count ?? staleShots.length
+
+  const loadStalePreview = async () => {
+    try {
+      const preview = await api.staleAssetsPreview(ep.id)
+      setStalePreview(preview)
+      if (!preview.stale_count) showToast('当前没有 stale 镜头')
+      else showToast(`发现 ${preview.stale_count} 个资产过期镜头`)
+    } catch (e: unknown) {
+      showToast(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const doRepairStale = async () => {
+    const count = stalePreview?.stale_count || staleShots.length
+    if (!count) { showToast('没有可修复的 stale 镜头'); return }
+    const ok = window.confirm(
+      `确认批量修复 ${count} 个 stale 镜头？\n`
+      + `将为这些镜头强制重抽新视频版本；旧采用版在新版成功前保留。`,
+    )
+    if (!ok) return
+    setStaleBusy(true)
+    videoTimer.start()
+    try {
+      const shotIds = stalePreview?.shots.map(s => s.shot_id)
+      const result = await api.repairStaleAssets(ep.id, shotIds) as { queued?: number; message?: string }
+      showToast(result.message || `已提交 ${result.queued ?? 0} 个重生任务`)
+      void refreshAll()
+      void loadStalePreview()
+    } catch (e: unknown) {
+      videoTimer.clear()
+      showToast(e instanceof Error ? e.message : String(e))
+    } finally {
+      setStaleBusy(false)
+    }
+  }
 
   const doGenerateEpisode = async () => {
     if (!canGenerate) { showToast('请先在分镜台确认本集分镜'); return }
@@ -587,6 +630,26 @@ export default function WallPage() {
           </div>
         </div>
       </div>
+
+      {staleCount > 0 && (
+        <div className="material-fallback-note" role="status" style={{ margin: '8px 16px 0' }}>
+          参考资产已更新：本集有 <b>{staleCount}</b> 镜采用版可能使用旧人物/场景证据。
+          <span style={{ marginLeft: 10, display: 'inline-flex', gap: 8 }}>
+            <button className="btn small" disabled={staleBusy} onClick={() => void loadStalePreview()}>
+              预览影响
+            </button>
+            <button className="btn small primary" disabled={staleBusy} onClick={() => void doRepairStale()}>
+              {staleBusy ? '提交中…' : '批量修复'}
+            </button>
+          </span>
+          {stalePreview && stalePreview.shots.length > 0 && (
+            <div style={{ marginTop: 6, fontSize: 12, color: 'var(--ink-soft)' }}>
+              镜号：{stalePreview.shots.map(s => s.shot_no).join('、')}
+              {stalePreview.shots[0]?.hint ? ` · ${stalePreview.shots[0].hint}` : ''}
+            </div>
+          )}
+        </div>
+      )}
 
       {!supervisorPanelDismissed && (supervisorLive || ep.video_supervisor) && (
         <VideoSupervisorPanel

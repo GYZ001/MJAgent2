@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -491,3 +492,261 @@ def test_shot_video_assets_stale_when_portrait_revision_changes() -> None:
     finally:
         mv.portrait_row_for_episode = original_portrait
         mv.scene_row_for_episode = original_scene
+
+
+def test_video_qa_sample_positions_high_risk() -> None:
+    from app.multiview import video_qa_sample_positions, shot_needs_high_risk_frame_sample
+
+    assert video_qa_sample_positions(high_risk=False) == (0.0, 0.50, 0.97)
+    assert video_qa_sample_positions(high_risk=True) == (0.0, 0.25, 0.50, 0.75, 0.95)
+    assert shot_needs_high_risk_frame_sample({"duration_s": 8, "risk_tags": []}) is True
+    assert shot_needs_high_risk_frame_sample({"duration_s": 4, "risk_tags": ["identity_risk"]}) is True
+    assert shot_needs_high_risk_frame_sample({"duration_s": 4, "risk_tags": []}) is False
+
+
+def test_clone_portrait_views_zero_cost_bind(tmp_path, monkeypatch) -> None:
+    """仅本集造型结束后，完整旧包应零付费重新绑定为 ready（含全部视角）。"""
+    import threading
+    from app import db
+    from app.multiview import bind_ready_portrait_reuse, list_portrait_views
+
+    database = tmp_path / "reuse.db"
+    monkeypatch.setattr(db, "DB_PATH", database)
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(db, "_local", threading.local())
+    db.init_db()
+    conn = db.get_conn()
+    img = tmp_path / "front.jpg"
+    img.write_bytes(b"x")
+    side = tmp_path / "side.jpg"
+    side.write_bytes(b"y")
+    conn.execute("INSERT INTO projects(id, name, created_at) VALUES('proj','t',1)")
+    conn.execute(
+        """INSERT INTO character_portraits(
+               id, project_id, character_name, ep_start, ep_end, appearance, prompt,
+               image_path, base_portrait_id, bible_version, artifact_id, pack_status,
+               group_qa_json, created_at
+           ) VALUES('p_old','proj','A',1,5,'黑发','prompt',?,NULL,0,NULL,'ready',?,1)""",
+        (str(img), json.dumps({"overall": 0.9})),
+    )
+    for role, path in (("front_full", img), ("three_quarter", side), ("profile", side)):
+        conn.execute(
+            """INSERT INTO character_portrait_views(
+                   id, portrait_id, view_role, framing, image_path, prompt, qa_json,
+                   artifact_id, base_view_id, status, selected, input_fingerprint, created_at
+               ) VALUES(?,?,?,?,?,?,NULL,NULL,NULL,'ready',1,'fp',1)""",
+            (f"v_{role}", "p_old", role, "full", str(path), "p"),
+        )
+    conn.commit()
+
+    reuse_id = bind_ready_portrait_reuse(
+        conn, project_id="proj", character_name="A", source_portrait_id="p_old",
+        ep_start=6, bible_version=0,
+    )
+    conn.commit()
+    row = conn.execute("SELECT pack_status, ep_start FROM character_portraits WHERE id=?", (reuse_id,)).fetchone()
+    assert row["pack_status"] == "ready"
+    assert row["ep_start"] == 6
+    views = list_portrait_views(reuse_id, conn=conn)
+    assert {v["view_role"] for v in views} == {"front_full", "three_quarter", "profile"}
+    assert all(v["status"] == "ready" for v in views)
+    assert all(Path(v["image_path"]).exists() for v in views)
+
+
+def test_refresh_portrait_pack_failure_does_not_switch(monkeypatch, tmp_path) -> None:
+    """整包 QA 失败不得切换版本：临时段删除，旧开区间继续生效。"""
+    import asyncio
+    import threading
+    from app import db, hiagent
+    from app.portraits import _refresh_portrait_on_drift
+
+    database = tmp_path / "drift.db"
+    monkeypatch.setattr(db, "DB_PATH", database)
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(db, "_local", threading.local())
+    db.init_db()
+    conn = db.get_conn()
+    img = tmp_path / "old.jpg"
+    img.write_bytes(b"old")
+    conn.execute(
+        "INSERT INTO projects(id, name, bible_json, bible_version, created_at) VALUES('proj','t',?,?,1)",
+        (json.dumps({"characters": [{"name": "A", "appearance_canonical": "黑发"}],
+                     "world": {"visual_style_canonical": "anime"}}), 1),
+    )
+    conn.execute(
+        """INSERT INTO character_portraits(
+               id, project_id, character_name, ep_start, ep_end, appearance, prompt,
+               image_path, base_portrait_id, bible_version, artifact_id, pack_status, created_at
+           ) VALUES('p_old','proj','A',1,NULL,'黑发','prompt',?,NULL,1,NULL,'ready',1)""",
+        (str(img),),
+    )
+    conn.commit()
+
+    async def fake_redraw(*_a, **_k):
+        new = tmp_path / "new.jpg"
+        new.write_bytes(b"new")
+        return str(new), "new prompt"
+
+    async def fake_review(*_a, **_k):
+        return {"overall": 0.95, "status": "approved", "issues": []}
+
+    async def failed_pack(**_k):
+        return {"status": "failed", "failed_view": "profile"}
+
+    monkeypatch.setattr("app.portraits._redraw_portrait", fake_redraw)
+    monkeypatch.setattr("app.portraits._review_portrait_asset", fake_review)
+    monkeypatch.setattr("app.portraits.record_reference_asset", lambda **k: {"id": "art1", "status": "approved"})
+    monkeypatch.setattr("app.multiview.ensure_character_multiview_pack", failed_pack)
+
+    with pytest.raises(hiagent.ProviderError, match="无法切换造型"):
+        asyncio.run(_refresh_portrait_on_drift(
+            "proj", "A", 12, "白发红袍", "anime", 1,
+            change_meta={"persistence": "persistent", "change_dimensions": ["hair", "outfit"]},
+        ))
+
+    rows = conn.execute(
+        "SELECT id, ep_start, ep_end, pack_status FROM character_portraits WHERE character_name='A'"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["id"] == "p_old"
+    assert rows[0]["ep_end"] is None
+    assert rows[0]["pack_status"] == "ready"
+
+
+def test_refresh_portrait_episode_persistence_binds_ready_pack(monkeypatch, tmp_path) -> None:
+    """仅本集造型成功后：旧包应从 ep+1 以 ready 完整视角重新绑定。"""
+    import asyncio
+    import threading
+    from pathlib import Path
+    from app import db
+    from app.portraits import _refresh_portrait_on_drift
+    from app.multiview import list_portrait_views
+
+    database = tmp_path / "ep-only.db"
+    monkeypatch.setattr(db, "DB_PATH", database)
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(db, "_local", threading.local())
+    db.init_db()
+    conn = db.get_conn()
+    img = tmp_path / "old.jpg"
+    img.write_bytes(b"old")
+    side = tmp_path / "side.jpg"
+    side.write_bytes(b"side")
+    conn.execute(
+        "INSERT INTO projects(id, name, bible_json, bible_version, created_at) VALUES('proj','t',?,?,1)",
+        (json.dumps({"characters": [{"name": "A", "appearance_canonical": "黑发"}],
+                     "world": {"visual_style_canonical": "anime"}}), 1),
+    )
+    conn.execute(
+        """INSERT INTO character_portraits(
+               id, project_id, character_name, ep_start, ep_end, appearance, prompt,
+               image_path, base_portrait_id, bible_version, artifact_id, pack_status, created_at
+           ) VALUES('p_old','proj','A',1,NULL,'黑发','prompt',?,NULL,1,NULL,'ready',1)""",
+        (str(img),),
+    )
+    for role, path in (("front_full", img), ("three_quarter", side), ("profile", side)):
+        conn.execute(
+            """INSERT INTO character_portrait_views(
+                   id, portrait_id, view_role, framing, image_path, prompt, qa_json,
+                   artifact_id, base_view_id, status, selected, input_fingerprint, created_at
+               ) VALUES(?,?,?,?,?,?,NULL,NULL,NULL,'ready',1,'fp',1)""",
+            (f"v_{role}", "p_old", role, "full", str(path), "p"),
+        )
+    conn.commit()
+
+    async def fake_redraw(*_a, **_k):
+        new = tmp_path / "new.jpg"
+        new.write_bytes(b"new")
+        return str(new), "new prompt"
+
+    async def fake_review(*_a, **_k):
+        return {"overall": 0.95, "status": "approved", "issues": []}
+
+    async def ready_pack(**kwargs):
+        # 模拟整包成功：给新段登记三视角
+        pid = kwargs["portrait_id"]
+        for role in ("front_full", "three_quarter", "profile"):
+            p = tmp_path / f"{pid}_{role}.jpg"
+            p.write_bytes(b"1")
+            conn.execute(
+                """INSERT OR REPLACE INTO character_portrait_views(
+                       id, portrait_id, view_role, framing, image_path, prompt, qa_json,
+                       artifact_id, base_view_id, status, selected, input_fingerprint, created_at
+                   ) VALUES(?,?,?,?,?,?,NULL,NULL,NULL,'ready',1,'fp',1)""",
+                (f"{pid}_{role}", pid, role, "full", str(p), "p"),
+            )
+        conn.execute("UPDATE character_portraits SET pack_status='ready' WHERE id=?", (pid,))
+        conn.commit()
+        return {"status": "ready", "portrait_id": pid}
+
+    monkeypatch.setattr("app.portraits._redraw_portrait", fake_redraw)
+    monkeypatch.setattr("app.portraits._review_portrait_asset", fake_review)
+    monkeypatch.setattr("app.portraits.record_reference_asset", lambda **k: {"id": "art1", "status": "approved"})
+    monkeypatch.setattr("app.multiview.ensure_character_multiview_pack", ready_pack)
+
+    result = asyncio.run(_refresh_portrait_on_drift(
+        "proj", "A", 12, "白发", "anime", 1,
+        change_meta={"persistence": "episode", "change_dimensions": ["hair"]},
+    ))
+    assert result and result["pack_status"] == "ready"
+    rows = conn.execute(
+        "SELECT id, ep_start, ep_end, pack_status FROM character_portraits WHERE character_name='A' ORDER BY ep_start"
+    ).fetchall()
+    assert len(rows) == 3
+    assert (rows[0]["id"], rows[0]["ep_end"]) == ("p_old", 11)
+    assert rows[1]["ep_start"] == 12 and rows[1]["ep_end"] == 12
+    assert rows[2]["ep_start"] == 13 and rows[2]["ep_end"] is None
+    assert rows[2]["pack_status"] == "ready"
+    reuse_views = list_portrait_views(rows[2]["id"], conn=conn)
+    assert len(reuse_views) == 3
+    assert all(Path(v["image_path"]).exists() for v in reuse_views)
+
+
+def test_refresh_scene_pack_failure_does_not_switch(monkeypatch, tmp_path) -> None:
+    """场景整包失败不切换版本。"""
+    import asyncio
+    import threading
+    from app import db, hiagent
+    from app.scenes import _refresh_scene_on_state_change
+
+    database = tmp_path / "scene-drift.db"
+    monkeypatch.setattr(db, "DB_PATH", database)
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(db, "_local", threading.local())
+    db.init_db()
+    conn = db.get_conn()
+    img = tmp_path / "scene.jpg"
+    img.write_bytes(b"old")
+    conn.execute("INSERT INTO projects(id, name, created_at) VALUES('proj','t',1)")
+    conn.execute(
+        """INSERT INTO scene_references(
+               id, project_id, scene_name, ep_start, ep_end, scene_canonical, prompt,
+               image_path, qa_json, base_scene_id, bible_version, artifact_id, pack_status, created_at
+           ) VALUES('s_old','proj','广场',1,NULL,'石板广场','prompt',?,?,NULL,0,NULL,'ready',1)""",
+        (str(img), json.dumps({"overall": 0.9})),
+    )
+    conn.commit()
+
+    async def fake_gen(*_a, **_k):
+        return {"b64_json": __import__("base64").b64encode(b"new").decode()}
+
+    async def fake_review(*_a, **_k):
+        return {"overall": 0.9, "issues": []}
+
+    async def failed_pack(**_k):
+        return {"status": "failed", "failed_view": "reverse_angle"}
+
+    monkeypatch.setattr("app.scenes._generate_scene_image", fake_gen)
+    monkeypatch.setattr("app.scenes._review_scene_ref", fake_review)
+    monkeypatch.setattr("app.multiview.ensure_scene_multiview_pack", failed_pack)
+
+    with pytest.raises(hiagent.ProviderError, match="无法切换版本"):
+        asyncio.run(_refresh_scene_on_state_change(
+            "proj", "广场", 8, "损毁后的废墟广场石柱倒塌", "anime", 0,
+            change_meta={"persistence": "persistent", "change_dimensions": ["damage"]},
+        ))
+
+    rows = conn.execute("SELECT id, ep_end, pack_status FROM scene_references WHERE scene_name='广场'").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["id"] == "s_old"
+    assert rows[0]["ep_end"] is None

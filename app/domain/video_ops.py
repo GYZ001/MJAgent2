@@ -1231,4 +1231,82 @@ async def concatenate(episode_id: str):
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(500, f"ffmpeg 合成失败：{exc}")
 
+
+@router.get("/episodes/{episode_id}/stale-assets-preview")
+def stale_assets_preview(episode_id: str):
+    """评审墙：资产/分镜 stale 影响预览（只读）。"""
+    ep = _episode_or_404(episode_id)
+    conn = get_conn()
+    from app.domain.storyboard_ops import _shot_video_is_stale, _shot_adopted_assets_stale
+    rows = conn.execute(
+        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
+    ).fetchall()
+    items = []
+    for row in rows:
+        shot = dict(row)
+        stale = _shot_video_is_stale(conn, shot, ep.get("storyboard_artifact_id"))
+        if not stale:
+            continue
+        reasons = []
+        try:
+            if ep.get("storyboard_artifact_id") and shot.get("storyboard_artifact_id") and (
+                shot["storyboard_artifact_id"] != ep["storyboard_artifact_id"]
+            ):
+                reasons.append("storyboard_artifact")
+        except (KeyError, TypeError):
+            pass
+        adopted = shot.get("adopted_version_id")
+        if adopted:
+            ver = conn.execute(
+                "SELECT artifact_id, image_inputs FROM shot_versions WHERE id=?", (adopted,)
+            ).fetchone()
+            if ver and _shot_adopted_assets_stale(conn, shot, ver):
+                reasons.append("asset_revision")
+        if not reasons:
+            reasons.append("parent_artifact")
+        items.append({
+            "shot_id": shot["id"],
+            "shot_no": shot["shot_no"],
+            "adopted_version_id": adopted,
+            "reasons": reasons,
+            "hint": "参考资产或分镜已更新，本镜采用版可能使用旧证据链",
+        })
+    return {
+        "episode_id": episode_id,
+        "stale_count": len(items),
+        "shots": items,
+        "repair_action": "POST /api/episodes/{id}/repair-stale-assets with confirm=true",
+    }
+
+
+@router.post("/episodes/{episode_id}/repair-stale-assets")
+async def repair_stale_assets(episode_id: str, body: dict | None = None):
+    """批量修复 stale 镜头：对指定/全部 stale 镜强制重抽新视频版本（保留旧采用版直至新版成功）。"""
+    body = body or {}
+    if body.get("confirm") is not True:
+        raise HTTPException(409, "必须先查看 stale-assets-preview，并显式提交 confirm=true")
+    preview = stale_assets_preview(episode_id)
+    wanted = set(body.get("shot_ids") or [])
+    targets = [
+        item for item in preview["shots"]
+        if not wanted or item["shot_id"] in wanted
+    ]
+    if not targets:
+        return {"queued": 0, "shot_ids": [], "message": "没有需要修复的 stale 镜头"}
+    queued = []
+    errors = []
+    for item in targets:
+        try:
+            result = await generate_shot(item["shot_id"], {"reroll": True})
+            queued.append({"shot_id": item["shot_id"], "shot_no": item["shot_no"], "result": result})
+        except Exception as exc:  # noqa: BLE001
+            errors.append({"shot_id": item["shot_id"], "shot_no": item["shot_no"], "error": str(exc)})
+    return {
+        "queued": len(queued),
+        "shot_ids": [q["shot_id"] for q in queued],
+        "errors": errors,
+        "message": f"已为 {len(queued)} 个 stale 镜头提交重生",
+    }
+
+
 __all__ = [name for name in globals() if not name.startswith("__")]

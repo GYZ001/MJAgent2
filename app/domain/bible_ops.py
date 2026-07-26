@@ -823,4 +823,55 @@ async def edit_scene_prompt(project_id: str, scene_name: str, body: dict):
     conn.commit()
     return {"saved": True, "reset_to_default": not prompt_text}
 
+
+@router.post("/projects/{project_id}/characters/{character_name}/portraits/{portrait_id}/views/{view_role}/regenerate")
+async def regenerate_character_view_route(
+    project_id: str, character_name: str, portrait_id: str, view_role: str,
+):
+    """人物谱单视角重做：只重生成指定视角并复跑整包 QA。"""
+    _project_or_404(project_id)
+    from app.multiview import regenerate_character_view, pack_result_ok
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM character_portraits WHERE id=? AND project_id=? AND character_name=?",
+        (portrait_id, project_id, character_name),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "造型版本不存在")
+    try:
+        result = await regenerate_character_view(
+            project_id=project_id, portrait_id=portrait_id, view_role=view_role,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(409, str(exc)) from exc
+    if not pack_result_ok(result):
+        raise HTTPException(409, f"视角重做未通过：{view_role}（status={result.get('status')}）")
+    return result
+
+
+@router.post("/projects/{project_id}/scenes/{scene_name}/refs/{scene_reference_id}/views/{view_role}/regenerate")
+async def regenerate_scene_view_route(
+    project_id: str, scene_name: str, scene_reference_id: str, view_role: str,
+):
+    """场景库单视角重做。"""
+    _project_or_404(project_id)
+    from app.multiview import regenerate_scene_view, pack_result_ok
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM scene_references WHERE id=? AND project_id=? AND scene_name=?",
+        (scene_reference_id, project_id, scene_name),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "场景版本不存在")
+    try:
+        result = await regenerate_scene_view(
+            project_id=project_id, scene_reference_id=scene_reference_id, view_role=view_role,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(409, str(exc)) from exc
+    if not pack_result_ok(result):
+        raise HTTPException(409, f"视角重做未通过：{view_role}（status={result.get('status')}）")
+    return result
+
+
 __all__ = [name for name in globals() if not name.startswith("__")]
