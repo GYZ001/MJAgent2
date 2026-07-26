@@ -446,7 +446,7 @@ def recover_storyboard_tasks() -> int:
 
 
 def _shot_video_is_stale(conn, shot_row, episode_storyboard_id: str | None) -> bool:
-    """比较镜头采用版本的 parent_artifact 与当前分镜 Artifact，不一致即 stale。"""
+    """分镜 Artifact 不一致，或采用版冻结的人物/场景版本已落后于本集最新，均判 stale。"""
     try:
         adopted = shot_row["adopted_version_id"]
     except (KeyError, IndexError, TypeError):
@@ -460,23 +460,78 @@ def _shot_video_is_stale(conn, shot_row, episode_storyboard_id: str | None) -> b
     if episode_storyboard_id and shot_art and shot_art != episode_storyboard_id:
         return True
     ver = conn.execute(
-        "SELECT artifact_id FROM shot_versions WHERE id=?", (adopted,)
+        "SELECT artifact_id, image_inputs FROM shot_versions WHERE id=?", (adopted,)
     ).fetchone()
     if not ver or not ver["artifact_id"]:
+        # 无 artifact 时仍可检查资产版本 stale
+        if ver and _shot_adopted_assets_stale(conn, shot_row, ver):
+            return True
         return False
     art = conn.execute(
         "SELECT parent_artifact_ids_json FROM artifacts WHERE id=?",
         (ver["artifact_id"],),
     ).fetchone()
-    if not art:
+    if art:
+        try:
+            parents = json.loads(art["parent_artifact_ids_json"] or "[]")
+        except (TypeError, ValueError):
+            parents = []
+        if episode_storyboard_id and parents and episode_storyboard_id not in parents:
+            return True
+    return _shot_adopted_assets_stale(conn, shot_row, ver)
+
+
+def _shot_adopted_assets_stale(conn, shot_row, version_row) -> bool:
+    """采用版 reference_manifest 中的人物/场景 revision 是否仍是本集当前生效版本。"""
+    try:
+        from app.multiview import (
+            character_multiview_enabled, scene_multiview_enabled,
+            manifest_asset_revision_ids, portrait_row_for_episode, scene_row_for_episode,
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    if not character_multiview_enabled() and not scene_multiview_enabled():
+        return False
+    meta = {}
+    try:
+        meta = json.loads(version_row["image_inputs"] or "{}") if version_row["image_inputs"] else {}
+    except (TypeError, ValueError, KeyError):
+        meta = {}
+    manifest = meta.get("reference_manifest") if isinstance(meta, dict) else None
+    if not isinstance(manifest, dict):
+        # 回退：从首张带 dependency_manifest 的参考图读取
+        for ref in (meta.get("reference_images") or []) if isinstance(meta, dict) else []:
+            if isinstance(ref, dict) and isinstance(ref.get("dependency_manifest"), dict):
+                manifest = ref["dependency_manifest"]
+                break
+    if not isinstance(manifest, dict):
+        return False
+    frozen_ids = manifest_asset_revision_ids(manifest)
+    if not frozen_ids:
         return False
     try:
-        parents = json.loads(art["parent_artifact_ids_json"] or "[]")
-    except (TypeError, ValueError):
-        parents = []
-    if not episode_storyboard_id or not parents:
+        episode_id = shot_row["episode_id"]
+    except (KeyError, IndexError, TypeError):
         return False
-    return episode_storyboard_id not in parents
+    ep = conn.execute("SELECT project_id, episode_no FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    if not ep:
+        return False
+    project_id = ep["project_id"]
+    episode_no = ep["episode_no"]
+    for key, frozen_rev in frozen_ids.items():
+        if key.startswith("character:"):
+            name = key.split(":", 1)[1]
+            row = portrait_row_for_episode(project_id, name, episode_no)
+            current_id = row["id"] if row else None
+            if current_id != frozen_rev:
+                return True
+        elif key.startswith("scene:"):
+            name = key.split(":", 1)[1]
+            row = scene_row_for_episode(project_id, name, episode_no)
+            current_id = row["id"] if row else None
+            if current_id != frozen_rev:
+                return True
+    return False
 
 
 def _new_storyboard_recorder(

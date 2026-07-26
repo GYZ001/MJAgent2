@@ -5,6 +5,8 @@ import json
 import sqlite3
 import threading
 
+import pytest
+
 from app import db
 from app.multiview import (
     CHARACTER_REQUIRED_VIEWS,
@@ -255,3 +257,237 @@ def test_consistency_unverified_not_perfect_score() -> None:
     scores = _consistency_scores(report)
     assert scores["a"]["consistency"] is None
     assert scores["a"]["check_failed"] is True
+
+
+def test_manifest_blocks_incomplete_character_pack() -> None:
+    from app.multiview import manifest_production_blockers, assert_manifest_allows_production
+    from app import hiagent
+
+    incomplete = {
+        "characters": [{
+            "name": "角色A",
+            "look_revision_id": "p1",
+            "pack_status": "failed",
+            "missing_required": ["profile"],
+            "selected_view_ids": ["v1"],
+            "selected_views": [{"id": "v1", "view_role": "front_full"}],
+        }],
+        "scene": None,
+    }
+    blockers = manifest_production_blockers(incomplete)
+    assert any("角色A" in b for b in blockers)
+    with pytest.raises(hiagent.ProviderError, match="禁止关键帧"):
+        assert_manifest_allows_production(incomplete)
+
+    ready = {
+        "characters": [{
+            "name": "角色A",
+            "look_revision_id": "p1",
+            "pack_status": "ready",
+            "missing_required": [],
+            "selected_view_ids": ["v1", "v2"],
+            "selected_views": [
+                {"id": "v1", "view_role": "front_full"},
+                {"id": "v2", "view_role": "profile"},
+            ],
+        }],
+        "scene": {
+            "name": "广场",
+            "scene_revision_id": "s1",
+            "pack_status": "ready",
+            "missing_required": [],
+            "selected_view_ids": ["sv1"],
+            "selected_views": [{"id": "sv1", "view_role": "establishing"}],
+        },
+    }
+    assert manifest_production_blockers(ready) == []
+    assert_manifest_allows_production(ready)
+
+
+def test_manifest_blocks_missing_scene_reverse_angle() -> None:
+    from app.multiview import manifest_production_blockers
+
+    blockers = manifest_production_blockers({
+        "characters": [],
+        "scene": {
+            "name": "宗门广场",
+            "scene_revision_id": "s1",
+            "pack_status": "legacy_partial",
+            "missing_required": ["reverse_angle"],
+            "selected_view_ids": ["sv1"],
+            "selected_views": [{"id": "sv1", "view_role": "establishing"}],
+        },
+    })
+    assert any("宗门广场" in b and "legacy_partial" in b for b in blockers)
+
+    blockers2 = manifest_production_blockers({
+        "characters": [],
+        "scene": {
+            "name": "宗门广场",
+            "scene_revision_id": "s1",
+            "pack_status": "ready",
+            "missing_required": ["reverse_angle"],
+            "selected_view_ids": ["sv1"],
+            "selected_views": [{"id": "sv1", "view_role": "establishing"}],
+        },
+    })
+    assert any("reverse_angle" in b or "缺少必需视角" in b for b in blockers2)
+
+
+def test_view_input_fingerprint_stable_and_distinct() -> None:
+    from app.multiview import view_input_fingerprint
+
+    a = view_input_fingerprint(
+        view_role="profile", prompt="p1", anchor_text="黑发", parent_revision_id="portrait_1",
+    )
+    b = view_input_fingerprint(
+        view_role="profile", prompt="p1", anchor_text="黑发", parent_revision_id="portrait_1",
+    )
+    c = view_input_fingerprint(
+        view_role="profile", prompt="p2", anchor_text="黑发", parent_revision_id="portrait_1",
+    )
+    assert a == b
+    assert a != c
+
+
+def test_ready_view_fingerprint_reuse_without_regen(tmp_path) -> None:
+    from app.multiview import (
+        _ready_view_matches_fingerprint, view_input_fingerprint,
+    )
+    img = tmp_path / "profile.jpg"
+    img.write_bytes(b"x")
+    fp = view_input_fingerprint(
+        view_role="profile", prompt="side", anchor_text="黑发", parent_revision_id="p1",
+    )
+    view = {
+        "id": "v1", "status": "ready", "image_path": str(img), "input_fingerprint": fp,
+    }
+    assert _ready_view_matches_fingerprint(view, fp) is True
+    assert _ready_view_matches_fingerprint(view, fp + "x") is False
+    # 旧数据无指纹：可复用，避免重复付费
+    legacy = {"id": "v2", "status": "ready", "image_path": str(img), "input_fingerprint": None}
+    assert _ready_view_matches_fingerprint(legacy, fp) is True
+
+
+def test_manifest_revisions_match_for_worker_restart() -> None:
+    from app.multiview import manifest_revisions_match, build_reference_manifest
+
+    frozen = build_reference_manifest(
+        episode_no=1, shot_id="shot_1",
+        characters=[{"name": "A", "look_revision_id": "p_old", "selected_view_ids": ["v1"]}],
+        scene={"name": "广场", "scene_revision_id": "s_old", "selected_view_ids": ["sv1"]},
+    )
+    same = build_reference_manifest(
+        episode_no=1, shot_id="shot_1",
+        characters=[{"name": "A", "look_revision_id": "p_old", "selected_view_ids": ["v9"]}],
+        scene={"name": "广场", "scene_revision_id": "s_old", "selected_view_ids": ["sv9"]},
+    )
+    changed = build_reference_manifest(
+        episode_no=1, shot_id="shot_1",
+        characters=[{"name": "A", "look_revision_id": "p_new", "selected_view_ids": ["v1"]}],
+        scene={"name": "广场", "scene_revision_id": "s_old", "selected_view_ids": ["sv1"]},
+    )
+    assert manifest_revisions_match(frozen, same) is True
+    assert manifest_revisions_match(frozen, changed) is False
+
+
+def test_pack_result_failed_not_ok() -> None:
+    from app.multiview import pack_result_ok
+    assert pack_result_ok({"status": "ready"}) is True
+    assert pack_result_ok({"status": "disabled"}) is True
+    assert pack_result_ok({"status": "failed"}) is False
+    assert pack_result_ok(None) is False
+
+
+def test_keyframe_qa_receives_library_visual_anchors(monkeypatch, tmp_path) -> None:
+    """关键帧 QA 必须实际上传候选图 + 库内人物/场景锚点，不能空跑。"""
+    import asyncio
+    from app.multiview import review_keyframe_with_evidence
+    from app.schemas import Bible, Character, Shot, World
+
+    captured: dict = {}
+
+    async def fake_vlm(frames, expectation, call_meta=None):
+        captured["frame_count"] = len(frames)
+        captured["expectation"] = expectation
+        captured["anchor_count"] = (call_meta or {}).get("anchor_count")
+        return json.dumps({
+            "overall": 0.9, "action_match": 0.9, "body_proportion": 0.9,
+            "face_identity": 0.9, "outfit_match": 0.9, "hair_match": 0.9, "scene_match": 0.9,
+            "hard_failures": [], "issues": [],
+        })
+
+    monkeypatch.setattr("app.hiagent.vlm_check", fake_vlm)
+    monkeypatch.setattr("app.multiview.visual_evidence_qa_enabled", lambda: True)
+    monkeypatch.setattr("app.hiagent.encode_image_file", lambda path: f"b64:{path}")
+
+    front = tmp_path / "front.jpg"
+    est = tmp_path / "est.jpg"
+    front.write_bytes(b"front")
+    est.write_bytes(b"est")
+
+    shot = Shot(
+        shot_no=1, duration_s=5, shot_size="中景", camera_move="固定", scene_setting="室内",
+        characters=["A"], action_desc="A坐着", first_frame_desc="A坐着", last_frame_desc="A站起",
+        source_excerpt="A坐着", dialogues=[], transition="硬切", continuity_from_prev=False,
+    )
+    bible = Bible(
+        characters=[Character(name="A", role="lead", appearance_canonical="黑发")],
+        world=World(visual_style_canonical="anime"),
+    )
+    anchors = [
+        {"image_path": str(front), "entity_type": "character", "entity_name": "A",
+         "view_role": "front_full"},
+        {"image_path": str(est), "entity_type": "scene", "entity_name": "室内",
+         "view_role": "establishing"},
+    ]
+
+    qa = asyncio.run(review_keyframe_with_evidence(
+        "candidate_b64", shot=shot, bible=bible, visual_anchors=anchors,
+    ))
+    assert captured.get("frame_count") == 3, "必须包含候选图与两张库内锚点"
+    assert captured.get("anchor_count") == 2
+    assert qa.get("overall") is not None
+    assert qa.get("status") == "scored" or qa.get("overall") >= 0.8
+
+
+def test_shot_video_assets_stale_when_portrait_revision_changes() -> None:
+    from app.domain.storyboard_ops import _shot_adopted_assets_stale
+
+    class _Row(dict):
+        def __getitem__(self, key):
+            return super().__getitem__(key)
+
+    version_row = _Row({
+        "image_inputs": json.dumps({
+            "reference_manifest": {
+                "characters": [{"name": "A", "look_revision_id": "portrait_old"}],
+                "scene": {"name": "广场", "scene_revision_id": "scene_old"},
+            }
+        }),
+    })
+    shot_row = _Row({"episode_id": "ep1"})
+
+    class _Conn:
+        def execute(self, sql, params=()):
+            class _C:
+                def fetchone(self_inner):
+                    if "FROM episodes" in sql:
+                        return {"project_id": "proj", "episode_no": 1}
+                    return None
+            return _C()
+
+    import app.multiview as mv
+
+    # patch episode portrait/scene lookups
+    original_portrait = mv.portrait_row_for_episode
+    original_scene = mv.scene_row_for_episode
+    mv.portrait_row_for_episode = lambda *a, **k: {"id": "portrait_new"}
+    mv.scene_row_for_episode = lambda *a, **k: {"id": "scene_old"}
+    try:
+        assert _shot_adopted_assets_stale(_Conn(), shot_row, version_row) is True
+        mv.portrait_row_for_episode = lambda *a, **k: {"id": "portrait_old"}
+        assert _shot_adopted_assets_stale(_Conn(), shot_row, version_row) is False
+    finally:
+        mv.portrait_row_for_episode = original_portrait
+        mv.scene_row_for_episode = original_scene

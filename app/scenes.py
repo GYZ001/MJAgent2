@@ -346,20 +346,29 @@ async def generate_scene_refs(
                         conn, project_id, sc.name, path, sc.scene_canonical,
                         prompt, qa, bible_version, artifact_id=artifact["id"],
                     )
-                    try:
-                        from app.multiview import ensure_scene_multiview_pack, scene_multiview_enabled
-                        if scene_multiview_enabled():
-                            await ensure_scene_multiview_pack(
-                                project_id=project_id,
-                                scene_reference_id=scene_id,
-                                scene_name=sc.name,
-                                scene_canonical=sc.scene_canonical,
-                                visual_style=style,
-                                ep_start=1,
+                    # 初始场景多视角资产包：反打/整包失败则禁止半包生效
+                    from app.multiview import (
+                        ensure_scene_multiview_pack, scene_multiview_enabled, pack_result_ok,
+                    )
+                    if scene_multiview_enabled():
+                        pack = await ensure_scene_multiview_pack(
+                            project_id=project_id,
+                            scene_reference_id=scene_id,
+                            scene_name=sc.name,
+                            scene_canonical=sc.scene_canonical,
+                            visual_style=style,
+                            ep_start=1,
+                        )
+                        if not pack_result_ok(pack):
+                            raise hiagent.ProviderError(
+                                f"多视角资产包未通过，禁止生效：{sc.name}"
+                                f"（status={pack.get('status')}）"
                             )
-                    except Exception as pack_exc:  # noqa: BLE001
-                        errors.append(f"{sc.name}多视角包：{pack_exc}")
                     break
+                except hiagent.ProviderError as exc:
+                    if "多视角资产包未通过" in str(exc):
+                        raise
+                    last_error = exc
                 except Exception as exc:  # noqa: BLE001 候选失败后在有界循环内修复
                     last_error = exc
             if not sc.ref_image_path:

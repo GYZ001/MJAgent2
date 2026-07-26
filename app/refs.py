@@ -182,21 +182,29 @@ async def generate_refs(
                     portrait_id = _portraits.register_initial_portrait(
                         conn, project_id, c.name, path, c.appearance_canonical, prompt,
                         bible_version, artifact_id=artifact["id"])
-                    # 初始多视角资产包：front_full 已就绪后补 three_quarter/profile
-                    try:
-                        from app.multiview import ensure_character_multiview_pack, character_multiview_enabled
-                        if character_multiview_enabled():
-                            await ensure_character_multiview_pack(
-                                project_id=project_id,
-                                portrait_id=portrait_id,
-                                character_name=c.name,
-                                appearance=c.appearance_canonical,
-                                visual_style=style,
-                                ep_start=1,
+                    # 初始多视角资产包：任一侧视角/整包失败则禁止半包生效
+                    from app.multiview import (
+                        ensure_character_multiview_pack, character_multiview_enabled, pack_result_ok,
+                    )
+                    if character_multiview_enabled():
+                        pack = await ensure_character_multiview_pack(
+                            project_id=project_id,
+                            portrait_id=portrait_id,
+                            character_name=c.name,
+                            appearance=c.appearance_canonical,
+                            visual_style=style,
+                            ep_start=1,
+                        )
+                        if not pack_result_ok(pack):
+                            raise hiagent.ProviderError(
+                                f"多视角资产包未通过，禁止生效：{c.name}"
+                                f"（status={pack.get('status')}）"
                             )
-                    except Exception as pack_exc:  # noqa: BLE001 多视角失败不抹掉主图，标记 legacy_partial
-                        errors.append(f"{c.name}多视角包：{pack_exc}")
                     break
+                except hiagent.ProviderError as exc:
+                    if "多视角资产包未通过" in str(exc):
+                        raise
+                    last_error = exc
                 except Exception as exc:  # noqa: BLE001 候选失败后在有界循环内修复
                     last_error = exc
             if not c.ref_image_path:

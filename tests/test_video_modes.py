@@ -49,6 +49,27 @@ def _shot(**kwargs) -> Shot:
     return Shot(**data)
 
 
+def _patch_multiview_production_ready(monkeypatch) -> None:
+    """测试中绕过真实 DB 多视角硬门禁，只验证参考图生成/QA/装箱路径。"""
+    import app.multiview as mv
+
+    async def _ready(*_a, **_k):
+        return {"status": "ready"}
+
+    monkeypatch.setattr(mv, "complete_legacy_character_pack", _ready)
+    monkeypatch.setattr(mv, "complete_legacy_scene_pack", _ready)
+    monkeypatch.setattr(mv, "resolve_shot_asset_dependencies", lambda **_k: {
+        "episode_no": 1, "shot_id": "s", "characters": [], "scene": None,
+        "keyframe_slot": "narrative_keyframe", "input_fingerprint": "fp",
+    })
+    monkeypatch.setattr(mv, "assert_manifest_allows_production", lambda _m: None)
+    monkeypatch.setattr(mv, "manifest_revisions_match", lambda _a, _b: True)
+    monkeypatch.setattr(mv, "library_anchor_assets_from_manifest", lambda _m: [])
+    monkeypatch.setattr(mv, "keyframe_seed_paths", lambda _m: [])
+    monkeypatch.setattr(mv, "character_multiview_enabled", lambda: True)
+    monkeypatch.setattr(mv, "scene_multiview_enabled", lambda: True)
+
+
 def test_selector_always_uses_reference_mode(monkeypatch) -> None:
     """The removed mode switch cannot reactivate an obsolete video path."""
     _fake_settings(monkeypatch)
@@ -161,14 +182,7 @@ def test_build_reference_assets_collects_rejected_for_discard_gallery(monkeypatc
     monkeypatch.setattr(video_modes, "consistency_check_enabled", lambda: False)
 
     import app.multiview as mv
-    monkeypatch.setattr(mv, "complete_legacy_character_pack", lambda *a, **k: None)
-    monkeypatch.setattr(mv, "complete_legacy_scene_pack", lambda *a, **k: None)
-    monkeypatch.setattr(mv, "resolve_shot_asset_dependencies", lambda **k: {
-        "episode_no": 1, "shot_id": "s", "characters": [], "scene": None,
-        "keyframe_slot": "narrative_keyframe", "input_fingerprint": "fp",
-    })
-    monkeypatch.setattr(mv, "library_anchor_assets_from_manifest", lambda m: [])
-    monkeypatch.setattr(mv, "keyframe_seed_paths", lambda m: [])
+    _patch_multiview_production_ready(monkeypatch)
 
     async def fake_keep_best(**kwargs):
         score = 0.55
@@ -321,14 +335,7 @@ def test_reference_assets_publish_each_completed_image_without_waiting_for_slowe
     monkeypatch.setattr(video_modes, "consistency_check_enabled", lambda: False)
 
     import app.multiview as mv
-    monkeypatch.setattr(mv, "complete_legacy_character_pack", lambda *a, **k: None)
-    monkeypatch.setattr(mv, "complete_legacy_scene_pack", lambda *a, **k: None)
-    monkeypatch.setattr(mv, "resolve_shot_asset_dependencies", lambda **k: {
-        "episode_no": 1, "shot_id": "s", "characters": [], "scene": None,
-        "keyframe_slot": "narrative_keyframe", "input_fingerprint": "fp",
-    })
-    monkeypatch.setattr(mv, "library_anchor_assets_from_manifest", lambda m: [])
-    monkeypatch.setattr(mv, "keyframe_seed_paths", lambda m: [])
+    _patch_multiview_production_ready(monkeypatch)
 
     async def fake_review(b64, **kwargs):
         return {
@@ -403,14 +410,7 @@ def test_build_reference_assets_fallback_keyframe_yields_to_clean_portrait(monke
                             qa={"overall": 1.0, "absolute_quality": 1.0})] if limit > 0 else []))
 
     import app.multiview as mv
-    monkeypatch.setattr(mv, "complete_legacy_character_pack", lambda *a, **k: None)
-    monkeypatch.setattr(mv, "complete_legacy_scene_pack", lambda *a, **k: None)
-    monkeypatch.setattr(mv, "resolve_shot_asset_dependencies", lambda **k: {
-        "episode_no": 1, "shot_id": "s", "characters": [], "scene": None,
-        "keyframe_slot": "narrative_keyframe", "input_fingerprint": "fp",
-    })
-    monkeypatch.setattr(mv, "library_anchor_assets_from_manifest", lambda m: [])
-    monkeypatch.setattr(mv, "keyframe_seed_paths", lambda m: [])
+    _patch_multiview_production_ready(monkeypatch)
     async def _fake_kf_review(b64, **kwargs):
         return {"status": "scored", "overall": 0.5, "action_match": 0.5, "body_proportion": 0.5,
                 "face_identity": 0.5, "outfit_match": 0.5, "hair_match": 0.5, "scene_match": 0.5,
@@ -478,14 +478,7 @@ def test_build_reference_assets_subfloor_fallback_not_fed(monkeypatch) -> None:
                             qa={"overall": 1.0, "absolute_quality": 1.0})] if limit > 0 else []))
 
     import app.multiview as mv
-    monkeypatch.setattr(mv, "complete_legacy_character_pack", lambda *a, **k: None)
-    monkeypatch.setattr(mv, "complete_legacy_scene_pack", lambda *a, **k: None)
-    monkeypatch.setattr(mv, "resolve_shot_asset_dependencies", lambda **k: {
-        "episode_no": 1, "shot_id": "s", "characters": [], "scene": None,
-        "keyframe_slot": "narrative_keyframe", "input_fingerprint": "fp",
-    })
-    monkeypatch.setattr(mv, "library_anchor_assets_from_manifest", lambda m: [])
-    monkeypatch.setattr(mv, "keyframe_seed_paths", lambda m: [])
+    _patch_multiview_production_ready(monkeypatch)
     async def _fake_kf_review(b64, **kwargs):
         return {"status": "scored", "overall": 0.5, "action_match": 0.5, "body_proportion": 0.5,
                 "face_identity": 0.5, "outfit_match": 0.5, "hair_match": 0.5, "scene_match": 0.5,
@@ -546,6 +539,7 @@ def test_generated_references_get_i2i_seeds(monkeypatch) -> None:
     monkeypatch.setattr(video_modes, "batch_qa_enabled", lambda: False)
     monkeypatch.setattr(video_modes, "consistency_check_enabled", lambda: False)
     monkeypatch.setattr(video_modes, "_portrait_seed_inputs", lambda *a, **k: ["PORTRAIT_A"])
+    _patch_multiview_production_ready(monkeypatch)
 
     seen: dict[str, list] = {}
 
@@ -792,3 +786,92 @@ def test_pack_seedance_prefers_score_and_keeps_gallery_selection(monkeypatch) ->
     # 人物上限 1 + 场景 → 最多 2 张；分数最高人物 + 场景
     assert len(inputs) == 2
     assert all(r["selectedForSeedance"] for r in refs)
+
+
+def test_build_reference_assets_blocks_incomplete_pack(monkeypatch) -> None:
+    """不完整多视角包必须阻止关键帧生成，不得静默继续。"""
+    bible = _bible()
+    shot = _shot(shot_no=9, scene_name="广场")
+    monkeypatch.setattr(video_modes, "character_reference_assets", lambda *a, **k: [])
+    monkeypatch.setattr(video_modes, "scene_reference_assets", lambda *a, **k: [])
+    monkeypatch.setattr(video_modes, "min_generated_references", lambda: 0)
+    monkeypatch.setattr(video_modes, "consistency_check_enabled", lambda: False)
+
+    import app.multiview as mv
+
+    async def failed_pack(*_a, **_k):
+        return {"status": "failed", "failed_view": "profile"}
+
+    monkeypatch.setattr(mv, "complete_legacy_character_pack", failed_pack)
+    monkeypatch.setattr(mv, "complete_legacy_scene_pack", failed_pack)
+    monkeypatch.setattr(mv, "character_multiview_enabled", lambda: True)
+    monkeypatch.setattr(mv, "scene_multiview_enabled", lambda: True)
+
+    decision = ShotVideoModeDecision(
+        mode=REFERENCE_IMAGE_MODE, reason="x", confidence=1.0,
+        referenceImagePlan=ReferenceImagePlan(totalCount=1, generateNewCount=1, types=["plot_key_frame"]),
+    )
+    with pytest.raises(hiagent.ProviderError, match="禁止关键帧"):
+        asyncio.run(video_modes.build_reference_assets(
+            conn=None, project_id="p", episode_no=1, episode_id="e", shot_id="s",
+            shot=shot, bible=bible, decision=decision, prev_shot=None))
+
+
+def test_build_reference_assets_reuses_frozen_manifest_when_revisions_match(monkeypatch) -> None:
+    """worker 重启后依赖不变：冻结 manifest 版本一致时必须复用，不重新选资产。"""
+    bible = _bible()
+    shot = _shot(shot_no=10)
+    monkeypatch.setattr(video_modes, "character_reference_assets", lambda *a, **k: [])
+    monkeypatch.setattr(video_modes, "scene_reference_assets", lambda *a, **k: [])
+    monkeypatch.setattr(video_modes, "reusable_previous_assets", lambda *a, **k: [])
+    monkeypatch.setattr(video_modes, "min_generated_references", lambda: 0)
+    monkeypatch.setattr(video_modes, "reference_gen_retries", lambda: 0)
+    monkeypatch.setattr(video_modes, "reference_prompt_async", lambda: False)
+    monkeypatch.setattr(video_modes, "batch_prompt_enabled", lambda: False)
+    monkeypatch.setattr(video_modes, "batch_qa_enabled", lambda: False)
+    monkeypatch.setattr(video_modes, "consistency_check_enabled", lambda: False)
+
+    import app.multiview as mv
+    frozen = {
+        "episode_no": 1, "shot_id": "s",
+        "characters": [{"name": "A", "look_revision_id": "p1", "pack_status": "ready",
+                        "missing_required": [], "selected_view_ids": ["v1"],
+                        "selected_views": []}],
+        "scene": None, "keyframe_slot": "narrative_keyframe", "input_fingerprint": "frozen-fp",
+    }
+    resolve_calls = {"n": 0}
+
+    def resolve(**_k):
+        resolve_calls["n"] += 1
+        return {
+            "episode_no": 1, "shot_id": "s",
+            "characters": [{"name": "A", "look_revision_id": "p1", "pack_status": "ready",
+                            "missing_required": [], "selected_view_ids": ["v9"],
+                            "selected_views": []}],
+            "scene": None, "keyframe_slot": "narrative_keyframe", "input_fingerprint": "new-fp",
+        }
+
+    async def must_not_complete(*_a, **_k):
+        raise AssertionError("冻结且版本未变时不应再 complete_legacy")
+
+    monkeypatch.setattr(mv, "resolve_shot_asset_dependencies", resolve)
+    monkeypatch.setattr(mv, "complete_legacy_character_pack", must_not_complete)
+    monkeypatch.setattr(mv, "complete_legacy_scene_pack", must_not_complete)
+    monkeypatch.setattr(mv, "assert_manifest_allows_production", lambda _m: None)
+    monkeypatch.setattr(mv, "library_anchor_assets_from_manifest", lambda _m: [])
+    monkeypatch.setattr(mv, "keyframe_seed_paths", lambda _m: [])
+    monkeypatch.setattr(mv, "character_multiview_enabled", lambda: True)
+    monkeypatch.setattr(mv, "scene_multiview_enabled", lambda: True)
+
+    decision = ShotVideoModeDecision(
+        mode=REFERENCE_IMAGE_MODE, reason="x", confidence=1.0,
+        referenceImagePlan=ReferenceImagePlan(totalCount=0, generateNewCount=0, types=[]),
+    )
+    meta = {"reference_manifest": frozen, "reference_manifest_frozen": True}
+    asyncio.run(video_modes.build_reference_assets(
+        conn=None, project_id="p", episode_no=1, episode_id="e", shot_id="s",
+        shot=shot, bible=bible, decision=decision, prev_shot=None, existing_meta=meta))
+
+    assert resolve_calls["n"] == 1, "仅探测当前版本一次"
+    assert meta["reference_manifest"]["input_fingerprint"] == "frozen-fp"
+    assert meta["reference_manifest_frozen"] is True
