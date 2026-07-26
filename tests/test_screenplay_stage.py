@@ -1,7 +1,10 @@
+import asyncio
+
+from app import stages
 from app.schemas import (Bible, Character, EpisodeScreenplay, KeyDialogueChain,
                          KeyDialogueTurn, PlotSpine, PlotSpineBeat,
                          ScreenplayBeat, ScriptScene, World)
-from app.stages import _render_screenplay_source
+from app.stages import _render_screenplay_source, generate_screenplay
 from app.validators import source_dialogue_fragments, validate_screenplay
 
 
@@ -480,6 +483,33 @@ def test_dialogue_chain_rejects_first_anchor_replaced_with_unrelated_line() -> N
     )
 
     assert any("开场对白锚点被改写到失去原意" in error for error in errors), errors
+
+
+def test_initial_screenplay_prompt_contains_d001_and_dialogue_chain_contract(monkeypatch) -> None:
+    script, source = _screenplay_with_source_dialogue_chain()
+    prompts: list[str] = []
+
+    async def fake_loop(_stage, _stage_key, prompt, *_args, **_kwargs):
+        prompts.append(prompt)
+        return script
+
+    monkeypatch.setattr(stages, "_run_with_agent_loop", fake_loop)
+    episode = {
+        "id": "ep-test",
+        "episode_no": 1,
+        "title": "测试集",
+        "target_duration_s": 50,
+        "hook": "开场",
+        "cliffhanger": "收束",
+        "synopsis": "测验结果引发回应",
+    }
+
+    asyncio.run(generate_screenplay(episode, source, _bible()))
+
+    assert "【原文开场对白锚点·硬门禁】" in prompts[0]
+    assert "D001：斗之力，三段！" in prompts[0]
+    assert '"dialogue_chains"' in prompts[0]
+    assert "`key_lines` 由后端按 dialogue_chains.turns 确定性回填" in prompts[0]
 
 
 def test_screenplay_allows_dropping_non_spine_source_dialogues() -> None:

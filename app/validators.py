@@ -708,7 +708,7 @@ _SOURCE_QUOTED_UTTERANCE_RE = re.compile(
     r"[“「『](?P<line>[^”」』\n]{2,240})[”」』]"
 )
 _SOURCE_PREFIXED_UTTERANCE_RE = re.compile(
-    r"(?m)^\s*[^\n：:]{1,20}(?:[（(][^）)]{1,12}[）)])?\s*[：:]\s*(?P<line>\S.{1,239})\s*$"
+    r"(?m)^\s*[^\n：:“「『]{1,20}(?:[（(][^）)]{1,12}[）)])?\s*[：:]\s*(?P<line>\S.{1,239})\s*$"
 )
 
 
