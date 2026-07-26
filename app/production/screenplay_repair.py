@@ -767,6 +767,8 @@ def _choose_issue(issues: list[Issue]) -> Issue | None:
         return None
     priority = {
         "SCHEMA_INVALID": 0,
+        "SCENE_STORY_FUNCTION_TOO_SHORT": 1,
+        "SCENE_FIELD_INVALID": 1,
         "DRAMATIC_CONTRACT_INCOMPLETE": 1,
         "LEDGER_INVALID": 2,
         "KEY_LINE_MISSING": 3,
@@ -786,6 +788,29 @@ def _mark_waiting_input(episode_id: str, issues: list[Issue], *, run_id: str | N
             run_id, "WAITING_INPUT", "warning",
             "存在不可自动修复的真实冲突，需用户决定",
             payload={"issues": [i.model_dump(mode="json") for i in issues[:5]]},
+        )
+
+
+def _mark_repair_failed(episode_id: str, issue: Issue, *, run_id: str | None) -> None:
+    """暂停内部修复但保留 working artifact；这不是用户输入冲突。"""
+    message = f"REPAIR_FAILED: 自动局部修复策略耗尽 {issue.code}: {issue.message}"
+    conn = get_conn()
+    conn.execute(
+        "UPDATE episodes SET screenplay_status='repairing', screenplay_error=?, "
+        "screenplay_updated_at=? WHERE id=?",
+        (message[:800], now(), episode_id),
+    )
+    conn.commit()
+    if run_id:
+        evidence_repository.append_event(
+            run_id,
+            "REPAIR_FAILED",
+            "error",
+            "自动局部修复策略耗尽，已保留工作副本",
+            payload={
+                "issue": issue.model_dump(mode="json"),
+                "requires_user_input": False,
+            },
         )
 
 
