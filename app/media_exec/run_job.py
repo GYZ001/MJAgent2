@@ -526,7 +526,7 @@ async def critique_version(version_id: str) -> list[str]:
         bible = json.loads(project["bible_json"])
         anchor_map = {c["name"]: c["appearance_canonical"] for c in bible["characters"]}
         anchors = [anchor_map[n] for n in json.loads(shot["characters"] or "[]") if n in anchor_map]
-        frames = _extract_frames(v["video_path"], high_risk=_shot_high_risk_for_qa(shot))
+        frames = _extract_qa_frames(v["video_path"], high_risk=_shot_high_risk_for_qa(shot))
         if not frames:
             return []
         meta = json.loads(v["image_inputs"] or "{}") if v["image_inputs"] else {}
@@ -1441,7 +1441,9 @@ async def _maybe_auto_qa(
         )
         if "shot_contract_json" in shot.keys() and shot["shot_contract_json"]:
             apply_shot_contract(shot_model, shot["shot_contract_json"])
-        frames = _extract_frames(video_path, high_risk=_shot_high_risk_for_qa(shot, shot_model))
+        frames = _extract_qa_frames(
+            video_path, high_risk=_shot_high_risk_for_qa(shot, shot_model),
+        )
         version_row = conn.execute("SELECT * FROM shot_versions WHERE id=?", (version_id,)).fetchone()
         meta_for_qa = json.loads(version_row["image_inputs"] or "{}") if version_row and version_row["image_inputs"] else {}
         if meta_for_qa.get("reference_set_id"):
@@ -1586,6 +1588,18 @@ def _extract_frames(video_path: str, *, high_risk: bool = False) -> list[str]:
             subprocess.run(cmd, check=True, capture_output=True)
             frames.append(hiagent.encode_image_file(str(out)))
     return frames
+
+
+def _extract_qa_frames(video_path: str, *, high_risk: bool) -> list[str]:
+    """兼容旧扩展/测试替身的一参数抽帧函数，同时保留高风险五帧策略。"""
+    if not high_risk:
+        return _extract_frames(video_path)
+    try:
+        return _extract_frames(video_path, high_risk=True)
+    except TypeError as exc:
+        if "high_risk" not in str(exc):
+            raise
+        return _extract_frames(video_path)
 
 
 def _shot_high_risk_for_qa(shot_row, shot_model=None) -> bool:

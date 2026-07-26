@@ -486,7 +486,8 @@ def _shot_adopted_assets_stale(conn, shot_row, version_row) -> bool:
     try:
         from app.multiview import (
             character_multiview_enabled, scene_multiview_enabled,
-            manifest_asset_revision_ids, portrait_row_for_episode, scene_row_for_episode,
+            manifest_asset_revision_ids, manifest_asset_view_fingerprints,
+            portrait_row_for_episode, scene_row_for_episode,
         )
     except Exception:  # noqa: BLE001
         return False
@@ -531,6 +532,26 @@ def _shot_adopted_assets_stale(conn, shot_row, version_row) -> bool:
             current_id = row["id"] if row else None
             if current_id != frozen_rev:
                 return True
+    frozen_views = manifest_asset_view_fingerprints(manifest)
+    for (kind, name, role), frozen_fp in frozen_views.items():
+        if kind == "character":
+            parent = portrait_row_for_episode(project_id, name, episode_no)
+            table = "character_portrait_views"
+            parent_column = "portrait_id"
+        else:
+            parent = scene_row_for_episode(project_id, name, episode_no)
+            table = "scene_reference_views"
+            parent_column = "scene_reference_id"
+        if not parent:
+            return True
+        current = conn.execute(
+            f"SELECT input_fingerprint FROM {table} "
+            f"WHERE {parent_column}=? AND view_role=? AND status='ready'",
+            (parent["id"], role),
+        ).fetchone()
+        current_fp = current["input_fingerprint"] if current else None
+        if current_fp != frozen_fp:
+            return True
     return False
 
 

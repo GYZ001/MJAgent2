@@ -142,6 +142,19 @@ async def resume_episode(args: I.EpisodeScopedInput) -> CommandResult:
     return succeeded(f"已恢复 {outcome.get('resumed_jobs', 0)} 个暂停中的视频任务", data=outcome)
 
 
+async def repair_stale_assets(args: I.VideoRepairStaleAssetsInput) -> CommandResult:
+    from app import api
+
+    outcome = await call_guarded(
+        api.repair_stale_assets,
+        args.episode_id,
+        {"shot_ids": args.shot_ids, "confirm": args.confirm},
+    )
+    if isinstance(outcome, CommandResult):
+        return outcome
+    return succeeded(f"已提交 {outcome.get('queued', 0)} 个陈旧镜头重生任务", data=outcome)
+
+
 async def reference_review(args: I.ReferenceReviewInput) -> CommandResult:
     from app import api
 

@@ -829,6 +829,16 @@ async def regenerate_character_view_route(
     project_id: str, character_name: str, portrait_id: str, view_role: str,
 ):
     """人物谱单视角重做：只重生成指定视角并复跑整包 QA。"""
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route(
+        "portrait.regenerate_view",
+        {
+            "project_id": project_id, "character_name": character_name,
+            "portrait_id": portrait_id, "view_role": view_role,
+        },
+    )
+    if routed is not None:
+        return routed
     _project_or_404(project_id)
     from app.multiview import regenerate_character_view, pack_result_ok
     conn = get_conn()
@@ -854,6 +864,16 @@ async def regenerate_scene_view_route(
     project_id: str, scene_name: str, scene_reference_id: str, view_role: str,
 ):
     """场景库单视角重做。"""
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route(
+        "scene.regenerate_view",
+        {
+            "project_id": project_id, "scene_name": scene_name,
+            "scene_reference_id": scene_reference_id, "view_role": view_role,
+        },
+    )
+    if routed is not None:
+        return routed
     _project_or_404(project_id)
     from app.multiview import regenerate_scene_view, pack_result_ok
     conn = get_conn()

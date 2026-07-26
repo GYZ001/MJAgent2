@@ -396,6 +396,7 @@ def resolve_shot_asset_dependencies(
                     "id": v["id"],
                     "view_role": v.get("view_role"),
                     "image_path": v.get("image_path"),
+                    "input_fingerprint": v.get("input_fingerprint"),
                     "purposes": [PURPOSE_KEYFRAME_SEED, PURPOSE_QA_ANCHOR],
                 }
                 for v in selected
@@ -422,6 +423,7 @@ def resolve_shot_asset_dependencies(
                     "id": v["id"],
                     "view_role": v.get("view_role"),
                     "image_path": v.get("image_path"),
+                    "input_fingerprint": v.get("input_fingerprint"),
                     "purposes": [PURPOSE_KEYFRAME_SEED, PURPOSE_QA_ANCHOR],
                 }
                 for v in selected
@@ -453,8 +455,36 @@ def manifest_asset_revision_ids(manifest: dict[str, Any] | None) -> dict[str, st
     return out
 
 
+def manifest_asset_view_fingerprints(
+    manifest: dict[str, Any] | None,
+) -> dict[tuple[str, str, str], str]:
+    """提取已冻结视角的内容版本；旧 manifest 缺字段时保持向后兼容。"""
+    out: dict[tuple[str, str, str], str] = {}
+    if not isinstance(manifest, dict):
+        return out
+    for ch in manifest.get("characters") or []:
+        name = str(ch.get("name") or "")
+        for view in ch.get("selected_views") or []:
+            role = str(view.get("view_role") or "")
+            fp = str(view.get("input_fingerprint") or "")
+            if name and role and fp:
+                out[("character", name, role)] = fp
+    scene = manifest.get("scene") or {}
+    if isinstance(scene, dict):
+        name = str(scene.get("name") or "")
+        for view in scene.get("selected_views") or []:
+            role = str(view.get("view_role") or "")
+            fp = str(view.get("input_fingerprint") or "")
+            if name and role and fp:
+                out[("scene", name, role)] = fp
+    return out
+
+
 def manifest_revisions_match(frozen: dict[str, Any] | None, current: dict[str, Any] | None) -> bool:
-    return manifest_asset_revision_ids(frozen) == manifest_asset_revision_ids(current)
+    return (
+        manifest_asset_revision_ids(frozen) == manifest_asset_revision_ids(current)
+        and manifest_asset_view_fingerprints(frozen) == manifest_asset_view_fingerprints(current)
+    )
 
 
 def manifest_production_blockers(manifest: dict[str, Any] | None) -> list[str]:
@@ -602,6 +632,14 @@ def _view_path(project_id: str, kind: str, name: str, view_role: str, ep_start: 
     root = config.PROJECTS_DIR / project_id / ("refs" if kind == "character" else "scene_refs") / "views"
     root.mkdir(parents=True, exist_ok=True)
     return str(root / f"{_safe_name(name)}__{view_role}__ep{ep_start}__{new_id('view')}.jpg")
+
+
+def _discard_rejected_candidate(path: str) -> None:
+    """尽力清理尚未登记入库的 QA 失败候选，不让清理异常覆盖真实 QA 结果。"""
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 async def _save_image_item(item: dict, dest: str) -> None:
@@ -1743,11 +1781,12 @@ async def regenerate_character_view(
     if view_role != "front_full" and front.get("image_path") and Path(front["image_path"]).exists():
         seeds.append(hiagent.data_url_from_file(front["image_path"]))
     prompt = character_view_prompt(style, appearance, view_role)
+    path = _view_path(project_id, "character", row["character_name"], view_role, row["ep_start"])
     fp = view_input_fingerprint(
         view_role=view_role, prompt=prompt, anchor_text=appearance,
-        parent_revision_id=portrait_id, seed_hint=front.get("image_path"),
+        parent_revision_id=portrait_id,
+        seed_hint=f"{front.get('image_path') or ''}|redo:{Path(path).name}",
     )
-    path = _view_path(project_id, "character", row["character_name"], view_role, row["ep_start"])
     item = await _generate_image(
         prompt, seed_inputs=seeds or None,
         call_meta={"asset_kind": "character_view_redo", "view_role": view_role,
@@ -1756,38 +1795,45 @@ async def regenerate_character_view(
     await _save_image_item(item, path)
     qa = await review_character_view(path, appearance, view_role)
     status = "ready" if _view_passed(qa) else ("unverified" if qa.get("status") == "unverified" else "failed")
+    if status != "ready":
+        _discard_rejected_candidate(path)
+        return {"status": "failed", "view_role": view_role, "qa": qa, "preserved_previous": True}
+
+    candidate = dict(existing.get(view_role) or {})
+    candidate.update({
+        "view_role": view_role, "image_path": path, "prompt": prompt,
+        "qa_json": json.dumps(qa, ensure_ascii=False), "status": "ready",
+        "input_fingerprint": fp,
+    })
+    candidate_views = [candidate if v.get("view_role") == view_role else v for v in existing.values()]
+    if view_role not in existing:
+        candidate_views.append(candidate)
+    required = [v for v in candidate_views if v.get("view_role") in CHARACTER_REQUIRED_VIEWS]
+    missing = missing_required_views(candidate_views, CHARACTER_REQUIRED_VIEWS)
+    if missing:
+        _discard_rejected_candidate(path)
+        return {
+            "status": "failed", "view_role": view_role, "missing_required": missing,
+            "preserved_previous": True,
+        }
+
+    group_qa = await review_character_pack_consistency(required, appearance)
+    if group_qa.get("status") != "ready":
+        _discard_rejected_candidate(path)
+        return {
+            "status": "failed", "view_role": view_role, "group_qa": group_qa,
+            "preserved_previous": True,
+        }
+
     view_id = _upsert_character_view(
         conn, portrait_id=portrait_id, view_role=view_role,
         framing="closeup" if view_role == "face_closeup" else ("full_body" if view_role.endswith("full") else "half_or_full"),
         image_path=path, prompt=prompt, qa=qa, artifact_id=None,
         base_view_id=(existing.get(view_role) or {}).get("id"),
-        status=status, fingerprint=fp,
+        status="ready", fingerprint=fp,
     )
-    if view_role == "front_full" and status == "ready":
+    if view_role == "front_full":
         conn.execute("UPDATE character_portraits SET image_path=? WHERE id=?", (path, portrait_id))
-    conn.commit()
-    if status != "ready":
-        _set_portrait_pack_fields(conn, portrait_id, pack_status=PACK_STATUS_FAILED,
-                                  group_qa_json=json.dumps({"failed_view": view_role, "qa": qa}, ensure_ascii=False))
-        conn.commit()
-        return {"status": "failed", "view_role": view_role, "view_id": view_id, "qa": qa}
-
-    views = list_portrait_views(portrait_id, conn=conn)
-    required = [v for v in views if v.get("view_role") in CHARACTER_REQUIRED_VIEWS]
-    missing = missing_required_views(views, CHARACTER_REQUIRED_VIEWS)
-    if missing:
-        _set_portrait_pack_fields(conn, portrait_id, pack_status=PACK_STATUS_FAILED,
-                                  group_qa_json=json.dumps({"missing_required": missing}, ensure_ascii=False))
-        conn.commit()
-        return {"status": "failed", "view_role": view_role, "missing_required": missing}
-
-    group_qa = await review_character_pack_consistency(required, appearance)
-    if group_qa.get("status") != "ready":
-        _set_portrait_pack_fields(conn, portrait_id, pack_status=PACK_STATUS_FAILED,
-                                  group_qa_json=json.dumps(group_qa, ensure_ascii=False))
-        conn.commit()
-        return {"status": "failed", "view_role": view_role, "group_qa": group_qa}
-
     _set_portrait_pack_fields(
         conn, portrait_id, pack_status=PACK_STATUS_READY,
         group_qa_json=json.dumps(group_qa, ensure_ascii=False),
@@ -1826,11 +1872,12 @@ async def regenerate_scene_view(
     if view_role != "establishing" and est.get("image_path") and Path(est["image_path"]).exists():
         seeds.append(hiagent.data_url_from_file(est["image_path"]))
     prompt = scene_view_prompt(style, canonical, view_role)
+    path = _view_path(project_id, "scene", row["scene_name"], view_role, row["ep_start"])
     fp = view_input_fingerprint(
         view_role=view_role, prompt=prompt, anchor_text=canonical,
-        parent_revision_id=scene_reference_id, seed_hint=est.get("image_path"),
+        parent_revision_id=scene_reference_id,
+        seed_hint=f"{est.get('image_path') or ''}|redo:{Path(path).name}",
     )
-    path = _view_path(project_id, "scene", row["scene_name"], view_role, row["ep_start"])
     item = await _generate_image(
         prompt, seed_inputs=seeds or None,
         call_meta={"asset_kind": "scene_view_redo", "view_role": view_role, "scene_name": row["scene_name"]},
@@ -1838,39 +1885,46 @@ async def regenerate_scene_view(
     await _save_image_item(item, path)
     qa = await review_scene_view(path, canonical, view_role)
     status = "ready" if _view_passed(qa) else ("unverified" if qa.get("status") == "unverified" else "failed")
+    if status != "ready":
+        _discard_rejected_candidate(path)
+        return {"status": "failed", "view_role": view_role, "qa": qa, "preserved_previous": True}
+
+    candidate = dict(existing.get(view_role) or {})
+    candidate.update({
+        "view_role": view_role, "image_path": path, "prompt": prompt,
+        "qa_json": json.dumps(qa, ensure_ascii=False), "status": "ready",
+        "input_fingerprint": fp,
+    })
+    candidate_views = [candidate if v.get("view_role") == view_role else v for v in existing.values()]
+    if view_role not in existing:
+        candidate_views.append(candidate)
+    required = [v for v in candidate_views if v.get("view_role") in SCENE_REQUIRED_VIEWS]
+    missing = missing_required_views(candidate_views, SCENE_REQUIRED_VIEWS)
+    if missing:
+        _discard_rejected_candidate(path)
+        return {
+            "status": "failed", "view_role": view_role, "missing_required": missing,
+            "preserved_previous": True,
+        }
+
+    group_qa = await review_scene_pack_consistency(required, canonical)
+    if group_qa.get("status") != "ready":
+        _discard_rejected_candidate(path)
+        return {
+            "status": "failed", "view_role": view_role, "group_qa": group_qa,
+            "preserved_previous": True,
+        }
+
     view_id = _upsert_scene_view(
         conn, scene_reference_id=scene_reference_id, view_role=view_role,
         camera_axis="establishing" if view_role == "establishing" else (
             "reverse" if view_role == "reverse_angle" else "action"),
         image_path=path, prompt=prompt, qa=qa, artifact_id=None,
         base_view_id=(existing.get(view_role) or {}).get("id"),
-        status=status, fingerprint=fp,
+        status="ready", fingerprint=fp,
     )
-    if view_role == "establishing" and status == "ready":
+    if view_role == "establishing":
         conn.execute("UPDATE scene_references SET image_path=? WHERE id=?", (path, scene_reference_id))
-    conn.commit()
-    if status != "ready":
-        _set_scene_pack_fields(conn, scene_reference_id, pack_status=PACK_STATUS_FAILED,
-                               group_qa_json=json.dumps({"failed_view": view_role, "qa": qa}, ensure_ascii=False))
-        conn.commit()
-        return {"status": "failed", "view_role": view_role, "view_id": view_id, "qa": qa}
-
-    views = list_scene_views(scene_reference_id, conn=conn)
-    required = [v for v in views if v.get("view_role") in SCENE_REQUIRED_VIEWS]
-    missing = missing_required_views(views, SCENE_REQUIRED_VIEWS)
-    if missing:
-        _set_scene_pack_fields(conn, scene_reference_id, pack_status=PACK_STATUS_FAILED,
-                               group_qa_json=json.dumps({"missing_required": missing}, ensure_ascii=False))
-        conn.commit()
-        return {"status": "failed", "view_role": view_role, "missing_required": missing}
-
-    group_qa = await review_scene_pack_consistency(required, canonical)
-    if group_qa.get("status") != "ready":
-        _set_scene_pack_fields(conn, scene_reference_id, pack_status=PACK_STATUS_FAILED,
-                               group_qa_json=json.dumps(group_qa, ensure_ascii=False))
-        conn.commit()
-        return {"status": "failed", "view_role": view_role, "group_qa": group_qa}
-
     _set_scene_pack_fields(
         conn, scene_reference_id, pack_status=PACK_STATUS_READY,
         group_qa_json=json.dumps(group_qa, ensure_ascii=False),

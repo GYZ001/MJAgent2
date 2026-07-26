@@ -678,18 +678,16 @@ async def screen_scene_state_changes(entries: list[dict], ep_label: str) -> dict
 - 普通昼夜、天气、临时烟雾/灯光/道具
 - 只影响单镜构图的临时布置
 
-输出 JSON 数组，每项：
-{{"name":str,"changed":bool,"persistence":"persistent|episode|shot_only",
+输出 JSON 对象，根字段为 items：
+{{"items":[{{"name":str,"changed":bool,"persistence":"persistent|episode|shot_only",
  "change_dimensions":["damage"|"rebuild"|"layout"|"decor"],
- "new_scene_canonical":str,"reason":str,"evidence_excerpt":str}}
+ "new_scene_canonical":str,"reason":str,"evidence_excerpt":str}}]}}
 shot_only / 未永久变化请 changed=false。new_scene_canonical 须 30~80 字，只写视觉环境。"""
     raw = await model_gateway.chat(
         [{"role": "user", "content": prompt}], temperature=0.2, max_tokens=1600,
         call_meta={"stage": "screen_scene_state_changes"},
     )
-    data = extract_json(raw)
-    if isinstance(data, dict):
-        data = data.get("items") or data.get("scenes") or []
+    data = _extract_scene_change_items(raw)
     if not isinstance(data, list):
         return {}
     out: dict[str, dict] = {}
@@ -723,6 +721,36 @@ shot_only / 未永久变化请 changed=false。new_scene_canonical 须 30~80 字
             "evidence_excerpt": (item.get("evidence_excerpt") or "").strip(),
         }
     return out
+
+
+def _extract_scene_change_items(raw: str) -> list[dict]:
+    """同时解析规范对象和旧版根数组，避免多场景决策被静默截断。"""
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].lstrip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    starts = [pos for pos in (text.find("["), text.find("{")) if pos >= 0]
+    data = None
+    if starts:
+        try:
+            data, _ = json.JSONDecoder().raw_decode(text[min(starts):])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            data = None
+    if data is None:
+        data = extract_json(raw)
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict):
+        items = data.get("items") or data.get("scenes")
+        if isinstance(items, list):
+            return [item for item in items if isinstance(item, dict)]
+        if "name" in data and "changed" in data:
+            return [data]
+    return []
 
 
 def _update_bible_scene_canonical(conn, project_id: str, name: str, canonical: str,

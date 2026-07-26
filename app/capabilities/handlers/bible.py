@@ -76,3 +76,15 @@ async def portrait_cancel(args: I.ProjectScopedInput) -> CommandResult:
     if isinstance(outcome, CommandResult):
         return outcome
     return succeeded("定妆照生成已停止", data=outcome)
+
+
+async def portrait_regenerate_view(args: I.PortraitViewRegenerateInput) -> CommandResult:
+    from app import api
+
+    outcome = await call_guarded(
+        api.regenerate_character_view_route,
+        args.project_id, args.character_name, args.portrait_id, args.view_role,
+    )
+    if isinstance(outcome, CommandResult):
+        return outcome
+    return succeeded(f"角色视角 {args.view_role} 已重做并通过整包 QA", data=outcome)

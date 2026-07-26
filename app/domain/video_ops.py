@@ -1283,6 +1283,17 @@ def stale_assets_preview(episode_id: str):
 async def repair_stale_assets(episode_id: str, body: dict | None = None):
     """批量修复 stale 镜头：对指定/全部 stale 镜强制重抽新视频版本（保留旧采用版直至新版成功）。"""
     body = body or {}
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route(
+        "video.repair_stale_assets",
+        {
+            "episode_id": episode_id,
+            "shot_ids": body.get("shot_ids") or [],
+            "confirm": body.get("confirm") is True,
+        },
+    )
+    if routed is not None:
+        return routed
     if body.get("confirm") is not True:
         raise HTTPException(409, "必须先查看 stale-assets-preview，并显式提交 confirm=true")
     preview = stale_assets_preview(episode_id)

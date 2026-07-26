@@ -1,5 +1,6 @@
 import json
 import asyncio
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -107,6 +108,10 @@ def test_connection_probe_checks_openai_response(monkeypatch) -> None:
         async def post(self, *args, **kwargs): return Response()
 
     monkeypatch.setattr(api.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(
+        api.socket, "getaddrinfo",
+        lambda host, port, **kwargs: [(api.socket.AF_INET, api.socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))],
+    )
     result = asyncio.run(api.test_model_connection({
         "base_url": "https://example.com/v1", "api_key": "secret", "model": "model-a",
     }))
@@ -146,6 +151,10 @@ def test_media_probe_accepts_explicit_endpoint_type_mismatch(monkeypatch) -> Non
         async def post(self, *args, **kwargs): return Response()
 
     monkeypatch.setattr(api.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(
+        api.socket, "getaddrinfo",
+        lambda host, port, **kwargs: [(api.socket.AF_INET, api.socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))],
+    )
     result = asyncio.run(api._probe_openai_model(
         "https://example.com/v1", "secret", "video-model", "video"))
 
@@ -168,9 +177,10 @@ def test_probe_openai_model_rejects_private_ssrf_targets() -> None:
 
 
 def test_browse_blocks_sensitive_system_paths() -> None:
+    sensitive = Path.home() / ".ssh"
     try:
-        api.browse_dir("/etc")
-        raise AssertionError("expected /etc browse to fail")
+        api.browse_dir(str(sensitive))
+        raise AssertionError("expected sensitive directory browse to fail")
     except HTTPException as exc:
         assert exc.status_code == 403
 

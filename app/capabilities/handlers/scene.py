@@ -43,3 +43,15 @@ async def update_prompt(args: I.SceneUpdatePromptInput) -> CommandResult:
     if isinstance(outcome, CommandResult):
         return outcome
     return succeeded(f"场景「{args.scene_name}」的场景图描述已保存", data=outcome)
+
+
+async def regenerate_view(args: I.SceneViewRegenerateInput) -> CommandResult:
+    from app import api
+
+    outcome = await call_guarded(
+        api.regenerate_scene_view_route,
+        args.project_id, args.scene_name, args.scene_reference_id, args.view_role,
+    )
+    if isinstance(outcome, CommandResult):
+        return outcome
+    return succeeded(f"场景视角 {args.view_role} 已重做并通过整包 QA", data=outcome)

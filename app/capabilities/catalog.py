@@ -412,6 +412,22 @@ def _register_commands(registry) -> None:
             rest_routes=("POST /api/projects/{project_id}/refs/cancel",),
             tags=("portrait",),
         ),
+        _cmd(
+            "portrait.regenerate_view",
+            title="重做人物单视角",
+            description="生成候选视角，通过单图与整包 QA 后原子替换当前视角",
+            input_model=I.PortraitViewRegenerateInput,
+            risk=RiskLevel.R2_MATERIAL,
+            confirmation=ConfirmationPolicy.ALWAYS,
+            idempotency=IdempotencyPolicy.REQUIRED,
+            scopes={"manju:generation-media"},
+            side_effect="creates_paid_character_view_and_may_replace_ready_view",
+            handler=h_bible.portrait_regenerate_view,
+            rest_routes=(
+                "POST /api/projects/{project_id}/characters/{character_name}/portraits/{portrait_id}/views/{view_role}/regenerate",
+            ),
+            tags=("portrait", "multiview"),
+        ),
         # —— 场景 ——
         _cmd(
             "scene.generate_bible",
@@ -469,6 +485,22 @@ def _register_commands(registry) -> None:
             handler=h_scene.update_prompt,
             rest_routes=("PUT /api/projects/{project_id}/scenes/{scene_name}/prompt",),
             tags=("scene",),
+        ),
+        _cmd(
+            "scene.regenerate_view",
+            title="重做场景单视角",
+            description="生成候选场景视角，通过单图与整包 QA 后原子替换当前视角",
+            input_model=I.SceneViewRegenerateInput,
+            risk=RiskLevel.R2_MATERIAL,
+            confirmation=ConfirmationPolicy.ALWAYS,
+            idempotency=IdempotencyPolicy.REQUIRED,
+            scopes={"manju:generation-media"},
+            side_effect="creates_paid_scene_view_and_may_replace_ready_view",
+            handler=h_scene.regenerate_view,
+            rest_routes=(
+                "POST /api/projects/{project_id}/scenes/{scene_name}/refs/{scene_reference_id}/views/{view_role}/regenerate",
+            ),
+            tags=("scene", "multiview"),
         ),
         # —— 分集 / 剧本 / 分镜 ——
         _cmd(
@@ -760,6 +792,20 @@ def _register_commands(registry) -> None:
             handler=h_video.resume_episode,
             rest_routes=("POST /api/episodes/{episode_id}/resume",),
             tags=("video",),
+        ),
+        _cmd(
+            "video.repair_stale_assets",
+            title="修复陈旧镜头资产",
+            description="依据当前人物与场景视角版本，为陈旧镜头提交新视频版本",
+            input_model=I.VideoRepairStaleAssetsInput,
+            risk=RiskLevel.R2_MATERIAL,
+            confirmation=ConfirmationPolicy.ALWAYS,
+            idempotency=IdempotencyPolicy.REQUIRED,
+            scopes={"manju:generation-media"},
+            side_effect="creates_paid_video_jobs_for_stale_shots",
+            handler=h_video.repair_stale_assets,
+            rest_routes=("POST /api/episodes/{episode_id}/repair-stale-assets",),
+            tags=("video", "stale-assets"),
         ),
         _cmd(
             "reference.review",

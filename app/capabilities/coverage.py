@@ -153,13 +153,13 @@ def validate_catalog_integrity() -> list[str]:
     required_tools = {
         "project.import_novel", "project.delete",
         "bible.generate", "bible.update", "bible.cancel",
-        "portrait.update_prompt", "portrait.generate", "portrait.cancel",
-        "scene.generate_bible", "scene.generate_refs", "scene.update_prompt", "scene.cancel_refs",
+        "portrait.update_prompt", "portrait.generate", "portrait.cancel", "portrait.regenerate_view",
+        "scene.generate_bible", "scene.generate_refs", "scene.update_prompt", "scene.cancel_refs", "scene.regenerate_view",
         "episode.plan",
         "screenplay.generate", "screenplay.generate_batch", "screenplay.update", "screenplay.cancel",
         "storyboard.generate", "storyboard.generate_batch", "shot.update", "storyboard.confirm", "storyboard.cancel",
         "video.generate_episode", "video.complete_episode", "video.complete_project", "video.generate_shot", "video.stop_shot", "video.adopt_version",
-        "video.clear_episode", "video.clear_shot", "video.delete_version", "reference.review",
+        "video.clear_episode", "video.clear_shot", "video.delete_version", "video.repair_stale_assets", "reference.review",
         "delivery.concatenate", "delivery.check", "delivery.create_package", "delivery.review",
         "delivery.submit_feedback", "run.control", "system.model_test",
     }

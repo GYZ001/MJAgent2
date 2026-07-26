@@ -392,6 +392,93 @@ def test_manifest_revisions_match_for_worker_restart() -> None:
     assert manifest_revisions_match(frozen, changed) is False
 
 
+def test_manifest_revisions_match_detects_same_parent_view_redo() -> None:
+    from app.multiview import manifest_revisions_match, build_reference_manifest
+
+    def manifest(fp: str):
+        return build_reference_manifest(
+            episode_no=1, shot_id="shot_1",
+            characters=[{
+                "name": "A", "look_revision_id": "p1",
+                "selected_views": [{
+                    "id": "v1", "view_role": "front_full", "input_fingerprint": fp,
+                }],
+            }],
+            scene=None,
+        )
+
+    assert manifest_revisions_match(manifest("fp-old"), manifest("fp-old")) is True
+    assert manifest_revisions_match(manifest("fp-old"), manifest("fp-new")) is False
+
+
+def test_failed_character_view_redo_preserves_ready_pack(tmp_path, monkeypatch) -> None:
+    """候选图未通过单图 QA 时，不得覆盖线上 ready 视角或污染整包状态。"""
+    import asyncio
+    import base64
+    import threading
+    from app import config, db
+    import app.multiview as mv
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "atomic-redo.db")
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(db, "_local", threading.local())
+    monkeypatch.setattr(config, "PROJECTS_DIR", tmp_path / "projects")
+    db.init_db()
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO projects(id, name, status, bible_json, created_at) VALUES(?,?,?,?,?)",
+        ("proj", "P", "created", json.dumps({"world": {"visual_style_canonical": "anime"}}), 1),
+    )
+    old_paths = {}
+    for role in CHARACTER_REQUIRED_VIEWS:
+        path = tmp_path / f"old-{role}.jpg"
+        path.write_bytes(b"old")
+        old_paths[role] = str(path)
+    conn.execute(
+        """INSERT INTO character_portraits(
+               id, project_id, character_name, ep_start, appearance, prompt, image_path,
+               bible_version, pack_status, created_at
+           ) VALUES('portrait_1','proj','A',1,'black hair','prompt',?,1,'ready',1)""",
+        (old_paths["front_full"],),
+    )
+    for idx, role in enumerate(CHARACTER_REQUIRED_VIEWS):
+        conn.execute(
+            """INSERT INTO character_portrait_views(
+                   id, portrait_id, view_role, image_path, prompt, qa_json, status,
+                   selected, input_fingerprint, created_at
+               ) VALUES(?,?,?,?,?,?, 'ready',1,?,?)""",
+            (f"view_{idx}", "portrait_1", role, old_paths[role], "prompt", "{}", f"old-{role}", idx + 1),
+        )
+    conn.commit()
+
+    async def fake_generate(*_args, **_kwargs):
+        return {"b64_json": base64.b64encode(b"candidate").decode()}
+
+    async def reject_view(*_args, **_kwargs):
+        return {"overall": 0.2, "status": "failed", "issues": ["face drift"]}
+
+    monkeypatch.setattr(mv, "_generate_image", fake_generate)
+    monkeypatch.setattr(mv, "review_character_view", reject_view)
+    result = asyncio.run(mv.regenerate_character_view(
+        project_id="proj", portrait_id="portrait_1", view_role="profile",
+    ))
+
+    current = conn.execute(
+        "SELECT image_path, status, input_fingerprint FROM character_portrait_views "
+        "WHERE portrait_id='portrait_1' AND view_role='profile'",
+    ).fetchone()
+    pack = conn.execute(
+        "SELECT pack_status FROM character_portraits WHERE id='portrait_1'",
+    ).fetchone()
+    assert result["status"] == "failed"
+    assert result["preserved_previous"] is True
+    assert dict(current) == {
+        "image_path": old_paths["profile"], "status": "ready",
+        "input_fingerprint": "old-profile",
+    }
+    assert pack["pack_status"] == "ready"
+
+
 def test_pack_result_failed_not_ok() -> None:
     from app.multiview import pack_result_ok
     assert pack_result_ok({"status": "ready"}) is True
@@ -489,6 +576,55 @@ def test_shot_video_assets_stale_when_portrait_revision_changes() -> None:
         assert _shot_adopted_assets_stale(_Conn(), shot_row, version_row) is True
         mv.portrait_row_for_episode = lambda *a, **k: {"id": "portrait_old"}
         assert _shot_adopted_assets_stale(_Conn(), shot_row, version_row) is False
+    finally:
+        mv.portrait_row_for_episode = original_portrait
+        mv.scene_row_for_episode = original_scene
+
+
+def test_shot_video_assets_stale_when_selected_view_is_redone() -> None:
+    from app.domain.storyboard_ops import _shot_adopted_assets_stale
+    import app.multiview as mv
+
+    version_row = {
+        "image_inputs": json.dumps({
+            "reference_manifest": {
+                "characters": [{
+                    "name": "A", "look_revision_id": "portrait_1",
+                    "selected_views": [{
+                        "id": "view_1", "view_role": "front_full",
+                        "input_fingerprint": "fp-old",
+                    }],
+                }],
+                "scene": None,
+            },
+        }),
+    }
+
+    class _Conn:
+        view_fp = "fp-new"
+
+        def execute(self, sql, params=()):
+            value = None
+            if "FROM episodes" in sql:
+                value = {"project_id": "proj", "episode_no": 1}
+            elif "FROM character_portrait_views" in sql:
+                value = {"input_fingerprint": self.view_fp}
+
+            class _Cursor:
+                def fetchone(self_inner):
+                    return value
+
+            return _Cursor()
+
+    original_portrait = mv.portrait_row_for_episode
+    original_scene = mv.scene_row_for_episode
+    mv.portrait_row_for_episode = lambda *a, **k: {"id": "portrait_1"}
+    mv.scene_row_for_episode = lambda *a, **k: None
+    conn = _Conn()
+    try:
+        assert _shot_adopted_assets_stale(conn, {"episode_id": "ep1"}, version_row) is True
+        conn.view_fp = "fp-old"
+        assert _shot_adopted_assets_stale(conn, {"episode_id": "ep1"}, version_row) is False
     finally:
         mv.portrait_row_for_episode = original_portrait
         mv.scene_row_for_episode = original_scene

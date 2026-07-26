@@ -43,6 +43,13 @@ class PortraitGenerateInput(StandardCommandInput):
     character: str | None = None
 
 
+class PortraitViewRegenerateInput(StandardCommandInput):
+    project_id: str
+    character_name: str
+    portrait_id: str
+    view_role: str
+
+
 class SceneGenerateRefsInput(StandardCommandInput):
     project_id: str
     scene_name: str | None = None
@@ -52,6 +59,13 @@ class SceneUpdatePromptInput(StandardCommandInput):
     project_id: str
     scene_name: str
     prompt: str
+
+
+class SceneViewRegenerateInput(StandardCommandInput):
+    project_id: str
+    scene_name: str
+    scene_reference_id: str
+    view_role: str
 
 
 class EpisodePlanInput(StandardCommandInput):
@@ -142,6 +156,12 @@ class ShotScopedInput(StandardCommandInput):
 class VideoAdoptVersionInput(StandardCommandInput):
     shot_id: str
     version_id: str
+
+
+class VideoRepairStaleAssetsInput(StandardCommandInput):
+    episode_id: str
+    shot_ids: list[str] = Field(default_factory=list)
+    confirm: bool = False
 
 
 class VersionScopedInput(StandardCommandInput):
