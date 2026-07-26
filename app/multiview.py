@@ -92,6 +92,59 @@ def fingerprint_payload(payload: dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:40]
 
 
+def view_input_fingerprint(
+    *,
+    view_role: str,
+    prompt: str,
+    anchor_text: str,
+    parent_revision_id: str | None = None,
+    base_view_id: str | None = None,
+    seed_hint: str | None = None,
+) -> str:
+    """人物/场景单视角生成幂等指纹：相同版本、视角、提示词与种子不重复付费生成。"""
+    return fingerprint_payload({
+        "view_role": view_role,
+        "prompt": prompt or "",
+        "anchor_text": anchor_text or "",
+        "parent_revision_id": parent_revision_id,
+        "base_view_id": base_view_id,
+        "seed_hint": seed_hint,
+    })
+
+
+def _ready_view_matches_fingerprint(view: dict[str, Any] | None, fingerprint: str) -> bool:
+    """ready 视角可复用：指纹一致；旧数据 fingerprint 为空时也复用（由调用方回填）。"""
+    if not view or not fingerprint:
+        return False
+    if view.get("status") != "ready":
+        return False
+    path = view.get("image_path")
+    if not path or not Path(path).exists():
+        return False
+    existing = view.get("input_fingerprint") or None
+    if existing is None:
+        return True
+    return existing == fingerprint
+
+
+def _backfill_view_fingerprint(conn, *, table: str, view_id: str, fingerprint: str) -> None:
+    if not view_id or not fingerprint:
+        return
+    try:
+        conn.execute(
+            f"UPDATE {table} SET input_fingerprint=? WHERE id=? AND (input_fingerprint IS NULL OR input_fingerprint='')",
+            (fingerprint, view_id),
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def pack_result_ok(result: dict[str, Any] | None) -> bool:
+    if not result:
+        return False
+    return result.get("status") in {PACK_STATUS_READY, "ready", "disabled"}
+
+
 # ---------- 视角提示词 ----------
 
 def character_view_prompt(visual_style: str, appearance: str, view_role: str) -> str:
@@ -316,11 +369,17 @@ def resolve_shot_asset_dependencies(
     shot_id: str,
     shot: Any,
     scene_name: str | None = None,
+    ready_only: bool = True,
 ) -> dict[str, Any]:
-    """解析本镜人物/场景多视角依赖，供关键帧生成与 QA 冻结。"""
+    """解析本镜人物/场景多视角依赖，供关键帧生成与 QA 冻结。
+
+    生产路径默认 ready_only=True：非 ready 视角不得进入依赖与后续生成。
+    """
     characters_out: list[dict[str, Any]] = []
     for name in list(getattr(shot, "characters", None) or []):
-        views = portrait_views_for_episode(project_id, name, episode_no, ready_only=False)
+        # 缺视角检测需要看全部视角状态；选中只允许 ready
+        all_views = portrait_views_for_episode(project_id, name, episode_no, ready_only=False)
+        views = [v for v in all_views if v.get("status") == "ready" and v.get("image_path")] if ready_only else all_views
         row = portrait_row_for_episode(project_id, name, episode_no)
         available = [v.get("view_role") for v in views if v.get("view_role")]
         wanted = select_character_view_roles(shot, name)
@@ -342,13 +401,14 @@ def resolve_shot_asset_dependencies(
                 for v in selected
             ],
             "available_view_roles": available,
-            "missing_required": missing_required_views(views, CHARACTER_REQUIRED_VIEWS),
+            "missing_required": missing_required_views(all_views, CHARACTER_REQUIRED_VIEWS),
         })
 
     scene_out = None
     sname = scene_name or getattr(shot, "scene_name", None) or ""
     if sname:
-        views = scene_views_for_episode(project_id, sname, episode_no, ready_only=False)
+        all_views = scene_views_for_episode(project_id, sname, episode_no, ready_only=False)
+        views = [v for v in all_views if v.get("status") == "ready" and v.get("image_path")] if ready_only else all_views
         row = scene_row_for_episode(project_id, sname, episode_no)
         wanted = select_scene_view_roles(shot)
         selected = resolve_views_for_roles(views, wanted, fallback_roles=SCENE_REQUIRED_VIEWS)
@@ -367,7 +427,7 @@ def resolve_shot_asset_dependencies(
                 for v in selected
             ],
             "available_view_roles": [v.get("view_role") for v in views if v.get("view_role")],
-            "missing_required": missing_required_views(views, SCENE_REQUIRED_VIEWS),
+            "missing_required": missing_required_views(all_views, SCENE_REQUIRED_VIEWS),
         }
 
     return build_reference_manifest(
@@ -375,6 +435,72 @@ def resolve_shot_asset_dependencies(
         shot_id=shot_id,
         characters=characters_out,
         scene=scene_out,
+    )
+
+
+def manifest_asset_revision_ids(manifest: dict[str, Any] | None) -> dict[str, str | None]:
+    """提取冻结依赖中的人物/场景版本 ID，供 stale 比较。"""
+    out: dict[str, str | None] = {}
+    if not isinstance(manifest, dict):
+        return out
+    for ch in manifest.get("characters") or []:
+        name = ch.get("name")
+        if name:
+            out[f"character:{name}"] = ch.get("look_revision_id")
+    scene = manifest.get("scene") or {}
+    if isinstance(scene, dict) and scene.get("name"):
+        out[f"scene:{scene['name']}"] = scene.get("scene_revision_id")
+    return out
+
+
+def manifest_revisions_match(frozen: dict[str, Any] | None, current: dict[str, Any] | None) -> bool:
+    return manifest_asset_revision_ids(frozen) == manifest_asset_revision_ids(current)
+
+
+def manifest_production_blockers(manifest: dict[str, Any] | None) -> list[str]:
+    """不完整/非 ready 多视角包阻断关键帧与视频生产的原因列表。"""
+    if not isinstance(manifest, dict):
+        return ["依赖 manifest 缺失"]
+    blockers: list[str] = []
+    for ch in manifest.get("characters") or []:
+        name = ch.get("name") or "?"
+        if not ch.get("look_revision_id"):
+            blockers.append(f"人物「{name}」缺少本集造型版本")
+            continue
+        pack = ch.get("pack_status")
+        missing = [str(x) for x in (ch.get("missing_required") or []) if x]
+        if pack and pack != PACK_STATUS_READY:
+            blockers.append(f"人物「{name}」多视角包状态为 {pack}")
+        elif missing:
+            blockers.append(f"人物「{name}」缺少必需视角：{','.join(missing)}")
+        elif not (ch.get("selected_view_ids") or ch.get("selected_views")):
+            blockers.append(f"人物「{name}」无可用 ready 视角")
+    scene = manifest.get("scene")
+    if isinstance(scene, dict) and scene.get("name"):
+        name = scene.get("name")
+        if not scene.get("scene_revision_id"):
+            blockers.append(f"场景「{name}」缺少本集场景版本")
+        else:
+            pack = scene.get("pack_status")
+            missing = [str(x) for x in (scene.get("missing_required") or []) if x]
+            if pack and pack != PACK_STATUS_READY:
+                blockers.append(f"场景「{name}」多视角包状态为 {pack}")
+            elif missing:
+                blockers.append(f"场景「{name}」缺少必需视角：{','.join(missing)}")
+            elif not (scene.get("selected_view_ids") or scene.get("selected_views")):
+                blockers.append(f"场景「{name}」无可用 ready 视角")
+    return blockers
+
+
+def assert_manifest_allows_production(manifest: dict[str, Any] | None) -> None:
+    """生产硬门禁：任一人/场景多视角包未就绪则禁止关键帧与视频。"""
+    if not character_multiview_enabled() and not scene_multiview_enabled():
+        return
+    blockers = manifest_production_blockers(manifest)
+    if not blockers:
+        return
+    raise hiagent.ProviderError(
+        "多视角资产包不完整，禁止关键帧/视频生产：" + "；".join(blockers)[:600]
     )
 
 
@@ -751,40 +877,62 @@ async def ensure_character_multiview_pack(
         base_views = {v["view_role"]: v for v in list_portrait_views(base_portrait_id, conn=conn)}
 
     roles = list(CHARACTER_REQUIRED_VIEWS) + [r for r in (optional_views or []) if r in CHARACTER_OPTIONAL_VIEWS]
-    # 1) front_full 优先
+    # 1) front_full 优先（含 fingerprint 幂等）
     front = existing_views.get("front_full")
-    if not front or not front.get("image_path") or not Path(front["image_path"]).exists():
-        # 若父记录已有 image_path，直接登记为 front_full
-        parent = conn.execute("SELECT * FROM character_portraits WHERE id=?", (portrait_id,)).fetchone()
+    parent = conn.execute("SELECT * FROM character_portraits WHERE id=?", (portrait_id,)).fetchone()
+    base_front = base_views.get("front_full") or {}
+    front_prompt = character_view_prompt(visual_style, appearance, "front_full")
+    if parent and parent["prompt"]:
+        # 初始主图登记路径：用已存 prompt 参与指纹，保证重试可复用
+        front_prompt_for_fp = parent["prompt"] or front_prompt
+    else:
+        front_prompt_for_fp = front_prompt
+    front_fp = view_input_fingerprint(
+        view_role="front_full",
+        prompt=front_prompt_for_fp,
+        anchor_text=appearance,
+        parent_revision_id=portrait_id,
+        base_view_id=base_front.get("id"),
+        seed_hint=base_front.get("image_path"),
+    )
+    if not _ready_view_matches_fingerprint(front, front_fp):
         if parent and parent["image_path"] and Path(parent["image_path"]).exists():
             qa = await review_character_view(parent["image_path"], appearance, "front_full")
             status = "ready" if _view_passed(qa) else ("unverified" if qa.get("status") == "unverified" else "failed")
             _upsert_character_view(
                 conn, portrait_id=portrait_id, view_role="front_full", framing="full_body",
-                image_path=parent["image_path"], prompt=parent["prompt"] or "",
+                image_path=parent["image_path"], prompt=parent["prompt"] or front_prompt,
                 qa=qa, artifact_id=parent["artifact_id"] if "artifact_id" in parent.keys() else None,
-                base_view_id=(base_views.get("front_full") or {}).get("id"),
-                status=status, fingerprint=None,
+                base_view_id=base_front.get("id"),
+                status=status, fingerprint=front_fp,
             )
             conn.commit()
+            if status != "ready":
+                _set_portrait_pack_fields(conn, portrait_id, pack_status=PACK_STATUS_FAILED,
+                                         group_qa_json=json.dumps(qa, ensure_ascii=False))
+                conn.commit()
+                return {"status": "failed", "portrait_id": portrait_id, "failed_view": "front_full", "qa": qa}
         else:
-            prompt = character_view_prompt(visual_style, appearance, "front_full")
             seed = None
-            base_front = base_views.get("front_full") or {}
             if base_front.get("image_path") and Path(base_front["image_path"]).exists():
                 seed = [hiagent.data_url_from_file(base_front["image_path"])]
             path = _view_path(project_id, "character", character_name, "front_full", ep_start)
             item = await _generate_image(
-                prompt, seed_inputs=seed,
+                front_prompt, seed_inputs=seed,
                 call_meta={"asset_kind": "character_view", "view_role": "front_full", "character_name": character_name},
             )
             await _save_image_item(item, path)
             qa = await review_character_view(path, appearance, "front_full")
             status = "ready" if _view_passed(qa) else ("unverified" if qa.get("status") == "unverified" else "failed")
+            gen_fp = view_input_fingerprint(
+                view_role="front_full", prompt=front_prompt, anchor_text=appearance,
+                parent_revision_id=portrait_id, base_view_id=base_front.get("id"),
+                seed_hint=base_front.get("image_path"),
+            )
             _upsert_character_view(
                 conn, portrait_id=portrait_id, view_role="front_full", framing="full_body",
-                image_path=path, prompt=prompt, qa=qa, artifact_id=None,
-                base_view_id=base_front.get("id"), status=status, fingerprint=None,
+                image_path=path, prompt=front_prompt, qa=qa, artifact_id=None,
+                base_view_id=base_front.get("id"), status=status, fingerprint=gen_fp,
             )
             # 镜像到父表 image_path
             conn.execute("UPDATE character_portraits SET image_path=? WHERE id=?", (path, portrait_id))
@@ -794,6 +942,11 @@ async def ensure_character_multiview_pack(
                                          group_qa_json=json.dumps(qa, ensure_ascii=False))
                 conn.commit()
                 return {"status": "failed", "portrait_id": portrait_id, "failed_view": "front_full", "qa": qa}
+    elif front and not front.get("input_fingerprint"):
+        _backfill_view_fingerprint(
+            conn, table="character_portrait_views", view_id=front["id"], fingerprint=front_fp,
+        )
+        conn.commit()
 
     existing_views = {v["view_role"]: v for v in list_portrait_views(portrait_id, conn=conn)}
     front = existing_views.get("front_full") or {}
@@ -809,12 +962,25 @@ async def ensure_character_multiview_pack(
         front_seed = [hiagent.data_url_from_file(front["image_path"])]
 
     async def _gen_side(view_role: str) -> dict[str, Any]:
-        cur = existing_views.get(view_role)
-        if cur and cur.get("status") == "ready" and cur.get("image_path") and Path(cur["image_path"]).exists():
-            return {"view_role": view_role, "status": "ready", "id": cur["id"]}
         prompt = character_view_prompt(visual_style, appearance, view_role)
-        seeds = list(front_seed)
         base = base_views.get(view_role) or {}
+        fp = view_input_fingerprint(
+            view_role=view_role,
+            prompt=prompt,
+            anchor_text=appearance,
+            parent_revision_id=portrait_id,
+            base_view_id=base.get("id"),
+            seed_hint=front.get("image_path") or base.get("image_path"),
+        )
+        cur = existing_views.get(view_role)
+        if _ready_view_matches_fingerprint(cur, fp):
+            if cur and not cur.get("input_fingerprint"):
+                _backfill_view_fingerprint(
+                    conn, table="character_portrait_views", view_id=cur["id"], fingerprint=fp,
+                )
+                conn.commit()
+            return {"view_role": view_role, "status": "ready", "id": cur["id"], "reused": True}
+        seeds = list(front_seed)
         if base.get("image_path") and Path(base["image_path"]).exists():
             seeds.append(hiagent.data_url_from_file(base["image_path"]))
         path = _view_path(project_id, "character", character_name, view_role, ep_start)
@@ -829,7 +995,7 @@ async def ensure_character_multiview_pack(
             conn, portrait_id=portrait_id, view_role=view_role,
             framing="half_or_full" if view_role != "face_closeup" else "closeup",
             image_path=path, prompt=prompt, qa=qa, artifact_id=None,
-            base_view_id=base.get("id"), status=status, fingerprint=None,
+            base_view_id=base.get("id"), status=status, fingerprint=fp,
         )
         conn.commit()
         return {"view_role": view_role, "status": status, "id": view_id, "qa": qa}
@@ -888,36 +1054,56 @@ async def ensure_scene_multiview_pack(
     existing_views = {v["view_role"]: v for v in list_scene_views(scene_reference_id, conn=conn)}
     base_views = {v["view_role"]: v for v in list_scene_views(base_scene_id, conn=conn)} if base_scene_id else {}
 
-    # establishing
+    # establishing（含 fingerprint 幂等）
     est = existing_views.get("establishing")
-    if not est or not est.get("image_path") or not Path(est["image_path"]).exists():
-        parent = conn.execute("SELECT * FROM scene_references WHERE id=?", (scene_reference_id,)).fetchone()
+    parent = conn.execute("SELECT * FROM scene_references WHERE id=?", (scene_reference_id,)).fetchone()
+    base_est = base_views.get("establishing") or {}
+    est_prompt = scene_view_prompt(visual_style, scene_canonical, "establishing")
+    est_prompt_for_fp = (parent["prompt"] if parent and parent["prompt"] else est_prompt)
+    est_fp = view_input_fingerprint(
+        view_role="establishing",
+        prompt=est_prompt_for_fp,
+        anchor_text=scene_canonical,
+        parent_revision_id=scene_reference_id,
+        base_view_id=base_est.get("id"),
+        seed_hint=base_est.get("image_path"),
+    )
+    if not _ready_view_matches_fingerprint(est, est_fp):
         if parent and parent["image_path"] and Path(parent["image_path"]).exists():
             qa = await review_scene_view(parent["image_path"], scene_canonical, "establishing")
             status = "ready" if _view_passed(qa) else ("unverified" if qa.get("status") == "unverified" else "failed")
             _upsert_scene_view(
                 conn, scene_reference_id=scene_reference_id, view_role="establishing",
                 camera_axis="establishing", image_path=parent["image_path"],
-                prompt=parent["prompt"] or "", qa=qa,
+                prompt=parent["prompt"] or est_prompt, qa=qa,
                 artifact_id=parent["artifact_id"] if "artifact_id" in parent.keys() else None,
-                base_view_id=(base_views.get("establishing") or {}).get("id"),
-                status=status, fingerprint=None,
+                base_view_id=base_est.get("id"),
+                status=status, fingerprint=est_fp,
             )
             conn.commit()
+            if status != "ready":
+                _set_scene_pack_fields(conn, scene_reference_id, pack_status=PACK_STATUS_FAILED,
+                                      group_qa_json=json.dumps(qa, ensure_ascii=False))
+                conn.commit()
+                return {"status": "failed", "scene_reference_id": scene_reference_id, "failed_view": "establishing"}
         else:
-            prompt = scene_view_prompt(visual_style, scene_canonical, "establishing")
             path = _view_path(project_id, "scene", scene_name, "establishing", ep_start)
             item = await _generate_image(
-                prompt, call_meta={"asset_kind": "scene_view", "view_role": "establishing", "scene_name": scene_name},
+                est_prompt, call_meta={"asset_kind": "scene_view", "view_role": "establishing", "scene_name": scene_name},
             )
             await _save_image_item(item, path)
             qa = await review_scene_view(path, scene_canonical, "establishing")
             status = "ready" if _view_passed(qa) else ("unverified" if qa.get("status") == "unverified" else "failed")
+            gen_fp = view_input_fingerprint(
+                view_role="establishing", prompt=est_prompt, anchor_text=scene_canonical,
+                parent_revision_id=scene_reference_id, base_view_id=base_est.get("id"),
+                seed_hint=base_est.get("image_path"),
+            )
             _upsert_scene_view(
                 conn, scene_reference_id=scene_reference_id, view_role="establishing",
-                camera_axis="establishing", image_path=path, prompt=prompt, qa=qa, artifact_id=None,
-                base_view_id=(base_views.get("establishing") or {}).get("id"),
-                status=status, fingerprint=None,
+                camera_axis="establishing", image_path=path, prompt=est_prompt, qa=qa, artifact_id=None,
+                base_view_id=base_est.get("id"),
+                status=status, fingerprint=gen_fp,
             )
             conn.execute("UPDATE scene_references SET image_path=? WHERE id=?", (path, scene_reference_id))
             conn.commit()
@@ -926,6 +1112,11 @@ async def ensure_scene_multiview_pack(
                                       group_qa_json=json.dumps(qa, ensure_ascii=False))
                 conn.commit()
                 return {"status": "failed", "scene_reference_id": scene_reference_id, "failed_view": "establishing"}
+    elif est and not est.get("input_fingerprint"):
+        _backfill_view_fingerprint(
+            conn, table="scene_reference_views", view_id=est["id"], fingerprint=est_fp,
+        )
+        conn.commit()
 
     existing_views = {v["view_role"]: v for v in list_scene_views(scene_reference_id, conn=conn)}
     est = existing_views.get("establishing") or {}
@@ -934,16 +1125,25 @@ async def ensure_scene_multiview_pack(
         conn.commit()
         return {"status": "failed", "scene_reference_id": scene_reference_id, "failed_view": "establishing"}
 
-    # reverse_angle
+    # reverse_angle（含 fingerprint 幂等）
     rev = existing_views.get("reverse_angle")
-    if not rev or rev.get("status") != "ready" or not rev.get("image_path"):
-        prompt = scene_view_prompt(visual_style, scene_canonical, "reverse_angle")
+    rev_prompt = scene_view_prompt(visual_style, scene_canonical, "reverse_angle")
+    base_rev = base_views.get("reverse_angle") or {}
+    rev_fp = view_input_fingerprint(
+        view_role="reverse_angle",
+        prompt=rev_prompt,
+        anchor_text=scene_canonical,
+        parent_revision_id=scene_reference_id,
+        base_view_id=base_rev.get("id"),
+        seed_hint=est.get("image_path"),
+    )
+    if not _ready_view_matches_fingerprint(rev, rev_fp):
         seeds = []
         if est.get("image_path") and Path(est["image_path"]).exists():
             seeds.append(hiagent.data_url_from_file(est["image_path"]))
         path = _view_path(project_id, "scene", scene_name, "reverse_angle", ep_start)
         item = await _generate_image(
-            prompt, seed_inputs=seeds or None,
+            rev_prompt, seed_inputs=seeds or None,
             call_meta={"asset_kind": "scene_view", "view_role": "reverse_angle", "scene_name": scene_name},
         )
         await _save_image_item(item, path)
@@ -951,9 +1151,9 @@ async def ensure_scene_multiview_pack(
         status = "ready" if _view_passed(qa) else ("unverified" if qa.get("status") == "unverified" else "failed")
         _upsert_scene_view(
             conn, scene_reference_id=scene_reference_id, view_role="reverse_angle",
-            camera_axis="reverse", image_path=path, prompt=prompt, qa=qa, artifact_id=None,
-            base_view_id=(base_views.get("reverse_angle") or {}).get("id"),
-            status=status, fingerprint=None,
+            camera_axis="reverse", image_path=path, prompt=rev_prompt, qa=qa, artifact_id=None,
+            base_view_id=base_rev.get("id"),
+            status=status, fingerprint=rev_fp,
         )
         conn.commit()
         if status != "ready":
@@ -961,6 +1161,11 @@ async def ensure_scene_multiview_pack(
                                   group_qa_json=json.dumps(qa, ensure_ascii=False))
             conn.commit()
             return {"status": "failed", "scene_reference_id": scene_reference_id, "failed_view": "reverse_angle"}
+    elif rev and not rev.get("input_fingerprint"):
+        _backfill_view_fingerprint(
+            conn, table="scene_reference_views", view_id=rev["id"], fingerprint=rev_fp,
+        )
+        conn.commit()
 
     views = list_scene_views(scene_reference_id, conn=conn)
     required_views = [v for v in views if v.get("view_role") in SCENE_REQUIRED_VIEWS]

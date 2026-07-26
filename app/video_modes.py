@@ -1331,36 +1331,57 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
         NARRATIVE_KEYFRAME_SLOT, resolve_shot_asset_dependencies, keyframe_seed_paths,
         library_anchor_assets_from_manifest, review_keyframe_with_evidence, keyframe_gate_passed,
         narrative_keyframe_required, complete_legacy_character_pack, complete_legacy_scene_pack,
+        assert_manifest_allows_production, manifest_revisions_match, pack_result_ok,
+        character_multiview_enabled, scene_multiview_enabled,
     )
     plan = decision.referenceImagePlan
     max_refs = max_reference_images()
     existing_meta = existing_meta or {}
     slot_state: dict[str, Any] = dict(existing_meta.get("reference_slots") or {})
+    scene_name = getattr(shot, "scene_name", "") or ""
 
-    # 冻结依赖 manifest：已冻结则复用，避免 worker 重启后重新选最新人物图
+    # 冻结依赖 manifest：worker 重启复用；若本集人物/场景版本已变则判 stale 并重建
+    reuse_frozen = False
     frozen_manifest = existing_meta.get("reference_manifest")
     if existing_meta.get("reference_manifest_frozen") and isinstance(frozen_manifest, dict):
-        manifest = frozen_manifest
-    else:
-        # 进入本集生产前按需补齐 legacy_partial 缺失视角
+        current_probe = resolve_shot_asset_dependencies(
+            project_id=project_id, episode_no=episode_no, shot_id=shot_id, shot=shot,
+            scene_name=scene_name or None,
+        )
+        if manifest_revisions_match(frozen_manifest, current_probe):
+            manifest = frozen_manifest
+            reuse_frozen = True
+        else:
+            existing_meta["reference_manifest_asset_stale"] = True
+            existing_meta["reference_manifest_frozen"] = False
+
+    if not reuse_frozen:
+        # 进入本集生产前按需补齐 legacy_partial；失败必须响，禁止吞掉后继续关键帧
         style = bible.world.visual_style_canonical
-        for name in list(shot.characters or []):
-            try:
-                await complete_legacy_character_pack(project_id, name, episode_no, style)
-            except Exception:  # noqa: BLE001
-                pass
-        scene_name = getattr(shot, "scene_name", "") or ""
-        if scene_name:
-            try:
-                await complete_legacy_scene_pack(project_id, scene_name, episode_no, style)
-            except Exception:  # noqa: BLE001
-                pass
+        if character_multiview_enabled():
+            for name in list(shot.characters or []):
+                pack = await complete_legacy_character_pack(project_id, name, episode_no, style)
+                if pack is not None and not pack_result_ok(pack):
+                    raise hiagent.ProviderError(
+                        f"人物多视角资产包未就绪，禁止关键帧生产：{name}"
+                        f"（status={pack.get('status')}）"
+                    )
+        if scene_name and scene_multiview_enabled():
+            pack = await complete_legacy_scene_pack(project_id, scene_name, episode_no, style)
+            if pack is not None and not pack_result_ok(pack):
+                raise hiagent.ProviderError(
+                    f"场景多视角资产包未就绪，禁止关键帧生产：{scene_name}"
+                    f"（status={pack.get('status')}）"
+                )
         manifest = resolve_shot_asset_dependencies(
             project_id=project_id, episode_no=episode_no, shot_id=shot_id, shot=shot,
             scene_name=scene_name or None,
         )
         existing_meta["reference_manifest"] = manifest
         existing_meta["reference_manifest_frozen"] = True
+
+    # 不完整资产包硬门禁：缺失侧面/反打等不得继续关键帧与视频
+    assert_manifest_allows_production(manifest)
 
     # 只有 action_continuation 才把上一镜尾帧作为强制参考图和剪辑点连贯锚点。
     forced: list[ReferenceImageAsset] = []

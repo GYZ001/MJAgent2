@@ -121,6 +121,17 @@ function refPurposeBucket(ref: ReferenceImage): 'video' | 'evidence' | 'discarde
   return 'video'
 }
 
+/** 评审墙三类分组：视频实际输入 / QA 依据 / 废弃候选 */
+export function classifyReferenceBuckets(refs: ReferenceImage[]) {
+  return {
+    video: refs.filter(r => refPurposeBucket(r) === 'video'),
+    evidence: refs.filter(r => refPurposeBucket(r) === 'evidence'),
+    discarded: refs.filter(r => refPurposeBucket(r) === 'discarded'),
+  }
+}
+
+export { refSourceLabel, refPurposeBucket }
+
 function rejectReasonLabel(reason?: string | null): string {
   if (!reason) return '分数不足'
   // 用户只关心分数：内部代号一律折叠为「分数不足」；手动废弃另议
