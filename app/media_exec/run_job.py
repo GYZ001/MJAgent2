@@ -461,6 +461,50 @@ def _defer_provider_poll(
     task.add_done_callback(_retry_tasks.discard)
     return True
 
+
+def _visual_anchors_from_version_meta(meta: dict) -> list[dict]:
+    """从冻结 reference set / image_inputs 读取关键帧与人物/场景视觉锚点。"""
+    from app.multiview import PURPOSE_QA_ANCHOR, purpose_list, library_anchor_assets_from_manifest
+    anchors: list[dict] = []
+    manifest = meta.get("reference_manifest") if isinstance(meta, dict) else None
+    if isinstance(manifest, dict):
+        anchors.extend(library_anchor_assets_from_manifest(manifest))
+    for ref in (meta.get("reference_images") or []):
+        if not isinstance(ref, dict):
+            continue
+        purposes = purpose_list(ref)
+        rtype = str(ref.get("type") or "")
+        is_keyframe = rtype == "plot_key_frame" or str(ref.get("slot_key") or "") == "narrative_keyframe"
+        is_anchor = PURPOSE_QA_ANCHOR in purposes or rtype in {"character", "scene", "previous_shot_frame"}
+        if not (is_keyframe or is_anchor):
+            continue
+        path = ref.get("path") or ref.get("image_path")
+        if not path:
+            continue
+        item = {
+            "type": rtype,
+            "path": path,
+            "image_path": path,
+            "entity_type": ref.get("entity_type"),
+            "entity_name": ref.get("entity_name"),
+            "view_role": ref.get("view_role"),
+            "library_revision_id": ref.get("library_revision_id"),
+            "library_view_id": ref.get("library_view_id"),
+            "role": "keyframe" if is_keyframe else None,
+        }
+        anchors.append(item)
+    # 去重 path
+    seen = set()
+    out = []
+    for a in anchors:
+        p = a.get("image_path") or a.get("path")
+        if not p or p in seen:
+            continue
+        seen.add(p)
+        out.append(a)
+    return out
+
+
 async def critique_version(version_id: str) -> list[str]:
     """取某视频版本的问题清单（AI 评语）：优先用已存的 QA issues；
     若该版本还没质检过，则现场抽帧跑一次 VLM 评审，并回存。供「带评语重生」避免重复犯错。"""
@@ -485,7 +529,18 @@ async def critique_version(version_id: str) -> list[str]:
         frames = _extract_frames(v["video_path"])
         if not frames:
             return []
-        qa = await qa_shot(frames, shot["action_desc"], shot["scene_setting"], anchors)
+        meta = json.loads(v["image_inputs"] or "{}") if v["image_inputs"] else {}
+        if meta.get("reference_set_id"):
+            try:
+                from app.media_pipeline.reference_store import apply_set_to_meta
+                meta = apply_set_to_meta(meta, meta["reference_set_id"], conn=conn)
+            except Exception:
+                pass
+        visual_anchors = _visual_anchors_from_version_meta(meta)
+        qa = await qa_shot(
+            frames, shot["action_desc"], shot["scene_setting"], anchors,
+            visual_anchors=visual_anchors,
+        )
         _set_version(version_id, qa_json=json.dumps(qa, ensure_ascii=False))
         return list(qa.get("issues") or [])
     except Exception:  # noqa: BLE001 评语失败不阻塞重生
@@ -787,6 +842,34 @@ async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dic
         meta["reference_generation_complete"] = True
         meta["reference_static_ready"] = True
         meta["continuity_anchor_ready"] = True
+        from app.multiview import narrative_keyframe_required, PURPOSE_VIDEO_INPUT, purpose_list
+        keyframe_ok = any(
+            (str(r.get("type") or "") == "plot_key_frame" or str(r.get("slot_key") or "") == "narrative_keyframe")
+            and not r.get("deleted")
+            and (PURPOSE_VIDEO_INPUT in purpose_list(r) or r.get("selectedForSeedance"))
+            and (r.get("qa") or {}).get("status") != "unverified"
+            and (r.get("qa") or {}).get("overall") is not None
+            for r in (meta.get("reference_images") or [])
+            if isinstance(r, dict)
+        )
+        if meta.get("narrative_keyframe_missing") or (narrative_keyframe_required() and not keyframe_ok):
+            meta["narrative_keyframe_missing"] = True
+            meta["reference_group_gate_passed"] = False
+            meta["video_input_manifest_frozen"] = False
+            try:
+                from app.media_pipeline.reference_store import upsert_reference_set_from_meta
+                upsert_reference_set_from_meta(
+                    shot_id=shot_id, version_id=version["id"], meta=meta, conn=conn,
+                    static_ready=True, continuity_ready=True, group_gate_passed=False,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            _set_version(version["id"], image_inputs=json.dumps(meta, ensure_ascii=False), prompt_text=prompt_text)
+            conn.commit()
+            raise ProviderError(
+                "必需叙事关键帧未通过证据化 QA 或缺失（unverified），默认阻止视频提交；"
+                "请人工确认后覆盖，或重新生成关键帧。"
+            )
         meta["reference_group_gate_passed"] = True
         meta["video_input_manifest_frozen"] = True
         meta.pop("first_frame_path", None)
@@ -1359,6 +1442,15 @@ async def _maybe_auto_qa(
         )
         if "shot_contract_json" in shot.keys() and shot["shot_contract_json"]:
             apply_shot_contract(shot_model, shot["shot_contract_json"])
+        version_row = conn.execute("SELECT * FROM shot_versions WHERE id=?", (version_id,)).fetchone()
+        meta_for_qa = json.loads(version_row["image_inputs"] or "{}") if version_row and version_row["image_inputs"] else {}
+        if meta_for_qa.get("reference_set_id"):
+            try:
+                from app.media_pipeline.reference_store import apply_set_to_meta
+                meta_for_qa = apply_set_to_meta(meta_for_qa, meta_for_qa["reference_set_id"], conn=conn)
+            except Exception:
+                pass
+        visual_anchors = _visual_anchors_from_version_meta(meta_for_qa)
         qa = await qa_shot(
             frames,
             effective_primary_action(shot_model) or shot["action_desc"],
@@ -1371,13 +1463,14 @@ async def _maybe_auto_qa(
                 "duration_gt5_needs_review" in (shot_model.risk_tags or [])
                 or int(shot_model.duration_s or shot["duration_s"] or 0) > 5
             ),
+            visual_anchors=visual_anchors,
         )
         _set_version(version_id, qa_json=json.dumps(qa, ensure_ascii=False))
         # QA 非标准输出虽可恢复部分分数，但证据不足以触发付费重抽。
         # 重抽不会发生：交由 force_best 在技术合格视频里挑最高分，避免无成片。
-        if qa.get("qa_recovered"):
+        if qa.get("qa_recovered") or qa.get("status") == "unverified" or qa.get("overall") is None:
             log_provider_call(
-                "vlm_qa", config.MODEL_VLM, "QA_RECOVERED_NO_RETAKE", None, 0,
+                "vlm_qa", config.MODEL_VLM, "QA_UNVERIFIED_NO_RETAKE", None, 0,
                 meta={"shot_id": job["shot_id"], "version_id": version_id, "qa": qa})
             return True
         threshold = float(get_setting("auto_retake_threshold") or 0.6)

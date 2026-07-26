@@ -240,6 +240,44 @@ CREATE TABLE IF NOT EXISTS scene_references (
 );
 CREATE INDEX IF NOT EXISTS idx_scene_refs_proj_name ON scene_references(project_id, scene_name, ep_start);
 CREATE INDEX IF NOT EXISTS idx_portraits_proj_char ON character_portraits(project_id, character_name, ep_start);
+CREATE TABLE IF NOT EXISTS character_portrait_views (
+    id TEXT PRIMARY KEY,
+    portrait_id TEXT NOT NULL,
+    view_role TEXT NOT NULL,
+    framing TEXT,
+    image_path TEXT,
+    prompt TEXT,
+    qa_json TEXT,
+    artifact_id TEXT,
+    base_view_id TEXT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    selected INTEGER NOT NULL DEFAULT 1,
+    input_fingerprint TEXT,
+    created_at REAL NOT NULL,
+    UNIQUE(portrait_id, view_role),
+    FOREIGN KEY(portrait_id) REFERENCES character_portraits(id) ON DELETE CASCADE,
+    FOREIGN KEY(base_view_id) REFERENCES character_portrait_views(id)
+);
+CREATE INDEX IF NOT EXISTS idx_portrait_views_portrait ON character_portrait_views(portrait_id, view_role);
+CREATE TABLE IF NOT EXISTS scene_reference_views (
+    id TEXT PRIMARY KEY,
+    scene_reference_id TEXT NOT NULL,
+    view_role TEXT NOT NULL,
+    camera_axis TEXT,
+    image_path TEXT,
+    prompt TEXT,
+    qa_json TEXT,
+    artifact_id TEXT,
+    base_view_id TEXT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    selected INTEGER NOT NULL DEFAULT 1,
+    input_fingerprint TEXT,
+    created_at REAL NOT NULL,
+    UNIQUE(scene_reference_id, view_role),
+    FOREIGN KEY(scene_reference_id) REFERENCES scene_references(id) ON DELETE CASCADE,
+    FOREIGN KEY(base_view_id) REFERENCES scene_reference_views(id)
+);
+CREATE INDEX IF NOT EXISTS idx_scene_ref_views_scene ON scene_reference_views(scene_reference_id, view_role);
 CREATE INDEX IF NOT EXISTS idx_chapters_project ON chapters(project_id, idx);
 CREATE INDEX IF NOT EXISTS idx_episodes_project ON episodes(project_id, episode_no);
 CREATE INDEX IF NOT EXISTS idx_shots_episode ON shots(episode_id, shot_no);
@@ -752,6 +790,26 @@ MIGRATIONS = (
     "ALTER TABLE reference_assets ADD COLUMN generation_status TEXT",
     "ALTER TABLE reference_assets ADD COLUMN qa_status TEXT",
     "ALTER TABLE reference_assets ADD COLUMN input_fingerprint TEXT",
+    # 人物/场景多视角资产包 + 关键帧证据链
+    "ALTER TABLE character_portraits ADD COLUMN pack_status TEXT NOT NULL DEFAULT 'legacy_partial'",
+    "ALTER TABLE character_portraits ADD COLUMN group_qa_json TEXT",
+    "ALTER TABLE character_portraits ADD COLUMN change_json TEXT",
+    "ALTER TABLE character_portraits ADD COLUMN input_fingerprint TEXT",
+    "ALTER TABLE scene_references ADD COLUMN pack_status TEXT NOT NULL DEFAULT 'legacy_partial'",
+    "ALTER TABLE scene_references ADD COLUMN group_qa_json TEXT",
+    "ALTER TABLE scene_references ADD COLUMN state_canonical TEXT",
+    "ALTER TABLE scene_references ADD COLUMN change_json TEXT",
+    "ALTER TABLE scene_references ADD COLUMN input_fingerprint TEXT",
+    "ALTER TABLE reference_assets ADD COLUMN entity_type TEXT",
+    "ALTER TABLE reference_assets ADD COLUMN entity_name TEXT",
+    "ALTER TABLE reference_assets ADD COLUMN library_revision_id TEXT",
+    "ALTER TABLE reference_assets ADD COLUMN library_view_id TEXT",
+    "ALTER TABLE reference_assets ADD COLUMN view_role TEXT",
+    "ALTER TABLE reference_assets ADD COLUMN purposes_json TEXT",
+    "ALTER TABLE reference_assets ADD COLUMN required INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE reference_assets ADD COLUMN dependency_manifest_json TEXT",
+    "ALTER TABLE reference_sets ADD COLUMN dependency_manifest_json TEXT",
+    "ALTER TABLE reference_sets ADD COLUMN frozen INTEGER NOT NULL DEFAULT 0",
 )
 
 
@@ -992,6 +1050,82 @@ def _prune_observability_logs(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM error_logs WHERE ts < ?", (errors_cutoff,))
 
 
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone()
+    return bool(row)
+
+
+def _column_names(conn: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    except sqlite3.OperationalError:
+        return set()
+
+
+def _backfill_multiview_assets(conn: sqlite3.Connection) -> None:
+    """旧单图资产回填为多视角子记录；幂等可重复执行。"""
+    stamp = now()
+    if _table_exists(conn, "character_portrait_views"):
+        cols = _column_names(conn, "character_portraits")
+        portraits = conn.execute("SELECT * FROM character_portraits").fetchall()
+        for row in portraits:
+            existing = conn.execute(
+                "SELECT id FROM character_portrait_views WHERE portrait_id=? AND view_role='front_full'",
+                (row["id"],),
+            ).fetchone()
+            if not existing and row["image_path"]:
+                view_id = new_id("pview")
+                conn.execute(
+                    """INSERT INTO character_portrait_views(
+                           id, portrait_id, view_role, framing, image_path, prompt, qa_json,
+                           artifact_id, base_view_id, status, selected, input_fingerprint, created_at
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        view_id, row["id"], "front_full", "full_body", row["image_path"],
+                        row["prompt"], None, row["artifact_id"] if "artifact_id" in row.keys() else None,
+                        None, "ready", 1, None, stamp,
+                    ),
+                )
+            if "pack_status" in cols:
+                status = row["pack_status"] if "pack_status" in row.keys() and row["pack_status"] else None
+                if not status:
+                    conn.execute(
+                        "UPDATE character_portraits SET pack_status=? WHERE id=?",
+                        ("legacy_partial", row["id"]),
+                    )
+    if _table_exists(conn, "scene_reference_views"):
+        cols = _column_names(conn, "scene_references")
+        scenes = conn.execute("SELECT * FROM scene_references").fetchall()
+        for row in scenes:
+            existing = conn.execute(
+                "SELECT id FROM scene_reference_views WHERE scene_reference_id=? AND view_role='establishing'",
+                (row["id"],),
+            ).fetchone()
+            if not existing and row["image_path"]:
+                view_id = new_id("sview")
+                conn.execute(
+                    """INSERT INTO scene_reference_views(
+                           id, scene_reference_id, view_role, camera_axis, image_path, prompt, qa_json,
+                           artifact_id, base_view_id, status, selected, input_fingerprint, created_at
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        view_id, row["id"], "establishing", "establishing", row["image_path"],
+                        row["prompt"], row["qa_json"],
+                        row["artifact_id"] if "artifact_id" in row.keys() else None,
+                        None, "ready", 1, None, stamp,
+                    ),
+                )
+            if "pack_status" in cols:
+                status = row["pack_status"] if "pack_status" in row.keys() and row["pack_status"] else None
+                if not status:
+                    conn.execute(
+                        "UPDATE scene_references SET pack_status=? WHERE id=?",
+                        ("legacy_partial", row["id"]),
+                    )
+
+
 def init_db() -> None:
     conn = get_conn()
     conn.executescript(SCHEMA)
@@ -1007,6 +1141,7 @@ def init_db() -> None:
         ensure_completion_grants_table(conn)
     except Exception:  # noqa: BLE001
         pass
+    _backfill_multiview_assets(conn)
     _repair_integrity(conn)
     for key, value in DEFAULT_SETTINGS.items():
         conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", (key, value))

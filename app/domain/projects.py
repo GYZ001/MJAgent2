@@ -97,30 +97,112 @@ def list_projects():
     return rows
 
 def _attach_character_portraits(conn, project_id: str, bible: dict) -> None:
-    """为 bible.characters 挂上 character_portraits 表里的分段定妆照（按适用集左区间排序）。"""
-    rows = rows_to_dicts(conn.execute(
-        "SELECT id, character_name, ep_start, ep_end, appearance, base_portrait_id, image_path "
-        "FROM character_portraits WHERE project_id=? ORDER BY character_name, ep_start", (project_id,)).fetchall())
+    """为 bible.characters 挂上 character_portraits 表里的分段定妆照（含多视角）。"""
+    try:
+        rows = rows_to_dicts(conn.execute(
+            "SELECT id, character_name, ep_start, ep_end, appearance, base_portrait_id, image_path, "
+            "pack_status, group_qa_json, change_json "
+            "FROM character_portraits WHERE project_id=? ORDER BY character_name, ep_start", (project_id,)).fetchall())
+    except Exception:  # noqa: BLE001
+        rows = rows_to_dicts(conn.execute(
+            "SELECT id, character_name, ep_start, ep_end, appearance, base_portrait_id, image_path "
+            "FROM character_portraits WHERE project_id=? ORDER BY character_name, ep_start", (project_id,)).fetchall())
+    view_rows = []
+    try:
+        view_rows = rows_to_dicts(conn.execute(
+            """SELECT v.* FROM character_portrait_views v
+               JOIN character_portraits p ON p.id=v.portrait_id
+               WHERE p.project_id=? ORDER BY v.portrait_id, v.created_at""",
+            (project_id,),
+        ).fetchall())
+    except Exception:  # noqa: BLE001
+        view_rows = []
+    views_by_portrait: dict[str, list[dict]] = {}
+    for v in view_rows:
+        qa = None
+        if v.get("qa_json"):
+            try:
+                qa = json.loads(v["qa_json"])
+            except (TypeError, ValueError):
+                qa = None
+        views_by_portrait.setdefault(v["portrait_id"], []).append({
+            "id": v["id"],
+            "view_role": v.get("view_role"),
+            "framing": v.get("framing"),
+            "status": v.get("status"),
+            "image_url": _media_url(v.get("image_path")),
+            "qa": qa,
+            "qa_overall": (qa or {}).get("overall") if isinstance(qa, dict) else None,
+        })
     by_name: dict[str, list[dict]] = {}
     for r in rows:
+        group_qa = None
+        if r.get("group_qa_json"):
+            try:
+                group_qa = json.loads(r["group_qa_json"])
+            except (TypeError, ValueError):
+                group_qa = None
+        change = None
+        if r.get("change_json"):
+            try:
+                change = json.loads(r["change_json"])
+            except (TypeError, ValueError):
+                change = None
         by_name.setdefault(r["character_name"], []).append({
             "id": r["id"], "ep_start": r["ep_start"], "ep_end": r["ep_end"],
             "appearance": r["appearance"], "base_portrait_id": r["base_portrait_id"],
             "image_url": _media_url(r["image_path"]),
+            "pack_status": r.get("pack_status"),
+            "group_qa": group_qa,
+            "change": change,
+            "views": views_by_portrait.get(r["id"], []),
         })
     for c in bible.get("characters", []):
         c["portraits"] = by_name.get(c.get("name"), [])
 
 
 def _attach_scene_refs(conn, project_id: str, bible: dict) -> None:
-    """为 bible.scenes 挂上 scene_references 表里的分段场景图（含 QA 分数），按适用集左区间排序。"""
-    rows = rows_to_dicts(conn.execute(
-        "SELECT scene_name, ep_start, ep_end, scene_canonical, image_path, qa_json, artifact_id "
-        "FROM scene_references WHERE project_id=? ORDER BY scene_name, ep_start", (project_id,)).fetchall())
+    """为 bible.scenes 挂上 scene_references 表里的分段场景图（含多视角与 QA）。"""
+    try:
+        rows = rows_to_dicts(conn.execute(
+            "SELECT id, scene_name, ep_start, ep_end, scene_canonical, image_path, qa_json, artifact_id, "
+            "pack_status, group_qa_json, change_json "
+            "FROM scene_references WHERE project_id=? ORDER BY scene_name, ep_start", (project_id,)).fetchall())
+    except Exception:  # noqa: BLE001 旧库缺列
+        rows = rows_to_dicts(conn.execute(
+            "SELECT scene_name, ep_start, ep_end, scene_canonical, image_path, qa_json, artifact_id "
+            "FROM scene_references WHERE project_id=? ORDER BY scene_name, ep_start", (project_id,)).fetchall())
+    view_rows = []
+    try:
+        view_rows = rows_to_dicts(conn.execute(
+            """SELECT v.* FROM scene_reference_views v
+               JOIN scene_references s ON s.id=v.scene_reference_id
+               WHERE s.project_id=? ORDER BY v.scene_reference_id, v.created_at""",
+            (project_id,),
+        ).fetchall())
+    except Exception:  # noqa: BLE001
+        view_rows = []
+    views_by_scene: dict[str, list[dict]] = {}
+    for v in view_rows:
+        qa = None
+        if v.get("qa_json"):
+            try:
+                qa = json.loads(v["qa_json"])
+            except (TypeError, ValueError):
+                qa = None
+        views_by_scene.setdefault(v["scene_reference_id"], []).append({
+            "id": v["id"],
+            "view_role": v.get("view_role"),
+            "camera_axis": v.get("camera_axis"),
+            "status": v.get("status"),
+            "image_url": _media_url(v.get("image_path")),
+            "qa": qa,
+            "qa_overall": (qa or {}).get("overall") if isinstance(qa, dict) else None,
+        })
     by_name: dict[str, list[dict]] = {}
     for r in rows:
         qa = None
-        if r["qa_json"]:
+        if r.get("qa_json"):
             try:
                 qa = json.loads(r["qa_json"])
             except (TypeError, ValueError):
@@ -128,11 +210,28 @@ def _attach_scene_refs(conn, project_id: str, bible: dict) -> None:
         evidence = evidence_repository.get_artifact(r["artifact_id"]) if r.get("artifact_id") else None
         if evidence:
             evidence["evaluations"] = evidence_repository.get_evaluations(evidence["id"])
+        group_qa = None
+        if r.get("group_qa_json"):
+            try:
+                group_qa = json.loads(r["group_qa_json"])
+            except (TypeError, ValueError):
+                group_qa = None
+        change = None
+        if r.get("change_json"):
+            try:
+                change = json.loads(r["change_json"])
+            except (TypeError, ValueError):
+                change = None
         by_name.setdefault(r["scene_name"], []).append({
+            "id": r.get("id"),
             "ep_start": r["ep_start"], "ep_end": r["ep_end"],
             "scene_canonical": r["scene_canonical"], "image_url": _media_url(r["image_path"]),
             "qa": qa, "qa_overall": (qa or {}).get("overall") if isinstance(qa, dict) else None,
             "artifact_id": r.get("artifact_id"), "evidence": evidence,
+            "pack_status": r.get("pack_status"),
+            "group_qa": group_qa,
+            "change": change,
+            "views": views_by_scene.get(r.get("id") or "", []),
         })
     candidate_by_name: dict[str, list[dict]] = {}
     artifact_rows = rows_to_dicts(conn.execute(
@@ -163,8 +262,6 @@ def _attach_scene_refs(conn, project_id: str, bible: dict) -> None:
         segs = by_name.get(s.get("name"), [])
         s["scene_refs"] = segs
         s["scene_candidates"] = candidate_by_name.get(s.get("name"), [])
-        # scene_references 是场景图的权威存储；bible 的 ref_image_path 只是回退，二者会因
-        # 重新提取场景清单/反应式补图而分叉。bible 没路径时用最新分段的落盘图回填出图状态与主图。
         if not s.get("ref_image_url"):
             latest = next((seg for seg in reversed(segs) if seg.get("image_url")), None)
             if latest:

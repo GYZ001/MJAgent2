@@ -359,7 +359,38 @@ export interface EpisodeScreenplay {
 export interface ReferenceImage {
   id: string; image_url?: string | null; type: string; source: string
   qualityScore?: number | null; selectedForSeedance?: boolean; deleted?: boolean
-  rejectReason?: string | null; qa?: { overall?: number; issues?: string[] } | null
+  rejectReason?: string | null
+  qa?: {
+    overall?: number | null
+    status?: string
+    issues?: string[]
+    action_match?: number
+    body_proportion?: number
+    face_identity?: number | null
+    outfit_match?: number
+    hair_match?: number
+    scene_match?: number
+    hard_failures?: string[]
+  } | null
+  entity_type?: string | null
+  entity_name?: string | null
+  library_revision_id?: string | null
+  library_view_id?: string | null
+  view_role?: string | null
+  purposes?: string[] | null
+  required?: boolean
+  slot_key?: string | null
+  dependency_manifest?: Record<string, unknown> | null
+}
+
+export interface PortraitView {
+  id: string
+  view_role?: string
+  framing?: string
+  status?: string
+  image_url?: string | null
+  qa?: { overall?: number | null; issues?: string[] } | null
+  qa_overall?: number | null
 }
 
 export interface ShotVersion {
@@ -578,6 +609,10 @@ export interface Portrait {
   appearance?: string | null
   base_portrait_id?: string | null
   image_url?: string | null
+  pack_status?: string | null
+  group_qa?: { overall?: number | null; issues?: string[]; status?: string } | null
+  change?: { change_dimensions?: string[]; persistence?: string; reason?: string } | null
+  views?: PortraitView[]
 }
 
 export interface Character {
@@ -598,6 +633,7 @@ export interface ChapterContent {
 }
 
 export interface SceneRefSegment {
+  id?: string
   ep_start: number
   ep_end: number | null
   scene_canonical?: string | null
@@ -606,6 +642,17 @@ export interface SceneRefSegment {
   qa_overall?: number | null
   artifact_id?: string | null
   evidence?: ArtifactEvidence | null
+  pack_status?: string | null
+  group_qa?: { overall?: number | null; issues?: string[]; status?: string } | null
+  views?: {
+    id: string
+    view_role?: string
+    camera_axis?: string
+    status?: string
+    image_url?: string | null
+    qa?: { overall?: number | null } | null
+    qa_overall?: number | null
+  }[]
 }
 
 export interface SceneReferenceCandidate {

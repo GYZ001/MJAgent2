@@ -82,7 +82,8 @@ async def screen_appearance_changes(entries: list[dict], ep_label: str) -> dict[
     """一次调用，批量判断本集里哪些【已有定妆照】角色外观相比各自当前锚点发生【明显视觉变化】。
 
     entries: [{"name", "current_appearance", "fragments"}]（fragments 为空者会被忽略）。
-    返回 {name: {"new_appearance", "reason"}}，仅含确实变化、且给出了新锚点的角色。"""
+    返回 {name: {new_appearance, reason, change_dimensions, persistence, evidence_excerpt}}，
+    仅含确实变化、且给出了新锚点的角色。"""
     entries = [e for e in entries if (e.get("fragments") or "").strip()]
     if not entries:
         return {}
@@ -102,15 +103,21 @@ async def screen_appearance_changes(entries: list[dict], ep_label: str) -> dict[
 - 没有把握时一律判为未明显变化，避免无意义重绘。
 
 对 changed=true 的角色，给出整合后的【新外观锚点串】new_appearance：40~60 字，沿用既有锚点未变部分，只改真正变化处；保留性别年龄感/发型发色/服装款式与颜色/标志性特征。
+同时给出：
+- change_dimensions：变化维度数组，取值仅限 hair/outfit/accessory/injury/age_stage/face/body_identity
+- persistence：persistent（跨集持续）/ episode（仅本集）/ shot_only（单镜临时，不应更新人物谱）
+- evidence_excerpt：原文短片段依据
+- face/body_identity 默认禁止；仅当原文明确年龄跃迁、变身或身体永久变化时才可使用
 
-只输出一个 JSON 对象：{{"changes": [{{"name": "角色名", "changed": true/false, "new_appearance": "", "reason": "一句话依据"}}]}}"""
+只输出一个 JSON 对象：{{"changes": [{{"name": "角色名", "changed": true/false, "new_appearance": "", "change_dimensions": ["hair"], "persistence": "persistent", "reason": "一句话依据", "evidence_excerpt": "原文短片段"}}]}}"""
     raw = await model_gateway.chat(
-        [{"role": "user", "content": prompt}], temperature=0.2, max_tokens=1200,
+        [{"role": "user", "content": prompt}], temperature=0.2, max_tokens=1600,
         call_meta={"stage": "screen_appearance_changes"},
     )
     obj = extract_json(raw)
     valid = {e["name"] for e in entries}
     out: dict[str, dict] = {}
+    from app.multiview import normalize_appearance_change
     for item in (obj.get("changes") or []):
         if not isinstance(item, dict):
             continue
@@ -120,7 +127,16 @@ async def screen_appearance_changes(entries: list[dict], ep_label: str) -> dict[
         new_app = (item.get("new_appearance") or "").strip()
         if not new_app:
             continue  # 说变了却没给新锚点 → 保守沿用，不重绘
-        out[name] = {"new_appearance": new_app[:APPEARANCE_MAX], "reason": (item.get("reason") or "").strip()}
+        normalized = normalize_appearance_change({**item, "character": name, "new_appearance": new_app})
+        if normalized.get("persistence") == "shot_only":
+            continue  # 临时状态不更新人物谱
+        out[name] = {
+            "new_appearance": normalized["new_appearance"][:APPEARANCE_MAX],
+            "reason": normalized["reason"],
+            "change_dimensions": normalized["change_dimensions"],
+            "persistence": normalized["persistence"],
+            "evidence_excerpt": normalized["evidence_excerpt"],
+        }
     return out
 
 
@@ -500,10 +516,10 @@ def _update_bible_appearance(conn, project_id: str, name: str, appearance: str, 
 
 
 async def _refresh_portrait_on_drift(project_id: str, name: str, episode_no: int,
-                                     new_appearance: str, style: str, bible_version: int) -> dict | None:
-    """外观明显变化：关闭当前开区间段（ep_end=本集-1），以旧图【图生图】重绘新开区间段（ep_start=本集），
-    并把 bible 该角色锚点/参考图同步成最新。带 (project,name) 锁、幂等可并发。
-    返回 {ep_start, image_path} 或 None（已被并发处理 / 没有可切分的旧段）。"""
+                                     new_appearance: str, style: str, bible_version: int,
+                                     *, change_meta: dict | None = None) -> dict | None:
+    """外观明显变化：先在临时状态生成完整多视角包，整包 QA 通过后同一事务关闭旧区间并启用新区间。
+    返回 {ep_start, image_path, pack_status} 或 None。"""
     lock = await _card_lock(project_id, name)
     async with lock:
         conn = get_conn()
@@ -513,6 +529,7 @@ async def _refresh_portrait_on_drift(project_id: str, name: str, episode_no: int
         new_path, new_prompt = await _redraw_portrait(
             project_id, name, style, new_appearance, base_path=cur["image_path"], ep_start=episode_no)
         artifact_supported = _has_column(conn, "character_portraits", "artifact_id")
+        pack_supported = _has_column(conn, "character_portraits", "pack_status")
         artifact = None
         if artifact_supported:
             project = conn.execute(
@@ -531,7 +548,7 @@ async def _refresh_portrait_on_drift(project_id: str, name: str, episode_no: int
                     file_path=new_path,
                     content={"character_name": name, "appearance": new_appearance,
                              "prompt": new_prompt, "episode_start": episode_no,
-                             "attempt": attempt},
+                             "attempt": attempt, "change": change_meta or {}},
                     parent_artifact_ids=parent_ids,
                     qa=qa,
                 )
@@ -544,22 +561,82 @@ async def _refresh_portrait_on_drift(project_id: str, name: str, episode_no: int
                     )
             if not artifact or artifact["status"] != "approved":
                 raise hiagent.ProviderError(f"角色漂移重绘一致性检查未通过：{name}")
-        conn.execute("UPDATE character_portraits SET ep_end=? WHERE id=?", (episode_no - 1, cur["id"]))
-        if artifact_supported:
+
+        new_portrait_id = new_id("portrait")
+        change_json = json.dumps(change_meta or {}, ensure_ascii=False) if change_meta else None
+        # 先插入临时段（不关闭旧区间）；整包通过后再原子切换
+        if artifact_supported and pack_supported:
+            conn.execute(
+                "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end, appearance, "
+                "prompt, image_path, base_portrait_id, bible_version, artifact_id, pack_status, change_json, created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (new_portrait_id, project_id, name, episode_no, episode_no,  # 临时：仅占本集，未生效
+                 new_appearance, new_prompt, new_path, cur["id"], bible_version,
+                 artifact["id"] if artifact else None, "generating", change_json, now()))
+        elif artifact_supported:
             conn.execute(
                 "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end, appearance, "
                 "prompt, image_path, base_portrait_id, bible_version, artifact_id, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                (new_id("portrait"), project_id, name, episode_no, None, new_appearance,
-                 new_prompt, new_path, cur["id"], bible_version, artifact["id"], now()))
+                (new_portrait_id, project_id, name, episode_no, None, new_appearance,
+                 new_prompt, new_path, cur["id"], bible_version, artifact["id"] if artifact else None, now()))
         else:
             conn.execute(
                 "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end, appearance, "
                 "prompt, image_path, base_portrait_id, bible_version, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (new_id("portrait"), project_id, name, episode_no, None, new_appearance,
+                (new_portrait_id, project_id, name, episode_no, None, new_appearance,
                  new_prompt, new_path, cur["id"], bible_version, now()))
+        conn.commit()
+
+        pack_status = "ready"
+        if pack_supported:
+            from app.multiview import ensure_character_multiview_pack, PACK_STATUS_READY
+            pack = await ensure_character_multiview_pack(
+                project_id=project_id,
+                portrait_id=new_portrait_id,
+                character_name=name,
+                appearance=new_appearance,
+                visual_style=style,
+                ep_start=episode_no,
+                base_portrait_id=cur["id"],
+            )
+            pack_status = pack.get("status") or "failed"
+            if pack_status != PACK_STATUS_READY and pack_status != "ready":
+                # 整包失败：删除临时段，旧包继续生效；相关镜头等待人工
+                conn.execute("DELETE FROM character_portraits WHERE id=?", (new_portrait_id,))
+                conn.commit()
+                raise hiagent.ProviderError(
+                    f"角色多视角资产包未通过，无法切换造型：{name}（waiting_asset_review）"
+                )
+            # 原子切换：关闭旧区间，开放新区间
+            conn.execute("UPDATE character_portraits SET ep_end=? WHERE id=?", (episode_no - 1, cur["id"]))
+            persistence = (change_meta or {}).get("persistence") or "persistent"
+            new_ep_end = episode_no if persistence == "episode" else None
+            conn.execute(
+                "UPDATE character_portraits SET ep_end=?, pack_status=? WHERE id=?",
+                (new_ep_end, "ready", new_portrait_id),
+            )
+            # 若仅本集有效，结束后不重复付费：旧包在 episode_no+1 重新开放
+            if persistence == "episode":
+                # 旧包已关闭到 episode_no-1；本集用新包；从 episode_no+1 起需要再挂回旧造型。
+                # 用复制旧包主视角的轻量段实现无付费复用（视图可后续按需补齐）。
+                reuse_id = new_id("portrait")
+                cols = "id, project_id, character_name, ep_start, ep_end, appearance, prompt, image_path, base_portrait_id, bible_version, created_at"
+                conn.execute(
+                    f"INSERT INTO character_portraits({cols}, artifact_id, pack_status) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (reuse_id, project_id, name, episode_no + 1, None, cur["appearance"],
+                     cur["prompt"], cur["image_path"], cur["id"], bible_version, now(),
+                     cur["artifact_id"] if "artifact_id" in cur.keys() else None, "legacy_partial"),
+                )
+            conn.commit()
+        else:
+            conn.execute("UPDATE character_portraits SET ep_end=? WHERE id=?", (episode_no - 1, cur["id"]))
+            conn.commit()
+
         _update_bible_appearance(conn, project_id, name, new_appearance, new_path)
         conn.commit()
-        return {"ep_start": episode_no, "image_path": new_path}
+        return {"ep_start": episode_no, "image_path": new_path, "pack_status": pack_status,
+                "portrait_id": new_portrait_id}
 
 
 async def ensure_cards_for_screenplay(project_id: str, episode_no: int, screenplay, bible) -> dict:
@@ -635,7 +712,14 @@ async def ensure_cards_for_screenplay(project_id: str, episode_no: int, screenpl
         for name, v in verdicts.items():
             try:
                 res = await _refresh_portrait_on_drift(
-                    project_id, name, episode_no, v["new_appearance"], style, bible_version)
+                    project_id, name, episode_no, v["new_appearance"], style, bible_version,
+                    change_meta={
+                        "change_dimensions": v.get("change_dimensions") or [],
+                        "persistence": v.get("persistence") or "persistent",
+                        "reason": v.get("reason") or "",
+                        "evidence_excerpt": v.get("evidence_excerpt") or "",
+                    },
+                )
             except Exception as exc:  # noqa: BLE001 单角色重绘失败不阻断分镜
                 errors.append(f"{name}@第{episode_no}集重绘失败"
                               + code_ref(exc, action="refresh_portrait_on_drift",
@@ -702,11 +786,20 @@ def register_initial_portrait(conn, project_id: str, name: str, image_path: str,
     conn.execute("DELETE FROM character_portraits WHERE project_id=? AND character_name=?",
                  (project_id, name))
     portrait_id = new_id("portrait")
-    conn.execute(
-        "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end, appearance, "
-        "prompt, image_path, base_portrait_id, bible_version, artifact_id, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-        (portrait_id, project_id, name, 1, None, appearance, prompt, image_path, None,
-         bible_version, artifact_id, now()))
+    pack_supported = _has_column(conn, "character_portraits", "pack_status")
+    if pack_supported:
+        conn.execute(
+            "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end, appearance, "
+            "prompt, image_path, base_portrait_id, bible_version, artifact_id, pack_status, created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (portrait_id, project_id, name, 1, None, appearance, prompt, image_path, None,
+             bible_version, artifact_id, "legacy_partial", now()))
+    else:
+        conn.execute(
+            "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end, appearance, "
+            "prompt, image_path, base_portrait_id, bible_version, artifact_id, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (portrait_id, project_id, name, 1, None, appearance, prompt, image_path, None,
+             bible_version, artifact_id, now()))
     conn.commit()
     return portrait_id
 
@@ -764,6 +857,12 @@ def bible_for_episode(project_id: str, bible: "Bible", episode_no: int | None) -
         if img:
             c.ref_image_path = img
     return view
+
+
+def portrait_views_for_episode(project_id: str, name: str, episode_no: int | None, *, ready_only: bool = False):
+    """本集有效人物多视角包；供新链路使用。"""
+    from app.multiview import portrait_views_for_episode as _views
+    return _views(project_id, name, episode_no, ready_only=ready_only)
 
 
 def redraw_prompt(style: str, appearance: str) -> str:

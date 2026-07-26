@@ -33,10 +33,10 @@ REFERENCE_IMAGE_TYPES = {
 
 @dataclass
 class ReferenceImagePlan:
-    totalCount: int = 4
+    totalCount: int = 1
     reusePreviousSceneCount: int = 0
-    generateNewCount: int = 4
-    types: list[str] = field(default_factory=lambda: ["character", "scene", "plot_key_frame"])
+    generateNewCount: int = 1
+    types: list[str] = field(default_factory=lambda: ["plot_key_frame"])
     # 模型按剧本/分镜为每张「新生成」参考图给出的提示词，元素形如 {"type": str, "prompt": str}。
     # 为空时回退到 reference_generation_prompt 的模板提示词。
     prompts: list[dict[str, str]] = field(default_factory=list)
@@ -70,6 +70,16 @@ class ReferenceImageAsset:
     rejectReason: str | None = None
     qa: dict[str, Any] | None = None
     deleted: bool = False  # 用户在素材画廊里手动废弃 → 不再喂给模型
+    # 多视角 / 用途 / 库资产溯源
+    entity_type: str | None = None
+    entity_name: str | None = None
+    library_revision_id: str | None = None
+    library_view_id: str | None = None
+    view_role: str | None = None
+    purposes: list[str] = field(default_factory=list)
+    required: bool = False
+    slot_key: str | None = None
+    dependency_manifest: dict[str, Any] | None = None
 
     def public_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -193,13 +203,27 @@ def _hard_failures_of(asset: ReferenceImageAsset) -> list[Any]:
     qa = asset.qa or {}
     raw = qa.get("hard_failures")
     if isinstance(raw, list) and raw:
-        return raw
-    issues = qa.get("issues") or []
-    if not isinstance(issues, list):
-        return []
-    # 仅把明显硬伤词视为一票否决因子；普通 issues 不压 hard_multiplier
-    markers = ("watermark", "水印", "broken", "畸形", "extra limb", "多余肢体", "logo", "字幕", "subtitle")
-    return [x for x in issues if any(m in str(x).lower() for m in markers)]
+        items = [str(x) for x in raw if str(x).strip()]
+    else:
+        issues = qa.get("issues") or []
+        if not isinstance(issues, list):
+            return []
+        # 仅把明显硬伤词视为一票否决因子；普通 issues 不压 hard_multiplier
+        markers = ("broken", "畸形", "extra limb", "多余肢体", "severe_anatomy",
+                   "wrong_identity", "duplicate_character", "action_missing")
+        items = [x for x in issues if any(m in str(x).lower() for m in markers)]
+    from app.multiview import watermark_qa_mode
+    if watermark_qa_mode() == "ignore_unless_occluding":
+        cleaned = []
+        for item in items:
+            s = str(item).lower()
+            if "watermark" in s or "水印" in s or s in {"logo", "字幕", "subtitle"}:
+                if "occlusion" in s or "遮挡" in s or "subject_occlusion" in s:
+                    cleaned.append("subject_occlusion")
+                continue
+            cleaned.append(item)
+        return cleaned
+    return items
 
 
 def recompose_asset_score(asset: ReferenceImageAsset, *, consistency: float | None = None,
@@ -326,10 +350,18 @@ class ShotVideoModeSelector:
 
 
 def default_reference_decision() -> ShotVideoModeDecision:
-    plan = ReferenceImagePlan()
+    from app.multiview import narrative_keyframe_required
+    plan = ReferenceImagePlan(
+        totalCount=1,
+        generateNewCount=1,
+        types=["plot_key_frame"],
+    )
+    reason = "已固定使用参考图模式；每镜生成 1 张必需叙事关键帧。"
+    if not narrative_keyframe_required():
+        reason = "已固定使用参考图模式生成视频。"
     return ShotVideoModeDecision(
         mode=REFERENCE_IMAGE_MODE,
-        reason="已固定使用参考图模式生成视频。",
+        reason=reason,
         confidence=1.0,
         needGenerateNewReferences=plan.generateNewCount > 0,
         referenceImagePlan=plan,
@@ -380,7 +412,11 @@ def reference_image_path(project_id: str, episode_no: int, shot_no: int, ref_typ
 def _asset_from_path(*, path: str, ref_type: str, source: str, shot_id: str | None = None,
                      episode_id: str | None = None, scene_id: str | None = None,
                      related_character_ids: list[str] | None = None,
-                     quality_score: float | None = None, qa: dict[str, Any] | None = None) -> ReferenceImageAsset:
+                     quality_score: float | None = None, qa: dict[str, Any] | None = None,
+                     entity_type: str | None = None, entity_name: str | None = None,
+                     library_revision_id: str | None = None, library_view_id: str | None = None,
+                     view_role: str | None = None, purposes: list[str] | None = None,
+                     required: bool = False, slot_key: str | None = None) -> ReferenceImageAsset:
     return ReferenceImageAsset(
         id=new_id("ref"),
         url=hiagent.data_url_from_file(path),
@@ -393,6 +429,14 @@ def _asset_from_path(*, path: str, ref_type: str, source: str, shot_id: str | No
         relatedCharacterIds=related_character_ids or [],
         qualityScore=quality_score,
         qa=qa,
+        entity_type=entity_type,
+        entity_name=entity_name,
+        library_revision_id=library_revision_id,
+        library_view_id=library_view_id,
+        view_role=view_role,
+        purposes=list(purposes or []),
+        required=required,
+        slot_key=slot_key,
     )
 
 
@@ -404,13 +448,57 @@ def reusable_previous_assets(conn: Any, *, prev_shot: Any | None, limit: int, th
 def character_reference_assets(bible: Bible, character_names: list[str], *, limit: int,
                                project_id: str | None = None,
                                episode_no: int | None = None) -> list[ReferenceImageAsset]:
+    """人物库图作为 keyframe_seed + qa_anchor；默认不直接 video_input。"""
+    from app.multiview import (
+        PURPOSE_KEYFRAME_SEED, PURPOSE_QA_ANCHOR, portrait_views_for_episode,
+        character_multiview_enabled,
+    )
     assets: list[ReferenceImageAsset] = []
     by_name = {c.name: c for c in bible.characters}
     for name in character_names:
         if len(assets) >= limit:
             break
         c = by_name.get(name)
-        # 按集号选用人物谱分段定妆照（覆盖该集的版本），未命中回退到初始 ref_image_path。
+        views = []
+        if c is not None and project_id is not None and character_multiview_enabled():
+            views = portrait_views_for_episode(project_id, name, episode_no, ready_only=True)
+        if views:
+            # 优先 front_full，其次任意 ready 视角
+            preferred = next((v for v in views if v.get("view_role") == "front_full"), views[0])
+            path = preferred.get("image_path")
+            qa = None
+            if preferred.get("qa_json"):
+                try:
+                    qa = json.loads(preferred["qa_json"])
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    qa = None
+            score = None
+            if isinstance(qa, dict) and qa.get("overall") is not None:
+                try:
+                    score = float(qa["overall"])
+                except (TypeError, ValueError):
+                    score = None
+            if not path or not Path(path).exists():
+                continue
+            try:
+                assets.append(_asset_from_path(
+                    path=path,
+                    ref_type="character",
+                    source="asset_library",
+                    related_character_ids=[name],
+                    quality_score=score,
+                    qa=qa or {"status": "unverified", "overall": None, "issues": ["人物库图缺少 QA"]},
+                    entity_type="character",
+                    entity_name=name,
+                    library_revision_id=preferred.get("portrait_id"),
+                    library_view_id=preferred.get("id"),
+                    view_role=preferred.get("view_role"),
+                    purposes=[PURPOSE_KEYFRAME_SEED, PURPOSE_QA_ANCHOR],
+                ))
+            except OSError:
+                continue
+            continue
+        # 回退单图
         path = None
         if c is not None and project_id is not None:
             from app.portraits import portrait_for_episode
@@ -425,8 +513,12 @@ def character_reference_assets(bible: Bible, character_names: list[str], *, limi
                 ref_type="character",
                 source="asset_library",
                 related_character_ids=[name],
-                quality_score=1.0,
-                qa={"overall": 1.0, "issues": []},
+                quality_score=None,
+                qa={"status": "unverified", "overall": None, "issues": ["旧单图无分项 QA"]},
+                entity_type="character",
+                entity_name=name,
+                view_role="front_full",
+                purposes=[PURPOSE_KEYFRAME_SEED, PURPOSE_QA_ANCHOR],
             ))
         except OSError:
             continue
@@ -435,10 +527,37 @@ def character_reference_assets(bible: Bible, character_names: list[str], *, limi
 
 def scene_reference_assets(bible: Bible, scene_name: str, *, project_id: str | None = None,
                            episode_no: int | None = None) -> list[ReferenceImageAsset]:
-    """该镜场景的场景库图 →[ReferenceImageAsset]（ref_type="scene"，环境真值锚点）。
-    同一规范场景的所有镜头、所有集都取同一张图（按集分段），保证场景跨镜/跨集一致。"""
+    """该镜场景的场景库图 →[ReferenceImageAsset]（环境真值锚点；默认 keyframe_seed+qa_anchor）。"""
+    from app.multiview import (
+        PURPOSE_KEYFRAME_SEED, PURPOSE_QA_ANCHOR, scene_views_for_episode, scene_multiview_enabled,
+    )
     if not scene_name:
         return []
+    if project_id and scene_multiview_enabled():
+        views = scene_views_for_episode(project_id, scene_name, episode_no, ready_only=True)
+        if views:
+            preferred = next((v for v in views if v.get("view_role") == "establishing"), views[0])
+            path = preferred.get("image_path")
+            qa = None
+            if preferred.get("qa_json"):
+                try:
+                    qa = json.loads(preferred["qa_json"])
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    qa = None
+            score = float(qa["overall"]) if isinstance(qa, dict) and qa.get("overall") is not None else None
+            if path and Path(path).exists():
+                try:
+                    return [_asset_from_path(
+                        path=path, ref_type="scene", source="asset_library",
+                        quality_score=score, qa=qa or {"status": "unverified", "overall": None},
+                        entity_type="scene", entity_name=scene_name,
+                        library_revision_id=preferred.get("scene_reference_id"),
+                        library_view_id=preferred.get("id"),
+                        view_role=preferred.get("view_role"),
+                        purposes=[PURPOSE_KEYFRAME_SEED, PURPOSE_QA_ANCHOR],
+                    )]
+                except OSError:
+                    pass
     from app.scenes import scene_ref_for_episode, scene_ref_qa_for_episode
     path = scene_ref_for_episode(project_id, scene_name, episode_no) if project_id else None
     if not path:
@@ -448,10 +567,14 @@ def scene_reference_assets(bible: Bible, scene_name: str, *, project_id: str | N
     if not path or not Path(path).exists():
         return []
     qa = scene_ref_qa_for_episode(project_id, scene_name, episode_no) if project_id else None
-    score = float(qa.get("overall", 1.0)) if isinstance(qa, dict) and qa.get("overall") is not None else 1.0
+    score = float(qa.get("overall")) if isinstance(qa, dict) and qa.get("overall") is not None else None
     try:
-        return [_asset_from_path(path=path, ref_type="scene", source="asset_library",
-                                 quality_score=score, qa=qa or {"overall": score, "issues": []})]
+        return [_asset_from_path(
+            path=path, ref_type="scene", source="asset_library",
+            quality_score=score, qa=qa or {"status": "unverified", "overall": None},
+            entity_type="scene", entity_name=scene_name, view_role="establishing",
+            purposes=[PURPOSE_KEYFRAME_SEED, PURPOSE_QA_ANCHOR],
+        )]
     except OSError:
         return []
 
@@ -652,14 +775,25 @@ async def review_reference_consistency(*, candidates: list[ReferenceImageAsset],
             issues = [str(x).strip() for x in (item.get("issues") or []) if str(x).strip()]
             out.append({"asset_id": cand.id, "consistency": cs, "drift": drift, "issues": issues})
     covered = {o["asset_id"] for o in out}
-    for c, _ in cand_pairs:  # 模型漏报的候选默认达标，不误删
+    for c, _ in cand_pairs:  # 模型漏报的候选 → unverified，不得伪装满分
         if c.id not in covered:
-            out.append({"asset_id": c.id, "consistency": 1.0, "drift": [], "issues": []})
+            out.append({
+                "asset_id": c.id,
+                "consistency": None,
+                "drift": [],
+                "issues": ["consistency_unreported"],
+                "check_failed": True,
+            })
     try:
-        overall = max(0.0, min(1.0, float(data.get("overall"))))
+        vals = [o["consistency"] for o in out if o.get("consistency") is not None]
+        overall = max(0.0, min(1.0, float(data.get("overall")))) if vals else None
+        if overall is None and vals:
+            overall = round(sum(vals) / len(vals), 3)
     except (TypeError, ValueError):
-        overall = round(sum(o["consistency"] for o in out) / len(out), 3) if out else 1.0
-    return {"candidates": out, "overall": overall, "failed": False}
+        vals = [o["consistency"] for o in out if o.get("consistency") is not None]
+        overall = round(sum(vals) / len(vals), 3) if vals else None
+    failed = any(o.get("check_failed") or o.get("consistency") is None for o in out)
+    return {"candidates": out, "overall": overall, "failed": failed}
 
 
 async def _generate_one_reference(*, project_id: str, episode_no: int, shot: Shot, bible: Bible,
@@ -804,10 +938,7 @@ async def write_reference_prompt(shot: Shot, bible: Bible, ref_type: str, *, int
 
 
 _SLOT_ROLE_CYCLE = [
-    ("identity_action", "character"),
-    ("environment", "scene"),
-    ("action_key", "plot_key_frame"),
-    ("emotion_composition", "plot_key_frame"),
+    ("narrative_keyframe", "plot_key_frame"),
 ]
 
 
@@ -1195,14 +1326,43 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
                                  allow_missing_continuity_tail: bool = False,
                                  job_id: str | None = None,
                                  existing_meta: dict[str, Any] | None = None) -> list[ReferenceImageAsset]:
+    from app.multiview import (
+        PURPOSE_KEYFRAME_SEED, PURPOSE_QA_ANCHOR, PURPOSE_VIDEO_INPUT,
+        NARRATIVE_KEYFRAME_SLOT, resolve_shot_asset_dependencies, keyframe_seed_paths,
+        library_anchor_assets_from_manifest, review_keyframe_with_evidence, keyframe_gate_passed,
+        narrative_keyframe_required, complete_legacy_character_pack, complete_legacy_scene_pack,
+    )
     plan = decision.referenceImagePlan
-    threshold = quality_threshold()
     max_refs = max_reference_images()
     existing_meta = existing_meta or {}
     slot_state: dict[str, Any] = dict(existing_meta.get("reference_slots") or {})
 
+    # 冻结依赖 manifest：已冻结则复用，避免 worker 重启后重新选最新人物图
+    frozen_manifest = existing_meta.get("reference_manifest")
+    if existing_meta.get("reference_manifest_frozen") and isinstance(frozen_manifest, dict):
+        manifest = frozen_manifest
+    else:
+        # 进入本集生产前按需补齐 legacy_partial 缺失视角
+        style = bible.world.visual_style_canonical
+        for name in list(shot.characters or []):
+            try:
+                await complete_legacy_character_pack(project_id, name, episode_no, style)
+            except Exception:  # noqa: BLE001
+                pass
+        scene_name = getattr(shot, "scene_name", "") or ""
+        if scene_name:
+            try:
+                await complete_legacy_scene_pack(project_id, scene_name, episode_no, style)
+            except Exception:  # noqa: BLE001
+                pass
+        manifest = resolve_shot_asset_dependencies(
+            project_id=project_id, episode_no=episode_no, shot_id=shot_id, shot=shot,
+            scene_name=scene_name or None,
+        )
+        existing_meta["reference_manifest"] = manifest
+        existing_meta["reference_manifest_frozen"] = True
+
     # 只有 action_continuation 才把上一镜尾帧作为强制参考图和剪辑点连贯锚点。
-    # 不受 plan.reusePreviousSceneCount 计数与 QA 阈值限制；放在最前、确保不被裁掉。
     forced: list[ReferenceImageAsset] = []
     from app.continuity import derive_continuity_mode, uses_previous_tail_frame
     needs_tail = uses_previous_tail_frame(derive_continuity_mode(shot))
@@ -1216,76 +1376,94 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
             ref_dir = reference_image_path(project_id, episode_no, shot.shot_no, "previous_shot_frame", 0).parent
             tail = previous_tail_reference_asset(conn, prev, dest_dir=ref_dir)
             if tail:
+                tail.purposes = [PURPOSE_VIDEO_INPUT, PURPOSE_QA_ANCHOR]
+                tail.required = True
+                tail.entity_type = "continuity"
                 forced.append(tail)
             elif not allow_missing_continuity_tail:
-                # 旧行为：缺尾帧仍继续静态准备
                 pass
 
-    # 期望新生成的关键帧参考图数量：模型计划值与「每镜最少生成数」取大者（仅参考图模式），保证每镜都有生成图。
-    min_gen = min_generated_references() if decision.mode == REFERENCE_IMAGE_MODE else 0
-    want_gen = max(int(plan.generateNewCount or 0), min_gen)
+    # 每镜必需 1 张叙事关键帧
+    min_gen = max(min_generated_references(), 1 if narrative_keyframe_required() else 0)
+    if decision.mode == REFERENCE_IMAGE_MODE:
+        want_gen = max(int(plan.generateNewCount or 0), min_gen)
+    else:
+        want_gen = 0
 
-    # P2：质量角色自适应——定妆照/场景/尾帧已覆盖的角色可少生成（实验开关）
-    if role_adaptive_enabled() and decision.mode == REFERENCE_IMAGE_MODE:
-        covered = 0
-        if forced:
-            covered += 1  # continuity
-        # 场景与定妆在后面注入；这里先按计划保留，生成后再裁
-        want_gen = max(min_gen, min(want_gen, 4 - min(covered, 2)))
+    # 证据锚点（人物/场景多视角）进入画廊但不默认挤占 video_input 名额
+    evidence_assets: list[ReferenceImageAsset] = []
+    for anchor in library_anchor_assets_from_manifest(manifest):
+        path = anchor.get("image_path")
+        if not path or not Path(path).exists():
+            continue
+        try:
+            evidence_assets.append(_asset_from_path(
+                path=path,
+                ref_type=anchor.get("type") or "character",
+                source="asset_library",
+                related_character_ids=[anchor["entity_name"]] if anchor.get("entity_type") == "character" else None,
+                quality_score=None,
+                qa={"status": "library", "overall": None, "issues": []},
+                entity_type=anchor.get("entity_type"),
+                entity_name=anchor.get("entity_name"),
+                library_revision_id=anchor.get("library_revision_id"),
+                library_view_id=anchor.get("library_view_id"),
+                view_role=anchor.get("view_role"),
+                purposes=list(anchor.get("purposes") or [PURPOSE_KEYFRAME_SEED, PURPOSE_QA_ANCHOR]),
+            ))
+        except OSError:
+            continue
 
-    # 先给强制连贯帧 + 生成位预留名额，剩余名额才给定妆照/复用帧，避免它们把生成位挤掉（否则只剩定妆照）。
-    reserve_for_gen = min(want_gen, max(0, max_refs - len(forced)))
-    non_gen_budget = max(0, max_refs - len(forced) - reserve_for_gen)
+    # 兼容旧路径：若 manifest 无锚点，回退 scene/character helpers
+    scene_assets = scene_reference_assets(
+        bible, getattr(shot, "scene_name", "") or "", project_id=project_id, episode_no=episode_no,
+    )
+    if not any(a.entity_type == "scene" for a in evidence_assets):
+        evidence_assets.extend(scene_assets)
+    char_assets = character_reference_assets(
+        bible, shot.characters, limit=max(1, len(shot.characters)),
+        project_id=project_id, episode_no=episode_no,
+    )
+    if not any(a.entity_type == "character" for a in evidence_assets):
+        evidence_assets.extend(char_assets)
 
     selected: list[ReferenceImageAsset] = list(forced)
-    # 场景库图（环境锚点）：同一规范场景跨镜/跨集复用同一张图，与定妆照同档优先注入。
-    scene_assets = scene_reference_assets(bible, getattr(shot, "scene_name", "") or "",
-                                          project_id=project_id, episode_no=episode_no)
-    selected.extend(scene_assets[:max(0, non_gen_budget)])
-    char_budget = max(0, non_gen_budget - len(scene_assets[:non_gen_budget]))
-    selected.extend(character_reference_assets(bible, shot.characters, limit=min(len(shot.characters), char_budget),
-                                               project_id=project_id, episode_no=episode_no))
-    selected = _dedupe_assets(selected)
-    remaining_reuse = max(0, plan.reusePreviousSceneCount)
-    room_for_reuse = max(0, max_refs - len(selected) - reserve_for_gen)
-    if remaining_reuse and room_for_reuse:
-        selected.extend(reusable_previous_assets(
-            conn, prev_shot=prev_shot, limit=min(remaining_reuse, room_for_reuse), threshold=threshold))
-
-    selected = _dedupe_assets(selected)[:max_refs]
-    room = max(0, max_refs - len(selected))
-    generated_needed = min(want_gen, room)
-
-    # P1-3：槽位级恢复——已通过槽位不重复生成
-    passed_slots = {
-        k: v for k, v in slot_state.items()
-        if isinstance(v, dict) and v.get("status") == "passed" and v.get("path")
-    }
+    # 证据锚点暂不计入 selectedForSeedance；稍后合并进画廊
+    reserve_for_gen = min(want_gen, max(0, max_refs - len(forced)))
+    generated_needed = reserve_for_gen
 
     def _publish_progress() -> None:
         if on_progress is None:
             return
-        for asset in selected:
-            asset.selectedForSeedance = True
+        gallery = _dedupe_assets(list(selected) + list(evidence_assets))
+        for asset in gallery:
             asset.shotId = asset.shotId or shot_id
             asset.episodeId = asset.episodeId or episode_id
+            # 仅 video_input 用途默认选中
+            if PURPOSE_VIDEO_INPUT in (asset.purposes or []) or asset.type == "previous_shot_frame":
+                asset.selectedForSeedance = not asset.deleted and asset.rejectReason is None
+            else:
+                asset.selectedForSeedance = False
         visible_rejected = rejected_out or []
         for asset in visible_rejected:
             asset.selectedForSeedance = False
             asset.shotId = asset.shotId or shot_id
             asset.episodeId = asset.episodeId or episode_id
-        on_progress(list(selected), list(visible_rejected))
+        on_progress(list(gallery), list(visible_rejected))
 
     _publish_progress()
 
     type_cycle = [t for t in plan.types if t in REFERENCE_IMAGE_TYPES and t not in {"previous_shot_frame"}] or ["plot_key_frame"]
     model_specs = [p for p in (plan.prompts or []) if p.get("prompt")]
     specs: list[tuple[str, str, str | None]] = []  # slot_key, ref_type, prompt
+    passed_slots = {
+        k: v for k, v in slot_state.items()
+        if isinstance(v, dict) and v.get("status") == "passed" and v.get("path")
+    }
     for i in range(generated_needed):
         role = _SLOT_ROLE_CYCLE[i % len(_SLOT_ROLE_CYCLE)]
         slot_key = role[0] if i < len(_SLOT_ROLE_CYCLE) else f"extra_{i}"
         if slot_key in passed_slots:
-            # 复用已通过槽位
             prev = passed_slots[slot_key]
             path = prev.get("path")
             if path and Path(path).exists():
@@ -1293,9 +1471,14 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
                     path=path,
                     ref_type=prev.get("type") or role[1],
                     source="seedream_generated",
-                    quality_score=float(prev.get("quality_score") or 1.0),
-                    qa=prev.get("qa") or {"overall": 1.0, "resumed": True},
+                    quality_score=float(prev.get("quality_score") or 0.0) if prev.get("quality_score") is not None else None,
+                    qa=prev.get("qa") or {"overall": None, "status": "unverified", "resumed": True},
+                    purposes=[PURPOSE_VIDEO_INPUT, PURPOSE_QA_ANCHOR],
+                    required=True,
+                    slot_key=slot_key,
+                    entity_type="shot",
                 )
+                asset.dependency_manifest = manifest
                 selected.append(asset)
                 continue
         if i < len(model_specs):
@@ -1304,7 +1487,6 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
         else:
             specs.append((slot_key, type_cycle[i % len(type_cycle)], None))
 
-    # 提示词：批量合同或逐图异步
     if specs and batch_prompt_enabled():
         prompts = await write_reference_prompt_batch(
             shot, bible, [(s, t) for s, t, _ in specs],
@@ -1325,13 +1507,24 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
         resolved = await asyncio.gather(*[_resolve(t, o) for _, t, o in specs])
         specs = [(specs[i][0], specs[i][1], resolved[i]) for i in range(len(specs))]
 
-    portrait_seeds = _portrait_seed_inputs(bible, shot.characters, project_id=project_id, episode_no=episode_no)
+    # 关键帧种子：优先用本镜选中的人物/场景视角
+    seed_paths = keyframe_seed_paths(manifest)
+    portrait_seeds = []
+    for p in seed_paths:
+        try:
+            portrait_seeds.append(hiagent.data_url_from_file(p))
+        except OSError:
+            continue
+    if not portrait_seeds:
+        portrait_seeds = _portrait_seed_inputs(bible, shot.characters, project_id=project_id, episode_no=episode_no)
     env_seeds = [a.url for a in forced if a.type == "previous_shot_frame" and a.url]
-    env_seeds += [a.url for a in scene_assets if a.url]
+    env_seeds += [a.url for a in evidence_assets if a.type == "scene" and a.url]
 
     def _seeds_for(ref_type: str) -> list[str]:
         seeds = (portrait_seeds + env_seeds) if ref_type in {"character", "plot_key_frame"} else list(env_seeds)
         return _dedupe_str(seeds)
+
+    visual_anchors = library_anchor_assets_from_manifest(manifest)
 
     if specs:
         async def _run_one(slot_key: str, ref_type: str, override: str | None, index: int):
@@ -1339,7 +1532,7 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
                 project_id=project_id, episode_no=episode_no, shot=shot, bible=bible,
                 ref_type=ref_type, index=index, content_override=override,
                 retries=reference_gen_retries(), seed_inputs=_seeds_for(ref_type),
-                skip_inline_qa=batch_qa_enabled())
+                skip_inline_qa=True)  # 统一走证据化 QA
             return slot_key, asset, discarded, rej
 
         wrapped = [
@@ -1352,59 +1545,77 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
             if rejection_details is not None:
                 rejection_details.extend(rej)
             if asset is not None:
+                asset.slot_key = slot_key
+                asset.required = slot_key == NARRATIVE_KEYFRAME_SLOT or asset.type == "plot_key_frame"
+                asset.entity_type = "shot"
+                asset.purposes = [PURPOSE_VIDEO_INPUT, PURPOSE_QA_ANCHOR]
+                asset.dependency_manifest = manifest
                 selected.append(asset)
                 slot_state[slot_key] = {
-                    "status": "qa_pending" if batch_qa_enabled() else "passed",
+                    "status": "qa_pending",
                     "type": asset.type,
                     "path": asset.path,
                     "quality_score": asset.qualityScore,
                     "qa": asset.qa,
                 }
-                if batch_qa_enabled():
-                    pending_qa.append((slot_key, asset.type, asset))
-                else:
-                    slot_state[slot_key]["status"] = "passed" if not asset.rejectReason else "rejected"
+                pending_qa.append((slot_key, asset.type, asset))
             if rejected_out is not None:
                 rejected_out.extend(discarded)
             if existing_meta is not None:
                 existing_meta["reference_slots"] = slot_state
             _publish_progress()
 
-        # P1-2：批量 QA；缺项回退单图
-        if pending_qa and batch_qa_enabled():
-            b64_items = []
+        if pending_qa:
             for slot_key, ref_type, asset in pending_qa:
-                if asset.path and Path(asset.path).exists():
-                    try:
-                        b64_items.append((slot_key, ref_type, hiagent.encode_image_file(asset.path)))
-                    except OSError:
-                        continue
-            report = await review_reference_images_batch(b64_items, shot=shot, bible=bible)
-            by_slot = {it.get("slot"): it for it in report.get("items") or []}
-            for slot_key, ref_type, asset in pending_qa:
-                it = by_slot.get(slot_key) or {}
-                if it.get("missing") or report.get("failed"):
-                    qa = await review_reference_image(
-                        hiagent.encode_image_file(asset.path), shot=shot, bible=bible, ref_type=ref_type,
+                if not asset.path or not Path(asset.path).exists():
+                    asset.qa = {"status": "unverified", "overall": None, "issues": ["关键帧文件缺失"]}
+                    asset.qualityScore = None
+                    asset.selectedForSeedance = False
+                    asset.rejectReason = "unverified"
+                    if rejected_out is not None and asset not in rejected_out:
+                        rejected_out.append(asset)
+                    if asset in selected:
+                        selected.remove(asset)
+                    continue
+                try:
+                    b64 = hiagent.encode_image_file(asset.path)
+                except OSError:
+                    asset.qa = {"status": "unverified", "overall": None, "issues": ["关键帧无法读取"]}
+                    asset.rejectReason = "unverified"
+                    continue
+                if ref_type == "plot_key_frame" or slot_key == NARRATIVE_KEYFRAME_SLOT:
+                    qa = await review_keyframe_with_evidence(
+                        b64, shot=shot, bible=bible, visual_anchors=visual_anchors, ref_type=ref_type,
                     )
-                    overall = float(qa.get("overall") or 0)
                 else:
-                    overall = float(it.get("overall") or 0)
-                    qa = {
-                        "overall": overall,
-                        "character_match": it.get("identity_consistency"),
-                        "scene_match": it.get("scene_consistency"),
-                        "issues": it.get("hard_failures") or [],
-                        "repair_instruction": it.get("repair_instruction"),
-                        "batch_qa": True,
-                    }
+                    qa = await review_reference_image(b64, shot=shot, bible=bible, ref_type=ref_type)
+                    qa.setdefault("status", "scored")
                 asset.qa = qa
+                if qa.get("status") == "unverified" or qa.get("overall") is None:
+                    asset.qualityScore = None
+                    asset.selectedForSeedance = False
+                    asset.rejectReason = "unverified"
+                    if rejected_out is not None and asset not in rejected_out:
+                        rejected_out.append(asset)
+                    if asset in selected:
+                        selected.remove(asset)
+                    slot_state[slot_key] = {
+                        **(slot_state.get(slot_key) or {}),
+                        "status": "unverified", "qa": qa,
+                    }
+                    continue
+                overall = float(qa.get("overall") or 0)
                 asset.qualityScore = overall
                 if "absolute_quality" not in qa:
                     qa["absolute_quality"] = overall
                     asset.qa = qa
                 recompose_asset_score(asset)
-                if not apply_keep_gate(asset):
+                passed = keyframe_gate_passed(qa) if (
+                    ref_type == "plot_key_frame" or slot_key == NARRATIVE_KEYFRAME_SLOT
+                ) else apply_keep_gate(asset)
+                if not passed:
+                    asset.selectedForSeedance = False
+                    asset.rejectReason = asset.rejectReason or "quality_below_threshold"
                     if rejected_out is not None and asset not in rejected_out:
                         rejected_out.append(asset)
                     if asset in selected:
@@ -1414,6 +1625,10 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
                         "status": "rejected", "qa": asset.qa, "quality_score": asset.qualityScore,
                     }
                 else:
+                    asset.selectedForSeedance = True
+                    asset.rejectReason = None
+                    if PURPOSE_VIDEO_INPUT not in asset.purposes:
+                        asset.purposes = list(asset.purposes or []) + [PURPOSE_VIDEO_INPUT]
                     slot_state[slot_key] = {
                         **(slot_state.get(slot_key) or {}),
                         "status": "passed", "qa": asset.qa, "quality_score": asset.qualityScore,
@@ -1423,7 +1638,7 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
                 existing_meta["reference_slots"] = slot_state
             _publish_progress()
 
-    # Phase 2：整组相对一致性检查
+    # Phase 2：整组相对一致性检查（仅对 video_input 候选）
     if job_id:
         try:
             from app.media_pipeline import stages as media_stages
@@ -1431,17 +1646,42 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
             set_pipeline_stage(job_id, media_stages.STAGE_REFERENCE_CONSISTENCY)
         except Exception:  # noqa: BLE001
             pass
-    selected = await _enforce_reference_consistency(
-        selected=selected, shot=shot, bible=bible, project_id=project_id, episode_no=episode_no,
+    video_candidates = [a for a in selected if PURPOSE_VIDEO_INPUT in (a.purposes or []) or a.type == "previous_shot_frame"]
+    video_candidates = await _enforce_reference_consistency(
+        selected=video_candidates, shot=shot, bible=bible, project_id=project_id, episode_no=episode_no,
         rejection_details=rejection_details, rejected_out=rejected_out)
 
-    selected = _dedupe_assets(selected)
-    selected = _finalize_reference_selection(
-        selected, rejected_out=rejected_out, rejection_details=rejection_details)
-    for asset in selected:
+    video_candidates = _dedupe_assets(video_candidates)
+    video_candidates = _finalize_reference_selection(
+        video_candidates, rejected_out=rejected_out, rejection_details=rejection_details)
+
+    # 必需关键帧门禁：未验证/缺失时默认阻止（由调用方检查 reference_group_gate）
+    has_keyframe = any(
+        (a.type == "plot_key_frame" or a.slot_key == NARRATIVE_KEYFRAME_SLOT)
+        and not a.deleted and a.qa and a.qa.get("status") != "unverified"
+        and a.qa.get("overall") is not None
+        for a in video_candidates
+    )
+    if narrative_keyframe_required() and not has_keyframe:
+        existing_meta["narrative_keyframe_missing"] = True
+        existing_meta["reference_group_gate_passed"] = False
+    else:
+        existing_meta["narrative_keyframe_missing"] = False
+
+    for asset in video_candidates:
+        if PURPOSE_VIDEO_INPUT not in (asset.purposes or []):
+            asset.purposes = list(asset.purposes or []) + [PURPOSE_VIDEO_INPUT]
         asset.selectedForSeedance = True
         asset.shotId = asset.shotId or shot_id
         asset.episodeId = asset.episodeId or episode_id
+
+    # 合并证据锚点进画廊（不选中为 video_input，除非显式加入）
+    gallery = _dedupe_assets(list(video_candidates) + list(evidence_assets))
+    for asset in gallery:
+        asset.shotId = asset.shotId or shot_id
+        asset.episodeId = asset.episodeId or episode_id
+        if PURPOSE_VIDEO_INPUT not in (asset.purposes or []) and asset.type != "previous_shot_frame":
+            asset.selectedForSeedance = False
     if rejected_out is not None:
         for asset in rejected_out:
             asset.selectedForSeedance = False
@@ -1449,8 +1689,10 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
             asset.episodeId = asset.episodeId or episode_id
     if existing_meta is not None:
         existing_meta["reference_slots"] = slot_state
+        existing_meta["reference_manifest"] = manifest
+        existing_meta["reference_manifest_frozen"] = True
     _publish_progress()
-    return selected
+    return gallery
 
 
 async def assemble_continuity_tail(
@@ -1586,35 +1828,24 @@ def _finalize_reference_selection(
 
 def pack_reference_images_for_seedance(
     refs: list[dict[str, Any]], *, max_images: int | None = None,
+    continuity_required: bool = False,
 ) -> list[dict[str, Any]]:
-    """按综合分 Top-N 装箱喂模型；不改 selectedForSeedance。含人物图受偏好上限约束。"""
-    usable = [r for r in refs if r.get("selectedForSeedance") and not r.get("deleted")]
+    """必需用途优先装箱；分数只在同类候选内排序。关键帧不会被高分定妆照挤掉。"""
+    from app.multiview import pack_references_by_purpose, PURPOSE_VIDEO_INPUT, purpose_list
+    usable = []
+    for r in refs:
+        if r.get("deleted"):
+            continue
+        purposes = purpose_list(r)
+        if PURPOSE_VIDEO_INPUT in purposes or r.get("selectedForSeedance"):
+            usable.append(r)
     if not usable:
         return []
     limit = max_images if max_images is not None else max_reference_images()
     char_limit = max_character_reference_images()
-
-    def _score(r: dict[str, Any]) -> float:
-        try:
-            if r.get("qualityScore") is not None:
-                return float(r["qualityScore"])
-            qa = r.get("qa") or {}
-            return float(qa.get("overall") or 0.0)
-        except (TypeError, ValueError):
-            return 0.0
-
-    ordered = sorted(usable, key=_score, reverse=True)
-    packed: list[dict[str, Any]] = []
-    char_count = 0
-    for ref in ordered:
-        if len(packed) >= limit:
-            break
-        if _is_character_bearing_ref(ref):
-            if char_count >= char_limit:
-                continue
-            char_count += 1
-        packed.append(ref)
-    return packed
+    return pack_references_by_purpose(
+        usable, max_images=limit, continuity_required=continuity_required, char_limit=char_limit,
+    )
 
 
 def _dedupe_assets(assets: list[ReferenceImageAsset]) -> list[ReferenceImageAsset]:

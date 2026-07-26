@@ -288,7 +288,7 @@ function PortraitBlock({ projectId, character: c, disabled, onChanged, regenerat
             <button className="btn small" disabled={disabled || saving}
               onClick={() => setDraft(c.portrait_prompt_override || c.portrait_prompt_effective || '')}>改画像描述</button>
             <button className="btn small" disabled={disabled || saving} onClick={regenerate}>
-              {c.ref_image_url ? '重新定妆' : '单独定妆'}
+              {c.ref_image_url ? '重新生成当前造型包' : '单独生成造型包'}
             </button>
           </div>
         </>
@@ -316,11 +316,19 @@ function portraitVersionLabel(portrait: Portrait): string {
   return `第${portrait.ep_start}集更新`
 }
 
+const VIEW_ROLE_LABELS: Record<string, string> = {
+  front_full: '正面全身',
+  three_quarter: '3/4 面',
+  profile: '侧面',
+  back_full: '背面全身',
+  face_closeup: '面部特写',
+}
+
 function CharacterPortraitGallery({ character, fitting }: { character: Character; fitting: boolean }) {
   const trackRef = useRef<HTMLDivElement>(null)
   // 当前版本排在第一张；旧图只是定妆版本历史，不代表对应集数已经投入生产。
   const portraits = [...(character.portraits ?? [])]
-    .filter(portrait => !!portrait.image_url)
+    .filter(portrait => !!portrait.image_url || (portrait.views ?? []).some(v => v.image_url))
     .sort((a, b) => b.ep_start - a.ep_start)
   const hasVersions = portraits.length > 0
   const count = hasVersions ? portraits.length : 1
@@ -336,11 +344,32 @@ function CharacterPortraitGallery({ character, fitting }: { character: Character
       <div ref={trackRef} className="character-portrait-track" aria-label={`${character.name}定妆照版本`}>
         {hasVersions ? portraits.map((portrait, index) => (
           <figure key={portrait.id} className="character-portrait-slide">
-            <img src={portrait.image_url!} alt={`${character.name} · ${portraitVersionLabel(portrait)}`}
+            <img src={(portrait.image_url || portrait.views?.find(v => v.view_role === 'front_full')?.image_url)!}
+              alt={`${character.name} · ${portraitVersionLabel(portrait)}`}
               style={{ opacity: fitting ? 0.45 : 1, transition: 'opacity 0.3s' }} />
             <figcaption className="portrait-version-label">
-              {portraitVersionLabel(portrait)}{index === 0 && portrait.ep_end == null ? <em>当前</em> : null}
+              {portraitVersionLabel(portrait)}
+              {index === 0 && portrait.ep_end == null ? <em>当前</em> : null}
+              {portrait.pack_status ? ` · ${portrait.pack_status}` : ''}
+              {portrait.ep_end != null
+                ? ` · 第${portrait.ep_start}-${portrait.ep_end}集`
+                : ` · 第${portrait.ep_start}集起`}
             </figcaption>
+            {(portrait.views ?? []).length > 0 && (
+              <div className="portrait-view-strip" aria-label="多视角">
+                {portrait.views!.map(view => view.image_url ? (
+                  <div key={view.id} className="portrait-view-chip">
+                    <img src={view.image_url} alt={view.view_role || 'view'} />
+                    <span>{VIEW_ROLE_LABELS[view.view_role || ''] || view.view_role || '视角'}</span>
+                  </div>
+                ) : null)}
+              </div>
+            )}
+            {portrait.change?.reason && (
+              <div className="f-misc" style={{ fontSize: 11, padding: '4px 6px' }}>
+                变化：{(portrait.change.change_dimensions || []).join('/') || '外观'} · {portrait.change.reason}
+              </div>
+            )}
           </figure>
         )) : (
           <figure className="character-portrait-slide">

@@ -1372,6 +1372,30 @@ table.calls-ledger th:nth-child(4), table.calls-ledger th:nth-child(5), table.ca
   background: rgba(33, 110, 70, 0.92); color: #fff; box-shadow: 0 1px 4px rgba(0,0,0,0.25);
 }
 .mc-qa-badge.bad { background: rgba(181, 68, 52, 0.92); }
+.mc-keyframe-badge {
+  position: absolute; top: 5px; right: 5px; font-size: 10.5px; line-height: 1.4; font-weight: 700;
+  padding: 1px 7px; border-radius: 6px; letter-spacing: 0.04em;
+  background: rgba(181, 68, 52, 0.95); color: #fff; box-shadow: 0 1px 4px rgba(0,0,0,0.28);
+}
+.material-card-keyframe { border-color: rgba(181, 68, 52, 0.45); }
+.mc-purpose {
+  font-size: 10.5px; color: var(--ink-faint); letter-spacing: 0.03em;
+}
+.material-section-head {
+  padding: 8px 18px 0; font-size: 12.5px; font-weight: 600; color: var(--ink-soft);
+}
+.evidence-gallery { border-top: 1px dashed var(--hairline); margin-top: 4px; }
+.portrait-view-strip {
+  display: flex; gap: 8px; overflow-x: auto; padding: 6px 0; scrollbar-width: thin;
+}
+.portrait-view-chip {
+  flex: 0 0 auto; width: 88px; border: 1px solid var(--hairline); border-radius: 8px; overflow: hidden;
+  background: var(--paper);
+}
+.portrait-view-chip img { width: 100%; aspect-ratio: 9/16; object-fit: cover; display: block; }
+.portrait-view-chip span {
+  display: block; font-size: 10.5px; padding: 4px 6px; color: var(--ink-soft); text-align: center;
+}
 .material-card figcaption {
   padding: 6px 8px 8px; display: flex; flex-direction: column; gap: 4px;
 }

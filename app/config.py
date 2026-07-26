@@ -200,6 +200,17 @@ DEFAULT_SETTINGS = {
     "agent_enabled": "true",            # 内嵌对话 Agent 总开关（API 入口会检查）
     "agent_max_tool_calls_per_turn": "8",
     "agent_max_consecutive_same_error": "2",
+    # 人物多视角资产与关键帧一致性 QA
+    "character_multiview_enabled": "true",
+    "scene_multiview_enabled": "true",
+    "narrative_keyframe_required": "true",
+    "visual_evidence_qa_enabled": "true",
+    "video_visual_anchor_qa_enabled": "true",
+    "watermark_qa_mode": "ignore_unless_occluding",  # ignore_unless_occluding | legacy
+    "keyframe_qa_overall_threshold": "0.80",
+    "keyframe_qa_action_threshold": "0.70",
+    "keyframe_qa_body_threshold": "0.72",
+    "keyframe_qa_identity_threshold": "0.75",
 }
 
 PROJECTS_DIR.mkdir(exist_ok=True)

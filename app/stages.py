@@ -1917,7 +1917,11 @@ async def qa_shot(frames_b64: list[str], action_desc: str, scene_setting: str,
                   character_anchors: list[str], state_in: str = "", state_out: str = "",
                   required_dialogue: str = "", required_text: str = "",
                   *, duration_s: int | None = None,
-                  duration_needs_review: bool = False) -> dict:
+                  duration_needs_review: bool = False,
+                  visual_anchors: list[dict] | None = None,
+                  image_manifest: list[dict] | None = None) -> dict:
+    from app.multiview import watermark_qa_mode, video_visual_anchor_qa_enabled, build_image_manifest
+
     anchors = "\n".join(character_anchors) or "（缺少角色锚点，应回到分镜补角色）"
     duration_block = ""
     if duration_needs_review or (duration_s is not None and int(duration_s) > PREFERRED_SHOT_DURATION_S):
@@ -1926,7 +1930,43 @@ async def qa_shot(frames_b64: list[str], action_desc: str, scene_setting: str,
 - duration_justified：若画面动作与口播显然在 {PREFERRED_SHOT_DURATION_S}s 内就能完成，必须为 false，并在 issues 写明「时长过长，建议改回 {PREFERRED_SHOT_DURATION_S}s」；
 - 仅当连续动作/口播确实需要更长窗口时才为 true。
 """
-    expectation = f"""你是 AI 视频质检员。对照预期检查这几帧画面（同一镜头的首/中/尾），输出 JSON。
+    all_frames = list(frames_b64)
+    manifest_entries: list[dict] = [{"role": "video_frame", "entity": f"frame_{i+1}"} for i in range(len(frames_b64))]
+    if video_visual_anchor_qa_enabled() and visual_anchors:
+        from pathlib import Path as _Path
+        for anchor in visual_anchors:
+            path_s = anchor.get("image_path") or anchor.get("path")
+            if not path_s or not _Path(path_s).exists():
+                continue
+            try:
+                all_frames.append(hiagent.encode_image_file(path_s))
+            except OSError:
+                continue
+            if anchor.get("type") in {"plot_key_frame"} or anchor.get("role") == "keyframe":
+                role = "candidate_keyframe"
+            elif anchor.get("entity_type") == "character" or anchor.get("type") == "character":
+                role = "character_anchor"
+            elif anchor.get("entity_type") == "scene" or anchor.get("type") == "scene":
+                role = "scene_anchor"
+            elif anchor.get("type") == "previous_shot_frame":
+                role = "continuity_anchor"
+            else:
+                role = "visual_anchor"
+            manifest_entries.append({
+                "role": role,
+                "entity": anchor.get("entity_name") or anchor.get("name"),
+                "view": anchor.get("view_role"),
+            })
+    effective_manifest = image_manifest or build_image_manifest(manifest_entries)
+    wm_mode = watermark_qa_mode()
+    wm_rule = (
+        "小水印/Logo 不单独作为主扣分；仅遮挡脸/发型/衣服/手部动作或关键标志物时在对应主项扣分并标记 subject_occlusion"
+        if wm_mode == "ignore_unless_occluding"
+        else "无文字/水印/多余人物/肢体畸形"
+    )
+    expectation = f"""你是 AI 视频质检员。对照预期检查这些画面（视频抽帧 + 可选关键帧/人物/场景真值图），输出 JSON。
+
+图片顺序清单（image_manifest）：{json.dumps(effective_manifest, ensure_ascii=False)}
 
 预期画面：{action_desc}
 预期起始状态：{state_in or '（未单列；按预期画面开头判断）'}
@@ -1938,45 +1978,63 @@ async def qa_shot(frames_b64: list[str], action_desc: str, scene_setting: str,
 {anchors}
 {duration_block}
 检查项（各 0~1 评分）：
-1. character_match  角色外观与预期相符（发型/服装/年龄感）
-2. action_match     画面内容与预期动作相符
-3. clean_frame      无文字/水印/多余人物/肢体畸形
-4. start_state_match 首帧/开头是否匹配预期起始状态
-5. end_state_match   尾帧/结尾是否匹配预期结束状态
-6. dialogue_match    可见口型/字幕/声画证据是否没有违背预期对白；无指定对白时给 1
-7. text_match        需要画面文字时是否准确；无文字要求时给 1
-{"8. duration_justified  超过默认时长是否必要（仅当上方要求审核时填写；不需要时给 true）" if duration_block else ""}
+1. character_match  角色外观与人物真值/锚点相符；检查镜头内是否换脸/换发型/换装/体型跳变
+2. action_match     核心动作是否真正出现
+3. body_proportion  头身比与肢体完整性
+4. outfit_match / hair_match / face_identity / scene_match  与真值一致；脸不可见时 face_identity 可为 null
+5. clean_frame      {wm_rule}
+6. start_state_match / end_state_match / dialogue_match / text_match  同前
+{"7. duration_justified  超过默认时长是否必要" if duration_block else ""}
 
-评分硬规则（评分会直接决定是否花费重抽，务必严格且稳定）：
-- 只根据所给首/中/尾帧中可见的证据评分，不得因为“可能在未抽到的时刻发生”而臆测通过。
-- action_match 是主项：核心动作、人物朝向、道具交互或动作结果未出现时必须 ≤0.4。
-- character_match 是主项：主要角色错人、外观明显不符或跨帧换脸/换装时必须 ≤0.4。
-- start_state_match / end_state_match 是连续性主项：起始状态或结束状态明显不符时对应项必须 ≤0.4。
-- dialogue_match / text_match 是可用性主项：指定台词被改写、字幕乱码、屏幕文字错误时对应项必须 ≤0.4。
-- no_story_repeat：若视频重演上一镜已完成内容则 false；no_future_leak：若抢演后续镜头/未来剧情则 false；no_character_duplicate：若同一角色分身/重复出现则 false；whole_clip_usable：若需要裁掉片头片尾或中间无效段才可用则 false。
-- failure_types 只能使用 story_repeat、future_leak、wrong_dialogue、text_error、character_duplicate、state_mismatch、needs_crop 等短码。
-- observed_state_out 用一句话描述视频实际尾部状态，供下一镜承接。
-- overall 不得高于 character_match、action_match、start_state_match、end_state_match、dialogue_match、text_match 中的最低主项；画面干净不能掩盖错人、错动作、状态错、台词/文字错。
-- issues 只写画面中可见、可定向修复的具体问题；达标时输出空数组，不要写泛化建议。
-{"- 若 duration_justified=false，必须把「时长过长」写入 issues，且 overall 不超过 0.55。" if duration_block else ""}
+硬规则：
+- 只根据可见证据评分；action/character/outfit/hair 为主项；干净度不能抬高错人/错动作总分。
+- overall 不得高于 character_match、action_match、start_state_match、end_state_match、dialogue_match、text_match 最低主项。
+- 缺必需分数时不要伪造满分。
+- failure_types 可用 story_repeat、future_leak、wrong_dialogue、text_error、character_duplicate、state_mismatch、needs_crop、wrong_identity、wrong_outfit、subject_occlusion。
+{"- duration_justified=false 时 overall≤0.55。" if duration_block else ""}
 
-只输出 JSON：{{"character_match": float, "action_match": float, "clean_frame": float, "start_state_match": float, "end_state_match": float, "dialogue_match": float, "text_match": float, "no_story_repeat": bool, "no_future_leak": bool, "no_character_duplicate": bool, "whole_clip_usable": bool, "failure_types": [str], "observed_state_out": str, "overall": float, "issues": [str]{', "duration_justified": bool' if duration_block else ''}}}"""
-    raw = await hiagent.vlm_check(
-        frames_b64, expectation,
-        call_meta={"initiator_label": "视频自动质检", "scene_setting": scene_setting})
-    result = _parse_qa_result(
-        raw,
-        [
-            "character_match", "action_match", "clean_frame",
-            "start_state_match", "end_state_match", "dialogue_match", "text_match",
-        ],
-        defaults={
-            "start_state_match": 1.0,
-            "end_state_match": 1.0,
-            "dialogue_match": 1.0,
-            "text_match": 1.0,
-        },
-    )
+只输出 JSON：{{"character_match": float, "action_match": float, "body_proportion": float, "outfit_match": float, "hair_match": float, "face_identity": float|null, "scene_match": float, "clean_frame": float, "start_state_match": float, "end_state_match": float, "dialogue_match": float, "text_match": float, "no_story_repeat": bool, "no_future_leak": bool, "no_character_duplicate": bool, "whole_clip_usable": bool, "failure_types": [str], "observed_state_out": str, "overall": float, "issues": [str]{', "duration_justified": bool' if duration_block else ''}}}"""
+    try:
+        raw = await hiagent.vlm_check(
+            all_frames, expectation,
+            call_meta={"initiator_label": "视频自动质检", "scene_setting": scene_setting,
+                       "anchor_count": max(0, len(all_frames) - len(frames_b64))})
+        result = _parse_qa_result(
+            raw,
+            [
+                "character_match", "action_match", "body_proportion", "outfit_match", "hair_match",
+                "scene_match", "clean_frame",
+                "start_state_match", "end_state_match", "dialogue_match", "text_match",
+            ],
+            defaults={
+                "start_state_match": 1.0,
+                "end_state_match": 1.0,
+                "dialogue_match": 1.0,
+                "text_match": 1.0,
+                "body_proportion": 1.0,
+                "outfit_match": 1.0,
+                "hair_match": 1.0,
+                "scene_match": 1.0,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "unverified",
+            "overall": None,
+            "issues": [f"视频 QA 未完成：{type(exc).__name__}: {exc}"],
+            "qa_recovered": True,
+            "image_manifest": effective_manifest,
+            "failure_types": [],
+        }
+    try:
+        raw_obj = extract_json(raw)
+        face = raw_obj.get("face_identity")
+        if face is None or (isinstance(face, str) and str(face).upper() in {"N/A", "NA"}):
+            result["face_identity"] = None
+        else:
+            result["face_identity"] = max(0.0, min(1.0, float(face)))
+    except Exception:  # noqa: BLE001
+        result["face_identity"] = None
     caps = [
         _score_or_none(result.get(key))
         for key in ("character_match", "action_match", "start_state_match",
@@ -1991,4 +2049,12 @@ async def qa_shot(frames_b64: list[str], action_desc: str, scene_setting: str,
             issues.append(f"时长过长，建议改回 {PREFERRED_SHOT_DURATION_S}s")
         result["issues"] = issues
         result["overall"] = round(min(float(result.get("overall") or 1), 0.55), 3)
+    if wm_mode == "ignore_unless_occluding":
+        ftypes = [str(x) for x in (result.get("failure_types") or [])]
+        result["failure_types"] = [
+            ft for ft in ftypes
+            if "watermark" not in ft.lower() and ft not in {"水印", "logo"}
+        ]
+    result["image_manifest"] = effective_manifest
+    result["status"] = "unverified" if result.get("qa_recovered") else "scored"
     return result

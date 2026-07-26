@@ -172,11 +172,20 @@ def register_initial_scene_ref(conn, project_id: str, name: str, image_path: str
     """初次出图后登记场景图（适用集 1~ 至今）。覆盖式：先清掉该场景全部旧分段。"""
     conn.execute("DELETE FROM scene_references WHERE project_id=? AND scene_name=?", (project_id, name))
     scene_id = new_id("scene")
-    conn.execute(
-        "INSERT INTO scene_references(id, project_id, scene_name, ep_start, ep_end, scene_canonical, "
-        "prompt, image_path, qa_json, base_scene_id, bible_version, artifact_id, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (scene_id, project_id, name, 1, None, scene_canonical, prompt, image_path,
-         json.dumps(qa, ensure_ascii=False), None, bible_version, artifact_id, now()))
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(scene_references)").fetchall()}
+    if "pack_status" in cols:
+        conn.execute(
+            "INSERT INTO scene_references(id, project_id, scene_name, ep_start, ep_end, scene_canonical, "
+            "prompt, image_path, qa_json, base_scene_id, bible_version, artifact_id, pack_status, created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (scene_id, project_id, name, 1, None, scene_canonical, prompt, image_path,
+             json.dumps(qa, ensure_ascii=False), None, bible_version, artifact_id, "legacy_partial", now()))
+    else:
+        conn.execute(
+            "INSERT INTO scene_references(id, project_id, scene_name, ep_start, ep_end, scene_canonical, "
+            "prompt, image_path, qa_json, base_scene_id, bible_version, artifact_id, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (scene_id, project_id, name, 1, None, scene_canonical, prompt, image_path,
+             json.dumps(qa, ensure_ascii=False), None, bible_version, artifact_id, now()))
     conn.commit()
     return scene_id
 
@@ -202,6 +211,12 @@ def scene_ref_for_episode(project_id: str, name: str, episode_no: int | None) ->
     if row and row["image_path"] and Path(row["image_path"]).exists():
         return row["image_path"]
     return None
+
+
+def scene_views_for_episode(project_id: str, name: str, episode_no: int | None, *, ready_only: bool = False):
+    """本集有效场景多视角包；供新链路使用。"""
+    from app.multiview import scene_views_for_episode as _views
+    return _views(project_id, name, episode_no, ready_only=ready_only)
 
 
 def scene_ref_qa_for_episode(project_id: str, name: str, episode_no: int | None) -> dict | None:
@@ -327,10 +342,23 @@ async def generate_scene_refs(
                         )
                         continue
                     sc.ref_image_path = path
-                    register_initial_scene_ref(
+                    scene_id = register_initial_scene_ref(
                         conn, project_id, sc.name, path, sc.scene_canonical,
                         prompt, qa, bible_version, artifact_id=artifact["id"],
                     )
+                    try:
+                        from app.multiview import ensure_scene_multiview_pack, scene_multiview_enabled
+                        if scene_multiview_enabled():
+                            await ensure_scene_multiview_pack(
+                                project_id=project_id,
+                                scene_reference_id=scene_id,
+                                scene_name=sc.name,
+                                scene_canonical=sc.scene_canonical,
+                                visual_style=style,
+                                ep_start=1,
+                            )
+                    except Exception as pack_exc:  # noqa: BLE001
+                        errors.append(f"{sc.name}多视角包：{pack_exc}")
                     break
                 except Exception as exc:  # noqa: BLE001 候选失败后在有界循环内修复
                     last_error = exc

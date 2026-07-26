@@ -289,6 +289,15 @@ def _public_reference_image(ref: dict) -> dict:
         "rejectReason": ref.get("rejectReason"),
         "qa": ref.get("qa"),
         "image_url": image_url,
+        "entity_type": ref.get("entity_type"),
+        "entity_name": ref.get("entity_name"),
+        "library_revision_id": ref.get("library_revision_id"),
+        "library_view_id": ref.get("library_view_id"),
+        "view_role": ref.get("view_role"),
+        "purposes": ref.get("purposes"),
+        "required": bool(ref.get("required")),
+        "slot_key": ref.get("slot_key"),
+        "dependency_manifest": ref.get("dependency_manifest"),
     }
 
 

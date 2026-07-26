@@ -83,11 +83,42 @@ export function currentVersionRefs(shot: Shot): {
   }
 }
 
-function refSourceLabel(source?: string): string {
+function refSourceLabel(ref: ReferenceImage): string {
+  const viewLabels: Record<string, string> = {
+    front_full: '正面全身',
+    three_quarter: '3/4 面',
+    profile: '侧面',
+    back_full: '背面全身',
+    face_closeup: '面部特写',
+    establishing: '建立',
+    reverse_angle: '反打',
+    action_zone: '动作区',
+  }
+  if (ref.type === 'plot_key_frame' || ref.slot_key === 'narrative_keyframe') return '关键帧'
+  if (ref.type === 'previous_shot_frame' || ref.source === 'previous_shot' || ref.source === 'previous_shot_frame') {
+    return '上镜衔接帧'
+  }
+  if (ref.type === 'character' || ref.entity_type === 'character') {
+    const view = ref.view_role ? viewLabels[ref.view_role] || ref.view_role : ''
+    return view ? `人物参考 · ${view}` : '人物参考'
+  }
+  if (ref.type === 'scene' || ref.entity_type === 'scene') {
+    const view = ref.view_role ? viewLabels[ref.view_role] || ref.view_role : ''
+    return view ? `场景参考 · ${view}` : '场景参考'
+  }
   return ({
     seedream_generated: '生成参考图', asset_library: '角色定妆照',
     previous_shot: '上镜衔接帧', previous_shot_frame: '上镜衔接帧',
-  } as Record<string, string>)[source ?? ''] ?? (source || '参考图')
+  } as Record<string, string>)[ref.source ?? ''] ?? (ref.source || '参考图')
+}
+
+function refPurposeBucket(ref: ReferenceImage): 'video' | 'evidence' | 'discarded' {
+  if (ref.deleted || (!ref.selectedForSeedance && ref.rejectReason)) return 'discarded'
+  const purposes = ref.purposes || []
+  if (ref.selectedForSeedance && !ref.deleted) return 'video'
+  if (purposes.includes('qa_anchor') || purposes.includes('keyframe_seed')) return 'evidence'
+  if (!ref.selectedForSeedance) return 'discarded'
+  return 'video'
 }
 
 function rejectReasonLabel(reason?: string | null): string {
@@ -118,17 +149,26 @@ function RefCard({ r, onOpen, onAction, actionLabel, discarded }: {
 }) {
   const score = refScore(r)
   const src = r.image_url || undefined
-  const label = refSourceLabel(r.source)
+  const label = refSourceLabel(r)
+  const isKeyframe = r.type === 'plot_key_frame' || r.slot_key === 'narrative_keyframe'
+  const purposeHint = (r.purposes || []).includes('video_input')
+    ? '视频输入'
+    : (r.purposes || []).includes('qa_anchor')
+      ? 'QA 依据'
+      : null
   return (
-    <figure className={`material-card${discarded ? ' material-card-discarded' : ''}`} title={label}>
+    <figure className={`material-card${discarded ? ' material-card-discarded' : ''}${isKeyframe ? ' material-card-keyframe' : ''}`} title={label}>
       <div className="mc-thumb" onClick={() => src && onOpen(src, label)}>
         {src ? <img src={src} alt={label} loading="lazy" /> : <div className="mc-noimg">无图</div>}
+        {isKeyframe && <span className="mc-keyframe-badge">关键帧</span>}
         {score != null && (
           <span className={`mc-qa-badge${score < QA_KEEP_THRESHOLD ? ' bad' : ''}`}>QA {score.toFixed(2)}</span>
         )}
+        {r.qa?.status === 'unverified' && <span className="mc-qa-badge bad">未验证</span>}
       </div>
       <figcaption>
         <span className="mc-label">{label}</span>
+        {purposeHint && <span className="mc-purpose">{purposeHint}</span>}
         {discarded
           ? <span className="mc-reject">{r.deleted ? '已手动废弃' : rejectReasonLabel(r.rejectReason)}</span>
           : (r.rejectReason
@@ -144,7 +184,7 @@ function RefCard({ r, onOpen, onAction, actionLabel, discarded }: {
   )
 }
 
-/* ─── 单镜素材画廊：使用中（可废弃） + 废弃照片画廊（可恢复） ─── */
+/* ─── 单镜素材画廊：视频输入 / QA 依据 / 废弃候选 ─── */
 function ShotMaterialGallery({ shot, onOpen, onRefresh, onToast }: {
   shot: Shot; onOpen: (src: string, label?: string) => void
   onRefresh: () => void; onToast: (m: string) => void
@@ -152,13 +192,49 @@ function ShotMaterialGallery({ shot, onOpen, onRefresh, onToast }: {
   const data = currentVersionRefs(shot)
   const refs = data?.refs ?? []
   const versionId = data?.versionId
-  const used = refs.filter(r => r.selectedForSeedance && !r.deleted)
-  const discarded = refs.filter(r => !(r.selectedForSeedance && !r.deleted))
+  const videoInputs = refs.filter(r => refPurposeBucket(r) === 'video')
+  const evidence = refs.filter(r => refPurposeBucket(r) === 'evidence')
+  const discarded = refs.filter(r => refPurposeBucket(r) === 'discarded')
 
   const act = (fn: () => Promise<unknown>) => async () => {
     try { await fn(); onRefresh() }
     catch (e: unknown) { onToast(e instanceof Error ? e.message : String(e)) }
   }
+
+  const renderStrip = (items: ReferenceImage[], opts: { discarded?: boolean; actionLabel: string; restore?: boolean }) => (
+    items.length ? (
+      <div className="material-strip">
+        {items.map(r => (
+          <RefCard
+            key={r.id}
+            r={r}
+            onOpen={onOpen}
+            discarded={opts.discarded}
+            actionLabel={opts.actionLabel}
+            onAction={versionId ? act(async () => {
+              if (opts.restore) {
+                const qaRejected = !!r.rejectReason
+                if (qaRejected) {
+                  const reason = window.prompt(
+                    `该图曾因「${rejectReasonLabel(r.rejectReason)}」被淘汰。\n请填写覆盖理由（将写入审计记录），留空则取消：`,
+                    '',
+                  )
+                  if (!reason?.trim()) return
+                  await api.restoreReferenceImage(versionId, r.id, reason.trim())
+                } else if (!window.confirm('确认恢复使用该参考图？')) {
+                  return
+                } else {
+                  await api.restoreReferenceImage(versionId, r.id)
+                }
+              } else {
+                await api.discardReferenceImage(versionId, r.id)
+              }
+            }) : undefined}
+          />
+        ))}
+      </div>
+    ) : null
+  )
 
   return (
     <>
@@ -167,14 +243,8 @@ function ShotMaterialGallery({ shot, onOpen, onRefresh, onToast }: {
           当前版本的参考图尚未就绪，暂时展示最近一次有图版本 v{data.versionNo}
         </div>
       )}
-      {used.length ? (
-        <div className="material-strip">
-          {used.map(r => (
-            <RefCard key={r.id} r={r} onOpen={onOpen} actionLabel="废弃"
-              onAction={versionId ? act(() => api.discardReferenceImage(versionId, r.id)) : undefined} />
-          ))}
-        </div>
-      ) : (
+      <div className="material-section-head">视频实际输入 · {videoInputs.length}</div>
+      {videoInputs.length ? renderStrip(videoInputs, { actionLabel: '废弃' }) : (
         <div className="material-strip-empty" aria-label="本镜暂无参考图">
           <span className="material-empty-frame" />
           <span className="material-empty-frame" />
@@ -182,32 +252,23 @@ function ShotMaterialGallery({ shot, onOpen, onRefresh, onToast }: {
         </div>
       )}
 
+      {evidence.length > 0 && (
+        <div className="evidence-gallery">
+          <div className="discard-gallery-head">
+            关键帧生成 / QA 依据 · {evidence.length} 张
+            <span className="discard-gallery-hint">人物/场景多视角真值，默认不直接喂视频模型</span>
+          </div>
+          {renderStrip(evidence, { actionLabel: '废弃' })}
+        </div>
+      )}
+
       {discarded.length > 0 && (
         <div className="discard-gallery">
           <div className="discard-gallery-head">
-            废弃照片画廊 · {discarded.length} 张
+            废弃候选 · {discarded.length} 张
             <span className="discard-gallery-hint">分数不足 / 已手动废弃，不会喂给视频模型</span>
           </div>
-          <div className="material-strip">
-            {discarded.map(r => (
-              <RefCard key={r.id} r={r} onOpen={onOpen} discarded actionLabel="恢复使用"
-                onAction={versionId ? act(async () => {
-                  const qaRejected = !!r.rejectReason
-                  if (qaRejected) {
-                    const reason = window.prompt(
-                      `该图曾因「${rejectReasonLabel(r.rejectReason)}」被淘汰。\n请填写覆盖理由（将写入审计记录），留空则取消：`,
-                      '',
-                    )
-                    if (!reason?.trim()) return
-                    await api.restoreReferenceImage(versionId, r.id, reason.trim())
-                  } else if (!window.confirm('确认恢复使用该参考图？')) {
-                    return
-                  } else {
-                    await api.restoreReferenceImage(versionId, r.id)
-                  }
-                }) : undefined} />
-            ))}
-          </div>
+          {renderStrip(discarded, { discarded: true, actionLabel: '恢复使用', restore: true })}
         </div>
       )}
     </>
