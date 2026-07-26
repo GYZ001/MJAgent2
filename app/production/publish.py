@@ -2,10 +2,9 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Literal
+from typing import Any
 
 from app.db import get_conn, now
-from app.evidence import repository as evidence_repository
 from app.production.certificate import (
     assert_publish_has_certificate,
     consume_completion_certificate,

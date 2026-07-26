@@ -453,7 +453,7 @@ async def revise_screenplay(episode_id: str, body: dict | None = Body(None)):
     if ep["screenplay_status"] == "running" and _screenplay_task_active(episode_id):
         raise HTTPException(409, "剧本任务进行中")
 
-    from app.production.revision import ensure_production_revision, update_working_artifact
+    from app.production.revision import ensure_production_revision
     from app.production.patch import screenplay_artifact_payload
     from app.harness.contracts import get_contract
     from app.harness.types import EvidenceArtifact

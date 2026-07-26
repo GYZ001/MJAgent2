@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import secrets
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, Field
 

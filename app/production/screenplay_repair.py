@@ -2,20 +2,17 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from typing import Any
 
 from app.db import get_conn, now
 from app.evidence import repository as evidence_repository
-from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
-from app.production.certificate import issue_completion_certificate
+from app.harness.types import Evaluation, EvidenceArtifact, Issue
 from app.production.grant import assert_grant_allows, issue_production_grant
 from app.production.metrics import (
     record_activation,
     record_baseline_generation,
     record_issue_reopened,
-    record_patch,
 )
 from app.production.patch import (
     PatchOperation,
@@ -32,12 +29,6 @@ from app.production.revision import (
     mark_baseline_generated,
     mark_first_evaluation,
     save_checkpoint,
-    update_working_artifact,
-)
-from app.production.screenplay_document import (
-    document_to_screenplay,
-    rederive_projections,
-    screenplay_to_document,
 )
 from app.production.structured_issues import (
     blocker_count,

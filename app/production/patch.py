@@ -2,15 +2,13 @@
 from __future__ import annotations
 
 import copy
-import hashlib
-import json
 from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app.db import new_id, now
+from app.db import now
 from app.evidence import repository as evidence_repository
-from app.harness.types import EvidenceArtifact, Evaluation, Issue
+from app.harness.types import EvidenceArtifact, Issue
 from app.production.metrics import record_noop_rejected, record_patch
 from app.production.policy import assert_patch_ops_allowed, FullRegenDenied
 from app.production.revision import get_production_revision, update_working_artifact
@@ -21,7 +19,6 @@ from app.production.screenplay_document import (
     rederive_projections,
     screenplay_to_document,
 )
-from app.production.structured_issues import issue_set_hash
 from app.schemas import EpisodeScreenplay
 
 
@@ -271,7 +268,6 @@ def screenplay_artifact_payload(script: EpisodeScreenplay) -> dict[str, Any]:
 
 
 def _local_screenplay_schema_check(script: EpisodeScreenplay) -> list[Issue]:
-    from app.harness.types import IssueSeverity
     from app.production.structured_issues import structured_issue
 
     issues: list[Issue] = []
