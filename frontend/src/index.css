@@ -2213,6 +2213,15 @@ label.f { color: var(--ink-soft); font: 600 12px var(--ui); letter-spacing: .02e
 .character-param-summary > div.wide { grid-column: 1 / -1; }
 .character-param-summary b { color: var(--ink-faint); font-size: 10.5px; }
 .character-param-summary p { margin: 5px 0 0; color: var(--ink-soft); font-size: 12.5px; line-height: 1.7; }
+.scene-card-summary { display: grid; gap: 9px; margin-top: auto; }
+.scene-detail-trigger {
+  display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 0 2px;
+  border: 0; border-top: 1px solid #e7e4dd; background: transparent; color: var(--indigo);
+  font-size: 11.5px; font-weight: 600; cursor: pointer;
+}
+.scene-detail-trigger span { font-size: 15px; transition: transform .16s ease; }
+.scene-detail-trigger:hover span { transform: translateX(3px); }
+.scene-detail-trigger:focus-visible { outline: 2px solid rgba(47,72,88,.3); outline-offset: 3px; }
 .scene-quality-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; min-height: 26px; margin: 2px 0 8px; }
 .scene-qa-line { min-width: 0; color: var(--ink-soft); font-size: 12px; line-height: 1.55; }
 .scene-candidates-trigger {
@@ -2226,6 +2235,56 @@ label.f { color: var(--ink-soft); font: 600 12px var(--ui); letter-spacing: .02e
 }
 .scene-candidates-trigger:hover { border-color: rgba(47,72,88,.38); color: var(--indigo); }
 .scene-candidates-trigger:focus-visible { outline: 2px solid rgba(47,72,88,.3); outline-offset: 2px; }
+.scene-detail-backdrop {
+  position: fixed; z-index: 155; inset: 0; display: grid; padding: 28px; place-items: center;
+  background: rgba(24,24,22,.58); backdrop-filter: blur(7px); animation: model-fade-in .16s ease-out;
+}
+.scene-detail-modal {
+  display: flex; width: min(1120px,100%); max-height: min(900px,calc(100vh - 56px));
+  flex-direction: column; overflow: hidden; border: 1px solid rgba(255,255,255,.62);
+  border-radius: 18px; background: #fcfaf4; box-shadow: 0 30px 90px rgba(20,18,15,.32);
+  animation: model-rise-in .2s cubic-bezier(.2,.8,.2,1);
+}
+.scene-detail-modal-head {
+  display: flex; flex: 0 0 auto; align-items: flex-start; justify-content: space-between; gap: 20px;
+  padding: 22px 24px 18px; border-bottom: 1px solid var(--hairline);
+}
+.scene-detail-modal-head .eyebrow { color: var(--cinnabar); font: 700 10px/1.5 "SF Mono", Menlo, monospace; letter-spacing: .16em; }
+.scene-detail-modal-head h2 { margin: 2px 0 4px; font-size: 22px; }
+.scene-detail-modal-head p { margin: 0; color: var(--ink-faint); font-size: 12px; }
+.scene-detail-modal-head > button {
+  width: 34px; height: 34px; border: 0; border-radius: 50%; background: rgba(45,38,31,.06);
+  color: var(--ink-soft); font-size: 22px; cursor: pointer;
+}
+.scene-detail-modal-body { min-height: 0; padding: 20px 24px 24px; overflow: auto; }
+.scene-detail-anchor { padding: 14px 16px; border-radius: 11px; background: rgba(91,114,83,.07); }
+.scene-detail-anchor b { color: var(--moss); font-size: 12px; }
+.scene-detail-anchor p { margin: 6px 0 0; color: var(--ink-soft); font: 13px/1.75 var(--serif); }
+.scene-view-guide { margin-top: 16px; }
+.scene-view-guide h3, .scene-version-heading h3 { margin: 0 0 8px; font-size: 14px; }
+.scene-view-guide > div { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.scene-view-guide article { padding: 12px 14px; border: 1px solid var(--hairline); border-radius: 10px; background: #fff; }
+.scene-view-guide b { color: var(--ink); font-size: 12.5px; }
+.scene-view-guide small { margin-left: 5px; color: var(--ink-faint); font-size: 10px; font-weight: 500; }
+.scene-view-guide p { margin: 5px 0 0; color: var(--ink-faint); font-size: 11.5px; line-height: 1.65; }
+.scene-version-list { margin-top: 20px; }
+.scene-version-heading p { margin: -3px 0 10px; color: var(--ink-faint); font-size: 11.5px; }
+.scene-version-track { display: grid; gap: 14px; }
+.scene-version-card { padding: 12px; border: 1px solid var(--hairline); border-radius: 12px; background: #fff; }
+.scene-version-meta { margin-bottom: 10px; color: var(--ink-soft); font-size: 11px; }
+.scene-view-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(190px,240px)); gap: 12px; }
+.scene-view-card { position: relative; min-width: 0; margin: 0; overflow: hidden; border: 1px solid var(--hairline); border-radius: 10px; background: var(--paper); }
+.scene-view-card img { width: 100%; height: min(38vh,330px); display: block; object-fit: contain; background: #25272a; }
+.scene-view-card figcaption { display: grid; gap: 3px; padding: 9px 10px; }
+.scene-view-card figcaption b { color: var(--ink); font-size: 11.5px; }
+.scene-view-card figcaption span { color: var(--ink-faint); font-size: 10.5px; line-height: 1.55; }
+.scene-view-card > .btn { margin: 0 10px 10px; font-size: 10px; padding: 3px 8px; }
+.scene-detail-empty { margin-top: 18px; padding: 22px; border: 1px dashed var(--hairline); border-radius: 11px; color: var(--ink-faint); font-size: 12px; text-align: center; }
+.scene-detail-modal > footer {
+  display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 14px 24px; border-top: 1px solid var(--hairline);
+}
+.scene-detail-modal > footer > div { display: flex; flex-wrap: wrap; gap: 8px; }
 .scene-candidate-backdrop {
   position: fixed; z-index: 160; inset: 0; display: grid; padding: 28px; place-items: center;
   background: rgba(24,24,22,.58); backdrop-filter: blur(7px); animation: model-fade-in .16s ease-out;
@@ -2291,6 +2350,15 @@ label.f { color: var(--ink-soft); font: 600 12px var(--ui); letter-spacing: .02e
   .generation-params-modal > footer { padding: 12px 18px; }
   .character-param-summary { grid-template-columns: 1fr; }
   .character-param-summary > div.wide { grid-column: auto; }
+  .scene-detail-backdrop { padding: 10px; align-items: end; }
+  .scene-detail-modal { max-height: calc(100vh - 20px); border-radius: 18px 18px 8px 8px; }
+  .scene-detail-modal-head { padding: 18px; }
+  .scene-detail-modal-body { padding: 16px 18px 18px; }
+  .scene-view-guide > div, .scene-view-grid { grid-template-columns: 1fr; }
+  .scene-view-card img { height: min(42vh,340px); }
+  .scene-detail-modal > footer { align-items: stretch; padding: 12px 18px; }
+  .scene-detail-modal > footer, .scene-detail-modal > footer > div { flex-direction: column; }
+  .scene-detail-modal > footer .btn { width: 100%; }
   .scene-candidate-backdrop { padding: 10px; align-items: end; }
   .scene-candidate-modal { max-height: calc(100vh - 20px); border-radius: 18px 18px 8px 8px; }
   .scene-candidate-modal-head { padding: 18px; }

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { api, Scene, SceneRefSegment, SceneReferenceCandidate } from '../api'
 import { useNav, useProject } from '../App'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
@@ -14,6 +14,7 @@ export default function ScenesPage() {
   const [busy, setBusy] = useState(false)
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(0)
+  const [detailSceneName, setDetailSceneName] = useState<string | null>(null)
   const [paramsSceneName, setParamsSceneName] = useState<string | null>(null)
   const [candidatePreview, setCandidatePreview] = useState<{
     sceneName: string
@@ -47,6 +48,7 @@ export default function ScenesPage() {
   const paged = filtered.slice(curPage * pageSize, curPage * pageSize + pageSize)
   const generating = p.scene_refs_status === 'running'
   const hasBible = !!p.bible
+  const detailScene = detailSceneName ? scenes.find(scene => scene.name === detailSceneName) ?? null : null
   const paramsScene = paramsSceneName ? scenes.find(scene => scene.name === paramsSceneName) ?? null : null
 
   return (
@@ -117,7 +119,6 @@ export default function ScenesPage() {
                 ?? [...approvedRefs].sort((a, b) => b.ep_start - a.ep_start)[0]
               const qaOverall = activeRef?.qa_overall
               const adoptedImageUrl = activeRef?.image_url
-              const candidates = s.scene_candidates ?? []
               return (
                 <article key={s.name} className="figure scene-card">
                   <div className="f-name">{s.name}
@@ -131,34 +132,13 @@ export default function ScenesPage() {
                     <div className="scene-visual"><img src={adoptedImageUrl} alt={s.name}
                       style={{ opacity: fitting ? 0.45 : 1, transition: 'opacity 0.3s' }} /></div>
                   )}
-                  <div className="scene-quality-row">
+                  <div className="scene-card-summary">
                     {typeof qaOverall === 'number' && (
                       <QaLine overall={qaOverall} issues={activeRef?.qa?.issues} />
                     )}
-                    {candidates.length > 0 && (
-                      <button className="scene-candidates-trigger" type="button" onClick={() => setCandidatePreview({
-                        sceneName: s.name,
-                        candidates,
-                        adoptedArtifactId: activeRef?.artifact_id,
-                      })}>
-                        查看候选 <span>{candidates.length}</span>
-                      </button>
-                    )}
-                  </div>
-                  {(approvedRefs.length > 0) && (
-                    <SceneRefStrip
-                      projectId={p.id}
-                      sceneName={s.name}
-                      segments={approvedRefs}
-                      disabled={busy || generating}
-                      onChanged={refresh}
-                    />
-                  )}
-                  <label className="f">场景锚点串（30~60 字，定稿后锁定）</label>
-                  <div className="f-anchor">{s.scene_canonical}</div>
-                  <div className="asset-params-action">
-                    <button className="asset-params-trigger" type="button" onClick={() => setParamsSceneName(s.name)}>
-                      生成参数与重绘 <span aria-hidden="true">→</span>
+                    <button className="scene-detail-trigger" type="button" onClick={() => setDetailSceneName(s.name)}>
+                      查看场景详情
+                      <span aria-hidden="true">→</span>
                     </button>
                   </div>
                 </article>
@@ -186,6 +166,23 @@ export default function ScenesPage() {
           onAdopted={(sceneName, candidates, adoptedArtifactId) => {
             setCandidatePreview({ sceneName, candidates, adoptedArtifactId })
             refresh()
+          }}
+        />
+      )}
+      {detailScene && (
+        <SceneDetailModal
+          projectId={p.id}
+          scene={detailScene}
+          disabled={busy || generating}
+          onClose={() => setDetailSceneName(null)}
+          onChanged={refresh}
+          onShowCandidates={(sceneName, candidates, adoptedArtifactId) => {
+            setDetailSceneName(null)
+            setCandidatePreview({ sceneName, candidates, adoptedArtifactId })
+          }}
+          onShowParams={sceneName => {
+            setDetailSceneName(null)
+            setParamsSceneName(sceneName)
           }}
         />
       )}
@@ -222,6 +219,131 @@ function candidateQaScore(candidate: SceneReferenceCandidate): number | null {
   const evaluation = candidate.evidence?.evaluations.find(item =>
     item.evaluator_name.includes('consistency_qa'))
   return typeof evaluation?.score === 'number' ? evaluation.score / 100 : null
+}
+
+const SCENE_VIEW_PRESENTATION: Record<string, { label: string; description: string }> = {
+  establishing: {
+    label: '全景视角',
+    description: '交代场景的整体布局、出入口和标志物，帮助后续镜头认清空间。',
+  },
+  reverse_angle: {
+    label: '对向视角',
+    description: '从相对方向看同一空间，常用于对话切换机位，并保持人物和方位一致。',
+  },
+  action_zone: {
+    label: '动作区视角',
+    description: '展示角色主要活动区域，为走位和动作镜头提供空间参考。',
+  },
+}
+
+function sceneViewPresentation(viewRole?: string | null) {
+  return SCENE_VIEW_PRESENTATION[viewRole || ''] || {
+    label: viewRole || '其他视角',
+    description: '同一场景的补充参考机位。',
+  }
+}
+
+function SceneDetailModal({
+  projectId, scene, disabled, onClose, onChanged, onShowCandidates, onShowParams,
+}: {
+  projectId: string
+  scene: Scene
+  disabled?: boolean
+  onClose: () => void
+  onChanged: () => void
+  onShowCandidates: (
+    sceneName: string,
+    candidates: SceneReferenceCandidate[],
+    adoptedArtifactId?: string | null,
+  ) => void
+  onShowParams: (sceneName: string) => void
+}) {
+  const titleId = useId()
+  const closeRef = useRef<HTMLButtonElement>(null)
+  const approvedRefs = (scene.scene_refs ?? []).filter(sceneRefPassedQa)
+  const activeRef = approvedRefs.find(ref => ref.image_url === scene.ref_image_url)
+    ?? [...approvedRefs].sort((a, b) => b.ep_start - a.ep_start)[0]
+  const candidates = scene.scene_candidates ?? []
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    document.body.style.overflow = 'hidden'
+    window.addEventListener('keydown', closeOnEscape)
+    closeRef.current?.focus()
+    return () => {
+      document.body.style.overflow = previousOverflow
+      window.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [onClose])
+
+  return (
+    <div className="scene-detail-backdrop" role="presentation" onMouseDown={event => {
+      if (event.currentTarget === event.target) onClose()
+    }}>
+      <section className="scene-detail-modal" role="dialog" aria-modal="true" aria-labelledby={titleId}>
+        <header className="scene-detail-modal-head">
+          <div>
+            <span className="eyebrow">SCENE DETAILS</span>
+            <h2 id={titleId}>{scene.name}</h2>
+            <p>查看这个场景的参考机位、适用版本和生成设置。</p>
+          </div>
+          <button ref={closeRef} type="button" aria-label="关闭场景详情" onClick={onClose}>×</button>
+        </header>
+        <div className="scene-detail-modal-body">
+          <section className="scene-detail-anchor">
+            <b>场景定位{scene.location_kind ? ` · ${scene.location_kind}` : ''}</b>
+            <p>{scene.scene_canonical}</p>
+          </section>
+
+          <section className="scene-view-guide" aria-label="场景视角说明">
+            <h3>这些视角有什么区别？</h3>
+            <div>
+              <article>
+                <b>全景视角 <small>原“建立”</small></b>
+                <p>{SCENE_VIEW_PRESENTATION.establishing.description}</p>
+              </article>
+              <article>
+                <b>对向视角 <small>原“反打”</small></b>
+                <p>{SCENE_VIEW_PRESENTATION.reverse_angle.description}</p>
+              </article>
+            </div>
+          </section>
+
+          {approvedRefs.length > 0 ? (
+            <SceneRefStrip
+              projectId={projectId}
+              sceneName={scene.name}
+              segments={approvedRefs}
+              disabled={disabled}
+              onChanged={onChanged}
+            />
+          ) : (
+            <div className="scene-detail-empty">这个场景还没有通过 QA 的参考视角。</div>
+          )}
+        </div>
+        <footer>
+          <div>
+            {candidates.length > 0 && (
+              <button className="btn" type="button" onClick={() => onShowCandidates(
+                scene.name,
+                candidates,
+                activeRef?.artifact_id,
+              )}>
+                查看候选图（{candidates.length}）
+              </button>
+            )}
+            <button className="btn" type="button" onClick={() => onShowParams(scene.name)}>
+              生成参数与重绘
+            </button>
+          </div>
+          <button className="btn primary" type="button" onClick={onClose}>完成</button>
+        </footer>
+      </section>
+    </div>
+  )
 }
 
 function SceneCandidateModal({
@@ -360,18 +482,15 @@ function SceneRefStrip({ projectId, sceneName, segments, disabled, onChanged }: 
   const { toast } = useNav()
   const [redoing, setRedoing] = useState<string | null>(null)
   const sorted = [...segments].sort((a, b) => a.ep_start - b.ep_start)
-  const viewLabels: Record<string, string> = {
-    establishing: '建立', reverse_angle: '反打', action_zone: '动作区',
-  }
   const current = sorted.filter(seg => seg.ep_end == null).at(-1) || sorted.at(-1)
 
   const redoView = async (sceneRefId: string, viewRole: string) => {
-    const label = viewLabels[viewRole] || viewRole
-    if (!window.confirm(`确认重做「${sceneName}」的${label}视角？将重新付费生成并复跑整包 QA。`)) return
+    const label = sceneViewPresentation(viewRole).label
+    if (!window.confirm(`确认重做「${sceneName}」的${label}？将重新付费生成并复跑整包 QA。`)) return
     setRedoing(`${sceneRefId}:${viewRole}`)
     try {
       await api.regenerateSceneView(projectId, sceneName, sceneRefId, viewRole)
-      toast(`${label}视角已重做`)
+      toast(`${label}已重做`)
       onChanged?.()
     } catch (e: unknown) {
       toast(e instanceof Error ? e.message : String(e), true)
@@ -381,33 +500,40 @@ function SceneRefStrip({ projectId, sceneName, segments, disabled, onChanged }: 
   }
 
   return (
-    <div style={{ margin: '2px 0 8px' }}>
-      <label className="f">场景版本（按适用集；可单视角重做）</label>
-      <div style={{ display: 'flex', gap: 12, overflowX: 'auto', paddingBottom: 4 }}>
+    <section className="scene-version-list">
+      <div className="scene-version-heading">
+        <div>
+          <h3>参考视角</h3>
+          <p>每个适用版本包含同一空间的不同机位；当前版本可单独重做某个视角。</p>
+        </div>
+      </div>
+      <div className="scene-version-track">
         {sorted.map((seg, i) => (
-          <div key={seg.id || i} style={{ flex: '0 0 auto', minWidth: 120 }}>
-            <div style={{ fontSize: 11, color: 'var(--ink-soft)', marginBottom: 4 }}>
+          <article key={seg.id || i} className="scene-version-card">
+            <div className="scene-version-meta">
               {sceneRangeLabel(seg.ep_start, seg.ep_end)}
               {seg.pack_status ? ` · ${seg.pack_status}` : ''}
             </div>
             {(seg.views && seg.views.length > 0) ? (
-              <div className="portrait-view-strip">
+              <div className="scene-view-grid">
                 {seg.views.map(view => view.image_url ? (
-                  <div key={view.id} className="portrait-view-chip">
+                  <figure key={view.id} className="scene-view-card">
                     <img src={view.image_url} alt={view.view_role || 'view'} />
-                    <span>{viewLabels[view.view_role || ''] || view.view_role || '视角'}</span>
+                    <figcaption>
+                      <b>{sceneViewPresentation(view.view_role).label}</b>
+                      <span>{sceneViewPresentation(view.view_role).description}</span>
+                    </figcaption>
                     {current?.id === seg.id && seg.id && view.view_role && (
                       <button
                         type="button"
                         className="btn small ghost"
-                        style={{ fontSize: 10, padding: '1px 6px', marginTop: 2 }}
                         disabled={disabled || !!redoing}
                         onClick={() => redoView(seg.id!, view.view_role!)}
                       >
                         {redoing === `${seg.id}:${view.view_role}` ? '重做中…' : '重做'}
                       </button>
                     )}
-                  </div>
+                  </figure>
                 ) : null)}
               </div>
             ) : (
@@ -420,10 +546,10 @@ function SceneRefStrip({ projectId, sceneName, segments, disabled, onChanged }: 
                                   fontSize: 11, color: 'var(--ink-faint)' }}>无图</div>}
               </div>
             )}
-          </div>
+          </article>
         ))}
       </div>
-    </div>
+    </section>
   )
 }
 
