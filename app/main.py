@@ -36,6 +36,10 @@ async def lifespan(_: FastAPI):
     ensure_session_secret()
     purge_legacy_screenplays()
     await recover_all()
+    from app.video_supervisor import video_supervisor_watchdog_loop
+    task_registry.spawn(
+        "system", "video_supervisor_watchdog", video_supervisor_watchdog_loop(),
+    )
     try:
         yield
     finally:

@@ -1,15 +1,14 @@
-/** 镜头视频统一状态机：轨道 / 标题 / 播放器 / 版本卡必须共用同一判定。
- * 执行阶段只读后端 shot.pipeline，不再用 versions 状态二次推断活动阶段。 */
+/** 评审墙镜头视频五态。
+ * 后端 shot.video_status / shot.pipeline.video_status 是权威状态；版本数据只用于兼容旧响应。
+ */
 import type { Shot, ShotVersion } from './api'
 
 export type ShotVideoPhase =
-  | 'empty'
-  | 'working'
-  | 'failed'
-  | 'ready'
+  | 'pending_generation'
+  | 'generating'
+  | 'pending_adoption'
   | 'adopted'
-  | 'stale'
-  | 'waiting_human'
+  | 'generation_failed'
 
 export interface ShotVideoState {
   phase: ShotVideoPhase
@@ -24,145 +23,129 @@ export interface ShotVideoState {
 }
 
 const PHASE_LABEL: Record<ShotVideoPhase, string> = {
-  empty: '待生成',
-  working: '生成中',
-  failed: '生成失败',
-  ready: '待采用',
-  adopted: '已采用',
-  stale: '需重生',
-  waiting_human: '待人工',
+  pending_generation: '待生成',
+  generating: '生成中',
+  pending_adoption: '待采纳',
+  adopted: '已采纳',
+  generation_failed: '生成失败',
 }
 
+const VIDEO_PHASES = new Set<ShotVideoPhase>(Object.keys(PHASE_LABEL) as ShotVideoPhase[])
+
 const ACTIVE_PIPELINE = new Set([
-  'queued', 'running', 'waiting', 'waiting_provider', 'blocked', 'waiting_human',
+  'queued',
+  'running',
+  'waiting',
+  'waiting_provider',
+  'waiting_retry',
+  'waiting_budget',
+  'paused_budget',
+  'blocked',
 ])
+
+function backendPhase(shot: Shot): ShotVideoPhase | undefined {
+  const value = shot.video_status ?? shot.pipeline?.video_status
+  return value && VIDEO_PHASES.has(value) ? value : undefined
+}
 
 export function shotVideoState(shot: Shot): ShotVideoState {
   const versions = shot.versions ?? []
-  const adopted = versions.find(v => v.id === shot.adopted_version_id)
+  const adopted = versions.find(version => version.id === shot.adopted_version_id)
   const latest = versions[0]
-  const pipeline = shot.pipeline
-
-  // 权威阶段：只信后端 pipeline；versions 仅用于播放/采用
-  const pipelineActive = pipeline != null && ACTIVE_PIPELINE.has(pipeline.pipeline_status)
-  const legacyVersionWorking = !pipeline && versions.some(v =>
-    v.status === 'queued' || v.status === 'running' || v.status === 'waiting_provider'
+  const playableAdopted = adopted?.status === 'succeeded' && !!adopted.video_url
+  const playableCandidate = versions.find(
+    version => version.status === 'succeeded' && !!version.video_url,
   )
-  const working = pipelineActive || legacyVersionWorking
+  const activeVersion = versions.find(
+    version => version.status === 'queued'
+      || version.status === 'running'
+      || version.status === 'waiting_provider',
+  )
 
-  if (pipeline?.stage_label && (
-    working
-    || pipeline.pipeline_status === 'waiting_human'
-    || pipeline.pipeline_status === 'blocked'
-  )) {
-    const phase: ShotVideoPhase =
-      pipeline.pipeline_status === 'waiting_human' || pipeline.pipeline_status === 'blocked'
-        ? 'waiting_human'
-        : 'working'
-    const playing = versions.find(v =>
-      v.status === 'queued' || v.status === 'running' || v.status === 'waiting_provider'
-    ) || adopted || latest
-    return {
-      phase,
-      label: pipeline.stage_label,
-      railClass: phase === 'waiting_human' ? 'failed' : 'working',
-      adopted,
-      latest,
-      playing,
-    }
-  }
+  const grade = shot.video_grade ?? null
+  const fallbackReason = shot.fallback_reason ?? null
+  const continuityDegraded = !!shot.continuity_degraded
 
-  if (working) {
-    const playing = versions.find(v =>
-      v.status === 'queued' || v.status === 'running' || v.status === 'waiting_provider'
-    ) || adopted || latest
-    return {
-      phase: 'working',
-      label: pipeline?.stage_label || PHASE_LABEL.working,
-      railClass: 'working',
-      adopted,
-      latest,
-      playing,
-    }
-  }
-
-  const adoptedOk = adopted?.status === 'succeeded' && !!adopted.video_url
-  const grade = (shot as { video_grade?: 'A' | 'B' | 'C' | null }).video_grade
-    ?? (shot as { grade?: 'A' | 'B' | 'C' | null }).grade
-    ?? null
-  const fallbackReason = (shot as { fallback_reason?: string | null }).fallback_reason ?? null
-  const continuityDegraded = !!(shot as { continuity_degraded?: boolean }).continuity_degraded
-
-  if (adoptedOk) {
-    if (shot.video_stale) {
-      return {
-        phase: 'stale', label: PHASE_LABEL.stale, railClass: 'failed',
-        adopted, latest, playing: adopted, grade: grade || 'C', fallbackReason, continuityDegraded,
+  // 防御旧响应或刷新竞争：只要采纳版可播放，就绝不能被生成/过期状态覆盖。
+  let phase: ShotVideoPhase
+  if (playableAdopted) {
+    phase = 'adopted'
+  } else {
+    const authoritative = backendPhase(shot)
+    if (authoritative) {
+      phase = authoritative
+    } else {
+      const pipelineActive = shot.pipeline != null
+        && ACTIVE_PIPELINE.has(shot.pipeline.pipeline_status)
+      const legacyVersionWorking = !shot.pipeline && !!activeVersion
+      if (pipelineActive || legacyVersionWorking) {
+        phase = 'generating'
+      } else if (playableCandidate) {
+        phase = 'pending_adoption'
+      } else if (
+        shot.pipeline?.pipeline_status === 'failed'
+        || latest?.status === 'failed'
+        || versions.some(version => version.status === 'failed')
+      ) {
+        phase = 'generation_failed'
+      } else {
+        phase = 'pending_generation'
       }
     }
-    if (grade === 'B' || fallbackReason) {
-      return {
-        phase: 'adopted',
-        label: continuityDegraded ? '已采用（兜底·衔接降级）' : '已采用（兜底）',
-        railClass: 'fallback',
-        adopted, latest, playing: adopted,
-        grade: 'B',
-        fallbackReason,
-        continuityDegraded,
-      }
-    }
-    return {
-      phase: 'adopted',
-      label: PHASE_LABEL.adopted,
-      railClass: 'ready',
-      adopted, latest, playing: adopted,
-      grade: grade || 'A',
-      fallbackReason: null,
-      continuityDegraded,
-    }
   }
 
-  const succeeded = versions.find(v => v.status === 'succeeded' && !!v.video_url)
-  if (succeeded) {
-    return { phase: 'ready', label: PHASE_LABEL.ready, railClass: 'ready', adopted, latest, playing: succeeded }
-  }
+  const playing = phase === 'adopted'
+    ? adopted
+    : phase === 'generating'
+      ? activeVersion || playableCandidate || latest
+      : playableCandidate || latest
 
-  if (pipeline?.pipeline_status === 'failed' || latest?.status === 'failed' || versions.some(v => v.status === 'failed')) {
-    return {
-      phase: 'failed',
-      label: pipeline?.stage_label || PHASE_LABEL.failed,
-      railClass: 'failed',
-      adopted,
-      latest,
-      playing: latest,
-    }
-  }
+  const railClass: ShotVideoState['railClass'] = phase === 'generating'
+    ? 'working'
+    : phase === 'generation_failed'
+      ? 'failed'
+      : phase === 'pending_generation'
+        ? 'empty'
+        : phase === 'adopted' && (grade === 'B' || !!fallbackReason)
+          ? 'fallback'
+          : 'ready'
 
-  return { phase: 'empty', label: PHASE_LABEL.empty, railClass: 'empty', adopted, latest, playing: latest }
+  return {
+    phase,
+    label: PHASE_LABEL[phase],
+    railClass,
+    adopted,
+    latest,
+    playing,
+    grade: phase === 'adopted' ? (grade || 'A') : grade,
+    fallbackReason,
+    continuityDegraded,
+  }
 }
 
-/** 进度统计：仅计「已采用且未过期」为完成 */
 export function countAdoptedVideos(shots: Shot[]): number {
-  return shots.filter(s => {
-    const { phase } = shotVideoState(s)
-    return phase === 'adopted'
-  }).length
+  return shots.filter(shot => shotVideoState(shot).phase === 'adopted').length
 }
 
-export function formatPipelineSummary(summary: import('./api').EpisodePipelineSummary | null | undefined, shotsTotal: number): string {
-  if (!summary) {
-    return `已采用 —/${shotsTotal}`
-  }
-  const parts = [
-    `${summary.shots_total} 镜`,
-    `已采用 ${summary.adopted}`,
-    `视频生成中 ${summary.upstream_generating}`,
-  ]
-  if (summary.video_ready != null) parts.push(`视频就绪待槽 ${summary.video_ready}`)
-  parts.push(`参考图制作 ${summary.preparing_references}`)
-  if (summary.waiting_continuity != null) parts.push(`等连续性 ${summary.waiting_continuity}`)
-  if (summary.video_qa != null) parts.push(`视频质检 ${summary.video_qa}`)
-  parts.push(`待人工 ${summary.waiting_human}`)
-  if (summary.failed != null) parts.push(`失败 ${summary.failed}`)
-  return parts.join(' · ')
+export function formatPipelineSummary(
+  summary: import('./api').EpisodePipelineSummary | null | undefined,
+  shotsTotal: number,
+): string {
+  const counts = summary?.video_status_counts
+  const adopted = counts?.adopted ?? summary?.adopted ?? 0
+  const generating = counts?.generating ?? summary?.upstream_generating ?? 0
+  const pendingAdoption = counts?.pending_adoption
+    ?? Math.max(0, (summary?.with_candidate ?? adopted) - adopted)
+  const failed = counts?.generation_failed ?? summary?.failed ?? 0
+  const pendingGeneration = counts?.pending_generation
+    ?? Math.max(0, shotsTotal - adopted - generating - pendingAdoption - failed)
+
+  return [
+    `${summary?.shots_total ?? shotsTotal} 镜`,
+    `待生成 ${pendingGeneration}`,
+    `生成中 ${generating}`,
+    `待采纳 ${pendingAdoption}`,
+    `已采纳 ${adopted}`,
+    `生成失败 ${failed}`,
+  ].join(' · ')
 }

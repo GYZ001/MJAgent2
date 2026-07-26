@@ -366,7 +366,7 @@ function ShotStrip({ shot, episode, onChanged, disabled }: {
   const [conflictOpen, setConflictOpen] = useState(false)
   const [conflictBusy, setConflictBusy] = useState(false)
   const s = edit ?? shot
-  const contLabel = continuityLabel(s.continuity_mode, s.continuity_from_prev)
+  const contLabel = continuityLabel(s.continuity_mode, !!s.continuity_from_prev)
 
   async function save() {
     if (!edit) return

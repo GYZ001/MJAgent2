@@ -251,3 +251,55 @@ def test_low_qa_video_stops_auto_retake_after_limit(monkeypatch) -> None:
 
     assert enqueued == []
     assert force_best is True
+
+
+def test_complete_mode_qa_records_score_but_defers_retake_to_supervisor(monkeypatch) -> None:
+    conn = _conn()
+    _seed_project(conn)
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker.shutil, "which", lambda _name: "/usr/bin/tool")
+    monkeypatch.setattr(worker, "_extract_frames", lambda _path: ["frame"])
+    monkeypatch.setattr(
+        worker,
+        "get_setting",
+        lambda key: {"auto_qa": "true", "auto_retake_threshold": "0.6", "video_auto_retake_limit": "2"}.get(key),
+    )
+
+    async def low_qa(*_args, **_kwargs):
+        return {"overall": 0.1, "issues": ["角色漂移"]}
+
+    monkeypatch.setattr(stages, "qa_shot", low_qa)
+    enqueued: list[dict] = []
+    monkeypatch.setattr(
+        worker,
+        "enqueue_shot",
+        lambda shot_id, **kwargs: enqueued.append({"shot_id": shot_id, **kwargs}) or {},
+    )
+    monkeypatch.setattr(worker, "log_provider_call", lambda *_args, **_kwargs: None)
+    version = worker.new_id("ver")
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id, shot_id, version_no, prompt_text, idem_key, status, video_path,
+               image_inputs, created_at
+           ) VALUES(?, 's1', 1, 'PROMPT', 'idem-controlled', 'succeeded', '/tmp/v.mp4', ?, 1.0)""",
+        (version, json.dumps({
+            "mode": "REFERENCE_IMAGE_MODE",
+            "reference_images": [{"id": "r1", "selectedForSeedance": True}],
+            "auto_retake_count": 0,
+        })),
+    )
+    conn.commit()
+
+    force_best = asyncio.run(worker._maybe_auto_qa({
+        "id": "j1",
+        "shot_id": "s1",
+        "project_id": "p1",
+        "after_shot_id": None,
+    }, version, "/tmp/v.mp4", allow_autonomous_retake=False))
+
+    assert enqueued == []
+    assert force_best is False
+    qa = json.loads(conn.execute(
+        "SELECT qa_json FROM shot_versions WHERE id=?", (version,),
+    ).fetchone()["qa_json"])
+    assert qa["overall"] == 0.1

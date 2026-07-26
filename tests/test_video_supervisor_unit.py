@@ -222,10 +222,14 @@ def test_state_drift():
 
 def test_covered_within_quota():
     entries = [
-        ShotCoverageEntry(shot_no=i, shot_id=f"s{i}", grade="A")
+        ShotCoverageEntry(
+            shot_no=i, shot_id=f"s{i}", grade="A", adopted_version_id=f"v{i}",
+        )
         for i in range(1, 10)
     ]
-    entries.append(ShotCoverageEntry(shot_no=10, shot_id="s10", grade="B"))
+    entries.append(ShotCoverageEntry(
+        shot_no=10, shot_id="s10", grade="B", adopted_version_id="v10",
+    ))
     ledger = CoverageLedger(
         episode_id="ep",
         shots_total=10,
@@ -236,7 +240,9 @@ def test_covered_within_quota():
     )
     assert ledger.covered_within_quota() is True
 
-    entries2 = entries + [ShotCoverageEntry(shot_no=11, shot_id="s11", grade="B")]
+    entries2 = entries + [ShotCoverageEntry(
+        shot_no=11, shot_id="s11", grade="B", adopted_version_id="v11",
+    )]
     # rebuild grades
     ledger2 = CoverageLedger(
         episode_id="ep",
@@ -246,7 +252,12 @@ def test_covered_within_quota():
         fallback_quota=1,
         entries=entries2,
     )
-    assert ledger2.covered_within_quota() is False  # B 超配额
+    assert ledger2.covered_within_quota() is True  # 已采用版本不因 B 配额被撤销或重烧
+
+    unadopted = entries.copy()
+    unadopted[0] = unadopted[0].model_copy(update={"adopted_version_id": None})
+    ledger3 = ledger.model_copy(update={"entries": unadopted})
+    assert ledger3.covered_within_quota() is False  # 有候选但未采用不能冒充完成
 
 
 def test_video_grant_episode_binding(tmp_path, monkeypatch):

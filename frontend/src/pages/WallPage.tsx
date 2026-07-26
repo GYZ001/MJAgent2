@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import EpisodeCrumb from '../components/EpisodeCrumb'
 import { useEpisode, useNav } from '../App'
 import { api, type Shot, type ShotVersion, type ReferenceImage } from '../api'
-import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
+import { ServerTaskTimer, TaskTimer, useTaskTimer } from '../components/TaskTimer'
 import { countAdoptedVideos, formatPipelineSummary, shotVideoState } from '../shotStatus'
 import AsyncButton from '../components/AsyncButton'
 import QueryState from '../components/QueryState'
@@ -17,16 +17,16 @@ const REVIEW_TABS: { id: ReviewTab; label: string }[] = [
   { id: 'videos', label: '视频对比' },
 ]
 
-const VIDEO_VERSION_STATUS_LABEL: Record<string, string> = {
-  queued: '排队中',
-  running: '生成中',
-  waiting_provider: '上游生成中',
-  succeeded: '已完成',
-  failed: '失败',
-  cancelled: '已停止',
-  abandoned: '已停止',
-  paused_budget: '预算暂停',
-  waiting_human: '待人工',
+function videoVersionStatusLabel(version: ShotVersion, adopted: boolean): string {
+  if (adopted) return '已采纳'
+  if (version.status === 'succeeded' && version.video_url) return '待采纳'
+  if (version.status === 'failed') return '生成失败'
+  if (
+    version.status === 'queued'
+    || version.status === 'running'
+    || version.status === 'waiting_provider'
+  ) return '生成中'
+  return '待生成'
 }
 
 function commaList(value?: string[]): string {
@@ -229,6 +229,7 @@ export default function WallPage() {
   const [clearMenuOpen, setClearMenuOpen] = useState(false)
   const [genMenuOpen, setGenMenuOpen] = useState(false)
   const [supervisorKickoff, setSupervisorKickoff] = useState(false)
+  const [supervisorPanelDismissed, setSupervisorPanelDismissed] = useState(false)
   const toastTimerRef = useRef<number>()
 
   const showToast = useCallback((msg: string) => {
@@ -283,17 +284,15 @@ export default function WallPage() {
   const supervisorPhase = typeof ep?.video_supervisor?.phase === 'string'
     ? ep.video_supervisor.phase
     : ''
-  const supervisorTerminal = supervisorPhase === 'SUCCEEDED_COVERED' || supervisorPhase === 'CANCELLED'
+  const supervisorTerminal = [
+    'SUCCEEDED_COVERED', 'COMPLETED_DEADLINE_FALLBACK',
+    'PARTIAL_NO_USABLE_CANDIDATE', 'FAILED_CLOSED', 'CANCELLED',
+  ].includes(supervisorPhase)
+  const supervisorTaskRunning = ep?.video_supervisor?.task_running === true
+  const supervisorRunFailed = ep?.video_supervisor?.run_status === 'FAILED'
   const supervisorLive = Boolean(
     supervisorKickoff
-    || (
-      !supervisorTerminal
-      && (
-        ep?.video_completion_mode === 'complete'
-        || ep?.active_video_run_id
-        || ep?.video_supervisor
-      )
-    ),
+    || (!supervisorTerminal && supervisorTaskRunning),
   )
   const videoActive = supervisorLive || shots.some(s =>
     (s.pipeline != null && ['queued', 'running', 'waiting', 'waiting_provider', 'blocked'].includes(s.pipeline.pipeline_status))
@@ -302,10 +301,20 @@ export default function WallPage() {
   const videoTimer = useTaskTimer(`episode.${episodeId}.videos`, videoActive)
 
   useEffect(() => {
-    if (supervisorTerminal || (ep?.video_supervisor && ep.video_completion_mode === 'complete')) {
+    if (supervisorTerminal || supervisorTaskRunning) {
       setSupervisorKickoff(false)
     }
-  }, [supervisorTerminal, ep?.video_supervisor, ep?.video_completion_mode])
+  }, [supervisorTerminal, supervisorTaskRunning])
+
+  useEffect(() => {
+    setSupervisorPanelDismissed(false)
+  }, [episodeId])
+
+  useEffect(() => {
+    if (supervisorKickoff || supervisorTaskRunning) {
+      setSupervisorPanelDismissed(false)
+    }
+  }, [supervisorKickoff, supervisorTaskRunning])
 
   const openLightbox = useCallback((src: string, label?: string) => {
     setLightbox({ src, label })
@@ -365,6 +374,7 @@ export default function WallPage() {
     const startOk = window.confirm(
       `确认启动「补齐到全片可用」？\n`
       + `预算 ¥${budget || 150} · ${wallH || 4}h · 微调分镜：${allowEdit ? '是' : '否'}\n`
+      + `只处理尚未采用的 ${Math.max(0, shots.length - adoptedCount)} 镜；已有采用的 ${adoptedCount} 镜会原样保留，不重生、不换版。\n`
       + `不会自动拼接成片或创建交付包。`,
     )
     if (!startOk) return
@@ -441,9 +451,24 @@ export default function WallPage() {
           </span>
         </div>
         <div className="wall-topbar-right">
-          <TaskTimer label="视频" timer={videoTimer} />
+          {typeof ep.video_supervisor?.started_at === 'number'
+            ? <ServerTaskTimer
+                label="视频"
+                startedAt={ep.video_supervisor.started_at}
+                finishedAt={typeof ep.video_supervisor.finished_at === 'number' ? ep.video_supervisor.finished_at : null}
+                running={supervisorTaskRunning}
+              />
+            : <TaskTimer label="视频" timer={videoTimer} />}
           <span className={`stamp ${ep.status === 'done' && !supervisorLive ? 'green' : (ep.status === 'confirmed' && !supervisorLive) ? 'green' : (ep.status === 'generating' || supervisorLive) ? 'gold' : 'grey'}`}>
-            {supervisorLive
+            {supervisorRunFailed && !supervisorLive
+              ? 'Supervisor失败'
+              : supervisorTerminal
+              ? (supervisorPhase === 'SUCCEEDED_COVERED' ? '补齐完成'
+                : supervisorPhase === 'COMPLETED_DEADLINE_FALLBACK' ? '截止已收口'
+                : supervisorPhase === 'PARTIAL_NO_USABLE_CANDIDATE' ? '部分收口'
+                : supervisorPhase === 'FAILED_CLOSED' ? '安全停止'
+                : '已取消')
+              : supervisorLive
               ? (supervisorPhase === 'WAITING_AUTHORIZATION' ? '等待授权'
                 : supervisorPhase === 'WAITING_HUMAN' ? '待人工'
                 : supervisorPhase === 'PAUSED_EXTERNAL' || supervisorPhase === 'PAUSED_BUDGET' ? '已暂停'
@@ -491,18 +516,16 @@ export default function WallPage() {
         </div>
       </div>
 
-      {(supervisorLive
-        || ep.video_completion_mode === 'complete'
-        || (ep.active_video_run_id && !supervisorTerminal)
-        || (ep.video_supervisor && !supervisorTerminal)) && (
+      {!supervisorPanelDismissed && (supervisorLive || ep.video_supervisor) && (
         <VideoSupervisorPanel
           api={api}
           episodeId={ep.id}
           runId={ep.active_video_run_id}
           supervisor={ep.video_supervisor as import('../components/VideoSupervisorPanel').VideoSupervisorSnapshot | null}
-          running={supervisorLive || ep.status === 'generating'}
-          onChanged={() => void refreshAll()}
+          running={supervisorTaskRunning || supervisorKickoff}
+          onChanged={refreshAll}
           onToast={showToast}
+          onDismiss={() => setSupervisorPanelDismissed(true)}
         />
       )}
 
@@ -612,8 +635,8 @@ function ShotSlide({ shot, episodeStatus, generating,
         <span className={`stamp ${
           videoState.grade === 'B' || videoState.railClass === 'fallback' ? 'gold'
             : videoState.phase === 'adopted' ? 'green'
-              : videoState.phase === 'working' ? 'gold'
-                : videoState.phase === 'failed' || videoState.phase === 'stale' ? 'red'
+              : videoState.phase === 'generating' ? 'gold'
+                : videoState.phase === 'generation_failed' ? 'red'
                   : 'grey'
         }`}>{videoState.label}</span>
         {videoState.continuityDegraded ? <span className="continuity-degraded-badge">衔接已降级</span> : null}
@@ -797,9 +820,9 @@ function InfoSection({ shot, current }: { shot: Shot; current?: ShotVersion }) {
 function VideoPlayer({ current, previewing, phase }: {
   current?: ShotVersion; previewing?: boolean; phase?: string
 }) {
-  const emptyLabel = phase === 'working' || current?.status === 'queued' || current?.status === 'running'
+  const emptyLabel = phase === 'generating' || current?.status === 'queued' || current?.status === 'running'
     ? '⏳ 生成中…'
-    : phase === 'failed' || current?.status === 'failed'
+    : phase === 'generation_failed' || current?.status === 'failed'
       ? '生成失败'
       : '暂无视频'
   return (
@@ -890,10 +913,10 @@ function VideoControls({ mode, shot, episodeStatus, current, previewVersionId, g
             <button className="btn primary small" disabled={disabled}
               onClick={() => onGenVideo({
                 // 已有采用版时强制重抽，避免幂等复用旧版本形成死循环
-                reroll: hasAdopted || videoState.phase === 'stale',
-                actionLabel: hasAdopted || videoState.phase === 'stale' ? '重生成视频' : '生成本镜视频',
+                reroll: hasAdopted,
+                actionLabel: hasAdopted ? '重生成视频' : '生成本镜视频',
               })}>
-              {generating ? '生成中…' : hasAdopted || videoState.phase === 'stale' ? '重生成视频' : '生成本镜视频'}
+              {generating ? '生成中…' : hasAdopted ? '重生成视频' : '生成本镜视频'}
             </button>
           )}
           {hasActiveVideoTask && (
@@ -963,7 +986,7 @@ function VideoControls({ mode, shot, episodeStatus, current, previewVersionId, g
                     <div className="version-compare-heading">
                       <b>v{version.version_no}</b>
                       <span className={`stamp ${stampClass}`}>
-                        {VIDEO_VERSION_STATUS_LABEL[version.status] ?? version.status}
+                        {videoVersionStatusLabel(version, adopted)}
                       </span>
                     </div>
                     <span>QA {version.qa?.overall?.toFixed(2) ?? '未评估'} · ￥{version.cost_cny.toFixed(2)} · {version.latency_s.toFixed(1)}s</span>

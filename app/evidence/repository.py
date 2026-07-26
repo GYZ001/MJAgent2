@@ -62,6 +62,7 @@ def create_run(
     policy_snapshot: dict[str, Any] | None = None,
     config_snapshot: dict[str, Any] | None = None,
     budget_limit_cny: float | None = None,
+    deadline_at: float | None = None,
     parent_run_id: str | None = None,
 ) -> str:
     run_id = new_id("run")
@@ -71,12 +72,12 @@ def create_run(
         """INSERT INTO workflow_runs(
             id, workflow_type, scope_type, scope_id, parent_run_id, status,
             requested_by, trigger_type, input_fingerprint, policy_snapshot_json,
-            config_snapshot_json, budget_limit_cny, updated_at
-        ) VALUES(?,?,?,?,?,'CREATED',?,?,?,?,?,?,?)""",
+            config_snapshot_json, budget_limit_cny, deadline_at, updated_at
+        ) VALUES(?,?,?,?,?,'CREATED',?,?,?,?,?,?,?,?)""",
         (
             run_id, workflow_type, scope_type, scope_id, parent_run_id, requested_by,
             trigger_type, input_fingerprint, _json(policy_snapshot or {}),
-            _json(config_snapshot or {}), budget_limit_cny, stamp,
+            _json(config_snapshot or {}), budget_limit_cny, deadline_at, stamp,
         ),
     )
     if parent_run_id:

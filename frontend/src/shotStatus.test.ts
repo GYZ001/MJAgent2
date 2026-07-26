@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { Shot, ShotVersion } from './api'
-import { countAdoptedVideos, shotVideoState } from './shotStatus'
+import { countAdoptedVideos, formatPipelineSummary, shotVideoState } from './shotStatus'
 
-function version( partial: Partial<ShotVersion> & Pick<ShotVersion, 'id' | 'status'>): ShotVersion {
+function version(partial: Partial<ShotVersion> & Pick<ShotVersion, 'id' | 'status'>): ShotVersion {
   return {
     version_no: 1,
     prompt_text: '',
@@ -42,103 +42,93 @@ function shot(partial: Partial<Shot> & { versions?: ShotVersion[] }): Shot {
 }
 
 describe('shotVideoState', () => {
-  it('空镜头为待生成', () => {
-    expect(shotVideoState(shot({})).phase).toBe('empty')
-    expect(shotVideoState(shot({})).label).toBe('待生成')
+  it('只输出后端约定的五种主状态', () => {
+    const fixtures: Array<[Partial<Shot>, string, string]> = [
+      [{ video_status: 'pending_generation' }, 'pending_generation', '待生成'],
+      [{ video_status: 'generating' }, 'generating', '生成中'],
+      [{ video_status: 'pending_adoption' }, 'pending_adoption', '待采纳'],
+      [{
+        video_status: 'adopted',
+        adopted_version_id: 'v1',
+        versions: [version({ id: 'v1', status: 'succeeded', video_url: '/a.mp4' })],
+      }, 'adopted', '已采纳'],
+      [{
+        video_status: 'generation_failed',
+        versions: [version({ id: 'v1', status: 'failed' })],
+      }, 'generation_failed', '生成失败'],
+    ]
+
+    for (const [input, phase, label] of fixtures) {
+      const state = shotVideoState(shot(input))
+      expect(state.phase).toBe(phase)
+      expect(state.label).toBe(label)
+    }
   })
 
-  it('queued/running 优先于已采用与失败', () => {
-    const s = shot({
-      adopted_version_id: 'v1',
-      versions: [
-        version({ id: 'v2', status: 'running' }),
-        version({ id: 'v1', status: 'succeeded', video_url: '/a.mp4', version_no: 1 }),
-      ],
-    })
-    expect(shotVideoState(s).phase).toBe('working')
-    expect(shotVideoState(s).railClass).toBe('working')
-  })
-
-  it('存在成功版但未采用 → 待采用，而不是已完成', () => {
-    const s = shot({
-      versions: [version({ id: 'v1', status: 'succeeded', video_url: '/a.mp4' })],
-    })
-    const state = shotVideoState(s)
-    expect(state.phase).toBe('ready')
-    expect(state.label).toBe('待采用')
-    expect(state.railClass).toBe('ready')
-  })
-
-  it('已采用且未过期 → 已采用', () => {
-    const s = shot({
-      adopted_version_id: 'v1',
-      versions: [version({ id: 'v1', status: 'succeeded', video_url: '/a.mp4' })],
-    })
-    expect(shotVideoState(s).phase).toBe('adopted')
-  })
-
-  it('已采用但 video_stale → 需重生', () => {
-    const s = shot({
+  it('可播放采纳版优先于重生成任务、video_stale 和后端竞争态', () => {
+    const state = shotVideoState(shot({
+      video_status: 'generating',
       adopted_version_id: 'v1',
       video_stale: true,
-      versions: [version({ id: 'v1', status: 'succeeded', video_url: '/a.mp4' })],
-    })
-    expect(shotVideoState(s).phase).toBe('stale')
-    expect(shotVideoState(s).railClass).toBe('failed')
-  })
-
-  it('最新失败且无成功版 → 生成失败', () => {
-    const s = shot({
-      versions: [version({ id: 'v1', status: 'failed', error: 'timeout' })],
-    })
-    expect(shotVideoState(s).phase).toBe('failed')
-  })
-
-  it('仅有 succeeded 但无 video_url 不算 ready', () => {
-    const s = shot({
-      versions: [version({ id: 'v1', status: 'succeeded' })],
-    })
-    expect(shotVideoState(s).phase).toBe('empty')
-  })
-
-  it('采用版失败时不算 adopted，回退到其它成功版', () => {
-    const s = shot({
-      adopted_version_id: 'v-bad',
+      pipeline: {
+        video_status: 'generating',
+        pipeline_status: 'running',
+        candidate_count: 1,
+        retake_count: 1,
+      },
       versions: [
-        version({ id: 'v2', status: 'succeeded', video_url: '/ok.mp4', version_no: 2 }),
-        version({ id: 'v-bad', status: 'failed', version_no: 1 }),
+        version({ id: 'v2', status: 'running', version_no: 2 }),
+        version({ id: 'v1', status: 'succeeded', video_url: '/adopted.mp4', version_no: 1 }),
       ],
-    })
-    expect(shotVideoState(s).phase).toBe('ready')
-    expect(shotVideoState(s).playing?.id).toBe('v2')
+    }))
+
+    expect(state.phase).toBe('adopted')
+    expect(state.label).toBe('已采纳')
+    expect(state.playing?.id).toBe('v1')
   })
 
-  it('B 级采用 → fallback rail 与兜底原因', () => {
-    const s = shot({
+  it('后端状态优先于前端对版本列表的二次猜测', () => {
+    const state = shotVideoState(shot({
+      video_status: 'generating',
+      versions: [version({ id: 'legacy', status: 'failed' })],
+    }))
+
+    expect(state.phase).toBe('generating')
+    expect(state.label).toBe('生成中')
+  })
+
+  it('兼容旧响应时仍按同一五态规则归并', () => {
+    expect(shotVideoState(shot({})).phase).toBe('pending_generation')
+    expect(shotVideoState(shot({
+      versions: [version({ id: 'v1', status: 'running' })],
+    })).phase).toBe('generating')
+    expect(shotVideoState(shot({
+      versions: [version({ id: 'v1', status: 'succeeded', video_url: '/candidate.mp4' })],
+    })).phase).toBe('pending_adoption')
+    expect(shotVideoState(shot({
+      versions: [version({ id: 'v1', status: 'failed' })],
+    })).phase).toBe('generation_failed')
+  })
+
+  it('B 级采纳版保留风险信息但主状态仍是已采纳', () => {
+    const state = shotVideoState(shot({
       adopted_version_id: 'v1',
       video_grade: 'B',
       fallback_reason: 'attempt budget 用尽，技术合格兜底',
+      continuity_degraded: true,
       versions: [version({ id: 'v1', status: 'succeeded', video_url: '/b.mp4' })],
-    })
-    const state = shotVideoState(s)
-    expect(state.grade).toBe('B')
+    }))
+
+    expect(state.phase).toBe('adopted')
+    expect(state.label).toBe('已采纳')
     expect(state.railClass).toBe('fallback')
     expect(state.fallbackReason).toContain('兜底')
-  })
-
-  it('衔接降级标记透出', () => {
-    const s = shot({
-      adopted_version_id: 'v1',
-      video_grade: 'B',
-      continuity_degraded: true,
-      versions: [version({ id: 'v1', status: 'succeeded', video_url: '/d.mp4' })],
-    })
-    expect(shotVideoState(s).continuityDegraded).toBe(true)
+    expect(state.continuityDegraded).toBe(true)
   })
 })
 
-describe('countAdoptedVideos', () => {
-  it('只统计已采用且未过期', () => {
+describe('review wall summary', () => {
+  it('采纳统计包含 stale 的可播放采纳版', () => {
     const shots = [
       shot({
         id: 'a',
@@ -147,15 +137,34 @@ describe('countAdoptedVideos', () => {
       }),
       shot({
         id: 'b',
+        adopted_version_id: 'v2',
+        video_stale: true,
         versions: [version({ id: 'v2', status: 'succeeded', video_url: '/b.mp4' })],
       }),
-      shot({
-        id: 'c',
-        adopted_version_id: 'v3',
-        video_stale: true,
-        versions: [version({ id: 'v3', status: 'succeeded', video_url: '/c.mp4' })],
-      }),
     ]
-    expect(countAdoptedVideos(shots)).toBe(1)
+
+    expect(countAdoptedVideos(shots)).toBe(2)
+  })
+
+  it('顶部汇总只展示五态', () => {
+    const summary = formatPipelineSummary({
+      shots_total: 5,
+      adopted: 1,
+      with_candidate: 2,
+      upstream_generating: 1,
+      preparing_references: 0,
+      queued: 0,
+      waiting_human: 1,
+      failed: 1,
+      video_status_counts: {
+        pending_generation: 1,
+        generating: 1,
+        pending_adoption: 1,
+        adopted: 1,
+        generation_failed: 1,
+      },
+    }, 5)
+
+    expect(summary).toBe('5 镜 · 待生成 1 · 生成中 1 · 待采纳 1 · 已采纳 1 · 生成失败 1')
   })
 })

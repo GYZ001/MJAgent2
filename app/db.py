@@ -147,6 +147,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     after_version_id TEXT,
     scene_kinds TEXT,
     run_id TEXT,
+    owner_run_id TEXT,
     step_run_id TEXT,
     lease_owner TEXT,
     lease_expires_at REAL,
@@ -681,6 +682,7 @@ MIGRATIONS = (
     "ALTER TABLE projects ADD COLUMN scene_refs_target TEXT",
     "ALTER TABLE shots ADD COLUMN scene_name TEXT",  # 归一化命中的库内规范场景名（渲染期取场景库图复用）
     "ALTER TABLE jobs ADD COLUMN run_id TEXT",
+    "ALTER TABLE jobs ADD COLUMN owner_run_id TEXT",
     "ALTER TABLE jobs ADD COLUMN step_run_id TEXT",
     "ALTER TABLE jobs ADD COLUMN lease_owner TEXT",
     "ALTER TABLE jobs ADD COLUMN lease_expires_at REAL",
@@ -758,6 +760,7 @@ INTEGRITY_SCHEMA = """
 -- must be created only after the additive migration pass has completed.
 CREATE INDEX IF NOT EXISTS idx_jobs_claim ON jobs(status, next_retry_at, lease_expires_at, created_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_run ON jobs(run_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_owner_run ON jobs(owner_run_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_provider_calls_operation ON provider_calls(operation_id, attempt_no);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_chapters_project_idx ON chapters(project_id, idx);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_episodes_project_no ON episodes(project_id, episode_no);

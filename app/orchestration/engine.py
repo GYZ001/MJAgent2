@@ -46,6 +46,7 @@ class WorkflowRecorder:
         policy_snapshot: dict[str, Any] | None = None,
         config_snapshot: dict[str, Any] | None = None,
         budget_limit_cny: float | None = None,
+        deadline_at: float | None = None,
         parent_run_id: str | None = None,
     ) -> "WorkflowRecorder":
         run_id = repository.create_run(
@@ -58,6 +59,7 @@ class WorkflowRecorder:
             policy_snapshot=policy_snapshot,
             config_snapshot=config_snapshot,
             budget_limit_cny=budget_limit_cny,
+            deadline_at=deadline_at,
             parent_run_id=parent_run_id,
         )
         return cls(run_id)

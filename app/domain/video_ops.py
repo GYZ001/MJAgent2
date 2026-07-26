@@ -706,10 +706,10 @@ async def _recorded_video_completion_task(
     allow_storyboard_edit: bool = False,
 ):
     import asyncio
-    from app.video_supervisor import run_video_completion_supervisor
+    from app.video_supervisor import run_video_completion_resilient
     recorder.start()
     try:
-        result = await run_video_completion_supervisor(
+        result = await run_video_completion_resilient(
             episode_id,
             resume=resume,
             grant_id=grant_id,
@@ -726,7 +726,10 @@ async def _recorded_video_completion_task(
             recorder.cancel()
         else:
             recorder.partial(result.outcome or result.phase)
-        if result.phase in {"SUCCEEDED_COVERED", "CANCELLED"}:
+        if result.phase in {
+            "SUCCEEDED_COVERED", "COMPLETED_DEADLINE_FALLBACK",
+            "PARTIAL_NO_USABLE_CANDIDATE", "FAILED_CLOSED", "CANCELLED",
+        }:
             from app.media_exec.enqueue import reconcile_episode_generation_status
             reconcile_episode_generation_status(episode_id)
         return result
@@ -846,6 +849,9 @@ async def _complete_episode_core(episode_id: str, body: dict) -> dict:
     conn.commit()
 
     cap = float(budget_cap if budget_cap is not None else DEFAULT_VIDEO_BUDGET_CAP_CNY)
+    resolved_wall_cap = float(
+        wall_cap if wall_cap is not None else DEFAULT_VIDEO_WALL_CLOCK_CAP_S
+    )
     recorder = WorkflowRecorder.create(
         workflow_type="episode_video_completion",
         scope_type="episode",
@@ -856,10 +862,11 @@ async def _complete_episode_core(episode_id: str, body: dict) -> dict:
         requested_by="user",
         trigger_type="manual",
         budget_limit_cny=cap,
+        deadline_at=now() + resolved_wall_cap,
         policy_snapshot={
             "supervisor": "video_completion",
             "budget_cap_cny": cap,
-            "wall_clock_cap_s": float(wall_cap if wall_cap is not None else DEFAULT_VIDEO_WALL_CLOCK_CAP_S),
+            "wall_clock_cap_s": resolved_wall_cap,
             "first_pass_budget_fraction": FIRST_PASS_BUDGET_FRACTION,
             "min_attempts_per_shot": MIN_ATTEMPTS_PER_SHOT,
             "max_attempts_per_shot": MAX_ATTEMPTS_PER_SHOT,
@@ -922,8 +929,20 @@ def get_video_completion(episode_id: str):
             "cost_spent": ledger.cost_spent,
             "entries": [e.model_dump(mode="json") for e in ledger.entries],
         }
+        adopted_count = sum(1 for entry in ledger.entries if entry.adopted_version_id)
+        proj["coverage"] = {
+            **(proj.get("coverage") or {}),
+            "A": ledger.grades.get("A", 0),
+            "B": ledger.grades.get("B", 0),
+            "C": ledger.grades.get("C", 0),
+            "total": ledger.shots_total,
+            "adopted": adopted_count,
+            "unadopted": max(0, ledger.shots_total - adopted_count),
+            "coverage_rate": ledger.coverage_rate,
+            "fallback_quota": ledger.fallback_quota,
+        }
         try:
-            uncovered_ids = [e.shot_id for e in ledger.entries if e.grade == "C"]
+            uncovered_ids = [e.shot_id for e in ledger.entries if not e.adopted_version_id]
             proj["cost_forecast"] = predict_episode_completion_cost(
                 episode_id, uncovered_shot_ids=uncovered_ids,
             )
@@ -947,6 +966,89 @@ def get_video_completion(episode_id: str):
         proj["video_completion_mode"] = "quick"
     proj["running"] = task_registry.active("video_completion", episode_id)
     return proj
+
+
+@router.get("/episodes/{episode_id}/video-completion/repair-preview")
+def preview_video_completion_repair_route(episode_id: str):
+    """只读：预演遗留 Supervisor 的收口动作。"""
+    _episode_or_404(episode_id)
+    from app.video_supervisor import preview_video_completion_repair
+    return preview_video_completion_repair(episode_id)
+
+
+@router.post("/episodes/{episode_id}/video-completion/repair")
+def repair_video_completion_route(episode_id: str, body: dict | None = None):
+    """显式确认后收口遗留 run；不会启动任何新视频生成。"""
+    from app.completion_grant import get_video_grant
+    from app.orchestration.engine import WorkflowRecorder, fingerprint
+    from app.video_supervisor import (
+        VideoSupervisorCheckpoint,
+        _deadline_closeout,
+        _mark_failed_closed,
+        load_latest_checkpoint,
+        preview_video_completion_repair,
+        public_checkpoint_projection,
+    )
+
+    ep = _episode_or_404(episode_id)
+    if not body or body.get("confirm") is not True:
+        raise HTTPException(409, "必须先查看 repair-preview，并显式提交 confirm=true")
+    if task_registry.active("video_completion", episode_id):
+        raise HTTPException(409, "Supervisor 仍在真实运行，不能执行遗留收口")
+    preview = preview_video_completion_repair(episode_id)
+    cp = load_latest_checkpoint(episode_id) or VideoSupervisorCheckpoint(
+        episode_id=episode_id,
+        started_at=now(),
+    )
+    if cp.deadline_at is None and cp.grant_id:
+        grant = get_video_grant(cp.grant_id)
+        if grant:
+            cp.deadline_at = float(grant.deadline_at)
+    parent_run_id = ep["active_video_run_id"]
+    recorder = WorkflowRecorder.create(
+        workflow_type="episode_video_completion",
+        scope_type="episode",
+        scope_id=episode_id,
+        input_fingerprint=fingerprint(
+            ep["storyboard_artifact_id"], cp.grant_id, "confirmed_legacy_closeout",
+        ),
+        requested_by="user",
+        trigger_type="repair",
+        policy_snapshot={"supervisor": "video_completion", "confirmed_legacy_closeout": True},
+        deadline_at=cp.deadline_at or now(),
+        parent_run_id=parent_run_id,
+    )
+    recorder.start()
+    conn = get_conn()
+    conn.execute(
+        """UPDATE episodes
+           SET active_video_run_id=?, video_completion_mode='complete', status='generating'
+           WHERE id=?""",
+        (recorder.run_id, episode_id),
+    )
+    conn.commit()
+    cp.run_id = recorder.run_id
+    try:
+        result = _deadline_closeout(
+            cp,
+            run_id=recorder.run_id,
+            reason="CONFIRMED_LEGACY_INCIDENT_CLOSEOUT",
+        )
+        recorder.partial(result.outcome or result.phase)
+    except Exception as exc:  # noqa: BLE001
+        _mark_failed_closed(
+            cp,
+            run_id=recorder.run_id,
+            reason=f"CONFIRMED_REPAIR_FAILED: {type(exc).__name__}: {exc}",
+        )
+        recorder.fail(exc)
+        raise HTTPException(500, f"遗留 run 收口失败：{exc}") from exc
+    return {
+        "status": "closed",
+        "run_id": recorder.run_id,
+        "preview": preview,
+        "result": public_checkpoint_projection(result),
+    }
 
 
 @router.post("/projects/{project_id}/video-completion")

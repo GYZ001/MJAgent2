@@ -387,7 +387,10 @@ export const useProject = (
     [projectId, view],
   )
 
-const VIDEO_SUPERVISOR_TERMINAL = new Set(['SUCCEEDED_COVERED', 'CANCELLED'])
+const VIDEO_SUPERVISOR_TERMINAL = new Set([
+  'SUCCEEDED_COVERED', 'COMPLETED_DEADLINE_FALLBACK',
+  'PARTIAL_NO_USABLE_CANDIDATE', 'FAILED_CLOSED', 'CANCELLED',
+])
 
 /** 全片补齐 Supervisor 仍在协调时视为忙碌（即使镜头队列暂时为空）。 */
 function videoSupervisorBusy(ep: Episode): boolean {
@@ -395,8 +398,7 @@ function videoSupervisorBusy(ep: Episode): boolean {
     ? ep.video_supervisor.phase
     : ''
   if (phase && VIDEO_SUPERVISOR_TERMINAL.has(phase)) return false
-  if (ep.video_completion_mode === 'complete' && ep.active_video_run_id) return true
-  if (ep.video_supervisor && phase) return true
+  if (ep.video_supervisor?.task_running === true || ep.video_supervisor?.running === true) return true
   return false
 }
 
@@ -405,7 +407,7 @@ function videoSupervisorBusy(ep: Episode): boolean {
 const episodeBusy = (ep: Episode | null): boolean => {
   if (!ep) return true  // 首次未拿到数据时，按可能忙碌处理触发首次拉取后的轮询
   if (ep.screenplay_status === 'running') return true
-  if (ep.status === 'scripting' || ep.status === 'drafting' || ep.status === 'generating') return true
+  if (ep.status === 'scripting' || ep.status === 'drafting') return true
   if (videoSupervisorBusy(ep)) return true
   if (ep.shots?.some(s =>
     s.versions?.some(v =>

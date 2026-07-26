@@ -8,6 +8,40 @@ from app.media_pipeline import stages as S
 from app.media_pipeline.stage_state import read_job_pipeline, stage_label
 
 
+VIDEO_STATUS_PENDING_GENERATION = "pending_generation"
+VIDEO_STATUS_GENERATING = "generating"
+VIDEO_STATUS_PENDING_ADOPTION = "pending_adoption"
+VIDEO_STATUS_ADOPTED = "adopted"
+VIDEO_STATUS_GENERATION_FAILED = "generation_failed"
+
+VIDEO_STATUS_LABELS = {
+    VIDEO_STATUS_PENDING_GENERATION: "待生成",
+    VIDEO_STATUS_GENERATING: "生成中",
+    VIDEO_STATUS_PENDING_ADOPTION: "待采纳",
+    VIDEO_STATUS_ADOPTED: "已采纳",
+    VIDEO_STATUS_GENERATION_FAILED: "生成失败",
+}
+
+
+def _video_status(*, has_adopted: bool, has_active_job: bool,
+                  candidate_count: int, latest_version_status: str | None) -> str:
+    """Project persisted video state to the only five statuses shown on the review wall.
+
+    The persisted adoption pointer is deliberately terminal for display purposes. Playback
+    health is reported separately; neither a stale flag nor a concurrent retake may make a
+    shot selected by the user/Supervisor look incomplete again.
+    """
+    if has_adopted:
+        return VIDEO_STATUS_ADOPTED
+    if has_active_job:
+        return VIDEO_STATUS_GENERATING
+    if candidate_count > 0:
+        return VIDEO_STATUS_PENDING_ADOPTION
+    if latest_version_status == "failed":
+        return VIDEO_STATUS_GENERATION_FAILED
+    return VIDEO_STATUS_PENDING_GENERATION
+
+
 def _macro_status_from_job(job) -> str:
     status = job["status"]
     if status == "paused_budget":
@@ -29,7 +63,8 @@ def _macro_status_from_job(job) -> str:
     return status or "unknown"
 
 
-def _status_from_rows(shot, *, candidate_count: int, retake_count: int, job,
+def _status_from_rows(shot, *, candidate_count: int, retake_count: int,
+                      latest_version_status: str | None, job,
                       provider_task_id: str | None, queue_position: int | None,
                       reference_progress: dict[str, int] | None, db) -> dict[str, Any]:
     """Build UI status from persisted job stage; fallback only when stage missing."""
@@ -161,7 +196,16 @@ def _status_from_rows(shot, *, candidate_count: int, retake_count: int, job,
     if stage_started_at:
         stage_elapsed_s = max(0.0, now() - float(stage_started_at))
 
+    video_status = _video_status(
+        has_adopted=bool(shot["adopted_version_id"]),
+        has_active_job=job is not None,
+        candidate_count=candidate_count,
+        latest_version_status=latest_version_status,
+    )
+
     return {
+        "video_status": video_status,
+        "video_status_label": VIDEO_STATUS_LABELS[video_status],
         "pipeline_status": pipeline_status,
         "pipeline_stage": current_stage,
         "current_stage": current_stage,  # 兼容旧字段
@@ -193,7 +237,10 @@ def episode_pipeline_statuses(episode_id: str, *, conn=None) -> tuple[dict[str, 
     """Load all shot statuses for an episode with a fixed number of light queries."""
     db = conn or get_conn()
     shots = db.execute(
-        "SELECT id, adopted_version_id FROM shots WHERE episode_id=? ORDER BY shot_no",
+        """SELECT s.id, s.adopted_version_id
+           FROM shots s
+           WHERE s.episode_id=?
+           ORDER BY s.shot_no""",
         (episode_id,),
     ).fetchall()
     if not shots:
@@ -202,13 +249,23 @@ def episode_pipeline_statuses(episode_id: str, *, conn=None) -> tuple[dict[str, 
             "upstream_generating": 0, "preparing_references": 0,
             "video_ready": 0, "waiting_continuity": 0, "video_qa": 0,
             "queued": 0, "waiting_human": 0, "failed": 0,
+            "video_status_counts": {
+                status: 0 for status in VIDEO_STATUS_LABELS
+            },
         }
 
     version_rows = db.execute(
         """SELECT v.shot_id,
                   SUM(CASE WHEN v.status='succeeded' AND v.video_path IS NOT NULL
                            AND v.video_path!='' THEN 1 ELSE 0 END) AS candidate_count,
-                  MAX(v.version_no) AS latest_version_no
+                  MAX(v.version_no) AS latest_version_no,
+                  (
+                    SELECT latest.status
+                    FROM shot_versions latest
+                    WHERE latest.shot_id=v.shot_id
+                    ORDER BY latest.version_no DESC
+                    LIMIT 1
+                  ) AS latest_version_status
            FROM shot_versions v
            JOIN shots s ON s.id=v.shot_id
            WHERE s.episode_id=?
@@ -271,11 +328,15 @@ def episode_pipeline_statuses(episode_id: str, *, conn=None) -> tuple[dict[str, 
     video_qa = 0
     failed = 0
     upstream = 0
+    video_status_counts = {
+        status: 0 for status in VIDEO_STATUS_LABELS
+    }
 
     for s in shots:
         version = version_stats.get(s["id"])
         candidate_count = int(version["candidate_count"] or 0) if version else 0
         retake_count = max(0, int(version["latest_version_no"] or 1) - 1) if version else 0
+        latest_version_status = version["latest_version_status"] if version else None
         job = jobs_by_shot.get(s["id"])
         refs = reference_stats.get(s["id"])
         reference_progress = None
@@ -288,6 +349,7 @@ def episode_pipeline_statuses(episode_id: str, *, conn=None) -> tuple[dict[str, 
             s,
             candidate_count=candidate_count,
             retake_count=retake_count,
+            latest_version_status=latest_version_status,
             job=job,
             provider_task_id=job["provider_task_id"] if job else None,
             queue_position=queue_positions.get(job["id"]) if job else None,
@@ -295,9 +357,10 @@ def episode_pipeline_statuses(episode_id: str, *, conn=None) -> tuple[dict[str, 
             db=db,
         )
         statuses[s["id"]] = st
-        if s["adopted_version_id"]:
+        video_status_counts[st["video_status"]] += 1
+        if st["video_status"] == VIDEO_STATUS_ADOPTED:
             adopted += 1
-        if st.get("candidate_count", 0) > 0 or s["adopted_version_id"]:
+        if st.get("candidate_count", 0) > 0:
             with_candidate += 1
         ps = st.get("pipeline_status")
         stage = st.get("pipeline_stage") or st.get("current_stage")
@@ -331,6 +394,7 @@ def episode_pipeline_statuses(episode_id: str, *, conn=None) -> tuple[dict[str, 
         "queued": queued,
         "waiting_human": waiting_human,
         "failed": failed,
+        "video_status_counts": video_status_counts,
     }
     return statuses, summary
 

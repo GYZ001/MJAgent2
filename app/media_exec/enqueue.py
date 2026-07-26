@@ -287,7 +287,8 @@ def _outgoing_transition_context(conn, shot_row) -> dict | None:
 def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
                  extra_negative: list[str] | None = None, reroll: bool = False,
                  critique: list[str] | None = None, after_shot_id: str | None = None,
-                 auto_retake_count: int = 0) -> dict:
+                 auto_retake_count: int = 0,
+                 supervisor_run_id: str | None = None) -> dict:
     """为镜头创建参考图模式视频版本并入队。
     critique：上一版 AI 评语问题，作为本次必须改正项写入 prompt。
     幂等：相同 idem_key 的成功版本直接复用（reroll 时跳过复用）。"""
@@ -428,6 +429,7 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
         "incoming_transition": incoming_transition,
         "outgoing_transition": outgoing_transition,
         "auto_retake_count": max(0, int(auto_retake_count)),
+        "supervisor_run_id": supervisor_run_id,
         "shot_contract_json": json.dumps(shot_contract_dict(shot), ensure_ascii=False),
     }
     if reference_gallery:
@@ -459,11 +461,11 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
     )
     conn.execute(
         "INSERT INTO jobs(id, kind, shot_id, version_id, episode_id, project_id, status, created_at, "
-        "updated_at, after_shot_id, run_id, step_run_id) "
-        "VALUES(?, 'video', ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)",
+        "updated_at, after_shot_id, run_id, owner_run_id, step_run_id) "
+        "VALUES(?, 'video', ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)",
         (
             job_id, shot_id, version_id, ep["id"], project["id"], now(), now(), chain_after_shot_id,
-            run_id, step_run_id,
+            run_id, supervisor_run_id, step_run_id,
         ))
     try:
         from app.media_pipeline import stages as media_stages

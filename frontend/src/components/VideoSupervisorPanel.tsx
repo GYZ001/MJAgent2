@@ -7,6 +7,13 @@ export type VideoSupervisorSnapshot = {
   goal?: string
   repair_epoch?: number
   tick_no?: number
+  started_at?: number
+  deadline_at?: number | null
+  last_heartbeat_at?: number | null
+  finished_at?: number | null
+  terminal_reason?: string | null
+  quality_target_missed?: boolean
+  missing_shots?: number[]
   grant_id?: string | null
   budget?: {
     cap_cny?: number
@@ -22,6 +29,8 @@ export type VideoSupervisorSnapshot = {
     total?: number
     fallback_quota?: number
     coverage_rate?: number
+    adopted?: number
+    unadopted?: number
   }
   shot_state?: Record<string, {
     grade?: string
@@ -31,6 +40,7 @@ export type VideoSupervisorSnapshot = {
     attempts_budgeted?: number
     fallback_reason?: string
     continuity_degraded?: boolean
+    adopted_version_id?: string | null
   }>
   last_plan?: {
     shot_no?: number
@@ -43,6 +53,11 @@ export type VideoSupervisorSnapshot = {
   pending_control?: { action: string; pending: boolean } | null
   active_video_run_id?: string | null
   running?: boolean
+  task_running?: boolean
+  run_status?: string | null
+  heartbeat_stale?: boolean
+  active_media_jobs?: number
+  preserve_adopted?: boolean
   ledger?: {
     entries?: Array<{
       shot_no: number
@@ -53,6 +68,7 @@ export type VideoSupervisorSnapshot = {
       attempts_budgeted?: number
       fallback_reason?: string | null
       continuity_degraded?: boolean
+      adopted_version_id?: string | null
     }>
   }
 }
@@ -65,7 +81,12 @@ const PHASE_LABEL: Record<string, string> = {
   EVALUATING: '正在评估',
   REPAIRING: '正在修复',
   FINALIZING: '正在收尾',
+  DEADLINE_CLOSING: '截止收口中',
   SUCCEEDED_COVERED: '全片已覆盖',
+  COMPLETED_DEADLINE_FALLBACK: '截止已收口',
+  PARTIAL_NO_USABLE_CANDIDATE: '部分收口（存在缺片）',
+  RECOVERING_CONTROL_PLANE: '控制面恢复中',
+  FAILED_CLOSED: '已安全停止',
   PAUSED_EXTERNAL: '已暂停',
   PAUSED_BUDGET: '预算暂停',
   WAITING_AUTHORIZATION: '等待追加授权',
@@ -73,7 +94,10 @@ const PHASE_LABEL: Record<string, string> = {
   CANCELLED: '已取消',
 }
 
-const TERMINAL = new Set(['SUCCEEDED_COVERED', 'CANCELLED'])
+const TERMINAL = new Set([
+  'SUCCEEDED_COVERED', 'COMPLETED_DEADLINE_FALLBACK',
+  'PARTIAL_NO_USABLE_CANDIDATE', 'FAILED_CLOSED', 'CANCELLED',
+])
 const ACTION_OK: Record<string, string> = {
   pause: '已请求暂停（下一轮生效）',
   handoff: '已转交人工',
@@ -90,14 +114,16 @@ export default function VideoSupervisorPanel({
   running,
   onChanged,
   onToast,
+  onDismiss,
 }: {
   api: typeof import('../api').api
   episodeId: string
   runId?: string | null
   supervisor: VideoSupervisorSnapshot | null | undefined
   running?: boolean
-  onChanged?: () => void
+  onChanged?: () => void | Promise<void>
   onToast?: (msg: string) => void
+  onDismiss?: () => void
 }) {
   const [busy, setBusy] = useState(false)
   const [live, setLive] = useState<VideoSupervisorSnapshot | null>(null)
@@ -128,20 +154,37 @@ export default function VideoSupervisorPanel({
   const cap = Number(budget.cap_cny || 150)
   const soft = Number(budget.first_pass_soft_cap_cny || cap * 0.65)
   const pct = total > 0 ? Math.min(100, Math.round(((a + b) / total) * 100)) : 0
-  const aPct = total > 0 ? (a / total) * 100 : 0
-  const bPct = total > 0 ? (b / total) * 100 : 0
   const waitingAuth = phase === 'WAITING_AUTHORIZATION'
   const succeeded = phase === 'SUCCEEDED_COVERED'
+  const deadlineCompleted = phase === 'COMPLETED_DEADLINE_FALLBACK'
+  const partialClosed = phase === 'PARTIAL_NO_USABLE_CANDIDATE' || phase === 'FAILED_CLOSED'
   const cancelledPhase = phase === 'CANCELLED'
+  const terminalPhase = TERMINAL.has(phase)
   const pausedLike = ['PAUSED_EXTERNAL', 'PAUSED_BUDGET', 'WAITING_HUMAN', 'WAITING_AUTHORIZATION'].includes(phase)
   const resolvedRunId = runId || snap?.active_video_run_id || null
   const activelyRunning = Boolean(
     running
+    || snap?.task_running
     || snap?.running
-    || (phase && !TERMINAL.has(phase) && !pausedLike),
   )
+  const runFailed = snap?.run_status === 'FAILED'
 
-  const uncovered = (snap?.ledger?.entries || []).filter(e => e.grade === 'C').slice(0, 6)
+  const deadlineTerminal = deadlineCompleted || phase === 'PARTIAL_NO_USABLE_CANDIDATE'
+  const adoptionCoverage = snap?.preserve_adopted === true || deadlineTerminal
+  const missingCount = snap?.missing_shots?.length || 0
+  const adoptedAtCloseout = Number(
+    cov.adopted ?? (deadlineTerminal ? Math.max(0, total - missingCount) : a + b),
+  )
+  const unadopted = Number(cov.unadopted ?? Math.max(0, total - adoptedAtCloseout))
+  const displayA = adoptionCoverage ? 0 : a
+  const displayB = adoptionCoverage ? adoptedAtCloseout : b
+  const displayC = adoptionCoverage ? unadopted : c
+  const displayPct = total > 0 ? Math.min(100, Math.round((adoptedAtCloseout / total) * 100)) : 0
+  const displayAPct = total > 0 ? (displayA / total) * 100 : 0
+  const displayBPct = total > 0 ? (displayB / total) * 100 : 0
+  const uncovered = (snap?.ledger?.entries || [])
+    .filter(e => !e.adopted_version_id && e.grade === 'C')
+    .slice(0, 6)
 
   const runAction = async (action: 'pause' | 'handoff' | 'resume' | 'topup' | 'cancel') => {
     setBusy(true)
@@ -182,6 +225,37 @@ export default function VideoSupervisorPanel({
     }
   }
 
+  const repairLegacyRun = async () => {
+    setBusy(true)
+    try {
+      const preview = await api.get(`/episodes/${episodeId}/video-completion/repair-preview`) as {
+        would_adopt?: unknown[]
+        would_retain?: unknown[]
+        would_mark_missing?: Array<{ shot_no?: number }>
+      }
+      const missing = (preview.would_mark_missing || []).map(item => item.shot_no).filter(Boolean)
+      const ok = window.confirm(
+        `只读预演完成：将采用 ${preview.would_adopt?.length || 0} 镜、保留 ${preview.would_retain?.length || 0} 镜、缺片 ${missing.join('、') || '无'}。\n\n确认停止遗留任务并按此结果收口？不会启动新生成，也不会删除视频。`,
+      )
+      if (!ok) return
+      const response = await api.post(`/episodes/${episodeId}/video-completion/repair`, { confirm: true }) as {
+        result?: VideoSupervisorSnapshot
+      }
+      if (response.result) setLive(response.result)
+      await onChanged?.()
+      const adopted = Math.max(
+        0,
+        (response.result?.coverage?.total || 0) - (response.result?.missing_shots?.length || 0),
+      )
+      onToast?.(`收口完成：已采用 ${adopted} 镜，缺片 ${(response.result?.missing_shots || []).join('、') || '无'}`)
+    } catch (e: unknown) {
+      onToast?.(e instanceof Error ? e.message : String(e))
+      throw e
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <div
       className={`video-supervisor-panel${activelyRunning ? ' is-live' : ''}`}
@@ -191,21 +265,24 @@ export default function VideoSupervisorPanel({
       <div className="vsp-head">
         {activelyRunning && <span className="vsp-pulse" aria-hidden />}
         <strong>补齐到全片可用</strong>
-        <span className="vsp-phase">{PHASE_LABEL[phase] || phase || '启动中…'}</span>
+        <span className="vsp-phase">
+          {runFailed && !activelyRunning ? `控制面已失败（最后阶段：${PHASE_LABEL[phase] || phase}）` : PHASE_LABEL[phase] || phase || '启动中…'}
+        </span>
         {typeof snap?.repair_epoch === 'number' && snap.repair_epoch > 0 && (
           <span className="vsp-epoch">修复周期 {snap.repair_epoch}</span>
         )}
         {activelyRunning && <span className="vsp-live-tag">运行中</span>}
       </div>
 
-      <div className="vsp-coverage-bar" title={`A ${a} · B ${b} · 未覆盖 ${c}`}>
-        <div className="vsp-seg a" style={{ width: `${aPct}%` }} />
-        <div className="vsp-seg b" style={{ width: `${bPct}%` }} />
-        <div className="vsp-seg c" style={{ width: `${Math.max(0, 100 - aPct - bPct)}%` }} />
+      <div className="vsp-coverage-bar" title={adoptionCoverage ? `已采用 ${displayB} · 未采用 ${displayC}` : `A ${a} · B ${b} · 未覆盖 ${c}`}>
+        <div className="vsp-seg a" style={{ width: `${displayAPct}%` }} />
+        <div className="vsp-seg b" style={{ width: `${displayBPct}%` }} />
+        <div className="vsp-seg c" style={{ width: `${Math.max(0, 100 - displayAPct - displayBPct)}%` }} />
       </div>
       <div className="vsp-cov-label">
-        覆盖 {pct}% · A 级 {a} / B 级 {b} / 未覆盖 {c}
-        {cov.fallback_quota != null ? `（B 配额 ${cov.fallback_quota}）` : ''}
+        {adoptionCoverage
+          ? `${deadlineTerminal ? '交差覆盖' : '采用覆盖'} ${displayPct}% · 已采用 ${displayB} / ${deadlineTerminal ? '缺片' : '待补齐'} ${displayC}`
+          : `覆盖 ${pct}% · A 级 ${a} / B 级 ${b} / 未覆盖 ${c}${cov.fallback_quota != null ? `（B 配额 ${cov.fallback_quota}）` : ''}`}
         {!snap?.phase && activelyRunning ? ' · 正在预检与建账…' : ''}
       </div>
 
@@ -227,7 +304,7 @@ export default function VideoSupervisorPanel({
         </div>
       )}
 
-      {uncovered.length > 0 && !cancelledPhase && (
+      {uncovered.length > 0 && !cancelledPhase && !terminalPhase && (
         <ul className="vsp-issues">
           {uncovered.map(e => (
             <li key={e.shot_no}>
@@ -250,12 +327,36 @@ export default function VideoSupervisorPanel({
         </div>
       )}
 
+      {deadlineCompleted && (
+        <div className="vsp-done">
+          ✓ 已按截止协议停止生成并采用每镜最佳技术可播候选
+          {snap?.quality_target_missed && <div>部分候选未达原 QA 目标，风险已写入覆盖报告。</div>}
+        </div>
+      )}
+
+      {partialClosed && (
+        <div className="vsp-plan">
+          已停止继续生成。无技术可播候选的镜头：{(snap?.missing_shots || []).join('、') || '请查看终态报告'}。
+        </div>
+      )}
+
+      {runFailed && !terminalPhase && !activelyRunning && (
+        <div className="vsp-plan">
+          Supervisor 已失败并停止计时；仍有 {snap?.active_media_jobs || 0} 个媒体任务。请先查看收口预演，再确认执行遗留收口。
+        </div>
+      )}
+
       {cancelledPhase && (
         <div className="vsp-plan">补齐已取消。可重新启动，或清空本集回到空白状态。</div>
       )}
 
       <div className="vsp-actions">
-        {!pausedLike && !succeeded && !cancelledPhase && (
+        {runFailed && !activelyRunning && !terminalPhase && (
+          <AsyncButton className="btn primary small" busyLabel="收口中…" onAction={repairLegacyRun} disabled={busy}>
+            预演并确认收口
+          </AsyncButton>
+        )}
+        {activelyRunning && !pausedLike && !terminalPhase && (
           <>
             <AsyncButton className="btn ghost small" busyLabel="…" onAction={() => runAction('pause')} disabled={busy}>暂停</AsyncButton>
             <AsyncButton className="btn ghost small" busyLabel="…" onAction={() => runAction('handoff')} disabled={busy}>转人工</AsyncButton>
@@ -271,7 +372,7 @@ export default function VideoSupervisorPanel({
           </>
         )}
         {cancelledPhase && (
-          <AsyncButton className="btn ghost small" busyLabel="…" onAction={() => runAction('cancel')} disabled={busy}>关闭面板</AsyncButton>
+          <button type="button" className="btn ghost small" onClick={onDismiss}>关闭面板</button>
         )}
       </div>
     </div>

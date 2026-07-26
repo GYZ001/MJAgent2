@@ -23,10 +23,18 @@ from app.video_repair_router import MAX_CHAIN_CASCADE_DEPTH, route, should_casca
 from app.video_supervisor import (
     FIRST_PASS_BUDGET_FRACTION,
     SHOT_BUDGET_MULTIPLIER,
+    CoverageLedger,
+    ShotCoverageEntry,
     VideoSupervisorCheckpoint,
+    _apply_cascade,
+    _deadline_closeout,
     _finalize_covered,
+    _reconcile_terminal_continuity_blocks,
     attempts_for,
+    preview_video_completion_repair,
+    reconcile_stale_video_supervisors,
     rebuild_coverage_ledger,
+    save_checkpoint,
 )
 
 
@@ -52,6 +60,8 @@ def memdb(monkeypatch):
     # 顶层 from app.db import get_conn 的模块 + db 本身
     import app.completion_grant as completion_grant
     import app.evidence.media as evidence_media
+    import app.orchestration.media_scheduler as media_scheduler
+    import app.orchestration.state_machine as state_machine
     import app.video_cost_model as video_cost_model
     import app.video_crop as video_crop
     import app.video_supervisor as video_supervisor
@@ -61,6 +71,8 @@ def memdb(monkeypatch):
         evidence_repository,
         completion_grant,
         evidence_media,
+        media_scheduler,
+        state_machine,
         video_cost_model,
         video_crop,
         video_supervisor,
@@ -151,6 +163,45 @@ def test_integration_all_a_covered(memdb):
     assert cp.phase == "SUCCEEDED_COVERED"
 
 
+@pytest.mark.asyncio
+async def test_fresh_completion_with_all_adopted_finishes_without_enqueue(memdb, monkeypatch):
+    """点击“补齐”时若全部已有采用版，应立即完成且零派发。"""
+    from app import worker
+    from app.video_supervisor import run_video_completion_supervisor
+
+    eid, _ = _seed_episode(memdb, 3)
+    for i in range(1, 4):
+        _add_succeeded_version(
+            memdb,
+            f"{eid}_shot_{i}",
+            qa={"overall": 0.2, "failure_types": ["state_mismatch"]},
+        )
+    memdb.execute(
+        "UPDATE shots SET storyboard_artifact_id='old_storyboard' WHERE episode_id=?",
+        (eid,),
+    )
+    memdb.commit()
+
+    def forbidden_enqueue(*_args, **_kwargs):
+        raise AssertionError("已有采用版时不得派发视频任务")
+
+    monkeypatch.setattr(worker, "enqueue_shot", forbidden_enqueue)
+
+    result = await run_video_completion_supervisor(
+        eid,
+        resume=False,
+        wall_clock_cap_s=60,
+    )
+
+    assert result.phase == "SUCCEEDED_COVERED"
+    assert result.coverage["adopted"] == 3
+    assert result.coverage["unadopted"] == 0
+    assert memdb.execute(
+        "SELECT COUNT(*) AS c FROM jobs WHERE episode_id=? AND kind='video'",
+        (eid,),
+    ).fetchone()["c"] == 0
+
+
 def test_integration_preflight_issue_in_ledger(memdb):
     eid, _ = _seed_episode(memdb, 3)
     shot_id = f"{eid}_shot_2"
@@ -167,7 +218,7 @@ def test_integration_preflight_issue_in_ledger(memdb):
     assert "VIDEO_PREFLIGHT_BLOCKED" in entry.last_issue_codes
 
 
-def test_integration_b_over_quota_not_complete(memdb):
+def test_integration_adopted_b_over_quota_is_still_complete(memdb):
     eid, _ = _seed_episode(memdb, 5)
     for i in range(1, 4):
         _add_succeeded_version(memdb, f"{eid}_shot_{i}", qa={"overall": 0.9, "failure_types": []})
@@ -178,7 +229,32 @@ def test_integration_b_over_quota_not_complete(memdb):
         )
     ledger = rebuild_coverage_ledger(eid, fallback_quota=1)
     assert ledger.grades["B"] >= 2
-    assert ledger.covered_within_quota() is False
+    assert ledger.covered_within_quota() is True
+    assert ledger.actionable() == []
+
+
+def test_adopted_stale_shot_is_protected_and_only_unadopted_is_actionable(memdb):
+    eid, _ = _seed_episode(memdb, 2)
+    adopted = _add_succeeded_version(
+        memdb, f"{eid}_shot_1", qa={"overall": 0.9, "failure_types": []},
+    )
+    memdb.execute(
+        "UPDATE shots SET storyboard_artifact_id='old_storyboard' WHERE id=?",
+        (f"{eid}_shot_1",),
+    )
+    memdb.commit()
+
+    ledger = rebuild_coverage_ledger(eid, fallback_quota=0)
+
+    protected = next(entry for entry in ledger.entries if entry.shot_no == 1)
+    missing = next(entry for entry in ledger.entries if entry.shot_no == 2)
+    assert protected.adopted_version_id == adopted
+    assert protected.video_stale is True
+    assert protected.grade == "C"
+    assert ledger.count_uncovered() == 1
+    assert [entry.shot_no for entry in ledger.actionable()] == [2]
+    assert ledger.coverage_rate == pytest.approx(0.5)
+    assert missing.adopted_version_id is None
 
 
 def test_integration_fallback_b_with_reason(memdb):
@@ -193,6 +269,349 @@ def test_integration_fallback_b_with_reason(memdb):
     assert b.grade == "B"
     assert b.fallback_reason
     assert ledger.covered_within_quota()
+
+
+def test_rebuild_ledger_never_moves_attempt_count_back_to_stale_checkpoint(memdb):
+    eid, _ = _seed_episode(memdb, 1)
+    shot_id = f"{eid}_shot_1"
+    _add_succeeded_version(
+        memdb, shot_id, qa={"overall": 0.2, "failure_types": ["state_mismatch"]},
+    )
+    _add_succeeded_version(
+        memdb, shot_id, qa={"overall": 0.3, "failure_types": ["state_mismatch"]},
+    )
+    cp = VideoSupervisorCheckpoint(
+        episode_id=eid,
+        shot_state={"1": {"attempts_paid": 1}},
+        coverage={"fallback_quota": 1},
+    )
+
+    ledger = rebuild_coverage_ledger(eid, cp=cp)
+
+    assert ledger.entries[0].attempts_paid == 2
+
+
+def test_apply_cascade_reads_planned_state_from_contract_on_production_schema(memdb):
+    eid, _ = _seed_episode(memdb, 2)
+    shot_id = f"{eid}_shot_1"
+    version_id = _add_succeeded_version(
+        memdb,
+        shot_id,
+        qa={
+            "overall": 0.8,
+            "failure_types": [],
+            "observed_state_out": "角色倒在地上",
+        },
+    )
+    memdb.execute(
+        "UPDATE shots SET shot_contract_json=?, last_frame_desc=? WHERE id=?",
+        (json.dumps({"state_out": "角色站在门口"}), "角色站在门口", shot_id),
+    )
+    memdb.commit()
+    current = ShotCoverageEntry(
+        shot_no=1,
+        shot_id=shot_id,
+        grade="B",
+        best_version_id=version_id,
+        chain_head_shot_no=1,
+        chain_position=0,
+    )
+    downstream = ShotCoverageEntry(
+        shot_no=2,
+        shot_id=f"{eid}_shot_2",
+        grade="C",
+        chain_head_shot_no=1,
+        chain_position=1,
+    )
+    ledger = CoverageLedger(
+        episode_id=eid,
+        shots_total=2,
+        grades={"A": 0, "B": 1, "C": 1},
+        entries=[current, downstream],
+    )
+    cp = VideoSupervisorCheckpoint(episode_id=eid)
+
+    cascaded = _apply_cascade(current, ledger, cp)
+
+    assert cascaded == [2]
+    assert downstream.chain_stale is True
+
+
+def test_deadline_closeout_adopts_best_candidate_cancels_jobs_and_stops(memdb):
+    eid, _ = _seed_episode(memdb, 4)
+    memdb.execute(
+        "UPDATE episodes SET status='generating', video_completion_mode='complete' WHERE id=?",
+        (eid,),
+    )
+    # 镜3已经采用；镜4存在技术可播但 QA 不达标的候选，必须在截止时采用。
+    _add_succeeded_version(
+        memdb, f"{eid}_shot_3", qa={"overall": 0.9, "failure_types": []},
+    )
+    candidate = _add_succeeded_version(
+        memdb, f"{eid}_shot_4", qa={"overall": 0.2, "failure_types": ["state_mismatch"]},
+    )
+    memdb.execute("UPDATE shots SET adopted_version_id=NULL WHERE id=?", (f"{eid}_shot_4",))
+    # 镜2永远等待镜1尾帧；收口必须把它停止，不能继续显示 active。
+    memdb.execute(
+        """INSERT INTO shot_versions(id,shot_id,version_no,prompt_text,idem_key,status,created_at)
+           VALUES('v_wait',?,1,'p','wait','queued',1)""",
+        (f"{eid}_shot_2",),
+    )
+    memdb.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,version_id,episode_id,project_id,status,created_at,updated_at,
+               after_shot_id,pipeline_stage
+           ) VALUES('j_wait','video',?,'v_wait',?,'proj_int','queued',1,1,?,'waiting_continuity_anchor')""",
+        (f"{eid}_shot_2", eid, f"{eid}_shot_1"),
+    )
+    # 镜3已有采用版；它的独立重抽不属于“补齐”，截止收口也不能误停。
+    memdb.execute(
+        """INSERT INTO shot_versions(id,shot_id,version_no,prompt_text,idem_key,status,created_at)
+           VALUES('v_adopted_manual_retake',?,2,'p','adopted-manual-retake','queued',1)""",
+        (f"{eid}_shot_3",),
+    )
+    memdb.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,version_id,episode_id,project_id,status,created_at,updated_at)
+           VALUES('j_adopted_manual_retake','video',?,'v_adopted_manual_retake',?,'proj_int','queued',1,1)""",
+        (f"{eid}_shot_3", eid),
+    )
+    memdb.commit()
+    cp = VideoSupervisorCheckpoint(
+        episode_id=eid,
+        phase="PLANNING_COVERAGE",
+        started_at=1,
+        deadline_at=2,
+        budget={"cap_cny": 150},
+        coverage={"fallback_quota": 1},
+    )
+
+    result = _deadline_closeout(cp, run_id=None)
+
+    assert result.phase == "PARTIAL_NO_USABLE_CANDIDATE"
+    assert result.missing_shots == [1, 2]
+    assert memdb.execute(
+        "SELECT adopted_version_id FROM shots WHERE id=?", (f"{eid}_shot_4",),
+    ).fetchone()["adopted_version_id"] == candidate
+    assert memdb.execute("SELECT status FROM jobs WHERE id='j_wait'").fetchone()["status"] == "cancelled"
+    assert memdb.execute(
+        "SELECT status FROM jobs WHERE id='j_adopted_manual_retake'",
+    ).fetchone()["status"] == "queued"
+    episode = memdb.execute(
+        "SELECT status,video_completion_mode,active_video_run_id FROM episodes WHERE id=?", (eid,),
+    ).fetchone()
+    assert dict(episode) == {
+        "status": "confirmed", "video_completion_mode": "quick", "active_video_run_id": None,
+    }
+
+
+def test_deadline_closeout_finishes_when_every_shot_has_technical_candidate(memdb):
+    eid, _ = _seed_episode(memdb, 2)
+    memdb.execute(
+        "UPDATE episodes SET status='generating', video_completion_mode='complete' WHERE id=?",
+        (eid,),
+    )
+    for i in (1, 2):
+        _add_succeeded_version(
+            memdb, f"{eid}_shot_{i}", qa={"overall": 0.2, "failure_types": ["state_mismatch"]},
+        )
+        memdb.execute("UPDATE shots SET adopted_version_id=NULL WHERE id=?", (f"{eid}_shot_{i}",))
+    memdb.commit()
+    cp = VideoSupervisorCheckpoint(
+        episode_id=eid, started_at=1, deadline_at=2,
+        budget={"cap_cny": 150}, coverage={"fallback_quota": 0},
+    )
+
+    result = _deadline_closeout(cp, run_id=None)
+
+    assert result.phase == "COMPLETED_DEADLINE_FALLBACK"
+    assert result.missing_shots == []
+    assert len(result.closeout_adoptions) == 2
+    assert result.quality_target_missed is True
+
+    # Closeout is an irreversible terminal transition, so a watchdog/retry may
+    # safely call it again without duplicating adoption or coverage reports.
+    repeated = _deadline_closeout(result, run_id=None)
+    assert repeated.phase == "COMPLETED_DEADLINE_FALLBACK"
+    assert len(repeated.closeout_adoptions) == 2
+    reports = memdb.execute(
+        """SELECT COUNT(*) AS c FROM artifacts
+           WHERE type='video_coverage_report' AND scope_id=?""",
+        (eid,),
+    ).fetchone()["c"]
+    assert reports == 1
+
+
+def test_repair_preview_is_strictly_read_only(memdb):
+    eid, _ = _seed_episode(memdb, 2)
+    candidate = _add_succeeded_version(
+        memdb, f"{eid}_shot_2", qa={"overall": 0.1, "failure_types": ["state_mismatch"]},
+    )
+    memdb.execute("UPDATE shots SET adopted_version_id=NULL WHERE id=?", (f"{eid}_shot_2",))
+    memdb.execute(
+        """INSERT INTO shot_versions(id,shot_id,version_no,prompt_text,idem_key,status,created_at)
+           VALUES('v_preview_wait',?,1,'p','preview-wait','queued',1)""",
+        (f"{eid}_shot_1",),
+    )
+    memdb.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,version_id,episode_id,project_id,status,created_at,updated_at,
+               after_shot_id,pipeline_stage
+           ) VALUES('j_preview_wait','video',?,'v_preview_wait',?,'proj_int','queued',1,1,?,
+                    'waiting_continuity_anchor')""",
+        (f"{eid}_shot_1", eid, "missing_anchor"),
+    )
+    memdb.commit()
+    before = {
+        "adopted": [tuple(row) for row in memdb.execute(
+            "SELECT id,adopted_version_id FROM shots WHERE episode_id=? ORDER BY shot_no", (eid,),
+        ).fetchall()],
+        "jobs": [tuple(row) for row in memdb.execute(
+            "SELECT id,status,reason_code FROM jobs WHERE episode_id=? ORDER BY id", (eid,),
+        ).fetchall()],
+        "artifacts": memdb.execute(
+            "SELECT COUNT(*) AS c FROM artifacts WHERE scope_id=?", (eid,),
+        ).fetchone()["c"],
+        "reasons": [tuple(row) for row in memdb.execute(
+            """SELECT id,adoption_reason FROM shot_versions
+               WHERE shot_id IN (SELECT id FROM shots WHERE episode_id=?) ORDER BY id""",
+            (eid,),
+        ).fetchall()],
+    }
+
+    preview = preview_video_completion_repair(eid)
+
+    assert preview["dry_run"] is True
+    assert preview["will_start_generation"] is False
+    assert preview["will_delete_media"] is False
+    assert [item["shot_no"] for item in preview["would_mark_missing"]] == [1]
+    assert preview["would_adopt"][0]["selected_version_id"] == candidate
+    after = {
+        "adopted": [tuple(row) for row in memdb.execute(
+            "SELECT id,adopted_version_id FROM shots WHERE episode_id=? ORDER BY shot_no", (eid,),
+        ).fetchall()],
+        "jobs": [tuple(row) for row in memdb.execute(
+            "SELECT id,status,reason_code FROM jobs WHERE episode_id=? ORDER BY id", (eid,),
+        ).fetchall()],
+        "artifacts": memdb.execute(
+            "SELECT COUNT(*) AS c FROM artifacts WHERE scope_id=?", (eid,),
+        ).fetchone()["c"],
+        "reasons": [tuple(row) for row in memdb.execute(
+            """SELECT id,adoption_reason FROM shot_versions
+               WHERE shot_id IN (SELECT id FROM shots WHERE episode_id=?) ORDER BY id""",
+            (eid,),
+        ).fetchall()],
+    }
+    assert after == before
+
+
+@pytest.mark.asyncio
+async def test_watchdog_closes_stale_run_when_task_record_is_missing(memdb, monkeypatch):
+    import app.video_supervisor as video_supervisor
+
+    eid, _ = _seed_episode(memdb, 1)
+    candidate = _add_succeeded_version(
+        memdb, f"{eid}_shot_1", qa={"overall": 0.2, "failure_types": ["state_mismatch"]},
+    )
+    memdb.execute("UPDATE shots SET adopted_version_id=NULL WHERE id=?", (f"{eid}_shot_1",))
+    run_id = evidence_repository.create_run(
+        workflow_type="episode_video_completion",
+        scope_type="episode",
+        scope_id=eid,
+        input_fingerprint="watchdog-missing-task",
+        deadline_at=200,
+    )
+    memdb.execute(
+        "UPDATE workflow_runs SET status='RUNNING', started_at=1, updated_at=1 WHERE id=?",
+        (run_id,),
+    )
+    memdb.execute(
+        """UPDATE episodes SET status='generating', video_completion_mode='complete',
+                   active_video_run_id=? WHERE id=?""",
+        (run_id, eid),
+    )
+    memdb.commit()
+    cp = VideoSupervisorCheckpoint(
+        episode_id=eid,
+        run_id=run_id,
+        phase="PLANNING_COVERAGE",
+        started_at=1,
+        deadline_at=200,
+        budget={"cap_cny": 150},
+        coverage={"fallback_quota": 0},
+    )
+    monkeypatch.setattr(video_supervisor, "now", lambda: 100.0)
+    save_checkpoint(cp, run_id=run_id)
+    monkeypatch.setattr(video_supervisor, "now", lambda: 1000.0)
+
+    recovered = await reconcile_stale_video_supervisors()
+
+    assert recovered == 1
+    assert memdb.execute(
+        "SELECT adopted_version_id FROM shots WHERE id=?", (f"{eid}_shot_1",),
+    ).fetchone()["adopted_version_id"] == candidate
+    episode = memdb.execute(
+        "SELECT status,video_completion_mode,active_video_run_id FROM episodes WHERE id=?", (eid,),
+    ).fetchone()
+    assert dict(episode) == {
+        "status": "confirmed", "video_completion_mode": "quick", "active_video_run_id": None,
+    }
+
+
+def test_terminal_continuity_wait_becomes_routable_issue(memdb):
+    eid, _ = _seed_episode(memdb, 2)
+    memdb.execute(
+        """INSERT INTO shot_versions(id,shot_id,version_no,prompt_text,idem_key,status,created_at)
+           VALUES('v_blocked',?,1,'p','blocked','queued',1)""",
+        (f"{eid}_shot_2",),
+    )
+    memdb.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,version_id,episode_id,project_id,status,created_at,updated_at,
+               after_shot_id,pipeline_stage
+           ) VALUES('j_blocked','video',?,'v_blocked',?,'proj_int','queued',1,1,?,'waiting_continuity_anchor')""",
+        (f"{eid}_shot_2", eid, f"{eid}_shot_1"),
+    )
+    memdb.commit()
+
+    assert _reconcile_terminal_continuity_blocks(eid) == 1
+    job = memdb.execute(
+        "SELECT status,reason_code FROM jobs WHERE id='j_blocked'",
+    ).fetchone()
+    assert dict(job) == {"status": "waiting_human", "reason_code": "VIDEO_CHAIN_ANCHOR_BLOCKED"}
+    ledger = rebuild_coverage_ledger(eid)
+    blocked = next(e for e in ledger.entries if e.shot_no == 2)
+    assert blocked.active_job_id is None
+    assert "VIDEO_CHAIN_ANCHOR_BLOCKED" in blocked.last_issue_codes
+
+
+def test_terminal_continuity_wait_does_not_touch_adopted_shot(memdb):
+    """补齐的死锁清理也必须跳过已有采用版镜头。"""
+    eid, _ = _seed_episode(memdb, 2)
+    _add_succeeded_version(
+        memdb,
+        f"{eid}_shot_2",
+        qa={"overall": 0.9, "failure_types": []},
+    )
+    memdb.execute(
+        """INSERT INTO shot_versions(id,shot_id,version_no,prompt_text,idem_key,status,created_at)
+           VALUES('v_adopted_retake',?,2,'p','adopted-retake','queued',1)""",
+        (f"{eid}_shot_2",),
+    )
+    memdb.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,version_id,episode_id,project_id,status,created_at,updated_at,
+               after_shot_id,pipeline_stage
+           ) VALUES('j_adopted_retake','video',?,'v_adopted_retake',?,'proj_int','queued',1,1,?,'waiting_continuity_anchor')""",
+        (f"{eid}_shot_2", eid, f"{eid}_shot_1"),
+    )
+    memdb.commit()
+
+    assert _reconcile_terminal_continuity_blocks(eid) == 0
+    job = memdb.execute(
+        "SELECT status,reason_code FROM jobs WHERE id='j_adopted_retake'",
+    ).fetchone()
+    assert dict(job) == {"status": "queued", "reason_code": None}
 
 
 def test_integration_continuity_degraded_marks_b(memdb):
@@ -279,9 +698,26 @@ def test_fake_enqueue_dispatch_reused_and_preflight(memdb, monkeypatch):
         raise CompileError("动作容量超限")
 
     monkeypatch.setattr(worker, "enqueue_shot", fake_enqueue)
+    protected = ShotCoverageEntry(
+        shot_no=1,
+        shot_id=f"{eid}_shot_1",
+        grade="C",
+        adopted_version_id="v_adopted",
+        video_stale=True,
+    )
     e1 = ShotCoverageEntry(shot_no=1, shot_id=f"{eid}_shot_1", grade="C")
     e2 = ShotCoverageEntry(shot_no=2, shot_id=f"{eid}_shot_2", grade="C")
+    assert _dispatch(protected, episode_id=eid, run_id=None, first=True) is False
+    assert calls["n"] == 0
     assert _dispatch(e1, episode_id=eid, run_id=None, first=True) is False
+    assert _dispatch(e2, episode_id=eid, run_id=None, first=True) is False
+    assert calls["n"] == 2
+    # entry 还是未采用的旧快照，但用户已在派发前采用候选：数据库终检必须拒绝。
+    _add_succeeded_version(
+        memdb,
+        f"{eid}_shot_2",
+        qa={"overall": 0.9, "failure_types": []},
+    )
     assert _dispatch(e2, episode_id=eid, run_id=None, first=True) is False
     assert calls["n"] == 2
     ledger = rebuild_coverage_ledger(eid)

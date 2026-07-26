@@ -79,6 +79,7 @@ def test_workspace_episode_views_do_not_expand_historical_inputs(monkeypatch) ->
     assert board["shots"][0]["versions"] == []
     assert board["shots"][0]["version_count"] == 2
     assert len(wall["shots"][0]["versions"]) == 2
+    assert wall["shots"][0]["video_status"] == "adopted"
     assert all(not v["image_inputs"]["reference_images"] for v in wall["shots"][0]["versions"])
     assert not any("SELECT * FROM shot_versions" in sql for sql in statements)
     assert not any("json_extract" in sql.lower() for sql in statements)
@@ -96,6 +97,7 @@ def test_review_detail_omits_oversized_legacy_inputs(monkeypatch) -> None:
     assert versions["v1"]["image_inputs"]["omitted_for_size"] is False
     assert versions["v2"]["image_inputs"]["omitted_for_size"] is True
     assert versions["v2"]["image_inputs"]["reference_images"] == []
+    assert review["video_status"] == "adopted"
 
 
 def test_pipeline_reference_query_is_scoped_to_episode() -> None:
@@ -111,6 +113,92 @@ def test_pipeline_reference_query_is_scoped_to_episode() -> None:
     reference_queries = [sql for sql in statements if "FROM reference_sets" in sql]
     assert len(reference_queries) == 1
     assert "s.episode_id='e1'" in reference_queries[0]
+
+
+def test_review_wall_video_statuses_are_exactly_five_and_adopted_wins() -> None:
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO projects(id, name, status, created_at) VALUES('p1','demo','created',1)"
+    )
+    conn.execute(
+        """INSERT INTO episodes(id, project_id, episode_no, status, created_at)
+           VALUES('e1','p1',1,'generating',1)"""
+    )
+    conn.executemany(
+        """INSERT INTO shots(id, episode_id, shot_no, duration_s, characters, dialogues)
+           VALUES(?, 'e1', ?, 5, '[]', '[]')""",
+        [
+            ("s_adopted", 1),
+            ("s_generating", 2),
+            ("s_pending_adoption", 3),
+            ("s_failed", 4),
+            ("s_pending_generation", 5),
+        ],
+    )
+    conn.executemany(
+        """INSERT INTO shot_versions(
+               id, shot_id, version_no, prompt_text, idem_key, status, video_path, created_at
+           ) VALUES(?, ?, ?, 'prompt', ?, ?, ?, 1)""",
+        [
+            ("v_adopted", "s_adopted", 1, "idem-adopted", "succeeded", "/tmp/adopted.mp4"),
+            ("v_adopted_retake", "s_adopted", 2, "idem-adopted-retake", "running", None),
+            ("v_generating", "s_generating", 1, "idem-generating", "queued", None),
+            ("v_candidate", "s_pending_adoption", 1, "idem-candidate", "succeeded", "/tmp/candidate.mp4"),
+            ("v_failed", "s_failed", 1, "idem-failed", "failed", None),
+        ],
+    )
+    conn.execute(
+        "UPDATE shots SET adopted_version_id='v_adopted' WHERE id='s_adopted'"
+    )
+    conn.executemany(
+        """INSERT INTO jobs(
+               id, kind, shot_id, version_id, episode_id, project_id, status, created_at, updated_at
+           ) VALUES(?, 'video', ?, ?, 'e1', 'p1', ?, 1, 1)""",
+        [
+            ("j_adopted_retake", "s_adopted", "v_adopted_retake", "running"),
+            ("j_generating", "s_generating", "v_generating", "queued"),
+        ],
+    )
+    conn.commit()
+
+    statuses, summary = episode_pipeline_statuses("e1", conn=conn)
+
+    assert statuses["s_adopted"]["video_status"] == "adopted"
+    assert statuses["s_adopted"]["video_status_label"] == "已采纳"
+    assert statuses["s_generating"]["video_status"] == "generating"
+    assert statuses["s_pending_adoption"]["video_status"] == "pending_adoption"
+    assert statuses["s_failed"]["video_status"] == "generation_failed"
+    assert statuses["s_pending_generation"]["video_status"] == "pending_generation"
+    assert summary["video_status_counts"] == {
+        "pending_generation": 1,
+        "generating": 1,
+        "pending_adoption": 1,
+        "adopted": 1,
+        "generation_failed": 1,
+    }
+
+
+def test_review_wall_adoption_pointer_wins_even_when_media_health_is_bad() -> None:
+    """补齐状态由采用决定；媒体健康问题不能把已采用镜头重新归为待生成。"""
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO projects(id, name, status, created_at) VALUES('p1','demo','created',1)"
+    )
+    conn.execute(
+        """INSERT INTO episodes(id, project_id, episode_no, status, created_at)
+           VALUES('e1','p1',1,'confirmed',1)"""
+    )
+    conn.execute(
+        """INSERT INTO shots(id, episode_id, shot_no, duration_s, characters, dialogues,
+                             adopted_version_id)
+           VALUES('s1','e1',1,5,'[]','[]','missing_version')"""
+    )
+    conn.commit()
+
+    statuses, summary = episode_pipeline_statuses("e1", conn=conn)
+
+    assert statuses["s1"]["video_status"] == "adopted"
+    assert summary["video_status_counts"]["adopted"] == 1
 
 
 def test_project_episode_view_is_server_paginated(monkeypatch) -> None:

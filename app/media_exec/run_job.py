@@ -1170,6 +1170,42 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         dest = _video_path(job["project_id"], ep["episode_no"], shot["shot_no"], version["version_no"])
         await hiagent.download(result["video_url"], str(dest))
         _assert_job_lease(job_id, owner)
+        supervisor_owner = _row_value(job, "owner_run_id")
+        if supervisor_owner:
+            current_owner = get_conn().execute(
+                "SELECT active_video_run_id, video_completion_mode FROM episodes WHERE id=?",
+                (job["episode_id"],),
+            ).fetchone()
+            fenced = (
+                not current_owner
+                or current_owner["video_completion_mode"] != "complete"
+                or current_owner["active_video_run_id"] != supervisor_owner
+            )
+            if not fenced:
+                try:
+                    from app.video_supervisor import TERMINAL_SUPERVISOR_PHASES, load_latest_checkpoint
+                    owner_cp = load_latest_checkpoint(job["episode_id"])
+                    fenced = bool(
+                        owner_cp
+                        and (
+                            owner_cp.dispatch_fenced_at is not None
+                            or owner_cp.phase in TERMINAL_SUPERVISOR_PHASES
+                        )
+                    )
+                except Exception:  # noqa: BLE001 — active run ownership remains the fallback fence
+                    pass
+            if fenced:
+                from app.observability.metrics import inc
+                inc(
+                    "video_supervisor_orphan_provider_result_total",
+                    episode_id=job["episode_id"],
+                    owner_run_id=supervisor_owner,
+                )
+                media_scheduler.request_cancel(
+                    job_id,
+                    reason="结果到达时所属 Supervisor 已收口；候选已隔离，不参与自动采用",
+                )
+                return
         latency = round(time.time() - started, 1)
         cost = shot_cost_cny(shot["duration_s"])
         _set_version(version["id"], status="succeeded", video_path=str(dest),
@@ -1183,17 +1219,26 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             owner,
             lease_seconds=max(180.0, float(config.TIMEOUT_VLM_READ) + 60.0),
         )
-        force_best = await _maybe_auto_qa(job, version["id"], str(dest))
-        # 补齐模式下 B 级兜底由 Supervisor 显式决定，禁止 _maybe_auto_qa 隐式 force_best
+        # 完整补齐模式只有 Supervisor 有权重抽和采用；Worker 只执行、校验并产出候选。
+        supervisor_controlled = False
         try:
             ep_mode = get_conn().execute(
                 "SELECT video_completion_mode FROM episodes WHERE id=?",
                 (job["episode_id"],),
             ).fetchone()
-            if ep_mode and ep_mode["video_completion_mode"] == "complete":
-                force_best = False
+            supervisor_controlled = bool(
+                ep_mode and ep_mode["video_completion_mode"] == "complete"
+            )
         except Exception:  # noqa: BLE001
             pass
+        force_best = await _maybe_auto_qa(
+            job,
+            version["id"],
+            str(dest),
+            allow_autonomous_retake=not supervisor_controlled,
+        )
+        if supervisor_controlled:
+            force_best = False
         _assert_job_lease(job_id, owner)
         media_evidence.record_video_candidate(
             version["id"], step_run_id=_row_value(job, "step_run_id")
@@ -1210,7 +1255,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                 resubmits = int(meta.get("technical_resubmit_count") or 0)
             except Exception:  # noqa: BLE001
                 resubmits = 0
-            if resubmits < technical_resubmit_limit():
+            if not supervisor_controlled and resubmits < technical_resubmit_limit():
                 enqueue_shot(
                     job["shot_id"],
                     reroll=True,
@@ -1241,9 +1286,10 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                     reconcile_episode_generation_status(job["episode_id"])
                 return
             raise ProviderError("视频文件技术校验失败，候选不可采用")
-        media_evidence.select_best_video_candidate(
-            job["shot_id"], force_best=force_best
-        )
+        if not supervisor_controlled:
+            media_evidence.select_best_video_candidate(
+                job["shot_id"], force_best=force_best
+            )
         if _set_job(job_id, "succeeded", lease_owner=owner):
             media_scheduler.settle_budget(job_id, cost, success=True)
             reconcile_episode_generation_status(job["episode_id"])
@@ -1268,7 +1314,13 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             reconcile_episode_generation_status(job["episode_id"])
 
 
-async def _maybe_auto_qa(job, version_id: str, video_path: str) -> bool:
+async def _maybe_auto_qa(
+    job,
+    version_id: str,
+    video_path: str,
+    *,
+    allow_autonomous_retake: bool = True,
+) -> bool:
     """自动质检 + 自动重抽。
 
     返回 True 表示重抽已结束/不会再抽，调用方应 ``force_best`` 采纳最高分视频，
@@ -1361,7 +1413,7 @@ async def _maybe_auto_qa(job, version_id: str, video_path: str) -> bool:
                 threshold=threshold,
                 hard_failures=hard_failures,
             )
-            if decision.allow:
+            if decision.allow and allow_autonomous_retake:
                 extra_neg: list[str] = list(qa.get("issues", [])[:3])
                 critique: list[str] = []
                 for ft in hard_failures[:3]:
@@ -1378,6 +1430,12 @@ async def _maybe_auto_qa(job, version_id: str, video_path: str) -> bool:
                     auto_retake_count=decision.attempt,
                 )
                 return False
+            if decision.allow:
+                log_provider_call(
+                    "vlm_qa", config.MODEL_VLM, "QA_RETAKE_DEFERRED_TO_SUPERVISOR", None, 0,
+                    meta={"shot_id": job["shot_id"], "version_id": version_id},
+                )
+                return False
             # 达上限：停止烧钱，强制采纳当前最高分（即使未过 QA）
             log_provider_call(
                 "vlm_qa", config.MODEL_VLM, "QA_RETAKE_EXHAUSTED", None, 0,
@@ -1390,6 +1448,8 @@ async def _maybe_auto_qa(job, version_id: str, video_path: str) -> bool:
             )
             return True
         if (
+            allow_autonomous_retake
+            and
             0 <= qa.get("overall", -1) < threshold
             and version["version_no"] == 1
             and qa.get("issues")

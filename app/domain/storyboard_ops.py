@@ -554,7 +554,7 @@ async def _recorded_storyboard_task(
                 resume=resume,
                 completion_mode=completion_mode,
                 completion_grant_id=completion_grant_id,
-                run_id=recorder.run_id,
+                run_id=getattr(recorder, "run_id", None),
             ),
             contract_key="storyboard",
             agent_name="storyboard_supervisor",
@@ -1075,6 +1075,9 @@ def episode_detail(episode_id: str, view: str | None = None):
 
         s["versions"] = _public_shot_versions(conn, s["id"], include_inputs=full)
         s["pipeline"] = pipeline_statuses.get(s["id"])
+        s["video_status"] = (
+            s["pipeline"].get("video_status") if s["pipeline"] else None
+        )
         # 透出 grade / fallback，供评审墙 A/B 分色
         try:
             from app.evidence.media import grade_shot_video
@@ -1140,6 +1143,9 @@ def shot_review_detail(shot_id: str):
         shot["pipeline"] = shot_pipeline_status(shot_id, conn=conn)
     except Exception:  # noqa: BLE001
         shot["pipeline"] = None
+    shot["video_status"] = (
+        shot["pipeline"].get("video_status") if shot["pipeline"] else None
+    )
     try:
         from app.evidence.media import grade_shot_video
         graded = grade_shot_video(shot_id)

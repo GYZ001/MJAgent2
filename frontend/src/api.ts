@@ -385,6 +385,8 @@ export interface ShotVersion {
 }
 
 export interface ShotPipelineStatus {
+  video_status?: 'pending_generation' | 'generating' | 'pending_adoption' | 'adopted' | 'generation_failed'
+  video_status_label?: '待生成' | '生成中' | '待采纳' | '已采纳' | '生成失败'
   pipeline_status: string
   pipeline_stage?: string | null
   current_stage?: string | null
@@ -422,6 +424,13 @@ export interface EpisodePipelineSummary {
   queued: number
   waiting_human: number
   failed?: number
+  video_status_counts?: {
+    pending_generation: number
+    generating: number
+    pending_adoption: number
+    adopted: number
+    generation_failed: number
+  }
 }
 
 export interface StopShotVideoResult {
@@ -476,6 +485,7 @@ export interface Shot {
   est_cost_cny: number; versions: ShotVersion[]
   version_count?: number
   video_stale: boolean
+  video_status?: 'pending_generation' | 'generating' | 'pending_adoption' | 'adopted' | 'generation_failed' | null
   video_grade?: 'A' | 'B' | 'C' | null
   fallback_reason?: string | null
   continuity_degraded?: boolean

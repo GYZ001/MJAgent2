@@ -158,7 +158,7 @@ def schedule_retry(job_id: str, message: str, *, max_retries: int, base_delay: f
     return due
 
 
-def request_cancel(job_id: str) -> dict[str, object]:
+def request_cancel(job_id: str, *, reason: str = "用户已停止视频任务") -> dict[str, object]:
     """Cancel locally; paid provider work may continue and is marked abandoned on completion."""
     db = get_conn()
     row = db.execute(
@@ -166,7 +166,11 @@ def request_cancel(job_id: str) -> dict[str, object]:
     ).fetchone()
     if not row:
         raise KeyError(job_id)
-    if row["status"] not in {"queued", "running", "paused_budget", "waiting_provider", "waiting_retry"}:
+    cancellable = {
+        "queued", "running", "paused_budget", "waiting_provider", "waiting_retry",
+        "waiting", "waiting_human",
+    }
+    if row["status"] not in cancellable:
         return {
             "job_id": job_id,
             "status": row["status"],
@@ -181,7 +185,9 @@ def request_cancel(job_id: str) -> dict[str, object]:
     cursor = db.execute(
         """UPDATE jobs SET cancellation_requested=1, abandoned=?, status=?,
                   lease_owner=NULL, lease_expires_at=NULL, next_retry_at=NULL, updated_at=?
-           WHERE id=? AND status IN ('queued','running','paused_budget','waiting_provider','waiting_retry')""",
+           WHERE id=? AND status IN (
+               'queued','running','paused_budget','waiting_provider','waiting_retry','waiting','waiting_human'
+           )""",
         (int(status == "abandoned"), status, now(), job_id),
     )
     if cursor.rowcount != 1:
@@ -200,7 +206,7 @@ def request_cancel(job_id: str) -> dict[str, object]:
     if row["version_id"]:
         db.execute(
             "UPDATE shot_versions SET status=?, error=? WHERE id=? AND status IN ('queued','running','paused_budget')",
-            (status, "用户已停止视频任务", row["version_id"]),
+            (status, reason, row["version_id"]),
         )
     db.commit()
     # 上游已接单：预算从 reserved/running 转为 committed 口径——保留 settled 审计，
@@ -219,7 +225,7 @@ def request_cancel(job_id: str) -> dict[str, object]:
     else:
         settle_budget(job_id, 0.0, success=False)
     from app.orchestration.media_runs import mark_media_job_state
-    mark_media_job_state(row["run_id"], row["step_run_id"], status, "用户取消媒体任务")
+    mark_media_job_state(row["run_id"], row["step_run_id"], status, reason)
     return {
         "job_id": job_id,
         "status": status,

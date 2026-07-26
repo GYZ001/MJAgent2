@@ -75,7 +75,9 @@ def test_long_reference_prompt_compacts_without_losing_story_anchors() -> None:
     prompt = compile_prompt(shot, _bible(), with_refs=True, prev_state_out=None)
 
     assert len(prompt) <= config.PROMPT_CHAR_LIMIT
-    assert action in prompt
+    assert "石碑表面骤然亮起刺眼白光" in prompt
+    assert "测验员抬头朝人群公布成绩" in prompt
+    assert "微微" not in prompt  # 编译层会剥离不可稳定渲染的微表情/微动作词
     assert "[START STATE" in prompt and "[END STATE" in prompt
     assert "萧炎，斗之力，三段！级别：低级！" in prompt
     assert SOURCE_EXCERPT_MARKER not in prompt
@@ -119,7 +121,9 @@ def test_silent_shot_compacts_without_forcing_dialogue_pacing(monkeypatch) -> No
 
     assert len(prompt) <= 920
     assert "[ONE CURRENT ACTION]" in prompt
-    assert action in prompt or action[:80] in prompt
+    assert "萧炎抬手按上冰冷石碑" in prompt
+    assert "碑面光纹向外扩散" in prompt
+    assert "指节" not in prompt
     assert "口型和肢体随台词自然推进" not in prompt
     assert prompt.endswith("--ratio 9:16 --dur 10")
 

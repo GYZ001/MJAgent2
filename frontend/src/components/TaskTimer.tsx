@@ -25,6 +25,27 @@ function formatDuration(ms: number) {
   return min ? `${min}分${String(sec).padStart(2, '0')}秒` : `${sec}秒`
 }
 
+export function ServerTaskTimer({ label, startedAt, finishedAt, running }: {
+  label: string
+  startedAt?: number | null
+  finishedAt?: number | null
+  running: boolean
+}) {
+  const [clock, setClock] = useState(Date.now())
+  useEffect(() => {
+    if (!running || !startedAt) return
+    setClock(Date.now())
+    const timer = window.setInterval(() => setClock(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [running, startedAt])
+  if (!startedAt) return null
+  const endMs = finishedAt ? finishedAt * 1000 : clock
+  const elapsedMs = Math.max(0, endMs - startedAt * 1000)
+  return running
+    ? <span className="task-timer"><b>{label}</b> 已执行 {formatDuration(elapsedMs)}</span>
+    : <span className="task-timer done"><b>{label}</b> 本次耗时 {formatDuration(elapsedMs)}</span>
+}
+
 export function useTaskTimer(key: string, active: boolean) {
   const storageKey = useMemo(() => `mjagent.timer.${key}`, [key])
   const [record, setRecord] = useState<TimerRecord>(() => loadRecord(storageKey))

@@ -23,7 +23,7 @@ from app.completion_grant import (
 from app.db import get_conn, new_id, now
 from app.evidence import repository as evidence_repository
 from app.evidence.media import grade_shot_video, select_best_video_candidate
-from app.harness.types import Evaluation, EvidenceArtifact, Issue
+from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
 from app.media_pipeline.stages import ACTIVE_JOB_STATUSES
 from app.video_control import consume_control
 from app.video_issues import (
@@ -53,7 +53,12 @@ SupervisorPhase = Literal[
     "EVALUATING",
     "REPAIRING",
     "FINALIZING",
+    "DEADLINE_CLOSING",
     "SUCCEEDED_COVERED",
+    "COMPLETED_DEADLINE_FALLBACK",
+    "PARTIAL_NO_USABLE_CANDIDATE",
+    "RECOVERING_CONTROL_PLANE",
+    "FAILED_CLOSED",
     "WAITING_RETRY",
     "PAUSED_EXTERNAL",
     "PAUSED_BUDGET",
@@ -72,6 +77,15 @@ SHOT_BUDGET_MULTIPLIER = 3.0
 CHECKPOINT_ARTIFACT_TYPE = "video_supervisor_checkpoint"
 REPORT_ARTIFACT_TYPE = "video_coverage_report"
 COST_PER_SECOND_CNY = 0.8
+CONTROL_PLANE_MAX_RECOVERIES = 3
+SUPERVISOR_HEARTBEAT_STALE_S = 60.0
+TERMINAL_SUPERVISOR_PHASES = {
+    "SUCCEEDED_COVERED",
+    "COMPLETED_DEADLINE_FALLBACK",
+    "PARTIAL_NO_USABLE_CANDIDATE",
+    "FAILED_CLOSED",
+    "CANCELLED",
+}
 
 
 class ShotCoverageEntry(BaseModel):
@@ -83,7 +97,9 @@ class ShotCoverageEntry(BaseModel):
     best_qa_overall: float | None = None
     qa_gain_last_2: float | None = None
     attempts_paid: int = 0
+    attempts_dispatched: int = 0
     attempts_budgeted: int = MIN_ATTEMPTS_PER_SHOT
+    no_charge_requeues: int = 0
     cost_spent_cny: float = 0.0
     last_issue_codes: list[str] = Field(default_factory=list)
     issue_fingerprint_counts: dict[str, int] = Field(default_factory=dict)
@@ -117,24 +133,23 @@ class CoverageLedger(BaseModel):
     cost_spent: float = 0.0
 
     def count_uncovered(self) -> int:
-        return int(self.grades.get("C", 0)) + sum(
-            1 for e in self.entries if e.chain_stale or e.video_stale
-        )
+        return sum(1 for entry in self.entries if not entry.adopted_version_id)
 
     def covered_within_quota(self) -> bool:
         if self.shots_total <= 0:
             return False
-        if any(e.grade == "C" or e.chain_stale or e.video_stale for e in self.entries):
-            return False
-        return int(self.grades.get("B", 0)) <= int(self.fallback_quota)
+        # “补齐”只填空位。adopted 是用户/Supervisor 已作出的最终选择；
+        # QA、stale 与 fallback 配额只能形成风险提示，不能撤销采用并重烧。
+        return all(entry.adopted_version_id for entry in self.entries)
 
     def has_active_jobs(self) -> bool:
-        return any(e.active_job_id for e in self.entries)
+        # 补齐 Supervisor 只观察未采用镜头；已有采用版的手工重抽不属于本次补齐。
+        return any(e.active_job_id for e in self.entries if not e.adopted_version_id)
 
     def actionable(self) -> list[ShotCoverageEntry]:
         out = []
         for e in self.entries:
-            if e.human_adopted:
+            if e.adopted_version_id:
                 continue
             if e.active_job_id:
                 continue
@@ -147,11 +162,11 @@ class CoverageLedger(BaseModel):
         """attempt 配额用尽但有技术合格候选、可 B 级兜底。"""
         out = []
         for e in self.entries:
-            if e.human_adopted or e.active_job_id:
+            if e.adopted_version_id or e.active_job_id:
                 continue
             if e.grade in {"A", "B"} and not e.chain_stale and not e.video_stale:
                 continue
-            if e.attempts_paid < e.attempts_budgeted:
+            if max(e.attempts_paid, e.attempts_dispatched) < e.attempts_budgeted:
                 continue
             if e.best_version_id:
                 out.append(e)
@@ -166,6 +181,16 @@ class VideoSupervisorCheckpoint(BaseModel):
     repair_epoch: int = 0
     tick_no: int = 0
     started_at: float = 0.0
+    deadline_at: float | None = None
+    last_heartbeat_at: float | None = None
+    dispatch_fenced_at: float | None = None
+    closeout_started_at: float | None = None
+    finished_at: float | None = None
+    terminal_reason: str | None = None
+    quality_target_missed: bool = False
+    missing_shots: list[int] = Field(default_factory=list)
+    closeout_adoptions: list[dict[str, Any]] = Field(default_factory=list)
+    control_plane_recoveries: int = 0
     grant_id: str | None = None
     storyboard_artifact_id: str | None = None
     budget: dict[str, float] = Field(default_factory=dict)
@@ -198,6 +223,55 @@ def load_latest_checkpoint(episode_id: str) -> VideoSupervisorCheckpoint | None:
 
 def save_checkpoint(cp: VideoSupervisorCheckpoint, *, run_id: str | None = None) -> str:
     rid = run_id or cp.run_id
+    cp.last_heartbeat_at = now()
+    if rid:
+        db = get_conn()
+        db.execute(
+            """UPDATE workflow_runs
+               SET updated_at=?, deadline_at=COALESCE(deadline_at, ?)
+               WHERE id=? AND status IN (
+                   'CREATED','RUNNING','WAITING_RETRY','WAITING_HUMAN',
+                   'WAITING_AUTHORIZATION','PAUSED_BUDGET','PAUSED_EXTERNAL'
+               )""",
+            (cp.last_heartbeat_at, cp.deadline_at, rid),
+        )
+        db.commit()
+
+    existing = get_conn().execute(
+        """SELECT id, content_json, created_at FROM artifacts
+           WHERE type=? AND scope_type='episode' AND scope_id=?
+             AND status IN ('candidate','validated','approved')
+           ORDER BY created_at DESC LIMIT 1""",
+        (CHECKPOINT_ARTIFACT_TYPE, cp.episode_id),
+    ).fetchone()
+    durable_every_time = TERMINAL_SUPERVISOR_PHASES | {
+        "DEADLINE_CLOSING", "RECOVERING_CONTROL_PLANE", "FAILED_CLOSED",
+        "WAITING_AUTHORIZATION", "WAITING_HUMAN", "PAUSED_EXTERNAL", "PAUSED_BUDGET",
+    }
+    if existing and cp.phase not in durable_every_time:
+        try:
+            previous = json.loads(existing["content_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            previous = {}
+        loop_phases = {"PLANNING_COVERAGE", "OBSERVING", "EVALUATING"}
+        previous_phase = previous.get("phase")
+        phase_equivalent = (
+            previous_phase == cp.phase
+            or (previous_phase in loop_phases and cp.phase in loop_phases)
+        )
+        semantic_same = all(previous.get(key) == value for key, value in {
+            "coverage": cp.coverage,
+            "shot_state": cp.shot_state,
+            "last_plan": cp.last_plan,
+            "outcome": cp.outcome,
+            "dispatch_fenced_at": cp.dispatch_fenced_at,
+        }.items())
+        if (
+            phase_equivalent
+            and semantic_same
+            and cp.last_heartbeat_at - float(existing["created_at"] or 0) < 60
+        ):
+            return str(existing["id"])
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type=CHECKPOINT_ARTIFACT_TYPE,
         scope_type="episode",
@@ -233,13 +307,50 @@ def save_checkpoint(cp: VideoSupervisorCheckpoint, *, run_id: str | None = None)
 def public_checkpoint_projection(cp: VideoSupervisorCheckpoint | None) -> dict[str, Any] | None:
     if cp is None:
         return None
+    from app import task_registry
     from app.video_control import control_snapshot
+    conn = get_conn()
+    task_running = task_registry.active("video_completion", cp.episode_id)
+    run = conn.execute(
+        "SELECT status, deadline_at, started_at, finished_at, updated_at FROM workflow_runs WHERE id=?",
+        (cp.run_id,),
+    ).fetchone() if cp.run_id else None
+    active_media_jobs = int(conn.execute(
+        """SELECT COUNT(*) AS c FROM jobs
+           WHERE episode_id=? AND kind='video'
+             AND status IN ('queued','running','waiting_provider','waiting_retry','waiting')""",
+        (cp.episode_id,),
+    ).fetchone()["c"])
+    abandoned_provider_jobs = int(conn.execute(
+        """SELECT COUNT(*) AS c FROM jobs
+           WHERE episode_id=? AND kind='video' AND status='abandoned'""",
+        (cp.episode_id,),
+    ).fetchone()["c"])
+    persisted_heartbeat = max(
+        float(cp.last_heartbeat_at or 0),
+        float(run["updated_at"] or 0) if run else 0,
+    ) or None
+    heartbeat_stale = bool(
+        cp.phase not in TERMINAL_SUPERVISOR_PHASES
+        and persisted_heartbeat
+        and now() - persisted_heartbeat > SUPERVISOR_HEARTBEAT_STALE_S
+    )
     return {
         "phase": cp.phase,
+        "run_id": cp.run_id,
         "goal": cp.goal,
         "repair_epoch": cp.repair_epoch,
         "tick_no": cp.tick_no,
-        "started_at": cp.started_at,
+        "started_at": cp.started_at or (run["started_at"] if run else None),
+        "deadline_at": cp.deadline_at or (run["deadline_at"] if run else None),
+        "last_heartbeat_at": persisted_heartbeat,
+        "dispatch_fenced_at": cp.dispatch_fenced_at,
+        "closeout_started_at": cp.closeout_started_at,
+        "finished_at": cp.finished_at or (run["finished_at"] if run else None),
+        "terminal_reason": cp.terminal_reason,
+        "quality_target_missed": cp.quality_target_missed,
+        "missing_shots": cp.missing_shots,
+        "closeout_adoptions": cp.closeout_adoptions,
         "grant_id": cp.grant_id,
         "storyboard_artifact_id": cp.storyboard_artifact_id,
         "budget": cp.budget,
@@ -248,6 +359,19 @@ def public_checkpoint_projection(cp: VideoSupervisorCheckpoint | None) -> dict[s
         "last_plan": cp.last_plan,
         "outcome": cp.outcome,
         "pending_control": control_snapshot(cp.episode_id),
+        "task_running": task_running,
+        "running": task_running,
+        "preserve_adopted": True,
+        "run_status": run["status"] if run else None,
+        "active_media_jobs": active_media_jobs,
+        "abandoned_provider_jobs": abandoned_provider_jobs,
+        "heartbeat_stale": heartbeat_stale,
+        "closeout": {
+            "started_at": cp.closeout_started_at,
+            "adoptions": cp.closeout_adoptions,
+            "missing_shots": cp.missing_shots,
+            "quality_target_missed": cp.quality_target_missed,
+        },
     }
 
 
@@ -345,6 +469,139 @@ def _video_stale_for_shot(conn, shot_row, episode_storyboard_id: str | None) -> 
     return episode_storyboard_id not in parents
 
 
+def _reconcile_terminal_continuity_blocks(episode_id: str) -> int:
+    """把不可能再获得上游尾帧的等待任务转成可路由 Issue。
+
+    queued + waiting_continuity 过去会永远被当成 active，Supervisor 因而永远
+    不会进入 L3 降链。这里只在上游既无技术候选、也无活动任务时解除死锁。
+    """
+    from app.media_pipeline import stages as media_stages
+
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT j.id, j.shot_id, j.version_id, j.after_shot_id, s.shot_no
+           FROM jobs j JOIN shots s ON s.id=j.shot_id
+           WHERE j.episode_id=? AND j.kind='video'
+             AND s.adopted_version_id IS NULL
+             AND j.status IN ('queued','waiting','waiting_retry')
+             AND j.after_shot_id IS NOT NULL
+             AND j.pipeline_stage=?""",
+        (episode_id, media_stages.STAGE_WAITING_CONTINUITY),
+    ).fetchall()
+    changed = 0
+    for row in rows:
+        upstream_rows = conn.execute(
+            """SELECT technical_validation_json FROM shot_versions
+               WHERE shot_id=? AND status='succeeded'""",
+            (row["after_shot_id"],),
+        ).fetchall()
+        upstream_candidate = False
+        for candidate in upstream_rows:
+            try:
+                if json.loads(candidate["technical_validation_json"] or "{}").get("passed"):
+                    upstream_candidate = True
+                    break
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+        upstream_active = conn.execute(
+            """SELECT 1 FROM jobs
+               WHERE shot_id=? AND kind='video'
+                 AND status IN ('queued','running','waiting_provider','waiting_retry','waiting')
+               LIMIT 1""",
+            (row["after_shot_id"],),
+        ).fetchone()
+        if upstream_candidate or upstream_active:
+            continue
+        message = "上一镜无可用尾帧且已无活动任务；解除连续性等待，交由 Supervisor 降链修复"
+        cursor = conn.execute(
+            """UPDATE jobs
+               SET status='waiting_human', pipeline_stage=?, stage_status='blocked',
+                   reason_code='VIDEO_CHAIN_ANCHOR_BLOCKED', reason_text=?, error=?,
+                   lease_owner=NULL, lease_expires_at=NULL, updated_at=?, stage_updated_at=?
+               WHERE id=? AND status IN ('queued','waiting','waiting_retry')""",
+            (media_stages.STAGE_WAITING_HUMAN, message, message, now(), now(), row["id"]),
+        )
+        if cursor.rowcount != 1:
+            continue
+        if row["version_id"]:
+            conn.execute(
+                """UPDATE shot_versions SET status='waiting_human', error=?
+                   WHERE id=? AND status IN ('queued','running','waiting_retry')""",
+                (message, row["version_id"]),
+            )
+        conn.commit()
+        persist_shot_issue(
+            episode_id=episode_id,
+            shot_id=row["shot_id"],
+            shot_no=int(row["shot_no"]),
+            issues=[Issue(
+                code="VIDEO_CHAIN_ANCHOR_BLOCKED",
+                severity=IssueSeverity.BLOCKER,
+                subject=row["shot_id"],
+                message=message,
+                evidence={
+                    "shot_no": int(row["shot_no"]),
+                    "path": str(row["shot_no"]),
+                    "rule_id": "chain_anchor",
+                    "job_id": row["id"],
+                },
+                repair_hint="取消尾帧依赖并按独立首帧重建本镜",
+            )],
+            source="supervisor_continuity_reconcile",
+        )
+        changed += 1
+    if changed:
+        from app.observability.metrics import inc
+        inc("video_continuity_anchor_blocked_total", value=changed, episode_id=episode_id)
+    return changed
+
+
+def _stop_supervised_video_jobs(episode_id: str, *, run_id: str | None, reason: str) -> list[dict[str, Any]]:
+    """冻结本次补齐仍在活动/阻塞的媒体任务；重复调用安全。"""
+    from app.orchestration import media_scheduler
+
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT j.id FROM jobs j
+           JOIN shots s ON s.id=j.shot_id
+           WHERE j.episode_id=? AND j.kind='video'
+             AND s.adopted_version_id IS NULL
+             AND j.status IN (
+               'queued','running','waiting_provider','waiting_retry','waiting',
+               'waiting_human','paused_budget'
+             )""",
+        (episode_id,),
+    ).fetchall()
+    results: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            results.append(media_scheduler.request_cancel(row["id"], reason=reason))
+        except Exception as exc:  # noqa: BLE001 — 逐任务 best effort，其余任务仍必须停止
+            results.append({"job_id": row["id"], "cancelled": False, "error": str(exc)})
+    return results
+
+
+def _release_episode_supervisor(episode_id: str, *, run_id: str | None) -> None:
+    conn = get_conn()
+    if run_id:
+        conn.execute(
+            """UPDATE episodes
+               SET video_completion_mode='quick', active_video_run_id=NULL,
+                   status=CASE WHEN status='generating' THEN 'confirmed' ELSE status END
+               WHERE id=? AND (active_video_run_id=? OR active_video_run_id IS NULL)""",
+            (episode_id, run_id),
+        )
+    else:
+        conn.execute(
+            """UPDATE episodes
+               SET video_completion_mode='quick', active_video_run_id=NULL,
+                   status=CASE WHEN status='generating' THEN 'confirmed' ELSE status END
+               WHERE id=?""",
+            (episode_id,),
+        )
+    conn.commit()
+
+
 def rebuild_coverage_ledger(
     episode_id: str,
     *,
@@ -378,6 +635,7 @@ def rebuild_coverage_ledger(
 
     cost_map: dict[str, float] = {}
     attempts_map: dict[str, int] = {}
+    dispatch_map: dict[str, int] = {}
     best_map: dict[str, dict[str, Any]] = {}
     if shot_ids:
         placeholders = ",".join("?" * len(shot_ids))
@@ -388,6 +646,7 @@ def rebuild_coverage_ledger(
             shot_ids,
         ).fetchall():
             sid = row["shot_id"]
+            dispatch_map[sid] = dispatch_map.get(sid, 0) + 1
             cost_map[sid] = cost_map.get(sid, 0.0) + float(row["cost_cny"] or 0)
             if row["provider_task_id"] or row["status"] in {"succeeded", "failed", "running", "queued"}:
                 # 产生过 provider 任务或进入执行的版本计为 paid attempt
@@ -479,6 +738,12 @@ def rebuild_coverage_ledger(
                 if job_issues:
                     last_codes = [i.code for i in job_issues]
 
+        observed_attempts = int(attempts_map.get(sid, 0))
+        try:
+            checkpoint_attempts = int(saved.get("attempts_paid") or 0)
+        except (TypeError, ValueError):
+            checkpoint_attempts = 0
+
         entry = ShotCoverageEntry(
             shot_no=int(row["shot_no"]),
             shot_id=sid,
@@ -487,8 +752,16 @@ def rebuild_coverage_ledger(
             best_version_id=(best or {}).get("id"),
             best_qa_overall=graded["qa_overall"],
             qa_gain_last_2=gain,
-            attempts_paid=int(saved.get("attempts_paid") or attempts_map.get(sid, 0)),
+            # Checkpoints remember policy history, but the durable version ledger is
+            # authoritative for attempts completed after the previous checkpoint.
+            # Never let a stale checkpoint move the counter backwards.
+            attempts_paid=max(checkpoint_attempts, observed_attempts),
+            attempts_dispatched=max(
+                int(saved.get("attempts_dispatched") or 0),
+                int(dispatch_map.get(sid, 0)),
+            ),
             attempts_budgeted=int(saved.get("attempts_budgeted") or MIN_ATTEMPTS_PER_SHOT),
+            no_charge_requeues=int(saved.get("no_charge_requeues") or 0),
             cost_spent_cny=cost,
             last_issue_codes=last_codes,
             issue_fingerprint_counts=dict(saved.get("issue_fingerprint_counts") or {}),
@@ -500,7 +773,7 @@ def rebuild_coverage_ledger(
             active_job_id=active_jobs.get(sid),
             human_adopted=_human_adopted(conn, sid),
             continuity_degraded=bool(saved.get("continuity_degraded") or graded.get("continuity_degraded")),
-            never_attempted=attempts_map.get(sid, 0) == 0 and not saved.get("attempts_paid"),
+            never_attempted=dispatch_map.get(sid, 0) == 0 and not saved.get("attempts_dispatched"),
             qa_history=qa_history,
             rebuilt_reference=bool(saved.get("rebuilt_reference")),
             fatal_repeat_count=int(saved.get("fatal_repeat_count") or 0),
@@ -521,7 +794,7 @@ def rebuild_coverage_ledger(
                     entry.blocked_by_shot_no = int(prev["shot_no"])
         entries.append(entry)
 
-    covered = grades["A"] + grades["B"]
+    covered = sum(1 for entry in entries if entry.adopted_version_id)
     total = len(entries)
     return CoverageLedger(
         episode_id=episode_id,
@@ -580,8 +853,11 @@ def _merge_shot_state(cp: VideoSupervisorCheckpoint, ledger: CoverageLedger) -> 
         state[str(e.shot_no)] = {
             "grade": e.grade,
             "shot_id": e.shot_id,
+            "adopted_version_id": e.adopted_version_id,
             "attempts_paid": e.attempts_paid,
+            "attempts_dispatched": e.attempts_dispatched,
             "attempts_budgeted": e.attempts_budgeted,
+            "no_charge_requeues": e.no_charge_requeues,
             "repair_level": e.repair_level,
             "issue_fingerprint_counts": e.issue_fingerprint_counts,
             "qa_history": e.qa_history,
@@ -599,6 +875,8 @@ def _merge_shot_state(cp: VideoSupervisorCheckpoint, ledger: CoverageLedger) -> 
         "B": ledger.grades.get("B", 0),
         "C": ledger.grades.get("C", 0),
         "total": ledger.shots_total,
+        "adopted": sum(1 for entry in ledger.entries if entry.adopted_version_id),
+        "unadopted": sum(1 for entry in ledger.entries if not entry.adopted_version_id),
         "fallback_quota": ledger.fallback_quota,
         "coverage_rate": ledger.coverage_rate,
     }
@@ -647,6 +925,44 @@ def _dispatch(
     from app import worker
     from app.compiler import CompileError
 
+    # 付费派发的最后保险：补齐模式永远不得为已有采用版的镜头创建新任务。
+    # entry 是循环开始时的快照；入队前必须重读数据库，封住用户刚刚采用候选的并发窗口。
+    if entry.adopted_version_id:
+        return False
+
+    conn = get_conn()
+    current_shot = conn.execute(
+        "SELECT adopted_version_id FROM shots WHERE id=? AND episode_id=?",
+        (entry.shot_id, episode_id),
+    ).fetchone()
+    if not current_shot or current_shot["adopted_version_id"]:
+        return False
+
+    if run_id:
+        ep = conn.execute(
+            "SELECT active_video_run_id, video_completion_mode FROM episodes WHERE id=?",
+            (episode_id,),
+        ).fetchone()
+        latest = load_latest_checkpoint(episode_id)
+        if (
+            not ep
+            or ep["video_completion_mode"] != "complete"
+            or ep["active_video_run_id"] != run_id
+            or (latest is not None and (
+                latest.dispatch_fenced_at is not None
+                or latest.phase in TERMINAL_SUPERVISOR_PHASES
+            ))
+        ):
+            if run_id:
+                evidence_repository.append_event(
+                    run_id,
+                    "VIDEO_DISPATCH_FENCED",
+                    "warning",
+                    f"第 {entry.shot_no} 镜派发被终态围栏拒绝",
+                    payload={"shot_no": entry.shot_no, "phase": latest.phase if latest else None},
+                )
+            return False
+
     kwargs: dict[str, Any] = {}
     degrade = bool(plan and plan.degrade_chain)
     if not first:
@@ -662,6 +978,7 @@ def _dispatch(
     after = _after_shot_id(episode_id, entry.shot_no, degrade=degrade)
     kwargs["after_shot_id"] = after
     kwargs["auto_retake_count"] = entry.attempts_paid
+    kwargs["supervisor_run_id"] = run_id
     kwargs["supervisor_meta"] = {
         "supervisor_run_id": run_id,
         "supervisor_repair_level": (plan.level if plan else entry.repair_level),
@@ -796,9 +1113,18 @@ def _apply_cascade(entry: ShotCoverageEntry, ledger: CoverageLedger, cp: VideoSu
             observed = qa.get("observed_state_out")
     planned = None
     conn = get_conn()
-    shot = conn.execute("SELECT state_out FROM shots WHERE id=?", (entry.shot_id,)).fetchone()
+    shot = conn.execute(
+        "SELECT shot_contract_json, last_frame_desc FROM shots WHERE id=?",
+        (entry.shot_id,),
+    ).fetchone()
     if shot:
-        planned = shot["state_out"]
+        try:
+            contract = json.loads(shot["shot_contract_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            contract = {}
+        if isinstance(contract, dict):
+            planned = contract.get("state_out")
+        planned = planned or shot["last_frame_desc"]
     drift = state_drift_significant(planned, observed)
 
     for other in ledger.entries:
@@ -1051,15 +1377,53 @@ def _try_auto_crop(entry: ShotCoverageEntry, *, run_id: str | None) -> bool:
     return True
 
 
-def _finalize_covered(
-    cp: VideoSupervisorCheckpoint, ledger: CoverageLedger, *, run_id: str | None
-) -> VideoSupervisorCheckpoint:
-    cp.phase = "FINALIZING"
-    save_checkpoint(cp, run_id=run_id)
+def _adopt_ready_candidates(
+    ledger: CoverageLedger,
+    *,
+    run_id: str | None,
+) -> int:
+    """正常运行期仅采用达到既定 QA 门槛的候选；重生仍由 Supervisor 决策。"""
+    adopted = 0
+    for entry in ledger.entries:
+        if entry.adopted_version_id or not entry.best_version_id:
+            continue
+        result = select_best_video_candidate(entry.shot_id, force_best=False)
+        if not result:
+            continue
+        entry.adopted_version_id = result.get("version_id")
+        entry.fallback_reason = result.get("fallback_reason")
+        adopted += 1
+        if run_id:
+            evidence_repository.append_event(
+                run_id,
+                "VIDEO_CANDIDATE_ADOPTED",
+                "info",
+                f"第 {entry.shot_no} 镜由 Supervisor 采用候选",
+                payload={"shot_no": entry.shot_no, "version_id": entry.adopted_version_id},
+            )
+    return adopted
+
+
+def _write_coverage_report(
+    cp: VideoSupervisorCheckpoint,
+    ledger: CoverageLedger,
+    *,
+    outcome: str,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     report = {
         "episode_id": cp.episode_id,
+        "run_id": cp.run_id,
+        "outcome": outcome,
+        "terminal_reason": cp.terminal_reason,
+        "started_at": cp.started_at,
+        "deadline_at": cp.deadline_at,
+        "finished_at": cp.finished_at,
         "grades": ledger.grades,
         "fallback_quota": ledger.fallback_quota,
+        "quality_target_missed": cp.quality_target_missed,
+        "missing_shots": cp.missing_shots,
+        "closeout_adoptions": cp.closeout_adoptions,
         "cost_spent_cny": ledger.cost_spent,
         "budget_cap_cny": (cp.budget or {}).get("cap_cny"),
         "shots": [
@@ -1067,7 +1431,8 @@ def _finalize_covered(
                 "shot_no": e.shot_no,
                 "shot_id": e.shot_id,
                 "grade": e.grade,
-                "adopted_version_id": e.adopted_version_id or e.best_version_id,
+                "adopted_version_id": e.adopted_version_id,
+                "best_version_id": e.best_version_id,
                 "qa_overall": e.best_qa_overall,
                 "cost_spent_cny": e.cost_spent_cny,
                 "repair_level": e.repair_level,
@@ -1076,57 +1441,214 @@ def _finalize_covered(
                 "attempts_paid": e.attempts_paid,
                 "attempts_budgeted": e.attempts_budgeted,
                 "last_issue_codes": e.last_issue_codes,
-                "repair_history": {
-                    "level": e.repair_level,
-                    "issue_fingerprint_counts": e.issue_fingerprint_counts,
-                    "qa_history": e.qa_history,
-                    "rebuilt_reference": e.rebuilt_reference,
-                    "fatal_repeat_count": e.fatal_repeat_count,
-                },
             }
             for e in ledger.entries
         ],
         "last_plan": cp.last_plan,
         "repair_epoch": cp.repair_epoch,
+        **(extra or {}),
     }
-    # 幂等：已有报告则不重复
-    existing = get_conn().execute(
-        """SELECT id FROM artifacts
+    # 以 run + outcome 为幂等键；旧报告不能吞掉新一轮的终态报告。
+    rows = get_conn().execute(
+        """SELECT content_json FROM artifacts
            WHERE type=? AND scope_type='episode' AND scope_id=?
              AND status IN ('validated','approved')
-           ORDER BY created_at DESC LIMIT 1""",
+           ORDER BY created_at DESC LIMIT 20""",
         (REPORT_ARTIFACT_TYPE, cp.episode_id),
-    ).fetchone()
-    if not existing:
-        art = evidence_repository.create_artifact(EvidenceArtifact(
-            type=REPORT_ARTIFACT_TYPE,
-            scope_type="episode",
-            scope_id=cp.episode_id,
-            status="validated",
-            trust_level="T2",
-            content=report,
-            contract_version="video-coverage-1.0.0",
-        ))
-        evidence_repository.create_evaluation(
-            art["id"],
-            Evaluation(
-                evaluator_type="deterministic",
-                evaluator_name="video_coverage_report",
-                evaluator_version="1.0.0",
-                status="passed",
-                hard_gate_passed=True,
-                score=100,
-                evidence={"grades": ledger.grades},
-            ),
+    ).fetchall()
+    for row in rows:
+        try:
+            old = json.loads(row["content_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if old.get("run_id") == cp.run_id and old.get("outcome") == outcome:
+            return old
+    art = evidence_repository.create_artifact(EvidenceArtifact(
+        type=REPORT_ARTIFACT_TYPE,
+        scope_type="episode",
+        scope_id=cp.episode_id,
+        status="validated",
+        trust_level="T2",
+        content=report,
+        contract_version="video-coverage-1.1.0",
+    ))
+    evidence_repository.create_evaluation(
+        art["id"],
+        Evaluation(
+            evaluator_type="deterministic",
+            evaluator_name="video_coverage_report",
+            evaluator_version="1.1.0",
+            status="passed",
+            hard_gate_passed=True,
+            score=100,
+            evidence={"grades": ledger.grades, "outcome": outcome},
+        ),
+    )
+    return report
+
+
+def _deadline_closeout(
+    cp: VideoSupervisorCheckpoint,
+    *,
+    run_id: str | None,
+    reason: str = "VIDEO_WALL_CLOCK_EXCEEDED",
+) -> VideoSupervisorCheckpoint:
+    """不可逆、幂等的截止收口：停止派发，停止任务，采用每镜最佳技术可播候选。"""
+    if cp.phase in TERMINAL_SUPERVISOR_PHASES:
+        _release_episode_supervisor(cp.episode_id, run_id=run_id or cp.run_id)
+        return cp
+    cp.phase = "DEADLINE_CLOSING"
+    cp.terminal_reason = reason
+    cp.dispatch_fenced_at = cp.dispatch_fenced_at or now()
+    cp.closeout_started_at = cp.closeout_started_at or now()
+    save_checkpoint(cp, run_id=run_id)
+
+    stopped = _stop_supervised_video_jobs(
+        cp.episode_id,
+        run_id=run_id or cp.run_id,
+        reason=f"Supervisor 收口：{reason}",
+    )
+    ledger = rebuild_coverage_ledger(
+        cp.episode_id,
+        cp=cp,
+        fallback_quota=int(cp.coverage.get("fallback_quota") or 0),
+    )
+    adopted_at_closeout: list[dict[str, Any]] = list(cp.closeout_adoptions)
+    already_recorded = {str(item.get("shot_id")) for item in adopted_at_closeout}
+    conn = get_conn()
+    for entry in ledger.entries:
+        if entry.adopted_version_id:
+            row = conn.execute(
+                "SELECT adoption_reason, qa_json FROM shot_versions WHERE id=?",
+                (entry.adopted_version_id,),
+            ).fetchone()
+            if (
+                entry.shot_id not in already_recorded
+                and row
+                and str(row["adoption_reason"] or "").startswith("截止收口由 Supervisor")
+            ):
+                try:
+                    adopted_qa = json.loads(row["qa_json"] or "{}")
+                    adopted_score = adopted_qa.get("overall")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    adopted_score = None
+                adopted_at_closeout.append({
+                    "shot_no": entry.shot_no,
+                    "shot_id": entry.shot_id,
+                    "version_id": entry.adopted_version_id,
+                    "qa_overall": adopted_score,
+                    "risk": row["adoption_reason"],
+                })
+                already_recorded.add(entry.shot_id)
+            # adopted 是不可被补齐流程覆盖的用户结果；技术/QA 风险写报告，
+            # 但截止收口也不得换版。
+            continue
+        result = select_best_video_candidate(entry.shot_id, force_best=True)
+        if not result:
+            continue
+        version_id = result.get("version_id")
+        reason_text = (
+            f"截止收口由 Supervisor 强制采用：在技术可播候选中选择最佳版本；"
+            f"QA 仅作为排序和风险标记。{result.get('reason') or ''}"
         )
-    cp.phase = "SUCCEEDED_COVERED"
-    cp.outcome = "SUCCEEDED_COVERED"
+        conn.execute(
+            "UPDATE shot_versions SET adoption_reason=? WHERE id=?",
+            (reason_text, version_id),
+        )
+        conn.commit()
+        if entry.shot_id not in already_recorded:
+            adopted_at_closeout.append({
+                "shot_no": entry.shot_no,
+                "shot_id": entry.shot_id,
+                "version_id": version_id,
+                "qa_overall": entry.best_qa_overall,
+                "risk": result.get("fallback_reason") or result.get("reason"),
+            })
+            already_recorded.add(entry.shot_id)
+
+    cp.closeout_adoptions = adopted_at_closeout
+    ledger = rebuild_coverage_ledger(
+        cp.episode_id,
+        cp=cp,
+        fallback_quota=int(cp.coverage.get("fallback_quota") or 0),
+    )
+    cp.missing_shots = [e.shot_no for e in ledger.entries if not e.adopted_version_id]
+    cp.quality_target_missed = bool(
+        cp.missing_shots or any(e.grade != "A" for e in ledger.entries)
+    )
+    cp.finished_at = now()
+    cp.outcome = (
+        "PARTIAL_NO_USABLE_CANDIDATE"
+        if cp.missing_shots
+        else "COMPLETED_DEADLINE_FALLBACK"
+    )
+    cp.phase = cp.outcome  # type: ignore[assignment]
+    _merge_shot_state(cp, ledger)
+    report = _write_coverage_report(
+        cp,
+        ledger,
+        outcome=cp.outcome,
+        extra={"stopped_jobs": stopped},
+    )
     if cp.grant_id:
         try:
             consume_grant(cp.grant_id)
         except Exception:  # noqa: BLE001
             pass
     save_checkpoint(cp, run_id=run_id)
+    _release_episode_supervisor(cp.episode_id, run_id=run_id or cp.run_id)
+    if run_id:
+        evidence_repository.append_event(
+            run_id,
+            "VIDEO_DEADLINE_CLOSED",
+            "warning" if cp.missing_shots else "info",
+            f"截止收口完成；采用 {len(cp.closeout_adoptions)} 镜，缺失 {cp.missing_shots}",
+            payload=report,
+        )
+    from app.observability.metrics import inc
+    inc(
+        "video_supervisor_deadline_fallback_adopted_total",
+        value=len(cp.closeout_adoptions),
+        episode_id=cp.episode_id,
+        terminal_reason=reason,
+    )
+    inc(
+        "video_supervisor_deadline_missing_shots_total",
+        value=len(cp.missing_shots),
+        episode_id=cp.episode_id,
+        terminal_reason=reason,
+    )
+    inc(
+        "video_supervisor_deadline_closeout_seconds",
+        value=max(0, int((cp.finished_at or now()) - (cp.closeout_started_at or now()))),
+        episode_id=cp.episode_id,
+    )
+    return cp
+
+
+def _finalize_covered(
+    cp: VideoSupervisorCheckpoint, ledger: CoverageLedger, *, run_id: str | None
+) -> VideoSupervisorCheckpoint:
+    cp.phase = "FINALIZING"
+    save_checkpoint(cp, run_id=run_id)
+    cp.phase = "SUCCEEDED_COVERED"
+    cp.outcome = "SUCCEEDED_COVERED"
+    cp.terminal_reason = "COVERAGE_TARGET_MET"
+    cp.finished_at = now()
+    cp.missing_shots = []
+    cp.quality_target_missed = any(
+        entry.grade != "A" or entry.video_stale or entry.chain_stale
+        for entry in ledger.entries
+    )
+    _merge_shot_state(cp, ledger)
+    report = _write_coverage_report(cp, ledger, outcome=cp.outcome)
+    if cp.grant_id:
+        try:
+            consume_grant(cp.grant_id)
+        except Exception:  # noqa: BLE001
+            pass
+    save_checkpoint(cp, run_id=run_id)
+    _release_episode_supervisor(cp.episode_id, run_id=run_id or cp.run_id)
     if run_id:
         evidence_repository.append_event(
             run_id, "VIDEO_COVERAGE_COMPLETED", "info",
@@ -1178,6 +1700,7 @@ async def run_video_completion_supervisor(
             run_id=run_id,
             phase="PREFLIGHT",
             started_at=now(),
+            deadline_at=None,
             grant_id=grant_id,
             storyboard_artifact_id=ep["storyboard_artifact_id"],
             budget={
@@ -1196,8 +1719,17 @@ async def run_video_completion_supervisor(
         if budget_cap_cny is not None:
             cp.budget["cap_cny"] = float(budget_cap_cny)
 
-    if cp.phase in {"SUCCEEDED_COVERED", "CANCELLED"}:
+    if cp.phase in TERMINAL_SUPERVISOR_PHASES:
         return cp
+
+    initial_wall_cap = float(
+        wall_clock_cap_s
+        if wall_clock_cap_s is not None
+        else (cp.budget.get("wall_clock_cap_s") or 4 * 3600)
+    )
+    cp.deadline_at = cp.deadline_at or ((cp.started_at or now()) + initial_wall_cap)
+    if now() >= cp.deadline_at:
+        return _deadline_closeout(cp, run_id=run_id, reason="VIDEO_WALL_CLOCK_EXCEEDED")
 
     grant: VideoCompletionGrant | None = None
     if cp.grant_id:
@@ -1212,7 +1744,11 @@ async def run_video_completion_supervisor(
             allow_fallback_adopt = grant.allow_fallback_adopt
             allow_storyboard_edit = grant.allow_storyboard_edit
             wall_clock_cap_s = float(grant.wall_clock_cap_s)
+            cp.deadline_at = float(grant.deadline_at)
+            cp.budget["wall_clock_cap_s"] = float(grant.wall_clock_cap_s)
         except GrantValidationError as exc:
+            if cp.deadline_at and now() >= cp.deadline_at:
+                return _deadline_closeout(cp, run_id=run_id, reason="VIDEO_WALL_CLOCK_EXCEEDED")
             cp.phase = "WAITING_AUTHORIZATION"
             cp.outcome = exc.code
             save_checkpoint(cp, run_id=run_id)
@@ -1228,8 +1764,13 @@ async def run_video_completion_supervisor(
     wall_cap = float(wall_clock_cap_s if wall_clock_cap_s is not None else (cp.budget.get("wall_clock_cap_s") or 4 * 3600))
     if grant:
         wall_cap = float(grant.wall_clock_cap_s)
+        cp.deadline_at = float(grant.deadline_at)
+    else:
+        cp.deadline_at = (cp.started_at or now()) + wall_cap
 
     while True:
+        if cp.deadline_at and now() >= cp.deadline_at:
+            return _deadline_closeout(cp, run_id=run_id, reason="VIDEO_WALL_CLOCK_EXCEEDED")
         action = consume_control(episode_id)
         if action == "pause":
             cp.phase = "PAUSED_EXTERNAL"
@@ -1267,12 +1808,15 @@ async def run_video_completion_supervisor(
             if g:
                 cp.budget["cap_cny"] = float(g.budget_cap_cny)
                 wall_cap = float(g.wall_clock_cap_s)
+                cp.deadline_at = float(g.deadline_at)
+                cp.budget["wall_clock_cap_s"] = wall_cap
                 allow_fallback_adopt = g.allow_fallback_adopt
                 allow_storyboard_edit = g.allow_storyboard_edit
                 grant = g
 
         cp.tick_no += 1
         cp.phase = "PLANNING_COVERAGE"
+        _reconcile_terminal_continuity_blocks(episode_id)
         ledger = rebuild_coverage_ledger(
             episode_id, cp=cp,
             fallback_quota=int(cp.coverage.get("fallback_quota") or 0),
@@ -1281,6 +1825,14 @@ async def run_video_completion_supervisor(
         cap = float(cp.budget.get("cap_cny") or DEFAULT_VIDEO_BUDGET_CAP_CNY)
         for e in ledger.entries:
             e.attempts_budgeted = attempts_for(e, ledger, budget_cap_cny=cap)
+        if _adopt_ready_candidates(ledger, run_id=run_id):
+            ledger = rebuild_coverage_ledger(
+                episode_id,
+                cp=cp,
+                fallback_quota=int(cp.coverage.get("fallback_quota") or 0),
+            )
+            for e in ledger.entries:
+                e.attempts_budgeted = attempts_for(e, ledger, budget_cap_cny=cap)
         _merge_shot_state(cp, ledger)
         save_checkpoint(cp, run_id=run_id)
 
@@ -1298,16 +1850,10 @@ async def run_video_completion_supervisor(
                     f"预算墙：已花 ¥{spent:.1f} / ¥{cap:.1f}",
                 )
             return cp
-        if now() - (cp.started_at or now()) >= wall_cap:
-            cp.phase = "WAITING_AUTHORIZATION"
-            cp.outcome = "VIDEO_WALL_CLOCK_EXCEEDED"
-            save_checkpoint(cp, run_id=run_id)
-            return cp
+        if cp.deadline_at and now() >= cp.deadline_at:
+            return _deadline_closeout(cp, run_id=run_id, reason="VIDEO_WALL_CLOCK_EXCEEDED")
         if cp.repair_epoch > MAX_REPAIR_EPOCHS:
-            cp.phase = "WAITING_HUMAN"
-            cp.outcome = "repair_epochs_exhausted"
-            save_checkpoint(cp, run_id=run_id)
-            return cp
+            return _deadline_closeout(cp, run_id=run_id, reason="REPAIR_EPOCHS_EXHAUSTED")
 
         if ledger.has_active_jobs() and not ledger.actionable():
             cp.phase = "OBSERVING"
@@ -1381,7 +1927,7 @@ async def run_video_completion_supervisor(
             if plan.strategy == "handoff_human":
                 continue
 
-            if entry.attempts_paid >= entry.attempts_budgeted and plan.is_paid:
+            if max(entry.attempts_paid, entry.attempts_dispatched) >= entry.attempts_budgeted and plan.is_paid:
                 continue
 
             if plan.strategy == "amend_storyboard":
@@ -1412,15 +1958,24 @@ async def run_video_completion_supervisor(
                        ORDER BY created_at DESC LIMIT 1""",
                     (entry.shot_id,),
                 ).fetchone()
-                if job:
+                if job and entry.no_charge_requeues < 2:
                     conn.execute(
                         "UPDATE jobs SET status='queued', retry_count=0, error=NULL, updated_at=? WHERE id=?",
                         (now(), job["id"]),
                     )
                     conn.commit()
+                    entry.no_charge_requeues += 1
                     progressed = True
                     continue
-                # 无旧 job → 走新入队
+                # 同一个失败任务最多免计费重排两次；之后创建新版本并受镜级派发上限约束。
+                plan = plan.model_copy(update={
+                    "level": "L1",
+                    "strategy": "retake_directed",
+                    "is_paid": True,
+                    "reason": (plan.reason or "") + "；免计费重排已达上限，切换受控新版本",
+                })
+                if max(entry.attempts_paid, entry.attempts_dispatched) >= entry.attempts_budgeted:
+                    continue
             cp.phase = "REPAIRING"
             if run_id:
                 evidence_repository.append_event(
@@ -1476,6 +2031,276 @@ async def run_video_completion_supervisor(
         await asyncio.sleep(cp.tick_interval_s)
 
 
+def _mark_failed_closed(
+    cp: VideoSupervisorCheckpoint,
+    *,
+    run_id: str | None,
+    reason: str,
+) -> VideoSupervisorCheckpoint:
+    """连收口协议自身也失败时的最小安全终态。"""
+    cp.phase = "FAILED_CLOSED"
+    cp.outcome = "FAILED_CLOSED"
+    cp.terminal_reason = reason
+    cp.dispatch_fenced_at = cp.dispatch_fenced_at or now()
+    cp.finished_at = now()
+    cp.quality_target_missed = True
+    try:
+        _stop_supervised_video_jobs(cp.episode_id, run_id=run_id or cp.run_id, reason=reason)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        save_checkpoint(cp, run_id=run_id)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        _release_episode_supervisor(cp.episode_id, run_id=run_id or cp.run_id)
+    except Exception:  # noqa: BLE001
+        # 最后一层仍尝试直接清掉假运行标记。
+        conn = get_conn()
+        conn.execute(
+            """UPDATE episodes SET video_completion_mode='quick', active_video_run_id=NULL,
+                      status=CASE WHEN status='generating' THEN 'confirmed' ELSE status END
+               WHERE id=?""",
+            (cp.episode_id,),
+        )
+        conn.commit()
+    return cp
+
+
+async def run_video_completion_resilient(
+    episode_id: str,
+    **kwargs: Any,
+) -> VideoSupervisorCheckpoint:
+    """控制面异常自动续跑；连续失败后仍执行候选收口并停止所有付费任务。"""
+    run_id = kwargs.get("run_id")
+    recoveries = 0
+    while True:
+        try:
+            return await run_video_completion_supervisor(episode_id, **kwargs)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — 控制面必须 fail closed，不能裸奔 Worker
+            from app.observability.metrics import inc
+            inc(
+                "video_supervisor_failed_with_active_jobs_total",
+                episode_id=episode_id,
+                error_type=type(exc).__name__,
+            )
+            recoveries += 1
+            cp = load_latest_checkpoint(episode_id) or VideoSupervisorCheckpoint(
+                episode_id=episode_id,
+                run_id=run_id,
+                phase="RECOVERING_CONTROL_PLANE",
+                started_at=now(),
+            )
+            cp.control_plane_recoveries = max(cp.control_plane_recoveries, recoveries)
+            cp.phase = "RECOVERING_CONTROL_PLANE"
+            cp.outcome = f"{type(exc).__name__}: {str(exc)[:500]}"
+            if cp.deadline_at is None:
+                wall_cap = float(kwargs.get("wall_clock_cap_s") or 4 * 3600)
+                cp.deadline_at = (cp.started_at or now()) + wall_cap
+            try:
+                save_checkpoint(cp, run_id=run_id)
+                if run_id:
+                    evidence_repository.append_event(
+                        run_id,
+                        "VIDEO_CONTROL_PLANE_RECOVERING",
+                        "error",
+                        f"Supervisor 控制面异常，自动恢复 {recoveries}/{CONTROL_PLANE_MAX_RECOVERIES}",
+                        payload={"error_type": type(exc).__name__, "message": str(exc)[:1000]},
+                    )
+            except Exception:  # noqa: BLE001 — 保留原异常，继续进入 fail-closed 路径
+                pass
+            if recoveries <= CONTROL_PLANE_MAX_RECOVERIES and now() < (cp.deadline_at or now()):
+                kwargs["resume"] = True
+                await asyncio.sleep(min(5.0, float(recoveries)))
+                continue
+            try:
+                return _deadline_closeout(
+                    cp,
+                    run_id=run_id,
+                    reason="CONTROL_PLANE_FAILURE",
+                )
+            except Exception as close_exc:  # noqa: BLE001
+                return _mark_failed_closed(
+                    cp,
+                    run_id=run_id,
+                    reason=f"CONTROL_PLANE_CLOSEOUT_FAILED: {type(close_exc).__name__}: {close_exc}",
+                )
+
+
+async def reconcile_stale_video_supervisors() -> int:
+    """接管 heartbeat 超时但内存 task 仍占位的 Supervisor。"""
+    from app import task_registry
+    from app.orchestration.engine import WorkflowRecorder, fingerprint
+    from app.observability.metrics import inc
+
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT e.id, e.project_id, e.storyboard_artifact_id, e.active_video_run_id,
+                  r.updated_at AS run_updated_at
+           FROM episodes e
+           LEFT JOIN workflow_runs r ON r.id=e.active_video_run_id
+           WHERE e.video_completion_mode='complete' AND e.active_video_run_id IS NOT NULL"""
+    ).fetchall()
+    recovered = 0
+    for row in rows:
+        episode_id = row["id"]
+        cp = load_latest_checkpoint(episode_id)
+        if cp is None or cp.phase in TERMINAL_SUPERVISOR_PHASES or cp.phase in {
+            "PAUSED_EXTERNAL", "PAUSED_BUDGET", "WAITING_AUTHORIZATION", "WAITING_HUMAN",
+        }:
+            continue
+        heartbeat = max(float(cp.last_heartbeat_at or 0), float(row["run_updated_at"] or 0))
+        task_running = task_registry.active("video_completion", episode_id)
+        # A checkpoint created before absolute deadlines existed is a legacy
+        # incident.  Do not mutate it automatically: the repair-preview +
+        # explicit confirmation path owns that migration.
+        if not task_running and cp.deadline_at is None:
+            continue
+        if heartbeat and now() - heartbeat <= SUPERVISOR_HEARTBEAT_STALE_S:
+            continue
+        if task_running:
+            await task_registry.cancel_and_wait("video_completion", episode_id)
+        recorder = WorkflowRecorder.create(
+            workflow_type="episode_video_completion",
+            scope_type="episode",
+            scope_id=episode_id,
+            input_fingerprint=fingerprint(
+                row["storyboard_artifact_id"], cp.grant_id, "watchdog_closeout",
+            ),
+            requested_by="system",
+            trigger_type="watchdog",
+            policy_snapshot={"supervisor": "video_completion", "watchdog_takeover": True},
+            deadline_at=cp.deadline_at,
+            parent_run_id=row["active_video_run_id"],
+        )
+        recorder.start()
+        cp.run_id = recorder.run_id
+        cp.phase = "RECOVERING_CONTROL_PLANE"
+        cp.control_plane_recoveries += 1
+        conn.execute(
+            """UPDATE episodes SET active_video_run_id=?, status='generating'
+               WHERE id=?""",
+            (recorder.run_id, episode_id),
+        )
+        conn.commit()
+        try:
+            result = _deadline_closeout(
+                cp,
+                run_id=recorder.run_id,
+                reason="SUPERVISOR_HEARTBEAT_STALE",
+            )
+            recorder.partial(result.outcome or result.phase)
+        except Exception as exc:  # noqa: BLE001
+            _mark_failed_closed(
+                cp,
+                run_id=recorder.run_id,
+                reason=f"WATCHDOG_CLOSEOUT_FAILED: {type(exc).__name__}: {exc}",
+            )
+            recorder.fail(exc)
+        inc("video_supervisor_watchdog_takeover_total", episode_id=episode_id)
+        recovered += 1
+    return recovered
+
+
+async def video_supervisor_watchdog_loop(interval_s: float = 30.0) -> None:
+    while True:
+        try:
+            await reconcile_stale_video_supervisors()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — watchdog 自身不得因单集坏数据退出
+            pass
+        await asyncio.sleep(max(5.0, min(float(interval_s), 60.0)))
+
+
+def preview_video_completion_repair(episode_id: str) -> dict[str, Any]:
+    """只读预演遗留/崩溃 run 的收口结果，不创建校验、不改 adopted、不停 job。"""
+    conn = get_conn()
+    cp = load_latest_checkpoint(episode_id)
+    ep = conn.execute(
+        "SELECT active_video_run_id, video_completion_mode, status FROM episodes WHERE id=?",
+        (episode_id,),
+    ).fetchone()
+    if not ep:
+        raise ValueError(f"剧集不存在：{episode_id}")
+    shots = conn.execute(
+        "SELECT id, shot_no, adopted_version_id FROM shots WHERE episode_id=? ORDER BY shot_no",
+        (episode_id,),
+    ).fetchall()
+    plan: list[dict[str, Any]] = []
+    for shot in shots:
+        candidates: list[dict[str, Any]] = []
+        versions = conn.execute(
+            """SELECT id, version_no, qa_json, technical_validation_json, adoption_reason
+               FROM shot_versions WHERE shot_id=? AND status='succeeded' ORDER BY version_no""",
+            (shot["id"],),
+        ).fetchall()
+        for version in versions:
+            try:
+                technical = json.loads(version["technical_validation_json"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                technical = {}
+            if not technical.get("passed"):
+                continue
+            try:
+                qa = json.loads(version["qa_json"] or "{}")
+                score = float(qa.get("overall")) if qa.get("overall") is not None else -1.0
+            except (TypeError, ValueError, json.JSONDecodeError):
+                score = -1.0
+            candidates.append({
+                "version_id": version["id"],
+                "version_no": int(version["version_no"]),
+                "qa_overall": score,
+            })
+        candidates.sort(key=lambda item: (item["qa_overall"], item["version_no"]), reverse=True)
+        adopted_valid = any(
+            candidate["version_id"] == shot["adopted_version_id"] for candidate in candidates
+        )
+        if adopted_valid:
+            action = "retain_adopted"
+            selected = shot["adopted_version_id"]
+        elif candidates:
+            action = "adopt_best_technical_candidate"
+            selected = candidates[0]["version_id"]
+        else:
+            action = "mark_missing"
+            selected = None
+        blocked_job = conn.execute(
+            """SELECT id, after_shot_id FROM jobs
+               WHERE shot_id=? AND kind='video'
+                 AND status IN ('queued','running','waiting_provider','waiting_retry','waiting','waiting_human')
+               ORDER BY created_at DESC LIMIT 1""",
+            (shot["id"],),
+        ).fetchone()
+        plan.append({
+            "shot_no": int(shot["shot_no"]),
+            "shot_id": shot["id"],
+            "action": action,
+            "selected_version_id": selected,
+            "candidates": candidates,
+            "active_job_id": blocked_job["id"] if blocked_job else None,
+            "blocked_by_shot_id": blocked_job["after_shot_id"] if blocked_job else None,
+        })
+    return {
+        "dry_run": True,
+        "episode_id": episode_id,
+        "active_video_run_id": ep["active_video_run_id"],
+        "video_completion_mode": ep["video_completion_mode"],
+        "episode_status": ep["status"],
+        "checkpoint_phase": cp.phase if cp else None,
+        "checkpoint_started_at": cp.started_at if cp else None,
+        "checkpoint_deadline_at": cp.deadline_at if cp else None,
+        "would_adopt": [item for item in plan if item["action"] == "adopt_best_technical_candidate"],
+        "would_retain": [item for item in plan if item["action"] == "retain_adopted"],
+        "would_mark_missing": [item for item in plan if item["action"] == "mark_missing"],
+        "shots": plan,
+        "will_start_generation": False,
+        "will_delete_media": False,
+    }
+
+
 def recover_video_completion_runs() -> int:
     """服务重启后恢复未完成的视频补齐 Supervisor。"""
     from app import task_registry
@@ -1505,7 +2330,12 @@ def recover_video_completion_runs() -> int:
         cp = load_latest_checkpoint(episode_id)
         if cp is None:
             continue
-        if cp.phase in {"SUCCEEDED_COVERED", "CANCELLED", "WAITING_AUTHORIZATION", "WAITING_HUMAN"}:
+        legacy_without_deadline = cp.deadline_at is None
+        if legacy_without_deadline and cp.grant_id:
+            prior_grant = get_video_grant(cp.grant_id)
+            if prior_grant:
+                cp.deadline_at = float(prior_grant.deadline_at)
+        if cp.phase in TERMINAL_SUPERVISOR_PHASES or cp.phase in {"WAITING_AUTHORIZATION", "WAITING_HUMAN"}:
             continue
         # 用户取消的 run 不恢复
         cancelled = conn.execute(
@@ -1523,7 +2353,11 @@ def recover_video_completion_runs() -> int:
         ).fetchone()
         if cancelled and latest and latest["status"] == "CANCELLED":
             continue
-        if cp.grant_id:
+        deadline_due = bool(cp.deadline_at and now() >= cp.deadline_at)
+        # 旧版本事故 run 没有持久化 deadline；只提供 dry-run，禁止启动时静默改用户现场数据。
+        if legacy_without_deadline and deadline_due:
+            continue
+        if cp.grant_id and not deadline_due:
             try:
                 validate_video_grant(
                     cp.grant_id,
@@ -1543,27 +2377,29 @@ def recover_video_completion_runs() -> int:
             requested_by="system",
             trigger_type="resume",
             policy_snapshot={"supervisor": "video_completion", "resume": True},
+            deadline_at=cp.deadline_at,
             parent_run_id=row["active_video_run_id"],
         )
 
-        async def _task(eid=episode_id, rid=recorder.run_id, gid=cp.grant_id):
+        async def _task(eid=episode_id, rid=recorder.run_id, gid=cp.grant_id, rec=recorder):
+            rec.start()
             try:
-                result = await run_video_completion_supervisor(
+                result = await run_video_completion_resilient(
                     eid, resume=True, grant_id=gid, run_id=rid,
                 )
                 if result.phase == "SUCCEEDED_COVERED":
-                    recorder.succeed(result.outcome or "SUCCEEDED_COVERED")
+                    rec.succeed(result.outcome or "SUCCEEDED_COVERED")
                 elif result.phase in {"WAITING_AUTHORIZATION", "WAITING_HUMAN", "PAUSED_EXTERNAL", "PAUSED_BUDGET"}:
-                    recorder.partial(result.outcome or result.phase)
+                    rec.partial(result.outcome or result.phase)
                 elif result.phase == "CANCELLED":
-                    recorder.cancel()
+                    rec.cancel()
                 else:
-                    recorder.partial(result.phase)
+                    rec.partial(result.phase)
             except asyncio.CancelledError:
-                recorder.cancel()
+                rec.cancel()
                 raise
             except Exception as exc:
-                recorder.fail(exc)
+                rec.fail(exc)
                 raise
 
         task_registry.spawn(

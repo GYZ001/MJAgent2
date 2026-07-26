@@ -48,6 +48,7 @@ class VideoCompletionGrant(BaseModel):
     kind: Literal["video"] = "video"
     budget_cap_cny: float = DEFAULT_VIDEO_BUDGET_CAP_CNY
     wall_clock_cap_s: float = DEFAULT_VIDEO_WALL_CLOCK_CAP_S
+    deadline_at: float
     allow_fallback_adopt: bool = True
     max_fallback_shots: int = 0
     allow_storyboard_edit: bool = False
@@ -86,6 +87,7 @@ def ensure_completion_grants_table(conn=None) -> None:
         "ALTER TABLE completion_grants ADD COLUMN storyboard_artifact_id TEXT",
         "ALTER TABLE completion_grants ADD COLUMN budget_cap_cny REAL",
         "ALTER TABLE completion_grants ADD COLUMN wall_clock_cap_s REAL",
+        "ALTER TABLE completion_grants ADD COLUMN deadline_at REAL",
         "ALTER TABLE completion_grants ADD COLUMN allow_fallback_adopt INTEGER NOT NULL DEFAULT 1",
         "ALTER TABLE completion_grants ADD COLUMN max_fallback_shots INTEGER",
         "ALTER TABLE completion_grants ADD COLUMN allow_storyboard_edit INTEGER NOT NULL DEFAULT 0",
@@ -167,9 +169,10 @@ def issue_video_completion_grant(
     grant_id = new_id("grant")
     token = secrets.token_urlsafe(24)
     issued_at = now()
-    expires_at = issued_at + max(60, int(ttl_s))
     cap = float(budget_cap_cny if budget_cap_cny is not None else DEFAULT_VIDEO_BUDGET_CAP_CNY)
     wall = float(wall_clock_cap_s if wall_clock_cap_s is not None else DEFAULT_VIDEO_WALL_CLOCK_CAP_S)
+    deadline_at = issued_at + wall
+    expires_at = issued_at + max(60, int(ttl_s), int(wall) + 3600)
     fallback_quota = (
         int(max_fallback_shots)
         if max_fallback_shots is not None
@@ -179,14 +182,14 @@ def issue_video_completion_grant(
         """INSERT INTO completion_grants(
             id, episode_id, project_id, screenplay_artifact_id, bible_artifact_id,
             permission, token_hash, issued_by, issued_at, expires_at, consumed_at, revoked_at,
-            impact_snapshot_json, kind, storyboard_artifact_id, budget_cap_cny, wall_clock_cap_s,
+            impact_snapshot_json, kind, storyboard_artifact_id, budget_cap_cny, wall_clock_cap_s, deadline_at,
             allow_fallback_adopt, max_fallback_shots, allow_storyboard_edit
-        ) VALUES(?,?,?,?,NULL,?,?,?,?,?,NULL,NULL,?,?,?,?,?,?,?,?)""",
+        ) VALUES(?,?,?,?,NULL,?,?,?,?,?,NULL,NULL,?,?,?,?,?,?,?,?,?)""",
         (
             grant_id, episode_id, project_id, "",
             VIDEO_PERMISSION, _hash_token(token), issued_by, issued_at, expires_at,
             json.dumps(impact_snapshot or {}, ensure_ascii=False),
-            "video", storyboard_artifact_id or "", cap, wall,
+            "video", storyboard_artifact_id or "", cap, wall, deadline_at,
             1 if allow_fallback_adopt else 0, fallback_quota,
             1 if allow_storyboard_edit else 0,
         ),
@@ -199,6 +202,7 @@ def issue_video_completion_grant(
         storyboard_artifact_id=storyboard_artifact_id or "",
         budget_cap_cny=cap,
         wall_clock_cap_s=wall,
+        deadline_at=deadline_at,
         allow_fallback_adopt=allow_fallback_adopt,
         max_fallback_shots=fallback_quota,
         allow_storyboard_edit=allow_storyboard_edit,
@@ -245,6 +249,10 @@ def _row_to_video_grant(row) -> VideoCompletionGrant:
         storyboard_artifact_id=_col("storyboard_artifact_id") or "",
         budget_cap_cny=float(_col("budget_cap_cny") or DEFAULT_VIDEO_BUDGET_CAP_CNY),
         wall_clock_cap_s=float(_col("wall_clock_cap_s") or DEFAULT_VIDEO_WALL_CLOCK_CAP_S),
+        deadline_at=float(
+            _col("deadline_at")
+            or (float(row["issued_at"]) + float(_col("wall_clock_cap_s") or DEFAULT_VIDEO_WALL_CLOCK_CAP_S))
+        ),
         allow_fallback_adopt=bool(int(_col("allow_fallback_adopt", 1) or 0)),
         max_fallback_shots=int(_col("max_fallback_shots") or 0),
         allow_storyboard_edit=bool(int(_col("allow_storyboard_edit", 0) or 0)),
@@ -367,13 +375,14 @@ def bump_video_grant_budget(
         raise GrantValidationError("GRANT_REVOKED", "视频补齐授权已撤销")
     new_cap = float(grant.budget_cap_cny) + max(0.0, float(add_cny))
     new_wall = float(grant.wall_clock_cap_s) + max(0.0, float(add_wall_s))
+    new_deadline = float(grant.issued_at) + new_wall
     new_expires = max(float(grant.expires_at), now() + GRANT_TTL_S)
     conn = get_conn()
     conn.execute(
         """UPDATE completion_grants
-           SET budget_cap_cny=?, wall_clock_cap_s=?, expires_at=?, consumed_at=NULL
+           SET budget_cap_cny=?, wall_clock_cap_s=?, deadline_at=?, expires_at=?, consumed_at=NULL
            WHERE id=?""",
-        (new_cap, new_wall, new_expires, grant_id),
+        (new_cap, new_wall, new_deadline, new_expires, grant_id),
     )
     conn.commit()
     updated = get_video_grant(grant_id)

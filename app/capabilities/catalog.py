@@ -1054,6 +1054,10 @@ def _register_exemptions(registry) -> None:
         "评审墙死锁解锁：强制停止补齐 Supervisor 并复位面板；不创建新付费任务",
     )
     registry.exempt_rest(
+        "POST /api/episodes/{episode_id}/video-completion/repair",
+        "遗留事故收口端点：必须先 dry-run 且由本机操作者 confirm=true；只停止任务和采用既有候选，不创建付费任务",
+    )
+    registry.exempt_rest(
         "POST /api/episodes/{episode_id}/migrate-shot-ids",
         "VAL-422 历史 ID 空间迁移：把误写入 story_event_id 的 S* 迁到 spine_beat_ids；只修合同字段，不启动付费任务",
     )
