@@ -145,8 +145,14 @@ export default function ScenesPage() {
                       </button>
                     )}
                   </div>
-                  {approvedRefs.length > 1 && (
-                    <SceneRefStrip segments={approvedRefs} />
+                  {(approvedRefs.length > 0) && (
+                    <SceneRefStrip
+                      projectId={p.id}
+                      sceneName={s.name}
+                      segments={approvedRefs}
+                      disabled={busy || generating}
+                      onChanged={refresh}
+                    />
                   )}
                   <label className="f">场景锚点串（30~60 字，定稿后锁定）</label>
                   <div className="f-anchor">{s.scene_canonical}</div>
@@ -295,14 +301,39 @@ function sceneRangeLabel(start: number, end: number | null): string {
   return start === end ? `第${start}集` : `第${start}~${end}集`
 }
 
-function SceneRefStrip({ segments }: { segments: SceneRefSegment[] }) {
+function SceneRefStrip({ projectId, sceneName, segments, disabled, onChanged }: {
+  projectId: string
+  sceneName: string
+  segments: SceneRefSegment[]
+  disabled?: boolean
+  onChanged?: () => void
+}) {
+  const { toast } = useNav()
+  const [redoing, setRedoing] = useState<string | null>(null)
   const sorted = [...segments].sort((a, b) => a.ep_start - b.ep_start)
   const viewLabels: Record<string, string> = {
     establishing: '建立', reverse_angle: '反打', action_zone: '动作区',
   }
+  const current = sorted.filter(seg => seg.ep_end == null).at(-1) || sorted.at(-1)
+
+  const redoView = async (sceneRefId: string, viewRole: string) => {
+    const label = viewLabels[viewRole] || viewRole
+    if (!window.confirm(`确认重做「${sceneName}」的${label}视角？将重新付费生成并复跑整包 QA。`)) return
+    setRedoing(`${sceneRefId}:${viewRole}`)
+    try {
+      await api.regenerateSceneView(projectId, sceneName, sceneRefId, viewRole)
+      toast(`${label}视角已重做`)
+      onChanged?.()
+    } catch (e: unknown) {
+      toast(e instanceof Error ? e.message : String(e), true)
+    } finally {
+      setRedoing(null)
+    }
+  }
+
   return (
     <div style={{ margin: '2px 0 8px' }}>
-      <label className="f">场景版本（按适用集；版本内展示多视角）</label>
+      <label className="f">场景版本（按适用集；可单视角重做）</label>
       <div style={{ display: 'flex', gap: 12, overflowX: 'auto', paddingBottom: 4 }}>
         {sorted.map((seg, i) => (
           <div key={seg.id || i} style={{ flex: '0 0 auto', minWidth: 120 }}>
@@ -316,6 +347,17 @@ function SceneRefStrip({ segments }: { segments: SceneRefSegment[] }) {
                   <div key={view.id} className="portrait-view-chip">
                     <img src={view.image_url} alt={view.view_role || 'view'} />
                     <span>{viewLabels[view.view_role || ''] || view.view_role || '视角'}</span>
+                    {current?.id === seg.id && seg.id && view.view_role && (
+                      <button
+                        type="button"
+                        className="btn small ghost"
+                        style={{ fontSize: 10, padding: '1px 6px', marginTop: 2 }}
+                        disabled={disabled || !!redoing}
+                        onClick={() => redoView(seg.id!, view.view_role!)}
+                      >
+                        {redoing === `${seg.id}:${view.view_role}` ? '重做中…' : '重做'}
+                      </button>
+                    )}
                   </div>
                 ) : null)}
               </div>

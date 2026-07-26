@@ -534,9 +534,10 @@ def _collect_scene_labels(screenplay) -> list[str]:
 
 
 async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenplay, bible) -> dict:
-    """剧本就绪后（分镜展开前）反应式维护场景库：剧本里出现、库里没有、够戏份的新场景 → 评估后
-    补进 bible.scenes + 出图，适用集从本集起开放。逐项吞错——单场景失败不阻断分镜。
-    返回 {checked, added:[...], errors:[...]}。"""
+    """剧本就绪后（分镜展开前）反应式维护场景库：
+      ① 新场景发现：剧本地点未入库 → 评估后补进 bible.scenes + 出图；
+      ② 已有场景永久状态演进：损毁/重建等 → 整包多视角原子切换。
+    逐项吞错——单场景失败不阻断分镜。返回 {checked, added, evolved, errors}。"""
     scenes = list(getattr(bible, "scenes", None) or [])
     style = bible.world.visual_style_canonical
     conn = get_conn()
@@ -544,7 +545,6 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
     bible_version = (proj["bible_version"] if proj else 0) or 0
 
     labels = _collect_scene_labels(screenplay)
-    # 已能映射到库内场景的标签直接跳过；映射结果用场景 summary 作为评估上下文。
     summary_by_heading = {
         (getattr(sc, "scene_heading", "") or "").strip(): (getattr(sc, "summary", "") or "")
         for sc in (getattr(screenplay, "scene_outline", None) or [])
@@ -552,6 +552,7 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
     unmatched = [lb for lb in labels if not match_scene_name(lb, scenes)]
 
     added: list[dict] = []
+    evolved: list[dict] = []
     errors: list[str] = []
     for label in unmatched:
         context = f"{label}：{summary_by_heading.get(label, '')}".strip()
@@ -567,7 +568,6 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
         if not verdict["important"]:
             continue
         name = verdict["name"]
-        # 评估给的 name 可能已映射到库内（同地点别称）→ 跳过；否则入库 + 出图。
         if match_scene_name(name, scenes) or name in {s.name for s in scenes}:
             continue
         new_scene = {"name": name, "scene_canonical": verdict["scene_canonical"],
@@ -586,4 +586,259 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
             scenes.append(Scene.model_validate(new_scene))
             added.append({"name": name, "reason": verdict["reason"], "has_image": bool(new_scene["ref_image_path"])})
 
-    return {"checked": len(unmatched), "added": added, "errors": errors}
+    # ② 已入库场景的永久状态演进（损毁/重建等）
+    try:
+        known_entries = _known_scene_change_entries(
+            conn, project_id, episode_no, screenplay, scenes, summary_by_heading,
+        )
+        if known_entries:
+            changes = await screen_scene_state_changes(known_entries, f"第 {episode_no} 集")
+            for name, meta in changes.items():
+                try:
+                    result = await _refresh_scene_on_state_change(
+                        project_id, name, episode_no,
+                        meta["new_scene_canonical"], style, bible_version,
+                        change_meta=meta,
+                    )
+                    if result:
+                        evolved.append({"name": name, **result, "reason": meta.get("reason")})
+                        _update_bible_scene_canonical(conn, project_id, name, meta["new_scene_canonical"],
+                                                      result.get("image_path"))
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        f"{name}@第{episode_no}集场景演进失败"
+                        + code_ref(exc, action="refresh_scene_state",
+                                   context={"project_id": project_id, "scene": name, "episode_no": episode_no})
+                    )
+    except Exception as exc:  # noqa: BLE001 演进探测失败不阻断分镜
+        errors.append("场景状态演进探测失败" + code_ref(exc, action="screen_scene_state_changes",
+                                                    context={"project_id": project_id, "episode_no": episode_no}))
+
+    return {"checked": len(unmatched), "added": added, "evolved": evolved, "errors": errors}
+
+
+def _open_scene_ref(conn, project_id: str, name: str):
+    return conn.execute(
+        "SELECT * FROM scene_references WHERE project_id=? AND scene_name=? AND ep_end IS NULL "
+        "ORDER BY ep_start DESC LIMIT 1",
+        (project_id, name),
+    ).fetchone()
+
+
+def _known_scene_change_entries(conn, project_id, episode_no, screenplay, scenes, summary_by_heading) -> list[dict]:
+    """为本集已映射到库内的场景收集状态演进探测条目。"""
+    entries: list[dict] = []
+    labels = _collect_scene_labels(screenplay)
+    by_name = {s.name: s for s in scenes}
+    for label in labels:
+        name = match_scene_name(label, scenes)
+        if not name and label in by_name:
+            name = label
+        if not name or name not in by_name:
+            continue
+        cur = _open_scene_ref(conn, project_id, name)
+        if not cur or cur["ep_start"] >= episode_no:
+            continue
+        context = summary_by_heading.get(label, "") or ""
+        for b in getattr(screenplay, "beats", None) or []:
+            if (getattr(b, "location", "") or "").strip() == label:
+                context += "\n" + (getattr(b, "action", "") or getattr(b, "summary", "") or "")
+        if not context.strip():
+            continue
+        entries.append({
+            "name": name,
+            "current_canonical": cur["scene_canonical"] or by_name[name].scene_canonical,
+            "fragments": [context.strip()[:2000]],
+        })
+    return entries
+
+
+async def screen_scene_state_changes(entries: list[dict], ep_label: str) -> dict[str, dict]:
+    """判断已有场景是否发生永久损毁/重建等需整包演进的状态变化。"""
+    if not entries:
+        return {}
+    payload = []
+    for item in entries:
+        payload.append({
+            "name": item["name"],
+            "current_canonical": item["current_canonical"],
+            "evidence": "\n".join(item.get("fragments") or [])[:1800],
+        })
+    prompt = f"""任务：判断漫剧场景是否发生【永久状态变化】，需要生成新的场景多视角资产包。
+
+范围（{ep_label}）：
+{json.dumps(payload, ensure_ascii=False)}
+
+只在下列情况标记 changed=true：
+- 建筑/空间永久损毁、坍塌、烧毁、炸毁
+- 明确重建、改建、装修后长期固定的新陈设
+- 永久性标志物增减导致环境真值改变
+
+不要标记：
+- 普通昼夜、天气、临时烟雾/灯光/道具
+- 只影响单镜构图的临时布置
+
+输出 JSON 数组，每项：
+{{"name":str,"changed":bool,"persistence":"persistent|episode|shot_only",
+ "change_dimensions":["damage"|"rebuild"|"layout"|"decor"],
+ "new_scene_canonical":str,"reason":str,"evidence_excerpt":str}}
+shot_only / 未永久变化请 changed=false。new_scene_canonical 须 30~80 字，只写视觉环境。"""
+    raw = await model_gateway.chat(
+        [{"role": "user", "content": prompt}], temperature=0.2, max_tokens=1600,
+        call_meta={"stage": "screen_scene_state_changes"},
+    )
+    data = extract_json(raw)
+    if isinstance(data, dict):
+        data = data.get("items") or data.get("scenes") or []
+    if not isinstance(data, list):
+        return {}
+    out: dict[str, dict] = {}
+    for item in data:
+        if not isinstance(item, dict) or not item.get("changed"):
+            continue
+        name = (item.get("name") or "").strip()
+        if not name:
+            continue
+        persistence = str(item.get("persistence") or "persistent").strip().lower()
+        if persistence == "shot_only":
+            continue
+        if persistence not in {"persistent", "episode"}:
+            persistence = "persistent"
+        dims = item.get("change_dimensions") or []
+        if isinstance(dims, str):
+            dims = [dims]
+        dims = [str(d).strip() for d in dims if str(d).strip()]
+        canonical = (item.get("new_scene_canonical") or "").strip()
+        if len(canonical) < SCENE_CANONICAL_MIN:
+            continue
+        if len(canonical) > SCENE_CANONICAL_MAX:
+            canonical = canonical[:SCENE_CANONICAL_MAX]
+        out[name] = {
+            "name": name,
+            "changed": True,
+            "persistence": persistence,
+            "change_dimensions": dims or ["layout"],
+            "new_scene_canonical": canonical,
+            "reason": (item.get("reason") or "").strip(),
+            "evidence_excerpt": (item.get("evidence_excerpt") or "").strip(),
+        }
+    return out
+
+
+def _update_bible_scene_canonical(conn, project_id: str, name: str, canonical: str,
+                                  ref_image_path: str | None = None) -> None:
+    row = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
+    if not row or not row["bible_json"]:
+        return
+    data = json.loads(row["bible_json"])
+    for sc in data.get("scenes", []):
+        if sc.get("name") == name:
+            sc["scene_canonical"] = canonical
+            if ref_image_path:
+                sc["ref_image_path"] = ref_image_path
+            break
+    conn.execute("UPDATE projects SET bible_json=? WHERE id=?",
+                 (json.dumps(data, ensure_ascii=False), project_id))
+    conn.commit()
+
+
+async def _refresh_scene_on_state_change(
+    project_id: str, name: str, episode_no: int,
+    new_canonical: str, style: str, bible_version: int,
+    *, change_meta: dict | None = None,
+) -> dict | None:
+    """永久场景状态变化：临时生成完整多视角包，整包 QA 通过后原子切换。"""
+    conn = get_conn()
+    cur = _open_scene_ref(conn, project_id, name)
+    if not cur or cur["ep_start"] >= episode_no:
+        return None
+
+    base_prompt = scene_ref_prompt(style, new_canonical)
+    prior = cur["image_path"] if cur["image_path"] and Path(cur["image_path"]).exists() else None
+    anchor_url = hiagent.data_url_from_file(prior) if prior else None
+    dest = str(Path(scene_ref_path(project_id, name, episode_no)).with_name(
+        f"{_safe_name(name)}__ep{episode_no}__{new_id('candidate')}.jpg"
+    ))
+    item = await _generate_scene_image(
+        base_prompt, anchor_url,
+        call_meta={"asset_kind": "scene_reference", "scene_name": name,
+                   "episode_no": episode_no, "scene_ref_mode": "state_evolve"},
+    )
+    await _save_image_item(item, dest)
+    qa = await _review_scene_ref(dest, {"name": name, "scene_canonical": new_canonical})
+    if float(qa.get("overall") or 0) < 0.6 and not qa.get("qa_recovered"):
+        raise hiagent.ProviderError(f"场景状态演进主图 QA 未通过：{name}")
+
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(scene_references)").fetchall()}
+    new_scene_id = new_id("scene")
+    change_json = json.dumps(change_meta or {}, ensure_ascii=False) if change_meta else None
+    if "pack_status" in cols:
+        conn.execute(
+            """INSERT INTO scene_references(
+                   id, project_id, scene_name, ep_start, ep_end, scene_canonical, prompt, image_path,
+                   qa_json, base_scene_id, bible_version, artifact_id, pack_status, state_canonical,
+                   change_json, created_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (new_scene_id, project_id, name, episode_no, episode_no, new_canonical, base_prompt, dest,
+             json.dumps(qa, ensure_ascii=False), cur["id"], bible_version, None, "generating",
+             new_canonical, change_json, now()),
+        )
+    else:
+        conn.execute(
+            """INSERT INTO scene_references(
+                   id, project_id, scene_name, ep_start, ep_end, scene_canonical, prompt, image_path,
+                   qa_json, base_scene_id, bible_version, artifact_id, created_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (new_scene_id, project_id, name, episode_no, None, new_canonical, base_prompt, dest,
+             json.dumps(qa, ensure_ascii=False), cur["id"], bible_version, None, now()),
+        )
+    conn.commit()
+
+    pack_status = "ready"
+    if "pack_status" in cols:
+        from app.multiview import ensure_scene_multiview_pack, pack_result_ok
+        pack = await ensure_scene_multiview_pack(
+            project_id=project_id,
+            scene_reference_id=new_scene_id,
+            scene_name=name,
+            scene_canonical=new_canonical,
+            visual_style=style,
+            ep_start=episode_no,
+            base_scene_id=cur["id"],
+        )
+        pack_status = pack.get("status") or "failed"
+        if not pack_result_ok(pack):
+            conn.execute("DELETE FROM scene_references WHERE id=?", (new_scene_id,))
+            conn.commit()
+            raise hiagent.ProviderError(
+                f"场景多视角资产包未通过，无法切换版本：{name}（waiting_asset_review）"
+            )
+        conn.execute("UPDATE scene_references SET ep_end=? WHERE id=?", (episode_no - 1, cur["id"]))
+        persistence = (change_meta or {}).get("persistence") or "persistent"
+        new_ep_end = episode_no if persistence == "episode" else None
+        conn.execute(
+            "UPDATE scene_references SET ep_end=?, pack_status=?, state_canonical=? WHERE id=?",
+            (new_ep_end, "ready", new_canonical, new_scene_id),
+        )
+        if persistence == "episode":
+            from app.multiview import clone_scene_views, PACK_STATUS_READY as READY
+            reuse_id = new_id("scene")
+            group_qa = cur["group_qa_json"] if "group_qa_json" in cur.keys() else None
+            conn.execute(
+                """INSERT INTO scene_references(
+                       id, project_id, scene_name, ep_start, ep_end, scene_canonical, prompt, image_path,
+                       qa_json, base_scene_id, bible_version, artifact_id, pack_status, group_qa_json, created_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (reuse_id, project_id, name, episode_no + 1, None, cur["scene_canonical"], cur["prompt"],
+                 cur["image_path"], cur["qa_json"], cur["id"], bible_version,
+                 cur["artifact_id"] if "artifact_id" in cur.keys() else None,
+                 READY, group_qa, now()),
+            )
+            clone_scene_views(conn, source_scene_id=cur["id"], dest_scene_id=reuse_id)
+        conn.commit()
+    else:
+        conn.execute("UPDATE scene_references SET ep_end=? WHERE id=?", (episode_no - 1, cur["id"]))
+        conn.commit()
+
+    return {"ep_start": episode_no, "image_path": dest, "pack_status": pack_status,
+            "scene_reference_id": new_scene_id}

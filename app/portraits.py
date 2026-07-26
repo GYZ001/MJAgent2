@@ -615,18 +615,16 @@ async def _refresh_portrait_on_drift(project_id: str, name: str, episode_no: int
                 "UPDATE character_portraits SET ep_end=?, pack_status=? WHERE id=?",
                 (new_ep_end, "ready", new_portrait_id),
             )
-            # 若仅本集有效，结束后不重复付费：旧包在 episode_no+1 重新开放
+            # 若仅本集有效，结束后零付费重新绑定完整旧包（含全部视角，pack_status=ready）
             if persistence == "episode":
-                # 旧包已关闭到 episode_no-1；本集用新包；从 episode_no+1 起需要再挂回旧造型。
-                # 用复制旧包主视角的轻量段实现无付费复用（视图可后续按需补齐）。
-                reuse_id = new_id("portrait")
-                cols = "id, project_id, character_name, ep_start, ep_end, appearance, prompt, image_path, base_portrait_id, bible_version, created_at"
-                conn.execute(
-                    f"INSERT INTO character_portraits({cols}, artifact_id, pack_status) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (reuse_id, project_id, name, episode_no + 1, None, cur["appearance"],
-                     cur["prompt"], cur["image_path"], cur["id"], bible_version, now(),
-                     cur["artifact_id"] if "artifact_id" in cur.keys() else None, "legacy_partial"),
+                from app.multiview import bind_ready_portrait_reuse
+                bind_ready_portrait_reuse(
+                    conn,
+                    project_id=project_id,
+                    character_name=name,
+                    source_portrait_id=cur["id"],
+                    ep_start=episode_no + 1,
+                    bible_version=bible_version,
                 )
             conn.commit()
         else:

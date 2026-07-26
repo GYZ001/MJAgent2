@@ -1629,3 +1629,298 @@ def is_plot_key_frame(ref: dict[str, Any] | Any) -> bool:
         getattr(ref, "type", None) == ASSET_TYPE_PLOT_KEY_FRAME
         or getattr(ref, "slot_key", None) == NARRATIVE_KEYFRAME_SLOT
     )
+
+
+# ---------- 零付费整包绑定 / 单视角重做 ----------
+
+def clone_portrait_views(
+    conn, *, source_portrait_id: str, dest_portrait_id: str,
+) -> int:
+    """把源造型包的全部视角零付费绑定到目标段（复用同一 image_path，不重新生成）。"""
+    views = list_portrait_views(source_portrait_id, conn=conn)
+    stamp = now()
+    count = 0
+    for v in views:
+        view_id = new_id("pview")
+        conn.execute(
+            """INSERT INTO character_portrait_views(
+                   id, portrait_id, view_role, framing, image_path, prompt, qa_json,
+                   artifact_id, base_view_id, status, selected, input_fingerprint, created_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                view_id, dest_portrait_id, v.get("view_role"), v.get("framing"),
+                v.get("image_path"), v.get("prompt"), v.get("qa_json"),
+                v.get("artifact_id"), v.get("id"), v.get("status") or "ready",
+                1, v.get("input_fingerprint"), stamp,
+            ),
+        )
+        count += 1
+    return count
+
+
+def clone_scene_views(
+    conn, *, source_scene_id: str, dest_scene_id: str,
+) -> int:
+    views = list_scene_views(source_scene_id, conn=conn)
+    stamp = now()
+    count = 0
+    for v in views:
+        view_id = new_id("sview")
+        conn.execute(
+            """INSERT INTO scene_reference_views(
+                   id, scene_reference_id, view_role, camera_axis, image_path, prompt, qa_json,
+                   artifact_id, base_view_id, status, selected, input_fingerprint, created_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                view_id, dest_scene_id, v.get("view_role"), v.get("camera_axis"),
+                v.get("image_path"), v.get("prompt"), v.get("qa_json"),
+                v.get("artifact_id"), v.get("id"), v.get("status") or "ready",
+                1, v.get("input_fingerprint"), stamp,
+            ),
+        )
+        count += 1
+    return count
+
+
+def bind_ready_portrait_reuse(
+    conn, *,
+    project_id: str,
+    character_name: str,
+    source_portrait_id: str,
+    ep_start: int,
+    bible_version: int,
+) -> str:
+    """仅本集造型结束后：把完整旧包零付费重新绑定为新开区间段（pack_status=ready）。"""
+    src = conn.execute(
+        "SELECT * FROM character_portraits WHERE id=?", (source_portrait_id,)
+    ).fetchone()
+    if not src:
+        raise hiagent.ProviderError(f"无法复用旧造型包：{source_portrait_id}")
+    reuse_id = new_id("portrait")
+    group_qa = src["group_qa_json"] if "group_qa_json" in src.keys() else None
+    conn.execute(
+        """INSERT INTO character_portraits(
+               id, project_id, character_name, ep_start, ep_end, appearance, prompt, image_path,
+               base_portrait_id, bible_version, artifact_id, pack_status, group_qa_json, created_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            reuse_id, project_id, character_name, ep_start, None,
+            src["appearance"], src["prompt"], src["image_path"],
+            source_portrait_id, bible_version,
+            src["artifact_id"] if "artifact_id" in src.keys() else None,
+            PACK_STATUS_READY, group_qa, now(),
+        ),
+    )
+    clone_portrait_views(conn, source_portrait_id=source_portrait_id, dest_portrait_id=reuse_id)
+    return reuse_id
+
+
+async def regenerate_character_view(
+    *,
+    project_id: str,
+    portrait_id: str,
+    view_role: str,
+    visual_style: str | None = None,
+) -> dict[str, Any]:
+    """人物谱单视角重做：只重生成指定视角，再跑整包一致性；失败不切换其它视角。"""
+    if view_role not in CHARACTER_REQUIRED_VIEWS + CHARACTER_OPTIONAL_VIEWS:
+        raise hiagent.ProviderError(f"未知人物视角：{view_role}")
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM character_portraits WHERE id=?", (portrait_id,)).fetchone()
+    if not row or row["project_id"] != project_id:
+        raise hiagent.ProviderError("造型版本不存在")
+    style = visual_style or ""
+    if not style:
+        proj = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
+        try:
+            style = (json.loads(proj["bible_json"] or "{}").get("world") or {}).get("visual_style_canonical") or ""
+        except (TypeError, ValueError, json.JSONDecodeError):
+            style = ""
+    appearance = row["appearance"] or ""
+    existing = {v["view_role"]: v for v in list_portrait_views(portrait_id, conn=conn)}
+    front = existing.get("front_full") or {}
+    seeds = []
+    if view_role != "front_full" and front.get("image_path") and Path(front["image_path"]).exists():
+        seeds.append(hiagent.data_url_from_file(front["image_path"]))
+    prompt = character_view_prompt(style, appearance, view_role)
+    fp = view_input_fingerprint(
+        view_role=view_role, prompt=prompt, anchor_text=appearance,
+        parent_revision_id=portrait_id, seed_hint=front.get("image_path"),
+    )
+    path = _view_path(project_id, "character", row["character_name"], view_role, row["ep_start"])
+    item = await _generate_image(
+        prompt, seed_inputs=seeds or None,
+        call_meta={"asset_kind": "character_view_redo", "view_role": view_role,
+                   "character_name": row["character_name"]},
+    )
+    await _save_image_item(item, path)
+    qa = await review_character_view(path, appearance, view_role)
+    status = "ready" if _view_passed(qa) else ("unverified" if qa.get("status") == "unverified" else "failed")
+    view_id = _upsert_character_view(
+        conn, portrait_id=portrait_id, view_role=view_role,
+        framing="closeup" if view_role == "face_closeup" else ("full_body" if view_role.endswith("full") else "half_or_full"),
+        image_path=path, prompt=prompt, qa=qa, artifact_id=None,
+        base_view_id=(existing.get(view_role) or {}).get("id"),
+        status=status, fingerprint=fp,
+    )
+    if view_role == "front_full" and status == "ready":
+        conn.execute("UPDATE character_portraits SET image_path=? WHERE id=?", (path, portrait_id))
+    conn.commit()
+    if status != "ready":
+        _set_portrait_pack_fields(conn, portrait_id, pack_status=PACK_STATUS_FAILED,
+                                  group_qa_json=json.dumps({"failed_view": view_role, "qa": qa}, ensure_ascii=False))
+        conn.commit()
+        return {"status": "failed", "view_role": view_role, "view_id": view_id, "qa": qa}
+
+    views = list_portrait_views(portrait_id, conn=conn)
+    required = [v for v in views if v.get("view_role") in CHARACTER_REQUIRED_VIEWS]
+    missing = missing_required_views(views, CHARACTER_REQUIRED_VIEWS)
+    if missing:
+        _set_portrait_pack_fields(conn, portrait_id, pack_status=PACK_STATUS_FAILED,
+                                  group_qa_json=json.dumps({"missing_required": missing}, ensure_ascii=False))
+        conn.commit()
+        return {"status": "failed", "view_role": view_role, "missing_required": missing}
+
+    group_qa = await review_character_pack_consistency(required, appearance)
+    if group_qa.get("status") != "ready":
+        _set_portrait_pack_fields(conn, portrait_id, pack_status=PACK_STATUS_FAILED,
+                                  group_qa_json=json.dumps(group_qa, ensure_ascii=False))
+        conn.commit()
+        return {"status": "failed", "view_role": view_role, "group_qa": group_qa}
+
+    _set_portrait_pack_fields(
+        conn, portrait_id, pack_status=PACK_STATUS_READY,
+        group_qa_json=json.dumps(group_qa, ensure_ascii=False),
+    )
+    conn.commit()
+    return {"status": "ready", "view_role": view_role, "view_id": view_id, "group_qa": group_qa}
+
+
+async def regenerate_scene_view(
+    *,
+    project_id: str,
+    scene_reference_id: str,
+    view_role: str,
+    visual_style: str | None = None,
+) -> dict[str, Any]:
+    """场景库单视角重做。"""
+    if view_role not in SCENE_REQUIRED_VIEWS + SCENE_OPTIONAL_VIEWS:
+        raise hiagent.ProviderError(f"未知场景视角：{view_role}")
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM scene_references WHERE id=?", (scene_reference_id,)).fetchone()
+    if not row or row["project_id"] != project_id:
+        raise hiagent.ProviderError("场景版本不存在")
+    style = visual_style or ""
+    if not style:
+        proj = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
+        try:
+            style = (json.loads(proj["bible_json"] or "{}").get("world") or {}).get("visual_style_canonical") or ""
+        except (TypeError, ValueError, json.JSONDecodeError):
+            style = ""
+    canonical = row["scene_canonical"] or ""
+    if "state_canonical" in row.keys() and row["state_canonical"]:
+        canonical = row["state_canonical"]
+    existing = {v["view_role"]: v for v in list_scene_views(scene_reference_id, conn=conn)}
+    est = existing.get("establishing") or {}
+    seeds = []
+    if view_role != "establishing" and est.get("image_path") and Path(est["image_path"]).exists():
+        seeds.append(hiagent.data_url_from_file(est["image_path"]))
+    prompt = scene_view_prompt(style, canonical, view_role)
+    fp = view_input_fingerprint(
+        view_role=view_role, prompt=prompt, anchor_text=canonical,
+        parent_revision_id=scene_reference_id, seed_hint=est.get("image_path"),
+    )
+    path = _view_path(project_id, "scene", row["scene_name"], view_role, row["ep_start"])
+    item = await _generate_image(
+        prompt, seed_inputs=seeds or None,
+        call_meta={"asset_kind": "scene_view_redo", "view_role": view_role, "scene_name": row["scene_name"]},
+    )
+    await _save_image_item(item, path)
+    qa = await review_scene_view(path, canonical, view_role)
+    status = "ready" if _view_passed(qa) else ("unverified" if qa.get("status") == "unverified" else "failed")
+    view_id = _upsert_scene_view(
+        conn, scene_reference_id=scene_reference_id, view_role=view_role,
+        camera_axis="establishing" if view_role == "establishing" else (
+            "reverse" if view_role == "reverse_angle" else "action"),
+        image_path=path, prompt=prompt, qa=qa, artifact_id=None,
+        base_view_id=(existing.get(view_role) or {}).get("id"),
+        status=status, fingerprint=fp,
+    )
+    if view_role == "establishing" and status == "ready":
+        conn.execute("UPDATE scene_references SET image_path=? WHERE id=?", (path, scene_reference_id))
+    conn.commit()
+    if status != "ready":
+        _set_scene_pack_fields(conn, scene_reference_id, pack_status=PACK_STATUS_FAILED,
+                               group_qa_json=json.dumps({"failed_view": view_role, "qa": qa}, ensure_ascii=False))
+        conn.commit()
+        return {"status": "failed", "view_role": view_role, "view_id": view_id, "qa": qa}
+
+    views = list_scene_views(scene_reference_id, conn=conn)
+    required = [v for v in views if v.get("view_role") in SCENE_REQUIRED_VIEWS]
+    missing = missing_required_views(views, SCENE_REQUIRED_VIEWS)
+    if missing:
+        _set_scene_pack_fields(conn, scene_reference_id, pack_status=PACK_STATUS_FAILED,
+                               group_qa_json=json.dumps({"missing_required": missing}, ensure_ascii=False))
+        conn.commit()
+        return {"status": "failed", "view_role": view_role, "missing_required": missing}
+
+    group_qa = await review_scene_pack_consistency(required, canonical)
+    if group_qa.get("status") != "ready":
+        _set_scene_pack_fields(conn, scene_reference_id, pack_status=PACK_STATUS_FAILED,
+                               group_qa_json=json.dumps(group_qa, ensure_ascii=False))
+        conn.commit()
+        return {"status": "failed", "view_role": view_role, "group_qa": group_qa}
+
+    _set_scene_pack_fields(
+        conn, scene_reference_id, pack_status=PACK_STATUS_READY,
+        group_qa_json=json.dumps(group_qa, ensure_ascii=False),
+    )
+    conn.commit()
+    return {"status": "ready", "view_role": view_role, "view_id": view_id, "group_qa": group_qa}
+
+
+# ---------- 高风险视频抽帧 ----------
+
+HIGH_RISK_QA_TAGS = frozenset({
+    "duration_gt5_needs_review",
+    "identity_risk",
+    "occlusion_risk",
+    "crowd_risk",
+    "action_complex",
+    "multi_character",
+    "high_risk_qa",
+    "complex_action",
+    "occlusion",
+})
+
+
+def shot_needs_high_risk_frame_sample(shot: Any) -> bool:
+    """高风险镜头：duration>5 或 risk_tags 命中时，视频 QA 抽五帧。"""
+    tags = {str(t).strip() for t in (getattr(shot, "risk_tags", None) or []) if str(t).strip()}
+    if tags & HIGH_RISK_QA_TAGS:
+        return True
+    try:
+        if int(getattr(shot, "duration_s", 0) or 0) > 5:
+            return True
+    except (TypeError, ValueError):
+        pass
+    if isinstance(shot, dict):
+        try:
+            raw = shot.get("risk_tags")
+            if isinstance(raw, str):
+                raw = json.loads(raw)
+            tags = {str(t).strip() for t in (raw or []) if str(t).strip()}
+            if tags & HIGH_RISK_QA_TAGS:
+                return True
+            if int(shot.get("duration_s") or 0) > 5:
+                return True
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    return False
+
+
+def video_qa_sample_positions(*, high_risk: bool = False) -> tuple[float, ...]:
+    """返回 0~1 相对时间点。普通三帧；高风险五帧（0/25/50/75/95%）。"""
+    if high_risk:
+        return (0.0, 0.25, 0.50, 0.75, 0.95)
+    return (0.0, 0.50, 0.97)

@@ -177,6 +177,21 @@ export const api = {
     request('PUT', `/projects/${projectId}/scenes/${encodeURIComponent(sceneName)}/prompt`, {
       scene_prompt: scenePrompt,
     }),
+  regenerateCharacterView: (projectId: string, characterName: string, portraitId: string, viewRole: string) =>
+    request('POST', `/projects/${projectId}/characters/${encodeURIComponent(characterName)}/portraits/${portraitId}/views/${encodeURIComponent(viewRole)}/regenerate`),
+  regenerateSceneView: (projectId: string, sceneName: string, sceneRefId: string, viewRole: string) =>
+    request('POST', `/projects/${projectId}/scenes/${encodeURIComponent(sceneName)}/refs/${sceneRefId}/views/${encodeURIComponent(viewRole)}/regenerate`),
+  staleAssetsPreview: (episodeId: string) =>
+    request('GET', `/episodes/${episodeId}/stale-assets-preview`) as Promise<{
+      episode_id: string
+      stale_count: number
+      shots: Array<{ shot_id: string; shot_no: number; reasons: string[]; hint?: string }>
+    }>,
+  repairStaleAssets: (episodeId: string, shotIds?: string[]) =>
+    request('POST', `/episodes/${episodeId}/repair-stale-assets`, {
+      confirm: true,
+      shot_ids: shotIds,
+    }),
 }
 
 export interface RunSummary {
