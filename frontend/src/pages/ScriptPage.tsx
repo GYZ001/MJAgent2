@@ -76,9 +76,11 @@ export default function ScriptPage() {
   const [draft, setDraft] = useState<EpisodeScreenplay | null>(null)
   const [manuscriptExpanded, setManuscriptExpanded] = useState(false)
   const [restoreEnabled, setRestoreEnabled] = useState(false)
+  const [selectedDialogueLines, setSelectedDialogueLines] = useState<string[] | null>(null)
   const screenplayTimer = useTaskTimer(
     `episode.${episodeId}.screenplay`,
-    ep?.screenplay_status === 'running' || ep?.screenplay_status === 'repairing',
+    ep?.screenplay_production?.task_active
+      ?? ep?.screenplay_status === 'running',
   )
   const storyboardTimer = useTaskTimer(`episode.${episodeId}.storyboard`, ep?.status === 'scripting')
 
@@ -101,31 +103,47 @@ export default function ScriptPage() {
   }
 
   const hasDownstream = (ep.shot_count ?? 0) > 0 || ['scripted', 'confirmed', 'generating', 'done'].includes(ep.status)
+  const productionOperation = ep.screenplay_production?.operation
+    ?? (ep.screenplay_status === 'repairing' || ep.screenplay_status === 'warning' ? 'repair' : 'baseline')
+  const screenplayTaskActive = ep.screenplay_production?.task_active
+    ?? ep.screenplay_status === 'running'
+  const canResumeRepair = ep.screenplay_production?.can_resume_repair
+    ?? (ep.screenplay_status === 'repairing' || ep.screenplay_status === 'warning')
+  const sourceDialogueLines = ep.source_dialogue_lines ?? []
+  const requiredDialogueLines = selectedDialogueLines ?? ep.required_dialogue_lines ?? []
+  const requiredDialogueSet = new Set(requiredDialogueLines)
+  const allDialogueSelected = sourceDialogueLines.length > 0
+    && sourceDialogueLines.every(line => requiredDialogueSet.has(line))
 
-  const generate = () => {
-    const hasReady = ep.screenplay_status === 'ready' && !!ep.screenplay
-    if (hasReady) {
-      if (!window.confirm('将从当前已交付剧本创建工作副本，由 Agent 按局部修复收敛新版本。页面在修复完成前仍显示当前已交付版本。确定继续？')) return
-      screenplayTimer.start()
-      void act(
-        () => api.post(`/episodes/${ep.id}/screenplay/revise`, {}),
-        '已启动 Agent 迭代修复（不会全量重新生成）',
-      ).then(r => { if (r === undefined) screenplayTimer.clear() })
-      return
-    }
-    if (ep.screenplay_status === 'repairing' || ep.screenplay_status === 'warning') {
-      screenplayTimer.start()
-      void act(
-        () => api.post(`/episodes/${ep.id}/screenplay`, {}),
-        '继续自动修复（从工作副本局部收敛）',
-      ).then(r => { if (r === undefined) screenplayTimer.clear() })
-      return
-    }
+  const startBaseline = () => {
     screenplayTimer.start()
     void act(
-      () => api.post(`/episodes/${ep.id}/screenplay`, {}),
-      '可交付剧本生成已开始（仅一次完整生成，随后自动局部修复）',
+      () => api.post(`/episodes/${ep.id}/screenplay`, {
+        required_dialogue_lines: requiredDialogueLines,
+      }),
+      '首次整版 Baseline 已开始；落库后只做局部 Patch',
     ).then(r => { if (r === undefined) screenplayTimer.clear() })
+  }
+
+  const resumeRepair = () => {
+    screenplayTimer.start()
+    void act(
+      () => api.post(`/episodes/${ep.id}/screenplay/resume`, {}),
+      '已从工作副本继续局部修复（不会再次整版生成）',
+    ).then(r => { if (r === undefined) screenplayTimer.clear() })
+  }
+
+  const deleteCurrentScreenplay = async () => {
+    const r = await act(
+      () => api.del(`/episodes/${ep.id}/screenplay`),
+      '当前剧本及下游产物已删除；必保留台词选择已保留',
+    )
+    if (r !== undefined) {
+      setDraft(null)
+      setRestoreEnabled(false)
+      screenplayTimer.clear()
+      storyboardTimer.clear()
+    }
   }
 
   const saveDraft = async () => {
@@ -201,23 +219,43 @@ export default function ScriptPage() {
         <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
           <ScreenplayStamp status={ep.screenplay_status} />
           <EpStamp status={ep.status} />
-          <button className="btn" disabled={busy || ep.screenplay_status === 'running' || ep.screenplay_status === 'repairing' || ep.status === 'scripting'}
-            onClick={generate}>
-            {ep.screenplay_status === 'ready'
-              ? '让 Agent 按要求迭代'
-              : ep.screenplay_status === 'repairing' || ep.screenplay_status === 'warning'
-                ? '继续自动修复'
-                : '生成可交付剧本'}
-          </button>
-          {(ep.screenplay_status === 'running' || ep.screenplay_status === 'repairing') && (
+          {screenplayTaskActive ? (
+            <button className="btn" disabled>
+              {productionOperation === 'baseline' ? '首次整版生成中…' : '局部修复中…'}
+            </button>
+          ) : canResumeRepair ? (
+            <>
+              <button className="btn" disabled={busy || ep.status === 'scripting'} onClick={resumeRepair}
+                title="从已有 working Artifact 和 checkpoint 继续，只执行字段/节点级 Patch">
+                继续局部修复
+              </button>
+              <button className="btn" disabled={busy || ep.status === 'scripting'} onClick={deleteCurrentScreenplay}
+                title={ep.screenplay
+                  ? '放弃当前工作副本和已交付剧本，并清空下游产物'
+                  : '放弃未通过的工作副本，清除失败 checkpoint 后重新首次生成'}>
+                {ep.screenplay ? '删除当前剧本' : '删除失败剧本'}
+              </button>
+            </>
+          ) : ep.screenplay ? (
+            <button className="btn" disabled={busy || ep.status === 'scripting'} onClick={deleteCurrentScreenplay}
+              title="删除当前剧本；若已有分镜、媒体或成片也会一并清空">
+              删除当前剧本
+            </button>
+          ) : (
+            <button className="btn" disabled={busy || ep.status === 'scripting'} onClick={startBaseline}
+              title="唯一会向模型发送完整剧本生成提示词的动作">
+              首次生成整版
+            </button>
+          )}
+          {screenplayTaskActive && (
             <button className="btn ghost" disabled={busy}
               onClick={() => act(() => api.post(`/episodes/${ep.id}/screenplay/cancel`), '已取消剧本任务')}>
-              取消
+              {productionOperation === 'baseline' ? '停止首次生成' : '停止局部修复'}
             </button>
           )}
           {ep.screenplay && !editing && (
             <button className="btn" disabled={busy || !['ready'].includes(ep.screenplay_status)} onClick={() => setDraft(cloneScript(ep.screenplay))}>
-              修改剧本
+              手工编辑全文
             </button>
           )}
           {editing && (
@@ -239,22 +277,70 @@ export default function ScriptPage() {
             目标 {ep.target_duration_s}s · renderability_v1
           </span>
         </div>
+        {!script && !screenplayTaskActive && (
+          <div className="screenplay-dialogue-picker">
+            <div className="screenplay-dialogue-picker-head">
+              <div>
+                <b>必保留原文台词</b>
+                <span>已选 {requiredDialogueLines.length} / {sourceDialogueLines.length} 条；勾选项会逐字进入剧本和后续分镜</span>
+              </div>
+              {sourceDialogueLines.length > 0 && (
+                <button type="button" className="btn ghost" disabled={busy}
+                  onClick={() => setSelectedDialogueLines(allDialogueSelected ? [] : [...sourceDialogueLines])}>
+                  {allDialogueSelected ? '取消全选' : '全选'}
+                </button>
+              )}
+            </div>
+            {sourceDialogueLines.length > 0 ? (
+              <div className="screenplay-dialogue-options">
+                {sourceDialogueLines.map((line, index) => (
+                  <label key={`${index}-${line}`} className="screenplay-dialogue-option">
+                    <input type="checkbox" checked={requiredDialogueSet.has(line)}
+                      onChange={event => {
+                        const next = new Set(requiredDialogueLines)
+                        if (event.target.checked) next.add(line)
+                        else next.delete(line)
+                        setSelectedDialogueLines(sourceDialogueLines.filter(item => next.has(item)))
+                      }} />
+                    <span><em>D{String(index + 1).padStart(3, '0')}</em>{line}</span>
+                  </label>
+                ))}
+              </div>
+            ) : (
+              <div className="screenplay-dialogue-empty">本集原文未识别到显式台词，可直接首次生成整版。</div>
+            )}
+            {requiredDialogueLines.length > 6 && (
+              <div className="screenplay-dialogue-warning">
+                已选择较多台词；系统会全部保留，但剧本与后续分镜可能相应变长。
+              </div>
+            )}
+          </div>
+        )}
+        <div className="script-capability-note" style={{ marginTop: 10, fontSize: 13, color: 'var(--ink-soft)' }}>
+          能力边界：仅「首次生成整版」发送完整剧本提示词；「继续局部修复」恢复 Patch checkpoint；「删除当前剧本」放弃当前版本并清空下游；自由改稿请用「手工编辑全文」。
+        </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10, marginTop: 12 }}>
           <div className="kv"><b>当前分集</b>第{numToCn(ep.episode_no)}集</div>
           <div className="kv"><b>原文来源范围</b>{script?.source_text_range || sourceRangeText(ep.source_chapters)}</div>
           <div className="kv"><b>目标时长</b>{ep.target_duration_s}s</div>
           <div className="kv"><b>剧本状态</b>{
             ep.screenplay_status === 'ready' ? '已交付（含完成凭证）'
-              : ep.screenplay_status === 'repairing' || ep.screenplay_status === 'warning' ? '自动修复中'
-              : ep.screenplay_status === 'running' ? '首次生成中'
+              : screenplayTaskActive && productionOperation === 'repair' ? '局部修复中'
+              : screenplayTaskActive ? '首次整版生成中'
+              : canResumeRepair ? '局部修复已暂停，可继续'
               : ep.screenplay_status === 'failed' ? '生成失败'
               : '待生成'
           }</div>
         </div>
-        {ep.screenplay_status === 'running' && <div style={{ marginTop: 10 }}><span className="stamp gold">首次生成</span> <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>仅一次完整生成，随后进入局部修复与复验……</span></div>}
-        {(ep.screenplay_status === 'repairing' || ep.screenplay_status === 'warning') && (
+        {screenplayTaskActive && productionOperation === 'baseline' && <div style={{ marginTop: 10 }}><span className="stamp gold">首次整版 Baseline</span> <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>这是唯一一次完整剧本模型请求；落库后切换为局部 Patch。</span></div>}
+        {screenplayTaskActive && productionOperation === 'repair' && (
           <div className="error-banner">
             Agent 正在按 Issue 做局部修复；未通过完成凭证前不会作为可用剧本交付，也不能进入分镜。
+          </div>
+        )}
+        {!screenplayTaskActive && canResumeRepair && (
+          <div className="error-banner">
+            局部修复已暂停或等待续跑；点击「继续局部修复」会从现有工作副本恢复，不会发送完整剧本生成提示词。
           </div>
         )}
         {ep.screenplay_error && <div className="error-banner">剧本提示：{'\n'}{ep.screenplay_error}</div>}
@@ -264,7 +350,7 @@ export default function ScriptPage() {
       <div className="workspace-gap" />
 
       {!script
-        ? <div className="empty"><div className="big">剧</div>尚无可交付剧本<br />点击上方「生成可交付剧本」</div>
+        ? <div className="empty"><div className="big">剧</div>尚无可交付剧本<br />点击上方「首次生成整版」</div>
         : (
             <>
               {(spine || editing) && (

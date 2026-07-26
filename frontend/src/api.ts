@@ -181,6 +181,10 @@ export const api = {
     request('POST', `/projects/${projectId}/characters/${encodeURIComponent(characterName)}/portraits/${portraitId}/views/${encodeURIComponent(viewRole)}/regenerate`),
   regenerateSceneView: (projectId: string, sceneName: string, sceneRefId: string, viewRole: string) =>
     request('POST', `/projects/${projectId}/scenes/${encodeURIComponent(sceneName)}/refs/${sceneRefId}/views/${encodeURIComponent(viewRole)}/regenerate`),
+  adoptSceneCandidate: (projectId: string, sceneName: string, artifactId: string, reason?: string) =>
+    request('POST', `/projects/${projectId}/scenes/${encodeURIComponent(sceneName)}/candidates/${encodeURIComponent(artifactId)}/adopt`, {
+      reason: reason || '人工采纳候选',
+    }),
   staleAssetsPreview: (episodeId: string) =>
     request('GET', `/episodes/${episodeId}/stale-assets-preview`) as Promise<{
       episode_id: string
@@ -546,9 +550,20 @@ export interface Episode {
   status: string; script_error?: string; storyboard_warning?: string | null; cost_cny: number; cost_limit_cny?: number
   screenplay_status: string; screenplay_error?: string | null; screenplay_beats?: number; screenplay_mode?: string
   screenplay?: EpisodeScreenplay | null
+  source_dialogue_lines?: string[] | null
+  required_dialogue_lines?: string[]
   shot_count?: number
   screenplay_artifact_id?: string | null
   screenplay_evidence?: ArtifactEvidence | null
+  screenplay_production?: {
+    revision_id?: string
+    operation: 'baseline' | 'repair'
+    phase: string
+    baseline_done: boolean
+    first_evaluation_done: boolean
+    task_active: boolean
+    can_resume_repair: boolean
+  } | null
   shots?: Shot[]
   storyboard_planned_shots?: number | null
   storyboard_artifact_id?: string | null

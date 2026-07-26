@@ -9,12 +9,34 @@ from app.capabilities.schemas import CommandResult
 async def generate(args: I.ScreenplayGenerateInput) -> CommandResult:
     from app import api
 
-    outcome = await call_guarded(api.start_screenplay, args.episode_id, body={"force": args.force})
+    outcome = await call_guarded(
+        api.start_screenplay,
+        args.episode_id,
+        body={
+            "force": args.force,
+            "required_dialogue_lines": args.required_dialogue_lines,
+        },
+    )
     if isinstance(outcome, CommandResult):
         return outcome
     run_id = outcome.get("run_id")
     return succeeded(
         "可交付剧本生产已启动（一次 Baseline + 局部自愈）",
+        data=outcome,
+        run_id=run_id,
+        resource_uris=[f"manju://runs/{run_id}"] if run_id else [],
+    )
+
+
+async def resume(args: I.ScreenplayResumeInput) -> CommandResult:
+    from app import api
+
+    outcome = await call_guarded(api.resume_screenplay, args.episode_id, body={})
+    if isinstance(outcome, CommandResult):
+        return outcome
+    run_id = outcome.get("run_id")
+    return succeeded(
+        "剧本工作副本已继续执行局部修复（不会再次整版生成）",
         data=outcome,
         run_id=run_id,
         resource_uris=[f"manju://runs/{run_id}"] if run_id else [],
@@ -33,10 +55,23 @@ async def revise(args: I.ScreenplayReviseInput) -> CommandResult:
         return outcome
     run_id = outcome.get("run_id")
     return succeeded(
-        "已从已发布剧本创建工作分支，开始局部迭代",
+        "已从已发布剧本创建工作分支，开始按当前规则复验和局部修复",
         data=outcome,
         run_id=run_id,
         resource_uris=[f"manju://runs/{run_id}"] if run_id else [],
+    )
+
+
+async def delete(args: I.ScreenplayDeleteInput) -> CommandResult:
+    from app import api
+
+    outcome = await call_guarded(api.delete_screenplay, args.episode_id)
+    if isinstance(outcome, CommandResult):
+        return outcome
+    return succeeded(
+        "当前剧本及其下游产物已删除；必保留台词约束已保留",
+        data=outcome,
+        resource_uris=[f"manju://episodes/{args.episode_id}"],
     )
 
 

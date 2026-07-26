@@ -907,4 +907,37 @@ async def regenerate_scene_view_route(
     return result
 
 
+@router.post("/projects/{project_id}/scenes/{scene_name}/candidates/{artifact_id}/adopt")
+async def adopt_scene_candidate_route(
+    project_id: str, scene_name: str, artifact_id: str, body: dict | None = None,
+):
+    """手动采纳场景候选图为主图。"""
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route(
+        "scene.adopt_candidate",
+        {
+            "project_id": project_id,
+            "scene_name": scene_name,
+            "artifact_id": artifact_id,
+            "reason": (body or {}).get("reason") or "人工采纳候选",
+        },
+    )
+    if routed is not None:
+        return routed
+    _project_or_404(project_id)
+    from app.scenes import adopt_scene_candidate
+    try:
+        return await adopt_scene_candidate(
+            project_id,
+            scene_name,
+            artifact_id,
+            reason=str((body or {}).get("reason") or "人工采纳候选"),
+            decided_by=str((body or {}).get("decided_by") or "user"),
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc) or "候选不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 __all__ = [name for name in globals() if not name.startswith("__")]

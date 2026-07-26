@@ -74,6 +74,8 @@ def classify(exc: BaseException | None, http_status: int | None = None) -> tuple
         return "provider", "LLM"
     if name in {"StageError", "CompileError", "ContentGenerationError"}:
         return "generation", "GEN"
+    if name == "FullRegenDenied":
+        return "conflict", "FULL-REGEN-DENIED"
     status = http_status if http_status is not None else getattr(exc, "status_code", None)
     if status is not None:
         if status == 404:

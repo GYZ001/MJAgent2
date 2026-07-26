@@ -21,7 +21,7 @@ from app.production.patch import (
     load_screenplay_from_artifact,
     screenplay_artifact_payload,
 )
-from app.production.policy import assert_baseline_allowed, deny_full_regen_after_qa
+from app.production.policy import assert_baseline_allowed
 from app.production.publish import can_issue_certificate, publish_screenplay
 from app.production.revision import (
     ensure_production_revision,
@@ -50,6 +50,39 @@ def _eval_id_from_create(evaluation_row: dict[str, Any] | str | None) -> str:
     return str(evaluation_row or "")
 
 
+def _strategy_was_tried(entries: list[str], strategy: str) -> bool:
+    """Recognize both current keys and legacy keys such as ``rederive:``."""
+    return any(
+        entry == strategy or entry.startswith(f"{strategy}:")
+        for entry in entries
+        if not entry.startswith(("fail:", "exhausted"))
+    )
+
+
+def _patch_strategy_key(ops: list[PatchOperation]) -> str:
+    op = ops[0]
+    kind = str((op.target or {}).get("kind") or "")
+    if op.op == "rederive":
+        return "rederive"
+    if kind == "metadata":
+        return f"fill_{op.path}"
+    if kind == "information" and op.path == "event_id":
+        return "fix_ledger_event"
+    if kind == "dialogue_chain_turn" and op.path == "source_text":
+        return "fix_opening_source_anchor"
+    if op.op == "create_node" and kind == "dialogue_turn":
+        return "insert_trigger"
+    locator = op.path or str((op.target or {}).get("id") or "")
+    return f"{op.op}:{locator}" if locator else op.op
+
+
+def _strategy_attempt_count(entries: list[str]) -> int:
+    return sum(
+        1 for entry in entries
+        if entry and not entry.startswith(("fail:", "exhausted"))
+    )
+
+
 def run_screenplay_qa(
     script: EpisodeScreenplay,
     *,
@@ -69,6 +102,7 @@ def run_screenplay_qa(
         episode_no=episode.get("episode_no"),
         source_text=source_text,
         require_dialogue_chains=True,
+        required_dialogue_lines=episode.get("required_dialogue_lines") or [],
     )
     messages.extend(adaptation_hook_errors(script, episode))
     issues = issues_from_validator_messages(
@@ -108,7 +142,7 @@ def plan_screenplay_patch(
     """最小范围 Patch 规划（确定性优先，避免整对象替换）。"""
     history = strategy_history or {}
     fp = issue.fingerprint
-    tried = set(history.get(fp) or [])
+    tried = list(history.get(fp) or [])
     path = str((issue.evidence or {}).get("path") or "")
     code = issue.code
     related = list((issue.evidence or {}).get("related_node_ids") or [])
@@ -117,7 +151,7 @@ def plan_screenplay_patch(
 
     # S0：派生字段问题 → rederive
     if code in {"FORMAT_CONTRACT_INVALID"} and "scene_outline" in (issue.message or ""):
-        if "rederive" not in tried:
+        if not _strategy_was_tried(tried, "rederive"):
             return [PatchOperation(op="rederive")]
 
     # S1：戏剧契约单字段
@@ -126,7 +160,7 @@ def plan_screenplay_patch(
             code == "DRAMATIC_CONTRACT_INCOMPLETE" and field in (issue.message or "").lower()
         ):
             strategy = f"fill_{field}"
-            if strategy in tried:
+            if _strategy_was_tried(tried, strategy):
                 continue
             value = _heuristic_fill_dramatic_field(field, script)
             if value:
@@ -141,7 +175,7 @@ def plan_screenplay_patch(
     if code == "LEDGER_INVALID" or "event_id" in (issue.message or ""):
         info_id = next((n for n in related if n.startswith("I")), "")
         event_ids = [e.event_id for e in (script.events or []) if e.event_id]
-        if info_id and event_ids and "fix_ledger_event" not in tried:
+        if info_id and event_ids and not _strategy_was_tried(tried, "fix_ledger_event"):
             return [PatchOperation(
                 op="replace_field",
                 path="event_id",
@@ -163,12 +197,32 @@ def plan_screenplay_patch(
                         target={"kind": "metadata", "id": field},
                     )]
 
+    # 原文开场对白锚点：只修 dialogue_chains[0].turns[0].source_text，
+    # 不覆盖整条对白链，更不会重写正文。
+    if code == "SOURCE_FIDELITY" and not _strategy_was_tried(
+        tried, "fix_opening_source_anchor"
+    ):
+        opening = _extract_quoted_fragment(issue.message or "")
+        if opening and script.dialogue_chains and script.dialogue_chains[0].turns:
+            chain_id = script.dialogue_chains[0].chain_id
+            return [PatchOperation(
+                op="replace_field",
+                path="source_text",
+                value=opening,
+                target={
+                    "kind": "dialogue_chain_turn",
+                    "id": f"{chain_id}-T1",
+                    "chain_id": chain_id,
+                    "turn_index": 0,
+                },
+            )]
+
     # 默认：rederive（安全、无内容改写）若尚未试过
-    if "rederive" not in tried:
+    if not _strategy_was_tried(tried, "rederive"):
         return [PatchOperation(op="rederive")]
 
     # 对白链触发：尝试在首场插入 trigger turn
-    if code == "KEY_LINE_MISSING" and "insert_trigger" not in tried:
+    if code == "KEY_LINE_MISSING" and not _strategy_was_tried(tried, "insert_trigger"):
         scene_id = next((n for n in related if n.startswith("SC")), None)
         if not scene_id and script.scene_outline:
             scene_id = f"SC{int(script.scene_outline[0].scene_no):02d}"
@@ -265,8 +319,14 @@ async def run_screenplay_production(
         "SELECT id, bible_version FROM projects WHERE id=?", (episode["project_id"],)
     ).fetchone()
     contract = get_contract("screenplay")
+    required_dialogue_fingerprint = "|".join(
+        str(line) for line in (episode.get("required_dialogue_lines") or [])
+    )
     input_fp = hashlib.sha256(
-        f"{episode_id}|{source_text[:2000]}|{project['bible_version'] if project else 0}".encode()
+        (
+            f"{episode_id}|{source_text[:2000]}|"
+            f"{project['bible_version'] if project else 0}|{required_dialogue_fingerprint}"
+        ).encode()
     ).hexdigest()
 
     rev = ensure_production_revision(
@@ -338,22 +398,27 @@ async def run_screenplay_production(
         record_baseline_generation(
             kind="screenplay", episode_id=episode_id, revision_id=rev.id,
         )
+        conn.execute(
+            "UPDATE episodes SET screenplay_status='repairing', screenplay_error=?, "
+            "screenplay_updated_at=? WHERE id=?",
+            ("首次整版 Baseline 已落库，现只做局部 QA Patch", now(), episode_id),
+        )
+        conn.commit()
         if run_id:
             evidence_repository.append_event(
                 run_id, "BASELINE_GENERATION_DONE", "info",
                 "Baseline 已落库，进入 QA",
                 payload={"artifact_id": baseline_art["id"], "revision_id": rev.id},
             )
-    else:
-        deny_full_regen_after_qa(rev, command="screenplay.generate", episode_id=episode_id)
-        if not rev.working_artifact_id:
-            raise RuntimeError("revision 已有 baseline 计数但缺少 working artifact")
+    elif not rev.working_artifact_id:
+        raise RuntimeError("revision 已有 baseline 计数但缺少 working artifact")
 
     # ---- Repair loop ----
     patches_this_activation = 0
+    attempts_this_activation = 0
     prev_issue_fps: set[str] = set(checkpoint.get("last_issue_fingerprints") or [])
 
-    while patches_this_activation < MAX_REPAIR_ACTIVATION_PATCHES:
+    while attempts_this_activation < MAX_REPAIR_ACTIVATION_PATCHES:
         rev = get_production_revision(rev.id)  # type: ignore[assignment]
         working_id = rev.working_artifact_id
         assert working_id
@@ -448,17 +513,31 @@ async def run_screenplay_production(
         if not ops:
             # 扩大一层：尝试 LLM 单字段修补
             ops = await _llm_field_patch(issue, script, source_text=source_text)
+        if ops:
+            proposed_key = _patch_strategy_key(ops)
+            if _strategy_was_tried(
+                strategy_history.get(issue.fingerprint, []), proposed_key
+            ):
+                ops = []
         if not ops:
             strategy_history.setdefault(issue.fingerprint, []).append("exhausted")
-            if len(strategy_history[issue.fingerprint]) >= MAX_STRATEGY_ATTEMPTS_PER_ISSUE:
-                _mark_waiting_input(episode_id, [issue], run_id=run_id)
-                raise RuntimeError(f"WAITING_INPUT: 无法局部修复 {issue.code}: {issue.message}")
-            # 记一次空策略并继续下一 issue
-            prev_issue_fps = current_fps
-            continue
+            _mark_waiting_input(episode_id, [issue], run_id=run_id)
+            save_checkpoint(rev.id, {
+                **checkpoint,
+                "phase": "WAITING_INPUT",
+                "activation_no": activation_no,
+                "working_artifact_id": working_id,
+                "open_issue_ids": [i.fingerprint for i in issues],
+                "issue_strategy_history": strategy_history,
+                "patch_artifact_ids": patch_ids,
+                "last_issue_fingerprints": list(current_fps),
+                "yield_reason": "strategies_exhausted",
+            })
+            raise RuntimeError(f"WAITING_INPUT: 无法局部修复 {issue.code}: {issue.message}")
 
-        strategy_key = ops[0].op + ":" + (ops[0].path or ops[0].target.get("id", ""))
+        strategy_key = _patch_strategy_key(ops)
         strategy_history.setdefault(issue.fingerprint, []).append(strategy_key)
+        attempts_this_activation += 1
 
         if rev.grant_id:
             assert_grant_allows(rev.grant_id, command="screenplay.patch", episode_id=episode_id)
@@ -480,15 +559,35 @@ async def run_screenplay_production(
                 expected_hash=artifact_hash,
                 issue_set_hash=issue_set_hash(issues),
                 operations=ops,
-                idempotency_key=f"{rev.id}:{issue.fingerprint}:{strategy_key}:{patches_this_activation}",
+                idempotency_key=f"{rev.id}:{issue.fingerprint}:{strategy_key}:{attempts_this_activation}",
                 reason=issue.message[:200],
             ),
             episode_id=episode_id,
         )
         if not result.ok:
-            strategy_history.setdefault(issue.fingerprint, []).append(f"fail:{result.error}")
+            strategy_history.setdefault(issue.fingerprint, []).append(
+                f"fail:{strategy_key}:{(result.error or 'patch failed')[:160]}"
+            )
             if "no-op" in (result.error or ""):
                 prev_issue_fps = current_fps
+                save_checkpoint(rev.id, {
+                    **checkpoint,
+                    "phase": "QA",
+                    "activation_no": activation_no,
+                    "working_artifact_id": working_id,
+                    "open_issue_ids": [i.fingerprint for i in issues],
+                    "issue_strategy_history": strategy_history,
+                    "patch_artifact_ids": patch_ids,
+                    "last_issue_fingerprints": list(current_fps),
+                    "yield_reason": "noop_rejected",
+                })
+                if _strategy_attempt_count(
+                    strategy_history.get(issue.fingerprint, [])
+                ) >= MAX_STRATEGY_ATTEMPTS_PER_ISSUE:
+                    _mark_waiting_input(episode_id, [issue], run_id=run_id)
+                    raise RuntimeError(
+                        f"WAITING_INPUT: 局部修复无进展 {issue.code}: {issue.message}"
+                    )
                 continue
             # CAS 冲突：重新观察
             if "CAS" in (result.error or "") or "hash" in (result.error or "").lower():
@@ -543,7 +642,11 @@ async def run_screenplay_production(
         evidence_repository.append_event(
             run_id, "REPAIR_YIELD", "info",
             "单次 activation 预算用尽，已写 checkpoint，等待自动续跑",
-            payload={"activation_no": activation_no, "patches": patches_this_activation},
+            payload={
+                "activation_no": activation_no,
+                "patches": patches_this_activation,
+                "attempts": attempts_this_activation,
+            },
         )
     # 返回当前工作副本（未发布）——调用方不得把它当 ready
     rev = get_production_revision(rev.id)  # type: ignore[assignment]

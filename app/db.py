@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS episodes (
     screenplay_error TEXT,
     screenplay_started_at REAL,
     screenplay_updated_at REAL,
+    screenplay_required_dialogues TEXT NOT NULL DEFAULT '[]',
     screenplay_artifact_id TEXT,
     storyboard_artifact_id TEXT,
     delivery_artifact_id TEXT,
@@ -707,6 +708,7 @@ MIGRATIONS = (
     "ALTER TABLE episodes ADD COLUMN screenplay_error TEXT",
     "ALTER TABLE episodes ADD COLUMN screenplay_started_at REAL",
     "ALTER TABLE episodes ADD COLUMN screenplay_updated_at REAL",
+    "ALTER TABLE episodes ADD COLUMN screenplay_required_dialogues TEXT NOT NULL DEFAULT '[]'",
     "ALTER TABLE shots ADD COLUMN mode_plan TEXT",
     "ALTER TABLE projects ADD COLUMN bible_feedback TEXT",  # 持久化重谱打回要求，供进程重启后恢复人物谱任务
     "ALTER TABLE projects ADD COLUMN portraits_status TEXT DEFAULT 'idle'",  # 按集刷新定妆照任务状态

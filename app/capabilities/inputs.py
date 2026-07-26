@@ -69,6 +69,13 @@ class SceneViewRegenerateInput(StandardCommandInput):
     view_role: str
 
 
+class SceneAdoptCandidateInput(StandardCommandInput):
+    project_id: str
+    scene_name: str
+    artifact_id: str
+    reason: str = "人工采纳候选"
+
+
 class EpisodePlanInput(StandardCommandInput):
     project_id: str
     replace_existing: bool = False
@@ -86,11 +93,20 @@ class EpisodeScopedInput(StandardCommandInput):
 class ScreenplayGenerateInput(StandardCommandInput):
     episode_id: str
     force: bool = False  # 已废弃：存在 published 时服务端拒绝全量重生
+    required_dialogue_lines: list[str] = Field(default_factory=list)
+
+
+class ScreenplayResumeInput(StandardCommandInput):
+    episode_id: str
 
 
 class ScreenplayReviseInput(StandardCommandInput):
     episode_id: str
     instruction: str = ""
+
+
+class ScreenplayDeleteInput(StandardCommandInput):
+    episode_id: str
 
 
 class ScreenplayPatchInput(StandardCommandInput):

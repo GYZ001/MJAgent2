@@ -9,6 +9,30 @@ def _screenplay_task_active(episode_id: str) -> bool:
     return task_registry.active("screenplay", episode_id)
 
 
+def _validate_required_dialogues_against_source(lines: list[str], source_text: str) -> None:
+    from app.textmatch import condense, strip_speaker
+
+    source = condense(source_text)
+    missing = [line for line in lines if condense(strip_speaker(line)) not in source]
+    if missing:
+        raise HTTPException(
+            422,
+            "以下必保留台词未在本集原文范围内逐字找到：" + "；".join(missing),
+        )
+
+
+def _screenplay_production_state(episode_id: str) -> dict:
+    """Expose the actual production phase used by ScriptPage controls.
+
+    ``screenplay_status`` is a delivery status and cannot distinguish the one
+    allowed Baseline call from later Patch activations.  The revision ledger is
+    the authority for that distinction.
+    """
+    from app.production.revision import screenplay_production_state
+
+    return screenplay_production_state(episode_id)
+
+
 def _screenplay_fallback_status(ep) -> str:
     if not ep["screenplay_json"]:
         return "pending"
@@ -111,6 +135,7 @@ async def _screenplay_task(
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     try:
         ep_data = dict(ep)
+        ep_data["required_dialogue_lines"] = _screenplay_required_dialogues(ep)
         p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
         bible = _project_bible_or_placeholder(p)
         source_text = _episode_source_text(conn, ep)
@@ -128,10 +153,22 @@ async def _screenplay_task(
             "SELECT cliffhanger FROM episodes WHERE project_id=? AND episode_no=?",
             (ep["project_id"], ep["episode_no"] - 1)).fetchone()
 
-        # 标记修复中；禁止在修复过程中清空下游
+        # Delivery 状态必须与真实 production phase 一致：Baseline 尚未落库时
+        # 仍是 running；只有已有 working baseline 才能称为 repairing。
+        production_state = _screenplay_production_state(episode_id)
+        is_repair = production_state["operation"] == "repair"
         conn.execute(
-            "UPDATE episodes SET screenplay_status='repairing', screenplay_error=?, screenplay_updated_at=? WHERE id=?",
-            ("生产修复中：首次生成后仅局部 Patch", now(), episode_id),
+            "UPDATE episodes SET screenplay_status=?, screenplay_error=?, screenplay_updated_at=? WHERE id=?",
+            (
+                "repairing" if is_repair else "running",
+                (
+                    "局部修复中：仅修改 Issue 涉及的字段或节点，不会再次整版生成"
+                    if is_repair
+                    else "首次整版 Baseline 生成中；本次完成后只允许局部 Patch"
+                ),
+                now(),
+                episode_id,
+            ),
         )
         conn.commit()
 
@@ -294,16 +331,33 @@ async def _recorded_screenplay_task(
             get_conn(),
             get_conn().execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone(),
         )
-        _, preflight = await recorder.step(
-            "character_discovery",
-            lambda: _screenplay_character_discovery(episode_id, discovery_source),
-            agent_name="screenplay_character_discovery",
-            context_manifest={
-                "episode_id": episode_id,
-                "source_chars": len(discovery_source),
-                "phase": "before_screenplay",
-            },
-        )
+        production_state = _screenplay_production_state(episode_id)
+        if production_state["operation"] == "repair":
+            # Character discovery is a Baseline preflight.  Re-running it for
+            # every Patch activation wastes a model call and makes a local
+            # repair look like another full generation in the call log.
+            preflight = {
+                "added": [],
+                "skipped": "baseline_already_exists",
+            }
+            evidence_repository.append_event(
+                recorder.run_id,
+                "CHARACTER_DISCOVERY_SKIPPED",
+                "info",
+                "已有 Baseline，续跑局部修复时跳过人物发现模型调用",
+                payload={"episode_id": episode_id},
+            )
+        else:
+            _, preflight = await recorder.step(
+                "character_discovery",
+                lambda: _screenplay_character_discovery(episode_id, discovery_source),
+                agent_name="screenplay_character_discovery",
+                context_manifest={
+                    "episode_id": episode_id,
+                    "source_chars": len(discovery_source),
+                    "phase": "before_screenplay",
+                },
+            )
         # Discovery may advance bible_version. Refresh the persisted fingerprint and
         # context pack before the screenplay step so evidence describes the inputs
         # actually used by generation.
@@ -377,9 +431,16 @@ async def _recorded_screenplay_task(
 async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
     from app.capabilities.dispatch import ui_route
     body = _as_body_dict(body)
+    requested_dialogues = _normalize_required_dialogue_lines(
+        body.get("required_dialogue_lines") or []
+    )
     routed = await ui_route(
         "screenplay.generate",
-        {"episode_id": episode_id, "force": bool(body.get("force"))},
+        {
+            "episode_id": episode_id,
+            "force": bool(body.get("force")),
+            "required_dialogue_lines": requested_dialogues,
+        },
     )
     if routed is not None:
         return routed
@@ -406,25 +467,42 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
         if force:
             raise HTTPException(
                 409,
-                "已有可交付剧本，禁止全量重新生成。请使用「让 Agent 按要求迭代」"
-                "（POST /episodes/{id}/screenplay/revise）从已发布版本创建工作分支。",
+                "已有可交付剧本，禁止直接全量重生；请先删除当前剧本，或使用手工编辑全文。",
             )
         # 无 force：若 repairing 则续跑；若 ready 则 409
         if ep["screenplay_status"] == "ready":
             raise HTTPException(
                 409,
-                "本集已有通过凭证的剧本。如需修改请调用 /screenplay/revise。",
+                "本集已有通过凭证的剧本；如需重新生成，请先删除当前剧本。",
             )
         # repairing / warning → 续跑 Repair Agent（不新建 Baseline）
         pass
 
     conn = get_conn()
+    resume_existing = bool(active_rev and active_rev.baseline_done and active_rev.working_artifact_id)
+    if not resume_existing:
+        _validate_required_dialogues_against_source(
+            requested_dialogues, _episode_source_text(conn, ep)
+        )
+        conn.execute(
+            "UPDATE episodes SET screenplay_required_dialogues=? WHERE id=?",
+            (json.dumps(requested_dialogues, ensure_ascii=False), episode_id),
+        )
     started_at = now()
     conn.execute(
-        "UPDATE episodes SET screenplay_status='running', screenplay_error=NULL, screenplay_started_at=?, screenplay_updated_at=? WHERE id=?",
-        (started_at, started_at, episode_id))
+        "UPDATE episodes SET screenplay_status=?, screenplay_error=?, screenplay_started_at=?, screenplay_updated_at=? WHERE id=?",
+        (
+            "repairing" if resume_existing else "running",
+            "继续局部修复：从 working Artifact 和 checkpoint 恢复" if resume_existing else None,
+            started_at,
+            started_at,
+            episode_id,
+        ))
     conn.commit()
-    recorder = _new_screenplay_recorder(episode_id)
+    recorder = _new_screenplay_recorder(
+        episode_id,
+        trigger_type="resume" if resume_existing else "manual",
+    )
     try:
         conn.execute(
             "UPDATE episodes SET active_screenplay_run_id=? WHERE id=?",
@@ -439,18 +517,83 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
         _recorded_screenplay_task(episode_id, recorder),
         project_id=ep["project_id"],
     )
-    return {"status": "running", "run_id": recorder.run_id}
+    return {
+        "status": "repairing" if resume_existing else "running",
+        "run_id": recorder.run_id,
+        "mode": "repair" if resume_existing else "baseline",
+    }
+
+
+@router.post("/episodes/{episode_id}/screenplay/resume")
+async def resume_screenplay(episode_id: str, body: dict | None = Body(None)):
+    """Continue an existing Patch loop; never creates a fresh Baseline."""
+    from app.capabilities.dispatch import ui_route
+    from app.production.revision import get_active_production_revision
+
+    _as_body_dict(body)
+    routed = await ui_route("screenplay.resume", {"episode_id": episode_id})
+    if routed is not None:
+        return routed
+    ep = _episode_or_404(episode_id)
+    _require_harness_engine(ep["project_id"])
+    if ep["status"] == "scripting":
+        raise HTTPException(409, "分镜正在生成中，不能同时修复剧本")
+    if _screenplay_task_active(episode_id):
+        raise HTTPException(409, "剧本任务正在运行中")
+    rev = get_active_production_revision(episode_id, "screenplay")
+    if not rev or not rev.baseline_done or not rev.working_artifact_id:
+        raise HTTPException(409, "没有可继续的剧本工作副本；请使用「首次生成整版」")
+
+    started_at = now()
+    conn = get_conn()
+    conn.execute(
+        "UPDATE episodes SET screenplay_status='repairing', screenplay_error=?, "
+        "screenplay_started_at=?, screenplay_updated_at=? WHERE id=?",
+        (
+            "继续局部修复：从 working Artifact 和 checkpoint 恢复，不会再次整版生成",
+            started_at,
+            started_at,
+            episode_id,
+        ),
+    )
+    conn.commit()
+    recorder = _new_screenplay_recorder(episode_id, trigger_type="resume")
+    try:
+        conn.execute(
+            "UPDATE episodes SET active_screenplay_run_id=? WHERE id=?",
+            (recorder.run_id, episode_id),
+        )
+        conn.commit()
+    except Exception:  # noqa: BLE001
+        pass
+    task_registry.spawn(
+        "screenplay",
+        episode_id,
+        _recorded_screenplay_task(episode_id, recorder),
+        project_id=ep["project_id"],
+    )
+    return {
+        "status": "repairing",
+        "run_id": recorder.run_id,
+        "revision_id": rev.id,
+        "mode": "repair",
+    }
 
 
 @router.post("/episodes/{episode_id}/screenplay/revise")
 async def revise_screenplay(episode_id: str, body: dict | None = Body(None)):
-    """从已发布版本克隆工作副本，创建新 production revision，仅局部收敛。"""
+    """从已发布版本克隆工作副本，按当前规则复验并仅局部收敛。"""
     body = _as_body_dict(body)
+    if str(body.get("instruction") or "").strip():
+        raise HTTPException(
+            422,
+            "当前后端不支持自由指令改稿；请使用「手工编辑全文」。本入口只复验当前版本并局部修复 QA Issue。",
+        )
     ep = _episode_or_404(episode_id)
     _require_harness_engine(ep["project_id"])
     if not ep["screenplay_json"] or ep["screenplay_status"] not in {"ready", "warning", "repairing"}:
         raise HTTPException(409, "没有可迭代的已有剧本，请先生成可交付剧本")
-    if ep["screenplay_status"] == "running" and _screenplay_task_active(episode_id):
+    if _screenplay_task_active(episode_id):
         raise HTTPException(409, "剧本任务进行中")
 
     from app.production.revision import ensure_production_revision
@@ -491,9 +634,9 @@ async def revise_screenplay(episode_id: str, body: dict | None = Body(None)):
     started_at = now()
     conn = get_conn()
     conn.execute(
-        "UPDATE episodes SET screenplay_status='running', screenplay_error=?, screenplay_started_at=?, "
+        "UPDATE episodes SET screenplay_status='repairing', screenplay_error=?, screenplay_started_at=?, "
         "screenplay_updated_at=?, working_screenplay_artifact_id=? WHERE id=?",
-        ("修订：从已发布版本局部收敛", started_at, started_at, art["id"], episode_id),
+        ("复验当前版本：只修复 QA Issue，不会再次整版生成", started_at, started_at, art["id"], episode_id),
     )
     conn.commit()
     recorder = _new_screenplay_recorder(episode_id, trigger_type="revise")
@@ -503,7 +646,95 @@ async def revise_screenplay(episode_id: str, body: dict | None = Body(None)):
         _recorded_screenplay_task(episode_id, recorder),
         project_id=ep["project_id"],
     )
-    return {"status": "running", "run_id": recorder.run_id, "revision_id": rev.id, "mode": "revise"}
+    return {"status": "repairing", "run_id": recorder.run_id, "revision_id": rev.id, "mode": "revalidate"}
+
+
+@router.delete("/episodes/{episode_id}/screenplay")
+async def delete_screenplay(episode_id: str):
+    """Delete the current screenplay projection and invalidate every downstream pointer.
+
+    Immutable artifacts/revisions remain as audit evidence.  The user-selected
+    source dialogue requirements intentionally remain on the episode so the
+    next Baseline can regenerate against the same explicit contract.
+    """
+    from app.capabilities.dispatch import ui_route
+
+    routed = await ui_route("screenplay.delete", {"episode_id": episode_id})
+    if routed is not None:
+        return routed
+    ep = _episode_or_404(episode_id)
+
+    cancelled = 0
+    for kind in ("screenplay", "storyboard", "video_completion"):
+        cancelled += int(await task_registry.cancel_and_wait(kind, episode_id))
+
+    conn = get_conn()
+    shot_count = conn.execute(
+        "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)
+    ).fetchone()["c"]
+    worker.delete_episode_shots(episode_id)
+    conn = get_conn()
+    stamp = now()
+
+    # Revisions and grants are historical audit records; revoke/supersede them
+    # instead of deleting them.  No old working checkpoint may become active
+    # after the episode has returned to the pre-Baseline state.
+    conn.execute(
+        "UPDATE production_revisions SET status='superseded', updated_at=? "
+        "WHERE episode_id=? AND status='active'",
+        (stamp, episode_id),
+    )
+    conn.execute(
+        "UPDATE production_grants SET revoked_at=COALESCE(revoked_at, ?) WHERE episode_id=?",
+        (stamp, episode_id),
+    )
+    conn.execute(
+        "UPDATE completion_grants SET revoked_at=COALESCE(revoked_at, ?) WHERE episode_id=?",
+        (stamp, episode_id),
+    )
+    conn.execute(
+        "UPDATE delivery_packages SET status='superseded' "
+        "WHERE episode_id=? AND status NOT IN ('rejected','superseded')",
+        (episode_id,),
+    )
+    conn.execute(
+        """UPDATE episodes SET
+            screenplay_json=NULL,
+            story_ledger_json=NULL,
+            screenplay_status='pending',
+            screenplay_error=NULL,
+            screenplay_started_at=NULL,
+            screenplay_updated_at=?,
+            screenplay_artifact_id=NULL,
+            active_screenplay_run_id=NULL,
+            working_screenplay_artifact_id=NULL,
+            published_screenplay_artifact_id=NULL,
+            screenplay_production_revision_id=NULL,
+            screenplay_completion_certificate_id=NULL,
+            storyboard_outline_json=NULL,
+            storyboard_artifact_id=NULL,
+            storyboard_warning=NULL,
+            active_storyboard_run_id=NULL,
+            working_storyboard_artifact_id=NULL,
+            published_storyboard_artifact_id=NULL,
+            storyboard_production_revision_id=NULL,
+            storyboard_completion_certificate_id=NULL,
+            active_video_run_id=NULL,
+            video_control_json=NULL,
+            delivery_artifact_id=NULL,
+            delivery_status='not_ready',
+            status='planned',
+            script_error=NULL
+        WHERE id=?""",
+        (stamp, episode_id),
+    )
+    conn.commit()
+    return {
+        "deleted": episode_id,
+        "downstream_shots_cleared": int(shot_count or 0),
+        "cancelled_tasks": cancelled,
+        "required_dialogue_lines": _screenplay_required_dialogues(ep),
+    }
 
 
 async def _screenplay_guarded(
@@ -565,7 +796,7 @@ async def cancel_screenplay_all(project_id: str):
     _project_or_404(project_id)
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id, screenplay_json FROM episodes WHERE project_id=? AND screenplay_status='running'",
+        "SELECT id, screenplay_json FROM episodes WHERE project_id=? AND screenplay_status IN ('running','repairing')",
         (project_id,)).fetchall()
     stopped = 0
     for r in rows:
@@ -588,8 +819,8 @@ async def cancel_screenplay(episode_id: str):
     if routed is not None:
         return routed
     ep = _episode_or_404(episode_id)
-    if ep["screenplay_status"] != "running":
-        raise HTTPException(409, "当前没有正在进行的剧本生成")
+    if ep["screenplay_status"] not in {"running", "repairing"} or not _screenplay_task_active(episode_id):
+        raise HTTPException(409, "当前没有正在进行的剧本任务")
     await task_registry.cancel_and_wait("screenplay", episode_id)
     conn = get_conn()
     fallback = _screenplay_fallback_status(ep)
@@ -635,7 +866,14 @@ async def edit_screenplay(episode_id: str, body: dict):
     p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
     bible = _project_bible_or_placeholder(p)
     expected = max(1, int(ep["target_duration_s"]) // config.VIDEO_DURATION_MIN_S)
-    errors = validate_screenplay(instance, bible, expected, episode_no=ep["episode_no"])
+    errors = validate_screenplay(
+        instance,
+        bible,
+        expected,
+        episode_no=ep["episode_no"],
+        source_text=_episode_source_text(conn, ep),
+        required_dialogue_lines=_screenplay_required_dialogues(ep),
+    )
     if errors:
         raise HTTPException(422, "；".join(errors))
     old_script = _load_screenplay(ep)

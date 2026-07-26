@@ -313,6 +313,28 @@ def apply_field_patch(
                 raise KeyError(f"unsupported scene path: {path}")
         return ScreenplayDocument.model_validate(data), touched
 
+    if kind == "dialogue_chain_turn":
+        chain_id = str(target.get("chain_id") or node_id).strip()
+        chain = _find_chain(data, chain_id, f"dialogue_chains.{chain_id}")
+        if chain is None:
+            raise KeyError(f"dialogue chain not found: {chain_id}")
+        turns = chain.get("turns") or []
+        turn_index = target.get("turn_index")
+        if turn_index is None:
+            turn_id = str(target.get("turn_id") or "").strip().upper()
+            match = re.search(r"-T(\d+)$", turn_id)
+            turn_index = int(match.group(1)) - 1 if match else -1
+        turn_index = int(turn_index)
+        if not 0 <= turn_index < len(turns):
+            raise KeyError(f"dialogue chain turn not found: {chain_id}[{turn_index}]")
+        field = path.split(".")[-1]
+        if field not in turns[turn_index]:
+            raise KeyError(f"unsupported dialogue chain turn field: {field}")
+        turns[turn_index][field] = value
+        touched.append(f"{chain_id}-T{turn_index + 1}")
+        touched.append(chain_id)
+        return ScreenplayDocument.model_validate(data), touched
+
     if kind in {"dialogue_turn", "dialogue_chain"} or "dialogue" in path:
         # search all scenes / chains
         if kind == "dialogue_chain" or path.startswith("dialogue_chains"):

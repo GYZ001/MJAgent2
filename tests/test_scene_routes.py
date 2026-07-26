@@ -13,6 +13,9 @@ def test_scene_library_routes_accept_post() -> None:
     assert "POST" in methods_by_path["/api/projects/{project_id}/scene-bible"]
     assert "POST" in methods_by_path["/api/projects/{project_id}/scene-refs"]
     assert "POST" in methods_by_path["/api/projects/{project_id}/scene-refs/cancel"]
+    assert "POST" in methods_by_path[
+        "/api/projects/{project_id}/scenes/{scene_name}/candidates/{artifact_id}/adopt"
+    ]
 
 
 def test_scene_bible_parent_does_not_block_scene_reference_handoff(monkeypatch) -> None:

@@ -178,7 +178,16 @@ export default function ScenesPage() {
         </section>
       )}
       {candidatePreview && (
-        <SceneCandidateModal {...candidatePreview} onClose={() => setCandidatePreview(null)} />
+        <SceneCandidateModal
+          projectId={p.id}
+          {...candidatePreview}
+          disabled={busy || generating}
+          onClose={() => setCandidatePreview(null)}
+          onAdopted={(sceneName, candidates, adoptedArtifactId) => {
+            setCandidatePreview({ sceneName, candidates, adoptedArtifactId })
+            refresh()
+          }}
+        />
       )}
       {paramsScene && (
         <GenerationParamsDialog
@@ -215,12 +224,20 @@ function candidateQaScore(candidate: SceneReferenceCandidate): number | null {
   return typeof evaluation?.score === 'number' ? evaluation.score / 100 : null
 }
 
-function SceneCandidateModal({ sceneName, candidates, adoptedArtifactId, onClose }: {
+function SceneCandidateModal({
+  projectId, sceneName, candidates, adoptedArtifactId, disabled, onClose, onAdopted,
+}: {
+  projectId: string
   sceneName: string
   candidates: SceneReferenceCandidate[]
   adoptedArtifactId?: string | null
+  disabled?: boolean
   onClose: () => void
+  onAdopted: (sceneName: string, candidates: SceneReferenceCandidate[], adoptedArtifactId: string) => void
 }) {
+  const { toast } = useNav()
+  const [adoptingId, setAdoptingId] = useState<string | null>(null)
+
   useEffect(() => {
     const previousOverflow = document.body.style.overflow
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -234,6 +251,27 @@ function SceneCandidateModal({ sceneName, candidates, adoptedArtifactId, onClose
     }
   }, [onClose])
 
+  const adopt = async (artifactId: string) => {
+    if (!window.confirm(`确认将此候选采纳为「${sceneName}」的场景库主图？将替换当前采用版本。`)) return
+    setAdoptingId(artifactId)
+    try {
+      await api.adoptSceneCandidate(projectId, sceneName, artifactId)
+      toast(`已采纳「${sceneName}」的候选图`)
+      const nextCandidates = candidates.map(item =>
+        item.artifact_id === artifactId
+          ? { ...item, status: 'approved' }
+          : item.status === 'approved'
+            ? { ...item, status: 'superseded' }
+            : item,
+      )
+      onAdopted(sceneName, nextCandidates, artifactId)
+    } catch (e: unknown) {
+      toast(e instanceof Error ? e.message : String(e), true)
+    } finally {
+      setAdoptingId(null)
+    }
+  }
+
   return (
     <div className="scene-candidate-backdrop" role="presentation" onMouseDown={event => {
       if (event.currentTarget === event.target) onClose()
@@ -245,7 +283,7 @@ function SceneCandidateModal({ sceneName, candidates, adoptedArtifactId, onClose
           <div>
             <span className="eyebrow">SCENE CANDIDATES</span>
             <h2 id="scene-candidate-title">{sceneName}</h2>
-            <p>候选仅供追溯；场景库主图只采用 QA 通过并已提交的版本。</p>
+            <p>可手动采纳任一候选为主图；检查并补齐时若候选超过 4 张会自动采纳最高分。</p>
           </div>
           <button type="button" aria-label="关闭候选预览" onClick={onClose}>×</button>
         </header>
@@ -254,6 +292,7 @@ function SceneCandidateModal({ sceneName, candidates, adoptedArtifactId, onClose
             const isCurrent = candidate.artifact_id === adoptedArtifactId
             const passed = candidate.status === 'approved'
             const score = candidateQaScore(candidate)
+            const canAdopt = !isCurrent && !!candidate.image_url && !disabled
             return (
               <article className={`scene-candidate-preview${isCurrent ? ' current' : passed ? ' passed' : ' rejected'}`}
                 key={candidate.artifact_id}>
@@ -273,6 +312,16 @@ function SceneCandidateModal({ sceneName, candidates, adoptedArtifactId, onClose
                   </strong>
                 </div>
                 {candidate.evidence && <EvidenceDrawer evidence={candidate.evidence} label="查看 QA 证据" />}
+                {canAdopt && (
+                  <button
+                    className="btn small primary"
+                    type="button"
+                    disabled={!!adoptingId}
+                    onClick={() => adopt(candidate.artifact_id)}
+                  >
+                    {adoptingId === candidate.artifact_id ? '采纳中…' : '采纳此图'}
+                  </button>
+                )}
               </article>
             )
           })}

@@ -641,6 +641,23 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
     no_episode_hook = not episode_hook and not episode_cliffhanger
     source_dialogues = source_dialogue_fragments(source_text)
     opening_dialogue_anchor = source_dialogues[0] if source_dialogues else ""
+    required_dialogue_lines = [
+        str(line).strip()
+        for line in (episode.get("required_dialogue_lines") or [])
+        if str(line).strip()
+    ]
+    dialogue_turn_cap = max(KEY_LINES_MAX, len(required_dialogue_lines) + 4)
+    required_dialogue_block = (
+        "【用户多选的必保留台词·逐字硬门禁】\n"
+        + "\n".join(
+            f"- R{index:03d}：{line}"
+            for index, line in enumerate(required_dialogue_lines, start=1)
+        )
+        + "\n以上每条都必须进入 dialogue_chains[*].turns[*].source_text 与 line，"
+        "并作为角色真实对白逐字写进 full_script_text；不得概括、改写或只写进动作描述。"
+        if required_dialogue_lines
+        else "【用户多选的必保留台词】本次未额外勾选；仍须遵守开场对白锚点与主线对白链规则。"
+    )
     opening_dialogue_block = (
         "【原文开场对白锚点·硬门禁】\n"
         f"- D001：{opening_dialogue_anchor}\n"
@@ -693,7 +710,7 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
 - `plot_spine.drop_list`：至少 2 条「本章有但不拍」的支线/气氛戏/装饰对白。
 - `dialogue_chains`：主线对白的权威来源。每条链写清 chain_id/topic/turns；turns 按原文与正文发生顺序排列，每个 turn 含 speaker/line/function/source_text。
 - 每条对白链必须从 trigger/announcement/question 开始，再接 response/decision；不得从回答开始。测验员、守卫等功能性角色若负责宣布结果或触发主角反应，允许且必须作为链首进入。
-- `key_lines` 由后端按 dialogue_chains.turns 确定性回填，模型仍需输出但不得自行另选；对白链总话轮 **{3}~{KEY_LINES_MAX} 条**，按整组取舍，禁止把人物谱原文台词全量入库。
+- `key_lines` 由后端按 dialogue_chains.turns 确定性回填，模型仍需输出但不得自行另选；对白链总话轮 **{3}~{dialogue_turn_cap} 条**。用户多选的必保留台词优先级最高，其余按整组取舍。
 - `key_lines` 中每一条都必须在 `full_script_text` 里作为“角色名：台词”的真实对白落地；写进动作描述、梗概、source_basis 或清单本身都不算角色说过。
 - `key_lines` 必须按正文发生顺序排列，并按“对白链”取舍：若保留回答、安慰、反驳、引用对方旧话，必须连同触发它的前一角色话轮一起保留；宁可删除另一组支线对白，也不得只摘一句回答让角色突兀开口。
 - `key_plot_points`：{KEY_PLOT_POINTS_MIN}~{KEY_PLOT_POINTS_MAX} 条，与 spine 局势变化对齐，不是动作微描写。
@@ -721,7 +738,7 @@ B. `full_script_text`：真正的剧本正文；只写大形体动作与主线�
 1. episode_no 必须作为顶层字段出现且等于 {episode['episode_no']}（不可省略，也不可写进任何嵌套对象里）。
 2. 必须先有合法 `plot_spine`；title / logline / scene_outline / full_script_text / emotional_curve / ending_hook / source_basis 必填；
    dramatic_question / protagonist_goal / obstacle / stakes 必填；
-   key_lines {3}~{KEY_LINES_MAX} 条且须按发生顺序写进正文；上下文依赖台词必须与触发话轮组成连续对白链；key_plot_points {KEY_PLOT_POINTS_MIN}~{KEY_PLOT_POINTS_MAX} 条。
+   key_lines {3}~{dialogue_turn_cap} 条且须按发生顺序写进正文；上下文依赖台词必须与触发话轮组成连续对白链；key_plot_points {KEY_PLOT_POINTS_MIN}~{KEY_PLOT_POINTS_MAX} 条。
 3. `scene_outline` 必须是 3~5 场的连续场次结构，scene_no 从 1 连续递增。
    【硬性·角色圣经】scene_outline[*].characters 中的具名角色只能填角色圣经准确姓名（{bible_names_inline}）；无需跨集定妆的临时人物允许使用测验员、守卫、围观者、路人甲等通用功能性身份标签。
 4. full_script_text 必须是一篇连续故事正文，且必须带场次标题、动作段、对白段；「【场N】」数量必须与 scene_outline 一致。
@@ -751,6 +768,8 @@ B. `full_script_text`：真正的剧本正文；只写大形体动作与主线�
 - 本集目标时长：{episode['target_duration_s']} 秒
 
 {opening_dialogue_block}
+
+{required_dialogue_block}
 
 角色圣经（姓名、关系、说话风格必须遵守）：
 {bible.model_dump_json()}
@@ -807,7 +826,8 @@ async def generate_screenplay_baseline(
         errors = validate_screenplay(
             s, bible, max(1, episode["target_duration_s"] // config.VIDEO_DURATION_MIN_S),
             episode_no=episode["episode_no"], source_text=source_text,
-            require_dialogue_chains=True)
+            require_dialogue_chains=True,
+            required_dialogue_lines=episode.get("required_dialogue_lines") or [])
         errors.extend(adaptation_hook_errors(s, episode))
         if no_episode_hook:
             ending = (s.ending_hook or "").strip()
@@ -818,7 +838,7 @@ async def generate_screenplay_baseline(
         return list(dict.fromkeys(errors))
 
     script = await _run_with_agent_loop(
-        "可拍剧本", "screenplay", _prompt, EpisodeScreenplay,
+        "剧本首次整版 Baseline", "screenplay", _prompt, EpisodeScreenplay,
         _check_screenplay,
         loop=loop, temperature=0.7, max_tokens=65535,
         repair_user_prompt_limit=None,

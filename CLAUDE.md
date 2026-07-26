@@ -20,6 +20,7 @@
 
 ## Verification
 完成后必须：
+- 日常改动优先运行 `py scripts/verify.py`，只验证 Git 改动直接影响的范围；提交或发布前才运行 `py scripts/verify.py --full`；
 - 运行构建或启动命令；
 - 检查控制台和终端错误；
 - 验证核心用户路径；
@@ -27,3 +28,8 @@
 - 报告实际完成项、未完成项和已知限制。
 
 禁止声称已经测试，除非确实执行了测试命令并获得结果。
+
+## Workspace Hygiene
+- 禁止在仓库根目录创建 `_*.py`、`_*.txt`、状态标记或临时输出；一次性诊断文件写入系统临时目录。
+- 运行日志统一写入 `logs/`，可复用工具放入 `scripts/`，不得在根目录散落日志与探针。
+- 历史临时产物用 `py scripts/clean_workspace.py --dry-run` 预览，再执行 `py scripts/clean_workspace.py` 清理。

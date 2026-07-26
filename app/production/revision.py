@@ -115,6 +115,36 @@ def get_active_production_revision(episode_id: str, kind: Kind) -> ProductionRev
     return _row_to_revision(row)
 
 
+def screenplay_production_state(episode_id: str) -> dict[str, Any]:
+    """Return the UI-safe distinction between Baseline generation and Patch repair."""
+    from app import task_registry
+
+    rev = get_active_production_revision(episode_id, "screenplay")
+    active = task_registry.active("screenplay", episode_id)
+    if rev is None:
+        return {
+            "operation": "baseline",
+            "phase": "BASELINE",
+            "baseline_done": False,
+            "first_evaluation_done": False,
+            "task_active": active,
+            "can_resume_repair": False,
+        }
+    checkpoint = dict(rev.checkpoint_json or {})
+    has_working_baseline = bool(rev.baseline_done and rev.working_artifact_id)
+    return {
+        "revision_id": rev.id,
+        "operation": "repair" if has_working_baseline else "baseline",
+        "phase": str(
+            checkpoint.get("phase") or ("QA" if has_working_baseline else "BASELINE")
+        ),
+        "baseline_done": rev.baseline_done,
+        "first_evaluation_done": rev.first_evaluation_done,
+        "task_active": active,
+        "can_resume_repair": bool(has_working_baseline and not active),
+    }
+
+
 def ensure_production_revision(
     *,
     episode_id: str,

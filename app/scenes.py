@@ -33,6 +33,9 @@ SCENE_CANONICAL_MAX = 80
 # 初始场景图只覆盖前 N 章的场景（按钮批量出图的范围）；更靠后才出现的新场景留到分镜阶段反应式补图。
 SCENE_BIBLE_CHAPTER_WINDOW = 20
 
+# 「检查并补齐」时：某场景候选图数量超过该阈值，自动采纳最高分候选，不再继续出图。
+SCENE_CANDIDATE_AUTO_ADOPT_THRESHOLD = 4
+
 
 # ---------- 落盘 / 提示词 ----------
 
@@ -227,6 +230,210 @@ def scene_ref_exists(conn, project_id: str, name: str) -> bool:
     )
 
 
+def _scene_candidate_qa_score(artifact_id: str) -> float:
+    """从 consistency_qa 评估取 0~1 分；无记录返回 -1，便于排序垫底。"""
+    from app.evidence import repository as evidence_repository
+
+    for row in evidence_repository.get_evaluations(artifact_id):
+        name = str(row.get("evaluator_name") or "")
+        if "consistency_qa" not in name:
+            continue
+        score = row.get("score")
+        if isinstance(score, (int, float)):
+            return float(score) / 100.0
+    return -1.0
+
+
+def _qa_dict_from_artifact(artifact_id: str) -> dict:
+    """重建登记 scene_references 所需的 qa_json。"""
+    from app.evidence import repository as evidence_repository
+
+    for row in evidence_repository.get_evaluations(artifact_id):
+        name = str(row.get("evaluator_name") or "")
+        if "consistency_qa" not in name:
+            continue
+        evidence = row.get("evidence") or {}
+        if isinstance(evidence, dict):
+            qa = evidence.get("qa")
+            if isinstance(qa, dict):
+                return dict(qa)
+        score = row.get("score")
+        if isinstance(score, (int, float)):
+            issues = []
+            for item in (row.get("issues") or []):
+                if isinstance(item, dict) and item.get("message"):
+                    issues.append(str(item["message"]))
+                elif isinstance(item, str):
+                    issues.append(item)
+            return {"overall": float(score) / 100.0, "issues": issues}
+    return {"overall": 0.0, "issues": ["人工采纳（无 QA 记录）"], "human_adopted": True}
+
+
+def list_scene_reference_candidates(conn, project_id: str, scene_name: str) -> list[dict]:
+    """列出某场景全部 scene_reference 候选产物（含已采纳/已替代），按创建时间升序。"""
+    from app.db import rows_to_dicts
+
+    rows = rows_to_dicts(conn.execute(
+        """SELECT * FROM artifacts
+           WHERE type='scene_reference' AND scope_type='reference_asset'
+             AND scope_id LIKE ? AND status != 'stale'
+           ORDER BY created_at, version""",
+        (f"{project_id}:%",),
+    ).fetchall())
+    out: list[dict] = []
+    for row in rows:
+        try:
+            content = json.loads(row.get("content_json") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            content = {}
+        if str(content.get("scene_name") or "").strip() != scene_name:
+            continue
+        path = row.get("file_path") or ""
+        if not path or not Path(path).exists():
+            continue
+        out.append({
+            "artifact_id": row["id"],
+            "status": row["status"],
+            "file_path": path,
+            "content": content,
+            "created_at": row.get("created_at") or "",
+            "qa_score": _scene_candidate_qa_score(row["id"]),
+            "scope_id": row.get("scope_id"),
+        })
+    return out
+
+
+def pick_best_scene_candidate(conn, project_id: str, scene_name: str) -> dict | None:
+    """按 QA 分选最高分候选；同分取较新创建。"""
+    candidates = list_scene_reference_candidates(conn, project_id, scene_name)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: (item["qa_score"], item["created_at"]))
+
+
+async def adopt_scene_candidate(
+    project_id: str,
+    scene_name: str,
+    artifact_id: str,
+    *,
+    reason: str = "人工采纳候选",
+    decided_by: str = "user",
+    ensure_pack: bool = True,
+) -> dict:
+    """将指定候选图采纳为场景库主图（人工或自动兜底）。
+
+    会 commit artifact（若尚未 approved）、登记 scene_references，并尽量补齐多视角包。
+    多视角失败时仍保留主图（人工明确选择不应被整包 QA 抹掉）。
+    """
+    from app.evidence import repository as evidence_repository
+    from app.harness.types import Evaluation
+
+    conn = get_conn()
+    project = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
+    if not project or not project["bible_json"]:
+        raise ValueError("项目不存在或还没有角色圣经")
+    bible_data = json.loads(project["bible_json"])
+    scene = next(
+        (item for item in bible_data.get("scenes", []) if item.get("name") == scene_name),
+        None,
+    )
+    if scene is None:
+        raise ValueError(f"场景不存在：{scene_name}")
+
+    artifact = evidence_repository.get_artifact(artifact_id)
+    if not artifact:
+        raise KeyError(f"候选不存在：{artifact_id}")
+    if artifact.get("type") != "scene_reference" or artifact.get("scope_type") != "reference_asset":
+        raise ValueError("不是场景参考图候选")
+    if artifact.get("status") == "stale":
+        raise ValueError("候选已过期，不能采纳")
+    try:
+        content = artifact.get("content")
+        if content is None and artifact.get("content_json"):
+            content = json.loads(artifact["content_json"])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        content = {}
+    if not isinstance(content, dict):
+        content = {}
+    if str(content.get("scene_name") or "").strip() != scene_name:
+        raise ValueError(f"候选不属于场景「{scene_name}」")
+    scope_id = str(artifact.get("scope_id") or "")
+    if not scope_id.startswith(f"{project_id}:"):
+        raise ValueError("候选不属于当前项目")
+
+    image_path = artifact.get("file_path") or ""
+    if not image_path or not Path(image_path).exists():
+        raise ValueError("候选图片文件不存在")
+
+    adopt_reason = (reason or "").strip() or "人工采纳候选"
+    if artifact.get("status") != "approved":
+        evidence_repository.commit_artifact(
+            None,
+            artifact_id,
+            [Evaluation(
+                evaluator_type="human",
+                evaluator_name=str(decided_by or "user"),
+                evaluator_version="1.0.0",
+                status="passed",
+                hard_gate_passed=True,
+                score=100,
+                evidence={"decision": "adopt", "reason": adopt_reason, "scene_name": scene_name},
+            )],
+        )
+
+    qa = _qa_dict_from_artifact(artifact_id)
+    qa = dict(qa)
+    qa["human_adopted"] = True
+    qa["adoption_reason"] = adopt_reason
+    prompt = str(content.get("prompt") or scene.get("scene_prompt_override") or "").strip()
+    if not prompt:
+        style = (bible_data.get("world") or {}).get("visual_style_canonical") or ""
+        prompt = scene_ref_prompt(style, scene.get("scene_canonical") or "")
+    bible_version = project["bible_version"] or 0
+    scene_id = register_initial_scene_ref(
+        conn, project_id, scene_name, image_path,
+        scene.get("scene_canonical") or "", prompt, qa, bible_version,
+        artifact_id=artifact_id,
+    )
+
+    pack: dict | None = None
+    if ensure_pack:
+        from app.multiview import ensure_scene_multiview_pack, scene_multiview_enabled
+        if scene_multiview_enabled():
+            style = (bible_data.get("world") or {}).get("visual_style_canonical") or ""
+            try:
+                pack = await ensure_scene_multiview_pack(
+                    project_id=project_id,
+                    scene_reference_id=scene_id,
+                    scene_name=scene_name,
+                    scene_canonical=scene.get("scene_canonical") or "",
+                    visual_style=style,
+                    ep_start=1,
+                    primary_qa=qa,
+                )
+            except Exception as exc:  # noqa: BLE001 主图已采纳，整包失败只记结果
+                pack = {"status": "failed", "error": str(exc)}
+            # 人工/自动兜底采纳：主图保留；整包未就绪不回滚主图。
+
+    class _Adopted:
+        def __init__(self, name: str, path: str):
+            self.name = name
+            self.ref_image_path = path
+
+    _merge_generated_scene_refs(conn, project_id, [_Adopted(scene_name, image_path)])
+    conn.commit()
+    return {
+        "adopted": True,
+        "scene_name": scene_name,
+        "artifact_id": artifact_id,
+        "scene_reference_id": scene_id,
+        "image_path": image_path,
+        "reason": adopt_reason,
+        "qa_overall": qa.get("overall"),
+        "pack": pack,
+    }
+
+
 def scene_ref_for_episode(project_id: str, name: str, episode_no: int | None) -> str | None:
     """返回覆盖该集的场景图落盘路径；未命中返回 None。"""
     if not name:
@@ -358,6 +565,24 @@ async def generate_scene_refs(
     failures: list[Exception] = []
     for sc in targets:
         try:
+            # 批量补齐：候选堆积超过阈值时，采纳最高分而不再继续烧图。
+            if only_scene is None:
+                piled = list_scene_reference_candidates(conn, project_id, sc.name)
+                if len(piled) > SCENE_CANDIDATE_AUTO_ADOPT_THRESHOLD:
+                    best = max(piled, key=lambda item: (item["qa_score"], item["created_at"]))
+                    adopted = await adopt_scene_candidate(
+                        project_id,
+                        sc.name,
+                        best["artifact_id"],
+                        reason=(
+                            f"检查并补齐：候选已达 {len(piled)} 张（阈值 "
+                            f"{SCENE_CANDIDATE_AUTO_ADOPT_THRESHOLD}），自动采纳最高分 "
+                            f"{best['qa_score']:.2f}"
+                        ),
+                        decided_by="scene_refs_auto_adopt",
+                    )
+                    sc.ref_image_path = adopted["image_path"]
+                    continue
             sc.ref_image_path = None
             base_prompt = ((sc.scene_prompt_override or "").strip()
                            or scene_ref_prompt(style, sc.scene_canonical))

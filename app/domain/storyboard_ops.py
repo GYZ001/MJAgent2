@@ -1017,6 +1017,16 @@ def episode_detail(episode_id: str, view: str | None = None):
     script = _load_screenplay(ep) if full or view in ("script", "board") else None
     ep["screenplay"] = script.model_dump() if script and (full or view == "script") else None
     ep["screenplay_mode"] = _screenplay_mode(script)
+    ep["required_dialogue_lines"] = _screenplay_required_dialogues(ep)
+    if full or view == "script":
+        from app.validators import source_dialogue_fragments
+
+        ep["source_dialogue_lines"] = source_dialogue_fragments(
+            _episode_source_text(conn, ep)
+        )
+    else:
+        ep["source_dialogue_lines"] = None
+    ep.pop("screenplay_required_dialogues", None)
     artifact_id = ep.get("screenplay_artifact_id")
     artifact = (
         evidence_repository.get_artifact(artifact_id)
@@ -1027,6 +1037,11 @@ def episode_detail(episode_id: str, view: str | None = None):
         artifact.pop("content", None)
         artifact["evaluations"] = evidence_repository.get_evaluations(artifact_id)
     ep["screenplay_evidence"] = artifact
+    if full or view == "script":
+        from app.production.revision import screenplay_production_state
+        ep["screenplay_production"] = screenplay_production_state(episode_id)
+    else:
+        ep["screenplay_production"] = None
     storyboard_artifact_id = ep.get("storyboard_artifact_id")
     storyboard_artifact = (
         evidence_repository.get_artifact(storyboard_artifact_id)

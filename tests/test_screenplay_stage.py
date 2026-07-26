@@ -5,7 +5,7 @@ from app.schemas import (Bible, Character, EpisodeScreenplay, KeyDialogueChain,
                          KeyDialogueTurn, PlotSpine, PlotSpineBeat,
                          ScreenplayBeat, ScriptScene, World)
 from app.stages import _render_screenplay_source, generate_screenplay
-from app.validators import source_dialogue_fragments, validate_screenplay
+from app.validators import source_dialogue_fragments, validate_dialogue_chains, validate_screenplay
 
 
 def _bible() -> Bible:
@@ -485,6 +485,74 @@ def test_dialogue_chain_rejects_first_anchor_replaced_with_unrelated_line() -> N
     assert any("开场对白锚点被改写到失去原意" in error for error in errors), errors
 
 
+def test_dialogue_chain_scene_check_prefers_declared_speaker_over_fuzzy_name_match() -> None:
+    source = "\n".join([
+        "测验员：“斗之力，三段！”",
+        "围观者：“三段？果然不出所料。”",
+        "萧薰儿：“萧炎哥哥。”",
+        "萧炎：“我现在还有资格让你这么叫吗？”",
+        "萧薰儿：“薰儿相信，你会重新站起来。”",
+    ])
+    script = _valid_rainy_script()
+    script.full_script_text = "\n".join([
+        "【场1】日 / 测验广场",
+        "测验员：萧炎，斗之力，三段！级别：低级！",
+        "围观者：三段？果然不出所料。",
+        "【场2】日 / 队伍末尾",
+        "萧薰儿：萧炎哥哥。",
+        "萧炎：我现在还有资格让你这么叫吗？",
+        "萧薰儿：薰儿相信，你会重新站起来。",
+    ])
+    script.dialogue_chains = [
+        KeyDialogueChain(
+            chain_id="DC1",
+            topic="测验结果公布",
+            turns=[
+                KeyDialogueTurn(
+                    speaker="测验员",
+                    line="萧炎，斗之力，三段！级别：低级！",
+                    function="announcement",
+                    source_text="斗之力，三段！",
+                ),
+                KeyDialogueTurn(
+                    speaker="围观者",
+                    line="三段？果然不出所料。",
+                    function="response",
+                    source_text="三段？果然不出所料。",
+                ),
+            ],
+        ),
+        KeyDialogueChain(
+            chain_id="DC2",
+            topic="薰儿鼓励萧炎",
+            turns=[
+                KeyDialogueTurn(
+                    speaker="萧薰儿",
+                    line="萧炎哥哥。",
+                    function="trigger",
+                    source_text="萧炎哥哥。",
+                ),
+                KeyDialogueTurn(
+                    speaker="萧炎",
+                    line="我现在还有资格让你这么叫吗？",
+                    function="response",
+                    source_text="我现在还有资格让你这么叫吗？",
+                ),
+                KeyDialogueTurn(
+                    speaker="萧薰儿",
+                    line="薰儿相信，你会重新站起来。",
+                    function="statement",
+                    source_text="薰儿相信，你会重新站起来。",
+                ),
+            ],
+        ),
+    ]
+
+    errors = validate_dialogue_chains(script, source_text=source, required=True)
+
+    assert not any("被拆到多个场次" in error for error in errors), errors
+
+
 def test_initial_screenplay_prompt_contains_d001_and_dialogue_chain_contract(monkeypatch) -> None:
     script, source = _screenplay_with_source_dialogue_chain()
     prompts: list[str] = []
@@ -502,14 +570,48 @@ def test_initial_screenplay_prompt_contains_d001_and_dialogue_chain_contract(mon
         "hook": "开场",
         "cliffhanger": "收束",
         "synopsis": "测验结果引发回应",
+        "required_dialogue_lines": ["只有三段？", "结果无误。"],
     }
 
     asyncio.run(generate_screenplay(episode, source, _bible()))
 
     assert "【原文开场对白锚点·硬门禁】" in prompts[0]
     assert "D001：斗之力，三段！" in prompts[0]
+    assert "【用户多选的必保留台词·逐字硬门禁】" in prompts[0]
+    assert "R001：只有三段？" in prompts[0]
+    assert "R002：结果无误。" in prompts[0]
     assert '"dialogue_chains"' in prompts[0]
     assert "`key_lines` 由后端按 dialogue_chains.turns 确定性回填" in prompts[0]
+
+
+def test_user_selected_dialogues_are_hard_gates() -> None:
+    script, source = _screenplay_with_source_dialogue_chain()
+
+    ok = validate_screenplay(
+        script,
+        _bible(),
+        expected_beats=5,
+        episode_no=1,
+        source_text=source,
+        require_dialogue_chains=True,
+        required_dialogue_lines=["只有三段？", "结果无误。"],
+    )
+    assert not any("用户锁定台词" in error for error in ok), ok
+
+    script.full_script_text = script.full_script_text.replace("测验员：结果无误。", "")
+    errors = validate_screenplay(
+        script,
+        _bible(),
+        expected_beats=5,
+        episode_no=1,
+        source_text=source,
+        require_dialogue_chains=True,
+        required_dialogue_lines=["结果无误。"],
+    )
+    assert any(
+        "用户锁定台词未作为角色对白写进 full_script_text" in error
+        for error in errors
+    ), errors
 
 
 def test_screenplay_allows_dropping_non_spine_source_dialogues() -> None:

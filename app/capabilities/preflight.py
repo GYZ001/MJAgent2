@@ -586,6 +586,81 @@ def screenplay_update(args) -> PreflightResult:
     )
 
 
+def screenplay_delete(args) -> PreflightResult:
+    conn = get_conn()
+    ep = conn.execute(
+        "SELECT id, episode_no, status, screenplay_json, screenplay_status, "
+        "screenplay_artifact_id, working_screenplay_artifact_id, screenplay_updated_at "
+        "FROM episodes WHERE id=?",
+        (args.episode_id,),
+    ).fetchone()
+    if not ep:
+        return PreflightResult(
+            command="screenplay.delete",
+            allowed=False,
+            risk=RiskLevel.R3_DESTRUCTIVE,
+            summary="剧集不存在",
+            state_fingerprint=_fp({"episode_id": args.episode_id, "missing": True}),
+            requires_confirmation=False,
+            confirmation_policy=ConfirmationPolicy.ALWAYS,
+            denial_code="not_found",
+            denial_message="剧集不存在",
+        )
+    if not ep["screenplay_json"] and not ep["working_screenplay_artifact_id"]:
+        return PreflightResult(
+            command="screenplay.delete",
+            allowed=False,
+            risk=RiskLevel.R3_DESTRUCTIVE,
+            summary="本集没有可删除的剧本",
+            state_fingerprint=_fp({
+                "episode_id": args.episode_id,
+                "screenplay_status": ep["screenplay_status"],
+                "empty": True,
+            }),
+            requires_confirmation=False,
+            confirmation_policy=ConfirmationPolicy.ALWAYS,
+            denial_code="invalid_state",
+            denial_message="本集没有可删除的剧本",
+        )
+    shots = conn.execute(
+        "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (args.episode_id,)
+    ).fetchone()["c"]
+    versions = conn.execute(
+        """SELECT COUNT(*) AS c FROM shot_versions v
+           JOIN shots s ON s.id=v.shot_id WHERE s.episode_id=?""",
+        (args.episode_id,),
+    ).fetchone()["c"]
+    warnings = ["删除后当前剧本不可恢复；历史证据仅供审计，不能直接还原"]
+    if int(shots or 0) or int(versions or 0):
+        warnings.append("本集分镜、参考图、视频和成片会一并清空")
+    warnings.append("已勾选的必保留原文台词会保留，供下次首次生成使用")
+    return PreflightResult(
+        command="screenplay.delete",
+        allowed=True,
+        risk=RiskLevel.R3_DESTRUCTIVE,
+        summary=f"删除第 {ep['episode_no']} 集当前剧本"
+        + (f"；同时清空 {shots} 镜和 {versions} 个媒体版本" if shots or versions else ""),
+        affected=AffectedScope(
+            episodes=[args.episode_id],
+            shot_count=int(shots or 0),
+            invalidated_artifacts=int(versions or 0),
+        ),
+        warnings=warnings,
+        state_fingerprint=_fp({
+            "episode_id": args.episode_id,
+            "status": ep["status"],
+            "screenplay_status": ep["screenplay_status"],
+            "artifact": ep["screenplay_artifact_id"],
+            "working_artifact": ep["working_screenplay_artifact_id"],
+            "updated_at": ep["screenplay_updated_at"],
+            "shots": shots,
+            "versions": versions,
+        }),
+        requires_confirmation=True,
+        confirmation_policy=ConfirmationPolicy.ALWAYS,
+    )
+
+
 def bible_update(args) -> PreflightResult:
     conn = get_conn()
     row = conn.execute(
@@ -686,6 +761,7 @@ PREFLIGHT_MAP: dict[str, Any] = {
     "storyboard.confirm": storyboard_confirm,
     "shot.update": shot_update,
     "screenplay.update": screenplay_update,
+    "screenplay.delete": screenplay_delete,
     "bible.update": bible_update,
     "delivery.review": delivery_review,
 }

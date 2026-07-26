@@ -29,6 +29,10 @@ _CODE_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("LEDGER_INVALID", re.compile(r"information_ledger|events\[|event_id", re.I)),
     ("SHOT_BUDGET", re.compile(r"软预算|硬上限|镜头数|合并反应镜", re.I)),
     ("CHARACTER_CONSISTENCY", re.compile(r"人物谱|角色圣经|角色名|说话人|characters", re.I)),
+    ("SCENE_FIELD_INVALID", re.compile(
+        r"scene_outline.*\.(?:scene_no|scene_heading|story_function|summary|conflict|turn|source_basis|characters)",
+        re.I,
+    )),
     ("DRAMATIC_CONTRACT_INCOMPLETE", re.compile(
         r"dramatic_question|protagonist_goal|obstacle|stakes|戏剧", re.I
     )),

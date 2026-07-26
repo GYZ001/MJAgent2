@@ -43,6 +43,43 @@ BIBLE_INTERRUPTED_ERROR = "人物谱任务已中断（服务重载或后台任�
 FALLBACK_VISUAL_STYLE = "国漫风格，非真人CG渲染，统一电影感光影，暖灰色调"
 
 
+def _normalize_required_dialogue_lines(value) -> list[str]:
+    if value in (None, ""):
+        return []
+    if not isinstance(value, list):
+        raise HTTPException(422, "必保留原文台词必须按行提交")
+    from app.textmatch import condense, strip_speaker
+
+    lines: list[str] = []
+    seen: set[str] = set()
+    for raw in value:
+        line = str(raw or "").strip().lstrip("-• ").strip()
+        if not line:
+            continue
+        content = condense(strip_speaker(line))
+        if len(content) < 2:
+            raise HTTPException(422, f"必保留原文台词过短：{line}")
+        if len(line) > 160:
+            raise HTTPException(422, f"单条必保留原文台词不能超过 160 字：{line[:30]}…")
+        if content in seen:
+            continue
+        seen.add(content)
+        lines.append(line)
+    return lines
+
+
+def _screenplay_required_dialogues(ep) -> list[str]:
+    try:
+        raw = ep["screenplay_required_dialogues"] or "[]"
+    except (KeyError, IndexError, TypeError):
+        return []
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+        return _normalize_required_dialogue_lines(value)
+    except (json.JSONDecodeError, HTTPException):
+        return []
+
+
 def _as_body_dict(body) -> dict:
     """FastAPI ``Body(None)`` 在直接调用时会把默认值变成 Body 对象，不能当 dict 展开。"""
     return body if isinstance(body, dict) else {}
@@ -164,7 +201,12 @@ def _storyboard_target_for_source(target_duration_s: int | None, source_chars: i
 
 
 def _episode_source_text(conn, ep) -> str:
-    source_chapters = json.loads(ep["source_chapters"] or "[]")
+    raw_source_chapters = ep["source_chapters"] or []
+    source_chapters = (
+        json.loads(raw_source_chapters)
+        if isinstance(raw_source_chapters, str)
+        else list(raw_source_chapters)
+    )
     if not source_chapters:
         return ""
     placeholders = ",".join("?" for _ in source_chapters)

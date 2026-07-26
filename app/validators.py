@@ -766,6 +766,7 @@ def validate_dialogue_chains(
     *,
     source_text: str | None,
     required: bool,
+    required_dialogue_lines: list[str] | None = None,
 ) -> list[str]:
     """Validate source-grounded trigger→reply chains before accepting a screenplay."""
     errors: list[str] = []
@@ -783,6 +784,8 @@ def validate_dialogue_chains(
     full_turns = _script_dialogue_turns(script.full_script_text or "")
     full_texts = [turn[2] for turn in full_turns]
     source_fragments = source_dialogue_fragments(source_text)
+    required_lines = [line for line in (required_dialogue_lines or []) if (line or "").strip()]
+    effective_max_turns = max(MAX_KEY_LINES, len(required_lines) + 4)
     for chain_index, chain in enumerate(chains):
         tag = f"dialogue_chains[{chain_index}]"
         chain_id = (chain.chain_id or "").strip().upper()
@@ -833,6 +836,23 @@ def validate_dialogue_chains(
                 ):
                     errors.append(f"{turn_tag}.source_text 未在本集原文中找到：{source_line}")
             candidates = _matching_text_indices(line, full_texts)
+            # A short character-address line can fuzzily match an earlier,
+            # unrelated utterance that merely contains the same name.  Prefer
+            # the declared speaker, then the exact spoken text, before using
+            # the ordered fuzzy fallback.  Otherwise a chain fully contained
+            # in one scene can be falsely reported as spanning several scenes.
+            same_speaker = [
+                idx for idx in candidates
+                if _condense(full_turns[idx][1]) == _condense(speaker)
+            ]
+            if same_speaker:
+                candidates = same_speaker
+            exact_text = [
+                idx for idx in candidates
+                if _condense(full_turns[idx][2]) == _condense(line)
+            ]
+            if exact_text:
+                candidates = exact_text
             after = [idx for idx in candidates if not matched_indices or idx >= matched_indices[-1]]
             if not after:
                 errors.append(f"{turn_tag}.line 未按对白链顺序写进 full_script_text：{line}")
@@ -844,10 +864,10 @@ def validate_dialogue_chains(
             if len(scenes) > 1:
                 errors.append(f"{tag} 被拆到多个场次；同一触发→回应链必须在同一场完成")
 
-    if not MIN_KEY_LINES <= total_turns <= MAX_KEY_LINES:
+    if not MIN_KEY_LINES <= total_turns <= effective_max_turns:
         errors.append(
             f"dialogue_chains 共 {total_turns} 个话轮；主线对白链总量必须为 "
-            f"{MIN_KEY_LINES}~{MAX_KEY_LINES}，按整组取舍而不是截断回答"
+            f"{MIN_KEY_LINES}~{effective_max_turns}，按整组取舍而不是截断回答"
         )
     if source_fragments:
         opening = source_fragments[0]
@@ -872,6 +892,33 @@ def validate_dialogue_chains(
                 f"开场对白锚点被改写到失去原意：原文「{opening}」→台词「{first_chain_line}」；"
                 "D001 只允许口语压缩，不得替换成另一句台词"
             )
+    if required_lines:
+        chain_sources = [
+            (turn.source_text or "").strip()
+            for chain in chains for turn in (chain.turns or [])
+        ]
+        chain_lines = [
+            (turn.line or "").strip()
+            for chain in chains for turn in (chain.turns or [])
+        ]
+        for required_line in required_lines:
+            needle = textmatch.strip_speaker(required_line)
+            identity = _condense(needle)
+            source_locked = any(identity and identity in _condense(line) for line in chain_sources)
+            adapted_locked = any(identity and identity in _condense(line) for line in chain_lines)
+            spoken_locked = any(identity and identity in _condense(turn[2]) for turn in full_turns)
+            if not source_locked:
+                errors.append(
+                    f"用户锁定台词未进入 dialogue_chains.source_text：「{required_line}」"
+                )
+            if not adapted_locked:
+                errors.append(
+                    f"用户锁定台词未逐字进入 dialogue_chains.line：「{required_line}」"
+                )
+            if not spoken_locked:
+                errors.append(
+                    f"用户锁定台词未作为角色对白写进 full_script_text：「{required_line}」"
+                )
     return errors
 
 
@@ -1307,7 +1354,8 @@ def validate_plot_spine(script: EpisodeScreenplay) -> list[str]:
 
 def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats: int,
                         episode_no: int | None = None, source_text: str | None = None,
-                        require_dialogue_chains: bool = False) -> list[str]:
+                        require_dialogue_chains: bool = False,
+                        required_dialogue_lines: list[str] | None = None) -> list[str]:
     """剧本层校验：Renderability First——先 spine，再正文；主线台词有上限，禁止全量原文台词入库。"""
     errors: list[str] = []
     # 先清洗/回填空壳台账，避免模型「有壳无肉」的 ledger 把整集卡在 WARNING 候选。
@@ -1315,6 +1363,7 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
     normalize_screenplay_dialogue_chains(script)
     errors.extend(validate_dialogue_chains(
         script, source_text=source_text, required=require_dialogue_chains,
+        required_dialogue_lines=required_dialogue_lines,
     ))
     if episode_no is not None and script.episode_no != episode_no:
         errors.append(f"episode_no={script.episode_no}，必须等于 {episode_no}")
@@ -1417,14 +1466,18 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
     if len((script.stakes or "").strip()) < 4:
         errors.append("stakes 过短或缺失；请写失败代价（输了会失去什么关系/尊严/目标）")
     key_lines = [ln.strip() for ln in (script.key_lines or []) if ln and ln.strip()]
+    effective_max_key_lines = max(
+        MAX_KEY_LINES,
+        len([line for line in (required_dialogue_lines or []) if (line or "").strip()]) + 4,
+    )
     if len(key_lines) < MIN_KEY_LINES:
         errors.append(
             f"key_lines 仅 {len(key_lines)} 条；请挑出至少 {MIN_KEY_LINES} 条推动主线的台词"
-            f"（上限 {MAX_KEY_LINES}，不要全量搬原文）")
-    if len(key_lines) > MAX_KEY_LINES:
+            f"（当前上限 {effective_max_key_lines}）")
+    if len(key_lines) > effective_max_key_lines:
         errors.append(
-            f"key_lines 共 {len(key_lines)} 条，超过上限 {MAX_KEY_LINES}；"
-            "只保留推动 spine 的主线台词，支线对白请放入 drop_list"
+            f"key_lines 共 {len(key_lines)} 条，超过上限 {effective_max_key_lines}；"
+            "用户勾选台词全部保留，其余只保留推动 spine 的完整对白链"
         )
     bible_names = {c.name for c in bible.characters}
     if bible_names:

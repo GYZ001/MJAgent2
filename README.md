@@ -220,7 +220,11 @@ foreach ($p in $ports) {
 
 ## 发布门禁
 
-新旧双轨基准需要三个不同真实项目通过，不能在仓库里伪造客户指标。可执行 `py scripts/check_contract_surface.py`、`py -m pytest -q` 和前端 `npm.cmd run build` 完成本地工程验收；真实项目指标通过 `/api/benchmarks` 录入并由 `/api/benchmarks/release-gate` 判定。
+日常改完代码先执行 `py scripts/verify.py`：它根据 Git 改动和 Python 导入关系，只运行受影响的后端测试；前端有改动时才执行类型检查和前端测试。用 `--plan` 可以只预览将执行的命令。提交或发布前执行 `py scripts/verify.py --full`，保留完整工程验收。
+
+根目录出现历史调试文件或旧日志时，执行 `py scripts/clean_workspace.py`；加 `--dry-run` 可先预览，加 `--caches` 会同时清理可重建的测试缓存和前端构建目录。
+
+新旧双轨基准需要三个不同真实项目通过，不能在仓库里伪造客户指标。真实项目指标通过 `/api/benchmarks` 录入并由 `/api/benchmarks/release-gate` 判定。
 
 以下 M0 说明仅保留为早期集成历史；当前发布以 Harness 运行手册和上述门禁为准。
 

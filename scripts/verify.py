@@ -1,0 +1,243 @@
+"""Run the smallest useful verification set for the current Git changes.
+
+Usage:
+    py scripts/verify.py          # affected checks only
+    py scripts/verify.py --plan   # show what would run
+    py scripts/verify.py --full   # release/CI-level verification
+"""
+from __future__ import annotations
+
+import argparse
+import ast
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent.parent
+APP = ROOT / "app"
+TESTS = ROOT / "tests"
+FRONTEND = ROOT / "frontend"
+
+
+def _git_lines(*args: str) -> list[str]:
+    result = subprocess.run(
+        ["git", *args], cwd=ROOT, text=True, capture_output=True, check=True
+    )
+    return [line.strip().replace("\\", "/") for line in result.stdout.splitlines() if line.strip()]
+
+
+def changed_files() -> list[str]:
+    """Return tracked worktree changes plus non-ignored untracked files."""
+    paths = _git_lines("diff", "--name-only", "--diff-filter=ACMRD", "HEAD")
+    paths += _git_lines("ls-files", "--others", "--exclude-standard")
+    return sorted(set(paths))
+
+
+def _module_name(path: Path) -> str | None:
+    try:
+        relative = path.relative_to(ROOT).with_suffix("")
+    except ValueError:
+        return None
+    parts = list(relative.parts)
+    if not parts or parts[0] not in {"app", "tests"}:
+        return None
+    if parts[-1] == "__init__":
+        parts.pop()
+    return ".".join(parts)
+
+
+def _python_files() -> list[Path]:
+    return sorted(APP.rglob("*.py")) + sorted(TESTS.glob("test_*.py"))
+
+
+def _parse(path: Path) -> ast.Module | None:
+    try:
+        return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError, UnicodeError):
+        return None
+
+
+def _imports_in(path: Path, known_modules: set[str], nodes: list[ast.AST]) -> set[str]:
+    """Extract local imports, including ``from app import module`` forms."""
+
+    current = _module_name(path) or ""
+    package = current if path.name == "__init__.py" else current.rpartition(".")[0]
+    found: set[str] = set()
+    for root_node in nodes:
+        for node in ast.walk(root_node):
+            if isinstance(node, ast.Import):
+                found.update(alias.name for alias in node.names if alias.name.startswith("app"))
+                continue
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            if node.level:
+                package_parts = package.split(".") if package else []
+                trim = node.level - 1
+                prefix = package_parts[: len(package_parts) - trim] if trim <= len(package_parts) else []
+                base = ".".join(prefix + (node.module.split(".") if node.module else []))
+            else:
+                base = node.module or ""
+            if not base.startswith("app"):
+                continue
+            found.add(base)
+            for alias in node.names:
+                candidate = f"{base}.{alias.name}"
+                if candidate in known_modules:
+                    found.add(candidate)
+    return found
+
+
+def _depends_on(imports: set[str], affected_modules: set[str]) -> bool:
+    return any(
+        dependency == affected or dependency.startswith(affected + ".")
+        for dependency in imports
+        for affected in affected_modules
+    )
+
+
+def affected_python_tests(paths: list[str]) -> list[str]:
+    """Find changed tests and tests directly importing a changed app module.
+
+    Direct dependencies keep the edit loop fast. Indirect integration coverage
+    intentionally belongs to ``--full`` instead of expanding through a central
+    facade such as ``app.api`` and selecting most of the suite.
+    """
+    python_files = _python_files()
+    module_by_file = {path: _module_name(path) for path in python_files}
+    known_modules = {module for module in module_by_file.values() if module}
+
+    changed_test_paths = {
+        path for path in paths if path.startswith("tests/test_") and path.endswith(".py")
+    }
+    changed_app_paths = {
+        path for path in paths if path.startswith("app/") and path.endswith(".py")
+    }
+    affected_modules = {
+        _module_name(ROOT / Path(path))
+        for path in changed_app_paths
+        if _module_name(ROOT / Path(path))
+    }
+
+    selected = set(changed_test_paths)
+    for file_path in python_files:
+        relative = file_path.relative_to(ROOT).as_posix()
+        if file_path.parent != TESTS or relative in selected:
+            continue
+        tree = _parse(file_path)
+        if tree is None:
+            continue
+        module_imports = _imports_in(
+            file_path,
+            known_modules,
+            [node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))],
+        )
+        if _depends_on(module_imports, affected_modules):
+            selected.add(relative)
+            continue
+        # A local import usually belongs to one focused regression. Select that
+        # node rather than paying for every unrelated test in a large file.
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
+                if _depends_on(_imports_in(file_path, known_modules, [node]), affected_modules):
+                    selected.add(f"{relative}::{node.name}")
+    return sorted(selected)
+
+
+def _npm() -> str:
+    return "npm.cmd" if os.name == "nt" else "npm"
+
+
+def _command_label(command: list[str], cwd: Path) -> str:
+    prefix = f"cd {cwd.relative_to(ROOT).as_posix()} && " if cwd != ROOT else ""
+    return prefix + " ".join(command)
+
+
+def _run(command: list[str], *, cwd: Path = ROOT, plan: bool = False) -> None:
+    print(f"\n> {_command_label(command, cwd)}", flush=True)
+    if not plan:
+        subprocess.run(command, cwd=cwd, check=True)
+
+
+def _quick_commands(paths: list[str]) -> list[tuple[list[str], Path]]:
+    commands: list[tuple[list[str], Path]] = []
+    python_changes = [path for path in paths if path.endswith(".py")]
+    lintable = [
+        path
+        for path in python_changes
+        if path.startswith(("app/", "tests/", "scripts/")) and (ROOT / path).exists()
+    ]
+    if lintable:
+        commands.append(([sys.executable, "-m", "ruff", "check", *lintable], ROOT))
+
+    force_all_python = any(
+        path in {"pyproject.toml", "requirements.txt", "requirements-dev.txt", "tests/conftest.py"}
+        for path in paths
+    )
+    selected_tests = sorted(path for path in paths if path.startswith("tests/test_") and path.endswith(".py"))
+    if force_all_python:
+        commands.append(([sys.executable, "-m", "pytest", "-q"], ROOT))
+    else:
+        selected_tests = affected_python_tests(paths)
+        if selected_tests:
+            commands.append(([sys.executable, "-m", "pytest", "-q", *selected_tests], ROOT))
+
+    if any(path.startswith("app/capabilities/") or path == "app/api.py" for path in paths):
+        commands.append(([sys.executable, "scripts/check_contract_surface.py"], ROOT))
+        commands.append(([sys.executable, "scripts/check_capability_coverage.py"], ROOT))
+
+    frontend_changes = [path for path in paths if path.startswith("frontend/")]
+    if frontend_changes:
+        commands.append(([_npm(), "run", "typecheck"], FRONTEND))
+        if any(path.startswith("frontend/src/") for path in frontend_changes):
+            commands.append(([_npm(), "test"], FRONTEND))
+    return commands
+
+
+def _full_commands() -> list[tuple[list[str], Path]]:
+    return [
+        ([sys.executable, "-m", "ruff", "check", "app", "tests", "scripts"], ROOT),
+        ([sys.executable, "scripts/check_contract_surface.py"], ROOT),
+        ([sys.executable, "scripts/check_capability_coverage.py"], ROOT),
+        ([sys.executable, "-m", "compileall", "-q", "app"], ROOT),
+        ([sys.executable, "-m", "pytest", "-q"], ROOT),
+        ([_npm(), "run", "build"], FRONTEND),
+        ([_npm(), "test"], FRONTEND),
+    ]
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--full", action="store_true", help="run the release/CI-level suite")
+    parser.add_argument("--plan", action="store_true", help="print commands without executing them")
+    args = parser.parse_args()
+
+    started = time.monotonic()
+    if args.full:
+        commands = _full_commands()
+        print("Full verification")
+    else:
+        paths = changed_files()
+        print(f"Quick verification for {len(paths)} changed file(s)")
+        for path in paths:
+            print(f"  {path}")
+        commands = _quick_commands(paths)
+
+    if not commands:
+        print("No code changes need verification.")
+        return 0
+    try:
+        for command, cwd in commands:
+            _run(command, cwd=cwd, plan=args.plan)
+    except subprocess.CalledProcessError as exc:
+        print(f"\nFAILED (exit {exc.returncode}) in {time.monotonic() - started:.1f}s")
+        return exc.returncode
+    suffix = " plan" if args.plan else ""
+    print(f"\nOK{suffix} in {time.monotonic() - started:.1f}s")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
