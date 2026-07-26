@@ -536,7 +536,9 @@ async def edit_screenplay(episode_id: str, body: dict):
     )
     if routed is not None:
         return routed
-    ep = _episode_or_404(episode_id)
+    # _episode_or_404 返回 sqlite3.Row；Row 没有 .get，必须先转 dict，
+    # 否则保存剧本会在版本比对处 AttributeError → 500「服务器内部错误」。
+    ep = dict(_episode_or_404(episode_id))
     current_version = ep.get("screenplay_artifact_id") or ""
     if expected_version is not None and str(expected_version) != str(current_version):
         raise HTTPException(
