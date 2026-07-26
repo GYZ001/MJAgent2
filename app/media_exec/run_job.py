@@ -1457,8 +1457,6 @@ async def _worker_loop(name: str, queue: asyncio.Queue[str] | None = None) -> No
 def recover_and_start(loop_concurrency: int | None = None) -> None:
     """启动时恢复队列（PRD §4.5 验收：中途杀进程重启后队列状态可恢复）。"""
     from app.media_pipeline.bootstrap import start_media_pipeline
-    from app.media_pipeline.concurrency import channel_limit
-    from app.media_pipeline import stages as media_stages
 
     start_media_pipeline()
     decommission_legacy_keyframe_jobs()

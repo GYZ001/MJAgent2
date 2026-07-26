@@ -111,29 +111,10 @@ def section_a_prompt(bible: Bible) -> bool:
     return changed
 
 
-# ---------- 修复前忠实复刻：#3 视频模式（旧 _rule_mode：连贯镜→参考图） ----------
-
-def _old_rule_mode(shot: Shot):
-    text = video_modes._text_for_rules(shot)
-    strong_words = [
-        "fight", "battle", "explode", "explosion", "transform", "spell", "magic", "blast",
-        "打斗", "战斗", "搏斗", "爆气", "爆炸", "法术", "施法", "变身", "快速转身", "转场",
-        "过渡到", "落点", "结尾画面", "尾帧", "强控制", "冲刺", "闪现",
-    ]
-    light_words = [
-        "dialogue", "talk", "walk", "stand", "sit", "look back", "scene continues",
-        "对话", "说", "交谈", "站", "坐", "走", "回头", "场景延续", "连续出场",
-        "情绪", "环境", "展示", "看向", "轻声",
-    ]
-    if video_modes._contains_any(text, strong_words):
-        return video_modes.FIRST_LAST_FRAME_MODE, "strong action", 0.82
-    if shot.dialogues or bool(shot.continuity_from_prev) or video_modes._contains_any(text, light_words):
-        return video_modes.REFERENCE_IMAGE_MODE, "dialogue/light/continuity", 0.84
-    return video_modes.REFERENCE_IMAGE_MODE, "default", 0.72
-
+# ---------- 视频模式已锁定 REFERENCE_IMAGE（旧多模式 diff 退役） ----------
 
 def section_b_mode(bible: Bible) -> bool:
-    _hr("B. 视频模式选择 diff（#3 连贯镜改走首尾帧）")
+    _hr("B. 视频模式选择（已锁定 reference_image）")
     fixtures = {
         "首镜·建立场景": _shot(shot_no=1, continuity_from_prev=False,
                             action_desc="萧炎走进药店，环视四周，停在柜台前。", dialogues=[]),
@@ -145,27 +126,13 @@ def section_b_mode(bible: Bible) -> bool:
         "强动作镜·打斗": _shot(shot_no=4, continuity_from_prev=False, scene_setting="清晨，广场",
                           action_desc="萧炎快速转身释放法术与敌人打斗，保证结尾落点。"),
     }
-    sel = video_modes.ShotVideoModeSelector()
-    orig = video_modes._rule_mode
-    rows = []
-    changed = False
-    for name, shot in fixtures.items():
-        after = sel.select_by_rules(shot)
-        video_modes._rule_mode = _old_rule_mode
-        try:
-            before = sel.select_by_rules(shot)
-        finally:
-            video_modes._rule_mode = orig
-        flag = "  <-- 改变" if before.mode != after.mode else ""
-        if before.mode != after.mode:
-            changed = True
-        rows.append((name, before.mode, before.referenceImagePlan.totalCount,
-                     after.mode, after.referenceImagePlan.totalCount, flag))
-    w = max(len(r[0]) for r in rows)
-    print(f"{'镜头':<{w}}  {'BEFORE mode':<22} refN   {'AFTER mode':<22} refN")
-    for name, bm, bn, am, an, flag in rows:
-        print(f"{name:<{w}}  {bm:<22} {bn:<4}   {am:<22} {an:<4}{flag}")
-    return changed
+    for name, _shot_obj in fixtures.items():
+        decision = video_modes.default_reference_decision()
+        print(f"{name}: mode={decision.mode} refN={decision.referenceImagePlan.totalCount}")
+        if decision.mode != video_modes.REFERENCE_IMAGE_MODE:
+            return True
+    print("全部镜头锁定 REFERENCE_IMAGE_MODE（无模式分叉）")
+    return False
 
 
 # ---------- #5 超长裁剪顺序：旧（先丢 extra_negative）vs 新（先丢 filler） ----------

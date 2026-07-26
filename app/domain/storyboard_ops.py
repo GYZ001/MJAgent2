@@ -11,7 +11,8 @@ def _shot_contract_json(shot: Shot) -> str:
 
 
 def _apply_contract_to_public_shot(target: dict) -> None:
-    from app.continuity import apply_shot_contract, max_speech_chars, spoken_chars_from_shot
+    from app.continuity import apply_shot_contract, spoken_chars_from_shot
+    from app.spoken_contract import max_speech_chars
     shot = Shot(
         shot_no=target["shot_no"],
         duration_s=target["duration_s"],
@@ -309,7 +310,6 @@ async def _storyboard_task(
     try:
         conn.execute("UPDATE episodes SET status='scripting', script_error=NULL, storyboard_warning=NULL WHERE id=?", (episode_id,))
         conn.commit()
-        ep_data = dict(ep)
         screenplay = _load_screenplay(ep)
         if screenplay is None or ep["screenplay_status"] != "ready":
             raise StageError("分镜脚本", ["请先生成并确认本集可拍剧本，再展开分镜"])
@@ -587,7 +587,8 @@ async def _recorded_storyboard_task(
 @router.post("/episodes/{episode_id}/storyboard")
 async def start_storyboard(episode_id: str, body: dict | None = Body(None)):
     from app.capabilities.dispatch import ui_route
-    payload = {"episode_id": episode_id, "mode": "fresh", **(body or {})}
+    body = _as_body_dict(body)
+    payload = {"episode_id": episode_id, "mode": "fresh", **body}
     routed = await ui_route("storyboard.generate", payload)
     if routed is not None:
         return routed
@@ -597,7 +598,6 @@ async def start_storyboard(episode_id: str, body: dict | None = Body(None)):
         raise HTTPException(409, "分镜正在生成中")
     if not _screenplay_ready(ep):
         raise HTTPException(409, "请先在剧本台生成本集可拍剧本")
-    body = body or {}
     completion_mode = body.get("completion_mode") or "ready_for_manual_confirm"
     if completion_mode not in {"ready_for_manual_confirm", "auto_confirm"}:
         raise HTTPException(422, "completion_mode 只能是 ready_for_manual_confirm 或 auto_confirm")
@@ -663,7 +663,8 @@ async def start_storyboard(episode_id: str, body: dict | None = Body(None)):
 async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
     """从 Supervisor Checkpoint / 已验证前缀恢复。"""
     from app.capabilities.dispatch import ui_route
-    payload = {"episode_id": episode_id, "mode": "resume", **(body or {})}
+    body = _as_body_dict(body)
+    payload = {"episode_id": episode_id, "mode": "resume", **body}
     routed = await ui_route("storyboard.generate", payload)
     if routed is not None:
         return routed
@@ -694,7 +695,7 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
             last_contract = {}
         if bool(last_contract.get("is_final")) and ep["status"] not in {"scripted"}:
             pass  # Supervisor 可能需要整集校验/确认，允许恢复
-        elif bool(last_contract.get("is_final")) and not (body or {}).get("force"):
+        elif bool(last_contract.get("is_final")) and not body.get("force"):
             # 已收束且无待修复时，默认禁止盲目续跑加镜
             if cp is None or cp.phase == "SUCCEEDED":
                 raise HTTPException(
@@ -711,8 +712,8 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
     try:
         completion_mode = ep["storyboard_completion_mode"] or "ready_for_manual_confirm"
     except (KeyError, IndexError, TypeError):
-        completion_mode = (body or {}).get("completion_mode") or "ready_for_manual_confirm"
-    grant_id = (body or {}).get("completion_grant_id") or (cp.completion_grant_id if cp else None)
+        completion_mode = body.get("completion_mode") or "ready_for_manual_confirm"
+    grant_id = body.get("completion_grant_id") or (cp.completion_grant_id if cp else None)
     conn.execute(
         "UPDATE episodes SET status='scripting', script_error=NULL WHERE id=?", (episode_id,)
     )
@@ -1451,7 +1452,7 @@ def audit_episode_spoken_contract(episode_id: str):
 def migrate_episode_shot_ids(episode_id: str, body: dict | None = Body(None)):
     """把误写入 story_event_id 的 S* 迁移到 spine_beat_ids（PRD §6.2）。"""
     _episode_or_404(episode_id)
-    dry_run = bool((body or {}).get("dry_run", False))
+    dry_run = bool(_as_body_dict(body).get("dry_run", False))
     from app.continuity import migrate_shot_id_spaces, shot_contract_dict
 
     conn = get_conn()

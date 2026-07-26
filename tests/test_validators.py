@@ -1,4 +1,3 @@
-from app import config
 from app.schemas import Bible, Character, Dialogue, EpisodeScreenplay, Shot, Storyboard, World
 from app.validators import (_contiguous_scene_move, _has_movement_cue, _has_transition_hint,
                             normalize_action_desc, validate_storyboard,

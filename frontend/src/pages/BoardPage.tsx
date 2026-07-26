@@ -64,7 +64,7 @@ function ShotLifecycleBadges({ shot }: { shot: Shot }) {
   )
 }
 
-function continuityLabel(mode?: string | null, fromPrev?: boolean): string {
+function continuityLabel(mode?: string | null, fromPrev?: boolean | number | null): string {
   if (mode && CONTINUITY_MODE_LABEL[mode]) return CONTINUITY_MODE_LABEL[mode]
   if (mode) return mode
   return fromPrev ? '接上镜' : ''
@@ -287,7 +287,7 @@ export default function BoardPage() {
           ) : null}
         </div>
         {ep.screenplay_status !== 'ready' && <div className="error-banner">本集还没有可用剧本。请先到剧本台生成/保存完整剧本，再展开分镜。</div>}
-        {(ep.status === 'scripting' || ep.supervisor || ['WAITING_HUMAN', 'PAUSED_EXTERNAL', 'WAITING_AUTHORIZATION', 'WAITING_RETRY'].includes(ep.supervisor?.phase || '')) && (
+        {(ep.status === 'scripting' || ep.supervisor != null) && (
           <SupervisorPanel
             api={api}
             episodeId={ep.id}

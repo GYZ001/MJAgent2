@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
+
 from app.db import get_conn
 from app.evidence import repository
 from app.observability.tracing import current_trace
 from app.orchestration.engine import WorkflowRecorder, fingerprint
 from app.orchestration.state_machine import transition_run, transition_step
 
+logger = logging.getLogger(__name__)
 
 MEDIA_WORKFLOWS = {"video_generation", "scene_generation"}
 
@@ -45,6 +48,11 @@ def ensure_media_trace(
     except Exception:
         # Minimal unit-test databases may not contain orchestration tables.  The
         # production schema always does; queue correctness must not depend on UI telemetry.
+        logger.exception(
+            "ensure_media_trace failed workflow_type=%s scope_id=%s",
+            workflow_type,
+            scope_id,
+        )
         return None, None
 
 
@@ -96,4 +104,10 @@ def mark_media_job_state(run_id: str | None, step_id: str | None, status: str, m
         )
     except Exception:
         # State transitions are CAS-protected. Another worker may have finalized it.
+        logger.exception(
+            "mark_media_job_state failed run_id=%s step_id=%s status=%s",
+            run_id,
+            step_id,
+            status,
+        )
         return

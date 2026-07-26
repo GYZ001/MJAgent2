@@ -20,7 +20,7 @@ from app.completion_grant import (
     validate_video_grant,
     GrantValidationError,
 )
-from app.db import get_conn, get_setting, new_id, now
+from app.db import get_conn, new_id, now
 from app.evidence import repository as evidence_repository
 from app.evidence.media import grade_shot_video, select_best_video_candidate
 from app.harness.types import Evaluation, EvidenceArtifact, Issue

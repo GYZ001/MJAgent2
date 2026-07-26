@@ -23,11 +23,10 @@ REQUIRED = {
     "app/compiler.py": ["shot.duration_s not in config.ALLOWED_DURATIONS", "--dur {shot_dur}"],
     "app/validators.py": [
         "shot.duration_s not in config.ALLOWED_DURATIONS",
-        "max_spoken_chars_for_duration(shot.duration_s)",
+        "spoken_chars_from_shot(shot)",
     ],
     "app/stages.py": [
-        "duration_s 必须由你根据",
-        "选择能完整、自然呈现本镜内容的最短时长",
+        "由模型按动作与口播选择最短可用时长",
         "禁止输出 shots 数组",
         "功能性路人合同",
         "max_tokens=config.STORYBOARD_SHOT_MAX_TOKENS",

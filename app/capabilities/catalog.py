@@ -1054,6 +1054,14 @@ def _register_exemptions(registry) -> None:
         "评审墙死锁解锁：强制停止补齐 Supervisor 并复位面板；不创建新付费任务",
     )
     registry.exempt_rest(
+        "POST /api/episodes/{episode_id}/migrate-shot-ids",
+        "VAL-422 历史 ID 空间迁移：把误写入 story_event_id 的 S* 迁到 spine_beat_ids；只修合同字段，不启动付费任务",
+    )
+    registry.exempt_rest(
+        "POST /api/shots/{shot_id}/resolve-spoken-conflict",
+        "口播合同冲突人工消解：在 dialogues / audio_timeline 间选基准同步；页面直达，不进入 Agent/MCP 能力面",
+    )
+    registry.exempt_rest(
         "POST /mcp",
         "MCP JSON-RPC 传输端点；具体 tools/call 映射到 Capability Registry",
     )

@@ -182,6 +182,10 @@ def test_unified_startup_recovery_runs_parent_before_all_child_adapters(monkeypa
     monkeypatch.setattr(planning, "recover_plan_tasks", recover("episode_mapping"))
     monkeypatch.setattr(api, "recover_screenplay_tasks", recover("screenplay"))
     monkeypatch.setattr(api, "recover_storyboard_tasks", recover("storyboard"))
+    monkeypatch.setattr(
+        "app.video_supervisor.recover_video_completion_runs",
+        recover("video_completion"),
+    )
     monkeypatch.setattr(orchestration_api, "recover_delivery_tasks", recover("delivery"))
 
     report = asyncio.run(recovery.recover_all())
@@ -189,10 +193,11 @@ def test_unified_startup_recovery_runs_parent_before_all_child_adapters(monkeypa
     assert calls == [
         "media", "partial_cleanup", "worker_start", "lease_sweeper", "character_bible",
         "character_references", "scene_references", "episode_mapping",
-        "screenplay", "storyboard", "delivery",
+        "screenplay", "storyboard", "video_completion", "delivery",
     ]
     assert report == {
         "media": 1, "abandoned_partial_files_removed": 2, "character_bible": 1,
         "character_references": 1, "scene_references": 1,
-        "episode_mapping": 1, "screenplay": 1, "storyboard": 1, "delivery": 1,
+        "episode_mapping": 1, "screenplay": 1, "storyboard": 1,
+        "video_completion": 1, "delivery": 1,
     }

@@ -566,8 +566,9 @@ async def review_reference_consistency(*, candidates: list[ReferenceImageAsset],
 
     与逐图绝对质检 review_reference_image 的本质区别：它做组内相对比较，能抓到「同分镜两张互相打架」
     「和上一镜没关系」这类单图质检结构上看不见的问题。姿态/表情/机位允许不同，不扣分。
-    VLM 异常或 JSON 解析失败时保守返回「全部达标」，避免误删好图。
-    返回 {"candidates": [{"asset_id", "consistency", "drift": [...], "issues": [...]}], "overall"}。"""
+    VLM 异常或 JSON 解析失败时返回 failed=True 且不伪造满分；调用方应跳过一致性重生，
+    仅保留已有绝对质检结果，避免「检查失败 = 完美一致」的静默放行。
+    返回 {"candidates": [{"asset_id", "consistency", "drift": [...], "issues": [...]}], "overall", "failed"?}。"""
     anchor_b64: list[str] = []
     for a in anchors:
         if a.path and Path(a.path).exists():
@@ -583,7 +584,7 @@ async def review_reference_consistency(*, candidates: list[ReferenceImageAsset],
             except OSError:
                 continue
     if not cand_pairs or not anchor_b64:
-        return {"candidates": [], "overall": 1.0}
+        return {"candidates": [], "overall": 1.0, "failed": False}
 
     char_txt = "; ".join(f"{c.name}: {c.appearance_canonical}"
                          for c in bible.characters if c.name in shot.characters)
@@ -614,9 +615,21 @@ async def review_reference_consistency(*, candidates: list[ReferenceImageAsset],
                 "anchor_count": len(anchor_b64),
             })
         data = extract_json(raw)
-    except Exception:  # noqa: BLE001 VLM/解析失败保守放行，不误删
-        return {"candidates": [{"asset_id": c.id, "consistency": 1.0, "drift": [], "issues": []}
-                               for c, _ in cand_pairs], "overall": 1.0}
+    except Exception as exc:  # noqa: BLE001 VLM/解析失败不可观测地伪造成满分
+        return {
+            "candidates": [
+                {
+                    "asset_id": c.id,
+                    "consistency": None,
+                    "drift": [],
+                    "issues": [f"consistency_check_unavailable:{type(exc).__name__}"],
+                    "check_failed": True,
+                }
+                for c, _ in cand_pairs
+            ],
+            "overall": None,
+            "failed": True,
+        }
 
     out: list[dict[str, Any]] = []
     reported = data.get("candidates") if isinstance(data, dict) else None
@@ -646,7 +659,7 @@ async def review_reference_consistency(*, candidates: list[ReferenceImageAsset],
         overall = max(0.0, min(1.0, float(data.get("overall"))))
     except (TypeError, ValueError):
         overall = round(sum(o["consistency"] for o in out) / len(out), 3) if out else 1.0
-    return {"candidates": out, "overall": overall}
+    return {"candidates": out, "overall": overall, "failed": False}
 
 
 async def _generate_one_reference(*, project_id: str, episode_no: int, shot: Shot, bible: Bible,
@@ -1014,6 +1027,14 @@ def _consistency_scores(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
         aid = c.get("asset_id")
         if not aid:
             continue
+        if c.get("check_failed") or (report or {}).get("failed"):
+            out[aid] = {
+                "consistency": None,
+                "drift": [str(x) for x in (c.get("drift") or []) if str(x).strip()],
+                "issues": [str(x) for x in (c.get("issues") or []) if str(x).strip()],
+                "check_failed": True,
+            }
+            continue
         try:
             cs = max(0.0, min(1.0, float(c.get("consistency", 1.0))))
         except (TypeError, ValueError):
@@ -1029,9 +1050,18 @@ def _consistency_scores(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
 def _annotate_consistency(assets: list[ReferenceImageAsset], scores: dict[str, dict[str, Any]]) -> None:
     for a in assets:
         info = scores.get(a.id)
-        if info:
-            a.qa = {**(a.qa or {}), "consistency": info["consistency"], "drift": info["drift"]}
-            recompose_asset_score(a, consistency=info["consistency"])
+        if not info:
+            continue
+        if info.get("check_failed") or info.get("consistency") is None:
+            a.qa = {
+                **(a.qa or {}),
+                "consistency_check_failed": True,
+                "drift": info.get("drift") or [],
+                "issues": info.get("issues") or [],
+            }
+            continue
+        a.qa = {**(a.qa or {}), "consistency": info["consistency"], "drift": info["drift"]}
+        recompose_asset_score(a, consistency=info["consistency"])
 
 
 def _mark_below_threshold(rejection_details: list[dict[str, Any]] | None,
@@ -1091,12 +1121,20 @@ async def _enforce_reference_consistency(*, selected: list[ReferenceImageAsset],
 
     current = list(candidates)
     extras_kept: list[ReferenceImageAsset] = []
-    scores = _consistency_scores(await review_reference_consistency(
-        candidates=current, anchors=anchors, shot=shot, bible=bible))
+    report = await review_reference_consistency(
+        candidates=current, anchors=anchors, shot=shot, bible=bible)
+    scores = _consistency_scores(report)
     _annotate_consistency(current, scores)
+    if report.get("failed"):
+        # 检查失败时不伪造满分、不触发漂移重生；保留既有绝对质检结果。
+        return selected
 
     for attempt in range(consistency_retries()):
-        drifted = [c for c in current if scores.get(c.id, {}).get("consistency", 1.0) < regen_line]
+        drifted = [
+            c for c in current
+            if (scores.get(c.id, {}).get("consistency") is not None
+                and scores.get(c.id, {}).get("consistency", 1.0) < regen_line)
+        ]
         if not drifted:
             break
         changed = False
@@ -1120,13 +1158,18 @@ async def _enforce_reference_consistency(*, selected: list[ReferenceImageAsset],
             changed = True
         if not changed:
             break
-        scores = _consistency_scores(await review_reference_consistency(
-            candidates=current, anchors=anchors, shot=shot, bible=bible))
+        report = await review_reference_consistency(
+            candidates=current, anchors=anchors, shot=shot, bible=bible)
+        scores = _consistency_scores(report)
         _annotate_consistency(current, scores)
+        if report.get("failed"):
+            break
 
-    # 最终候选全部按一致性重算分数；不因一致性硬剔
+    # 最终候选全部按一致性重算分数；不因一致性硬剔；检查失败时保持绝对质检分
     for c in current:
         info = scores.get(c.id) or {}
+        if info.get("check_failed") or info.get("consistency") is None:
+            continue
         recompose_asset_score(c, consistency=info.get("consistency", _consistency_of(c)))
 
     rebuilt = [a for a in selected if a.source != "seedream_generated"] + current

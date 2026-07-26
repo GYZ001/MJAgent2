@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 from app.evaluations.issues import issue_code, issues_from_messages
-from app.harness.types import Issue, IssueSeverity
-from app.loops.base import AgentLoopPolicy, AgentLoopResult
+from app.harness.types import IssueSeverity
+from app.loops.base import AgentLoopPolicy
 from app.schemas import Dialogue, PlotSpine, PlotSpineBeat, EpisodeScreenplay, Shot, Storyboard, StoryboardOutline, StoryboardOutlineShot
 from app.spoken_contract import spoken_text_of
 from app.validators import (

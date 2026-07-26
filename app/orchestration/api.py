@@ -511,7 +511,7 @@ async def create_delivery_package(episode_id: str, body: dict | None = Body(None
         return routed
     from app.delivery import build_delivery_package, validate_package_id
 
-    payload = dict(body or {})
+    payload = dict(body) if isinstance(body, dict) else {}
     # package_id 必须服务端可控：忽略客户端自带路径穿越载荷，仅允许恢复场景沿用已校验 id。
     raw_package_id = payload.get("package_id")
     if raw_package_id:

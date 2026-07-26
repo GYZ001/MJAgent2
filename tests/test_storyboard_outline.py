@@ -4,7 +4,6 @@
 - _render_storyboard_outline / _outline_brief：把大纲渲染进逐镜 prompt 并标出"本镜"。
 """
 
-from app import config
 from app.schemas import (Bible, Character, EpisodeScreenplay, StoryboardOutline,
                          StoryboardOutlineShot, World)
 from app.stages import (_maybe_split_outline_covers, _outline_brief,
@@ -217,9 +216,8 @@ def test_outline_allows_long_atom_for_deterministic_pre_split() -> None:
 def test_real_shot_12_cover_split_avoids_tiny_tail() -> None:
     covers = "萧炎哥哥；以前你曾经与薰儿说过；要能放下；才能拿起；提放自如；是自在人"
 
-    chunks = _split_atoms_to_content_budget(
-        _atomize_claim(covers), config.MAX_SPOKEN_CHARS_PER_SHOT
-    )
+    # 用固定预算测装箱算法；产品口播上限已随 VAL-422 上调到 36，不能再绑死 MAX_SPOKEN。
+    chunks = _split_atoms_to_content_budget(_atomize_claim(covers), 16)
 
     assert [len(_condense(chunk)) for chunk in chunks] == [14, 16]
     assert _condense("".join(chunks)) == _condense("".join(_atomize_claim(covers)))

@@ -102,11 +102,6 @@ def reference_shot_cohort_limit() -> int:
     from app.media_pipeline.concurrency import channel_limit
     from app.media_pipeline import stages as S
     image_n = channel_limit(S.RESOURCE_IMAGE)
-    target_refs = 4
-    try:
-        target_refs = max(1, int(get_setting("video_reference_min_generated") or 4))
-    except (TypeError, ValueError):
-        target_refs = 4
     # PRD：cohort_limit = max(1, floor(image / target_generated_refs))
     # 但 min_generated 默认常为 1，这里用计划默认 4 更符合「一次做完一镜」
     planned = 4

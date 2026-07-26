@@ -374,5 +374,13 @@ def test_late_episode_screenplay_discovers_character_before_generation(tmp_path,
     assert names == {"萧炎", "魂天帝"}
     assert project["bible_version"] == 2
     assert generated_with == [{"萧炎", "魂天帝"}]
-    assert episode["screenplay_status"] == "ready"
+    # 本用例 fake_generate 只覆盖发现链路，剧本正文故意不完整 → 允许 warning；
+    # 关键是人物已入库且剧本产物落库，不能因场次粘连对白误报「未入谱说话人」而失败。
+    assert episode["screenplay_status"] in {"ready", "warning"}
     assert "魂天帝" in episode["screenplay_json"]
+    error_text = ""
+    try:
+        error_text = episode["screenplay_error"] or ""
+    except (KeyError, IndexError):
+        error_text = ""
+    assert "【场1】魂天帝" not in error_text

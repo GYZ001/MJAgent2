@@ -48,7 +48,7 @@ def test_long_reference_prompt_compacts_without_losing_story_anchors() -> None:
     """长锚点 + 多角色 + 台词仍须保留 START/ACTION/END 与台词原文，且不得注入章节原文。"""
     action = (
         "石碑表面骤然亮起刺眼白光，测验员抬头朝人群公布成绩，"
-        "周围人群骚动，路人甲嗤笑摇头，路人乙掩嘴窃语。萧炎按在石碑上的手微微收紧。"
+        "周围人群骚动，路人甲嗤笑摇头，路人乙掩嘴窃语。萧炎按在石碑上的手收紧。"
     )
     shot = Shot(
         shot_no=2,
@@ -59,10 +59,10 @@ def test_long_reference_prompt_compacts_without_losing_story_anchors() -> None:
         characters=["萧炎", "测验员", "路人甲", "路人乙"],
         action_desc=action,
         first_frame_desc="萧炎按住石碑，测验员低头等待结果。",
-        last_frame_desc="测验员公布成绩，萧炎按碑的手微微收紧。",
+        last_frame_desc="测验员公布成绩，萧炎按碑的手收紧。",
         state_in="萧炎按住石碑，测验员低头等待结果。",
         primary_action=action,
-        state_out="测验员公布成绩，萧炎按碑的手微微收紧。",
+        state_out="测验员公布成绩，萧炎按碑的手收紧。",
         continuity_mode="same_scene_cut",
         source_excerpt=(
             "测验员看了一眼碑上所显示出来的信息，语气漠然地将之公布了出来。"
@@ -87,7 +87,7 @@ def test_silent_shot_compacts_without_forcing_dialogue_pacing(monkeypatch) -> No
     """无台词镜头不应被口型铺满纪律绑架；超长时仍可压缩 FORMAT/CONSISTENCY。"""
     monkeypatch.setattr(config, "PROMPT_CHAR_LIMIT", 920)
     action = (
-        "萧炎抬手按上冰冷石碑，指节因用力而微微发白，碑面光纹向外扩散，萧薰儿侧身注视，"
+        "萧炎抬手按上冰冷石碑，因用力而发白，碑面光纹向外扩散，萧薰儿侧身注视，"
         "萧战立于边缘压抑呼吸，三人神情绷紧，动作连贯不跳切。"
     ) * 3
     shot = Shot(

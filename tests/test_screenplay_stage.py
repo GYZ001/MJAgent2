@@ -238,6 +238,22 @@ def test_screenplay_rejects_named_speaker_missing_from_bible() -> None:
     assert any("未进入人物谱的具名说话人" in error and "陌生杀手" in error for error in errors)
 
 
+def test_glued_scene_heading_dialogue_is_not_offbible_speaker() -> None:
+    """【场1】角色：台词 粘连行应识别角色名，不能把整段场次标题当说话人。"""
+    from app.validators import _iter_script_sound_matches
+
+    text = "\n".join([
+        "【场1】魂天帝：今日便结束一切。",
+        "萧炎：那就一战。",
+        "【场2】夜 / 中州天际：这是地点梗概不是对白",
+        "【场3】测验广场",
+        "测验员：报出成绩。",
+    ])
+    speakers = [m.group(1).strip() for m in _iter_script_sound_matches(text)]
+    assert speakers == ["魂天帝", "萧炎", "测验员"]
+    assert all("【" not in s and "/" not in s for s in speakers)
+
+
 def _valid_rainy_script(**overrides) -> EpisodeScreenplay:
     """构造一份完全合法的"雨夜敲门"剧本，供单点变异测试复用。"""
     full_script_text = "\n".join([

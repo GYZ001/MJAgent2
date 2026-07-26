@@ -1,12 +1,15 @@
 """System, settings, model-catalog, credentials, and filesystem API routes."""
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
+import socket
 import string
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -18,6 +21,30 @@ router = APIRouter(prefix="/api")
 
 # ---------- 文件系统目录浏览（本机部署，供导出目录选择器使用） ----------
 
+_BLOCKED_BROWSE_PREFIXES = (
+    "/etc", "/proc", "/sys", "/dev", "/root", "/boot", "/var/log",
+    "/private/etc", "/private/var",
+)
+
+
+def _is_blocked_fs_path(path: Path) -> bool:
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return True
+    text = str(resolved)
+    lowered = text.lower()
+    if any(text == prefix or text.startswith(prefix + os.sep) for prefix in _BLOCKED_BROWSE_PREFIXES):
+        return True
+    # 隐藏敏感家目录内容
+    parts = {p.lower() for p in resolved.parts}
+    if parts & {".ssh", ".gnupg", ".aws", ".kube", ".docker"}:
+        return True
+    if lowered.endswith(".env") or "/.env/" in lowered.replace("\\", "/"):
+        return True
+    return False
+
+
 def _list_drives() -> list[str]:
     if os.name != "nt":
         return []
@@ -27,28 +54,32 @@ def _list_drives() -> list[str]:
 @router.get("/system/browse")
 def browse_dir(path: str = ""):
     """列出某目录下的子目录，供前端目录选择器逐级浏览。
-    path 为空时：Windows 返回盘符列表，POSIX 从根目录开始。"""
+    path 为空时：Windows 返回盘符列表，POSIX 从用户主目录开始。"""
     drives = _list_drives()
     p = (path or "").strip()
     if not p:
         if os.name == "nt":
             return {"path": "", "parent": None, "drives": drives,
                     "dirs": [{"name": d, "path": d} for d in drives]}
-        p = "/"
+        p = str(Path.home())
     base = Path(p)
+    if _is_blocked_fs_path(base):
+        raise HTTPException(403, f"不允许浏览系统敏感目录：{p}")
     if not base.exists() or not base.is_dir():
         raise HTTPException(404, f"目录不存在：{p}")
     dirs = []
     try:
         for child in sorted(base.iterdir(), key=lambda x: x.name.lower()):
             try:
-                if child.is_dir():
+                if child.is_dir() and not _is_blocked_fs_path(child):
                     dirs.append({"name": child.name, "path": str(child)})
             except OSError:
                 continue  # 个别子项无权访问/不可达，跳过
     except PermissionError:
         raise HTTPException(403, f"无权访问：{p}")
     parent = str(base.parent) if base.parent != base else None
+    if parent and _is_blocked_fs_path(Path(parent)):
+        parent = None
     return {"path": str(base), "parent": parent, "drives": drives, "dirs": dirs}
 
 
@@ -73,9 +104,18 @@ def make_dir(body: dict):
         raise HTTPException(422, "缺少父目录或文件夹名")
     if re.search(r'[<>:"/\\|?*\x00-\x1f]', name):
         raise HTTPException(422, '文件夹名含非法字符（不能包含 \\ / : * ? " < > |）')
-    dest = Path(parent) / name
+    if name in {".", ".."}:
+        raise HTTPException(422, "文件夹名非法")
+    parent_path = Path(parent)
+    if _is_blocked_fs_path(parent_path):
+        raise HTTPException(403, f"不允许在系统敏感目录下创建：{parent}")
+    if not parent_path.exists() or not parent_path.is_dir():
+        raise HTTPException(404, f"父目录不存在：{parent}")
+    dest = parent_path / name
+    if _is_blocked_fs_path(dest):
+        raise HTTPException(403, "目标路径不被允许")
     try:
-        dest.mkdir(parents=True, exist_ok=True)
+        dest.mkdir(parents=False, exist_ok=True)
     except OSError as e:
         raise HTTPException(400, f"创建失败：{e}")
     return {"path": str(dest)}
@@ -195,12 +235,56 @@ def add_model(body: dict):
     return _public_model(item)
 
 
+def _assert_public_http_url(base_url: str) -> None:
+    """拒绝指向本机/内网/链路本地的探测 URL，降低 SSRF 风险。"""
+    parsed = urlparse(base_url)
+    if parsed.scheme not in {"http", "https"}:
+        raise HTTPException(422, "Base URL 必须是 http(s)")
+    host = (parsed.hostname or "").strip().lower()
+    if not host:
+        raise HTTPException(422, "Base URL 缺少主机名")
+    if host in {"localhost", "metadata", "metadata.google.internal"} or host.endswith(".local"):
+        raise HTTPException(422, "不允许探测本机或链路本地地址")
+    if host == "169.254.169.254":
+        raise HTTPException(422, "不允许探测云元数据地址")
+    candidates: list[str] = []
+    try:
+        ipaddress.ip_address(host)
+        candidates = [host]
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(host, parsed.port or 443, type=socket.SOCK_STREAM)
+        except socket.gaierror as exc:
+            raise HTTPException(422, f"无法解析主机名：{host}") from exc
+        for info in infos:
+            addr = info[4][0]
+            if addr:
+                candidates.append(addr)
+    if not candidates:
+        raise HTTPException(422, f"无法解析主机名：{host}")
+    for addr in candidates:
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            continue
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            raise HTTPException(422, "不允许探测内网或保留地址")
+
+
 async def _probe_openai_model(base_url: str, api_key: str, model: str, kind: str = "text") -> dict:
     base_url = base_url.strip().rstrip("/")
     if not re.fullmatch(r"https?://[^\s]+", base_url):
         raise HTTPException(422, "Base URL 必须是有效的 http(s) 地址")
     if not api_key.strip() or not model.strip():
         raise HTTPException(422, "模型 ID 和 API Key 不能为空")
+    _assert_public_http_url(base_url)
     started = time.perf_counter()
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(30, connect=10)) as client:
@@ -659,9 +743,8 @@ def put_settings(body: dict):
             set_setting("model_vlm_provider", sval)
     try:
         from app.media_pipeline.concurrency import (
-            SETTING_KEYS, channel_limit, reload_limits_from_settings,
+            SETTING_KEYS, reload_limits_from_settings,
         )
-        from app.media_pipeline import stages as media_stages
         from app import worker
         reload_limits_from_settings()
         # 三通道 worker 分别跟随各自并发配置热更新
