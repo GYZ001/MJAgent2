@@ -42,6 +42,13 @@ from app.schemas import Bible, EpisodeScreenplay
 
 MAX_REPAIR_ACTIVATION_PATCHES = 12
 MAX_STRATEGY_ATTEMPTS_PER_ISSUE = 3
+SCREENPLAY_REPAIR_PLANNER_VERSION = "screenplay-repair-2"
+
+_SCENE_STORY_FUNCTION_CODES = {
+    "SCENE_FIELD_INVALID",
+    "SCENE_STORY_FUNCTION_TOO_SHORT",
+}
+_SCENE_NUMBER_RE = re.compile(r"scene_outline\s*第\s*(\d+)\s*场|/scene_blocks/SC(\d+)", re.I)
 
 
 def _eval_id_from_create(evaluation_row: dict[str, Any] | str | None) -> str:
@@ -66,6 +73,8 @@ def _patch_strategy_key(ops: list[PatchOperation]) -> str:
         return "rederive"
     if kind == "metadata":
         return f"fill_{op.path}"
+    if kind in {"scene", "screenplay_scene"}:
+        return f"fill_scene_{op.target.get('id')}_{op.path}"
     if kind == "information" and op.path == "event_id":
         return "fix_ledger_event"
     if kind == "dialogue_chain_turn" and op.path == "source_text":
@@ -149,6 +158,24 @@ def plan_screenplay_patch(
 
     ops: list[PatchOperation] = []
 
+    # 场级字段必须直接 Patch 源节点。rederive 只会重建投影，无法修复源字段。
+    if (
+        code in _SCENE_STORY_FUNCTION_CODES
+        or "story_function" in path
+        or "story_function" in (issue.message or "")
+    ):
+        scene_id, scene = _scene_from_issue(issue, script)
+        strategy = f"fill_scene_{scene_id}_story_function" if scene_id else ""
+        if scene is not None and strategy and not _strategy_was_tried(tried, strategy):
+            value = _derive_scene_story_function(scene)
+            if value and value != (scene.story_function or "").strip():
+                return [PatchOperation(
+                    op="replace_field",
+                    path="story_function",
+                    value=value,
+                    target={"kind": "scene", "id": scene_id},
+                )]
+
     # S0：派生字段问题 → rederive
     if code in {"FORMAT_CONTRACT_INVALID"} and "scene_outline" in (issue.message or ""):
         if not _strategy_was_tried(tried, "rederive"):
@@ -217,8 +244,8 @@ def plan_screenplay_patch(
                 },
             )]
 
-    # 默认：rederive（安全、无内容改写）若尚未试过
-    if not _strategy_was_tried(tried, "rederive"):
+    # key_lines / full_script_text 等派生投影才允许 rederive。
+    if code == "KEY_LINE_MISSING" and not _strategy_was_tried(tried, "rederive"):
         return [PatchOperation(op="rederive")]
 
     # 对白链触发：尝试在首场插入 trigger turn
@@ -268,6 +295,52 @@ def _heuristic_fill_dramatic_field(field: str, script: EpisodeScreenplay) -> str
             return ""
         return f"主角能否在阻力下完成：{premise[:50] or script.title}？"
     return ""
+
+
+def _scene_from_issue(issue: Issue, script: EpisodeScreenplay) -> tuple[str, Any | None]:
+    evidence = issue.evidence or {}
+    candidates = [
+        str(node).upper()
+        for node in (evidence.get("related_node_ids") or [])
+        if re.fullmatch(r"SC\d+", str(node), re.I)
+    ]
+    if not candidates:
+        text = f"{evidence.get('path') or ''} {issue.message or ''}"
+        match = _SCENE_NUMBER_RE.search(text)
+        if match:
+            number = int(match.group(1) or match.group(2))
+            candidates.append(f"SC{number:02d}")
+    if not candidates:
+        return "", None
+    scene_id = candidates[0]
+    scene_no = int(scene_id[2:])
+    scene = next(
+        (item for item in (script.scene_outline or []) if int(item.scene_no) == scene_no),
+        None,
+    )
+    return scene_id, scene
+
+
+def _derive_scene_story_function(scene: Any) -> str:
+    """从本场已有事实确定性补全功能描述，不引入新剧情。"""
+
+    def compact(value: Any, limit: int) -> str:
+        text = re.sub(r"\s+", "", str(value or "")).strip("，。；;：:、 ")
+        return text[:limit].rstrip("，。；;：:、 ")
+
+    conflict = compact(getattr(scene, "conflict", ""), 20)
+    turn = compact(getattr(scene, "turn", ""), 18)
+    summary = compact(getattr(scene, "summary", ""), 24)
+    heading = compact(getattr(scene, "scene_heading", ""), 16)
+    if conflict and turn:
+        return f"呈现{conflict}，推动{turn}"
+    if summary and turn:
+        return f"呈现{summary}，推动{turn}"
+    if summary:
+        return f"呈现{summary}并推进本场局势"
+    if heading:
+        return f"承接{heading}场景并推动本场局势变化"
+    return "推动本场核心冲突并形成后续状态变化"
 
 
 def _extract_quoted_fragment(message: str) -> str:
@@ -349,6 +422,14 @@ async def run_screenplay_production(
         rev = get_production_revision(rev.id)  # type: ignore[assignment]
 
     checkpoint = dict(rev.checkpoint_json or {})
+    if checkpoint.get("planner_version") != SCREENPLAY_REPAIR_PLANNER_VERSION:
+        # 新规划器必须能接管旧 working artifact；旧版 exhausted 不能永久封死新策略。
+        checkpoint = {
+            **checkpoint,
+            "planner_version": SCREENPLAY_REPAIR_PLANNER_VERSION,
+            "issue_strategy_history": {},
+            "yield_reason": "planner_upgraded",
+        }
     strategy_history: dict[str, list[str]] = dict(checkpoint.get("issue_strategy_history") or {})
     patch_ids: list[str] = list(checkpoint.get("patch_artifact_ids") or [])
     activation_no = int(checkpoint.get("activation_no") or 0) + 1
@@ -521,10 +602,24 @@ async def run_screenplay_production(
                 ops = []
         if not ops:
             strategy_history.setdefault(issue.fingerprint, []).append("exhausted")
-            _mark_waiting_input(episode_id, [issue], run_id=run_id)
+            if bool((issue.evidence or {}).get("requires_user_input", False)):
+                _mark_waiting_input(episode_id, [issue], run_id=run_id)
+                save_checkpoint(rev.id, {
+                    **checkpoint,
+                    "phase": "WAITING_INPUT",
+                    "activation_no": activation_no,
+                    "working_artifact_id": working_id,
+                    "open_issue_ids": [i.fingerprint for i in issues],
+                    "issue_strategy_history": strategy_history,
+                    "patch_artifact_ids": patch_ids,
+                    "last_issue_fingerprints": list(current_fps),
+                    "yield_reason": "user_input_required",
+                })
+                raise RuntimeError(f"WAITING_INPUT: 无法自动解决 {issue.code}: {issue.message}")
+            _mark_repair_failed(episode_id, issue, run_id=run_id)
             save_checkpoint(rev.id, {
                 **checkpoint,
-                "phase": "WAITING_INPUT",
+                "phase": "REPAIR_FAILED",
                 "activation_no": activation_no,
                 "working_artifact_id": working_id,
                 "open_issue_ids": [i.fingerprint for i in issues],
@@ -533,7 +628,7 @@ async def run_screenplay_production(
                 "last_issue_fingerprints": list(current_fps),
                 "yield_reason": "strategies_exhausted",
             })
-            raise RuntimeError(f"WAITING_INPUT: 无法局部修复 {issue.code}: {issue.message}")
+            return script
 
         strategy_key = _patch_strategy_key(ops)
         strategy_history.setdefault(issue.fingerprint, []).append(strategy_key)
@@ -584,10 +679,19 @@ async def run_screenplay_production(
                 if _strategy_attempt_count(
                     strategy_history.get(issue.fingerprint, [])
                 ) >= MAX_STRATEGY_ATTEMPTS_PER_ISSUE:
-                    _mark_waiting_input(episode_id, [issue], run_id=run_id)
-                    raise RuntimeError(
-                        f"WAITING_INPUT: 局部修复无进展 {issue.code}: {issue.message}"
-                    )
+                    _mark_repair_failed(episode_id, issue, run_id=run_id)
+                    save_checkpoint(rev.id, {
+                        **checkpoint,
+                        "phase": "REPAIR_FAILED",
+                        "activation_no": activation_no,
+                        "working_artifact_id": working_id,
+                        "open_issue_ids": [i.fingerprint for i in issues],
+                        "issue_strategy_history": strategy_history,
+                        "patch_artifact_ids": patch_ids,
+                        "last_issue_fingerprints": list(current_fps),
+                        "yield_reason": "no_progress",
+                    })
+                    return script
                 continue
             # CAS 冲突：重新观察
             if "CAS" in (result.error or "") or "hash" in (result.error or "").lower():
