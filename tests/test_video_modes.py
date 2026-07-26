@@ -456,7 +456,6 @@ def test_build_reference_assets_fallback_keyframe_yields_to_clean_portrait(monke
         conn=None, project_id="p", episode_no=1, episode_id="e", shot_id="s",
         shot=shot, bible=bible, decision=decision, prev_shot=None, rejected_out=rejected))
 
-    fed = [a for a in assets if a.selectedForSeedance]
     # PRD：人物库图默认只作 keyframe_seed/qa_anchor，不直接喂 Seedance
     assert not any(a.source == "asset_library" and a.selectedForSeedance for a in assets)
     assert all(a.source != "seedream_generated" or not a.selectedForSeedance for a in assets)

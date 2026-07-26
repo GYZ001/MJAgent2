@@ -8,14 +8,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import re
 from pathlib import Path
 from typing import Any
 
 from app import config, hiagent
 from app.atomic_io import atomic_write_bytes
 from app.db import get_conn, get_setting, new_id, now
-from app.refs import _safe_name, portrait_prompt
+from app.refs import _safe_name
 
 # ---------- 视角角色常量 ----------
 

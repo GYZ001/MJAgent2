@@ -1333,7 +1333,6 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
         narrative_keyframe_required, complete_legacy_character_pack, complete_legacy_scene_pack,
     )
     plan = decision.referenceImagePlan
-    threshold = quality_threshold()
     max_refs = max_reference_images()
     existing_meta = existing_meta or {}
     slot_state: dict[str, Any] = dict(existing_meta.get("reference_slots") or {})
