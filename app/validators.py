@@ -783,7 +783,6 @@ def validate_dialogue_chains(
     full_turns = _script_dialogue_turns(script.full_script_text or "")
     full_texts = [turn[2] for turn in full_turns]
     source_fragments = source_dialogue_fragments(source_text)
-    flattened_source_evidence: list[str] = []
     for chain_index, chain in enumerate(chains):
         tag = f"dialogue_chains[{chain_index}]"
         chain_id = (chain.chain_id or "").strip().upper()
@@ -828,7 +827,6 @@ def validate_dialogue_chains(
             if len(_condense(source_line)) < 2:
                 errors.append(f"{turn_tag}.source_text 不能为空；必须引用原文对白证据")
             else:
-                flattened_source_evidence.append(source_line)
                 if source_text and (
                     _longest_run_ratio(source_line, source_text) < KEY_LINE_PRESENT_RATIO
                     and _bigram_coverage(source_line, source_text) < KEY_LINE_BIGRAM_COVERAGE
@@ -853,13 +851,14 @@ def validate_dialogue_chains(
         )
     if source_fragments:
         opening = source_fragments[0]
-        if not any(
-            _condense(opening) == _condense(evidence)
-            for evidence in flattened_source_evidence
-        ):
+        first_chain_source = (
+            (chains[0].turns[0].source_text or "").strip()
+            if chains and chains[0].turns else ""
+        )
+        if _condense(opening) != _condense(first_chain_source):
             errors.append(
-                f"原文开场第一句对白未进入 dialogue_chains：{opening}；"
-                "开场对白是对白链锚点，不能在模型挑选 key_lines 前静默丢失"
+                f"原文开场第一句对白未作为 dialogue_chains[0].turns[0]：{opening}；"
+                "开场对白是第一条对白链锚点，不能在模型挑选 key_lines 前静默丢失"
             )
     return errors
 

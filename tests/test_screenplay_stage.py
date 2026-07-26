@@ -464,7 +464,7 @@ def test_dialogue_chain_rejects_missing_first_source_utterance() -> None:
         source_text=source, require_dialogue_chains=True,
     )
 
-    assert any("原文开场第一句对白未进入 dialogue_chains" in error for error in errors), errors
+    assert any("原文开场第一句对白未作为 dialogue_chains[0].turns[0]" in error for error in errors), errors
 
 
 def test_screenplay_allows_dropping_non_spine_source_dialogues() -> None:
