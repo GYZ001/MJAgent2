@@ -1,0 +1,411 @@
+"""剧本 / 分镜领域 Patch 执行器。"""
+from __future__ import annotations
+
+import copy
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+from app.db import now
+from app.evidence import repository as evidence_repository
+from app.harness.types import EvidenceArtifact, Issue
+from app.production.metrics import record_noop_rejected, record_patch
+from app.production.policy import assert_patch_ops_allowed, FullRegenDenied
+from app.production.revision import get_production_revision, update_working_artifact
+from app.production.screenplay_document import (
+    ScreenplayDocument,
+    apply_field_patch,
+    document_to_screenplay,
+    rederive_projections,
+    screenplay_to_document,
+)
+from app.schemas import EpisodeScreenplay
+
+
+class PatchOperation(BaseModel):
+    op: str
+    target: dict[str, Any] = Field(default_factory=dict)
+    path: str = ""
+    value: Any = None
+
+
+class PatchRequest(BaseModel):
+    production_revision_id: str
+    expected_artifact_id: str
+    expected_hash: str
+    issue_set_hash: str = ""
+    operations: list[PatchOperation]
+    idempotency_key: str = ""
+    reason: str = ""
+    planner_model: str = ""
+    tool_call_ids: list[str] = Field(default_factory=list)
+
+
+class PatchResult(BaseModel):
+    ok: bool
+    before_artifact_id: str
+    after_artifact_id: str | None = None
+    before_hash: str = ""
+    after_hash: str = ""
+    touched_node_ids: list[str] = Field(default_factory=list)
+    diff: dict[str, Any] = Field(default_factory=dict)
+    needs_full_qa: bool = True
+    error: str | None = None
+    patch_artifact_id: str | None = None
+
+
+def _artifact_content_hash(artifact: dict[str, Any]) -> str:
+    return artifact.get("content_hash") or evidence_repository.content_hash(artifact.get("content"))
+
+
+def apply_screenplay_patch(
+    request: PatchRequest,
+    *,
+    episode_id: str,
+    run_local_validate: bool = True,
+) -> PatchResult:
+    """在工作副本上应用剧本 Patch，成功则创建新 Artifact 并 CAS 更新 working 指针。"""
+    rev = get_production_revision(request.production_revision_id)
+    if rev is None:
+        return PatchResult(
+            ok=False,
+            before_artifact_id=request.expected_artifact_id,
+            error="production revision 不存在",
+        )
+    try:
+        assert_patch_ops_allowed([op.model_dump(mode="json") for op in request.operations])
+    except FullRegenDenied as exc:
+        return PatchResult(
+            ok=False,
+            before_artifact_id=request.expected_artifact_id,
+            error=str(exc),
+        )
+
+    before = evidence_repository.get_artifact(request.expected_artifact_id)
+    if not before:
+        return PatchResult(
+            ok=False,
+            before_artifact_id=request.expected_artifact_id,
+            error="expected artifact 不存在",
+        )
+    before_hash = _artifact_content_hash(before)
+    if request.expected_hash and before_hash != request.expected_hash:
+        return PatchResult(
+            ok=False,
+            before_artifact_id=request.expected_artifact_id,
+            before_hash=before_hash,
+            error="expected_hash 不匹配（CAS 冲突）",
+        )
+    if rev.working_artifact_id and rev.working_artifact_id != request.expected_artifact_id:
+        return PatchResult(
+            ok=False,
+            before_artifact_id=request.expected_artifact_id,
+            before_hash=before_hash,
+            error="expected_artifact_id 不是当前 working 链头",
+        )
+
+    content = before.get("content") or {}
+    # content 可能是 EpisodeScreenplay 或 ScreenplayDocument
+    try:
+        if "screenplay_metadata" in content:
+            doc = ScreenplayDocument.model_validate(content)
+        else:
+            script = EpisodeScreenplay.model_validate(content)
+            doc = screenplay_to_document(script)
+    except Exception as exc:  # noqa: BLE001
+        return PatchResult(
+            ok=False,
+            before_artifact_id=request.expected_artifact_id,
+            before_hash=before_hash,
+            error=f"无法解析工作 Artifact: {exc}",
+        )
+
+    touched: list[str] = []
+    working = doc
+    for op in request.operations:
+        if op.op == "rederive":
+            working = rederive_projections(working)
+            touched.append("rederive")
+            continue
+        if op.op in {"replace_field", "add_field"}:
+            working, nodes = apply_field_patch(
+                working, path=op.path, value=op.value, target=op.target,
+            )
+            touched.extend(nodes)
+            continue
+        if op.op == "create_node":
+            working, nodes = _create_node(working, op)
+            touched.extend(nodes)
+            continue
+        if op.op == "delete_node":
+            working, nodes = _delete_node(working, op)
+            touched.extend(nodes)
+            continue
+        if op.op in {"insert_node", "split_node", "move_node"}:
+            working, nodes = _structure_op(working, op)
+            touched.extend(nodes)
+            continue
+        return PatchResult(
+            ok=False,
+            before_artifact_id=request.expected_artifact_id,
+            before_hash=before_hash,
+            error=f"不支持的 op: {op.op}",
+        )
+
+    working = rederive_projections(working)
+    script = document_to_screenplay(working)
+    after_content = working.model_dump(mode="json")
+    # 同时保留兼容投影
+    after_content["_projection"] = script.model_dump(mode="json")
+    after_hash = evidence_repository.content_hash(after_content)
+    if after_hash == before_hash:
+        record_noop_rejected(kind="screenplay", episode_id=episode_id)
+        return PatchResult(
+            ok=False,
+            before_artifact_id=request.expected_artifact_id,
+            before_hash=before_hash,
+            after_hash=after_hash,
+            error="no-op Patch 已拒绝",
+        )
+
+    local_issues: list[Issue] = []
+    if run_local_validate:
+        local_issues = _local_screenplay_schema_check(script)
+
+    after_art = evidence_repository.create_artifact(
+        EvidenceArtifact(
+            type="screenplay_document",
+            scope_type="episode",
+            scope_id=episode_id,
+            status="candidate" if local_issues else "validated",
+            trust_level="T1" if local_issues else "T2",
+            content=after_content,
+            parent_artifact_ids=[request.expected_artifact_id],
+            contract_version=rev.contract_version or None,
+        )
+    )
+    patch_payload = {
+        "issue_set_hash": request.issue_set_hash,
+        "before_artifact_id": request.expected_artifact_id,
+        "before_hash": before_hash,
+        "operations": [op.model_dump(mode="json") for op in request.operations],
+        "touched_node_ids": list(dict.fromkeys(touched)),
+        "dependency_closure": ["rendered_full_script_text", "key_lines", "scene_outline"],
+        "after_artifact_id": after_art["id"],
+        "after_hash": after_hash,
+        "planner_model": request.planner_model,
+        "tool_call_ids": request.tool_call_ids,
+        "reason": request.reason,
+        "idempotency_key": request.idempotency_key,
+        "created_at": now(),
+    }
+    patch_art = evidence_repository.create_artifact(
+        EvidenceArtifact(
+            type="artifact_patch",
+            scope_type="episode",
+            scope_id=episode_id,
+            status="validated",
+            trust_level="T2",
+            content=patch_payload,
+            parent_artifact_ids=[request.expected_artifact_id, after_art["id"]],
+            contract_version=rev.contract_version or None,
+        )
+    )
+    try:
+        update_working_artifact(
+            request.production_revision_id,
+            after_art["id"],
+            expected_hash=before_hash,
+        )
+    except RuntimeError as exc:
+        return PatchResult(
+            ok=False,
+            before_artifact_id=request.expected_artifact_id,
+            before_hash=before_hash,
+            error=str(exc),
+        )
+
+    record_patch(
+        kind="screenplay",
+        episode_id=episode_id,
+        revision_id=request.production_revision_id,
+        touched=len(set(touched)),
+    )
+    return PatchResult(
+        ok=True,
+        before_artifact_id=request.expected_artifact_id,
+        after_artifact_id=after_art["id"],
+        before_hash=before_hash,
+        after_hash=after_hash,
+        touched_node_ids=list(dict.fromkeys(n for n in touched if n)),
+        diff={
+            "touched_node_ids": list(dict.fromkeys(touched)),
+            "operations": [op.op for op in request.operations],
+            "local_issue_count": len(local_issues),
+        },
+        needs_full_qa=True,
+        patch_artifact_id=patch_art["id"],
+    )
+
+
+def load_screenplay_from_artifact(artifact_id: str) -> EpisodeScreenplay:
+    art = evidence_repository.get_artifact(artifact_id)
+    if not art:
+        raise ValueError(f"artifact 不存在: {artifact_id}")
+    content = art.get("content") or {}
+    if "_projection" in content:
+        return EpisodeScreenplay.model_validate(content["_projection"])
+    if "screenplay_metadata" in content:
+        return document_to_screenplay(ScreenplayDocument.model_validate(content))
+    return EpisodeScreenplay.model_validate(content)
+
+
+def screenplay_artifact_payload(script: EpisodeScreenplay) -> dict[str, Any]:
+    doc = screenplay_to_document(script)
+    payload = doc.model_dump(mode="json")
+    payload["_projection"] = script.model_dump(mode="json")
+    return payload
+
+
+def _local_screenplay_schema_check(script: EpisodeScreenplay) -> list[Issue]:
+    from app.production.structured_issues import structured_issue
+
+    issues: list[Issue] = []
+    if not (script.stakes or "").strip():
+        issues.append(structured_issue(
+            code="DRAMATIC_CONTRACT_INCOMPLETE",
+            message="stakes 不能为空",
+            subject="screenplay",
+            path="/stakes",
+            rule_id="stakes_required",
+            related_node_ids=["meta:stakes"],
+            stage="screenplay",
+        ))
+    if script.episode_no is None:
+        issues.append(structured_issue(
+            code="SCHEMA_INVALID",
+            message="episode_no 缺失",
+            subject="screenplay",
+            path="/episode_no",
+            rule_id="episode_no_required",
+            stage="screenplay",
+        ))
+    return issues
+
+
+def _create_node(doc: ScreenplayDocument, op: PatchOperation) -> tuple[ScreenplayDocument, list[str]]:
+    data = copy.deepcopy(doc.model_dump(mode="json"))
+    kind = (op.target or {}).get("kind") or ""
+    value = op.value if isinstance(op.value, dict) else {}
+    if kind in {"screenplay_scene", "scene"}:
+        scenes = data.setdefault("scene_blocks", [])
+        scene_no = len(scenes) + 1
+        scene_id = value.get("scene_id") or f"SC{scene_no:02d}"
+        node = {
+            "scene_id": scene_id,
+            "scene_no": scene_no,
+            "scene_heading": value.get("scene_heading") or f"【场{scene_no}】",
+            "story_function": value.get("story_function") or "",
+            "characters": value.get("characters") or [],
+            "summary": value.get("summary") or "",
+            "conflict": value.get("conflict") or "",
+            "turn": value.get("turn") or "",
+            "source_basis": value.get("source_basis") or "",
+            "action_blocks": value.get("action_blocks") or [],
+            "dialogue_turns": value.get("dialogue_turns") or [],
+        }
+        insert_at = op.target.get("after_scene_no")
+        if insert_at is not None:
+            idx = max(0, min(len(scenes), int(insert_at)))
+            scenes.insert(idx, node)
+        else:
+            scenes.append(node)
+        return ScreenplayDocument.model_validate(data), [scene_id]
+    if kind in {"dialogue_turn"}:
+        scene_id = op.target.get("scene_id") or ""
+        for block in data.get("scene_blocks") or []:
+            if block.get("scene_id") == scene_id:
+                turns = block.setdefault("dialogue_turns", [])
+                turn_id = value.get("turn_id") or f"{value.get('chain_id', 'DCX')}-T{len(turns)+1}"
+                turns.append({
+                    "turn_id": turn_id,
+                    "chain_id": value.get("chain_id") or "",
+                    "speaker": value.get("speaker") or "",
+                    "line": value.get("line") or "",
+                    "function": value.get("function") or "statement",
+                    "source_text": value.get("source_text") or "",
+                })
+                return ScreenplayDocument.model_validate(data), [turn_id, scene_id]
+        raise KeyError(f"create dialogue_turn: scene {scene_id} not found")
+    raise FullRegenDenied(f"不支持 create_node kind={kind}")
+
+
+def _delete_node(doc: ScreenplayDocument, op: PatchOperation) -> tuple[ScreenplayDocument, list[str]]:
+    data = copy.deepcopy(doc.model_dump(mode="json"))
+    kind = (op.target or {}).get("kind") or ""
+    node_id = str((op.target or {}).get("id") or "")
+    if not node_id or node_id in {"*", "ALL", "all"}:
+        raise FullRegenDenied("禁止 delete-all")
+    if kind in {"screenplay_scene", "scene"}:
+        before = len(data.get("scene_blocks") or [])
+        data["scene_blocks"] = [
+            b for b in (data.get("scene_blocks") or []) if b.get("scene_id") != node_id
+        ]
+        if len(data["scene_blocks"]) == before:
+            raise KeyError(f"scene not found: {node_id}")
+        if not data["scene_blocks"]:
+            raise FullRegenDenied("禁止删除全部场景")
+        return ScreenplayDocument.model_validate(data), [node_id]
+    if kind == "dialogue_turn":
+        for block in data.get("scene_blocks") or []:
+            turns = block.get("dialogue_turns") or []
+            new_turns = [t for t in turns if t.get("turn_id") != node_id]
+            if len(new_turns) != len(turns):
+                block["dialogue_turns"] = new_turns
+                return ScreenplayDocument.model_validate(data), [node_id, block.get("scene_id") or ""]
+        raise KeyError(f"turn not found: {node_id}")
+    raise FullRegenDenied(f"不支持 delete_node kind={kind}")
+
+
+def _structure_op(doc: ScreenplayDocument, op: PatchOperation) -> tuple[ScreenplayDocument, list[str]]:
+    """insert/split/move 的最小实现。"""
+    if op.op == "insert_node":
+        return _create_node(doc, op)
+    if op.op == "split_node":
+        # 将一场拆成两场：原场保留前半，新建后半
+        data = copy.deepcopy(doc.model_dump(mode="json"))
+        node_id = str((op.target or {}).get("id") or "")
+        blocks = data.get("scene_blocks") or []
+        idx = next((i for i, b in enumerate(blocks) if b.get("scene_id") == node_id), -1)
+        if idx < 0:
+            raise KeyError(f"split scene not found: {node_id}")
+        block = blocks[idx]
+        turns = block.get("dialogue_turns") or []
+        mid = max(1, len(turns) // 2) if turns else 0
+        new_id = f"{node_id}B"
+        new_block = copy.deepcopy(block)
+        new_block["scene_id"] = new_id
+        new_block["scene_heading"] = (op.value or {}).get("scene_heading") or (block.get("scene_heading") + "·续")
+        if turns:
+            block["dialogue_turns"] = turns[:mid]
+            new_block["dialogue_turns"] = turns[mid:]
+        actions = block.get("action_blocks") or []
+        if len(actions) > 1:
+            mid_a = len(actions) // 2
+            block["action_blocks"] = actions[:mid_a]
+            new_block["action_blocks"] = actions[mid_a:]
+        blocks.insert(idx + 1, new_block)
+        return ScreenplayDocument.model_validate(data), [node_id, new_id]
+    if op.op == "move_node":
+        data = copy.deepcopy(doc.model_dump(mode="json"))
+        node_id = str((op.target or {}).get("id") or "")
+        to_index = int((op.target or {}).get("to_index") or 0)
+        blocks = data.get("scene_blocks") or []
+        idx = next((i for i, b in enumerate(blocks) if b.get("scene_id") == node_id), -1)
+        if idx < 0:
+            raise KeyError(f"move scene not found: {node_id}")
+        block = blocks.pop(idx)
+        to_index = max(0, min(len(blocks), to_index))
+        blocks.insert(to_index, block)
+        return ScreenplayDocument.model_validate(data), [node_id]
+    raise FullRegenDenied(f"不支持的结构操作 {op.op}")

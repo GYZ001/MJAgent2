@@ -380,7 +380,7 @@ def project_detail(
         if status_filter == "running":
             clauses.append("(screenplay_status='running' OR status IN ('scripting','generating'))")
         elif status_filter == "failed":
-            clauses.append("(screenplay_status IN ('failed','warning') OR status LIKE '%failed%')")
+            clauses.append("(screenplay_status IN ('failed','warning','repairing') OR status LIKE '%failed%')")
         elif status_filter == "done":
             clauses.append("status='done'")
         elif status_filter == "pending":
@@ -406,7 +406,7 @@ def project_detail(
                       SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) AS done,
                       SUM(CASE WHEN screenplay_status='running' THEN 1 ELSE 0 END) AS screenplay_running,
                       SUM(CASE WHEN status='scripting' THEN 1 ELSE 0 END) AS scripting,
-                      SUM(CASE WHEN screenplay_status IN ('pending','failed','warning')
+                      SUM(CASE WHEN screenplay_status IN ('pending','failed','warning','repairing')
                                 OR screenplay_json IS NULL THEN 1 ELSE 0 END) AS screenplay_todo,
                       SUM(CASE WHEN screenplay_status='ready'
                                 AND status IN ('planned','script_failed') THEN 1 ELSE 0 END) AS storyboard_ready

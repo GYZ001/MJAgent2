@@ -348,6 +348,25 @@ async def _run_with_agent_loop(
                 "issue_codes": [issue.code for issue in result.issues[:10]],
             },
         )
+    elif result.status == "baseline":
+        object.__setattr__(result.value, "residual_errors", [issue.message for issue in result.issues])
+        object.__setattr__(
+            result.value, "residual_issues",
+            [issue.model_dump(mode="json") for issue in result.issues],
+        )
+        object.__setattr__(result.value, "disposition", "BASELINE")
+        object.__setattr__(result.value, "evidence_artifact_id", result.artifact_id)
+        log_provider_call(
+            f"{stage}_loop", config.MODEL_TEXT, "BASELINE_HANDOFF", None, 0,
+            meta={
+                "stage": stage,
+                "iterations": result.iterations,
+                "exit_reason": result.exit_reason,
+                "artifact_id": result.artifact_id,
+                "issue_codes": [issue.code for issue in result.issues[:10]],
+                "call_role": "local_patch",
+            },
+        )
     elif result.status == "needs_replan":
         object.__setattr__(result.value, "residual_errors", [issue.message for issue in result.issues])
         object.__setattr__(
@@ -744,22 +763,46 @@ B. `full_script_text`：真正的剧本正文；只写大形体动作与主线�
 
 输出 JSON Schema：
 {{"episode_no": {episode['episode_no']}, "mode": "full_script", "title": str, "logline": str, "script_format_note": "一句话说明正文采用的台本格式", "plot_spine": {{"episode_premise": "一句话本集目标", "spine_beats": [{{"beat_id": "S01", "who": str, "does": str, "turn": str, "must_keep": true}}], "must_keep_ending": str, "drop_list": [str, str]}}, "dramatic_question": "本集戏剧问题（一句话）", "protagonist_goal": "主角外在目标", "obstacle": "外部+内部阻力", "stakes": "失败代价", "dialogue_chains": [{{"chain_id": "DC1", "topic": "同一话题", "turns": [{{"speaker": "测验员或人物谱角色", "line": "适合表演的改编台词", "function": "trigger|announcement|question|response|decision|statement", "source_text": "对应原文对白原句"}}]}}], "key_lines": ["由后端按 dialogue_chains.turns 回填；不要另选孤立金句"], "key_plot_points": ["与spine对齐的局势变化，{KEY_PLOT_POINTS_MIN}~{KEY_PLOT_POINTS_MAX}条"], "scene_outline": [{{"scene_no": int, "scene_heading": "场次标题", "story_function": "本场戏剧功能", "characters": [str], "summary": "本场戏剧内容概括", "conflict": str, "turn": "交给下一场的状态变化", "source_basis": "原文依据"}}], "full_script_text": str, "character_state_changes": [str], "emotional_curve": str, "ending_hook": "若 hook/cliffhanger 均为空则固定为「无集级钩子」", "source_basis": str, "adaptation_direction": str, "opening": str, "development": str, "conflict": str, "climax": str, "episode_premise": "一句话本集目标", "events": [{{"event_id": "E1", "source_span": "原文位置或摘句", "source_fact": "原文事实", "state_in": "事件前状态", "trigger": "触发因素", "visible_change": "可见/可听变化", "state_out": "事件后状态", "must_keep": true, "adaptation_addition": false, "adaptation_reason": "", "approved": false}}], "information_ledger": [{{"info_id": "I1", "event_id": "E1", "content": "观众必须获得的信息", "delivery_owner": "visual_action|spoken_dialogue|offscreen_voice|narration|on_screen_text|ambient_sound", "speaker_id": "角色名/旁白/功能性身份或null", "exact_text": "需逐字交付时填写，否则null", "reinforcement_allowed": false, "status": "unassigned"}}], "voice_bible": [{{"speaker_id": "角色名/旁白/功能性身份", "voice_canonical": "声音与语气规范", "language": "普通话", "role_type": "named_character|functional_character|narrator"}}], "approved_adaptations": [str], "forbidden_additions": [str]}}"""
-    configured_iterations = max(int(get_setting("max_repair_attempts") or 4), 1)
+    # Production Repair：完整生成只允许一次；QA 后禁止“重新输出完整 JSON”。
+    return await generate_screenplay_baseline(
+        episode, source_text, bible, prev_ending=prev_ending, _prompt=prompt,
+        _no_episode_hook=no_episode_hook,
+    )
+
+
+async def generate_screenplay_baseline(
+    episode: dict,
+    source_text: str,
+    bible: Bible,
+    prev_ending: str = "",
+    *,
+    _prompt: str | None = None,
+    _no_episode_hook: bool | None = None,
+) -> EpisodeScreenplay:
+    """仅一次完整 Baseline 生成。无论 QA 是否通过都返回可解析候选，交由局部 Patch。"""
+    if _prompt is None:
+        # 复用 generate_screenplay 的 prompt 构建：直接再调一次会递归，故要求调用方传入
+        # 或走 generate_screenplay 包装。此处保留独立入口供 Production Repair 使用。
+        return await generate_screenplay(episode, source_text, bible, prev_ending=prev_ending)
+
+    no_episode_hook = bool(_no_episode_hook)
     loop = AgentLoop(
         stage_key="screenplay",
         contract_key="screenplay",
-        goal=f"生成第 {episode['episode_no']} 集可拍剧本并通过全部确定性门禁",
+        goal=f"生成第 {episode['episode_no']} 集剧本 Baseline（仅一次完整生成）",
         scope_type="episode",
         scope_id=str(episode.get("id") or f"episode-{episode['episode_no']}"),
         artifact_type="episode_screenplay",
         policy=AgentLoopPolicy(
-            max_iterations=min(configured_iterations, 4),
-            stall_rounds=2,
+            max_iterations=1,
+            stall_rounds=1,
             min_quality_gain=0.03,
-            no_gain_rounds=2,
-            allow_warning_candidate=True,
+            no_gain_rounds=1,
+            allow_warning_candidate=False,
+            baseline_only=True,
         ),
     )
+
     def _check_screenplay(s: EpisodeScreenplay) -> list[str]:
         errors = validate_screenplay(
             s, bible, max(1, episode["target_duration_s"] // config.VIDEO_DURATION_MIN_S),
@@ -775,16 +818,13 @@ B. `full_script_text`：真正的剧本正文；只写大形体动作与主线�
         return list(dict.fromkeys(errors))
 
     script = await _run_with_agent_loop(
-        "可拍剧本", "screenplay", prompt, EpisodeScreenplay,
+        "可拍剧本", "screenplay", _prompt, EpisodeScreenplay,
         _check_screenplay,
         loop=loop, temperature=0.7, max_tokens=65535,
-        # 剧本 JSON 的正文与源文都位于长 prompt/候选后半段。修复轮必须看到完整任务和
-        # 完整候选，否则一次格式修复就可能在无原文状态下重写并静默丢掉主线台词。
         repair_user_prompt_limit=None,
         repair_candidate_limit=None,
-        # episode_no/mode 是后端权威值（validator 也要求 episode_no 必须等于本集号），模型给的值不可信，
-        # 直接确定性回填，避免再为这两个已知字段空转修复轮。
-        prefill={"episode_no": episode["episode_no"], "mode": "full_script"})
+        prefill={"episode_no": episode["episode_no"], "mode": "full_script"},
+    )
     if no_episode_hook:
         if not (script.ending_hook or "").strip() or len((script.ending_hook or "").strip()) < 4:
             script.ending_hook = "无集级钩子"
@@ -1180,13 +1220,13 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
     outline_loop = AgentLoop(
         stage_key="storyboard_outline",
         contract_key="storyboard",
-        goal=f"规划第 {episode['episode_no']} 集完整逐镜节奏与必保留内容分配",
+        goal=f"规划第 {episode['episode_no']} 集完整逐镜节奏与必保留内容分配（仅一次 Baseline）",
         scope_type="episode",
         scope_id=str(episode.get("id") or f"episode-{episode['episode_no']}"),
         artifact_type="storyboard_outline",
         policy=AgentLoopPolicy(
-            max_iterations=4, stall_rounds=2, min_quality_gain=0.03,
-            no_gain_rounds=2, allow_warning_candidate=True,
+            max_iterations=1, stall_rounds=1, min_quality_gain=0.03,
+            no_gain_rounds=1, allow_warning_candidate=False, baseline_only=True,
         ),
     )
     outline = await _run_with_agent_loop(

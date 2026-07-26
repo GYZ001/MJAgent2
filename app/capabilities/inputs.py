@@ -85,7 +85,23 @@ class EpisodeScopedInput(StandardCommandInput):
 
 class ScreenplayGenerateInput(StandardCommandInput):
     episode_id: str
-    force: bool = False
+    force: bool = False  # 已废弃：存在 published 时服务端拒绝全量重生
+
+
+class ScreenplayReviseInput(StandardCommandInput):
+    episode_id: str
+    instruction: str = ""
+
+
+class ScreenplayPatchInput(StandardCommandInput):
+    episode_id: str
+    production_revision_id: str
+    expected_artifact_id: str
+    expected_hash: str
+    issue_set_hash: str = ""
+    operations: list[dict[str, Any]]
+    idempotency_key: str = ""
+    reason: str = ""
 
 
 class ScreenplayUpdateInput(StandardCommandInput):
@@ -103,12 +119,23 @@ class ScreenplayCancelInput(StandardCommandInput):
 
 class StoryboardGenerateInput(StandardCommandInput):
     episode_id: str
-    mode: Literal["fresh", "resume"] = "fresh"
+    # fresh 已废弃：映射为创建/恢复 production revision，禁止删光后整版重做
+    mode: Literal["create", "resume", "fresh"] = "create"
     completion_mode: Literal[
         "ready_for_manual_confirm",
         "auto_confirm",
     ] = "ready_for_manual_confirm"
     completion_grant_id: str | None = None
+
+
+class StoryboardPatchShotInput(StandardCommandInput):
+    episode_id: str
+    shot_uid: str | None = None
+    shot_no: int | None = None
+    patch: dict[str, Any]
+    expected_hash: str = ""
+    production_revision_id: str = ""
+    idempotency_key: str = ""
 
 
 class ShotUpdateInput(StandardCommandInput):

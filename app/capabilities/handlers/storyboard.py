@@ -9,7 +9,9 @@ from app.capabilities.schemas import CommandResult
 async def generate(args: I.StoryboardGenerateInput) -> CommandResult:
     from app import api
 
-    if args.mode == "resume":
+    # fresh 已废弃：一律按 create（新建/恢复 revision）或 resume 处理
+    mode = "resume" if args.mode == "resume" else "create"
+    if mode == "resume":
         outcome = await call_guarded(
             api.resume_storyboard,
             args.episode_id,
@@ -30,12 +32,12 @@ async def generate(args: I.StoryboardGenerateInput) -> CommandResult:
     if isinstance(outcome, CommandResult):
         return outcome
     run_id = outcome.get("run_id")
-    verb = "续跑" if args.mode == "resume" else "重新生成"
+    verb = "续跑局部修复" if mode == "resume" else "生产"
     goal = outcome.get("goal") or (
         "generate_and_confirm" if args.completion_mode == "auto_confirm" else "generate_ready"
     )
     return succeeded(
-        f"分镜{verb}已启动（{goal}）",
+        f"分镜{verb}已启动（{goal}；禁止整版重规划）",
         data=outcome,
         run_id=run_id,
         resource_uris=[f"manju://runs/{run_id}"] if run_id else [],

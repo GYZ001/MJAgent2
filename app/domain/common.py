@@ -252,7 +252,11 @@ def purge_legacy_screenplays() -> int:
 
 
 def _screenplay_ready(ep) -> bool:
-    if not (ep["screenplay_json"] and ep["screenplay_status"] == "ready"):
+    """仅 published/ready 可进分镜；warning/repairing 不可交付。"""
+    status = ep["screenplay_status"] if "screenplay_status" in ep.keys() else None
+    if status in {"warning", "repairing", "running", "failed", "pending"}:
+        return False
+    if not (ep["screenplay_json"] and status == "ready"):
         return False
     try:
         script = EpisodeScreenplay.model_validate(json.loads(ep["screenplay_json"]))

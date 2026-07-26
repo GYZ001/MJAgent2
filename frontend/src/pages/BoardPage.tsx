@@ -166,41 +166,39 @@ export default function BoardPage() {
       storyboardTimer.start()
       void act(
         () => api.post(`/episodes/${ep.id}/storyboard/resume`, { completion_mode: completionMode }),
-        `已从前 ${ep.shots?.length ?? 0} 镜 checkpoint 继续生成`,
+        `已从工作 checkpoint 继续局部修复（已验证前 ${ep.shots?.length ?? 0} 镜）`,
       ).then(r => { if (r === undefined) storyboardTimer.clear() })
       return
     }
     const shotCount = ep.shots?.length ?? 0
-    const hasDownstream = shotCount > 0
+    const hasPublished = shotCount > 0 && ['scripted', 'confirmed', 'generating', 'done'].includes(ep.status)
     const autoConfirmNote = completionMode === 'auto_confirm'
       ? `\n\n【自动确认授权】\n`
         + `· 剧集：第 ${ep.episode_no} 集《${ep.title}》\n`
-        + `· 将自动修改/重排的范围仅限本集分镜\n`
-        + `· 全量校验通过后将自动确认，解锁付费视频能力\n`
+        + `· 全量门禁通过后将自动确认，解锁付费视频能力\n`
         + `· 本任务不会自动提交任何付费视频生成\n`
-        + `· 可随时取消`
+        + `· 修复过程只做局部 Patch，不会整版重规划`
       : ''
     const ok = window.confirm(
-      (hasDownstream
-        ? `重新生成分镜将删除本集全部 ${shotCount} 个镜头，以及其参考图、视频版本与成片依赖。\n`
-          + `费用：会重新消耗文本模型额度；已产生的视频费用不会退回。\n`
-          + `此操作不可恢复。确定继续？`
+      (hasPublished
+        ? `将创建新的分镜生产修订：页面在交付前继续显示上一已发布版本；工作副本通过全部门禁后一次性切换。\n`
+          + `不会提供「删除全部镜头后整版重生成」路径。确定继续？`
         : completionMode === 'auto_confirm'
-          ? '将生成全部分镜并在通过后自动确认。确定继续？'
-          : '将开始生成分镜脚本（先规划大纲，再逐镜填充）。确定继续？')
+          ? '将生成全部可用分镜，通过后自动确认。确定继续？'
+          : '将开始生成所有可用分镜（一次大纲 + 逐镜填充 + 局部自愈）。确定继续？')
       + autoConfirmNote,
     )
     if (!ok) return
     storyboardTimer.start()
     void act(
       () => api.post(`/episodes/${ep.id}/storyboard`, { completion_mode: completionMode }),
-      hasDownstream
+      hasPublished
         ? (completionMode === 'auto_confirm'
-          ? '已删除旧分镜，开始重新生成并自动确认'
-          : '已删除旧分镜，开始重新生成整版分镜')
+          ? '已启动分镜修订（通过后自动确认）'
+          : '已启动分镜修订（局部修复至可交付）')
         : (completionMode === 'auto_confirm'
           ? '分镜生成已开始（通过后将自动确认；尚未产生视频费用）'
-          : '分镜生成已开始（先规划大纲，再逐镜填充，QA 通过后陆续展示）'),
+          : '分镜生成已开始（工作镜头验证中，整集门禁通过后一次性交付）'),
     ).then(r => { if (r === undefined) storyboardTimer.clear() })
   }
 
@@ -226,26 +224,23 @@ export default function BoardPage() {
           {ep.status !== 'scripting' && (
             <button className="btn" disabled={busy || ep.screenplay_status !== 'ready'}
               onClick={() => confirmRegenerateStoryboard(canResumeCheckpoint ? 'resume' : 'fresh')}>
-              {canResumeCheckpoint ? `从镜${String((ep.shots?.length ?? 0) + 1).padStart(2, '0')}继续` : ep.shots?.length ? '重新生成分镜' : '生成并等待确认'}
+              {canResumeCheckpoint
+                ? `继续修复（已验证 ${ep.shots?.length ?? 0} 镜）`
+                : ep.shots?.length
+                  ? '让 Agent 迭代分镜'
+                  : '生成所有可用分镜'}
             </button>
           )}
           {ep.status !== 'scripting' && !canResumeCheckpoint && ep.screenplay_status === 'ready' && (
             <button className="btn ghost" disabled={busy}
               onClick={() => confirmRegenerateStoryboard('fresh', 'auto_confirm')}>
-              生成完成后自动确认
+              通过后自动确认
             </button>
           )}
           {ep.status !== 'scripting' && canResumeCheckpoint && (
-            <AsyncButton className="btn ghost" disabled={busy}
-              busyLabel="提交中…"
-              onAction={async () => { confirmRegenerateStoryboard('fresh') }}>
-              重新生成整版
-            </AsyncButton>
-          )}
-          {ep.status !== 'scripting' && canResumeCheckpoint && (
             <button className="btn ghost" disabled={busy}
-              onClick={() => confirmRegenerateStoryboard('fresh', 'auto_confirm')}>
-              重生成并自动确认
+              onClick={() => confirmRegenerateStoryboard('resume', 'auto_confirm')}>
+              继续修复并自动确认
             </button>
           )}
           {ep.screenplay_status !== 'ready' && (
