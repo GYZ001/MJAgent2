@@ -9,16 +9,8 @@ from app.db import get_conn, new_id, now
 
 
 def _fingerprint(shot_id: str, refs: list[dict]) -> str:
-    material = []
-    for ref in refs:
-        material.append({
-            "id": ref.get("id"),
-            "type": ref.get("type"),
-            "source": ref.get("source"),
-            "path": ref.get("path") or ref.get("image_path"),
-            "selected": bool(ref.get("selectedForSeedance", True)),
-            "deleted": bool(ref.get("deleted")),
-        })
+    from app.multiview import gallery_fingerprint_material
+    material = gallery_fingerprint_material(refs)
     raw = json.dumps({"shot_id": shot_id, "refs": material}, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
@@ -118,8 +110,9 @@ def upsert_reference_set_from_meta(
                        id, reference_set_id, asset_type, source, path, sort_order,
                        quality_score, consistency_score, selected, deleted, qa_json,
                        slot_key, attempt_no, generation_status, qa_status, input_fingerprint,
-                       created_at
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       entity_type, entity_name, library_revision_id, library_view_id, view_role,
+                       purposes_json, required, dependency_manifest_json, created_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     asset_id, set_id,
                     ref.get("type") or "generated",
@@ -131,30 +124,69 @@ def upsert_reference_set_from_meta(
                     int(bool(ref.get("selectedForSeedance", True))),
                     int(bool(ref.get("deleted"))),
                     json.dumps(ref.get("qa") or {}, ensure_ascii=False) if ref.get("qa") else None,
-                    slot_key, attempt_no, gen_status, qa_status, input_fp,
+                    slot_key or ref.get("slot_key"), attempt_no, gen_status, qa_status, input_fp,
+                    ref.get("entity_type"), ref.get("entity_name"),
+                    ref.get("library_revision_id"), ref.get("library_view_id"), ref.get("view_role"),
+                    json.dumps(ref.get("purposes") or [], ensure_ascii=False) if ref.get("purposes") is not None else ref.get("purposes_json"),
+                    int(bool(ref.get("required"))),
+                    json.dumps(ref.get("dependency_manifest") or {}, ensure_ascii=False) if ref.get("dependency_manifest") else None,
                     now(),
                 ),
             )
         except Exception:  # noqa: BLE001
+            try:
+                db.execute(
+                    """INSERT INTO reference_assets(
+                           id, reference_set_id, asset_type, source, path, sort_order,
+                           quality_score, consistency_score, selected, deleted, qa_json,
+                           slot_key, attempt_no, generation_status, qa_status, input_fingerprint,
+                           created_at
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        asset_id, set_id,
+                        ref.get("type") or "generated",
+                        ref.get("source") or "pipeline",
+                        path,
+                        i,
+                        ref.get("qualityScore"),
+                        ref.get("consistencyScore"),
+                        int(bool(ref.get("selectedForSeedance", True))),
+                        int(bool(ref.get("deleted"))),
+                        json.dumps(ref.get("qa") or {}, ensure_ascii=False) if ref.get("qa") else None,
+                        slot_key, attempt_no, gen_status, qa_status, input_fp,
+                        now(),
+                    ),
+                )
+            except Exception:  # noqa: BLE001
+                db.execute(
+                    """INSERT INTO reference_assets(
+                           id, reference_set_id, asset_type, source, path, sort_order,
+                           quality_score, consistency_score, selected, deleted, qa_json, created_at
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        asset_id, set_id,
+                        ref.get("type") or "generated",
+                        ref.get("source") or "pipeline",
+                        path,
+                        i,
+                        ref.get("qualityScore"),
+                        ref.get("consistencyScore"),
+                        int(bool(ref.get("selectedForSeedance", True))),
+                        int(bool(ref.get("deleted"))),
+                        json.dumps(ref.get("qa") or {}, ensure_ascii=False) if ref.get("qa") else None,
+                        now(),
+                    ),
+                )
+    # 冻结 manifest
+    try:
+        manifest = meta.get("reference_manifest")
+        if manifest:
             db.execute(
-                """INSERT INTO reference_assets(
-                       id, reference_set_id, asset_type, source, path, sort_order,
-                       quality_score, consistency_score, selected, deleted, qa_json, created_at
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    asset_id, set_id,
-                    ref.get("type") or "generated",
-                    ref.get("source") or "pipeline",
-                    path,
-                    i,
-                    ref.get("qualityScore"),
-                    ref.get("consistencyScore"),
-                    int(bool(ref.get("selectedForSeedance", True))),
-                    int(bool(ref.get("deleted"))),
-                    json.dumps(ref.get("qa") or {}, ensure_ascii=False) if ref.get("qa") else None,
-                    now(),
-                ),
+                "UPDATE reference_sets SET dependency_manifest_json=?, frozen=? WHERE id=?",
+                (json.dumps(manifest, ensure_ascii=False), int(bool(meta.get("reference_manifest_frozen"))), set_id),
             )
+    except Exception:  # noqa: BLE001
+        pass
     meta["reference_set_id"] = set_id
     meta["reference_gallery_fingerprint"] = fp
     meta["reference_gallery_revision"] = revision
@@ -174,7 +206,12 @@ def load_reference_set(set_id: str, *, conn=None) -> dict[str, Any] | None:
     ).fetchall()
     refs = []
     for a in assets:
-        refs.append({
+        purposes = None
+        try:
+            purposes = json.loads(a["purposes_json"]) if "purposes_json" in a.keys() and a["purposes_json"] else None
+        except Exception:  # noqa: BLE001
+            purposes = None
+        item = {
             "id": a["id"],
             "type": a["asset_type"],
             "source": a["source"],
@@ -184,8 +221,34 @@ def load_reference_set(set_id: str, *, conn=None) -> dict[str, Any] | None:
             "selectedForSeedance": bool(a["selected"]),
             "deleted": bool(a["deleted"]),
             "qa": json.loads(a["qa_json"]) if a["qa_json"] else None,
-        })
-    return {
+        }
+        for key, col in (
+            ("entity_type", "entity_type"),
+            ("entity_name", "entity_name"),
+            ("library_revision_id", "library_revision_id"),
+            ("library_view_id", "library_view_id"),
+            ("view_role", "view_role"),
+            ("slot_key", "slot_key"),
+        ):
+            try:
+                if col in a.keys() and a[col] is not None:
+                    item[key] = a[col]
+            except Exception:  # noqa: BLE001
+                pass
+        if purposes is not None:
+            item["purposes"] = purposes
+        try:
+            if "required" in a.keys():
+                item["required"] = bool(a["required"])
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            if "dependency_manifest_json" in a.keys() and a["dependency_manifest_json"]:
+                item["dependency_manifest"] = json.loads(a["dependency_manifest_json"])
+        except Exception:  # noqa: BLE001
+            pass
+        refs.append(item)
+    result = {
         "id": row["id"],
         "shot_id": row["shot_id"],
         "revision": row["revision"],
@@ -193,6 +256,14 @@ def load_reference_set(set_id: str, *, conn=None) -> dict[str, Any] | None:
         "status": row["status"],
         "reference_images": refs,
     }
+    try:
+        if "dependency_manifest_json" in row.keys() and row["dependency_manifest_json"]:
+            result["reference_manifest"] = json.loads(row["dependency_manifest_json"])
+        if "frozen" in row.keys():
+            result["frozen"] = bool(row["frozen"])
+    except Exception:  # noqa: BLE001
+        pass
+    return result
 
 
 def apply_set_to_meta(meta: dict[str, Any], set_id: str, *, conn=None) -> dict[str, Any]:
@@ -204,4 +275,7 @@ def apply_set_to_meta(meta: dict[str, Any], set_id: str, *, conn=None) -> dict[s
     meta["reference_images"] = loaded["reference_images"]
     meta["reference_gallery_fingerprint"] = loaded["fingerprint"]
     meta["reference_gallery_revision"] = loaded["revision"]
+    if loaded.get("reference_manifest"):
+        meta["reference_manifest"] = loaded["reference_manifest"]
+        meta["reference_manifest_frozen"] = True
     return meta

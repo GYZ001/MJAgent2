@@ -297,19 +297,38 @@ function sceneRangeLabel(start: number, end: number | null): string {
 
 function SceneRefStrip({ segments }: { segments: SceneRefSegment[] }) {
   const sorted = [...segments].sort((a, b) => a.ep_start - b.ep_start)
+  const viewLabels: Record<string, string> = {
+    establishing: '建立', reverse_angle: '反打', action_zone: '动作区',
+  }
   return (
     <div style={{ margin: '2px 0 8px' }}>
-      <label className="f">场景图分段（按适用集横向预览）</label>
-      <div style={{ display: 'flex', gap: 8, overflowX: 'auto', paddingBottom: 4 }}>
+      <label className="f">场景版本（按适用集；版本内展示多视角）</label>
+      <div style={{ display: 'flex', gap: 12, overflowX: 'auto', paddingBottom: 4 }}>
         {sorted.map((seg, i) => (
-          <div key={i} style={{ flex: '0 0 auto', width: 104, textAlign: 'center' }}>
-            {seg.image_url
-              ? <img src={seg.image_url} alt={sceneRangeLabel(seg.ep_start, seg.ep_end)}
-                  style={{ width: 104, height: 184, objectFit: 'cover', borderRadius: 6, border: '1px solid var(--hairline)' }} />
-              : <div style={{ width: 104, height: 184, borderRadius: 6, border: '1px dashed var(--hairline)',
-                              display: 'flex', alignItems: 'center', justifyContent: 'center',
-                              fontSize: 11, color: 'var(--ink-faint)' }}>无图</div>}
-            <div style={{ fontSize: 11, color: 'var(--ink-soft)', marginTop: 3 }}>{sceneRangeLabel(seg.ep_start, seg.ep_end)}</div>
+          <div key={seg.id || i} style={{ flex: '0 0 auto', minWidth: 120 }}>
+            <div style={{ fontSize: 11, color: 'var(--ink-soft)', marginBottom: 4 }}>
+              {sceneRangeLabel(seg.ep_start, seg.ep_end)}
+              {seg.pack_status ? ` · ${seg.pack_status}` : ''}
+            </div>
+            {(seg.views && seg.views.length > 0) ? (
+              <div className="portrait-view-strip">
+                {seg.views.map(view => view.image_url ? (
+                  <div key={view.id} className="portrait-view-chip">
+                    <img src={view.image_url} alt={view.view_role || 'view'} />
+                    <span>{viewLabels[view.view_role || ''] || view.view_role || '视角'}</span>
+                  </div>
+                ) : null)}
+              </div>
+            ) : (
+              <div style={{ width: 104, textAlign: 'center' }}>
+                {seg.image_url
+                  ? <img src={seg.image_url} alt={sceneRangeLabel(seg.ep_start, seg.ep_end)}
+                      style={{ width: 104, height: 184, objectFit: 'cover', borderRadius: 6, border: '1px solid var(--hairline)' }} />
+                  : <div style={{ width: 104, height: 184, borderRadius: 6, border: '1px dashed var(--hairline)',
+                                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                  fontSize: 11, color: 'var(--ink-faint)' }}>无图</div>}
+              </div>
+            )}
           </div>
         ))}
       </div>
@@ -349,7 +368,7 @@ function ScenePromptBlock({ projectId, scene: s, disabled, onChanged, regenerate
             <button className="btn small" disabled={disabled || saving}
               onClick={() => setDraft(s.scene_prompt_override || s.scene_prompt_effective || '')}>改场景描述</button>
             <button className="btn small" disabled={disabled || saving} onClick={regenerate}>
-              {s.ref_image_url ? '重新出图' : '单独出图'}
+              {s.ref_image_url ? '重新生成场景视角包' : '单独生成场景视角包'}
             </button>
           </div>
         </>

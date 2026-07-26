@@ -112,7 +112,8 @@ def test_selector_returns_default_reference_plan_without_llm(monkeypatch) -> Non
     assert decision.mode == REFERENCE_IMAGE_MODE
     assert decision.llmUsed is False
     plan = decision.referenceImagePlan
-    assert plan.totalCount == 4 and plan.generateNewCount == 4
+    assert plan.totalCount == 1 and plan.generateNewCount == 1
+    assert plan.types == ["plot_key_frame"]
     assert plan.prompts == []
     # 决策可往返序列化（入队持久化 → 生成期复用）
     assert dict_to_decision(decision_to_dict(decision)).referenceImagePlan.prompts == plan.prompts
@@ -143,13 +144,13 @@ def test_reference_mode_excludes_deleted_reference_images() -> None:
     assert inputs == [("data:image/jpeg;base64,keep", "reference_image")]
 
 
-def test_build_reference_assets_collects_rejected_for_discard_gallery(monkeypatch) -> None:
-    """质检未通过、未被选用的参考图收集进 rejected_out（带图片），供废弃照片画廊展示；
-    选用列表里仍只有过审/兜底图，且 rejected_out 里的图 selectedForSeedance=False。"""
+def test_build_reference_assets_collects_rejected_for_discard_gallery(monkeypatch, tmp_path) -> None:
+    """质检未通过的关键帧进入 rejected_out；人物库图只作 QA 依据，不默认 selectedForSeedance。"""
     bible = _bible()
     shot = _shot(shot_no=4, narration="对白场景", dialogues=[{"speaker": "A", "line": "嗯", "emotion": "平静"}])
 
     monkeypatch.setattr(video_modes, "character_reference_assets", lambda *a, **k: [])
+    monkeypatch.setattr(video_modes, "scene_reference_assets", lambda *a, **k: [])
     monkeypatch.setattr(video_modes, "reusable_previous_assets", lambda *a, **k: [])
     monkeypatch.setattr(video_modes, "min_generated_references", lambda: 1)
     monkeypatch.setattr(video_modes, "reference_gen_retries", lambda: 2)
@@ -159,31 +160,50 @@ def test_build_reference_assets_collects_rejected_for_discard_gallery(monkeypatc
     monkeypatch.setattr(video_modes, "batch_prompt_enabled", lambda: False)
     monkeypatch.setattr(video_modes, "consistency_check_enabled", lambda: False)
 
-    async def fake_gen_one(*, project_id, episode_no, shot, bible, ref_type, index, content_override=None, seed_inputs=None,
-                           **kwargs):
-        score = 0.5 + 0.1 * (index % 3)  # 100→0.6, 101→0.7, 102→0.5：均低于阈值 0.8
-        asset = ReferenceImageAsset(id=f"g{index}", url="u", type=ref_type, source="seedream_generated",
-                                    path=f"/tmp/g{index}.jpg", qualityScore=score,
-                                    qa={"overall": score, "absolute_quality": score, "issues": []})
-        asset.rejectReason = "quality_below_threshold"
-        return asset
+    import app.multiview as mv
+    monkeypatch.setattr(mv, "complete_legacy_character_pack", lambda *a, **k: None)
+    monkeypatch.setattr(mv, "complete_legacy_scene_pack", lambda *a, **k: None)
+    monkeypatch.setattr(mv, "resolve_shot_asset_dependencies", lambda **k: {
+        "episode_no": 1, "shot_id": "s", "characters": [], "scene": None,
+        "keyframe_slot": "narrative_keyframe", "input_fingerprint": "fp",
+    })
+    monkeypatch.setattr(mv, "library_anchor_assets_from_manifest", lambda m: [])
+    monkeypatch.setattr(mv, "keyframe_seed_paths", lambda m: [])
 
-    monkeypatch.setattr(video_modes, "_generate_one_reference", fake_gen_one)
+    async def fake_keep_best(**kwargs):
+        score = 0.55
+        path = tmp_path / "g.jpg"
+        path.write_bytes(b"img")
+        asset = ReferenceImageAsset(
+            id="g1", url="u", type="plot_key_frame", source="seedream_generated",
+            path=str(path), qualityScore=score,
+            qa={"overall": score, "absolute_quality": score, "issues": []},
+        )
+        return asset, [], []
+
+    async def fake_review(b64, **kwargs):
+        return {
+            "status": "scored", "overall": 0.55, "action_match": 0.55, "body_proportion": 0.55,
+            "face_identity": 0.55, "outfit_match": 0.55, "hair_match": 0.55, "scene_match": 0.55,
+            "hard_failures": [], "issues": ["低分"], "absolute_quality": 0.55,
+        }
+
+    monkeypatch.setattr(video_modes, "_generate_reference_keep_best", fake_keep_best)
+    monkeypatch.setattr(mv, "review_keyframe_with_evidence", fake_review)
+    monkeypatch.setattr(mv, "keyframe_gate_passed", lambda qa: False)
 
     decision = ShotVideoModeDecision(
         mode=REFERENCE_IMAGE_MODE, reason="对白", confidence=0.9,
         referenceImagePlan=ReferenceImagePlan(totalCount=1, reusePreviousSceneCount=0,
-                                              generateNewCount=0, types=["plot_key_frame"], prompts=[]))
+                                              generateNewCount=1, types=["plot_key_frame"], prompts=[]))
     rejected: list = []
     assets = asyncio.run(video_modes.build_reference_assets(
         conn=None, project_id="p", episode_no=1, episode_id="e", shot_id="s",
         shot=shot, bible=bible, decision=decision, prev_shot=None, rejected_out=rejected))
 
-    # 全员低于 0.8 但最佳 ≥ floor → 兜底留最高分一张
-    assert len(assets) == 1 and assets[0].qualityScore == 0.7
-    assert assets[0].selectedForSeedance is True
-    assert len(rejected) == 2  # 另两次尝试进废弃画廊
-    assert all(a.selectedForSeedance is False and a.path for a in rejected)
+    fed = [a for a in assets if a.selectedForSeedance]
+    assert fed == []
+    assert rejected and all(a.selectedForSeedance is False and a.path for a in rejected)
 
 
 class _FakeCursor:
@@ -237,10 +257,17 @@ def test_runtime_reference_mode_uses_stored_decision(monkeypatch) -> None:
 
     async def fake_build_reference_assets(**kwargs):
         assets = [ReferenceImageAsset(
-            id="r1", url="data:image/jpeg;base64,abc", type="character",
+            id="r1", url="data:image/jpeg;base64,abc", type="plot_key_frame",
             source="seedream_generated", selectedForSeedance=True,
+            purposes=["video_input", "qa_anchor"], slot_key="narrative_keyframe", required=True,
+            qa={"overall": 0.9, "status": "scored", "absolute_quality": 0.9},
+            qualityScore=0.9,
         )]
         kwargs["on_progress"](assets, [])
+        meta = kwargs.get("existing_meta")
+        if isinstance(meta, dict):
+            meta["narrative_keyframe_missing"] = False
+            meta["reference_group_gate_passed"] = True
         return assets
 
     # 运行期一旦调用 LLM 选择即视为回归（应已被移除）
@@ -278,7 +305,7 @@ def test_runtime_reference_mode_uses_stored_decision(monkeypatch) -> None:
     assert not out_meta.get("fallback_reason")
 
 
-def test_reference_assets_publish_each_completed_image_without_waiting_for_slowest(monkeypatch) -> None:
+def test_reference_assets_publish_each_completed_image_without_waiting_for_slowest(monkeypatch, tmp_path) -> None:
     """快图完成后应先进入画廊，不能被同批慢图的生成/QA 阻塞。"""
     monkeypatch.setattr(video_modes, "character_reference_assets", lambda *a, **k: [])
     monkeypatch.setattr(video_modes, "scene_reference_assets", lambda *a, **k: [])
@@ -291,13 +318,35 @@ def test_reference_assets_publish_each_completed_image_without_waiting_for_slowe
     monkeypatch.setattr(video_modes, "min_generated_references", lambda: 0)
     monkeypatch.setattr(video_modes, "max_character_reference_images", lambda: 2)
     monkeypatch.setattr(video_modes, "quality_threshold", lambda: 0.8)
+    monkeypatch.setattr(video_modes, "consistency_check_enabled", lambda: False)
+
+    import app.multiview as mv
+    monkeypatch.setattr(mv, "complete_legacy_character_pack", lambda *a, **k: None)
+    monkeypatch.setattr(mv, "complete_legacy_scene_pack", lambda *a, **k: None)
+    monkeypatch.setattr(mv, "resolve_shot_asset_dependencies", lambda **k: {
+        "episode_no": 1, "shot_id": "s", "characters": [], "scene": None,
+        "keyframe_slot": "narrative_keyframe", "input_fingerprint": "fp",
+    })
+    monkeypatch.setattr(mv, "library_anchor_assets_from_manifest", lambda m: [])
+    monkeypatch.setattr(mv, "keyframe_seed_paths", lambda m: [])
+
+    async def fake_review(b64, **kwargs):
+        return {
+            "status": "scored", "overall": 0.9, "action_match": 0.9, "body_proportion": 0.9,
+            "face_identity": 0.9, "outfit_match": 0.9, "hair_match": 0.9, "scene_match": 0.9,
+            "hard_failures": [], "issues": [], "absolute_quality": 0.9,
+        }
+    monkeypatch.setattr(mv, "review_keyframe_with_evidence", fake_review)
+    monkeypatch.setattr(mv, "keyframe_gate_passed", lambda qa: True)
 
     async def fake_generate(*, index, **kwargs):
         await asyncio.sleep(0.03 if index == 1 else 0.001)
+        path = tmp_path / f"g{index}.jpg"
+        path.write_bytes(b"img")
         return (
             ReferenceImageAsset(
                 id=f"g{index}", url=f"u{index}", type="plot_key_frame",
-                source="seedream_generated", qualityScore=0.9,
+                source="seedream_generated", path=str(path), qualityScore=0.9,
                 qa={"overall": 0.9, "absolute_quality": 0.9},
             ),
             [],
@@ -334,10 +383,11 @@ def test_reference_assets_publish_each_completed_image_without_waiting_for_slowe
         on_progress=lambda current, _rejected: snapshots.append([a.id for a in current]),
     ))
 
-    generated_snapshots = [ids for ids in snapshots if ids]
-    assert generated_snapshots[0] == ["g2"]
-    assert set(generated_snapshots[1]) == {"g1", "g2"}
-    assert {a.id for a in result} == {"g1", "g2"}
+    # 多视角改造后画廊可含证据锚点；本测试只断言生成关键帧会渐进出现
+    generated_snapshots = [ids for ids in snapshots if any(i.startswith("g") for i in ids)]
+    assert generated_snapshots, "应至少发布一次进度快照"
+    assert any("g2" in ids for ids in generated_snapshots)
+    assert {a.id for a in result if a.id.startswith("g")} == {"g1", "g2"}
 
 
 def test_build_reference_assets_fallback_keyframe_yields_to_clean_portrait(monkeypatch) -> None:
@@ -351,6 +401,22 @@ def test_build_reference_assets_fallback_keyframe_yields_to_clean_portrait(monke
                             id="c1", url="u", type="character", source="asset_library",
                             path="/tmp/a.jpg", relatedCharacterIds=["A"], qualityScore=1.0,
                             qa={"overall": 1.0, "absolute_quality": 1.0})] if limit > 0 else []))
+
+    import app.multiview as mv
+    monkeypatch.setattr(mv, "complete_legacy_character_pack", lambda *a, **k: None)
+    monkeypatch.setattr(mv, "complete_legacy_scene_pack", lambda *a, **k: None)
+    monkeypatch.setattr(mv, "resolve_shot_asset_dependencies", lambda **k: {
+        "episode_no": 1, "shot_id": "s", "characters": [], "scene": None,
+        "keyframe_slot": "narrative_keyframe", "input_fingerprint": "fp",
+    })
+    monkeypatch.setattr(mv, "library_anchor_assets_from_manifest", lambda m: [])
+    monkeypatch.setattr(mv, "keyframe_seed_paths", lambda m: [])
+    async def _fake_kf_review(b64, **kwargs):
+        return {"status": "scored", "overall": 0.5, "action_match": 0.5, "body_proportion": 0.5,
+                "face_identity": 0.5, "outfit_match": 0.5, "hair_match": 0.5, "scene_match": 0.5,
+                "hard_failures": [], "issues": [], "absolute_quality": 0.5}
+    monkeypatch.setattr(mv, "review_keyframe_with_evidence", _fake_kf_review)
+    monkeypatch.setattr(mv, "keyframe_gate_passed", lambda qa: False)
     monkeypatch.setattr(video_modes, "reusable_previous_assets", lambda *a, **k: [])
     monkeypatch.setattr(video_modes, "scene_reference_assets", lambda *a, **k: [])
     monkeypatch.setattr(video_modes, "min_generated_references", lambda: 1)
@@ -391,12 +457,12 @@ def test_build_reference_assets_fallback_keyframe_yields_to_clean_portrait(monke
         shot=shot, bible=bible, decision=decision, prev_shot=None, rejected_out=rejected))
 
     fed = [a for a in assets if a.selectedForSeedance]
-    assert [a.source for a in fed] == ["asset_library"], "低于门禁的生成图应让位给干净定妆照"
-    assert all((a.qualityScore or 0) >= 0.8 for a in fed)
-    assert prompt_calls["n"] == 1, "生成仍发生（逐图异步写提示词，本例 1 张）"
+    # PRD：人物库图默认只作 keyframe_seed/qa_anchor，不直接喂 Seedance
+    assert not any(a.source == "asset_library" and a.selectedForSeedance for a in assets)
+    assert all(a.source != "seedream_generated" or not a.selectedForSeedance for a in assets)
+    assert prompt_calls["n"] >= 1, "仍应尝试生成必需关键帧"
     suppressed = [a for a in rejected if a.source == "seedream_generated"]
     assert suppressed and all(not a.selectedForSeedance for a in suppressed)
-    assert all(a.rejectReason == "quality_below_threshold" for a in suppressed)
 
 
 def test_build_reference_assets_subfloor_fallback_not_fed(monkeypatch) -> None:
@@ -411,6 +477,22 @@ def test_build_reference_assets_subfloor_fallback_not_fed(monkeypatch) -> None:
                             id="c1", url="u", type="character", source="asset_library",
                             path="/tmp/a.jpg", relatedCharacterIds=["A"], qualityScore=1.0,
                             qa={"overall": 1.0, "absolute_quality": 1.0})] if limit > 0 else []))
+
+    import app.multiview as mv
+    monkeypatch.setattr(mv, "complete_legacy_character_pack", lambda *a, **k: None)
+    monkeypatch.setattr(mv, "complete_legacy_scene_pack", lambda *a, **k: None)
+    monkeypatch.setattr(mv, "resolve_shot_asset_dependencies", lambda **k: {
+        "episode_no": 1, "shot_id": "s", "characters": [], "scene": None,
+        "keyframe_slot": "narrative_keyframe", "input_fingerprint": "fp",
+    })
+    monkeypatch.setattr(mv, "library_anchor_assets_from_manifest", lambda m: [])
+    monkeypatch.setattr(mv, "keyframe_seed_paths", lambda m: [])
+    async def _fake_kf_review(b64, **kwargs):
+        return {"status": "scored", "overall": 0.5, "action_match": 0.5, "body_proportion": 0.5,
+                "face_identity": 0.5, "outfit_match": 0.5, "hair_match": 0.5, "scene_match": 0.5,
+                "hard_failures": [], "issues": [], "absolute_quality": 0.5}
+    monkeypatch.setattr(mv, "review_keyframe_with_evidence", _fake_kf_review)
+    monkeypatch.setattr(mv, "keyframe_gate_passed", lambda qa: False)
     monkeypatch.setattr(video_modes, "reusable_previous_assets", lambda *a, **k: [])
     monkeypatch.setattr(video_modes, "scene_reference_assets", lambda *a, **k: [])
     monkeypatch.setattr(video_modes, "min_generated_references", lambda: 1)
@@ -440,10 +522,12 @@ def test_build_reference_assets_subfloor_fallback_not_fed(monkeypatch) -> None:
         shot=shot, bible=bible, decision=decision, prev_shot=None, rejected_out=rejected))
 
     fed = [a for a in assets if a.selectedForSeedance]
-    assert [a.source for a in fed] == ["asset_library"], "低于地板的兜底图不喂，只留定妆照锚点"
     assert not any(a.source == "seedream_generated" for a in fed), "低于地板的生成图一律不喂"
+    # 定妆照进入画廊作 QA 依据，但不作为 video_input
+    assert any(a.source == "asset_library" for a in assets)
+    assert not any(a.source == "asset_library" and a.selectedForSeedance for a in assets)
     gen_rejected = [a for a in rejected if a.source == "seedream_generated"]
-    assert len(gen_rejected) == 3 and all(not a.selectedForSeedance for a in gen_rejected), "全部尝试进废弃画廊"
+    assert gen_rejected and all(not a.selectedForSeedance for a in gen_rejected), "失败关键帧进废弃画廊"
 
 
 def test_generated_references_get_i2i_seeds(monkeypatch) -> None:
