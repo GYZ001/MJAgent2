@@ -158,7 +158,21 @@ def _attach_character_portraits(conn, project_id: str, bible: dict) -> None:
             "views": views_by_portrait.get(r["id"], []),
         })
     for c in bible.get("characters", []):
-        c["portraits"] = by_name.get(c.get("name"), [])
+        portraits = by_name.get(c.get("name"), [])
+        c["portraits"] = portraits
+        # ``bible_json.characters[].ref_image_path`` is a compatibility cache,
+        # not the source of truth for versioned portraits. A ready pack is
+        # committed to ``character_portraits`` before a long batch finishes, so
+        # expose that checkpoint immediately instead of leaving the UI gated on
+        # a later Bible merge (or process restart).
+        if not c.get("ref_image_url"):
+            latest_ready = next((
+                portrait for portrait in reversed(portraits)
+                if portrait.get("pack_status") in (None, "ready")
+                and portrait.get("image_url")
+            ), None)
+            if latest_ready:
+                c["ref_image_url"] = latest_ready["image_url"]
 
 
 def _attach_scene_refs(conn, project_id: str, bible: dict) -> None:

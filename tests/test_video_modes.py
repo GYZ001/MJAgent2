@@ -177,7 +177,6 @@ def test_build_reference_assets_collects_rejected_for_discard_gallery(monkeypatc
     monkeypatch.setattr(video_modes, "reference_gen_retries", lambda: 2)
     monkeypatch.setattr(video_modes, "reference_prompt_async", lambda: False)
     monkeypatch.setattr(video_modes, "quality_threshold", lambda: 0.8)
-    monkeypatch.setattr(video_modes, "batch_qa_enabled", lambda: False)
     monkeypatch.setattr(video_modes, "batch_prompt_enabled", lambda: False)
     monkeypatch.setattr(video_modes, "consistency_check_enabled", lambda: False)
 
@@ -327,7 +326,6 @@ def test_reference_assets_publish_each_completed_image_without_waiting_for_slowe
     monkeypatch.setattr(video_modes, "_portrait_seed_inputs", lambda *a, **k: [])
     monkeypatch.setattr(video_modes, "reference_prompt_async", lambda: False)
     monkeypatch.setattr(video_modes, "batch_prompt_enabled", lambda: False)
-    monkeypatch.setattr(video_modes, "batch_qa_enabled", lambda: False)
     monkeypatch.setattr(video_modes, "reference_gen_retries", lambda: 0)
     monkeypatch.setattr(video_modes, "min_generated_references", lambda: 0)
     monkeypatch.setattr(video_modes, "max_character_reference_images", lambda: 2)
@@ -423,7 +421,6 @@ def test_build_reference_assets_fallback_keyframe_yields_to_clean_portrait(monke
     monkeypatch.setattr(video_modes, "reference_gen_retries", lambda: 2)
     monkeypatch.setattr(video_modes, "reference_prompt_async", lambda: True)
     monkeypatch.setattr(video_modes, "batch_prompt_enabled", lambda: False)
-    monkeypatch.setattr(video_modes, "batch_qa_enabled", lambda: False)
     monkeypatch.setattr(video_modes, "quality_threshold", lambda: 0.8)
     monkeypatch.setattr(video_modes, "consistency_check_enabled", lambda: False)
 
@@ -490,7 +487,6 @@ def test_build_reference_assets_subfloor_fallback_not_fed(monkeypatch) -> None:
     monkeypatch.setattr(video_modes, "min_generated_references", lambda: 1)
     monkeypatch.setattr(video_modes, "reference_gen_retries", lambda: 2)
     monkeypatch.setattr(video_modes, "reference_prompt_async", lambda: False)
-    monkeypatch.setattr(video_modes, "batch_qa_enabled", lambda: False)
     monkeypatch.setattr(video_modes, "consistency_check_enabled", lambda: False)
 
     async def fake_gen_one(*, project_id, episode_no, shot, bible, ref_type, index, content_override=None, seed_inputs=None,
@@ -536,7 +532,6 @@ def test_generated_references_get_i2i_seeds(monkeypatch) -> None:
     monkeypatch.setattr(video_modes, "reference_gen_retries", lambda: 0)
     monkeypatch.setattr(video_modes, "reference_prompt_async", lambda: False)
     monkeypatch.setattr(video_modes, "batch_prompt_enabled", lambda: False)
-    monkeypatch.setattr(video_modes, "batch_qa_enabled", lambda: False)
     monkeypatch.setattr(video_modes, "consistency_check_enabled", lambda: False)
     monkeypatch.setattr(video_modes, "_portrait_seed_inputs", lambda *a, **k: ["PORTRAIT_A"])
     _patch_multiview_production_ready(monkeypatch)
@@ -706,10 +701,39 @@ def test_consistency_check_failure_does_not_fake_perfect_score(monkeypatch, tmp_
     assert report["candidates"][0]["consistency"] is None
     assert report["candidates"][0].get("check_failed") is True
 
+    cand2 = ReferenceImageAsset(
+        id="g2", url="u3", type="plot_key_frame", source="seedream_generated",
+        path=str(img), qualityScore=0.88, selectedForSeedance=True,
+    )
+    kept = asyncio.run(video_modes._enforce_reference_consistency(
+        selected=[cand, cand2, anchor], shot=shot, bible=bible, project_id="p", episode_no=1))
+    assert {a.id for a in kept} == {"g1", "g2", "p1"}
+    assert (cand.qa or {}).get("consistency_check_failed") is True
+
+
+def test_single_generated_candidate_skips_redundant_group_consistency(monkeypatch, tmp_path) -> None:
+    bible, shot = _bible(), _shot(shot_no=2)
+    _consistency_settings(monkeypatch, retries=1)
+    img = tmp_path / "single.jpg"
+    img.write_bytes(b"fake-image")
+
+    async def must_not_run(*_a, **_k):
+        raise AssertionError("single candidate must reuse evidence QA instead of a second VLM call")
+
+    monkeypatch.setattr(video_modes, "review_reference_consistency", must_not_run)
+    cand = ReferenceImageAsset(
+        id="g1", url="u", type="plot_key_frame", source="seedream_generated",
+        path=str(img), qualityScore=0.9, selectedForSeedance=True,
+    )
+    anchor = ReferenceImageAsset(
+        id="p1", url="u2", type="character_sheet", source="asset_library",
+        path=str(img), qualityScore=0.95, selectedForSeedance=True,
+    )
+
     kept = asyncio.run(video_modes._enforce_reference_consistency(
         selected=[cand, anchor], shot=shot, bible=bible, project_id="p", episode_no=1))
-    assert {a.id for a in kept} == {"g1", "p1"}
-    assert (cand.qa or {}).get("consistency_check_failed") is True
+
+    assert kept == [cand, anchor]
 
 
 def test_compose_reference_score_weights() -> None:
@@ -828,7 +852,6 @@ def test_build_reference_assets_reuses_frozen_manifest_when_revisions_match(monk
     monkeypatch.setattr(video_modes, "reference_gen_retries", lambda: 0)
     monkeypatch.setattr(video_modes, "reference_prompt_async", lambda: False)
     monkeypatch.setattr(video_modes, "batch_prompt_enabled", lambda: False)
-    monkeypatch.setattr(video_modes, "batch_qa_enabled", lambda: False)
     monkeypatch.setattr(video_modes, "consistency_check_enabled", lambda: False)
 
     import app.multiview as mv

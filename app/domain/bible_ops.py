@@ -265,13 +265,20 @@ async def _bible_task(project_id: str, feedback: str = "", *, trigger_full_refs:
         project_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(projects)").fetchall()
         }
+        final_project_status = "bible_ready"
+        if "plan_status" in project_columns:
+            plan_row = conn.execute(
+                "SELECT plan_status FROM projects WHERE id=?", (project_id,)
+            ).fetchone()
+            if plan_row and plan_row["plan_status"] == "ready":
+                final_project_status = "planned"
         if "bible_artifact_id" in project_columns:
             conn.execute(
                 "UPDATE projects SET bible_json=?, bible_version=bible_version+1, bible_status=?, "
                 "bible_error=?, bible_artifact_id=?, status=? WHERE id=?",
                 (
                     bible.model_dump_json(), bible_status, bible_error, artifact_id,
-                    "bible_ready" if not residual else "created", project_id,
+                    final_project_status if not residual else "created", project_id,
                 ))
         else:
             conn.execute(
@@ -279,7 +286,7 @@ async def _bible_task(project_id: str, feedback: str = "", *, trigger_full_refs:
                 "bible_error=?, status=? WHERE id=?",
                 (
                     bible.model_dump_json(), bible_status, bible_error,
-                    "bible_ready" if not residual else "created", project_id,
+                    final_project_status if not residual else "created", project_id,
                 ))
         conn.commit()
         if trigger_full_refs and not residual:
@@ -655,9 +662,14 @@ async def _refs_task(
 @router.post("/projects/{project_id}/refs")
 async def start_refs(project_id: str, body: dict | None = None):
     from app.capabilities.dispatch import ui_route
+    payload = body or {}
     routed = await ui_route(
         "portrait.generate",
-        {"project_id": project_id, "character": (body or {}).get("character")},
+        {
+            "project_id": project_id,
+            "character": payload.get("character"),
+            "resume": bool(payload.get("resume", False)),
+        },
     )
     if routed is not None:
         return routed
@@ -666,8 +678,9 @@ async def start_refs(project_id: str, body: dict | None = None):
         raise HTTPException(409, "请先生成角色圣经")
     if _refs_task_active(project_id) or p["refs_status"] == "running":
         raise HTTPException(409, "定妆照正在生成中")
-    only = (body or {}).get("character")
-    _start_refs_generation(project_id, only)
+    only = payload.get("character")
+    resume = bool(payload.get("resume", False))
+    _start_refs_generation(project_id, only, resume=resume)
     return {"status": "running"}
 
 

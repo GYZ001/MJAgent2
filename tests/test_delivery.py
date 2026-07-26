@@ -76,6 +76,19 @@ def test_delivery_package_reaches_t5_and_feedback_preserves_snapshot(tmp_path, m
 
     readiness = delivery.delivery_readiness("e")
     assert readiness["ready"] is True and readiness["evidence_coverage"] == 1
+    conn.execute(
+        "UPDATE shot_versions SET qa_json=? WHERE id='v'",
+        (json.dumps({"overall": 0.9, "failure_types": ["character_duplicate"]}),),
+    )
+    conn.commit()
+    blocked = delivery.delivery_readiness("e")
+    assert blocked["ready"] is False
+    assert any(item["key"] == "fatal_video_quality" for item in blocked["blockers"])
+    conn.execute(
+        "UPDATE shot_versions SET qa_json=? WHERE id='v'",
+        (json.dumps({"overall": 0.9}),),
+    )
+    conn.commit()
     draft = delivery.build_delivery_package(
         "e", package_id="delivery_crash_window", operation_started_at=42,
     )

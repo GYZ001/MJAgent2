@@ -4,7 +4,7 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
-from app import api, db
+from app import api, db, planning
 from app.capabilities import attachments, ensure_catalog_loaded
 from app.capabilities.bus import reset_command_bus_for_tests, set_request_approval_token
 from app.capabilities.policy import reset_approvals_for_tests
@@ -37,7 +37,22 @@ def client(tmp_path, monkeypatch):
     attachments.reset_for_tests()
 
 
-def test_import_reuses_attachment_token_after_approval(client: TestClient) -> None:
+def test_import_reuses_attachment_token_after_approval(
+    client: TestClient, monkeypatch,
+) -> None:
+    started: dict[str, str] = {}
+
+    async def fake_start_bible(project_id: str, feedback: str) -> dict:
+        started["project_id"] = project_id
+        started["feedback"] = feedback
+        return {"status": "running", "run_id": "run_bootstrap"}
+
+    async def fake_start_plan(project_id: str) -> dict:
+        started["plan_project_id"] = project_id
+        return {"status": "running", "planner": "regex", "rule": "one_chapter_one_episode"}
+
+    monkeypatch.setattr(api, "_start_bible_core", fake_start_bible)
+    monkeypatch.setattr(planning, "start_plan", fake_start_plan)
     upload = client.post(
         "/api/attachments/novel",
         files={"file": ("story.txt", "第一章 开始\n这是正文。".encode("utf-8"), "text/plain")},
@@ -61,3 +76,17 @@ def test_import_reuses_attachment_token_after_approval(client: TestClient) -> No
     payload = imported.json()
     assert payload["project_id"].startswith("proj_")
     assert payload["ingestion"]["chapter_count"] == 1
+    assert payload["asset_generation"] == {
+        "status": "running",
+        "run_id": "run_bootstrap",
+    }
+    assert payload["episode_planning"] == {
+        "status": "running",
+        "planner": "regex",
+        "rule": "one_chapter_one_episode",
+    }
+    assert started == {
+        "plan_project_id": payload["project_id"],
+        "project_id": payload["project_id"],
+        "feedback": "",
+    }

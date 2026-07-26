@@ -776,6 +776,7 @@ async def review_scene_view(image_path: str, scene_canonical: str, view_role: st
     try:
         qa = await review_scene_image(
             hiagent.encode_image_file(image_path), scene_canonical, "场景定场", [], kind="head",
+            initiator_label="场景多视角主图QA",
         )
         qa["view_role"] = view_role
         return qa
@@ -789,8 +790,16 @@ async def review_scene_view(image_path: str, scene_canonical: str, view_role: st
         }
 
 
+def _qa_string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if item is not None]
+    if value is None or value == "":
+        return []
+    return [str(value)]
+
+
 async def review_character_pack_consistency(views: list[dict[str, Any]], appearance: str) -> dict[str, Any]:
-    """整包跨视角 QA：同一角色脸/发型/服装一致。"""
+    """一次完成逐视角质量与整包一致性 QA。"""
     frames: list[str] = []
     roles: list[str] = []
     for v in views:
@@ -802,15 +811,21 @@ async def review_character_pack_consistency(views: list[dict[str, Any]], appeara
             roles.append(str(v.get("view_role") or ""))
         except OSError:
             continue
-    if len(frames) < 2:
-        return {"overall": 1.0 if frames else None, "status": "ready" if frames else "unverified", "issues": []}
+    if len(frames) != len(views) or len(frames) < 2:
+        return {
+            "overall": None,
+            "status": "unverified",
+            "issues": ["多视角素材不完整，无法完成整包 QA"],
+        }
     expectation = (
         "你是角色多视角一致性评审。以下图片是同一角色不同观察角度的设定图，顺序："
         + ", ".join(f"{i+1}:{r}" for i, r in enumerate(roles))
         + f"。外观锚点：{appearance}。"
-        "检查：同一角色脸部特征、发型、服装、体型在各视角一致，只允许角度不同。"
+        "先逐张检查是否符合对应观察角度、外观锚点、主体完整且无畸形；"
+        "再检查同一角色脸部特征、发型、服装、体型在各视角一致，只允许角度不同。"
         '输出 JSON：{"overall":0~1,"face_consistency":0~1,"outfit_consistency":0~1,'
-        '"hair_consistency":0~1,"issues":[str],"hard_failures":[str]}'
+        '"hair_consistency":0~1,"views":[{"view_role":str,"overall":0~1,'
+        '"issues":[str],"hard_failures":[str]}],"issues":[str],"hard_failures":[str]}'
     )
     try:
         raw = await hiagent.vlm_check(frames, expectation, call_meta={"initiator_label": "人物多视角整包QA"})
@@ -821,9 +836,34 @@ async def review_character_pack_consistency(views: list[dict[str, Any]], appeara
                 data[key] = max(0.0, min(1.0, float(data.get(key, 0))))
             except (TypeError, ValueError):
                 data[key] = 0.0
-        data["status"] = "ready" if float(data.get("overall") or 0) >= 0.75 and not data.get("hard_failures") else "failed"
-        if not isinstance(data.get("issues"), list):
-            data["issues"] = []
+        reported = {
+            str(item.get("view_role") or ""): item
+            for item in (data.get("views") or []) if isinstance(item, dict)
+        }
+        normalized_views = []
+        for role in roles:
+            item = dict(reported.get(role) or {})
+            item["view_role"] = role
+            try:
+                item["overall"] = max(0.0, min(1.0, float(item.get("overall"))))
+            except (TypeError, ValueError):
+                item["overall"] = None
+            item["issues"] = _qa_string_list(item.get("issues"))
+            item["hard_failures"] = _qa_string_list(item.get("hard_failures"))
+            item["status"] = (
+                "ready" if item["overall"] is not None and item["overall"] >= 0.6
+                and not item["hard_failures"] else "failed"
+            )
+            normalized_views.append(item)
+        data["views"] = normalized_views
+        data["status"] = (
+            "ready" if float(data.get("overall") or 0) >= 0.75
+            and not data.get("hard_failures")
+            and all(item["status"] == "ready" for item in normalized_views)
+            else "failed"
+        )
+        data["issues"] = _qa_string_list(data.get("issues"))
+        data["hard_failures"] = _qa_string_list(data.get("hard_failures"))
         return data
     except Exception as exc:  # noqa: BLE001
         return {
@@ -846,15 +886,21 @@ async def review_scene_pack_consistency(views: list[dict[str, Any]], scene_canon
             roles.append(str(v.get("view_role") or ""))
         except OSError:
             continue
-    if len(frames) < 2:
-        return {"overall": 1.0 if frames else None, "status": "ready" if frames else "unverified", "issues": []}
+    if len(frames) != len(views) or len(frames) < 2:
+        return {
+            "overall": None,
+            "status": "unverified",
+            "issues": ["场景多视角素材不完整，无法完成整包 QA"],
+        }
     expectation = (
         "你是场景多视角一致性评审。以下是同一场景不同机位的无人定场图，顺序："
         + ", ".join(f"{i+1}:{r}" for i, r in enumerate(roles))
         + f"。场景锚点：{scene_canonical}。"
-        "检查门窗、主陈设、标志物、光线方向在各视角不自相矛盾；允许构图不同。"
+        "先逐张检查是否符合对应机位、场景锚点且画面结构完整；"
+        "再检查门窗、主陈设、标志物、光线方向在各视角不自相矛盾；允许构图不同。"
         '输出 JSON：{"overall":0~1,"geometry_consistency":0~1,"landmark_consistency":0~1,'
-        '"lighting_consistency":0~1,"issues":[str],"hard_failures":[str]}'
+        '"lighting_consistency":0~1,"views":[{"view_role":str,"overall":0~1,'
+        '"issues":[str],"hard_failures":[str]}],"issues":[str],"hard_failures":[str]}'
     )
     try:
         raw = await hiagent.vlm_check(frames, expectation, call_meta={"initiator_label": "场景多视角整包QA"})
@@ -865,9 +911,34 @@ async def review_scene_pack_consistency(views: list[dict[str, Any]], scene_canon
                 data[key] = max(0.0, min(1.0, float(data.get(key, 0))))
             except (TypeError, ValueError):
                 data[key] = 0.0
-        data["status"] = "ready" if float(data.get("overall") or 0) >= 0.75 and not data.get("hard_failures") else "failed"
-        if not isinstance(data.get("issues"), list):
-            data["issues"] = []
+        reported = {
+            str(item.get("view_role") or ""): item
+            for item in (data.get("views") or []) if isinstance(item, dict)
+        }
+        normalized_views = []
+        for role in roles:
+            item = dict(reported.get(role) or {})
+            item["view_role"] = role
+            try:
+                item["overall"] = max(0.0, min(1.0, float(item.get("overall"))))
+            except (TypeError, ValueError):
+                item["overall"] = None
+            item["issues"] = _qa_string_list(item.get("issues"))
+            item["hard_failures"] = _qa_string_list(item.get("hard_failures"))
+            item["status"] = (
+                "ready" if item["overall"] is not None and item["overall"] >= 0.6
+                and not item["hard_failures"] else "failed"
+            )
+            normalized_views.append(item)
+        data["views"] = normalized_views
+        data["status"] = (
+            "ready" if float(data.get("overall") or 0) >= 0.75
+            and not data.get("hard_failures")
+            and all(item["status"] == "ready" for item in normalized_views)
+            else "failed"
+        )
+        data["issues"] = _qa_string_list(data.get("issues"))
+        data["hard_failures"] = _qa_string_list(data.get("hard_failures"))
         return data
     except Exception as exc:  # noqa: BLE001
         return {
@@ -881,7 +952,7 @@ async def review_scene_pack_consistency(views: list[dict[str, Any]], scene_canon
 def _view_passed(qa: dict[str, Any] | None) -> bool:
     if not qa:
         return False
-    if qa.get("status") == "unverified" or qa.get("overall") is None:
+    if qa.get("status") in {"unverified", "failed", "rejected"} or qa.get("overall") is None:
         return False
     if qa.get("qa_recovered"):
         return False
@@ -889,6 +960,43 @@ def _view_passed(qa: dict[str, Any] | None) -> bool:
         return float(qa.get("overall") or 0) >= 0.6
     except (TypeError, ValueError):
         return False
+
+
+def _apply_pack_view_qa(
+    conn,
+    *,
+    table: str,
+    parent_column: str,
+    parent_id: str,
+    views: list[dict[str, Any]],
+    group_qa: dict[str, Any],
+) -> list[str]:
+    """把一次整包 QA 的逐视角结果落回视角表；返回未通过的视角。"""
+    reported = {
+        str(item.get("view_role") or ""): dict(item)
+        for item in (group_qa.get("views") or []) if isinstance(item, dict)
+    }
+    failed: list[str] = []
+    for view in views:
+        role = str(view.get("view_role") or "")
+        qa = reported.get(role)
+        if qa is None:
+            # 兼容旧测试替身和历史整包结果；真实评估器缺项会把整包标为 failed。
+            qa = {
+                "view_role": role,
+                "overall": group_qa.get("overall"),
+                "issues": _qa_string_list(group_qa.get("issues")),
+                "hard_failures": _qa_string_list(group_qa.get("hard_failures")),
+                "status": group_qa.get("status"),
+            }
+        status = "ready" if _view_passed(qa) and group_qa.get("status") == "ready" else "failed"
+        if status != "ready":
+            failed.append(role)
+        conn.execute(
+            f"UPDATE {table} SET qa_json=?, status=? WHERE {parent_column}=? AND view_role=?",
+            (json.dumps(qa, ensure_ascii=False), status, parent_id, role),
+        )
+    return failed
 
 
 async def ensure_character_multiview_pack(
@@ -901,6 +1009,7 @@ async def ensure_character_multiview_pack(
     ep_start: int,
     base_portrait_id: str | None = None,
     optional_views: list[str] | None = None,
+    primary_qa: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """生成/补齐人物必需多视角包；失败时 pack_status=failed，不半包生效。"""
     if not character_multiview_enabled():
@@ -935,7 +1044,10 @@ async def ensure_character_multiview_pack(
     )
     if not _ready_view_matches_fingerprint(front, front_fp):
         if parent and parent["image_path"] and Path(parent["image_path"]).exists():
-            qa = await review_character_view(parent["image_path"], appearance, "front_full")
+            qa = dict(primary_qa) if primary_qa else await review_character_view(
+                parent["image_path"], appearance, "front_full",
+            )
+            qa.setdefault("view_role", "front_full")
             status = "ready" if _view_passed(qa) else ("unverified" if qa.get("status") == "unverified" else "failed")
             _upsert_character_view(
                 conn, portrait_id=portrait_id, view_role="front_full", framing="full_body",
@@ -1027,20 +1139,18 @@ async def ensure_character_multiview_pack(
             call_meta={"asset_kind": "character_view", "view_role": view_role, "character_name": character_name},
         )
         await _save_image_item(item, path)
-        qa = await review_character_view(path, appearance, view_role)
-        status = "ready" if _view_passed(qa) else ("unverified" if qa.get("status") == "unverified" else "failed")
         view_id = _upsert_character_view(
             conn, portrait_id=portrait_id, view_role=view_role,
             framing="half_or_full" if view_role != "face_closeup" else "closeup",
-            image_path=path, prompt=prompt, qa=qa, artifact_id=None,
-            base_view_id=base.get("id"), status=status, fingerprint=fp,
+            image_path=path, prompt=prompt, qa=None, artifact_id=None,
+            base_view_id=base.get("id"), status=PACK_STATUS_QA_PENDING, fingerprint=fp,
         )
         conn.commit()
-        return {"view_role": view_role, "status": status, "id": view_id, "qa": qa}
+        return {"view_role": view_role, "status": PACK_STATUS_QA_PENDING, "id": view_id}
 
     side_roles = [r for r in roles if r != "front_full"]
     side_results = await asyncio.gather(*[_gen_side(r) for r in side_roles])
-    failed = [r for r in side_results if r.get("status") != "ready"]
+    failed = [r for r in side_results if r.get("status") not in {"ready", PACK_STATUS_QA_PENDING}]
     if failed:
         _set_portrait_pack_fields(
             conn, portrait_id, pack_status=PACK_STATUS_FAILED,
@@ -1052,14 +1162,26 @@ async def ensure_character_multiview_pack(
     views = list_portrait_views(portrait_id, conn=conn)
     required_views = [v for v in views if v.get("view_role") in CHARACTER_REQUIRED_VIEWS]
     group_qa = await review_character_pack_consistency(required_views, appearance)
-    if group_qa.get("status") != "ready":
+    failed_roles = _apply_pack_view_qa(
+        conn,
+        table="character_portrait_views",
+        parent_column="portrait_id",
+        parent_id=portrait_id,
+        views=required_views,
+        group_qa=group_qa,
+    )
+    if group_qa.get("status") != "ready" or failed_roles:
         _set_portrait_pack_fields(
             conn, portrait_id, pack_status=PACK_STATUS_FAILED,
             group_qa_json=json.dumps(group_qa, ensure_ascii=False),
         )
         conn.commit()
-        return {"status": "failed", "portrait_id": portrait_id, "group_qa": group_qa}
+        return {
+            "status": "failed", "portrait_id": portrait_id,
+            "group_qa": group_qa, "failed_views": failed_roles,
+        }
 
+    views = list_portrait_views(portrait_id, conn=conn)
     # 镜像 front_full 到父表
     front_ready = next((v for v in views if v.get("view_role") == "front_full"), None)
     fields = {
@@ -1082,6 +1204,7 @@ async def ensure_scene_multiview_pack(
     visual_style: str,
     ep_start: int,
     base_scene_id: str | None = None,
+    primary_qa: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not scene_multiview_enabled():
         return {"status": "disabled", "scene_reference_id": scene_reference_id}
@@ -1108,7 +1231,10 @@ async def ensure_scene_multiview_pack(
     )
     if not _ready_view_matches_fingerprint(est, est_fp):
         if parent and parent["image_path"] and Path(parent["image_path"]).exists():
-            qa = await review_scene_view(parent["image_path"], scene_canonical, "establishing")
+            qa = dict(primary_qa) if primary_qa else await review_scene_view(
+                parent["image_path"], scene_canonical, "establishing",
+            )
+            qa.setdefault("view_role", "establishing")
             status = "ready" if _view_passed(qa) else ("unverified" if qa.get("status") == "unverified" else "failed")
             _upsert_scene_view(
                 conn, scene_reference_id=scene_reference_id, view_role="establishing",
@@ -1185,20 +1311,13 @@ async def ensure_scene_multiview_pack(
             call_meta={"asset_kind": "scene_view", "view_role": "reverse_angle", "scene_name": scene_name},
         )
         await _save_image_item(item, path)
-        qa = await review_scene_view(path, scene_canonical, "reverse_angle")
-        status = "ready" if _view_passed(qa) else ("unverified" if qa.get("status") == "unverified" else "failed")
         _upsert_scene_view(
             conn, scene_reference_id=scene_reference_id, view_role="reverse_angle",
-            camera_axis="reverse", image_path=path, prompt=rev_prompt, qa=qa, artifact_id=None,
+            camera_axis="reverse", image_path=path, prompt=rev_prompt, qa=None, artifact_id=None,
             base_view_id=base_rev.get("id"),
-            status=status, fingerprint=rev_fp,
+            status=PACK_STATUS_QA_PENDING, fingerprint=rev_fp,
         )
         conn.commit()
-        if status != "ready":
-            _set_scene_pack_fields(conn, scene_reference_id, pack_status=PACK_STATUS_FAILED,
-                                  group_qa_json=json.dumps(qa, ensure_ascii=False))
-            conn.commit()
-            return {"status": "failed", "scene_reference_id": scene_reference_id, "failed_view": "reverse_angle"}
     elif rev and not rev.get("input_fingerprint"):
         _backfill_view_fingerprint(
             conn, table="scene_reference_views", view_id=rev["id"], fingerprint=rev_fp,
@@ -1208,14 +1327,26 @@ async def ensure_scene_multiview_pack(
     views = list_scene_views(scene_reference_id, conn=conn)
     required_views = [v for v in views if v.get("view_role") in SCENE_REQUIRED_VIEWS]
     group_qa = await review_scene_pack_consistency(required_views, scene_canonical)
-    if group_qa.get("status") != "ready":
+    failed_roles = _apply_pack_view_qa(
+        conn,
+        table="scene_reference_views",
+        parent_column="scene_reference_id",
+        parent_id=scene_reference_id,
+        views=required_views,
+        group_qa=group_qa,
+    )
+    if group_qa.get("status") != "ready" or failed_roles:
         _set_scene_pack_fields(
             conn, scene_reference_id, pack_status=PACK_STATUS_FAILED,
             group_qa_json=json.dumps(group_qa, ensure_ascii=False),
         )
         conn.commit()
-        return {"status": "failed", "scene_reference_id": scene_reference_id, "group_qa": group_qa}
+        return {
+            "status": "failed", "scene_reference_id": scene_reference_id,
+            "group_qa": group_qa, "failed_views": failed_roles,
+        }
 
+    views = list_scene_views(scene_reference_id, conn=conn)
     est_ready = next((v for v in views if v.get("view_role") == "establishing"), None)
     fields = {
         "pack_status": PACK_STATUS_READY,

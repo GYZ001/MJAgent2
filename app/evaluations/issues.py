@@ -16,7 +16,9 @@ _CODE_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("SPOKEN_TIMELINE_OUT_OF_RANGE", re.compile(r"口播时间段.+超出|SPOKEN_TIMELINE_OUT_OF_RANGE", re.I)),
     ("LEGACY_COVERAGE_UNCERTAIN", re.compile(r"LEGACY_COVERAGE_UNCERTAIN", re.I)),
     ("STATE_CHAIN_INVALID", re.compile(r"状态链|state_in|state_out|承接", re.I)),
-    ("KEY_LINE_MISSING", re.compile(r"主线台词|关键台词|key_lines|key_line", re.I)),
+    ("KEY_LINE_MISSING", re.compile(
+        r"主线台词|关键台词|主线对白|对白上下文|对白顺序|dialogue_chains|key_lines|key_line", re.I
+    )),
     ("SPINE_MISSING", re.compile(r"must_keep|spine_beat|主线节拍|plot_spine", re.I)),
     ("KEY_CONTENT_MISSING", re.compile(r"key_plot_points|主线剧情|关键剧情", re.I)),
     ("SHOT_OUTLINE_COVERAGE", re.compile(r"covers|大纲.*落实|本镜.*漏", re.I)),

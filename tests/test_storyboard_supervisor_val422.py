@@ -120,6 +120,10 @@ def test_issue_code_spoken_capacity():
     assert issue_code("第 9 镜口播超过 10 秒上限 36 字") == "SPOKEN_CAPACITY_EXCEEDED"
 
 
+def test_issue_code_dialogue_context_break_is_key_line_failure():
+    assert issue_code("主线对白上下文断裂：角色突然冒出一句回应") == "KEY_LINE_MISSING"
+
+
 def test_warning_candidate_policy_rejects_blocker_concept():
     """allow_warning_candidate 语义：有 blocker 时不得作为 warning 通过。
 

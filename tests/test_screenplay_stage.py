@@ -1,5 +1,8 @@
-from app.schemas import Bible, Character, EpisodeScreenplay, ScreenplayBeat, ScriptScene, World, PlotSpine, PlotSpineBeat
-from app.validators import validate_screenplay
+from app.schemas import (Bible, Character, EpisodeScreenplay, KeyDialogueChain,
+                         KeyDialogueTurn, PlotSpine, PlotSpineBeat,
+                         ScreenplayBeat, ScriptScene, World)
+from app.stages import _render_screenplay_source
+from app.validators import source_dialogue_fragments, validate_screenplay
 
 
 def _bible() -> Bible:
@@ -322,6 +325,146 @@ def test_screenplay_rejects_key_line_absent_from_body() -> None:
     errors = validate_screenplay(script, _bible(), expected_beats=5, episode_no=1)
 
     assert any("未真正写进 full_script_text" in e for e in errors)
+
+
+def test_screenplay_rejects_key_line_only_copied_into_action_prose() -> None:
+    """关键台词出现在动作描述里不等于角色真的说出了这句台词。"""
+    script = _valid_rainy_script()
+    script.full_script_text = script.full_script_text.replace(
+        "谷言（猛地起身）：你这几天到底躲到哪去了？",
+        "谷言猛地起身，纸条上写着“你这几天到底躲到哪去了？”。",
+    )
+
+    errors = validate_screenplay(script, _bible(), expected_beats=5, episode_no=1)
+
+    assert any("角色对白" in e and "动作描述或梗概" in e for e in errors), errors
+
+
+def test_screenplay_rejects_orphan_context_dependent_reply() -> None:
+    """安慰/回答不能脱离另一角色的触发话轮突然出现。"""
+    reply = "我相信，你会重新站起来。"
+    script = _valid_rainy_script()
+    script.full_script_text = script.full_script_text.replace(
+        "谷言（攥紧钥匙）：你到底想说什么？别绕了，把今晚的事一次讲清楚。",
+        f"谷言：{reply}",
+    )
+    script.key_lines[-1] = reply
+
+    errors = validate_screenplay(script, _bible(), expected_beats=5, episode_no=1)
+
+    assert any("主线对白上下文断裂" in e and "突然冒出一句回应" in e for e in errors), errors
+
+
+def test_screenplay_accepts_reply_with_prior_other_character_turn() -> None:
+    reply = "我相信，你会重新站起来。"
+    script = _valid_rainy_script()
+    script.full_script_text = script.full_script_text.replace(
+        "谷言（攥紧钥匙）：你到底想说什么？别绕了，把今晚的事一次讲清楚。",
+        f"测验员：你还相信他会回来吗？\n谷言：{reply}",
+    )
+    script.key_lines = script.key_lines[:2] + ["你还相信他会回来吗？", reply]
+
+    errors = validate_screenplay(script, _bible(), expected_beats=5, episode_no=1)
+
+    assert not any("主线对白上下文断裂" in e for e in errors), errors
+
+
+def test_screenplay_rejects_key_lines_out_of_story_order() -> None:
+    script = _valid_rainy_script()
+    script.key_lines = list(reversed(script.key_lines))
+
+    errors = validate_screenplay(script, _bible(), expected_beats=5, episode_no=1)
+
+    assert any("打乱了主线对白顺序" in e for e in errors), errors
+
+
+def test_long_screenplay_source_retains_head_middle_dialogue_and_tail() -> None:
+    source = (
+        "开场事实" + ("甲" * 500)
+        + "中段人物说道：“这句主线台词绝对不能丢。”"
+        + ("乙" * 500) + "结尾真相落定"
+    )
+
+    rendered = _render_screenplay_source(source, budget=360)
+
+    assert rendered.startswith("开场事实")
+    assert "“这句主线台词绝对不能丢。”" in rendered
+    assert rendered.endswith("结尾真相落定")
+    assert len(rendered) <= 360
+
+
+def _screenplay_with_source_dialogue_chain() -> tuple[EpisodeScreenplay, str]:
+    source = "\n".join([
+        "测验员：“斗之力，三段！”",
+        "谷言：“只有三段？”",
+        "测验员：“结果无误。”",
+    ])
+    script = _valid_rainy_script()
+    script.full_script_text = script.full_script_text.replace(
+        "谷言（压低声音）：还有十分钟，他要是再不来，我就走。",
+        "测验员：斗之力，三段！\n谷言：只有三段？\n测验员：结果无误。",
+    )
+    script.dialogue_chains = [KeyDialogueChain(
+        chain_id="DC1",
+        topic="测验员宣布结果并确认",
+        turns=[
+            KeyDialogueTurn(
+                speaker="测验员", line="斗之力，三段！",
+                function="announcement", source_text="斗之力，三段！",
+            ),
+            KeyDialogueTurn(
+                speaker="谷言", line="只有三段？",
+                function="response", source_text="只有三段？",
+            ),
+            KeyDialogueTurn(
+                speaker="测验员", line="结果无误。",
+                function="response", source_text="结果无误。",
+            ),
+        ],
+    )]
+    script.key_lines = ["模型错误挑选的孤立金句"]
+    return script, source
+
+
+def test_source_dialogue_inventory_keeps_first_utterance_in_order() -> None:
+    _script, source = _screenplay_with_source_dialogue_chain()
+
+    assert source_dialogue_fragments(source) == [
+        "斗之力，三段！", "只有三段？", "结果无误。",
+    ]
+
+
+def test_dialogue_chain_is_authoritative_and_allows_functional_trigger() -> None:
+    script, source = _screenplay_with_source_dialogue_chain()
+
+    errors = validate_screenplay(
+        script, _bible(), expected_beats=5, episode_no=1,
+        source_text=source, require_dialogue_chains=True,
+    )
+
+    assert script.key_lines == [
+        "测验员：斗之力，三段！", "谷言：只有三段？", "测验员：结果无误。",
+    ]
+    assert not any("dialogue_chains" in error or "开场第一句对白" in error for error in errors), errors
+    assert not any("非人物谱角色台词" in error for error in errors), errors
+
+
+def test_dialogue_chain_rejects_missing_first_source_utterance() -> None:
+    script, source = _screenplay_with_source_dialogue_chain()
+    script.dialogue_chains[0].turns = script.dialogue_chains[0].turns[1:]
+    script.dialogue_chains[0].turns.append(KeyDialogueTurn(
+        speaker="谷言", line="今晚必须查清。", function="decision", source_text="结果无误。",
+    ))
+    script.full_script_text = script.full_script_text.replace(
+        "测验员：结果无误。", "测验员：结果无误。\n谷言：今晚必须查清。",
+    )
+
+    errors = validate_screenplay(
+        script, _bible(), expected_beats=5, episode_no=1,
+        source_text=source, require_dialogue_chains=True,
+    )
+
+    assert any("原文开场第一句对白未进入 dialogue_chains" in error for error in errors), errors
 
 
 def test_screenplay_allows_dropping_non_spine_source_dialogues() -> None:

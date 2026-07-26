@@ -27,7 +27,10 @@ export default function Studio() {
         attachment_token: attachment.attachment_token,
         name: name || file.name.replace(/\.txt$/i, ''),
       })
-      toast(`《${name || file.name}》已摄入：${res.ingestion.chapter_count} 章，${res.ingestion.total_chars} 字${res.ingestion.auto_split ? '（未识别到章节标题，已按字数切分）' : ''}`)
+      const bootstrapMessage = res.asset_generation?.status === 'running' && res.episode_planning?.status === 'running'
+        ? '；正在自动分集，并生成人物谱和多视角素材'
+        : '；部分自动任务未能启动，请进入项目查看并重试'
+      toast(`《${name || file.name}》已摄入：${res.ingestion.chapter_count} 章，${res.ingestion.total_chars} 字${res.ingestion.auto_split ? '（未识别到章节标题，已按字数切分）' : ''}${bootstrapMessage}`)
       setName('')
       setShowImport(false)
       refresh()

@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -99,7 +100,15 @@ async def generate_refs(
 
     if resume:
         # A candidate is committed per character before the batch-level Bible merge.
-        # Rehydrate those committed paths first, then regenerate only missing assets.
+        # Rehydrate only complete packs. A process may stop after the front view
+        # was committed but before the side views finished; resume that pack
+        # instead of mistaking the partial row for a completed character.
+        from app.multiview import (
+            character_multiview_enabled,
+            complete_legacy_character_pack,
+            pack_result_ok,
+        )
+
         committed: dict[str, str] = {}
         for character in targets:
             row = conn.execute(
@@ -109,6 +118,23 @@ async def generate_refs(
                 (project_id, character.name),
             ).fetchone()
             if row and row["image_path"] and Path(row["image_path"]).is_file():
+                if character_multiview_enabled():
+                    try:
+                        pack = await complete_legacy_character_pack(
+                            project_id, character.name, 1, style,
+                        )
+                    except Exception:  # noqa: BLE001 - regular generation retries below
+                        pack = None
+                    if not pack_result_ok(pack):
+                        continue
+                    row = conn.execute(
+                        "SELECT image_path FROM character_portraits "
+                        "WHERE project_id=? AND character_name=? AND ep_start=1 "
+                        "ORDER BY created_at DESC LIMIT 1",
+                        (project_id, character.name),
+                    ).fetchone()
+                    if not row or not row["image_path"] or not Path(row["image_path"]).is_file():
+                        continue
                 character.ref_image_path = row["image_path"]
                 committed[character.name] = row["image_path"]
         if committed:
@@ -130,6 +156,7 @@ async def generate_refs(
             last_error: Exception | None = None
             critique = ""
             for attempt in range(1, 3):
+                portrait_id: str | None = None
                 path = str(Path(ref_path(project_id, c.name)).with_name(
                     f"{_safe_name(c.name)}__{new_id('candidate')}.jpg"
                 ))
@@ -178,7 +205,6 @@ async def generate_refs(
                             f"定妆照一致性检查未通过：{c.name}（第 {attempt} 次）"
                         )
                         continue
-                    c.ref_image_path = path
                     portrait_id = _portraits.register_initial_portrait(
                         conn, project_id, c.name, path, c.appearance_canonical, prompt,
                         bible_version, artifact_id=artifact["id"])
@@ -194,21 +220,47 @@ async def generate_refs(
                             appearance=c.appearance_canonical,
                             visual_style=style,
                             ep_start=1,
+                            primary_qa=qa,
                         )
                         if not pack_result_ok(pack):
                             raise hiagent.ProviderError(
                                 f"多视角资产包未通过，禁止生效：{c.name}"
                                 f"（status={pack.get('status')}）"
                             )
+                    # The Bible path becomes visible only after the required
+                    # multiview pack has passed as a whole.
+                    c.ref_image_path = path
                     break
+                except asyncio.CancelledError:
+                    if portrait_id:
+                        conn.execute("DELETE FROM character_portraits WHERE id=?", (portrait_id,))
+                        conn.commit()
+                    c.ref_image_path = None
+                    raise
                 except hiagent.ProviderError as exc:
+                    if portrait_id:
+                        conn.execute("DELETE FROM character_portraits WHERE id=?", (portrait_id,))
+                        conn.commit()
+                        portrait_id = None
+                    c.ref_image_path = None
                     if "多视角资产包未通过" in str(exc):
                         raise
                     last_error = exc
                 except Exception as exc:  # noqa: BLE001 候选失败后在有界循环内修复
+                    if portrait_id:
+                        conn.execute("DELETE FROM character_portraits WHERE id=?", (portrait_id,))
+                        conn.commit()
+                        portrait_id = None
+                    c.ref_image_path = None
                     last_error = exc
             if not c.ref_image_path:
                 raise last_error or hiagent.ProviderError(f"定妆照生成失败：{c.name}")
+            # Publish each accepted character as its own durable checkpoint.
+            # The remaining characters may take many minutes or be interrupted
+            # by a process restart; already-ready packs must be visible and
+            # resumable without waiting for the entire batch to finish.
+            _merge_generated_portraits(conn, project_id, [c])
+            conn.commit()
         except Exception as exc:  # noqa: BLE001 失败要响：逐角色记录，最后汇总抛出
             errors.append(f"{c.name}：{exc}")
 

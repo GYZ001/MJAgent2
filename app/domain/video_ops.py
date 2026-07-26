@@ -1235,7 +1235,7 @@ async def concatenate(episode_id: str):
 @router.get("/episodes/{episode_id}/stale-assets-preview")
 def stale_assets_preview(episode_id: str):
     """评审墙：资产/分镜 stale 影响预览（只读）。"""
-    ep = _episode_or_404(episode_id)
+    ep = dict(_episode_or_404(episode_id))
     conn = get_conn()
     from app.domain.storyboard_ops import _shot_video_is_stale, _shot_adopted_assets_stale
     rows = conn.execute(

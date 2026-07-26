@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, Bible, Character, Portrait } from '../api'
+import { api, Bible, Character, Portrait, PortraitView } from '../api'
 import { useNav, useProject } from '../App'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 import SearchField from '../components/SearchField'
@@ -11,7 +11,7 @@ import PrepSubnav from '../components/PrepSubnav'
 import { useFillPageSize } from '../hooks/useFillPageSize'
 
 export default function BiblePage() {
-  const { projectId, toast } = useNav()
+  const { projectId, toast, go } = useNav()
   const { data: p, refresh, error, loading } = useProject(projectId!, undefined, 'bible')
   const [editing, setEditing] = useState<Bible | null>(null)
   const [busy, setBusy] = useState(false)
@@ -87,6 +87,14 @@ export default function BiblePage() {
     }
   }
 
+  const retryRefs = async () => {
+    refsTimer.start()
+    await act(
+      () => api.post(`/projects/${p.id}/refs`, { resume: true }),
+      '已开始补齐缺失的定妆照，已有成品会保留',
+    )
+  }
+
   const saveBible = async () => {
     if (!editing) return
     await act(async () => {
@@ -114,8 +122,18 @@ export default function BiblePage() {
         <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
           {!p.bible && !generating && (
             <button className="btn primary" disabled={busy} onClick={startBible}>
-              开始生成人物谱和定妆照
+              {p.bible_status === 'failed' ? '重新生成人物谱和定妆照' : '开始生成人物谱和定妆照'}
             </button>
+          )}
+          {p.bible && p.refs_status === 'failed' && !generating && (
+            <>
+              <button className="btn primary" disabled={busy} onClick={retryRefs}>
+                补齐缺失的定妆照
+              </button>
+              <button className="btn ghost" disabled={busy} onClick={() => go('episodes', p.id)}>
+                暂时跳过，继续分集
+              </button>
+            </>
           )}
           {generating && (
             <button className="btn ghost" disabled={busy} onClick={stopGeneration}>
@@ -173,14 +191,22 @@ export default function BiblePage() {
           </div>
           <div className="figure-grid">
             {pagedChars.map(({ c, i }: { c: Character; i: number }) => {
-              const fitting = p.refs_status === 'running' && (!p.refs_target || p.refs_target === c.name)
+              const portraits = c.portraits ?? []
+              const hasPortraitImage = portraits.some(portrait =>
+                (portrait.pack_status === 'ready' || !portrait.pack_status)
+                && (!!portrait.image_url || (portrait.views ?? []).some(view => !!view.image_url)),
+              )
+              const fitting = p.refs_status === 'running' && (
+                p.refs_target === c.name
+                || (!p.refs_target && portraits.some(portrait => portrait.pack_status === 'generating'))
+              )
               return (
               <article key={c.name} className="figure character-card">
                 <div className="f-name">{c.name} <span className="f-role">{c.role}</span>
                   {fitting ? <span className="stamp gold">定妆中</span>
-                    : c.ref_image_url ? <span className="stamp green">已定妆</span> : <span className="stamp grey">未定妆</span>}
+                    : (c.ref_image_url || hasPortraitImage) ? <span className="stamp green">已定妆</span> : <span className="stamp grey">未定妆</span>}
                 </div>
-                {c.ref_image_url && (
+                {(c.ref_image_url || hasPortraitImage) && (
                   <CharacterPortraitGallery
                     projectId={p.id}
                     character={c}
@@ -332,6 +358,14 @@ const VIEW_ROLE_LABELS: Record<string, string> = {
   face_closeup: '面部特写',
 }
 
+type PortraitSlide = {
+  key: string
+  imageUrl: string
+  portrait: Portrait | null
+  versionIndex: number
+  view: PortraitView | null
+}
+
 function CharacterPortraitGallery({ projectId, character, fitting, disabled, onChanged }: {
   projectId: string
   character: Character
@@ -344,10 +378,44 @@ function CharacterPortraitGallery({ projectId, character, fitting, disabled, onC
   const [redoing, setRedoing] = useState<string | null>(null)
   // 当前版本排在第一张；旧图只是定妆版本历史，不代表对应集数已经投入生产。
   const portraits = [...(character.portraits ?? [])]
-    .filter(portrait => !!portrait.image_url || (portrait.views ?? []).some(v => v.image_url))
+    .filter(portrait =>
+      (portrait.pack_status === 'ready' || !portrait.pack_status)
+      && (!!portrait.image_url || (portrait.views ?? []).some(v => v.image_url)),
+    )
     .sort((a, b) => b.ep_start - a.ep_start)
-  const hasVersions = portraits.length > 0
-  const count = hasVersions ? portraits.length : 1
+  const slides: PortraitSlide[] = []
+  portraits.forEach((portrait, versionIndex) => {
+    const views = (portrait.views ?? []).filter(view => !!view.image_url)
+    if (views.length) {
+      slides.push(...views.map(view => ({
+        key: `${portrait.id}:${view.id}`,
+        imageUrl: view.image_url!,
+        portrait,
+        versionIndex,
+        view,
+      })))
+      return
+    }
+    if (portrait.image_url) {
+      slides.push({
+        key: portrait.id || `${portrait.ep_start}:${portrait.image_url}`,
+        imageUrl: portrait.image_url,
+        portrait,
+        versionIndex,
+        view: null,
+      })
+    }
+  })
+  if (!slides.length && character.ref_image_url) {
+    slides.push({
+      key: `${character.name}:legacy`,
+      imageUrl: character.ref_image_url,
+      portrait: null,
+      versionIndex: 0,
+      view: null,
+    })
+  }
+  const count = slides.length
 
   const scroll = (direction: -1 | 1) => {
     const track = trackRef.current
@@ -373,56 +441,41 @@ function CharacterPortraitGallery({ projectId, character, fitting, disabled, onC
   return (
     <div className="character-portrait">
       <div ref={trackRef} className="character-portrait-track" aria-label={`${character.name}定妆照版本`}>
-        {hasVersions ? portraits.map((portrait, index) => (
-          <figure key={portrait.id} className="character-portrait-slide">
-            <img src={(portrait.image_url || portrait.views?.find(v => v.view_role === 'front_full')?.image_url)!}
-              alt={`${character.name} · ${portraitVersionLabel(portrait)}`}
+        {slides.map(({ key, imageUrl, portrait, versionIndex, view }) => (
+          <figure key={key} className="character-portrait-slide">
+            <img src={imageUrl}
+              alt={`${character.name} · ${portrait ? portraitVersionLabel(portrait) : '定妆照'} · ${VIEW_ROLE_LABELS[view?.view_role || ''] || view?.view_role || '正面'}`}
               style={{ opacity: fitting ? 0.45 : 1, transition: 'opacity 0.3s' }} />
-            <figcaption className="portrait-version-label">
-              {portraitVersionLabel(portrait)}
-              {index === 0 && portrait.ep_end == null ? <em>当前</em> : null}
-              {portrait.pack_status ? ` · ${portrait.pack_status}` : ''}
-              {portrait.ep_end != null
-                ? ` · 第${portrait.ep_start}-${portrait.ep_end}集`
-                : ` · 第${portrait.ep_start}集起`}
-            </figcaption>
-            {(portrait.views ?? []).length > 0 && (
-              <div className="portrait-view-strip" aria-label="多视角">
-                {portrait.views!.map(view => view.image_url ? (
-                  <div key={view.id} className="portrait-view-chip">
-                    <img src={view.image_url} alt={view.view_role || 'view'} />
-                    <span>{VIEW_ROLE_LABELS[view.view_role || ''] || view.view_role || '视角'}</span>
-                    {index === 0 && portrait.ep_end == null && view.view_role && (
-                      <button
-                        type="button"
-                        className="btn small ghost"
-                        style={{ fontSize: 10, padding: '1px 6px', marginTop: 2 }}
-                        disabled={disabled || !!redoing}
-                        onClick={() => redoView(portrait.id, view.view_role!)}
-                      >
-                        {redoing === `${portrait.id}:${view.view_role}` ? '重做中…' : '重做'}
-                      </button>
-                    )}
-                  </div>
-                ) : null)}
-              </div>
+            {portrait && <figcaption className="portrait-version-label">
+              <span>
+                {portraitVersionLabel(portrait)} · {VIEW_ROLE_LABELS[view?.view_role || ''] || view?.view_role || '正面'}
+                {portrait.ep_end != null
+                  ? ` · 第${portrait.ep_start}-${portrait.ep_end}集`
+                  : ` · 第${portrait.ep_start}集起`}
+              </span>
+              {versionIndex === 0 && portrait.ep_end == null ? <em>当前</em> : null}
+            </figcaption>}
+            {portrait && versionIndex === 0 && portrait.ep_end == null && view?.view_role && (
+              <button
+                type="button"
+                className="portrait-view-redo"
+                disabled={disabled || !!redoing}
+                onClick={() => redoView(portrait.id!, view.view_role!)}
+              >
+                {redoing === `${portrait.id}:${view.view_role}` ? '重做中…' : '重做当前视角'}
+              </button>
             )}
-            {portrait.change?.reason && (
+            {portrait?.change?.reason && (
               <div className="f-misc" style={{ fontSize: 11, padding: '4px 6px' }}>
                 变化：{(portrait.change.change_dimensions || []).join('/') || '外观'} · {portrait.change.reason}
               </div>
             )}
           </figure>
-        )) : (
-          <figure className="character-portrait-slide">
-            <img src={character.ref_image_url!} alt={character.name}
-              style={{ opacity: fitting ? 0.45 : 1, transition: 'opacity 0.3s' }} />
-          </figure>
-        )}
+        ))}
       </div>
       {count > 1 && (
         <div className="portrait-scroll-controls" aria-label="切换定妆照">
-          <span>{count} 张 · 横滑</span>
+          <span>{count} 张视角图 · 横滑</span>
           <button type="button" onClick={() => scroll(-1)} aria-label="上一张定妆照">‹</button>
           <button type="button" onClick={() => scroll(1)} aria-label="下一张定妆照">›</button>
         </div>

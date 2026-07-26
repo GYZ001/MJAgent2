@@ -38,6 +38,7 @@ from app.validators import (SCENE_SETTING_MAX_CHARS,
                             normalize_offbible_characters, normalize_transition_visuals,
                             prefer_default_shot_durations,
                             relieve_spoken_overflow,
+                            source_dialogue_fragments,
                             storyboard_shot_count_range,
                             validate_bible, validate_screenplay,
                             validate_scene_bible,
@@ -186,6 +187,7 @@ async def _run_with_agent_loop(
     temperature: float = 0.7,
     max_tokens: int = 8192,
     repair_user_prompt_limit: int | None = 3000,
+    repair_candidate_limit: int | None = 6000,
     repair_context: str | None = None,
     repair_output_contract: str | None = None,
     prefill: dict | None = None,
@@ -237,6 +239,9 @@ async def _run_with_agent_loop(
                 if repair_user_prompt_limit is None
                 else user_prompt[:repair_user_prompt_limit]
             )
+        previous_candidate = previous_raw or ""
+        if repair_candidate_limit is not None:
+            previous_candidate = previous_candidate[:repair_candidate_limit]
         repair_prompt = (
             "你此前的输出未通过校验。以下问题均为结构化硬门禁，不是泛泛建议：\n"
             + _render_error_history(error_history)
@@ -245,7 +250,7 @@ async def _run_with_agent_loop(
             + "\n\n原任务要求：\n"
             + original_task
             + "\n\n最近一次候选：\n"
-            + (previous_raw or "")[:6000]
+            + previous_candidate
             + (
                 "\n\n本轮输出合同（最高优先级）：\n" + repair_output_contract
                 if repair_output_contract
@@ -545,13 +550,61 @@ async def generate_scene_bible(chapters: list[dict], bible: Bible,
 SCREENPLAY_SOURCE_BUDGET_CHARS = 24000
 
 
+_SOURCE_QUOTED_DIALOGUE_RE = re.compile(r"[“「『][^”」』\n]{2,240}[”」』]")
+_SOURCE_SPEAKER_DIALOGUE_RE = re.compile(
+    r"(?m)^[^\n：:]{1,20}[：:][^\n]{2,300}$"
+)
+
+
+def _source_dialogue_evidence(text: str, limit: int) -> str:
+    """Select exact dialogue evidence from a source section without inventing prose.
+
+    Long chapters used to be truncated at the head, which made dialogue in the
+    middle or climax literally unavailable to generation and repair.  Preserve
+    dialogue-shaped source fragments in addition to stable head/tail context.
+    """
+    if limit <= 0 or not text:
+        return ""
+    fragments: list[str] = []
+    seen: set[str] = set()
+    for pattern in (_SOURCE_SPEAKER_DIALOGUE_RE, _SOURCE_QUOTED_DIALOGUE_RE):
+        for match in pattern.finditer(text):
+            fragment = match.group(0).strip()
+            condensed = re.sub(r"\s+", "", fragment)
+            if not condensed or condensed in seen:
+                continue
+            seen.add(condensed)
+            fragments.append(fragment)
+    selected: list[str] = []
+    used = 0
+    for fragment in fragments:
+        cost = len(fragment) + (1 if selected else 0)
+        if used + cost > limit:
+            continue
+        selected.append(fragment)
+        used += cost
+    return "\n".join(selected)
+
+
 def _render_screenplay_source(source_text: str, budget: int = SCREENPLAY_SOURCE_BUDGET_CHARS) -> str:
     text = source_text or ""
     if len(text) <= budget:
         return text
-    return (text[:budget]
-            + f"\n\n……（本集源文还有约 {len(text) - budget} 字未展示；改编时请依据上方"
-              "原文真实情节推进，不要遗漏后半段的关键事件与台词）")
+    marker_a = "\n\n……（中段叙事已按上下文预算压缩；以下保留中段原文对白证据）……\n"
+    marker_b = "\n\n……（继续保留本章结尾原文，结尾事件与台词不得遗漏）……\n"
+    payload_budget = max(0, budget - len(marker_a) - len(marker_b))
+    head_budget = int(payload_budget * 0.35)
+    tail_budget = int(payload_budget * 0.35)
+    dialogue_budget = payload_budget - head_budget - tail_budget
+    middle_end = max(head_budget, len(text) - tail_budget)
+    middle = text[head_budget:middle_end]
+    dialogue_evidence = _source_dialogue_evidence(middle, dialogue_budget)
+    # If the middle contains little dialogue, use the remaining allowance for
+    # contiguous context immediately after the head instead of wasting budget.
+    unused = max(0, dialogue_budget - len(dialogue_evidence))
+    head = text[:head_budget + unused]
+    tail = text[-tail_budget:] if tail_budget else ""
+    return head + marker_a + dialogue_evidence + marker_b + tail
 
 
 async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
@@ -567,6 +620,16 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
     episode_hook = (episode.get("hook") or "").strip()
     episode_cliffhanger = (episode.get("cliffhanger") or "").strip()
     no_episode_hook = not episode_hook and not episode_cliffhanger
+    source_dialogues = source_dialogue_fragments(source_text)
+    opening_dialogue_anchor = source_dialogues[0] if source_dialogues else ""
+    opening_dialogue_block = (
+        "【原文开场对白锚点·硬门禁】\n"
+        f"- D001：{opening_dialogue_anchor}\n"
+        "D001 必须进入 dialogue_chains[0].turns[0].source_text，并在 adapted line/full_script_text 中落地。"
+        "即使说话人是测验员、守卫等功能性角色，只要它触发后续主角反应，就必须整组保留。"
+        if opening_dialogue_anchor
+        else "【原文开场对白锚点】本集原文未检测到显式对白。"
+    )
     screenplay_hook_rule = (
         "剧本开头按原文真实开场推进；本集 episode hook 为空，禁止为了格式发明额外开场钩子。"
         if not episode_hook
@@ -609,7 +672,11 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
 - `plot_spine.spine_beats`：5~12 条；每条含 beat_id/who/does/turn/must_keep；只写改变局势的事件。
 - `plot_spine.must_keep_ending`：本章收束（与原文本章结局同向；禁止发明下一章钩子）。
 - `plot_spine.drop_list`：至少 2 条「本章有但不拍」的支线/气氛戏/装饰对白。
-- `key_lines`：只保留推动 spine 的主线台词，**最多 {KEY_LINES_MAX} 条**；禁止把人物谱原文台词全量入库。功能性路人台词可写进正文但不得进 key_lines。
+- `dialogue_chains`：主线对白的权威来源。每条链写清 chain_id/topic/turns；turns 按原文与正文发生顺序排列，每个 turn 含 speaker/line/function/source_text。
+- 每条对白链必须从 trigger/announcement/question 开始，再接 response/decision；不得从回答开始。测验员、守卫等功能性角色若负责宣布结果或触发主角反应，允许且必须作为链首进入。
+- `key_lines` 由后端按 dialogue_chains.turns 确定性回填，模型仍需输出但不得自行另选；对白链总话轮 **{3}~{KEY_LINES_MAX} 条**，按整组取舍，禁止把人物谱原文台词全量入库。
+- `key_lines` 中每一条都必须在 `full_script_text` 里作为“角色名：台词”的真实对白落地；写进动作描述、梗概、source_basis 或清单本身都不算角色说过。
+- `key_lines` 必须按正文发生顺序排列，并按“对白链”取舍：若保留回答、安慰、反驳、引用对方旧话，必须连同触发它的前一角色话轮一起保留；宁可删除另一组支线对白，也不得只摘一句回答让角色突兀开口。
 - `key_plot_points`：{KEY_PLOT_POINTS_MIN}~{KEY_PLOT_POINTS_MAX} 条，与 spine 局势变化对齐，不是动作微描写。
 
 【单集戏剧契约】（先想清楚再落笔，避免压缩后只剩事件、没有方向）：
@@ -635,7 +702,7 @@ B. `full_script_text`：真正的剧本正文；只写大形体动作与主线�
 1. episode_no 必须作为顶层字段出现且等于 {episode['episode_no']}（不可省略，也不可写进任何嵌套对象里）。
 2. 必须先有合法 `plot_spine`；title / logline / scene_outline / full_script_text / emotional_curve / ending_hook / source_basis 必填；
    dramatic_question / protagonist_goal / obstacle / stakes 必填；
-   key_lines {3}~{KEY_LINES_MAX} 条且须写进正文；key_plot_points {KEY_PLOT_POINTS_MIN}~{KEY_PLOT_POINTS_MAX} 条。
+   key_lines {3}~{KEY_LINES_MAX} 条且须按发生顺序写进正文；上下文依赖台词必须与触发话轮组成连续对白链；key_plot_points {KEY_PLOT_POINTS_MIN}~{KEY_PLOT_POINTS_MAX} 条。
 3. `scene_outline` 必须是 3~5 场的连续场次结构，scene_no 从 1 连续递增。
    【硬性·角色圣经】scene_outline[*].characters 中的具名角色只能填角色圣经准确姓名（{bible_names_inline}）；无需跨集定妆的临时人物允许使用测验员、守卫、围观者、路人甲等通用功能性身份标签。
 4. full_script_text 必须是一篇连续故事正文，且必须带场次标题、动作段、对白段；「【场N】」数量必须与 scene_outline 一致。
@@ -664,6 +731,8 @@ B. `full_script_text`：真正的剧本正文；只写大形体动作与主线�
 - 上一集结尾：{prev_ending or '（本集为第一集）'}
 - 本集目标时长：{episode['target_duration_s']} 秒
 
+{opening_dialogue_block}
+
 角色圣经（姓名、关系、说话风格必须遵守）：
 {bible.model_dump_json()}
 
@@ -674,7 +743,7 @@ B. `full_script_text`：真正的剧本正文；只写大形体动作与主线�
 {_render_screenplay_source(source_text)}
 
 输出 JSON Schema：
-{{"episode_no": {episode['episode_no']}, "mode": "full_script", "title": str, "logline": str, "script_format_note": "一句话说明正文采用的台本格式", "plot_spine": {{"episode_premise": "一句话本集目标", "spine_beats": [{{"beat_id": "S01", "who": str, "does": str, "turn": str, "must_keep": true}}], "must_keep_ending": str, "drop_list": [str, str]}}, "dramatic_question": "本集戏剧问题（一句话）", "protagonist_goal": "主角外在目标", "obstacle": "外部+内部阻力", "stakes": "失败代价", "key_lines": ["推动主线的台词，最多{KEY_LINES_MAX}条"], "key_plot_points": ["与spine对齐的局势变化，{KEY_PLOT_POINTS_MIN}~{KEY_PLOT_POINTS_MAX}条"], "scene_outline": [{{"scene_no": int, "scene_heading": "场次标题", "story_function": "本场戏剧功能", "characters": [str], "summary": "本场戏剧内容概括", "conflict": str, "turn": "交给下一场的状态变化", "source_basis": "原文依据"}}], "full_script_text": str, "character_state_changes": [str], "emotional_curve": str, "ending_hook": "若 hook/cliffhanger 均为空则固定为「无集级钩子」", "source_basis": str, "adaptation_direction": str, "opening": str, "development": str, "conflict": str, "climax": str, "episode_premise": "一句话本集目标", "events": [{{"event_id": "E1", "source_span": "原文位置或摘句", "source_fact": "原文事实", "state_in": "事件前状态", "trigger": "触发因素", "visible_change": "可见/可听变化", "state_out": "事件后状态", "must_keep": true, "adaptation_addition": false, "adaptation_reason": "", "approved": false}}], "information_ledger": [{{"info_id": "I1", "event_id": "E1", "content": "观众必须获得的信息", "delivery_owner": "visual_action|spoken_dialogue|offscreen_voice|narration|on_screen_text|ambient_sound", "speaker_id": "角色名/旁白/功能性身份或null", "exact_text": "需逐字交付时填写，否则null", "reinforcement_allowed": false, "status": "unassigned"}}], "voice_bible": [{{"speaker_id": "角色名/旁白/功能性身份", "voice_canonical": "声音与语气规范", "language": "普通话", "role_type": "named_character|functional_character|narrator"}}], "approved_adaptations": [str], "forbidden_additions": [str]}}"""
+{{"episode_no": {episode['episode_no']}, "mode": "full_script", "title": str, "logline": str, "script_format_note": "一句话说明正文采用的台本格式", "plot_spine": {{"episode_premise": "一句话本集目标", "spine_beats": [{{"beat_id": "S01", "who": str, "does": str, "turn": str, "must_keep": true}}], "must_keep_ending": str, "drop_list": [str, str]}}, "dramatic_question": "本集戏剧问题（一句话）", "protagonist_goal": "主角外在目标", "obstacle": "外部+内部阻力", "stakes": "失败代价", "dialogue_chains": [{{"chain_id": "DC1", "topic": "同一话题", "turns": [{{"speaker": "测验员或人物谱角色", "line": "适合表演的改编台词", "function": "trigger|announcement|question|response|decision|statement", "source_text": "对应原文对白原句"}}]}}], "key_lines": ["由后端按 dialogue_chains.turns 回填；不要另选孤立金句"], "key_plot_points": ["与spine对齐的局势变化，{KEY_PLOT_POINTS_MIN}~{KEY_PLOT_POINTS_MAX}条"], "scene_outline": [{{"scene_no": int, "scene_heading": "场次标题", "story_function": "本场戏剧功能", "characters": [str], "summary": "本场戏剧内容概括", "conflict": str, "turn": "交给下一场的状态变化", "source_basis": "原文依据"}}], "full_script_text": str, "character_state_changes": [str], "emotional_curve": str, "ending_hook": "若 hook/cliffhanger 均为空则固定为「无集级钩子」", "source_basis": str, "adaptation_direction": str, "opening": str, "development": str, "conflict": str, "climax": str, "episode_premise": "一句话本集目标", "events": [{{"event_id": "E1", "source_span": "原文位置或摘句", "source_fact": "原文事实", "state_in": "事件前状态", "trigger": "触发因素", "visible_change": "可见/可听变化", "state_out": "事件后状态", "must_keep": true, "adaptation_addition": false, "adaptation_reason": "", "approved": false}}], "information_ledger": [{{"info_id": "I1", "event_id": "E1", "content": "观众必须获得的信息", "delivery_owner": "visual_action|spoken_dialogue|offscreen_voice|narration|on_screen_text|ambient_sound", "speaker_id": "角色名/旁白/功能性身份或null", "exact_text": "需逐字交付时填写，否则null", "reinforcement_allowed": false, "status": "unassigned"}}], "voice_bible": [{{"speaker_id": "角色名/旁白/功能性身份", "voice_canonical": "声音与语气规范", "language": "普通话", "role_type": "named_character|functional_character|narrator"}}], "approved_adaptations": [str], "forbidden_additions": [str]}}"""
     configured_iterations = max(int(get_setting("max_repair_attempts") or 4), 1)
     loop = AgentLoop(
         stage_key="screenplay",
@@ -694,7 +763,8 @@ B. `full_script_text`：真正的剧本正文；只写大形体动作与主线�
     def _check_screenplay(s: EpisodeScreenplay) -> list[str]:
         errors = validate_screenplay(
             s, bible, max(1, episode["target_duration_s"] // config.VIDEO_DURATION_MIN_S),
-            episode_no=episode["episode_no"], source_text=source_text)
+            episode_no=episode["episode_no"], source_text=source_text,
+            require_dialogue_chains=True)
         errors.extend(adaptation_hook_errors(s, episode))
         if no_episode_hook:
             ending = (s.ending_hook or "").strip()
@@ -708,6 +778,10 @@ B. `full_script_text`：真正的剧本正文；只写大形体动作与主线�
         "可拍剧本", "screenplay", prompt, EpisodeScreenplay,
         _check_screenplay,
         loop=loop, temperature=0.7, max_tokens=65535,
+        # 剧本 JSON 的正文与源文都位于长 prompt/候选后半段。修复轮必须看到完整任务和
+        # 完整候选，否则一次格式修复就可能在无原文状态下重写并静默丢掉主线台词。
+        repair_user_prompt_limit=None,
+        repair_candidate_limit=None,
         # episode_no/mode 是后端权威值（validator 也要求 episode_no 必须等于本集号），模型给的值不可信，
         # 直接确定性回填，避免再为这两个已知字段空转修复轮。
         prefill={"episode_no": episode["episode_no"], "mode": "full_script"})
@@ -758,7 +832,7 @@ def _storyboard_key_content_block(screenplay: EpisodeScreenplay) -> str:
     if contract_text:
         blocks.extend(["【单集戏剧契约】（指导取舍：服务它们的内容优先保留）：", contract_text, ""])
     blocks.extend([
-        "【本集主线台词】（每条必须写进某镜有效口播，并在大纲填 key_line_ids=KL*；代码逐条校验）：",
+        "【本集主线对白链】（KL 顺序就是剧情顺序；每条必须写进某镜有效口播并填 key_line_ids。回答/安慰/反驳必须与其触发台词放在同镜或相邻镜，禁止孤立摘句；代码校验存在性与顺序）：",
         lines_text,
         "",
         "【本集主线剧情点】（每条必须在某镜的 action_desc 或有效口播中体现，代码逐条校验）：",
@@ -1824,7 +1898,7 @@ def _parse_qa_result(raw: str, score_keys: list[str], *,
 
 async def review_scene_image(image_b64: str, frame_desc: str, scene_setting: str,
                              character_anchors: list[str], prev_image_b64: str | None = None,
-                             kind: str = "tail") -> dict:
+                             kind: str = "tail", initiator_label: str = "关键帧评审") -> dict:
     """场景关键帧评审 agent：只对照【本帧自己的画面描述】（首图描述 / 尾图描述）检查该单张静止帧，
     不要拿整段动作或后续画面来要求它。返回 {expectation_match, continuity, clean_frame, overall, issues}。"""
     anchors = "\n".join(character_anchors) or "（缺少角色锚点）"
@@ -1855,7 +1929,7 @@ async def review_scene_image(image_b64: str, frame_desc: str, scene_setting: str
     raw = await hiagent.vlm_check(
         frames, expectation,
         call_meta={
-            "initiator_label": "关键帧评审",
+            "initiator_label": initiator_label,
             "frame_kind": kind,
             "scene_setting": scene_setting,
             "has_prev_frame": bool(prev_image_b64),

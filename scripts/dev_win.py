@@ -1,8 +1,11 @@
-"""Windows 前后端启停：无控制台弹窗，后台常驻 + 热刷新。
+"""Windows 前后端启停：无控制台弹窗，后台常驻。
 
 用法：
   scripts\\dev.cmd [start|stop|status|restart]
   restart.vbs          # 双击无黑窗
+
+后端默认不开启 uvicorn --reload，避免源码保存中断长时间媒体任务。
+确需调试后端热重载时，可显式设置 MJ_BACKEND_RELOAD=1。
 """
 from __future__ import annotations
 
@@ -116,19 +119,22 @@ def _start() -> None:
     fe = open(FE_LOG, "ab")
     si = _startupinfo_hidden()
 
-    # 后端：uvicorn --reload（改 app/ 自动热重载）
+    # 后端默认稳定运行；仅在显式 opt-in 时启用热重载。
+    backend_args = [
+        str(UVICORN),
+        "app.main:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8230",
+    ]
+    backend_reload = os.environ.get("MJ_BACKEND_RELOAD", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    if backend_reload:
+        backend_args.extend(["--reload", "--reload-dir", "app"])
     b = subprocess.Popen(
-        [
-            str(UVICORN),
-            "app.main:app",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            "8230",
-            "--reload",
-            "--reload-dir",
-            "app",
-        ],
+        backend_args,
         cwd=str(ROOT),
         stdin=dn,
         stdout=be_out,
@@ -149,11 +155,12 @@ def _start() -> None:
         close_fds=True,
     )
     print(f"backend pid={b.pid}  frontend pid={f.pid}")
-    print("后端 http://127.0.0.1:8230  （--reload 热重载）")
+    backend_mode = "--reload 热重载（可能中断长任务）" if backend_reload else "稳定模式（不热重载）"
+    print(f"后端 http://127.0.0.1:8230  （{backend_mode}）")
     print("前端 http://127.0.0.1:5230  （Vite HMR）")
     print(f"日志 {BE_LOG}")
     print(f"     {FE_LOG}")
-    print("无控制台窗口；改代码会自动热刷新，一般无需重启。")
+    print("无控制台窗口；前端改动自动热刷新，后端改动后请执行 restart。")
 
 
 def _wait_ready(timeout: float = 45.0) -> None:

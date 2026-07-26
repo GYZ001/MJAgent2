@@ -244,7 +244,7 @@ def _new_screenplay_recorder(
         requested_by=requested_by,
         trigger_type=trigger_type,
         policy_snapshot={
-            "contract": "screenplay@1.0.0",
+            "contract": f"screenplay@{get_contract('screenplay').version}",
             "max_iterations": min(max(int(get_setting("max_repair_attempts") or 4), 1), 4),
             "stall_rounds": 2,
             "min_quality_gain": 0.03,
@@ -279,7 +279,7 @@ def _screenplay_context_pack(episode_id: str) -> tuple[list[str], dict]:
         metadata={
             "episode_id": episode_id,
             "episode_no": ep["episode_no"],
-            "contract_version": "1.0.0",
+            "contract_version": get_contract("screenplay").version,
         },
     )
     pack.add_text(
@@ -579,7 +579,7 @@ async def edit_screenplay(episode_id: str, body: dict):
                 if ep["screenplay_artifact_id"]
                 else []
             ),
-            contract_version="1.0.0",
+            contract_version=get_contract("screenplay").version,
         )
     )
     adopted = evidence_repository.commit_artifact(

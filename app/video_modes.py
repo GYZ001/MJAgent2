@@ -288,11 +288,6 @@ def batch_prompt_enabled() -> bool:
     return _bp()
 
 
-def batch_qa_enabled() -> bool:
-    from app.media_pipeline.retry_policy import batch_qa_enabled as _bq
-    return _bq()
-
-
 def role_adaptive_enabled() -> bool:
     from app.media_pipeline.retry_policy import role_adaptive_enabled as _ra
     return _ra()
@@ -1013,87 +1008,6 @@ async def write_reference_prompt_batch(
     return prompts
 
 
-async def review_reference_images_batch(
-    items: list[tuple[str, str, str]], *, shot: Shot, bible: Bible,
-) -> dict[str, Any]:
-    """一次多图结构化评估（P1）。items: [(slot, ref_type, image_b64), ...]。
-
-    返回 {"items":[{slot, overall, ..., hard_failures, repair_instruction}], "group_consistency": float}
-    缺项或置信不足时由调用方对异常图回退单图 VLM。
-    """
-    if not items:
-        return {"items": [], "group_consistency": 1.0}
-    anchors = []
-    by_name = {c.name: c for c in bible.characters}
-    for name in shot.characters:
-        if name in by_name:
-            anchors.append(f"{name}: {by_name[name].appearance_canonical}")
-    expectation = {
-        "task": "Quality-check multiple Seedance reference images in one response.",
-        "shot": {
-            "scene": shot.scene_setting,
-            "action": shot.action_desc,
-            "characters": anchors,
-            "style": bible.world.visual_style_canonical,
-        },
-        "image_order": [{"index": i, "slot": s, "ref_type": t} for i, (s, t, _) in enumerate(items)],
-        "output_schema": {
-            "items": [{
-                "slot": "action_key",
-                "technical_quality": 0.0,
-                "prompt_alignment": 0.0,
-                "identity_consistency": 0.0,
-                "scene_consistency": 0.0,
-                "overall": 0.0,
-                "hard_failures": [],
-                "repair_instruction": None,
-            }],
-            "group_consistency": 0.0,
-        },
-    }
-    images = [b64 for _, _, b64 in items]
-    try:
-        raw = await hiagent.vlm_check(
-            images, json.dumps(expectation, ensure_ascii=False),
-            call_meta={
-                "initiator_label": "参考图批量质检",
-                "shot_no": shot.shot_no,
-                "image_count": len(images),
-            })
-        data = extract_json(raw)
-    except Exception:
-        return {"items": [], "group_consistency": None, "failed": True}
-
-    out_items = []
-    by_slot = {str(it.get("slot") or ""): it for it in (data.get("items") or []) if isinstance(it, dict)}
-    for slot, ref_type, _ in items:
-        it = by_slot.get(slot) or {}
-        if not it:
-            out_items.append({"slot": slot, "missing": True})
-            continue
-        for key in ("technical_quality", "prompt_alignment", "identity_consistency",
-                    "scene_consistency", "overall"):
-            try:
-                it[key] = max(0.0, min(1.0, float(it.get(key, 0))))
-            except (TypeError, ValueError):
-                it[key] = 0.0
-        if not it.get("overall"):
-            vals = [it.get(k, 0) for k in (
-                "technical_quality", "prompt_alignment", "identity_consistency", "scene_consistency"
-            )]
-            it["overall"] = round(sum(float(v) for v in vals) / max(len(vals), 1), 3)
-        it["slot"] = slot
-        it["ref_type"] = ref_type
-        if not isinstance(it.get("hard_failures"), list):
-            it["hard_failures"] = []
-        out_items.append(it)
-    try:
-        group = max(0.0, min(1.0, float(data.get("group_consistency", 0.8))))
-    except (TypeError, ValueError):
-        group = 0.8
-    return {"items": out_items, "group_consistency": group, "failed": False}
-
-
 async def _generate_reference_keep_best(*, project_id: str, episode_no: int, shot: Shot, bible: Bible,
                                         ref_type: str, index: int, content_override: str | None,
                                         retries: int, seed_inputs: list[str] | None = None,
@@ -1245,7 +1159,9 @@ async def _enforce_reference_consistency(*, selected: list[ReferenceImageAsset],
         return selected
     candidates = [a for a in selected if a.source == "seedream_generated"]
     anchors = [a for a in selected if a.source in {"asset_library", "previous_shot"}]
-    if not candidates or not anchors:
+    # 单候选已经在证据化关键帧 QA 中与同一批人物/场景锚点比较过；
+    # 组一致性只有在多张候选可能彼此打架时才提供新增信息。
+    if len(candidates) < 2 or not anchors:
         return selected
     seeds = _dedupe_str([a.url for a in anchors if a.url])
     regen_line = consistency_threshold()

@@ -1,4 +1,4 @@
-' 无黑窗后台重启漫剧 Agent 前后端（热刷新常驻）
+' 无黑窗后台重启漫剧 Agent 前后端（后端稳定模式，前端热刷新）
 Option Explicit
 Dim sh, root, py, cmd, rc
 Set sh = CreateObject("WScript.Shell")

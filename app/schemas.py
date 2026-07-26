@@ -209,6 +209,23 @@ class PlotSpine(BaseModel):
     drop_list: list[str] = Field(default_factory=list)
 
 
+class KeyDialogueTurn(BaseModel):
+    """One source-grounded turn in an ordered main-dialogue chain."""
+
+    speaker: str = ""
+    line: str = ""
+    function: str = "statement"  # trigger|announcement|question|response|decision|statement
+    source_text: str = ""         # exact source utterance used as adaptation evidence
+
+
+class KeyDialogueChain(BaseModel):
+    """A trigger and its dependent replies; downstream must preserve the whole chain."""
+
+    chain_id: str = ""
+    topic: str = ""
+    turns: list[KeyDialogueTurn] = Field(default_factory=list)
+
+
 class EpisodeScreenplay(BaseModel):
     episode_no: int
     # 完整剧本源数据（新格式）
@@ -226,6 +243,8 @@ class EpisodeScreenplay(BaseModel):
     stakes: str = ""                 # 失败代价/成功代价（§3.5）
     # 主线台词/剧情点（Renderability First）：只保留推动 spine 的内容，禁止全量原文台词入库。
     key_lines: list[str] = Field(default_factory=list)        # 主线台词 ≤6，含说话人更佳
+    # 新生成合同：结构化对白链是 key_lines 的权威来源；key_lines 由后端按 turns 顺序回填。
+    dialogue_chains: list[KeyDialogueChain] = Field(default_factory=list)
     key_plot_points: list[str] = Field(default_factory=list)  # 与 spine 对齐的局势变化
     plot_spine: PlotSpine | None = None
     scene_outline: list[ScriptScene] = Field(default_factory=list)

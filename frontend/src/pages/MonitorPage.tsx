@@ -827,7 +827,6 @@ export default function MonitorPage() {
     reference_shot_cohort_limit: '参考图镜头批次上限',
     media_scheduler_policy: '调度策略(legacy/stage_aware)',
     video_reference_batch_prompt: '批量参考图提示词',
-    video_reference_batch_qa: '批量参考图QA',
     video_reference_role_adaptive: '质量角色自适应(实验)',
     vlm_request_concurrency: 'VLM 质检并发',
     download_concurrency: '下载并发',

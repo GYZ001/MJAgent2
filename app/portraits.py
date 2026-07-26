@@ -531,6 +531,7 @@ async def _refresh_portrait_on_drift(project_id: str, name: str, episode_no: int
         artifact_supported = _has_column(conn, "character_portraits", "artifact_id")
         pack_supported = _has_column(conn, "character_portraits", "pack_status")
         artifact = None
+        qa = None
         if artifact_supported:
             project = conn.execute(
                 "SELECT bible_artifact_id FROM projects WHERE id=?", (project_id,)
@@ -598,6 +599,7 @@ async def _refresh_portrait_on_drift(project_id: str, name: str, episode_no: int
                 visual_style=style,
                 ep_start=episode_no,
                 base_portrait_id=cur["id"],
+                primary_qa=qa,
             )
             pack_status = pack.get("status") or "failed"
             if pack_status != PACK_STATUS_READY and pack_status != "ready":
@@ -762,13 +764,10 @@ def _new_portrait_path(project_id: str, name: str, ep_start: int) -> str:
 
 async def _review_portrait_asset(image_path: str, appearance: str) -> dict:
     """对反应式人物锚点执行与初始定妆照相同的保守一致性门禁。"""
-    from app.stages import review_scene_image
+    from app.stages import review_portrait_image
 
     try:
-        return await review_scene_image(
-            hiagent.encode_image_file(image_path), appearance,
-            "角色定妆立绘", [appearance], kind="head",
-        )
+        return await review_portrait_image(hiagent.encode_image_file(image_path), appearance)
     except Exception as exc:  # noqa: BLE001 评估失败不能伪装成通过
         return {
             "overall": 0.0,

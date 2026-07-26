@@ -12,6 +12,7 @@ scene_references（按"适用集区间"分段，ep_end=NULL 表示开区间=当�
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from pathlib import Path
@@ -155,7 +156,9 @@ async def _review_scene_ref(image_path: str, scene: "Scene | dict") -> dict:
     canonical = scene["scene_canonical"] if isinstance(scene, dict) else scene.scene_canonical
     try:
         return await review_scene_image(
-            hiagent.encode_image_file(image_path), canonical, name, [], kind="head")
+            hiagent.encode_image_file(image_path), canonical, name, [], kind="head",
+            initiator_label="场景资产主图QA",
+        )
     except Exception as exc:  # noqa: BLE001 评估器失败不能伪装成通过
         return {
             "overall": 0.0,
@@ -194,9 +197,27 @@ def scene_ref_exists(conn, project_id: str, name: str) -> bool:
     """该场景是否已有一张落盘可用的场景图（已登记 scene_references 且文件还在）。
     批量出图据此跳过已生成的场景，使按钮可幂等重复点击。"""
     rows = conn.execute(
-        "SELECT image_path FROM scene_references WHERE project_id=? AND scene_name=?",
+        "SELECT * FROM scene_references WHERE project_id=? AND scene_name=?",
         (project_id, name)).fetchall()
-    return any(r["image_path"] and Path(r["image_path"]).exists() for r in rows)
+    existing = [r for r in rows if r["image_path"] and Path(r["image_path"]).exists()]
+    if not existing:
+        return False
+    from app.multiview import (
+        SCENE_REQUIRED_VIEWS,
+        list_scene_views,
+        pack_is_ready,
+        scene_multiview_enabled,
+    )
+    if not scene_multiview_enabled():
+        return True
+    return any(
+        pack_is_ready(
+            row["pack_status"] if "pack_status" in row.keys() else None,
+            list_scene_views(row["id"], conn=conn),
+            SCENE_REQUIRED_VIEWS,
+        )
+        for row in existing
+    )
 
 
 def scene_ref_for_episode(project_id: str, name: str, episode_no: int | None) -> str | None:
@@ -289,7 +310,40 @@ async def generate_scene_refs(
     # 批量出图（only_scene=None）：只补还没出过图的场景，已生成的跳过 → 按钮可重复点击而不重复出图。
     # 单场景重做（only_scene 指定）：强制重出，不跳过。
     if only_scene is None or resume:
-        targets = [s for s in targets if not scene_ref_exists(conn, project_id, s.name)]
+        completed: list = []
+        pending: list = []
+        for scene in targets:
+            if scene_ref_exists(conn, project_id, scene.name):
+                continue
+            if resume:
+                from app.multiview import (
+                    complete_legacy_scene_pack,
+                    pack_result_ok,
+                    scene_multiview_enabled,
+                    scene_row_for_episode,
+                )
+                row = scene_row_for_episode(project_id, scene.name, 1)
+                if row and row["image_path"] and Path(row["image_path"]).exists():
+                    try:
+                        pack = (
+                            await complete_legacy_scene_pack(project_id, scene.name, 1, style)
+                            if scene_multiview_enabled()
+                            else {"status": "disabled"}
+                        )
+                    except Exception:  # noqa: BLE001 - full regeneration retries below
+                        pack = None
+                    if pack_result_ok(pack):
+                        refreshed = scene_row_for_episode(project_id, scene.name, 1)
+                        if (refreshed and refreshed["image_path"]
+                                and Path(refreshed["image_path"]).exists()):
+                            scene.ref_image_path = refreshed["image_path"]
+                            completed.append(scene)
+                            continue
+            pending.append(scene)
+        if completed:
+            _merge_generated_scene_refs(conn, project_id, completed)
+            conn.commit()
+        targets = pending
         if not targets:
             return  # 当前场景库里的场景图都已就绪，无需重出
 
@@ -302,6 +356,7 @@ async def generate_scene_refs(
             last_error: Exception | None = None
             critique = ""
             for attempt in range(1, 3):
+                scene_id: str | None = None
                 path = str(Path(scene_ref_path(project_id, sc.name)).with_name(
                     f"{_safe_name(sc.name)}__{new_id('candidate')}.jpg"
                 ))
@@ -341,7 +396,6 @@ async def generate_scene_refs(
                             f"场景图一致性检查未通过：{sc.name}（第 {attempt} 次）"
                         )
                         continue
-                    sc.ref_image_path = path
                     scene_id = register_initial_scene_ref(
                         conn, project_id, sc.name, path, sc.scene_canonical,
                         prompt, qa, bible_version, artifact_id=artifact["id"],
@@ -358,18 +412,37 @@ async def generate_scene_refs(
                             scene_canonical=sc.scene_canonical,
                             visual_style=style,
                             ep_start=1,
+                            primary_qa=qa,
                         )
                         if not pack_result_ok(pack):
                             raise hiagent.ProviderError(
                                 f"多视角资产包未通过，禁止生效：{sc.name}"
                                 f"（status={pack.get('status')}）"
                             )
+                    # Publish the scene anchor only when all required angles pass.
+                    sc.ref_image_path = path
                     break
+                except asyncio.CancelledError:
+                    if scene_id:
+                        conn.execute("DELETE FROM scene_references WHERE id=?", (scene_id,))
+                        conn.commit()
+                    sc.ref_image_path = None
+                    raise
                 except hiagent.ProviderError as exc:
+                    if scene_id:
+                        conn.execute("DELETE FROM scene_references WHERE id=?", (scene_id,))
+                        conn.commit()
+                        scene_id = None
+                    sc.ref_image_path = None
                     if "多视角资产包未通过" in str(exc):
                         raise
                     last_error = exc
                 except Exception as exc:  # noqa: BLE001 候选失败后在有界循环内修复
+                    if scene_id:
+                        conn.execute("DELETE FROM scene_references WHERE id=?", (scene_id,))
+                        conn.commit()
+                        scene_id = None
+                    sc.ref_image_path = None
                     last_error = exc
             if not sc.ref_image_path:
                 raise last_error or hiagent.ProviderError(f"场景图生成失败：{sc.name}")
@@ -833,6 +906,7 @@ async def _refresh_scene_on_state_change(
             visual_style=style,
             ep_start=episode_no,
             base_scene_id=cur["id"],
+            primary_qa=qa,
         )
         pack_status = pack.get("status") or "failed"
         if not pack_result_ok(pack):

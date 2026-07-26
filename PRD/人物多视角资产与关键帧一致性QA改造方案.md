@@ -29,7 +29,7 @@
 | 场景按集版本 | `app/scenes.py` 的 `scene_references`、`scene_ref_for_episode()` | 数据表已有分段与 lineage，但当前主要用于初始图和新场景，缺少已有场景状态演进 |
 | 镜头参考图集合 | `reference_sets/reference_assets`、`app/media_pipeline/reference_store.py` | 可继续作为镜头级冻结清单和恢复点 |
 | 叙事关键帧类型 | `app/video_modes.py` 已有 `plot_key_frame`、`action_key` 等槽位 | 不必另起一条旧式首尾关键帧链路 |
-| 参考图一致性 QA | `review_reference_image()`、`review_reference_images_batch()`、`review_reference_consistency()` | 可保留调用入口，但必须改成基于实际资产图的证据化评分 |
+| 参考图一致性 QA | `review_reference_image()`、`review_reference_consistency()` | 单候选复用证据化关键帧 QA；仅多候选运行组一致性检查 |
 | 视频 QA | `app/stages.py::qa_shot()`、`app/media_exec/run_job.py::_maybe_auto_qa()` | 已有动作和人物主项，但目前只有视频抽帧与文字锚点 |
 | 评审墙素材画廊 | `frontend/src/pages/WallPage.tsx` | 已能展示、废弃、恢复参考图，只需补类型、用途和 QA 标签 |
 
@@ -39,7 +39,7 @@
 2. 人物漂移重绘只重绘一张图；新造型没有完整多视角包，后续关键帧仍只能从单一正面定妆照推断其他角度。
 3. `default_reference_decision()` 默认每镜生成 4 张新参考图；这些镜头级图片成本高、容易近似重复，却没有一个被定义为不可缺失的关键帧。
 4. `pack_reference_images_for_seedance()` 主要按总分排序，且默认只偏好 1 张含人物参考图。高分人物定妆照可能挤掉关键帧，关键帧也可能挤掉身份锚点，缺少按用途的确定性优先级。
-5. `review_reference_images_batch()` 只接收候选图，不接收人物谱/场景库真值图片；它输出的 `identity_consistency` 和 `scene_consistency` 缺少直接视觉证据。
+5. 旧批量参考图 QA 因缺少人物谱/场景库真值图片且未接入运行链路，已删除；不再保留平行评分体系。
 6. `review_reference_consistency()` 在 VLM 异常或 JSON 解析失败时默认一致性为 1.0，存在“没有完成比对却被当成满分”的错误放行。
 7. `_maybe_auto_qa()` 和 `critique_version()` 只把人物文字锚点传给 `qa_shot()`，没有把本集人物图、场景图和已采用关键帧一起传入，因此无法可靠识别换脸、换发型和换装。
 8. 人物库图在 `character_reference_assets()` 中被直接赋予 `QA=1.0`，没有把真实的单图与整包 QA 结论带到镜头链路。

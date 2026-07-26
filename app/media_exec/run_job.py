@@ -1479,7 +1479,19 @@ async def _maybe_auto_qa(
         version = conn.execute("SELECT * FROM shot_versions WHERE id=?", (version_id,)).fetchone()
         meta = json.loads(version["image_inputs"] or "{}") if version else {}
         hard_failures = classify_video_hard_failures(qa, technical=json.loads(version["technical_validation_json"] or "{}") if version else {})
-        needs_retake = bool(hard_failures) or (0 <= qa.get("overall", -1) < threshold)
+        low_score = 0 <= qa.get("overall", -1) < threshold
+        needs_retake = bool(hard_failures) or low_score
+        if low_score and not hard_failures:
+            # 未校准的 VLM 总分不能单独触发付费视频重抽。保留为 B 级风险候选；
+            # 普通模式兜底采用，complete 模式交给 Supervisor 统一决定。
+            log_provider_call(
+                "vlm_qa", config.MODEL_VLM, "QA_LOW_SCORE_REVIEW", None, 0,
+                meta={
+                    "shot_id": job["shot_id"], "version_id": version_id,
+                    "overall": qa.get("overall"), "threshold": threshold,
+                },
+            )
+            return True if allow_autonomous_retake else False
         if needs_retake and meta.get("mode") == video_modes.REFERENCE_IMAGE_MODE:
             logs = meta.get("reference_failure_logs") or []
             # 只留轻量元信息做审计；绝不把带 base64 url 的参考图整份塞进日志，

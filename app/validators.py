@@ -587,6 +587,22 @@ def _iter_script_sound_matches(full_text: str):
         yield match
 
 
+def _script_dialogue_turns(full_text: str) -> list[tuple[int, str, str]]:
+    """Return screenplay dialogue turns as ``(scene_no, speaker, line)`` in story order."""
+    turns: list[tuple[int, str, str]] = []
+    scene_no = 0
+    for raw_line in (full_text or "").splitlines():
+        line = raw_line.strip()
+        heading = SCRIPT_SCENE_HEADING_RE.search(line)
+        if heading:
+            number = re.search(r"\d+", heading.group(0))
+            if number:
+                scene_no = int(number.group(0))
+        for match in _iter_script_sound_matches(line):
+            turns.append((scene_no, match.group(1).strip(), match.group(3).strip()))
+    return turns
+
+
 # ---------- 关键内容（必保留清单）模糊匹配工具 ----------
 # 防丢失校验的共用底座：剧本台/分镜台都要判断"某条关键台词/剧情点是否仍真实存在于文本里"。
 # 务实优先（本次定调）：只拦【明显丢失】，用模糊匹配容忍口语化改写/标点差异，绝不逐字比对，
@@ -605,6 +621,52 @@ MAX_KEY_PLOT_POINTS = KEY_PLOT_POINTS_MAX
 
 _strip_speaker = textmatch.strip_speaker
 _speaker_name = textmatch.speaker_name
+
+
+_CONTEXT_DEPENDENT_DIALOGUE_MARKERS = (
+    "以前你", "你以前", "你曾", "你说过", "你问过", "你叫我",
+    "我相信", "我知道", "我明白", "我也", "没错", "正是", "当然",
+    "因为", "可是", "但是", "不过", "所以", "本来就", "并不是",
+    "不是这样", "不会的", "你会重新", "你还能", "你仍然",
+)
+
+
+def _is_context_dependent_dialogue(line: str) -> bool:
+    compact = re.sub(r"\s+", "", _strip_speaker(line or ""))
+    return any(marker in compact for marker in _CONTEXT_DEPENDENT_DIALOGUE_MARKERS)
+
+
+def _matching_text_indices(needle: str, ordered_texts: list[str]) -> list[int]:
+    core = _strip_speaker(needle)
+    return [
+        i for i, text in enumerate(ordered_texts)
+        if _longest_run_ratio(core, text) >= KEY_LINE_PRESENT_RATIO
+        or _bigram_coverage(core, text) >= KEY_LINE_BIGRAM_COVERAGE
+    ]
+
+
+def key_line_order_errors(
+    key_lines: list[str], ordered_texts: list[str], *, subject: str,
+) -> list[str]:
+    """Ensure key dialogue remains in narrative order, not merely present as a bag of lines."""
+    last_index = -1
+    out_of_order: list[str] = []
+    for line in key_lines:
+        candidates = _matching_text_indices(line, ordered_texts)
+        if not candidates:  # Missing-content validators report this separately.
+            continue
+        following = [index for index in candidates if index >= last_index]
+        if following:
+            last_index = following[0]
+        else:
+            out_of_order.append(line)
+    if not out_of_order:
+        return []
+    shown = "；".join(out_of_order[:KEY_CONTENT_MAX_REPORT])
+    return [
+        f"{subject}打乱了主线对白顺序：{shown}；key_lines 是按剧情发生顺序排列的对白链，"
+        "提问/刺激必须先于回答/安慰/反驳，禁止只保留一组无序金句"
+    ]
 
 
 def _source_bible_dialogues(source_text: str | None, bible: Bible) -> list[str]:
@@ -640,6 +702,166 @@ _bigram_set = textmatch.bigram_set
 _bigram_coverage = textmatch.bigram_coverage
 _CLAIM_SPLIT_RE = textmatch._CLAIM_SPLIT_RE
 _atomize_claim = textmatch.atomize_claim
+
+
+_SOURCE_QUOTED_UTTERANCE_RE = re.compile(
+    r"[“「『](?P<line>[^”」』\n]{2,240})[”」』]"
+)
+_SOURCE_PREFIXED_UTTERANCE_RE = re.compile(
+    r"(?m)^\s*[^\n：:]{1,20}(?:[（(][^）)]{1,12}[）)])?\s*[：:]\s*(?P<line>\S.{1,239})\s*$"
+)
+
+
+def source_dialogue_fragments(source_text: str | None) -> list[str]:
+    """Extract source utterances in deterministic source order.
+
+    This inventory exists before the model chooses ``key_lines``.  It closes
+    the former circular contract where a line omitted by the model could no
+    longer be detected because the model-authored key-line list was the only
+    source of truth.
+    """
+    if not source_text:
+        return []
+    matches: list[tuple[int, str]] = []
+    for pattern in (_SOURCE_QUOTED_UTTERANCE_RE, _SOURCE_PREFIXED_UTTERANCE_RE):
+        for match in pattern.finditer(source_text):
+            line = match.group("line").strip().strip("“”「」『』\"'")
+            if len(_condense(line)) >= 2:
+                matches.append((match.start(), line))
+    matches.sort(key=lambda item: item[0])
+    result: list[str] = []
+    seen: set[str] = set()
+    for _offset, line in matches:
+        identity = _condense(line)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        result.append(line)
+    return result
+
+
+_DIALOGUE_TURN_FUNCTIONS = {
+    "trigger", "announcement", "question", "response", "decision", "statement",
+}
+_DIALOGUE_RESPONSE_FUNCTIONS = {"response"}
+
+
+def normalize_screenplay_dialogue_chains(script: EpisodeScreenplay) -> EpisodeScreenplay:
+    """Make structured dialogue chains authoritative for downstream key-line delivery."""
+    if not script.dialogue_chains:
+        return script
+    flattened: list[str] = []
+    for chain in script.dialogue_chains:
+        for turn in chain.turns or []:
+            speaker = (turn.speaker or "").strip()
+            line = (turn.line or "").strip()
+            if speaker and line:
+                flattened.append(f"{speaker}：{line}")
+    script.key_lines = flattened
+    return script
+
+
+def validate_dialogue_chains(
+    script: EpisodeScreenplay,
+    *,
+    source_text: str | None,
+    required: bool,
+) -> list[str]:
+    """Validate source-grounded trigger→reply chains before accepting a screenplay."""
+    errors: list[str] = []
+    chains = script.dialogue_chains or []
+    if required and not chains:
+        return [
+            "dialogue_chains 缺失；必须先从原文建立“触发台词→回答/安慰/反驳”的主线对白链，"
+            "再由后端生成 key_lines，禁止直接挑选孤立金句"
+        ]
+    if not chains:
+        return errors
+
+    chain_ids: set[str] = set()
+    total_turns = 0
+    full_turns = _script_dialogue_turns(script.full_script_text or "")
+    full_texts = [turn[2] for turn in full_turns]
+    source_fragments = source_dialogue_fragments(source_text)
+    flattened_source_evidence: list[str] = []
+    for chain_index, chain in enumerate(chains):
+        tag = f"dialogue_chains[{chain_index}]"
+        chain_id = (chain.chain_id or "").strip().upper()
+        if not re.fullmatch(r"DC\d{1,3}", chain_id):
+            errors.append(f"{tag}.chain_id 必须使用 DC1、DC2 这类稳定编号")
+        elif chain_id in chain_ids:
+            errors.append(f"{tag}.chain_id=「{chain_id}」重复")
+        else:
+            chain_ids.add(chain_id)
+        if len((chain.topic or "").strip()) < 4:
+            errors.append(f"{tag}.topic 过短；请写清这组对白围绕的同一话题")
+        turns = chain.turns or []
+        total_turns += len(turns)
+        if not 1 <= len(turns) <= MAX_KEY_LINES:
+            errors.append(f"{tag}.turns 需包含 1~{MAX_KEY_LINES} 个连续话轮")
+            continue
+        if turns and (turns[0].function or "").strip() == "response":
+            errors.append(f"{tag} 不能从 response 开始；必须先保留触发句/宣布/提问")
+        previous_speaker = ""
+        matched_indices: list[int] = []
+        for turn_index, turn in enumerate(turns):
+            turn_tag = f"{tag}.turns[{turn_index}]"
+            speaker = (turn.speaker or "").strip()
+            line = (turn.line or "").strip()
+            function = (turn.function or "").strip()
+            source_line = (turn.source_text or "").strip()
+            if not speaker:
+                errors.append(f"{turn_tag}.speaker 不能为空")
+            if len(_condense(line)) < 2:
+                errors.append(f"{turn_tag}.line 过短或为空")
+            if function not in _DIALOGUE_TURN_FUNCTIONS:
+                errors.append(
+                    f"{turn_tag}.function=「{function}」非法；只能是 "
+                    "trigger|announcement|question|response|decision|statement"
+                )
+            if function in _DIALOGUE_RESPONSE_FUNCTIONS and (
+                turn_index == 0 or not previous_speaker or previous_speaker == speaker
+            ):
+                errors.append(
+                    f"{turn_tag} 是 response，但前一话轮没有另一角色的触发台词"
+                )
+            if len(_condense(source_line)) < 2:
+                errors.append(f"{turn_tag}.source_text 不能为空；必须引用原文对白证据")
+            else:
+                flattened_source_evidence.append(source_line)
+                if source_text and (
+                    _longest_run_ratio(source_line, source_text) < KEY_LINE_PRESENT_RATIO
+                    and _bigram_coverage(source_line, source_text) < KEY_LINE_BIGRAM_COVERAGE
+                ):
+                    errors.append(f"{turn_tag}.source_text 未在本集原文中找到：{source_line}")
+            candidates = _matching_text_indices(line, full_texts)
+            after = [idx for idx in candidates if not matched_indices or idx >= matched_indices[-1]]
+            if not after:
+                errors.append(f"{turn_tag}.line 未按对白链顺序写进 full_script_text：{line}")
+            else:
+                matched_indices.append(after[0])
+            previous_speaker = speaker
+        if matched_indices:
+            scenes = {full_turns[idx][0] for idx in matched_indices}
+            if len(scenes) > 1:
+                errors.append(f"{tag} 被拆到多个场次；同一触发→回应链必须在同一场完成")
+
+    if not MIN_KEY_LINES <= total_turns <= MAX_KEY_LINES:
+        errors.append(
+            f"dialogue_chains 共 {total_turns} 个话轮；主线对白链总量必须为 "
+            f"{MIN_KEY_LINES}~{MAX_KEY_LINES}，按整组取舍而不是截断回答"
+        )
+    if source_fragments:
+        opening = source_fragments[0]
+        if not any(
+            _condense(opening) == _condense(evidence)
+            for evidence in flattened_source_evidence
+        ):
+            errors.append(
+                f"原文开场第一句对白未进入 dialogue_chains：{opening}；"
+                "开场对白是对白链锚点，不能在模型挑选 key_lines 前静默丢失"
+            )
+    return errors
 
 
 # 逐镜 covers 原子用更宽的"明显缺失"判定：covers 是模型自写的事实改写，连接词（"被…当众宣告为"）
@@ -1073,11 +1295,16 @@ def validate_plot_spine(script: EpisodeScreenplay) -> list[str]:
 
 
 def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats: int,
-                        episode_no: int | None = None, source_text: str | None = None) -> list[str]:
+                        episode_no: int | None = None, source_text: str | None = None,
+                        require_dialogue_chains: bool = False) -> list[str]:
     """剧本层校验：Renderability First——先 spine，再正文；主线台词有上限，禁止全量原文台词入库。"""
     errors: list[str] = []
     # 先清洗/回填空壳台账，避免模型「有壳无肉」的 ledger 把整集卡在 WARNING 候选。
     normalize_screenplay_ledgers(script)
+    normalize_screenplay_dialogue_chains(script)
+    errors.extend(validate_dialogue_chains(
+        script, source_text=source_text, required=require_dialogue_chains,
+    ))
     if episode_no is not None and script.episode_no != episode_no:
         errors.append(f"episode_no={script.episode_no}，必须等于 {episode_no}")
     if (script.mode or "full_script") != "full_script":
@@ -1195,7 +1422,7 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
             speaker = _speaker_name(ln)
             if not speaker:
                 continue
-            if speaker not in bible_names:
+            if speaker not in bible_names and not is_functional_extra(speaker):
                 non_bible_key_lines.append(ln)
         if non_bible_key_lines:
             shown = "；".join(non_bible_key_lines[:KEY_CONTENT_MAX_REPORT])
@@ -1204,44 +1431,82 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
             errors.append(
                 f"key_lines 有 {len(non_bible_key_lines)} 条含非人物谱角色台词：{shown}{extra}"
                 f"；key_lines 只能保留角色圣经角色（{'、'.join(sorted(bible_names))}）的台词，"
-                "功能性路人/旁白台词可写进 full_script_text 但不得进入 key_lines；"
+                "测验员/守卫等功能性角色可作为对白链触发者进入 key_lines；旁白不得进入；"
                 "其他具名角色必须先补进人物谱")
-    missing_in_script = [
-        ln for ln in key_lines
-        if _longest_run_ratio(_strip_speaker(ln), full_text) < KEY_LINE_PRESENT_RATIO
-        and _bigram_coverage(_strip_speaker(ln), full_text) < KEY_LINE_BIGRAM_COVERAGE]
-    if missing_in_script:
-        shown = "；".join(missing_in_script[:KEY_CONTENT_MAX_REPORT])
+    # 主线台词只能由真正的“角色名：台词”行交付。旧校验拿整个 full_script_text
+    # 当 haystack，导致模型把台词抄进动作描述/梗概也能通过，页面看得到 key_lines
+    # 清单，角色却从未开口。
+    dialogue_turns = _script_dialogue_turns(full_text)
+    script_dialogues: list[tuple[str, str]] = [
+        (speaker, spoken) for _scene_no, speaker, spoken in dialogue_turns
+    ]
+    missing_in_dialogue: list[str] = []
+    mismatched: list[str] = []
+    for ln in key_lines:
+        core = _strip_speaker(ln)
+        matching_speakers = {
+            speaker for speaker, spoken in script_dialogues
+            if _longest_run_ratio(core, spoken) >= KEY_LINE_PRESENT_RATIO
+            or _bigram_coverage(core, spoken) >= KEY_LINE_BIGRAM_COVERAGE
+        }
+        if not matching_speakers:
+            missing_in_dialogue.append(ln)
+            continue
+        expected_speaker = _speaker_name(ln)
+        if expected_speaker and expected_speaker not in matching_speakers:
+            mismatched.append(
+                f"{ln}（正文归属为：{'、'.join(sorted(matching_speakers))}）"
+            )
+    if missing_in_dialogue:
+        shown = "；".join(missing_in_dialogue[:KEY_CONTENT_MAX_REPORT])
         errors.append(
-            f"key_lines 有 {len(missing_in_script)} 条未真正写进 full_script_text：{shown}"
-            "；主线台词必须在剧本正文里实际出现，不能只列在清单里")
-    if bible_names:
-        script_speakers: dict[str, list[str]] = {}
-        for sm in _iter_script_sound_matches(full_text):
-            sp = sm.group(1).strip()
-            line_text = sm.group(3).strip()
-            script_speakers.setdefault(sp, []).append(line_text)
-        mismatched = []
-        for ln in key_lines:
-            kl_speaker = _speaker_name(ln)
-            if not kl_speaker or kl_speaker not in bible_names:
-                continue
-            kl_text = _strip_speaker(ln)
-            matched_speakers = {
-                sp for sp, texts in script_speakers.items()
-                if any(_longest_run_ratio(kl_text, t) >= KEY_LINE_PRESENT_RATIO
-                       or _bigram_coverage(kl_text, t) >= KEY_LINE_BIGRAM_COVERAGE
-                       for t in texts)
-            }
-            if matched_speakers and kl_speaker not in matched_speakers:
-                mismatched.append(f"{ln}（正文归属为：{'、'.join(sorted(matched_speakers))}）")
-        if mismatched:
-            shown = "；".join(mismatched[:KEY_CONTENT_MAX_REPORT])
-            extra = (f"（另有 {len(mismatched) - KEY_CONTENT_MAX_REPORT} 条从略）"
-                     if len(mismatched) > KEY_CONTENT_MAX_REPORT else "")
-            errors.append(
-                f"key_lines 有 {len(mismatched)} 条台词的说话人与 full_script_text 不一致：{shown}{extra}"
-                "；同一句台词在 key_lines 和 full_script_text 中必须由同一角色说出")
+            f"key_lines 有 {len(missing_in_dialogue)} 条未真正写进 full_script_text 的角色对白：{shown}"
+            "；主线台词必须落在“角色名：台词”对白行，动作描述或梗概中的文字不算交付")
+    if mismatched:
+        shown = "；".join(mismatched[:KEY_CONTENT_MAX_REPORT])
+        extra = (f"（另有 {len(mismatched) - KEY_CONTENT_MAX_REPORT} 条从略）"
+                 if len(mismatched) > KEY_CONTENT_MAX_REPORT else "")
+        errors.append(
+            f"key_lines 有 {len(mismatched)} 条台词的说话人与 full_script_text 不一致：{shown}{extra}"
+            "；同一句台词在 key_lines 和 full_script_text 中必须由同一角色说出")
+    errors.extend(key_line_order_errors(
+        key_lines,
+        [spoken for _scene_no, _speaker, spoken in dialogue_turns],
+        subject="full_script_text",
+    ))
+    orphan_responses: list[str] = []
+    spoken_turn_texts = [spoken for _scene_no, _speaker, spoken in dialogue_turns]
+    key_turn_indices = {
+        index
+        for key_line in key_lines
+        for index in _matching_text_indices(key_line, spoken_turn_texts)
+    }
+    for line in key_lines:
+        if not _is_context_dependent_dialogue(line):
+            continue
+        candidates = _matching_text_indices(
+            line, [spoken for _scene_no, _speaker, spoken in dialogue_turns]
+        )
+        if not candidates:
+            continue
+        turn_index = candidates[0]
+        scene_no, speaker, _spoken = dialogue_turns[turn_index]
+        prior_context = [
+            dialogue_turns[prior_index]
+            for prior_index in range(max(0, turn_index - 2), turn_index)
+            if dialogue_turns[prior_index][0] == scene_no
+            and dialogue_turns[prior_index][1] != speaker
+            and prior_index in key_turn_indices
+        ]
+        if not prior_context:
+            orphan_responses.append(line)
+    if orphan_responses:
+        shown = "；".join(orphan_responses[:KEY_CONTENT_MAX_REPORT])
+        errors.append(
+            f"主线对白上下文断裂：{shown}；这类回答/安慰/反驳依赖前文，"
+            "必须把同一场前两轮内另一角色的触发台词也列入 key_lines，"
+            "让下游整组保留，不能让主要角色突然冒出一句回应"
+        )
     _ = source_text  # 保留参数兼容；全量原文台词入库已废止
     key_points = [pt.strip() for pt in (script.key_plot_points or []) if pt and pt.strip()]
     if len(key_points) < MIN_KEY_PLOT_POINTS:
@@ -1407,6 +1672,15 @@ def validate_storyboard_preserves_key_content(board: Storyboard,
         errors.append(
             f"分镜丢失了剧本标记的 {len(missing_lines)} 条主线台词：{shown}{extra}；"
             "请把它们写进对应镜头的 dialogues（人物开口），不要在压缩中丢弃")
+    ordered_spoken_turns = [
+        dialogue.line
+        for shot in shots
+        for dialogue in (shot.dialogues or [])
+        if (dialogue.line or "").strip()
+    ]
+    errors.extend(key_line_order_errors(
+        key_lines, ordered_spoken_turns, subject="分镜 dialogues",
+    ))
 
     missing_points = [pt for pt in key_points if _bigram_coverage(pt, visual_text) < KEY_POINT_COVERAGE]
     if missing_points:
@@ -1899,6 +2173,11 @@ def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeS
         errors.append(
             f"大纲未安排 {len(missing_lines)} 条必保留关键台词：{shown}{extra}；"
             "请把每条关键台词分配到对应镜头的 covers，确保整集都规划进去")
+    errors.extend(key_line_order_errors(
+        key_lines,
+        [(s.beat or "") + (s.covers or "") for s in shots],
+        subject="分镜大纲",
+    ))
     missing_points = [pt for pt in key_points if _bigram_coverage(pt, plan_text) < KEY_POINT_COVERAGE]
     if missing_points:
         shown = "；".join(missing_points[:KEY_CONTENT_MAX_REPORT])

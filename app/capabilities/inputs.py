@@ -41,6 +41,7 @@ class PortraitUpdatePromptInput(StandardCommandInput):
 class PortraitGenerateInput(StandardCommandInput):
     project_id: str
     character: str | None = None
+    resume: bool = False
 
 
 class PortraitViewRegenerateInput(StandardCommandInput):

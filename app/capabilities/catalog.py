@@ -300,7 +300,7 @@ def _register_commands(registry) -> None:
         _cmd(
             "project.import_novel",
             title="导入小说",
-            description="消费 attachment_token 创建项目并导入 TXT",
+            description="消费 attachment_token 创建项目并导入 TXT，随后自动分集并生成人物谱与多视角素材库",
             input_model=I.ProjectImportNovelInput,
             risk=RiskLevel.R2_MATERIAL,
             confirmation=ConfirmationPolicy.ALWAYS,

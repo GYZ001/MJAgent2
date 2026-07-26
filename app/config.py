@@ -172,7 +172,6 @@ DEFAULT_SETTINGS = {
     "video_qa_reserved_concurrency": "2",
     "video_control_reserved_concurrency": "2",
     "video_reference_batch_prompt": "true",   # P1：一镜一次提示词合同
-    "video_reference_batch_qa": "true",       # P1：批量参考图 QA
     "video_reference_role_adaptive": "false", # P2：质量角色自适应（实验，默认关）
     "episode_cost_limit_cny": "100",
     "use_character_refs": "true",     # 出场角色定妆照随镜头注入 reference_image（跨集一致性核心）

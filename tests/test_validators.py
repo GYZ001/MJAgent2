@@ -237,6 +237,20 @@ def test_storyboard_preservation_flags_dropped_key_line() -> None:
     assert not any("narration" in e for e in errors), errors
 
 
+def test_storyboard_preservation_rejects_reversed_key_dialogue_chain() -> None:
+    board = _board_preserving_key_content()
+    board.shots[0].dialogues, board.shots[1].dialogues = (
+        board.shots[1].dialogues,
+        board.shots[0].dialogues,
+    )
+
+    errors = validate_storyboard_preserves_key_content(
+        board, _screenplay_with_manifest()
+    )
+
+    assert any("打乱了主线对白顺序" in e for e in errors), errors
+
+
 def test_storyboard_preservation_noop_without_manifest() -> None:
     """剧本未声明必保留清单（旧数据/兜底）时，本校验直接放行，不制造误报。"""
     errors = validate_storyboard_preserves_key_content(

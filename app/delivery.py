@@ -12,7 +12,7 @@ from app import config
 from app.atomic_io import atomic_copy, atomic_write_text, atomic_zip_directory
 from app.db import get_conn, new_id, now, rows_to_dicts
 from app.evidence import repository
-from app.evidence.media import record_video_candidate, validate_video_file
+from app.evidence.media import grade_shot_video, record_video_candidate, validate_video_file
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
 from app.orchestration.engine import fingerprint
 
@@ -160,13 +160,20 @@ def delivery_readiness(episode_id: str) -> dict[str, Any]:
                     technical = validate_video_file(
                         version["video_path"], expected_duration_s=shot["duration_s"]
                     )
+            qa = json.loads(version["qa_json"] or "{}")
+            graded = grade_shot_video(
+                technical=technical,
+                qa=qa,
+                version_row=dict(version),
+            )
             item.update({
                 "ready": bool(technical.get("passed")),
                 "path": version["video_path"],
                 "artifact_id": version["artifact_id"],
                 "technical": technical,
                 "adoption_reason": version["adoption_reason"],
-                "qa": json.loads(version["qa_json"] or "{}"),
+                "qa": qa,
+                "grade": graded,
             })
         video_items.append(item)
     check(
@@ -174,6 +181,21 @@ def delivery_readiness(episode_id: str) -> dict[str, Any]:
         bool(video_items) and all(item["ready"] for item in video_items),
         "每镜都有已采用且通过技术校验的视频",
         {"missing_or_invalid": [item["shot_no"] for item in video_items if not item["ready"]]},
+    )
+    fatal_quality = [
+        {
+            "shot_no": item["shot_no"],
+            "version_id": item.get("version_id"),
+            "fatal_failures": (item.get("grade") or {}).get("fatal_failures") or [],
+        }
+        for item in video_items
+        if (item.get("grade") or {}).get("fatal_failures")
+    ]
+    check(
+        "fatal_video_quality",
+        not fatal_quality,
+        "已采用视频不存在分身、错误文字等致命内容问题",
+        {"fatal_shots": fatal_quality},
     )
     source_artifacts = [
         _artifact_summary(project["bible_artifact_id"]),

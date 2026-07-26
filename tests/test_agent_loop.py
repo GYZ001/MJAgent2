@@ -303,6 +303,39 @@ def test_storyboard_plural_shots_gets_targeted_repair_and_singular_contract(
     assert prompts[1].endswith("根对象只能包含单数 shot；禁止 shots 数组。")
 
 
+def test_repair_loop_can_retain_complete_task_and_candidate(monkeypatch) -> None:
+    """长剧本修复不得只看到头 3000/6000 字而丢失后半段台词。"""
+    task_sentinel = "SOURCE_MAIN_DIALOGUE_AT_TASK_TAIL"
+    candidate_sentinel = "SCRIPT_MAIN_DIALOGUE_AT_CANDIDATE_TAIL"
+    user_prompt = "任务开头" + ("源" * 7000) + task_sentinel
+    first = json.dumps(
+        {"value": 1, "padding": "稿" * 7000, "sentinel": candidate_sentinel},
+        ensure_ascii=False,
+    )
+    outputs = [first, '{"value": 2}']
+    prompts: list[str] = []
+
+    async def fake_chat(messages, **_kwargs):
+        prompts.append(messages[-1]["content"])
+        return outputs[len(prompts) - 1]
+
+    monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
+    result = asyncio.run(stages._run_with_agent_loop(
+        "可拍剧本",
+        "screenplay",
+        user_prompt,
+        Candidate,
+        lambda candidate: [] if candidate.value >= 2 else ["主线台词缺失"],
+        loop=_loop(max_iterations=2),
+        repair_user_prompt_limit=None,
+        repair_candidate_limit=None,
+    ))
+
+    assert result.value == 2
+    assert task_sentinel in prompts[1]
+    assert candidate_sentinel in prompts[1]
+
+
 def test_storyboard_loop_exit_message_reflects_actual_reason() -> None:
     assert api._storyboard_loop_exit_text("max_iterations") == "已达到重试上限"
     assert "无质量提升" in api._storyboard_loop_exit_text("no_quality_gain")

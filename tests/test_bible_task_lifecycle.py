@@ -61,3 +61,41 @@ def test_bible_task_starts_full_refs_after_success(monkeypatch) -> None:
     assert row["status"] == "bible_ready"
     assert row["bible_version"] == 1
     assert started["args"] == ("proj_test", None)
+
+
+def test_bible_completion_preserves_planned_project_status(monkeypatch) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE chapters(project_id TEXT, idx INTEGER)")
+    conn.execute(
+        "CREATE TABLE projects("
+        "id TEXT PRIMARY KEY, bible_json TEXT, bible_version INTEGER DEFAULT 0, "
+        "bible_status TEXT, bible_error TEXT, plan_status TEXT, status TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO projects(id, bible_json, bible_version, bible_status, bible_error, plan_status, status) "
+        "VALUES('proj_planned', NULL, 0, 'running', NULL, 'ready', 'planned')"
+    )
+    conn.commit()
+
+    async def fake_generate_bible(*_args, **_kwargs):
+        return Bible(
+            world=World(visual_style_canonical="ink animation"),
+            characters=[
+                Character(
+                    name="Hero",
+                    role="lead",
+                    appearance_canonical="black hair, blue coat, tall build",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    monkeypatch.setattr(api, "generate_bible", fake_generate_bible)
+    monkeypatch.setattr(api, "_start_refs_generation", lambda *_args: True)
+
+    asyncio.run(api._bible_task("proj_planned", trigger_full_refs=True))
+
+    row = conn.execute("SELECT status, bible_status FROM projects WHERE id='proj_planned'").fetchone()
+    assert row["bible_status"] == "ready"
+    assert row["status"] == "planned"

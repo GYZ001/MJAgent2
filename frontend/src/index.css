@@ -2139,10 +2139,19 @@ label.f { color: var(--ink-soft); font: 600 12px var(--ui); letter-spacing: .02e
   background: rgba(25,29,31,.68); color: #fff; font-size: 11px; line-height: 1.2;
   backdrop-filter: blur(8px); box-shadow: 0 3px 14px rgba(0,0,0,.14);
 }
+.portrait-version-label > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .portrait-version-label em {
   padding: 3px 6px; border-radius: 999px; background: rgba(255,255,255,.17);
   color: #fff; font-size: 9.5px; font-style: normal; letter-spacing: .05em;
 }
+.portrait-view-redo {
+  position: absolute; z-index: 3; top: 9px; left: 9px; padding: 5px 8px;
+  border: 1px solid rgba(255,255,255,.3); border-radius: 999px;
+  background: rgba(25,29,31,.62); color: #fff; font-size: 9.5px; cursor: pointer;
+  backdrop-filter: blur(8px);
+}
+.portrait-view-redo:hover { background: rgba(255,255,255,.27); }
+.portrait-view-redo:disabled { cursor: not-allowed; opacity: .58; }
 .portrait-scroll-controls {
   position: absolute; z-index: 2; inset: 0; color: #fff; pointer-events: none;
 }

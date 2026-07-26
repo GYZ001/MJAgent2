@@ -62,11 +62,16 @@ async def portrait_update_prompt(args: I.PortraitUpdatePromptInput) -> CommandRe
 async def portrait_generate(args: I.PortraitGenerateInput) -> CommandResult:
     from app import api
 
-    outcome = await call_guarded(api.start_refs, args.project_id, body={"character": args.character})
+    outcome = await call_guarded(
+        api.start_refs,
+        args.project_id,
+        body={"character": args.character, "resume": args.resume},
+    )
     if isinstance(outcome, CommandResult):
         return outcome
     scope = f"角色「{args.character}」" if args.character else "全部角色"
-    return succeeded(f"{scope}的定妆照生成已启动", data=outcome)
+    action = "缺失定妆照补齐" if args.resume else "定妆照生成"
+    return succeeded(f"{scope}的{action}已启动", data=outcome)
 
 
 async def portrait_cancel(args: I.ProjectScopedInput) -> CommandResult:

@@ -27,11 +27,11 @@ class RetryDecision:
 
 
 def auto_retake_limit() -> int:
-    """质量 QA 自动重抽：连续失败 2 次后停止烧钱转人工（PRD §14.3）。"""
+    """明确结构性 QA 失败最多自动重抽一次，随后转人工。"""
     try:
-        return max(1, int(get_setting("video_auto_retake_limit") or 2))
+        return max(1, int(get_setting("video_auto_retake_limit") or 1))
     except (TypeError, ValueError):
-        return 2
+        return 1
 
 
 def technical_resubmit_limit() -> int:
@@ -49,8 +49,9 @@ def decide_qa_retake(*, auto_retake_count: int, qa_overall: float, threshold: fl
     failures = list(hard_failures or [])
     if qa_overall < 0 and not failures:
         return RetryDecision(False, RetryKind.QA_RETAKE, False, "质检未完成", limit, auto_retake_count)
-    if not failures and qa_overall >= thr:
-        return RetryDecision(False, RetryKind.QA_RETAKE, False, "已达标", limit, auto_retake_count)
+    if not failures:
+        reason = "已达标" if qa_overall >= thr else "仅总分偏低，无明确结构性失败，转人工复核"
+        return RetryDecision(False, RetryKind.QA_RETAKE, False, reason, limit, auto_retake_count)
     if auto_retake_count >= limit:
         return RetryDecision(
             False, RetryKind.QA_RETAKE, False,
@@ -115,11 +116,6 @@ def scheduler_policy() -> str:
 
 def batch_prompt_enabled() -> bool:
     value = (get_setting("video_reference_batch_prompt") or "true").strip().lower()
-    return value in {"1", "true", "yes", "on"}
-
-
-def batch_qa_enabled() -> bool:
-    value = (get_setting("video_reference_batch_qa") or "true").strip().lower()
     return value in {"1", "true", "yes", "on"}
 
 
