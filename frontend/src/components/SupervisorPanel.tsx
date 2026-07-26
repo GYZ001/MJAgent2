@@ -54,13 +54,18 @@ const PHASE_LABEL: Record<string, string> = {
 
 const STRATEGY_LABEL: Record<string, string> = {
   normalize: '整理格式',
-  repair_current: '微调当前镜',
-  repair_window: '修复相邻镜头',
-  redo_suffix: '重做后续镜头',
+  repair_current: '修当前镜',
+  repair_window: '修复相邻衔接',
+  insert_shot: '插入镜头',
+  split_shot: '拆分镜头',
   split_adjacent_shot: '拆分相邻镜头',
-  replan_outline: '重规划大纲',
+  delete_shot: '删除重复镜头',
+  move_shot: '移动镜头',
+  // 遗留文案兼容（后端已封死）
+  redo_suffix: '修复相邻衔接',
+  replan_outline: '插入镜头',
   waiting_human: '等待人工',
-  waiting_retry: '等待重试',
+  waiting_retry: '自动续跑',
   waiting_authorization: '等待授权',
 }
 

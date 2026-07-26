@@ -40,11 +40,11 @@ def test_route_capacity_prefers_split_adjacent() -> None:
     assert plan.invalidation_frontier == 9
 
 
-def test_route_capacity_escalates_to_replan_after_stall() -> None:
+def test_route_capacity_escalates_to_split_after_stall() -> None:
     msg = "shot_no=9 台词纯文字 65 字，超过 10s 口播上限 36 字；请拆镜"
     first = route_issues([msg], validated_prefix_end=8, next_shot_no=9)
     assert first.strategy == "split_adjacent_shot"
-    # 连续 stalled 升到 L4 后才整集重规划
+    # 连续 stalled 升到 L4 后走拆镜，禁止整集重规划
     stalled = route_issues(
         [msg],
         validated_prefix_end=8,
@@ -52,4 +52,5 @@ def test_route_capacity_escalates_to_replan_after_stall() -> None:
         current_level="L3",
         issue_fingerprint_counts={first.fingerprint: 2},
     )
-    assert stalled.strategy == "replan_outline"
+    assert stalled.strategy == "split_shot"
+    assert stalled.strategy != "replan_outline"

@@ -1,4 +1,4 @@
-"""Repair Router 单元测试。"""
+"""Repair Router：局部策略回归（无 redo_suffix / replan_outline）。"""
 from __future__ import annotations
 
 from app.harness.types import Issue, IssueSeverity
@@ -26,25 +26,26 @@ def test_preferred_levels():
     assert preferred_level_for_code("SCHEMA_INVALID") == "L1"
     assert preferred_level_for_code("STATE_CHAIN_INVALID") == "L2"
     assert preferred_level_for_code("SPINE_MISSING") == "L3"
-    assert preferred_level_for_code("PLAN_EXHAUSTED_NOT_FINAL") == "L4"
+    assert preferred_level_for_code("PLAN_EXHAUSTED_NOT_FINAL") == "L3"
 
 
-def test_route_spoken_capacity_to_replan_when_must_keep():
-    """容量超限首轮走相邻插镜；升到 L4 后整集重规划。"""
+def test_route_spoken_capacity_never_replans_outline():
+    """容量超限走拆镜/插镜；升到 L4 后仍禁止整集重规划。"""
     issues = [_issue("SPOKEN_CAPACITY_EXCEEDED", "第 9 镜必保留台词超过 10 秒容量，请拆镜")]
     first = route_issues(issues, validated_prefix_end=8, next_shot_no=9)
     assert first.level == "L1"
     assert first.strategy == "split_adjacent_shot"
     assert first.invalidation_frontier <= 9
 
-    replan = route_issues(
+    split = route_issues(
         issues,
         validated_prefix_end=8,
         next_shot_no=9,
         current_level="L4",
     )
-    assert replan.level == "L4"
-    assert replan.strategy == "replan_outline"
+    assert split.level == "L4"
+    assert split.strategy == "split_shot"
+    assert split.strategy != "replan_outline"
 
 
 def test_route_state_chain_window():
@@ -69,7 +70,6 @@ def test_fingerprint_stall_upgrades():
         current_level=first.level,
     )
     assert stalled.level != "L1" or stalled.pause_state == "WAITING_HUMAN"
-    # 两轮后至少升级一层
     assert upgrade_level("L1") == "L2"
 
 
@@ -87,3 +87,11 @@ def test_provider_pauses_external():
     ], validated_prefix_end=2)
     assert plan.pause_state == "PAUSED_EXTERNAL"
     assert plan.strategy == "waiting_retry"
+
+
+def test_spine_missing_inserts_not_redo_suffix():
+    plan = route_issues([
+        _issue("SPINE_MISSING", "must_keep spine 未覆盖 第 3 镜", 3),
+    ], validated_prefix_end=2, next_shot_no=3)
+    assert plan.strategy == "insert_shot"
+    assert plan.strategy not in {"redo_suffix", "replan_outline"}

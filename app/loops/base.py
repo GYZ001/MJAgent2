@@ -29,6 +29,9 @@ class AgentLoopPolicy:
     min_quality_gain: float = 0.03
     no_gain_rounds: int = 2
     allow_warning_candidate: bool = False
+    # Production Repair：只跑一轮完整生成，无论 QA 是否通过都交出候选给局部 Patch Agent。
+    # 禁止再用“重新输出完整 JSON”的修复轮。
+    baseline_only: bool = False
 
 
 @dataclass(slots=True)
@@ -160,6 +163,22 @@ class AgentLoop(Generic[T]):
                     value=value,
                     status="accepted",
                     exit_reason="contract_passed",
+                    iterations=iteration_no,
+                    artifact_id=artifact_id,
+                )
+
+            # Baseline-only：首轮结束后立即交出可解析候选（含 blocker），交由 Production Repair。
+            if self.policy.baseline_only and value is not None:
+                if iteration_step_id:
+                    transition_step(
+                        iteration_step_id, "RUNNING", "WARNING", "baseline_handoff",
+                        decision="repair", output_artifact_id=artifact_id,
+                    )
+                return AgentLoopResult(
+                    value=value,
+                    status="baseline",
+                    exit_reason="baseline_handoff",
+                    issues=list(issues),
                     iterations=iteration_no,
                     artifact_id=artifact_id,
                 )

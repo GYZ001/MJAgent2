@@ -362,9 +362,10 @@ def test_context_pack_records_hash_and_truncation_without_hiding_it() -> None:
     assert len(manifest["items"][0]["content_hash"]) == 64
 
 
-def test_screenplay_task_persists_warning_candidate_without_marking_ready(
+def test_screenplay_task_keeps_repairing_without_publishing_warning(
     tmp_path, monkeypatch
 ) -> None:
+    """普通 QA blocker 不得以 warning 可交付终态落库；应保持 repairing / 工作副本。"""
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "screenplay-warning.db")
     monkeypatch.setattr(db._local, "conn", None, raising=False)
     db.init_db()
@@ -386,23 +387,36 @@ def test_screenplay_task_persists_warning_candidate_without_marking_ready(
     conn.commit()
     candidate = EpisodeScreenplay(
         episode_no=1,
-        full_script_text="editable warning candidate",
+        full_script_text="working repair candidate",
+        stakes="失败失去资格",
+        dramatic_question="能否赢？",
+        protagonist_goal="赢",
+        obstacle="阻力",
     )
-    object.__setattr__(candidate, "residual_errors", ["关键剧情点缺失"])
-    object.__setattr__(candidate, "evidence_artifact_id", "art_warning")
 
-    async def fake_generate(*_args, **_kwargs):
+    async def fake_production(**_kwargs):
+        conn.execute(
+            "UPDATE episodes SET screenplay_status='repairing', screenplay_error=?, "
+            "screenplay_updated_at=? WHERE id=?",
+            ("自动修复中：剩余 blocker", db.now(), "e1"),
+        )
+        conn.commit()
         return candidate
 
-    monkeypatch.setattr(api, "generate_screenplay", fake_generate)
+    monkeypatch.setattr(
+        "app.production.screenplay_repair.run_screenplay_production",
+        fake_production,
+    )
 
     result = asyncio.run(api._screenplay_task("e1"))
 
     row = conn.execute(
-        "SELECT screenplay_status, screenplay_error, screenplay_artifact_id "
+        "SELECT screenplay_status, screenplay_error, screenplay_json "
         "FROM episodes WHERE id='e1'"
     ).fetchone()
     assert result is candidate
-    assert row["screenplay_status"] == "warning"
-    assert "不能进入分镜" in row["screenplay_error"]
-    assert row["screenplay_artifact_id"] == "art_warning"
+    assert row["screenplay_status"] == "repairing"
+    assert row["screenplay_status"] != "warning"
+    assert row["screenplay_status"] != "ready"
+    # 未发布：页面交付位不应被未认证候选覆盖为 ready 文本
+    assert "自动修复" in (row["screenplay_error"] or "")

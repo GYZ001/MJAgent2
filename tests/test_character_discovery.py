@@ -354,10 +354,24 @@ def test_late_episode_screenplay_discovers_character_before_generation(tmp_path,
             full_script_text="【场1】魂天帝：今日便结束一切。\n萧炎：那就一战。",
         )
 
+    async def fake_production(*, episode_id, episode, source_text, bible, **_kwargs):
+        # 生产链仍应看到 preflight 已追加的 source-backed 角色
+        script = await fake_generate(episode, source_text, bible)
+        conn.execute(
+            "UPDATE episodes SET screenplay_json=?, screenplay_status='ready', "
+            "screenplay_error=NULL, screenplay_updated_at=? WHERE id=?",
+            (script.model_dump_json(), db.now(), episode_id),
+        )
+        conn.commit()
+        return script
+
     monkeypatch.setattr(portraits, "discover_character_candidates", fake_candidates)
     monkeypatch.setattr(portraits, "assess_new_character", fake_assess)
     monkeypatch.setattr(portraits, "_generate_fresh_portrait", portrait_failure)
-    monkeypatch.setattr(api, "generate_screenplay", fake_generate)
+    monkeypatch.setattr(
+        "app.production.screenplay_repair.run_screenplay_production",
+        fake_production,
+    )
 
     result = asyncio.run(api._screenplay_task("e1926"))
 
@@ -374,9 +388,8 @@ def test_late_episode_screenplay_discovers_character_before_generation(tmp_path,
     assert names == {"萧炎", "魂天帝"}
     assert project["bible_version"] == 2
     assert generated_with == [{"萧炎", "魂天帝"}]
-    # 本用例 fake_generate 只覆盖发现链路，剧本正文故意不完整 → 允许 warning；
-    # 关键是人物已入库且剧本产物落库，不能因场次粘连对白误报「未入谱说话人」而失败。
-    assert episode["screenplay_status"] in {"ready", "warning"}
+    # 发现链路完成后由 Production Repair 发布；未通过凭证前不会落 warning 可交付态。
+    assert episode["screenplay_status"] in {"ready", "repairing"}
     assert "魂天帝" in episode["screenplay_json"]
     error_text = ""
     try:

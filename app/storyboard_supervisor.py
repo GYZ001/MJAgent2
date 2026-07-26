@@ -257,15 +257,41 @@ async def run_storyboard_supervisor(
         return cp
 
     if not resume:
-        worker.delete_episode_shots(episode_id)
-        conn.execute(
-            "UPDATE episodes SET storyboard_outline_json=NULL, storyboard_artifact_id=NULL WHERE id=?",
-            (episode_id,),
-        )
-        conn.commit()
-        cp.validated_prefix_end = 0
-        cp.next_shot_no = 1
-        cp.validated_shot_artifact_ids = []
+        # 新 production revision：若本 revision 已完成 Baseline+QA，拒绝 fresh 全量清空，改为 resume。
+        from app.production.revision import ensure_production_revision, get_active_production_revision
+        from app.harness.contracts import get_contract
+
+        existing_rev = get_active_production_revision(episode_id, "storyboard")
+        if existing_rev and existing_rev.baseline_done and existing_rev.first_evaluation_done:
+            resume = True
+        else:
+            worker.delete_episode_shots(episode_id)
+            try:
+                conn.execute(
+                    "UPDATE episodes SET storyboard_outline_json=NULL, "
+                    "working_storyboard_artifact_id=NULL, "
+                    "storyboard_artifact_id=COALESCE(published_storyboard_artifact_id, NULL) WHERE id=?",
+                    (episode_id,),
+                )
+            except Exception:  # noqa: BLE001
+                conn.execute(
+                    "UPDATE episodes SET storyboard_outline_json=NULL, storyboard_artifact_id=NULL WHERE id=?",
+                    (episode_id,),
+                )
+            conn.commit()
+            cp.validated_prefix_end = 0
+            cp.next_shot_no = 1
+            cp.validated_shot_artifact_ids = []
+            try:
+                contract_ver = get_contract("storyboard").version
+            except Exception:  # noqa: BLE001
+                contract_ver = "1"
+            ensure_production_revision(
+                episode_id=episode_id,
+                kind="storyboard",
+                contract_version=contract_ver,
+                resume=False,
+            )
 
     conn.execute(
         "UPDATE episodes SET status='scripting', script_error=NULL, storyboard_warning=NULL WHERE id=?",
@@ -440,7 +466,7 @@ async def run_storyboard_supervisor(
                     ).fetchall(),
                     ep_data["episode_no"],
                 ).shots) if cp.validated_prefix_end else []
-                if (cp.last_repair or {}).get("strategy") == "replan_outline" or plan.strategy == "replan_outline":
+                if (cp.last_repair or {}).get("strategy") == "insert_shot" or plan.strategy in {"insert_shot", "replan_outline"}:
                     outline = None
                     needs_outline = True
                     conn.execute(
@@ -500,7 +526,7 @@ async def run_storyboard_supervisor(
                     )
                     conn.commit()
                     return cp
-                if (cp.last_repair or {}).get("strategy") == "replan_outline" or plan.strategy == "replan_outline":
+                if (cp.last_repair or {}).get("strategy") == "insert_shot" or plan.strategy in {"insert_shot", "replan_outline"}:
                     outline = None
                     needs_outline = True
                     conn.execute(
@@ -612,7 +638,7 @@ async def run_storyboard_supervisor(
                     except Exception:  # noqa: BLE001
                         pass
                 return cp
-            if (cp.last_repair or {}).get("strategy") == "replan_outline" or plan.strategy == "replan_outline":
+            if (cp.last_repair or {}).get("strategy") == "insert_shot" or plan.strategy in {"insert_shot", "replan_outline"}:
                 outline = None
                 needs_outline = True
                 conn.execute(
@@ -716,19 +742,25 @@ async def run_storyboard_supervisor(
                 "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
             ).fetchall()
             completed = list(_board_from_shot_rows(rows, ep_data["episode_no"]).shots) if rows else []
-            if (cp.last_repair or {}).get("strategy") == "replan_outline" or plan.strategy == "replan_outline":
+            if (cp.last_repair or {}).get("strategy") == "insert_shot" or plan.strategy in {"insert_shot", "replan_outline"}:
                 outline = None
                 needs_outline = True
             continue
 
-    # 超出 repair epoch
-    cp.phase = "WAITING_HUMAN"
+    # 超出单次 activation 的 repair epoch：让出并自动续跑，不把可修复 QA 结束为 failure
+    cp.phase = "WAITING_RETRY"
     save_checkpoint(cp, run_id=run_id)
     conn.execute(
-        "UPDATE episodes SET status='scripted', script_error=? WHERE id=?",
-        (f"自动修复已达上限（{MAX_REPAIR_EPOCHS} 轮），请人工介入后继续", episode_id),
+        "UPDATE episodes SET status='scripting', script_error=? WHERE id=?",
+        (f"自动修复让出（已完成 {MAX_REPAIR_EPOCHS} 轮局部修补），将自动续跑", episode_id),
     )
     conn.commit()
+    if run_id:
+        evidence_repository.append_event(
+            run_id, "REPAIR_YIELD", "info",
+            "分镜修复 activation 预算用尽，已写 checkpoint，等待自动续跑",
+            payload={"repair_epoch": cp.repair_epoch},
+        )
     return cp
 
 
@@ -740,20 +772,22 @@ def _apply_repair(
     completed: list[Shot],
     outline: StoryboardOutline | None,
 ) -> SupervisorCheckpoint:
+    """最小范围修复：只触及当前镜或相邻窗口；禁止 redo_suffix / replan_outline。"""
     from app.observability.metrics import inc
+    from app.repair_router import normalize_strategy
 
     cp.phase = "REPAIRING"
     cp.repair_epoch += 1
     cp.issue_fingerprint_counts = bump_fingerprint_count(
         cp.issue_fingerprint_counts, plan.fingerprint
     )
-    cp.last_repair = plan.model_dump(mode="json")
+    strategy = normalize_strategy(plan.strategy)
+    cp.last_repair = {**plan.model_dump(mode="json"), "strategy": strategy}
     frontier = max(1, int(plan.invalidation_frontier or 1))
     deleted = 0
-    effective_strategy = plan.strategy
+    effective_strategy = strategy
 
-    if plan.strategy == "split_adjacent_shot":
-        # P1：容量不可满足 → 大纲层插入相邻镜并重排 shot_no，避免整集重写。
+    if strategy in {"split_adjacent_shot", "split_shot"}:
         from app.validators import split_outline_over_key_line_capacity, storyboard_shot_count_range
         from app.domain.common import _load_screenplay
 
@@ -772,75 +806,131 @@ def _apply_repair(
                 )
                 cp.expected_total = len(outline.shots)
                 inc(
-                    "storyboard_replan_due_to_capacity_total",
+                    "storyboard_split_shot_total",
                     episode_id=episode_id,
                     shot_no=frontier,
                     shots_after=len(outline.shots),
-                    strategy="split_adjacent_shot",
+                    strategy=strategy,
                 )
-        deleted = _delete_shots_from(conn, episode_id, frontier)
-        cp.validated_prefix_end = frontier - 1
+        # 只失效 frontier 一镜（或窗口），不删整后缀
+        window_end = frontier if strategy == "split_shot" else frontier
+        deleted = _delete_shot_window(conn, episode_id, frontier, window_end)
+        cp.validated_prefix_end = max(0, frontier - 1)
         cp.next_shot_no = frontier
         cp.validated_shot_artifact_ids = cp.validated_shot_artifact_ids[: max(0, frontier - 1)]
         if not events:
-            # 大纲无法再拆 → 升级为整集重规划
-            effective_strategy = "replan_outline"
+            # 大纲无法再拆 → 插入明确节点，绝不整集重规划
+            effective_strategy = "insert_shot"
             cp.last_repair = {
                 **(cp.last_repair or {}),
-                "strategy": "replan_outline",
-                "reason": "split_adjacent_shot_noop_escalate",
+                "strategy": "insert_shot",
+                "reason": "split_noop_escalate_insert",
             }
-            conn.execute(
-                "UPDATE episodes SET storyboard_outline_json=NULL WHERE id=?", (episode_id,)
-            )
+            if outline is not None and frontier <= len(outline.shots):
+                # 在 frontier 处复制相邻大纲节点作为插镜占位
+                from copy import deepcopy
+                src = outline.shots[min(len(outline.shots), frontier) - 1]
+                extra = deepcopy(src)
+                extra.shot_no = frontier
+                # 重排后续编号由后续生成填充；这里扩展计划长度
+                outline.shots.insert(frontier - 1, extra)
+                for i, node in enumerate(outline.shots, start=1):
+                    node.shot_no = i
+                conn.execute(
+                    "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
+                    (outline.model_dump_json(), episode_id),
+                )
+                cp.expected_total = len(outline.shots)
             inc(
-                "storyboard_replan_due_to_capacity_total",
+                "storyboard_insert_shot_total",
                 episode_id=episode_id,
                 shot_no=frontier,
-                strategy="replan_outline",
+                strategy="insert_shot",
             )
-    elif plan.strategy in {"repair_current", "normalize"}:
-        deleted = _delete_shots_from(conn, episode_id, frontier)
-        cp.validated_prefix_end = frontier - 1
+    elif strategy == "insert_shot":
+        # 不删除已通过镜头；仅从 frontier 起允许重填/追加
+        deleted = _delete_shot_window(conn, episode_id, frontier, frontier)
+        cp.validated_prefix_end = max(0, frontier - 1)
         cp.next_shot_no = frontier
         cp.validated_shot_artifact_ids = cp.validated_shot_artifact_ids[: max(0, frontier - 1)]
-    elif plan.strategy == "repair_window":
-        deleted = _delete_shots_from(conn, episode_id, frontier)
-        cp.validated_prefix_end = frontier - 1
+        if outline is not None:
+            from copy import deepcopy
+            idx = min(len(outline.shots), max(1, frontier)) - 1
+            if outline.shots:
+                extra = deepcopy(outline.shots[idx])
+                extra.shot_no = frontier
+                outline.shots.insert(idx + 1, extra)
+                for i, node in enumerate(outline.shots, start=1):
+                    node.shot_no = i
+                conn.execute(
+                    "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
+                    (outline.model_dump_json(), episode_id),
+                )
+                cp.expected_total = len(outline.shots)
+        inc("storyboard_insert_shot_total", episode_id=episode_id, shot_no=frontier)
+    elif strategy in {"repair_current", "normalize", "delete_shot"}:
+        deleted = _delete_shot_window(conn, episode_id, frontier, frontier)
+        cp.validated_prefix_end = max(0, frontier - 1)
         cp.next_shot_no = frontier
         cp.validated_shot_artifact_ids = cp.validated_shot_artifact_ids[: max(0, frontier - 1)]
-    elif plan.strategy in {"redo_suffix", "replan_outline"}:
-        deleted = _delete_shots_from(conn, episode_id, frontier)
-        cp.validated_prefix_end = frontier - 1
+    elif strategy in {"repair_window", "move_shot"}:
+        # 相邻 2~3 镜窗口
+        window_end = frontier + 1
+        deleted = _delete_shot_window(conn, episode_id, frontier, window_end)
+        cp.validated_prefix_end = max(0, frontier - 1)
         cp.next_shot_no = frontier
         cp.validated_shot_artifact_ids = cp.validated_shot_artifact_ids[: max(0, frontier - 1)]
-        if plan.strategy == "replan_outline":
-            inc(
-                "storyboard_replan_due_to_capacity_total",
-                episode_id=episode_id,
-                shot_no=frontier,
-                strategy="replan_outline",
-            )
     else:
-        deleted = 0
+        # 未知策略降级为单镜修复
+        effective_strategy = "repair_current"
+        deleted = _delete_shot_window(conn, episode_id, frontier, frontier)
+        cp.validated_prefix_end = max(0, frontier - 1)
+        cp.next_shot_no = frontier
+        cp.validated_shot_artifact_ids = cp.validated_shot_artifact_ids[: max(0, frontier - 1)]
+
+    cp.last_repair = {**(cp.last_repair or {}), "strategy": effective_strategy}
     conn.commit()
     save_checkpoint(cp)
-    # 观测事件
     try:
         from app.observability.tracing import current_trace
         rid = current_trace().run_id
         if rid and deleted:
             evidence_repository.append_event(
-                rid, "SUFFIX_INVALIDATED", "info",
-                f"失效边界={frontier}，删除 {deleted} 镜",
+                rid, "LOCAL_PATCH_INVALIDATED", "info",
+                f"局部失效边界={frontier}，删除 {deleted} 镜（策略={effective_strategy}）",
                 payload={"frontier": frontier, "deleted": deleted, "strategy": effective_strategy},
             )
-        if rid and effective_strategy in {"replan_outline", "split_adjacent_shot"}:
+        if rid and effective_strategy in {"insert_shot", "split_shot", "split_adjacent_shot"}:
             evidence_repository.append_event(
-                rid, "OUTLINE_REPLANNED", "info",
-                f"大纲修复 strategy={effective_strategy} epoch={cp.repair_epoch}",
+                rid, "SHOT_STRUCTURE_PATCHED", "info",
+                f"结构修补 strategy={effective_strategy} epoch={cp.repair_epoch}",
                 payload=cp.last_repair or plan.model_dump(mode="json"),
             )
     except Exception:  # noqa: BLE001
         pass
     return cp
+
+
+def _delete_shot_window(conn, episode_id: str, start_no: int, end_no: int) -> int:
+    """只删除 [start_no, end_no] 闭区间内的镜头，保留前后无关镜头。"""
+    start_no = max(1, int(start_no))
+    end_no = max(start_no, int(end_no))
+    rows = conn.execute(
+        "SELECT id, shot_no FROM shots WHERE episode_id=? AND shot_no>=? AND shot_no<=? ORDER BY shot_no",
+        (episode_id, start_no, end_no),
+    ).fetchall()
+    if not rows:
+        return 0
+    from app import worker
+    for row in rows:
+        worker.clear_shot_artifacts(row["id"])
+        conn.execute("DELETE FROM shots WHERE id=?", (row["id"],))
+    # 重排后续 shot_no，保持连续
+    remaining = conn.execute(
+        "SELECT id, shot_no FROM shots WHERE episode_id=? ORDER BY shot_no",
+        (episode_id,),
+    ).fetchall()
+    for idx, row in enumerate(remaining, start=1):
+        if row["shot_no"] != idx:
+            conn.execute("UPDATE shots SET shot_no=? WHERE id=?", (idx, row["id"]))
+    return len(rows)

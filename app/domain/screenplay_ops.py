@@ -106,6 +106,7 @@ async def _screenplay_task(
     *,
     preflight_result: dict | None = None,
 ) -> EpisodeScreenplay | None:
+    """一次 Baseline + Production Repair Agent 局部自愈；仅证书通过后写入 published。"""
     conn = get_conn()
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     try:
@@ -126,80 +127,48 @@ async def _screenplay_task(
         prev = conn.execute(
             "SELECT cliffhanger FROM episodes WHERE project_id=? AND episode_no=?",
             (ep["project_id"], ep["episode_no"] - 1)).fetchone()
-        script = await generate_screenplay(ep_data, source_text, bible,
-                                           prev_ending=prev["cliffhanger"] if prev else "")
-        # Second guard: audit the actual generated body, not only the source preflight.
-        # This catches named people that the model placed in prose/dialogue while
-        # omitting them from scene_outline.characters (the historical deadlock).
-        draft_audit = await _screenplay_character_discovery(
-            episode_id,
-            source_text,
-            draft_text=script.model_dump_json(),
-        )
-        if draft_audit.get("added"):
-            p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
-            bible = _project_bible_or_placeholder(p)
-            # Regenerate at most once with the expanded bible so the final outline,
-            # dialogue attribution, relationships, and speech styles all share the
-            # same authoritative cast.
-            script = await generate_screenplay(
-                ep_data,
-                source_text,
-                bible,
-                prev_ending=prev["cliffhanger"] if prev else "",
-            )
-        old_script = _load_screenplay(ep)
-        # Renderability：入库前再清洗并用最新门禁复检，消化空壳 ledger 等可自动修复项。
-        from app.validators import normalize_screenplay_ledgers, validate_screenplay
-        normalize_screenplay_ledgers(script)
-        # 主线压缩后：集目标时长跟 spine 走（不再因原文长而抬高）。
-        spine_n = len((script.plot_spine.spine_beats if script.plot_spine else None) or [])
-        spine_target = _storyboard_target_for_source(
-            ep_data.get("target_duration_s"), len(source_text), spine_beat_count=spine_n or None
-        )
-        if spine_target != ep_data.get("target_duration_s"):
-            conn.execute("UPDATE episodes SET target_duration_s=? WHERE id=?", (spine_target, episode_id))
-            conn.commit()
-            ep_data["target_duration_s"] = spine_target
-        expected = max(1, int(ep_data.get("target_duration_s") or ep["target_duration_s"]) // config.VIDEO_DURATION_MIN_S)
-        residual = validate_screenplay(
-            script, bible, expected,
-            episode_no=ep["episode_no"], source_text=source_text,
-        )
-        object.__setattr__(script, "residual_errors", residual)
-        script = _prepare_screenplay_for_storage(
-            ep, script,
-            keep_existing_id=(old_script.id if old_script else None),
-            keep_created_at=(old_script.created_at if old_script else None),
-        )
-        # 新剧本会让旧分镜/视频失效；保存前清空下游，确保后续必须重新展开。
-        worker.delete_episode_shots(episode_id)
-        residual = list(getattr(script, "residual_errors", []) or [])
-        artifact_id = getattr(script, "evidence_artifact_id", None)
-        note = None
-        if residual:
-            note = (
-                "当前仅为 WARNING 候选，存在未解决硬门禁；可手动修改后保存，"
-                "但修复前不能进入分镜：" + "；".join(residual)
-            )
-        screenplay_status = "warning" if residual else "ready"
-        ledger_json = json.dumps({
-            "episode_premise": script.episode_premise,
-            "events": [e.model_dump() for e in (script.events or [])],
-            "information_ledger": [i.model_dump() for i in (script.information_ledger or [])],
-            "voice_bible": [v.model_dump() for v in (script.voice_bible or [])],
-            "approved_adaptations": list(script.approved_adaptations or []),
-            "forbidden_additions": list(script.forbidden_additions or []),
-        }, ensure_ascii=False)
+
+        # 标记修复中；禁止在修复过程中清空下游
         conn.execute(
-            "UPDATE episodes SET screenplay_json=?, screenplay_status=?, screenplay_error=?, "
-            "screenplay_updated_at=?, screenplay_artifact_id=?, story_ledger_json=?, "
-            "status='planned', script_error=NULL WHERE id=?",
-            (
-                script.model_dump_json(), screenplay_status, (note or "")[:800] or None,
-                now(), artifact_id, ledger_json, episode_id,
-            ))
+            "UPDATE episodes SET screenplay_status='repairing', screenplay_error=?, screenplay_updated_at=? WHERE id=?",
+            ("生产修复中：首次生成后仅局部 Patch", now(), episode_id),
+        )
         conn.commit()
+
+        from app.production.screenplay_repair import run_screenplay_production
+        from app.observability.tracing import current_trace
+
+        run_id = None
+        try:
+            run_id = current_trace().run_id
+        except Exception:  # noqa: BLE001
+            run_id = None
+
+        # 若已有 published 且用户未 force 新 revision，resume 工作副本
+        resume = True
+        script = await run_screenplay_production(
+            episode_id=episode_id,
+            episode=ep_data,
+            source_text=source_text,
+            bible=bible,
+            prev_ending=prev["cliffhanger"] if prev else "",
+            run_id=run_id,
+            resume=resume,
+        )
+
+        # run_screenplay_production 在成功时已 publish；若仍 repairing 则不要写成 ready
+        row = conn.execute(
+            "SELECT screenplay_status, screenplay_json FROM episodes WHERE id=?", (episode_id,)
+        ).fetchone()
+        if row and row["screenplay_status"] == "ready" and row["screenplay_json"]:
+            return _load_screenplay(row) or script
+
+        # 未发布：保持 repairing，不写 warning 候选到页面交付位
+        if row and row["screenplay_status"] == "repairing":
+            # 工作副本仅存 working artifact；兼容字段不覆盖 published screenplay_json
+            return script
+
+        # 兜底：若 publish 已写入
         return script
     except asyncio.CancelledError:
         conn.execute(
@@ -207,7 +176,14 @@ async def _screenplay_task(
             ("剧本生成已取消，可重新发起。", now(), episode_id))
         conn.commit()
         raise
-    except (StageError, Exception) as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc)
+        if msg.startswith("WAITING_INPUT"):
+            conn.execute(
+                "UPDATE episodes SET screenplay_status='repairing', screenplay_error=?, screenplay_updated_at=? WHERE id=?",
+                (msg[:800], now(), episode_id))
+            conn.commit()
+            return None
         public = errors.record_and_format(exc, action="screenplay_generate", context={"episode_id": episode_id})
         conn.execute(
             "UPDATE episodes SET screenplay_status='failed', screenplay_error=?, screenplay_updated_at=? WHERE id=?",
@@ -365,10 +341,15 @@ async def _recorded_screenplay_task(
         ).fetchone()
         if not row:
             raise RuntimeError("剧本任务完成后剧集记录不存在")
-        if row["screenplay_status"] == "warning":
-            recorder.partial(row["screenplay_error"] or "剧本存在未解决门禁")
+        if row["screenplay_status"] == "ready":
+            recorder.succeed("剧本已通过完成凭证并发布")
+        elif row["screenplay_status"] == "repairing":
+            recorder.partial(row["screenplay_error"] or "剧本自动修复中/等待续跑")
+        elif row["screenplay_status"] == "warning":
+            # 兼容旧数据：warning 不再是可交付终态
+            recorder.partial(row["screenplay_error"] or "旧 warning 候选，已转入修复")
         else:
-            recorder.succeed("剧本已通过确定性门禁")
+            recorder.succeed("剧本任务结束")
         return script
     except asyncio.CancelledError:
         recorder.cancel("剧本生成已取消")
@@ -408,17 +389,50 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
         raise HTTPException(409, "分镜正在生成中，不能同时重写剧本")
     if ep["screenplay_status"] == "running" and _screenplay_task_active(episode_id):
         raise HTTPException(409, "剧本正在生成中")
+    if ep["screenplay_status"] == "repairing" and _screenplay_task_active(episode_id):
+        raise HTTPException(409, "剧本正在自动修复中")
+
+    # 已有 published / production revision：禁止 force 全量重生；应走 revise 或 resume repair
+    from app.production.revision import get_active_production_revision
+    active_rev = get_active_production_revision(episode_id, "screenplay")
+    published_id = None
+    try:
+        published_id = ep["published_screenplay_artifact_id"] if "published_screenplay_artifact_id" in ep.keys() else None
+    except Exception:  # noqa: BLE001
+        published_id = None
+    has_product = bool(ep["screenplay_json"]) and ep["screenplay_status"] in {"ready", "repairing", "warning"}
     force = bool(body.get("force"))
+    if has_product and (active_rev or published_id or ep["screenplay_status"] == "ready"):
+        if force:
+            raise HTTPException(
+                409,
+                "已有可交付剧本，禁止全量重新生成。请使用「让 Agent 按要求迭代」"
+                "（POST /episodes/{id}/screenplay/revise）从已发布版本创建工作分支。",
+            )
+        # 无 force：若 repairing 则续跑；若 ready 则 409
+        if ep["screenplay_status"] == "ready":
+            raise HTTPException(
+                409,
+                "本集已有通过凭证的剧本。如需修改请调用 /screenplay/revise。",
+            )
+        # repairing / warning → 续跑 Repair Agent（不新建 Baseline）
+        pass
+
     conn = get_conn()
-    has_shots = conn.execute("SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)).fetchone()["c"] > 0
-    if has_shots and not force:
-        raise HTTPException(409, "重新生成剧本会清空本集现有分镜、参考图、视频和成片，请确认后重试")
     started_at = now()
     conn.execute(
         "UPDATE episodes SET screenplay_status='running', screenplay_error=NULL, screenplay_started_at=?, screenplay_updated_at=? WHERE id=?",
         (started_at, started_at, episode_id))
     conn.commit()
     recorder = _new_screenplay_recorder(episode_id)
+    try:
+        conn.execute(
+            "UPDATE episodes SET active_screenplay_run_id=? WHERE id=?",
+            (recorder.run_id, episode_id),
+        )
+        conn.commit()
+    except Exception:  # noqa: BLE001
+        pass
     task_registry.spawn(
         "screenplay",
         episode_id,
@@ -426,6 +440,70 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
         project_id=ep["project_id"],
     )
     return {"status": "running", "run_id": recorder.run_id}
+
+
+@router.post("/episodes/{episode_id}/screenplay/revise")
+async def revise_screenplay(episode_id: str, body: dict | None = Body(None)):
+    """从已发布版本克隆工作副本，创建新 production revision，仅局部收敛。"""
+    body = _as_body_dict(body)
+    ep = _episode_or_404(episode_id)
+    _require_harness_engine(ep["project_id"])
+    if not ep["screenplay_json"] or ep["screenplay_status"] not in {"ready", "warning", "repairing"}:
+        raise HTTPException(409, "没有可迭代的已有剧本，请先生成可交付剧本")
+    if ep["screenplay_status"] == "running" and _screenplay_task_active(episode_id):
+        raise HTTPException(409, "剧本任务进行中")
+
+    from app.production.revision import ensure_production_revision, update_working_artifact
+    from app.production.patch import screenplay_artifact_payload
+    from app.harness.contracts import get_contract
+    from app.harness.types import EvidenceArtifact
+
+    script = _load_screenplay(ep)
+    if not script:
+        raise HTTPException(409, "无法加载已有剧本")
+    # 归档旧 revision，新建
+    rev = ensure_production_revision(
+        episode_id=episode_id,
+        kind="screenplay",
+        contract_version=get_contract("screenplay").version,
+        qa_profile_version="screenplay-qa-1",
+        resume=False,
+    )
+    # 克隆 published 为 working baseline（计数记为已生成，避免再次完整生成）
+    payload = screenplay_artifact_payload(script)
+    art = evidence_repository.create_artifact(
+        EvidenceArtifact(
+            type="screenplay_document",
+            scope_type="episode",
+            scope_id=episode_id,
+            status="validated",
+            trust_level="T2",
+            content=payload,
+            parent_artifact_ids=[ep["screenplay_artifact_id"]] if ep["screenplay_artifact_id"] else [],
+            contract_version=get_contract("screenplay").version,
+        )
+    )
+    from app.production.revision import mark_baseline_generated, mark_first_evaluation
+    mark_baseline_generated(rev.id, baseline_artifact_id=art["id"], working_artifact_id=art["id"])
+    # 标记已做过 evaluation 占位，禁止完整生成；随后 Repair 会重跑 QA
+    mark_first_evaluation(rev.id, f"revise-seed-{art['id']}")
+
+    started_at = now()
+    conn = get_conn()
+    conn.execute(
+        "UPDATE episodes SET screenplay_status='running', screenplay_error=?, screenplay_started_at=?, "
+        "screenplay_updated_at=?, working_screenplay_artifact_id=? WHERE id=?",
+        ("修订：从已发布版本局部收敛", started_at, started_at, art["id"], episode_id),
+    )
+    conn.commit()
+    recorder = _new_screenplay_recorder(episode_id, trigger_type="revise")
+    task_registry.spawn(
+        "screenplay",
+        episode_id,
+        _recorded_screenplay_task(episode_id, recorder),
+        project_id=ep["project_id"],
+    )
+    return {"status": "running", "run_id": recorder.run_id, "revision_id": rev.id, "mode": "revise"}
 
 
 async def _screenplay_guarded(
@@ -451,9 +529,12 @@ async def start_screenplay_all(project_id: str):
         (project_id,)).fetchall()
     ids = [
         r["id"] for r in rows
-        if not r["screenplay_json"]
-        or r["screenplay_status"] in ("pending", "failed", "warning")
-        or (r["screenplay_status"] == "running" and not task_registry.active("screenplay", r["id"]))
+        if (
+            not r["screenplay_json"]
+            or r["screenplay_status"] in ("pending", "failed", "warning", "repairing")
+            or (r["screenplay_status"] == "running" and not task_registry.active("screenplay", r["id"]))
+        )
+        and r["screenplay_status"] != "ready"
     ]
     if not ids:
         raise HTTPException(409, "没有待生成剧本的剧集")

@@ -810,6 +810,17 @@ MIGRATIONS = (
     "ALTER TABLE reference_assets ADD COLUMN dependency_manifest_json TEXT",
     "ALTER TABLE reference_sets ADD COLUMN dependency_manifest_json TEXT",
     "ALTER TABLE reference_sets ADD COLUMN frozen INTEGER NOT NULL DEFAULT 0",
+    # Production Repair：Working / Published 双指针与完成凭证
+    "ALTER TABLE episodes ADD COLUMN active_screenplay_run_id TEXT",
+    "ALTER TABLE episodes ADD COLUMN working_screenplay_artifact_id TEXT",
+    "ALTER TABLE episodes ADD COLUMN published_screenplay_artifact_id TEXT",
+    "ALTER TABLE episodes ADD COLUMN working_storyboard_artifact_id TEXT",
+    "ALTER TABLE episodes ADD COLUMN published_storyboard_artifact_id TEXT",
+    "ALTER TABLE episodes ADD COLUMN screenplay_production_revision_id TEXT",
+    "ALTER TABLE episodes ADD COLUMN storyboard_production_revision_id TEXT",
+    "ALTER TABLE episodes ADD COLUMN screenplay_completion_certificate_id TEXT",
+    "ALTER TABLE episodes ADD COLUMN storyboard_completion_certificate_id TEXT",
+    "ALTER TABLE shots ADD COLUMN shot_uid TEXT",
 )
 
 
@@ -1139,6 +1150,18 @@ def init_db() -> None:
     try:
         from app.completion_grant import ensure_completion_grants_table
         ensure_completion_grants_table(conn)
+    except Exception:  # noqa: BLE001
+        pass
+    # Production Repair：revision / certificate / grant
+    try:
+        from app.production.revision import ensure_production_revisions_table
+        from app.production.certificate import ensure_completion_certificates_table
+        from app.production.grant import ensure_production_grants_table
+        from app.production.shot_uid import backfill_shot_uids
+        ensure_production_revisions_table(conn)
+        ensure_completion_certificates_table(conn)
+        ensure_production_grants_table(conn)
+        backfill_shot_uids(conn)
     except Exception:  # noqa: BLE001
         pass
     _backfill_multiview_assets(conn)

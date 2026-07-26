@@ -1,6 +1,7 @@
 """分镜集级 Repair Router：把结构化 Issue 映射为最小修复范围与策略。
 
-不让 LLM 自由决定是否重做全片；按 PRD §9 从 L0→L5 逐级升级。
+PRD《剧本分镜一次生成与Agent局部自愈交付方案》：
+删除 redo_suffix / replan_outline；L3/L4 改为 insert_shot / split_shot。
 """
 from __future__ import annotations
 
@@ -17,9 +18,11 @@ RepairStrategy = Literal[
     "normalize",
     "repair_current",
     "repair_window",
-    "redo_suffix",
+    "insert_shot",
+    "split_shot",
     "split_adjacent_shot",
-    "replan_outline",
+    "delete_shot",
+    "move_shot",
     "waiting_human",
     "waiting_retry",
     "waiting_authorization",
@@ -27,7 +30,7 @@ RepairStrategy = Literal[
 
 LEVEL_ORDER: list[RepairLevel] = ["L0", "L1", "L2", "L3", "L4", "L5"]
 
-# Issue code → 首选层级
+# Issue code → 首选层级（不再映射到整版重做）
 _PREFERRED_LEVEL: dict[str, RepairLevel] = {
     "SCHEMA_INVALID": "L1",
     "JSON_INVALID": "L1",
@@ -36,15 +39,21 @@ _PREFERRED_LEVEL: dict[str, RepairLevel] = {
     "SHOT_OUTLINE_COVERAGE": "L1",
     "STATE_CHAIN_INVALID": "L2",
     "KEY_LINE_MISSING": "L2",
-    "SPINE_MISSING": "L3",
+    "SPINE_MISSING": "L3",  # 插入明确镜头，不删后缀
     "KEY_CONTENT_MISSING": "L2",
     "DROP_LIST_REINTRODUCED": "L1",
-    "PLAN_EXHAUSTED_NOT_FINAL": "L4",
+    "PLAN_EXHAUSTED_NOT_FINAL": "L3",  # 追加 final / 修最后窗口，不重规划大纲
     "PROVIDER_UNAVAILABLE": "L5",
     "UPSTREAM_VERSION_CHANGED": "L5",
 }
 
 _SHOT_NO_RE = re.compile(r"(?:shot_no\s*=\s*|第\s*)(\d+)\s*镜?", re.I)
+
+# 旧策略别名 → 新策略（兼容 checkpoint / 前端文案）
+_LEGACY_STRATEGY_MAP = {
+    "redo_suffix": "repair_window",
+    "replan_outline": "insert_shot",
+}
 
 
 class RepairPlan(BaseModel):
@@ -55,6 +64,7 @@ class RepairPlan(BaseModel):
     fingerprint: str = ""
     reason: str = ""
     pause_state: str | None = None  # WAITING_HUMAN / PAUSED_EXTERNAL / WAITING_AUTHORIZATION
+    touched_shot_nos: list[int] = Field(default_factory=list)
 
 
 def _extract_shot_nos(issues: list[Issue]) -> list[int]:
@@ -77,14 +87,27 @@ def strategy_for_level(level: RepairLevel) -> RepairStrategy:
         "L0": "normalize",
         "L1": "repair_current",
         "L2": "repair_window",
-        "L3": "redo_suffix",
-        "L4": "replan_outline",
+        "L3": "insert_shot",
+        "L4": "split_shot",
         "L5": "waiting_human",
     }[level]
 
 
+def normalize_strategy(strategy: str) -> RepairStrategy:
+    """把遗留 redo_suffix / replan_outline 映射为局部策略。"""
+    mapped = _LEGACY_STRATEGY_MAP.get(strategy, strategy)
+    allowed = {
+        "normalize", "repair_current", "repair_window", "insert_shot",
+        "split_shot", "split_adjacent_shot", "delete_shot", "move_shot",
+        "waiting_human", "waiting_retry", "waiting_authorization",
+    }
+    if mapped not in allowed:
+        return "repair_window"
+    return mapped  # type: ignore[return-value]
+
+
 def _capacity_needs_adjacent_split(issues: list[Issue]) -> bool:
-    """容量超限且文案暗示不可单镜满足 → 优先相邻插镜，而不是立刻整集重规划。"""
+    """容量超限且文案暗示不可单镜满足 → 相邻插镜/拆镜，绝不整集重规划。"""
     if not any(issue.code == "SPOKEN_CAPACITY_EXCEEDED" for issue in issues):
         return False
     return any(
@@ -105,7 +128,7 @@ def compute_invalidation_frontier(
     validated_prefix_end: int,
     next_shot_no: int | None = None,
 ) -> int:
-    """最早失效边界：只保留 frontier 之前仍通过的 validated prefix。"""
+    """最早失效边界：只触及 frontier 附近窗口，禁止整后缀失效。"""
     shot_nos = _extract_shot_nos(issues)
     candidates = [n for n in shot_nos if n > 0]
     if next_shot_no and next_shot_no > 0:
@@ -115,15 +138,14 @@ def compute_invalidation_frontier(
     else:
         frontier = min(candidates)
 
-    if level == "L0":
-        return frontier
-    if level == "L1":
+    if level in {"L0", "L1"}:
         return frontier
     if level == "L2":
         return max(1, frontier - 1)
+    # L3/L4：插入/拆分也不清空后缀；frontier 仅作定位
     if level in {"L3", "L4"}:
-        return max(1, frontier)
-    return 1
+        return frontier
+    return frontier
 
 
 def route_issues(
@@ -134,7 +156,7 @@ def route_issues(
     issue_fingerprint_counts: dict[str, int] | None = None,
     current_level: RepairLevel | None = None,
 ) -> RepairPlan:
-    """将 Issue 列表映射为 RepairPlan；相同 fingerprint 连续出现则升级层级。"""
+    """将 Issue 列表映射为局部 RepairPlan；相同 fingerprint 连续出现则升级层级，但不整版重做。"""
     normalized: list[Issue] = []
     for item in issues:
         if isinstance(item, Issue):
@@ -157,14 +179,12 @@ def route_issues(
         )
 
     codes = [issue.code for issue in normalized]
-    # 取最严重（最高）首选层级
     preferred = "L0"
     for code in codes:
         lvl = preferred_level_for_code(code)
         if LEVEL_ORDER.index(lvl) > LEVEL_ORDER.index(preferred):
             preferred = lvl
 
-    # SPOKEN_CAPACITY：首轮优先相邻插镜（split_adjacent_shot）；反复 stalled 再升 L4 整集重规划。
     capacity_split = _capacity_needs_adjacent_split(normalized)
 
     if any(c == "PROVIDER_UNAVAILABLE" for c in codes):
@@ -195,7 +215,6 @@ def route_issues(
     fp = issue_fingerprint(normalized)
     counts = dict(issue_fingerprint_counts or {})
     prior = counts.get(fp, 0)
-    # 相同 fingerprint 连续 2 轮视为 stalled → 升级
     if prior >= 2:
         level = upgrade_level(level)
         if level == "L5":
@@ -219,32 +238,33 @@ def route_issues(
         validated_prefix_end=validated_prefix_end,
         next_shot_no=next_shot_no,
     )
-    # 容量不可满足：未升到 L4 前走相邻插镜；已升 L4 则整集重规划。
-    if capacity_split and LEVEL_ORDER.index(level) < LEVEL_ORDER.index("L4"):
+    touched = sorted({n for n in _extract_shot_nos(normalized) if n > 0} or {frontier})
+
+    # 容量不可满足：始终走拆镜/插镜，永不 replan_outline
+    if capacity_split:
+        strategy: RepairStrategy = "split_adjacent_shot" if level in {"L0", "L1", "L2"} else "split_shot"
         return RepairPlan(
             level=level,
-            strategy="split_adjacent_shot",
+            strategy=strategy,
             invalidation_frontier=frontier,
             issue_codes=codes,
             fingerprint=fp,
-            reason="route:split_adjacent_shot:capacity",
+            reason=f"route:{strategy}:capacity",
+            touched_shot_nos=touched,
         )
-    if capacity_split and level == "L4":
-        return RepairPlan(
-            level="L4",
-            strategy="replan_outline",
-            invalidation_frontier=frontier,
-            issue_codes=codes,
-            fingerprint=fp,
-            reason="route:L4:replan_outline:capacity_exhausted",
-        )
+
+    strategy = strategy_for_level(level)
+    # spine 缺失 → insert_shot；结局未收束 → insert_shot（追加 final）
+    if "SPINE_MISSING" in codes or "PLAN_EXHAUSTED_NOT_FINAL" in codes:
+        strategy = "insert_shot"
     return RepairPlan(
         level=level,
-        strategy=strategy_for_level(level),
+        strategy=strategy,
         invalidation_frontier=frontier,
         issue_codes=codes,
         fingerprint=fp,
-        reason=f"route:{level}:{strategy_for_level(level)}",
+        reason=f"route:{level}:{strategy}",
+        touched_shot_nos=touched,
     )
 
 
