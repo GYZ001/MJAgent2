@@ -34,6 +34,10 @@ CATEGORIES: dict[str, dict[str, Any]] = {
 _FALLBACK = "system"
 
 
+class ContentGenerationError(Exception):
+    """A provider call succeeded, but generated content failed a quality gate."""
+
+
 @dataclass
 class ErrorRecord:
     error_id: str
@@ -68,7 +72,7 @@ def classify(exc: BaseException | None, http_status: int | None = None) -> tuple
     name = type(exc).__name__ if exc is not None else ""
     if name == "ProviderError":
         return "provider", "LLM"
-    if name in {"StageError", "CompileError"}:
+    if name in {"StageError", "CompileError", "ContentGenerationError"}:
         return "generation", "GEN"
     status = http_status if http_status is not None else getattr(exc, "status_code", None)
     if status is not None:

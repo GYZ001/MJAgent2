@@ -777,6 +777,7 @@ async def review_scene_view(image_path: str, scene_canonical: str, view_role: st
         qa = await review_scene_image(
             hiagent.encode_image_file(image_path), scene_canonical, "场景定场", [], kind="head",
             initiator_label="场景多视角主图QA",
+            environment_only=True,
         )
         qa["view_role"] = view_role
         return qa

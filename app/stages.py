@@ -1898,16 +1898,48 @@ def _parse_qa_result(raw: str, score_keys: list[str], *,
 
 async def review_scene_image(image_b64: str, frame_desc: str, scene_setting: str,
                              character_anchors: list[str], prev_image_b64: str | None = None,
-                             kind: str = "tail", initiator_label: str = "关键帧评审") -> dict:
+                             kind: str = "tail", initiator_label: str = "关键帧评审",
+                             environment_only: bool = False) -> dict:
     """场景关键帧评审 agent：只对照【本帧自己的画面描述】（首图描述 / 尾图描述）检查该单张静止帧，
     不要拿整段动作或后续画面来要求它。返回 {expectation_match, continuity, clean_frame, overall, issues}。"""
-    anchors = "\n".join(character_anchors) or "（缺少角色锚点）"
+    if environment_only:
+        anchors = "（纯环境定场图：明确要求画面中无人；没有人物是正确结果，不得因此扣分）"
+        subject_note = (
+            "\n本次审核对象是跨镜头复用的纯环境定场图，不是剧情关键帧。"
+            "画面必须无人；不要要求角色、人物动作、姿态、表情或互动。"
+        )
+        expectation_focus = "场景名称、空间类型、建筑结构、陈设、光照、画风与构图是否对得上"
+        main_rule = (
+            "- 这是纯环境图：画面无人是合格要求，绝不能因没有人物、角色锚点、动作或互动而扣分。\n"
+            "- expectation_match 的主项是场景语义与环境细节；场景名称和预期描述中的明确要求都要核对。"
+        )
+    else:
+        anchors = "\n".join(character_anchors) or "（缺少角色锚点）"
+        subject_note = ""
+        expectation_focus = (
+            "人物姿态/表情/手部与道具的接触状态、人物的身体与视线朝向、"
+            "人物与对象（道具或另一人）之间的空间互动关系，以及角色外观、场景是否对得上"
+        )
+        main_rule = (
+            "- expectation_match 是本次评审的【主项】。若预期画面里人物在与某对象/另一人互动"
+            "（触碰/按压/拿取/递出/挥击/指向/注视/搀扶等），而画面中人物只是正面端站、"
+            "双手垂放、目视镜头，或朝向/接触与描述不符（例如该摸石碑却没碰到石碑、"
+            "身体正对镜头而非转向石碑），expectation_match 必须 ≤0.4。"
+        )
+    from app.multiview import watermark_qa_mode
+    ignore_non_occluding_watermark = watermark_qa_mode() == "ignore_unless_occluding"
+    watermark_note = (
+        "供应商自动添加且位于角落、不遮挡场景主体的水印/Logo 不扣分，也不要写入 issues；"
+        "只有遮挡关键场景结构时才扣分并说明遮挡位置。"
+        if ignore_non_occluding_watermark
+        else "画面不得包含文字、水印或 Logo。"
+    )
     frame_name = "首图（本镜动作开始前的静止画面）" if kind == "head" else "尾图（本镜动作完成后的静止画面）"
     cont = ("\n本关键帧需与第2张参考图在画风、人物形象、光影上自然连贯（第2张可能是本镜首图或上一镜尾图）。"
             if prev_image_b64 else "\n本关键帧是新场景起点，无需对比上一镜。")
     expectation = f"""你是漫剧场景关键帧评审 agent。下面给出本镜{frame_name}{('（第1张）以及参考图（第2张，仅作连贯性对比）' if prev_image_b64 else '')}，对照下面这【单张静止帧】的预期检查，输出 JSON。
 
-重要：只审这一张静止帧是否符合它自己的画面描述；不要因为它没有表现整段动作的过程或后续/结尾画面而扣分（动作的展开由视频负责，关键帧只是这一刻的定格）。但【这一刻的人物姿态、朝向与互动】必须与描述一致——定格不等于可以摆拍。
+重要：只审这一张静止帧是否符合它自己的画面描述；不要因为它没有表现整段动作的过程或后续/结尾画面而扣分（动作的展开由视频负责，关键帧只是这一刻的定格）。但【这一刻的人物姿态、朝向与互动】必须与描述一致——定格不等于可以摆拍。{subject_note}
 
 本帧预期画面：{frame_desc}
 预期场景：{scene_setting}
@@ -1915,12 +1947,12 @@ async def review_scene_image(image_b64: str, frame_desc: str, scene_setting: str
 {anchors}{cont}
 
 检查项（各 0~1 评分）：
-1. expectation_match  画面是否符合【本帧预期画面】，重点核对：人物姿态/表情/手部与道具的接触状态、人物的身体与视线【朝向】、人物与对象（道具或另一人）之间的【空间互动关系】，以及角色外观、场景是否对得上
+1. expectation_match  画面是否符合【本帧预期画面】，重点核对：{expectation_focus}
 2. continuity         与参考图的画风、人物形象、光影是否连贯（无参考图则给 1）
-3. clean_frame        无文字/水印/多余人物/肢体畸形/五官崩坏
+3. clean_frame        无多余文字/多余人物/肢体畸形/五官崩坏。{watermark_note}
 
 评分硬规则（务必遵守）：
-- expectation_match 是本次评审的【主项】。若预期画面里人物在与某对象/另一人互动（触碰/按压/拿取/递出/挥击/指向/注视/搀扶等），而画面中人物只是正面端站、双手垂放、目视镜头，或朝向/接触与描述不符（例如该摸石碑却没碰到石碑、身体正对镜头而非转向石碑），expectation_match 必须 ≤0.4。
+{main_rule}
 - overall 不得高于 expectation_match：动作/朝向/互动不对就是不合格，画面再干净、画风再连贯也不能给高 overall。
 - issues 里必须逐条点明具体不符之处（例如"人物未触碰石碑、身体正对镜头而非转向石碑"），供下一版定向改正。
 
@@ -1936,6 +1968,28 @@ async def review_scene_image(image_b64: str, frame_desc: str, scene_setting: str
         })
     defaults = {"continuity": 1.0} if not prev_image_b64 else None
     result = _parse_qa_result(raw, ["expectation_match", "continuity", "clean_frame"], defaults=defaults)
+    if ignore_non_occluding_watermark:
+        original_issues = [str(item) for item in (result.get("issues") or [])]
+
+        def _watermark_only(issue: str) -> bool:
+            lower = issue.lower()
+            mentions_watermark = any(
+                token in lower for token in ("watermark", "logo", "水印", "ai生成")
+            )
+            mentions_occlusion = any(
+                token in lower for token in ("occlud", "遮挡", "遮住", "覆盖主体")
+            )
+            return mentions_watermark and not mentions_occlusion
+
+        result["issues"] = [item for item in original_issues if not _watermark_only(item)]
+        if original_issues and not result["issues"]:
+            result["clean_frame"] = 1.0
+            expectation_score = _score_or_none(result.get("expectation_match")) or 0.0
+            continuity_score = _score_or_none(result.get("continuity")) or 0.0
+            result["overall"] = round(
+                min(expectation_score, (expectation_score + continuity_score + 1.0) / 3),
+                3,
+            )
     # 动作/朝向/互动是关键帧的主项：把 overall 夹到不超过 expectation_match，避免"画面干净但动作不对"
     # 被 continuity/clean_frame 拉高均值而蒙混过审（VLM 即便没遵守上面的硬规则，这里也强制生效）。
     em = _score_or_none(result.get("expectation_match"))

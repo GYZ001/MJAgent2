@@ -1,7 +1,8 @@
 import asyncio
 
 from app import hiagent
-from app.stages import _parse_qa_result, qa_shot, review_portrait_image
+from app.errors import ContentGenerationError, classify
+from app.stages import _parse_qa_result, qa_shot, review_portrait_image, review_scene_image
 
 
 def test_parse_qa_result_recovers_scores_from_truncated_json() -> None:
@@ -96,3 +97,80 @@ def test_portrait_qa_uses_anchor_specific_nonhuman_rules(monkeypatch) -> None:
 
     assert qa["overall"] == 0.35
     assert qa["continuity"] == 1.0
+
+
+def test_scene_reference_qa_treats_empty_environment_as_required(monkeypatch) -> None:
+    async def fake_vlm_check(images, expectation, *, call_meta=None):
+        assert "画面必须无人" in expectation
+        assert "画面无人是合格要求" in expectation
+        assert "不要要求角色、人物动作、姿态、表情或互动" in expectation
+        assert call_meta["initiator_label"] == "场景资产主图QA"
+        return (
+            '{"expectation_match": 0.9, "continuity": 1, "clean_frame": 1, '
+            '"overall": 0.9, "issues": []}'
+        )
+
+    monkeypatch.setattr(hiagent, "vlm_check", fake_vlm_check)
+    monkeypatch.setattr("app.multiview.watermark_qa_mode", lambda: "ignore_unless_occluding")
+    qa = asyncio.run(review_scene_image(
+        "frame", "古风斗技堂，中央石质擂台", "萧家斗技堂", [], kind="head",
+        initiator_label="场景资产主图QA", environment_only=True,
+    ))
+
+    assert qa["overall"] == 0.9
+    assert qa["issues"] == []
+
+
+def test_scene_reference_qa_ignores_non_occluding_provider_watermark(monkeypatch) -> None:
+    async def fake_vlm_check(images, expectation, *, call_meta=None):
+        assert "位于角落、不遮挡场景主体的水印/Logo 不扣分" in expectation
+        return (
+            '{"expectation_match": 0.92, "continuity": 1, "clean_frame": 0.3, '
+            '"overall": 0.3, "issues": ["画面右下角带有AI生成水印"]}'
+        )
+
+    monkeypatch.setattr(hiagent, "vlm_check", fake_vlm_check)
+    monkeypatch.setattr("app.multiview.watermark_qa_mode", lambda: "ignore_unless_occluding")
+    qa = asyncio.run(review_scene_image(
+        "frame", "古风斗技堂，中央石质擂台", "萧家斗技堂", [],
+        environment_only=True,
+    ))
+
+    assert qa["clean_frame"] == 1.0
+    assert qa["overall"] == 0.92
+    assert qa["issues"] == []
+
+
+def test_scene_reference_review_uses_effective_override(monkeypatch) -> None:
+    from app.scenes import _review_scene_ref
+
+    captured = {}
+
+    async def fake_review(image, frame_desc, scene_setting, anchors, **kwargs):
+        captured.update(
+            frame_desc=frame_desc,
+            scene_setting=scene_setting,
+            anchors=anchors,
+            environment_only=kwargs.get("environment_only"),
+        )
+        return {"overall": 0.9, "issues": []}
+
+    monkeypatch.setattr(hiagent, "encode_image_file", lambda _path: "frame")
+    monkeypatch.setattr("app.stages.review_scene_image", fake_review)
+    qa = asyncio.run(_review_scene_ref(
+        "unused.jpg",
+        {"name": "萧家斗技堂", "scene_canonical": "错误的藏书阁描述"},
+        expected_description="古风斗技堂，中央石质擂台，四周观战席",
+    ))
+
+    assert qa["overall"] == 0.9
+    assert captured == {
+        "frame_desc": "古风斗技堂，中央石质擂台，四周观战席",
+        "scene_setting": "萧家斗技堂",
+        "anchors": [],
+        "environment_only": True,
+    }
+
+
+def test_scene_quality_gate_is_classified_as_generation_error() -> None:
+    assert classify(ContentGenerationError("场景图一致性检查未通过")) == ("generation", "GEN")

@@ -19,7 +19,7 @@ from pathlib import Path
 
 from app import config, hiagent
 from app.atomic_io import atomic_write_bytes
-from app.errors import code_ref
+from app.errors import ContentGenerationError, code_ref
 from app.db import get_conn, new_id, now
 from app.evidence.media import record_reference_asset
 from app.harness import model_gateway
@@ -149,15 +149,22 @@ async def _generate_scene_image(prompt: str, anchor_url: str | None = None, *,
     return await hiagent.generate_image(prompt, size=config.REF_IMAGE_SIZE, call_meta=call_meta)
 
 
-async def _review_scene_ref(image_path: str, scene: "Scene | dict") -> dict:
+async def _review_scene_ref(
+    image_path: str,
+    scene: "Scene | dict",
+    *,
+    expected_description: str | None = None,
+) -> dict:
     """复用 stages.review_scene_image 对场景图做 QA（无人物，锚点传空）。"""
     from app.stages import review_scene_image
     name = scene["name"] if isinstance(scene, dict) else scene.name
     canonical = scene["scene_canonical"] if isinstance(scene, dict) else scene.scene_canonical
+    expected = (expected_description or canonical).strip()
     try:
         return await review_scene_image(
-            hiagent.encode_image_file(image_path), canonical, name, [], kind="head",
+            hiagent.encode_image_file(image_path), expected, name, [], kind="head",
             initiator_label="场景资产主图QA",
+            environment_only=True,
         )
     except Exception as exc:  # noqa: BLE001 评估器失败不能伪装成通过
         return {
@@ -348,6 +355,7 @@ async def generate_scene_refs(
             return  # 当前场景库里的场景图都已就绪，无需重出
 
     errors: list[str] = []
+    failures: list[Exception] = []
     for sc in targets:
         try:
             sc.ref_image_path = None
@@ -374,7 +382,9 @@ async def generate_scene_refs(
                             "attempt": attempt,
                         })
                     await _save_image_item(item, path)
-                    qa = await _review_scene_ref(path, sc)
+                    qa = await _review_scene_ref(
+                        path, sc, expected_description=base_prompt,
+                    )
                     artifact = record_reference_asset(
                         asset_type="scene_reference",
                         scope_id=f"{project_id}:{sc.name}:1",
@@ -392,8 +402,9 @@ async def generate_scene_refs(
                     )
                     if artifact["status"] != "approved":
                         critique = "；".join(str(item) for item in (qa.get("issues") or []))[:400]
-                        last_error = hiagent.ProviderError(
-                            f"场景图一致性检查未通过：{sc.name}（第 {attempt} 次）"
+                        detail = f"：{critique}" if critique else ""
+                        last_error = ContentGenerationError(
+                            f"场景图一致性检查未通过：{sc.name}（第 {attempt} 次）{detail}"
                         )
                         continue
                     scene_id = register_initial_scene_ref(
@@ -448,13 +459,17 @@ async def generate_scene_refs(
                 raise last_error or hiagent.ProviderError(f"场景图生成失败：{sc.name}")
         except Exception as exc:  # noqa: BLE001 失败要响：逐场景记录，最后汇总抛出
             errors.append(f"{sc.name}：{exc}")
+            failures.append(exc)
 
     # Portrait generation and reactive scene discovery can update the Bible in
     # parallel.  Only merge paths owned by this batch.
     _merge_generated_scene_refs(conn, project_id, targets)
     conn.commit()
     if errors:
-        raise hiagent.ProviderError("部分场景图失败：" + "；".join(errors)[:600])
+        message = "部分场景图失败：" + "；".join(errors)[:600]
+        if failures and all(isinstance(exc, ContentGenerationError) for exc in failures):
+            raise ContentGenerationError(message)
+        raise hiagent.ProviderError(message)
 
 
 # ---------- 分镜阶段反应式发现新场景（对照 portraits.ensure_character_card 的新角色路径） ----------

@@ -17,6 +17,7 @@
 | [分镜全集Supervisor-AgentLoop与自动确认方案.md](./分镜全集Supervisor-AgentLoop与自动确认方案.md) | 集级分镜 Supervisor：自动修复、重规划、全量校验后自动确认 |
 | [评审墙全片视频Supervisor-AgentLoop与全覆盖补齐方案.md](./评审墙全片视频Supervisor-AgentLoop与全覆盖补齐方案.md) | 集级视频 Supervisor：可用视频三级判定、Issue 路由修复、预算内自主补齐到全片可用 |
 | [评审墙AgentLoop超时收口与故障自治整改方案.md](./评审墙AgentLoop超时收口与故障自治整改方案.md) | 评审墙 P0 整改：到点强制采用、停止生成、异常 fail-closed、单一调度权与真实运行状态 |
+| [剧本分镜一次生成与Agent局部自愈交付方案.md](./剧本分镜一次生成与Agent局部自愈交付方案.md) | 废止 QA 后完整重生：首次生成一次，随后由本地 Agent 调用 Capability/MCP 工具做局部 Patch，全部门禁通过后才原子交付剧本与整集分镜 |
 
 ---
 
