@@ -855,10 +855,22 @@ def validate_dialogue_chains(
             (chains[0].turns[0].source_text or "").strip()
             if chains and chains[0].turns else ""
         )
+        first_chain_line = (
+            (chains[0].turns[0].line or "").strip()
+            if chains and chains[0].turns else ""
+        )
         if _condense(opening) != _condense(first_chain_source):
             errors.append(
                 f"原文开场第一句对白未作为 dialogue_chains[0].turns[0]：{opening}；"
                 "开场对白是第一条对白链锚点，不能在模型挑选 key_lines 前静默丢失"
+            )
+        elif (
+            _longest_run_ratio(opening, first_chain_line) < KEY_LINE_PRESENT_RATIO
+            and _bigram_coverage(opening, first_chain_line) < KEY_LINE_BIGRAM_COVERAGE
+        ):
+            errors.append(
+                f"开场对白锚点被改写到失去原意：原文「{opening}」→台词「{first_chain_line}」；"
+                "D001 只允许口语压缩，不得替换成另一句台词"
             )
     return errors
 

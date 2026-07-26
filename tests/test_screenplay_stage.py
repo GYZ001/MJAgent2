@@ -467,6 +467,21 @@ def test_dialogue_chain_rejects_missing_first_source_utterance() -> None:
     assert any("原文开场第一句对白未作为 dialogue_chains[0].turns[0]" in error for error in errors), errors
 
 
+def test_dialogue_chain_rejects_first_anchor_replaced_with_unrelated_line() -> None:
+    script, source = _screenplay_with_source_dialogue_chain()
+    script.dialogue_chains[0].turns[0].line = "今天天气不错。"
+    script.full_script_text = script.full_script_text.replace(
+        "测验员：斗之力，三段！", "测验员：今天天气不错。",
+    )
+
+    errors = validate_screenplay(
+        script, _bible(), expected_beats=5, episode_no=1,
+        source_text=source, require_dialogue_chains=True,
+    )
+
+    assert any("开场对白锚点被改写到失去原意" in error for error in errors), errors
+
+
 def test_screenplay_allows_dropping_non_spine_source_dialogues() -> None:
     """Renderability：不再要求人物谱原文台词全量进 key_lines / 正文。"""
     script = _valid_rainy_script()
