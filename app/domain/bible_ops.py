@@ -488,30 +488,387 @@ def _purge_for_style_change(project_id: str, instance: "Bible") -> dict:
     return {**purged, "refs_cleared": refs_cleared, "scene_refs_cleared": scene_refs_cleared}
 
 
+def _parse_bible_write_body(body: dict) -> tuple[dict, object, bool, str | None]:
+    """拆出 bible 正文、expected_version、confirm 标志与影响预检指纹。"""
+    expected_version = body.get("expected_version")
+    confirm = body.get("confirm") is True
+    impact_fp = body.get("impact_preview_fingerprint")
+    if "bible" in body and isinstance(body.get("bible"), dict):
+        bible_body = dict(body["bible"])
+    else:
+        skip = {
+            "expected_version", "confirm", "impact_preview_fingerprint",
+            "quote_id", "dry_run",
+        }
+        bible_body = {k: v for k, v in body.items() if k not in skip}
+    if "expected_version" in bible_body:
+        expected_version = bible_body.pop("expected_version", expected_version)
+    if "confirm" in bible_body:
+        confirm = bible_body.pop("confirm") is True or confirm
+    if "impact_preview_fingerprint" in bible_body:
+        impact_fp = bible_body.pop("impact_preview_fingerprint", impact_fp)
+    return bible_body, expected_version, confirm, impact_fp
+
+
+def _bible_conflict_detail(p: dict, expected_version) -> dict:
+    server_bible = None
+    if p.get("bible_json"):
+        try:
+            server_bible = json.loads(p["bible_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            server_bible = None
+    return {
+        "code": "BIBLE_VERSION_CONFLICT",
+        "message": (
+            f"人物谱版本冲突：当前版本 {p.get('bible_version')}，"
+            f"请求基于 {expected_version}，请刷新后重试"
+        ),
+        "current_version": int(p.get("bible_version") or 0),
+        "expected_version": expected_version,
+        "server_bible": server_bible,
+        "character_names": [
+            c.get("name") for c in (server_bible or {}).get("characters", []) if c.get("name")
+        ],
+    }
+
+
+def _classify_bible_changes(old_bible: dict | None, new_bible: dict) -> list[str]:
+    """区分仅文字 / 角色外观 / 全局画风变更，供定稿影响预检展示。"""
+    changes: list[str] = []
+    old = old_bible or {}
+    old_style = (old.get("world") or {}).get("visual_style_canonical")
+    new_style = (new_bible.get("world") or {}).get("visual_style_canonical")
+    if old_style and new_style and old_style != new_style:
+        changes.append("global_style")
+    old_chars = {c.get("name"): c for c in old.get("characters", []) if c.get("name")}
+    new_chars = {c.get("name"): c for c in new_bible.get("characters", []) if c.get("name")}
+    appearance_changed = False
+    text_changed = False
+    if set(old_chars) != set(new_chars):
+        text_changed = True
+    for name, nc in new_chars.items():
+        oc = old_chars.get(name) or {}
+        if (oc.get("appearance_canonical") or "") != (nc.get("appearance_canonical") or ""):
+            appearance_changed = True
+        for field in ("personality", "speech_style", "role", "portrait_prompt_override"):
+            if (oc.get(field) or "") != (nc.get(field) or ""):
+                text_changed = True
+        if (oc.get("relationships") or []) != (nc.get("relationships") or []):
+            text_changed = True
+    if appearance_changed:
+        changes.append("character_appearance")
+    if text_changed and "character_appearance" not in changes:
+        changes.append("text_only")
+    elif text_changed:
+        changes.append("text_fields")
+    if not changes:
+        changes.append("text_only")
+    return changes
+
+
+def _artifact_type_counts(artifact_ids: list[str]) -> dict[str, int]:
+    if not artifact_ids:
+        return {}
+    conn = get_conn()
+    counts: dict[str, int] = {}
+    for i in range(0, len(artifact_ids), 400):
+        chunk = artifact_ids[i:i + 400]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = conn.execute(
+            f"SELECT type, COUNT(*) AS c FROM artifacts WHERE id IN ({placeholders}) GROUP BY type",
+            chunk,
+        ).fetchall()
+        for row in rows:
+            counts[row["type"]] = counts.get(row["type"], 0) + int(row["c"])
+    return counts
+
+
+def compute_bible_impact_preview(
+    project_id: str,
+    bible_body: dict,
+    *,
+    expected_version=None,
+) -> dict:
+    """定稿前只读影响预检：不写库、不失效下游。"""
+    from app.config import IMAGE_PRICE_PER_UNIT
+    from app.multiview import CHARACTER_REQUIRED_VIEWS
+
+    p = _project_or_404(project_id)
+    current_version = int(p.get("bible_version") or 0)
+    if expected_version is not None and int(expected_version) != current_version:
+        raise HTTPException(409, detail=_bible_conflict_detail(p, expected_version))
+
+    instance, errors = schema_errors(Bible, bible_body)
+    if errors:
+        raise HTTPException(422, "；".join(errors))
+    from app.validators import validate_bible
+    v_errors = validate_bible(instance)
+    if v_errors:
+        raise HTTPException(422, "；".join(v_errors))
+
+    old_bible = json.loads(p["bible_json"]) if p.get("bible_json") else None
+    new_bible = instance.model_dump(mode="json")
+    change_types = _classify_bible_changes(old_bible, new_bible)
+    style_changed = "global_style" in change_types
+    previous_artifact_id = p.get("bible_artifact_id")
+    stale_ids = (
+        evidence_repository.list_descendants(previous_artifact_id)
+        if previous_artifact_id else []
+    )
+    by_type = _artifact_type_counts(stale_ids)
+    conn = get_conn()
+    portraits = conn.execute(
+        "SELECT COUNT(*) AS c FROM character_portraits WHERE project_id=?", (project_id,)
+    ).fetchone()["c"]
+    scenes = conn.execute(
+        "SELECT COUNT(*) AS c FROM scene_references WHERE project_id=?", (project_id,)
+    ).fetchone()["c"]
+    char_count = len(instance.characters)
+    views_per = len(CHARACTER_REQUIRED_VIEWS)
+    rebuild_images = 0
+    if style_changed:
+        rebuild_images = char_count * views_per + int(scenes or 0) * 2
+    elif "character_appearance" in change_types:
+        old_chars = {
+            c.get("name"): c for c in (old_bible or {}).get("characters", []) if c.get("name")
+        }
+        affected = 0
+        for c in new_bible.get("characters", []):
+            name = c.get("name")
+            oc = old_chars.get(name) or {}
+            if (oc.get("appearance_canonical") or "") != (c.get("appearance_canonical") or ""):
+                affected += 1
+        rebuild_images = affected * views_per
+    unit = float(IMAGE_PRICE_PER_UNIT)
+    estimated = round(rebuild_images * unit, 2)
+    max_retry = round(estimated * 1.5, 2)
+    computed_at = now()
+    fingerprint_payload = {
+        "project_id": project_id,
+        "bible_version": current_version,
+        "bible_artifact_id": previous_artifact_id,
+        "change_types": change_types,
+        "stale_descendant_ids": stale_ids,
+        "portraits": int(portraits or 0),
+        "scenes": int(scenes or 0),
+        "rebuild_images": rebuild_images,
+    }
+    preview_fp = fingerprint(fingerprint_payload)
+    return {
+        "project_id": project_id,
+        "bible_version": current_version,
+        "computed_at": computed_at,
+        "fingerprint": preview_fp,
+        "change_types": change_types,
+        "style_changed": style_changed,
+        "stale_descendant_ids": stale_ids,
+        "stale_count": len(stale_ids),
+        "by_artifact_type": by_type,
+        "paid_assets": {
+            "character_portraits": int(portraits or 0),
+            "scene_references": int(scenes or 0),
+        },
+        "rebuild": {
+            "image_count": rebuild_images,
+            "unit_price_cny": unit,
+            "estimated_cost_cny": estimated,
+            "max_retry_budget_cny": max_retry,
+            "note": "费用来自服务端口径；实际生成以任务账单为准",
+        },
+        "requires_reconfirm": bool(stale_ids),
+        "paid_media_invalidated": bool(style_changed or stale_ids),
+        "old_asset_policy": "定稿后下游证据标记失效；画风变更会作废旧定妆/场景图",
+    }
+
+
+def compute_refs_cost_precheck(
+    project_id: str,
+    *,
+    character: str | None = None,
+    resume: bool = False,
+    view_role: str | None = None,
+) -> dict:
+    """人物定妆/单视角付费预检（只读）。"""
+    from app.config import IMAGE_PRICE_PER_UNIT
+    from app.multiview import CHARACTER_REQUIRED_VIEWS
+
+    p = _project_or_404(project_id)
+    if not p.get("bible_json"):
+        raise HTTPException(409, "请先生成角色圣经")
+    bible = json.loads(p["bible_json"])
+    characters = bible.get("characters") or []
+    if character:
+        characters = [c for c in characters if c.get("name") == character]
+        if not characters:
+            raise HTTPException(404, f"角色不存在：{character}")
+    views_per = 1 if view_role else len(CHARACTER_REQUIRED_VIEWS)
+    conn = get_conn()
+    missing_roles: list[dict] = []
+    image_count = 0
+    if view_role:
+        image_count = 1
+        missing_roles.append({
+            "character": character, "view_role": view_role, "reason": "单视角重做",
+        })
+    elif resume:
+        for c in characters:
+            name = c.get("name")
+            row = conn.execute(
+                """SELECT id, pack_status FROM character_portraits
+                   WHERE project_id=? AND character_name=? AND ep_end IS NULL
+                   ORDER BY ep_start DESC LIMIT 1""",
+                (project_id, name),
+            ).fetchone()
+            if not row or row["pack_status"] not in (None, "ready"):
+                image_count += views_per
+                missing_roles.append({
+                    "character": name, "views": list(CHARACTER_REQUIRED_VIEWS),
+                    "reason": "缺包或未通过",
+                })
+                continue
+            view_rows = conn.execute(
+                "SELECT view_role, status, image_path FROM character_portrait_views WHERE portrait_id=?",
+                (row["id"],),
+            ).fetchall()
+            have = {
+                v["view_role"] for v in view_rows
+                if v["status"] == "ready" and v["image_path"]
+            }
+            need = [r for r in CHARACTER_REQUIRED_VIEWS if r not in have]
+            if need:
+                image_count += len(need)
+                missing_roles.append({
+                    "character": name, "views": need, "reason": "缺失视角",
+                })
+    else:
+        image_count = len(characters) * views_per
+        for c in characters:
+            missing_roles.append({
+                "character": c.get("name"),
+                "views": list(CHARACTER_REQUIRED_VIEWS) if not view_role else [view_role],
+                "reason": "整包生成",
+            })
+    unit = float(IMAGE_PRICE_PER_UNIT)
+    estimated = round(image_count * unit, 2)
+    max_retry = round(estimated * 1.5, 2)
+    computed_at = now()
+    quote_id = fingerprint({
+        "project_id": project_id,
+        "character": character,
+        "resume": resume,
+        "view_role": view_role,
+        "image_count": image_count,
+        "unit": unit,
+        "bible_version": p.get("bible_version"),
+    })
+    return {
+        "quote_id": quote_id,
+        "computed_at": computed_at,
+        "quote_expires_at": computed_at + 300,
+        "project_id": project_id,
+        "action": (
+            "regenerate_view" if view_role
+            else ("resume_missing" if resume else ("regenerate_pack" if character else "generate_all"))
+        ),
+        "character": character,
+        "view_role": view_role,
+        "character_count": len(characters),
+        "views_per_character": views_per,
+        "image_count": image_count,
+        "unit_price_cny": unit,
+        "estimated_cost_cny": estimated,
+        "max_retry_budget_cny": max_retry,
+        "budget_cap_cny": max_retry,
+        "scope": missing_roles,
+        "old_asset_policy": "已落盘且合格的视角保留；失败不替换当前采用包",
+        "idempotency_hint": "同一 quote_id 重复确认不会扩大范围；服务端仍做最终校验",
+        "stop_policy": "可停止；已扣费步骤不退款，已完成成品保留",
+    }
+
+
+@router.post("/projects/{project_id}/bible/impact-preview")
+async def bible_impact_preview(project_id: str, body: dict):
+    """定稿人物谱前的只读影响预检。"""
+    bible_body, expected_version, _, _ = _parse_bible_write_body(body or {})
+    return compute_bible_impact_preview(
+        project_id, bible_body, expected_version=expected_version,
+    )
+
+
+@router.post("/projects/{project_id}/refs/precheck")
+async def refs_cost_precheck(project_id: str, body: dict | None = None):
+    """定妆照/造型包付费预检。"""
+    payload = body or {}
+    return compute_refs_cost_precheck(
+        project_id,
+        character=payload.get("character"),
+        resume=bool(payload.get("resume", False)),
+        view_role=payload.get("view_role"),
+    )
+
+
 @router.put("/projects/{project_id}/bible")
 async def edit_bible(project_id: str, body: dict):
     from app.capabilities.dispatch import ui_route
 
-    expected_version = body.get("expected_version")
-    if "bible" in body and isinstance(body.get("bible"), dict):
-        bible_body = dict(body["bible"])
-    else:
-        bible_body = {k: v for k, v in body.items() if k != "expected_version"}
-    if "expected_version" in bible_body:
-        expected_version = bible_body.pop("expected_version", expected_version)
+    bible_body, expected_version, confirm, impact_fp = _parse_bible_write_body(body or {})
 
     routed = await ui_route(
         "bible.update",
-        {"project_id": project_id, "bible": bible_body, "expected_version": expected_version},
+        {
+            "project_id": project_id,
+            "bible": bible_body,
+            "expected_version": expected_version,
+            "confirm": confirm,
+            "impact_preview_fingerprint": impact_fp,
+        },
     )
     if routed is not None:
         return routed
     p = _project_or_404(project_id)
-    if expected_version is not None and int(expected_version) != int(p.get("bible_version") or 0):
+    if expected_version is None:
         raise HTTPException(
             409,
-            f"人物谱版本冲突：当前版本 {p.get('bible_version')}，请求基于 {expected_version}，请刷新后重试",
+            detail={
+                "code": "EXPECTED_VERSION_REQUIRED",
+                "message": "定稿人物谱必须携带 expected_version，以防止并发覆盖",
+                "current_version": int(p.get("bible_version") or 0),
+            },
         )
+    if int(expected_version) != int(p.get("bible_version") or 0):
+        raise HTTPException(409, detail=_bible_conflict_detail(p, expected_version))
+    if not confirm:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "IMPACT_CONFIRM_REQUIRED",
+                "message": "必须先完成定稿影响预检并显式确认（confirm=true）",
+            },
+        )
+    try:
+        preview = compute_bible_impact_preview(
+            project_id, bible_body, expected_version=expected_version,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            409,
+            detail={
+                "code": "IMPACT_PREVIEW_UNAVAILABLE",
+                "message": f"定稿影响预检失败，已阻止正式定稿：{exc}",
+            },
+        ) from exc
+    if not impact_fp or impact_fp != preview.get("fingerprint"):
+        raise HTTPException(
+            409,
+            detail={
+                "code": "IMPACT_PREVIEW_STALE",
+                "message": "影响预检已过期或缺失，请重新预检后再定稿",
+                "preview": preview,
+            },
+        )
+
     instance, errors = schema_errors(Bible, bible_body)
     if errors:
         raise HTTPException(422, "；".join(errors))
@@ -566,10 +923,14 @@ async def edit_bible(project_id: str, body: dict):
         "style_changed": style_changed,
         "purged": purge_info,
         "artifact_id": artifact["id"],
+        "bible_version": int(p.get("bible_version") or 0) + 1,
         "impact": {
             "stale_descendant_ids": stale_ids,
             "requires_reconfirm": bool(stale_ids),
             "paid_media_invalidated": bool(style_changed or stale_ids),
+            "by_artifact_type": _artifact_type_counts(stale_ids),
+            "change_types": preview.get("change_types"),
+            "rebuild": preview.get("rebuild"),
         },
     }
 
@@ -669,6 +1030,8 @@ async def start_refs(project_id: str, body: dict | None = None):
             "project_id": project_id,
             "character": payload.get("character"),
             "resume": bool(payload.get("resume", False)),
+            "confirm": payload.get("confirm") is True,
+            "quote_id": payload.get("quote_id"),
         },
     )
     if routed is not None:
@@ -678,10 +1041,29 @@ async def start_refs(project_id: str, body: dict | None = None):
         raise HTTPException(409, "请先生成角色圣经")
     if _refs_task_active(project_id) or p["refs_status"] == "running":
         raise HTTPException(409, "定妆照正在生成中")
+    if payload.get("confirm") is not True:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "PAYMENT_CONFIRM_REQUIRED",
+                "message": "必须先完成费用预检并显式确认（confirm=true）",
+            },
+        )
     only = payload.get("character")
     resume = bool(payload.get("resume", False))
+    quote = compute_refs_cost_precheck(project_id, character=only, resume=resume)
+    quote_id = payload.get("quote_id")
+    if quote_id and quote_id != quote.get("quote_id"):
+        raise HTTPException(
+            409,
+            detail={
+                "code": "QUOTE_STALE",
+                "message": "费用预检已过期或范围变化，请重新确认",
+                "precheck": quote,
+            },
+        )
     _start_refs_generation(project_id, only, resume=resume)
-    return {"status": "running"}
+    return {"status": "running", "quote_id": quote.get("quote_id"), "precheck": quote}
 
 
 @router.post("/projects/{project_id}/refs/cancel")
@@ -840,20 +1222,46 @@ async def edit_scene_prompt(project_id: str, scene_name: str, body: dict):
 @router.post("/projects/{project_id}/characters/{character_name}/portraits/{portrait_id}/views/{view_role}/regenerate")
 async def regenerate_character_view_route(
     project_id: str, character_name: str, portrait_id: str, view_role: str,
+    body: dict | None = None,
 ):
-    """人物谱单视角重做：只重生成指定视角并复跑整包 QA。"""
+    """人物谱单视角重做：持久异步任务，立即返回 accepted + run_id。"""
     from app.capabilities.dispatch import ui_route
+
+    payload = body or {}
     routed = await ui_route(
         "portrait.regenerate_view",
         {
             "project_id": project_id, "character_name": character_name,
             "portrait_id": portrait_id, "view_role": view_role,
+            "confirm": payload.get("confirm") is True,
+            "quote_id": payload.get("quote_id"),
         },
     )
     if routed is not None:
         return routed
     _project_or_404(project_id)
-    from app.multiview import regenerate_character_view, pack_result_ok
+    if payload.get("confirm") is not True:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "PAYMENT_CONFIRM_REQUIRED",
+                "message": "必须先完成费用预检并显式确认（confirm=true）",
+            },
+        )
+    quote = compute_refs_cost_precheck(
+        project_id, character=character_name, view_role=view_role,
+    )
+    if not payload.get("quote_id") or payload.get("quote_id") != quote.get("quote_id"):
+        if payload.get("quote_id"):
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "QUOTE_STALE",
+                    "message": "费用预检已过期或范围变化，请重新确认",
+                    "precheck": quote,
+                },
+            )
+        # Agent/工具路径：confirm=true 且未带 quote_id 时采用当前服务端报价
     conn = get_conn()
     row = conn.execute(
         "SELECT * FROM character_portraits WHERE id=? AND project_id=? AND character_name=?",
@@ -861,15 +1269,89 @@ async def regenerate_character_view_route(
     ).fetchone()
     if not row:
         raise HTTPException(404, "造型版本不存在")
-    try:
-        result = await regenerate_character_view(
-            project_id=project_id, portrait_id=portrait_id, view_role=view_role,
+
+    task_key = f"{portrait_id}:{view_role}"
+    if task_registry.active("portrait_view_redo", task_key):
+        active_runs = evidence_repository.list_runs(active=True, project_id=project_id, limit=20)
+        existing = next(
+            (
+                r for r in active_runs
+                if r.get("workflow_type") == "portrait_view_redo"
+                and (r.get("config_snapshot") or {}).get("task_key") == task_key
+            ),
+            None,
         )
-    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "accepted",
+            "task_id": f"portrait_view_redo:{task_key}",
+            "run_id": (existing or {}).get("id"),
+            "portrait_id": portrait_id,
+            "view_role": view_role,
+            "message": "该视角重做任务已在运行",
+        }
+
+    recorder = WorkflowRecorder.create(
+        workflow_type="portrait_view_redo",
+        scope_type="project",
+        scope_id=project_id,
+        input_fingerprint=fingerprint(project_id, portrait_id, view_role, quote.get("quote_id")),
+        requested_by="user",
+        trigger_type="manual",
+        config_snapshot={
+            "task_key": task_key,
+            "character_name": character_name,
+            "portrait_id": portrait_id,
+            "view_role": view_role,
+            "quote_id": quote.get("quote_id"),
+        },
+        budget_limit_cny=float(quote.get("max_retry_budget_cny") or 1),
+    )
+
+    async def _run_redo() -> None:
+        from app.multiview import regenerate_character_view, pack_result_ok
+        recorder.start()
+        try:
+            async def _op():
+                return await regenerate_character_view(
+                    project_id=project_id, portrait_id=portrait_id, view_role=view_role,
+                )
+            result = await recorder.step(
+                "portrait_view_redo",
+                _op,
+                agent_name="portrait_view_redo",
+            )
+            if isinstance(result, tuple):
+                result = result[1]
+            if not pack_result_ok(result):
+                recorder.fail(RuntimeError(
+                    f"视角重做未通过：{view_role}（status={(result or {}).get('status')}）"
+                ))
+                return
+            recorder.succeed(f"{character_name}/{view_role} 视角已重做并通过整包 QA")
+        except asyncio.CancelledError:
+            recorder.cancel()
+            raise
+        except Exception as exc:  # noqa: BLE001
+            recorder.fail(exc)
+            raise
+
+    try:
+        task_registry.spawn(
+            "portrait_view_redo", task_key, _run_redo(), project_id=project_id,
+        )
+    except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
-    if not pack_result_ok(result):
-        raise HTTPException(409, f"视角重做未通过：{view_role}（status={result.get('status')}）")
-    return result
+
+    return {
+        "status": "accepted",
+        "task_id": f"portrait_view_redo:{task_key}",
+        "run_id": recorder.run_id,
+        "portrait_id": portrait_id,
+        "view_role": view_role,
+        "character_name": character_name,
+        "precheck": quote,
+        "message": "单视角重做任务已受理，可刷新查看进度",
+    }
 
 
 @router.post("/projects/{project_id}/scenes/{scene_name}/refs/{scene_reference_id}/views/{view_role}/regenerate")

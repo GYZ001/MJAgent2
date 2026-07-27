@@ -54,7 +54,11 @@ export default function ScenesPage() {
   return (
     <>
       <header className="desk-head">
-        <div className="crumb">书房 / 《{p.name}》</div>
+        <div className="crumb">书房 / {(() => {
+          const n = (p.name || '').trim()
+          if (!n) return '《未命名》'
+          return n.startsWith('《') && n.endsWith('》') ? n : `《${n}》`
+        })()}</div>
         <PrepSubnav current="scenes" />
         <h1>场景库 <span className="sub">以视觉资产为中心管理场景锚点、版本与跨集一致性</span></h1>
         <hr className="rule" />

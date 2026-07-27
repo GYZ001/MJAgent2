@@ -108,6 +108,8 @@ async function request(
         _retried: true,
       })
     }
+    // 异步受理（如单视角重做）：直接返回 payload，不再走 handle
+    return payload
   }
 
   return handle(resp)
@@ -177,14 +179,28 @@ export const api = {
     request('PUT', `/projects/${projectId}/scenes/${encodeURIComponent(sceneName)}/prompt`, {
       scene_prompt: scenePrompt,
     }),
-  regenerateCharacterView: (projectId: string, characterName: string, portraitId: string, viewRole: string) =>
-    request('POST', `/projects/${projectId}/characters/${encodeURIComponent(characterName)}/portraits/${portraitId}/views/${encodeURIComponent(viewRole)}/regenerate`),
+  regenerateCharacterView: (projectId: string, characterName: string, portraitId: string, viewRole: string, body?: {
+    confirm?: boolean
+    quote_id?: string
+  }) =>
+    request('POST', `/projects/${projectId}/characters/${encodeURIComponent(characterName)}/portraits/${portraitId}/views/${encodeURIComponent(viewRole)}/regenerate`, body || {}),
   regenerateSceneView: (projectId: string, sceneName: string, sceneRefId: string, viewRole: string) =>
     request('POST', `/projects/${projectId}/scenes/${encodeURIComponent(sceneName)}/refs/${sceneRefId}/views/${encodeURIComponent(viewRole)}/regenerate`),
   adoptSceneCandidate: (projectId: string, sceneName: string, artifactId: string, reason?: string) =>
     request('POST', `/projects/${projectId}/scenes/${encodeURIComponent(sceneName)}/candidates/${encodeURIComponent(artifactId)}/adopt`, {
       reason: reason || '人工采纳候选',
     }),
+  bibleImpactPreview: (projectId: string, body: {
+    bible: unknown
+    expected_version?: number | null
+  }) =>
+    request('POST', `/projects/${projectId}/bible/impact-preview`, body) as Promise<BibleImpactPreview>,
+  refsPrecheck: (projectId: string, body?: {
+    character?: string
+    resume?: boolean
+    view_role?: string
+  }) =>
+    request('POST', `/projects/${projectId}/refs/precheck`, body || {}) as Promise<RefsCostPrecheck>,
   staleAssetsPreview: (episodeId: string) =>
     request('GET', `/episodes/${episodeId}/stale-assets-preview`) as Promise<{
       episode_id: string
@@ -196,6 +212,50 @@ export const api = {
       confirm: true,
       shot_ids: shotIds,
     }),
+}
+
+export interface BibleImpactPreview {
+  project_id: string
+  bible_version: number
+  computed_at: number
+  fingerprint: string
+  change_types: string[]
+  style_changed: boolean
+  stale_descendant_ids: string[]
+  stale_count: number
+  by_artifact_type?: Record<string, number>
+  paid_assets?: { character_portraits?: number; scene_references?: number }
+  rebuild?: {
+    image_count: number
+    unit_price_cny: number
+    estimated_cost_cny: number
+    max_retry_budget_cny: number
+    note?: string
+  }
+  requires_reconfirm?: boolean
+  paid_media_invalidated?: boolean
+  old_asset_policy?: string
+}
+
+export interface RefsCostPrecheck {
+  quote_id: string
+  computed_at: number
+  quote_expires_at: number
+  project_id: string
+  action: string
+  character?: string | null
+  view_role?: string | null
+  character_count: number
+  views_per_character: number
+  image_count: number
+  unit_price_cny: number
+  estimated_cost_cny: number
+  max_retry_budget_cny: number
+  budget_cap_cny: number
+  scope: Array<Record<string, unknown>>
+  old_asset_policy?: string
+  idempotency_hint?: string
+  stop_policy?: string
 }
 
 export interface RunSummary {
@@ -640,7 +700,22 @@ export interface Portrait {
   base_portrait_id?: string | null
   image_url?: string | null
   pack_status?: string | null
-  group_qa?: { overall?: number | null; issues?: string[]; status?: string } | null
+  group_qa?: {
+    overall?: number | null
+    issues?: string[]
+    hard_failures?: string[]
+    status?: string
+    face_consistency?: number | null
+    outfit_consistency?: number | null
+    hair_consistency?: number | null
+    views?: Array<{
+      view_role?: string
+      overall?: number | null
+      issues?: string[]
+      hard_failures?: string[]
+      status?: string
+    }>
+  } | null
   change?: { change_dimensions?: string[]; persistence?: string; reason?: string } | null
   views?: PortraitView[]
 }

@@ -1,14 +1,76 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, Bible, Character, Portrait, PortraitView } from '../api'
+import {
+  api, ApiError, Bible, BibleImpactPreview, Character, Portrait, PortraitView, RefsCostPrecheck,
+} from '../api'
 import { useNav, useProject } from '../App'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 import SearchField from '../components/SearchField'
 import EvidenceDrawer from '../components/harness/EvidenceDrawer'
 import ImpactDialog, { ImpactSummary } from '../components/harness/ImpactDialog'
+import PaymentConfirmDialog from '../components/PaymentConfirmDialog'
 import GenerationParamsDialog from '../components/GenerationParamsDialog'
 import QueryState from '../components/QueryState'
 import PrepSubnav from '../components/PrepSubnav'
 import { useFillPageSize } from '../hooks/useFillPageSize'
+
+const CHAR_QA_PASS = 0.6
+
+function formatBookTitle(name: string): string {
+  const trimmed = (name || '').trim()
+  if (!trimmed) return '未命名'
+  if (trimmed.startsWith('《') && trimmed.endsWith('》')) return trimmed
+  return `《${trimmed}》`
+}
+
+function currentPortrait(character: Character): Portrait | null {
+  const portraits = [...(character.portraits ?? [])]
+    .filter(portrait => !!portrait.image_url || (portrait.views ?? []).some(view => !!view.image_url))
+    .sort((a, b) => b.ep_start - a.ep_start)
+  return portraits.find(p => p.ep_end == null) || portraits[0] || null
+}
+
+type PortraitAvailability =
+  | 'generating'
+  | 'passed'
+  | 'warning'
+  | 'failed'
+  | 'unverified'
+  | 'missing'
+
+function portraitAvailability(character: Character, fitting: boolean): PortraitAvailability {
+  if (fitting) return 'generating'
+  const portrait = currentPortrait(character)
+  if (!portrait || (!portrait.image_url && !(portrait.views ?? []).some(v => v.image_url))) {
+    return character.ref_image_url ? 'unverified' : 'missing'
+  }
+  const status = portrait.pack_status
+  if (status === 'generating' || status === 'qa_pending') return 'generating'
+  if (status === 'failed') return 'failed'
+  const qa = portrait.group_qa
+  const hard = (qa?.hard_failures ?? []).length > 0 || qa?.status === 'failed'
+  if (hard) return 'failed'
+  if (status === 'ready' || !status) {
+    if (typeof qa?.overall === 'number') {
+      if (qa.overall >= CHAR_QA_PASS) {
+        return (qa.issues ?? []).length ? 'warning' : 'passed'
+      }
+      return 'failed'
+    }
+    return status === 'ready' ? 'unverified' : 'unverified'
+  }
+  return 'unverified'
+}
+
+function availabilityStamp(state: PortraitAvailability): { label: string; color: string } {
+  switch (state) {
+    case 'generating': return { label: '生成/验证中', color: 'gold' }
+    case 'passed': return { label: '已采用且通过', color: 'green' }
+    case 'warning': return { label: '已采用但有警告', color: 'gold' }
+    case 'failed': return { label: '硬失败/不可用', color: 'red' }
+    case 'missing': return { label: '未出图', color: 'grey' }
+    default: return { label: '待复核/未验证', color: 'grey' }
+  }
+}
 
 export default function BiblePage() {
   const { projectId, toast, go } = useNav()
@@ -19,6 +81,20 @@ export default function BiblePage() {
   const [charPage, setCharPage] = useState(0)
   const [paramsCharacterName, setParamsCharacterName] = useState<string | null>(null)
   const [impactOpen, setImpactOpen] = useState(false)
+  const [impactLoading, setImpactLoading] = useState(false)
+  const [impactError, setImpactError] = useState<string | null>(null)
+  const [impactPreview, setImpactPreview] = useState<BibleImpactPreview | null>(null)
+  const [conflict, setConflict] = useState<{
+    message: string
+    current_version?: number
+    character_names?: string[]
+  } | null>(null)
+  const [payOpen, setPayOpen] = useState(false)
+  const [payTitle, setPayTitle] = useState('')
+  const [payLoading, setPayLoading] = useState(false)
+  const [payError, setPayError] = useState<string | null>(null)
+  const [payPrecheck, setPayPrecheck] = useState<RefsCostPrecheck | null>(null)
+  const payActionRef = useRef<null | (() => Promise<void>)>(null)
   const pageSize = useFillPageSize({ minCardWidth: 270, rows: 3, floor: 8, ceiling: 24 })
   const bibleTimer = useTaskTimer(`project.${projectId}.bible`, p?.bible_status === 'running')
   const refsTimer = useTaskTimer(`project.${projectId}.refs`, p?.refs_status === 'running')
@@ -35,6 +111,16 @@ export default function BiblePage() {
     if (charPage > charPageCount - 1) setCharPage(Math.max(0, charPageCount - 1))
   }, [charPage, charPageCount])
 
+  useEffect(() => {
+    if (!editing) return
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault()
+      event.returnValue = ''
+    }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+  }, [editing])
+
   if (error && !p) return <QueryState loading={false} error={error} hasData={false}>{null}</QueryState>
   if (!p) return <QueryState loading={loading !== false} error={null} hasData={false}>{null}</QueryState>
 
@@ -46,7 +132,6 @@ export default function BiblePage() {
   }
 
   const bible = editing ?? p.bible
-  // 角色卡分页：按视口列数×行数铺满再分页；保留原始下标 i 供编辑态写回
   const indexedChars = (bible?.characters ?? []).map((c, i) => ({ c, i }))
   const filteredChars = charQuery ? indexedChars.filter(({ c }) => c.name.includes(charQuery)) : indexedChars
   const curCharPage = Math.min(charPage, charPageCount - 1)
@@ -55,6 +140,31 @@ export default function BiblePage() {
   const paramsCharacter = paramsCharacterName
     ? bible?.characters.find(character => character.name === paramsCharacterName) ?? null
     : null
+  const dirty = !!editing
+
+  const openPayment = async (
+    title: string,
+    precheckBody: { character?: string; resume?: boolean; view_role?: string },
+    action: (quote: RefsCostPrecheck) => Promise<void>,
+  ) => {
+    setPayTitle(title)
+    setPayOpen(true)
+    setPayLoading(true)
+    setPayError(null)
+    setPayPrecheck(null)
+    try {
+      const quote = await api.refsPrecheck(p.id, precheckBody)
+      setPayPrecheck(quote)
+      payActionRef.current = async () => {
+        await action(quote)
+      }
+    } catch (e: unknown) {
+      setPayError((e as Error).message)
+      payActionRef.current = null
+    } finally {
+      setPayLoading(false)
+    }
+  }
 
   const startBible = async () => {
     bibleTimer.start()
@@ -75,10 +185,11 @@ export default function BiblePage() {
     try {
       if (p.bible_status === 'running') {
         await api.post(`/projects/${p.id}/bible/cancel`)
+        toast('已停止谱写；已落盘资产保留')
       } else {
         await api.post(`/projects/${p.id}/refs/cancel`)
+        toast('已停止定妆；已落盘资产保留')
       }
-      toast('已停止当前人物谱/定妆照生成')
       refresh()
     } catch (e: unknown) {
       toast((e as Error).message, true)
@@ -88,30 +199,114 @@ export default function BiblePage() {
   }
 
   const retryRefs = async () => {
-    refsTimer.start()
-    await act(
-      () => api.post(`/projects/${p.id}/refs`, { resume: true }),
-      '已开始补齐缺失的定妆照，已有成品会保留',
+    await openPayment(
+      '补齐缺失的定妆照',
+      { resume: true },
+      async (quote) => {
+        refsTimer.start()
+        await api.post(`/projects/${p.id}/refs`, {
+          resume: true, confirm: true, quote_id: quote.quote_id,
+        })
+        toast('已开始补齐缺失的定妆照，已有成品会保留')
+        refresh()
+      },
     )
   }
 
-  const saveBible = async () => {
+  const openImpactPreview = async () => {
     if (!editing) return
-    await act(async () => {
-      const r = await api.put(`/projects/${p.id}/bible`, editing) as {
-        style_changed?: boolean; purged?: { versions: number } | null; impact?: ImpactSummary
+    setImpactOpen(true)
+    setImpactLoading(true)
+    setImpactError(null)
+    setImpactPreview(null)
+    try {
+      const preview = await api.bibleImpactPreview(p.id, {
+        bible: editing,
+        expected_version: p.bible_version ?? 0,
+      })
+      setImpactPreview(preview)
+    } catch (e: unknown) {
+      if (e instanceof ApiError && e.status === 409) {
+        const detail = e.detail as { code?: string; message?: string; character_names?: string[]; current_version?: number } | undefined
+        if (detail?.code === 'BIBLE_VERSION_CONFLICT') {
+          setImpactOpen(false)
+          setConflict({
+            message: detail.message || e.message,
+            current_version: detail.current_version,
+            character_names: detail.character_names,
+          })
+          return
+        }
+      }
+      setImpactError((e as Error).message)
+    } finally {
+      setImpactLoading(false)
+    }
+  }
+
+  const saveBible = async () => {
+    if (!editing || !impactPreview) return
+    setBusy(true)
+    try {
+      const r = await api.put(`/projects/${p.id}/bible`, {
+        bible: editing,
+        expected_version: p.bible_version ?? 0,
+        confirm: true,
+        impact_preview_fingerprint: impactPreview.fingerprint,
+      }) as {
+        style_changed?: boolean
+        purged?: { versions: number } | null
+        impact?: ImpactSummary
       }
       setEditing(null)
+      setImpactOpen(false)
+      setImpactPreview(null)
       toast(r.style_changed
         ? `画风已变更：旧画风定妆照与已生成视频（${r.purged?.versions ?? 0} 个版本）已全部作废，请重新生成定妆照后再生成视频`
         : `人物谱已定稿；${r.impact?.stale_descendant_ids?.length ?? 0} 个下游证据已标记失效`)
-    })
+      refresh()
+    } catch (e: unknown) {
+      if (e instanceof ApiError && e.status === 409) {
+        const detail = e.detail as {
+          code?: string; message?: string; character_names?: string[]; current_version?: number; preview?: BibleImpactPreview
+        } | undefined
+        if (detail?.code === 'BIBLE_VERSION_CONFLICT') {
+          setImpactOpen(false)
+          setConflict({
+            message: detail.message || e.message,
+            current_version: detail.current_version,
+            character_names: detail.character_names,
+          })
+          return
+        }
+        if (detail?.code === 'IMPACT_PREVIEW_STALE' && detail.preview) {
+          setImpactPreview(detail.preview)
+          setImpactError('影响预检已过期，已刷新最新结果，请再次确认')
+          return
+        }
+      }
+      toast((e as Error).message, true)
+    } finally {
+      setBusy(false)
+    }
   }
+
+  const abandonEditing = () => {
+    if (!dirty) {
+      setEditing(null)
+      return
+    }
+    if (window.confirm('有未保存的人物谱修订，确定放弃吗？')) {
+      setEditing(null)
+    }
+  }
+
+  const stopLabel = p.bible_status === 'running' ? '停止谱写' : '停止定妆'
 
   return (
     <>
       <header className="desk-head">
-        <div className="crumb">书房 / 《{p.name}》</div>
+        <div className="crumb">书房 / {formatBookTitle(p.name)}</div>
         <PrepSubnav current="bible" />
         <h1>人物谱 <span className="sub">角色资产与定妆版本中心 · 保持跨镜头、跨分集一致</span></h1>
         <hr className="rule" />
@@ -127,7 +322,7 @@ export default function BiblePage() {
           )}
           {p.bible && p.refs_status === 'failed' && !generating && (
             <>
-              <button className="btn primary" disabled={busy} onClick={retryRefs}>
+              <button className="btn primary" disabled={busy} onClick={() => void retryRefs()}>
                 补齐缺失的定妆照
               </button>
               <button className="btn ghost" disabled={busy} onClick={() => go('episodes', p.id)}>
@@ -137,12 +332,13 @@ export default function BiblePage() {
           )}
           {generating && (
             <button className="btn ghost" disabled={busy} onClick={stopGeneration}>
-              停止
+              {stopLabel}
             </button>
           )}
           {p.bible_status === 'running' && <span className="stamp gold">谱写中（约 1~3 分钟）</span>}
           {p.refs_status === 'running' && <span className="stamp gold">定妆中</span>}
           {p.bible && <span className="stamp green">第 {`${p.bible_version ?? ''}`} 稿</span>}
+          {dirty && <span className="stamp gold">未保存修订</span>}
           {p.bible_evidence && <EvidenceDrawer evidence={p.bible_evidence} label="人物谱证据" />}
           <TaskTimer label="人物谱" timer={bibleTimer} />
           <TaskTimer label="定妆照" timer={refsTimer} />
@@ -164,8 +360,8 @@ export default function BiblePage() {
               ? <button className="btn small" style={{ marginLeft: 14 }} onClick={() => setEditing(JSON.parse(JSON.stringify(p.bible)))}>修订</button>
               : <>
                 <button className="btn small primary" style={{ marginLeft: 14 }} disabled={busy}
-                  onClick={() => setImpactOpen(true)}>定稿</button>
-                <button className="btn small ghost" style={{ marginLeft: 8 }} onClick={() => setEditing(null)}>放弃</button>
+                  onClick={() => void openImpactPreview()}>定稿</button>
+                <button className="btn small ghost" style={{ marginLeft: 8 }} onClick={abandonEditing}>放弃</button>
               </>}
           </h3>
           <label className="f">全局画风锚点串（逐字注入每个镜头 prompt）</label>
@@ -178,7 +374,7 @@ export default function BiblePage() {
           <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}>
             {p.refs_status === 'running' && <span className="stamp gold">定妆中</span>}
             <span style={{ fontSize: 12.5, color: 'var(--ink-faint)' }}>
-              启动后会先为全部角色生成初始定妆照；随后在分镜阶段按集判断角色外观是否相比当前定妆照大变，大变才图生图重绘并切分适用集，新登场重要人物会自动补人物卡并生成定妆照（¥0.2/张）
+              启动后会先为全部角色生成初始定妆照；随后在分镜阶段按集判断角色外观是否相比当前定妆照大变，大变才图生图重绘并切分适用集，新登场重要人物会自动补人物卡并生成定妆照
             </span>
           </div>
           {p.refs_status === 'failed' && <div className="error-banner">定妆照生成失败：{'\n'}{p.refs_error}</div>}
@@ -193,18 +389,19 @@ export default function BiblePage() {
             {pagedChars.map(({ c, i }: { c: Character; i: number }) => {
               const portraits = c.portraits ?? []
               const hasPortraitImage = portraits.some(portrait =>
-                (portrait.pack_status === 'ready' || !portrait.pack_status)
-                && (!!portrait.image_url || (portrait.views ?? []).some(view => !!view.image_url)),
+                (!!portrait.image_url || (portrait.views ?? []).some(view => !!view.image_url)),
               )
               const fitting = p.refs_status === 'running' && (
                 p.refs_target === c.name
                 || (!p.refs_target && portraits.some(portrait => portrait.pack_status === 'generating'))
               )
+              const availability = portraitAvailability(c, fitting)
+              const stamp = availabilityStamp(availability)
+              const active = currentPortrait(c)
               return (
               <article key={c.name} className="figure character-card">
                 <div className="f-name">{c.name} <span className="f-role">{c.role}</span>
-                  {fitting ? <span className="stamp gold">定妆中</span>
-                    : (c.ref_image_url || hasPortraitImage) ? <span className="stamp green">已定妆</span> : <span className="stamp grey">未定妆</span>}
+                  <span className={`stamp ${stamp.color}`}>{stamp.label}</span>
                 </div>
                 {(c.ref_image_url || hasPortraitImage) && (
                   <CharacterPortraitGallery
@@ -213,7 +410,11 @@ export default function BiblePage() {
                     fitting={fitting}
                     disabled={busy || generating}
                     onChanged={refresh}
+                    onPayRequest={openPayment}
                   />
+                )}
+                {active?.group_qa && (
+                  <CharacterQaLine qa={active.group_qa} availability={availability} />
                 )}
                 <label className="f">外观锚点串（40~60 字，定稿后锁定）</label>
                 {editing
@@ -256,14 +457,49 @@ export default function BiblePage() {
       <ImpactDialog
         open={impactOpen}
         title="定稿人物谱并传播影响"
-        impact={{ requires_reconfirm: true, paid_media_invalidated: true }}
-        knownEffects={[
-          '下游分集剧本、分镜、参考图与视频可能需要重新生成',
-          '精确失效 Artifact 数量将在保存后由服务端计算并回传',
-        ]}
-        onClose={() => setImpactOpen(false)}
-        onConfirm={() => { setImpactOpen(false); void saveBible() }}
+        impact={impactPreview}
+        loading={impactLoading}
+        error={impactError}
+        onClose={() => { setImpactOpen(false); setImpactError(null) }}
+        onConfirm={() => { void saveBible() }}
       />
+      <PaymentConfirmDialog
+        open={payOpen}
+        title={payTitle}
+        precheck={payPrecheck}
+        loading={payLoading}
+        error={payError}
+        onClose={() => { setPayOpen(false); payActionRef.current = null }}
+        onConfirm={() => {
+          const run = payActionRef.current
+          setPayOpen(false)
+          if (!run) return
+          void act(run)
+        }}
+      />
+      {conflict && (
+        <div className="evidence-backdrop" role="presentation">
+          <section className="impact-dialog" role="dialog" aria-modal="true" aria-label="版本冲突">
+            <h3>人物谱版本冲突</h3>
+            <p>{conflict.message}</p>
+            {typeof conflict.current_version === 'number' && (
+              <p>服务端当前版本：第 {conflict.current_version} 稿</p>
+            )}
+            {!!conflict.character_names?.length && (
+              <p>服务端角色：{conflict.character_names.join('、')}</p>
+            )}
+            <p>请刷新后重新修订；禁止用旧页面静默覆盖。</p>
+            <div className="dialog-actions">
+              <button type="button" className="btn" onClick={() => setConflict(null)}>留下继续查看</button>
+              <button type="button" className="btn primary" onClick={() => {
+                setConflict(null)
+                setEditing(null)
+                refresh()
+              }}>刷新并放弃本地修改</button>
+            </div>
+          </section>
+        </div>
+      )}
       {paramsCharacter && (
         <GenerationParamsDialog
           title={`${paramsCharacter.name} · 角色设定与生成参数`}
@@ -279,13 +515,44 @@ export default function BiblePage() {
           </div>
           <PortraitBlock projectId={p.id} character={paramsCharacter}
             disabled={busy || p.refs_status === 'running'} onChanged={refresh}
-            regenerate={() => act(
-              () => api.post(`/projects/${p.id}/refs`, { character: paramsCharacter.name }),
-              `正在为「${paramsCharacter.name}」重新定妆`,
+            regenerate={() => openPayment(
+              `重新生成「${paramsCharacter.name}」造型包`,
+              { character: paramsCharacter.name },
+              async (quote) => {
+                await api.post(`/projects/${p.id}/refs`, {
+                  character: paramsCharacter.name,
+                  confirm: true,
+                  quote_id: quote.quote_id,
+                })
+                toast(`正在为「${paramsCharacter.name}」重新定妆`)
+                refresh()
+              },
             )} />
         </GenerationParamsDialog>
       )}
     </>
+  )
+}
+
+function CharacterQaLine({
+  qa, availability,
+}: {
+  qa: NonNullable<Portrait['group_qa']>
+  availability: PortraitAvailability
+}) {
+  const overall = qa.overall
+  const issues = [...(qa.hard_failures ?? []), ...(qa.issues ?? [])]
+  const color = availability === 'passed' ? 'var(--moss)'
+    : availability === 'warning' ? 'var(--gold, #b8860b)'
+      : availability === 'failed' ? 'var(--cinnabar)' : 'var(--ink-faint)'
+  return (
+    <div className="scene-qa-line" style={{ marginBottom: 8 }}>
+      <span>整包 QA：{typeof overall === 'number'
+        ? <b style={{ color }}>{overall.toFixed(2)}</b>
+        : <b style={{ color }}>未验证</b>}
+      </span>
+      {issues.length ? <span style={{ color: 'var(--ink-faint)' }}>　{issues.slice(0, 2).join('；')}</span> : null}
+    </div>
   )
 }
 
@@ -294,15 +561,18 @@ function PortraitBlock({ projectId, character: c, disabled, onChanged, regenerat
   onChanged: () => void; regenerate: () => void
 }) {
   const { toast } = useNav()
-  const [draft, setDraft] = useState<string | null>(null)  // null=非编辑态
+  const [draft, setDraft] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const isOverridden = !!(c.portrait_prompt_override || '').trim()
+  const draftLen = (draft ?? '').trim().length
+  const draftValid = draft !== null && (draftLen === 0 || (draftLen >= 10 && draftLen <= 400))
 
-  async function save(thenRegen: boolean) {
+  async function save(thenRegen: boolean, value?: string) {
     setSaving(true)
     try {
+      const text = value ?? draft ?? ''
       const r = await api.put(`/projects/${projectId}/characters/${encodeURIComponent(c.name)}/portrait`,
-        { portrait_prompt: draft ?? '' })
+        { portrait_prompt: text })
       toast(r.reset_to_default ? `「${c.name}」画像描述已恢复默认` : `「${c.name}」画像描述已保存`)
       setDraft(null); onChanged()
       if (thenRegen) regenerate()
@@ -330,11 +600,18 @@ function PortraitBlock({ projectId, character: c, disabled, onChanged, regenerat
         <>
           <textarea rows={4} style={{ fontSize: 12.5 }} value={draft} onChange={e => setDraft(e.target.value)}
             placeholder="描述定妆照画面：画风、人物外观、姿态、背景……（10~400 字）" />
+          <div style={{ fontSize: 12, color: draftValid ? 'var(--ink-faint)' : 'var(--cinnabar)', marginTop: 4 }}>
+            {draftLen === 0 ? '留空并保存将恢复默认' : `${draftLen} / 10~400 字`}
+          </div>
           <div style={{ display: 'flex', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>
-            <button className="btn small primary" disabled={saving || disabled} onClick={() => save(true)}>保存并重新定妆</button>
-            <button className="btn small" disabled={saving} onClick={() => save(false)}>仅保存</button>
+            <button className="btn small primary" disabled={saving || disabled || !draftValid || draftLen === 0}
+              onClick={() => save(true)}>保存并重新定妆</button>
+            <button className="btn small" disabled={saving || !draftValid} onClick={() => save(false)}>仅保存</button>
             {isOverridden && <button className="btn small" disabled={saving}
-              onClick={() => { setDraft(''); }} title="清空后保存即恢复默认">清空</button>}
+              onClick={() => {
+                if (!window.confirm('确认恢复默认画像描述？不会触发生成或扣费。')) return
+                void save(false, '')
+              }}>恢复默认</button>}
             <button className="btn small ghost" disabled={saving} onClick={() => setDraft(null)}>放弃</button>
           </div>
         </>
@@ -366,21 +643,24 @@ type PortraitSlide = {
   view: PortraitView | null
 }
 
-function CharacterPortraitGallery({ projectId, character, fitting, disabled, onChanged }: {
+function CharacterPortraitGallery({ projectId, character, fitting, disabled, onChanged, onPayRequest }: {
   projectId: string
   character: Character
   fitting: boolean
   disabled?: boolean
   onChanged?: () => void
+  onPayRequest: (
+    title: string,
+    precheckBody: { character?: string; resume?: boolean; view_role?: string },
+    action: (quote: RefsCostPrecheck) => Promise<void>,
+  ) => Promise<void>
 }) {
   const { toast } = useNav()
   const trackRef = useRef<HTMLDivElement>(null)
   const [redoing, setRedoing] = useState<string | null>(null)
-  // 当前版本排在第一张；旧图只是定妆版本历史，不代表对应集数已经投入生产。
   const portraits = [...(character.portraits ?? [])]
     .filter(portrait =>
-      (portrait.pack_status === 'ready' || !portrait.pack_status)
-      && (!!portrait.image_url || (portrait.views ?? []).some(v => v.image_url)),
+      (!!portrait.image_url || (portrait.views ?? []).some(v => v.image_url)),
     )
     .sort((a, b) => b.ep_start - a.ep_start)
   const slides: PortraitSlide[] = []
@@ -425,30 +705,38 @@ function CharacterPortraitGallery({ projectId, character, fitting, disabled, onC
 
   const redoView = async (portraitId: string, viewRole: string) => {
     const label = VIEW_ROLE_LABELS[viewRole] || viewRole
-    if (!window.confirm(`确认重做「${character.name}」的${label}视角？将重新付费生成并复跑整包 QA。`)) return
-    setRedoing(`${portraitId}:${viewRole}`)
-    try {
-      await api.regenerateCharacterView(projectId, character.name, portraitId, viewRole)
-      toast(`${label}视角已重做`)
-      onChanged?.()
-    } catch (e: unknown) {
-      toast(e instanceof Error ? e.message : String(e), true)
-    } finally {
-      setRedoing(null)
-    }
+    await onPayRequest(
+      `重做「${character.name}」的${label}视角`,
+      { character: character.name, view_role: viewRole },
+      async (quote) => {
+        setRedoing(`${portraitId}:${viewRole}`)
+        try {
+          const result = await api.regenerateCharacterView(
+            projectId, character.name, portraitId, viewRole,
+            { confirm: true, quote_id: quote.quote_id },
+          ) as { status?: string; run_id?: string; message?: string }
+          toast(result?.status === 'accepted'
+            ? `${label}视角重做已受理，可刷新查看进度`
+            : `${label}视角已重做`)
+          onChanged?.()
+        } finally {
+          setRedoing(null)
+        }
+      },
+    )
   }
 
   return (
     <div className="character-portrait">
       <div ref={trackRef} className="character-portrait-track" aria-label={`${character.name}定妆照版本`}>
-        {slides.map(({ key, imageUrl, portrait, versionIndex, view }) => (
+        {slides.map(({ key, imageUrl, portrait, versionIndex, view }, index) => (
           <figure key={key} className="character-portrait-slide">
             <img src={imageUrl}
               alt={`${character.name} · ${portrait ? portraitVersionLabel(portrait) : '定妆照'} · ${VIEW_ROLE_LABELS[view?.view_role || ''] || view?.view_role || '正面'}`}
               style={{ opacity: fitting ? 0.45 : 1, transition: 'opacity 0.3s' }} />
             {portrait && <figcaption className="portrait-version-label">
               <span>
-                {portraitVersionLabel(portrait)} · {VIEW_ROLE_LABELS[view?.view_role || ''] || view?.view_role || '正面'}
+                {index + 1}/{count} · {portraitVersionLabel(portrait)} · {VIEW_ROLE_LABELS[view?.view_role || ''] || view?.view_role || '正面'}
                 {portrait.ep_end != null
                   ? ` · 第${portrait.ep_start}-${portrait.ep_end}集`
                   : ` · 第${portrait.ep_start}集起`}
@@ -460,9 +748,9 @@ function CharacterPortraitGallery({ projectId, character, fitting, disabled, onC
                 type="button"
                 className="portrait-view-redo"
                 disabled={disabled || !!redoing}
-                onClick={() => redoView(portrait.id!, view.view_role!)}
+                onClick={() => void redoView(portrait.id!, view.view_role!)}
               >
-                {redoing === `${portrait.id}:${view.view_role}` ? '重做中…' : '重做当前视角'}
+                {redoing === `${portrait.id}:${view.view_role}` ? '受理中…' : '重做当前视角'}
               </button>
             )}
             {portrait?.change?.reason && (

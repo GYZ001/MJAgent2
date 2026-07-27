@@ -438,16 +438,17 @@ def pending_human_gates(*, project_id: str | None = None, limit: int = 100) -> l
     return _decode_rows(rows)
 
 
-def invalidate_descendants(
+def list_descendants(
     artifact_id: str,
-    reason: str,
     *,
     exclude_ids: set[str] | None = None,
 ) -> list[str]:
-    """Mark all descendants stale while preserving their immutable evidence rows."""
+    """Return descendant artifact ids without mutating status (impact preview)."""
+    if not artifact_id:
+        return []
     conn = get_conn()
     all_rows = rows_to_dicts(conn.execute(
-        "SELECT id, parent_artifact_ids_json, status FROM artifacts"
+        "SELECT id, parent_artifact_ids_json FROM artifacts"
     ).fetchall())
     children: dict[str, list[str]] = {}
     for row in all_rows:
@@ -457,7 +458,7 @@ def invalidate_descendants(
             parents = []
         for parent in parents:
             children.setdefault(parent, []).append(row["id"])
-    stale: list[str] = []
+    found: list[str] = []
     excluded = exclude_ids or set()
     pending = list(children.get(artifact_id, []))
     seen: set[str] = set()
@@ -466,9 +467,21 @@ def invalidate_descendants(
         if child_id in seen or child_id in excluded:
             continue
         seen.add(child_id)
-        stale.append(child_id)
+        found.append(child_id)
         pending.extend(children.get(child_id, []))
+    return found
+
+
+def invalidate_descendants(
+    artifact_id: str,
+    reason: str,
+    *,
+    exclude_ids: set[str] | None = None,
+) -> list[str]:
+    """Mark all descendants stale while preserving their immutable evidence rows."""
+    stale = list_descendants(artifact_id, exclude_ids=exclude_ids)
     if stale:
+        conn = get_conn()
         conn.executemany(
             "UPDATE artifacts SET status='stale', stale_reason=? WHERE id=? AND status!='rejected'",
             [(reason, child_id) for child_id in stale],

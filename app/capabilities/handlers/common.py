@@ -60,7 +60,11 @@ def failed(summary: str, *, error_code: str = "domain_error", data: dict[str, An
 
 
 def from_http_exception(exc: HTTPException) -> CommandResult:
-    return failed(str(exc.detail), error_code=f"http_{exc.status_code}")
+    detail = exc.detail
+    if isinstance(detail, dict):
+        message = str(detail.get("message") or detail.get("code") or detail)
+        return failed(message, error_code=f"http_{exc.status_code}", data=detail)
+    return failed(str(detail), error_code=f"http_{exc.status_code}")
 
 
 async def call_guarded(

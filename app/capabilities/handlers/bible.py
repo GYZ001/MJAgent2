@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from app.capabilities import inputs as I
-from app.capabilities.handlers.common import call_guarded, succeeded
+from app.capabilities.handlers.common import accepted, call_guarded, succeeded
 from app.capabilities.schemas import CommandResult
 
 
@@ -33,11 +33,12 @@ async def cancel(args: I.ProjectScopedInput) -> CommandResult:
 async def update(args: I.BibleUpdateInput) -> CommandResult:
     from app import api
 
-    body = dict(args.bible or {})
-    if args.expected_version is not None:
-        body = {"bible": args.bible, "expected_version": args.expected_version}
-    else:
-        body = args.bible
+    body = {
+        "bible": args.bible,
+        "expected_version": args.expected_version,
+        "confirm": bool(args.confirm),
+        "impact_preview_fingerprint": args.impact_preview_fingerprint,
+    }
     outcome = await call_guarded(api.edit_bible, args.project_id, body)
     if isinstance(outcome, CommandResult):
         return outcome
@@ -65,7 +66,12 @@ async def portrait_generate(args: I.PortraitGenerateInput) -> CommandResult:
     outcome = await call_guarded(
         api.start_refs,
         args.project_id,
-        body={"character": args.character, "resume": args.resume},
+        body={
+            "character": args.character,
+            "resume": args.resume,
+            "confirm": bool(args.confirm),
+            "quote_id": args.quote_id,
+        },
     )
     if isinstance(outcome, CommandResult):
         return outcome
@@ -88,8 +94,22 @@ async def portrait_regenerate_view(args: I.PortraitViewRegenerateInput) -> Comma
 
     outcome = await call_guarded(
         api.regenerate_character_view_route,
-        args.project_id, args.character_name, args.portrait_id, args.view_role,
+        args.project_id,
+        args.character_name,
+        args.portrait_id,
+        args.view_role,
+        body={
+            "confirm": bool(args.confirm),
+            "quote_id": args.quote_id,
+        },
     )
     if isinstance(outcome, CommandResult):
         return outcome
+    if outcome.get("status") == "accepted":
+        return accepted(
+            f"角色视角 {args.view_role} 重做任务已受理",
+            data=outcome,
+            run_id=outcome.get("run_id"),
+            resource_uris=[f"manju://runs/{outcome['run_id']}"] if outcome.get("run_id") else [],
+        )
     return succeeded(f"角色视角 {args.view_role} 已重做并通过整包 QA", data=outcome)
