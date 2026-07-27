@@ -190,6 +190,19 @@ def route(
         elif isinstance(item, dict):
             normalized.append(Issue.model_validate(item))
 
+    # Score-only：QA 类 Issue 不得驱动付费修复（PRD QA-SO #30）。
+    qa_only = [i for i in normalized if str(i.code).startswith("VIDEO_QA_")]
+    actionable = [i for i in normalized if not str(i.code).startswith("VIDEO_QA_")]
+    if not actionable:
+        return VideoRepairPlan(
+            level="L6",
+            strategy="handoff_human",
+            issue_codes=[i.code for i in qa_only],
+            reason="仅有 QA 评分问题，不自动重抽/重建；交还用户主动重做",
+            is_paid=False,
+        )
+    normalized = actionable
+
     counts = dict(fingerprint_counts or {})
     chain_position = int(getattr(entry, "chain_position", 0) or 0) if entry else 0
     codes = [i.code for i in normalized]

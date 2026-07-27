@@ -143,8 +143,6 @@ def _review_asset_qualification(conn, episode_id: str) -> dict[str, Any]:
             gate = str(ref.get("gate_status") or ref.get("downstream_eligibility") or qa.get("status") or "").lower()
             if qa.get("qa_recovered"):
                 gate = "unverified"
-            if qa.get("hard_gate_passed") is False and not hard:
-                hard = ["hard_gate_not_passed"]
             payload = {
                 "shot_id": row["shot_id"], "version_id": row["version_id"], "ref_id": ref.get("id"),
                 "entity_type": ref.get("entity_type"), "entity_name": ref.get("entity_name"),
@@ -153,16 +151,26 @@ def _review_asset_qualification(conn, episode_id: str) -> dict[str, Any]:
                 "hard_failures": hard,
             }
             if not gate:
-                gate = "unverified"
+                gate = "scored"
                 payload["gate_status"] = gate
             payload["gate_status"] = gate
             payload["soft_warnings"] = [
                 str(item) for item in (ref.get("soft_warnings") or qa.get("issues") or [])
             ]
-            qualified_inputs.append(payload)
-            if hard or gate in {"failed", "hard_failed", "unverified", "unknown", "ineligible", "pending"}:
-                payload["reason"] = "资产硬门禁未通过" if hard or gate in {"failed", "hard_failed", "ineligible"} else "资产未验证"
+            # Score-only：QA hard gate / unverified 只进 soft_warnings，不进 blockers（PRD QA-SO #32）。
+            for msg in hard:
+                warnings.append({**payload, "warning": f"qa_hard_failure:{msg}"})
+            if qa.get("hard_gate_passed") is False:
+                warnings.append({**payload, "warning": "hard_gate_not_passed_score_only"})
+            if gate in {"failed", "hard_failed", "unverified", "unknown", "ineligible", "pending"}:
+                warnings.append({**payload, "warning": f"gate_status:{gate}"})
+            # 结构缺失才阻断：无实体引用或明确标记文件缺失
+            missing_file = bool(ref.get("file_missing") or ref.get("missing"))
+            if missing_file:
+                payload["reason"] = "资产文件缺失"
                 blockers.append(payload)
+            else:
+                qualified_inputs.append(payload)
             for warning in ref.get("soft_warnings") or qa.get("issues") or []:
                 warnings.append({**payload, "warning": str(warning)})
     return {

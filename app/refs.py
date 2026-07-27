@@ -198,15 +198,13 @@ async def generate_refs(
             base_prompt = ((c.portrait_prompt_override or "").strip()
                            or portrait_prompt(style, c.appearance_canonical))
             last_error: Exception | None = None
-            critique = ""
-            for attempt in range(1, 3):
+            # Score-only：只生成一次；QA 低分不带 critique 重生（PRD QA-SO #14）。
+            for attempt in range(1, 2):
                 portrait_id: str | None = None
                 path = str(Path(ref_path(project_id, c.name)).with_name(
                     f"{_safe_name(c.name)}__{new_id('candidate')}.jpg"
                 ))
                 prompt = base_prompt
-                if critique:
-                    prompt += f"。上一版一致性检查问题：{critique}。本版必须逐条修复。"
                 try:
                     item = await hiagent.generate_image(
                         prompt,
@@ -243,17 +241,9 @@ async def generate_refs(
                         ),
                         qa=qa,
                     )
-                    if artifact["status"] != "approved":
-                        # Repair true blockers first; acting-direction issues are
-                        # soft and only reach this branch when another hard gate
-                        # (identity/technical completeness) also failed.
-                        critique_items = [
-                            *(qa.get("hard_failures") or []),
-                            *(qa.get("issues") or []),
-                        ]
-                        critique = "；".join(str(item) for item in critique_items)[:400]
+                    if artifact["status"] not in {"approved", "validated"}:
                         last_error = ContentGenerationError(
-                            f"定妆照一致性检查未通过：{c.name}（第 {attempt} 次）"
+                            f"定妆照技术校验未通过：{c.name}"
                         )
                         continue
                     portrait_id = _portraits.stage_initial_portrait(

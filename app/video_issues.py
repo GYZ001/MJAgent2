@@ -8,13 +8,13 @@ from app.harness.types import Issue, IssueSeverity
 
 DEFAULT_FATAL_FAILURE_TYPES = ("character_duplicate", "text_error")
 
-# QA / classify 失败码 → Issue code
+# QA / classify 失败码 → Issue code（Score-only：QA 一律 WARNING，不升 BLOCKER，PRD QA-SO #30）
 _QA_CODE_MAP: dict[str, tuple[str, IssueSeverity]] = {
-    "character_duplicate": ("VIDEO_QA_CHARACTER_DUPLICATE", IssueSeverity.BLOCKER),
-    "text_error": ("VIDEO_QA_TEXT_ARTIFACT", IssueSeverity.BLOCKER),
-    "state_mismatch": ("VIDEO_QA_STATE_MISMATCH", IssueSeverity.BLOCKER),
-    "story_repeat": ("VIDEO_QA_STORY_REPEAT", IssueSeverity.BLOCKER),
-    "future_leak": ("VIDEO_QA_FUTURE_LEAK", IssueSeverity.BLOCKER),
+    "character_duplicate": ("VIDEO_QA_CHARACTER_DUPLICATE", IssueSeverity.WARNING),
+    "text_error": ("VIDEO_QA_TEXT_ARTIFACT", IssueSeverity.WARNING),
+    "state_mismatch": ("VIDEO_QA_STATE_MISMATCH", IssueSeverity.WARNING),
+    "story_repeat": ("VIDEO_QA_STORY_REPEAT", IssueSeverity.WARNING),
+    "future_leak": ("VIDEO_QA_FUTURE_LEAK", IssueSeverity.WARNING),
     "wrong_dialogue": ("VIDEO_QA_WRONG_DIALOGUE", IssueSeverity.WARNING),
     "needs_crop": ("VIDEO_QA_NEEDS_CROP", IssueSeverity.WARNING),
 }
@@ -125,9 +125,9 @@ def issues_from_qa(
         out.append(_mk(
             code, sev,
             shot_id=shot_id,
-            message=f"视频 QA 硬失败：{ft}",
+            message=f"视频 QA 质量风险：{ft}",
             shot_no=shot_no, version_id=version_id, job_id=job_id, rule_id=ft,
-            repair_hint=f"按 {ft} 定向重抽",
+            repair_hint="仅评分展示；如需重做请用户主动触发",
         ))
 
     if qa.get("qa_recovered"):

@@ -303,64 +303,28 @@ def missing_required_views(views: list[dict[str, Any]], required: tuple[str, ...
 
 
 def pack_is_ready(pack_status: str | None, views: list[dict[str, Any]], required: tuple[str, ...]) -> bool:
-    if pack_status == PACK_STATUS_READY and not missing_required_views(views, required):
-        return True
-    return False
+    """结构就绪：必需视角文件齐全即可（QA 分数不参与，PRD QA-SO #16/#20）。"""
+    del pack_status
+    return not missing_required_views(views, required)
 
 
 def scene_pack_is_usable(row, views: list[dict[str, Any]]) -> bool:
-    """下游只消费新版硬门禁通过的当前场景包。"""
-    if not row or (row["pack_status"] if "pack_status" in row.keys() else None) != PACK_STATUS_READY:
+    """下游消费资格只看必需视角文件齐全（PRD QA-SO）。"""
+    if not row:
         return False
-    if missing_required_views(views, SCENE_REQUIRED_VIEWS):
-        return False
-    try:
-        group = json.loads(row["group_qa_json"] or "{}") if "group_qa_json" in row.keys() else {}
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return False
-    if group.get("hard_gate_passed") is not True or group.get("hard_failures"):
-        return False
-    return group.get("status") in {"ready", "warning"}
+    return not missing_required_views(views, SCENE_REQUIRED_VIEWS)
 
 
 def scene_primary_is_usable(row, views: list[dict[str, Any]]) -> bool:
-    """The adopted establishing image remains usable when only extra views fail.
+    """主场景图可用资格只看文件是否存在（PRD QA-SO #21）。
 
-    Pack QA controls whether reverse/action views may be consumed.  It must not
-    invalidate an otherwise usable primary image merely because those optional
-    production aids are missing, pending, or inconsistent.
+    额外视角缺失或 QA 低分不得使已有 establishing 图失效。
     """
+    del views
     if not row:
         return False
     path = row["image_path"] if "image_path" in row.keys() else None
-    if not path or not Path(path).exists():
-        return False
-
-    def _qa_dict(raw: Any) -> dict[str, Any]:
-        try:
-            return json.loads(raw or "{}") if isinstance(raw, str) else dict(raw or {})
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return {}
-
-    def _explicitly_failed(qa: dict[str, Any]) -> bool:
-        return bool(qa.get("hard_failures")) or qa.get("status") in {"failed", "hard_failed", "rejected"}
-
-    row_qa = _qa_dict(row["qa_json"] if "qa_json" in row.keys() else None)
-    if _explicitly_failed(row_qa):
-        return False
-    establishing = next(
-        (view for view in views if view.get("view_role") == "establishing" and view.get("image_path") == path),
-        None,
-    )
-    establishing_qa = _qa_dict(
-        establishing.get("qa_json") or establishing.get("qa") if establishing else None,
-    )
-    if _explicitly_failed(establishing_qa):
-        return False
-    # A visible file without any primary-image evidence may be the same image
-    # implicated by an old group hard failure.  Require at least one primary
-    # QA record before separating it from the pack result.
-    return bool(row_qa or establishing_qa)
+    return bool(path and Path(path).exists())
 
 
 # ---------- 视角选择（镜头级） ----------
@@ -1170,18 +1134,9 @@ async def review_scene_pack_consistency(views: list[dict[str, Any]], scene_canon
 
 
 def _view_passed(qa: dict[str, Any] | None) -> bool:
-    if not qa:
-        return False
-    if qa.get("hard_failures") or qa.get("hard_gate_passed") is False:
-        return False
-    if qa.get("status") in {"unverified", "failed", "rejected"} or qa.get("overall") is None:
-        return False
-    if qa.get("qa_recovered"):
-        return False
-    try:
-        return float(qa.get("overall") or 0) >= 0.6
-    except (TypeError, ValueError):
-        return False
+    """Score-only：单视图 QA 永不因低分判失败（PRD QA-SO）。缺少 QA 视为 unscored 但仍通过结构路径。"""
+    del qa
+    return True
 
 
 def _apply_pack_view_qa(
@@ -1193,7 +1148,7 @@ def _apply_pack_view_qa(
     views: list[dict[str, Any]],
     group_qa: dict[str, Any],
 ) -> list[str]:
-    """把一次整包 QA 的逐视角结果落回视角表；返回未通过的视角。"""
+    """落回整包 QA 评分；视角 ready 只看文件是否存在（PRD QA-SO #16/#20）。"""
     reported = {
         str(item.get("view_role") or ""): dict(item)
         for item in (group_qa.get("views") or []) if isinstance(item, dict)
@@ -1203,7 +1158,6 @@ def _apply_pack_view_qa(
         role = str(view.get("view_role") or "")
         qa = reported.get(role)
         if qa is None:
-            # 兼容旧测试替身和历史整包结果；真实评估器缺项会把整包标为 failed。
             qa = {
                 "view_role": role,
                 "overall": group_qa.get("overall"),
@@ -1211,7 +1165,15 @@ def _apply_pack_view_qa(
                 "hard_failures": _qa_string_list(group_qa.get("hard_failures")),
                 "status": group_qa.get("status"),
             }
-        status = "ready" if _view_passed(qa) and group_qa.get("status") in {"ready", "warning"} else "failed"
+        qa = {
+            **qa,
+            "evaluation_role": "score_only",
+            "runtime_blocking": False,
+            "retry_eligible": False,
+        }
+        path = view.get("image_path")
+        has_file = bool(path and Path(str(path)).exists())
+        status = "ready" if has_file else "failed"
         if status != "ready":
             failed.append(role)
         conn.execute(
@@ -1384,6 +1346,12 @@ async def ensure_character_multiview_pack(
     views = list_portrait_views(portrait_id, conn=conn)
     required_views = [v for v in views if v.get("view_role") in CHARACTER_REQUIRED_VIEWS]
     group_qa = await review_character_pack_consistency(required_views, appearance)
+    group_qa = {
+        **group_qa,
+        "evaluation_role": "score_only",
+        "runtime_blocking": False,
+        "retry_eligible": False,
+    }
     failed_roles = _apply_pack_view_qa(
         conn,
         table="character_portrait_views",
@@ -1392,7 +1360,8 @@ async def ensure_character_multiview_pack(
         views=required_views,
         group_qa=group_qa,
     )
-    if group_qa.get("status") not in {"ready", "warning"} or failed_roles:
+    # 仅结构缺失可失败；QA 低分/hard_failures 不阻断整包生效。
+    if failed_roles:
         _set_portrait_pack_fields(
             conn, portrait_id, pack_status=PACK_STATUS_FAILED,
             group_qa_json=json.dumps(group_qa, ensure_ascii=False),
@@ -1618,8 +1587,9 @@ async def ensure_scene_multiview_pack(
             single_failed.append(view["view_role"])
     if single_failed:
         group_qa = {
-            "status": "failed", "hard_failures": [f"{role} 单图纯净度硬门禁未通过" for role in single_failed],
+            "status": "failed", "hard_failures": [f"{role} 文件不可用" for role in single_failed],
             "failed_views": single_failed, "required_views": list(required_roles),
+            "evaluation_role": "score_only", "runtime_blocking": False,
         }
         _set_scene_pack_fields(conn, scene_reference_id, pack_status=PACK_STATUS_FAILED,
                                group_qa_json=json.dumps(group_qa, ensure_ascii=False))
@@ -1627,6 +1597,12 @@ async def ensure_scene_multiview_pack(
         return {"status": "failed", "scene_reference_id": scene_reference_id, "group_qa": group_qa, "failed_views": single_failed}
     conn.commit()
     group_qa = await review_scene_pack_consistency(required_views, scene_canonical)
+    group_qa = {
+        **group_qa,
+        "evaluation_role": "score_only",
+        "runtime_blocking": False,
+        "retry_eligible": False,
+    }
     failed_roles = _apply_pack_view_qa(
         conn,
         table="scene_reference_views",
@@ -1635,7 +1611,8 @@ async def ensure_scene_multiview_pack(
         views=required_views,
         group_qa=group_qa,
     )
-    if group_qa.get("status") not in {"ready", "warning"} or failed_roles:
+    # 仅结构缺失可失败；QA 分数不阻断场景整包。
+    if failed_roles:
         _set_scene_pack_fields(
             conn, scene_reference_id, pack_status=PACK_STATUS_FAILED,
             group_qa_json=json.dumps(group_qa, ensure_ascii=False),
@@ -1743,32 +1720,8 @@ def compute_weighted_overall(scores: dict[str, Any], weights: dict[str, float]) 
 
 
 def keyframe_gate_passed(qa: dict[str, Any]) -> bool:
-    if qa.get("status") == "unverified" or qa.get("overall") is None:
-        return False
-    if qa.get("qa_recovered"):
-        return False
-    hard = {str(x).strip() for x in (qa.get("hard_failures") or []) if str(x).strip()}
-    if hard & KEYFRAME_HARD_FAILURES:
-        return False
-    overall_thr = float_setting("keyframe_qa_overall_threshold", 0.80)
-    action_thr = float_setting("keyframe_qa_action_threshold", 0.70)
-    body_thr = float_setting("keyframe_qa_body_threshold", 0.72)
-    id_thr = float_setting("keyframe_qa_identity_threshold", 0.75)
-    try:
-        if float(qa.get("overall") or 0) < overall_thr:
-            return False
-        if float(qa.get("action_match") or 0) < action_thr:
-            return False
-        if float(qa.get("body_proportion") or 0) < body_thr:
-            return False
-        for key in ("face_identity", "outfit_match", "hair_match"):
-            val = qa.get(key)
-            if val is None or (isinstance(val, str) and val.upper() in {"N/A", "NA"}):
-                continue
-            if float(val) < id_thr:
-                return False
-    except (TypeError, ValueError):
-        return False
+    """Score-only：关键帧 QA 阈值不再决定能否作为视频输入（PRD QA-SO #23）。"""
+    del qa
     return True
 
 
@@ -2225,10 +2178,16 @@ async def regenerate_character_view(
     )
     await _save_image_item(item, path)
     qa = await review_character_view(path, appearance, view_role)
-    status = "ready" if _view_passed(qa) else ("unverified" if qa.get("status") == "unverified" else "failed")
-    if status != "ready":
-        _discard_rejected_candidate(path)
+    qa = {
+        **qa,
+        "evaluation_role": "score_only",
+        "runtime_blocking": False,
+        "retry_eligible": False,
+    }
+    # Score-only：技术有效图即可替换；QA 低分不丢弃候选（PRD QA-SO #17）。
+    if not Path(path).exists():
         return {"status": "failed", "view_role": view_role, "qa": qa, "preserved_previous": True}
+    status = "ready"
 
     candidate = dict(existing.get(view_role) or {})
     candidate.update({
@@ -2249,12 +2208,12 @@ async def regenerate_character_view(
         }
 
     group_qa = await review_character_pack_consistency(required, appearance)
-    if group_qa.get("status") not in {"ready", "warning"}:
-        _discard_rejected_candidate(path)
-        return {
-            "status": "failed", "view_role": view_role, "group_qa": group_qa,
-            "preserved_previous": True,
-        }
+    group_qa = {
+        **group_qa,
+        "evaluation_role": "score_only",
+        "runtime_blocking": False,
+        "retry_eligible": False,
+    }
 
     view_id = _upsert_character_view(
         conn, portrait_id=portrait_id, view_role=view_role,
@@ -2315,10 +2274,16 @@ async def regenerate_scene_view(
     )
     await _save_image_item(item, path)
     qa = await review_scene_view(path, canonical, view_role)
-    status = "ready" if _view_passed(qa) else ("unverified" if qa.get("status") == "unverified" else "failed")
-    if status != "ready":
-        _discard_rejected_candidate(path)
+    qa = {
+        **qa,
+        "evaluation_role": "score_only",
+        "runtime_blocking": False,
+        "retry_eligible": False,
+    }
+    # Score-only：技术有效图即可替换；QA 低分不丢弃候选（PRD QA-SO #17/#21）。
+    if not Path(path).exists():
         return {"status": "failed", "view_role": view_role, "qa": qa, "preserved_previous": True}
+    status = "ready"
 
     candidate = dict(existing.get(view_role) or {})
     candidate.update({
@@ -2347,12 +2312,12 @@ async def regenerate_scene_view(
         }
 
     group_qa = await review_scene_pack_consistency(required, canonical)
-    if group_qa.get("status") not in {"ready", "warning"}:
-        _discard_rejected_candidate(path)
-        return {
-            "status": "failed", "view_role": view_role, "group_qa": group_qa,
-            "preserved_previous": True,
-        }
+    group_qa = {
+        **group_qa,
+        "evaluation_role": "score_only",
+        "runtime_blocking": False,
+        "retry_eligible": False,
+    }
 
     view_id = _upsert_scene_view(
         conn, scene_reference_id=scene_reference_id, view_role=view_role,

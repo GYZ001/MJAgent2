@@ -153,7 +153,7 @@ def test_gap_scan_ignores_optional_views_when_primary_is_video_usable(tmp_path, 
     assert result["counts"]["warning"] == 0
 
 
-def test_manual_adoption_cannot_override_explicit_scene_hard_failure(tmp_path, monkeypatch) -> None:
+def test_manual_adoption_allows_explicit_scene_hard_failure_as_score_only(tmp_path, monkeypatch) -> None:
     conn = _fresh_db(tmp_path, monkeypatch)
     _seed_project(conn)
     image = tmp_path / "watermarked.jpg"
@@ -173,9 +173,11 @@ def test_manual_adoption_cannot_override_explicit_scene_hard_failure(tmp_path, m
     ))
     from app.scenes import adopt_scene_candidate
 
-    with pytest.raises(ValueError, match="硬门禁失败"):
-        asyncio.run(adopt_scene_candidate("p", "萧炎卧室", artifact["id"], reason="强行采用"))
-    assert conn.execute("SELECT COUNT(*) n FROM scene_references").fetchone()["n"] == 0
+    # Score-only：硬门禁失败仅作警告；填写理由后仍可采纳。
+    result = asyncio.run(adopt_scene_candidate("p", "萧炎卧室", artifact["id"], reason="强行采用"))
+    assert result.get("adopted") is True or conn.execute(
+        "SELECT COUNT(*) n FROM scene_references"
+    ).fetchone()["n"] >= 1
 
 
 def _seed_ready_scene_pack(conn, tmp_path):
@@ -277,22 +279,23 @@ def _strict_candidate(tmp_path):
     return artifact, str(image)
 
 
-def test_candidate_pack_failure_preserves_current_atomically(tmp_path, monkeypatch) -> None:
+def test_candidate_pack_qa_failure_still_adopts_when_files_ready(tmp_path, monkeypatch) -> None:
     conn = _fresh_db(tmp_path, monkeypatch); _seed_project(conn)
     old_path = _seed_ready_scene_pack(conn, tmp_path)
-    artifact, _ = _strict_candidate(tmp_path)
+    artifact, candidate_path = _strict_candidate(tmp_path)
 
     async def failed_group(*_args, **_kwargs):
         return {"status": "failed", "hard_gate_passed": False, "hard_failures": ["对向轴线错误"]}
 
     monkeypatch.setattr("app.multiview.review_scene_pack_consistency", failed_group)
     from app.scenes import adopt_scene_candidate
-    with pytest.raises(ValueError, match="当前采用包已保留"):
-        asyncio.run(adopt_scene_candidate("p", "萧炎卧室", artifact["id"], reason="测试"))
+    result = asyncio.run(adopt_scene_candidate("p", "萧炎卧室", artifact["id"], reason="测试"))
+    assert result["adopted"] is True
     current = conn.execute("SELECT * FROM scene_references WHERE ep_end IS NULL").fetchone()
-    assert current["id"] == "current"
-    assert current["image_path"] == old_path
-    assert conn.execute("SELECT COUNT(*) n FROM scene_references").fetchone()["n"] == 1
+    assert current["image_path"] == candidate_path
+    assert current["image_path"] != old_path
+    history = conn.execute("SELECT * FROM scene_references WHERE ep_end=0").fetchone()
+    assert history is not None
 
 
 def test_candidate_pack_success_preserves_rollback_history(tmp_path, monkeypatch) -> None:

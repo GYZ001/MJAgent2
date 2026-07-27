@@ -1244,8 +1244,8 @@ async def _generate_discovered_character_portrait(
 ) -> dict:
     """为后续剧情自动发现的角色生成并原子接入定妆包。
 
-    候选主图先过单图 QA，再生成必需多视角并过整包 QA；任一环节失败都不会
-    留下可被下游选中的半包。新包从首次出场集开始生效，不污染更早剧集。
+    Score-only（PRD QA-SO #15）：第一张技术有效主图即可接入；QA 只评分，
+    不因低分重生。多视角包完整性只看必需视角文件是否齐全。
     """
     conn = get_conn()
     current = _open_portrait(conn, project_id, name)
@@ -1269,15 +1269,10 @@ async def _generate_discovered_character_portrait(
 
     artifact = None
     qa = None
-    image_path = ""
-    prompt = ""
-    attempts = 2 if artifact_supported else 1
-    for attempt in range(1, attempts + 1):
-        image_path, prompt = await _generate_fresh_portrait(
-            project_id, name, style, appearance, ep_start=ep_start,
-        )
-        if not artifact_supported:
-            break
+    image_path, prompt = await _generate_fresh_portrait(
+        project_id, name, style, appearance, ep_start=ep_start,
+    )
+    if artifact_supported:
         qa = await _review_portrait_asset(image_path, appearance)
         artifact = record_reference_asset(
             asset_type="character_portrait",
@@ -1288,16 +1283,14 @@ async def _generate_discovered_character_portrait(
                 "appearance": appearance,
                 "prompt": prompt,
                 "episode_start": ep_start,
-                "attempt": attempt,
+                "attempt": 1,
                 "origin": "automatic_character_discovery",
             },
             parent_artifact_ids=parent_ids,
             qa=qa,
         )
-        if artifact["status"] == "approved":
-            break
-    if artifact_supported and (not artifact or artifact["status"] != "approved"):
-        raise hiagent.ProviderError(f"新角色定妆照 QA 未通过：{name}")
+        if artifact["status"] not in {"approved", "validated"}:
+            raise hiagent.ProviderError(f"新角色定妆照技术校验未通过：{name}")
 
     portrait_id = new_id("portrait")
     values = {

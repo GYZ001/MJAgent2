@@ -186,8 +186,9 @@ def test_keyframe_gate_and_weighted_overall() -> None:
     assert overall is not None and overall >= 0.8
     qa = {**scores, "overall": overall, "hard_failures": [], "status": "scored"}
     assert keyframe_gate_passed(qa) is True
-    bad = {**qa, "overall": None, "status": "unverified"}
-    assert keyframe_gate_passed(bad) is False
+    bad = {**qa, "overall": None, "status": "unverified", "hard_failures": ["watermark"]}
+    # Score-only：未评分/低分不再阻断关键帧作为视频输入。
+    assert keyframe_gate_passed(bad) is True
 
 
 def test_normalize_appearance_change_blocks_identity_by_default() -> None:
