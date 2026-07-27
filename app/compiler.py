@@ -287,6 +287,80 @@ def _framing_scale_hint(shot_size: str) -> str:
     return ""
 
 
+# 接触类动作：人物与人物/道具发生真实肢体接触或近距交递，侧面机位最易读清接触点。
+_CONTACT_ACTION_MARKERS = (
+    "触碰", "触摸", "抚摸", "按压", "按住", "按下", "按上", "贴上", "贴住", "贴紧",
+    "拿取", "拿起", "握住", "抓住", "抓牢", "递出", "递给", "递过", "接过", "接住",
+    "挥击", "挥砍", "击打", "击中", "格挡", "挡住", "搀扶", "扶住", "扶着", "搀着",
+    "拍打", "拍肩", "拍了", "推开", "推住", "拉住", "拉着", "拖住", "抱住", "抱紧",
+    "搂住", "握手", "搭手", "搭肩", "抵住", "顶住", "压住", "捂住", "托住", "托着",
+    "拔出", "插入", "刺向", "砍向", "捅向", "碰到", "摸到", "摸着", "摸上",
+)
+_SIDE_VIEW_MARKERS = ("侧面", "侧视", "侧拍", "侧机位", "侧身机位", "侧面机位", "侧面视角")
+_HEIGHT_DIFF_MARKERS = (
+    "身高差", "一高一低", "高他一头", "高她一头", "高出一头", "矮半头", "矮一头",
+    "明显更高", "明显更矮", "比.*高", "比.*矮", "仰头看", "仰视对方", "俯视对方",
+    "俯身看", "巨汉", "娇小", "矮小", "孩童", "幼童", "小孩", "儿童", "孩子气身材",
+)
+_HEIGHT_DIFF_RE = re.compile("|".join(_HEIGHT_DIFF_MARKERS))
+
+
+def _shot_visual_text(shot: Shot) -> str:
+    """汇总本镜可用于检测接触/身高差的视觉描述文本。"""
+    parts = [
+        shot.primary_action or "",
+        shot.action_desc or "",
+        shot.state_in or "",
+        shot.state_out or "",
+        shot.first_frame_desc or "",
+        shot.last_frame_desc or "",
+        shot.spatial_anchor or "",
+    ]
+    return "。".join(p.strip() for p in parts if p and p.strip())
+
+
+def has_contact_action(shot: Shot) -> bool:
+    """本镜主动作是否含人物与人物/道具的真实接触互动。"""
+    text = _shot_visual_text(shot)
+    return any(m in text for m in _CONTACT_ACTION_MARKERS)
+
+
+def has_explicit_height_difference(shot: Shot, bible: Bible | None = None) -> bool:
+    """提示词/外观锚点是否已明确写出身高差（有则不强行同身高）。"""
+    chunks = [_shot_visual_text(shot)]
+    if bible is not None:
+        bible_map = {c.name: c for c in bible.characters}
+        for name in shot.characters or []:
+            ch = bible_map.get(name)
+            if ch and (ch.appearance_canonical or "").strip():
+                chunks.append(ch.appearance_canonical)
+    text = "。".join(chunks)
+    return bool(_HEIGHT_DIFF_RE.search(text))
+
+
+def _resolve_camera_angle(shot: Shot) -> str:
+    """接触类动作默认侧面视角；已显式侧面则保留，非接触沿用原机位角。"""
+    current = (shot.camera_angle or "").strip()
+    if has_contact_action(shot):
+        if current and any(m in current for m in _SIDE_VIEW_MARKERS):
+            return current
+        # 接触动作：强制侧面，便于看清肢体与接触点；覆盖空值/平视等正面默认
+        return "侧面"
+    return current or "平视"
+
+
+def _equal_height_hint(shot: Shot, bible: Bible | None = None) -> str:
+    """多人物同框：无明示身高差时锁定站立同高/齐眼线，避免随机一高一低。"""
+    if len(shot.characters or []) < 2:
+        return ""
+    if has_explicit_height_difference(shot, bible):
+        return ""
+    return (
+        "同框人物站立身高与眼线尽量齐平、体型尺度协调一致；"
+        "除非剧情已写明身高差，禁止把角色画成随意一高一低"
+    )
+
+
 
 def _compile_text_policy(shot: Shot) -> str:
     required = getattr(shot, "required_text", None)
@@ -365,7 +439,8 @@ def _compile_reference_roles(shot: Shot, *, continuity_mode: str, with_refs: boo
 
 
 def _compile_negative_constraints(shot: Shot, extra_negative: list[str] | None,
-                                  continuity_mode: str) -> str:
+                                  continuity_mode: str, *,
+                                  bible: Bible | None = None) -> str:
     from app.continuity import effective_characters_visible, uses_previous_tail_frame
     parts = [
         "不要重演前序剧情",
@@ -392,6 +467,10 @@ def _compile_negative_constraints(shot: Shot, extra_negative: list[str] | None,
         parts.append(f"画面可见角色仅限：{'、'.join(visible)}")
     if not uses_previous_tail_frame(continuity_mode):
         parts.append("不要沿用上一镜完整构图或主体尾帧姿势")
+    if has_contact_action(shot):
+        parts.append("接触动作禁止正面摆拍、禁止手悬空未触及目标")
+    if len(shot.characters or []) >= 2 and not has_explicit_height_difference(shot, bible):
+        parts.append("禁止同框人物随意一高一低或眼线错位")
     if extra_negative:
         parts.extend(x.strip() for x in extra_negative if x and x.strip())
     # 保留关键安全负面词（精简，避免与条件文字策略冲突）
@@ -468,10 +547,18 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
 
     style = (visual_style or bible.world.visual_style_canonical or "写实国风玄幻动画").strip()
     scale_hint = _framing_scale_hint(shot.shot_size)
+    camera_angle = _resolve_camera_angle(shot)
+    # 回写解析后的机位角，便于下游审计/重试与关键帧对齐
+    shot.camera_angle = camera_angle
     camera_line = (
-        f"{shot.shot_size}；{(shot.camera_angle or '平视').strip()}；{shot.camera_move}"
+        f"{shot.shot_size}；{camera_angle}；{shot.camera_move}"
         + (f"。{scale_hint}" if scale_hint else "")
     )
+    if has_contact_action(shot):
+        camera_line += (
+            "。接触类动作必须侧面机位拍摄，清楚展现肢体与接触点、人物与对象的空间关系，"
+            "禁止正面端站摆拍"
+        )
     spatial = (shot.spatial_anchor or shot.scene_setting or "").strip()
     if spatial:
         camera_line += f"。保持空间轴线和人物方位：{spatial}"
@@ -488,6 +575,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     prop_anchor = ""
     if shot.required_text and (shot.required_text.surface or "").strip():
         prop_anchor = f"文字承载面：{shot.required_text.surface.strip()}"
+    height_hint = _equal_height_hint(shot, bible)
 
     # 转场：仅描述本镜可完成的视觉出口/入口，不注入下一镜详细剧情
     transition_bits: list[str] = []
@@ -533,9 +621,11 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
 
     audio_block = _compile_audio_timeline(shot, voice_bible)
     text_block = _compile_text_policy(shot)
-    consistency_parts = [character_anchor, scene_anchor, prop_anchor, f"全片统一画风：{style}"]
+    consistency_parts = [
+        character_anchor, scene_anchor, prop_anchor, height_hint, f"全片统一画风：{style}",
+    ]
     consistency_block = "\n".join(p for p in consistency_parts if p)
-    negative_block = _compile_negative_constraints(shot, extra_negative, mode)
+    negative_block = _compile_negative_constraints(shot, extra_negative, mode, bible=bible)
     if critique:
         negative_block += "；上一版必须改正：" + "；".join(
             c.strip() for c in critique[:6] if c and c.strip()
@@ -577,7 +667,10 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         ),
         "FORMAT": f"生成 {shot_dur} 秒、{aspect_ratio}、{style} 完整可直接采用视频；禁止后期。",
         "DO NOT": "；".join(negative_block.split("；")[:6]),
-        "CAMERA": f"{shot.shot_size}；{shot.camera_move}",
+        "CAMERA": (
+            f"{shot.shot_size}；{camera_angle}；{shot.camera_move}"
+            + ("；接触动作侧面机位" if has_contact_action(shot) else "")
+        ),
     }
     for priority in (5, 4, 3):
         if fits(text):
@@ -635,13 +728,21 @@ SCENE_QUALITY = (
     "竖屏 9:16 单帧定格画面，构图完整，人物五官清晰稳定、表情自然，手部与所持道具关系正常稳定，"
     "光影与色调统一，电影质感，高清")
 # 角色不漂移 + 同镜两帧同机位 + 特效克制（与视频侧一致，三者是 5~10s 成片稳定的关键）
-SCENE_CONSISTENCY = "人物形象严格遵循上方角色锚点串与参考图：同一张脸、同一发型、同一服装、同一年龄与体型，跨镜不漂移"
+SCENE_CONSISTENCY = (
+    "人物形象严格遵循上方角色锚点串与参考图：同一张脸、同一发型、同一服装、同一年龄与体型，跨镜不漂移；"
+    "同框多人物默认站立身高与眼线齐平、体型尺度协调，除非画面描述已写明身高差，禁止随意一高一低"
+)
 SCENE_SAME_FRAMING = "本帧与本镜另一张关键帧（首图/尾图）保持同一机位、同一构图、同一场景布置与光线方向，只有人物动作所处的瞬间不同，不要换机位或重新构图"
 # 动作/互动保真：把"摸石碑"画成"正面端站、手悬空、与石碑互不相干"是当前关键帧最常见的失真。
 SCENE_ACTION_FIDELITY = (
     "严格按上方画面描述还原人物的动作与朝向：若描述中人物在触碰/按压/拿取/递出/挥击/指向/注视/搀扶某个对象或另一个人，"
     "必须画出明确的接触或明确朝向该对象——人物的身体、肩线、面部与视线随动作转向目标，手部真实搭在/握住/伸向目标，"
-    "人物与对象形成清晰可读的互动关系；切勿把有互动的动作画成正面端站、双手垂放、目视镜头、与对象彼此无关的摆拍站姿")
+    "人物与对象形成清晰可读的互动关系；切勿把有互动的动作画成正面端站、双手垂放、目视镜头、与对象彼此无关的摆拍站姿；"
+    "接触类动作优先侧面构图，清楚展现接触点与双方相对方位"
+)
+SCENE_CONTACT_SIDE_VIEW = (
+    "本帧含接触类动作：采用侧面视角构图，清楚展现肢体接触点与人物/对象的空间关系，禁止正面摆拍"
+)
 SCENE_EFFECT_RESTRAINT = "光效/特效服从剧情：日常场景克制写实、不要满屏光效或能量粒子，仅在情绪高潮或力量爆发瞬间才用强特效且不遮挡面部表情"
 
 
@@ -694,10 +795,11 @@ def compile_scene_prompt(shot: Shot, bible: Bible, *, kind: str = "tail",
         f"场景：{scene_hint}" if scene_hint else "",
         frame_desc,
         SCENE_ACTION_FIDELITY if anchors else "",
+        SCENE_CONTACT_SIDE_VIEW if has_contact_action(shot) else "",
         SCENE_SAME_FRAMING,
         SCENE_EFFECT_RESTRAINT,
         transition_frame_hint,
-        f"景别：{shot.shot_size}",
+        f"景别：{shot.shot_size}" + ("；机位：侧面" if has_contact_action(shot) else ""),
         SCENE_QUALITY,
         SCENE_NEGATIVE,
     ]
