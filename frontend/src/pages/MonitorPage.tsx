@@ -2055,7 +2055,7 @@ function ModelCenter({
                   try {
                     await api.put(
                       `/models/${encodeURIComponent(credential.id)}/credentials`,
-                      credentialDraft,
+                      { ...credentialDraft, confirm: true },
                     );
                     await refreshCatalog();
                     setCredential(null);

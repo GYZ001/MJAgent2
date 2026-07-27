@@ -94,6 +94,30 @@ def require_local_session(
     return token or ""
 
 
+def _is_loopback_host(host: str | None) -> bool:
+    if not host:
+        return False
+    hostname = host.split(":", 1)[0].strip().lower()
+    return hostname in {"localhost", "127.0.0.1", "::1"}
+
+
+def assert_session_bootstrap_allowed(request: Request) -> None:
+    """``GET /api/session`` 无鉴权，必须限制在本机开发 Origin / loopback。"""
+    origin = (request.headers.get("origin") or "").strip()
+    if origin:
+        if origin not in _DEFAULT_ORIGINS:
+            raise HTTPException(403, "不允许的 Origin")
+        return
+    host = (request.headers.get("host") or "").strip()
+    if _is_loopback_host(host):
+        return
+    client_host = request.client.host if request.client else None
+    if client_host in {"127.0.0.1", "::1", "localhost", "testclient"}:
+        # testclient：Starlette TestClient 本机回环；生产反向代理不应伪造为 testclient。
+        return
+    raise HTTPException(403, "会话领取仅允许本机 Host")
+
+
 def public_session_payload() -> dict[str, str]:
     return {"session_token": ensure_session_secret(), "header": "X-Manju-Session"}
 

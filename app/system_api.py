@@ -548,6 +548,8 @@ def put_model_credentials(model_id: str, body: dict):
     item = next((m for m in _model_catalog() if m.get("id") == model_id), None)
     if not item:
         raise HTTPException(404, "模型不存在")
+    if body.get("confirm") is not True:
+        raise HTTPException(422, "写入模型凭证需 confirm=true 二次确认")
     base_url = str(body.get("base_url") or "").strip().rstrip("/")
     api_key = str(body.get("api_key") or "").strip()
     if not re.fullmatch(r"https?://[^\s]+", base_url):
@@ -1409,9 +1411,12 @@ def get_keys():
 def put_keys(body: dict):
     """保存 API Key 到 .env 并热更新运行时变量。
 
-    body 格式：{"hiagent": "sk-xxx", "openrouter": "sk-or-v1-xxx", "bailian": "sk-xxx", "deepseek": "sk-xxx"}
+    body 格式：{"confirm": true, "hiagent": "sk-xxx", ...}
     前端传 provider 名（小写），后端映射到对应的环境变量名。
+    写入需 ``confirm=true`` 二次确认（Todolist T2）。
     """
+    if body.get("confirm") is not True:
+        raise HTTPException(422, "写入 API Key 需 confirm=true 二次确认")
     provider_to_key = {
         "hiagent": "HIAGENT_API_KEY",
         "openrouter": "OPENROUTER_API_KEY",
@@ -1422,6 +1427,8 @@ def put_keys(body: dict):
     env_keys: dict[str, str] = {}
     for provider, value in body.items():
         p = str(provider).strip().lower()
+        if p == "confirm":
+            continue
         if p not in provider_to_key:
             raise HTTPException(422, f"不支持的 provider：{p}，可选：{', '.join(provider_to_key)}")
         env_keys[provider_to_key[p]] = str(value).strip()

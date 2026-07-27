@@ -90,8 +90,11 @@ async def _inject_session_and_approval(request: Request, call_next):
 
 
 @app.get("/api/session")
-def get_local_session():
-    """本机前端领取会话秘密（无鉴权；领取后其余 /api/* 均需携带）。"""
+def get_local_session(request: Request):
+    """本机前端领取会话秘密（无鉴权；仅本机 Origin/Host 可领取）。"""
+    from app.local_session import assert_session_bootstrap_allowed
+
+    assert_session_bootstrap_allowed(request)
     return public_session_payload()
 
 

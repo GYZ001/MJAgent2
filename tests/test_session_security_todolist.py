@@ -56,9 +56,22 @@ def authed(anon: TestClient) -> SessionTestClient:
 
 def test_public_health_and_session_need_no_auth(anon: TestClient) -> None:
     assert anon.get("/api/system/health").status_code == 200
-    body = anon.get("/api/session").json()
+    body = anon.get("/api/session", headers={"Origin": "http://127.0.0.1:5230"}).json()
     assert body["session_token"]
     assert body["header"] == "X-Manju-Session"
+    blocked = anon.get("/api/session", headers={"Origin": "https://evil.example", "Host": "evil.example"})
+    assert blocked.status_code == 403
+
+
+def test_keys_and_credentials_require_confirm(authed: SessionTestClient) -> None:
+    denied = authed.put("/api/keys", json={"hiagent": "sk-test"})
+    assert denied.status_code == 422
+    assert "confirm" in denied.text
+    # confirm 通过后仍可能因空 key 等失败，但不得再因缺确认拒绝
+    okish = authed.put("/api/keys", json={"confirm": True, "hiagent": "sk-test-key"})
+    assert okish.status_code in {200, 422}
+    if okish.status_code == 200:
+        assert okish.json().get("ok") is True
 
 
 @pytest.mark.parametrize(

@@ -44,6 +44,9 @@ async def dispatch(
     """执行一次领域命令。任何 initiator 都不会自动批准。"""
     del initiator  # 保留参数以兼容旧调用方；策略已统一。
     ensure_catalog_loaded()
+    if session_id is None:
+        from app.local_session import get_request_session_id
+        session_id = get_request_session_id()
     bus = get_command_bus()
     return await bus.execute_async(name, args, session_id=session_id)
 
