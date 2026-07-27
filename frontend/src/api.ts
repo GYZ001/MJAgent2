@@ -195,12 +195,44 @@ export const api = {
     expected_version?: number | null
   }) =>
     request('POST', `/projects/${projectId}/bible/impact-preview`, body) as Promise<BibleImpactPreview>,
+  bibleGeneratePrecheck: (projectId: string) =>
+    request('POST', `/projects/${projectId}/bible/generate-precheck`) as Promise<RefsCostPrecheck & {
+      estimated_duration_min?: number[]
+      estimate_note?: string
+      character_names?: string[]
+    }>,
   refsPrecheck: (projectId: string, body?: {
     character?: string
     resume?: boolean
     view_role?: string
   }) =>
     request('POST', `/projects/${projectId}/refs/precheck`, body || {}) as Promise<RefsCostPrecheck>,
+  refsGaps: (projectId: string) =>
+    request('GET', `/projects/${projectId}/refs/gaps`) as Promise<{
+      missing_count: number
+      image_count: number
+      items: Array<Record<string, unknown>>
+      precheck: RefsCostPrecheck
+    }>,
+  refsProgress: (projectId: string) =>
+    request('GET', `/projects/${projectId}/refs/progress`) as Promise<{
+      total: number; ready: number; failed: number; missing: number
+      refs_status?: string; refs_target?: string | null
+      items: Array<{ character: string; status: string; missing_views?: string[]; current?: boolean; pack_status?: string }>
+      updated_at?: number
+    }>,
+  saveBibleDraft: (projectId: string, body: { bible: unknown; expected_version?: number | null }) =>
+    request('POST', `/projects/${projectId}/bible/draft`, body),
+  getBibleDraft: (projectId: string) =>
+    request('GET', `/projects/${projectId}/bible/draft`) as Promise<{
+      draft: unknown; updated_at?: number | null; bible_version: number
+    }>,
+  listAutoChanges: (projectId: string) =>
+    request('GET', `/projects/${projectId}/auto-changes`) as Promise<{ items: AutoChangeItem[] }>,
+  decideAutoChange: (projectId: string, changeId: string, decision: string, reason?: string) =>
+    request('POST', `/projects/${projectId}/auto-changes/${encodeURIComponent(changeId)}/decide`, {
+      decision, reason,
+    }),
   staleAssetsPreview: (episodeId: string) =>
     request('GET', `/episodes/${episodeId}/stale-assets-preview`) as Promise<{
       episode_id: string
@@ -212,6 +244,21 @@ export const api = {
       confirm: true,
       shot_ids: shotIds,
     }),
+}
+
+export interface AutoChangeItem {
+  id: string
+  kind?: string
+  status?: string
+  character?: string
+  ep_start?: number
+  reason?: string | null
+  change_dimensions?: string[]
+  persistence?: string
+  pack_status?: string
+  created_at?: number
+  source?: string
+  decision_reason?: string
 }
 
 export interface BibleImpactPreview {

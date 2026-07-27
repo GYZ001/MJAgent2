@@ -807,6 +807,299 @@ async def refs_cost_precheck(project_id: str, body: dict | None = None):
     )
 
 
+@router.post("/projects/{project_id}/bible/generate-precheck")
+async def bible_generate_precheck(project_id: str):
+    """首次生成人物谱+定妆的费用与范围预估（只读）。"""
+    from app.config import IMAGE_PRICE_PER_UNIT
+    from app.multiview import CHARACTER_REQUIRED_VIEWS
+
+    p = _project_or_404(project_id)
+    unit = float(IMAGE_PRICE_PER_UNIT)
+    views_per = len(CHARACTER_REQUIRED_VIEWS)
+    # 初始谱写合同上限 8 角色；若已有 bible 则用真实角色数
+    if p.get("bible_json"):
+        bible = json.loads(p["bible_json"])
+        chars = bible.get("characters") or []
+        char_count = len(chars)
+        names = [c.get("name") for c in chars if c.get("name")]
+        estimate_note = "基于当前人物谱角色数"
+    else:
+        char_count = 8
+        names = []
+        estimate_note = "尚无人物谱，按初始上限 8 角色估算；谱写完成后按真实角色数出图"
+    image_count = char_count * views_per
+    estimated = round(image_count * unit, 2)
+    max_retry = round(estimated * 1.5, 2)
+    computed_at = now()
+    quote_id = fingerprint({
+        "project_id": project_id,
+        "action": "generate_bible_and_refs",
+        "character_count": char_count,
+        "image_count": image_count,
+        "unit": unit,
+        "bible_version": p.get("bible_version"),
+    })
+    return {
+        "quote_id": quote_id,
+        "computed_at": computed_at,
+        "quote_expires_at": computed_at + 300,
+        "project_id": project_id,
+        "action": "generate_bible_and_refs",
+        "character_count": char_count,
+        "character_names": names,
+        "views_per_character": views_per,
+        "image_count": image_count,
+        "unit_price_cny": unit,
+        "estimated_cost_cny": estimated,
+        "max_retry_budget_cny": max_retry,
+        "budget_cap_cny": max_retry,
+        "estimated_duration_min": [max(3, char_count), max(8, char_count * 3)],
+        "estimate_note": estimate_note,
+        "old_asset_policy": "停止后保留已落盘成品；未开始项可稍后补齐",
+        "stop_policy": "可按阶段停止谱写或定妆；已扣费步骤不退款",
+        "scope": [
+            {"character": n or f"角色{i+1}", "views": list(CHARACTER_REQUIRED_VIEWS), "reason": "首次/重生"}
+            for i, n in enumerate(names or [None] * char_count)
+        ],
+    }
+
+
+@router.get("/projects/{project_id}/refs/gaps")
+async def refs_gaps(project_id: str):
+    """扫描定妆缺口：按角色/视角列出缺失原因。"""
+    quote = compute_refs_cost_precheck(project_id, resume=True)
+    return {
+        "project_id": project_id,
+        "missing_count": len(quote.get("scope") or []),
+        "image_count": quote.get("image_count"),
+        "items": quote.get("scope") or [],
+        "precheck": quote,
+    }
+
+
+@router.get("/projects/{project_id}/refs/progress")
+async def refs_progress(project_id: str):
+    """定妆细粒度进度：完成/当前/缺失/失败分项。"""
+    from app.multiview import CHARACTER_REQUIRED_VIEWS
+
+    p = _project_or_404(project_id)
+    if not p.get("bible_json"):
+        return {"project_id": project_id, "total": 0, "ready": 0, "failed": 0, "missing": 0, "items": []}
+    bible = json.loads(p["bible_json"])
+    conn = get_conn()
+    items = []
+    ready = failed = missing = 0
+    for c in bible.get("characters") or []:
+        name = c.get("name")
+        row = conn.execute(
+            """SELECT id, pack_status FROM character_portraits
+               WHERE project_id=? AND character_name=? AND ep_end IS NULL
+               ORDER BY ep_start DESC LIMIT 1""",
+            (project_id, name),
+        ).fetchone()
+        if not row:
+            missing += 1
+            items.append({"character": name, "status": "missing", "missing_views": list(CHARACTER_REQUIRED_VIEWS)})
+            continue
+        views = conn.execute(
+            "SELECT view_role, status FROM character_portrait_views WHERE portrait_id=?",
+            (row["id"],),
+        ).fetchall()
+        have = {v["view_role"] for v in views if v["status"] == "ready"}
+        need = [r for r in CHARACTER_REQUIRED_VIEWS if r not in have]
+        pack = row["pack_status"] or "unknown"
+        if pack == "ready" and not need:
+            ready += 1
+            status = "ready"
+        elif pack == "failed" or need:
+            if pack == "failed":
+                failed += 1
+                status = "failed"
+            else:
+                missing += 1
+                status = "missing"
+        else:
+            status = pack
+        items.append({
+            "character": name,
+            "status": status,
+            "pack_status": pack,
+            "missing_views": need,
+            "current": p.get("refs_target") == name,
+        })
+    return {
+        "project_id": project_id,
+        "refs_status": p.get("refs_status"),
+        "refs_target": p.get("refs_target"),
+        "total": len(items),
+        "ready": ready,
+        "failed": failed,
+        "missing": missing,
+        "items": items,
+        "updated_at": now(),
+    }
+
+
+@router.post("/projects/{project_id}/bible/draft")
+async def save_bible_draft(project_id: str, body: dict):
+    """保存人物谱草稿（不定稿、不失效下游、不升版本）。"""
+    p = _project_or_404(project_id)
+    expected_version = body.get("expected_version")
+    if expected_version is not None and int(expected_version) != int(p.get("bible_version") or 0):
+        raise HTTPException(409, detail=_bible_conflict_detail(p, expected_version))
+    draft = body.get("bible") if isinstance(body.get("bible"), dict) else {
+        k: v for k, v in (body or {}).items()
+        if k not in {"expected_version", "confirm", "impact_preview_fingerprint"}
+    }
+    conn = get_conn()
+    # 兼容旧库：无列时写入 bible_feedback 旁路字段不可行，使用独立列迁移
+    try:
+        conn.execute(
+            "UPDATE projects SET bible_draft_json=?, bible_draft_updated_at=? WHERE id=?",
+            (json.dumps(draft, ensure_ascii=False), now(), project_id),
+        )
+    except Exception:
+        conn.execute("ALTER TABLE projects ADD COLUMN bible_draft_json TEXT")
+        conn.execute("ALTER TABLE projects ADD COLUMN bible_draft_updated_at REAL")
+        conn.execute(
+            "UPDATE projects SET bible_draft_json=?, bible_draft_updated_at=? WHERE id=?",
+            (json.dumps(draft, ensure_ascii=False), now(), project_id),
+        )
+    conn.commit()
+    return {
+        "saved": True,
+        "draft": True,
+        "bible_version": int(p.get("bible_version") or 0),
+        "updated_at": now(),
+    }
+
+
+@router.get("/projects/{project_id}/bible/draft")
+async def get_bible_draft(project_id: str):
+    p = _project_or_404(project_id)
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT bible_draft_json, bible_draft_updated_at, bible_version FROM projects WHERE id=?",
+            (project_id,),
+        ).fetchone()
+    except Exception:
+        return {"draft": None, "bible_version": int(p.get("bible_version") or 0)}
+    draft = None
+    if row and row["bible_draft_json"]:
+        try:
+            draft = json.loads(row["bible_draft_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            draft = None
+    return {
+        "draft": draft,
+        "updated_at": row["bible_draft_updated_at"] if row else None,
+        "bible_version": int((row["bible_version"] if row else p.get("bible_version")) or 0),
+    }
+
+
+@router.get("/projects/{project_id}/auto-changes")
+async def list_auto_changes(project_id: str):
+    """自动变更/待审队列（人物发现与漂移记录）。"""
+    _project_or_404(project_id)
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT bible_auto_changes_json FROM projects WHERE id=?", (project_id,),
+        ).fetchone()
+    except Exception:
+        return {"items": []}
+    items = []
+    if row and row["bible_auto_changes_json"]:
+        try:
+            items = json.loads(row["bible_auto_changes_json"]) or []
+        except (TypeError, ValueError, json.JSONDecodeError):
+            items = []
+    # 同时从定妆 change_json 汇总漂移记录
+    portraits = conn.execute(
+        """SELECT id, character_name, ep_start, change_json, pack_status, created_at
+           FROM character_portraits WHERE project_id=? AND change_json IS NOT NULL
+           ORDER BY created_at DESC LIMIT 50""",
+        (project_id,),
+    ).fetchall()
+    for r in portraits:
+        try:
+            change = json.loads(r["change_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            change = {}
+        items.append({
+            "id": f"portrait:{r['id']}",
+            "kind": "appearance_drift",
+            "status": change.get("review_status") or "recorded",
+            "character": r["character_name"],
+            "ep_start": r["ep_start"],
+            "reason": change.get("reason"),
+            "change_dimensions": change.get("change_dimensions") or [],
+            "persistence": change.get("persistence"),
+            "pack_status": r["pack_status"],
+            "created_at": r["created_at"],
+            "source": "portrait_change",
+        })
+    return {"items": items}
+
+
+@router.post("/projects/{project_id}/auto-changes/{change_id}/decide")
+async def decide_auto_change(project_id: str, change_id: str, body: dict | None = None):
+    """批准/拒绝/回滚自动变更记录。"""
+    _project_or_404(project_id)
+    payload = body or {}
+    decision = payload.get("decision") or "approve"
+    if decision not in {"approve", "reject", "rollback", "merge"}:
+        raise HTTPException(422, "decision 须为 approve/reject/rollback/merge")
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT bible_auto_changes_json FROM projects WHERE id=?", (project_id,),
+        ).fetchone()
+        items = json.loads(row["bible_auto_changes_json"] or "[]") if row and row["bible_auto_changes_json"] else []
+    except Exception:
+        conn.execute("ALTER TABLE projects ADD COLUMN bible_auto_changes_json TEXT")
+        items = []
+    found = False
+    for item in items:
+        if item.get("id") == change_id:
+            item["status"] = decision
+            item["decided_at"] = now()
+            item["decision_reason"] = payload.get("reason") or ""
+            found = True
+            break
+    if change_id.startswith("portrait:"):
+        portrait_id = change_id.split(":", 1)[1]
+        prow = conn.execute(
+            "SELECT change_json FROM character_portraits WHERE id=? AND project_id=?",
+            (portrait_id, project_id),
+        ).fetchone()
+        if prow:
+            try:
+                change = json.loads(prow["change_json"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                change = {}
+            change["review_status"] = decision
+            change["decision_reason"] = payload.get("reason") or ""
+            change["decided_at"] = now()
+            conn.execute(
+                "UPDATE character_portraits SET change_json=? WHERE id=?",
+                (json.dumps(change, ensure_ascii=False), portrait_id),
+            )
+            found = True
+    if not found:
+        raise HTTPException(404, "自动变更记录不存在")
+    conn.execute(
+        "UPDATE projects SET bible_auto_changes_json=? WHERE id=?",
+        (json.dumps(items, ensure_ascii=False), project_id),
+    )
+    conn.commit()
+    return {"ok": True, "change_id": change_id, "decision": decision}
+
+
+
+
+
 @router.put("/projects/{project_id}/bible")
 async def edit_bible(project_id: str, body: dict):
     from app.capabilities.dispatch import ui_route

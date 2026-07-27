@@ -29,30 +29,58 @@ def ref_path(project_id: str, character_name: str) -> str:
     return str(d / f"{_safe_name(character_name)}.jpg")
 
 
+def normalize_prompt_text(text: str) -> str:
+    """生成前规范化：重复标点压缩、完全重复片段去重；保留原始语义强调。"""
+    if not text:
+        return text
+    out = text
+    # 重复中英文标点 → 单个
+    out = re.sub(r"([。．\.．？！!?,，、；;：:])\1+", r"\1", out)
+    out = re.sub(r"([。．\.]){2,}", "。", out)
+    # 连续空白
+    out = re.sub(r"[ \t]{2,}", " ", out)
+    # 完全重复的短句片段（以句号/分号切）去重保序
+    parts = re.split(r"(?<=[。；;])", out)
+    seen: set[str] = set()
+    kept: list[str] = []
+    for part in parts:
+        key = part.strip()
+        if not key:
+            kept.append(part)
+            continue
+        if key in seen and len(key) >= 4:
+            continue
+        seen.add(key)
+        kept.append(part)
+    return "".join(kept).strip()
+
+
 def portrait_prompt(visual_style: str, anchor: str) -> str:
     spectral_tokens = ("透明", "半透明", "虚影", "魂体", "灵魂", "幽灵", "悬浮", "漂浮", "人影")
-    is_spectral = any(token in anchor for token in spectral_tokens)
+    style = normalize_prompt_text(visual_style or "")
+    body = normalize_prompt_text(anchor or "")
+    is_spectral = any(token in body for token in spectral_tokens)
     if is_spectral:
         refinements: list[str] = [
             "这是超自然角色概念设定图，不要套用普通人的站立证件照姿态",
             "锚点指定的非实体形态、悬浮关系和神态优先级最高",
         ]
-        if any(token in anchor for token in ("透明", "半透明", "虚影", "魂体", "灵魂", "幽灵", "人影")):
+        if any(token in body for token in ("透明", "半透明", "虚影", "魂体", "灵魂", "幽灵", "人影")):
             refinements.append("身体必须明显半透明，背景能透过身体看见，禁止实体皮肤质感")
-        if any(token in anchor for token in ("悬浮", "漂浮")):
+        if any(token in body for token in ("悬浮", "漂浮")):
             refinements.append("双脚离地，明确表现悬浮，禁止站在地面")
-        if "戒指" in anchor:
+        if "戒指" in body:
             refinements.append("戒指完整清晰地置于画面底部中央，角色垂直悬浮在戒指正上方")
-        if "戏谑" in anchor:
+        if "戏谑" in body:
             refinements.append("嘴角微扬、眼神狡黠，明确表现戏谑，禁止严肃皱眉或中性表情")
-        return (
-            f"{visual_style}。单角色全身概念定妆设定图：{anchor}。"
+        return normalize_prompt_text(
+            f"{style}。单角色全身概念定妆设定图：{body}。"
             + "；".join(refinements)
             + "。纯浅米色背景，全身与关联道具完整可见。"
               "仅保留锚点明确要求的特效，禁止额外火焰、斗气光环、文字、水印和 logo"
         )
-    return (
-        f"{visual_style}。全身角色立绘定妆照：{anchor}。"
+    return normalize_prompt_text(
+        f"{style}。全身角色立绘定妆照：{body}。"
         "正面站立，中性表情，双臂自然下垂，纯浅米色背景，全身完整可见。"
         "仅保留锚点明确要求的特效，禁止额外火焰、斗气光环、文字、水印和 logo"
     )

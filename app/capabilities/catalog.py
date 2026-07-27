@@ -1224,6 +1224,34 @@ def _register_exemptions(registry) -> None:
         "定妆照/单视角付费只读预检：返回报价与范围；正式生成仍走 portrait.generate / portrait.regenerate_view",
     )
     registry.exempt_rest(
+        "POST /api/projects/{project_id}/bible/generate-precheck",
+        "首次生成人物谱+定妆只读费用预估；正式启动仍走 bible.generate",
+    )
+    registry.exempt_rest(
+        "GET /api/projects/{project_id}/refs/gaps",
+        "定妆缺口只读扫描",
+    )
+    registry.exempt_rest(
+        "GET /api/projects/{project_id}/refs/progress",
+        "定妆进度只读汇总",
+    )
+    registry.exempt_rest(
+        "POST /api/projects/{project_id}/bible/draft",
+        "人物谱草稿保存：不定稿、不失效下游",
+    )
+    registry.exempt_rest(
+        "GET /api/projects/{project_id}/bible/draft",
+        "读取人物谱草稿",
+    )
+    registry.exempt_rest(
+        "GET /api/projects/{project_id}/auto-changes",
+        "自动变更待审队列只读",
+    )
+    registry.exempt_rest(
+        "POST /api/projects/{project_id}/auto-changes/{change_id}/decide",
+        "自动变更批准/拒绝/回滚；页面人工决策入口",
+    )
+    registry.exempt_rest(
         "POST /mcp",
         "MCP JSON-RPC 传输端点；具体 tools/call 映射到 Capability Registry",
     )
