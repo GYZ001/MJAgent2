@@ -452,6 +452,22 @@ async def _storyboard_task(
             )
             conn.commit()
 
+        # 恢复旧 checkpoint 时先把模型产生的引号漂移/拼接式证据收敛为授权原文中的
+        # 连续片段。严格匹配不足的内容保持未解决，仍由确认门禁拦截。
+        if resume:
+            from app.storyboard_workspace import repair_generated_source_bindings
+
+            evidence_repair = repair_generated_source_bindings(episode_id)
+            if evidence_repair["bound"]:
+                log_provider_call(
+                    "storyboard_source_evidence_repair",
+                    config.MODEL_TEXT,
+                    "SOURCE_EVIDENCE_REALIGNED",
+                    None,
+                    0,
+                    meta={"episode_id": episode_id, **evidence_repair},
+                )
+
         # 集级 Supervisor：大纲 → 逐镜 → 整集校验 → 修复 / 自动确认
         from app.storyboard_supervisor import run_storyboard_supervisor
         mode = completion_mode if completion_mode in {
@@ -552,7 +568,18 @@ def _shot_video_is_stale(conn, shot_row, episode_storyboard_id: str | None) -> b
     except (KeyError, IndexError, TypeError):
         shot_art = None
     if episode_storyboard_id and shot_art and shot_art != episode_storyboard_id:
-        return True
+        episode_art = conn.execute(
+            "SELECT parent_artifact_ids_json FROM artifacts WHERE id=?",
+            (episode_storyboard_id,),
+        ).fetchone()
+        try:
+            episode_parents = json.loads(
+                episode_art["parent_artifact_ids_json"] or "[]"
+            ) if episode_art else []
+        except (TypeError, ValueError):
+            episode_parents = []
+        if shot_art not in episode_parents:
+            return True
     ver = conn.execute(
         "SELECT artifact_id, image_inputs FROM shot_versions WHERE id=?", (adopted,)
     ).fetchone()
@@ -570,8 +597,12 @@ def _shot_video_is_stale(conn, shot_row, episode_storyboard_id: str | None) -> b
             parents = json.loads(art["parent_artifact_ids_json"] or "[]")
         except (TypeError, ValueError):
             parents = []
-        if episode_storyboard_id and parents and episode_storyboard_id not in parents:
-            return True
+        if episode_storyboard_id and parents:
+            valid_storyboard_parents = {episode_storyboard_id}
+            if shot_art:
+                valid_storyboard_parents.add(shot_art)
+            if not any(parent in valid_storyboard_parents for parent in parents):
+                return True
     return _shot_adopted_assets_stale(conn, shot_row, ver)
 
 
@@ -752,6 +783,20 @@ async def _recorded_storyboard_task(
     except Exception as exc:
         recorder.fail(exc)
         raise
+    finally:
+        # The workflow run remains available for audit/resume lineage, but it must
+        # stop acting as a write lock once this coroutine has ended. The guarded
+        # comparison avoids clearing a newer run that may have started meanwhile.
+        try:
+            cleanup_conn = get_conn()
+            cleanup_conn.execute(
+                "UPDATE episodes SET active_storyboard_run_id=NULL "
+                "WHERE id=? AND active_storyboard_run_id=?",
+                (episode_id, recorder.run_id),
+            )
+            cleanup_conn.commit()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _storyboard_generation_is_live(ep: dict) -> bool:
@@ -1110,12 +1155,14 @@ def _storyboard_status_snapshot(
     confirmed = ep.get("status") in {"confirmed", "generating", "done"}
     terminal_structure = bool(
         ep.get("status") == "scripted"
-        and not ep.get("script_error")
         and shot_count > 0
         and planned == shot_count
         and passed == shot_count
         and final_valid
-        and (not supervisor or phase == "SUCCEEDED")
+        and (
+            not supervisor
+            or phase in {"PREPARING_CONFIRM", "CONFIRMING", "SUCCEEDED"}
+        )
     )
     gate_errors: list[str] = []
     if terminal_structure:
@@ -1172,12 +1219,12 @@ def _storyboard_status_snapshot(
         state, headline, action = "no_screenplay", "尚无可用于分镜的剧本", "go_screenplay"
     elif running:
         state, headline, action = "running", f"正在生成：已通过 {passed}/{planned or '—'} 镜", "view_progress"
-    elif paused:
+    elif paused and not terminal_structure:
         state, headline, action = "paused", f"已暂停，已有 {passed} 镜通过", "resume_storyboard"
-    elif ep.get("status") == "script_failed" or (ep.get("script_error") and not full_terminal):
-        state, headline, action = "failed", f"生成停在第 {max(1, passed + 1)} 镜，可继续处理", "resume_storyboard"
     elif terminal_structure and gate_errors:
         state, headline, action = "failed", f"还有 {len(gate_errors)} 个确认门禁问题，可继续修改", "resume_storyboard"
+    elif ep.get("status") == "script_failed" or (ep.get("script_error") and not full_terminal):
+        state, headline, action = "failed", f"生成停在第 {max(1, passed + 1)} 镜，可继续处理", "resume_storyboard"
     elif confirmed:
         state, headline, action = "confirmed", "当前分镜已确认", "go_review_wall"
     elif not shots:
@@ -2262,29 +2309,33 @@ async def edit_shot(shot_id: str, body: dict):
         contract_version=get_contract("storyboard").version,
     ))
     contract_version = get_contract("storyboard").version
+    # Human authorship is provenance, not a hard gate. Record it separately so the
+    # repository's all-hard-gates-must-pass commit rule only evaluates the actual
+    # deterministic business gate.
+    evidence_repository.create_evaluation(
+        manual_artifact["id"],
+        Evaluation(
+            evaluator_type="human",
+            evaluator_name="storyboard_editor",
+            evaluator_version="1.0.0",
+            status="passed",
+            hard_gate_passed=False,
+            score=100,
+            evidence={"decision": "authored_or_reviewed", "shot_id": shot_id},
+        ),
+    )
     manual_artifact = evidence_repository.commit_artifact(
         None,
         manual_artifact["id"],
-        [
-            Evaluation(
-                evaluator_type="human",
-                evaluator_name="storyboard_editor",
-                evaluator_version="1.0.0",
-                status="passed",
-                hard_gate_passed=False,
-                score=100,
-                evidence={"decision": "authored_or_reviewed", "shot_id": shot_id},
-            ),
-            Evaluation(
-                evaluator_type="deterministic",
-                evaluator_name="storyboard_shot_business_gate",
-                evaluator_version=contract_version,
-                status="passed",
-                hard_gate_passed=True,
-                score=100,
-                evidence={"shot_id": shot_id, "spoken_contract_status": instance.spoken_contract_status},
-            ),
-        ],
+        [Evaluation(
+            evaluator_type="deterministic",
+            evaluator_name="storyboard_shot_business_gate",
+            evaluator_version=contract_version,
+            status="passed",
+            hard_gate_passed=True,
+            score=100,
+            evidence={"shot_id": shot_id, "spoken_contract_status": instance.spoken_contract_status},
+        )],
     )
     conn.execute(
         "UPDATE shots SET storyboard_artifact_id=? WHERE id=?",

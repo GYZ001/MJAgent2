@@ -1,7 +1,11 @@
 """evaluate_storyboard_for_confirmation 与确认幂等相关测试。"""
 from __future__ import annotations
 
-from app.domain.video_ops import ConfirmationEvaluation, evaluate_storyboard_for_confirmation
+from types import SimpleNamespace
+
+from app.domain.video_ops import (ConfirmationEvaluation,
+                                  _is_storyboard_terminal_for_confirmation,
+                                  evaluate_storyboard_for_confirmation)
 from app.schemas import Bible, Character, Dialogue, EpisodeScreenplay, Shot, Storyboard, World
 from app.validators import validate_storyboard_preserves_key_content
 
@@ -32,6 +36,41 @@ def _shot(no: int = 1, **kwargs) -> Shot:
     )
     base.update(kwargs)
     return Shot(**base)
+
+
+def test_automated_confirmation_accepts_fully_validated_confirming_checkpoint() -> None:
+    episode = {"status": "scripting", "script_error": None}
+    checkpoint = SimpleNamespace(
+        phase="CONFIRMING", validated_prefix_end=11, expected_total=11,
+    )
+
+    assert _is_storyboard_terminal_for_confirmation(
+        episode, checkpoint, shot_count=11, planned_shots=11,
+        final_shot_valid=True, automated=True,
+    )
+    # Manual confirmation remains blocked while the supervisor is actively writing.
+    assert not _is_storyboard_terminal_for_confirmation(
+        episode, checkpoint, shot_count=11, planned_shots=11,
+        final_shot_valid=True, automated=False,
+    )
+
+    stopped_episode = {"status": "scripted", "script_error": "stale confirmation error"}
+    assert _is_storyboard_terminal_for_confirmation(
+        stopped_episode, checkpoint, shot_count=11, planned_shots=11,
+        final_shot_valid=True, automated=False,
+    )
+
+
+def test_automated_confirmation_rejects_incomplete_validated_prefix() -> None:
+    episode = {"status": "scripting", "script_error": None}
+    checkpoint = SimpleNamespace(
+        phase="CONFIRMING", validated_prefix_end=10, expected_total=11,
+    )
+
+    assert not _is_storyboard_terminal_for_confirmation(
+        episode, checkpoint, shot_count=11, planned_shots=11,
+        final_shot_valid=True, automated=True,
+    )
 
 
 def test_evaluate_is_readonly_and_returns_structured_result():

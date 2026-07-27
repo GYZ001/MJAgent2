@@ -113,7 +113,7 @@
 
 机制：剧本台（`generate_screenplay`）**先**产出 `plot_spine`（5~12 条 `spine_beats` + `must_keep_ending` + `drop_list`≥2），**再**写正文：
 
-- `key_lines`：推动 spine 的主线台词，**最多 6 条**；禁止人物谱原文台词全量入库。
+- `key_lines`：推动 spine 的主线台词，不设固定条数上限；按完整语义链保留，并由目标时长与逐镜口播容量约束。禁止为了凑数把人物谱原文台词全量入库。
 - `key_plot_points`：4~8 条，与 spine 局势变化对齐。
 - 单集戏剧契约：`dramatic_question` / `protagonist_goal` / `obstacle` / `stakes` 仍必填。
 - 校验拦超纲细节词与 drop_list 回流；分镜软预算约 8~16 镜（硬上限 20）。

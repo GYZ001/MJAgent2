@@ -1014,8 +1014,6 @@ async def generate_scene_refs(
         completed: list = []
         pending: list = []
         for scene in targets:
-            if scene_ref_exists(conn, project_id, scene.name):
-                continue
             if resume:
                 from app.multiview import (
                     complete_legacy_scene_pack,
@@ -1040,6 +1038,8 @@ async def generate_scene_refs(
                             scene.ref_image_path = refreshed["image_path"]
                             completed.append(scene)
                             continue
+            if scene_ref_exists(conn, project_id, scene.name):
+                continue
             pending.append(scene)
         if completed:
             _merge_generated_scene_refs(conn, project_id, completed)

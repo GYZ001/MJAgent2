@@ -1641,6 +1641,8 @@ async def assemble_continuity_tail(
     rejected_out: list[ReferenceImageAsset] | None = None,
 ) -> list[ReferenceImageAsset]:
     """尾帧到达后：装配连续性参考并做最终组门禁；不重跑已通过静态槽位。"""
+    from app.multiview import PURPOSE_VIDEO_INPUT, purpose_list
+
     refs = list(meta.get("reference_images") or [])
     selected: list[ReferenceImageAsset] = []
     for ref in refs:
@@ -1649,16 +1651,42 @@ async def assemble_continuity_tail(
             continue
         if ref.get("type") == "previous_shot_frame":
             continue  # 用最新尾帧替换
-        selected.append(_asset_from_path(
+        asset = _asset_from_path(
             path=path,
             ref_type=ref.get("type") or "plot_key_frame",
             source=ref.get("source") or "pipeline",
+            shot_id=ref.get("shotId") or shot_id,
+            episode_id=ref.get("episodeId") or episode_id,
             quality_score=ref.get("qualityScore"),
             qa=ref.get("qa"),
             related_character_ids=list(ref.get("relatedCharacterIds") or []),
-        ))
-        selected[-1].selectedForSeedance = bool(ref.get("selectedForSeedance", True))
-        selected[-1].id = ref.get("id") or selected[-1].id
+            entity_type=ref.get("entity_type"),
+            entity_name=ref.get("entity_name"),
+            library_revision_id=ref.get("library_revision_id"),
+            library_view_id=ref.get("library_view_id"),
+            view_role=ref.get("view_role"),
+            purposes=purpose_list(ref),
+            required=bool(ref.get("required")),
+            slot_key=ref.get("slot_key"),
+        )
+        asset.id = ref.get("id") or asset.id
+        asset.selectedForSeedance = bool(ref.get("selectedForSeedance"))
+        asset.deleted = bool(ref.get("deleted"))
+        asset.rejectReason = ref.get("rejectReason")
+        asset.dependency_manifest = ref.get("dependency_manifest")
+
+        # 静态参考图可能在等待上一镜尾帧期间被人工废弃，QA 淘汰图也会
+        # 保留 video_input 用途供审计。两者都只能留在废弃画廊，不能参与
+        # 连续性重装配，否则后续门禁可能把高分旧候选重新标成 selected。
+        stale_video_candidate = (
+            PURPOSE_VIDEO_INPUT in asset.purposes and not asset.selectedForSeedance
+        )
+        if asset.deleted or asset.rejectReason or stale_video_candidate:
+            asset.selectedForSeedance = False
+            if rejected_out is not None and asset not in rejected_out:
+                rejected_out.append(asset)
+            continue
+        selected.append(asset)
 
     prev = prev_shot
     if prev is None and int(getattr(shot, "shot_no", 0) or 0) > 1:
@@ -1770,13 +1798,13 @@ def pack_reference_images_for_seedance(
     continuity_required: bool = False,
 ) -> list[dict[str, Any]]:
     """必需用途优先装箱；分数只在同类候选内排序。关键帧不会被高分定妆照挤掉。"""
-    from app.multiview import pack_references_by_purpose, PURPOSE_VIDEO_INPUT, purpose_list
+    from app.multiview import pack_references_by_purpose
     usable = []
     for r in refs:
-        if r.get("deleted"):
-            continue
-        purposes = purpose_list(r)
-        if PURPOSE_VIDEO_INPUT in purposes or r.get("selectedForSeedance"):
+        # ``purposes`` describes what an asset was generated for and is retained
+        # on rejected candidates for audit.  Only the explicit selection flag is
+        # authoritative for the current provider request.
+        if r.get("selectedForSeedance") and not r.get("deleted"):
             usable.append(r)
     if not usable:
         return []
@@ -1810,7 +1838,11 @@ REFERENCE_SINGLE_INSTANCE_NOTE = (
 
 def append_reference_prompt_notes(prompt_text: str, assets: list[ReferenceImageAsset]) -> str:
     lines = []
-    for idx, asset in enumerate(assets, 1):
+    selected_assets = [
+        asset for asset in assets
+        if asset.selectedForSeedance and not asset.deleted
+    ]
+    for idx, asset in enumerate(selected_assets, 1):
         label = {
             "character": "character",
             "scene": "scene",

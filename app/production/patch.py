@@ -19,6 +19,7 @@ from app.production.screenplay_document import (
     normalize_overdetail_text_fields,
     prune_dialogue_chains_to_budget,
     rederive_projections,
+    restore_dialogue_chains_from_baseline,
     screenplay_to_document,
     split_dialogue_chain_by_scene,
 )
@@ -124,6 +125,7 @@ def apply_screenplay_patch(
         )
 
     touched: list[str] = []
+    additional_parent_ids: list[str] = []
     working = doc
     for op in request.operations:
         if op.op == "rederive":
@@ -151,6 +153,35 @@ def apply_screenplay_patch(
             chain_id = str((op.target or {}).get("chain_id") or (op.target or {}).get("id") or "")
             working, nodes = split_dialogue_chain_by_scene(working, chain_id=chain_id)
             touched.extend(nodes)
+            continue
+        if op.op == "restore_dialogue_chains_from_baseline":
+            baseline_id = str(
+                (op.target or {}).get("baseline_artifact_id")
+                or (op.target or {}).get("id")
+                or ""
+            )
+            baseline_artifact = evidence_repository.get_artifact(baseline_id)
+            if not baseline_artifact:
+                return PatchResult(
+                    ok=False,
+                    before_artifact_id=request.expected_artifact_id,
+                    before_hash=before_hash,
+                    error="Baseline artifact 不存在",
+                )
+            baseline_content = baseline_artifact.get("content") or {}
+            if "screenplay_metadata" in baseline_content:
+                baseline_doc = ScreenplayDocument.model_validate(baseline_content)
+            else:
+                baseline_script = EpisodeScreenplay.model_validate(
+                    baseline_content.get("_projection") or baseline_content
+                )
+                baseline_doc = screenplay_to_document(baseline_script)
+            working, nodes = restore_dialogue_chains_from_baseline(
+                working,
+                baseline=baseline_doc,
+            )
+            touched.extend(nodes)
+            additional_parent_ids.append(baseline_id)
             continue
         if op.op in {"replace_field", "add_field"}:
             working, nodes = apply_field_patch(
@@ -205,7 +236,10 @@ def apply_screenplay_patch(
             status="candidate" if local_issues else "validated",
             trust_level="T1" if local_issues else "T2",
             content=after_content,
-            parent_artifact_ids=[request.expected_artifact_id],
+            parent_artifact_ids=list(dict.fromkeys([
+                request.expected_artifact_id,
+                *additional_parent_ids,
+            ])),
             contract_version=rev.contract_version or None,
         )
     )
@@ -232,7 +266,11 @@ def apply_screenplay_patch(
             status="validated",
             trust_level="T2",
             content=patch_payload,
-            parent_artifact_ids=[request.expected_artifact_id, after_art["id"]],
+            parent_artifact_ids=list(dict.fromkeys([
+                request.expected_artifact_id,
+                after_art["id"],
+                *additional_parent_ids,
+            ])),
             contract_version=rev.contract_version or None,
         )
     )

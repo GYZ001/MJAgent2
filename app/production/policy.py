@@ -30,6 +30,7 @@ ALLOWED_PATCH_OPS = frozenset({
     "normalize_overdetail",
     "prune_dialogue_budget",
     "split_dialogue_chain_by_scene",
+    "restore_dialogue_chains_from_baseline",
 })
 
 FORBIDDEN_PATCH_OPS = frozenset({

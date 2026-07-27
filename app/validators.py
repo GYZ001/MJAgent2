@@ -22,7 +22,15 @@ from app.continuity import (
     count_sequential_action_beats,
     spoken_chars_from_shot,
 )
-from app.spoken_contract import content_char_count, max_speech_chars, spoken_text_of
+from app.spoken_contract import (
+    RULE_SPOKEN_COHERENCE,
+    build_timeline_from_segments,
+    content_char_count,
+    max_speech_chars,
+    segments_from_timeline,
+    spoken_text_of,
+    validate_spoken_contract,
+)
 from app.schemas import (Bible, EpisodeScreenplay, InformationItem, Shot, Storyboard,
                          StoryboardOutline, StoryEvent, SHOT_SIZES, CAMERA_MOVES, TRANSITIONS,
                          CONTINUITY_MODES, DELIVERY_OWNERS)
@@ -33,7 +41,6 @@ from app.renderability import (
     DROP_LIST_MIN,
     DIALOGUE_CHAIN_TURNS_HARD_MAX,
     DURATION_REVIEW_RISK_TAG,
-    KEY_LINES_MAX,
     KEY_LINES_MIN,
     KEY_PLOT_POINTS_MAX,
     KEY_PLOT_POINTS_MIN,
@@ -132,6 +139,42 @@ def _voiced_shot_count(shots: list[Shot]) -> int:
 
 def _soundtrack_text(shot: Shot) -> str:
     return "".join([shot.narration or "", *(d.line for d in shot.dialogues)])
+
+
+def _normalized_spoken_text(text: str | None) -> str:
+    """Normalize punctuation/spacing so adjacent repeated delivery cannot hide behind typography."""
+    return re.sub(r"[\W_]+", "", text or "", flags=re.UNICODE).casefold()
+
+
+def adjacent_spoken_repeat_errors(board: Storyboard) -> list[str]:
+    """Reject a line that is delivered again by the same speaker in the next shot.
+
+    A longer line may legitimately span shots, so this only rejects a current line whose
+    complete normalized text already appears in the immediately previous shot. Short
+    interjections are ignored to avoid false positives such as repeated names or greetings.
+    """
+    errors: list[str] = []
+    for index in range(1, len(board.shots)):
+        previous = board.shots[index - 1]
+        current = board.shots[index]
+        previous_by_speaker: dict[str, str] = {}
+        for dialogue in previous.dialogues:
+            speaker = (dialogue.speaker or "").strip().casefold()
+            previous_by_speaker[speaker] = (
+                previous_by_speaker.get(speaker, "") + _normalized_spoken_text(dialogue.line)
+            )
+        for dialogue in current.dialogues:
+            speaker = (dialogue.speaker or "").strip().casefold()
+            normalized = _normalized_spoken_text(dialogue.line)
+            if len(normalized) < 8 or not speaker:
+                continue
+            if normalized in previous_by_speaker.get(speaker, ""):
+                errors.append(
+                    f"shots[{index}](shot_no={current.shot_no}) 与上一镜相邻重复台词："
+                    f"{dialogue.speaker} 的「{dialogue.line}」已在镜{previous.shot_no:02d}完整说过；"
+                    "请删除重复台词并改为无台词反应镜，或改写为新的有效信息"
+                )
+    return errors
 
 
 def _action_beat_count(text: str) -> int:
@@ -486,6 +529,7 @@ def validate_storyboard(
         errors.append(f"shot_no 必须为连续递增 1..{len(shots)}，当前为 {actual}")
 
     # V12 场景必须落在场景图素材库内（库非空时；同时回填 shot.scene_name 供渲染期复用同一张场景图）
+    errors.extend(adjacent_spoken_repeat_errors(board))
     errors.extend(validate_storyboard_scenes(board, bible))
     errors.extend(state_chain_errors(board))
     errors.extend(shot_count_budget_errors(len(shots), context="分镜"))
@@ -604,6 +648,57 @@ def _script_dialogue_turns(full_text: str) -> list[tuple[int, str, str]]:
     return turns
 
 
+def _screenplay_scene_space(heading: str) -> tuple[str, str]:
+    """把场次标题拆成时间与地点，用于识别同一连续空间的子区域。"""
+    value = re.sub(r"^【场\s*\d+】\s*", "", (heading or "").strip())
+    parts = re.split(r"\s*/\s*", value, maxsplit=1)
+    if len(parts) == 1:
+        return "", _condense(parts[0])
+    return _condense(parts[0]), _condense(parts[1])
+
+
+def _dialogue_chain_crosses_hard_scene_boundary(
+    script: EpisodeScreenplay,
+    scene_numbers: set[int],
+) -> bool:
+    """区分真正换场与同一时空内的相邻子区域切块。
+
+    剧本常把「迎客大厅」和「迎客大厅角落」拆成两个节拍场块；这不是对白
+    因果被打断，不应阻断发布。非相邻场次、时间变化或地点无连续关系时仍按
+    真正跨场处理。
+    """
+    ordered = sorted(number for number in scene_numbers if number > 0)
+    if len(ordered) != len(scene_numbers) or any(
+        right != left + 1 for left, right in zip(ordered, ordered[1:])
+    ):
+        return True
+    headings = {
+        int(scene.scene_no): str(scene.scene_heading or "")
+        for scene in (script.scene_outline or [])
+    }
+    for left, right in zip(ordered, ordered[1:]):
+        left_heading = headings.get(left, "")
+        right_heading = headings.get(right, "")
+        if not left_heading or not right_heading:
+            return True
+        left_time, left_location = _screenplay_scene_space(left_heading)
+        right_time, right_location = _screenplay_scene_space(right_heading)
+        if left_time and right_time and left_time != right_time:
+            return True
+        if not left_location or not right_location:
+            return True
+        if left_location in right_location or right_location in left_location:
+            continue
+        common = 0
+        for left_char, right_char in zip(left_location, right_location):
+            if left_char != right_char:
+                break
+            common += 1
+        if common < 3:
+            return True
+    return False
+
+
 # ---------- 关键内容（必保留清单）模糊匹配工具 ----------
 # 防丢失校验的共用底座：剧本台/分镜台都要判断"某条关键台词/剧情点是否仍真实存在于文本里"。
 # 务实优先（本次定调）：只拦【明显丢失】，用模糊匹配容忍口语化改写/标点差异，绝不逐字比对，
@@ -615,7 +710,6 @@ KEY_LINE_BIGRAM_COVERAGE = textmatch.KEY_LINE_BIGRAM_COVERAGE
 KEY_POINT_COVERAGE = textmatch.KEY_POINT_COVERAGE
 KEY_CONTENT_MAX_REPORT = 4       # 单条错误最多点名几条，避免错误列表过长把 prompt 撑爆
 MIN_KEY_LINES = KEY_LINES_MIN
-MAX_KEY_LINES = KEY_LINES_MAX
 MIN_KEY_PLOT_POINTS = KEY_PLOT_POINTS_MIN
 MAX_KEY_PLOT_POINTS = KEY_PLOT_POINTS_MAX
 
@@ -803,7 +897,6 @@ def validate_dialogue_chains(
     full_texts = [turn[2] for turn in full_turns]
     source_fragments = source_dialogue_fragments(source_text)
     required_lines = [line for line in (required_dialogue_lines or []) if (line or "").strip()]
-    effective_max_turns = max(MAX_KEY_LINES, len(required_lines) + 4)
     for chain_index, chain in enumerate(chains):
         tag = f"dialogue_chains[{chain_index}]"
         chain_id = (chain.chain_id or "").strip().upper()
@@ -889,13 +982,19 @@ def validate_dialogue_chains(
             }
             # “同一触发→回应链不得跨场”只适用于人物之间的互动链。单人自语/独白
             # 可能因动作节拍被拆成相邻场块，跨块并不会破坏对白因果，不应阻断交付。
-            if len(scenes) > 1 and len(speakers) > 1:
+            if (
+                len(scenes) > 1
+                and len(speakers) > 1
+                and _dialogue_chain_crosses_hard_scene_boundary(script, scenes)
+            ):
                 errors.append(f"{tag} 被拆到多个场次；同一触发→回应链必须在同一场完成")
 
-    if not MIN_KEY_LINES <= total_turns <= effective_max_turns:
+    # 对白密度由本集时长预算和后续逐镜口播容量控制。这里仅保证至少有一组
+    # 可追溯的主线对白，不再把“精选台词软建议”误当成整集对白硬上限。
+    if total_turns < MIN_KEY_LINES:
         errors.append(
-            f"dialogue_chains 共 {total_turns} 个话轮；主线对白链总量必须为 "
-            f"{MIN_KEY_LINES}~{effective_max_turns}，按整组取舍而不是截断回答"
+            f"dialogue_chains 共 {total_turns} 个话轮；请至少保留 {MIN_KEY_LINES} 个"
+            "推动主线且可追溯的完整话轮"
         )
     if source_fragments:
         opening = source_fragments[0]
@@ -1501,19 +1600,9 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
     if len((script.stakes or "").strip()) < 4:
         errors.append("stakes 过短或缺失；请写失败代价（输了会失去什么关系/尊严/目标）")
     key_lines = [ln.strip() for ln in (script.key_lines or []) if ln and ln.strip()]
-    effective_max_key_lines = max(
-        MAX_KEY_LINES,
-        len([line for line in (required_dialogue_lines or []) if (line or "").strip()]) + 4,
-    )
     if len(key_lines) < MIN_KEY_LINES:
         errors.append(
-            f"key_lines 仅 {len(key_lines)} 条；请挑出至少 {MIN_KEY_LINES} 条推动主线的台词"
-            f"（当前上限 {effective_max_key_lines}）")
-    if len(key_lines) > effective_max_key_lines:
-        errors.append(
-            f"key_lines 共 {len(key_lines)} 条，超过上限 {effective_max_key_lines}；"
-            "用户勾选台词全部保留，其余只保留推动 spine 的完整对白链"
-        )
+            f"key_lines 仅 {len(key_lines)} 条；请保留至少 {MIN_KEY_LINES} 条推动主线的台词")
     bible_names = {c.name for c in bible.characters}
     if bible_names:
         non_bible_key_lines = []
@@ -2264,6 +2353,14 @@ def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeS
             errors.append(
                 f"大纲第 {i} 与第 {i + 1} 镜剧情几乎相同（停留在同一节拍）；"
                 "每镜必须推进到新的剧情进展，禁止把同一情绪/同一句原文拆成多镜空耗时长")
+        repeated_key_lines = sorted(
+            set(shots[i - 1].key_line_ids or []).intersection(shots[i].key_line_ids or [])
+        )
+        if repeated_key_lines:
+            errors.append(
+                f"大纲第 {i} 与第 {i + 1} 镜重复分配关键台词 "
+                f"{repeated_key_lines}；同一句台词只能在一镜完整说出，下一镜应推进到人物反应或新信息"
+            )
     # 关键台词/剧情点必须在大纲里被分配到某一镜（beat 或 covers 中体现），否则后段必丢戏。
     plan_text = "".join((s.beat or "") + (s.covers or "") for s in shots)
     key_lines = [ln.strip() for ln in (screenplay.key_lines or []) if ln and ln.strip()]
@@ -2382,6 +2479,29 @@ def relieve_spoken_overflow(board: Storyboard) -> list[dict]:
     return strip_all_narration(board)
 
 
+def _retime_coherent_spoken_timeline(shot: Shot) -> bool:
+    """Duration normalization must not manufacture an out-of-range timeline.
+
+    A generated candidate may legitimately choose 6~10 seconds and place its
+    spoken segments across that interval.  ``prefer_default_shot_durations``
+    can subsequently compress the shot to five seconds.  When dialogues and
+    timeline still describe the same speech, retiming is an unambiguous
+    derived-field repair.  A genuine dialogues/timeline fork remains untouched
+    so the spoken-contract gate can report it instead of silently picking a
+    side.
+    """
+    if not shot.audio_timeline:
+        return False
+    issues = validate_spoken_contract(shot)
+    if any(issue.rule_id == RULE_SPOKEN_COHERENCE for issue in issues):
+        return False
+    spoken = segments_from_timeline(shot)
+    if not spoken:
+        return False
+    shot.audio_timeline = build_timeline_from_segments(shot, spoken)
+    return True
+
+
 def prefer_default_shot_durations(board: Storyboard) -> list[dict]:
     """主线压缩：能 5s 讲完的镜压回 5s；仍需 6~10s 的镜打上 AI 审核标记。"""
     changes: list[dict] = []
@@ -2392,7 +2512,8 @@ def prefer_default_shot_durations(board: Storyboard) -> list[dict]:
         )
         tags = list(shot.risk_tags or [])
         if shot_duration_should_prefer_five(spoken_chars=spoken, action_beats=beats):
-            if int(shot.duration_s or 0) != PREFERRED_SHOT_DURATION_S:
+            duration_changed = int(shot.duration_s or 0) != PREFERRED_SHOT_DURATION_S
+            if duration_changed:
                 changes.append({
                     "shot_no": shot.shot_no,
                     "from": shot.duration_s,
@@ -2400,6 +2521,12 @@ def prefer_default_shot_durations(board: Storyboard) -> list[dict]:
                     "reason": "content_fits_5s",
                 })
                 shot.duration_s = PREFERRED_SHOT_DURATION_S
+                if _retime_coherent_spoken_timeline(shot):
+                    changes.append({
+                        "shot_no": shot.shot_no,
+                        "duration_s": shot.duration_s,
+                        "reason": "retimed_audio_after_duration_normalization",
+                    })
             if DURATION_REVIEW_RISK_TAG in tags:
                 tags = [t for t in tags if t != DURATION_REVIEW_RISK_TAG]
                 shot.risk_tags = tags

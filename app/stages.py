@@ -50,7 +50,6 @@ from app.validators import (SCENE_SETTING_MAX_CHARS,
 from app.renderability import (
     ACTION_DESC_TARGET_MAX,
     ACTION_DESC_TARGET_MIN,
-    KEY_LINES_MAX,
     KEY_PLOT_POINTS_MAX,
     KEY_PLOT_POINTS_MIN,
     PREFERRED_SHOT_DURATION_S,
@@ -59,6 +58,7 @@ from app.renderability import (
     SHOT_SOFT_MIN,
     renderability_prompt_block,
 )
+from app.source_excerpt import align_source_excerpt
 
 SYSTEM_PREFIX = (
     "你是专业的竖屏漫剧（动态漫画短剧）编剧与分镜师。\n"
@@ -652,7 +652,6 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
         for line in (episode.get("required_dialogue_lines") or [])
         if str(line).strip()
     ]
-    dialogue_turn_cap = max(KEY_LINES_MAX, len(required_dialogue_lines) + 4)
     required_dialogue_block = (
         "【用户多选的必保留台词·逐字硬门禁】\n"
         + "\n".join(
@@ -716,7 +715,7 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
 - `plot_spine.drop_list`：至少 2 条「本章有但不拍」的支线/气氛戏/装饰对白。
 - `dialogue_chains`：主线对白的权威来源。每条链写清 chain_id/topic/turns；turns 按原文与正文发生顺序排列，每个 turn 含 speaker/line/function/source_text。
 - 每条对白链必须从 trigger/announcement/question 开始，再接 response/decision；不得从回答开始。测验员、守卫等功能性角色若负责宣布结果或触发主角反应，允许且必须作为链首进入。
-- `key_lines` 由后端按 dialogue_chains.turns 确定性回填，模型仍需输出但不得自行另选；对白链总话轮 **{3}~{dialogue_turn_cap} 条**。用户多选的必保留台词优先级最高，其余按整组取舍。
+- `key_lines` 由后端按 dialogue_chains.turns 确定性回填，模型仍需输出但不得自行另选；对白话轮不设固定条数上限。用户多选的必保留台词优先级最高，其余按完整语义链取舍，并让总口播服从本集目标时长。
 - `key_lines` 中每一条都必须在 `full_script_text` 里作为“角色名：台词”的真实对白落地；写进动作描述、梗概、source_basis 或清单本身都不算角色说过。
 - `key_lines` 必须按正文发生顺序排列，并按“对白链”取舍：若保留回答、安慰、反驳、引用对方旧话，必须连同触发它的前一角色话轮一起保留；宁可删除另一组支线对白，也不得只摘一句回答让角色突兀开口。
 - `key_plot_points`：{KEY_PLOT_POINTS_MIN}~{KEY_PLOT_POINTS_MAX} 条，与 spine 局势变化对齐，不是动作微描写。
@@ -744,7 +743,7 @@ B. `full_script_text`：真正的剧本正文；只写大形体动作与主线�
 1. episode_no 必须作为顶层字段出现且等于 {episode['episode_no']}（不可省略，也不可写进任何嵌套对象里）。
 2. 必须先有合法 `plot_spine`；title / logline / scene_outline / full_script_text / emotional_curve / ending_hook / source_basis 必填；
    dramatic_question / protagonist_goal / obstacle / stakes 必填；
-   key_lines {3}~{dialogue_turn_cap} 条且须按发生顺序写进正文；上下文依赖台词必须与触发话轮组成连续对白链；key_plot_points {KEY_PLOT_POINTS_MIN}~{KEY_PLOT_POINTS_MAX} 条。
+   key_lines 至少 {3} 条且须按发生顺序写进正文，不设固定条数上限；上下文依赖台词必须与触发话轮组成连续对白链；总口播服从本集目标时长；key_plot_points {KEY_PLOT_POINTS_MIN}~{KEY_PLOT_POINTS_MAX} 条。
 3. `scene_outline` 必须是 3~5 场的连续场次结构，scene_no 从 1 连续递增。
    【硬性·角色圣经】scene_outline[*].characters 中的具名角色只能填角色圣经准确姓名（{bible_names_inline}）；无需跨集定妆的临时人物允许使用测验员、守卫、围观者、路人甲等通用功能性身份标签。
 4. full_script_text 必须是一篇连续故事正文，且必须带场次标题、动作段、对白段；「【场N】」数量必须与 scene_outline 一致。
@@ -1064,7 +1063,8 @@ def _normalized_candidate_board(episode_no: int, completed_shots: list[Shot], sh
 def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict, bible: Bible,
                                     screenplay: EpisodeScreenplay, completed_shots: list[Shot],
                                     shot_no: int, allow_finish: bool, must_finish: bool,
-                                    outline_covers: str = "", later_planned_covers: str = "") -> list[str]:
+                                    outline_covers: str = "", later_planned_covers: str = "",
+                                    source_text: str = "") -> list[str]:
     errors: list[str] = []
     if draft.episode_no != episode["episode_no"]:
         errors.append(f"episode_no={draft.episode_no}，必须等于 {episode['episode_no']}")
@@ -1076,6 +1076,21 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
         errors.append(
             f"当前已到本集收束位（大纲末镜/软预算/硬上限），第 {shot_no} 镜必须收束到尾钩并设置 is_final=true"
         )
+
+    aligned_excerpt = align_source_excerpt(
+        draft.shot.source_excerpt,
+        source_text,
+        min_match_chars=SOURCE_EXCERPT_MIN_CHARS,
+    )
+    if aligned_excerpt is None:
+        errors.append(
+            "shot.source_excerpt 无法在本集授权原文中找到足够强的连续依据；"
+            "请从‘本镜可逐字摘录原文’中复制一段连续原文"
+        )
+    else:
+        # Evidence is an audit field, not creative prose.  Canonicalize harmless
+        # quote/whitespace drift and stitched excerpts before the artifact is saved.
+        draft.shot.source_excerpt = aligned_excerpt.excerpt
 
     # 相邻镜允许共享同一主线段落的 source_excerpt（Renderability：不再用「必须推进原文」逼碎镜）。
 
@@ -1694,6 +1709,7 @@ source_excerpt 内的双引号必须按 JSON 规范转义，或改用中文引�
             later_planned_covers="".join(
                 (s.covers or "") for s in (outline.shots[shot_no:] if (outline and outline.shots) else [])
             ),
+            source_text=source_text,
         ),
         loop=shot_loop,
         temperature=0.7,

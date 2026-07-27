@@ -1,3 +1,4 @@
+import asyncio
 import json
 import threading
 
@@ -16,6 +17,7 @@ from app.storyboard_supervisor import (
     load_latest_checkpoint,
     save_checkpoint,
 )
+from app.domain.storyboard_ops import _recorded_storyboard_task
 
 
 @pytest.fixture()
@@ -119,6 +121,29 @@ def _cancel_test_run(storyboard_db) -> WorkflowRecorder:
     )
     storyboard_db.commit()
     return recorder
+
+
+def test_recorded_storyboard_task_releases_terminal_write_pointer(storyboard_db, monkeypatch):
+    recorder = WorkflowRecorder.create(
+        workflow_type="storyboard", scope_type="episode", scope_id="e1",
+        input_fingerprint="release-pointer-test",
+    )
+    storyboard_db.execute(
+        "UPDATE episodes SET active_storyboard_run_id=?,status='scripted',script_error='暂停待处理' WHERE id='e1'",
+        (recorder.run_id,),
+    )
+    storyboard_db.commit()
+
+    async def completed_task(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr("app.domain.storyboard_ops._storyboard_task", completed_task)
+    asyncio.run(_recorded_storyboard_task("e1", recorder, resume=True))
+
+    row = storyboard_db.execute(
+        "SELECT active_storyboard_run_id FROM episodes WHERE id='e1'",
+    ).fetchone()
+    assert row["active_storyboard_run_id"] is None
 
 
 def test_waiting_retry_resume_starts_a_fresh_activation_budget():
@@ -381,6 +406,24 @@ def test_source_binding_only_accepts_authorized_contiguous_range(storyboard_db):
     assert drifted.value.status_code == 409
 
 
+def test_generated_source_binding_repair_replaces_stitched_excerpt(storyboard_db):
+    stitched = "少年推开房门，看见桌上的信……神色骤然一沉。"
+    storyboard_db.execute(
+        "UPDATE shots SET source_excerpt=? WHERE id='s1'",
+        (stitched,),
+    )
+    storyboard_db.commit()
+
+    result = workspace.repair_generated_source_bindings("e1")
+
+    assert result == {"bound": 1, "realigned": 1, "unresolved_shot_nos": []}
+    repaired = storyboard_db.execute(
+        "SELECT source_excerpt FROM shots WHERE id='s1'",
+    ).fetchone()["source_excerpt"]
+    assert repaired == "少年推开房门，看见桌上的信"
+    assert workspace.verify_or_bind_existing_excerpt("e1", "s1", repaired)["chapter_idx"] == 1
+
+
 def test_edit_impact_preview_is_noop_safe_and_exact(storyboard_db):
     session = workspace.create_edit_session("s1")
     no_op = api.preview_shot_edit_impact("s1", {
@@ -398,6 +441,30 @@ def test_edit_impact_preview_is_noop_safe_and_exact(storyboard_db):
     assert changed["changed_fields"] == ["duration_s"]
     assert changed["preview_token"].startswith("sbpv_")
     assert 1 in changed["revalidation_shots"]
+
+
+def test_shot_edit_commits_deterministic_gate_without_treating_authorship_as_failure(storyboard_db):
+    session = workspace.create_edit_session("s1")
+    changes = {"camera_move": "缓慢推近"}
+    preview = api.preview_shot_edit_impact("s1", {
+        "edit_session_token": session["edit_session_token"],
+        "changes": changes,
+    })
+
+    result = asyncio.run(api.edit_shot("s1", {
+        **changes,
+        "expected_version": session["baseline_artifact_id"],
+        "edit_session_token": session["edit_session_token"],
+        "preview_token": preview["preview_token"],
+        "baseline_content_hash": session["baseline_content_hash"],
+        "change_source": "test_edit",
+    }))
+
+    assert result["ok"] is True
+    assert storyboard_db.execute("SELECT camera_move FROM shots WHERE id='s1'").fetchone()[0] == "缓慢推近"
+    evaluations = repository.get_evaluations(result["artifact_id"])
+    assert any(row["evaluator_name"] == "storyboard_editor" and not row["hard_gate_passed"] for row in evaluations)
+    assert any(row["evaluator_name"] == "storyboard_shot_business_gate" and row["hard_gate_passed"] for row in evaluations)
 
 
 def test_free_text_source_edit_is_rejected(storyboard_db):

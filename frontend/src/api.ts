@@ -1418,6 +1418,7 @@ export interface Episode {
     patch_count?: number;
     open_issue_count?: number;
     yield_reason?: string;
+    legacy_dialogue_policy_recovery_available?: boolean;
   } | null;
   shots?: Shot[];
   storyboard_planned_shots?: number | null;

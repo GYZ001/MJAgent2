@@ -20,7 +20,7 @@ export default function CapabilityApprovalHost() {
 
   return (
     <div
-      className="evidence-backdrop"
+      className="evidence-backdrop capability-approval-backdrop"
       role="presentation"
       onMouseDown={event => {
         if (event.currentTarget === event.target) resolveCapabilityApproval(false)

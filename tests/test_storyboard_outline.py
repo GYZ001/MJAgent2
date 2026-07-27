@@ -88,6 +88,16 @@ def test_outline_rejects_lingering_adjacent_beats() -> None:
     assert any("停留在同一节拍" in e for e in errors)
 
 
+def test_outline_rejects_adjacent_duplicate_key_line_assignment() -> None:
+    outline = _outline(_valid_beats(), covers={5: KEY_LINE})
+    outline.shots[3].key_line_ids = ["KL1"]
+    outline.shots[4].key_line_ids = ["KL1"]
+
+    errors = validate_storyboard_outline(outline, _screenplay(), 50)
+
+    assert any("重复分配关键台词" in error and "KL1" in error for error in errors), errors
+
+
 def test_outline_rejects_missing_key_line() -> None:
     # 关键台词在任何 beat/covers 中都没出现 → 大纲漏戏，必须拦下。
     screenplay = EpisodeScreenplay(

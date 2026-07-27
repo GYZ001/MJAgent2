@@ -1333,8 +1333,8 @@ async def poll_video_task(task_id: str, *, call_meta: dict | None = None) -> dic
     }
 
 
-async def download(url: str, dest_path: str) -> None:
-    """下载供应商媒体到本地。禁止 SSRF：仅允许公网 http(s)，跟随重定向后再次校验。"""
+async def _download_once(url: str, dest_path: str) -> None:
+    """单次下载；禁止 SSRF：仅允许公网 http(s)，跟随重定向后再次校验。"""
     import ipaddress
     import socket
     from urllib.parse import urlparse
@@ -1394,6 +1394,28 @@ async def download(url: str, dest_path: str) -> None:
         if resp.status_code != 200:
             raise ProviderError(f"视频下载失败 HTTP {resp.status_code}（URL 可能已过期，有效期 7 天）")
         atomic_write_bytes(dest_path, resp.content)
+
+
+async def download(url: str, dest_path: str) -> None:
+    """Download provider media with bounded retries for transient transport faults."""
+    attempts = 3
+    last_error: ProviderError | None = None
+    for attempt in range(attempts):
+        try:
+            await _download_once(url, dest_path)
+            return
+        except httpx.RequestError as exc:
+            phase = _timeout_phase(exc) if isinstance(exc, httpx.TimeoutException) else None
+            last_error = ProviderError(
+                f"媒体下载网络异常：{type(exc).__name__}: {exc}",
+                retryable=True,
+                raw=repr(exc),
+                timeout_phase=phase,
+            )
+        if attempt + 1 < attempts:
+            await asyncio.sleep(1.5 * (2 ** attempt))
+    assert last_error is not None
+    raise last_error
 
 
 async def generate_image(prompt: str, *, size: str = "1024x1024",

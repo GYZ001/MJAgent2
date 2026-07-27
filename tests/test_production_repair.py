@@ -396,8 +396,8 @@ def test_cross_scene_dialogue_chain_is_split_without_rewriting_body() -> None:
                     characters=["乙"], summary="对峙收束", conflict="余波", turn="局势定型", source_basis="原文"),
     ]
     script.full_script_text = (
-        "【场1】日 / 大厅\n甲：结果公布。\n乙：我不接受。\n\n"
-        "【场2】日 / 大厅\n乙：你们若是当事人呢？\n丙：他有权回答。\n\n"
+        "【场1】日 / 大厅\n甲（宣布）：结果公布。\n乙（拒绝）：我不接受。\n\n"
+        "【场2】日 / 大厅\n乙（追问）：你们若是当事人呢？\n丙（支持）：他有权回答。\n\n"
         "【场3】日 / 大厅\n乙转身离开。"
     )
     issue = structured_issue(
@@ -420,6 +420,128 @@ def test_cross_scene_dialogue_chain_is_split_without_rewriting_body() -> None:
     assert result.dialogue_chains[1].chain_id == "DC2"
     assert result.full_script_text == before_body
     assert touched == ["dialogue_chains", "DC1", "DC2"]
+
+
+@pytest.mark.asyncio
+async def test_resume_restores_chains_pruned_by_retired_dialogue_budget(monkeypatch) -> None:
+    from app.evidence import repository as evidence_repository
+    from app.production import screenplay_repair
+    from app.production.revision import (
+        get_production_revision,
+        save_checkpoint,
+        screenplay_production_state,
+    )
+
+    def chain(chain_id: str, line: str) -> KeyDialogueChain:
+        return KeyDialogueChain(
+            chain_id=chain_id,
+            topic=f"{line}对白主题",
+            turns=[KeyDialogueTurn(
+                speaker="甲",
+                line=line,
+                function="statement",
+                source_text=line,
+            )],
+        )
+
+    baseline_script = _minimal_script(
+        stakes="失败将失去资格",
+        dialogue_chains=[
+            chain("DC1", "第一句"),
+            chain("DC2", "第二句"),
+            chain("DC3", "第三句"),
+        ],
+    )
+    working_script = baseline_script.model_copy(deep=True)
+    working_script.dialogue_chains = working_script.dialogue_chains[:2]
+
+    revision = ensure_production_revision(
+        episode_id="ep_p",
+        kind="screenplay",
+        resume=False,
+    )
+    baseline_artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id="ep_p",
+        status="candidate",
+        trust_level="T1",
+        content=screenplay_repair.screenplay_artifact_payload(baseline_script),
+    ))
+    working_artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id="ep_p",
+        status="validated",
+        trust_level="T2",
+        content=screenplay_repair.screenplay_artifact_payload(working_script),
+        parent_artifact_ids=[baseline_artifact["id"]],
+    ))
+    mark_baseline_generated(
+        revision.id,
+        baseline_artifact_id=baseline_artifact["id"],
+        working_artifact_id=working_artifact["id"],
+    )
+    mark_first_evaluation(revision.id, "eval_existing")
+    save_checkpoint(revision.id, {
+        "planner_version": "screenplay-repair-7",
+        "phase": "REPAIR_FAILED",
+        "issue_strategy_history": {
+            "legacy-budget-issue": ["prune_dialogue_budget"],
+        },
+        "patch_artifact_ids": [],
+    })
+
+    assert screenplay_production_state("ep_p")[
+        "legacy_dialogue_policy_recovery_available"
+    ] is True
+
+    def passing_qa(_current, **_kwargs):
+        return [], Evaluation(
+            evaluator_type="deterministic",
+            evaluator_name="test",
+            evaluator_version="1",
+            status="passed",
+            hard_gate_passed=True,
+            score=100,
+            issues=[],
+        )
+
+    async def forbidden_baseline(*_args, **_kwargs):
+        raise AssertionError("兼容恢复不得再次调用整版生成")
+
+    monkeypatch.setattr(screenplay_repair, "run_screenplay_qa", passing_qa)
+    monkeypatch.setattr("app.stages.generate_screenplay_baseline", forbidden_baseline)
+    monkeypatch.setattr(
+        screenplay_repair,
+        "publish_screenplay",
+        lambda **kwargs: {"status": "ready", "artifact_id": kwargs["artifact_id"]},
+    )
+
+    result = await screenplay_repair.run_screenplay_production(
+        episode_id="ep_p",
+        episode={
+            "id": "ep_p",
+            "project_id": "proj_p",
+            "episode_no": 1,
+            "target_duration_s": 50,
+        },
+        source_text="第一句 第二句 第三句",
+        bible=Bible(
+            characters=[],
+            world=World(visual_style_canonical="测试画风"),
+        ),
+        resume=True,
+    )
+
+    assert [item.chain_id for item in result.dialogue_chains] == ["DC1", "DC2", "DC3"]
+    resumed = get_production_revision(revision.id)
+    assert resumed is not None
+    assert resumed.baseline_generation_count == 1
+    assert resumed.checkpoint_json["dialogue_policy_recovery"]["restored"] is True
+    assert screenplay_production_state("ep_p")[
+        "legacy_dialogue_policy_recovery_available"
+    ] is False
 
 
 def test_full_regen_denied_is_a_policy_conflict_not_a_media_error():

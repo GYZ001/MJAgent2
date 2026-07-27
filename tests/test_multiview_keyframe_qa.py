@@ -151,6 +151,32 @@ def test_pack_purpose_helper_priority() -> None:
     assert any(r["id"] == "kf" for r in packed)
 
 
+def test_pack_purpose_helper_excludes_unselected_video_purpose() -> None:
+    refs = [
+        {
+            "id": "keep",
+            "type": "plot_key_frame",
+            "selectedForSeedance": True,
+            "qualityScore": 0.9,
+            "purposes": [PURPOSE_VIDEO_INPUT],
+        },
+        {
+            "id": "rejected",
+            "type": "plot_key_frame",
+            "selectedForSeedance": False,
+            "qualityScore": 0.99,
+            "purposes": [PURPOSE_VIDEO_INPUT],
+            "rejectReason": "quality_below_threshold",
+        },
+    ]
+
+    packed = pack_references_by_purpose(
+        refs, max_images=2, continuity_required=False, char_limit=1,
+    )
+
+    assert [ref["id"] for ref in packed] == ["keep"]
+
+
 def test_watermark_not_hard_failure_unless_occluding() -> None:
     from app.db import set_setting
     set_setting("watermark_qa_mode", "ignore_unless_occluding")
@@ -349,6 +375,48 @@ def test_view_input_fingerprint_stable_and_distinct() -> None:
     )
     assert a == b
     assert a != c
+
+
+def test_manifest_allows_explicitly_unmanaged_storyboard_extras() -> None:
+    from app.multiview import manifest_production_blockers
+
+    manifest = {
+        "characters": [{
+            "name": "临时测验员",
+            "asset_required": False,
+            "look_revision_id": None,
+            "selected_view_ids": [],
+            "selected_views": [],
+        }],
+        "scene": {
+            "name": "临时过场",
+            "asset_required": False,
+            "scene_revision_id": None,
+            "selected_view_ids": [],
+            "selected_views": [],
+        },
+    }
+    assert manifest_production_blockers(manifest) == []
+
+    # Frozen manifests from before asset_required existed stay strict.
+    legacy = {"characters": [{"name": "旧角色", "look_revision_id": None}], "scene": None}
+    assert manifest_production_blockers(legacy)
+
+
+def test_asset_requirement_change_invalidates_frozen_manifest() -> None:
+    from app.multiview import manifest_revisions_match
+
+    frozen = {
+        "characters": [{"name": "临时测验员", "look_revision_id": None}],
+        "scene": None,
+    }
+    current = {
+        "characters": [{
+            "name": "临时测验员", "look_revision_id": None, "asset_required": False,
+        }],
+        "scene": None,
+    }
+    assert not manifest_revisions_match(frozen, current)
 
 
 def test_ready_view_fingerprint_reuse_without_regen(tmp_path) -> None:

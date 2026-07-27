@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import type { Shot, ShotVersion, ReferenceImage } from '../api'
 import {
+  REVIEW_TABS,
   currentVersionRefs,
   classifyReferenceBuckets,
   describeShotUpdate,
   refSourceLabel,
+  resolvePreviewVersionId,
   resolveStableShotSelection,
+  shotDetailRefreshKey,
   shouldCommitShotDetail,
 } from './WallPage'
 
@@ -150,5 +153,58 @@ describe('评审对象稳定性', () => {
     const after = { id: 's1', source_excerpt: '新原文', action_desc: '动作', versions: [version('v1', 'queued', [], 1)] } as unknown as Shot
     expect(describeShotUpdate(before, after)).toContain('镜头文字/连续性内容已更新')
     expect(describeShotUpdate(before, after)).toContain('视频版本或采用关系已更新')
+  })
+
+  it('轮询返回等价的新对象时不重复请求镜头详情', () => {
+    const first = {
+      id: 's1',
+      adopted_version_id: null,
+      video_status: 'generating',
+      video_stale: false,
+      versions: [version('v1', 'running', [], 1)],
+    } as Shot
+    const sameSnapshot = JSON.parse(JSON.stringify(first)) as Shot
+
+    expect(shotDetailRefreshKey(sameSnapshot)).toBe(shotDetailRefreshKey(first))
+  })
+
+  it('视频状态或参考图流出时会刷新镜头详情', () => {
+    const running = {
+      id: 's1',
+      adopted_version_id: null,
+      video_status: 'generating',
+      video_stale: false,
+      versions: [version('v1', 'running', [], 1)],
+    } as Shot
+    const withReference = {
+      ...running,
+      versions: [version('v1', 'running', [{
+        id: 'ref-1',
+        type: 'character',
+        source: 'asset_library',
+        image_url: '/assets/ref-1.png',
+        selectedForSeedance: true,
+      }], 1)],
+    } as Shot
+
+    expect(shotDetailRefreshKey(withReference)).not.toBe(shotDetailRefreshKey(running))
+  })
+})
+
+describe('视频预览工作区', () => {
+  it('只保留视频预览入口，不再显示 A/B 视频和评审项菜单', () => {
+    expect(REVIEW_TABS.map(tab => tab.label)).toEqual(['文字内容', '参考图', '视频预览'])
+  })
+
+  it('默认预览最新的可播放候选，并保留用户当前选择', () => {
+    const versions = [
+      { ...version('v1', 'succeeded', [], 1), video_url: '/v1.mp4' },
+      version('v3', 'running', [], 3),
+      { ...version('v2', 'succeeded', [], 2), video_url: '/v2.mp4' },
+    ]
+
+    expect(resolvePreviewVersionId(versions, null)).toBe('v2')
+    expect(resolvePreviewVersionId(versions, 'v1')).toBe('v1')
+    expect(resolvePreviewVersionId(versions, 'deleted')).toBe('v2')
   })
 })

@@ -43,6 +43,40 @@ class ConfirmationEvaluation:
         self.estimated_cost_cny = estimated_cost_cny
 
 
+def _is_storyboard_terminal_for_confirmation(
+    episode,
+    checkpoint,
+    *,
+    shot_count: int,
+    planned_shots: int,
+    final_shot_valid: bool,
+    automated: bool,
+) -> bool:
+    """Allow the supervisor's internal confirmation phase without weakening manual confirmation."""
+    if shot_count <= 0 or shot_count != planned_shots or not final_shot_valid:
+        return False
+    if checkpoint is not None:
+        phase = str(getattr(checkpoint, "phase", "") or "")
+        validated = int(getattr(checkpoint, "validated_prefix_end", 0) or 0)
+        expected = int(getattr(checkpoint, "expected_total", 0) or planned_shots)
+        checkpoint_complete = bool(
+            phase in {"PREPARING_CONFIRM", "CONFIRMING", "SUCCEEDED"}
+            and validated == shot_count
+            and expected == shot_count
+        )
+        if automated and checkpoint_complete:
+            return True
+        # A stopped internal confirmation may be completed manually once the episode
+        # is no longer being written. The full confirmation evaluation still runs below.
+        if episode["status"] == "scripted" and checkpoint_complete:
+            return True
+    return bool(
+        episode["status"] == "scripted"
+        and not episode["script_error"]
+        and checkpoint is None
+    )
+
+
 def evaluate_storyboard_for_confirmation(
     episode,
     storyboard: Storyboard,
@@ -137,12 +171,13 @@ def create_storyboard_confirmation_preview(episode_id: str, *, automated: bool =
     )
     board = _board_from_shot_rows(rows, ep["episode_no"])
     final_valid = bool(board.shots and board.shots[-1].is_final)
-    terminal = bool(
-        ep["status"] == "scripted"
-        and not ep["script_error"]
-        and len(rows) == planned
-        and final_valid
-        and (cp is None or cp.phase == "SUCCEEDED")
+    terminal = _is_storyboard_terminal_for_confirmation(
+        ep,
+        cp,
+        shot_count=len(rows),
+        planned_shots=planned,
+        final_shot_valid=final_valid,
+        automated=automated,
     )
     evidence_errors: list[str] = []
     for row in rows:
@@ -716,6 +751,24 @@ async def generate_episode(episode_id: str, body: dict | None = None):
             raise HTTPException(404, f"未找到镜 {from_no}")
     else:
         selected = shots
+    # Quick generation must not create one doomed paid-version record per shot.
+    # The completion supervisor owns the self-healing asset preparation path.
+    from app.multiview import scan_episode_reference_asset_gaps
+    asset_gaps = scan_episode_reference_asset_gaps(
+        project_id=ep["project_id"],
+        episode_no=int(ep["episode_no"]),
+        shots=[(item["row"]["id"], item["shot"]) for item in selected],
+    )
+    if asset_gaps["blockers"]:
+        names = [
+            *(f"人物「{name}」" for name in asset_gaps["characters"]),
+            *(f"场景「{name}」" for name in asset_gaps["scenes"]),
+        ]
+        summary = "、".join(names) or "本集生产资产"
+        raise HTTPException(
+            409,
+            f"{summary}尚未就绪。为避免整集批量失败，请使用“补齐到全片可用”，系统会先补齐资产再生成视频。",
+        )
     # 不再预先清空 adopted_version_id：新版本成功并通过技术门禁后由
     # select_best_video_candidate 比较切换；任务失败时保留原可交付采用结果。
     # 固定参考图模式：批量生成前确保每个选中镜都有固定参考图计划。

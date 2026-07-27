@@ -43,7 +43,7 @@ from app.renderability import OVERDETAIL_TERMS
 
 MAX_REPAIR_ACTIVATION_PATCHES = 12
 MAX_STRATEGY_ATTEMPTS_PER_ISSUE = 3
-SCREENPLAY_REPAIR_PLANNER_VERSION = "screenplay-repair-7"
+SCREENPLAY_REPAIR_PLANNER_VERSION = "screenplay-repair-8"
 
 _SCENE_STORY_FUNCTION_CODES = {
     "SCENE_STORY_FUNCTION_TOO_SHORT",
@@ -100,6 +100,17 @@ def _strategy_attempt_count(entries: list[str]) -> int:
     return sum(
         1 for entry in entries
         if entry and not entry.startswith(("fail:", "exhausted"))
+    )
+
+
+def _used_retired_dialogue_budget_policy(
+    history: dict[str, list[str]] | None,
+) -> bool:
+    return any(
+        entry == "prune_dialogue_budget"
+        or entry.startswith("prune_dialogue_budget:")
+        for entries in (history or {}).values()
+        for entry in (entries or [])
     )
 
 
@@ -512,6 +523,11 @@ async def run_screenplay_production(
         rev = get_production_revision(rev.id)  # type: ignore[assignment]
 
     checkpoint = dict(rev.checkpoint_json or {})
+    legacy_strategy_history = dict(checkpoint.get("issue_strategy_history") or {})
+    retired_dialogue_budget_prune_detected = bool(
+        checkpoint.get("retired_dialogue_budget_prune_detected")
+        or _used_retired_dialogue_budget_policy(legacy_strategy_history)
+    )
     if checkpoint.get("planner_version") != SCREENPLAY_REPAIR_PLANNER_VERSION:
         # 新规划器必须能接管旧 working artifact；旧版 exhausted 不能永久封死新策略。
         checkpoint = {
@@ -519,6 +535,9 @@ async def run_screenplay_production(
             "planner_version": SCREENPLAY_REPAIR_PLANNER_VERSION,
             "issue_strategy_history": {},
             "yield_reason": "planner_upgraded",
+            "retired_dialogue_budget_prune_detected": (
+                retired_dialogue_budget_prune_detected
+            ),
         }
     strategy_history: dict[str, list[str]] = dict(checkpoint.get("issue_strategy_history") or {})
     patch_ids: list[str] = list(checkpoint.get("patch_artifact_ids") or [])
@@ -585,6 +604,81 @@ async def run_screenplay_production(
             )
     elif not rev.working_artifact_id:
         raise RuntimeError("revision 已有 baseline 计数但缺少 working artifact")
+
+    # 兼容旧版把对白数量软建议当硬上限的历史工作副本。只有审计历史明确记录过
+    # prune_dialogue_budget，且当前链是 Baseline 的未改写子集时，才通过正式 Patch
+    # 恢复被整组裁掉的对白链。正文、人工修改和其他局部 Patch 均不会被覆盖。
+    recovery_state = dict(checkpoint.get("dialogue_policy_recovery") or {})
+    if retired_dialogue_budget_prune_detected and not recovery_state.get("completed"):
+        rev = get_production_revision(rev.id)  # type: ignore[assignment]
+        baseline_id = str(rev.baseline_artifact_id or "")
+        working_id = str(rev.working_artifact_id or "")
+        working_art = evidence_repository.get_artifact(working_id) if working_id else None
+        if baseline_id and working_art:
+            working_hash = (
+                working_art.get("content_hash")
+                or evidence_repository.content_hash(working_art.get("content"))
+            )
+            if rev.grant_id:
+                assert_grant_allows(
+                    rev.grant_id,
+                    command="screenplay.patch",
+                    episode_id=episode_id,
+                )
+            recovery_result = apply_screenplay_patch(
+                PatchRequest(
+                    production_revision_id=rev.id,
+                    expected_artifact_id=working_id,
+                    expected_hash=working_hash,
+                    issue_set_hash="retired-dialogue-budget-policy",
+                    operations=[PatchOperation(
+                        op="restore_dialogue_chains_from_baseline",
+                        target={
+                            "kind": "dialogue_chains",
+                            "baseline_artifact_id": baseline_id,
+                        },
+                    )],
+                    idempotency_key=f"{rev.id}:restore-retired-dialogue-budget",
+                    reason="旧版对白数量上限已退役；恢复曾被整组裁掉的 Baseline 对白链",
+                ),
+                episode_id=episode_id,
+            )
+            completed = bool(recovery_result.ok) or "no-op" in str(
+                recovery_result.error or ""
+            )
+            if recovery_result.patch_artifact_id:
+                patch_ids.append(recovery_result.patch_artifact_id)
+            checkpoint = {
+                **checkpoint,
+                "dialogue_policy_recovery": {
+                    "completed": completed,
+                    "restored": bool(recovery_result.ok),
+                    "baseline_artifact_id": baseline_id,
+                    "working_artifact_id": (
+                        recovery_result.after_artifact_id or working_id
+                    ),
+                    "error": None if completed else recovery_result.error,
+                },
+                "patch_artifact_ids": patch_ids,
+            }
+            save_checkpoint(rev.id, checkpoint)
+            if run_id:
+                evidence_repository.append_event(
+                    run_id,
+                    "RETIRED_DIALOGUE_POLICY_RECOVERED"
+                    if recovery_result.ok
+                    else "RETIRED_DIALOGUE_POLICY_RECOVERY_SKIPPED",
+                    "info" if completed else "warning",
+                    "已按当前规则恢复旧上限裁掉的对白链"
+                    if recovery_result.ok
+                    else "旧对白上限恢复检查未改动工作副本",
+                    payload={
+                        "baseline_artifact_id": baseline_id,
+                        "before_artifact_id": working_id,
+                        "after_artifact_id": recovery_result.after_artifact_id,
+                        "error": recovery_result.error,
+                    },
+                )
 
     # ---- Repair loop ----
     patches_this_activation = 0

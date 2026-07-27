@@ -15,6 +15,7 @@ from fastapi import HTTPException
 from app import config
 from app.db import get_conn, now
 from app.evidence import repository as evidence_repository
+from app.source_excerpt import align_source_excerpt
 
 
 PREVIEW_TTL_S = 10 * 60
@@ -454,6 +455,71 @@ def source_binding_for_shot(shot_id: str) -> dict[str, Any] | None:
         "SELECT * FROM storyboard_source_bindings WHERE shot_id=?", (shot_id,),
     ).fetchone()
     return dict(row) if row else None
+
+
+def repair_generated_source_bindings(episode_id: str) -> dict[str, Any]:
+    """Bind or safely realign unbound AI-generated source excerpts.
+
+    Only a sufficiently strong contiguous match in an authorized chapter is
+    accepted.  Existing bindings are never rewritten here; version drift and
+    human-authored bindings continue through the strict validation path.
+    """
+    conn = get_conn()
+    sources = chapter_sources(episode_id)
+    shots = conn.execute(
+        """SELECT s.id,s.shot_no,s.source_excerpt
+           FROM shots s
+           LEFT JOIN storyboard_source_bindings b ON b.shot_id=s.id
+           WHERE s.episode_id=? AND b.shot_id IS NULL
+           ORDER BY s.shot_no""",
+        (episode_id,),
+    ).fetchall()
+    bound = 0
+    realigned = 0
+    unresolved: list[int] = []
+    for row in shots:
+        candidate = (row["source_excerpt"] or "").strip()
+        matches = []
+        for source in sources:
+            aligned = align_source_excerpt(candidate, source["content"] or "")
+            if aligned is not None:
+                matches.append((aligned.match_chars, int(aligned.exact), source, aligned))
+        if not matches:
+            unresolved.append(int(row["shot_no"]))
+            continue
+        _score, _exact, source, aligned = max(matches, key=lambda item: (item[0], item[1]))
+        if aligned.excerpt != candidate:
+            conn.execute(
+                "UPDATE shots SET source_excerpt=? WHERE id=?",
+                (aligned.excerpt, row["id"]),
+            )
+            realigned += 1
+        excerpt_hash = hashlib.sha256(aligned.excerpt.encode("utf-8")).hexdigest()
+        conn.execute(
+            """INSERT INTO storyboard_source_bindings(
+                   shot_id,chapter_id,chapter_idx,source_version_hash,start_offset,end_offset,
+                   excerpt_hash,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?)""",
+            (
+                row["id"], int(source["id"]), int(source["idx"]),
+                source["source_version_hash"], aligned.start_offset,
+                aligned.end_offset, excerpt_hash, now(),
+            ),
+        )
+        bound += 1
+    conn.commit()
+    if bound:
+        _inc(
+            "storyboard_source_evidence_auto_bound_total",
+            episode_id=episode_id,
+            bound=bound,
+            realigned=realigned,
+        )
+    return {
+        "bound": bound,
+        "realigned": realigned,
+        "unresolved_shot_nos": unresolved,
+    }
 
 
 def verify_or_bind_existing_excerpt(

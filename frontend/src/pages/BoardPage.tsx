@@ -234,13 +234,16 @@ export default function BoardPage() {
   const [characterFilter, setCharacterFilter] = useState('')
   const [capacityFilter, setCapacityFilter] = useState(false)
   const [riskFilter, setRiskFilter] = useState(false)
-  const [detailsOpen, setDetailsOpen] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [progressOpen, setProgressOpen] = useState(false)
+  const [recoveredStatus, setRecoveredStatus] = useState<StoryboardStatus | null>(null)
   const [startPreview, setStartPreview] = useState<StartPreview | null>(null)
   const [autoConfirm, setAutoConfirm] = useState(false)
   const [confirmPreview, setConfirmPreview] = useState<ConfirmPreview | null>(null)
   const [cancelOpen, setCancelOpen] = useState(false)
   const [structurePreview, setStructurePreview] = useState<StructurePreview | null>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
+  const moreActionsRef = useRef<HTMLDetailsElement>(null)
   const startPreviewTriggerRef = useRef<HTMLElement | null>(null)
   const storyboardTimer = useTaskTimer(`episode.${episodeId}.storyboard`, ep?.storyboard_status?.state === 'running')
 
@@ -256,7 +259,7 @@ export default function BoardPage() {
   const selectedShot = visibleShots.find(shot => shot.id === selectedShotId) ?? visibleShots[0] ?? shots[0]
   const selectedIndex = Math.max(0, visibleShots.findIndex(shot => shot.id === selectedShot?.id))
   const absoluteIndex = shots.findIndex(shot => shot.id === selectedShot?.id)
-  const status = ep?.storyboard_status ?? (ep ? statusFallback(ep) : null)
+  const status = ep?.storyboard_status ?? recoveredStatus ?? (ep ? statusFallback(ep) : null)
 
   const scenes = useMemo(() => [...new Set(shots.map(shot => shot.scene_setting).filter(Boolean))], [shots])
   const characters = useMemo(() => [...new Set(shots.flatMap(shot => [...(shot.characters ?? []), ...(shot.audio_cast ?? [])]).filter(Boolean))], [shots])
@@ -269,6 +272,37 @@ export default function BoardPage() {
     timelineRef.current?.querySelector<HTMLElement>('[aria-current="true"]')
       ?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' })
   }, [selectedShotId])
+
+  // 兼容缺少内嵌 storyboard_status 的旧详情响应，避免页面永久停在只读占位态。
+  useEffect(() => {
+    if (!ep || ep.storyboard_status) {
+      setRecoveredStatus(null)
+      return
+    }
+    let active = true
+    void api.get(`/episodes/${ep.id}/storyboard/status`)
+      .then(value => { if (active) setRecoveredStatus(value as StoryboardStatus) })
+      .catch(() => { /* 仍保留安全只读占位态，由手动刷新继续恢复。 */ })
+    return () => { active = false }
+  }, [ep?.id, Boolean(ep?.storyboard_status)])
+
+  useEffect(() => {
+    if (!menuOpen) return
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      if (!moreActionsRef.current?.contains(event.target as Node)) setMenuOpen(false)
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      setMenuOpen(false)
+      moreActionsRef.current?.querySelector<HTMLElement>('summary')?.focus()
+    }
+    document.addEventListener('pointerdown', closeOnOutsideClick)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsideClick)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [menuOpen])
 
   const selectRelative = (offset: number) => {
     if (!visibleShots.length) return
@@ -304,6 +338,16 @@ export default function BoardPage() {
       return undefined
     } finally {
       setBusy(false)
+    }
+  }
+
+  const refreshBoardState = async () => {
+    await refresh()
+    if (ep.storyboard_status) return
+    try {
+      setRecoveredStatus(await api.get(`/episodes/${ep.id}/storyboard/status`) as StoryboardStatus)
+    } catch {
+      // 详情与轻量状态接口都不可用时继续展示安全占位态。
     }
   }
 
@@ -349,7 +393,7 @@ export default function BoardPage() {
       case 'go_screenplay': go('script', projectId, ep.id); break
       case 'generate_storyboard': await loadStartPreview('create'); break
       case 'resume_storyboard': await loadStartPreview('resume'); break
-      case 'view_progress': setDetailsOpen(true); document.getElementById('storyboard-progress')?.scrollIntoView({ behavior: 'smooth' }); break
+      case 'view_progress': setProgressOpen(true); window.requestAnimationFrame(() => document.getElementById('storyboard-progress')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })); break
       case 'confirm_storyboard': {
         setBusy(true)
         try { setConfirmPreview(await api.post(`/episodes/${ep.id}/confirm-preview`) as ConfirmPreview) }
@@ -366,7 +410,7 @@ export default function BoardPage() {
         break
       }
       case 'go_review_wall': go('wall', projectId, ep.id); break
-      default: await refresh()
+      default: await refreshBoardState()
     }
   }
 
@@ -419,10 +463,15 @@ export default function BoardPage() {
   const totalDuration = shots.reduce((total, shot) => total + shot.duration_s, 0)
   const primaryLabel: Record<StoryboardStatus['recommended_action'], string> = {
     go_screenplay: '先去剧本台', generate_storyboard: '生成分镜', view_progress: '查看分镜进度',
-    resume_storyboard: `继续生成分镜${status.validated_shots ? `（从第 ${status.validated_shots + 1} 镜）` : ''}`,
+    resume_storyboard: status.final_shot_valid && status.produced_shots >= status.planned_shots
+      ? '修复分镜问题'
+      : `继续生成分镜${status.validated_shots ? `（从第 ${status.validated_shots + 1} 镜）` : ''}`,
     confirm_storyboard: '确认分镜', go_review_wall: '进入评审墙', refresh_status: '刷新状态',
   }
   const showLaunchPanel = !shots.length && (status.state === 'empty' || status.state === 'no_screenplay')
+  const syncAction = status.recommended_action === 'refresh_status'
+  const canCreateRevision = status.state !== 'running' && status.screenplay_available && status.editable
+  const revisionBlockReason = status.write_block_reason || '当前状态暂不可创建新的分镜修订'
 
   return (
     <>
@@ -447,16 +496,21 @@ export default function BoardPage() {
             </div>
           </div>
           <div className="board-action-group">
-            <button type="button" className="btn primary board-primary-action" disabled={busy} onClick={() => void runPrimary()}>
+            <button type="button" className={`btn board-primary-action${syncAction ? ' is-sync' : ' primary'}`} disabled={busy} onClick={() => void runPrimary()}>
               {busy ? '处理中…' : primaryLabel[status.recommended_action]}
             </button>
-            <details className="board-more-actions" open={detailsOpen} onToggle={event => setDetailsOpen(event.currentTarget.open)}>
-              <summary className="btn ghost">更多操作</summary>
-              <div className="board-more-menu">
-                {status.state === 'running' && <button type="button" onClick={() => void requestPauseAndEdit()}>暂停并编辑</button>}
-                {status.state === 'running' && <button type="button" onClick={() => setCancelOpen(true)}>取消本次生成</button>}
-                {status.state !== 'running' && status.screenplay_available && <button type="button" onClick={() => void loadStartPreview('create')}>创建新的分镜修订</button>}
-                <button type="button" onClick={() => void refresh()}>刷新状态</button>
+            <details ref={moreActionsRef} className="board-more-actions" open={menuOpen} onToggle={event => setMenuOpen(event.currentTarget.open)}>
+              <summary className="btn ghost"><span>更多操作</span><i aria-hidden="true" /></summary>
+              <div className="board-more-menu" role="menu">
+                {status.state === 'running' && <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); void requestPauseAndEdit() }}>暂停并编辑</button>}
+                {status.state === 'running' && <button type="button" role="menuitem" className="danger" onClick={() => { setMenuOpen(false); setCancelOpen(true) }}>取消本次生成</button>}
+                {status.state !== 'running' && status.screenplay_available && <button type="button" role="menuitem" disabled={!canCreateRevision || busy}
+                  title={!canCreateRevision ? revisionBlockReason : undefined}
+                  onClick={() => { setMenuOpen(false); void loadStartPreview('create') }}>创建新的分镜修订</button>}
+                {(status.state === 'running' || ep.supervisor) && status.recommended_action !== 'view_progress' && <button type="button" role="menuitem" onClick={() => {
+                  setProgressOpen(value => !value); setMenuOpen(false)
+                }}>{progressOpen ? '收起进度详情' : '查看进度详情'}</button>}
+                {!syncAction && <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); void refreshBoardState() }}>刷新状态</button>}
               </div>
             </details>
           </div>
@@ -467,9 +521,9 @@ export default function BoardPage() {
           <span><b>v{status.snapshot_version}</b> 状态快照</span>
           <span><b>{shots.filter(isStoryboardProblemShot).length}</b> 问题镜</span>
         </div>
-        {status.write_block_reason && status.state === 'syncing' && <div className="error-banner" role="status">{status.write_block_reason}</div>}
+        {status.write_block_reason && status.state === 'syncing' && <div className="board-sync-banner" role="status"><b>正在同步状态</b><span>{status.write_block_reason}</span></div>}
         {(status.state === 'running' || ep.supervisor) && (
-          <div id="storyboard-progress" className={`board-progress-drawer ${detailsOpen ? 'open' : ''}`}>
+          <div id="storyboard-progress" className={`board-progress-drawer ${progressOpen ? 'open' : ''}`}>
             <SupervisorPanel api={api} episodeId={ep.id} runId={ep.active_storyboard_run_id}
               supervisor={ep.supervisor} scripting={status.state === 'running'} onChanged={() => { void refresh() }} />
           </div>
@@ -622,6 +676,10 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
   const overCapacity = currentChars > spokenLimit
   const prevConflict = Boolean(edit && previous?.state_out?.trim() && edit.state_in?.trim() && previous.state_out.trim() !== edit.state_in.trim())
   const nextConflict = Boolean(edit && next?.state_in?.trim() && edit.state_out?.trim() && next.state_in.trim() !== edit.state_out.trim())
+  const structureEditEnabled = status.feature_flags?.structure_edit !== false
+  const actionBlockReason = !structureEditEnabled
+    ? '镜头结构编辑已由管理员关闭'
+    : status.write_block_reason || '当前状态暂不可修改或删除，请先刷新状态'
 
   const characterOptions = useMemo(() => [...new Set([
     ...(episode.shots ?? []).flatMap(item => item.characters ?? []),
@@ -768,10 +826,11 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
         </div>
         <div className="shot-head-actions">
           {shot.spoken_contract_status === 'conflict' && <button className="btn small ghost" onClick={() => setConflictOpen(true)}>解决口播冲突</button>}
+          {!edit && !status.editable && <span className="shot-actions-locked" role="status">{actionBlockReason}</span>}
           {!edit ? <>
-            {status.feature_flags?.structure_edit !== false && <button className="btn small danger" disabled={disabled || !status.editable}
-              title={status.write_block_reason || '删除前会展示镜号重排、相邻重验和媒体失效影响'}
-              onClick={() => void onStructure('delete')}>删除镜头</button>}
+            <button className="btn small danger shot-delete-action" disabled={disabled || !status.editable || !structureEditEnabled}
+              title={!status.editable || !structureEditEnabled ? actionBlockReason : '删除前会展示镜号重排、相邻重验和媒体失效影响'}
+              onClick={() => void onStructure('delete')}>删除镜头</button>
             <button className="btn small" disabled={disabled || !status.editable} title={status.write_block_reason || undefined} onClick={() => void beginEdit()}>修改</button>
           </> : <>
             <button className="btn small primary" disabled={!dirty || overCapacity || !edit.characters.length} onClick={() => void previewSave()}>保存前预览</button>

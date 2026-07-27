@@ -1,7 +1,11 @@
 """Unified startup reconciliation for every durable background workflow."""
 from __future__ import annotations
 
-import fcntl
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+    import msvcrt
 from pathlib import Path
 import time
 from typing import Any
@@ -11,6 +15,25 @@ from app.config import DATA_DIR
 
 _last_report: dict[str, Any] = {}
 _runtime_lock_handle = None
+
+
+def _try_lock(handle) -> None:
+    handle.seek(0)
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return
+    try:
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError as exc:
+        raise BlockingIOError from exc
+
+
+def _unlock(handle) -> None:
+    handle.seek(0)
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    else:
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def acquire_runtime_recovery_lock(
@@ -28,11 +51,11 @@ def acquire_runtime_recovery_lock(
         return True
     lock_path = path or (DATA_DIR / ".runtime-recovery.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    handle = lock_path.open("a+", encoding="utf-8")
+    handle = lock_path.open("a+b")
     deadline = time.monotonic() + max(float(wait_timeout_s), 0.0)
     while True:
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _try_lock(handle)
             break
         except BlockingIOError:
             if time.monotonic() >= deadline:
@@ -52,7 +75,7 @@ def release_runtime_recovery_lock() -> None:
     if handle is None:
         return
     try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        _unlock(handle)
     finally:
         handle.close()
 

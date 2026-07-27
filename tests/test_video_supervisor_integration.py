@@ -1,6 +1,7 @@
 """视频 Supervisor 集成 / 成本回归（进程内假入队，不打真实 Seedance）。"""
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from types import SimpleNamespace
@@ -255,6 +256,62 @@ def test_adopted_stale_shot_is_protected_and_only_unadopted_is_actionable(memdb)
     assert [entry.shot_no for entry in ledger.actionable()] == [2]
     assert ledger.coverage_rate == pytest.approx(0.5)
     assert missing.adopted_version_id is None
+
+
+def test_per_shot_artifact_inside_current_episode_aggregate_is_not_stale(memdb):
+    from app.domain.storyboard_ops import _shot_video_is_stale
+    from app.harness.types import EvidenceArtifact
+
+    eid, _ = _seed_episode(memdb, 1)
+    shot_id = f"{eid}_shot_1"
+    shot_art = evidence_repository.create_artifact(EvidenceArtifact(
+        type="storyboard_shot",
+        scope_type="storyboard_checkpoint",
+        scope_id=f"{eid}:1",
+        status="approved",
+        trust_level="T2",
+        content={"shot_no": 1},
+    ))
+    episode_art = evidence_repository.create_artifact(EvidenceArtifact(
+        type="storyboard",
+        scope_type="episode",
+        scope_id=eid,
+        status="approved",
+        trust_level="T4",
+        content={"episode_no": 1},
+        parent_artifact_ids=[shot_art["id"]],
+    ))
+    version_id = _add_succeeded_version(
+        memdb, shot_id, qa={"overall": 0.9, "failure_types": []},
+    )
+    video_art = evidence_repository.create_artifact(EvidenceArtifact(
+        type="shot_video",
+        scope_type="shot",
+        scope_id=shot_id,
+        status="validated",
+        trust_level="T3",
+        content={"version_id": version_id},
+        parent_artifact_ids=[shot_art["id"]],
+    ))
+    memdb.execute(
+        "UPDATE episodes SET storyboard_artifact_id=? WHERE id=?",
+        (episode_art["id"], eid),
+    )
+    memdb.execute(
+        "UPDATE shots SET storyboard_artifact_id=? WHERE id=?",
+        (shot_art["id"], shot_id),
+    )
+    memdb.execute(
+        "UPDATE shot_versions SET artifact_id=? WHERE id=?",
+        (video_art["id"], version_id),
+    )
+    memdb.commit()
+
+    shot_row = memdb.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
+    ledger = rebuild_coverage_ledger(eid, fallback_quota=0)
+
+    assert ledger.entries[0].video_stale is False
+    assert _shot_video_is_stale(memdb, shot_row, episode_art["id"]) is False
 
 
 def test_integration_fallback_b_with_reason(memdb):
@@ -556,6 +613,59 @@ async def test_watchdog_closes_stale_run_when_task_record_is_missing(memdb, monk
     assert dict(episode) == {
         "status": "confirmed", "video_completion_mode": "quick", "active_video_run_id": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_asset_preparation_heartbeat_prevents_watchdog_takeover(memdb, monkeypatch):
+    import app.video_supervisor as video_supervisor
+
+    eid, _ = _seed_episode(memdb, 1)
+    run_id = evidence_repository.create_run(
+        workflow_type="episode_video_completion",
+        scope_type="episode",
+        scope_id=eid,
+        input_fingerprint="slow-reference-preparation",
+        deadline_at=500,
+    )
+    memdb.execute(
+        "UPDATE workflow_runs SET status='RUNNING', started_at=1, updated_at=1 WHERE id=?",
+        (run_id,),
+    )
+    memdb.execute(
+        """UPDATE episodes SET status='generating', video_completion_mode='complete',
+                   active_video_run_id=? WHERE id=?""",
+        (run_id, eid),
+    )
+    memdb.commit()
+    cp = VideoSupervisorCheckpoint(
+        episode_id=eid,
+        run_id=run_id,
+        phase="PREPARING_ASSETS",
+        started_at=1,
+        deadline_at=500,
+        budget={"cap_cny": 150},
+        coverage={"fallback_quota": 0},
+    )
+    clock = {"now": 100.0}
+    monkeypatch.setattr(video_supervisor, "now", lambda: clock["now"])
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        video_supervisor._asset_prep_heartbeat(
+            cp, run_id=run_id, stop=stop, interval_s=0.01,
+        )
+    )
+    await asyncio.sleep(0.03)
+    stop.set()
+    await task
+
+    assert memdb.execute(
+        "SELECT updated_at FROM workflow_runs WHERE id=?", (run_id,),
+    ).fetchone()["updated_at"] == 100.0
+    clock["now"] = 150.0
+    assert await reconcile_stale_video_supervisors() == 0
+    assert memdb.execute(
+        "SELECT active_video_run_id FROM episodes WHERE id=?", (eid,),
+    ).fetchone()["active_video_run_id"] == run_id
 
 
 def test_terminal_continuity_wait_becomes_routable_issue(memdb):
