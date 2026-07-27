@@ -8,7 +8,8 @@ from app import api, db, planning
 from app.capabilities import attachments, ensure_catalog_loaded
 from app.capabilities.bus import reset_command_bus_for_tests, set_request_approval_token
 from app.capabilities.policy import reset_approvals_for_tests
-from app.local_session import APPROVAL_HEADER
+from app.local_session import APPROVAL_HEADER, ensure_session_secret, set_request_session_id
+from tests.conftest import SessionTestClient
 
 
 @pytest.fixture
@@ -26,14 +27,16 @@ def client(tmp_path, monkeypatch):
     @test_app.middleware("http")
     async def inject_approval_token(request: Request, call_next):
         set_request_approval_token(request.headers.get(APPROVAL_HEADER))
+        set_request_session_id(ensure_session_secret())
         try:
             return await call_next(request)
         finally:
             set_request_approval_token(None)
+            set_request_session_id(None)
 
     test_app.include_router(api.router)
     with TestClient(test_app) as test_client:
-        yield test_client
+        yield SessionTestClient(test_client)
     attachments.reset_for_tests()
 
 

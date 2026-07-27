@@ -9,6 +9,7 @@ import socket
 import string
 import time
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
@@ -20,6 +21,8 @@ from app.db import get_conn, get_setting, new_id, rows_to_dicts, set_setting
 from app.local_session import require_local_session
 
 router = APIRouter(prefix="/api")
+# 公开探活路由：不挂本机会话依赖（由 main 单独 include）。
+public_router = APIRouter(prefix="/api")
 
 _MONITOR_EVENTS = {
     "block_load", "drilldown", "deep_link", "job_action", "gate_action",
@@ -76,6 +79,57 @@ def _is_blocked_fs_path(path: Path) -> bool:
     return False
 
 
+def _list_directory_grants() -> list[str]:
+    try:
+        raw = json.loads(get_setting("directory_grants") or "[]")
+    except (TypeError, json.JSONDecodeError):
+        return []
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw:
+        text = str(item or "").strip()
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
+def _builtin_directory_roots() -> list[Path]:
+    """默认可浏览/建目录根：仅项目与数据目录，不开放家目录枚举（Todolist T5）。"""
+    return [config.PROJECTS_DIR.resolve(), config.DATA_DIR.resolve()]
+
+
+def allowed_directory_roots() -> list[Path]:
+    roots = list(_builtin_directory_roots())
+    for grant in _list_directory_grants():
+        try:
+            path = Path(grant).expanduser().resolve()
+        except OSError:
+            continue
+        if _is_blocked_fs_path(path):
+            continue
+        if path not in roots:
+            roots.append(path)
+    return roots
+
+
+def assert_path_under_directory_grant(path: Path) -> Path:
+    """路径必须落在 builtin 根或已授权 directory_grant 之下。"""
+    try:
+        resolved = path.expanduser().resolve()
+    except OSError as exc:
+        raise HTTPException(400, f"路径不可解析：{path}") from exc
+    if _is_blocked_fs_path(resolved):
+        raise HTTPException(403, f"不允许访问系统敏感目录：{resolved}")
+    for root in allowed_directory_roots():
+        try:
+            resolved.relative_to(root)
+            return resolved
+        except ValueError:
+            continue
+    raise HTTPException(403, f"路径不在已授权 directory_grant 白名单内：{resolved}")
+
+
 def _list_drives() -> list[str]:
     if os.name != "nt":
         return []
@@ -84,18 +138,20 @@ def _list_drives() -> list[str]:
 
 @router.get("/system/browse")
 def browse_dir(path: str = ""):
-    """列出某目录下的子目录，供前端目录选择器逐级浏览。
-    path 为空时：Windows 返回盘符列表，POSIX 从用户主目录开始。"""
+    """列出已授权根或其子目录；空 path 返回白名单根，不枚举家目录。"""
     drives = _list_drives()
     p = (path or "").strip()
     if not p:
-        if os.name == "nt":
-            return {"path": "", "parent": None, "drives": drives,
-                    "dirs": [{"name": d, "path": d} for d in drives]}
-        p = str(Path.home())
+        roots = allowed_directory_roots()
+        return {
+            "path": "",
+            "parent": None,
+            "drives": drives,
+            "dirs": [{"name": root.name or str(root), "path": str(root)} for root in roots],
+            "grants": [str(root) for root in roots],
+        }
     base = Path(p)
-    if _is_blocked_fs_path(base):
-        raise HTTPException(403, f"不允许浏览系统敏感目录：{p}")
+    assert_path_under_directory_grant(base)
     if not base.exists() or not base.is_dir():
         raise HTTPException(404, f"目录不存在：{p}")
     dirs = []
@@ -103,15 +159,51 @@ def browse_dir(path: str = ""):
         for child in sorted(base.iterdir(), key=lambda x: x.name.lower()):
             try:
                 if child.is_dir() and not _is_blocked_fs_path(child):
-                    dirs.append({"name": child.name, "path": str(child)})
+                    # 子目录仍须落在 grant 内（通常自然满足）
+                    try:
+                        assert_path_under_directory_grant(child)
+                    except HTTPException:
+                        continue
+                    dirs.append({"name": child.name, "path": str(child.resolve())})
             except OSError:
                 continue  # 个别子项无权访问/不可达，跳过
     except PermissionError:
         raise HTTPException(403, f"无权访问：{p}")
     parent = str(base.parent) if base.parent != base else None
-    if parent and _is_blocked_fs_path(Path(parent)):
-        parent = None
-    return {"path": str(base), "parent": parent, "drives": drives, "dirs": dirs}
+    if parent:
+        try:
+            assert_path_under_directory_grant(Path(parent))
+        except HTTPException:
+            parent = None
+    return {"path": str(base.resolve()), "parent": parent, "drives": drives, "dirs": dirs}
+
+
+@router.post("/system/directory-grants")
+def grant_directory(body: dict):
+    """人工授权一个可浏览/建子目录的根路径（Todolist T5）。"""
+    raw = str(body.get("path") or "").strip()
+    if not raw:
+        raise HTTPException(422, "缺少 path")
+    path = Path(raw).expanduser()
+    try:
+        resolved = path.resolve()
+    except OSError as exc:
+        raise HTTPException(400, f"路径不可解析：{raw}") from exc
+    if _is_blocked_fs_path(resolved):
+        raise HTTPException(403, f"不允许授权系统敏感目录：{resolved}")
+    if not resolved.exists() or not resolved.is_dir():
+        raise HTTPException(404, f"目录不存在：{resolved}")
+    grants = _list_directory_grants()
+    text = str(resolved)
+    if text not in grants:
+        grants.append(text)
+        set_setting("directory_grants", json.dumps(grants, ensure_ascii=False))
+    return {"ok": True, "path": text, "grants": [str(r) for r in allowed_directory_roots()]}
+
+
+@router.get("/system/directory-grants")
+def list_directory_grants_route():
+    return {"grants": [str(r) for r in allowed_directory_roots()]}
 
 
 @router.post("/system/mkdir")
@@ -128,7 +220,7 @@ async def make_dir_route(body: dict):
 
 
 def make_dir(body: dict):
-    """领域实现：创建子目录（供 Command Handler 与路由共用）。"""
+    """领域实现：仅允许在已授权 directory_grant 下创建子目录。"""
     parent = (body.get("path") or "").strip()
     name = (body.get("name") or "").strip()
     if not parent or not name:
@@ -137,14 +229,14 @@ def make_dir(body: dict):
         raise HTTPException(422, '文件夹名含非法字符（不能包含 \\ / : * ? " < > |）')
     if name in {".", ".."}:
         raise HTTPException(422, "文件夹名非法")
-    parent_path = Path(parent)
-    if _is_blocked_fs_path(parent_path):
-        raise HTTPException(403, f"不允许在系统敏感目录下创建：{parent}")
+    parent_path = assert_path_under_directory_grant(Path(parent))
     if not parent_path.exists() or not parent_path.is_dir():
         raise HTTPException(404, f"父目录不存在：{parent}")
     dest = parent_path / name
     if _is_blocked_fs_path(dest):
         raise HTTPException(403, "目标路径不被允许")
+    # 新建目标也必须仍在同一 grant 树下
+    assert_path_under_directory_grant(dest)
     try:
         dest.mkdir(parents=False, exist_ok=True)
     except OSError as e:
@@ -471,7 +563,7 @@ def put_model_credentials(model_id: str, body: dict):
     set_setting("model_credentials", json.dumps(credentials, ensure_ascii=False))
     return {"ok": True, "key_configured": True}
 
-@router.get("/system/health")
+@public_router.get("/system/health")
 def health():
     from app import config, hiagent
 
@@ -557,10 +649,17 @@ def _effective_call_status(row: dict) -> str:
 
 @router.get("/system/calls")
 def recent_calls(limit: int = 30):
+    """最近调用概览：禁止回传 request/response 原文（Todolist T6）。"""
     rows = rows_to_dicts(get_conn().execute(
-        "SELECT * FROM provider_calls ORDER BY id DESC LIMIT ?", (min(limit, 200),)).fetchall())
+        """SELECT id,ts,kind,model,status,http_status,latency_ms,error,run_id,step_run_id,
+                  trace_id,operation_id,attempt_no,supersedes_call_id,superseded_by_call_id,
+                  recovery_disposition,meta
+           FROM provider_calls ORDER BY id DESC LIMIT ?""",
+        (min(limit, 200),),
+    ).fetchall())
     for row in rows:
         row["effective_status"] = _effective_call_status(row)
+        row["context"] = _call_meta_summary(row.pop("meta", None))
     return rows
 
 
@@ -776,12 +875,23 @@ def recent_errors(limit: int = 50):
 
 
 @router.get("/system/errors/{error_id}")
-def error_detail(error_id: str):
-    """凭错误ID查全文：请求动作上下文 + 原始报错 + 堆栈，定位根因用。"""
+def error_detail(error_id: str, _session: str = Depends(require_local_session)):
+    """凭错误ID查全文：请求动作上下文 + 原始报错 + 堆栈（需本机会话，Todolist T6）。"""
+    from app.monitoring import redact_monitor_value
+
     row = get_conn().execute("SELECT * FROM error_logs WHERE id=?", (error_id,)).fetchone()
     if not row:
         raise HTTPException(404, f"错误ID不存在：{error_id}")
-    return dict(row)
+    item = dict(row)
+    if "context_json" in item:
+        try:
+            ctx = json.loads(item["context_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            ctx = {}
+        item["context_json"] = json.dumps(
+            redact_monitor_value(ctx, mask_sensitive_content=True), ensure_ascii=False,
+        )
+    return item
 
 
 @router.get("/system/jobs")
@@ -1071,12 +1181,42 @@ def retry_job(job_id: str, body: dict | None = None):
     return {"ok": True, "accepted": True, "asynchronous": True, "job": latest}
 
 
+def _redact_settings_values(values: dict[str, Any]) -> dict[str, Any]:
+    """永远剥离 api_key / model_credentials 明文（Todolist T2）。"""
+    public: dict[str, Any] = {}
+    for key, raw in values.items():
+        if key == "model_credentials":
+            public[key] = "{}"
+            continue
+        if key == "custom_models":
+            try:
+                items = json.loads(raw or "[]")
+            except (TypeError, json.JSONDecodeError):
+                public[key] = "[]"
+                continue
+            if isinstance(items, list):
+                public[key] = json.dumps(
+                    [{k: v for k, v in item.items() if k != "api_key"}
+                     if isinstance(item, dict) else item for item in items],
+                    ensure_ascii=False,
+                )
+            else:
+                public[key] = "[]"
+            continue
+        lowered = key.lower()
+        if "api_key" in lowered or "secret" in lowered or lowered.endswith("_token") or lowered == "token":
+            public[key] = "***" if raw else ""
+            continue
+        public[key] = raw
+    return public
+
+
 @router.get("/settings")
 def get_settings(include_schema: bool = False):
     rows = get_conn().execute("SELECT key, value FROM settings").fetchall()
     values = {r["key"]: r["value"] for r in rows}
     if not include_schema:
-        return values
+        return _redact_settings_values(values)
     from app.monitoring import (
         SETTINGS_SCHEMA,
         monitor_features,
@@ -1094,13 +1234,15 @@ def get_settings(include_schema: bool = False):
             issues.append({"field": key, "message": exc.detail})
     version = int(values.get("_monitor_config_version") or 0)
     public_values = {key: values.get(key, str(spec.get("default", ""))) for key, spec in SETTINGS_SCHEMA.items()}
+    public_values = _redact_settings_values(public_values)
     effective_values = {
         key: (
-            values.get(f"_monitor_effective_{key}", public_values[key])
-            if not spec.get("immediate", True) else public_values[key]
+            values.get(f"_monitor_effective_{key}", public_values.get(key, ""))
+            if not spec.get("immediate", True) else public_values.get(key, "")
         )
         for key, spec in SETTINGS_SCHEMA.items()
     }
+    effective_values = _redact_settings_values(effective_values)
     return {
         "values": public_values, "effective": effective_values,
         "schema": public_settings_schema(), "version": version,
@@ -1112,9 +1254,13 @@ def get_settings(include_schema: bool = False):
 @router.put("/settings")
 async def put_settings_route(body: dict):
     from app.capabilities.dispatch import dispatch, respond_ui
+    from app.local_session import get_request_session_id
 
-    result = await dispatch("system.update_settings", {"patch": body}, initiator="ui")
-    return respond_ui(result)
+    session_id = get_request_session_id()
+    result = await dispatch(
+        "system.update_settings", {"patch": body}, initiator="ui", session_id=session_id,
+    )
+    return respond_ui(result, session_id=session_id)
 
 
 def put_settings(body: dict):

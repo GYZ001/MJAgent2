@@ -273,8 +273,35 @@ export default function CinemaPage() {
                     >选择审核</button>
                     <code>{item.id}</code>
                     <span className={`stamp ${item.status === 'approved' ? 'green' : item.status === 'rejected' ? 'red' : 'gold'}`}>{item.status}</span>
-                    <a className="btn small" href={`/api/delivery/packages/${item.id}/report`} target="_blank" rel="noreferrer">质量报告</a>
-                    <a className="btn small" href={`/api/delivery/packages/${item.id}/archive`}>交付 ZIP</a>
+                    <button
+                      type="button"
+                      className="btn small"
+                      onClick={async () => {
+                        try {
+                          const blob = await api.download(`/delivery/packages/${item.id}/report`)
+                          const url = URL.createObjectURL(blob)
+                          window.open(url, '_blank', 'noopener,noreferrer')
+                          setTimeout(() => URL.revokeObjectURL(url), 60_000)
+                        } catch (e) { toast((e as Error).message, true) }
+                      }}
+                    >质量报告</button>
+                    <button
+                      type="button"
+                      className="btn small"
+                      onClick={async () => {
+                        try {
+                          const blob = await api.download(`/delivery/packages/${item.id}/archive`)
+                          const url = URL.createObjectURL(blob)
+                          const a = document.createElement('a')
+                          a.href = url
+                          a.download = `${item.id}.zip`
+                          document.body.appendChild(a)
+                          a.click()
+                          a.remove()
+                          URL.revokeObjectURL(url)
+                        } catch (e) { toast((e as Error).message, true) }
+                      }}
+                    >交付 ZIP</button>
                   </div>)}
                 </div>
               ) : (

@@ -29,3 +29,37 @@ def _reset_capability_runtime():
     reset_command_bus_for_tests()
     reset_approvals_for_tests()
     clear_for_tests()
+
+
+def session_headers() -> dict[str, str]:
+    """测试用：领取当前进程本机会话头。"""
+    from app.local_session import ensure_session_secret
+
+    return {"X-Manju-Session": ensure_session_secret()}
+
+
+class SessionTestClient:
+    """包装 TestClient，自动附加 X-Manju-Session（Todolist T1 回归）。"""
+
+    def __init__(self, client):
+        self._client = client
+        self._headers = session_headers()
+
+    def request(self, method: str, url: str, **kwargs):
+        headers = {**self._headers, **(kwargs.pop("headers", None) or {})}
+        return self._client.request(method, url, headers=headers, **kwargs)
+
+    def get(self, url: str, **kwargs):
+        return self.request("GET", url, **kwargs)
+
+    def post(self, url: str, **kwargs):
+        return self.request("POST", url, **kwargs)
+
+    def put(self, url: str, **kwargs):
+        return self.request("PUT", url, **kwargs)
+
+    def delete(self, url: str, **kwargs):
+        return self.request("DELETE", url, **kwargs)
+
+    def __getattr__(self, name: str):
+        return getattr(self._client, name)

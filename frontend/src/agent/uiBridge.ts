@@ -1,7 +1,20 @@
 import type { UiIntent } from './types'
 import type { View } from '../App'
+import { api } from '../api'
 
 type GoFn = (v: View, projectId?: string | null, episodeId?: string | null, chapterIdx?: number | null) => void
+
+function triggerBlobDownload(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.rel = 'noreferrer'
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
 
 /** 白名单 UI Bridge：禁止任意 URL / DOM selector。 */
 export function applyUiIntent(
@@ -42,14 +55,18 @@ export function applyUiIntent(
       return { ok: true }
     }
     case 'open_download': {
-      const path = intent.artifact === 'archive'
-        ? `/api/delivery/packages/${encodeURIComponent(intent.package_id)}/archive`
-        : `/api/delivery/packages/${encodeURIComponent(intent.package_id)}/report`
-      // 仅允许本站 allowlist 路径
-      if (!path.startsWith('/api/delivery/packages/')) {
+      const apiPath = intent.artifact === 'archive'
+        ? `/delivery/packages/${encodeURIComponent(intent.package_id)}/archive`
+        : `/delivery/packages/${encodeURIComponent(intent.package_id)}/report`
+      if (!apiPath.startsWith('/delivery/packages/')) {
         return { ok: false, message: '非法下载路径' }
       }
-      window.location.assign(path)
+      const filename = intent.artifact === 'archive'
+        ? `${intent.package_id}.zip`
+        : `${intent.package_id}-report.html`
+      void api.download(apiPath)
+        .then((blob) => triggerBlobDownload(blob, filename))
+        .catch((err: Error) => extras?.toast?.(err.message || String(err), true))
       return { ok: true }
     }
     case 'open_credentials': {

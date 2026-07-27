@@ -1,10 +1,11 @@
-"""本地会话秘密：保护 /api/agent/* 免受恶意网页跨站调用（PRD §12.2）。
+"""本地会话秘密：保护 /api/* 免受恶意网页跨站调用（PRD §12.2 / 2026-07-27 Todolist T1）。
 
 启动时生成（或复用落盘）随机会话秘密；前端通过 ``/api/session`` 领取后，
 以 ``X-Manju-Session`` 头携带。仅绑定本机 Origin allowlist。
 """
 from __future__ import annotations
 
+import contextvars
 import hmac
 import secrets
 import threading
@@ -26,6 +27,19 @@ _DEFAULT_ORIGINS = frozenset({
 
 _lock = threading.Lock()
 _secret: str | None = None
+
+# 由 HTTP 中间件注入：仅在 verify 通过后写入，供 Command Bus 绑定 approval。
+_request_session_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "request_session_id", default=None
+)
+
+
+def set_request_session_id(session_id: str | None) -> None:
+    _request_session_id.set(session_id)
+
+
+def get_request_session_id() -> str | None:
+    return _request_session_id.get()
 
 
 def ensure_session_secret() -> str:
@@ -82,3 +96,19 @@ def require_local_session(
 
 def public_session_payload() -> dict[str, str]:
     return {"session_token": ensure_session_secret(), "header": "X-Manju-Session"}
+
+
+def extract_raw_session_token(request: Request) -> str | None:
+    """从 Header 或 ``?session=`` 取出原始会话凭证（未校验）。"""
+    header = request.headers.get("X-Manju-Session") or request.headers.get(SESSION_HEADER)
+    return header or request.query_params.get("session")
+
+
+def bind_verified_session(request: Request) -> str | None:
+    """校验通过则写入 ContextVar 并返回 token；否则清空并返回 None。"""
+    raw = extract_raw_session_token(request)
+    if verify_session_token(raw):
+        set_request_session_id(raw)
+        return raw
+    set_request_session_id(None)
+    return None

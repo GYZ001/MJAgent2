@@ -48,8 +48,12 @@ async def dispatch(
     return await bus.execute_async(name, args, session_id=session_id)
 
 
-def waiting_approval_payload(result: CommandResult) -> dict[str, Any]:
-    """页面二次确认所需的完整载荷（含 approval_token；仅同源 UI 可见）。"""
+def waiting_approval_payload(result: CommandResult, *, session_id: str | None = None) -> dict[str, Any]:
+    """页面二次确认所需的完整载荷。
+
+    仅在存在有效本机会话时回传 ``approval_token``（Todolist T4）；
+    无会话不得把可自批自执行的令牌暴露给匿名调用方。
+    """
     data = dict(result.data or {})
     payload: dict[str, Any] = {
         "ok": False,
@@ -57,10 +61,11 @@ def waiting_approval_payload(result: CommandResult) -> dict[str, Any]:
         "summary": result.summary,
         "command": result.command,
         "approval_id": data.get("approval_id"),
-        "approval_token": data.get("approval_token"),
         "expires_at": data.get("expires_at"),
         "preflight": result.preflight.model_dump(mode="json") if result.preflight else None,
     }
+    if session_id:
+        payload["approval_token"] = data.get("approval_token")
     return payload
 
 
@@ -109,10 +114,16 @@ def raise_if_failed(result: CommandResult) -> None:
 raise_for_command_result = raise_if_failed
 
 
-def respond_ui(result: CommandResult) -> dict[str, Any] | JSONResponse:
+def respond_ui(result: CommandResult, *, session_id: str | None = None) -> dict[str, Any] | JSONResponse:
     """dispatch 之后的统一 REST 收尾：待批准 → 202；失败 → HTTPException；成功 → payload。"""
+    if session_id is None:
+        from app.local_session import get_request_session_id
+        session_id = get_request_session_id()
     if result.status == CommandStatus.WAITING_APPROVAL:
-        return JSONResponse(status_code=202, content=waiting_approval_payload(result))
+        return JSONResponse(
+            status_code=202,
+            content=waiting_approval_payload(result, session_id=session_id),
+        )
     if result.status == CommandStatus.ACCEPTED:
         raise_if_failed(result)
         return JSONResponse(status_code=202, content=result_http_payload(result))
@@ -124,11 +135,13 @@ async def ui_route(name: str, args: dict[str, Any]) -> dict[str, Any] | JSONResp
     """REST 入口统一走 Command Bus；Handler 内再次进入同名函数时返回 ``None`` 以执行领域逻辑。
 
     需要用户批准时返回 HTTP 202 + Impact/token，前端展示后再带
-    ``X-Manju-Approval-Token`` 重试。
+    ``X-Manju-Approval-Token`` 重试。批准令牌绑定本机会话（Todolist T4）。
     """
     from app.capabilities.direct import in_handler
+    from app.local_session import get_request_session_id
 
     if in_handler():
         return None
-    result = await dispatch(name, args, initiator="ui")
-    return respond_ui(result)
+    session_id = get_request_session_id()
+    result = await dispatch(name, args, initiator="ui", session_id=session_id)
+    return respond_ui(result, session_id=session_id)
