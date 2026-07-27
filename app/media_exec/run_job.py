@@ -911,7 +911,8 @@ async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dic
         keyframe_ok = any(
             (str(r.get("type") or "") == "plot_key_frame" or str(r.get("slot_key") or "") == "narrative_keyframe")
             and not r.get("deleted")
-            and (PURPOSE_VIDEO_INPUT in purpose_list(r) or r.get("selectedForSeedance"))
+            and r.get("selectedForSeedance")
+            and PURPOSE_VIDEO_INPUT in purpose_list(r)
             and (r.get("qa") or {}).get("status") != "unverified"
             and (r.get("qa") or {}).get("overall") is not None
             for r in (meta.get("reference_images") or [])

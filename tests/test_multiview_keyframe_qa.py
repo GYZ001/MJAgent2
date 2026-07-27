@@ -151,6 +151,32 @@ def test_pack_purpose_helper_priority() -> None:
     assert any(r["id"] == "kf" for r in packed)
 
 
+def test_pack_purpose_helper_excludes_unselected_video_purpose() -> None:
+    refs = [
+        {
+            "id": "keep",
+            "type": "plot_key_frame",
+            "selectedForSeedance": True,
+            "qualityScore": 0.9,
+            "purposes": [PURPOSE_VIDEO_INPUT],
+        },
+        {
+            "id": "rejected",
+            "type": "plot_key_frame",
+            "selectedForSeedance": False,
+            "qualityScore": 0.99,
+            "purposes": [PURPOSE_VIDEO_INPUT],
+            "rejectReason": "quality_below_threshold",
+        },
+    ]
+
+    packed = pack_references_by_purpose(
+        refs, max_images=2, continuity_required=False, char_limit=1,
+    )
+
+    assert [ref["id"] for ref in packed] == ["keep"]
+
+
 def test_watermark_not_hard_failure_unless_occluding() -> None:
     from app.db import set_setting
     set_setting("watermark_qa_mode", "ignore_unless_occluding")

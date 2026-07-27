@@ -1998,11 +1998,9 @@ def pack_references_by_purpose(
     """必需用途优先装箱：关键帧不会被高分定妆照挤掉。"""
     usable = []
     for r in refs:
-        if r.get("deleted"):
-            continue
-        purposes = purpose_list(r)
-        # selectedForSeedance 仍代表 video_input 意愿
-        if PURPOSE_VIDEO_INPUT in purposes or r.get("selectedForSeedance"):
+        # 用途是资产血缘/装箱优先级，不是当前选择状态。QA 淘汰图会保留
+        # video_input 用途供审计，因此必须以 selectedForSeedance 为准。
+        if r.get("selectedForSeedance") and not r.get("deleted"):
             usable.append(r)
     if not usable:
         return []

@@ -165,6 +165,95 @@ def test_reference_mode_excludes_deleted_reference_images() -> None:
     assert inputs == [("data:image/jpeg;base64,keep", "reference_image")]
 
 
+def test_reference_mode_excludes_rejected_candidate_with_stale_video_purpose() -> None:
+    """QA 淘汰图会保留用途元数据，但 selected=false 必须阻止它进入供应商请求。"""
+    inputs = build_seedance_image_inputs({
+        "mode": REFERENCE_IMAGE_MODE,
+        "reference_images": [
+            {
+                "url": "data:image/jpeg;base64,keep",
+                "selectedForSeedance": True,
+                "type": "plot_key_frame",
+                "purposes": ["video_input", "qa_anchor"],
+            },
+            {
+                "url": "data:image/jpeg;base64,rejected",
+                "selectedForSeedance": False,
+                "type": "plot_key_frame",
+                "purposes": ["video_input", "qa_anchor"],
+                "rejectReason": "quality_below_threshold",
+            },
+        ],
+    })
+
+    assert inputs == [("data:image/jpeg;base64,keep", "reference_image")]
+
+
+def test_continuity_assembly_does_not_restore_discarded_candidates(monkeypatch, tmp_path) -> None:
+    """等待连续性尾帧后重新装配时，人工废弃和 QA 淘汰图都不得被重新选中。"""
+    keep_path = tmp_path / "keep.jpg"
+    rejected_path = tmp_path / "rejected.jpg"
+    deleted_path = tmp_path / "deleted.jpg"
+    keep_path.write_bytes(b"keep")
+    rejected_path.write_bytes(b"rejected")
+    deleted_path.write_bytes(b"deleted")
+    monkeypatch.setattr(video_modes, "consistency_check_enabled", lambda: False)
+    monkeypatch.setattr(video_modes, "quality_threshold", lambda: 0.8)
+
+    rejected_out: list[ReferenceImageAsset] = []
+    assets = asyncio.run(video_modes.assemble_continuity_tail(
+        conn=None,
+        project_id="p1",
+        episode_no=1,
+        episode_id="e1",
+        shot_id="s1",
+        shot=_shot(shot_no=1),
+        bible=_bible(),
+        meta={
+            "reference_images": [
+                {
+                    "id": "keep",
+                    "path": str(keep_path),
+                    "type": "plot_key_frame",
+                    "source": "seedream_generated",
+                    "qualityScore": 0.95,
+                    "qa": {"overall": 0.95, "absolute_quality": 0.95},
+                    "selectedForSeedance": True,
+                    "purposes": ["video_input", "qa_anchor"],
+                },
+                {
+                    "id": "rejected",
+                    "path": str(rejected_path),
+                    "type": "plot_key_frame",
+                    "source": "seedream_generated",
+                    "qualityScore": 0.7,
+                    "qa": {"overall": 0.7, "absolute_quality": 0.7},
+                    "selectedForSeedance": False,
+                    "purposes": ["video_input", "qa_anchor"],
+                    "rejectReason": "quality_below_threshold",
+                },
+                {
+                    "id": "deleted",
+                    "path": str(deleted_path),
+                    "type": "plot_key_frame",
+                    "source": "seedream_generated",
+                    "qualityScore": 0.99,
+                    "qa": {"overall": 0.99, "absolute_quality": 0.99},
+                    "selectedForSeedance": False,
+                    "deleted": True,
+                    "purposes": ["video_input", "qa_anchor"],
+                },
+            ],
+        },
+        prev_shot=None,
+        rejected_out=rejected_out,
+    ))
+
+    assert [asset.id for asset in assets if asset.selectedForSeedance] == ["keep"]
+    assert {asset.id for asset in rejected_out} == {"rejected", "deleted"}
+    assert all(not asset.selectedForSeedance for asset in rejected_out)
+
+
 def test_build_reference_assets_collects_rejected_for_discard_gallery(monkeypatch, tmp_path) -> None:
     """质检未通过的关键帧进入 rejected_out；人物库图只作 QA 依据，不默认 selectedForSeedance。"""
     bible = _bible()
