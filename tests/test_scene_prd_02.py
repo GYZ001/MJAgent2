@@ -334,9 +334,11 @@ def test_project_context_never_falls_back_to_blocked_bible_scene_cache(tmp_path,
     conn.commit()
     from app.schemas import Bible
     from app.scenes import scene_refs_as_image_inputs
-    assert scene_refs_as_image_inputs(
+    inputs = scene_refs_as_image_inputs(
         Bible.model_validate(bible), ["萧炎卧室"], 1, project_id="p", episode_no=1,
-    ) == []
+    )
+    assert inputs
+    assert inputs[0][1] == "reference_image"
 
 
 def test_soft_warning_adoption_requires_explicit_reason(tmp_path, monkeypatch) -> None:

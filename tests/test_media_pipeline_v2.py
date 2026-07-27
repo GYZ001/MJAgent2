@@ -61,17 +61,19 @@ def test_channel_defaults_balanced() -> None:
 
 
 def test_qa_retake_requires_explicit_failure_and_caps_at_one() -> None:
-    """低总分不烧视频；明确结构性失败只自动重抽一次。"""
+    """QA 只评分：低分和结构性失败都不触发自动重抽。"""
     low_only = decide_qa_retake(auto_retake_count=0, qa_overall=0.2, threshold=0.6)
     assert not low_only.allow
     d_hard = decide_qa_retake(
         auto_retake_count=0, qa_overall=0.8, threshold=0.6, hard_failures=["story_repeat"]
     )
-    assert d_hard.allow and d_hard.attempt == 1
+    assert not d_hard.allow
+    assert d_hard.attempt == 0
     exhausted = decide_qa_retake(
         auto_retake_count=1, qa_overall=0.8, threshold=0.6, hard_failures=["story_repeat"]
     )
     assert not exhausted.allow
+    assert exhausted.attempt == 1
 
 
 def test_reference_set_persist(monkeypatch) -> None:

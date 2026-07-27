@@ -81,9 +81,10 @@ def test_delivery_package_reaches_t5_and_feedback_preserves_snapshot(tmp_path, m
         (json.dumps({"overall": 0.9, "failure_types": ["character_duplicate"]}),),
     )
     conn.commit()
-    blocked = delivery.delivery_readiness("e")
-    assert blocked["ready"] is False
-    assert any(item["key"] == "fatal_video_quality" for item in blocked["blockers"])
+    score_only = delivery.delivery_readiness("e")
+    assert score_only["ready"] is True
+    assert not any(item["key"] == "fatal_video_quality" for item in score_only["blockers"])
+    assert any(item["check"] == "fatal_video_quality" for item in score_only["warnings"])
     conn.execute(
         "UPDATE shot_versions SET qa_json=? WHERE id='v'",
         (json.dumps({"overall": 0.9}),),
