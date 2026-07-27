@@ -1150,6 +1150,7 @@ def _storyboard_status_snapshot(
         )
     )
     gate_errors: list[str] = []
+    score_warnings: list[str] = []
     if terminal_structure:
         try:
             from app.storyboard_workspace import verify_or_bind_existing_excerpt
@@ -1171,6 +1172,7 @@ def _storyboard_status_snapshot(
                 record_metrics=False,
             )
             gate_errors.extend(evaluation.errors)
+            score_warnings.extend(evaluation.warnings)
             for shot in shots:
                 try:
                     verify_or_bind_existing_excerpt(
@@ -1190,8 +1192,16 @@ def _storyboard_status_snapshot(
             message for message in gate_errors
             if f"shots[{index}]" in message or f"shot_no={shot_no}" in message
         ]
-        if localized:
-            shot["preflight_errors"] = localized
+        # Score-only：质量 warning 仍挂到镜头供 UI 展示，但不进入确认硬门禁。
+        localized_scores = [
+            message for message in score_warnings
+            if f"shots[{index}]" in message or f"shot_no={shot_no}" in message
+        ]
+        if localized_scores:
+            shot["qa_warnings"] = localized_scores
+        display = localized + localized_scores
+        if display:
+            shot["preflight_errors"] = display
     full_terminal = bool(terminal_structure and not gate_errors)
     invalid = bool(
         (running and confirmed)
