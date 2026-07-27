@@ -322,6 +322,32 @@ def test_refs_precheck_filters_characters(monkeypatch) -> None:
     assert filtered["image_count"] == 3
 
 
+def test_payment_quote_expires_and_consumed_quote_replays(monkeypatch) -> None:
+    conn = _memory_conn()
+    _seed_bible(conn)
+    clock = {"value": 100.0}
+    monkeypatch.setattr(bible_ops, "get_conn", lambda: conn)
+    monkeypatch.setattr(bible_ops, "now", lambda: clock["value"])
+    monkeypatch.setattr(bible_ops, "_project_or_404", lambda _pid: dict(conn.execute(
+        "SELECT * FROM projects WHERE id='proj_test'"
+    ).fetchone()))
+
+    current = bible_ops.compute_refs_cost_precheck("proj_test")
+    issued = bible_ops._issue_payment_quote(current)
+    clock["value"] = issued["quote_expires_at"] + 1
+    with pytest.raises(HTTPException) as exc:
+        bible_ops._validate_payment_quote("proj_test", issued["quote_id"], current)
+    assert exc.value.detail["code"] == "QUOTE_STALE"
+
+    clock["value"] = 200.0
+    consumed = bible_ops._issue_payment_quote(current)
+    bible_ops._consume_payment_quote(consumed["quote_id"], task_id="refs:proj_test", run_id="run_1")
+    clock["value"] = consumed["quote_expires_at"] + 100
+    row = bible_ops._validate_payment_quote("proj_test", consumed["quote_id"], current)
+    assert row["consumed_task_id"] == "refs:proj_test"
+    assert row["consumed_run_id"] == "run_1"
+
+
 def test_adopt_portrait_candidate_rejects_hard_failure(monkeypatch) -> None:
     conn = _memory_conn()
     _seed_bible(conn)
@@ -353,4 +379,40 @@ def test_adopt_portrait_candidate_rejects_hard_failure(monkeypatch) -> None:
         assert exc.value.detail["code"] == "PORTRAIT_HARD_FAILED"
 
     import asyncio
+    asyncio.run(_run())
+
+
+def test_adopt_portrait_candidate_rejects_missing_required_views(monkeypatch) -> None:
+    conn = _memory_conn()
+    _seed_bible(conn)
+    conn.execute(
+        "INSERT INTO character_portraits("
+        "id, project_id, character_name, ep_start, ep_end, appearance, prompt, image_path, "
+        "base_portrait_id, bible_version, artifact_id, pack_status, group_qa_json, change_json, created_at"
+        ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "portrait_partial", "proj_test", "萧炎", 1, None, "黑发少年", "prompt", "/tmp/front.jpg",
+            None, 1, None, "ready", json.dumps({"status": "ready", "issues": []}), None, 1.0,
+        ),
+    )
+    conn.execute(
+        "INSERT INTO character_portrait_views(id,portrait_id,view_role,image_path,status,created_at) "
+        "VALUES('view_front','portrait_partial','front_full','/tmp/front.jpg','ready',1)"
+    )
+    conn.commit()
+    monkeypatch.setattr(bible_ops, "get_conn", lambda: conn)
+    monkeypatch.setattr(bible_ops, "_project_or_404", lambda _pid: dict(conn.execute(
+        "SELECT * FROM projects WHERE id='proj_test'"
+    ).fetchone()))
+
+    import asyncio
+    async def _run():
+        with pytest.raises(HTTPException) as exc:
+            await bible_ops.adopt_portrait_candidate(
+                "proj_test", "萧炎", "portrait_partial",
+                {"reason": "人工检查", "bypass_soft": True},
+            )
+        assert exc.value.detail["code"] == "PORTRAIT_HARD_FAILED"
+        assert "missing_required_view=three_quarter" in exc.value.detail["hard_failures"]
+
     asyncio.run(_run())

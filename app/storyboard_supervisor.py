@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
+from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from app import errors
@@ -72,6 +73,32 @@ class SupervisorCheckpoint(BaseModel):
     input_versions: dict[str, str | None] = Field(default_factory=dict)
     last_repair: dict[str, Any] | None = None
     outcome: str | None = None  # SUCCEEDED_READY_FOR_CONFIRM | SUCCEEDED_CONFIRMED
+
+
+def _begin_repair_activation(cp: SupervisorCheckpoint, *, resume: bool) -> int | None:
+    """为一次新的自动续跑 activation 重置局部修复预算。
+
+    ``repair_epoch`` 是单次 activation 的保险丝，而不是整个分镜任务的永久上限。
+    WAITING_RETRY 检查点若原样带着 ``MAX_REPAIR_EPOCHS + 1`` 恢复，主循环会在生成前
+    立即再次让出，形成“页面一直等待、后台永不续跑”的假恢复。
+
+    指纹计数与 ``last_repair`` 保留，用于跨 activation 识别重复根因并升级策略；这里只
+    重置本次循环预算。
+    """
+    if not resume or cp.phase != "WAITING_RETRY":
+        return None
+    previous_epoch = cp.repair_epoch
+    cp.repair_epoch = 0
+    cp.outcome = None
+    return previous_epoch
+
+
+def _requires_manual_confirmation(exc: HTTPException) -> bool:
+    """自动确认只因可审阅 warning 被拒时，降级为“已就绪待人工确认”。"""
+    return (
+        exc.status_code == 409
+        and "自动确认遇到需要人工判断的警告" in str(exc.detail)
+    )
 
 
 def load_latest_checkpoint(episode_id: str) -> SupervisorCheckpoint | None:
@@ -190,6 +217,7 @@ async def run_storyboard_supervisor(
         _board_from_shot_rows,
         _finalize_storyboard_evidence,
         _insert_storyboard_shot,
+        _assert_storyboard_write_authorized,
         _persist_storyboard_character_policy_repairs,
         _reconcile_storyboard_plan,
         _sync_storyboard_shot_timing,
@@ -231,11 +259,17 @@ async def run_storyboard_supervisor(
         if completion_grant_id:
             cp.completion_grant_id = completion_grant_id
 
+    resumed_repair_epoch = _begin_repair_activation(cp, resume=resume)
+
     if run_id:
         evidence_repository.append_event(
             run_id, "STORYBOARD_SUPERVISOR_STARTED", "info",
             f"Supervisor 启动 mode={cp.completion_mode} resume={resume}",
-            payload={"episode_id": episode_id, "phase": cp.phase},
+            payload={
+                "episode_id": episode_id,
+                "phase": cp.phase,
+                "resumed_repair_epoch": resumed_repair_epoch,
+            },
         )
 
     # 上游版本校验
@@ -427,6 +461,10 @@ async def run_storyboard_supervisor(
 
         # ---- 逐镜 ----
         cp.phase = "GENERATING_SHOTS"
+        cp.outcome = None
+        # 恢复自 CANCELLED / WAITING_* 检查点时，先持久化新的运行相位，再进入可能
+        # 耗时数分钟的模型调用；否则页面会在 Run 已运行时继续显示旧终态。
+        save_checkpoint(cp, run_id=run_id)
         shot_loop_broke_for_repair = False
         while True:
             planned_now = len(outline.shots) if (outline and outline.shots) else 0
@@ -544,12 +582,17 @@ async def run_storyboard_supervisor(
             relieve_spoken_overflow(board)
             prefer_default_shot_durations(board)
             normalize_transition_visuals(board)
-            _sync_storyboard_shot_timing(conn, episode_id, board)
+            expected_screenplay_artifact_id = cp.input_versions.get("screenplay_artifact_id")
+            _sync_storyboard_shot_timing(
+                conn, episode_id, board, expected_screenplay_artifact_id
+            )
             shot = board.shots[-1]
             shot.is_final = bool(draft.is_final)
             shot.prompt_contract_version = "renderability_v1"
             object.__setattr__(shot, "evidence_artifact_id", getattr(draft, "evidence_artifact_id", None))
-            _insert_storyboard_shot(conn, episode_id, screenplay, shot)
+            _insert_storyboard_shot(
+                conn, episode_id, screenplay, shot, expected_screenplay_artifact_id
+            )
             completed = list(board.shots)
             conn.execute(
                 "UPDATE episodes SET status='scripting', script_error=NULL WHERE id=?", (episode_id,)
@@ -650,6 +693,9 @@ async def run_storyboard_supervisor(
         # ---- 通过：finalize + 完成模式 ----
         actual_total = sum(int(s.duration_s or 0) for s in completed)
         synced = _compact_episode_target(actual_total or ep_data["target_duration_s"])
+        _assert_storyboard_write_authorized(
+            conn, episode_id, cp.input_versions.get("screenplay_artifact_id")
+        )
         _finalize_storyboard_evidence(episode_id, evaluation.board)
 
         if cp.completion_mode != "auto_confirm":
@@ -685,10 +731,13 @@ async def run_storyboard_supervisor(
                 evidence_repository.append_event(
                     run_id, "AUTO_CONFIRM_STARTED", "info", "开始自动确认",
                 )
+            from app.domain.video_ops import create_storyboard_confirmation_preview
+            confirm_preview = create_storyboard_confirmation_preview(episode_id, automated=True)
             confirm_episode_core(
                 episode_id,
                 decided_by="supervisor",
                 reason="分镜全量确定性校验通过并由 Supervisor 自动确认",
+                preview_token=confirm_preview["preview_token"],
             )
             consume_grant(cp.completion_grant_id)
             if run_id:
@@ -717,6 +766,27 @@ async def run_storyboard_supervisor(
                     transition_run(run_id, "RUNNING", "WAITING_AUTHORIZATION", "grant_invalid")
                 except Exception:  # noqa: BLE001
                     pass
+            return cp
+        except HTTPException as exc:
+            if not _requires_manual_confirmation(exc):
+                raise
+            # 整集确定性门禁已经通过，只是存在 >5s 镜头等需要人看一眼的 warning。
+            # 这不是“追加镜生成失败”，也不应把 checkpoint 永久卡在 CONFIRMING。
+            conn.execute(
+                "UPDATE episodes SET status='scripted', script_error=NULL WHERE id=?",
+                (episode_id,),
+            )
+            conn.commit()
+            cp.phase = "SUCCEEDED"
+            cp.outcome = "SUCCEEDED_READY_FOR_CONFIRM"
+            save_checkpoint(cp, run_id=run_id)
+            if run_id:
+                evidence_repository.append_event(
+                    run_id,
+                    "AUTO_CONFIRM_NEEDS_HUMAN",
+                    "warning",
+                    str(exc.detail)[:200],
+                )
             return cp
         except ValueError as exc:
             # VAL-422 → 回流 Repair
@@ -922,8 +992,17 @@ def _delete_shot_window(conn, episode_id: str, start_no: int, end_no: int) -> in
     if not rows:
         return 0
     from app import worker
+    try:
+        from app.observability.tracing import current_trace
+        active_storyboard_run_id = current_trace().run_id
+    except Exception:  # noqa: BLE001
+        active_storyboard_run_id = None
     for row in rows:
-        worker.clear_shot_artifacts(row["id"])
+        worker.clear_shot_artifacts(
+            row["id"],
+            active_storyboard_run_id=active_storyboard_run_id,
+            commit=False,
+        )
         conn.execute("DELETE FROM shots WHERE id=?", (row["id"],))
     # 重排后续 shot_no，保持连续
     remaining = conn.execute(

@@ -69,8 +69,76 @@ def test_character_reference_restart_preserves_target_and_parent(tmp_path, monke
     assert api.recover_character_ref_tasks() == 1
     assert seen == [{
         "project_id": "p1", "target": "萧炎", "only_characters": None,
-        "resume": True, "parent_run_id": parent,
+        "resume": True, "fresh_after": None, "parent_run_id": parent,
     }]
+
+
+def test_character_reference_restart_preserves_fresh_batch_boundary(tmp_path, monkeypatch) -> None:
+    conn = _fresh_database(tmp_path, monkeypatch)
+    conn.execute(
+        "UPDATE projects SET refs_status='running', refs_target=NULL, refs_resume=0, "
+        "refs_batch_started_at=123.5 WHERE id='p1'"
+    )
+    seen: list[dict] = []
+    monkeypatch.setattr(api, "_refs_task_active", lambda _pid: False)
+    monkeypatch.setattr(
+        api,
+        "_start_refs_generation",
+        lambda project_id, target, **kwargs: seen.append({
+            "project_id": project_id, "target": target, **kwargs,
+        }) or True,
+    )
+
+    assert api.recover_character_ref_tasks() == 1
+    assert seen == [{
+        "project_id": "p1", "target": None, "only_characters": None,
+        "resume": True, "fresh_after": 123.5, "parent_run_id": None,
+    }]
+
+
+def test_fresh_character_reference_batch_persists_restart_mode(tmp_path, monkeypatch) -> None:
+    conn = _fresh_database(tmp_path, monkeypatch)
+    spawned = _capture_spawn(monkeypatch)
+    monkeypatch.setattr(api, "_refs_task_active", lambda _pid: False)
+
+    started = api._start_refs_generation(
+        "p1", None, only_characters=["萧炎", "药老"], resume=False,
+    )
+    assert started and started["task_id"] == "refs:p1" and started["run_id"]
+
+    row = conn.execute(
+        "SELECT refs_status, refs_target, refs_resume, refs_batch_started_at "
+        "FROM projects WHERE id='p1'"
+    ).fetchone()
+    assert row["refs_status"] == "running"
+    assert json.loads(row["refs_target"]) == ["萧炎", "药老"]
+    assert row["refs_resume"] == 0
+    assert row["refs_batch_started_at"] is not None
+    assert spawned == [("refs", "p1")]
+
+
+def test_portrait_view_redo_is_recreated_from_paused_run(tmp_path, monkeypatch) -> None:
+    conn = _fresh_database(tmp_path, monkeypatch)
+    parent = _paused_run(
+        "portrait_view_redo", "project", "p1",
+        config={
+            "task_key": "portrait_1:profile", "character_name": "萧炎",
+            "portrait_id": "portrait_1", "view_role": "profile",
+            "quote_id": "quote_1", "budget_limit_cny": 1.5,
+        },
+    )
+    spawned = _capture_spawn(monkeypatch)
+    monkeypatch.setattr(task_registry, "active", lambda *_args: False)
+
+    assert api.recover_portrait_view_redo_tasks() == 1
+    child = conn.execute(
+        "SELECT id,parent_run_id,trigger_type,config_snapshot_json FROM workflow_runs "
+        "WHERE parent_run_id=?", (parent,),
+    ).fetchone()
+    assert child and child["parent_run_id"] == parent
+    assert child["trigger_type"] == "resume"
+    assert json.loads(child["config_snapshot_json"])["view_role"] == "profile"
+    assert spawned == [("portrait_view_redo", "portrait_1:profile")]
 
 
 def test_delivery_http_task_is_recreated_as_background_attempt(tmp_path, monkeypatch) -> None:
@@ -178,7 +246,9 @@ def test_unified_startup_recovery_runs_parent_before_all_child_adapters(monkeypa
     monkeypatch.setattr(atomic_io, "cleanup_abandoned_parts", recover("partial_cleanup", 2))
     monkeypatch.setattr(api, "recover_bible_tasks", recover("character_bible"))
     monkeypatch.setattr(api, "recover_character_ref_tasks", recover("character_references"))
+    monkeypatch.setattr(api, "recover_portrait_view_redo_tasks", recover("portrait_view_redo"))
     monkeypatch.setattr(api, "recover_scene_ref_tasks", recover("scene_references"))
+    monkeypatch.setattr(api, "recover_scene_review_tasks", recover("scene_history_review"))
     monkeypatch.setattr(planning, "recover_plan_tasks", recover("episode_mapping"))
     monkeypatch.setattr(api, "recover_screenplay_tasks", recover("screenplay"))
     monkeypatch.setattr(api, "recover_storyboard_tasks", recover("storyboard"))
@@ -192,12 +262,32 @@ def test_unified_startup_recovery_runs_parent_before_all_child_adapters(monkeypa
 
     assert calls == [
         "media", "partial_cleanup", "worker_start", "lease_sweeper", "character_bible",
-        "character_references", "scene_references", "episode_mapping",
+            "character_references", "portrait_view_redo", "scene_references", "scene_history_review", "episode_mapping",
         "screenplay", "storyboard", "video_completion", "delivery",
     ]
     assert report == {
         "media": 1, "abandoned_partial_files_removed": 2, "character_bible": 1,
-        "character_references": 1, "scene_references": 1,
+            "character_references": 1, "portrait_view_redo": 1, "scene_references": 1,
+            "scene_history_review": 1,
         "episode_mapping": 1, "screenplay": 1, "storyboard": 1,
         "video_completion": 1, "delivery": 1,
     }
+
+
+def test_passive_instance_initialization_does_not_fence_active_run(tmp_path, monkeypatch) -> None:
+    conn = _fresh_database(tmp_path, monkeypatch)
+    run_id = repository.create_run(
+        workflow_type="screenplay", scope_type="project", scope_id="p1",
+        input_fingerprint="active-primary",
+    )
+    step_id = repository.create_step(run_id, "screenplay")
+    conn.execute("UPDATE workflow_runs SET status='RUNNING' WHERE id=?", (run_id,))
+    conn.execute("UPDATE step_runs SET status='RUNNING' WHERE id=?", (step_id,))
+    call_id = db.start_provider_call("chat", "model", request_json={"prompt": "active"})
+    conn.commit()
+
+    db.init_db(reconcile_interrupted=False)
+
+    assert conn.execute("SELECT status FROM workflow_runs WHERE id=?", (run_id,)).fetchone()["status"] == "RUNNING"
+    assert conn.execute("SELECT status FROM step_runs WHERE id=?", (step_id,)).fetchone()["status"] == "RUNNING"
+    assert conn.execute("SELECT status FROM provider_calls WHERE id=?", (call_id,)).fetchone()["status"] == "RUNNING"

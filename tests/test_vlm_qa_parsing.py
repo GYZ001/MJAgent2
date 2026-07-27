@@ -57,6 +57,23 @@ def test_parse_qa_result_normalizes_complete_json() -> None:
     assert qa["qa_recovered"] is False
 
 
+def test_parse_qa_result_preserves_machine_observation_fields() -> None:
+    raw = (
+        '{"expectation_match":0.9,"continuity":1,"clean_frame":1,"overall":0.9,'
+        '"person_count":0,"watermark_detected":true,'
+        '"forbidden_text_detected":false,"space_type_matches":true,'
+        '"uncertainties":[]}'
+    )
+
+    qa = _parse_qa_result(raw, ["expectation_match", "continuity", "clean_frame"])
+
+    assert qa["person_count"] == 0
+    assert qa["watermark_detected"] is True
+    assert qa["forbidden_text_detected"] is False
+    assert qa["space_type_matches"] is True
+    assert qa["uncertainties"] == []
+
+
 def test_parse_qa_result_marks_missing_required_score_untrusted() -> None:
     qa = _parse_qa_result(
         '{"character_match": 0.9, "clean_frame": 0.9, "issues": []}',
@@ -84,19 +101,74 @@ def test_video_qa_caps_overall_at_character_and_action_main_scores(monkeypatch) 
 
 def test_portrait_qa_uses_anchor_specific_nonhuman_rules(monkeypatch) -> None:
     async def fake_vlm_check(images, expectation, *, call_meta=None):
-        assert "锚点优先于普通定妆照惯例" in expectation
-        assert "不要反过来要求双脚着地" in expectation
+        assert "非实体形态" in expectation
+        assert "属于硬门禁" in expectation
         assert call_meta["asset_kind"] == "portrait"
         return (
-            '{"expectation_match": 0.35, "continuity": 1, "clean_frame": 1, '
-            '"overall": 0.9, "issues": ["未呈现透明悬浮形态"]}'
+            '{"identity_match": 0.35, "presentation_match": 0.9, "clean_frame": 1, '
+            '"overall": 0.9, "hard_failures": ["未呈现透明悬浮形态"], "issues": []}'
         )
 
     monkeypatch.setattr(hiagent, "vlm_check", fake_vlm_check)
     qa = asyncio.run(review_portrait_image("frame", "透明苍老人影，悬浮于戒指上方，神态戏谑"))
 
     assert qa["overall"] == 0.35
-    assert qa["continuity"] == 1.0
+    assert qa["hard_gate_passed"] is False
+    assert "未呈现透明悬浮形态" in qa["hard_failures"]
+
+
+def test_portrait_qa_keeps_expression_mismatch_as_soft_warning(monkeypatch) -> None:
+    async def fake_vlm_check(images, expectation, *, call_meta=None):
+        assert "表情、眼神、笑容" in expectation
+        assert "绝不能写入 hard_failures" in expectation
+        return (
+            '{"identity_match": 0.92, "presentation_match": 0.3, "clean_frame": 1, '
+            '"overall": 0.3, "hard_failures": ["眼神未体现炽热爱慕"], '
+            '"soft_warnings": ["微笑不够轻浮"], "issues": []}'
+        )
+
+    monkeypatch.setattr(hiagent, "vlm_check", fake_vlm_check)
+    qa = asyncio.run(review_portrait_image(
+        "frame", "二十岁青年，华贵衣衫，目光炽热爱慕，嘴角虚伪轻浮微笑",
+    ))
+
+    assert qa["overall"] == 0.92
+    assert qa["hard_gate_passed"] is True
+    assert qa["hard_failures"] == []
+    assert qa["status"] == "warning"
+    assert "眼神未体现炽热爱慕" in qa["issues"]
+    assert "微笑不够轻浮" in qa["issues"]
+
+
+def test_portrait_qa_allows_non_occluding_corner_watermark_with_warning(monkeypatch) -> None:
+    async def fake_vlm_check(images, expectation, *, call_meta=None):
+        return (
+            '{"identity_match": 0.95, "presentation_match": 1, "clean_frame": 0.9, '
+            '"overall": 0.95, "watermark_detected": null, "hard_failures": [], '
+            '"issues": ["画面右下角存在水印"]}'
+        )
+
+    monkeypatch.setattr(hiagent, "vlm_check", fake_vlm_check)
+    qa = asyncio.run(review_portrait_image("frame", "黑发少年，玄色劲装"))
+
+    assert qa["hard_gate_passed"] is True
+    assert qa["hard_failures"] == []
+    assert "画面右下角存在水印" in qa["issues"]
+
+
+def test_portrait_qa_keeps_occluding_watermark_as_hard_failure(monkeypatch) -> None:
+    async def fake_vlm_check(images, expectation, *, call_meta=None):
+        return (
+            '{"identity_match": 0.95, "presentation_match": 1, "clean_frame": 0.9, '
+            '"overall": 0.9, "watermark_detected": true, "watermark_occluding": true, '
+            '"hard_failures": ["水印遮挡人物脸部"], "issues": []}'
+        )
+
+    monkeypatch.setattr(hiagent, "vlm_check", fake_vlm_check)
+    qa = asyncio.run(review_portrait_image("frame", "黑发少年，玄色劲装"))
+
+    assert qa["hard_gate_passed"] is False
+    assert any("遮挡" in item for item in qa["hard_failures"])
 
 
 def test_scene_reference_qa_treats_empty_environment_as_required(monkeypatch) -> None:
@@ -126,7 +198,9 @@ def test_scene_reference_qa_ignores_non_occluding_provider_watermark(monkeypatch
         assert "位于角落、不遮挡场景主体的水印/Logo 不扣分" in expectation
         return (
             '{"expectation_match": 0.92, "continuity": 1, "clean_frame": 0.3, '
-            '"overall": 0.3, "issues": ["画面右下角带有AI生成水印"]}'
+            '"overall": 0.3, "person_count": 0, "watermark_detected": true, '
+            '"forbidden_text_detected": true, "space_type_matches": true, '
+            '"issues": ["画面右下角带有AI生成水印"]}'
         )
 
     monkeypatch.setattr(hiagent, "vlm_check", fake_vlm_check)
@@ -139,6 +213,31 @@ def test_scene_reference_qa_ignores_non_occluding_provider_watermark(monkeypatch
     assert qa["clean_frame"] == 1.0
     assert qa["overall"] == 0.92
     assert qa["issues"] == []
+    assert qa["hard_gate_passed"] is True
+    assert qa["status"] == "warning"
+    assert qa["watermark_detected"] is True
+    assert qa["forbidden_text_detected"] is True
+    assert "实用质量模式" in qa["warnings"][0]
+
+
+def test_scene_reference_qa_keeps_real_overlay_text_as_hard_failure(monkeypatch) -> None:
+    async def fake_vlm_check(images, expectation, *, call_meta=None):
+        return (
+            '{"expectation_match":0.9,"continuity":1,"clean_frame":0.7,"overall":0.7,'
+            '"person_count":0,"watermark_detected":true,'
+            '"forbidden_text_detected":true,"space_type_matches":true,'
+            '"issues":["右下角AI生成水印","画面中央有剧情字幕叠字"]}'
+        )
+
+    monkeypatch.setattr(hiagent, "vlm_check", fake_vlm_check)
+    monkeypatch.setattr("app.multiview.watermark_qa_mode", lambda: "ignore_unless_occluding")
+    qa = asyncio.run(review_scene_image(
+        "frame", "古风斗技堂，中央石质擂台", "萧家斗技堂", [],
+        environment_only=True,
+    ))
+
+    assert qa["hard_gate_passed"] is False
+    assert "检测到禁止的多余文字" in qa["hard_failures"]
 
 
 def test_scene_reference_review_uses_effective_override(monkeypatch) -> None:
@@ -172,5 +271,5 @@ def test_scene_reference_review_uses_effective_override(monkeypatch) -> None:
     }
 
 
-def test_scene_quality_gate_is_classified_as_generation_error() -> None:
-    assert classify(ContentGenerationError("场景图一致性检查未通过")) == ("generation", "GEN")
+def test_scene_quality_gate_is_not_misclassified_as_provider_error() -> None:
+    assert classify(ContentGenerationError("场景图一致性检查未通过")) == ("quality_gate", "QA")

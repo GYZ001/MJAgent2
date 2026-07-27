@@ -59,7 +59,7 @@ def _real_shot_2() -> Shot:
 def test_functional_extra_classifier_is_bounded_and_deterministic() -> None:
     assert all(is_functional_extra(name) for name in (
         "测验员", "中年测验员", "测验员甲", "路人甲", "路人乙", "路人丙",
-        "族人甲", "弟子乙", "守卫3"
+        "族人甲", "弟子乙", "守卫3", "老管家", "二长老",
     ))
     assert not is_functional_extra("萧炎")
     assert not is_functional_extra("韩枫")

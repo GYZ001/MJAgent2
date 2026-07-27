@@ -18,6 +18,15 @@ export type WaitingApprovalPayload = {
       episodes?: string[]
       projects?: string[]
       packages?: string[]
+      extra?: {
+        diff?: string[]
+        active_runs?: number
+        reference_images?: number
+        media_versions?: number
+        rerun_scope?: string
+        stop_downstream_first?: boolean
+        unchanged?: boolean
+      }
     }
   }
 }
@@ -82,6 +91,12 @@ export function describeImpact(payload: WaitingApprovalPayload): string[] {
     lines.push(`预计失效产物：${affected.invalidated_artifacts}`)
   }
   if (affected?.packages?.length) lines.push(`涉及交付包：${affected.packages.join(', ')}`)
+  const extra = affected?.extra
+  if (extra?.diff?.length) lines.push(`变更字段：${extra.diff.join('、')}`)
+  if (extra?.active_runs) lines.push(`需先停止的下游运行：${extra.active_runs} 个`)
+  if (extra?.reference_images) lines.push(`受影响参考图：${extra.reference_images} 个`)
+  if (extra?.media_versions) lines.push(`受影响媒体版本：${extra.media_versions} 个`)
+  if (extra?.rerun_scope) lines.push(`重跑范围：${extra.rerun_scope}`)
   for (const w of pf?.warnings ?? []) lines.push(w)
   return lines
 }

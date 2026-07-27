@@ -21,13 +21,13 @@ export default function CharacterQaPanel({
 }: {
   projectId: string
   characterName: string
-  portrait: Portrait
+  portrait?: Portrait | null
   onChanged?: () => void
   onClose: () => void
 }) {
   const { toast } = useNav()
   const trapRef = useFocusTrap(true, onClose)
-  const qa = portrait.group_qa
+  const qa = portrait?.group_qa
   const hard = qa?.hard_failures ?? []
   const soft = qa?.issues ?? []
   const [candidates, setCandidates] = useState<CharacterPortraitCandidate[]>([])
@@ -50,9 +50,13 @@ export default function CharacterQaPanel({
   }
 
   useEffect(() => {
+    void api.post('/system/monitor/events', {
+      name: 'portrait_qa_review', object_id: projectId,
+      dimensions: { action: 'open', result: portrait?.pack_status || 'candidate_only' },
+    }).catch(() => undefined)
     loadCandidates()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId, characterName])
+  }, [projectId, characterName, portrait?.pack_status])
 
   const candidateId = (candidate: CharacterPortraitCandidate) => candidate.portrait_id || candidate.id || ''
   const candidateQa = (candidate: CharacterPortraitCandidate) => candidate.group_qa || candidate.qa || null
@@ -96,12 +100,15 @@ export default function CharacterQaPanel({
       <section ref={trapRef} className="impact-dialog character-qa-panel" role="dialog" aria-modal="true" aria-label="人物 QA 详情">
         <h3>{characterName} · 定妆 QA</h3>
         <ul>
-          <li>包状态：<span title={statusTitle(portrait.pack_status || '')}>{statusLabel(portrait.pack_status)}</span></li>
+          <li>包状态：{portrait
+            ? <span title={statusTitle(portrait.pack_status || '')}>{statusLabel(portrait.pack_status)}</span>
+            : '暂无已采用定妆包'}</li>
           <li>整包结论：{qa?.status ? <span title={statusTitle(qa.status)}>{statusLabel(qa.status)}</span> : '未验证'}
             {typeof qa?.overall === 'number' ? ` · ${qa.overall.toFixed(2)}` : ''}</li>
           <li>脸一致性：{qa?.face_consistency ?? '—'}</li>
           <li>发型一致性：{qa?.hair_consistency ?? '—'}</li>
           <li>服装一致性：{qa?.outfit_consistency ?? '—'}</li>
+          <li>体型一致性：{qa?.body_consistency ?? '—'}</li>
         </ul>
         {!!hard.length && (
           <>
@@ -117,7 +124,7 @@ export default function CharacterQaPanel({
         )}
         <h4>视角级结果</h4>
         <ul>
-          {(qa?.views ?? portrait.views ?? []).map((view, index) => {
+          {(qa?.views ?? portrait?.views ?? []).map((view, index) => {
             const role = ('view_role' in view ? view.view_role : undefined) || `view-${index}`
             const overall = 'overall' in view ? view.overall : ('qa_overall' in view ? view.qa_overall : null)
             const issues = ('issues' in view ? view.issues : undefined) || []
@@ -145,16 +152,19 @@ export default function CharacterQaPanel({
               const qa = candidateQa(candidate)
               const warnings = candidateSoftWarnings(candidate)
               const isCurrent = candidate.current || candidate.is_current || candidate.adopted
+              const isSingleImage = candidate.candidate_kind === 'single_image'
+              const adoptable = candidate.adoptable !== false
               return (
                 <article key={id} className="portrait-candidate-item">
                   {candidate.image_url && <img src={candidate.image_url} alt={`${characterName} 候选定妆`} />}
                   <div>
                     <div className="portrait-candidate-head">
-                      <b>{isCurrent ? '当前采用' : candidate.historical ? '历史候选' : '候选包'}</b>
+                      <b>{isCurrent ? '当前采用' : candidate.historical ? '历史候选' : isSingleImage ? '失败单图候选' : '候选包'}</b>
                       <span title={statusTitle(candidate.pack_status || candidate.status || '')}>
                         {statusLabel(candidate.pack_status || candidate.status)}
                       </span>
                       {typeof qa?.overall === 'number' && <span>QA {qa.overall.toFixed(2)}</span>}
+                      {candidate.attempt != null && <span>第 {candidate.attempt} 次</span>}
                     </div>
                     <p>
                       {(qa?.hard_failures ?? []).length
@@ -163,13 +173,23 @@ export default function CharacterQaPanel({
                           ? `警告：${warnings.slice(0, 3).join('；')}`
                           : 'QA 未报告明显问题'}
                     </p>
-                    <label className="f">采纳原因</label>
+                    <p className="hint">
+                      {isSingleImage
+                        ? '阶段：正面单图候选，尚未进入三视角整包'
+                        : `适用范围：${(candidate.ep_start ?? 0) <= 0
+                          ? '历史初始版本（曾适用第 1 集起）'
+                          : `第 ${candidate.ep_start} 集起${candidate.ep_end != null ? ` 至第 ${candidate.ep_end} 集` : '至今'}`}`}
+                      {candidate.change?.adoption_reason ? ` · 采纳原因：${candidate.change.adoption_reason}` : ''}
+                    </p>
+                    {candidate.artifact_id && <p className="hint">证据产物：{candidate.artifact_id}</p>}
+                    {!adoptable && <p className="error-banner">{candidate.blocked_reason || '该候选未完成生产门禁，不能直接采纳。'}</p>}
+                    {adoptable && <><label className="f">采纳原因</label>
                     <input
                       value={reasons[id] || ''}
                       onChange={event => setReasons(current => ({ ...current, [id]: event.target.value }))}
                       placeholder="说明为什么采纳此候选包"
-                    />
-                    {!!warnings.length && (
+                    /></>}
+                    {adoptable && !!warnings.length && (
                       <label className="portrait-candidate-bypass">
                         <input
                           type="checkbox"
@@ -179,7 +199,7 @@ export default function CharacterQaPanel({
                         允许越过软警告
                       </label>
                     )}
-                    <div className="dialog-actions">
+                    {adoptable && <div className="dialog-actions">
                       <button
                         type="button"
                         className="btn small primary"
@@ -196,7 +216,7 @@ export default function CharacterQaPanel({
                       >
                         {candidateBusy === `rollback:${id}` ? '回滚中…' : '回滚'}
                       </button>
-                    </div>
+                    </div>}
                   </div>
                 </article>
               )

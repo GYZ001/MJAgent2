@@ -10,7 +10,9 @@
 import asyncio
 
 from app import config, stages
-from app.schemas import Bible, Character, Dialogue, EpisodeScreenplay, Shot, World
+from app.schemas import (Bible, Character, Dialogue, EpisodeScreenplay,
+                         InformationItem, Shot, StoryboardOutline,
+                         StoryboardOutlineShot, World)
 from app.stages import (StoryboardShotDraft, _storyboard_progress_block,
                         _relevant_text_windows, _render_completed_shots_context,
                         _validate_storyboard_shot_draft)
@@ -144,6 +146,35 @@ def test_next_shot_uses_bounded_single_shot_output_budget(monkeypatch) -> None:
     assert result.shot.shot_no == 1
     assert captured["max_tokens"] == config.STORYBOARD_SHOT_MAX_TOKENS == 8192
     assert captured["max_tokens"] < 65535
+
+
+def test_invalid_legacy_outline_information_id_is_not_injected_after_validation(monkeypatch) -> None:
+    async def fake_agent_loop(*_args, **_kwargs):
+        return _draft(_shot(1), is_final=False)
+
+    screenplay = _screenplay()
+    screenplay.information_ledger = [
+        InformationItem(info_id="I1", event_id="E1", content="合法信息")
+    ]
+    outline = StoryboardOutline(episode_no=2, shots=[StoryboardOutlineShot(
+        shot_no=1,
+        beat="萧炎离开人群",
+        information_ids=["INFO_03"],
+    )])
+    monkeypatch.setattr(stages, "_run_with_agent_loop", fake_agent_loop)
+
+    result = asyncio.run(stages.generate_storyboard_next_shot(
+        {"id": "e2", "episode_no": 2, "title": "测试集", "target_duration_s": 50},
+        "少年面无表情，转身走到队伍最后。",
+        _bible(),
+        "",
+        screenplay,
+        [],
+        outline=outline,
+    ))
+
+    assert result.shot.information_ids == []
+    assert result.shot.new_information_ids == []
 
 
 # ---------- 单镜 QA 的整集级放行 / 收尾分支 ----------

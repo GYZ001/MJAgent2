@@ -3,7 +3,10 @@ import type { Shot, ShotVersion, ReferenceImage } from '../api'
 import {
   currentVersionRefs,
   classifyReferenceBuckets,
+  describeShotUpdate,
   refSourceLabel,
+  resolveStableShotSelection,
+  shouldCommitShotDetail,
 } from './WallPage'
 
 function version(
@@ -119,5 +122,33 @@ describe('评审墙三类分组与视角标签', () => {
       entity_type: 'scene',
       view_role: 'reverse_angle',
     })).toBe('场景参考 · 反打')
+  })
+})
+
+describe('评审对象稳定性', () => {
+  it('5 镜变 4 镜时不会把已删镜头静默换成相邻镜头', () => {
+    const result = resolveStableShotSelection(
+      [{ id: 's1' }, { id: 's2' }, { id: 's3' }, { id: 's4' }],
+      's5',
+      true,
+    )
+    expect(result).toEqual({ selectedShotId: 's5', tombstoneShotId: 's5' })
+  })
+
+  it('只有从未保存过镜头身份时才默认首镜', () => {
+    expect(resolveStableShotSelection([{ id: 's1' }], null, false))
+      .toEqual({ selectedShotId: 's1', tombstoneShotId: null })
+  })
+
+  it('丢弃乱序返回的旧镜头详情', () => {
+    expect(shouldCommitShotDetail(4, 5, 's1', 's2')).toBe(false)
+    expect(shouldCommitShotDetail(5, 5, 's2', 's2')).toBe(true)
+  })
+
+  it('同一 shotId 的内容/版本刷新会生成可见差异摘要', () => {
+    const before = { id: 's1', source_excerpt: '旧原文', action_desc: '动作', versions: [] } as unknown as Shot
+    const after = { id: 's1', source_excerpt: '新原文', action_desc: '动作', versions: [version('v1', 'queued', [], 1)] } as unknown as Shot
+    expect(describeShotUpdate(before, after)).toContain('镜头文字/连续性内容已更新')
+    expect(describeShotUpdate(before, after)).toContain('视频版本或采用关系已更新')
   })
 })

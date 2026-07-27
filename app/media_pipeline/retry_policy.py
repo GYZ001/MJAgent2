@@ -97,8 +97,8 @@ def reference_shot_cohort_limit() -> int:
     if raw not in (None, ""):
         try:
             return max(1, int(raw))
-        except (TypeError, ValueError):
-            pass
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("非法运行时设置 reference_shot_cohort_limit；请在监制房修正") from exc
     # 默认：floor(image_concurrency / target_refs)；目标新图默认 4
     from app.media_pipeline.concurrency import channel_limit
     from app.media_pipeline import stages as S
@@ -111,14 +111,20 @@ def reference_shot_cohort_limit() -> int:
 
 def scheduler_policy() -> str:
     value = (get_setting("media_scheduler_policy") or "stage_aware").strip().lower()
-    return value if value in {"legacy", "stage_aware"} else "stage_aware"
+    if value not in {"legacy", "stage_aware"}:
+        raise RuntimeError("非法运行时设置 media_scheduler_policy；请在监制房修正")
+    return value
 
 
 def batch_prompt_enabled() -> bool:
     value = (get_setting("video_reference_batch_prompt") or "true").strip().lower()
-    return value in {"1", "true", "yes", "on"}
+    if value not in {"true", "false"}:
+        raise RuntimeError("非法运行时设置 video_reference_batch_prompt；请在监制房修正")
+    return value == "true"
 
 
 def role_adaptive_enabled() -> bool:
     value = (get_setting("video_reference_role_adaptive") or "false").strip().lower()
-    return value in {"1", "true", "yes", "on"}
+    if value not in {"true", "false"}:
+        raise RuntimeError("非法运行时设置 video_reference_role_adaptive；请在监制房修正")
+    return value == "true"

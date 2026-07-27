@@ -41,6 +41,7 @@ FRAGMENT_WINDOW = 220   # 命中角色名前后各取多少字
 FRAGMENT_BUDGET = 4000  # 单角色单段送审片段总字数预算
 APPEARANCE_MIN = 30     # 外观锚点串下限（与 validate_bible 一致）
 APPEARANCE_MAX = 80     # 外观锚点串上限
+STAGED_INITIAL_EP_START = 2_147_483_647  # 候选包不得命中任何真实集号
 CAST_DISCOVERY_SOURCE_BUDGET = 18000
 CAST_DISCOVERY_DRAFT_BUDGET = 14000
 
@@ -284,6 +285,7 @@ async def ensure_cards_for_text(
         if item["name"] not in known
     ]
     added: list[dict] = []
+    provisional_characters: list[dict] = []
     skipped: list[dict] = []
     errors: list[str] = []
     warnings: list[str] = []
@@ -293,6 +295,9 @@ async def ensure_cards_for_text(
             added.append(result)
             if not result.get("has_portrait"):
                 warnings.append(f"{item['name']}：人物卡已添加，定妆照生成失败，需稍后重试")
+        elif result.get("status") == "pending_review":
+            # 兼容旧实现返回值；新流程不应再产生用户待审项。
+            errors.append(f"{item['name']}：自动建卡流程未完成")
         elif result.get("status") in {"skipped_minor", "exists"}:
             skipped.append(result)
         else:
@@ -301,6 +306,7 @@ async def ensure_cards_for_text(
         "checked": len(unknown),
         "candidates": candidates,
         "added": added,
+        "provisional_characters": provisional_characters,
         "skipped": skipped,
         "errors": errors,
         "warnings": warnings,
@@ -357,9 +363,12 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
 
 
 async def ensure_character_card(project_id: str, name: str, from_episode_no: int) -> dict:
-    """确保「name」在人物谱里有卡：已有→直接返回；没有→向后检索原文判断戏份，够分量才补卡 + 定妆
-    （出图失败仍补卡，按集选图时回退到无该角色参考图）。带 (project,name) 锁，幂等可并发。
-    返回 {status: exists|added|skipped_minor|skipped|error, name, ...}。"""
+    """检查新角色的原文份量，并自动完成建卡与定妆包。
+
+    AI 只为确实需要跨镜头保持一致的具名角色建卡；路人、一次性功能角色、
+    已有角色别名会自动跳过。建卡先落库，定妆包生成失败时保留卡片并由分镜前
+    的自愈步骤重试，不再暴露人工待审队列。带 (project,name) 锁，可幂等并发。
+    """
     name = (name or "").strip()
     if not name:
         return {"status": "skipped", "reason": "empty"}
@@ -370,10 +379,25 @@ async def ensure_character_card(project_id: str, name: str, from_episode_no: int
     async with lock:
         if _name_in_bible(conn, project_id, name):  # 拿到锁后复查（并发兜底）
             return {"status": "exists", "name": name}
+        if not _has_column(conn, "projects", "bible_auto_changes_json"):
+            conn.execute("ALTER TABLE projects ADD COLUMN bible_auto_changes_json TEXT")
+        pending_row = conn.execute(
+            "SELECT bible_auto_changes_json FROM projects WHERE id=?", (project_id,),
+        ).fetchone()
+        try:
+            change_items = json.loads(pending_row["bible_auto_changes_json"] or "[]") if pending_row else []
+        except (TypeError, ValueError, json.JSONDecodeError):
+            change_items = []
+        existing_change = next((
+            item for item in change_items
+            if item.get("kind") in {"new_character", "character_discovery", "new_bible_character"}
+            and item.get("character") == name
+            and item.get("status") in {"pending", "processing", "auto_applied_asset_failed"}
+        ), None)
         # 负缓存：近 DISCOVERY_REJUDGE_WINDOW 集内判过"戏份不足"就先不重判；隔得够远会重新评估
         # （龙套后期可能转重要）。
         skip_raw = get_setting(_discovery_skip_key(project_id, name))
-        if skip_raw:
+        if skip_raw and existing_change is None:
             try:
                 last = int(skip_raw)
             except (TypeError, ValueError):
@@ -393,88 +417,197 @@ async def ensure_character_card(project_id: str, name: str, from_episode_no: int
         style = bible.world.visual_style_canonical
         known = [c.name for c in bible.characters]
         fragments, ep_label = _forward_fragments(conn, project_id, name, from_episode_no)
-        if not fragments:
-            # 原文里根本检索不到这个名字（多半是剧本臆造/称谓）→ 记负缓存、不建卡
-            set_setting(_discovery_skip_key(project_id, name), str(from_episode_no))
-            return {"status": "skipped_minor", "name": name, "reason": "no fragments in novel"}
-        try:
-            verdict = await assess_new_character(name, fragments, style=style, known_names=known, ep_label=ep_label)
-        except Exception as exc:  # noqa: BLE001
-            return {"status": "error", "name": name,
-                    "reason": "新角色评估失败" + code_ref(exc, action="assess_new_character",
-                                                          context={"project_id": project_id, "name": name})}
-        if not verdict["important"]:
-            set_setting(_discovery_skip_key(project_id, name), str(from_episode_no))
-            return {"status": "skipped_minor", "name": name, "reason": verdict["reason"]}
-        try:
-            char_obj = Character.model_validate({
-                "name": name, "role": verdict["role"],
-                "appearance_canonical": verdict["appearance_canonical"],
-                "personality": verdict["personality"], "speech_style": verdict["speech_style"],
-                "relationships": verdict["relationships"], "portrait_prompt_override": None})
-        except ValidationError as exc:
-            return {"status": "error", "name": name, "reason": f"card invalid {exc}"[:240]}
-        bible_version = (project["bible_version"] or 0) + 1
-        # 出图失败也要补卡（重试一次吸收瞬时失败）：定妆照适用集从 from_episode_no 起。
-        new_path = new_prompt = None
-        for attempt in range(2):
+        if existing_change is not None:
+            change_payload = (
+                existing_change.get("payload")
+                if isinstance(existing_change.get("payload"), dict) else {}
+            )
             try:
-                new_path, new_prompt = await _generate_fresh_portrait(
-                    project_id, name, style, char_obj.appearance_canonical, ep_start=from_episode_no)
-                break
-            except Exception:  # noqa: BLE001
-                continue
-        if new_path:
-            artifact_supported = _has_column(conn, "character_portraits", "artifact_id")
-            artifact = None
-            if artifact_supported:
-                parent_id = project["bible_artifact_id"] if bible_artifact_supported else None
-                for qa_attempt in range(1, 3):
-                    qa = await _review_portrait_asset(new_path, char_obj.appearance_canonical)
-                    artifact = record_reference_asset(
-                        asset_type="character_portrait",
-                        scope_id=f"{project_id}:{name}:{from_episode_no}",
-                        file_path=new_path,
-                        content={"character_name": name, "appearance": char_obj.appearance_canonical,
-                                 "prompt": new_prompt, "episode_start": from_episode_no,
-                                 "attempt": qa_attempt},
-                        parent_artifact_ids=[parent_id] if parent_id else [],
-                        qa=qa,
-                    )
-                    if artifact["status"] == "approved":
-                        break
-                    if qa_attempt < 2:
-                        try:
-                            new_path, new_prompt = await _generate_fresh_portrait(
-                                project_id, name, style, char_obj.appearance_canonical,
-                                ep_start=from_episode_no,
-                            )
-                        except Exception:  # noqa: BLE001 补卡仍继续，但不采用未过门禁的图片
-                            break
-                if not artifact or artifact["status"] != "approved":
-                    new_path = new_prompt = None
-            if not new_path:
-                artifact_supported = False
-        if new_path:
-            char_obj.ref_image_path = new_path
-            if artifact_supported:
-                conn.execute(
-                    "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end, appearance, "
-                    "prompt, image_path, base_portrait_id, bible_version, artifact_id, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (new_id("portrait"), project_id, name, from_episode_no, None, char_obj.appearance_canonical,
-                     new_prompt, new_path, None, bible_version, artifact["id"], now()))
-            else:
-                conn.execute(
-                    "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end, appearance, "
-                    "prompt, image_path, base_portrait_id, bible_version, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                    (new_id("portrait"), project_id, name, from_episode_no, None, char_obj.appearance_canonical,
-                     new_prompt, new_path, None, bible_version, now()))
-            conn.commit()
+                char_obj = Character.model_validate(change_payload.get("character_card"))
+            except ValidationError as exc:
+                return {"status": "error", "name": name, "reason": f"pending card invalid {exc}"[:240]}
+            verdict = {
+                "reason": existing_change.get("reason") or "AI 已判定为需要跨镜头保持的新角色",
+            }
+        else:
+            if not fragments:
+                # 原文里根本检索不到这个名字（多半是剧本臆造/称谓）。
+                set_setting(_discovery_skip_key(project_id, name), str(from_episode_no))
+                return {"status": "skipped_minor", "name": name, "reason": "no fragments in novel"}
+            try:
+                verdict = await assess_new_character(
+                    name, fragments, style=style, known_names=known, ep_label=ep_label,
+                )
+            except Exception as exc:  # noqa: BLE001
+                return {"status": "error", "name": name,
+                        "reason": "新角色评估失败" + code_ref(exc, action="assess_new_character",
+                                                              context={"project_id": project_id, "name": name})}
+            if not verdict["important"]:
+                set_setting(_discovery_skip_key(project_id, name), str(from_episode_no))
+                return {"status": "skipped_minor", "name": name, "reason": verdict["reason"]}
+            try:
+                char_obj = Character.model_validate({
+                    "name": name, "role": verdict["role"],
+                    "appearance_canonical": verdict["appearance_canonical"],
+                    "personality": verdict["personality"], "speech_style": verdict["speech_style"],
+                    "relationships": verdict["relationships"], "portrait_prompt_override": None})
+            except ValidationError as exc:
+                return {"status": "error", "name": name, "reason": f"card invalid {exc}"[:240]}
+
+        # 保留内部追溯记录，但不再把它当成用户待审任务。
+        existing = existing_change
+        if existing is None:
+            evidence_fragments = [
+                part.strip() for part in fragments.split("\n……\n") if part.strip()
+            ][:6]
+            existing = {
+                "id": new_id("change"),
+                "kind": "new_character",
+                "status": "processing",
+                "character": name,
+                "ep_start": from_episode_no,
+                "reason": verdict["reason"],
+                "created_at": now(),
+                "payload": {
+                    "character_card": char_obj.model_dump(mode="json"),
+                    "source_episode": from_episode_no,
+                    "source_episode_label": ep_label,
+                    "evidence_fragments": evidence_fragments,
+                },
+            }
+            change_items.append(existing)
+        else:
+            existing["status"] = "processing"
+        conn.execute(
+            "UPDATE projects SET bible_auto_changes_json=? WHERE id=?",
+            (json.dumps(change_items, ensure_ascii=False), project_id),
+        )
+        conn.commit()
+
+        card = char_obj.model_dump(mode="json")
         bible_lock = await _bible_lock(project_id)
         async with bible_lock:
-            _append_character_to_bible(conn, project_id, char_obj.model_dump())
-        set_setting(_discovery_skip_key(project_id, name), "")  # 已建卡，清掉历史负缓存
-        return {"status": "added", "name": name, "has_portrait": bool(new_path), "reason": verdict["reason"]}
+            appended = _append_character_to_bible(conn, project_id, card)
+        if not appended and not _name_in_bible(conn, project_id, name):
+            existing["status"] = "auto_apply_failed"
+            existing["decision_reason"] = "人物卡写入失败"
+            conn.execute(
+                "UPDATE projects SET bible_auto_changes_json=? WHERE id=?",
+                (json.dumps(change_items, ensure_ascii=False), project_id),
+            )
+            conn.commit()
+            return {"status": "error", "name": name, "reason": "character card commit failed"}
+        set_setting(_discovery_skip_key(project_id, name), "")
+
+        latest = conn.execute(
+            "SELECT bible_version FROM projects WHERE id=?", (project_id,),
+        ).fetchone()
+        try:
+            portrait = await _generate_discovered_character_portrait(
+                project_id,
+                name,
+                style,
+                char_obj.appearance_canonical,
+                ep_start=from_episode_no,
+                bible_version=int(latest["bible_version"] or 0) if latest else 0,
+            )
+        except Exception as exc:  # noqa: BLE001 -- 卡片仍可约束剧本，分镜前自动重试资产
+            public = code_ref(
+                exc,
+                action="auto_generate_discovered_character_portrait",
+                context={"project_id": project_id, "name": name, "episode_no": from_episode_no},
+            )
+            existing["status"] = "auto_applied_asset_failed"
+            existing["decided_at"] = now()
+            existing["decision_reason"] = public
+            conn.execute(
+                "UPDATE projects SET bible_auto_changes_json=? WHERE id=?",
+                (json.dumps(change_items, ensure_ascii=False), project_id),
+            )
+            conn.commit()
+            return {
+                "status": "added", "name": name, "change_id": existing["id"],
+                "has_portrait": False, "reason": verdict["reason"],
+                "portrait_error": public, "character_card": card,
+            }
+
+        existing["status"] = "auto_applied"
+        existing["decided_at"] = now()
+        existing["decision_reason"] = "AI 判定需要人物卡并已自动生成定妆包"
+        existing.setdefault("payload", {})["portrait_id"] = portrait.get("portrait_id")
+        conn.execute(
+            "UPDATE projects SET bible_auto_changes_json=? WHERE id=?",
+            (json.dumps(change_items, ensure_ascii=False), project_id),
+        )
+        conn.commit()
+        return {
+            "status": "added", "name": name, "change_id": existing["id"],
+            "has_portrait": True, "reason": verdict["reason"],
+            "character_card": card, **portrait,
+        }
+
+
+def bible_with_provisional_characters(bible: Bible, discovery: dict | None) -> Bible:
+    """兼容旧运行记录：把历史临时人物注入当前剧本生成上下文。
+
+    新流程会在发现阶段直接自动入卡；此函数只用于断点续跑的向后兼容。
+    """
+    cards = (discovery or {}).get("provisional_characters") or []
+    if not cards:
+        return bible
+    characters = list(bible.characters)
+    known = {character.name for character in characters}
+    for card in cards:
+        if not isinstance(card, dict):
+            continue
+        try:
+            character = Character.model_validate(card)
+        except ValidationError:
+            continue
+        if character.name in known:
+            continue
+        characters.append(character)
+        known.add(character.name)
+    return bible.model_copy(update={"characters": characters})
+
+
+def bible_with_pending_characters_for_text(
+    project_id: str,
+    bible: Bible,
+    text: str,
+) -> Bible:
+    """恢复/续跑时从历史队列恢复本章实际出现的临时人物约束。
+
+    这是只读的旧数据兼容路径，不触发出图。
+    """
+    if not (text or "").strip():
+        return bible
+    conn = get_conn()
+    if not _has_column(conn, "projects", "bible_auto_changes_json"):
+        return bible
+    row = conn.execute(
+        "SELECT bible_auto_changes_json FROM projects WHERE id=?", (project_id,),
+    ).fetchone()
+    try:
+        items = json.loads(row["bible_auto_changes_json"] or "[]") if row else []
+    except (TypeError, ValueError, json.JSONDecodeError):
+        items = []
+    cards: list[dict] = []
+    for item in items:
+        if (
+            not isinstance(item, dict)
+            or item.get("status") != "pending"
+            or item.get("kind") not in {"new_character", "character_discovery", "new_bible_character"}
+        ):
+            continue
+        name = str(item.get("character") or "").strip()
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        card = payload.get("character_card")
+        if name and name in text and isinstance(card, dict):
+            cards.append(card)
+    return bible_with_provisional_characters(
+        bible, {"provisional_characters": cards},
+    )
 
 
 def _episode_source_text(conn, project_id: str, episode_no: int) -> str:
@@ -676,13 +809,77 @@ async def ensure_cards_for_screenplay(project_id: str, episode_no: int, screenpl
                                                   context={"project_id": project_id, "name": n})}
         if res.get("status") == "added":
             added.append(res)
+        elif res.get("status") == "pending_review":
+            blocking_errors.append(f"{n}：自动建卡流程未完成")
         elif res.get("status") == "error":
             message = f"{n}：发现失败 {res.get('reason')}"
             errors.append(message)
             blocking_errors.append(message)
 
-    # ② 已有角色按集漂移（只判本集之前就已有定妆照的角色；本集新建的天然是最新）
+    # 剧本阶段若遇到供应商短暂失败，人物卡已保留；分镜前对这些系统失败项
+    # 自动补齐定妆包。这是内部自愈，不再转换为用户待审任务。
     conn = get_conn()
+    retry_changes: list[dict] = []
+    if _has_column(conn, "projects", "bible_auto_changes_json"):
+        change_row = conn.execute(
+            "SELECT bible_auto_changes_json FROM projects WHERE id=?", (project_id,),
+        ).fetchone()
+        try:
+            all_changes = json.loads(change_row["bible_auto_changes_json"] or "[]") if change_row else []
+        except (TypeError, ValueError, json.JSONDecodeError):
+            all_changes = []
+        retry_changes = [
+            item for item in all_changes
+            if item.get("kind") in {"new_character", "character_discovery", "new_bible_character"}
+            and item.get("status") == "auto_applied_asset_failed"
+            and item.get("character") in names
+        ]
+    else:
+        all_changes = []
+    if retry_changes:
+        refreshed_project = conn.execute(
+            "SELECT bible_json,bible_version FROM projects WHERE id=?", (project_id,),
+        ).fetchone()
+        refreshed_bible = Bible.model_validate(json.loads(refreshed_project["bible_json"]))
+        refreshed_by_name = {character.name: character for character in refreshed_bible.characters}
+        for change in retry_changes:
+            retry_name = str(change.get("character") or "").strip()
+            character = refreshed_by_name.get(retry_name)
+            if character is None:
+                continue
+            try:
+                retry_lock = await _card_lock(project_id, retry_name)
+                async with retry_lock:
+                    portrait = await _generate_discovered_character_portrait(
+                        project_id,
+                        retry_name,
+                        refreshed_bible.world.visual_style_canonical,
+                        character.appearance_canonical,
+                        ep_start=max(1, int(change.get("ep_start") or episode_no)),
+                        bible_version=int(refreshed_project["bible_version"] or 0),
+                    )
+            except Exception as exc:  # noqa: BLE001
+                public = code_ref(
+                    exc,
+                    action="retry_auto_character_portrait",
+                    context={"project_id": project_id, "name": retry_name, "episode_no": episode_no},
+                )
+                change["decision_reason"] = public
+                blocking_errors.append(f"{retry_name}：自动定妆包生成失败，系统重试后仍未就绪")
+                continue
+            change["status"] = "auto_applied"
+            change["decided_at"] = now()
+            change["decision_reason"] = "系统已在分镜前自动补齐定妆包"
+            change.setdefault("payload", {})["portrait_id"] = portrait.get("portrait_id")
+            if not any(item.get("name") == retry_name for item in added):
+                added.append({"status": "added", "name": retry_name, "has_portrait": True, **portrait})
+        conn.execute(
+            "UPDATE projects SET bible_auto_changes_json=? WHERE id=?",
+            (json.dumps(all_changes, ensure_ascii=False), project_id),
+        )
+        conn.commit()
+
+    # ② 已有角色按集漂移（只判本集之前就已有定妆照的角色；本集新建的天然是最新）
     by_name = {c.name: c for c in bible.characters}
     src_text = _episode_source_text(conn, project_id, episode_no)
     entries: list[dict] = []
@@ -801,11 +998,85 @@ def register_initial_portrait(conn, project_id: str, name: str, image_path: str,
     return portrait_id
 
 
+def stage_initial_portrait(conn, project_id: str, name: str, image_path: str,
+                           appearance: str, prompt: str, bible_version: int,
+                           artifact_id: str | None = None) -> str:
+    """暂存新的初始定妆包，不提前删除当前已采用包。
+
+    STAGED_INITIAL_EP_START 是仅供生成/QA 使用的候选槽位，不会命中任何
+    真实集号；整包验收通过后再由
+    promote_staged_initial_portrait 以单个事务替换 ep_start=1 的当前包。
+    """
+    current = conn.execute(
+        "SELECT id FROM character_portraits WHERE project_id=? AND character_name=? "
+        "AND ep_end IS NULL AND ep_start<>? ORDER BY created_at DESC LIMIT 1",
+        (project_id, name, STAGED_INITIAL_EP_START),
+    ).fetchone()
+    base_portrait_id = current["id"] if current else None
+    conn.execute(
+        "DELETE FROM character_portraits WHERE project_id=? AND character_name=? AND ep_start=?",
+        (project_id, name, STAGED_INITIAL_EP_START),
+    )
+    portrait_id = new_id("portrait")
+    pack_supported = _has_column(conn, "character_portraits", "pack_status")
+    if pack_supported:
+        conn.execute(
+            "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end, appearance, "
+            "prompt, image_path, base_portrait_id, bible_version, artifact_id, pack_status, created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (portrait_id, project_id, name, STAGED_INITIAL_EP_START, None, appearance, prompt, image_path, base_portrait_id,
+             bible_version, artifact_id, "legacy_partial", now()),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO character_portraits(id, project_id, character_name, ep_start, ep_end, appearance, "
+            "prompt, image_path, base_portrait_id, bible_version, artifact_id, created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (portrait_id, project_id, name, STAGED_INITIAL_EP_START, None, appearance, prompt, image_path, base_portrait_id,
+             bible_version, artifact_id, now()),
+        )
+    conn.commit()
+    return portrait_id
+
+
+def promote_staged_initial_portrait(conn, project_id: str, name: str, portrait_id: str) -> None:
+    """整包验收通过后原子替换当前定妆版本。"""
+    row = conn.execute(
+        "SELECT id FROM character_portraits "
+        "WHERE id=? AND project_id=? AND character_name=? AND ep_start=?",
+        (portrait_id, project_id, name, STAGED_INITIAL_EP_START),
+    ).fetchone()
+    if not row:
+        raise ValueError(f"定妆候选不存在：{name}")
+    with conn:
+        current = conn.execute(
+            "SELECT id FROM character_portraits WHERE project_id=? AND character_name=? "
+            "AND id<>? AND ep_end IS NULL AND ep_start<>? ORDER BY created_at DESC LIMIT 1",
+            (project_id, name, portrait_id, STAGED_INITIAL_EP_START),
+        ).fetchone()
+        if current:
+            minimum = conn.execute(
+                "SELECT MIN(ep_start) AS value FROM character_portraits "
+                "WHERE project_id=? AND character_name=? AND ep_start<=0",
+                (project_id, name),
+            ).fetchone()
+            history_start = int(minimum["value"] if minimum and minimum["value"] is not None else 0) - 1
+            conn.execute(
+                "UPDATE character_portraits SET ep_start=?, ep_end=0 WHERE id=?",
+                (history_start, current["id"]),
+            )
+        conn.execute(
+            "UPDATE character_portraits SET ep_start=1, ep_end=NULL WHERE id=?",
+            (portrait_id,),
+        )
+
+
 def _open_portrait(conn, project_id: str, name: str):
     """该角色当前开区间（ep_end IS NULL）的最新定妆照。"""
     return conn.execute(
-        "SELECT * FROM character_portraits WHERE project_id=? AND character_name=? AND ep_end IS NULL "
-        "ORDER BY ep_start DESC LIMIT 1", (project_id, name)).fetchone()
+        "SELECT * FROM character_portraits WHERE project_id=? AND character_name=? "
+        "AND ep_end IS NULL AND ep_start<>? ORDER BY ep_start DESC LIMIT 1",
+        (project_id, name, STAGED_INITIAL_EP_START)).fetchone()
 
 
 def portrait_for_episode(project_id: str, name: str, episode_no: int | None) -> str | None:
@@ -960,6 +1231,142 @@ def _append_character_to_bible(conn, project_id: str, char: dict) -> bool:
                 context={"project_id": project_id, "character_name": char.get("name")},
             )
     return True
+
+
+async def _generate_discovered_character_portrait(
+    project_id: str,
+    name: str,
+    style: str,
+    appearance: str,
+    *,
+    ep_start: int,
+    bible_version: int,
+) -> dict:
+    """为后续剧情自动发现的角色生成并原子接入定妆包。
+
+    候选主图先过单图 QA，再生成必需多视角并过整包 QA；任一环节失败都不会
+    留下可被下游选中的半包。新包从首次出场集开始生效，不污染更早剧集。
+    """
+    conn = get_conn()
+    current = _open_portrait(conn, project_id, name)
+    pack_supported = _has_column(conn, "character_portraits", "pack_status")
+    if current and current["image_path"] and Path(current["image_path"]).is_file():
+        current_pack = current["pack_status"] if pack_supported else "ready"
+        if current_pack == "ready" and int(current["ep_start"] or 1) <= ep_start:
+            return {
+                "portrait_id": current["id"], "image_path": current["image_path"],
+                "pack_status": "ready", "reused": True,
+            }
+
+    artifact_supported = (
+        _has_column(conn, "character_portraits", "artifact_id")
+        and _has_table(conn, "artifacts")
+    )
+    project = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
+    parent_ids = []
+    if project and "bible_artifact_id" in project.keys() and project["bible_artifact_id"]:
+        parent_ids.append(project["bible_artifact_id"])
+
+    artifact = None
+    qa = None
+    image_path = ""
+    prompt = ""
+    attempts = 2 if artifact_supported else 1
+    for attempt in range(1, attempts + 1):
+        image_path, prompt = await _generate_fresh_portrait(
+            project_id, name, style, appearance, ep_start=ep_start,
+        )
+        if not artifact_supported:
+            break
+        qa = await _review_portrait_asset(image_path, appearance)
+        artifact = record_reference_asset(
+            asset_type="character_portrait",
+            scope_id=f"{project_id}:{name}:{ep_start}",
+            file_path=image_path,
+            content={
+                "character_name": name,
+                "appearance": appearance,
+                "prompt": prompt,
+                "episode_start": ep_start,
+                "attempt": attempt,
+                "origin": "automatic_character_discovery",
+            },
+            parent_artifact_ids=parent_ids,
+            qa=qa,
+        )
+        if artifact["status"] == "approved":
+            break
+    if artifact_supported and (not artifact or artifact["status"] != "approved"):
+        raise hiagent.ProviderError(f"新角色定妆照 QA 未通过：{name}")
+
+    portrait_id = new_id("portrait")
+    values = {
+        "id": portrait_id,
+        "project_id": project_id,
+        "character_name": name,
+        "ep_start": ep_start,
+        # 多视角尚未通过时只占本集候选槽，不开放右区间。
+        "ep_end": ep_start if pack_supported else None,
+        "appearance": appearance,
+        "prompt": prompt,
+        "image_path": image_path,
+        "base_portrait_id": current["id"] if current else None,
+        "bible_version": bible_version,
+        "created_at": now(),
+    }
+    if _has_column(conn, "character_portraits", "artifact_id"):
+        values["artifact_id"] = artifact["id"] if artifact else None
+    if pack_supported:
+        values["pack_status"] = "generating"
+    columns = list(values)
+    conn.execute(
+        f"INSERT INTO character_portraits({', '.join(columns)}) "
+        f"VALUES({', '.join('?' for _ in columns)})",
+        tuple(values[column] for column in columns),
+    )
+    conn.commit()
+
+    try:
+        if pack_supported:
+            from app.multiview import ensure_character_multiview_pack, pack_result_ok
+            pack = await ensure_character_multiview_pack(
+                project_id=project_id,
+                portrait_id=portrait_id,
+                character_name=name,
+                appearance=appearance,
+                visual_style=style,
+                ep_start=ep_start,
+                base_portrait_id=current["id"] if current else None,
+                primary_qa=qa,
+            )
+            if not pack_result_ok(pack):
+                raise hiagent.ProviderError(f"新角色多视角定妆包未通过：{name}")
+            if current and current["id"] != portrait_id:
+                if int(current["ep_start"] or 1) < ep_start:
+                    conn.execute(
+                        "UPDATE character_portraits SET ep_end=? WHERE id=?",
+                        (ep_start - 1, current["id"]),
+                    )
+                else:
+                    conn.execute("DELETE FROM character_portraits WHERE id=?", (current["id"],))
+            conn.execute(
+                "UPDATE character_portraits SET ep_end=NULL,pack_status='ready' WHERE id=?",
+                (portrait_id,),
+            )
+            conn.commit()
+    except Exception:
+        conn.execute("DELETE FROM character_portraits WHERE id=?", (portrait_id,))
+        conn.commit()
+        raise
+
+    _update_bible_appearance(conn, project_id, name, appearance, image_path)
+    conn.commit()
+    return {
+        "portrait_id": portrait_id,
+        "image_path": image_path,
+        "pack_status": "ready",
+        "reused": False,
+    }
 
 
 def _has_column(conn, table: str, column: str) -> bool:

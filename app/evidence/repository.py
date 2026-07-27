@@ -423,14 +423,20 @@ def pending_human_gates(*, project_id: str | None = None, limit: int = 100) -> l
         params.extend([project_id, project_id])
     params.append(max(1, min(limit, 500)))
     rows = rows_to_dicts(get_conn().execute(
-        f"""SELECT a.*, e.project_id, e.episode_no, e.title AS episode_title
+        f"""SELECT a.*, COALESCE(e.project_id, scope_project.id) AS project_id,
+                    COALESCE(episode_project.name, scope_project.name) AS project_name,
+                    e.episode_no, e.title AS episode_title,
+                    sr.run_id
             FROM artifacts a
             LEFT JOIN episodes e ON a.scope_type='episode' AND e.id=a.scope_id
+            LEFT JOIN projects episode_project ON episode_project.id=e.project_id
+            LEFT JOIN projects scope_project ON a.scope_type='project' AND scope_project.id=a.scope_id
+            LEFT JOIN step_runs sr ON sr.id=a.created_by_step_run_id
             WHERE {' AND '.join(clauses)}
               AND a.type IN ('character_bible','episode_screenplay','storyboard','delivery_package')
               AND NOT EXISTS (
                 SELECT 1 FROM gate_decisions g WHERE g.artifact_id=a.id
-                  AND g.decision IN ('approve','approve_with_risk','reject')
+                  AND g.decision IN ('approve','approve_with_risk','reject','ignore')
               )
             ORDER BY a.created_at LIMIT ?""",
         params,

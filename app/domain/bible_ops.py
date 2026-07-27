@@ -71,48 +71,167 @@ def _payment_confirm_required(precheck: dict | None = None) -> HTTPException:
     return HTTPException(409, detail=detail)
 
 
+def _ensure_character_payment_quotes(conn) -> None:
+    """兼容单测中的最小化 schema；正式数据库由 app.db.SCHEMA 创建。"""
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS character_payment_quotes (
+            quote_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            scope_fingerprint TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            expires_at REAL NOT NULL,
+            consumed_task_id TEXT,
+            consumed_run_id TEXT,
+            created_at REAL NOT NULL,
+            consumed_at REAL
+        )"""
+    )
+
+
+def _issue_payment_quote(precheck: dict) -> dict:
+    """将付费预检签发为有时效、可消费的服务端凭证。"""
+    issued = dict(precheck)
+    issued["quote_id"] = new_id("quote")
+    issued["computed_at"] = now()
+    issued["quote_expires_at"] = issued["computed_at"] + 300
+    conn = get_conn()
+    _ensure_character_payment_quotes(conn)
+    conn.execute(
+        "INSERT INTO character_payment_quotes(quote_id,project_id,action,scope_fingerprint,"
+        "payload_json,expires_at,created_at) VALUES(?,?,?,?,?,?,?)",
+        (
+            issued["quote_id"], issued["project_id"], issued["action"],
+            issued["scope_fingerprint"], json.dumps(issued, ensure_ascii=False),
+            issued["quote_expires_at"], issued["computed_at"],
+        ),
+    )
+    conn.commit()
+    return issued
+
+
+def _validate_payment_quote(project_id: str, quote_id: str | None, current: dict):
+    if not quote_id:
+        raise _quote_stale(current, "费用预检缺失，请重新确认")
+    conn = get_conn()
+    _ensure_character_payment_quotes(conn)
+    row = conn.execute(
+        "SELECT * FROM character_payment_quotes WHERE quote_id=? AND project_id=?",
+        (quote_id, project_id),
+    ).fetchone()
+    if not row:
+        raise _quote_stale(current)
+    if row["consumed_at"] is not None:
+        return row
+    if float(row["expires_at"] or 0) < now():
+        raise _quote_stale(current, "费用预检已过期，请重新确认")
+    if row["action"] != current.get("action") or row["scope_fingerprint"] != current.get("scope_fingerprint"):
+        raise _quote_stale(current)
+    return row
+
+
+def _consume_payment_quote(quote_id: str, *, task_id: str, run_id: str | None) -> None:
+    conn = get_conn()
+    _ensure_character_payment_quotes(conn)
+    conn.execute(
+        "UPDATE character_payment_quotes SET consumed_task_id=?, consumed_run_id=?, consumed_at=? "
+        "WHERE quote_id=? AND consumed_at IS NULL",
+        (task_id, run_id, now(), quote_id),
+    )
+    conn.commit()
+
+
+def _new_refs_recorder(
+    project_id: str,
+    only_character: str | None,
+    only_characters: list[str] | None,
+    *,
+    resume: bool,
+    fresh_after: float | None,
+    parent_run_id: str | None,
+    requested_by: str,
+    trigger_type: str,
+) -> WorkflowRecorder:
+    return WorkflowRecorder.create(
+        workflow_type="character_references",
+        scope_type="project",
+        scope_id=project_id,
+        input_fingerprint=fingerprint(
+            project_id, only_character, only_characters, "character_references",
+            resume, fresh_after,
+        ),
+        requested_by=requested_by,
+        trigger_type=trigger_type,
+        config_snapshot={
+            "only_character": only_character,
+            "only_characters": only_characters,
+            "resume": resume,
+            "fresh_after": fresh_after,
+        },
+        budget_limit_cny=float(get_setting("episode_cost_limit_cny") or 100),
+        parent_run_id=parent_run_id,
+    )
+
+
 def _start_refs_generation(
     project_id: str,
     only_character: str | None,
     *,
     only_characters: list[str] | None = None,
     resume: bool = False,
+    fresh_after: float | None = None,
     parent_run_id: str | None = None,
-) -> bool:
+) -> dict | None:
     """启动定妆照任务。
 
-    返回值表示是否成功启动；若已有同项目定妆任务在跑，则直接返回 False。
+    返回可追踪的任务与 run id；已有同项目任务时返回 None。
     """
     if _refs_task_active(project_id):
-        return False
+        return None
     conn = get_conn()
     target_payload = _refs_target_payload(only_character, only_characters)
+    # fresh_after 只在“全量重生被进程恢复”时传入；新的全量批次在此冻结起点。
+    # 恢复时 generate_refs 使用 resume=True，但只跳过该起点之后已提交的新包。
+    batch_started_at = fresh_after if fresh_after is not None else (None if resume else now())
+    persisted_resume = 0 if batch_started_at is not None else 1
     if target_payload is None:
         conn.execute(
-            "UPDATE projects SET refs_status='running', refs_error=NULL, refs_target=NULL WHERE id=?",
-            (project_id,),
+            "UPDATE projects SET refs_status='running', refs_error=NULL, refs_target=NULL, "
+            "refs_resume=?, refs_batch_started_at=? WHERE id=?",
+            (persisted_resume, batch_started_at, project_id),
         )
     else:
         conn.execute(
-            "UPDATE projects SET refs_status='running', refs_error=NULL, refs_target=? WHERE id=?",
-            (target_payload, project_id),
+            "UPDATE projects SET refs_status='running', refs_error=NULL, refs_target=?, "
+            "refs_resume=?, refs_batch_started_at=? WHERE id=?",
+            (target_payload, persisted_resume, batch_started_at, project_id),
         )
     conn.commit()
+    requested_by = "system" if resume else "user"
+    trigger_type = "resume" if resume else "manual"
+    recorder = _new_refs_recorder(
+        project_id, only_character, only_characters,
+        resume=resume, fresh_after=batch_started_at, parent_run_id=parent_run_id,
+        requested_by=requested_by, trigger_type=trigger_type,
+    )
     task_registry.spawn(
         "refs", project_id,
         _refs_task(
             project_id, only_character, only_characters=only_characters,
-            resume=resume, parent_run_id=parent_run_id,
-            requested_by="system" if resume else "user",
-            trigger_type="resume" if resume else "manual",
+            resume=resume, fresh_after=batch_started_at, parent_run_id=parent_run_id,
+            requested_by=requested_by, trigger_type=trigger_type, recorder=recorder,
         ),
         project_id=project_id,
     )
-    return True
+    return {
+        "status": "accepted",
+        "task_id": f"refs:{project_id}",
+        "run_id": recorder.run_id,
+    }
 
 def _start_scene_refs_generation(
     project_id: str,
-    only_scene: str | None,
+    only_scene: str | list[str] | None,
     *,
     resume: bool = False,
     parent_run_id: str | None = None,
@@ -121,9 +240,13 @@ def _start_scene_refs_generation(
     if _scene_refs_task_active(project_id):
         return False
     conn = get_conn()
+    target_payload = (
+        json.dumps(only_scene, ensure_ascii=False)
+        if isinstance(only_scene, list) else only_scene
+    )
     conn.execute(
         "UPDATE projects SET scene_refs_status='running', scene_refs_error=NULL, scene_refs_target=? WHERE id=?",
-        (only_scene, project_id))
+        (target_payload, project_id))
     conn.commit()
     task_registry.spawn(
         "scene_refs", project_id,
@@ -135,6 +258,16 @@ def _start_scene_refs_generation(
         project_id=project_id,
     )
     return True
+
+
+def _decode_scene_target(value: str | list[str] | None) -> str | list[str] | None:
+    if not isinstance(value, str):
+        return value
+    parsed = _parse_json_value(value)
+    if isinstance(parsed, list):
+        names = [str(item).strip() for item in parsed if str(item).strip()]
+        return list(dict.fromkeys(names)) or None
+    return value.strip() or None
 
 
 async def _scene_bible_and_refs(project_id: str) -> None:
@@ -222,10 +355,11 @@ def recover_bible_tasks() -> int:
 
 
 def recover_character_ref_tasks() -> int:
-    """Resume initial portrait batches and skip per-character committed checkpoints."""
+    """Resume portrait batches without changing their original refresh semantics."""
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id, refs_target FROM projects WHERE refs_status='running'"
+        "SELECT id, refs_target, refs_resume, refs_batch_started_at "
+        "FROM projects WHERE refs_status='running'"
     ).fetchall()
     resumed = 0
     for row in rows:
@@ -239,11 +373,14 @@ def recover_character_ref_tasks() -> int:
             (project_id,),
         ).fetchone()
         only_character, only_characters = _decode_refs_target(row["refs_target"])
+        was_gap_resume = bool(row["refs_resume"])
+        fresh_after = None if was_gap_resume else row["refs_batch_started_at"]
         if _start_refs_generation(
             project_id,
             only_character,
             only_characters=only_characters,
             resume=True,
+            fresh_after=fresh_after,
             parent_run_id=parent["id"] if parent else None,
         ):
             resumed += 1
@@ -284,7 +421,7 @@ def recover_scene_ref_tasks() -> int:
             ).fetchone()
             if _start_scene_refs_generation(
                 project_id,
-                row["scene_refs_target"],
+                _decode_scene_target(row["scene_refs_target"]),
                 resume=True,
                 parent_run_id=parent["id"] if parent else None,
             ):
@@ -485,13 +622,15 @@ async def _start_bible_core(
     feedback = feedback.strip()
     if len(feedback) > 2000:
         raise HTTPException(400, "打回要求过长，请控制在 2000 字以内")
-    precheck = await bible_generate_precheck(project_id)
+    precheck = _compute_bible_generate_precheck(project_id)
     if not confirm:
         raise _payment_confirm_required(precheck)
-    if quote_id and quote_id != precheck.get("quote_id"):
-        raise _quote_stale(precheck)
-    if require_quote_id and not quote_id:
-        raise _quote_stale(precheck, "费用预检缺失，请重新确认")
+    quote_row = _validate_payment_quote(project_id, quote_id, precheck)
+    if quote_row["consumed_at"] is not None:
+        return {
+            "status": "accepted", "idempotent_replay": True,
+            "task_id": quote_row["consumed_task_id"], "run_id": quote_row["consumed_run_id"],
+        }
     conn = get_conn()
     # 持久化 feedback：进程重启后 recover_bible_tasks 能用相同入参续跑，而非中断报错
     conn.execute("UPDATE projects SET bible_status='running', bible_error=NULL, bible_feedback=? WHERE id=?",
@@ -504,7 +643,10 @@ async def _start_bible_core(
             _recorded_bible_task(project_id, feedback, recorder, trigger_full_refs=True)
         ),
     )
-    return {"status": "running", "run_id": recorder.run_id}
+    _consume_payment_quote(
+        str(quote_id), task_id=f"bible:{project_id}", run_id=recorder.run_id,
+    )
+    return {"status": "running", "task_id": f"bible:{project_id}", "run_id": recorder.run_id}
 
 
 @router.post("/projects/{project_id}/bible")
@@ -521,6 +663,7 @@ async def start_bible(project_id: str, body: dict | None = Body(None)):
             "confirm": payload.get("confirm") is True,
             "quote_id": payload.get("quote_id"),
             "require_quote_id": True,
+            "idempotency_key": payload.get("idempotency_key") or payload.get("quote_id"),
         },
         initiator="ui",
     )
@@ -869,7 +1012,7 @@ def compute_refs_cost_precheck(
     estimated = round(image_count * unit, 2)
     max_retry = round(estimated * 1.5, 2)
     computed_at = now()
-    quote_id = fingerprint({
+    scope_fingerprint = fingerprint({
         "project_id": project_id,
         "character": character,
         "characters": selected_names,
@@ -880,7 +1023,8 @@ def compute_refs_cost_precheck(
         "bible_version": p.get("bible_version"),
     })
     return {
-        "quote_id": quote_id,
+        "quote_id": scope_fingerprint,
+        "scope_fingerprint": scope_fingerprint,
         "computed_at": computed_at,
         "quote_expires_at": computed_at + 300,
         "project_id": project_id,
@@ -899,7 +1043,11 @@ def compute_refs_cost_precheck(
         "max_retry_budget_cny": max_retry,
         "budget_cap_cny": max_retry,
         "scope": missing_roles,
-        "old_asset_policy": "已落盘且合格的视角保留；失败不替换当前采用包",
+        "old_asset_policy": (
+            "已落盘且合格的视角保留；失败不替换当前采用包"
+            if resume else
+            "使用最新角色提示词与全局画风生成；新包通过整包 QA 后才替换旧包"
+        ),
         "idempotency_hint": "同一 quote_id 重复确认不会扩大范围；服务端仍做最终校验",
         "stop_policy": "可停止；已扣费步骤不退款，已完成成品保留",
     }
@@ -918,18 +1066,17 @@ async def bible_impact_preview(project_id: str, body: dict):
 async def refs_cost_precheck(project_id: str, body: dict | None = None):
     """定妆照/造型包付费预检。"""
     payload = body or {}
-    return compute_refs_cost_precheck(
+    return _issue_payment_quote(compute_refs_cost_precheck(
         project_id,
         character=payload.get("character"),
         characters=_normalize_character_selection(payload.get("characters")),
         resume=bool(payload.get("resume", False)),
         view_role=payload.get("view_role"),
-    )
+    ))
 
 
-@router.post("/projects/{project_id}/bible/generate-precheck")
-async def bible_generate_precheck(project_id: str):
-    """首次生成人物谱+定妆的费用与范围预估（只读）。"""
+def _compute_bible_generate_precheck(project_id: str) -> dict:
+    """计算首次人物谱+定妆范围；不签发可执行凭证。"""
     from app.config import IMAGE_PRICE_PER_UNIT
     from app.multiview import CHARACTER_REQUIRED_VIEWS
 
@@ -951,7 +1098,7 @@ async def bible_generate_precheck(project_id: str):
     estimated = round(image_count * unit, 2)
     max_retry = round(estimated * 1.5, 2)
     computed_at = now()
-    quote_id = fingerprint({
+    scope_fingerprint = fingerprint({
         "project_id": project_id,
         "action": "generate_bible_and_refs",
         "character_count": char_count,
@@ -960,7 +1107,8 @@ async def bible_generate_precheck(project_id: str):
         "bible_version": p.get("bible_version"),
     })
     return {
-        "quote_id": quote_id,
+        "quote_id": scope_fingerprint,
+        "scope_fingerprint": scope_fingerprint,
         "computed_at": computed_at,
         "quote_expires_at": computed_at + 300,
         "project_id": project_id,
@@ -984,10 +1132,16 @@ async def bible_generate_precheck(project_id: str):
     }
 
 
+@router.post("/projects/{project_id}/bible/generate-precheck")
+async def bible_generate_precheck(project_id: str):
+    """签发首次生成人物谱+定妆的服务端费用凭证。"""
+    return _issue_payment_quote(_compute_bible_generate_precheck(project_id))
+
+
 @router.get("/projects/{project_id}/refs/gaps")
 async def refs_gaps(project_id: str):
     """扫描定妆缺口：按角色/视角列出缺失原因。"""
-    quote = compute_refs_cost_precheck(project_id, resume=True)
+    quote = _issue_payment_quote(compute_refs_cost_precheck(project_id, resume=True))
     return {
         "project_id": project_id,
         "missing_count": len(quote.get("scope") or []),
@@ -1241,6 +1395,12 @@ async def decide_auto_change(project_id: str, change_id: str, body: dict | None 
             item["decision_reason"] = payload.get("reason") or ""
             if decision == "merge":
                 item["merge_into_character"] = payload.get("merge_into_character")
+                item["merge_into_scene"] = payload.get("merge_into_scene")
+            if payload.get("ep_start") is not None:
+                try:
+                    item["ep_start"] = max(1, int(payload["ep_start"]))
+                except (TypeError, ValueError) as exc:
+                    raise HTTPException(422, "ep_start 必须是正整数") from exc
             found = True
             matched_item = item
             break
@@ -1311,6 +1471,61 @@ async def decide_auto_change(project_id: str, change_id: str, body: dict | None 
                     )
                     found = True
                     action_result["portrait_id"] = portrait_id
+        elif kind == "scene_discovery":
+            scene = _auto_change_payload(matched_item).get("scene")
+            if isinstance(scene, dict) and scene.get("name"):
+                bible = json.loads(project["bible_json"] or '{}')
+                if not any(item.get("name") == scene["name"] for item in bible.get("scenes", [])):
+                    bible.setdefault("scenes", []).append(scene)
+                    instance, validation_errors = schema_errors(Bible, bible)
+                    if validation_errors:
+                        raise HTTPException(422, "；".join(validation_errors))
+                    conn.execute(
+                        "UPDATE projects SET bible_json=?,bible_version=bible_version+1 WHERE id=?",
+                        (instance.model_dump_json(), project_id),
+                    )
+                    action_result.update({
+                        "added_scene": scene["name"], "requires_payment_confirmation": True,
+                        "message": "场景锚点已批准入库；出图仍需在场景库完成费用预检",
+                    })
+        elif kind == "scene_state_change":
+            scene_name = str(matched_item.get("scene") or "").strip()
+            change_payload = _auto_change_payload(matched_item)
+            new_canonical = str(change_payload.get("new_scene_canonical") or "").strip()
+            ep_start = max(1, int(matched_item.get("ep_start") or 1))
+            bible = json.loads(project["bible_json"] or '{}')
+            target_scene = next(
+                (item for item in bible.get("scenes", []) if item.get("name") == scene_name), None,
+            )
+            if not target_scene or not new_canonical:
+                raise HTTPException(422, "场景状态变化缺少目标场景或新锚点")
+            target_scene["pending_state_canonical"] = new_canonical
+            target_scene["pending_state_ep_start"] = ep_start
+            instance, validation_errors = schema_errors(Bible, bible)
+            if validation_errors:
+                raise HTTPException(422, "；".join(validation_errors))
+            conn.execute(
+                "UPDATE projects SET bible_json=?,bible_version=bible_version+1 WHERE id=?",
+                (instance.model_dump_json(), project_id),
+            )
+            current_ref = _scene_current_row(conn, project_id, scene_name)
+            if current_ref and "change_json" in current_ref.keys():
+                ref_change = _parse_json_value(current_ref["change_json"], {}) or {}
+                ref_change.update({
+                    "pending_redraw": True, "pending_state_canonical": new_canonical,
+                    "pending_state_ep_start": ep_start, "approved_change_id": change_id,
+                    "approved_at": now(),
+                })
+                conn.execute(
+                    "UPDATE scene_references SET change_json=? WHERE id=?",
+                    (json.dumps(ref_change, ensure_ascii=False), current_ref["id"]),
+                )
+            action_result.update({
+                "approved_scene_change": scene_name,
+                "requires_payment_confirmation": True,
+                "pending_state_ep_start": ep_start,
+                "message": "状态变化锚点已保存为待重绘版本；仍需在场景库完成费用预检",
+            })
     elif matched_item and decision == "rollback":
         portrait_id = _auto_change_portrait_id(change_id, matched_item)
         if portrait_id:
@@ -1349,14 +1564,19 @@ async def decide_auto_change(project_id: str, change_id: str, body: dict | None 
                     ))
                     found = True
     elif matched_item and decision == "merge":
-        target_name = payload.get("merge_into_character")
+        is_scene_change = str(matched_item.get("kind") or "").startswith("scene_")
+        target_name = payload.get("merge_into_scene") if is_scene_change else payload.get("merge_into_character")
         if not target_name:
-            raise HTTPException(422, "merge 需要 merge_into_character")
+            raise HTTPException(422, "merge 需要明确合并目标")
+        bible = json.loads(project["bible_json"] or '{"characters":[]}')
+        collection = bible.get("scenes", []) if is_scene_change else bible.get("characters", [])
+        if not any(c.get("name") == target_name for c in collection):
+            raise HTTPException(422, f"合并目标不存在：{target_name}")
         matched_item["decision_reason"] = (
             (payload.get("reason") or "").strip()
-            or f"合并到已有角色：{target_name}"
+            or f"合并到已有{'场景' if is_scene_change else '角色'}：{target_name}"
         )
-        action_result["merge_into_character"] = target_name
+        action_result["merge_into_scene" if is_scene_change else "merge_into_character"] = target_name
     if not found:
         raise HTTPException(404, "自动变更记录不存在")
     conn.execute(
@@ -1581,7 +1801,6 @@ async def edit_character(project_id: str, character_name: str, body: dict):
     )
     if target_idx is None:
         raise HTTPException(404, f"角色不存在：{character_name}")
-    old_character = dict(next_bible["characters"][target_idx])
     next_bible["characters"][target_idx] = character_body
 
     instance, errors = schema_errors(Bible, next_bible)
@@ -1592,45 +1811,39 @@ async def edit_character(project_id: str, character_name: str, body: dict):
     if errors:
         raise HTTPException(422, "；".join(errors))
 
-    appearance_changed = (
-        (old_character.get("appearance_canonical") or "")
-        != (character_body.get("appearance_canonical") or "")
-    )
-    preview = None
-    if appearance_changed:
-        try:
-            preview = compute_bible_impact_preview(
-                project_id, next_bible, expected_version=expected_version,
-            )
-        except HTTPException:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(
-                409,
-                detail={
-                    "code": "IMPACT_PREVIEW_UNAVAILABLE",
-                    "message": f"定稿影响预检失败，已阻止正式定稿：{exc}",
-                },
-            ) from exc
-        impact_fp = payload.get("impact_preview_fingerprint")
-        if payload.get("confirm") is not True or not impact_fp:
-            raise HTTPException(
-                409,
-                detail={
-                    "code": "IMPACT_CONFIRM_REQUIRED",
-                    "message": "角色外观变更必须先完成影响预检并显式确认",
-                    "preview": preview,
-                },
-            )
-        if impact_fp != preview.get("fingerprint"):
-            raise HTTPException(
-                409,
-                detail={
-                    "code": "IMPACT_PREVIEW_STALE",
-                    "message": "影响预检已过期或缺失，请重新预检后再保存",
-                    "preview": preview,
-                },
-            )
+    try:
+        preview = compute_bible_impact_preview(
+            project_id, next_bible, expected_version=expected_version,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            409,
+            detail={
+                "code": "IMPACT_PREVIEW_UNAVAILABLE",
+                "message": f"定稿影响预检失败，已阻止正式定稿：{exc}",
+            },
+        ) from exc
+    impact_fp = payload.get("impact_preview_fingerprint")
+    if payload.get("confirm") is not True or not impact_fp:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "IMPACT_CONFIRM_REQUIRED",
+                "message": "任何角色定稿变更都必须先完成影响预检并显式确认",
+                "preview": preview,
+            },
+        )
+    if impact_fp != preview.get("fingerprint"):
+        raise HTTPException(
+            409,
+            detail={
+                "code": "IMPACT_PREVIEW_STALE",
+                "message": "影响预检已过期或缺失，请重新预检后再保存",
+                "preview": preview,
+            },
+        )
 
     revision = _commit_bible_revision(project_id, p, instance, reason=f"人工保存角色：{character_name}")
     return {
@@ -1639,10 +1852,10 @@ async def edit_character(project_id: str, character_name: str, body: dict):
         "bible_version": revision["bible_version"],
         "artifact_id": revision["artifact_id"],
         "impact": {
-            "change_types": preview.get("change_types") if preview else ["text_only"],
+            "change_types": preview.get("change_types"),
             "stale_descendant_ids": revision["stale_descendant_ids"],
             "by_artifact_type": revision["by_artifact_type"],
-            "rebuild": preview.get("rebuild") if preview else None,
+            "rebuild": preview.get("rebuild"),
         },
     }
 
@@ -1710,6 +1923,7 @@ def _portrait_candidate_payload(row, views: list[dict] | None = None) -> dict:
         "character_name": row["character_name"],
         "ep_start": row["ep_start"],
         "ep_end": row["ep_end"],
+        "historical": int(row["ep_start"] or 0) <= 0 or row["ep_end"] is not None,
         "is_current": row["ep_end"] is None,
         "appearance": row["appearance"],
         "prompt": row["prompt"],
@@ -1725,7 +1939,90 @@ def _portrait_candidate_payload(row, views: list[dict] | None = None) -> dict:
     }
 
 
+def _portrait_artifact_candidate_payload(conn, row) -> dict:
+    """Expose generated front-image candidates that failed before a pack existed.
+
+    These artifacts are deliberately not adoptable as production portraits: they
+    have not completed the three required views.  They remain visible so a user
+    can inspect the actual image and QA evidence instead of seeing a misleading
+    provider failure with an empty candidate list.
+    """
+    content = _parse_json_value(row["content_json"] if "content_json" in row.keys() else None, {})
+    if not isinstance(content, dict):
+        content = {}
+    try:
+        evaluations = conn.execute(
+            "SELECT * FROM evaluations WHERE artifact_id=? ORDER BY created_at DESC",
+            (row["id"],),
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - compatibility with historical/minimal schemas
+        evaluations = []
+
+    model_eval = next((item for item in evaluations if item["evaluator_type"] == "model"), None)
+    file_eval = next((item for item in evaluations if item["evaluator_type"] == "file"), None)
+    evidence = _parse_json_value(
+        model_eval["evidence_json"] if model_eval and "evidence_json" in model_eval.keys() else None,
+        {},
+    )
+    qa = dict(evidence.get("qa") or {}) if isinstance(evidence, dict) else {}
+    raw_issues = _parse_json_value(
+        model_eval["issues_json"] if model_eval and "issues_json" in model_eval.keys() else None,
+        [],
+    )
+    hard: list[str] = []
+    warnings: list[str] = []
+    for issue in raw_issues if isinstance(raw_issues, list) else []:
+        if isinstance(issue, dict):
+            message = str(issue.get("message") or issue.get("code") or "").strip()
+            severity = str(issue.get("severity") or "").lower()
+            code = str(issue.get("code") or "").upper()
+            if not message:
+                continue
+            if severity in {"blocker", "critical", "error"} or code == "REFERENCE_QUALITY_THRESHOLD":
+                hard.append(message)
+            else:
+                warnings.append(message)
+        elif str(issue).strip():
+            warnings.append(str(issue).strip())
+    if model_eval is not None:
+        if model_eval["score"] is not None and not isinstance(qa.get("overall"), (int, float)):
+            qa["overall"] = float(model_eval["score"]) / 100.0
+        failed = not bool(model_eval["hard_gate_passed"])
+        qa["status"] = "failed" if failed else str(model_eval["status"] or "unverified")
+        if failed and not hard:
+            hard.append("人物一致性 QA 未通过")
+    elif file_eval is not None and not bool(file_eval["hard_gate_passed"]):
+        qa["status"] = "failed"
+        hard.append("图片技术校验未通过")
+    else:
+        qa.setdefault("status", "unverified")
+    qa["hard_failures"] = list(dict.fromkeys([*(qa.get("hard_failures") or []), *hard]))
+    qa["issues"] = list(dict.fromkeys([*(qa.get("issues") or []), *warnings]))
+
+    return {
+        "id": row["id"],
+        "artifact_id": row["id"],
+        "project_id": str(row["scope_id"] or "").split(":", 1)[0],
+        "character_name": content.get("character_name"),
+        "candidate_kind": "single_image",
+        "attempt": content.get("attempt"),
+        "status": "failed" if qa.get("status") == "failed" else "unverified",
+        "pack_status": "not_built",
+        "group_qa": qa,
+        "qa": qa,
+        "image_url": _media_url(row["file_path"] if "file_path" in row.keys() else None),
+        "created_at": row["created_at"] if "created_at" in row.keys() else None,
+        "adoptable": False,
+        "blocked_reason": (
+            "该图只完成了正面单图阶段，尚未形成正面、3/4 面、侧面三视角包；"
+            "可用于人工复核和重新生成，但不能直接标记为生产可用定妆包。"
+        ),
+    }
+
+
 def _portrait_gate_lists(row, views: list[dict]) -> tuple[list[str], list[str]]:
+    from app.multiview import CHARACTER_REQUIRED_VIEWS
+
     group_qa = _parse_json_value(row["group_qa_json"] if "group_qa_json" in row.keys() else None, {})
     hard: list[str] = []
     soft: list[str] = []
@@ -1733,8 +2030,8 @@ def _portrait_gate_lists(row, views: list[dict]) -> tuple[list[str], list[str]]:
         hard.extend(str(x) for x in (group_qa.get("hard_failures") or []) if str(x).strip())
         soft.extend(str(x) for x in (group_qa.get("issues") or []) if str(x).strip())
         if group_qa.get("status") and group_qa.get("status") != "ready":
-            soft.append(f"group_qa_status={group_qa.get('status')}")
-        soft.extend(str(x) for x in (group_qa.get("failed_views") or []) if str(x).strip())
+            hard.append(f"group_qa_status={group_qa.get('status')}")
+        hard.extend(str(x) for x in (group_qa.get("failed_views") or []) if str(x).strip())
         for view in group_qa.get("views") or []:
             if not isinstance(view, dict):
                 continue
@@ -1744,11 +2041,19 @@ def _portrait_gate_lists(row, views: list[dict]) -> tuple[list[str], list[str]]:
         qa = view.get("qa") if isinstance(view.get("qa"), dict) else {}
         hard.extend(str(x) for x in (qa.get("hard_failures") or []) if str(x).strip())
         soft.extend(str(x) for x in (qa.get("issues") or []) if str(x).strip())
-        if view.get("status") and view.get("status") != "ready":
-            soft.append(f"{view.get('view_role')}:status={view.get('status')}")
+        if view.get("status") != "ready" or not (view.get("image_path") or view.get("image_url")):
+            hard.append(f"{view.get('view_role')}:status={view.get('status') or 'missing'}")
+    ready_roles = {
+        view.get("view_role") for view in views
+        if view.get("view_role") in CHARACTER_REQUIRED_VIEWS
+        and view.get("status") == "ready" and (view.get("image_path") or view.get("image_url"))
+    }
+    for missing_role in CHARACTER_REQUIRED_VIEWS:
+        if missing_role not in ready_roles:
+            hard.append(f"missing_required_view={missing_role}")
     pack_status = row["pack_status"] if "pack_status" in row.keys() else None
     if pack_status and pack_status != "ready":
-        soft.append(f"pack_status={pack_status}")
+        hard.append(f"pack_status={pack_status}")
     return list(dict.fromkeys(hard)), list(dict.fromkeys(soft))
 
 
@@ -1762,12 +2067,30 @@ def _set_current_portrait(
     decision: str,
 ) -> dict:
     stamp = now()
-    ep_end = max(int(row["ep_start"] or 1) - 1, 0)
-    conn.execute(
-        "UPDATE character_portraits SET ep_end=? "
-        "WHERE project_id=? AND character_name=? AND id<>? AND ep_end IS NULL",
-        (ep_end, project_id, character_name, row["id"]),
-    )
+    target_start = int(row["ep_start"] or 1)
+    adopted_start = target_start
+    if target_start <= 0:
+        # 初始包历史版本使用负数槽位避开 (project, character, ep_start)
+        # 唯一约束；回滚时先将当前 ep=1 版本移入新历史槽，再恢复目标。
+        minimum = conn.execute(
+            "SELECT MIN(ep_start) AS value FROM character_portraits "
+            "WHERE project_id=? AND character_name=? AND ep_start<=0",
+            (project_id, character_name),
+        ).fetchone()
+        history_start = int(minimum["value"] if minimum and minimum["value"] is not None else 0) - 1
+        conn.execute(
+            "UPDATE character_portraits SET ep_start=?, ep_end=0 "
+            "WHERE project_id=? AND character_name=? AND id<>? AND ep_end IS NULL",
+            (history_start, project_id, character_name, row["id"]),
+        )
+        adopted_start = 1
+    else:
+        ep_end = max(target_start - 1, 0)
+        conn.execute(
+            "UPDATE character_portraits SET ep_end=? "
+            "WHERE project_id=? AND character_name=? AND id<>? AND ep_end IS NULL",
+            (ep_end, project_id, character_name, row["id"]),
+        )
     change = _parse_json_value(row["change_json"] if "change_json" in row.keys() else None, {})
     if not isinstance(change, dict):
         change = {}
@@ -1777,8 +2100,8 @@ def _set_current_portrait(
         "decided_at": stamp,
     })
     conn.execute(
-        "UPDATE character_portraits SET ep_end=NULL, change_json=? WHERE id=?",
-        (json.dumps(change, ensure_ascii=False), row["id"]),
+        "UPDATE character_portraits SET ep_start=?, ep_end=NULL, change_json=? WHERE id=?",
+        (adopted_start, json.dumps(change, ensure_ascii=False), row["id"]),
     )
     prow = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
     if prow and prow["bible_json"]:
@@ -1799,7 +2122,7 @@ def _set_current_portrait(
             (new_id("gate"), artifact_id, "portrait_adoption", decision, "bible_editor", reason, stamp),
         )
     conn.commit()
-    return {"portrait_id": row["id"], "character_name": character_name, "ep_start": row["ep_start"]}
+    return {"portrait_id": row["id"], "character_name": character_name, "ep_start": adopted_start}
 
 
 def _adopt_portrait_by_id(
@@ -1857,10 +2180,28 @@ async def list_portrait_candidates(project_id: str, character_name: str):
         "ORDER BY ep_start DESC, created_at DESC",
         (project_id, character_name),
     ).fetchall()
+    portrait_items = [_portrait_candidate_payload(row) for row in rows]
+    attached_artifact_ids = {
+        str(row["artifact_id"]) for row in rows
+        if "artifact_id" in row.keys() and row["artifact_id"]
+    }
+    try:
+        artifact_rows = conn.execute(
+            "SELECT * FROM artifacts WHERE type='character_portrait' "
+            "AND scope_type='reference_asset' AND scope_id=? "
+            "ORDER BY created_at DESC LIMIT 30",
+            (f"{project_id}:{character_name}:1",),
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - old databases may not have evidence tables
+        artifact_rows = []
+    raw_candidates = [
+        _portrait_artifact_candidate_payload(conn, row)
+        for row in artifact_rows if str(row["id"]) not in attached_artifact_ids
+    ]
     return {
         "project_id": project_id,
         "character_name": character_name,
-        "items": [_portrait_candidate_payload(row) for row in rows],
+        "items": [*portrait_items, *raw_candidates],
     }
 
 
@@ -1935,30 +2276,23 @@ async def _refs_task(
     *,
     only_characters: list[str] | None = None,
     resume: bool = False,
+    fresh_after: float | None = None,
     parent_run_id: str | None = None,
     requested_by: str = "user",
     trigger_type: str = "manual",
+    recorder: WorkflowRecorder | None = None,
 ):
     from app.refs import generate_refs
     conn = get_conn()
-    recorder = WorkflowRecorder.create(
-        workflow_type="character_references",
-        scope_type="project",
-        scope_id=project_id,
-        input_fingerprint=fingerprint(project_id, only_character, only_characters, "character_references"),
-        requested_by=requested_by,
-        trigger_type=trigger_type,
-        config_snapshot={
-            "only_character": only_character,
-            "only_characters": only_characters,
-            "resume": resume,
-        },
-        budget_limit_cny=float(get_setting("episode_cost_limit_cny") or 100),
-        parent_run_id=parent_run_id,
+    recorder = recorder or _new_refs_recorder(
+        project_id, only_character, only_characters,
+        resume=resume, fresh_after=fresh_after, parent_run_id=parent_run_id,
+        requested_by=requested_by, trigger_type=trigger_type,
     )
     try:
         recorder.start()
-        # 重做定妆照前，先清理旧人物图衍生的评审视频与成品（按受影响角色范围）
+        # 先生成并通过 QA，成功后才使旧定妆的下游产物失效。
+        # 这样生成失败/中止不会破坏当前可用链路。
         p = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
         if only_characters:
             names = only_characters
@@ -1968,16 +2302,21 @@ async def _refs_task(
             names = [c["name"] for c in json.loads(p["bible_json"]).get("characters", [])]
         else:
             names = []
-        if not resume:
-            worker.purge_character_video_artifacts(project_id, names)
         await recorder.step(
             "character_references",
             lambda: generate_refs(
-                project_id, only_character, only_characters=only_characters, resume=resume
+                project_id, only_character, only_characters=only_characters,
+                resume=resume, fresh_after=fresh_after,
             ),
             agent_name="reference_asset_loop",
         )
-        conn.execute("UPDATE projects SET refs_status='ready', refs_error=NULL WHERE id=?", (project_id,))
+        if not resume:
+            worker.purge_character_video_artifacts(project_id, names)
+        conn.execute(
+            "UPDATE projects SET refs_status='ready', refs_error=NULL, refs_target=NULL, "
+            "refs_batch_started_at=NULL WHERE id=?",
+            (project_id,),
+        )
         conn.commit()
         recorder.succeed("人物参考资产已生成并通过证据门禁")
     except asyncio.CancelledError:
@@ -2005,6 +2344,7 @@ async def start_refs(project_id: str, body: dict | None = None):
             "resume": bool(payload.get("resume", False)),
             "confirm": payload.get("confirm") is True,
             "quote_id": payload.get("quote_id"),
+            "idempotency_key": payload.get("idempotency_key") or payload.get("quote_id"),
         },
     )
     if routed is not None:
@@ -2025,16 +2365,26 @@ async def start_refs(project_id: str, body: dict | None = None):
     if payload.get("confirm") is not True:
         raise _payment_confirm_required(quote)
     quote_id = payload.get("quote_id")
-    if not quote_id or quote_id != quote.get("quote_id"):
-        raise _quote_stale(quote)
+    quote_row = _validate_payment_quote(project_id, quote_id, quote)
+    if quote_row["consumed_at"] is not None:
+        return {
+            "status": "accepted", "idempotent_replay": True,
+            "quote_id": quote_id, "task_id": quote_row["consumed_task_id"],
+            "run_id": quote_row["consumed_run_id"], "precheck": quote,
+        }
     generation_only = selected_names[0] if selected_names and len(selected_names) == 1 else only
-    _start_refs_generation(
+    started = _start_refs_generation(
         project_id,
         generation_only,
         only_characters=selected_names,
         resume=resume,
     )
-    return {"status": "running", "quote_id": quote.get("quote_id"), "precheck": quote}
+    if not started:
+        raise HTTPException(409, "定妆照正在生成中")
+    _consume_payment_quote(
+        str(quote_id), task_id=started["task_id"], run_id=started["run_id"],
+    )
+    return {**started, "quote_id": quote_id, "precheck": quote}
 
 
 @router.post("/projects/{project_id}/refs/cancel")
@@ -2048,7 +2398,8 @@ async def cancel_refs(project_id: str):
     stopped = await task_registry.cancel_and_wait("refs", project_id)
     conn = get_conn()
     conn.execute(
-        "UPDATE projects SET refs_status='idle', refs_error=NULL, refs_target=NULL WHERE id=?", (project_id,))
+        "UPDATE projects SET refs_status='idle', refs_error=NULL, refs_target=NULL, "
+        "refs_batch_started_at=NULL WHERE id=?", (project_id,))
     conn.commit()
     was_running = p["refs_status"] == "running"
     return {"stopped": stopped or was_running}
@@ -2059,16 +2410,626 @@ async def cancel_refs(project_id: str):
 # 已挂在分镜阶段（见 scenes.ensure_scenes_for_storyboard），不在此轮询。
 
 
+def _normalize_scene_selection(value) -> list[str] | None:
+    if value in (None, ""):
+        return None
+    raw = value
+    if isinstance(value, str):
+        parsed = _parse_json_value(value)
+        raw = parsed if isinstance(parsed, list) else value.split(",")
+    if not isinstance(raw, list):
+        raise HTTPException(422, "scenes 必须是场景名数组")
+    names = [str(item).strip() for item in raw if str(item).strip()]
+    return list(dict.fromkeys(names)) or None
+
+
+def _scene_required_roles(scene: dict) -> list[str]:
+    from app.multiview import SCENE_REQUIRED_VIEWS
+    roles = list(SCENE_REQUIRED_VIEWS)
+    requested = scene.get("required_views") or []
+    if isinstance(requested, str):
+        requested = [requested]
+    if scene.get("action_zone_required") or "action_zone" in requested:
+        roles.append("action_zone")
+    return list(dict.fromkeys(roles))
+
+
+def _scene_current_row(conn, project_id: str, scene_name: str):
+    return conn.execute(
+        "SELECT * FROM scene_references WHERE project_id=? AND scene_name=? "
+        "ORDER BY (ep_end IS NULL) DESC, ep_start DESC, created_at DESC LIMIT 1",
+        (project_id, scene_name),
+    ).fetchone()
+
+
+def _scene_row_gate(row) -> dict:
+    if not row:
+        return {}
+    for column in ("group_qa_json", "qa_json"):
+        if column not in row.keys() or not row[column]:
+            continue
+        parsed = _parse_json_value(row[column], {})
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def scan_scene_asset_gaps(project_id: str) -> dict:
+    """只读扫描；不会创建任务、调用供应商或写账单。"""
+    from app.multiview import scene_primary_is_usable
+    from app.scene_policy import scene_asset_state
+
+    p = _project_or_404(project_id)
+    if not p.get("bible_json"):
+        return {"project_id": project_id, "total": 0, "items": [], "counts": {}}
+    bible = json.loads(p["bible_json"])
+    conn = get_conn()
+    items: list[dict] = []
+    counts = {"missing": 0, "hard_failure": 0, "warning": 0, "interrupted": 0, "unverified": 0}
+    for scene in bible.get("scenes") or []:
+        name = str(scene.get("name") or "")
+        required = _scene_required_roles(scene)
+        row = _scene_current_row(conn, project_id, name)
+        if not row:
+            item = {"scene": name, "category": "missing", "reason": "尚无场景视角包", "views": required}
+            counts["missing"] += 1
+            items.append(item)
+            continue
+        views = rows_to_dicts(conn.execute(
+            "SELECT view_role,status,image_path,qa_json FROM scene_reference_views WHERE scene_reference_id=?",
+            (row["id"],),
+        ).fetchall())
+        ready_roles = {v["view_role"] for v in views if v.get("status") == "ready" and v.get("image_path")}
+        missing_roles = [role for role in required if role not in ready_roles]
+        gate = _scene_row_gate(row)
+        has_image = bool(row["image_path"])
+        primary_usable = scene_primary_is_usable(row, views)
+        # The gap scanner serves the video-production path, not the internal
+        # multi-view QA dashboard.  Once the establishing image is usable,
+        # optional reverse/action views and soft QA warnings are not a user
+        # blocking gap.
+        if primary_usable:
+            continue
+        state = scene_asset_state(
+            row["pack_status"] if "pack_status" in row.keys() else None,
+            gate,
+            has_image=has_image,
+            primary_usable=primary_usable,
+        )
+        hard = [str(x) for x in (gate.get("hard_failures") or []) if str(x).strip()]
+        failed_views = [
+            str(v.get("view_role")) for v in (gate.get("views") or [])
+            if isinstance(v, dict) and v.get("status") in {"failed", "unverified"}
+        ]
+        if missing_roles:
+            category, reason, repair = "missing", "缺少必需视角", missing_roles
+        elif state == "failed":
+            category, reason = "hard_failure", "；".join(hard[:4]) or "整包硬门禁未通过"
+            repair = failed_views or required
+        elif state == "warning":
+            category = "warning"
+            reason = (
+                "主图尚未确认可用；多视角包待补齐或待验证"
+                if row["pack_status"] == "failed"
+                else "；".join((gate.get("warnings") or gate.get("issues") or [])[:4])
+            )
+            repair = missing_roles or failed_views
+        elif state == "unverified":
+            category, reason, repair = "unverified", "未按新版硬门禁完成验证", required
+        elif p.get("scene_refs_status") == "failed":
+            category, reason, repair = "interrupted", "最近一次场景任务中断或失败", []
+        else:
+            continue
+        counts[category] += 1
+        items.append({
+            "scene": name,
+            "scene_reference_id": row["id"],
+            "category": category,
+            "reason": reason,
+            "views": list(dict.fromkeys(repair)),
+            "hard_failures": hard,
+            "warnings": gate.get("warnings") or gate.get("issues") or [],
+            "pack_status": row["pack_status"] if "pack_status" in row.keys() else None,
+        })
+    return {"project_id": project_id, "total": len(items), "items": items, "counts": counts, "read_only": True}
+
+
+def compute_scene_cost_precheck(
+    project_id: str,
+    *,
+    scenes: list[str] | None = None,
+    resume: bool = False,
+    view_role: str | None = None,
+    scene_reference_id: str | None = None,
+    action: str | None = None,
+    scene_payloads: list[dict] | None = None,
+) -> dict:
+    """所有场景图片付费入口共用的服务端范围/费用预检。"""
+    from app.config import IMAGE_PRICE_PER_UNIT
+
+    p = _project_or_404(project_id)
+    if not p.get("bible_json"):
+        raise HTTPException(409, "请先生成人物谱")
+    bible = json.loads(p["bible_json"])
+    source_scenes = scene_payloads if scene_payloads is not None else list(bible.get("scenes") or [])
+    selected = _normalize_scene_selection(scenes)
+    if selected:
+        by_name = {str(item.get("name") or ""): item for item in source_scenes}
+        missing = [name for name in selected if name not in by_name]
+        if missing:
+            raise HTTPException(404, f"场景不存在：{missing[0]}")
+        source_scenes = [by_name[name] for name in selected]
+    scope: list[dict] = []
+    if view_role:
+        if len(source_scenes) != 1:
+            raise HTTPException(422, "单视角预检必须明确一个场景")
+        scene = source_scenes[0]
+        scope.append({
+            "scene": scene.get("name"), "scene_reference_id": scene_reference_id,
+            "views": [view_role], "view_role": view_role, "reason": "单视角重做",
+        })
+    elif resume:
+        gaps = scan_scene_asset_gaps(project_id)
+        allowed = set(selected or [str(s.get("name") or "") for s in source_scenes])
+        source_by_name = {str(scene.get("name") or ""): scene for scene in source_scenes}
+        for item in gaps["items"]:
+            if item["scene"] not in allowed or item["category"] == "warning":
+                continue
+            # 当前补齐实现以临时完整包复验后原子切换，报价必须覆盖完整合同视角；
+            # 只修一个视角请走详情内“单视角重做”入口。
+            contract_views = _scene_required_roles(source_by_name.get(item["scene"], {}))
+            scope.append({
+                "scene": item["scene"],
+                "scene_reference_id": item.get("scene_reference_id"),
+                "views": contract_views,
+                "suggested_failed_views": item.get("views") or [],
+                "reason": f"{item.get('reason')}；整包候选通过后原子切换",
+                "category": item.get("category"),
+            })
+    else:
+        for scene in source_scenes:
+            scope.append({
+                "scene": scene.get("name"),
+                "views": _scene_required_roles(scene),
+                "reason": "首次生成" if action == "generate_bible_and_refs" else "整包重生",
+            })
+    image_count = sum(len(item.get("views") or []) for item in scope)
+    unit = float(IMAGE_PRICE_PER_UNIT)
+    estimated = round(image_count * unit, 2)
+    max_retry = round(estimated * 1.5, 2)
+    computed = now()
+    scope_fp = fingerprint({
+        "project_id": project_id,
+        "action": action or ("regenerate_view" if view_role else ("resume_missing" if resume else "regenerate_pack")),
+        "scope": scope,
+        "unit": unit,
+        "bible_version": p.get("bible_version"),
+    })
+    return {
+        "quote_id": scope_fp,
+        "scope_fingerprint": scope_fp,
+        "computed_at": computed,
+        "quote_expires_at": computed + 300,
+        "project_id": project_id,
+        "action": action or ("regenerate_view" if view_role else ("resume_missing" if resume else "regenerate_pack")),
+        "scene_count": len(scope),
+        "actual_view_count": image_count,
+        "views_per_scene": max((len(item.get("views") or []) for item in scope), default=0),
+        "image_count": image_count,
+        "unit_price_cny": unit,
+        "estimated_cost_cny": estimated,
+        "max_retry_budget_cny": max_retry,
+        "budget_cap_cny": max_retry,
+        "max_retries": 2,
+        "estimated_duration_min": [max(1, image_count), max(3, image_count * 3)],
+        "scope": scope,
+        "old_asset_policy": "新图在单图及整包 QA 全部通过前仅作候选；旧采用包继续服务下游",
+        "idempotency_hint": "同一有效报价重复确认只受理一个任务；范围或价格扩大必须重新确认",
+        "stop_policy": "可停止；已开始步骤可能计费，已通过并落盘的资产保留",
+    }
+
+
+@router.get("/projects/{project_id}/scene-refs/gaps")
+async def scene_refs_gaps(project_id: str):
+    return scan_scene_asset_gaps(project_id)
+
+
+@router.post("/projects/{project_id}/scene-refs/precheck")
+async def scene_refs_precheck(project_id: str, body: dict | None = None):
+    payload = _as_body_dict(body)
+    return _issue_payment_quote(compute_scene_cost_precheck(
+        project_id,
+        scenes=_normalize_scene_selection(payload.get("scenes")),
+        resume=bool(payload.get("resume", False)),
+        view_role=payload.get("view_role"),
+        scene_reference_id=payload.get("scene_reference_id"),
+        action=payload.get("action"),
+    ))
+
+
+def _scene_refs_progress_payload(project_id: str) -> dict:
+    p = _project_or_404(project_id)
+    gaps = scan_scene_asset_gaps(project_id)
+    target = _decode_scene_target(p.get("scene_refs_target"))
+    all_scenes = (json.loads(p["bible_json"]).get("scenes") or []) if p.get("bible_json") else []
+    target_names = set(target if isinstance(target, list) else ([target] if isinstance(target, str) else []))
+    progress_scenes = [scene for scene in all_scenes if not target_names or scene.get("name") in target_names]
+    total = len(progress_scenes)
+    problematic = {item["scene"]: item for item in gaps["items"]}
+    items = []
+    ready = failed = missing = unverified = 0
+    for scene in progress_scenes:
+        name = scene.get("name")
+        gap = problematic.get(name)
+        if not gap:
+            status = "ready"; ready += 1
+        elif gap["category"] == "missing":
+            status = "missing"; missing += 1
+        elif gap["category"] == "hard_failure":
+            status = "failed"; failed += 1
+        else:
+            status = "unverified"; unverified += 1
+        items.append({"scene": name, "status": status, **({"detail": gap} if gap else {})})
+    run = next((item for item in evidence_repository.list_runs(project_id=project_id, limit=50)
+                if item.get("workflow_type") in {"scene_references", "scene_view_redo"}), None)
+    run_id = (run or {}).get("id")
+    steps = evidence_repository.get_steps(run_id) if run_id else []
+    active_step = next((step for step in reversed(steps)
+                        if step.get("status") in {"queued", "running", "waiting"}), None)
+    latest_step = active_step or (steps[-1] if steps else None)
+    latest_call = None
+    successful_images = 0
+    if run_id:
+        conn = get_conn()
+        calls = rows_to_dicts(conn.execute(
+            "SELECT * FROM provider_calls WHERE run_id=? ORDER BY id", (run_id,),
+        ).fetchall())
+        successful_images = sum(
+            1 for call in calls
+            if call.get("status") in {"SUCCEEDED", "succeeded", "success"}
+            and "image" in str(call.get("kind") or "").lower()
+        )
+        latest_call = calls[-1] if calls else None
+    call_meta = _parse_json_value((latest_call or {}).get("meta"), {})
+    if not isinstance(call_meta, dict):
+        call_meta = {}
+    fallback_scene = target[0] if isinstance(target, list) and target else (target if isinstance(target, str) else None)
+    configured = (run or {}).get("config_snapshot") or {}
+    spent = float((run or {}).get("cost_cny") or 0)
+    if spent <= 0 and successful_images:
+        spent = successful_images * float(config.IMAGE_PRICE_PER_UNIT)
+    return {
+        "project_id": project_id, "total": total, "ready": ready, "failed": failed,
+        "missing": missing, "unverified": unverified, "remaining": max(0, total - ready),
+        "refs_status": p.get("scene_refs_status"), "refs_target": target,
+        "run_id": run_id,
+        "phase": (latest_step or {}).get("step_name") or (latest_call or {}).get("kind") or p.get("scene_refs_status"),
+        "current_scene": call_meta.get("scene_name") or configured.get("scene_name") or fallback_scene,
+        "current_view": call_meta.get("view_role") or configured.get("view_role"),
+        "attempt": int((latest_call or {}).get("attempt_no") or 0),
+        "spent_cny": round(spent, 2),
+        "items": items, "updated_at": now(),
+    }
+
+
+@router.get("/projects/{project_id}/scene-refs/progress")
+async def scene_refs_progress(project_id: str):
+    return _scene_refs_progress_payload(project_id)
+
+
+def _scene_review_snapshot(conn, project_id: str) -> list[dict]:
+    rows = rows_to_dicts(conn.execute(
+        "SELECT id,scene_name,artifact_id,input_fingerprint,pack_status,created_at "
+        "FROM scene_references WHERE project_id=? AND ep_end IS NULL ORDER BY scene_name,id",
+        (project_id,),
+    ).fetchall())
+    snapshot: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        version = str(row.get("artifact_id") or row.get("input_fingerprint") or row["id"])
+        key = (row["id"], version)
+        if key in seen:
+            continue
+        seen.add(key)
+        snapshot.append({
+            "scene_reference_id": row["id"], "adopted_version": version,
+            "scene_name": row["scene_name"], "old_status": row.get("pack_status"),
+        })
+    return snapshot
+
+
+def _insert_scene_review_items(conn, batch_id: str, snapshot: list[dict]) -> int:
+    added = 0
+    for item in snapshot:
+        cursor = conn.execute(
+            "INSERT OR IGNORE INTO scene_review_items(id,batch_id,scene_reference_id,adopted_version,"
+            "scene_name,old_status,result_status,disposition) VALUES(?,?,?,?,?,?,?,?)",
+            (new_id("scene_review_item"), batch_id, item["scene_reference_id"], item["adopted_version"],
+             item["scene_name"], item.get("old_status"), "queued", "pending"),
+        )
+        added += max(0, cursor.rowcount)
+    return added
+
+
+async def _evaluate_scene_review_item(conn, row, *, enforce: bool) -> tuple[str, dict]:
+    from app.multiview import (
+        SCENE_REQUIRED_VIEWS, list_scene_views, review_scene_pack_consistency, review_scene_view,
+    )
+    from app.scene_policy import normalize_scene_pack_qa
+
+    scene = conn.execute("SELECT * FROM scene_references WHERE id=?", (row["scene_reference_id"],)).fetchone()
+    if not scene:
+        return "unverified", {"uncertainties": ["复验期间资产已不存在"], "status": "unverified"}
+    views = list_scene_views(scene["id"], conn=conn)
+    old_group = _parse_json_value(scene["group_qa_json"] if "group_qa_json" in scene.keys() else None, {})
+    required = list((old_group or {}).get("required_views") or SCENE_REQUIRED_VIEWS)
+    actual = [str(view.get("view_role") or "") for view in views if view.get("image_path")]
+    single_results: list[dict] = []
+    for view in views:
+        if view.get("view_role") not in required or not view.get("image_path"):
+            continue
+        single_results.append(await review_scene_view(
+            view["image_path"], scene["state_canonical"] if "state_canonical" in scene.keys()
+            and scene["state_canonical"] else (scene["scene_canonical"] or ""), view["view_role"],
+        ))
+    required_views = [view for view in views if view.get("view_role") in required and view.get("image_path")]
+    if len(required_views) >= 2:
+        group = await review_scene_pack_consistency(required_views, scene["scene_canonical"] or "")
+    else:
+        group = normalize_scene_pack_qa({}, required_roles=required, actual_roles=actual)
+    hard = list(group.get("hard_failures") or [])
+    uncertain = list(group.get("uncertainties") or [])
+    warnings = list(group.get("warnings") or group.get("issues") or [])
+    for item in single_results:
+        hard.extend(item.get("hard_failures") or [])
+        uncertain.extend(item.get("uncertainties") or [])
+        warnings.extend(item.get("warnings") or [])
+    hard = list(dict.fromkeys(str(item) for item in hard if str(item).strip()))
+    uncertain = list(dict.fromkeys(str(item) for item in uncertain if str(item).strip()))
+    warnings = list(dict.fromkeys(str(item) for item in warnings if str(item).strip()))
+    status = "hard_failed" if hard else ("unverified" if uncertain else ("warning" if warnings else "passed"))
+    evidence = {
+        **group, "hard_failures": hard, "uncertainties": uncertain, "warnings": warnings,
+        "single_view_results": single_results, "result_status": status,
+    }
+    if enforce and status in {"hard_failed", "unverified"}:
+        change = _parse_json_value(scene["change_json"] if "change_json" in scene.keys() else None, {}) or {}
+        change.update({
+            "new_references_blocked": True, "blocked_by_review_batch": row["batch_id"],
+            "blocked_at": now(),
+            "reason": "新版场景硬门禁复验失败" if status == "hard_failed" else "新版场景门禁无法完成验证",
+        })
+        conn.execute(
+            "UPDATE scene_references SET pack_status=?,group_qa_json=?,change_json=? WHERE id=?",
+            ("failed" if status == "hard_failed" else "qa_pending",
+             json.dumps(evidence, ensure_ascii=False), json.dumps(change, ensure_ascii=False), scene["id"]),
+        )
+    elif enforce and status in {"passed", "warning"}:
+        change = _parse_json_value(scene["change_json"] if "change_json" in scene.keys() else None, {}) or {}
+        change.update({
+            "new_references_blocked": False, "reviewed_by_batch": row["batch_id"],
+            "reviewed_at": now(), "review_result": status,
+        })
+        conn.execute(
+            "UPDATE scene_references SET pack_status='ready',group_qa_json=?,change_json=? WHERE id=?",
+            (json.dumps(evidence, ensure_ascii=False), json.dumps(change, ensure_ascii=False), scene["id"]),
+        )
+    return status, evidence
+
+
+async def _run_scene_review_batch(batch_id: str) -> None:
+    from app.scene_policy import SCENE_QA_POLICY_VERSION, SCENE_QA_RULE_VERSION
+
+    conn = get_conn()
+    batch = conn.execute("SELECT * FROM scene_review_batches WHERE id=?", (batch_id,)).fetchone()
+    if not batch:
+        return
+    conn.execute("UPDATE scene_review_batches SET status='running',started_at=COALESCE(started_at,?) WHERE id=?",
+                 (now(), batch_id))
+    conn.commit()
+    try:
+        while True:
+            pending = conn.execute(
+                "SELECT * FROM scene_review_items WHERE batch_id=? AND result_status='queued' ORDER BY scene_name,id",
+                (batch_id,),
+            ).fetchall()
+            for item in pending:
+                try:
+                    status, evidence = await _evaluate_scene_review_item(
+                        conn, item,
+                        enforce=(not bool(batch["shadow_mode"]) and bool(batch["block_new_references"])),
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    status, evidence = "unverified", {
+                        "status": "unverified", "uncertainties": [f"复验未完成：{type(exc).__name__}"],
+                        "policy_version": SCENE_QA_POLICY_VERSION, "rule_version": SCENE_QA_RULE_VERSION,
+                    }
+                conn.execute(
+                    "UPDATE scene_review_items SET result_status=?,evidence_json=?,evaluated_at=? WHERE id=?",
+                    (status, json.dumps(evidence, ensure_ascii=False), now(), item["id"]),
+                )
+                conn.commit()
+            # 把签收截止前的新采用/切换包加入增量快照，按包版本去重。
+            current = _scene_review_snapshot(conn, batch["project_id"])
+            before = conn.execute("SELECT COUNT(*) n FROM scene_review_items WHERE batch_id=?", (batch_id,)).fetchone()["n"]
+            added = _insert_scene_review_items(conn, batch_id, current)
+            if added:
+                existing_incremental = _parse_json_value(batch["incremental_snapshot_json"], []) or []
+                known = {(item.get("scene_reference_id"), item.get("adopted_version")) for item in existing_incremental}
+                delta = [item for item in current if (item["scene_reference_id"], item["adopted_version"]) not in known]
+                conn.execute(
+                    "UPDATE scene_review_batches SET incremental_snapshot_json=? WHERE id=?",
+                    (json.dumps([*existing_incremental, *delta], ensure_ascii=False), batch_id),
+                )
+                conn.commit()
+                batch = conn.execute("SELECT * FROM scene_review_batches WHERE id=?", (batch_id,)).fetchone()
+                continue
+            if before == conn.execute("SELECT COUNT(*) n FROM scene_review_items WHERE batch_id=?", (batch_id,)).fetchone()["n"]:
+                break
+        counts = {row["result_status"]: row["n"] for row in conn.execute(
+            "SELECT result_status,COUNT(*) n FROM scene_review_items WHERE batch_id=? GROUP BY result_status",
+            (batch_id,),
+        ).fetchall()}
+        denominator = sum(counts.values())
+        evaluated = denominator - counts.get("queued", 0)
+        conn.execute(
+            "UPDATE scene_review_batches SET status='succeeded',cutoff_at=?,denominator=?,evaluated=?,"
+            "passed=?,warning=?,hard_failed=?,unverified=?,finished_at=? WHERE id=?",
+            (now(), denominator, evaluated, counts.get("passed", 0), counts.get("warning", 0),
+             counts.get("hard_failed", 0), counts.get("unverified", 0), now(), batch_id),
+        )
+        conn.commit()
+    except asyncio.CancelledError:
+        conn.execute("UPDATE scene_review_batches SET status='stopped',finished_at=? WHERE id=?", (now(), batch_id))
+        conn.commit()
+        raise
+    except Exception as exc:  # noqa: BLE001
+        conn.execute("UPDATE scene_review_batches SET status='failed',finished_at=? WHERE id=?", (now(), batch_id))
+        conn.commit()
+        errors.record_and_format(exc, action="scene_history_review", context={"batch_id": batch_id})
+
+
+def _scene_review_payload(conn, batch_id: str, *, include_items: bool = True) -> dict:
+    row = conn.execute("SELECT * FROM scene_review_batches WHERE id=?", (batch_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "历史复验批次不存在")
+    out = dict(row)
+    out["baseline_snapshot"] = _parse_json_value(out.pop("baseline_snapshot_json"), [])
+    out["incremental_snapshot"] = _parse_json_value(out.pop("incremental_snapshot_json"), [])
+    out["coverage"] = (out["evaluated"] / out["denominator"]) if out["denominator"] else 1.0
+    if include_items:
+        out["items"] = []
+        for item in rows_to_dicts(conn.execute(
+            "SELECT * FROM scene_review_items WHERE batch_id=? ORDER BY scene_name,id", (batch_id,),
+        ).fetchall()):
+            item["evidence"] = _parse_json_value(item.pop("evidence_json"), {})
+            out["items"].append(item)
+    return out
+
+
+@router.post("/projects/{project_id}/scene-reviews", status_code=202)
+async def start_scene_history_review(project_id: str, body: dict | None = None):
+    from app.scene_policy import SCENE_QA_POLICY_VERSION, SCENE_QA_RULE_VERSION
+
+    payload = _as_body_dict(body)
+    _project_or_404(project_id)
+    conn = get_conn()
+    active = conn.execute(
+        "SELECT id FROM scene_review_batches WHERE project_id=? AND status IN ('queued','running') "
+        "ORDER BY created_at DESC LIMIT 1", (project_id,),
+    ).fetchone()
+    if active:
+        return {**_scene_review_payload(conn, active["id"], include_items=False), "idempotent_replay": True}
+    baseline = _scene_review_snapshot(conn, project_id)
+    batch_id = new_id("scene_review")
+    conn.execute(
+        "INSERT INTO scene_review_batches(id,project_id,status,policy_version,rule_version,"
+        "baseline_snapshot_json,incremental_snapshot_json,denominator,shadow_mode,block_new_references,created_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (batch_id, project_id, "queued", SCENE_QA_POLICY_VERSION, SCENE_QA_RULE_VERSION,
+         json.dumps(baseline, ensure_ascii=False), "[]", len(baseline),
+         int(payload.get("shadow_mode", True)), int(payload.get("block_new_references", False)), now()),
+    )
+    _insert_scene_review_items(conn, batch_id, baseline)
+    conn.commit()
+    task_registry.spawn("scene_history_review", batch_id, _run_scene_review_batch(batch_id), project_id=project_id)
+    return {**_scene_review_payload(conn, batch_id, include_items=False), "status": "accepted", "task_id": f"scene_history_review:{batch_id}"}
+
+
+@router.get("/projects/{project_id}/scene-reviews")
+async def list_scene_history_reviews(project_id: str):
+    _project_or_404(project_id)
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id FROM scene_review_batches WHERE project_id=? ORDER BY created_at DESC", (project_id,),
+    ).fetchall()
+    return {"project_id": project_id, "items": [_scene_review_payload(conn, row["id"], include_items=False) for row in rows]}
+
+
+@router.get("/projects/{project_id}/scene-reviews/{batch_id}")
+async def get_scene_history_review(project_id: str, batch_id: str):
+    _project_or_404(project_id)
+    payload = _scene_review_payload(get_conn(), batch_id)
+    if payload["project_id"] != project_id:
+        raise HTTPException(404, "历史复验批次不存在")
+    return payload
+
+
+@router.post("/projects/{project_id}/scene-reviews/{batch_id}/cancel")
+async def cancel_scene_history_review(project_id: str, batch_id: str):
+    _project_or_404(project_id)
+    payload = _scene_review_payload(get_conn(), batch_id, include_items=False)
+    if payload["project_id"] != project_id:
+        raise HTTPException(404, "历史复验批次不存在")
+    stopped = await task_registry.cancel_and_wait("scene_history_review", batch_id)
+    return {"stopped": stopped, "batch_id": batch_id}
+
+
+@router.post("/projects/{project_id}/scene-reviews/{batch_id}/items/{item_id}/disposition")
+async def dispose_scene_history_review_item(
+    project_id: str, batch_id: str, item_id: str, body: dict | None = None,
+):
+    """记录复验处置；不删除历史图片、证据或账单。"""
+    _project_or_404(project_id)
+    payload = _as_body_dict(body)
+    action = str(payload.get("action") or "").strip()
+    if action not in {"accepted_risk", "repair_planned", "repaired", "false_positive", "deferred"}:
+        raise HTTPException(422, "未知复验处置动作")
+    reason = str(payload.get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(422, "复验处置必须填写原因")
+    conn = get_conn()
+    batch = conn.execute(
+        "SELECT * FROM scene_review_batches WHERE id=? AND project_id=?", (batch_id, project_id),
+    ).fetchone()
+    item = conn.execute(
+        "SELECT * FROM scene_review_items WHERE id=? AND batch_id=?", (item_id, batch_id),
+    ).fetchone()
+    if not batch or not item:
+        raise HTTPException(404, "复验批次或条目不存在")
+    disposition = json.dumps({
+        "action": action, "reason": reason,
+        "decided_by": str(payload.get("decided_by") or "user"), "decided_at": now(),
+    }, ensure_ascii=False)
+    conn.execute("UPDATE scene_review_items SET disposition=? WHERE id=?", (disposition, item_id))
+    count = conn.execute(
+        "SELECT COUNT(*) AS n FROM scene_review_items WHERE batch_id=? AND disposition!='pending'",
+        (batch_id,),
+    ).fetchone()["n"]
+    conn.execute(
+        "UPDATE scene_review_batches SET disposition_count=? WHERE id=?", (count, batch_id),
+    )
+    conn.commit()
+    return {"disposed": True, "item_id": item_id, "disposition": _parse_json_value(disposition, {})}
+
+
+def recover_scene_review_tasks() -> int:
+    """服务重启后以同一稳定批次 ID 继续未完成复验。"""
+    conn = get_conn()
+    rows = conn.execute("SELECT id,project_id FROM scene_review_batches WHERE status IN ('queued','running')").fetchall()
+    resumed = 0
+    for row in rows:
+        if task_registry.active("scene_history_review", row["id"]):
+            continue
+        task_registry.spawn(
+            "scene_history_review", row["id"], _run_scene_review_batch(row["id"]), project_id=row["project_id"],
+        )
+        resumed += 1
+    return resumed
+
+
 async def _scene_refs_task(
     project_id: str,
-    only_scene: str | None,
+    only_scene: str | list[str] | None,
     *,
     resume: bool = False,
     parent_run_id: str | None = None,
     requested_by: str = "user",
     trigger_type: str = "manual",
 ):
-    from app.scenes import generate_scene_refs
+    from app.scenes import SceneCandidateReviewRequired, generate_scene_refs
     conn = get_conn()
     recorder = WorkflowRecorder.create(
         workflow_type="scene_references",
@@ -2093,6 +3054,14 @@ async def _scene_refs_task(
     except asyncio.CancelledError:
         recorder.cancel()
         raise
+    except SceneCandidateReviewRequired as exc:
+        message = str(exc)[:1200]
+        recorder.partial(message)
+        conn.execute(
+            "UPDATE projects SET scene_refs_status='warning', scene_refs_error=? WHERE id=?",
+            (message, project_id),
+        )
+        conn.commit()
     except Exception as exc:  # noqa: BLE001
         recorder.fail(exc)
         public = errors.record_and_format(exc, action="scene_refs_generate", context={"project_id": project_id})
@@ -2101,45 +3070,151 @@ async def _scene_refs_task(
         conn.commit()
 
 
-@router.post("/projects/{project_id}/scene-bible")
-async def start_scene_bible(project_id: str):
+@router.post("/projects/{project_id}/scene-bible/preview")
+async def preview_scene_bible(project_id: str):
+    """只生成可编辑的场景清单与真实视角报价；不出图、不替换资产。"""
+    from app.stages import generate_scene_bible
+
+    p = _project_or_404(project_id)
+    if not p.get("bible_json"):
+        raise HTTPException(409, "请先生成角色圣经")
+    bible = Bible.model_validate(json.loads(p["bible_json"]))
+    from app.scenes import SCENE_BIBLE_CHAPTER_WINDOW
+    chapters = rows_to_dicts(get_conn().execute(
+        "SELECT * FROM chapters WHERE project_id=? ORDER BY idx LIMIT ?",
+        (project_id, SCENE_BIBLE_CHAPTER_WINDOW),
+    ).fetchall())
+    _, scenes = await generate_scene_bible(chapters, bible, project_id=project_id)
+    scene_payloads = [scene.model_dump(mode="json") for scene in scenes]
+    quote = _issue_payment_quote(compute_scene_cost_precheck(
+        project_id,
+        scenes=[scene["name"] for scene in scene_payloads],
+        action="generate_bible_and_refs",
+        scene_payloads=scene_payloads,
+    ))
+    return {"project_id": project_id, "scenes": scene_payloads, "precheck": quote, "generates_images": False}
+
+
+@router.post("/projects/{project_id}/scene-bible/precheck")
+async def scene_bible_precheck(project_id: str, body: dict | None = None):
+    payload = _as_body_dict(body)
+    scenes = payload.get("scenes")
+    if not isinstance(scenes, list) or not scenes:
+        raise HTTPException(422, "必须提交已确认的场景清单")
+    names = [str(item.get("name") or "").strip() for item in scenes if isinstance(item, dict)]
+    if len(names) != len(scenes) or not all(names) or len(names) != len(set(names)):
+        raise HTTPException(422, "场景名称不能为空或重复")
+    if any(not 30 <= len(str(item.get("scene_canonical") or "").strip()) <= 80 for item in scenes):
+        raise HTTPException(422, "每个场景锚点必须为 30~80 字")
+    project = _project_or_404(project_id)
+    candidate_bible = json.loads(project["bible_json"] or '{}')
+    candidate_bible["scenes"] = scenes
+    instance, validation_errors = schema_errors(Bible, candidate_bible)
+    if validation_errors:
+        raise HTTPException(422, "；".join(validation_errors))
+    normalized_scenes = [scene.model_dump(mode="json") for scene in instance.scenes]
+    return _issue_payment_quote(compute_scene_cost_precheck(
+        project_id, scenes=names, action="generate_bible_and_refs", scene_payloads=normalized_scenes,
+    ))
+
+
+@router.post("/projects/{project_id}/scene-bible", status_code=202)
+async def start_scene_bible(project_id: str, body: dict | None = None):
     """（重新）生成场景圣经并触发场景图批量出图。人物谱必须先就绪。"""
     from app.capabilities.dispatch import ui_route
-    routed = await ui_route("scene.generate_bible", {"project_id": project_id})
-    if routed is not None:
-        return routed
+    payload = _as_body_dict(body)
+    # 带服务端报价的正式确认直接进入本路由的报价/幂等校验；旧能力入口仍走 Command Bus。
+    if not payload.get("quote_id"):
+        routed = await ui_route("scene.generate_bible", {"project_id": project_id})
+        if routed is not None:
+            return routed
     p = _project_or_404(project_id)
     if not p["bible_json"]:
         raise HTTPException(409, "请先生成角色圣经")
     if _scene_assets_task_active(project_id):
         raise HTTPException(409, "场景图正在生成中")
-    conn = get_conn()
-    conn.execute("UPDATE projects SET scene_refs_status='running', scene_refs_error=NULL WHERE id=?", (project_id,))
-    conn.commit()
-    task_registry.spawn(
-        "scene_bible", project_id, _scene_bible_and_refs(project_id), project_id=project_id
+    confirmed_scenes = payload.get("scenes")
+    if not isinstance(confirmed_scenes, list) or not confirmed_scenes:
+        raise HTTPException(409, detail={
+            "code": "SCENE_PREVIEW_REQUIRED",
+            "message": "必须先预览并确认场景清单，再执行费用确认",
+        })
+    names = [str(item.get("name") or "").strip() for item in confirmed_scenes if isinstance(item, dict)]
+    if not names or len(names) != len(set(names)):
+        raise HTTPException(422, "场景清单名称不能为空或重复")
+    if any(not 30 <= len(str(item.get("scene_canonical") or "").strip()) <= 80 for item in confirmed_scenes):
+        raise HTTPException(422, "每个场景锚点必须为 30~80 字")
+    candidate_bible = json.loads(p["bible_json"] or '{}')
+    candidate_bible["scenes"] = confirmed_scenes
+    bible_instance, validation_errors = schema_errors(Bible, candidate_bible)
+    if validation_errors:
+        raise HTTPException(422, "；".join(validation_errors))
+    confirmed_scenes = [scene.model_dump(mode="json") for scene in bible_instance.scenes]
+    quote = compute_scene_cost_precheck(
+        project_id, scenes=names, action="generate_bible_and_refs", scene_payloads=confirmed_scenes,
     )
-    return {"status": "running"}
+    if payload.get("confirm") is not True:
+        raise _payment_confirm_required(quote)
+    quote_row = _validate_payment_quote(project_id, payload.get("quote_id"), quote)
+    if quote_row["consumed_at"] is not None:
+        return {
+            "status": "accepted", "idempotent_replay": True,
+            "quote_id": payload.get("quote_id"), "task_id": quote_row["consumed_task_id"],
+            "run_id": quote_row["consumed_run_id"],
+        }
+    conn = get_conn()
+    current = json.loads(p["bible_json"])
+    current["scenes"] = confirmed_scenes
+    conn.execute("UPDATE projects SET bible_json=?, scene_refs_status='running', scene_refs_error=NULL WHERE id=?",
+                 (json.dumps(current, ensure_ascii=False), project_id))
+    conn.commit()
+    if not _start_scene_refs_generation(project_id, names):
+        raise HTTPException(409, "场景图正在生成中")
+    task_id = f"scene_refs:{project_id}"
+    _consume_payment_quote(str(payload.get("quote_id")), task_id=task_id, run_id=None)
+    return {"status": "accepted", "task_id": task_id, "quote_id": payload.get("quote_id"), "precheck": quote}
 
 
-@router.post("/projects/{project_id}/scene-refs")
+@router.post("/projects/{project_id}/scene-refs", status_code=202)
 async def start_scene_refs(project_id: str, body: dict | None = None):
     """（重新）生成场景图。需先有场景圣经（bible.scenes 非空）。可带 only 单场景重做。"""
     from app.capabilities.dispatch import ui_route
-    routed = await ui_route(
-        "scene.generate_refs",
-        {"project_id": project_id, "scene_name": (body or {}).get("scene")},
-    )
-    if routed is not None:
-        return routed
+    payload = _as_body_dict(body)
+    if not payload.get("quote_id"):
+        routed = await ui_route(
+            "scene.generate_refs",
+            {"project_id": project_id, "scene_name": payload.get("scene")},
+        )
+        if routed is not None:
+            return routed
     p = _project_or_404(project_id)
     if not p["bible_json"] or not json.loads(p["bible_json"]).get("scenes"):
         raise HTTPException(409, "还没有场景圣经，请先生成场景清单")
     if _scene_assets_task_active(project_id):
         raise HTTPException(409, "场景图正在生成中")
-    only = (body or {}).get("scene")
-    _start_scene_refs_generation(project_id, only)
-    return {"status": "running"}
+    selected = _normalize_scene_selection(payload.get("scenes"))
+    only = payload.get("scene")
+    if only and selected and only not in selected:
+        raise HTTPException(422, "scene 与 scenes 范围不一致")
+    if only and not selected:
+        selected = [str(only)]
+    resume = bool(payload.get("resume", not bool(only)))
+    quote = compute_scene_cost_precheck(project_id, scenes=selected, resume=resume)
+    if payload.get("confirm") is not True:
+        raise _payment_confirm_required(quote)
+    quote_row = _validate_payment_quote(project_id, payload.get("quote_id"), quote)
+    if quote_row["consumed_at"] is not None:
+        return {
+            "status": "accepted", "idempotent_replay": True,
+            "quote_id": payload.get("quote_id"), "task_id": quote_row["consumed_task_id"],
+            "run_id": quote_row["consumed_run_id"], "precheck": quote,
+        }
+    targets: str | list[str] | None = selected if selected else None
+    if not _start_scene_refs_generation(project_id, targets, resume=resume):
+        raise HTTPException(409, "场景图正在生成中")
+    task_id = f"scene_refs:{project_id}"
+    _consume_payment_quote(str(payload.get("quote_id")), task_id=task_id, run_id=None)
+    return {"status": "accepted", "task_id": task_id, "quote_id": payload.get("quote_id"), "precheck": quote}
 
 
 @router.post("/projects/{project_id}/scene-refs/cancel")
@@ -2153,13 +3228,19 @@ async def cancel_scene_refs(project_id: str):
     stopped_bible = await task_registry.cancel_and_wait("scene_bible", project_id)
     stopped_refs = await task_registry.cancel_and_wait("scene_refs", project_id)
     stopped = stopped_bible or stopped_refs
+    final_progress = _scene_refs_progress_payload(project_id)
     conn = get_conn()
     conn.execute(
         "UPDATE projects SET scene_refs_status='idle', scene_refs_error=NULL, scene_refs_target=NULL WHERE id=?",
         (project_id,))
     conn.commit()
     was_running = p["scene_refs_status"] == "running"
-    return {"stopped": stopped or was_running}
+    final_progress["refs_status"] = "idle"
+    return {
+        "stopped": stopped or was_running,
+        "partial_results_preserved": True,
+        "progress": final_progress,
+    }
 
 
 @router.put("/projects/{project_id}/scenes/{scene_name}/prompt")
@@ -2178,6 +3259,12 @@ async def edit_scene_prompt(project_id: str, scene_name: str, body: dict):
     prompt_text = (body.get("scene_prompt") or "").strip()
     if prompt_text and not 10 <= len(prompt_text) <= 400:
         raise HTTPException(422, f"场景图描述长度 {len(prompt_text)} 字，要求 10~400 字（留空则恢复默认）")
+    forbidden_people_requests = (
+        "出现人物", "有人物", "出现人群", "包含人群", "有人群",
+        "出现行人", "有行人", "角色入镜", "主体人物",
+    )
+    if prompt_text and any(token in prompt_text for token in forbidden_people_requests):
+        raise HTTPException(422, "纯环境场景图描述不能要求人物、人群、行人或角色入镜")
     bible = json.loads(p["bible_json"])
     target = next((s for s in bible.get("scenes", []) if s.get("name") == scene_name), None)
     if target is None:
@@ -2188,6 +3275,161 @@ async def edit_scene_prompt(project_id: str, scene_name: str, body: dict):
                  (json.dumps(bible, ensure_ascii=False), project_id))
     conn.commit()
     return {"saved": True, "reset_to_default": not prompt_text}
+
+
+@router.put("/projects/{project_id}/scenes/{scene_name}")
+async def edit_scene_anchor(project_id: str, scene_name: str, body: dict):
+    """结构化保存场景锚点；只改文字并标记待重绘，不产生图片费用。"""
+    p = _project_or_404(project_id)
+    if not p.get("bible_json"):
+        raise HTTPException(409, "请先生成角色圣经")
+    expected = body.get("expected_version")
+    if expected is None or int(expected) != int(p.get("bible_version") or 0):
+        raise HTTPException(409, detail={
+            "code": "BIBLE_VERSION_CONFLICT", "message": "场景锚点已被其他操作更新，请刷新后重试",
+            "current_version": int(p.get("bible_version") or 0),
+        })
+    bible = json.loads(p["bible_json"])
+    target = next((scene for scene in bible.get("scenes", []) if scene.get("name") == scene_name), None)
+    if target is None:
+        raise HTTPException(404, f"场景不存在：{scene_name}")
+    canonical = str(body.get("scene_canonical") or "").strip()
+    if not 30 <= len(canonical) <= 80:
+        raise HTTPException(422, "完整场景锚点要求 30~80 字")
+    location = str(body.get("location_kind") or target.get("location_kind") or "").strip()
+    if location and location not in {"室内", "室外", "其他"}:
+        raise HTTPException(422, "location_kind 须为室内/室外/其他")
+    target.update({
+        "scene_canonical": canonical, "location_kind": location,
+        "space": str(body.get("space") or "").strip(),
+        "time_of_day": str(body.get("time_of_day") or "").strip(),
+        "lighting": str(body.get("lighting") or "").strip(),
+        "landmarks": [str(item).strip() for item in (body.get("landmarks") or []) if str(item).strip()],
+        "forbidden_elements": [str(item).strip() for item in (body.get("forbidden_elements") or []) if str(item).strip()],
+    })
+    instance, validation_errors = schema_errors(Bible, bible)
+    if validation_errors:
+        raise HTTPException(422, "；".join(validation_errors))
+    conn = get_conn()
+    conn.execute(
+        "UPDATE projects SET bible_json=?,bible_version=bible_version+1 WHERE id=?",
+        (instance.model_dump_json(), project_id),
+    )
+    current = _scene_current_row(conn, project_id, scene_name)
+    if current:
+        change = _parse_json_value(current["change_json"] if "change_json" in current.keys() else None, {}) or {}
+        change.update({"description_changed": True, "pending_redraw": True, "changed_at": now()})
+        conn.execute("UPDATE scene_references SET change_json=? WHERE id=?",
+                     (json.dumps(change, ensure_ascii=False), current["id"]))
+    conn.commit()
+    return {"saved": True, "bible_version": int(p.get("bible_version") or 0) + 1, "pending_redraw": True, "generated": False}
+
+
+async def _run_portrait_view_redo(
+    project_id: str,
+    character_name: str,
+    portrait_id: str,
+    view_role: str,
+    recorder: WorkflowRecorder,
+) -> None:
+    from app.multiview import regenerate_character_view, pack_result_ok
+
+    recorder.start()
+    try:
+        async def _op():
+            return await regenerate_character_view(
+                project_id=project_id, portrait_id=portrait_id, view_role=view_role,
+            )
+
+        result = await recorder.step(
+            "portrait_view_redo", _op, agent_name="portrait_view_redo",
+        )
+        if isinstance(result, tuple):
+            result = result[1]
+        if not pack_result_ok(result):
+            recorder.fail(RuntimeError(
+                f"视角重做未通过：{view_role}（status={(result or {}).get('status')}）"
+            ))
+            return
+        recorder.succeed(f"{character_name}/{view_role} 视角已重做并通过整包 QA")
+    except asyncio.CancelledError:
+        recorder.cancel()
+        raise
+    except Exception as exc:  # noqa: BLE001
+        recorder.fail(exc)
+
+
+def _start_portrait_view_redo(
+    project_id: str,
+    character_name: str,
+    portrait_id: str,
+    view_role: str,
+    *,
+    quote_id: str | None,
+    budget_limit_cny: float,
+    parent_run_id: str | None = None,
+    requested_by: str = "user",
+    trigger_type: str = "manual",
+) -> dict | None:
+    task_key = f"{portrait_id}:{view_role}"
+    if task_registry.active("portrait_view_redo", task_key):
+        return None
+    recorder = WorkflowRecorder.create(
+        workflow_type="portrait_view_redo",
+        scope_type="project",
+        scope_id=project_id,
+        input_fingerprint=fingerprint(project_id, portrait_id, view_role, quote_id),
+        requested_by=requested_by,
+        trigger_type=trigger_type,
+        config_snapshot={
+            "task_key": task_key, "character_name": character_name,
+            "portrait_id": portrait_id, "view_role": view_role, "quote_id": quote_id,
+            "budget_limit_cny": budget_limit_cny,
+        },
+        budget_limit_cny=budget_limit_cny,
+        parent_run_id=parent_run_id,
+    )
+    task_registry.spawn(
+        "portrait_view_redo", task_key,
+        _run_portrait_view_redo(
+            project_id, character_name, portrait_id, view_role, recorder,
+        ),
+        project_id=project_id,
+    )
+    return {
+        "status": "accepted", "task_id": f"portrait_view_redo:{task_key}",
+        "run_id": recorder.run_id, "portrait_id": portrait_id,
+        "view_role": view_role, "character_name": character_name,
+    }
+
+
+def recover_portrait_view_redo_tasks() -> int:
+    """重建进程重启时丢失的单视角异步任务。"""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id, scope_id, config_snapshot_json FROM workflow_runs "
+        "WHERE workflow_type='portrait_view_redo' AND status='PAUSED_EXTERNAL' "
+        "AND recovered_by_run_id IS NULL ORDER BY updated_at"
+    ).fetchall()
+    resumed = 0
+    for row in rows:
+        config = _parse_json_value(row["config_snapshot_json"], {})
+        if not isinstance(config, dict):
+            continue
+        character_name = str(config.get("character_name") or "").strip()
+        portrait_id = str(config.get("portrait_id") or "").strip()
+        view_role = str(config.get("view_role") or "").strip()
+        if not character_name or not portrait_id or not view_role:
+            continue
+        started = _start_portrait_view_redo(
+            row["scope_id"], character_name, portrait_id, view_role,
+            quote_id=config.get("quote_id"),
+            budget_limit_cny=float(config.get("budget_limit_cny") or 1),
+            parent_run_id=row["id"], requested_by="system", trigger_type="resume",
+        )
+        if started:
+            resumed += 1
+    return resumed
 
 
 @router.post("/projects/{project_id}/characters/{character_name}/portraits/{portrait_id}/views/{view_role}/regenerate")
@@ -2206,6 +3448,7 @@ async def regenerate_character_view_route(
             "portrait_id": portrait_id, "view_role": view_role,
             "confirm": payload.get("confirm") is True,
             "quote_id": payload.get("quote_id"),
+            "idempotency_key": payload.get("idempotency_key") or payload.get("quote_id"),
         },
     )
     if routed is not None:
@@ -2222,17 +3465,15 @@ async def regenerate_character_view_route(
     quote = compute_refs_cost_precheck(
         project_id, character=character_name, view_role=view_role,
     )
-    if not payload.get("quote_id") or payload.get("quote_id") != quote.get("quote_id"):
-        if payload.get("quote_id"):
-            raise HTTPException(
-                409,
-                detail={
-                    "code": "QUOTE_STALE",
-                    "message": "费用预检已过期或范围变化，请重新确认",
-                    "precheck": quote,
-                },
-            )
-        # Agent/工具路径：confirm=true 且未带 quote_id 时采用当前服务端报价
+    quote_id = payload.get("quote_id")
+    quote_row = _validate_payment_quote(project_id, quote_id, quote)
+    if quote_row["consumed_at"] is not None:
+        return {
+            "status": "accepted", "idempotent_replay": True,
+            "task_id": quote_row["consumed_task_id"], "run_id": quote_row["consumed_run_id"],
+            "portrait_id": portrait_id, "view_role": view_role,
+            "character_name": character_name, "precheck": quote,
+        }
     conn = get_conn()
     row = conn.execute(
         "SELECT * FROM character_portraits WHERE id=? AND project_id=? AND character_name=?",
@@ -2261,87 +3502,147 @@ async def regenerate_character_view_route(
             "message": "该视角重做任务已在运行",
         }
 
-    recorder = WorkflowRecorder.create(
-        workflow_type="portrait_view_redo",
-        scope_type="project",
-        scope_id=project_id,
-        input_fingerprint=fingerprint(project_id, portrait_id, view_role, quote.get("quote_id")),
-        requested_by="user",
-        trigger_type="manual",
-        config_snapshot={
-            "task_key": task_key,
-            "character_name": character_name,
-            "portrait_id": portrait_id,
-            "view_role": view_role,
-            "quote_id": quote.get("quote_id"),
-        },
-        budget_limit_cny=float(quote.get("max_retry_budget_cny") or 1),
-    )
-
-    async def _run_redo() -> None:
-        from app.multiview import regenerate_character_view, pack_result_ok
-        recorder.start()
-        try:
-            async def _op():
-                return await regenerate_character_view(
-                    project_id=project_id, portrait_id=portrait_id, view_role=view_role,
-                )
-            result = await recorder.step(
-                "portrait_view_redo",
-                _op,
-                agent_name="portrait_view_redo",
-            )
-            if isinstance(result, tuple):
-                result = result[1]
-            if not pack_result_ok(result):
-                recorder.fail(RuntimeError(
-                    f"视角重做未通过：{view_role}（status={(result or {}).get('status')}）"
-                ))
-                return
-            recorder.succeed(f"{character_name}/{view_role} 视角已重做并通过整包 QA")
-        except asyncio.CancelledError:
-            recorder.cancel()
-            raise
-        except Exception as exc:  # noqa: BLE001
-            recorder.fail(exc)
-            raise
-
     try:
-        task_registry.spawn(
-            "portrait_view_redo", task_key, _run_redo(), project_id=project_id,
+        started = _start_portrait_view_redo(
+            project_id, character_name, portrait_id, view_role,
+            quote_id=str(quote_id),
+            budget_limit_cny=float(quote.get("max_retry_budget_cny") or 1),
         )
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
-
+    if not started:
+        raise HTTPException(409, "该视角重做任务已在运行")
+    _consume_payment_quote(
+        str(quote_id), task_id=started["task_id"], run_id=started["run_id"],
+    )
     return {
-        "status": "accepted",
-        "task_id": f"portrait_view_redo:{task_key}",
-        "run_id": recorder.run_id,
-        "portrait_id": portrait_id,
-        "view_role": view_role,
-        "character_name": character_name,
-        "precheck": quote,
+        **started, "precheck": quote,
         "message": "单视角重做任务已受理，可刷新查看进度",
     }
 
 
-@router.post("/projects/{project_id}/scenes/{scene_name}/refs/{scene_reference_id}/views/{view_role}/regenerate")
+async def _run_scene_view_redo(
+    project_id: str,
+    scene_name: str,
+    scene_reference_id: str,
+    view_role: str,
+    recorder: WorkflowRecorder,
+) -> None:
+    from app.multiview import pack_result_ok, regenerate_scene_view
+
+    recorder.start()
+    try:
+        result = await recorder.step(
+            "generate_and_single_view_qa_and_pack_qa",
+            lambda: regenerate_scene_view(
+                project_id=project_id, scene_reference_id=scene_reference_id, view_role=view_role,
+            ),
+            agent_name="scene_view_redo",
+        )
+        if not pack_result_ok(result):
+            recorder.fail(RuntimeError(
+                f"视角重做未通过：{view_role}（status={(result or {}).get('status')}）"
+            ))
+            return
+        recorder.succeed(f"{scene_name}/{view_role} 已通过单图及整包 QA 并原子替换")
+    except asyncio.CancelledError:
+        recorder.cancel()
+        raise
+    except Exception as exc:  # noqa: BLE001
+        recorder.fail(exc)
+
+
+def _start_scene_view_redo(
+    project_id: str,
+    scene_name: str,
+    scene_reference_id: str,
+    view_role: str,
+    *,
+    quote_id: str | None,
+    budget_limit_cny: float,
+    parent_run_id: str | None = None,
+    requested_by: str = "user",
+    trigger_type: str = "manual",
+) -> dict | None:
+    task_key = f"{scene_reference_id}:{view_role}"
+    if task_registry.active("scene_view_redo", task_key):
+        return None
+    recorder = WorkflowRecorder.create(
+        workflow_type="scene_view_redo", scope_type="project", scope_id=project_id,
+        input_fingerprint=fingerprint(project_id, scene_reference_id, view_role, quote_id),
+        requested_by=requested_by, trigger_type=trigger_type,
+        config_snapshot={
+            "task_key": task_key, "scene_name": scene_name,
+            "scene_reference_id": scene_reference_id, "view_role": view_role,
+            "quote_id": quote_id, "budget_limit_cny": budget_limit_cny,
+        },
+        budget_limit_cny=budget_limit_cny,
+        parent_run_id=parent_run_id,
+    )
+    task_registry.spawn(
+        "scene_view_redo", task_key,
+        _run_scene_view_redo(project_id, scene_name, scene_reference_id, view_role, recorder),
+        project_id=project_id,
+    )
+    return {
+        "status": "accepted", "task_id": f"scene_view_redo:{task_key}",
+        "run_id": recorder.run_id, "scene_reference_id": scene_reference_id,
+        "scene_name": scene_name, "view_role": view_role,
+    }
+
+
+def recover_scene_view_redo_tasks() -> int:
+    """服务重启后从持久运行记录恢复场景单视角重做。"""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id,scope_id,config_snapshot_json FROM workflow_runs "
+        "WHERE workflow_type='scene_view_redo' AND status='PAUSED_EXTERNAL' "
+        "AND recovered_by_run_id IS NULL ORDER BY updated_at"
+    ).fetchall()
+    resumed = 0
+    for row in rows:
+        snapshot = _parse_json_value(row["config_snapshot_json"], {})
+        if not isinstance(snapshot, dict):
+            continue
+        scene_name = str(snapshot.get("scene_name") or "").strip()
+        scene_reference_id = str(snapshot.get("scene_reference_id") or "").strip()
+        view_role = str(snapshot.get("view_role") or "").strip()
+        if not scene_name or not scene_reference_id or not view_role:
+            continue
+        started = _start_scene_view_redo(
+            row["scope_id"], scene_name, scene_reference_id, view_role,
+            quote_id=snapshot.get("quote_id"),
+            budget_limit_cny=float(snapshot.get("budget_limit_cny") or 1),
+            parent_run_id=row["id"], requested_by="system", trigger_type="resume",
+        )
+        if started:
+            resumed += 1
+    return resumed
+
+
+@router.post(
+    "/projects/{project_id}/scenes/{scene_name}/refs/{scene_reference_id}/views/{view_role}/regenerate",
+    status_code=202,
+)
 async def regenerate_scene_view_route(
     project_id: str, scene_name: str, scene_reference_id: str, view_role: str,
+    body: dict | None = None,
 ):
-    """场景库单视角重做。"""
+    """场景库单视角重做：预检后异步受理，不在 HTTP 请求中等待生成/整包 QA。"""
     from app.capabilities.dispatch import ui_route
-    routed = await ui_route(
-        "scene.regenerate_view",
-        {
-            "project_id": project_id, "scene_name": scene_name,
-            "scene_reference_id": scene_reference_id, "view_role": view_role,
-        },
-    )
-    if routed is not None:
-        return routed
+    payload = _as_body_dict(body)
+    if not payload.get("quote_id"):
+        routed = await ui_route(
+            "scene.regenerate_view",
+            {
+                "project_id": project_id, "scene_name": scene_name,
+                "scene_reference_id": scene_reference_id, "view_role": view_role,
+                "confirm": payload.get("confirm") is True, "quote_id": payload.get("quote_id"),
+            },
+        )
+        if routed is not None:
+            return routed
     _project_or_404(project_id)
-    from app.multiview import regenerate_scene_view, pack_result_ok
     conn = get_conn()
     row = conn.execute(
         "SELECT * FROM scene_references WHERE id=? AND project_id=? AND scene_name=?",
@@ -2349,15 +3650,52 @@ async def regenerate_scene_view_route(
     ).fetchone()
     if not row:
         raise HTTPException(404, "场景版本不存在")
-    try:
-        result = await regenerate_scene_view(
-            project_id=project_id, scene_reference_id=scene_reference_id, view_role=view_role,
-        )
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(409, str(exc)) from exc
-    if not pack_result_ok(result):
-        raise HTTPException(409, f"视角重做未通过：{view_role}（status={result.get('status')}）")
-    return result
+    quote = compute_scene_cost_precheck(
+        project_id, scenes=[scene_name], view_role=view_role,
+        scene_reference_id=scene_reference_id, action="regenerate_view",
+    )
+    if payload.get("confirm") is not True:
+        raise _payment_confirm_required(quote)
+    quote_row = _validate_payment_quote(project_id, payload.get("quote_id"), quote)
+    if quote_row["consumed_at"] is not None:
+        return {
+            "status": "accepted", "idempotent_replay": True,
+            "task_id": quote_row["consumed_task_id"], "run_id": quote_row["consumed_run_id"],
+            "precheck": quote,
+        }
+    task_key = f"{scene_reference_id}:{view_role}"
+    if task_registry.active("scene_view_redo", task_key):
+        active_runs = evidence_repository.list_runs(active=True, project_id=project_id, limit=50)
+        existing = next((run for run in active_runs if run.get("workflow_type") == "scene_view_redo"
+                         and (run.get("config_snapshot") or {}).get("task_key") == task_key), None)
+        return {
+            "status": "accepted", "task_id": f"scene_view_redo:{task_key}",
+            "run_id": (existing or {}).get("id"), "precheck": quote,
+        }
+    started = _start_scene_view_redo(
+        project_id, scene_name, scene_reference_id, view_role,
+        quote_id=str(payload.get("quote_id")),
+        budget_limit_cny=float(quote.get("max_retry_budget_cny") or 1),
+    )
+    if not started:
+        raise HTTPException(409, "该场景视角重做任务已在运行")
+    _consume_payment_quote(
+        str(payload.get("quote_id")), task_id=started["task_id"], run_id=started["run_id"],
+    )
+    return {
+        **started,
+        "precheck": quote, "message": "单视角重做任务已受理，可刷新恢复进度",
+    }
+
+
+@router.post("/projects/{project_id}/scenes/{scene_name}/refs/{scene_reference_id}/views/{view_role}/regenerate/cancel")
+async def cancel_scene_view_regeneration(
+    project_id: str, scene_name: str, scene_reference_id: str, view_role: str,
+):
+    _project_or_404(project_id)
+    task_key = f"{scene_reference_id}:{view_role}"
+    stopped = await task_registry.cancel_and_wait("scene_view_redo", task_key)
+    return {"stopped": stopped, "task_id": f"scene_view_redo:{task_key}", "old_asset_preserved": True}
 
 
 @router.post("/projects/{project_id}/scenes/{scene_name}/candidates/{artifact_id}/adopt")
@@ -2372,7 +3710,7 @@ async def adopt_scene_candidate_route(
             "project_id": project_id,
             "scene_name": scene_name,
             "artifact_id": artifact_id,
-            "reason": (body or {}).get("reason") or "人工采纳候选",
+            "reason": (body or {}).get("reason") or "",
         },
     )
     if routed is not None:
@@ -2384,13 +3722,139 @@ async def adopt_scene_candidate_route(
             project_id,
             scene_name,
             artifact_id,
-            reason=str((body or {}).get("reason") or "人工采纳候选"),
+            reason=str((body or {}).get("reason") or ""),
             decided_by=str((body or {}).get("decided_by") or "user"),
         )
     except KeyError as exc:
         raise HTTPException(404, str(exc) or "候选不存在") from exc
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/projects/{project_id}/scenes/{scene_name}/candidates/{artifact_id}/review")
+async def review_scene_candidate_route(
+    project_id: str, scene_name: str, artifact_id: str,
+):
+    """只重验已落盘候选的 QA，不重新生图、不扣图片生成费。"""
+    _project_or_404(project_id)
+    from app.scenes import review_scene_candidate
+    try:
+        return await review_scene_candidate(project_id, scene_name, artifact_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc) or "候选不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/projects/{project_id}/scenes/{scene_name}/candidates/{artifact_id}/manual-review")
+async def manual_review_scene_candidate_route(
+    project_id: str, scene_name: str, artifact_id: str, body: dict | None = None,
+):
+    """只允许对缺失/未验证证据做带审计的人工复核；明确硬失败不可覆盖。"""
+    _project_or_404(project_id)
+    payload = body or {}
+    from app.scenes import manually_review_and_adopt_scene_candidate
+    try:
+        return await manually_review_and_adopt_scene_candidate(
+            project_id,
+            scene_name,
+            artifact_id,
+            confirmations=payload.get("confirmations") if isinstance(payload.get("confirmations"), dict) else {},
+            reason=str(payload.get("reason") or ""),
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc) or "候选不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/projects/{project_id}/scenes/{scene_name}/refs/{scene_reference_id}/rollback")
+async def rollback_scene_reference(
+    project_id: str, scene_name: str, scene_reference_id: str, body: dict | None = None,
+):
+    """将历史通过包复制为当前包；同一事务更新视角、证据和审计原因。"""
+    _project_or_404(project_id)
+    conn = get_conn()
+    target = conn.execute(
+        "SELECT * FROM scene_references WHERE id=? AND project_id=? AND scene_name=?",
+        (scene_reference_id, project_id, scene_name),
+    ).fetchone()
+    if not target:
+        raise HTTPException(404, "场景历史版本不存在")
+    gate = _scene_row_gate(target)
+    if target["pack_status"] != "ready" or gate.get("hard_gate_passed") is not True or gate.get("hard_failures"):
+        raise HTTPException(409, "历史包未通过新版硬门禁，不能回滚为当前版本")
+    current = conn.execute(
+        "SELECT * FROM scene_references WHERE project_id=? AND scene_name=? AND ep_end IS NULL "
+        "ORDER BY ep_start DESC LIMIT 1", (project_id, scene_name),
+    ).fetchone()
+    if not current:
+        raise HTTPException(409, "当前场景版本不存在")
+    if current["id"] == target["id"]:
+        return {"rolled_back": True, "idempotent_replay": True, "scene_reference_id": current["id"]}
+    reason = str(_as_body_dict(body).get("reason") or "回滚到历史通过场景包").strip()
+    # 覆盖当前行前先复制完整当前包到新的负数历史槽，确保回滚也可反向回滚。
+    from app.multiview import clone_scene_views
+    minimum = conn.execute(
+        "SELECT MIN(ep_start) AS value FROM scene_references "
+        "WHERE project_id=? AND scene_name=? AND ep_start<=0",
+        (project_id, scene_name),
+    ).fetchone()
+    history_start = int(minimum["value"] if minimum and minimum["value"] is not None else 0) - 1
+    prior_history_id = new_id("scene")
+    columns = [
+        "id", "project_id", "scene_name", "ep_start", "ep_end", "scene_canonical", "prompt",
+        "image_path", "qa_json", "base_scene_id", "bible_version", "artifact_id", "pack_status",
+        "group_qa_json", "state_canonical", "input_fingerprint", "change_json", "created_at",
+    ]
+    available = {item[1] for item in conn.execute("PRAGMA table_info(scene_references)").fetchall()}
+    columns = [column for column in columns if column in available]
+    values = {column: current[column] if column in current.keys() else None for column in columns}
+    values.update({
+        "id": prior_history_id, "ep_start": history_start, "ep_end": 0,
+        "base_scene_id": current["id"], "created_at": now(),
+    })
+    conn.execute(
+        f"INSERT INTO scene_references({','.join(columns)}) VALUES({','.join('?' for _ in columns)})",
+        tuple(values[column] for column in columns),
+    )
+    clone_scene_views(conn, source_scene_id=current["id"], dest_scene_id=prior_history_id)
+    fields = (
+        "scene_canonical", "prompt", "image_path", "qa_json", "bible_version", "artifact_id",
+        "pack_status", "group_qa_json", "state_canonical", "input_fingerprint",
+    )
+    change = _parse_json_value(target["change_json"], {}) if "change_json" in target.keys() else {}
+    if not isinstance(change, dict):
+        change = {}
+    change.update({
+        "rollback_from": prior_history_id, "rollback_source": target["id"],
+        "reason": reason, "rolled_back_at": now(),
+    })
+    assignments = ",".join(f"{field}=?" for field in fields)
+    values = [target[field] if field in target.keys() else None for field in fields]
+    conn.execute(
+        f"UPDATE scene_references SET {assignments},change_json=? WHERE id=?",
+        (*values, json.dumps(change, ensure_ascii=False), current["id"]),
+    )
+    conn.execute("DELETE FROM scene_reference_views WHERE scene_reference_id=?", (current["id"],))
+    target_views = conn.execute(
+        "SELECT * FROM scene_reference_views WHERE scene_reference_id=?", (target["id"],),
+    ).fetchall()
+    for view in target_views:
+        conn.execute(
+            "INSERT INTO scene_reference_views(id,scene_reference_id,view_role,camera_axis,image_path,prompt,"
+            "qa_json,artifact_id,base_view_id,status,selected,input_fingerprint,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (new_id("sview"), current["id"], view["view_role"], view["camera_axis"], view["image_path"],
+             view["prompt"], view["qa_json"], view["artifact_id"], view["id"], view["status"],
+             view["selected"], view["input_fingerprint"], now()),
+        )
+    if target["artifact_id"]:
+        conn.execute(
+            "INSERT INTO gate_decisions(id,artifact_id,gate_key,decision,decided_by,reason,created_at) VALUES(?,?,?,?,?,?,?)",
+            (new_id("gate"), target["artifact_id"], "scene_reference_rollback", "rollback", "scene_editor", reason, now()),
+        )
+    conn.commit()
+    return {"rolled_back": True, "scene_reference_id": current["id"], "source_scene_reference_id": target["id"], "reason": reason}
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]

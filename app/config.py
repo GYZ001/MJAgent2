@@ -68,7 +68,10 @@ ZHIPU_API_KEY = os.environ.get("ZHIPU_API_KEY", "")
 ZHIPU_MODEL_TEXT = os.environ.get("ZHIPU_MODEL_TEXT", "glm-5.2")
 
 # 超时（秒）——依据 1.0 实测延迟：LLM ~22s、VLM ~57-66s（见 docs/HIAGENT_INTEGRATION.md §2）
-TIMEOUT_CHAT_READ = 300.0
+TIMEOUT_CHAT_READ = float(os.environ.get("TIMEOUT_CHAT_READ", "300"))
+# 整版剧本需要同时生成骨架、场次、对白链与正文，实测长章可超过 300s。
+# 单独放宽该阶段，不让短请求共享一个过大超时，也避免已接近完成时整次重发。
+TIMEOUT_CHAT_BASELINE_READ = float(os.environ.get("TIMEOUT_CHAT_BASELINE_READ", "600"))
 TIMEOUT_VIDEO_CREATE = 30.0
 TIMEOUT_VIDEO_POLL = 30.0
 TIMEOUT_DOWNLOAD = 180.0
@@ -185,6 +188,10 @@ DEFAULT_SETTINGS = {
     "max_repair_attempts": "8",  # LLM 输出校验失败的最大修复重试次数（含首次）；模型不可用不走此重试
     "model_route": "hiagent",           # 文本/质检模型路由：hiagent（火山）| openrouter
     "storyboard_concurrency": "2",      # 手动批量分镜的并发上限
+    # PRD-03 分镜台独立灰度/回滚开关；P0 服务端防线不受 UI 开关影响。
+    "storyboard_workspace_safe_readonly": "false",
+    "storyboard_structure_edit_enabled": "true",
+    "storyboard_source_rebind_enabled": "true",
     "video_reference_max_images": "8",
     "video_reference_quality_threshold": "0.8",  # 综合 QA 分门禁：≥此分必须留在「使用中」
     "video_reference_quality_floor": "0.4", # 兜底图质量地板：生成图全不达标时，最佳一版仍低于此分则不喂模型，只靠定妆照/场景锚点（脏图反而拖累成片）
@@ -205,7 +212,8 @@ DEFAULT_SETTINGS = {
     "narrative_keyframe_required": "true",
     "visual_evidence_qa_enabled": "true",
     "video_visual_anchor_qa_enabled": "true",
-    "watermark_qa_mode": "ignore_unless_occluding",  # ignore_unless_occluding | legacy
+    # 水印门禁可配置；reject 严格拒绝，ignore_unless_occluding 只放行不遮挡主体的供应商角落标识。
+    "watermark_qa_mode": "reject",
     "keyframe_qa_overall_threshold": "0.80",
     "keyframe_qa_action_threshold": "0.70",
     "keyframe_qa_body_threshold": "0.72",

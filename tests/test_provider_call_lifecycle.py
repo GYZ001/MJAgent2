@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import json
 import sqlite3
 
 import httpx
@@ -18,6 +19,15 @@ class _Response:
 class _Client:
     async def post(self, url, *, json, headers):
         return _Response()
+
+
+def test_screenplay_baseline_uses_dedicated_long_read_timeout(monkeypatch) -> None:
+    monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_READ", 300.0)
+    monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_BASELINE_READ", 600.0)
+
+    assert hiagent._chat_read_timeout_s(None) == 300.0
+    assert hiagent._chat_read_timeout_s({"stage": "discover_character_candidates"}) == 300.0
+    assert hiagent._chat_read_timeout_s({"stage": "剧本首次整版 Baseline"}) == 600.0
 
 
 def test_post_json_writes_running_before_updating_same_ledger_row(monkeypatch) -> None:
@@ -144,6 +154,76 @@ def test_late_response_from_old_process_cannot_overwrite_interrupted_call(
         "status": "INTERRUPTED", "response_json": None,
         "recovery_disposition": "AWAITING_RETRY",
     }
+
+
+def test_successful_text_operation_can_be_reused_after_local_state_conflict(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-cache.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    payload = {
+        "model": "text-model",
+        "messages": [{"role": "user", "content": "same"}],
+        "temperature": 0.7,
+        "max_tokens": 1024,
+    }
+    call_id = db.start_provider_call("chat", "text-model", request_json=payload)
+    db.finish_provider_call(
+        call_id,
+        "OK",
+        200,
+        25,
+        response_json={"choices": [{"message": {"content": "cached result"}}]},
+    )
+
+    ignored_without_opt_in = hiagent._cached_successful_provider_response(
+        "chat", "text-model", payload, {},
+    )
+    cached = hiagent._cached_successful_provider_response(
+        "chat", "text-model", payload, {"reuse_successful_operation": True},
+    )
+
+    assert ignored_without_opt_in is None
+    assert cached == {"choices": [{"message": {"content": "cached result"}}]}
+    hit = db.get_conn().execute(
+        "SELECT status,meta FROM provider_calls WHERE kind='provider_cache_hit' "
+        "ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert hit["status"] == "REUSED"
+    assert json.loads(hit["meta"])["source_provider_call_id"] == call_id
+
+
+def test_custom_text_provider_uses_opt_in_success_cache(monkeypatch) -> None:
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    async def forbidden_post(*_args, **_kwargs):
+        raise AssertionError("cached operation must not call provider again")
+
+    monkeypatch.setattr(hiagent, "active_provider", lambda _kind: "custom:model-x")
+    monkeypatch.setattr(hiagent, "active_model", lambda *_args: "text-model")
+    monkeypatch.setattr(hiagent, "_model_connection", lambda *_args: ("https://provider", {}))
+    monkeypatch.setattr(hiagent.httpx, "AsyncClient", lambda **_kwargs: Client())
+    monkeypatch.setattr(hiagent, "_post_json", forbidden_post)
+    monkeypatch.setattr(
+        hiagent,
+        "_cached_successful_provider_response",
+        lambda *_args, **_kwargs: {
+            "choices": [{"message": {"content": "cached screenplay"}}],
+        },
+    )
+
+    result = asyncio.run(hiagent.chat(
+        [{"role": "user", "content": "same"}],
+        call_meta={"reuse_successful_operation": True},
+    ))
+
+    assert result == "cached screenplay"
 
 
 def test_video_create_sends_stable_idempotency_key(monkeypatch) -> None:

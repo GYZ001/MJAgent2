@@ -154,12 +154,15 @@ def _scene_assets_task_active(project_id: str) -> bool:
     """Whether either phase of the scene-asset pipeline is active."""
     return _scene_refs_task_active(project_id) or task_registry.active("scene_bible", project_id)
 
-def _project_or_404(project_id: str):
+def _project_or_404(project_id: str) -> dict:
     conn = get_conn()
     row = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
     if not row:
         raise HTTPException(404, f"项目不存在：{project_id}")
-    return _recover_orphan_bible_row(conn, row)
+    # sqlite3.Row supports item access but not Mapping.get().  Project callers
+    # use both styles, so normalize once at the shared boundary instead of
+    # leaving individual endpoints vulnerable to AttributeError -> HTTP 500.
+    return dict(_recover_orphan_bible_row(conn, row))
 
 
 def _require_harness_engine(project_id: str) -> None:
@@ -344,6 +347,14 @@ def _public_reference_image(ref: dict) -> dict:
         "required": bool(ref.get("required")),
         "slot_key": ref.get("slot_key"),
         "dependency_manifest": ref.get("dependency_manifest"),
+        "gate_status": ref.get("gate_status"),
+        "downstream_eligibility": ref.get("downstream_eligibility"),
+        "rule_version": ref.get("rule_version") or (ref.get("qa") or {}).get("rule_version"),
+        "hard_failures": ref.get("hard_failures") or (ref.get("qa") or {}).get("hard_failures") or [],
+        "soft_warnings": ref.get("soft_warnings") or [],
+        "referenced_by_version_ids": ref.get("referenced_by_version_ids") or [],
+        "selection_reason": ref.get("selection_reason"),
+        "restoreOverrideReason": ref.get("restoreOverrideReason"),
     }
 
 

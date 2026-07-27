@@ -33,6 +33,9 @@ async def complete_episode(args: I.VideoCompleteEpisodeInput) -> CommandResult:
         "completion_grant_id": args.completion_grant_id,
         "add_budget_cny": args.add_budget_cny,
         "add_wall_clock_s": args.add_wall_clock_s,
+        "qualification_version": args.qualification_version,
+        "idempotency_key": args.idempotency_key,
+        "request_id": args.request_id,
     }
     outcome = await call_guarded(api._complete_episode_core, args.episode_id, body)
     if isinstance(outcome, CommandResult):
@@ -76,6 +79,11 @@ async def generate_shot(args: I.VideoGenerateShotInput) -> CommandResult:
         "prompt_override": args.prompt_override,
         "reroll": args.reroll,
         "with_critique": bool(args.critique),
+        "critique": args.critique,
+        "review_item_ids": args.review_item_ids,
+        "qualification_version": args.qualification_version,
+        "idempotency_key": args.idempotency_key,
+        "request_id": args.request_id,
     }
     outcome = await call_guarded(api._generate_shot_core, args.shot_id, body)
     if isinstance(outcome, CommandResult):
@@ -99,7 +107,11 @@ async def stop_shot(args: I.ShotScopedInput) -> CommandResult:
 async def adopt_version(args: I.VideoAdoptVersionInput) -> CommandResult:
     from app import api
 
-    body = {"version_id": args.version_id, "reason": args.reason, "decided_by": "agent"}
+    body = {
+        "version_id": args.version_id, "reason": args.reason, "decided_by": "agent",
+        "qualification_version": args.qualification_version,
+        "idempotency_key": args.idempotency_key, "request_id": args.request_id,
+    }
     outcome = await call_guarded(api._adopt_version_core, args.shot_id, body)
     if isinstance(outcome, CommandResult):
         return outcome
@@ -148,7 +160,12 @@ async def repair_stale_assets(args: I.VideoRepairStaleAssetsInput) -> CommandRes
     outcome = await call_guarded(
         api.repair_stale_assets,
         args.episode_id,
-        {"shot_ids": args.shot_ids, "confirm": args.confirm},
+        {
+            "shot_ids": args.shot_ids, "confirm": args.confirm,
+            "preview_version": args.preview_version,
+            "qualification_version": args.qualification_version,
+            "idempotency_key": args.idempotency_key,
+        },
     )
     if isinstance(outcome, CommandResult):
         return outcome

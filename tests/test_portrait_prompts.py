@@ -23,6 +23,8 @@ def test_ordinary_portrait_prompt_keeps_standard_model_sheet_pose() -> None:
     prompt = portrait_prompt("国漫风", "黑发少年，身着青灰色布衣")
 
     assert "正面站立，中性表情，双臂自然下垂" in prompt
+    assert "鞋底均不得贴边或出画" in prompt
+    assert "8% 安全边距" in prompt
     assert "禁止额外火焰、斗气光环" in prompt
 
 

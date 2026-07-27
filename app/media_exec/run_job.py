@@ -5,6 +5,71 @@ try:
 except NameError:  # pragma: no cover - used when importing this module directly
     from app.media_exec.common import *
 
+
+class ReviewDependencyFence(RuntimeError):
+    """The upstream/asset snapshot captured at enqueue is no longer current."""
+
+
+def _assert_review_dependency_fence(job, version_id: str, write_point: str) -> None:
+    """Fail closed before a paid run can become a current candidate or adoption.
+
+    Legacy rows without a snapshot remain readable/finishable for compatibility;
+    every review-wall/API/Supervisor-created task now carries this token.
+    """
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT image_inputs FROM shot_versions WHERE id=?", (version_id,),
+    ).fetchone()
+    try:
+        meta = json.loads(row["image_inputs"] or "{}") if row else {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        meta = {}
+    captured = meta.get("review_dependency_snapshot") or {}
+    expected = captured.get("qualification_version")
+    if not expected:
+        return
+    try:
+        from app.api import _review_upstream_snapshot
+        current = _review_upstream_snapshot(job["episode_id"])
+    except Exception as exc:  # qualification service errors are fail-closed
+        raise ReviewDependencyFence(
+            f"依赖资格复核失败（{write_point}）：{exc}"
+        ) from exc
+    upstream_keys = (
+        "published_screenplay_artifact_id", "confirmed_storyboard_artifact_id",
+        "screenplay_revision", "storyboard_revision",
+    )
+    upstream_equal = all(current.get(key) == captured.get(key) for key in upstream_keys)
+    expected_assets = captured.get("asset_inputs") or []
+    current_assets = current.get("asset_inputs") or []
+    def asset_contract(items):
+        return sorted(
+            json.dumps(
+                {key: value for key, value in item.items() if key not in {"version_id"}},
+                ensure_ascii=False, sort_keys=True,
+            )
+            for item in items
+        )
+    assets_equal = not expected_assets or asset_contract(current_assets) == asset_contract(expected_assets)
+    if current.get("eligible_for_production") and upstream_equal and assets_equal:
+        return
+    detail = {
+        "code": "REVIEW_DEPENDENCY_STALE",
+        "write_point": write_point,
+        "expected_qualification_version": expected,
+        "current_qualification_version": current.get("qualification_version"),
+        "blockers": current.get("blockers") or [],
+    }
+    try:
+        from app.observability.metrics import inc
+        inc(
+            "video_run_dependency_fenced_total",
+            episode_id=job["episode_id"], write_point=write_point,
+        )
+    except Exception:  # observability must not weaken the fence
+        pass
+    raise ReviewDependencyFence(json.dumps(detail, ensure_ascii=False))
+
 def _assert_job_lease(job_id: str, owner: str, *, lease_seconds: float = 180.0) -> None:
     if not media_scheduler.renew_lease(job_id, owner, lease_seconds=lease_seconds):
         raise LeaseLost(f"job lease lost: {job_id} / {owner}")
@@ -1289,6 +1354,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                     reason="结果到达时所属 Supervisor 已收口；候选已隔离，不参与自动采用",
                 )
                 return
+        _assert_review_dependency_fence(job, version["id"], "candidate")
         latency = round(time.time() - started, 1)
         cost = shot_cost_cny(shot["duration_s"])
         _set_version(version["id"], status="succeeded", video_path=str(dest),
@@ -1323,6 +1389,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         if supervisor_controlled:
             force_best = False
         _assert_job_lease(job_id, owner)
+        _assert_review_dependency_fence(job, version["id"], "candidate_evidence")
         media_evidence.record_video_candidate(
             version["id"], step_run_id=_row_value(job, "step_run_id")
         )
@@ -1344,6 +1411,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                     reroll=True,
                     after_shot_id=job["after_shot_id"],
                     auto_retake_count=resubmits + 1,
+                    dependency_snapshot=meta.get("review_dependency_snapshot"),
                 )
                 # 标记新版本的 technical_resubmit_count（尽力而为）
                 try:
@@ -1370,6 +1438,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                 return
             raise ProviderError("视频文件技术校验失败，候选不可采用")
         if not supervisor_controlled:
+            _assert_review_dependency_fence(job, version["id"], "adoption_relation")
             media_evidence.select_best_video_candidate(
                 job["shot_id"], force_best=force_best
             )
@@ -1377,6 +1446,13 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             media_scheduler.settle_budget(job_id, cost, success=True)
             reconcile_episode_generation_status(job["episode_id"])
     except LeaseLost:
+        return
+    except ReviewDependencyFence as exc:
+        public = str(exc)
+        _set_version(version["id"], status="failed", error=public)
+        if _set_job(job_id, "failed", public, lease_owner=owner):
+            media_scheduler.settle_budget(job_id, 0.0, success=False)
+            reconcile_episode_generation_status(job["episode_id"])
         return
     except (ProviderError, Exception) as exc:  # noqa: BLE001 失败要响：原文进日志，前端给码+分类
         if not media_scheduler.renew_lease(job_id, owner, lease_seconds=180.0):
@@ -1453,6 +1529,7 @@ async def _maybe_auto_qa(
             except Exception:
                 pass
         visual_anchors = _visual_anchors_from_version_meta(meta_for_qa)
+        _assert_review_dependency_fence(job, version_id, "qa_start")
         qa = await qa_shot(
             frames,
             effective_primary_action(shot_model) or shot["action_desc"],
@@ -1467,6 +1544,12 @@ async def _maybe_auto_qa(
             ),
             visual_anchors=visual_anchors,
         )
+        dependency = meta_for_qa.get("review_dependency_snapshot") or {}
+        if dependency.get("asset_soft_warnings"):
+            qa["input_asset_soft_warnings"] = dependency["asset_soft_warnings"]
+        if dependency.get("asset_inputs"):
+            qa["input_asset_qualification"] = dependency["asset_inputs"]
+        _assert_review_dependency_fence(job, version_id, "qa_result")
         _set_version(version_id, qa_json=json.dumps(qa, ensure_ascii=False))
         # QA 非标准输出虽可恢复部分分数，但证据不足以触发付费重抽。
         # 重抽不会发生：交由 force_best 在技术合格视频里挑最高分，避免无成片。
@@ -1535,6 +1618,7 @@ async def _maybe_auto_qa(
                     reroll=True,
                     after_shot_id=job["after_shot_id"],
                     auto_retake_count=decision.attempt,
+                    dependency_snapshot=meta.get("review_dependency_snapshot"),
                 )
                 return False
             if decision.allow:
@@ -1563,13 +1647,18 @@ async def _maybe_auto_qa(
             and meta.get("mode") != video_modes.REFERENCE_IMAGE_MODE
         ):
             # 旧非参考图路径兜底；参考图模式由上面统一策略覆盖
-            enqueue_shot(job["shot_id"], extra_negative=qa["issues"][:3],
-                         after_shot_id=job["after_shot_id"])
+            enqueue_shot(
+                job["shot_id"], extra_negative=qa["issues"][:3],
+                after_shot_id=job["after_shot_id"],
+                dependency_snapshot=meta.get("review_dependency_snapshot"),
+            )
             return False
         if needs_retake:
             # 不会再自动重抽（例如非参考图且非首版）：有视频则兜底采纳最高分
             return True
         return False
+    except ReviewDependencyFence:
+        raise
     except Exception as exc:  # noqa: BLE001 QA 异常只记录，不影响已落盘的视频
         _set_version(version_id, qa_json=json.dumps({"overall": -1, "issues": [f"质检未完成：{exc}"]}, ensure_ascii=False))
         log_provider_call("vlm_qa", config.MODEL_VLM, "QA_ERROR", None, 0, error=str(exc))

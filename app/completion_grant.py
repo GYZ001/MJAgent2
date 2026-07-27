@@ -171,6 +171,10 @@ def issue_video_completion_grant(
     issued_at = now()
     cap = float(budget_cap_cny if budget_cap_cny is not None else DEFAULT_VIDEO_BUDGET_CAP_CNY)
     wall = float(wall_clock_cap_s if wall_clock_cap_s is not None else DEFAULT_VIDEO_WALL_CLOCK_CAP_S)
+    if not math.isfinite(cap) or not 1 <= cap <= 100000:
+        raise GrantValidationError("INVALID_BUDGET", "视频补齐预算必须是 1–100000 的有限数")
+    if not math.isfinite(wall) or not 60 <= wall <= 604800:
+        raise GrantValidationError("INVALID_WALL_CLOCK", "视频补齐时长墙必须是 60–604800 秒的有限数")
     deadline_at = issued_at + wall
     expires_at = issued_at + max(60, int(ttl_s), int(wall) + 3600)
     fallback_quota = (
@@ -373,8 +377,18 @@ def bump_video_grant_budget(
         raise GrantValidationError("GRANT_NOT_FOUND", "视频补齐授权不存在")
     if grant.revoked_at is not None:
         raise GrantValidationError("GRANT_REVOKED", "视频补齐授权已撤销")
-    new_cap = float(grant.budget_cap_cny) + max(0.0, float(add_cny))
-    new_wall = float(grant.wall_clock_cap_s) + max(0.0, float(add_wall_s))
+    add_cny = float(add_cny)
+    add_wall_s = float(add_wall_s)
+    if not math.isfinite(add_cny) or add_cny < 0 or add_cny > 100000:
+        raise GrantValidationError("INVALID_BUDGET", "追加预算必须是 0–100000 的有限数")
+    if not math.isfinite(add_wall_s) or add_wall_s < 0 or add_wall_s > 604800:
+        raise GrantValidationError("INVALID_WALL_CLOCK", "追加时长必须是 0–604800 秒的有限数")
+    if add_cny == 0 and add_wall_s == 0:
+        raise GrantValidationError("EMPTY_TOPUP", "追加预算和时长不能同时为 0")
+    new_cap = float(grant.budget_cap_cny) + add_cny
+    new_wall = float(grant.wall_clock_cap_s) + add_wall_s
+    if new_cap > 100000 or new_wall > 604800:
+        raise GrantValidationError("GRANT_LIMIT_EXCEEDED", "追加后授权超过最大上限")
     new_deadline = float(grant.issued_at) + new_wall
     new_expires = max(float(grant.expires_at), now() + GRANT_TTL_S)
     conn = get_conn()

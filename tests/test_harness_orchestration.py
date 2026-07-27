@@ -79,6 +79,27 @@ def test_workflow_recorder_persists_trace_evidence_and_commit(tmp_path, monkeypa
     }
 
 
+def test_workflow_recorder_process_shutdown_remains_recoverable(tmp_path, monkeypatch) -> None:
+    _fresh_database(tmp_path, monkeypatch)
+    recorder = WorkflowRecorder.create(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="input",
+    )
+    recorder.start()
+
+    recorder.pause_external("服务重启，等待续跑")
+
+    run = repository.get_run(recorder.run_id)
+    assert run["status"] == "PAUSED_EXTERNAL"
+    assert run["failure_code"] == "SERVICE_RESTART"
+    assert "等待续跑" in run["failure_message"]
+    assert "RUN_PAUSED_EXTERNAL" in {
+        event["event_type"] for event in repository.get_events(recorder.run_id)
+    }
+
+
 def test_commit_rejects_blockers_and_recovered_evidence(tmp_path, monkeypatch) -> None:
     _fresh_database(tmp_path, monkeypatch)
     recorder = WorkflowRecorder.create(
@@ -210,7 +231,7 @@ def test_state_machine_uses_compare_and_set_and_restart_is_explicit(tmp_path, mo
     with pytest.raises(StateConflict):
         transition_run(recorder.run_id, "CREATED", "CANCELLED", "stale writer")
 
-    db.init_db()
+    db.init_db(reconcile_interrupted=True)
     run = conn.execute(
         "SELECT status, failure_code, resume_from_step FROM workflow_runs WHERE id=?",
         (recorder.run_id,),

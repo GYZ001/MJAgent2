@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 
+from app.domain import common
 from app.refs import normalize_prompt_text, portrait_prompt
 
 
@@ -16,6 +17,27 @@ def test_portrait_prompt_uses_normalization() -> None:
     text = portrait_prompt("国风水墨清透光影细腻晕染", "黑发少年。。玄色劲装，目光坚定，身形修长腰佩玉佩")
     assert "。。" not in text
     assert "国风水墨" in text
+
+
+def test_project_or_404_normalizes_sqlite_row_to_dict(monkeypatch) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE projects("
+        "id TEXT PRIMARY KEY, bible_status TEXT, bible_error TEXT, bible_json TEXT, bible_version INTEGER DEFAULT 0"
+        ")"
+    )
+    conn.execute(
+        "INSERT INTO projects(id, bible_status, bible_json, bible_version) VALUES('p1', 'idle', NULL, 0)"
+    )
+    conn.commit()
+    monkeypatch.setattr(common, "get_conn", lambda: conn)
+
+    project = common._project_or_404("p1")
+
+    assert isinstance(project, dict)
+    assert project.get("bible_json") is None
+    assert project["bible_version"] == 0
 
 
 def test_generate_precheck_estimates_without_bible(monkeypatch) -> None:

@@ -5,6 +5,33 @@ try:
 except NameError:  # pragma: no cover - used when importing this module directly
     from app.domain.common import *
 
+
+def _present_refs_error(conn, value: str | None) -> str | None:
+    """Repair the display of legacy QA failures stored as generic LLM errors.
+
+    Older runs wrapped every ``ProviderError`` as an external-service failure,
+    including the semantic message raised after two successful QA calls.  Keep
+    the immutable log handle, but show the safe workflow cause on project reads.
+    """
+    text = str(value or "").strip()
+    if not text or "错误码 LLM" not in text or "ERR-" not in text:
+        return value
+    start = text.rfind("ERR-")
+    error_id = text[start:start + 19]
+    try:
+        row = conn.execute(
+            "SELECT message FROM error_logs WHERE id=? AND action='refs_generate'",
+            (error_id,),
+        ).fetchone()
+    except Exception:  # noqa: BLE001 - compatibility with minimal/legacy schemas
+        return value
+    message = str(row["message"] if row else "").strip()
+    if "一致性检查未通过" not in message and "未通过质量校验" not in message:
+        return value
+    message = message.replace("部分定妆照失败：", "部分定妆照未通过质量校验：", 1)
+    return f"{message}（QA · {error_id}）"
+
+
 def _create_project_core(name: str | None, filename: str, raw: bytes) -> dict:
     """导入小说的领域逻辑，供 REST 路由与 ``project.import_novel`` Command Handler 共用。"""
     if not raw:
@@ -98,22 +125,26 @@ def list_projects():
 
 def _attach_character_portraits(conn, project_id: str, bible: dict) -> None:
     """为 bible.characters 挂上 character_portraits 表里的分段定妆照（含多视角）。"""
+    from app.portraits import STAGED_INITIAL_EP_START
+
     try:
         rows = rows_to_dicts(conn.execute(
             "SELECT id, character_name, ep_start, ep_end, appearance, base_portrait_id, image_path, "
             "pack_status, group_qa_json, change_json "
-            "FROM character_portraits WHERE project_id=? ORDER BY character_name, ep_start", (project_id,)).fetchall())
+            "FROM character_portraits WHERE project_id=? AND ep_start<>? ORDER BY character_name, ep_start",
+            (project_id, STAGED_INITIAL_EP_START)).fetchall())
     except Exception:  # noqa: BLE001
         rows = rows_to_dicts(conn.execute(
             "SELECT id, character_name, ep_start, ep_end, appearance, base_portrait_id, image_path "
-            "FROM character_portraits WHERE project_id=? ORDER BY character_name, ep_start", (project_id,)).fetchall())
+            "FROM character_portraits WHERE project_id=? AND ep_start<>? ORDER BY character_name, ep_start",
+            (project_id, STAGED_INITIAL_EP_START)).fetchall())
     view_rows = []
     try:
         view_rows = rows_to_dicts(conn.execute(
             """SELECT v.* FROM character_portrait_views v
                JOIN character_portraits p ON p.id=v.portrait_id
-               WHERE p.project_id=? ORDER BY v.portrait_id, v.created_at""",
-            (project_id,),
+               WHERE p.project_id=? AND p.ep_start<>? ORDER BY v.portrait_id, v.created_at""",
+            (project_id, STAGED_INITIAL_EP_START),
         ).fetchall())
     except Exception:  # noqa: BLE001
         view_rows = []
@@ -213,6 +244,18 @@ def _attach_scene_refs(conn, project_id: str, bible: dict) -> None:
             "qa": qa,
             "qa_overall": (qa or {}).get("overall") if isinstance(qa, dict) else None,
         })
+    try:
+        reference_rows = rows_to_dicts(conn.execute(
+            "SELECT s.scene_name,e.id AS episode_id,e.episode_no,COUNT(*) AS shot_count FROM shots s "
+            "JOIN episodes e ON e.id=s.episode_id WHERE e.project_id=? AND s.scene_name IS NOT NULL "
+            "AND s.scene_name!='' GROUP BY s.scene_name,e.episode_no ORDER BY e.episode_no",
+            (project_id,),
+        ).fetchall())
+    except Exception:  # noqa: BLE001 兼容精简测试库/历史库
+        reference_rows = []
+    references_by_name: dict[str, list[dict]] = {}
+    for item in reference_rows:
+        references_by_name.setdefault(item["scene_name"], []).append(item)
     by_name: dict[str, list[dict]] = {}
     for r in rows:
         qa = None
@@ -236,6 +279,11 @@ def _attach_scene_refs(conn, project_id: str, bible: dict) -> None:
                 change = json.loads(r["change_json"])
             except (TypeError, ValueError):
                 change = None
+        segment_references = [
+            item for item in references_by_name.get(r["scene_name"], [])
+            if int(item["episode_no"]) >= int(r["ep_start"] or 1)
+            and (r["ep_end"] is None or int(item["episode_no"]) <= int(r["ep_end"]))
+        ]
         by_name.setdefault(r["scene_name"], []).append({
             "id": r.get("id"),
             "ep_start": r["ep_start"], "ep_end": r["ep_end"],
@@ -245,6 +293,12 @@ def _attach_scene_refs(conn, project_id: str, bible: dict) -> None:
             "pack_status": r.get("pack_status"),
             "group_qa": group_qa,
             "change": change,
+            "reference_summary": {
+                "episode_numbers": [int(item["episode_no"]) for item in segment_references],
+                "episodes": [{"id": item["episode_id"], "episode_no": int(item["episode_no"])}
+                             for item in segment_references],
+                "shot_count": sum(int(item["shot_count"] or 0) for item in segment_references),
+            },
             "views": views_by_scene.get(r.get("id") or "", []),
         })
     candidate_by_name: dict[str, list[dict]] = {}
@@ -291,11 +345,12 @@ def project_detail(
     query: str = "",
     status_filter: str = "all",
 ):
-    if view not in (None, "bible", "scenes", "episodes", "picker"):
+    if view not in (None, "bible", "scenes", "episodes", "picker", "picker_review"):
         raise HTTPException(400, f"未知项目视图：{view}")
     full = view is None
     p = dict(_project_or_404(project_id))
     conn = get_conn()
+    p["refs_error"] = _present_refs_error(conn, p.get("refs_error"))
     include_bible = full or view in ("bible", "scenes")
     p["bible"] = json.loads(p["bible_json"]) if include_bible and p["bible_json"] else None
     bible_artifact = (
@@ -354,12 +409,39 @@ def project_detail(
     # 把每个角色的定妆照分段（适用集区间 + 图生图谱系）挂到 bible.characters 上，供横向预览。
     if p["bible"] and (full or view == "bible"):
         _attach_character_portraits(conn, project_id, p["bible"])
-    if p["bible"] and (full or view == "scenes"):
+    # The prep navigation is also shown on the character page. Attach current
+    # scene-reference status there so it can report actual video usability
+    # instead of a stale project-level warning from an older multi-view run.
+    if p["bible"] and (full or view in ("bible", "scenes")):
         _attach_scene_refs(conn, project_id, p["bible"])
 
     if view == "picker":
         p["episodes"] = rows_to_dicts(conn.execute(
-            "SELECT id, episode_no, title FROM episodes WHERE project_id=? ORDER BY episode_no",
+            "SELECT id, episode_no, title, status, screenplay_status "
+            "FROM episodes WHERE project_id=? ORDER BY episode_no",
+            (project_id,),
+        ).fetchall())
+        return p
+    if view == "picker_review":
+        # Review tables are additive and may be absent in databases created by
+        # older builds. The helper is loaded later into the shared API facade
+        # but is available by the time this route can be called.
+        ensure_review_tables = globals().get("_ensure_review_wall_tables")
+        if callable(ensure_review_tables):
+            ensure_review_tables(conn)
+        p["episodes"] = rows_to_dicts(conn.execute(
+            """SELECT e.id, e.episode_no, e.title, e.status, e.screenplay_status,
+                      (SELECT COUNT(*) FROM shots s WHERE s.episode_id=e.id) AS shot_count,
+                      (SELECT COUNT(*) FROM shots s WHERE s.episode_id=e.id AND s.adopted_version_id IS NOT NULL) AS video_count,
+                      (SELECT COUNT(*) FROM shots s WHERE s.episode_id=e.id AND s.adopted_version_id IS NULL
+                         AND EXISTS(SELECT 1 FROM shot_versions v WHERE v.shot_id=s.id AND v.status='succeeded')) AS pending_adoption_count,
+                      (SELECT COUNT(*) FROM shot_versions v JOIN shots s ON s.id=v.shot_id
+                         WHERE s.episode_id=e.id AND v.status='failed') AS failed_count,
+                      (SELECT COUNT(*) FROM shot_review_items ri JOIN shots s ON s.id=ri.shot_id
+                         WHERE s.episode_id=e.id AND ri.status IN ('open','in_progress')) AS open_review_count,
+                      (SELECT COUNT(*) FROM shot_review_states rs JOIN shots s ON s.id=rs.shot_id
+                         WHERE s.episode_id=e.id AND rs.review_status='completed') AS reviewed_count
+                 FROM episodes e WHERE e.project_id=? ORDER BY e.episode_no""",
             (project_id,),
         ).fetchall())
         return p
@@ -393,7 +475,8 @@ def project_detail(
         ).fetchone()["c"])
         offset = (page - 1) * page_size
         p["episodes"] = rows_to_dicts(conn.execute(
-            f"SELECT * FROM episodes WHERE {where} ORDER BY episode_no LIMIT ? OFFSET ?",
+            f"SELECT e.*, (SELECT COUNT(*) FROM shots s WHERE s.episode_id=e.id) AS shot_count "
+            f"FROM episodes e WHERE {where} ORDER BY episode_no LIMIT ? OFFSET ?",
             [*params, page_size, offset],
         ).fetchall())
         p["episodes_total"] = filtered_total

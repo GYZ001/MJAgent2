@@ -452,6 +452,63 @@ def test_dialogue_chain_is_authoritative_and_allows_functional_trigger() -> None
     assert not any("非人物谱角色台词" in error for error in errors), errors
 
 
+def test_dialogue_chain_allows_seven_continuous_turns_but_keeps_hard_limit() -> None:
+    script, source = _screenplay_with_source_dialogue_chain()
+    seed = script.dialogue_chains[0].turns
+    script.dialogue_chains[0].turns = [*seed, seed[1], seed[2], seed[1], seed[2]]
+
+    seven_turn_errors = validate_dialogue_chains(
+        script,
+        source_text=source,
+        required=True,
+        required_dialogue_lines=["斗之力，三段！", "只有三段？", "结果无误。"],
+    )
+
+    assert not any("turns 需包含" in error for error in seven_turn_errors)
+
+    script.dialogue_chains[0].turns.extend([seed[1], seed[2]])
+    nine_turn_errors = validate_dialogue_chains(
+        script,
+        source_text=source,
+        required=True,
+        required_dialogue_lines=["一", "二", "三", "四", "五"],
+    )
+
+    assert any("turns 需包含 1~8 个连续话轮" in error for error in nine_turn_errors)
+
+
+def test_single_speaker_monologue_may_span_adjacent_scene_blocks() -> None:
+    script, source = _screenplay_with_source_dialogue_chain()
+    script.dialogue_chains[0].turns = script.dialogue_chains[0].turns[:2]
+    script.dialogue_chains[0].turns[1].speaker = "测验员"
+    script.dialogue_chains[0].turns[1].function = "statement"
+    script.full_script_text = (
+        "【场1】夜 / 山崖\n测验员：斗之力，三段！\n"
+        "【场2】夜 / 山崖\n测验员：只有三段？"
+    )
+
+    errors = validate_dialogue_chains(
+        script,
+        source_text=source,
+        required=True,
+    )
+
+    assert not any("被拆到多个场次" in error for error in errors), errors
+
+
+def test_source_grounded_single_character_reply_is_not_rejected_as_empty() -> None:
+    script, _source = _screenplay_with_source_dialogue_chain()
+    script.dialogue_chains[0].turns[-1].line = "哦。"
+    script.dialogue_chains[0].turns[-1].source_text = "哦。"
+    script.full_script_text = script.full_script_text.replace("结果无误。", "哦。")
+    source = "测验员：“斗之力，三段！”\n谷言：“只有三段？”\n测验员：“哦。”"
+
+    errors = validate_dialogue_chains(script, source_text=source, required=True)
+
+    assert not any("过短或为空" in error for error in errors), errors
+    assert not any("source_text 不能为空" in error for error in errors), errors
+
+
 def test_dialogue_chain_rejects_missing_first_source_utterance() -> None:
     script, source = _screenplay_with_source_dialogue_chain()
     script.dialogue_chains[0].turns = script.dialogue_chains[0].turns[1:]

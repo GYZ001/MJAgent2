@@ -1,14 +1,15 @@
 import { ReactNode, useId } from 'react'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 
-export default function GenerationParamsDialog({ title, subtitle, children, onClose }: {
+export default function GenerationParamsDialog({ title, subtitle, children, onClose, focusActive = true }: {
   title: string
   subtitle?: string
   children: ReactNode
   onClose: () => void
+  focusActive?: boolean
 }) {
   const titleId = useId()
-  const trapRef = useFocusTrap(true, onClose)
+  const trapRef = useFocusTrap(focusActive, onClose)
 
   return (
     <div className="generation-params-backdrop" role="presentation" onMouseDown={event => {

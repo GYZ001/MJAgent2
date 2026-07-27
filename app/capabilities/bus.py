@@ -216,12 +216,24 @@ class CommandBus:
         session_id: str | None,
     ) -> CommandResult | None:
         if not preflight.allowed:
+            denial_data: dict[str, Any] = {}
+            if preflight.denial_code:
+                denial_data = {
+                    "code": preflight.denial_code,
+                    "message": preflight.denial_message or "命令被策略拒绝",
+                    **(preflight.affected.extra or {}),
+                }
+                if preflight.denial_code == "version_conflict":
+                    # 兼容旧客户端对 detail 做“版本冲突”包含判断，
+                    # 新客户端则消费 code/current_version/diff 结构。
+                    denial_data["版本冲突"] = True
             return CommandResult(
                 status=CommandStatus.REJECTED,
                 summary=preflight.denial_message or "命令被策略拒绝",
                 command=name,
                 preflight=preflight,
                 error_code=preflight.denial_code or "policy_denied",
+                data=denial_data,
             )
         if args.dry_run:
             return CommandResult(

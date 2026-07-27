@@ -76,7 +76,7 @@ def test_hard_process_exit_is_reconciled_and_media_job_is_requeued(tmp_path) -> 
 
         db.DB_PATH = Path(sys.argv[1])
         db._local.conn = None
-        db.init_db()
+        db.init_db(reconcile_interrupted=True)
         resumed = worker.recover_media_jobs()
         conn = db.get_conn()
         run = dict(conn.execute('SELECT * FROM workflow_runs').fetchone())

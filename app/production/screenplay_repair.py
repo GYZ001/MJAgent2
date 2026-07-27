@@ -38,14 +38,14 @@ from app.production.structured_issues import (
     must_fix_count,
 )
 from app.schemas import Bible, EpisodeScreenplay
+from app.renderability import OVERDETAIL_TERMS
 
 
 MAX_REPAIR_ACTIVATION_PATCHES = 12
 MAX_STRATEGY_ATTEMPTS_PER_ISSUE = 3
-SCREENPLAY_REPAIR_PLANNER_VERSION = "screenplay-repair-2"
+SCREENPLAY_REPAIR_PLANNER_VERSION = "screenplay-repair-7"
 
 _SCENE_STORY_FUNCTION_CODES = {
-    "SCENE_FIELD_INVALID",
     "SCENE_STORY_FUNCTION_TOO_SHORT",
 }
 _SCENE_NUMBER_RE = re.compile(r"scene_outline\s*第\s*(\d+)\s*场|/scene_blocks/SC(\d+)", re.I)
@@ -71,6 +71,12 @@ def _patch_strategy_key(ops: list[PatchOperation]) -> str:
     kind = str((op.target or {}).get("kind") or "")
     if op.op == "rederive":
         return "rederive"
+    if op.op == "normalize_overdetail":
+        return "normalize_overdetail"
+    if op.op == "prune_dialogue_budget":
+        return "prune_dialogue_budget"
+    if op.op == "split_dialogue_chain_by_scene":
+        return f"split_dialogue_chain_{(op.target or {}).get('chain_id') or 'unknown'}"
     if kind == "metadata":
         return f"fill_{op.path}"
     if kind in {"scene", "screenplay_scene"}:
@@ -79,6 +85,11 @@ def _patch_strategy_key(ops: list[PatchOperation]) -> str:
         return "fix_ledger_event"
     if kind == "dialogue_chain_turn" and op.path == "source_text":
         return "fix_opening_source_anchor"
+    if kind == "dialogue_chain_turn" and op.path == "function":
+        return (
+            f"fix_dialogue_function_{op.target.get('chain_id')}_"
+            f"{op.target.get('turn_index')}"
+        )
     if op.op == "create_node" and kind == "dialogue_turn":
         return "insert_trigger"
     locator = op.path or str((op.target or {}).get("id") or "")
@@ -123,6 +134,10 @@ def run_screenplay_qa(
     for issue in issues:
         if artifact_hash:
             issue.evidence["artifact_hash"] = artifact_hash
+        if issue.code == "KEY_LINE_MISSING" and "dialogue_chains 共" in issue.message:
+            issue.evidence["required_dialogue_lines"] = list(
+                episode.get("required_dialogue_lines") or []
+            )
     status = "passed" if not issues else "failed"
     evaluation = Evaluation(
         evaluator_type="deterministic",
@@ -244,6 +259,69 @@ def plan_screenplay_patch(
                 },
             )]
 
+    # 模型把同一人物的连续自语误标成 response 时，只改结构标签，不改台词。
+    response_match = re.search(
+        r"dialogue_chains\[(\d+)\]\.turns\[(\d+)\]\s*是\s*response",
+        issue.message or "",
+    )
+    if code == "KEY_LINE_MISSING" and response_match:
+        chain_index, turn_index = map(int, response_match.groups())
+        if 0 <= chain_index < len(script.dialogue_chains or []):
+            chain = script.dialogue_chains[chain_index]
+            turns = chain.turns or []
+            if 0 <= turn_index < len(turns):
+                strategy = f"fix_dialogue_function_{chain.chain_id}_{turn_index}"
+                if not _strategy_was_tried(tried, strategy):
+                    return [PatchOperation(
+                        op="replace_field",
+                        path="function",
+                        value="statement",
+                        target={
+                            "kind": "dialogue_chain_turn",
+                            "id": f"{chain.chain_id}-T{turn_index + 1}",
+                            "chain_id": chain.chain_id,
+                            "turn_index": turn_index,
+                        },
+                    )]
+
+    # 同一对白链被正文场次切开：按台词的实际场次拆成多条完整链。
+    # 只修结构归属，不移动正文，比 rederive 更小且能真正消除问题。
+    cross_scene_match = re.search(
+        r"dialogue_chains\[(\d+)\]\s*被拆到多个场次",
+        issue.message or "",
+    )
+    if code == "KEY_LINE_MISSING" and cross_scene_match:
+        chain_index = int(cross_scene_match.group(1))
+        if 0 <= chain_index < len(script.dialogue_chains or []):
+            chain = script.dialogue_chains[chain_index]
+            strategy = f"split_dialogue_chain_{chain.chain_id}"
+            if not _strategy_was_tried(tried, strategy):
+                return [PatchOperation(
+                    op="split_dialogue_chain_by_scene",
+                    target={"kind": "dialogue_chain", "id": chain.chain_id,
+                            "chain_id": chain.chain_id},
+                )]
+
+    # 整集精选台词超预算：只删除整条非必保对白链，永不截断问答。
+    # 可读台本正文保留，因此不会为了过 QA 删掉剧情。
+    budget_match = re.search(
+        r"dialogue_chains\s*共\s*\d+\s*个话轮.*?必须为\s*\d+~(\d+)",
+        issue.message or "",
+    )
+    if code == "KEY_LINE_MISSING" and budget_match and not _strategy_was_tried(
+        tried, "prune_dialogue_budget"
+    ):
+        return [PatchOperation(
+            op="prune_dialogue_budget",
+            target={"kind": "dialogue_chains"},
+            value={
+                "max_turns": int(budget_match.group(1)),
+                "required_lines": list(
+                    (issue.evidence or {}).get("required_dialogue_lines") or []
+                ),
+            },
+        )]
+
     # key_lines / full_script_text 等派生投影才允许 rederive。
     if code == "KEY_LINE_MISSING" and not _strategy_was_tried(tried, "rederive"):
         return [PatchOperation(op="rederive")]
@@ -265,6 +343,16 @@ def plan_screenplay_patch(
                     "function": "trigger",
                     "source_text": line,
                 },
+            )]
+
+    # 可拍性细节词不值得再次调用模型；只清理画面描述字段，保留对白和原文证据。
+    if code == "OVERDETAIL" and not _strategy_was_tried(tried, "normalize_overdetail"):
+        terms = [term for term in OVERDETAIL_TERMS if term in (issue.message or "")]
+        if terms:
+            return [PatchOperation(
+                op="normalize_overdetail",
+                target={"kind": "renderability_text"},
+                value={"terms": terms},
             )]
 
     return ops
@@ -328,9 +416,11 @@ def _derive_scene_story_function(scene: Any) -> str:
         text = re.sub(r"\s+", "", str(value or "")).strip("，。；;：:、 ")
         return text[:limit].rstrip("，。；;：:、 ")
 
-    conflict = compact(getattr(scene, "conflict", ""), 20)
-    turn = compact(getattr(scene, "turn", ""), 18)
-    summary = compact(getattr(scene, "summary", ""), 24)
+    # 场功能是短段元数据，不值得为省几个字截成“情绪从”这类半句。
+    # 这里的宽限只防御模型异常长输入，正常的冲突与转折应完整保留。
+    conflict = compact(getattr(scene, "conflict", ""), 48)
+    turn = compact(getattr(scene, "turn", ""), 48)
+    summary = compact(getattr(scene, "summary", ""), 64)
     heading = compact(getattr(scene, "scene_heading", ""), 16)
     if conflict and turn:
         return f"呈现{conflict}，推动{turn}"
@@ -456,6 +546,8 @@ async def run_screenplay_production(
             p = conn.execute("SELECT * FROM projects WHERE id=?", (episode["project_id"],)).fetchone()
             from app.domain.common import _project_bible_or_placeholder
             bible = _project_bible_or_placeholder(p)
+        from app.portraits import bible_with_provisional_characters
+        bible = bible_with_provisional_characters(bible, draft_audit)
 
         from app.validators import normalize_screenplay_ledgers
         normalize_screenplay_ledgers(script)
@@ -560,6 +652,8 @@ async def run_screenplay_production(
                 "open_issue_ids": [],
                 "issue_strategy_history": strategy_history,
                 "patch_artifact_ids": patch_ids,
+                "last_issue_fingerprints": [],
+                "yield_reason": None,
             })
             return load_screenplay_from_artifact(working_id)
 
@@ -616,7 +710,13 @@ async def run_screenplay_production(
                     "yield_reason": "user_input_required",
                 })
                 raise RuntimeError(f"WAITING_INPUT: 无法自动解决 {issue.code}: {issue.message}")
-            _mark_repair_failed(episode_id, issue, run_id=run_id)
+            _mark_repair_failed(
+                episode_id,
+                issue,
+                run_id=run_id,
+                activation_no=activation_no,
+                patch_count=len(patch_ids),
+            )
             save_checkpoint(rev.id, {
                 **checkpoint,
                 "phase": "REPAIR_FAILED",
@@ -679,7 +779,13 @@ async def run_screenplay_production(
                 if _strategy_attempt_count(
                     strategy_history.get(issue.fingerprint, [])
                 ) >= MAX_STRATEGY_ATTEMPTS_PER_ISSUE:
-                    _mark_repair_failed(episode_id, issue, run_id=run_id)
+                    _mark_repair_failed(
+                        episode_id,
+                        issue,
+                        run_id=run_id,
+                        activation_no=activation_no,
+                        patch_count=len(patch_ids),
+                    )
                     save_checkpoint(rev.id, {
                         **checkpoint,
                         "phase": "REPAIR_FAILED",
@@ -776,10 +882,20 @@ def _choose_issue(issues: list[Issue]) -> Issue | None:
         "CHARACTER_CONSISTENCY": 5,
         "FORMAT_CONTRACT_INVALID": 6,
         "SOURCE_FIDELITY": 7,
+        "OVERDETAIL": 8,
     }
     repairable = [i for i in issues if i.repairable]
     pool = repairable or issues
-    return sorted(pool, key=lambda i: priority.get(i.code, 50))[0]
+
+    def issue_priority(issue: Issue) -> tuple[float, str]:
+        base = float(priority.get(issue.code, 50))
+        # 先缩减整集“必交付对白链”集合，再检查集合内单链。
+        # 否则会先去移动/改写一条本应整组取舍的非必保链。
+        if issue.code == "KEY_LINE_MISSING" and "dialogue_chains 共" in issue.message:
+            base -= 0.5
+        return base, issue.fingerprint
+
+    return sorted(pool, key=issue_priority)[0]
 
 
 def _mark_waiting_input(episode_id: str, issues: list[Issue], *, run_id: str | None) -> None:
@@ -791,9 +907,32 @@ def _mark_waiting_input(episode_id: str, issues: list[Issue], *, run_id: str | N
         )
 
 
-def _mark_repair_failed(episode_id: str, issue: Issue, *, run_id: str | None) -> None:
+def _mark_repair_failed(
+    episode_id: str,
+    issue: Issue,
+    *,
+    run_id: str | None,
+    activation_no: int | None = None,
+    patch_count: int | None = None,
+) -> None:
     """暂停内部修复但保留 working artifact；这不是用户输入冲突。"""
-    message = f"REPAIR_FAILED: 自动局部修复策略耗尽 {issue.code}: {issue.message}"
+    rev = get_active_safe(episode_id)
+    checkpoint = dict(rev.checkpoint_json or {}) if rev else {}
+    current_activation = (
+        int(activation_no)
+        if activation_no is not None
+        else int(checkpoint.get("activation_no") or 0)
+    )
+    applied_patches = (
+        int(patch_count)
+        if patch_count is not None
+        else len(checkpoint.get("patch_artifact_ids") or [])
+    )
+    progress = f"已启动 {current_activation} 轮、实际应用 {applied_patches} 个补丁"
+    message = (
+        f"REPAIR_FAILED: 自动修复暂停（{progress}）；当前问题暂无可用策略 "
+        f"{issue.code}: {issue.message}"
+    )
     conn = get_conn()
     conn.execute(
         "UPDATE episodes SET screenplay_status='repairing', screenplay_error=?, "
@@ -806,7 +945,7 @@ def _mark_repair_failed(episode_id: str, issue: Issue, *, run_id: str | None) ->
             run_id,
             "REPAIR_FAILED",
             "error",
-            "自动局部修复策略耗尽，已保留工作副本",
+            f"自动修复暂停（{progress}），已保留工作副本",
             payload={
                 "issue": issue.model_dump(mode="json"),
                 "requires_user_input": False,

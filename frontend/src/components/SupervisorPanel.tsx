@@ -73,7 +73,9 @@ const ISSUE_LABEL: Record<string, string> = {
   SPOKEN_CAPACITY_EXCEEDED: '口播超容量',
   STATE_CHAIN_INVALID: '镜头衔接',
   SPINE_MISSING: '主线缺失',
+  KEY_CONTENT_MISSING: '关键内容缺失',
   KEY_LINE_MISSING: '关键台词',
+  BUSINESS_RULE_FAILED: '业务门禁',
   SCHEMA_INVALID: '结构问题',
   PLAN_EXHAUSTED_NOT_FINAL: '未正常收束',
 }
@@ -132,7 +134,8 @@ function stepState(phase: string, stepPhases: readonly string[]): 'done' | 'acti
   if (phase === 'SUCCEEDED') return 'done'
   const currentIdx = PHASE_STEPS.findIndex(s => (s.phases as readonly string[]).includes(phase))
   const stepIdx = PHASE_STEPS.findIndex(s => s.phases === stepPhases)
-  if (['PAUSED_EXTERNAL', 'PAUSED_BUDGET', 'WAITING_HUMAN', 'WAITING_AUTHORIZATION', 'WAITING_RETRY', 'CANCELLED'].includes(phase)) {
+  if (phase === 'CANCELLED') return 'todo'
+  if (['PAUSED_EXTERNAL', 'PAUSED_BUDGET', 'WAITING_HUMAN', 'WAITING_AUTHORIZATION', 'WAITING_RETRY'].includes(phase)) {
     if (stepIdx < 2) return 'done'
     if (stepIdx === 2) return 'active'
     return 'todo'
@@ -202,6 +205,7 @@ export default function SupervisorPanel({
   const nextNo = supervisor?.next_shot_no || (prefix > 0 ? prefix + 1 : 1)
   const auto = supervisor?.completion_mode === 'auto_confirm' || supervisor?.goal === 'generate_and_confirm'
   const pausedLike = ['PAUSED_EXTERNAL', 'PAUSED_BUDGET', 'WAITING_RETRY', 'WAITING_HUMAN', 'WAITING_AUTHORIZATION'].includes(phase)
+  const cancelled = phase === 'CANCELLED'
   const succeeded = phase === 'SUCCEEDED' || supervisor?.outcome?.startsWith('SUCCEEDED')
   const progressPct = total > 0
     ? Math.min(100, Math.round((prefix / total) * 100))
@@ -222,9 +226,10 @@ export default function SupervisorPanel({
     }
   }
 
-  const tone = pausedLike ? 'wait' : succeeded ? 'done' : 'run'
+  const tone = cancelled ? 'cancel' : pausedLike ? 'wait' : succeeded ? 'done' : 'run'
   const headline = succeeded
-    ? (supervisor?.outcome === 'SUCCEEDED_CONFIRMED' ? '分镜已自动确认' : '分镜已通过校验')
+    ? (supervisor?.outcome === 'SUCCEEDED_CONFIRMED' ? '分镜已确认' : '分镜已通过校验')
+    : cancelled ? '本次分镜生成已取消'
     : (PHASE_LABEL[phase] || '分镜生成中')
 
   return (
@@ -246,10 +251,10 @@ export default function SupervisorPanel({
             {prefix > 0 ? `已通过 1–${String(prefix).padStart(2, '0')} 镜` : '尚未通过镜头'}
             {total > 0 ? ` · 计划 ${total} 镜` : ''}
             {!succeeded && scripting ? ` · 下一镜 ${String(nextNo).padStart(2, '0')}` : ''}
-            {supervisor?.strategy ? ` · ${STRATEGY_LABEL[supervisor.strategy] || supervisor.strategy}` : ''}
-            {supervisor?.frontier ? `（自第 ${supervisor.frontier} 镜起重做）` : ''}
+            {supervisor?.strategy && !succeeded ? ` · ${STRATEGY_LABEL[supervisor.strategy] || supervisor.strategy}` : ''}
+            {supervisor?.frontier && !succeeded ? `（自第 ${supervisor.frontier} 镜起重做）` : ''}
           </p>
-          {!!supervisor?.issue_codes?.length && (
+          {!succeeded && !!supervisor?.issue_codes?.length && (
             <p className="supervisor-rail-issues">
               待处理：{(supervisor.issue_codes || []).slice(0, 3).map(c => ISSUE_LABEL[c] || c).join(' · ')}
             </p>

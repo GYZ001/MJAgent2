@@ -320,6 +320,24 @@ def _register_human_only(registry) -> None:
             related_ui_intent="ui.request_directory_grant",
             tags=("human", "filesystem"),
         ),
+        HumanOnlySpec(
+            "human.review_scene_candidate_hard_gates",
+            "人工复核场景候选硬门禁",
+            "用户放大查看候选图，逐项确认无人、无水印、无禁止文字和空间匹配",
+            reason="这是对视觉硬门禁的责任人签署，Agent 不得代替用户勾选或承担风险",
+            rest_routes=(
+                "POST /api/projects/{project_id}/scenes/{scene_name}/candidates/{artifact_id}/manual-review",
+            ),
+            tags=("human", "scene", "qa"),
+        ),
+        HumanOnlySpec(
+            "human.choose_episode_target_duration",
+            "选择单集目标时长",
+            "用户在首版剧本生成前确认单集节奏预算",
+            reason="这是会改变剧作节奏与后续成本的创作取舍，当前仅允许用户在前端显式选择",
+            rest_routes=("PUT /api/episodes/{episode_id}/target-duration",),
+            tags=("human", "episode", "screenplay"),
+        ),
     ]:
         registry.register_human_only(spec)
 
@@ -535,7 +553,7 @@ def _register_commands(registry) -> None:
         _cmd(
             "scene.adopt_candidate",
             title="采纳场景候选图",
-            description="将场景库候选图手动采纳为主图；可绕过 QA 阈值",
+            description="将已通过新版硬门禁的场景候选图采纳为主图；明确硬失败不可绕过",
             input_model=I.SceneAdoptCandidateInput,
             risk=RiskLevel.R2_MATERIAL,
             confirmation=ConfirmationPolicy.ALWAYS,
@@ -547,6 +565,22 @@ def _register_commands(registry) -> None:
                 "POST /api/projects/{project_id}/scenes/{scene_name}/candidates/{artifact_id}/adopt",
             ),
             tags=("scene",),
+        ),
+        _cmd(
+            "scene.review_candidate",
+            title="重验场景候选 QA",
+            description="对已落盘场景候选执行最新硬门禁 QA；不重新生图、不切换当前资产",
+            input_model=I.SceneAdoptCandidateInput,
+            risk=RiskLevel.R1_REVERSIBLE,
+            confirmation=ConfirmationPolicy.OPTIONAL,
+            idempotency=IdempotencyPolicy.RECOMMENDED,
+            scopes={"manju:project-write"},
+            side_effect="appends_scene_candidate_qa_evidence",
+            handler=h_scene.review_candidate,
+            rest_routes=(
+                "POST /api/projects/{project_id}/scenes/{scene_name}/candidates/{artifact_id}/review",
+            ),
+            tags=("scene", "qa"),
         ),
         # —— 分集 / 剧本 / 分镜 ——
         _cmd(
@@ -1267,6 +1301,38 @@ def _register_exemptions(registry) -> None:
         "POST /api/projects/{project_id}/characters/{character_name}/portraits/{portrait_id}/rollback",
         "人物定妆候选人工回滚；页面评审入口，复用采纳切换逻辑",
     )
+    for route, reason in {
+        "PUT /api/episodes/{episode_id}/screenplay/draft": "剧本台草稿会话写入；不发布、不触发生成，仅由页面自动保存管理",
+        "DELETE /api/episodes/{episode_id}/screenplay/draft": "剧本台草稿清理；只删除未发布工作副本",
+        "DELETE /api/shots/{shot_id}/drafts/{draft_id}": "分镜编辑会话草稿清理；不改变已发布产物",
+        "POST /api/episodes/{episode_id}/confirm-preview": "分集确认前只读影响预览；正式确认仍走已登记命令",
+        "POST /api/episodes/{episode_id}/screenplay/preflight": "剧本生成前只读预检与短时凭证签发",
+        "POST /api/episodes/{episode_id}/screenplay/impact-preview": "剧本发布前只读影响预览；不写库、不建任务，正式发布仍走 screenplay.update",
+        "POST /api/episodes/{episode_id}/storyboard/preflight": "分镜生成前只读预检与短时凭证签发",
+        "POST /api/episodes/{episode_id}/storyboard/structure-preview": "分镜结构变更前只读预览",
+        "POST /api/episodes/{episode_id}/storyboard/structure": "分镜台人工结构编辑入口；必须消费页面预览凭证",
+        "POST /api/gates/{artifact_id}/decision": "证据门禁的人工决策入口；禁止 Agent 自行代替人类批准",
+        "POST /api/projects/{project_id}/scene-bible/precheck": "场景清单生成前只读付费预检",
+        "POST /api/projects/{project_id}/scene-bible/preview": "场景清单与付费范围只读预览",
+        "POST /api/projects/{project_id}/scene-refs/precheck": "场景图付费生成前只读预检",
+        "POST /api/projects/{project_id}/scene-reviews": "历史场景包本机管理复验；不启动付费出图",
+        "POST /api/projects/{project_id}/scene-reviews/{batch_id}/cancel": "取消本机场景历史复验任务",
+        "POST /api/projects/{project_id}/scene-reviews/{batch_id}/items/{item_id}/disposition": "场景历史复验的人工处置记录；不删除历史资产且不向 Agent/MCP 开放",
+        "POST /api/projects/{project_id}/scenes/{scene_name}/refs/{scene_reference_id}/views/{view_role}/regenerate/cancel": "页面定向取消单场景视角任务，不创建新付费作业",
+        "POST /api/projects/{project_id}/scenes/{scene_name}/refs/{scene_reference_id}/rollback": "场景库历史版本人工回滚；页面评审入口，不向 Agent/MCP 开放",
+        "PUT /api/projects/{project_id}/scenes/{scene_name}": "场景库人工元数据修订；页面编辑入口，不自动触发付费出图",
+        "POST /api/shots/{shot_id}/edit-session": "分镜编辑租约签发；不改变分镜内容",
+        "POST /api/shots/{shot_id}/impact-preview": "分镜修订前只读影响预览",
+        "POST /api/shots/{shot_id}/spoken-conflict-preview": "分镜口播冲突处理前只读预览",
+        "POST /api/shots/{shot_id}/review-items": "评审墙人工批注入口；不向 Agent/MCP 开放",
+        "PUT /api/review-items/{item_id}": "评审墙人工批注状态更新；不向 Agent/MCP 开放",
+        "POST /api/shots/{shot_id}/review-state": "评审墙人工决策状态；不向 Agent/MCP 开放",
+        "POST /api/system/jobs/{job_id}/retry": "监制房运维重试入口；只限本机管理员",
+        "POST /api/system/monitor/events": "前端监控事件采集入口；只记录遥测，不执行领域动作",
+        "POST /api/versions/{version_id}/archive": "评审墙人工归档操作；不删除媒体，不向 Agent/MCP 开放",
+        "DELETE /api/versions/{version_id}/archive": "评审墙人工取消归档操作；不向 Agent/MCP 开放",
+    }.items():
+        registry.exempt_rest(route, reason)
     registry.exempt_rest(
         "POST /mcp",
         "MCP JSON-RPC 传输端点；具体 tools/call 映射到 Capability Registry",

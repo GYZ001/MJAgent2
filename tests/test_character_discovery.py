@@ -38,7 +38,7 @@ def _patch_settings(monkeypatch, conn) -> dict:
     return settings
 
 
-def test_ensure_character_card_adds_prominent_new_character(monkeypatch) -> None:
+def test_ensure_character_card_auto_adds_prominent_character_and_portrait(monkeypatch) -> None:
     conn = _make_conn()
     _seed_project(conn, "美杜莎现身，紫色长发，妖娆冷艳。美杜莎再次出手。美杜莎统领蛇人一族。" * 3)
     _patch_settings(monkeypatch, conn)
@@ -64,17 +64,21 @@ def test_ensure_character_card_adds_prominent_new_character(monkeypatch) -> None
         conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"])["characters"]]
     assert "美杜莎" in names
     assert conn.execute("SELECT bible_version FROM projects WHERE id='p1'").fetchone()["bible_version"] == 2
-    row = conn.execute("SELECT * FROM character_portraits WHERE character_name='美杜莎'").fetchone()
-    assert row["ep_start"] == 21 and row["ep_end"] is None
+    assert conn.execute("SELECT COUNT(*) c FROM character_portraits WHERE character_name='美杜莎'").fetchone()["c"] == 1
+    queue = json.loads(conn.execute(
+        "SELECT bible_auto_changes_json FROM projects WHERE id='p1'"
+    ).fetchone()["bible_auto_changes_json"])
+    assert queue[0]["status"] == "auto_applied"
+    assert queue[0]["payload"]["character_card"]["name"] == "美杜莎"
 
-    # 幂等：第二次直接 exists，不重复建卡/出图
+    # 幂等：第二次识别到同名角色时不重复建卡/出图。
     res2 = asyncio.run(portraits.ensure_character_card("p1", "美杜莎", 22))
     assert res2["status"] == "exists"
     cnt = conn.execute("SELECT COUNT(*) c FROM character_portraits WHERE character_name='美杜莎'").fetchone()["c"]
     assert cnt == 1
 
 
-def test_ensure_character_card_still_adds_when_portrait_fails(monkeypatch) -> None:
+def test_ensure_character_card_keeps_auto_added_card_when_portrait_fails(monkeypatch) -> None:
     conn = _make_conn()
     _seed_project(conn, "美杜莎现身，紫色长发。美杜莎再次出手。美杜莎统领蛇人一族。" * 3)
     _patch_settings(monkeypatch, conn)
@@ -84,19 +88,143 @@ def test_ensure_character_card_still_adds_when_portrait_fails(monkeypatch) -> No
                 "appearance_canonical": "紫发妖娆女子，紫色长发，金瞳蛇眸，蛇纹长裙，气场冷艳标志性蛇瞳",
                 "personality": "", "speech_style": "", "relationships": []}
 
+    portrait_calls = 0
+
     async def boom(*a, **k):
-        raise RuntimeError("seedream down")
+        nonlocal portrait_calls
+        portrait_calls += 1
+        raise RuntimeError("provider unavailable")
 
     monkeypatch.setattr(portraits, "assess_new_character", fake_assess)
     monkeypatch.setattr(portraits, "_generate_fresh_portrait", boom)
 
     res = asyncio.run(portraits.ensure_character_card("p1", "美杜莎", 21))
     assert res["status"] == "added" and res["has_portrait"] is False
-    # 仍补进人物谱，但没有定妆照行
+    assert portrait_calls == 1
+    # 供应商失败不回滚 AI 已确认的卡片；分镜前自动重试定妆资产。
     names = [c["name"] for c in json.loads(
         conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"])["characters"]]
     assert "美杜莎" in names
     assert conn.execute("SELECT COUNT(*) c FROM character_portraits WHERE character_name='美杜莎'").fetchone()["c"] == 0
+    queue = json.loads(conn.execute(
+        "SELECT bible_auto_changes_json FROM projects WHERE id='p1'"
+    ).fetchone()["bible_auto_changes_json"])
+    assert queue[0]["status"] == "auto_applied_asset_failed"
+
+
+def test_existing_pending_character_is_auto_applied_without_reassessment(monkeypatch) -> None:
+    conn = _make_conn()
+    _seed_project(conn, "葛叶陪同纳兰嫣然现身。葛叶出手阻拦萧炎。" * 4)
+    _patch_settings(monkeypatch, conn)
+    conn.execute("ALTER TABLE projects ADD COLUMN bible_auto_changes_json TEXT")
+    card = Character(
+        name="葛叶",
+        role="重要配角",
+        appearance_canonical="老年男性，灰白长发束起，身着云岚宗青灰长袍，面容沉稳，腰佩宗门令牌",
+    )
+    pending = [{
+        "id": "change_old",
+        "kind": "new_character",
+        "status": "pending",
+        "character": "葛叶",
+        "ep_start": 5,
+        "reason": "有具名台词与持续行动",
+        "payload": {"character_card": card.model_dump(mode="json")},
+    }]
+    conn.execute(
+        "UPDATE projects SET bible_auto_changes_json=? WHERE id='p1'",
+        (json.dumps(pending, ensure_ascii=False),),
+    )
+    conn.commit()
+
+    async def forbidden_assess(*_args, **_kwargs):
+        raise AssertionError("已有待审卡不应重复调用 AI 评估")
+
+    async def fake_portrait(project_id, name, style, appearance, *, ep_start):
+        assert name == "葛叶" and ep_start == 5
+        return ("/tmp/葛叶.jpg", "fake prompt")
+
+    monkeypatch.setattr(portraits, "assess_new_character", forbidden_assess)
+    monkeypatch.setattr(portraits, "_generate_fresh_portrait", fake_portrait)
+
+    result = asyncio.run(portraits.ensure_character_card("p1", "葛叶", 5))
+
+    assert result["status"] == "added"
+    bible = json.loads(conn.execute(
+        "SELECT bible_json FROM projects WHERE id='p1'"
+    ).fetchone()["bible_json"])
+    assert "葛叶" in {item["name"] for item in bible["characters"]}
+    changes = json.loads(conn.execute(
+        "SELECT bible_auto_changes_json FROM projects WHERE id='p1'"
+    ).fetchone()["bible_auto_changes_json"])
+    assert changes[0]["status"] == "auto_applied"
+
+
+def test_auto_discovered_character_pack_starts_at_first_appearance(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "auto-character-pack.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    conn = db.get_conn()
+    bible = Bible(
+        world=World(visual_style_canonical="国风"),
+        characters=[Character(
+            name="萧炎", role="主角",
+            appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰佩火纹玉佩",
+        )],
+    )
+    conn.execute(
+        "INSERT INTO projects(id,name,status,bible_json,bible_version,bible_status,created_at) "
+        "VALUES('p1','斗破苍穹','planned',?,1,'ready',1)",
+        (bible.model_dump_json(),),
+    )
+    conn.execute(
+        "INSERT INTO chapters(project_id,idx,title,content,char_count) VALUES(?,?,?,?,?)",
+        ("p1", 5, "葛叶登场", "葛叶陪同纳兰嫣然现身，并与萧炎正面交锋。" * 8, 240),
+    )
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,title,source_chapters,status,created_at) "
+        "VALUES('e5','p1',5,'葛叶登场','[5]','planned',1)"
+    )
+    conn.commit()
+
+    async def fake_assess(*_args, **_kwargs):
+        return {
+            "important": True, "reason": "具名对手且持续参与主线", "role": "重要配角",
+            "appearance_canonical": "老年男性，灰白长发束起，身着云岚宗青灰长袍，面容沉稳，腰佩宗门令牌",
+            "personality": "沉稳", "speech_style": "克制", "relationships": [],
+        }
+
+    async def fake_portrait(project_id, name, style, appearance, *, ep_start):
+        path = tmp_path / f"{name}-{ep_start}.jpg"
+        path.write_bytes(b"\xff\xd8\xff\xe0automatic-character")
+        return str(path), "fake prompt"
+
+    async def fake_review(*_args, **_kwargs):
+        return {
+            "identity_match": 1.0, "presentation_match": 1.0, "clean_frame": 1.0,
+            "overall": 1.0, "issues": [], "hard_failures": [], "hard_gate_passed": True,
+        }
+
+    pack_calls = []
+
+    async def fake_pack(**kwargs):
+        pack_calls.append(kwargs)
+        return {"status": "ready", "portrait_id": kwargs["portrait_id"]}
+
+    monkeypatch.setattr(portraits, "assess_new_character", fake_assess)
+    monkeypatch.setattr(portraits, "_generate_fresh_portrait", fake_portrait)
+    monkeypatch.setattr(portraits, "_review_portrait_asset", fake_review)
+    monkeypatch.setattr("app.multiview.ensure_character_multiview_pack", fake_pack)
+
+    result = asyncio.run(portraits.ensure_character_card("p1", "葛叶", 5))
+
+    assert result["status"] == "added" and result["has_portrait"] is True
+    row = conn.execute(
+        "SELECT ep_start,ep_end,pack_status FROM character_portraits "
+        "WHERE project_id='p1' AND character_name='葛叶'"
+    ).fetchone()
+    assert (row["ep_start"], row["ep_end"], row["pack_status"]) == (5, None, "ready")
+    assert pack_calls[0]["ep_start"] == 5
 
 
 def test_minor_character_is_skipped_and_negatively_cached(monkeypatch) -> None:
@@ -278,7 +406,7 @@ def test_discover_character_candidates_filters_functional_extras_and_unseen_name
     assert [item["name"] for item in result] == ["魂天帝", "萧炎"]
 
 
-def test_late_episode_screenplay_discovers_character_before_generation(tmp_path, monkeypatch) -> None:
+def test_late_episode_screenplay_auto_adds_character_even_if_portrait_provider_fails(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "late-episode-character.db")
     monkeypatch.setattr(db._local, "conn", None, raising=False)
     db.init_db()
@@ -382,18 +510,18 @@ def test_late_episode_screenplay_discovers_character_before_generation(tmp_path,
         item["name"] for item in json.loads(project["bible_json"])["characters"]
     }
     episode = conn.execute(
-        "SELECT screenplay_status,screenplay_json FROM episodes WHERE id='e1926'"
+        "SELECT screenplay_status,screenplay_json,screenplay_error FROM episodes WHERE id='e1926'"
     ).fetchone()
     assert result is not None
+    assert result.title == "双帝之战"
     assert names == {"萧炎", "魂天帝"}
     assert project["bible_version"] == 2
     assert generated_with == [{"萧炎", "魂天帝"}]
-    # 发现链路完成后由 Production Repair 发布；未通过凭证前不会落 warning 可交付态。
-    assert episode["screenplay_status"] in {"ready", "repairing"}
-    assert "魂天帝" in episode["screenplay_json"]
-    error_text = ""
-    try:
-        error_text = episode["screenplay_error"] or ""
-    except (KeyError, IndexError):
-        error_text = ""
-    assert "【场1】魂天帝" not in error_text
+    assert episode["screenplay_status"] == "ready"
+    assert episode["screenplay_json"] is not None
+    assert episode["screenplay_error"] is None
+    queue = json.loads(conn.execute(
+        "SELECT bible_auto_changes_json FROM projects WHERE id='p1'"
+    ).fetchone()["bible_auto_changes_json"])
+    assert queue[0]["character"] == "魂天帝"
+    assert queue[0]["status"] == "auto_applied_asset_failed"

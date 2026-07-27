@@ -555,7 +555,9 @@ def scene_reference_assets(bible: Bible, scene_name: str, *, project_id: str | N
                     pass
     from app.scenes import scene_ref_for_episode, scene_ref_qa_for_episode
     path = scene_ref_for_episode(project_id, scene_name, episode_no) if project_id else None
-    if not path:
+    # 有项目上下文时，scene_ref_for_episode 已执行新版整包硬门禁；不得再回退到
+    # bible_json 中可能仍指向历史硬失败图的兼容缓存。
+    if not path and not project_id:
         by_name = {s.name: s for s in (getattr(bible, "scenes", None) or [])}
         sc = by_name.get(scene_name)
         path = getattr(sc, "ref_image_path", None) if sc else None

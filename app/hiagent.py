@@ -12,6 +12,7 @@ import base64
 import binascii
 import inspect
 import json
+import sqlite3
 import shutil
 import subprocess
 import time
@@ -25,7 +26,7 @@ import httpx
 
 from app import config
 from app.atomic_io import atomic_write_bytes
-from app.db import (finish_provider_call, get_setting, log_provider_call,
+from app.db import (finish_provider_call, get_conn, get_setting, log_provider_call,
                     provider_operation_id, start_provider_call)
 
 BAILIAN_TEXT_FREE_MODELS = (
@@ -42,6 +43,45 @@ _BAILIAN_FAILED_MODELS: dict[str, set[str]] = {"text": set(), "vlm": set()}
 _MEDIA_SEMAPHORES: weakref.WeakKeyDictionary[Any, asyncio.Semaphore] = weakref.WeakKeyDictionary()
 _IMAGE_SEMAPHORES: weakref.WeakKeyDictionary[Any, asyncio.Semaphore] = weakref.WeakKeyDictionary()
 _VLM_SEMAPHORES: weakref.WeakKeyDictionary[Any, asyncio.Semaphore] = weakref.WeakKeyDictionary()
+
+
+def _cached_successful_provider_response(
+    kind: str,
+    model: str,
+    payload: dict[str, Any],
+    meta: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """恢复时复用同一幂等 operation 的成功响应，避免成功结果因状态竞态丢失。"""
+    if not bool((meta or {}).get("reuse_successful_operation")):
+        return None
+    operation_id = provider_operation_id(kind, model, payload)
+    try:
+        row = get_conn().execute(
+            "SELECT id,response_json FROM provider_calls "
+            "WHERE operation_id=? AND status IN ('OK','SUCCESS','SUCCEEDED') "
+            "AND response_json IS NOT NULL ORDER BY id DESC LIMIT 1",
+            (operation_id,),
+        ).fetchone()
+        if not row or not row["response_json"]:
+            return None
+        value = json.loads(row["response_json"])
+        if not isinstance(value, dict):
+            return None
+        log_provider_call(
+            "provider_cache_hit",
+            model,
+            "REUSED",
+            None,
+            0,
+            meta={
+                **(meta or {}),
+                "operation_id": operation_id,
+                "source_provider_call_id": int(row["id"]),
+            },
+        )
+        return value
+    except (json.JSONDecodeError, sqlite3.Error, TypeError, ValueError):
+        return None
 
 
 class ProviderError(Exception):
@@ -575,12 +615,20 @@ async def _chat_with_reasoning_fallback(client: httpx.AsyncClient, url: str, pay
     return content
 
 
+def _chat_read_timeout_s(call_meta: dict | None) -> float:
+    """为整版剧本 Baseline 使用独立读超时，其他文本请求保持通用上限。"""
+    stage = str((call_meta or {}).get("stage") or "").strip().lower()
+    if "baseline" in stage:
+        return max(config.TIMEOUT_CHAT_READ, config.TIMEOUT_CHAT_BASELINE_READ)
+    return config.TIMEOUT_CHAT_READ
+
+
 async def chat(messages: list[dict], *, model: str | None = None, temperature: float = 0.7,
                max_tokens: int = 65535, call_meta: dict | None = None) -> str:
     """文本 LLM 对话，返回 message.content（推理模型的 reasoning 一律丢弃）。
     按设置在火山 HiAgent、OpenRouter、阿里云百炼、DeepSeek、智谱官方 API 之间路由（后两者仅文本，
     图像/视频始终走火山）。"""
-    timeout = httpx.Timeout(connect=10, read=config.TIMEOUT_CHAT_READ, write=30, pool=10)
+    timeout = httpx.Timeout(connect=10, read=_chat_read_timeout_s(call_meta), write=30, pool=10)
     provider = active_provider("text")
     async with httpx.AsyncClient(timeout=timeout) as client:
         if provider == "openrouter":
@@ -629,17 +677,23 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
             custom_model = active_model("text", provider)
             base_url, headers = _model_connection(provider, custom_model)
             payload = {"model": custom_model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
-            data = await _post_json(client, f"{base_url}/chat/completions", payload,
-                                    kind="chat", model=custom_model, headers=headers,
-                                    key_name=f"model:{custom_model}", meta=call_meta)
+            data = _cached_successful_provider_response(
+                "chat", custom_model, payload, call_meta,
+            )
+            if data is None:
+                data = await _post_json(client, f"{base_url}/chat/completions", payload,
+                                        kind="chat", model=custom_model, headers=headers,
+                                        key_name=f"model:{custom_model}", meta=call_meta)
             content = _chat_content(data, label="custom chat")
         else:
             model = model or active_model("text", "hiagent")
             base_url, model_headers = _model_connection("hiagent", model, config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY)
             payload = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
-            data = await _post_json(client, f"{base_url}/chat/completions", payload,
-                                    kind="chat", model=model, headers=model_headers,
-                                    key_name=f"model:{model}", meta=call_meta)
+            data = _cached_successful_provider_response("chat", model, payload, call_meta)
+            if data is None:
+                data = await _post_json(client, f"{base_url}/chat/completions", payload,
+                                        kind="chat", model=model, headers=model_headers,
+                                        key_name=f"model:{model}", meta=call_meta)
             content = _chat_content(data, label="chat")
 
     if not content or not content.strip():

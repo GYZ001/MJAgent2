@@ -9,7 +9,7 @@ import re
 FUNCTIONAL_EXTRA_ROLES = frozenset({
     "测验员", "裁判", "主持人", "司仪", "店员", "服务员", "侍者", "守卫", "门卫",
     "护卫", "保安", "司机", "医生", "护士", "记者", "警员", "官差", "伙计", "小二",
-    "传令兵", "随从", "仆人", "侍女", "宫女", "太监",
+    "传令兵", "随从", "仆人", "侍女", "宫女", "太监", "管家", "长老",
 })
 FUNCTIONAL_EXTRA_BASES = frozenset({
     "路人", "围观者", "群众", "族人", "弟子", "学生", "顾客", "客人", "村民", "士兵",
@@ -17,9 +17,10 @@ FUNCTIONAL_EXTRA_BASES = frozenset({
 })
 FUNCTIONAL_EXTRA_BARE_LABELS = frozenset({"路人", "围观者"})
 FUNCTIONAL_EXTRA_MODIFIERS = frozenset({
-    "年轻", "中年", "年长", "老年", "男", "女", "男性", "女性",
+    "年轻", "中年", "年长", "老年", "老", "男", "女", "男性", "女性",
 })
 _EXTRA_INDEX_RE = re.compile(r"(?:甲|乙|丙|丁|A|B|C|D|[1-9]\d*)$", re.I)
+_ROLE_ORDINAL_RE = re.compile(r"(?:[一二三四五六七八九十]|[1-9]\d*)$")
 
 
 def is_functional_extra(name: str) -> bool:
@@ -32,6 +33,12 @@ def is_functional_extra(name: str) -> bool:
     if any(
         value == modifier + role
         for modifier in FUNCTIONAL_EXTRA_MODIFIERS
+        for role in FUNCTIONAL_EXTRA_ROLES
+    ):
+        return True
+    if any(
+        value.endswith(role)
+        and _ROLE_ORDINAL_RE.fullmatch(value[:-len(role)]) is not None
         for role in FUNCTIONAL_EXTRA_ROLES
     ):
         return True

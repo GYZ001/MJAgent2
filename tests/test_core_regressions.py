@@ -176,6 +176,26 @@ def test_task_registry_cancels_and_waits_before_returning() -> None:
     asyncio.run(scenario())
 
 
+def test_task_registry_distinguishes_process_shutdown_from_user_cancel() -> None:
+    async def scenario() -> None:
+        observed: list[bool] = []
+
+        async def background() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                observed.append(task_registry.shutdown_in_progress())
+                raise
+
+        task_registry.spawn("test", "shutdown", background())
+        await asyncio.sleep(0)
+        await task_registry.stop_all()
+        assert observed == [True]
+        assert task_registry.shutdown_in_progress() is False
+
+    asyncio.run(scenario())
+
+
 def test_video_derivatives_are_removed_when_visual_basis_changes(tmp_path, monkeypatch) -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row

@@ -59,7 +59,11 @@ CREATE TABLE IF NOT EXISTS episodes (
     screenplay_started_at REAL,
     screenplay_updated_at REAL,
     screenplay_required_dialogues TEXT NOT NULL DEFAULT '[]',
+    screenplay_required_dialogue_occurrences TEXT NOT NULL DEFAULT '[]',
     screenplay_artifact_id TEXT,
+    screenplay_publish_fence INTEGER NOT NULL DEFAULT 0,
+    screenplay_snapshot_version INTEGER NOT NULL DEFAULT 0,
+    screenplay_constraint_version INTEGER NOT NULL DEFAULT 0,
     storyboard_artifact_id TEXT,
     delivery_artifact_id TEXT,
     delivery_status TEXT NOT NULL DEFAULT 'not_ready',
@@ -95,6 +99,20 @@ CREATE TABLE IF NOT EXISTS shots (
     scene_status TEXT DEFAULT 'none',
     storyboard_artifact_id TEXT,
     UNIQUE(episode_id, shot_no),
+    FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS screenplay_drafts (
+    id TEXT PRIMARY KEY,
+    episode_id TEXT NOT NULL,
+    user_key TEXT NOT NULL DEFAULT 'local',
+    baseline_artifact_id TEXT,
+    baseline_hash TEXT,
+    content_json TEXT,
+    constraint_json TEXT NOT NULL DEFAULT '{}',
+    validation_json TEXT NOT NULL DEFAULT '{}',
+    dirty_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    UNIQUE(episode_id, user_key),
     FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS shot_versions (
@@ -206,6 +224,15 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS monitor_audit (
+    id TEXT PRIMARY KEY,
+    ts REAL NOT NULL,
+    action TEXT NOT NULL,
+    object_type TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    detail_json TEXT NOT NULL DEFAULT '{}'
+);
 CREATE TABLE IF NOT EXISTS character_portraits (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
@@ -279,6 +306,47 @@ CREATE TABLE IF NOT EXISTS scene_reference_views (
     FOREIGN KEY(base_view_id) REFERENCES scene_reference_views(id)
 );
 CREATE INDEX IF NOT EXISTS idx_scene_ref_views_scene ON scene_reference_views(scene_reference_id, view_role);
+CREATE TABLE IF NOT EXISTS scene_review_batches (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    policy_version TEXT NOT NULL,
+    rule_version TEXT NOT NULL,
+    baseline_snapshot_json TEXT NOT NULL DEFAULT '[]',
+    incremental_snapshot_json TEXT NOT NULL DEFAULT '[]',
+    cutoff_at REAL,
+    denominator INTEGER NOT NULL DEFAULT 0,
+    evaluated INTEGER NOT NULL DEFAULT 0,
+    passed INTEGER NOT NULL DEFAULT 0,
+    warning INTEGER NOT NULL DEFAULT 0,
+    hard_failed INTEGER NOT NULL DEFAULT 0,
+    unverified INTEGER NOT NULL DEFAULT 0,
+    disposition_count INTEGER NOT NULL DEFAULT 0,
+    shadow_mode INTEGER NOT NULL DEFAULT 1,
+    block_new_references INTEGER NOT NULL DEFAULT 0,
+    run_id TEXT,
+    started_at REAL,
+    finished_at REAL,
+    created_at REAL NOT NULL,
+    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS scene_review_items (
+    id TEXT PRIMARY KEY,
+    batch_id TEXT NOT NULL,
+    scene_reference_id TEXT NOT NULL,
+    adopted_version TEXT NOT NULL,
+    scene_name TEXT NOT NULL,
+    old_status TEXT,
+    result_status TEXT NOT NULL DEFAULT 'queued',
+    evidence_json TEXT,
+    disposition TEXT NOT NULL DEFAULT 'pending',
+    evaluated_at REAL,
+    UNIQUE(batch_id, scene_reference_id, adopted_version),
+    FOREIGN KEY(batch_id) REFERENCES scene_review_batches(id) ON DELETE CASCADE,
+    FOREIGN KEY(scene_reference_id) REFERENCES scene_references(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_scene_review_batches_project ON scene_review_batches(project_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_scene_review_items_batch ON scene_review_items(batch_id, result_status);
 CREATE INDEX IF NOT EXISTS idx_chapters_project ON chapters(project_id, idx);
 CREATE INDEX IF NOT EXISTS idx_episodes_project ON episodes(project_id, episode_no);
 CREATE INDEX IF NOT EXISTS idx_shots_episode ON shots(episode_id, shot_no);
@@ -314,6 +382,21 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
     FOREIGN KEY(parent_run_id) REFERENCES workflow_runs(id),
     FOREIGN KEY(recovered_by_run_id) REFERENCES workflow_runs(id)
 );
+CREATE TABLE IF NOT EXISTS character_payment_quotes (
+    quote_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    scope_fingerprint TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    expires_at REAL NOT NULL,
+    consumed_task_id TEXT,
+    consumed_run_id TEXT,
+    created_at REAL NOT NULL,
+    consumed_at REAL,
+    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_character_payment_quotes_project
+    ON character_payment_quotes(project_id, created_at);
 CREATE TABLE IF NOT EXISTS step_runs (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL,
@@ -422,6 +505,105 @@ CREATE TABLE IF NOT EXISTS gate_decisions (
     FOREIGN KEY(artifact_id) REFERENCES artifacts(id),
     FOREIGN KEY(run_id) REFERENCES workflow_runs(id)
 );
+CREATE TABLE IF NOT EXISTS storyboard_workspace_state (
+    episode_id TEXT PRIMARY KEY,
+    snapshot_version INTEGER NOT NULL DEFAULT 1,
+    state_fingerprint TEXT NOT NULL,
+    updated_at REAL NOT NULL,
+    FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS storyboard_action_previews (
+    token TEXT PRIMARY KEY,
+    action_type TEXT NOT NULL,
+    episode_id TEXT NOT NULL,
+    shot_id TEXT,
+    baseline_fingerprint TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    expires_at REAL NOT NULL,
+    consumed_at REAL,
+    created_at REAL NOT NULL,
+    FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE,
+    FOREIGN KEY(shot_id) REFERENCES shots(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_storyboard_previews_scope
+    ON storyboard_action_previews(episode_id, shot_id, action_type, created_at);
+CREATE TABLE IF NOT EXISTS storyboard_edit_sessions (
+    token TEXT PRIMARY KEY,
+    episode_id TEXT NOT NULL,
+    shot_id TEXT NOT NULL,
+    baseline_artifact_id TEXT,
+    baseline_content_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    expires_at REAL NOT NULL,
+    created_at REAL NOT NULL,
+    FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE,
+    FOREIGN KEY(shot_id) REFERENCES shots(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_storyboard_edit_sessions_shot
+    ON storyboard_edit_sessions(shot_id, status, created_at);
+CREATE TABLE IF NOT EXISTS storyboard_source_bindings (
+    shot_id TEXT PRIMARY KEY,
+    chapter_id INTEGER NOT NULL,
+    chapter_idx INTEGER NOT NULL,
+    source_version_hash TEXT NOT NULL,
+    start_offset INTEGER NOT NULL,
+    end_offset INTEGER NOT NULL,
+    excerpt_hash TEXT NOT NULL,
+    updated_at REAL NOT NULL,
+    FOREIGN KEY(shot_id) REFERENCES shots(id) ON DELETE CASCADE,
+    FOREIGN KEY(chapter_id) REFERENCES chapters(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS shot_review_items (
+    id TEXT PRIMARY KEY,
+    shot_id TEXT NOT NULL,
+    anchor_json TEXT NOT NULL DEFAULT '{}',
+    issue_type TEXT NOT NULL,
+    severity TEXT NOT NULL DEFAULT 'medium',
+    comment TEXT NOT NULL,
+    assignee TEXT,
+    status TEXT NOT NULL DEFAULT 'open',
+    content_version TEXT NOT NULL DEFAULT '',
+    revision INTEGER NOT NULL DEFAULT 1,
+    created_by TEXT NOT NULL DEFAULT 'user',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    FOREIGN KEY(shot_id) REFERENCES shots(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_shot_review_items_shot
+    ON shot_review_items(shot_id, status, updated_at);
+CREATE TABLE IF NOT EXISTS shot_review_states (
+    shot_id TEXT PRIMARY KEY,
+    review_status TEXT NOT NULL DEFAULT 'pending',
+    revision INTEGER NOT NULL DEFAULT 1,
+    decided_by TEXT NOT NULL DEFAULT 'user',
+    completed_at REAL,
+    updated_at REAL NOT NULL,
+    FOREIGN KEY(shot_id) REFERENCES shots(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS video_version_archives (
+    version_id TEXT PRIMARY KEY,
+    archived_by TEXT NOT NULL DEFAULT 'user',
+    reason TEXT,
+    archived_at REAL NOT NULL,
+    FOREIGN KEY(version_id) REFERENCES shot_versions(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS review_action_audit (
+    id TEXT PRIMARY KEY,
+    action TEXT NOT NULL,
+    scope_type TEXT NOT NULL,
+    scope_id TEXT NOT NULL,
+    target_version TEXT,
+    idempotency_key TEXT,
+    old_state_json TEXT NOT NULL DEFAULT '{}',
+    new_state_json TEXT NOT NULL DEFAULT '{}',
+    reason TEXT,
+    decided_by TEXT NOT NULL DEFAULT 'user',
+    request_id TEXT,
+    created_at REAL NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_review_action_idempotency
+    ON review_action_audit(action, idempotency_key)
+    WHERE idempotency_key IS NOT NULL AND idempotency_key != '';
 CREATE TABLE IF NOT EXISTS delivery_packages (
     id TEXT PRIMARY KEY,
     episode_id TEXT NOT NULL,
@@ -690,6 +872,10 @@ MIGRATIONS = (
     "ALTER TABLE projects ADD COLUMN refs_status TEXT DEFAULT 'idle'",
     "ALTER TABLE projects ADD COLUMN refs_error TEXT",
     "ALTER TABLE projects ADD COLUMN refs_target TEXT",
+    # 持久化定妆批次语义：0=按最新设定全量重生，1=仅续跑缺口。
+    # 进程重启后必须保留这个区别，否则全量重生会被误恢复成“跳过旧成品”。
+    "ALTER TABLE projects ADD COLUMN refs_resume INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE projects ADD COLUMN refs_batch_started_at REAL",
     "ALTER TABLE shots ADD COLUMN source_excerpt TEXT DEFAULT ''",
     "ALTER TABLE shots ADD COLUMN approved_scene_id TEXT",
     "ALTER TABLE shots ADD COLUMN approved_head_scene_id TEXT",
@@ -825,6 +1011,11 @@ MIGRATIONS = (
     "ALTER TABLE episodes ADD COLUMN storyboard_production_revision_id TEXT",
     "ALTER TABLE episodes ADD COLUMN screenplay_completion_certificate_id TEXT",
     "ALTER TABLE episodes ADD COLUMN storyboard_completion_certificate_id TEXT",
+    # 剧本台安全发布、occurrence 约束与轻量状态快照。
+    "ALTER TABLE episodes ADD COLUMN screenplay_required_dialogue_occurrences TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE episodes ADD COLUMN screenplay_publish_fence INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE episodes ADD COLUMN screenplay_snapshot_version INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE episodes ADD COLUMN screenplay_constraint_version INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE shots ADD COLUMN shot_uid TEXT",
 )
 
@@ -836,6 +1027,7 @@ CREATE INDEX IF NOT EXISTS idx_jobs_claim ON jobs(status, next_retry_at, lease_e
 CREATE INDEX IF NOT EXISTS idx_jobs_run ON jobs(run_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_owner_run ON jobs(owner_run_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_provider_calls_operation ON provider_calls(operation_id, attempt_no);
+CREATE INDEX IF NOT EXISTS idx_monitor_audit_object ON monitor_audit(object_type, object_id, ts);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_chapters_project_idx ON chapters(project_id, idx);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_episodes_project_no ON episodes(project_id, episode_no);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_shots_episode_no ON shots(episode_id, shot_no);
@@ -851,6 +1043,12 @@ BEGIN SELECT RAISE(ABORT, 'chapters.project_id missing'); END;
 CREATE TRIGGER IF NOT EXISTS guard_episode_project BEFORE INSERT ON episodes
 WHEN NOT EXISTS (SELECT 1 FROM projects WHERE id=NEW.project_id)
 BEGIN SELECT RAISE(ABORT, 'episodes.project_id missing'); END;
+CREATE TRIGGER IF NOT EXISTS guard_shot_screenplay_publish_fence BEFORE INSERT ON shots
+WHEN EXISTS (
+    SELECT 1 FROM episodes e
+    WHERE e.id=NEW.episode_id AND e.screenplay_publish_fence=1
+)
+BEGIN SELECT RAISE(ABORT, 'screenplay publish fence rejects storyboard write'); END;
 CREATE TRIGGER IF NOT EXISTS guard_shot_episode BEFORE INSERT ON shots
 WHEN NOT EXISTS (SELECT 1 FROM episodes WHERE id=NEW.episode_id)
 BEGIN SELECT RAISE(ABORT, 'shots.episode_id missing'); END;
@@ -1142,7 +1340,14 @@ def _backfill_multiview_assets(conn: sqlite3.Connection) -> None:
                     )
 
 
-def init_db() -> None:
+def init_db(*, reconcile_interrupted: bool = False) -> None:
+    """初始化/迁移数据库。
+
+    中断恢复是带全局副作用的启动动作：它会把所有 RUNNING Run/Step/ProviderCall
+    改写为服务重启状态。因此默认必须关闭，只允许 ``app.main`` 在持有
+    ``runtime-recovery.lock`` 后显式传入 ``True``。测试、CLI 和短生命周期脚本只做
+    schema 初始化，不能误杀正在运行的主服务任务。
+    """
     conn = get_conn()
     conn.executescript(SCHEMA)
     for stmt in MIGRATIONS:
@@ -1171,31 +1376,71 @@ def init_db() -> None:
         pass
     _backfill_multiview_assets(conn)
     _repair_integrity(conn)
+    # 旧版把“候选已生成但缺新版 QA 证据”误归类为 ProviderError，并在项目页显示为
+    # 大模型故障。保留历史 run 原貌供审计，只修正项目当前态与面向用户的恢复指引。
+    conn.execute(
+        """UPDATE projects
+           SET scene_refs_status='warning',
+               scene_refs_error=(
+                 SELECT '历史任务已更正分类：图片候选已生成，但缺少新版 QA 证据。'
+                        || '请进入候选页重新验 QA，或对未验证候选执行人工复核；系统不会继续重复出图。原始诊断：'
+                        || substr(r.failure_message, 1, 700)
+                   FROM workflow_runs r
+                  WHERE r.workflow_type='scene_references'
+                    AND r.scope_type='project'
+                    AND r.scope_id=projects.id
+                  ORDER BY r.updated_at DESC LIMIT 1
+               )
+         WHERE scene_refs_status='failed'
+           AND EXISTS (
+             SELECT 1 FROM workflow_runs r
+              WHERE r.workflow_type='scene_references'
+                AND r.scope_type='project'
+                AND r.scope_id=projects.id
+                AND r.id=(
+                  SELECT latest.id FROM workflow_runs latest
+                   WHERE latest.workflow_type='scene_references'
+                     AND latest.scope_type='project'
+                     AND latest.scope_id=projects.id
+                   ORDER BY latest.updated_at DESC LIMIT 1
+                )
+                AND r.failure_message LIKE '%候选缺少可用的新版%'
+           )"""
+    )
     for key, value in DEFAULT_SETTINGS.items():
         conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", (key, value))
+    # These settings are persisted immediately but only become runtime-effective
+    # after a process restart.  Capture the authoritative startup value separately
+    # so the monitor UI never reports a pending value as already active.
+    for key in ("provider_call_retention_days", "error_log_retention_days"):
+        conn.execute(
+            "INSERT INTO settings(key,value) SELECT ?,value FROM settings WHERE key=? "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (f"_monitor_effective_{key}", key),
+        )
     _prune_observability_logs(conn)
-    # 进程重启时，旧进程不可能再回写这些请求；不能让监控页永久显示“调用中”。
-    conn.execute(
-        "UPDATE provider_calls SET status='INTERRUPTED', "
-        "error=COALESCE(error, '服务重启，调用结果未回写'), "
-        "recovery_disposition=COALESCE(recovery_disposition, 'AWAITING_RETRY') "
-        "WHERE status='RUNNING'"
-    )
-    # A process restart cannot leave a persisted run pretending to be active.
-    # Phase 1 has no durable leases yet, so interruption is explicit and resumable.
-    conn.execute(
-        "UPDATE step_runs SET status='FAILED', finished_at=?, exit_reason='service_restart', "
-        "error_code='SERVICE_RESTART', error_message=COALESCE(error_message, '服务重启，步骤已中断') "
-        "WHERE status IN ('RUNNING','EVALUATING','REPAIRING')",
-        (now(),),
-    )
-    conn.execute(
-        "UPDATE workflow_runs SET status='PAUSED_EXTERNAL', updated_at=?, "
-        "failure_code='SERVICE_RESTART', failure_message='服务重启，可从安全检查点恢复', "
-        "resume_from_step=COALESCE(resume_from_step, current_step_key) "
-        "WHERE status IN ('RUNNING','WAITING_RETRY')",
-        (now(),),
-    )
+    if reconcile_interrupted:
+        # 只有持有运行时恢复锁的实例才能宣告旧调用中断。
+        # 否则另一端口的启动会把主实例正在执行的长请求错误围栏。
+        conn.execute(
+            "UPDATE provider_calls SET status='INTERRUPTED', "
+            "error=COALESCE(error, '服务重启，调用结果未回写'), "
+            "recovery_disposition=COALESCE(recovery_disposition, 'AWAITING_RETRY') "
+            "WHERE status='RUNNING'"
+        )
+        conn.execute(
+            "UPDATE step_runs SET status='FAILED', finished_at=?, exit_reason='service_restart', "
+            "error_code='SERVICE_RESTART', error_message=COALESCE(error_message, '服务重启，步骤已中断') "
+            "WHERE status IN ('RUNNING','EVALUATING','REPAIRING')",
+            (now(),),
+        )
+        conn.execute(
+            "UPDATE workflow_runs SET status='PAUSED_EXTERNAL', updated_at=?, "
+            "failure_code='SERVICE_RESTART', failure_message='服务重启，可从安全检查点恢复', "
+            "resume_from_step=COALESCE(resume_from_step, current_step_key) "
+            "WHERE status IN ('RUNNING','WAITING_RETRY')",
+            (now(),),
+        )
     # 审批进程可能在不可变 T5 快照生成前后退出。已有更新批准包则旧草稿只保留审计状态；
     # 否则恢复等待人工，允许安全重试。
     conn.execute(

@@ -16,8 +16,11 @@ from app.production.screenplay_document import (
     ScreenplayDocument,
     apply_field_patch,
     document_to_screenplay,
+    normalize_overdetail_text_fields,
+    prune_dialogue_chains_to_budget,
     rederive_projections,
     screenplay_to_document,
+    split_dialogue_chain_by_scene,
 )
 from app.schemas import EpisodeScreenplay
 
@@ -126,6 +129,28 @@ def apply_screenplay_patch(
         if op.op == "rederive":
             working = rederive_projections(working)
             touched.append("rederive")
+            continue
+        if op.op == "normalize_overdetail":
+            raw_terms = op.value.get("terms") if isinstance(op.value, dict) else []
+            working, nodes = normalize_overdetail_text_fields(
+                working,
+                terms=[str(term) for term in (raw_terms or [])],
+            )
+            touched.extend(nodes)
+            continue
+        if op.op == "prune_dialogue_budget":
+            value = op.value if isinstance(op.value, dict) else {}
+            working, nodes = prune_dialogue_chains_to_budget(
+                working,
+                max_turns=int(value.get("max_turns") or 6),
+                required_lines=[str(line) for line in (value.get("required_lines") or [])],
+            )
+            touched.extend(nodes)
+            continue
+        if op.op == "split_dialogue_chain_by_scene":
+            chain_id = str((op.target or {}).get("chain_id") or (op.target or {}).get("id") or "")
+            working, nodes = split_dialogue_chain_by_scene(working, chain_id=chain_id)
+            touched.extend(nodes)
             continue
         if op.op in {"replace_field", "add_field"}:
             working, nodes = apply_field_patch(

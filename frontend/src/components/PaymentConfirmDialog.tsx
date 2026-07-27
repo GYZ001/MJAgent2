@@ -1,11 +1,15 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { RefsCostPrecheck } from '../api'
+import type { RefsCostPrecheck, SceneCostPrecheck } from '../api'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 
-type PaymentSelection = { characters: string[] }
+type PaymentSelection = { characters: string[]; scenes?: string[] }
 
 function scopeCharacter(item: Record<string, unknown>): string {
   return String(item.character || item.name || item.character_name || '').trim()
+}
+
+function scopeScene(item: Record<string, unknown>): string {
+  return String(item.scene || item.scene_name || '').trim()
 }
 
 export default function PaymentConfirmDialog({
@@ -17,10 +21,11 @@ export default function PaymentConfirmDialog({
   onConfirm,
   onClose,
   enableScopeSelection = false,
+  scopeSelectionTitle,
 }: {
   open: boolean
   title: string
-  precheck?: (RefsCostPrecheck & {
+  precheck?: ((RefsCostPrecheck | SceneCostPrecheck) & {
     estimated_duration_min?: number[]
     estimate_note?: string
     character_names?: string[]
@@ -30,6 +35,7 @@ export default function PaymentConfirmDialog({
   onConfirm: (selection: PaymentSelection) => void
   onClose: () => void
   enableScopeSelection?: boolean
+  scopeSelectionTitle?: string
 }) {
   const trapRef = useFocusTrap(open, onClose)
   const selectableCharacters = useMemo(() => {
@@ -40,18 +46,31 @@ export default function PaymentConfirmDialog({
     }
     return [...names]
   }, [precheck])
+  const selectableScenes = useMemo(() => {
+    const names = new Set<string>()
+    for (const item of precheck?.scope ?? []) {
+      const name = scopeScene(item)
+      if (name) names.add(name)
+    }
+    return [...names]
+  }, [precheck])
   const [selectedCharacters, setSelectedCharacters] = useState<string[]>([])
+  const [selectedScenes, setSelectedScenes] = useState<string[]>([])
 
   useEffect(() => {
     if (!open || !enableScopeSelection) return
     setSelectedCharacters(selectableCharacters)
-  }, [enableScopeSelection, open, selectableCharacters])
+    setSelectedScenes(selectableScenes)
+  }, [enableScopeSelection, open, selectableCharacters, selectableScenes])
 
   if (!open) return null
   const canConfirm = !loading && !error && !!precheck && (precheck.image_count ?? 0) >= 0
   const duration = precheck?.estimated_duration_min
   const showSelection = enableScopeSelection && selectableCharacters.length > 1
+  const showSceneSelection = enableScopeSelection && selectableScenes.length > 0
   const selectedSet = new Set(selectedCharacters)
+  const selectedSceneSet = new Set(selectedScenes)
+  const sceneQuote = precheck && 'scene_count' in precheck ? precheck as SceneCostPrecheck : null
 
   return (
     <div className="evidence-backdrop" role="presentation" onMouseDown={event => {
@@ -65,7 +84,9 @@ export default function PaymentConfirmDialog({
           <>
             <p>确认后才会创建付费任务；取消不会扣费、不会替换资产。</p>
             <ul>
-              <li>范围：{precheck.character_count} 个角色 · 每角色 {precheck.views_per_character} 视角</li>
+              <li>范围：{sceneQuote
+                ? `${sceneQuote.scene_count} 个场景 · ${sceneQuote.actual_view_count} 个实际视角`
+                : `${(precheck as RefsCostPrecheck).character_count} 个角色 · 每角色 ${(precheck as RefsCostPrecheck).views_per_character} 视角`}</li>
               {!!precheck.character_names?.length && (
                 <li>角色：{precheck.character_names.slice(0, 12).join('、')}{precheck.character_names.length > 12 ? '…' : ''}</li>
               )}
@@ -79,36 +100,44 @@ export default function PaymentConfirmDialog({
             </ul>
             {!!precheck.scope?.length && (
               <div className="pay-scope-list">
-                <h4>{showSelection ? '选择本次补齐角色（默认全选缺失项）' : '明细（默认缺失项）'}</h4>
-                {showSelection && (
+                <h4>{showSelection || showSceneSelection
+                  ? (scopeSelectionTitle || '选择本次补齐角色（默认全选缺失项）')
+                  : (scopeSelectionTitle || '本次生成明细')}</h4>
+                {(showSelection || showSceneSelection) && (
                   <div className="pay-scope-actions">
-                    <button type="button" className="btn small" onClick={() => setSelectedCharacters(selectableCharacters)}>
+                    <button type="button" className="btn small" onClick={() => {
+                      setSelectedCharacters(selectableCharacters); setSelectedScenes(selectableScenes)
+                    }}>
                       全选
                     </button>
-                    <button type="button" className="btn small ghost" onClick={() => setSelectedCharacters([])}>
+                    <button type="button" className="btn small ghost" onClick={() => {
+                      setSelectedCharacters([]); setSelectedScenes([])
+                    }}>
                       清空
                     </button>
-                    <span>已选 {selectedCharacters.length} / {selectableCharacters.length}</span>
+                    <span>已选 {showSceneSelection ? selectedScenes.length : selectedCharacters.length} / {showSceneSelection ? selectableScenes.length : selectableCharacters.length}</span>
                   </div>
                 )}
                 <ul>
                   {precheck.scope.slice(0, 30).map((item, index) => (
                     <li key={index}>
-                      {showSelection ? (
+                      {showSelection || showSceneSelection ? (
                         <label className="pay-scope-option">
                           <input
                             type="checkbox"
-                            checked={selectedSet.has(scopeCharacter(item))}
+                            checked={showSceneSelection
+                              ? selectedSceneSet.has(scopeScene(item))
+                              : selectedSet.has(scopeCharacter(item))}
                             onChange={event => {
-                              const name = scopeCharacter(item)
+                              const name = showSceneSelection ? scopeScene(item) : scopeCharacter(item)
                               if (!name) return
-                              setSelectedCharacters(current => event.target.checked
-                                ? [...new Set([...current, name])]
-                                : current.filter(item => item !== name))
+                              const setter = showSceneSelection ? setSelectedScenes : setSelectedCharacters
+                              setter(current => event.target.checked
+                                ? [...new Set([...current, name])] : current.filter(item => item !== name))
                             }}
                           />
                           <span>
-                            {scopeCharacter(item) || '角色'}
+                            {scopeScene(item) || scopeCharacter(item) || (showSceneSelection ? '场景' : '角色')}
                             {Array.isArray(item.views) ? ` · ${(item.views as string[]).join('/')}` : ''}
                             {item.view_role ? ` · ${String(item.view_role)}` : ''}
                             {item.reason ? ` · ${String(item.reason)}` : ''}
@@ -116,7 +145,7 @@ export default function PaymentConfirmDialog({
                         </label>
                       ) : (
                         <>
-                          {String(item.character || '角色')}
+                          {String(item.scene || item.character || (sceneQuote ? '场景' : '角色'))}
                           {Array.isArray(item.views) ? ` · ${(item.views as string[]).join('/')}` : ''}
                           {item.view_role ? ` · ${String(item.view_role)}` : ''}
                           {item.reason ? ` · ${String(item.reason)}` : ''}
@@ -134,8 +163,11 @@ export default function PaymentConfirmDialog({
           <button
             type="button"
             className="btn primary"
-            disabled={!canConfirm || (showSelection && selectedCharacters.length === 0)}
-            onClick={() => onConfirm({ characters: showSelection ? selectedCharacters : [] })}
+            disabled={!canConfirm || (showSelection && selectedCharacters.length === 0) || (showSceneSelection && selectedScenes.length === 0)}
+            onClick={() => onConfirm({
+              characters: showSelection ? selectedCharacters : [],
+              scenes: showSceneSelection ? selectedScenes : [],
+            })}
           >
             确认并开始
           </button>

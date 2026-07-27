@@ -20,7 +20,7 @@ from app.completion_grant import (
     validate_video_grant,
     GrantValidationError,
 )
-from app.db import get_conn, new_id, now
+from app.db import get_conn, now
 from app.evidence import repository as evidence_repository
 from app.evidence.media import grade_shot_video, select_best_video_candidate
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
@@ -979,6 +979,23 @@ def _dispatch(
     kwargs["after_shot_id"] = after
     kwargs["auto_retake_count"] = entry.attempts_paid
     kwargs["supervisor_run_id"] = run_id
+    # Supervisor dispatches are positive production actions too.  Capture the
+    # same immutable dependency token used by the review wall so a later
+    # screenplay/storyboard/asset change fences already-running providers.
+    if run_id:
+        try:
+            from app.api import _review_assert_shot_positive
+            kwargs["dependency_snapshot"] = _review_assert_shot_positive(entry.shot_id)
+        except Exception as exc:
+            issues = issues_from_enqueue_error(
+                exc, shot_id=entry.shot_id, shot_no=entry.shot_no,
+            )
+            persist_shot_issue(
+                episode_id=episode_id, shot_id=entry.shot_id, shot_no=entry.shot_no,
+                issues=issues, source="supervisor_dependency_fence",
+            )
+            entry.last_issue_codes = [i.code for i in issues]
+            return False
     kwargs["supervisor_meta"] = {
         "supervisor_run_id": run_id,
         "supervisor_repair_level": (plan.level if plan else entry.repair_level),
@@ -1172,51 +1189,23 @@ def _amend_storyboard(
     plan: VideoRepairPlan | None = None,
     run_id: str | None = None,
 ) -> bool:
-    """L5：微调分镜（需授权）。允许：调 duration_s、删不可渲染细节、拆镜。
+    """L5 只创建分镜修改草稿，不改写已确认分镜。
 
-    禁止改 dialogues/narration/characters/key_lines。改后跑确定性校验，失败回滚。
+    ``allow_storyboard_edit`` 授予的是“提议草稿”权限，不是绕过人工重新
+    确认的权限。草稿产生后 Supervisor 转 WAITING_HUMAN，且视频流水线
+    保持暂停；只有分镜台完成并发布新终态后才能重新授权。
     """
     if not grant.allow_storyboard_edit:
         return False
-    from app.completion_grant import refresh_video_grant_storyboard_artifact
-    from app.schemas import Shot, Storyboard
-    from app.validators import normalize_action_desc, validate_storyboard
+    from app.validators import normalize_action_desc
 
     conn = get_conn()
     row = conn.execute("SELECT * FROM shots WHERE id=?", (entry.shot_id,)).fetchone()
     if not row:
         return False
     episode_id = row["episode_id"]
-    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
-    all_rows = conn.execute(
-        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
-    ).fetchall()
-
-    def _row_to_shot(r) -> Shot:
-        return Shot(
-            shot_no=int(r["shot_no"]),
-            duration_s=int(r["duration_s"] or 5),
-            shot_size=r["shot_size"] or "中景",
-            camera_move=r["camera_move"] or "固定",
-            scene_setting=r["scene_setting"] or "",
-            characters=json.loads(r["characters"] or "[]"),
-            action_desc=r["action_desc"] or "",
-            first_frame_desc=(r["first_frame_desc"] if "first_frame_desc" in r.keys() else "") or "",
-            last_frame_desc=(r["last_frame_desc"] if "last_frame_desc" in r.keys() else "") or "",
-            source_excerpt=(r["source_excerpt"] if "source_excerpt" in r.keys() else "") or "",
-            narration=r["narration"] if "narration" in r.keys() else None,
-            dialogues=json.loads(r["dialogues"] or "[]"),
-            continuity_from_prev=bool(r["continuity_from_prev"]),
-        )
-
-    backup = {
-        "duration_s": row["duration_s"],
-        "action_desc": row["action_desc"],
-    }
     codes = set((plan.issue_codes if plan else entry.last_issue_codes) or [])
-    changed = False
-
-    # 1) 时长合同
+    patch: dict[str, Any] = {}
     if "VIDEO_DURATION_CONTRACT" in codes or not codes:
         cur = int(row["duration_s"] or 5)
         new_dur = 5 if cur > 7 else 8
@@ -1224,101 +1213,32 @@ def _amend_storyboard(
         if new_dur == cur:
             new_dur = 6 if cur != 6 else 7
         if new_dur != cur:
-            conn.execute("UPDATE shots SET duration_s=? WHERE id=?", (new_dur, entry.shot_id))
-            changed = True
+            patch["duration_s"] = new_dur
 
-    # 2) 删除不可渲染细节：压缩过长 action_desc / 去掉显式快切标记
     action = normalize_action_desc(row["action_desc"] or "") or (row["action_desc"] or "")
     original_action = action
-    # 去掉括号内后期指示
     import re
     action = re.sub(r"[（(][^）)]{0,40}(?:后期|裁切|字幕|特效|配音)[^）)]*[）)]", "", action)
     action = re.sub(r"(?:快切|闪回|蒙太奇|分屏)[，,]?", "", action)
     if len(action) > 80:
         action = action[:78].rstrip("，,。；; ") + "。"
     if action.strip() and action.strip() != (original_action or "").strip():
-        conn.execute("UPDATE shots SET action_desc=? WHERE id=?", (action.strip(), entry.shot_id))
-        changed = True
+        patch["action_desc"] = action.strip()
 
-    # 3) 拆镜：仅当 preflight 容量类且 action 明显含两个主动作时，拆成两镜
-    split_done = False
+    split_proposal: dict[str, Any] | None = None
     if "VIDEO_PREFLIGHT_BLOCKED" in codes and "拆" not in (row["action_desc"] or ""):
         text = (action or row["action_desc"] or "")
-        # 简单启发：出现两个「然后/接着」以上视为可拆
         if text.count("然后") + text.count("接着") + text.count("随后") >= 2:
             parts = re.split(r"(?:然后|接着|随后)", text, maxsplit=1)
             if len(parts) == 2 and len(parts[0].strip()) >= 12 and len(parts[1].strip()) >= 12:
-                shot_no = int(row["shot_no"])
-                # 后续镜号 +1
-                later = [r for r in all_rows if int(r["shot_no"]) > shot_no]
-                for r in reversed(later):
-                    conn.execute(
-                        "UPDATE shots SET shot_no=? WHERE id=?",
-                        (int(r["shot_no"]) + 1, r["id"]),
-                    )
-                new_shot_id = new_id("shot")
                 half = max(5, min(10, int((row["duration_s"] or 8) // 2) or 5))
-                conn.execute(
-                    "UPDATE shots SET action_desc=?, duration_s=?, last_frame_desc=? WHERE id=?",
-                    (parts[0].strip().rstrip("，,") + "。", half,
-                     (row["first_frame_desc"] if "first_frame_desc" in row.keys() else "") or "",
-                     entry.shot_id),
-                )
-                conn.execute(
-                    """INSERT INTO shots(
-                        id, episode_id, shot_no, duration_s, shot_size, camera_move, scene_setting,
-                        characters, action_desc, first_frame_desc, last_frame_desc, source_excerpt,
-                        narration, dialogues, continuity_from_prev, transition
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)""",
-                    (
-                        new_shot_id, episode_id, shot_no + 1, half,
-                        row["shot_size"] or "中景", row["camera_move"] or "固定",
-                        row["scene_setting"] or "", row["characters"] or "[]",
-                        parts[1].strip().rstrip("，,") + "。",
-                        (row["last_frame_desc"] if "last_frame_desc" in row.keys() else "") or "",
-                        (row["last_frame_desc"] if "last_frame_desc" in row.keys() else "") or "",
-                        (row["source_excerpt"] if "source_excerpt" in row.keys() else "") or "",
-                        row["narration"], row["dialogues"] or "[]",
-                        row["transition"] if "transition" in row.keys() else "硬切",
-                    ),
-                )
-                split_done = True
-                changed = True
-
-    if not changed:
+                split_proposal = {
+                    "first_action_desc": parts[0].strip().rstrip("，,") + "。",
+                    "second_action_desc": parts[1].strip().rstrip("，,") + "。",
+                    "duration_s_each": half,
+                }
+    if not patch and not split_proposal:
         return False
-    conn.commit()
-
-    # 校验整集；失败回滚
-    try:
-        refreshed = conn.execute(
-            "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
-        ).fetchall()
-        board = Storyboard(
-            episode_no=int(ep["episode_no"]),
-            shots=[_row_to_shot(r) for r in refreshed],
-        )
-        errors = validate_storyboard(board)
-        hard = [e for e in (errors or []) if "硬下限" in e or "必须" in e or "禁止" in e]
-        if hard:
-            raise ValueError(";".join(hard[:3]))
-    except Exception:  # noqa: BLE001
-        # 回滚本镜 + 拆镜
-        conn.execute(
-            "UPDATE shots SET duration_s=?, action_desc=? WHERE id=?",
-            (backup["duration_s"], backup["action_desc"], entry.shot_id),
-        )
-        if split_done:
-            # 删除 shot_no+1 的新镜并恢复后续编号——简化：删掉刚插入的、把后续 -1
-            conn.execute(
-                "DELETE FROM shots WHERE episode_id=? AND shot_no=? AND id!=?",
-                (episode_id, int(row["shot_no"]) + 1, entry.shot_id),
-            )
-            # 不完美恢复，但避免脏数据扩散：重新从 backup 后的编号不强制
-        conn.commit()
-        return False
-
-    # 写新 storyboard artifact 指纹并刷新 grant
     try:
         from app.evidence import repository as evidence_repository
         from app.harness.types import EvidenceArtifact
@@ -1326,34 +1246,41 @@ def _amend_storyboard(
             type="storyboard",
             scope_type="episode",
             scope_id=episode_id,
-            status="validated",
-            trust_level="T2",
+            status="candidate",
+            trust_level="T1",
             content={
                 "amended_by": "video_supervisor_l5",
                 "shot_id": entry.shot_id,
                 "shot_no": entry.shot_no,
+                "base_storyboard_artifact_id": grant.storyboard_artifact_id,
+                "patch": patch,
+                "split_proposal": split_proposal,
+                "requires_manual_confirmation": True,
             },
-            contract_version="storyboard-amend-1.0.0",
+            parent_artifact_ids=[grant.storyboard_artifact_id] if grant.storyboard_artifact_id else [],
+            contract_version="storyboard-amend-draft-2.0.0",
         ))
         conn.execute(
-            "UPDATE episodes SET storyboard_artifact_id=? WHERE id=?",
+            """UPDATE episodes SET working_storyboard_artifact_id=?,
+                      storyboard_completion_mode='ready_for_manual_confirm'
+                 WHERE id=?""",
             (art["id"], episode_id),
         )
-        conn.execute(
-            "UPDATE shots SET storyboard_artifact_id=? WHERE id=?",
-            (art["id"], entry.shot_id),
-        )
         conn.commit()
-        refresh_video_grant_storyboard_artifact(grant.grant_id, art["id"])
+        try:
+            from app.video_control import request_control
+            request_control(episode_id, "pause")
+        except Exception:  # noqa: BLE001
+            pass
         if run_id:
             evidence_repository.append_event(
-                run_id, "VIDEO_STORYBOARD_AMENDED", "info",
-                f"第 {entry.shot_no} 镜 L5 微调分镜",
-                payload={"shot_id": entry.shot_id, "artifact_id": art["id"], "split": split_done},
+                run_id, "VIDEO_STORYBOARD_DRAFT_CREATED", "warning",
+                f"第 {entry.shot_no} 镜 L5 修改草稿待重新确认",
+                payload={"shot_id": entry.shot_id, "artifact_id": art["id"], "split": bool(split_proposal)},
             )
+        return True
     except Exception:  # noqa: BLE001
-        pass
-    return True
+        return False
 
 
 # 兼容旧名
@@ -1932,7 +1859,11 @@ async def run_video_completion_supervisor(
 
             if plan.strategy == "amend_storyboard":
                 if grant and _amend_storyboard(entry, grant=grant, plan=plan, run_id=run_id):
-                    progressed = True
+                    cp.phase = "WAITING_HUMAN"
+                    cp.outcome = "已创建分镜修改草稿；视频流水线已暂停，等待分镜台完整终态与人工重新确认"
+                    _merge_shot_state(cp, ledger)
+                    save_checkpoint(cp, run_id=run_id)
+                    return cp
                 else:
                     cp.phase = "WAITING_AUTHORIZATION"
                     save_checkpoint(cp, run_id=run_id)

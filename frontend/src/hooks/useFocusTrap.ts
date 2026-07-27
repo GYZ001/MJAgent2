@@ -8,6 +8,10 @@ export function useFocusTrap(
 ) {
   const containerRef = useRef<HTMLElement | null>(null)
   const previousFocus = useRef<HTMLElement | null>(null)
+  const onCloseRef = useRef(onClose)
+  const optionsRef = useRef(options)
+  onCloseRef.current = onClose
+  optionsRef.current = options
 
   useEffect(() => {
     if (!active) return
@@ -28,8 +32,9 @@ export function useFocusTrap(
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault()
-        if (options?.dirty && options.onDirtyClose) options.onDirtyClose()
-        else onClose()
+        const latestOptions = optionsRef.current
+        if (latestOptions?.dirty && latestOptions.onDirtyClose) latestOptions.onDirtyClose()
+        else onCloseRef.current()
         return
       }
       if (event.key !== 'Tab' || !node) return
@@ -51,7 +56,7 @@ export function useFocusTrap(
       window.removeEventListener('keydown', onKeyDown)
       previousFocus.current?.focus?.()
     }
-  }, [active, onClose, options?.dirty, options?.onDirtyClose])
+  }, [active])
 
   return containerRef
 }

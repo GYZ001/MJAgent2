@@ -22,6 +22,7 @@ from app.schemas import (
     StoryEvent,
     VoiceCanonical,
 )
+from app.renderability import OVERDETAIL_TERMS
 
 
 class DialogueTurnNode(BaseModel):
@@ -400,6 +401,224 @@ def apply_field_patch(
     _set_by_dotted(data, path, value)
     touched.append(path.split(".")[0] or path)
     return ScreenplayDocument.model_validate(data), touched
+
+
+def normalize_overdetail_text_fields(
+    doc: ScreenplayDocument,
+    *,
+    terms: list[str] | None = None,
+) -> tuple[ScreenplayDocument, list[str]]:
+    """删除结构化画面描述中的不可拍细节词，绝不改对白或原文证据。"""
+    requested = list(dict.fromkeys(terms or list(OVERDETAIL_TERMS)))
+    selected = [term for term in requested if term in OVERDETAIL_TERMS]
+    if not selected:
+        return doc, []
+
+    data = copy.deepcopy(doc.model_dump(mode="json"))
+    touched: list[str] = []
+
+    def clean(value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        result = value
+        for term in selected:
+            result = result.replace(term, "")
+        result = re.sub(r"[ \t]{2,}", " ", result)
+        result = re.sub(r"。{2,}", "。", result)
+        return result.strip()
+
+    for block in data.get("scene_blocks") or []:
+        scene_id = str(block.get("scene_id") or "")
+        for field in ("summary", "conflict", "turn"):
+            before = block.get(field)
+            after = clean(before)
+            if after != before:
+                block[field] = after
+                touched.append(scene_id)
+        for action in block.get("action_blocks") or []:
+            before = action.get("text")
+            after = clean(before)
+            if after != before:
+                action["text"] = after
+                touched.extend([str(action.get("action_id") or ""), scene_id])
+
+    spine = data.get("plot_spine") or {}
+    for beat in spine.get("spine_beats") or []:
+        for field in ("does", "turn"):
+            before = beat.get(field)
+            after = clean(before)
+            if after != before:
+                beat[field] = after
+                touched.append(str(beat.get("beat_id") or "plot_spine"))
+
+    for event in data.get("story_events") or []:
+        for field in ("state_in", "visible_change", "state_out"):
+            before = event.get(field)
+            after = clean(before)
+            if after != before:
+                event[field] = after
+                touched.append(str(event.get("event_id") or "story_event"))
+
+    return ScreenplayDocument.model_validate(data), list(dict.fromkeys(filter(None, touched)))
+
+
+def prune_dialogue_chains_to_budget(
+    doc: ScreenplayDocument,
+    *,
+    max_turns: int,
+    required_lines: list[str] | None = None,
+    min_turns: int = 3,
+) -> tuple[ScreenplayDocument, list[str]]:
+    """按整条对白链压缩精选台词，不截断问答，不改写正文。
+
+    首条链是原文开场对白锚点，始终保留；用户锁定台词所在链也始终保留。
+    其余链只在整组加入后仍不超预算时保留。full_script_text 的可读台本
+    保持不变，只缩减后续分镜必须逐句交付的 key_lines。
+    """
+    data = copy.deepcopy(doc.model_dump(mode="json"))
+    chains = list(data.get("dialogue_chains") or [])
+    if not chains:
+        return doc, []
+    cap = max(int(max_turns or 0), int(min_turns or 0), 1)
+
+    def compact(value: Any) -> str:
+        return re.sub(r"[\s\W_]+", "", str(value or ""), flags=re.UNICODE)
+
+    required = [compact(line) for line in (required_lines or []) if compact(line)]
+    keep: set[int] = {0}
+    for index, chain in enumerate(chains):
+        haystack = [
+            compact(turn.get("line"))
+            for turn in (chain.get("turns") or [])
+        ] + [
+            compact(turn.get("source_text"))
+            for turn in (chain.get("turns") or [])
+        ]
+        if any(needle in text for needle in required for text in haystack):
+            keep.add(index)
+
+    def turn_count(indices: set[int]) -> int:
+        return sum(len(chains[index].get("turns") or []) for index in indices)
+
+    for index, chain in enumerate(chains):
+        if index in keep:
+            continue
+        size = len(chain.get("turns") or [])
+        if turn_count(keep) + size <= cap:
+            keep.add(index)
+
+    # 极端情况下首链不足最小数：选最短的后续完整链，也不截断。
+    if turn_count(keep) < min_turns:
+        remaining = [
+            (len(chain.get("turns") or []), index)
+            for index, chain in enumerate(chains)
+            if index not in keep
+        ]
+        for _size, index in sorted(remaining):
+            keep.add(index)
+            if turn_count(keep) >= min_turns:
+                break
+
+    selected = [chain for index, chain in enumerate(chains) if index in keep]
+    if selected == chains:
+        return doc, []
+    removed_ids = [
+        str(chain.get("chain_id") or f"dialogue_chain:{index}")
+        for index, chain in enumerate(chains)
+        if index not in keep
+    ]
+    data["dialogue_chains"] = selected
+    return ScreenplayDocument.model_validate(data), ["dialogue_chains", *removed_ids]
+
+
+def split_dialogue_chain_by_scene(
+    doc: ScreenplayDocument,
+    *,
+    chain_id: str,
+) -> tuple[ScreenplayDocument, list[str]]:
+    """按正文实际所在场次拆分被跨场的对白链。
+
+    只修正 dialogue_chains 的结构归属，不移动/删改正文台词，因此不会打乱演员调度。
+    同一场内的连续话轮保持成组；新链 ID 使用尚未占用的 DC 序号。
+    """
+    data = copy.deepcopy(doc.model_dump(mode="json"))
+    chains = list(data.get("dialogue_chains") or [])
+    chain_index = next((
+        index for index, chain in enumerate(chains)
+        if str(chain.get("chain_id") or "") == chain_id
+    ), None)
+    if chain_index is None:
+        return doc, []
+    chain = chains[chain_index]
+    turns = list(chain.get("turns") or [])
+    if len(turns) < 2:
+        return doc, []
+
+    def compact(value: Any) -> str:
+        return re.sub(r"[\s\W_]+", "", str(value or ""), flags=re.UNICODE)
+
+    scene_lines: list[tuple[str, list[tuple[str, str]]]] = []
+    for block in data.get("scene_blocks") or []:
+        values = [
+            (compact(turn.get("speaker")), compact(turn.get("line")))
+            for turn in (block.get("dialogue_turns") or [])
+            if compact(turn.get("line"))
+        ]
+        scene_lines.append((str(block.get("scene_id") or ""), values))
+
+    located: list[tuple[str, dict]] = []
+    previous_scene = ""
+    for turn in turns:
+        speaker = compact(turn.get("speaker"))
+        line = compact(turn.get("line"))
+        scene_id = next((
+            candidate_scene
+            for candidate_scene, values in scene_lines
+            if any(
+                (not speaker or not candidate_speaker or speaker == candidate_speaker)
+                and (line == candidate_line or line in candidate_line or candidate_line in line)
+                for candidate_speaker, candidate_line in values
+            )
+        ), "")
+        scene_id = scene_id or previous_scene or (scene_lines[0][0] if scene_lines else "")
+        previous_scene = scene_id
+        located.append((scene_id, turn))
+
+    groups: list[tuple[str, list[dict]]] = []
+    for scene_id, turn in located:
+        if groups and groups[-1][0] == scene_id:
+            groups[-1][1].append(turn)
+        else:
+            groups.append((scene_id, [turn]))
+    if len(groups) <= 1:
+        return doc, []
+
+    used_ids = {str(item.get("chain_id") or "") for item in chains}
+    next_number = 1
+
+    def next_chain_id() -> str:
+        nonlocal next_number
+        while f"DC{next_number}" in used_ids:
+            next_number += 1
+        value = f"DC{next_number}"
+        used_ids.add(value)
+        next_number += 1
+        return value
+
+    replacements: list[dict] = []
+    created_ids: list[str] = []
+    for group_index, (_scene_id, group_turns) in enumerate(groups):
+        item = copy.deepcopy(chain)
+        item["chain_id"] = chain_id if group_index == 0 else next_chain_id()
+        item["turns"] = group_turns
+        if group_index:
+            item["topic"] = f"{str(chain.get('topic') or '').strip()}（续）".strip()
+            created_ids.append(item["chain_id"])
+        replacements.append(item)
+    data["dialogue_chains"] = [
+        *chains[:chain_index], *replacements, *chains[chain_index + 1:],
+    ]
+    return ScreenplayDocument.model_validate(data), ["dialogue_chains", chain_id, *created_ids]
 
 
 def _build_scene_blocks(script: EpisodeScreenplay) -> list[SceneBlockNode]:

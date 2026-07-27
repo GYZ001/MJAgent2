@@ -129,6 +129,10 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
             "first_evaluation_done": False,
             "task_active": active,
             "can_resume_repair": False,
+            "activation_count": 0,
+            "patch_count": 0,
+            "open_issue_count": 0,
+            "yield_reason": "",
         }
     checkpoint = dict(rev.checkpoint_json or {})
     has_working_baseline = bool(rev.baseline_done and rev.working_artifact_id)
@@ -142,6 +146,10 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
         "first_evaluation_done": rev.first_evaluation_done,
         "task_active": active,
         "can_resume_repair": bool(has_working_baseline and not active),
+        "activation_count": int(checkpoint.get("activation_no") or 0),
+        "patch_count": len(checkpoint.get("patch_artifact_ids") or []),
+        "open_issue_count": len(checkpoint.get("open_issue_ids") or []),
+        "yield_reason": str(checkpoint.get("yield_reason") or ""),
     }
 
 

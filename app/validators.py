@@ -31,6 +31,7 @@ from app.renderability import (
     ACTION_DESC_TARGET_MAX,
     ACTION_DESC_TARGET_MIN,
     DROP_LIST_MIN,
+    DIALOGUE_CHAIN_TURNS_HARD_MAX,
     DURATION_REVIEW_RISK_TAG,
     KEY_LINES_MAX,
     KEY_LINES_MIN,
@@ -761,6 +762,23 @@ def normalize_screenplay_dialogue_chains(script: EpisodeScreenplay) -> EpisodeSc
     return script
 
 
+def _is_grounded_short_utterance(
+    line: str,
+    source_line: str,
+    source_text: str | None,
+) -> bool:
+    """放行原文中真实存在的单字口语回应（如“哦。”）。
+
+    这类句子本身可演、可配音；字数下限只应拦空值，不应把原文短回应
+    当成视频质量问题。
+    """
+    spoken = _condense(line)
+    evidence = _condense(source_line)
+    if not spoken or spoken != evidence:
+        return False
+    return not source_text or evidence in _condense(source_text)
+
+
 def validate_dialogue_chains(
     script: EpisodeScreenplay,
     *,
@@ -799,8 +817,10 @@ def validate_dialogue_chains(
             errors.append(f"{tag}.topic 过短；请写清这组对白围绕的同一话题")
         turns = chain.turns or []
         total_turns += len(turns)
-        if not 1 <= len(turns) <= MAX_KEY_LINES:
-            errors.append(f"{tag}.turns 需包含 1~{MAX_KEY_LINES} 个连续话轮")
+        if not 1 <= len(turns) <= DIALOGUE_CHAIN_TURNS_HARD_MAX:
+            errors.append(
+                f"{tag}.turns 需包含 1~{DIALOGUE_CHAIN_TURNS_HARD_MAX} 个连续话轮"
+            )
             continue
         if turns and (turns[0].function or "").strip() == "response":
             errors.append(f"{tag} 不能从 response 开始；必须先保留触发句/宣布/提问")
@@ -814,7 +834,8 @@ def validate_dialogue_chains(
             source_line = (turn.source_text or "").strip()
             if not speaker:
                 errors.append(f"{turn_tag}.speaker 不能为空")
-            if len(_condense(line)) < 2:
+            grounded_short = _is_grounded_short_utterance(line, source_line, source_text)
+            if len(_condense(line)) < 2 and not grounded_short:
                 errors.append(f"{turn_tag}.line 过短或为空")
             if function not in _DIALOGUE_TURN_FUNCTIONS:
                 errors.append(
@@ -827,7 +848,7 @@ def validate_dialogue_chains(
                 errors.append(
                     f"{turn_tag} 是 response，但前一话轮没有另一角色的触发台词"
                 )
-            if len(_condense(source_line)) < 2:
+            if len(_condense(source_line)) < 2 and not grounded_short:
                 errors.append(f"{turn_tag}.source_text 不能为空；必须引用原文对白证据")
             else:
                 if source_text and (
@@ -861,7 +882,14 @@ def validate_dialogue_chains(
             previous_speaker = speaker
         if matched_indices:
             scenes = {full_turns[idx][0] for idx in matched_indices}
-            if len(scenes) > 1:
+            speakers = {
+                _condense(turn.speaker or "")
+                for turn in turns
+                if _condense(turn.speaker or "")
+            }
+            # “同一触发→回应链不得跨场”只适用于人物之间的互动链。单人自语/独白
+            # 可能因动作节拍被拆成相邻场块，跨块并不会破坏对白因果，不应阻断交付。
+            if len(scenes) > 1 and len(speakers) > 1:
                 errors.append(f"{tag} 被拆到多个场次；同一触发→回应链必须在同一场完成")
 
     if not MIN_KEY_LINES <= total_turns <= effective_max_turns:
@@ -1416,7 +1444,14 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
             f"full_script_text 过短；当前仅 {len(full_text)} 字，至少需要 {min_script_chars} 字"
             "（只演主线骨架，勿注水细节）"
         )
-    errors.extend(overdetail_errors(full_text, "full_script_text"))
+    # 可拍性词表只约束画面动作，不约束角色说出的原文台词。过去直接扫描全文会把
+    # 必保留台词里的“微微”等词也误判成不可拍细节，造成无意义的修复死循环。
+    action_text = "\n".join(
+        line for line in full_text.splitlines()
+        if not SCRIPT_DIALOGUE_LINE_RE.match(line.strip())
+        and not SCRIPT_SCENE_HEADING_RE.match(line.strip())
+    )
+    errors.extend(overdetail_errors(action_text, "full_script_text"))
     for term in FULL_SCRIPT_FORBIDDEN_TERMS:
         if term in full_text:
             errors.append(f"full_script_text 含禁用词「{term}」；剧本台正文不能写拍卡/分镜/执行语言")
@@ -1746,16 +1781,24 @@ def validate_storyboard_preserves_key_content(board: Storyboard,
         key_lines, ordered_spoken_turns, subject="分镜 dialogues",
     ))
 
-    missing_points = [pt for pt in key_points if _bigram_coverage(pt, visual_text) < KEY_POINT_COVERAGE]
-    if missing_points:
-        shown = "；".join(missing_points[:KEY_CONTENT_MAX_REPORT])
-        extra = (f"（另有 {len(missing_points) - KEY_CONTENT_MAX_REPORT} 条从略）"
-                 if len(missing_points) > KEY_CONTENT_MAX_REPORT else "")
-        errors.append(
-            f"分镜丢失了剧本标记的 {len(missing_points)} 条主线剧情点：{shown}{extra}；"
-            "请在对应镜头的 action_desc 或声轨中体现这些局势变化，不能整段略过")
-
     spine = screenplay.plot_spine
+    # textmatch 模糊匹配只用于没有稳定 ID 的旧数据降级判定。新版剧本已有 plot_spine，
+    # 其 must_keep 由下方 validate_spine_delivery_ledger 逐 ID 校验；若仍用自由文本摘要的
+    # 2-gram 重合率单独报 blocker，会把“萧炎三段低级已由 S01+KL01/KL02 交付”误判成
+    # 没逐字写“天才跌落谷底”而缺剧情，与 textmatch 模块的主从口径相冲突。
+    if not (spine and spine.spine_beats):
+        missing_points = [
+            pt for pt in key_points
+            if _bigram_coverage(pt, visual_text) < KEY_POINT_COVERAGE
+        ]
+        if missing_points:
+            shown = "；".join(missing_points[:KEY_CONTENT_MAX_REPORT])
+            extra = (f"（另有 {len(missing_points) - KEY_CONTENT_MAX_REPORT} 条从略）"
+                     if len(missing_points) > KEY_CONTENT_MAX_REPORT else "")
+            errors.append(
+                f"分镜丢失了剧本标记的 {len(missing_points)} 条主线剧情点：{shown}{extra}；"
+                "请在对应镜头的 action_desc 或声轨中体现这些局势变化，不能整段略过")
+
     if spine and spine.spine_beats:
         errors.extend(validate_spine_delivery_ledger(board, screenplay))
         for drop in spine.drop_list or []:

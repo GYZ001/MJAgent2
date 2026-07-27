@@ -183,3 +183,17 @@ class WorkflowRecorder:
             message,
         )
         repository.append_event(self.run_id, "RUN_CANCELLED", "warning", message)
+
+    def pause_external(self, message: str = "服务停机，等待自动恢复") -> None:
+        """Persist a recoverable process interruption without pretending the user cancelled."""
+        self.refresh_cost()
+        transition_run(
+            self.run_id,
+            "RUNNING",
+            "PAUSED_EXTERNAL",
+            message,
+            failure_code="SERVICE_RESTART",
+        )
+        repository.append_event(
+            self.run_id, "RUN_PAUSED_EXTERNAL", "warning", message,
+        )

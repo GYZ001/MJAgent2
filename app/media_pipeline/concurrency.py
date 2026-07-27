@@ -62,8 +62,8 @@ def _int_setting(key: str, default: int) -> int:
         return max(1, int(default))
     try:
         return max(1, int(raw))
-    except (TypeError, ValueError):
-        return max(1, int(default))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"非法运行时设置 {key}={raw!r}；请在监制房修正") from exc
 
 
 def channel_limit(resource: str) -> int:

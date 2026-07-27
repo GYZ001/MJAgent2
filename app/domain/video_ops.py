@@ -51,6 +51,7 @@ def evaluate_storyboard_for_confirmation(
     *,
     has_real_bible: bool = True,
     target_duration_s: int | None = None,
+    record_metrics: bool = True,
 ) -> ConfirmationEvaluation:
     """与 confirm_episode_core 同源的只读确认评估（不写库）。
 
@@ -85,15 +86,16 @@ def evaluate_storyboard_for_confirmation(
     except Exception:  # noqa: BLE001
         ep_id = getattr(episode, "id", "") or ""
     # VAL-422 可观测性：确认门才首次发现的容量/口播冲突（理想应为 0）。
-    try:
-        from app.observability.metrics import inc
-        for err in errors:
-            if "口播上限" in err or "台词纯文字" in err:
-                inc("confirm_first_seen_capacity_error_total", episode_id=ep_id)
-            if "分叉" in err or "SPOKEN_CONTRACT" in err or "口播合同" in err:
-                inc("confirm_first_seen_spoken_conflict_total", episode_id=ep_id)
-    except Exception:  # noqa: BLE001
-        pass
+    if record_metrics:
+        try:
+            from app.observability.metrics import inc
+            for err in errors:
+                if "口播上限" in err or "台词纯文字" in err:
+                    inc("confirm_first_seen_capacity_error_total", episode_id=ep_id)
+                if "分叉" in err or "SPOKEN_CONTRACT" in err or "口播合同" in err:
+                    inc("confirm_first_seen_spoken_conflict_total", episode_id=ep_id)
+        except Exception:  # noqa: BLE001
+            pass
     issues = issues_from_messages(errors, subject=f"episode:{ep_id}")
     est = sum(shot_cost_cny(s.duration_s) for s in board.shots)
     return ConfirmationEvaluation(
@@ -106,10 +108,185 @@ def evaluate_storyboard_for_confirmation(
     )
 
 
-def confirm_episode_core(episode_id: str, *, decided_by: str = "user", reason: str | None = None) -> dict:
+def create_storyboard_confirmation_preview(episode_id: str, *, automated: bool = False) -> dict:
+    """计算并签发确认快照；提交与自动确认均消费同一契约。"""
+    from app.storyboard_supervisor import load_latest_checkpoint
+    from app.storyboard_workspace import create_preview, verify_or_bind_existing_excerpt
+
+    ep = _episode_or_404(episode_id)
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,),
+    ).fetchall()
+    if not rows:
+        raise HTTPException(409, "本集还没有分镜")
+    cp = load_latest_checkpoint(episode_id)
+    outline_count = 0
+    try:
+        outline_count = len(json.loads(ep["storyboard_outline_json"] or "{}").get("shots") or [])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        outline_count = 0
+    # 结构调整会撤销整集 artifact 并重写大纲；此时旧 checkpoint 仅是历史生成记录，
+    # 确认门必须以用户刚批准的新结构为准。
+    structural_draft = ep["storyboard_artifact_id"] is None and outline_count > 0
+    planned = int(
+        (outline_count if structural_draft else 0)
+        or (cp.expected_total if cp else 0)
+        or outline_count
+        or len(rows)
+    )
+    board = _board_from_shot_rows(rows, ep["episode_no"])
+    final_valid = bool(board.shots and board.shots[-1].is_final)
+    terminal = bool(
+        ep["status"] == "scripted"
+        and not ep["script_error"]
+        and len(rows) == planned
+        and final_valid
+        and (cp is None or cp.phase == "SUCCEEDED")
+    )
+    evidence_errors: list[str] = []
+    for row in rows:
+        try:
+            verify_or_bind_existing_excerpt(
+                episode_id, row["id"], row["source_excerpt"] or "",
+            )
+        except HTTPException as exc:
+            detail = exc.detail
+            message = detail.get("message") if isinstance(detail, dict) else str(detail)
+            evidence_errors.append(f"第 {row['shot_no']} 镜：{message}")
+    project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
+    bible = _project_bible_or_placeholder(project)
+    screenplay = _load_screenplay(ep)
+    evaluation = evaluate_storyboard_for_confirmation(
+        ep, board, screenplay, bible,
+        has_real_bible=bool((project["bible_json"] or "").strip()) if project else False,
+    )
+    hard_errors = list(evaluation.errors) + evidence_errors
+    if not terminal:
+        hard_errors.insert(
+            0,
+            f"分镜尚未达到完整终态：已完成 {len(rows)}/{planned} 镜，最终镜{'有效' if final_valid else '缺失'}",
+        )
+    warnings: list[str] = []
+    if any(int(shot.duration_s or 0) > 5 for shot in evaluation.board.shots):
+        warnings.append("存在超过 5 秒的镜头，已纳入全量 AI/确定性门禁")
+    payload = {
+        "contract_version": "storyboard-confirm.v1",
+        "episode_id": episode_id,
+        "storyboard_artifact_id": ep["storyboard_artifact_id"],
+        "shot_count": len(rows),
+        "planned_shots": planned,
+        "total_duration_s": sum(int(shot.duration_s or 0) for shot in evaluation.board.shots),
+        "final_shot_valid": final_valid,
+        "hard_gates": {
+            "passed": terminal and evaluation.passed and not evidence_errors,
+            "errors": hard_errors,
+        },
+        "warnings": warnings,
+        "estimated_video_cost_cny": {
+            "min": evaluation.estimated_cost_cny,
+            "max": evaluation.estimated_cost_cny,
+            "note": "按当前服务端费率估算；确认不会自动提交付费视频",
+        },
+        "unlocks": ["评审墙", "付费视频生成入口"],
+    }
+    if not payload["hard_gates"]["passed"]:
+        try:
+            from app.observability.metrics import inc
+            inc("storyboard_confirm_preview_total", episode_id=episode_id, passed=False)
+        except Exception:  # noqa: BLE001
+            pass
+        raise HTTPException(409, {
+            "code": "STORYBOARD_NOT_CONFIRMABLE",
+            "message": "分镜尚未通过确认门禁",
+            **payload,
+        })
+    # 硬门禁错误比人工警告更可操作：若两者同时存在，必须先返回完整的
+    # STORYBOARD_NOT_CONFIRMABLE 证据，不能被「转人工」的泛化警告遮蔽。
+    if automated and warnings:
+        raise HTTPException(409, "自动确认遇到需要人工判断的警告，请转人工确认")
+    try:
+        from app.observability.metrics import inc
+        inc("storyboard_confirm_preview_total", episode_id=episode_id, passed=True)
+    except Exception:  # noqa: BLE001
+        pass
+    return create_preview("confirm", episode_id, payload)
+
+
+@router.post("/episodes/{episode_id}/confirm-preview")
+def confirm_episode_preview(episode_id: str):
+    return create_storyboard_confirmation_preview(episode_id)
+
+
+def _converge_confirmed_storyboard_state(
+    episode_id: str,
+    *,
+    active_storyboard_run_id: str | None,
+    decided_by: str,
+) -> None:
+    """把已确认的业务结果投影到 Supervisor/运行指针/授权状态。
+
+    该收口同时用于首次确认与幂等重试，因此能自愈旧版留下的「已确认但
+    active_storyboard_run_id 仍存在」状态。
+    """
+    conn = get_conn()
+    conn.execute(
+        "UPDATE episodes SET script_error=NULL, active_storyboard_run_id=NULL WHERE id=?",
+        (episode_id,),
+    )
+    conn.commit()
+    try:
+        from app.storyboard_supervisor import load_latest_checkpoint, save_checkpoint
+
+        checkpoint = load_latest_checkpoint(episode_id)
+        if checkpoint is not None and (
+            checkpoint.phase != "SUCCEEDED" or checkpoint.outcome != "SUCCEEDED_CONFIRMED"
+        ):
+            checkpoint.phase = "SUCCEEDED"
+            checkpoint.outcome = "SUCCEEDED_CONFIRMED"
+            save_checkpoint(checkpoint, run_id=active_storyboard_run_id)
+    except Exception:  # noqa: BLE001 -- 业务确认已完成，辅助投影可在下次重试自愈
+        pass
+    if decided_by != "supervisor":
+        try:
+            from app.completion_grant import revoke_active_grants_for_episode
+
+            revoke_active_grants_for_episode(episode_id)
+        except Exception:  # noqa: BLE001 -- 不回滚已通过门禁的确认
+            pass
+
+
+def confirm_episode_core(
+    episode_id: str,
+    *,
+    decided_by: str = "user",
+    reason: str | None = None,
+    preview_token: str | None = None,
+) -> dict:
     """人工/自动确认门：全量业务校验通过才进入 confirmed。
     失败抛 ValueError（消息面向 UI）；供路由与 Supervisor 复用。
     """
+    from app.storyboard_workspace import consume_preview, require_preview
+
+    already = _episode_or_404(episode_id)
+    if already["status"] == "confirmed":
+        _converge_confirmed_storyboard_state(
+            episode_id,
+            active_storyboard_run_id=already["active_storyboard_run_id"],
+            decided_by=decided_by,
+        )
+        shots = get_conn().execute(
+            "SELECT duration_s FROM shots WHERE episode_id=?", (episode_id,),
+        ).fetchall()
+        return {
+            "confirmed": True,
+            "idempotent": True,
+            "shot_count": len(shots),
+            "total_duration_s": sum(int(row["duration_s"] or 0) for row in shots),
+        }
+    preview = require_preview(preview_token, "confirm", episode_id)
+    if not (preview.get("hard_gates") or {}).get("passed"):
+        raise ValueError("确认预览未通过完整性与业务门禁")
     ep = _episode_or_404(episode_id)
     conn = get_conn()
     compact_target = _compact_episode_target(ep["target_duration_s"])
@@ -237,8 +414,25 @@ def confirm_episode_core(episode_id: str, *, decided_by: str = "user", reason: s
                 reason or "分镜全量确定性校验通过并确认", now(),
             ),
         )
-    conn.execute("UPDATE episodes SET status='confirmed' WHERE id=?", (episode_id,))
+    active_storyboard_run_id = ep["active_storyboard_run_id"]
+    conn.execute(
+        "UPDATE episodes SET status='confirmed', script_error=NULL, "
+        "active_storyboard_run_id=NULL WHERE id=?",
+        (episode_id,),
+    )
     conn.commit()
+    consume_preview(str(preview_token))
+    # 手动确认是 Supervisor 「已就绪待确认」状态的真正终点。
+    _converge_confirmed_storyboard_state(
+        episode_id,
+        active_storyboard_run_id=active_storyboard_run_id,
+        decided_by=decided_by,
+    )
+    try:
+        from app.observability.metrics import inc
+        inc("storyboard_confirm_submit_total", episode_id=episode_id, passed=True, decided_by=decided_by)
+    except Exception:  # noqa: BLE001
+        pass
     return {
         "confirmed": True,
         "estimated_cost_cny": est,
@@ -250,11 +444,16 @@ def confirm_episode_core(episode_id: str, *, decided_by: str = "user", reason: s
 
 
 @router.post("/episodes/{episode_id}/confirm")
-async def confirm_episode(episode_id: str):
+async def confirm_episode(episode_id: str, body: dict | None = Body(None)):
     """运行确定性确认门；校验通过后把剧集推进到 confirmed。"""
     from app.capabilities.dispatch import dispatch, respond_ui
 
-    result = await dispatch("storyboard.confirm", {"episode_id": episode_id}, initiator="ui")
+    body = _as_body_dict(body)
+    result = await dispatch(
+        "storyboard.confirm",
+        {"episode_id": episode_id, "preview_token": body.get("preview_token")},
+        initiator="ui",
+    )
     return respond_ui(result)
 
 
@@ -266,8 +465,20 @@ async def clear_episode_artifacts(episode_id: str):
     if routed is not None:
         return routed
     _episode_or_404(episode_id)
+    snapshot = _review_upstream_snapshot(episode_id)
+    if snapshot["active_upstream_runs"]:
+        raise HTTPException(409, {
+            "code": "UPSTREAM_RUN_ACTIVE",
+            "message": "编剧或分镜任务仍在写入，不能普通清空；请先停止上游任务",
+            "active_runs": snapshot["active_upstream_runs"],
+        })
     await reset_video_completion_state(episode_id, reason="CLEARED")
-    return worker.clear_episode_artifacts(episode_id)
+    try:
+        result = worker.clear_episode_artifacts(episode_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    _review_write_audit("artifacts.clear_episode", "episode", episode_id, new_state=result)
+    return result
 
 
 async def reset_video_completion_state(episode_id: str, *, reason: str = "CANCELLED") -> dict:
@@ -323,9 +534,22 @@ async def clear_shot_artifacts(shot_id: str):
     if routed is not None:
         return routed
     conn = get_conn()
-    if not conn.execute("SELECT id FROM shots WHERE id=?", (shot_id,)).fetchone():
+    shot = conn.execute("SELECT id, episode_id FROM shots WHERE id=?", (shot_id,)).fetchone()
+    if not shot:
         raise HTTPException(404, "镜头不存在")
-    return worker.clear_shot_artifacts(shot_id)
+    snapshot = _review_upstream_snapshot(shot["episode_id"])
+    if snapshot["active_upstream_runs"]:
+        raise HTTPException(409, {
+            "code": "UPSTREAM_RUN_ACTIVE",
+            "message": "编剧或分镜任务仍在写入，不能普通清空",
+            "active_runs": snapshot["active_upstream_runs"],
+        })
+    try:
+        result = worker.clear_shot_artifacts(shot_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    _review_write_audit("artifacts.clear_shot", "shot", shot_id, new_state=result)
+    return result
 
 
 @router.delete("/versions/{version_id}")
@@ -336,10 +560,20 @@ async def delete_version(version_id: str):
     if routed is not None:
         return routed
     conn = get_conn()
-    v = conn.execute("SELECT id FROM shot_versions WHERE id=?", (version_id,)).fetchone()
+    v = conn.execute(
+        """SELECT v.id, v.shot_id, s.adopted_version_id,
+                  EXISTS(SELECT 1 FROM jobs j WHERE j.version_id=v.id AND j.status IN ('queued','running','waiting_provider')) AS active_job
+             FROM shot_versions v JOIN shots s ON s.id=v.shot_id WHERE v.id=?""",
+        (version_id,),
+    ).fetchone()
     if not v:
         raise HTTPException(404, "视频版本不存在")
+    if v["adopted_version_id"] == version_id:
+        raise HTTPException(409, "当前采用版受保护，请先采用其他版本")
+    if v["active_job"]:
+        raise HTTPException(409, "该版本仍在生成且被任务依赖，请先停止任务")
     shot_id = worker.delete_video_version(version_id)
+    _review_write_audit("video_version.delete", "version", version_id, old_state=dict(v))
     return {"deleted": version_id, "shot_id": shot_id}
 
 
@@ -357,6 +591,8 @@ def _set_reference_image_used(
     target = next((r for r in refs if r.get("id") == ref_id), None)
     if target is None:
         raise HTTPException(404, "参考图不存在")
+    if use:
+        _review_assert_reference_restore(version_id, ref_id)
     if use and target.get("rejectReason") and not (override_reason or "").strip():
         raise HTTPException(400, "恢复质检淘汰的参考图必须填写覆盖理由")
     changed = target.get("deleted") != (not use) or target.get("selectedForSeedance") != use
@@ -373,6 +609,12 @@ def _set_reference_image_used(
     conn.execute("UPDATE shot_versions SET image_inputs=? WHERE id=?",
                  (json.dumps(meta, ensure_ascii=False), version_id))
     conn.commit()
+    _review_write_audit(
+        "reference.restore" if use else "reference.discard",
+        "version", version_id, target_version=str(meta.get("reference_gallery_revision") or ""),
+        old_state={"ref_id": ref_id, "deleted": not target.get("deleted")},
+        new_state={"ref_id": ref_id, "deleted": not use}, reason=override_reason,
+    )
     return {
         "version_id": version_id,
         "ref_id": ref_id,
@@ -432,6 +674,9 @@ async def generate_episode(episode_id: str, body: dict | None = None):
     if routed is not None:
         return routed
     ep = _episode_or_404(episode_id)
+    qualification = _review_assert_positive_action(
+        episode_id, (body or {}).get("qualification_version"),
+    )
     if ep["status"] not in ("confirmed", "generating", "done"):
         raise HTTPException(409, "分镜脚本未确认（先在工作台点击确认分镜）")
     # Supervisor 运行期间拒绝快速模式，避免重复付费
@@ -483,7 +728,10 @@ async def generate_episode(episode_id: str, body: dict | None = None):
             pr = _shot_by_no(episode_id, s["row"]["shot_no"] - 1)
             after = pr["id"] if pr else None
         try:
-            r = worker.enqueue_shot(s["row"]["id"], after_shot_id=after)
+            r = worker.enqueue_shot(
+                s["row"]["id"], after_shot_id=after,
+                dependency_snapshot=qualification,
+            )
             # 幂等命中（已有相同成片）：若当前无采用版，把复用版标为采用
             if r.get("reused") and r.get("version_id"):
                 row = conn.execute(
@@ -529,9 +777,13 @@ async def _generate_shot_core(shot_id: str, body: dict) -> dict:
     shot_row = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
     if not shot_row:
         raise HTTPException(404, "镜头不存在")
+    qualification = _review_assert_shot_positive(
+        shot_id, body.get("qualification_version"),
+    )
     # 带 AI 评语重生：取「当前采用版 / 最新成功版」的问题清单（必要时现场跑评审），
     # 作为本次必须改正项写入 prompt，避免模型再犯同样的错。
-    critique = None
+    critique: list[str] | None = None
+    critique_sources: list[dict] = []
     if body.get("with_critique"):
         ref = None
         if shot_row["adopted_version_id"]:
@@ -543,6 +795,25 @@ async def _generate_shot_core(shot_id: str, body: dict) -> dict:
                 (shot_id,)).fetchone()
         if ref:
             critique = await worker.critique_version(ref["id"])
+            critique_sources.append({"source": "video_qa", "version_id": ref["id"]})
+    review_item_ids = [str(item) for item in (body.get("review_item_ids") or []) if str(item).strip()]
+    if review_item_ids:
+        _ensure_review_wall_tables(conn)
+        marks = ",".join("?" for _ in review_item_ids)
+        rows = conn.execute(
+            f"""SELECT id, comment, severity, anchor_json FROM shot_review_items
+                  WHERE shot_id=? AND id IN ({marks}) AND status IN ('open','in_progress')""",
+            (shot_id, *review_item_ids),
+        ).fetchall()
+        if len(rows) != len(set(review_item_ids)):
+            raise HTTPException(409, "所选评审项已变化、关闭或不属于当前镜头，请刷新向导")
+        critique = list(critique or [])
+        for item in rows:
+            critique.append(f"[{item['severity']}] {item['comment']}")
+            critique_sources.append({
+                "source": "review_item", "review_item_id": item["id"],
+                "severity": item["severity"], "anchor": _review_json(item["anchor_json"], {}),
+            })
     # 固定参考图模式：生成前确保已有固定参考图计划。
     await _ensure_shot_mode_plan(conn, shot_id)
     # 同场景接上镜时，参考图模式可复用上一镜可用素材作为参考。
@@ -568,7 +839,9 @@ async def _generate_shot_core(shot_id: str, body: dict) -> dict:
             prompt_override=body.get("prompt_override"),
             extra_negative=body.get("extra_negative"),
             reroll=bool(body.get("reroll")) or bool(body.get("with_critique")),
-            critique=critique, after_shot_id=after)
+            critique=critique, after_shot_id=after,
+            dependency_snapshot=qualification,
+            critique_sources=critique_sources)
     except ValueError as exc:
         raise HTTPException(409, str(exc))
 
@@ -584,7 +857,11 @@ async def generate_shot(shot_id: str, body: dict | None = None):
             "shot_id": shot_id,
             "prompt_override": body.get("prompt_override"),
             "reroll": bool(body.get("reroll")),
-            "critique": "with_critique" if body.get("with_critique") else None,
+            "critique": body.get("critique") or ("with_critique" if body.get("with_critique") else None),
+            "review_item_ids": body.get("review_item_ids") or [],
+            "qualification_version": body.get("qualification_version"),
+            "idempotency_key": body.get("idempotency_key"),
+            "request_id": body.get("request_id"),
         },
         initiator="ui",
     )
@@ -607,6 +884,7 @@ async def stop_shot_video(shot_id: str):
 def _adopt_version_core(shot_id: str, body: dict) -> dict:
     """人工采用视频版本的领域逻辑，供 REST 路由与 ``video.adopt_version`` Command Handler 共用。"""
     version_id = body.get("version_id")
+    _review_assert_shot_positive(shot_id, body.get("qualification_version"))
     conn = get_conn()
     v = conn.execute("SELECT * FROM shot_versions WHERE id=? AND shot_id=?", (version_id, shot_id)).fetchone()
     if not v or v["status"] != "succeeded":
@@ -629,7 +907,9 @@ def _adopt_version_core(shot_id: str, body: dict) -> dict:
     observed_state_out = qa.get("observed_state_out")
     if observed_state_out:
         media_evidence.merge_observed_state_out_into_shot_contract(shot_id, str(observed_state_out))
-    reason = str(body.get("reason") or "人工横向比较后采用").strip()
+    reason = str(body.get("reason") or "").strip()
+    if len(reason) < 4 or reason in {"人工横向比较后采用", "默认", "同意"}:
+        raise HTTPException(422, "请填写有效的采用理由（至少 4 个字，说明质量、成本或版本比较）")
     evidence_repository.commit_artifact(
         None,
         artifact["id"],
@@ -652,6 +932,12 @@ def _adopt_version_core(shot_id: str, body: dict) -> dict:
         ),
     )
     conn.commit()
+    _review_write_audit(
+        "video_version.adopt", "shot", shot_id, target_version=version_id,
+        old_state={"adopted_version_id": shot["adopted_version_id"] if shot else None},
+        new_state={"adopted_version_id": version_id}, reason=reason,
+        idempotency_key=body.get("idempotency_key"), request_id=body.get("request_id"),
+    )
     if shot and shot["adopted_version_id"] != version_id:
         worker.invalidate_episode_final(shot["episode_id"])
     return {"adopted": version_id, "artifact_id": artifact["id"], "reason": reason}
@@ -663,7 +949,11 @@ async def adopt_version(shot_id: str, body: dict):
 
     result = await dispatch(
         "video.adopt_version",
-        {"shot_id": shot_id, "version_id": body.get("version_id"), "reason": body.get("reason")},
+        {
+            "shot_id": shot_id, "version_id": body.get("version_id"), "reason": body.get("reason"),
+            "qualification_version": body.get("qualification_version"),
+            "idempotency_key": body.get("idempotency_key"), "request_id": body.get("request_id"),
+        },
         initiator="ui",
     )
     return respond_ui(result)
@@ -771,6 +1061,7 @@ async def _complete_episode_core(episode_id: str, body: dict) -> dict:
     )
 
     ep = _episode_or_404(episode_id)
+    _review_assert_positive_action(episode_id, body.get("qualification_version"))
     if ep["status"] not in ("confirmed", "generating", "done"):
         raise HTTPException(409, "分镜脚本未确认（先在工作台点击确认分镜）")
     _ensure_video_episode_columns()
@@ -788,17 +1079,27 @@ async def _complete_episode_core(episode_id: str, body: dict) -> dict:
     if int(shots_total or 0) <= 0:
         raise HTTPException(409, "本集尚无分镜")
 
-    budget_cap = body.get("budget_cap_cny")
-    wall_cap = body.get("wall_clock_cap_s")
+    budget_cap = _review_validate_authorization_number(
+        body.get("budget_cap_cny"), field="budget_cap_cny", minimum=1, maximum=100000,
+    )
+    wall_cap = _review_validate_authorization_number(
+        body.get("wall_clock_cap_s"), field="wall_clock_cap_s", minimum=60, maximum=604800,
+    )
     allow_fallback = body.get("allow_fallback_adopt", True)
     max_fallback = body.get("max_fallback_shots")
     allow_edit = bool(body.get("allow_storyboard_edit", False))
     grant_id = body.get("completion_grant_id")
 
     # resume + 追加预算
-    add_budget = body.get("add_budget_cny")
-    add_wall = body.get("add_wall_clock_s")
-    if mode == "resume" and grant_id and (add_budget or add_wall):
+    add_budget = _review_validate_authorization_number(
+        body.get("add_budget_cny"), field="add_budget_cny", minimum=1, maximum=100000,
+    )
+    add_wall = _review_validate_authorization_number(
+        body.get("add_wall_clock_s"), field="add_wall_clock_s", minimum=60, maximum=604800,
+    )
+    if (add_budget is not None or add_wall is not None) and not (mode == "resume" and grant_id):
+        raise HTTPException(422, "追加授权只能用于带 completion_grant_id 的 resume 模式")
+    if mode == "resume" and grant_id and (add_budget is not None or add_wall is not None):
         bump_video_grant_budget(
             grant_id,
             add_cny=float(add_budget or 0),
@@ -1070,9 +1371,15 @@ async def _complete_project_videos_core(project_id: str, body: dict) -> dict:
     if not project:
         raise HTTPException(404, "项目不存在")
 
-    global_cap = float(body.get("global_budget_cap_cny") or 500)
-    per_cap = float(body.get("per_episode_cap_cny") or 150)
-    wall_cap = float(body.get("wall_clock_cap_s") or 4 * 3600)
+    global_cap = float(_review_validate_authorization_number(
+        body.get("global_budget_cap_cny", 500), field="global_budget_cap_cny", minimum=1, maximum=1000000, allow_none=False,
+    ))
+    per_cap = float(_review_validate_authorization_number(
+        body.get("per_episode_cap_cny", 150), field="per_episode_cap_cny", minimum=1, maximum=100000, allow_none=False,
+    ))
+    wall_cap = float(_review_validate_authorization_number(
+        body.get("wall_clock_cap_s", 4 * 3600), field="wall_clock_cap_s", minimum=60, maximum=604800, allow_none=False,
+    ))
     allow_fallback = bool(body.get("allow_fallback_adopt", True))
     allow_edit = bool(body.get("allow_storyboard_edit", False))
     episode_ids = body.get("episode_ids")
@@ -1264,17 +1571,48 @@ def stale_assets_preview(episode_id: str):
                 reasons.append("asset_revision")
         if not reasons:
             reasons.append("parent_artifact")
+        reason_labels = {
+            "storyboard_artifact": "已确认分镜版本已变更",
+            "asset_revision": "人物或场景资产版本已变更",
+            "parent_artifact": "上游证据链已变更",
+        }
         items.append({
             "shot_id": shot["id"],
             "shot_no": shot["shot_no"],
             "adopted_version_id": adopted,
             "reasons": reasons,
+            "reason_labels": [reason_labels.get(reason, "未知陈旧原因") for reason in reasons],
+            "storyboard_artifact_id": shot.get("storyboard_artifact_id"),
+            "current_storyboard_artifact_id": ep.get("storyboard_artifact_id"),
+            "estimated_cost_cny": shot_cost_cny(float(shot.get("duration_s") or 0)),
             "hint": "参考资产或分镜已更新，本镜采用版可能使用旧证据链",
         })
+    qualification = _review_upstream_snapshot(episode_id)
+    for item in items:
+        asset_inputs = [
+            asset for asset in qualification["assets"].get("inputs", [])
+            if asset.get("shot_id") == item["shot_id"]
+        ]
+        item["asset_qualification"] = asset_inputs
+        item["asset_soft_warnings"] = [
+            warning for warning in qualification["assets"].get("soft_warnings", [])
+            if warning.get("shot_id") == item["shot_id"]
+        ]
+        item["rule_versions"] = sorted({
+            str(asset.get("rule_version")) for asset in asset_inputs if asset.get("rule_version")
+        })
+    preview_version = _review_sha({
+        "episode_id": episode_id,
+        "qualification_version": qualification["qualification_version"],
+        "shots": [(item["shot_id"], item["adopted_version_id"], item["reasons"]) for item in items],
+    })[:32]
     return {
         "episode_id": episode_id,
         "stale_count": len(items),
         "shots": items,
+        "estimated_cost_cny": round(sum(item["estimated_cost_cny"] for item in items), 2),
+        "qualification": qualification,
+        "preview_version": preview_version,
         "repair_action": "POST /api/episodes/{id}/repair-stale-assets with confirm=true",
     }
 
@@ -1290,6 +1628,9 @@ async def repair_stale_assets(episode_id: str, body: dict | None = None):
             "episode_id": episode_id,
             "shot_ids": body.get("shot_ids") or [],
             "confirm": body.get("confirm") is True,
+            "preview_version": body.get("preview_version"),
+            "qualification_version": body.get("qualification_version"),
+            "idempotency_key": body.get("idempotency_key"),
         },
     )
     if routed is not None:
@@ -1297,6 +1638,13 @@ async def repair_stale_assets(episode_id: str, body: dict | None = None):
     if body.get("confirm") is not True:
         raise HTTPException(409, "必须先查看 stale-assets-preview，并显式提交 confirm=true")
     preview = stale_assets_preview(episode_id)
+    _review_assert_positive_action(episode_id, body.get("qualification_version"))
+    if body.get("preview_version") and body.get("preview_version") != preview["preview_version"]:
+        raise HTTPException(409, {
+            "code": "STALE_PREVIEW_EXPIRED",
+            "message": "陈旧资产范围或依赖已变化，请重新预演",
+            "preview": preview,
+        })
     wanted = set(body.get("shot_ids") or [])
     targets = [
         item for item in preview["shots"]
@@ -1308,7 +1656,11 @@ async def repair_stale_assets(episode_id: str, body: dict | None = None):
     errors = []
     for item in targets:
         try:
-            result = await generate_shot(item["shot_id"], {"reroll": True})
+            result = await _generate_shot_core(item["shot_id"], {
+                "reroll": True,
+                "qualification_version": preview["qualification"]["qualification_version"],
+                "idempotency_key": f"{body.get('idempotency_key') or preview['preview_version']}:{item['shot_id']}",
+            })
             queued.append({"shot_id": item["shot_id"], "shot_no": item["shot_no"], "result": result})
         except Exception as exc:  # noqa: BLE001
             errors.append({"shot_id": item["shot_id"], "shot_no": item["shot_no"], "error": str(exc)})
@@ -1317,6 +1669,7 @@ async def repair_stale_assets(episode_id: str, body: dict | None = None):
         "shot_ids": [q["shot_id"] for q in queued],
         "errors": errors,
         "message": f"已为 {len(queued)} 个 stale 镜头提交重生",
+        "preview_version": preview["preview_version"],
     }
 
 

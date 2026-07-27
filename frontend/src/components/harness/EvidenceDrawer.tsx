@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { api, ArtifactEvidence, EvidenceIssue } from '../../api'
 import IssueList from './IssueList'
 import TrustBadge from './TrustBadge'
@@ -11,17 +11,24 @@ export default function EvidenceDrawer({
   evidence,
   label = '查看证据',
   conclusion,
+  onOpenChange,
 }: {
   evidence: ArtifactEvidence
   label?: string
   conclusion?: string
+  onOpenChange?: (open: boolean) => void
 }) {
   const [open, setOpen] = useState(false)
   const [lineage, setLineage] = useState<{ ancestors: ArtifactEvidence[]; descendants: ArtifactEvidence[] } | null>(null)
+  const [lineageState, setLineageState] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
+  const [lineageError, setLineageError] = useState('')
+  const [retryVersion, setRetryVersion] = useState(0)
+  const requestRef = useRef(0)
   const [techOpen, setTechOpen] = useState(false)
   const [descFilter, setDescFilter] = useState('')
   const [descPage, setDescPage] = useState(0)
-  const containerRef = useFocusTrap(open, () => setOpen(false))
+  const setDrawerOpen = (value: boolean) => { setOpen(value); onOpenChange?.(value) }
+  const containerRef = useFocusTrap(open, () => setDrawerOpen(false))
 
   const issues = useMemo(
     () => evidence.evaluations.flatMap(item => item.issues || []),
@@ -32,8 +39,20 @@ export default function EvidenceDrawer({
 
   useEffect(() => {
     if (!open) return
-    api.get(`/artifacts/${evidence.id}/lineage`).then(setLineage).catch(() => setLineage(null))
-  }, [open, evidence.id])
+    const requestId = ++requestRef.current
+    setLineageState('loading')
+    setLineageError('')
+    api.get(`/artifacts/${evidence.id}/lineage`).then(value => {
+      if (requestId !== requestRef.current) return
+      setLineage(value)
+      setLineageState('success')
+    }).catch((error: unknown) => {
+      if (requestId !== requestRef.current) return
+      setLineageState('error')
+      setLineageError((error as Error).message || '血缘请求失败')
+    })
+    return () => { requestRef.current += 1 }
+  }, [open, evidence.id, retryVersion])
 
   const descendants = (lineage?.descendants ?? []).filter(item => {
     if (!descFilter.trim()) return true
@@ -46,12 +65,12 @@ export default function EvidenceDrawer({
 
   return (
     <>
-      <button className="btn small evidence-trigger" type="button" onClick={() => setOpen(true)}>
+      <button className="btn small evidence-trigger" type="button" onClick={() => setDrawerOpen(true)}>
         <TrustBadge level={evidence.trust_level} /> {label}
       </button>
       {open && (
         <div className="evidence-backdrop" role="presentation" onMouseDown={event => {
-          if (event.currentTarget === event.target) setOpen(false)
+          if (event.currentTarget === event.target) setDrawerOpen(false)
         }}>
           <aside
             className="evidence-drawer"
@@ -65,7 +84,7 @@ export default function EvidenceDrawer({
                 <span className="eyebrow">EVIDENCE</span>
                 <h3>可用性结论</h3>
               </div>
-              <button type="button" onClick={() => setOpen(false)} aria-label="关闭">×</button>
+              <button type="button" onClick={() => setDrawerOpen(false)} aria-label="关闭">×</button>
             </header>
             <div className="evidence-summary">
               <TrustBadge level={evidence.trust_level} />
@@ -80,7 +99,16 @@ export default function EvidenceDrawer({
             {conclusion && <p className="evidence-conclusion">{conclusion}</p>}
             <h4>问题与下游影响</h4>
             <IssueList issues={issues} />
-            <p className="hint">下游血缘共 {lineage?.descendants.length ?? 0} 个；上游 {lineage?.ancestors.length ?? evidence.parent_artifact_ids?.length ?? 0} 个。</p>
+            {lineageState === 'loading' && <p className="hint" role="status">正在加载血缘……</p>}
+            {lineageState === 'error' && (
+              <div className="error-banner" role="alert">
+                血缘加载失败，不等于 0 个下游：{lineageError}
+                <button type="button" className="btn small ghost" onClick={() => setRetryVersion(value => value + 1)}>重试</button>
+              </div>
+            )}
+            {lineageState === 'success' && (
+              <p className="hint">下游血缘共 {lineage?.descendants.length ?? 0} 个；上游 {lineage?.ancestors.length ?? 0} 个。</p>
+            )}
 
             <button type="button" className="btn small ghost" onClick={() => setTechOpen(v => !v)}>
               {techOpen ? '收起技术信息' : '展开技术信息（Artifact / Hash / 合同）'}
@@ -95,7 +123,7 @@ export default function EvidenceDrawer({
                       v{evidence.version} · {statusLabel(evidence.status)}
                     </dd>
                   </div>
-                  <div><dt>Hash</dt><dd><code>{evidence.content_hash.slice(0, 16)}…</code></dd></div>
+                  <div><dt>Hash</dt><dd><code>{evidence.content_hash.slice(0, 16)}…</code> <button type="button" className="btn small ghost" onClick={() => void navigator.clipboard.writeText(evidence.content_hash)}>复制</button></dd></div>
                   <div><dt>Contract</dt><dd>{evidence.contract_version || '未记录'}</dd></div>
                 </dl>
                 <h4>评估记录</h4>
@@ -123,7 +151,7 @@ export default function EvidenceDrawer({
                   placeholder="筛选下游类型/状态…"
                   aria-label="筛选下游血缘"
                 />
-                <span>下游命中 {descendants.length} / 总计 {lineage?.descendants.length ?? 0}</span>
+                <span>{lineageState === 'success' ? `下游命中 ${descendants.length} / 总计 ${lineage?.descendants.length ?? 0}` : '血缘数量尚未确认'}</span>
               </div>
               {(lineage?.ancestors ?? []).map(item => (
                 <code key={`a-${item.id}`}>↑ {item.type} v{item.version} · {statusLabel(item.status)}</code>

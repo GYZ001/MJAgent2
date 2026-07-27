@@ -104,6 +104,7 @@ class ScreenplayGenerateInput(StandardCommandInput):
     episode_id: str
     force: bool = False  # 已废弃：存在 published 时服务端拒绝全量重生
     required_dialogue_lines: list[str] = Field(default_factory=list)
+    required_dialogue_occurrence_ids: list[str] = Field(default_factory=list)
 
 
 class ScreenplayResumeInput(StandardCommandInput):
@@ -152,6 +153,7 @@ class StoryboardGenerateInput(StandardCommandInput):
         "auto_confirm",
     ] = "ready_for_manual_confirm"
     completion_grant_id: str | None = None
+    preflight_token: str | None = None
 
 
 class StoryboardPatchShotInput(StandardCommandInput):
@@ -167,38 +169,48 @@ class StoryboardPatchShotInput(StandardCommandInput):
 class ShotUpdateInput(StandardCommandInput):
     shot_id: str
     patch: dict[str, Any]
+    expected_version: str | None = None
+    edit_session_token: str | None = None
+    preview_token: str | None = None
+    baseline_content_hash: str | None = None
+    change_source: str = "standard_edit"
+    source_binding: dict[str, Any] | None = None
 
 
 class StoryboardConfirmInput(StandardCommandInput):
     episode_id: str
+    preview_token: str | None = None
 
 
 class VideoGenerateShotInput(StandardCommandInput):
     shot_id: str
     prompt_override: str | None = None
     critique: str | None = None
+    review_item_ids: list[str] = Field(default_factory=list, max_length=200)
     reroll: bool = False
+    qualification_version: str | None = None
 
 
 class VideoCompleteEpisodeInput(StandardCommandInput):
     episode_id: str
     mode: Literal["fresh", "resume"] = "fresh"
-    budget_cap_cny: float | None = None
-    wall_clock_cap_s: float | None = None
+    budget_cap_cny: float | None = Field(default=None, ge=1, le=100000, allow_inf_nan=False)
+    wall_clock_cap_s: float | None = Field(default=None, ge=60, le=604800, allow_inf_nan=False)
     allow_fallback_adopt: bool = True
-    max_fallback_shots: int | None = None
+    max_fallback_shots: int | None = Field(default=None, ge=0, le=10000)
     allow_storyboard_edit: bool = False
     completion_grant_id: str | None = None
-    add_budget_cny: float | None = None
-    add_wall_clock_s: float | None = None
+    add_budget_cny: float | None = Field(default=None, ge=1, le=100000, allow_inf_nan=False)
+    add_wall_clock_s: float | None = Field(default=None, ge=60, le=604800, allow_inf_nan=False)
+    qualification_version: str | None = None
 
 
 class VideoCompleteProjectInput(StandardCommandInput):
     project_id: str
     episode_ids: list[str] | None = None
-    global_budget_cap_cny: float | None = None
-    per_episode_cap_cny: float | None = None
-    wall_clock_cap_s: float | None = None
+    global_budget_cap_cny: float | None = Field(default=None, ge=1, le=1000000, allow_inf_nan=False)
+    per_episode_cap_cny: float | None = Field(default=None, ge=1, le=100000, allow_inf_nan=False)
+    wall_clock_cap_s: float | None = Field(default=None, ge=60, le=604800, allow_inf_nan=False)
     allow_fallback_adopt: bool = True
     allow_storyboard_edit: bool = False
 
@@ -210,12 +222,15 @@ class ShotScopedInput(StandardCommandInput):
 class VideoAdoptVersionInput(StandardCommandInput):
     shot_id: str
     version_id: str
+    qualification_version: str | None = None
 
 
 class VideoRepairStaleAssetsInput(StandardCommandInput):
     episode_id: str
     shot_ids: list[str] = Field(default_factory=list)
     confirm: bool = False
+    preview_version: str | None = None
+    qualification_version: str | None = None
 
 
 class VersionScopedInput(StandardCommandInput):

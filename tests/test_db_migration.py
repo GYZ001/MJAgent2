@@ -25,8 +25,10 @@ def test_init_db_migrates_legacy_jobs_before_creating_claim_index(tmp_path, monk
 
     migrated = db.get_conn()
     columns = {row[1] for row in migrated.execute("PRAGMA table_info(jobs)").fetchall()}
+    project_columns = {row[1] for row in migrated.execute("PRAGMA table_info(projects)").fetchall()}
     indexes = {row[1] for row in migrated.execute("PRAGMA index_list(jobs)").fetchall()}
     assert {"next_retry_at", "lease_expires_at", "retry_count"}.issubset(columns)
+    assert {"refs_resume", "refs_batch_started_at"}.issubset(project_columns)
     assert "idx_jobs_claim" in indexes
     assert "idx_jobs_run" in indexes
     migrated.close()
@@ -54,7 +56,7 @@ def test_init_db_interrupts_text_run_waiting_for_retry(tmp_path, monkeypatch) ->
     monkeypatch.setattr(db, "DATA_DIR", tmp_path)
     monkeypatch.setattr(db, "_local", threading.local())
 
-    db.init_db()
+    db.init_db(reconcile_interrupted=True)
 
     recovered = db.get_conn()
     run = recovered.execute(
@@ -69,3 +71,26 @@ def test_init_db_interrupts_text_run_waiting_for_retry(tmp_path, monkeypatch) ->
     assert step["status"] == "FAILED"
     assert step["error_code"] == "SERVICE_RESTART"
     recovered.close()
+
+
+def test_plain_init_db_does_not_interrupt_live_work(tmp_path, monkeypatch) -> None:
+    database = tmp_path / "non-destructive-init.db"
+    monkeypatch.setattr(db, "DB_PATH", database)
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(db, "_local", threading.local())
+    db.init_db()
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO workflow_runs(id,workflow_type,scope_type,scope_id,status,input_fingerprint,updated_at) "
+        "VALUES('run_live','storyboard','episode','e1','RUNNING','fp',1)"
+    )
+    conn.execute(
+        "INSERT INTO step_runs(id,run_id,step_key,status,started_at) "
+        "VALUES('step_live','run_live','storyboard','RUNNING',1)"
+    )
+    conn.commit()
+
+    db.init_db()
+
+    assert conn.execute("SELECT status FROM workflow_runs WHERE id='run_live'").fetchone()[0] == "RUNNING"
+    assert conn.execute("SELECT status FROM step_runs WHERE id='step_live'").fetchone()[0] == "RUNNING"

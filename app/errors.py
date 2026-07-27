@@ -3,8 +3,9 @@
 前端只拿到 错误码(code) + 问题分类(category) + 错误ID(error_id)；技术类报错的原文、
 堆栈、请求上下文全部留在后端 error_logs 表，凭 error_id 可查根因。
 
-两类错误的处理策略（见 plan）：
+错误处理策略（见 plan）：
 - 业务/校验类（4xx：输入校验/状态冲突/资源不存在）：保留原有友好中文提示，附带 码+ID。
+- 质量门禁类（供应商调用成功，但产物未通过业务 QA）：展示可操作的安全原因，不伪报外部服务故障。
 - 技术类（5xx、大模型/外部服务、内容生成、媒体处理）：前端只给安全通用提示 + 码+ID，原文进日志。
 """
 from __future__ import annotations
@@ -22,10 +23,11 @@ CATEGORIES: dict[str, dict[str, Any]] = {
     "validation": {"label": "输入校验", "technical": False, "hint": ""},
     "conflict":   {"label": "状态冲突", "technical": False, "hint": ""},
     "not_found":  {"label": "资源不存在", "technical": False, "hint": ""},
+    "quality_gate": {"label": "质量校验", "technical": False, "hint": ""},
     "provider":   {"label": "大模型/外部服务", "technical": True,
                    "hint": "大模型/外部服务调用失败，可稍后重试；若持续失败请把错误码反馈给技术人员。"},
     "generation": {"label": "内容生成", "technical": True,
-                   "hint": "内容生成未通过校验，可点击重试，或在监制房调高「修复重试上限」。"},
+                   "hint": "内容生成未通过格式或业务校验，可点击重试；若持续失败，请先按错误码检查具体原因，再决定是否调整「修复重试上限」。"},
     "media":      {"label": "媒体处理", "technical": True,
                    "hint": "媒体处理失败（转码/文件读写等），请把错误码反馈给技术人员。"},
     "system":     {"label": "系统内部", "technical": True,
@@ -70,9 +72,13 @@ def classify(exc: BaseException | None, http_status: int | None = None) -> tuple
 
     用类名判断 ProviderError/StageError，避免 import app.hiagent/app.stages 造成环依赖。"""
     name = type(exc).__name__ if exc is not None else ""
+    if name == "ContentGenerationError":
+        return "quality_gate", "QA"
     if name == "ProviderError":
         return "provider", "LLM"
-    if name in {"StageError", "CompileError", "ContentGenerationError"}:
+    if name == "StageError" and "JSON 解析失败" in _extract_message(exc):
+        return "generation", "JSON"
+    if name in {"StageError", "CompileError"}:
         return "generation", "GEN"
     if name == "FullRegenDenied":
         return "conflict", "FULL-REGEN-DENIED"

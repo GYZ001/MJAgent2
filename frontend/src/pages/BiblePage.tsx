@@ -15,6 +15,7 @@ import { useFillPageSize } from '../hooks/useFillPageSize'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { usePrepListState } from '../hooks/usePrepListState'
 import { formatBookTitle } from '../lib/bookTitle'
+import { sceneUsability } from '../lib/sceneUsability'
 import type { PrepStepStatus } from '../lib/statusLabels'
 import CharacterFilters, {
   EMPTY_CHARACTER_FILTERS,
@@ -23,9 +24,13 @@ import CharacterFilters, {
 } from '../components/CharacterFilters'
 import CharacterQaPanel from '../components/CharacterQaPanel'
 import ImageCompareModal from '../components/ImageCompareModal'
-import AutoChangeQueue from '../components/AutoChangeQueue'
 
 const CHAR_QA_PASS = 0.6
+const REQUIRED_CHARACTER_VIEWS = ['front_full', 'three_quarter', 'profile'] as const
+
+function trackBible(name: string, projectId: string, dimensions: Record<string, string | number | boolean> = {}) {
+  void api.post('/system/monitor/events', { name, object_id: projectId, dimensions }).catch(() => undefined)
+}
 
 type RefsProgress = Awaited<ReturnType<typeof api.refsProgress>>
 type PaymentQuote = RefsCostPrecheck & {
@@ -60,6 +65,12 @@ function portraitAvailability(character: Character, fitting: boolean): PortraitA
   const status = portrait.pack_status
   if (status === 'generating' || status === 'qa_pending') return 'generating'
   if (status === 'failed') return 'failed'
+  const readyViewRoles = new Set(
+    (portrait.views ?? [])
+      .filter(view => view.status === 'ready' && !!view.image_url)
+      .map(view => view.view_role),
+  )
+  if (REQUIRED_CHARACTER_VIEWS.some(role => !readyViewRoles.has(role))) return 'failed'
   const qa = portrait.group_qa
   const hard = (qa?.hard_failures ?? []).length > 0 || qa?.status === 'failed'
   if (hard) return 'failed'
@@ -140,12 +151,47 @@ function characterHasPortrait(character: Character): boolean {
   ) || !!character.ref_image_url
 }
 
-function characterIsFitting(project: { refs_status?: string; refs_target?: string | null }, character: Character): boolean {
+function characterFirstAppearance(character: Character): number | null {
+  const starts = (character.portraits ?? []).map(item => item.ep_start).filter(value => value > 0)
+  return starts.length ? Math.min(...starts) : null
+}
+
+function characterFilterMeta(
+  project: { refs_status?: string; refs_target?: string | null } | null | undefined,
+  character: Character,
+) {
   const portraits = character.portraits ?? []
-  return project.refs_status === 'running' && (
-    project.refs_target === character.name
-    || (!project.refs_target && portraits.some(portrait => portrait.pack_status === 'generating'))
-  )
+  return {
+    availability: characterAvailabilityForFilter(project, character),
+    hasPortrait: characterHasPortrait(character),
+    hasCandidate: portraits.length > 1 || portraits.some(item => !!item.pack_status && item.pack_status !== 'ready'),
+    hasHistory: portraits.some(item => item.ep_end != null || item.ep_start <= 0),
+    firstAppearance: characterFirstAppearance(character),
+  }
+}
+
+function compareCharacters(left: Character, right: Character, sort: string, project?: {
+  refs_status?: string
+  refs_target?: string | null
+} | null): number {
+  if (sort === 'role') return (left.role || '').localeCompare(right.role || '', 'zh-CN')
+  if (sort === 'first') return (characterFirstAppearance(left) ?? Number.MAX_SAFE_INTEGER)
+    - (characterFirstAppearance(right) ?? Number.MAX_SAFE_INTEGER)
+  if (sort === 'qa') return characterAvailabilityForFilter(project, left)
+    .localeCompare(characterAvailabilityForFilter(project, right))
+  return left.name.localeCompare(right.name, 'zh-CN')
+}
+
+export function characterIsFitting(project: { refs_status?: string; refs_target?: string | null }, character: Character): boolean {
+  if (project.refs_status !== 'running') return false
+  if (!project.refs_target) return true
+  if (project.refs_target === character.name) return true
+  try {
+    const targets = JSON.parse(project.refs_target)
+    return Array.isArray(targets) && targets.includes(character.name)
+  } catch {
+    return false
+  }
 }
 
 function characterAvailabilityForFilter(
@@ -175,9 +221,14 @@ function bibleStepStatus(project: {
 
 function sceneStepStatus(project: { bible?: Bible | null; scene_refs_status?: string }): PrepStepStatus {
   const status = project.scene_refs_status
+  const scenes = project.bible?.scenes ?? []
   if (status === 'running') return 'running'
+  const hasUnavailable = scenes.some(scene => (scene.scene_refs ?? []).length > 0
+    ? sceneUsability(scene, false) === 'unavailable'
+    : !scene.ref_image_url)
+  if (hasUnavailable) return 'problem'
+  if (scenes.length > 0) return 'done'
   if (status === 'failed' || status === 'warning') return 'problem'
-  if ((project.bible?.scenes ?? []).length > 0) return 'done'
   if (status && ['ready', 'done', 'succeeded'].includes(status)) return 'done'
   return 'idle'
 }
@@ -187,19 +238,6 @@ function episodeStepStatus(project: { episodes?: unknown[]; episodes_total?: num
   if (typeof project.episodes_total === 'number') return project.episodes_total > 0 ? 'done' : 'idle'
   if (typeof project.episode_count === 'number') return project.episode_count > 0 ? 'done' : 'idle'
   return 'idle'
-}
-
-function readyPortraitMosaic(bible: Bible): { src: string; label: string }[] {
-  const images: { src: string; label: string; ep: number }[] = []
-  for (const character of bible.characters ?? []) {
-    for (const portrait of character.portraits ?? []) {
-      if (portrait.pack_status && portrait.pack_status !== 'ready') continue
-      const view = (portrait.views ?? []).find(item => !!item.image_url)
-      const src = view?.image_url || portrait.image_url
-      if (src) images.push({ src, label: character.name, ep: portrait.ep_start })
-    }
-  }
-  return images.sort((a, b) => b.ep - a.ep).slice(0, 4)
 }
 
 function characterCompareImages(character: Character): { src: string; label: string }[] {
@@ -236,10 +274,57 @@ function progressProblemNames(progress: RefsProgress | null): string[] {
     .filter(Boolean)
 }
 
-function mergeServerOnlyCharacters(local: Bible, server: Bible): Bible {
-  const localNames = new Set((local.characters ?? []).map(character => character.name))
-  const serverOnly = (server.characters ?? []).filter(character => !localNames.has(character.name))
-  return { ...local, characters: [...local.characters, ...serverOnly.map(cloneCharacter)] }
+export type BibleMergeConflict = {
+  path: string
+  base: unknown
+  local: unknown
+  server: unknown
+}
+
+const sameValue = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right)
+
+export function mergeBibleThreeWay(
+  base: Bible,
+  local: Bible,
+  server: Bible,
+  choices: Record<string, 'local' | 'server'> = {},
+): { bible: Bible; conflicts: BibleMergeConflict[] } {
+  const conflicts: BibleMergeConflict[] = []
+
+  const mergeValue = (baseValue: unknown, localValue: unknown, serverValue: unknown, path: string): unknown => {
+    if (sameValue(localValue, serverValue)) return localValue
+    if (sameValue(localValue, baseValue)) return serverValue
+    if (sameValue(serverValue, baseValue)) return localValue
+    if (path === 'characters' && Array.isArray(localValue) && Array.isArray(serverValue)) {
+      const baseItems = Array.isArray(baseValue) ? baseValue as Character[] : []
+      const localItems = localValue as Character[]
+      const serverItems = serverValue as Character[]
+      const baseByName = new Map(baseItems.map(item => [item.name, item]))
+      const localByName = new Map(localItems.map(item => [item.name, item]))
+      const serverByName = new Map(serverItems.map(item => [item.name, item]))
+      const names = [...new Set([...serverItems.map(item => item.name), ...localItems.map(item => item.name)])]
+      return names.flatMap(name => {
+        const merged = mergeValue(baseByName.get(name), localByName.get(name), serverByName.get(name), `characters.${name}`)
+        return merged == null ? [] : [merged]
+      })
+    }
+    if (baseValue && localValue && serverValue
+      && typeof baseValue === 'object' && typeof localValue === 'object' && typeof serverValue === 'object'
+      && !Array.isArray(baseValue) && !Array.isArray(localValue) && !Array.isArray(serverValue)) {
+      const baseRecord = baseValue as Record<string, unknown>
+      const localRecord = localValue as Record<string, unknown>
+      const serverRecord = serverValue as Record<string, unknown>
+      const keys = new Set([...Object.keys(baseRecord), ...Object.keys(localRecord), ...Object.keys(serverRecord)])
+      return Object.fromEntries([...keys].map(key => [
+        key,
+        mergeValue(baseRecord[key], localRecord[key], serverRecord[key], path ? `${path}.${key}` : key),
+      ]))
+    }
+    conflicts.push({ path, base: baseValue, local: localValue, server: serverValue })
+    return choices[path] === 'local' ? localValue : serverValue
+  }
+
+  return { bible: mergeValue(base, local, server, '') as Bible, conflicts }
 }
 
 function cloneCharacter(character: Character): Character {
@@ -277,10 +362,11 @@ function promptSegments(prompt: string | undefined): { label: string; text: stri
 }
 
 export default function BiblePage() {
-  const { projectId, toast, go } = useNav()
+  const { projectId, toast, go, registerNavigationGuard } = useNav()
   const { data: p, refresh, error, loading } = useProject(projectId!, undefined, 'bible')
   const [editing, setEditing] = useState<Bible | null>(null)
   const [editBaseVersion, setEditBaseVersion] = useState<number | null>(null)
+  const [editBaseBible, setEditBaseBible] = useState<Bible | null>(null)
   const [undoStack, setUndoStack] = useState<Bible[]>([])
   const [draftState, setDraftState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const [busy, setBusy] = useState(false)
@@ -293,7 +379,7 @@ export default function BiblePage() {
   const setCharFilters = (value: CharacterFilterState) => setListState(current => ({ ...current, filters: value, page: 0 }))
   const setCharPage = (value: number) => setListState(current => ({ ...current, page: value, scrollY: window.scrollY }))
   const [paramsCharacterName, setParamsCharacterName] = useState<string | null>(null)
-  const [qaDetail, setQaDetail] = useState<{ characterName: string; portrait: Portrait } | null>(null)
+  const [qaDetail, setQaDetail] = useState<{ characterName: string; portrait: Portrait | null } | null>(null)
   const [compareDetail, setCompareDetail] = useState<{ title: string; images: { src: string; label: string }[] } | null>(null)
   const [timelineCharacter, setTimelineCharacter] = useState('')
   const [refsProgress, setRefsProgress] = useState<RefsProgress | null>(null)
@@ -314,6 +400,7 @@ export default function BiblePage() {
   const [payError, setPayError] = useState<string | null>(null)
   const [payPrecheck, setPayPrecheck] = useState<RefsCostPrecheck | null>(null)
   const [paySelectable, setPaySelectable] = useState(false)
+  const [payScopeTitle, setPayScopeTitle] = useState<string | undefined>(undefined)
   const payActionRef = useRef<null | ((selection: PaymentSelection) => Promise<void>)>(null)
   const [impactMode, setImpactMode] = useState<'bible' | 'character'>('bible')
   const [pendingCharacterSave, setPendingCharacterSave] = useState<{ name: string; character: Character } | null>(null)
@@ -325,15 +412,28 @@ export default function BiblePage() {
   const charQuery = charSearch.trim()
   const indexedCharsPreview = (biblePreview?.characters ?? []).map((c, i) => ({ c, i }))
   const filteredCharsPreview = indexedCharsPreview.filter(({ c }) =>
-    matchCharacterFilters(c, charQuery, charFilters, {
-      availability: characterAvailabilityForFilter(p, c),
-      hasPortrait: characterHasPortrait(c),
-    }),
-  )
+    matchCharacterFilters(c, charQuery, charFilters, characterFilterMeta(p, c)),
+  ).sort((left, right) => compareCharacters(left.c, right.c, charFilters.sort, p))
   const charPageCount = Math.max(1, Math.ceil(filteredCharsPreview.length / pageSize))
   const dirtyCount = countBibleChanges(editing, p?.bible)
   const dirty = dirtyCount > 0
   const currentEditVersion = editBaseVersion ?? p?.bible_version ?? 0
+
+  useEffect(() => {
+    if (!dirty) {
+      registerNavigationGuard(null, false)
+      return
+    }
+    registerNavigationGuard(
+      () => {
+        const leave = window.confirm('人物谱有未定稿修订，离开后可从草稿恢复。确认离开？')
+        trackBible('bible_navigation_guard', projectId || '', { result: leave ? 'leave' : 'stay' })
+        return leave
+      },
+      true,
+    )
+    return () => registerNavigationGuard(null, false)
+  }, [dirty, registerNavigationGuard])
 
   useEffect(() => {
     if (charPage > charPageCount - 1) setCharPage(Math.max(0, charPageCount - 1))
@@ -424,7 +524,7 @@ export default function BiblePage() {
   }, [projectId, dirty, currentEditVersion])
 
   useEffect(() => {
-    if (!p || !(p.bible_status === 'running' || p.refs_status === 'running')) return
+    if (!p?.id || !p.bible) return
     let cancelled = false
     const load = async () => {
       try {
@@ -435,12 +535,13 @@ export default function BiblePage() {
       }
     }
     void load()
-    const id = window.setInterval(load, 3500)
+    const running = p.bible_status === 'running' || p.refs_status === 'running'
+    const id = running ? window.setInterval(load, 3500) : null
     return () => {
       cancelled = true
-      window.clearInterval(id)
+      if (id != null) window.clearInterval(id)
     }
-  }, [p?.id, p?.bible_status, p?.refs_status])
+  }, [p?.id, p?.bible, p?.bible_status, p?.refs_status])
 
   if (error && !p) return <QueryState loading={false} error={error} hasData={false} objectName="人物谱" onRetry={refresh}>{null}</QueryState>
   if (!p) return <QueryState loading={loading !== false} error={null} hasData={false} objectName="人物谱" onRetry={refresh}>{null}</QueryState>
@@ -455,11 +556,8 @@ export default function BiblePage() {
   const bible = editing ?? p.bible
   const indexedChars = (bible?.characters ?? []).map((c, i) => ({ c, i }))
   const filteredChars = indexedChars.filter(({ c }) =>
-    matchCharacterFilters(c, charQuery, charFilters, {
-      availability: characterAvailabilityForFilter(p, c),
-      hasPortrait: characterHasPortrait(c),
-    }),
-  )
+    matchCharacterFilters(c, charQuery, charFilters, characterFilterMeta(p, c)),
+  ).sort((left, right) => compareCharacters(left.c, right.c, charFilters.sort, p))
   const curCharPage = Math.min(charPage, charPageCount - 1)
   const pagedChars = filteredChars.slice(curCharPage * pageSize, curCharPage * pageSize + pageSize)
   const generating = p.bible_status === 'running' || p.refs_status === 'running'
@@ -472,7 +570,6 @@ export default function BiblePage() {
     episodes: episodeStepStatus(p),
   }
   const characterRoles = Array.from(new Set((bible?.characters ?? []).map(character => character.role).filter(Boolean)))
-  const mosaicImages = bible ? readyPortraitMosaic(bible) : []
   const timelineQuery = timelineCharacter.trim()
   const timelineNames = (bible?.characters ?? []).map(character => character.name).filter(Boolean)
   const filteredTimeline = (p.key_timeline ?? []).filter(item => {
@@ -486,7 +583,7 @@ export default function BiblePage() {
     precheckBody: { character?: string; characters?: string[]; resume?: boolean; view_role?: string },
     action: (quote: RefsCostPrecheck, selection: PaymentSelection) => Promise<void>,
     precheckLoader?: () => Promise<PaymentQuote>,
-    options?: { enableScopeSelection?: boolean },
+    options?: { enableScopeSelection?: boolean; scopeSelectionTitle?: string },
   ) => {
     setPayTitle(title)
     setPayOpen(true)
@@ -494,10 +591,12 @@ export default function BiblePage() {
     setPayError(null)
     setPayPrecheck(null)
     setPaySelectable(!!options?.enableScopeSelection)
+    setPayScopeTitle(options?.scopeSelectionTitle)
     try {
       const quote = precheckLoader
         ? await precheckLoader()
         : await api.refsPrecheck(p.id, precheckBody)
+      trackBible('bible_payment_precheck', p.id, { action: quote.action, result: 'shown' })
       setPayPrecheck(quote)
       payActionRef.current = async (selection: PaymentSelection) => {
         await action(quote, selection)
@@ -530,6 +629,7 @@ export default function BiblePage() {
   const beginRevision = async () => {
     if (!p.bible) return
     setEditBaseVersion(p.bible_version ?? 0)
+    setEditBaseBible(cloneBible(p.bible))
     setUndoStack([])
     setDraftState('idle')
     setEditing(cloneBible(p.bible))
@@ -561,7 +661,9 @@ export default function BiblePage() {
       async (quote) => {
         bibleTimer.start()
         refsTimer.start()
-        await api.post(`/projects/${p.id}/bible`, { confirm: true, quote_id: quote.quote_id })
+        await api.post(`/projects/${p.id}/bible`, {
+          confirm: true, quote_id: quote.quote_id, idempotency_key: quote.quote_id,
+        })
         toast('人物谱与定妆照生成已开始')
         refresh()
       },
@@ -610,6 +712,7 @@ export default function BiblePage() {
           characters: selectedCharacters.length ? selectedCharacters : undefined,
           confirm: true,
           quote_id: effectiveQuote.quote_id,
+          idempotency_key: effectiveQuote.quote_id,
         })
         toast('已开始补齐缺失的定妆照，已有成品会保留')
         refresh()
@@ -619,6 +722,38 @@ export default function BiblePage() {
         return gaps.precheck
       },
       { enableScopeSelection: true },
+    )
+  }
+
+  const restartRefsWithLatestSettings = async () => {
+    if (dirty) {
+      toast('请先定稿当前人物谱修订，再按最新画风批量重生', true)
+      return
+    }
+    await openPayment(
+      '按最新提示词与画风批量重新生成',
+      { resume: false },
+      async (quote, selection) => {
+        refsTimer.start()
+        const selectedCharacters = selection.characters.filter(Boolean)
+        const effectiveQuote = selectedCharacters.length
+          ? await api.refsPrecheck(p.id, { resume: false, characters: selectedCharacters })
+          : quote
+        await api.post(`/projects/${p.id}/refs`, {
+          resume: false,
+          characters: selectedCharacters.length ? selectedCharacters : undefined,
+          confirm: true,
+          quote_id: effectiveQuote.quote_id,
+          idempotency_key: effectiveQuote.quote_id,
+        })
+        toast('已按最新提示词与画风开始批量重新生成；新包通过 QA 前保留旧成品')
+        refresh()
+      },
+      undefined,
+      {
+        enableScopeSelection: true,
+        scopeSelectionTitle: '选择本次重新生成角色（默认全选）',
+      },
     )
   }
 
@@ -669,6 +804,7 @@ export default function BiblePage() {
           server_bible?: Bible | null
         } | undefined
         if (detail?.code === 'BIBLE_VERSION_CONFLICT') {
+          trackBible('bible_conflict', p.id, { conflict: true, source: 'impact_preview' })
           setImpactOpen(false)
           setConflict({
             message: detail.message || e.message,
@@ -705,6 +841,7 @@ export default function BiblePage() {
       }
       setEditing(null)
       setEditBaseVersion(null)
+      setEditBaseBible(null)
       setUndoStack([])
       setImpactOpen(false)
       setImpactPreview(null)
@@ -726,6 +863,7 @@ export default function BiblePage() {
           server_bible?: Bible | null
         } | undefined
         if (detail?.code === 'BIBLE_VERSION_CONFLICT') {
+          trackBible('bible_conflict', p.id, { conflict: true, source: 'bible_save' })
           setImpactOpen(false)
           setConflict({
             message: detail.message || e.message,
@@ -759,6 +897,7 @@ export default function BiblePage() {
       })
       const nextCharacter = result.character ?? character
       setEditing(current => current ? replaceCharacter(current, character.name, nextCharacter) : current)
+      setEditBaseBible(current => current ? replaceCharacter(current, character.name, nextCharacter) : current)
       if (typeof result.bible_version === 'number') setEditBaseVersion(result.bible_version)
       setImpactOpen(false)
       setImpactPreview(null)
@@ -794,6 +933,22 @@ export default function BiblePage() {
           setImpactPreview(preview)
           return
         }
+        if (detail?.code === 'BIBLE_VERSION_CONFLICT') {
+          trackBible('bible_conflict', p.id, { conflict: true, source: 'character_save' })
+          const conflictDetail = e.detail as {
+            message?: string
+            current_version?: number
+            character_names?: string[]
+            server_bible?: Bible | null
+          }
+          setConflict({
+            message: conflictDetail.message || e.message,
+            current_version: conflictDetail.current_version,
+            character_names: conflictDetail.character_names,
+            server_bible: conflictDetail.server_bible,
+          })
+          return
+        }
       }
       toast((e as Error).message, true)
     } finally {
@@ -809,16 +964,21 @@ export default function BiblePage() {
     if (window.confirm('有未保存的人物谱修订，确定放弃吗？')) {
       setEditing(null)
       setEditBaseVersion(null)
+      setEditBaseBible(null)
       setUndoStack([])
     }
   }
 
   const stopLabel = p.bible_status === 'running' ? '停止谱写' : '停止定妆'
+  const hasRefGaps = !!refsProgress && (refsProgress.failed > 0 || refsProgress.missing > 0)
   const conflictServerNames = new Set((conflict?.server_bible?.characters ?? []).map(character => character.name))
   const conflictLocalNames = new Set((editing?.characters ?? []).map(character => character.name))
   const conflictOnlyServer = [...conflictServerNames].filter(name => !conflictLocalNames.has(name))
   const conflictOnlyLocal = [...conflictLocalNames].filter(name => !conflictServerNames.has(name))
   const conflictBoth = [...conflictLocalNames].filter(name => conflictServerNames.has(name))
+  const conflictMerge = conflict?.server_bible && editing && editBaseBible
+    ? mergeBibleThreeWay(editBaseBible, editing, conflict.server_bible)
+    : null
 
   return (
     <>
@@ -850,9 +1010,19 @@ export default function BiblePage() {
               {p.bible_status === 'failed' ? '重新生成人物谱和定妆照' : '开始生成人物谱和定妆照'}
             </button>
           )}
-          {p.bible && p.refs_status === 'failed' && !generating && (
+          {p.bible && !generating && (
+            <button
+              className="btn primary"
+              disabled={busy || dirty}
+              title={dirty ? '请先定稿当前人物谱修订' : '使用服务端已保存的最新角色提示词和全局画风'}
+              onClick={() => void restartRefsWithLatestSettings()}
+            >
+              批量按最新设定重新生成
+            </button>
+          )}
+          {p.bible && (p.refs_status === 'failed' || hasRefGaps) && !generating && (
             <>
-              <button className="btn primary" disabled={busy} onClick={() => void retryRefs()}>
+              <button className="btn ghost" disabled={busy} onClick={() => void retryRefs()}>
                 补齐缺失的定妆照
               </button>
               <button className="btn ghost" disabled={busy} onClick={() => void skipToEpisodes()}>
@@ -905,7 +1075,7 @@ export default function BiblePage() {
         )}
         {!generating && p.bible && (
           <div className="hint" style={{ marginTop: 10 }}>
-            已启动过后端持续生成人物谱链路；后续在分镜阶段按集自动判定角色外观是否变化、按需重绘定妆照，前端不再提供打回重生入口。
+            修改角色画像描述或全局画风并定稿后，可用“批量按最新设定重新生成”选择角色并重建造型包；新包通过 QA 前不替换已采用成品。
           </div>
         )}
         {p.bible_status === 'failed' && <div className="error-banner">人物谱生成失败（原始错误如下，不做静默兜底）：{'\n'}{p.bible_error}</div>}
@@ -934,22 +1104,6 @@ export default function BiblePage() {
                   world: { ...current.world, visual_style_canonical: e.target.value },
                 }))} />
             : <div style={{ fontSize: 14, background: 'rgba(181,68,52,0.05)', borderLeft: '3px solid var(--cinnabar)', padding: '8px 12px', borderRadius: '0 6px 6px 0', lineHeight: 1.9 }}>{bible.world.visual_style_canonical}</div>}
-          {!!mosaicImages.length && (
-            <div className="worldview-mosaic" aria-label="最近可用定妆照">
-              {mosaicImages.map(image => (
-                <figure key={`${image.label}:${image.src}`}>
-                  <img src={image.src} alt={`${image.label} 定妆照`} />
-                  <figcaption>{image.label}</figcaption>
-                </figure>
-              ))}
-            </div>
-          )}
-          {!mosaicImages.length && (
-            <div className="hint" style={{ marginTop: 10 }}>
-              暂无可用定妆样图：当前角色尚未生成通过 QA 的定妆包，或已有包仍在生成/验证中。
-            </div>
-          )}
-
           <div style={{ height: 16 }} />
           <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}>
             {p.refs_status === 'running' && <span className="stamp gold">定妆中</span>}
@@ -1004,8 +1158,8 @@ export default function BiblePage() {
                   <CharacterQaLine qa={active.group_qa} availability={availability} />
                 )}
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
-                  <button className="btn small" type="button" disabled={!active}
-                    onClick={() => active && setQaDetail({ characterName: c.name, portrait: active })}>
+                  <button className="btn small" type="button"
+                    onClick={() => setQaDetail({ characterName: c.name, portrait: active })}>
                     QA详情
                   </button>
                   <button className="btn small" type="button" disabled={!characterCompareImages(c).length}
@@ -1069,13 +1223,13 @@ export default function BiblePage() {
           <ol style={{ paddingLeft: 22, fontSize: 13.5, color: 'var(--ink-soft)' }}>
             {filteredTimeline.map((k, i) => {
               const names = timelineNames.filter(name => k.includes(name))
-              const parts: Array<string | { episode: number; text: string }> = []
+              const parts: Array<string | { target: number; kind: 'episode' | 'chapter'; text: string }> = []
               let lastIndex = 0
-              for (const match of k.matchAll(/第([零一二两三四五六七八九十\d]+)集/g)) {
-                const episode = cnEpisodeToNumber(match[1])
-                if (!episode) continue
+              for (const match of k.matchAll(/第([零一二两三四五六七八九十\d]+)(集|章)/g)) {
+                const target = cnEpisodeToNumber(match[1])
+                if (!target) continue
                 if (match.index !== undefined && match.index > lastIndex) parts.push(k.slice(lastIndex, match.index))
-                parts.push({ episode, text: match[0] })
+                parts.push({ target, kind: match[2] === '章' ? 'chapter' : 'episode', text: match[0] })
                 lastIndex = (match.index ?? 0) + match[0].length
               }
               if (lastIndex < k.length) parts.push(k.slice(lastIndex))
@@ -1086,12 +1240,16 @@ export default function BiblePage() {
                     ? <span key={index}>{part}</span>
                     : (
                       <button
-                        key={`${index}:${part.episode}`}
+                        key={`${index}:${part.kind}:${part.target}`}
                         type="button"
                         className="timeline-episode-link"
                         onClick={() => {
-                          window.sessionStorage.setItem(`prep-episodes-focus:${p.id}`, JSON.stringify({ episode_no: part.episode }))
-                          go('episodes', p.id)
+                          if (part.kind === 'chapter') {
+                            go('reader', p.id, null, part.target)
+                          } else {
+                            window.sessionStorage.setItem(`prep-episodes-focus:${p.id}`, JSON.stringify({ episode_no: part.target }))
+                            go('episodes', p.id)
+                          }
                         }}
                       >
                         {part.text}
@@ -1104,7 +1262,14 @@ export default function BiblePage() {
                           key={name}
                           type="button"
                           className="stamp grey stamp-button"
-                          onClick={() => setTimelineCharacter(name)}
+                          onClick={() => {
+                            setTimelineCharacter(name)
+                            setCharSearch(name)
+                            setCharPage(0)
+                            window.requestAnimationFrame(() => {
+                              document.querySelector('.figure-grid')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                            })
+                          }}
                         >
                           {name}
                         </button>
@@ -1120,7 +1285,6 @@ export default function BiblePage() {
           )}
         </section>
       )}
-      <AutoChangeQueue projectId={p.id} onChanged={refresh} />
       <ImpactDialog
         open={impactOpen}
         title={impactMode === 'character' && pendingCharacterSave
@@ -1144,11 +1308,16 @@ export default function BiblePage() {
         loading={payLoading}
         error={payError}
         enableScopeSelection={paySelectable}
-        onClose={() => { setPayOpen(false); payActionRef.current = null }}
+        scopeSelectionTitle={payScopeTitle}
+        onClose={() => {
+          trackBible('bible_payment_confirm', p.id, { action: payPrecheck?.action || 'unknown', result: 'cancelled' })
+          setPayOpen(false); payActionRef.current = null
+        }}
         onConfirm={(selection) => {
           const run = payActionRef.current
           setPayOpen(false)
           if (!run) return
+          trackBible('bible_payment_confirm', p.id, { action: payPrecheck?.action || 'unknown', result: 'confirmed' })
           void act(() => run(selection))
         }}
       />
@@ -1168,19 +1337,23 @@ export default function BiblePage() {
           onlyServer={conflictOnlyServer}
           onlyLocal={conflictOnlyLocal}
           both={conflictBoth}
-          canMerge={!!conflict.server_bible && !!editing}
+          fieldConflicts={conflictMerge?.conflicts ?? []}
+          canMerge={!!conflict.server_bible && !!editing && !!editBaseBible}
           onClose={() => setConflict(null)}
-          onMerge={() => {
-            if (!editing || !conflict.server_bible) return
-            setEditing(mergeServerOnlyCharacters(editing, conflict.server_bible))
+          onMerge={(choices) => {
+            if (!editing || !conflict.server_bible || !editBaseBible) return
+            const merged = mergeBibleThreeWay(editBaseBible, editing, conflict.server_bible, choices)
+            setEditing(merged.bible)
+            setEditBaseBible(cloneBible(conflict.server_bible))
             setEditBaseVersion(conflict.current_version ?? editBaseVersion ?? p.bible_version ?? 0)
             setConflict(null)
-            toast('已合并服务端新增角色，请复核后重新定稿')
+            toast('已完成三方字段合并，请复核后重新定稿')
           }}
           onRefresh={() => {
             setConflict(null)
             setEditing(null)
             setEditBaseVersion(null)
+            setEditBaseBible(null)
             setUndoStack([])
             refresh()
           }}
@@ -1225,6 +1398,7 @@ export default function BiblePage() {
                   character: paramsCharacter.name,
                   confirm: true,
                   quote_id: quote.quote_id,
+                  idempotency_key: quote.quote_id,
                 })
                 toast(`正在为「${paramsCharacter.name}」重新定妆`)
                 refresh()
@@ -1330,6 +1504,7 @@ function PortraitBlock({ projectId, character: c, disabled, onChanged, regenerat
 }
 
 function portraitVersionLabel(portrait: Portrait): string {
+  if (portrait.ep_start <= 0) return '历史初始定妆'
   if (!portrait.base_portrait_id) {
     return portrait.ep_start > 1 ? `第${portrait.ep_start}集首次定妆` : '初始定妆'
   }
@@ -1422,7 +1597,7 @@ function CharacterPortraitGallery({ projectId, character, fitting, disabled, onC
         try {
           const result = await api.regenerateCharacterView(
             projectId, character.name, portraitId, viewRole,
-            { confirm: true, quote_id: quote.quote_id },
+            { confirm: true, quote_id: quote.quote_id, idempotency_key: quote.quote_id },
           ) as { status?: string; run_id?: string; message?: string }
           toast(result?.status === 'accepted'
             ? `${label}视角重做已受理，可刷新查看进度`
@@ -1446,7 +1621,9 @@ function CharacterPortraitGallery({ projectId, character, fitting, disabled, onC
             {portrait && <figcaption className="portrait-version-label">
               <span>
                 {index + 1}/{count} · {portraitVersionLabel(portrait)} · {VIEW_ROLE_LABELS[view?.view_role || ''] || view?.view_role || '正面'}
-                {portrait.ep_end != null
+                {portrait.ep_start <= 0
+                  ? ' · 曾适用第1集起'
+                  : portrait.ep_end != null
                   ? ` · 第${portrait.ep_start}-${portrait.ep_end}集`
                   : ` · 第${portrait.ep_start}集起`}
               </span>
@@ -1516,6 +1693,7 @@ function ConflictDialog({
   onlyServer,
   onlyLocal,
   both,
+  fieldConflicts,
   canMerge,
   onClose,
   onMerge,
@@ -1530,12 +1708,16 @@ function ConflictDialog({
   onlyServer: string[]
   onlyLocal: string[]
   both: string[]
+  fieldConflicts: BibleMergeConflict[]
   canMerge: boolean
   onClose: () => void
-  onMerge: () => void
+  onMerge: (choices: Record<string, 'local' | 'server'>) => void
   onRefresh: () => void
 }) {
   const trapRef = useFocusTrap(true, onClose)
+  const [choices, setChoices] = useState<Record<string, 'local' | 'server'>>(() =>
+    Object.fromEntries(fieldConflicts.map(item => [item.path, 'server'])),
+  )
   return (
     <div className="evidence-backdrop" role="presentation" onMouseDown={event => {
       if (event.currentTarget === event.target) onClose()
@@ -1564,11 +1746,31 @@ function ConflictDialog({
         ) : !!conflict.character_names?.length && (
           <p>服务端角色：{conflict.character_names.join('、')}</p>
         )}
+        {!!fieldConflicts.length && (
+          <div className="conflict-field-list">
+            <h4>双方同时修改的字段</h4>
+            {fieldConflicts.map(item => (
+              <fieldset key={item.path}>
+                <legend>{item.path || '人物谱'}</legend>
+                <label>
+                  <input type="radio" name={`conflict:${item.path}`} checked={choices[item.path] === 'local'}
+                    onChange={() => setChoices(current => ({ ...current, [item.path]: 'local' }))} />
+                  保留我的修改：{JSON.stringify(item.local)}
+                </label>
+                <label>
+                  <input type="radio" name={`conflict:${item.path}`} checked={choices[item.path] !== 'local'}
+                    onChange={() => setChoices(current => ({ ...current, [item.path]: 'server' }))} />
+                  采用服务端：{JSON.stringify(item.server)}
+                </label>
+              </fieldset>
+            ))}
+          </div>
+        )}
         <p>请处理冲突后继续；禁止用旧页面静默覆盖。</p>
         <div className="dialog-actions">
           <button type="button" className="btn" onClick={onClose}>留下继续查看</button>
           {canMerge && (
-            <button type="button" className="btn" onClick={onMerge}>采用服务端新角色并继续</button>
+            <button type="button" className="btn" onClick={() => onMerge(choices)}>合并选定字段并继续</button>
           )}
           <button type="button" className="btn primary" onClick={onRefresh}>刷新放弃</button>
         </div>

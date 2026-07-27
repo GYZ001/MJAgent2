@@ -84,7 +84,7 @@ def video_visual_anchor_qa_enabled() -> bool:
 
 
 def watermark_qa_mode() -> str:
-    return (get_setting("watermark_qa_mode") or "ignore_unless_occluding").strip()
+    return (get_setting("watermark_qa_mode") or "reject").strip()
 
 
 def fingerprint_payload(payload: dict[str, Any]) -> str:
@@ -125,6 +125,17 @@ def _ready_view_matches_fingerprint(view: dict[str, Any] | None, fingerprint: st
     if existing is None:
         return True
     return existing == fingerprint
+
+
+def _pending_view_can_be_reviewed(view: dict[str, Any] | None, fingerprint: str) -> bool:
+    """A generated view awaiting QA should be reviewed, not regenerated at cost."""
+    if not view or view.get("status") not in {PACK_STATUS_QA_PENDING, "unverified"}:
+        return False
+    path = view.get("image_path")
+    if not path or not Path(path).exists():
+        return False
+    existing = view.get("input_fingerprint") or None
+    return existing in {None, fingerprint}
 
 
 def _backfill_view_fingerprint(conn, *, table: str, view_id: str, fingerprint: str) -> None:
@@ -275,6 +286,61 @@ def pack_is_ready(pack_status: str | None, views: list[dict[str, Any]], required
     return False
 
 
+def scene_pack_is_usable(row, views: list[dict[str, Any]]) -> bool:
+    """下游只消费新版硬门禁通过的当前场景包。"""
+    if not row or (row["pack_status"] if "pack_status" in row.keys() else None) != PACK_STATUS_READY:
+        return False
+    if missing_required_views(views, SCENE_REQUIRED_VIEWS):
+        return False
+    try:
+        group = json.loads(row["group_qa_json"] or "{}") if "group_qa_json" in row.keys() else {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if group.get("hard_gate_passed") is not True or group.get("hard_failures"):
+        return False
+    return group.get("status") in {"ready", "warning"}
+
+
+def scene_primary_is_usable(row, views: list[dict[str, Any]]) -> bool:
+    """The adopted establishing image remains usable when only extra views fail.
+
+    Pack QA controls whether reverse/action views may be consumed.  It must not
+    invalidate an otherwise usable primary image merely because those optional
+    production aids are missing, pending, or inconsistent.
+    """
+    if not row:
+        return False
+    path = row["image_path"] if "image_path" in row.keys() else None
+    if not path or not Path(path).exists():
+        return False
+
+    def _qa_dict(raw: Any) -> dict[str, Any]:
+        try:
+            return json.loads(raw or "{}") if isinstance(raw, str) else dict(raw or {})
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+
+    def _explicitly_failed(qa: dict[str, Any]) -> bool:
+        return bool(qa.get("hard_failures")) or qa.get("status") in {"failed", "hard_failed", "rejected"}
+
+    row_qa = _qa_dict(row["qa_json"] if "qa_json" in row.keys() else None)
+    if _explicitly_failed(row_qa):
+        return False
+    establishing = next(
+        (view for view in views if view.get("view_role") == "establishing" and view.get("image_path") == path),
+        None,
+    )
+    establishing_qa = _qa_dict(
+        establishing.get("qa_json") or establishing.get("qa") if establishing else None,
+    )
+    if _explicitly_failed(establishing_qa):
+        return False
+    # A visible file without any primary-image evidence may be the same image
+    # implicated by an old group hard failure.  Require at least one primary
+    # QA record before separating it from the pack result.
+    return bool(row_qa or establishing_qa)
+
+
 # ---------- 视角选择（镜头级） ----------
 
 def select_character_view_roles(shot: Any, character_name: str) -> list[str]:
@@ -409,14 +475,23 @@ def resolve_shot_asset_dependencies(
     sname = scene_name or getattr(shot, "scene_name", None) or ""
     if sname:
         all_views = scene_views_for_episode(project_id, sname, episode_no, ready_only=False)
-        views = [v for v in all_views if v.get("status") == "ready" and v.get("image_path")] if ready_only else all_views
         row = scene_row_for_episode(project_id, sname, episode_no)
+        pack_usable = scene_pack_is_usable(row, all_views)
+        primary_usable = scene_primary_is_usable(row, all_views)
+        usable = pack_usable or primary_usable
+        views = (
+            [v for v in all_views if v.get("status") == "ready" and v.get("image_path")]
+            if ready_only and usable else ([] if ready_only else all_views)
+        )
         wanted = select_scene_view_roles(shot)
         selected = resolve_views_for_roles(views, wanted, fallback_roles=SCENE_REQUIRED_VIEWS)
         scene_out = {
             "name": sname,
             "scene_revision_id": row["id"] if row else None,
             "pack_status": (row["pack_status"] if row and "pack_status" in row.keys() else None),
+            "asset_usable": usable,
+            "pack_usable": pack_usable,
+            "primary_usable": primary_usable,
             "selected_view_ids": [v["id"] for v in selected],
             "selected_views": [
                 {
@@ -779,8 +854,9 @@ async def review_scene_view(image_path: str, scene_canonical: str, view_role: st
             initiator_label="场景多视角主图QA",
             environment_only=True,
         )
+        from app.scene_policy import normalize_scene_image_qa
         qa["view_role"] = view_role
-        return qa
+        return normalize_scene_image_qa(qa, environment_only=True)
     except Exception as exc:  # noqa: BLE001
         return {
             "overall": None,
@@ -822,21 +898,32 @@ async def review_character_pack_consistency(views: list[dict[str, Any]], appeara
         "你是角色多视角一致性评审。以下图片是同一角色不同观察角度的设定图，顺序："
         + ", ".join(f"{i+1}:{r}" for i, r in enumerate(roles))
         + f"。外观锚点：{appearance}。"
-        "先逐张检查是否符合对应观察角度、外观锚点、主体完整且无畸形；"
-        "再检查同一角色脸部特征、发型、服装、体型在各视角一致，只允许角度不同。"
+        "先逐张检查对应观察角度、稳定身份特征、主体完整性与技术缺陷；"
+        "再检查同一角色脸部特征、发型、服装、体型在各视角一致，只允许观察角度不同。"
+        "年龄段、性别、核心身份、脸/发型/服装/体型漂移、缺失视角、多余人物、畸形、"
+        "遮挡人物主体的文字/水印属于 hard_failures。供应商角落水印若不遮挡人物，"
+        "只属于 issues 软警告，不得写入 hard_failures。表情、眼神、笑容、爱慕/妩媚/虚荣/戏谑等气质，"
+        "以及普通展示站姿只属于 issues 软警告，不得写入 hard_failures，也不得拉低 overall；"
+        "定妆多视角允许使用统一的中性表情。"
         '输出 JSON：{"overall":0~1,"face_consistency":0~1,"outfit_consistency":0~1,'
-        '"hair_consistency":0~1,"views":[{"view_role":str,"overall":0~1,'
+        '"hair_consistency":0~1,"body_consistency":0~1,'
+        '"views":[{"view_role":str,"identity_match":0~1,"presentation_match":0~1,'
+        '"clean_frame":0~1,"overall":0~1,'
         '"issues":[str],"hard_failures":[str]}],"issues":[str],"hard_failures":[str]}'
     )
     try:
         raw = await hiagent.vlm_check(frames, expectation, call_meta={"initiator_label": "人物多视角整包QA"})
         from app.schemas import extract_json
+        from app.portrait_policy import split_portrait_hard_failures, unique_messages
         data = extract_json(raw)
-        for key in ("overall", "face_consistency", "outfit_consistency", "hair_consistency"):
+        for key in ("overall", "face_consistency", "outfit_consistency", "hair_consistency", "body_consistency"):
             try:
                 data[key] = max(0.0, min(1.0, float(data.get(key, 0))))
             except (TypeError, ValueError):
                 data[key] = 0.0
+        group_hard, group_demoted = split_portrait_hard_failures(data.get("hard_failures"))
+        data["hard_failures"] = group_hard
+        data["issues"] = unique_messages([*_qa_string_list(data.get("issues")), *group_demoted])
         reported = {
             str(item.get("view_role") or ""): item
             for item in (data.get("views") or []) if isinstance(item, dict)
@@ -849,22 +936,37 @@ async def review_character_pack_consistency(views: list[dict[str, Any]], appeara
                 item["overall"] = max(0.0, min(1.0, float(item.get("overall"))))
             except (TypeError, ValueError):
                 item["overall"] = None
-            item["issues"] = _qa_string_list(item.get("issues"))
-            item["hard_failures"] = _qa_string_list(item.get("hard_failures"))
+            try:
+                stable_view_score = min(
+                    max(0.0, min(1.0, float(item["identity_match"]))),
+                    max(0.0, min(1.0, float(item["clean_frame"]))),
+                )
+                item["overall"] = round(stable_view_score, 3)
+            except (KeyError, TypeError, ValueError):
+                pass
+            view_hard, view_demoted = split_portrait_hard_failures(item.get("hard_failures"))
+            item["issues"] = unique_messages([*_qa_string_list(item.get("issues")), *view_demoted])
+            item["hard_failures"] = view_hard
             item["status"] = (
                 "ready" if item["overall"] is not None and item["overall"] >= 0.6
                 and not item["hard_failures"] else "failed"
             )
             normalized_views.append(item)
         data["views"] = normalized_views
-        data["status"] = (
-            "ready" if float(data.get("overall") or 0) >= 0.75
-            and not data.get("hard_failures")
+        data["issues"] = unique_messages([
+            *data["issues"],
+            *(
+                f"{item['view_role']}：{message}"
+                for item in normalized_views
+                for message in item.get("issues", [])
+            ),
+        ])
+        passed = (
+            float(data.get("overall") or 0) >= 0.75
+            and not data["hard_failures"]
             and all(item["status"] == "ready" for item in normalized_views)
-            else "failed"
         )
-        data["issues"] = _qa_string_list(data.get("issues"))
-        data["hard_failures"] = _qa_string_list(data.get("hard_failures"))
+        data["status"] = "warning" if passed and data["issues"] else ("ready" if passed else "failed")
         return data
     except Exception as exc:  # noqa: BLE001
         return {
@@ -897,11 +999,16 @@ async def review_scene_pack_consistency(views: list[dict[str, Any]], scene_canon
         "你是场景多视角一致性评审。以下是同一场景不同机位的无人定场图，顺序："
         + ", ".join(f"{i+1}:{r}" for i, r in enumerate(roles))
         + f"。场景锚点：{scene_canonical}。"
-        "先逐张检查是否符合对应机位、场景锚点且画面结构完整；"
-        "再检查门窗、主陈设、标志物、光线方向在各视角不自相矛盾；允许构图不同。"
+        "先逐张识别实际视角角色并检查场景锚点和画面结构；"
+        "再检查相机轴线是否真正变化、门窗/主陈设/标志物的左右前后关系及空间覆盖。"
+        "相似度/SSIM 只能作为证据，不能单独决定通过；对称空间也必须给出轴线和标志物依据。"
+        "views 必须与输入顺序一一对应，view_role 只能原样输出上述英文枚举，"
+        "不得加 shot、机位描述或其他后缀。"
         '输出 JSON：{"overall":0~1,"geometry_consistency":0~1,"landmark_consistency":0~1,'
         '"lighting_consistency":0~1,"views":[{"view_role":str,"overall":0~1,'
-        '"issues":[str],"hard_failures":[str]}],"issues":[str],"hard_failures":[str]}'
+        '"view_role_matches":bool,"camera_axis_valid":bool,"landmark_relation_valid":bool,'
+        '"space_coverage_valid":bool,"issues":[str],"hard_failures":[str]}],'
+        '"issues":[str],"hard_failures":[str],"uncertainties":[str]}'
     )
     try:
         raw = await hiagent.vlm_check(frames, expectation, call_meta={"initiator_label": "场景多视角整包QA"})
@@ -912,13 +1019,32 @@ async def review_scene_pack_consistency(views: list[dict[str, Any]], scene_canon
                 data[key] = max(0.0, min(1.0, float(data.get(key, 0))))
             except (TypeError, ValueError):
                 data[key] = 0.0
-        reported = {
-            str(item.get("view_role") or ""): item
-            for item in (data.get("views") or []) if isinstance(item, dict)
-        }
+        raw_views = [dict(item) for item in (data.get("views") or []) if isinstance(item, dict)]
+        unused = set(range(len(raw_views)))
         normalized_views = []
-        for role in roles:
-            item = dict(reported.get(role) or {})
+        for role_index, role in enumerate(roles):
+            matched_index = next(
+                (index for index in unused if str(raw_views[index].get("view_role") or "").strip() == role),
+                None,
+            )
+            if matched_index is None:
+                role_token = role.replace("_", " ").lower()
+                matched_index = next(
+                    (
+                        index for index in unused
+                        if role_token in str(raw_views[index].get("view_role") or "")
+                        .replace("_", " ").lower()
+                    ),
+                    None,
+                )
+            # The contract also defines positional correspondence.  This
+            # recovers otherwise valid VLM output such as
+            # "establishing shot (left viewpoint)" without fabricating facts.
+            if matched_index is None and role_index in unused:
+                matched_index = role_index
+            item = dict(raw_views[matched_index]) if matched_index is not None else {}
+            if matched_index is not None:
+                unused.discard(matched_index)
             item["view_role"] = role
             try:
                 item["overall"] = max(0.0, min(1.0, float(item.get("overall"))))
@@ -932,15 +1058,14 @@ async def review_scene_pack_consistency(views: list[dict[str, Any]], scene_canon
             )
             normalized_views.append(item)
         data["views"] = normalized_views
-        data["status"] = (
-            "ready" if float(data.get("overall") or 0) >= 0.75
-            and not data.get("hard_failures")
-            and all(item["status"] == "ready" for item in normalized_views)
-            else "failed"
-        )
         data["issues"] = _qa_string_list(data.get("issues"))
         data["hard_failures"] = _qa_string_list(data.get("hard_failures"))
-        return data
+        from app.scene_policy import normalize_scene_pack_qa
+        return normalize_scene_pack_qa(
+            data,
+            required_roles=[*SCENE_REQUIRED_VIEWS, *(["action_zone"] if "action_zone" in roles else [])],
+            actual_roles=roles,
+        )
     except Exception as exc:  # noqa: BLE001
         return {
             "overall": None,
@@ -952,6 +1077,8 @@ async def review_scene_pack_consistency(views: list[dict[str, Any]], scene_canon
 
 def _view_passed(qa: dict[str, Any] | None) -> bool:
     if not qa:
+        return False
+    if qa.get("hard_failures") or qa.get("hard_gate_passed") is False:
         return False
     if qa.get("status") in {"unverified", "failed", "rejected"} or qa.get("overall") is None:
         return False
@@ -990,7 +1117,7 @@ def _apply_pack_view_qa(
                 "hard_failures": _qa_string_list(group_qa.get("hard_failures")),
                 "status": group_qa.get("status"),
             }
-        status = "ready" if _view_passed(qa) and group_qa.get("status") == "ready" else "failed"
+        status = "ready" if _view_passed(qa) and group_qa.get("status") in {"ready", "warning"} else "failed"
         if status != "ready":
             failed.append(role)
         conn.execute(
@@ -1171,7 +1298,7 @@ async def ensure_character_multiview_pack(
         views=required_views,
         group_qa=group_qa,
     )
-    if group_qa.get("status") != "ready" or failed_roles:
+    if group_qa.get("status") not in {"ready", "warning"} or failed_roles:
         _set_portrait_pack_fields(
             conn, portrait_id, pack_status=PACK_STATUS_FAILED,
             group_qa_json=json.dumps(group_qa, ensure_ascii=False),
@@ -1206,6 +1333,7 @@ async def ensure_scene_multiview_pack(
     ep_start: int,
     base_scene_id: str | None = None,
     primary_qa: dict[str, Any] | None = None,
+    optional_views: list[str] | None = None,
 ) -> dict[str, Any]:
     if not scene_multiview_enabled():
         return {"status": "disabled", "scene_reference_id": scene_reference_id}
@@ -1302,7 +1430,7 @@ async def ensure_scene_multiview_pack(
         base_view_id=base_rev.get("id"),
         seed_hint=est.get("image_path"),
     )
-    if not _ready_view_matches_fingerprint(rev, rev_fp):
+    if not _ready_view_matches_fingerprint(rev, rev_fp) and not _pending_view_can_be_reviewed(rev, rev_fp):
         seeds = []
         if est.get("image_path") and Path(est["image_path"]).exists():
             seeds.append(hiagent.data_url_from_file(est["image_path"]))
@@ -1325,8 +1453,85 @@ async def ensure_scene_multiview_pack(
         )
         conn.commit()
 
+    requested_optional = [role for role in (optional_views or []) if role in SCENE_OPTIONAL_VIEWS]
+    if "action_zone" in requested_optional:
+        existing_views = {v["view_role"]: v for v in list_scene_views(scene_reference_id, conn=conn)}
+        action = existing_views.get("action_zone")
+        action_prompt = scene_view_prompt(visual_style, scene_canonical, "action_zone")
+        action_fp = view_input_fingerprint(
+            view_role="action_zone", prompt=action_prompt, anchor_text=scene_canonical,
+            parent_revision_id=scene_reference_id,
+            seed_hint=(existing_views.get("establishing") or {}).get("image_path"),
+        )
+        if not _ready_view_matches_fingerprint(action, action_fp) and not _pending_view_can_be_reviewed(action, action_fp):
+            seeds = []
+            anchor = existing_views.get("establishing") or {}
+            if anchor.get("image_path") and Path(anchor["image_path"]).exists():
+                seeds.append(hiagent.data_url_from_file(anchor["image_path"]))
+            path = _view_path(project_id, "scene", scene_name, "action_zone", ep_start)
+            item = await _generate_image(
+                action_prompt, seed_inputs=seeds or None,
+                call_meta={"asset_kind": "scene_view", "view_role": "action_zone", "scene_name": scene_name},
+            )
+            await _save_image_item(item, path)
+            _upsert_scene_view(
+                conn, scene_reference_id=scene_reference_id, view_role="action_zone",
+                camera_axis="action", image_path=path, prompt=action_prompt, qa=None, artifact_id=None,
+                base_view_id=None, status=PACK_STATUS_QA_PENDING, fingerprint=action_fp,
+            )
+            conn.commit()
+
     views = list_scene_views(scene_reference_id, conn=conn)
-    required_views = [v for v in views if v.get("view_role") in SCENE_REQUIRED_VIEWS]
+    required_roles = (*SCENE_REQUIRED_VIEWS, *requested_optional)
+    required_views = [v for v in views if v.get("view_role") in required_roles]
+    # At this point qa_pending is a real on-disk image that the loop below must
+    # review.  Only a physically absent role is missing; using
+    # missing_required_views here used to abort before QA because that helper
+    # intentionally counts only ready views for downstream consumption.
+    present_roles = {
+        view.get("view_role") for view in views
+        if view.get("image_path") and Path(view["image_path"]).exists()
+    }
+    missing = [role for role in required_roles if role not in present_roles]
+    if missing:
+        group_qa = {
+            "status": "failed", "hard_failures": [f"缺少必需视角：{role}" for role in missing],
+            "missing_required": missing, "required_views": list(required_roles),
+        }
+        _set_scene_pack_fields(conn, scene_reference_id, pack_status=PACK_STATUS_FAILED,
+                               group_qa_json=json.dumps(group_qa, ensure_ascii=False))
+        conn.commit()
+        return {"status": "failed", "scene_reference_id": scene_reference_id, "group_qa": group_qa, "failed_views": missing}
+    single_failed: list[str] = []
+    for view in required_views:
+        try:
+            existing_qa = json.loads(view.get("qa_json") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            existing_qa = {}
+        if existing_qa.get("policy_version") and existing_qa.get("hard_gate_passed") is True:
+            continue
+        qa = await review_scene_view(view["image_path"], scene_canonical, view["view_role"])
+        view_status = "ready" if _view_passed(qa) else (
+            "unverified" if qa.get("status") == "unverified" else "failed"
+        )
+        conn.execute(
+            "UPDATE scene_reference_views SET qa_json=?,status=? WHERE id=?",
+            (json.dumps(qa, ensure_ascii=False), view_status, view["id"]),
+        )
+        view["qa_json"] = json.dumps(qa, ensure_ascii=False)
+        view["status"] = view_status
+        if view_status != "ready":
+            single_failed.append(view["view_role"])
+    if single_failed:
+        group_qa = {
+            "status": "failed", "hard_failures": [f"{role} 单图纯净度硬门禁未通过" for role in single_failed],
+            "failed_views": single_failed, "required_views": list(required_roles),
+        }
+        _set_scene_pack_fields(conn, scene_reference_id, pack_status=PACK_STATUS_FAILED,
+                               group_qa_json=json.dumps(group_qa, ensure_ascii=False))
+        conn.commit()
+        return {"status": "failed", "scene_reference_id": scene_reference_id, "group_qa": group_qa, "failed_views": single_failed}
+    conn.commit()
     group_qa = await review_scene_pack_consistency(required_views, scene_canonical)
     failed_roles = _apply_pack_view_qa(
         conn,
@@ -1336,7 +1541,7 @@ async def ensure_scene_multiview_pack(
         views=required_views,
         group_qa=group_qa,
     )
-    if group_qa.get("status") != "ready" or failed_roles:
+    if group_qa.get("status") not in {"ready", "warning"} or failed_roles:
         _set_scene_pack_fields(
             conn, scene_reference_id, pack_status=PACK_STATUS_FAILED,
             group_qa_json=json.dumps(group_qa, ensure_ascii=False),
@@ -1950,7 +2155,7 @@ async def regenerate_character_view(
         }
 
     group_qa = await review_character_pack_consistency(required, appearance)
-    if group_qa.get("status") != "ready":
+    if group_qa.get("status") not in {"ready", "warning"}:
         _discard_rejected_candidate(path)
         return {
             "status": "failed", "view_role": view_role, "group_qa": group_qa,
@@ -2030,8 +2235,16 @@ async def regenerate_scene_view(
     candidate_views = [candidate if v.get("view_role") == view_role else v for v in existing.values()]
     if view_role not in existing:
         candidate_views.append(candidate)
-    required = [v for v in candidate_views if v.get("view_role") in SCENE_REQUIRED_VIEWS]
-    missing = missing_required_views(candidate_views, SCENE_REQUIRED_VIEWS)
+    previous_group = {}
+    try:
+        previous_group = json.loads(row["group_qa_json"] or "{}") if "group_qa_json" in row.keys() else {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        previous_group = {}
+    required_roles = list(previous_group.get("required_views") or SCENE_REQUIRED_VIEWS)
+    if view_role == "action_zone" and "action_zone" not in required_roles:
+        required_roles.append("action_zone")
+    required = [v for v in candidate_views if v.get("view_role") in required_roles]
+    missing = missing_required_views(candidate_views, tuple(required_roles))
     if missing:
         _discard_rejected_candidate(path)
         return {
@@ -2040,7 +2253,7 @@ async def regenerate_scene_view(
         }
 
     group_qa = await review_scene_pack_consistency(required, canonical)
-    if group_qa.get("status") != "ready":
+    if group_qa.get("status") not in {"ready", "warning"}:
         _discard_rejected_candidate(path)
         return {
             "status": "failed", "view_role": view_role, "group_qa": group_qa,

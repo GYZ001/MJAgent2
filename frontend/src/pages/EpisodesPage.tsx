@@ -20,6 +20,7 @@ function ScreenplayStamp({ status }: { status: string }) {
 }
 
 const PAGE_SIZE = 15
+const TARGET_DURATION_CHOICES = [40, 50, 60, 70, 80, 90] as const
 
 export default function EpisodesPage() {
   const { projectId, go, toast } = useNav()
@@ -266,6 +267,10 @@ export default function EpisodesPage() {
             : ['confirmed', 'generating', 'paused_budget'].includes(ep.status) ? 'wall'
               : ep.screenplay_status === 'ready' ? 'board' : 'script'
           const destinationLabel = destination === 'cinema' ? '查看成片' : destination === 'wall' ? '继续评审' : destination === 'board' ? '继续分镜' : '继续剧本'
+          const targetDurationEditable = ['pending', 'failed'].includes(ep.screenplay_status)
+            && ['planned', 'drafting'].includes(ep.status)
+            && !ep.screenplay_artifact_id
+            && !ep.shot_count
           return (
           <div key={ep.id} className={`episode-row${focusEpisodeNo === ep.episode_no ? ' focus-highlight' : ''}`} data-episode-no={ep.episode_no}>
             <div className="ep-main">
@@ -279,7 +284,25 @@ export default function EpisodesPage() {
             <div className="ep-side">
               <div className="ep-meta">
                 <span>源章 {ep.source_chapters[0]}–{ep.source_chapters[ep.source_chapters.length - 1]}</span>
-                <span>目标 {ep.target_duration_s}s</span>
+                <span className="episode-target-inline" title={targetDurationEditable
+                  ? '整集节奏预算，包含对白、动作、反应和转场'
+                  : '已有剧本或下游产物后不可直接修改，避免版本不一致'}>
+                  目标
+                  <select
+                    aria-label={`第${ep.episode_no}集目标时长`}
+                    value={ep.target_duration_s}
+                    disabled={busy || !targetDurationEditable}
+                    onChange={event => {
+                      const target = Number(event.target.value)
+                      void act(
+                        () => api.put(`/episodes/${ep.id}/target-duration`, { target_duration_s: target }),
+                        `第${ep.episode_no}集目标时长已调整为 ${target} 秒`,
+                      )
+                    }}
+                  >
+                    {TARGET_DURATION_CHOICES.map(value => <option key={value} value={value}>{value}s</option>)}
+                  </select>
+                </span>
                 <span>已耗 ¥{ep.cost_cny.toFixed(1)}</span>
               </div>
               <div className="ep-stamps">

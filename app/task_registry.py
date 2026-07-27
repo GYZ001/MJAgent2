@@ -19,6 +19,12 @@ class TaskRecord:
 
 
 _records: dict[tuple[str, str], TaskRecord] = {}
+_shutdown_in_progress = False
+
+
+def shutdown_in_progress() -> bool:
+    """Return whether cancellation comes from process shutdown, not a user action."""
+    return _shutdown_in_progress
 
 
 def get(kind: str, key: str) -> asyncio.Task | None:
@@ -89,9 +95,15 @@ async def cancel_project(project_id: str) -> int:
 
 
 async def stop_all() -> None:
-    records = [r for r in list(_records.values()) if not r.task.done()]
-    _records.clear()
-    for record in records:
-        record.task.cancel()
-    if records:
-        await asyncio.gather(*(r.task for r in records), return_exceptions=True)
+    global _shutdown_in_progress
+    _shutdown_in_progress = True
+    try:
+        records = [r for r in list(_records.values()) if not r.task.done()]
+        _records.clear()
+        for record in records:
+            record.task.cancel()
+        if records:
+            await asyncio.gather(*(r.task for r in records), return_exceptions=True)
+    finally:
+        # 测试或嵌入式 lifespan 可能在同一进程内再次启动。
+        _shutdown_in_progress = False

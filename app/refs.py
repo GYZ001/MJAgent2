@@ -16,6 +16,7 @@ from app import config, hiagent
 from app.atomic_io import atomic_write_bytes
 from app.db import get_conn, new_id
 from app.evidence.media import record_reference_asset
+from app.errors import ContentGenerationError
 from app.schemas import Bible
 
 
@@ -76,12 +77,13 @@ def portrait_prompt(visual_style: str, anchor: str) -> str:
         return normalize_prompt_text(
             f"{style}。单角色全身概念定妆设定图：{body}。"
             + "；".join(refinements)
-            + "。纯浅米色背景，全身与关联道具完整可见。"
+            + "。纯浅米色背景，全身与关联道具完整可见，主体四周保留安全边距。"
               "仅保留锚点明确要求的特效，禁止额外火焰、斗气光环、文字、水印和 logo"
         )
     return normalize_prompt_text(
         f"{style}。全身角色立绘定妆照：{body}。"
         "正面站立，中性表情，双臂自然下垂，纯浅米色背景，全身完整可见。"
+        "头顶、肩臂和鞋底均不得贴边或出画，主体四周保留至少 8% 安全边距。"
         "仅保留锚点明确要求的特效，禁止额外火焰、斗气光环、文字、水印和 logo"
     )
 
@@ -110,6 +112,7 @@ async def generate_refs(
     *,
     only_characters: list[str] | None = None,
     resume: bool = False,
+    fresh_after: float | None = None,
 ) -> None:
     """为项目全部（或指定）角色生成定妆照，写回 bible_json 的 ref_image_path。"""
     conn = get_conn()
@@ -144,12 +147,20 @@ async def generate_refs(
 
         committed: dict[str, str] = {}
         for character in targets:
-            row = conn.execute(
-                "SELECT image_path FROM character_portraits "
-                "WHERE project_id=? AND character_name=? AND ep_start=1 "
-                "ORDER BY created_at DESC LIMIT 1",
-                (project_id, character.name),
-            ).fetchone()
+            if fresh_after is None:
+                row = conn.execute(
+                    "SELECT image_path FROM character_portraits "
+                    "WHERE project_id=? AND character_name=? AND ep_start=1 "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (project_id, character.name),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT image_path FROM character_portraits "
+                    "WHERE project_id=? AND character_name=? AND ep_start=1 AND created_at>=? "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (project_id, character.name, fresh_after),
+                ).fetchone()
             if row and row["image_path"] and Path(row["image_path"]).is_file():
                 if character_multiview_enabled():
                     try:
@@ -179,7 +190,7 @@ async def generate_refs(
         if not targets:
             return
 
-    errors: list[str] = []
+    failures: list[tuple[str, Exception]] = []
     for c in targets:
         try:
             c.ref_image_path = None
@@ -233,12 +244,19 @@ async def generate_refs(
                         qa=qa,
                     )
                     if artifact["status"] != "approved":
-                        critique = "；".join(str(item) for item in (qa.get("issues") or []))[:400]
-                        last_error = hiagent.ProviderError(
+                        # Repair true blockers first; acting-direction issues are
+                        # soft and only reach this branch when another hard gate
+                        # (identity/technical completeness) also failed.
+                        critique_items = [
+                            *(qa.get("hard_failures") or []),
+                            *(qa.get("issues") or []),
+                        ]
+                        critique = "；".join(str(item) for item in critique_items)[:400]
+                        last_error = ContentGenerationError(
                             f"定妆照一致性检查未通过：{c.name}（第 {attempt} 次）"
                         )
                         continue
-                    portrait_id = _portraits.register_initial_portrait(
+                    portrait_id = _portraits.stage_initial_portrait(
                         conn, project_id, c.name, path, c.appearance_canonical, prompt,
                         bible_version, artifact_id=artifact["id"])
                     # 初始多视角资产包：任一侧视角/整包失败则禁止半包生效
@@ -260,6 +278,9 @@ async def generate_refs(
                                 f"多视角资产包未通过，禁止生效：{c.name}"
                                 f"（status={pack.get('status')}）"
                             )
+                    _portraits.promote_staged_initial_portrait(
+                        conn, project_id, c.name, portrait_id,
+                    )
                     # The Bible path becomes visible only after the required
                     # multiview pack has passed as a whole.
                     c.ref_image_path = path
@@ -295,14 +316,17 @@ async def generate_refs(
             _merge_generated_portraits(conn, project_id, [c])
             conn.commit()
         except Exception as exc:  # noqa: BLE001 失败要响：逐角色记录，最后汇总抛出
-            errors.append(f"{c.name}：{exc}")
+            failures.append((c.name, exc))
 
     # Scene Bible generation runs in parallel with portraits.  Merge only the
     # fields owned by this task so its old snapshot cannot erase newly added scenes.
     _merge_generated_portraits(conn, project_id, targets)
     conn.commit()
-    if errors:
-        raise hiagent.ProviderError("部分定妆照失败：" + "；".join(errors)[:600])
+    if failures:
+        detail = "；".join(f"{name}：{exc}" for name, exc in failures)[:600]
+        if all(isinstance(exc, ContentGenerationError) for _, exc in failures):
+            raise ContentGenerationError("部分定妆照未通过质量校验：" + detail)
+        raise hiagent.ProviderError("部分定妆照失败：" + detail)
 
 
 def refs_as_image_inputs(bible: Bible, character_names: list[str], limit: int,

@@ -15,6 +15,7 @@ async def generate(args: I.ScreenplayGenerateInput) -> CommandResult:
         body={
             "force": args.force,
             "required_dialogue_lines": args.required_dialogue_lines,
+            "required_dialogue_occurrence_ids": args.required_dialogue_occurrence_ids,
         },
     )
     if isinstance(outcome, CommandResult):

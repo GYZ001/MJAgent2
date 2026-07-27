@@ -63,7 +63,7 @@ from app.renderability import (
 SYSTEM_PREFIX = (
     "你是专业的竖屏漫剧（动态漫画短剧）编剧与分镜师。\n"
     "你的观众看的是 AI 生成视频，不是摄影机实拍；请为模型能力写作，不为文学完整度炫技。\n"
-    "输出规则：只输出一个 JSON 对象，无 Markdown 围栏，无解释文字。\n"
+    "输出规则：只输出一个 JSON 对象，无 Markdown 围栏，无解释文字；字符串内部的英文双引号必须写成 JSON 转义形式。\n"
     "所有内容使用简体中文。"
 )
 
@@ -218,6 +218,9 @@ async def _run_with_agent_loop(
                     "call_role": "stage_generate",
                     "call_role_label": "主生成",
                     "repair_round": 0,
+                    # 若相同幂等 operation 已从供应商成功返回、但本地状态机在落库前
+                    # 发生恢复竞态，直接复用已记录响应，禁止再次付费生成。
+                    "reuse_successful_operation": True,
                 },
             )
         error_history = [[issue.message for issue in issues] for issues in issue_history]
@@ -273,7 +276,10 @@ async def _run_with_agent_loop(
 
     def evaluator(raw: str):
         try:
-            obj = extract_json(raw)
+            obj = extract_json(
+                raw,
+                repair_unescaped_inner_quotes=model_cls is EpisodeScreenplay,
+            )
         except ValueError as exc:
             messages = [str(exc)]
             return None, issues_from_messages(messages, subject=f"{loop.scope_type}:{loop.scope_id}")
@@ -1710,9 +1716,12 @@ source_excerpt 内的双引号必须按 JSON 规范转义，或改用中文引�
             draft.shot.spine_beat_ids = list(brief.spine_beat_ids)
         if not draft.shot.key_line_ids and brief.key_line_ids:
             draft.shot.key_line_ids = list(brief.key_line_ids)
-        if not draft.shot.information_ids and brief.information_ids:
-            draft.shot.information_ids = list(brief.information_ids)
-            draft.shot.new_information_ids = list(brief.information_ids)
+        if not draft.shot.information_ids and current_info_ids:
+            # 大纲可能来自旧版本并携带 INFO_03 等非权威 ID。提示和校验前已经按
+            # screenplay.information_ledger 过滤，这里必须复用同一白名单结果，不能
+            # 在校验通过后重新注入未经校验的 brief.information_ids。
+            draft.shot.information_ids = list(current_info_ids)
+            draft.shot.new_information_ids = list(current_info_ids)
     # 防重复约束是给后续创作/视频模型理解的中文语义，不持久化裸内部 ID。
     draft.shot.do_not_repeat = list(ledger_context.get("do_not_repeat") or [])
     _normalized_candidate_board(episode["episode_no"], completed_shots, draft.shot, bible, episode["target_duration_s"])
@@ -1909,7 +1918,11 @@ def _normalize_qa_object(obj: dict, score_keys: list[str], *, raw: str = "",
                          defaults: dict[str, float] | None = None,
                          recovered: bool = False) -> dict:
     defaults = defaults or {}
-    out: dict[str, object] = {}
+    # Keep the evaluator's observation fields in addition to the normalized
+    # scores.  Scene/portrait policies rely on facts such as person_count and
+    # watermark_detected; dropping them here turns a complete response into an
+    # artificial "unverified" result.
+    out: dict[str, object] = dict(obj)
     known_scores: list[float] = []
     incomplete = False
     for key in score_keys:
@@ -1992,7 +2005,7 @@ async def review_scene_image(image_b64: str, frame_desc: str, scene_setting: str
         "供应商自动添加且位于角落、不遮挡场景主体的水印/Logo 不扣分，也不要写入 issues；"
         "只有遮挡关键场景结构时才扣分并说明遮挡位置。"
         if ignore_non_occluding_watermark
-        else "画面不得包含文字、水印或 Logo。"
+        else "画面不得包含任何位置、透明度的文字、水印或 Logo；检出即为入库硬失败。"
     )
     frame_name = "首图（本镜动作开始前的静止画面）" if kind == "head" else "尾图（本镜动作完成后的静止画面）"
     cont = ("\n本关键帧需与第2张参考图在画风、人物形象、光影上自然连贯（第2张可能是本镜首图或上一镜尾图）。"
@@ -2011,12 +2024,18 @@ async def review_scene_image(image_b64: str, frame_desc: str, scene_setting: str
 2. continuity         与参考图的画风、人物形象、光影是否连贯（无参考图则给 1）
 3. clean_frame        无多余文字/多余人物/肢体畸形/五官崩坏。{watermark_note}
 
+纯环境资产还必须输出可机器判断的观察事实；不能确认时使用 null，禁止猜测：
+- person_count: 识别到的人物数量（int 或 null）
+- watermark_detected: 是否检出任意水印/Logo（bool 或 null）
+- forbidden_text_detected: 是否检出不属于场景合理陈设的字幕、角标、随机字形或叠字（bool 或 null）
+- space_type_matches: 室内外及空间类型是否符合预期（bool 或 null）
+
 评分硬规则（务必遵守）：
 {main_rule}
 - overall 不得高于 expectation_match：动作/朝向/互动不对就是不合格，画面再干净、画风再连贯也不能给高 overall。
 - issues 里必须逐条点明具体不符之处（例如"人物未触碰石碑、身体正对镜头而非转向石碑"），供下一版定向改正。
 
-只输出 JSON：{{"expectation_match": float, "continuity": float, "clean_frame": float, "overall": float, "issues": [str]}}"""
+只输出 JSON：{{"expectation_match": float, "continuity": float, "clean_frame": float, "overall": float, "person_count": int|null, "watermark_detected": bool|null, "forbidden_text_detected": bool|null, "space_type_matches": bool|null, "issues": [str], "uncertainties": [str]}}"""
     frames = [image_b64] + ([prev_image_b64] if prev_image_b64 else [])
     raw = await hiagent.vlm_check(
         frames, expectation,
@@ -2041,7 +2060,30 @@ async def review_scene_image(image_b64: str, frame_desc: str, scene_setting: str
             )
             return mentions_watermark and not mentions_occlusion
 
+        watermark_reported = result.get("watermark_detected") is True
+        occluding_watermark = any(
+            _watermark_only(item) is False
+            and any(token in item.lower() for token in ("watermark", "logo", "水印", "ai生成"))
+            and any(token in item.lower() for token in ("occlud", "遮挡", "遮住", "覆盖主体"))
+            for item in original_issues
+        )
         result["issues"] = [item for item in original_issues if not _watermark_only(item)]
+        if watermark_reported and not occluding_watermark:
+            # Preserve the observed fact for audit, while explicitly telling
+            # the deterministic policy that this provider mark is allowed by
+            # the configured practical-quality mode.
+            result["non_occluding_provider_watermark"] = True
+            remaining_text_issues = [
+                item for item in result["issues"]
+                if any(token in item.lower() for token in (
+                    "字幕", "角标", "叠字", "随机文字", "多余文字", "caption", "overlay text",
+                ))
+            ]
+            if result.get("forbidden_text_detected") is True and not remaining_text_issues:
+                result["forbidden_text_is_provider_mark"] = True
+            warnings = [str(item) for item in (result.get("warnings") or []) if str(item).strip()]
+            warnings.append("检测到不遮挡主体的供应商角落标识，按实用质量模式不阻断采用")
+            result["warnings"] = list(dict.fromkeys(warnings))
         if original_issues and not result["issues"]:
             result["clean_frame"] = 1.0
             expectation_score = _score_or_none(result.get("expectation_match")) or 0.0
@@ -2055,32 +2097,39 @@ async def review_scene_image(image_b64: str, frame_desc: str, scene_setting: str
     em = _score_or_none(result.get("expectation_match"))
     if em is not None:
         result["overall"] = round(min(float(result["overall"]), em), 3)
+    if environment_only:
+        from app.scene_policy import normalize_scene_image_qa
+        result = normalize_scene_image_qa(result, environment_only=True)
     return result
 
 
 async def review_portrait_image(image_b64: str, appearance_anchor: str) -> dict:
-    """Review a character reference without imposing ordinary-human posing rules.
+    """Review a character identity sheet without hard-gating acting direction.
 
     Portrait anchors can describe spirits, creatures, floating bodies, props, or
-    a non-neutral expression.  Those anchor-specific requirements take priority
-    over the conventional front-facing model-sheet pose.
+    acting direction.  Stable identity/form requirements remain hard gates;
+    expression, gaze and ordinary display pose are retained as soft warnings.
     """
-    expectation = f"""你是漫剧角色定妆照评审 agent。请只对照角色锚点检查这张单角色全身设定图，输出 JSON。
+    expectation = f"""你是漫剧角色定妆照评审 agent。请对照角色锚点检查这张单角色全身设定图，输出 JSON。
 
 角色锚点：{appearance_anchor}
 
 检查项（各 0~1 评分）：
-1. expectation_match  年龄、性别、发型、服装、体态、材质/透明度、表情、指定道具及空间关系是否与锚点一致
-2. continuity         当前没有历史参考图，固定给 1
-3. clean_frame        无文字/水印/多余人物/肢体畸形/五官崩坏，主体与锚点要求的道具完整可见
+1. identity_match      只评稳定造型：年龄段、性别、核心五官、发型、服装、体型、材质/透明度、身份道具与必要空间关系
+2. presentation_match  只评表演呈现：表情、眼神、笑容、气质、普通站姿/身姿是否符合锚点
+3. clean_frame         单人物、主体完整、无遮挡主体的文字/水印/Logo、无肢体畸形/五官崩坏
 
 评分硬规则（务必遵守）：
-- 锚点优先于普通定妆照惯例。若锚点要求透明、魂体、悬浮、指定表情或与道具的空间关系，必须按锚点核对；不要反过来要求双脚着地、中性表情或普通实体人站姿。
-- 锚点要求的非实体形态、表情或道具空间关系缺失时，expectation_match 必须 ≤0.4。
-- 锚点没有要求的火焰、斗气光环、文字或其他主体都属于多余元素，应写入 issues。
-- overall 不得高于 expectation_match；issues 必须指出可直接用于下一轮修图的具体差异。
+- 年龄段、性别、核心身份、非实体形态（透明/魂体/悬浮）、身份道具、单人物、明显畸形、严重裁切、遮挡主体的文字/水印属于硬门禁；不符时写入 hard_failures。
+- 仅截掉脚尖、鞋尖、衣摆或发梢属于轻微裁切；供应商自动添加且位于角落、不遮挡人物的水印/Logo 属于轻微瑕疵。两者只写入 soft_warnings，不得写入 hard_failures。
+- 表情、眼神、爱慕/妩媚/虚荣/戏谑等气质以及普通展示站姿只写入 soft_warnings，绝不能写入 hard_failures，也不能降低 identity_match。
+- 定妆图允许中性表情和中性展示姿态；presentation_match 低可以有警告，但不能阻止后续生成 3/4 面和侧面。
+- overall 只按 identity_match 与 clean_frame 的较低值给分，不计 presentation_match。
+- 锚点没有要求的火焰、斗气光环或其他主体属于硬失败。
 
-只输出 JSON：{{"expectation_match": float, "continuity": 1.0, "clean_frame": float, "overall": float, "issues": [str]}}"""
+还要输出观察事实：person_count（人物数或 null）、watermark_detected、watermark_occluding（水印是否遮挡人物主体）、forbidden_text_detected、full_body_visible、crop_severity（none/minor/major）、anatomy_valid（不能确认用 null）。
+
+只输出 JSON：{{"identity_match": float, "presentation_match": float, "clean_frame": float, "overall": float, "person_count": int|null, "watermark_detected": bool|null, "watermark_occluding": bool|null, "forbidden_text_detected": bool|null, "full_body_visible": bool|null, "crop_severity": "none|minor|major", "anatomy_valid": bool|null, "soft_warnings": [str], "hard_failures": [str], "issues": [str]}}"""
     raw = await hiagent.vlm_check(
         [image_b64],
         expectation,
@@ -2092,13 +2141,21 @@ async def review_portrait_image(image_b64: str, appearance_anchor: str) -> dict:
     )
     result = _parse_qa_result(
         raw,
-        ["expectation_match", "continuity", "clean_frame"],
-        defaults={"continuity": 1.0},
+        ["identity_match", "presentation_match", "clean_frame"],
     )
-    expectation_match = _score_or_none(result.get("expectation_match"))
-    if expectation_match is not None:
-        result["overall"] = round(min(float(result["overall"]), expectation_match), 3)
-    return result
+    try:
+        raw_result = extract_json(raw)
+    except Exception:  # noqa: BLE001 - _parse_qa_result already records recovery
+        raw_result = {}
+    for key in (
+        "person_count", "watermark_detected", "watermark_occluding",
+        "forbidden_text_detected", "full_body_visible", "crop_severity",
+        "anatomy_valid", "soft_warnings", "hard_failures",
+    ):
+        if key in raw_result:
+            result[key] = raw_result[key]
+    from app.portrait_policy import normalize_portrait_seed_qa
+    return normalize_portrait_seed_qa(result)
 
 
 async def qa_shot(frames_b64: list[str], action_desc: str, scene_setting: str,

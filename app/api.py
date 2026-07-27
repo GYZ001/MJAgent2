@@ -16,6 +16,7 @@ _DOMAIN_MODULES = (
     "domain/screenplay_ops.py",
     "domain/storyboard_ops.py",
     "domain/video_ops.py",
+    "domain/review_wall.py",
 )
 for _rel in _DOMAIN_MODULES:
     _path = _BASE / _rel

@@ -487,6 +487,7 @@ def test_build_reference_assets_subfloor_fallback_not_fed(monkeypatch) -> None:
     monkeypatch.setattr(video_modes, "min_generated_references", lambda: 1)
     monkeypatch.setattr(video_modes, "reference_gen_retries", lambda: 2)
     monkeypatch.setattr(video_modes, "reference_prompt_async", lambda: False)
+    monkeypatch.setattr(video_modes, "batch_prompt_enabled", lambda: False)
     monkeypatch.setattr(video_modes, "consistency_check_enabled", lambda: False)
 
     async def fake_gen_one(*, project_id, episode_no, shot, bible, ref_type, index, content_override=None, seed_inputs=None,

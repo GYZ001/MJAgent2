@@ -288,7 +288,9 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
                  extra_negative: list[str] | None = None, reroll: bool = False,
                  critique: list[str] | None = None, after_shot_id: str | None = None,
                  auto_retake_count: int = 0,
-                 supervisor_run_id: str | None = None) -> dict:
+                 supervisor_run_id: str | None = None,
+                 dependency_snapshot: dict[str, Any] | None = None,
+                 critique_sources: list[dict[str, Any]] | None = None) -> dict:
     """为镜头创建参考图模式视频版本并入队。
     critique：上一版 AI 评语问题，作为本次必须改正项写入 prompt。
     幂等：相同 idem_key 的成功版本直接复用（reroll 时跳过复用）。"""
@@ -432,6 +434,23 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
         "supervisor_run_id": supervisor_run_id,
         "shot_contract_json": json.dumps(shot_contract_dict(shot), ensure_ascii=False),
     }
+    if dependency_snapshot:
+        # This immutable token is checked again by the worker before every
+        # candidate/QA/adoption write.  Keeping it on the version also makes a
+        # stale provider result explainable after process restarts.
+        image_meta["review_dependency_snapshot"] = {
+            "qualification_version": dependency_snapshot.get("qualification_version"),
+            "published_screenplay_artifact_id": dependency_snapshot.get("published_screenplay_artifact_id"),
+            "confirmed_storyboard_artifact_id": dependency_snapshot.get("confirmed_storyboard_artifact_id"),
+            "screenplay_revision": dependency_snapshot.get("screenplay_revision"),
+            "storyboard_revision": dependency_snapshot.get("storyboard_revision"),
+            "asset_status": dependency_snapshot.get("asset_status"),
+            "asset_inputs": dependency_snapshot.get("asset_inputs") or [],
+            "asset_soft_warnings": dependency_snapshot.get("asset_soft_warnings") or [],
+            "captured_at": dependency_snapshot.get("server_time"),
+        }
+    if critique_sources:
+        image_meta["critique_sources"] = critique_sources
     if reference_gallery:
         image_meta["reference_images"] = reference_gallery["reference_images"]
         image_meta["reference_gallery_source_version_id"] = reference_gallery["source_version_id"]

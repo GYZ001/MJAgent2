@@ -12,12 +12,43 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import PlainTextResponse
 
 from app import config
 from app.db import get_conn, get_setting, new_id, rows_to_dicts, set_setting
+from app.local_session import require_local_session
 
 router = APIRouter(prefix="/api")
+
+_MONITOR_EVENTS = {
+    "block_load", "drilldown", "deep_link", "job_action", "gate_action",
+    "settings_preview", "settings_submit", "call_detail", "query_result",
+    "bible_payment_precheck", "bible_payment_confirm", "bible_conflict",
+    "portrait_qa_review", "bible_navigation_guard",
+}
+
+
+@router.post("/system/monitor/events")
+def record_monitor_event(body: dict):
+    """监制房最小化埋点；只收白名单维度，拒绝 prompt/正文/密钥。"""
+    import hashlib
+    from app.monitoring import audit
+
+    name = str(body.get("name") or "")
+    if name not in _MONITOR_EVENTS:
+        raise HTTPException(422, "未知监制房事件")
+    dimensions = body.get("dimensions") if isinstance(body.get("dimensions"), dict) else {}
+    allowed = {
+        "block", "result", "error_category", "source", "target_type", "filter_count",
+        "action", "object_status", "permission", "conflict", "apply_mode", "size_bucket",
+        "query_type", "total", "page_size", "query_ms",
+    }
+    safe = {str(key): value for key, value in dimensions.items() if key in allowed and isinstance(value, (str, int, float, bool))}
+    object_id = str(body.get("object_id") or "")
+    object_hash = hashlib.sha256(object_id.encode()).hexdigest()[:16] if object_id else "none"
+    audit(name, "monitor_event", object_hash, "recorded", safe)
+    return {"ok": True}
 
 # ---------- 文件系统目录浏览（本机部署，供导出目录选择器使用） ----------
 
@@ -175,7 +206,14 @@ def _public_model(item: dict) -> dict:
         credentials = json.loads(get_setting("model_credentials") or "{}")
     except (TypeError, json.JSONDecodeError):
         credentials = {}
-    public["key_configured"] = bool(item.get("api_key") or credentials.get(item.get("id"), {}).get("api_key"))
+    provider_key = {
+        "hiagent": config.HIAGENT_API_KEY, "openrouter": config.OPENROUTER_API_KEY,
+        "bailian": config.BAILIAN_API_KEY, "deepseek": config.DEEPSEEK_API_KEY,
+        "zhipu": config.ZHIPU_API_KEY,
+    }.get(str(item.get("provider") or ""), "")
+    public["key_configured"] = bool(
+        item.get("api_key") or credentials.get(item.get("id"), {}).get("api_key") or provider_key
+    )
     return public
 
 
@@ -452,7 +490,8 @@ def health():
         }
 
     def custom_options(kind: str) -> list[dict]:
-        return [option(item["provider"], item["model"], True) for item in _custom_models()
+        return [option(item["provider"], item["model"], bool(_public_model(item).get("key_configured")))
+                for item in _custom_models()
                 if kind in item.get("kinds", []) and str(item.get("provider", "")).startswith("custom:")]
 
     def model_available(provider: str, model: str, legacy_available: bool) -> bool:
@@ -506,19 +545,203 @@ def health():
     }
 
 
+def _effective_call_status(row: dict) -> str:
+    effective = row["status"]
+    if row["status"] == "INTERRUPTED":
+        if row.get("recovery_disposition") == "RETRIED_SUCCESSFULLY":
+            effective = "RECOVERED"
+        elif row.get("recovery_disposition") in {"RETRY_STARTED", "RETRYING_INTERRUPTED"}:
+            effective = "RETRYING"
+    return effective
+
+
 @router.get("/system/calls")
 def recent_calls(limit: int = 30):
     rows = rows_to_dicts(get_conn().execute(
         "SELECT * FROM provider_calls ORDER BY id DESC LIMIT ?", (min(limit, 200),)).fetchall())
     for row in rows:
-        effective = row["status"]
-        if row["status"] == "INTERRUPTED":
-            if row.get("recovery_disposition") == "RETRIED_SUCCESSFULLY":
-                effective = "RECOVERED"
-            elif row.get("recovery_disposition") in {"RETRY_STARTED", "RETRYING_INTERRUPTED"}:
-                effective = "RETRYING"
-        row["effective_status"] = effective
+        row["effective_status"] = _effective_call_status(row)
     return rows
+
+
+_BUSINESS_CALL_KINDS = {
+    "chat", "vlm", "vlm_qa", "video_create", "video_poll", "image", "image_generate",
+    "image_edit", "scene_image", "screenplay_prompt", "plan_prompt", "bible_prompt",
+    "references_prompt", "storyboard_prompt", "storyboard_shot_prompt", "storyboard_outline_prompt",
+}
+_WORKFLOW_CALL_MARKERS = ("prompt", "storyboard", "reference", "handoff", "repair")
+_FAILED_CALL_STATUSES = {"FAILED", "TIMEOUT", "NETWORK_ERROR", "TASK_FAILED", "QA_ERROR", "REPAIR_STALLED"}
+
+
+def _call_category(kind: str) -> str:
+    if kind in _BUSINESS_CALL_KINDS:
+        return "business"
+    if any(marker in kind for marker in _WORKFLOW_CALL_MARKERS):
+        return "workflow"
+    return "internal"
+
+
+def _call_meta_summary(raw: str | None) -> dict:
+    try:
+        meta = json.loads(raw or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(meta, dict):
+        return {}
+    allowed = {
+        "project_id", "project_name", "episode_id", "episode_no", "episode_title",
+        "shot_id", "shot_no", "stage", "asset_kind", "frame_kind", "reference_type",
+        "character_name", "scene_name", "call_role", "call_role_label", "caller_module",
+        "caller_function", "contract_version", "error_stage", "purpose",
+    }
+    return {key: value for key, value in meta.items() if key in allowed}
+
+
+@router.get("/system/calls/query")
+def query_calls(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    search: str = "",
+    status: str | None = None,
+    category: str | None = None,
+    project_id: str | None = None,
+    function: str | None = None,
+    model: str | None = None,
+    from_ts: float | None = None,
+    to_ts: float | None = None,
+    sort: str = "desc",
+    ids: str | None = None,
+):
+    query_started = time.perf_counter()
+    clauses: list[str] = []
+    params: list[object] = []
+    selected_ids = [int(value) for value in (ids or "").split(",") if value.strip().isdigit()][:500]
+    if selected_ids:
+        clauses.append(f"id IN ({','.join('?' for _ in selected_ids)})")
+        params.extend(selected_ids)
+    if search.strip():
+        needle = f"%{search.strip()}%"
+        clauses.append("(kind LIKE ? OR model LIKE ? OR status LIKE ? OR error LIKE ? OR CAST(id AS TEXT) LIKE ? OR meta LIKE ?)")
+        params.extend([needle] * 6)
+    if function:
+        clauses.append("kind=?")
+        params.append(function)
+    if model:
+        clauses.append("model=?")
+        params.append(model)
+    if from_ts is not None:
+        clauses.append("ts>=?")
+        params.append(from_ts)
+    if to_ts is not None:
+        clauses.append("ts<=?")
+        params.append(to_ts)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    order = "ASC" if sort.lower() == "asc" else "DESC"
+    rows = rows_to_dicts(get_conn().execute(
+        f"""SELECT id,ts,kind,model,status,http_status,latency_ms,error,run_id,step_run_id,
+                    trace_id,operation_id,attempt_no,supersedes_call_id,superseded_by_call_id,
+                    recovery_disposition,meta
+             FROM provider_calls {where} ORDER BY id {order}""",
+        params,
+    ).fetchall())
+    catalog = {(item.get("provider"), item.get("model")): item.get("label") for item in _model_catalog()}
+    filtered: list[dict] = []
+    for row in rows:
+        row["effective_status"] = _effective_call_status(row)
+        if status and row["effective_status"] != status:
+            continue
+        row["category"] = _call_category(str(row.get("kind") or ""))
+        if category and row["category"] != category:
+            continue
+        meta_summary = _call_meta_summary(row.pop("meta", None))
+        if project_id and str(meta_summary.get("project_id") or "") != project_id:
+            continue
+        row["context"] = meta_summary
+        row["model_label"] = next(
+            (label for (_provider, model_id), label in catalog.items() if model_id == row.get("model")),
+            row.get("model") or "未记录模型",
+        )
+        filtered.append(row)
+    total = len(filtered)
+    start = (page - 1) * page_size
+    items = filtered[start:start + page_size]
+    aggregate_rows = [row for row in filtered if row["effective_status"] in _FAILED_CALL_STATUSES or "FAILED" in row["effective_status"] or "ERROR" in row["effective_status"]]
+    grouped: dict[tuple[str, str, str], dict] = {}
+    for row in aggregate_rows:
+        ctx = row.get("context") or {}
+        root = re.sub(r"\b[0-9a-f]{8,}\b", "#", str(row.get("error") or row["effective_status"]))[:160]
+        key = (str(ctx.get("project_id") or ""), str(row.get("kind") or ""), root)
+        group = grouped.setdefault(key, {
+            "key": "|".join(key), "project_id": ctx.get("project_id"),
+            "project_name": ctx.get("project_name") or "上下文未关联",
+            "episode_no": ctx.get("episode_no"), "shot_no": ctx.get("shot_no"),
+            "kind": row.get("kind"), "root_cause": root, "count": 0,
+            "first_ts": row["ts"], "last_ts": row["ts"], "call_ids": [],
+            "run_id": row.get("run_id"),
+        })
+        group["count"] += 1
+        group["first_ts"] = min(group["first_ts"], row["ts"])
+        group["last_ts"] = max(group["last_ts"], row["ts"])
+        group["call_ids"].append(row["id"])
+    return {
+        "items": items, "total": total, "page": page, "page_size": page_size,
+        "page_count": max(1, (total + page_size - 1) // page_size),
+        "aggregates": sorted(grouped.values(), key=lambda item: item["last_ts"], reverse=True)[:20],
+        "failed_total": len(aggregate_rows),
+        "query_ms": round((time.perf_counter() - query_started) * 1000, 2),
+        "server_time": time.time(),
+    }
+
+
+def _call_detail_payload(call_id: int) -> dict:
+    from app.monitoring import redact_json_text
+
+    row = get_conn().execute("SELECT * FROM provider_calls WHERE id=?", (call_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "调用记录不存在")
+    item = dict(row)
+    item["effective_status"] = _effective_call_status(item)
+    item["category"] = _call_category(str(item.get("kind") or ""))
+    item["context"] = _call_meta_summary(item.get("meta"))
+    item["model_label"] = next(
+        (entry.get("label") for entry in _model_catalog() if entry.get("model") == item.get("model")),
+        item.get("model") or "未记录模型",
+    )
+    for field in ("request_json", "response_json", "meta"):
+        raw = item.get(field)
+        item[f"{field}_size"] = len(raw.encode("utf-8")) if isinstance(raw, str) else 0
+        item[field] = redact_json_text(raw, mask_sensitive_content=field == "request_json")
+    item["raw_access"] = False
+    return item
+
+
+@router.get("/system/calls/{call_id}")
+def call_detail(call_id: int, _session: str = Depends(require_local_session)):
+    from app.monitoring import audit, monitor_features
+
+    if not monitor_features()["call_detail_v2"]:
+        raise HTTPException(503, "调用详情已由发布开关安全停用")
+
+    item = _call_detail_payload(call_id)
+    audit("call_detail_view", "provider_call", str(call_id), "masked")
+    return item
+
+
+@router.get("/system/calls/{call_id}/download", response_class=PlainTextResponse)
+def download_call_detail(
+    call_id: int,
+    _session: str = Depends(require_local_session),
+):
+    from app.monitoring import audit, monitor_features
+
+    if not monitor_features()["call_detail_v2"]:
+        raise HTTPException(503, "调用详情下载已由发布开关安全停用")
+
+    item = _call_detail_payload(call_id)
+    audit("call_detail_download", "provider_call", str(call_id), "masked")
+    return PlainTextResponse(json.dumps(item, ensure_ascii=False, indent=2), headers={
+        "Content-Disposition": f'attachment; filename="provider-call-{call_id}-masked.json"',
+    })
 
 
 @router.get("/system/val422-metrics")
@@ -562,7 +785,7 @@ def error_detail(error_id: str):
 
 
 @router.get("/system/jobs")
-def jobs_overview():
+def jobs_overview(include_all: bool = False):
     conn = get_conn()
     run_statuses = {
         "CREATED": "queued",
@@ -627,7 +850,7 @@ def jobs_overview():
              ON wr.scope_type='shot' AND scope_shot.id=wr.scope_id
            LEFT JOIN episodes shot_episode ON shot_episode.id=scope_shot.episode_id
            LEFT JOIN projects shot_project ON shot_project.id=shot_episode.project_id
-           ORDER BY wr.updated_at DESC LIMIT 200""").fetchall())
+           ORDER BY wr.updated_at DESC""").fetchall())
     for row in run_recent:
         row["source"] = "run"
         row["run_id"] = row["id"]
@@ -660,7 +883,7 @@ def jobs_overview():
            LEFT JOIN episodes e ON e.id=j.episode_id LEFT JOIN projects p ON p.id=j.project_id
            WHERE j.run_id IS NULL
               OR NOT EXISTS (SELECT 1 FROM workflow_runs wr WHERE wr.id=j.run_id)
-           ORDER BY j.updated_at DESC LIMIT 200""").fetchall())
+           ORDER BY j.updated_at DESC""").fetchall())
     for row in conn.execute(
         """SELECT j.status, COUNT(*) c FROM jobs j
            WHERE j.run_id IS NULL
@@ -690,22 +913,200 @@ def jobs_overview():
                WHERE wr.workflow_type='screenplay'
                  AND wr.scope_type='episode' AND wr.scope_id=e.id
              )
-           ORDER BY updated_at DESC LIMIT 200""").fetchall())
+           ORDER BY updated_at DESC""").fetchall())
     for row in screenplay_recent:
         add_count(row["status"])
-    recent = sorted(
+    all_rows = sorted(
         [*run_recent, *legacy_jobs, *screenplay_recent],
         key=lambda row: row.get("updated_at") or 0,
         reverse=True,
-    )[:200]
+    )
+    recent = all_rows if include_all else all_rows[:200]
     from app.recovery import last_report
-    return {"counts": counts, "recent": recent, "startup_recovery": last_report()}
+    return {
+        "counts": counts, "recent": recent, "total": len(all_rows),
+        "startup_recovery": last_report(), "server_time": time.time(),
+    }
+
+
+@router.get("/system/jobs/query")
+def query_jobs(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    search: str = "",
+    status: str | None = None,
+    project_id: str | None = None,
+    workflow: str | None = None,
+    from_ts: float | None = None,
+    to_ts: float | None = None,
+    sort: str = "desc",
+):
+    query_started = time.perf_counter()
+    payload = jobs_overview(include_all=True)
+    keyword = search.strip().lower()
+    wanted_statuses = {
+        item.strip() for item in (status or "").split(",") if item.strip()
+    }
+    items = []
+    for row in payload["recent"]:
+        if wanted_statuses and row.get("status") not in wanted_statuses:
+            continue
+        if project_id and row.get("project_id") != project_id:
+            continue
+        if workflow and (row.get("workflow_type") or row.get("kind")) != workflow:
+            continue
+        updated_at = float(row.get("updated_at") or 0)
+        if from_ts is not None and updated_at < from_ts:
+            continue
+        if to_ts is not None and updated_at > to_ts:
+            continue
+        if keyword:
+            haystack = " ".join(str(row.get(key) or "") for key in (
+                "id", "run_id", "kind", "workflow_type", "scope_type", "scope_id",
+                "status", "project_name", "episode_title", "error", "episode_no", "shot_no",
+            )).lower()
+            if keyword not in haystack:
+                continue
+        items.append(row)
+    items.sort(key=lambda row: float(row.get("updated_at") or 0), reverse=sort.lower() != "asc")
+    total = len(items)
+    start = (page - 1) * page_size
+    return {
+        "items": items[start:start + page_size], "total": total, "page": page,
+        "page_size": page_size, "page_count": max(1, (total + page_size - 1) // page_size),
+        "counts": payload["counts"], "startup_recovery": payload["startup_recovery"],
+        "server_time": payload["server_time"],
+        "query_ms": round((time.perf_counter() - query_started) * 1000, 2),
+    }
+
+
+@router.get("/system/jobs/{job_id}")
+def job_detail(job_id: str, source: str = "job"):
+    summary: dict = {}
+    if source == "auto":
+        summary = next((row for row in jobs_overview(include_all=True)["recent"] if row.get("id") == job_id), {})
+        if not summary:
+            raise HTTPException(404, "任务不存在")
+        source = str(summary.get("source") or "job")
+    if source == "run":
+        from app.evidence import repository
+        run = repository.get_run(job_id)
+        if not run:
+            raise HTTPException(404, "任务对应的 Run 不存在")
+        return {
+            **run, **summary, "source": "run", "run_id": job_id,
+            "raw_status": run.get("status"),
+            "status": summary.get("status") or {
+                "CREATED": "queued", "RUNNING": "running", "WAITING_RETRY": "waiting_retry",
+                "WAITING_HUMAN": "waiting_human", "PAUSED_BUDGET": "paused_budget",
+                "PAUSED_EXTERNAL": "paused_external", "SUCCEEDED": "succeeded",
+                "PARTIAL": "partial", "FAILED": "failed", "CANCELLED": "cancelled",
+            }.get(str(run.get("status") or ""), str(run.get("status") or "").lower()),
+            "steps": repository.get_steps(job_id), "events": repository.get_events(job_id, limit=100),
+        }
+    if source == "screenplay" or job_id.startswith("screenplay_"):
+        episode_id = job_id.removeprefix("screenplay_")
+        row = get_conn().execute(
+            """SELECT e.*,p.name AS project_name FROM episodes e JOIN projects p ON p.id=e.project_id
+               WHERE e.id=?""", (episode_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "剧本任务不存在")
+        return {**dict(row), "source": "screenplay", "id": job_id}
+    row = get_conn().execute(
+        """SELECT j.*,s.shot_no,e.episode_no,e.title AS episode_title,p.name AS project_name
+           FROM jobs j LEFT JOIN shots s ON s.id=j.shot_id
+           LEFT JOIN episodes e ON e.id=j.episode_id LEFT JOIN projects p ON p.id=j.project_id
+           WHERE j.id=?""", (job_id,),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "媒体任务不存在")
+    return {**dict(row), "source": "job"}
+
+
+@router.post("/system/jobs/{job_id}/retry")
+def retry_job(job_id: str, body: dict | None = None):
+    """低层媒体 Job 的显式重试/恢复；Run 任务继续使用统一 Run 控制接口。"""
+    from app import worker
+    from app.monitoring import audit
+
+    request = body or {}
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "媒体任务不存在")
+    item = dict(row)
+    if item["status"] not in {"failed", "cancelled", "paused_external", "paused_budget", "waiting_retry"}:
+        raise HTTPException(409, detail={
+            "code": "JOB_STATE_CONFLICT", "message": f"当前状态 {item['status']} 不支持重试",
+            "current_status": item["status"],
+        })
+    expected = request.get("expected_version")
+    if expected is not None and int(expected) != int(item.get("state_revision") or 0):
+        raise HTTPException(409, detail={
+            "code": "JOB_VERSION_CONFLICT", "message": "任务状态已变化，请刷新后重试",
+            "current_version": item.get("state_revision") or 0,
+        })
+    if item["status"] == "paused_budget":
+        if not item.get("episode_id"):
+            raise HTTPException(409, "预算暂停任务缺少分集上下文，不能安全恢复")
+        resumed = worker.retry_paused(item["episode_id"])
+        if not resumed:
+            raise HTTPException(409, "预算仍不足，请先提高单集成本上限")
+    else:
+        cursor = conn.execute(
+            """UPDATE jobs SET status='queued',error=NULL,next_retry_at=NULL,
+                       cancellation_requested=0,lease_owner=NULL,lease_expires_at=NULL,
+                       state_revision=COALESCE(state_revision,0)+1,updated_at=?
+               WHERE id=? AND status=?""",
+            (time.time(), job_id, item["status"]),
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            raise HTTPException(409, "任务已被其他操作更新")
+        conn.commit()
+        worker._enqueue_for_current_status(job_id)
+    latest = dict(conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
+    audit("job_retry", "job", job_id, "accepted", {"previous_status": item["status"]})
+    return {"ok": True, "accepted": True, "asynchronous": True, "job": latest}
 
 
 @router.get("/settings")
-def get_settings():
+def get_settings(include_schema: bool = False):
     rows = get_conn().execute("SELECT key, value FROM settings").fetchall()
-    return {r["key"]: r["value"] for r in rows}
+    values = {r["key"]: r["value"] for r in rows}
+    if not include_schema:
+        return values
+    from app.monitoring import (
+        SETTINGS_SCHEMA,
+        monitor_features,
+        normalize_setting,
+        public_settings_schema,
+    )
+
+    issues = []
+    for key, spec in SETTINGS_SCHEMA.items():
+        if key not in values:
+            continue
+        try:
+            normalize_setting(key, values[key])
+        except HTTPException as exc:
+            issues.append({"field": key, "message": exc.detail})
+    version = int(values.get("_monitor_config_version") or 0)
+    public_values = {key: values.get(key, str(spec.get("default", ""))) for key, spec in SETTINGS_SCHEMA.items()}
+    effective_values = {
+        key: (
+            values.get(f"_monitor_effective_{key}", public_values[key])
+            if not spec.get("immediate", True) else public_values[key]
+        )
+        for key, spec in SETTINGS_SCHEMA.items()
+    }
+    return {
+        "values": public_values, "effective": effective_values,
+        "schema": public_settings_schema(), "version": version,
+        "health": "invalid" if issues else "ok", "issues": issues,
+        "server_time": time.time(), "features": monitor_features(),
+    }
 
 
 @router.put("/settings")
@@ -717,48 +1118,137 @@ async def put_settings_route(body: dict):
 
 
 def put_settings(body: dict):
-    for key, value in body.items():
-        skey = str(key)
-        sval = str(value).strip()
-        if skey in {"provider_call_retention_days", "error_log_retention_days"}:
-            try:
-                days = int(sval)
-            except ValueError as exc:
-                raise HTTPException(422, f"{skey} 必须是整数天数") from exc
-            if not 1 <= days <= 365:
-                raise HTTPException(422, f"{skey} 必须在 1~365 天之间")
-            sval = str(days)
-        custom_provider = sval.startswith("custom:") and any(m.get("provider") == sval for m in _custom_models())
-        if skey == "model_text_provider" and sval not in {"hiagent", "openrouter", "bailian", "deepseek", "zhipu"} and not custom_provider:
-            raise HTTPException(422, f"{skey} 只能是 hiagent、openrouter、bailian、deepseek 或 zhipu")
-        if skey == "model_vlm_provider" and sval not in {"hiagent", "openrouter", "bailian"} and not custom_provider:
-            raise HTTPException(422, f"{skey} 只能是 hiagent、openrouter 或 bailian")
-        if skey == "model_route" and sval not in {"hiagent", "openrouter"}:
-            raise HTTPException(422, f"{skey} 只能是 hiagent 或 openrouter")
-        if skey in {"model_video_provider", "model_image_provider"} and sval != "hiagent":
-            raise HTTPException(422, "当前视频/图像生成只支持火山 HiAgent")
-        set_setting(skey, sval)
-        if skey == "model_route":
-            set_setting("model_text_provider", sval)
-            set_setting("model_vlm_provider", sval)
+    from app.monitoring import (
+        SETTINGS_SCHEMA,
+        audit,
+        monitor_features,
+        validate_settings_patch,
+    )
+
+    if not monitor_features()["settings_edit_v2"]:
+        raise HTTPException(503, "设置编辑已由发布开关切为只读")
+
+    request = body if isinstance(body, dict) else {}
+    patch = request.get("patch") if isinstance(request.get("patch"), dict) else request
+    expected_version = request.get("version") if patch is not request else request.pop("_version", None)
+    conn = get_conn()
+    current = {row["key"]: row["value"] for row in conn.execute("SELECT key,value FROM settings")}
+    normalized = validate_settings_patch(dict(patch), current)
+    # model_route is a legacy shorthand; preserve its historical coupled update in the same transaction.
+    if "model_route" in normalized:
+        normalized.setdefault("model_text_provider", normalized["model_route"])
+        normalized.setdefault("model_vlm_provider", normalized["model_route"])
+    if any(key.startswith("model_") or "_model_" in key for key in normalized):
+        try:
+            saved_credentials = json.loads(current.get("model_credentials") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            saved_credentials = {}
+        provider_keys = {
+            "hiagent": bool(config.HIAGENT_API_KEY), "openrouter": bool(config.OPENROUTER_API_KEY),
+            "bailian": bool(config.BAILIAN_API_KEY), "deepseek": bool(config.DEEPSEEK_API_KEY),
+            "zhipu": bool(config.ZHIPU_API_KEY),
+        }
+        for kind in ("text", "vlm", "video", "image"):
+            provider_field = f"model_{kind}_provider"
+            if provider_field not in normalized and not any(key.endswith(f"_model_{kind}") for key in normalized):
+                continue
+            provider = normalized.get(provider_field, current.get(provider_field, "hiagent"))
+            if provider.startswith("custom:"):
+                target = next((item for item in _model_catalog()
+                               if item.get("provider") == provider and kind in item.get("kinds", [])), None)
+            else:
+                model_field = f"{provider}_model_{kind}"
+                model_id = normalized.get(model_field, current.get(model_field, ""))
+                target = next((item for item in _model_catalog()
+                               if item.get("provider") == provider and item.get("model") == model_id
+                               and kind in item.get("kinds", [])), None)
+            if not target:
+                raise HTTPException(422, detail={"field": provider_field, "message": "目标模型不存在或不支持该能力"})
+            configured = bool(
+                target.get("api_key")
+                or (saved_credentials.get(target.get("id"), {}) if isinstance(saved_credentials, dict) else {}).get("api_key")
+                or provider_keys.get(provider)
+            )
+            if not configured:
+                raise HTTPException(422, detail={"field": provider_field, "message": "目标模型连接尚未配置并通过测试"})
+    current_version = int(current.get("_monitor_config_version") or 0)
+    if expected_version is not None and int(expected_version) != current_version:
+        raise HTTPException(409, detail={
+            "code": "SETTINGS_VERSION_CONFLICT", "message": "设置已被其他会话更新，请重新核对差异",
+            "expected_version": expected_version, "current_version": current_version,
+        })
+    changed = {key: value for key, value in normalized.items() if current.get(key, str(SETTINGS_SCHEMA[key].get("default", ""))) != value}
+    if not changed:
+        return {"ok": True, "version": current_version, "items": [], "runtime_reload_ok": True}
+    conn.execute("BEGIN IMMEDIATE")
     try:
+        authoritative_version = int((conn.execute(
+            "SELECT value FROM settings WHERE key='_monitor_config_version'"
+        ).fetchone() or {"value": 0})["value"])
+        if authoritative_version != current_version:
+            raise HTTPException(409, detail={
+                "code": "SETTINGS_VERSION_CONFLICT", "message": "设置版本已变化，请重新加载",
+                "current_version": authoritative_version,
+            })
+        # Restart-only fields retain a separate runtime-effective snapshot.  init_db
+        # advances that snapshot on the next process start; a successful save does not
+        # pretend the new persisted value is already active.
+        for key in changed:
+            if not SETTINGS_SCHEMA[key].get("immediate", True):
+                conn.execute(
+                    "INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)",
+                    (f"_monitor_effective_{key}", current.get(key, str(SETTINGS_SCHEMA[key].get("default", "")))),
+                )
+        conn.executemany(
+            "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            list(changed.items()),
+        )
         from app.media_pipeline.concurrency import (
             SETTING_KEYS, reload_limits_from_settings,
         )
         from app import worker
-        reload_limits_from_settings()
+        immediate_changed = [key for key in changed if SETTINGS_SCHEMA[key].get("immediate", True)]
+        if immediate_changed:
+            reload_limits_from_settings()
         # 三通道 worker 分别跟随各自并发配置热更新
-        if any(k in body for k in (*SETTING_KEYS.values(), "video_concurrency", "auto_concurrency",
+        if any(k in changed for k in (*SETTING_KEYS.values(), "video_concurrency", "auto_concurrency",
                                    "media_scheduler_policy", "video_ready_low_watermark",
                                    "video_ready_high_watermark", "reference_shot_cohort_limit")):
             worker.ensure_workers()
-    except Exception as exc:  # noqa: BLE001 热更新失败不阻断设置保存，但必须回传可见警告
-        return {
-            "ok": True,
-            "warning": f"设置已保存，但运行时热更新失败：{exc}",
-            "runtime_reload_ok": False,
-        }
-    return {"ok": True, "runtime_reload_ok": True}
+        new_version = current_version + 1
+        conn.execute(
+            "INSERT INTO settings(key,value) VALUES('_monitor_config_version',?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(new_version),),
+        )
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as exc:  # noqa: BLE001 必须回滚持久值，并把运行时恢复到旧配置
+        conn.rollback()
+        try:
+            from app.media_pipeline.concurrency import reload_limits_from_settings
+            reload_limits_from_settings()
+        except Exception:
+            pass
+        audit("settings_update", "settings", str(current_version), "rolled_back", {"error_type": type(exc).__name__})
+        raise HTTPException(503, detail={
+            "code": "SETTINGS_RUNTIME_APPLY_FAILED",
+            "message": "运行时应用失败，全部设置已回滚；草稿可修正后重试",
+        }) from exc
+    items = [{
+        "key": key, "requested": value,
+        "effective": value if SETTINGS_SCHEMA[key].get("immediate", True) else current.get(key, SETTINGS_SCHEMA[key].get("default", "")),
+        "apply_mode": "immediate" if SETTINGS_SCHEMA[key].get("immediate", True) else "restart",
+    } for key, value in changed.items()]
+    audit("settings_update", "settings", str(new_version), "succeeded", {"fields": sorted(changed)})
+    return {
+        "ok": True, "runtime_reload_ok": True, "version": new_version, "items": items,
+        "effect_scope": {
+            "new_tasks": True, "queued_not_started": True, "running_tasks": False,
+            "source": "server_policy_v1",
+        } if any(key.startswith("model_") or "_model_" in key for key in changed) else None,
+    }
 
 
 # ---------- API Key 管理：前端填写 → 持久化 .env ----------

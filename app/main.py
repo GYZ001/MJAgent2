@@ -23,29 +23,42 @@ from app.capabilities.bus import set_request_approval_token
 from app.local_session import APPROVAL_HEADER, ensure_session_secret, public_session_payload
 from app.mcp.auth import ensure_bootstrap_token
 from app.planning import router as planning_router
-from app.recovery import recover_all
+from app.recovery import (
+    acquire_runtime_recovery_lock,
+    record_passive_instance,
+    recover_all,
+    release_runtime_recovery_lock,
+)
 from app.orchestration.api import router as orchestration_router
 from app.system_api import router as system_router
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    init_db()
+    # 热重载时新旧 worker 会短暂重叠；允许新 worker 有界等待旧锁释放。
+    # 真正的第二实例超时后仍会按被动实例启动，不会中断主实例任务。
+    recovery_owner = acquire_runtime_recovery_lock(wait_timeout_s=5.0)
+    init_db(reconcile_interrupted=recovery_owner)
     ensure_catalog_loaded()
     ensure_bootstrap_token()
     ensure_session_secret()
-    purge_legacy_screenplays()
-    await recover_all()
-    from app.video_supervisor import video_supervisor_watchdog_loop
-    task_registry.spawn(
-        "system", "video_supervisor_watchdog", video_supervisor_watchdog_loop(),
-    )
+    if recovery_owner:
+        purge_legacy_screenplays()
+        await recover_all()
+        from app.video_supervisor import video_supervisor_watchdog_loop
+        task_registry.spawn(
+            "system", "video_supervisor_watchdog", video_supervisor_watchdog_loop(),
+        )
+    else:
+        record_passive_instance()
     try:
         yield
     finally:
         # 取消常驻 worker，保证 reload/退出能干净停机，不卡在 "Waiting for connections to close"
         await task_registry.stop_all()
         await worker.stop()
+        if recovery_owner:
+            release_runtime_recovery_lock()
 
 
 app = FastAPI(title="漫剧 Agent 2.0", lifespan=lifespan)
@@ -104,10 +117,25 @@ async def _request_context(request: Request) -> dict[str, Any]:
     return ctx
 
 
-def _error_json(rec: errors.ErrorRecord, *, headers: dict | None = None) -> JSONResponse:
+def _error_json(
+    rec: errors.ErrorRecord,
+    *,
+    headers: dict | None = None,
+    detail: Any | None = None,
+) -> JSONResponse:
+    public_detail: Any = detail if isinstance(detail, dict) else rec.public
+    if isinstance(public_detail, dict):
+        public_detail = {
+            **public_detail,
+            "error_ref": {
+                "code": rec.code,
+                "category": rec.category_label,
+                "error_id": rec.error_id,
+            },
+        }
     return JSONResponse(
         status_code=rec.http_status or 500,
-        content={"detail": rec.public, "code": rec.code,
+        content={"detail": public_detail, "code": rec.code,
                  "category": rec.category_label, "error_id": rec.error_id},
         headers=headers,
     )
@@ -131,7 +159,11 @@ async def _on_http_exception(request: Request, exc: HTTPException):
         exc, action=f"{request.method} {request.url.path}", context=ctx,
         http_status=exc.status_code,
     )
-    return _error_json(rec, headers=getattr(exc, "headers", None))
+    return _error_json(
+        rec,
+        headers=getattr(exc, "headers", None),
+        detail=exc.detail,
+    )
 
 
 @app.exception_handler(Exception)

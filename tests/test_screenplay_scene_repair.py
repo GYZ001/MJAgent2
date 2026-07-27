@@ -125,6 +125,7 @@ def test_story_function_patch_targets_only_the_scene_field():
     assert operation.path == "story_function"
     assert operation.target == {"kind": "scene", "id": "SC01"}
     assert len(operation.value) >= 6
+    assert "萧炎退回队尾" in operation.value
 
     patched, touched = apply_field_patch(
         screenplay_to_document(script),
@@ -233,6 +234,8 @@ async def test_old_exhausted_checkpoint_resumes_without_second_baseline(monkeypa
     assert resumed.baseline_generation_count == 1
     assert resumed.checkpoint_json["phase"] == "SUCCEEDED"
     assert resumed.checkpoint_json["planner_version"] == screenplay_repair.SCREENPLAY_REPAIR_PLANNER_VERSION
+    assert resumed.checkpoint_json["yield_reason"] is None
+    assert resumed.checkpoint_json["last_issue_fingerprints"] == []
     assert len(result.scene_outline[0].story_function) >= 6
 
 

@@ -318,8 +318,10 @@ def video_complete_episode(args) -> PreflightResult:
     confirmed = ep["status"] in {"confirmed", "generating", "done", "mixed"}
     allow_edit = bool(getattr(args, "allow_storyboard_edit", False))
     risk = RiskLevel.R3_DESTRUCTIVE if allow_edit else RiskLevel.R2_MATERIAL
-    cap = getattr(args, "budget_cap_cny", None) or 150.0
-    wall = getattr(args, "wall_clock_cap_s", None) or 14400
+    cap_arg = getattr(args, "budget_cap_cny", None)
+    wall_arg = getattr(args, "wall_clock_cap_s", None)
+    cap = 150.0 if cap_arg is None else cap_arg
+    wall = 14400 if wall_arg is None else wall_arg
     fallback = getattr(args, "max_fallback_shots", None)
     if fallback is None:
         fallback = max(1, int(math.ceil(int(total or 0) * 0.2)))
@@ -392,8 +394,10 @@ def video_complete_project(args) -> PreflightResult:
         wanted = set(episode_ids)
         rows = [r for r in rows if r["id"] in wanted]
     eligible = [r for r in rows if r["status"] in {"confirmed", "generating", "done", "mixed"}]
-    global_cap = float(getattr(args, "global_budget_cap_cny", None) or 500)
-    per_cap = float(getattr(args, "per_episode_cap_cny", None) or 150)
+    global_arg = getattr(args, "global_budget_cap_cny", None)
+    per_arg = getattr(args, "per_episode_cap_cny", None)
+    global_cap = float(500 if global_arg is None else global_arg)
+    per_cap = float(150 if per_arg is None else per_arg)
     allow_edit = bool(getattr(args, "allow_storyboard_edit", False))
     estimated = round(min(global_cap, max(1, len(eligible)) * per_cap * 0.65), 2)
     try:
@@ -536,9 +540,13 @@ def shot_update(args) -> PreflightResult:
 
 
 def screenplay_update(args) -> PreflightResult:
+    import json
+
     conn = get_conn()
     ep = conn.execute(
-        "SELECT id, episode_no, status, screenplay_artifact_id, screenplay_updated_at FROM episodes WHERE id=?",
+        "SELECT id, episode_no, status, screenplay_json, screenplay_artifact_id, "
+        "screenplay_updated_at, active_storyboard_run_id, screenplay_publish_fence "
+        "FROM episodes WHERE id=?",
         (args.episode_id,),
     ).fetchone()
     if not ep:
@@ -553,6 +561,70 @@ def screenplay_update(args) -> PreflightResult:
             denial_code="not_found",
             denial_message="剧集不存在",
         )
+    current_version = ep["screenplay_artifact_id"] or ""
+    expected_version = getattr(args, "expected_version", None)
+    if expected_version is not None and str(expected_version) != str(current_version):
+        conflict_before = json.loads(ep["screenplay_json"] or "{}")
+        conflict_after = dict(getattr(args, "screenplay", None) or {})
+        conflict_diff = [
+            {"field": key, "section": {
+                "plot_spine": "主线", "full_script_text": "正文",
+                "scene_outline": "场次", "source_basis": "依据",
+            }.get(key, "依据与状态")}
+            for key in sorted(set(conflict_before) | set(conflict_after))
+            if key not in {"created_at", "updated_at"}
+            and conflict_before.get(key) != conflict_after.get(key)
+        ]
+        return PreflightResult(
+            command="screenplay.update",
+            allowed=False,
+            risk=RiskLevel.R2_MATERIAL,
+            summary="当前发布版已变化，不能用陈旧草稿覆盖",
+            affected=AffectedScope(
+                episodes=[args.episode_id],
+                extra={
+                    "conflict": True,
+                    "expected_version": expected_version,
+                    "current_version": current_version,
+                    "diff": conflict_diff,
+                },
+            ),
+            state_fingerprint=_fp({
+                "episode_id": args.episode_id,
+                "artifact": current_version,
+                "expected_version": expected_version,
+            }),
+            requires_confirmation=False,
+            confirmation_policy=ConfirmationPolicy.WHEN_IMPACT,
+            denial_code="version_conflict",
+            denial_message="剧本版本冲突：草稿已保留，请查看差异后重新建立基线",
+        )
+    before = json.loads(ep["screenplay_json"] or "{}")
+    after = dict(getattr(args, "screenplay", None) or {})
+    for payload in (before, after):
+        payload.pop("created_at", None)
+        payload.pop("updated_at", None)
+        payload["beats"] = []
+    changed_fields = sorted(
+        key for key in (set(before) | set(after)) if before.get(key) != after.get(key)
+    )
+    if not changed_fields:
+        return PreflightResult(
+            command="screenplay.update",
+            allowed=True,
+            risk=RiskLevel.R1_REVERSIBLE,
+            summary="剧本内容无变化，不会创建新版本或清空下游",
+            affected=AffectedScope(
+                episodes=[args.episode_id], extra={"unchanged": True, "diff": []}
+            ),
+            state_fingerprint=_fp({
+                "episode_id": args.episode_id,
+                "artifact": current_version,
+                "unchanged": True,
+            }),
+            requires_confirmation=False,
+            confirmation_policy=ConfirmationPolicy.WHEN_IMPACT,
+        )
     shots = conn.execute(
         "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (args.episode_id,)
     ).fetchone()["c"]
@@ -561,6 +633,22 @@ def screenplay_update(args) -> PreflightResult:
            JOIN shots s ON s.id=v.shot_id WHERE s.episode_id=?""",
         (args.episode_id,),
     ).fetchone()["c"]
+    references = conn.execute(
+        """SELECT COUNT(*) AS c FROM shot_scenes ss
+           JOIN shots s ON s.id=ss.shot_id WHERE s.episode_id=?""",
+        (args.episode_id,),
+    ).fetchone()["c"]
+    active_run_kinds: list[str] = []
+    if ep["status"] == "scripting" or ep["active_storyboard_run_id"]:
+        active_run_kinds.append("storyboard")
+    try:
+        from app import task_registry
+        for kind in ("storyboard", "video_completion"):
+            if task_registry.active(kind, args.episode_id) and kind not in active_run_kinds:
+                active_run_kinds.append(kind)
+    except Exception:  # noqa: BLE001 -- 持久状态仍作为保守回退
+        pass
+    active_runs = len(active_run_kinds)
     has_downstream = int(shots or 0) > 0
     return PreflightResult(
         command="screenplay.update",
@@ -571,15 +659,32 @@ def screenplay_update(args) -> PreflightResult:
         affected=AffectedScope(
             episodes=[args.episode_id],
             shot_count=int(shots or 0),
-            invalidated_artifacts=int(versions or 0),
+            invalidated_artifacts=int(versions or 0) + int(references or 0),
+            extra={
+                "diff": changed_fields,
+                "active_runs": active_runs,
+                "active_run_kinds": active_run_kinds,
+                "reference_images": int(references or 0),
+                "media_versions": int(versions or 0),
+                "rerun_scope": "本集全部分镜及派生媒体" if has_downstream else "无",
+                "stop_downstream_first": bool(active_runs),
+            },
         ),
-        warnings=["修改剧本会清空本集分镜与媒体"] if has_downstream else [],
+        warnings=(
+            (["发布前将先建立写入栅栏，取消并等待下游任务终止"] if active_runs else [])
+            + (["修改剧本会清空本集分镜与媒体"] if has_downstream else [])
+        ),
         state_fingerprint=_fp({
             "episode_id": args.episode_id,
             "artifact": ep["screenplay_artifact_id"],
             "updated_at": ep["screenplay_updated_at"],
             "shots": shots,
-            "expected_version": getattr(args, "expected_version", None),
+            "versions": versions,
+            "references": references,
+            "active_run": ep["active_storyboard_run_id"],
+            "fence": ep["screenplay_publish_fence"],
+            "expected_version": expected_version,
+            "diff": changed_fields,
         }),
         requires_confirmation=False,
         confirmation_policy=ConfirmationPolicy.WHEN_IMPACT,

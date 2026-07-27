@@ -278,15 +278,29 @@ def _diff_segments(
 
 def _conflict_issue(shot: Shot, diffs: list[dict[str, Any]]) -> SpokenIssue:
     first = diffs[0]
-    dial = (first["dialogues"] or {}).get("text", "（缺失）")
-    tl = (first["timeline"] or {}).get("text", "（缺失）")
+    dial_item = first["dialogues"] or {}
+    timeline_item = first["timeline"] or {}
+
+    def _describe(item: dict[str, Any]) -> str:
+        if not item:
+            return "（缺失）"
+        return (
+            f"{item.get('speaker_id') or '未知说话人'}｜"
+            f"{item.get('delivery') or '未知发声方式'}｜"
+            f"{item.get('text') or '（空文本）'}"
+        )
+
+    dial = _describe(dial_item)
+    tl = _describe(timeline_item)
     return SpokenIssue(
         code="SPOKEN_CONTRACT_CONFLICT",
         rule_id=RULE_SPOKEN_COHERENCE,
         shot_no=shot.shot_no,
         message=(
             f"shot_no={shot.shot_no} dialogues 与 audio_timeline 的口播内容分叉（第 {first['index'] + 1} 段："
-            f"dialogues=「{dial}」/ timeline=「{tl}」）；同一镜头只能有一套有效口播，"
+            f"dialogues=「{dial}」/ timeline=「{tl}」）；说话人、文本、发声方式和顺序必须完全一致，"
+            "spoken_dialogue 的角色必须可见且时间轴 lip_sync=true；画外发声则两侧都用 offscreen_voice。"
+            "同一镜头只能有一套有效口播，"
             "请选择以台词为准重建时间轴，或以时间轴为准重建台词，系统不会静默择一"
         ),
         evidence={

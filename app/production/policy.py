@@ -27,6 +27,9 @@ ALLOWED_PATCH_OPS = frozenset({
     "split_node",
     "insert_node",
     "rederive",
+    "normalize_overdetail",
+    "prune_dialogue_budget",
+    "split_dialogue_chain_by_scene",
 })
 
 FORBIDDEN_PATCH_OPS = frozenset({

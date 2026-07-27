@@ -17,6 +17,8 @@ from app.production.revision import (
 )
 from app.production.screenplay_document import (
     document_to_screenplay,
+    normalize_overdetail_text_fields,
+    prune_dialogue_chains_to_budget,
     screenplay_to_document,
     apply_field_patch,
 )
@@ -134,6 +136,44 @@ def test_screenplay_document_patch_stakes_only():
     assert out.scene_outline[0].scene_heading == script.scene_outline[0].scene_heading
 
 
+def test_overdetail_normalizer_only_changes_visual_description() -> None:
+    script = _minimal_script(
+        full_script_text=(
+            "【场1】夜 / 场地\n"
+            "甲微微点头并站定。\n"
+            "甲：我只是说了‘微微’两个字。"
+        ),
+    )
+    doc = screenplay_to_document(script)
+
+    patched, touched = normalize_overdetail_text_fields(doc, terms=["微微"])
+    out = document_to_screenplay(patched)
+
+    assert "甲点头并站定。" in out.full_script_text
+    assert "甲：我只是说了‘微微’两个字。" in out.full_script_text
+    assert touched
+
+
+def test_patch_planner_normalizes_overdetail_without_model_call() -> None:
+    from app.production.screenplay_repair import _patch_strategy_key, plan_screenplay_patch
+
+    issue = structured_issue(
+        code="OVERDETAIL",
+        message="full_script_text 含超纲细节词：微微；请删除微动作",
+        subject="screenplay",
+        path="/full_script_text",
+        rule_id="renderability_overdetail",
+        stage="screenplay",
+    )
+
+    ops = plan_screenplay_patch(issue, _minimal_script())
+
+    assert len(ops) == 1
+    assert ops[0].op == "normalize_overdetail"
+    assert ops[0].value == {"terms": ["微微"]}
+    assert _patch_strategy_key(ops) == "normalize_overdetail"
+
+
 def test_dialogue_chain_turn_patch_changes_only_opening_source_anchor():
     script = _minimal_script(dialogue_chains=[KeyDialogueChain(
         chain_id="DC1",
@@ -205,6 +245,181 @@ def test_patch_planner_recognizes_legacy_rederive_and_repairs_opening_anchor():
     assert _patch_strategy_key(ops) == "fix_opening_source_anchor"
     assert ops[0].target["kind"] == "dialogue_chain_turn"
     assert ops[0].value == "斗之力，三段！"
+
+
+def test_patch_planner_relabels_invalid_same_speaker_response() -> None:
+    from app.production.screenplay_repair import _patch_strategy_key, plan_screenplay_patch
+
+    script = _minimal_script(dialogue_chains=[KeyDialogueChain(
+        chain_id="DC1",
+        topic="萧炎连续自语",
+        turns=[
+            KeyDialogueTurn(
+                speaker="萧炎", line="十五年了。", function="statement", source_text="十五年了。",
+            ),
+            KeyDialogueTurn(
+                speaker="萧炎", line="为什么偏偏是我？", function="response", source_text="为什么偏偏是我？",
+            ),
+        ],
+    )])
+    issue = structured_issue(
+        code="KEY_LINE_MISSING",
+        message="dialogue_chains[0].turns[1] 是 response，但前一话轮没有另一角色的触发台词",
+        subject="screenplay",
+        path="/dialogue_chains",
+        rule_id="response_requires_trigger",
+        stage="screenplay",
+    )
+
+    ops = plan_screenplay_patch(issue, script)
+
+    assert len(ops) == 1
+    assert ops[0].path == "function"
+    assert ops[0].value == "statement"
+    assert ops[0].target["chain_id"] == "DC1"
+    assert _patch_strategy_key(ops) == "fix_dialogue_function_DC1_1"
+
+
+def test_dialogue_budget_pruning_keeps_complete_opening_and_required_chains() -> None:
+    def chain(chain_id: str, prefix: str, count: int) -> KeyDialogueChain:
+        return KeyDialogueChain(
+            chain_id=chain_id,
+            topic=f"{prefix}对白主题",
+            turns=[
+                KeyDialogueTurn(
+                    speaker="甲" if index % 2 == 0 else "乙",
+                    line=f"{prefix}{index + 1}",
+                    function="statement",
+                    source_text=f"{prefix}{index + 1}",
+                )
+                for index in range(count)
+            ],
+        )
+
+    script = _minimal_script(dialogue_chains=[
+        chain("DC1", "开场", 3),
+        chain("DC2", "过渡", 4),
+        chain("DC3", "锁定", 2),
+    ])
+
+    patched, touched = prune_dialogue_chains_to_budget(
+        screenplay_to_document(script),
+        max_turns=6,
+        required_lines=["锁定1"],
+    )
+    out = document_to_screenplay(patched)
+
+    assert [item.chain_id for item in out.dialogue_chains] == ["DC1", "DC3"]
+    assert len(out.key_lines) == 5
+    assert "DC2" in touched
+    assert out.full_script_text == script.full_script_text  # 正文不因精选预算被删剧情
+
+
+def test_patch_planner_prunes_dialogue_budget_before_generic_rederive() -> None:
+    from app.production.screenplay_repair import _patch_strategy_key, plan_screenplay_patch
+
+    script = _minimal_script(dialogue_chains=[KeyDialogueChain(
+        chain_id="DC1",
+        topic="开场主线",
+        turns=[
+            KeyDialogueTurn(
+                speaker="甲", line=f"第{index}句", function="statement", source_text=f"第{index}句",
+            )
+            for index in range(7)
+        ],
+    )])
+    issue = structured_issue(
+        code="KEY_LINE_MISSING",
+        message="dialogue_chains 共 11 个话轮；主线对白链总量必须为 3~6，按整组取舍而不是截断回答",
+        subject="screenplay",
+        path="/dialogue_chains",
+        rule_id="dialogue_budget",
+        stage="screenplay",
+    )
+    issue.evidence["required_dialogue_lines"] = ["必保台词"]
+
+    ops = plan_screenplay_patch(issue, script)
+
+    assert len(ops) == 1
+    assert ops[0].op == "prune_dialogue_budget"
+    assert ops[0].value == {"max_turns": 6, "required_lines": ["必保台词"]}
+    assert _patch_strategy_key(ops) == "prune_dialogue_budget"
+
+
+def test_dialogue_budget_issue_is_chosen_before_individual_chain_issue() -> None:
+    from app.production.screenplay_repair import _choose_issue
+
+    cross_scene = structured_issue(
+        code="KEY_LINE_MISSING",
+        message="dialogue_chains[1] 被拆到多个场次；同一触发→回应链必须在同一场完成",
+        subject="screenplay",
+        path="/dialogue_chains",
+        rule_id="chain_scene",
+        stage="screenplay",
+    )
+    budget = structured_issue(
+        code="KEY_LINE_MISSING",
+        message="dialogue_chains 共 11 个话轮；主线对白链总量必须为 3~6，按整组取舍而不是截断回答",
+        subject="screenplay",
+        path="/dialogue_chains",
+        rule_id="dialogue_budget",
+        stage="screenplay",
+    )
+
+    assert _choose_issue([cross_scene, budget]) is budget
+
+
+def test_cross_scene_dialogue_chain_is_split_without_rewriting_body() -> None:
+    from app.production.screenplay_document import (
+        document_to_screenplay,
+        screenplay_to_document,
+        split_dialogue_chain_by_scene,
+    )
+    from app.production.screenplay_repair import _patch_strategy_key, plan_screenplay_patch
+
+    script = _minimal_script(dialogue_chains=[KeyDialogueChain(
+        chain_id="DC1",
+        topic="宣布与回应",
+        turns=[
+            KeyDialogueTurn(speaker="甲", line="结果公布。", function="announcement", source_text="结果公布。"),
+            KeyDialogueTurn(speaker="乙", line="我不接受。", function="response", source_text="我不接受。"),
+            KeyDialogueTurn(speaker="乙", line="你们若是当事人呢？", function="question", source_text="你们若是当事人呢？"),
+            KeyDialogueTurn(speaker="丙", line="他有权回答。", function="statement", source_text="他有权回答。"),
+        ],
+    )])
+    script.scene_outline = [
+        ScriptScene(scene_no=1, scene_heading="【场1】日 / 大厅", story_function="公布结果并引发拒绝",
+                    characters=["甲", "乙"], summary="公布结果", conflict="乙拒绝", turn="乙开始反问", source_basis="原文"),
+        ScriptScene(scene_no=2, scene_heading="【场2】日 / 大厅", story_function="反问促使立场改变",
+                    characters=["乙", "丙"], summary="乙反问", conflict="立场冲突", turn="丙支持乙", source_basis="原文"),
+        ScriptScene(scene_no=3, scene_heading="【场3】日 / 大厅", story_function="收束对峙并交付结果",
+                    characters=["乙"], summary="对峙收束", conflict="余波", turn="局势定型", source_basis="原文"),
+    ]
+    script.full_script_text = (
+        "【场1】日 / 大厅\n甲：结果公布。\n乙：我不接受。\n\n"
+        "【场2】日 / 大厅\n乙：你们若是当事人呢？\n丙：他有权回答。\n\n"
+        "【场3】日 / 大厅\n乙转身离开。"
+    )
+    issue = structured_issue(
+        code="KEY_LINE_MISSING",
+        message="dialogue_chains[0] 被拆到多个场次；同一触发→回应链必须在同一场完成",
+        subject="screenplay", path="/dialogue_chains", rule_id="chain_scene", stage="screenplay",
+    )
+
+    ops = plan_screenplay_patch(issue, script)
+    assert len(ops) == 1
+    assert ops[0].op == "split_dialogue_chain_by_scene"
+    assert _patch_strategy_key(ops) == "split_dialogue_chain_DC1"
+
+    document = screenplay_to_document(script)
+    before_body = document_to_screenplay(document).full_script_text
+    patched, touched = split_dialogue_chain_by_scene(document, chain_id="DC1")
+    result = document_to_screenplay(patched)
+    assert [len(chain.turns) for chain in result.dialogue_chains] == [2, 2]
+    assert result.dialogue_chains[0].chain_id == "DC1"
+    assert result.dialogue_chains[1].chain_id == "DC2"
+    assert result.full_script_text == before_body
+    assert touched == ["dialogue_chains", "DC1", "DC2"]
 
 
 def test_full_regen_denied_is_a_policy_conflict_not_a_media_error():

@@ -9,11 +9,13 @@ from app.harness.types import Issue, IssueSeverity
 _CODE_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("SCHEMA_INVALID", re.compile(r"字段|schema|JSON|解析|类型|必填", re.I)),
     ("SOURCE_FIDELITY", re.compile(r"原文|来源|source|依据|凭空", re.I)),
-    ("CONTRACT_FIELD_INVALID", re.compile(r"episode_no|mode|5~10 秒|5-10 秒|时长", re.I)),
-    ("SPOKEN_CAPACITY_EXCEEDED", re.compile(r"口播|台词.{0,8}超|字数.{0,6}超|容量上限|超过.{0,12}字", re.I)),
+    # 口播相关诊断必须先匹配具体合同/时间轴错误，再匹配容量兜底。
+    # 否则包含“口播”的分叉和时间轴错误都会被误路由为容量超限。
     ("SPOKEN_CONTRACT_CONFLICT", re.compile(r"dialogues.+audio_timeline|口播合同|spoken.?contract|分叉", re.I)),
     ("SPOKEN_TIMELINE_OVERLAP", re.compile(r"口播时间段.+重叠|SPOKEN_TIMELINE_OVERLAP", re.I)),
     ("SPOKEN_TIMELINE_OUT_OF_RANGE", re.compile(r"口播时间段.+超出|SPOKEN_TIMELINE_OUT_OF_RANGE", re.I)),
+    ("CONTRACT_FIELD_INVALID", re.compile(r"episode_no|mode|5~10 秒|5-10 秒|时长", re.I)),
+    ("SPOKEN_CAPACITY_EXCEEDED", re.compile(r"口播|台词.{0,8}超|字数.{0,6}超|容量上限|超过.{0,12}字", re.I)),
     ("LEGACY_COVERAGE_UNCERTAIN", re.compile(r"LEGACY_COVERAGE_UNCERTAIN", re.I)),
     ("STATE_CHAIN_INVALID", re.compile(r"状态链|state_in|state_out|承接", re.I)),
     ("KEY_LINE_MISSING", re.compile(

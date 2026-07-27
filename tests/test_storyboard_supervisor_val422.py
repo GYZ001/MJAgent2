@@ -1,10 +1,13 @@
 """Supervisor / VAL-422 门禁相关测试。"""
 from __future__ import annotations
 
+from fastapi import HTTPException
+
 from app.evaluations.issues import issue_code, issues_from_messages
 from app.harness.types import IssueSeverity
 from app.loops.base import AgentLoopPolicy
 from app.schemas import Dialogue, PlotSpine, PlotSpineBeat, EpisodeScreenplay, Shot, Storyboard, StoryboardOutline, StoryboardOutlineShot
+from app.storyboard_supervisor import _requires_manual_confirmation
 from app.spoken_contract import spoken_text_of
 from app.validators import (
     key_line_catalog,
@@ -67,6 +70,7 @@ def test_spine_beat_ids_cover_must_keep():
     screenplay = EpisodeScreenplay(
         episode_no=1,
         key_lines=[],
+        key_plot_points=["这是面向策划的抽象总结句，不要求分镜逐字复述"],
         plot_spine=PlotSpine(
             episode_premise="测灵",
             spine_beats=[
@@ -86,6 +90,7 @@ def test_spine_beat_ids_cover_must_keep():
         Storyboard(episode_no=1, shots=[shot]), screenplay,
     )
     assert not any("主线节拍" in e for e in errors)
+    assert not any("主线剧情点" in e for e in errors)
 
 
 def test_outline_key_line_capacity_blocks_overload():
@@ -120,8 +125,26 @@ def test_issue_code_spoken_capacity():
     assert issue_code("第 9 镜口播超过 10 秒上限 36 字") == "SPOKEN_CAPACITY_EXCEEDED"
 
 
+def test_issue_code_spoken_contract_conflict_is_not_capacity():
+    assert issue_code(
+        "shot_no=15 dialogues 与 audio_timeline 的口播内容分叉；同一镜头只能有一套有效口播"
+    ) == "SPOKEN_CONTRACT_CONFLICT"
+
+
+def test_issue_code_spoken_timeline_errors_are_not_capacity():
+    assert issue_code("shot_no=3 口播时间段在 2.0s 处与上一段非法重叠") == "SPOKEN_TIMELINE_OVERLAP"
+    assert issue_code("shot_no=3 口播时间段 [0, 11] 超出本镜 10s 时长") == "SPOKEN_TIMELINE_OUT_OF_RANGE"
+
+
 def test_issue_code_dialogue_context_break_is_key_line_failure():
     assert issue_code("主线对白上下文断裂：角色突然冒出一句回应") == "KEY_LINE_MISSING"
+
+
+def test_auto_confirm_warning_is_routed_to_manual_ready_state():
+    assert _requires_manual_confirmation(
+        HTTPException(409, "自动确认遇到需要人工判断的警告，请转人工确认")
+    )
+    assert not _requires_manual_confirmation(HTTPException(409, "分镜硬门禁失败"))
 
 
 def test_warning_candidate_policy_rejects_blocker_concept():

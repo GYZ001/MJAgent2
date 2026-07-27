@@ -1,51 +1,42 @@
-import { useState } from 'react'
-import { api, EpisodeScreenplay, PlotSpine, ScriptScene, numToCn } from '../api'
-import { useEpisode, useNav } from '../App'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import {
+  api,
+  DialogueOccurrence,
+  EpisodeScreenplay,
+  PlotSpine,
+  PlotSpineBeat,
+  ScreenplayState,
+  ScriptScene,
+  numToCn,
+} from '../api'
+import { useNav, useScriptEpisode } from '../App'
 import { EpStamp } from './BiblePage'
 import EpisodeCrumb from '../components/EpisodeCrumb'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 import EvidenceDrawer from '../components/harness/EvidenceDrawer'
+import { useFocusTrap } from '../hooks/useFocusTrap'
 
-function ScreenplayStamp({ status }: { status: string }) {
-  const map: Record<string, [string, string]> = {
-    pending: ['待剧本', 'grey'],
-    running: ['生成中', 'gold'],
-    repairing: ['修复中', 'gold'],
-    ready: ['已交付', 'green'],
-    warning: ['修复中', 'gold'],
-    failed: ['剧本败', 'red'],
-  }
-  const [label, color] = map[status] ?? [status, 'grey']
-  return <span className={`stamp ${color}`}>{label}</span>
+type EditorSection = 'spine' | 'body' | 'scenes' | 'evidence'
+type SaveState = 'idle' | 'saving' | 'saved' | 'error'
+
+type ActionPreview = {
+  kind: 'screenplay' | 'storyboard-create' | 'storyboard-resume' | 'screenplay-save'
+  title: string
+  data: Record<string, any>
+  idempotencyKey: string
+}
+
+type DropWizard = {
+  item: string
+  reason: string
+  rewrite: string
+  targetType: 'beat' | 'scene'
+  targetIndex: number
+  step: 1 | 2
 }
 
 const cloneScript = (script: EpisodeScreenplay | null | undefined): EpisodeScreenplay | null =>
   script ? JSON.parse(JSON.stringify(script)) : null
-
-const splitLines = (text: string) => text.split('\n').map(x => x.trim()).filter(Boolean)
-const sourceRangeText = (chapters: number[]) => chapters.length <= 1 ? `第 ${chapters[0] ?? '-'} 章` : `第 ${chapters[0]}-${chapters[chapters.length - 1]} 章`
-const parseSceneOutlineText = (text: string): ScriptScene[] =>
-  text.split('\n')
-    .map(x => x.trim())
-    .filter(Boolean)
-    .map((line, index) => {
-      const [scene_heading = '', story_function = '', summary = '', conflict = '', turn = '', source_basis = '', characters = ''] = line.split('|').map(part => part.trim())
-      return {
-        scene_no: index + 1,
-        scene_heading,
-        story_function,
-        summary,
-        conflict,
-        turn,
-        source_basis,
-        characters: characters.split(/[、,，/]/).map(x => x.trim()).filter(Boolean),
-      }
-    })
-
-const sceneOutlineText = (sceneOutline: ScriptScene[] | undefined) =>
-  (sceneOutline ?? [])
-    .map(scene => [scene.scene_heading, scene.story_function, scene.summary, scene.conflict ?? '', scene.turn ?? '', scene.source_basis ?? '', (scene.characters ?? []).join('、')].join(' | '))
-    .join('\n')
 
 const emptySpine = (): PlotSpine => ({
   episode_premise: '',
@@ -54,158 +45,553 @@ const emptySpine = (): PlotSpine => ({
   drop_list: [],
 })
 
-const restoreDropItem = (script: EpisodeScreenplay, dropText: string): EpisodeScreenplay => {
-  const spine = { ...(script.plot_spine ?? emptySpine()) }
-  const drops = [...(spine.drop_list ?? [])]
-  const idx = drops.findIndex(d => d === dropText)
-  if (idx < 0) return script
-  drops.splice(idx, 1)
-  spine.drop_list = drops
-  const points = [...(script.key_plot_points ?? [])]
-  if (!points.includes(dropText)) points.push(dropText)
-  const approved = [...(script.approved_adaptations ?? [])]
-  const mark = `恢复拍摄：${dropText}`
-  if (!approved.includes(mark)) approved.push(mark)
-  return { ...script, plot_spine: spine, key_plot_points: points, approved_adaptations: approved }
+const sourceRangeText = (chapters: number[]) => chapters.length <= 1
+  ? `第 ${chapters[0] ?? '-'} 章`
+  : `第 ${chapters[0]}-${chapters[chapters.length - 1]} 章`
+
+const splitLines = (text: string) => text.split('\n').map(value => value.trim()).filter(Boolean)
+
+const moveItem = <T,>(items: T[], index: number, direction: -1 | 1): T[] => {
+  const target = index + direction
+  if (target < 0 || target >= items.length) return items
+  const next = [...items]
+  ;[next[index], next[target]] = [next[target], next[index]]
+  return next
+}
+
+const stableKey = (prefix: string) => `${prefix}:${Date.now()}:${Math.random().toString(36).slice(2)}`
+const TARGET_DURATION_CHOICES = [40, 50, 60, 70, 80, 90] as const
+
+function ScreenplayStamp({ status }: { status: string }) {
+  const map: Record<string, [string, string]> = {
+    pending: ['待剧本', 'grey'],
+    running: ['生成中', 'gold'],
+    repairing: ['修复中', 'gold'],
+    ready: ['已交付', 'green'],
+    warning: ['待续修', 'gold'],
+    failed: ['剧本败', 'red'],
+  }
+  const [label, color] = map[status] ?? ['状态同步中', 'grey']
+  return <span className={`stamp ${color}`}>{label}</span>
+}
+
+function StructuredListActions({
+  index,
+  length,
+  onMove,
+  onDelete,
+}: {
+  index: number
+  length: number
+  onMove: (direction: -1 | 1) => void
+  onDelete: () => void
+}) {
+  return (
+    <div className="structured-row-actions">
+      <button type="button" className="btn small ghost" disabled={index === 0} onClick={() => onMove(-1)} aria-label="上移">↑</button>
+      <button type="button" className="btn small ghost" disabled={index === length - 1} onClick={() => onMove(1)} aria-label="下移">↓</button>
+      <button type="button" className="btn small ghost danger" onClick={onDelete}>删除</button>
+    </div>
+  )
+}
+
+function HighlightedText({ text, query }: { text: string; query: string }) {
+  const needle = query.trim()
+  if (!needle) return <>{text}</>
+  const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const parts = text.split(new RegExp(`(${escaped})`, 'gi'))
+  return <>{parts.map((part, index) => part.toLowerCase() === needle.toLowerCase()
+    ? <mark key={index}>{part}</mark>
+    : part)}</>
 }
 
 export default function ScriptPage() {
-  const { episodeId, projectId, go, toast } = useNav()
-  const { data: ep, refresh, error, loading } = useEpisode(episodeId!, 'script')
+  const { episodeId, projectId, go, toast, registerNavigationGuard } = useNav()
+  const { data: ep, refresh, error, loading } = useScriptEpisode(episodeId!)
   const [busy, setBusy] = useState(false)
   const [draft, setDraft] = useState<EpisodeScreenplay | null>(null)
+  const [baselineVersion, setBaselineVersion] = useState<string | null>(null)
+  const [dirty, setDirty] = useState(false)
+  const [draftSaveState, setDraftSaveState] = useState<SaveState>('idle')
+  const [recoverable, setRecoverable] = useState<{ content?: EpisodeScreenplay; constraints?: { occurrence_ids?: string[] }; baseline?: string | null } | null>(null)
+  const [selectedOccurrenceIds, setSelectedOccurrenceIds] = useState<string[] | null>(null)
   const [manuscriptExpanded, setManuscriptExpanded] = useState(false)
-  const [restoreEnabled, setRestoreEnabled] = useState(false)
-  const [selectedDialogueLines, setSelectedDialogueLines] = useState<string[] | null>(null)
+  const [detailsExpanded, setDetailsExpanded] = useState(false)
+  const [editorSection, setEditorSection] = useState<EditorSection>('spine')
+  const [manuscriptSearch, setManuscriptSearch] = useState('')
+  const [preview, setPreview] = useState<ActionPreview | null>(null)
+  const [dropWizard, setDropWizard] = useState<DropWizard | null>(null)
+  const [conflict, setConflict] = useState<Record<string, any> | null>(null)
+  const [targetDurationDraft, setTargetDurationDraft] = useState(50)
+  const historyRef = useRef<EpisodeScreenplay[]>([])
+  const redoRef = useRef<EpisodeScreenplay[]>([])
+  const restoredRef = useRef(false)
+  const manuscriptRef = useRef<HTMLDivElement>(null)
+  const conflictTrapRef = useFocusTrap(Boolean(conflict), () => setConflict(null))
+  const previewTrapRef = useFocusTrap(Boolean(preview), () => setPreview(null))
+  const dropTrapRef = useFocusTrap(Boolean(dropWizard), () => setDropWizard(null), {
+    dirty: Boolean(dropWizard?.reason || dropWizard?.rewrite),
+    onDirtyClose: () => toast('恢复向导尚未写入草稿，请先完成或点击取消'),
+  })
+
   const screenplayTimer = useTaskTimer(
     `episode.${episodeId}.screenplay`,
-    ep?.screenplay_production?.task_active
-      ?? ep?.screenplay_status === 'running',
+    ep?.screenplay_production?.task_active ?? ep?.screenplay_status === 'running',
   )
   const storyboardTimer = useTaskTimer(`episode.${episodeId}.storyboard`, ep?.status === 'scripting')
 
-  if (error && !ep) return <div className="empty">{error}</div>
-  if (loading && !ep) return <div className="empty">展卷中……</div>
-  if (!ep) return <div className="empty">展卷中……</div>
+  const occurrences = ep?.source_dialogue_occurrences ?? []
+  const serverOccurrenceIds = ep?.required_dialogue_occurrence_ids ?? []
+  const requiredOccurrenceIds = selectedOccurrenceIds ?? serverOccurrenceIds
+  const selectedSet = useMemo(() => new Set(requiredOccurrenceIds), [requiredOccurrenceIds])
+  const selectedOccurrences = useMemo(
+    () => occurrences.filter(item => selectedSet.has(item.id)),
+    [occurrences, selectedSet],
+  )
+  const selectedSeconds = useMemo(
+    () => selectedOccurrences.reduce((sum, item) => sum + item.estimated_seconds, 0),
+    [selectedOccurrences],
+  )
+  const targetDuration = ep?.target_duration_s ?? 50
+  const performanceReserve = targetDuration - selectedSeconds
+  const suggestedTargetDuration = TARGET_DURATION_CHOICES.find(
+    value => value >= selectedSeconds / 0.8,
+  )
+  const averageSeconds = occurrences.length
+    ? occurrences.reduce((sum, item) => sum + item.estimated_seconds, 0) / occurrences.length
+    : 2.5
+  const dynamicLimit = Math.max(1, Math.floor(targetDuration * 0.8 / Math.max(averageSeconds, 0.5)))
+  const effectiveLimit = Math.max(dynamicLimit, requiredOccurrenceIds.length)
+  const hardBudgetExceeded = selectedSeconds > targetDuration
+  const allDialogueSelected = occurrences.length > 0 && occurrences.every(item => selectedSet.has(item.id))
 
-  const act = async (fn: () => Promise<unknown>, doneMsg?: string) => {
+  const screenplayTaskActive = ep?.screenplay_production?.task_active ?? ep?.screenplay_status === 'running'
+  const canResumeRepair = ep?.screenplay_production?.can_resume_repair
+    ?? (ep?.screenplay_status === 'repairing' || ep?.screenplay_status === 'warning')
+  const productionOperation = ep?.screenplay_production?.operation
+    ?? (ep?.screenplay_status === 'repairing' || ep?.screenplay_status === 'warning' ? 'repair' : 'baseline')
+
+  const script = draft ?? ep?.screenplay ?? null
+  const editing = draft !== null
+  const spine = script?.plot_spine
+
+  const localDraftKey = ep ? `manju:screenplay-draft:${projectId}:${ep.id}` : ''
+  const draftEpisodeId = ep?.id
+  const draftEpisodeArtifactId = ep?.screenplay_artifact_id ?? null
+
+  useEffect(() => {
+    if (ep) setTargetDurationDraft(ep.target_duration_s)
+  }, [ep?.id, ep?.target_duration_s])
+
+  const applyTargetDuration = async () => {
+    if (!ep || targetDurationDraft === targetDuration) return
     setBusy(true)
     try {
-      const r = await fn()
-      if (doneMsg) toast(doneMsg)
-      refresh()
-      return r
-    } catch (e: unknown) {
-      toast((e as Error).message, true)
+      await api.put(`/episodes/${ep.id}/target-duration`, {
+        target_duration_s: targetDurationDraft,
+      })
+      await refresh()
+      toast(`本集目标时长已调整为 ${targetDurationDraft} 秒`)
+    } catch (reason: unknown) {
+      setTargetDurationDraft(targetDuration)
+      toast((reason as Error).message, true)
     } finally {
       setBusy(false)
     }
   }
 
-  const hasDownstream = (ep.shot_count ?? 0) > 0 || ['scripted', 'confirmed', 'generating', 'done'].includes(ep.status)
-  const productionOperation = ep.screenplay_production?.operation
-    ?? (ep.screenplay_status === 'repairing' || ep.screenplay_status === 'warning' ? 'repair' : 'baseline')
-  const screenplayTaskActive = ep.screenplay_production?.task_active
-    ?? ep.screenplay_status === 'running'
-  const canResumeRepair = ep.screenplay_production?.can_resume_repair
-    ?? (ep.screenplay_status === 'repairing' || ep.screenplay_status === 'warning')
-  const sourceDialogueLines = ep.source_dialogue_lines ?? []
-  const requiredDialogueLines = selectedDialogueLines ?? ep.required_dialogue_lines ?? []
-  const requiredDialogueSet = new Set(requiredDialogueLines)
-  const allDialogueSelected = sourceDialogueLines.length > 0
-    && sourceDialogueLines.every(line => requiredDialogueSet.has(line))
+  useEffect(() => {
+    if (!ep || restoredRef.current) return
+    restoredRef.current = true
+    let cancelled = false
+    const fromLocal = localStorage.getItem(localDraftKey)
+    if (fromLocal) {
+      try {
+        const parsed = JSON.parse(fromLocal)
+        setRecoverable(parsed)
+      } catch { localStorage.removeItem(localDraftKey) }
+    }
+    api.get(`/episodes/${ep.id}/screenplay/draft`).then((result: any) => {
+      if (cancelled || !result?.draft) return
+      const server = result.draft
+      setRecoverable(current => current ?? {
+        content: server.content,
+        constraints: server.constraints,
+        baseline: server.baseline_artifact_id,
+      })
+    }).catch(() => { /* 本地草稿仍可恢复 */ })
+    return () => { cancelled = true }
+  }, [ep, localDraftKey])
 
-  const startBaseline = () => {
-    screenplayTimer.start()
-    void act(
-      () => api.post(`/episodes/${ep.id}/screenplay`, {
-        required_dialogue_lines: requiredDialogueLines,
-      }),
-      '首次整版 Baseline 已开始；落库后只做局部 Patch',
-    ).then(r => { if (r === undefined) screenplayTimer.clear() })
+  useEffect(() => {
+    if (!draftEpisodeId || !dirty) return
+    const payload = {
+      content: draft ?? undefined,
+      constraints: { occurrence_ids: requiredOccurrenceIds },
+      baseline: baselineVersion ?? draftEpisodeArtifactId,
+      saved_at: Date.now(),
+    }
+    localStorage.setItem(localDraftKey, JSON.stringify(payload))
+    setDraftSaveState('saving')
+    const timer = window.setTimeout(() => {
+      api.put(`/episodes/${draftEpisodeId}/screenplay/draft`, {
+        content: draft ?? undefined,
+        constraints: { occurrence_ids: requiredOccurrenceIds },
+        baseline_artifact_id: baselineVersion ?? draftEpisodeArtifactId,
+      }).then(() => setDraftSaveState('saved')).catch(() => setDraftSaveState('error'))
+    }, 650)
+    return () => window.clearTimeout(timer)
+  }, [baselineVersion, dirty, draft, draftEpisodeArtifactId, draftEpisodeId, localDraftKey, requiredOccurrenceIds])
+
+  useEffect(() => {
+    if (!dirty) {
+      registerNavigationGuard(null, false)
+      return
+    }
+    registerNavigationGuard(
+      () => window.confirm('当前修改尚未发布，已自动保存为工作草稿。确定离开吗？'),
+      true,
+    )
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault()
+      event.returnValue = ''
+    }
+    window.addEventListener('beforeunload', beforeUnload)
+    return () => {
+      window.removeEventListener('beforeunload', beforeUnload)
+      registerNavigationGuard(null, false)
+    }
+  }, [dirty, registerNavigationGuard])
+
+  const mutateDraft = (updater: (current: EpisodeScreenplay) => EpisodeScreenplay) => {
+    setDraft(current => {
+      if (!current) return current
+      historyRef.current.push(cloneScript(current)!)
+      if (historyRef.current.length > 80) historyRef.current.shift()
+      redoRef.current = []
+      return updater(cloneScript(current)!)
+    })
+    setDirty(true)
   }
 
-  const resumeRepair = () => {
+  const undo = () => {
+    const previous = historyRef.current.pop()
+    if (!previous || !draft) return
+    redoRef.current.push(cloneScript(draft)!)
+    setDraft(previous)
+    setDirty(true)
+  }
+
+  const redo = () => {
+    const next = redoRef.current.pop()
+    if (!next || !draft) return
+    historyRef.current.push(cloneScript(draft)!)
+    setDraft(next)
+    setDirty(true)
+  }
+
+  const updateScript = (patch: Partial<EpisodeScreenplay>) => mutateDraft(current => ({ ...current, ...patch }))
+  const updateSpine = (patch: Partial<PlotSpine>) => mutateDraft(current => ({
+    ...current,
+    plot_spine: { ...(current.plot_spine ?? emptySpine()), ...patch },
+  }))
+
+  const beginEditing = (value = ep?.screenplay ?? null, baseline = ep?.screenplay_artifact_id ?? null) => {
+    if (!value) return
+    setDraft(cloneScript(value))
+    setBaselineVersion(baseline)
+    setEditorSection('spine')
+    historyRef.current = []
+    redoRef.current = []
+    setDirty(false)
+    setConflict(null)
+  }
+
+  const clearWorkingDraft = async () => {
+    setDraft(null)
+    setBaselineVersion(null)
+    setDirty(false)
+    setSelectedOccurrenceIds(null)
+    setRecoverable(null)
+    setConflict(null)
+    historyRef.current = []
+    redoRef.current = []
+    if (localDraftKey) localStorage.removeItem(localDraftKey)
+    if (ep) await api.del(`/episodes/${ep.id}/screenplay/draft`).catch(() => undefined)
+  }
+
+  const run = async (fn: () => Promise<any>, done?: string) => {
+    setBusy(true)
+    try {
+      const result = await fn()
+      if (done) toast(done)
+      await refresh()
+      return result
+    } catch (unknownError: unknown) {
+      const apiError = unknownError as Error & { status?: number; detail?: any }
+      if (apiError.status === 403 && apiError.message.includes('已取消操作')) {
+        toast('未执行，数据保持不变')
+      } else {
+        toast(apiError.message, true)
+      }
+      throw unknownError
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const publishDraft = async () => {
+    if (!ep || !draft) return
+    setBusy(true)
+    try {
+      const result = await api.put(`/episodes/${ep.id}/screenplay`, {
+        screenplay: draft,
+        expected_version: baselineVersion,
+      })
+      toast(result.unchanged ? '内容无变化，未创建新版本' : '剧本已原子发布')
+      await clearWorkingDraft()
+      await refresh()
+    } catch (saveError: unknown) {
+      const typed = saveError as Error & { status?: number; detail?: any }
+      if (typed.status === 409 && ['screenplay_version_conflict', 'version_conflict'].includes(typed.detail?.code)) {
+        setConflict(typed.detail)
+      } else if (typed.status === 403 && typed.message.includes('已取消操作')) {
+        toast('未执行发布，工作草稿已保留')
+      } else {
+        toast(typed.message, true)
+      }
+    } finally { setBusy(false) }
+  }
+
+  const openScreenplayPreview = async () => {
+    if (!ep || hardBudgetExceeded || canResumeRepair) return
+    setBusy(true)
+    try {
+      const data = await api.post(`/episodes/${ep.id}/screenplay/preflight`, {
+        occurrence_ids: requiredOccurrenceIds,
+      })
+      setPreview({
+        kind: 'screenplay',
+        title: '首次生成剧本预检',
+        data,
+        idempotencyKey: stableKey(`screenplay:${ep.id}`),
+      })
+    } catch (previewError) {
+      toast((previewError as Error).message, true)
+    } finally { setBusy(false) }
+  }
+
+  const openStoryboardPreview = async (mode: 'create' | 'resume') => {
+    if (!ep || dirty) return
+    setBusy(true)
+    try {
+      const data = await api.post(`/episodes/${ep.id}/storyboard/preflight`, { mode })
+      setPreview({
+        kind: mode === 'resume' ? 'storyboard-resume' : 'storyboard-create',
+        title: mode === 'resume' ? '继续生成分镜预检' : '首次生成分镜预检',
+        data,
+        idempotencyKey: stableKey(`storyboard:${ep.id}:${mode}`),
+      })
+    } catch (previewError) {
+      toast((previewError as Error).message, true)
+    } finally { setBusy(false) }
+  }
+
+  const executePreview = async () => {
+    if (!preview || !ep) return
+    const current = preview
+    setPreview(null)
+    if (current.kind === 'screenplay-save') {
+      await publishDraft()
+      return
+    }
+    if (current.kind === 'screenplay') {
+      screenplayTimer.start()
+      const result = await run(() => api.post(`/episodes/${ep.id}/screenplay`, {
+        required_dialogue_occurrence_ids: requiredOccurrenceIds,
+        required_dialogue_lines: selectedOccurrences.map(item => item.text),
+        idempotency_key: current.idempotencyKey,
+      }), '首版剧本任务已受理').catch(() => screenplayTimer.clear())
+      if (result) {
+        setDirty(false)
+        localStorage.removeItem(localDraftKey)
+        void api.del(`/episodes/${ep.id}/screenplay/draft`).catch(() => undefined)
+      }
+      return
+    }
+    storyboardTimer.start()
+    const resume = current.kind === 'storyboard-resume'
+    await run(() => api.post(`/episodes/${ep.id}/storyboard${resume ? '/resume' : ''}`, {
+      preflight_token: current.data.preview_token,
+      idempotency_key: current.idempotencyKey,
+    }), resume ? '已从安全 checkpoint 继续分镜' : '分镜生成任务已受理')
+      .catch(() => storyboardTimer.clear())
+  }
+
+  const resumeRepair = async () => {
+    if (!ep) return
     screenplayTimer.start()
-    void act(
-      () => api.post(`/episodes/${ep.id}/screenplay/resume`, {}),
-      '已从工作副本继续局部修复（不会再次整版生成）',
-    ).then(r => { if (r === undefined) screenplayTimer.clear() })
+    await run(() => api.post(`/episodes/${ep.id}/screenplay/resume`, {
+      idempotency_key: stableKey(`screenplay-resume:${ep.id}`),
+    }), '已使用任务详情中的锁定约束版本继续修复')
+      .catch(() => screenplayTimer.clear())
+  }
+
+  const stopScreenplay = async () => {
+    if (!ep) return
+    const result = await run(() => api.post(`/episodes/${ep.id}/screenplay/cancel`, {}))
+      .catch(() => null)
+    if (result?.status === 'cancelling') toast('正在取消，尚未宣称已停止')
+    else if (result) toast(`任务已终止；${result.resume_available ? '可从工作副本恢复' : '可重新发起'}`)
+  }
+
+  const savePublished = async () => {
+    if (!ep || !draft) return
+    setBusy(true)
+    try {
+      const result = await api.post(`/episodes/${ep.id}/screenplay/impact-preview`, {
+        screenplay: draft,
+        expected_version: baselineVersion,
+      })
+      if (result.requires_server_approval) {
+        // 有下游时不再叠加本地弹窗；PUT 会进入统一 Capability 影响卡。
+        await publishDraft()
+        return
+      }
+      setPreview({
+        kind: 'screenplay-save',
+        title: result.unchanged ? '发布前检查' : '剧本发布差异预览',
+        data: result,
+        idempotencyKey: stableKey(`screenplay-save:${ep.id}`),
+      })
+    } catch (previewError: unknown) {
+      const typed = previewError as Error & { status?: number; detail?: any }
+      if (typed.status === 409 && ['screenplay_version_conflict', 'version_conflict'].includes(typed.detail?.code)) {
+        setConflict(typed.detail)
+      } else {
+        toast(typed.message, true)
+      }
+    } finally { setBusy(false) }
   }
 
   const deleteCurrentScreenplay = async () => {
-    const r = await act(
-      () => api.del(`/episodes/${ep.id}/screenplay`),
-      '当前剧本及下游产物已删除；必保留台词选择已保留',
-    )
-    if (r !== undefined) {
-      setDraft(null)
-      setRestoreEnabled(false)
-      screenplayTimer.clear()
-      storyboardTimer.clear()
-    }
-  }
-
-  const saveDraft = async () => {
-    if (!draft) return
-    if (hasDownstream &&
-      !window.confirm('保存剧本修改会清空本集已有分镜、参考图、视频和成片，需要重新生成分镜。确定保存？')) return
-    const r = await act(() => api.put(`/episodes/${ep.id}/screenplay`, { screenplay: draft, force: hasDownstream }),
-      hasDownstream ? '剧本已保存，下游分镜已清空' : '剧本已保存')
-    if (r !== undefined) {
-      setDraft(null)
-      setRestoreEnabled(false)
-    }
-  }
-
-  const enterBoard = async () => {
-    const canResumeCheckpoint = Boolean(
-      (ep.shot_count ?? 0) > 0 &&
-      ep.script_error &&
-      (ep.status === 'scripted' || ep.status === 'script_failed') &&
-      !(ep.shots?.length && ep.shots[ep.shots.length - 1]?.is_final)
-    )
-    const needGenerate = (ep.shot_count ?? 0) === 0 || ['planned', 'script_failed'].includes(ep.status)
-    if (needGenerate && ep.status !== 'scripting') {
-      storyboardTimer.start()
-      const path = canResumeCheckpoint
-        ? `/episodes/${ep.id}/storyboard/resume`
-        : `/episodes/${ep.id}/storyboard`
-      const r = await act(
-        () => api.post(path),
-        canResumeCheckpoint
-          ? `已进入分镜台，从前 ${ep.shot_count ?? 0} 镜 checkpoint 继续生成`
-          : '已进入分镜台，正在逐镜头生成，QA 通过后陆续展示',
-      )
-      if (r === undefined) {
+    if (!ep) return
+    try {
+      const result = await run(() => api.del(`/episodes/${ep.id}/screenplay`))
+      if (result) {
+        await clearWorkingDraft()
+        screenplayTimer.clear()
         storyboardTimer.clear()
-        return
+        toast('当前剧本及下游已删除；必保留台词已保留')
       }
+    } catch { /* run 已呈现结果 */ }
+  }
+
+  const validateDraft = (value: EpisodeScreenplay | null) => {
+    const sections: Record<EditorSection, string[]> = { spine: [], body: [], scenes: [], evidence: [] }
+    if (!value) return sections
+    if (!value.title?.trim()) sections.body.push('标题不能为空')
+    if (!value.full_script_text?.trim()) sections.body.push('完整剧本正文不能为空')
+    if ((value.full_script_text?.length ?? 0) < 100) sections.body.push('剧本正文过短')
+    ;(value.plot_spine?.spine_beats ?? []).forEach((beat, index) => {
+      if (!beat.who?.trim() || !beat.does?.trim() || !beat.turn?.trim()) sections.spine.push(`节拍 ${index + 1} 未写完`)
+    })
+    ;(value.scene_outline ?? []).forEach((scene, index) => {
+      if (!scene.scene_heading.trim() || !scene.story_function.trim() || !scene.summary.trim()) sections.scenes.push(`场次 ${index + 1} 未写完`)
+    })
+    ;(value.key_lines ?? []).forEach((line, index) => {
+      if (line && !value.full_script_text?.includes(line.replace(/^.{1,12}[：:]/, ''))) sections.evidence.push(`主线台词 ${index + 1} 在正文中不可追溯`)
+    })
+    return sections
+  }
+
+  const validation = useMemo(() => validateDraft(draft), [draft])
+  const totalErrors = Object.values(validation).reduce((sum, items) => sum + items.length, 0)
+
+  const exportScript = () => {
+    if (!script || !ep) return
+    const blob = new Blob([script.full_script_text ?? ''], { type: 'text/plain;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `第${ep.episode_no}集-${script.title || ep.title}-剧本.txt`
+    anchor.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const applyDropWizard = () => {
+    if (!dropWizard || !draft || !dropWizard.rewrite.trim() || !dropWizard.reason.trim()) return
+    const wizard = dropWizard
+    mutateDraft(current => {
+      const next = cloneScript(current)!
+      const nextSpine = { ...(next.plot_spine ?? emptySpine()) }
+      nextSpine.drop_list = (nextSpine.drop_list ?? []).filter(item => item !== wizard.item)
+      if (wizard.targetType === 'beat') {
+        const beats = [...(nextSpine.spine_beats ?? [])]
+        const target = beats[wizard.targetIndex]
+        if (target) beats[wizard.targetIndex] = {
+          ...target,
+          does: `${target.does || ''}；${wizard.rewrite}`.replace(/^；/, ''),
+        }
+        nextSpine.spine_beats = beats
+      } else {
+        const scenes = [...(next.scene_outline ?? [])]
+        const target = scenes[wizard.targetIndex]
+        if (target) scenes[wizard.targetIndex] = {
+          ...target,
+          summary: `${target.summary || ''}；${wizard.rewrite}`.replace(/^；/, ''),
+        }
+        next.scene_outline = scenes
+      }
+      next.plot_spine = nextSpine
+      next.approved_adaptations = [
+        ...(next.approved_adaptations ?? []),
+        `恢复原因：${wizard.reason}；可拍化：${wizard.rewrite}`,
+      ]
+      return next
+    })
+    setDropWizard(null)
+    toast('恢复项已进入工作草稿，尚未影响下游')
+  }
+
+  if (error && !ep) return <div className="empty">{error}</div>
+  if (loading && !ep) return <div className="empty">展卷中……</div>
+  if (!ep) return <div className="empty">展卷中……</div>
+
+  const state: Pick<ScreenplayState, 'code' | 'message' | 'recommended_action' | 'publish_blocked' | 'storyboard_running' | 'reason' | 'checkpoint_shot'> = ep.screenplay_state ?? {
+    code: 'unknown',
+    message: '状态同步中',
+    recommended_action: 'refresh',
+    publish_blocked: true,
+    storyboard_running: false,
+    reason: '',
+    checkpoint_shot: null,
+  }
+
+  const primaryAction = () => {
+    if (dirty && editing) return <button className="btn primary" disabled={busy || totalErrors > 0} onClick={savePublished}>预览影响并发布</button>
+    switch (state.recommended_action) {
+      case 'generate_screenplay':
+        return <button className="btn primary" disabled={busy || hardBudgetExceeded} onClick={openScreenplayPreview}>首次生成剧本</button>
+      case 'stop_screenplay':
+        return <button className="btn primary" disabled={busy} onClick={stopScreenplay}>停止剧本任务</button>
+      case 'resume_screenplay':
+        return <button className="btn primary" disabled={busy} onClick={resumeRepair}>继续局部修复</button>
+      case 'generate_storyboard':
+        return <button className="btn primary" disabled={busy || dirty} onClick={() => openStoryboardPreview('create')}>首次生成分镜</button>
+      case 'resume_storyboard':
+        return <button className="btn primary" disabled={busy || dirty} onClick={() => openStoryboardPreview('resume')}>继续生成分镜（从第 {(state.checkpoint_shot ?? ep.shot_count ?? 0) + 1} 镜）</button>
+      case 'view_storyboard':
+        return <button className="btn primary" onClick={() => go('board', projectId, ep.id)}>查看分镜进度</button>
+      default:
+        return <button className="btn primary" disabled={busy} onClick={() => refresh()}>刷新状态</button>
     }
-    go('board', projectId, ep.id)
-  }
-
-  const script = draft ?? ep.screenplay ?? null
-  const editing = !!draft
-  const spine = script?.plot_spine
-
-  const updateScript = (patch: Partial<EpisodeScreenplay>) => {
-    if (!draft) return
-    setDraft({ ...draft, ...patch })
-  }
-
-  const updateSpine = (patch: Partial<PlotSpine>) => {
-    if (!draft) return
-    setDraft({ ...draft, plot_spine: { ...(draft.plot_spine ?? emptySpine()), ...patch } })
   }
 
   const structureItems = [
-    ['开端', script?.opening],
-    ['发展', script?.development],
-    ['冲突', script?.conflict],
-    ['高潮', script?.climax],
-    ['结尾钩子', script?.ending_hook],
-  ].filter(([, value]) => !!(value ?? '').toString().trim())
+    ['开端', script?.opening], ['发展', script?.development], ['冲突', script?.conflict],
+    ['高潮', script?.climax], ['结尾钩子', script?.ending_hook],
+  ].filter(([, value]) => Boolean(value?.trim()))
 
   return (
     <>
@@ -216,416 +602,526 @@ export default function ScriptPage() {
       </header>
 
       <section className="card script-toolbar">
-        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-          <ScreenplayStamp status={ep.screenplay_status} />
-          <EpStamp status={ep.status} />
-          {screenplayTaskActive ? (
-            <button className="btn" disabled>
-              {productionOperation === 'baseline' ? '首次整版生成中…' : '局部修复中…'}
-            </button>
-          ) : canResumeRepair ? (
-            <>
-              <button className="btn" disabled={busy || ep.status === 'scripting'} onClick={resumeRepair}
-                title="从已有 working Artifact 和 checkpoint 继续，只执行字段/节点级 Patch">
-                继续局部修复
-              </button>
-              <button className="btn" disabled={busy || ep.status === 'scripting'} onClick={deleteCurrentScreenplay}
-                title={ep.screenplay
-                  ? '放弃当前工作副本和已交付剧本，并清空下游产物'
-                  : '放弃未通过的工作副本，清除失败 checkpoint 后重新首次生成'}>
-                {ep.screenplay ? '删除当前剧本' : '删除失败剧本'}
-              </button>
-            </>
-          ) : ep.screenplay ? (
-            <button className="btn" disabled={busy || ep.status === 'scripting'} onClick={deleteCurrentScreenplay}
-              title="删除当前剧本；若已有分镜、媒体或成片也会一并清空">
-              删除当前剧本
-            </button>
-          ) : (
-            <button className="btn" disabled={busy || ep.status === 'scripting'} onClick={startBaseline}
-              title="唯一会向模型发送完整剧本生成提示词的动作">
-              首次生成整版
-            </button>
-          )}
-          {screenplayTaskActive && (
-            <button className="btn ghost" disabled={busy}
-              onClick={() => act(() => api.post(`/episodes/${ep.id}/screenplay/cancel`), '已取消剧本任务')}>
-              {productionOperation === 'baseline' ? '停止首次生成' : '停止局部修复'}
-            </button>
-          )}
+        <div className="screenplay-primary-row">
+          <div className="screenplay-state-copy">
+            <div><ScreenplayStamp status={ep.screenplay_status} /> <EpStamp status={ep.status} /></div>
+            <strong>{state.message}</strong>
+            {state.reason && <small>{state.reason}</small>}
+          </div>
+          <div className="screenplay-primary-actions">
+            {primaryAction()}
+            {ep.screenplay_status === 'ready' && (
+              <button className="btn ghost" type="button" onClick={() => go('board', projectId, ep.id)}>查看分镜台 →</button>
+            )}
+          </div>
+        </div>
+
+        <div className="screenplay-secondary-row">
           {ep.screenplay && !editing && (
-            <button className="btn" disabled={busy || !['ready'].includes(ep.screenplay_status)} onClick={() => setDraft(cloneScript(ep.screenplay))}>
-              手工编辑全文
-            </button>
+            <button className="btn" disabled={busy} onClick={() => beginEditing()}>手工编辑全文</button>
           )}
           {editing && (
             <>
-              <button className="btn primary" disabled={busy} onClick={saveDraft}>保存剧本</button>
-              <button className="btn ghost" disabled={busy} onClick={() => { setDraft(null); setRestoreEnabled(false) }}>放弃</button>
+              <button className="btn ghost" disabled={!historyRef.current.length} onClick={undo}>撤销</button>
+              <button className="btn ghost" disabled={!redoRef.current.length} onClick={redo}>重做</button>
+              <button className="btn ghost" disabled={busy} onClick={() => void clearWorkingDraft()}>放弃工作草稿</button>
+              <span className={`draft-state ${draftSaveState}`}>
+                {draftSaveState === 'saving' ? '草稿保存中…'
+                  : draftSaveState === 'saved' ? '草稿已自动保存'
+                    : draftSaveState === 'error' ? '草稿云端保存失败（本地已保留）' : ''}
+              </span>
             </>
           )}
-          {ep.screenplay_status === 'ready' && !editing && (
-            <button className="btn primary" disabled={busy} onClick={enterBoard}>
-              进入分镜台 →
+          {!screenplayTaskActive && (ep.screenplay || canResumeRepair) && (
+            <button className="btn ghost danger" disabled={busy} onClick={deleteCurrentScreenplay}>
+              {ep.screenplay ? '删除当前剧本' : '删除失败剧本'}
             </button>
           )}
-          <span style={{ flex: 1 }} />
+          <span className="screenplay-row-spacer" />
           {ep.screenplay_evidence && <EvidenceDrawer evidence={ep.screenplay_evidence} label="剧本证据" />}
           <TaskTimer label="剧本" timer={screenplayTimer} />
           <TaskTimer label="分镜" timer={storyboardTimer} />
-          <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>
-            目标 {ep.target_duration_s}s · renderability_v1
-          </span>
         </div>
+
+        {recoverable && !editing && (
+          <div className="draft-recovery-banner" role="status">
+            <span>发现未发布的工作草稿，基线 {recoverable.baseline || '空版本'}。</span>
+            <div>
+              <button className="btn small" onClick={() => {
+                if (recoverable.content) beginEditing(recoverable.content, recoverable.baseline ?? null)
+                if (recoverable.constraints?.occurrence_ids) setSelectedOccurrenceIds(recoverable.constraints.occurrence_ids)
+                setDirty(true)
+                setRecoverable(null)
+              }}>恢复草稿</button>
+              <button className="btn small ghost" onClick={() => void clearWorkingDraft()}>放弃</button>
+            </div>
+          </div>
+        )}
+
         {!script && !screenplayTaskActive && (
           <div className="screenplay-dialogue-picker">
             <div className="screenplay-dialogue-picker-head">
               <div>
-                <b>必保留原文台词</b>
-                <span>已选 {requiredDialogueLines.length} / {sourceDialogueLines.length} 条；勾选项会逐字进入剧本和后续分镜</span>
+                <b>必保留原文台词（按出现位置）</b>
+                <span>已选 {requiredOccurrenceIds.length} / {occurrences.length} 处 · 估算 {selectedSeconds.toFixed(1)}s / 目标 {targetDuration}s · 差值 {(targetDuration - selectedSeconds).toFixed(1)}s</span>
               </div>
-              {sourceDialogueLines.length > 0 && (
-                <button type="button" className="btn ghost" disabled={busy}
-                  onClick={() => setSelectedDialogueLines(allDialogueSelected ? [] : [...sourceDialogueLines])}>
-                  {allDialogueSelected ? '取消全选' : '全选'}
-                </button>
-              )}
+              <button type="button" className="btn ghost" disabled={busy || canResumeRepair || !occurrences.length}
+                onClick={() => {
+                  setSelectedOccurrenceIds(allDialogueSelected ? [] : occurrences.map(item => item.id))
+                  setDirty(true)
+                }}>
+                {allDialogueSelected ? '取消全选' : '全选'}
+              </button>
             </div>
-            {sourceDialogueLines.length > 0 ? (
-              <div className="screenplay-dialogue-options">
-                {sourceDialogueLines.map((line, index) => (
-                  <label key={`${index}-${line}`} className="screenplay-dialogue-option">
-                    <input type="checkbox" checked={requiredDialogueSet.has(line)}
-                      onChange={event => {
-                        const next = new Set(requiredDialogueLines)
-                        if (event.target.checked) next.add(line)
-                        else next.delete(line)
-                        setSelectedDialogueLines(sourceDialogueLines.filter(item => next.has(item)))
-                      }} />
-                    <span><em>D{String(index + 1).padStart(3, '0')}</em>{line}</span>
-                  </label>
-                ))}
+            <div className="target-duration-control">
+              <div className="target-duration-copy">
+                <b>本集目标时长</b>
+                <span>这是包含对白、动作、反应和转场的整集节奏预算，不要求成片精确卡到该秒数。</span>
               </div>
-            ) : (
-              <div className="screenplay-dialogue-empty">本集原文未识别到显式台词，可直接首次生成整版。</div>
-            )}
-            {requiredDialogueLines.length > 6 && (
-              <div className="screenplay-dialogue-warning">
-                已选择较多台词；系统会全部保留，但剧本与后续分镜可能相应变长。
+              <div className="target-duration-actions">
+                <label>
+                  <select
+                    aria-label="本集目标时长"
+                    value={targetDurationDraft}
+                    disabled={busy || Boolean(canResumeRepair)}
+                    onChange={event => setTargetDurationDraft(Number(event.target.value))}
+                  >
+                    {TARGET_DURATION_CHOICES.map(value => <option key={value} value={value}>{value} 秒</option>)}
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  className="btn small"
+                  disabled={busy || Boolean(canResumeRepair) || targetDurationDraft === targetDuration}
+                  onClick={() => void applyTargetDuration()}
+                >应用目标</button>
+              </div>
+            </div>
+            <div className={`dialogue-budget ${hardBudgetExceeded ? 'hard' : selectedSeconds > targetDuration * 0.8 ? 'soft' : 'ok'}`}>
+              <b>动态建议上限 {dynamicLimit} 处</b>
+              <span>
+                必保留项可将当前上限抬高到 {effectiveLimit} 处；所选对白后
+                {performanceReserve >= 0 ? `约剩 ${performanceReserve.toFixed(1)}s` : `已超 ${Math.abs(performanceReserve).toFixed(1)}s`} 表演空间。
+              </span>
+              <small>
+                口径：约 4.2 字/秒；通常建议至少留出 20% 给动作、反应和转场。
+                {selectedSeconds > targetDuration * 0.8 && suggestedTargetDuration
+                  ? ` 按此余量建议选择 ${suggestedTargetDuration} 秒。`
+                  : ''}
+              </small>
+            </div>
+            {canResumeRepair && <div className="screenplay-dialogue-warning">当前 checkpoint 锁定了约束版本，台词选择只读；继续修复不会静默消费本地改动。</div>}
+            <div className="screenplay-dialogue-options">
+              {occurrences.map(item => (
+                <DialogueOption
+                  key={item.id}
+                  item={item}
+                  checked={selectedSet.has(item.id)}
+                  disabled={Boolean(canResumeRepair)}
+                  onChange={checked => {
+                    const next = new Set(requiredOccurrenceIds)
+                    if (checked) next.add(item.id)
+                    else next.delete(item.id)
+                    setSelectedOccurrenceIds(occurrences.filter(value => next.has(value.id)).map(value => value.id))
+                    setDirty(true)
+                  }}
+                />
+              ))}
+              {!occurrences.length && <div className="screenplay-dialogue-empty">本集原文未识别到显式台词，可直接首次生成剧本。</div>}
+            </div>
+            {hardBudgetExceeded && (
+              <div className="screenplay-dialogue-warning hard">
+                对白估算已超出整集节奏预算 {Math.abs(targetDuration - selectedSeconds).toFixed(1)}s；请减少选择、拆分对话组，或在上方提高目标时长后再生成。
               </div>
             )}
           </div>
         )}
-        <div className="script-capability-note" style={{ marginTop: 10, fontSize: 13, color: 'var(--ink-soft)' }}>
-          能力边界：仅「首次生成整版」发送完整剧本提示词；「继续局部修复」恢复 Patch checkpoint；「删除当前剧本」放弃当前版本并清空下游；自由改稿请用「手工编辑全文」。
-        </div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10, marginTop: 12 }}>
-          <div className="kv"><b>当前分集</b>第{numToCn(ep.episode_no)}集</div>
-          <div className="kv"><b>原文来源范围</b>{script?.source_text_range || sourceRangeText(ep.source_chapters)}</div>
-          <div className="kv"><b>目标时长</b>{ep.target_duration_s}s</div>
-          <div className="kv"><b>剧本状态</b>{
-            ep.screenplay_status === 'ready' ? '已交付（含完成凭证）'
-              : screenplayTaskActive && productionOperation === 'repair' ? '局部修复中'
-              : screenplayTaskActive ? '首次整版生成中'
-              : canResumeRepair ? '局部修复已暂停，可继续'
-              : ep.screenplay_status === 'failed' ? '生成失败'
-              : '待生成'
-          }</div>
-        </div>
-        {screenplayTaskActive && productionOperation === 'baseline' && <div style={{ marginTop: 10 }}><span className="stamp gold">首次整版 Baseline</span> <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>这是唯一一次完整剧本模型请求；落库后切换为局部 Patch。</span></div>}
-        {screenplayTaskActive && productionOperation === 'repair' && (
-          <div className="error-banner">
-            Agent 正在按 Issue 做局部修复；未通过完成凭证前不会作为可用剧本交付，也不能进入分镜。
+
+        <button type="button" className="script-details-toggle" onClick={() => setDetailsExpanded(value => !value)} aria-expanded={detailsExpanded}>
+          {detailsExpanded ? '收起详情' : '查看计时、来源与技术详情'}
+        </button>
+        {detailsExpanded && (
+          <div className="screenplay-detail-grid">
+            <div className="kv"><b>当前分集</b>第{numToCn(ep.episode_no)}集</div>
+            <div className="kv"><b>原文来源范围</b>{script?.source_text_range || sourceRangeText(ep.source_chapters)}{!script?.source_text_range && <em>推断显示</em>}</div>
+            <div className="kv"><b>目标时长</b>{ep.target_duration_s}s</div>
+            <div className="kv"><b>状态快照</b>v{ep.screenplay_state?.version ?? 0} · {ep.screenplay_state?.code ?? 'unknown'}</div>
+            {ep.screenplay_production?.operation === 'repair' && (
+              <div className="kv"><b>修复统计</b>
+                已启动 {ep.screenplay_production.activation_count ?? 0} 轮 ·
+                已应用 {ep.screenplay_production.patch_count ?? 0} 个补丁 ·
+                待处理 {ep.screenplay_production.open_issue_count ?? 0} 项
+              </div>
+            )}
           </div>
         )}
-        {!screenplayTaskActive && canResumeRepair && (
-          <div className="error-banner">
-            局部修复已暂停或等待续跑；点击「继续局部修复」会从现有工作副本恢复，不会发送完整剧本生成提示词。
-          </div>
-        )}
-        {ep.screenplay_error && <div className="error-banner">剧本提示：{'\n'}{ep.screenplay_error}</div>}
-        {ep.script_error && <div className="error-banner">分镜提示：{'\n'}{ep.script_error}</div>}
+        {ep.screenplay_error && <div className="error-banner">剧本详情：{ep.screenplay_error}</div>}
+        {ep.script_error && <div className="error-banner">分镜详情：{ep.script_error}</div>}
       </section>
 
       <div className="workspace-gap" />
 
-      {!script
-        ? <div className="empty"><div className="big">剧</div>尚无可交付剧本<br />点击上方「首次生成整版」</div>
-        : (
-            <>
-              {(spine || editing) && (
-                <section className="card spine-card">
-                  <div className="shot-head" style={{ marginBottom: 10 }}>
-                    <span className="sn">主线骨架</span>
-                    <span className="meta">只拍这些；drop_list 默认不拍 · 合同 renderability_v1</span>
-                  </div>
-                  {!editing ? (
-                    <div className="shot-body">
-                      {!!spine?.episode_premise && (
-                        <div className="kv full"><b>本集前提</b>{spine.episode_premise}</div>
-                      )}
-                      {!!spine?.spine_beats?.length && (
-                        <div className="kv full"><b>主线节拍</b>
-                          <ol className="spine-beat-list">
-                            {spine.spine_beats.map((b, i) => (
-                              <li key={b.beat_id || i}>
-                                <code>{b.beat_id || `S${i + 1}`}</code>
-                                <span>{b.who}｜{b.does}→{b.turn}</span>
-                                {b.must_keep === false && <em className="spine-optional">可删过渡</em>}
-                              </li>
-                            ))}
-                          </ol>
-                        </div>
-                      )}
-                      {!!spine?.must_keep_ending && (
-                        <div className="kv full"><b>必须收束</b>{spine.must_keep_ending}</div>
-                      )}
-                      {!!spine?.drop_list?.length && (
-                        <div className="kv full"><b>本集不拍</b>
-                          <ul className="key-list drop-list">
-                            {spine.drop_list.map((d, i) => <li key={i}>{d}</li>)}
-                          </ul>
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="shot-body">
-                      <div className="full"><label className="f">本集前提（一句话）</label>
-                        <input type="text" style={{ width: '100%' }} value={draft?.plot_spine?.episode_premise ?? ''}
-                          onChange={e => updateSpine({ episode_premise: e.target.value })} /></div>
-                      <div className="full"><label className="f">主线节拍（每行：beat_id | who | does | turn）</label>
-                        <textarea rows={6} value={(draft?.plot_spine?.spine_beats ?? []).map(b =>
-                          [b.beat_id, b.who ?? '', b.does ?? '', b.turn ?? ''].join(' | ')).join('\n')}
-                          onChange={e => updateSpine({
-                            spine_beats: splitLines(e.target.value).map((line, i) => {
-                              const [beat_id = `S${String(i + 1).padStart(2, '0')}`, who = '', does = '', turn = ''] = line.split('|').map(p => p.trim())
-                              return { beat_id, who, does, turn, must_keep: true }
-                            }),
-                          })} /></div>
-                      <div className="full"><label className="f">必须收束</label>
-                        <textarea rows={2} value={draft?.plot_spine?.must_keep_ending ?? ''}
-                          onChange={e => updateSpine({ must_keep_ending: e.target.value })} /></div>
-                      <div className="full">
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 6 }}>
-                          <label className="f" style={{ margin: 0 }}>本集不拍（drop_list）</label>
-                          <label style={{ fontSize: 13, color: 'var(--ink-soft)', display: 'flex', gap: 6, alignItems: 'center' }}>
-                            <input type="checkbox" checked={restoreEnabled}
-                              onChange={e => setRestoreEnabled(e.target.checked)} />
-                            启用「恢复一条 drop」授权
-                          </label>
-                        </div>
-                        <textarea rows={3} value={(draft?.plot_spine?.drop_list ?? []).join('\n')}
-                          onChange={e => updateSpine({ drop_list: splitLines(e.target.value) })} />
-                        {restoreEnabled && !!(draft?.plot_spine?.drop_list?.length) && (
-                          <ul className="drop-restore-list">
-                            {(draft?.plot_spine?.drop_list ?? []).map((d, i) => (
-                              <li key={`${d}-${i}`}>
-                                <span>{d}</span>
-                                <button type="button" className="btn ghost" style={{ fontSize: 12 }}
-                                  onClick={() => {
-                                    if (!draft) return
-                                    if (!window.confirm(`确认恢复拍摄「${d}」？将移出 drop_list 并写入关键剧情点，保存后才会进分镜。`)) return
-                                    setDraft(restoreDropItem(draft, d))
-                                    toast('已标记恢复；请保存剧本后再进分镜')
-                                  }}>
-                                  恢复拍摄
-                                </button>
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                </section>
-              )}
+      {!script ? (
+        <div className="empty screenplay-mobile-summary"><div className="big">剧</div>{state.message}<br />请使用顶部唯一主操作</div>
+      ) : editing ? (
+        <ScreenplayEditor
+          draft={draft!}
+          section={editorSection}
+          setSection={setEditorSection}
+          validation={validation}
+          updateScript={updateScript}
+          updateSpine={updateSpine}
+          mutateDraft={mutateDraft}
+          sourceFallback={sourceRangeText(ep.source_chapters)}
+          restoreDrop={item => setDropWizard({ item, reason: '', rewrite: '', targetType: 'beat', targetIndex: 0, step: 1 })}
+        />
+      ) : (
+        <ScreenplayReader
+          script={script}
+          epTitle={ep.title}
+          expanded={manuscriptExpanded}
+          setExpanded={setManuscriptExpanded}
+          search={manuscriptSearch}
+          setSearch={setManuscriptSearch}
+          manuscriptRef={manuscriptRef}
+          exportScript={exportScript}
+          toast={toast}
+          structureItems={structureItems}
+        />
+      )}
 
-              <div style={{ height: 16 }} />
+      {conflict && (
+        <div className="evidence-backdrop" role="presentation">
+          <section ref={conflictTrapRef} className="impact-dialog" role="dialog" aria-modal="true" aria-label="剧本版本冲突">
+            <h3>当前剧本已被更新</h3>
+            <p>我的工作草稿仍完整保留，没有覆盖新发布版。</p>
+            <p><code>{conflict.expected_version || '空基线'}</code> → <code>{conflict.current_version || '空版本'}</code></p>
+            <ul>{(conflict.diff ?? []).map((item: any) => <li key={item.field}>{item.section} / {item.field}</li>)}</ul>
+            <div className="dialog-actions">
+              <button className="btn" onClick={() => setConflict(null)}>继续保留我的草稿</button>
+              <button className="btn primary" onClick={async () => {
+                const latest = await refresh()
+                if (latest?.screenplay) beginEditing(latest.screenplay, latest.screenplay_artifact_id ?? null)
+                setConflict(null)
+              }}>重新加载发布版</button>
+            </div>
+          </section>
+        </div>
+      )}
 
-              <section className={`card script-editor${editing ? ' editing' : ''}`}>
-                {!editing ? (
-                  <>
-                    <div className="kv full"><b>标题</b>{script.title || ep.title}</div>
-                    <div className="kv full"><b>本集一句话梗概</b>{script.logline || ep.synopsis}</div>
-                    {!!script.script_format_note && <div className="kv full"><b>稿件格式</b>{script.script_format_note}</div>}
-                    {!!script.dramatic_question && <div className="kv full"><b>本集戏剧问题</b>{script.dramatic_question}</div>}
-                    {(!!script.protagonist_goal || !!script.obstacle || !!script.stakes) && (
-                      <div className="kv full"><b>目标 / 阻力 / 代价</b>
-                        {[script.protagonist_goal, script.obstacle, script.stakes].filter(Boolean).join(' ｜ ')}
-                      </div>
-                    )}
-                    {!!script.key_lines?.length && (
-                      <div className="kv full"><b>主线台词</b>
-                        <ul className="key-list">{script.key_lines.map((l, i) => <li key={i}>{l}</li>)}</ul>
-                      </div>
-                    )}
-                    {!!script.key_plot_points?.length && (
-                      <div className="kv full"><b>主线剧情点</b>
-                        <ul className="key-list">{script.key_plot_points.map((p, i) => <li key={i}>{p}</li>)}</ul>
-                      </div>
-                    )}
-                    <div className={`kv full script-manuscript-section ${manuscriptExpanded ? 'expanded' : 'collapsed'}`}>
-                      <div className="script-manuscript-head">
-                        <div>
-                          <b>完整剧本文本</b>
-                          <span>{(script.full_script_text ?? '').length.toLocaleString()} 字 · {(script.full_script_text ?? '').split('\n').filter(Boolean).length} 行</span>
-                        </div>
-                        <button
-                          type="button"
-                          className="script-manuscript-toggle"
-                          aria-expanded={manuscriptExpanded}
-                          aria-controls="full-script-manuscript"
-                          onClick={() => setManuscriptExpanded(value => !value)}
-                        >
-                          {manuscriptExpanded ? '收起全文 ↑' : '展开全文 ↓'}
-                        </button>
-                      </div>
-                      {manuscriptExpanded ? (
-                        <div id="full-script-manuscript" className="script-manuscript">{script.full_script_text || '暂无完整剧本文本'}</div>
-                      ) : (
-                        <button
-                          id="full-script-manuscript"
-                          type="button"
-                          className="script-manuscript-collapsed"
-                          onClick={() => setManuscriptExpanded(true)}
-                        >
-                          <span>正文已收起</span>
-                          <small>点击展开并阅读完整剧本</small>
-                        </button>
-                      )}
-                    </div>
-                    <div className="kv"><b>情绪曲线说明</b>{script.emotional_curve}</div>
-                    <div className="kv"><b>结尾钩子</b>{script.ending_hook}</div>
-                    <div className="kv full"><b>原文依据</b>{script.source_basis}</div>
-                    {!!script.character_state_changes?.length && (
-                      <div className="kv full"><b>主要人物状态变化</b>{script.character_state_changes.join('；')}</div>
-                    )}
-                    {!!script.adaptation_direction && (
-                      <div className="kv full"><b>改编方向</b>{script.adaptation_direction}</div>
-                    )}
-                  </>
-                ) : (
-                  <>
-                    <div className="full"><label className="f">标题</label>
-                      <input type="text" style={{ width: '100%' }} value={draft?.title ?? ''}
-                        onChange={e => updateScript({ title: e.target.value })} /></div>
-                    <div className="full"><label className="f">原文来源范围</label>
-                      <input type="text" style={{ width: '100%' }} value={draft?.source_text_range ?? sourceRangeText(ep.source_chapters)}
-                        onChange={e => updateScript({ source_text_range: e.target.value })} /></div>
-                    <div className="full"><label className="f">本集一句话梗概</label>
-                      <textarea rows={2} value={draft?.logline ?? ''}
-                        onChange={e => updateScript({ logline: e.target.value })} /></div>
-                    <div className="full"><label className="f">稿件格式说明</label>
-                      <input type="text" style={{ width: '100%' }} value={draft?.script_format_note ?? ''}
-                        onChange={e => updateScript({ script_format_note: e.target.value })} /></div>
-                    <div className="full"><label className="f">本集戏剧问题</label>
-                      <input type="text" style={{ width: '100%' }} value={draft?.dramatic_question ?? ''}
-                        onChange={e => updateScript({ dramatic_question: e.target.value })} /></div>
-                    <div><label className="f">主角目标</label>
-                      <textarea rows={2} value={draft?.protagonist_goal ?? ''}
-                        onChange={e => updateScript({ protagonist_goal: e.target.value })} /></div>
-                    <div><label className="f">阻力（外部+内部）</label>
-                      <textarea rows={2} value={draft?.obstacle ?? ''}
-                        onChange={e => updateScript({ obstacle: e.target.value })} /></div>
-                    <div className="full"><label className="f">失败代价</label>
-                      <textarea rows={2} value={draft?.stakes ?? ''}
-                        onChange={e => updateScript({ stakes: e.target.value })} /></div>
-                    <div className="full"><label className="f">主线台词（每行一条，最多 6 条）</label>
-                      <textarea rows={4} value={(draft?.key_lines ?? []).join('\n')}
-                        onChange={e => updateScript({ key_lines: splitLines(e.target.value) })} /></div>
-                    <div className="full"><label className="f">主线剧情点（每行一条）</label>
-                      <textarea rows={4} value={(draft?.key_plot_points ?? []).join('\n')}
-                        onChange={e => updateScript({ key_plot_points: splitLines(e.target.value) })} /></div>
-                    <div className="full"><label className="f">完整剧本文本</label>
-                      <textarea rows={18} value={draft?.full_script_text ?? ''}
-                        onChange={e => updateScript({ full_script_text: e.target.value })} /></div>
-                    <div className="full"><label className="f">场次结构（每行：场次标题 | 本场功能 | 本场摘要 | 冲突 | 转折 | 原文依据 | 角色）</label>
-                      <textarea rows={7} value={sceneOutlineText(draft?.scene_outline)}
-                        onChange={e => updateScript({ scene_outline: parseSceneOutlineText(e.target.value) })} /></div>
-                    <div><label className="f">情绪曲线说明</label>
-                      <textarea rows={3} value={draft?.emotional_curve ?? ''}
-                        onChange={e => updateScript({ emotional_curve: e.target.value })} /></div>
-                    <div><label className="f">结尾钩子</label>
-                      <textarea rows={3} value={draft?.ending_hook ?? ''}
-                        onChange={e => updateScript({ ending_hook: e.target.value })} /></div>
-                    <div className="full"><label className="f">原文依据</label>
-                      <textarea rows={4} value={draft?.source_basis ?? ''}
-                        onChange={e => updateScript({ source_basis: e.target.value })} /></div>
-                    <div className="full"><label className="f">主要人物状态变化（每行一条）</label>
-                      <textarea rows={3} value={(draft?.character_state_changes ?? []).join('\n')}
-                        onChange={e => updateScript({ character_state_changes: splitLines(e.target.value) })} /></div>
-                    <div className="full"><label className="f">改编方向</label>
-                      <textarea rows={3} value={draft?.adaptation_direction ?? ''}
-                        onChange={e => updateScript({ adaptation_direction: e.target.value })} /></div>
-                  </>
-                )}
-              </section>
-
-              {!!script.scene_outline?.length && (
+      {preview && (
+        <div className="evidence-backdrop" role="presentation" onMouseDown={event => {
+          if (event.currentTarget === event.target) setPreview(null)
+        }}>
+          <section ref={previewTrapRef} className="impact-dialog" role="dialog" aria-modal="true" aria-label={preview.title}>
+            <h3>{preview.title}</h3>
+            <p>{preview.kind === 'screenplay-save'
+              ? '此预览只读，尚未发布。确认后才会写入新版本。'
+              : '预检不会创建任务；只有点击下方执行按钮才会发起。'}</p>
+            <ul>
+              {preview.kind === 'screenplay' ? (
                 <>
-                  <div style={{ height: 16 }} />
-                  <section className="card">
-                    <div className="shot-head" style={{ marginBottom: 10 }}>
-                      <span className="sn">场次结构</span>
-                      <span className="meta">导演审戏与分镜拆解使用，不是拍卡</span>
-                    </div>
-                    <div className="scene-outline-grid">
-                      {script.scene_outline.map(scene => (
-                        <article key={scene.scene_no} className="scene-outline-card">
-                          <div className="scene-outline-head">
-                            <span className="sn">场{scene.scene_no}</span>
-                            <span className="meta">{scene.scene_heading}</span>
-                          </div>
-                          <div className="scene-outline-body">
-                            <div className="kv full"><b>本场功能</b>{scene.story_function}</div>
-                            <div className="kv full"><b>本场内容</b>{scene.summary}</div>
-                            {!!scene.conflict && <div className="kv"><b>冲突</b>{scene.conflict}</div>}
-                            {!!scene.turn && <div className="kv"><b>转折/交接</b>{scene.turn}</div>}
-                            {!!scene.source_basis && <div className="kv full"><b>原文依据</b>{scene.source_basis}</div>}
-                            {!!scene.characters?.length && <div className="kv full"><b>角色</b>{scene.characters.join('、')}</div>}
-                          </div>
-                        </article>
-                      ))}
-                    </div>
-                  </section>
+                  <li>原文 {preview.data.input?.source_chars ?? '—'} 字，选中 {preview.data.selected_count ?? 0} 处台词</li>
+                  <li>口播估算 {preview.data.selected_seconds ?? 0}s / 目标 {preview.data.target_duration_s}s</li>
+                  <li>{preview.data.estimate_note}</li>
+                </>
+              ) : preview.kind === 'screenplay-save' ? (
+                <>
+                  <li>{preview.data.unchanged ? '可编辑内容没有变化，确认后也不会创建新版本' : `变更 ${preview.data.diff?.length ?? 0} 个字段`}</li>
+                  {(preview.data.diff ?? []).map((item: any) => (
+                    <li key={item.field}>{item.section}：{item.before_chars} 字符 → {item.after_chars} 字符</li>
+                  ))}
+                  <li>{preview.data.impact}</li>
+                </>
+              ) : (
+                <>
+                  <li>checkpoint：{preview.data.checkpoint?.available ? `从第 ${preview.data.checkpoint.resume_from_shot} 镜继续` : '无'}</li>
+                  <li>保留已验证镜头：{preview.data.kept_validated_shots ?? 0}</li>
+                  <li>{preview.data.impact}</li>
+                  <li>{preview.data.estimate_note}</li>
                 </>
               )}
+            </ul>
+            <div className="dialog-actions">
+              <button className="btn" onClick={() => setPreview(null)}>取消（不执行）</button>
+              <button className="btn primary" disabled={Boolean(preview.data.hard_exceeded)} onClick={executePreview}>
+                {preview.kind === 'screenplay'
+                  ? '启动首版剧本生成'
+                  : preview.kind === 'storyboard-resume'
+                    ? '继续生成分镜'
+                    : preview.kind === 'screenplay-save'
+                      ? (preview.data.unchanged ? '确认无变更' : '确认发布')
+                      : '首次生成分镜'}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
 
-              {(editing || structureItems.length > 0) && (
-                <>
-                  <div style={{ height: 16 }} />
-                  <section className="card">
-                    <div className="shot-head" style={{ marginBottom: 10 }}>
-                      <span className="sn">辅助结构</span>
-                      <span className="meta">作为拆分分镜时的辅助，不作为剧本主内容</span>
-                    </div>
-                    {!editing ? (
-                      <div className="shot-body">
-                        {structureItems.map(([label, value]) => (
-                          <div key={label} className="kv full"><b>{label}</b>{value}</div>
-                        ))}
-                      </div>
-                    ) : (
-                      <div className="shot-body">
-                        <div><label className="f">开端</label>
-                          <textarea rows={2} value={draft?.opening ?? ''}
-                            onChange={e => updateScript({ opening: e.target.value })} /></div>
-                        <div><label className="f">发展</label>
-                          <textarea rows={2} value={draft?.development ?? ''}
-                            onChange={e => updateScript({ development: e.target.value })} /></div>
-                        <div><label className="f">冲突</label>
-                          <textarea rows={2} value={draft?.conflict ?? ''}
-                            onChange={e => updateScript({ conflict: e.target.value })} /></div>
-                        <div><label className="f">高潮</label>
-                          <textarea rows={2} value={draft?.climax ?? ''}
-                            onChange={e => updateScript({ climax: e.target.value })} /></div>
-                      </div>
-                    )}
-                  </section>
-                </>
-              )}
-            </>
-          )}
+      {dropWizard && draft && (
+        <div className="evidence-backdrop" role="presentation">
+          <section ref={dropTrapRef} className="impact-dialog drop-wizard" role="dialog" aria-modal="true" aria-label="drop 恢复向导">
+            <h3>恢复“{dropWizard.item}”</h3>
+            {dropWizard.step === 1 ? (
+              <>
+                <label className="f">恢复原因</label>
+                <textarea rows={3} value={dropWizard.reason} onChange={event => setDropWizard({ ...dropWizard, reason: event.target.value })} />
+                <label className="f">改写为可见 / 可听的内容</label>
+                <textarea rows={4} value={dropWizard.rewrite} onChange={event => setDropWizard({ ...dropWizard, rewrite: event.target.value })} />
+                <div className="dialog-actions">
+                  <button className="btn" onClick={() => setDropWizard(null)}>取消</button>
+                  <button className="btn primary" disabled={!dropWizard.reason.trim() || !dropWizard.rewrite.trim()} onClick={() => setDropWizard({ ...dropWizard, step: 2 })}>选择落点</button>
+                </div>
+              </>
+            ) : (
+              <>
+                <label className="f">落入结构</label>
+                <select value={dropWizard.targetType} onChange={event => setDropWizard({ ...dropWizard, targetType: event.target.value as 'beat' | 'scene', targetIndex: 0 })}>
+                  <option value="beat">主线节拍</option><option value="scene">场次</option>
+                </select>
+                <select value={dropWizard.targetIndex} onChange={event => setDropWizard({ ...dropWizard, targetIndex: Number(event.target.value) })}>
+                  {(dropWizard.targetType === 'beat' ? draft.plot_spine?.spine_beats ?? [] : draft.scene_outline ?? []).map((item: any, index: number) => (
+                    <option key={index} value={index}>{dropWizard.targetType === 'beat' ? item.beat_id || `节拍 ${index + 1}` : item.scene_heading || `场 ${index + 1}`}</option>
+                  ))}
+                </select>
+                <div className="drop-diff-preview"><b>草稿 diff</b><del>{dropWizard.item}</del><ins>{dropWizard.rewrite}</ins></div>
+                <div className="dialog-actions">
+                  <button className="btn" onClick={() => setDropWizard({ ...dropWizard, step: 1 })}>上一步</button>
+                  <button className="btn primary" onClick={applyDropWizard}>写入工作草稿</button>
+                </div>
+              </>
+            )}
+          </section>
+        </div>
+      )}
+    </>
+  )
+}
+
+function DialogueOption({ item, checked, disabled, onChange }: {
+  item: DialogueOccurrence
+  checked: boolean
+  disabled: boolean
+  onChange: (checked: boolean) => void
+}) {
+  const [contextOpen, setContextOpen] = useState(false)
+  return (
+    <div className="screenplay-dialogue-option">
+      <label>
+        <input type="checkbox" checked={checked} disabled={disabled} onChange={event => onChange(event.target.checked)} />
+        <span><em>D{String(item.order).padStart(3, '0')}</em>{item.text}</span>
+      </label>
+      <div className="dialogue-occurrence-meta">
+        <span>{item.chapter ? `第 ${item.chapter} 章` : '本集原文'} · 段落 {item.paragraph} · 约 {item.estimated_seconds}s</span>
+        {item.group_id && <span>建议上下文组 {item.group_id}</span>}
+        <button type="button" className="btn small ghost" onClick={() => setContextOpen(value => !value)}>{contextOpen ? '收起上下文' : '查看上下文'}</button>
+      </div>
+      {contextOpen && <p>{item.context}</p>}
+    </div>
+  )
+}
+
+function ScreenplayEditor({
+  draft,
+  section,
+  setSection,
+  validation,
+  updateScript,
+  updateSpine,
+  mutateDraft,
+  sourceFallback,
+  restoreDrop,
+}: {
+  draft: EpisodeScreenplay
+  section: EditorSection
+  setSection: (section: EditorSection) => void
+  validation: Record<EditorSection, string[]>
+  updateScript: (patch: Partial<EpisodeScreenplay>) => void
+  updateSpine: (patch: Partial<PlotSpine>) => void
+  mutateDraft: (updater: (current: EpisodeScreenplay) => EpisodeScreenplay) => void
+  sourceFallback: string
+  restoreDrop: (item: string) => void
+}) {
+  const tabs: [EditorSection, string][] = [['spine', '主线'], ['body', '正文'], ['scenes', '场次'], ['evidence', '依据与状态']]
+  const beats = draft.plot_spine?.spine_beats ?? []
+  const scenes = draft.scene_outline ?? []
+  const stateChanges = draft.character_state_changes ?? []
+  return (
+    <section className="screenplay-editor-shell">
+      <nav className="screenplay-editor-tabs" aria-label="剧本编辑目录">
+        {tabs.map(([key, label]) => (
+          <button key={key} type="button" className={section === key ? 'active' : ''} onClick={() => setSection(key)}>
+            {label}{validation[key].length > 0 && <span>{validation[key].length}</span>}
+          </button>
+        ))}
+      </nav>
+      {validation[section].length > 0 && <div className="editor-validation"><b>本区待修复</b>{validation[section].map(item => <span key={item}>{item}</span>)}</div>}
+
+      {section === 'spine' && (
+        <div className="card screenplay-editor-section">
+          <label className="f">本集前提</label>
+          <textarea rows={2} value={draft.plot_spine?.episode_premise ?? ''} onChange={event => updateSpine({ episode_premise: event.target.value })} />
+          <div className="structured-section-head"><b>主线节拍</b><button className="btn small" type="button" onClick={() => updateSpine({ spine_beats: [...beats, { beat_id: `S${String(beats.length + 1).padStart(2, '0')}`, who: '', does: '', turn: '', must_keep: true }] })}>新增节拍</button></div>
+          <div className="structured-list">
+            {beats.map((beat, index) => (
+              <article className="structured-row" key={`${beat.beat_id}-${index}`}>
+                <header><b>{beat.beat_id || `S${index + 1}`}</b><StructuredListActions index={index} length={beats.length} onMove={direction => updateSpine({ spine_beats: moveItem(beats, index, direction) })} onDelete={() => updateSpine({ spine_beats: beats.filter((_, itemIndex) => itemIndex !== index) })} /></header>
+                <div className="structured-fields">
+                  <label>谁<input value={beat.who ?? ''} onChange={event => updateSpine({ spine_beats: beats.map((item, itemIndex) => itemIndex === index ? { ...item, who: event.target.value } : item) })} /></label>
+                  <label>做了什么<textarea rows={2} value={beat.does ?? ''} onChange={event => updateSpine({ spine_beats: beats.map((item, itemIndex) => itemIndex === index ? { ...item, does: event.target.value } : item) })} /></label>
+                  <label>局势变化<textarea rows={2} value={beat.turn ?? ''} onChange={event => updateSpine({ spine_beats: beats.map((item, itemIndex) => itemIndex === index ? { ...item, turn: event.target.value } : item) })} /></label>
+                  <label className="check"><input type="checkbox" checked={beat.must_keep !== false} onChange={event => updateSpine({ spine_beats: beats.map((item, itemIndex) => itemIndex === index ? { ...item, must_keep: event.target.checked } : item) })} />必保留</label>
+                </div>
+              </article>
+            ))}
+          </div>
+          <label className="f">必须收束</label>
+          <textarea rows={2} value={draft.plot_spine?.must_keep_ending ?? ''} onChange={event => updateSpine({ must_keep_ending: event.target.value })} />
+          <div className="structured-section-head"><b>本集不拍（drop_list）</b></div>
+          <div className="drop-restore-list">
+            {(draft.plot_spine?.drop_list ?? []).map((item, index) => (
+              <div key={`${item}-${index}`}><textarea rows={2} value={item} onChange={event => updateSpine({ drop_list: (draft.plot_spine?.drop_list ?? []).map((value, itemIndex) => itemIndex === index ? event.target.value : value) })} /><button type="button" className="btn small ghost" onClick={() => restoreDrop(item)}>可拍化恢复向导</button></div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {section === 'body' && (
+        <div className="card script-editor editing">
+          <div className="full"><label className="f">标题</label><input value={draft.title ?? ''} onChange={event => updateScript({ title: event.target.value })} /></div>
+          <div className="full"><label className="f">原文来源范围</label><input value={draft.source_text_range ?? sourceFallback} onChange={event => updateScript({ source_text_range: event.target.value })} /><small>{!draft.source_text_range && '当前为本集章节范围的推断显示'}</small></div>
+          <div className="full"><label className="f">本集一句话梗概</label><textarea rows={2} value={draft.logline ?? ''} onChange={event => updateScript({ logline: event.target.value })} /></div>
+          <div><label className="f">本集戏剧问题</label><textarea rows={2} value={draft.dramatic_question ?? ''} onChange={event => updateScript({ dramatic_question: event.target.value })} /></div>
+          <div><label className="f">主角目标</label><textarea rows={2} value={draft.protagonist_goal ?? ''} onChange={event => updateScript({ protagonist_goal: event.target.value })} /></div>
+          <div><label className="f">阻力</label><textarea rows={2} value={draft.obstacle ?? ''} onChange={event => updateScript({ obstacle: event.target.value })} /></div>
+          <div><label className="f">失败代价</label><textarea rows={2} value={draft.stakes ?? ''} onChange={event => updateScript({ stakes: event.target.value })} /></div>
+          <div className="full"><label className="f">完整剧本正文 · {(draft.full_script_text ?? '').length.toLocaleString()} 字</label><textarea rows={24} value={draft.full_script_text ?? ''} onChange={event => updateScript({ full_script_text: event.target.value })} /></div>
+          <div className="full"><label className="f">主线台词（每行一条）</label><textarea rows={5} value={(draft.key_lines ?? []).join('\n')} onChange={event => updateScript({ key_lines: splitLines(event.target.value) })} /></div>
+          <div className="full"><label className="f">主线剧情点（每行一条）</label><textarea rows={5} value={(draft.key_plot_points ?? []).join('\n')} onChange={event => updateScript({ key_plot_points: splitLines(event.target.value) })} /></div>
+        </div>
+      )}
+
+      {section === 'scenes' && (
+        <div className="card screenplay-editor-section">
+          <div className="structured-section-head"><b>场次结构</b><span>每个字段独立存储；正文中的 | 只是普通字符。</span><button className="btn small" type="button" onClick={() => updateScript({ scene_outline: [...scenes, { scene_no: scenes.length + 1, scene_heading: '', story_function: '', summary: '', conflict: '', turn: '', source_basis: '', characters: [] }] })}>新增场次</button></div>
+          <div className="structured-list">
+            {scenes.map((scene, index) => (
+              <article className="structured-row" key={`${scene.scene_no}-${index}`}>
+                <header><b>场 {index + 1}</b><StructuredListActions index={index} length={scenes.length} onMove={direction => updateScript({ scene_outline: moveItem(scenes, index, direction).map((item, itemIndex) => ({ ...item, scene_no: itemIndex + 1 })) })} onDelete={() => updateScript({ scene_outline: scenes.filter((_, itemIndex) => itemIndex !== index).map((item, itemIndex) => ({ ...item, scene_no: itemIndex + 1 })) })} /></header>
+                <SceneFields scene={scene} update={patch => updateScript({ scene_outline: scenes.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item) })} />
+              </article>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {section === 'evidence' && (
+        <div className="card script-editor editing">
+          <div className="full"><label className="f">原文依据</label><textarea rows={5} value={draft.source_basis ?? ''} onChange={event => updateScript({ source_basis: event.target.value })} /></div>
+          <div className="full">
+            <div className="structured-section-head"><b>主要人物状态变化</b><button className="btn small" type="button" onClick={() => updateScript({ character_state_changes: [...stateChanges, ''] })}>新增状态</button></div>
+            <div className="structured-list compact">
+              {stateChanges.map((value, index) => (
+                <article className="structured-row" key={`state-${index}`}>
+                  <header><b>状态 {index + 1}</b><StructuredListActions index={index} length={stateChanges.length} onMove={direction => updateScript({ character_state_changes: moveItem(stateChanges, index, direction) })} onDelete={() => updateScript({ character_state_changes: stateChanges.filter((_, itemIndex) => itemIndex !== index) })} /></header>
+                  <textarea rows={2} aria-label={`人物状态变化 ${index + 1}`} value={value} onChange={event => updateScript({ character_state_changes: stateChanges.map((item, itemIndex) => itemIndex === index ? event.target.value : item) })} />
+                </article>
+              ))}
+            </div>
+          </div>
+          <div><label className="f">情绪曲线</label><textarea rows={3} value={draft.emotional_curve ?? ''} onChange={event => updateScript({ emotional_curve: event.target.value })} /></div>
+          <div><label className="f">结尾钩子</label><textarea rows={3} value={draft.ending_hook ?? ''} onChange={event => updateScript({ ending_hook: event.target.value })} /></div>
+          <div className="full"><label className="f">改编方向</label><textarea rows={3} value={draft.adaptation_direction ?? ''} onChange={event => updateScript({ adaptation_direction: event.target.value })} /></div>
+          <div><label className="f">开端摘要</label><textarea rows={2} value={draft.opening ?? ''} onChange={event => updateScript({ opening: event.target.value })} /></div>
+          <div><label className="f">发展摘要</label><textarea rows={2} value={draft.development ?? ''} onChange={event => updateScript({ development: event.target.value })} /></div>
+          <div><label className="f">冲突摘要</label><textarea rows={2} value={draft.conflict ?? ''} onChange={event => updateScript({ conflict: event.target.value })} /></div>
+          <div><label className="f">高潮摘要</label><textarea rows={2} value={draft.climax ?? ''} onChange={event => updateScript({ climax: event.target.value })} /></div>
+        </div>
+      )}
+    </section>
+  )
+}
+
+function SceneFields({ scene, update }: { scene: ScriptScene; update: (patch: Partial<ScriptScene>) => void }) {
+  return (
+    <div className="structured-fields scene-fields">
+      <label>场次标题<input value={scene.scene_heading} onChange={event => update({ scene_heading: event.target.value })} /></label>
+      <label>本场功能<input value={scene.story_function} onChange={event => update({ story_function: event.target.value })} /></label>
+      <label className="wide">本场内容<textarea rows={3} value={scene.summary} onChange={event => update({ summary: event.target.value })} /></label>
+      <label>冲突<textarea rows={2} value={scene.conflict ?? ''} onChange={event => update({ conflict: event.target.value })} /></label>
+      <label>转折 / 交接<textarea rows={2} value={scene.turn ?? ''} onChange={event => update({ turn: event.target.value })} /></label>
+      <label className="wide">原文依据<textarea rows={2} value={scene.source_basis ?? ''} onChange={event => update({ source_basis: event.target.value })} /></label>
+      <label className="wide">角色（顿号或逗号分隔）<input value={(scene.characters ?? []).join('、')} onChange={event => update({ characters: event.target.value.split(/[、,，/]/).map(value => value.trim()).filter(Boolean) })} /></label>
+    </div>
+  )
+}
+
+function ScreenplayReader({
+  script,
+  epTitle,
+  expanded,
+  setExpanded,
+  search,
+  setSearch,
+  manuscriptRef,
+  exportScript,
+  toast,
+  structureItems,
+}: {
+  script: EpisodeScreenplay
+  epTitle: string
+  expanded: boolean
+  setExpanded: (value: boolean) => void
+  search: string
+  setSearch: (value: string) => void
+  manuscriptRef: React.RefObject<HTMLDivElement>
+  exportScript: () => void
+  toast: (message: string, error?: boolean) => void
+  structureItems: Array<(string | undefined)[]>
+}) {
+  const spine = script.plot_spine
+  const matches = search.trim() ? (script.full_script_text ?? '').toLowerCase().split(search.trim().toLowerCase()).length - 1 : 0
+  return (
+    <>
+      {spine && (
+        <section className="card spine-card" id="script-spine">
+          <details open>
+            <summary><b>主线骨架</b><span>只拍这些；drop_list 默认不拍</span></summary>
+            <div className="shot-body">
+              {spine.episode_premise && <div className="kv full"><b>本集前提</b>{spine.episode_premise}</div>}
+              {!!spine.spine_beats?.length && <div className="kv full"><b>主线节拍</b><ol className="spine-beat-list">{spine.spine_beats.map((beat: PlotSpineBeat, index: number) => <li key={beat.beat_id || index}><code>{beat.beat_id || `S${index + 1}`}</code><span>{beat.who}｜{beat.does}→{beat.turn}</span>{beat.must_keep === false && <em className="spine-optional">可删过渡</em>}</li>)}</ol></div>}
+              {spine.must_keep_ending && <div className="kv full"><b>必须收束</b>{spine.must_keep_ending}</div>}
+              {!!spine.drop_list?.length && <div className="kv full"><b>本集不拍</b><ul className="key-list drop-list">{spine.drop_list.map((item, index) => <li key={index}>{item}</li>)}</ul></div>}
+            </div>
+          </details>
+        </section>
+      )}
+      <div className="workspace-gap" />
+      <section className="card script-editor">
+        <div className="kv full"><b>标题</b>{script.title || epTitle}</div>
+        <div className="kv full"><b>本集一句话梗概</b>{script.logline}</div>
+        {!!script.key_lines?.length && <div className="kv full"><b>主线台词</b><ul className="key-list">{script.key_lines.map((item, index) => <li key={index}>{item}</li>)}</ul></div>}
+        <div className={`kv full script-manuscript-section ${expanded ? 'expanded' : 'collapsed'}`}>
+          <div className="script-manuscript-head">
+            <div><b>完整剧本文本</b><span>{(script.full_script_text ?? '').length.toLocaleString()} 字 · {(script.full_script_text ?? '').split('\n').filter(Boolean).length} 行</span></div>
+            <div className="manuscript-tools">
+              <input type="search" value={search} onChange={event => { setSearch(event.target.value); setExpanded(true) }} placeholder="页内搜索" aria-label="搜索剧本正文" />
+              {search && <span>{matches} 处</span>}
+              <button className="btn small ghost" type="button" onClick={() => navigator.clipboard.writeText(script.full_script_text ?? '').then(() => toast('剧本正文已复制'))}>复制</button>
+              <button className="btn small ghost" type="button" onClick={exportScript}>导出</button>
+              <button type="button" className="script-manuscript-toggle" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>{expanded ? '收起全文 ↑' : '展开全文 ↓'}</button>
+            </div>
+          </div>
+          {expanded ? <div ref={manuscriptRef} className="script-manuscript"><HighlightedText text={script.full_script_text || '暂无完整剧本文本'} query={search} /></div> : <button type="button" className="script-manuscript-collapsed" onClick={() => setExpanded(true)}><span>正文已收起</span><small>点击展开并阅读完整剧本</small></button>}
+        </div>
+        <div className="kv"><b>情绪曲线说明</b>{script.emotional_curve}</div>
+        <div className="kv"><b>结尾钩子</b>{script.ending_hook}</div>
+        <div className="kv full"><b>原文依据</b>{script.source_basis}</div>
+      </section>
+
+      {!!script.scene_outline?.length && <><div className="workspace-gap" /><section className="card"><details open><summary><b>场次结构</b><span>可跳转到正文对应场次</span></summary><div className="scene-outline-grid">{script.scene_outline.map(scene => <article key={scene.scene_no} className="scene-outline-card"><div className="scene-outline-head"><span className="sn">场{scene.scene_no}</span><span className="meta">{scene.scene_heading}</span><button className="btn small ghost" onClick={() => { setExpanded(true); setSearch(scene.scene_heading); window.setTimeout(() => manuscriptRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0) }}>跳转正文</button></div><div className="scene-outline-body"><div className="kv full"><b>本场功能</b>{scene.story_function}</div><div className="kv full"><b>本场内容</b>{scene.summary}</div>{scene.conflict && <div className="kv"><b>冲突</b>{scene.conflict}</div>}{scene.turn && <div className="kv"><b>转折 / 交接</b>{scene.turn}</div>}{scene.source_basis && <div className="kv full"><b>原文依据</b>{scene.source_basis}</div>}</div></article>)}</div></details></section></>}
+
+      {structureItems.length > 0 && <><div className="workspace-gap" /><section className="card auxiliary-structure"><details><summary><b>辅助结构</b><span>与主线 / 场次重复的内容默认折叠</span></summary><div className="shot-body">{structureItems.map(([label, value]) => <div key={label} className="kv full"><b>{label}</b>{value}</div>)}</div></details></section></>}
     </>
   )
 }

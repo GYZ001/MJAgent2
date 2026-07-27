@@ -8,6 +8,58 @@ from pathlib import Path
 from app import config
 from app.db import get_conn, rows_to_dicts
 
+_CLEAR_TERMINAL_RUN_STATES = {
+    "SUCCEEDED", "FAILED", "CANCELLED", "COMPLETED", "PARTIAL",
+    "succeeded", "failed", "cancelled", "completed", "partial",
+}
+
+
+def _begin_clear_transaction(
+    conn,
+    episode_id: str,
+    *,
+    active_storyboard_run_id: str | None = None,
+) -> None:
+    """Serialize the final upstream check and media purge in SQLite."""
+    # Supervisor 局部修复可能在同一连接已有事务（例如先写修复计划再清理相邻镜）。
+    # 复用该事务，避免 ``cannot start a transaction within a transaction``；独立的
+    # 评审墙清空仍以 BEGIN IMMEDIATE 获取写锁。
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    ep = conn.execute(
+        "SELECT status, active_screenplay_run_id, active_storyboard_run_id FROM episodes WHERE id=?",
+        (episode_id,),
+    ).fetchone()
+    if not ep:
+        conn.rollback()
+        raise ValueError("分集不存在")
+    authorized_storyboard_run = False
+    if active_storyboard_run_id and ep["active_storyboard_run_id"] == active_storyboard_run_id:
+        allowed = conn.execute(
+            "SELECT workflow_type,scope_type,scope_id,status FROM workflow_runs WHERE id=?",
+            (active_storyboard_run_id,),
+        ).fetchone()
+        authorized_storyboard_run = bool(
+            allowed
+            and allowed["workflow_type"] == "storyboard"
+            and allowed["scope_type"] == "episode"
+            and allowed["scope_id"] == episode_id
+            and allowed["status"] not in _CLEAR_TERMINAL_RUN_STATES
+        )
+    active: list[str] = []
+    for run_id in (ep["active_screenplay_run_id"], ep["active_storyboard_run_id"]):
+        if not run_id:
+            continue
+        if authorized_storyboard_run and run_id == active_storyboard_run_id:
+            continue
+        run = conn.execute("SELECT status FROM workflow_runs WHERE id=?", (run_id,)).fetchone()
+        if not run or run["status"] not in _CLEAR_TERMINAL_RUN_STATES:
+            active.append(str(run_id))
+    writing_status = ep["status"] in {"planned", "scripting", "storyboarding"}
+    if (writing_status and not authorized_storyboard_run) or active:
+        conn.rollback()
+        raise ValueError("编剧或分镜任务仍在写入，清空已原子拒绝")
+
 def _delete_version_files(video_path: str | None) -> None:
     """删除版本视频及旧链路遗留的缓存尾帧。"""
     if not video_path:
@@ -212,7 +264,12 @@ def _delete_shot_reference_dir(conn, shot_row) -> int:
     return count
 
 
-def clear_shot_artifacts(shot_id: str) -> dict:
+def clear_shot_artifacts(
+    shot_id: str,
+    *,
+    active_storyboard_run_id: str | None = None,
+    commit: bool = True,
+) -> dict:
     """清空单镜的参考图、关键帧（首/尾图）、视频版本与模型分析（mode_plan），并使该集成品失效。
     用于评审墙的「清空」操作。"""
     conn = get_conn()
@@ -220,11 +277,21 @@ def clear_shot_artifacts(shot_id: str) -> dict:
     if not shot:
         return {"shot_id": shot_id, "videos": 0, "references": 0,
                 "keyframes_cleared": False, "mode_plan_cleared": False}
-    refs = _delete_shot_reference_dir(conn, shot)
-    versions, affected_eps = _purge_shots(conn, [dict(shot)])  # 视频+关键帧+任务、采用/审批标记、scene_status 复位
-    conn.execute("UPDATE shots SET mode_plan=NULL WHERE id=?", (shot_id,))
-    _rollback_episodes(conn, affected_eps)  # 整集成品失效 + generating/done → confirmed
-    conn.commit()
+    _begin_clear_transaction(
+        conn,
+        shot["episode_id"],
+        active_storyboard_run_id=active_storyboard_run_id,
+    )
+    try:
+        refs = _delete_shot_reference_dir(conn, shot)
+        versions, affected_eps = _purge_shots(conn, [dict(shot)])  # 视频+关键帧+任务、采用/审批标记、scene_status 复位
+        conn.execute("UPDATE shots SET mode_plan=NULL WHERE id=?", (shot_id,))
+        _rollback_episodes(conn, affected_eps)  # 整集成品失效 + generating/done → confirmed
+        if commit:
+            conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     return {"shot_id": shot_id, "videos": versions, "references": refs,
             "keyframes_cleared": True, "mode_plan_cleared": True}
 
@@ -233,15 +300,20 @@ def clear_episode_artifacts(episode_id: str) -> dict:
     """清空整集每个镜头的参考图、关键帧、视频版本与模型分析（mode_plan），并把该集回退到「已确认」。
     用于评审墙的「清空本集」操作。"""
     conn = get_conn()
-    shots = rows_to_dicts(conn.execute(
-        "SELECT * FROM shots WHERE episode_id=?", (episode_id,)).fetchall())
-    refs = 0
-    for s in shots:
-        refs += _delete_shot_reference_dir(conn, s)
-        conn.execute("UPDATE shots SET mode_plan=NULL WHERE id=?", (s["id"],))
-    versions, affected_eps = _purge_shots(conn, shots)
-    _rollback_episodes(conn, affected_eps or {episode_id})
-    conn.commit()
+    _begin_clear_transaction(conn, episode_id)
+    try:
+        shots = rows_to_dicts(conn.execute(
+            "SELECT * FROM shots WHERE episode_id=?", (episode_id,)).fetchall())
+        refs = 0
+        for s in shots:
+            refs += _delete_shot_reference_dir(conn, s)
+            conn.execute("UPDATE shots SET mode_plan=NULL WHERE id=?", (s["id"],))
+        versions, affected_eps = _purge_shots(conn, shots)
+        _rollback_episodes(conn, affected_eps or {episode_id})
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     return {"episode_id": episode_id, "shots": len(shots), "videos": versions, "references": refs}
 
 
@@ -267,5 +339,3 @@ def _adopted_video_paths(episode_id: str) -> list[tuple[int, str]]:
            ORDER BY s.shot_no""",
         (episode_id,)).fetchall()
     return [(r["shot_no"], r["video_path"]) for r in rows]
-
-

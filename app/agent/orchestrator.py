@@ -64,8 +64,8 @@ _BACKGROUND_TASKS: dict[str, asyncio.Task] = {}
 def _int_setting(key: str, fallback: int) -> int:
     try:
         return max(1, int(get_setting(key) or fallback))
-    except (TypeError, ValueError):
-        return fallback
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"非法运行时设置 {key}；请在监制房修正") from exc
 
 
 def _system_prompt() -> str:

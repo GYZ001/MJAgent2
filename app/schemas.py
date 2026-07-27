@@ -114,6 +114,18 @@ class Scene(BaseModel):
     ref_image_path: str | None = None
     # 场景图生成词覆盖：人工编辑值；为空时用 锚点串+画风 合成的默认描述（scenes.scene_ref_prompt）
     scene_prompt_override: str | None = None
+    # 渐进式结构化锚点与自动发现血缘；旧数据缺字段时保持兼容。
+    space: str = ""
+    time_of_day: str = ""
+    lighting: str = ""
+    landmarks: list[str] = Field(default_factory=list)
+    forbidden_elements: list[str] = Field(default_factory=list)
+    first_episode: int | None = None
+    required_views: list[str] = Field(default_factory=list)
+    discovery_sources: list[str] = Field(default_factory=list)
+    # 待审状态变化获批后先记录目标锚点和生效集；完成费用确认与整包重绘后才转为正式锚点。
+    pending_state_canonical: str | None = None
+    pending_state_ep_start: int | None = None
 
 
 class Bible(BaseModel):
@@ -396,7 +408,49 @@ class StoryboardOutline(BaseModel):
     shots: list[StoryboardOutlineShot] = Field(default_factory=list)
 
 
-def extract_json(text: str) -> dict:
+def _escape_unescaped_inner_quotes(text: str) -> str:
+    """只修复能明确判定为 JSON 字符串内容的裸双引号。
+
+    模型偶尔把原文弯引号改成 ASCII 双引号，例如
+    ``"这个"天才"仍在原地"``。字符串真正的结束引号后只能跟
+    ``:``, ``,``、``]``、``}`` 或文本结束；其他位置的裸引号可安全
+    视为字符串内容并转义。缺逗号、括号错误等结构问题不会被放行。
+    """
+    repaired: list[str] = []
+    in_string = False
+    escaped = False
+    length = len(text)
+    for index, char in enumerate(text):
+        if not in_string:
+            repaired.append(char)
+            if char == '"':
+                in_string = True
+            continue
+        if escaped:
+            repaired.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            repaired.append(char)
+            escaped = True
+            continue
+        if char != '"':
+            repaired.append(char)
+            continue
+
+        next_index = index + 1
+        while next_index < length and text[next_index].isspace():
+            next_index += 1
+        next_char = text[next_index] if next_index < length else ""
+        if next_char in {":", ",", "]", "}"} or not next_char:
+            repaired.append(char)
+            in_string = False
+        else:
+            repaired.extend(("\\", char))
+    return "".join(repaired)
+
+
+def extract_json(text: str, *, repair_unescaped_inner_quotes: bool = False) -> dict:
     """从模型输出中提取第一个完整 JSON 对象。失败抛 ValueError（含原文摘要）。"""
     cleaned = re.sub(r"```(?:json)?\s*", "", text, flags=re.IGNORECASE).replace("```", "").strip()
     first_start = cleaned.find("{")
@@ -416,6 +470,16 @@ def extract_json(text: str) -> dict:
         try:
             obj, _ = json.JSONDecoder().raw_decode(cleaned[start:])
         except json.JSONDecodeError as exc:
+            if repair_unescaped_inner_quotes:
+                repaired = _escape_unescaped_inner_quotes(cleaned[start:])
+                if repaired != cleaned[start:]:
+                    try:
+                        obj, _ = json.JSONDecoder().raw_decode(repaired)
+                    except json.JSONDecodeError:
+                        pass
+                    else:
+                        if isinstance(obj, dict):
+                            return obj
             first_error = exc
             break
         if isinstance(obj, dict):

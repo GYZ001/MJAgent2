@@ -116,21 +116,30 @@ def _model_evaluation(qa: dict[str, Any] | None, *, subject: str, evaluator_name
         score = max(0.0, min(100.0, float(raw_score) * 100))
     except (TypeError, ValueError):
         score = None
+    hard_failures = [str(message) for message in (qa.get("hard_failures") or []) if str(message).strip()]
     issues = [
         _issue("MEDIA_QUALITY", str(message), subject, blocker=False)
         for message in (qa.get("issues") or [])[:20]
     ]
+    issues.extend(
+        _issue("SCENE_HARD_GATE", message, subject, blocker=True)
+        for message in hard_failures[:20]
+    )
     if recovered:
         issues.append(_issue(
             "EVALUATOR_RECOVERED", "评估器输出经保守恢复，不能独立触发自动采用", subject
         ))
-    status = "error" if recovered else ("warning" if issues else "passed")
+    explicit_unverified = qa.get("status") in {"unverified", "pending"}
+    status = "error" if recovered or explicit_unverified else (
+        "failed" if hard_failures else ("warning" if issues else "passed")
+    )
     return Evaluation(
         evaluator_type="model",
         evaluator_name=evaluator_name,
         evaluator_version="1.0.0",
         status=status,
-        hard_gate_passed=not recovered,
+        hard_gate_passed=not recovered and not explicit_unverified and not hard_failures
+        and qa.get("hard_gate_passed") is not False,
         score=score,
         dimension_scores={
             key: float(value) * 100

@@ -12,22 +12,26 @@ async def generate(args: I.StoryboardGenerateInput) -> CommandResult:
     # fresh 已废弃：一律按 create（新建/恢复 revision）或 resume 处理
     mode = "resume" if args.mode == "resume" else "create"
     if mode == "resume":
+        resume_body = None if args.preflight_token is None else {
+                "completion_mode": args.completion_mode,
+                "completion_grant_id": args.completion_grant_id,
+                "preflight_token": args.preflight_token,
+            }
         outcome = await call_guarded(
             api.resume_storyboard,
             args.episode_id,
-            {
-                "completion_mode": args.completion_mode,
-                "completion_grant_id": args.completion_grant_id,
-            },
+            body=resume_body,
         )
     else:
+        create_body = None if args.preflight_token is None else {
+                "completion_mode": args.completion_mode,
+                "completion_grant_id": args.completion_grant_id,
+                "preflight_token": args.preflight_token,
+            }
         outcome = await call_guarded(
             api.start_storyboard,
             args.episode_id,
-            {
-                "completion_mode": args.completion_mode,
-                "completion_grant_id": args.completion_grant_id,
-            },
+            body=create_body,
         )
     if isinstance(outcome, CommandResult):
         return outcome
@@ -71,7 +75,7 @@ async def confirm(args: I.StoryboardConfirmInput) -> CommandResult:
 
     try:
         api._episode_or_404(args.episode_id)
-        outcome = api.confirm_episode_core(args.episode_id)
+        outcome = api.confirm_episode_core(args.episode_id, preview_token=args.preview_token)
     except HTTPException as exc:
         return from_http_exception(exc)
     except ValueError as exc:
@@ -85,6 +89,15 @@ async def shot_update(args: I.ShotUpdateInput) -> CommandResult:
     patch = dict(args.patch or {})
     if args.expected_version is not None:
         patch["expected_version"] = args.expected_version
+    if args.edit_session_token is not None:
+        patch["edit_session_token"] = args.edit_session_token
+    if args.preview_token is not None:
+        patch["preview_token"] = args.preview_token
+    if args.baseline_content_hash is not None:
+        patch["baseline_content_hash"] = args.baseline_content_hash
+    patch["change_source"] = args.change_source
+    if args.source_binding is not None:
+        patch["source_binding"] = args.source_binding
     outcome = await call_guarded(api.edit_shot, args.shot_id, patch)
     if isinstance(outcome, CommandResult):
         return outcome

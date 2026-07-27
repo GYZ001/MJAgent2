@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 
 from app import api, config, db, hiagent, multiview, portraits, refs, scenes, stages
+from app.domain import bible_ops
+from app.errors import ContentGenerationError
 from app.schemas import Bible, Character, Scene, World
 
 
@@ -108,6 +110,87 @@ def test_initial_character_generation_publishes_complete_three_view_pack(
     assert all(view["image_url"] for view in visible["views"])
 
 
+def test_failed_batch_refresh_keeps_previous_ready_pack(
+    asset_db, monkeypatch,
+) -> None:
+    conn, _ = asset_db
+    _seed_bible_project(conn)
+    _patch_successful_character_generation(monkeypatch)
+    asyncio.run(refs.generate_refs("proj_bootstrap"))
+    previous = conn.execute(
+        "SELECT id, image_path FROM character_portraits "
+        "WHERE project_id='proj_bootstrap' AND character_name='Hero' AND ep_start=1"
+    ).fetchone()
+
+    async def fail_new_pack(**_kwargs):
+        return {"status": "failed", "failed_view": "profile"}
+
+    monkeypatch.setattr(multiview, "ensure_character_multiview_pack", fail_new_pack)
+    with pytest.raises(hiagent.ProviderError, match="多视角资产包未通过"):
+        asyncio.run(refs.generate_refs("proj_bootstrap"))
+
+    rows = conn.execute(
+        "SELECT id, ep_start, image_path, pack_status FROM character_portraits "
+        "WHERE project_id='proj_bootstrap' AND character_name='Hero' ORDER BY ep_start"
+    ).fetchall()
+    assert [(row["id"], row["ep_start"]) for row in rows] == [(previous["id"], 1)]
+    assert rows[0]["image_path"] == previous["image_path"]
+    assert rows[0]["pack_status"] == "ready"
+
+
+def test_staged_refresh_pack_is_not_exposed_or_selected_before_qa(
+    asset_db, monkeypatch,
+) -> None:
+    conn, tmp_path = asset_db
+    bible = _seed_bible_project(conn)
+    _patch_successful_character_generation(monkeypatch)
+    asyncio.run(refs.generate_refs("proj_bootstrap"))
+    previous = conn.execute(
+        "SELECT id, image_path FROM character_portraits "
+        "WHERE project_id='proj_bootstrap' AND character_name='Hero' AND ep_start=1"
+    ).fetchone()
+    candidate_path = tmp_path / "candidate.jpg"
+    candidate_path.write_bytes(b"candidate")
+
+    candidate_id = portraits.stage_initial_portrait(
+        conn, "proj_bootstrap", "Hero", str(candidate_path),
+        bible.characters[0].appearance_canonical, "new prompt", 1,
+    )
+
+    assert portraits.portrait_for_episode("proj_bootstrap", "Hero", 1) == previous["image_path"]
+    visible = api.project_detail("proj_bootstrap", view="bible")["bible"]["characters"][0]["portraits"]
+    assert [item["id"] for item in visible] == [previous["id"]]
+    assert candidate_id not in {item["id"] for item in visible}
+
+
+def test_recovered_fresh_batch_does_not_skip_pre_batch_ready_pack(
+    asset_db, monkeypatch,
+) -> None:
+    conn, _ = asset_db
+    _seed_bible_project(conn)
+    _patch_successful_character_generation(monkeypatch)
+    asyncio.run(refs.generate_refs("proj_bootstrap"))
+    previous = conn.execute(
+        "SELECT id, created_at FROM character_portraits "
+        "WHERE project_id='proj_bootstrap' AND character_name='Hero' AND ep_start=1"
+    ).fetchone()
+    conn.execute("UPDATE character_portraits SET created_at=1 WHERE id=?", (previous["id"],))
+    conn.commit()
+
+    # 模拟“全量重生”在旧包之后启动，随后服务重启并以 resume=True 恢复。
+    asyncio.run(refs.generate_refs(
+        "proj_bootstrap", resume=True, fresh_after=2,
+    ))
+
+    current = conn.execute(
+        "SELECT id, ep_start, pack_status FROM character_portraits "
+        "WHERE project_id='proj_bootstrap' AND character_name='Hero' AND ep_start=1"
+    ).fetchone()
+    assert current["id"] != previous["id"]
+    assert current["ep_start"] == 1
+    assert current["pack_status"] == "ready"
+
+
 def test_project_detail_uses_latest_ready_pack_when_bible_path_is_not_merged(
     asset_db, monkeypatch,
 ) -> None:
@@ -194,6 +277,128 @@ def test_failed_initial_pack_is_not_exposed_as_front_only_portrait(
         "SELECT bible_json FROM projects WHERE id='proj_bootstrap'"
     ).fetchone()["bible_json"])
     assert bible["characters"][0]["ref_image_path"] is None
+
+
+def test_failed_single_image_qa_is_visible_as_non_adoptable_candidate(
+    asset_db, monkeypatch,
+) -> None:
+    conn, tmp_path = asset_db
+    _seed_bible_project(conn)
+    candidate = tmp_path / "projects" / "proj_bootstrap" / "refs" / "failed-front.jpg"
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_bytes(b"candidate")
+    conn.execute(
+        """INSERT INTO artifacts(
+               id,type,scope_type,scope_id,version,status,trust_level,content_json,file_path,
+               content_hash,parent_artifact_ids_json,contract_version,model_snapshot_json,created_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            "art_failed_front", "character_portrait", "reference_asset",
+            "proj_bootstrap:Hero:1", 1, "candidate", "T1",
+            json.dumps({"character_name": "Hero", "attempt": 2}), str(candidate),
+            "hash", "[]", "reference-1.0.0", "{}", 2,
+        ),
+    )
+    conn.execute(
+        """INSERT INTO evaluations(
+               id,artifact_id,evaluator_type,evaluator_name,evaluator_version,status,
+               hard_gate_passed,score,dimension_scores_json,issues_json,evidence_json,created_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            "eval_failed_front", "art_failed_front", "model",
+            "character_portrait_consistency_qa", "1", "failed", 0, 30,
+            "{}",
+            json.dumps([{
+                "code": "REFERENCE_QUALITY_THRESHOLD", "severity": "blocker",
+                "message": "参考资产质量分未达到 0.60",
+            }], ensure_ascii=False),
+            json.dumps({"qa": {"overall": 0.3, "issues": ["视觉年龄不符"]}}, ensure_ascii=False),
+            2,
+        ),
+    )
+    conn.commit()
+    monkeypatch.setattr(bible_ops, "get_conn", lambda: conn)
+
+    result = asyncio.run(bible_ops.list_portrait_candidates("proj_bootstrap", "Hero"))
+
+    item = result["items"][0]
+    assert item["candidate_kind"] == "single_image"
+    assert item["adoptable"] is False
+    assert item["group_qa"]["overall"] == 0.3
+    assert "参考资产质量分未达到 0.60" in item["group_qa"]["hard_failures"]
+    assert item["image_url"]
+
+
+def test_failed_single_image_qa_raises_quality_gate_error(
+    asset_db, monkeypatch,
+) -> None:
+    _seed_bible_project(asset_db[0])
+    encoded = base64.b64encode(b"test-image").decode("ascii")
+
+    async def fake_image(*_args, **_kwargs):
+        return {"b64_json": encoded}
+
+    async def failed_qa(*_args, **_kwargs):
+        return {"overall": 0.3, "status": "failed", "issues": ["视觉年龄不符"]}
+
+    monkeypatch.setattr(refs.hiagent, "generate_image", fake_image)
+    monkeypatch.setattr(stages, "review_portrait_image", failed_qa)
+    monkeypatch.setattr(
+        refs,
+        "record_reference_asset",
+        lambda **_kwargs: {"id": "artifact_failed", "status": "candidate"},
+    )
+
+    with pytest.raises(ContentGenerationError, match="未通过质量校验"):
+        asyncio.run(refs.generate_refs("proj_bootstrap"))
+
+
+def test_expression_warning_seed_continues_into_multiview_pack(
+    asset_db, monkeypatch,
+) -> None:
+    conn, _ = asset_db
+    _seed_bible_project(conn)
+    encoded = base64.b64encode(b"\xff\xd8\xff\xe0valid-test-image").decode("ascii")
+    pack_calls: list[str] = []
+
+    async def fake_image(*_args, **_kwargs):
+        return {"b64_json": encoded}
+
+    async def expression_warning_qa(*_args, **_kwargs):
+        return {
+            "identity_match": 0.92,
+            "presentation_match": 0.3,
+            "clean_frame": 1.0,
+            "overall": 0.92,
+            "issues": ["眼神未体现炽热爱慕"],
+            "soft_warnings": ["眼神未体现炽热爱慕"],
+            "hard_failures": [],
+            "hard_gate_passed": True,
+            "status": "warning",
+        }
+
+    async def fake_pack(**kwargs):
+        pack_calls.append(kwargs["portrait_id"])
+        conn.execute(
+            "UPDATE character_portraits SET pack_status='ready', group_qa_json=? WHERE id=?",
+            (json.dumps({"status": "warning", "overall": 0.9, "issues": ["神态软警告"]}), kwargs["portrait_id"]),
+        )
+        conn.commit()
+        return {"status": "ready", "portrait_id": kwargs["portrait_id"]}
+
+    monkeypatch.setattr(refs.hiagent, "generate_image", fake_image)
+    monkeypatch.setattr(stages, "review_portrait_image", expression_warning_qa)
+    monkeypatch.setattr(multiview, "character_multiview_enabled", lambda: True)
+    monkeypatch.setattr(multiview, "ensure_character_multiview_pack", fake_pack)
+
+    asyncio.run(refs.generate_refs("proj_bootstrap"))
+
+    assert len(pack_calls) == 1
+    portrait = conn.execute(
+        "SELECT ep_start, pack_status FROM character_portraits WHERE project_id='proj_bootstrap'"
+    ).fetchone()
+    assert portrait["ep_start"] == 1
+    assert portrait["pack_status"] == "ready"
 
 
 def test_cancelled_initial_pack_removes_staged_front_only_portrait(
@@ -295,6 +500,119 @@ def test_scene_exists_requires_complete_pack_when_multiview_is_enabled(
         )
     conn.commit()
     assert scenes.scene_ref_exists(conn, "proj_bootstrap", "Courtyard") is True
+
+
+def test_failed_extra_view_pack_keeps_primary_scene_available_to_video(
+    asset_db, monkeypatch,
+) -> None:
+    conn, tmp_path = asset_db
+    _seed_bible_project(conn, with_scene=True)
+    image = tmp_path / "usable-primary.jpg"
+    image.write_bytes(b"scene")
+    qa = {
+        "overall": 0.9,
+        "status": "warning",
+        "hard_gate_passed": True,
+        "hard_failures": [],
+    }
+    scene_id = scenes.register_initial_scene_ref(
+        conn, "proj_bootstrap", "Courtyard", str(image),
+        "stone courtyard at dawn with a red gate", "prompt", qa, 1,
+    )
+    conn.execute(
+        "UPDATE scene_references SET pack_status='failed',group_qa_json=? WHERE id=?",
+        (json.dumps({
+            "status": "failed",
+            "hard_failures": ["缺少必需视角：reverse_angle"],
+        }, ensure_ascii=False), scene_id),
+    )
+    conn.execute(
+        "INSERT INTO scene_reference_views("
+        "id,scene_reference_id,view_role,image_path,qa_json,status,created_at) "
+        "VALUES('primary',?,'establishing',?,?,'ready',1)",
+        (scene_id, str(image), json.dumps(qa)),
+    )
+    conn.commit()
+    monkeypatch.setattr(multiview, "scene_multiview_enabled", lambda: True)
+
+    row = conn.execute("SELECT * FROM scene_references WHERE id=?", (scene_id,)).fetchone()
+    views = multiview.list_scene_views(scene_id, conn=conn)
+    assert multiview.scene_pack_is_usable(row, views) is False
+    assert multiview.scene_primary_is_usable(row, views) is True
+    assert scenes.scene_ref_for_episode("proj_bootstrap", "Courtyard", 1) == str(image)
+
+
+def test_pending_reverse_view_is_reviewed_without_regeneration(asset_db, monkeypatch) -> None:
+    conn, tmp_path = asset_db
+    _seed_bible_project(conn, with_scene=True)
+    primary = tmp_path / "primary.jpg"
+    reverse = tmp_path / "reverse.jpg"
+    primary.write_bytes(b"primary")
+    reverse.write_bytes(b"reverse")
+    qa = {
+        "overall": 0.9,
+        "status": "warning",
+        "hard_gate_passed": True,
+        "hard_failures": [],
+        "policy_version": "scene-practical-quality-1.1.0",
+    }
+    scene_id = scenes.register_initial_scene_ref(
+        conn, "proj_bootstrap", "Courtyard", str(primary),
+        "stone courtyard at dawn with a red gate", "prompt", qa, 1,
+    )
+    for role, path, status, view_qa in (
+        ("establishing", primary, "ready", qa),
+        ("reverse_angle", reverse, "qa_pending", None),
+    ):
+        conn.execute(
+            "INSERT INTO scene_reference_views("
+            "id,scene_reference_id,view_role,image_path,qa_json,status,created_at) "
+            "VALUES(?,?,?,?,?,?,1)",
+            (f"view-{role}", scene_id, role, str(path),
+             json.dumps(view_qa) if view_qa else None, status),
+        )
+    conn.commit()
+    reviewed = []
+
+    async def must_not_generate(*_args, **_kwargs):
+        raise AssertionError("qa_pending 反打图已存在，不得重复付费生成")
+
+    async def review_view(path, canonical, role):
+        reviewed.append(role)
+        return {**qa, "view_role": role}
+
+    async def review_pack(views, canonical):
+        return {
+            "overall": 0.9,
+            "status": "ready",
+            "hard_gate_passed": True,
+            "hard_failures": [],
+            "policy_version": "scene-practical-quality-1.1.0",
+            "views": [
+                {**qa, "view_role": view["view_role"], "status": "ready"}
+                for view in views
+            ],
+        }
+
+    monkeypatch.setattr(multiview, "_generate_image", must_not_generate)
+    monkeypatch.setattr(multiview, "review_scene_view", review_view)
+    monkeypatch.setattr(multiview, "review_scene_pack_consistency", review_pack)
+
+    result = asyncio.run(multiview.ensure_scene_multiview_pack(
+        project_id="proj_bootstrap",
+        scene_reference_id=scene_id,
+        scene_name="Courtyard",
+        scene_canonical="stone courtyard at dawn with a red gate",
+        visual_style="cinematic animation",
+        ep_start=1,
+        primary_qa=qa,
+    ))
+
+    assert result["status"] == "ready"
+    assert reviewed == ["reverse_angle"]
+    assert conn.execute(
+        "SELECT status FROM scene_reference_views WHERE id='view-reverse_angle'",
+    ).fetchone()["status"] == "ready"
 
 
 def test_stale_assets_preview_accepts_sqlite_episode_rows(asset_db, monkeypatch) -> None:

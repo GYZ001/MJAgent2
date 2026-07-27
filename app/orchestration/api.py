@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, Body, HTTPException, Query
@@ -23,6 +24,88 @@ def list_runs(
     limit: int = Query(default=100, ge=1, le=500),
 ):
     return repository.list_runs(active=active, project_id=project_id, limit=limit)
+
+
+RUN_ACTIONABLE_STATUSES = {
+    "CREATED", "RUNNING", "WAITING_RETRY", "WAITING_HUMAN", "WAITING_AUTHORIZATION",
+    "PAUSED_BUDGET", "PAUSED_EXTERNAL", "FAILED", "PARTIAL",
+}
+
+
+@router.get("/runs/query")
+def query_runs(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    search: str = "",
+    status: str | None = None,
+    project_id: str | None = None,
+    workflow: str | None = None,
+    episode_no: int | None = None,
+    from_ts: float | None = None,
+    to_ts: float | None = None,
+    include_history: bool = False,
+    sort: str = "desc",
+):
+    """监制房全量 Run 查询；旧 ``/runs`` 数组契约继续供其他页面兼容使用。"""
+    query_started = time.perf_counter()
+    conn = get_conn()
+    rows = [dict(row) for row in conn.execute(
+        """SELECT wr.*,
+                  CASE wr.scope_type
+                    WHEN 'project' THEN wr.scope_id
+                    WHEN 'episode' THEN scope_episode.project_id
+                    WHEN 'shot' THEN shot_episode.project_id
+                  END AS project_id,
+                  COALESCE(project_scope.name, episode_project.name, shot_project.name) AS project_name,
+                  COALESCE(scope_episode.id, shot_episode.id) AS episode_id,
+                  COALESCE(scope_episode.episode_no, shot_episode.episode_no) AS episode_no,
+                  COALESCE(scope_episode.title, shot_episode.title) AS episode_title,
+                  scope_shot.id AS shot_id, scope_shot.shot_no AS shot_no
+           FROM workflow_runs wr
+           LEFT JOIN projects project_scope ON wr.scope_type='project' AND project_scope.id=wr.scope_id
+           LEFT JOIN episodes scope_episode ON wr.scope_type='episode' AND scope_episode.id=wr.scope_id
+           LEFT JOIN projects episode_project ON episode_project.id=scope_episode.project_id
+           LEFT JOIN shots scope_shot ON wr.scope_type='shot' AND scope_shot.id=wr.scope_id
+           LEFT JOIN episodes shot_episode ON shot_episode.id=scope_shot.episode_id
+           LEFT JOIN projects shot_project ON shot_project.id=shot_episode.project_id"""
+    ).fetchall()]
+    allowed_statuses = {item.strip() for item in (status or "").split(",") if item.strip()}
+    keyword = search.strip().lower()
+    filtered = []
+    for row in rows:
+        if not include_history and not allowed_statuses and row.get("status") not in RUN_ACTIONABLE_STATUSES:
+            continue
+        if allowed_statuses and row.get("status") not in allowed_statuses:
+            continue
+        if project_id and row.get("project_id") != project_id:
+            continue
+        if workflow and row.get("workflow_type") != workflow:
+            continue
+        if episode_no is not None and row.get("episode_no") != episode_no:
+            continue
+        updated_at = float(row.get("updated_at") or 0)
+        if from_ts is not None and updated_at < from_ts:
+            continue
+        if to_ts is not None and updated_at > to_ts:
+            continue
+        if keyword:
+            haystack = " ".join(str(row.get(key) or "") for key in (
+                "id", "workflow_type", "scope_type", "scope_id", "project_name",
+                "episode_title", "current_step_key", "failure_code", "failure_message",
+            )).lower()
+            if keyword not in haystack:
+                continue
+        filtered.append(row)
+    filtered.sort(key=lambda row: float(row.get("updated_at") or 0), reverse=sort.lower() != "asc")
+    total = len(filtered)
+    start = (page - 1) * page_size
+    return {
+        "items": filtered[start:start + page_size], "total": total,
+        "page": page, "page_size": page_size,
+        "page_count": max(1, (total + page_size - 1) // page_size),
+        "server_time": now(),
+        "query_ms": round((time.perf_counter() - query_started) * 1000, 2),
+    }
 
 
 @router.get("/runs/{run_id}")
@@ -64,6 +147,23 @@ async def cancel_run(run_id: str):
     run = repository.get_run(run_id)
     if not run:
         raise HTTPException(404, "运行不存在")
+    # 分镜 Run 可能从监制房直接取消；必须和分镜台按集取消收口到同一业务终态。
+    # 已是 CANCELLED 的 Run 也允许幂等补偿，以修复旧版本留下的 scripting 锁。
+    if run["workflow_type"] == "storyboard":
+        from app.storyboard_workspace import finalize_storyboard_cancellation
+
+        cancelled = run["status"] == "CANCELLED"
+        if run["status"] in repository.ACTIVE_RUN_STATUSES:
+            cancelled = await task_registry.cancel_and_wait("storyboard", run["scope_id"])
+            if not cancelled:
+                WorkflowRecorder(run_id).cancel("已取消分镜运行")
+                cancelled = True
+        elif not cancelled:
+            raise HTTPException(409, "运行已结束，不能取消")
+        finalized = finalize_storyboard_cancellation(
+            run["scope_id"], run_id=run_id, message="已取消分镜运行"
+        )
+        return {"cancelled": cancelled, "finalized": finalized, "run": repository.get_run(run_id)}
     # 视频补齐：即使 Run 已因崩溃结束，也要允许取消并复位集状态，否则评审墙会死锁
     if run["workflow_type"] == "episode_video_completion":
         from app.completion_grant import revoke_grant
@@ -109,9 +209,8 @@ async def cancel_run(run_id: str):
             WorkflowRecorder(run_id).cancel("已取消暂停中的剧本运行")
             cancelled = True
         return {"cancelled": cancelled, "run": repository.get_run(run_id)}
-    if run["workflow_type"] in {"storyboard", "character_bible"}:
-        kind = "storyboard" if run["workflow_type"] == "storyboard" else "bible"
-        cancelled = await task_registry.cancel_and_wait(kind, run["scope_id"])
+    if run["workflow_type"] == "character_bible":
+        cancelled = await task_registry.cancel_and_wait("bible", run["scope_id"])
         if not cancelled:
             WorkflowRecorder(run_id).cancel("已取消暂停中的运行")
             cancelled = True
@@ -491,6 +590,112 @@ def list_pending_gates(
     limit: int = Query(default=100, ge=1, le=500),
 ):
     return repository.pending_human_gates(project_id=project_id, limit=limit)
+
+
+@router.post("/gates/{artifact_id}/decision")
+def decide_gate(artifact_id: str, body: dict = Body(...)):
+    """统一门禁决策入口；以 artifact version + 幂等键保护并发和重复提交。"""
+    from app.harness.types import Evaluation
+    from app.monitoring import audit
+
+    decision = str(body.get("decision") or "").strip()
+    reason = str(body.get("reason") or "").strip()
+    decided_by = str(body.get("decided_by") or "monitor_user").strip()
+    expected_version = body.get("expected_version")
+    idem = str(body.get("idempotency_key") or "").strip()
+    if decision not in {"approve", "reject", "approve_with_risk"}:
+        raise HTTPException(422, "门禁决定只允许批准、带风险批准或打回")
+    if not reason:
+        raise HTTPException(422, "请填写处理意见")
+    conn = get_conn()
+    artifact = repository.get_artifact(artifact_id)
+    if not artifact:
+        raise HTTPException(404, "门禁产物不存在")
+    if expected_version is not None and int(expected_version) != int(artifact["version"]):
+        raise HTTPException(409, detail={
+            "code": "GATE_VERSION_CONFLICT", "message": "证据版本已变化，请刷新后重试",
+            "current_version": artifact["version"],
+        })
+    existing = conn.execute(
+        "SELECT * FROM gate_decisions WHERE artifact_id=? ORDER BY created_at DESC LIMIT 1",
+        (artifact_id,),
+    ).fetchone()
+    if existing:
+        existing_dict = dict(existing)
+        if existing_dict["decision"] == decision:
+            return {"ok": True, "idempotent": True, "decision": existing_dict}
+        raise HTTPException(409, detail={
+            "code": "GATE_ALREADY_DECIDED", "message": "该门禁已由其他人处理",
+            "current_decision": existing_dict["decision"],
+        })
+    gate_key = {
+        "character_bible": "character_bible", "episode_screenplay": "screenplay",
+        "storyboard": "storyboard", "delivery_package": "delivery",
+    }.get(artifact["type"], artifact["type"])
+    step = conn.execute(
+        "SELECT run_id FROM step_runs WHERE id=?", (artifact.get("created_by_step_run_id"),)
+    ).fetchone() if artifact.get("created_by_step_run_id") else None
+    run_id = step["run_id"] if step else None
+    if artifact["type"] == "delivery_package":
+        package = conn.execute(
+            "SELECT id,episode_id FROM delivery_packages WHERE artifact_id=? AND status='waiting_human' ORDER BY created_at DESC LIMIT 1",
+            (artifact_id,),
+        ).fetchone()
+        if not package:
+            raise HTTPException(409, "交付包已不在待审核状态")
+        from app.delivery import approve_delivery
+        try:
+            result = approve_delivery(
+                package["episode_id"], decided_by=decided_by, decision=decision,
+                reason=reason, accepted_risk=body.get("accepted_risk"), package_id=package["id"],
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        audit("gate_decision", "artifact", artifact_id, decision, {"idempotency_key": idem})
+        return {"ok": True, "idempotent": False, "decision": decision, "result": result}
+    if decision in {"approve", "approve_with_risk"}:
+        repository.commit_artifact(None, artifact_id, [Evaluation(
+            evaluator_type="human", evaluator_name=decided_by, evaluator_version="monitor-1.0",
+            status="warning" if decision == "approve_with_risk" else "passed",
+            hard_gate_passed=True, score=100,
+            evidence={"decision": decision, "reason": reason, "idempotency_key": idem},
+        )])
+    else:
+        conn.execute("UPDATE artifacts SET status='rejected' WHERE id=?", (artifact_id,))
+    conn.execute(
+        """INSERT INTO gate_decisions(id,artifact_id,run_id,gate_key,decision,decided_by,reason,accepted_risk,created_at)
+           VALUES(?,?,?,?,?,?,?,?,?)""",
+        (new_id("gate"), artifact_id, run_id, gate_key, decision, decided_by, reason,
+         body.get("accepted_risk"), now()),
+    )
+    if artifact["scope_type"] == "project" and artifact["type"] == "character_bible":
+        if decision.startswith("approve"):
+            conn.execute(
+                "UPDATE projects SET bible_json=?,bible_artifact_id=?,bible_status='ready',bible_error=NULL WHERE id=?",
+                (json.dumps(artifact.get("content") or {}, ensure_ascii=False), artifact_id, artifact["scope_id"]),
+            )
+        else:
+            conn.execute("UPDATE projects SET bible_status='failed',bible_error=? WHERE id=?", (reason, artifact["scope_id"]))
+    elif artifact["scope_type"] == "episode":
+        if artifact["type"] == "episode_screenplay":
+            conn.execute(
+                "UPDATE episodes SET screenplay_status=?,screenplay_error=?,screenplay_artifact_id=? WHERE id=?",
+                ("ready" if decision.startswith("approve") else "failed", None if decision.startswith("approve") else reason,
+                 artifact_id if decision.startswith("approve") else None, artifact["scope_id"]),
+            )
+        elif artifact["type"] == "storyboard":
+            conn.execute(
+                "UPDATE episodes SET status=?,script_error=?,storyboard_artifact_id=? WHERE id=?",
+                ("confirmed" if decision.startswith("approve") else "scripted", None if decision.startswith("approve") else reason,
+                 artifact_id if decision.startswith("approve") else None, artifact["scope_id"]),
+            )
+    conn.commit()
+    if run_id:
+        repository.append_event(run_id, "HUMAN_GATE_DECIDED", "info", f"人工门禁已{decision}", payload={
+            "artifact_id": artifact_id, "decision": decision, "decided_by": decided_by,
+        })
+    audit("gate_decision", "artifact", artifact_id, decision, {"idempotency_key": idem})
+    return {"ok": True, "idempotent": False, "decision": decision, "artifact_id": artifact_id, "run_id": run_id}
 
 
 @router.get("/episodes/{episode_id}/delivery/readiness")
