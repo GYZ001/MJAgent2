@@ -26,6 +26,82 @@ class RetryDecision:
     attempt: int
 
 
+RETRYABLE_ERROR_CLASSES = frozenset({
+    "PROVIDER_TRANSIENT",
+    "ACCIDENTAL_JSON_INVALID",
+    "ACCIDENTAL_SCHEMA_MISMATCH",
+    "PROVIDER_RESPONSE_INCOMPLETE",
+    "MEDIA_TECHNICALLY_UNUSABLE",
+    "CONTEXT_MISSING",
+})
+
+_QA_SCORE_ONLY_PREFIXES = ("QA_", "QUALITY_", "SCORE_")
+_QA_SCORE_ONLY_MARKERS = ("hard_failure", "consistency_drift", "score_below")
+
+
+def decide_retry_by_error_class(
+    error_class: str,
+    *,
+    attempt: int = 0,
+    max_attempts: int | None = None,
+    context_missing_retryable: bool = False,
+) -> RetryDecision:
+    """Only accidental/transient infrastructure failures may schedule retries.
+
+    QA, quality and score-derived findings are score-only signals on this branch;
+    they must never create an automatic retry or retake path.
+    """
+    normalized = str(error_class or "").strip().upper()
+    lowered = normalized.lower()
+    limit = max_attempts if max_attempts is not None else technical_resubmit_limit()
+    if (
+        normalized.startswith(_QA_SCORE_ONLY_PREFIXES)
+        or "_QA_" in normalized
+        or any(marker in lowered for marker in _QA_SCORE_ONLY_MARKERS)
+    ):
+        return RetryDecision(
+            False,
+            RetryKind.TECHNICAL,
+            False,
+            "QA/quality/score findings are score-only and cannot trigger retry",
+            limit,
+            attempt,
+        )
+    if normalized not in RETRYABLE_ERROR_CLASSES:
+        return RetryDecision(
+            False,
+            RetryKind.TECHNICAL,
+            False,
+            f"error_class {normalized or '<empty>'} is not retry allowlisted",
+            limit,
+            attempt,
+        )
+    if normalized == "CONTEXT_MISSING" and not context_missing_retryable:
+        return RetryDecision(
+            False,
+            RetryKind.TECHNICAL,
+            False,
+            "CONTEXT_MISSING requires explicit retryable context",
+            limit,
+            attempt,
+        )
+    if normalized == "PROVIDER_TRANSIENT":
+        limit = max_attempts if max_attempts is not None else job_transient_max_retries()
+        kind = RetryKind.PROVIDER_TRANSIENT
+        create_new_version = False
+    else:
+        kind = RetryKind.TECHNICAL
+        create_new_version = normalized == "MEDIA_TECHNICALLY_UNUSABLE"
+    return RetryDecision(
+        attempt < limit,
+        kind,
+        create_new_version,
+        f"error_class {normalized} is retry allowlisted",
+        limit,
+        attempt,
+    )
+
+
 def auto_retake_limit() -> int:
     """明确结构性 QA 失败最多自动重抽一次，随后转人工。"""
     try:

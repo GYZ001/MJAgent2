@@ -601,7 +601,7 @@ function SceneDetailModal({
               onRequestRedo={onRequestRedo}
             />
           ) : (
-            <div className="scene-detail-empty">这个场景还没有通过 QA 的参考视角。</div>
+            <div className="scene-detail-empty">这个场景还没有可用的参考视角文件。</div>
           )}
         </div>
         <footer>
@@ -666,9 +666,9 @@ function SceneCandidateModal({
       : item.status === 'approved' ? { ...item, status: 'superseded' } : item)
 
   const adopt = async (artifactId: string, warnings: string[]) => {
-    let reason = '候选通过全部硬门禁，人工确认采用'
+    let reason = '候选已有图片文件，人工确认采用；QA 结果仅作评分参考'
     if (warnings.length) {
-      const input = window.prompt(`此候选有软警告：\n${warnings.join('；')}\n\n请填写承担风险的采用理由：`, '')
+      const input = window.prompt(`此候选有 QA 提示：\n${warnings.join('；')}\n\n请填写人工采用理由：`, '')
       if (!input?.trim()) return
       reason = input.trim()
     } else if (!window.confirm(`确认将此候选采纳为「${sceneName}」的场景库主图？切换会保留历史版本。`)) return
@@ -694,9 +694,9 @@ function SceneCandidateModal({
       onCandidatesChanged(sceneName, nextCandidates)
       const qa = result.qa as { status?: string; hard_failures?: string[]; uncertainties?: string[] }
       if (qa.status === 'passed' || qa.status === 'warning') {
-        toast('新版 QA 已完成，此候选现在可采纳')
+        toast('新版 QA 已完成；有图候选可由人工直接采纳')
       } else if (qa.status === 'failed') {
-        toast(`QA 已完成，发现硬失败：${(qa.hard_failures ?? []).join('；') || '请查看证据'}`, true)
+        toast(`QA 已完成，记录提示：${(qa.hard_failures ?? []).join('；') || '请查看证据'}`, true)
       } else {
         toast(`QA 未能给出完整结论：${(qa.uncertainties ?? []).join('；') || '可稍后重试或人工复核'}`, true)
       }
@@ -735,12 +735,12 @@ function SceneCandidateModal({
           <div>
             <span className="eyebrow">SCENE CANDIDATES</span>
             <h2 id="scene-candidate-title">{sceneName}</h2>
-            <p>只会自动采纳通过新版硬门禁的候选；缺 QA 可直接重验现有图，不重新出图。</p>
+            <p>候选图是否可人工采纳只看图片文件是否存在；QA 结果仅作评分和风险提示，可重验现有图且不重新出图。</p>
             <div className="scene-candidate-summary" aria-label="候选 QA 汇总">
-              <span className="passed">可采纳 {summary.passed}</span>
+              <span className="passed">QA 无提示 {summary.passed}</span>
               <span>未验证 {summary.not_reviewed}</span>
               <span>QA 未完成 {summary.qa_incomplete}</span>
-              <span className="failed">硬失败 {summary.hard_failed}</span>
+              <span className="failed">QA 提示 {summary.hard_failed}</span>
             </div>
             {candidates.filter(item => !!item.image_url).length > 1 && (
               <button className="btn small" type="button" onClick={() => onCompare(
@@ -758,7 +758,7 @@ function SceneCandidateModal({
             const gate = candidateGate(candidate)
             const passed = gate.verified && gate.hard.length === 0
             const score = candidateQaScore(candidate)
-            const canAdopt = !isCurrent && !!candidate.image_url && !disabled && passed
+            const canAdopt = !isCurrent && !!candidate.image_url && !disabled
             return (
               <article className={`scene-candidate-preview${isCurrent ? ' current' : passed ? ' passed' : ' rejected'}`}
                 key={candidate.artifact_id}>
@@ -769,7 +769,7 @@ function SceneCandidateModal({
                           src: candidate.image_url!, label: `${sceneName} · 尝试 ${candidate.attempt ?? '—'}`,
                         }])} />
                     : <div className="scene-candidate-empty">图片不可用</div>}
-                  <span>{isCurrent ? '当前采用' : gate.hard.length ? '硬失败/不可用' : passed ? '硬门禁通过' : '待复核/未验证'}</span>
+                  <span>{isCurrent ? '当前采用' : gate.hard.length ? 'QA 提示' : passed ? 'QA 无提示' : '待复核/未验证'}</span>
                 </div>
                 <div className="scene-candidate-meta">
                   <div>
@@ -782,7 +782,7 @@ function SceneCandidateModal({
                     QA {score == null ? '—' : score.toFixed(2)}
                   </strong>
                 </div>
-                {!!gate.hard.length && <div className="error-banner">{gate.hard.slice(0, 3).join('；')} · 分数不参与通过判定</div>}
+                {!!gate.hard.length && <div className="error-banner">{gate.hard.slice(0, 3).join('；')} · QA 只评分，不自动拦截人工采纳</div>}
                 {!gate.hard.length && !gate.verified && <div className="hint">
                   {gate.reviewState === 'qa_incomplete'
                     ? `上次 QA 未能完整判定${gate.uncertainties.length ? `：${gate.uncertainties.slice(0, 2).join('；')}` : ''}`
@@ -792,7 +792,7 @@ function SceneCandidateModal({
                 {candidate.evidence && <EvidenceDrawer evidence={candidate.evidence} label="查看 QA 证据"
                   onOpenChange={setEvidenceOpen} />}
                 {canAdopt && <button className="btn small primary" type="button" disabled={!!adoptingId}
-                  onClick={() => adopt(candidate.artifact_id, gate.warnings)}>
+                  onClick={() => adopt(candidate.artifact_id, [...gate.hard, ...gate.warnings])}>
                   {adoptingId === candidate.artifact_id ? '采纳中…' : '采纳此图'}
                 </button>}
                 {!isCurrent && !passed && !!candidate.image_url && <div className="scene-candidate-actions">
@@ -800,10 +800,7 @@ function SceneCandidateModal({
                     disabled={!!reviewingId || !!adoptingId || disabled} onClick={() => void review(candidate)}>
                     {reviewingId === candidate.artifact_id ? '验证中…' : '重新验 QA'}
                   </button>
-                  {gate.manualReviewAllowed
-                    ? <button className="btn small" type="button" disabled={!!reviewingId || disabled}
-                        onClick={() => setManualCandidateId(candidate.artifact_id)}>人工复核后采纳</button>
-                    : <span className="scene-candidate-blocked">明确硬失败不可人工覆盖</span>}
+                  <span className="hint">可直接人工采纳；重新验 QA 不会重新出图</span>
                 </div>}
               </article>
             )
@@ -943,10 +940,10 @@ function SceneRefStrip({ projectId, sceneName, segments, disabled, onChanged, on
               </div>
             )}
             {!!seg.group_qa?.hard_failures?.length && sceneSegmentPrimaryFailed(seg) && (
-              <div className="error-banner">主图硬失败：{seg.group_qa.hard_failures.join('；')} · 不得进入新的生产引用</div>
+              <div className="error-banner">主图 QA 提示：{seg.group_qa.hard_failures.join('；')} · QA 只评分，不自动拦截生产引用</div>
             )}
             {!!seg.group_qa?.hard_failures?.length && !sceneSegmentPrimaryFailed(seg) && (
-              <div className="hint">附加视角待处理：{seg.group_qa.hard_failures.join('；')} · 主图仍可用于视频</div>
+              <div className="hint">附加视角 QA 提示：{seg.group_qa.hard_failures.join('；')} · 主图仍可用于视频</div>
             )}
             {!!seg.group_qa?.warnings?.length && !seg.group_qa?.hard_failures?.length && (
               <div className="hint">软警告：{seg.group_qa.warnings.join('；')}</div>

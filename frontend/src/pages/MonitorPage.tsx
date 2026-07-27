@@ -961,13 +961,12 @@ const SETTING_GROUP_DEFINITIONS: SettingGroupDefinition[] = [
   },
   {
     id: "quality-repair",
-    title: "质量检查与自动修复",
-    description: "控制视觉质检、自动重做判断和失败后的修复尝试。",
-    affects: ["视频质检", "评审墙", "自动重做"],
+    title: "视觉质检与评分",
+    description: "控制视觉质检评分开关与并发；QA 分数不触发自动重做或重试。",
+    affects: ["视频质检", "评审墙", "评分记录"],
     keys: [
       "vlm_request_concurrency",
       "auto_qa",
-      "auto_retake_threshold",
       "max_repair_attempts",
     ],
   },
@@ -1023,7 +1022,7 @@ const SETTING_FIELD_IMPACTS: Record<string, string> = {
   video_reference_role_adaptive: "是否根据镜头角色自动调整参考图策略",
   vlm_request_concurrency: "同时执行多少个视觉质量检查",
   auto_qa: "生成完成后是否自动进入质量检查",
-  auto_retake_threshold: "质量分低于此值时触发自动重做",
+  auto_retake_threshold: "兼容历史配置；QA 分数不再触发自动重做",
   max_repair_attempts: "同一问题允许自动修复的最大次数",
   download_concurrency: "同时下载多少个模型生成结果",
   finalize_concurrency: "同时执行多少个文件落盘与校验任务",
@@ -1034,6 +1033,13 @@ const SETTING_FIELD_IMPACTS: Record<string, string> = {
   storyboard_structure_edit_enabled: "是否允许增删和调整分镜结构",
   storyboard_source_rebind_enabled: "是否允许重新绑定分镜对应的原文",
 };
+
+const LEGACY_QA_RETRY_SETTING_KEYS = new Set([
+  "auto_retake_threshold",
+  "video_hard_gate_enabled",
+  "video_reference_gen_retries",
+  "video_reference_consistency_retries",
+]);
 
 export function categorizeSettingKeys(keys: string[]) {
   const remaining = new Set(keys);
@@ -1092,7 +1098,8 @@ function SettingsPanel({
     ([key]) =>
       !key.startsWith("model_") &&
       !key.includes("_model_") &&
-      key !== "model_route",
+      key !== "model_route" &&
+      !LEGACY_QA_RETRY_SETTING_KEYS.has(key),
   );
   const visibleSchema = Object.fromEntries(visibleSchemaEntries);
   const settingGroups = categorizeSettingKeys(
