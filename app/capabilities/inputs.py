@@ -25,6 +25,9 @@ class ProjectScopedInput(StandardCommandInput):
 class BibleGenerateInput(StandardCommandInput):
     project_id: str
     feedback: str | None = None
+    confirm: bool = False
+    quote_id: str | None = None
+    require_quote_id: bool = False
 
 
 class BibleUpdateInput(StandardCommandInput):
@@ -43,6 +46,7 @@ class PortraitUpdatePromptInput(StandardCommandInput):
 class PortraitGenerateInput(StandardCommandInput):
     project_id: str
     character: str | None = None
+    characters: list[str] | None = None
     resume: bool = False
     confirm: bool = False
     quote_id: str | None = None

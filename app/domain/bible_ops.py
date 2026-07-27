@@ -5,10 +5,76 @@ try:
 except NameError:  # pragma: no cover - used when importing this module directly
     from app.domain.common import *
 
+def _parse_json_value(value, default=None):
+    if value in (None, ""):
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return default
+
+
+def _normalize_character_selection(value) -> list[str] | None:
+    if value in (None, ""):
+        return None
+    raw_items = value
+    if isinstance(value, str):
+        parsed = _parse_json_value(value)
+        raw_items = parsed if isinstance(parsed, list) else value.split(",")
+    if not isinstance(raw_items, list):
+        raise HTTPException(422, "characters 必须是角色名数组")
+    names: list[str] = []
+    for item in raw_items:
+        name = str(item or "").strip()
+        if name and name not in names:
+            names.append(name)
+    return names or None
+
+
+def _refs_target_payload(only_character: str | None, only_characters: list[str] | None) -> str | None:
+    if only_characters:
+        return json.dumps(only_characters, ensure_ascii=False)
+    return only_character
+
+
+def _decode_refs_target(value: str | None) -> tuple[str | None, list[str] | None]:
+    parsed = _parse_json_value(value)
+    if isinstance(parsed, list):
+        names = _normalize_character_selection(parsed)
+        if names:
+            return (names[0] if len(names) == 1 else None), names
+    target = str(value or "").strip() or None
+    return target, ([target] if target else None)
+
+
+def _quote_stale(precheck: dict, message: str = "费用预检已过期或范围变化，请重新确认") -> HTTPException:
+    return HTTPException(
+        409,
+        detail={
+            "code": "QUOTE_STALE",
+            "message": message,
+            "precheck": precheck,
+        },
+    )
+
+
+def _payment_confirm_required(precheck: dict | None = None) -> HTTPException:
+    detail = {
+        "code": "PAYMENT_CONFIRM_REQUIRED",
+        "message": "必须先完成费用预检并显式确认（confirm=true）",
+    }
+    if precheck is not None:
+        detail["precheck"] = precheck
+    return HTTPException(409, detail=detail)
+
+
 def _start_refs_generation(
     project_id: str,
     only_character: str | None,
     *,
+    only_characters: list[str] | None = None,
     resume: bool = False,
     parent_run_id: str | None = None,
 ) -> bool:
@@ -19,7 +85,8 @@ def _start_refs_generation(
     if _refs_task_active(project_id):
         return False
     conn = get_conn()
-    if only_character is None:
+    target_payload = _refs_target_payload(only_character, only_characters)
+    if target_payload is None:
         conn.execute(
             "UPDATE projects SET refs_status='running', refs_error=NULL, refs_target=NULL WHERE id=?",
             (project_id,),
@@ -27,13 +94,14 @@ def _start_refs_generation(
     else:
         conn.execute(
             "UPDATE projects SET refs_status='running', refs_error=NULL, refs_target=? WHERE id=?",
-            (only_character, project_id),
+            (target_payload, project_id),
         )
     conn.commit()
     task_registry.spawn(
         "refs", project_id,
         _refs_task(
-            project_id, only_character, resume=resume, parent_run_id=parent_run_id,
+            project_id, only_character, only_characters=only_characters,
+            resume=resume, parent_run_id=parent_run_id,
             requested_by="system" if resume else "user",
             trigger_type="resume" if resume else "manual",
         ),
@@ -169,9 +237,11 @@ def recover_character_ref_tasks() -> int:
             "AND recovered_by_run_id IS NULL ORDER BY updated_at DESC LIMIT 1",
             (project_id,),
         ).fetchone()
+        only_character, only_characters = _decode_refs_target(row["refs_target"])
         if _start_refs_generation(
             project_id,
-            row["refs_target"],
+            only_character,
+            only_characters=only_characters,
             resume=True,
             parent_run_id=parent["id"] if parent else None,
         ):
@@ -396,7 +466,14 @@ async def _recorded_bible_task(
         raise
 
 
-async def _start_bible_core(project_id: str, feedback: str) -> dict:
+async def _start_bible_core(
+    project_id: str,
+    feedback: str,
+    *,
+    confirm: bool = False,
+    quote_id: str | None = None,
+    require_quote_id: bool = False,
+) -> dict:
     """启动人物谱生成的领域逻辑，供 REST 路由与 ``bible.generate`` Command Handler 共用。"""
     p = _project_or_404(project_id)
     _require_harness_engine(project_id)
@@ -407,6 +484,13 @@ async def _start_bible_core(project_id: str, feedback: str) -> dict:
     feedback = feedback.strip()
     if len(feedback) > 2000:
         raise HTTPException(400, "打回要求过长，请控制在 2000 字以内")
+    precheck = await bible_generate_precheck(project_id)
+    if not confirm:
+        raise _payment_confirm_required(precheck)
+    if quote_id and quote_id != precheck.get("quote_id"):
+        raise _quote_stale(precheck)
+    if require_quote_id and not quote_id:
+        raise _quote_stale(precheck, "费用预检缺失，请重新确认")
     conn = get_conn()
     # 持久化 feedback：进程重启后 recover_bible_tasks 能用相同入参续跑，而非中断报错
     conn.execute("UPDATE projects SET bible_status='running', bible_error=NULL, bible_feedback=? WHERE id=?",
@@ -426,9 +510,18 @@ async def _start_bible_core(project_id: str, feedback: str) -> dict:
 async def start_bible(project_id: str, body: dict | None = Body(None)):
     from app.capabilities.dispatch import dispatch, respond_ui
 
-    feedback = str(_as_body_dict(body).get("feedback") or "")
+    payload = _as_body_dict(body)
+    feedback = str(payload.get("feedback") or "")
     result = await dispatch(
-        "bible.generate", {"project_id": project_id, "feedback": feedback}, initiator="ui"
+        "bible.generate",
+        {
+            "project_id": project_id,
+            "feedback": feedback,
+            "confirm": payload.get("confirm") is True,
+            "quote_id": payload.get("quote_id"),
+            "require_quote_id": True,
+        },
+        initiator="ui",
     )
     return respond_ui(result)
 
@@ -617,6 +710,17 @@ def compute_bible_impact_preview(
     )
     by_type = _artifact_type_counts(stale_ids)
     conn = get_conn()
+    stale_assets: list[dict] = []
+    if stale_ids:
+        for i in range(0, min(len(stale_ids), 100), 400):
+            chunk = stale_ids[i:i + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"SELECT id, type, status, scope_type, scope_id FROM artifacts WHERE id IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            found = {row["id"]: dict(row) for row in rows}
+            stale_assets.extend(found[asset_id] for asset_id in chunk if asset_id in found)
     portraits = conn.execute(
         "SELECT COUNT(*) AS c FROM character_portraits WHERE project_id=?", (project_id,)
     ).fetchone()["c"]
@@ -662,6 +766,8 @@ def compute_bible_impact_preview(
         "change_types": change_types,
         "style_changed": style_changed,
         "stale_descendant_ids": stale_ids,
+        "stale_assets": stale_assets,
+        "stale_assets_truncated": len(stale_ids) > 100,
         "stale_count": len(stale_ids),
         "by_artifact_type": by_type,
         "paid_assets": {
@@ -685,6 +791,7 @@ def compute_refs_cost_precheck(
     project_id: str,
     *,
     character: str | None = None,
+    characters: list[str] | None = None,
     resume: bool = False,
     view_role: str | None = None,
 ) -> dict:
@@ -696,11 +803,20 @@ def compute_refs_cost_precheck(
     if not p.get("bible_json"):
         raise HTTPException(409, "请先生成角色圣经")
     bible = json.loads(p["bible_json"])
-    characters = bible.get("characters") or []
+    bible_characters = bible.get("characters") or []
+    selected_names = _normalize_character_selection(characters)
+    if character and selected_names and character not in selected_names:
+        raise HTTPException(422, "character 与 characters 范围不一致")
     if character:
-        characters = [c for c in characters if c.get("name") == character]
-        if not characters:
+        bible_characters = [c for c in bible_characters if c.get("name") == character]
+        if not bible_characters:
             raise HTTPException(404, f"角色不存在：{character}")
+    elif selected_names:
+        by_name = {c.get("name"): c for c in bible_characters if c.get("name")}
+        missing = [name for name in selected_names if name not in by_name]
+        if missing:
+            raise HTTPException(404, f"角色不存在：{missing[0]}")
+        bible_characters = [by_name[name] for name in selected_names]
     views_per = 1 if view_role else len(CHARACTER_REQUIRED_VIEWS)
     conn = get_conn()
     missing_roles: list[dict] = []
@@ -711,7 +827,7 @@ def compute_refs_cost_precheck(
             "character": character, "view_role": view_role, "reason": "单视角重做",
         })
     elif resume:
-        for c in characters:
+        for c in bible_characters:
             name = c.get("name")
             row = conn.execute(
                 """SELECT id, pack_status FROM character_portraits
@@ -741,8 +857,8 @@ def compute_refs_cost_precheck(
                     "character": name, "views": need, "reason": "缺失视角",
                 })
     else:
-        image_count = len(characters) * views_per
-        for c in characters:
+        image_count = len(bible_characters) * views_per
+        for c in bible_characters:
             missing_roles.append({
                 "character": c.get("name"),
                 "views": list(CHARACTER_REQUIRED_VIEWS) if not view_role else [view_role],
@@ -755,6 +871,7 @@ def compute_refs_cost_precheck(
     quote_id = fingerprint({
         "project_id": project_id,
         "character": character,
+        "characters": selected_names,
         "resume": resume,
         "view_role": view_role,
         "image_count": image_count,
@@ -771,8 +888,9 @@ def compute_refs_cost_precheck(
             else ("resume_missing" if resume else ("regenerate_pack" if character else "generate_all"))
         ),
         "character": character,
+        "characters": selected_names,
         "view_role": view_role,
-        "character_count": len(characters),
+        "character_count": len(bible_characters),
         "views_per_character": views_per,
         "image_count": image_count,
         "unit_price_cny": unit,
@@ -802,6 +920,7 @@ async def refs_cost_precheck(project_id: str, body: dict | None = None):
     return compute_refs_cost_precheck(
         project_id,
         character=payload.get("character"),
+        characters=_normalize_character_selection(payload.get("characters")),
         resume=bool(payload.get("resume", False)),
         view_role=payload.get("view_role"),
     )
@@ -998,6 +1117,58 @@ async def get_bible_draft(project_id: str):
     }
 
 
+def _auto_change_payload(item: dict) -> dict:
+    payload = item.get("payload")
+    return payload if isinstance(payload, dict) else {}
+
+
+def _auto_change_character_card(item: dict) -> dict | None:
+    payload = _auto_change_payload(item)
+    candidates = [
+        payload.get("character"),
+        payload.get("character_card"),
+        item.get("character_card"),
+    ]
+    if isinstance(item.get("character"), dict):
+        candidates.append(item.get("character"))
+    if item.get("appearance_canonical") or payload.get("appearance_canonical"):
+        candidates.append({**payload, **item})
+    for card in candidates:
+        if not isinstance(card, dict):
+            continue
+        name = (
+            card.get("name")
+            or payload.get("character_name")
+            or item.get("character_name")
+            or (item.get("character") if isinstance(item.get("character"), str) else None)
+        )
+        if not name:
+            continue
+        merged = dict(card)
+        merged["name"] = name
+        merged.setdefault("role", payload.get("role") or item.get("role") or "重要配角")
+        merged.setdefault("appearance_canonical", payload.get("appearance_canonical") or item.get("appearance_canonical") or "")
+        merged.setdefault("personality", payload.get("personality") or item.get("personality") or "")
+        merged.setdefault("speech_style", payload.get("speech_style") or item.get("speech_style") or "")
+        merged.setdefault("relationships", payload.get("relationships") or item.get("relationships") or [])
+        return merged
+    return None
+
+
+def _auto_change_portrait_id(change_id: str, item: dict | None = None) -> str | None:
+    if change_id.startswith("portrait:"):
+        return change_id.split(":", 1)[1]
+    payload = _auto_change_payload(item or {})
+    return (
+        payload.get("portrait_id")
+        or payload.get("previous_portrait_id")
+        or payload.get("base_portrait_id")
+        or (item or {}).get("portrait_id")
+        or (item or {}).get("previous_portrait_id")
+        or (item or {}).get("base_portrait_id")
+    )
+
+
 @router.get("/projects/{project_id}/auto-changes")
 async def list_auto_changes(project_id: str):
     """自动变更/待审队列（人物发现与漂移记录）。"""
@@ -1046,7 +1217,7 @@ async def list_auto_changes(project_id: str):
 @router.post("/projects/{project_id}/auto-changes/{change_id}/decide")
 async def decide_auto_change(project_id: str, change_id: str, body: dict | None = None):
     """批准/拒绝/回滚自动变更记录。"""
-    _project_or_404(project_id)
+    project = _project_or_404(project_id)
     payload = body or {}
     decision = payload.get("decision") or "approve"
     if decision not in {"approve", "reject", "rollback", "merge"}:
@@ -1061,17 +1232,22 @@ async def decide_auto_change(project_id: str, change_id: str, body: dict | None 
         conn.execute("ALTER TABLE projects ADD COLUMN bible_auto_changes_json TEXT")
         items = []
     found = False
+    matched_item = None
     for item in items:
         if item.get("id") == change_id:
             item["status"] = decision
             item["decided_at"] = now()
             item["decision_reason"] = payload.get("reason") or ""
+            if decision == "merge":
+                item["merge_into_character"] = payload.get("merge_into_character")
             found = True
+            matched_item = item
             break
+    action_result: dict = {}
     if change_id.startswith("portrait:"):
         portrait_id = change_id.split(":", 1)[1]
         prow = conn.execute(
-            "SELECT change_json FROM character_portraits WHERE id=? AND project_id=?",
+            "SELECT change_json, pack_status FROM character_portraits WHERE id=? AND project_id=?",
             (portrait_id, project_id),
         ).fetchone()
         if prow:
@@ -1082,11 +1258,104 @@ async def decide_auto_change(project_id: str, change_id: str, body: dict | None 
             change["review_status"] = decision
             change["decision_reason"] = payload.get("reason") or ""
             change["decided_at"] = now()
+            if decision == "approve":
+                change["review_status"] = "approved"
             conn.execute(
                 "UPDATE character_portraits SET change_json=? WHERE id=?",
                 (json.dumps(change, ensure_ascii=False), portrait_id),
             )
+            if decision == "reject" and prow["pack_status"] != "ready":
+                conn.execute(
+                    "UPDATE character_portraits SET pack_status='rejected' WHERE id=?",
+                    (portrait_id,),
+                )
             found = True
+            action_result["portrait_id"] = portrait_id
+    if matched_item and decision == "approve":
+        kind = matched_item.get("kind")
+        if kind in {"new_character", "character_discovery", "new_bible_character"}:
+            card = _auto_change_character_card(matched_item)
+            if card:
+                bible = json.loads(project["bible_json"] or '{"characters":[],"world":{"visual_style_canonical":""}}')
+                if not any(c.get("name") == card.get("name") for c in bible.get("characters", [])):
+                    bible.setdefault("characters", []).append(card)
+                    instance, errors = schema_errors(Bible, bible)
+                    if errors:
+                        raise HTTPException(422, "；".join(errors))
+                    revision = _commit_bible_revision(
+                        project_id, project, instance, reason=f"批准新增角色：{card.get('name')}"
+                    )
+                    action_result.update({
+                        "bible_version": revision["bible_version"],
+                        "artifact_id": revision["artifact_id"],
+                        "added_character": card.get("name"),
+                    })
+        elif kind == "appearance_drift":
+            portrait_id = _auto_change_portrait_id(change_id, matched_item)
+            if portrait_id:
+                prow = conn.execute(
+                    "SELECT change_json FROM character_portraits WHERE id=? AND project_id=?",
+                    (portrait_id, project_id),
+                ).fetchone()
+                if prow:
+                    change = _parse_json_value(prow["change_json"], {})
+                    if not isinstance(change, dict):
+                        change = {}
+                    change["review_status"] = "approved"
+                    change["decision_reason"] = payload.get("reason") or ""
+                    change["decided_at"] = now()
+                    conn.execute(
+                        "UPDATE character_portraits SET change_json=? WHERE id=?",
+                        (json.dumps(change, ensure_ascii=False), portrait_id),
+                    )
+                    found = True
+                    action_result["portrait_id"] = portrait_id
+    elif matched_item and decision == "rollback":
+        portrait_id = _auto_change_portrait_id(change_id, matched_item)
+        if portrait_id:
+            row = conn.execute(
+                "SELECT * FROM character_portraits WHERE id=? AND project_id=?",
+                (portrait_id, project_id),
+            ).fetchone()
+            if row:
+                target_id = (
+                    _auto_change_payload(matched_item).get("previous_portrait_id")
+                    or _auto_change_payload(matched_item).get("base_portrait_id")
+                    or matched_item.get("previous_portrait_id")
+                    or matched_item.get("base_portrait_id")
+                    or row["base_portrait_id"]
+                )
+                target = None
+                if target_id:
+                    target = conn.execute(
+                        "SELECT * FROM character_portraits WHERE id=? AND project_id=? AND character_name=?",
+                        (target_id, project_id, row["character_name"]),
+                    ).fetchone()
+                if target is None:
+                    target = conn.execute(
+                        "SELECT * FROM character_portraits WHERE project_id=? AND character_name=? AND id<>? "
+                        "AND (pack_status IS NULL OR pack_status='ready') ORDER BY created_at DESC LIMIT 1",
+                        (project_id, row["character_name"], portrait_id),
+                    ).fetchone()
+                if target:
+                    action_result.update(_set_current_portrait(
+                        conn,
+                        project_id,
+                        row["character_name"],
+                        target,
+                        reason=payload.get("reason") or "自动变更回滚",
+                        decision="rollback",
+                    ))
+                    found = True
+    elif matched_item and decision == "merge":
+        target_name = payload.get("merge_into_character")
+        if not target_name:
+            raise HTTPException(422, "merge 需要 merge_into_character")
+        matched_item["decision_reason"] = (
+            (payload.get("reason") or "").strip()
+            or f"合并到已有角色：{target_name}"
+        )
+        action_result["merge_into_character"] = target_name
     if not found:
         raise HTTPException(404, "自动变更记录不存在")
     conn.execute(
@@ -1094,7 +1363,7 @@ async def decide_auto_change(project_id: str, change_id: str, body: dict | None 
         (json.dumps(items, ensure_ascii=False), project_id),
     )
     conn.commit()
-    return {"ok": True, "change_id": change_id, "decision": decision}
+    return {"ok": True, "change_id": change_id, "decision": decision, **action_result}
 
 
 
@@ -1228,6 +1497,155 @@ async def edit_bible(project_id: str, body: dict):
     }
 
 
+def _commit_bible_revision(project_id: str, p: dict, instance: "Bible", *, reason: str) -> dict:
+    previous_artifact_id = p.get("bible_artifact_id")
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="character_bible",
+        scope_type="project",
+        scope_id=project_id,
+        status="validated",
+        trust_level="T4",
+        content=instance.model_dump(mode="json"),
+        parent_artifact_ids=[previous_artifact_id] if previous_artifact_id else [],
+        contract_version="character-bible-1.0.0",
+    ))
+    artifact = evidence_repository.commit_artifact(None, artifact["id"], [Evaluation(
+        evaluator_type="human",
+        evaluator_name="bible_editor",
+        evaluator_version="1.0.0",
+        status="passed",
+        hard_gate_passed=True,
+        score=100,
+        evidence={"decision": "manual_edit", "reason": reason},
+    )])
+    stale_ids = evidence_repository.invalidate_descendants(
+        previous_artifact_id,
+        "人物谱已人工修订，需要重新复验下游产物",
+        exclude_ids={artifact["id"]},
+    ) if previous_artifact_id else []
+    conn = get_conn()
+    conn.execute(
+        "UPDATE projects SET bible_json=?, bible_version=bible_version+1, bible_artifact_id=?, "
+        "bible_status='ready', bible_error=NULL WHERE id=?",
+        (instance.model_dump_json(), artifact["id"], project_id),
+    )
+    conn.execute(
+        "INSERT INTO gate_decisions(id, artifact_id, gate_key, decision, decided_by, reason, created_at) "
+        "VALUES(?,?,?,?,?,?,?)",
+        (new_id("gate"), artifact["id"], "character_bible", "approve", "bible_editor", reason, now()),
+    )
+    conn.commit()
+    return {
+        "artifact_id": artifact["id"],
+        "stale_descendant_ids": stale_ids,
+        "by_artifact_type": _artifact_type_counts(stale_ids),
+        "bible_version": int(p.get("bible_version") or 0) + 1,
+    }
+
+
+@router.put("/projects/{project_id}/characters/{character_name}")
+async def edit_character(project_id: str, character_name: str, body: dict):
+    """角色级保存：只替换指定角色对象，并按 bible_version 做乐观并发控制。"""
+    payload = body or {}
+    expected_version = payload.get("expected_version")
+    if expected_version is None:
+        expected_version = (payload.get("character") or {}).get("expected_version") if isinstance(payload.get("character"), dict) else None
+    p = _project_or_404(project_id)
+    if not p.get("bible_json"):
+        raise HTTPException(409, "请先生成角色圣经")
+    if expected_version is None:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "EXPECTED_VERSION_REQUIRED",
+                "message": "保存角色必须携带 expected_version，以防止并发覆盖",
+                "current_version": int(p.get("bible_version") or 0),
+            },
+        )
+    if int(expected_version) != int(p.get("bible_version") or 0):
+        raise HTTPException(409, detail=_bible_conflict_detail(p, expected_version))
+
+    character_body = payload.get("character")
+    if not isinstance(character_body, dict):
+        raise HTTPException(422, "character 必须是角色对象")
+    character_body = dict(character_body)
+    character_body.setdefault("name", character_name)
+    if character_body.get("name") != character_name:
+        raise HTTPException(422, "角色 name 与路径 character_name 不一致")
+
+    next_bible = json.loads(p["bible_json"])
+    target_idx = next(
+        (idx for idx, item in enumerate(next_bible.get("characters", [])) if item.get("name") == character_name),
+        None,
+    )
+    if target_idx is None:
+        raise HTTPException(404, f"角色不存在：{character_name}")
+    old_character = dict(next_bible["characters"][target_idx])
+    next_bible["characters"][target_idx] = character_body
+
+    instance, errors = schema_errors(Bible, next_bible)
+    if errors:
+        raise HTTPException(422, "；".join(errors))
+    from app.validators import validate_bible
+    errors = validate_bible(instance)
+    if errors:
+        raise HTTPException(422, "；".join(errors))
+
+    appearance_changed = (
+        (old_character.get("appearance_canonical") or "")
+        != (character_body.get("appearance_canonical") or "")
+    )
+    preview = None
+    if appearance_changed:
+        try:
+            preview = compute_bible_impact_preview(
+                project_id, next_bible, expected_version=expected_version,
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "IMPACT_PREVIEW_UNAVAILABLE",
+                    "message": f"定稿影响预检失败，已阻止正式定稿：{exc}",
+                },
+            ) from exc
+        impact_fp = payload.get("impact_preview_fingerprint")
+        if payload.get("confirm") is not True or not impact_fp:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "IMPACT_CONFIRM_REQUIRED",
+                    "message": "角色外观变更必须先完成影响预检并显式确认",
+                    "preview": preview,
+                },
+            )
+        if impact_fp != preview.get("fingerprint"):
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "IMPACT_PREVIEW_STALE",
+                    "message": "影响预检已过期或缺失，请重新预检后再保存",
+                    "preview": preview,
+                },
+            )
+
+    revision = _commit_bible_revision(project_id, p, instance, reason=f"人工保存角色：{character_name}")
+    return {
+        "saved": True,
+        "character": character_name,
+        "bible_version": revision["bible_version"],
+        "artifact_id": revision["artifact_id"],
+        "impact": {
+            "change_types": preview.get("change_types") if preview else ["text_only"],
+            "stale_descendant_ids": revision["stale_descendant_ids"],
+            "by_artifact_type": revision["by_artifact_type"],
+            "rebuild": preview.get("rebuild") if preview else None,
+        },
+    }
+
+
 @router.put("/projects/{project_id}/characters/{character_name}/portrait")
 async def edit_portrait_prompt(project_id: str, character_name: str, body: dict):
     """更新单个角色的画像描述（定妆照生成词）。传空字符串/null 恢复为默认合成描述。"""
@@ -1256,6 +1674,255 @@ async def edit_portrait_prompt(project_id: str, character_name: str, body: dict)
     return {"saved": True, "reset_to_default": not prompt_text}
 
 
+def _portrait_views_for(conn, portrait_id: str) -> list[dict]:
+    try:
+        rows = rows_to_dicts(conn.execute(
+            "SELECT * FROM character_portrait_views WHERE portrait_id=? ORDER BY created_at",
+            (portrait_id,),
+        ).fetchall())
+    except Exception:  # noqa: BLE001
+        return []
+    views: list[dict] = []
+    for row in rows:
+        qa = _parse_json_value(row.get("qa_json"), {})
+        views.append({
+            "id": row.get("id"),
+            "view_role": row.get("view_role"),
+            "framing": row.get("framing"),
+            "status": row.get("status"),
+            "selected": bool(row.get("selected", 1)),
+            "image_url": _media_url(row.get("image_path")),
+            "qa": qa,
+            "qa_overall": qa.get("overall") if isinstance(qa, dict) else None,
+        })
+    return views
+
+
+def _portrait_candidate_payload(row, views: list[dict] | None = None) -> dict:
+    group_qa = _parse_json_value(row["group_qa_json"] if "group_qa_json" in row.keys() else None, {})
+    change = _parse_json_value(row["change_json"] if "change_json" in row.keys() else None, {})
+    view_items = views if views is not None else _portrait_views_for(get_conn(), row["id"])
+    return {
+        "id": row["id"],
+        "portrait_id": row["id"],
+        "project_id": row["project_id"],
+        "character_name": row["character_name"],
+        "ep_start": row["ep_start"],
+        "ep_end": row["ep_end"],
+        "is_current": row["ep_end"] is None,
+        "appearance": row["appearance"],
+        "prompt": row["prompt"],
+        "base_portrait_id": row["base_portrait_id"],
+        "bible_version": row["bible_version"],
+        "artifact_id": row["artifact_id"] if "artifact_id" in row.keys() else None,
+        "pack_status": row["pack_status"] if "pack_status" in row.keys() else None,
+        "group_qa": group_qa,
+        "change": change,
+        "image_url": _media_url(row["image_path"]),
+        "views": view_items,
+        "created_at": row["created_at"],
+    }
+
+
+def _portrait_gate_lists(row, views: list[dict]) -> tuple[list[str], list[str]]:
+    group_qa = _parse_json_value(row["group_qa_json"] if "group_qa_json" in row.keys() else None, {})
+    hard: list[str] = []
+    soft: list[str] = []
+    if isinstance(group_qa, dict):
+        hard.extend(str(x) for x in (group_qa.get("hard_failures") or []) if str(x).strip())
+        soft.extend(str(x) for x in (group_qa.get("issues") or []) if str(x).strip())
+        if group_qa.get("status") and group_qa.get("status") != "ready":
+            soft.append(f"group_qa_status={group_qa.get('status')}")
+        soft.extend(str(x) for x in (group_qa.get("failed_views") or []) if str(x).strip())
+        for view in group_qa.get("views") or []:
+            if not isinstance(view, dict):
+                continue
+            hard.extend(str(x) for x in (view.get("hard_failures") or []) if str(x).strip())
+            soft.extend(str(x) for x in (view.get("issues") or []) if str(x).strip())
+    for view in views:
+        qa = view.get("qa") if isinstance(view.get("qa"), dict) else {}
+        hard.extend(str(x) for x in (qa.get("hard_failures") or []) if str(x).strip())
+        soft.extend(str(x) for x in (qa.get("issues") or []) if str(x).strip())
+        if view.get("status") and view.get("status") != "ready":
+            soft.append(f"{view.get('view_role')}:status={view.get('status')}")
+    pack_status = row["pack_status"] if "pack_status" in row.keys() else None
+    if pack_status and pack_status != "ready":
+        soft.append(f"pack_status={pack_status}")
+    return list(dict.fromkeys(hard)), list(dict.fromkeys(soft))
+
+
+def _set_current_portrait(
+    conn,
+    project_id: str,
+    character_name: str,
+    row,
+    *,
+    reason: str,
+    decision: str,
+) -> dict:
+    stamp = now()
+    ep_end = max(int(row["ep_start"] or 1) - 1, 0)
+    conn.execute(
+        "UPDATE character_portraits SET ep_end=? "
+        "WHERE project_id=? AND character_name=? AND id<>? AND ep_end IS NULL",
+        (ep_end, project_id, character_name, row["id"]),
+    )
+    change = _parse_json_value(row["change_json"] if "change_json" in row.keys() else None, {})
+    if not isinstance(change, dict):
+        change = {}
+    change.update({
+        "review_status": decision,
+        "adoption_reason": reason,
+        "decided_at": stamp,
+    })
+    conn.execute(
+        "UPDATE character_portraits SET ep_end=NULL, change_json=? WHERE id=?",
+        (json.dumps(change, ensure_ascii=False), row["id"]),
+    )
+    prow = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
+    if prow and prow["bible_json"]:
+        bible = json.loads(prow["bible_json"])
+        for character in bible.get("characters", []):
+            if character.get("name") == character_name:
+                character["ref_image_path"] = row["image_path"]
+                break
+        conn.execute(
+            "UPDATE projects SET bible_json=? WHERE id=?",
+            (json.dumps(bible, ensure_ascii=False), project_id),
+        )
+    artifact_id = row["artifact_id"] if "artifact_id" in row.keys() else None
+    if artifact_id:
+        conn.execute(
+            "INSERT INTO gate_decisions(id, artifact_id, gate_key, decision, decided_by, reason, created_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (new_id("gate"), artifact_id, "portrait_adoption", decision, "bible_editor", reason, stamp),
+        )
+    conn.commit()
+    return {"portrait_id": row["id"], "character_name": character_name, "ep_start": row["ep_start"]}
+
+
+def _adopt_portrait_by_id(
+    project_id: str,
+    character_name: str,
+    portrait_id: str,
+    *,
+    reason: str,
+    bypass_soft: bool = False,
+    decision: str = "approve",
+) -> dict:
+    _project_or_404(project_id)
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM character_portraits WHERE id=? AND project_id=? AND character_name=?",
+        (portrait_id, project_id, character_name),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "造型版本不存在")
+    views = _portrait_views_for(conn, portrait_id)
+    hard, soft = _portrait_gate_lists(row, views)
+    if hard:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "PORTRAIT_HARD_FAILED",
+                "message": "候选包存在硬失败，禁止采纳",
+                "hard_failures": hard,
+                "candidate": _portrait_candidate_payload(row, views),
+            },
+        )
+    if soft and (not bypass_soft or not reason.strip()):
+        raise HTTPException(
+            409,
+            detail={
+                "code": "PORTRAIT_SOFT_WARNING_CONFIRM_REQUIRED",
+                "message": "候选包存在软警告，需 bypass_soft=true 并填写 reason",
+                "warnings": soft,
+                "candidate": _portrait_candidate_payload(row, views),
+            },
+        )
+    result = _set_current_portrait(
+        conn, project_id, character_name, row, reason=reason, decision=decision,
+    )
+    return {**result, "soft_warnings": soft, "candidate": _portrait_candidate_payload(row, views)}
+
+
+@router.get("/projects/{project_id}/characters/{character_name}/portrait-candidates")
+async def list_portrait_candidates(project_id: str, character_name: str):
+    """列出角色定妆候选与历史包。"""
+    _project_or_404(project_id)
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM character_portraits WHERE project_id=? AND character_name=? "
+        "ORDER BY ep_start DESC, created_at DESC",
+        (project_id, character_name),
+    ).fetchall()
+    return {
+        "project_id": project_id,
+        "character_name": character_name,
+        "items": [_portrait_candidate_payload(row) for row in rows],
+    }
+
+
+@router.post("/projects/{project_id}/characters/{character_name}/portraits/{portrait_id}/adopt")
+async def adopt_portrait_candidate(
+    project_id: str, character_name: str, portrait_id: str, body: dict | None = None,
+):
+    payload = body or {}
+    reason = str(payload.get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(422, "采纳候选必须填写 reason")
+    result = _adopt_portrait_by_id(
+        project_id,
+        character_name,
+        portrait_id,
+        reason=reason,
+        bypass_soft=payload.get("bypass_soft") is True,
+        decision="approve",
+    )
+    return {"adopted": True, **result}
+
+
+@router.post("/projects/{project_id}/characters/{character_name}/portraits/{portrait_id}/rollback")
+async def rollback_portrait_candidate(
+    project_id: str, character_name: str, portrait_id: str, body: dict | None = None,
+):
+    payload = body or {}
+    reason = str(payload.get("reason") or "回滚到上一可用定妆包").strip()
+    _project_or_404(project_id)
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM character_portraits WHERE id=? AND project_id=? AND character_name=?",
+        (portrait_id, project_id, character_name),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "造型版本不存在")
+    target = None
+    if row["base_portrait_id"]:
+        target = conn.execute(
+            "SELECT * FROM character_portraits WHERE id=? AND project_id=? AND character_name=? "
+            "AND (pack_status IS NULL OR pack_status='ready')",
+            (row["base_portrait_id"], project_id, character_name),
+        ).fetchone()
+    if target is None:
+        target = conn.execute(
+            "SELECT * FROM character_portraits WHERE project_id=? AND character_name=? AND id<>? "
+            "AND (pack_status IS NULL OR pack_status='ready') "
+            "ORDER BY created_at DESC LIMIT 1",
+            (project_id, character_name, portrait_id),
+        ).fetchone()
+    if target is None:
+        raise HTTPException(409, "没有可回滚的 ready 定妆包")
+    result = _adopt_portrait_by_id(
+        project_id,
+        character_name,
+        target["id"],
+        reason=reason,
+        bypass_soft=True,
+        decision="rollback",
+    )
+    return {"rolled_back": True, "from_portrait_id": portrait_id, **result}
+
+
 # ---------- 角色定妆照（人物跨集一致性） ----------
 # 注：初始定妆在此生成（generate_refs，适用集 1~ 至今）；已有角色的外观漂移重绘已改为分镜阶段
 # 按集反应式处理（见 portraits.ensure_cards_for_screenplay），不再有"每 20 集全量轮询"步骤。
@@ -1265,6 +1932,7 @@ async def _refs_task(
     project_id: str,
     only_character: str | None,
     *,
+    only_characters: list[str] | None = None,
     resume: bool = False,
     parent_run_id: str | None = None,
     requested_by: str = "user",
@@ -1276,9 +1944,14 @@ async def _refs_task(
         workflow_type="character_references",
         scope_type="project",
         scope_id=project_id,
-        input_fingerprint=fingerprint(project_id, only_character, "character_references"),
+        input_fingerprint=fingerprint(project_id, only_character, only_characters, "character_references"),
         requested_by=requested_by,
         trigger_type=trigger_type,
+        config_snapshot={
+            "only_character": only_character,
+            "only_characters": only_characters,
+            "resume": resume,
+        },
         budget_limit_cny=float(get_setting("episode_cost_limit_cny") or 100),
         parent_run_id=parent_run_id,
     )
@@ -1286,7 +1959,9 @@ async def _refs_task(
         recorder.start()
         # 重做定妆照前，先清理旧人物图衍生的评审视频与成品（按受影响角色范围）
         p = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
-        if only_character:
+        if only_characters:
+            names = only_characters
+        elif only_character:
             names = [only_character]
         elif p and p["bible_json"]:
             names = [c["name"] for c in json.loads(p["bible_json"]).get("characters", [])]
@@ -1296,7 +1971,9 @@ async def _refs_task(
             worker.purge_character_video_artifacts(project_id, names)
         await recorder.step(
             "character_references",
-            lambda: generate_refs(project_id, only_character, resume=resume),
+            lambda: generate_refs(
+                project_id, only_character, only_characters=only_characters, resume=resume
+            ),
             agent_name="reference_asset_loop",
         )
         conn.execute("UPDATE projects SET refs_status='ready', refs_error=NULL WHERE id=?", (project_id,))
@@ -1317,11 +1994,13 @@ async def _refs_task(
 async def start_refs(project_id: str, body: dict | None = None):
     from app.capabilities.dispatch import ui_route
     payload = body or {}
+    selected_names = _normalize_character_selection(payload.get("characters"))
     routed = await ui_route(
         "portrait.generate",
         {
             "project_id": project_id,
             "character": payload.get("character"),
+            "characters": selected_names,
             "resume": bool(payload.get("resume", False)),
             "confirm": payload.get("confirm") is True,
             "quote_id": payload.get("quote_id"),
@@ -1334,28 +2013,26 @@ async def start_refs(project_id: str, body: dict | None = None):
         raise HTTPException(409, "请先生成角色圣经")
     if _refs_task_active(project_id) or p["refs_status"] == "running":
         raise HTTPException(409, "定妆照正在生成中")
-    if payload.get("confirm") is not True:
-        raise HTTPException(
-            409,
-            detail={
-                "code": "PAYMENT_CONFIRM_REQUIRED",
-                "message": "必须先完成费用预检并显式确认（confirm=true）",
-            },
-        )
     only = payload.get("character")
+    if only and selected_names and only not in selected_names:
+        raise HTTPException(422, "character 与 characters 范围不一致")
     resume = bool(payload.get("resume", False))
-    quote = compute_refs_cost_precheck(project_id, character=only, resume=resume)
+    quote_character = only if not selected_names else None
+    quote = compute_refs_cost_precheck(
+        project_id, character=quote_character, characters=selected_names, resume=resume
+    )
+    if payload.get("confirm") is not True:
+        raise _payment_confirm_required(quote)
     quote_id = payload.get("quote_id")
-    if quote_id and quote_id != quote.get("quote_id"):
-        raise HTTPException(
-            409,
-            detail={
-                "code": "QUOTE_STALE",
-                "message": "费用预检已过期或范围变化，请重新确认",
-                "precheck": quote,
-            },
-        )
-    _start_refs_generation(project_id, only, resume=resume)
+    if not quote_id or quote_id != quote.get("quote_id"):
+        raise _quote_stale(quote)
+    generation_only = selected_names[0] if selected_names and len(selected_names) == 1 else only
+    _start_refs_generation(
+        project_id,
+        generation_only,
+        only_characters=selected_names,
+        resume=resume,
+    )
     return {"status": "running", "quote_id": quote.get("quote_id"), "precheck": quote}
 
 

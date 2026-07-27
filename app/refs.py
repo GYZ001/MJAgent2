@@ -108,6 +108,7 @@ async def generate_refs(
     project_id: str,
     only_character: str | None = None,
     *,
+    only_characters: list[str] | None = None,
     resume: bool = False,
 ) -> None:
     """为项目全部（或指定）角色生成定妆照，写回 bible_json 的 ref_image_path。"""
@@ -118,9 +119,13 @@ async def generate_refs(
     bible = Bible.model_validate(json.loads(project["bible_json"]))
     style = bible.world.visual_style_canonical
 
-    targets = [c for c in bible.characters if (only_character is None or c.name == only_character)]
+    selected = {str(name).strip() for name in (only_characters or []) if str(name).strip()}
+    targets = [
+        c for c in bible.characters
+        if ((not selected or c.name in selected) and (only_character is None or c.name == only_character))
+    ]
     if not targets:
-        raise ValueError(f"角色不存在：{only_character}")
+        raise ValueError(f"角色不存在：{only_character or sorted(selected)}")
 
     # 初始定妆照登记到 character_portraits（适用集 1~ 至今），供按集分段刷新与评审墙按集选图。
     from app import portraits as _portraits

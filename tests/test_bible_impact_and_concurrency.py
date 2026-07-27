@@ -39,9 +39,12 @@ def _memory_conn() -> sqlite3.Connection:
           prompt TEXT,
           image_path TEXT,
           base_portrait_id TEXT,
+          bible_version INTEGER DEFAULT 0,
+          artifact_id TEXT,
           pack_status TEXT,
           group_qa_json TEXT,
-          change_json TEXT
+          change_json TEXT,
+          created_at REAL DEFAULT 0
         );
         CREATE TABLE character_portrait_views(
           id TEXT PRIMARY KEY,
@@ -168,6 +171,14 @@ def test_impact_preview_returns_fingerprint(monkeypatch) -> None:
         "proj_test", bible, expected_version=1,
     )
     assert preview["stale_count"] == 1
+    assert preview["stale_assets"] == [{
+        "id": "art_child_1",
+        "type": "episode_screenplay",
+        "status": "approved",
+        "scope_type": "episode",
+        "scope_id": "ep1",
+    }]
+    assert preview["stale_assets_truncated"] is False
     assert preview["fingerprint"]
     assert preview["change_types"]
 
@@ -252,9 +263,94 @@ def test_refs_precheck_counts_images(monkeypatch) -> None:
     assert quote["quote_id"] == fingerprint({
         "project_id": "proj_test",
         "character": None,
+        "characters": None,
         "resume": False,
         "view_role": None,
         "image_count": 3,
         "unit": 0.2,
         "bible_version": 1,
     })
+
+
+def test_bible_generate_requires_confirm(monkeypatch) -> None:
+    conn = _memory_conn()
+    _seed_bible(conn)
+    monkeypatch.setattr(bible_ops, "get_conn", lambda: conn)
+    monkeypatch.setattr(bible_ops, "_require_harness_engine", lambda _pid: None)
+    monkeypatch.setattr(bible_ops, "_project_or_404", lambda _pid: dict(conn.execute(
+        "SELECT * FROM projects WHERE id='proj_test'"
+    ).fetchone()))
+
+    async def _run():
+        with pytest.raises(HTTPException) as exc:
+            await bible_ops._start_bible_core("proj_test", "", confirm=False)
+        assert exc.value.status_code == 409
+        assert exc.value.detail["code"] == "PAYMENT_CONFIRM_REQUIRED"
+        assert exc.value.detail["precheck"]["quote_id"]
+
+    import asyncio
+    asyncio.run(_run())
+
+
+def test_refs_precheck_filters_characters(monkeypatch) -> None:
+    conn = _memory_conn()
+    bible = _seed_bible(conn)
+    bible["characters"].append({
+        "name": "药老",
+        "role": "导师",
+        "appearance_canonical": "白发老者，道袍飘逸，目光深邃，手持药鼎，气质出尘，须发皆白",
+        "personality": "慈祥",
+        "speech_style": "沉稳",
+        "relationships": [],
+    })
+    conn.execute(
+        "UPDATE projects SET bible_json=? WHERE id='proj_test'",
+        (json.dumps(bible, ensure_ascii=False),),
+    )
+    conn.commit()
+    monkeypatch.setattr(bible_ops, "get_conn", lambda: conn)
+    monkeypatch.setattr(bible_ops, "_project_or_404", lambda _pid: dict(conn.execute(
+        "SELECT * FROM projects WHERE id='proj_test'"
+    ).fetchone()))
+
+    all_quote = bible_ops.compute_refs_cost_precheck("proj_test")
+    filtered = bible_ops.compute_refs_cost_precheck("proj_test", characters=["药老"])
+    assert all_quote["character_count"] == 2
+    assert filtered["character_count"] == 1
+    assert filtered["scope"][0]["character"] == "药老"
+    assert filtered["characters"] == ["药老"]
+    assert filtered["image_count"] == 3
+
+
+def test_adopt_portrait_candidate_rejects_hard_failure(monkeypatch) -> None:
+    conn = _memory_conn()
+    _seed_bible(conn)
+    conn.execute(
+        "INSERT INTO character_portraits("
+        "id, project_id, character_name, ep_start, ep_end, appearance, prompt, image_path, "
+        "base_portrait_id, bible_version, artifact_id, pack_status, group_qa_json, change_json, created_at"
+        ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "portrait_bad", "proj_test", "萧炎", 1, None, "黑发少年", "prompt", None,
+            None, 1, None, "failed",
+            json.dumps({"status": "failed", "hard_failures": ["face_mismatch"], "issues": []}),
+            None, 1.0,
+        ),
+    )
+    conn.commit()
+    monkeypatch.setattr(bible_ops, "get_conn", lambda: conn)
+    monkeypatch.setattr(bible_ops, "_project_or_404", lambda _pid: dict(conn.execute(
+        "SELECT * FROM projects WHERE id='proj_test'"
+    ).fetchone()))
+
+    async def _run():
+        with pytest.raises(HTTPException) as exc:
+            await bible_ops.adopt_portrait_candidate(
+                "proj_test", "萧炎", "portrait_bad",
+                {"reason": "人工检查", "bypass_soft": True},
+            )
+        assert exc.value.status_code == 409
+        assert exc.value.detail["code"] == "PORTRAIT_HARD_FAILED"
+
+    import asyncio
+    asyncio.run(_run())

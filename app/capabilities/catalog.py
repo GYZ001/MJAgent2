@@ -1252,6 +1252,22 @@ def _register_exemptions(registry) -> None:
         "自动变更批准/拒绝/回滚；页面人工决策入口",
     )
     registry.exempt_rest(
+        "PUT /api/projects/{project_id}/characters/{character_name}",
+        "角色级人物谱保存：局部替换角色对象，内部复用人物谱版本与影响预检",
+    )
+    registry.exempt_rest(
+        "GET /api/projects/{project_id}/characters/{character_name}/portrait-candidates",
+        "角色定妆候选只读列表",
+    )
+    registry.exempt_rest(
+        "POST /api/projects/{project_id}/characters/{character_name}/portraits/{portrait_id}/adopt",
+        "人物定妆候选人工采纳；页面评审入口，写入 gate/change 决策",
+    )
+    registry.exempt_rest(
+        "POST /api/projects/{project_id}/characters/{character_name}/portraits/{portrait_id}/rollback",
+        "人物定妆候选人工回滚；页面评审入口，复用采纳切换逻辑",
+    )
+    registry.exempt_rest(
         "POST /mcp",
         "MCP JSON-RPC 传输端点；具体 tools/call 映射到 Capability Registry",
     )

@@ -9,7 +9,14 @@ from app.capabilities.schemas import CommandResult
 async def generate(args: I.BibleGenerateInput) -> CommandResult:
     from app import api
 
-    outcome = await call_guarded(api._start_bible_core, args.project_id, args.feedback or "")
+    outcome = await call_guarded(
+        api._start_bible_core,
+        args.project_id,
+        args.feedback or "",
+        confirm=bool(args.confirm),
+        quote_id=args.quote_id,
+        require_quote_id=bool(args.require_quote_id),
+    )
     if isinstance(outcome, CommandResult):
         return outcome
     run_id = outcome.get("run_id")
@@ -68,6 +75,7 @@ async def portrait_generate(args: I.PortraitGenerateInput) -> CommandResult:
         args.project_id,
         body={
             "character": args.character,
+            "characters": args.characters,
             "resume": args.resume,
             "confirm": bool(args.confirm),
             "quote_id": args.quote_id,
