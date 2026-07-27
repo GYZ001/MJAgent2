@@ -1648,7 +1648,7 @@ async def _asset_prep_heartbeat(
         try:
             await asyncio.wait_for(stop.wait(), timeout=wait_s)
             return
-        except TimeoutError:
+        except asyncio.TimeoutError:
             pass
         if run_id:
             owner = get_conn().execute(
