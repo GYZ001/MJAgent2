@@ -85,7 +85,9 @@ def test_builtin_model_credentials_are_saved_by_model_id(monkeypatch) -> None:
     model_id = "builtin:openrouter:z-ai/glm-5.2"
 
     api.put_model_credentials(model_id, {
-        "base_url": "https://gateway.example.com/v1", "api_key": "model-specific-key",
+        "base_url": "https://gateway.example.com/v1",
+        "api_key": "model-specific-key",
+        "confirm": True,
     })
 
     credentials = json.loads(store["model_credentials"])
