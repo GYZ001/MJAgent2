@@ -68,8 +68,8 @@ def test_character_reference_restart_preserves_target_and_parent(tmp_path, monke
 
     assert api.recover_character_ref_tasks() == 1
     assert seen == [{
-        "project_id": "p1", "target": "萧炎", "resume": True,
-        "parent_run_id": parent,
+        "project_id": "p1", "target": "萧炎", "only_characters": None,
+        "resume": True, "parent_run_id": parent,
     }]
 
 

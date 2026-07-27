@@ -45,8 +45,9 @@ def _decode_refs_target(value: str | None) -> tuple[str | None, list[str] | None
         names = _normalize_character_selection(parsed)
         if names:
             return (names[0] if len(names) == 1 else None), names
+    # 历史单角色 refs_target 为纯字符串，不升格为 only_characters 列表
     target = str(value or "").strip() or None
-    return target, ([target] if target else None)
+    return target, None
 
 
 def _quote_stale(precheck: dict, message: str = "费用预检已过期或范围变化，请重新确认") -> HTTPException:

@@ -1,7 +1,6 @@
 """提示词规范化与人物谱扩展预检。"""
 from __future__ import annotations
 
-import json
 import sqlite3
 
 from app.refs import normalize_prompt_text, portrait_prompt

@@ -9,7 +9,7 @@ import PrepSubnav from '../components/PrepSubnav'
 import QueryState from '../components/QueryState'
 import { useFillPageSize } from '../hooks/useFillPageSize'
 import { formatBookTitle } from '../lib/bookTitle'
-import type { PrepStepStatus } from '../lib/statusLabels'
+import { statusLabel, statusTitle, type PrepStepStatus } from '../lib/statusLabels'
 
 export default function ScenesPage() {
   const { projectId, toast } = useNav()
@@ -437,7 +437,9 @@ function SceneCandidateModal({
                 <div className="scene-candidate-meta">
                   <div>
                     <b>尝试 {candidate.attempt ?? '—'}</b>
-                    <small>{candidate.trust_level} · {candidate.status}</small>
+                    <small title={`${statusTitle(candidate.trust_level)} · ${statusTitle(candidate.status)}`}>
+                      {statusLabel(candidate.trust_level)} · {statusLabel(candidate.status)}
+                    </small>
                   </div>
                   <strong className={score != null && score >= SCENE_QA_PASS_SCORE ? 'passed' : 'failed'}>
                     QA {score == null ? '—' : score.toFixed(2)}
@@ -522,7 +524,7 @@ function SceneRefStrip({ projectId, sceneName, segments, disabled, onChanged }: 
           <article key={seg.id || i} className="scene-version-card">
             <div className="scene-version-meta">
               {sceneRangeLabel(seg.ep_start, seg.ep_end)}
-              {seg.pack_status ? ` · ${seg.pack_status}` : ''}
+              {seg.pack_status ? ` · ${statusLabel(seg.pack_status)}` : ''}
             </div>
             {(seg.views && seg.views.length > 0) ? (
               <div className="scene-view-grid">
