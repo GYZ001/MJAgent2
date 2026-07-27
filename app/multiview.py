@@ -2187,7 +2187,6 @@ async def regenerate_character_view(
     # Score-only：技术有效图即可替换；QA 低分不丢弃候选（PRD QA-SO #17）。
     if not Path(path).exists():
         return {"status": "failed", "view_role": view_role, "qa": qa, "preserved_previous": True}
-    status = "ready"
 
     candidate = dict(existing.get(view_role) or {})
     candidate.update({
@@ -2283,7 +2282,6 @@ async def regenerate_scene_view(
     # Score-only：技术有效图即可替换；QA 低分不丢弃候选（PRD QA-SO #17/#21）。
     if not Path(path).exists():
         return {"status": "failed", "view_role": view_role, "qa": qa, "preserved_previous": True}
-    status = "ready"
 
     candidate = dict(existing.get(view_role) or {})
     candidate.update({

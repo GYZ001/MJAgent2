@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 
 import pytest
 
 from scripts import dev_win
+
+pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="dev_win 仅 Windows 平台")
 
 
 class _FakeProcess:

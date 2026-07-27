@@ -611,14 +611,17 @@ async def adopt_scene_candidate(
         raise ValueError("候选已过期，不能采纳")
     current_gate = scene_candidate_gate(artifact_id, require_current_policy=False)
     latest_qa = dict(current_gate.get("qa") or {})
-    hard_failures = list(current_gate.get("hard_failures") or [])
     warnings = list(current_gate.get("warnings") or [])
+    # Score-only：gate 报告的 hard_failures 一律降为 soft warning（PRD QA-SO #19）。
+    for item in (current_gate.get("hard_failures") or []):
+        text = str(item).strip()
+        if text and text not in warnings:
+            warnings.append(text)
     from app.multiview import scene_multiview_enabled
     multiview_enabled = scene_multiview_enabled()
     if multiview_enabled:
         from app.scene_policy import normalize_scene_image_qa
         latest_qa = normalize_scene_image_qa(latest_qa, environment_only=True)
-        # Score-only：硬门禁失败降为警告，不禁止采纳（PRD QA-SO #19）。
         for item in (latest_qa.get("hard_failures") or []):
             text = str(item).strip()
             if text and text not in warnings:
@@ -628,7 +631,6 @@ async def adopt_scene_candidate(
             note = "候选 QA 未达展示阈值（仅评分，不拦截采纳）" + (f"：{detail}" if detail else "")
             if note not in warnings:
                 warnings.append(note)
-    hard_failures = []  # 不再因 QA hard gate 阻断采纳
     if warnings and not (reason or "").strip():
         # 软警告仍要求理由，便于审计；但不因 hard_failures 硬拒
         raise ValueError("候选存在软警告，必须填写采纳理由")
