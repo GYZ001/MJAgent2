@@ -5,7 +5,7 @@ import json
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -20,7 +20,14 @@ from app.config import PROJECTS_DIR, ROOT
 from app.db import init_db
 from app.mcp import router as mcp_router
 from app.capabilities.bus import set_request_approval_token
-from app.local_session import APPROVAL_HEADER, ensure_session_secret, public_session_payload
+from app.local_session import (
+    APPROVAL_HEADER,
+    bind_verified_session,
+    ensure_session_secret,
+    public_session_payload,
+    require_local_session,
+    set_request_session_id,
+)
 from app.mcp.auth import ensure_bootstrap_token
 from app.planning import router as planning_router
 from app.recovery import (
@@ -30,7 +37,11 @@ from app.recovery import (
     release_runtime_recovery_lock,
 )
 from app.orchestration.api import router as orchestration_router
+from app.system_api import public_router as system_public_router
 from app.system_api import router as system_router
+
+# 除 health / session 领取外，全部 /api/* 强制本机会话（Todolist T1）。
+_SESSION_DEPS = [Depends(require_local_session)]
 
 
 @asynccontextmanager
@@ -66,19 +77,24 @@ app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=3)
 
 
 @app.middleware("http")
-async def _inject_approval_token(request: Request, call_next):
-    """页面二次确认时通过请求头携带 approval_token，注入 Command Bus 上下文。"""
+async def _inject_session_and_approval(request: Request, call_next):
+    """注入本机会话与 approval_token，供 Command Bus 绑定批准令牌（Todolist T4）。"""
     token = request.headers.get(APPROVAL_HEADER)
     set_request_approval_token(token)
+    bind_verified_session(request)
     try:
         return await call_next(request)
     finally:
         set_request_approval_token(None)
+        set_request_session_id(None)
 
 
 @app.get("/api/session")
-def get_local_session():
-    """本机前端领取会话秘密，用于后续 /api/agent/* 请求（PRD §12.2）。"""
+def get_local_session(request: Request):
+    """本机前端领取会话秘密（无鉴权；仅本机 Origin/Host 可领取）。"""
+    from app.local_session import assert_session_bootstrap_allowed
+
+    assert_session_bootstrap_allowed(request)
     return public_session_payload()
 
 
@@ -175,13 +191,15 @@ async def _on_unhandled(request: Request, exc: Exception):
     return _error_json(rec)
 
 
-app.include_router(router)
-app.include_router(planning_router)
-app.include_router(orchestration_router)
-app.include_router(system_router)
-app.include_router(agent_capabilities_router, prefix="/api")
-app.include_router(agent_conversation_router, prefix="/api")
+app.include_router(system_public_router)  # health 等公开探活，不要求会话
+app.include_router(router, dependencies=_SESSION_DEPS)
+app.include_router(planning_router, dependencies=_SESSION_DEPS)
+app.include_router(orchestration_router, dependencies=_SESSION_DEPS)
+app.include_router(system_router, dependencies=_SESSION_DEPS)
+app.include_router(agent_capabilities_router, prefix="/api", dependencies=_SESSION_DEPS)
+app.include_router(agent_conversation_router, prefix="/api")  # 路由自身已带 session deps
 # /mcp 必须在 StaticFiles("/") 挂载之前注册，否则会被前端静态资源路由抢先吞掉。
+# MCP 使用 Bearer Token，不叠本机会话闸门。
 app.include_router(mcp_router)
 app.mount("/media", StaticFiles(directory=PROJECTS_DIR), name="media")
 

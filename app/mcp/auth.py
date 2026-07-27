@@ -192,24 +192,28 @@ def validate_bearer(header: str | None) -> TokenClaims:
 
 
 def ensure_bootstrap_token() -> None:
-    """首次启动、且尚无任何 token 时，自动生成一枚本地默认 token 方便联调。
+    """首次启动、且尚无任何 token 时，自动生成一枚本机只读 token 方便联调。
 
-    明文只写入一次性本地文件 `data/mcp_bootstrap_token.txt`（不进日志/不进 DB），
-    生产使用请通过 `/api/system/mcp-tokens` 管理端点按需创建/撤销更小范围的 token。
+    明文只写入一次性本地文件 ``data/mcp_bootstrap_token.txt``（不进日志/不进 DB）。
+    默认仅 ``manju:read`` + 24h TTL；写权限请通过监制房人工签发（Todolist T3）。
     """
     with _lock:
         data = _load()
         if data["tokens"]:
             return
     plaintext, _ = create_token(
-        scopes=sorted(ALL_SCOPES - {"manju:admin"}),
-        ttl_s=None,
-        name="bootstrap-local",
+        scopes=sorted(DEFAULT_SCOPES),
+        ttl_s=24 * 60 * 60,
+        name="bootstrap-local-readonly",
     )
     try:
         atomic_write_text(
             BOOTSTRAP_TOKEN_PATH,
-            f"{plaintext}\n# 本机首次启动自动生成，仅供本机联调；可在监制房撤销后重新创建更小范围的 token。\n",
+            f"{plaintext}\n# 本机首次启动自动生成（只读，24h）；可在监制房撤销后重新创建更小范围的 token。\n",
         )
+        try:
+            BOOTSTRAP_TOKEN_PATH.chmod(0o600)
+        except OSError:
+            pass
     except OSError:
         pass
