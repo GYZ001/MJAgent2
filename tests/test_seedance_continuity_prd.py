@@ -302,7 +302,7 @@ def test_classify_video_hard_failures_detects_story_repeat_and_related_failures(
 
 
 def test_select_best_video_candidate_rejects_below_threshold_and_hard_failures(monkeypatch) -> None:
-    """重抽尚未用尽时：未达阈值 / 硬门禁失败的候选不自动采纳。"""
+    """Score-only：技术合格即可采纳；QA 阈值/硬失败只影响排序与 fallback 标记。"""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript("""
@@ -333,11 +333,17 @@ def test_select_best_video_candidate_rejects_below_threshold_and_hard_failures(m
         "video_hard_gate_enabled": "true",
         "video_auto_retake_limit": "2",
     }.get(key))
+    monkeypatch.setattr(media, "grade_shot_video", lambda *a, **k: {"grade": "B"})
+    monkeypatch.setattr(media, "merge_observed_state_out_into_shot_contract", lambda *a, **k: None)
 
     selected = media.select_best_video_candidate("s")
 
-    assert selected is None
-    assert conn.execute("SELECT adopted_version_id FROM shots WHERE id='s'").fetchone()[0] is None
+    assert selected is not None
+    # 0.95 有 hard failure，0.7 无 hard failure 但低于阈值 → 都进 technical_pool；
+    # qualified 为空时取最高分 hard（0.95）作为 fallback。
+    assert selected["version_id"] == "hard"
+    assert selected["fallback"] is True
+    assert conn.execute("SELECT adopted_version_id FROM shots WHERE id='s'").fetchone()[0] == "hard"
 
 
 def test_select_best_video_candidate_force_adopts_highest_when_retakes_exhausted(monkeypatch) -> None:
@@ -379,12 +385,12 @@ def test_select_best_video_candidate_force_adopts_highest_when_retakes_exhausted
 
     assert selected and selected["version_id"] == "best_low"
     assert selected["fallback"] is True
-    assert "重抽名额已用尽" in selected["reason"]
+    assert "技术合格" in selected["reason"] or "最高分" in selected["reason"] or "仅评分" in selected["reason"]
     assert conn.execute("SELECT adopted_version_id FROM shots WHERE id='s'").fetchone()[0] == "best_low"
 
 
 def test_select_best_video_candidate_force_best_adopts_single_below_threshold(monkeypatch) -> None:
-    """显式 force_best：仅一个未达标视频时也采纳。"""
+    """QA 只评分：仅一个技术合格视频即使未达展示阈值也采纳，force_best 被忽略。"""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript("""
@@ -404,11 +410,12 @@ def test_select_best_video_candidate_force_best_adopts_single_below_threshold(mo
     monkeypatch.setattr(media, "get_conn", lambda: conn)
     monkeypatch.setattr(media, "get_setting", lambda key: "true" if key == "video_hard_gate_enabled" else None)
 
-    assert media.select_best_video_candidate("s") is None
-    selected = media.select_best_video_candidate("s", force_best=True)
+    selected = media.select_best_video_candidate("s")
     assert selected and selected["version_id"] == "only"
     assert selected["fallback"] is True
     assert conn.execute("SELECT adopted_version_id FROM shots WHERE id='s'").fetchone()[0] == "only"
+    forced = media.select_best_video_candidate("s", force_best=True)
+    assert forced and forced["version_id"] == "only"
 
 
 def test_action_continuation_without_prev_downgrades_instead_of_chain_head_error() -> None:

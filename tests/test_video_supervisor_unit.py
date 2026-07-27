@@ -119,11 +119,11 @@ def test_repair_router_levels_and_upgrade():
             evidence={"shot_no": 9, "path": "9", "rule_id": "state_mismatch"},
         )
     ])
-    assert plan.level == "L2"
-    assert plan.strategy == "retake_directed"
-    assert plan.extra_negative
+    assert plan.level == "L6"
+    assert plan.strategy == "handoff_human"
+    assert plan.is_paid is False
 
-    # stall → upgrade
+    # QA-only issues ignore automatic stall upgrades and stay human handoff.
     fp = plan.fingerprint
     counts = bump_fingerprint_count({}, fp)
     counts = bump_fingerprint_count(counts, fp)
@@ -138,7 +138,9 @@ def test_repair_router_levels_and_upgrade():
         fingerprint_counts=counts,
         current_level="L2",
     )
-    assert plan2.level == "L3"
+    assert plan2.level == "L6"
+    assert plan2.strategy == "handoff_human"
+    assert plan2.is_paid is False
 
     # L5 without auth
     plan5 = route([
@@ -164,7 +166,9 @@ def test_qa_gain_upgrade():
         evidence={"path": "1", "rule_id": "low_score"},
     )
     plan = route([issue], current_level="L1", qa_history=[0.40, 0.41])
-    assert plan.level in {"L2", "L3"}  # gain < 0.03 → upgrade from L1
+    assert plan.level == "L6"
+    assert plan.strategy == "handoff_human"
+    assert plan.is_paid is False
 
 
 def test_attempts_for_budget():

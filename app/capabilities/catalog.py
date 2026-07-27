@@ -1214,6 +1214,10 @@ def _register_exemptions(registry) -> None:
         "同上：token 撤销只能由本机操作者通过监制房页面执行，不进入 Agent/MCP 能力面",
     )
     registry.exempt_rest(
+        "POST /api/system/directory-grants",
+        "本机人工授权可浏览/建目录根；仅本机会话可写，不向 Agent/MCP 开放",
+    )
+    registry.exempt_rest(
         "POST /api/agent/conversations",
         "Agent 会话编排入口，不直接改变制作领域状态",
     )

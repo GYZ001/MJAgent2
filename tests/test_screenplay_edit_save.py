@@ -9,8 +9,9 @@ from app import api, db
 from app.capabilities import ensure_catalog_loaded
 from app.capabilities.bus import reset_command_bus_for_tests, set_request_approval_token
 from app.capabilities.policy import reset_approvals_for_tests
-from app.local_session import APPROVAL_HEADER
+from app.local_session import APPROVAL_HEADER, ensure_session_secret, set_request_session_id
 from app.schemas import Bible, Character, EpisodeScreenplay, World
+from tests.conftest import SessionTestClient
 from tests.test_screenplay_stage import (
     _RAINY_KEY_LINES,
     _RAINY_KEY_POINTS,
@@ -33,14 +34,17 @@ def client(tmp_path, monkeypatch):
     @test_app.middleware("http")
     async def inject_approval_token(request: Request, call_next):
         set_request_approval_token(request.headers.get(APPROVAL_HEADER))
+        # 单元测试未挂全局会话闸门：显式绑定会话，保证批准令牌可下发（T4）。
+        set_request_session_id(ensure_session_secret())
         try:
             return await call_next(request)
         finally:
             set_request_approval_token(None)
+            set_request_session_id(None)
 
     test_app.include_router(api.router)
     with TestClient(test_app) as test_client:
-        yield test_client
+        yield SessionTestClient(test_client)
 
 
 def _valid_script() -> EpisodeScreenplay:

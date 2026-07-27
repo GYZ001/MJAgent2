@@ -456,6 +456,10 @@ CREATE TABLE IF NOT EXISTS evaluations (
     evaluator_version TEXT NOT NULL,
     status TEXT NOT NULL,
     hard_gate_passed INTEGER NOT NULL,
+    evaluation_role TEXT,
+    score_status TEXT,
+    runtime_blocking INTEGER NOT NULL DEFAULT 0,
+    retry_eligible INTEGER NOT NULL DEFAULT 0,
     score REAL,
     dimension_scores_json TEXT NOT NULL DEFAULT '{}',
     issues_json TEXT NOT NULL DEFAULT '[]',
@@ -1017,6 +1021,11 @@ MIGRATIONS = (
     "ALTER TABLE episodes ADD COLUMN screenplay_snapshot_version INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE episodes ADD COLUMN screenplay_constraint_version INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE shots ADD COLUMN shot_uid TEXT",
+    # QA score-only metadata for typed Evaluation rows.
+    "ALTER TABLE evaluations ADD COLUMN evaluation_role TEXT",
+    "ALTER TABLE evaluations ADD COLUMN score_status TEXT",
+    "ALTER TABLE evaluations ADD COLUMN runtime_blocking INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE evaluations ADD COLUMN retry_eligible INTEGER NOT NULL DEFAULT 0",
 )
 
 

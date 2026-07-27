@@ -6,8 +6,8 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5230,
-    // 允许云环境通过 localtunnel / 临时公网域名访问开发服
-    allowedHosts: true,
+    // 仅允许本机开发域名；禁止默认 allowedHosts:true 放大隧道暴露面（Todolist T7）
+    allowedHosts: ['localhost', '127.0.0.1'],
     proxy: {
       '/api': 'http://127.0.0.1:8230',
       '/media': 'http://127.0.0.1:8230',

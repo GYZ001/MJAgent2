@@ -1334,9 +1334,63 @@ async def poll_video_task(task_id: str, *, call_meta: dict | None = None) -> dic
 
 
 async def _download_once(url: str, dest_path: str) -> None:
+    """单次下载；禁止 SSRF：仅允许公网 http(s)，跟随重定向后再次校验。"""
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    def _assert_public_download_url(candidate: str) -> None:
+        parsed = urlparse(candidate)
+        if parsed.scheme not in {"http", "https"}:
+            raise ProviderError("下载 URL 必须是 http(s)")
+        host = (parsed.hostname or "").strip().lower()
+        if not host:
+            raise ProviderError("下载 URL 缺少主机名")
+        if host in {"localhost", "metadata", "metadata.google.internal"} or host.endswith(".local"):
+            raise ProviderError("拒绝下载本机或链路本地地址")
+        if host == "169.254.169.254":
+            raise ProviderError("拒绝下载云元数据地址")
+        candidates: list[str] = []
+        try:
+            ipaddress.ip_address(host)
+            candidates = [host]
+        except ValueError:
+            try:
+                infos = socket.getaddrinfo(host, parsed.port or 443, type=socket.SOCK_STREAM)
+            except socket.gaierror as exc:
+                raise ProviderError(f"无法解析下载主机：{host}") from exc
+            for info in infos:
+                addr = info[4][0]
+                if addr:
+                    candidates.append(addr)
+        for addr in candidates:
+            try:
+                ip = ipaddress.ip_address(addr)
+            except ValueError:
+                continue
+            if (
+                ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_multicast or ip.is_reserved or ip.is_unspecified
+            ):
+                raise ProviderError("拒绝下载内网或保留地址")
+
+    _assert_public_download_url(url)
     timeout = httpx.Timeout(connect=10, read=config.TIMEOUT_DOWNLOAD, write=30, pool=10)
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+
+    async def _on_redirect(response: httpx.Response) -> None:
+        location = response.headers.get("location")
+        if location:
+            next_url = str(response.url.join(location))
+            _assert_public_download_url(next_url)
+
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        follow_redirects=True,
+        event_hooks={"response": [_on_redirect]},
+    ) as client:
         resp = await client.get(url)
+        # 最终落地 URL 再校验一次（防 DNS 重绑定后的内网跳转）。
+        _assert_public_download_url(str(resp.url))
         if resp.status_code != 200:
             raise ProviderError(f"视频下载失败 HTTP {resp.status_code}（URL 可能已过期，有效期 7 天）")
         atomic_write_bytes(dest_path, resp.content)

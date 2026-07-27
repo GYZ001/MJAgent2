@@ -919,7 +919,8 @@ def test_router_needs_crop_auto_crop():
             evidence={"path": "1", "rule_id": "needs_crop"},
         )
     ])
-    assert plan.strategy == "auto_crop"
+    assert plan.level == "L6"
+    assert plan.strategy == "handoff_human"
     assert plan.is_paid is False
 
 

@@ -69,6 +69,10 @@ class Evaluation(BaseModel):
     evaluator_version: str
     status: Literal["passed", "warning", "failed", "error"]
     hard_gate_passed: bool
+    evaluation_role: Literal["score_only", "runtime_gate", "business_safety"] | None = None
+    score_status: str | None = None
+    runtime_blocking: bool = False
+    retry_eligible: bool = False
     score: float | None = Field(default=None, ge=0, le=100)
     dimension_scores: dict[str, float] = Field(default_factory=dict)
     issues: list[Issue] = Field(default_factory=list)

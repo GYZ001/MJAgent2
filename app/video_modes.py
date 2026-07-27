@@ -248,19 +248,20 @@ def recompose_asset_score(asset: ReferenceImageAsset, *, consistency: float | No
 
 
 def apply_keep_gate(asset: ReferenceImageAsset, *, threshold: float | None = None) -> bool:
-    """统一门禁：综合分 ≥ 阈值则留下，否则仅标 quality_below_threshold。返回是否留下。"""
-    thr = quality_threshold() if threshold is None else float(threshold)
-    score = asset.qualityScore
-    if score is None:
-        asset.selectedForSeedance = False
-        asset.rejectReason = "missing_quality_score"
-        return False
-    if float(score) < thr:
-        asset.selectedForSeedance = False
-        asset.rejectReason = "quality_below_threshold"
-        return False
+    """Score-only：QA 分数不再淘汰参考图（PRD QA-SO #24）。
+
+    阈值仅用于标记 ``rejectReason`` 供展示/排序，资产仍可选入 Seedance。
+    """
+    del threshold
     asset.selectedForSeedance = True
-    asset.rejectReason = None
+    score = asset.qualityScore
+    thr = quality_threshold()
+    if score is None:
+        asset.rejectReason = "missing_quality_score"
+    elif float(score) < thr:
+        asset.rejectReason = "quality_below_threshold_score_only"
+    else:
+        asset.rejectReason = None
     return True
 
 
@@ -270,8 +271,8 @@ def min_generated_references() -> int:
 
 
 def reference_gen_retries() -> int:
-    """单张参考图 QA 不达标时的额外重试次数。"""
-    return max(0, int_setting("video_reference_gen_retries", 2))
+    """QA 只评分：禁止因低分额外重生参考图（PRD QA-SO #25）。"""
+    return 0
 
 
 def reference_prompt_async() -> bool:
@@ -294,18 +295,18 @@ def role_adaptive_enabled() -> bool:
 
 
 def consistency_check_enabled() -> bool:
-    """Phase 2：是否对整组参考图做相对一致性检查（扣分进综合分，低分可触发 i2i 重生提分）。"""
+    """Phase 2：是否对整组参考图做相对一致性检查（仅扣分/展示，不触发 i2i 重生）。"""
     return bool_setting("video_reference_consistency_check", True)
 
 
 def consistency_threshold() -> float:
-    """仅触发 i2i 重生尝试的内部线；不再单独决定废弃（废弃只看综合分门禁）。"""
+    """一致性分数分段阈值；不再触发 i2i 重生。"""
     return float_setting("video_reference_consistency_threshold", 0.7)
 
 
 def consistency_retries() -> int:
-    """漂移图从锚点 i2i 重生的最大次数；仍漂移则只靠综合分门禁决定去留。"""
-    return max(0, int_setting("video_reference_consistency_retries", 1))
+    """QA 只评分：禁止一致性漂移驱动的 i2i 重生（PRD QA-SO #26）。"""
+    return 0
 
 
 def max_character_reference_images() -> int:
@@ -1761,36 +1762,14 @@ def _finalize_reference_selection(
     rejected_out: list[ReferenceImageAsset] | None = None,
     rejection_details: list[dict[str, Any]] | None = None,
 ) -> list[ReferenceImageAsset]:
-    """冗余软惩罚 → 综合分门禁：≥阈值一律留下；低于则进废弃（仅 quality_below_threshold）。"""
+    """Score-only：全部技术有效参考图保留；按分数排序，低分只记展示标记（PRD QA-SO #24）。"""
+    del rejected_out, rejection_details
     if not assets:
         return []
     _apply_redundancy_penalties(assets)
-    kept: list[ReferenceImageAsset] = []
     for asset in assets:
-        if apply_keep_gate(asset):
-            kept.append(asset)
-            continue
-        # 地板以上的生成兜底：若本镜尚无任何留下的图，允许暂留最高分一张
-        if rejected_out is not None and asset not in rejected_out:
-            rejected_out.append(asset)
-        if rejection_details is not None:
-            rejection_details.append({
-                "type": asset.type, "source": asset.source,
-                "reason": asset.rejectReason or "quality_below_threshold",
-                "quality_score": asset.qualityScore,
-            })
-    if kept:
-        return kept
-    # 极端兜底：全部低于门禁时，若最佳仍 ≥ quality_floor，留下一张以免无参考
-    ranked = sorted(assets, key=lambda a: a.qualityScore or 0.0, reverse=True)
-    best = ranked[0] if ranked else None
-    if best is not None and (best.qualityScore or 0) >= quality_floor():
-        best.selectedForSeedance = True
-        # 仍保留 rejectReason 作为「兜底」标记，前端可显示分数
-        if rejected_out is not None and best in rejected_out:
-            rejected_out.remove(best)
-        return [best]
-    return []
+        apply_keep_gate(asset)
+    return sorted(assets, key=lambda a: a.qualityScore or 0.0, reverse=True)
 
 
 def pack_reference_images_for_seedance(

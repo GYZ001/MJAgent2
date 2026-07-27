@@ -309,6 +309,7 @@ def get_key_status() -> dict[str, dict]:
             "key_name": key_name,
             "label": label,
             "configured": bool(val),
-            "preview": f"{val[:6]}...{val[-4:]}" if len(val) > 10 else ("已配置" if val else ""),
+            # 不回传前后缀 preview，避免泄露密钥族信息（Todolist T2/S15）
+            "preview": "已配置" if val else "",
         }
     return result

@@ -50,9 +50,12 @@ async def test_ui_initiator_does_not_auto_approve_high_risk():
     )
     assert result.status == CommandStatus.WAITING_APPROVAL
     assert result.data.get("approval_token")
-    payload = waiting_approval_payload(result)
+    payload = waiting_approval_payload(result, session_id="sess-test")
     assert payload["status"] == "waiting_approval"
     assert payload["approval_token"]
+
+    stripped = waiting_approval_payload(result, session_id=None)
+    assert "approval_token" not in stripped
 
 
 @pytest.mark.asyncio

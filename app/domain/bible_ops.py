@@ -3781,9 +3781,11 @@ async def rollback_scene_reference(
     ).fetchone()
     if not target:
         raise HTTPException(404, "场景历史版本不存在")
-    gate = _scene_row_gate(target)
-    if target["pack_status"] != "ready" or gate.get("hard_gate_passed") is not True or gate.get("hard_failures"):
-        raise HTTPException(409, "历史包未通过新版硬门禁，不能回滚为当前版本")
+    # Score-only：回滚只要求目标包存在且必需视角齐全，不复跑 QA 硬门禁（PRD QA-SO #21）。
+    from app.multiview import SCENE_REQUIRED_VIEWS, list_scene_views, missing_required_views
+    views = list_scene_views(target["id"], conn=conn)
+    if missing_required_views(views, SCENE_REQUIRED_VIEWS):
+        raise HTTPException(409, "历史包缺少必需视角文件，不能回滚为当前版本")
     current = conn.execute(
         "SELECT * FROM scene_references WHERE project_id=? AND scene_name=? AND ep_end IS NULL "
         "ORDER BY ep_start DESC LIMIT 1", (project_id, scene_name),

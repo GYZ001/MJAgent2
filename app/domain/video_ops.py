@@ -23,13 +23,17 @@ def _uses_previous_tail_frame_for_model(shot: Shot, prev: Shot | None = None) ->
 class ConfirmationEvaluation:
     """只读确认评估结果；不写数据库。"""
 
-    __slots__ = ("passed", "errors", "issues", "board", "compact_target", "estimated_cost_cny")
+    __slots__ = (
+        "passed", "errors", "warnings", "issues", "board", "compact_target",
+        "estimated_cost_cny",
+    )
 
     def __init__(
         self,
         *,
         passed: bool,
         errors: list[str],
+        warnings: list[str],
         issues: list,
         board: Storyboard,
         compact_target: int,
@@ -37,6 +41,7 @@ class ConfirmationEvaluation:
     ):
         self.passed = passed
         self.errors = errors
+        self.warnings = list(warnings or [])
         self.issues = issues
         self.board = board
         self.compact_target = compact_target
@@ -77,6 +82,39 @@ def _is_storyboard_terminal_for_confirmation(
     )
 
 
+def _storyboard_structural_errors(storyboard: Storyboard) -> list[str]:
+    errors: list[str] = []
+    shots = list(storyboard.shots or [])
+    if not shots:
+        return ["本集还没有分镜"]
+    seen: set[int] = set()
+    for index, shot in enumerate(shots, start=1):
+        shot_no = int(shot.shot_no or 0)
+        if shot_no <= 0:
+            errors.append(f"第 {index} 个镜头缺少有效 shot_no")
+        elif shot_no in seen:
+            errors.append(f"shot_no={shot_no} 重复")
+        else:
+            seen.add(shot_no)
+        if shot_no and shot_no != index:
+            errors.append(f"shot_no={shot_no} 与顺序 {index} 不一致")
+        required = {
+            "shot_size": shot.shot_size,
+            "camera_move": shot.camera_move,
+            "scene_setting": shot.scene_setting,
+            "action_desc": shot.action_desc,
+            "first_frame_desc": shot.first_frame_desc,
+            "last_frame_desc": shot.last_frame_desc,
+            "source_excerpt": shot.source_excerpt,
+        }
+        missing = [name for name, value in required.items() if not str(value or "").strip()]
+        if missing:
+            errors.append(f"第 {shot_no or index} 镜缺少必填字段：{', '.join(missing)}")
+        if int(shot.duration_s or 0) <= 0:
+            errors.append(f"第 {shot_no or index} 镜缺少有效 duration_s")
+    return errors
+
+
 def evaluate_storyboard_for_confirmation(
     episode,
     storyboard: Storyboard,
@@ -92,6 +130,7 @@ def evaluate_storyboard_for_confirmation(
     Supervisor 与确认门必须共用此函数，避免「Supervisor 认为通过、确认门又用另一套规则失败」。
     """
     from app.evaluations.issues import issues_from_messages
+    from app.harness.types import IssueSeverity
     from app.validators import prefer_default_shot_durations
 
     board = Storyboard(episode_no=storyboard.episode_no, shots=list(storyboard.shots))
@@ -105,16 +144,17 @@ def evaluate_storyboard_for_confirmation(
     actual_total = sum(int(s.duration_s or 0) for s in board.shots)
     compact_target = _compact_episode_target(actual_total or compact_target)
 
-    errors = validate_storyboard(board, bible, compact_target)
+    structural_errors = _storyboard_structural_errors(board)
+    score_warnings = validate_storyboard(board, bible, compact_target)
     if screenplay is not None:
-        errors.extend(validate_storyboard_soundtrack(board, screenplay, compact_target))
-        errors.extend(validate_storyboard_preserves_key_content(board, screenplay))
-    if has_real_bible and not errors:
+        score_warnings.extend(validate_storyboard_soundtrack(board, screenplay, compact_target))
+        score_warnings.extend(validate_storyboard_preserves_key_content(board, screenplay))
+    if has_real_bible and not structural_errors:
         try:
             for s in board.shots:
                 compile_prompt(s, bible)
         except Exception as exc:  # noqa: BLE001
-            errors.append(f"Prompt 编译失败：{exc}")
+            structural_errors.append(f"Prompt 编译失败：{exc}")
     try:
         ep_id = episode["id"]
     except Exception:  # noqa: BLE001
@@ -123,18 +163,23 @@ def evaluate_storyboard_for_confirmation(
     if record_metrics:
         try:
             from app.observability.metrics import inc
-            for err in errors:
+            for err in score_warnings:
                 if "口播上限" in err or "台词纯文字" in err:
                     inc("confirm_first_seen_capacity_error_total", episode_id=ep_id)
                 if "分叉" in err or "SPOKEN_CONTRACT" in err or "口播合同" in err:
                     inc("confirm_first_seen_spoken_conflict_total", episode_id=ep_id)
         except Exception:  # noqa: BLE001
             pass
-    issues = issues_from_messages(errors, subject=f"episode:{ep_id}")
+    issues = issues_from_messages(
+        score_warnings,
+        subject=f"episode:{ep_id}",
+        severity=IssueSeverity.WARNING,
+    )
     est = sum(shot_cost_cny(s.duration_s) for s in board.shots)
     return ConfirmationEvaluation(
-        passed=not errors,
-        errors=errors,
+        passed=not structural_errors,
+        errors=structural_errors,
+        warnings=score_warnings,
         issues=issues,
         board=board,
         compact_target=compact_target,
@@ -202,9 +247,9 @@ def create_storyboard_confirmation_preview(episode_id: str, *, automated: bool =
             0,
             f"分镜尚未达到完整终态：已完成 {len(rows)}/{planned} 镜，最终镜{'有效' if final_valid else '缺失'}",
         )
-    warnings: list[str] = []
+    warnings: list[str] = list(dict.fromkeys(evaluation.warnings))
     if any(int(shot.duration_s or 0) > 5 for shot in evaluation.board.shots):
-        warnings.append("存在超过 5 秒的镜头，已纳入全量 AI/确定性门禁")
+        warnings.append("存在超过 5 秒的镜头，已纳入 QA 评分报告")
     payload = {
         "contract_version": "storyboard-confirm.v1",
         "episode_id": episode_id,
@@ -218,6 +263,11 @@ def create_storyboard_confirmation_preview(episode_id: str, *, automated: bool =
             "errors": hard_errors,
         },
         "warnings": warnings,
+        "score_only": {
+            "evaluation_role": "score_only",
+            "runtime_blocking": False,
+            "issue_count": len(evaluation.issues),
+        },
         "estimated_video_cost_cny": {
             "min": evaluation.estimated_cost_cny,
             "max": evaluation.estimated_cost_cny,
@@ -236,10 +286,6 @@ def create_storyboard_confirmation_preview(episode_id: str, *, automated: bool =
             "message": "分镜尚未通过确认门禁",
             **payload,
         })
-    # 硬门禁错误比人工警告更可操作：若两者同时存在，必须先返回完整的
-    # STORYBOARD_NOT_CONFIRMABLE 证据，不能被「转人工」的泛化警告遮蔽。
-    if automated and warnings:
-        raise HTTPException(409, "自动确认遇到需要人工判断的警告，请转人工确认")
     try:
         from app.observability.metrics import inc
         inc("storyboard_confirm_preview_total", episode_id=episode_id, passed=True)
@@ -298,10 +344,14 @@ def confirm_episode_core(
     reason: str | None = None,
     preview_token: str | None = None,
 ) -> dict:
-    """人工/自动确认门：全量业务校验通过才进入 confirmed。
+    """人工/自动确认门：结构完整即可 confirmed；QA 仅作为评分报告。
     失败抛 ValueError（消息面向 UI）；供路由与 Supervisor 复用。
     """
-    from app.storyboard_workspace import consume_preview, require_preview
+    from app.storyboard_workspace import (
+        consume_preview,
+        require_preview,
+        verify_or_bind_existing_excerpt,
+    )
 
     already = _episode_or_404(episode_id)
     if already["status"] == "confirmed":
@@ -321,7 +371,7 @@ def confirm_episode_core(
         }
     preview = require_preview(preview_token, "confirm", episode_id)
     if not (preview.get("hard_gates") or {}).get("passed"):
-        raise ValueError("确认预览未通过完整性与业务门禁")
+        raise ValueError("确认预览未通过结构完整性门禁")
     ep = _episode_or_404(episode_id)
     conn = get_conn()
     compact_target = _compact_episode_target(ep["target_duration_s"])
@@ -334,6 +384,18 @@ def confirm_episode_core(
     shots_rows = conn.execute("SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)).fetchall()
     if not shots_rows:
         raise ValueError("本集还没有分镜脚本")
+    source_errors: list[str] = []
+    for row in shots_rows:
+        try:
+            verify_or_bind_existing_excerpt(
+                episode_id, row["id"], row["source_excerpt"] or "",
+            )
+        except HTTPException as exc:
+            detail = exc.detail
+            message = detail.get("message") if isinstance(detail, dict) else str(detail)
+            source_errors.append(f"第 {row['shot_no']} 镜：{message}")
+    if source_errors:
+        raise ValueError(json.dumps(source_errors, ensure_ascii=False))
     board = _board_from_shot_rows(shots_rows, ep["episode_no"])
     shots = board.shots
     character_changes = normalize_offbible_characters(board, bible)

@@ -191,12 +191,6 @@ def delivery_readiness(episode_id: str) -> dict[str, Any]:
         for item in video_items
         if (item.get("grade") or {}).get("fatal_failures")
     ]
-    check(
-        "fatal_video_quality",
-        not fatal_quality,
-        "已采用视频不存在分身、错误文字等致命内容问题",
-        {"fatal_shots": fatal_quality},
-    )
     source_artifacts = [
         _artifact_summary(project["bible_artifact_id"]),
         _artifact_summary(ep["screenplay_artifact_id"]),
@@ -213,6 +207,14 @@ def delivery_readiness(episode_id: str) -> dict[str, Any]:
     check("evidence_coverage", coverage >= 0.9, "证据覆盖率不低于 90%", {"coverage": coverage})
     blockers = [item for item in checks if not item["passed"]]
     warnings: list[dict[str, Any]] = []
+    # Score-only：致命内容问题进入 warnings，不再阻断交付（PRD QA-SO #33）。
+    if fatal_quality:
+        warnings.append({
+            "check": "fatal_video_quality",
+            "code": "FATAL_VIDEO_QUALITY_SCORE_ONLY",
+            "message": "已采用视频存在分身、错误文字等质量风险（仅评分，不阻断交付）",
+            "detail": {"fatal_shots": fatal_quality},
+        })
     for item in video_items:
         for issue in (item.get("technical") or {}).get("issues") or []:
             severity = issue.get("severity") if isinstance(issue, dict) else None

@@ -144,12 +144,14 @@ def test_positive_actions_fail_closed_for_hard_failed_asset(monkeypatch) -> None
     monkeypatch.setattr(api, "get_conn", lambda: conn)
 
     snapshot = api._review_upstream_snapshot("e")
-    assert snapshot["eligible_for_production"] is False
-    assert snapshot["assets"]["blockers"][0]["ref_id"] == "ref-1"
-    with pytest.raises(HTTPException) as blocked:
-        api._review_assert_positive_action("e")
-    assert blocked.value.status_code == 409
-    assert blocked.value.detail["code"] == "REVIEW_PRODUCTION_BLOCKED"
+    assert snapshot["eligible_for_production"] is True
+    assert snapshot["assets"]["blockers"] == []
+    assert any(
+        item["ref_id"] == "ref-1"
+        and item["warning"] == "qa_hard_failure:character_duplicate"
+        for item in snapshot["assets"]["soft_warnings"]
+    )
+    assert api._review_assert_positive_action("e")["eligible_for_production"] is True
 
 
 @pytest.mark.parametrize("value", [-1, 0, float("nan"), float("inf"), 100001])
@@ -209,6 +211,7 @@ def test_asset_gate_uses_adopted_gallery_and_missing_verdict_is_unverified(monke
         (json.dumps({"reference_images": [{
             "id": "legacy-ref", "selectedForSeedance": True,
             "entity_type": "character", "entity_name": "角色甲",
+            "gate_status": "unverified",
         }]}),),
     )
     conn.execute(
@@ -224,9 +227,14 @@ def test_asset_gate_uses_adopted_gallery_and_missing_verdict_is_unverified(monke
     monkeypatch.setattr(api, "get_conn", lambda: conn)
 
     snapshot = api._review_upstream_snapshot("e")
-    assert snapshot["eligible_for_production"] is False
-    assert snapshot["assets"]["blockers"][0]["ref_id"] == "legacy-ref"
-    assert snapshot["assets"]["blockers"][0]["gate_status"] == "unverified"
+    assert snapshot["eligible_for_production"] is True
+    assert snapshot["assets"]["blockers"] == []
+    warnings = snapshot["assets"]["soft_warnings"]
+    assert any(
+        item["ref_id"] == "legacy-ref" and item["warning"] == "gate_status:unverified"
+        for item in warnings
+    )
+    assert all(item["ref_id"] != "new-ref" for item in snapshot["assets"]["inputs"] + warnings)
 
 
 def test_asset_rule_version_participates_in_qualification_token(monkeypatch) -> None:

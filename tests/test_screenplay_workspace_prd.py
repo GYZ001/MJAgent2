@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from app import api, db
 from app.capabilities.direct import enter_handler
 from app.main import app
+from tests.conftest import SessionTestClient
 from tests.test_screenplay_edit_save import _seed_episode, _valid_script
 
 
@@ -25,6 +26,12 @@ def isolated_db(tmp_path, monkeypatch):
     if conn is not None:
         conn.close()
     monkeypatch.setattr(db._local, "conn", None, raising=False)
+
+
+@pytest.fixture
+def client():
+    with TestClient(app) as raw:
+        yield SessionTestClient(raw)
 
 
 def test_noop_publish_keeps_artifact_and_downstream() -> None:
@@ -89,9 +96,8 @@ def test_stale_storyboard_run_write_is_rejected_after_new_screenplay() -> None:
         api._assert_storyboard_write_authorized(conn, "e1", "art_screenplay_v1")
 
 
-def test_server_draft_survives_version_conflict() -> None:
+def test_server_draft_survives_version_conflict(client) -> None:
     _seed_episode(with_artifact=True)
-    client = TestClient(app)
     draft = _valid_script().model_dump(mode="json")
     saved = client.put("/api/episodes/e1/screenplay/draft", json={
         "content": draft,
@@ -145,7 +151,7 @@ def test_nested_curly_quotes_do_not_truncate_dialogue_occurrence() -> None:
     assert items[0]["estimated_seconds"] > 7
 
 
-def test_target_duration_can_be_changed_before_generation_and_versions_constraints() -> None:
+def test_target_duration_can_be_changed_before_generation_and_versions_constraints(client) -> None:
     conn = db.get_conn()
     conn.execute("INSERT INTO projects(id,name,status,created_at) VALUES('p1','P','planned',1)")
     conn.execute(
@@ -153,7 +159,6 @@ def test_target_duration_can_be_changed_before_generation_and_versions_constrain
         "screenplay_status,status,created_at) VALUES('e1','p1',1,'E','[1]',50,'pending','planned',1)"
     )
     conn.commit()
-    client = TestClient(app)
 
     changed = client.put("/api/episodes/e1/target-duration", json={"target_duration_s": 70})
     assert changed.status_code == 200
@@ -176,9 +181,8 @@ def test_target_duration_can_be_changed_before_generation_and_versions_constrain
     assert tuple(row) == (1, 1)
 
 
-def test_target_duration_rejects_unknown_step_and_published_episode() -> None:
+def test_target_duration_rejects_unknown_step_and_published_episode(client) -> None:
     _seed_episode(with_artifact=True)
-    client = TestClient(app)
 
     invalid = client.put("/api/episodes/e1/target-duration", json={"target_duration_s": 55})
     assert invalid.status_code == 422
@@ -194,9 +198,8 @@ def test_target_duration_rejects_unknown_step_and_published_episode() -> None:
     ).fetchone()["target_duration_s"] == 50
 
 
-def test_edit_impact_preview_is_read_only_and_detects_downstream() -> None:
+def test_edit_impact_preview_is_read_only_and_detects_downstream(client) -> None:
     _seed_episode(with_artifact=True)
-    client = TestClient(app)
     changed = _valid_script().model_dump(mode="json")
     changed["logline"] += "（改动）"
     before = db.get_conn().execute(

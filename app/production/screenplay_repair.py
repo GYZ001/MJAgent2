@@ -7,7 +7,7 @@ from typing import Any
 
 from app.db import get_conn, now
 from app.evidence import repository as evidence_repository
-from app.harness.types import Evaluation, EvidenceArtifact, Issue
+from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
 from app.production.grant import assert_grant_allows, issue_production_grant
 from app.production.metrics import (
     record_activation,
@@ -49,6 +49,23 @@ _SCENE_STORY_FUNCTION_CODES = {
     "SCENE_STORY_FUNCTION_TOO_SHORT",
 }
 _SCENE_NUMBER_RE = re.compile(r"scene_outline\s*第\s*(\d+)\s*场|/scene_blocks/SC(\d+)", re.I)
+
+
+def _score_only_screenplay_issues(issues: list[Issue]) -> list[Issue]:
+    score_only: list[Issue] = []
+    for issue in issues:
+        evidence = {
+            **(issue.evidence or {}),
+            "must_fix": False,
+            "evaluation_role": "score_only",
+            "runtime_blocking": False,
+        }
+        score_only.append(issue.model_copy(update={
+            "severity": IssueSeverity.WARNING,
+            "evidence": evidence,
+            "repairable": False,
+        }))
+    return score_only
 
 
 def _eval_id_from_create(evaluation_row: dict[str, Any] | str | None) -> str:
@@ -136,12 +153,14 @@ def run_screenplay_qa(
         required_dialogue_lines=episode.get("required_dialogue_lines") or [],
     )
     messages.extend(adaptation_hook_errors(script, episode))
-    issues = issues_from_validator_messages(
+    validator_issues = issues_from_validator_messages(
         list(dict.fromkeys(messages)),
         subject="screenplay",
         stage="screenplay",
     )
-    issues = enrich_issues(issues, stage="screenplay", artifact_id=artifact_id)
+    issues = _score_only_screenplay_issues(
+        enrich_issues(validator_issues, stage="screenplay", artifact_id=artifact_id)
+    )
     for issue in issues:
         if artifact_hash:
             issue.evidence["artifact_hash"] = artifact_hash
@@ -149,13 +168,13 @@ def run_screenplay_qa(
             issue.evidence["required_dialogue_lines"] = list(
                 episode.get("required_dialogue_lines") or []
             )
-    status = "passed" if not issues else "failed"
+    status = "passed" if not issues else "warning"
     evaluation = Evaluation(
         evaluator_type="deterministic",
         evaluator_name="screenplay_production_qa",
         evaluator_version="production-repair-1",
         status=status,
-        hard_gate_passed=not issues,
+        hard_gate_passed=True,
         score=100.0 if not issues else max(0.0, 100.0 - 10.0 * len(issues)),
         issues=issues,
         evidence={
@@ -163,6 +182,9 @@ def run_screenplay_qa(
             "artifact_hash": artifact_hash,
             "blocker_count": blocker_count(issues),
             "must_fix_count": must_fix_count(issues),
+            "evaluation_role": "score_only",
+            "runtime_blocking": False,
+            "qa_warning_count": len(issues),
         },
     )
     return issues, evaluation
@@ -718,8 +740,12 @@ async def run_screenplay_production(
         if can_issue_certificate(issues):
             if run_id:
                 evidence_repository.append_event(
-                    run_id, "CERTIFYING", "info", "剧本 QA 全部通过，签发完成凭证",
-                    payload={"artifact_id": working_id, "evaluation_id": eval_id},
+                    run_id, "CERTIFYING", "info", "剧本结构可交付，QA 评分报告随凭证附加",
+                    payload={
+                        "artifact_id": working_id,
+                        "evaluation_id": eval_id,
+                        "qa_warning_count": len(issues),
+                    },
                 )
             # 首次发布清空下游；若已有 published 且同 hash 则仍走 publish
             result = publish_screenplay(
