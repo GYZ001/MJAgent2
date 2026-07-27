@@ -1,6 +1,7 @@
 """视频 Supervisor 集成 / 成本回归（进程内假入队，不打真实 Seedance）。"""
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from types import SimpleNamespace
@@ -556,6 +557,59 @@ async def test_watchdog_closes_stale_run_when_task_record_is_missing(memdb, monk
     assert dict(episode) == {
         "status": "confirmed", "video_completion_mode": "quick", "active_video_run_id": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_asset_preparation_heartbeat_prevents_watchdog_takeover(memdb, monkeypatch):
+    import app.video_supervisor as video_supervisor
+
+    eid, _ = _seed_episode(memdb, 1)
+    run_id = evidence_repository.create_run(
+        workflow_type="episode_video_completion",
+        scope_type="episode",
+        scope_id=eid,
+        input_fingerprint="slow-reference-preparation",
+        deadline_at=500,
+    )
+    memdb.execute(
+        "UPDATE workflow_runs SET status='RUNNING', started_at=1, updated_at=1 WHERE id=?",
+        (run_id,),
+    )
+    memdb.execute(
+        """UPDATE episodes SET status='generating', video_completion_mode='complete',
+                   active_video_run_id=? WHERE id=?""",
+        (run_id, eid),
+    )
+    memdb.commit()
+    cp = VideoSupervisorCheckpoint(
+        episode_id=eid,
+        run_id=run_id,
+        phase="PREPARING_ASSETS",
+        started_at=1,
+        deadline_at=500,
+        budget={"cap_cny": 150},
+        coverage={"fallback_quota": 0},
+    )
+    clock = {"now": 100.0}
+    monkeypatch.setattr(video_supervisor, "now", lambda: clock["now"])
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        video_supervisor._asset_prep_heartbeat(
+            cp, run_id=run_id, stop=stop, interval_s=0.01,
+        )
+    )
+    await asyncio.sleep(0.03)
+    stop.set()
+    await task
+
+    assert memdb.execute(
+        "SELECT updated_at FROM workflow_runs WHERE id=?", (run_id,),
+    ).fetchone()["updated_at"] == 100.0
+    clock["now"] = 150.0
+    assert await reconcile_stale_video_supervisors() == 0
+    assert memdb.execute(
+        "SELECT active_video_run_id FROM episodes WHERE id=?", (eid,),
+    ).fetchone()["active_video_run_id"] == run_id
 
 
 def test_terminal_continuity_wait_becomes_routable_issue(memdb):

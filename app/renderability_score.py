@@ -91,7 +91,8 @@ def score_renderability_sample(
         "shot_count_in_soft_budget": SHOT_SOFT_MIN <= n_shots <= SHOT_SOFT_MAX,
         "shot_count_within_hard_max": n_shots <= SHOT_HARD_MAX,
         "spine_beats_in_range": SPINE_BEATS_MIN <= len(beats) <= SPINE_BEATS_MAX,
-        "key_lines_within_cap": len(key_lines) <= KEY_LINES_MAX,
+        # 仅保留为节奏诊断，不参与硬门禁；对白多少由时长/口播容量决定。
+        "key_lines_within_soft_budget": len(key_lines) <= KEY_LINES_MAX,
         "no_overdetail": len(overdetail_hits) == 0,
         "no_drop_reappear": len(drop_reappear) == 0,
         "spine_fully_covered": len(uncovered) == 0 and bool(must_keep),
@@ -100,7 +101,6 @@ def score_renderability_sample(
         gates[k] for k in (
             "shot_count_within_hard_max",
             "spine_beats_in_range",
-            "key_lines_within_cap",
             "no_overdetail",
             "no_drop_reappear",
         )

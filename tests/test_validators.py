@@ -1,5 +1,6 @@
 from app.schemas import Bible, Character, Dialogue, EpisodeScreenplay, Shot, Storyboard, World
 from app.validators import (_contiguous_scene_move, _has_movement_cue, _has_transition_hint,
+                            adjacent_spoken_repeat_errors,
                             normalize_action_desc, validate_storyboard,
                             storyboard_shot_count_range,
                             validate_storyboard_preserves_key_content,
@@ -115,6 +116,28 @@ def _compact_shot(no: int) -> Shot:
         transition="硬切",
         continuity_from_prev=no > 1,
     )
+
+
+def test_adjacent_repeated_dialogue_is_rejected_even_when_punctuation_differs() -> None:
+    first = _compact_shot(1)
+    second = _compact_shot(2)
+    first.dialogues = [Dialogue(speaker="萧炎", line="我绝不会忘记今日受到的羞辱", emotion="坚定")]
+    second.dialogues = [Dialogue(speaker="萧炎", line="不会忘记，今日受到的羞辱！", emotion="低沉")]
+
+    errors = validate_storyboard(Storyboard(episode_no=1, shots=[first, second]), _bible(), 20)
+
+    assert any("相邻重复台词" in error and "镜01" in error for error in errors), errors
+
+
+def test_adjacent_new_dialogue_is_not_mistaken_for_a_repeat() -> None:
+    first = _compact_shot(1)
+    second = _compact_shot(2)
+    first.dialogues = [Dialogue(speaker="萧炎", line="我绝不会忘记今日受到的羞辱", emotion="坚定")]
+    second.dialogues = [Dialogue(speaker="萧炎", line="我要从今天开始重新修炼", emotion="坚定")]
+
+    errors = adjacent_spoken_repeat_errors(Storyboard(episode_no=1, shots=[first, second]))
+
+    assert errors == []
 
 
 def test_storyboard_accepts_model_selected_duration_and_scales_spoken_budget() -> None:

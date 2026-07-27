@@ -241,7 +241,7 @@ def issues_from_job_failure(
         ))
         return out
 
-    if any(k in err for k in ("参考图", "reference")):
+    if any(k in err for k in ("参考图", "reference", "多视角资产包", "造型版本")):
         out.append(_mk(
             "VIDEO_REFERENCE_UNAVAILABLE", IssueSeverity.BLOCKER,
             shot_id=sid, message=err or "参考图生成失败",

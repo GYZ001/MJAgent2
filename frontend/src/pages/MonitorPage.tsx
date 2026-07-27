@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { useNav, usePoll } from "../App";
 import RunCenter from "../components/harness/RunCenter";
+import JsonViewer from "../components/JsonViewer";
 import SearchField from "../components/SearchField";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 
@@ -492,7 +493,11 @@ function JsonSection({
           {size.toLocaleString()} bytes · {open ? "收起" : "展开并渲染"}
         </small>
       </button>
-      {open && <pre tabIndex={0}>{raw || "查询成功：此段无内容"}</pre>}
+      {open && (
+        <div className="call-json-body">
+          <JsonViewer raw={raw} collapsed={false} maxHeight="45vh" />
+        </div>
+      )}
     </section>
   );
 }
@@ -826,9 +831,9 @@ function JobDrawer({
           <div className="monitor-loading">正在加载任务详情…</div>
         )}
         {detail && (
-          <details>
+          <details className="job-technical-details">
             <summary>技术详情</summary>
-            <pre>{JSON.stringify(detail, null, 2)}</pre>
+            <JsonViewer data={detail} collapsed={false} maxHeight="50vh" />
           </details>
         )}
         <div className="monitor-drawer-actions">
@@ -1511,7 +1516,8 @@ function ModelCenter({
   const [provider, setProvider] = useState("");
   const [capability, setCapability] = useState("");
   const [connection, setConnection] = useState("");
-  const [message, setMessage] = useState("");
+  const [testStates, setTestStates] = useState<Record<string, { state: "testing" | "ok" | "fail"; note?: string }>>({});
+  const [saving, setSaving] = useState(false);
   const [credential, setCredential] = useState<CatalogModel | null>(null);
   const [credentialDraft, setCredentialDraft] = useState({
     base_url: "",
@@ -1565,6 +1571,7 @@ function ModelCenter({
   }, [draft, health]);
   const saveAssignments = async () => {
     if (!settings) return;
+    setSaving(true);
     try {
       const response = await api.put("/settings", {
         version: settings.version,
@@ -1580,6 +1587,8 @@ function ModelCenter({
       );
     } catch (e) {
       toast((e as Error).message, true);
+    } finally {
+      setSaving(false);
     }
   };
   const filtered = (catalog?.items || []).filter((item) => {
@@ -1591,6 +1600,34 @@ function ModelCenter({
       (!connection || (connection === "configured") === !!item.key_configured)
     );
   });
+  const testModel = async (item: CatalogModel) => {
+    setTestStates((s) => ({ ...s, [item.id]: { state: "testing" } }));
+    try {
+      const result = await api.post(
+        `/models/${encodeURIComponent(item.id)}/test`,
+      );
+      setTestStates((s) => ({
+        ...s,
+        [item.id]: { state: "ok", note: `${result.latency_ms} ms` },
+      }));
+    } catch (e) {
+      setTestStates((s) => ({
+        ...s,
+        [item.id]: { state: "fail", note: (e as Error).message },
+      }));
+    }
+  };
+  const removeModel = async (item: CatalogModel) => {
+    if (!window.confirm(`确认删除 ${item.label}？在用模型会被后端阻止。`))
+      return;
+    try {
+      await api.del(`/models/${encodeURIComponent(item.id)}`);
+      await refreshCatalog();
+      toast(`${item.label} 已删除`);
+    } catch (e) {
+      toast((e as Error).message, true);
+    }
+  };
   const groupedModels = filtered.reduce<Record<string, CatalogModel[]>>(
     (groups, item) => {
       (groups[item.provider] ||= []).push(item);
@@ -1613,27 +1650,29 @@ function ModelCenter({
           <h3>模型中心</h3>
           <p>四类职责、友好名称与生效范围清晰可见。</p>
         </div>
-        <button
-          className="btn primary small"
-          onClick={() => {
-            setEditingModel(null);
-            setModelDraft({
-              label: "",
-              provider_label: "",
-              base_url: "",
-              api_key: "",
-              model: "",
-              kinds: ["text"],
-            });
-            setNewTested("");
-            setNewModel(true);
-          }}
-        >
-          添加模型
-        </button>
-        <button className="btn small" onClick={() => setLibrary(true)}>
-          管理模型
-        </button>
+        <div className="model-hub-actions">
+          <button className="btn ghost small" onClick={() => setLibrary(true)}>
+            管理模型库
+          </button>
+          <button
+            className="btn primary small"
+            onClick={() => {
+              setEditingModel(null);
+              setModelDraft({
+                label: "",
+                provider_label: "",
+                base_url: "",
+                api_key: "",
+                model: "",
+                kinds: ["text"],
+              });
+              setNewTested("");
+              setNewModel(true);
+            }}
+          >
+            添加模型
+          </button>
+        </div>
       </div>
       <div className="model-grid">
         {MODEL_ROWS.map((row) => {
@@ -1751,10 +1790,10 @@ function ModelCenter({
         </span>
         <button
           className="btn primary small"
-          disabled={!Object.keys(assignmentPatch).length}
+          disabled={!Object.keys(assignmentPatch).length || saving}
           onClick={() => void saveAssignments()}
         >
-          保存模型分配
+          {saving ? "保存中…" : "保存模型分配"}
         </button>
       </div>
       {library && (
@@ -1851,119 +1890,100 @@ function ModelCenter({
                       providerKey}
                     <small>{items.length} 个模型</small>
                   </h3>
-                  {items.map((item) => (
-                    <div className="model-library-item" key={item.id}>
-                      <div className="model-library-main">
-                        <div>
-                          <b>{item.label}</b>
-                          {!item.builtin && (
-                            <span className="stamp gold">自定义</span>
-                          )}
+                  {items.map((item) => {
+                    const test = testStates[item.id];
+                    return (
+                      <div className="model-library-item" key={item.id}>
+                        <div className="model-library-main">
+                          <div>
+                            <b>{item.label}</b>
+                            {!item.builtin && (
+                              <span className="stamp gold">自定义</span>
+                            )}
+                          </div>
+                          <code>
+                            {PROVIDER_LABELS[item.provider] ||
+                              item.provider_label ||
+                              item.provider}{" "}
+                            · {item.model}
+                          </code>
+                          <span>{item.kinds.join(" / ")}</span>
                         </div>
-                        <code>
-                          {PROVIDER_LABELS[item.provider] ||
-                            item.provider_label ||
-                            item.provider}{" "}
-                          · {item.model}
-                        </code>
-                        <span>{item.kinds.join(" / ")}</span>
-                      </div>
-                      <span
-                        className={`stamp ${item.key_configured ? "green" : "red"}`}
-                      >
-                        {item.key_configured ? "连接已配置" : "待配置"}
-                      </span>
-                      <div className="model-library-actions">
-                        <button
-                          aria-label={`测试 ${item.label}`}
-                          onClick={async () => {
-                            setMessage(`正在测试 ${item.label}…`);
-                            try {
-                              const result = await api.post(
-                                `/models/${encodeURIComponent(item.id)}/test`,
-                              );
-                              setMessage(
-                                `${item.label} 可用 · ${result.latency_ms} ms`,
-                              );
-                            } catch (e) {
-                              setMessage((e as Error).message);
-                            }
-                          }}
+                        <span
+                          className={`stamp ${item.key_configured ? "green" : "red"}`}
                         >
-                          测试
-                        </button>
-                        <button
-                          aria-label={`配置 ${item.label} 的连接`}
-                          onClick={() => {
-                            setLibrary(false);
-                            setCredential(item);
-                            setCredentialDraft({
-                              base_url:
-                                item.base_url || defaults[item.provider] || "",
-                              api_key: "",
-                            });
-                            setTestedSignature("");
-                          }}
-                        >
-                          连接
-                        </button>
-                        {!item.builtin && (
+                          {item.key_configured ? "连接已配置" : "待配置"}
+                        </span>
+                        <div className="model-library-actions">
                           <button
-                            aria-label={`编辑 ${item.label}`}
+                            type="button"
+                            aria-label={`测试 ${item.label}`}
+                            disabled={test?.state === "testing"}
+                            onClick={() => void testModel(item)}
+                          >
+                            {test?.state === "testing"
+                              ? "测试中…"
+                              : test?.state === "ok"
+                                ? `可用 · ${test.note}`
+                                : test?.state === "fail"
+                                  ? "测试失败"
+                                  : "测试"}
+                          </button>
+                          <button
+                            type="button"
+                            aria-label={`配置 ${item.label} 的连接`}
                             onClick={() => {
                               setLibrary(false);
-                              setEditingModel(item);
-                              setModelDraft({
-                                label: item.label,
-                                provider_label:
-                                  item.provider_label || item.provider,
-                                base_url: item.base_url || "",
+                              setCredential(item);
+                              setCredentialDraft({
+                                base_url:
+                                  item.base_url || defaults[item.provider] || "",
                                 api_key: "",
-                                model: item.model,
-                                kinds: item.kinds,
                               });
-                              setNewTested("");
+                              setTestedSignature("");
                             }}
                           >
-                            编辑
+                            连接
                           </button>
-                        )}
-                        {!item.builtin && (
-                          <button
-                            className="danger"
-                            aria-label={`删除 ${item.label}`}
-                            onClick={async () => {
-                              if (
-                                !window.confirm(
-                                  `确认删除 ${item.label}？在用模型会被后端阻止。`,
-                                )
-                              )
-                                return;
-                              try {
-                                await api.del(
-                                  `/models/${encodeURIComponent(item.id)}`,
-                                );
-                                await refreshCatalog();
-                                toast(`${item.label} 已删除`);
-                              } catch (e) {
-                                toast((e as Error).message, true);
-                              }
-                            }}
-                          >
-                            删除
-                          </button>
-                        )}
+                          {!item.builtin && (
+                            <button
+                              type="button"
+                              aria-label={`编辑 ${item.label}`}
+                              onClick={() => {
+                                setLibrary(false);
+                                setEditingModel(item);
+                                setModelDraft({
+                                  label: item.label,
+                                  provider_label:
+                                    item.provider_label || item.provider,
+                                  base_url: item.base_url || "",
+                                  api_key: "",
+                                  model: item.model,
+                                  kinds: item.kinds,
+                                });
+                                setNewTested("");
+                              }}
+                            >
+                              编辑
+                            </button>
+                          )}
+                          {!item.builtin && (
+                            <button
+                              type="button"
+                              className="danger"
+                              aria-label={`删除 ${item.label}`}
+                              onClick={() => void removeModel(item)}
+                            >
+                              删除
+                            </button>
+                          )}
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </section>
               ))}
             </div>
-            {message && (
-              <div className="model-library-feedback" role="status">
-                {message}
-              </div>
-            )}
           </section>
         </div>
       )}

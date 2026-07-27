@@ -9,7 +9,7 @@ from app.spoken_contract import (
     validate_spoken_contract,
     spoken_text_of,
 )
-from app.validators import validate_storyboard
+from app.validators import prefer_default_shot_durations, validate_storyboard
 from tests.test_validators import _bible, _compact_shot
 from app.schemas import Storyboard
 
@@ -106,6 +106,40 @@ def test_36_chars_10s_passes_capacity() -> None:
     shot = _shot_with_line(line, duration_s=10)
     assert speech_capacity_errors(shot) == []
     assert spoken_chars_from_shot(shot) == 36
+
+
+def test_duration_normalization_retimes_coherent_spoken_timeline() -> None:
+    shot = _shot_with_line("走吧。", duration_s=10)
+    shot.audio_timeline[0].end_s = 8.0
+
+    changes = prefer_default_shot_durations(Storyboard(episode_no=1, shots=[shot]))
+
+    assert shot.duration_s == 5
+    assert max(
+        item.end_s for item in shot.audio_timeline if item.type == "spoken_dialogue"
+    ) <= 5
+    assert not any(
+        issue.code == "SPOKEN_TIMELINE_OUT_OF_RANGE"
+        for issue in validate_spoken_contract(shot)
+    )
+    assert any(
+        item.get("reason") == "retimed_audio_after_duration_normalization"
+        for item in changes
+    )
+
+
+def test_duration_normalization_does_not_hide_spoken_contract_conflict() -> None:
+    shot = _shot_with_line("甲。", duration_s=10)
+    shot.audio_timeline[0].text = "乙。"
+    original_timeline_text = shot.audio_timeline[0].text
+
+    prefer_default_shot_durations(Storyboard(episode_no=1, shots=[shot]))
+
+    assert shot.audio_timeline[0].text == original_timeline_text
+    assert any(
+        issue.code == "SPOKEN_CONTRACT_CONFLICT"
+        for issue in validate_spoken_contract(shot)
+    )
 
 
 def test_key_line_only_in_source_excerpt_not_delivered() -> None:

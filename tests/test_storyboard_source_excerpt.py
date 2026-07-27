@@ -1,5 +1,6 @@
 from app.compiler import ensure_source_excerpt_in_prompt, compile_prompt, SOURCE_EXCERPT_MARKER
 from app.schemas import Bible, Character, Shot, Storyboard, World
+from app.source_excerpt import align_source_excerpt
 from app.validators import validate_storyboard
 
 
@@ -108,3 +109,32 @@ def test_storyboard_allows_characters_without_bible() -> None:
     errors = validate_storyboard(board, _empty_bible(), 10)
 
     assert not any("角色圣经中不存在" in error for error in errors)
+
+
+def test_generated_source_excerpt_is_realigned_to_contiguous_original() -> None:
+    source = (
+        "“斗之力，三段！”\n"
+        "少年面无表情，唇角有着一抹自嘲，紧握的手掌微微发白。\n"
+        "“萧炎，斗之力，三段！级别：低级！”"
+    )
+    stitched = (
+        "少年面无表情，唇角有着一抹自嘲……"
+        '"萧炎，斗之力，三段！级别：低级！"'
+    )
+
+    aligned = align_source_excerpt(stitched, source)
+
+    assert aligned is not None
+    assert aligned.exact is False
+    assert aligned.excerpt in source
+    assert aligned.excerpt not in stitched or aligned.excerpt != stitched
+    assert source[aligned.start_offset:aligned.end_offset] == aligned.excerpt
+
+
+def test_generated_source_excerpt_rejects_weak_name_only_overlap() -> None:
+    aligned = align_source_excerpt(
+        "萧炎站在完全不存在的星舰上启动跃迁引擎。",
+        "萧炎站在测验石碑前，沉默地看着碑面。",
+    )
+
+    assert aligned is None

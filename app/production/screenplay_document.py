@@ -557,10 +557,17 @@ def split_dialogue_chain_by_scene(
     def compact(value: Any) -> str:
         return re.sub(r"[\s\W_]+", "", str(value or ""), flags=re.UNICODE)
 
+    def compact_speaker(value: Any) -> str:
+        # 正文允许把表演提示写在角色名后（如「萧战（关切）」），而对白链中的
+        # speaker 只保存角色名。定位时先去掉这类提示，否则会把所有话轮错误地
+        # 回退到首场，最终把本可修复的跨场链误判成 no-op。
+        base = re.sub(r"[（(][^）)]*[）)]", "", str(value or ""))
+        return compact(base)
+
     scene_lines: list[tuple[str, list[tuple[str, str]]]] = []
     for block in data.get("scene_blocks") or []:
         values = [
-            (compact(turn.get("speaker")), compact(turn.get("line")))
+            (compact_speaker(turn.get("speaker")), compact(turn.get("line")))
             for turn in (block.get("dialogue_turns") or [])
             if compact(turn.get("line"))
         ]
@@ -569,7 +576,7 @@ def split_dialogue_chain_by_scene(
     located: list[tuple[str, dict]] = []
     previous_scene = ""
     for turn in turns:
-        speaker = compact(turn.get("speaker"))
+        speaker = compact_speaker(turn.get("speaker"))
         line = compact(turn.get("line"))
         scene_id = next((
             candidate_scene
@@ -619,6 +626,46 @@ def split_dialogue_chain_by_scene(
         *chains[:chain_index], *replacements, *chains[chain_index + 1:],
     ]
     return ScreenplayDocument.model_validate(data), ["dialogue_chains", chain_id, *created_ids]
+
+
+def restore_dialogue_chains_from_baseline(
+    doc: ScreenplayDocument,
+    *,
+    baseline: ScreenplayDocument,
+) -> tuple[ScreenplayDocument, list[str]]:
+    """恢复被旧版对白数量上限整组裁掉的对白链。
+
+    这是一个严格的兼容性迁移：只有当前链集合是 Baseline 链集合的未改写子集时
+    才恢复。这样可以确认历史操作只是删除了整条链，不会覆盖后续人工修改或其他
+    局部补丁。正文场次与台词完全不动，只恢复可追溯的对白链元数据。
+    """
+    current = [chain.model_dump(mode="json") for chain in (doc.dialogue_chains or [])]
+    original = [chain.model_dump(mode="json") for chain in (baseline.dialogue_chains or [])]
+    if len(original) <= len(current):
+        return doc, []
+
+    original_by_id = {
+        str(chain.get("chain_id") or ""): chain
+        for chain in original
+        if str(chain.get("chain_id") or "")
+    }
+    if not current or any(
+        original_by_id.get(str(chain.get("chain_id") or "")) != chain
+        for chain in current
+    ):
+        return doc, []
+
+    data = copy.deepcopy(doc.model_dump(mode="json"))
+    data["dialogue_chains"] = copy.deepcopy(original)
+    restored_ids = [
+        str(chain.get("chain_id") or "")
+        for chain in original
+        if chain not in current and str(chain.get("chain_id") or "")
+    ]
+    return ScreenplayDocument.model_validate(data), [
+        "dialogue_chains",
+        *restored_ids,
+    ]
 
 
 def _build_scene_blocks(script: EpisodeScreenplay) -> list[SceneBlockNode]:

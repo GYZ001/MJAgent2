@@ -170,6 +170,9 @@ export default function ScriptPage() {
     ?? (ep?.screenplay_status === 'repairing' || ep?.screenplay_status === 'warning')
   const productionOperation = ep?.screenplay_production?.operation
     ?? (ep?.screenplay_status === 'repairing' || ep?.screenplay_status === 'warning' ? 'repair' : 'baseline')
+  const legacyDialoguePolicyRecovery = Boolean(
+    ep?.screenplay_production?.legacy_dialogue_policy_recovery_available,
+  )
 
   const script = draft ?? ep?.screenplay ?? null
   const editing = draft !== null
@@ -576,7 +579,9 @@ export default function ScriptPage() {
       case 'stop_screenplay':
         return <button className="btn primary" disabled={busy} onClick={stopScreenplay}>停止剧本任务</button>
       case 'resume_screenplay':
-        return <button className="btn primary" disabled={busy} onClick={resumeRepair}>继续局部修复</button>
+        return <button className="btn primary" disabled={busy} onClick={resumeRepair}>
+          {legacyDialoguePolicyRecovery ? '按当前规则恢复并继续' : '继续局部修复'}
+        </button>
       case 'generate_storyboard':
         return <button className="btn primary" disabled={busy || dirty} onClick={() => openStoryboardPreview('create')}>首次生成分镜</button>
       case 'resume_storyboard':
@@ -698,9 +703,9 @@ export default function ScriptPage() {
               </div>
             </div>
             <div className={`dialogue-budget ${hardBudgetExceeded ? 'hard' : selectedSeconds > targetDuration * 0.8 ? 'soft' : 'ok'}`}>
-              <b>动态建议上限 {dynamicLimit} 处</b>
+              <b>时长预算参考：约 {dynamicLimit} 处</b>
               <span>
-                必保留项可将当前上限抬高到 {effectiveLimit} 处；所选对白后
+                这不是对白条数上限；当前选择按口播时长折算约可容纳 {effectiveLimit} 处，所选对白后
                 {performanceReserve >= 0 ? `约剩 ${performanceReserve.toFixed(1)}s` : `已超 ${Math.abs(performanceReserve).toFixed(1)}s`} 表演空间。
               </span>
               <small>
@@ -752,6 +757,9 @@ export default function ScriptPage() {
                 已应用 {ep.screenplay_production.patch_count ?? 0} 个补丁 ·
                 待处理 {ep.screenplay_production.open_issue_count ?? 0} 项
               </div>
+            )}
+            {legacyDialoguePolicyRecovery && (
+              <div className="kv"><b>兼容恢复</b>将恢复旧数量上限裁掉的对白链，再按当前时长规则复验</div>
             )}
           </div>
         )}

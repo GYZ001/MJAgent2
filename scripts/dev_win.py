@@ -81,11 +81,11 @@ def _pids_on_port(port: int) -> list[int]:
     return sorted(pids)
 
 
-def _kill_port(port: int, name: str) -> None:
+def _kill_port(port: int, name: str) -> bool:
     pids = _pids_on_port(port)
     if not pids:
         print(f"{name} (:{port}) 未在运行")
-        return
+        return True
     for pid in pids:
         subprocess.run(
             ["taskkill", "/F", "/T", "/PID", str(pid)],
@@ -101,11 +101,12 @@ def _kill_port(port: int, name: str) -> None:
     left = _pids_on_port(port)
     if left:
         print(f"{name} (:{port}) 仍未退出: {left}")
-    else:
-        print(f"已停止 {name}（:{port}，pid={pids}）")
+        return False
+    print(f"已停止 {name}（:{port}，pid={pids}）")
+    return True
 
 
-def _start() -> None:
+def _start() -> tuple[subprocess.Popen[bytes], subprocess.Popen[bytes]]:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     if not UVICORN.exists():
         raise SystemExit(f"缺少 uvicorn: {UVICORN}（先创建 .venv 并安装依赖）")
@@ -161,12 +162,27 @@ def _start() -> None:
     print(f"日志 {BE_LOG}")
     print(f"     {FE_LOG}")
     print("无控制台窗口；前端改动自动热刷新，后端改动后请执行 restart。")
+    return b, f
 
 
-def _wait_ready(timeout: float = 45.0) -> None:
+def _wait_ready(
+    backend_process: subprocess.Popen[bytes],
+    frontend_process: subprocess.Popen[bytes],
+    timeout: float = 45.0,
+) -> None:
     deadline = time.time() + timeout
     be_ok = fe_ok = False
     while time.time() < deadline:
+        backend_exit = backend_process.poll()
+        if backend_exit is not None:
+            raise SystemExit(
+                f"后端启动失败（退出码 {backend_exit}），请检查日志 {BE_ERR}"
+            )
+        frontend_exit = frontend_process.poll()
+        if frontend_exit is not None:
+            raise SystemExit(
+                f"前端启动失败（退出码 {frontend_exit}），请检查日志 {FE_LOG}"
+            )
         if not be_ok:
             try:
                 with urllib.request.urlopen("http://127.0.0.1:8230/docs", timeout=2) as r:
@@ -190,17 +206,19 @@ def _wait_ready(timeout: float = 45.0) -> None:
 def main() -> None:
     action = (sys.argv[1] if len(sys.argv) > 1 else "restart").lower()
     if action in {"stop", "restart"}:
-        _kill_port(8230, "后端")
-        _kill_port(5230, "前端")
+        stopped_backend = _kill_port(8230, "后端")
+        stopped_frontend = _kill_port(5230, "前端")
+        if not (stopped_backend and stopped_frontend):
+            raise SystemExit("旧服务未能完全停止，已中止启动，避免把旧服务误报为新服务。")
         time.sleep(0.8)
     if action in {"start", "restart"}:
-        if _pids_on_port(8230):
-            _kill_port(8230, "后端")
-        if _pids_on_port(5230):
-            _kill_port(5230, "前端")
+        if _pids_on_port(8230) and not _kill_port(8230, "后端"):
+            raise SystemExit("后端端口仍被占用，已中止启动。")
+        if _pids_on_port(5230) and not _kill_port(5230, "前端"):
+            raise SystemExit("前端端口仍被占用，已中止启动。")
         time.sleep(0.3)
-        _start()
-        _wait_ready()
+        backend_process, frontend_process = _start()
+        _wait_ready(backend_process, frontend_process)
     elif action == "status":
         print(f"后端 :8230 -> {_pids_on_port(8230) or '（停）'}")
         print(f"前端 :5230 -> {_pids_on_port(5230) or '（停）'}")

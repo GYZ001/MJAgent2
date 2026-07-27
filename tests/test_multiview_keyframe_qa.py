@@ -351,6 +351,48 @@ def test_view_input_fingerprint_stable_and_distinct() -> None:
     assert a != c
 
 
+def test_manifest_allows_explicitly_unmanaged_storyboard_extras() -> None:
+    from app.multiview import manifest_production_blockers
+
+    manifest = {
+        "characters": [{
+            "name": "临时测验员",
+            "asset_required": False,
+            "look_revision_id": None,
+            "selected_view_ids": [],
+            "selected_views": [],
+        }],
+        "scene": {
+            "name": "临时过场",
+            "asset_required": False,
+            "scene_revision_id": None,
+            "selected_view_ids": [],
+            "selected_views": [],
+        },
+    }
+    assert manifest_production_blockers(manifest) == []
+
+    # Frozen manifests from before asset_required existed stay strict.
+    legacy = {"characters": [{"name": "旧角色", "look_revision_id": None}], "scene": None}
+    assert manifest_production_blockers(legacy)
+
+
+def test_asset_requirement_change_invalidates_frozen_manifest() -> None:
+    from app.multiview import manifest_revisions_match
+
+    frozen = {
+        "characters": [{"name": "临时测验员", "look_revision_id": None}],
+        "scene": None,
+    }
+    current = {
+        "characters": [{
+            "name": "临时测验员", "look_revision_id": None, "asset_required": False,
+        }],
+        "scene": None,
+    }
+    assert not manifest_revisions_match(frozen, current)
+
+
 def test_ready_view_fingerprint_reuse_without_regen(tmp_path) -> None:
     from app.multiview import (
         _ready_view_matches_fingerprint, view_input_fingerprint,

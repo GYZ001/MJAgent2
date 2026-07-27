@@ -217,6 +217,28 @@ def scene_row_for_episode(project_id: str, name: str, episode_no: int | None):
         return None
 
 
+def project_bible_asset_names(project_id: str) -> tuple[set[str], set[str]]:
+    """Return the character/scene names that are managed by the project asset library."""
+    try:
+        row = get_conn().execute(
+            "SELECT bible_json FROM projects WHERE id=?", (project_id,),
+        ).fetchone()
+        payload = json.loads(row["bible_json"] or "{}") if row else {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        payload = {}
+    characters = {
+        str(item.get("name") or "").strip()
+        for item in (payload.get("characters") or [])
+        if isinstance(item, dict) and str(item.get("name") or "").strip()
+    }
+    scenes = {
+        str(item.get("name") or "").strip()
+        for item in (payload.get("scenes") or [])
+        if isinstance(item, dict) and str(item.get("name") or "").strip()
+    }
+    return characters, scenes
+
+
 def list_portrait_views(portrait_id: str, *, conn=None) -> list[dict[str, Any]]:
     db = conn or get_conn()
     try:
@@ -441,6 +463,7 @@ def resolve_shot_asset_dependencies(
 
     生产路径默认 ready_only=True：非 ready 视角不得进入依赖与后续生成。
     """
+    managed_characters, managed_scenes = project_bible_asset_names(project_id)
     characters_out: list[dict[str, Any]] = []
     for name in list(getattr(shot, "characters", None) or []):
         # 缺视角检测需要看全部视角状态；选中只允许 ready
@@ -454,6 +477,10 @@ def resolve_shot_asset_dependencies(
         )
         characters_out.append({
             "name": name,
+            # Storyboards may contain one-off extras that intentionally have no
+            # reusable library identity. Keep them auditable without requiring
+            # a canonical multiview pack.
+            "asset_required": name in managed_characters,
             "look_revision_id": row["id"] if row else None,
             "pack_status": (row["pack_status"] if row and "pack_status" in row.keys() else None),
             "selected_view_ids": [v["id"] for v in selected],
@@ -487,6 +514,7 @@ def resolve_shot_asset_dependencies(
         selected = resolve_views_for_roles(views, wanted, fallback_roles=SCENE_REQUIRED_VIEWS)
         scene_out = {
             "name": sname,
+            "asset_required": sname in managed_scenes,
             "scene_revision_id": row["id"] if row else None,
             "pack_status": (row["pack_status"] if row and "pack_status" in row.keys() else None),
             "asset_usable": usable,
@@ -559,6 +587,15 @@ def manifest_revisions_match(frozen: dict[str, Any] | None, current: dict[str, A
     return (
         manifest_asset_revision_ids(frozen) == manifest_asset_revision_ids(current)
         and manifest_asset_view_fingerprints(frozen) == manifest_asset_view_fingerprints(current)
+        and {
+            str(ch.get("name") or ""): bool(ch.get("asset_required", True))
+            for ch in ((frozen or {}).get("characters") or [])
+        } == {
+            str(ch.get("name") or ""): bool(ch.get("asset_required", True))
+            for ch in ((current or {}).get("characters") or [])
+        }
+        and bool(((frozen or {}).get("scene") or {}).get("asset_required", True))
+        == bool(((current or {}).get("scene") or {}).get("asset_required", True))
     )
 
 
@@ -570,7 +607,11 @@ def manifest_production_blockers(manifest: dict[str, Any] | None) -> list[str]:
     for ch in manifest.get("characters") or []:
         name = ch.get("name") or "?"
         if not ch.get("look_revision_id"):
-            blockers.append(f"人物「{name}」缺少本集造型版本")
+            # Old manifests have no asset_required and intentionally remain
+            # strict. New manifests may explicitly mark a one-off extra as
+            # text-driven rather than library-managed.
+            if ch.get("asset_required", True):
+                blockers.append(f"人物「{name}」缺少本集造型版本")
             continue
         pack = ch.get("pack_status")
         missing = [str(x) for x in (ch.get("missing_required") or []) if x]
@@ -584,7 +625,8 @@ def manifest_production_blockers(manifest: dict[str, Any] | None) -> list[str]:
     if isinstance(scene, dict) and scene.get("name"):
         name = scene.get("name")
         if not scene.get("scene_revision_id"):
-            blockers.append(f"场景「{name}」缺少本集场景版本")
+            if scene.get("asset_required", True):
+                blockers.append(f"场景「{name}」缺少本集场景版本")
         else:
             pack = scene.get("pack_status")
             missing = [str(x) for x in (scene.get("missing_required") or []) if x]
@@ -595,6 +637,58 @@ def manifest_production_blockers(manifest: dict[str, Any] | None) -> list[str]:
             elif not (scene.get("selected_view_ids") or scene.get("selected_views")):
                 blockers.append(f"场景「{name}」无可用 ready 视角")
     return blockers
+
+
+def scan_episode_reference_asset_gaps(
+    *,
+    project_id: str,
+    episode_no: int,
+    shots: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    """Read-only production preflight for the reusable assets used by an episode."""
+    missing_characters: set[str] = set()
+    missing_scenes: set[str] = set()
+    blockers: list[str] = []
+    for shot_id, shot in shots:
+        manifest = resolve_shot_asset_dependencies(
+            project_id=project_id,
+            episode_no=episode_no,
+            shot_id=shot_id,
+            shot=shot,
+            scene_name=(getattr(shot, "scene_name", None) or None),
+        )
+        shot_blockers = manifest_production_blockers(manifest)
+        if shot_blockers:
+            shot_no = int(getattr(shot, "shot_no", 0) or 0)
+            blockers.extend(f"镜头 {shot_no}: {reason}" for reason in shot_blockers)
+        for character in manifest.get("characters") or []:
+            if not character.get("asset_required", True):
+                continue
+            if (
+                not character.get("look_revision_id")
+                or character.get("pack_status") not in {None, PACK_STATUS_READY}
+                or bool(character.get("missing_required"))
+                or not (character.get("selected_view_ids") or character.get("selected_views"))
+            ):
+                name = str(character.get("name") or "").strip()
+                if name:
+                    missing_characters.add(name)
+        scene = manifest.get("scene") or {}
+        if isinstance(scene, dict) and scene.get("asset_required", True):
+            if (
+                not scene.get("scene_revision_id")
+                or scene.get("pack_status") not in {None, PACK_STATUS_READY}
+                or bool(scene.get("missing_required"))
+                or not (scene.get("selected_view_ids") or scene.get("selected_views"))
+            ):
+                name = str(scene.get("name") or "").strip()
+                if name:
+                    missing_scenes.add(name)
+    return {
+        "characters": sorted(missing_characters),
+        "scenes": sorted(missing_scenes),
+        "blockers": blockers,
+    }
 
 
 def assert_manifest_allows_production(manifest: dict[str, Any] | None) -> None:

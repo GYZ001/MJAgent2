@@ -205,7 +205,7 @@ def test_empty_shell_ledger_normalized_from_spine() -> None:
     assert ledger_errs == [], ledger_errs
 
 
-def test_screenplay_rejects_too_many_key_lines() -> None:
+def test_screenplay_allows_dialogue_rich_key_lines_without_fixed_cap() -> None:
     bible = Bible(
         characters=[
             Character(
@@ -245,4 +245,4 @@ def test_screenplay_rejects_too_many_key_lines() -> None:
         information_ledger=[{"info_id": "I1", "event_id": "E1", "content": "关键信息交付内容"}],
     )
     errors = validate_screenplay(script, bible, expected_beats=5, episode_no=1)
-    assert any("超过上限" in e and "key_lines" in e for e in errors)
+    assert not any("超过上限" in e and "key_lines" in e for e in errors)

@@ -496,6 +496,25 @@ def test_single_speaker_monologue_may_span_adjacent_scene_blocks() -> None:
     assert not any("被拆到多个场次" in error for error in errors), errors
 
 
+def test_dialogue_chain_may_continue_into_adjacent_subarea_of_same_location() -> None:
+    script, source = _screenplay_with_source_dialogue_chain()
+    script.scene_outline = [
+        _scene(1, "【场1】日 / 萧家迎客大厅", "长老当众刁难，冲突在大厅爆发。"),
+        _scene(2, "【场2】日 / 萧家迎客大厅角落", "薰儿从大厅角落回应并完成解围。"),
+    ]
+    script.full_script_text = (
+        "【场1】日 / 萧家迎客大厅\n"
+        "测验员：斗之力，三段！\n"
+        "谷言：只有三段？\n"
+        "【场2】日 / 萧家迎客大厅角落\n"
+        "测验员：结果无误。"
+    )
+
+    errors = validate_dialogue_chains(script, source_text=source, required=True)
+
+    assert not any("被拆到多个场次" in error for error in errors), errors
+
+
 def test_source_grounded_single_character_reply_is_not_rejected_as_empty() -> None:
     script, _source = _screenplay_with_source_dialogue_chain()
     script.dialogue_chains[0].turns[-1].line = "哦。"
@@ -639,6 +658,7 @@ def test_initial_screenplay_prompt_contains_d001_and_dialogue_chain_contract(mon
     assert "R002：结果无误。" in prompts[0]
     assert '"dialogue_chains"' in prompts[0]
     assert "`key_lines` 由后端按 dialogue_chains.turns 确定性回填" in prompts[0]
+    assert "对白话轮不设固定条数上限" in prompts[0]
 
 
 def test_user_selected_dialogues_are_hard_gates() -> None:
