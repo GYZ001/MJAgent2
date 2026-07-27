@@ -1,3 +1,6 @@
+import { useState } from 'react'
+import { useFocusTrap } from '../../hooks/useFocusTrap'
+
 export interface ImpactSummary {
   stale_descendant_ids?: string[]
   requires_reconfirm?: boolean
@@ -14,6 +17,8 @@ export interface ImpactSummary {
   paid_assets?: { character_portraits?: number; scene_references?: number }
   old_asset_policy?: string
   stale_count?: number
+  stale_assets?: Array<{ id: string; type: string; status: string; scope_type?: string | null; scope_id?: string | null }>
+  stale_assets_truncated?: boolean
 }
 
 const CHANGE_TYPE_LABELS: Record<string, string> = {
@@ -44,18 +49,24 @@ export default function ImpactDialog({
   onConfirm: () => void
   onClose: () => void
 }) {
+  const trapRef = useFocusTrap(open, onClose)
+  const [stalePage, setStalePage] = useState(0)
   if (!open) return null
   const staleCount = impact?.stale_count ?? impact?.stale_descendant_ids?.length
   const byType = impact?.by_artifact_type || {}
   const typeLines = Object.entries(byType).map(([type, count]) => `${type} × ${count}`)
   const changeLabels = (impact?.change_types || []).map(t => CHANGE_TYPE_LABELS[t] || t)
   const canConfirm = !loading && !error && !!impact
+  const staleAssets = impact?.stale_assets ?? []
+  const stalePageCount = Math.max(1, Math.ceil(staleAssets.length / 20))
+  const curStalePage = Math.min(stalePage, stalePageCount - 1)
+  const pagedStaleAssets = staleAssets.slice(curStalePage * 20, curStalePage * 20 + 20)
 
   return (
     <div className="evidence-backdrop" role="presentation" onMouseDown={event => {
       if (event.currentTarget === event.target) onClose()
     }}>
-      <section className="impact-dialog" role="dialog" aria-modal="true" aria-label={title}>
+      <section ref={trapRef} className="impact-dialog" role="dialog" aria-modal="true" aria-label={title}>
         <h3>{title}</h3>
         {loading && <p>正在计算下游影响与重建费用…</p>}
         {error && <p className="error-banner" style={{ whiteSpace: 'pre-wrap' }}>{error}</p>}
@@ -90,6 +101,33 @@ export default function ImpactDialog({
               {impact.old_asset_policy && <li>{impact.old_asset_policy}</li>}
               {(knownEffects ?? []).map(item => <li key={item}>{item}</li>)}
             </ul>
+            {!!staleAssets.length && (
+              <div className="impact-stale-assets">
+                <h4>失效资产明细</h4>
+                {impact.stale_assets_truncated && (
+                  <p className="hint">服务端仅返回前 {staleAssets.length} 项，完整列表已截断。</p>
+                )}
+                <ul>
+                  {pagedStaleAssets.map(asset => (
+                    <li key={`${asset.type}:${asset.id}`}>
+                      <code>{asset.type}</code>
+                      <span>{asset.status}</span>
+                      <code>{asset.id}</code>
+                      {(asset.scope_type || asset.scope_id) && (
+                        <small>{asset.scope_type || 'scope'}:{asset.scope_id || '-'}</small>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+                {stalePageCount > 1 && (
+                  <div className="impact-stale-pager">
+                    <button type="button" className="btn small" disabled={curStalePage <= 0} onClick={() => setStalePage(curStalePage - 1)}>上一页</button>
+                    <span>第 {curStalePage + 1} / {stalePageCount} 页</span>
+                    <button type="button" className="btn small" disabled={curStalePage >= stalePageCount - 1} onClick={() => setStalePage(curStalePage + 1)}>下一页</button>
+                  </div>
+                )}
+              </div>
+            )}
           </>
         )}
         <div className="dialog-actions">

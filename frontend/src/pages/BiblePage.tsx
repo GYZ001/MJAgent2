@@ -12,6 +12,8 @@ import GenerationParamsDialog from '../components/GenerationParamsDialog'
 import QueryState from '../components/QueryState'
 import PrepSubnav from '../components/PrepSubnav'
 import { useFillPageSize } from '../hooks/useFillPageSize'
+import { useFocusTrap } from '../hooks/useFocusTrap'
+import { usePrepListState } from '../hooks/usePrepListState'
 import { formatBookTitle } from '../lib/bookTitle'
 import type { PrepStepStatus } from '../lib/statusLabels'
 import CharacterFilters, {
@@ -31,6 +33,8 @@ type PaymentQuote = RefsCostPrecheck & {
   estimate_note?: string
   character_names?: string[]
 }
+
+type PaymentSelection = { characters: string[] }
 
 function currentPortrait(character: Character): Portrait | null {
   const portraits = [...(character.portraits ?? [])]
@@ -119,6 +123,15 @@ function countBibleChanges(next: Bible | null, base: Bible | null | undefined): 
     if (!nextNames.has(character.name)) count += 1
   }
   return count
+}
+
+function characterChanged(next: Character | null | undefined, base: Character | null | undefined): boolean {
+  if (!next || !base) return !!next !== !!base
+  return next.role !== base.role
+    || next.appearance_canonical !== base.appearance_canonical
+    || next.personality !== base.personality
+    || next.speech_style !== base.speech_style
+    || JSON.stringify(next.relationships ?? []) !== JSON.stringify(base.relationships ?? [])
 }
 
 function characterHasPortrait(character: Character): boolean {
@@ -231,6 +244,26 @@ function cloneCharacter(character: Character): Character {
   return JSON.parse(JSON.stringify(character)) as Character
 }
 
+function replaceCharacter(bible: Bible, name: string, character: Character): Bible {
+  return {
+    ...bible,
+    characters: bible.characters.map(item => item.name === name ? cloneCharacter(character) : item),
+  }
+}
+
+function cnEpisodeToNumber(value: string): number | null {
+  if (/^\d+$/.test(value)) return Number(value)
+  const digits: Record<string, number> = { 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 }
+  if (value === '十') return 10
+  if (value.includes('十')) {
+    const [tensRaw, onesRaw] = value.split('十')
+    const tens = tensRaw ? digits[tensRaw] : 1
+    const ones = onesRaw ? digits[onesRaw] : 0
+    if (typeof tens === 'number' && typeof ones === 'number') return tens * 10 + ones
+  }
+  return digits[value] ?? null
+}
+
 function promptSegments(prompt: string | undefined): { label: string; text: string }[] {
   const parts = (prompt || '').split('。').map(part => part.trim()).filter(Boolean)
   const fallback = (prompt || '').trim()
@@ -249,9 +282,14 @@ export default function BiblePage() {
   const [undoStack, setUndoStack] = useState<Bible[]>([])
   const [draftState, setDraftState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const [busy, setBusy] = useState(false)
-  const [charSearch, setCharSearch] = useState('')
-  const [charFilters, setCharFilters] = useState<CharacterFilterState>({ ...EMPTY_CHARACTER_FILTERS })
-  const [charPage, setCharPage] = useState(0)
+  const pageSize = useFillPageSize({ minCardWidth: 270, rows: 3, floor: 8, ceiling: 24 })
+  const [listState, setListState] = usePrepListState(projectId!, 'bible-characters', pageSize)
+  const charSearch = listState.search
+  const charFilters: CharacterFilterState = { ...EMPTY_CHARACTER_FILTERS, ...(listState.filters as Partial<CharacterFilterState>) }
+  const charPage = listState.page
+  const setCharSearch = (value: string) => setListState(current => ({ ...current, search: value, page: 0 }))
+  const setCharFilters = (value: CharacterFilterState) => setListState(current => ({ ...current, filters: value, page: 0 }))
+  const setCharPage = (value: number) => setListState(current => ({ ...current, page: value, scrollY: window.scrollY }))
   const [paramsCharacterName, setParamsCharacterName] = useState<string | null>(null)
   const [qaDetail, setQaDetail] = useState<{ characterName: string; portrait: Portrait } | null>(null)
   const [compareDetail, setCompareDetail] = useState<{ title: string; images: { src: string; label: string }[] } | null>(null)
@@ -273,9 +311,11 @@ export default function BiblePage() {
   const [payLoading, setPayLoading] = useState(false)
   const [payError, setPayError] = useState<string | null>(null)
   const [payPrecheck, setPayPrecheck] = useState<RefsCostPrecheck | null>(null)
-  const payActionRef = useRef<null | (() => Promise<void>)>(null)
+  const [paySelectable, setPaySelectable] = useState(false)
+  const payActionRef = useRef<null | ((selection: PaymentSelection) => Promise<void>)>(null)
+  const [impactMode, setImpactMode] = useState<'bible' | 'character'>('bible')
+  const [pendingCharacterSave, setPendingCharacterSave] = useState<{ name: string; character: Character } | null>(null)
   const editingRef = useRef<Bible | null>(null)
-  const pageSize = useFillPageSize({ minCardWidth: 270, rows: 3, floor: 8, ceiling: 24 })
   const bibleTimer = useTaskTimer(`project.${projectId}.bible`, p?.bible_status === 'running')
   const refsTimer = useTaskTimer(`project.${projectId}.refs`, p?.refs_status === 'running')
 
@@ -296,6 +336,51 @@ export default function BiblePage() {
   useEffect(() => {
     if (charPage > charPageCount - 1) setCharPage(Math.max(0, charPageCount - 1))
   }, [charPage, charPageCount])
+
+  useEffect(() => {
+    if (!projectId) return
+    try {
+      const raw = window.sessionStorage.getItem(`prep-bible-focus:${projectId}`)
+      if (!raw) return
+      const focus = JSON.parse(raw) as { missing?: string }
+      if (focus.missing === 'yes') {
+        setListState(current => ({
+          ...current,
+          filters: { ...EMPTY_CHARACTER_FILTERS, ...(current.filters as Partial<CharacterFilterState>), missing: 'yes' },
+          page: 0,
+        }))
+      }
+      window.sessionStorage.removeItem(`prep-bible-focus:${projectId}`)
+    } catch { /* ignore invalid focus payload */ }
+  }, [projectId, setListState])
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      if (listState.scrollY > 0) window.scrollTo({ top: listState.scrollY, behavior: 'auto' })
+    })
+    return () => window.cancelAnimationFrame(frame)
+    // Only restore once for this page instance; subsequent scroll is user-driven.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    let ticking = false
+    const saveScroll = () => {
+      if (ticking) return
+      ticking = true
+      window.requestAnimationFrame(() => {
+        ticking = false
+        setListState(current => current.scrollY === window.scrollY
+          ? current
+          : { ...current, scrollY: window.scrollY })
+      })
+    }
+    window.addEventListener('scroll', saveScroll, { passive: true })
+    return () => {
+      window.removeEventListener('scroll', saveScroll)
+      setListState(current => ({ ...current, scrollY: window.scrollY }))
+    }
+  }, [setListState])
 
   useEffect(() => {
     if (!dirty) return
@@ -396,22 +481,24 @@ export default function BiblePage() {
 
   const openPayment = async (
     title: string,
-    precheckBody: { character?: string; resume?: boolean; view_role?: string },
-    action: (quote: RefsCostPrecheck) => Promise<void>,
+    precheckBody: { character?: string; characters?: string[]; resume?: boolean; view_role?: string },
+    action: (quote: RefsCostPrecheck, selection: PaymentSelection) => Promise<void>,
     precheckLoader?: () => Promise<PaymentQuote>,
+    options?: { enableScopeSelection?: boolean },
   ) => {
     setPayTitle(title)
     setPayOpen(true)
     setPayLoading(true)
     setPayError(null)
     setPayPrecheck(null)
+    setPaySelectable(!!options?.enableScopeSelection)
     try {
       const quote = precheckLoader
         ? await precheckLoader()
         : await api.refsPrecheck(p.id, precheckBody)
       setPayPrecheck(quote)
-      payActionRef.current = async () => {
-        await action(quote)
+      payActionRef.current = async (selection: PaymentSelection) => {
+        await action(quote, selection)
       }
     } catch (e: unknown) {
       setPayError((e as Error).message)
@@ -510,10 +597,17 @@ export default function BiblePage() {
     await openPayment(
       '补齐缺失的定妆照',
       { resume: true },
-      async (quote) => {
+      async (quote, selection) => {
         refsTimer.start()
+        const selectedCharacters = selection.characters.filter(Boolean)
+        const effectiveQuote = selectedCharacters.length
+          ? await api.refsPrecheck(p.id, { resume: true, characters: selectedCharacters })
+          : quote
         await api.post(`/projects/${p.id}/refs`, {
-          resume: true, confirm: true, quote_id: quote.quote_id,
+          resume: true,
+          characters: selectedCharacters.length ? selectedCharacters : undefined,
+          confirm: true,
+          quote_id: effectiveQuote.quote_id,
         })
         toast('已开始补齐缺失的定妆照，已有成品会保留')
         refresh()
@@ -522,6 +616,7 @@ export default function BiblePage() {
         const gaps = await api.refsGaps(p.id)
         return gaps.precheck
       },
+      { enableScopeSelection: true },
     )
   }
 
@@ -550,6 +645,8 @@ export default function BiblePage() {
 
   const openImpactPreview = async () => {
     if (!editing) return
+    setImpactMode('bible')
+    setPendingCharacterSave(null)
     setImpactOpen(true)
     setImpactLoading(true)
     setImpactError(null)
@@ -588,6 +685,10 @@ export default function BiblePage() {
 
   const saveBible = async () => {
     if (!editing || !impactPreview) return
+    if (impactMode === 'character' && pendingCharacterSave) {
+      await saveCharacterDraft(pendingCharacterSave.character, impactPreview.fingerprint)
+      return
+    }
     setBusy(true)
     try {
       const r = await api.put(`/projects/${p.id}/bible`, {
@@ -644,6 +745,60 @@ export default function BiblePage() {
     }
   }
 
+  const saveCharacterDraft = async (character: Character, fingerprint?: string) => {
+    if (!editing) return
+    setBusy(true)
+    try {
+      const result = await api.saveCharacter(p.id, character.name, {
+        character,
+        expected_version: currentEditVersion,
+        impact_preview_fingerprint: fingerprint,
+        confirm: !!fingerprint,
+      })
+      const nextCharacter = result.character ?? character
+      setEditing(current => current ? replaceCharacter(current, character.name, nextCharacter) : current)
+      if (typeof result.bible_version === 'number') setEditBaseVersion(result.bible_version)
+      setImpactOpen(false)
+      setImpactPreview(null)
+      setPendingCharacterSave(null)
+      setImpactMode('bible')
+      toast(`「${character.name}」已保存为角色级修订`)
+      refresh()
+    } catch (e: unknown) {
+      if (e instanceof ApiError && e.status === 409) {
+        const detail = e.detail as {
+          code?: string
+          message?: string
+          preview?: BibleImpactPreview
+          impact_preview?: BibleImpactPreview
+        } | undefined
+        if (detail?.code === 'IMPACT_CONFIRM_REQUIRED') {
+          let preview = detail.preview || detail.impact_preview || null
+          if (!preview) {
+            try {
+              preview = await api.bibleImpactPreview(p.id, {
+                bible: p.bible ? replaceCharacter(cloneBible(p.bible), character.name, character) : editing,
+                expected_version: currentEditVersion,
+              })
+            } catch (previewError) {
+              toast((previewError as Error).message, true)
+              return
+            }
+          }
+          setPendingCharacterSave({ name: character.name, character: cloneCharacter(character) })
+          setImpactMode('character')
+          setImpactOpen(true)
+          setImpactError(null)
+          setImpactPreview(preview)
+          return
+        }
+      }
+      toast((e as Error).message, true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const abandonEditing = () => {
     if (!dirty) {
       setEditing(null)
@@ -670,6 +825,10 @@ export default function BiblePage() {
         <PrepSubnav
           current="bible"
           statuses={prepStatuses}
+          onBeforeNavigate={() => {
+            if (!dirty) return true
+            return window.confirm('有未保存的人物谱修订。离开会保留草稿但不会定稿，确定离开？')
+          }}
           onProblemClick={(key) => {
             if (key === 'bible') {
               setCharFilters({ ...EMPTY_CHARACTER_FILTERS, missing: 'yes' })
@@ -715,12 +874,31 @@ export default function BiblePage() {
           <TaskTimer label="人物谱" timer={bibleTimer} />
           <TaskTimer label="定妆照" timer={refsTimer} />
         </div>
-        {generating && refsProgress && (
+        {refsProgress && (
           <div className="refs-progress-strip" role="status" aria-label="定妆进度">
-            <span>{summarizeProgress(refsProgress)}</span>
-            <div>
+            <span>
+              {summarizeProgress(refsProgress)}
+              {refsProgress.refs_target ? ` · 当前角色：${refsProgress.refs_target}` : ''}
+              {refsProgress.updated_at ? ` · 更新：${new Date(refsProgress.updated_at * 1000).toLocaleTimeString()}` : ''}
+            </span>
+            <div className="refs-progress-bar">
               <i style={{ width: `${refsProgress.total ? Math.round((refsProgress.ready / refsProgress.total) * 100) : 0}%` }} />
             </div>
+            {!generating && !!refsProgress.items?.length && (
+              <div className="refs-stop-checklist" aria-label="停止后的定妆清单">
+                {(['ready', 'failed', 'missing'] as const).map(status => {
+                  const items = refsProgress.items.filter(item => item.status === status)
+                  if (!items.length) return null
+                  const label = status === 'ready' ? '已完成' : status === 'failed' ? '失败' : '缺失'
+                  return (
+                    <div key={status}>
+                      <b>{label} {items.length}</b>
+                      <p>{items.slice(0, 12).map(item => item.character).join('、')}{items.length > 12 ? ` 等 ${items.length} 个` : ''}</p>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
           </div>
         )}
         {!generating && p.bible && (
@@ -764,6 +942,11 @@ export default function BiblePage() {
               ))}
             </div>
           )}
+          {!mosaicImages.length && (
+            <div className="hint" style={{ marginTop: 10 }}>
+              暂无可用定妆样图：当前角色尚未生成通过 QA 的定妆包，或已有包仍在生成/验证中。
+            </div>
+          )}
 
           <div style={{ height: 16 }} />
           <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}>
@@ -798,6 +981,8 @@ export default function BiblePage() {
               const availability = portraitAvailability(c, fitting)
               const stamp = availabilityStamp(availability)
               const active = currentPortrait(c)
+              const baseCharacter = p.bible?.characters.find(character => character.name === c.name)
+              const characterDirty = editing ? characterChanged(editing.characters[i], baseCharacter) : false
               return (
               <article key={c.name} className="figure character-card">
                 <div className="f-name">{c.name} <span className="f-role">{c.role}</span>
@@ -837,6 +1022,19 @@ export default function BiblePage() {
                         })
                       }} />
                   : <div className="f-anchor">{c.appearance_canonical}</div>}
+                {editing && (
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', margin: '8px 0' }}>
+                    <button
+                      type="button"
+                      className="btn small primary"
+                      disabled={busy || !characterDirty}
+                      onClick={() => { void saveCharacterDraft(editing.characters[i]) }}
+                    >
+                      保存此角色
+                    </button>
+                    {characterDirty && <span className="hint">仅提交当前角色，其他本地修订保留在草稿中。</span>}
+                  </div>
+                )}
                 <div className="asset-params-action">
                   <button className="asset-params-trigger" type="button" onClick={() => setParamsCharacterName(c.name)}>
                     角色设定与生成参数 <span aria-hidden="true">→</span>
@@ -869,12 +1067,46 @@ export default function BiblePage() {
           <ol style={{ paddingLeft: 22, fontSize: 13.5, color: 'var(--ink-soft)' }}>
             {filteredTimeline.map((k, i) => {
               const names = timelineNames.filter(name => k.includes(name))
+              const parts: Array<string | { episode: number; text: string }> = []
+              let lastIndex = 0
+              for (const match of k.matchAll(/第([零一二两三四五六七八九十\d]+)集/g)) {
+                const episode = cnEpisodeToNumber(match[1])
+                if (!episode) continue
+                if (match.index !== undefined && match.index > lastIndex) parts.push(k.slice(lastIndex, match.index))
+                parts.push({ episode, text: match[0] })
+                lastIndex = (match.index ?? 0) + match[0].length
+              }
+              if (lastIndex < k.length) parts.push(k.slice(lastIndex))
+              if (!parts.length) parts.push(k)
               return (
                 <li key={`${i}:${k}`}>
-                  {k}
+                  {parts.map((part, index) => typeof part === 'string'
+                    ? <span key={index}>{part}</span>
+                    : (
+                      <button
+                        key={`${index}:${part.episode}`}
+                        type="button"
+                        className="timeline-episode-link"
+                        onClick={() => {
+                          window.sessionStorage.setItem(`prep-episodes-focus:${p.id}`, JSON.stringify({ episode_no: part.episode }))
+                          go('episodes', p.id)
+                        }}
+                      >
+                        {part.text}
+                      </button>
+                    ))}
                   {!!names.length && (
                     <span style={{ marginLeft: 8 }}>
-                      {names.slice(0, 4).map(name => <span key={name} className="stamp grey">{name}</span>)}
+                      {names.slice(0, 4).map(name => (
+                        <button
+                          key={name}
+                          type="button"
+                          className="stamp grey stamp-button"
+                          onClick={() => setTimelineCharacter(name)}
+                        >
+                          {name}
+                        </button>
+                      ))}
                     </span>
                   )}
                 </li>
@@ -889,11 +1121,18 @@ export default function BiblePage() {
       <AutoChangeQueue projectId={p.id} onChanged={refresh} />
       <ImpactDialog
         open={impactOpen}
-        title="定稿人物谱并传播影响"
+        title={impactMode === 'character' && pendingCharacterSave
+          ? `保存「${pendingCharacterSave.name}」并传播影响`
+          : '定稿人物谱并传播影响'}
         impact={impactPreview}
         loading={impactLoading}
         error={impactError}
-        onClose={() => { setImpactOpen(false); setImpactError(null) }}
+        onClose={() => {
+          setImpactOpen(false)
+          setImpactError(null)
+          setImpactMode('bible')
+          setPendingCharacterSave(null)
+        }}
         onConfirm={() => { void saveBible() }}
       />
       <PaymentConfirmDialog
@@ -902,85 +1141,55 @@ export default function BiblePage() {
         precheck={payPrecheck}
         loading={payLoading}
         error={payError}
+        enableScopeSelection={paySelectable}
         onClose={() => { setPayOpen(false); payActionRef.current = null }}
-        onConfirm={() => {
+        onConfirm={(selection) => {
           const run = payActionRef.current
           setPayOpen(false)
           if (!run) return
-          void act(run)
+          void act(() => run(selection))
         }}
       />
       {skipConfirm && (
-        <div className="evidence-backdrop" role="presentation">
-          <section className="impact-dialog" role="dialog" aria-modal="true" aria-label="跳过定妆缺口确认">
-            <h3>仍有定妆缺口，确认继续分集？</h3>
-            <p>当前仍有 {skipConfirm.count} 个角色缺少可用定妆照或 QA 未通过。继续后，分镜阶段可能需要自动补图或暂停等待。</p>
-            <ul>
-              {skipConfirm.names.slice(0, 20).map(name => <li key={name}>{name}</li>)}
-              {skipConfirm.names.length > 20 && <li>另有 {skipConfirm.names.length - 20} 个角色…</li>}
-            </ul>
-            <div className="dialog-actions">
-              <button type="button" className="btn" onClick={() => setSkipConfirm(null)}>返回补齐</button>
-              <button type="button" className="btn primary" onClick={() => {
-                setSkipConfirm(null)
-                go('episodes', p.id)
-              }}>确认跳过，继续分集</button>
-            </div>
-          </section>
-        </div>
+        <SkipConfirmDialog
+          data={skipConfirm}
+          onClose={() => setSkipConfirm(null)}
+          onConfirm={() => {
+            setSkipConfirm(null)
+            go('episodes', p.id)
+          }}
+        />
       )}
       {conflict && (
-        <div className="evidence-backdrop" role="presentation">
-          <section className="impact-dialog" role="dialog" aria-modal="true" aria-label="版本冲突">
-            <h3>人物谱版本冲突</h3>
-            <p>{conflict.message}</p>
-            {typeof conflict.current_version === 'number' && (
-              <p>服务端当前版本：第 {conflict.current_version} 稿</p>
-            )}
-            {conflict.server_bible ? (
-              <div className="conflict-merge-grid">
-                <div>
-                  <b>仅服务端新增</b>
-                  <p>{conflictOnlyServer.length ? conflictOnlyServer.join('、') : '无'}</p>
-                </div>
-                <div>
-                  <b>仅本地修订</b>
-                  <p>{conflictOnlyLocal.length ? conflictOnlyLocal.join('、') : '无'}</p>
-                </div>
-                <div>
-                  <b>双方都有</b>
-                  <p>{conflictBoth.length ? conflictBoth.join('、') : '无'}</p>
-                </div>
-              </div>
-            ) : !!conflict.character_names?.length && (
-              <p>服务端角色：{conflict.character_names.join('、')}</p>
-            )}
-            <p>请处理冲突后继续；禁止用旧页面静默覆盖。</p>
-            <div className="dialog-actions">
-              <button type="button" className="btn" onClick={() => setConflict(null)}>留下继续查看</button>
-              {conflict.server_bible && editing && (
-                <button type="button" className="btn" onClick={() => {
-                  setEditing(mergeServerOnlyCharacters(editing, conflict.server_bible!))
-                  setEditBaseVersion(conflict.current_version ?? editBaseVersion ?? p.bible_version ?? 0)
-                  setConflict(null)
-                  toast('已合并服务端新增角色，请复核后重新定稿')
-                }}>采用服务端新角色并继续</button>
-              )}
-              <button type="button" className="btn primary" onClick={() => {
-                setConflict(null)
-                setEditing(null)
-                setEditBaseVersion(null)
-                setUndoStack([])
-                refresh()
-              }}>刷新放弃</button>
-            </div>
-          </section>
-        </div>
+        <ConflictDialog
+          conflict={conflict}
+          onlyServer={conflictOnlyServer}
+          onlyLocal={conflictOnlyLocal}
+          both={conflictBoth}
+          canMerge={!!conflict.server_bible && !!editing}
+          onClose={() => setConflict(null)}
+          onMerge={() => {
+            if (!editing || !conflict.server_bible) return
+            setEditing(mergeServerOnlyCharacters(editing, conflict.server_bible))
+            setEditBaseVersion(conflict.current_version ?? editBaseVersion ?? p.bible_version ?? 0)
+            setConflict(null)
+            toast('已合并服务端新增角色，请复核后重新定稿')
+          }}
+          onRefresh={() => {
+            setConflict(null)
+            setEditing(null)
+            setEditBaseVersion(null)
+            setUndoStack([])
+            refresh()
+          }}
+        />
       )}
       {qaDetail && (
         <CharacterQaPanel
+          projectId={p.id}
           characterName={qaDetail.characterName}
           portrait={qaDetail.portrait}
+          onChanged={refresh}
           onClose={() => setQaDetail(null)}
         />
       )}
@@ -1149,7 +1358,7 @@ function CharacterPortraitGallery({ projectId, character, fitting, disabled, onC
   onChanged?: () => void
   onPayRequest: (
     title: string,
-    precheckBody: { character?: string; resume?: boolean; view_role?: string },
+    precheckBody: { character?: string; characters?: string[]; resume?: boolean; view_role?: string },
     action: (quote: RefsCostPrecheck) => Promise<void>,
   ) => Promise<void>
 }) {
@@ -1266,6 +1475,102 @@ function CharacterPortraitGallery({ projectId, character, fitting, disabled, onC
           <button type="button" onClick={() => scroll(1)} aria-label="下一张定妆照">›</button>
         </div>
       )}
+    </div>
+  )
+}
+
+function SkipConfirmDialog({
+  data,
+  onClose,
+  onConfirm,
+}: {
+  data: { count: number; names: string[] }
+  onClose: () => void
+  onConfirm: () => void
+}) {
+  const trapRef = useFocusTrap(true, onClose)
+  return (
+    <div className="evidence-backdrop" role="presentation" onMouseDown={event => {
+      if (event.currentTarget === event.target) onClose()
+    }}>
+      <section ref={trapRef} className="impact-dialog" role="dialog" aria-modal="true" aria-label="跳过定妆缺口确认">
+        <h3>仍有定妆缺口，确认继续分集？</h3>
+        <p>当前仍有 {data.count} 个角色缺少可用定妆照或 QA 未通过。继续后，分镜阶段可能需要自动补图或暂停等待。</p>
+        <ul>
+          {data.names.slice(0, 20).map(name => <li key={name}>{name}</li>)}
+          {data.names.length > 20 && <li>另有 {data.names.length - 20} 个角色…</li>}
+        </ul>
+        <div className="dialog-actions">
+          <button type="button" className="btn" onClick={onClose}>返回补齐</button>
+          <button type="button" className="btn primary" onClick={onConfirm}>确认跳过，继续分集</button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function ConflictDialog({
+  conflict,
+  onlyServer,
+  onlyLocal,
+  both,
+  canMerge,
+  onClose,
+  onMerge,
+  onRefresh,
+}: {
+  conflict: {
+    message: string
+    current_version?: number
+    character_names?: string[]
+    server_bible?: Bible | null
+  }
+  onlyServer: string[]
+  onlyLocal: string[]
+  both: string[]
+  canMerge: boolean
+  onClose: () => void
+  onMerge: () => void
+  onRefresh: () => void
+}) {
+  const trapRef = useFocusTrap(true, onClose)
+  return (
+    <div className="evidence-backdrop" role="presentation" onMouseDown={event => {
+      if (event.currentTarget === event.target) onClose()
+    }}>
+      <section ref={trapRef} className="impact-dialog" role="dialog" aria-modal="true" aria-label="版本冲突">
+        <h3>人物谱版本冲突</h3>
+        <p>{conflict.message}</p>
+        {typeof conflict.current_version === 'number' && (
+          <p>服务端当前版本：第 {conflict.current_version} 稿</p>
+        )}
+        {conflict.server_bible ? (
+          <div className="conflict-merge-grid">
+            <div>
+              <b>仅服务端新增</b>
+              <p>{onlyServer.length ? onlyServer.join('、') : '无'}</p>
+            </div>
+            <div>
+              <b>仅本地修订</b>
+              <p>{onlyLocal.length ? onlyLocal.join('、') : '无'}</p>
+            </div>
+            <div>
+              <b>双方都有</b>
+              <p>{both.length ? both.join('、') : '无'}</p>
+            </div>
+          </div>
+        ) : !!conflict.character_names?.length && (
+          <p>服务端角色：{conflict.character_names.join('、')}</p>
+        )}
+        <p>请处理冲突后继续；禁止用旧页面静默覆盖。</p>
+        <div className="dialog-actions">
+          <button type="button" className="btn" onClick={onClose}>留下继续查看</button>
+          {canMerge && (
+            <button type="button" className="btn" onClick={onMerge}>采用服务端新角色并继续</button>
+          )}
+          <button type="button" className="btn primary" onClick={onRefresh}>刷新放弃</button>
+        </div>
+      </section>
     </div>
   )
 }

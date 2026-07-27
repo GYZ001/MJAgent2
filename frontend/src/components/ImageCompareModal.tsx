@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { useFocusTrap } from '../hooks/useFocusTrap'
 
 export default function ImageCompareModal({
   title,
@@ -9,9 +10,23 @@ export default function ImageCompareModal({
   images: { src: string; label: string }[]
   onClose: () => void
 }) {
+  const trapRef = useFocusTrap(true, onClose)
   const [mode, setMode] = useState<'single' | 'compare'>('single')
   const [index, setIndex] = useState(0)
   const [zoom, setZoom] = useState(1)
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'ArrowLeft') {
+        event.preventDefault()
+        setIndex(current => Math.max(0, current - 1))
+      } else if (event.key === 'ArrowRight') {
+        event.preventDefault()
+        setIndex(current => Math.min(images.length - 1, current + 1))
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [images.length])
   if (!images.length) return null
   const current = images[Math.min(index, images.length - 1)]
 
@@ -19,7 +34,7 @@ export default function ImageCompareModal({
     <div className="evidence-backdrop" role="presentation" onMouseDown={e => {
       if (e.currentTarget === e.target) onClose()
     }}>
-      <section className="impact-dialog image-compare-modal" role="dialog" aria-modal="true" aria-label={title}>
+      <section ref={trapRef} className="impact-dialog image-compare-modal" role="dialog" aria-modal="true" aria-label={title}>
         <h3>{title}</h3>
         <div className="image-compare-toolbar">
           <button type="button" className="btn small" onClick={() => setMode('single')}>单图</button>

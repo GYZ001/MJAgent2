@@ -203,6 +203,7 @@ export const api = {
     }>,
   refsPrecheck: (projectId: string, body?: {
     character?: string
+    characters?: string[]
     resume?: boolean
     view_role?: string
   }) =>
@@ -227,6 +228,29 @@ export const api = {
     request('GET', `/projects/${projectId}/bible/draft`) as Promise<{
       draft: unknown; updated_at?: number | null; bible_version: number
     }>,
+  saveCharacter: (projectId: string, name: string, body: {
+    character: Character
+    expected_version?: number | null
+    impact_preview_fingerprint?: string
+    confirm?: boolean
+  }) =>
+    request('PUT', `/projects/${projectId}/characters/${encodeURIComponent(name)}`, body) as Promise<{
+      bible_version?: number
+      character?: Character
+      impact?: BibleImpactPreview
+    }>,
+  listPortraitCandidates: (projectId: string, name: string) =>
+    request('GET', `/projects/${projectId}/characters/${encodeURIComponent(name)}/portrait-candidates`) as Promise<{
+      items?: CharacterPortraitCandidate[]
+      candidates?: CharacterPortraitCandidate[]
+    } | CharacterPortraitCandidate[]>,
+  adoptPortraitCandidate: (projectId: string, name: string, portraitId: string, body: {
+    reason: string
+    bypass_soft?: boolean
+  }) =>
+    request('POST', `/projects/${projectId}/characters/${encodeURIComponent(name)}/portraits/${encodeURIComponent(portraitId)}/adopt`, body),
+  rollbackPortraitCandidate: (projectId: string, name: string, portraitId: string) =>
+    request('POST', `/projects/${projectId}/characters/${encodeURIComponent(name)}/portraits/${encodeURIComponent(portraitId)}/rollback`),
   listAutoChanges: (projectId: string) =>
     request('GET', `/projects/${projectId}/auto-changes`) as Promise<{ items: AutoChangeItem[] }>,
   decideAutoChange: (projectId: string, changeId: string, decision: string, reason?: string) =>
@@ -270,6 +294,8 @@ export interface BibleImpactPreview {
   style_changed: boolean
   stale_descendant_ids: string[]
   stale_count: number
+  stale_assets?: Array<{ id: string; type: string; status: string; scope_type?: string | null; scope_id?: string | null }>
+  stale_assets_truncated?: boolean
   by_artifact_type?: Record<string, number>
   paid_assets?: { character_portraits?: number; scene_references?: number }
   rebuild?: {
@@ -765,6 +791,25 @@ export interface Portrait {
   } | null
   change?: { change_dimensions?: string[]; persistence?: string; reason?: string } | null
   views?: PortraitView[]
+}
+
+export interface CharacterPortraitCandidate {
+  id?: string
+  portrait_id?: string
+  image_url?: string | null
+  current?: boolean
+  historical?: boolean
+  is_current?: boolean
+  adopted?: boolean
+  pack_status?: string | null
+  status?: string | null
+  reason?: string | null
+  created_at?: number | null
+  adopted_at?: number | null
+  group_qa?: Portrait['group_qa']
+  qa?: Portrait['group_qa']
+  views?: PortraitView[]
+  soft_warnings?: string[]
 }
 
 export interface Character {

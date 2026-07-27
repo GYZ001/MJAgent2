@@ -14,10 +14,12 @@ export default function PrepSubnav({
   current,
   statuses,
   onProblemClick,
+  onBeforeNavigate,
 }: {
   current: View
   statuses?: PrepStepStatuses
   onProblemClick?: (key: 'bible' | 'scenes' | 'episodes') => void
+  onBeforeNavigate?: (target: View) => boolean
 }) {
   const { go, projectId } = useNav()
   if (!projectId) return null
@@ -33,6 +35,7 @@ export default function PrepSubnav({
             aria-current={current === tab.key ? 'page' : undefined}
             className={`prep-subnav-tab${current === tab.key ? ' active' : ''} prep-status-${status}`}
             onClick={() => {
+              if (tab.key !== current && onBeforeNavigate && !onBeforeNavigate(tab.key)) return
               if (status === 'problem' && onProblemClick) {
                 onProblemClick(tab.key as 'bible' | 'scenes' | 'episodes')
               }

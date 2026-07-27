@@ -1,4 +1,12 @@
+import { useEffect, useMemo, useState } from 'react'
 import type { RefsCostPrecheck } from '../api'
+import { useFocusTrap } from '../hooks/useFocusTrap'
+
+type PaymentSelection = { characters: string[] }
+
+function scopeCharacter(item: Record<string, unknown>): string {
+  return String(item.character || item.name || item.character_name || '').trim()
+}
 
 export default function PaymentConfirmDialog({
   open,
@@ -8,6 +16,7 @@ export default function PaymentConfirmDialog({
   error,
   onConfirm,
   onClose,
+  enableScopeSelection = false,
 }: {
   open: boolean
   title: string
@@ -18,18 +27,37 @@ export default function PaymentConfirmDialog({
   }) | null
   loading?: boolean
   error?: string | null
-  onConfirm: () => void
+  onConfirm: (selection: PaymentSelection) => void
   onClose: () => void
+  enableScopeSelection?: boolean
 }) {
+  const trapRef = useFocusTrap(open, onClose)
+  const selectableCharacters = useMemo(() => {
+    const names = new Set<string>()
+    for (const item of precheck?.scope ?? []) {
+      const name = scopeCharacter(item)
+      if (name) names.add(name)
+    }
+    return [...names]
+  }, [precheck])
+  const [selectedCharacters, setSelectedCharacters] = useState<string[]>([])
+
+  useEffect(() => {
+    if (!open || !enableScopeSelection) return
+    setSelectedCharacters(selectableCharacters)
+  }, [enableScopeSelection, open, selectableCharacters])
+
   if (!open) return null
   const canConfirm = !loading && !error && !!precheck && (precheck.image_count ?? 0) >= 0
   const duration = precheck?.estimated_duration_min
+  const showSelection = enableScopeSelection && selectableCharacters.length > 1
+  const selectedSet = new Set(selectedCharacters)
 
   return (
     <div className="evidence-backdrop" role="presentation" onMouseDown={event => {
       if (event.currentTarget === event.target) onClose()
     }}>
-      <section className="impact-dialog" role="dialog" aria-modal="true" aria-label={title}>
+      <section ref={trapRef} className="impact-dialog" role="dialog" aria-modal="true" aria-label={title}>
         <h3>{title}</h3>
         {loading && <p>正在估算图片数量与费用…</p>}
         {error && <p className="error-banner" style={{ whiteSpace: 'pre-wrap' }}>{error}</p>}
@@ -51,14 +79,49 @@ export default function PaymentConfirmDialog({
             </ul>
             {!!precheck.scope?.length && (
               <div className="pay-scope-list">
-                <h4>明细（默认缺失项）</h4>
+                <h4>{showSelection ? '选择本次补齐角色（默认全选缺失项）' : '明细（默认缺失项）'}</h4>
+                {showSelection && (
+                  <div className="pay-scope-actions">
+                    <button type="button" className="btn small" onClick={() => setSelectedCharacters(selectableCharacters)}>
+                      全选
+                    </button>
+                    <button type="button" className="btn small ghost" onClick={() => setSelectedCharacters([])}>
+                      清空
+                    </button>
+                    <span>已选 {selectedCharacters.length} / {selectableCharacters.length}</span>
+                  </div>
+                )}
                 <ul>
                   {precheck.scope.slice(0, 30).map((item, index) => (
                     <li key={index}>
-                      {String(item.character || '角色')}
-                      {Array.isArray(item.views) ? ` · ${(item.views as string[]).join('/')}` : ''}
-                      {item.view_role ? ` · ${String(item.view_role)}` : ''}
-                      {item.reason ? ` · ${String(item.reason)}` : ''}
+                      {showSelection ? (
+                        <label className="pay-scope-option">
+                          <input
+                            type="checkbox"
+                            checked={selectedSet.has(scopeCharacter(item))}
+                            onChange={event => {
+                              const name = scopeCharacter(item)
+                              if (!name) return
+                              setSelectedCharacters(current => event.target.checked
+                                ? [...new Set([...current, name])]
+                                : current.filter(item => item !== name))
+                            }}
+                          />
+                          <span>
+                            {scopeCharacter(item) || '角色'}
+                            {Array.isArray(item.views) ? ` · ${(item.views as string[]).join('/')}` : ''}
+                            {item.view_role ? ` · ${String(item.view_role)}` : ''}
+                            {item.reason ? ` · ${String(item.reason)}` : ''}
+                          </span>
+                        </label>
+                      ) : (
+                        <>
+                          {String(item.character || '角色')}
+                          {Array.isArray(item.views) ? ` · ${(item.views as string[]).join('/')}` : ''}
+                          {item.view_role ? ` · ${String(item.view_role)}` : ''}
+                          {item.reason ? ` · ${String(item.reason)}` : ''}
+                        </>
+                      )}
                     </li>
                   ))}
                 </ul>
@@ -68,7 +131,12 @@ export default function PaymentConfirmDialog({
         )}
         <div className="dialog-actions">
           <button type="button" className="btn" onClick={onClose}>取消</button>
-          <button type="button" className="btn primary" disabled={!canConfirm} onClick={onConfirm}>
+          <button
+            type="button"
+            className="btn primary"
+            disabled={!canConfirm || (showSelection && selectedCharacters.length === 0)}
+            onClick={() => onConfirm({ characters: showSelection ? selectedCharacters : [] })}
+          >
             确认并开始
           </button>
         </div>
