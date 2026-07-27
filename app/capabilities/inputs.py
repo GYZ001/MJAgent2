@@ -25,11 +25,16 @@ class ProjectScopedInput(StandardCommandInput):
 class BibleGenerateInput(StandardCommandInput):
     project_id: str
     feedback: str | None = None
+    confirm: bool = False
+    quote_id: str | None = None
+    require_quote_id: bool = False
 
 
 class BibleUpdateInput(StandardCommandInput):
     project_id: str
     bible: dict[str, Any]
+    confirm: bool = False
+    impact_preview_fingerprint: str | None = None
 
 
 class PortraitUpdatePromptInput(StandardCommandInput):
@@ -41,7 +46,10 @@ class PortraitUpdatePromptInput(StandardCommandInput):
 class PortraitGenerateInput(StandardCommandInput):
     project_id: str
     character: str | None = None
+    characters: list[str] | None = None
     resume: bool = False
+    confirm: bool = False
+    quote_id: str | None = None
 
 
 class PortraitViewRegenerateInput(StandardCommandInput):
@@ -49,6 +57,8 @@ class PortraitViewRegenerateInput(StandardCommandInput):
     character_name: str
     portrait_id: str
     view_role: str
+    confirm: bool = False
+    quote_id: str | None = None
 
 
 class SceneGenerateRefsInput(StandardCommandInput):

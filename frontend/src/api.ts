@@ -108,6 +108,8 @@ async function request(
         _retried: true,
       })
     }
+    // 异步受理（如单视角重做）：直接返回 payload，不再走 handle
+    return payload
   }
 
   return handle(resp)
@@ -177,13 +179,83 @@ export const api = {
     request('PUT', `/projects/${projectId}/scenes/${encodeURIComponent(sceneName)}/prompt`, {
       scene_prompt: scenePrompt,
     }),
-  regenerateCharacterView: (projectId: string, characterName: string, portraitId: string, viewRole: string) =>
-    request('POST', `/projects/${projectId}/characters/${encodeURIComponent(characterName)}/portraits/${portraitId}/views/${encodeURIComponent(viewRole)}/regenerate`),
+  regenerateCharacterView: (projectId: string, characterName: string, portraitId: string, viewRole: string, body?: {
+    confirm?: boolean
+    quote_id?: string
+  }) =>
+    request('POST', `/projects/${projectId}/characters/${encodeURIComponent(characterName)}/portraits/${portraitId}/views/${encodeURIComponent(viewRole)}/regenerate`, body || {}),
   regenerateSceneView: (projectId: string, sceneName: string, sceneRefId: string, viewRole: string) =>
     request('POST', `/projects/${projectId}/scenes/${encodeURIComponent(sceneName)}/refs/${sceneRefId}/views/${encodeURIComponent(viewRole)}/regenerate`),
   adoptSceneCandidate: (projectId: string, sceneName: string, artifactId: string, reason?: string) =>
     request('POST', `/projects/${projectId}/scenes/${encodeURIComponent(sceneName)}/candidates/${encodeURIComponent(artifactId)}/adopt`, {
       reason: reason || '人工采纳候选',
+    }),
+  bibleImpactPreview: (projectId: string, body: {
+    bible: unknown
+    expected_version?: number | null
+  }) =>
+    request('POST', `/projects/${projectId}/bible/impact-preview`, body) as Promise<BibleImpactPreview>,
+  bibleGeneratePrecheck: (projectId: string) =>
+    request('POST', `/projects/${projectId}/bible/generate-precheck`) as Promise<RefsCostPrecheck & {
+      estimated_duration_min?: number[]
+      estimate_note?: string
+      character_names?: string[]
+    }>,
+  refsPrecheck: (projectId: string, body?: {
+    character?: string
+    characters?: string[]
+    resume?: boolean
+    view_role?: string
+  }) =>
+    request('POST', `/projects/${projectId}/refs/precheck`, body || {}) as Promise<RefsCostPrecheck>,
+  refsGaps: (projectId: string) =>
+    request('GET', `/projects/${projectId}/refs/gaps`) as Promise<{
+      missing_count: number
+      image_count: number
+      items: Array<Record<string, unknown>>
+      precheck: RefsCostPrecheck
+    }>,
+  refsProgress: (projectId: string) =>
+    request('GET', `/projects/${projectId}/refs/progress`) as Promise<{
+      total: number; ready: number; failed: number; missing: number
+      refs_status?: string; refs_target?: string | null
+      items: Array<{ character: string; status: string; missing_views?: string[]; current?: boolean; pack_status?: string }>
+      updated_at?: number
+    }>,
+  saveBibleDraft: (projectId: string, body: { bible: unknown; expected_version?: number | null }) =>
+    request('POST', `/projects/${projectId}/bible/draft`, body),
+  getBibleDraft: (projectId: string) =>
+    request('GET', `/projects/${projectId}/bible/draft`) as Promise<{
+      draft: unknown; updated_at?: number | null; bible_version: number
+    }>,
+  saveCharacter: (projectId: string, name: string, body: {
+    character: Character
+    expected_version?: number | null
+    impact_preview_fingerprint?: string
+    confirm?: boolean
+  }) =>
+    request('PUT', `/projects/${projectId}/characters/${encodeURIComponent(name)}`, body) as Promise<{
+      bible_version?: number
+      character?: Character
+      impact?: BibleImpactPreview
+    }>,
+  listPortraitCandidates: (projectId: string, name: string) =>
+    request('GET', `/projects/${projectId}/characters/${encodeURIComponent(name)}/portrait-candidates`) as Promise<{
+      items?: CharacterPortraitCandidate[]
+      candidates?: CharacterPortraitCandidate[]
+    } | CharacterPortraitCandidate[]>,
+  adoptPortraitCandidate: (projectId: string, name: string, portraitId: string, body: {
+    reason: string
+    bypass_soft?: boolean
+  }) =>
+    request('POST', `/projects/${projectId}/characters/${encodeURIComponent(name)}/portraits/${encodeURIComponent(portraitId)}/adopt`, body),
+  rollbackPortraitCandidate: (projectId: string, name: string, portraitId: string) =>
+    request('POST', `/projects/${projectId}/characters/${encodeURIComponent(name)}/portraits/${encodeURIComponent(portraitId)}/rollback`),
+  listAutoChanges: (projectId: string) =>
+    request('GET', `/projects/${projectId}/auto-changes`) as Promise<{ items: AutoChangeItem[] }>,
+  decideAutoChange: (projectId: string, changeId: string, decision: string, reason?: string) =>
+    request('POST', `/projects/${projectId}/auto-changes/${encodeURIComponent(changeId)}/decide`, {
+      decision, reason,
     }),
   staleAssetsPreview: (episodeId: string) =>
     request('GET', `/episodes/${episodeId}/stale-assets-preview`) as Promise<{
@@ -196,6 +268,67 @@ export const api = {
       confirm: true,
       shot_ids: shotIds,
     }),
+}
+
+export interface AutoChangeItem {
+  id: string
+  kind?: string
+  status?: string
+  character?: string
+  ep_start?: number
+  reason?: string | null
+  change_dimensions?: string[]
+  persistence?: string
+  pack_status?: string
+  created_at?: number
+  source?: string
+  decision_reason?: string
+}
+
+export interface BibleImpactPreview {
+  project_id: string
+  bible_version: number
+  computed_at: number
+  fingerprint: string
+  change_types: string[]
+  style_changed: boolean
+  stale_descendant_ids: string[]
+  stale_count: number
+  stale_assets?: Array<{ id: string; type: string; status: string; scope_type?: string | null; scope_id?: string | null }>
+  stale_assets_truncated?: boolean
+  by_artifact_type?: Record<string, number>
+  paid_assets?: { character_portraits?: number; scene_references?: number }
+  rebuild?: {
+    image_count: number
+    unit_price_cny: number
+    estimated_cost_cny: number
+    max_retry_budget_cny: number
+    note?: string
+  }
+  requires_reconfirm?: boolean
+  paid_media_invalidated?: boolean
+  old_asset_policy?: string
+}
+
+export interface RefsCostPrecheck {
+  quote_id: string
+  computed_at: number
+  quote_expires_at: number
+  project_id: string
+  action: string
+  character?: string | null
+  view_role?: string | null
+  character_count: number
+  views_per_character: number
+  image_count: number
+  unit_price_cny: number
+  estimated_cost_cny: number
+  max_retry_budget_cny: number
+  budget_cap_cny: number
+  scope: Array<Record<string, unknown>>
+  old_asset_policy?: string
+  idempotency_hint?: string
+  stop_policy?: string
 }
 
 export interface RunSummary {
@@ -640,9 +773,43 @@ export interface Portrait {
   base_portrait_id?: string | null
   image_url?: string | null
   pack_status?: string | null
-  group_qa?: { overall?: number | null; issues?: string[]; status?: string } | null
+  group_qa?: {
+    overall?: number | null
+    issues?: string[]
+    hard_failures?: string[]
+    status?: string
+    face_consistency?: number | null
+    outfit_consistency?: number | null
+    hair_consistency?: number | null
+    views?: Array<{
+      view_role?: string
+      overall?: number | null
+      issues?: string[]
+      hard_failures?: string[]
+      status?: string
+    }>
+  } | null
   change?: { change_dimensions?: string[]; persistence?: string; reason?: string } | null
   views?: PortraitView[]
+}
+
+export interface CharacterPortraitCandidate {
+  id?: string
+  portrait_id?: string
+  image_url?: string | null
+  current?: boolean
+  historical?: boolean
+  is_current?: boolean
+  adopted?: boolean
+  pack_status?: string | null
+  status?: string | null
+  reason?: string | null
+  created_at?: number | null
+  adopted_at?: number | null
+  group_qa?: Portrait['group_qa']
+  qa?: Portrait['group_qa']
+  views?: PortraitView[]
+  soft_warnings?: string[]
 }
 
 export interface Character {

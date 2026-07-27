@@ -262,7 +262,7 @@ export default function App() {
         {view === 'cinema' && (episodeId ? <CinemaPage key={episodeId} /> : <WorkspaceEmpty label="成片台" view="cinema" />)}
         {view === 'monitor' && <MonitorPage />}
       </main>
-      <RunDock projectId={projectId} onOpen={() => go('monitor')} />
+      <RunDock projectId={projectId} page={view === 'bible' ? 'bible' : view === 'scenes' ? 'scenes' : 'other'} onOpen={() => go('monitor')} />
       {agentEnabled && !agentOpen && (
         <button
           type="button"

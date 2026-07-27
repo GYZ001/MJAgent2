@@ -5,6 +5,7 @@ import { EpStamp } from './BiblePage'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 import SearchField from '../components/SearchField'
 import PrepSubnav from '../components/PrepSubnav'
+import { formatBookTitle } from '../lib/bookTitle'
 
 function ScreenplayStamp({ status }: { status: string }) {
   const map: Record<string, [string, string]> = {
@@ -27,6 +28,7 @@ export default function EpisodesPage() {
   const [pageDraft, setPageDraft] = useState('1')
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('all')
+  const [focusEpisodeNo, setFocusEpisodeNo] = useState<number | null>(null)
   const deferredSearch = useDeferredValue(search)
   const query = deferredSearch.trim().toLowerCase()
   const { data: p, refresh, error, loading } = usePoll<Project>(
@@ -78,12 +80,54 @@ export default function EpisodesPage() {
   const pageCount = p?.episodes_page_count ?? 1
   const curPage = Math.min(page, pageCount - 1)
 
+  const [portraitGap, setPortraitGap] = useState<{ missing_count: number; image_count: number } | null>(null)
+
+  useEffect(() => {
+    if (!projectId) return
+    try {
+      const raw = window.sessionStorage.getItem(`prep-episodes-focus:${projectId}`)
+      if (!raw) return
+      const focus = JSON.parse(raw) as { episode_no?: number }
+      if (typeof focus.episode_no === 'number' && focus.episode_no > 0) {
+        setFocusEpisodeNo(focus.episode_no)
+        setPage(Math.max(0, Math.floor((focus.episode_no - 1) / PAGE_SIZE)))
+        setSearch('')
+        setStatusFilter('all')
+      }
+      window.sessionStorage.removeItem(`prep-episodes-focus:${projectId}`)
+    } catch { /* ignore invalid focus payload */ }
+  }, [projectId])
+
+  useEffect(() => {
+    if (!projectId) return
+    let cancelled = false
+    api.refsGaps(projectId).then(res => {
+      if (!cancelled) {
+        setPortraitGap(res.missing_count > 0
+          ? { missing_count: res.missing_count, image_count: res.image_count }
+          : null)
+      }
+    }).catch(() => {
+      if (!cancelled) setPortraitGap(null)
+    })
+    return () => { cancelled = true }
+  }, [projectId, p?.refs_status, p?.bible_version])
+
   useEffect(() => {
     // 输入框聚焦编辑时不要被轮询/钳位覆盖草稿，否则正在输入的页码会被悄悄清空。
     if (!pageInputFocused.current) {
       setPageDraft(String(curPage + 1))
     }
   }, [curPage])
+
+  useEffect(() => {
+    if (!focusEpisodeNo || !responseMatches) return
+    const node = document.querySelector<HTMLElement>(`[data-episode-no="${focusEpisodeNo}"]`)
+    if (!node) return
+    node.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    const id = window.setTimeout(() => setFocusEpisodeNo(null), 1800)
+    return () => window.clearTimeout(id)
+  }, [focusEpisodeNo, responseMatches, eps])
 
   if (error && !p) return <div className="empty">{error}</div>
   if (loading && !p) return <div className="empty">展卷中……</div>
@@ -129,11 +173,29 @@ export default function EpisodesPage() {
   return (
     <>
       <header className="desk-head">
-        <div className="crumb">书房 / 《{p.name}》</div>
+        <div className="crumb">书房 / {formatBookTitle(p.name)}</div>
         <PrepSubnav current="episodes" />
         <h1>分集规划 <span className="sub">{p.chapter_count ?? 0} 章 · {totalEpisodes} 集 · 追踪每集从剧本到成片的制作状态</span></h1>
         <hr className="rule" />
       </header>
+
+      {portraitGap && (
+        <section className="card" style={{ marginBottom: 12 }}>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+            <span className="stamp gold">人物定妆缺口</span>
+            <span>
+              仍有 {portraitGap.missing_count} 个角色/包未就绪（约 {portraitGap.image_count} 张图待补）。
+              分集可继续，但下游出图可能受阻。
+            </span>
+            <button type="button" className="btn small primary" onClick={() => {
+              window.sessionStorage.setItem(`prep-bible-focus:${p.id}`, JSON.stringify({ missing: 'yes' }))
+              go('bible', p.id)
+            }}>
+              返回人物谱补齐缺口
+            </button>
+          </div>
+        </section>
+      )}
 
       <section className="episode-overview">
         <div><span>全部分集</span><b>{totalEpisodes}</b><small>每章一集</small></div>
@@ -205,7 +267,7 @@ export default function EpisodesPage() {
               : ep.screenplay_status === 'ready' ? 'board' : 'script'
           const destinationLabel = destination === 'cinema' ? '查看成片' : destination === 'wall' ? '继续评审' : destination === 'board' ? '继续分镜' : '继续剧本'
           return (
-          <div key={ep.id} className="episode-row">
+          <div key={ep.id} className={`episode-row${focusEpisodeNo === ep.episode_no ? ' focus-highlight' : ''}`} data-episode-no={ep.episode_no}>
             <div className="ep-main">
               <div className="ep-no">第{numToCn(ep.episode_no)}集</div>
               <div className="ep-body">

@@ -68,6 +68,7 @@ def result_http_payload(result: CommandResult) -> dict[str, Any]:
     """把 CommandResult 转成可直接被 FastAPI 路由返回的 dict，尽量贴近既有 REST 响应形状。"""
     payload: dict[str, Any] = dict(result.data or {})
     payload.setdefault("ok", result.status in {CommandStatus.SUCCEEDED, CommandStatus.ACCEPTED})
+    payload.setdefault("status", result.status.value)
     payload.setdefault("summary", result.summary)
     if result.run_id is not None:
         payload.setdefault("run_id", result.run_id)
@@ -96,7 +97,13 @@ def raise_if_failed(result: CommandResult) -> None:
         return
     status_code = _http_status_for(result)
     if status_code is not None:
-        raise HTTPException(status_code, result.summary)
+        detail: Any = result.summary
+        if isinstance(result.data, dict) and result.data.get("code"):
+            detail = {
+                **result.data,
+                "message": result.data.get("message") or result.summary,
+            }
+        raise HTTPException(status_code, detail)
 
 
 raise_for_command_result = raise_if_failed
@@ -106,6 +113,9 @@ def respond_ui(result: CommandResult) -> dict[str, Any] | JSONResponse:
     """dispatch 之后的统一 REST 收尾：待批准 → 202；失败 → HTTPException；成功 → payload。"""
     if result.status == CommandStatus.WAITING_APPROVAL:
         return JSONResponse(status_code=202, content=waiting_approval_payload(result))
+    if result.status == CommandStatus.ACCEPTED:
+        raise_if_failed(result)
+        return JSONResponse(status_code=202, content=result_http_payload(result))
     raise_if_failed(result)
     return result_http_payload(result)
 

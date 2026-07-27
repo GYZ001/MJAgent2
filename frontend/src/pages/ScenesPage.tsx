@@ -6,7 +6,10 @@ import SearchField from '../components/SearchField'
 import EvidenceDrawer from '../components/harness/EvidenceDrawer'
 import GenerationParamsDialog from '../components/GenerationParamsDialog'
 import PrepSubnav from '../components/PrepSubnav'
+import QueryState from '../components/QueryState'
 import { useFillPageSize } from '../hooks/useFillPageSize'
+import { formatBookTitle } from '../lib/bookTitle'
+import { statusLabel, statusTitle, type PrepStepStatus } from '../lib/statusLabels'
 
 export default function ScenesPage() {
   const { projectId, toast } = useNav()
@@ -34,9 +37,9 @@ export default function ScenesPage() {
     if (page > pageCount - 1) setPage(Math.max(0, pageCount - 1))
   }, [page, pageCount])
 
-  if (error && !p) return <div className="empty">{error}</div>
-  if (loading && !p) return <div className="empty">展卷中……</div>
-  if (!p) return <div className="empty">展卷中……</div>
+  if (error && !p) return <QueryState loading={false} error={error} hasData={false} objectName="场景库" onRetry={refresh}>{null}</QueryState>
+  if (loading && !p) return <QueryState loading hasData={false} objectName="场景库" onRetry={refresh}>{null}</QueryState>
+  if (!p) return <QueryState loading hasData={false} objectName="场景库" onRetry={refresh}>{null}</QueryState>
 
   const act = async (fn: () => Promise<unknown>, doneMsg?: string) => {
     setBusy(true)
@@ -50,12 +53,19 @@ export default function ScenesPage() {
   const hasBible = !!p.bible
   const detailScene = detailSceneName ? scenes.find(scene => scene.name === detailSceneName) ?? null : null
   const paramsScene = paramsSceneName ? scenes.find(scene => scene.name === paramsSceneName) ?? null : null
+  const sceneStatus: PrepStepStatus = generating
+    ? 'running'
+    : ['failed', 'warning'].includes(p.scene_refs_status || '')
+      ? 'problem'
+      : scenes.length > 0
+        ? 'done'
+        : 'idle'
 
   return (
     <>
       <header className="desk-head">
-        <div className="crumb">书房 / 《{p.name}》</div>
-        <PrepSubnav current="scenes" />
+        <div className="crumb">书房 / {formatBookTitle(p.name)}</div>
+        <PrepSubnav current="scenes" statuses={{ scenes: sceneStatus }} />
         <h1>场景库 <span className="sub">以视觉资产为中心管理场景锚点、版本与跨集一致性</span></h1>
         <hr className="rule" />
       </header>
@@ -427,7 +437,9 @@ function SceneCandidateModal({
                 <div className="scene-candidate-meta">
                   <div>
                     <b>尝试 {candidate.attempt ?? '—'}</b>
-                    <small>{candidate.trust_level} · {candidate.status}</small>
+                    <small title={`${statusTitle(candidate.trust_level)} · ${statusTitle(candidate.status)}`}>
+                      {statusLabel(candidate.trust_level)} · {statusLabel(candidate.status)}
+                    </small>
                   </div>
                   <strong className={score != null && score >= SCENE_QA_PASS_SCORE ? 'passed' : 'failed'}>
                     QA {score == null ? '—' : score.toFixed(2)}
@@ -512,7 +524,7 @@ function SceneRefStrip({ projectId, sceneName, segments, disabled, onChanged }: 
           <article key={seg.id || i} className="scene-version-card">
             <div className="scene-version-meta">
               {sceneRangeLabel(seg.ep_start, seg.ep_end)}
-              {seg.pack_status ? ` · ${seg.pack_status}` : ''}
+              {seg.pack_status ? ` · ${statusLabel(seg.pack_status)}` : ''}
             </div>
             {(seg.views && seg.views.length > 0) ? (
               <div className="scene-view-grid">

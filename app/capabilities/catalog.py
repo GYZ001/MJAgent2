@@ -391,7 +391,7 @@ def _register_commands(registry) -> None:
             description="保存人物谱修订；若使下游失效需确认",
             input_model=I.BibleUpdateInput,
             risk=RiskLevel.R2_MATERIAL,
-            confirmation=ConfirmationPolicy.WHEN_IMPACT,
+            confirmation=ConfirmationPolicy.NEVER,
             idempotency=IdempotencyPolicy.RECOMMENDED,
             scopes={"manju:project-write"},
             side_effect="updates_bible_may_invalidate_downstream",
@@ -419,7 +419,7 @@ def _register_commands(registry) -> None:
             description="生成全部或单角色定妆图（付费图片）",
             input_model=I.PortraitGenerateInput,
             risk=RiskLevel.R2_MATERIAL,
-            confirmation=ConfirmationPolicy.ALWAYS,
+            confirmation=ConfirmationPolicy.NEVER,
             idempotency=IdempotencyPolicy.REQUIRED,
             scopes={"manju:generation-media"},
             side_effect="creates_paid_image_jobs",
@@ -448,7 +448,7 @@ def _register_commands(registry) -> None:
             description="生成候选视角，通过单图与整包 QA 后原子替换当前视角",
             input_model=I.PortraitViewRegenerateInput,
             risk=RiskLevel.R2_MATERIAL,
-            confirmation=ConfirmationPolicy.ALWAYS,
+            confirmation=ConfirmationPolicy.NEVER,
             idempotency=IdempotencyPolicy.REQUIRED,
             scopes={"manju:generation-media"},
             side_effect="creates_paid_character_view_and_may_replace_ready_view",
@@ -1214,6 +1214,58 @@ def _register_exemptions(registry) -> None:
     registry.exempt_rest(
         "POST /api/shots/{shot_id}/resolve-spoken-conflict",
         "口播合同冲突人工消解：在 dialogues / audio_timeline 间选基准同步；页面直达，不进入 Agent/MCP 能力面",
+    )
+    registry.exempt_rest(
+        "POST /api/projects/{project_id}/bible/impact-preview",
+        "人物谱定稿前只读影响预检：不写库、不失效下游；正式定稿仍走 bible.update",
+    )
+    registry.exempt_rest(
+        "POST /api/projects/{project_id}/refs/precheck",
+        "定妆照/单视角付费只读预检：返回报价与范围；正式生成仍走 portrait.generate / portrait.regenerate_view",
+    )
+    registry.exempt_rest(
+        "POST /api/projects/{project_id}/bible/generate-precheck",
+        "首次生成人物谱+定妆只读费用预估；正式启动仍走 bible.generate",
+    )
+    registry.exempt_rest(
+        "GET /api/projects/{project_id}/refs/gaps",
+        "定妆缺口只读扫描",
+    )
+    registry.exempt_rest(
+        "GET /api/projects/{project_id}/refs/progress",
+        "定妆进度只读汇总",
+    )
+    registry.exempt_rest(
+        "POST /api/projects/{project_id}/bible/draft",
+        "人物谱草稿保存：不定稿、不失效下游",
+    )
+    registry.exempt_rest(
+        "GET /api/projects/{project_id}/bible/draft",
+        "读取人物谱草稿",
+    )
+    registry.exempt_rest(
+        "GET /api/projects/{project_id}/auto-changes",
+        "自动变更待审队列只读",
+    )
+    registry.exempt_rest(
+        "POST /api/projects/{project_id}/auto-changes/{change_id}/decide",
+        "自动变更批准/拒绝/回滚；页面人工决策入口",
+    )
+    registry.exempt_rest(
+        "PUT /api/projects/{project_id}/characters/{character_name}",
+        "角色级人物谱保存：局部替换角色对象，内部复用人物谱版本与影响预检",
+    )
+    registry.exempt_rest(
+        "GET /api/projects/{project_id}/characters/{character_name}/portrait-candidates",
+        "角色定妆候选只读列表",
+    )
+    registry.exempt_rest(
+        "POST /api/projects/{project_id}/characters/{character_name}/portraits/{portrait_id}/adopt",
+        "人物定妆候选人工采纳；页面评审入口，写入 gate/change 决策",
+    )
+    registry.exempt_rest(
+        "POST /api/projects/{project_id}/characters/{character_name}/portraits/{portrait_id}/rollback",
+        "人物定妆候选人工回滚；页面评审入口，复用采纳切换逻辑",
     )
     registry.exempt_rest(
         "POST /mcp",
