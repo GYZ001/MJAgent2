@@ -36,6 +36,31 @@ def _decode_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
+def _is_score_only_evaluation(evaluation: Evaluation) -> bool:
+    if evaluation.evaluation_role == "score_only":
+        return True
+    return (
+        evaluation.evaluator_type == "model"
+        and evaluation.runtime_blocking is False
+        and _is_model_qa_name(evaluation.evaluator_name)
+    )
+
+
+def _is_score_only_evaluation_row(row: dict[str, Any]) -> bool:
+    if row.get("evaluation_role") == "score_only":
+        return True
+    return (
+        row.get("evaluator_type") == "model"
+        and not bool(row.get("runtime_blocking"))
+        and _is_model_qa_name(str(row.get("evaluator_name") or ""))
+    )
+
+
+def _is_model_qa_name(evaluator_name: str) -> bool:
+    lowered = evaluator_name.lower()
+    return "qa" in lowered or "quality" in lowered
+
+
 def content_hash(content: Any | None = None, file_path: str | None = None) -> str:
     digest = hashlib.sha256()
     if content is not None:
@@ -209,13 +234,16 @@ def create_evaluation(
     conn.execute(
         """INSERT INTO evaluations(
             id, artifact_id, step_run_id, evaluator_type, evaluator_name, evaluator_version,
-            status, hard_gate_passed, score, dimension_scores_json, issues_json,
-            evidence_json, raw_result_ref, confidence, recovered, created_at
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            status, hard_gate_passed, evaluation_role, score_status, runtime_blocking,
+            retry_eligible, score, dimension_scores_json, issues_json, evidence_json,
+            raw_result_ref, confidence, recovered, created_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             evaluation_id, artifact_id, step_run_id, evaluation.evaluator_type,
             evaluation.evaluator_name, evaluation.evaluator_version, evaluation.status,
-            int(evaluation.hard_gate_passed), evaluation.score, _json(evaluation.dimension_scores),
+            int(evaluation.hard_gate_passed), evaluation.evaluation_role,
+            evaluation.score_status, int(evaluation.runtime_blocking),
+            int(evaluation.retry_eligible), evaluation.score, _json(evaluation.dimension_scores),
             _json([issue.model_dump(mode="json") for issue in evaluation.issues]),
             _json(evaluation.evidence), evaluation.raw_result_ref, evaluation.confidence,
             int(evaluation.recovered), now(),
@@ -238,12 +266,16 @@ def commit_artifact(
         raise ValueError("stale artifact cannot be committed")
     if not evaluations:
         raise ValueError("artifact commit requires at least one evaluation")
+    gate_evaluations = [
+        evaluation for evaluation in evaluations
+        if not _is_score_only_evaluation(evaluation)
+    ]
     if any(not evaluation.hard_gate_passed or evaluation.status in {"failed", "error"}
-           for evaluation in evaluations):
+           for evaluation in gate_evaluations):
         raise ValueError("hard gate evaluation failed")
-    if any(issue.severity.value == "blocker" for evaluation in evaluations for issue in evaluation.issues):
+    if any(issue.severity.value == "blocker" for evaluation in gate_evaluations for issue in evaluation.issues):
         raise ValueError("unresolved blocker prevents artifact commit")
-    if any(evaluation.recovered for evaluation in evaluations):
+    if any(evaluation.recovered for evaluation in gate_evaluations):
         raise ValueError("recovered evaluation cannot independently commit an artifact")
 
     created_evaluations = [
@@ -251,10 +283,11 @@ def commit_artifact(
         for evaluation in evaluations
     ]
     evaluator_types = {
-        evaluation.evaluator_type for evaluation in evaluations
+        evaluation.evaluator_type for evaluation in gate_evaluations
     } | {
         row["evaluator_type"] for row in get_evaluations(artifact_id)
         if row["hard_gate_passed"] and row["status"] not in {"failed", "error"}
+        and not _is_score_only_evaluation_row(row)
     }
     if artifact["type"] == "delivery_package" and {"human", "file"}.issubset(evaluator_types):
         trust_level = "T5"

@@ -42,7 +42,9 @@ def _loop(*, allow_warning: bool = False, max_iterations: int = 4) -> AgentLoop[
 
 def _evaluate(raw: str):
     value = Candidate.model_validate(json.loads(raw))
-    messages = [] if value.value >= 2 else [f"value {value.value} is below contract"]
+    messages = [] if value.value >= 2 else [
+        "字段 value：Input should be greater than or equal to 2"
+    ]
     return value, issues_from_messages(messages, subject="episode:e1")
 
 
@@ -111,7 +113,7 @@ def test_schema_issue_fingerprint_includes_field_and_rule() -> None:
 
 
 def test_agent_loop_stops_same_issue_fingerprint_and_rejects_blocker_warning() -> None:
-    """VAL-422：allow_warning_candidate 不得把带 blocker 的候选当成 warning 通过。"""
+    """Structural blockers still cannot be published as warning candidates."""
 
     async def producer(_iteration, *_args):
         return '{"value": 1}'
@@ -131,7 +133,8 @@ def test_agent_loop_stops_when_issue_set_changes_without_quality_gain() -> None:
     def evaluate(raw: str):
         value = Candidate.model_validate(json.loads(raw))
         return value, issues_from_messages(
-            [f"distinct problem {abs(value.value)}"], subject=f"episode:e{abs(value.value)}"
+            [f"字段 value：distinct schema problem {abs(value.value)}"],
+            subject=f"episode:e{abs(value.value)}",
         )
 
     with pytest.raises(AgentLoopFailure) as exc:
@@ -221,7 +224,7 @@ def test_warning_fallback_keeps_value_issues_and_artifact_from_same_iteration(
         if "value" in payload:
             value = Candidate.model_validate(payload)
             return value, issues_from_messages(
-                ["candidate business problem"], subject="episode:e1"
+                ["字段 value：candidate violates structural contract"], subject="episode:e1"
             )
         return None, issues_from_messages(
             [f"字段 value：第 {payload['broken']} 次修复缺失"],
@@ -325,7 +328,9 @@ def test_repair_loop_can_retain_complete_task_and_candidate(monkeypatch) -> None
         "screenplay",
         user_prompt,
         Candidate,
-        lambda candidate: [] if candidate.value >= 2 else ["主线台词缺失"],
+        lambda candidate: [] if candidate.value >= 2 else [
+            "字段 value：Input should be greater than or equal to 2"
+        ],
         loop=_loop(max_iterations=2),
         repair_user_prompt_limit=None,
         repair_candidate_limit=None,
