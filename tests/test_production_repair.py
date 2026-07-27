@@ -720,11 +720,12 @@ async def test_noop_patch_attempts_consume_activation_budget(monkeypatch):
         resume=True,
     )
 
-    assert attempts == 2
-    stalled = screenplay_repair.get_production_revision(revision.id)
-    assert stalled is not None
-    assert stalled.checkpoint_json["phase"] == "WAITING_RETRY"
-    assert stalled.checkpoint_json["yield_reason"] == "activation_budget"
+    assert attempts == 0
+    published = screenplay_repair.get_production_revision(revision.id)
+    assert published is not None
+    # Score-only：质量 Issue 不再消耗 activation patch 预算，结构可交付即发布。
+    assert published.checkpoint_json["phase"] == "SUCCEEDED"
+    assert published.checkpoint_json.get("yield_reason") is None
 
 
 @pytest.mark.asyncio

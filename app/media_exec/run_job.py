@@ -1481,13 +1481,14 @@ async def _maybe_auto_qa(
     *,
     allow_autonomous_retake: bool = True,
 ) -> bool:
-    """自动质检 + 自动重抽。
+    """旁路视频评分（PRD QA-SO）：只写 ``qa_json``，永不触发 ``QA_RETAKE`` / enqueue。
 
-    返回 True 表示重抽已结束/不会再抽，调用方应 ``force_best`` 采纳最高分视频，
-    避免槽位用尽后镜头无成片。QA 异常不阻塞已落盘视频。
+    返回 True 表示评分流程结束，调用方可用 ``force_best`` 在技术合格视频中选取版本。
+    ``allow_autonomous_retake`` 保留签名兼容，但本函数不再据此创建付费重抽。
     """
+    del allow_autonomous_retake
     if get_setting("auto_qa") != "true" or not shutil.which("ffmpeg"):
-        return False
+        return True
     conn = get_conn()
     try:
         shot = conn.execute("SELECT * FROM shots WHERE id=?", (job["shot_id"],)).fetchone()
@@ -1502,7 +1503,6 @@ async def _maybe_auto_qa(
             effective_primary_action,
             effective_state_in,
             planned_state_out,
-            retry_patch_for_failure,
         )
         from app.schemas import Shot
         shot_model = Shot(
@@ -1545,6 +1545,13 @@ async def _maybe_auto_qa(
             ),
             visual_anchors=visual_anchors,
         )
+        qa["evaluation_role"] = "score_only"
+        qa["runtime_blocking"] = False
+        qa["retry_eligible"] = False
+        if qa.get("overall") is None or qa.get("status") == "unverified" or qa.get("qa_recovered"):
+            qa["score_status"] = "unavailable"
+        else:
+            qa["score_status"] = "scored"
         dependency = meta_for_qa.get("review_dependency_snapshot") or {}
         if dependency.get("asset_soft_warnings"):
             qa["input_asset_soft_warnings"] = dependency["asset_soft_warnings"]
@@ -1552,116 +1559,38 @@ async def _maybe_auto_qa(
             qa["input_asset_qualification"] = dependency["asset_inputs"]
         _assert_review_dependency_fence(job, version_id, "qa_result")
         _set_version(version_id, qa_json=json.dumps(qa, ensure_ascii=False))
-        # QA 非标准输出虽可恢复部分分数，但证据不足以触发付费重抽。
-        # 重抽不会发生：交由 force_best 在技术合格视频里挑最高分，避免无成片。
-        if qa.get("qa_recovered") or qa.get("status") == "unverified" or qa.get("overall") is None:
-            log_provider_call(
-                "vlm_qa", config.MODEL_VLM, "QA_UNVERIFIED_NO_RETAKE", None, 0,
-                meta={"shot_id": job["shot_id"], "version_id": version_id, "qa": qa})
-            return True
-        threshold = float(get_setting("auto_retake_threshold") or 0.6)
         version = conn.execute("SELECT * FROM shot_versions WHERE id=?", (version_id,)).fetchone()
-        meta = json.loads(version["image_inputs"] or "{}") if version else {}
-        hard_failures = classify_video_hard_failures(qa, technical=json.loads(version["technical_validation_json"] or "{}") if version else {})
-        low_score = 0 <= qa.get("overall", -1) < threshold
-        needs_retake = bool(hard_failures) or low_score
-        if low_score and not hard_failures:
-            # 未校准的 VLM 总分不能单独触发付费视频重抽。保留为 B 级风险候选；
-            # 普通模式兜底采用，complete 模式交给 Supervisor 统一决定。
-            log_provider_call(
-                "vlm_qa", config.MODEL_VLM, "QA_LOW_SCORE_REVIEW", None, 0,
-                meta={
-                    "shot_id": job["shot_id"], "version_id": version_id,
-                    "overall": qa.get("overall"), "threshold": threshold,
-                },
-            )
-            return True if allow_autonomous_retake else False
-        if needs_retake and meta.get("mode") == video_modes.REFERENCE_IMAGE_MODE:
-            logs = meta.get("reference_failure_logs") or []
-            # 只留轻量元信息做审计；绝不把带 base64 url 的参考图整份塞进日志，
-            # 否则会在 image_inputs 里成倍堆积 base64，撑爆单集响应体积。
-            log_refs = [
-                {k: v for k, v in (r or {}).items() if k not in ("url", "path")}
-                for r in (meta.get("reference_images") or [])
-            ]
-            logs.append({
-                "mode": video_modes.REFERENCE_IMAGE_MODE,
-                "reason": "Video QA failed after reference image mode.",
-                "reference_images": log_refs,
-                "prompt": version["prompt_text"][:500],
-                "qa": qa,
+        hard_failures = classify_video_hard_failures(
+            qa,
+            technical=json.loads(version["technical_validation_json"] or "{}") if version else {},
+        )
+        log_provider_call(
+            "vlm_qa", config.MODEL_VLM, "QA_SCORE_ONLY", None, 0,
+            meta={
+                "shot_id": job["shot_id"],
+                "version_id": version_id,
+                "overall": qa.get("overall"),
+                "score_status": qa.get("score_status"),
                 "hard_failures": hard_failures,
-            })
-            meta["reference_failure_logs"] = logs
-            meta["retry_reason"] = "视频质检未通过，已按失败类型定向重抽。"
-            meta["hard_failures"] = hard_failures
-            _set_version(version_id, image_inputs=json.dumps(meta, ensure_ascii=False))
-            auto_retake_count = int(meta.get("auto_retake_count") or 0)
-            from app.media_pipeline.retry_policy import decide_qa_retake
-            decision = decide_qa_retake(
-                auto_retake_count=auto_retake_count,
-                qa_overall=float(qa.get("overall", -1)),
-                threshold=threshold,
-                hard_failures=hard_failures,
-            )
-            if decision.allow and allow_autonomous_retake:
-                extra_neg: list[str] = list(qa.get("issues", [])[:3])
-                critique: list[str] = []
-                for ft in hard_failures[:3]:
-                    patch = retry_patch_for_failure(ft)
-                    extra_neg.extend(patch.get("extra_negative") or [])
-                    if patch.get("hint"):
-                        critique.append(str(patch["hint"]))
-                enqueue_shot(
-                    job["shot_id"],
-                    extra_negative=extra_neg[:8],
-                    critique=critique[:6] or None,
-                    reroll=True,
-                    after_shot_id=job["after_shot_id"],
-                    auto_retake_count=decision.attempt,
-                    dependency_snapshot=meta.get("review_dependency_snapshot"),
-                )
-                return False
-            if decision.allow:
-                log_provider_call(
-                    "vlm_qa", config.MODEL_VLM, "QA_RETAKE_DEFERRED_TO_SUPERVISOR", None, 0,
-                    meta={"shot_id": job["shot_id"], "version_id": version_id},
-                )
-                return False
-            # 达上限：停止烧钱，强制采纳当前最高分（即使未过 QA）
-            log_provider_call(
-                "vlm_qa", config.MODEL_VLM, "QA_RETAKE_EXHAUSTED", None, 0,
-                meta={
-                    "shot_id": job["shot_id"],
-                    "hard_failures": hard_failures,
-                    "reason": decision.reason,
-                    "force_best": True,
-                },
-            )
-            return True
-        if (
-            allow_autonomous_retake
-            and
-            0 <= qa.get("overall", -1) < threshold
-            and version["version_no"] == 1
-            and qa.get("issues")
-            and meta.get("mode") != video_modes.REFERENCE_IMAGE_MODE
-        ):
-            # 旧非参考图路径兜底；参考图模式由上面统一策略覆盖
-            enqueue_shot(
-                job["shot_id"], extra_negative=qa["issues"][:3],
-                after_shot_id=job["after_shot_id"],
-                dependency_snapshot=meta.get("review_dependency_snapshot"),
-            )
-            return False
-        if needs_retake:
-            # 不会再自动重抽（例如非参考图且非首版）：有视频则兜底采纳最高分
-            return True
-        return False
+                "retake": False,
+            },
+        )
+        return True
     except ReviewDependencyFence:
         raise
     except Exception as exc:  # noqa: BLE001 QA 异常只记录，不影响已落盘的视频
-        _set_version(version_id, qa_json=json.dumps({"overall": -1, "issues": [f"质检未完成：{exc}"]}, ensure_ascii=False))
+        _set_version(
+            version_id,
+            qa_json=json.dumps({
+                "overall": None,
+                "issues": [f"质检未完成：{exc}"],
+                "evaluation_role": "score_only",
+                "score_status": "unavailable",
+                "runtime_blocking": False,
+                "retry_eligible": False,
+                "diagnostic": "qa_exception",
+            }, ensure_ascii=False),
+        )
         log_provider_call("vlm_qa", config.MODEL_VLM, "QA_ERROR", None, 0, error=str(exc))
         return True
 

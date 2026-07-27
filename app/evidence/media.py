@@ -386,10 +386,10 @@ def select_best_video_candidate(
 ) -> dict[str, Any] | None:
     """比较技术合格候选并落盘采用理由。
 
-    默认只采纳「硬门禁通过且 QA ≥ 阈值」的最高分。
-    若无一达标，且 ``force_best`` 或重抽名额已用尽，则兜底采纳技术合格中分数最高的版本
-    （即使未过 QA / 有硬门禁问题），避免槽位用尽后镜头无成片。
+    Score-only（PRD QA-SO #29）：技术可解码即具备采用资格；QA 分数仅用于排序与展示。
+    ``force_best`` 保留兼容；不再因「等待 QA 重抽」而返回 None。
     """
+    del force_best
     conn = get_conn()
     threshold_row = conn.execute(
         "SELECT value FROM settings WHERE key='auto_retake_threshold'"
@@ -402,8 +402,6 @@ def select_best_video_candidate(
         "SELECT * FROM shot_versions WHERE shot_id=? AND status='succeeded' ORDER BY version_no",
         (shot_id,),
     ).fetchall()
-    hard_gate_enabled = _video_hard_gate_enabled()
-    qualified: list[dict[str, Any]] = []
     technical_pool: list[dict[str, Any]] = []
     for row in rows:
         technical = json.loads(row["technical_validation_json"] or "{}")
@@ -418,9 +416,7 @@ def select_best_video_candidate(
             continue
         qa = json.loads(row["qa_json"] or "{}")
         score = _qa_overall(qa)
-        hard_failures = (
-            classify_video_hard_failures(qa, technical=technical) if hard_gate_enabled else []
-        )
+        hard_failures = classify_video_hard_failures(qa, technical=technical)
         entry = {
             "id": row["id"],
             "version_no": row["version_no"],
@@ -430,34 +426,33 @@ def select_best_video_candidate(
             "qa_recovered": bool(qa.get("qa_recovered")),
         }
         technical_pool.append(entry)
-        if entry["qa_recovered"] or hard_failures or score is None or score < threshold:
-            continue
-        qualified.append(entry)
 
-    fallback = False
-    if qualified:
-        candidates = qualified
-    else:
-        if not force_best and not _shot_retakes_exhausted(conn, shot_id):
-            return None
-        if not technical_pool:
-            return None
-        candidates = technical_pool
-        fallback = True
+    if not technical_pool:
+        return None
+
+    # 优先推荐分数达标者；否则取技术合格中最高分（不阻塞采用）。
+    qualified = [
+        entry for entry in technical_pool
+        if not entry["qa_recovered"]
+        and not entry["hard_failures"]
+        and entry["score"] >= threshold
+    ]
+    candidates = qualified or technical_pool
+    fallback = not bool(qualified)
 
     ordered = sorted(candidates, key=lambda item: (item["score"], item["version_no"]), reverse=True)
     best = ordered[0]
     margin = best["score"] - ordered[1]["score"] if len(ordered) > 1 else best["score"]
     if fallback:
         reason = (
-            f"重抽名额已用尽（或强制兜底），自动比较 {len(ordered)} 个技术合格视频；"
+            f"自动比较 {len(ordered)} 个技术合格视频（QA 仅评分）；"
             f"采纳最高分 v{best['version_no']}，质量分 {best['score']:.3f}"
-            f"（未达阈值 {threshold:.3f} 或未过硬门禁），领先次优 {margin:.3f}。"
+            f"（展示阈值 {threshold:.3f}），领先次优 {margin:.3f}。"
         )
     else:
         reason = (
-            f"自动比较 {len(ordered)} 个技术门禁和连续性硬门禁通过候选；选择 v{best['version_no']}，"
-            f"硬门禁通过，质量分 {best['score']:.3f}（阈值 {threshold:.3f}），领先次优 {margin:.3f}。"
+            f"自动比较 {len(ordered)} 个技术合格候选；选择 v{best['version_no']}，"
+            f"质量分 {best['score']:.3f}，领先次优 {margin:.3f}。"
         )
     previous = conn.execute(
         "SELECT adopted_version_id FROM shots WHERE id=?", (shot_id,)
@@ -525,15 +520,35 @@ def record_reference_asset(
         subject=scope_id,
         evaluator_name=f"{asset_type}_consistency_qa",
     ) if qa else None
-    if model_eval and (model_eval.score is None or model_eval.score < min_score * 100):
-        model_eval.hard_gate_passed = False
-        model_eval.status = "failed"
-        model_eval.issues.append(_issue(
-            "REFERENCE_QUALITY_THRESHOLD",
-            f"参考资产质量分未达到 {min_score:.2f}",
-            scope_id,
-        ))
-    acceptable = technical["passed"] and (model_eval is None or model_eval.hard_gate_passed)
+    # Score-only：低分/hard_gate/blocker 不得阻止技术有效资产落库（PRD QA-SO）。
+    if model_eval is not None:
+        model_eval.hard_gate_passed = True
+        model_eval.recovered = False
+        if (
+            model_eval.score is None
+            or model_eval.score < min_score * 100
+            or model_eval.status in {"failed", "error", "warning"}
+        ):
+            if model_eval.score is None or model_eval.score < min_score * 100:
+                model_eval.issues.append(_issue(
+                    "REFERENCE_QUALITY_SCORE_ONLY",
+                    f"参考资产质量分 {None if model_eval.score is None else model_eval.score / 100:.2f} "
+                    f"低于展示阈值 {min_score:.2f}（仅评分，不拦截）",
+                    scope_id,
+                    blocker=False,
+                ))
+            model_eval.status = "scored"
+        demoted: list[Issue] = []
+        for issue in model_eval.issues:
+            if issue.severity == IssueSeverity.BLOCKER:
+                demoted.append(issue.model_copy(update={"severity": IssueSeverity.WARNING}))
+            else:
+                demoted.append(issue)
+        model_eval.issues = demoted
+        model_eval.status = "scored" if model_eval.status in {"failed", "error", "warning"} else model_eval.status
+        if model_eval.status not in {"passed", "scored", "warning"}:
+            model_eval.status = "scored"
+    acceptable = technical["passed"]
     artifact = repository.create_artifact(
         EvidenceArtifact(
             type=asset_type,

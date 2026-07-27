@@ -611,26 +611,28 @@ async def adopt_scene_candidate(
         raise ValueError("候选已过期，不能采纳")
     current_gate = scene_candidate_gate(artifact_id, require_current_policy=False)
     latest_qa = dict(current_gate.get("qa") or {})
-    hard_failures = list(current_gate.get("hard_failures") or [])
     warnings = list(current_gate.get("warnings") or [])
+    # Score-only：gate 报告的 hard_failures 一律降为 soft warning（PRD QA-SO #19）。
+    for item in (current_gate.get("hard_failures") or []):
+        text = str(item).strip()
+        if text and text not in warnings:
+            warnings.append(text)
     from app.multiview import scene_multiview_enabled
     multiview_enabled = scene_multiview_enabled()
     if multiview_enabled:
         from app.scene_policy import normalize_scene_image_qa
         latest_qa = normalize_scene_image_qa(latest_qa, environment_only=True)
-        hard_failures.extend(
-            str(item) for item in (latest_qa.get("hard_failures") or []) if str(item).strip()
-        )
+        for item in (latest_qa.get("hard_failures") or []):
+            text = str(item).strip()
+            if text and text not in warnings:
+                warnings.append(text)
         if latest_qa.get("hard_gate_passed") is not True:
             detail = "、".join(str(item) for item in (latest_qa.get("uncertainties") or [])[:4])
-            hard_failures.append(
-                "候选缺少可用的新版纯场景硬门禁证据"
-                + (f"（{detail}）" if detail else "")
-            )
-    hard_failures = list(dict.fromkeys(hard_failures))
-    if hard_failures:
-        raise ValueError("候选存在硬门禁失败，禁止采纳：" + "；".join(hard_failures[:6]))
+            note = "候选 QA 未达展示阈值（仅评分，不拦截采纳）" + (f"：{detail}" if detail else "")
+            if note not in warnings:
+                warnings.append(note)
     if warnings and not (reason or "").strip():
+        # 软警告仍要求理由，便于审计；但不因 hard_failures 硬拒
         raise ValueError("候选存在软警告，必须填写采纳理由")
     try:
         content = artifact.get("content")
@@ -747,7 +749,7 @@ async def adopt_scene_candidate(
 
         current_views = list_scene_views(current["id"], conn=conn)
         if not scene_pack_is_usable(current, current_views):
-            raise ValueError("当前场景整包尚未通过新版硬门禁，请先使用“检查并补齐”完成整包")
+            raise ValueError("当前场景整包缺少必需视角文件，请先使用“检查并补齐”完成整包")
         try:
             current_group = json.loads(current["group_qa_json"] or "{}")
         except (TypeError, ValueError, json.JSONDecodeError):
@@ -774,9 +776,21 @@ async def adopt_scene_candidate(
         group_qa = await review_scene_pack_consistency(
             required_views, scene.get("scene_canonical") or "",
         )
+        # Score-only：整包 QA 仅写入评分；结构齐全即可采纳（PRD QA-SO #19/#21）。
+        group_qa = {
+            **group_qa,
+            "evaluation_role": "score_only",
+            "runtime_blocking": False,
+            "retry_eligible": False,
+        }
         if group_qa.get("status") not in {"ready", "warning"} or group_qa.get("hard_failures"):
-            reasons = group_qa.get("hard_failures") or group_qa.get("issues") or ["整包一致性未通过"]
-            raise ValueError("候选未通过整包硬门禁，当前采用包已保留：" + "；".join(map(str, reasons[:6])))
+            for item in (group_qa.get("hard_failures") or group_qa.get("issues") or []):
+                text = str(item).strip()
+                if text and text not in warnings:
+                    warnings.append(text)
+            note = "候选整包 QA 存在质量风险（仅评分，不拦截采纳）"
+            if note not in warnings:
+                warnings.append(note)
 
         # 先克隆当前包到负数历史槽，再原子更新当前包。这样既不改变下游引用 ID，
         # 也保留了可回滚的完整旧版本（含全部视角与证据）。
@@ -1170,15 +1184,13 @@ async def generate_scene_refs(
             base_prompt = ((sc.scene_prompt_override or "").strip()
                            or scene_ref_prompt(style, sc.scene_canonical))
             last_error: Exception | None = None
-            critique = ""
-            for attempt in range(1, 3):
+            # Score-only：只生成一次；QA 低分不带 critique 重生（PRD QA-SO #18）。
+            for attempt in range(1, 2):
                 scene_id: str | None = None
                 path = str(Path(scene_ref_path(project_id, sc.name)).with_name(
                     f"{_safe_name(sc.name)}__{new_id('candidate')}.jpg"
                 ))
                 prompt = base_prompt
-                if critique:
-                    prompt += f"。上一版一致性检查问题：{critique}。本版必须逐条修复。"
                 try:
                     item = await _generate_scene_image(
                         prompt,
@@ -1208,11 +1220,9 @@ async def generate_scene_refs(
                         ),
                         qa=qa,
                     )
-                    if artifact["status"] != "approved":
-                        critique = "；".join(str(item) for item in (qa.get("issues") or []))[:400]
-                        detail = f"：{critique}" if critique else ""
+                    if artifact["status"] not in {"approved", "validated"}:
                         last_error = ContentGenerationError(
-                            f"场景图一致性检查未通过：{sc.name}（第 {attempt} 次）{detail}"
+                            f"场景图技术校验未通过：{sc.name}"
                         )
                         continue
                     from app.multiview import scene_multiview_enabled
@@ -1442,11 +1452,9 @@ async def _generate_and_register_scene(project_id: str, name: str, scene_canonic
     prompt = base_prompt
     qa: dict = {}
     artifact = None
-    critique = ""
-    for attempt in range(1, 3):
+    # Score-only：只生成一次，不因 QA 带 critique 重生（PRD QA-SO）。
+    for attempt in range(1, 2):
         prompt = base_prompt
-        if critique:
-            prompt += f"。上一版一致性检查问题：{critique}。本版必须逐条修复。"
         dest = str(Path(scene_ref_path(project_id, name, ep_start)).with_name(
             f"{_safe_name(name)}__ep{ep_start}__{new_id('candidate')}.jpg"
         ))
@@ -1472,12 +1480,11 @@ async def _generate_and_register_scene(project_id: str, name: str, scene_canonic
                 parent_artifact_ids=parent_ids,
                 qa=qa,
             )
-            if artifact["status"] == "approved":
+            if artifact["status"] in {"approved", "validated"}:
                 break
-            critique = "；".join(str(item) for item in (qa.get("issues") or []))[:400]
-        except Exception:  # noqa: BLE001 出图失败仍允许一次有界重试
+        except Exception:  # noqa: BLE001 技术失败不伪装成 QA 问题
             continue
-    if not artifact or artifact["status"] != "approved":
+    if not artifact or artifact["status"] not in {"approved", "validated"}:
         return None
     conn.execute(
         "INSERT INTO scene_references(id, project_id, scene_name, ep_start, ep_end, scene_canonical, "
@@ -1794,9 +1801,9 @@ async def _refresh_scene_on_state_change(
     )
     await _save_image_item(item, dest)
     qa = await _review_scene_ref(dest, {"name": name, "scene_canonical": new_canonical})
-    # 生产评估始终带 policy_version；无版本分支仅兼容注入旧测试桩，不能让真实旧证据入库。
-    if qa.get("policy_version") and qa.get("hard_gate_passed") is not True:
-        raise hiagent.ProviderError(f"场景状态演进主图 QA 未通过：{name}")
+    # Score-only：演进主图技术落盘即可，QA 不通过不阻断（PRD QA-SO #21）。
+    if not Path(dest).exists() or Path(dest).stat().st_size <= 0:
+        raise hiagent.ProviderError(f"场景状态演进主图未落盘：{name}")
 
     cols = {row[1] for row in conn.execute("PRAGMA table_info(scene_references)").fetchall()}
     new_scene_id = new_id("scene")

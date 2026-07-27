@@ -656,9 +656,9 @@ def _consistency_settings(monkeypatch, *, retries: int) -> None:
 
 
 def test_consistency_agent_regenerates_drifted_reference(monkeypatch) -> None:
-    """Phase 2：低一致性触发 i2i 重生；原图若综合分跌破门禁则进废弃（理由为分数不足，非 consistency_drift）。"""
+    """QA 只评分：低一致性只扣分标记，不触发 i2i 重生或废弃。"""
     bible, shot = _bible(), _shot(shot_no=2)
-    _consistency_settings(monkeypatch, retries=1)
+    _consistency_settings(monkeypatch, retries=0)
     monkeypatch.setattr(video_modes, "quality_threshold", lambda: 0.8)
 
     anchor = ReferenceImageAsset(id="p1", url="PORTRAIT", type="character", source="asset_library",
@@ -680,11 +680,7 @@ def test_consistency_agent_regenerates_drifted_reference(monkeypatch) -> None:
 
     async def fake_gen_one(*, project_id, episode_no, shot, bible, ref_type, index,
                            content_override=None, seed_inputs=None, extra_instruction=None, skip_inline_qa=False):
-        assert seed_inputs == ["PORTRAIT"], "重生必须以锚点 data URL 做 i2i 种子"
-        assert extra_instruction and "costume" in extra_instruction, "重生提示词须带漂移修复说明"
-        return ReferenceImageAsset(id="g_fixed", url="u2", type=ref_type, source="seedream_generated",
-                                   path="/tmp/fixed.jpg", qualityScore=0.9,
-                                   qa={"overall": 0.9, "absolute_quality": 0.9})
+        raise AssertionError("QA 只评分不应因一致性漂移重生参考图")
 
     monkeypatch.setattr(video_modes, "_generate_one_reference", fake_gen_one)
 
@@ -697,18 +693,18 @@ def test_consistency_agent_regenerates_drifted_reference(monkeypatch) -> None:
         result, rejected_out=rejected, rejection_details=rej_details)
 
     ids = [a.id for a in result]
-    assert "g_fixed" in ids, "重生版应进入候选"
-    assert "g_good" in ids and "p1" in ids, "达标图与锚点应保留"
-    # abs=0.9, cons=0.4 → 综合分约 0.706 < 0.8 → 原漂移图因分数不足废弃
-    assert any(a.id == "g_bad" for a in rejected), "原低一致性图因综合分不足进废弃"
-    assert all(d.get("reason") == "quality_below_threshold" for d in rej_details if d.get("reason"))
-    assert not any(d.get("reason") == "consistency_drift" for d in rej_details)
+    assert "g_good" in ids and "g_bad" in ids and "p1" in ids, "漂移图只扣分标记，仍保留"
+    bad_asset = next(a for a in result if a.id == "g_bad")
+    assert bad_asset.qa["consistency"] == 0.4
+    assert bad_asset.rejectReason == "quality_below_threshold_score_only"
+    assert rejected == []
+    assert rej_details == []
 
 
 def test_consistency_agent_drops_unfixable_reference(monkeypatch) -> None:
-    """Phase 2：重生后仍低一致性 → 综合分跌破门禁才废弃；不再使用 consistency_drift_unfixable。"""
+    """QA 只评分：持续低一致性也只保留分数/漂移标记，不重生不丢弃。"""
     bible, shot = _bible(), _shot(shot_no=2)
-    _consistency_settings(monkeypatch, retries=1)
+    _consistency_settings(monkeypatch, retries=0)
     monkeypatch.setattr(video_modes, "quality_threshold", lambda: 0.8)
 
     anchor = ReferenceImageAsset(id="p1", url="PORTRAIT", type="character", source="asset_library",
@@ -730,9 +726,7 @@ def test_consistency_agent_drops_unfixable_reference(monkeypatch) -> None:
 
     async def fake_gen_one(*, project_id, episode_no, shot, bible, ref_type, index,
                            content_override=None, seed_inputs=None, extra_instruction=None, skip_inline_qa=False):
-        return ReferenceImageAsset(id="g_bad_fixed", url="u2", type=ref_type, source="seedream_generated",
-                                   path="/tmp/fixed.jpg", qualityScore=0.9,
-                                   qa={"overall": 0.9, "absolute_quality": 0.9})
+        raise AssertionError("QA 只评分不应因一致性漂移重生参考图")
 
     monkeypatch.setattr(video_modes, "_generate_one_reference", fake_gen_one)
 
@@ -743,10 +737,12 @@ def test_consistency_agent_drops_unfixable_reference(monkeypatch) -> None:
     result = video_modes._finalize_reference_selection(result, rejected_out=rejected)
 
     ids = [a.id for a in result]
-    assert "g_bad" not in ids and "g_bad_fixed" not in ids, "综合分不足的漂移图应被门禁淘汰"
-    assert "g_good" in ids and "p1" in ids, "达标图与锚点保留"
-    assert all(not a.selectedForSeedance for a in rejected), "废弃图不喂 Seedance"
-    assert all(a.rejectReason == "quality_below_threshold" for a in rejected)
+    assert "g_good" in ids and "g_bad" in ids and "p1" in ids, "低一致性图仍保留给 Seedance"
+    bad_asset = next(a for a in result if a.id == "g_bad")
+    assert bad_asset.qa["consistency"] == 0.3
+    assert bad_asset.selectedForSeedance is True
+    assert bad_asset.rejectReason == "quality_below_threshold_score_only"
+    assert rejected == []
 
 
 def test_consistency_agent_skips_without_anchor(monkeypatch) -> None:

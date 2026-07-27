@@ -28,6 +28,10 @@ describe('场景主图与附加视角状态', () => {
         pack_status: 'failed',
         qa: { overall: 0.95, status: 'warning', hard_gate_passed: true, hard_failures: [] },
         group_qa: { status: 'failed', hard_failures: ['缺少必需视角：reverse_angle'] },
+        views: [
+          { id: 'front', view_role: 'establishing', image_url: '/media/forest.jpg' },
+          { id: 'reverse', view_role: 'reverse_angle', image_url: '/media/forest-reverse.jpg' },
+        ],
       }],
     }
 
@@ -35,7 +39,7 @@ describe('场景主图与附加视角状态', () => {
     expect(sceneUsability(scene, false)).toBe('available')
   })
 
-  it('主图自身硬失败时仍不可用', () => {
+  it('主图自身 QA 失败时仍按文件存在判为可用', () => {
     const scene = {
       name: '错误场景',
       scene_canonical: '室内',
@@ -48,7 +52,27 @@ describe('场景主图与附加视角状态', () => {
       }],
     }
 
-    expect(sceneAvailability(scene, false)).toBe('failed')
+    expect(sceneAvailability(scene, false)).toBe('warning')
+    expect(sceneUsability(scene, false)).toBe('available')
+  })
+
+  it('整包模式缺少必需视角文件时不可用', () => {
+    const scene = {
+      name: '半包场景',
+      scene_canonical: '室内',
+      scene_refs: [{
+        ep_start: 1,
+        ep_end: null,
+        image_url: '/media/room.jpg',
+        pack_status: 'failed',
+        group_qa: { required_views: ['establishing', 'reverse_angle'] },
+        views: [
+          { id: 'front', view_role: 'establishing', image_url: '/media/room.jpg' },
+        ],
+      }],
+    }
+
+    expect(sceneAvailability(scene, false)).toBe('missing')
     expect(sceneUsability(scene, false)).toBe('unavailable')
   })
 })

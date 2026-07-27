@@ -212,8 +212,9 @@ def test_keyframe_gate_and_weighted_overall() -> None:
     assert overall is not None and overall >= 0.8
     qa = {**scores, "overall": overall, "hard_failures": [], "status": "scored"}
     assert keyframe_gate_passed(qa) is True
-    bad = {**qa, "overall": None, "status": "unverified"}
-    assert keyframe_gate_passed(bad) is False
+    bad = {**qa, "overall": None, "status": "unverified", "hard_failures": ["watermark"]}
+    # Score-only：未评分/低分不再阻断关键帧作为视频输入。
+    assert keyframe_gate_passed(bad) is True
 
 
 def test_normalize_appearance_change_blocks_identity_by_default() -> None:
@@ -480,7 +481,7 @@ def test_manifest_revisions_match_detects_same_parent_view_redo() -> None:
 
 
 def test_failed_character_view_redo_preserves_ready_pack(tmp_path, monkeypatch) -> None:
-    """候选图未通过单图 QA 时，不得覆盖线上 ready 视角或污染整包状态。"""
+    """QA 只评分：候选图低分仍替换指定视角，整包保持 ready。"""
     import asyncio
     import base64
     import threading
@@ -532,18 +533,20 @@ def test_failed_character_view_redo_preserves_ready_pack(tmp_path, monkeypatch) 
     ))
 
     current = conn.execute(
-        "SELECT image_path, status, input_fingerprint FROM character_portrait_views "
+        "SELECT image_path, status, input_fingerprint, qa_json FROM character_portrait_views "
         "WHERE portrait_id='portrait_1' AND view_role='profile'",
     ).fetchone()
     pack = conn.execute(
         "SELECT pack_status FROM character_portraits WHERE id='portrait_1'",
     ).fetchone()
-    assert result["status"] == "failed"
-    assert result["preserved_previous"] is True
-    assert dict(current) == {
-        "image_path": old_paths["profile"], "status": "ready",
-        "input_fingerprint": "old-profile",
-    }
+    assert result["status"] == "ready"
+    assert current["image_path"] != old_paths["profile"]
+    assert Path(current["image_path"]).read_bytes() == b"candidate"
+    assert current["status"] == "ready"
+    assert current["input_fingerprint"] != "old-profile"
+    qa = json.loads(current["qa_json"])
+    assert qa["overall"] == 0.2
+    assert qa["runtime_blocking"] is False
     assert pack["pack_status"] == "ready"
 
 

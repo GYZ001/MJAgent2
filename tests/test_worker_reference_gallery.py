@@ -298,8 +298,13 @@ def test_complete_mode_qa_records_score_but_defers_retake_to_supervisor(monkeypa
     }, version, "/tmp/v.mp4", allow_autonomous_retake=False))
 
     assert enqueued == []
-    assert force_best is False
+    # Score-only：即使 allow_autonomous_retake=False，也只旁路评分并返回 True；
+    # complete 模式下由外层调用方把 force_best 置 False，禁止 Worker 自行采用。
+    assert force_best is True
     qa = json.loads(conn.execute(
         "SELECT qa_json FROM shot_versions WHERE id=?", (version,),
     ).fetchone()["qa_json"])
     assert qa["overall"] == 0.1
+    assert qa.get("evaluation_role") == "score_only"
+    assert qa.get("runtime_blocking") is False
+    assert qa.get("retry_eligible") is False

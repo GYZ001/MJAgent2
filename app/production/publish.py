@@ -16,6 +16,31 @@ from app.production.revision import get_production_revision, set_published_artif
 from app.production.structured_issues import blocker_count, must_fix_count
 
 
+_STRUCTURAL_ISSUE_CODES = {
+    "ARTIFACT_MISSING",
+    "ARTIFACT_HASH_MISMATCH",
+    "FORMAT_CONTRACT_INVALID",
+    "ID_INVALID",
+    "INVALID_ID",
+    "REQUIRED_BINDING_MISSING",
+    "SCHEMA_INVALID",
+    "SOURCE_BINDING_MISSING",
+    "SOURCE_BINDING_INVALID",
+    "VERSION_MISMATCH",
+}
+_STRUCTURAL_ISSUE_TERMS = (
+    "artifact",
+    "schema",
+    "json",
+    "id",
+    "绑定",
+    "缺少必填",
+    "必填字段",
+    "原文证据",
+    "版本已变化",
+)
+
+
 def publish_screenplay(
     *,
     episode_id: str,
@@ -175,5 +200,20 @@ def publish_storyboard(
     }
 
 
+def _is_structural_issue(issue) -> bool:
+    code = str(getattr(issue, "code", "") or "").upper()
+    evidence = getattr(issue, "evidence", None) or {}
+    rule_id = str(evidence.get("rule_id") or "").lower() if isinstance(evidence, dict) else ""
+    category = str(evidence.get("category") or "").lower() if isinstance(evidence, dict) else ""
+    if code in _STRUCTURAL_ISSUE_CODES or category == "structural":
+        return True
+    text = " ".join(
+        str(part or "")
+        for part in (code, rule_id, getattr(issue, "message", ""))
+    ).lower()
+    return any(term.lower() in text for term in _STRUCTURAL_ISSUE_TERMS)
+
+
 def can_issue_certificate(issues: list) -> bool:
-    return blocker_count(issues) == 0 and must_fix_count(issues) == 0
+    structural = [issue for issue in issues if _is_structural_issue(issue)]
+    return blocker_count(structural) == 0 and must_fix_count(structural) == 0

@@ -62,6 +62,49 @@ def _quality(issues: list[Issue]) -> float:
     return 1.0 / (1.0 + penalty)
 
 
+_STRUCTURAL_CODE_NAMES = {
+    "JSON",
+    "SCHEMA",
+    "PARSE",
+    "REQUIRED",
+    "MISSING_FIELD",
+    "TYPE_ERROR",
+    "INVALID_ENUM",
+    "CONTRACT",
+}
+_STRUCTURAL_CODE_PREFIXES = tuple(f"{name}_" for name in _STRUCTURAL_CODE_NAMES)
+_STRUCTURAL_CODE_MARKERS = (
+    "schema",
+    "json",
+    "required_field",
+    "missing_field",
+    "type_error",
+    "invalid_enum",
+    "parse",
+)
+
+
+def is_structural_issue(issue: Issue) -> bool:
+    """Return True for parse/schema/contract-shape failures only."""
+    code = (issue.code or "").strip()
+    upper_code = code.upper()
+    lower_code = code.lower()
+    return (
+        upper_code in _STRUCTURAL_CODE_NAMES
+        or upper_code.startswith(_STRUCTURAL_CODE_PREFIXES)
+        or upper_code.endswith("_REQUIRED")
+        or any(marker in lower_code for marker in _STRUCTURAL_CODE_MARKERS)
+    )
+
+
+def split_structural_quality_issues(issues: list[Issue]) -> tuple[list[Issue], list[Issue]]:
+    structural: list[Issue] = []
+    quality: list[Issue] = []
+    for issue in issues:
+        (structural if is_structural_issue(issue) else quality).append(issue)
+    return structural, quality
+
+
 class AgentLoop(Generic[T]):
     def __init__(
         self,
@@ -129,21 +172,30 @@ class AgentLoop(Generic[T]):
                 raise
 
             previous_raw = raw
-            issue_history.append(issues)
-            fingerprint = issue_fingerprint(issues)
+            structural_issues, _quality_issues = split_structural_quality_issues(issues)
+            repair_issues = structural_issues if value is not None else (structural_issues or issues)
+            issue_history.append(repair_issues)
+            fingerprint = issue_fingerprint(repair_issues)
             fingerprint_history.append(fingerprint)
             # Structural failures have no comparable candidate quality.  Do
             # not count malformed JSON / schema-invalid output as a no-gain
             # round: a later repair may expose a different structural issue,
             # which is progress and must receive the remaining repair budget.
-            quality = _quality(issues) if value is not None else 0.0
+            quality = _quality(repair_issues) if value is not None else 0.0
             if value is not None:
                 if previous_quality is not None:
                     gain = quality - previous_quality
                     no_gain_count = no_gain_count + 1 if gain < self.policy.min_quality_gain else 0
                 previous_quality = quality
+            score_only_quality = value is not None and bool(issues) and not repair_issues
             artifact_id = self._record_candidate(
-                iteration_step_id, iteration_no, raw, value, issues, quality
+                iteration_step_id,
+                iteration_no,
+                raw,
+                value,
+                issues,
+                _quality(issues) if value is not None else quality,
+                score_only_quality=score_only_quality,
             )
             if value is not None:
                 # Keep the fallback value, its evaluation, and its artifact as
@@ -153,16 +205,18 @@ class AgentLoop(Generic[T]):
                 last_value_issues = list(issues)
                 last_value_artifact_id = artifact_id
 
-            if not issues and value is not None:
+            if value is not None and not repair_issues:
+                exit_reason = "contract_passed" if not issues else "score_only_quality"
                 if iteration_step_id:
                     transition_step(
-                        iteration_step_id, "RUNNING", "SUCCEEDED", "contract_passed",
+                        iteration_step_id, "RUNNING", "SUCCEEDED", exit_reason,
                         decision="accept", output_artifact_id=artifact_id,
                     )
                 return AgentLoopResult(
                     value=value,
                     status="accepted",
-                    exit_reason="contract_passed",
+                    exit_reason=exit_reason,
+                    issues=list(issues),
                     iterations=iteration_no,
                     artifact_id=artifact_id,
                 )
@@ -307,16 +361,19 @@ class AgentLoop(Generic[T]):
         value: T | None,
         issues: list[Issue],
         quality: float,
+        *,
+        score_only_quality: bool = False,
     ) -> str | None:
         if not step_run_id:
             return None
+        accepted_candidate = value is not None and (not issues or score_only_quality)
         artifact = repository.create_artifact(
             EvidenceArtifact(
                 type=self.artifact_type,
                 scope_type=self.scope_type,
                 scope_id=self.scope_id,
-                status="validated" if value is not None and not issues else "candidate",
-                trust_level="T2" if value is not None and not issues else ("T1" if value is not None else "T0"),
+                status="validated" if accepted_candidate else "candidate",
+                trust_level="T2" if accepted_candidate else ("T1" if value is not None else "T0"),
                 content=value.model_dump(mode="json") if value is not None else {"raw_output": raw},
                 parent_artifact_ids=self.input_artifact_ids,
                 contract_version=self.contract.version,
@@ -327,13 +384,16 @@ class AgentLoop(Generic[T]):
             evaluator_type="deterministic",
             evaluator_name=f"{self.stage_key}_validator",
             evaluator_version=self.contract.version,
-            status="passed" if not issues else "failed",
-            hard_gate_passed=not issues,
+            status="passed" if not issues else ("warning" if score_only_quality else "failed"),
+            hard_gate_passed=not issues or score_only_quality,
+            evaluation_role="score_only" if score_only_quality else None,
+            score_status="scored" if score_only_quality else None,
+            runtime_blocking=False if score_only_quality else True,
             score=round(quality * 100, 2),
             issues=issues,
             evidence={"iteration_no": iteration_no, "goal": self.goal},
         )
-        if not issues:
+        if accepted_candidate:
             committed = repository.commit_artifact(step_run_id, artifact["id"], [evaluation])
             return str(committed["id"])
         repository.create_evaluation(artifact["id"], evaluation, step_run_id=step_run_id)
