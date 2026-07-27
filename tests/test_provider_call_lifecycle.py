@@ -332,6 +332,27 @@ def test_video_poll_network_error_is_retryable(monkeypatch) -> None:
     assert calls[0][0][:3] == ("video_poll", "video-model", "FAILED")
 
 
+def test_media_download_retries_transient_connect_timeout(monkeypatch) -> None:
+    calls = 0
+
+    async def fake_download_once(url: str, dest_path: str) -> None:
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            request = httpx.Request("GET", url)
+            raise httpx.ConnectTimeout("temporary CDN connect timeout", request=request)
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(hiagent, "_download_once", fake_download_once)
+    monkeypatch.setattr(hiagent.asyncio, "sleep", no_sleep)
+
+    asyncio.run(hiagent.download("https://cdn.invalid/video.mp4", "unused.mp4"))
+
+    assert calls == 3
+
+
 def test_prepare_image_data_urls_records_compression_stats(monkeypatch) -> None:
     raw = b"large-image-payload"
     monkeypatch.setattr(hiagent, "_compress_image_bytes", lambda value: b"small" if value == raw else value)

@@ -568,7 +568,18 @@ def _shot_video_is_stale(conn, shot_row, episode_storyboard_id: str | None) -> b
     except (KeyError, IndexError, TypeError):
         shot_art = None
     if episode_storyboard_id and shot_art and shot_art != episode_storyboard_id:
-        return True
+        episode_art = conn.execute(
+            "SELECT parent_artifact_ids_json FROM artifacts WHERE id=?",
+            (episode_storyboard_id,),
+        ).fetchone()
+        try:
+            episode_parents = json.loads(
+                episode_art["parent_artifact_ids_json"] or "[]"
+            ) if episode_art else []
+        except (TypeError, ValueError):
+            episode_parents = []
+        if shot_art not in episode_parents:
+            return True
     ver = conn.execute(
         "SELECT artifact_id, image_inputs FROM shot_versions WHERE id=?", (adopted,)
     ).fetchone()
@@ -586,8 +597,12 @@ def _shot_video_is_stale(conn, shot_row, episode_storyboard_id: str | None) -> b
             parents = json.loads(art["parent_artifact_ids_json"] or "[]")
         except (TypeError, ValueError):
             parents = []
-        if episode_storyboard_id and parents and episode_storyboard_id not in parents:
-            return True
+        if episode_storyboard_id and parents:
+            valid_storyboard_parents = {episode_storyboard_id}
+            if shot_art:
+                valid_storyboard_parents.add(shot_art)
+            if not any(parent in valid_storyboard_parents for parent in parents):
+                return True
     return _shot_adopted_assets_stale(conn, shot_row, ver)
 
 

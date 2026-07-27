@@ -450,7 +450,20 @@ def _video_stale_for_shot(conn, shot_row, episode_storyboard_id: str | None) -> 
     except (KeyError, IndexError, TypeError):
         shot_art = None
     if episode_storyboard_id and shot_art and shot_art != episode_storyboard_id:
-        return True
+        episode_art = conn.execute(
+            "SELECT parent_artifact_ids_json FROM artifacts WHERE id=?",
+            (episode_storyboard_id,),
+        ).fetchone()
+        try:
+            episode_parents = json.loads(
+                episode_art["parent_artifact_ids_json"] or "[]"
+            ) if episode_art else []
+        except (TypeError, ValueError):
+            episode_parents = []
+        # Current storyboard aggregates directly parent their per-shot artifacts.
+        # A shot artifact inside the approved aggregate is current, not stale.
+        if shot_art not in episode_parents:
+            return True
     ver = conn.execute(
         "SELECT artifact_id FROM shot_versions WHERE id=?", (adopted,)
     ).fetchone()
@@ -470,7 +483,10 @@ def _video_stale_for_shot(conn, shot_row, episode_storyboard_id: str | None) -> 
         return False
     if not parents:
         return False
-    return episode_storyboard_id not in parents
+    valid_storyboard_parents = {episode_storyboard_id}
+    if shot_art:
+        valid_storyboard_parents.add(shot_art)
+    return not any(parent in valid_storyboard_parents for parent in parents)
 
 
 def _reconcile_terminal_continuity_blocks(episode_id: str) -> int:

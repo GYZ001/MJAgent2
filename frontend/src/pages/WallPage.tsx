@@ -18,7 +18,7 @@ import AsyncButton from '../components/AsyncButton'
 import QueryState from '../components/QueryState'
 import VideoSupervisorPanel from '../components/VideoSupervisorPanel'
 
-type ReviewTab = 'text' | 'references' | 'videos' | 'issues'
+type ReviewTab = 'text' | 'references' | 'videos'
 type DetailState =
   | { status: 'idle' }
   | { status: 'loading'; shotId: string }
@@ -26,11 +26,10 @@ type DetailState =
   | { status: 'error'; shotId: string; message: string; errorId?: string }
 type ShotFilter = 'problem' | 'unproduced' | 'generating' | 'pending_adoption' | 'adopted' | 'failed' | 'unreviewed' | 'grade_b' | 'continuity'
 
-const REVIEW_TABS: Array<{ id: ReviewTab; label: string }> = [
+export const REVIEW_TABS: Array<{ id: ReviewTab; label: string }> = [
   { id: 'text', label: '文字内容' },
   { id: 'references', label: '参考图' },
-  { id: 'videos', label: 'A/B 视频' },
-  { id: 'issues', label: '评审项' },
+  { id: 'videos', label: '视频预览' },
 ]
 
 const reviewDraftKey = (shotId: string) => `manju:review-item-draft:${shotId}`
@@ -90,6 +89,38 @@ export function describeShotUpdate(previous: Shot, next: Shot): string | null {
   const changedVersions = beforeVersions !== afterVersions || previous.adopted_version_id !== next.adopted_version_id
   if (!changedContent && !changedVersions) return null
   return [changedContent ? '镜头文字/连续性内容已更新' : '', changedVersions ? '视频版本或采用关系已更新' : ''].filter(Boolean).join('；')
+}
+
+/**
+ * Only refresh the heavyweight shot review payload when something visible in
+ * the workbench can have changed. Episode polling returns fresh object/array
+ * identities every time; using those identities as effect dependencies made
+ * the current workbench enter its loading state on every poll.
+ */
+export function shotDetailRefreshKey(shot: Shot | null): string {
+  if (!shot) return 'missing'
+  return JSON.stringify({
+    id: shot.id,
+    adoptedVersionId: shot.adopted_version_id,
+    videoStatus: shot.video_status,
+    videoStale: shot.video_stale,
+    versions: shot.versions.map(version => ({
+      id: version.id,
+      status: version.status,
+      hasVideo: Boolean(version.video_url),
+      error: version.error || null,
+      qa: version.qa?.overall ?? null,
+      references: (version.image_inputs?.reference_images ?? []).map(ref => ({
+        id: ref.id,
+        imageUrl: ref.image_url || null,
+        qualityScore: refScore(ref),
+        selected: Boolean(ref.selectedForSeedance),
+        deleted: Boolean(ref.deleted),
+        rejectReason: ref.rejectReason || null,
+        gateStatus: ref.gate_status || ref.downstream_eligibility || ref.qa?.status || null,
+      })),
+    })),
+  })
 }
 
 function commaList(value?: string[]) {
@@ -289,7 +320,14 @@ export default function WallPage() {
 
   const loadDetail = useCallback(async (shotId: string) => {
     const request = ++detailRequest.current
-    setDetail({ status: 'loading', shotId })
+    // Keep an already rendered workbench mounted during background sync. This
+    // avoids a full-card teardown/rebuild (and the visible page flash) while
+    // the episode status poll is running.
+    setDetail(current => (
+      (current.status === 'ready' || current.status === 'loading') && current.shotId === shotId
+        ? current
+        : { status: 'loading', shotId }
+    ))
     try {
       const shot = await api.get(`/shots/${shotId}/review`) as Shot
       if (!shouldCommitShotDetail(request, detailRequest.current, shotId, selectedShotId)) return null
@@ -326,19 +364,22 @@ export default function WallPage() {
     setSelectionReady(true)
   }, [ep, episodeId, loading, positionKey, selectionReady, shots])
 
+  const selectedSummary = shots.find(shot => shot.id === selectedShotId) || null
+  const selectedDetailRefreshKey = shotDetailRefreshKey(selectedSummary)
+
   useEffect(() => {
     if (!selectionReady || !selectedShotId) {
       setDetail(current => current.status === 'idle' ? current : { status: 'idle' })
       return
     }
-    if (!shots.some(shot => shot.id === selectedShotId)) {
+    if (selectedDetailRefreshKey === 'missing') {
       setTombstoneShotId(selectedShotId)
       setDetail(current => current.status === 'idle' ? current : { status: 'idle' })
       return
     }
     setTombstoneShotId(null)
     void loadDetail(selectedShotId)
-  }, [loadDetail, selectedShotId, selectionReady, shots])
+  }, [loadDetail, selectedDetailRefreshKey, selectedShotId, selectionReady])
 
   useEffect(() => {
     if (!selectionReady || !selectedShotId) return
@@ -358,7 +399,6 @@ export default function WallPage() {
     return shots.filter(shot => [...filters].every(filter => matchesFilter(shot, reviewSummary(context, shot.id), filter)))
   }, [context, filters, shots])
 
-  const selectedSummary = shots.find(shot => shot.id === selectedShotId) || null
   const selectedReview = reviewSummary(context, selectedShotId)
   const readyShot = detail.status === 'ready' && detail.shotId === selectedShotId ? detail.shot : null
   const writeFrozen = Boolean(tombstoneShotId || detail.status !== 'ready' || !context?.upstream.eligible_for_production)
@@ -600,11 +640,10 @@ function ShotWorkbench({ shot, episodeNo, episodeStatus, tab, onTab, review, con
 }) {
   const state = shotVideoState(shot)
   const current = state.adopted || state.latest
-  return <article className="slide-card"><header className="slide-head"><span className="sn">镜 {shot.shot_no}</span><span className="meta">{shot.shot_size} · {shot.camera_move} · {shot.duration_s}s · {shot.transition}</span><span className="meta">{shot.scene_setting}</span><span className={`stamp ${state.phase === 'adopted' ? 'green' : state.phase === 'generation_failed' ? 'red' : state.phase === 'generating' ? 'gold' : 'grey'}`}>{state.label}</span>{review?.review_status === 'completed' && <span className="stamp green">本镜已评完</span>}{state.continuityDegraded && <span className="continuity-degraded-badge">衔接已降级</span>}</header><nav className="review-tabs" role="tablist" aria-label={`镜 ${shot.shot_no} 评审内容`}>{REVIEW_TABS.map(item => <button key={item.id} type="button" role="tab" aria-selected={tab === item.id} className={tab === item.id ? 'active' : ''} onClick={() => onTab(item.id)}>{item.label}{item.id === 'issues' && review?.open_issue_count ? ` ${review.open_issue_count}` : ''}</button>)}</nav><div className="review-workbench-panel" role="tabpanel">
+  return <article className="slide-card"><header className="slide-head"><span className="sn">镜 {shot.shot_no}</span><span className="meta">{shot.shot_size} · {shot.camera_move} · {shot.duration_s}s · {shot.transition}</span><span className="meta">{shot.scene_setting}</span><span className={`stamp ${state.phase === 'adopted' ? 'green' : state.phase === 'generation_failed' ? 'red' : state.phase === 'generating' ? 'gold' : 'grey'}`}>{state.label}</span>{review?.review_status === 'completed' && <span className="stamp green">本镜已评完</span>}{state.continuityDegraded && <span className="continuity-degraded-badge">衔接已降级</span>}</header><nav className="review-tabs" role="tablist" aria-label={`镜 ${shot.shot_no} 评审内容`}>{REVIEW_TABS.map(item => <button key={item.id} type="button" role="tab" aria-selected={tab === item.id} className={tab === item.id ? 'active' : ''} onClick={() => onTab(item.id)}>{item.label}</button>)}</nav><div className="review-workbench-panel" role="tabpanel">
     {tab === 'text' && <InfoSection shot={shot} current={current} />}
     {tab === 'references' && <MaterialGallery shot={shot} productionEligible={!writeFrozen} onOpen={onOpen} onRefresh={onRefresh} onToast={onToast} />}
-    {tab === 'videos' && <VideoWorkspace shot={shot} episodeNo={episodeNo} episodeStatus={episodeStatus} context={context} generating={generating} setGenerating={setGenerating} writeFrozen={writeFrozen} review={review} onRefresh={onRefresh} onToast={onToast} />}
-    {tab === 'issues' && <ReviewItems shot={shot} summary={review} onContext={onContext} onToast={onToast} onDraftDirty={onDraftDirty} />}
+    {tab === 'videos' && <VideoPreviewWorkspace shot={shot} episodeNo={episodeNo} episodeStatus={episodeStatus} context={context} generating={generating} setGenerating={setGenerating} writeFrozen={writeFrozen} review={review} onRefresh={onRefresh} onToast={onToast} />}
   </div></article>
 }
 
@@ -652,6 +691,152 @@ function ReviewItems({ shot, summary, onContext, onToast, onDraftDirty }: { shot
   const update = async (item: ShotReviewItem, status: ReviewItemStatus) => { try { await api.updateReviewItem(item.id, { expected_revision: item.revision, status, idempotency_key: newId(`review-update:${item.id}`) }); await onContext() } catch (error) { onToast(error instanceof Error ? error.message : String(error), undefined, true) } }
   const complete = async () => { if (!summary) return; try { await api.setShotReviewState(shot.id, { review_status: summary.review_status === 'completed' ? 'in_review' : 'completed', expected_revision: summary.review_revision, idempotency_key: newId(`review-state:${shot.id}`) }); await onContext(); onToast(summary.review_status === 'completed' ? '已重新打开本镜评审' : '本镜已标记评审完成') } catch (error) { onToast(error instanceof Error ? error.message : String(error), undefined, true) } }
   return <div className="review-items-panel"><section className="review-item-compose"><h3>新建锚定评审项</h3><small>未提交内容会按 shotId 自动保存在本机，切集后可恢复。</small><div className="review-form-grid"><label>问题类型<select value={type} onChange={event => setType(event.target.value)}><option value="visual">画面</option><option value="dialogue">台词/旁白</option><option value="continuity">连续性</option><option value="reference">参考图</option><option value="video">视频质量</option><option value="other">其他</option></select></label><label>严重度<select value={severity} onChange={event => setSeverity(event.target.value as ReviewSeverity)}><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="blocker">阻断</option></select></label><label>负责人<input value={assignee} onChange={event => setAssignee(event.target.value)} placeholder="姓名或角色" /></label><label className="full">批注<textarea rows={4} value={comment} onChange={event => setComment(event.target.value)} placeholder="说明问题、期望和可验证标准" /></label></div><div className="dialog-actions"><button className="btn primary" disabled={busy || !comment.trim()} onClick={() => { void submit() }}>{busy ? '提交中…' : '创建评审项'}</button></div></section><section className="review-item-list"><header><h3>本镜评审记录</h3><button className={`btn small ${summary?.review_status === 'completed' ? 'ghost' : 'primary'}`} disabled={!summary} onClick={() => { void complete() }}>{summary?.review_status === 'completed' ? '重新打开评审' : '标记本镜评审完成'}</button></header>{summary?.review_items.length ? summary.review_items.map(item => <article key={item.id} className={`review-item severity-${item.severity}`}><div><b>{item.issue_type} · {item.severity}</b><span>{item.status}</span>{item.anchor_stale && <span className="stamp red">锚点已失效，需重新定位</span>}</div><p>{item.comment}</p><small>负责人 {item.assignee || '未指定'} · 版本 {item.revision} · {new Date(item.updated_at * 1000).toLocaleString()}</small><div>{item.status !== 'in_progress' && item.status !== 'resolved' && <button onClick={() => { void update(item, 'in_progress') }}>开始处理</button>}{item.status !== 'resolved' && <button onClick={() => { void update(item, 'resolved') }}>解决</button>}{item.status === 'resolved' && <button onClick={() => { void update(item, 'open') }}>重开</button>}</div></article>) : <div className="review-state-empty"><b>暂无评审项</b><p>可以在左侧创建批注、指定负责人和严重度。</p></div>}</section></div>
+}
+
+export function resolvePreviewVersionId(versions: ShotVersion[], currentId: string | null): string | null {
+  const playable = versions.filter(version => Boolean(version.video_url))
+  if (currentId && playable.some(version => version.id === currentId)) return currentId
+  return [...playable].sort((left, right) => right.version_no - left.version_no)[0]?.id || null
+}
+
+function VideoPreviewWorkspace({ shot, episodeNo, episodeStatus, context, generating, setGenerating, writeFrozen, review, onRefresh, onToast }: { shot: Shot; episodeNo: number; episodeStatus: string; context: ReviewWallContext | null; generating: boolean; setGenerating: (busy: boolean) => void; writeFrozen: boolean; review: ReviewShotSummary | null; onRefresh: () => Promise<void>; onToast: (message: string, action?: { label: string; run: () => void }, persistent?: boolean) => void }) {
+  const [previewId, setPreviewId] = useState<string | null>(() => resolvePreviewVersionId(shot.versions, null))
+  const [sort, setSort] = useState<'time' | 'qa' | 'status'>('time')
+  const [status, setStatus] = useState('all')
+  const [adopt, setAdopt] = useState<ShotVersion | null>(null)
+  const [adoptReason, setAdoptReason] = useState('')
+  const [wizard, setWizard] = useState<'reroll' | 'rewrite' | 'critique' | null>(null)
+  const [prompt, setPrompt] = useState('')
+  const [stopOpen, setStopOpen] = useState(false)
+  const [mediaError, setMediaError] = useState<string | null>(null)
+  const playableKey = shot.versions.map(version => `${version.id}:${Boolean(version.video_url)}`).join('|')
+
+  useEffect(() => {
+    setPreviewId(current => resolvePreviewVersionId(shot.versions, current))
+  }, [playableKey, shot.versions])
+  useEffect(() => { setMediaError(null) }, [previewId])
+  useEffect(() => {
+    if (wizard !== 'rewrite') return
+    const saved = localStorage.getItem(generationDraftKey(shot.id))
+    if (saved) setPrompt(saved)
+  }, [shot.id, wizard])
+  useEffect(() => {
+    if (wizard === 'rewrite' && prompt.trim()) localStorage.setItem(generationDraftKey(shot.id), prompt)
+  }, [prompt, shot.id, wizard])
+
+  const selected = shot.versions.find(version => version.id === previewId)
+  const adoptedVersion = shot.versions.find(version => version.id === shot.adopted_version_id)
+  const versions = useMemo(() => shot.versions
+    .filter(version => status === 'all' || version.status === status)
+    .sort((left, right) => sort === 'qa'
+      ? (right.qa?.overall ?? -Infinity) - (left.qa?.overall ?? -Infinity) || right.version_no - left.version_no
+      : sort === 'status'
+        ? videoVersionStatusLabel(left, left.id === shot.adopted_version_id).localeCompare(videoVersionStatusLabel(right, right.id === shot.adopted_version_id)) || right.version_no - left.version_no
+        : right.version_no - left.version_no), [shot.adopted_version_id, shot.versions, sort, status])
+  const activeVersions = shot.versions.filter(version => ['queued', 'running', 'waiting_provider'].includes(version.status))
+
+  const runGeneration = async () => {
+    if (!wizard || !context) return
+    const initial = adoptedVersion?.prompt_text || shot.prompt_preview || ''
+    const next = prompt.trim()
+    if (wizard === 'rewrite' && (!next || next === initial)) {
+      onToast('修改模式需要与原词不同的有效生成词')
+      return
+    }
+    const openItems = review?.review_items.filter(item => ['open', 'in_progress'].includes(item.status)) || []
+    const selectedReviewIds = wizard === 'critique'
+      ? Array.from(document.querySelectorAll<HTMLInputElement>('.critique-list input[type="checkbox"]')).flatMap((input, index) => input.checked && openItems[index] ? [openItems[index].id] : [])
+      : []
+    if (wizard === 'critique' && openItems.length && !selectedReviewIds.length) {
+      onToast('请至少选择一条要带入的评审项')
+      return
+    }
+    setGenerating(true)
+    try {
+      const result = await api.shotGenerate(shot.id, wizard === 'rewrite' ? next : undefined, wizard !== 'rewrite', wizard === 'critique' ? 'selected_review_items' : undefined, selectedReviewIds, context.upstream.qualification_version, newId(`generate:${shot.id}`)) as { reused?: boolean; version_id?: string; job_id?: string; status?: string }
+      if (wizard === 'rewrite') localStorage.removeItem(generationDraftKey(shot.id))
+      onToast(result.reused ? '输入未变化，已复用旧版；原词新候选会强制新建版本' : `请求已接受${result.job_id ? `，任务 ${result.job_id}` : ''}；正在排队/生成，尚未完成`)
+      setWizard(null)
+      await onRefresh()
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : String(error), undefined, true)
+    } finally {
+      setGenerating(false)
+    }
+  }
+
+  const doAdopt = async () => {
+    if (!adopt || !context) return
+    try {
+      await api.adoptVersion(shot.id, adopt.id, adoptReason.trim(), context.upstream.qualification_version, newId(`adopt:${adopt.id}`))
+      setAdopt(null)
+      setPreviewId(adopt.id)
+      onToast(`已采用 v${adopt.version_no}，理由已写入审计`)
+      await onRefresh()
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : String(error), undefined, true)
+    }
+  }
+
+  const archive = async (version: ShotVersion) => {
+    try {
+      await api.archiveVersion(version.id, '候选版本整理')
+      await onRefresh()
+      onToast(`v${version.version_no} 已归档`)
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : String(error), undefined, true)
+    }
+  }
+  const remove = async (version: ShotVersion) => {
+    try {
+      await api.deleteVersion(version.id)
+      await onRefresh()
+      onToast(`v${version.version_no} 已删除`)
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : String(error), undefined, true)
+    }
+  }
+  const openAdopt = (version: ShotVersion) => {
+    setPreviewId(version.id)
+    setAdopt(version)
+    setAdoptReason('')
+  }
+
+  return <div className="video-preview-workspace">
+    <section className="video-toolbar">
+      <div><button className="btn primary small" disabled={writeFrozen || generating || !['confirmed', 'generating', 'done'].includes(episodeStatus)} onClick={() => { setWizard('reroll'); setPrompt(shot.prompt_preview || '') }}>新建视频版本</button>{activeVersions.length > 0 && <button className="btn ghost small danger" onClick={() => setStopOpen(true)}>停止任务</button>}</div>
+      <span>单次估算 ￥{shot.est_cost_cny.toFixed(2)} · 候选 {shot.versions.length} 个 · 当前评审问题 {review?.open_issue_count || 0}</span>
+    </section>
+    <div className="video-preview-layout">
+      <section className="video-preview-player" aria-label="单视频预览">
+        <header><div><span>当前预览</span><b>{selected ? `镜 ${shot.shot_no} · v${selected.version_no}` : `镜 ${shot.shot_no}`}</b></div>{selected && <span className={`stamp ${selected.status === 'failed' ? 'red' : selected.status === 'succeeded' ? 'green' : 'gold'}`}>{videoVersionStatusLabel(selected, selected.id === shot.adopted_version_id)}</span>}</header>
+        {selected?.video_url ? <video key={selected.id} src={selected.video_url} controls preload="metadata" onLoadedData={() => setMediaError(null)} onError={() => setMediaError(`无法加载 v${selected.version_no} 的媒体，请检查访问权限或稍后重试`)} /> : <div className="video-preview-empty"><b>暂无可预览视频</b><span>请从右侧选择已生成的候选；排队中或失败版本仍会保留在列表中。</span></div>}
+        {(mediaError || selected?.error) && <div className="review-persistent-error compact" role="alert">{mediaError || selected?.error}</div>}
+        {selected && <div className="video-preview-summary"><span>QA <b>{selected.qa?.overall?.toFixed(2) ?? '未评估'}</b></span><span>费用 <b>￥{selected.cost_cny.toFixed(2)}</b></span><span>耗时 <b>{selected.latency_s.toFixed(1)}s</b></span></div>}
+        {selected?.qa?.issues?.length ? <p className="video-preview-issues">{selected.qa.issues.join('；')}</p> : null}
+        <div className="video-preview-actions">{selected?.video_url && <a className="btn ghost small" href={selected.video_url} download={`ep-${episodeNo}-shot-${shot.shot_no}-v${selected.version_no}-${selected.id === shot.adopted_version_id ? 'adopted' : 'candidate'}.mp4`}>导出当前视频</a>}{selected?.video_url && selected.id !== shot.adopted_version_id && !context?.archived_versions[selected.id] && <button className="btn primary small" disabled={writeFrozen} onClick={() => openAdopt(selected)}>采纳当前候选</button>}{selected?.id === shot.adopted_version_id && <span className="stamp green">当前采用版本</span>}</div>
+      </section>
+      <section className="video-candidate-list" aria-label="视频候选列表">
+        <header><div><b>候选列表</b><span>{versions.length}/{shot.versions.length}</span></div><div><select aria-label="版本状态筛选" value={status} onChange={event => setStatus(event.target.value)}><option value="all">全部状态</option><option value="succeeded">已成功</option><option value="failed">失败</option><option value="running">运行中</option><option value="queued">排队中</option></select><select aria-label="版本排序" value={sort} onChange={event => setSort(event.target.value as typeof sort)}><option value="time">按版本</option><option value="qa">按 QA</option><option value="status">按状态</option></select></div></header>
+        <div className="video-candidate-scroll">{versions.length ? versions.map(version => {
+          const adopted = version.id === shot.adopted_version_id
+          const archived = Boolean(context?.archived_versions[version.id])
+          const selectedCandidate = version.id === previewId
+          return <article className={`video-candidate-card${selectedCandidate ? ' selected' : ''}${adopted ? ' adopted' : ''}${archived ? ' archived' : ''}`} key={version.id}>
+            <button type="button" className="video-candidate-select" disabled={!version.video_url} aria-pressed={selectedCandidate} onClick={() => setPreviewId(version.id)}>
+              <span className="video-candidate-title"><b>v{version.version_no}</b><span className={`stamp ${version.status === 'failed' ? 'red' : version.status === 'succeeded' ? 'green' : 'gold'}`}>{videoVersionStatusLabel(version, adopted)}</span>{archived && <span className="stamp grey">已归档</span>}</span>
+              <span className="video-candidate-metrics"><span>QA {version.qa?.overall?.toFixed(2) ?? '—'}</span><span>￥{version.cost_cny.toFixed(2)}</span><span>{version.latency_s.toFixed(1)}s</span></span>
+              <span className="video-candidate-note">{version.qa?.issues?.join('；') || version.error || (version.video_url ? '点击切换到此候选' : '视频尚不可预览')}</span>
+            </button>
+            <div className="video-candidate-actions">{version.video_url && <button type="button" className="btn ghost small" disabled={selectedCandidate} onClick={() => setPreviewId(version.id)}>{selectedCandidate ? '预览中' : '预览'}</button>}{version.video_url && !adopted && !archived && <button type="button" className="btn primary small" disabled={writeFrozen} onClick={() => openAdopt(version)}>采纳</button>}{!adopted && !archived && <button type="button" className="btn ghost small" onClick={() => { void archive(version) }}>归档</button>}{!adopted && !archived && !['queued', 'running', 'waiting_provider'].includes(version.status) && <button type="button" className="btn ghost small danger" onClick={() => { void remove(version) }}>删除</button>}{archived && <button type="button" className="btn ghost small" onClick={() => { void api.unarchiveVersion(version.id).then(onRefresh) }}>恢复归档</button>}</div>
+          </article>
+        }) : <div className="review-state-empty"><b>当前筛选下无候选</b><p>{shot.versions.length ? '请更改状态筛选。' : writeFrozen ? '请先完成分镜确认与资产门禁。' : '可点击「新建视频版本」创建候选。'}</p></div>}</div>
+      </section>
+    </div>
+    {wizard && <Dialog title="新建视频版本" onClose={() => setWizard(null)} wide><div className="generation-mode-tabs"><button className={wizard === 'reroll' ? 'active' : ''} onClick={() => setWizard('reroll')}>按原词新建候选</button><button className={wizard === 'rewrite' ? 'active' : ''} onClick={() => setWizard('rewrite')}>修改提示词</button><button className={wizard === 'critique' ? 'active' : ''} onClick={() => setWizard('critique')}>带评语修复</button></div><div className="review-impact"><b>{wizard === 'reroll' ? '输入不变，强制创建新候选' : wizard === 'rewrite' ? '将以新生成词创建独立版本' : `将带入 ${review?.open_issue_count || 0} 条未解决评语`}</b><p>估算 ￥{shot.est_cost_cny.toFixed(2)}；旧采用版保留，失败不覆盖。提交后会出现在右侧候选列表。</p></div>{wizard === 'rewrite' && <><div className="prompt-diff"><div><b>原词</b><pre>{truncateText(adoptedVersion?.prompt_text || shot.prompt_preview || '无')}</pre></div><div><b>新词</b><textarea rows={8} maxLength={8000} value={prompt} onChange={event => setPrompt(event.target.value)} /></div></div><small>{prompt.length}/8000 字符；切镜后草稿保留在当前对话框，未提交不产生费用。</small></>}{wizard === 'critique' && <div className="critique-list">{review?.review_items.filter(item => ['open', 'in_progress'].includes(item.status)).map(item => <label key={item.id}><input type="checkbox" defaultChecked />[{item.severity}] {item.comment}</label>)}{!review?.open_issue_count && <p>当前无未解决评语，将使用视频 QA 问题清单。</p>}</div>}<div className="dialog-actions"><button className="btn ghost" onClick={() => setWizard(null)}>取消（零任务/零扣费）</button><button className="btn primary" disabled={generating || (wizard === 'rewrite' && !prompt.trim())} onClick={() => { void runGeneration() }}>继续到影响确认</button></div></Dialog>}
+    {adopt && <Dialog title={`采纳镜 ${shot.shot_no} 的 v${adopt.version_no}`} onClose={() => setAdopt(null)}><div className="review-impact"><p>当前采用：{adoptedVersion ? `v${adoptedVersion.version_no}` : '无'}；目标候选：v{adopt.version_no}。</p><p>目标 QA {adopt.qa?.overall?.toFixed(2) ?? '未评估'}，费用 ￥{adopt.cost_cny.toFixed(2)}。提交会固定镜头和版本，并写入审计。</p></div><label className="review-field">必填采纳理由<textarea rows={4} value={adoptReason} onChange={event => setAdoptReason(event.target.value)} placeholder="说明画面质量、连续性或成本判断" /></label><div className="dialog-actions"><button className="btn ghost" onClick={() => setAdopt(null)}>取消</button><button className="btn primary" disabled={adoptReason.trim().length < 4} onClick={() => { void doAdopt() }}>确认采纳此候选</button></div></Dialog>}
+    {stopOpen && <Dialog title={`停止镜 ${shot.shot_no} 的视频任务`} onClose={() => setStopOpen(false)}><div className="review-impact"><b>目标：{activeVersions.map(version => `v${version.version_no}（${videoVersionStatusLabel(version, false)}）`).join('、')}</b><p>将停止本地排队、轮询和后续写入。供应商已接单的任务可能无法硬停，仍可能继续执行并计费。</p><p>已知候选费用合计 ￥{activeVersions.reduce((sum, version) => sum + version.cost_cny, 0).toFixed(2)}。</p></div><div className="dialog-actions"><button className="btn ghost" onClick={() => setStopOpen(false)}>继续运行</button><AsyncButton className="btn danger" busyLabel="停止中…" onAction={async () => { const result = await api.stopShotVideo(shot.id); setStopOpen(false); onToast(result.provider_may_continue ? `停止请求已接受；任务 ${result.jobs.map(job => job.job_id).join('、')} 的供应商部分可能继续执行和计费` : '视频任务已停止'); await onRefresh() }}>确认停止这些任务</AsyncButton></div></Dialog>}
+  </div>
 }
 
 function VideoWorkspace({ shot, episodeNo, episodeStatus, context, generating, setGenerating, writeFrozen, review, onRefresh, onToast }: { shot: Shot; episodeNo: number; episodeStatus: string; context: ReviewWallContext | null; generating: boolean; setGenerating: (busy: boolean) => void; writeFrozen: boolean; review: ReviewShotSummary | null; onRefresh: () => Promise<void>; onToast: (message: string, action?: { label: string; run: () => void }, persistent?: boolean) => void }) {

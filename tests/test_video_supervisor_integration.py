@@ -258,6 +258,62 @@ def test_adopted_stale_shot_is_protected_and_only_unadopted_is_actionable(memdb)
     assert missing.adopted_version_id is None
 
 
+def test_per_shot_artifact_inside_current_episode_aggregate_is_not_stale(memdb):
+    from app.domain.storyboard_ops import _shot_video_is_stale
+    from app.harness.types import EvidenceArtifact
+
+    eid, _ = _seed_episode(memdb, 1)
+    shot_id = f"{eid}_shot_1"
+    shot_art = evidence_repository.create_artifact(EvidenceArtifact(
+        type="storyboard_shot",
+        scope_type="storyboard_checkpoint",
+        scope_id=f"{eid}:1",
+        status="approved",
+        trust_level="T2",
+        content={"shot_no": 1},
+    ))
+    episode_art = evidence_repository.create_artifact(EvidenceArtifact(
+        type="storyboard",
+        scope_type="episode",
+        scope_id=eid,
+        status="approved",
+        trust_level="T4",
+        content={"episode_no": 1},
+        parent_artifact_ids=[shot_art["id"]],
+    ))
+    version_id = _add_succeeded_version(
+        memdb, shot_id, qa={"overall": 0.9, "failure_types": []},
+    )
+    video_art = evidence_repository.create_artifact(EvidenceArtifact(
+        type="shot_video",
+        scope_type="shot",
+        scope_id=shot_id,
+        status="validated",
+        trust_level="T3",
+        content={"version_id": version_id},
+        parent_artifact_ids=[shot_art["id"]],
+    ))
+    memdb.execute(
+        "UPDATE episodes SET storyboard_artifact_id=? WHERE id=?",
+        (episode_art["id"], eid),
+    )
+    memdb.execute(
+        "UPDATE shots SET storyboard_artifact_id=? WHERE id=?",
+        (shot_art["id"], shot_id),
+    )
+    memdb.execute(
+        "UPDATE shot_versions SET artifact_id=? WHERE id=?",
+        (video_art["id"], version_id),
+    )
+    memdb.commit()
+
+    shot_row = memdb.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
+    ledger = rebuild_coverage_ledger(eid, fallback_quota=0)
+
+    assert ledger.entries[0].video_stale is False
+    assert _shot_video_is_stale(memdb, shot_row, episode_art["id"]) is False
+
+
 def test_integration_fallback_b_with_reason(memdb):
     eid, _ = _seed_episode(memdb, 2)
     _add_succeeded_version(memdb, f"{eid}_shot_1", qa={"overall": 0.92, "failure_types": []})
