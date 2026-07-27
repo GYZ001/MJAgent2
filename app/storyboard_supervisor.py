@@ -169,21 +169,67 @@ def _delete_shots_from(conn, episode_id: str, frontier: int) -> int:
 def _blocker_messages(draft) -> list[str]:
     residual = list(getattr(draft, "residual_errors", []) or [])
     disposition = getattr(draft, "disposition", None)
-    if disposition == "NEEDS_REPLAN":
-        return residual or ["单镜合同不可满足，需要重规划"]
     issues = getattr(draft, "residual_issues", None) or []
+    structural = [
+        i.get("message", "") for i in issues
+        if isinstance(i, dict) and i.get("severity") == "blocker"
+        and _is_structural_storyboard_issue(i.get("code"), i.get("message", ""))
+    ]
+    if structural:
+        return structural
+    if disposition == "NEEDS_REPLAN":
+        # Phase 3 QA score-only: quality/capacity replanning requests are
+        # warnings for the report, not a reason to delete/split/replan shots.
+        return [m for m in residual if _is_structural_storyboard_issue(None, m)]
     blockers = [
         i.get("message", "") for i in issues
         if isinstance(i, dict) and i.get("severity") == "blocker"
+        and _is_structural_storyboard_issue(i.get("code"), i.get("message", ""))
     ]
     if blockers:
         return blockers
     # warning-only：允许继续（非 blocker）
     if disposition == "WARNING" and residual:
-        # 兼容旧路径：若 residual 实际是容量等硬错误，仍视为 blocker
-        hard = [m for m in residual if any(k in m for k in ("口播", "容量", "超过", "字段", "JSON", "schema"))]
-        return hard
-    return residual if disposition not in {"PASS", "WARNING", None} else []
+        return [m for m in residual if _is_structural_storyboard_issue(None, m)]
+    if disposition not in {"PASS", "WARNING", None}:
+        return [m for m in residual if _is_structural_storyboard_issue(None, m)]
+    return []
+
+
+def _is_structural_storyboard_issue(code: Any = None, message: Any = "") -> bool:
+    text = f"{code or ''} {message or ''}".lower()
+    structural_tokens = (
+        "schema",
+        "json",
+        "field",
+        "字段",
+        "必填",
+        "missing required",
+        "source_binding",
+        "原文证据",
+        "版本已变化",
+        "upstream_version_changed",
+        "artifact",
+        "id_invalid",
+        "invalid_id",
+    )
+    return any(token in text for token in structural_tokens)
+
+
+def _is_quality_only_repair_plan(plan: RepairPlan) -> bool:
+    quality_codes = {
+        "SPOKEN_CAPACITY_EXCEEDED",
+        "SPOKEN_CONTRACT_CONFLICT",
+        "SHOT_OUTLINE_COVERAGE",
+        "STATE_CHAIN_INVALID",
+        "KEY_LINE_MISSING",
+        "SPINE_MISSING",
+        "KEY_CONTENT_MISSING",
+        "DROP_LIST_REINTRODUCED",
+        "PLAN_EXHAUSTED_NOT_FINAL",
+    }
+    codes = set(plan.issue_codes or [])
+    return bool(codes) and codes.issubset(quality_codes)
 
 
 async def run_storyboard_supervisor(
@@ -845,6 +891,15 @@ def _apply_repair(
     """最小范围修复：只触及当前镜或相邻窗口；禁止 redo_suffix / replan_outline。"""
     from app.observability.metrics import inc
     from app.repair_router import normalize_strategy
+
+    if _is_quality_only_repair_plan(plan):
+        cp.last_repair = {
+            **plan.model_dump(mode="json"),
+            "strategy": "skip_score_only_qa",
+            "skipped": True,
+        }
+        save_checkpoint(cp)
+        return cp
 
     cp.phase = "REPAIRING"
     cp.repair_epoch += 1

@@ -66,9 +66,12 @@ def issue_completion_certificate(
     must_fix_issues: int = 0,
     production_revision_id: str | None = None,
 ) -> CompletionCertificate:
-    """签发完成凭证。blockers / must_fix 必须为 0。"""
-    if blockers > 0 or must_fix_issues > 0:
-        raise ValueError("无法签发完成凭证：仍存在 blocker 或 must_fix Issue")
+    """签发完成凭证。
+
+    Phase 3 QA is score-only: caller-provided QA blocker/must-fix counts are
+    retained as report metadata and must not prevent issuance. Structural
+    binding checks below remain hard requirements.
+    """
     if not artifact_id or not artifact_hash:
         raise ValueError("完成凭证必须绑定 artifact_id 与 artifact_hash")
 
@@ -93,8 +96,8 @@ def issue_completion_certificate(
         contract_version=contract_version,
         qa_profile_version=qa_profile_version,
         evaluation_ids=list(evaluation_ids or []),
-        blockers=0,
-        must_fix_issues=0,
+        blockers=max(0, int(blockers or 0)),
+        must_fix_issues=max(0, int(must_fix_issues or 0)),
         issued_at=issued_at,
         production_revision_id=production_revision_id,
     )
@@ -109,7 +112,7 @@ def issue_completion_certificate(
             certificate_id, kind, scope_id, artifact_id, artifact_hash, input_fingerprint,
             contract_version, qa_profile_version,
             json.dumps(cert.evaluation_ids, ensure_ascii=False),
-            0, 0, production_revision_id, issued_at,
+            cert.blockers, cert.must_fix_issues, production_revision_id, issued_at,
             json.dumps(cert.model_dump(mode="json"), ensure_ascii=False),
         ),
     )

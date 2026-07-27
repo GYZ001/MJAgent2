@@ -638,7 +638,7 @@ def test_automated_confirmation_reports_hard_errors_before_manual_warning(storyb
 
     assert caught.value.status_code == 409
     assert caught.value.detail["code"] == "STORYBOARD_NOT_CONFIRMABLE"
-    assert caught.value.detail["warnings"] == ["存在超过 5 秒的镜头，已纳入全量 AI/确定性门禁"]
+    assert caught.value.detail["warnings"] == ["存在超过 5 秒的镜头，已纳入 QA 评分报告"]
 
 
 def test_idempotent_confirmation_converges_terminal_runtime_state(storyboard_db):
