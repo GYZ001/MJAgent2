@@ -12,6 +12,32 @@ function scopeScene(item: Record<string, unknown>): string {
   return String(item.scene || item.scene_name || '').trim()
 }
 
+const VIEW_LABELS: Record<string, string> = {
+  front_full: '正面全身',
+  three_quarter: '3/4 面',
+  profile: '侧面',
+  back_full: '背面全身',
+  face_closeup: '面部特写',
+  wide: '全景',
+  medium: '中景',
+  closeup: '细节',
+}
+
+export function paymentPolicyText(value: string): string {
+  return value
+    .replace(/同一\s*quote_id\s*/g, '同一报价')
+    .replaceAll('quote_id', '报价')
+    .replaceAll('服务端', '系统')
+    .replace(/\s*QA\s*/g, '质检')
+    .replaceAll('角色提示词', '角色设定')
+    .replaceAll('提示词', '生成描述')
+}
+
+function viewLabel(value: unknown): string {
+  const key = String(value || '')
+  return VIEW_LABELS[key] || key
+}
+
 export default function PaymentConfirmDialog({
   open,
   title,
@@ -64,10 +90,22 @@ export default function PaymentConfirmDialog({
   }, [enableScopeSelection, open, selectableCharacters, selectableScenes])
 
   if (!open) return null
-  const canConfirm = !loading && !error && !!precheck && (precheck.image_count ?? 0) >= 0
   const duration = precheck?.estimated_duration_min
   const showSelection = enableScopeSelection && selectableCharacters.length > 1
   const showSceneSelection = enableScopeSelection && selectableScenes.length > 0
+  const selectionEmpty = (showSelection && selectedCharacters.length === 0)
+    || (showSceneSelection && selectedScenes.length === 0)
+  const quoteIncomplete = !precheck || typeof precheck.image_count !== 'number'
+  const canConfirm = !loading && !error && !quoteIncomplete && !selectionEmpty
+  const confirmDisabledReason = loading
+    ? '正在估算范围与费用'
+    : error
+      ? '费用预览失败，请取消后重试'
+      : quoteIncomplete
+        ? '尚未取得完整费用预览'
+        : selectionEmpty
+          ? '请至少选择一个生成对象'
+          : ''
   const selectedSet = new Set(selectedCharacters)
   const selectedSceneSet = new Set(selectedScenes)
   const sceneQuote = precheck && 'scene_count' in precheck ? precheck as SceneCostPrecheck : null
@@ -91,12 +129,12 @@ export default function PaymentConfirmDialog({
                 <li>角色：{precheck.character_names.slice(0, 12).join('、')}{precheck.character_names.length > 12 ? '…' : ''}</li>
               )}
               <li>预计图片：{precheck.image_count} 张 × ¥{precheck.unit_price_cny} = ¥{precheck.estimated_cost_cny}</li>
-              <li>最大重试预算 / 上限：¥{precheck.max_retry_budget_cny} / ¥{precheck.budget_cap_cny}</li>
+              <li>最大重试预算 / 费用上限：¥{precheck.max_retry_budget_cny} / ¥{precheck.budget_cap_cny}</li>
               {duration && <li>预计耗时：约 {duration[0]}~{duration[1]} 分钟</li>}
-              {precheck.estimate_note && <li>{precheck.estimate_note}</li>}
-              {precheck.old_asset_policy && <li>{precheck.old_asset_policy}</li>}
-              {precheck.stop_policy && <li>{precheck.stop_policy}</li>}
-              {precheck.idempotency_hint && <li>{precheck.idempotency_hint}</li>}
+              {precheck.estimate_note && <li>{paymentPolicyText(precheck.estimate_note)}</li>}
+              {precheck.old_asset_policy && <li>{paymentPolicyText(precheck.old_asset_policy)}</li>}
+              {precheck.stop_policy && <li>{paymentPolicyText(precheck.stop_policy)}</li>}
+              {precheck.idempotency_hint && <li>{paymentPolicyText(precheck.idempotency_hint)}</li>}
             </ul>
             {!!precheck.scope?.length && (
               <div className="pay-scope-list">
@@ -115,7 +153,7 @@ export default function PaymentConfirmDialog({
                     }}>
                       清空
                     </button>
-                    <span>已选 {showSceneSelection ? selectedScenes.length : selectedCharacters.length} / {showSceneSelection ? selectableScenes.length : selectableCharacters.length}</span>
+                    <span role="status">已选 {showSceneSelection ? selectedScenes.length : selectedCharacters.length} / {showSceneSelection ? selectableScenes.length : selectableCharacters.length}</span>
                   </div>
                 )}
                 <ul>
@@ -138,17 +176,17 @@ export default function PaymentConfirmDialog({
                           />
                           <span>
                             {scopeScene(item) || scopeCharacter(item) || (showSceneSelection ? '场景' : '角色')}
-                            {Array.isArray(item.views) ? ` · ${(item.views as string[]).join('/')}` : ''}
-                            {item.view_role ? ` · ${String(item.view_role)}` : ''}
-                            {item.reason ? ` · ${String(item.reason)}` : ''}
+                            {Array.isArray(item.views) ? ` · ${(item.views as string[]).map(viewLabel).join('/')}` : ''}
+                            {item.view_role ? ` · ${viewLabel(item.view_role)}` : ''}
+                            {item.reason ? ` · ${paymentPolicyText(String(item.reason))}` : ''}
                           </span>
                         </label>
                       ) : (
                         <>
                           {String(item.scene || item.character || (sceneQuote ? '场景' : '角色'))}
-                          {Array.isArray(item.views) ? ` · ${(item.views as string[]).join('/')}` : ''}
-                          {item.view_role ? ` · ${String(item.view_role)}` : ''}
-                          {item.reason ? ` · ${String(item.reason)}` : ''}
+                          {Array.isArray(item.views) ? ` · ${(item.views as string[]).map(viewLabel).join('/')}` : ''}
+                          {item.view_role ? ` · ${viewLabel(item.view_role)}` : ''}
+                          {item.reason ? ` · ${paymentPolicyText(String(item.reason))}` : ''}
                         </>
                       )}
                     </li>
@@ -163,7 +201,8 @@ export default function PaymentConfirmDialog({
           <button
             type="button"
             className="btn primary"
-            disabled={!canConfirm || (showSelection && selectedCharacters.length === 0) || (showSceneSelection && selectedScenes.length === 0)}
+            disabled={!canConfirm}
+            aria-label={confirmDisabledReason ? `确认并开始，暂不可用：${confirmDisabledReason}` : '确认并开始付费生成'}
             onClick={() => onConfirm({
               characters: showSelection ? selectedCharacters : [],
               scenes: showSceneSelection ? selectedScenes : [],

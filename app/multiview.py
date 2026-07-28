@@ -14,7 +14,7 @@ from typing import Any
 from app import config, hiagent
 from app.atomic_io import atomic_write_bytes
 from app.db import get_conn, get_setting, new_id, now
-from app.refs import _safe_name
+from app.refs import _safe_name, portrait_prompt
 
 # ---------- 视角角色常量 ----------
 
@@ -158,7 +158,12 @@ def pack_result_ok(result: dict[str, Any] | None) -> bool:
 
 # ---------- 视角提示词 ----------
 
-def character_view_prompt(visual_style: str, appearance: str, view_role: str) -> str:
+def character_view_prompt(
+    visual_style: str,
+    appearance: str,
+    view_role: str,
+    portrait_prompt: str | None = None,
+) -> str:
     framing = {
         "front_full": "正面全身立绘，中性姿态，双臂自然，全身完整可见",
         "three_quarter": "3/4 侧面半身或全身，清晰展示五官深度与发型轮廓",
@@ -166,9 +171,12 @@ def character_view_prompt(visual_style: str, appearance: str, view_role: str) ->
         "back_full": "背面全身，展示服装背面与发型背部轮廓",
         "face_closeup": "面部近景特写，五官清晰，发型完整入画",
     }.get(view_role, "全身立绘")
+    source = (portrait_prompt or "").strip() or f"{visual_style}。{appearance}"
     return (
-        f"{visual_style}。同一角色多视角设定图（{VIEW_ROLE_LABELS.get(view_role, view_role)}）：{appearance}。"
+        f"最新定妆提示词（角色外观与画风的唯一依据）：{source}。"
+        f"生成同一角色多视角设定图（{VIEW_ROLE_LABELS.get(view_role, view_role)}）。"
         f"{framing}。纯浅米色背景，单角色，禁止额外人物。"
+        "本条视角与构图要求覆盖源提示词中的视角、姿态和景别要求。"
         "同一角色、只改变观察角度，不改变脸、发型、服装和体型。"
         "禁止文字、水印、logo、多余肢体。"
     )
@@ -331,13 +339,25 @@ def scene_primary_is_usable(row, views: list[dict[str, Any]]) -> bool:
 
 def select_character_view_roles(shot: Any, character_name: str) -> list[str]:
     """按景别/朝向为角色选择 1~2 个最相关视角。"""
+    from app.compiler import has_contact_action
+
     size = str(getattr(shot, "shot_size", "") or "")
     action = " ".join([
+        str(getattr(shot, "primary_action", "") or ""),
         str(getattr(shot, "action_desc", "") or ""),
         str(getattr(shot, "first_frame_desc", "") or ""),
+        str(getattr(shot, "last_frame_desc", "") or ""),
+        str(getattr(shot, "state_in", "") or ""),
+        str(getattr(shot, "state_out", "") or ""),
+        str(getattr(shot, "camera_angle", "") or ""),
     ])
     roles: list[str] = []
-    if any(k in size for k in ("特写", "近景")) or any(k in action for k in ("脸", "眼神", "表情")):
+    # 接触镜的侧面种子优先级高于特写/近景；否则正面定妆图会强烈诱导
+    # 图生图退化成“正面站桩 + 手部悬空”。
+    if has_contact_action(shot) or any(k in action.lower() for k in ("侧面", "侧视", "侧拍", "profile", "side view")):
+        roles.append("profile")
+        roles.append("three_quarter")
+    elif any(k in size for k in ("特写", "近景")) or any(k in action for k in ("脸", "眼神", "表情")):
         roles.append("three_quarter")
         if "特写" in size:
             roles.append("face_closeup")
@@ -427,9 +447,25 @@ def resolve_shot_asset_dependencies(
 
     生产路径默认 ready_only=True：非 ready 视角不得进入依赖与后续生成。
     """
+    from app.character_policy import is_collective_role
+    from app.continuity import effective_characters_visible
+
     managed_characters, managed_scenes = project_bible_asset_names(project_id)
     characters_out: list[dict[str, Any]] = []
-    for name in list(getattr(shot, "characters", None) or []):
+    for name in effective_characters_visible(shot):
+        if name not in managed_characters and is_collective_role(name):
+            characters_out.append({
+                "name": name,
+                "role_kind": "collective",
+                "asset_required": False,
+                "look_revision_id": None,
+                "pack_status": None,
+                "selected_view_ids": [],
+                "selected_views": [],
+                "available_view_roles": [],
+                "missing_required": [],
+            })
+            continue
         # 缺视角检测需要看全部视角状态；选中只允许 ready
         all_views = portrait_views_for_episode(project_id, name, episode_no, ready_only=False)
         views = [v for v in all_views if v.get("status") == "ready" and v.get("image_path")] if ready_only else all_views
@@ -958,11 +994,12 @@ async def review_character_pack_consistency(views: list[dict[str, Any]], appeara
         + f"。外观锚点：{appearance}。"
         "先逐张检查对应观察角度、稳定身份特征、主体完整性与技术缺陷；"
         "再检查同一角色脸部特征、发型、服装、体型在各视角一致，只允许观察角度不同。"
-        "年龄段、性别、核心身份、脸/发型/服装/体型漂移、缺失视角、多余人物、畸形、"
+        "各视角之间发生性别、核心身份、脸/发型/服装/体型漂移，或缺失视角、多余人物、畸形、"
         "遮挡人物主体的文字/水印属于 hard_failures。供应商角落水印若不遮挡人物，"
         "只属于 issues 软警告，不得写入 hard_failures。表情、眼神、笑容、爱慕/妩媚/虚荣/戏谑等气质，"
         "以及普通展示站姿只属于 issues 软警告，不得写入 hard_failures，也不得拉低 overall；"
-        "定妆多视角允许使用统一的中性表情。"
+        "定妆多视角允许使用统一的中性表情。三张图若彼此一致，仅与文字锚点在视觉年龄、"
+        "服装款式、发饰或审美装饰上有差异，也只属于 issues，不得判为 hard_failures。"
         '输出 JSON：{"overall":0~1,"face_consistency":0~1,"outfit_consistency":0~1,'
         '"hair_consistency":0~1,"body_consistency":0~1,'
         '"views":[{"view_role":str,"identity_match":0~1,"presentation_match":0~1,'
@@ -1190,6 +1227,7 @@ async def ensure_character_multiview_pack(
     character_name: str,
     appearance: str,
     visual_style: str,
+    portrait_prompt: str | None = None,
     ep_start: int,
     base_portrait_id: str | None = None,
     optional_views: list[str] | None = None,
@@ -1212,7 +1250,10 @@ async def ensure_character_multiview_pack(
     front = existing_views.get("front_full")
     parent = conn.execute("SELECT * FROM character_portraits WHERE id=?", (portrait_id,)).fetchone()
     base_front = base_views.get("front_full") or {}
-    front_prompt = character_view_prompt(visual_style, appearance, "front_full")
+    effective_prompt = (portrait_prompt or "").strip() or appearance
+    front_prompt = character_view_prompt(
+        visual_style, appearance, "front_full", portrait_prompt,
+    )
     if parent and parent["prompt"]:
         # 初始主图登记路径：用已存 prompt 参与指纹，保证重试可复用
         front_prompt_for_fp = parent["prompt"] or front_prompt
@@ -1221,7 +1262,7 @@ async def ensure_character_multiview_pack(
     front_fp = view_input_fingerprint(
         view_role="front_full",
         prompt=front_prompt_for_fp,
-        anchor_text=appearance,
+        anchor_text=effective_prompt,
         parent_revision_id=portrait_id,
         base_view_id=base_front.get("id"),
         seed_hint=base_front.get("image_path"),
@@ -1229,7 +1270,7 @@ async def ensure_character_multiview_pack(
     if not _ready_view_matches_fingerprint(front, front_fp):
         if parent and parent["image_path"] and Path(parent["image_path"]).exists():
             qa = dict(primary_qa) if primary_qa else await review_character_view(
-                parent["image_path"], appearance, "front_full",
+                parent["image_path"], effective_prompt, "front_full",
             )
             qa.setdefault("view_role", "front_full")
             status = "ready" if _view_passed(qa) else ("unverified" if qa.get("status") == "unverified" else "failed")
@@ -1256,10 +1297,10 @@ async def ensure_character_multiview_pack(
                 call_meta={"asset_kind": "character_view", "view_role": "front_full", "character_name": character_name},
             )
             await _save_image_item(item, path)
-            qa = await review_character_view(path, appearance, "front_full")
+            qa = await review_character_view(path, effective_prompt, "front_full")
             status = "ready" if _view_passed(qa) else ("unverified" if qa.get("status") == "unverified" else "failed")
             gen_fp = view_input_fingerprint(
-                view_role="front_full", prompt=front_prompt, anchor_text=appearance,
+                view_role="front_full", prompt=front_prompt, anchor_text=effective_prompt,
                 parent_revision_id=portrait_id, base_view_id=base_front.get("id"),
                 seed_hint=base_front.get("image_path"),
             )
@@ -1296,12 +1337,14 @@ async def ensure_character_multiview_pack(
         front_seed = [hiagent.data_url_from_file(front["image_path"])]
 
     async def _gen_side(view_role: str) -> dict[str, Any]:
-        prompt = character_view_prompt(visual_style, appearance, view_role)
+        prompt = character_view_prompt(
+            visual_style, appearance, view_role, portrait_prompt,
+        )
         base = base_views.get(view_role) or {}
         fp = view_input_fingerprint(
             view_role=view_role,
             prompt=prompt,
-            anchor_text=appearance,
+            anchor_text=effective_prompt,
             parent_revision_id=portrait_id,
             base_view_id=base.get("id"),
             seed_hint=front.get("image_path") or base.get("image_path"),
@@ -1345,7 +1388,7 @@ async def ensure_character_multiview_pack(
 
     views = list_portrait_views(portrait_id, conn=conn)
     required_views = [v for v in views if v.get("view_role") in CHARACTER_REQUIRED_VIEWS]
-    group_qa = await review_character_pack_consistency(required_views, appearance)
+    group_qa = await review_character_pack_consistency(required_views, effective_prompt)
     group_qa = {
         **group_qa,
         "evaluation_role": "score_only",
@@ -1695,7 +1738,14 @@ KEYFRAME_SCORE_WEIGHTS = {
 KEYFRAME_HARD_FAILURES = {
     "wrong_identity", "duplicate_character", "severe_anatomy",
     "wrong_outfit", "action_missing", "subject_occlusion",
+    "wrong_camera_angle", "contact_missing", "relative_scale_mismatch", "character_missing",
+    "contact_phase_mismatch", "collective_group_missing", "required_text_error", "diagnostic_missing",
+    "geometry_guard_unverified",
 }
+
+# 分数仍只用于三选一排序；但这些结构性错误会直接污染视频，不能再以
+# “三张里相对最好”为理由放行。
+KEYFRAME_RUNTIME_BLOCKING_FAILURES = frozenset(KEYFRAME_HARD_FAILURES)
 
 
 def compute_weighted_overall(scores: dict[str, Any], weights: dict[str, float]) -> float | None:
@@ -1719,10 +1769,117 @@ def compute_weighted_overall(scores: dict[str, Any], weights: dict[str, float]) 
     return round(sum(score * (w / total_w) for score, w in usable), 3)
 
 
+def keyframe_runtime_blocking_failures(qa: dict[str, Any]) -> set[str]:
+    failures = {str(item) for item in (qa.get("hard_failures") or [])}
+    return failures & KEYFRAME_RUNTIME_BLOCKING_FAILURES
+
+
 def keyframe_gate_passed(qa: dict[str, Any]) -> bool:
-    """Score-only：关键帧 QA 阈值不再决定能否作为视频输入（PRD QA-SO #23）。"""
-    del qa
-    return True
+    """低分不拦截；明确的结构性硬失败必须拦截。"""
+    return not keyframe_runtime_blocking_failures(qa)
+
+
+async def review_keyframe_geometry_guard(
+    candidate_b64: str,
+    *,
+    contract: dict[str, Any],
+    visible_characters: list[str],
+) -> dict[str, Any]:
+    """独立复核多人关键帧的身高、体型与强透视，避免通用 QA 自证通过。"""
+    policy = str(contract.get("relative_height_policy") or "single_subject")
+    expectation = {
+        "task": "Strict independent human-scale geometry audit. Inspect only visible facts in this candidate image.",
+        "characters": visible_characters,
+        "relative_height_policy": policy,
+        "explicit_height_evidence": list(contract.get("height_difference_evidence") or []),
+        "instructions": [
+            "First identify each named person's posture: standing, sitting, kneeling, leaning, or unclear.",
+            "Estimate apparent full-body height for each person from head top to supporting foot/ground point; "
+            "report max_height_div_min_height even if a foot is cropped, using a conservative lower bound.",
+            "Judge whether the people occupy the same interaction/depth plane and whether forced perspective is "
+            "making one a giant or miniature.",
+            "A teenager rendered with child/toddler body scale, oversized head, narrow child shoulders, or a head "
+            "below the other standing teenager/adult's shoulder is a childlike_body_scale_mismatch.",
+            "For equal_scale, two upright co-present teens/adults must use approximately the same canonical skeleton "
+            "scale. If apparent standing-height ratio exceeds 1.25 without an explicit seated/kneeling/depth reason, FAIL.",
+            "Do not infer that a large height gap is acceptable merely because the text calls one character a boy "
+            "and the other a girl. Do not repeat another QA score; make an independent visual measurement.",
+        ],
+        "output_schema": {
+            "postures": [{"character": "name", "posture": "standing|sitting|kneeling|leaning|unclear"}],
+            "same_depth_plane": True,
+            "max_height_div_min_height": 1.0,
+            "childlike_body_scale_mismatch": False,
+            "forced_perspective_scale_mismatch": False,
+            "scripted_height_relation_match": True,
+            "confidence": 1.0,
+            "verdict": "pass|fail",
+            "issues": [],
+        },
+        "rule_version": "keyframe_geometry_guard_v1",
+    }
+    try:
+        raw = await hiagent.vlm_check(
+            [candidate_b64],
+            json.dumps(expectation, ensure_ascii=False),
+            call_meta={
+                "initiator_label": "关键帧身高体型硬复核",
+                "character_count": len(visible_characters),
+                "relative_height_policy": policy,
+            },
+        )
+        from app.schemas import extract_json
+        data = extract_json(raw)
+        ratio = float(data.get("max_height_div_min_height"))
+        confidence = float(data.get("confidence"))
+        postures = data.get("postures")
+        childlike = data.get("childlike_body_scale_mismatch")
+        forced = data.get("forced_perspective_scale_mismatch")
+        relation = data.get("scripted_height_relation_match")
+        verdict = str(data.get("verdict") or "").strip().lower()
+        if not (0.0 < ratio < 10.0) or not (0.0 <= confidence <= 1.0):
+            raise ValueError("invalid geometry measurements")
+        if not isinstance(postures, list) or len(postures) < min(2, len(visible_characters)):
+            raise ValueError("missing posture observations")
+        if not isinstance(childlike, bool) or not isinstance(forced, bool) or not isinstance(relation, bool):
+            raise ValueError("missing geometry booleans")
+        if verdict not in {"pass", "fail"}:
+            raise ValueError("missing geometry verdict")
+        same_depth = data.get("same_depth_plane")
+        ratio_failure = (
+            policy == "equal_scale"
+            and ratio > 1.25
+            and same_depth is not False
+        )
+        passed = (
+            verdict == "pass"
+            and confidence >= 0.75
+            and not childlike
+            and not forced
+            and relation
+            and not ratio_failure
+        )
+        return {
+            "status": "verified",
+            "passed": passed,
+            "postures": postures,
+            "same_depth_plane": same_depth,
+            "max_height_div_min_height": ratio,
+            "childlike_body_scale_mismatch": childlike,
+            "forced_perspective_scale_mismatch": forced,
+            "scripted_height_relation_match": relation,
+            "confidence": confidence,
+            "verdict": verdict,
+            "issues": [str(item) for item in (data.get("issues") or []) if str(item).strip()],
+            "rule_version": "keyframe_geometry_guard_v1",
+        }
+    except Exception as exc:  # noqa: BLE001 独立硬复核失败时不得伪装成通过
+        return {
+            "status": "unverified",
+            "passed": False,
+            "issues": [f"身高体型硬复核未完成：{type(exc).__name__}"],
+            "rule_version": "keyframe_geometry_guard_v1",
+        }
 
 
 def build_image_manifest(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1773,11 +1930,92 @@ async def review_keyframe_with_evidence(
         })
 
     image_manifest = build_image_manifest(manifest_entries)
+    from app.character_policy import (
+        collective_role_anchor, functional_extra_anchor, is_collective_role, is_functional_extra,
+    )
+    from app.compiler import keyframe_visual_contract
+
+    contract = keyframe_visual_contract(shot, bible)
+    target_contact_phase = str(contract.get("target_contact_phase") or "none")
+    contact_phase_required = target_contact_phase in {"approach", "established", "separated"}
     by_name = {c.name: c for c in getattr(bible, "characters", []) or []}
     anchors_txt = []
-    for name in getattr(shot, "characters", []) or []:
+    for name in contract.get("visible_characters") or []:
         if name in by_name:
             anchors_txt.append(f"{name}: {by_name[name].appearance_canonical}")
+        elif is_collective_role(str(name)):
+            anchors_txt.append(f"{name}: {collective_role_anchor(str(name))}")
+        elif is_functional_extra(str(name)):
+            anchors_txt.append(f"{name}: {functional_extra_anchor(str(name))}")
+
+    geometry_requirements = [
+        f"唯一目标定格：{contract.get('target_keyframe_desc') or getattr(shot, 'action_desc', '')}",
+        f"计划机位：{contract.get('camera_angle') or '平视'}",
+    ]
+    required_text = getattr(shot, "required_text", None)
+    required_text_expected = bool(contract.get("required_text_expected"))
+    required_text_payload = (
+        required_text.model_dump()
+        if required_text_expected and required_text is not None and hasattr(required_text, "model_dump")
+        else None
+    )
+    if contract.get("collective_presence_forbidden"):
+        geometry_requirements.append("目标定格明示人群已离场/在画外/仅属回忆：画面中不得出现人群，不得把画外声变成可见人物")
+    elif contract.get("collective_visible_roles"):
+        geometry_requirements.append(
+            "可见名单含叙事群体："
+            + "、".join(str(name) for name in contract.get("collective_visible_roles") or [])
+            + "；必须按目标的人数和主次表现为群体，不得缩成一人，不得复制具名角色长相"
+        )
+    elif contract.get("collective_presence_required"):
+        geometry_requirements.append("目标定格明示需要人群/众人：必须按目标主次与数量画出匿名群体，不得缺失、也不得替代或复制焦点角色")
+    elif contract.get("anonymous_background_allowed"):
+        geometry_requirements.append("环境语义允许匿名背景人群，但本定格不强制入画；若出现，不得抢占焦点或复制具名角色")
+    else:
+        geometry_requirements.append("不得添加名单外的可辨识焦点人物")
+    if required_text_expected:
+        geometry_requirements.append(
+            "唯一允许的画面文字为「"
+            + str(required_text_payload.get("exact_text") or "").strip()
+            + "」，位于"
+            + str(required_text_payload.get("surface") or "指定表面")
+            + "；其他文字/乱码均不允许"
+        )
+    else:
+        geometry_requirements.append("该目标定格时刻不应出现画面文字、字幕或乱码")
+    if contract.get("contact_camera_required"):
+        geometry_requirements.append(
+            "本镜必须从互动轴侧面拍摄，互动区清晰无遮挡，禁止正面站桩；"
+            "人物身体/脸可为身份辨识自然转成 3/4 角度"
+        )
+    if contract.get("established_contact_required"):
+        geometry_requirements.append(
+            "目标定格中接触已成立：接触点必须真实连接、清晰可见，禁止手部悬空或留缝"
+        )
+    elif contract.get("target_contact_phase") == "separated":
+        geometry_requirements.append("目标是松开/分离后的状态：必须保留已分开的空隙与收回动作，不得重新连接")
+    elif target_contact_phase == "approach":
+        geometry_requirements.append("目标尚未建立接触：保留接近/未命中的距离，不得凭空改成已碰触")
+    elif contract.get("contact_axis_inherited"):
+        geometry_requirements.append(
+            "该时序帧继承接触镜的侧面轴线，但当前目标未规定接触阶段；"
+            "只评侧面机位，不得凭空添加或删除肢体接触"
+        )
+    if contract.get("relative_height_policy") == "equal_scale":
+        geometry_requirements.append(
+            "本镜无剧情身高差：同框青少年/成人的基础骨架尺度与站直参考身高应近似；"
+            "允许坐、弯腰、行礼、倾身或剧情景深导致当前头部/眼线高度不同，"
+            "但禁止夸张强透视把人物变成前景巨人或后景小人"
+        )
+    elif contract.get("relative_height_policy") == "preserve_explicit_difference":
+        height_evidence = "；".join(
+            str(item).strip() for item in (contract.get("height_difference_evidence") or []) if str(item).strip()
+        )
+        geometry_requirements.append(
+            "仅保留剧情/人物锚点明示的身高差"
+            + (f"（原文证据：{height_evidence}）" if height_evidence else "")
+            + "，不得用强透视夸大"
+        )
 
     wm_mode = watermark_qa_mode()
     wm_note = (
@@ -1793,13 +2031,31 @@ async def review_keyframe_with_evidence(
         "shot": {
             "scene": getattr(shot, "scene_setting", ""),
             "action": getattr(shot, "action_desc", ""),
-            "first_frame": getattr(shot, "first_frame_desc", ""),
+            "target_keyframe_desc": contract.get("target_keyframe_desc"),
+            "target_source": contract.get("target_source"),
+            "target_contact_phase": contract.get("target_contact_phase"),
+            "camera_angle": contract.get("camera_angle"),
+            "visible_characters": list(contract.get("visible_characters") or []),
+            "individual_visible_characters": list(contract.get("individual_visible_characters") or []),
+            "collective_visible_roles": list(contract.get("collective_visible_roles") or []),
+            "anonymous_background_allowed": bool(contract.get("anonymous_background_allowed")),
+            "collective_presence_required": bool(contract.get("collective_presence_required")),
+            "collective_presence_forbidden": bool(contract.get("collective_presence_forbidden")),
+            "required_text_expected": required_text_expected,
+            "required_text": required_text_payload,
             "characters": anchors_txt,
             "style": getattr(getattr(bible, "world", None), "visual_style_canonical", ""),
         },
+        "geometry_requirements": geometry_requirements,
         "dimensions": {
-            "action_match": "姿态、朝向、手部/道具接触、人物间空间互动",
-            "body_proportion": "头身比、肢体长度、身体完整性、无异常融合",
+            "action_match": "唯一目标定格的姿态、朝向、手部/道具接触、人物间空间互动；不得改画首帧或中性摆拍",
+            "body_proportion": "头身比、肢体长度、身体完整性，以及同框人物相对身高、眼线、体型尺度和透视深度",
+            "side_view_match": "互动轴侧面机位是否清楚展示互动区且非正面站桩；非接触/趋近镜可返回 N/A",
+            "contact_visibility": "已建立接触时，接触点是否真实连接、清晰可见且未遮挡；否则返回 N/A",
+            "contact_phase_match": "是否严格匹配 target_contact_phase：established 必须连接，approach 必须留缝，separated 必须显示松开后的空隙",
+            "relative_height_match": "是否符合 geometry_requirements 中的同高或明示身高差，且没有强透视夸大",
+            "collective_presence_match": "有叙事群体时，是否按目标数量/主次/动作以群体出现，而非缩成单人；无群体返回 N/A",
+            "required_text_match": "required_text_expected=true 时检查字面、承载面与样式；false 时目标帧禁字并返回 N/A",
             "face_identity": "与人物锚点脸部特征一致；脸不可见时返回 null 或 N/A",
             "outfit_match": "款式颜色层次配饰与本集造型一致",
             "hair_match": "发型长度发色刘海轮廓一致",
@@ -1810,6 +2066,17 @@ async def review_keyframe_with_evidence(
         "output_schema": {
             "action_match": 0.0,
             "body_proportion": 0.0,
+            "side_view_match": 0.0 if contract.get("contact_camera_required") else "N/A",
+            "contact_visibility": 0.0 if contract.get("established_contact_required") else "N/A",
+            "contact_phase_match": 0.0 if contact_phase_required else "N/A",
+            "relative_height_match": (
+                0.0 if contract.get("relative_height_policy") != "single_subject" else "N/A"
+            ),
+            "required_text_match": 0.0 if required_text_expected else "N/A",
+            "collective_presence_match": (
+                0.0 if contract.get("collective_presence_required") or contract.get("collective_presence_forbidden")
+                else "N/A"
+            ),
             "face_identity": 0.0,
             "outfit_match": 0.0,
             "hair_match": 0.0,
@@ -1819,6 +2086,7 @@ async def review_keyframe_with_evidence(
             "issues": [],
             "status": "scored",
         },
+        "rule_version": "keyframe_geometry_qa_v3",
     }
     try:
         raw = await hiagent.vlm_check(
@@ -1837,6 +2105,12 @@ async def review_keyframe_with_evidence(
             "overall": None,
             "action_match": None,
             "body_proportion": None,
+            "side_view_match": None,
+            "contact_visibility": None,
+            "contact_phase_match": None,
+            "relative_height_match": None,
+            "required_text_match": None,
+            "collective_presence_match": None,
             "face_identity": None,
             "outfit_match": None,
             "hair_match": None,
@@ -1845,6 +2119,7 @@ async def review_keyframe_with_evidence(
             "issues": [f"关键帧 QA 未完成：{type(exc).__name__}"],
             "qa_recovered": True,
             "image_manifest": image_manifest,
+            "rule_version": "keyframe_geometry_qa_v3",
         }
 
     score_keys = list(KEYFRAME_SCORE_WEIGHTS.keys())
@@ -1857,7 +2132,7 @@ async def review_keyframe_with_evidence(
                 data[key] = None
                 continue
             # 其它缺失 → unverified
-            if key in {"action_match", "body_proportion"} and val is None:
+            if key in {"action_match", "body_proportion"}:
                 missing_required = True
             data[key] = None
             continue
@@ -1868,13 +2143,80 @@ async def review_keyframe_with_evidence(
             if key in {"action_match", "body_proportion"}:
                 missing_required = True
 
-    if missing_required:
+    for key in (
+        "side_view_match", "contact_visibility", "contact_phase_match", "relative_height_match",
+        "required_text_match", "collective_presence_match",
+    ):
+        val = data.get(key)
+        if val is None or (isinstance(val, str) and val.upper() in {"N/A", "NA", "NONE"}):
+            data[key] = None
+            continue
+        try:
+            data[key] = max(0.0, min(1.0, float(val)))
+        except (TypeError, ValueError):
+            data[key] = None
+
+    required_diagnostics: list[str] = []
+    if contract.get("contact_camera_required"):
+        required_diagnostics.append("side_view_match")
+    if contract.get("established_contact_required"):
+        required_diagnostics.append("contact_visibility")
+    if contact_phase_required:
+        required_diagnostics.append("contact_phase_match")
+    if contract.get("relative_height_policy") != "single_subject":
+        required_diagnostics.append("relative_height_match")
+    if required_text_expected:
+        required_diagnostics.append("required_text_match")
+    if contract.get("collective_presence_required") or contract.get("collective_presence_forbidden"):
+        required_diagnostics.append("collective_presence_match")
+    missing_diagnostics = [key for key in required_diagnostics if data.get(key) is None]
+
+    if missing_required or missing_diagnostics:
         data["status"] = "unverified"
         data["overall"] = None
         data["qa_recovered"] = True
-        data["issues"] = list(data.get("issues") or []) + ["缺少必需评分数"]
+        issue = "缺少必需评分数"
+        if missing_diagnostics:
+            issue += "：" + ",".join(missing_diagnostics)
+        data["issues"] = list(data.get("issues") or []) + [issue]
+        data["hard_failures"] = list(data.get("hard_failures") or [])
+        if missing_diagnostics and "diagnostic_missing" not in data["hard_failures"]:
+            data["hard_failures"].append("diagnostic_missing")
         data["image_manifest"] = image_manifest
+        data["rule_version"] = "keyframe_geometry_qa_v3"
+        data["geometry_requirements"] = geometry_requirements
+        data["target_keyframe_desc"] = contract.get("target_keyframe_desc")
         return data
+
+    # 通用 QA 若声称多人身高通过，再交给一个只看骨架尺度/体型/强透视的
+    # 独立审计。它不读取通用 QA 分数，专门拦截“少年被画成儿童、另一人像巨人”。
+    if (
+        contract.get("relative_height_policy") != "single_subject"
+        and data.get("relative_height_match") is not None
+        and float(data["relative_height_match"]) >= 0.7
+    ):
+        guard = await review_keyframe_geometry_guard(
+            candidate_b64,
+            contract=contract,
+            visible_characters=[str(name) for name in (contract.get("visible_characters") or [])],
+        )
+        data["geometry_guard"] = guard
+        hard_failures = [str(item) for item in (data.get("hard_failures") or [])]
+        issues = [str(item) for item in (data.get("issues") or [])]
+        if guard.get("status") != "verified":
+            if "geometry_guard_unverified" not in hard_failures:
+                hard_failures.append("geometry_guard_unverified")
+            issues.extend(str(item) for item in (guard.get("issues") or []) if str(item) not in issues)
+        elif not guard.get("passed"):
+            data["relative_height_match"] = min(float(data["relative_height_match"]), 0.2)
+            if "relative_scale_mismatch" not in hard_failures:
+                hard_failures.append("relative_scale_mismatch")
+            guard_issue = "独立身高体型复核失败：人物儿童化、身高比例异常或存在强透视"
+            if guard_issue not in issues:
+                issues.append(guard_issue)
+            issues.extend(str(item) for item in (guard.get("issues") or []) if str(item) not in issues)
+        data["hard_failures"] = hard_failures
+        data["issues"] = issues
 
     overall = compute_weighted_overall(data, KEYFRAME_SCORE_WEIGHTS)
     data["overall"] = overall
@@ -1893,8 +2235,40 @@ async def review_keyframe_with_evidence(
                 continue
             cleaned.append(str(item))
         data["hard_failures"] = cleaned
+    diagnostic_failures = (
+        ("side_view_match", "wrong_camera_angle", "接触镜未使用强制侧面机位"),
+        ("contact_visibility", "contact_missing", "接触点不清晰或肢体未真实接触"),
+        ("contact_phase_match", "contact_phase_mismatch", "关键帧已接触/未接触阶段与目标不符"),
+        ("relative_height_match", "relative_scale_mismatch", "同框人物相对身高/透视尺度不符合约束"),
+        ("required_text_match", "required_text_error", "指定画面文字缺失、错误或出现额外乱码"),
+        ("collective_presence_match", "collective_group_missing", "叙事群体缺失或被错画成单人"),
+    )
+    for score_key, failure_code, issue in diagnostic_failures:
+        if score_key == "side_view_match" and not contract.get("contact_camera_required"):
+            continue
+        if score_key == "contact_visibility" and not contract.get("established_contact_required"):
+            continue
+        if score_key == "contact_phase_match" and not contact_phase_required:
+            continue
+        if score_key == "relative_height_match" and contract.get("relative_height_policy") == "single_subject":
+            continue
+        if score_key == "required_text_match" and not required_text_expected:
+            continue
+        if score_key == "collective_presence_match" and not (
+            contract.get("collective_presence_required") or contract.get("collective_presence_forbidden")
+        ):
+            continue
+        score = data.get(score_key)
+        if score is not None and score < 0.7:
+            if failure_code not in data["hard_failures"]:
+                data["hard_failures"].append(failure_code)
+            if issue not in data["issues"]:
+                data["issues"].append(issue)
     data["status"] = "scored"
     data["image_manifest"] = image_manifest
+    data["rule_version"] = "keyframe_geometry_qa_v3"
+    data["geometry_requirements"] = geometry_requirements
+    data["target_keyframe_desc"] = contract.get("target_keyframe_desc")
     data["passed"] = keyframe_gate_passed(data)
     return data
 
@@ -1916,29 +2290,87 @@ def purpose_list(ref: dict[str, Any]) -> list[str]:
     return []
 
 
-def ref_pack_priority(ref: dict[str, Any]) -> tuple[int, float]:
-    """必需用途优先；同类内按分数。数值越小越优先。"""
+def _is_narrative_keyframe_slot(slot: str) -> bool:
+    """识别旧版单关键帧槽与新版时序槽。"""
+    value = (slot or "").strip()
+    return value == NARRATIVE_KEYFRAME_SLOT or value.startswith(f"{NARRATIVE_KEYFRAME_SLOT}_")
+
+
+def _ref_quality(ref: dict[str, Any]) -> float:
+    try:
+        value = ref.get("qualityScore")
+        if value is None and isinstance(ref.get("qa"), dict):
+            value = ref["qa"].get("overall")
+        return float(value) if value is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _optional_number(value: Any) -> float | None:
+    try:
+        return float(value) if value is not None and value != "" else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _keyframe_sequence_key(ref: dict[str, Any]) -> tuple[float, float, float, str, str]:
+    """关键帧只按冻结的剧情时序排列，不允许 QA 分数改变播放顺序。"""
+    qa = ref.get("qa") if isinstance(ref.get("qa"), dict) else {}
+    beat = ref.get("beat") or ref.get("keyframe_beat") or qa.get("keyframe_beat") or {}
+    if not isinstance(beat, dict):
+        beat = {}
+    beat_index = _optional_number(
+        ref.get("beat_index")
+        if ref.get("beat_index") is not None
+        else (ref.get("keyframe_index") if ref.get("keyframe_index") is not None else beat.get("beat_index"))
+    )
+    time_ratio = _optional_number(
+        ref.get("time_ratio")
+        if ref.get("time_ratio") is not None
+        else (
+            ref.get("keyframe_time_ratio")
+            if ref.get("keyframe_time_ratio") is not None
+            else beat.get("time_ratio")
+        )
+    )
+    slot = str(ref.get("slot_key") or "")
+    suffix: float | None = None
+    if _is_narrative_keyframe_slot(slot):
+        tail = slot[len(NARRATIVE_KEYFRAME_SLOT):].strip("_-")
+        # 新槽位默认为 narrative_keyframe_01；兼容 _01_opening。
+        first_token = tail.replace("-", "_").split("_", 1)[0] if tail else ""
+        if first_token.isdigit():
+            suffix = float(int(first_token))
+    infinity = float("inf")
+    return (
+        beat_index if beat_index is not None else infinity,
+        time_ratio if time_ratio is not None else infinity,
+        suffix if suffix is not None else infinity,
+        slot,
+        str(ref.get("id") or ref.get("path") or ref.get("image_path") or ""),
+    )
+
+
+def ref_pack_priority(ref: dict[str, Any]) -> tuple[Any, ...]:
+    """装箱稳定排序：连续帧、人物/场景锚点、剧情时序帧、其他。"""
     rtype = str(ref.get("type") or "")
     purposes = set(purpose_list(ref))
     slot = str(ref.get("slot_key") or "")
     if rtype == "previous_shot_frame" or "previous_shot" in str(ref.get("source") or ""):
         tier = 0
-    elif rtype == ASSET_TYPE_PLOT_KEY_FRAME or slot == NARRATIVE_KEYFRAME_SLOT or "keyframe" in purposes:
+    elif rtype == "character":
         tier = 1
     elif rtype == "scene":
         tier = 2
-    elif rtype == "character":
+    elif rtype == ASSET_TYPE_PLOT_KEY_FRAME or _is_narrative_keyframe_slot(slot) or "keyframe" in purposes:
         tier = 3
     elif rtype in {"prop", "style"}:
         tier = 4
     else:
         tier = 5
-    try:
-        score = float(ref.get("qualityScore") if ref.get("qualityScore") is not None
-                      else (ref.get("qa") or {}).get("overall") or 0.0)
-    except (TypeError, ValueError):
-        score = 0.0
-    return (tier, -score)
+    if tier == 3:
+        return (tier, *_keyframe_sequence_key(ref))
+    return (tier, -_ref_quality(ref), str(ref.get("id") or ""))
 
 
 def pack_references_by_purpose(
@@ -1948,7 +2380,15 @@ def pack_references_by_purpose(
     continuity_required: bool = False,
     char_limit: int = 1,
 ) -> list[dict[str, Any]]:
-    """必需用途优先装箱：关键帧不会被高分定妆照挤掉。"""
+    """按角色装箱：锚点先占位，其余容量按剧情时序填入关键帧。
+
+    上一镜尾帧与至少一张剧情关键帧是结构必需项；当 ``max_images``
+    容得下两者时不可被人物/场景图挤掉。人物配额只统计 character
+    资产，plot keyframe 即使含人物也不消耗该配额。
+    """
+    limit = max(0, int(max_images))
+    if limit == 0:
+        return []
     usable = []
     for r in refs:
         # 用途是资产血缘/装箱优先级，不是当前选择状态。QA 淘汰图会保留
@@ -1958,55 +2398,51 @@ def pack_references_by_purpose(
     if not usable:
         return []
 
-    ordered = sorted(usable, key=ref_pack_priority)
+    tails = sorted([
+        ref for ref in usable
+        if str(ref.get("type") or "") == "previous_shot_frame"
+        or "previous_shot" in str(ref.get("source") or "")
+    ], key=ref_pack_priority)
+    keyframes = sorted([
+        ref for ref in usable
+        if str(ref.get("type") or "") == ASSET_TYPE_PLOT_KEY_FRAME
+        or _is_narrative_keyframe_slot(str(ref.get("slot_key") or ""))
+    ], key=_keyframe_sequence_key)
+    all_characters = sorted([
+        ref for ref in usable if str(ref.get("type") or "") == "character"
+    ], key=ref_pack_priority)
+    characters = all_characters[:max(0, int(char_limit))]
+    scenes = sorted([
+        ref for ref in usable if str(ref.get("type") or "") == "scene"
+    ], key=ref_pack_priority)
+    classified_ids = {id(ref) for ref in [*tails, *keyframes, *all_characters, *scenes]}
+    extras = sorted([
+        ref for ref in usable if id(ref) not in classified_ids
+    ], key=ref_pack_priority)
+
+    # 正常产线 max_images>=2。先冻结必需份数，再让人物/场景锚点
+    # 占据剩余容量，避免锚点把唯一关键帧挤出。
+    tail = tails[0] if tails else None
+    required_count = int(tail is not None) + int(bool(keyframes))
+    anchor_capacity = max(0, limit - min(limit, required_count))
+    anchors = [*characters, *scenes]
+    chosen_anchors = anchors[:anchor_capacity]
+
     packed: list[dict[str, Any]] = []
-    char_count = 0
-
-    def _is_char_bearing(ref: dict[str, Any]) -> bool:
-        rtype = str(ref.get("type") or "")
-        if rtype in {"character", ASSET_TYPE_PLOT_KEY_FRAME, "previous_shot_frame"}:
-            return True
-        return bool(ref.get("relatedCharacterIds"))
-
-    # 先确保必需项
-    required_types = []
-    if continuity_required:
-        required_types.append("previous_shot_frame")
-    required_types.append(ASSET_TYPE_PLOT_KEY_FRAME)
-
-    for need in required_types:
-        for ref in ordered:
-            if ref in packed:
-                continue
-            if str(ref.get("type") or "") != need and not (
-                need == ASSET_TYPE_PLOT_KEY_FRAME and str(ref.get("slot_key") or "") == NARRATIVE_KEYFRAME_SLOT
-            ):
-                continue
-            if len(packed) >= max_images:
-                break
-            if _is_char_bearing(ref) and need != "previous_shot_frame":
-                # 关键帧本身计人物图，但必需，不受 char_limit 拦截
-                packed.append(ref)
-                if need != ASSET_TYPE_PLOT_KEY_FRAME:
-                    char_count += 1
-                else:
-                    char_count += 1
-            else:
-                packed.append(ref)
+    if tail is not None and len(packed) < limit:
+        packed.append(tail)
+    for ref in chosen_anchors:
+        if len(packed) >= limit:
             break
-
-    for ref in ordered:
-        if ref in packed:
-            continue
-        if len(packed) >= max_images:
+        packed.append(ref)
+    for ref in keyframes:
+        if len(packed) >= limit:
             break
-        if _is_char_bearing(ref):
-            # 额外人物图受上限；关键帧已计入
-            if char_count >= char_limit and str(ref.get("type") or "") != ASSET_TYPE_PLOT_KEY_FRAME:
-                # 若关键帧已占 1 个人物名额，额外 character 图默认不加（除非 char_limit>1）
-                if str(ref.get("type") or "") == "character" and char_count >= max(char_limit, 1):
-                    continue
-            char_count += 1
+        packed.append(ref)
+    # 当不存在关键帧，或锚点+关键帧未填满上限时，再放入其他用途。
+    for ref in extras:
+        if len(packed) >= limit:
+            break
         packed.append(ref)
     return packed
 
@@ -2022,6 +2458,10 @@ def enrich_ref_dict_metadata(ref: dict[str, Any], **extra: Any) -> dict[str, Any
 def gallery_fingerprint_material(refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     material = []
     for ref in refs:
+        qa = ref.get("qa") if isinstance(ref.get("qa"), dict) else {}
+        frozen_beat = ref.get("beat") or ref.get("keyframe_beat") or qa.get("keyframe_beat") or {}
+        if not isinstance(frozen_beat, dict):
+            frozen_beat = {}
         material.append({
             "id": ref.get("id"),
             "type": ref.get("type"),
@@ -2032,6 +2472,50 @@ def gallery_fingerprint_material(refs: list[dict[str, Any]]) -> list[dict[str, A
             "library_revision_id": ref.get("library_revision_id"),
             "library_view_id": ref.get("library_view_id"),
             "view_role": ref.get("view_role"),
+            "slot_key": ref.get("slot_key"),
+            "candidate_no": ref.get("candidate_no"),
+            "beat_index": (
+                ref.get("beat_index")
+                if ref.get("beat_index") is not None
+                else (
+                    ref.get("keyframe_index")
+                    if ref.get("keyframe_index") is not None
+                    else frozen_beat.get("beat_index")
+                )
+            ),
+            "beat_count": (
+                ref.get("beat_count")
+                if ref.get("beat_count") is not None
+                else (
+                    ref.get("keyframe_total")
+                    if ref.get("keyframe_total") is not None
+                    else frozen_beat.get("beat_total")
+                )
+            ),
+            "time_ratio": (
+                ref.get("time_ratio")
+                if ref.get("time_ratio") is not None
+                else (
+                    ref.get("keyframe_time_ratio")
+                    if ref.get("keyframe_time_ratio") is not None
+                    else frozen_beat.get("time_ratio")
+                )
+            ),
+            "time_s": (
+                ref.get("time_s")
+                if ref.get("time_s") is not None
+                else (ref.get("keyframe_time_s") or frozen_beat.get("time_s"))
+            ),
+            "beat_role": ref.get("beat_role") or frozen_beat.get("phase"),
+            "target_desc": (
+                ref.get("target_desc")
+                or ref.get("keyframe_target_desc")
+                or ref.get("target_keyframe_desc")
+                or frozen_beat.get("target_desc")
+            ),
+            "beat": frozen_beat or None,
+            "keyframe_contract_fingerprint": ref.get("keyframe_contract_fingerprint"),
+            "keyframe_sequence_fingerprint": ref.get("keyframe_sequence_fingerprint"),
             "purposes": purpose_list(ref),
             "qa_status": (ref.get("qa") or {}).get("status"),
             "qa_overall": (ref.get("qa") or {}).get("overall"),
@@ -2043,11 +2527,11 @@ def is_plot_key_frame(ref: dict[str, Any] | Any) -> bool:
     if isinstance(ref, dict):
         return (
             str(ref.get("type") or "") == ASSET_TYPE_PLOT_KEY_FRAME
-            or str(ref.get("slot_key") or "") == NARRATIVE_KEYFRAME_SLOT
+            or _is_narrative_keyframe_slot(str(ref.get("slot_key") or ""))
         )
     return (
         getattr(ref, "type", None) == ASSET_TYPE_PLOT_KEY_FRAME
-        or getattr(ref, "slot_key", None) == NARRATIVE_KEYFRAME_SLOT
+        or _is_narrative_keyframe_slot(str(getattr(ref, "slot_key", None) or ""))
     )
 
 
@@ -2149,23 +2633,34 @@ async def regenerate_character_view(
     row = conn.execute("SELECT * FROM character_portraits WHERE id=?", (portrait_id,)).fetchone()
     if not row or row["project_id"] != project_id:
         raise hiagent.ProviderError("造型版本不存在")
-    style = visual_style or ""
-    if not style:
-        proj = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
-        try:
-            style = (json.loads(proj["bible_json"] or "{}").get("world") or {}).get("visual_style_canonical") or ""
-        except (TypeError, ValueError, json.JSONDecodeError):
-            style = ""
+    proj = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
+    try:
+        bible = json.loads(proj["bible_json"] or "{}") if proj else {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        bible = {}
+    style = visual_style or (bible.get("world") or {}).get("visual_style_canonical") or ""
     appearance = row["appearance"] or ""
+    character = next(
+        (
+            item for item in bible.get("characters", [])
+            if item.get("name") == row["character_name"]
+        ),
+        {},
+    )
+    latest_prompt = (
+        (character.get("portrait_prompt_override") or "").strip()
+        or portrait_prompt(style, character.get("appearance_canonical") or appearance)
+        or (row["prompt"] or "").strip()
+    )
     existing = {v["view_role"]: v for v in list_portrait_views(portrait_id, conn=conn)}
     front = existing.get("front_full") or {}
     seeds = []
     if view_role != "front_full" and front.get("image_path") and Path(front["image_path"]).exists():
         seeds.append(hiagent.data_url_from_file(front["image_path"]))
-    prompt = character_view_prompt(style, appearance, view_role)
+    prompt = character_view_prompt(style, appearance, view_role, latest_prompt)
     path = _view_path(project_id, "character", row["character_name"], view_role, row["ep_start"])
     fp = view_input_fingerprint(
-        view_role=view_role, prompt=prompt, anchor_text=appearance,
+        view_role=view_role, prompt=prompt, anchor_text=latest_prompt,
         parent_revision_id=portrait_id,
         seed_hint=f"{front.get('image_path') or ''}|redo:{Path(path).name}",
     )
@@ -2175,7 +2670,7 @@ async def regenerate_character_view(
                    "character_name": row["character_name"]},
     )
     await _save_image_item(item, path)
-    qa = await review_character_view(path, appearance, view_role)
+    qa = await review_character_view(path, latest_prompt, view_role)
     qa = {
         **qa,
         "evaluation_role": "score_only",
@@ -2204,7 +2699,7 @@ async def regenerate_character_view(
             "preserved_previous": True,
         }
 
-    group_qa = await review_character_pack_consistency(required, appearance)
+    group_qa = await review_character_pack_consistency(required, latest_prompt)
     group_qa = {
         **group_qa,
         "evaluation_role": "score_only",

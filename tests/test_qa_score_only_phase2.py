@@ -55,6 +55,11 @@ def test_keyframe_gate_ignores_low_scores() -> None:
         "status": "unverified",
         "hard_failures": ["watermark"],
     }) is True
+    assert keyframe_gate_passed({
+        "overall": 0.95,
+        "status": "scored",
+        "hard_failures": ["relative_scale_mismatch"],
+    }) is False
 
 
 def test_pack_ready_is_structural_only() -> None:
@@ -112,7 +117,7 @@ def test_repair_router_rejects_qa_only_issues() -> None:
     assert "不自动" in plan.reason or "评分" in plan.reason
 
 
-def test_record_reference_asset_commits_low_score(tmp_path, monkeypatch) -> None:
+def test_record_reference_asset_commits_low_score_warning(tmp_path, monkeypatch) -> None:
     from app import db
     from app.evidence import repository as evidence_repository
 
@@ -130,10 +135,9 @@ def test_record_reference_asset_commits_low_score(tmp_path, monkeypatch) -> None
         content={"character_name": "Hero"},
         qa={
             "overall": 0.1,
-            "hard_failures": ["face_mismatch"],
             "issues": ["不像"],
-            "hard_gate_passed": False,
-            "status": "failed",
+            "hard_gate_passed": True,
+            "status": "warning",
         },
         min_score=0.9,
     )
@@ -142,6 +146,35 @@ def test_record_reference_asset_commits_low_score(tmp_path, monkeypatch) -> None
     assert any(row["evaluator_type"] == "model" for row in evals)
     model = next(row for row in evals if row["evaluator_type"] == "model")
     assert int(model["hard_gate_passed"]) == 1
+
+
+def test_record_reference_asset_deletes_explicit_qa_reject(tmp_path, monkeypatch) -> None:
+    from app import db
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "qa-reject.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+
+    image = tmp_path / "rejected-portrait.jpg"
+    image.write_bytes(b"\xff\xd8\xff\xd9")
+    artifact = record_reference_asset(
+        asset_type="character_portrait",
+        scope_id="proj:Hero:1",
+        file_path=str(image),
+        content={"character_name": "Hero"},
+        qa={
+            "overall": 0.9,
+            "hard_failures": ["face_mismatch"],
+            "status": "failed",
+        },
+    )
+
+    assert artifact["status"] == "rejected_deleted"
+    assert artifact["id"] is None
+    assert not image.exists()
+    assert db.get_conn().execute(
+        "SELECT COUNT(*) AS n FROM artifacts WHERE scope_id='proj:Hero:1'",
+    ).fetchone()["n"] == 0
 
 
 def test_select_best_adopts_technical_even_below_threshold(monkeypatch) -> None:

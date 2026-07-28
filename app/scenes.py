@@ -610,13 +610,12 @@ async def adopt_scene_candidate(
     if artifact.get("status") == "stale":
         raise ValueError("候选已过期，不能采纳")
     current_gate = scene_candidate_gate(artifact_id, require_current_policy=False)
+    if current_gate.get("state") == "hard_failed":
+        from app.rejected_media import purge_reference_artifact
+        purge_reference_artifact(conn, artifact_id)
+        raise ValueError("候选已被 QA 明确淘汰并永久删除，请重新生成")
     latest_qa = dict(current_gate.get("qa") or {})
     warnings = list(current_gate.get("warnings") or [])
-    # Score-only：gate 报告的 hard_failures 一律降为 soft warning（PRD QA-SO #19）。
-    for item in (current_gate.get("hard_failures") or []):
-        text = str(item).strip()
-        if text and text not in warnings:
-            warnings.append(text)
     from app.multiview import scene_multiview_enabled
     multiview_enabled = scene_multiview_enabled()
     if multiview_enabled:
@@ -709,12 +708,12 @@ async def adopt_scene_candidate(
             if not pack_result_ok(pack):
                 raise ValueError(f"候选整包未通过新版硬门禁（status={pack.get('status')}）")
         except asyncio.CancelledError:
-            conn.execute("DELETE FROM scene_references WHERE id=?", (scene_id,))
-            conn.commit()
+            from app.rejected_media import purge_scene_reference
+            purge_scene_reference(conn, scene_id)
             raise
         except Exception as exc:
-            conn.execute("DELETE FROM scene_references WHERE id=?", (scene_id,))
-            conn.commit()
+            from app.rejected_media import purge_scene_reference
+            purge_scene_reference(conn, scene_id)
             raise ValueError(f"候选整包未通过，当前采用包已保留：{exc}") from exc
         minimum = conn.execute(
             "SELECT MIN(ep_start) AS value FROM scene_references "
@@ -1325,14 +1324,14 @@ async def generate_scene_refs(
                     break
                 except asyncio.CancelledError:
                     if scene_id:
-                        conn.execute("DELETE FROM scene_references WHERE id=?", (scene_id,))
-                        conn.commit()
+                        from app.rejected_media import purge_scene_reference
+                        purge_scene_reference(conn, scene_id)
                     sc.ref_image_path = None
                     raise
                 except hiagent.ProviderError as exc:
                     if scene_id:
-                        conn.execute("DELETE FROM scene_references WHERE id=?", (scene_id,))
-                        conn.commit()
+                        from app.rejected_media import purge_scene_reference
+                        purge_scene_reference(conn, scene_id)
                         scene_id = None
                     sc.ref_image_path = None
                     if "多视角资产包未通过" in str(exc):
@@ -1340,8 +1339,8 @@ async def generate_scene_refs(
                     last_error = exc
                 except Exception as exc:  # noqa: BLE001 候选失败后在有界循环内修复
                     if scene_id:
-                        conn.execute("DELETE FROM scene_references WHERE id=?", (scene_id,))
-                        conn.commit()
+                        from app.rejected_media import purge_scene_reference
+                        purge_scene_reference(conn, scene_id)
                         scene_id = None
                     sc.ref_image_path = None
                     last_error = exc
@@ -1845,8 +1844,8 @@ async def _refresh_scene_on_state_change(
         )
         pack_status = pack.get("status") or "failed"
         if not pack_result_ok(pack):
-            conn.execute("DELETE FROM scene_references WHERE id=?", (new_scene_id,))
-            conn.commit()
+            from app.rejected_media import purge_scene_reference
+            purge_scene_reference(conn, new_scene_id)
             raise hiagent.ProviderError(
                 f"场景多视角资产包未通过，无法切换版本：{name}（waiting_asset_review）"
             )

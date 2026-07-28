@@ -9,7 +9,7 @@ const PAGE_LABELS: Record<AgentView, string> = {
   episodes: '分集规划',
   script: '剧本台',
   board: '分镜台',
-  wall: '评审墙',
+  wall: '生成台',
   cinema: '成片台',
   monitor: '监制房',
   reader: '原著阅读',

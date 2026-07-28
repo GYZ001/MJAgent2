@@ -154,24 +154,24 @@ IMAGE_PRICE_PER_UNIT = 0.2  # CNY
 # 可在 settings 表覆盖的默认值
 DEFAULT_SETTINGS = {
     # 兼容旧键；新调度以分通道为准（见 media_pipeline.concurrency）
-    "video_concurrency": "4",
-    "auto_concurrency": "8",
-    "reference_pipeline_concurrency": "6",
+    "video_concurrency": "15",
+    "auto_concurrency": "15",
+    "reference_pipeline_concurrency": "15",
     "image_request_concurrency": "4",
     "vlm_request_concurrency": "6",
-    "video_submit_concurrency": "4",
-    "video_inflight_limit": "8",
-    "video_poll_concurrency": "8",
+    "video_submit_concurrency": "15",
+    "video_inflight_limit": "15",
+    "video_poll_concurrency": "15",
     "download_concurrency": "3",
     "finalize_concurrency": "4",
-    "episode_video_inflight_limit": "8",
-    "project_video_inflight_limit": "12",
+    "episode_video_inflight_limit": "15",
+    "project_video_inflight_limit": "15",
     "reference_prepared_backlog": "8",
     # QPSP 调度：高低水位 / cohort / 策略开关
     "media_scheduler_policy": "stage_aware",  # legacy | stage_aware
     "video_ready_low_watermark": "2",
     "video_ready_high_watermark": "6",
-    "reference_shot_cohort_limit": "1",
+    "reference_shot_cohort_limit": "15",
     "video_qa_reserved_concurrency": "2",
     "video_control_reserved_concurrency": "2",
     "video_reference_batch_prompt": "true",   # P1：一镜一次提示词合同
@@ -192,10 +192,11 @@ DEFAULT_SETTINGS = {
     "storyboard_workspace_safe_readonly": "false",
     "storyboard_structure_edit_enabled": "true",
     "storyboard_source_rebind_enabled": "true",
-    "video_reference_max_images": "8",
+    "video_reference_max_images": "9",
     "video_reference_quality_threshold": "0.8",  # 综合 QA 分门禁：≥此分必须留在「使用中」
     "video_reference_quality_floor": "0.4", # 兜底图质量地板：生成图全不达标时，最佳一版仍低于此分则不喂模型，只靠定妆照/场景锚点（脏图反而拖累成片）
     "video_reference_min_generated": "1",   # 参考图模式每镜至少新生成几张关键帧参考图（防止只剩定妆照）
+    "video_supporting_keyframe_candidates": "3", # 每张辅助时序关键帧同样固定生成 3 张，并独立择优保留 1 张
     "video_reference_gen_retries": "2",     # 单张生成参考图 QA 不达标时的额外重试次数；仍不达标保留最佳一版而非丢弃
     "video_reference_prompt_async": "true", # 每张新参考图的提示词用独立 LLM 调用并发生成（防止一次性写多张时偷懒）
     "video_reference_consistency_check": "true",       # Phase 2：整组参考图相对一致性检查（扣分 + 可选 i2i 重生提分）

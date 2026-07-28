@@ -1,6 +1,8 @@
 import sqlite3
+import json
 
 from app import db, worker
+from app.media_pipeline.status import episode_pipeline_statuses
 from app.orchestration import media_scheduler
 
 
@@ -108,3 +110,129 @@ def test_stop_shot_is_idempotent_and_does_not_overwrite_finished_job(monkeypatch
     assert conn.execute(
         "SELECT status,cancellation_requested FROM jobs WHERE id='j1'"
     ).fetchone()[:] == ("succeeded", 0)
+
+
+def test_episode_pause_and_resume_is_reversible_and_cyclic(monkeypatch) -> None:
+    conn = _conn()
+    conn.execute("UPDATE shot_versions SET provider_task_id='provider-2' WHERE id='v2'")
+    conn.commit()
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "mark_media_job_state", lambda *args, **kwargs: None)
+
+    first_pause = worker.pause_episode_video_tasks("e")
+    assert first_pause["paused_jobs"] == 2
+    assert first_pause["resume_supported"] is True
+    assert first_pause["provider_may_continue"] is True
+    assert [row["status"] for row in conn.execute(
+        "SELECT status FROM jobs ORDER BY id"
+    )] == ["paused", "paused"]
+    assert [row["status"] for row in conn.execute(
+        "SELECT status FROM shot_versions ORDER BY id"
+    )] == ["paused", "paused"]
+    assert conn.execute("SELECT status FROM episodes WHERE id='e'").fetchone()[0] == "confirmed"
+
+    first_resume = worker.resume_episode_video_tasks("e")
+    assert first_resume["resumed_jobs"] == 2
+    assert [row["status"] for row in conn.execute(
+        "SELECT status FROM jobs ORDER BY id"
+    )] == ["queued", "waiting_provider"]
+    assert [row["status"] for row in conn.execute(
+        "SELECT status FROM shot_versions ORDER BY id"
+    )] == ["queued", "queued"]
+    assert conn.execute("SELECT status FROM episodes WHERE id='e'").fetchone()[0] == "generating"
+
+    second_pause = worker.pause_episode_video_tasks("e")
+    second_resume = worker.resume_episode_video_tasks("e")
+    assert second_pause["paused_jobs"] == 2
+    assert second_resume["resumed_jobs"] == 2
+
+
+def test_episode_pause_does_not_touch_completed_jobs(monkeypatch) -> None:
+    conn = _conn()
+    conn.execute("UPDATE jobs SET status='succeeded' WHERE id='j1'")
+    conn.execute("UPDATE shot_versions SET status='succeeded' WHERE id='v1'")
+    conn.commit()
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "mark_media_job_state", lambda *args, **kwargs: None)
+
+    result = worker.pause_episode_video_tasks("e")
+
+    assert result["paused_jobs"] == 1
+    assert conn.execute("SELECT status FROM jobs WHERE id='j1'").fetchone()[0] == "succeeded"
+    assert conn.execute("SELECT status FROM shot_versions WHERE id='v1'").fetchone()[0] == "succeeded"
+
+
+def test_paused_episode_status_is_not_reported_as_generating(monkeypatch) -> None:
+    conn = _conn()
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "mark_media_job_state", lambda *args, **kwargs: None)
+    worker.pause_episode_video_tasks("e")
+
+    statuses, summary = episode_pipeline_statuses("e", conn=conn)
+
+    assert summary["paused"] == 1
+    assert statuses["s1"]["pipeline_status"] == "paused"
+    assert statuses["s1"]["video_status"] == "pending_generation"
+
+
+def test_resume_recovers_existing_provider_handle_without_resubmitting(monkeypatch) -> None:
+    conn = _conn()
+    conn.execute(
+        """UPDATE jobs
+              SET provider_operation_id='video-create-v2',
+                  provider_create_state='accepted', provider_non_cancellable=1
+            WHERE id='j2'"""
+    )
+    conn.execute(
+        """INSERT INTO provider_calls(
+               ts,kind,status,operation_id,response_json
+           ) VALUES(10,'video_create','OK','video-create-v2',?)""",
+        (json.dumps({"id": "provider-existing-2"}),),
+    )
+    conn.commit()
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "mark_media_job_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+
+    worker.pause_episode_video_tasks("e")
+    result = worker.resume_episode_video_tasks("e")
+
+    assert result.get("requires_provider_confirmation", False) is False
+    assert result["resumed_jobs"] == 2
+    job = conn.execute(
+        "SELECT status,provider_create_state FROM jobs WHERE id='j2'"
+    ).fetchone()
+    assert dict(job) == {
+        "status": "waiting_provider",
+        "provider_create_state": "accepted",
+    }
+    assert conn.execute(
+        "SELECT provider_task_id FROM shot_versions WHERE id='v2'"
+    ).fetchone()["provider_task_id"] == "provider-existing-2"
+
+
+def test_resume_refuses_duplicate_charge_when_provider_handle_is_unknown(monkeypatch) -> None:
+    conn = _conn()
+    conn.execute(
+        """UPDATE jobs
+              SET provider_operation_id='video-create-v2',
+                  provider_create_state='unknown', provider_non_cancellable=1
+            WHERE id='j2'"""
+    )
+    conn.commit()
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "mark_media_job_state", lambda *args, **kwargs: None)
+
+    worker.pause_episode_video_tasks("e")
+    result = worker.resume_episode_video_tasks("e")
+
+    assert result["requires_provider_confirmation"] is True
+    assert result["resumed_jobs"] == 0
+    assert result["unresolved_provider_jobs"] == [{
+        "job_id": "j2",
+        "provider_operation_id": "video-create-v2",
+        "reason": "供应商可能已接单，但本地尚未确认原任务号",
+    }]
+    assert [row["status"] for row in conn.execute(
+        "SELECT status FROM jobs ORDER BY id"
+    )] == ["paused", "paused"]

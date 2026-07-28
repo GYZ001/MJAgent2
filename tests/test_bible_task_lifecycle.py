@@ -1,7 +1,10 @@
 import asyncio
 import sqlite3
 
-from app import api, task_registry
+import pytest
+from fastapi import HTTPException
+
+from app import api, db, task_registry
 from app.api import BIBLE_INTERRUPTED_ERROR, _recover_orphan_bible_row
 from app.schemas import Bible, Character, World
 
@@ -99,3 +102,87 @@ def test_bible_completion_preserves_planned_project_status(monkeypatch) -> None:
     row = conn.execute("SELECT status, bible_status FROM projects WHERE id='proj_planned'").fetchone()
     assert row["bible_status"] == "ready"
     assert row["status"] == "planned"
+
+
+@pytest.mark.asyncio
+async def test_bible_spawn_failure_restores_state_and_keeps_quote(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "bible-spawn.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO projects(id,name,status,bible_status,bible_error,created_at) "
+        "VALUES('p1','P','ingested','idle','上次状态',1)"
+    )
+    conn.execute(
+        "INSERT INTO chapters(project_id,idx,title,content,char_count) "
+        "VALUES('p1',1,'第一章','正文',2)"
+    )
+    conn.commit()
+    monkeypatch.setattr(api, "_require_harness_engine", lambda _project_id: None)
+    precheck = api._compute_bible_generate_precheck("p1")
+    quote = api._issue_payment_quote(precheck)
+
+    def fail_spawn(_kind, _key, coro, *, project_id=None):
+        coro.close()
+        raise RuntimeError("event loop unavailable")
+
+    monkeypatch.setattr(task_registry, "spawn", fail_spawn)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api._start_bible_core(
+            "p1",
+            "保留这条反馈",
+            confirm=True,
+            quote_id=quote["quote_id"],
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail["code"] == "BIBLE_START_FAILED"
+    project = conn.execute(
+        "SELECT bible_status,bible_error,bible_feedback FROM projects WHERE id='p1'"
+    ).fetchone()
+    assert dict(project) == {
+        "bible_status": "idle",
+        "bible_error": "上次状态",
+        "bible_feedback": None,
+    }
+    assert conn.execute(
+        "SELECT consumed_at FROM character_payment_quotes WHERE quote_id=?",
+        (quote["quote_id"],),
+    ).fetchone()["consumed_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_bible_shutdown_keeps_running_projection_for_recovery(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "bible-shutdown.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO projects(id,name,status,bible_status,created_at) "
+        "VALUES('p1','P','ingested','running',1)"
+    )
+    conn.execute(
+        "INSERT INTO chapters(project_id,idx,title,content,char_count) "
+        "VALUES('p1',1,'第一章','正文',2)"
+    )
+    conn.commit()
+
+    async def interrupted(*_args, **_kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(api, "generate_bible", interrupted)
+    monkeypatch.setattr(task_registry, "shutdown_in_progress", lambda: True)
+
+    with pytest.raises(asyncio.CancelledError):
+        await api._bible_task("p1")
+
+    project = conn.execute(
+        "SELECT bible_status,bible_error FROM projects WHERE id='p1'"
+    ).fetchone()
+    assert dict(project) == {"bible_status": "running", "bible_error": None}

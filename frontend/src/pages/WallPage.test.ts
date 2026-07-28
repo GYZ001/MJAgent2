@@ -4,12 +4,17 @@ import {
   REVIEW_TABS,
   currentVersionRefs,
   classifyReferenceBuckets,
+  countReferenceImages,
   describeShotUpdate,
+  episodeGenerationAction,
   refSourceLabel,
   resolvePreviewVersionId,
   resolveStableShotSelection,
   shotDetailRefreshKey,
   shouldCommitShotDetail,
+  videoCandidateNote,
+  videoGenerationConfirmLabel,
+  visibleVideoVersions,
 } from './WallPage'
 
 function version(
@@ -59,7 +64,7 @@ describe('currentVersionRefs', () => {
   })
 })
 
-describe('评审墙三类分组与视角标签', () => {
+describe('生成台三类分组与视角标签', () => {
   it('按用途分为视频实际输入 / QA 依据 / 废弃候选', () => {
     const refs: ReferenceImage[] = [
       {
@@ -128,7 +133,7 @@ describe('评审墙三类分组与视角标签', () => {
   })
 })
 
-describe('评审对象稳定性', () => {
+describe('生成台对象稳定性', () => {
   it('5 镜变 4 镜时不会把已删镜头静默换成相邻镜头', () => {
     const result = resolveStableShotSelection(
       [{ id: 's1' }, { id: 's2' }, { id: 's3' }, { id: 's4' }],
@@ -192,7 +197,7 @@ describe('评审对象稳定性', () => {
 })
 
 describe('视频预览工作区', () => {
-  it('只保留视频预览入口，不再显示 A/B 视频和评审项菜单', () => {
+  it('只保留生成与预览相关页签', () => {
     expect(REVIEW_TABS.map(tab => tab.label)).toEqual(['文字内容', '参考图', '视频预览'])
   })
 
@@ -206,5 +211,50 @@ describe('视频预览工作区', () => {
     expect(resolvePreviewVersionId(versions, null)).toBe('v2')
     expect(resolvePreviewVersionId(versions, 'v1')).toBe('v1')
     expect(resolvePreviewVersionId(versions, 'deleted')).toBe('v2')
+  })
+
+  it('参考图承载记录不会进入视频候选列表', () => {
+    const versions = [
+      version('refs', 'references_ready', [], 3),
+      version('failed', 'failed', [], 2),
+      version('ready', 'succeeded', [], 1),
+    ]
+    expect(visibleVideoVersions(versions).map(item => item.id)).toEqual(['failed', 'ready'])
+  })
+
+  it('只有图像没有视频时仍能识别可清空资源', () => {
+    const versions = [
+      version('refs', 'references_ready', [
+        { id: 'character', type: 'character', source: 'asset_library' },
+        { id: 'keyframe', type: 'plot_key_frame', source: 'seedream_generated' },
+      ], 1),
+    ]
+    expect(visibleVideoVersions(versions)).toEqual([])
+    expect(countReferenceImages(versions)).toBe(2)
+  })
+
+  it('失败候选只在列表显示可操作摘要，原始错误留给详情区', () => {
+    const failed = {
+      ...version('failed', 'failed', [], 2),
+      error: 'provider_internal_stack_trace',
+    }
+    expect(videoCandidateNote(failed)).toBe('生成未完成，点击查看错误详情')
+    expect(videoCandidateNote({ ...version('ready', 'succeeded', [], 1), video_url: '/v1.mp4' }))
+      .toBe('点击卡片预览此候选')
+  })
+
+  it('付费提交按钮直接说明动作与预计费用，不暗示还有下一步确认', () => {
+    expect(videoGenerationConfirmLabel('reroll', 4)).toBe('确认新建候选 · 预计 ￥4.00')
+    expect(videoGenerationConfirmLabel('rewrite', 4)).toBe('确认使用新词生成 · 预计 ￥4.00')
+    expect(videoGenerationConfirmLabel('critique', 4)).toBe('确认按质检问题修复 · 预计 ￥4.00')
+  })
+})
+
+describe('整集生成按钮状态', () => {
+  it('运行时停止，暂停或失败停止后继续，其余情况生成', () => {
+    expect(episodeGenerationAction(true, 0, 0)).toBe('stop')
+    expect(episodeGenerationAction(false, 2, 0)).toBe('resume')
+    expect(episodeGenerationAction(false, 0, 1)).toBe('resume')
+    expect(episodeGenerationAction(false, 0, 0)).toBe('generate')
   })
 })

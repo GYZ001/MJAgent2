@@ -4,6 +4,7 @@ import json
 import sqlite3
 
 import httpx
+import pytest
 
 from app import db, hiagent, system_api, video_modes
 
@@ -256,9 +257,18 @@ def test_video_create_sends_stable_idempotency_key(monkeypatch) -> None:
     task_id = asyncio.run(hiagent.create_video_task(
         "prompt", call_meta={"version_id": "ver_1"},
     ))
+    retry_task_id = asyncio.run(hiagent.create_video_task(
+        "prompt",
+        call_meta={
+            "version_id": "ver_1",
+            "operation_id": "video-create-ver_1-safety-1",
+        },
+    ))
 
     assert task_id == "task-1"
+    assert retry_task_id == "task-1"
     assert seen_headers[0]["Idempotency-Key"] == "video-create-ver_1"
+    assert seen_headers[1]["Idempotency-Key"] == "video-create-ver_1-safety-1"
 
 
 def test_image_generation_sends_stable_idempotency_key(monkeypatch) -> None:
@@ -384,6 +394,23 @@ def test_seeded_image_write_timeout_immediately_falls_back_without_seed(monkeypa
 
     assert result["url"].endswith("generated.jpg")
     assert seen_inputs == [["data:image/jpeg;base64,abc"], None]
+
+
+def test_seeded_image_transient_provider_error_never_drops_identity_seed(monkeypatch) -> None:
+    seen_inputs: list[list[str] | None] = []
+
+    async def fake_generate_image(prompt, *, size, image_inputs=None, call_meta=None):
+        seen_inputs.append(image_inputs)
+        raise hiagent.ProviderError("HTTP 429 rate limited", retryable=True, raw="status=429")
+
+    monkeypatch.setattr(hiagent, "generate_image", fake_generate_image)
+
+    with pytest.raises(hiagent.ProviderError, match="429"):
+        asyncio.run(video_modes._generate_image_with_seed_fallback(
+            "prompt", ["data:image/jpeg;base64,identity"], call_meta={"shot_no": 1},
+        ))
+
+    assert seen_inputs == [["data:image/jpeg;base64,identity"]]
 
 
 def test_jobs_overview_includes_running_screenplay(monkeypatch) -> None:

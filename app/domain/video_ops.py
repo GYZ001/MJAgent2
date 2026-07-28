@@ -273,7 +273,7 @@ def create_storyboard_confirmation_preview(episode_id: str, *, automated: bool =
             "max": evaluation.estimated_cost_cny,
             "note": "按当前服务端费率估算；确认不会自动提交付费视频",
         },
-        "unlocks": ["评审墙", "付费视频生成入口"],
+        "unlocks": ["生成台", "付费视频生成入口"],
     }
     if not payload["hard_gates"]["passed"]:
         try:
@@ -570,6 +570,7 @@ async def clear_episode_artifacts(episode_id: str):
             "active_runs": snapshot["active_upstream_runs"],
         })
     await reset_video_completion_state(episode_id, reason="CLEARED")
+    worker.pause_episode_video_tasks(episode_id)
     try:
         result = worker.clear_episode_artifacts(episode_id)
     except ValueError as exc:
@@ -578,8 +579,33 @@ async def clear_episode_artifacts(episode_id: str):
     return result
 
 
+@router.post("/episodes/{episode_id}/videos/clear")
+async def clear_episode_videos(episode_id: str):
+    """Clear all shot videos in the episode while preserving reference images."""
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route("video.clear_episode_videos", {"episode_id": episode_id})
+    if routed is not None:
+        return routed
+    _episode_or_404(episode_id)
+    snapshot = _review_upstream_snapshot(episode_id)
+    if snapshot["active_upstream_runs"]:
+        raise HTTPException(409, {
+            "code": "UPSTREAM_RUN_ACTIVE",
+            "message": "编剧或分镜任务仍在写入，不能清空视频",
+            "active_runs": snapshot["active_upstream_runs"],
+        })
+    await reset_video_completion_state(episode_id, reason="VIDEOS_CLEARED")
+    worker.pause_episode_video_tasks(episode_id)
+    try:
+        result = worker.clear_episode_video_assets(episode_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    _review_write_audit("artifacts.clear_episode_videos", "episode", episode_id, new_state=result)
+    return result
+
+
 async def reset_video_completion_state(episode_id: str, *, reason: str = "CANCELLED") -> dict:
-    """停止全片补齐 Supervisor，并把集级补齐状态复位，避免评审墙死锁。"""
+    """停止全片补齐 Supervisor，并把集级补齐状态复位，避免生成台死锁。"""
     from app import task_registry
     from app.completion_grant import revoke_grant
     from app.video_control import request_control
@@ -641,11 +667,67 @@ async def clear_shot_artifacts(shot_id: str):
             "message": "编剧或分镜任务仍在写入，不能普通清空",
             "active_runs": snapshot["active_upstream_runs"],
         })
+    worker.stop_shot_video_tasks(shot_id)
     try:
         result = worker.clear_shot_artifacts(shot_id)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     _review_write_audit("artifacts.clear_shot", "shot", shot_id, new_state=result)
+    return result
+
+
+def _shot_clear_context(shot_id: str):
+    conn = get_conn()
+    shot = conn.execute("SELECT id, episode_id FROM shots WHERE id=?", (shot_id,)).fetchone()
+    if not shot:
+        raise HTTPException(404, "镜头不存在")
+    snapshot = _review_upstream_snapshot(shot["episode_id"])
+    if snapshot["active_upstream_runs"]:
+        raise HTTPException(409, {
+            "code": "UPSTREAM_RUN_ACTIVE",
+            "message": "编剧或分镜任务仍在写入，不能清空资产",
+            "active_runs": snapshot["active_upstream_runs"],
+        })
+    return conn, shot
+
+
+@router.post("/shots/{shot_id}/references/clear")
+async def clear_shot_references(shot_id: str):
+    """Clear this shot's generated images without touching its videos."""
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route("video.clear_shot_references", {"shot_id": shot_id})
+    if routed is not None:
+        return routed
+    conn, shot = _shot_clear_context(shot_id)
+    active = conn.execute(
+        """SELECT COUNT(*) AS c FROM jobs WHERE shot_id=? AND kind='video'
+           AND status IN ('queued','running','waiting_provider','waiting_retry','paused')""",
+        (shot_id,),
+    ).fetchone()["c"]
+    if active:
+        raise HTTPException(409, "本镜仍有生成任务，请先停止整集任务再清空参考图")
+    try:
+        result = worker.clear_shot_reference_assets(shot_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    _review_write_audit("artifacts.clear_shot_references", "shot", shot_id, new_state=result)
+    return result
+
+
+@router.post("/shots/{shot_id}/videos/clear")
+async def clear_shot_videos(shot_id: str):
+    """Clear this shot's videos while preserving its reference images."""
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route("video.clear_shot_videos", {"shot_id": shot_id})
+    if routed is not None:
+        return routed
+    _, shot = _shot_clear_context(shot_id)
+    worker.stop_shot_video_tasks(shot_id)
+    try:
+        result = worker.clear_shot_video_assets(shot_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    _review_write_audit("artifacts.clear_shot_videos", "shot", shot_id, new_state=result)
     return result
 
 
@@ -703,6 +785,10 @@ def _set_reference_image_used(
     if changed:
         meta["reference_gallery_revision"] = now()
         meta["reference_gallery_edited"] = True
+        if use and str(target.get("type") or "") == "plot_key_frame":
+            # 只有用户明确恢复/保留关键帧才允许跨 prompt 合同复用；
+            # 编辑场景图/人物图不应让旧关键帧永久绕过升级。
+            meta["reference_gallery_contract_override"] = True
     conn.execute("UPDATE shot_versions SET image_inputs=? WHERE id=?",
                  (json.dumps(meta, ensure_ascii=False), version_id))
     conn.commit()
@@ -770,9 +856,14 @@ async def generate_episode(episode_id: str, body: dict | None = None):
     routed = await ui_route("video.generate_episode", {"episode_id": episode_id})
     if routed is not None:
         return routed
+    return await _generate_episode_core(episode_id, body or {})
+
+
+async def _generate_episode_core(episode_id: str, body: dict) -> dict:
+    """Create/reuse jobs for an episode; ``only_incomplete`` powers Continue."""
     ep = _episode_or_404(episode_id)
     qualification = _review_assert_positive_action(
-        episode_id, (body or {}).get("qualification_version"),
+        episode_id, body.get("qualification_version"),
     )
     if ep["status"] not in ("confirmed", "generating", "done"):
         raise HTTPException(409, "分镜脚本未确认（先在工作台点击确认分镜）")
@@ -792,7 +883,7 @@ async def generate_episode(episode_id: str, body: dict | None = None):
         {"row": dict(row), "shot": board.shots[idx], "prev": board.shots[idx - 1] if idx > 0 else None}
         for idx, row in enumerate(shots_rows)
     ]
-    from_no = (body or {}).get("from_shot_no")
+    from_no = body.get("from_shot_no")
     if from_no is not None:
         try:
             from_no = int(from_no)
@@ -813,6 +904,23 @@ async def generate_episode(episode_id: str, body: dict | None = None):
             raise HTTPException(404, f"未找到镜 {from_no}")
     else:
         selected = shots
+    completed_count = 0
+    if body.get("only_incomplete"):
+        completed_ids = {
+            row["id"] for row in conn.execute(
+                """SELECT s.id FROM shots s
+                   WHERE s.episode_id=? AND (
+                       s.adopted_version_id IS NOT NULL OR EXISTS(
+                           SELECT 1 FROM shot_versions v
+                           WHERE v.shot_id=s.id AND v.status='succeeded'
+                             AND v.video_path IS NOT NULL AND v.video_path!=''
+                       )
+                   )""",
+                (episode_id,),
+            ).fetchall()
+        }
+        completed_count = sum(1 for item in selected if item["row"]["id"] in completed_ids)
+        selected = [item for item in selected if item["row"]["id"] not in completed_ids]
     # Quick generation must not create one doomed paid-version record per shot.
     # The completion supervisor owns the self-healing asset preparation path.
     from app.multiview import scan_episode_reference_asset_gaps
@@ -883,7 +991,11 @@ async def generate_episode(episode_id: str, body: dict | None = None):
                 "issue_codes": issue_codes,
             })
     conn.commit()
-    return {"enqueued": results}
+    return {
+        "enqueued": results,
+        "skipped_completed": completed_count,
+        "selected_shots": len(selected),
+    }
 
 
 async def _generate_shot_core(shot_id: str, body: dict) -> dict:
@@ -895,7 +1007,7 @@ async def _generate_shot_core(shot_id: str, body: dict) -> dict:
     qualification = _review_assert_shot_positive(
         shot_id, body.get("qualification_version"),
     )
-    # 带 AI 评语重生：取「当前采用版 / 最新成功版」的问题清单（必要时现场跑评审），
+    # 按视频质检问题重生：取「当前采用版 / 最新成功版」的问题清单（必要时现场跑质检），
     # 作为本次必须改正项写入 prompt，避免模型再犯同样的错。
     critique: list[str] | None = None
     critique_sources: list[dict] = []
@@ -911,24 +1023,6 @@ async def _generate_shot_core(shot_id: str, body: dict) -> dict:
         if ref:
             critique = await worker.critique_version(ref["id"])
             critique_sources.append({"source": "video_qa", "version_id": ref["id"]})
-    review_item_ids = [str(item) for item in (body.get("review_item_ids") or []) if str(item).strip()]
-    if review_item_ids:
-        _ensure_review_wall_tables(conn)
-        marks = ",".join("?" for _ in review_item_ids)
-        rows = conn.execute(
-            f"""SELECT id, comment, severity, anchor_json FROM shot_review_items
-                  WHERE shot_id=? AND id IN ({marks}) AND status IN ('open','in_progress')""",
-            (shot_id, *review_item_ids),
-        ).fetchall()
-        if len(rows) != len(set(review_item_ids)):
-            raise HTTPException(409, "所选评审项已变化、关闭或不属于当前镜头，请刷新向导")
-        critique = list(critique or [])
-        for item in rows:
-            critique.append(f"[{item['severity']}] {item['comment']}")
-            critique_sources.append({
-                "source": "review_item", "review_item_id": item["id"],
-                "severity": item["severity"], "anchor": _review_json(item["anchor_json"], {}),
-            })
     # 固定参考图模式：生成前确保已有固定参考图计划。
     await _ensure_shot_mode_plan(conn, shot_id)
     # 同场景接上镜时，参考图模式可复用上一镜可用素材作为参考。
@@ -972,8 +1066,7 @@ async def generate_shot(shot_id: str, body: dict | None = None):
             "shot_id": shot_id,
             "prompt_override": body.get("prompt_override"),
             "reroll": bool(body.get("reroll")),
-            "critique": body.get("critique") or ("with_critique" if body.get("with_critique") else None),
-            "review_item_ids": body.get("review_item_ids") or [],
+            "with_critique": bool(body.get("with_critique")),
             "qualification_version": body.get("qualification_version"),
             "idempotency_key": body.get("idempotency_key"),
             "request_id": body.get("request_id"),
@@ -1074,14 +1167,134 @@ async def adopt_version(shot_id: str, body: dict):
     return respond_ui(result)
 
 
+def _cancel_shot_adoption_core(shot_id: str) -> dict:
+    """保留候选视频，只取消本镜采纳关系；后续成片合成自动跳过。"""
+    conn = get_conn()
+    shot = conn.execute(
+        "SELECT id,episode_id,adopted_version_id FROM shots WHERE id=?", (shot_id,),
+    ).fetchone()
+    if not shot:
+        raise HTTPException(404, "镜头不存在")
+    previous = shot["adopted_version_id"]
+    if not previous:
+        return {"shot_id": shot_id, "previous_adopted_version_id": None, "adopted_version_id": None}
+    conn.execute("UPDATE shots SET adopted_version_id=NULL WHERE id=?", (shot_id,))
+    conn.commit()
+    worker.invalidate_episode_final(shot["episode_id"])
+    _review_write_audit(
+        "video_version.cancel_adoption",
+        "shot",
+        shot_id,
+        target_version=previous,
+        old_state={"adopted_version_id": previous},
+        new_state={"adopted_version_id": None},
+        reason="用户取消采纳，成片合成时跳过本镜",
+    )
+    return {
+        "shot_id": shot_id,
+        "previous_adopted_version_id": previous,
+        "adopted_version_id": None,
+    }
+
+
+@router.post("/shots/{shot_id}/adoption/cancel")
+async def cancel_shot_adoption(shot_id: str):
+    from app.capabilities.dispatch import ui_route
+
+    routed = await ui_route("video.cancel_adoption", {"shot_id": shot_id})
+    if routed is not None:
+        return routed
+    return _cancel_shot_adoption_core(shot_id)
+
+
 @router.post("/episodes/{episode_id}/resume")
 async def resume_episode(episode_id: str):
     from app.capabilities.dispatch import ui_route
     routed = await ui_route("video.resume_episode", {"episode_id": episode_id})
     if routed is not None:
         return routed
-    _episode_or_404(episode_id)
-    return {"resumed_jobs": worker.retry_paused(episode_id)}
+    ep = _episode_or_404(episode_id)
+    reset_result = None
+    if (ep["video_completion_mode"] or "quick") == "complete":
+        reset_result = await reset_video_completion_state(
+            episode_id,
+            reason="CONTINUED_AS_QUICK",
+        )
+    try:
+        resumed = worker.resume_episode_video_tasks(episode_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    if resumed.get("requires_provider_confirmation"):
+        raise HTTPException(409, {
+            "code": "PROVIDER_HANDLE_UNCONFIRMED",
+            "message": "部分暂停任务可能已被供应商接单，系统未自动重复提交，以避免重复扣费",
+            "recovery_action": resumed.get("recovery_action"),
+            "unresolved_provider_jobs": resumed.get("unresolved_provider_jobs") or [],
+            "episode_id": episode_id,
+            "recoverable": True,
+        })
+    budget_resumed = worker.retry_paused(episode_id)
+    generated = await _generate_episode_core(episode_id, {"only_incomplete": True})
+    if (
+        int(resumed.get("resumed_jobs") or 0) == 0
+        and int(budget_resumed or 0) == 0
+        and int(generated.get("selected_shots") or 0) == 0
+        and not generated.get("enqueued")
+    ):
+        if reset_result is not None:
+            return {
+                **resumed,
+                "budget_resumed_jobs": 0,
+                "enqueued": [],
+                "skipped_completed": int(generated.get("skipped_completed") or 0),
+                "selected_shots": 0,
+                "state_changed": True,
+                "video_completion_mode": "quick",
+                "supervisor_stopped": True,
+                "cancelled_task": bool(reset_result.get("cancelled_task")),
+                "message": "已停止全片补齐并切回快速模式；当前没有其他待继续任务",
+            }
+        raise HTTPException(409, {
+            "code": "VIDEO_RESUME_EMPTY",
+            "message": "当前没有可继续的视频任务",
+            "recovery_action": "如需重新生成，请在生成台选择具体镜头或整集重新生成",
+            "episode_id": episode_id,
+            "recoverable": True,
+            "state": {
+                "resumed_jobs": 0,
+                "budget_resumed_jobs": 0,
+                "selected_shots": 0,
+                "skipped_completed": int(generated.get("skipped_completed") or 0),
+            },
+        })
+    return {
+        **resumed,
+        "budget_resumed_jobs": budget_resumed,
+        "enqueued": generated["enqueued"],
+        "skipped_completed": generated["skipped_completed"],
+        "selected_shots": generated["selected_shots"],
+        "state_changed": reset_result is not None,
+        "video_completion_mode": "quick",
+        "supervisor_stopped": reset_result is not None,
+    }
+
+
+@router.post("/episodes/{episode_id}/video/stop")
+async def stop_episode_video(episode_id: str):
+    """Pause the whole episode's video work; a later Continue can resume it."""
+    from app.capabilities.dispatch import ui_route
+    routed = await ui_route("video.stop_episode", {"episode_id": episode_id})
+    if routed is not None:
+        return routed
+    ep = _episode_or_404(episode_id)
+    if (ep["video_completion_mode"] or "quick") == "complete":
+        await reset_video_completion_state(episode_id, reason="STOPPED")
+    try:
+        result = worker.pause_episode_video_tasks(episode_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    _review_write_audit("video.pause_episode", "episode", episode_id, new_state=result)
+    return result
 
 
 def _ensure_video_episode_columns(conn=None) -> None:
@@ -1139,7 +1352,10 @@ async def _recorded_video_completion_task(
             reconcile_episode_generation_status(episode_id)
         return result
     except asyncio.CancelledError:
-        recorder.cancel()
+        if task_registry.shutdown_in_progress():
+            recorder.pause_external("服务重启，全片视频补齐等待自动恢复")
+        else:
+            recorder.cancel()
         raise
     except Exception as exc:
         recorder.fail(exc)
@@ -1157,14 +1373,22 @@ async def complete_episode(episode_id: str, body: dict | None = None):
     return await _complete_episode_core(episode_id, body or {})
 
 
-async def _complete_episode_core(episode_id: str, body: dict) -> dict:
+async def _complete_episode_core(
+    episode_id: str,
+    body: dict,
+    *,
+    parent_run_id: str | None = None,
+    trigger_type: str = "manual",
+) -> dict:
     from app.completion_grant import (
         DEFAULT_VIDEO_BUDGET_CAP_CNY,
         DEFAULT_VIDEO_WALL_CLOCK_CAP_S,
+        GrantValidationError,
         default_max_fallback_shots,
         issue_video_completion_grant,
         bump_video_grant_budget,
-        get_video_grant,
+        revoke_grant,
+        validate_video_grant,
     )
     from app.orchestration.engine import WorkflowRecorder, fingerprint
     from app.video_supervisor import (
@@ -1204,6 +1428,12 @@ async def _complete_episode_core(episode_id: str, body: dict) -> dict:
     max_fallback = body.get("max_fallback_shots")
     allow_edit = bool(body.get("allow_storyboard_edit", False))
     grant_id = body.get("completion_grant_id")
+    if mode == "resume" and not grant_id:
+        raise HTTPException(422, {
+            "code": "VIDEO_COMPLETION_GRANT_REQUIRED",
+            "message": "继续补齐必须携带原补齐授权；如需重新开始，请选择 fresh 模式",
+            "action": "start_fresh",
+        })
 
     # resume + 追加预算
     add_budget = _review_validate_authorization_number(
@@ -1214,14 +1444,30 @@ async def _complete_episode_core(episode_id: str, body: dict) -> dict:
     )
     if (add_budget is not None or add_wall is not None) and not (mode == "resume" and grant_id):
         raise HTTPException(422, "追加授权只能用于带 completion_grant_id 的 resume 模式")
-    if mode == "resume" and grant_id and (add_budget is not None or add_wall is not None):
-        bump_video_grant_budget(
-            grant_id,
-            add_cny=float(add_budget or 0),
-            add_wall_s=float(add_wall or 0),
-        )
+    existing = None
+    if mode == "resume" and grant_id:
+        try:
+            existing = validate_video_grant(
+                grant_id,
+                episode_id=episode_id,
+                storyboard_artifact_id=ep["storyboard_artifact_id"],
+            )
+            if add_budget is not None or add_wall is not None:
+                existing = bump_video_grant_budget(
+                    grant_id,
+                    add_cny=float(add_budget or 0),
+                    add_wall_s=float(add_wall or 0),
+                )
+        except GrantValidationError as exc:
+            raise HTTPException(409, {
+                "code": exc.code,
+                "message": str(exc),
+                "action": "renew_authorization",
+                "completion_grant_id": grant_id,
+            }) from exc
 
-    if mode == "fresh" or not grant_id:
+    issued_new_grant = False
+    if mode == "fresh":
         grant, _token = issue_video_completion_grant(
             episode_id=episode_id,
             project_id=ep["project_id"],
@@ -1241,12 +1487,12 @@ async def _complete_episode_core(episode_id: str, body: dict) -> dict:
                 "auto_delivery": False,
             },
         )
+        issued_new_grant = True
         grant_id = grant.grant_id
         budget_cap = grant.budget_cap_cny
         wall_cap = grant.wall_clock_cap_s
         max_fallback = grant.max_fallback_shots
     else:
-        existing = get_video_grant(grant_id)
         if existing:
             budget_cap = existing.budget_cap_cny
             wall_cap = existing.wall_clock_cap_s
@@ -1254,71 +1500,321 @@ async def _complete_episode_core(episode_id: str, body: dict) -> dict:
             allow_fallback = existing.allow_fallback_adopt
             allow_edit = existing.allow_storyboard_edit
 
-    conn.execute(
-        """UPDATE episodes
-           SET video_completion_mode='complete',
-               status='generating',
-               active_video_run_id=NULL
-           WHERE id=?""",
-        (episode_id,),
-    )
-    conn.commit()
+    active_run_states = {
+        "CREATED", "RUNNING", "WAITING_RETRY", "WAITING_HUMAN",
+        "WAITING_AUTHORIZATION", "PAUSED_BUDGET", "PAUSED_EXTERNAL",
+    }
+    start_claim = f"starting:{int(now())}:{new_id('video_completion')}"
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        owner_row = conn.execute(
+            "SELECT active_video_run_id FROM episodes WHERE id=?",
+            (episode_id,),
+        ).fetchone()
+        previous_active_run_id = owner_row["active_video_run_id"] if owner_row else None
+        active_status = None
+        previous_claim_live = False
+        if str(previous_active_run_id or "").startswith("starting:"):
+            try:
+                claim_started_at = float(str(previous_active_run_id).split(":", 2)[1])
+                previous_claim_live = now() - claim_started_at <= 60
+            except (TypeError, ValueError, IndexError):
+                previous_claim_live = False
+        elif previous_active_run_id:
+            active_row = conn.execute(
+                "SELECT status FROM workflow_runs WHERE id=?",
+                (previous_active_run_id,),
+            ).fetchone()
+            active_status = active_row["status"] if active_row else None
+        if (
+            previous_claim_live
+            or active_status in active_run_states
+        ):
+            raise HTTPException(409, {
+                "code": "VIDEO_COMPLETION_ALREADY_ACTIVE",
+                "message": "全片补齐任务已在启动或运行，请勿重复提交",
+                "active_run_id": previous_active_run_id,
+                "action": "view_progress",
+            })
+        claimed = conn.execute(
+            """UPDATE episodes SET active_video_run_id=?
+               WHERE id=? AND active_video_run_id IS ?""",
+            (start_claim, episode_id, previous_active_run_id),
+        )
+        if claimed.rowcount != 1:
+            raise HTTPException(409, {
+                "code": "VIDEO_COMPLETION_START_CONFLICT",
+                "message": "本集补齐状态刚刚发生变化，请刷新后重试",
+                "action": "refresh",
+            })
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        if issued_new_grant and grant_id:
+            revoke_grant(grant_id)
+        raise
 
     cap = float(budget_cap if budget_cap is not None else DEFAULT_VIDEO_BUDGET_CAP_CNY)
     resolved_wall_cap = float(
         wall_cap if wall_cap is not None else DEFAULT_VIDEO_WALL_CLOCK_CAP_S
     )
-    recorder = WorkflowRecorder.create(
-        workflow_type="episode_video_completion",
-        scope_type="episode",
-        scope_id=episode_id,
-        input_fingerprint=fingerprint(
-            ep["storyboard_artifact_id"], grant_id, mode,
-        ),
-        requested_by="user",
-        trigger_type="manual",
-        budget_limit_cny=cap,
-        deadline_at=now() + resolved_wall_cap,
-        policy_snapshot={
-            "supervisor": "video_completion",
-            "budget_cap_cny": cap,
-            "wall_clock_cap_s": resolved_wall_cap,
-            "first_pass_budget_fraction": FIRST_PASS_BUDGET_FRACTION,
-            "min_attempts_per_shot": MIN_ATTEMPTS_PER_SHOT,
-            "max_attempts_per_shot": MAX_ATTEMPTS_PER_SHOT,
-            "max_repair_epochs": MAX_REPAIR_EPOCHS,
-            "max_chain_cascade_depth": MAX_CHAIN_CASCADE_DEPTH,
-            "allow_fallback_adopt": bool(allow_fallback),
-            "max_fallback_shots": int(max_fallback or 0),
-            "allow_storyboard_edit": allow_edit,
-        },
+    try:
+        recorder = WorkflowRecorder.create(
+            workflow_type="episode_video_completion",
+            scope_type="episode",
+            scope_id=episode_id,
+            input_fingerprint=fingerprint(
+                ep["storyboard_artifact_id"], grant_id, mode,
+            ),
+            requested_by="user",
+            trigger_type=trigger_type,
+            budget_limit_cny=cap,
+            deadline_at=now() + resolved_wall_cap,
+            policy_snapshot={
+                "supervisor": "video_completion",
+                "budget_cap_cny": cap,
+                "wall_clock_cap_s": resolved_wall_cap,
+                "first_pass_budget_fraction": FIRST_PASS_BUDGET_FRACTION,
+                "min_attempts_per_shot": MIN_ATTEMPTS_PER_SHOT,
+                "max_attempts_per_shot": MAX_ATTEMPTS_PER_SHOT,
+                "max_repair_epochs": MAX_REPAIR_EPOCHS,
+                "max_chain_cascade_depth": MAX_CHAIN_CASCADE_DEPTH,
+                "allow_fallback_adopt": bool(allow_fallback),
+                "max_fallback_shots": int(max_fallback or 0),
+                "allow_storyboard_edit": allow_edit,
+            },
+            parent_run_id=parent_run_id,
+        )
+    except Exception:
+        conn.execute(
+            """UPDATE episodes SET active_video_run_id=?
+               WHERE id=? AND active_video_run_id=?""",
+            (previous_active_run_id, episode_id, start_claim),
+        )
+        conn.commit()
+        if issued_new_grant and grant_id:
+            revoke_grant(grant_id)
+        raise
+    installed = conn.execute(
+        """UPDATE episodes
+           SET video_completion_mode='complete',
+               status='generating',
+               active_video_run_id=?
+           WHERE id=? AND active_video_run_id=?""",
+        (recorder.run_id, episode_id, start_claim),
     )
-    conn.execute(
-        "UPDATE episodes SET active_video_run_id=? WHERE id=?",
-        (recorder.run_id, episode_id),
-    )
+    if installed.rowcount != 1:
+        conn.rollback()
+        recorder.cancel("补齐启动权已变化，当前运行未启动")
+        if issued_new_grant and grant_id:
+            revoke_grant(grant_id)
+        raise HTTPException(409, {
+            "code": "VIDEO_COMPLETION_START_CONFLICT",
+            "message": "本集补齐状态刚刚发生变化，请刷新后重试",
+            "action": "refresh",
+        })
     conn.commit()
 
-    task_registry.spawn(
-        "video_completion", episode_id,
-        _recorded_video_completion_task(
-            episode_id, recorder,
-            resume=(mode == "resume"),
-            grant_id=grant_id,
-            budget_cap_cny=cap,
-            wall_clock_cap_s=float(wall_cap) if wall_cap is not None else None,
-            allow_fallback_adopt=bool(allow_fallback),
-            max_fallback_shots=int(max_fallback) if max_fallback is not None else None,
-            allow_storyboard_edit=allow_edit,
-        ),
-        project_id=ep["project_id"],
+    completion_coro = _recorded_video_completion_task(
+        episode_id, recorder,
+        resume=(mode == "resume"),
+        grant_id=grant_id,
+        budget_cap_cny=cap,
+        wall_clock_cap_s=float(wall_cap) if wall_cap is not None else None,
+        allow_fallback_adopt=bool(allow_fallback),
+        max_fallback_shots=int(max_fallback) if max_fallback is not None else None,
+        allow_storyboard_edit=allow_edit,
     )
+    try:
+        task_registry.spawn(
+            "video_completion", episode_id, completion_coro,
+            project_id=ep["project_id"],
+        )
+    except Exception as exc:
+        completion_coro.close()
+        try:
+            recorder.start()
+            recorder.fail(exc)
+        except Exception as record_exc:  # noqa: BLE001
+            errors.log_error(
+                record_exc,
+                action="video_completion_start_record_failed",
+                context={"episode_id": episode_id, "run_id": recorder.run_id},
+            )
+        try:
+            previous_mode = ep["video_completion_mode"] or "quick"
+        except (KeyError, IndexError):
+            previous_mode = "quick"
+        conn.execute(
+            """UPDATE episodes
+               SET video_completion_mode=?,
+                   status=?,
+                   active_video_run_id=NULL
+               WHERE id=? AND active_video_run_id=?""",
+            (previous_mode, ep["status"], episode_id, recorder.run_id),
+        )
+        conn.commit()
+        raise HTTPException(503, {
+            "code": "VIDEO_COMPLETION_START_FAILED",
+            "message": "全片补齐任务未能启动，尚未产生生成任务，可安全重试",
+            "retryable": True,
+            "completion_grant_id": grant_id,
+            "run_id": recorder.run_id,
+        }) from exc
     return {
         "status": "accepted",
         "run_id": recorder.run_id,
         "goal": "complete_episode_video",
         "completion_grant_id": grant_id,
         "resource_uri": f"manju://runs/{recorder.run_id}",
+        "poll_url": f"/api/episodes/{episode_id}/video-completion",
+        "message": "全片补齐任务已启动，可在生成台查看进度",
+    }
+
+
+def _video_completion_user_contract(
+    episode_id: str,
+    cp: Any,
+    projection: dict[str, Any],
+    *,
+    running: bool,
+) -> dict[str, Any]:
+    phase = str(getattr(cp, "phase", "") or projection.get("phase") or "")
+    checkpoint_run_id = getattr(cp, "run_id", None) or projection.get("run_id")
+    run_id = (
+        projection.get("active_video_run_id") or checkpoint_run_id
+        if running else checkpoint_run_id
+    )
+    grant_id = getattr(cp, "grant_id", None) or projection.get("grant_id")
+    base = f"/api/episodes/{episode_id}/video-completion"
+
+    def action(action_id, label, method, endpoint, confirm=False):
+        return {
+            "id": action_id,
+            "label": label,
+            "method": method,
+            "endpoint": endpoint,
+            "requires_confirm": confirm,
+        }
+
+    def running_contract():
+        actions = [action("view_progress", "查看进度", "GET", base)]
+        if run_id:
+            actions.append(action("pause", "暂停", "POST", f"/api/runs/{run_id}/pause", True))
+        return {
+            "user_state": "running",
+            "message": "正在补齐全片视频，已完成内容会持续保留",
+            "next_actions": actions,
+        }
+
+    active_run_id = projection.get("active_video_run_id")
+    if running and (cp is None or (active_run_id and active_run_id != checkpoint_run_id)):
+        return running_contract()
+    active_run_status = str(projection.get("active_run_status") or "")
+    if (
+        not running
+        and active_run_id
+        and active_run_id != checkpoint_run_id
+        and (
+            str(active_run_id).startswith("starting:")
+            or active_run_status in {
+                "CREATED", "RUNNING", "WAITING_RETRY", "WAITING_HUMAN",
+                "WAITING_AUTHORIZATION", "PAUSED_BUDGET", "PAUSED_EXTERNAL",
+            }
+        )
+    ):
+        actions = [action("repair_preview", "查看恢复状态", "GET", f"{base}/repair-preview")]
+        if not str(active_run_id).startswith("starting:"):
+            actions.insert(0, action("open_run", "查看运行", "GET", f"/api/runs/{active_run_id}"))
+        return {
+            "user_state": "recovering",
+            "message": "检测到未完成的补齐运行，系统正在恢复持久化进度",
+            "next_actions": actions,
+        }
+    if cp is None:
+        return {
+            "user_state": "not_started",
+            "message": "尚未开始全片视频补齐",
+            "next_actions": [
+                action("start_completion", "开始全片补齐", "POST", base, True),
+            ],
+        }
+    if phase == "SUCCEEDED_COVERED":
+        return {
+            "user_state": "completed",
+            "message": "全片视频已补齐",
+            "next_actions": [
+                action("view_results", "查看成片", "GET", f"/api/episodes/{episode_id}"),
+            ],
+        }
+    if phase == "COMPLETED_DEADLINE_FALLBACK":
+        return {
+            "user_state": "completed",
+            "message": "已按截止时间完成交差，部分镜头可能使用保底版本",
+            "next_actions": [
+                action("view_results", "查看结果", "GET", f"/api/episodes/{episode_id}"),
+            ],
+        }
+    if phase == "PARTIAL_NO_USABLE_CANDIDATE":
+        missing = len(projection.get("missing_shots") or [])
+        suffix = f"，仍有 {missing} 个镜头缺少可用候选" if missing else ""
+        return {
+            "user_state": "failed",
+            "message": f"全片补齐已停止{suffix}",
+            "next_actions": [
+                action("repair_preview", "查看修复预演", "GET", f"{base}/repair-preview"),
+                action("start_completion", "重新授权并补齐", "POST", base, True),
+            ],
+        }
+    if phase == "FAILED_CLOSED":
+        return {
+            "user_state": "failed",
+            "message": "全片补齐已安全停止，现有采用版不会丢失",
+            "next_actions": [
+                action("repair_preview", "查看修复预演", "GET", f"{base}/repair-preview"),
+                action("start_completion", "重新授权并补齐", "POST", base, True),
+            ],
+        }
+    if phase == "CANCELLED":
+        return {
+            "user_state": "cancelled",
+            "message": "全片补齐已取消，已完成内容仍然保留",
+            "next_actions": [
+                action("start_completion", "重新开始", "POST", base, True),
+            ],
+        }
+    if running:
+        return running_contract()
+    if phase in {"WAITING_AUTHORIZATION", "PAUSED_BUDGET"}:
+        return {
+            "user_state": "waiting_authorization",
+            "message": "任务已暂停，需要追加授权或预算后继续",
+            "next_actions": [{
+                **action("authorize_continue", "追加授权并继续", "POST", base, True),
+                "required_fields": ["add_budget_cny", "add_wall_clock_s"],
+                "required_rule": "至少填写一项",
+                "request_body": {
+                    "mode": "resume",
+                    "completion_grant_id": grant_id,
+                },
+            }, action("start_completion", "重新授权并开始", "POST", base, True)],
+        }
+    if phase in {"WAITING_HUMAN", "PAUSED_EXTERNAL", "WAITING_RETRY"}:
+        actions = [action("repair_preview", "查看恢复预演", "GET", f"{base}/repair-preview")]
+        if run_id:
+            actions.insert(0, action("resume", "继续补齐", "POST", f"/api/runs/{run_id}/resume"))
+        return {
+            "user_state": "waiting_human",
+            "message": "任务已暂停，检查评审意见或恢复条件后可继续",
+            "next_actions": actions,
+        }
+    return {
+        "user_state": "interrupted",
+        "message": "补齐任务当前未运行，请先查看恢复预演再继续",
+        "next_actions": [
+            action("repair_preview", "查看恢复预演", "GET", f"{base}/repair-preview"),
+            action("start_completion", "重新授权并补齐", "POST", base, True),
+        ],
     }
 
 
@@ -1380,7 +1876,16 @@ def get_video_completion(episode_id: str):
     except (KeyError, IndexError, TypeError):
         proj["active_video_run_id"] = None
         proj["video_completion_mode"] = "quick"
-    proj["running"] = task_registry.active("video_completion", episode_id)
+    active_run = conn.execute(
+        "SELECT status FROM workflow_runs WHERE id=?",
+        (proj["active_video_run_id"],),
+    ).fetchone() if proj["active_video_run_id"] else None
+    proj["active_run_status"] = active_run["status"] if active_run else None
+    running = task_registry.active("video_completion", episode_id)
+    proj["running"] = running
+    proj.update(_video_completion_user_contract(
+        episode_id, cp, proj, running=running,
+    ))
     return proj
 
 
@@ -1478,13 +1983,216 @@ async def complete_project_videos(project_id: str, body: dict | None = None):
     return await _complete_project_videos_core(project_id, body or {})
 
 
+def _persist_project_video_queue(run_id: str, state: dict) -> None:
+    conn = get_conn()
+    conn.execute(
+        "UPDATE workflow_runs SET config_snapshot_json=?,updated_at=? WHERE id=?",
+        (json.dumps({"queue_state": state}, ensure_ascii=False), now(), run_id),
+    )
+    conn.commit()
+
+
+_project_video_queue_pause_requests: set[str] = set()
+
+
+def request_project_video_queue_pause(project_id: str) -> None:
+    _project_video_queue_pause_requests.add(project_id)
+
+
+def clear_project_video_queue_pause(project_id: str) -> None:
+    _project_video_queue_pause_requests.discard(project_id)
+
+
+async def _run_project_video_completion_queue(
+    project_id: str,
+    state: dict,
+    recorder,
+) -> None:
+    import asyncio
+
+    plan = state.get("plan") or []
+    recorder.start()
+    _persist_project_video_queue(recorder.run_id, state)
+    try:
+        for item in plan:
+            if item.get("status") not in {"queued", "started", "failed_to_schedule"}:
+                continue
+            episode_id = item["episode_id"]
+            # A recovered per-episode Supervisor always owns the episode first.
+            while any(
+                task_registry.active("video_completion", candidate["episode_id"])
+                for candidate in plan
+                if candidate.get("episode_id")
+            ):
+                await asyncio.sleep(5)
+            try:
+                from app.video_supervisor import rebuild_coverage_ledger
+
+                ledger = rebuild_coverage_ledger(episode_id)
+                if ledger.covered_within_quota():
+                    item["status"] = "finished"
+                    _persist_project_video_queue(recorder.run_id, state)
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
+            room_now = max(
+                0.0,
+                float(state["global_budget_cap_cny"]) - _project_video_spent(project_id),
+            )
+            if room_now < 5:
+                item["status"] = "skipped_budget"
+                item["allocated_cny"] = 0
+                _persist_project_video_queue(recorder.run_id, state)
+                continue
+            item["allocated_cny"] = min(float(item["allocated_cny"]), room_now)
+            try:
+                result = await _complete_episode_core(episode_id, {
+                    "mode": "fresh",
+                    "budget_cap_cny": item["allocated_cny"],
+                    "wall_clock_cap_s": state["wall_clock_cap_s"],
+                    "allow_fallback_adopt": state["allow_fallback_adopt"],
+                    "allow_storyboard_edit": state["allow_storyboard_edit"],
+                })
+                item["status"] = "started"
+                item["run_id"] = result.get("run_id")
+                item["completion_grant_id"] = result.get("completion_grant_id")
+                _persist_project_video_queue(recorder.run_id, state)
+                while task_registry.active("video_completion", episode_id):
+                    await asyncio.sleep(8)
+                item["status"] = "finished"
+            except Exception as exc:  # noqa: BLE001
+                item["status"] = "failed"
+                item["error"] = str(exc)[:500]
+            _persist_project_video_queue(recorder.run_id, state)
+        failures = [
+            item for item in plan
+            if item.get("status") in {"failed", "failed_to_schedule", "skipped_budget"}
+        ]
+        if failures:
+            recorder.partial(
+                f"项目补齐队列已结束，{len(failures)} 集需补充预算或重新发起"
+            )
+        else:
+            recorder.succeed("项目补齐队列已全部处理")
+    except asyncio.CancelledError:
+        _persist_project_video_queue(recorder.run_id, state)
+        pause_requested = project_id in _project_video_queue_pause_requests
+        _project_video_queue_pause_requests.discard(project_id)
+        if task_registry.shutdown_in_progress() or pause_requested:
+            recorder.pause_external(
+                "用户暂停，项目补齐剩余队列已保留"
+                if pause_requested else "服务重启，项目补齐剩余队列等待自动恢复"
+            )
+            if pause_requested:
+                conn = get_conn()
+                conn.execute(
+                    "UPDATE workflow_runs SET failure_code='USER_PAUSED' WHERE id=?",
+                    (recorder.run_id,),
+                )
+                conn.commit()
+        else:
+            recorder.cancel("项目补齐队列已取消")
+        raise
+    except Exception as exc:
+        _persist_project_video_queue(recorder.run_id, state)
+        recorder.fail(exc)
+        raise
+
+
+def recover_project_video_completion_queues() -> int:
+    from app.orchestration.engine import WorkflowRecorder
+
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT * FROM workflow_runs
+           WHERE workflow_type='project_video_completion_queue'
+             AND status='PAUSED_EXTERNAL' AND failure_code='SERVICE_RESTART'
+             AND recovered_by_run_id IS NULL ORDER BY updated_at"""
+    ).fetchall()
+    resumed = 0
+    for row in rows:
+        project_id = row["scope_id"]
+        if task_registry.active("video_completion_project", project_id):
+            continue
+        recorder = None
+        coro = None
+        try:
+            snapshot = json.loads(row["config_snapshot_json"] or "{}")
+            state = snapshot["queue_state"]
+            if not isinstance(state, dict) or not isinstance(state.get("plan"), list):
+                raise ValueError("项目补齐恢复参数不完整")
+            recorder = WorkflowRecorder.create(
+                workflow_type="project_video_completion_queue",
+                scope_type="project",
+                scope_id=project_id,
+                input_fingerprint=row["input_fingerprint"],
+                requested_by="system",
+                trigger_type="resume",
+                policy_snapshot=json.loads(row["policy_snapshot_json"] or "{}"),
+                config_snapshot={"queue_state": state},
+                budget_limit_cny=row["budget_limit_cny"],
+                parent_run_id=row["id"],
+            )
+            coro = _run_project_video_completion_queue(project_id, state, recorder)
+            task_registry.spawn(
+                "video_completion_project",
+                project_id,
+                coro,
+                project_id=project_id,
+            )
+            resumed += 1
+        except Exception as exc:  # noqa: BLE001
+            if coro is not None:
+                coro.close()
+            if recorder is not None:
+                try:
+                    recorder.cancel("项目补齐队列恢复任务未能启动")
+                except Exception:  # noqa: BLE001
+                    pass
+            errors.record_and_format(
+                exc,
+                action="project_video_completion_recovery",
+                context={"project_id": project_id, "run_id": row["id"]},
+            )
+            conn.execute(
+                """UPDATE workflow_runs
+                   SET status='FAILED',failure_code='RECOVERY_START_FAILED',
+                       failure_message='项目补齐队列恢复任务未能启动，可重新提交',updated_at=?
+                   WHERE id=? AND status='PAUSED_EXTERNAL'""",
+                (now(), row["id"]),
+            )
+            conn.commit()
+            continue
+    return resumed
+
+
 async def _complete_project_videos_core(project_id: str, body: dict) -> dict:
     """全局预算编排：按 episode_no 顺序分配 per-episode cap，串行启动未覆盖集。"""
-    import asyncio
+    from app.orchestration.engine import WorkflowRecorder, fingerprint
+
     conn = get_conn()
     project = conn.execute("SELECT id FROM projects WHERE id=?", (project_id,)).fetchone()
     if not project:
         raise HTTPException(404, "项目不存在")
+    active_queue = conn.execute(
+        """SELECT id FROM workflow_runs
+           WHERE workflow_type='project_video_completion_queue'
+             AND scope_type='project' AND scope_id=?
+             AND recovered_by_run_id IS NULL
+             AND status IN (
+               'CREATED','RUNNING','WAITING_RETRY','WAITING_HUMAN',
+               'WAITING_AUTHORIZATION','PAUSED_BUDGET','PAUSED_EXTERNAL'
+             )
+           ORDER BY updated_at DESC LIMIT 1""",
+        (project_id,),
+    ).fetchone()
+    if task_registry.active("video_completion_project", project_id) or active_queue:
+        raise HTTPException(409, {
+            "code": "PROJECT_VIDEO_COMPLETION_ALREADY_ACTIVE",
+            "message": "项目补齐队列已在运行或等待恢复，请查看现有进度",
+            "run_id": active_queue["id"] if active_queue else None,
+            "action": "view_progress",
+        })
 
     global_cap = float(_review_validate_authorization_number(
         body.get("global_budget_cap_cny", 500), field="global_budget_cap_cny", minimum=1, maximum=1000000, allow_none=False,
@@ -1561,6 +2269,8 @@ async def _complete_project_videos_core(project_id: str, body: dict) -> dict:
 
     started = []
     queue = [p for p in plan if p["status"] == "queued"]
+    rest: list[dict] = []
+    project_queue_run_id = None
 
     async def _run_one(item: dict) -> dict:
         room_now = max(0.0, global_cap - _project_video_spent(project_id))
@@ -1585,26 +2295,59 @@ async def _complete_project_videos_core(project_id: str, body: dict) -> dict:
         started.append(first)
         rest = queue[1:]
         if rest:
-            async def _chain(items=rest):
-                for item in items:
-                    # 等待项目内任意集级 supervisor 空闲
-                    while any(
-                        task_registry.active("video_completion", p["episode_id"])
-                        for p in plan
-                        if p.get("episode_id") and p.get("status") in {"queued", "started", "already_running"}
-                    ):
-                        await asyncio.sleep(5)
+            queue_state = {
+                "global_budget_cap_cny": global_cap,
+                "per_episode_cap_cny": per_cap,
+                "wall_clock_cap_s": wall_cap,
+                "allow_fallback_adopt": allow_fallback,
+                "allow_storyboard_edit": allow_edit,
+                "plan": plan,
+            }
+            recorder = None
+            chain_coro = None
+            try:
+                recorder = WorkflowRecorder.create(
+                    workflow_type="project_video_completion_queue",
+                    scope_type="project",
+                    scope_id=project_id,
+                    input_fingerprint=fingerprint(project_id, queue_state),
+                    requested_by="user",
+                    trigger_type="manual",
+                    policy_snapshot={
+                        "serial": True,
+                        "global_budget_cap_cny": global_cap,
+                        "per_episode_cap_cny": per_cap,
+                    },
+                    config_snapshot={"queue_state": queue_state},
+                    budget_limit_cny=global_cap,
+                )
+                project_queue_run_id = recorder.run_id
+                chain_coro = _run_project_video_completion_queue(
+                    project_id, queue_state, recorder,
+                )
+                task_registry.spawn(
+                    "video_completion_project", project_id, chain_coro, project_id=project_id,
+                )
+            except Exception as exc:
+                if chain_coro is not None:
+                    chain_coro.close()
+                if recorder is not None:
                     try:
-                        await _run_one(item)
-                    except Exception as exc:  # noqa: BLE001
-                        item["status"] = "failed"
-                        item["error"] = str(exc)[:200]
-                    while task_registry.active("video_completion", item["episode_id"]):
-                        await asyncio.sleep(8)
-
-            task_registry.spawn(
-                "video_completion_project", project_id, _chain(), project_id=project_id,
-            )
+                        recorder.cancel("项目补齐队列未能启动")
+                    except Exception:  # noqa: BLE001
+                        pass
+                for item in rest:
+                    item["status"] = "failed_to_schedule"
+                    item["error"] = "项目级排队任务未能启动，可重新提交项目补齐；已启动集不受影响"
+                errors.record_and_format(
+                    exc,
+                    action="video_completion_project_spawn",
+                    context={
+                        "project_id": project_id,
+                        "already_started_episode_ids": [item["episode_id"] for item in started],
+                        "pending_episode_ids": [item["episode_id"] for item in rest],
+                    },
+                )
 
     return {
         "status": "accepted",
@@ -1614,6 +2357,16 @@ async def _complete_project_videos_core(project_id: str, body: dict) -> dict:
         "remaining_cny": remaining_global,
         "plan": plan,
         "started": started,
+        "project_queue_active": bool(rest) and all(
+            item.get("status") != "failed_to_schedule" for item in rest
+        ),
+        "project_queue_run_id": project_queue_run_id,
+        "project_queue_poll_url": (
+            f"/api/runs/{project_queue_run_id}" if project_queue_run_id else None
+        ),
+        "retryable_schedule_failures": [
+            item["episode_id"] for item in plan if item.get("status") == "failed_to_schedule"
+        ],
     }
 
 
@@ -1647,7 +2400,7 @@ async def concatenate(episode_id: str):
         return routed
     _episode_or_404(episode_id)
     try:
-        return worker.concatenate_episode(episode_id)
+        return await asyncio.to_thread(worker.concatenate_episode, episode_id)
     except ValueError as exc:
         raise HTTPException(409, str(exc))
     except Exception as exc:  # noqa: BLE001
@@ -1656,7 +2409,7 @@ async def concatenate(episode_id: str):
 
 @router.get("/episodes/{episode_id}/stale-assets-preview")
 def stale_assets_preview(episode_id: str):
-    """评审墙：资产/分镜 stale 影响预览（只读）。"""
+    """生成台：资产/分镜 stale 影响预览（只读）。"""
     ep = dict(_episode_or_404(episode_id))
     conn = get_conn()
     from app.domain.storyboard_ops import _shot_video_is_stale, _shot_adopted_assets_stale

@@ -1,0 +1,160 @@
+import sqlite3
+import subprocess
+from pathlib import Path
+
+from app import api, artifacts, db, worker
+
+
+def _database() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(db.SCHEMA)
+    for statement in db.MIGRATIONS:
+        try:
+            conn.execute(statement)
+        except sqlite3.OperationalError:
+            pass
+    conn.execute("INSERT INTO projects(id,name,created_at) VALUES('p','P',0)")
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,title,status,created_at) "
+        "VALUES('e','p',1,'E','confirmed',0)"
+    )
+    for shot_no in (1, 2, 3):
+        conn.execute(
+            "INSERT INTO shots(id,episode_id,shot_no,duration_s) VALUES(?,?,?,?)",
+            (f"s{shot_no}", "e", shot_no, 5 + shot_no),
+        )
+    conn.commit()
+    return conn
+
+
+def _version(conn: sqlite3.Connection, *, shot_no: int, path: Path, adopted: bool) -> None:
+    version_id = f"v{shot_no}"
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,video_path,created_at
+           ) VALUES(?,?,?,?,?,'succeeded',?,0)""",
+        (version_id, f"s{shot_no}", 1, "prompt", f"key-{shot_no}", str(path)),
+    )
+    if adopted:
+        conn.execute(
+            "UPDATE shots SET adopted_version_id=? WHERE id=?",
+            (version_id, f"s{shot_no}"),
+        )
+
+
+def test_partial_episode_can_mix_one_adopted_video_and_skip_other_shots(
+    tmp_path, monkeypatch,
+) -> None:
+    conn = _database()
+    project_root = tmp_path / "projects"
+    shot_dir = project_root / "p" / "episodes" / "1" / "shots"
+    shot_dir.mkdir(parents=True)
+    adopted_path = shot_dir / "shot-1.mp4"
+    unadopted_path = shot_dir / "shot-2.mp4"
+    missing_path = shot_dir / "shot-3-missing.mp4"
+    adopted_path.write_bytes(b"adopted")
+    unadopted_path.write_bytes(b"unadopted")
+    _version(conn, shot_no=1, path=adopted_path, adopted=True)
+    _version(conn, shot_no=2, path=unadopted_path, adopted=False)
+    _version(conn, shot_no=3, path=missing_path, adopted=True)
+    conn.commit()
+
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker.config, "PROJECTS_DIR", project_root)
+    monkeypatch.setattr(worker.shutil, "which", lambda _name: None)
+
+    status = worker.episode_mix_status("e")
+
+    assert status["ready"] is True
+    assert status["all_ready"] is False
+    assert status["shots_ready"] == 1
+    assert status["shots_skipped"] == 2
+    assert status["skipped_shot_nos"] == [2, 3]
+    assert [item["shot_no"] for item in status["shots"] if item["has_adopted"]] == [1]
+
+    result = worker.concatenate_episode("e")
+
+    assert result["shots"] == 1
+    assert result["shots_skipped"] == 2
+    assert result["skipped_shot_nos"] == [2, 3]
+    assert result["total_duration_s"] == 6
+    assert result["video_url"].endswith("/shot-1.mp4")
+
+
+def test_episode_without_adopted_video_still_cannot_mix(tmp_path, monkeypatch) -> None:
+    conn = _database()
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker.config, "PROJECTS_DIR", tmp_path / "projects")
+
+    status = worker.episode_mix_status("e")
+    assert status["ready"] is False
+    assert status["shots_ready"] == 0
+
+    try:
+        worker.concatenate_episode("e")
+    except ValueError as exc:
+        assert "没有任何已采用的视频片段" in str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("没有采纳片段时不应进入合成")
+
+
+def test_concat_timeout_preserves_previous_final_video(tmp_path, monkeypatch) -> None:
+    conn = _database()
+    project_root = tmp_path / "projects"
+    piece = project_root / "p" / "episodes" / "1" / "shots" / "shot-1.mp4"
+    piece.parent.mkdir(parents=True)
+    piece.write_bytes(b"new-piece")
+    _version(conn, shot_no=1, path=piece, adopted=True)
+    conn.commit()
+    final_path = project_root / "p" / "episodes" / "1" / "final" / "episode.mp4"
+    final_path.parent.mkdir(parents=True)
+    final_path.write_bytes(b"previous-final")
+
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker.config, "PROJECTS_DIR", project_root)
+    monkeypatch.setattr(worker.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
+
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs.get("timeout", 1))
+
+    monkeypatch.setattr(worker.subprocess, "run", timeout)
+
+    try:
+        worker.concatenate_episode("e")
+    except ValueError as exc:
+        assert "上一版成片仍保留" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("合成超时必须返回可重试失败")
+    assert final_path.read_bytes() == b"previous-final"
+
+
+def test_cancel_adoption_keeps_candidate_and_marks_shot_to_skip(tmp_path, monkeypatch) -> None:
+    conn = _database()
+    video_path = tmp_path / "candidate.mp4"
+    video_path.write_bytes(b"video")
+    _version(conn, shot_no=1, path=video_path, adopted=True)
+    conn.commit()
+    invalidated: list[str] = []
+    audits: list[tuple] = []
+    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    monkeypatch.setattr(
+        api.worker,
+        "invalidate_episode_final",
+        lambda episode_id: invalidated.append(episode_id),
+    )
+    monkeypatch.setattr(api, "_review_write_audit", lambda *args, **kwargs: audits.append((args, kwargs)))
+
+    result = api._cancel_shot_adoption_core("s1")
+
+    assert result["previous_adopted_version_id"] == "v1"
+    assert conn.execute(
+        "SELECT adopted_version_id FROM shots WHERE id='s1'",
+    ).fetchone()[0] is None
+    assert conn.execute("SELECT COUNT(*) FROM shot_versions WHERE id='v1'").fetchone()[0] == 1
+    assert video_path.exists()
+    assert invalidated == ["e"]
+    assert audits

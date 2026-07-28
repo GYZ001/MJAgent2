@@ -10,7 +10,7 @@
        - 变化很大 → 关闭当前定妆照右区间（= 本集-1），以当前定妆照为底【图生图】重绘新定妆照
          （左区间=本集、右区间开放），并把 bible 该角色锚点同步成最新（供人物谱 UI 展示）。
 
-评审墙/关键帧出图时按集号选用覆盖该集的定妆照与外观锚点：图走 portrait_for_episode，文字锚点走
+生成台/关键帧出图时按集号选用覆盖该集的定妆照与外观锚点：图走 portrait_for_episode，文字锚点走
 bible_for_episode（把 bible 换成"本集视图"），二者同段同源（见 app.refs / app.video_modes / app.worker）。
 """
 from __future__ import annotations
@@ -737,8 +737,8 @@ async def _refresh_portrait_on_drift(project_id: str, name: str, episode_no: int
             pack_status = pack.get("status") or "failed"
             if pack_status != PACK_STATUS_READY and pack_status != "ready":
                 # 整包失败：删除临时段，旧包继续生效；相关镜头等待人工
-                conn.execute("DELETE FROM character_portraits WHERE id=?", (new_portrait_id,))
-                conn.commit()
+                from app.rejected_media import purge_character_portrait
+                purge_character_portrait(conn, new_portrait_id)
                 raise hiagent.ProviderError(
                     f"角色多视角资产包未通过，无法切换造型：{name}（waiting_asset_review）"
                 )
@@ -1042,13 +1042,21 @@ def stage_initial_portrait(conn, project_id: str, name: str, image_path: str,
 def promote_staged_initial_portrait(conn, project_id: str, name: str, portrait_id: str) -> None:
     """整包验收通过后原子替换当前定妆版本。"""
     row = conn.execute(
-        "SELECT id FROM character_portraits "
+        "SELECT id, base_portrait_id FROM character_portraits "
         "WHERE id=? AND project_id=? AND character_name=? AND ep_start=?",
         (portrait_id, project_id, name, STAGED_INITIAL_EP_START),
     ).fetchone()
     if not row:
         raise ValueError(f"定妆候选不存在：{name}")
     with conn:
+        target_start = 1
+        if row["base_portrait_id"]:
+            base = conn.execute(
+                "SELECT ep_start FROM character_portraits WHERE id=?",
+                (row["base_portrait_id"],),
+            ).fetchone()
+            if base and int(base["ep_start"]) > 0:
+                target_start = int(base["ep_start"])
         current = conn.execute(
             "SELECT id FROM character_portraits WHERE project_id=? AND character_name=? "
             "AND id<>? AND ep_end IS NULL AND ep_start<>? ORDER BY created_at DESC LIMIT 1",
@@ -1066,8 +1074,8 @@ def promote_staged_initial_portrait(conn, project_id: str, name: str, portrait_i
                 (history_start, current["id"]),
             )
         conn.execute(
-            "UPDATE character_portraits SET ep_start=1, ep_end=NULL WHERE id=?",
-            (portrait_id,),
+            "UPDATE character_portraits SET ep_start=?, ep_end=NULL WHERE id=?",
+            (target_start, portrait_id),
         )
 
 
@@ -1348,8 +1356,8 @@ async def _generate_discovered_character_portrait(
             )
             conn.commit()
     except Exception:
-        conn.execute("DELETE FROM character_portraits WHERE id=?", (portrait_id,))
-        conn.commit()
+        from app.rejected_media import purge_character_portrait
+        purge_character_portrait(conn, portrait_id)
         raise
 
     _update_bible_appearance(conn, project_id, name, appearance, image_path)

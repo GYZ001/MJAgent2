@@ -53,7 +53,7 @@ def test_defer_sets_waiting_provider(monkeypatch) -> None:
 
 
 def test_channel_defaults_balanced() -> None:
-    assert CHANNEL_DEFAULTS[S.RESOURCE_VIDEO_INFLIGHT] == 8
+    assert CHANNEL_DEFAULTS[S.RESOURCE_VIDEO_INFLIGHT] == 15
     assert CHANNEL_DEFAULTS[S.RESOURCE_IMAGE] == 4
     assert CHANNEL_DEFAULTS[S.RESOURCE_VLM] == 6
     ensure_channel(S.RESOURCE_VIDEO_SUBMIT)

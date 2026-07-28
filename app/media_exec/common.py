@@ -17,7 +17,9 @@ from typing import Any
 from app import config, errors, hiagent, video_modes
 from app.atomic_io import atomic_copy, atomic_write_bytes
 from app.artifacts import (_adopted_video_paths, _invalidate_final_video,
-                           clear_episode_artifacts, clear_shot_artifacts,
+                           clear_episode_artifacts, clear_episode_video_assets,
+                           clear_shot_artifacts, clear_shot_reference_assets,
+                           clear_shot_video_assets,
                            delete_episode_shots, delete_project_episodes,
                            delete_video_version, invalidate_episode_final,
                            invalidate_shot_video_derivatives,
@@ -31,7 +33,8 @@ from app.orchestration import media_scheduler
 from app.orchestration.media_runs import ensure_media_trace, mark_media_job_state
 
 __all__ = [
-    "clear_episode_artifacts", "clear_shot_artifacts", "delete_episode_shots",
+    "clear_episode_artifacts", "clear_episode_video_assets", "clear_shot_artifacts",
+    "clear_shot_reference_assets", "clear_shot_video_assets", "delete_episode_shots",
     "delete_project_episodes", "delete_video_version", "invalidate_episode_final",
     "invalidate_shot_video_derivatives", "purge_character_video_artifacts",
     "purge_project_video_artifacts", "purge_shot_videos",

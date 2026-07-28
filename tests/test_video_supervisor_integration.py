@@ -34,6 +34,7 @@ from app.video_supervisor import (
     attempts_for,
     preview_video_completion_repair,
     reconcile_stale_video_supervisors,
+    recover_video_completion_runs,
     rebuild_coverage_ledger,
     save_checkpoint,
 )
@@ -140,6 +141,26 @@ def _add_succeeded_version(
     conn.execute("UPDATE shots SET adopted_version_id=? WHERE id=?", (vid, shot_id))
     conn.commit()
     return vid
+
+
+def test_coverage_ledger_counts_provider_attempts_inside_one_version(memdb):
+    eid, _ = _seed_episode(memdb, 1)
+    version_id = _add_succeeded_version(
+        memdb,
+        f"{eid}_shot_1",
+        qa={"overall": 0.9, "failure_types": []},
+        cost=12.0,
+    )
+    memdb.execute(
+        "UPDATE shot_versions SET image_inputs=? WHERE id=?",
+        (json.dumps({"provider_paid_attempts": 3}), version_id),
+    )
+    memdb.commit()
+
+    ledger = rebuild_coverage_ledger(eid)
+
+    assert ledger.entries[0].attempts_paid == 3
+    assert ledger.entries[0].cost_spent_cny == 12.0
 
 
 def test_integration_all_a_covered(memdb):
@@ -612,6 +633,55 @@ async def test_watchdog_closes_stale_run_when_task_record_is_missing(memdb, monk
     ).fetchone()
     assert dict(episode) == {
         "status": "confirmed", "video_completion_mode": "quick", "active_video_run_id": None,
+    }
+
+
+def test_startup_recovery_spawn_failure_restores_episode_state(memdb, monkeypatch):
+    import app.task_registry as task_registry
+    import app.video_supervisor as video_supervisor
+
+    eid, _ = _seed_episode(memdb, 1)
+    parent_run_id = evidence_repository.create_run(
+        workflow_type="episode_video_completion",
+        scope_type="episode",
+        scope_id=eid,
+        input_fingerprint="recovery-parent",
+        deadline_at=500,
+    )
+    memdb.execute(
+        "UPDATE workflow_runs SET status='RUNNING', started_at=1, updated_at=1 WHERE id=?",
+        (parent_run_id,),
+    )
+    memdb.execute(
+        """UPDATE episodes SET status='confirmed', video_completion_mode='complete',
+                   active_video_run_id=? WHERE id=?""",
+        (parent_run_id, eid),
+    )
+    memdb.commit()
+    checkpoint = VideoSupervisorCheckpoint(
+        episode_id=eid,
+        run_id=parent_run_id,
+        phase="PLANNING_COVERAGE",
+        started_at=1,
+        deadline_at=500,
+    )
+    monkeypatch.setattr(video_supervisor, "now", lambda: 100.0)
+    save_checkpoint(checkpoint, run_id=parent_run_id)
+    monkeypatch.setattr(task_registry, "active", lambda *_args: False)
+    monkeypatch.setattr(
+        task_registry,
+        "spawn",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("spawn failed")),
+    )
+
+    assert recover_video_completion_runs() == 0
+    episode = memdb.execute(
+        "SELECT status,active_video_run_id FROM episodes WHERE id=?",
+        (eid,),
+    ).fetchone()
+    assert dict(episode) == {
+        "status": "confirmed",
+        "active_video_run_id": parent_run_id,
     }
 
 

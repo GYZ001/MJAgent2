@@ -8,7 +8,11 @@ lease_expires_at<now 的 job，因此不会恢复——结果用户看到的"任
 queued，随后由数据库驱动的持久调度器在下一轮重新发现并交给 worker。
 """
 import asyncio
+import json
 import sqlite3
+
+import pytest
+from fastapi import HTTPException
 
 from app import db, worker
 
@@ -201,6 +205,308 @@ def test_provider_poll_budget_uses_original_submission_time_after_restart(monkey
     ).fetchone()["provider_submitted_at"] == 100.0
 
 
+def test_paid_provider_handle_is_recovered_from_successful_call() -> None:
+    conn = _conn()
+    conn.execute(
+        """INSERT INTO provider_calls(
+               ts, kind, status, operation_id, response_json
+           ) VALUES(100.0, 'video_create', 'OK', 'video-create-v1', ?)""",
+        (json.dumps({"id": "provider-task-1"}),),
+    )
+    conn.execute(
+        """INSERT INTO provider_calls(
+               ts, kind, status, operation_id, response_json
+           ) VALUES(101.0, 'video_create', 'FAILED', 'video-create-v1', ?)""",
+        (json.dumps({"id": "wrong-task"}),),
+    )
+    conn.commit()
+
+    recovered = worker._recover_paid_video_task(conn, "video-create-v1")
+
+    assert recovered == ("provider-task-1", 100.0)
+    assert worker._recover_paid_video_task(conn, "video-create-other") is None
+
+
+def test_paid_provider_attempts_count_distinct_operations() -> None:
+    conn = _conn()
+    conn.executemany(
+        """INSERT INTO provider_calls(
+               ts, kind, status, operation_id, response_json
+           ) VALUES(?, 'video_create', 'OK', ?, ?)""",
+        [
+            (1, "video-create-v1", json.dumps({"id": "task-1"})),
+            (2, "video-create-v1", json.dumps({"id": "task-1"})),
+            (3, "video-create-v1-safety-1", json.dumps({"id": "task-2"})),
+            (4, "video-create-v1-copyright-1", json.dumps({"id": "task-3"})),
+        ],
+    )
+    conn.commit()
+
+    assert worker._paid_video_attempt_count(conn, "v1") == 3
+
+
+def test_resubmit_budget_extension_is_atomic_and_capped() -> None:
+    conn = _conn()
+    conn.execute(
+        """INSERT INTO jobs(
+               id, kind, status, episode_id, reserved_cost_cny, created_at, updated_at
+           ) VALUES('j1','video','running','e1',5,1,1)"""
+    )
+    conn.execute(
+        """INSERT INTO budget_reservations(
+               id,job_id,scope_type,scope_id,amount_cny,status,created_at
+           ) VALUES('b1','j1','episode','e1',5,'running',1)"""
+    )
+    conn.commit()
+
+    assert worker.media_scheduler.extend_budget_reservation(
+        "j1", "e1", 5, 9, conn=conn,
+    ) is False
+    assert conn.execute(
+        "SELECT amount_cny FROM budget_reservations WHERE job_id='j1'",
+    ).fetchone()["amount_cny"] == 5
+
+    assert worker.media_scheduler.extend_budget_reservation(
+        "j1", "e1", 5, 10, conn=conn,
+    ) is True
+    assert conn.execute(
+        "SELECT amount_cny FROM budget_reservations WHERE job_id='j1'",
+    ).fetchone()["amount_cny"] == 10
+
+
+def test_video_resubmit_checkpoint_is_persisted_atomically() -> None:
+    conn = _conn()
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id, shot_id, version_no, prompt_text, idem_key, status,
+               provider_task_id, image_inputs, created_at
+           ) VALUES('v1','s1',1,'old','idem','failed','old-task','{}',1)"""
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id, kind, status, version_id, provider_operation_id,
+               provider_create_state, provider_non_cancellable,
+               provider_submitted_at, created_at, updated_at
+           ) VALUES(
+               'j1','video','running','v1','video-create-v1','accepted',1,50,1,1
+           )"""
+    )
+    conn.commit()
+
+    worker._persist_video_resubmit(
+        conn,
+        job_id="j1",
+        version_id="v1",
+        prompt_text="sanitized",
+        meta={"seedance_safety_retry": True},
+        operation_id="video-create-v1-safety-1",
+    )
+
+    version = conn.execute(
+        "SELECT prompt_text, provider_task_id, image_inputs FROM shot_versions WHERE id='v1'"
+    ).fetchone()
+    job = conn.execute(
+        """SELECT provider_operation_id, provider_create_state,
+                  provider_non_cancellable, provider_submitted_at
+             FROM jobs WHERE id='j1'"""
+    ).fetchone()
+    assert dict(version) == {
+        "prompt_text": "sanitized",
+        "provider_task_id": None,
+        "image_inputs": '{"seedance_safety_retry": true}',
+    }
+    assert dict(job) == {
+        "provider_operation_id": "video-create-v1-safety-1",
+        "provider_create_state": "not_started",
+        "provider_non_cancellable": 0,
+        "provider_submitted_at": None,
+    }
+
+
+def test_manual_retry_distinguishes_poll_from_new_submission(monkeypatch) -> None:
+    import app.monitoring as monitoring
+    import app.system_api as system_api
+
+    conn = _conn()
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id, shot_id, version_no, prompt_text, idem_key, status,
+               provider_task_id, created_at
+           ) VALUES('v-paid','s1',1,'p','i1','failed','provider-task-1',1)"""
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id, kind, status, version_id, created_at, updated_at
+           ) VALUES('j-paid','video','failed','v-paid',1,1)"""
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id, kind, status, episode_id, created_at, updated_at
+           ) VALUES('j-new','video','failed','e1',1,1)"""
+    )
+    conn.commit()
+    monkeypatch.setattr(system_api, "get_conn", lambda: conn)
+    monkeypatch.setattr(system_api, "get_setting", lambda *_args: "100")
+    monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+
+    paid = system_api.retry_job("j-paid")
+    new = system_api.retry_job("j-new")
+
+    assert paid["retryability"]["action"] == "continue_poll"
+    assert paid["retryability"]["will_submit_new_provider_task"] is False
+    assert paid["job"]["status"] == "waiting_provider"
+    assert new["retryability"]["action"] == "new_submission"
+    assert new["retryability"]["will_submit_new_provider_task"] is True
+    assert new["job"]["status"] == "queued"
+
+
+def test_manual_budget_retry_only_resumes_requested_job(monkeypatch) -> None:
+    import app.monitoring as monitoring
+    import app.system_api as system_api
+
+    conn = _conn()
+    conn.executemany(
+        """INSERT INTO jobs(
+               id, kind, status, episode_id, reserved_cost_cny, created_at, updated_at
+           ) VALUES(?, 'video', 'paused_budget', 'e1', 1, 1, 1)""",
+        [("j-budget-1",), ("j-budget-2",)],
+    )
+    conn.commit()
+    monkeypatch.setattr(system_api, "get_conn", lambda: conn)
+    monkeypatch.setattr(system_api, "get_setting", lambda *_args: "100")
+    monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "get_setting", lambda *_args: "100")
+    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+
+    result = system_api.retry_job("j-budget-1")
+
+    assert result["retryability"]["action"] == "resume_budget_paused"
+    statuses = {
+        row["id"]: row["status"]
+        for row in conn.execute(
+            "SELECT id,status FROM jobs ORDER BY id",
+        ).fetchall()
+    }
+    assert statuses == {
+        "j-budget-1": "queued",
+        "j-budget-2": "paused_budget",
+    }
+
+
+def test_manual_retry_recovers_persisted_provider_handle_before_queueing(monkeypatch) -> None:
+    import app.monitoring as monitoring
+    import app.system_api as system_api
+
+    conn = _conn()
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id, shot_id, version_no, prompt_text, idem_key, status, created_at
+           ) VALUES('v-recover','s1',1,'p','i1','failed',1)"""
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id, kind, status, version_id, episode_id, provider_operation_id,
+               provider_create_state, provider_non_cancellable, created_at, updated_at
+           ) VALUES(
+               'j-recover','video','failed','v-recover','e1','video-create-v-recover',
+               'unknown',1,1,1
+           )"""
+    )
+    conn.execute(
+        """INSERT INTO provider_calls(
+               ts, kind, status, operation_id, response_json
+           ) VALUES(100, 'video_create', 'OK', 'video-create-v-recover', ?)""",
+        (json.dumps({"id": "provider-task-recovered"}),),
+    )
+    conn.commit()
+    monkeypatch.setattr(system_api, "get_conn", lambda: conn)
+    monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+
+    result = system_api.retry_job("j-recover")
+
+    assert result["retryability"]["action"] == "continue_poll"
+    assert result["job"]["status"] == "waiting_provider"
+    assert conn.execute(
+        "SELECT provider_task_id FROM shot_versions WHERE id='v-recover'",
+    ).fetchone()["provider_task_id"] == "provider-task-recovered"
+
+
+def test_manual_retry_requires_confirmation_for_unverified_provider_charge(monkeypatch) -> None:
+    import app.monitoring as monitoring
+    import app.system_api as system_api
+
+    conn = _conn()
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id, shot_id, version_no, prompt_text, idem_key, status, created_at
+           ) VALUES('v-unknown','s1',1,'p','i1','failed',1)"""
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id, kind, status, version_id, episode_id, provider_operation_id,
+               provider_create_state, provider_non_cancellable, reserved_cost_cny,
+               created_at, updated_at
+           ) VALUES(
+               'j-unknown','video','failed','v-unknown','e1','video-create-v-unknown',
+               'unknown',1,1,1,1
+           )"""
+    )
+    conn.commit()
+    monkeypatch.setattr(system_api, "get_conn", lambda: conn)
+    monkeypatch.setattr(system_api, "get_setting", lambda *_args: "100")
+    monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+
+    with pytest.raises(HTTPException) as rejected:
+        system_api.retry_job("j-unknown")
+
+    assert rejected.value.detail["code"] == "PROVIDER_HANDLE_UNCONFIRMED"
+    assert rejected.value.detail["retryability"]["action"] == "confirm_new_submission"
+    assert conn.execute(
+        "SELECT status FROM jobs WHERE id='j-unknown'",
+    ).fetchone()["status"] == "failed"
+
+    confirmed = system_api.retry_job(
+        "j-unknown",
+        {"allow_new_submission": True},
+    )
+    assert confirmed["retryability"]["action"] == "new_submission_after_unconfirmed_provider"
+    assert confirmed["retryability"]["will_submit_new_provider_task"] is True
+    assert confirmed["job"]["status"] == "queued"
+
+
+def test_manual_retry_rejects_terminal_provider_failure(monkeypatch) -> None:
+    import app.system_api as system_api
+
+    conn = _conn()
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id, shot_id, version_no, prompt_text, idem_key, status,
+               provider_task_id, created_at
+           ) VALUES('v-failed','s1',1,'p','i1','failed','provider-task-1',1)"""
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id, kind, status, version_id, error, created_at, updated_at
+           ) VALUES(
+               'j-failed','video','failed','v-failed',
+               'Seedance 任务失败：内容审核未通过',1,1
+           )"""
+    )
+    conn.commit()
+    monkeypatch.setattr(system_api, "get_conn", lambda: conn)
+
+    with pytest.raises(HTTPException) as rejected:
+        system_api.retry_job("j-failed")
+
+    assert rejected.value.status_code == 409
+    assert rejected.value.detail["code"] == "PROVIDER_TASK_TERMINAL_FAILED"
+    assert rejected.value.detail["retryability"]["action"] == "create_new_version"
+
+
 def test_episode_leaves_generating_when_no_video_job_is_active(monkeypatch) -> None:
     conn = _conn()
     conn.execute(
@@ -289,3 +595,61 @@ def test_stale_lease_sweeper_reclaims_expired_lease(monkeypatch) -> None:
     job = conn.execute("SELECT status, lease_owner FROM jobs WHERE id='j_s'").fetchone()
     assert job["status"] == "queued"
     assert job["lease_owner"] is None
+
+
+def test_media_run_resume_adapter_requeues_exact_paused_job(monkeypatch) -> None:
+    import app.monitoring as monitoring
+    import app.system_api as system_api
+    from app.evidence import repository
+    from app.orchestration import api as orchestration_api
+    from app.orchestration import media_scheduler
+
+    conn = _conn()
+    conn.execute("INSERT INTO projects(id,name,created_at) VALUES('p1','P',1)")
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,status,created_at) "
+        "VALUES('e1','p1',1,'confirmed',1)"
+    )
+    conn.execute(
+        "INSERT INTO shots(id,episode_id,shot_no,duration_s) VALUES('s1','e1',1,5)"
+    )
+    conn.execute(
+        "INSERT INTO shot_versions(id,shot_id,version_no,prompt_text,idem_key,status,created_at) "
+        "VALUES('v1','s1',1,'p','i','paused',1)"
+    )
+    conn.execute(
+        """INSERT INTO workflow_runs(
+               id,workflow_type,scope_type,scope_id,status,input_fingerprint,
+               failure_code,updated_at
+           ) VALUES(
+               'run-media','video_generation','shot','s1','PAUSED_EXTERNAL','fp',
+               'USER_PAUSED',1
+           )"""
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,version_id,episode_id,project_id,status,run_id,
+               provider_create_state,created_at,updated_at
+           ) VALUES(
+               'j1','video','s1','v1','e1','p1','paused','run-media',
+               'not_started',1,1
+           )"""
+    )
+    conn.commit()
+    for module in (
+        worker, monitoring, system_api, orchestration_api, media_scheduler, repository,
+    ):
+        monkeypatch.setattr(module, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+    monkeypatch.setattr(system_api, "get_setting", lambda *_args: "100")
+
+    result = asyncio.run(
+        orchestration_api.resume_run("run-media", allow_new_submission=True)
+    )
+
+    assert result["accepted"] is True
+    assert result["job"]["id"] == "j1"
+    assert result["job"]["status"] == "queued"
+    assert conn.execute(
+        "SELECT status FROM jobs WHERE id='j1'"
+    ).fetchone()["status"] == "queued"

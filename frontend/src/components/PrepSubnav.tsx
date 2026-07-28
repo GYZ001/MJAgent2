@@ -3,7 +3,7 @@ import { prepStepLabel, type PrepStepStatus } from '../lib/statusLabels'
 
 const TABS: { key: View; label: string; description: string }[] = [
   { key: 'bible', label: '人物谱', description: '角色与定妆资产' },
-  { key: 'scenes', label: '场景库', description: '场景锚点与参考图' },
+  { key: 'scenes', label: '场景库', description: '场景设定与参考图' },
   { key: 'episodes', label: '分集规划', description: '章节拆分与制作进度' },
 ]
 
@@ -26,14 +26,14 @@ export default function PrepSubnav({
   return (
     <nav className="prep-subnav" aria-label="前期准备">
       {TABS.map((tab, index) => {
-        const status = statuses?.[tab.key as 'bible' | 'scenes' | 'episodes'] || 'idle'
-        const label = prepStepLabel(status)
+        const status = statuses?.[tab.key as 'bible' | 'scenes' | 'episodes']
+        const label = status ? prepStepLabel(status) : ''
         return (
           <button
             key={tab.key}
             type="button"
             aria-current={current === tab.key ? 'page' : undefined}
-            className={`prep-subnav-tab${current === tab.key ? ' active' : ''} prep-status-${status}`}
+            className={`prep-subnav-tab${current === tab.key ? ' active' : ''}${status ? ` prep-status-${status}` : ''}`}
             onClick={() => {
               if (tab.key !== current && onBeforeNavigate && !onBeforeNavigate(tab.key)) return
               if (status === 'problem' && onProblemClick) {
@@ -46,10 +46,12 @@ export default function PrepSubnav({
             <span className="prep-subnav-copy">
               <strong>{tab.label}</strong>
               <small>{tab.description}</small>
-              <em className="prep-step-status" title={label}>
-                <span aria-hidden="true">{status === 'done' ? '✓' : status === 'problem' ? '!' : status === 'running' ? '…' : '○'}</span>
-                {label}
-              </em>
+              {status && (
+                <em className="prep-step-status" title={label}>
+                  <span aria-hidden="true">{status === 'done' ? '✓' : status === 'problem' ? '!' : status === 'running' ? '…' : '○'}</span>
+                  {label}
+                </em>
+              )}
             </span>
           </button>
         )

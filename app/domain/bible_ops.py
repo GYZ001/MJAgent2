@@ -189,6 +189,11 @@ def _start_refs_generation(
     if _refs_task_active(project_id):
         return None
     conn = get_conn()
+    previous = conn.execute(
+        "SELECT refs_status,refs_error,refs_target,refs_resume,refs_batch_started_at "
+        "FROM projects WHERE id=?",
+        (project_id,),
+    ).fetchone()
     target_payload = _refs_target_payload(only_character, only_characters)
     # fresh_after 只在“全量重生被进程恢复”时传入；新的全量批次在此冻结起点。
     # 恢复时 generate_refs 使用 resume=True，但只跳过该起点之后已提交的新包。
@@ -209,20 +214,39 @@ def _start_refs_generation(
     conn.commit()
     requested_by = "system" if resume else "user"
     trigger_type = "resume" if resume else "manual"
-    recorder = _new_refs_recorder(
-        project_id, only_character, only_characters,
-        resume=resume, fresh_after=batch_started_at, parent_run_id=parent_run_id,
-        requested_by=requested_by, trigger_type=trigger_type,
-    )
-    task_registry.spawn(
-        "refs", project_id,
-        _refs_task(
-            project_id, only_character, only_characters=only_characters,
+    recorder = None
+    try:
+        recorder = _new_refs_recorder(
+            project_id, only_character, only_characters,
             resume=resume, fresh_after=batch_started_at, parent_run_id=parent_run_id,
-            requested_by=requested_by, trigger_type=trigger_type, recorder=recorder,
-        ),
-        project_id=project_id,
-    )
+            requested_by=requested_by, trigger_type=trigger_type,
+        )
+        task_registry.spawn(
+            "refs", project_id,
+            _refs_task(
+                project_id, only_character, only_characters=only_characters,
+                resume=resume, fresh_after=batch_started_at, parent_run_id=parent_run_id,
+                requested_by=requested_by, trigger_type=trigger_type, recorder=recorder,
+            ),
+            project_id=project_id,
+        )
+    except Exception as exc:
+        if previous:
+            conn.execute(
+                "UPDATE projects SET refs_status=?,refs_error=?,refs_target=?,"
+                "refs_resume=?,refs_batch_started_at=? WHERE id=?",
+                (
+                    previous["refs_status"], previous["refs_error"], previous["refs_target"],
+                    previous["refs_resume"], previous["refs_batch_started_at"], project_id,
+                ),
+            )
+            conn.commit()
+        if recorder is not None:
+            try:
+                recorder.cancel("定妆任务未能启动，项目状态已回滚")
+            except Exception:  # noqa: BLE001
+                pass
+        raise ValueError("定妆任务未能启动，原状态和费用凭证已保留，请重试") from exc
     return {
         "status": "accepted",
         "task_id": f"refs:{project_id}",
@@ -240,6 +264,10 @@ def _start_scene_refs_generation(
     if _scene_refs_task_active(project_id):
         return False
     conn = get_conn()
+    previous = conn.execute(
+        "SELECT scene_refs_status,scene_refs_error,scene_refs_target FROM projects WHERE id=?",
+        (project_id,),
+    ).fetchone()
     target_payload = (
         json.dumps(only_scene, ensure_ascii=False)
         if isinstance(only_scene, list) else only_scene
@@ -248,15 +276,28 @@ def _start_scene_refs_generation(
         "UPDATE projects SET scene_refs_status='running', scene_refs_error=NULL, scene_refs_target=? WHERE id=?",
         (target_payload, project_id))
     conn.commit()
-    task_registry.spawn(
-        "scene_refs", project_id,
-        _scene_refs_task(
-            project_id, only_scene, resume=resume, parent_run_id=parent_run_id,
-            requested_by="system" if resume else "user",
-            trigger_type="resume" if resume else "manual",
-        ),
-        project_id=project_id,
-    )
+    try:
+        task_registry.spawn(
+            "scene_refs", project_id,
+            _scene_refs_task(
+                project_id, only_scene, resume=resume, parent_run_id=parent_run_id,
+                requested_by="system" if resume else "user",
+                trigger_type="resume" if resume else "manual",
+            ),
+            project_id=project_id,
+        )
+    except Exception as exc:
+        if previous:
+            conn.execute(
+                "UPDATE projects SET scene_refs_status=?,scene_refs_error=?,scene_refs_target=? "
+                "WHERE id=?",
+                (
+                    previous["scene_refs_status"], previous["scene_refs_error"],
+                    previous["scene_refs_target"], project_id,
+                ),
+            )
+            conn.commit()
+        raise ValueError("场景图任务未能启动，原状态和费用凭证已保留，请重试") from exc
     return True
 
 
@@ -340,17 +381,35 @@ def recover_bible_tasks() -> int:
             "AND recovered_by_run_id IS NULL ORDER BY updated_at DESC LIMIT 1",
             (pid,),
         ).fetchone()
-        recorder = _new_bible_recorder(
-            pid, trigger_type="resume", requested_by="system",
-            parent_run_id=parent["id"] if parent else None,
-        )
-        _track_bible_task(
-            pid,
-            asyncio.get_running_loop().create_task(
-                _recorded_bible_task(pid, feedback, recorder, trigger_full_refs=True)
-            ),
-        )
-        resumed += 1
+        recorder = None
+        try:
+            recorder = _new_bible_recorder(
+                pid, trigger_type="resume", requested_by="system",
+                parent_run_id=parent["id"] if parent else None,
+            )
+            task_registry.spawn(
+                "bible",
+                pid,
+                _recorded_bible_task(pid, feedback, recorder, trigger_full_refs=True),
+                project_id=pid,
+            )
+            resumed += 1
+        except Exception as exc:  # one project must not block all startup recovery
+            public = errors.record_and_format(
+                exc,
+                action="bible_recovery_spawn",
+                context={"project_id": pid},
+            )
+            conn.execute(
+                "UPDATE projects SET bible_status='failed', bible_error=? WHERE id=?",
+                (f"人物谱自动恢复未能启动，原文和反馈已保留，可重新发起。{public}", pid),
+            )
+            conn.commit()
+            if recorder is not None:
+                try:
+                    recorder.cancel("人物谱恢复任务未能启动")
+                except Exception:  # noqa: BLE001
+                    pass
     return resumed
 
 
@@ -375,15 +434,25 @@ def recover_character_ref_tasks() -> int:
         only_character, only_characters = _decode_refs_target(row["refs_target"])
         was_gap_resume = bool(row["refs_resume"])
         fresh_after = None if was_gap_resume else row["refs_batch_started_at"]
-        if _start_refs_generation(
-            project_id,
-            only_character,
-            only_characters=only_characters,
-            resume=True,
-            fresh_after=fresh_after,
-            parent_run_id=parent["id"] if parent else None,
-        ):
-            resumed += 1
+        try:
+            if _start_refs_generation(
+                project_id,
+                only_character,
+                only_characters=only_characters,
+                resume=True,
+                fresh_after=fresh_after,
+                parent_run_id=parent["id"] if parent else None,
+            ):
+                resumed += 1
+        except Exception as exc:  # noqa: BLE001
+            public = errors.record_and_format(
+                exc, action="refs_recovery_spawn", context={"project_id": project_id},
+            )
+            conn.execute(
+                "UPDATE projects SET refs_status='failed',refs_error=? WHERE id=?",
+                (f"定妆自动恢复未能启动，已完成素材仍保留，可重试缺口。{public}", project_id),
+            )
+            conn.commit()
     return resumed
 
 
@@ -419,18 +488,39 @@ def recover_scene_ref_tasks() -> int:
                 "AND recovered_by_run_id IS NULL ORDER BY updated_at DESC LIMIT 1",
                 (project_id,),
             ).fetchone()
-            if _start_scene_refs_generation(
-                project_id,
-                _decode_scene_target(row["scene_refs_target"]),
-                resume=True,
-                parent_run_id=parent["id"] if parent else None,
-            ):
-                resumed += 1
+            try:
+                if _start_scene_refs_generation(
+                    project_id,
+                    _decode_scene_target(row["scene_refs_target"]),
+                    resume=True,
+                    parent_run_id=parent["id"] if parent else None,
+                ):
+                    resumed += 1
+            except Exception as exc:  # noqa: BLE001
+                public = errors.record_and_format(
+                    exc, action="scene_refs_recovery_spawn",
+                    context={"project_id": project_id},
+                )
+                conn.execute(
+                    "UPDATE projects SET scene_refs_status='failed',scene_refs_error=? WHERE id=?",
+                    (f"场景图自动恢复未能启动，已完成素材仍保留，可重试缺口。{public}", project_id),
+                )
+                conn.commit()
             continue
-        task_registry.spawn(
-            "scene_bible", project_id, _scene_bible_and_refs(project_id), project_id=project_id
-        )
-        resumed += 1
+        try:
+            task_registry.spawn(
+                "scene_bible", project_id, _scene_bible_and_refs(project_id), project_id=project_id
+            )
+            resumed += 1
+        except Exception as exc:  # noqa: BLE001
+            public = errors.record_and_format(
+                exc, action="scene_bible_recovery_spawn", context={"project_id": project_id},
+            )
+            conn.execute(
+                "UPDATE projects SET scene_refs_status='failed',scene_refs_error=? WHERE id=?",
+                (f"场景清单自动恢复未能启动，可重新发起。{public}", project_id),
+            )
+            conn.commit()
     return resumed
 
 async def _bible_task(project_id: str, feedback: str = "", *, trigger_full_refs: bool = True):
@@ -498,7 +588,17 @@ async def _bible_task(project_id: str, feedback: str = "", *, trigger_full_refs:
                 ))
         conn.commit()
         if trigger_full_refs and not residual:
-            _start_refs_generation(project_id, None)
+            try:
+                _start_refs_generation(project_id, None)
+            except Exception as exc:  # noqa: BLE001 bible remains deliverable
+                public = errors.record_and_format(
+                    exc, action="refs_spawn_after_bible", context={"project_id": project_id},
+                )
+                conn.execute(
+                    "UPDATE projects SET refs_status='failed',refs_error=? WHERE id=?",
+                    (f"人物谱已完成，但定妆任务未能启动，可直接重试定妆。{public}", project_id),
+                )
+                conn.commit()
             # 场景圣经 + 场景图素材库（与定妆照并行）：跨集场景一致性的底稿。增强项，整段失败都不能影响人物谱主流程。
             if {"scene_refs_status", "scene_refs_error"}.issubset(project_columns):
                 try:
@@ -524,6 +624,8 @@ async def _bible_task(project_id: str, feedback: str = "", *, trigger_full_refs:
         )
         conn.commit()
     except asyncio.CancelledError:
+        if task_registry.shutdown_in_progress():
+            raise
         row = conn.execute("SELECT bible_status FROM projects WHERE id=?", (project_id,)).fetchone()
         if row and row["bible_status"] == "running":
             conn.execute(
@@ -597,7 +699,10 @@ async def _recorded_bible_task(
         else:
             recorder.fail(RuntimeError(row["bible_error"] if row else "人物谱生成失败"))
     except asyncio.CancelledError:
-        recorder.cancel()
+        if task_registry.shutdown_in_progress():
+            recorder.pause_external("服务重启，人物谱任务等待自动恢复")
+        else:
+            recorder.cancel()
         raise
     except Exception as exc:
         recorder.fail(exc)
@@ -636,13 +741,36 @@ async def _start_bible_core(
     conn.execute("UPDATE projects SET bible_status='running', bible_error=NULL, bible_feedback=? WHERE id=?",
                  (feedback, project_id))
     conn.commit()
-    recorder = _new_bible_recorder(project_id)
-    _track_bible_task(
-        project_id,
-        asyncio.create_task(
-            _recorded_bible_task(project_id, feedback, recorder, trigger_full_refs=True)
-        ),
-    )
+    recorder = None
+    try:
+        recorder = _new_bible_recorder(project_id)
+        task_registry.spawn(
+            "bible",
+            project_id,
+            _recorded_bible_task(project_id, feedback, recorder, trigger_full_refs=True),
+            project_id=project_id,
+        )
+    except Exception as exc:
+        conn.execute(
+            "UPDATE projects SET bible_status=?, bible_error=?, bible_feedback=? WHERE id=?",
+            (
+                p["bible_status"],
+                p["bible_error"],
+                p.get("bible_feedback"),
+                project_id,
+            ),
+        )
+        conn.commit()
+        if recorder is not None:
+            try:
+                recorder.cancel("人物谱任务未能启动，项目状态已回滚")
+            except Exception:  # noqa: BLE001
+                pass
+        raise HTTPException(503, {
+            "code": "BIBLE_START_FAILED",
+            "message": "人物谱任务未能启动，项目原状态和费用凭证均已保留，请重试",
+            "action": "retry_generate",
+        }) from exc
     _consume_payment_quote(
         str(quote_id), task_id=f"bible:{project_id}", run_id=recorder.run_id,
     )
@@ -1891,13 +2019,19 @@ async def edit_portrait_prompt(project_id: str, character_name: str, body: dict)
 def _portrait_views_for(conn, portrait_id: str) -> list[dict]:
     try:
         rows = rows_to_dicts(conn.execute(
-            "SELECT * FROM character_portrait_views WHERE portrait_id=? ORDER BY created_at",
+            "SELECT * FROM character_portrait_views WHERE portrait_id=? "
+            "ORDER BY view_role, selected DESC, (status='ready') DESC, created_at DESC",
             (portrait_id,),
         ).fetchall())
     except Exception:  # noqa: BLE001
         return []
     views: list[dict] = []
+    seen_roles: set[str] = set()
     for row in rows:
+        view_role = str(row.get("view_role") or "")
+        if view_role in seen_roles:
+            continue
+        seen_roles.add(view_role)
         qa = _parse_json_value(row.get("qa_json"), {})
         views.append({
             "id": row.get("id"),
@@ -2320,7 +2454,10 @@ async def _refs_task(
         conn.commit()
         recorder.succeed("人物参考资产已生成并通过证据门禁")
     except asyncio.CancelledError:
-        recorder.cancel()
+        if task_registry.shutdown_in_progress():
+            recorder.pause_external("服务重启，定妆任务等待自动恢复")
+        else:
+            recorder.cancel()
         raise
     except Exception as exc:  # noqa: BLE001
         recorder.fail(exc)
@@ -2882,7 +3019,16 @@ async def _run_scene_review_batch(batch_id: str) -> None:
         )
         conn.commit()
     except asyncio.CancelledError:
-        conn.execute("UPDATE scene_review_batches SET status='stopped',finished_at=? WHERE id=?", (now(), batch_id))
+        if task_registry.shutdown_in_progress():
+            conn.execute(
+                "UPDATE scene_review_batches SET status='queued',finished_at=NULL WHERE id=?",
+                (batch_id,),
+            )
+        else:
+            conn.execute(
+                "UPDATE scene_review_batches SET status='stopped',finished_at=? WHERE id=?",
+                (now(), batch_id),
+            )
         conn.commit()
         raise
     except Exception as exc:  # noqa: BLE001
@@ -2934,7 +3080,24 @@ async def start_scene_history_review(project_id: str, body: dict | None = None):
     )
     _insert_scene_review_items(conn, batch_id, baseline)
     conn.commit()
-    task_registry.spawn("scene_history_review", batch_id, _run_scene_review_batch(batch_id), project_id=project_id)
+    coro = _run_scene_review_batch(batch_id)
+    try:
+        task_registry.spawn(
+            "scene_history_review", batch_id, coro, project_id=project_id,
+        )
+    except Exception as exc:
+        coro.close()
+        conn.execute(
+            "UPDATE scene_review_batches SET status='failed',finished_at=? WHERE id=?",
+            (now(), batch_id),
+        )
+        conn.commit()
+        raise HTTPException(503, detail={
+            "code": "SCENE_REVIEW_START_FAILED",
+            "message": "场景复验任务未能启动，批次快照已保留，可重新发起",
+            "batch_id": batch_id,
+            "retryable": True,
+        }) from exc
     return {**_scene_review_payload(conn, batch_id, include_items=False), "status": "accepted", "task_id": f"scene_history_review:{batch_id}"}
 
 
@@ -3013,10 +3176,19 @@ def recover_scene_review_tasks() -> int:
     for row in rows:
         if task_registry.active("scene_history_review", row["id"]):
             continue
-        task_registry.spawn(
-            "scene_history_review", row["id"], _run_scene_review_batch(row["id"]), project_id=row["project_id"],
-        )
-        resumed += 1
+        coro = _run_scene_review_batch(row["id"])
+        try:
+            task_registry.spawn(
+                "scene_history_review", row["id"], coro, project_id=row["project_id"],
+            )
+            resumed += 1
+        except Exception:
+            coro.close()
+            conn.execute(
+                "UPDATE scene_review_batches SET status='failed',finished_at=? WHERE id=?",
+                (now(), row["id"]),
+            )
+            conn.commit()
     return resumed
 
 
@@ -3052,7 +3224,10 @@ async def _scene_refs_task(
         conn.commit()
         recorder.succeed("场景参考资产已生成并通过证据门禁")
     except asyncio.CancelledError:
-        recorder.cancel()
+        if task_registry.shutdown_in_progress():
+            recorder.pause_external("服务重启，人物单视角重做等待自动恢复")
+        else:
+            recorder.cancel()
         raise
     except SceneCandidateReviewRequired as exc:
         message = str(exc)[:1200]
@@ -3124,7 +3299,11 @@ async def start_scene_bible(project_id: str, body: dict | None = None):
     from app.capabilities.dispatch import ui_route
     payload = _as_body_dict(body)
     # 带服务端报价的正式确认直接进入本路由的报价/幂等校验；旧能力入口仍走 Command Bus。
-    if not payload.get("quote_id"):
+    formal_request = any(
+        key in payload
+        for key in ("scenes", "confirm", "quote_id", "idempotency_key", "request_id")
+    )
+    if not formal_request:
         routed = await ui_route("scene.generate_bible", {"project_id": project_id})
         if routed is not None:
             return routed
@@ -3180,7 +3359,11 @@ async def start_scene_refs(project_id: str, body: dict | None = None):
     """（重新）生成场景图。需先有场景圣经（bible.scenes 非空）。可带 only 单场景重做。"""
     from app.capabilities.dispatch import ui_route
     payload = _as_body_dict(body)
-    if not payload.get("quote_id"):
+    formal_request = any(
+        key in payload
+        for key in ("scenes", "resume", "confirm", "quote_id", "idempotency_key", "request_id")
+    )
+    if not formal_request:
         routed = await ui_route(
             "scene.generate_refs",
             {"project_id": project_id, "scene_name": payload.get("scene")},
@@ -3389,13 +3572,20 @@ def _start_portrait_view_redo(
         budget_limit_cny=budget_limit_cny,
         parent_run_id=parent_run_id,
     )
-    task_registry.spawn(
-        "portrait_view_redo", task_key,
-        _run_portrait_view_redo(
-            project_id, character_name, portrait_id, view_role, recorder,
-        ),
-        project_id=project_id,
+    coro = _run_portrait_view_redo(
+        project_id, character_name, portrait_id, view_role, recorder,
     )
+    try:
+        task_registry.spawn(
+            "portrait_view_redo", task_key, coro, project_id=project_id,
+        )
+    except Exception as exc:
+        coro.close()
+        try:
+            recorder.cancel("人物单视角重做未能启动")
+        except Exception:  # noqa: BLE001
+            pass
+        raise RuntimeError("人物单视角重做任务未能启动，旧定妆包和费用凭证均已保留") from exc
     return {
         "status": "accepted", "task_id": f"portrait_view_redo:{task_key}",
         "run_id": recorder.run_id, "portrait_id": portrait_id,
@@ -3421,14 +3611,17 @@ def recover_portrait_view_redo_tasks() -> int:
         view_role = str(config.get("view_role") or "").strip()
         if not character_name or not portrait_id or not view_role:
             continue
-        started = _start_portrait_view_redo(
-            row["scope_id"], character_name, portrait_id, view_role,
-            quote_id=config.get("quote_id"),
-            budget_limit_cny=float(config.get("budget_limit_cny") or 1),
-            parent_run_id=row["id"], requested_by="system", trigger_type="resume",
-        )
-        if started:
-            resumed += 1
+        try:
+            started = _start_portrait_view_redo(
+                row["scope_id"], character_name, portrait_id, view_role,
+                quote_id=config.get("quote_id"),
+                budget_limit_cny=float(config.get("budget_limit_cny") or 1),
+                parent_run_id=row["id"], requested_by="system", trigger_type="resume",
+            )
+            if started:
+                resumed += 1
+        except Exception:
+            continue
     return resumed
 
 
@@ -3546,7 +3739,10 @@ async def _run_scene_view_redo(
             return
         recorder.succeed(f"{scene_name}/{view_role} 已通过单图及整包 QA 并原子替换")
     except asyncio.CancelledError:
-        recorder.cancel()
+        if task_registry.shutdown_in_progress():
+            recorder.pause_external("服务重启，场景单视角重做等待自动恢复")
+        else:
+            recorder.cancel()
         raise
     except Exception as exc:  # noqa: BLE001
         recorder.fail(exc)
@@ -3579,11 +3775,20 @@ def _start_scene_view_redo(
         budget_limit_cny=budget_limit_cny,
         parent_run_id=parent_run_id,
     )
-    task_registry.spawn(
-        "scene_view_redo", task_key,
-        _run_scene_view_redo(project_id, scene_name, scene_reference_id, view_role, recorder),
-        project_id=project_id,
+    coro = _run_scene_view_redo(
+        project_id, scene_name, scene_reference_id, view_role, recorder,
     )
+    try:
+        task_registry.spawn(
+            "scene_view_redo", task_key, coro, project_id=project_id,
+        )
+    except Exception as exc:
+        coro.close()
+        try:
+            recorder.cancel("场景单视角重做未能启动")
+        except Exception:  # noqa: BLE001
+            pass
+        raise RuntimeError("场景单视角重做任务未能启动，旧场景包和费用凭证均已保留") from exc
     return {
         "status": "accepted", "task_id": f"scene_view_redo:{task_key}",
         "run_id": recorder.run_id, "scene_reference_id": scene_reference_id,
@@ -3609,14 +3814,17 @@ def recover_scene_view_redo_tasks() -> int:
         view_role = str(snapshot.get("view_role") or "").strip()
         if not scene_name or not scene_reference_id or not view_role:
             continue
-        started = _start_scene_view_redo(
-            row["scope_id"], scene_name, scene_reference_id, view_role,
-            quote_id=snapshot.get("quote_id"),
-            budget_limit_cny=float(snapshot.get("budget_limit_cny") or 1),
-            parent_run_id=row["id"], requested_by="system", trigger_type="resume",
-        )
-        if started:
-            resumed += 1
+        try:
+            started = _start_scene_view_redo(
+                row["scope_id"], scene_name, scene_reference_id, view_role,
+                quote_id=snapshot.get("quote_id"),
+                budget_limit_cny=float(snapshot.get("budget_limit_cny") or 1),
+                parent_run_id=row["id"], requested_by="system", trigger_type="resume",
+            )
+            if started:
+                resumed += 1
+        except Exception:
+            continue
     return resumed
 
 

@@ -1,4 +1,4 @@
-/** 评审墙镜头视频五态。
+/** 生成台镜头视频五态。
  * 后端 shot.video_status / shot.pipeline.video_status 是权威状态；版本数据只用于兼容旧响应。
  */
 import type { Shot, ShotVersion } from './api'

@@ -1,11 +1,15 @@
+import asyncio
 import hashlib
 import json
 import sqlite3
 from pathlib import Path
 
-from app import db, delivery
+import pytest
+
+from app import db, delivery, task_registry
 from app.evidence import repository
 from app.harness.types import Evaluation, EvidenceArtifact
+from app.orchestration import api as orchestration_api
 
 
 def _conn() -> sqlite3.Connection:
@@ -95,6 +99,22 @@ def test_delivery_package_reaches_t5_and_feedback_preserves_snapshot(tmp_path, m
     )
     draft_manifest = Path(draft["package_path"], "manifest.json").read_bytes()
     draft_hash = repository.get_artifact(draft["artifact_id"])["content_hash"]
+    Path(draft["archive_path"]).unlink()
+    archive_recovered = delivery.build_delivery_package(
+        "e", package_id="delivery_crash_window", operation_started_at=42,
+    )
+    assert archive_recovered["archive_recovered"] is True
+    assert Path(archive_recovered["archive_path"]).is_file()
+    tracked_shot = next(
+        item for item in draft["manifest"]["files"] if item["role"] == "shot_video"
+    )
+    tracked_path = Path(draft["package_path"], tracked_shot["path"])
+    tracked_path.write_bytes(b"corrupted")
+    with pytest.raises(ValueError, match="损坏"):
+        delivery.build_delivery_package(
+            "e", package_id="delivery_crash_window", operation_started_at=42,
+        )
+    tracked_path.write_bytes(video.read_bytes())
     # Simulate a hard exit after the immutable artifact commit but before the
     # delivery_packages pointer commit.  The stable operation must reconstruct
     # the pointer without changing evidence or duplicating its file evaluation.
@@ -129,9 +149,129 @@ def test_delivery_package_reaches_t5_and_feedback_preserves_snapshot(tmp_path, m
 
 
 def test_delivery_package_id_rejects_path_traversal() -> None:
-    import pytest
-
     with pytest.raises(ValueError, match="非法的 package_id"):
         delivery.validate_package_id("../../etc/passwd")
     with pytest.raises(ValueError, match="非法的 package_id"):
         delivery.validate_package_id("delivery_../escape")
+
+
+def test_delivery_reject_can_only_be_claimed_once(monkeypatch) -> None:
+    conn = _conn()
+    monkeypatch.setattr(repository, "get_conn", lambda: conn)
+    monkeypatch.setattr(delivery, "get_conn", lambda: conn)
+    conn.execute("INSERT INTO projects(id,name,created_at) VALUES('p','P',0)")
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,created_at) VALUES('e','p',1,0)"
+    )
+    artifact = repository.create_artifact(EvidenceArtifact(
+        type="delivery_package",
+        scope_type="episode",
+        scope_id="e",
+        content={"package": "draft"},
+        status="candidate",
+        trust_level="T3",
+    ))
+    conn.execute(
+        """INSERT INTO delivery_packages(
+               id,episode_id,artifact_id,status,package_path,manifest_json,
+               quality_report_json,known_issues,created_at
+           ) VALUES('delivery_draft','e',?,'waiting_human','/tmp/draft','{}','{}','[]',0)""",
+        (artifact["id"],),
+    )
+    conn.commit()
+
+    first = delivery.approve_delivery(
+        "e",
+        package_id="delivery_draft",
+        decided_by="reviewer",
+        decision="reject",
+        reason="证据不足",
+    )
+    assert first["decision"] == "reject"
+    with pytest.raises(ValueError, match="不可审核"):
+        delivery.approve_delivery(
+            "e",
+            package_id="delivery_draft",
+            decided_by="reviewer",
+            decision="reject",
+            reason="重复提交",
+        )
+    assert conn.execute(
+        "SELECT COUNT(*) FROM gate_decisions WHERE artifact_id=?", (artifact["id"],)
+    ).fetchone()[0] == 1
+
+
+def test_delivery_route_forwards_idempotency_metadata(monkeypatch) -> None:
+    captured: dict = {}
+
+    async def fake_ui_route(name: str, args: dict):
+        captured.update({"name": name, "args": args})
+        return {"status": "accepted"}
+
+    monkeypatch.setattr("app.capabilities.dispatch.ui_route", fake_ui_route)
+    result = asyncio.run(orchestration_api.create_delivery_package(
+        "e",
+        {"idempotency_key": "delivery-once", "request_id": "request-1"},
+    ))
+
+    assert result == {"status": "accepted"}
+    assert captured == {
+        "name": "delivery.create_package",
+        "args": {
+            "episode_id": "e",
+            "idempotency_key": "delivery-once",
+            "request_id": "request-1",
+        },
+    }
+
+
+def test_delivery_recovery_isolates_spawn_failure_and_continues(monkeypatch) -> None:
+    conn = _conn()
+    monkeypatch.setattr(repository, "get_conn", lambda: conn)
+    monkeypatch.setattr(orchestration_api, "get_conn", lambda: conn)
+    conn.execute("INSERT INTO projects(id,name,created_at) VALUES('p','P',0)")
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,created_at) VALUES('e','p',1,0)"
+    )
+    for index in (1, 2):
+        payload = {
+            "package_id": f"delivery_recover_{index}",
+            "operation_started_at": float(index),
+        }
+        conn.execute(
+            """INSERT INTO workflow_runs(
+                   id,workflow_type,scope_type,scope_id,status,input_fingerprint,
+                   policy_snapshot_json,config_snapshot_json,failure_code,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (
+                f"run_delivery_{index}",
+                "delivery_package",
+                "episode",
+                "e",
+                "PAUSED_EXTERNAL",
+                f"fp-{index}",
+                "{}",
+                json.dumps({"recovery_payload": payload}),
+                "SERVICE_RESTART",
+                float(index),
+            ),
+        )
+    conn.commit()
+    calls = 0
+
+    def selective_spawn(_kind, _key, coro, *, project_id=None):
+        nonlocal calls
+        calls += 1
+        coro.close()
+        if calls == 1:
+            raise RuntimeError("event loop unavailable")
+        return None
+
+    monkeypatch.setattr(task_registry, "spawn", selective_spawn)
+
+    assert orchestration_api.recover_delivery_tasks() == 1
+    assert calls == 2
+    first = conn.execute(
+        "SELECT failure_message FROM workflow_runs WHERE id='run_delivery_1'"
+    ).fetchone()
+    assert "可重新发起" in first["failure_message"]

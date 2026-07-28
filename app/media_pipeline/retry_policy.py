@@ -139,11 +139,11 @@ def first_pass_retake_slot_fraction() -> float:
 
 
 def episode_inflight_cap() -> int:
-    return int(get_setting("episode_video_inflight_limit") or 8)
+    return int(get_setting("episode_video_inflight_limit") or 15)
 
 
 def project_inflight_cap() -> int:
-    return int(get_setting("project_video_inflight_limit") or 12)
+    return int(get_setting("project_video_inflight_limit") or 15)
 
 
 def prepared_reference_backlog() -> int:
@@ -168,13 +168,14 @@ def reference_shot_cohort_limit() -> int:
             return max(1, int(raw))
         except (TypeError, ValueError) as exc:
             raise RuntimeError("非法运行时设置 reference_shot_cohort_limit；请在监制房修正") from exc
-    # 默认：floor(image_concurrency / target_refs)；目标新图默认 4
+    # 默认：floor(image_concurrency / target_refs)。这里按一镜完整
+    # 时序关键帧计划估算，避免多节拍上线后单镜瞬时占满图片通道。
     from app.media_pipeline.concurrency import channel_limit
     from app.media_pipeline import stages as S
+    from app import video_modes
     image_n = channel_limit(S.RESOURCE_IMAGE)
     # PRD：cohort_limit = max(1, floor(image / target_generated_refs))
-    # 但 min_generated 默认常为 1，这里用计划默认 4 更符合「一次做完一镜」
-    planned = 4
+    planned = max(1, video_modes.estimated_keyframe_generation_count())
     return max(1, image_n // planned)
 
 

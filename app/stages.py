@@ -2125,20 +2125,22 @@ async def review_portrait_image(image_b64: str, appearance_anchor: str) -> dict:
     """Review a character identity sheet without hard-gating acting direction.
 
     Portrait anchors can describe spirits, creatures, floating bodies, props, or
-    acting direction.  Stable identity/form requirements remain hard gates;
-    expression, gaze and ordinary display pose are retained as soft warnings.
+    acting direction. Only unmistakable identity/technical defects are hard
+    gates; subjective styling differences remain review notes.
     """
     expectation = f"""你是漫剧角色定妆照评审 agent。请对照角色锚点检查这张单角色全身设定图，输出 JSON。
 
 角色锚点：{appearance_anchor}
 
 检查项（各 0~1 评分）：
-1. identity_match      只评稳定造型：年龄段、性别、核心五官、发型、服装、体型、材质/透明度、身份道具与必要空间关系
+1. identity_match      评估整体角色辨识度：性别、核心五官、主体形态与关键身份特征；年龄观感、服装款式、发型细节和装饰差异只作为参考
 2. presentation_match  只评表演呈现：表情、眼神、笑容、气质、普通站姿/身姿是否符合锚点
 3. clean_frame         单人物、主体完整、无遮挡主体的文字/水印/Logo、无肢体畸形/五官崩坏
 
 评分硬规则（务必遵守）：
-- 年龄段、性别、核心身份、非实体形态（透明/魂体/悬浮）、身份道具、单人物、明显畸形、严重裁切、遮挡主体的文字/水印属于硬门禁；不符时写入 hard_failures。
+- 只有明确生成成其他角色、性别错误、核心身份/物种错误、非实体形态完全丢失、关键身份道具完全缺失、多人、明显畸形、严重裁切、遮挡主体的文字/水印属于硬门禁；不符时写入 hard_failures。
+- 视觉年龄偏成熟或偏年轻、服装颜色/款式不同、发型细节或发饰不同、增加花瓣/莲花/普通光效等审美装饰，只写入 soft_warnings；不得写入 hard_failures，也不得因此把 identity_match 压到 0.60 以下。
+- 角色锚点是创作方向，不是逐字验收清单。画面整体好看、人物清晰且核心身份成立时，应优先判为可用，不要因未逐项复刻文字细节而拒绝。
 - 仅截掉脚尖、鞋尖、衣摆或发梢属于轻微裁切；供应商自动添加且位于角落、不遮挡人物的水印/Logo 属于轻微瑕疵。两者只写入 soft_warnings，不得写入 hard_failures。
 - 表情、眼神、爱慕/妩媚/虚荣/戏谑等气质以及普通展示站姿只写入 soft_warnings，绝不能写入 hard_failures，也不能降低 identity_match。
 - 定妆图允许中性表情和中性展示姿态；presentation_match 低可以有警告，但不能阻止后续生成 3/4 面和侧面。

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { filterAutoChangeItems, normalizeEvidenceFragments } from './AutoChangeQueue'
+import {
+  autoChangeDecisionCopy,
+  filterAutoChangeItems,
+  normalizeEvidenceFragments,
+} from './AutoChangeQueue'
 
 describe('normalizeEvidenceFragments', () => {
   it('preserves valid array evidence and removes empty or malformed entries', () => {
@@ -25,5 +29,25 @@ describe('filterAutoChangeItems', () => {
 
     expect(filterAutoChangeItems(items, 'scene').map(item => item.id)).toEqual(['scene'])
     expect(filterAutoChangeItems(items, 'all')).toHaveLength(2)
+  })
+})
+
+describe('更新建议影响确认', () => {
+  it('新增场景明确说明不自动出图和收费', () => {
+    const copy = autoChangeDecisionCopy(
+      { kind: 'scene_discovery', scene: '云岚宗广场' },
+      'approve',
+    )
+    expect(copy.message).toContain('加入当前场景库')
+    expect(copy.message).toContain('不会自动生成图片或产生费用')
+  })
+
+  it('忽略建议说明当前采用版本保持不变', () => {
+    const copy = autoChangeDecisionCopy(
+      { kind: 'scene_state_change', scene: '萧家广场' },
+      'reject',
+    )
+    expect(copy.details.join('；')).toContain('当前已采用版本')
+    expect(copy.danger).toBe(true)
   })
 })

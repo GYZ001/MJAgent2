@@ -1,11 +1,16 @@
 """剧本台按钮必须映射到真实的 Baseline / Patch 后端阶段。"""
 from __future__ import annotations
 
-import pytest
+import json
 
-from app import db
+import pytest
+from fastapi import HTTPException
+
+from app import api, db, task_registry
 from app.capabilities import ensure_catalog_loaded
+from app.capabilities.direct import enter_handler
 from app.capabilities.registry import get_registry
+from app.evidence import repository
 from app.production.revision import (
     ensure_production_revision,
     mark_baseline_generated,
@@ -62,3 +67,189 @@ def test_resume_route_has_a_distinct_capability() -> None:
         "POST /api/episodes/{episode_id}/screenplay/resume"
     ] == "screenplay.resume"
     assert registry.commands["screenplay.resume"].title == "继续剧本局部修复"
+
+
+@pytest.mark.asyncio
+async def test_first_screenplay_spawn_failure_restores_state_and_keeps_constraints(
+    monkeypatch,
+) -> None:
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO chapters(project_id,idx,title,content,char_count) "
+        "VALUES('p1',1,'第一章','第一章\\n林舟说：别走。',12)"
+    )
+    conn.execute(
+        "UPDATE episodes SET source_chapters='[1]', screenplay_error='上次提示', "
+        "screenplay_started_at=10, screenplay_updated_at=11 WHERE id='e1'"
+    )
+    conn.commit()
+
+    class Recorder:
+        run_id = "run_not_started"
+        cancelled = False
+
+        def cancel(self, _message: str) -> None:
+            self.cancelled = True
+
+    recorder = Recorder()
+
+    def fail_spawn(_kind, _key, coro, *, project_id=None):
+        coro.close()
+        raise RuntimeError("event loop unavailable")
+
+    monkeypatch.setattr(api, "_new_screenplay_recorder", lambda *args, **kwargs: recorder)
+    monkeypatch.setattr(task_registry, "spawn", fail_spawn)
+
+    with enter_handler(), pytest.raises(HTTPException) as exc_info:
+        await api.start_screenplay(
+            "e1",
+            body={"required_dialogue_lines": ["别走"], "required_dialogue_occurrence_ids": []},
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail["action"] == "retry_generate"
+    row = conn.execute(
+        "SELECT screenplay_status,screenplay_error,screenplay_started_at,"
+        "screenplay_updated_at,active_screenplay_run_id,screenplay_required_dialogues "
+        "FROM episodes WHERE id='e1'"
+    ).fetchone()
+    assert row["screenplay_status"] == "pending"
+    assert row["screenplay_error"] == "上次提示"
+    assert row["screenplay_started_at"] == 10
+    assert row["screenplay_updated_at"] == 11
+    assert row["active_screenplay_run_id"] is None
+    assert json.loads(row["screenplay_required_dialogues"]) == ["别走"]
+    assert recorder.cancelled is True
+
+
+def test_recovery_resumes_repair_interrupted_by_service_restart(monkeypatch) -> None:
+    conn = db.get_conn()
+    parent_run_id = repository.create_run(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="repair",
+    )
+    conn.execute(
+        "UPDATE workflow_runs SET status='PAUSED_EXTERNAL', failure_code='SERVICE_RESTART' "
+        "WHERE id=?",
+        (parent_run_id,),
+    )
+    conn.execute(
+        "UPDATE episodes SET screenplay_status='repairing', screenplay_error='修复到第 2 步', "
+        "active_screenplay_run_id=? WHERE id='e1'",
+        (parent_run_id,),
+    )
+    conn.commit()
+    seen: dict[str, object] = {}
+
+    class Recorder:
+        run_id = "run_recovered"
+
+    def fake_recorder(*_args, **kwargs):
+        seen["parent_run_id"] = kwargs.get("parent_run_id")
+        return Recorder()
+
+    def fake_spawn(kind, key, coro, *, project_id=None):
+        seen["spawn"] = (kind, key, project_id)
+        coro.close()
+        return None
+
+    monkeypatch.setattr(api, "_new_screenplay_recorder", fake_recorder)
+    monkeypatch.setattr(task_registry, "spawn", fake_spawn)
+
+    assert api.recover_screenplay_tasks() == 1
+    row = conn.execute(
+        "SELECT screenplay_status,screenplay_error,active_screenplay_run_id "
+        "FROM episodes WHERE id='e1'"
+    ).fetchone()
+    assert dict(row) == {
+        "screenplay_status": "repairing",
+        "screenplay_error": "修复到第 2 步",
+        "active_screenplay_run_id": "run_recovered",
+    }
+    assert seen == {
+        "parent_run_id": parent_run_id,
+        "spawn": ("screenplay", "e1", "p1"),
+    }
+
+
+def test_recovery_does_not_restart_intentionally_paused_repair(monkeypatch) -> None:
+    conn = db.get_conn()
+    run_id = repository.create_run(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="repair",
+    )
+    conn.execute(
+        "UPDATE workflow_runs SET status='PARTIAL', failure_code='PARTIAL_RESULT' WHERE id=?",
+        (run_id,),
+    )
+    conn.execute(
+        "UPDATE episodes SET screenplay_status='repairing', "
+        "screenplay_error='恢复点已保存，可继续', active_screenplay_run_id=? WHERE id='e1'",
+        (run_id,),
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        api,
+        "_new_screenplay_recorder",
+        lambda *_args, **_kwargs: pytest.fail("不应自动重启主动暂停的修复"),
+    )
+
+    assert api.recover_screenplay_tasks() == 0
+
+
+@pytest.mark.asyncio
+async def test_batch_start_reports_partial_failure_without_stranding_episode(
+    monkeypatch,
+) -> None:
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,title,screenplay_status,status,created_at) "
+        "VALUES('e2','p1',2,'第二集','running','planned',?)",
+        (db.now(),),
+    )
+    conn.commit()
+
+    class Recorder:
+        def __init__(self, run_id: str):
+            self.run_id = run_id
+            self.cancelled = False
+
+        def cancel(self, _message: str) -> None:
+            self.cancelled = True
+
+    recorders: dict[str, Recorder] = {}
+
+    def fake_recorder(episode_id: str, **_kwargs):
+        recorder = Recorder(f"run_{episode_id}")
+        recorders[episode_id] = recorder
+        return recorder
+
+    def fake_spawn(_kind, key, coro, *, project_id=None):
+        coro.close()
+        if key == "e2":
+            raise RuntimeError("queue unavailable")
+        return None
+
+    monkeypatch.setattr(api, "_new_screenplay_recorder", fake_recorder)
+    monkeypatch.setattr(task_registry, "spawn", fake_spawn)
+    with enter_handler():
+        result = await api.start_screenplay_all("p1")
+
+    assert result["started"] == 1
+    assert result["retryable_failures"] == 1
+    assert result["failed_to_start"][0]["episode_id"] == "e2"
+    rows = {
+        row["id"]: dict(row)
+        for row in conn.execute(
+            "SELECT id,screenplay_status,active_screenplay_run_id FROM episodes ORDER BY id"
+        ).fetchall()
+    }
+    assert rows["e1"]["screenplay_status"] == "running"
+    assert rows["e1"]["active_screenplay_run_id"] == "run_e1"
+    assert rows["e2"]["screenplay_status"] == "failed"
+    assert rows["e2"]["active_screenplay_run_id"] is None
+    assert recorders["e2"].cancelled is True

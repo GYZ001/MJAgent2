@@ -95,6 +95,10 @@ def test_set_pipeline_stage_and_status_projection(monkeypatch) -> None:
     conn.commit()
     statuses, summary = episode_pipeline_statuses("e1", conn=conn)
     st = statuses["s1"]
+    assert st["task_accepted"] is True
+    assert st["task_id"] == "j1"
+    assert st["task_created_at"] == 1
+    assert st["provider_submitted"] is False
     assert st["pipeline_stage"] == S.STAGE_WAITING_VIDEO_SLOT
     assert st["reason_code"] == "EPISODE_VIDEO_INFLIGHT_FULL"
     assert "槽" in (st["stage_label"] or "")

@@ -23,7 +23,7 @@ def _begin_clear_transaction(
     """Serialize the final upstream check and media purge in SQLite."""
     # Supervisor 局部修复可能在同一连接已有事务（例如先写修复计划再清理相邻镜）。
     # 复用该事务，避免 ``cannot start a transaction within a transaction``；独立的
-    # 评审墙清空仍以 BEGIN IMMEDIATE 获取写锁。
+    # 生成台清空仍以 BEGIN IMMEDIATE 获取写锁。
     if not conn.in_transaction:
         conn.execute("BEGIN IMMEDIATE")
     ep = conn.execute(
@@ -112,7 +112,7 @@ def _rollback_episodes(conn, ep_ids: set[str]) -> None:
 
 def purge_character_video_artifacts(project_id: str, character_names: list[str]) -> dict:
     """角色定妆照重做后，清理所有用到该角色的镜头已生成产物：
-    评审墙关键帧、各版本视频、相关任务、整集成品，并把对应剧集回退到“已确认”，
+    生成台关键帧、各版本视频、相关任务、整集成品，并把对应剧集回退到“已确认”，
     强制后续基于新定妆照重新生成，避免新旧画风/形象混用。"""
     targets = {n for n in character_names if n}
     if not targets:
@@ -220,6 +220,164 @@ def purge_shot_videos(shot_id: str) -> int:
     return len(versions)
 
 
+def _reference_meta(image_inputs: str | None) -> tuple[dict, bool]:
+    try:
+        meta = json.loads(image_inputs or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+    return meta, bool(meta.get("reference_images"))
+
+
+def _clear_shot_video_assets(conn, shot_row) -> int:
+    """Delete video assets while retaining one reference-gallery carrier row.
+
+    Reference images historically live in ``shot_versions.image_inputs``.  A
+    video-only clear must therefore keep one metadata-only version, otherwise
+    the separate reference-image tab would silently lose its assets too.
+    """
+    versions = conn.execute(
+        "SELECT * FROM shot_versions WHERE shot_id=? ORDER BY version_no DESC",
+        (shot_row["id"],),
+    ).fetchall()
+    keeper = None
+    for version in versions:
+        _, has_references = _reference_meta(version["image_inputs"])
+        if has_references:
+            keeper = version
+            break
+    for version in versions:
+        _delete_version_files(version["video_path"])
+        if keeper is not None and version["id"] == keeper["id"]:
+            conn.execute(
+                """UPDATE shot_versions
+                   SET provider_task_id=NULL, status='references_ready', error=NULL,
+                       video_path=NULL, last_frame_url=NULL, qa_json=NULL,
+                       technical_validation_json=NULL, adoption_reason=NULL,
+                       cost_cny=0, latency_s=0
+                   WHERE id=?""",
+                (version["id"],),
+            )
+        else:
+            conn.execute("DELETE FROM shot_versions WHERE id=?", (version["id"],))
+    conn.execute("DELETE FROM jobs WHERE shot_id=? AND kind='video'", (shot_row["id"],))
+    conn.execute("UPDATE shots SET adopted_version_id=NULL WHERE id=?", (shot_row["id"],))
+    if keeper is not None:
+        conn.execute(
+            "UPDATE reference_sets SET source_version_id=? WHERE shot_id=?",
+            (keeper["id"], shot_row["id"]),
+        )
+    return len(versions)
+
+
+def clear_shot_video_assets(shot_id: str, *, commit: bool = True) -> dict:
+    """Clear only one shot's created video assets; keep its reference gallery."""
+    conn = get_conn()
+    shot = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
+    if not shot:
+        return {"shot_id": shot_id, "videos": 0, "references_preserved": True}
+    _begin_clear_transaction(conn, shot["episode_id"])
+    try:
+        videos = _clear_shot_video_assets(conn, shot)
+        _rollback_episodes(conn, {shot["episode_id"]})
+        if commit:
+            conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return {"shot_id": shot_id, "videos": videos, "references_preserved": True}
+
+
+def clear_episode_video_assets(episode_id: str) -> dict:
+    """Clear every shot video in an episode without deleting reference images."""
+    conn = get_conn()
+    _begin_clear_transaction(conn, episode_id)
+    try:
+        shots = conn.execute(
+            "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
+        ).fetchall()
+        videos = sum(_clear_shot_video_assets(conn, shot) for shot in shots)
+        _rollback_episodes(conn, {episode_id})
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return {
+        "episode_id": episode_id,
+        "shots": len(shots),
+        "videos": videos,
+        "references_preserved": True,
+    }
+
+
+_REFERENCE_META_KEYS = {
+    "reference_images", "reference_failure_logs", "reference_manifest",
+    "reference_gallery_revision", "reference_gallery_edited",
+    "reference_gallery_contract_override", "reference_gallery_source_version_id",
+    "reference_gallery_fingerprint", "keyframe_contract_fingerprint",
+    "keyframe_sequence", "reference_image_used", "first_frame_used",
+    "first_frame_src", "first_frame_path", "first_frame_scene_id",
+    "last_frame_used", "last_frame_src", "last_frame_path", "last_frame_scene_id",
+}
+
+
+def clear_shot_reference_assets(shot_id: str) -> dict:
+    """Clear only generated shot reference/keyframe images; keep video assets."""
+    conn = get_conn()
+    shot = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
+    if not shot:
+        return {"shot_id": shot_id, "references": 0, "videos_preserved": True}
+    _begin_clear_transaction(conn, shot["episode_id"])
+    try:
+        references = _delete_shot_reference_dir(conn, shot)
+        scenes = conn.execute(
+            "SELECT image_path FROM shot_scenes WHERE shot_id=?", (shot_id,)
+        ).fetchall()
+        for scene in scenes:
+            if scene["image_path"]:
+                try:
+                    Path(scene["image_path"]).unlink()
+                except OSError:
+                    pass
+        references += sum(1 for scene in scenes if scene["image_path"])
+        conn.execute("DELETE FROM shot_scenes WHERE shot_id=?", (shot_id,))
+        conn.execute(
+            "DELETE FROM reference_assets WHERE reference_set_id IN "
+            "(SELECT id FROM reference_sets WHERE shot_id=?)",
+            (shot_id,),
+        )
+        conn.execute("DELETE FROM reference_sets WHERE shot_id=?", (shot_id,))
+        versions = conn.execute(
+            "SELECT id, image_inputs FROM shot_versions WHERE shot_id=?", (shot_id,)
+        ).fetchall()
+        for version in versions:
+            meta, _ = _reference_meta(version["image_inputs"])
+            for key in _REFERENCE_META_KEYS:
+                meta.pop(key, None)
+            conn.execute(
+                "UPDATE shot_versions SET image_inputs=? WHERE id=?",
+                (json.dumps(meta, ensure_ascii=False), version["id"]),
+            )
+        # A metadata-only carrier has no purpose once its gallery is gone.
+        conn.execute(
+            "DELETE FROM shot_versions WHERE shot_id=? AND status='references_ready'",
+            (shot_id,),
+        )
+        conn.execute(
+            """UPDATE shots
+               SET approved_scene_id=NULL, approved_head_scene_id=NULL,
+                   approved_tail_scene_id=NULL, scene_status='none'
+               WHERE id=?""",
+            (shot_id,),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return {"shot_id": shot_id, "references": references, "videos_preserved": True}
+
+
 def invalidate_shot_video_derivatives(shot_id: str) -> dict:
     """关键帧/参考依据变化后，作废该镜的视频侧衍生产物，但保留关键帧候选。
 
@@ -264,6 +422,20 @@ def _delete_shot_reference_dir(conn, shot_row) -> int:
     return count
 
 
+def _delete_shot_reference_records(conn, shot_id: str) -> None:
+    """删除单镜参考图集合及其资产索引。
+
+    参考图文件主要位于镜头 references 目录，但 reference_sets 还会持久化
+    画廊指针。只删文件/版本会留下指向旧版本的孤儿记录，后续可能被误判为可复用资产。
+    """
+    conn.execute(
+        "DELETE FROM reference_assets WHERE reference_set_id IN "
+        "(SELECT id FROM reference_sets WHERE shot_id=?)",
+        (shot_id,),
+    )
+    conn.execute("DELETE FROM reference_sets WHERE shot_id=?", (shot_id,))
+
+
 def clear_shot_artifacts(
     shot_id: str,
     *,
@@ -271,7 +443,7 @@ def clear_shot_artifacts(
     commit: bool = True,
 ) -> dict:
     """清空单镜的参考图、关键帧（首/尾图）、视频版本与模型分析（mode_plan），并使该集成品失效。
-    用于评审墙的「清空」操作。"""
+    用于生成台的「清空」操作。"""
     conn = get_conn()
     shot = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
     if not shot:
@@ -284,6 +456,7 @@ def clear_shot_artifacts(
     )
     try:
         refs = _delete_shot_reference_dir(conn, shot)
+        _delete_shot_reference_records(conn, shot_id)
         versions, affected_eps = _purge_shots(conn, [dict(shot)])  # 视频+关键帧+任务、采用/审批标记、scene_status 复位
         conn.execute("UPDATE shots SET mode_plan=NULL WHERE id=?", (shot_id,))
         _rollback_episodes(conn, affected_eps)  # 整集成品失效 + generating/done → confirmed
@@ -298,7 +471,7 @@ def clear_shot_artifacts(
 
 def clear_episode_artifacts(episode_id: str) -> dict:
     """清空整集每个镜头的参考图、关键帧、视频版本与模型分析（mode_plan），并把该集回退到「已确认」。
-    用于评审墙的「清空本集」操作。"""
+    用于生成台的「清空本集」操作。"""
     conn = get_conn()
     _begin_clear_transaction(conn, episode_id)
     try:
@@ -307,6 +480,7 @@ def clear_episode_artifacts(episode_id: str) -> dict:
         refs = 0
         for s in shots:
             refs += _delete_shot_reference_dir(conn, s)
+            _delete_shot_reference_records(conn, s["id"])
             conn.execute("UPDATE shots SET mode_plan=NULL WHERE id=?", (s["id"],))
         versions, affected_eps = _purge_shots(conn, shots)
         _rollback_episodes(conn, affected_eps or {episode_id})
@@ -318,7 +492,7 @@ def clear_episode_artifacts(episode_id: str) -> dict:
 
 
 def _invalidate_final_video(project_id: str, episode_no: int) -> None:
-    """删除某集已合成的整集成品（如存在）。在评审墙产生新片段后调用，
+    """删除某集已合成的整集成品（如存在）。在生成台产生新片段后调用，
     使成片台回到“需重新合成”的状态，而非展示与当前片段不一致的旧成品。"""
     final_path = config.PROJECTS_DIR / project_id / "episodes" / str(episode_no) / "final" / "episode.mp4"
     try:
@@ -329,7 +503,7 @@ def _invalidate_final_video(project_id: str, episode_no: int) -> None:
 
 
 def _adopted_video_paths(episode_id: str) -> list[tuple[int, str]]:
-    """按镜头顺序返回 (shot_no, video_path)，仅含已有成片的镜头。"""
+    """按镜头顺序返回 (shot_no, video_path)，仅含已采纳且文件可用的镜头。"""
     conn = get_conn()
     rows = conn.execute(
         """SELECT s.shot_no, v.video_path
@@ -338,4 +512,8 @@ def _adopted_video_paths(episode_id: str) -> list[tuple[int, str]]:
            WHERE s.episode_id=? AND v.status='succeeded' AND v.video_path IS NOT NULL
            ORDER BY s.shot_no""",
         (episode_id,)).fetchall()
-    return [(r["shot_no"], r["video_path"]) for r in rows]
+    return [
+        (r["shot_no"], r["video_path"])
+        for r in rows
+        if r["video_path"] and Path(r["video_path"]).is_file()
+    ]

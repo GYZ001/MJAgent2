@@ -530,20 +530,38 @@ def forbidden_prompt_content_errors(prompt_text: str, shot: Shot) -> list[str]:
     return errors
 
 
-def reference_role_plan(shot: Shot, *, continuity_mode: str | None = None) -> list[str]:
+def reference_role_plan(
+    shot: Shot,
+    *,
+    continuity_mode: str | None = None,
+    individual_names: set[str] | None = None,
+) -> list[str]:
+    from app.character_policy import is_collective_role
+
     mode = continuity_mode or derive_continuity_mode(shot)
     roles: list[str] = []
     if uses_previous_tail_frame(mode):
         roles.append("start_state_reference")
     if mode != "scene_change":
         roles.append("scene_reference")
-    for name in effective_characters_visible(shot):
-        roles.append(f"character_identity:{name}")
+    visible_names = effective_characters_visible(shot)
+    for name in visible_names:
+        roles.append(
+            f"collective_group:{name}"
+            if is_collective_role(name) and (individual_names is None or name not in individual_names)
+            else f"character_identity:{name}"
+        )
     if shot.required_text and (shot.required_text.exact_text or "").strip():
         roles.append("text_surface_reference")
     if shot.reference_roles:
         # 保留显式声明，同时保证强制规则
-        merged = list(dict.fromkeys([*roles, *shot.reference_roles]))
+        auto_entity_roles = {
+            role
+            for name in visible_names
+            for role in (f"character_identity:{name}", f"collective_group:{name}")
+        }
+        explicit_roles = [role for role in shot.reference_roles if role not in auto_entity_roles]
+        merged = list(dict.fromkeys([*roles, *explicit_roles]))
         return merged
     return roles
 

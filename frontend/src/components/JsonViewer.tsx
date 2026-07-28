@@ -44,7 +44,7 @@ export default function JsonViewer({
     return (
       <div className="json-viewer">
         <div className="json-viewer-toolbar">
-          <span className="json-viewer-badge">RAW</span>
+          <span className="json-viewer-badge">原始文本</span>
           <button type="button" onClick={copy}>复制</button>
         </div>
         <pre style={{ maxHeight }}>{rawText}</pre>

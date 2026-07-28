@@ -185,8 +185,7 @@ class StoryboardConfirmInput(StandardCommandInput):
 class VideoGenerateShotInput(StandardCommandInput):
     shot_id: str
     prompt_override: str | None = None
-    critique: str | None = None
-    review_item_ids: list[str] = Field(default_factory=list, max_length=200)
+    with_critique: bool = False
     reroll: bool = False
     qualification_version: str | None = None
 
@@ -261,6 +260,7 @@ class DeliveryFeedbackInput(StandardCommandInput):
 class RunControlInput(StandardCommandInput):
     run_id: str
     action: Literal["cancel", "resume", "retry", "pause", "handoff"]
+    allow_new_submission: bool = False
 
 
 class JobCancelInput(StandardCommandInput):

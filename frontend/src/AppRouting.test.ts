@@ -1,0 +1,33 @@
+import { describe, expect, it } from 'vitest'
+import { locationFor, routeFromPath } from './App'
+
+describe('无分集工作台路由', () => {
+  it('为四个工作台保留稳定的项目级 URL', () => {
+    expect(locationFor('script', 'project 1', null, null))
+      .toBe('/projects/project%201/script')
+    expect(locationFor('board', 'p1', null, null)).toBe('/projects/p1/board')
+    expect(locationFor('wall', 'p1', null, null)).toBe('/projects/p1/wall')
+    expect(locationFor('cinema', 'p1', null, null)).toBe('/projects/p1/cinema')
+  })
+
+  it('刷新项目级工作台 URL 后仍进入对应空状态', () => {
+    expect(routeFromPath('/projects/p1/script')).toEqual({
+      view: 'script',
+      projectId: 'p1',
+      episodeId: null,
+      chapterIdx: null,
+    })
+    expect(routeFromPath('/projects/p1/board').view).toBe('board')
+    expect(routeFromPath('/projects/p1/wall').view).toBe('wall')
+    expect(routeFromPath('/projects/p1/cinema').view).toBe('cinema')
+  })
+
+  it('已有分集的工作台 URL 保持原有解析', () => {
+    expect(routeFromPath('/projects/p1/episodes/e1/wall')).toEqual({
+      view: 'wall',
+      projectId: 'p1',
+      episodeId: 'e1',
+      chapterIdx: null,
+    })
+  })
+})

@@ -371,43 +371,75 @@ def _screenplay_fallback_status(ep) -> str:
 
 
 def recover_screenplay_tasks() -> int:
-    """服务热更/重启后续跑状态为 running 的剧本任务，避免 UI 卡在生成中却没有真实调用。"""
+    """Resume only work that was actually interrupted by a service restart."""
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id, project_id FROM episodes WHERE screenplay_status='running'"
+        """SELECT e.*
+             FROM episodes e
+            WHERE e.screenplay_status='running'
+               OR (
+                    e.screenplay_status='repairing'
+                    AND EXISTS(
+                        SELECT 1 FROM workflow_runs wr
+                         WHERE wr.id=e.active_screenplay_run_id
+                           AND wr.workflow_type='screenplay'
+                           AND wr.status='PAUSED_EXTERNAL'
+                           AND wr.recovered_by_run_id IS NULL
+                    )
+               )"""
     ).fetchall()
     resumed = 0
     for row in rows:
         episode_id = row["id"]
         if _screenplay_task_active(episode_id):
             continue
-        stamp = now()
-        conn.execute(
-            "UPDATE episodes SET screenplay_started_at=COALESCE(screenplay_started_at, ?), screenplay_updated_at=? WHERE id=?",
-            (stamp, stamp, episode_id))
         parent = conn.execute(
             "SELECT id FROM workflow_runs WHERE workflow_type='screenplay' "
-            "AND scope_type='episode' AND scope_id=? ORDER BY updated_at DESC LIMIT 1",
+            "AND scope_type='episode' AND scope_id=? AND status='PAUSED_EXTERNAL' "
+            "AND recovered_by_run_id IS NULL ORDER BY updated_at DESC LIMIT 1",
             (episode_id,),
         ).fetchone()
-        recorder = _new_screenplay_recorder(
-            episode_id,
-            requested_by="recovery",
-            trigger_type="resume",
-            parent_run_id=parent["id"] if parent else None,
-        )
-        conn.execute(
-            "UPDATE episodes SET active_screenplay_run_id=? WHERE id=?",
-            (recorder.run_id, episode_id),
-        )
-        task_registry.spawn(
-            "screenplay",
-            episode_id,
-            _recorded_screenplay_task(episode_id, recorder),
-            project_id=row["project_id"],
-        )
+        recorder = None
+        try:
+            recorder = _new_screenplay_recorder(
+                episode_id,
+                requested_by="recovery",
+                trigger_type="resume",
+                parent_run_id=parent["id"] if parent else None,
+            )
+            _spawn_screenplay_activation(
+                episode_id,
+                recorder,
+                project_id=row["project_id"],
+                status=row["screenplay_status"],
+                message=row["screenplay_error"],
+                preserve_started_at=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - recover remaining episodes independently
+            public = errors.record_and_format(
+                exc,
+                action="screenplay_recovery_spawn",
+                context={"episode_id": episode_id, "previous_run_id": row["active_screenplay_run_id"]},
+            )
+            retry_status = "repairing" if row["screenplay_status"] == "repairing" else "failed"
+            retry_hint = (
+                "局部修复恢复点已保留，请点击「继续局部修复」"
+                if retry_status == "repairing"
+                else "原文与约束已保留，请重新发起首版剧本"
+            )
+            conn.execute(
+                "UPDATE episodes SET screenplay_status=?, screenplay_error=?, "
+                "active_screenplay_run_id=NULL, screenplay_updated_at=? WHERE id=?",
+                (
+                    retry_status,
+                    f"服务重启后的自动恢复未能启动；{retry_hint}。{public}",
+                    now(),
+                    episode_id,
+                ),
+            )
+            conn.commit()
+            continue
         resumed += 1
-    conn.commit()
     return resumed
 
 
@@ -629,6 +661,69 @@ def _new_screenplay_recorder(
     )
 
 
+def _spawn_screenplay_activation(
+    episode_id: str,
+    recorder: WorkflowRecorder,
+    *,
+    project_id: str,
+    status: str,
+    message: str | None,
+    preserve_started_at: bool = False,
+    task_factory=None,
+) -> None:
+    """Persist an activation only if its in-process task can be registered."""
+    conn = get_conn()
+    previous_row = conn.execute(
+        "SELECT screenplay_status, screenplay_error, screenplay_started_at, "
+        "screenplay_updated_at, active_screenplay_run_id FROM episodes WHERE id=?",
+        (episode_id,),
+    ).fetchone()
+    if not previous_row:
+        raise ValueError(f"episode not found: {episode_id}")
+    previous = dict(previous_row)
+    stamp = now()
+    started_at = previous["screenplay_started_at"] if preserve_started_at else stamp
+    if started_at is None:
+        started_at = stamp
+    conn.execute(
+        "UPDATE episodes SET screenplay_status=?, screenplay_error=?, "
+        "screenplay_started_at=?, screenplay_updated_at=?, active_screenplay_run_id=? WHERE id=?",
+        (status, message, started_at, stamp, recorder.run_id, episode_id),
+    )
+    conn.commit()
+    try:
+        task_coro = (
+            task_factory()
+            if task_factory is not None
+            else _recorded_screenplay_task(episode_id, recorder)
+        )
+        task_registry.spawn(
+            "screenplay",
+            episode_id,
+            task_coro,
+            project_id=project_id,
+        )
+    except BaseException:
+        conn.execute(
+            "UPDATE episodes SET screenplay_status=?, screenplay_error=?, "
+            "screenplay_started_at=?, screenplay_updated_at=?, active_screenplay_run_id=? WHERE id=?",
+            (
+                previous["screenplay_status"],
+                previous["screenplay_error"],
+                previous["screenplay_started_at"],
+                previous["screenplay_updated_at"],
+                previous["active_screenplay_run_id"],
+                episode_id,
+            ),
+        )
+        conn.commit()
+        try:
+            recorder.cancel("任务未能启动，剧集状态已回滚")
+        except Exception:  # noqa: BLE001 - rollback must not be hidden by run bookkeeping
+            pass
+        raise
+
+
 def _screenplay_context_pack(episode_id: str) -> tuple[list[str], dict]:
     conn = get_conn()
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
@@ -779,7 +874,7 @@ async def _recorded_screenplay_task(
         return None
     except Exception as exc:  # noqa: BLE001 -- failure is persisted for Run Center
         row = get_conn().execute(
-            "SELECT screenplay_status FROM episodes WHERE id=?", (episode_id,)
+            "SELECT screenplay_status, screenplay_error FROM episodes WHERE id=?", (episode_id,)
         ).fetchone()
         if row and row["screenplay_status"] == "running":
             public = errors.record_and_format(
@@ -790,6 +885,27 @@ async def _recorded_screenplay_task(
             get_conn().execute(
                 "UPDATE episodes SET screenplay_status='failed', screenplay_error=?, screenplay_updated_at=? WHERE id=?",
                 (public, now(), episode_id),
+            )
+            get_conn().commit()
+        elif row and row["screenplay_status"] == "repairing":
+            if str(row["screenplay_error"] or "").startswith("WAITING_INPUT"):
+                try:
+                    recorder.partial(row["screenplay_error"])
+                except StateConflict:
+                    pass
+                return None
+            public = errors.record_and_format(
+                exc,
+                action="screenplay_repair",
+                context={"episode_id": episode_id},
+            )
+            get_conn().execute(
+                "UPDATE episodes SET screenplay_error=?, screenplay_updated_at=? WHERE id=?",
+                (
+                    f"局部修复已暂停，恢复点和工作副本已保留，可继续重试。{public}",
+                    now(),
+                    episode_id,
+                ),
             )
             get_conn().commit()
         try:
@@ -1070,35 +1186,29 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
                 episode_id,
             ),
         )
-    started_at = now()
-    conn.execute(
-        "UPDATE episodes SET screenplay_status=?, screenplay_error=?, screenplay_started_at=?, screenplay_updated_at=? WHERE id=?",
-        (
-            "repairing" if resume_existing else "running",
-            "继续局部修复：从 working Artifact 和 checkpoint 恢复" if resume_existing else None,
-            started_at,
-            started_at,
-            episode_id,
-        ))
     conn.commit()
-    recorder = _new_screenplay_recorder(
-        episode_id,
-        trigger_type="resume" if resume_existing else "manual",
-    )
     try:
-        conn.execute(
-            "UPDATE episodes SET active_screenplay_run_id=? WHERE id=?",
-            (recorder.run_id, episode_id),
+        recorder = _new_screenplay_recorder(
+            episode_id,
+            trigger_type="resume" if resume_existing else "manual",
+            parent_run_id=ep["active_screenplay_run_id"] if resume_existing else None,
         )
-        conn.commit()
-    except Exception:  # noqa: BLE001
-        pass
-    task_registry.spawn(
-        "screenplay",
-        episode_id,
-        _recorded_screenplay_task(episode_id, recorder),
-        project_id=ep["project_id"],
-    )
+        _spawn_screenplay_activation(
+            episode_id,
+            recorder,
+            project_id=ep["project_id"],
+            status="repairing" if resume_existing else "running",
+            message=(
+                "继续局部修复：从 working Artifact 和 checkpoint 恢复"
+                if resume_existing else None
+            ),
+        )
+    except Exception as exc:
+        raise HTTPException(503, {
+            "code": "SCREENPLAY_START_FAILED",
+            "message": "剧本任务未能启动，原状态和已选台词约束均已保留，请重试",
+            "action": "retry_resume" if resume_existing else "retry_generate",
+        }) from exc
     return {
         "status": "repairing" if resume_existing else "running",
         "run_id": recorder.run_id,
@@ -1134,34 +1244,25 @@ async def resume_screenplay(episode_id: str, body: dict | None = Body(None)):
     if not rev or not rev.baseline_done or not rev.working_artifact_id:
         raise HTTPException(409, "没有可继续的剧本工作副本；请使用「首次生成整版」")
 
-    started_at = now()
-    conn = get_conn()
-    conn.execute(
-        "UPDATE episodes SET screenplay_status='repairing', screenplay_error=?, "
-        "screenplay_started_at=?, screenplay_updated_at=? WHERE id=?",
-        (
-            "继续局部修复：从 working Artifact 和 checkpoint 恢复，不会再次整版生成",
-            started_at,
-            started_at,
-            episode_id,
-        ),
-    )
-    conn.commit()
-    recorder = _new_screenplay_recorder(episode_id, trigger_type="resume")
     try:
-        conn.execute(
-            "UPDATE episodes SET active_screenplay_run_id=? WHERE id=?",
-            (recorder.run_id, episode_id),
+        recorder = _new_screenplay_recorder(
+            episode_id,
+            trigger_type="resume",
+            parent_run_id=ep["active_screenplay_run_id"],
         )
-        conn.commit()
-    except Exception:  # noqa: BLE001
-        pass
-    task_registry.spawn(
-        "screenplay",
-        episode_id,
-        _recorded_screenplay_task(episode_id, recorder),
-        project_id=ep["project_id"],
-    )
+        _spawn_screenplay_activation(
+            episode_id,
+            recorder,
+            project_id=ep["project_id"],
+            status="repairing",
+            message="继续局部修复：从 working Artifact 和 checkpoint 恢复，不会再次整版生成",
+        )
+    except Exception as exc:
+        raise HTTPException(503, {
+            "code": "SCREENPLAY_RESUME_FAILED",
+            "message": "局部修复任务未能启动，工作副本和恢复点均已保留，请稍后重试",
+            "action": "retry_resume",
+        }) from exc
     return {
         "status": "repairing",
         "run_id": recorder.run_id,
@@ -1221,21 +1322,27 @@ async def revise_screenplay(episode_id: str, body: dict | None = Body(None)):
     # 标记已做过 evaluation 占位，禁止完整生成；随后 Repair 会重跑 QA
     mark_first_evaluation(rev.id, f"revise-seed-{art['id']}")
 
-    started_at = now()
     conn = get_conn()
     conn.execute(
-        "UPDATE episodes SET screenplay_status='repairing', screenplay_error=?, screenplay_started_at=?, "
-        "screenplay_updated_at=?, working_screenplay_artifact_id=? WHERE id=?",
-        ("复验当前版本：只修复 QA Issue，不会再次整版生成", started_at, started_at, art["id"], episode_id),
+        "UPDATE episodes SET working_screenplay_artifact_id=? WHERE id=?",
+        (art["id"], episode_id),
     )
     conn.commit()
-    recorder = _new_screenplay_recorder(episode_id, trigger_type="revise")
-    task_registry.spawn(
-        "screenplay",
-        episode_id,
-        _recorded_screenplay_task(episode_id, recorder),
-        project_id=ep["project_id"],
-    )
+    try:
+        recorder = _new_screenplay_recorder(episode_id, trigger_type="revise")
+        _spawn_screenplay_activation(
+            episode_id,
+            recorder,
+            project_id=ep["project_id"],
+            status="repairing",
+            message="复验当前版本：只修复 QA Issue，不会再次整版生成",
+        )
+    except Exception as exc:
+        raise HTTPException(503, {
+            "code": "SCREENPLAY_REVISE_START_FAILED",
+            "message": "复验任务未能启动，新工作副本已保留，可点击「继续局部修复」重试",
+            "action": "retry_resume",
+        }) from exc
     return {"status": "repairing", "run_id": recorder.run_id, "revision_id": rev.id, "mode": "revalidate"}
 
 
@@ -1346,10 +1453,10 @@ async def start_screenplay_all(project_id: str):
     _require_harness_engine(project_id)
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id, screenplay_status, screenplay_json FROM episodes WHERE project_id=? ORDER BY episode_no",
+        "SELECT * FROM episodes WHERE project_id=? ORDER BY episode_no",
         (project_id,)).fetchall()
-    ids = [
-        r["id"] for r in rows
+    selected = [
+        r for r in rows
         if (
             not r["screenplay_json"]
             or r["screenplay_status"] in ("pending", "failed", "warning", "repairing")
@@ -1357,23 +1464,67 @@ async def start_screenplay_all(project_id: str):
         )
         and r["screenplay_status"] != "ready"
     ]
-    if not ids:
+    if not selected:
         raise HTTPException(409, "没有待生成剧本的剧集")
-    placeholders = ",".join("?" for _ in ids)
-    started_at = now()
-    conn.execute(
-        f"UPDATE episodes SET screenplay_status='running', screenplay_error=NULL, screenplay_started_at=?, screenplay_updated_at=? WHERE id IN ({placeholders})",
-        [started_at, started_at, *ids])
-    conn.commit()
     sem = asyncio.Semaphore(max(int(get_setting("storyboard_concurrency") or 2), 1))
     run_ids: list[str] = []
-    for eid in ids:
-        recorder = _new_screenplay_recorder(eid)
-        run_ids.append(recorder.run_id)
-        task_registry.spawn(
-            "screenplay", eid, _screenplay_guarded(eid, sem, recorder), project_id=project_id
-        )
-    return {"started": len(ids), "run_ids": run_ids}
+    failed_to_start: list[dict] = []
+    for row in selected:
+        eid = row["id"]
+        if row["screenplay_status"] == "running" and not _screenplay_task_active(eid):
+            conn.execute(
+                "UPDATE episodes SET screenplay_status='failed', screenplay_error=?, "
+                "active_screenplay_run_id=NULL, screenplay_updated_at=? WHERE id=?",
+                ("检测到上次剧本任务已中断，本次将从安全状态重新启动", now(), eid),
+            )
+            conn.commit()
+            row = conn.execute("SELECT * FROM episodes WHERE id=?", (eid,)).fetchone()
+        recorder = None
+        production = _screenplay_production_state(eid)
+        is_repair = bool(production.get("can_resume_repair"))
+        try:
+            recorder = _new_screenplay_recorder(
+                eid,
+                trigger_type="batch_resume" if is_repair else "batch",
+                parent_run_id=row["active_screenplay_run_id"] if is_repair else None,
+            )
+            _spawn_screenplay_activation(
+                eid,
+                recorder,
+                project_id=project_id,
+                status="repairing" if is_repair else "running",
+                message=(
+                    "批量任务已从工作副本继续局部修复"
+                    if is_repair else None
+                ),
+                task_factory=lambda eid=eid, recorder=recorder: _screenplay_guarded(
+                    eid, sem, recorder
+                ),
+            )
+            run_ids.append(recorder.run_id)
+        except Exception as exc:  # noqa: BLE001 - one episode must not strand the batch
+            public = errors.record_and_format(
+                exc,
+                action="screenplay_batch_spawn",
+                context={"project_id": project_id, "episode_id": eid},
+            )
+            failed_to_start.append({
+                "episode_id": eid,
+                "error": public,
+                "retryable": True,
+            })
+    if not run_ids:
+        raise HTTPException(503, {
+            "code": "SCREENPLAY_BATCH_START_FAILED",
+            "message": "批量剧本任务均未能启动，各集原状态已保留，可直接重试",
+            "failed_to_start": failed_to_start,
+        })
+    return {
+        "started": len(run_ids),
+        "run_ids": run_ids,
+        "failed_to_start": failed_to_start,
+        "retryable_failures": len(failed_to_start),
+    }
 
 
 @router.post("/projects/{project_id}/screenplay-all/cancel")
@@ -1410,6 +1561,25 @@ async def cancel_screenplay(episode_id: str):
         return routed
     ep = dict(_episode_or_404(episode_id))
     if str(ep.get("screenplay_error") or "").startswith("CANCELLING:"):
+        if not _screenplay_task_active(episode_id):
+            fallback = _screenplay_fallback_status(ep)
+            conn = get_conn()
+            conn.execute(
+                "UPDATE episodes SET screenplay_status=?, screenplay_error=NULL, screenplay_updated_at=?, "
+                "active_screenplay_run_id=NULL, screenplay_snapshot_version=screenplay_snapshot_version+1 "
+                "WHERE id=?",
+                (fallback, now(), episode_id),
+            )
+            conn.commit()
+            return {
+                "status": fallback,
+                "run_id": ep.get("active_screenplay_run_id"),
+                "requested_at": ep.get("screenplay_updated_at"),
+                "finished_at": now(),
+                "retained_working_copy": bool(ep.get("screenplay_json")),
+                "resume_available": fallback in {"repairing", "warning"},
+                "recovered_stale_cancellation": True,
+            }
         return {
             "status": "cancelling",
             "run_id": ep.get("active_screenplay_run_id"),

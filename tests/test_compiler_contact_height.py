@@ -76,7 +76,7 @@ def test_compile_prompt_forces_side_view_for_contact() -> None:
     prompt = compile_prompt(shot, _bible())
     assert "[CAMERA]" in prompt
     assert "侧面" in prompt
-    assert "接触类动作必须侧面机位" in prompt
+    assert "已接触动作必须从互动轴侧面拍摄" in prompt
     assert "接触动作禁止正面摆拍" in prompt
     assert shot.camera_angle == "侧面"
 

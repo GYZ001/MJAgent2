@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import shutil
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,21 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _archive_matches_directory(archive_path: Path, package_path: Path) -> bool:
+    if not archive_path.is_file() or not zipfile.is_zipfile(archive_path):
+        return False
+    expected = {
+        path.relative_to(package_path).as_posix()
+        for path in package_path.rglob("*")
+        if path.is_file()
+    }
+    try:
+        with zipfile.ZipFile(archive_path) as archive:
+            return archive.testzip() is None and set(archive.namelist()) == expected
+    except (OSError, zipfile.BadZipFile):
+        return False
 
 
 def _artifact_summary(artifact_id: str | None) -> dict[str, Any] | None:
@@ -274,23 +290,76 @@ def build_delivery_package(
     else:
         package_id = validate_package_id(new_id("delivery"))
     operation_started_at = operation_started_at or now()
+    delivery_root = (
+        config.PROJECTS_DIR / ep["project_id"] / "episodes" / str(ep["episode_no"]) / "delivery"
+    ).resolve()
     existing = conn.execute(
         "SELECT * FROM delivery_packages WHERE id=?", (package_id,)
     ).fetchone()
     if existing:
+        package_path = Path(existing["package_path"]).resolve()
+        if not package_path.is_relative_to(delivery_root):
+            raise ValueError("交付包路径超出当前剧集目录，已拒绝读取")
+        manifest = json.loads(existing["manifest_json"])
+        quality_report = json.loads(existing["quality_report_json"])
+        missing_files = []
+        damaged_files = []
+        for item in manifest.get("files") or []:
+            relative = str(item.get("path") or "").strip()
+            if not relative:
+                continue
+            candidate = (package_path / relative).resolve()
+            if not candidate.is_relative_to(package_path):
+                damaged_files.append(relative)
+                continue
+            if not candidate.is_file():
+                missing_files.append(relative)
+                continue
+            expected_size = item.get("size_bytes")
+            expected_hash = str(item.get("sha256") or "")
+            if (
+                expected_size is not None and candidate.stat().st_size != int(expected_size)
+            ) or (
+                expected_hash and _sha256(candidate) != expected_hash
+            ):
+                damaged_files.append(relative)
+        for filename, expected_payload in (
+            ("manifest.json", manifest),
+            ("quality-report.json", quality_report),
+        ):
+            path = package_path / filename
+            try:
+                actual_payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                damaged_files.append(filename)
+                continue
+            if actual_payload != expected_payload:
+                damaged_files.append(filename)
+        if not package_path.is_dir() or missing_files or damaged_files:
+            details = [
+                *(f"缺少 {path}" for path in missing_files[:3]),
+                *(f"损坏 {path}" for path in damaged_files[:3]),
+            ]
+            raise ValueError(
+                "交付包文件不完整，数据库记录已保留供审计；请重新创建一份交付包"
+                + (f"（{'；'.join(details)}）" if details else "")
+            )
+        archive_path = Path(str(package_path) + ".zip")
+        archive_recovered = False
+        if not _archive_matches_directory(archive_path, package_path):
+            archive_path = atomic_zip_directory(package_path, archive_path)
+            archive_recovered = True
         return {
             "package_id": existing["id"],
             "artifact_id": existing["artifact_id"],
             "trust_level": (repository.get_artifact(existing["artifact_id"]) or {}).get("trust_level", "T3"),
             "status": existing["status"],
-            "package_path": existing["package_path"],
-            "archive_path": str(existing["package_path"]) + ".zip",
-            "manifest": json.loads(existing["manifest_json"]),
-            "quality_report": json.loads(existing["quality_report_json"]),
+            "package_path": str(package_path),
+            "archive_path": str(archive_path),
+            "manifest": manifest,
+            "quality_report": quality_report,
+            "archive_recovered": archive_recovered,
         }
-    delivery_root = (
-        config.PROJECTS_DIR / ep["project_id"] / "episodes" / str(ep["episode_no"]) / "delivery"
-    ).resolve()
     package_dir = (delivery_root / package_id).resolve()
     if not package_dir.is_relative_to(delivery_root):
         raise ValueError("非法的 package_id")
@@ -555,8 +624,14 @@ def approve_delivery(
         raise ValueError("带风险批准必须填写 accepted_risk")
     approved_package_id = validate_package_id(approved_package_id or new_id("delivery"))
     if decision == "reject":
+        claimed = conn.execute(
+            "UPDATE delivery_packages SET status='rejected' WHERE id=? AND status='waiting_human'",
+            (row["id"],),
+        )
+        if claimed.rowcount != 1:
+            conn.rollback()
+            raise ValueError("交付草稿已由另一审批任务处理")
         conn.execute("UPDATE artifacts SET status='rejected' WHERE id=?", (row["artifact_id"],))
-        conn.execute("UPDATE delivery_packages SET status='rejected' WHERE id=?", (row["id"],))
         conn.execute("UPDATE episodes SET delivery_status='rejected' WHERE id=?", (episode_id,))
         conn.execute(
             """INSERT INTO gate_decisions(

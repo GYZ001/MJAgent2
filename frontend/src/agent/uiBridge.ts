@@ -40,9 +40,9 @@ export function applyUiIntent(
       return { ok: true }
     }
     case 'select_version': {
-      // 版本选择必须在评审墙人工完成；意图只做导航提示，避免假闭环。
+      // 版本选择必须在生成台人工完成；意图只做导航提示，避免假闭环。
       go('wall')
-      extras?.toast?.(`请在评审墙人工选择版本 ${intent.version_id}`)
+      extras?.toast?.(`请在生成台人工选择版本 ${intent.version_id}`)
       return { ok: true }
     }
     case 'open_evidence': {

@@ -164,7 +164,7 @@ async def cancel_run(run_id: str):
             run["scope_id"], run_id=run_id, message="已取消分镜运行"
         )
         return {"cancelled": cancelled, "finalized": finalized, "run": repository.get_run(run_id)}
-    # 视频补齐：即使 Run 已因崩溃结束，也要允许取消并复位集状态，否则评审墙会死锁
+    # 视频补齐：即使 Run 已因崩溃结束，也要允许取消并复位集状态，否则生成台会死锁
     if run["workflow_type"] == "episode_video_completion":
         from app.completion_grant import revoke_grant
         from app.video_supervisor import load_latest_checkpoint, save_checkpoint
@@ -201,6 +201,23 @@ async def cancel_run(run_id: str):
         except Exception:  # noqa: BLE001
             pass
         return {"cancelled": cancelled, "run": repository.get_run(run_id)}
+    if run["workflow_type"] == "project_video_completion_queue":
+        from app import api as domain_api
+
+        domain_api.clear_project_video_queue_pause(run["scope_id"])
+        cancelled = await task_registry.cancel_and_wait(
+            "video_completion_project", run["scope_id"],
+        )
+        current = repository.get_run(run_id)
+        if not cancelled and current and current["status"] in repository.ACTIVE_RUN_STATUSES:
+            WorkflowRecorder(run_id).cancel("项目补齐剩余队列已取消")
+            cancelled = True
+        return {
+            "cancelled": cancelled,
+            "current_episode_continues": True,
+            "message": "已停止尚未启动的后续分集；当前单集补齐继续执行",
+            "run": repository.get_run(run_id),
+        }
     if run["status"] not in repository.ACTIVE_RUN_STATUSES:
         raise HTTPException(409, "运行已结束，不能取消")
     if run["workflow_type"] == "screenplay":
@@ -231,31 +248,37 @@ def _restart_screenplay_run(run_id: str, trigger_type: str):
     from app import api as domain_api
 
     episode = get_conn().execute(
-        "SELECT id, project_id FROM episodes WHERE id=?", (run["scope_id"],)
+        "SELECT * FROM episodes WHERE id=?", (run["scope_id"],)
     ).fetchone()
     if not episode:
         raise HTTPException(404, "剧集不存在")
     if task_registry.active("screenplay", episode["id"]):
         raise HTTPException(409, "该剧集已有剧本任务在运行")
-    stamp = domain_api.now()
-    get_conn().execute(
-        "UPDATE episodes SET screenplay_status='running', screenplay_error=NULL, "
-        "screenplay_started_at=?, screenplay_updated_at=? WHERE id=?",
-        (stamp, stamp, episode["id"]),
-    )
-    get_conn().commit()
-    recorder = domain_api._new_screenplay_recorder(
-        episode["id"],
-        requested_by="api",
-        trigger_type=trigger_type,
-        parent_run_id=run_id,
-    )
-    task_registry.spawn(
-        "screenplay",
-        episode["id"],
-        domain_api._recorded_screenplay_task(episode["id"], recorder),
-        project_id=episode["project_id"],
-    )
+    try:
+        production = domain_api._screenplay_production_state(episode["id"])
+        is_repair = production.get("operation") == "repair"
+        recorder = domain_api._new_screenplay_recorder(
+            episode["id"],
+            requested_by="api",
+            trigger_type=trigger_type,
+            parent_run_id=run_id,
+        )
+        domain_api._spawn_screenplay_activation(
+            episode["id"],
+            recorder,
+            project_id=episode["project_id"],
+            status="repairing" if is_repair else "running",
+            message=(
+                "从任务中心继续局部修复：工作副本和检查点均已保留"
+                if is_repair else None
+            ),
+        )
+    except Exception as exc:
+        raise HTTPException(503, {
+            "code": "RUN_RESUME_START_FAILED",
+            "message": "剧本恢复任务未能启动，原状态已保留，可稍后重试",
+            "action": "retry_resume",
+        }) from exc
     return repository.get_run(recorder.run_id)
 
 
@@ -277,34 +300,51 @@ def _restart_storyboard_run(run_id: str, trigger_type: str):
         completion_mode = "ready_for_manual_confirm"
     cp = load_latest_checkpoint(episode["id"])
     grant_id = cp.completion_grant_id if cp else None
-    get_conn().execute(
-        "UPDATE episodes SET status='scripting', script_error=NULL WHERE id=?", (episode["id"],)
-    )
-    get_conn().commit()
-    recorder = domain_api._new_storyboard_recorder(
-        episode["id"],
-        requested_by="api",
-        trigger_type=trigger_type,
-        parent_run_id=run_id,
-        completion_mode=completion_mode,
-    )
+    recorder = None
     try:
+        recorder = domain_api._new_storyboard_recorder(
+            episode["id"],
+            requested_by="api",
+            trigger_type=trigger_type,
+            parent_run_id=run_id,
+            completion_mode=completion_mode,
+        )
         get_conn().execute(
-            "UPDATE episodes SET active_storyboard_run_id=? WHERE id=?",
+            "UPDATE episodes SET status='scripting',script_error=NULL,"
+            "active_storyboard_run_id=? WHERE id=?",
             (recorder.run_id, episode["id"]),
         )
         get_conn().commit()
-    except Exception:  # noqa: BLE001
-        pass
-    task_registry.spawn(
-        "storyboard", episode["id"],
-        domain_api._recorded_storyboard_task(
-            episode["id"], recorder, resume=True,
-            completion_mode=completion_mode,
-            completion_grant_id=grant_id,
-        ),
-        project_id=episode["project_id"],
-    )
+        task_registry.spawn(
+            "storyboard", episode["id"],
+            domain_api._recorded_storyboard_task(
+                episode["id"], recorder, resume=True,
+                completion_mode=completion_mode,
+                completion_grant_id=grant_id,
+            ),
+            project_id=episode["project_id"],
+        )
+    except Exception as exc:
+        get_conn().execute(
+            "UPDATE episodes SET status=?, script_error=?, active_storyboard_run_id=? WHERE id=?",
+            (
+                episode["status"],
+                episode["script_error"],
+                episode["active_storyboard_run_id"],
+                episode["id"],
+            ),
+        )
+        get_conn().commit()
+        if recorder is not None:
+            try:
+                recorder.cancel("恢复任务启动失败，资源状态已回滚")
+            except Exception:  # noqa: BLE001
+                pass
+        raise HTTPException(503, {
+            "code": "RUN_RESUME_START_FAILED",
+            "message": "分镜恢复任务未能启动，原状态已保留，可稍后重试",
+            "action": "retry_resume",
+        }) from exc
     return repository.get_run(recorder.run_id)
 
 
@@ -313,30 +353,234 @@ def _restart_bible_run(run_id: str, trigger_type: str):
     from app import api as domain_api
 
     project = get_conn().execute(
-        "SELECT id, bible_feedback FROM projects WHERE id=?", (run["scope_id"],)
+        "SELECT id, bible_feedback, bible_status, bible_error FROM projects WHERE id=?",
+        (run["scope_id"],),
     ).fetchone()
     if not project:
         raise HTTPException(404, "项目不存在")
     if task_registry.active("bible", project["id"]):
         raise HTTPException(409, "该项目已有人物谱任务在运行")
-    get_conn().execute(
-        "UPDATE projects SET bible_status='running', bible_error=NULL WHERE id=?", (project["id"],)
-    )
-    get_conn().commit()
-    recorder = domain_api._new_bible_recorder(
-        project["id"], requested_by="api", trigger_type=trigger_type, parent_run_id=run_id
-    )
-    task_registry.spawn(
-        "bible", project["id"],
-        domain_api._recorded_bible_task(
-            project["id"], project["bible_feedback"] or "", recorder, trigger_full_refs=True
-        ),
-        project_id=project["id"],
-    )
+    recorder = None
+    try:
+        recorder = domain_api._new_bible_recorder(
+            project["id"], requested_by="api", trigger_type=trigger_type, parent_run_id=run_id
+        )
+        get_conn().execute(
+            "UPDATE projects SET bible_status='running', bible_error=NULL WHERE id=?",
+            (project["id"],),
+        )
+        get_conn().commit()
+        task_registry.spawn(
+            "bible", project["id"],
+            domain_api._recorded_bible_task(
+                project["id"], project["bible_feedback"] or "", recorder, trigger_full_refs=True
+            ),
+            project_id=project["id"],
+        )
+    except Exception as exc:
+        get_conn().execute(
+            "UPDATE projects SET bible_status=?, bible_error=? WHERE id=?",
+            (project["bible_status"], project["bible_error"], project["id"]),
+        )
+        get_conn().commit()
+        if recorder is not None:
+            try:
+                recorder.cancel("恢复任务启动失败，资源状态已回滚")
+            except Exception:  # noqa: BLE001
+                pass
+        raise HTTPException(503, {
+            "code": "RUN_RESUME_START_FAILED",
+            "message": "人物谱恢复任务未能启动，原状态已保留，可稍后重试",
+            "action": "retry_resume",
+        }) from exc
     return repository.get_run(recorder.run_id)
 
 
-def _restart_run(run_id: str, trigger_type: str):
+async def _restart_video_completion_run(run_id: str, trigger_type: str):
+    run = repository.get_run(run_id)
+    from app import api as domain_api
+    from app.completion_grant import GrantValidationError, validate_video_grant
+    from app.video_supervisor import load_latest_checkpoint
+
+    if run.get("recovered_by_run_id"):
+        raise HTTPException(409, {
+            "code": "RUN_ALREADY_RECOVERED",
+            "message": "该运行已创建续跑任务，请查看最新运行",
+            "recovered_by_run_id": run["recovered_by_run_id"],
+            "action": "open_recovered_run",
+        })
+    if trigger_type == "retry":
+        raise HTTPException(409, {
+            "code": "VIDEO_COMPLETION_RETRY_REQUIRES_NEW_AUTHORIZATION",
+            "message": "已结束的补齐运行不能沿用旧授权续跑，请重新授权后发起全片补齐",
+            "action": "start_fresh",
+        })
+    episode = get_conn().execute(
+        "SELECT id, storyboard_artifact_id FROM episodes WHERE id=?",
+        (run["scope_id"],),
+    ).fetchone()
+    if not episode:
+        raise HTTPException(404, "剧集不存在")
+    if task_registry.active("video_completion", episode["id"]):
+        raise HTTPException(409, "该剧集已有全片补齐任务在运行")
+    cp = load_latest_checkpoint(episode["id"])
+    if not cp or not cp.grant_id:
+        raise HTTPException(409, {
+            "code": "VIDEO_COMPLETION_RESUME_CONTEXT_MISSING",
+            "message": "未找到可续跑的补齐检查点或授权，请重新发起全片补齐",
+            "action": "start_fresh",
+        })
+    checkpoint_run_id = getattr(cp, "run_id", None)
+    if checkpoint_run_id and checkpoint_run_id != run_id:
+        raise HTTPException(409, {
+            "code": "VIDEO_COMPLETION_CHECKPOINT_MOVED",
+            "message": "该运行已有更新的续跑检查点，请查看最新运行",
+            "checkpoint_run_id": checkpoint_run_id,
+            "action": "open_latest_run",
+        })
+    try:
+        validate_video_grant(
+            cp.grant_id,
+            episode_id=episode["id"],
+            storyboard_artifact_id=episode["storyboard_artifact_id"],
+        )
+    except GrantValidationError as exc:
+        raise HTTPException(409, {
+            "code": exc.code,
+            "message": str(exc),
+            "action": "renew_authorization",
+            "completion_grant_id": cp.grant_id,
+        }) from exc
+    result = await domain_api._complete_episode_core(
+        episode["id"],
+        {"mode": "resume", "completion_grant_id": cp.grant_id},
+        parent_run_id=run_id,
+        trigger_type=trigger_type,
+    )
+    return repository.get_run(result["run_id"])
+
+
+def _restart_media_run(
+    run_id: str,
+    trigger_type: str,
+    *,
+    allow_new_submission: bool = False,
+):
+    run = repository.get_run(run_id)
+    rows = get_conn().execute(
+        "SELECT * FROM jobs WHERE run_id=? ORDER BY updated_at DESC",
+        (run_id,),
+    ).fetchall()
+    if not rows:
+        raise HTTPException(409, {
+            "code": "MEDIA_RUN_JOB_MISSING",
+            "message": "运行没有可恢复的媒体任务记录，请从源页面重新发起",
+            "action": "open_source",
+        })
+    job = dict(rows[0])
+    if job["status"] in {"queued", "running", "waiting_provider"}:
+        return {
+            "run": run,
+            "job": job,
+            "idempotent": True,
+            "message": "媒体任务已在持久队列中，无需重复恢复",
+        }
+    if trigger_type != "resume":
+        raise HTTPException(409, {
+            "code": "MEDIA_RUN_RETRY_REQUIRES_NEW_VERSION",
+            "message": "已失败或取消的视频运行不能原地重试，请从生成台创建新视频版本",
+            "action": "create_new_version",
+            "job_id": job["id"],
+        })
+    from app.system_api import retry_job
+
+    result = retry_job(
+        job["id"],
+        {"allow_new_submission": bool(allow_new_submission)},
+    )
+    return {
+        "run": repository.get_run(run_id),
+        "job": result["job"],
+        "retryability": result["retryability"],
+        "accepted": True,
+    }
+
+
+def _restart_project_video_queue_run(run_id: str, trigger_type: str):
+    from app import api as domain_api
+
+    run = repository.get_run(run_id)
+    if run.get("recovered_by_run_id"):
+        raise HTTPException(409, {
+            "code": "RUN_ALREADY_RECOVERED",
+            "message": "该项目队列已创建续跑任务，请查看最新运行",
+            "recovered_by_run_id": run["recovered_by_run_id"],
+            "action": "open_recovered_run",
+        })
+    if task_registry.active("video_completion_project", run["scope_id"]):
+        raise HTTPException(409, "该项目已有补齐队列在运行")
+    try:
+        snapshot = run.get("config_snapshot") or json.loads(
+            run.get("config_snapshot_json") or "{}"
+        )
+        state = snapshot["queue_state"]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(409, {
+            "code": "PROJECT_VIDEO_QUEUE_CONTEXT_MISSING",
+            "message": "项目补齐队列缺少恢复参数，请重新提交项目补齐",
+            "action": "start_fresh",
+        }) from exc
+    state = json.loads(json.dumps(state, ensure_ascii=False))
+    if trigger_type == "retry":
+        for item in state.get("plan") or []:
+            if item.get("status") in {
+                "failed", "failed_to_schedule", "skipped_budget",
+            }:
+                item["status"] = "queued"
+                item.pop("error", None)
+    recorder = WorkflowRecorder.create(
+        workflow_type="project_video_completion_queue",
+        scope_type="project",
+        scope_id=run["scope_id"],
+        input_fingerprint=run["input_fingerprint"],
+        requested_by="user",
+        trigger_type=trigger_type,
+        policy_snapshot=run.get("policy_snapshot") or {},
+        config_snapshot={"queue_state": state},
+        budget_limit_cny=run.get("budget_limit_cny"),
+        parent_run_id=run_id,
+    )
+    domain_api.clear_project_video_queue_pause(run["scope_id"])
+    coro = domain_api._run_project_video_completion_queue(
+        run["scope_id"], state, recorder,
+    )
+    try:
+        task_registry.spawn(
+            "video_completion_project",
+            run["scope_id"],
+            coro,
+            project_id=run["scope_id"],
+        )
+    except Exception as exc:
+        coro.close()
+        try:
+            recorder.cancel("项目补齐队列恢复任务未能启动")
+        except Exception:  # noqa: BLE001
+            pass
+        raise HTTPException(503, {
+            "code": "PROJECT_VIDEO_QUEUE_RESUME_FAILED",
+            "message": "项目补齐队列未能恢复，持久计划仍保留，可稍后重试",
+            "action": "retry_resume",
+        }) from exc
+    return repository.get_run(recorder.run_id)
+
+
+async def _restart_run(
+    run_id: str,
+    trigger_type: str,
+    *,
+    allow_new_submission: bool = False,
+):
     run = repository.get_run(run_id)
     if not run:
         raise HTTPException(404, "运行不存在")
@@ -346,18 +590,36 @@ def _restart_run(run_id: str, trigger_type: str):
         return _restart_storyboard_run(run_id, trigger_type)
     if run["workflow_type"] == "character_bible":
         return _restart_bible_run(run_id, trigger_type)
+    if run["workflow_type"] == "episode_video_completion":
+        return await _restart_video_completion_run(run_id, trigger_type)
+    if run["workflow_type"] == "project_video_completion_queue":
+        return _restart_project_video_queue_run(run_id, trigger_type)
+    if run["workflow_type"] in {"video_generation", "scene_generation"}:
+        return _restart_media_run(
+            run_id,
+            trigger_type,
+            allow_new_submission=allow_new_submission,
+        )
     raise HTTPException(400, "当前工作流尚未接入恢复适配器")
 
 
 @router.post("/runs/{run_id}/resume")
-async def resume_run_route(run_id: str):
+async def resume_run_route(run_id: str, body: dict | None = Body(None)):
     from app.capabilities.dispatch import dispatch, respond_ui
 
-    result = await dispatch("run.control", {"run_id": run_id, "action": "resume"}, initiator="ui")
+    result = await dispatch(
+        "run.control",
+        {
+            "run_id": run_id,
+            "action": "resume",
+            "allow_new_submission": bool((body or {}).get("allow_new_submission")),
+        },
+        initiator="ui",
+    )
     return respond_ui(result)
 
 
-async def resume_run(run_id: str):
+async def resume_run(run_id: str, *, allow_new_submission: bool = False):
     run = repository.get_run(run_id)
     if not run:
         raise HTTPException(404, "运行不存在")
@@ -366,7 +628,11 @@ async def resume_run(run_id: str):
         "WAITING_HUMAN", "WAITING_AUTHORIZATION",
     }:
         raise HTTPException(409, "当前状态不能恢复")
-    return _restart_run(run_id, "resume")
+    return await _restart_run(
+        run_id,
+        "resume",
+        allow_new_submission=allow_new_submission,
+    )
 
 
 @router.post("/runs/{run_id}/pause")
@@ -402,6 +668,25 @@ async def pause_run(run_id: str):
             payload={"episode_id": run["scope_id"]},
         )
         return {"paused_requested": True, "run": repository.get_run(run_id)}
+    if run["workflow_type"] == "project_video_completion_queue":
+        from app import api as domain_api
+
+        domain_api.request_project_video_queue_pause(run["scope_id"])
+        stopped = await task_registry.cancel_and_wait(
+            "video_completion_project", run["scope_id"],
+        )
+        if not stopped and run["status"] == "RUNNING":
+            WorkflowRecorder(run_id).pause_external("用户暂停，项目补齐剩余队列已保留")
+            get_conn().execute(
+                "UPDATE workflow_runs SET failure_code='USER_PAUSED' WHERE id=?",
+                (run_id,),
+            )
+            get_conn().commit()
+        return {
+            "paused": True,
+            "current_episode_continues": True,
+            "run": repository.get_run(run_id),
+        }
     raise HTTPException(400, "当前工作流不支持暂停")
 
 
@@ -479,20 +764,32 @@ async def handoff_run(run_id: str):
 
 
 @router.post("/runs/{run_id}/retry")
-async def retry_run_route(run_id: str):
+async def retry_run_route(run_id: str, body: dict | None = Body(None)):
     from app.capabilities.dispatch import dispatch, respond_ui
 
-    result = await dispatch("run.control", {"run_id": run_id, "action": "retry"}, initiator="ui")
+    result = await dispatch(
+        "run.control",
+        {
+            "run_id": run_id,
+            "action": "retry",
+            "allow_new_submission": bool((body or {}).get("allow_new_submission")),
+        },
+        initiator="ui",
+    )
     return respond_ui(result)
 
 
-async def retry_run(run_id: str):
+async def retry_run(run_id: str, *, allow_new_submission: bool = False):
     run = repository.get_run(run_id)
     if not run:
         raise HTTPException(404, "运行不存在")
     if run["status"] not in {"FAILED", "PARTIAL", "CANCELLED"}:
         raise HTTPException(409, "只有失败、部分完成或已取消的运行可以受控重试")
-    return _restart_run(run_id, "retry")
+    return await _restart_run(
+        run_id,
+        "retry",
+        allow_new_submission=allow_new_submission,
+    )
 
 
 @router.get("/projects/{project_id}/storyboard-metrics")
@@ -711,12 +1008,17 @@ def get_delivery_readiness(episode_id: str):
 @router.post("/episodes/{episode_id}/delivery/package")
 async def create_delivery_package(episode_id: str, body: dict | None = Body(None)):
     from app.capabilities.dispatch import ui_route
-    routed = await ui_route("delivery.create_package", {"episode_id": episode_id})
+
+    payload = dict(body) if isinstance(body, dict) else {}
+    routed = await ui_route("delivery.create_package", {
+        "episode_id": episode_id,
+        "idempotency_key": payload.get("idempotency_key"),
+        "request_id": payload.get("request_id"),
+    })
     if routed is not None:
         return routed
     from app.delivery import build_delivery_package, validate_package_id
 
-    payload = dict(body) if isinstance(body, dict) else {}
     # package_id 必须服务端可控：忽略客户端自带路径穿越载荷，仅允许恢复场景沿用已校验 id。
     raw_package_id = payload.get("package_id")
     if raw_package_id:
@@ -911,7 +1213,10 @@ async def _resume_delivery_package(
         )
         recorder.succeed("交付快照已从服务重启中恢复")
     except asyncio.CancelledError:
-        recorder.cancel("交付快照恢复已取消")
+        if task_registry.shutdown_in_progress():
+            recorder.pause_external("服务重启，交付快照等待自动恢复")
+        else:
+            recorder.cancel("交付快照恢复已取消")
         raise
     except Exception as exc:  # noqa: BLE001 recovery failure must remain visible
         recorder.fail(exc)
@@ -954,7 +1259,10 @@ async def _resume_delivery_approval(
         )
         recorder.succeed("交付门禁已从服务重启中恢复")
     except asyncio.CancelledError:
-        recorder.cancel("交付门禁恢复已取消")
+        if task_registry.shutdown_in_progress():
+            recorder.pause_external("服务重启，交付门禁等待自动恢复")
+        else:
+            recorder.cancel("交付门禁恢复已取消")
         raise
     except Exception as exc:  # noqa: BLE001 recovery failure must remain visible
         recorder.fail(exc)
@@ -985,26 +1293,46 @@ def recover_delivery_tasks() -> int:
             )
             conn.commit()
             continue
-        recorder = WorkflowRecorder.create(
-            workflow_type=row["workflow_type"],
-            scope_type="episode",
-            scope_id=row["scope_id"],
-            input_fingerprint=row["input_fingerprint"],
-            requested_by="system",
-            trigger_type="resume",
-            policy_snapshot=json.loads(row["policy_snapshot_json"] or "{}"),
-            config_snapshot={"recovery_payload": payload},
-            parent_run_id=row["id"],
-        )
-        operation = (
-            _resume_delivery_package(row["scope_id"], payload, recorder)
-            if row["workflow_type"] == "delivery_package"
-            else _resume_delivery_approval(row["scope_id"], payload, recorder)
-        )
-        task_registry.spawn(
-            "run", recorder.run_id, operation, project_id=row["project_id"]
-        )
-        resumed += 1
+        recorder = None
+        operation = None
+        try:
+            recorder = WorkflowRecorder.create(
+                workflow_type=row["workflow_type"],
+                scope_type="episode",
+                scope_id=row["scope_id"],
+                input_fingerprint=row["input_fingerprint"],
+                requested_by="system",
+                trigger_type="resume",
+                policy_snapshot=json.loads(row["policy_snapshot_json"] or "{}"),
+                config_snapshot={"recovery_payload": payload},
+                parent_run_id=row["id"],
+            )
+            operation = (
+                _resume_delivery_package(row["scope_id"], payload, recorder)
+                if row["workflow_type"] == "delivery_package"
+                else _resume_delivery_approval(row["scope_id"], payload, recorder)
+            )
+            task_registry.spawn(
+                "run", recorder.run_id, operation, project_id=row["project_id"]
+            )
+            resumed += 1
+        except Exception as exc:  # one broken recovery must not block later packages
+            if operation is not None:
+                operation.close()
+            if recorder is not None:
+                try:
+                    recorder.cancel("交付恢复任务未能启动")
+                except Exception:  # noqa: BLE001
+                    pass
+            get_conn().execute(
+                "UPDATE workflow_runs SET failure_message=? WHERE id=?",
+                (
+                    f"交付恢复任务未能启动：{type(exc).__name__}；文件与原运行记录已保留，可重新发起",
+                    row["id"],
+                ),
+            )
+            get_conn().commit()
+            continue
     return resumed
 
 

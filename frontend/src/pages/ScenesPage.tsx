@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import {
   api, Scene, SceneCostPrecheck, SceneGapScan, SceneRefSegment, SceneReferenceCandidate,
   SceneRefsProgress,
@@ -13,6 +13,8 @@ import PaymentConfirmDialog from '../components/PaymentConfirmDialog'
 import PrepSubnav from '../components/PrepSubnav'
 import QueryState from '../components/QueryState'
 import AutoChangeQueue from '../components/AutoChangeQueue'
+import DecisionDialog from '../components/DecisionDialog'
+import OperationError from '../components/OperationError'
 import { useFillPageSize } from '../hooks/useFillPageSize'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { usePrepListState } from '../hooks/usePrepListState'
@@ -21,7 +23,7 @@ import { sceneUsability } from '../lib/sceneUsability'
 import { statusLabel, statusTitle, type PrepStepStatus } from '../lib/statusLabels'
 
 export default function ScenesPage() {
-  const { projectId, toast } = useNav()
+  const { projectId, toast, registerNavigationGuard } = useNav()
   const { data: p, refresh, error, loading } = useProject(projectId!, undefined, 'scenes')
   const [busy, setBusy] = useState(false)
   const pageSize = useFillPageSize({ minCardWidth: 270, rows: 3, floor: 8, ceiling: 24 })
@@ -38,6 +40,8 @@ export default function ScenesPage() {
   const [detailSceneName, setDetailSceneName] = useState<string | null>(null)
   const [paramsSceneName, setParamsSceneName] = useState<string | null>(null)
   const [paramsDirty, setParamsDirty] = useState({ anchor: false, prompt: false })
+  const [paramsCloseConfirm, setParamsCloseConfirm] = useState(false)
+  const [stopConfirm, setStopConfirm] = useState(false)
   const [candidatePreview, setCandidatePreview] = useState<{
     sceneName: string
     candidates: SceneReferenceCandidate[]
@@ -65,6 +69,32 @@ export default function ScenesPage() {
   }).sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
   const pageCount = Math.max(1, Math.ceil(filtered.length / effectivePageSize))
   const curPage = Math.min(page, pageCount - 1)
+  const dirtyParamCount = Number(paramsDirty.anchor) + Number(paramsDirty.prompt)
+  const hasSceneCriteria = Boolean(query) || Boolean(availabilityFilter)
+
+  const resetSceneList = () => {
+    setListState(current => ({ ...current, search: '', filters: {}, sort: 'name', page: 0 }))
+    window.requestAnimationFrame(() => {
+      document.querySelector<HTMLInputElement>('input[aria-label="搜索场景"]')?.focus()
+    })
+  }
+
+  useLayoutEffect(() => {
+    if (!paramsSceneName || dirtyParamCount === 0) {
+      registerNavigationGuard(null, false)
+      return
+    }
+    registerNavigationGuard({
+      title: '放弃未保存的场景参数？',
+      summary: `${dirtyParamCount} 组场景参数仍在编辑`,
+      message: '场景固定信息和场景图描述尚未保存，离开会丢失当前输入；已有场景图和下游产物不会改变。',
+      details: ['场景参数不会自动保存', '返回继续编辑可保留当前输入'],
+      confirmLabel: '放弃修改并离开',
+      cancelLabel: '继续编辑',
+      danger: true,
+    }, true)
+    return () => registerNavigationGuard(null, false)
+  }, [dirtyParamCount, paramsSceneName, registerNavigationGuard])
 
   useEffect(() => {
     if (page > pageCount - 1) setPage(Math.max(0, pageCount - 1))
@@ -190,22 +220,26 @@ export default function ScenesPage() {
           <div className="hint">请先到「人物谱」生成角色圣经；场景圣经会在人物谱定稿后自动生成。</div>
         )}
         {hasBible && (
-          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+          <div className="library-action-row">
             {!scenes.length && !generating && (
               <button className="btn primary" disabled={busy}
+                aria-label={busy ? '生成场景设定与场景图，暂不可用：正在处理上一项操作' : '生成场景设定与场景图'}
                 onClick={previewInitialScenes}>
-                生成场景圣经与场景图
+                生成场景设定与场景图
               </button>
             )}
             {scenes.length > 0 && !generating && (
-              <button className="btn primary" disabled={busy} onClick={scanGaps}>
+              <button className="btn primary" disabled={busy}
+                aria-label={busy ? '扫描场景图缺口，暂不可用：正在处理上一项操作' : '扫描场景图缺口，扫描免费且不会生成图片'}
+                onClick={scanGaps}>
                 扫描场景图缺口（免费）
               </button>
             )}
             {generating && (
               <button className="btn ghost" disabled={busy}
-                onClick={() => act(() => api.cancelSceneRefs(p.id), '已停止场景图生成')}>
-                停止
+                aria-label={busy ? '停止场景图生成，暂不可用：正在处理上一项操作' : '停止场景图生成'}
+                onClick={() => setStopConfirm(true)}>
+                停止场景图生成
               </button>
             )}
             {generating && <span className="stamp gold">生成中</span>}
@@ -214,7 +248,7 @@ export default function ScenesPage() {
           </div>
         )}
         {generating && progress && (
-          <div className="hint" role="status" style={{ marginTop: 8 }}>
+          <div className="hint task-progress-copy" role="status">
             已完成 {progress.ready}/{progress.total} · 失败 {progress.failed} · 待复核 {progress.unverified} · 剩余 {progress.remaining}
             {progress.current_scene ? ` · 当前：${progress.current_scene}` : ''}
             {progress.current_view ? ` / ${sceneViewPresentation(progress.current_view).label}` : ''}
@@ -225,13 +259,23 @@ export default function ScenesPage() {
           </div>
         )}
         {p.scene_refs_status === 'failed' && hasUnavailable && (
-          <div className="error-banner">场景图生成失败（原始错误如下，不做静默兜底）：{'\n'}{p.scene_refs_error}</div>
+          <OperationError
+            title="场景图生成未完成"
+            message={p.scene_refs_error}
+            guidance="已完成场景图和当前采用版本会保留。可重试失败或缺失项，不会重复覆盖可用图片。"
+          />
         )}
         {p.scene_refs_status === 'warning' && hasUnavailable && (
-          <div className="warning-banner">{p.scene_refs_error}</div>
+          <OperationError
+            title="部分场景图需要复核"
+            message={p.scene_refs_error}
+            guidance="主图可用性以每张场景卡片的状态为准；请先处理提示项，再继续下游制作。"
+            variant="warning"
+            detailLabel="查看复核详情"
+          />
         )}
         {scenes.length > 0 && (
-          <div className="hint" style={{ marginTop: 10 }}>
+          <div className="hint library-note">
             分镜阶段会把镜头收敛到规范场景；新场景或永久状态变化只进入待审队列，批准后仍须单独确认费用才会出图。
           </div>
         )}
@@ -239,19 +283,17 @@ export default function ScenesPage() {
 
       {scenes.length > 0 && (
         <section className="card scene-library">
-          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', margin: '4px 0 12px' }}>
+          <div className="library-toolbar">
             <SearchField value={search} onChange={value => { setSearch(value); setPage(0) }}
               placeholder="搜索场景名…" ariaLabel="搜索场景" className="library-search" />
             <select aria-label="可用状态筛选" value={availabilityFilter} onChange={e => setFilter('availability', e.target.value)}>
-              <option value="">全部</option><option value="available">可用</option><option value="unavailable">不可用</option>
+              <option value="">全部可用状态</option><option value="available">可用</option><option value="unavailable">不可用</option>
             </select>
             {(query || availabilityFilter) && (
-              <button type="button" className="btn small ghost" onClick={() => setListState(current => ({
-                ...current, search: '', filters: {}, sort: 'name', page: 0,
-              }))}>清除</button>
+              <button type="button" className="btn small ghost" onClick={resetSceneList}>清除搜索与筛选</button>
             )}
-            <span style={{ fontSize: 12.5, color: 'var(--ink-faint)' }}>
-              共 {scenes.length} 个场景{query ? ` · 命中 ${filtered.length}` : ''}
+            <span className="library-result-count" role="status">
+              共 {scenes.length} 个场景{hasSceneCriteria ? ` · 当前显示 ${filtered.length}` : ''}
             </span>
           </div>
           <div className="figure-grid">
@@ -292,13 +334,23 @@ export default function ScenesPage() {
             })}
           </div>
           {!paged.length && (
-            <div className="empty">{query ? `没有匹配「${query}」的场景` : '暂无场景'}</div>
+            <div className="library-filter-empty" role="status">
+              <b>{hasSceneCriteria ? '没有符合当前条件的场景' : '场景库暂无场景'}</b>
+              <p>{hasSceneCriteria
+                ? `${query ? `搜索“${query}”` : '当前可用状态筛选'}未命中；清除条件后可恢复全部 ${scenes.length} 个场景。`
+                : '可先生成场景设定，系统会在确认清单后再展示出图费用。'}</p>
+              {hasSceneCriteria && <button type="button" className="btn small" onClick={resetSceneList}>清除搜索与筛选</button>}
+            </div>
           )}
           {pageCount > 1 && (
-            <div style={{ display: 'flex', gap: 10, alignItems: 'center', justifyContent: 'center', marginTop: 14 }}>
-              <button className="btn small" disabled={curPage <= 0} onClick={() => setPage(curPage - 1)}>← 上一页</button>
-              <span style={{ fontSize: 13, color: 'var(--ink-faint)' }}>第 {curPage + 1} / {pageCount} 页</span>
-              <button className="btn small" disabled={curPage >= pageCount - 1} onClick={() => setPage(curPage + 1)}>下一页 →</button>
+            <div className="library-pagination" aria-label="场景分页">
+              <button className="btn small" disabled={curPage <= 0}
+                aria-label={curPage <= 0 ? '上一页，暂不可用：当前已是第一页' : '上一页'}
+                onClick={() => setPage(curPage - 1)}>← 上一页</button>
+              <span>第 {curPage + 1} / {pageCount} 页</span>
+              <button className="btn small" disabled={curPage >= pageCount - 1}
+                aria-label={curPage >= pageCount - 1 ? '下一页，暂不可用：当前已是最后一页' : '下一页'}
+                onClick={() => setPage(curPage + 1)}>下一页 →</button>
             </div>
           )}
         </section>
@@ -342,11 +394,14 @@ export default function ScenesPage() {
       )}
       {paramsScene && (
         <GenerationParamsDialog
-          title={`${paramsScene.name} · 生成参数与重绘`}
-          subtitle="查看或调整场景图生成词，修改后可保存并重新出图。"
-          focusActive={!payOpen && !compareDetail}
+          title={`${paramsScene.name} · 场景设定与重绘`}
+          subtitle="查看或调整场景图生成描述，修改后可保存并重新出图。"
+          focusActive={!payOpen && !compareDetail && !paramsCloseConfirm}
           onClose={() => {
-            if ((paramsDirty.anchor || paramsDirty.prompt) && !window.confirm('有未保存的场景编辑，确认放弃并关闭？')) return
+            if (paramsDirty.anchor || paramsDirty.prompt) {
+              setParamsCloseConfirm(true)
+              return
+            }
             setParamsSceneName(null); setParamsDirty({ anchor: false, prompt: false })
           }}
         >
@@ -358,6 +413,40 @@ export default function ScenesPage() {
             onDirtyChange={dirty => setParamsDirty(value => ({ ...value, prompt: dirty }))}
             regenerate={() => quoteSceneGeneration([paramsScene.name], false, `重新生成「${paramsScene.name}」场景视角包`)} />
         </GenerationParamsDialog>
+      )}
+      {paramsScene && paramsCloseConfirm && (
+        <SceneParamsCloseDialog
+          sceneName={paramsScene.name}
+          onClose={() => setParamsCloseConfirm(false)}
+          onDiscard={() => {
+            setParamsCloseConfirm(false)
+            setParamsSceneName(null)
+            setParamsDirty({ anchor: false, prompt: false })
+          }}
+        />
+      )}
+      {stopConfirm && (
+        <DecisionDialog
+          title="停止场景图生成？"
+          summary={progress
+            ? `已完成 ${progress.ready}/${progress.total}，剩余 ${progress.remaining}`
+            : '当前场景图任务仍在运行'}
+          message="系统会停止本地生成队列并保留已落盘场景图；当前已提交给图片服务的请求可能仍会完成并产生费用。"
+          details={[
+            progress?.current_scene
+              ? `当前处理：${progress.current_scene}${progress.current_view ? ` / ${sceneViewPresentation(progress.current_view).label}` : ''}`
+              : '未完成场景可稍后重新扫描并补齐',
+            '停止不会删除已完成图片或当前采用版本',
+          ]}
+          confirmLabel="确认停止生成"
+          cancelLabel="继续生成"
+          danger
+          onClose={() => setStopConfirm(false)}
+          onConfirm={() => {
+            setStopConfirm(false)
+            void act(() => api.cancelSceneRefs(p.id), '已停止场景图生成；已完成图片保留')
+          }}
+        />
       )}
       <PaymentConfirmDialog
         open={payOpen}
@@ -373,7 +462,7 @@ export default function ScenesPage() {
           setPayLoading(true)
           try {
             await payActionRef.current(selection.scenes ?? [])
-            toast('付费任务已受理；新包通过完整 QA 前保留旧资产')
+            toast('付费任务已受理；新包通过完整质检前保留旧资产')
             setPayOpen(false); setGapScan(null); refresh()
           } catch (e: unknown) { setPayError(e instanceof Error ? e.message : String(e)) }
           finally { setPayLoading(false) }
@@ -415,6 +504,33 @@ export default function ScenesPage() {
   )
 }
 
+function SceneParamsCloseDialog({
+  sceneName,
+  onClose,
+  onDiscard,
+}: {
+  sceneName: string
+  onClose: () => void
+  onDiscard: () => void
+}) {
+  const trapRef = useFocusTrap(true, onClose)
+  return (
+    <div className="evidence-backdrop" role="presentation" onMouseDown={event => {
+      if (event.currentTarget === event.target) onClose()
+    }}>
+      <section ref={trapRef} className="impact-dialog" role="dialog" aria-modal="true"
+        aria-labelledby="scene-params-close-title">
+        <h3 id="scene-params-close-title">「{sceneName}」有未保存修改</h3>
+        <p>关闭后会放弃尚未保存的场景固定信息或场景图描述；已保存版本、图片和下游不会变化。</p>
+        <div className="dialog-actions">
+          <button className="btn" type="button" onClick={onClose}>返回继续编辑</button>
+          <button className="btn danger" type="button" onClick={onDiscard}>放弃修改并关闭</button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
 /** 二级扫描弹窗向费用确认弹窗交接时，必须先卸载前者，避免同层遮罩挡住确认卡。 */
 export async function handoffGapSelectionToPayment(
   selectedScenes: string[],
@@ -431,8 +547,8 @@ function sceneSegmentPrimaryFailed(segment: SceneRefSegment): boolean {
 
 function scenePhaseLabel(value: string): string {
   const phase = value.toLowerCase()
-  if (phase.includes('pack_qa')) return '整包 QA'
-  if (phase.includes('single_view_qa')) return '单图 QA'
+  if (phase.includes('pack_qa')) return '整包质检'
+  if (phase.includes('single_view_qa')) return '单图质检'
   if (phase.includes('scene_reference') || phase.includes('image')) return '生成场景图'
   if (phase === 'running') return '执行中'
   if (phase === 'ready' || phase === 'succeeded') return '已完成'
@@ -544,7 +660,7 @@ function SceneDetailModal({
   ) => void
   onShowParams: (sceneName: string) => void
   onCompare: (images: { src: string; label: string }[]) => void
-  onRequestRedo: (sceneName: string, sceneRefId: string, viewRole: string) => void
+  onRequestRedo: (sceneName: string, sceneRefId: string, viewRole: string) => Promise<void>
 }) {
   const titleId = useId()
   const trapRef = useFocusTrap(focusActive, onClose)
@@ -563,7 +679,7 @@ function SceneDetailModal({
       <section ref={trapRef} className="scene-detail-modal" role="dialog" aria-modal="true" aria-labelledby={titleId}>
         <header className="scene-detail-modal-head">
           <div>
-            <span className="eyebrow">SCENE DETAILS</span>
+            <span className="eyebrow">场景详情</span>
             <h2 id={titleId}>{scene.name}</h2>
             <p>查看这个场景的参考机位、适用版本和生成设置。</p>
           </div>
@@ -574,11 +690,11 @@ function SceneDetailModal({
             <b>场景定位{scene.location_kind ? ` · ${scene.location_kind}` : ''}</b>
             <p>{scene.scene_canonical}</p>
             <dl className="scene-anchor-grid">
-              <div><dt>空间</dt><dd>{scene.space || scene.location_kind || '历史锚点未拆分'}</dd></div>
-              <div><dt>时段</dt><dd>{scene.time_of_day || '历史锚点未拆分'}</dd></div>
-              <div><dt>光线</dt><dd>{scene.lighting || '历史锚点未拆分'}</dd></div>
-              <div><dt>标志物</dt><dd>{scene.landmarks?.join('、') || '历史锚点未拆分'}</dd></div>
-              <div><dt>禁用元素</dt><dd>{scene.forbidden_elements?.join('、') || '人物、文字、水印、Logo'}</dd></div>
+              <div><dt>空间</dt><dd>{scene.space || scene.location_kind || '旧版场景信息未拆分'}</dd></div>
+              <div><dt>时段</dt><dd>{scene.time_of_day || '旧版场景信息未拆分'}</dd></div>
+              <div><dt>光线</dt><dd>{scene.lighting || '旧版场景信息未拆分'}</dd></div>
+              <div><dt>标志物</dt><dd>{scene.landmarks?.join('、') || '旧版场景信息未拆分'}</dd></div>
+              <div><dt>排除内容</dt><dd>{scene.forbidden_elements?.join('、') || '人物、文字、水印、Logo'}</dd></div>
             </dl>
           </section>
 
@@ -616,7 +732,7 @@ function SceneDetailModal({
               </button>
             )}
             <button className="btn" type="button" onClick={() => onShowParams(scene.name)}>
-              生成参数与重绘
+              场景设定与重绘
             </button>
             {!!refs.some(ref => (ref.views ?? []).some(view => view.image_url)) && (
               <button className="btn" type="button" onClick={() => onCompare(refs.flatMap(ref =>
@@ -650,10 +766,11 @@ function SceneCandidateModal({
   const { toast } = useNav()
   const [evidenceOpen, setEvidenceOpen] = useState(false)
   const [adoptingId, setAdoptingId] = useState<string | null>(null)
+  const [adoptRequest, setAdoptRequest] = useState<{ artifactId: string; warnings: string[] } | null>(null)
   const [reviewingId, setReviewingId] = useState<string | null>(null)
   const [manualCandidateId, setManualCandidateId] = useState<string | null>(null)
   const [manualBusy, setManualBusy] = useState(false)
-  const trapRef = useFocusTrap(focusActive && !evidenceOpen && !manualCandidateId, onClose)
+  const trapRef = useFocusTrap(focusActive && !evidenceOpen && !manualCandidateId && !adoptRequest, onClose)
   const summary = candidates.reduce((result, candidate) => {
     const state = candidateGate(candidate).reviewState as keyof typeof result
     result[state] += 1
@@ -665,16 +782,11 @@ function SceneCandidateModal({
       ? { ...item, status: 'approved' }
       : item.status === 'approved' ? { ...item, status: 'superseded' } : item)
 
-  const adopt = async (artifactId: string, warnings: string[]) => {
-    let reason = '候选已有图片文件，人工确认采用；QA 结果仅作评分参考'
-    if (warnings.length) {
-      const input = window.prompt(`此候选有 QA 提示：\n${warnings.join('；')}\n\n请填写人工采用理由：`, '')
-      if (!input?.trim()) return
-      reason = input.trim()
-    } else if (!window.confirm(`确认将此候选采纳为「${sceneName}」的场景库主图？切换会保留历史版本。`)) return
+  const adopt = async (artifactId: string, reason: string) => {
     setAdoptingId(artifactId)
     try {
       await api.adoptSceneCandidate(projectId, sceneName, artifactId, reason)
+      setAdoptRequest(null)
       toast(`已采纳「${sceneName}」的候选图`)
       onAdopted(sceneName, applyAdoptedState(artifactId), artifactId)
     } catch (e: unknown) {
@@ -694,11 +806,11 @@ function SceneCandidateModal({
       onCandidatesChanged(sceneName, nextCandidates)
       const qa = result.qa as { status?: string; hard_failures?: string[]; uncertainties?: string[] }
       if (qa.status === 'passed' || qa.status === 'warning') {
-        toast('新版 QA 已完成；有图候选可由人工直接采纳')
+        toast('新版质检已完成；有图候选可由人工直接采纳')
       } else if (qa.status === 'failed') {
-        toast(`QA 已完成，记录提示：${(qa.hard_failures ?? []).join('；') || '请查看证据'}`, true)
+        toast(`质检已完成，记录提示：${(qa.hard_failures ?? []).join('；') || '请查看证据'}`, true)
       } else {
-        toast(`QA 未能给出完整结论：${(qa.uncertainties ?? []).join('；') || '可稍后重试或人工复核'}`, true)
+        toast(`质检未能给出完整结论：${(qa.uncertainties ?? []).join('；') || '可稍后重试或人工复核'}`, true)
       }
     } catch (e: unknown) {
       toast(e instanceof Error ? e.message : String(e), true)
@@ -733,14 +845,14 @@ function SceneCandidateModal({
         role="dialog" aria-modal="true" aria-labelledby="scene-candidate-title">
         <header className="scene-candidate-modal-head">
           <div>
-            <span className="eyebrow">SCENE CANDIDATES</span>
+            <span className="eyebrow">场景候选</span>
             <h2 id="scene-candidate-title">{sceneName}</h2>
-            <p>候选图是否可人工采纳只看图片文件是否存在；QA 结果仅作评分和风险提示，可重验现有图且不重新出图。</p>
-            <div className="scene-candidate-summary" aria-label="候选 QA 汇总">
-              <span className="passed">QA 无提示 {summary.passed}</span>
-              <span>未验证 {summary.not_reviewed}</span>
-              <span>QA 未完成 {summary.qa_incomplete}</span>
-              <span className="failed">QA 提示 {summary.hard_failed}</span>
+            <p>候选图是否可人工采纳只看图片文件是否存在；质检结果仅作评分和风险提示，可重验现有图且不重新出图。</p>
+            <div className="scene-candidate-summary" aria-label="候选质检汇总">
+              <span className="passed">质检无提示 {summary.passed}</span>
+              <span>待质检 {summary.not_reviewed}</span>
+              <span>质检未完成 {summary.qa_incomplete}</span>
+              <span className="failed">质检有提示 {summary.hard_failed}</span>
             </div>
             {candidates.filter(item => !!item.image_url).length > 1 && (
               <button className="btn small" type="button" onClick={() => onCompare(
@@ -758,7 +870,7 @@ function SceneCandidateModal({
             const gate = candidateGate(candidate)
             const passed = gate.verified && gate.hard.length === 0
             const score = candidateQaScore(candidate)
-            const canAdopt = !isCurrent && !!candidate.image_url && !disabled
+            const canOfferAdopt = !isCurrent && !!candidate.image_url
             return (
               <article className={`scene-candidate-preview${isCurrent ? ' current' : passed ? ' passed' : ' rejected'}`}
                 key={candidate.artifact_id}>
@@ -769,7 +881,7 @@ function SceneCandidateModal({
                           src: candidate.image_url!, label: `${sceneName} · 尝试 ${candidate.attempt ?? '—'}`,
                         }])} />
                     : <div className="scene-candidate-empty">图片不可用</div>}
-                  <span>{isCurrent ? '当前采用' : gate.hard.length ? 'QA 提示' : passed ? 'QA 无提示' : '待复核/未验证'}</span>
+                  <span>{isCurrent ? '当前采用' : gate.hard.length ? '质检有提示' : passed ? '质检无提示' : '待质检'}</span>
                 </div>
                 <div className="scene-candidate-meta">
                   <div>
@@ -779,28 +891,35 @@ function SceneCandidateModal({
                     </small>
                   </div>
                   <strong className={gate.hard.length ? 'failed' : passed ? 'passed' : ''}>
-                    QA {score == null ? '—' : score.toFixed(2)}
+                    质检分 {score == null ? '—' : score.toFixed(2)}
                   </strong>
                 </div>
-                {!!gate.hard.length && <div className="error-banner">{gate.hard.slice(0, 3).join('；')} · QA 只评分，不自动拦截人工采纳</div>}
+                {!!gate.hard.length && <div className="error-banner">{gate.hard.slice(0, 3).join('；')} · 质检只评分，不自动拦截人工采纳</div>}
                 {!gate.hard.length && !gate.verified && <div className="hint">
                   {gate.reviewState === 'qa_incomplete'
-                    ? `上次 QA 未能完整判定${gate.uncertainties.length ? `：${gate.uncertainties.slice(0, 2).join('；')}` : ''}`
-                    : '该候选尚未执行新版 QA'}
+                    ? `上次质检未能完整判定${gate.uncertainties.length ? `：${gate.uncertainties.slice(0, 2).join('；')}` : ''}`
+                    : '该候选尚未执行新版质检'}
                 </div>}
-                {!!gate.warnings.length && <div className="hint">警告：{gate.warnings.slice(0, 3).join('；')}</div>}
-                {candidate.evidence && <EvidenceDrawer evidence={candidate.evidence} label="查看 QA 证据"
+                {!!gate.warnings.length && <div className="hint">提示：{gate.warnings.slice(0, 3).join('；')}</div>}
+                {candidate.evidence && <EvidenceDrawer evidence={candidate.evidence} label="查看质检证据"
                   onOpenChange={setEvidenceOpen} />}
-                {canAdopt && <button className="btn small primary" type="button" disabled={!!adoptingId}
-                  onClick={() => adopt(candidate.artifact_id, [...gate.hard, ...gate.warnings])}>
+                {canOfferAdopt && <button className="btn small primary" type="button" disabled={!!adoptingId || disabled}
+                  aria-label={adoptingId || disabled
+                    ? `采纳此图，暂不可用：${adoptingId ? '正在处理上一项采纳操作' : '当前有其他场景任务运行'}`
+                    : '采纳此图；下一步填写采纳理由并确认影响'}
+                  onClick={() => setAdoptRequest({ artifactId: candidate.artifact_id, warnings: [...gate.hard, ...gate.warnings] })}>
                   {adoptingId === candidate.artifact_id ? '采纳中…' : '采纳此图'}
                 </button>}
                 {!isCurrent && !passed && !!candidate.image_url && <div className="scene-candidate-actions">
                   <button className="btn small primary" type="button"
-                    disabled={!!reviewingId || !!adoptingId || disabled} onClick={() => void review(candidate)}>
-                    {reviewingId === candidate.artifact_id ? '验证中…' : '重新验 QA'}
+                    disabled={!!reviewingId || !!adoptingId || disabled}
+                    aria-label={reviewingId || adoptingId || disabled
+                      ? `重新质检，暂不可用：${reviewingId ? '正在质检上一项候选' : adoptingId ? '正在采纳候选' : '当前有其他场景任务运行'}`
+                      : '重新质检；不会重新生成图片'}
+                    onClick={() => void review(candidate)}>
+                    {reviewingId === candidate.artifact_id ? '质检中…' : '重新质检'}
                   </button>
-                  <span className="hint">可直接人工采纳；重新验 QA 不会重新出图</span>
+                  <span className="hint">可直接人工采纳；重新质检不会重新出图</span>
                 </div>}
               </article>
             )
@@ -814,6 +933,63 @@ function SceneCandidateModal({
           sceneName={sceneName} busy={manualBusy} onClose={() => setManualCandidateId(null)}
           onConfirm={(confirmations, reason) => void manualReviewAndAdopt(manualCandidateId, confirmations, reason)}
         />}
+        {adoptRequest && <SceneCandidateAdoptDialog
+          sceneName={sceneName}
+          warnings={adoptRequest.warnings}
+          busy={adoptingId === adoptRequest.artifactId}
+          onClose={() => setAdoptRequest(null)}
+          onConfirm={reason => void adopt(adoptRequest.artifactId, reason)}
+        />}
+      </section>
+    </div>
+  )
+}
+
+function SceneCandidateAdoptDialog({
+  sceneName,
+  warnings,
+  busy,
+  onClose,
+  onConfirm,
+}: {
+  sceneName: string
+  warnings: string[]
+  busy: boolean
+  onClose: () => void
+  onConfirm: (reason: string) => void
+}) {
+  const [reason, setReason] = useState('')
+  const trapRef = useFocusTrap(true, onClose)
+  return (
+    <div className="scene-manual-review-backdrop" role="presentation" onMouseDown={event => {
+      if (event.currentTarget === event.target && !busy) onClose()
+    }}>
+      <section ref={trapRef} className="scene-manual-review-dialog" role="dialog" aria-modal="true"
+        aria-labelledby="scene-adopt-title">
+        <h3 id="scene-adopt-title">采纳「{sceneName}」候选图</h3>
+        <p>采纳后将作为场景库当前主图；历史版本会保留，可在场景版本中回滚。</p>
+        {!!warnings.length && (
+          <div className="warning-banner" role="status">
+            <b>采纳前请确认以下质检提示</b>
+            <ul>{warnings.map((warning, index) => <li key={`${index}:${warning}`}>{warning}</li>)}</ul>
+          </div>
+        )}
+        <label className="scene-manual-review-reason">
+          <span>采纳理由（必填）</span>
+          <textarea value={reason} disabled={busy} rows={3} maxLength={300}
+            placeholder="说明画面质量、场景一致性和风险判断"
+            onChange={event => setReason(event.target.value)} />
+        </label>
+        <footer>
+          <button className="btn" type="button" disabled={busy} onClick={onClose}>取消</button>
+          <button className="btn primary" type="button" disabled={busy || reason.trim().length < 4}
+            aria-label={busy || reason.trim().length < 4
+              ? `确认采纳此图，暂不可用：${busy ? '正在处理采纳操作' : '请填写至少 4 个字的采纳理由'}`
+              : '确认采纳此图'}
+            onClick={() => onConfirm(reason.trim())}>
+            {busy ? '采纳中…' : '确认采纳此图'}
+          </button>
+        </footer>
       </section>
     </div>
   )
@@ -841,11 +1017,11 @@ function SceneCandidateManualReviewDialog({ sceneName, busy, onClose, onConfirm 
       <section ref={trapRef} className="scene-manual-review-dialog" role="dialog" aria-modal="true"
         aria-labelledby="scene-manual-review-title">
         <h3 id="scene-manual-review-title">人工复核「{sceneName}」</h3>
-        <p>仅用于“无 QA 或 QA 未完成”的恢复。系统已识别的硬失败无法通过此流程覆盖；复核结果会记入审计证据。</p>
+        <p>仅用于“未质检或质检未完成”的恢复。系统已识别的必检项失败无法通过此流程覆盖；复核结果会记入审计证据。</p>
         <div className="scene-manual-review-checks">
           {([
             ['person_free', '画面是纯环境，没有人物或人影'],
-            ['watermark_free', '画面没有水印、Logo 或 AI 生成标记'],
+            ['watermark_free', '画面没有水印、Logo 或生成工具标记'],
             ['forbidden_text_free', '画面没有字幕、角标或禁止的多余文字'],
             ['space_type_matches', '室内/室外与场景定义一致，空间类型匹配'],
           ] as const).map(([key, label]) => <label key={key}>
@@ -857,12 +1033,15 @@ function SceneCandidateManualReviewDialog({ sceneName, busy, onClose, onConfirm 
         <label className="scene-manual-review-reason">
           <span>复核理由（必填）</span>
           <textarea value={reason} disabled={busy} rows={3} maxLength={300}
-            placeholder="例：已 1:1 放大查看，四项硬门禁均人工确认通过"
+            placeholder="例：已按原尺寸放大查看，四项必检项均人工确认通过"
             onChange={event => setReason(event.target.value)} />
         </label>
         <footer>
           <button className="btn" type="button" disabled={busy} onClick={onClose}>取消</button>
           <button className="btn primary" type="button" disabled={busy || !allChecked || reason.trim().length < 4}
+            aria-label={busy || !allChecked || reason.trim().length < 4
+              ? `记录复核并采纳，暂不可用：${busy ? '正在处理复核' : !allChecked ? '请确认全部必检项' : '请填写至少 4 个字的复核理由'}`
+              : '记录复核并采纳'}
             onClick={() => onConfirm(confirmations, reason.trim())}>
             {busy ? '复核采纳中…' : '记录复核并采纳'}
           </button>
@@ -889,6 +1068,7 @@ function SceneRefStrip({ projectId, sceneName, segments, disabled, onChanged, on
   const { toast, go } = useNav()
   const [redoing, setRedoing] = useState<string | null>(null)
   const [rollingBack, setRollingBack] = useState<string | null>(null)
+  const [rollbackDraft, setRollbackDraft] = useState<{ id: string; reason: string } | null>(null)
   const sorted = [...segments].sort((a, b) => a.ep_start - b.ep_start)
   const current = sorted.filter(seg => seg.ep_end == null).at(-1) || sorted.at(-1)
 
@@ -940,13 +1120,13 @@ function SceneRefStrip({ projectId, sceneName, segments, disabled, onChanged, on
               </div>
             )}
             {!!seg.group_qa?.hard_failures?.length && sceneSegmentPrimaryFailed(seg) && (
-              <div className="error-banner">主图 QA 提示：{seg.group_qa.hard_failures.join('；')} · QA 只评分，不自动拦截生产引用</div>
+              <div className="error-banner">主图质检提示：{seg.group_qa.hard_failures.join('；')} · 质检只评分，不自动拦截生产引用</div>
             )}
             {!!seg.group_qa?.hard_failures?.length && !sceneSegmentPrimaryFailed(seg) && (
-              <div className="hint">附加视角 QA 提示：{seg.group_qa.hard_failures.join('；')} · 主图仍可用于视频</div>
+              <div className="hint">附加视角质检提示：{seg.group_qa.hard_failures.join('；')} · 主图仍可用于视频</div>
             )}
             {!!seg.group_qa?.warnings?.length && !seg.group_qa?.hard_failures?.length && (
-              <div className="hint">软警告：{seg.group_qa.warnings.join('；')}</div>
+              <div className="hint">提示：{seg.group_qa.warnings.join('；')}</div>
             )}
             {(seg.views && seg.views.length > 0) ? (
               <div className="scene-view-grid">
@@ -966,9 +1146,21 @@ function SceneRefStrip({ projectId, sceneName, segments, disabled, onChanged, on
                         type="button"
                         className="btn small ghost"
                         disabled={disabled || !!redoing}
+                        aria-label={disabled || !!redoing
+                          ? `重做${sceneViewPresentation(view.view_role).label}，暂不可用：${disabled ? '当前有其他场景任务运行' : '正在提交上一项重做任务'}`
+                          : `重做${sceneViewPresentation(view.view_role).label}；下一步预览费用`}
+                        title={
+                          disabled
+                            ? '当前有其他场景任务运行，请等待完成'
+                            : redoing
+                              ? '正在提交重做任务'
+                              : `重新生成${sceneViewPresentation(view.view_role).label}，提交前会进入费用确认`
+                        }
                         onClick={() => redoView(seg.id!, view.view_role!)}
                       >
-                        {redoing === `${seg.id}:${view.view_role}` ? '重做中…' : '重做'}
+                        {redoing === `${seg.id}:${view.view_role}`
+                          ? '重做中…'
+                          : `重做${sceneViewPresentation(view.view_role).label}`}
                       </button>
                     )}
                   </figure>
@@ -986,14 +1178,51 @@ function SceneRefStrip({ projectId, sceneName, segments, disabled, onChanged, on
             )}
             {seg.ep_end != null && seg.id && (
               <button className="btn small" type="button" disabled={disabled || !!rollingBack}
-                onClick={async () => {
-                  const reason = window.prompt('回滚会影响新的下游引用，请填写切换原因：', '回滚到此历史通过包')
-                  if (!reason?.trim()) return
-                  setRollingBack(seg.id!)
-                  try { await api.rollbackSceneReference(projectId, sceneName, seg.id!, reason.trim()); toast('场景包已原子回滚'); onChanged?.() }
-                  catch (e: unknown) { toast(e instanceof Error ? e.message : String(e), true) }
-                  finally { setRollingBack(null) }
-                }}>{rollingBack === seg.id ? '回滚中…' : '回滚到此版本'}</button>
+                aria-label={disabled || !!rollingBack
+                  ? `回滚到此版本，暂不可用：${disabled ? '当前有其他场景任务运行' : '正在处理上一项回滚'}`
+                  : '回滚到此版本；下一步填写切换原因'}
+                onClick={() => setRollbackDraft({ id: seg.id!, reason: '回滚到此历史通过包' })}>
+                {rollingBack === seg.id ? '回滚中…' : '回滚到此版本'}
+              </button>
+            )}
+            {rollbackDraft?.id === seg.id && (
+              <div className="scene-version-rollback">
+                <b>确认回滚到此版本</b>
+                <span>新产生的下游引用将改用此场景包，现有历史记录不会删除。</span>
+                <label>切换原因
+                  <textarea rows={2} value={rollbackDraft?.reason ?? ''}
+                    onChange={event => setRollbackDraft(current => current
+                      ? { ...current, reason: event.target.value }
+                      : current)} />
+                </label>
+                <div>
+                  <button className="btn small ghost" type="button" disabled={!!rollingBack}
+                    aria-label={rollingBack ? '取消版本回滚，暂不可用：正在处理回滚' : '取消版本回滚'}
+                    onClick={() => setRollbackDraft(null)}>取消</button>
+                  <button className="btn small primary" type="button"
+                    disabled={!!rollingBack || (rollbackDraft?.reason.trim().length ?? 0) < 4}
+                    aria-label={rollingBack || (rollbackDraft?.reason.trim().length ?? 0) < 4
+                      ? `确认回滚，暂不可用：${rollingBack ? '正在处理回滚' : '请填写至少 4 个字的切换原因'}`
+                      : '确认回滚到此场景版本'}
+                    onClick={async () => {
+                      const reason = rollbackDraft?.reason.trim()
+                      if (!reason) return
+                      setRollingBack(seg.id!)
+                      try {
+                        await api.rollbackSceneReference(projectId, sceneName, seg.id!, reason)
+                        setRollbackDraft(null)
+                        toast('已切换到所选历史场景版本')
+                        onChanged?.()
+                      } catch (e: unknown) {
+                        toast(e instanceof Error ? e.message : String(e), true)
+                      } finally {
+                        setRollingBack(null)
+                      }
+                    }}>
+                    {rollingBack === seg.id ? '回滚中…' : '确认回滚'}
+                  </button>
+                </div>
+              </div>
             )}
           </article>
         ))}
@@ -1009,38 +1238,45 @@ function SceneAnchorBlock({ projectId, scene, expectedVersion, disabled, onChang
   const { toast } = useNav()
   const [editing, setEditing] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [draft, setDraft] = useState(() => ({
+  const [discardConfirm, setDiscardConfirm] = useState(false)
+  const savedDraft = {
     scene_canonical: scene.scene_canonical,
     location_kind: scene.location_kind || '', space: scene.space || '',
     time_of_day: scene.time_of_day || '', lighting: scene.lighting || '',
     landmarks: (scene.landmarks || []).join('、'),
     forbidden_elements: (scene.forbidden_elements || []).join('、'),
-  }))
-  const dirty = JSON.stringify(draft) !== JSON.stringify({
-    scene_canonical: scene.scene_canonical,
-    location_kind: scene.location_kind || '', space: scene.space || '',
-    time_of_day: scene.time_of_day || '', lighting: scene.lighting || '',
-    landmarks: (scene.landmarks || []).join('、'),
-    forbidden_elements: (scene.forbidden_elements || []).join('、'),
-  })
+  }
+  const [draft, setDraft] = useState(() => savedDraft)
+  const dirty = JSON.stringify(draft) !== JSON.stringify(savedDraft)
   useEffect(() => { onDirtyChange(editing && dirty) }, [dirty, editing])
   useEffect(() => {
     if (!dirty) return
-    const beforeUnload = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = '' }
+    const beforeUnload = (event: BeforeUnloadEvent) => { event.preventDefault() }
     window.addEventListener('beforeunload', beforeUnload)
     return () => window.removeEventListener('beforeunload', beforeUnload)
   }, [dirty])
   const split = (value: string) => value.split(/[、,，;；]/).map(item => item.trim()).filter(Boolean)
+  const descriptionLength = draft.scene_canonical.trim().length
+  const descriptionInvalid = descriptionLength < 30 || descriptionLength > 80
+  const saveDisabledReason = saving
+    ? '正在保存场景固定信息'
+    : !dirty
+      ? '尚未修改任何场景信息'
+      : descriptionInvalid
+        ? '完整场景描述需为 30 至 80 字'
+        : ''
   if (!editing) return (
     <section className="scene-anchor-editor">
-      <h4>结构化场景锚点</h4>
+      <h4>场景固定信息</h4>
       <p className="hint">空间：{scene.space || '未拆分'} · 时段：{scene.time_of_day || '未拆分'} · 光线：{scene.lighting || '未拆分'}</p>
-      <button className="btn small" type="button" disabled={disabled} onClick={() => setEditing(true)}>逐段修改 / 查看差异</button>
+      <button className="btn small" type="button" disabled={disabled}
+        aria-label={disabled ? '逐段修改场景固定信息，暂不可用：当前有其他场景任务运行' : '逐段修改场景固定信息并查看差异'}
+        onClick={() => setEditing(true)}>逐段修改 / 查看差异</button>
     </section>
   )
   return (
     <section className="scene-anchor-editor">
-      <h4>结构化场景锚点（只保存不会生成图片）</h4>
+      <h4>场景固定信息（只保存不会生成图片）</h4>
       <div className="scene-anchor-form">
         <label>室内外<select value={draft.location_kind} onChange={e => setDraft(v => ({ ...v, location_kind: e.target.value }))}>
           <option value="">待确认</option><option value="室内">室内</option><option value="室外">室外</option><option value="其他">其他</option>
@@ -1051,16 +1287,17 @@ function SceneAnchorBlock({ projectId, scene, expectedVersion, disabled, onChang
         <label>标志物<input value={draft.landmarks} onChange={e => setDraft(v => ({ ...v, landmarks: e.target.value }))} placeholder="用顿号分隔" /></label>
         <label>禁用元素<input value={draft.forbidden_elements} onChange={e => setDraft(v => ({ ...v, forbidden_elements: e.target.value }))} placeholder="用顿号分隔" /></label>
       </div>
-      <label>完整锚点<textarea rows={4} value={draft.scene_canonical} onChange={e => setDraft(v => ({ ...v, scene_canonical: e.target.value }))} /></label>
-      <div className={draft.scene_canonical.trim().length < 30 || draft.scene_canonical.trim().length > 80 ? 'error-banner' : 'hint'}>
-        {draft.scene_canonical.trim().length}/80 字（要求 30~80）{dirty ? ' · 保存后现有图片标记“待重绘”' : ''}
+      <label>完整场景描述<textarea rows={4} value={draft.scene_canonical} onChange={e => setDraft(v => ({ ...v, scene_canonical: e.target.value }))} /></label>
+      <div className={descriptionInvalid ? 'error-banner' : 'hint'}>
+        {descriptionLength}/80 字（要求 30~80）{dirty ? ' · 保存后现有图片标记“待重绘”' : ''}
       </div>
       {dirty && <details><summary>查看前后差异</summary><p>原：{scene.scene_canonical}</p><p>新：{draft.scene_canonical}</p></details>}
       <div className="dialog-actions">
-        <button className="btn small" type="button" disabled={saving} onClick={() => {
-          if (!dirty || window.confirm('放弃尚未保存的场景锚点修改？')) setEditing(false)
-        }}>取消</button>
-        <button className="btn small primary" type="button" disabled={saving || !dirty || draft.scene_canonical.trim().length < 30 || draft.scene_canonical.trim().length > 80}
+        <button className="btn small" type="button" disabled={saving}
+          aria-label={saving ? '退出场景固定信息编辑，暂不可用：正在保存' : dirty ? '取消并检查是否放弃场景修改' : '退出场景固定信息编辑'}
+          onClick={() => dirty ? setDiscardConfirm(true) : setEditing(false)}>取消</button>
+        <button className="btn small primary" type="button" disabled={Boolean(saveDisabledReason)}
+          aria-label={saveDisabledReason ? `仅保存场景固定信息，暂不可用：${saveDisabledReason}` : '仅保存场景固定信息，不生成图片'}
           onClick={async () => {
             setSaving(true)
             try {
@@ -1068,12 +1305,22 @@ function SceneAnchorBlock({ projectId, scene, expectedVersion, disabled, onChang
                 expected_version: expectedVersion, ...draft,
                 landmarks: split(draft.landmarks), forbidden_elements: split(draft.forbidden_elements),
               })
-              toast('场景锚点已保存；现有图片已标记待重绘（未生成、未扣费）')
-              setEditing(false); onChanged()
+              toast('场景固定信息已保存；现有图片已标记待重绘（未生成、未扣费）')
+              setDiscardConfirm(false); setEditing(false); onChanged()
             } catch (e: unknown) { toast(e instanceof Error ? e.message : String(e), true) }
             finally { setSaving(false) }
-          }}>仅保存锚点</button>
+          }}>仅保存场景信息</button>
       </div>
+      {discardConfirm && (
+        <div className="inline-reset-confirm" role="status">
+          <span><b>放弃尚未保存的场景固定信息？</b>当前输入会恢复为已保存版本，图片和下游不会变化。</span>
+          <div>
+            <button className="btn small ghost" type="button" onClick={() => setDiscardConfirm(false)}>继续编辑</button>
+            <button className="btn small danger" type="button"
+              onClick={() => { setDraft(savedDraft); setDiscardConfirm(false); setEditing(false) }}>放弃修改</button>
+          </div>
+        </div>
+      )}
     </section>
   )
 }
@@ -1086,26 +1333,45 @@ function ScenePromptBlock({ projectId, scene: s, disabled, onChanged, regenerate
   const { toast } = useNav()
   const [draft, setDraft] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const [restoreConfirm, setRestoreConfirm] = useState(false)
+  const [discardConfirm, setDiscardConfirm] = useState(false)
   const isOverridden = !!(s.scene_prompt_override || '').trim()
   const effective = s.scene_prompt_effective || ''
+  const savedPrompt = s.scene_prompt_override || effective
+  const draftChanged = draft !== null && draft !== savedPrompt
   const promptParts = effective.split('。').map(part => part.trim()).filter(Boolean)
   const promptSections = [
     { label: '全局画风', value: promptParts[0] || '未提供' },
-    { label: '场景锚点', value: promptParts.find(part => part.includes('场景')) || s.scene_canonical },
-    { label: '视角与构图', value: promptParts.find(part => /视角|镜头|构图|竖屏/.test(part)) || '由当前视角包动态追加' },
-    { label: '负面约束', value: promptParts.filter(part => /无人物|无文字|无字幕|无水印|logo|禁止/.test(part)).join('；') || '无人物、无文字、无水印、无 Logo' },
+    { label: '场景固定描述', value: promptParts.find(part => part.includes('场景')) || s.scene_canonical },
+    { label: '视角与构图', value: promptParts.find(part => /视角|镜头|构图|竖屏/.test(part)) || '随当前视角自动补充' },
+    { label: '排除内容', value: promptParts.filter(part => /无人物|无文字|无字幕|无水印|logo|禁止/.test(part)).join('；') || '无人物、无文字、无水印、无 Logo' },
   ]
   const draftLength = (draft ?? '').trim().length
   const requestsPeople = draft !== null && /出现人物|有人物|出现人群|包含人群|有人群|出现行人|有行人|角色入镜|主体人物/.test(draft)
   const draftInvalid = draft !== null && draftLength > 0 && (draftLength < 10 || draftLength > 400 || requestsPeople)
-  useEffect(() => { onDirtyChange(draft !== null) }, [draft])
+  const baseDisabledReason = saving
+    ? '正在保存上一项修改'
+    : disabled
+      ? '当前有其他场景任务运行，请等待完成'
+      : ''
+  const saveAndRegenerateDisabledReason = baseDisabledReason
+    || (!draftChanged ? '尚未修改场景图描述' : '')
+    || (draftInvalid ? requestsPeople ? '纯环境场景不能要求人物入镜' : '描述需为 10 至 400 字' : '')
+  const saveOnlyDisabledReason = saving
+    ? '正在保存上一项修改'
+    : !draftChanged
+      ? '尚未修改场景图描述'
+      : draftInvalid
+        ? requestsPeople ? '纯环境场景不能要求人物入镜' : '描述需为 10 至 400 字'
+        : ''
+  useEffect(() => { onDirtyChange(draftChanged) }, [draftChanged])
 
   async function save(thenRegen: boolean, valueOverride?: string) {
     setSaving(true)
     try {
       const r = await api.editScenePrompt(projectId, s.name, valueOverride ?? draft ?? '')
       toast(r.reset_to_default ? `「${s.name}」场景图描述已恢复默认` : `「${s.name}」场景图描述已保存`)
-      setDraft(null); onChanged()
+      setRestoreConfirm(false); setDiscardConfirm(false); setDraft(null); onChanged()
       if (thenRegen) regenerate()
     } catch (e: unknown) { toast((e as Error).message, true) }
     finally { setSaving(false) }
@@ -1113,39 +1379,73 @@ function ScenePromptBlock({ projectId, scene: s, disabled, onChanged, regenerate
 
   return (
     <div style={{ marginTop: 10 }}>
-      <label className="f">场景图描述（生成词）{isOverridden ? ' · 已自定义' : ' · 默认（由画风+锚点串合成）'}</label>
+      <label className="f">场景图生成描述{isOverridden ? ' · 已自定义' : ' · 默认（由画风与场景固定信息合成）'}</label>
       {draft === null ? (
         <>
           <div className="f-misc" style={{ background: 'rgba(91,114,83,0.06)', borderLeft: '3px solid var(--moss)', padding: '6px 10px', borderRadius: '0 6px 6px 0', fontSize: 12.5 }}>
             {promptSections.map(section => <p key={section.label}><b>{section.label}：</b>{section.value}</p>)}
           </div>
-          <div className="hint">生成约束与 QA 对照：禁人物 / 禁文字 / 无水印均为入库硬门禁，违反项会标红且总分不能抵消。</div>
+          <div className="hint">生成约束与质检对照：禁人物、禁文字、无水印均为入库必检项，违反项会标红且总分不能抵消。</div>
           <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
             <button className="btn small" disabled={disabled || saving}
-              onClick={() => setDraft(s.scene_prompt_override || s.scene_prompt_effective || '')}>改场景描述</button>
-            <button className="btn small" disabled={disabled || saving} onClick={regenerate}>
+              aria-label={baseDisabledReason ? `修改场景图描述，暂不可用：${baseDisabledReason}` : '修改场景图描述'}
+              onClick={() => { setDiscardConfirm(false); setDraft(savedPrompt) }}>修改场景描述</button>
+            <button className="btn small" disabled={disabled || saving}
+              aria-label={baseDisabledReason
+                ? `${s.ref_image_url ? '重新生成场景视角图' : '单独生成场景视角图'}，暂不可用：${baseDisabledReason}`
+                : s.ref_image_url ? '重新生成场景视角图；下一步预览费用' : '单独生成场景视角图；下一步预览费用'}
+              onClick={regenerate}>
               {s.ref_image_url ? '重新生成场景视角包' : '单独生成场景视角包'}
             </button>
           </div>
         </>
       ) : (
         <>
-          <textarea rows={4} style={{ fontSize: 12.5 }} value={draft} onChange={e => setDraft(e.target.value)}
+          <textarea aria-label={`${s.name}场景图描述`} rows={4} style={{ fontSize: 12.5 }} value={draft} onChange={e => setDraft(e.target.value)}
             placeholder="描述场景定场图：画风、地点、光线时段、陈设、氛围……（10~400 字，不要出现人物）" />
           <div className={draftInvalid ? 'error-banner' : 'hint'}>{draftLength}/400 字
             {draftLength > 0 && (draftLength < 10 || draftLength > 400) ? ' · 自定义描述要求 10~400 字' : ''}
             {requestsPeople ? ' · 纯环境场景不能要求人物/角色入镜' : ''}
           </div>
           <div style={{ display: 'flex', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>
-            <button className="btn small primary" disabled={saving || disabled || draftInvalid} onClick={() => save(true)}>保存并重新出图</button>
-            <button className="btn small" disabled={saving || draftInvalid} onClick={() => save(false)}>仅保存</button>
-            {isOverridden && <button className="btn small" disabled={saving} onClick={() => {
-              if (window.confirm(`确认恢复「${s.name}」的默认描述？此操作只保存描述，不生成图片、不扣费。`)) {
-                setDraft(''); void save(false, '')
-              }
-            }}>恢复默认</button>}
-            <button className="btn small ghost" disabled={saving} onClick={() => setDraft(null)}>放弃</button>
+            <button className="btn small primary" disabled={Boolean(saveAndRegenerateDisabledReason)}
+              aria-label={saveAndRegenerateDisabledReason ? `保存并重新出图，暂不可用：${saveAndRegenerateDisabledReason}` : '保存场景图描述并重新出图'}
+              onClick={() => save(true)}>保存并重新出图</button>
+            <button className="btn small" disabled={Boolean(saveOnlyDisabledReason)}
+              aria-label={saveOnlyDisabledReason ? `仅保存场景图描述，暂不可用：${saveOnlyDisabledReason}` : '仅保存场景图描述'}
+              onClick={() => save(false)}>仅保存</button>
+            {isOverridden && <button className="btn small" disabled={saving}
+              aria-label={saving ? '恢复默认场景图描述，暂不可用：正在保存上一项修改' : '恢复默认场景图描述'}
+              onClick={() => setRestoreConfirm(true)}>恢复默认</button>}
+            <button className="btn small ghost" disabled={saving}
+              aria-label={saving ? '退出场景图描述编辑，暂不可用：正在保存上一项修改' : draftChanged ? '放弃场景图描述修改' : '退出场景图描述编辑'}
+              onClick={() => {
+                setRestoreConfirm(false)
+                if (draftChanged) setDiscardConfirm(true)
+                else setDraft(null)
+              }}>{draftChanged ? '放弃修改' : '退出编辑'}</button>
           </div>
+          {restoreConfirm && (
+            <div className="inline-reset-confirm" role="status">
+              <span><b>恢复「{s.name}」的默认场景描述？</b>只恢复由画风和场景固定信息合成的默认描述，不生成图片、不扣费。</span>
+              <div>
+                <button className="btn small ghost" type="button" disabled={saving}
+                  onClick={() => setRestoreConfirm(false)}>取消</button>
+                <button className="btn small primary" type="button" disabled={saving}
+                  onClick={() => { setRestoreConfirm(false); setDraft(''); void save(false, '') }}>确认恢复默认</button>
+              </div>
+            </div>
+          )}
+          {discardConfirm && (
+            <div className="inline-reset-confirm" role="status">
+              <span><b>放弃尚未保存的场景图描述？</b>当前输入会恢复为已保存版本，场景图和下游不会变化。</span>
+              <div>
+                <button className="btn small ghost" type="button" onClick={() => setDiscardConfirm(false)}>继续编辑</button>
+                <button className="btn small danger" type="button"
+                  onClick={() => { setDiscardConfirm(false); setDraft(null) }}>放弃修改</button>
+              </div>
+            </div>
+          )}
         </>
       )}
     </div>
@@ -1172,9 +1472,13 @@ function SceneGapDialog({ scan, onClose, onGenerate }: {
         <h3>场景图缺口扫描结果</h3>
         <p>扫描本身免费。系统会优先复用已有图片并补做验证；只有确需生成新图片时，下一步才会显示费用。</p>
         <div className="pay-scope-actions">
-          <button className="btn small" type="button" onClick={() => setSelected(defaults)}>选择建议项</button>
-          <button className="btn small ghost" type="button" onClick={() => setSelected([])}>清空</button>
-          <span>已选 {selected.length}/{scan.items.length}</span>
+          <button className="btn small" type="button" disabled={!defaults.length}
+            aria-label={!defaults.length ? '选择建议项，暂不可用：当前没有场景图缺口' : '选择全部建议项'}
+            onClick={() => setSelected(defaults)}>选择建议项</button>
+          <button className="btn small ghost" type="button" disabled={!selected.length}
+            aria-label={!selected.length ? '清空已选场景，暂不可用：当前没有已选场景' : '清空已选场景'}
+            onClick={() => setSelected([])}>清空</button>
+          <span role="status">已选 {selected.length}/{scan.items.length}</span>
         </div>
         <ul className="scene-gap-list">
           {scan.items.map(item => (
@@ -1191,7 +1495,9 @@ function SceneGapDialog({ scan, onClose, onGenerate }: {
         {!scan.items.length && <div className="empty">所有场景图均可用，当前没有需要处理的缺口</div>}
         <div className="dialog-actions">
           <button className="btn" type="button" onClick={onClose}>关闭</button>
-          <button className="btn primary" type="button" disabled={!selected.length} onClick={() => onGenerate(selected)}>处理已选缺口</button>
+          <button className="btn primary" type="button" disabled={!selected.length}
+            aria-label={!selected.length ? '处理已选缺口，暂不可用：请至少选择一个场景' : '处理已选缺口；下一步仅在需要出图时展示费用'}
+            onClick={() => onGenerate(selected)}>处理已选缺口</button>
         </div>
       </section>
     </div>
@@ -1207,6 +1513,8 @@ function ScenePreviewDialog({ scenes, onClose, onConfirm }: {
   const [items, setItems] = useState(() => scenes.map(scene => ({ ...scene })))
   const [selected, setSelected] = useState(() => scenes.map(scene => scene.name))
   const [busy, setBusy] = useState(false)
+  const [mergeOpen, setMergeOpen] = useState(false)
+  const [mergeName, setMergeName] = useState('')
   const selectedItems = items.filter(item => selected.includes(item.name))
   const duplicate = new Set(selectedItems.map(item => item.name)).size !== selectedItems.length
   const invalid = !selectedItems.length || duplicate || selectedItems.some(item =>
@@ -1223,7 +1531,7 @@ function ScenePreviewDialog({ scenes, onClose, onConfirm }: {
 
   const mergeSelected = () => {
     if (selectedItems.length < 2) return
-    const name = window.prompt('合并后的规范场景名：', selectedItems[0].name)?.trim()
+    const name = mergeName.trim()
     if (!name) return
     const merged: Scene = {
       ...selectedItems[0], name,
@@ -1232,6 +1540,8 @@ function ScenePreviewDialog({ scenes, onClose, onConfirm }: {
     }
     setItems(current => [merged, ...current.filter(item => !selected.includes(item.name))])
     setSelected([name])
+    setMergeOpen(false)
+    setMergeName('')
   }
 
   return (
@@ -1240,11 +1550,27 @@ function ScenePreviewDialog({ scenes, onClose, onConfirm }: {
     }}>
       <section ref={trapRef} className="impact-dialog scene-preview-dialog" role="dialog" aria-modal="true" aria-label="确认场景提取清单">
         <h3>确认场景提取清单</h3>
-        <p>先取消不需要项、合并同义场景或修订名称/锚点；下一步才显示服务端真实费用。</p>
+        <p>先取消不需要项、合并同义场景或修订名称与固定场景描述；下一步才显示实际费用。</p>
         <div className="pay-scope-actions">
-          <button className="btn small" type="button" disabled={selectedItems.length < 2} onClick={mergeSelected}>合并勾选项</button>
-          <span>已选 {selectedItems.length}/{items.length}</span>
+          <button className="btn small" type="button" aria-expanded={mergeOpen} disabled={selectedItems.length < 2}
+            aria-label={selectedItems.length < 2 ? '合并勾选项，暂不可用：请至少选择两个场景' : '合并勾选的同义场景'}
+            onClick={() => { setMergeName(selectedItems[0]?.name || ''); setMergeOpen(value => !value) }}>合并勾选项</button>
+          <span role="status">已选 {selectedItems.length}/{items.length}</span>
         </div>
+        {mergeOpen && (
+          <div className="scene-merge-control">
+            <label>合并后的规范场景名
+              <input value={mergeName} autoFocus onChange={event => setMergeName(event.target.value)} />
+            </label>
+            <span>将合并当前勾选的 {selectedItems.length} 个场景，原始发现依据会保留。</span>
+            <div>
+              <button className="btn small ghost" type="button" onClick={() => setMergeOpen(false)}>取消合并</button>
+              <button className="btn small primary" type="button" disabled={!mergeName.trim()}
+                aria-label={!mergeName.trim() ? '确认合并，暂不可用：请填写合并后的场景名' : '确认合并勾选场景'}
+                onClick={mergeSelected}>确认合并</button>
+            </div>
+          </div>
+        )}
         <div className="scene-preview-list">
           {items.map((scene, index) => (
             <article key={`${index}:${scene.name}`}>
@@ -1257,10 +1583,10 @@ function ScenePreviewDialog({ scenes, onClose, onConfirm }: {
               <select aria-label="室内外" value={scene.location_kind || ''} onChange={event => update(index, { location_kind: event.target.value })}>
                 <option value="">待确认</option><option value="室内">室内</option><option value="室外">室外</option><option value="其他">其他</option>
               </select>
-              <textarea aria-label="场景锚点" rows={3} value={scene.scene_canonical}
+              <textarea aria-label="场景固定描述" rows={3} value={scene.scene_canonical}
                 onChange={event => update(index, { scene_canonical: event.target.value })} />
               <small className={scene.scene_canonical.length < 30 || scene.scene_canonical.length > 80 ? 'failed' : ''}>
-                锚点 {scene.scene_canonical.length}/80 字（要求 30~80）
+                固定描述 {scene.scene_canonical.length}/80 字（要求 30~80）
               </small>
               {!!scene.discovery_sources?.length && <small>发现依据：{scene.discovery_sources.join('、')}</small>}
             </article>
@@ -1268,10 +1594,16 @@ function ScenePreviewDialog({ scenes, onClose, onConfirm }: {
         </div>
         {duplicate && <div className="error-banner">场景名称不能重复；同义场景请合并</div>}
         <div className="dialog-actions">
-          <button className="btn" type="button" disabled={busy} onClick={onClose}>取消</button>
-          <button className="btn primary" type="button" disabled={busy || invalid} onClick={async () => {
+          <button className="btn" type="button" disabled={busy}
+            aria-label={busy ? '取消场景清单，暂不可用：正在准备费用预览' : '取消场景清单'}
+            onClick={onClose}>取消</button>
+          <button className="btn primary" type="button" disabled={busy || invalid}
+            aria-label={busy || invalid
+              ? `下一步预览费用，暂不可用：${busy ? '正在准备费用预览' : !selectedItems.length ? '请至少选择一个场景' : duplicate ? '场景名称不能重复，请先合并' : '场景名称不能为空，且固定描述需为 30 至 80 字'}`
+              : '下一步预览场景图费用'}
+            onClick={async () => {
             setBusy(true); try { await onConfirm(selectedItems) } finally { setBusy(false) }
-          }}>下一步：费用预检</button>
+          }}>下一步：预览费用</button>
         </div>
       </section>
     </div>

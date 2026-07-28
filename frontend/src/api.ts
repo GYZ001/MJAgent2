@@ -170,6 +170,21 @@ export const api = {
   /* ── 便捷方法 ── */
   episodeGenerate: (episodeId: string) =>
     request("POST", `/episodes/${episodeId}/generate`),
+  stopEpisodeVideo: (episodeId: string) =>
+    request("POST", `/episodes/${episodeId}/video/stop`) as Promise<{
+      episode_id: string;
+      paused_jobs: number;
+      provider_may_continue: boolean;
+      resume_supported: true;
+      job_ids: string[];
+    }>,
+  resumeEpisodeVideo: (episodeId: string) =>
+    request("POST", `/episodes/${episodeId}/resume`) as Promise<{
+      resumed_jobs: number;
+      budget_resumed_jobs: number;
+      skipped_completed: number;
+      enqueued: Array<{ job_id?: string; reused?: boolean; error?: unknown }>;
+    }>,
   episodeVideoCompletion: (episodeId: string, body?: Record<string, unknown>) =>
     request("POST", `/episodes/${episodeId}/video-completion`, body || {}),
   getVideoCompletion: (episodeId: string) =>
@@ -182,17 +197,14 @@ export const api = {
     shotId: string,
     promptOverride?: string,
     reroll?: boolean,
-    critique?: string,
-    reviewItemIds?: string[],
+    withCritique?: boolean,
     qualificationVersion?: string,
     idempotencyKey?: string,
   ) =>
     request("POST", `/shots/${shotId}/generate`, {
       prompt_override: promptOverride,
       reroll,
-      with_critique: Boolean(critique),
-      critique,
-      review_item_ids: reviewItemIds || [],
+      with_critique: Boolean(withCritique),
       qualification_version: qualificationVersion,
       idempotency_key: idempotencyKey,
     }),
@@ -211,6 +223,8 @@ export const api = {
       qualification_version: qualificationVersion,
       idempotency_key: idempotencyKey,
     }),
+  cancelShotAdoption: (shotId: string) =>
+    request("POST", `/shots/${shotId}/adoption/cancel`),
   deleteVersion: (versionId: string) =>
     request("DELETE", `/versions/${versionId}`),
   discardReferenceImage: (versionId: string, refId: string) =>
@@ -231,48 +245,17 @@ export const api = {
     request("POST", `/episodes/${episodeId}/clear-artifacts`),
   clearShotArtifacts: (shotId: string) =>
     request("POST", `/shots/${shotId}/clear-artifacts`),
+  clearEpisodeVideos: (episodeId: string) =>
+    request("POST", `/episodes/${episodeId}/videos/clear`),
+  clearShotReferences: (shotId: string) =>
+    request("POST", `/shots/${shotId}/references/clear`),
+  clearShotVideos: (shotId: string) =>
+    request("POST", `/shots/${shotId}/videos/clear`),
   getReviewContext: (episodeId: string) =>
     request(
       "GET",
       `/episodes/${episodeId}/review-context`,
     ) as Promise<ReviewWallContext>,
-  createReviewItem: (
-    shotId: string,
-    body: {
-      issue_type: string;
-      severity: ReviewSeverity;
-      comment: string;
-      assignee?: string;
-      anchor?: Record<string, unknown>;
-      content_version?: string;
-      idempotency_key?: string;
-    },
-  ) =>
-    request(
-      "POST",
-      `/shots/${shotId}/review-items`,
-      body,
-    ) as Promise<ShotReviewItem>,
-  updateReviewItem: (
-    itemId: string,
-    body: {
-      expected_revision: number;
-      status?: ReviewItemStatus;
-      severity?: ReviewSeverity;
-      comment?: string;
-      assignee?: string;
-      idempotency_key?: string;
-    },
-  ) =>
-    request("PUT", `/review-items/${itemId}`, body) as Promise<ShotReviewItem>,
-  setShotReviewState: (
-    shotId: string,
-    body: {
-      review_status: ShotReviewStatus;
-      expected_revision?: number;
-      idempotency_key?: string;
-    },
-  ) => request("POST", `/shots/${shotId}/review-state`, body),
   archiveVersion: (versionId: string, reason?: string) =>
     request("POST", `/versions/${versionId}/archive`, { reason }),
   unarchiveVersion: (versionId: string) =>
@@ -1132,42 +1115,6 @@ export interface ShotVersion {
   };
 }
 
-export type ReviewSeverity = "low" | "medium" | "high" | "blocker";
-export type ReviewItemStatus = "open" | "in_progress" | "resolved" | "wont_fix";
-export type ShotReviewStatus =
-  | "pending"
-  | "in_review"
-  | "completed"
-  | "needs_recheck";
-
-export interface ShotReviewItem {
-  id: string;
-  shot_id: string;
-  anchor: Record<string, unknown>;
-  issue_type: string;
-  severity: ReviewSeverity;
-  comment: string;
-  assignee?: string | null;
-  status: ReviewItemStatus;
-  content_version: string;
-  revision: number;
-  created_by: string;
-  created_at: number;
-  updated_at: number;
-  anchor_stale?: boolean;
-}
-
-export interface ReviewShotSummary {
-  shot_id: string;
-  content_version: string;
-  review_status: ShotReviewStatus;
-  review_revision: number;
-  review_updated_at?: number | null;
-  open_issue_count: number;
-  blocker_count: number;
-  review_items: ShotReviewItem[];
-}
-
 export interface ReviewUpstreamSnapshot {
   episode_id: string;
   episode_status: string;
@@ -1206,7 +1153,6 @@ export interface ReviewWallContext {
   episode_id: string;
   object_version: string;
   upstream: ReviewUpstreamSnapshot;
-  shots: ReviewShotSummary[];
   archived_versions: Record<
     string,
     { version_id: string; reason?: string | null; archived_at: number }
@@ -1221,6 +1167,13 @@ export interface ReviewWallContext {
 }
 
 export interface ShotPipelineStatus {
+  /** 持久化媒体任务已创建；不等于供应商已接单。 */
+  task_accepted?: boolean;
+  task_id?: string | null;
+  task_created_at?: number | null;
+  task_updated_at?: number | null;
+  /** 供应商已返回 task id，表示实际生成请求已下发上游。 */
+  provider_submitted?: boolean;
   video_status?:
     | "pending_generation"
     | "generating"
@@ -1271,6 +1224,7 @@ export interface EpisodePipelineSummary {
   queued: number;
   waiting_human: number;
   failed?: number;
+  paused?: number;
   video_status_counts?: {
     pending_generation: number;
     generating: number;
@@ -1401,8 +1355,6 @@ export interface Episode {
   video_count?: number;
   pending_adoption_count?: number;
   failed_count?: number;
-  open_review_count?: number;
-  reviewed_count?: number;
   screenplay_artifact_id?: string | null;
   screenplay_evidence?: ArtifactEvidence | null;
   screenplay_state?: ScreenplayState | null;
@@ -1581,6 +1533,9 @@ export interface MixStatus {
   shots_total: number;
   shots_ready: number;
   ready: boolean;
+  all_ready?: boolean;
+  shots_skipped?: number;
+  skipped_shot_nos?: number[];
   final_video_url: string | null;
   shots: MixShot[];
 }
@@ -1590,6 +1545,9 @@ export interface MixResult {
   shots: number;
   total_duration_s: number;
   ffmpeg_missing?: boolean;
+  shots_total?: number;
+  shots_skipped?: number;
+  skipped_shot_nos?: number[];
   note?: string;
 }
 

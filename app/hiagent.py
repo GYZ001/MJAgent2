@@ -1260,7 +1260,9 @@ async def create_video_task(prompt_text: str, *, image_urls: list[tuple[str, str
     model = active_model("video", "hiagent")
     base_url, model_headers = _model_connection("hiagent", model, config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY)
     payload = {"model": model, "content": content}
-    if call_meta and call_meta.get("version_id"):
+    if call_meta and call_meta.get("operation_id"):
+        operation_id = str(call_meta["operation_id"])
+    elif call_meta and call_meta.get("version_id"):
         operation_id = f"video-create-{call_meta['version_id']}"
     else:
         operation_id = provider_operation_id("video_create", model, payload)

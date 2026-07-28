@@ -346,6 +346,16 @@ def _public_reference_image(ref: dict) -> dict:
         "purposes": ref.get("purposes"),
         "required": bool(ref.get("required")),
         "slot_key": ref.get("slot_key"),
+        "keyframe_index": ref.get("keyframe_index") or ((ref.get("qa") or {}).get("keyframe_beat") or {}).get("beat_index"),
+        "keyframe_total": ref.get("keyframe_total") or ((ref.get("qa") or {}).get("keyframe_beat") or {}).get("beat_total"),
+        "keyframe_time_ratio": (
+            ref.get("keyframe_time_ratio")
+            if ref.get("keyframe_time_ratio") is not None
+            else ((ref.get("qa") or {}).get("keyframe_beat") or {}).get("time_ratio")
+        ),
+        "keyframe_target_desc": (
+            ref.get("keyframe_target_desc") or ((ref.get("qa") or {}).get("keyframe_beat") or {}).get("target_desc")
+        ),
         "dependency_manifest": ref.get("dependency_manifest"),
         "gate_status": ref.get("gate_status"),
         "downstream_eligibility": ref.get("downstream_eligibility"),

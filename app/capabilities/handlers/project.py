@@ -10,35 +10,105 @@ async def import_novel(args: I.ProjectImportNovelInput) -> CommandResult:
     from app import api, planning
     from app.capabilities import attachments
 
-    try:
-        filename, raw = attachments.consume(args.attachment_token)
-    except KeyError as exc:
-        return failed(str(exc), error_code="attachment_invalid")
-    outcome = await call_guarded(api._create_project_core, args.name, filename, raw)
-    if isinstance(outcome, CommandResult):
-        return outcome
-    planning_generation = await call_guarded(planning.start_plan, outcome["project_id"])
-    if isinstance(planning_generation, CommandResult):
+    token_hash = api._novel_import_token_hash(args.attachment_token)
+    outcome = api._novel_import_receipt(token_hash)
+    if outcome is None:
+        try:
+            filename, raw = attachments.read(args.attachment_token)
+        except KeyError as exc:
+            return failed(str(exc), error_code="attachment_invalid")
+        try:
+            outcome = await call_guarded(
+                api._create_project_core,
+                args.name,
+                filename,
+                raw,
+                import_token_hash=token_hash,
+            )
+        except BaseException:
+            attachments.release(args.attachment_token)
+            raise
+        if isinstance(outcome, CommandResult):
+            attachments.release(args.attachment_token)
+            return outcome
+    attachments.discard(args.attachment_token)
+
+    project_id = outcome["project_id"]
+    project_state = api.get_conn().execute(
+        "SELECT plan_status,bible_status FROM projects WHERE id=?",
+        (project_id,),
+    ).fetchone()
+    if project_state and project_state["plan_status"] == "ready":
         outcome["episode_planning"] = {
-            "status": "failed_to_start",
-            "error": planning_generation.summary,
+            "status": "ready",
+            "existing": True,
         }
     else:
-        outcome["episode_planning"] = planning_generation
+        planning_generation = await call_guarded(planning.start_plan, project_id)
+        if isinstance(planning_generation, CommandResult):
+            outcome["episode_planning"] = {
+                "status": "failed_to_start",
+                "error": planning_generation.summary,
+                "error_code": planning_generation.error_code,
+                "retryable": True,
+                "retry_endpoint": f"/api/projects/{project_id}/plan",
+            }
+        else:
+            outcome["episode_planning"] = planning_generation
     # Import bootstraps a usable asset library. Bible generation is asynchronous
     # and already fans out into character and scene multiview generation after
     # its validation gate passes.
-    generation = await call_guarded(api._start_bible_core, outcome["project_id"], "")
-    if isinstance(generation, CommandResult):
+    if project_state and project_state["bible_status"] in {"ready", "warning"}:
         outcome["asset_generation"] = {
-            "status": "failed_to_start",
-            "error": generation.summary,
+            "status": project_state["bible_status"],
+            "existing": True,
+        }
+    elif project_state and project_state["bible_status"] == "running":
+        outcome["asset_generation"] = {
+            "status": "running",
+            "existing": True,
+            "task_id": f"bible:{project_id}",
         }
     else:
-        outcome["asset_generation"] = generation
+        generation = await call_guarded(api._start_bible_core, project_id, "")
+        if isinstance(generation, CommandResult):
+            detail = generation.data if isinstance(generation.data, dict) else {}
+            if detail.get("code") == "PAYMENT_CONFIRM_REQUIRED":
+                outcome["asset_generation"] = {
+                    "status": "awaiting_confirmation",
+                    "reason_code": "payment_confirmation_required",
+                    "message": "人物谱与定妆涉及模型费用，已保留导入结果，确认费用后即可继续",
+                    "precheck": detail.get("precheck"),
+                    "retryable": True,
+                    "precheck_endpoint": f"/api/projects/{project_id}/bible/generate-precheck",
+                    "start_endpoint": f"/api/projects/{project_id}/bible",
+                }
+            else:
+                outcome["asset_generation"] = {
+                    "status": "failed_to_start",
+                    "error": generation.summary,
+                    "error_code": generation.error_code,
+                    "retryable": True,
+                    "retry_endpoint": f"/api/projects/{project_id}/bible",
+                }
+        else:
+            outcome["asset_generation"] = generation
     chapter_count = outcome.get("ingestion", {}).get("chapter_count", 0)
+    planning_status = outcome["episode_planning"].get("status")
+    asset_status = outcome["asset_generation"].get("status")
+    if planning_status == "running" and asset_status == "running":
+        summary = f"小说已导入，共 {chapter_count} 章；分集、人物谱与素材准备已启动"
+    elif planning_status in {"running", "ready"} and asset_status == "awaiting_confirmation":
+        planning_text = "已完成" if planning_status == "ready" else "已启动"
+        summary = f"小说已导入，共 {chapter_count} 章；分集{planning_text}，人物谱与定妆等待费用确认"
+    elif planning_status == "ready" and asset_status in {"ready", "warning"}:
+        summary = f"小说导入结果已恢复，共 {chapter_count} 章；分集和人物谱均已保留"
+    elif planning_status in {"running", "ready"} and asset_status == "running":
+        summary = f"小说导入结果已恢复，共 {chapter_count} 章；后台准备正在继续"
+    else:
+        summary = f"小说已导入，共 {chapter_count} 章；后台准备可在项目内继续或重试"
     return succeeded(
-        f"已导入小说，共切分出 {chapter_count} 章",
+        summary,
         data=outcome,
         resource_uris=[f"manju://projects/{outcome['project_id']}"],
     )

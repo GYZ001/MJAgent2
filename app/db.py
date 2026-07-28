@@ -42,6 +42,15 @@ CREATE TABLE IF NOT EXISTS chapters (
     UNIQUE(project_id, idx),
     FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS novel_import_receipts (
+    token_hash TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_novel_import_receipts_project
+    ON novel_import_receipts(project_id);
 CREATE TABLE IF NOT EXISTS episodes (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
@@ -556,33 +565,6 @@ CREATE TABLE IF NOT EXISTS storyboard_source_bindings (
     updated_at REAL NOT NULL,
     FOREIGN KEY(shot_id) REFERENCES shots(id) ON DELETE CASCADE,
     FOREIGN KEY(chapter_id) REFERENCES chapters(id) ON DELETE CASCADE
-);
-CREATE TABLE IF NOT EXISTS shot_review_items (
-    id TEXT PRIMARY KEY,
-    shot_id TEXT NOT NULL,
-    anchor_json TEXT NOT NULL DEFAULT '{}',
-    issue_type TEXT NOT NULL,
-    severity TEXT NOT NULL DEFAULT 'medium',
-    comment TEXT NOT NULL,
-    assignee TEXT,
-    status TEXT NOT NULL DEFAULT 'open',
-    content_version TEXT NOT NULL DEFAULT '',
-    revision INTEGER NOT NULL DEFAULT 1,
-    created_by TEXT NOT NULL DEFAULT 'user',
-    created_at REAL NOT NULL,
-    updated_at REAL NOT NULL,
-    FOREIGN KEY(shot_id) REFERENCES shots(id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_shot_review_items_shot
-    ON shot_review_items(shot_id, status, updated_at);
-CREATE TABLE IF NOT EXISTS shot_review_states (
-    shot_id TEXT PRIMARY KEY,
-    review_status TEXT NOT NULL DEFAULT 'pending',
-    revision INTEGER NOT NULL DEFAULT 1,
-    decided_by TEXT NOT NULL DEFAULT 'user',
-    completed_at REAL,
-    updated_at REAL NOT NULL,
-    FOREIGN KEY(shot_id) REFERENCES shots(id) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS video_version_archives (
     version_id TEXT PRIMARY KEY,
@@ -1418,6 +1400,35 @@ def init_db(*, reconcile_interrupted: bool = False) -> None:
     )
     for key, value in DEFAULT_SETTINGS.items():
         conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", (key, value))
+    # Seedance 2.0 参考图容量已从旧默认 8 升级到 9。INSERT OR IGNORE 不会更新
+    # 已有工作区，因此用一次性标记只升级仍停留在旧默认值的实例；后续用户
+    # 手工改回 8 时不会被每次启动覆盖。
+    capacity_migration_key = "_migration_video_reference_capacity_9_v1"
+    capacity_migrated = conn.execute(
+        "SELECT 1 FROM settings WHERE key=?", (capacity_migration_key,),
+    ).fetchone()
+    if not capacity_migrated:
+        conn.execute(
+            "UPDATE settings SET value='9' WHERE key='video_reference_max_images' AND value='8'"
+        )
+        conn.execute(
+            "INSERT INTO settings(key, value) VALUES(?, 'applied')", (capacity_migration_key,),
+        )
+    # 所有辅助时序关键帧也升级为默认 3 选 1。仅迁移仍停留在旧默认值 1
+    # 的工作区；一次性标记确保用户之后主动改成 1 时不会被启动流程覆盖。
+    supporting_candidates_migration_key = "_migration_supporting_keyframe_candidates_3_v1"
+    supporting_candidates_migrated = conn.execute(
+        "SELECT 1 FROM settings WHERE key=?", (supporting_candidates_migration_key,),
+    ).fetchone()
+    if not supporting_candidates_migrated:
+        conn.execute(
+            "UPDATE settings SET value='3' "
+            "WHERE key='video_supporting_keyframe_candidates' AND value='1'"
+        )
+        conn.execute(
+            "INSERT INTO settings(key, value) VALUES(?, 'applied')",
+            (supporting_candidates_migration_key,),
+        )
     # These settings are persisted immediately but only become runtime-effective
     # after a process restart.  Capture the authoritative startup value separately
     # so the monitor UI never reports a pending value as already active.
@@ -1450,6 +1461,13 @@ def init_db(*, reconcile_interrupted: bool = False) -> None:
             "WHERE status IN ('RUNNING','WAITING_RETRY')",
             (now(),),
         )
+        # A running command claim belongs to the stopped process. Durable domain
+        # receipts/runs remain authoritative; releasing only the claim lets the
+        # same idempotency key reconcile instead of appearing busy for 24 hours.
+        try:
+            conn.execute("DELETE FROM command_idempotency WHERE status='running'")
+        except sqlite3.OperationalError:
+            pass
     # 审批进程可能在不可变 T5 快照生成前后退出。已有更新批准包则旧草稿只保留审计状态；
     # 否则恢复等待人工，允许安全重试。
     conn.execute(

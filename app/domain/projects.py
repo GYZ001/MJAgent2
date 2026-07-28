@@ -32,23 +32,84 @@ def _present_refs_error(conn, value: str | None) -> str | None:
     return f"{message}（QA · {error_id}）"
 
 
-def _create_project_core(name: str | None, filename: str, raw: bytes) -> dict:
+async def _read_novel_upload(file: UploadFile) -> tuple[str, bytes]:
+    """Bound memory use and reject unsupported uploads before issuing a token."""
+    from app.ingest import MAX_NOVEL_UPLOAD_BYTES
+
+    filename = Path(file.filename or "novel.txt").name
+    if Path(filename).suffix.lower() != ".txt":
+        raise HTTPException(422, "仅支持 TXT 小说，请将文件另存为 UTF-8 TXT 后重试")
+    raw = await file.read(MAX_NOVEL_UPLOAD_BYTES + 1)
+    if len(raw) > MAX_NOVEL_UPLOAD_BYTES:
+        limit_mb = MAX_NOVEL_UPLOAD_BYTES // (1024 * 1024)
+        raise HTTPException(413, f"小说文件超过 {limit_mb} MB，请拆分后再导入")
+    if not raw:
+        raise HTTPException(400, "文件为空，请选择包含正文的 TXT 小说")
+    try:
+        # Validate while the user is still on the file-selection step. The
+        # authoritative parse is repeated inside the transaction below.
+        ingest_novel(raw)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return filename, raw
+
+
+def _novel_import_token_hash(attachment_token: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(attachment_token.encode("utf-8")).hexdigest()
+
+
+def _novel_import_receipt(token_hash: str) -> dict | None:
+    if not token_hash:
+        return None
+    row = get_conn().execute(
+        """SELECT r.result_json
+             FROM novel_import_receipts r
+             JOIN projects p ON p.id=r.project_id
+            WHERE r.token_hash=?""",
+        (token_hash,),
+    ).fetchone()
+    if not row:
+        return None
+    try:
+        result = json.loads(row["result_json"])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(result, dict) or not result.get("project_id"):
+        return None
+    return {**result, "idempotent_replay": True}
+
+
+def _create_project_core(
+    name: str | None,
+    filename: str,
+    raw: bytes,
+    *,
+    import_token_hash: str | None = None,
+) -> dict:
     """导入小说的领域逻辑，供 REST 路由与 ``project.import_novel`` Command Handler 共用。"""
     if not raw:
-        raise HTTPException(400, "文件为空")
-    report = ingest_novel(raw)
+        raise HTTPException(400, "文件为空，请选择包含正文的 TXT 小说")
+    if Path(filename or "").suffix.lower() != ".txt":
+        raise HTTPException(422, "仅支持 TXT 小说，请将文件另存为 UTF-8 TXT 后重试")
+    try:
+        report = ingest_novel(raw)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     if not report["chapters"]:
-        raise HTTPException(400, "未能从文件中切分出任何章节")
+        raise HTTPException(422, "未能从文件中切分出任何章节，请检查正文或章节标题")
     conn = get_conn()
     project_id = new_id("proj")
-    conn.execute(
-        "INSERT INTO projects(id, name, status, novel_chars, created_at) VALUES(?,?,'ingested',?,?)",
-        (project_id, (name or "").strip() or filename, report["total_chars"], now()))
-    conn.executemany(
-        "INSERT INTO chapters(project_id, idx, title, content, char_count) VALUES(?,?,?,?,?)",
-        [(project_id, ch["idx"], ch["title"], ch["content"], len(ch["content"])) for ch in report["chapters"]])
-    conn.commit()
-    return {
+    fallback_name = Path(filename).stem.strip() or "未命名小说"
+    project_name = (name or "").strip() or fallback_name
+    if len(project_name) > 120:
+        raise HTTPException(422, "项目名称不能超过 120 个字符")
+    if import_token_hash:
+        existing = _novel_import_receipt(import_token_hash)
+        if existing is not None:
+            return existing
+    outcome = {
         "project_id": project_id,
         "ingestion": {
             key: report[key]
@@ -61,6 +122,33 @@ def _create_project_core(name: str | None, filename: str, raw: bytes) -> dict:
             )
         },
     }
+    try:
+        conn.execute(
+            "INSERT INTO projects(id, name, status, novel_chars, created_at) VALUES(?,?,'ingested',?,?)",
+            (project_id, project_name, report["total_chars"], now()))
+        conn.executemany(
+            "INSERT INTO chapters(project_id, idx, title, content, char_count) VALUES(?,?,?,?,?)",
+            [
+                (project_id, ch["idx"], ch["title"], ch["content"], len(ch["content"]))
+                for ch in report["chapters"]
+            ])
+        if import_token_hash:
+            conn.execute(
+                """INSERT INTO novel_import_receipts(
+                       token_hash,project_id,result_json,created_at
+                   ) VALUES(?,?,?,?)""",
+                (
+                    import_token_hash,
+                    project_id,
+                    json.dumps(outcome, ensure_ascii=False),
+                    now(),
+                ),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return outcome
 
 
 @router.post("/attachments/novel")
@@ -68,11 +156,14 @@ async def upload_novel_attachment(file: UploadFile = File(...)):
     """用户在系统文件选择器中挑选 TXT 后，前端立即换发短时效 attachment_token（不暴露真实路径）。"""
     from app.capabilities.attachments import store_upload
 
-    raw = await file.read()
-    if not raw:
-        raise HTTPException(400, "文件为空")
-    token = store_upload(file.filename or "novel.txt", raw, content_type=file.content_type)
-    return {"attachment_token": token, "filename": file.filename}
+    filename, raw = await _read_novel_upload(file)
+    token = store_upload(filename, raw, content_type=file.content_type)
+    return {
+        "attachment_token": token,
+        "filename": filename,
+        "size_bytes": len(raw),
+        "expires_in_s": 15 * 60,
+    }
 
 
 @router.post("/projects")
@@ -81,13 +172,15 @@ async def create_project(name: str = Form(...), file: UploadFile = File(...)):
     from app.capabilities.attachments import store_upload
     from app.capabilities.dispatch import dispatch, respond_ui
 
-    raw = await file.read()
-    if not raw:
-        raise HTTPException(400, "文件为空")
-    token = store_upload(file.filename or "novel.txt", raw)
+    filename, raw = await _read_novel_upload(file)
+    token = store_upload(filename, raw, content_type=file.content_type)
     result = await dispatch(
         "project.import_novel",
-        {"attachment_token": token, "name": name},
+        {
+            "attachment_token": token,
+            "name": name,
+            "idempotency_key": f"novel-import:{token}",
+        },
         initiator="ui",
     )
     return respond_ui(result)
@@ -106,6 +199,9 @@ async def create_project_from_attachment(
         {
             "attachment_token": attachment_token,
             "name": name,
+            # The one-time attachment token is unique for this import. Reusing
+            # it as the command key makes response-loss retries replay-safe.
+            "idempotency_key": f"novel-import:{attachment_token}",
         },
         initiator="ui",
     )
@@ -143,13 +239,20 @@ def _attach_character_portraits(conn, project_id: str, bible: dict) -> None:
         view_rows = rows_to_dicts(conn.execute(
             """SELECT v.* FROM character_portrait_views v
                JOIN character_portraits p ON p.id=v.portrait_id
-               WHERE p.project_id=? AND p.ep_start<>? ORDER BY v.portrait_id, v.created_at""",
+               WHERE p.project_id=? AND p.ep_start<>?
+               ORDER BY v.portrait_id, v.view_role, v.selected DESC,
+                        (v.status='ready') DESC, v.created_at DESC""",
             (project_id, STAGED_INITIAL_EP_START),
         ).fetchall())
     except Exception:  # noqa: BLE001
         view_rows = []
     views_by_portrait: dict[str, list[dict]] = {}
+    seen_view_roles: set[tuple[str, str]] = set()
     for v in view_rows:
+        view_key = (str(v["portrait_id"]), str(v.get("view_role") or ""))
+        if view_key in seen_view_roles:
+            continue
+        seen_view_roles.add(view_key)
         qa = None
         if v.get("qa_json"):
             try:
@@ -345,7 +448,7 @@ def project_detail(
     query: str = "",
     status_filter: str = "all",
 ):
-    if view not in (None, "bible", "scenes", "episodes", "picker", "picker_review"):
+    if view not in (None, "bible", "scenes", "episodes", "picker", "picker_generation"):
         raise HTTPException(400, f"未知项目视图：{view}")
     full = view is None
     p = dict(_project_or_404(project_id))
@@ -379,7 +482,9 @@ def project_detail(
             else:
                 c["ref_image_url"] = None
             override = (c.get("portrait_prompt_override") or "").strip()
-            c["portrait_prompt_effective"] = override or portrait_prompt(style, c.get("appearance_canonical", ""))
+            c["portrait_prompt_effective"] = override or portrait_prompt(
+                style, c.get("appearance_canonical", "")
+            )
         # 场景图素材库：为每个规范场景挂上落盘图 url + QA + 有效生成词，供「场景图」菜单页展示。
         from app.scenes import scene_ref_prompt
         for s in p["bible"].get("scenes", []):
@@ -422,13 +527,7 @@ def project_detail(
             (project_id,),
         ).fetchall())
         return p
-    if view == "picker_review":
-        # Review tables are additive and may be absent in databases created by
-        # older builds. The helper is loaded later into the shared API facade
-        # but is available by the time this route can be called.
-        ensure_review_tables = globals().get("_ensure_review_wall_tables")
-        if callable(ensure_review_tables):
-            ensure_review_tables(conn)
+    if view == "picker_generation":
         p["episodes"] = rows_to_dicts(conn.execute(
             """SELECT e.id, e.episode_no, e.title, e.status, e.screenplay_status,
                       (SELECT COUNT(*) FROM shots s WHERE s.episode_id=e.id) AS shot_count,
@@ -436,11 +535,7 @@ def project_detail(
                       (SELECT COUNT(*) FROM shots s WHERE s.episode_id=e.id AND s.adopted_version_id IS NULL
                          AND EXISTS(SELECT 1 FROM shot_versions v WHERE v.shot_id=s.id AND v.status='succeeded')) AS pending_adoption_count,
                       (SELECT COUNT(*) FROM shot_versions v JOIN shots s ON s.id=v.shot_id
-                         WHERE s.episode_id=e.id AND v.status='failed') AS failed_count,
-                      (SELECT COUNT(*) FROM shot_review_items ri JOIN shots s ON s.id=ri.shot_id
-                         WHERE s.episode_id=e.id AND ri.status IN ('open','in_progress')) AS open_review_count,
-                      (SELECT COUNT(*) FROM shot_review_states rs JOIN shots s ON s.id=rs.shot_id
-                         WHERE s.episode_id=e.id AND rs.review_status='completed') AS reviewed_count
+                         WHERE s.episode_id=e.id AND v.status='failed') AS failed_count
                  FROM episodes e WHERE e.project_id=? ORDER BY e.episode_no""",
             (project_id,),
         ).fetchall())

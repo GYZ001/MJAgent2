@@ -130,7 +130,7 @@ async def generate_refs(
     if not targets:
         raise ValueError(f"角色不存在：{only_character or sorted(selected)}")
 
-    # 初始定妆照登记到 character_portraits（适用集 1~ 至今），供按集分段刷新与评审墙按集选图。
+    # 初始定妆照登记到 character_portraits（适用集 1~ 至今），供按集分段刷新与生成台按集选图。
     from app import portraits as _portraits
     bible_version = project["bible_version"] or 0
 
@@ -224,7 +224,7 @@ async def generate_refs(
                     else:
                         raise hiagent.ProviderError(f"图像响应缺少 url/b64_json：{list(item.keys())}")
                     qa = await review_portrait_image(
-                        hiagent.encode_image_file(path), c.appearance_canonical,
+                        hiagent.encode_image_file(path), base_prompt,
                     )
                     artifact = record_reference_asset(
                         asset_type="character_portrait",
@@ -260,6 +260,7 @@ async def generate_refs(
                             character_name=c.name,
                             appearance=c.appearance_canonical,
                             visual_style=style,
+                            portrait_prompt=base_prompt,
                             ep_start=1,
                             primary_qa=qa,
                         )
@@ -277,14 +278,14 @@ async def generate_refs(
                     break
                 except asyncio.CancelledError:
                     if portrait_id:
-                        conn.execute("DELETE FROM character_portraits WHERE id=?", (portrait_id,))
-                        conn.commit()
+                        from app.rejected_media import purge_character_portrait
+                        purge_character_portrait(conn, portrait_id)
                     c.ref_image_path = None
                     raise
                 except hiagent.ProviderError as exc:
                     if portrait_id:
-                        conn.execute("DELETE FROM character_portraits WHERE id=?", (portrait_id,))
-                        conn.commit()
+                        from app.rejected_media import purge_character_portrait
+                        purge_character_portrait(conn, portrait_id)
                         portrait_id = None
                     c.ref_image_path = None
                     if "多视角资产包未通过" in str(exc):
@@ -292,8 +293,8 @@ async def generate_refs(
                     last_error = exc
                 except Exception as exc:  # noqa: BLE001 候选失败后在有界循环内修复
                     if portrait_id:
-                        conn.execute("DELETE FROM character_portraits WHERE id=?", (portrait_id,))
-                        conn.commit()
+                        from app.rejected_media import purge_character_portrait
+                        purge_character_portrait(conn, portrait_id)
                         portrait_id = None
                     c.ref_image_path = None
                     last_error = exc

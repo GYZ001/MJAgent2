@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   api, ApiError, Bible, BibleImpactPreview, Character, Portrait, PortraitView, RefsCostPrecheck,
 } from '../api'
@@ -18,12 +18,15 @@ import { formatBookTitle } from '../lib/bookTitle'
 import { sceneUsability } from '../lib/sceneUsability'
 import type { PrepStepStatus } from '../lib/statusLabels'
 import CharacterFilters, {
+  characterFilterActiveCount,
   EMPTY_CHARACTER_FILTERS,
   matchCharacterFilters,
   type CharacterFilterState,
 } from '../components/CharacterFilters'
 import CharacterQaPanel from '../components/CharacterQaPanel'
+import DecisionDialog from '../components/DecisionDialog'
 import ImageCompareModal from '../components/ImageCompareModal'
+import OperationError from '../components/OperationError'
 
 const CHAR_QA_PASS = 0.6
 const REQUIRED_CHARACTER_VIEWS = ['front_full', 'three_quarter', 'profile'] as const
@@ -41,7 +44,7 @@ type PaymentQuote = RefsCostPrecheck & {
 
 type PaymentSelection = { characters: string[] }
 
-function currentPortrait(character: Character): Portrait | null {
+export function currentPortrait(character: Character): Portrait | null {
   const portraits = [...(character.portraits ?? [])]
     .filter(portrait => !!portrait.image_url || (portrait.views ?? []).some(view => !!view.image_url))
     .sort((a, b) => b.ep_start - a.ep_start)
@@ -88,12 +91,12 @@ function portraitAvailability(character: Character, fitting: boolean): PortraitA
 
 function availabilityStamp(state: PortraitAvailability): { label: string; color: string } {
   switch (state) {
-    case 'generating': return { label: '生成/验证中', color: 'gold' }
+    case 'generating': return { label: '生成或质检中', color: 'gold' }
     case 'passed': return { label: '已采用且通过', color: 'green' }
-    case 'warning': return { label: '已采用但有警告', color: 'gold' }
-    case 'failed': return { label: '硬失败/不可用', color: 'red' }
+    case 'warning': return { label: '已采用 · 质量需复核', color: 'gold' }
+    case 'failed': return { label: '暂不可用', color: 'red' }
     case 'missing': return { label: '未出图', color: 'grey' }
-    default: return { label: '待复核/未验证', color: 'grey' }
+    default: return { label: '待质检', color: 'grey' }
   }
 }
 
@@ -281,6 +284,24 @@ export type BibleMergeConflict = {
   server: unknown
 }
 
+export function bibleConflictFieldLabel(path: string): string {
+  if (!path) return '人物谱'
+  const parts = path.split('.')
+  const field = parts.at(-1) || path
+  const labels: Record<string, string> = {
+    role: '角色定位',
+    appearance_canonical: '固定外观',
+    personality: '性格',
+    speech_style: '说话风格',
+    relationships: '人物关系',
+    visual_style_canonical: '统一画面风格',
+  }
+  if (parts[0] === 'characters' && parts[1]) {
+    return `${parts[1]} · ${labels[field] || '角色信息'}`
+  }
+  return labels[field] || '人物谱字段'
+}
+
 const sameValue = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right)
 
 export function mergeBibleThreeWay(
@@ -355,9 +376,9 @@ function promptSegments(prompt: string | undefined): { label: string; text: stri
   const parts = (prompt || '').split('。').map(part => part.trim()).filter(Boolean)
   const fallback = (prompt || '').trim()
   return [
-    { label: '全局画风', text: parts[0] || fallback || '未生成' },
-    { label: '外观锚点', text: parts[1] || parts[0] || fallback || '未生成' },
-    { label: '姿态与约束', text: parts.slice(2).join('。') || parts[1] || fallback || '未生成' },
+    { label: '统一画风', text: parts[0] || fallback || '未生成' },
+    { label: '角色定妆', text: parts[1] || parts[0] || fallback || '未生成' },
+    { label: '构图要求', text: parts.slice(2).join('。') || parts[1] || fallback || '未生成' },
   ]
 }
 
@@ -384,6 +405,7 @@ export default function BiblePage() {
   const [timelineCharacter, setTimelineCharacter] = useState('')
   const [refsProgress, setRefsProgress] = useState<RefsProgress | null>(null)
   const [skipConfirm, setSkipConfirm] = useState<{ count: number; names: string[] } | null>(null)
+  const [stopConfirm, setStopConfirm] = useState(false)
   const [impactOpen, setImpactOpen] = useState(false)
   const [impactLoading, setImpactLoading] = useState(false)
   const [impactError, setImpactError] = useState<string | null>(null)
@@ -410,6 +432,8 @@ export default function BiblePage() {
 
   const biblePreview = editing ?? p?.bible
   const charQuery = charSearch.trim()
+  const activeCharFilterCount = characterFilterActiveCount(charFilters)
+  const hasCharacterCriteria = Boolean(charQuery) || activeCharFilterCount > 0
   const indexedCharsPreview = (biblePreview?.characters ?? []).map((c, i) => ({ c, i }))
   const filteredCharsPreview = indexedCharsPreview.filter(({ c }) =>
     matchCharacterFilters(c, charQuery, charFilters, characterFilterMeta(p, c)),
@@ -419,21 +443,35 @@ export default function BiblePage() {
   const dirty = dirtyCount > 0
   const currentEditVersion = editBaseVersion ?? p?.bible_version ?? 0
 
-  useEffect(() => {
+  const resetCharacterList = () => {
+    setCharSearch('')
+    setCharFilters({ ...EMPTY_CHARACTER_FILTERS })
+    setCharPage(0)
+    window.requestAnimationFrame(() => {
+      document.querySelector<HTMLInputElement>('input[aria-label="搜索角色"]')?.focus()
+    })
+  }
+
+  useLayoutEffect(() => {
     if (!dirty) {
       registerNavigationGuard(null, false)
       return
     }
     registerNavigationGuard(
-      () => {
-        const leave = window.confirm('人物谱有未定稿修订，离开后可从草稿恢复。确认离开？')
-        trackBible('bible_navigation_guard', projectId || '', { result: leave ? 'leave' : 'stay' })
-        return leave
+      {
+        title: '保留人物谱草稿并离开？',
+        summary: `当前有 ${dirtyCount} 项未定稿修订`,
+        message: '修订已自动保存在当前项目草稿中，离开不会发布新版本，也不会影响已生成资产。',
+        details: ['下次返回人物谱时可继续编辑', '只有完成定稿后，下游才会采用这些修订'],
+        confirmLabel: '保留草稿并离开',
+        cancelLabel: '继续修订',
+        onConfirm: () => trackBible('bible_navigation_guard', projectId || '', { result: 'leave' }),
+        onCancel: () => trackBible('bible_navigation_guard', projectId || '', { result: 'stay' }),
       },
       true,
     )
     return () => registerNavigationGuard(null, false)
-  }, [dirty, registerNavigationGuard])
+  }, [dirty, dirtyCount, projectId, registerNavigationGuard])
 
   useEffect(() => {
     if (charPage > charPageCount - 1) setCharPage(Math.max(0, charPageCount - 1))
@@ -488,7 +526,6 @@ export default function BiblePage() {
     if (!dirty) return
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
       event.preventDefault()
-      event.returnValue = ''
     }
     window.addEventListener('beforeunload', onBeforeUnload)
     return () => window.removeEventListener('beforeunload', onBeforeUnload)
@@ -727,11 +764,11 @@ export default function BiblePage() {
 
   const restartRefsWithLatestSettings = async () => {
     if (dirty) {
-      toast('请先定稿当前人物谱修订，再按最新画风批量重生', true)
+      toast('请先定稿当前人物谱修订，再按最新画风批量重新生成', true)
       return
     }
     await openPayment(
-      '按最新提示词与画风批量重新生成',
+      '按最新人物设定与画风批量重新生成',
       { resume: false },
       async (quote, selection) => {
         refsTimer.start()
@@ -746,7 +783,7 @@ export default function BiblePage() {
           quote_id: effectiveQuote.quote_id,
           idempotency_key: effectiveQuote.quote_id,
         })
-        toast('已按最新提示词与画风开始批量重新生成；新包通过 QA 前保留旧成品')
+        toast('已按最新人物设定与画风开始批量重新生成；新包通过质检前保留旧成品')
         refresh()
       },
       undefined,
@@ -957,16 +994,12 @@ export default function BiblePage() {
   }
 
   const abandonEditing = () => {
-    if (!dirty) {
-      setEditing(null)
-      return
-    }
-    if (window.confirm('有未保存的人物谱修订，确定放弃吗？')) {
-      setEditing(null)
-      setEditBaseVersion(null)
-      setEditBaseBible(null)
-      setUndoStack([])
-    }
+    const keptAsDraft = dirty
+    setEditing(null)
+    setEditBaseVersion(null)
+    setEditBaseBible(null)
+    setUndoStack([])
+    if (keptAsDraft) toast('未定稿修订已保留，可稍后恢复继续编辑')
   }
 
   const stopLabel = p.bible_status === 'running' ? '停止谱写' : '停止定妆'
@@ -987,10 +1020,6 @@ export default function BiblePage() {
         <PrepSubnav
           current="bible"
           statuses={prepStatuses}
-          onBeforeNavigate={() => {
-            if (!dirty) return true
-            return window.confirm('有未保存的人物谱修订。离开会保留草稿但不会定稿，确定离开？')
-          }}
           onProblemClick={(key) => {
             if (key === 'bible') {
               setCharFilters({ ...EMPTY_CHARACTER_FILTERS, missing: 'yes' })
@@ -1004,9 +1033,11 @@ export default function BiblePage() {
 
       <section className="card">
         <h3>原著 <span className="hint">{(p.novel_chars / 10000).toFixed(1)} 万字 · {p.chapter_count ?? p.chapters?.length ?? 0} 章</span></h3>
-        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+        <div className="library-action-row">
           {!p.bible && !generating && (
-            <button className="btn primary" disabled={busy} onClick={() => void startBible()}>
+            <button className="btn primary" disabled={busy}
+              aria-label={busy ? '生成人物谱和定妆照，暂不可用：正在处理上一项操作' : p.bible_status === 'failed' ? '重新生成人物谱和定妆照' : '开始生成人物谱和定妆照'}
+              onClick={() => void startBible()}>
               {p.bible_status === 'failed' ? '重新生成人物谱和定妆照' : '开始生成人物谱和定妆照'}
             </button>
           )}
@@ -1014,35 +1045,44 @@ export default function BiblePage() {
             <button
               className="btn primary"
               disabled={busy || dirty}
-              title={dirty ? '请先定稿当前人物谱修订' : '使用服务端已保存的最新角色提示词和全局画风'}
+              title={dirty ? '请先定稿当前人物谱修订' : '先选择角色范围，再预览定妆照费用'}
+              aria-label={busy || dirty
+                ? `选择角色并重新生成定妆照，暂不可用：${busy ? '正在处理上一项操作' : '请先定稿当前人物谱修订'}`
+                : '选择角色并重新生成定妆照；下一步选择范围并预览费用'}
               onClick={() => void restartRefsWithLatestSettings()}
             >
-              批量按最新设定重新生成
+              选择角色并重新生成定妆照
             </button>
           )}
           {p.bible && (p.refs_status === 'failed' || hasRefGaps) && !generating && (
             <>
-              <button className="btn ghost" disabled={busy} onClick={() => void retryRefs()}>
+              <button className="btn ghost" disabled={busy}
+                aria-label={busy ? '补齐缺失的定妆照，暂不可用：正在处理上一项操作' : '补齐缺失的定妆照'}
+                onClick={() => void retryRefs()}>
                 补齐缺失的定妆照
               </button>
-              <button className="btn ghost" disabled={busy} onClick={() => void skipToEpisodes()}>
+              <button className="btn ghost" disabled={busy}
+                aria-label={busy ? '暂时跳过并继续分集，暂不可用：正在处理上一项操作' : '暂时跳过并继续分集'}
+                onClick={() => void skipToEpisodes()}>
                 暂时跳过，继续分集
               </button>
             </>
           )}
           {generating && (
-            <button className="btn ghost" disabled={busy} onClick={stopGeneration}>
+            <button className="btn ghost danger" disabled={busy}
+              aria-label={busy ? `${stopLabel}，暂不可用：正在处理上一项操作` : stopLabel}
+              onClick={() => setStopConfirm(true)}>
               {stopLabel}
             </button>
           )}
           {p.bible_status === 'running' && <span className="stamp gold">谱写中（约 1~3 分钟）</span>}
           {p.refs_status === 'running' && <span className="stamp gold">定妆中</span>}
-          {p.bible && <span className="stamp green">第 {`${p.bible_version ?? ''}`} 稿</span>}
+          {p.bible && <span className="stamp green">第 {p.bible_version ?? 1} 稿</span>}
           {dirty && <span className="stamp gold">未保存修订 · {dirtyCount} 项</span>}
           {editing && draftState === 'saving' && <span className="stamp grey">草稿保存中</span>}
           {editing && draftState === 'saved' && <span className="stamp green">草稿已自动保存</span>}
           {editing && draftState === 'error' && <span className="stamp red">草稿保存失败，已保留本地备份</span>}
-          {p.bible_evidence && <EvidenceDrawer evidence={p.bible_evidence} label="人物谱证据" />}
+          {p.bible_evidence && <EvidenceDrawer evidence={p.bible_evidence} label="查看人物谱质检依据" />}
           <TaskTimer label="人物谱" timer={bibleTimer} />
           <TaskTimer label="定妆照" timer={refsTimer} />
         </div>
@@ -1074,45 +1114,69 @@ export default function BiblePage() {
           </div>
         )}
         {!generating && p.bible && (
-          <div className="hint" style={{ marginTop: 10 }}>
-            修改角色画像描述或全局画风并定稿后，可用“批量按最新设定重新生成”选择角色并重建造型包；新包通过 QA 前不替换已采用成品。
+          <div className="hint library-note">
+            更新人物谱角色设定或统一画面风格并定稿后，可选择角色重新生成定妆照；新图通过质检前不会替换已采用成品。
           </div>
         )}
-        {p.bible_status === 'failed' && <div className="error-banner">人物谱生成失败（原始错误如下，不做静默兜底）：{'\n'}{p.bible_error}</div>}
-        {p.bible_status === 'warning' && <div className="error-banner">人物谱存在未解决的门禁问题，下游已暂停：{'\n'}{p.bible_error}</div>}
+        {p.bible_status === 'failed' && (
+          <OperationError
+            title="人物谱生成未完成"
+            message={p.bible_error}
+            guidance="失败结果没有发布；原著、旧人物谱和已生成资产保持不变。可重新生成，若持续失败可展开详情排查。"
+          />
+        )}
+        {p.bible_status === 'warning' && (
+          <OperationError
+            title="人物谱有待处理问题"
+            message={p.bible_error}
+            guidance="下游制作已暂停，现有版本未被覆盖。请按提示修订后重新定稿。"
+            variant="warning"
+            detailLabel="查看问题详情"
+          />
+        )}
       </section>
 
       {bible && (
         <section className="card bible-library">
-          <h3>世界观
-            <span className="hint">era {bible.world.era} · genre {bible.world.genre}</span>
-            {!editing
-              ? <button className="btn small" style={{ marginLeft: 14 }} onClick={() => void beginRevision()}>修订</button>
-              : <>
-                <button className="btn small primary" style={{ marginLeft: 14 }} disabled={busy}
-                  onClick={() => void openImpactPreview()}>定稿</button>
-                <button className="btn small" style={{ marginLeft: 8 }} disabled={!undoStack.length}
-                  onClick={undoEdit}>撤销</button>
-                <button className="btn small ghost" style={{ marginLeft: 8 }} onClick={abandonEditing}>放弃</button>
-              </>}
-          </h3>
-          <label className="f">全局画风锚点串（逐字注入每个镜头 prompt）</label>
+          <div className="card-heading-row">
+            <h3>世界观 <span className="hint">时代：{bible.world.era} · 类型：{bible.world.genre}</span></h3>
+            <div className="card-heading-actions">
+              {!editing
+                ? <button className="btn small" onClick={() => void beginRevision()}>修订人物谱</button>
+                : <>
+                  <button className="btn small primary" disabled={busy}
+                    aria-label={busy ? '预览影响并定稿，暂不可用：正在处理上一项操作' : '预览影响并定稿'}
+                    onClick={() => void openImpactPreview()}>预览影响并定稿</button>
+                  <button className="btn small" disabled={!undoStack.length}
+                    aria-label={!undoStack.length ? '撤销上次修改，暂不可用：还没有可撤销的修改' : '撤销上次修改'}
+                    onClick={undoEdit}>撤销上次修改</button>
+                  <button className="btn small ghost" onClick={abandonEditing}>暂存并退出编辑</button>
+                </>}
+            </div>
+          </div>
+          <label className="f">统一画面风格（会用于每个镜头）</label>
           {editing
-            ? <textarea rows={2} value={editing.world.visual_style_canonical}
+            ? <textarea aria-label="统一画面风格" rows={2} value={editing.world.visual_style_canonical}
                 onChange={e => updateEditing(current => ({
                   ...current,
                   world: { ...current.world, visual_style_canonical: e.target.value },
                 }))} />
             : <div style={{ fontSize: 14, background: 'rgba(181,68,52,0.05)', borderLeft: '3px solid var(--cinnabar)', padding: '8px 12px', borderRadius: '0 6px 6px 0', lineHeight: 1.9 }}>{bible.world.visual_style_canonical}</div>}
           <div style={{ height: 16 }} />
-          <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}>
+          <div className="library-note-row">
             {p.refs_status === 'running' && <span className="stamp gold">定妆中</span>}
             <span style={{ fontSize: 12.5, color: 'var(--ink-faint)' }}>
               启动后会先为全部角色生成初始定妆照；随后在分镜阶段按集判断角色外观是否相比当前定妆照大变，大变才图生图重绘并切分适用集，新登场重要人物会自动补人物卡并生成定妆照
             </span>
           </div>
-          {p.refs_status === 'failed' && <div className="error-banner">定妆照生成失败：{'\n'}{p.refs_error}</div>}
-          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', margin: '4px 0 12px' }}>
+          {p.refs_status === 'failed' && (
+            <OperationError
+              title="定妆照生成未完成"
+              message={p.refs_error}
+              guidance="已经完成的定妆照会保留。可重试全部缺口，或按角色单独补齐失败项。"
+            />
+          )}
+          <div className="library-toolbar">
             <SearchField value={charSearch} onChange={value => { setCharSearch(value); setCharPage(0) }}
               placeholder="搜索角色名…" ariaLabel="搜索角色" className="library-search" />
             <CharacterFilters
@@ -1120,8 +1184,8 @@ export default function BiblePage() {
               onChange={value => { setCharFilters(value); setCharPage(0) }}
               roles={characterRoles}
             />
-            <span style={{ fontSize: 12.5, color: 'var(--ink-faint)' }}>
-              共 {bible.characters.length} 个角色{charQuery ? ` · 命中 ${filteredChars.length}` : ''}
+            <span className="library-result-count" role="status">
+              共 {bible.characters.length} 个角色{hasCharacterCriteria ? ` · 当前显示 ${filteredChars.length}` : ''}
             </span>
           </div>
           <div className="figure-grid">
@@ -1157,33 +1221,26 @@ export default function BiblePage() {
                 {active?.group_qa && (
                   <CharacterQaLine qa={active.group_qa} availability={availability} />
                 )}
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+                <div className="asset-card-actions">
                   <button className="btn small" type="button"
                     onClick={() => setQaDetail({ characterName: c.name, portrait: active })}>
-                    QA详情
+                    质检详情
                   </button>
                   <button className="btn small" type="button" disabled={!characterCompareImages(c).length}
+                    aria-label={!characterCompareImages(c).length ? `放大对比${c.name}定妆照，暂不可用：当前没有可对比图片` : `放大对比${c.name}定妆照`}
                     onClick={() => setCompareDetail({ title: `${c.name} · 定妆图对比`, images: characterCompareImages(c) })}>
                     放大对比
                   </button>
                 </div>
-                <label className="f">外观锚点串（40~60 字，定稿后锁定）</label>
-                {editing
-                  ? <textarea rows={3} value={editing.characters[i].appearance_canonical}
-                      onChange={e => {
-                        updateEditing(current => {
-                          const next = { ...current, characters: [...current.characters] }
-                          next.characters[i] = { ...next.characters[i], appearance_canonical: e.target.value }
-                          return next
-                        })
-                      }} />
-                  : <div className="f-anchor">{c.appearance_canonical}</div>}
                 {editing && (
                   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', margin: '8px 0' }}>
                     <button
                       type="button"
                       className="btn small primary"
                       disabled={busy || !characterDirty}
+                      aria-label={busy || !characterDirty
+                        ? `保存${c.name}的角色修订，暂不可用：${busy ? '正在处理上一项操作' : '该角色尚无修改'}`
+                        : `保存${c.name}的角色修订`}
                       onClick={() => { void saveCharacterDraft(editing.characters[i]) }}
                     >
                       保存此角色
@@ -1200,13 +1257,23 @@ export default function BiblePage() {
             )})}
           </div>
           {!pagedChars.length && (
-            <div className="empty">{charQuery ? `没有匹配「${charQuery}」的角色` : '暂无角色'}</div>
+            <div className="library-filter-empty" role="status">
+              <b>{hasCharacterCriteria ? '没有符合当前条件的角色' : '人物谱暂无角色'}</b>
+              <p>{hasCharacterCriteria
+                ? `${charQuery ? `搜索“${charQuery}”` : '当前筛选'}未命中；清除条件后可恢复全部 ${bible.characters.length} 个角色。`
+                : '可重新生成人物谱，或进入修订补充角色。'}</p>
+              {hasCharacterCriteria && <button type="button" className="btn small" onClick={resetCharacterList}>清除搜索与筛选</button>}
+            </div>
           )}
           {charPageCount > 1 && (
-            <div style={{ display: 'flex', gap: 10, alignItems: 'center', justifyContent: 'center', marginTop: 14 }}>
-              <button className="btn small" disabled={curCharPage <= 0} onClick={() => setCharPage(curCharPage - 1)}>← 上一页</button>
-              <span style={{ fontSize: 13, color: 'var(--ink-faint)' }}>第 {curCharPage + 1} / {charPageCount} 页</span>
-              <button className="btn small" disabled={curCharPage >= charPageCount - 1} onClick={() => setCharPage(curCharPage + 1)}>下一页 →</button>
+            <div className="library-pagination" aria-label="角色分页">
+              <button className="btn small" disabled={curCharPage <= 0}
+                aria-label={curCharPage <= 0 ? '上一页，暂不可用：当前已是第一页' : '上一页'}
+                onClick={() => setCharPage(curCharPage - 1)}>← 上一页</button>
+              <span>第 {curCharPage + 1} / {charPageCount} 页</span>
+              <button className="btn small" disabled={curCharPage >= charPageCount - 1}
+                aria-label={curCharPage >= charPageCount - 1 ? '下一页，暂不可用：当前已是最后一页' : '下一页'}
+                onClick={() => setCharPage(curCharPage + 1)}>下一页 →</button>
             </div>
           )}
         </section>
@@ -1331,6 +1398,33 @@ export default function BiblePage() {
           }}
         />
       )}
+      {stopConfirm && (
+        <DecisionDialog
+          title={`${stopLabel}？`}
+          summary={p.bible_status === 'running'
+            ? '人物谱尚未完成'
+            : refsProgress
+              ? summarizeProgress(refsProgress)
+              : '定妆照仍在生成'}
+          message={p.bible_status === 'running'
+            ? '系统会停止当前谱写任务；尚未完成的人物谱不会发布，已有原著和旧版本保持不变。'
+            : '系统会停止后续定妆队列并保留已落盘素材；已提交给图片服务的当前请求可能仍会完成并产生费用。'}
+          details={[
+            p.bible_status === 'running'
+              ? '稍后可重新发起人物谱生成'
+              : '已完成定妆照不会删除，可稍后补齐缺失项',
+            '停止请求不代表供应商会退回已经发生的费用',
+          ]}
+          confirmLabel={`确认${stopLabel}`}
+          cancelLabel="继续生成"
+          danger
+          onClose={() => setStopConfirm(false)}
+          onConfirm={() => {
+            setStopConfirm(false)
+            void stopGeneration()
+          }}
+        />
+      )}
       {conflict && (
         <ConflictDialog
           conflict={conflict}
@@ -1378,7 +1472,7 @@ export default function BiblePage() {
       {paramsCharacter && (
         <GenerationParamsDialog
           title={`${paramsCharacter.name} · 角色设定与生成参数`}
-          subtitle="查看角色设定、调整定妆照生成词，或重新生成当前角色定妆照。"
+          subtitle="查看角色设定、调整当前定妆提示词，或重新生成当前角色定妆照。"
           onClose={() => setParamsCharacterName(null)}
         >
           <div className="character-param-summary">
@@ -1391,7 +1485,7 @@ export default function BiblePage() {
           <PortraitBlock projectId={p.id} character={paramsCharacter}
             disabled={busy || p.refs_status === 'running'} onChanged={refresh}
             regenerate={() => openPayment(
-              `重新生成「${paramsCharacter.name}」造型包`,
+              `重新生成「${paramsCharacter.name}」定妆照`,
               { character: paramsCharacter.name },
               async (quote) => {
                 await api.post(`/projects/${p.id}/refs`, {
@@ -1423,9 +1517,9 @@ function CharacterQaLine({
       : availability === 'failed' ? 'var(--cinnabar)' : 'var(--ink-faint)'
   return (
     <div className="scene-qa-line" style={{ marginBottom: 8 }}>
-      <span>整包 QA：{typeof overall === 'number'
+      <span>整包质检：{typeof overall === 'number'
         ? <b style={{ color }}>{overall.toFixed(2)}</b>
-        : <b style={{ color }}>未验证</b>}
+        : <b style={{ color }}>待质检</b>}
       </span>
       {issues.length ? <span style={{ color: 'var(--ink-faint)' }}>　{issues.slice(0, 2).join('；')}</span> : null}
     </div>
@@ -1439,9 +1533,29 @@ function PortraitBlock({ projectId, character: c, disabled, onChanged, regenerat
   const { toast } = useNav()
   const [draft, setDraft] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const [restoreConfirm, setRestoreConfirm] = useState(false)
+  const [discardConfirm, setDiscardConfirm] = useState(false)
   const isOverridden = !!(c.portrait_prompt_override || '').trim()
+  const savedPrompt = c.portrait_prompt_override || c.portrait_prompt_effective || ''
+  const draftChanged = draft !== null && draft !== savedPrompt
   const draftLen = (draft ?? '').trim().length
   const draftValid = draft !== null && (draftLen === 0 || (draftLen >= 10 && draftLen <= 400))
+  const baseDisabledReason = saving
+    ? '正在保存上一项修改'
+    : disabled
+      ? '当前有其他人物资产任务运行，请等待完成'
+      : ''
+  const saveAndRegenerateDisabledReason = baseDisabledReason
+    || (!draftChanged ? '尚未修改定妆提示词' : '')
+    || (!draftValid ? '提示词需为 10 至 400 字' : '')
+    || (draftLen === 0 ? '提示词为空时只能保存为系统默认值' : '')
+  const saveOnlyDisabledReason = saving
+    ? '正在保存上一项修改'
+    : !draftChanged
+      ? '尚未修改定妆提示词'
+      : !draftValid
+        ? '提示词需为 10 至 400 字，或留空恢复系统默认值'
+        : ''
 
   async function save(thenRegen: boolean, value?: string) {
     setSaving(true)
@@ -1449,8 +1563,8 @@ function PortraitBlock({ projectId, character: c, disabled, onChanged, regenerat
       const text = value ?? draft ?? ''
       const r = await api.put(`/projects/${projectId}/characters/${encodeURIComponent(c.name)}/portrait`,
         { portrait_prompt: text })
-      toast(r.reset_to_default ? `「${c.name}」画像描述已恢复默认` : `「${c.name}」画像描述已保存`)
-      setDraft(null); onChanged()
+      toast(r.reset_to_default ? `「${c.name}」定妆提示词已恢复系统默认值` : `「${c.name}」最新定妆提示词已保存`)
+      setRestoreConfirm(false); setDiscardConfirm(false); setDraft(null); onChanged()
       if (thenRegen) regenerate()
     } catch (e: unknown) { toast((e as Error).message, true) }
     finally { setSaving(false) }
@@ -1458,10 +1572,10 @@ function PortraitBlock({ projectId, character: c, disabled, onChanged, regenerat
 
   return (
     <div style={{ marginTop: 10 }}>
-      <label className="f">画像描述（定妆照生成词）{isOverridden ? ' · 已自定义' : ' · 默认（由画风+锚点串合成）'}</label>
+      <label className="f">当前定妆提示词{isOverridden ? ' · 用户已修改' : ' · 系统默认'}</label>
       {draft === null ? (
         <>
-          <div className="prompt-source-chips" aria-label="画像描述来源">
+          <div className="prompt-source-chips" aria-label="定妆提示词组成">
             {promptSegments(c.portrait_prompt_effective).map(segment => (
               <span key={segment.label} title={segment.text}>
                 <b>{segment.label}</b>{segment.text}
@@ -1471,32 +1585,66 @@ function PortraitBlock({ projectId, character: c, disabled, onChanged, regenerat
           <div className="f-misc" style={{ background: 'rgba(91,114,83,0.06)', borderLeft: '3px solid var(--moss)', padding: '6px 10px', borderRadius: '0 6px 6px 0', fontSize: 12.5 }}>
             {c.portrait_prompt_effective}
           </div>
+          <p className="hint">后续正面、3/4 面和侧面定妆均以这里保存的最新提示词为准。</p>
           <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
             <button className="btn small" disabled={disabled || saving}
-              onClick={() => setDraft(c.portrait_prompt_override || c.portrait_prompt_effective || '')}>改画像描述</button>
-            <button className="btn small" disabled={disabled || saving} onClick={regenerate}>
-              {c.ref_image_url ? '重新生成当前造型包' : '单独生成造型包'}
+              aria-label={baseDisabledReason ? `修改定妆提示词，暂不可用：${baseDisabledReason}` : '修改定妆提示词'}
+              onClick={() => { setDiscardConfirm(false); setDraft(savedPrompt) }}>修改定妆提示词</button>
+            <button className="btn small" disabled={disabled || saving}
+              aria-label={baseDisabledReason
+                ? `${c.ref_image_url ? '重新生成当前定妆照' : '单独生成定妆照'}，暂不可用：${baseDisabledReason}`
+                : c.ref_image_url ? '重新生成当前定妆照' : '单独生成定妆照'}
+              onClick={regenerate}>
+              {c.ref_image_url ? '重新生成当前定妆照' : '单独生成定妆照'}
             </button>
           </div>
         </>
       ) : (
         <>
-          <textarea rows={4} style={{ fontSize: 12.5 }} value={draft} onChange={e => setDraft(e.target.value)}
-            placeholder="描述定妆照画面：画风、人物外观、姿态、背景……（10~400 字）" />
+          <textarea aria-label={`${c.name}定妆提示词`} rows={4} style={{ fontSize: 12.5 }} value={draft} onChange={e => setDraft(e.target.value)}
+            placeholder="修改角色定妆提示词：角色外观、画风、姿态、背景……（10~400 字）" />
           <div style={{ fontSize: 12, color: draftValid ? 'var(--ink-faint)' : 'var(--cinnabar)', marginTop: 4 }}>
-            {draftLen === 0 ? '留空并保存将恢复默认' : `${draftLen} / 10~400 字`}
+            {draftLen === 0 ? '留空并保存将恢复系统根据内部角色设定生成的默认值' : `${draftLen} / 10~400 字`}
           </div>
           <div style={{ display: 'flex', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>
-            <button className="btn small primary" disabled={saving || disabled || !draftValid || draftLen === 0}
+            <button className="btn small primary" disabled={Boolean(saveAndRegenerateDisabledReason)}
+              aria-label={saveAndRegenerateDisabledReason ? `保存并重新定妆，暂不可用：${saveAndRegenerateDisabledReason}` : '保存并重新定妆'}
               onClick={() => save(true)}>保存并重新定妆</button>
-            <button className="btn small" disabled={saving || !draftValid} onClick={() => save(false)}>仅保存</button>
+            <button className="btn small" disabled={Boolean(saveOnlyDisabledReason)}
+              aria-label={saveOnlyDisabledReason ? `仅保存定妆提示词，暂不可用：${saveOnlyDisabledReason}` : '仅保存定妆提示词'}
+              onClick={() => save(false)}>仅保存</button>
             {isOverridden && <button className="btn small" disabled={saving}
+              aria-label={saving ? '恢复系统默认提示词，暂不可用：正在保存上一项修改' : '恢复系统默认提示词'}
+              onClick={() => setRestoreConfirm(true)}>恢复系统默认值</button>}
+            <button className="btn small ghost" disabled={saving}
+              aria-label={saving ? '退出提示词编辑，暂不可用：正在保存上一项修改' : draftChanged ? '放弃提示词修改' : '退出提示词编辑'}
               onClick={() => {
-                if (!window.confirm('确认恢复默认画像描述？不会触发生成或扣费。')) return
-                void save(false, '')
-              }}>恢复默认</button>}
-            <button className="btn small ghost" disabled={saving} onClick={() => setDraft(null)}>放弃</button>
+                setRestoreConfirm(false)
+                if (draftChanged) setDiscardConfirm(true)
+                else setDraft(null)
+              }}>{draftChanged ? '放弃修改' : '退出编辑'}</button>
           </div>
+          {restoreConfirm && (
+            <div className="inline-reset-confirm" role="status">
+              <span><b>恢复系统默认提示词？</b>系统会根据内部角色设定与统一画风重新生成默认值，不生成图片、不扣费。</span>
+              <div>
+                <button className="btn small ghost" type="button" disabled={saving}
+                  onClick={() => setRestoreConfirm(false)}>取消</button>
+                <button className="btn small primary" type="button" disabled={saving}
+                  onClick={() => { setRestoreConfirm(false); void save(false, '') }}>确认恢复</button>
+              </div>
+            </div>
+          )}
+          {discardConfirm && (
+            <div className="inline-reset-confirm" role="status">
+              <span><b>放弃尚未保存的提示词？</b>当前输入会恢复为已保存版本，定妆照和下游不会变化。</span>
+              <div>
+                <button className="btn small ghost" type="button" onClick={() => setDiscardConfirm(false)}>继续编辑</button>
+                <button className="btn small danger" type="button"
+                  onClick={() => { setDiscardConfirm(false); setDraft(null) }}>放弃修改</button>
+              </div>
+            </div>
+          )}
         </>
       )}
     </div>
@@ -1517,6 +1665,21 @@ const VIEW_ROLE_LABELS: Record<string, string> = {
   profile: '侧面',
   back_full: '背面全身',
   face_closeup: '面部特写',
+}
+
+const PRIMARY_PORTRAIT_VIEW_ROLES = ['front_full', 'three_quarter', 'profile']
+
+export function currentPortraitViews(character: Character): PortraitView[] {
+  const portrait = currentPortrait(character)
+  const byRole = new Map<string, PortraitView>()
+  for (const view of portrait?.views ?? []) {
+    const role = view.view_role ?? ''
+    if (!view.image_url || !PRIMARY_PORTRAIT_VIEW_ROLES.includes(role) || byRole.has(role)) continue
+    byRole.set(role, view)
+  }
+  return PRIMARY_PORTRAIT_VIEW_ROLES
+    .map(role => byRole.get(role))
+    .filter((view): view is PortraitView => !!view)
 }
 
 type PortraitSlide = {
@@ -1542,34 +1705,30 @@ function CharacterPortraitGallery({ projectId, character, fitting, disabled, onC
   const { toast } = useNav()
   const trackRef = useRef<HTMLDivElement>(null)
   const [redoing, setRedoing] = useState<string | null>(null)
-  const portraits = [...(character.portraits ?? [])]
-    .filter(portrait =>
-      (!!portrait.image_url || (portrait.views ?? []).some(v => v.image_url)),
-    )
-    .sort((a, b) => b.ep_start - a.ep_start)
+  const [canScrollBack, setCanScrollBack] = useState(false)
+  const [canScrollForward, setCanScrollForward] = useState(false)
+  const portrait = currentPortrait(character)
   const slides: PortraitSlide[] = []
-  portraits.forEach((portrait, versionIndex) => {
-    const views = (portrait.views ?? []).filter(view => !!view.image_url)
+  if (portrait) {
+    const views = currentPortraitViews(character)
     if (views.length) {
       slides.push(...views.map(view => ({
         key: `${portrait.id}:${view.id}`,
         imageUrl: view.image_url!,
         portrait,
-        versionIndex,
+        versionIndex: 0,
         view,
       })))
-      return
-    }
-    if (portrait.image_url) {
+    } else if (portrait.image_url) {
       slides.push({
         key: portrait.id || `${portrait.ep_start}:${portrait.image_url}`,
         imageUrl: portrait.image_url,
         portrait,
-        versionIndex,
+        versionIndex: 0,
         view: null,
       })
     }
-  })
+  }
   if (!slides.length && character.ref_image_url) {
     slides.push({
       key: `${character.name}:legacy`,
@@ -1580,6 +1739,24 @@ function CharacterPortraitGallery({ projectId, character, fitting, disabled, onC
     })
   }
   const count = slides.length
+
+  useEffect(() => {
+    const track = trackRef.current
+    if (!track) return
+    const sync = () => {
+      const max = Math.max(0, track.scrollWidth - track.clientWidth)
+      setCanScrollBack(track.scrollLeft > 2)
+      setCanScrollForward(track.scrollLeft < max - 2)
+    }
+    const frame = window.requestAnimationFrame(sync)
+    track.addEventListener('scroll', sync, { passive: true })
+    window.addEventListener('resize', sync)
+    return () => {
+      window.cancelAnimationFrame(frame)
+      track.removeEventListener('scroll', sync)
+      window.removeEventListener('resize', sync)
+    }
+  }, [character.name, count])
 
   const scroll = (direction: -1 | 1) => {
     const track = trackRef.current
@@ -1634,9 +1811,21 @@ function CharacterPortraitGallery({ projectId, character, fitting, disabled, onC
                 type="button"
                 className="portrait-view-redo"
                 disabled={disabled || !!redoing}
+                aria-label={disabled || !!redoing
+                  ? `重做${character.name}的${VIEW_ROLE_LABELS[view.view_role] || view.view_role}视角，暂不可用：${disabled ? '当前有其他人物资产任务运行，请等待完成' : '正在提交上一项视角重做任务'}`
+                  : `重做${character.name}的${VIEW_ROLE_LABELS[view.view_role] || view.view_role}视角；下一步预览费用`}
+                title={
+                  disabled
+                    ? '当前有其他人物资产任务运行，请等待完成'
+                    : redoing
+                      ? '正在提交视角重做任务'
+                      : '提交前会先展示本次生成费用'
+                }
                 onClick={() => void redoView(portrait.id!, view.view_role!)}
               >
-                {redoing === `${portrait.id}:${view.view_role}` ? '受理中…' : '重做当前视角'}
+                {redoing === `${portrait.id}:${view.view_role}`
+                  ? '受理中…'
+                  : `重做${VIEW_ROLE_LABELS[view.view_role] || view.view_role}`}
               </button>
             )}
             {portrait?.change?.reason && (
@@ -1649,9 +1838,27 @@ function CharacterPortraitGallery({ projectId, character, fitting, disabled, onC
       </div>
       {count > 1 && (
         <div className="portrait-scroll-controls" aria-label="切换定妆照">
-          <span>{count} 张视角图 · 横滑</span>
-          <button type="button" onClick={() => scroll(-1)} aria-label="上一张定妆照">‹</button>
-          <button type="button" onClick={() => scroll(1)} aria-label="下一张定妆照">›</button>
+          <span>{count} 张视角图 · 可横向切换</span>
+          <button
+            type="button"
+            disabled={!canScrollBack}
+            onClick={() => scroll(-1)}
+            aria-label={canScrollBack
+              ? `上一张${character.name}定妆照`
+              : `上一张${character.name}定妆照，暂不可用：当前已是第一张`}
+          >
+            ‹
+          </button>
+          <button
+            type="button"
+            disabled={!canScrollForward}
+            onClick={() => scroll(1)}
+            aria-label={canScrollForward
+              ? `下一张${character.name}定妆照`
+              : `下一张${character.name}定妆照，暂不可用：当前已是最后一张`}
+          >
+            ›
+          </button>
         </div>
       )}
     </div>
@@ -1674,7 +1881,7 @@ function SkipConfirmDialog({
     }}>
       <section ref={trapRef} className="impact-dialog" role="dialog" aria-modal="true" aria-label="跳过定妆缺口确认">
         <h3>仍有定妆缺口，确认继续分集？</h3>
-        <p>当前仍有 {data.count} 个角色缺少可用定妆照或 QA 未通过。继续后，分镜阶段可能需要自动补图或暂停等待。</p>
+        <p>当前仍有 {data.count} 个角色缺少可用定妆照或质检未通过。继续后，分镜阶段可能需要自动补图或暂停等待。</p>
         <ul>
           {data.names.slice(0, 20).map(name => <li key={name}>{name}</li>)}
           {data.names.length > 20 && <li>另有 {data.names.length - 20} 个角色…</li>}
@@ -1726,12 +1933,12 @@ function ConflictDialog({
         <h3>人物谱版本冲突</h3>
         <p>{conflict.message}</p>
         {typeof conflict.current_version === 'number' && (
-          <p>服务端当前版本：第 {conflict.current_version} 稿</p>
+          <p>线上最新版本：第 {conflict.current_version} 稿</p>
         )}
         {conflict.server_bible ? (
           <div className="conflict-merge-grid">
             <div>
-              <b>仅服务端新增</b>
+              <b>仅线上版本新增</b>
               <p>{onlyServer.length ? onlyServer.join('、') : '无'}</p>
             </div>
             <div>
@@ -1739,19 +1946,19 @@ function ConflictDialog({
               <p>{onlyLocal.length ? onlyLocal.join('、') : '无'}</p>
             </div>
             <div>
-              <b>双方都有</b>
+              <b>两边都存在</b>
               <p>{both.length ? both.join('、') : '无'}</p>
             </div>
           </div>
         ) : !!conflict.character_names?.length && (
-          <p>服务端角色：{conflict.character_names.join('、')}</p>
+          <p>线上版本角色：{conflict.character_names.join('、')}</p>
         )}
         {!!fieldConflicts.length && (
           <div className="conflict-field-list">
             <h4>双方同时修改的字段</h4>
             {fieldConflicts.map(item => (
               <fieldset key={item.path}>
-                <legend>{item.path || '人物谱'}</legend>
+                <legend>{bibleConflictFieldLabel(item.path)}</legend>
                 <label>
                   <input type="radio" name={`conflict:${item.path}`} checked={choices[item.path] === 'local'}
                     onChange={() => setChoices(current => ({ ...current, [item.path]: 'local' }))} />
@@ -1760,7 +1967,7 @@ function ConflictDialog({
                 <label>
                   <input type="radio" name={`conflict:${item.path}`} checked={choices[item.path] !== 'local'}
                     onChange={() => setChoices(current => ({ ...current, [item.path]: 'server' }))} />
-                  采用服务端：{JSON.stringify(item.server)}
+                  采用线上版本：{JSON.stringify(item.server)}
                 </label>
               </fieldset>
             ))}
@@ -1768,23 +1975,13 @@ function ConflictDialog({
         )}
         <p>请处理冲突后继续；禁止用旧页面静默覆盖。</p>
         <div className="dialog-actions">
-          <button type="button" className="btn" onClick={onClose}>留下继续查看</button>
+          <button type="button" className="btn" onClick={onClose}>返回继续检查</button>
           {canMerge && (
             <button type="button" className="btn" onClick={() => onMerge(choices)}>合并选定字段并继续</button>
           )}
-          <button type="button" className="btn primary" onClick={onRefresh}>刷新放弃</button>
+          <button type="button" className="btn danger" onClick={onRefresh}>放弃我的修改并刷新</button>
         </div>
       </section>
     </div>
   )
-}
-
-export function EpStamp({ status }: { status: string }) {
-  const map: Record<string, [string, string]> = {
-    planned: ['待分镜', 'grey'], scripting: ['分镜中', 'gold'], scripted: ['待确认', 'blue'],
-    script_failed: ['分镜失败', 'red'], confirmed: ['已确认', 'green'],
-    generating: ['生成中', 'gold'], done: ['成片', 'green'],
-  }
-  const [label, color] = map[status] ?? [status, 'grey']
-  return <span className={`stamp ${color}`}>{label}</span>
 }

@@ -75,6 +75,78 @@ def _assert_job_lease(job_id: str, owner: str, *, lease_seconds: float = 180.0) 
         raise LeaseLost(f"job lease lost: {job_id} / {owner}")
 
 
+async def _await_with_job_lease_heartbeat(
+    awaitable,
+    *,
+    job_id: str,
+    owner: str,
+    lease_seconds: float = 180.0,
+    heartbeat_interval_s: float = 30.0,
+):
+    """Keep ownership alive while one provider-heavy stage is awaiting I/O.
+
+    Reference preparation may contain several image and VLM calls, each of
+    which can legitimately outlive the normal job lease.  Run renewals on a
+    worker thread so the heartbeat uses its own thread-local SQLite connection
+    instead of committing work on the media coroutine's connection.
+
+    If ownership has genuinely moved, cancel the in-flight stage immediately:
+    a fenced worker must not publish a stale checkpoint or delete files that a
+    newer attempt has already adopted.
+    """
+    interval = max(0.01, float(heartbeat_interval_s))
+
+    async def _heartbeat() -> bool:
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                owned = await asyncio.to_thread(
+                    media_scheduler.renew_lease,
+                    job_id,
+                    owner,
+                    lease_seconds=lease_seconds,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # ownership cannot be proven; fail closed
+                return False
+            if not owned:
+                return False
+
+    operation_task = asyncio.create_task(awaitable)
+    heartbeat_task = asyncio.create_task(_heartbeat())
+    try:
+        done, _pending = await asyncio.wait(
+            {operation_task, heartbeat_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if heartbeat_task in done:
+            owned = heartbeat_task.result()
+            if not owned:
+                operation_task.cancel()
+                await asyncio.gather(operation_task, return_exceptions=True)
+                raise LeaseLost(f"job lease lost during provider stage: {job_id} / {owner}")
+
+        result = await operation_task
+        try:
+            owned = await asyncio.to_thread(
+                media_scheduler.renew_lease,
+                job_id,
+                owner,
+                lease_seconds=lease_seconds,
+            )
+        except Exception:  # ownership cannot be proven; fail closed
+            owned = False
+        if not owned:
+            raise LeaseLost(f"job lease lost after provider stage: {job_id} / {owner}")
+        return result
+    finally:
+        for task in (operation_task, heartbeat_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(operation_task, heartbeat_task, return_exceptions=True)
+
+
 def _enqueue_for_current_status(job_id: str) -> None:
     """按阶段路由到 finalize / video-ready / reference 通道。
 
@@ -137,9 +209,90 @@ def _completed_reference_slots(raw_meta: str | None) -> int:
         return 0
     slots = meta.get("reference_slots") or {}
     if isinstance(slots, dict):
-        return sum(1 for s in slots.values() if (s or {}).get("status") == "passed")
+        return sum(
+            1
+            for slot_key, slot in slots.items()
+            if isinstance(slot, dict)
+            and (
+                video_modes.is_narrative_keyframe_slot(str(slot_key))
+                or not str(slot_key).startswith("narrative_keyframe")
+            )
+            and slot.get("status") in {"passed", "unverified", "scored_warning"}
+        )
     refs = meta.get("reference_images") or []
     return len([r for r in refs if r.get("selectedForSeedance", True) and not r.get("deleted")])
+
+
+def _narrative_keyframe_candidate_progress(meta: dict[str, Any]) -> tuple[int, int]:
+    """Aggregate generated candidates across every timeline keyframe slot.
+
+    ``narrative_keyframe`` is the decisive master beat; sibling timeline beats
+    use ``narrative_keyframe_*``.  Candidate records are intentionally kept out
+    of ``reference_images`` until a winner is selected, so progress must come
+    from the slot checkpoints rather than the public gallery.
+    """
+    slots = meta.get("reference_slots") or {}
+    if not isinstance(slots, dict):
+        slots = {}
+
+    sequence = meta.get("keyframe_sequence")
+    sequence_keys: list[str] = []
+    if isinstance(sequence, dict) and isinstance(sequence.get("beats"), list):
+        sequence_keys = list(dict.fromkeys(
+            str(beat.get("slot_key") or "")
+            for beat in sequence["beats"]
+            if isinstance(beat, dict) and str(beat.get("slot_key") or "")
+        ))
+    if sequence_keys:
+        slot_items = [(slot_key, slots.get(slot_key) or {}) for slot_key in sequence_keys]
+    else:
+        slot_items = [
+            (str(slot_key), raw_slot)
+            for slot_key, raw_slot in slots.items()
+            if video_modes.is_narrative_keyframe_slot(str(slot_key))
+        ]
+
+    current = 0
+    total = 0
+    matched = False
+    terminal_statuses = {"passed", "unverified", "scored_warning"}
+    for slot_key, raw_slot in slot_items:
+        if not isinstance(raw_slot, dict):
+            raw_slot = {}
+        matched = True
+        default_target = (
+            video_modes.keyframe_candidate_count()
+            if str(slot_key) == "narrative_keyframe"
+            else video_modes.supporting_keyframe_candidate_count()
+        )
+        try:
+            target = max(1, int(raw_slot.get("candidate_target") or default_target))
+        except (TypeError, ValueError):
+            target = default_target
+
+        records = raw_slot.get("candidates") or []
+        candidate_nos: set[int] = set()
+        if isinstance(records, list):
+            for ordinal, record in enumerate(records, start=1):
+                if not isinstance(record, dict):
+                    continue
+                try:
+                    candidate_no = int(record.get("candidate_no") or ordinal)
+                except (TypeError, ValueError):
+                    candidate_no = ordinal
+                if 1 <= candidate_no <= target:
+                    candidate_nos.add(candidate_no)
+        done = min(target, len(candidate_nos))
+        # Legacy/final winner checkpoints may not retain the candidate audit
+        # list.  A terminal logical slot is nevertheless complete.
+        if done == 0 and raw_slot.get("status") in terminal_statuses:
+            done = target
+        current += done
+        total += target
+
+    if not matched:
+        return 0, video_modes.estimated_keyframe_generation_count()
+    return min(current, total), total
 
 
 def _dispatch_due_jobs_legacy() -> dict[str, int]:
@@ -537,14 +690,21 @@ def _visual_anchors_from_version_meta(meta: dict) -> list[dict]:
     for ref in (meta.get("reference_images") or []):
         if not isinstance(ref, dict):
             continue
+        if ref.get("deleted"):
+            continue
         purposes = purpose_list(ref)
         rtype = str(ref.get("type") or "")
-        is_keyframe = rtype == "plot_key_frame" or str(ref.get("slot_key") or "") == "narrative_keyframe"
+        is_keyframe = (
+            rtype == "plot_key_frame"
+            or video_modes.is_narrative_keyframe_slot(str(ref.get("slot_key") or ""))
+        )
+        if is_keyframe and not ref.get("selectedForSeedance"):
+            continue
         is_anchor = PURPOSE_QA_ANCHOR in purposes or rtype in {"character", "scene", "previous_shot_frame"}
         if not (is_keyframe or is_anchor):
             continue
         path = ref.get("path") or ref.get("image_path")
-        if not path:
+        if not path or not Path(str(path)).is_file():
             continue
         item = {
             "type": rtype,
@@ -699,6 +859,122 @@ def _provider_submitted_at(conn, job, task_id: str) -> float:
     return submitted_at
 
 
+def _recover_paid_video_task(conn, operation_id: str | None) -> tuple[str, float] | None:
+    """Recover a provider handle accepted before the local job commit."""
+    if not operation_id:
+        return None
+    rows = conn.execute(
+        """SELECT ts, response_json FROM provider_calls
+           WHERE kind='video_create' AND status='OK' AND operation_id=?
+             AND response_json IS NOT NULL
+           ORDER BY id DESC""",
+        (operation_id,),
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["response_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        task_id = str(payload.get("id") or "").strip() if isinstance(payload, dict) else ""
+        if task_id:
+            return task_id, float(row["ts"])
+    return None
+
+
+def _paid_video_attempt_count(conn, version_id: str) -> int:
+    prefix = f"video-create-{version_id}"
+    row = conn.execute(
+        """SELECT COUNT(DISTINCT operation_id) AS count
+           FROM provider_calls
+           WHERE kind='video_create' AND status='OK'
+             AND response_json IS NOT NULL
+             AND (operation_id=? OR operation_id LIKE ?)""",
+        (prefix, f"{prefix}-%"),
+    ).fetchone()
+    return int(row["count"] or 0) if row else 0
+
+
+def _reserve_video_resubmit(job, shot) -> bool:
+    """Reserve one additional payable attempt before changing operation_id."""
+    limit = float(get_setting("episode_cost_limit_cny") or 100)
+    try:
+        from app.completion_grant import active_video_grant_budget_cap
+
+        grant_cap = active_video_grant_budget_cap(job["episode_id"])
+        if grant_cap is not None:
+            limit = float(grant_cap)
+    except Exception:  # noqa: BLE001
+        pass
+    return media_scheduler.extend_budget_reservation(
+        job["id"],
+        job["episode_id"],
+        shot_cost_cny(shot["duration_s"]),
+        limit,
+        conn=get_conn(),
+    )
+
+
+def _reserve_or_pause_video_resubmit(job, version, shot, owner: str) -> bool:
+    if _reserve_video_resubmit(job, shot):
+        return True
+    message = "追加提交会超过单集预算，任务已暂停；提高成本上限后可继续"
+    conn = get_conn()
+    changed = conn.execute(
+        """UPDATE jobs
+           SET status='paused_budget', error=?, updated_at=?,
+               lease_owner=NULL, lease_expires_at=NULL
+           WHERE id=? AND status='running' AND lease_owner=?""",
+        (message, now(), job["id"], owner),
+    )
+    if changed.rowcount == 1:
+        conn.execute(
+            "UPDATE shot_versions SET status='paused_budget', error=? WHERE id=?",
+            (message, version["id"]),
+        )
+        conn.commit()
+        mark_media_job_state(
+            _row_value(job, "run_id"),
+            _row_value(job, "step_run_id"),
+            "paused_budget",
+            message,
+        )
+    else:
+        conn.rollback()
+    return False
+
+
+def _persist_video_resubmit(
+    conn,
+    *,
+    job_id: str,
+    version_id: str,
+    prompt_text: str,
+    meta: dict,
+    operation_id: str,
+) -> None:
+    """Persist the next intentional paid attempt as one recoverable checkpoint."""
+    paid_attempts = max(
+        int(meta.get("provider_paid_attempts") or 0),
+        _paid_video_attempt_count(conn, version_id),
+    )
+    if paid_attempts:
+        meta["provider_paid_attempts"] = paid_attempts
+    conn.execute(
+        """UPDATE shot_versions
+           SET prompt_text=?, provider_task_id=NULL, image_inputs=?
+           WHERE id=?""",
+        (prompt_text, json.dumps(meta, ensure_ascii=False), version_id),
+    )
+    conn.execute(
+        """UPDATE jobs
+           SET provider_operation_id=?, provider_create_state='not_started',
+               provider_non_cancellable=0, provider_submitted_at=NULL, updated_at=?
+           WHERE id=?""",
+        (operation_id, now(), job_id),
+    )
+    conn.commit()
+
+
 def _ip_genericization_terms(conn, project_id: str) -> tuple[tuple[str, str], ...]:
     """把版权角色专名替换成中性代称（角色甲/乙…），降低 Seedance 输出版权误判概率。
     仅在平台已返回版权限制后的自动重提里使用。"""
@@ -721,14 +997,69 @@ def _video_image_inputs_from_meta(meta: dict) -> list[tuple[str, str]]:
     return video_modes.build_seedance_image_inputs(meta)
 
 
-async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dict, prompt_text: str) -> tuple[dict, str]:
+async def _prepare_reference_mode_inputs(
+    conn, job, version, shot, ep, meta: dict, prompt_text: str,
+    *, lease_owner: str | None = None,
+) -> tuple[dict, str]:
     if meta.get("mode") != video_modes.REFERENCE_IMAGE_MODE:
         return meta, prompt_text
+
+    def _assert_reference_lease() -> None:
+        if lease_owner is not None:
+            _assert_job_lease(job["id"], lease_owner)
+
+    def _invalidate_reference_checkpoint(reason: str) -> None:
+        meta["stale_reference_reason"] = reason
+        meta["stale_keyframe_prompt_contract_version"] = meta.get("keyframe_prompt_contract_version")
+        meta["keyframe_prompt_contract_version"] = video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION
+        meta.pop("keyframe_contract_fingerprint", None)
+        meta["reference_images"] = []
+        meta["reference_slots"] = {}
+        meta.pop("keyframe_sequence", None)
+        meta["reference_manifest_frozen"] = False
+        meta["reference_manifest_asset_stale"] = True
+        meta["reference_generation_complete"] = False
+        meta["reference_static_ready"] = False
+        meta["continuity_anchor_ready"] = False
+        meta["reference_group_gate_passed"] = False
+        meta["video_input_manifest_frozen"] = False
+        meta.pop("narrative_keyframe_missing", None)
+        # 新画廊不得沿用旧 fingerprint/refset，否则 reference_store 会早返并指回旧图。
+        for stale_key in (
+            "reference_set_id", "reference_gallery_fingerprint", "reference_gallery_revision",
+            "reference_gallery_source_version_id", "reference_gallery_edited",
+            "reference_gallery_contract_override", "video_input_fingerprint",
+        ):
+            meta.pop(stale_key, None)
+
     # Historical galleries predate this marker and are complete.  A gallery
     # explicitly marked incomplete is a streamed checkpoint from an interrupted
     # generation and must resume instead of being mistaken for the final set.
-    if meta.get("reference_images") and meta.get("reference_generation_complete") is not False:
-        return meta, prompt_text
+    complete_gallery_candidate = False
+    if meta.get("reference_images"):
+        incomplete_checkpoint = meta.get("reference_generation_complete") is False
+        if incomplete_checkpoint:
+            # prompt_ready 时画廊通常只有人物/场景 evidence，尚未产出关键帧。
+            # 这里只校验 checkpoint 合同版本，不能套用「最终画廊必须有关键帧」的门禁。
+            checkpoint_matches = (
+                str(meta.get("keyframe_prompt_contract_version") or "")
+                == video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION
+            )
+            if not checkpoint_matches:
+                _invalidate_reference_checkpoint("keyframe_prompt_checkpoint_contract_invalid")
+            elif (
+                meta.get("reference_static_ready")
+                and not video_modes.reference_gallery_matches_keyframe_contract(meta)
+            ):
+                # static_ready 意味着必需关键帧已经落盘；若只剩 evidence
+                # 或 path 已丢失，必须回到生成阶段，不能被连续性快路伪装完成。
+                _invalidate_reference_checkpoint("static_keyframe_contract_or_file_invalid")
+        else:
+            gallery_matches = video_modes.reference_gallery_matches_keyframe_contract(meta)
+            if gallery_matches:
+                complete_gallery_candidate = True
+            else:
+                _invalidate_reference_checkpoint("keyframe_prompt_contract_or_file_invalid")
     from app.schemas import Bible
     from app.media_pipeline import stages as media_stages
     from app.media_pipeline.stage_state import set_pipeline_stage
@@ -740,7 +1071,57 @@ async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dic
     from app.portraits import bible_for_episode
     bible = bible_for_episode(job["project_id"], bible, ep["episode_no"])
     shot_model = _load_shot_model(shot)
+    # 入队时 compile_prompt 已把接触镜机位确定性归一为“侧面”。执行时必须使用
+    # 该视频版本冻结的合同，不能只重读 shots 行中可能较旧的 camera_angle。
+    from app.continuity import apply_shot_contract
+    apply_shot_contract(shot_model, meta.get("shot_contract_json"))
     prev_shot = conn.execute("SELECT * FROM shots WHERE id=?", (meta.get("after_shot_id"),)).fetchone() if meta.get("after_shot_id") else None
+    needs_tail = uses_previous_tail_frame(derive_continuity_mode(shot_model, prev=prev_shot))
+    current_keyframe_fingerprint = video_modes.keyframe_contract_fingerprint(shot_model, bible)
+    if complete_gallery_candidate:
+        # 提示词合同相同仍不代表人物/场景锚点未变。入队复用会把
+        # manifest 一起带过来；兼容从关键帧 asset 内的冻结副本回退读取。
+        frozen_manifest = meta.get("reference_manifest")
+        if not isinstance(frozen_manifest, dict):
+            frozen_manifest = next(
+                (
+                    ref.get("dependency_manifest") for ref in (meta.get("reference_images") or [])
+                    if isinstance(ref, dict) and isinstance(ref.get("dependency_manifest"), dict)
+                ),
+                None,
+            )
+        if not video_modes.reference_gallery_matches_keyframe_contract(
+            meta, expected_fingerprint=current_keyframe_fingerprint,
+        ):
+            _invalidate_reference_checkpoint("shot_keyframe_contract_changed")
+            complete_gallery_candidate = False
+        if complete_gallery_candidate and needs_tail:
+            frozen_tail_contract = next(
+                (
+                    (ref.get("dependency_manifest") or {}).get("continuity_source")
+                    for ref in (meta.get("reference_images") or [])
+                    if isinstance(ref, dict) and ref.get("type") == "previous_shot_frame"
+                ),
+                None,
+            )
+            current_tail_contract = video_modes.previous_tail_source_contract(conn, prev_shot)
+            if not isinstance(frozen_tail_contract, dict) or frozen_tail_contract != current_tail_contract:
+                _invalidate_reference_checkpoint("continuity_tail_source_changed")
+                complete_gallery_candidate = False
+        if complete_gallery_candidate and meta.get("reference_gallery_contract_override"):
+            return meta, prompt_text
+        from app.multiview import manifest_revisions_match, resolve_shot_asset_dependencies
+
+        if complete_gallery_candidate:
+            current_manifest = resolve_shot_asset_dependencies(
+                project_id=job["project_id"], episode_no=ep["episode_no"], shot_id=job["shot_id"],
+                shot=shot_model, scene_name=getattr(shot_model, "scene_name", "") or None,
+            )
+            if isinstance(frozen_manifest, dict) and manifest_revisions_match(frozen_manifest, current_manifest):
+                meta["reference_manifest"] = frozen_manifest
+                meta["reference_manifest_frozen"] = True
+                return meta, prompt_text
+            _invalidate_reference_checkpoint("reference_dependency_manifest_changed")
     # 复用入队时已确定的模式决策，不在生成时再跑一次 LLM 选择：既省每镜一次文本调用，
     # 又避免模式在入队与执行之间无谓翻转（决策应在入队时一次定死）。
     decision = video_modes.dict_to_decision(meta.get("mode_decision") or {})
@@ -748,24 +1129,49 @@ async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dic
         decision = video_modes.default_reference_decision()
     meta["mode"] = video_modes.REFERENCE_IMAGE_MODE
     shot_id = job["shot_id"]
-    needs_tail = uses_previous_tail_frame(derive_continuity_mode(shot_model))
+    if meta.get("reference_static_ready") and needs_tail and meta.get("reference_images"):
+        from app.multiview import manifest_revisions_match, resolve_shot_asset_dependencies
+
+        frozen_manifest = meta.get("reference_manifest")
+        current_manifest = resolve_shot_asset_dependencies(
+            project_id=job["project_id"], episode_no=ep["episode_no"], shot_id=shot_id,
+            shot=shot_model, scene_name=getattr(shot_model, "scene_name", "") or None,
+        )
+        if not isinstance(frozen_manifest, dict) or not manifest_revisions_match(frozen_manifest, current_manifest):
+            _invalidate_reference_checkpoint("reference_dependency_manifest_changed")
+        elif not video_modes.reference_gallery_matches_keyframe_contract(meta):
+            # 静态预取点可能在 worker 崩溃后只剩 evidence，或关键帧文件已丢失。
+            # 连续性快路不能只装配尾帧就把这组资产标成完成。
+            _invalidate_reference_checkpoint("static_keyframe_contract_or_file_invalid")
     rejection_details: list[dict[str, Any]] = []
     rejected_assets: list = []
 
+    def _delete_rejected_assets(items: list) -> None:
+        # Never let a recovered/stale worker remove files owned by the new
+        # attempt.  This check also extends the lease at every checkpoint.
+        _assert_reference_lease()
+        from app.rejected_media import discard_file
+        for asset in items:
+            discard_file(getattr(asset, "path", None))
+            asset.path = None
+            asset.url = None
+
     def _persist_reference_progress(current_assets: list, current_rejected: list) -> None:
-        """Checkpoint each completed reference so the polling UI can render it."""
+        """Checkpoint usable references only; rejected images are irrecoverably removed."""
+        _assert_reference_lease()
+        _delete_rejected_assets(current_rejected)
         meta["mode"] = video_modes.REFERENCE_IMAGE_MODE
         meta["mode_decision"] = video_modes.decision_to_dict(decision)
         meta["reference_generation_complete"] = False
-        meta["reference_images"] = (
-            [a.public_dict() for a in current_assets]
-            + [a.public_dict() for a in current_rejected]
-        )
-        done = len([a for a in current_assets if getattr(a, "source", "") == "seedream_generated"
-                    or (getattr(a, "selectedForSeedance", False))])
+        meta["reference_images"] = [a.public_dict() for a in current_assets]
+        candidate_done, candidate_total = _narrative_keyframe_candidate_progress(meta)
         set_pipeline_stage(
             job["id"], media_stages.STAGE_REFERENCE_GENERATE,
-            stage_progress={"current": done, "total": max(done, 4), "unit": "reference_slots"},
+            stage_progress={
+                "current": candidate_done,
+                "total": candidate_total,
+                "unit": "keyframe_candidates",
+            },
             scheduler_lane=media_stages.LANE_REFERENCE_CRITICAL if needs_tail else media_stages.LANE_REFERENCE_NORMAL,
             conn=conn,
         )
@@ -797,7 +1203,16 @@ async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dic
             rejection_details=rejection_details, rejected_out=rejected_assets,
         )
         if assets:
-            meta["reference_images"] = [a.public_dict() for a in assets] + [a.public_dict() for a in rejected_assets]
+            _delete_rejected_assets(rejected_assets)
+            assembled_refs = [a.public_dict() for a in assets]
+            assembled_meta = {**meta, "reference_images": assembled_refs}
+            if not video_modes.reference_gallery_matches_keyframe_contract(
+                assembled_meta, expected_fingerprint=current_keyframe_fingerprint,
+            ):
+                _invalidate_reference_checkpoint("continuity_assembly_keyframe_missing_or_stale")
+                assets = []
+        if assets:
+            meta["reference_images"] = assembled_refs
             meta["reference_generation_complete"] = True
             meta["reference_static_ready"] = True
             meta["continuity_anchor_ready"] = True
@@ -838,7 +1253,8 @@ async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dic
         if not has_tail:
             meta["mode"] = video_modes.REFERENCE_IMAGE_MODE
             meta["mode_decision"] = video_modes.decision_to_dict(decision)
-            meta["reference_images"] = [a.public_dict() for a in assets] + [a.public_dict() for a in rejected_assets]
+            _delete_rejected_assets(rejected_assets)
+            meta["reference_images"] = [a.public_dict() for a in assets]
             meta["reference_static_ready"] = True
             meta["reference_generation_complete"] = False
             meta["continuity_anchor_ready"] = False
@@ -872,6 +1288,7 @@ async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dic
             })
 
         retry_rejection: list[dict[str, Any]] = []
+        _delete_rejected_assets(rejected_assets)
         rejected_assets = []
         assets = await video_modes.build_reference_assets(
             conn=conn, project_id=job["project_id"], episode_no=ep["episode_no"], episode_id=job["episode_id"],
@@ -903,22 +1320,41 @@ async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dic
     if assets:
         meta["mode"] = video_modes.REFERENCE_IMAGE_MODE
         meta["mode_decision"] = video_modes.decision_to_dict(decision)
-        meta["reference_images"] = [a.public_dict() for a in assets] + [a.public_dict() for a in rejected_assets]
+        _delete_rejected_assets(rejected_assets)
+        meta["reference_images"] = [a.public_dict() for a in assets]
         meta["reference_generation_complete"] = True
         meta["reference_static_ready"] = True
         meta["continuity_anchor_ready"] = True
         from app.multiview import narrative_keyframe_required, PURPOSE_VIDEO_INPUT, purpose_list
+
+        def _has_usable_keyframe(ref: dict) -> bool:
+            path = str(ref.get("path") or ref.get("image_path") or "").strip()
+            url = str(ref.get("url") or "").strip()
+            return (
+                (
+                    str(ref.get("type") or "") == "plot_key_frame"
+                    or video_modes.is_narrative_keyframe_slot(str(ref.get("slot_key") or ""))
+                )
+                and not ref.get("deleted")
+                and ref.get("selectedForSeedance")
+                and PURPOSE_VIDEO_INPUT in purpose_list(ref)
+                and ((bool(path) and Path(path).is_file()) or url.startswith("data:image"))
+            )
+
         keyframe_ok = any(
-            (str(r.get("type") or "") == "plot_key_frame" or str(r.get("slot_key") or "") == "narrative_keyframe")
-            and not r.get("deleted")
-            and r.get("selectedForSeedance")
-            and PURPOSE_VIDEO_INPUT in purpose_list(r)
-            and (r.get("qa") or {}).get("status") != "unverified"
-            and (r.get("qa") or {}).get("overall") is not None
+            _has_usable_keyframe(r)
             for r in (meta.get("reference_images") or [])
             if isinstance(r, dict)
         )
+        if isinstance(meta.get("keyframe_sequence"), dict):
+            # 新时序合同要求每个计划 slot 都有可用 winner；唯一例外是
+            # 3 个候选全部命中结构硬伤的显式降级 slot，此时只用人物/场景锚点继续。
+            keyframe_ok = video_modes.reference_gallery_matches_keyframe_contract(
+                meta,
+                expected_fingerprint=current_keyframe_fingerprint,
+            )
         if meta.get("narrative_keyframe_missing") or (narrative_keyframe_required() and not keyframe_ok):
+            _assert_reference_lease()
             meta["narrative_keyframe_missing"] = True
             meta["reference_group_gate_passed"] = False
             meta["video_input_manifest_frozen"] = False
@@ -933,8 +1369,7 @@ async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dic
             _set_version(version["id"], image_inputs=json.dumps(meta, ensure_ascii=False), prompt_text=prompt_text)
             conn.commit()
             raise ProviderError(
-                "必需叙事关键帧未通过证据化 QA 或缺失（unverified），默认阻止视频提交；"
-                "请人工确认后覆盖，或重新生成关键帧。"
+                "必需叙事关键帧文件缺失或不可用，已阻止视频提交；请重新生成关键帧。"
             )
         meta["reference_group_gate_passed"] = True
         meta["video_input_manifest_frozen"] = True
@@ -943,6 +1378,7 @@ async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dic
         meta.pop("first_frame_scene_id", None)
         meta.pop("last_frame_scene_id", None)
         prompt_text = video_modes.append_reference_prompt_notes(prompt_text, assets)
+        _assert_reference_lease()
         try:
             from app.media_pipeline.reference_store import upsert_reference_set_from_meta
             upsert_reference_set_from_meta(
@@ -960,6 +1396,7 @@ async def _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta: dic
         return meta, prompt_text
 
     # ── 参考图模式彻底失败（2 次均失败）—— 记录原始失败原因 ──
+    _delete_rejected_assets(rejected_assets)
     ref_failure_reason = (
         f"参考图模式 2 次尝试均未产出可用资产 "
         f"（共 {len(rejection_details)} 张被拒绝）"
@@ -1032,12 +1469,35 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
 
     started = time.time()
     try:
+        provider_operation_id = (
+            _row_value(job, "provider_operation_id")
+            or f"video-create-{version['id']}"
+        )
         task_id = version["provider_task_id"]
+        recovered_at = None
+        if not task_id:
+            recovered = _recover_paid_video_task(conn, provider_operation_id)
+            if recovered:
+                task_id, recovered_at = recovered
+                conn.execute(
+                    "UPDATE shot_versions SET provider_task_id=? WHERE id=?",
+                    (task_id, version["id"]),
+                )
+                conn.execute(
+                    """UPDATE jobs
+                       SET provider_operation_id=?, provider_create_state='accepted',
+                           provider_non_cancellable=1, provider_submitted_at=?,
+                           updated_at=?
+                       WHERE id=?""",
+                    (provider_operation_id, recovered_at, now(), job_id),
+                )
+                conn.commit()
         provider_submitted_at = (
-            _provider_submitted_at(conn, job, task_id) if task_id else None
+            recovered_at
+            if recovered_at is not None
+            else (_provider_submitted_at(conn, job, task_id) if task_id else None)
         )
         result = None
-        provider_operation_id = f"video-create-{version['id']}"
         if task_id:
             conn.execute(
                 "UPDATE jobs SET provider_operation_id=?, provider_create_state='accepted', "
@@ -1055,7 +1515,14 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         meta.pop("first_frame_scene_id", None)
         meta.pop("last_frame_scene_id", None)
         try:
-            meta, prompt_text = await _prepare_reference_mode_inputs(conn, job, version, shot, ep, meta, prompt_text)
+            meta, prompt_text = await _await_with_job_lease_heartbeat(
+                _prepare_reference_mode_inputs(
+                    conn, job, version, shot, ep, meta, prompt_text,
+                    lease_owner=owner,
+                ),
+                job_id=job_id,
+                owner=owner,
+            )
         except _ContinuityWait as wait_exc:
             wait = 15.0
             note = wait_exc.reason
@@ -1077,7 +1544,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         _assert_job_lease(job_id, owner)
 
         # 连续镜调度级依赖：无可用尾帧时不得提交 Seedance
-        if job["after_shot_id"] and not version["provider_task_id"]:
+        if job["after_shot_id"] and not task_id:
             from app.media_pipeline.scheduler import continuity_anchor_ready
             from app.media_pipeline import stages as media_stages
             from app.media_pipeline.stage_state import set_pipeline_stage
@@ -1111,7 +1578,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                 return
 
         # 视频提交配额：首轮优先，重抽限额
-        if not version["provider_task_id"]:
+        if not task_id:
             from app.media_pipeline.scheduler import can_admit_video_submit
             from app.media_pipeline import stages as media_stages
             from app.media_pipeline.stage_state import set_pipeline_stage
@@ -1175,6 +1642,20 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                         report_congestion, report_healthy, semaphore_for,
                     )
                     async with semaphore_for(media_stages.RESOURCE_VIDEO_SUBMIT):
+                        _assert_job_lease(job_id, owner)
+                        marked = conn.execute(
+                            """UPDATE jobs
+                               SET provider_non_cancellable=1, updated_at=?
+                               WHERE id=? AND status='running' AND lease_owner=?
+                                 AND cancellation_requested=0""",
+                            (now(), job_id, owner),
+                        )
+                        if marked.rowcount != 1:
+                            conn.rollback()
+                            raise LeaseLost(
+                                f"video submit cancelled before provider call: {job_id}"
+                            )
+                        conn.commit()
                         try:
                             task_id = await hiagent.create_video_task(
                                 prompt_text,
@@ -1198,28 +1679,60 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                 except ProviderError as exc:
                     _assert_job_lease(job_id, owner)
                     conn.execute(
-                        "UPDATE jobs SET provider_create_state=?, updated_at=? WHERE id=?",
-                        ("unknown" if exc.retryable else "not_started", now(), job_id),
+                        "UPDATE jobs SET provider_create_state=?, provider_non_cancellable=?, "
+                        "updated_at=? WHERE id=?",
+                        (
+                            "unknown" if exc.retryable else "not_started",
+                            int(bool(exc.retryable)),
+                            now(),
+                            job_id,
+                        ),
                     )
                     conn.commit()
-                    if _is_seedance_text_sensitive(str(exc)) and not safety_retry_used:
+                    if (
+                        not exc.retryable
+                        and _is_seedance_text_sensitive(str(exc))
+                        and not safety_retry_used
+                    ):
                         prompt_text = sanitize_seedance_prompt(prompt_text, aggressive=True)
                         safety_retry_used = True
+                        provider_operation_id = f"video-create-{version['id']}-safety-1"
                         meta["seedance_safety_retry"] = True
                         meta["seedance_safety_reason"] = str(exc)[:300]
-                        _set_version(version["id"], prompt_text=prompt_text, provider_task_id=None,
-                                     image_inputs=json.dumps(meta, ensure_ascii=False))
+                        if not _reserve_or_pause_video_resubmit(
+                            job, version, shot, owner,
+                        ):
+                            return
+                        _persist_video_resubmit(
+                            conn, job_id=job_id, version_id=version["id"],
+                            prompt_text=prompt_text, meta=meta,
+                            operation_id=provider_operation_id,
+                        )
                         continue
-                    if _is_seedance_copyright_restricted(str(exc)) and copyright_retries < _SEEDANCE_COPYRIGHT_MAX_RETRIES:
+                    if (
+                        not exc.retryable
+                        and _is_seedance_copyright_restricted(str(exc))
+                        and copyright_retries < _SEEDANCE_COPYRIGHT_MAX_RETRIES
+                    ):
                         copyright_retries += 1
+                        provider_operation_id = (
+                            f"video-create-{version['id']}-copyright-{copyright_retries}"
+                        )
                         if copyright_retries == 1:
                             prompt_text = sanitize_seedance_prompt(
                                 prompt_text, aggressive=True,
                                 extra_terms=_ip_genericization_terms(conn, job["project_id"]))
                         meta["seedance_copyright_retries"] = copyright_retries
                         meta["seedance_copyright_reason"] = str(exc)[:300]
-                        _set_version(version["id"], prompt_text=prompt_text, provider_task_id=None,
-                                     image_inputs=json.dumps(meta, ensure_ascii=False))
+                        if not _reserve_or_pause_video_resubmit(
+                            job, version, shot, owner,
+                        ):
+                            return
+                        _persist_video_resubmit(
+                            conn, job_id=job_id, version_id=version["id"],
+                            prompt_text=prompt_text, meta=meta,
+                            operation_id=provider_operation_id,
+                        )
                         continue
                     raise
                 # Persist the paid provider handle and the non-cancellable flag in
@@ -1295,13 +1808,24 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                     prompt_text = sanitize_seedance_prompt(prompt_text, aggressive=True)
                     safety_retry_used = True
                     task_id = None
+                    provider_operation_id = f"video-create-{version['id']}-safety-1"
                     meta["seedance_safety_retry"] = True
                     meta["seedance_safety_reason"] = error_text
-                    _set_version(version["id"], prompt_text=prompt_text, provider_task_id=None,
-                                 image_inputs=json.dumps(meta, ensure_ascii=False))
+                    if not _reserve_or_pause_video_resubmit(
+                        job, version, shot, owner,
+                    ):
+                        return
+                    _persist_video_resubmit(
+                        conn, job_id=job_id, version_id=version["id"],
+                        prompt_text=prompt_text, meta=meta,
+                        operation_id=provider_operation_id,
+                    )
                     continue
                 if _is_seedance_copyright_restricted(error_text) and copyright_retries < _SEEDANCE_COPYRIGHT_MAX_RETRIES:
                     copyright_retries += 1
+                    provider_operation_id = (
+                        f"video-create-{version['id']}-copyright-{copyright_retries}"
+                    )
                     if copyright_retries == 1:  # 首次重提：去掉版权专名 + 激进改写，降低输出与原 IP 相似度
                         prompt_text = sanitize_seedance_prompt(
                             prompt_text, aggressive=True,
@@ -1309,8 +1833,15 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                     task_id = None  # 再次重提靠重新生成的随机性（同一镜其它版本可成功即说明判定是概率性的）
                     meta["seedance_copyright_retries"] = copyright_retries
                     meta["seedance_copyright_reason"] = error_text
-                    _set_version(version["id"], prompt_text=prompt_text, provider_task_id=None,
-                                 image_inputs=json.dumps(meta, ensure_ascii=False))
+                    if not _reserve_or_pause_video_resubmit(
+                        job, version, shot, owner,
+                    ):
+                        return
+                    _persist_video_resubmit(
+                        conn, job_id=job_id, version_id=version["id"],
+                        prompt_text=prompt_text, meta=meta,
+                        operation_id=provider_operation_id,
+                    )
                     continue
                 raise ProviderError(f"Seedance 任务失败：{error_text}")
             break
@@ -1357,10 +1888,17 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                 return
         _assert_review_dependency_fence(job, version["id"], "candidate")
         latency = round(time.time() - started, 1)
-        cost = shot_cost_cny(shot["duration_s"])
+        paid_attempts = max(
+            1,
+            int(meta.get("provider_paid_attempts") or 0),
+            _paid_video_attempt_count(conn, version["id"]),
+        )
+        meta["provider_paid_attempts"] = paid_attempts
+        cost = shot_cost_cny(shot["duration_s"]) * paid_attempts
         _set_version(version["id"], status="succeeded", video_path=str(dest),
-                     last_frame_url=result["last_frame_url"], cost_cny=cost, latency_s=latency)
-        # 评审墙产生了新片段，旧的整集合成视频即过期 → 删除，避免成片台展示陈旧成品
+                     last_frame_url=result["last_frame_url"], cost_cny=cost, latency_s=latency,
+                     image_inputs=json.dumps(meta, ensure_ascii=False))
+        # 生成台产生了新片段，旧的整集合成视频即过期 → 删除，避免成片台展示陈旧成品
         _invalidate_final_video(job["project_id"], ep["episode_no"])
         # 自动 QA 可能跑满 VLM 读超时（默认 300s），超过默认 180s lease 会被 sweeper
         # 抢占：原协程仍会跑完但无法 settle，新 worker 则对已成功版本重跑付费链路。
@@ -1956,13 +2494,21 @@ async def stop() -> None:
     _drain_memory_queue(_poll_queue)
 
 
-def retry_paused(episode_id: str) -> int:
-    """成本上限调高后，恢复因预算暂停的任务。"""
+def retry_paused(episode_id: str, *, job_id: str | None = None) -> int:
+    """成本上限调高后恢复预算暂停任务；可限定为一个明确的 job。"""
     conn = get_conn()
-    rows = conn.execute(
-        "SELECT id, reserved_cost_cny, kind FROM jobs WHERE episode_id=? AND status='paused_budget'",
-        (episode_id,),
-    ).fetchall()
+    if job_id:
+        rows = conn.execute(
+            """SELECT id, reserved_cost_cny, kind FROM jobs
+               WHERE episode_id=? AND id=? AND status='paused_budget'""",
+            (episode_id, job_id),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT id, reserved_cost_cny, kind FROM jobs
+               WHERE episode_id=? AND status='paused_budget'""",
+            (episode_id,),
+        ).fetchall()
     resumed = 0
     for r in rows:
         estimate = float(r["reserved_cost_cny"] or 0)
@@ -1972,12 +2518,22 @@ def retry_paused(episode_id: str) -> int:
             r["id"], episode_id, estimate,
             float(get_setting("episode_cost_limit_cny") or 100), conn=conn,
         ):
-            conn.execute(
-                "UPDATE jobs SET status='queued', error=NULL, next_retry_at=NULL, updated_at=? WHERE id=?",
+            changed = conn.execute(
+                """UPDATE jobs SET status='queued', error=NULL, next_retry_at=NULL, updated_at=?
+                   WHERE id=? AND status='paused_budget'""",
                 (now(), r["id"]),
             )
             conn.commit()
-            _enqueue_for_current_status(r["id"])
+            if changed.rowcount != 1:
+                continue
+            try:
+                _enqueue_for_current_status(r["id"])
+            except Exception as exc:
+                errors.record_and_format(
+                    exc,
+                    action="budget_resume_dispatch",
+                    context={"episode_id": episode_id, "job_id": r["id"]},
+                )
             resumed += 1
     return resumed
 

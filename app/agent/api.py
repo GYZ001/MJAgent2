@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from app.agent import events, orchestrator, store
@@ -53,7 +53,6 @@ def get_conversation(conversation_id: str):
 async def send_message(
     conversation_id: str,
     body: SendMessageRequest,
-    background_tasks: BackgroundTasks,
 ):
     """立即返回 turn_id；Agent 循环作为后台任务运行，前端用 SSE 订阅并可随时停止。"""
     _require_agent_enabled()
@@ -62,8 +61,7 @@ async def send_message(
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     turn = outcome["turn"]
-    background_tasks.add_task(
-        orchestrator.run_prepared_turn,
+    orchestrator.spawn_prepared_turn(
         conversation_id,
         turn["id"],
         outcome["state"],

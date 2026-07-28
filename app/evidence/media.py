@@ -520,7 +520,17 @@ def record_reference_asset(
         subject=scope_id,
         evaluator_name=f"{asset_type}_consistency_qa",
     ) if qa else None
-    # Score-only：低分/hard_gate/blocker 不得阻止技术有效资产落库（PRD QA-SO）。
+    from app.rejected_media import discard_file, qa_is_rejected
+    if not technical["passed"] or qa_is_rejected(qa):
+        discard_file(file_path)
+        return {
+            "id": None,
+            "type": asset_type,
+            "scope_id": scope_id,
+            "status": "rejected_deleted",
+            "file_path": None,
+        }
+    # 低分仍只作提示；明确 failed/hard_failures 的落选资源已在上方物理删除。
     if model_eval is not None:
         model_eval.hard_gate_passed = True
         model_eval.recovered = False

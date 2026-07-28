@@ -58,12 +58,16 @@ def spawn(kind: str, key: str, coro: Coroutine[Any, Any, Any], *,
     if active(kind, key):
         coro.close()
         raise RuntimeError(f"后台任务已在运行：{kind}/{key}")
-    return register(
-        kind,
-        key,
-        asyncio.get_running_loop().create_task(coro),
-        project_id=project_id,
-    )
+    task: asyncio.Task | None = None
+    try:
+        task = asyncio.get_running_loop().create_task(coro)
+        return register(kind, key, task, project_id=project_id)
+    except BaseException:
+        if task is None:
+            coro.close()
+        else:
+            task.cancel()
+        raise
 
 
 def cancel(kind: str, key: str) -> bool:
@@ -76,7 +80,7 @@ def cancel(kind: str, key: str) -> bool:
 
 async def cancel_and_wait(kind: str, key: str) -> bool:
     """Cancel one task from an async route and wait until it can no longer write state."""
-    record = _records.pop((kind, key), None)
+    record = _records.get((kind, key))
     if not record or record.task.done():
         return False
     record.task.cancel()

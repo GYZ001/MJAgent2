@@ -7,6 +7,7 @@ import {
   StepRun,
 } from "../../api";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
+import { statusLabel } from "../../lib/statusLabels";
 
 interface RunItem extends RunSummary {
   project_id?: string | null;
@@ -57,7 +58,7 @@ const STATUS_LABELS: Record<string, string> = {
 const WORKFLOW_LABELS: Record<string, string> = {
   character_bible: "人物谱生成",
   character_references: "人物定妆照",
-  scene_bible: "场景圣经",
+  scene_bible: "场景设定",
   scene_references: "场景参考图",
   episode_mapping: "分集规划",
   screenplay: "剧本生成",
@@ -65,8 +66,8 @@ const WORKFLOW_LABELS: Record<string, string> = {
   scene_generation: "关键帧生成",
   video_generation: "视频生成",
   episode_video_completion: "全片视频补齐",
-  delivery: "交付包",
-  delivery_package: "交付包生成",
+  delivery: "交付",
+  delivery_package: "交付候选生成",
 };
 const STEP_LABELS: Record<string, string> = {
   generate: "生成内容",
@@ -90,19 +91,30 @@ function businessName(raw?: string | null, map = WORKFLOW_LABELS) {
   if (!raw) return "未命名流程";
   return map[raw] || "其他业务步骤";
 }
+export function runFailureGuidance(status?: string | null) {
+  if (status === "PAUSED_BUDGET") return "预算不足，查看范围和已耗费用后再决定是否恢复。";
+  if (status === "PAUSED_EXTERNAL") return "外部服务中断，可查看原因并从安全检查点恢复。";
+  if (status === "WAITING_RETRY") return "系统正在等待自动重试，可查看失败原因。";
+  if (status === "WAITING_HUMAN") return "需要人工确认后才能继续。";
+  if (status === "PARTIAL") return "部分步骤未完成，可查看详情后受控重试。";
+  return "运行未完成，可查看错误详情后重试或返回源页面修正。";
+}
 function formatTime(value?: number | null) {
   return value ? new Date(value * 1000).toLocaleString() : "—";
 }
 function paramsFromLocation() {
   return new URLSearchParams(window.location.search);
 }
-function setUrlParams(patch: Record<string, string | null>) {
+function setUrlParams(
+  patch: Record<string, string | null>,
+  push = true,
+) {
   const params = paramsFromLocation();
   Object.entries(patch).forEach(([key, value]) =>
     value ? params.set(key, value) : params.delete(key),
   );
   const next = `${window.location.pathname}?${params.toString()}`;
-  window.history.pushState(
+  window.history[push ? "pushState" : "replaceState"](
     {},
     "",
     next.endsWith("?") ? window.location.pathname : next,
@@ -146,6 +158,7 @@ function GateDrawer({
   const [loading, setLoading] = useState(true);
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState("");
+  const [confirmDecision, setConfirmDecision] = useState<"approve" | "reject" | "">("");
   const drawerRef = useFocusTrap(true, onClose);
   const load = useCallback(async () => {
     setLoading(true);
@@ -193,6 +206,7 @@ function GateDrawer({
       setError((e as Error).message);
     } finally {
       setBusy("");
+      setConfirmDecision("");
     }
   };
   return (
@@ -214,10 +228,10 @@ function GateDrawer({
       >
         <header>
           <div>
-            <span className="eyebrow">HUMAN GATE</span>
-            <h3 id="gate-title">{GATE_LABELS[gate.type] || "人工门禁"}</h3>
+            <span className="eyebrow">人工确认</span>
+            <h3 id="gate-title">{GATE_LABELS[gate.type] || "人工确认"}</h3>
           </div>
-          <button type="button" onClick={onClose} aria-label="关闭门禁面板">
+          <button type="button" onClick={onClose} aria-label="关闭人工确认面板">
             ×
           </button>
         </header>
@@ -250,10 +264,10 @@ function GateDrawer({
               <b>
                 {blockers.length
                   ? `${blockers.length} 个阻塞问题需要决定`
-                  : "自动门禁已通过，等待人工确认"}
+                  : "自动检查已通过，等待人工确认"}
               </b>
               <span>
-                证据 v{evidence.version} · {evidence.trust_level} · 最后同步{" "}
+                证据第 {evidence.version} 版 · {statusLabel(evidence.trust_level)} · 最后同步{" "}
                 {formatTime(gate.created_at)}
               </span>
             </div>
@@ -290,7 +304,10 @@ function GateDrawer({
               <span>处理意见（必填）</span>
               <textarea
                 value={reason}
-                onChange={(e) => setReason(e.target.value)}
+                onChange={(e) => {
+                  setReason(e.target.value);
+                  setConfirmDecision("");
+                }}
                 placeholder="记录批准依据，或明确打回修改项"
               />
             </label>
@@ -309,7 +326,14 @@ function GateDrawer({
                 type="button"
                 className="danger"
                 disabled={!reason.trim() || !!busy || stale}
-                onClick={() => void decide("reject")}
+                aria-label={!reason.trim()
+                  ? "打回修改，暂不可用：请先填写处理意见"
+                  : stale
+                    ? "打回修改，暂不可用：证据已有新版本，请先刷新"
+                    : busy
+                      ? "打回修改，暂不可用：正在提交决定"
+                      : "预览打回修改的影响"}
+                onClick={() => setConfirmDecision("reject")}
               >
                 {busy === "reject" ? "提交中…" : "打回修改"}
               </button>
@@ -319,16 +343,35 @@ function GateDrawer({
                 disabled={
                   !reason.trim() || !!busy || stale || blockers.length > 0
                 }
-                title={
-                  blockers.length
-                    ? "存在 blocker 时不能直接批准，请先打回处理"
-                    : ""
-                }
-                onClick={() => void decide("approve")}
+                aria-label={!reason.trim()
+                  ? "批准并继续，暂不可用：请先填写处理意见"
+                  : stale
+                    ? "批准并继续，暂不可用：证据已有新版本，请先刷新"
+                    : blockers.length
+                      ? `批准并继续，暂不可用：仍有 ${blockers.length} 个阻塞问题，请先打回处理`
+                      : busy
+                        ? "批准并继续，暂不可用：正在提交决定"
+                        : "预览批准并继续的影响"}
+                onClick={() => setConfirmDecision("approve")}
               >
                 {busy === "approve" ? "提交中…" : "批准并继续"}
               </button>
             </div>
+            {confirmDecision && (
+              <div className="monitor-inline-confirm" role="group" aria-label="确认人工处理决定">
+                <span>
+                  {confirmDecision === "approve"
+                    ? "批准后后续制作可继续，后续生成可能产生模型费用；当前证据、历史版本和审计记录会保留。"
+                    : "打回后当前内容会保留并停止向下游推进；不会自动删除资产，也不会立即产生新的模型费用。"}
+                </span>
+                <button type="button" disabled={!!busy}
+                  onClick={() => void decide(confirmDecision)}>
+                  {busy ? "提交中…" : confirmDecision === "approve" ? "确认批准并继续" : "确认打回修改"}
+                </button>
+                <button type="button" disabled={!!busy}
+                  onClick={() => setConfirmDecision("")}>返回检查</button>
+              </div>
+            )}
           </>
         )}
       </aside>
@@ -380,7 +423,9 @@ export default function RunCenter({
   const [actionBusy, setActionBusy] = useState("");
   const [actionError, setActionError] = useState("");
   const [actionMessage, setActionMessage] = useState("");
-  const [confirmCancel, setConfirmCancel] = useState(false);
+  const [confirmAction, setConfirmAction] = useState<
+    "" | "cancel" | "resume" | "retry"
+  >("");
   const requestSeq = useRef(0);
   const selectedRowRef = useRef<HTMLButtonElement | null>(null);
 
@@ -540,12 +585,13 @@ export default function RunCenter({
   }, [focusToken, selected, runs]);
 
   const choose = (id: string) => {
+    setConfirmAction("");
     setSelected(id);
     setUrlParams({ run_id: id, focus: String(Date.now()) });
     onSelect?.(id);
   };
   const updateFilter = (patch: Record<string, string | null>) => {
-    setUrlParams(patch);
+    setUrlParams(patch, false);
     setPage(1);
   };
   const runAction = async (action: "cancel" | "resume" | "retry") => {
@@ -572,23 +618,39 @@ export default function RunCenter({
         setDetail(nextDetail);
       }
       setActionMessage(
-        `${businessName(current?.workflow_type)} ${action === "cancel" ? "取消" : action === "resume" ? "恢复" : "重试"}请求已由服务端接受`,
+        `${businessName(current?.workflow_type)} ${action === "cancel" ? "取消" : action === "resume" ? "恢复" : "重试"}请求已由系统接受`,
       );
     } catch (e) {
       setActionError((e as Error).message);
     } finally {
       setActionBusy("");
-      setConfirmCancel(false);
+      setConfirmAction("");
     }
   };
   const current =
     detail || runs?.items.find((run) => run.id === selected) || null;
   const workflows = Object.keys(WORKFLOW_LABELS);
+  const filterCount = [
+    search,
+    status,
+    workflow,
+    project,
+    episode,
+    fromTime,
+    toTime,
+    sort !== "desc" ? sort : "",
+    includeHistory ? "history" : "",
+  ].filter(Boolean).length;
+  const timeInvalid = Boolean(
+    fromTime &&
+      toTime &&
+      new Date(fromTime).getTime() > new Date(toTime).getTime(),
+  );
   return (
     <section className="card run-center" aria-busy={loading}>
       <div className="run-center-head">
         <div>
-          <span className="eyebrow">ACTIONABLE RUNS</span>
+          <span className="eyebrow">可处理任务</span>
           <h3>运行中心</h3>
           <p>默认聚焦运行中、待人工、失败与可恢复任务；成功历史可按需查询。</p>
         </div>
@@ -602,7 +664,7 @@ export default function RunCenter({
           <input
             value={search}
             aria-label="搜索运行"
-            placeholder="Run、项目、集数或错误"
+            placeholder="运行编号、项目、集数或错误"
             onChange={(e) => {
               setSearch(e.target.value);
               updateFilter({
@@ -615,6 +677,7 @@ export default function RunCenter({
         <label>
           <span>状态</span>
           <select
+            aria-label="按运行状态筛选"
             value={status}
             onChange={(e) => {
               setStatus(e.target.value);
@@ -624,7 +687,7 @@ export default function RunCenter({
               });
             }}
           >
-            <option value="">默认待办</option>
+            <option value="">默认：待处理与异常</option>
             {Object.entries(STATUS_LABELS).map(([key, label]) => (
               <option value={key} key={key}>
                 {label}
@@ -635,6 +698,7 @@ export default function RunCenter({
         <label>
           <span>工作流</span>
           <select
+            aria-label="按工作流筛选运行"
             value={workflow}
             onChange={(e) => {
               setWorkflow(e.target.value);
@@ -653,9 +717,11 @@ export default function RunCenter({
           </select>
         </label>
         <label>
-          <span>项目 ID</span>
+          <span>指定项目（高级筛选）</span>
           <input
+            aria-label="按项目技术标识精确筛选运行"
             value={project}
+            placeholder="输入项目技术标识（可选）"
             onChange={(e) => {
               setProject(e.target.value);
               updateFilter({
@@ -669,8 +735,10 @@ export default function RunCenter({
           <span>集数</span>
           <input
             type="number"
+            aria-label="按集数筛选运行"
             min="1"
             value={episode}
+            placeholder="如 1"
             onChange={(e) => {
               setEpisode(e.target.value);
               updateFilter({
@@ -684,7 +752,10 @@ export default function RunCenter({
           <span>开始时间</span>
           <input
             type="datetime-local"
+            aria-label="运行开始时间下限"
             value={fromTime}
+            max={toTime || undefined}
+            aria-invalid={timeInvalid}
             onChange={(e) => {
               setFromTime(e.target.value);
               updateFilter({
@@ -698,7 +769,10 @@ export default function RunCenter({
           <span>结束时间</span>
           <input
             type="datetime-local"
+            aria-label="运行结束时间上限"
             value={toTime}
+            min={fromTime || undefined}
+            aria-invalid={timeInvalid}
             onChange={(e) => {
               setToTime(e.target.value);
               updateFilter({ run_to: e.target.value || null, run_page: null });
@@ -708,6 +782,7 @@ export default function RunCenter({
         <label>
           <span>排序</span>
           <select
+            aria-label="运行排序方式"
             value={sort}
             onChange={(e) => {
               setSort(e.target.value);
@@ -730,10 +805,17 @@ export default function RunCenter({
               });
             }}
           />
-          查询成功历史
+          包含已完成历史
         </label>
         <button
+          type="button"
           className="monitor-clear"
+          disabled={filterCount === 0}
+          aria-label={
+            filterCount
+              ? `清除 ${filterCount} 项运行筛选`
+              : "当前没有运行筛选可清除"
+          }
           onClick={() => {
             setSearch("");
             setStatus("");
@@ -759,17 +841,22 @@ export default function RunCenter({
             });
           }}
         >
-          清除组合筛选
+          {filterCount ? `清除筛选（${filterCount}）` : "清除筛选"}
         </button>
       </div>
+      {timeInvalid && (
+        <p className="monitor-filter-error" role="alert">
+          开始时间不能晚于结束时间，请调整时间范围。
+        </p>
+      )}
       <div className="gate-queue">
         <div className="gate-queue-head">
-          <b>人工门禁队列</b>
+          <b>待人工确认</b>
           <span>{gates ? `${gates.length} 项待处理` : "加载中"}</span>
         </div>
         {gateError && (
           <div className="monitor-state error" role="alert">
-            门禁加载失败：{gateError}
+            人工确认项加载失败：{gateError}
             <button onClick={refreshGates}>重试</button>
           </div>
         )}
@@ -778,26 +865,31 @@ export default function RunCenter({
             查询成功：当前没有待人工决定的核心产物
           </span>
         )}
-        {gates?.map((item) => (
-          <button
-            type="button"
-            className="gate-item gate-item-button"
-            key={`${item.id}-${item.version}`}
-            onClick={() => setOpenGate(item)}
-            aria-label={`处理${GATE_LABELS[item.type] || item.type}：${item.project_name || item.scope_id}`}
-          >
-            <div>
-              <b>{GATE_LABELS[item.type] || "其他门禁"}</b>
-              <span>
-                {item.project_name || "上下文未关联"}
-                {item.episode_no
-                  ? ` · 第${item.episode_no}集 ${item.episode_title || ""}`
-                  : ""}
-              </span>
-            </div>
-            <span>查看证据并决策 →</span>
-          </button>
-        ))}
+        {gates?.map((item) => {
+          const scope = item.episode_no
+            ? `第${item.episode_no}集 ${item.episode_title || ""}`.trim()
+            : item.project_name
+              ? "项目级内容"
+              : "未关联具体范围";
+          return (
+            <button
+              type="button"
+              className="gate-item gate-item-button"
+              key={`${item.id}-${item.version}`}
+              onClick={() => setOpenGate(item)}
+              aria-label={`处理${GATE_LABELS[item.type] || "其他人工确认"}：${item.project_name || "未关联项目"}，${scope}，提交于 ${formatTime(item.created_at)}`}
+            >
+              <div>
+                <b>{GATE_LABELS[item.type] || "其他人工确认"}</b>
+                <span>
+                  {item.project_name || "未关联项目"} · {scope} · 提交于{" "}
+                  {formatTime(item.created_at)}
+                </span>
+              </div>
+              <span>查看证据并决策 →</span>
+            </button>
+          );
+        })}
       </div>
       {listError && (
         <div
@@ -830,34 +922,37 @@ export default function RunCenter({
         <>
           <div className="run-center-grid">
             <div className="run-list">
-              {runs.items.map((run) => (
-                <button
-                  ref={run.id === selected ? selectedRowRef : undefined}
-                  type="button"
-                  key={run.id}
-                  className={run.id === selected ? "active" : ""}
-                  onClick={() => choose(run.id)}
-                  aria-pressed={run.id === selected}
-                >
-                  <b>{businessName(run.workflow_type)}</b>
-                  <span>
-                    {STATUS_LABELS[run.status] || "其他 / 内部状态"} ·{" "}
-                    {formatTime(run.updated_at)}
-                  </span>
-                  <small>
-                    {run.project_name || "上下文未关联"}
-                    {run.episode_no ? ` · 第${run.episode_no}集` : ""}
-                    {run.failure_message
-                      ? ` · ${run.failure_message.slice(0, 100)}`
-                      : ""}
-                  </small>
-                </button>
-              ))}
+              {runs.items.map((run) => {
+                return (
+                  <button
+                    ref={run.id === selected ? selectedRowRef : undefined}
+                    type="button"
+                    key={run.id}
+                    className={run.id === selected ? "active" : ""}
+                    onClick={() => choose(run.id)}
+                    aria-pressed={run.id === selected}
+                  >
+                    <b>
+                      {businessName(run.workflow_type)}
+                      {run.shot_no != null ? ` · 镜${run.shot_no}` : ""}
+                    </b>
+                    <span>
+                      {STATUS_LABELS[run.status] || "状态待确认"} ·{" "}
+                      {formatTime(run.updated_at)}
+                    </span>
+                    <small>
+                      {run.project_name || "上下文未关联"}
+                      {run.episode_no ? ` · 第${run.episode_no}集` : ""}
+                      {run.failure_message ? ` · ${runFailureGuidance(run.status)}` : ""}
+                    </small>
+                  </button>
+                );
+              })}
             </div>
             <div className="run-detail">
               {detailError && (
                 <div className="monitor-state error" role="alert">
-                  目标 Run 无法定位：{detailError}。不会自动改选其他 Run。
+                  目标运行任务无法定位：{detailError}。不会自动改选其他任务。
                   <button
                     onClick={() => {
                       setSelected(null);
@@ -872,19 +967,29 @@ export default function RunCenter({
                 <>
                   <div className="run-detail-summary">
                     <b>{businessName(current.workflow_type)}</b>
-                    <code>{current.id}</code>
                     <span>
                       {current.project_name ||
-                        `${current.scope_type}:${current.scope_id}`}{" "}
-                      · ¥{Number(current.cost_cny || 0).toFixed(2)}
+                        "上下文未关联"}{" "}
+                      {current.episode_no
+                        ? `· 第${current.episode_no}集 `
+                        : ""}
+                      {current.shot_no != null ? `· 镜${current.shot_no} ` : ""}
+                      · 已记录费用 ¥
+                      {Number(current.cost_cny || 0).toFixed(2)}
                     </span>
+                    <details>
+                      <summary>技术标识</summary>
+                      <code>{current.id}</code>
+                      <small>{current.scope_type}:{current.scope_id}</small>
+                    </details>
                   </div>
                   {current.failure_message && (
                     <div className="monitor-impact">
                       <b>当前影响：</b>
-                      {current.failure_message}
-                      <details>
-                        <summary>技术详情</summary>
+                      <span>{runFailureGuidance(current.status)}</span>
+                      <details className="monitor-error-details">
+                        <summary>查看错误详情</summary>
+                        <pre>{current.failure_message}</pre>
                         <code>
                           {current.failure_code || "未记录错误码"} ·{" "}
                           {current.current_step_key || "未记录步骤"}
@@ -893,27 +998,14 @@ export default function RunCenter({
                     </div>
                   )}
                   <div className="monitor-run-actions">
-                    {current.status === "RUNNING" && !confirmCancel && (
+                    {current.status === "RUNNING" && !confirmAction && (
                       <button
                         className="danger"
-                        onClick={() => setConfirmCancel(true)}
+                        aria-label={actionBusy ? "取消运行，暂不可用：正在处理上一项操作" : "取消当前运行"}
+                        onClick={() => setConfirmAction("cancel")}
                       >
                         取消运行
                       </button>
-                    )}
-                    {current.status === "RUNNING" && confirmCancel && (
-                      <span className="monitor-inline-confirm">
-                        取消可能中止长任务并保留已产生费用。
-                        <button
-                          onClick={() => void runAction("cancel")}
-                          disabled={!!actionBusy}
-                        >
-                          {actionBusy ? "处理中…" : "确认取消"}
-                        </button>
-                        <button onClick={() => setConfirmCancel(false)}>
-                          返回
-                        </button>
-                      </span>
                     )}
                     {[
                       "PAUSED_EXTERNAL",
@@ -921,23 +1013,54 @@ export default function RunCenter({
                       "WAITING_RETRY",
                       "WAITING_HUMAN",
                       "WAITING_AUTHORIZATION",
-                    ].includes(current.status) && (
+                    ].includes(current.status) &&
+                      !confirmAction && (
                       <button
-                        onClick={() => void runAction("resume")}
+                        onClick={() => setConfirmAction("resume")}
                         disabled={!!actionBusy}
+                        aria-label={actionBusy ? "从检查点恢复，暂不可用：正在处理上一项操作" : "从安全检查点恢复运行"}
                       >
-                        {actionBusy ? "处理中…" : "从检查点恢复"}
+                        从检查点恢复
                       </button>
                     )}
                     {["FAILED", "PARTIAL", "CANCELLED"].includes(
                       current.status,
-                    ) && (
+                    ) &&
+                      !confirmAction && (
                       <button
-                        onClick={() => void runAction("retry")}
+                        onClick={() => setConfirmAction("retry")}
                         disabled={!!actionBusy}
+                        aria-label={actionBusy ? "受控重试，暂不可用：正在处理上一项操作" : "受控重试当前运行"}
                       >
-                        {actionBusy ? "处理中…" : "受控重试"}
+                        受控重试
                       </button>
+                    )}
+                    {confirmAction && (
+                      <span className="monitor-inline-confirm">
+                        {confirmAction === "cancel"
+                          ? "取消会中止当前任务，已产生的上游费用仍会保留。"
+                          : confirmAction === "resume"
+                            ? "恢复会从安全检查点继续，并可能产生新的模型费用。"
+                            : "重试会创建新的执行轮次，并可能产生新的模型费用。"}
+                        <button
+                          onClick={() => void runAction(confirmAction)}
+                          disabled={!!actionBusy}
+                        >
+                          {actionBusy
+                            ? "处理中…"
+                            : confirmAction === "cancel"
+                              ? "确认取消"
+                              : confirmAction === "resume"
+                                ? "确认恢复"
+                                : "确认重试"}
+                        </button>
+                        <button
+                          disabled={!!actionBusy}
+                          onClick={() => setConfirmAction("")}
+                        >
+                          返回
+                        </button>
+                      </span>
                     )}
                   </div>
                   {actionError && (
@@ -960,13 +1083,14 @@ export default function RunCenter({
                         <div>
                           <b>{businessName(step.step_key, STEP_LABELS)}</b>
                           <span>
-                            {STATUS_LABELS[step.status] || "其他 / 内部状态"} ·{" "}
+                            {STATUS_LABELS[step.status] || "状态待确认"} ·{" "}
                             {(step.latency_ms / 1000).toFixed(1)} 秒
                           </span>
                           {(step.error_message || step.exit_reason) && (
-                            <small>
-                              {step.error_message || step.exit_reason}
-                            </small>
+                            <details className="monitor-error-details">
+                              <summary>查看步骤错误</summary>
+                              <pre>{step.error_message || step.exit_reason}</pre>
+                            </details>
                           )}
                           <details>
                             <summary>技术标识</summary>
@@ -1001,6 +1125,7 @@ export default function RunCenter({
             <label>
               每页
               <select
+                aria-label={`每页显示运行记录数，当前 ${pageSize} 条`}
                 value={pageSize}
                 onChange={(e) => {
                   const size = Number(e.target.value);
@@ -1016,6 +1141,7 @@ export default function RunCenter({
             </label>
             <button
               disabled={page <= 1}
+              aria-label={page <= 1 ? "上一页，暂不可用：当前已是第一页" : "上一页"}
               onClick={() => {
                 setPage(page - 1);
                 setUrlParams({ run_page: String(page - 1) });
@@ -1028,6 +1154,7 @@ export default function RunCenter({
             </b>
             <button
               disabled={page >= runs.page_count}
+              aria-label={page >= runs.page_count ? "下一页，暂不可用：当前已是最后一页" : "下一页"}
               onClick={() => {
                 setPage(page + 1);
                 setUrlParams({ run_page: String(page + 1) });

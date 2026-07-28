@@ -7,6 +7,7 @@ export default function AgentComposer({
   onStop,
   disabled,
   stopping,
+  statusMessage,
 }: {
   value: string
   onChange: (v: string) => void
@@ -14,6 +15,7 @@ export default function AgentComposer({
   onStop: () => void
   disabled?: boolean
   stopping?: boolean
+  statusMessage?: string
 }) {
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
 
@@ -27,6 +29,13 @@ export default function AgentComposer({
   }, [value])
 
   const actionDisabled = !stopping && (Boolean(disabled) || !value.trim())
+  const disabledReason = stopping
+    ? ''
+    : disabled
+      ? statusMessage || '正在发送上一条消息'
+      : !value.trim()
+        ? '请先输入消息'
+        : ''
 
   return (
     <div className="agent-composer">
@@ -35,8 +44,9 @@ export default function AgentComposer({
           ref={inputRef}
           className="agent-input"
           rows={1}
-          placeholder="给案头助手发消息"
+          placeholder={statusMessage || '给案头助手发消息'}
           aria-label="消息内容"
+          aria-describedby={statusMessage ? 'agent-composer-status' : undefined}
           value={value}
           disabled={disabled}
           onChange={e => onChange(e.target.value)}
@@ -53,8 +63,8 @@ export default function AgentComposer({
         <button
           type="button"
           className={`agent-send-button ${stopping ? 'stopping' : ''}`}
-          aria-label={stopping ? '停止生成' : '发送消息'}
-          title={stopping ? '停止生成' : '发送消息'}
+          aria-label={stopping ? '停止生成' : disabledReason ? `发送消息，暂不可用：${disabledReason}` : '发送消息'}
+          title={stopping ? '停止生成' : disabledReason || '发送消息'}
           disabled={actionDisabled}
           onClick={stopping ? onStop : onSend}
         >
@@ -67,6 +77,11 @@ export default function AgentComposer({
           )}
         </button>
       </div>
+      {statusMessage && (
+        <p id="agent-composer-status" className="agent-composer-status" role="status">
+          {statusMessage}
+        </p>
+      )}
     </div>
   )
 }

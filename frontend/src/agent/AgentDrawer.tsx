@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type ArtifactEvidence } from "../api";
 import EvidenceDrawer from "../components/harness/EvidenceDrawer";
 import { useNav } from "../App";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useScrollContainment } from "../useScrollContainment";
 import AgentComposer from "./AgentComposer";
 import AssistantTurnView from "./AssistantTurnView";
@@ -17,6 +18,12 @@ import {
 import type { ContextEnvelope, UiIntent } from "./types";
 import { applyUiIntent } from "./uiBridge";
 import { useAgentStream } from "./useAgentStream";
+
+const STARTER_PROMPTS = [
+  "检查当前页面有哪些未完成项",
+  "告诉我接下来最该处理什么",
+  "定位最近失败的生成任务",
+];
 
 let _uidSeq = 0;
 function uid(prefix: string): string {
@@ -83,11 +90,30 @@ export default function AgentDrawer({
 }) {
   const { go, toast } = useNav();
   const drawerRef = useRef<HTMLElement | null>(null);
+  const [overlayMode, setOverlayMode] = useState(() =>
+    window.matchMedia("(max-width: 1280px)").matches,
+  );
+  const overlayTrapRef = useFocusTrap(open && overlayMode, onClose);
+  const bindDrawerRef = useCallback(
+    (node: HTMLElement | null) => {
+      drawerRef.current = node;
+      overlayTrapRef.current = node;
+    },
+    [overlayTrapRef],
+  );
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const transcriptRef = useRef<HTMLDivElement | null>(null);
   const stickRef = useRef(true);
   const conversationScope = convKey(context.project_id);
   const scopeRef = useRef(conversationScope);
   useScrollContainment(drawerRef, open);
+
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 1280px)");
+    const update = (event: MediaQueryListEvent) => setOverlayMode(event.matches);
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
 
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [turnId, setTurnId] = useState<string | null>(null);
@@ -95,6 +121,7 @@ export default function AgentDrawer({
   const [sending, setSending] = useState(false);
   const [messages, setMessages] = useState<TranscriptItem[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [sessionAttempt, setSessionAttempt] = useState(0);
 
   const streaming = Boolean(turnId) && sending;
   const {
@@ -114,24 +141,40 @@ export default function AgentDrawer({
     setTurnId(null);
     setSending(false);
     setMessages([]);
+    setInput("");
     setError(null);
   }, [conversationScope, resetStream]);
 
   // Esc 收起
   useEffect(() => {
-    if (!open) return;
+    if (!open || overlayMode) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  }, [open, onClose, overlayMode]);
+
+  useEffect(() => {
+    if (!open) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (conversationId) {
+        drawerRef.current
+          ?.querySelector<HTMLTextAreaElement>(".agent-input")
+          ?.focus();
+      } else {
+        closeButtonRef.current?.focus();
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [conversationId, open]);
 
   // 会话引导：优先复用本机上次会话（含历史回填），失败或不存在则新建。
   useEffect(() => {
     if (!open || conversationId) return;
     let cancelled = false;
     const key = conversationScope;
+    setError(null);
 
     const createNew = async () => {
       const conv = (await api.post("/agent/conversations", {
@@ -148,6 +191,7 @@ export default function AgentDrawer({
       }
       setConversationId(conv.id);
       setMessages([]);
+      setError(null);
     };
 
     (async () => {
@@ -166,6 +210,7 @@ export default function AgentDrawer({
           if (cancelled) return;
           setConversationId(data.conversation.id);
           setMessages(mapHistory(data.messages || []));
+          setError(null);
           return;
         } catch {
           /* 会话已不存在（如 DB 重置）→ 落到新建 */
@@ -182,7 +227,13 @@ export default function AgentDrawer({
     return () => {
       cancelled = true;
     };
-  }, [open, conversationId, context.project_id, conversationScope]);
+  }, [
+    open,
+    conversationId,
+    context.project_id,
+    conversationScope,
+    sessionAttempt,
+  ]);
 
   // 把当前 turn 的事件流折叠进对应的 assistant 消息（不覆盖历史，其它消息原样保留）。
   useEffect(() => {
@@ -263,7 +314,7 @@ export default function AgentDrawer({
     if (!turnId) return;
     try {
       await api.post(`/agent/turns/${turnId}/cancel`, { cancel_run: false });
-      toast("已停止本轮对话（底层 Run 未取消）");
+      toast("已停止本轮对话（已关联的后台任务不会自动取消）");
     } catch (err) {
       toast(err instanceof Error ? err.message : String(err), true);
     } finally {
@@ -353,10 +404,13 @@ export default function AgentDrawer({
   return (
     <aside
       id="agent-drawer"
-      ref={drawerRef}
+      ref={bindDrawerRef}
       className={`agent-drawer ${open ? "open" : ""}`}
+      role={open && overlayMode ? "dialog" : undefined}
+      aria-modal={open && overlayMode ? true : undefined}
       aria-label="案头助手"
       aria-hidden={!open}
+      aria-busy={open && !conversationId && !error}
     >
       <div className="agent-drawer-head">
         <div>
@@ -371,6 +425,7 @@ export default function AgentDrawer({
           )}
         </div>
         <button
+          ref={closeButtonRef}
           type="button"
           className="agent-panel-toggle"
           aria-label="收起案头助手"
@@ -413,15 +468,35 @@ export default function AgentDrawer({
       >
         {error && (
           <div className="agent-error" role="alert">
-            {error}
+            <span>{error}</span>
+            {!conversationId && (
+              <button
+                type="button"
+                onClick={() => setSessionAttempt((attempt) => attempt + 1)}
+              >
+                重新连接
+              </button>
+            )}
           </div>
         )}
 
         {messages.length === 0 && (
           <div className="agent-empty">
             <p>
-              我是案头助手：默认先帮你诊断状态并指路到对应工作台；付费/破坏性写入会请你确认，也可直接在页面按钮完成。
+              我会结合当前项目和页面检查状态、定位问题并带你前往对应工作台。涉及费用或删除等高风险操作时，会先请你确认。
             </p>
+            <div className="agent-starters" aria-label="示例问题">
+              {STARTER_PROMPTS.map((prompt) => (
+                <button
+                  type="button"
+                  key={prompt}
+                  disabled={!conversationId}
+                  onClick={() => setInput(prompt)}
+                >
+                  {prompt}
+                </button>
+              ))}
+            </div>
           </div>
         )}
 
@@ -460,6 +535,13 @@ export default function AgentDrawer({
         onStop={stop}
         disabled={sending || !conversationId}
         stopping={streaming}
+        statusMessage={
+          !conversationId
+            ? error
+              ? "会话未连接，请重新连接后再发送"
+              : "正在准备当前项目会话…"
+            : undefined
+        }
       />
       {evidence && (
         <div className="agent-evidence-host" style={{ padding: "0 12px 12px" }}>

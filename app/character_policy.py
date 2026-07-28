@@ -21,6 +21,20 @@ FUNCTIONAL_EXTRA_MODIFIERS = frozenset({
 })
 _EXTRA_INDEX_RE = re.compile(r"(?:甲|乙|丙|丁|A|B|C|D|[1-9]\d*)$", re.I)
 _ROLE_ORDINAL_RE = re.compile(r"(?:[一二三四五六七八九十]|[1-9]\d*)$")
+_COLLECTIVE_ROLE_EXACT = frozenset({
+    "人群", "众人", "群众", "大家", "人们", "百姓", "观众", "家族子弟", "族人", "子弟",
+})
+_COLLECTIVE_ROLE_MARKERS = (
+    "人群", "众人", "群众", "一群", "一众", "众弟子", "众族人", "围观人群", "围观众人",
+)
+_COLLECTIVE_ROLE_SUFFIXES = (
+    "们", "子弟", "人群", "群众", "百姓", "观众", "护卫队", "守卫队", "士兵队伍",
+)
+_COLLECTIVE_QUANTIFIER_RE = re.compile(
+    r"^(?:几|数|多|两|[2-9]|二|三|四|五|六|七|八|九|十)(?:名|位|个)?"
+    r"(?:族人|弟子|子弟|学生|顾客|村民|士兵|护卫|守卫|围观者|观众)$"
+)
+_SINGULAR_QUANTIFIER_RE = re.compile(r"^(?:一|1)(?:名|位|个)")
 
 
 def is_functional_extra(name: str) -> bool:
@@ -45,6 +59,34 @@ def is_functional_extra(name: str) -> bool:
     return any(
         value.startswith(base) and _EXTRA_INDEX_RE.fullmatch(value[len(base):]) is not None
         for base in FUNCTIONAL_EXTRA_BASES | FUNCTIONAL_EXTRA_ROLES
+    )
+
+
+def is_collective_role(name: str) -> bool:
+    """返回这个可见名单项是否表示群体，而不是一个需锁定身份的人。
+
+    「萧家子弟」这类 legacy 标签会出现在 characters_visible 中。如果按一个角色
+    处理，图像模型会把「众人议论」压成单人，还会错误寻找它的定妆照。
+    """
+    value = (name or "").strip()
+    if not value:
+        return False
+    if _SINGULAR_QUANTIFIER_RE.match(value):
+        return False
+    if value in _COLLECTIVE_ROLE_EXACT or _COLLECTIVE_QUANTIFIER_RE.fullmatch(value):
+        return True
+    if any(marker in value for marker in _COLLECTIVE_ROLE_MARKERS):
+        return True
+    return any(value.endswith(suffix) for suffix in _COLLECTIVE_ROLE_SUFFIXES)
+
+
+def collective_role_anchor(name: str) -> str:
+    """群体名单项的画面锚点：锁阵营/服饰语义，不伪造单人身份。"""
+    if not is_collective_role(name):
+        raise ValueError(f"not a collective role: {name}")
+    return (
+        f"叙事群体「{name}」，人数、前后景和动作严格按本镜目标描述；"
+        "这是由多个不同个体组成的群体，不得缩成一个固定身份，不复制主角长相"
     )
 
 

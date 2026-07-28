@@ -8,7 +8,9 @@ import hashlib
 import re
 
 from app import config
-from app.character_policy import functional_extra_anchor, is_functional_extra
+from app.character_policy import (
+    collective_role_anchor, functional_extra_anchor, is_collective_role, is_functional_extra,
+)
 from app.renderability import strip_overdetail_terms
 from app.schemas import Bible, Shot
 
@@ -289,20 +291,72 @@ def _framing_scale_hint(shot_size: str) -> str:
 
 # 接触类动作：人物与人物/道具发生真实肢体接触或近距交递，侧面机位最易读清接触点。
 _CONTACT_ACTION_MARKERS = (
-    "触碰", "触摸", "抚摸", "按压", "按住", "按下", "按上", "贴上", "贴住", "贴紧",
-    "拿取", "拿起", "握住", "抓住", "抓牢", "递出", "递给", "递过", "接过", "接住",
-    "挥击", "挥砍", "击打", "击中", "格挡", "挡住", "搀扶", "扶住", "扶着", "搀着",
-    "拍打", "拍肩", "拍了", "推开", "推住", "拉住", "拉着", "拖住", "抱住", "抱紧",
-    "搂住", "握手", "搭手", "搭肩", "抵住", "顶住", "压住", "捂住", "托住", "托着",
+    "触碰", "触摸", "接触", "触及", "抚摸", "按压", "按住", "按下", "按上", "贴上", "贴在", "贴着", "贴住", "贴紧", "紧贴",
+    "拿取", "拿起", "握住", "握着", "握紧", "攥住", "抓住", "抓着", "抓牢", "拽住", "揪住", "扣住", "递出", "递给", "递过", "接过", "接住",
+    "挥击", "挥砍", "击打", "击中", "打在", "踢中", "踹中", "踹在", "砸中", "砸在", "扇在", "扇了", "扇向", "格挡", "挡住", "搀扶", "扶住", "扶着", "搀着",
+    "拍打", "拍肩", "拍了", "打了一巴掌", "打了一拳", "推开", "推住", "推了", "拉住", "拉着", "拖住", "抱住", "抱着", "抱紧", "抱起",
+    "搂住", "搂着", "握手", "搭手", "搭肩", "搭在", "抵住", "顶住", "压住", "捂住", "掐住", "踩住", "托住", "托着", "托起", "捧着",
     "拔出", "插入", "刺向", "砍向", "捅向", "碰到", "摸到", "摸着", "摸上",
+    "牵手", "牵着手", "牵着", "牵住", "靠在肩", "倚在肩", "靠着肩", "倚着肩", "靠在", "倚在", "靠着", "倚着", "依偎", "拥抱", "挽住", "挽着", "扶起",
+    "十指相扣", "相扣", "抵着", "拳头落在", "撞上", "撞到", "亲吻", "吻上", "扑进", "背起", "背着", "扛起",
 )
+_ESTABLISHED_CONTACT_MARKERS = (
+    "触碰", "触摸", "接触", "触及", "抚摸", "按压", "按住", "按下", "按上",
+    "贴上", "贴在", "贴着", "贴住", "贴紧", "紧贴", "拿取", "拿起", "握住", "握着", "握紧", "攥住", "抓住", "抓着", "抓牢", "拽住", "揪住", "扣住",
+    "递给", "接过", "接住", "击中", "打在", "踢中", "踹中", "踹在", "砸中", "砸在", "扇在", "扇了", "格挡", "挡住", "搀扶", "扶住", "扶着", "搀着",
+    "拍打", "拍肩", "拍了", "打了一巴掌", "打了一拳", "推开", "推住", "推了", "拉住", "拉着", "拖住", "抱住", "抱着", "抱紧", "抱起",
+    "搂住", "搂着", "握手", "搭手", "搭肩", "搭在", "抵住", "顶住", "压住", "捂住", "掐住", "踩住", "托住", "托着", "托起", "捧着",
+    "拔出", "插入", "碰到", "摸到", "摸着", "摸上",
+    "牵手", "牵着手", "牵着", "牵住", "靠在肩", "倚在肩", "靠着肩", "倚着肩", "靠在", "倚在", "靠着", "倚着", "依偎", "拥抱", "挽住", "挽着", "扶起",
+    "十指相扣", "相扣", "抵着", "拳头落在", "撞上", "撞到", "亲吻", "吻上", "扑进", "背起", "背着", "扛起",
+)
+_RELEASE_CONTACT_MARKERS = (
+    "松开", "放开", "撒开", "甩开", "抽回", "缩回", "撤回", "抽出",
+    "收回手", "移开手", "挣脱", "脱离", "分开",
+)
+_NON_PHYSICAL_CONTACT_PHRASES = (
+    "抓住机会", "抓住时机", "抓住重点", "握住命运", "压住怒火", "压住情绪", "触动心弦",
+    "触及底线", "触及真相", "触及真理", "接触真相", "接触到真相", "触及灵魂",
+)
+_PRECONTACT_CUES = (
+    "尚未", "还未", "还没", "仍未", "并未", "并没有", "没有", "未曾", "不曾", "无法",
+    "未能", "没能", "差一点", "差点", "差一步", "几乎", "险些", "即将", "将要", "正要",
+    "准备", "试图", "尝试", "企图", "想要", "想", "欲", "并不",
+)
+_CONTACT_PROHIBITION_CUES = ("禁止", "避免", "不得", "不要", "勿", "非接触")
+_CONTACT_CLAUSE_BOUNDARY_RE = re.compile(r"[，,。；;！!？?\n]")
+_STATIC_OBJECT_CONTACT_RE = re.compile(
+    r"(?:(?:海报|告示|照片|画像|标语|标牌)[^，。；！？]{0,8}(?:贴在|挂在)|"
+    r"(?:贴在|挂在)墙上(?:的)?(?:海报|告示|照片|画像|标语|标牌))"
+)
+_ABSTRACT_CONTACT_RE = re.compile(
+    r"(?:触及|接触(?:到)?)(?:了)?"
+    r"(?:(?:事情|事件|案件|问题|制度|道德|法律|原则|人生)(?:的)?)?"
+    r"(?:底线|真相|真理|灵魂)"
+)
+_STATIC_OBJECT_LEAN_RE = re.compile(
+    r"(?:椅子|桌子|凳子|柜子|梯子|门板|木板|石碑|长剑|刀|枪|伞)"
+    r"[^，。；！？]{0,6}(?:靠在|倚在|靠着|倚着)"
+)
+_NON_HUMAN_IMPACT_RE = re.compile(
+    r"(?:阳光|光线|灯光|投影|影子|雨点|雨水|雪花)"
+    r"[^，。；！？]{0,8}(?:打在|砸在)"
+)
+_CARRIED_OBJECT_RE = re.compile(r"背着(?:书包|背包|行囊|包袱|长剑|刀|枪|箱子)")
+_EXPLICIT_ESTABLISHED_IMPACT_RE = re.compile(
+    r"(?:打了[^，。；！？]{0,5}(?:一巴掌|一拳)|"
+    r"(?:一巴掌|一拳)[^，。；！？]{0,5}(?:打在|扇在|砸在))"
+)
+_NEAR_CONTACT_RE = re.compile(
+    r"(?:手|指尖|拳头|脚|刀|剑)[^，。；！？]{0,8}(?:悬停|停在|逼近)"
+    r"[^，。；！？]{0,8}(?:前|旁|上方)"
+)
+_BARE_PRECONTACT_SUFFIX_RE = re.compile(r"(?:未|没|不)(?:真正|实际|成功|能|曾|再|可|敢|愿|肯)?$")
 _SIDE_VIEW_MARKERS = ("侧面", "侧视", "侧拍", "侧机位", "侧身机位", "侧面机位", "侧面视角")
 _HEIGHT_DIFF_MARKERS = (
     "身高差", "一高一低", "高他一头", "高她一头", "高出一头", "矮半头", "矮一头",
-    "明显更高", "明显更矮", "比.*高", "比.*矮", "仰头看", "仰视对方", "俯视对方",
-    "俯身看", "巨汉", "娇小", "矮小", "孩童", "幼童", "小孩", "儿童", "孩子气身材",
+    "明显更高", "明显更矮", "巨汉", "娇小", "矮小", "孩童", "幼童", "小孩", "儿童", "孩子气身材",
 )
-_HEIGHT_DIFF_RE = re.compile("|".join(_HEIGHT_DIFF_MARKERS))
 
 
 def _shot_visual_text(shot: Shot) -> str:
@@ -319,23 +373,148 @@ def _shot_visual_text(shot: Shot) -> str:
     return "。".join(p.strip() for p in parts if p and p.strip())
 
 
+def _shot_primary_interaction_text(shot: Shot) -> str:
+    """仅检测本镜主动作/结果，避免 state_in 里「仍握着茶杯」劫持新镜头机位。"""
+    parts = [shot.primary_action or "", shot.action_desc or "", shot.last_frame_desc or "", shot.state_out or ""]
+    if not any(part.strip() for part in parts):
+        parts = [shot.first_frame_desc or "", shot.state_in or ""]
+    return "。".join(part.strip() for part in parts if part and part.strip())
+
+
 def has_contact_action(shot: Shot) -> bool:
     """本镜主动作是否含人物与人物/道具的真实接触互动。"""
-    text = _shot_visual_text(shot)
-    return any(m in text for m in _CONTACT_ACTION_MARKERS)
+    return shot_contact_phase(shot) in {"approach", "established", "separated"}
+
+
+def shot_contact_phase(shot: Shot) -> str:
+    """本镜主互动的接触阶段；不读历史起始姿态。"""
+    return contact_action_phase(_shot_primary_interaction_text(shot))
+
+
+def contains_contact_action(text: str | None) -> bool:
+    """一段画面描述是否含真实接触动作。
+
+    该函数与 :func:`has_contact_action` 共用同一词表，供视频和叙事关键帧
+    选择“接触已成立”的唯一定格时刻，避免两条生产链语义漂移。
+    """
+    return contact_action_phase(text) in {"approach", "established", "separated"}
+
+
+def contains_established_contact_action(text: str | None) -> bool:
+    """一段画面描述是否明确表示接触已经成立。"""
+    return contact_action_phase(text) == "established"
+
+
+def contact_action_phase(text: str | None) -> str:
+    """返回目标画面的物理互动阶段：established / approach / separated / none。"""
+    value = (text or "").strip()
+    if not value:
+        return "none"
+    for phrase in _NON_PHYSICAL_CONTACT_PHRASES:
+        value = value.replace(phrase, "")
+    value = _STATIC_OBJECT_CONTACT_RE.sub("", value)
+    value = _STATIC_OBJECT_LEAN_RE.sub("", value)
+    value = _NON_HUMAN_IMPACT_RE.sub("", value)
+    value = _CARRIED_OBJECT_RE.sub("", value)
+    value = _ABSTRACT_CONTACT_RE.sub("", value)
+    phases: list[tuple[int, str]] = []
+    established_markers = set(_ESTABLISHED_CONTACT_MARKERS)
+    for marker in sorted(set(_CONTACT_ACTION_MARKERS), key=len, reverse=True):
+        start = 0
+        while True:
+            index = value.find(marker, start)
+            if index < 0:
+                break
+            prefix = _CONTACT_CLAUSE_BOUNDARY_RE.split(value[:index])[-1][-18:]
+            # 「没有犹豫便抓住」不是未抓住。
+            for non_negating_phrase in (
+                "没有犹豫", "毫不犹豫", "没有迟疑", "没有退缩", "没有停顿", "不顾一切",
+                "想也不想", "想都没想", "不假思索",
+            ):
+                prefix = prefix.replace(non_negating_phrase, "")
+            if any(cue in prefix for cue in _CONTACT_PROHIBITION_CUES):
+                start = index + len(marker)
+                continue
+            is_precontact = (
+                any(cue in prefix for cue in _PRECONTACT_CUES)
+                or bool(_BARE_PRECONTACT_SUFFIX_RE.search(prefix))
+            )
+            if is_precontact or marker not in established_markers:
+                phases.append((index, "approach"))
+            else:
+                phases.append((index, "established"))
+            start = index + len(marker)
+    phases.extend((match.start(), "established") for match in _EXPLICIT_ESTABLISHED_IMPACT_RE.finditer(value))
+    for marker in _RELEASE_CONTACT_MARKERS:
+        start = 0
+        while True:
+            index = value.find(marker, start)
+            if index < 0:
+                break
+            prefix = _CONTACT_CLAUSE_BOUNDARY_RE.split(value[:index])[-1][-12:]
+            negated = any(cue in prefix for cue in (
+                "尚未", "还未", "还没", "并未", "并没有", "没有", "不曾", "未曾",
+                "不肯", "不愿", "绝不", "拒绝",
+            ))
+            phases.append((index, "established" if negated else "separated"))
+            start = index + len(marker)
+    if phases:
+        if re.search(
+            r"(?:松开|放开|撒开|甩开|抽回|缩回|撤回|抽出|收回手|移开手)"
+            r"[^，。；！？]{0,8}(?:原本|原先|之前|先前|一直|被)"
+            r"[^，。；！？]{0,10}(?:握住|握紧|抓住|抓着|拉住|抱住|搂住)",
+            value,
+        ):
+            return "separated"
+        # 同一目标句可能写「想抓住却没碰到」；最后一个物理结果决定定格阶段。
+        return max(phases, key=lambda item: item[0])[1]
+    return "approach" if _NEAR_CONTACT_RE.search(value) else "none"
 
 
 def has_explicit_height_difference(shot: Shot, bible: Bible | None = None) -> bool:
     """提示词/外观锚点是否已明确写出身高差（有则不强行同身高）。"""
-    chunks = [_shot_visual_text(shot)]
+    return bool(explicit_height_difference_evidence(shot, bible))
+
+
+def explicit_height_difference_evidence(shot: Shot, bible: Bible | None = None) -> list[str]:
+    """返回确定性命中的身高差原文，供关键帧提示词/QA 保留具体关系。"""
+    chunks = [
+        shot.primary_action or "",
+        shot.action_desc or "",
+        shot.state_in or "",
+        shot.state_out or "",
+        shot.first_frame_desc or "",
+        shot.last_frame_desc or "",
+        shot.spatial_anchor or "",
+    ]
+    from app.continuity import effective_characters_visible
+
+    visible_names = [str(name).strip() for name in effective_characters_visible(shot) if str(name).strip()]
+    relation_subjects = list(dict.fromkeys([*visible_names, "甲", "乙", "丙", "他", "她", "对方"]))
     if bible is not None:
+
         bible_map = {c.name: c for c in bible.characters}
-        for name in shot.characters or []:
+        for name in effective_characters_visible(shot):
             ch = bible_map.get(name)
             if ch and (ch.appearance_canonical or "").strip():
                 chunks.append(ch.appearance_canonical)
-    text = "。".join(chunks)
-    return bool(_HEIGHT_DIFF_RE.search(text))
+    evidence: list[str] = []
+    for chunk in chunks:
+        value = (chunk or "").strip()
+        has_literal = any(marker in value for marker in _HEIGHT_DIFF_MARKERS)
+        has_relation = any(
+            re.search(
+                rf"{re.escape(left)}[^，。；！？]{{0,4}}比[^，。；！？]{{0,4}}{re.escape(right)}"
+                r"[^，。；！？]{0,3}(?:高|矮)(?!兴|级|潮|光|声)",
+                value,
+            )
+            for left in relation_subjects
+            for right in relation_subjects
+            if left != right
+        )
+        if value and (has_literal or has_relation) and value not in evidence:
+            evidence.append(value)
+    return evidence[:4]
 
 
 def _resolve_camera_angle(shot: Shot) -> str:
@@ -351,7 +530,14 @@ def _resolve_camera_angle(shot: Shot) -> str:
 
 def _equal_height_hint(shot: Shot, bible: Bible | None = None) -> str:
     """多人物同框：无明示身高差时锁定站立同高/齐眼线，避免随机一高一低。"""
-    if len(shot.characters or []) < 2:
+    from app.continuity import effective_characters_visible
+
+    bible_names = {c.name for c in bible.characters} if bible is not None else set()
+    individuals = [
+        name for name in effective_characters_visible(shot)
+        if name in bible_names or not is_collective_role(name)
+    ]
+    if len(individuals) < 2:
         return ""
     if has_explicit_height_difference(shot, bible):
         return ""
@@ -359,6 +545,177 @@ def _equal_height_hint(shot: Shot, bible: Bible | None = None) -> str:
         "同框人物站立身高与眼线尽量齐平、体型尺度协调一致；"
         "除非剧情已写明身高差，禁止把角色画成随意一高一低"
     )
+
+
+def _narrative_keyframe_target_with_source(shot: Shot) -> tuple[str, str]:
+    terminal_moments = (
+        ("last_frame_desc", shot.last_frame_desc),
+        ("state_out", shot.state_out),
+    )
+    action_moments = (
+        ("primary_action", shot.primary_action),
+        ("action_desc", shot.action_desc),
+    )
+    moments = (*terminal_moments, *action_moments)
+    if has_contact_action(shot):
+        # 尾态优先：「抓住后松开」必须定格在已分离，不能被早先的抓住劫持。
+        for source, moment in terminal_moments:
+            if contact_action_phase(moment) in {"approach", "established", "separated"}:
+                return (moment or "").strip(), source
+        # 尾态没写互动时，再从主动作选取已成立的接触。
+        for source, moment in action_moments:
+            if contains_established_contact_action(moment):
+                return (moment or "").strip(), source
+        # 中止/分离也是可读的决定性瞬间，但不得凭空改成已接触。
+        for source, moment in action_moments:
+            if contact_action_phase(moment) in {"approach", "separated"}:
+                return (moment or "").strip(), source
+    for source, moment in (
+        *moments,
+        ("first_frame_desc", shot.first_frame_desc),
+        ("state_in", shot.state_in),
+    ):
+        if (moment or "").strip():
+            return (moment or "").strip(), source
+    return (shot.scene_setting or "").strip(), "scene_setting"
+
+
+def narrative_keyframe_target(shot: Shot) -> str:
+    """返回叙事关键帧必须表现的唯一动作瞬间。
+
+    关键帧不是首帧/尾帧协议。接触镜头优先选“接触已成立”的尾状态；
+    其他镜头选主动作。这样图片模型不会把首尾两个时刻拼成一张图。
+    """
+    return _narrative_keyframe_target_with_source(shot)[0]
+
+
+def _keyframe_required_text_expected(shot: Shot, target: str, target_source: str) -> bool:
+    required = getattr(shot, "required_text", None)
+    exact = str(getattr(required, "exact_text", "") or "").strip() if required is not None else ""
+    if not exact:
+        return False
+    if exact in (target or ""):
+        return True
+    try:
+        appear_at = float(getattr(required, "appear_start_s", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        appear_at = 0.0
+    stable_raw = getattr(required, "stable_until_s", None)
+    try:
+        stable_until = float(stable_raw) if stable_raw is not None else None
+    except (TypeError, ValueError):
+        stable_until = None
+    target_time: float | None
+    if target_source in {"last_frame_desc", "state_out"}:
+        target_time = float(getattr(shot, "duration_s", 0) or 0)
+    elif target_source in {"first_frame_desc", "state_in"}:
+        target_time = 0.0
+    else:
+        target_time = None
+    if target_time is None:
+        # 中间动作无精确时码；只有从 0s 就稳定存在的文字才可强制入画。
+        return appear_at <= 0 and (stable_until is None or stable_until >= 0)
+    return appear_at <= target_time and (stable_until is None or target_time <= stable_until)
+
+
+def keyframe_visual_contract(shot: Shot, bible: Bible | None = None) -> dict[str, object]:
+    """视频编译器与叙事关键帧共用的确定性构图合同。"""
+    from app.continuity import effective_characters_visible
+
+    visible_characters = effective_characters_visible(shot)
+    bible_names = {c.name for c in bible.characters} if bible is not None else set()
+    collective_roles = [
+        name for name in visible_characters if name not in bible_names and is_collective_role(name)
+    ]
+    individual_characters = [name for name in visible_characters if name not in collective_roles]
+    target_keyframe_desc, target_source = _narrative_keyframe_target_with_source(shot)
+    target_contact_phase = contact_action_phase(target_keyframe_desc)
+    # 多时序关键帧中，接触镜的开场/反应帧本身可能已不含“接触”词面，
+    # 但仍必须与决定性帧共用侧面互动轴。该标记只强制机位，不伪造已建立接触。
+    inherited_contact_axis = "timeline_contact_side_axis" in (shot.risk_tags or [])
+    contact_camera_required = (
+        target_contact_phase in {"approach", "established", "separated"}
+        or inherited_contact_axis
+    )
+    established_contact_required = target_contact_phase == "established"
+    height_difference_evidence = explicit_height_difference_evidence(shot, bible)
+    explicit_height_difference = bool(height_difference_evidence)
+    if len(individual_characters) < 2:
+        relative_height_policy = "single_subject"
+    elif explicit_height_difference:
+        relative_height_policy = "preserve_explicit_difference"
+    else:
+        relative_height_policy = "equal_scale"
+    crowd_markers = (
+        "人群", "众人", "围观", "群众", "队伍", "人们", "众族人", "众弟子",
+        "族人们", "弟子们", "族人纷纷", "弟子纷纷", "年轻一辈",
+    )
+    collective_entity_re = r"(?:人群|众人|群众|人们|家族子弟|族人|弟子|年轻一辈)"
+    collective_context_re = re.compile(
+        rf"(?:一群|一众|多名|几名|数名|成群|密集的?)\s*{collective_entity_re}"
+        rf"|(?:身后|周围|两侧|门口|场内|背景)[^，。；！？]{{0,10}}{collective_entity_re}"
+        rf"|{collective_entity_re}[^，。；！？]{{0,10}}"
+        r"(?:纷纷|们|跟着|交头接耳|哄笑|嘲笑|围观|议论|聚集|列队|站满|站在|站着)"
+    )
+    collective_absent_re = re.compile(
+        rf"(?:画外(?:传来|响起)?|回忆(?:起)?|想起)[^，。；！？]{{0,12}}{collective_entity_re}"
+        rf"|{collective_entity_re}[^，。；！？]{{0,12}}"
+        r"(?:散去|散开|全部离开|离开画面|退到画外|退场|消失|不在画面|只在画外)"
+    )
+    target_forbids_crowd = bool(collective_absent_re.search(target_keyframe_desc)) or (
+        bool(re.search(collective_entity_re, target_keyframe_desc))
+        and ("独自" in target_keyframe_desc or bool(re.search(r"(?:只剩|仅剩)[^，。]{0,8}(?:一人|他|她)", target_keyframe_desc)))
+    )
+    target_requires_anonymous_crowd = (
+        not target_forbids_crowd
+        and (
+            any(marker in target_keyframe_desc for marker in crowd_markers)
+            or bool(collective_context_re.search(target_keyframe_desc))
+            or "家族子弟" in target_keyframe_desc
+        )
+    )
+    crowd_context_text = " ".join((target_keyframe_desc, shot.scene_setting or "", shot.action_desc or ""))
+    anonymous_background_allowed = not target_forbids_crowd and (
+        bool(collective_roles)
+        or any(marker in crowd_context_text for marker in (*crowd_markers, "当众"))
+        or bool(collective_context_re.search(crowd_context_text))
+        or "家族子弟" in crowd_context_text
+    )
+    return {
+        "target_keyframe_desc": target_keyframe_desc,
+        "target_source": target_source,
+        "target_contact_phase": target_contact_phase,
+        "contact_evidence": [f"{target_source}: {target_keyframe_desc}"] if contact_camera_required else [],
+        # contact_required 保留为旧调用方的侧拍别名。
+        "contact_required": contact_camera_required,
+        "contact_camera_required": contact_camera_required,
+        "contact_axis_inherited": inherited_contact_axis,
+        "established_contact_required": established_contact_required,
+        "camera_angle": (
+            (shot.camera_angle or "").strip()
+            if not contact_camera_required
+            else (
+                (shot.camera_angle or "").strip()
+                if any(marker in (shot.camera_angle or "") for marker in _SIDE_VIEW_MARKERS)
+                else "侧面"
+            )
+        ) or "平视",
+        "relative_height_policy": relative_height_policy,
+        "explicit_height_difference": explicit_height_difference,
+        "height_difference_evidence": height_difference_evidence,
+        "visible_characters": visible_characters,
+        "individual_visible_characters": individual_characters,
+        "collective_visible_roles": collective_roles,
+        "collective_presence_required": (
+            bool(collective_roles) or target_requires_anonymous_crowd
+        ) and not target_forbids_crowd,
+        "collective_presence_forbidden": target_forbids_crowd,
+        "required_text_expected": _keyframe_required_text_expected(
+            shot, target_keyframe_desc, target_source,
+        ),
+        "spatial_anchor": (shot.spatial_anchor or "").strip(),
+        "anonymous_background_allowed": anonymous_background_allowed,
+    }
 
 
 
@@ -410,9 +767,11 @@ def _compile_audio_timeline(shot: Shot, voice_bible: list | None = None) -> str:
 
 
 def _compile_reference_roles(shot: Shot, *, continuity_mode: str, with_refs: bool,
-                             chained: bool) -> str:
+                             chained: bool, individual_names: set[str] | None = None) -> str:
     from app.continuity import reference_role_plan, uses_previous_tail_frame
-    roles = reference_role_plan(shot, continuity_mode=continuity_mode)
+    roles = reference_role_plan(
+        shot, continuity_mode=continuity_mode, individual_names=individual_names,
+    )
     lines: list[str] = []
     if uses_previous_tail_frame(continuity_mode) and (chained or "start_state_reference" in roles):
         lines.append(
@@ -467,9 +826,18 @@ def _compile_negative_constraints(shot: Shot, extra_negative: list[str] | None,
         parts.append(f"画面可见角色仅限：{'、'.join(visible)}")
     if not uses_previous_tail_frame(continuity_mode):
         parts.append("不要沿用上一镜完整构图或主体尾帧姿势")
-    if has_contact_action(shot):
-        parts.append("接触动作禁止正面摆拍、禁止手悬空未触及目标")
-    if len(shot.characters or []) >= 2 and not has_explicit_height_difference(shot, bible):
+    contact_phase = shot_contact_phase(shot)
+    if contact_phase == "established":
+        parts.append("已接触动作禁止正面摆拍、禁止手悬空或接触点留缝")
+    elif contact_phase == "approach":
+        parts.append("接近/未命中动作禁止正面摆拍；保留清晰间距，禁止提前改成已碰触")
+    elif contact_phase == "separated":
+        parts.append("松开/分离动作禁止正面摆拍；保留已分开的清晰间距，禁止重新画成已接触")
+    bible_names = {c.name for c in bible.characters} if bible is not None else set()
+    individual_visible = [
+        name for name in visible if name in bible_names or not is_collective_role(name)
+    ]
+    if len(individual_visible) >= 2 and not has_explicit_height_difference(shot, bible):
         parts.append("禁止同框人物随意一高一低或眼线错位")
     if extra_negative:
         parts.extend(x.strip() for x in extra_negative if x and x.strip())
@@ -511,7 +879,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     bible_map = {c.name: c for c in bible.characters}
     missing = [
         name for name in shot.characters
-        if name not in bible_map and not is_functional_extra(name)
+        if name not in bible_map and not is_functional_extra(name) and not is_collective_role(name)
     ]
     if missing:
         raise CompileError(
@@ -530,7 +898,9 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     shot.continuity_mode = mode
     shot.prompt_contract_version = PROMPT_CONTRACT_VERSION
     ensure_audio_timeline(shot, voice_bible)
-    shot.reference_roles = reference_role_plan(shot, continuity_mode=mode)
+    shot.reference_roles = reference_role_plan(
+        shot, continuity_mode=mode, individual_names=set(bible_map),
+    )
 
     shot_dur = clip_duration(shot)
     state_in = effective_state_in(shot)
@@ -554,10 +924,21 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         f"{shot.shot_size}；{camera_angle}；{shot.camera_move}"
         + (f"。{scale_hint}" if scale_hint else "")
     )
-    if has_contact_action(shot):
+    contact_phase = shot_contact_phase(shot)
+    if contact_phase == "established":
         camera_line += (
-            "。接触类动作必须侧面机位拍摄，清楚展现肢体与接触点、人物与对象的空间关系，"
+            "。已接触动作必须从互动轴侧面拍摄，清楚展现肢体与接触点、人物与对象的空间关系，"
             "禁止正面端站摆拍"
+        )
+    elif contact_phase == "approach":
+        camera_line += (
+            "。接近/未命中互动必须从互动轴侧面拍摄，清楚展现两者间距，"
+            "禁止正面端站或提前改成已接触"
+        )
+    elif contact_phase == "separated":
+        camera_line += (
+            "。松开/分离互动必须从互动轴侧面拍摄，清楚展现已分开的间距，"
+            "禁止正面端站或重新改成已接触"
         )
     spatial = (shot.spatial_anchor or shot.scene_setting or "").strip()
     if spatial:
@@ -568,6 +949,8 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     for name in shot.characters:
         if name in bible_map:
             anchors.append(f"{name}：{bible_map[name].appearance_canonical}")
+        elif is_collective_role(name):
+            anchors.append(f"{name}：{collective_role_anchor(name)}")
         else:
             anchors.append(f"{name}：{functional_extra_anchor(name)}")
     character_anchor = "；".join(anchors[:4]) if anchors else "保持人物身份服装一致"
@@ -601,6 +984,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     reference_block = _compile_reference_roles(
         shot, continuity_mode=mode, with_refs=with_refs,
         chained=chained or uses_previous_tail_frame(mode),
+        individual_names=set(bible_map),
     )
     # 兼容旧 chained/from_scene 调用：仅 action_continuation 才强调尾帧起点
     if uses_previous_tail_frame(mode) and (chained or from_scene or with_last_frame):
@@ -757,7 +1141,7 @@ def compile_scene_prompt(shot: Shot, bible: Bible, *, kind: str = "tail",
     bible_map = {c.name: c for c in bible.characters}
     missing = [
         name for name in shot.characters
-        if name not in bible_map and not is_functional_extra(name)
+        if name not in bible_map and not is_functional_extra(name) and not is_collective_role(name)
     ]
     if missing:
         raise CompileError(
@@ -765,7 +1149,9 @@ def compile_scene_prompt(shot: Shot, bible: Bible, *, kind: str = "tail",
         )
     anchors = "；".join(
         bible_map[name].appearance_canonical
-        if name in bible_map else functional_extra_anchor(name)
+        if name in bible_map else (
+            collective_role_anchor(name) if is_collective_role(name) else functional_extra_anchor(name)
+        )
         for name in shot.characters
     )
     visible_names = "、".join(shot.characters)

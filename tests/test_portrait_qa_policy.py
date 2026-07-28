@@ -96,6 +96,111 @@ def test_seed_qa_keeps_major_crop_as_hard_failure() -> None:
     assert "主体全身未完整可见" in result["hard_failures"]
 
 
+def test_seed_qa_allows_subjective_anchor_differences_with_warning() -> None:
+    result = normalize_portrait_seed_qa({
+        "identity_match": 0.1,
+        "presentation_match": 0.9,
+        "clean_frame": 0.95,
+        "person_count": 1,
+        "full_body_visible": True,
+        "anatomy_valid": True,
+        "hard_failures": [
+            "视觉年龄为成年女性，不符合锚点要求的14岁少女",
+            "服装不符合锚点要求的淡绿色上衣长裤，实际为紫色绣花长裙",
+            "存在锚点未要求的莲花及漂浮花瓣装饰",
+            "发型带有锚点未提及的额外发箍装饰",
+        ],
+    })
+
+    assert result["status"] == "warning"
+    assert result["hard_gate_passed"] is True
+    assert result["overall"] == 0.6
+    assert result["hard_failures"] == []
+    assert any("设定贴合度" in item for item in result["issues"])
+
+
+def test_seed_qa_respects_explicit_non_occluding_watermark_result() -> None:
+    result = normalize_portrait_seed_qa({
+        "identity_match": 0.9,
+        "presentation_match": 0.45,
+        "clean_frame": 0.95,
+        "person_count": 1,
+        "watermark_detected": True,
+        "watermark_occluding": False,
+        "forbidden_text_detected": False,
+        "full_body_visible": True,
+        "crop_severity": "none",
+        "anatomy_valid": True,
+        "issues": ["画面存在轻微角落水印，未遮挡人物主体"],
+        "hard_failures": [],
+    })
+
+    assert result["status"] == "warning"
+    assert result["hard_gate_passed"] is True
+    assert result["hard_failures"] == []
+    assert any("角落水印" in item for item in result["issues"])
+
+
+def test_seed_qa_does_not_double_count_corner_watermark_as_forbidden_text() -> None:
+    result = normalize_portrait_seed_qa({
+        "identity_match": 0.93,
+        "presentation_match": 0.91,
+        "clean_frame": 0.97,
+        "person_count": 1,
+        "watermark_detected": True,
+        "watermark_occluding": False,
+        "forbidden_text_detected": True,
+        "full_body_visible": True,
+        "crop_severity": "minor",
+        "anatomy_valid": True,
+        "issues": ["该立绘整体符合角色设定，仅存在轻微瑕疵"],
+        "soft_warnings": ["画面角落存在轻微文字水印"],
+        "hard_failures": [],
+    })
+
+    assert result["status"] == "warning"
+    assert result["hard_gate_passed"] is True
+    assert result["hard_failures"] == []
+    assert any("水印含文字" in item for item in result["issues"])
+
+
+def test_seed_qa_still_blocks_separate_forbidden_body_text() -> None:
+    result = normalize_portrait_seed_qa({
+        "identity_match": 0.95,
+        "presentation_match": 0.9,
+        "clean_frame": 0.9,
+        "person_count": 1,
+        "watermark_detected": True,
+        "watermark_occluding": False,
+        "forbidden_text_detected": True,
+        "full_body_visible": True,
+        "anatomy_valid": True,
+        "issues": ["人物胸前出现大段宣传文字，影响角色识别"],
+        "hard_failures": [],
+    })
+
+    assert result["status"] == "failed"
+    assert result["hard_gate_passed"] is False
+    assert "画面检测到不允许的文字" in result["hard_failures"]
+
+
+def test_seed_qa_still_blocks_an_explicitly_wrong_character() -> None:
+    result = normalize_portrait_seed_qa({
+        "identity_match": 0.1,
+        "presentation_match": 1.0,
+        "clean_frame": 1.0,
+        "person_count": 1,
+        "full_body_visible": True,
+        "anatomy_valid": True,
+        "hard_failures": ["明显生成成其他人物，属于错误角色"],
+    })
+
+    assert result["status"] == "failed"
+    assert result["hard_gate_passed"] is False
+    assert result["overall"] == 0.1
+    assert "明显生成成其他人物，属于错误角色" in result["hard_failures"]
+
+
 def test_character_pack_qa_demotes_non_occluding_provider_watermark(
     tmp_path, monkeypatch,
 ) -> None:

@@ -1,8 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
   blockStatus,
+  callBusinessLabel,
+  callNextStep,
   categorizeSettingKeys,
+  jobBusinessLabel,
+  jobNextStep,
+  modelBusinessLabel,
   normalizeDraft,
+  settingOptionLabel,
+  type Call,
+  type Job,
   type SettingSchema,
 } from "./MonitorPage";
 
@@ -30,6 +38,65 @@ describe("监制房数据块状态", () => {
 
   it("只有成功查询才可进入 ready-empty", () => {
     expect(blockStatus(false, null, { total: 0 }, true)).toBe("ready-empty");
+  });
+});
+
+describe("任务队列业务名称与恢复建议", () => {
+  const job = {
+    id: "run_internal_123",
+    source: "run",
+    project_name: "斗破苍穹",
+    episode_no: 1,
+    shot_no: 4,
+    workflow_type: "video_generation",
+    status: "paused_external",
+    updated_at: 0,
+  } satisfies Job;
+
+  it("主要操作名称使用项目、集镜和工作流，不暴露内部任务标识", () => {
+    expect(jobBusinessLabel(job))
+      .toBe("斗破苍穹 · 第1集 · 镜4 · 视频生成 · 外部中断");
+    expect(jobBusinessLabel(job)).not.toContain(job.id);
+  });
+
+  it("按状态给出可执行的下一步，不把原始错误铺在列表中", () => {
+    expect(jobNextStep(job)).toBe("任务被外部中断，可查看原因后恢复");
+    expect(jobNextStep({ ...job, status: "failed", error: "provider_stack" }))
+      .toBe("任务未完成，可查看详情后重试");
+    expect(jobNextStep({ ...job, status: "succeeded" }))
+      .toBe("任务已完成，无需处理");
+  });
+});
+
+describe("调用日志业务名称与恢复建议", () => {
+  const call = {
+    id: 22112,
+    ts: 0,
+    kind: "video_create",
+    status: "FAILED",
+    effective_status: "FAILED",
+    category: "business",
+    latency_ms: 1200,
+    error: "provider_stack",
+    context: {
+      project_name: "斗破苍穹",
+      episode_no: 1,
+      shot_no: 4,
+    },
+  } satisfies Call;
+
+  it("详情入口使用业务上下文，不把数字调用 ID作为主要名称", () => {
+    expect(callBusinessLabel(call))
+      .toBe("斗破苍穹 · 第1集第4镜 · 创建视频任务 · 失败");
+    expect(callBusinessLabel(call)).not.toContain(String(call.id));
+  });
+
+  it("主列表显示恢复动作，原始错误留给折叠详情", () => {
+    expect(callNextStep(call)).toBe("调用未完成，可展开错误详情");
+    expect(callNextStep({ ...call, error: undefined, effective_status: "OK" }))
+      .toBe("调用已完成，无需处理");
+    expect(callNextStep({ ...call, run_id: "run_1" }))
+      .toBe("可查看关联运行任务");
   });
 });
 
@@ -90,5 +157,21 @@ describe("系统设置功能分类", () => {
     expect(groups.flatMap((group) => group.keys).sort()).toEqual(
       [...keys].sort(),
     );
+  });
+
+  it("设置枚举在业务层显示中文，未知值保留以便兼容", () => {
+    expect(settingOptionLabel("media_scheduler_policy", "legacy"))
+      .toBe("兼容调度");
+    expect(settingOptionLabel("media_scheduler_policy", "stage_aware"))
+      .toBe("分阶段调度");
+    expect(settingOptionLabel("future_setting", "future_value"))
+      .toBe("future_value");
+  });
+});
+
+describe("模型业务名称", () => {
+  it("替换内置占位英文且保留真实模型品牌名", () => {
+    expect(modelBusinessLabel("Text 模型")).toBe("文本模型");
+    expect(modelBusinessLabel("Claude Opus 4.8")).toBe("Claude Opus 4.8");
   });
 });

@@ -5,6 +5,7 @@ import asyncio
 from app import api, db
 from app.orchestration.engine import WorkflowRecorder
 from app.schemas import EpisodeScreenplay
+from app.storyboard_supervisor import SupervisorCheckpoint, save_checkpoint
 
 
 def test_resume_storyboard_keeps_checkpoint_and_links_parent_run(tmp_path, monkeypatch) -> None:
@@ -121,3 +122,46 @@ def test_resume_storyboard_accepts_needs_edit_checkpoint(tmp_path, monkeypatch) 
     assert spawned == [("storyboard", "e1")]
     assert conn.execute("SELECT COUNT(*) AS c FROM shots WHERE episode_id='e1'").fetchone()["c"] == 7
 
+
+def test_resume_storyboard_reports_checkpoint_only_progress(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "storyboard-resume-checkpoint-only.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO projects(id, name, status, created_at) VALUES('p1', 'P', 'planned', 1)"
+    )
+    screenplay_json = EpisodeScreenplay(
+        episode_no=1,
+        title="E",
+        full_script_text="【场1】日 / 广场\n角色走到碑前。",
+    ).model_dump_json()
+    conn.execute(
+        """INSERT INTO episodes(
+               id, project_id, episode_no, title, source_chapters, target_duration_s,
+               screenplay_json, screenplay_status, status, created_at
+           ) VALUES('e1', 'p1', 1, 'E', '[1]', 50, ?, 'ready', 'scripted', 1)""",
+        (screenplay_json,),
+    )
+    conn.commit()
+    save_checkpoint(
+        SupervisorCheckpoint(
+            episode_id="e1",
+            phase="PAUSED_EXTERNAL",
+            validated_prefix_end=4,
+            next_shot_no=5,
+            expected_total=10,
+        )
+    )
+
+    def fake_spawn(_kind, _key, coroutine, **_kwargs):
+        coroutine.close()
+
+    monkeypatch.setattr(api.task_registry, "active", lambda *_args: False)
+    monkeypatch.setattr(api.task_registry, "spawn", fake_spawn)
+
+    result = asyncio.run(api.resume_storyboard("e1"))
+
+    assert result["resumed_from_shot"] == 4
+    assert result["next_shot_no"] == 5
+    assert result["checkpoint_only"] is True

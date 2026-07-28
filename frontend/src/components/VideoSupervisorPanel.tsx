@@ -1,6 +1,7 @@
 /** 视频补齐 Supervisor 运行面板：覆盖率 / 预算 / 修复层级。 */
 import { useCallback, useEffect, useState } from 'react'
 import AsyncButton from './AsyncButton'
+import { useFocusTrap } from '../hooks/useFocusTrap'
 
 export type VideoSupervisorSnapshot = {
   phase?: string
@@ -130,12 +131,18 @@ export default function VideoSupervisorPanel({
   const [pollFailures, setPollFailures] = useState(0)
   const [lastSuccessAt, setLastSuccessAt] = useState<number | null>(null)
   const [refreshing, setRefreshing] = useState(false)
-  const [actionDialog, setActionDialog] = useState<'cancel' | 'topup' | null>(null)
+  const [actionDialog, setActionDialog] = useState<'cancel' | 'topup' | 'resume' | null>(null)
   const [topupBudget, setTopupBudget] = useState('50')
   const [topupHours, setTopupHours] = useState('1')
   const [legacyPreview, setLegacyPreview] = useState<{
     would_adopt?: unknown[]; would_retain?: unknown[]; would_mark_missing?: Array<{ shot_no?: number }>
   } | null>(null)
+  const actionTrapRef = useFocusTrap(Boolean(actionDialog), () => {
+    if (!busy) setActionDialog(null)
+  })
+  const legacyTrapRef = useFocusTrap(Boolean(legacyPreview), () => {
+    if (!busy) setLegacyPreview(null)
+  })
 
   const load = useCallback(async (manual = false) => {
     if (manual) setRefreshing(true)
@@ -155,7 +162,6 @@ export default function VideoSupervisorPanel({
   }, [api, episodeId, onToast])
 
   useEffect(() => {
-    let cancelled = false
     const poll = () => {
       load().catch(() => {
         // 保留旧快照，但失败计数和过期标记会告知用户。
@@ -163,7 +169,7 @@ export default function VideoSupervisorPanel({
     }
     poll()
     const id = window.setInterval(poll, running ? 3000 : 10000)
-    return () => { cancelled = true; window.clearInterval(id) }
+    return () => window.clearInterval(id)
   }, [load, running])
 
   const snap = live || supervisor
@@ -193,6 +199,7 @@ export default function VideoSupervisorPanel({
     || snap?.task_running
     || snap?.running
   )
+  const historical = terminalPhase && !activelyRunning
   const runFailed = snap?.run_status === 'FAILED'
   const stale = pollFailures >= 2 || snap?.heartbeat_stale === true
   const snapshotTime = lastSuccessAt || (snap?.last_heartbeat_at ? snap.last_heartbeat_at * 1000 : null)
@@ -216,7 +223,7 @@ export default function VideoSupervisorPanel({
 
   const runAction = async (action: 'pause' | 'handoff' | 'resume' | 'topup' | 'cancel') => {
     if (stale) {
-      onToast?.('当前 Supervisor 快照已过期，请先手动刷新')
+      onToast?.('当前补齐进度已过期，请先手动刷新')
       return
     }
     setBusy(true)
@@ -314,9 +321,9 @@ export default function VideoSupervisorPanel({
     >
       <div className="vsp-head">
         {activelyRunning && <span className="vsp-pulse" aria-hidden />}
-        <strong>补齐到全片可用</strong>
+        <strong>{historical ? '上一次自动补齐' : '补齐到全片可用'}</strong>
         <span className="vsp-phase">
-          {runFailed && !activelyRunning ? `控制面已失败（最后阶段：${PHASE_LABEL[phase] || phase}）` : PHASE_LABEL[phase] || phase || '启动中…'}
+          {runFailed && !activelyRunning ? `自动补齐已失败（最后阶段：${PHASE_LABEL[phase] || phase}）` : PHASE_LABEL[phase] || phase || '启动中…'}
         </span>
         {typeof snap?.repair_epoch === 'number' && snap.repair_epoch > 0 && (
           <span className="vsp-epoch">修复周期 {snap.repair_epoch}</span>
@@ -332,7 +339,7 @@ export default function VideoSupervisorPanel({
         </button>
       </div>
 
-      <div className="vsp-coverage-bar" title={adoptionCoverage ? `已采用 ${displayB} · 未采用 ${displayC}` : `A ${a} · B ${b} · 未覆盖 ${c}`}>
+      <div className="vsp-coverage-bar" title={adoptionCoverage ? `已采用 ${displayB} · 未采用 ${displayC}` : `达到质量目标 ${a} · 可用待复核 ${b} · 未覆盖 ${c}`}>
         <div className="vsp-seg a" style={{ width: `${displayAPct}%` }} />
         <div className="vsp-seg b" style={{ width: `${displayBPct}%` }} />
         <div className="vsp-seg c" style={{ width: `${Math.max(0, 100 - displayAPct - displayBPct)}%` }} />
@@ -340,7 +347,7 @@ export default function VideoSupervisorPanel({
       <div className="vsp-cov-label">
         {adoptionCoverage
           ? `${deadlineTerminal ? '交差覆盖' : '采用覆盖'} ${displayPct}% · 已采用 ${displayB} / ${deadlineTerminal ? '缺片' : '待补齐'} ${displayC}`
-          : `覆盖 ${pct}% · A 级 ${a} / B 级 ${b} / 未覆盖 ${c}${cov.fallback_quota != null ? `（B 配额 ${cov.fallback_quota}）` : ''}`}
+          : `覆盖 ${pct}% · 达到质量目标 ${a} / 可用待复核 ${b} / 未覆盖 ${c}${cov.fallback_quota != null ? `（待复核采用上限 ${cov.fallback_quota}）` : ''}`}
         {!snap?.phase && activelyRunning ? ' · 正在预检与建账…' : ''}
       </div>
 
@@ -370,7 +377,7 @@ export default function VideoSupervisorPanel({
               {(e.last_issue_codes || []).slice(0, 2).join(', ') || '待生成'}
               {e.repair_level ? ` → ${e.repair_level}` : ''}
               {` · ${e.attempts_paid || 0}/${e.attempts_budgeted || 0} 次`}
-              {e.continuity_degraded ? ' · 衔接已降级' : ''}
+              {e.continuity_degraded ? ' · 衔接需复核' : ''}
             </li>
           ))}
         </ul>
@@ -378,8 +385,8 @@ export default function VideoSupervisorPanel({
 
       {succeeded && (
         <div className="vsp-done">
-          ✓ 全部 {total} 镜均有可用视频 · A {a} · B {b}
-          （在授权配额 {(cov.fallback_quota ?? 0)} 内）
+          ✓ 全部 {total} 镜均有可用视频 · 达到质量目标 {a} · 可用待复核 {b}
+          （待复核采用上限 {(cov.fallback_quota ?? 0)}）
           <div>✓ 覆盖报告已生成</div>
           <div>尚未拼接成片，尚未创建交付包</div>
         </div>
@@ -388,7 +395,7 @@ export default function VideoSupervisorPanel({
       {deadlineCompleted && (
         <div className="vsp-done">
           ✓ 已按截止协议停止生成并采用每镜最佳技术可播候选
-          {snap?.quality_target_missed && <div>部分候选未达原 QA 目标，风险已写入覆盖报告。</div>}
+          {snap?.quality_target_missed && <div>部分候选未达到原定质量目标，风险已写入覆盖报告。</div>}
         </div>
       )}
 
@@ -400,12 +407,12 @@ export default function VideoSupervisorPanel({
 
       {runFailed && !terminalPhase && !activelyRunning && (
         <div className="vsp-plan">
-          Supervisor 已失败并停止计时；仍有 {snap?.active_media_jobs || 0} 个媒体任务。请先查看收口预演，再确认执行遗留收口。
+          自动补齐已失败并停止计时；仍有 {snap?.active_media_jobs || 0} 个媒体任务。请先查看收口预演，再确认执行遗留收口。
         </div>
       )}
 
       {cancelledPhase && (
-        <div className="vsp-plan">补齐已取消。可重新启动，或清空本集回到空白状态。</div>
+        <div className="vsp-plan">这一次自动补齐已取消。这是历史结果，不代表之后单独创建的视频任务也已取消。</div>
       )}
 
       <div className="vsp-actions">
@@ -426,9 +433,9 @@ export default function VideoSupervisorPanel({
             {waitingAuth ? (
               <button type="button" className="btn primary small" onClick={() => setActionDialog('topup')} disabled={busy || stale}>追加预算并继续</button>
             ) : (
-              <AsyncButton className="btn primary small" busyLabel="…" onAction={() => runAction('resume')} disabled={busy || stale}>
+              <button type="button" className="btn primary small" onClick={() => setActionDialog('resume')} disabled={busy || stale}>
                 继续补齐
-              </AsyncButton>
+              </button>
             )}
             <button type="button" className="btn ghost small danger" onClick={() => setActionDialog('cancel')} disabled={busy || stale}>取消</button>
           </>
@@ -440,22 +447,37 @@ export default function VideoSupervisorPanel({
 
       {actionDialog && (
         <div className="review-dialog-backdrop" role="presentation" onMouseDown={() => !busy && setActionDialog(null)}>
-          <div className="review-dialog" role="dialog" aria-modal="true" aria-labelledby="supervisor-action-title" onMouseDown={event => event.stopPropagation()}>
-            <h3 id="supervisor-action-title">{actionDialog === 'cancel' ? '取消补齐 Supervisor' : '追加授权'}</h3>
+          <div ref={node => { actionTrapRef.current = node }} className="review-dialog" role="dialog" aria-modal="true" aria-labelledby="supervisor-action-title" onMouseDown={event => event.stopPropagation()}>
+            <h3 id="supervisor-action-title">
+              {actionDialog === 'cancel'
+                ? '取消自动补齐'
+                : actionDialog === 'topup'
+                  ? '追加授权'
+                  : '继续自动补齐'}
+            </h3>
             {actionDialog === 'cancel' ? (
               <p>对象：{resolvedRunId || episodeId}。当前阶段「{PHASE_LABEL[phase] || phase}」，已花 ¥{spent.toFixed(1)}。本地会请求停止，已被供应商接单的任务可能继续执行和计费，未完成镜头保持未采用。</p>
-            ) : (
+            ) : actionDialog === 'topup' ? (
               <div className="review-form-grid">
                 <label>追加预算（元）<input type="number" min="1" max="100000" value={topupBudget} onChange={event => setTopupBudget(event.target.value)} /></label>
                 <label>追加时长（小时）<input type="number" min="0.0167" max="168" step="0.5" value={topupHours} onChange={event => setTopupHours(event.target.value)} /></label>
                 <p className="full">旧上限 ¥{cap.toFixed(0)} → 新上限 ¥{(cap + (Number(topupBudget) || 0)).toFixed(0)}。将继续未覆盖的 {unadopted} 镜。</p>
               </div>
+            ) : (
+              <p>
+                将从安全检查点继续处理尚未采用的 {unadopted} 镜，并可能产生新的模型费用。
+                当前已花 ¥{spent.toFixed(1)}，预算上限 ¥{cap.toFixed(0)}；已有采用版本不会被覆盖。
+              </p>
             )}
             <div className="dialog-actions">
               <button type="button" className="btn ghost" disabled={busy} onClick={() => setActionDialog(null)}>返回</button>
               <AsyncButton className={`btn ${actionDialog === 'cancel' ? 'danger' : 'primary'}`} busyLabel="提交中…" disabled={busy}
                 onAction={() => runAction(actionDialog)}>
-                {actionDialog === 'cancel' ? '确认取消' : '预演并提交授权'}
+                {actionDialog === 'cancel'
+                  ? '确认取消'
+                  : actionDialog === 'topup'
+                    ? '预演并提交授权'
+                    : '确认继续补齐'}
               </AsyncButton>
             </div>
           </div>
@@ -464,7 +486,7 @@ export default function VideoSupervisorPanel({
 
       {legacyPreview && (
         <div className="review-dialog-backdrop" role="presentation" onMouseDown={() => !busy && setLegacyPreview(null)}>
-          <div className="review-dialog" role="dialog" aria-modal="true" aria-labelledby="legacy-repair-title" onMouseDown={event => event.stopPropagation()}>
+          <div ref={node => { legacyTrapRef.current = node }} className="review-dialog" role="dialog" aria-modal="true" aria-labelledby="legacy-repair-title" onMouseDown={event => event.stopPropagation()}>
             <h3 id="legacy-repair-title">遗留任务收口预演</h3>
             <p>将采用 {legacyPreview.would_adopt?.length || 0} 镜，保留 {legacyPreview.would_retain?.length || 0} 镜，缺片 {(legacyPreview.would_mark_missing || []).map(item => item.shot_no).filter(Boolean).join('、') || '无'}。不会启动新生成，也不会删除视频。</p>
             <div className="dialog-actions">

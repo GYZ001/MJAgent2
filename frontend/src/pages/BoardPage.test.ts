@@ -4,6 +4,7 @@ import {
   buildStoryboardChanges,
   isStoryboardProblemShot,
   storyboardGateIssueLabel,
+  storyboardSaveDisabledReason,
   storyboardSpokenChars,
 } from './BoardPage'
 
@@ -51,5 +52,13 @@ describe('分镜台结构化 diff 与问题筛选', () => {
       .toBe('第 2 镜：首帧画面 太短')
     expect(storyboardGateIssueLabel('shot_no=3.primary_action 缺失'))
       .toBe('第 3 镜：镜头动作 缺失')
+    expect(storyboardGateIssueLabel('QA 门禁未通过')).toBe('质检 必检项未通过')
+  })
+
+  it('保存预览禁用时给出具体恢复路径', () => {
+    expect(storyboardSaveDisabledReason(false, false, 1)).toBe('尚未修改任何内容')
+    expect(storyboardSaveDisabledReason(true, true, 1)).toContain('删减台词')
+    expect(storyboardSaveDisabledReason(true, false, 0)).toContain('选择一个画面角色')
+    expect(storyboardSaveDisabledReason(true, false, 1)).toBe('')
   })
 })

@@ -510,48 +510,86 @@ async def _storyboard_task(
 
 
 def recover_storyboard_tasks() -> int:
-    """恢复中断的分镜任务；优先读 Supervisor Checkpoint。"""
+    """恢复被服务重启中断的分镜任务，不接管用户主动暂停的 Run。"""
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id, project_id FROM episodes "
+        "SELECT * FROM episodes "
         "WHERE status='scripting' AND screenplay_status='ready' AND screenplay_json IS NOT NULL"
     ).fetchall()
     resumed = 0
     for row in rows:
-        if not task_registry.active("storyboard", row["id"]):
-            parent = conn.execute(
-                "SELECT id FROM workflow_runs WHERE workflow_type='storyboard' "
-                "AND scope_type='episode' AND scope_id=? AND status='PAUSED_EXTERNAL' "
-                "AND recovered_by_run_id IS NULL ORDER BY updated_at DESC LIMIT 1",
-                (row["id"],),
-            ).fetchone()
-            # 用户取消的 run 永不自动恢复
-            cancelled = conn.execute(
-                """SELECT id FROM workflow_runs
-                   WHERE workflow_type='storyboard' AND scope_type='episode' AND scope_id=?
-                     AND status='CANCELLED' ORDER BY updated_at DESC LIMIT 1""",
-                (row["id"],),
-            ).fetchone()
-            if cancelled and not parent:
-                # 若最近是取消且无 PAUSED_EXTERNAL，跳过
-                latest = conn.execute(
-                    """SELECT status FROM workflow_runs
-                       WHERE workflow_type='storyboard' AND scope_type='episode' AND scope_id=?
-                       ORDER BY updated_at DESC LIMIT 1""",
-                    (row["id"],),
-                ).fetchone()
-                if latest and latest["status"] == "CANCELLED":
-                    continue
+        episode_id = row["id"]
+        if task_registry.active("storyboard", episode_id):
+            continue
+        latest = conn.execute(
+            """SELECT id,status,failure_code FROM workflow_runs
+               WHERE workflow_type='storyboard' AND scope_type='episode' AND scope_id=?
+               ORDER BY updated_at DESC LIMIT 1""",
+            (episode_id,),
+        ).fetchone()
+        if latest:
+            if latest["status"] in {"CREATED", "RUNNING"}:
+                # A durable run may belong to another live service instance.
+                continue
+            if latest["status"] != "PAUSED_EXTERNAL" or latest["failure_code"] != "SERVICE_RESTART":
+                # PARTIAL / WAITING_HUMAN / user_pause are explicit manual resume points.
+                continue
+            parent = latest
+        else:
+            # Legacy databases may have only the projection state and no run ledger.
+            parent = None
+        recorder = None
+        try:
             recorder = _new_storyboard_recorder(
-                row["id"], requested_by="system", trigger_type="resume",
+                episode_id, requested_by="system", trigger_type="resume",
                 parent_run_id=parent["id"] if parent else None,
             )
+            installed = conn.execute(
+                "UPDATE episodes SET active_storyboard_run_id=? "
+                "WHERE id=? AND status='scripting' AND active_storyboard_run_id IS ?",
+                (recorder.run_id, episode_id, row["active_storyboard_run_id"]),
+            )
+            if installed.rowcount != 1:
+                conn.rollback()
+                recorder.cancel("分镜恢复启动权已变化，当前运行未启动")
+                continue
+            conn.commit()
             task_registry.spawn(
-                "storyboard", row["id"],
-                _recorded_storyboard_task(row["id"], recorder, resume=True),
+                "storyboard", episode_id,
+                _recorded_storyboard_task(episode_id, recorder, resume=True),
                 project_id=row["project_id"],
             )
             resumed += 1
+        except Exception as exc:  # noqa: BLE001 - one bad episode must not block startup
+            public = errors.record_and_format(
+                exc,
+                action="storyboard_recovery_spawn",
+                context={"episode_id": episode_id, "previous_run_id": row["active_storyboard_run_id"]},
+            )
+            from app.storyboard_supervisor import load_latest_checkpoint
+            checkpoint = load_latest_checkpoint(episode_id)
+            shot_count = int(conn.execute(
+                "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)
+            ).fetchone()["c"])
+            recoverable = bool(shot_count or (checkpoint and checkpoint.validated_prefix_end > 0))
+            conn.execute(
+                "UPDATE episodes SET status=?, script_error=?, active_storyboard_run_id=NULL WHERE id=?",
+                (
+                    "script_failed" if recoverable else "planned",
+                    (
+                        f"服务重启后的分镜恢复未能启动；"
+                        f"{'已通过镜头和恢复点均已保留，可点击继续分镜' if recoverable else '剧本已保留，可重新生成分镜'}。"
+                        f"{public}"
+                    ),
+                    episode_id,
+                ),
+            )
+            conn.commit()
+            if recorder is not None:
+                try:
+                    recorder.cancel("分镜恢复任务未能启动，已回滚到可重试状态")
+                except Exception:  # noqa: BLE001
+                    pass
     return resumed
 
 
@@ -774,11 +812,16 @@ async def _recorded_storyboard_task(
             # WAITING_HUMAN / 授权失效等：不是 PARTIAL 业务伪造成功，记为等待态成功保留
             recorder.partial(result["script_error"])
         elif result and result["status"] == "scripting":
-            recorder.partial(result["script_error"] or "Supervisor 暂停，待恢复")
+            run = evidence_repository.get_run(recorder.run_id)
+            if not run or run.get("status") != "PAUSED_EXTERNAL":
+                recorder.partial(result["script_error"] or "Supervisor 暂停，待恢复")
         else:
             recorder.fail(RuntimeError(result["script_error"] if result else "分镜生成失败"))
     except asyncio.CancelledError:
-        recorder.cancel()
+        if task_registry.shutdown_in_progress():
+            recorder.pause_external("服务重启，分镜运行等待自动续做")
+        else:
+            recorder.cancel()
         raise
     except Exception as exc:
         recorder.fail(exc)
@@ -847,6 +890,7 @@ async def start_storyboard(episode_id: str, body: dict | None = Body(None)):
     if completion_mode not in {"ready_for_manual_confirm", "auto_confirm"}:
         raise HTTPException(422, "completion_mode 只能是 ready_for_manual_confirm 或 auto_confirm")
     completion_grant_id = body.get("completion_grant_id")
+    issued_grant_id = None
     conn = get_conn()
     if completion_mode == "auto_confirm":
         from app.completion_grant import issue_completion_grant
@@ -863,6 +907,13 @@ async def start_storyboard(episode_id: str, body: dict | None = Body(None)):
             },
         )
         completion_grant_id = grant.grant_id
+        issued_grant_id = grant.grant_id
+    previous = {
+        "status": ep["status"],
+        "script_error": ep["script_error"],
+        "active_storyboard_run_id": ep["active_storyboard_run_id"],
+        "storyboard_completion_mode": ep["storyboard_completion_mode"],
+    }
     cursor = conn.execute(
         "UPDATE episodes SET status='scripting', script_error=NULL, "
         "storyboard_completion_mode=?, active_storyboard_run_id=NULL "
@@ -871,26 +922,59 @@ async def start_storyboard(episode_id: str, body: dict | None = Body(None)):
     )
     if cursor.rowcount != 1:
         conn.rollback()
+        if issued_grant_id:
+            from app.completion_grant import revoke_grant
+            revoke_grant(issued_grant_id)
         raise HTTPException(409, "剧本发布栅栏已生效，未启动分镜")
     conn.commit()
-    recorder = _new_storyboard_recorder(episode_id, completion_mode=completion_mode)
+    recorder = None
+    coro = None
     try:
+        recorder = _new_storyboard_recorder(episode_id, completion_mode=completion_mode)
         conn.execute(
             "UPDATE episodes SET active_storyboard_run_id=? WHERE id=?",
             (recorder.run_id, episode_id),
         )
         conn.commit()
-    except Exception:  # noqa: BLE001
-        pass
-    task_registry.spawn(
-        "storyboard", episode_id,
-        _recorded_storyboard_task(
+        coro = _recorded_storyboard_task(
             episode_id, recorder, resume=False,
             completion_mode=completion_mode,
             completion_grant_id=completion_grant_id,
-        ),
-        project_id=ep["project_id"],
-    )
+        )
+        task_registry.spawn(
+            "storyboard", episode_id, coro, project_id=ep["project_id"],
+        )
+    except Exception as exc:
+        if coro is not None:
+            coro.close()
+        conn.execute(
+            "UPDATE episodes SET status=?, script_error=?, active_storyboard_run_id=?, "
+            "storyboard_completion_mode=? WHERE id=?",
+            (
+                previous["status"],
+                previous["script_error"],
+                previous["active_storyboard_run_id"],
+                previous["storyboard_completion_mode"],
+                episode_id,
+            ),
+        )
+        conn.commit()
+        if issued_grant_id:
+            from app.completion_grant import revoke_grant
+            revoke_grant(issued_grant_id)
+        if recorder is not None:
+            try:
+                recorder.cancel("分镜任务未能启动，剧集状态已回滚")
+            except Exception:  # noqa: BLE001
+                pass
+        raise HTTPException(503, {
+            "code": "STORYBOARD_START_SPAWN_FAILED",
+            "message": "分镜任务未能启动，剧本和原状态已保留，请重试",
+            "recovery_action": "重新点击生成分镜；尚未开始逐镜生成",
+            "episode_id": episode_id,
+            "rolled_back": True,
+            "recoverable": True,
+        }) from exc
     return {
         "status": "accepted" if completion_mode == "auto_confirm" else "scripting",
         "run_id": recorder.run_id,
@@ -972,6 +1056,7 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
     grant_id = body.get("completion_grant_id") or (cp.completion_grant_id if cp else None)
     # 恢复预检中的自动确认勾选是一次新的明确授权。取消会撤销旧 grant，且旧 grant
     # 也可能已过期；若仍沿用空/旧凭据，任务会生成到底后才停在 WAITING_AUTHORIZATION。
+    issued_grant_id = None
     if completion_mode == "auto_confirm" and (requested_mode == "auto_confirm" or not grant_id):
         from app.completion_grant import issue_completion_grant
         project = conn.execute(
@@ -990,43 +1075,95 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
             },
         )
         grant_id = grant.grant_id
+        issued_grant_id = grant.grant_id
+    previous = {
+        "status": ep["status"],
+        "script_error": ep["script_error"],
+        "active_storyboard_run_id": ep["active_storyboard_run_id"],
+        "storyboard_completion_mode": ep["storyboard_completion_mode"],
+    }
     cursor = conn.execute(
         "UPDATE episodes SET status='scripting', script_error=NULL, storyboard_completion_mode=? "
         "WHERE id=? AND screenplay_publish_fence=0", (completion_mode, episode_id)
     )
     if cursor.rowcount != 1:
         conn.rollback()
+        if issued_grant_id:
+            from app.completion_grant import revoke_grant
+            revoke_grant(issued_grant_id)
         raise HTTPException(409, "剧本发布栅栏已生效，未继续分镜")
     conn.commit()
-    recorder = _new_storyboard_recorder(
-        episode_id,
-        trigger_type="resume",
-        parent_run_id=parent["id"] if parent else None,
-        completion_mode=completion_mode,
-    )
-    # 恢复任务与首次启动必须遵守同一运行指针契约。此前遗漏这次写回会造成
-    # Run 已 RUNNING、剧集却没有 active_storyboard_run_id，分镜台因此失去进度
-    # 轮询和暂停/转人工控制，显示为“状态同步中”。任务注册前先持久化，避免空窗。
-    conn.execute(
-        "UPDATE episodes SET active_storyboard_run_id=? WHERE id=?",
-        (recorder.run_id, episode_id),
-    )
-    conn.commit()
-    task_registry.spawn(
-        "storyboard",
-        episode_id,
-        _recorded_storyboard_task(
+    recorder = None
+    coro = None
+    try:
+        recorder = _new_storyboard_recorder(
+            episode_id,
+            trigger_type="resume",
+            parent_run_id=parent["id"] if parent else None,
+            completion_mode=completion_mode,
+        )
+        # 任务注册前持久化指针，避免 Run 已启动但页面无法轮询或控制。
+        conn.execute(
+            "UPDATE episodes SET active_storyboard_run_id=? WHERE id=?",
+            (recorder.run_id, episode_id),
+        )
+        conn.commit()
+        coro = _recorded_storyboard_task(
             episode_id, recorder, resume=True,
             completion_mode=completion_mode,
             completion_grant_id=grant_id,
-        ),
-        project_id=ep["project_id"],
-    )
+        )
+        task_registry.spawn(
+            "storyboard", episode_id, coro, project_id=ep["project_id"],
+        )
+    except Exception as exc:
+        if coro is not None:
+            coro.close()
+        conn.execute(
+            """UPDATE episodes
+               SET active_storyboard_run_id=?, status=?, script_error=?,
+                   storyboard_completion_mode=?
+               WHERE id=? AND active_storyboard_run_id IS ?""",
+            (
+                previous["active_storyboard_run_id"],
+                previous["status"],
+                previous["script_error"],
+                previous["storyboard_completion_mode"],
+                episode_id,
+                (
+                    recorder.run_id
+                    if recorder is not None
+                    else previous["active_storyboard_run_id"]
+                ),
+            ),
+        )
+        conn.commit()
+        if issued_grant_id:
+            from app.completion_grant import revoke_grant
+            revoke_grant(issued_grant_id)
+        if recorder is not None:
+            try:
+                recorder.cancel("分镜继续任务未能启动，状态已回滚")
+            except Exception:  # noqa: BLE001
+                pass
+        raise HTTPException(503, {
+            "code": "STORYBOARD_RESUME_SPAWN_FAILED",
+            "message": "分镜继续任务未能启动，已回滚到可重试状态",
+            "recovery_action": "请稍后重试；已通过镜头和 checkpoint 均已保留",
+            "episode_id": episode_id,
+            "run_id": recorder.run_id if recorder is not None else None,
+            "rolled_back": True,
+            "recoverable": True,
+        }) from exc
+    checkpoint_saved = int(cp.validated_prefix_end or 0) if cp else 0
+    resumed_from_shot = max(int(saved), checkpoint_saved)
+    checkpoint_next = int(cp.next_shot_no or 0) if cp else 0
     return {
         "status": "scripting",
         "run_id": recorder.run_id,
-        "resumed_from_shot": int(saved),
-        "next_shot_no": int(saved) + 1,
+        "resumed_from_shot": resumed_from_shot,
+        "next_shot_no": checkpoint_next or resumed_from_shot + 1,
+        "checkpoint_only": bool(not saved and checkpoint_saved),
         "completion_mode": completion_mode,
         "completion_grant_id": grant_id,
     }
@@ -1054,33 +1191,103 @@ async def start_storyboard_all(project_id: str):
     _require_harness_engine(project_id)
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id, status, screenplay_status, screenplay_json, screenplay_publish_fence "
+        "SELECT id, status, script_error, screenplay_status, screenplay_json, screenplay_publish_fence, "
+        "active_storyboard_run_id "
         "FROM episodes WHERE project_id=? AND status IN ('planned','scripting','script_failed') ORDER BY episode_no",
         (project_id,)).fetchall()
     # 待分镜的；以及卡在“分镜中”却没有在跑任务的孤儿（需重新触发）
-    ids = [
-        r["id"] for r in rows
+    candidates = [
+        r for r in rows
         if r["screenplay_status"] == "ready" and r["screenplay_json"]
         and not r["screenplay_publish_fence"]
-        and (r["status"] in ("planned", "script_failed")
-             or not task_registry.active("storyboard", r["id"]))
+        and not _storyboard_generation_is_live(dict(r))
     ]
-    if not ids:
+    if not candidates:
         raise HTTPException(409, "没有可展开分镜的剧集（需先生成剧本，且状态为待分镜/分镜失败/卡住的分镜中）")
-    placeholders = ",".join("?" for _ in ids)
-    conn.execute(f"UPDATE episodes SET status='scripting', script_error=NULL WHERE id IN ({placeholders})", ids)
-    conn.commit()
     sem = asyncio.Semaphore(max(int(get_setting("storyboard_concurrency") or 2), 1))
     run_ids: list[str] = []
-    for eid in ids:
-        recorder = _new_storyboard_recorder(eid, trigger_type="batch")
-        run_ids.append(recorder.run_id)
-        task_registry.spawn(
-            "storyboard", eid,
-            _storyboard_guarded_recorded(eid, sem, recorder),
-            project_id=project_id,
+    failed_to_start: list[dict] = []
+    for candidate in candidates:
+        eid = candidate["id"]
+        recorder = None
+        try:
+            recorder = _new_storyboard_recorder(eid, trigger_type="batch")
+        except Exception as exc:
+            public = errors.record_and_format(
+                exc, action="storyboard_batch_recorder",
+                context={"project_id": project_id, "episode_id": eid},
+            )
+            failed_to_start.append({"episode_id": eid, "error": public, "retryable": True})
+            continue
+        installed = conn.execute(
+            """UPDATE episodes
+               SET status='scripting', script_error=NULL, active_storyboard_run_id=?
+               WHERE id=? AND status=? AND active_storyboard_run_id IS ?
+                 AND screenplay_publish_fence=0
+                 AND NOT EXISTS (
+                     SELECT 1 FROM workflow_runs AS wr
+                     WHERE wr.id=episodes.active_storyboard_run_id
+                       AND wr.status IN ('CREATED','RUNNING')
+                 )""",
+            (
+                recorder.run_id,
+                eid,
+                candidate["status"],
+                candidate["active_storyboard_run_id"],
+            ),
         )
-    return {"started": len(ids), "run_ids": run_ids}
+        if installed.rowcount != 1:
+            conn.rollback()
+            recorder.cancel("批量分镜启动权已变化，当前运行未启动")
+            failed_to_start.append({
+                "episode_id": eid,
+                "error": "剧集状态刚刚发生变化，本次未接管",
+                "retryable": True,
+            })
+            continue
+        conn.commit()
+        coro = _storyboard_guarded_recorded(eid, sem, recorder)
+        try:
+            task_registry.spawn(
+                "storyboard", eid, coro, project_id=project_id,
+            )
+        except Exception as exc:
+            coro.close()
+            rollback_status = (
+                "script_failed" if candidate["status"] == "scripting" else candidate["status"]
+            )
+            rollback_error = (
+                "检测到上次分镜任务已中断；本次批量任务也未能启动，可继续重试"
+                if candidate["status"] == "scripting"
+                else candidate["script_error"]
+            )
+            conn.execute(
+                """UPDATE episodes
+                   SET active_storyboard_run_id=NULL, status=?, script_error=?
+                   WHERE id=? AND active_storyboard_run_id=?""",
+                (rollback_status, rollback_error, eid, recorder.run_id),
+            )
+            conn.commit()
+            recorder.cancel("批量分镜任务未能启动，状态已回滚")
+            public = errors.record_and_format(
+                exc, action="storyboard_batch_spawn",
+                context={"project_id": project_id, "episode_id": eid},
+            )
+            failed_to_start.append({"episode_id": eid, "error": public, "retryable": True})
+            continue
+        run_ids.append(recorder.run_id)
+    if not run_ids:
+        raise HTTPException(503, {
+            "code": "STORYBOARD_BATCH_START_FAILED",
+            "message": "批量分镜任务均未能启动，各集剧本和恢复点已保留，可直接重试",
+            "failed_to_start": failed_to_start,
+        })
+    return {
+        "started": len(run_ids),
+        "run_ids": run_ids,
+        "failed_to_start": failed_to_start,
+        "retryable_failures": len(failed_to_start),
+    }
 
 
 async def _storyboard_guarded_recorded(
@@ -1982,7 +2189,7 @@ def episode_detail(episode_id: str, view: str | None = None):
         s["video_status"] = (
             s["pipeline"].get("video_status") if s["pipeline"] else None
         )
-        # 透出 grade / fallback，供评审墙 A/B 分色
+        # 透出 grade / fallback，供生成台 A/B 分色
         try:
             from app.evidence.media import grade_shot_video
             graded = grade_shot_video(s["id"])
@@ -1999,7 +2206,7 @@ def episode_detail(episode_id: str, view: str | None = None):
             ep, shots, ep.get("supervisor"), script,
         )
     ep["pipeline_summary"] = pipeline_summary
-    # 视频补齐 Supervisor 面板（评审墙）
+    # 视频补齐 Supervisor 面板（生成台）
     if full or view == "wall":
         try:
             from app.video_supervisor import load_latest_checkpoint, public_checkpoint_projection

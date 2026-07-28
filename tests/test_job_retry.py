@@ -166,3 +166,66 @@ def test_assert_job_lease_can_extend_ttl_for_long_qa_window(monkeypatch) -> None
     # 默认路径仍保持 180s，避免无关续租被意外拉长。
     worker._assert_job_lease("j1", "worker-a")
     assert seen == [360.0, 180.0]
+
+
+def test_provider_stage_heartbeat_renews_lease_while_reference_work_is_slow(monkeypatch) -> None:
+    """Slow keyframe/VLM work must not look abandoned after the initial lease."""
+    renewals: list[tuple[str, str, float]] = []
+
+    def fake_renew(job_id: str, owner: str, *, lease_seconds: float = 180.0) -> bool:
+        renewals.append((job_id, owner, lease_seconds))
+        return True
+
+    monkeypatch.setattr(worker.media_scheduler, "renew_lease", fake_renew)
+
+    async def run() -> str:
+        async def slow_reference_work() -> str:
+            await asyncio.sleep(0.045)
+            return "ready"
+
+        return await worker._await_with_job_lease_heartbeat(
+            slow_reference_work(),
+            job_id="j1",
+            owner="worker-a",
+            lease_seconds=0.03,
+            heartbeat_interval_s=0.01,
+        )
+
+    assert asyncio.run(run()) == "ready"
+    assert len(renewals) >= 3
+    assert all(item == ("j1", "worker-a", 0.03) for item in renewals)
+
+
+def test_provider_stage_heartbeat_cancels_fenced_worker_before_stale_write(monkeypatch) -> None:
+    """A worker that lost ownership cannot finish and publish its old snapshot."""
+    writes: list[str] = []
+    cancelled: list[bool] = []
+
+    monkeypatch.setattr(
+        worker.media_scheduler,
+        "renew_lease",
+        lambda *_args, **_kwargs: False,
+    )
+
+    async def run() -> None:
+        async def stale_worker() -> None:
+            try:
+                await asyncio.sleep(0.05)
+                writes.append("stale checkpoint")
+            finally:
+                cancelled.append(True)
+
+        try:
+            await worker._await_with_job_lease_heartbeat(
+                stale_worker(),
+                job_id="j1",
+                owner="old-worker",
+                heartbeat_interval_s=0.01,
+            )
+        except worker.LeaseLost:
+            return
+        raise AssertionError("lost ownership must raise LeaseLost")
+
+    asyncio.run(run())
+    assert writes == []
+    assert cancelled == [True]

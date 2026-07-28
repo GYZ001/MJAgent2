@@ -157,6 +157,53 @@ def test_regex_replan_skips_existing_title_only_duplicate(monkeypatch) -> None:
     assert json.loads(rows[0]["source_chapters"]) == [1927]
 
 
+def test_regex_planner_rolls_back_partial_episode_batch(monkeypatch) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE projects(
+          id TEXT PRIMARY KEY, plan_status TEXT, plan_error TEXT,
+          key_timeline TEXT, status TEXT
+        );
+        CREATE TABLE chapters(
+          project_id TEXT, idx INTEGER, title TEXT, content TEXT
+        );
+        CREATE TABLE episodes(
+          id TEXT PRIMARY KEY, project_id TEXT, episode_no INTEGER UNIQUE, title TEXT, hook TEXT,
+          cliffhanger TEXT, synopsis TEXT, source_chapters TEXT,
+          target_duration_s INTEGER, status TEXT, created_at REAL
+        );
+        CREATE TABLE error_logs(
+          id TEXT PRIMARY KEY, ts REAL, action TEXT, category TEXT, code TEXT,
+          message TEXT, traceback TEXT, context TEXT
+        );
+        INSERT INTO projects VALUES('p1','running',NULL,NULL,'ingested');
+        INSERT INTO chapters VALUES('p1',1,'第一章','第一章 正文一');
+        INSERT INTO chapters VALUES('p1',2,'第二章','第二章 正文二');
+        """
+    )
+    monkeypatch.setattr(planning, "get_conn", lambda: conn)
+    monkeypatch.setattr(
+        planning.worker,
+        "delete_project_episodes",
+        lambda project_id: conn.execute(
+            "DELETE FROM episodes WHERE project_id=?", (project_id,)
+        ).rowcount,
+    )
+    ids = iter(("ep_same", "ep_same"))
+    monkeypatch.setattr(planning, "new_id", lambda _prefix: next(ids))
+
+    asyncio.run(planning.run_regex_plan("p1"))
+
+    assert conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0] == 0
+    project = conn.execute(
+        "SELECT plan_status, plan_error FROM projects WHERE id='p1'"
+    ).fetchone()
+    assert project["plan_status"] == "failed"
+    assert project["plan_error"]
+
+
 def test_task_registry_cancels_and_waits_before_returning() -> None:
     async def scenario() -> None:
         finished = asyncio.Event()
@@ -172,6 +219,33 @@ def test_task_registry_cancels_and_waits_before_returning() -> None:
         assert await task_registry.cancel_and_wait("test", "one") is True
         assert finished.is_set()
         assert not task_registry.active("test", "one")
+
+    asyncio.run(scenario())
+
+
+def test_task_registry_keeps_cancelling_task_visible_until_it_finishes() -> None:
+    async def scenario() -> None:
+        cancelling = asyncio.Event()
+        release = asyncio.Event()
+
+        async def background() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelling.set()
+                await release.wait()
+                raise
+
+        task_registry.spawn("test", "slow-cancel", background())
+        await asyncio.sleep(0)
+        waiter = asyncio.create_task(
+            task_registry.cancel_and_wait("test", "slow-cancel")
+        )
+        await cancelling.wait()
+        assert task_registry.active("test", "slow-cancel")
+        release.set()
+        assert await waiter is True
+        assert not task_registry.active("test", "slow-cancel")
 
     asyncio.run(scenario())
 

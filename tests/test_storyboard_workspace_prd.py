@@ -5,12 +5,14 @@ import threading
 import pytest
 from fastapi import HTTPException
 
-from app import api, db
+from app import api, db, task_registry
+from app.capabilities.direct import enter_handler
 from app.evidence import repository
 from app.harness.types import EvidenceArtifact
 from app import storyboard_workspace as workspace
 from app.orchestration import api as orchestration_api
 from app.orchestration.engine import WorkflowRecorder
+from app.orchestration.state_machine import transition_run
 from app.storyboard_supervisor import (
     SupervisorCheckpoint,
     _begin_repair_activation,
@@ -313,6 +315,227 @@ async def test_resume_does_not_deduplicate_terminal_run_behind_scripting_project
     assert result.get("deduplicated") is not True
     assert result["run_id"] != terminal.run_id
     assert spawned == {"kind": "storyboard", "key": "e1", "project_id": "p1"}
+
+
+@pytest.mark.asyncio
+async def test_batch_storyboard_does_not_take_over_durable_active_run(
+    storyboard_db, monkeypatch,
+):
+    from app import task_registry
+    from app.capabilities import dispatch
+
+    active = WorkflowRecorder.create(
+        workflow_type="storyboard",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="other-instance-active",
+    )
+    active.start()
+    storyboard_db.execute(
+        "UPDATE episodes SET status='scripting',active_storyboard_run_id=? WHERE id='e1'",
+        (active.run_id,),
+    )
+    storyboard_db.commit()
+    monkeypatch.setattr(task_registry, "active", lambda *_args: False)
+
+    async def bypass_capability_route(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(dispatch, "ui_route", bypass_capability_route)
+
+    with pytest.raises(HTTPException) as rejected:
+        await api.start_storyboard_all("p1")
+
+    assert rejected.value.status_code == 409
+    episode = storyboard_db.execute(
+        "SELECT status,active_storyboard_run_id FROM episodes WHERE id='e1'",
+    ).fetchone()
+    assert dict(episode) == {
+        "status": "scripting",
+        "active_storyboard_run_id": active.run_id,
+    }
+
+
+@pytest.mark.asyncio
+async def test_first_storyboard_spawn_failure_restores_episode_state(
+    storyboard_db, monkeypatch,
+):
+    storyboard_db.execute(
+        "UPDATE episodes SET status='planned',script_error='启动前状态' WHERE id='e1'"
+    )
+    storyboard_db.commit()
+
+    def fail_spawn(_kind, _key, coro, *, project_id=None):
+        coro.close()
+        raise RuntimeError("event loop unavailable")
+
+    monkeypatch.setattr(task_registry, "spawn", fail_spawn)
+    with enter_handler(), pytest.raises(HTTPException) as exc_info:
+        await api.start_storyboard("e1")
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail["code"] == "STORYBOARD_START_SPAWN_FAILED"
+    episode = storyboard_db.execute(
+        "SELECT status,script_error,active_storyboard_run_id FROM episodes WHERE id='e1'"
+    ).fetchone()
+    assert dict(episode) == {
+        "status": "planned",
+        "script_error": "启动前状态",
+        "active_storyboard_run_id": None,
+    }
+    latest = storyboard_db.execute(
+        "SELECT status FROM workflow_runs WHERE workflow_type='storyboard' "
+        "AND scope_id='e1' ORDER BY updated_at DESC LIMIT 1"
+    ).fetchone()
+    assert latest["status"] == "CANCELLED"
+
+
+def test_storyboard_recovery_resumes_service_restart_and_persists_pointer(
+    storyboard_db, monkeypatch,
+):
+    parent = WorkflowRecorder.create(
+        workflow_type="storyboard",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="restart",
+    )
+    parent.start()
+    parent.pause_external("服务重启")
+    storyboard_db.execute(
+        "UPDATE episodes SET status='scripting',active_storyboard_run_id=? WHERE id='e1'",
+        (parent.run_id,),
+    )
+    storyboard_db.commit()
+    spawned: dict[str, object] = {}
+
+    def fake_spawn(kind, key, coro, *, project_id=None):
+        spawned.update(kind=kind, key=key, project_id=project_id)
+        coro.close()
+        return None
+
+    monkeypatch.setattr(task_registry, "spawn", fake_spawn)
+
+    assert api.recover_storyboard_tasks() == 1
+    episode = storyboard_db.execute(
+        "SELECT status,active_storyboard_run_id FROM episodes WHERE id='e1'"
+    ).fetchone()
+    assert episode["status"] == "scripting"
+    assert episode["active_storyboard_run_id"] != parent.run_id
+    child = storyboard_db.execute(
+        "SELECT parent_run_id,trigger_type FROM workflow_runs WHERE id=?",
+        (episode["active_storyboard_run_id"],),
+    ).fetchone()
+    assert dict(child) == {"parent_run_id": parent.run_id, "trigger_type": "resume"}
+    assert spawned == {"kind": "storyboard", "key": "e1", "project_id": "p1"}
+
+
+def test_storyboard_recovery_does_not_take_over_user_pause(
+    storyboard_db, monkeypatch,
+):
+    paused = WorkflowRecorder.create(
+        workflow_type="storyboard",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="user-pause",
+    )
+    paused.start()
+    transition_run(paused.run_id, "RUNNING", "PAUSED_EXTERNAL", "user_pause")
+    storyboard_db.execute(
+        "UPDATE episodes SET status='scripting',active_storyboard_run_id=? WHERE id='e1'",
+        (paused.run_id,),
+    )
+    storyboard_db.commit()
+    monkeypatch.setattr(
+        task_registry,
+        "spawn",
+        lambda *_args, **_kwargs: pytest.fail("用户暂停不应被启动恢复接管"),
+    )
+
+    assert api.recover_storyboard_tasks() == 0
+    assert storyboard_db.execute(
+        "SELECT active_storyboard_run_id FROM episodes WHERE id='e1'"
+    ).fetchone()[0] == paused.run_id
+
+
+@pytest.mark.asyncio
+async def test_recorded_storyboard_shutdown_becomes_recoverable_pause(
+    storyboard_db, monkeypatch,
+):
+    recorder = WorkflowRecorder.create(
+        workflow_type="storyboard",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="shutdown",
+    )
+    storyboard_db.execute(
+        "UPDATE episodes SET status='scripting',active_storyboard_run_id=? WHERE id='e1'",
+        (recorder.run_id,),
+    )
+    storyboard_db.commit()
+
+    async def interrupted(*_args, **_kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr("app.domain.storyboard_ops._storyboard_task", interrupted)
+    monkeypatch.setattr(task_registry, "shutdown_in_progress", lambda: True)
+
+    with pytest.raises(asyncio.CancelledError):
+        await _recorded_storyboard_task("e1", recorder, resume=True)
+
+    run = repository.get_run(recorder.run_id)
+    assert run["status"] == "PAUSED_EXTERNAL"
+    assert run["failure_code"] == "SERVICE_RESTART"
+    assert storyboard_db.execute(
+        "SELECT active_storyboard_run_id FROM episodes WHERE id='e1'"
+    ).fetchone()[0] is None
+
+
+@pytest.mark.asyncio
+async def test_batch_storyboard_reports_partial_start_failure(
+    storyboard_db, monkeypatch,
+):
+    screenplay = storyboard_db.execute(
+        "SELECT screenplay_json,screenplay_artifact_id FROM episodes WHERE id='e1'"
+    ).fetchone()
+    storyboard_db.execute(
+        "UPDATE episodes SET status='planned',script_error=NULL,active_storyboard_run_id=NULL "
+        "WHERE id='e1'"
+    )
+    storyboard_db.execute(
+        """INSERT INTO episodes(
+               id,project_id,episode_no,title,screenplay_json,screenplay_status,
+               screenplay_artifact_id,status,created_at
+           ) VALUES('e2','p1',2,'第二集',?,'ready',?,'planned',1)""",
+        (screenplay["screenplay_json"], screenplay["screenplay_artifact_id"]),
+    )
+    storyboard_db.commit()
+
+    def selective_spawn(_kind, key, coro, *, project_id=None):
+        coro.close()
+        if key == "e2":
+            raise RuntimeError("queue unavailable")
+        return None
+
+    monkeypatch.setattr(task_registry, "spawn", selective_spawn)
+    with enter_handler():
+        result = await api.start_storyboard_all("p1")
+
+    assert result["started"] == 1
+    assert result["retryable_failures"] == 1
+    assert result["failed_to_start"][0]["episode_id"] == "e2"
+    rows = {
+        row["id"]: dict(row)
+        for row in storyboard_db.execute(
+            "SELECT id,status,active_storyboard_run_id FROM episodes ORDER BY id"
+        ).fetchall()
+    }
+    assert rows["e1"]["status"] == "scripting"
+    assert rows["e1"]["active_storyboard_run_id"]
+    assert rows["e2"] == {
+        "id": "e2",
+        "status": "planned",
+        "active_storyboard_run_id": None,
+    }
 
 
 @pytest.mark.asyncio

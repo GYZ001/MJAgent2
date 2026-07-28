@@ -4,7 +4,12 @@ import { useEffect, useRef } from 'react'
 export function useFocusTrap(
   active: boolean,
   onClose: () => void,
-  options?: { dirty?: boolean; onDirtyClose?: () => void },
+  options?: {
+    dirty?: boolean
+    onDirtyClose?: () => void
+    returnFocus?: HTMLElement | null
+    suspended?: boolean
+  },
 ) {
   const containerRef = useRef<HTMLElement | null>(null)
   const previousFocus = useRef<HTMLElement | null>(null)
@@ -30,6 +35,7 @@ export function useFocusTrap(
     initial?.focus()
 
     const onKeyDown = (event: KeyboardEvent) => {
+      if (optionsRef.current?.suspended) return
       if (event.key === 'Escape') {
         event.preventDefault()
         const latestOptions = optionsRef.current
@@ -54,7 +60,17 @@ export function useFocusTrap(
     return () => {
       document.body.style.overflow = previousOverflow
       window.removeEventListener('keydown', onKeyDown)
-      previousFocus.current?.focus?.()
+      const previous = previousFocus.current
+      const fallback = optionsRef.current?.returnFocus
+      const previousUsable = previous
+        && previous !== document.body
+        && previous.isConnected
+        && previous.getClientRects().length > 0
+      const fallbackUsable = fallback
+        && fallback.isConnected
+        && fallback.getClientRects().length > 0
+      const target = fallbackUsable ? fallback : previousUsable ? previous : previous
+      target?.focus?.()
     }
   }, [active])
 

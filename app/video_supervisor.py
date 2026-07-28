@@ -668,10 +668,18 @@ def rebuild_coverage_ledger(
             sid = row["shot_id"]
             dispatch_map[sid] = dispatch_map.get(sid, 0) + 1
             cost_map[sid] = cost_map.get(sid, 0.0) + float(row["cost_cny"] or 0)
+            try:
+                version_meta = json.loads(row["image_inputs"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                version_meta = {}
             if row["provider_task_id"] or row["status"] in {"succeeded", "failed", "running", "queued"}:
                 # 产生过 provider 任务或进入执行的版本计为 paid attempt
                 if row["provider_task_id"] or row["status"] == "succeeded":
-                    attempts_map[sid] = attempts_map.get(sid, 0) + 1
+                    paid_attempts = max(
+                        1,
+                        int(version_meta.get("provider_paid_attempts") or 0),
+                    )
+                    attempts_map[sid] = attempts_map.get(sid, 0) + paid_attempts
             if row["status"] != "succeeded":
                 continue
             qa = json.loads(row["qa_json"] or "{}")
@@ -2263,6 +2271,7 @@ async def run_video_completion_resilient(
 async def reconcile_stale_video_supervisors() -> int:
     """接管 heartbeat 超时但内存 task 仍占位的 Supervisor。"""
     from app import task_registry
+    from app.errors import log_error
     from app.orchestration.engine import WorkflowRecorder, fingerprint
     from app.observability.metrics import inc
 
@@ -2275,22 +2284,23 @@ async def reconcile_stale_video_supervisors() -> int:
            WHERE e.video_completion_mode='complete' AND e.active_video_run_id IS NOT NULL"""
     ).fetchall()
     recovered = 0
-    for row in rows:
+
+    async def reconcile_one(row) -> bool:
         episode_id = row["id"]
         cp = load_latest_checkpoint(episode_id)
         if cp is None or cp.phase in TERMINAL_SUPERVISOR_PHASES or cp.phase in {
             "PAUSED_EXTERNAL", "PAUSED_BUDGET", "WAITING_AUTHORIZATION", "WAITING_HUMAN",
         }:
-            continue
+            return False
         heartbeat = max(float(cp.last_heartbeat_at or 0), float(row["run_updated_at"] or 0))
         task_running = task_registry.active("video_completion", episode_id)
         # A checkpoint created before absolute deadlines existed is a legacy
         # incident.  Do not mutate it automatically: the repair-preview +
         # explicit confirmation path owns that migration.
         if not task_running and cp.deadline_at is None:
-            continue
+            return False
         if heartbeat and now() - heartbeat <= SUPERVISOR_HEARTBEAT_STALE_S:
-            continue
+            return False
         if task_running:
             await task_registry.cancel_and_wait("video_completion", episode_id)
         recorder = WorkflowRecorder.create(
@@ -2307,15 +2317,19 @@ async def reconcile_stale_video_supervisors() -> int:
             parent_run_id=row["active_video_run_id"],
         )
         recorder.start()
+        claimed = conn.execute(
+            """UPDATE episodes SET active_video_run_id=?, status='generating'
+               WHERE id=? AND active_video_run_id=?""",
+            (recorder.run_id, episode_id, row["active_video_run_id"]),
+        )
+        if claimed.rowcount != 1:
+            conn.rollback()
+            recorder.cancel("检测到更新的补齐运行，watchdog 放弃接管")
+            return False
+        conn.commit()
         cp.run_id = recorder.run_id
         cp.phase = "RECOVERING_CONTROL_PLANE"
         cp.control_plane_recoveries += 1
-        conn.execute(
-            """UPDATE episodes SET active_video_run_id=?, status='generating'
-               WHERE id=?""",
-            (recorder.run_id, episode_id),
-        )
-        conn.commit()
         try:
             result = _deadline_closeout(
                 cp,
@@ -2331,7 +2345,34 @@ async def reconcile_stale_video_supervisors() -> int:
             )
             recorder.fail(exc)
         inc("video_supervisor_watchdog_takeover_total", episode_id=episode_id)
-        recovered += 1
+        return True
+
+    for row in rows:
+        episode_id = row["id"]
+        try:
+            if await reconcile_one(row):
+                recovered += 1
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            log_error(
+                exc,
+                action="video_supervisor.watchdog_episode",
+                context={
+                    "episode_id": episode_id,
+                    "active_video_run_id": row["active_video_run_id"],
+                },
+                meta={"stage": "video_supervisor_watchdog", "isolation": "episode"},
+            )
+            inc(
+                "video_supervisor_watchdog_episode_error_total",
+                episode_id=episode_id,
+                error_type=type(exc).__name__,
+            )
     return recovered
 
 
@@ -2341,8 +2382,19 @@ async def video_supervisor_watchdog_loop(interval_s: float = 30.0) -> None:
             await reconcile_stale_video_supervisors()
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001 — watchdog 自身不得因单集坏数据退出
-            pass
+        except Exception as exc:  # noqa: BLE001 — watchdog 自身不得因单集坏数据退出
+            from app.errors import log_error
+            from app.observability.metrics import inc
+            log_error(
+                exc,
+                action="video_supervisor.watchdog_loop",
+                context={"interval_s": interval_s},
+                meta={"stage": "video_supervisor_watchdog", "isolation": "loop"},
+            )
+            inc(
+                "video_supervisor_watchdog_loop_error_total",
+                error_type=type(exc).__name__,
+            )
         await asyncio.sleep(max(5.0, min(float(interval_s), 60.0)))
 
 
@@ -2435,7 +2487,9 @@ def preview_video_completion_repair(episode_id: str) -> dict[str, Any]:
 def recover_video_completion_runs() -> int:
     """服务重启后恢复未完成的视频补齐 Supervisor。"""
     from app import task_registry
+    from app.errors import log_error
     from app.orchestration.engine import WorkflowRecorder, fingerprint
+    from app.observability.metrics import inc
 
     conn = get_conn()
     # 确保列存在
@@ -2450,24 +2504,26 @@ def recover_video_completion_runs() -> int:
             pass
 
     rows = conn.execute(
-        """SELECT id, project_id, active_video_run_id, video_completion_mode, storyboard_artifact_id
+        """SELECT id, project_id, status AS episode_status, active_video_run_id,
+                  video_completion_mode, storyboard_artifact_id
            FROM episodes WHERE video_completion_mode='complete'"""
     ).fetchall()
     resumed = 0
-    for row in rows:
+
+    def recover_one(row) -> bool:
         episode_id = row["id"]
         if task_registry.active("video_completion", episode_id):
-            continue
+            return False
         cp = load_latest_checkpoint(episode_id)
         if cp is None:
-            continue
+            return False
         legacy_without_deadline = cp.deadline_at is None
         if legacy_without_deadline and cp.grant_id:
             prior_grant = get_video_grant(cp.grant_id)
             if prior_grant:
                 cp.deadline_at = float(prior_grant.deadline_at)
         if cp.phase in TERMINAL_SUPERVISOR_PHASES or cp.phase in {"WAITING_AUTHORIZATION", "WAITING_HUMAN"}:
-            continue
+            return False
         # 用户取消的 run 不恢复
         cancelled = conn.execute(
             """SELECT id FROM workflow_runs
@@ -2483,11 +2539,11 @@ def recover_video_completion_runs() -> int:
             (episode_id,),
         ).fetchone()
         if cancelled and latest and latest["status"] == "CANCELLED":
-            continue
+            return False
         deadline_due = bool(cp.deadline_at and now() >= cp.deadline_at)
         # 旧版本事故 run 没有持久化 deadline；只提供 dry-run，禁止启动时静默改用户现场数据。
         if legacy_without_deadline and deadline_due:
-            continue
+            return False
         if cp.grant_id and not deadline_due:
             try:
                 validate_video_grant(
@@ -2498,7 +2554,7 @@ def recover_video_completion_runs() -> int:
             except GrantValidationError:
                 cp.phase = "WAITING_AUTHORIZATION"
                 save_checkpoint(cp)
-                continue
+                return False
 
         recorder = WorkflowRecorder.create(
             workflow_type="episode_video_completion",
@@ -2527,19 +2583,73 @@ def recover_video_completion_runs() -> int:
                 else:
                     rec.partial(result.phase)
             except asyncio.CancelledError:
-                rec.cancel()
+                if task_registry.shutdown_in_progress():
+                    rec.pause_external("服务重启，全片视频补齐等待自动恢复")
+                else:
+                    rec.cancel()
                 raise
             except Exception as exc:
                 rec.fail(exc)
                 raise
 
-        task_registry.spawn(
-            "video_completion", episode_id, _task(), project_id=row["project_id"],
+        claimed = conn.execute(
+            """UPDATE episodes SET active_video_run_id=?, status='generating'
+               WHERE id=? AND active_video_run_id IS ?""",
+            (recorder.run_id, episode_id, row["active_video_run_id"]),
         )
-        conn.execute(
-            "UPDATE episodes SET active_video_run_id=? WHERE id=?",
-            (recorder.run_id, episode_id),
-        )
+        if claimed.rowcount != 1:
+            conn.rollback()
+            recorder.cancel("恢复启动权已变化，当前运行未启动")
+            return False
         conn.commit()
-        resumed += 1
+        coro = _task()
+        try:
+            task_registry.spawn(
+                "video_completion", episode_id, coro, project_id=row["project_id"],
+            )
+        except Exception as exc:
+            coro.close()
+            try:
+                recorder.start()
+                recorder.fail(exc)
+            except Exception:  # noqa: BLE001
+                pass
+            conn.execute(
+                """UPDATE episodes SET active_video_run_id=?, status=?
+                   WHERE id=? AND active_video_run_id=?""",
+                (
+                    row["active_video_run_id"],
+                    row["episode_status"],
+                    episode_id,
+                    recorder.run_id,
+                ),
+            )
+            conn.commit()
+            raise
+        return True
+
+    for row in rows:
+        episode_id = row["id"]
+        try:
+            if recover_one(row):
+                resumed += 1
+        except Exception as exc:  # noqa: BLE001
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            log_error(
+                exc,
+                action="video_supervisor.recover_episode",
+                context={
+                    "episode_id": episode_id,
+                    "active_video_run_id": row["active_video_run_id"],
+                },
+                meta={"stage": "video_supervisor_recovery", "isolation": "episode"},
+            )
+            inc(
+                "video_supervisor_recovery_episode_error_total",
+                episode_id=episode_id,
+                error_type=type(exc).__name__,
+            )
     return resumed

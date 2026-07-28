@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import OperationError from './OperationError'
 
 export type QueryKind =
   | 'loading'
@@ -61,10 +62,16 @@ export default function QueryState({
   }
   if (resolved === 'network' || resolved === 'server' || (error && !hasData)) {
     return (
-      <div className="empty query-error" role="alert">
-        <strong>{resolved === 'network' ? '网络异常' : '服务异常'}</strong>
-        <p>{error || `暂时无法加载${objectName}`}</p>
-        {onRetry && <button type="button" className="btn" onClick={onRetry}>重试</button>}
+      <div className="empty query-error">
+        <OperationError
+          title={resolved === 'network' ? '网络连接异常' : `${objectName}加载失败`}
+          message={error}
+          guidance={resolved === 'network'
+            ? '请检查本机服务和网络连接后重试；当前不会用空数据覆盖已有内容。'
+            : `暂时无法取得${objectName}，当前不会改选其他对象或把失败误报为空。`}
+        >
+          {onRetry && <button type="button" className="btn" onClick={onRetry}>重试加载</button>}
+        </OperationError>
       </div>
     )
   }

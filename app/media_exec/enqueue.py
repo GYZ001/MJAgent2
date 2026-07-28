@@ -27,7 +27,7 @@ def reconcile_episode_generation_status(episode_id: str) -> bool:
     """视频队列已无活动任务时，把剧集从假“生成中”恢复为“已确认”。
 
     单镜失败或预算暂停不应让整集永久处于运行态；真正完成并合成后仍由交付流程置为 done。
-    全片补齐 Supervisor 仍在协调（含预检/等待授权）时不得降回 confirmed，否则评审墙会误判为空闲。
+    全片补齐 Supervisor 仍在协调（含预检/等待授权）时不得降回 confirmed，否则生成台会误判为空闲。
     """
     conn = get_conn()
     active = conn.execute(
@@ -98,6 +98,207 @@ def stop_shot_video_tasks(shot_id: str) -> dict[str, object]:
         ),
         "resume_supported": False,
         "jobs": results,
+    }
+
+
+def pause_episode_video_tasks(episode_id: str) -> dict[str, object]:
+    """Durably pause every active video job in an episode.
+
+    Unlike single-shot cancellation this is reversible.  A provider operation
+    that has already been accepted may continue remotely, but its local worker
+    loses the lease immediately and cannot write a result until the episode is
+    resumed.
+    """
+    conn = get_conn()
+    ep = conn.execute("SELECT id FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    if not ep:
+        raise ValueError(f"分集不存在：{episode_id}")
+    rows = conn.execute(
+        """SELECT id, version_id, run_id, step_run_id, provider_non_cancellable,
+                  provider_operation_id
+             FROM jobs
+            WHERE episode_id=? AND kind='video'
+              AND status IN ('queued','running','waiting_provider','waiting_retry','waiting','waiting_human')
+              AND cancellation_requested=0 AND abandoned=0
+            ORDER BY created_at""",
+        (episode_id,),
+    ).fetchall()
+    already_paused_jobs = int(conn.execute(
+        """SELECT COUNT(*) AS c FROM jobs
+           WHERE episode_id=? AND kind='video' AND status='paused'
+             AND cancellation_requested=0 AND abandoned=0""",
+        (episode_id,),
+    ).fetchone()["c"])
+    paused = []
+    for row in rows:
+        cursor = conn.execute(
+            """UPDATE jobs
+                  SET status='paused', error='用户已暂停整集生成',
+                      lease_owner=NULL, lease_expires_at=NULL, next_retry_at=NULL,
+                      updated_at=?
+                WHERE id=? AND status IN (
+                    'queued','running','waiting_provider','waiting_retry','waiting','waiting_human'
+                ) AND cancellation_requested=0 AND abandoned=0""",
+            (now(), row["id"]),
+        )
+        if cursor.rowcount != 1:
+            continue
+        if row["version_id"]:
+            conn.execute(
+                """UPDATE shot_versions SET status='paused', error='用户已暂停整集生成'
+                   WHERE id=? AND status IN (
+                       'queued','running','waiting_provider','waiting_retry','waiting','waiting_human'
+                   )""",
+                (row["version_id"],),
+            )
+        conn.execute(
+            "UPDATE budget_reservations SET status='reserved' WHERE job_id=? AND status='running'",
+            (row["id"],),
+        )
+        paused.append(row)
+    conn.execute(
+        "UPDATE episodes SET status='confirmed' WHERE id=? AND status='generating'",
+        (episode_id,),
+    )
+    conn.commit()
+    for row in paused:
+        mark_media_job_state(
+            row["run_id"], row["step_run_id"], "paused", "用户已暂停整集生成",
+        )
+    return {
+        "episode_id": episode_id,
+        "paused_jobs": len(paused),
+        "already_paused_jobs": already_paused_jobs,
+        "provider_may_continue": any(
+            bool(row["provider_non_cancellable"] or row["provider_operation_id"])
+            for row in paused
+        ),
+        "resume_supported": True,
+        "job_ids": [row["id"] for row in paused],
+    }
+
+
+def _recover_paused_provider_handle(conn, row) -> tuple[str, float] | None:
+    operation_id = row["provider_operation_id"]
+    if not operation_id:
+        return None
+    calls = conn.execute(
+        """SELECT ts,response_json FROM provider_calls
+           WHERE kind='video_create' AND status='OK' AND operation_id=?
+             AND response_json IS NOT NULL
+           ORDER BY id DESC""",
+        (operation_id,),
+    ).fetchall()
+    for call in calls:
+        try:
+            payload = json.loads(call["response_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        task_id = str(payload.get("id") or "").strip() if isinstance(payload, dict) else ""
+        if task_id:
+            return task_id, float(call["ts"])
+    return None
+
+
+def resume_episode_video_tasks(episode_id: str) -> dict[str, object]:
+    """Resume jobs paused by :func:`pause_episode_video_tasks`."""
+    conn = get_conn()
+    ep = conn.execute("SELECT id FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    if not ep:
+        raise ValueError(f"分集不存在：{episode_id}")
+    rows = conn.execute(
+        """SELECT j.id, j.version_id, j.run_id, j.step_run_id,
+                  j.provider_operation_id, j.provider_create_state,
+                  j.provider_non_cancellable, j.provider_submitted_at,
+                  v.provider_task_id
+             FROM jobs j
+             LEFT JOIN shot_versions v ON v.id=j.version_id
+            WHERE j.episode_id=? AND j.kind='video' AND j.status='paused'
+              AND j.cancellation_requested=0 AND j.abandoned=0
+            ORDER BY j.created_at""",
+        (episode_id,),
+    ).fetchall()
+    plans = []
+    unresolved = []
+    for row in rows:
+        provider_task_id = row["provider_task_id"]
+        provider_may_have_accepted = bool(
+            not provider_task_id
+            and (
+                row["provider_non_cancellable"]
+                or row["provider_create_state"] in {"accepted", "submitting", "unknown"}
+            )
+        )
+        if provider_may_have_accepted:
+            recovered = _recover_paused_provider_handle(conn, row)
+            if not recovered:
+                unresolved.append({
+                    "job_id": row["id"],
+                    "provider_operation_id": row["provider_operation_id"],
+                    "reason": "供应商可能已接单，但本地尚未确认原任务号",
+                })
+                continue
+            provider_task_id, submitted_at = recovered
+            if row["version_id"]:
+                conn.execute(
+                    "UPDATE shot_versions SET provider_task_id=? WHERE id=?",
+                    (provider_task_id, row["version_id"]),
+                )
+            conn.execute(
+                """UPDATE jobs
+                   SET provider_create_state='accepted', provider_non_cancellable=1,
+                       provider_submitted_at=COALESCE(provider_submitted_at,?), updated_at=?
+                   WHERE id=? AND status='paused'""",
+                (submitted_at, now(), row["id"]),
+            )
+        plans.append((row, "waiting_provider" if provider_task_id else "queued"))
+    conn.commit()
+    if unresolved:
+        return {
+            "episode_id": episode_id,
+            "resumed_jobs": 0,
+            "job_ids": [],
+            "requires_provider_confirmation": True,
+            "unresolved_provider_jobs": unresolved,
+            "recovery_action": "请在任务中心核对这些任务；确认供应商后台无可继续任务后，再明确重试",
+        }
+
+    resumed = []
+    for row, next_status in plans:
+        cursor = conn.execute(
+            """UPDATE jobs
+                  SET status=?, error=NULL, lease_owner=NULL, lease_expires_at=NULL,
+                      next_retry_at=NULL, updated_at=?
+                WHERE id=? AND status='paused' AND cancellation_requested=0 AND abandoned=0""",
+            (next_status, now(), row["id"]),
+        )
+        if cursor.rowcount != 1:
+            continue
+        if row["version_id"]:
+            conn.execute(
+                "UPDATE shot_versions SET status='queued', error=NULL WHERE id=? AND status='paused'",
+                (row["version_id"],),
+            )
+        resumed.append(row)
+    if resumed:
+        conn.execute("UPDATE episodes SET status='generating' WHERE id=?", (episode_id,))
+    conn.commit()
+    dispatch_deferred = []
+    for row in resumed:
+        try:
+            _enqueue_for_current_status(row["id"])
+        except Exception as exc:  # durable dispatcher will rediscover the row
+            errors.record_and_format(
+                exc, action="resume_episode_video_dispatch",
+                context={"episode_id": episode_id, "job_id": row["id"]},
+            )
+            dispatch_deferred.append(row["id"])
+    return {
+        "episode_id": episode_id,
+        "resumed_jobs": len(resumed),
+        "job_ids": [row["id"] for row in resumed],
+        "dispatch_deferred_job_ids": dispatch_deferred,
+        "durable_dispatch_pending": bool(dispatch_deferred),
     }
 
 
@@ -218,11 +419,38 @@ def _load_reference_gallery(conn, shot_row) -> dict | None:
         refs = meta.get("reference_images") or []
         if not refs:
             continue
+        if not video_modes.reference_gallery_matches_keyframe_contract(meta):
+            # 关键帧 prompt 合同升级后，未编辑的旧图不再默认污染新视频。
+            # 文件仍保留供审计，新版本只是重新生成唯一叙事关键帧。
+            continue
+        frozen_manifest = meta.get("reference_manifest")
+        if not isinstance(frozen_manifest, dict):
+            frozen_manifest = next(
+                (
+                    ref.get("dependency_manifest") for ref in refs
+                    if isinstance(ref, dict) and isinstance(ref.get("dependency_manifest"), dict)
+                ),
+                None,
+            )
         return {
             "source_version_id": version["id"],
             "revision": meta.get("reference_gallery_revision"),
             "edited": bool(meta.get("reference_gallery_edited")),
+            "contract_override": bool(meta.get("reference_gallery_contract_override")),
+            "keyframe_prompt_contract_version": meta.get("keyframe_prompt_contract_version"),
+            "keyframe_contract_fingerprint": (
+                meta.get("keyframe_contract_fingerprint")
+                or next(
+                    (
+                        ref.get("keyframe_contract_fingerprint") for ref in refs
+                        if isinstance(ref, dict) and ref.get("keyframe_contract_fingerprint")
+                    ),
+                    None,
+                )
+            ),
+            "keyframe_sequence": meta.get("keyframe_sequence"),
             "reference_images": refs,
+            "reference_manifest": frozen_manifest,
             "fingerprint": _reference_gallery_fingerprint(meta),
         }
     return None
@@ -357,6 +585,10 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
         (prev_row["id"] if prev_row else None)
         if uses_previous_tail_frame(continuity_mode) else None
     )
+    chain_after_version_id = (
+        _row_value(prev_row, "adopted_version_id")
+        if chain_after_shot_id else None
+    )
 
     outgoing_transition = _outgoing_transition_context(conn, shot_row)
     incoming_transition = None
@@ -390,7 +622,13 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
     # 参考图是分镜级素材。重抽、改词或带评语只创建新视频版本，不能重新跑参考图生成。
     reference_gallery = _load_reference_gallery(conn, shot_row)
 
-    key_material = prompt_text + f"|mode:{video_modes.REFERENCE_IMAGE_MODE}|plan:{video_modes.decision_to_dict(decision)}|after:{chain_after_shot_id or ''}"
+    key_material = (
+        prompt_text
+        + f"|mode:{video_modes.REFERENCE_IMAGE_MODE}|plan:{video_modes.decision_to_dict(decision)}"
+        + f"|after:{chain_after_shot_id or ''}"
+        + f"|after_version:{chain_after_version_id or ''}"
+        + f"|keyframe_prompt_contract:{video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION}"
+    )
     # 只有人工编辑会改变视频输入并打破原幂等键；未编辑画廊沿用历史幂等行为，
     # 普通重复点击仍直接复用已有成功视频。
     if reference_gallery and reference_gallery["revision"] is not None:
@@ -406,7 +644,7 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
         existing = conn.execute(
             "SELECT * FROM shot_versions WHERE shot_id=? AND idem_key=? "
             "AND status IN ('succeeded','queued','running','waiting_provider',"
-            "'waiting_retry','waiting_human','paused_budget') "
+            "'waiting_retry','waiting_human','paused_budget','paused') "
             "ORDER BY CASE status WHEN 'succeeded' THEN 0 ELSE 1 END, version_no DESC "
             "LIMIT 1",
             (shot_id, key)).fetchone()
@@ -425,6 +663,7 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
         "mode": decision.mode,
         "mode_decision": video_modes.decision_to_dict(decision),
         "after_shot_id": chain_after_shot_id,
+        "after_version_id": chain_after_version_id,
         "after_shot_no": None,
         "continuity_mode": continuity_mode,
         "prev_state_out": prompt_prev_state_out,
@@ -433,6 +672,7 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
         "auto_retake_count": max(0, int(auto_retake_count)),
         "supervisor_run_id": supervisor_run_id,
         "shot_contract_json": json.dumps(shot_contract_dict(shot), ensure_ascii=False),
+        "keyframe_prompt_contract_version": video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION,
     }
     if dependency_snapshot:
         # This immutable token is checked again by the worker before every
@@ -455,10 +695,19 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
         image_meta["reference_images"] = reference_gallery["reference_images"]
         image_meta["reference_gallery_source_version_id"] = reference_gallery["source_version_id"]
         image_meta["reference_gallery_fingerprint"] = reference_gallery["fingerprint"]
+        if reference_gallery.get("keyframe_contract_fingerprint"):
+            image_meta["keyframe_contract_fingerprint"] = reference_gallery["keyframe_contract_fingerprint"]
+        if isinstance(reference_gallery.get("keyframe_sequence"), dict):
+            image_meta["keyframe_sequence"] = reference_gallery["keyframe_sequence"]
+        if isinstance(reference_gallery.get("reference_manifest"), dict):
+            image_meta["reference_manifest"] = reference_gallery["reference_manifest"]
+            image_meta["reference_manifest_frozen"] = True
         if reference_gallery["revision"] is not None:
             image_meta["reference_gallery_revision"] = reference_gallery["revision"]
         if reference_gallery["edited"]:
             image_meta["reference_gallery_edited"] = True
+        if reference_gallery.get("contract_override"):
+            image_meta["reference_gallery_contract_override"] = True
     conn.execute(
         "INSERT INTO shot_versions(id, shot_id, version_no, prompt_text, idem_key, status, created_at, image_inputs) "
         "VALUES(?,?,?,?,?, 'queued', ?, ?)",
@@ -480,11 +729,11 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
     )
     conn.execute(
         "INSERT INTO jobs(id, kind, shot_id, version_id, episode_id, project_id, status, created_at, "
-        "updated_at, after_shot_id, run_id, owner_run_id, step_run_id) "
-        "VALUES(?, 'video', ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)",
+        "updated_at, after_shot_id, after_version_id, run_id, owner_run_id, step_run_id) "
+        "VALUES(?, 'video', ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)",
         (
             job_id, shot_id, version_id, ep["id"], project["id"], now(), now(), chain_after_shot_id,
-            run_id, supervisor_run_id, step_run_id,
+            chain_after_version_id, run_id, supervisor_run_id, step_run_id,
         ))
     try:
         from app.media_pipeline import stages as media_stages
@@ -494,10 +743,33 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
         pass
     conn.execute("UPDATE episodes SET status='generating' WHERE id=? AND status='confirmed'", (ep["id"],))
     conn.commit()
-    estimate = shot_cost_cny(shot.duration_s) + config.IMAGE_PRICE_PER_UNIT * 2
-    reserved = media_scheduler.reserve_budget(
-        job_id, ep["id"], estimate, budget_limit, conn=conn
+    estimate = (
+        shot_cost_cny(shot.duration_s)
+        + config.IMAGE_PRICE_PER_UNIT * video_modes.estimated_keyframe_generation_count()
     )
+    try:
+        reserved = media_scheduler.reserve_budget(
+            job_id, ep["id"], estimate, budget_limit, conn=conn
+        )
+    except Exception as exc:
+        public = errors.record_and_format(
+            exc,
+            action="video_budget_reserve",
+            context={"job_id": job_id, "shot_id": shot_id, "episode_id": ep["id"]},
+        )
+        message = f"视频任务未能完成预算预留，尚未提交供应商，可直接重试。{public}"
+        conn.execute(
+            "UPDATE jobs SET status='failed', error=?, updated_at=? WHERE id=?",
+            (message, now(), job_id),
+        )
+        conn.execute(
+            "UPDATE shot_versions SET status='failed', error=? WHERE id=?",
+            (message, version_id),
+        )
+        conn.commit()
+        mark_media_job_state(run_id, step_run_id, "failed", message)
+        reconcile_episode_generation_status(ep["id"])
+        raise ValueError(message) from exc
     if not reserved:
         _set_version(version_id, status="paused_budget")
         _set_job(job_id, "paused_budget", "集预算不足，任务已暂停")
@@ -506,7 +778,31 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
             "reused": False, "version_id": version_id, "job_id": job_id,
             "paused_budget": True,
         }
-    _enqueue_for_current_status(job_id)
-    return {"reused": False, "version_id": version_id, "job_id": job_id}
+    dispatch_deferred = False
+    try:
+        _enqueue_for_current_status(job_id)
+    except Exception as exc:  # durable dispatcher continuously rebuilds queues from jobs
+        errors.record_and_format(
+            exc,
+            action="video_initial_dispatch",
+            context={"job_id": job_id, "shot_id": shot_id, "episode_id": ep["id"]},
+        )
+        dispatch_deferred = True
+        conn.execute(
+            "UPDATE jobs SET error=?, updated_at=? WHERE id=? AND status='queued'",
+            (
+                "任务已写入持久队列；实时调度通知暂未送达，系统将自动重新发现，无需重复点击",
+                now(),
+                job_id,
+            ),
+        )
+        conn.commit()
+    return {
+        "reused": False,
+        "version_id": version_id,
+        "job_id": job_id,
+        "dispatch_deferred": dispatch_deferred,
+        "task_accepted": True,
+    }
 
 __all__ = [name for name in globals() if not name.startswith("__")]

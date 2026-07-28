@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 
 export type CharacterFilterState = {
   role: string
@@ -14,6 +14,12 @@ export type CharacterFilterState = {
 const DEFAULT: CharacterFilterState = {
   role: '', portrait: '', qa: '', missing: '', firstAppearance: '',
   version: '', candidate: '', sort: 'name',
+}
+
+export function characterFilterActiveCount(value: CharacterFilterState): number {
+  return Object.entries(value).filter(([key, item]) => (
+    key === 'sort' ? item !== DEFAULT.sort : Boolean(item)
+  )).length
 }
 
 /** 利用 zh-CN 排序边界推导汉字拼音首字母，覆盖通用汉字而非少量角色白名单。 */
@@ -77,20 +83,57 @@ export default function CharacterFilters({
   roles: string[]
 }) {
   const [open, setOpen] = useState(false)
-  const activeCount = useMemo(
-    () => Object.values(value).filter(Boolean).length,
-    [value],
-  )
+  const panelId = useId()
+  const rootRef = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const activeCount = useMemo(() => characterFilterActiveCount(value), [value])
+
+  const closeAndRestoreFocus = () => {
+    setOpen(false)
+    window.requestAnimationFrame(() => triggerRef.current?.focus())
+  }
+
+  const clearFilters = () => {
+    onChange({ ...DEFAULT })
+    window.requestAnimationFrame(() => triggerRef.current?.focus())
+  }
+
+  useEffect(() => {
+    if (!open) return
+    const onPointerDown = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      closeAndRestoreFocus()
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [open])
+
   return (
-    <div className="character-filters">
-      <button type="button" className="btn small" onClick={() => setOpen(v => !v)}>
-        筛选{activeCount ? ` · ${activeCount}` : ''}
+    <div ref={rootRef} className="character-filters">
+      <button
+        ref={triggerRef}
+        type="button"
+        className="btn small"
+        aria-expanded={open}
+        aria-controls={panelId}
+        aria-label={activeCount ? `角色筛选，已启用 ${activeCount} 项` : '角色筛选'}
+        onClick={() => setOpen(v => !v)}
+      >
+        角色筛选{activeCount ? ` · ${activeCount}` : ''}
       </button>
       {activeCount > 0 && (
-        <button type="button" className="btn small ghost" onClick={() => onChange({ ...DEFAULT })}>清除筛选</button>
+        <button type="button" className="btn small ghost" onClick={clearFilters}>清除筛选</button>
       )}
       {open && (
-        <div className="character-filter-panel">
+        <div id={panelId} className="character-filter-panel" role="group" aria-label="角色筛选条件">
           <label>
             身份
             <select value={value.role} onChange={e => onChange({ ...value, role: e.target.value })}>
@@ -107,15 +150,15 @@ export default function CharacterFilters({
             </select>
           </label>
           <label>
-            QA
+            质检结果
             <select value={value.qa} onChange={e => onChange({ ...value, qa: e.target.value })}>
               <option value="">全部</option>
               <option value="passed">已采用且通过</option>
-              <option value="warning">有警告</option>
-              <option value="failed">硬失败</option>
-              <option value="unverified">待复核</option>
+              <option value="warning">质量需复核</option>
+              <option value="failed">暂不可用</option>
+              <option value="unverified">待质检</option>
               <option value="missing">未出图</option>
-              <option value="generating">生成中</option>
+              <option value="generating">生成或质检中</option>
             </select>
           </label>
           <label>
@@ -156,9 +199,13 @@ export default function CharacterFilters({
               <option value="name">按名称</option>
               <option value="role">按身份</option>
               <option value="first">按首次适用集</option>
-              <option value="qa">按 QA 状态</option>
+              <option value="qa">按质检状态</option>
             </select>
           </label>
+          <div className="character-filter-actions">
+            {activeCount > 0 && <button type="button" className="btn small ghost" onClick={clearFilters}>清除筛选</button>}
+            <button type="button" className="btn small primary" onClick={closeAndRestoreFocus}>完成筛选</button>
+          </div>
         </div>
       )}
     </div>

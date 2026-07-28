@@ -28,7 +28,11 @@ async def control(args: I.RunControlInput) -> CommandResult:
     if func_name is None:
         return failed(f"未知 action：{args.action}", error_code="invalid_input")
     func = getattr(orch_api, func_name)
-    outcome = await call_guarded(func, args.run_id)
+    kwargs = (
+        {"allow_new_submission": bool(args.allow_new_submission)}
+        if args.action in {"resume", "retry"} else {}
+    )
+    outcome = await call_guarded(func, args.run_id, **kwargs)
     if isinstance(outcome, CommandResult):
         return outcome
     return succeeded(
@@ -43,4 +47,9 @@ async def job_cancel(args: I.JobCancelInput) -> CommandResult:
     outcome = await call_guarded(orch_api.cancel_media_job, args.job_id)
     if isinstance(outcome, CommandResult):
         return outcome
+    if outcome.get("cancelled") is False:
+        return succeeded(
+            f"媒体任务 {args.job_id} 已结束或无需取消",
+            data={**outcome, "idempotent": True},
+        )
     return succeeded(f"媒体任务 {args.job_id} 已请求取消", data=outcome)

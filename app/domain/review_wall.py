@@ -1,4 +1,4 @@
-"""评审墙的稳定对象、上游资格与评审工作流契约。
+"""生成台的稳定对象、上游资格与版本操作契约。
 
 这个模块由 ``app.api`` 兼容门面在其命名空间内执行，因此路由和
 原有领域函数共用同一个 ``router``。安全校验函数也供视频写路径调用，
@@ -21,9 +21,10 @@ _REVIEW_TERMINAL_RUN_STATES = {
     "SUCCEEDED", "FAILED", "CANCELLED", "COMPLETED", "PARTIAL",
     "succeeded", "failed", "cancelled", "completed", "partial",
 }
-_REVIEW_ITEM_STATUSES = {"open", "in_progress", "resolved", "wont_fix"}
-_REVIEW_SEVERITIES = {"low", "medium", "high", "blocker"}
-_REVIEW_SHOT_STATUSES = {"pending", "in_review", "completed", "needs_recheck"}
+_REVIEW_ACTIVE_RUN_STATES = {
+    "CREATED", "RUNNING", "WAITING_RETRY", "WAITING_HUMAN",
+    "WAITING_AUTHORIZATION", "PAUSED_BUDGET", "PAUSED_EXTERNAL",
+}
 
 
 def _review_sha(payload: Any) -> str:
@@ -45,23 +46,6 @@ def _ensure_review_wall_tables(conn=None) -> None:
     db = conn or get_conn()
     db.executescript(
         """
-        CREATE TABLE IF NOT EXISTS shot_review_items (
-            id TEXT PRIMARY KEY, shot_id TEXT NOT NULL,
-            anchor_json TEXT NOT NULL DEFAULT '{}', issue_type TEXT NOT NULL,
-            severity TEXT NOT NULL DEFAULT 'medium', comment TEXT NOT NULL,
-            assignee TEXT, status TEXT NOT NULL DEFAULT 'open',
-            content_version TEXT NOT NULL DEFAULT '', revision INTEGER NOT NULL DEFAULT 1,
-            created_by TEXT NOT NULL DEFAULT 'user', created_at REAL NOT NULL, updated_at REAL NOT NULL,
-            FOREIGN KEY(shot_id) REFERENCES shots(id) ON DELETE CASCADE
-        );
-        CREATE INDEX IF NOT EXISTS idx_shot_review_items_shot
-            ON shot_review_items(shot_id, status, updated_at);
-        CREATE TABLE IF NOT EXISTS shot_review_states (
-            shot_id TEXT PRIMARY KEY, review_status TEXT NOT NULL DEFAULT 'pending',
-            revision INTEGER NOT NULL DEFAULT 1, decided_by TEXT NOT NULL DEFAULT 'user',
-            completed_at REAL, updated_at REAL NOT NULL,
-            FOREIGN KEY(shot_id) REFERENCES shots(id) ON DELETE CASCADE
-        );
         CREATE TABLE IF NOT EXISTS video_version_archives (
             version_id TEXT PRIMARY KEY, archived_by TEXT NOT NULL DEFAULT 'user',
             reason TEXT, archived_at REAL NOT NULL,
@@ -79,20 +63,6 @@ def _ensure_review_wall_tables(conn=None) -> None:
         """
     )
     db.commit()
-
-
-def _review_shot_content_version(shot: Any) -> str:
-    row = dict(shot)
-    return _review_sha({
-        "id": row.get("id"),
-        "storyboard_artifact_id": row.get("storyboard_artifact_id"),
-        "shot_no": row.get("shot_no"),
-        "duration_s": row.get("duration_s"),
-        "action_desc": row.get("action_desc"),
-        "narration": row.get("narration"),
-        "dialogues": row.get("dialogues"),
-        "shot_contract_json": row.get("shot_contract_json"),
-    })[:24]
 
 
 def _review_asset_qualification(conn, episode_id: str) -> dict[str, Any]:
@@ -192,6 +162,7 @@ def _review_upstream_snapshot(episode_id: str) -> dict[str, Any]:
     published_screenplay = ep.get("published_screenplay_artifact_id") or ep.get("screenplay_artifact_id")
     published_storyboard = ep.get("published_storyboard_artifact_id") or ep.get("storyboard_artifact_id")
     active: list[dict[str, Any]] = []
+    seen_run_ids: set[str] = set()
     for kind, run_id in (
         ("screenplay", ep.get("active_screenplay_run_id")),
         ("storyboard", ep.get("active_storyboard_run_id")),
@@ -200,15 +171,57 @@ def _review_upstream_snapshot(episode_id: str) -> dict[str, Any]:
             continue
         run = conn.execute("SELECT id, status, current_step_key, updated_at FROM workflow_runs WHERE id=?", (run_id,)).fetchone()
         if not run or run["status"] not in _REVIEW_TERMINAL_RUN_STATES:
+            seen_run_ids.add(run_id)
             active.append({
                 "kind": kind, "run_id": run_id,
                 "status": run["status"] if run else "unknown",
                 "stage": run["current_step_key"] if run else None,
                 "updated_at": run["updated_at"] if run else None,
+                "source": "episode_pointer",
+            })
+    # 服务重启或启动阶段异常可能使 active_* 指针与 durable run 短暂失配。
+    # 资格门禁同时反查持久化事实，避免把仍可恢复的上游任务误判为已结束。
+    marks = ",".join("?" for _ in _REVIEW_ACTIVE_RUN_STATES)
+    durable_runs = conn.execute(
+        f"""SELECT id, workflow_type, status, current_step_key, updated_at
+              FROM workflow_runs
+             WHERE scope_type='episode' AND scope_id=?
+               AND workflow_type IN ('screenplay', 'storyboard')
+               AND status IN ({marks})
+               AND recovered_by_run_id IS NULL
+             ORDER BY updated_at DESC""",
+        (episode_id, *sorted(_REVIEW_ACTIVE_RUN_STATES)),
+    ).fetchall()
+    for run in durable_runs:
+        if run["id"] in seen_run_ids:
+            continue
+        seen_run_ids.add(run["id"])
+        active.append({
+            "kind": run["workflow_type"],
+            "run_id": run["id"],
+            "status": run["status"],
+            "stage": run["current_step_key"],
+            "updated_at": run["updated_at"],
+            "source": "workflow_run",
+        })
+    for kind in ("screenplay", "storyboard"):
+        if task_registry.active(kind, episode_id) and not any(
+            item["kind"] == kind for item in active
+        ):
+            active.append({
+                "kind": kind,
+                "run_id": None,
+                "status": "RUNNING",
+                "stage": None,
+                "updated_at": None,
+                "source": "task_registry",
             })
     # 旧任务没有 workflow_run 时，剧集状态仍要 fail-closed。
     if ep.get("status") in {"scripting", "storyboarding", "planned"} and not active:
-        active.append({"kind": "upstream", "run_id": None, "status": ep.get("status"), "stage": None})
+        active.append({
+            "kind": "upstream", "run_id": None, "status": ep.get("status"),
+            "stage": None, "updated_at": None, "source": "episode_status",
+        })
     confirmed = ep.get("status") in {"confirmed", "generating", "done", "mixed"}
     has_artifacts = bool(published_screenplay and published_storyboard)
     assets = _review_asset_qualification(conn, episode_id)
@@ -308,9 +321,11 @@ def _review_write_audit(
     action: str, scope_type: str, scope_id: str, *, target_version: str | None = None,
     idempotency_key: str | None = None, old_state: Any = None, new_state: Any = None,
     reason: str | None = None, decided_by: str = "user", request_id: str | None = None,
+    conn=None, commit: bool = True,
 ) -> dict[str, Any]:
-    _ensure_review_wall_tables()
-    conn = get_conn()
+    if conn is None:
+        _ensure_review_wall_tables()
+        conn = get_conn()
     if idempotency_key:
         existing = conn.execute(
             "SELECT * FROM review_action_audit WHERE action=? AND idempotency_key=?",
@@ -331,33 +346,9 @@ def _review_write_audit(
             reason, decided_by, request_id, now(),
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return {"id": audit_id, "action": action, "scope_type": scope_type, "scope_id": scope_id}
-
-
-def _review_idempotent_state(
-    action: str, key: Any, *, scope_id: str | None = None,
-) -> dict[str, Any] | None:
-    """Return the original response state for a retried review-wall command."""
-    token = str(key or "").strip()
-    if not token:
-        return None
-    sql = "SELECT new_state_json FROM review_action_audit WHERE action=? AND idempotency_key=?"
-    params: list[Any] = [action, token]
-    if scope_id is not None:
-        sql += " AND scope_id=?"
-        params.append(scope_id)
-    row = get_conn().execute(sql, params).fetchone()
-    if not row:
-        return None
-    return _review_json(row["new_state_json"], {})
-
-
-def _review_item_public(row: Any, current_content_version: str | None = None) -> dict[str, Any]:
-    item = dict(row)
-    item["anchor"] = _review_json(item.pop("anchor_json", "{}"), {})
-    item["anchor_stale"] = bool(current_content_version and item.get("content_version") != current_content_version)
-    return item
 
 
 @router.get("/episodes/{episode_id}/review-context")
@@ -365,21 +356,6 @@ def review_wall_context(episode_id: str):
     _ensure_review_wall_tables()
     conn = get_conn()
     snapshot = _review_upstream_snapshot(episode_id)
-    shots = conn.execute(
-        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,),
-    ).fetchall()
-    shot_ids = [row["id"] for row in shots]
-    states: dict[str, dict[str, Any]] = {}
-    items_by_shot: dict[str, list[dict[str, Any]]] = {shot_id: [] for shot_id in shot_ids}
-    if shot_ids:
-        marks = ",".join("?" for _ in shot_ids)
-        for row in conn.execute(f"SELECT * FROM shot_review_states WHERE shot_id IN ({marks})", shot_ids).fetchall():
-            states[row["shot_id"]] = dict(row)
-        content_versions = {row["id"]: _review_shot_content_version(row) for row in shots}
-        for row in conn.execute(
-            f"SELECT * FROM shot_review_items WHERE shot_id IN ({marks}) ORDER BY updated_at DESC", shot_ids,
-        ).fetchall():
-            items_by_shot[row["shot_id"]].append(_review_item_public(row, content_versions[row["shot_id"]]))
     archived = {
         row["version_id"]: dict(row)
         for row in conn.execute(
@@ -387,26 +363,13 @@ def review_wall_context(episode_id: str):
                  JOIN shots s ON s.id=v.shot_id WHERE s.episode_id=?""", (episode_id,),
         ).fetchall()
     }
-    summaries = []
-    for row in shots:
-        shot_id = row["id"]
-        items = items_by_shot.get(shot_id, [])
-        state = states.get(shot_id) or {"review_status": "pending", "revision": 0, "updated_at": None}
-        summaries.append({
-            "shot_id": shot_id,
-            "content_version": _review_shot_content_version(row),
-            "review_status": state.get("review_status", "pending"),
-            "review_revision": state.get("revision", 0),
-            "review_updated_at": state.get("updated_at"),
-            "open_issue_count": sum(item["status"] in {"open", "in_progress"} for item in items),
-            "blocker_count": sum(item["status"] in {"open", "in_progress"} and item["severity"] == "blocker" for item in items),
-            "review_items": items,
-        })
     return {
         "episode_id": episode_id,
-        "object_version": _review_sha({"qualification": snapshot["qualification_version"], "shots": [(r["id"], _review_shot_content_version(r)) for r in shots]})[:32],
+        "object_version": _review_sha({
+            "qualification": snapshot["qualification_version"],
+            "archived_versions": sorted(archived),
+        })[:32],
         "upstream": snapshot,
-        "shots": summaries,
         "archived_versions": archived,
         "authorization_constraints": {
             "budget_cap_cny": {"type": "number", "unit": "CNY", "default": 150, "min": 1, "max": 100000, "step": 1, "finite": True},
@@ -416,147 +379,6 @@ def review_wall_context(episode_id: str):
         },
         "server_time": now(),
     }
-
-
-@router.post("/shots/{shot_id}/review-items")
-def create_shot_review_item(shot_id: str, body: dict = Body(...)):
-    _ensure_review_wall_tables()
-    repeated = _review_idempotent_state(
-        "review_item.create", body.get("idempotency_key"), scope_id=shot_id,
-    )
-    if repeated:
-        return _review_item_public(repeated)
-    conn = get_conn()
-    shot = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
-    if not shot:
-        raise HTTPException(404, "镜头不存在")
-    comment = str(body.get("comment") or "").strip()
-    issue_type = str(body.get("issue_type") or "other").strip()
-    severity = str(body.get("severity") or "medium")
-    if not comment:
-        raise HTTPException(422, "批注内容不能为空")
-    if severity not in _REVIEW_SEVERITIES:
-        raise HTTPException(422, "severity 无效")
-    content_version = _review_shot_content_version(shot)
-    expected = body.get("content_version")
-    if expected and expected != content_version:
-        raise HTTPException(409, {"code": "REVIEW_CONTENT_CHANGED", "message": "镜头内容已更新，请重新定位批注", "content_version": content_version})
-    item_id = new_id("review")
-    ts = now()
-    conn.execute(
-        """INSERT INTO shot_review_items(
-               id, shot_id, anchor_json, issue_type, severity, comment, assignee,
-               status, content_version, revision, created_by, created_at, updated_at
-           ) VALUES(?,?,?,?,?,?,?,?,?,1,?,?,?)""",
-        (
-            item_id, shot_id, json.dumps(body.get("anchor") or {}, ensure_ascii=False),
-            issue_type, severity, comment, (str(body.get("assignee") or "").strip() or None),
-            "open", content_version, str(body.get("created_by") or "user"), ts, ts,
-        ),
-    )
-    conn.execute(
-        """INSERT INTO shot_review_states(shot_id, review_status, revision, decided_by, updated_at)
-           VALUES(?, 'in_review', 1, ?, ?)
-           ON CONFLICT(shot_id) DO UPDATE SET
-             review_status=CASE WHEN review_status='completed' THEN 'needs_recheck' ELSE 'in_review' END,
-             revision=revision+1, decided_by=excluded.decided_by, updated_at=excluded.updated_at""",
-        (shot_id, str(body.get("created_by") or "user"), ts),
-    )
-    conn.commit()
-    row = conn.execute("SELECT * FROM shot_review_items WHERE id=?", (item_id,)).fetchone()
-    _review_write_audit(
-        "review_item.create", "shot", shot_id, target_version=content_version,
-        idempotency_key=body.get("idempotency_key"), request_id=body.get("request_id"),
-        new_state=dict(row),
-    )
-    return _review_item_public(row, content_version)
-
-
-@router.put("/review-items/{item_id}")
-def update_shot_review_item(item_id: str, body: dict = Body(...)):
-    _ensure_review_wall_tables()
-    conn = get_conn()
-    row = conn.execute("SELECT * FROM shot_review_items WHERE id=?", (item_id,)).fetchone()
-    if not row:
-        raise HTTPException(404, "评审项不存在")
-    repeated = _review_idempotent_state(
-        "review_item.update", body.get("idempotency_key"), scope_id=row["shot_id"],
-    )
-    if repeated:
-        if repeated.get("id") != item_id:
-            raise HTTPException(409, "幂等键已用于其他评审项")
-        return _review_item_public(repeated)
-    expected = body.get("expected_revision")
-    if expected is not None and int(expected) != int(row["revision"]):
-        raise HTTPException(409, {"code": "REVIEW_ITEM_CONFLICT", "message": "评审项已被其他人更新", "latest": _review_item_public(row)})
-    status = str(body.get("status", row["status"]))
-    severity = str(body.get("severity", row["severity"]))
-    comment = str(body.get("comment", row["comment"])).strip()
-    if status not in _REVIEW_ITEM_STATUSES or severity not in _REVIEW_SEVERITIES or not comment:
-        raise HTTPException(422, "评审项字段无效")
-    assignee = body.get("assignee", row["assignee"])
-    old = dict(row)
-    conn.execute(
-        """UPDATE shot_review_items SET status=?, severity=?, comment=?, assignee=?,
-                  revision=revision+1, updated_at=? WHERE id=?""",
-        (status, severity, comment, (str(assignee).strip() if assignee else None), now(), item_id),
-    )
-    conn.commit()
-    latest = conn.execute("SELECT * FROM shot_review_items WHERE id=?", (item_id,)).fetchone()
-    _review_write_audit(
-        "review_item.update", "shot", row["shot_id"],
-        target_version=row["content_version"], idempotency_key=body.get("idempotency_key"),
-        request_id=body.get("request_id"), old_state=old, new_state=dict(latest),
-    )
-    return _review_item_public(latest)
-
-
-@router.post("/shots/{shot_id}/review-state")
-def set_shot_review_state(shot_id: str, body: dict = Body(...)):
-    _ensure_review_wall_tables()
-    repeated = _review_idempotent_state(
-        "review_state.update", body.get("idempotency_key"), scope_id=shot_id,
-    )
-    if repeated:
-        return repeated
-    conn = get_conn()
-    shot = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
-    if not shot:
-        raise HTTPException(404, "镜头不存在")
-    status = str(body.get("review_status") or "")
-    if status not in _REVIEW_SHOT_STATUSES:
-        raise HTTPException(422, "review_status 无效")
-    expected = body.get("expected_revision")
-    current = conn.execute("SELECT * FROM shot_review_states WHERE shot_id=?", (shot_id,)).fetchone()
-    current_revision = int(current["revision"] if current else 0)
-    if expected is not None and int(expected) != current_revision:
-        raise HTTPException(409, {"code": "REVIEW_STATE_CONFLICT", "message": "镜头评审状态已变化", "latest": dict(current) if current else None})
-    if status == "completed":
-        blockers = conn.execute(
-            """SELECT COUNT(*) AS c FROM shot_review_items
-               WHERE shot_id=? AND status IN ('open','in_progress') AND severity='blocker'""",
-            (shot_id,),
-        ).fetchone()["c"]
-        if blockers:
-            raise HTTPException(409, "仍有未处理的阻断问题，不能标记评审完成")
-    ts = now()
-    conn.execute(
-        """INSERT INTO shot_review_states(shot_id, review_status, revision, decided_by, completed_at, updated_at)
-           VALUES(?,?,1,?,?,?)
-           ON CONFLICT(shot_id) DO UPDATE SET review_status=excluded.review_status,
-             revision=shot_review_states.revision+1, decided_by=excluded.decided_by,
-             completed_at=excluded.completed_at, updated_at=excluded.updated_at""",
-        (shot_id, status, str(body.get("decided_by") or "user"), ts if status == "completed" else None, ts),
-    )
-    conn.commit()
-    latest = dict(conn.execute("SELECT * FROM shot_review_states WHERE shot_id=?", (shot_id,)).fetchone())
-    _review_write_audit(
-        "review_state.update", "shot", shot_id,
-        target_version=_review_shot_content_version(shot),
-        idempotency_key=body.get("idempotency_key"), request_id=body.get("request_id"),
-        old_state=dict(current) if current else {}, new_state=latest,
-    )
-    return latest
 
 
 @router.post("/versions/{version_id}/archive")
@@ -572,24 +394,57 @@ def archive_video_version(version_id: str, body: dict | None = Body(None)):
         raise HTTPException(404, "视频版本不存在")
     if row["adopted_version_id"] == version_id:
         raise HTTPException(409, "当前采用版不能归档")
-    conn.execute(
-        """INSERT INTO video_version_archives(version_id, archived_by, reason, archived_at)
-           VALUES(?,?,?,?) ON CONFLICT(version_id) DO NOTHING""",
-        (version_id, str(body.get("archived_by") or "user"), str(body.get("reason") or "").strip() or None, now()),
-    )
-    conn.commit()
-    _review_write_audit("video_version.archive", "version", version_id, reason=body.get("reason"))
-    return {"version_id": version_id, "archived": True}
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        inserted = conn.execute(
+            """INSERT INTO video_version_archives(version_id, archived_by, reason, archived_at)
+               VALUES(?,?,?,?) ON CONFLICT(version_id) DO NOTHING""",
+            (
+                version_id,
+                str(body.get("archived_by") or "user"),
+                str(body.get("reason") or "").strip() or None,
+                now(),
+            ),
+        )
+        if inserted.rowcount == 1:
+            _review_write_audit(
+                "video_version.archive", "version", version_id,
+                reason=body.get("reason"), conn=conn, commit=False,
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return {
+        "version_id": version_id,
+        "archived": True,
+        "idempotent": inserted.rowcount == 0,
+    }
 
 
 @router.delete("/versions/{version_id}/archive")
 def unarchive_video_version(version_id: str):
     _ensure_review_wall_tables()
     conn = get_conn()
-    conn.execute("DELETE FROM video_version_archives WHERE version_id=?", (version_id,))
-    conn.commit()
-    _review_write_audit("video_version.unarchive", "version", version_id)
-    return {"version_id": version_id, "archived": False}
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        deleted = conn.execute(
+            "DELETE FROM video_version_archives WHERE version_id=?", (version_id,)
+        )
+        if deleted.rowcount == 1:
+            _review_write_audit(
+                "video_version.unarchive", "version", version_id,
+                conn=conn, commit=False,
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return {
+        "version_id": version_id,
+        "archived": False,
+        "idempotent": deleted.rowcount == 0,
+    }
 
 
 @router.get("/review-wall/events")

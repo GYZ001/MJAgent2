@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import time
 
 import pytest
@@ -310,6 +311,38 @@ def test_cancel_turn_does_not_cancel_underlying_run(client) -> None:
     tc_after = store.get_tool_call(tool_call["id"])
     assert tc_after["status"] == "cancelled"
     assert tc_after["run_id"] == run_id
+
+
+@pytest.mark.asyncio
+async def test_spawned_agent_turn_can_be_cancelled(monkeypatch) -> None:
+    conv = store.create_conversation(title="cancel-task", project_id=None, created_by="tester")
+    turn = store.create_turn(
+        conv["id"],
+        context_envelope={},
+        model_provider="hiagent",
+        model="x",
+        prompt_version="v1",
+    )
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def blocking_turn(conversation_id, turn_id, state) -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(orchestrator, "run_prepared_turn", blocking_turn)
+    task = orchestrator.spawn_prepared_turn(conv["id"], turn["id"], object())
+    await started.wait()
+
+    result = orchestrator.cancel_turn(turn["id"])
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert result["status"] == "cancelled"
+    assert cancelled.is_set()
+    assert turn["id"] not in orchestrator._BACKGROUND_TASKS
 
 
 # ---------- 6. Prompt Injection ----------

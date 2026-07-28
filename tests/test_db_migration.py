@@ -4,6 +4,41 @@ import threading
 from app import db
 
 
+def test_init_db_migrates_old_supporting_keyframe_default_once(tmp_path, monkeypatch) -> None:
+    database = tmp_path / "supporting-keyframes.db"
+    conn = sqlite3.connect(database)
+    conn.executescript(db.SCHEMA)
+    conn.execute(
+        "INSERT INTO settings(key, value) VALUES('video_supporting_keyframe_candidates', '1')"
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(db, "DB_PATH", database)
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(db, "_local", threading.local())
+
+    db.init_db()
+
+    migrated = db.get_conn()
+    value = migrated.execute(
+        "SELECT value FROM settings WHERE key='video_supporting_keyframe_candidates'"
+    ).fetchone()[0]
+    assert value == "3"
+
+    # 迁移完成后，用户仍可主动把候选数改回 1，后续启动不得再次覆盖。
+    migrated.execute(
+        "UPDATE settings SET value='1' WHERE key='video_supporting_keyframe_candidates'"
+    )
+    migrated.commit()
+    db.init_db()
+    value = migrated.execute(
+        "SELECT value FROM settings WHERE key='video_supporting_keyframe_candidates'"
+    ).fetchone()[0]
+    assert value == "1"
+    migrated.close()
+
+
 def test_init_db_migrates_legacy_jobs_before_creating_claim_index(tmp_path, monkeypatch) -> None:
     database = tmp_path / "legacy.db"
     conn = sqlite3.connect(database)
@@ -94,3 +129,35 @@ def test_plain_init_db_does_not_interrupt_live_work(tmp_path, monkeypatch) -> No
 
     assert conn.execute("SELECT status FROM workflow_runs WHERE id='run_live'").fetchone()[0] == "RUNNING"
     assert conn.execute("SELECT status FROM step_runs WHERE id='step_live'").fetchone()[0] == "RUNNING"
+
+
+def test_recovery_releases_only_interrupted_command_claims(tmp_path, monkeypatch) -> None:
+    database = tmp_path / "command-claims.db"
+    monkeypatch.setattr(db, "DB_PATH", database)
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(db, "_local", threading.local())
+    db.init_db()
+    conn = db.get_conn()
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS command_idempotency(
+               idem_key TEXT PRIMARY KEY, command TEXT NOT NULL, status TEXT NOT NULL,
+               result_json TEXT NOT NULL, created_at REAL NOT NULL, expires_at REAL NOT NULL
+           )"""
+    )
+    conn.executemany(
+        "INSERT INTO command_idempotency VALUES(?,?,?,?,?,?)",
+        [
+            ("running", "project.import_novel", "running", "{}", 1, 9999999999),
+            ("done", "project.import_novel", "succeeded", "{}", 1, 9999999999),
+        ],
+    )
+    conn.commit()
+
+    db.init_db()
+    assert conn.execute("SELECT COUNT(*) FROM command_idempotency").fetchone()[0] == 2
+
+    db.init_db(reconcile_interrupted=True)
+    rows = conn.execute(
+        "SELECT idem_key,status FROM command_idempotency ORDER BY idem_key"
+    ).fetchall()
+    assert [tuple(row) for row in rows] == [("done", "succeeded")]

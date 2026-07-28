@@ -1,7 +1,12 @@
+import asyncio
 import sqlite3
+
+import pytest
+from fastapi import HTTPException
 
 from app import api, task_registry
 from app.api import router
+from app.domain import bible_ops
 
 
 def test_scene_library_routes_accept_post() -> None:
@@ -46,3 +51,23 @@ def test_scene_bible_parent_does_not_block_scene_reference_handoff(monkeypatch) 
     assert api._scene_assets_task_active("p") is True
     assert api._start_scene_refs_generation("p", None) is True
     assert spawned == [("scene_refs", "p")]
+
+
+def test_scene_bible_formal_request_keeps_confirmed_payload_out_of_legacy_bus(
+    monkeypatch,
+) -> None:
+    async def unexpected_ui_route(_name: str, _args: dict):
+        raise AssertionError("formal scene request must not lose its payload in Command Bus")
+
+    monkeypatch.setattr("app.capabilities.dispatch.ui_route", unexpected_ui_route)
+    monkeypatch.setattr(bible_ops, "_project_or_404", lambda _project_id: {"bible_json": "{}"})
+    monkeypatch.setattr(bible_ops, "_scene_assets_task_active", lambda _project_id: False)
+
+    with pytest.raises(HTTPException) as preview_required:
+        asyncio.run(bible_ops.start_scene_bible(
+            "p",
+            {"scenes": [], "confirm": True, "idempotency_key": "scene-once"},
+        ))
+
+    assert preview_required.value.status_code == 409
+    assert preview_required.value.detail["code"] == "SCENE_PREVIEW_REQUIRED"

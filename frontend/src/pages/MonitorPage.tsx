@@ -1,10 +1,19 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { api } from "../api";
 import { useNav, usePoll } from "../App";
+import type { NavigationGuardPrompt } from "../App";
 import RunCenter from "../components/harness/RunCenter";
 import JsonViewer from "../components/JsonViewer";
 import SearchField from "../components/SearchField";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import DecisionDialog from "../components/DecisionDialog";
 
 type MonitorSection =
   | "overview"
@@ -17,7 +26,7 @@ type ModelKind = "text" | "vlm" | "video" | "image";
 type BlockStatus = "loading" | "ready-empty" | "ready-data" | "error" | "stale";
 type ProviderKey = string;
 
-interface Job {
+export interface Job {
   id: string;
   source: "run" | "job" | "screenplay";
   run_id?: string;
@@ -71,7 +80,7 @@ interface CallContext {
   purpose?: string;
   error_stage?: string;
 }
-interface Call {
+export interface Call {
   id: number;
   ts: number;
   kind: string;
@@ -185,7 +194,7 @@ const SECTIONS: Array<{
   description: string;
 }> = [
   { key: "overview", label: "总览", description: "关键状态与异常" },
-  { key: "runs", label: "运行中心", description: "步骤与人工门禁" },
+  { key: "runs", label: "运行中心", description: "步骤与人工确认" },
   { key: "jobs", label: "任务队列", description: "生成任务与失败" },
   { key: "models", label: "模型中心", description: "模型分配与连接" },
   { key: "calls", label: "调用日志", description: "分类、摘要与详情" },
@@ -193,11 +202,17 @@ const SECTIONS: Array<{
 ];
 const VALID_SECTIONS = new Set(SECTIONS.map((item) => item.key));
 const MODEL_ROWS: Array<{ key: ModelKind; label: string; note: string }> = [
-  { key: "text", label: "Text 模型", note: "分集 / 剧本 / 分镜 / 文本修复" },
-  { key: "vlm", label: "VLM 模型", note: "参考图评审 / 视频质检" },
+  { key: "text", label: "文本模型", note: "分集、剧本、分镜与文本修复" },
+  { key: "vlm", label: "视觉理解模型", note: "参考图评审与视频质检" },
   { key: "video", label: "视频模型", note: "Seedance 视频生成" },
   { key: "image", label: "图像模型", note: "Seedream 参考图 / 定妆照" },
 ];
+const MODEL_KIND_LABELS: Record<ModelKind, string> = {
+  text: "文本生成",
+  vlm: "视觉理解",
+  video: "视频生成",
+  image: "图像生成",
+};
 const PROVIDER_LABELS: Record<string, string> = {
   hiagent: "火山",
   openrouter: "OpenRouter",
@@ -219,31 +234,19 @@ const JOB_STATUS_LABELS: Record<string, string> = {
   recovering: "恢复排队中",
   recovered: "已自动续跑",
 };
-const RUN_TO_JOB: Record<string, string> = {
-  CREATED: "queued",
-  RUNNING: "running",
-  WAITING_RETRY: "waiting_retry",
-  WAITING_HUMAN: "waiting_human",
-  PAUSED_BUDGET: "paused_budget",
-  PAUSED_EXTERNAL: "paused_external",
-  SUCCEEDED: "succeeded",
-  PARTIAL: "partial",
-  FAILED: "failed",
-  CANCELLED: "cancelled",
-};
 const WORKFLOW_LABELS: Record<string, string> = {
   character_bible: "人物谱",
   character_references: "人物定妆照",
-  scene_bible: "场景圣经",
+  scene_bible: "场景设定",
   scene_references: "场景参考图",
-  episode_mapping: "分集映射",
+  episode_mapping: "分集规划",
   screenplay: "剧本",
   storyboard: "分镜",
   scene_generation: "关键帧生成",
   video_generation: "视频生成",
   episode_video_completion: "全片视频补齐",
   delivery: "交付",
-  delivery_package: "交付包",
+  delivery_package: "交付候选",
 };
 const CALL_STATUS_LABELS: Record<string, string> = {
   RUNNING: "调用中",
@@ -287,12 +290,16 @@ function querySection() {
   const raw = nowQuery().get("section") as MonitorSection | null;
   return raw && VALID_SECTIONS.has(raw) ? raw : "overview";
 }
-function writeQuery(patch: Record<string, string | null>, push = true) {
+function queryTarget(patch: Record<string, string | null>) {
   const params = nowQuery();
   for (const [key, value] of Object.entries(patch))
     value ? params.set(key, value) : params.delete(key);
-  const target = `/monitor${params.toString() ? `?${params}` : ""}`;
+  return `/monitor${params.toString() ? `?${params}` : ""}`;
+}
+function writeQuery(patch: Record<string, string | null>, push = true) {
+  const target = queryTarget(patch);
   window.history[push ? "pushState" : "replaceState"]({}, "", target);
+  window.dispatchEvent(new Event("manju:locationchange"));
 }
 function fmtTime(value?: number | null) {
   return value
@@ -300,7 +307,10 @@ function fmtTime(value?: number | null) {
     : "—";
 }
 function jobStatusLabel(status: string) {
-  return JOB_STATUS_LABELS[status] || "其他 / 内部状态";
+  return JOB_STATUS_LABELS[status] || "状态待确认";
+}
+export function modelBusinessLabel(value: string) {
+  return value.trim().toLowerCase() === "text 模型" ? "文本模型" : value;
 }
 function workflowLabel(raw?: string) {
   return raw ? WORKFLOW_LABELS[raw] || "其他业务任务" : "任务";
@@ -311,6 +321,38 @@ function jobWorkLabel(job: Job) {
       ? `第${job.episode_no}集${job.shot_no != null ? ` · 镜${job.shot_no}` : ""} · `
       : "";
   return `${scope}${workflowLabel(job.workflow_type || job.kind)}`;
+}
+export function jobBusinessLabel(job: Job) {
+  return [
+    job.project_name || "未关联项目",
+    jobWorkLabel(job),
+    jobStatusLabel(job.status),
+  ].join(" · ");
+}
+export function jobNextStep(job: Job) {
+  if (job.status === "succeeded")
+    return "任务已完成，无需处理";
+  if (job.status === "running")
+    return "正在执行，可查看进度或取消任务";
+  if (job.status === "queued" || job.status === "recovering")
+    return "正在等待执行，可查看排队详情或取消任务";
+  if (job.status === "waiting_retry")
+    return "正在等待自动重试，可查看失败原因";
+  if (job.status === "waiting_human")
+    return "等待人工确认，请打开详情处理";
+  if (job.status === "paused_budget")
+    return "因预算暂停，请查看范围和费用后恢复";
+  if (job.status === "paused_external")
+    return "任务被外部中断，可查看原因后恢复";
+  if (job.status === "partial")
+    return "部分步骤未完成，可查看详情后重试";
+  if (job.status === "failed")
+    return "任务未完成，可查看详情后重试";
+  if (job.status === "cancelled")
+    return "任务已取消；如需继续，请从详情重新发起";
+  if (job.status === "recovered")
+    return "任务已自动续跑完成，无需处理";
+  return "状态待确认，请查看详情";
 }
 function stampClass(status: string) {
   return ["succeeded", "recovered", "OK", "RECOVERED"].includes(status)
@@ -330,7 +372,7 @@ function stampClass(status: string) {
       : "gold";
 }
 function callStatusLabel(status: string) {
-  return CALL_STATUS_LABELS[status] || "未知状态";
+  return CALL_STATUS_LABELS[status] || "状态待确认";
 }
 function callPurpose(call: Call) {
   const ctx = call.context || {};
@@ -339,6 +381,19 @@ function callPurpose(call: Call) {
       ? `第${ctx.episode_no}集${ctx.shot_no != null ? `第${ctx.shot_no}镜` : ""} · `
       : "";
   return `${scope}${ctx.purpose || CALL_KIND_LABELS[call.kind] || (call.category === "internal" ? "内部事件" : "其他业务调用")}`;
+}
+export function callBusinessLabel(call: Call) {
+  return [
+    call.context?.project_name || "未关联项目",
+    callPurpose(call),
+    callStatusLabel(call.effective_status),
+  ].join(" · ");
+}
+export function callNextStep(call: Call) {
+  if (call.run_id) return "可查看关联运行任务";
+  if (call.error || !["OK", "RECOVERED"].includes(call.effective_status))
+    return "调用未完成，可展开错误详情";
+  return "调用已完成，无需处理";
 }
 export function blockStatus<T>(
   loading: boolean,
@@ -450,6 +505,7 @@ function Pagination({
       <label>
         每页
         <select
+          aria-label={`每页显示条数，当前 ${pageSize} 条`}
           value={pageSize}
           onChange={(e) => onPageSize(Number(e.target.value))}
         >
@@ -458,13 +514,17 @@ function Pagination({
           ))}
         </select>
       </label>
-      <button disabled={page <= 1} onClick={() => onPage(page - 1)}>
+      <button disabled={page <= 1}
+        aria-label={page <= 1 ? "上一页，暂不可用：当前已是第一页" : "上一页"}
+        onClick={() => onPage(page - 1)}>
         上一页
       </button>
       <b>
         {page} / {pageCount}
       </b>
-      <button disabled={page >= pageCount} onClick={() => onPage(page + 1)}>
+      <button disabled={page >= pageCount}
+        aria-label={page >= pageCount ? "下一页，暂不可用：当前已是最后一页" : "下一页"}
+        onClick={() => onPage(page + 1)}>
         下一页
       </button>
     </div>
@@ -490,7 +550,7 @@ function JsonSection({
       >
         <span>{label}</span>
         <small>
-          {size.toLocaleString()} bytes · {open ? "收起" : "展开并渲染"}
+          {size.toLocaleString()} 字节 · {open ? "收起" : "展开并渲染"}
         </small>
       </button>
       {open && (
@@ -586,7 +646,7 @@ function CallDrawer({
       >
         <header>
           <div>
-            <span className="eyebrow">CALL DETAIL</span>
+            <span className="eyebrow">调用详情</span>
             <h3 id="call-title">{callPurpose(call)}</h3>
           </div>
           <button onClick={onClose} aria-label="关闭调用详情">
@@ -610,7 +670,7 @@ function CallDrawer({
             <span>输入规模</span>
             <b>
               {detail
-                ? `${detail.request_json_size.toLocaleString()} bytes`
+                ? `${detail.request_json_size.toLocaleString()} 字节`
                 : "详情加载后显示"}
             </b>
           </div>
@@ -632,22 +692,36 @@ function CallDrawer({
             <span>下一步</span>
             <b>
               {call.run_id
-                ? "查看关联 Run"
+                ? "查看关联运行任务"
                 : call.error
                   ? "按错误建议处理"
                   : "无需处理"}
             </b>
           </div>
         </div>
-        {call.error && <div className="monitor-impact">{call.error}</div>}
+        {call.error && (
+          <div className="monitor-impact">
+            <b>当前影响：</b>
+            <span>{callNextStep(call)}</span>
+            <details className="monitor-error-details">
+              <summary>查看错误详情</summary>
+              <pre>{call.error}</pre>
+            </details>
+          </div>
+        )}
         {call.run_id && (
           <button className="btn small" onClick={() => onRun(call.run_id!)}>
-            查看关联 Run
+            查看关联运行任务
           </button>
         )}
         {error && (
           <div className="monitor-state error" role="alert">
-            详情加载失败：{error}
+            <b>调用详情加载失败</b>
+            <span>当前列表摘要仍保留，发送内容和返回内容尚不可查看。</span>
+            <details className="monitor-error-details">
+              <summary>查看错误详情</summary>
+              <pre>{error}</pre>
+            </details>
             <button onClick={load}>重试</button>
           </div>
         )}
@@ -657,7 +731,7 @@ function CallDrawer({
         {detail && (
           <>
             <div className="monitor-state ready">
-              本机路径、凭证及令牌形态字段已在服务端遮罩；常规入口不提供未遮罩原文。
+              本机路径、凭证及令牌形态字段已由系统遮罩；常规入口不提供未遮罩原文。
             </div>
             <JsonSection
               label="发送内容"
@@ -714,7 +788,9 @@ function JobDrawer({
   const [detail, setDetail] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState("");
-  const [confirmCancel, setConfirmCancel] = useState(false);
+  const [confirmAction, setConfirmAction] = useState<
+    "" | "retry" | "resume" | "cancel"
+  >("");
   const [copied, setCopied] = useState("");
   const [actionMessage, setActionMessage] = useState("");
   const drawerRef = useFocusTrap(true, onClose);
@@ -741,12 +817,14 @@ function JobDrawer({
       if (job.source === "run")
         await api.post(
           `/runs/${encodeURIComponent(job.run_id || job.id)}/${action}`,
+          action === "cancel" ? undefined : { allow_new_submission: true },
         );
       else if (action === "cancel")
         await api.post(`/jobs/${encodeURIComponent(job.id)}/cancel`);
       else
         await api.post(`/system/jobs/${encodeURIComponent(job.id)}/retry`, {
           expected_version: job.state_revision ?? 0,
+          allow_new_submission: true,
         });
       track("job_action", { action, object_status: job.status }, job.id);
       setActionMessage(
@@ -758,7 +836,7 @@ function JobDrawer({
       setError((e as Error).message);
     } finally {
       setBusy("");
-      setConfirmCancel(false);
+      setConfirmAction("");
     }
   };
   const sourceUrl = job.project_id
@@ -797,7 +875,7 @@ function JobDrawer({
       >
         <header>
           <div>
-            <span className="eyebrow">JOB DETAIL</span>
+            <span className="eyebrow">任务详情</span>
             <h3 id="job-title">{jobWorkLabel(job)}</h3>
           </div>
           <button onClick={onClose} aria-label="关闭任务详情">
@@ -812,13 +890,22 @@ function JobDrawer({
         </div>
         {job.error && (
           <div className="monitor-impact">
-            <b>业务影响：</b>
-            {job.error}
+            <b>当前影响：</b>
+            <span>{jobNextStep(job)}</span>
+            <details className="monitor-error-details">
+              <summary>查看错误详情</summary>
+              <pre>{job.error}</pre>
+            </details>
           </div>
         )}
         {error && (
           <div className="monitor-state error" role="alert">
-            {error}
+            <b>任务详情加载失败</b>
+            <span>当前列表摘要仍保留，依赖完整详情的处理操作不会显示。</span>
+            <details className="monitor-error-details">
+              <summary>查看错误详情</summary>
+              <pre>{error}</pre>
+            </details>
             <button onClick={load}>重试</button>
           </div>
         )}
@@ -849,7 +936,7 @@ function JobDrawer({
             </button>
           )}
           {job.run_id && (
-            <button onClick={() => onRun(job.run_id!)}>查看 Run</button>
+            <button onClick={() => onRun(job.run_id!)}>查看运行详情</button>
           )}
           {sourceUrl && (
             <button
@@ -860,29 +947,56 @@ function JobDrawer({
               去源页面处理
             </button>
           )}
-          {canRetry && (
-            <button disabled={!!busy} onClick={() => void runAction("retry")}>
-              {busy ? "处理中…" : "重试"}
+          {canRetry && !confirmAction && (
+            <button
+              disabled={!!busy}
+              onClick={() => setConfirmAction("retry")}
+            >
+              重试
             </button>
           )}
-          {canResume && (
-            <button disabled={!!busy} onClick={() => void runAction("resume")}>
-              {busy ? "处理中…" : "从检查点恢复"}
+          {canResume && !confirmAction && (
+            <button
+              disabled={!!busy}
+              onClick={() => setConfirmAction("resume")}
+            >
+              从检查点恢复
             </button>
           )}
-          {canCancel && !confirmCancel && (
-            <button className="danger" onClick={() => setConfirmCancel(true)}>
+          {canCancel && !confirmAction && (
+            <button
+              className="danger"
+              onClick={() => setConfirmAction("cancel")}
+            >
               取消任务
             </button>
           )}
         </div>
-        {canCancel && confirmCancel && (
+        {confirmAction && (
           <div className="monitor-inline-confirm">
-            取消运行中的任务可能仍产生上游费用。
-            <button disabled={!!busy} onClick={() => void runAction("cancel")}>
-              确认取消
+            {confirmAction === "cancel"
+              ? "取消会中止当前任务，已产生的上游费用仍会保留。"
+              : confirmAction === "resume"
+                ? "恢复会从安全检查点继续，并可能产生新的模型费用。"
+                : "重试会创建新的执行轮次，并可能产生新的模型费用。"}
+            <button
+              disabled={!!busy}
+              onClick={() => void runAction(confirmAction)}
+            >
+              {busy
+                ? "处理中…"
+                : confirmAction === "cancel"
+                  ? "确认取消"
+                  : confirmAction === "resume"
+                    ? "确认恢复"
+                    : "确认重试"}
             </button>
-            <button onClick={() => setConfirmCancel(false)}>返回</button>
+            <button
+              disabled={!!busy}
+              onClick={() => setConfirmAction("")}
+            >
+              返回
+            </button>
           </div>
         )}
         {!canRetry && job.status === "succeeded" && (
@@ -962,8 +1076,8 @@ const SETTING_GROUP_DEFINITIONS: SettingGroupDefinition[] = [
   {
     id: "quality-repair",
     title: "视觉质检与评分",
-    description: "控制视觉质检评分开关与并发；QA 分数不触发自动重做或重试。",
-    affects: ["视频质检", "评审墙", "评分记录"],
+    description: "控制视觉质检评分开关与并发；质检分数不触发自动重做或重试。",
+    affects: ["视频质检", "生成台", "评分记录"],
     keys: [
       "vlm_request_concurrency",
       "auto_qa",
@@ -974,14 +1088,14 @@ const SETTING_GROUP_DEFINITIONS: SettingGroupDefinition[] = [
     id: "delivery-files",
     title: "下载、落盘与交付",
     description: "控制生成结果下载、本地校验和交付文件写入速度。",
-    affects: ["媒体下载", "文件校验", "交付包"],
+    affects: ["媒体下载", "文件校验", "交付候选"],
     keys: ["download_concurrency", "finalize_concurrency"],
   },
   {
     id: "budget-logs",
     title: "预算与运行记录",
     description: "控制单集费用保护，以及调用记录和错误记录的保留周期。",
-    affects: ["预算门禁", "调用日志", "故障排查"],
+    affects: ["预算限制", "调用日志", "故障排查"],
     keys: [
       "episode_cost_limit_cny",
       "provider_call_retention_days",
@@ -1022,7 +1136,7 @@ const SETTING_FIELD_IMPACTS: Record<string, string> = {
   video_reference_role_adaptive: "是否根据镜头角色自动调整参考图策略",
   vlm_request_concurrency: "同时执行多少个视觉质量检查",
   auto_qa: "生成完成后是否自动进入质量检查",
-  auto_retake_threshold: "兼容历史配置；QA 分数不再触发自动重做",
+  auto_retake_threshold: "兼容历史配置；质检分数不再触发自动重做",
   max_repair_attempts: "同一问题允许自动修复的最大次数",
   download_concurrency: "同时下载多少个模型生成结果",
   finalize_concurrency: "同时执行多少个文件落盘与校验任务",
@@ -1033,6 +1147,16 @@ const SETTING_FIELD_IMPACTS: Record<string, string> = {
   storyboard_structure_edit_enabled: "是否允许增删和调整分镜结构",
   storyboard_source_rebind_enabled: "是否允许重新绑定分镜对应的原文",
 };
+const SETTING_OPTION_LABELS: Record<string, Record<string, string>> = {
+  media_scheduler_policy: {
+    legacy: "兼容调度",
+    stage_aware: "分阶段调度",
+  },
+};
+
+export function settingOptionLabel(key: string, value: string) {
+  return SETTING_OPTION_LABELS[key]?.[value] || value;
+}
 
 const LEGACY_QA_RETRY_SETTING_KEYS = new Set([
   "auto_retake_threshold",
@@ -1076,7 +1200,7 @@ function SettingsPanel({
   error: string | null;
   refresh: () => Promise<SettingsView | null>;
   toast: (message: string, error?: boolean) => void;
-  registerGuard: (guard: (() => boolean) | null, unsaved?: boolean) => void;
+  registerGuard: (guard: NavigationGuardPrompt | null, unsaved?: boolean) => void;
   editable: boolean;
 }) {
   const [draft, setDraft] = useState<Record<string, string>>({});
@@ -1150,15 +1274,42 @@ function SettingsPanel({
   );
   const dirty =
     Object.keys(changed).length > 0 || Object.keys(fieldErrors).length > 0;
-  useEffect(() => {
+  const resetAllDisabledReason = !editable
+    ? "当前设置为只读"
+    : !dirty
+      ? "当前没有未保存修改"
+      : "";
+  const previewDisabledReason = !editable
+    ? "当前设置为只读"
+    : Object.keys(fieldErrors).length
+      ? `请先修正 ${Object.keys(fieldErrors).length} 项输入`
+      : !Object.keys(changed).length
+        ? "当前没有可预览的修改"
+        : "";
+  const saveDisabledReason = !editable
+    ? "当前设置为只读"
+    : saving
+      ? "正在保存系统设置"
+      : "";
+  useLayoutEffect(() => {
     const guard = dirty
-      ? () => window.confirm("系统设置仍有未保存修改，确定离开吗？")
+      ? {
+          title: "放弃未保存的系统设置？",
+          summary: `${Object.keys(changed).length} 项设置尚未保存`,
+          message:
+            "离开后，本页填写的修改和校验结果都会丢失；当前已生效设置不会改变。",
+          details: Object.keys(fieldErrors).length
+            ? [`另有 ${Object.keys(fieldErrors).length} 项输入仍需修正`]
+            : ["尚未点击“保存并应用”，不会影响正在运行的任务"],
+          confirmLabel: "放弃修改并离开",
+          cancelLabel: "继续编辑",
+          danger: true,
+        }
       : null;
     registerGuard(guard, dirty);
     const before = (e: BeforeUnloadEvent) => {
       if (dirty) {
         e.preventDefault();
-        e.returnValue = "";
       }
     };
     window.addEventListener("beforeunload", before);
@@ -1166,7 +1317,7 @@ function SettingsPanel({
       registerGuard(null, false);
       window.removeEventListener("beforeunload", before);
     };
-  }, [dirty, registerGuard]);
+  }, [changed, dirty, fieldErrors, registerGuard]);
   useEffect(() => {
     if (state)
       setDraft((current) =>
@@ -1238,7 +1389,7 @@ function SettingsPanel({
     <section className="card monitor-section monitor-settings">
       <div className="monitor-section-head compact">
         <div>
-          <span className="eyebrow">SYSTEM POLICY</span>
+          <span className="eyebrow">系统策略</span>
           <h2>系统设置</h2>
         </div>
         <p>按功能展开 · 每项说明影响范围 · 修改后统一预览保存</p>
@@ -1331,7 +1482,7 @@ function SettingsPanel({
                                   {spec.type === "boolean"
                                     ? "开关"
                                     : spec.type === "enum"
-                                      ? `可选 ${spec.options?.join(" / ")}`
+                                      ? `可选 ${spec.options?.map((option) => settingOptionLabel(key, option)).join(" / ")}`
                                       : spec.type === "string"
                                         ? `最多 ${spec.max_length || 1000} 字符`
                                         : `${spec.min}~${spec.max}，步长 ${spec.step}`}
@@ -1358,7 +1509,9 @@ function SettingsPanel({
                                   disabled={!editable}
                                 >
                                   {spec.options?.map((option) => (
-                                    <option key={option}>{option}</option>
+                                    <option key={option} value={option}>
+                                      {settingOptionLabel(key, option)}
+                                    </option>
                                   ))}
                                 </select>
                               ) : (
@@ -1391,6 +1544,20 @@ function SettingsPanel({
                               <button
                                 type="button"
                                 disabled={!editable || draft[key] === undefined}
+                                aria-label={
+                                  !editable
+                                    ? `重置${spec.label}，暂不可用：当前设置为只读`
+                                    : draft[key] === undefined
+                                      ? `重置${spec.label}，暂不可用：此项尚未修改`
+                                      : `重置${spec.label}`
+                                }
+                                title={
+                                  !editable
+                                    ? "当前设置为只读"
+                                    : draft[key] === undefined
+                                      ? "此项尚未修改"
+                                      : "恢复为当前已生效值"
+                                }
                                 onClick={() =>
                                   setDraft((currentDraft) => {
                                     const next = { ...currentDraft };
@@ -1421,7 +1588,8 @@ function SettingsPanel({
                   <div key={key}>
                     <b>{schema[key].label}</b>
                     <span>
-                      {values[key]} → {value}
+                      {settingOptionLabel(key, values[key])} →{" "}
+                      {settingOptionLabel(key, value)}
                     </span>
                     <small>
                       {schema[key].immediate
@@ -1437,8 +1605,9 @@ function SettingsPanel({
                 <b>权威生效结果</b>
                 {result.map((item) => (
                   <span key={item.key}>
-                    {schema[item.key]?.label || item.key}：请求 {item.requested}{" "}
-                    / 有效 {item.effective}（
+                    {schema[item.key]?.label || item.key}：请求{" "}
+                    {settingOptionLabel(item.key, item.requested)} / 有效{" "}
+                    {settingOptionLabel(item.key, item.effective)}（
                     {item.apply_mode === "immediate" ? "即时" : "需重启"}）
                   </span>
                 ))}
@@ -1462,18 +1631,18 @@ function SettingsPanel({
                   setDraft({});
                   setPreview(false);
                 }}
-                disabled={!editable || !dirty}
+                disabled={Boolean(resetAllDisabledReason)}
+                aria-label={resetAllDisabledReason ? `全部重置，暂不可用：${resetAllDisabledReason}` : `重置 ${Object.keys(draft).length} 项未保存修改`}
+                title={resetAllDisabledReason || "恢复为当前已生效设置"}
               >
                 全部重置
               </button>
               {!preview ? (
                 <button
                   className="btn primary small"
-                  disabled={
-                    !editable ||
-                    !Object.keys(changed).length ||
-                    !!Object.keys(fieldErrors).length
-                  }
+                  disabled={Boolean(previewDisabledReason)}
+                  aria-label={previewDisabledReason ? `预览差异，暂不可用：${previewDisabledReason}` : `预览 ${Object.keys(changed).length} 项设置差异`}
+                  title={previewDisabledReason || "预览不会保存或应用设置"}
                   onClick={() => {
                     setPreview(true);
                     track("settings_preview", {
@@ -1486,7 +1655,9 @@ function SettingsPanel({
               ) : (
                 <button
                   className="btn primary small"
-                  disabled={!editable || saving}
+                  disabled={Boolean(saveDisabledReason)}
+                  aria-label={saveDisabledReason ? `批准并保存全部，暂不可用：${saveDisabledReason}` : `批准并保存 ${Object.keys(changed).length} 项设置`}
+                  title={saveDisabledReason || "保存后即时项立即生效，其他项在重启后生效"}
                   onClick={() => void save()}
                 >
                   {saving ? "整体提交中…" : "批准并保存全部"}
@@ -1525,6 +1696,7 @@ function ModelCenter({
   const [connection, setConnection] = useState("");
   const [testStates, setTestStates] = useState<Record<string, { state: "testing" | "ok" | "fail"; note?: string }>>({});
   const [saving, setSaving] = useState(false);
+  const [assignmentConfirm, setAssignmentConfirm] = useState(false);
   const [credential, setCredential] = useState<CatalogModel | null>(null);
   const [credentialDraft, setCredentialDraft] = useState({
     base_url: "",
@@ -1532,8 +1704,11 @@ function ModelCenter({
   });
   const [testedSignature, setTestedSignature] = useState("");
   const [testing, setTesting] = useState(false);
+  const [credentialSaving, setCredentialSaving] = useState(false);
   const [newModel, setNewModel] = useState(false);
   const [editingModel, setEditingModel] = useState<CatalogModel | null>(null);
+  const [deleteModel, setDeleteModel] = useState<CatalogModel | null>(null);
+  const [deletingModel, setDeletingModel] = useState(false);
   const [modelDraft, setModelDraft] = useState({
     label: "",
     provider_label: "",
@@ -1543,18 +1718,32 @@ function ModelCenter({
     kinds: ["text"] as ModelKind[],
   });
   const [newTested, setNewTested] = useState("");
-  const libraryRef = useFocusTrap(library, () => setLibrary(false));
-  const credentialRef = useFocusTrap(!!credential, () => setCredential(null));
+  const [newTesting, setNewTesting] = useState(false);
+  const [modelSaving, setModelSaving] = useState(false);
+  const libraryTriggerRef = useRef<HTMLElement | null>(null);
+  const modelDialogTriggerRef = useRef<HTMLElement | null>(null);
+  const nestedModelDialogOpen =
+    !!credential || newModel || !!editingModel || !!deleteModel;
+  const libraryRef = useFocusTrap(library, () => setLibrary(false), {
+    suspended: nestedModelDialogOpen,
+    returnFocus: libraryTriggerRef.current,
+  });
+  const credentialRef = useFocusTrap(!!credential, () => setCredential(null), {
+    returnFocus: modelDialogTriggerRef.current,
+  });
   const newRef = useFocusTrap(newModel || !!editingModel, () => {
     setNewModel(false);
     setEditingModel(null);
+  }, {
+    returnFocus: modelDialogTriggerRef.current,
+  });
+  const deleteRef = useFocusTrap(!!deleteModel, () => setDeleteModel(null), {
+    returnFocus: modelDialogTriggerRef.current,
   });
   const catalogLabel = (providerKey: string, model: string) =>
-    catalog?.items.find(
+    modelBusinessLabel(catalog?.items.find(
       (item) => item.provider === providerKey && item.model === model,
-    )?.label ||
-    model ||
-    "未配置";
+    )?.label || model || "未配置");
   const assignmentPatch = useMemo(() => {
     const patch: Record<string, string> = {};
     for (const row of MODEL_ROWS) {
@@ -1576,6 +1765,14 @@ function ModelCenter({
     }
     return patch;
   }, [draft, health]);
+  const assignmentAffectedRows = MODEL_ROWS.filter((row) =>
+    Object.keys(assignmentPatch).some((key) => key.includes(row.key)),
+  );
+  const assignmentSaveDisabledReason = saving
+    ? "正在保存模型分配"
+    : !assignmentAffectedRows.length
+      ? "当前没有未保存的模型分配"
+      : "";
   const saveAssignments = async () => {
     if (!settings) return;
     setSaving(true);
@@ -1590,7 +1787,7 @@ function ModelCenter({
       toast(
         scope?.new_tasks && scope?.queued_not_started && !scope?.running_tasks
           ? "模型分配已保存；新任务和未启动队列使用新模型，运行中任务保持启动快照"
-          : "模型分配已保存；请以服务端返回的生效范围为准",
+          : "模型分配已保存；请以系统返回的生效范围为准",
       );
     } catch (e) {
       toast((e as Error).message, true);
@@ -1625,14 +1822,16 @@ function ModelCenter({
     }
   };
   const removeModel = async (item: CatalogModel) => {
-    if (!window.confirm(`确认删除 ${item.label}？在用模型会被后端阻止。`))
-      return;
+    setDeletingModel(true);
     try {
       await api.del(`/models/${encodeURIComponent(item.id)}`);
       await refreshCatalog();
-      toast(`${item.label} 已删除`);
+      setDeleteModel(null);
+      toast(`${modelBusinessLabel(item.label)} 已删除`);
     } catch (e) {
       toast((e as Error).message, true);
+    } finally {
+      setDeletingModel(false);
     }
   };
   const groupedModels = filtered.reduce<Record<string, CatalogModel[]>>(
@@ -1650,6 +1849,40 @@ function ModelCenter({
   };
   const credentialSignature = JSON.stringify(credentialDraft);
   const newSignature = JSON.stringify(modelDraft);
+  const credentialTestDisabledReason = !credential
+    ? "未选择模型"
+    : testing
+      ? "正在测试连接"
+      : !credentialDraft.base_url.trim()
+        ? "请先填写服务地址"
+        : !credential.key_configured && !credentialDraft.api_key.trim()
+          ? "请先填写访问密钥"
+          : "";
+  const credentialSaveDisabledReason = credentialSaving
+    ? "正在保存连接"
+    : testedSignature !== credentialSignature
+      ? "请先使用当前地址和密钥通过连接测试"
+      : "";
+  const modelDraftMissing = [
+    !modelDraft.label.trim() ? "显示名称" : "",
+    !modelDraft.provider_label.trim() ? "服务名称" : "",
+    !modelDraft.base_url.trim() ? "服务地址" : "",
+    !modelDraft.model.trim() ? "模型标识" : "",
+    !editingModel && !modelDraft.api_key.trim() ? "访问密钥" : "",
+    !modelDraft.kinds.length ? "至少一种模型能力" : "",
+  ].filter(Boolean);
+  const modelTestDisabledReason = newTesting
+    ? "正在测试连接"
+    : modelDraftMissing.length
+      ? `请先填写：${modelDraftMissing.join("、")}`
+      : "";
+  const modelSaveDisabledReason = modelSaving
+    ? "正在保存模型"
+    : modelDraftMissing.length
+      ? `请先填写：${modelDraftMissing.join("、")}`
+      : newTested !== newSignature
+        ? "请先使用当前配置通过连接测试"
+        : "";
   return (
     <section className="card model-hub monitor-section">
       <div className="model-hub-head">
@@ -1658,12 +1891,16 @@ function ModelCenter({
           <p>四类职责、友好名称与生效范围清晰可见。</p>
         </div>
         <div className="model-hub-actions">
-          <button className="btn ghost small" onClick={() => setLibrary(true)}>
+          <button className="btn ghost small" onClick={(event) => {
+            libraryTriggerRef.current = event.currentTarget;
+            setLibrary(true);
+          }}>
             管理模型库
           </button>
           <button
             className="btn primary small"
-            onClick={() => {
+            onClick={(event) => {
+              modelDialogTriggerRef.current = event.currentTarget;
               setEditingModel(null);
               setModelDraft({
                 label: "",
@@ -1720,7 +1957,9 @@ function ModelCenter({
                 <label className="model-select-field">
                   <span>服务</span>
                   <select
-                    aria-label={`${row.label}服务商`}
+                    aria-label={row.key === "video" || row.key === "image"
+                      ? `${row.label}服务商，暂不可修改：当前只支持已配置的固定服务`
+                      : `${row.label}服务商`}
                     value={providerKey}
                     disabled={row.key === "video" || row.key === "image"}
                     onChange={(e) =>
@@ -1756,7 +1995,7 @@ function ModelCenter({
                     {models.length ? (
                       models.map((item) => (
                         <option key={item.id} value={item.model}>
-                          {item.label} · {item.model}
+                          {modelBusinessLabel(item.label)}
                         </option>
                       ))
                     ) : (
@@ -1775,12 +2014,13 @@ function ModelCenter({
                     catalog?.items.find(
                       (item) => item.provider === selection.provider,
                     )?.provider_label ||
-                    "自定义服务"}
+                    "自定义服务"}{" "}
+                  · {catalogLabel(selection.provider, selection.model)}
                 </strong>
-                <code>
-                  {catalogLabel(selection.provider, selection.model)} ·{" "}
-                  {selection.model}
-                </code>
+                <details className="model-assignment-technical">
+                  <summary>技术标识</summary>
+                  <code>{selection.model}</code>
+                </details>
                 <small>
                   保存后：新任务与尚未启动的排队任务使用新分配；运行中任务保持启动快照。
                 </small>
@@ -1797,8 +2037,10 @@ function ModelCenter({
         </span>
         <button
           className="btn primary small"
-          disabled={!Object.keys(assignmentPatch).length || saving}
-          onClick={() => void saveAssignments()}
+          disabled={Boolean(assignmentSaveDisabledReason)}
+          aria-label={assignmentSaveDisabledReason ? `保存模型分配，暂不可用：${assignmentSaveDisabledReason}` : `保存 ${assignmentAffectedRows.length} 类模型分配`}
+          title={assignmentSaveDisabledReason || "保存前会再次说明对新任务、排队任务和运行中任务的影响"}
+          onClick={() => setAssignmentConfirm(true)}
         >
           {saving ? "保存中…" : "保存模型分配"}
         </button>
@@ -1822,7 +2064,7 @@ function ModelCenter({
           >
             <div className="model-modal-head">
               <div>
-                <span className="eyebrow">MODEL LIBRARY</span>
+                <span className="eyebrow">模型库</span>
                 <h2 id="library-title">管理模型</h2>
                 <p>搜索、分组与连接状态筛选不会修改模型数据。</p>
               </div>
@@ -1838,12 +2080,13 @@ function ModelCenter({
               <SearchField
                 value={search}
                 onChange={setSearch}
-                placeholder="搜索名称或模型 ID"
+                placeholder="搜索模型名称或技术标识"
                 ariaLabel="搜索模型库"
               />
               <label>
                 <span>服务商</span>
                 <select
+                  aria-label="按服务商筛选模型"
                   value={provider}
                   onChange={(e) => setProvider(e.target.value)}
                 >
@@ -1865,6 +2108,7 @@ function ModelCenter({
               <label>
                 <span>能力</span>
                 <select
+                  aria-label="按能力筛选模型"
                   value={capability}
                   onChange={(e) => setCapability(e.target.value)}
                 >
@@ -1879,6 +2123,7 @@ function ModelCenter({
               <label>
                 <span>连接</span>
                 <select
+                  aria-label="按连接状态筛选模型"
                   value={connection}
                   onChange={(e) => setConnection(e.target.value)}
                 >
@@ -1903,7 +2148,7 @@ function ModelCenter({
                       <div className="model-library-item" key={item.id}>
                         <div className="model-library-main">
                           <div>
-                            <b>{item.label}</b>
+                            <b>{modelBusinessLabel(item.label)}</b>
                             {!item.builtin && (
                               <span className="stamp gold">自定义</span>
                             )}
@@ -1911,10 +2156,13 @@ function ModelCenter({
                           <code>
                             {PROVIDER_LABELS[item.provider] ||
                               item.provider_label ||
-                              item.provider}{" "}
-                            · {item.model}
+                              item.provider}
                           </code>
-                          <span>{item.kinds.join(" / ")}</span>
+                          <span>{item.kinds.map((kind) => MODEL_KIND_LABELS[kind]).join(" / ")}</span>
+                          <details className="model-library-technical">
+                            <summary>技术标识</summary>
+                            <code>{item.model}</code>
+                          </details>
                         </div>
                         <span
                           className={`stamp ${item.key_configured ? "green" : "red"}`}
@@ -1924,7 +2172,9 @@ function ModelCenter({
                         <div className="model-library-actions">
                           <button
                             type="button"
-                            aria-label={`测试 ${item.label}`}
+                            aria-label={test?.state === "testing"
+                              ? `测试 ${modelBusinessLabel(item.label)}，暂不可用：连接测试正在进行`
+                              : `测试 ${modelBusinessLabel(item.label)}`}
                             disabled={test?.state === "testing"}
                             onClick={() => void testModel(item)}
                           >
@@ -1938,9 +2188,9 @@ function ModelCenter({
                           </button>
                           <button
                             type="button"
-                            aria-label={`配置 ${item.label} 的连接`}
-                            onClick={() => {
-                              setLibrary(false);
+                            aria-label={`配置 ${modelBusinessLabel(item.label)} 的连接`}
+                            onClick={(event) => {
+                              modelDialogTriggerRef.current = event.currentTarget;
                               setCredential(item);
                               setCredentialDraft({
                                 base_url:
@@ -1955,9 +2205,9 @@ function ModelCenter({
                           {!item.builtin && (
                             <button
                               type="button"
-                              aria-label={`编辑 ${item.label}`}
-                              onClick={() => {
-                                setLibrary(false);
+                              aria-label={`编辑 ${modelBusinessLabel(item.label)}`}
+                              onClick={(event) => {
+                                modelDialogTriggerRef.current = event.currentTarget;
                                 setEditingModel(item);
                                 setModelDraft({
                                   label: item.label,
@@ -1978,8 +2228,11 @@ function ModelCenter({
                             <button
                               type="button"
                               className="danger"
-                              aria-label={`删除 ${item.label}`}
-                              onClick={() => void removeModel(item)}
+                              aria-label={`删除 ${modelBusinessLabel(item.label)}`}
+                              onClick={(event) => {
+                                modelDialogTriggerRef.current = event.currentTarget;
+                                setDeleteModel(item);
+                              }}
                             >
                               删除
                             </button>
@@ -2007,8 +2260,8 @@ function ModelCenter({
           >
             <div className="model-modal-head">
               <div>
-                <span className="eyebrow">MODEL CONNECTION</span>
-                <h2 id="credential-title">{credential.label} 的连接</h2>
+                <span className="eyebrow">模型连接</span>
+                <h2 id="credential-title">{modelBusinessLabel(credential.label)} 的连接</h2>
                 <p>密钥留空表示不修改现有值；接口不会回显明文。</p>
               </div>
               <button
@@ -2021,7 +2274,7 @@ function ModelCenter({
             </div>
             <div className="model-form-grid">
               <label className="model-form-field model-form-wide">
-                <span>Base URL</span>
+                <span>服务地址</span>
                 <input
                   value={credentialDraft.base_url}
                   onChange={(e) => {
@@ -2034,7 +2287,7 @@ function ModelCenter({
                 />
               </label>
               <label className="model-form-field model-form-wide">
-                <span>该模型专用 API Key</span>
+                <span>该模型专用访问密钥</span>
                 <input
                   type="password"
                   autoComplete="new-password"
@@ -2042,7 +2295,7 @@ function ModelCenter({
                   placeholder={
                     credential.key_configured
                       ? "留空则不修改现有密钥"
-                      : "输入 API Key"
+                      : "输入访问密钥"
                   }
                   onChange={(e) => {
                     setCredentialDraft((value) => ({
@@ -2056,7 +2309,9 @@ function ModelCenter({
             </div>
             <div className="model-modal-actions">
               <button
-                disabled={testing}
+                disabled={Boolean(credentialTestDisabledReason)}
+                aria-label={credentialTestDisabledReason ? `测试连接，暂不可用：${credentialTestDisabledReason}` : `测试 ${modelBusinessLabel(credential.label)} 的当前连接`}
+                title={credentialTestDisabledReason || "测试不会保存地址或密钥"}
                 onClick={async () => {
                   setTesting(true);
                   try {
@@ -2065,7 +2320,7 @@ function ModelCenter({
                       credentialDraft,
                     );
                     setTestedSignature(credentialSignature);
-                    toast(`${credential.label} 连接测试通过`);
+                    toast(`${modelBusinessLabel(credential.label)} 连接测试通过`);
                   } catch (e) {
                     toast((e as Error).message, true);
                   } finally {
@@ -2077,8 +2332,11 @@ function ModelCenter({
               </button>
               <button
                 className="btn primary small"
-                disabled={testedSignature !== credentialSignature}
+                disabled={Boolean(credentialSaveDisabledReason)}
+                aria-label={credentialSaveDisabledReason ? `保存连接，暂不可用：${credentialSaveDisabledReason}` : `保存 ${modelBusinessLabel(credential.label)} 的连接`}
+                title={credentialSaveDisabledReason || "保存后该模型将使用当前连接配置"}
                 onClick={async () => {
+                  setCredentialSaving(true);
                   try {
                     await api.put(
                       `/models/${encodeURIComponent(credential.id)}/credentials`,
@@ -2086,13 +2344,15 @@ function ModelCenter({
                     );
                     await refreshCatalog();
                     setCredential(null);
-                    toast(`${credential.label} 的连接已保存`);
+                    toast(`${modelBusinessLabel(credential.label)} 的连接已保存`);
                   } catch (e) {
                     toast((e as Error).message, true);
+                  } finally {
+                    setCredentialSaving(false);
                   }
                 }}
               >
-                保存连接
+                {credentialSaving ? "保存中…" : "保存连接"}
               </button>
             </div>
           </section>
@@ -2111,7 +2371,7 @@ function ModelCenter({
           >
             <div className="model-modal-head">
               <div>
-                <span className="eyebrow">CUSTOM MODEL</span>
+                <span className="eyebrow">自定义模型</span>
                 <h2 id="new-model-title">
                   {editingModel
                     ? "编辑 OpenAI 兼容模型"
@@ -2132,7 +2392,7 @@ function ModelCenter({
             </div>
             <div className="model-form-grid">
               <label className="model-form-field">
-                <span>显示名称</span>
+                <span>显示名称（必填）</span>
                 <input
                   value={modelDraft.label}
                   onChange={(e) => {
@@ -2145,7 +2405,7 @@ function ModelCenter({
                 />
               </label>
               <label className="model-form-field">
-                <span>服务名称</span>
+                <span>服务名称（必填）</span>
                 <input
                   value={modelDraft.provider_label}
                   onChange={(e) => {
@@ -2158,7 +2418,7 @@ function ModelCenter({
                 />
               </label>
               <label className="model-form-field model-form-wide">
-                <span>Base URL</span>
+                <span>服务地址（必填）</span>
                 <input
                   value={modelDraft.base_url}
                   onChange={(e) => {
@@ -2171,7 +2431,7 @@ function ModelCenter({
                 />
               </label>
               <label className="model-form-field">
-                <span>模型 ID</span>
+                <span>模型技术标识（必填）</span>
                 <input
                   value={modelDraft.model}
                   onChange={(e) => {
@@ -2184,13 +2444,13 @@ function ModelCenter({
                 />
               </label>
               <label className="model-form-field">
-                <span>API Key</span>
+                <span>访问密钥（{editingModel ? "留空则不修改" : "必填"}）</span>
                 <input
                   type="password"
                   autoComplete="new-password"
                   value={modelDraft.api_key}
                   placeholder={
-                    editingModel ? "留空则不修改现有密钥" : "输入 API Key"
+                    editingModel ? "留空则不修改现有密钥" : "输入访问密钥"
                   }
                   onChange={(e) => {
                     setModelDraft((value) => ({
@@ -2217,14 +2477,18 @@ function ModelCenter({
                         }))
                       }
                     />
-                    {kind === "text" ? "Text" : "VLM"}
+                    {kind === "text" ? "文本生成" : "视觉理解"}
                   </label>
                 ))}
               </fieldset>
             </div>
             <div className="model-modal-actions">
               <button
+                disabled={Boolean(modelTestDisabledReason)}
+                aria-label={modelTestDisabledReason ? `测试连接，暂不可用：${modelTestDisabledReason}` : "测试当前模型连接"}
+                title={modelTestDisabledReason || "测试不会将模型加入模型库"}
                 onClick={async () => {
+                  setNewTesting(true);
                   try {
                     if (editingModel)
                       await api.post(
@@ -2240,17 +2504,20 @@ function ModelCenter({
                     toast("连接测试通过");
                   } catch (e) {
                     toast((e as Error).message, true);
+                  } finally {
+                    setNewTesting(false);
                   }
                 }}
               >
-                测试连接
+                {newTesting ? "测试中…" : "测试连接"}
               </button>
               <button
                 className="btn primary small"
-                disabled={
-                  newTested !== newSignature || !modelDraft.kinds.length
-                }
+                disabled={Boolean(modelSaveDisabledReason)}
+                aria-label={modelSaveDisabledReason ? `${editingModel ? "保存模型修改" : "添加到模型库"}，暂不可用：${modelSaveDisabledReason}` : editingModel ? "保存模型修改" : "添加到模型库"}
+                title={modelSaveDisabledReason || "保存后可在模型分配中选择"}
                 onClick={async () => {
+                  setModelSaving(true);
                   try {
                     if (editingModel)
                       await api.put(
@@ -2272,21 +2539,81 @@ function ModelCenter({
                     );
                   } catch (e) {
                     toast((e as Error).message, true);
+                  } finally {
+                    setModelSaving(false);
                   }
                 }}
               >
-                {editingModel ? "保存模型修改" : "添加到模型库"}
+                {modelSaving ? "保存中…" : editingModel ? "保存模型修改" : "添加到模型库"}
               </button>
             </div>
           </section>
         </div>
+      )}
+      {deleteModel && (
+        <div className="model-modal-backdrop" role="presentation" onMouseDown={event => {
+          if (event.currentTarget === event.target && !deletingModel) setDeleteModel(null);
+        }}>
+          <section
+            ref={deleteRef}
+            className="model-modal model-delete-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="model-delete-title"
+          >
+            <div className="model-modal-head">
+              <div>
+                <span className="eyebrow">删除模型</span>
+                <h2 id="model-delete-title">删除「{deleteModel.label}」？</h2>
+                <p>如果该模型仍被任何任务类型使用，系统会阻止删除并保留现有配置。</p>
+              </div>
+            </div>
+            <dl>
+              <div><dt>服务商</dt><dd>{PROVIDER_LABELS[deleteModel.provider] || deleteModel.provider_label || deleteModel.provider}</dd></div>
+              <div><dt>模型</dt><dd>{deleteModel.model}</dd></div>
+              <div><dt>能力</dt><dd>{deleteModel.kinds.join(" / ")}</dd></div>
+            </dl>
+            <div className="model-modal-actions">
+              <button type="button" disabled={deletingModel}
+                aria-label={deletingModel ? "保留模型，暂不可用：正在删除模型" : "保留模型，不执行删除"}
+                onClick={() => setDeleteModel(null)}>
+                保留模型
+              </button>
+              <button type="button" className="danger" disabled={deletingModel}
+                aria-label={deletingModel
+                  ? `确认删除 ${deleteModel.label}，暂不可用：删除请求正在处理`
+                  : `确认删除模型 ${deleteModel.label}`}
+                onClick={() => void removeModel(deleteModel)}>
+                {deletingModel ? "删除中…" : "确认删除模型"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+      {assignmentConfirm && (
+        <DecisionDialog
+          title="保存模型分配？"
+          summary={`${assignmentAffectedRows.length} 类模型职责将使用新分配`}
+          message="新任务和尚未启动的排队任务会使用新模型；正在运行的任务保持启动时的模型快照。"
+          details={[
+            `影响职责：${assignmentAffectedRows.map((row) => row.label).join("、")}`,
+            "不会删除模型库配置，也不会重启正在运行的任务",
+          ]}
+          confirmLabel="确认保存模型分配"
+          cancelLabel="返回检查"
+          onClose={() => setAssignmentConfirm(false)}
+          onConfirm={() => {
+            setAssignmentConfirm(false);
+            void saveAssignments();
+          }}
+        />
       )}
     </section>
   );
 }
 
 export default function MonitorPage() {
-  const { toast, registerNavigationGuard } = useNav();
+  const { toast, registerNavigationGuard, requestNavigation } = useNav();
   const initial = nowQuery();
   const [activeSection, setActiveSection] =
     useState<MonitorSection>(querySection());
@@ -2460,31 +2787,40 @@ export default function MonitorPage() {
     section: MonitorSection,
     patch: Record<string, string | null> = {},
   ) => {
-    setObjectLoadError("");
     const cleanup: Record<string, string | null> = {};
-    if (section !== "jobs") {
-      cleanup.job_id = null;
-      setSelectedJob(null);
-      setSelectedJobId("");
+    if (section !== "jobs") cleanup.job_id = null;
+    if (section !== "calls") cleanup.call_id = null;
+    if (section !== "runs") {
+      cleanup.focus = null;
+      cleanup.run_id = null;
     }
-    if (section !== "calls") {
-      cleanup.call_id = null;
-      setSelectedCall(null);
-      setSelectedCallId(0);
-    }
-    if (section !== "runs") cleanup.focus = null;
-    setActiveSection(section);
-    writeQuery({
+    const queryPatch = {
       section: section === "overview" ? null : section,
       ...cleanup,
       ...patch,
+    };
+    const target = queryTarget(queryPatch);
+    requestNavigation(target, () => {
+      const source = nowQuery().get("section") || "overview";
+      setObjectLoadError("");
+      if (section !== "jobs") {
+        setSelectedJob(null);
+        setSelectedJobId("");
+      }
+      if (section !== "calls") {
+        setSelectedCall(null);
+        setSelectedCallId(0);
+      }
+      if (section !== "runs") setSelectedRunId(null);
+      setActiveSection(section);
+      writeQuery(queryPatch);
+      track("drilldown", {
+        source,
+        target_type: section,
+        filter_count: Object.values(patch).filter(Boolean).length,
+      });
+      window.scrollTo({ top: 0, behavior: "smooth" });
     });
-    track("drilldown", {
-      source: nowQuery().get("section") || "overview",
-      target_type: section,
-      filter_count: Object.values(patch).filter(Boolean).length,
-    });
-    window.scrollTo({ top: 0, behavior: "smooth" });
   };
   const openRun = (runId: string) => {
     const focus = String(Date.now());
@@ -2547,7 +2883,37 @@ export default function MonitorPage() {
     });
   }, [callsPagePoll.data?.server_time]);
   const counts = jobsSummaryPoll.data?.counts || {};
-  const systemExceptions = callsPagePoll.data?.failed_total || 0;
+  const jobFilterCount =
+    [
+      jobSearch,
+      jobStatus,
+      jobProject,
+      jobWorkflow,
+      jobFrom,
+      jobTo,
+      jobSort !== "desc" ? jobSort : "",
+    ].filter(Boolean).length;
+  const callFilterCount =
+    [
+      callSearch,
+      callStatus,
+      callCategory !== "business" ? callCategory : "",
+      callModel,
+      callFrom,
+      callTo,
+      callProject,
+      callFunction,
+      callSort !== "desc" ? callSort : "",
+      callIds,
+    ].filter(Boolean).length;
+  const jobTimeInvalid = Boolean(
+    jobFrom && jobTo && new Date(jobFrom).getTime() > new Date(jobTo).getTime(),
+  );
+  const callTimeInvalid = Boolean(
+    callFrom &&
+      callTo &&
+      new Date(callFrom).getTime() > new Date(callTo).getTime(),
+  );
   useEffect(() => {
     if (activeSection !== "jobs" || !selectedJobId) return;
     setObjectLoadError("");
@@ -2660,11 +3026,10 @@ export default function MonitorPage() {
               ? (counts.running || 0) +
                 (counts.queued || 0) +
                 (counts.waiting_human || 0)
-              : section.key === "calls" && callsPagePoll.data
-                ? systemExceptions
-                : undefined;
+              : undefined;
           return (
             <button
+              type="button"
               key={section.key}
               className={activeSection === section.key ? "active" : ""}
               aria-current={activeSection === section.key ? "page" : undefined}
@@ -2691,7 +3056,7 @@ export default function MonitorPage() {
         <div className="monitor-section">
           <div className="monitor-section-head">
             <div>
-              <span className="eyebrow">CONTROL OVERVIEW</span>
+              <span className="eyebrow">运行总览</span>
               <h2>制作运行总览</h2>
             </div>
             <p>正在运行、待我处理、系统异常与近期完成。</p>
@@ -2759,7 +3124,7 @@ export default function MonitorPage() {
                 >
                   <div className="s-label">{item.label}</div>
                   <div className="cost-ink">{item.count}</div>
-                  <span>按统一口径下钻 →</span>
+                  <span>查看对应任务 →</span>
                 </button>
               ))}
             </div>
@@ -2768,7 +3133,7 @@ export default function MonitorPage() {
             <section className="card monitor-overview-card">
               <div className="monitor-card-head">
                 <div>
-                  <span className="eyebrow">EXCEPTIONS</span>
+                  <span className="eyebrow">异常待办</span>
                   <h3>需要关注</h3>
                 </div>
                 <button
@@ -2846,17 +3211,21 @@ export default function MonitorPage() {
                         <span>
                           <b>
                             {CALL_KIND_LABELS[group.kind] || "其他业务异常"} ·{" "}
-                            {group.project_name}
+                            {group.project_name === "上下文未关联"
+                              ? "未关联项目"
+                              : group.project_name}
                           </b>
                           <small>
                             {group.episode_no
                               ? `第${group.episode_no}集`
-                              : "上下文未关联"}{" "}
+                              : "未关联具体分集"}{" "}
                             · 首次 {fmtTime(group.first_ts)} · 最近{" "}
                             {fmtTime(group.last_ts)}
                           </small>
                         </span>
-                        <span className="stamp red">影响 {group.count}</span>
+                        <span className="stamp red">
+                          异常 {group.count} 次
+                        </span>
                       </button>
                     ))}
                   </div>
@@ -2870,7 +3239,7 @@ export default function MonitorPage() {
             <section className="card monitor-overview-card">
               <div className="monitor-card-head">
                 <div>
-                  <span className="eyebrow">RECENT JOBS</span>
+                  <span className="eyebrow">最近任务</span>
                   <h3>最近任务</h3>
                 </div>
                 <button onClick={() => openSection("jobs")}>查看全部</button>
@@ -2915,7 +3284,7 @@ export default function MonitorPage() {
             <section className="card monitor-overview-card monitor-system-card">
               <div className="monitor-card-head">
                 <div>
-                  <span className="eyebrow">SYSTEM</span>
+                  <span className="eyebrow">系统状态</span>
                   <h3>配置概况</h3>
                 </div>
                 <button onClick={() => openSection("settings")}>
@@ -2988,13 +3357,13 @@ export default function MonitorPage() {
         <section className="card monitor-section">
           <div className="monitor-section-head compact">
             <div>
-              <span className="eyebrow">JOB QUEUE</span>
+              <span className="eyebrow">任务队列</span>
               <h2>任务队列</h2>
             </div>
             <p>
               {nowQuery().get("source") === "overview"
                 ? "来自总览 · 已清除冲突筛选"
-                : "服务端全量查询与真实总数"}
+                : "系统全量查询与真实总数"}
             </p>
           </div>
           <div className="monitor-toolbar">
@@ -3017,6 +3386,7 @@ export default function MonitorPage() {
             <label>
               <span>状态</span>
               <select
+                aria-label="按任务状态筛选"
                 value={jobStatus}
                 onChange={(e) => {
                   setJobStatus(e.target.value);
@@ -3043,9 +3413,11 @@ export default function MonitorPage() {
               </select>
             </label>
             <label>
-              <span>项目 ID</span>
+              <span>指定项目（高级筛选）</span>
               <input
+                aria-label="按项目技术标识精确筛选任务"
                 value={jobProject}
+                placeholder="输入项目技术标识（可选）"
                 onChange={(e) => {
                   setJobProject(e.target.value);
                   setJobPage(1);
@@ -3059,6 +3431,7 @@ export default function MonitorPage() {
             <label>
               <span>工作流</span>
               <select
+                aria-label="按工作流筛选任务"
                 value={jobWorkflow}
                 onChange={(e) => {
                   setJobWorkflow(e.target.value);
@@ -3081,7 +3454,10 @@ export default function MonitorPage() {
               <span>开始时间</span>
               <input
                 type="datetime-local"
+                aria-label="任务开始时间下限"
                 value={jobFrom}
+                max={jobTo || undefined}
+                aria-invalid={jobTimeInvalid}
                 onChange={(e) => {
                   setJobFrom(e.target.value);
                   setJobPage(1);
@@ -3096,7 +3472,10 @@ export default function MonitorPage() {
               <span>结束时间</span>
               <input
                 type="datetime-local"
+                aria-label="任务结束时间上限"
                 value={jobTo}
+                min={jobFrom || undefined}
+                aria-invalid={jobTimeInvalid}
                 onChange={(e) => {
                   setJobTo(e.target.value);
                   setJobPage(1);
@@ -3110,6 +3489,7 @@ export default function MonitorPage() {
             <label>
               <span>排序</span>
               <select
+                aria-label="任务排序方式"
                 value={jobSort}
                 onChange={(e) => {
                   setJobSort(e.target.value);
@@ -3122,7 +3502,14 @@ export default function MonitorPage() {
               </select>
             </label>
             <button
+              type="button"
               className="monitor-clear"
+              disabled={jobFilterCount === 0}
+              aria-label={
+                jobFilterCount
+                  ? `清除 ${jobFilterCount} 项任务筛选`
+                  : "当前没有任务筛选可清除"
+              }
               onClick={() => {
                 setJobSearch("");
                 setJobStatus("");
@@ -3148,9 +3535,14 @@ export default function MonitorPage() {
                 );
               }}
             >
-              清除组合筛选
+              {jobFilterCount ? `清除筛选（${jobFilterCount}）` : "清除筛选"}
             </button>
           </div>
+          {jobTimeInvalid && (
+            <p className="monitor-filter-error" role="alert">
+              开始时间不能晚于结束时间，请调整时间范围。
+            </p>
+          )}
           <DataBoundary
             status={blockStatus(
               jobsPagePoll.loading,
@@ -3187,10 +3579,17 @@ export default function MonitorPage() {
                         </span>
                       </td>
                       <td className="monitor-error-cell">
-                        {job.error ||
-                          (job.status === "succeeded"
-                            ? "任务已完成，无需处理"
-                            : "查看详情获取下一步")}
+                        <span>{jobNextStep(job)}</span>
+                        {job.error && (
+                          <details className="monitor-error-details">
+                            <summary
+                              aria-label={`查看${jobBusinessLabel(job)}的错误详情`}
+                            >
+                              错误详情
+                            </summary>
+                            <pre>{job.error}</pre>
+                          </details>
+                        )}
                       </td>
                       <td>
                         <button
@@ -3202,7 +3601,9 @@ export default function MonitorPage() {
                             setObjectLoadError("");
                             writeQuery({ job_id: job.id });
                           }}
-                          aria-label={`查看任务 ${job.id} 详情`}
+                          aria-label={features.call_detail_v2
+                            ? `查看${jobBusinessLabel(job)}详情`
+                            : `查看${jobBusinessLabel(job)}详情，暂不可用：任务详情功能已停用`}
                         >
                           详情 / 处理
                         </button>
@@ -3236,7 +3637,7 @@ export default function MonitorPage() {
         <section className="card monitor-section">
           <div className="monitor-section-head compact">
             <div>
-              <span className="eyebrow">PROVIDER CALLS</span>
+              <span className="eyebrow">模型调用</span>
               <h2>调用日志</h2>
             </div>
             <p>
@@ -3250,7 +3651,7 @@ export default function MonitorPage() {
               <span>搜索</span>
               <SearchField
                 value={callSearch}
-                placeholder="搜索功能、模型、HTTP 或错误"
+                placeholder="搜索功能、模型、接口状态或错误"
                 ariaLabel="搜索调用日志"
                 onChange={(value) => {
                   setCallSearch(value);
@@ -3270,6 +3671,7 @@ export default function MonitorPage() {
             <label>
               <span>类别</span>
               <select
+                aria-label="按调用类别筛选"
                 value={callCategory}
                 onChange={(e) => {
                   setCallCategory(e.target.value);
@@ -3293,6 +3695,7 @@ export default function MonitorPage() {
             <label>
               <span>状态</span>
               <select
+                aria-label="按调用状态筛选"
                 value={callStatus}
                 onChange={(e) => {
                   setCallStatus(e.target.value);
@@ -3314,9 +3717,11 @@ export default function MonitorPage() {
               </select>
             </label>
             <label>
-              <span>模型 ID</span>
+              <span>指定模型（高级筛选）</span>
               <input
+                aria-label="按模型技术标识精确筛选调用"
                 value={callModel}
+                placeholder="输入模型技术标识（可选）"
                 onChange={(e) => {
                   setCallModel(e.target.value);
                   setCallIds("");
@@ -3330,9 +3735,11 @@ export default function MonitorPage() {
               />
             </label>
             <label>
-              <span>项目 ID</span>
+              <span>指定项目（高级筛选）</span>
               <input
+                aria-label="按项目技术标识精确筛选调用"
                 value={callProject}
+                placeholder="输入项目技术标识（可选）"
                 onChange={(e) => {
                   setCallProject(e.target.value);
                   setCallIds("");
@@ -3346,9 +3753,11 @@ export default function MonitorPage() {
               />
             </label>
             <label>
-              <span>功能</span>
+              <span>指定功能（高级筛选）</span>
               <input
+                aria-label="按功能技术标识精确筛选调用"
                 value={callFunction}
+                placeholder="输入功能技术标识（可选）"
                 onChange={(e) => {
                   setCallFunction(e.target.value);
                   setCallIds("");
@@ -3365,7 +3774,10 @@ export default function MonitorPage() {
               <span>开始时间</span>
               <input
                 type="datetime-local"
+                aria-label="调用开始时间下限"
                 value={callFrom}
+                max={callTo || undefined}
+                aria-invalid={callTimeInvalid}
                 onChange={(e) => {
                   setCallFrom(e.target.value);
                   setCallIds("");
@@ -3382,7 +3794,10 @@ export default function MonitorPage() {
               <span>结束时间</span>
               <input
                 type="datetime-local"
+                aria-label="调用结束时间上限"
                 value={callTo}
+                min={callFrom || undefined}
+                aria-invalid={callTimeInvalid}
                 onChange={(e) => {
                   setCallTo(e.target.value);
                   setCallIds("");
@@ -3398,6 +3813,7 @@ export default function MonitorPage() {
             <label>
               <span>排序</span>
               <select
+                aria-label="调用排序方式"
                 value={callSort}
                 onChange={(e) => {
                   setCallSort(e.target.value);
@@ -3410,7 +3826,14 @@ export default function MonitorPage() {
               </select>
             </label>
             <button
+              type="button"
               className="monitor-clear"
+              disabled={callFilterCount === 0}
+              aria-label={
+                callFilterCount
+                  ? `清除 ${callFilterCount} 项调用筛选`
+                  : "当前没有调用筛选可清除"
+              }
               onClick={() => {
                 setCallSearch("");
                 setCallStatus("");
@@ -3442,9 +3865,14 @@ export default function MonitorPage() {
                 );
               }}
             >
-              清除组合筛选
+              {callFilterCount ? `清除筛选（${callFilterCount}）` : "清除筛选"}
             </button>
           </div>
+          {callTimeInvalid && (
+            <p className="monitor-filter-error" role="alert">
+              开始时间不能晚于结束时间，请调整时间范围。
+            </p>
+          )}
           <DataBoundary
             status={callsStatus}
             error={callsPagePoll.error}
@@ -3460,7 +3888,7 @@ export default function MonitorPage() {
                     <th>类别 / 调用目的</th>
                     <th>模型</th>
                     <th>状态</th>
-                    <th>HTTP</th>
+                    <th>接口状态码</th>
                     <th>延迟</th>
                     <th>错误 / 下一步</th>
                     <th>操作</th>
@@ -3478,38 +3906,53 @@ export default function MonitorPage() {
                       <td>
                         {call.model_label || call.model || "未记录模型"}
                         <details>
-                          <summary>原始 ID</summary>
+                          <summary
+                            aria-label={`查看${call.model_label || "当前模型"}的技术标识`}
+                          >
+                            技术标识
+                          </summary>
                           <code>{call.model}</code>
                         </details>
                       </td>
                       <td>
                         <span
                           className={`stamp ${stampClass(call.effective_status)}`}
-                          title={`原始状态：${call.status}`}
                         >
                           {callStatusLabel(call.effective_status)}
                         </span>
                       </td>
                       <td>
                         {call.http_status
-                          ? `HTTP ${call.http_status}`
+                          ? `状态码 ${call.http_status}`
                           : "未返回"}
                       </td>
-                      <td>{(call.latency_ms / 1000).toFixed(1)}s</td>
+                      <td>{(call.latency_ms / 1000).toFixed(1)} 秒</td>
                       <td className="monitor-error-cell">
-                        {call.error ||
-                          (call.run_id ? "可查看关联 Run" : "无需处理")}
+                        <span>{callNextStep(call)}</span>
+                        {call.error && (
+                          <details className="monitor-error-details">
+                            <summary
+                              aria-label={`查看${callBusinessLabel(call)}的错误详情`}
+                            >
+                              错误详情
+                            </summary>
+                            <pre>{call.error}</pre>
+                          </details>
+                        )}
                       </td>
                       <td>
                         <button
                           className="btn small"
+                          disabled={!features.call_detail_v2}
                           onClick={() => {
                             setSelectedCall(call);
                             setSelectedCallId(call.id);
                             setObjectLoadError("");
                             writeQuery({ call_id: String(call.id) });
                           }}
-                          aria-label={`查看调用 ${call.id} 的脱敏详情`}
+                          aria-label={features.call_detail_v2
+                            ? `查看${callBusinessLabel(call)}的脱敏详情`
+                            : `查看${callBusinessLabel(call)}的脱敏详情，暂不可用：调用详情功能已停用`}
                         >
                           {features.call_detail_v2 ? "查看详情" : "详情已停用"}
                         </button>

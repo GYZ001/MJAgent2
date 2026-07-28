@@ -6,10 +6,12 @@ import {
   subscribeApprovalPrompt,
   type WaitingApprovalPayload,
 } from '../capabilityApproval'
+import { useFocusTrap } from '../hooks/useFocusTrap'
 
 /** 全局批准卡：拦截 REST 202 waiting_approval，展示服务端 Impact。 */
 export default function CapabilityApprovalHost() {
   const [payload, setPayload] = useState<WaitingApprovalPayload | null>(getPendingApproval())
+  const trapRef = useFocusTrap(Boolean(payload), () => resolveCapabilityApproval(false))
 
   useEffect(() => subscribeApprovalPrompt(() => {
     setPayload(getPendingApproval())
@@ -26,7 +28,7 @@ export default function CapabilityApprovalHost() {
         if (event.currentTarget === event.target) resolveCapabilityApproval(false)
       }}
     >
-      <section className="impact-dialog" role="dialog" aria-modal="true" aria-label="操作批准">
+      <section ref={trapRef} className="impact-dialog" role="dialog" aria-modal="true" aria-label="操作批准">
         <h3>{payload.command ? `批准：${payload.command}` : '需要批准后继续'}</h3>
         <p>以下影响来自服务端预检；未批准前不会执行任何业务变更。</p>
         <ul>

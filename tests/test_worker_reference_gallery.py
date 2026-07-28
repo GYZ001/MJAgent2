@@ -1,9 +1,41 @@
 import asyncio
 import json
 import sqlite3
+from pathlib import Path
 
-from app import compiler, db, stages, worker
+import pytest
+
+from app import compiler, db, stages, video_modes, worker
 from app.schemas import Bible, Character, World
+
+
+def test_video_qa_anchors_ignore_loser_deleted_and_missing_keyframes(tmp_path) -> None:
+    from app.media_exec.run_job import _visual_anchors_from_version_meta
+
+    winner = tmp_path / "winner.jpg"
+    loser = tmp_path / "loser.jpg"
+    deleted = tmp_path / "deleted.jpg"
+    scene = tmp_path / "scene.jpg"
+    for path in (winner, loser, deleted, scene):
+        path.write_bytes(path.name.encode())
+
+    anchors = _visual_anchors_from_version_meta({
+        "reference_images": [
+            {"type": "plot_key_frame", "path": str(winner), "selectedForSeedance": True},
+            {"type": "plot_key_frame", "path": str(loser), "selectedForSeedance": False},
+            {
+                "type": "plot_key_frame", "path": str(deleted),
+                "selectedForSeedance": True, "deleted": True,
+            },
+            {
+                "type": "plot_key_frame", "path": str(tmp_path / "missing.jpg"),
+                "selectedForSeedance": True,
+            },
+            {"type": "scene", "path": str(scene), "purposes": ["qa_anchor"]},
+        ],
+    })
+
+    assert {Path(item["path"]).name for item in anchors} == {"winner.jpg", "scene.jpg"}
 
 
 def _conn() -> sqlite3.Connection:
@@ -44,6 +76,81 @@ def _seed_project(conn: sqlite3.Connection) -> None:
         ),
     )
     conn.commit()
+
+
+def test_enqueue_budget_reserves_full_timeline_keyframe_estimate(monkeypatch) -> None:
+    conn = _conn()
+    _seed_project(conn)
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "ensure_media_trace", lambda **_kwargs: (None, None))
+    monkeypatch.setattr(compiler, "compile_prompt", lambda *a, **k: "PROMPT --dur 10")
+    monkeypatch.setattr(video_modes, "estimated_keyframe_generation_count", lambda: 9)
+    captured: dict[str, float] = {}
+
+    def reserve(_job_id, _episode_id, estimate, _limit, *, conn=None):
+        captured["estimate"] = float(estimate)
+        return True
+
+    monkeypatch.setattr(worker.media_scheduler, "reserve_budget", reserve)
+
+    result = worker.enqueue_shot("s1")
+
+    assert result["reused"] is False
+    assert "paused_budget" not in result
+    assert captured["estimate"] == (
+        compiler.shot_cost_cny(10) + worker.config.IMAGE_PRICE_PER_UNIT * 9
+    )
+
+
+def test_enqueue_budget_reservation_error_closes_durable_job(monkeypatch) -> None:
+    conn = _conn()
+    _seed_project(conn)
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "ensure_media_trace", lambda **_kwargs: (None, None))
+    monkeypatch.setattr(compiler, "compile_prompt", lambda *a, **k: "PROMPT --dur 10")
+
+    def fail_reserve(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(worker.media_scheduler, "reserve_budget", fail_reserve)
+
+    with pytest.raises(ValueError, match="尚未提交供应商"):
+        worker.enqueue_shot("s1")
+
+    job = conn.execute("SELECT status,error FROM jobs").fetchone()
+    version = conn.execute("SELECT status,error FROM shot_versions").fetchone()
+    assert job["status"] == "failed"
+    assert version["status"] == "failed"
+    assert "预算预留" in job["error"]
+    assert conn.execute(
+        "SELECT status FROM episodes WHERE id='e1'"
+    ).fetchone()["status"] == "confirmed"
+
+
+def test_enqueue_dispatch_error_keeps_job_durably_accepted(monkeypatch) -> None:
+    conn = _conn()
+    _seed_project(conn)
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "ensure_media_trace", lambda **_kwargs: (None, None))
+    monkeypatch.setattr(compiler, "compile_prompt", lambda *a, **k: "PROMPT --dur 10")
+    monkeypatch.setattr(
+        worker.media_scheduler,
+        "reserve_budget",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        worker,
+        "_enqueue_for_current_status",
+        lambda _job_id: (_ for _ in ()).throw(RuntimeError("queue notification failed")),
+    )
+
+    result = worker.enqueue_shot("s1")
+
+    assert result["task_accepted"] is True
+    assert result["dispatch_deferred"] is True
+    job = conn.execute("SELECT status,error FROM jobs WHERE id=?", (result["job_id"],)).fetchone()
+    assert job["status"] == "queued"
+    assert "持久队列" in job["error"]
 
 
 def test_edited_reference_gallery_changes_enqueue_idempotency(monkeypatch) -> None:
@@ -91,6 +198,7 @@ def test_edited_reference_gallery_changes_enqueue_idempotency(monkeypatch) -> No
         "reference_images": refs,
         "reference_gallery_revision": 123.0,
         "reference_gallery_edited": True,
+        "reference_gallery_contract_override": True,
     }
     conn.execute(
         "UPDATE shot_versions SET image_inputs=? WHERE id=?",
@@ -129,6 +237,8 @@ def test_reroll_reuses_unedited_shot_reference_gallery(monkeypatch) -> None:
         (json.dumps({
             "mode": "REFERENCE_IMAGE_MODE",
             "reference_images": refs,
+            "reference_manifest": {"input_fingerprint": "frozen-manifest"},
+            "keyframe_prompt_contract_version": video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION,
         }), first["version_id"]),
     )
     conn.execute(
@@ -146,6 +256,67 @@ def test_reroll_reuses_unedited_shot_reference_gallery(monkeypatch) -> None:
     assert rerolled["version_id"] != first["version_id"]
     assert rerolled_meta["reference_gallery_source_version_id"] == first["version_id"]
     assert rerolled_meta["reference_images"] == refs
+    assert rerolled_meta["reference_manifest"] == {"input_fingerprint": "frozen-manifest"}
+    assert rerolled_meta["reference_manifest_frozen"] is True
+
+
+def test_legacy_keyframe_gallery_is_not_reused_after_prompt_contract_upgrade(monkeypatch) -> None:
+    """无构图合同版本的老关键帧不得继续污染新视频版本。"""
+    conn = _conn()
+    _seed_project(conn)
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "ensure_media_trace", lambda **_kwargs: (None, None))
+    monkeypatch.setattr(compiler, "compile_prompt", lambda *a, **k: "PROMPT --dur 5")
+
+    first = worker.enqueue_shot("s1")
+    legacy_refs = [{
+        "id": "legacy_keyframe",
+        "url": "data:image/jpeg;base64,old",
+        "type": "plot_key_frame",
+        "source": "seedream_generated",
+        "selectedForSeedance": True,
+    }]
+    conn.execute(
+        "UPDATE shot_versions SET status='succeeded', image_inputs=? WHERE id=?",
+        (json.dumps({
+            "mode": "REFERENCE_IMAGE_MODE",
+            "reference_images": legacy_refs,
+        }), first["version_id"]),
+    )
+    conn.execute("UPDATE shots SET adopted_version_id=? WHERE id='s1'", (first["version_id"],))
+    conn.commit()
+
+    rerolled = worker.enqueue_shot("s1", reroll=True)
+    new_meta = json.loads(conn.execute(
+        "SELECT image_inputs FROM shot_versions WHERE id=?", (rerolled["version_id"],),
+    ).fetchone()["image_inputs"])
+
+    assert "reference_gallery_source_version_id" not in new_meta
+    assert "reference_images" not in new_meta
+    assert new_meta["keyframe_prompt_contract_version"] == video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION
+
+
+def test_gallery_with_missing_selected_continuity_tail_is_not_technically_reusable() -> None:
+    fingerprint = "shot-fingerprint"
+    meta = {
+        "keyframe_prompt_contract_version": video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION,
+        "keyframe_contract_fingerprint": fingerprint,
+        "reference_images": [
+            {
+                "type": "plot_key_frame", "url": "data:image/jpeg;base64,keyframe",
+                "selectedForSeedance": True,
+                "keyframe_contract_fingerprint": fingerprint,
+            },
+            {
+                "type": "previous_shot_frame", "path": "/definitely/missing/00_previous_tail.jpg",
+                "selectedForSeedance": True,
+            },
+        ],
+    }
+
+    assert video_modes.reference_gallery_matches_keyframe_contract(
+        meta, expected_fingerprint=fingerprint,
+    ) is False
 
 
 def test_failed_video_reference_gallery_is_reused_by_next_attempt(monkeypatch) -> None:
@@ -159,7 +330,7 @@ def test_failed_video_reference_gallery_is_reused_by_next_attempt(monkeypatch) -
     refs = [{
         "id": "r_failed_video",
         "url": "data:image/jpeg;base64,still-valid",
-        "type": "scene",
+        "type": "plot_key_frame",
         "source": "seedream_generated",
         "selectedForSeedance": True,
     }]
@@ -168,6 +339,7 @@ def test_failed_video_reference_gallery_is_reused_by_next_attempt(monkeypatch) -
         (json.dumps({
             "mode": "REFERENCE_IMAGE_MODE",
             "reference_images": refs,
+            "keyframe_prompt_contract_version": video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION,
         }), failed["version_id"]),
     )
     conn.commit()

@@ -80,6 +80,13 @@ def mark_media_job_state(run_id: str | None, step_id: str | None, status: str, m
             if run["status"] == "RUNNING":
                 transition_run(run_id, "RUNNING", "PAUSED_BUDGET", reason)
             return
+        if status == "paused":
+            if run["status"] in {"RUNNING", "WAITING_RETRY"}:
+                transition_run(run_id, run["status"], "PAUSED_EXTERNAL", reason)
+            repository.append_event(
+                run_id, "MEDIA_PAUSED", "info", reason, step_run_id=step_id,
+            )
+            return
         if status == "succeeded":
             if step["status"] == "RUNNING":
                 transition_step(step_id, "RUNNING", "SUCCEEDED", reason, decision="accept")

@@ -465,26 +465,40 @@ async def prepare_user_message(
 
 
 async def run_prepared_turn(conversation_id: str, turn_id: str, state: _LoopState) -> None:
-    """执行已准备好的 Agent 循环（BackgroundTasks / 测试调用）。"""
+    """执行已准备好的 Agent 循环。"""
     turn = store.get_turn(turn_id)
     if not turn or turn["status"] == "cancelled":
         return
     await _run_loop(conversation_id, turn_id, state)
 
 
+def spawn_prepared_turn(conversation_id: str, turn_id: str, state: _LoopState) -> asyncio.Task:
+    """启动并登记 Agent 循环，保证取消接口能找到真实后台任务。"""
+    existing = _BACKGROUND_TASKS.get(turn_id)
+    if existing is not None and not existing.done():
+        raise RuntimeError(f"Agent Turn 已在运行：{turn_id}")
+    task = asyncio.create_task(
+        run_prepared_turn(conversation_id, turn_id, state),
+        name=f"agent-turn-{turn_id}",
+    )
+    _BACKGROUND_TASKS[turn_id] = task
+
+    def _cleanup(done: asyncio.Task) -> None:
+        if _BACKGROUND_TASKS.get(turn_id) is done:
+            _BACKGROUND_TASKS.pop(turn_id, None)
+
+    task.add_done_callback(_cleanup)
+    return task
+
+
 async def start_user_message(conversation_id: str, content: str, context: ContextEnvelope | None) -> dict[str, Any]:
     """兼容旧名：准备 turn 后在当前任务中启动循环（不等同于 HTTP 异步入口）。"""
     prepared = await prepare_user_message(conversation_id, content, context)
-    task = asyncio.create_task(
-        run_prepared_turn(conversation_id, prepared["turn"]["id"], prepared["state"]),
-        name=f"agent-turn-{prepared['turn']['id']}",
+    spawn_prepared_turn(
+        conversation_id,
+        prepared["turn"]["id"],
+        prepared["state"],
     )
-    _BACKGROUND_TASKS[prepared["turn"]["id"]] = task
-
-    def _cleanup(done: asyncio.Task) -> None:
-        _BACKGROUND_TASKS.pop(prepared["turn"]["id"], None)
-
-    task.add_done_callback(_cleanup)
     return {"turn": prepared["turn"], "user_message": prepared["user_message"]}
 
 

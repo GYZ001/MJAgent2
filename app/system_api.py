@@ -119,6 +119,14 @@ def assert_path_under_directory_grant(path: Path) -> Path:
         resolved = path.expanduser().resolve()
     except OSError as exc:
         raise HTTPException(400, f"路径不可解析：{path}") from exc
+    # 应用内建数据根由部署配置明确指定；macOS 的临时目录会解析到
+    # /private/var，不能因此把应用自己的 projects/data 目录误判为敏感路径。
+    for root in _builtin_directory_roots():
+        try:
+            resolved.relative_to(root)
+            return resolved
+        except ValueError:
+            continue
     if _is_blocked_fs_path(resolved):
         raise HTTPException(403, f"不允许访问系统敏感目录：{resolved}")
     for root in allowed_directory_roots():
@@ -233,8 +241,6 @@ def make_dir(body: dict):
     if not parent_path.exists() or not parent_path.is_dir():
         raise HTTPException(404, f"父目录不存在：{parent}")
     dest = parent_path / name
-    if _is_blocked_fs_path(dest):
-        raise HTTPException(403, "目标路径不被允许")
     # 新建目标也必须仍在同一 grant 树下
     assert_path_under_directory_grant(dest)
     try:
@@ -1144,14 +1150,28 @@ def retry_job(job_id: str, body: dict | None = None):
 
     request = body or {}
     conn = get_conn()
-    row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+    row = conn.execute(
+        """SELECT j.*, v.provider_task_id, s.duration_s
+             FROM jobs j
+             LEFT JOIN shot_versions v ON v.id=j.version_id
+             LEFT JOIN shots s ON s.id=j.shot_id
+            WHERE j.id=?""",
+        (job_id,),
+    ).fetchone()
     if not row:
         raise HTTPException(404, "媒体任务不存在")
     item = dict(row)
-    if item["status"] not in {"failed", "cancelled", "paused_external", "paused_budget", "waiting_retry"}:
+    if item["status"] not in {
+        "failed", "cancelled", "paused", "paused_external", "paused_budget", "waiting_retry",
+    }:
         raise HTTPException(409, detail={
             "code": "JOB_STATE_CONFLICT", "message": f"当前状态 {item['status']} 不支持重试",
             "current_status": item["status"],
+            "retryability": {
+                "retryable": False,
+                "action": "refresh",
+                "message": "任务状态已变化，请刷新后查看最新状态",
+            },
         })
     expected = request.get("expected_version")
     if expected is not None and int(expected) != int(item.get("state_revision") or 0):
@@ -1162,25 +1182,201 @@ def retry_job(job_id: str, body: dict | None = None):
     if item["status"] == "paused_budget":
         if not item.get("episode_id"):
             raise HTTPException(409, "预算暂停任务缺少分集上下文，不能安全恢复")
-        resumed = worker.retry_paused(item["episode_id"])
+        resumed = worker.retry_paused(item["episode_id"], job_id=job_id)
         if not resumed:
             raise HTTPException(409, "预算仍不足，请先提高单集成本上限")
+        retryability = {
+            "retryable": True,
+            "action": "resume_budget_paused",
+            "paid_risk": "uses_reserved_budget",
+            "will_submit_new_provider_task": not bool(item.get("provider_task_id")),
+            "will_continue_existing_provider_task": bool(item.get("provider_task_id")),
+            "message": "预算已重新校验，任务将从已保存断点继续",
+        }
     else:
+        has_provider_task = bool(item.get("provider_task_id"))
+        provider_recovery = bool(
+            item.get("provider_non_cancellable")
+            or item.get("provider_create_state") in {"accepted", "submitting", "unknown"}
+        )
+        provider_recovery_unconfirmed = False
+        if not has_provider_task and provider_recovery:
+            recovered = worker._recover_paid_video_task(
+                conn,
+                item.get("provider_operation_id"),
+            )
+            if recovered and item.get("version_id"):
+                provider_task_id, submitted_at = recovered
+                conn.execute(
+                    "UPDATE shot_versions SET provider_task_id=? WHERE id=?",
+                    (provider_task_id, item["version_id"]),
+                )
+                conn.execute(
+                    """UPDATE jobs
+                       SET provider_create_state='accepted', provider_non_cancellable=1,
+                           provider_submitted_at=?, updated_at=?
+                       WHERE id=?""",
+                    (submitted_at, time.time(), job_id),
+                )
+                conn.commit()
+                item["provider_task_id"] = provider_task_id
+                has_provider_task = True
+            elif not request.get("allow_new_submission"):
+                raise HTTPException(409, detail={
+                    "code": "PROVIDER_HANDLE_UNCONFIRMED",
+                    "message": "供应商可能已接单，但暂未找到可继续查询的任务编号",
+                    "retryability": {
+                        "retryable": True,
+                        "action": "confirm_new_submission",
+                        "paid_risk": "previous_charge_unknown",
+                        "will_submit_new_provider_task": True,
+                        "will_continue_existing_provider_task": False,
+                        "message": "请先核对供应商后台；确认继续后会重新校验预算，并可能产生新费用",
+                    },
+                })
+            else:
+                provider_recovery_unconfirmed = True
+        error_text = str(item.get("error") or "").lower()
+        provider_terminal_failure = bool(
+            has_provider_task
+            and item["status"] == "failed"
+            and (
+                "seedance 任务失败" in error_text
+                or ("供应商任务" in error_text and "失败" in error_text)
+            )
+        )
+        if provider_terminal_failure:
+            raise HTTPException(409, detail={
+                "code": "PROVIDER_TASK_TERMINAL_FAILED",
+                "message": "供应商任务已明确失败，不能继续轮询同一任务，请创建新视频版本",
+                "retryability": {
+                    "retryable": False,
+                    "action": "create_new_version",
+                    "paid_risk": "requires_new_charge",
+                    "message": "新版本会创建新的供应商任务，并可能产生新费用",
+                },
+            })
+        if has_provider_task:
+            target_status = "waiting_provider"
+            retryability = {
+                "retryable": True,
+                "action": "continue_poll",
+                "paid_risk": "no_new_charge",
+                "will_submit_new_provider_task": False,
+                "will_continue_existing_provider_task": True,
+                "message": "将继续查询同一个供应商任务，不会重复提交或产生新任务",
+            }
+        elif provider_recovery_unconfirmed:
+            target_status = "queued"
+            if not item.get("episode_id"):
+                raise HTTPException(409, detail={
+                    "code": "JOB_RETRY_CONTEXT_MISSING",
+                    "message": "任务缺少分集上下文，不能安全重新提交",
+                })
+            from app.compiler import shot_cost_cny
+            estimate = float(item.get("reserved_cost_cny") or 0)
+            if estimate <= 0:
+                estimate = shot_cost_cny(float(item.get("duration_s") or 5))
+            if not worker.media_scheduler.reserve_budget(
+                job_id,
+                item["episode_id"],
+                estimate,
+                float(get_setting("episode_cost_limit_cny") or 100),
+                conn=conn,
+            ):
+                raise HTTPException(409, detail={
+                    "code": "JOB_RETRY_BUDGET_BLOCKED",
+                    "message": "单集预算不足，任务已保持暂停；提高成本上限后可继续",
+                    "retryability": {
+                        "retryable": True,
+                        "action": "increase_budget",
+                        "paid_risk": "blocked_before_charge",
+                    },
+                })
+            retryability = {
+                "retryable": True,
+                "action": "new_submission_after_unconfirmed_provider",
+                "paid_risk": "may_create_new_charge",
+                "will_submit_new_provider_task": True,
+                "will_continue_existing_provider_task": False,
+                "message": "已确认继续并重新校验预算；将复用原幂等标识，但仍可能产生新费用",
+            }
+        else:
+            target_status = "queued"
+            if not item.get("episode_id"):
+                raise HTTPException(409, detail={
+                    "code": "JOB_RETRY_CONTEXT_MISSING",
+                    "message": "任务缺少分集上下文，不能安全重新提交",
+                })
+            from app.compiler import shot_cost_cny
+            estimate = float(item.get("reserved_cost_cny") or 0)
+            if estimate <= 0:
+                estimate = shot_cost_cny(float(item.get("duration_s") or 5))
+            if not worker.media_scheduler.reserve_budget(
+                job_id,
+                item["episode_id"],
+                estimate,
+                float(get_setting("episode_cost_limit_cny") or 100),
+                conn=conn,
+            ):
+                raise HTTPException(409, detail={
+                    "code": "JOB_RETRY_BUDGET_BLOCKED",
+                    "message": "单集预算不足，任务已保持暂停；提高成本上限后可继续",
+                    "retryability": {
+                        "retryable": True,
+                        "action": "increase_budget",
+                        "paid_risk": "blocked_before_charge",
+                    },
+                })
+            retryability = {
+                "retryable": True,
+                "action": "new_submission",
+                "paid_risk": "may_create_new_charge",
+                "will_submit_new_provider_task": True,
+                "will_continue_existing_provider_task": False,
+                "message": "该任务尚无供应商断点，将重新提交并可能产生新费用",
+            }
         cursor = conn.execute(
-            """UPDATE jobs SET status='queued',error=NULL,next_retry_at=NULL,
+            """UPDATE jobs SET status=?,error=?,next_retry_at=NULL,
                        cancellation_requested=0,lease_owner=NULL,lease_expires_at=NULL,
                        state_revision=COALESCE(state_revision,0)+1,updated_at=?
                WHERE id=? AND status=?""",
-            (time.time(), job_id, item["status"]),
+            (
+                target_status,
+                retryability["message"],
+                time.time(),
+                job_id,
+                item["status"],
+            ),
         )
         if cursor.rowcount != 1:
             conn.rollback()
             raise HTTPException(409, "任务已被其他操作更新")
         conn.commit()
-        worker._enqueue_for_current_status(job_id)
+        dispatch_deferred = False
+        try:
+            worker._enqueue_for_current_status(job_id)
+        except Exception as exc:
+            from app import errors as app_errors
+            app_errors.record_and_format(
+                exc,
+                action="manual_job_retry_dispatch",
+                context={"job_id": job_id, "target_status": target_status},
+            )
+            dispatch_deferred = True
     latest = dict(conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
-    audit("job_retry", "job", job_id, "accepted", {"previous_status": item["status"]})
-    return {"ok": True, "accepted": True, "asynchronous": True, "job": latest}
+    audit(
+        "job_retry", "job", job_id, "accepted",
+        {"previous_status": item["status"], "retry_action": retryability["action"]},
+    )
+    return {
+        "ok": True,
+        "accepted": True,
+        "asynchronous": True,
+        "retryability": retryability,
+        "job": latest,
+        "dispatch_deferred": locals().get("dispatch_deferred", False),
+    }
 
 
 def _redact_settings_values(values: dict[str, Any]) -> dict[str, Any]:

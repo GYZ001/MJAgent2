@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { filterEpisodeOptions, resolveEpisodeId, type EpisodeOption } from './episodePicker'
+import {
+  episodeProductionStatus,
+  filterEpisodeOptions,
+  resolveEpisodeId,
+  resolveRoutedEpisodeId,
+  type EpisodeOption,
+} from './episodePicker'
 
 const episodes: EpisodeOption[] = [
   { id: 'e1', episode_no: 1, title: '开端' },
@@ -13,6 +19,21 @@ describe('episode picker', () => {
     expect(resolveEpisodeId(episodes, 'missing')).toBe('e1')
     expect(resolveEpisodeId(episodes, null)).toBe('e1')
     expect(resolveEpisodeId([], 'e2')).toBeNull()
+  })
+
+  it('keeps an explicit routed episode authoritative, including a missing deep link', () => {
+    expect(resolveRoutedEpisodeId(episodes, 'e1', 'e2')).toBe('e2')
+    expect(resolveRoutedEpisodeId(episodes, 'e1', 'missing')).toBe('missing')
+    expect(resolveRoutedEpisodeId([], null, 'missing')).toBe('missing')
+    expect(resolveRoutedEpisodeId(episodes, 'e2', null)).toBe('e2')
+    expect(resolveRoutedEpisodeId(episodes, null, null)).toBe('e1')
+  })
+
+  it('presents failed screenplay work as needing attention', () => {
+    expect(episodeProductionStatus({ screenplay_status: 'failed', status: 'pending' })).toBe('需处理')
+    expect(episodeProductionStatus({ screenplay_status: 'ready', status: 'script_failed' })).toBe('需处理')
+    expect(episodeProductionStatus({ screenplay_status: 'running', status: 'pending' })).toBe('剧本中')
+    expect(episodeProductionStatus({ screenplay_status: 'ready', status: 'scripted' })).toBe('待确认')
   })
 
   it('searches episode numbers and titles before applying the result limit', () => {

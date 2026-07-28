@@ -1,55 +1,142 @@
-import { useRef, useState } from 'react'
+import { useId, useRef, useState } from 'react'
 import { api, Project } from '../api'
 import { useNav, usePoll } from '../App'
+import QueryState from '../components/QueryState'
+import { useFocusTrap } from '../hooks/useFocusTrap'
+import { formatFileSize, projectEntry, validateNovelFile } from './studioImport'
 
 const STATUS_LABEL: Record<string, [string, string]> = {
-  created: ['新建', 'grey'], ingested: ['已摄入', 'blue'],
-  bible_ready: ['谱成', 'blue'], planned: ['已分集', 'green'],
+  created: ['新建', 'grey'], ingested: ['已导入', 'blue'],
+  bible_ready: ['人物谱就绪', 'blue'], planned: ['分集已规划', 'green'],
 }
+
+type ImportStage = 'idle' | 'selected' | 'uploading' | 'creating' | 'error'
 
 export default function Studio() {
   const { go, toast } = useNav()
-  const { data: projects, refresh } = usePoll<Project[]>(() => api.get('/projects'), 6000)
-  const [uploading, setUploading] = useState(false)
+  const { data: projects, refresh, error, loading } = usePoll<Project[]>(() => api.get('/projects'), 6000)
   const [name, setName] = useState('')
   const [showImport, setShowImport] = useState(false)
+  const importTriggerRef = useRef<HTMLButtonElement | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const [drag, setDrag] = useState(false)
+  const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [pendingAttachment, setPendingAttachment] = useState<{ fileKey: string; token: string } | null>(null)
+  const [importStage, setImportStage] = useState<ImportStage>('idle')
+  const [importError, setImportError] = useState<string | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<Project | null>(null)
+  const [deleting, setDeleting] = useState(false)
+  const deleteTriggerRef = useRef<HTMLButtonElement | null>(null)
+  const projectNameId = useId()
+  const importPanelId = useId()
+  const importHelpId = useId()
+  const uploading = importStage === 'uploading' || importStage === 'creating'
+  const emptyProjectList = !loading && !error && projects?.length === 0
+  const importVisible = showImport || emptyProjectList
+
+  function rejectFile(message: string) {
+    setSelectedFile(null)
+    setPendingAttachment(null)
+    setImportStage('error')
+    setImportError(message)
+    toast(message, true)
+  }
+
+  function selectFiles(files: FileList | null) {
+    if (!files?.length || uploading) return
+    if (files.length > 1) {
+      rejectFile('一次只能导入一份 TXT，请重新选择')
+      return
+    }
+    const file = files[0]
+    const validationError = validateNovelFile(file)
+    if (validationError) {
+      rejectFile(validationError)
+      return
+    }
+    setSelectedFile(file)
+    setPendingAttachment(null)
+    setImportStage('selected')
+    setImportError(null)
+  }
 
   async function submit(file: File) {
     if (uploading) return
-    setUploading(true)
+    const validationError = validateNovelFile(file)
+    if (validationError) {
+      rejectFile(validationError)
+      return
+    }
+    const projectName = name.trim() || file.name.replace(/\.txt$/i, '')
+    setSelectedFile(file)
+    setImportError(null)
+    setImportStage('uploading')
     try {
-      const form = new FormData()
-      form.append('file', file)
-      const attachment = await api.upload('/attachments/novel', form) as { attachment_token: string }
+      const fileKey = `${file.name}:${file.size}:${file.lastModified}`
+      let attachmentToken = pendingAttachment?.fileKey === fileKey ? pendingAttachment.token : ''
+      if (!attachmentToken) {
+        const form = new FormData()
+        form.append('file', file)
+        const attachment = await api.upload('/attachments/novel', form) as { attachment_token: string }
+        attachmentToken = attachment.attachment_token
+        setPendingAttachment({ fileKey, token: attachmentToken })
+      }
+      setImportStage('creating')
       const res = await api.post('/projects/import', {
-        attachment_token: attachment.attachment_token,
-        name: name || file.name.replace(/\.txt$/i, ''),
+        attachment_token: attachmentToken,
+        name: projectName,
       })
-      const bootstrapMessage = res.asset_generation?.status === 'running' && res.episode_planning?.status === 'running'
-        ? '；正在自动分集，并生成人物谱和多视角素材'
-        : '；部分自动任务未能启动，请进入项目查看并重试'
-      toast(`《${name || file.name}》已摄入：${res.ingestion.chapter_count} 章，${res.ingestion.total_chars} 字${res.ingestion.auto_split ? '（未识别到章节标题，已按字数切分）' : ''}${bootstrapMessage}`)
+      const planningRunning = res.episode_planning?.status === 'running'
+      const assetStatus = res.asset_generation?.status
+      const bootstrapMessage = planningRunning && assetStatus === 'running'
+        ? '；自动分集、人物谱和素材准备已启动'
+        : planningRunning && assetStatus === 'awaiting_confirmation'
+          ? '；自动分集已启动，人物谱与定妆将在确认费用后继续'
+          : '；部分后台准备未能启动，原文和项目已保留，请进入项目重试'
+      toast(`《${projectName}》导入完成：${res.ingestion.chapter_count} 章，${res.ingestion.total_chars} 字${res.ingestion.auto_split ? '（未识别到章节标题，已按字数切分）' : ''}${bootstrapMessage}`)
       setName('')
+      setSelectedFile(null)
+      setPendingAttachment(null)
+      setImportError(null)
+      setImportStage('idle')
       setShowImport(false)
-      refresh()
+      void refresh()
       go('bible', res.project_id, null)
     } catch (e: unknown) {
-      toast(`摄入失败：${(e as Error).message}`, true)
-    } finally {
-      setUploading(false)
+      const message = (e as Error).message
+      if (message.includes('附件凭证') && (message.includes('过期') || message.includes('不存在'))) {
+        setPendingAttachment(null)
+      }
+      setImportStage('error')
+      setImportError(message)
+      toast(`导入未完成：${message}`, true)
     }
   }
 
-  async function remove(p: Project, ev: React.MouseEvent) {
-    ev.stopPropagation()
-    if (!window.confirm(`确定删除《${p.name}》？将删除全部章节、剧集、分镜与已生成视频，不可恢复。`)) return
+  async function remove(p: Project) {
+    setDeleting(true)
     try {
       await api.del(`/projects/${p.id}`)
       toast(`已删除《${p.name}》`)
+      setDeleteTarget(null)
+      window.requestAnimationFrame(() => {
+        importTriggerRef.current?.focus()
+      })
       refresh()
-    } catch (e: unknown) { toast((e as Error).message, true) }
+    } catch (e: unknown) {
+      toast((e as Error).message, true)
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  function closeDeleteDialog() {
+    setDeleteTarget(null)
+    window.requestAnimationFrame(() => {
+      const trigger = deleteTriggerRef.current
+      if (trigger?.isConnected) trigger.focus()
+      else importTriggerRef.current?.focus()
+    })
   }
 
   return (
@@ -58,53 +145,167 @@ export default function Studio() {
         <div className="crumb">漫剧案头 / 项目中心</div>
         <div className="page-title-row">
           <h1>项目中心 <span className="sub">从原著到成片，继续你的制作进度</span></h1>
-          <button className="btn primary" type="button" onClick={() => setShowImport(value => !value)}>
-            {showImport ? '收起导入' : '＋ 导入小说'}
-          </button>
+          {!emptyProjectList && (
+            <button
+              ref={importTriggerRef}
+              className="btn primary"
+              type="button"
+              aria-expanded={importVisible}
+              aria-controls={importPanelId}
+              disabled={uploading}
+              aria-label={uploading
+                ? '导入小说，暂不可用：小说正在导入，请等待完成'
+                : importVisible ? '收起小说导入区' : '展开小说导入区'}
+              title={uploading ? '小说正在导入，请等待完成' : undefined}
+              onClick={() => setShowImport(value => !value)}
+            >
+              {importVisible ? '收起导入' : '＋ 导入小说'}
+            </button>
+          )}
         </div>
         <hr className="rule" />
       </header>
 
-      {(showImport || !projects?.length) && <section className="card import-panel">
+      {importVisible && <section id={importPanelId} className="card import-panel" aria-busy={uploading || undefined}>
         <div className="section-heading">
-          <div><span className="eyebrow">NEW PROJECT</span><h3>导入一部小说</h3></div>
-          <span className="hint">支持 TXT，自动识别编码并切分章节</span>
+          <div><span className="eyebrow">新项目</span><h3>导入一部小说</h3></div>
+          <span className="hint">仅支持非空 TXT · 自动识别 UTF-8、GB18030 和 Big5</span>
         </div>
         <div className="import-grid">
           <div>
-            <label className="f">书名（留空则取文件名）</label>
-            <input type="text" value={name} onChange={e => setName(e.target.value)} placeholder="例如：凡人修仙传" />
+            <label className="f" htmlFor={projectNameId}>书名（留空则取文件名）</label>
+            <input
+              id={projectNameId}
+              type="text"
+              value={name}
+              maxLength={120}
+              disabled={uploading}
+              aria-describedby={importHelpId}
+              onChange={e => setName(e.target.value)}
+              placeholder="例如：凡人修仙传"
+            />
           </div>
-          <div
+          <button
+            type="button"
             className={`upload-zone ${drag ? 'drag' : ''}`}
+            disabled={uploading}
+            aria-busy={uploading || undefined}
+            aria-label={uploading
+              ? `选择 TXT 文件，暂不可用：${importStage === 'uploading' ? '正在上传文件' : '正在创建项目'}`
+              : '选择一份 TXT 小说文件，或拖放到此处'}
+            aria-describedby={importHelpId}
             onClick={() => fileRef.current?.click()}
             onDragOver={e => { e.preventDefault(); setDrag(true) }}
             onDragLeave={() => setDrag(false)}
-            onDrop={e => { e.preventDefault(); setDrag(false); const f = e.dataTransfer.files[0]; if (f) submit(f) }}
+            onDrop={e => {
+              e.preventDefault()
+              setDrag(false)
+              selectFiles(e.dataTransfer.files)
+            }}
           >
-            <b>{uploading ? '正在导入并切分章节…' : '选择 TXT 文件'}</b>
-            <span>{uploading ? '请保持页面开启' : '或将文件拖到这里'}</span>
-          </div>
+            <b>{importStage === 'uploading' ? '正在上传 TXT…' : importStage === 'creating' ? '正在创建项目…' : '选择 TXT 文件'}</b>
+            <span>{uploading ? '请保持页面开启，不要重复提交' : '或将一份文件拖到这里'}</span>
+          </button>
         </div>
-        <input ref={fileRef} type="file" accept=".txt" hidden
-          onChange={e => { const f = e.target.files?.[0]; if (f) submit(f); e.target.value = '' }} />
+        <p id={importHelpId} className="import-guidance">
+          选择文件只会在本页预览；确认后才上传并创建项目。现有项目不会被覆盖。
+        </p>
+        {(selectedFile || importError) && (
+          <div
+            className={`import-file-state ${importStage === 'error' ? 'error' : 'working'}`}
+            role={importStage === 'error' ? 'alert' : 'status'}
+            aria-live="polite"
+          >
+            <div className="import-file-copy">
+              <b>
+                {importStage === 'uploading'
+                  ? '正在上传文件'
+                  : importStage === 'creating'
+                    ? '正在切分章节并创建项目'
+                    : importStage === 'selected'
+                      ? '已选择，等待确认'
+                      : '导入未完成'}
+              </b>
+              {selectedFile && <span>{selectedFile.name} · {formatFileSize(selectedFile.size)}</span>}
+              {importStage === 'selected' && selectedFile && (
+                <p className="import-impact">
+                  将创建《{name.trim() || selectedFile.name.replace(/\.txt$/i, '')}》；导入后自动启动分集规划、
+                  人物谱和素材准备，可能产生模型费用。
+                </p>
+              )}
+              {importError && (
+                <details>
+                  <summary>查看错误详情</summary>
+                  <pre>{importError}</pre>
+                </details>
+              )}
+            </div>
+            {importStage === 'selected' && selectedFile && (
+              <div className="import-file-actions">
+                <button className="btn primary small" type="button" onClick={() => { void submit(selectedFile) }}>
+                  确认导入并启动后台准备
+                </button>
+                <button className="btn small" type="button" onClick={() => fileRef.current?.click()}>
+                  选择其他文件
+                </button>
+              </div>
+            )}
+            {importStage === 'error' && (
+              <div className="import-file-actions">
+                {selectedFile && (
+                  <button className="btn primary small" type="button" onClick={() => { void submit(selectedFile) }}>
+                    重试导入这份文件
+                  </button>
+                )}
+                <button className="btn small" type="button" onClick={() => fileRef.current?.click()}>
+                  选择其他文件
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".txt,text/plain"
+          disabled={uploading}
+          hidden
+          onChange={e => {
+            selectFiles(e.target.files)
+            e.target.value = ''
+          }}
+        />
       </section>}
 
-      {!projects?.length ? (
-        <div className="empty"><div className="big">卷</div>书房尚空<br />上传第一本小说开始</div>
-      ) : (
+      <QueryState
+        loading={loading}
+        error={error}
+        hasData={Boolean(projects?.length)}
+        objectName="项目"
+        emptyText="书房尚空。请在上方导入区选择一份 TXT，创建第一个项目。"
+        onRetry={refresh}
+      >
+        {projects?.length ? (
         <section className="project-section">
           <div className="section-heading">
-            <div><span className="eyebrow">YOUR PROJECTS</span><h2>正在制作</h2></div>
+            <div><span className="eyebrow">我的项目</span><h2>正在制作</h2></div>
             <span className="hint">{projects.length} 个项目</span>
           </div>
           <div className="shelf">
             {projects.map(p => {
-              const [label, color] = STATUS_LABEL[p.status] ?? [p.status, 'grey']
+              const knownStatus = STATUS_LABEL[p.status]
+              const [label, color] = knownStatus ?? ['项目状态待确认', 'grey']
               const failed = p.bible_status === 'failed' || p.plan_status === 'failed'
+              const entry = projectEntry(p)
               return (
                 <article key={p.id} className="volume">
-                  <button className="volume-open" type="button" onClick={() => go('bible', p.id, null)}>
+                  <button
+                    className="volume-open"
+                    type="button"
+                    title={`${entry.label}：${p.name}`}
+                    aria-label={`${entry.label}《${p.name}》；${p.chapter_count} 章，${p.episode_count} 集`}
+                    onClick={() => go(entry.view, p.id, null)}
+                  >
                     <div className="volume-cover" aria-hidden="true"><span>漫</span></div>
                     <div className="volume-content">
                       <div className="v-title">{p.name}</div>
@@ -114,20 +315,77 @@ export default function Studio() {
                         <span className={p.plan_status === 'ready' ? 'done' : ''}>分集</span><i /><span>成片</span>
                       </div>
                     </div>
-                    <span className="project-enter">继续制作 →</span>
+                    <span className="project-enter">{entry.label} →</span>
                   </button>
                   <div className="v-foot">
-                    <span className={`stamp ${failed ? 'red' : color}`}>{failed ? '需要处理' : label}</span>
+                    <span
+                      className={`stamp ${failed ? 'red' : color}`}
+                      title={!failed && !knownStatus ? '项目状态待确认，请进入项目查看' : undefined}
+                    >
+                      {failed ? '需要处理' : label}
+                    </span>
                     {p.bible_status === 'running' && <span className="stamp gold">人物谱生成中</span>}
                     {p.plan_status === 'running' && <span className="stamp gold">分集生成中</span>}
-                    <button className="project-delete" type="button" onClick={e => remove(p, e)} aria-label={`删除${p.name}`}>删除项目</button>
+                    <button className="project-delete" type="button" onClick={event => {
+                      deleteTriggerRef.current = event.currentTarget
+                      setDeleteTarget(p)
+                    }} aria-label={`永久删除项目《${p.name}》`}>删除项目</button>
                   </div>
                 </article>
               )
             })}
           </div>
         </section>
+        ) : null}
+      </QueryState>
+      {deleteTarget && (
+        <ProjectDeleteDialog
+          project={deleteTarget}
+          deleting={deleting}
+          onClose={closeDeleteDialog}
+          onConfirm={() => { void remove(deleteTarget) }}
+        />
       )}
     </>
+  )
+}
+
+function ProjectDeleteDialog({
+  project,
+  deleting,
+  onClose,
+  onConfirm,
+}: {
+  project: Project
+  deleting: boolean
+  onClose: () => void
+  onConfirm: () => void
+}) {
+  const trapRef = useFocusTrap(true, onClose)
+  return (
+    <div className="evidence-backdrop" role="presentation" onMouseDown={event => {
+      if (event.currentTarget === event.target && !deleting) onClose()
+    }}>
+      <section ref={trapRef} className="impact-dialog project-delete-dialog" role="dialog" aria-modal="true"
+        aria-labelledby="project-delete-title">
+        <h3 id="project-delete-title">删除《{project.name}》？</h3>
+        <p className="error-banner">此操作不可恢复。</p>
+        <dl>
+          <div><dt>原著</dt><dd>{project.chapter_count} 章 · {(project.novel_chars / 10000).toFixed(1)} 万字</dd></div>
+          <div><dt>分集</dt><dd>{project.episode_count} 集</dd></div>
+          <div><dt>同时删除</dt><dd>人物谱、场景、剧本、分镜、参考图、视频与交付记录</dd></div>
+        </dl>
+        <div className="dialog-actions">
+          <button className="btn" type="button" disabled={deleting}
+            aria-label={deleting ? '保留项目，暂不可用：正在删除项目' : '保留项目，不执行删除'}
+            onClick={onClose}>保留项目</button>
+          <button className="btn danger" type="button" disabled={deleting}
+            aria-label={deleting ? '确认永久删除，暂不可用：删除请求正在处理' : `确认永久删除项目《${project.name}》`}
+            onClick={onConfirm}>
+            {deleting ? '删除中…' : '确认永久删除'}
+          </button>
+        </div>
+      </section>
+    </div>
   )
 }

@@ -100,10 +100,11 @@ def test_init_db_backfills_legacy_portrait_and_scene_views(tmp_path, monkeypatch
     migrated.close()
 
 
-def test_default_reference_decision_is_single_keyframe() -> None:
+def test_default_reference_decision_reserves_at_most_two_timeline_keyframes() -> None:
     decision = default_reference_decision()
-    assert decision.referenceImagePlan.generateNewCount == 1
-    assert decision.referenceImagePlan.types == ["plot_key_frame"]
+    assert decision.referenceImagePlan.totalCount == 2
+    assert decision.referenceImagePlan.generateNewCount == 2
+    assert decision.referenceImagePlan.types == ["plot_key_frame"] * 2
 
 
 def test_pack_keeps_required_keyframe_over_high_score_character() -> None:
@@ -213,8 +214,11 @@ def test_keyframe_gate_and_weighted_overall() -> None:
     qa = {**scores, "overall": overall, "hard_failures": [], "status": "scored"}
     assert keyframe_gate_passed(qa) is True
     bad = {**qa, "overall": None, "status": "unverified", "hard_failures": ["watermark"]}
-    # Score-only：未评分/低分不再阻断关键帧作为视频输入。
+    # 普通分数/水印不阻断；明确结构硬伤必须阻断。
     assert keyframe_gate_passed(bad) is True
+    assert keyframe_gate_passed({
+        **qa, "overall": 0.99, "hard_failures": ["relative_scale_mismatch"],
+    }) is False
 
 
 def test_normalize_appearance_change_blocks_identity_by_default() -> None:
@@ -496,7 +500,18 @@ def test_failed_character_view_redo_preserves_ready_pack(tmp_path, monkeypatch) 
     conn = db.get_conn()
     conn.execute(
         "INSERT INTO projects(id, name, status, bible_json, created_at) VALUES(?,?,?,?,?)",
-        ("proj", "P", "created", json.dumps({"world": {"visual_style_canonical": "anime"}}), 1),
+        (
+            "proj", "P", "created",
+            json.dumps({
+                "world": {"visual_style_canonical": "anime"},
+                "characters": [{
+                    "name": "A",
+                    "appearance_canonical": "black hair",
+                    "portrait_prompt_override": "latest silver hair and red armor",
+                }],
+            }),
+            1,
+        ),
     )
     old_paths = {}
     for role in CHARACTER_REQUIRED_VIEWS:
@@ -520,10 +535,15 @@ def test_failed_character_view_redo_preserves_ready_pack(tmp_path, monkeypatch) 
         )
     conn.commit()
 
-    async def fake_generate(*_args, **_kwargs):
+    generated_prompts = []
+    review_anchors = []
+
+    async def fake_generate(prompt, **_kwargs):
+        generated_prompts.append(prompt)
         return {"b64_json": base64.b64encode(b"candidate").decode()}
 
-    async def reject_view(*_args, **_kwargs):
+    async def reject_view(_path, anchor, _view_role):
+        review_anchors.append(anchor)
         return {"overall": 0.2, "status": "failed", "issues": ["face drift"]}
 
     monkeypatch.setattr(mv, "_generate_image", fake_generate)
@@ -544,6 +564,9 @@ def test_failed_character_view_redo_preserves_ready_pack(tmp_path, monkeypatch) 
     assert Path(current["image_path"]).read_bytes() == b"candidate"
     assert current["status"] == "ready"
     assert current["input_fingerprint"] != "old-profile"
+    assert "latest silver hair and red armor" in generated_prompts[0]
+    assert "black hair" not in generated_prompts[0]
+    assert review_anchors == ["latest silver hair and red armor"]
     qa = json.loads(current["qa_json"])
     assert qa["overall"] == 0.2
     assert qa["runtime_blocking"] is False

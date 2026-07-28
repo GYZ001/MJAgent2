@@ -2,6 +2,7 @@ import json
 import sqlite3
 
 from app.refs import _merge_generated_portraits, portrait_prompt
+from app.multiview import character_view_prompt
 from app.schemas import Character
 
 
@@ -26,6 +27,21 @@ def test_ordinary_portrait_prompt_keeps_standard_model_sheet_pose() -> None:
     assert "鞋底均不得贴边或出画" in prompt
     assert "8% 安全边距" in prompt
     assert "禁止额外火焰、斗气光环" in prompt
+
+
+def test_multiview_prompt_uses_latest_edited_portrait_prompt() -> None:
+    prompt = character_view_prompt(
+        "旧画风",
+        "旧外观锚点",
+        "three_quarter",
+        "用户最新定妆提示词：银发少女，红色机甲，赛博写实风",
+    )
+
+    assert "用户最新定妆提示词：银发少女，红色机甲，赛博写实风" in prompt
+    assert "旧画风" not in prompt
+    assert "旧外观锚点" not in prompt
+    assert "3/4" in prompt
+    assert "视角与构图要求覆盖源提示词" in prompt
 
 
 def test_portrait_completion_merges_without_erasing_concurrent_scenes() -> None:

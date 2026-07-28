@@ -1,30 +1,36 @@
 import {
+  lazy,
+  Suspense,
   createContext,
   useCallback,
   useContext,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
 } from "react";
 import { api, Episode, Project } from "./api";
 import Studio from "./pages/Studio";
-import BiblePage from "./pages/BiblePage";
-import ScenesPage from "./pages/ScenesPage";
-import EpisodesPage from "./pages/EpisodesPage";
-import ScriptPage from "./pages/ScriptPage";
-import BoardPage from "./pages/BoardPage";
-import WallPage from "./pages/WallPage";
-import CinemaPage from "./pages/CinemaPage";
-import MonitorPage from "./pages/MonitorPage";
-import ReaderPage from "./pages/ReaderPage";
 import AgentDrawer from "./agent/AgentDrawer";
 import type { ContextEnvelope } from "./agent/types";
 import CapabilityApprovalHost from "./components/CapabilityApprovalHost";
+import DecisionDialog from "./components/DecisionDialog";
 import EpisodeCrumb from "./components/EpisodeCrumb";
+import { useFocusTrap } from "./hooks/useFocusTrap";
 import { useScrollContainment } from "./useScrollContainment";
 import { AdaptivePoller, type PollInterval } from "./adaptivePoller";
-import { resolveEpisodeId } from "./episodePicker";
+import { resolveEpisodeId, resolveRoutedEpisodeId } from "./episodePicker";
+
+const BiblePage = lazy(() => import("./pages/BiblePage"));
+const ScenesPage = lazy(() => import("./pages/ScenesPage"));
+const EpisodesPage = lazy(() => import("./pages/EpisodesPage"));
+const ScriptPage = lazy(() => import("./pages/ScriptPage"));
+const BoardPage = lazy(() => import("./pages/BoardPage"));
+const WallPage = lazy(() => import("./pages/WallPage"));
+const CinemaPage = lazy(() => import("./pages/CinemaPage"));
+const MonitorPage = lazy(() => import("./pages/MonitorPage"));
+const ReaderPage = lazy(() => import("./pages/ReaderPage"));
 
 export type View =
   | "studio"
@@ -38,6 +44,18 @@ export type View =
   | "monitor"
   | "reader";
 
+export interface NavigationGuardPrompt {
+  title: string;
+  summary: string;
+  message: string;
+  details?: string[];
+  confirmLabel: string;
+  cancelLabel?: string;
+  danger?: boolean;
+  onConfirm?: () => void;
+  onCancel?: () => void;
+}
+
 interface Nav {
   view: View;
   projectId: string | null;
@@ -49,11 +67,23 @@ interface Nav {
     episodeId?: string | null,
     chapterIdx?: number | null,
   ) => void;
+  requestNavigation: (target: string, commit: () => void) => void;
   toast: (msg: string, isErr?: boolean) => void;
   registerNavigationGuard: (
-    guard: (() => boolean) | null,
+    guard: NavigationGuardPrompt | null,
     unsaved?: boolean,
   ) => void;
+}
+
+interface PendingNavigation {
+  view: View;
+  projectId: string | null;
+  episodeId: string | null;
+  chapterIdx: number | null;
+  target: string;
+  historyAction: "push" | "replace";
+  prompt: NavigationGuardPrompt;
+  commit?: () => void;
 }
 
 const NavCtx = createContext<Nav>(null as unknown as Nav);
@@ -93,8 +123,8 @@ const SECTIONS: {
   },
   {
     key: "wall",
-    label: "评审墙",
-    icon: "审",
+    label: "生成台",
+    icon: "生",
     group: "质量交付",
     needEpisode: true,
   },
@@ -111,11 +141,11 @@ const SECTIONS: {
 const decodePart = (value?: string) =>
   value ? decodeURIComponent(value) : null;
 
-function readLocation(): Pick<
+export function routeFromPath(pathname: string): Pick<
   Nav,
   "view" | "projectId" | "episodeId" | "chapterIdx"
 > {
-  const parts = window.location.pathname.split("/").filter(Boolean);
+  const parts = pathname.split("/").filter(Boolean);
   if (parts[0] === "monitor")
     return {
       view: "monitor",
@@ -150,6 +180,19 @@ function readLocation(): Pick<
         : "script";
     return { view, projectId, episodeId, chapterIdx: null };
   }
+  if (
+    parts[2] === "script" ||
+    parts[2] === "board" ||
+    parts[2] === "wall" ||
+    parts[2] === "cinema"
+  ) {
+    return {
+      view: parts[2],
+      projectId,
+      episodeId: null,
+      chapterIdx: null,
+    };
+  }
   const view: View =
     parts[2] === "scenes" || parts[2] === "episodes" || parts[2] === "bible"
       ? parts[2]
@@ -157,7 +200,11 @@ function readLocation(): Pick<
   return { view, projectId, episodeId: null, chapterIdx: null };
 }
 
-function locationFor(
+function readLocation() {
+  return routeFromPath(window.location.pathname);
+}
+
+export function locationFor(
   view: View,
   projectId: string | null,
   episodeId: string | null,
@@ -176,7 +223,7 @@ function locationFor(
   ) {
     return episodeId
       ? `${project}/episodes/${encodeURIComponent(episodeId)}/${view}`
-      : `${project}/episodes`;
+      : `${project}/${view}`;
   }
   return `${project}/${view}`;
 }
@@ -196,12 +243,45 @@ export default function App() {
   const [spineCollapsed, setSpineCollapsed] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [unsavedDraft, setUnsavedDraft] = useState(false);
-  const navigationGuardRef = useRef<(() => boolean) | null>(null);
+  const [pendingNavigation, setPendingNavigation] =
+    useState<PendingNavigation | null>(null);
+  const navigationGuardRef = useRef<NavigationGuardPrompt | null>(null);
+  const lastLocationRef = useRef(
+    `${window.location.pathname}${window.location.search}`,
+  );
   const [agentOpen, setAgentOpen] = useState(false);
   const [agentEnabled, setAgentEnabled] = useState(true);
+  const agentToggleRef = useRef<HTMLButtonElement | null>(null);
+  const restoreAgentFocusRef = useRef(false);
   const toastTimerRef = useRef<number>();
   const spineRef = useRef<HTMLElement | null>(null);
+  const closeMobileNav = useCallback(() => setMobileNavOpen(false), []);
+  const mobileNavTrapRef = useFocusTrap(mobileNavOpen, closeMobileNav);
+  const bindSpineRef = useCallback(
+    (node: HTMLElement | null) => {
+      spineRef.current = node;
+      mobileNavTrapRef.current = node;
+    },
+    [mobileNavTrapRef],
+  );
   useScrollContainment(spineRef, true);
+
+  useEffect(() => {
+    const mobile = window.matchMedia("(max-width: 720px)");
+    const closeOnDesktop = (event: MediaQueryListEvent) => {
+      if (!event.matches) closeMobileNav();
+    };
+    mobile.addEventListener("change", closeOnDesktop);
+    return () => mobile.removeEventListener("change", closeOnDesktop);
+  }, [closeMobileNav]);
+
+  useEffect(() => {
+    const syncLocation = () => {
+      lastLocationRef.current = `${window.location.pathname}${window.location.search}`;
+    };
+    window.addEventListener("manju:locationchange", syncLocation);
+    return () => window.removeEventListener("manju:locationchange", syncLocation);
+  }, []);
 
   useEffect(() => {
     api
@@ -225,12 +305,23 @@ export default function App() {
   }, []);
 
   const registerNavigationGuard = useCallback(
-    (guard: (() => boolean) | null, unsaved = false) => {
+    (guard: NavigationGuardPrompt | null, unsaved = false) => {
       navigationGuardRef.current = guard;
       setUnsavedDraft(unsaved);
     },
     [],
   );
+
+  const closeAgent = useCallback(() => {
+    restoreAgentFocusRef.current = true;
+    setAgentOpen(false);
+  }, []);
+
+  useEffect(() => {
+    if (agentOpen || !restoreAgentFocusRef.current) return;
+    restoreAgentFocusRef.current = false;
+    agentToggleRef.current?.focus();
+  }, [agentOpen]);
 
   const go = useCallback(
     (
@@ -239,23 +330,45 @@ export default function App() {
       eid?: string | null,
       cidx?: number | null,
     ) => {
-      const nextProjectId = pid === undefined ? projectId : pid;
-      const nextEpisodeId = eid === undefined ? episodeId : eid;
-      const nextChapterIdx = cidx === undefined ? chapterIdx : cidx;
+      const globalView = v === "studio" || v === "monitor";
+      const nextProjectId = globalView
+        ? null
+        : pid === undefined
+          ? projectId
+          : pid;
+      const nextEpisodeId = globalView
+        ? null
+        : eid === undefined
+          ? episodeId
+          : eid;
+      const nextChapterIdx = globalView
+        ? null
+        : cidx === undefined
+          ? chapterIdx
+          : cidx;
       const target = locationFor(
         v,
         nextProjectId,
         nextEpisodeId,
         nextChapterIdx,
       );
-      if (
-        `${window.location.pathname}${window.location.search}` !== target &&
-        navigationGuardRef.current &&
-        !navigationGuardRef.current()
-      )
+      const currentLocation = `${window.location.pathname}${window.location.search}`;
+      if (currentLocation !== target && navigationGuardRef.current) {
+        setPendingNavigation({
+          view: v,
+          projectId: nextProjectId,
+          episodeId: nextEpisodeId,
+          chapterIdx: nextChapterIdx,
+          target,
+          historyAction: "push",
+          prompt: navigationGuardRef.current,
+        });
+        setMobileNavOpen(false);
         return;
-      if (`${window.location.pathname}${window.location.search}` !== target) {
+      }
+      if (currentLocation !== target) {
         window.history.pushState({}, "", target);
+        lastLocationRef.current = target;
       }
       setProjectId(nextProjectId);
       setEpisodeId(nextEpisodeId);
@@ -267,17 +380,78 @@ export default function App() {
     [chapterIdx, episodeId, projectId],
   );
 
-  useEffect(() => {
-    const onPopState = () => {
-      if (navigationGuardRef.current && !navigationGuardRef.current()) {
-        window.history.pushState(
-          {},
-          "",
-          locationFor(view, projectId, episodeId, chapterIdx),
-        );
+  const requestNavigation = useCallback(
+    (target: string, commit: () => void) => {
+      const currentLocation = `${window.location.pathname}${window.location.search}`;
+      if (currentLocation !== target && navigationGuardRef.current) {
+        setPendingNavigation({
+          view,
+          projectId,
+          episodeId,
+          chapterIdx,
+          target,
+          historyAction: "push",
+          prompt: navigationGuardRef.current,
+          commit,
+        });
+        setMobileNavOpen(false);
         return;
       }
+      commit();
+    },
+    [chapterIdx, episodeId, projectId, view],
+  );
+
+  const cancelPendingNavigation = () => {
+    pendingNavigation?.prompt.onCancel?.();
+    setPendingNavigation(null);
+  };
+
+  const confirmPendingNavigation = () => {
+    if (!pendingNavigation) return;
+    const next = pendingNavigation;
+    next.prompt.onConfirm?.();
+    navigationGuardRef.current = null;
+    setUnsavedDraft(false);
+    if (next.commit) {
+      setPendingNavigation(null);
+      next.commit();
+      return;
+    }
+    window.history[next.historyAction === "replace" ? "replaceState" : "pushState"](
+      {},
+      "",
+      next.target,
+    );
+    lastLocationRef.current = next.target;
+    if (next.historyAction === "replace") {
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    }
+    setView(next.view);
+    setProjectId(next.projectId);
+    setEpisodeId(next.episodeId);
+    setChapterIdx(next.chapterIdx);
+    setPendingNavigation(null);
+    setMobileNavOpen(false);
+    window.scrollTo({ top: 0, behavior: "auto" });
+  };
+
+  useEffect(() => {
+    const onPopState = () => {
+      const attemptedTarget = `${window.location.pathname}${window.location.search}`;
       const next = readLocation();
+      if (navigationGuardRef.current) {
+        window.history.pushState({}, "", lastLocationRef.current);
+        setPendingNavigation({
+          ...next,
+          target: attemptedTarget,
+          historyAction: "replace",
+          prompt: navigationGuardRef.current,
+        });
+        setMobileNavOpen(false);
+        return;
+      }
+      lastLocationRef.current = attemptedTarget;
       setView(next.view);
       setProjectId(next.projectId);
       setEpisodeId(next.episodeId);
@@ -285,8 +459,8 @@ export default function App() {
       setMobileNavOpen(false);
       window.scrollTo({ top: 0, behavior: "auto" });
     };
-    window.addEventListener("popstate", onPopState);
-    return () => window.removeEventListener("popstate", onPopState);
+    window.addEventListener("popstate", onPopState, { capture: true });
+    return () => window.removeEventListener("popstate", onPopState, { capture: true });
   }, [chapterIdx, episodeId, projectId, view]);
 
   useEffect(() => {
@@ -309,17 +483,18 @@ export default function App() {
       setEpisodeId(null);
       return;
     }
+    const location = readLocation();
+    const requestedEpisodeId =
+      location.projectId === projectId ? location.episodeId : null;
     let cancelled = false;
     api
       .get(`/projects/${projectId}?view=picker`)
       .then((project: Project) => {
         if (cancelled) return;
         const episodes = project.episodes ?? [];
-        if (!episodes.length) {
-          setEpisodeId(null);
-          return;
-        }
-        setEpisodeId((current) => resolveEpisodeId(episodes, current));
+        setEpisodeId((current) =>
+          resolveRoutedEpisodeId(episodes, current, requestedEpisodeId),
+        );
       })
       .catch(() => {
         // 临时请求失败不能等同于“项目没有分集”。保留当前选择，侧栏进入工作台时会重试。
@@ -335,6 +510,7 @@ export default function App() {
     episodeId,
     chapterIdx,
     go,
+    requestNavigation,
     toast,
     registerNavigationGuard,
   };
@@ -361,8 +537,8 @@ export default function App() {
       )) as Project;
       const nextEpisodeId = resolveEpisodeId(project.episodes ?? [], episodeId);
       go(s.key, projectId, nextEpisodeId);
-    } catch (error) {
-      toast(`读取分集失败：${String((error as Error).message || error)}`, true);
+    } catch {
+      toast("分集列表加载失败，已打开工作台入口；可点击顶部的分集切换器重试", true);
       go(s.key);
     }
   };
@@ -379,7 +555,9 @@ export default function App() {
       <button
         className="mobile-nav-trigger"
         type="button"
-        aria-label="打开导航"
+        aria-label="打开主菜单"
+        aria-expanded={mobileNavOpen}
+        aria-controls="main-navigation"
         onClick={() => setMobileNavOpen(true)}
       >
         ☰
@@ -389,18 +567,23 @@ export default function App() {
           className="mobile-nav-backdrop"
           type="button"
           aria-label="点击空白处关闭导航"
-          onClick={() => setMobileNavOpen(false)}
+          onClick={closeMobileNav}
         />
       )}
       <aside
-        ref={spineRef}
+        id="main-navigation"
+        ref={bindSpineRef}
         className={`spine ${spineCollapsed ? "collapsed" : ""} ${mobileNavOpen ? "mobile-open" : ""}`}
+        role={mobileNavOpen ? "dialog" : undefined}
+        aria-modal={mobileNavOpen || undefined}
+        aria-label="主导航"
       >
         <div className="spine-top">
           <button
             className="seal"
             type="button"
-            aria-label={spineCollapsed ? "展开菜单栏" : "隐藏菜单栏"}
+            aria-label={spineCollapsed ? "展开侧栏" : "收起侧栏"}
+            title={spineCollapsed ? "展开侧栏" : "收起侧栏"}
             aria-expanded={!spineCollapsed}
             onClick={() => setSpineCollapsed((v) => !v)}
           >
@@ -408,18 +591,18 @@ export default function App() {
           </button>
           <div className="brand-copy">
             <b>漫剧案头</b>
-            <span>AI PRODUCTION</span>
+            <span>智能制作</span>
           </div>
           <button
             className="spine-close"
             type="button"
             aria-label="关闭导航"
-            onClick={() => setMobileNavOpen(false)}
+            onClick={closeMobileNav}
           >
             ×
           </button>
         </div>
-        <nav>
+        <nav aria-label="工作台">
           {Object.entries(groupedSections).map(([group, sections]) => (
             <div className="spine-group" key={group}>
               <div className="spine-group-label">{group}</div>
@@ -430,11 +613,14 @@ export default function App() {
                 return (
                   <button
                     key={s.key}
+                    type="button"
                     className={`spine-item ${active ? "active" : ""}`}
+                    aria-label={s.label}
+                    aria-current={active ? "page" : undefined}
                     onClick={() => {
                       void openSection(s);
                     }}
-                    title={spineCollapsed ? s.label : undefined}
+                    title={s.label}
                   >
                     <span className="spine-icon" aria-hidden="true">
                       {s.icon}
@@ -446,9 +632,16 @@ export default function App() {
             </div>
           ))}
         </nav>
-        <div className="spine-foot">MANJU STUDIO · 2.0</div>
+        <div className="spine-foot">漫剧案头 · 2.0</div>
       </aside>
       <main className={`desk ${view === "board" ? "board-desk" : ""}`}>
+        <Suspense
+          fallback={
+            <div className="empty route-loading" role="status">
+              正在打开工作台…
+            </div>
+          }
+        >
         {view === "studio" && <Studio />}
         {view === "bible" && projectId && <BiblePage key={projectId} />}
         {view === "scenes" && projectId && <ScenesPage key={projectId} />}
@@ -470,7 +663,7 @@ export default function App() {
           (episodeId ? (
             <WallPage key={episodeId} />
           ) : (
-            <WorkspaceEmpty label="评审墙" view="wall" />
+            <WorkspaceEmpty label="生成台" view="wall" />
           ))}
         {view === "cinema" &&
           (episodeId ? (
@@ -479,9 +672,11 @@ export default function App() {
             <WorkspaceEmpty label="成片台" view="cinema" />
           ))}
         {view === "monitor" && <MonitorPage />}
+        </Suspense>
       </main>
       {agentEnabled && !agentOpen && (
         <button
+          ref={agentToggleRef}
           type="button"
           className="agent-toggle"
           aria-label="打开案头助手"
@@ -519,8 +714,21 @@ export default function App() {
       {agentEnabled && (
         <AgentDrawer
           open={agentOpen}
-          onClose={() => setAgentOpen(false)}
+          onClose={closeAgent}
           context={agentContext}
+        />
+      )}
+      {pendingNavigation && (
+        <DecisionDialog
+          title={pendingNavigation.prompt.title}
+          summary={pendingNavigation.prompt.summary}
+          message={pendingNavigation.prompt.message}
+          details={pendingNavigation.prompt.details}
+          confirmLabel={pendingNavigation.prompt.confirmLabel}
+          cancelLabel={pendingNavigation.prompt.cancelLabel || "继续编辑"}
+          danger={pendingNavigation.prompt.danger}
+          onConfirm={confirmPendingNavigation}
+          onClose={cancelPendingNavigation}
         />
       )}
       <CapabilityApprovalHost />
@@ -534,20 +742,40 @@ export default function App() {
 }
 
 function WorkspaceEmpty({ label, view }: { label: string; view: View }) {
+  const { projectId, go } = useNav();
+  const titleId = useId();
   return (
     <>
       <header className="desk-head">
         <EpisodeCrumb label={label} view={view} />
         <h1>
-          {label} <span className="sub">当前项目还没有可进入的分集</span>
+          {label} <span className="sub">请选择或创建分集后进入</span>
         </h1>
         <hr className="rule" />
       </header>
-      <div className="empty">
-        <div className="big">集</div>暂无分集
-        <br />
-        可先到分集台生成分集
-      </div>
+      <section className="empty workspace-empty" aria-labelledby={titleId}>
+        <div className="big" aria-hidden="true">集</div>
+        <h2 id={titleId}>尚未进入具体分集</h2>
+        <p>前往分集规划检查并选择已有分集；若项目尚无分集，可在那里创建。</p>
+        <div className="workspace-empty-actions">
+          {projectId && (
+            <button
+              type="button"
+              className="btn primary"
+              onClick={() => go("episodes", projectId, null)}
+            >
+              查看分集并选择
+            </button>
+          )}
+          <button
+            type="button"
+            className="btn"
+            onClick={() => go("studio", null, null)}
+          >
+            返回项目中心
+          </button>
+        </div>
+      </section>
     </>
   );
 }
@@ -635,7 +863,7 @@ const projectBusy = (p: Project | null): boolean => {
 export const useProject = (
   projectId: string,
   intervalMs: PollInterval<Project> = (p) => (projectBusy(p) ? 3000 : 0),
-  view?: "bible" | "scenes" | "episodes" | "picker" | "picker_review",
+  view?: "bible" | "scenes" | "episodes" | "picker" | "picker_generation",
 ) =>
   usePoll<Project>(
     () => api.get(`/projects/${projectId}${view ? `?view=${view}` : ""}`),

@@ -1,4 +1,4 @@
-"""video.* / reference.review Command Handlers（评审墙、镜头版本与参考图画廊）。"""
+"""video.* / reference.review Command Handlers（生成台、镜头版本与参考图画廊）。"""
 from __future__ import annotations
 
 from app.capabilities import inputs as I
@@ -9,7 +9,7 @@ from app.capabilities.schemas import CommandResult
 async def generate_episode(args: I.EpisodeScopedInput) -> CommandResult:
     from app import api
 
-    outcome = await call_guarded(api.generate_episode, args.episode_id, {})
+    outcome = await call_guarded(api._generate_episode_core, args.episode_id, {})
     if isinstance(outcome, CommandResult):
         return outcome
     enqueued = outcome.get("enqueued") or []
@@ -78,9 +78,7 @@ async def generate_shot(args: I.VideoGenerateShotInput) -> CommandResult:
     body = {
         "prompt_override": args.prompt_override,
         "reroll": args.reroll,
-        "with_critique": bool(args.critique),
-        "critique": args.critique,
-        "review_item_ids": args.review_item_ids,
+        "with_critique": args.with_critique,
         "qualification_version": args.qualification_version,
         "idempotency_key": args.idempotency_key,
         "request_id": args.request_id,
@@ -104,6 +102,23 @@ async def stop_shot(args: I.ShotScopedInput) -> CommandResult:
     return succeeded("已停止本镜排队中/运行中的视频任务", data=outcome)
 
 
+async def stop_episode(args: I.EpisodeScopedInput) -> CommandResult:
+    from app import api
+
+    outcome = await call_guarded(api.stop_episode_video, args.episode_id)
+    if isinstance(outcome, CommandResult):
+        return outcome
+    if int(outcome.get("paused_jobs") or 0) == 0:
+        if int(outcome.get("already_paused_jobs") or 0) > 0:
+            return succeeded("整集视频任务已处于暂停状态", data={**outcome, "idempotent": True})
+        return failed(
+            "当前没有可暂停的视频任务",
+            error_code="no_active_video_jobs",
+            data={**outcome, "recovery_action": "如需生成，请在生成台发起新任务"},
+        )
+    return succeeded("已暂停整集视频任务，可继续执行", data=outcome)
+
+
 async def adopt_version(args: I.VideoAdoptVersionInput) -> CommandResult:
     from app import api
 
@@ -116,6 +131,21 @@ async def adopt_version(args: I.VideoAdoptVersionInput) -> CommandResult:
     if isinstance(outcome, CommandResult):
         return outcome
     return succeeded(f"已采用版本 {args.version_id}", data=outcome, resource_uris=[f"manju://shots/{args.shot_id}"])
+
+
+async def cancel_adoption(args: I.ShotScopedInput) -> CommandResult:
+    from app import api
+
+    outcome = await call_guarded(api._cancel_shot_adoption_core, args.shot_id)
+    if isinstance(outcome, CommandResult):
+        return outcome
+    if not outcome.get("previous_adopted_version_id"):
+        return succeeded("本镜当前未采纳任何版本", data={**outcome, "idempotent": True})
+    return succeeded(
+        "已取消本镜采纳，合成时将跳过",
+        data=outcome,
+        resource_uris=[f"manju://shots/{args.shot_id}"],
+    )
 
 
 async def clear_episode(args: I.EpisodeScopedInput) -> CommandResult:
@@ -136,6 +166,33 @@ async def clear_shot(args: I.ShotScopedInput) -> CommandResult:
     return succeeded("已清空本镜的媒体产物", data=outcome)
 
 
+async def clear_episode_videos(args: I.EpisodeScopedInput) -> CommandResult:
+    from app import api
+
+    outcome = await call_guarded(api.clear_episode_videos, args.episode_id)
+    if isinstance(outcome, CommandResult):
+        return outcome
+    return succeeded("已清空本集全部视频，参考图已保留", data=outcome)
+
+
+async def clear_shot_references(args: I.ShotScopedInput) -> CommandResult:
+    from app import api
+
+    outcome = await call_guarded(api.clear_shot_references, args.shot_id)
+    if isinstance(outcome, CommandResult):
+        return outcome
+    return succeeded("已清空本镜参考图，视频已保留", data=outcome)
+
+
+async def clear_shot_videos(args: I.ShotScopedInput) -> CommandResult:
+    from app import api
+
+    outcome = await call_guarded(api.clear_shot_videos, args.shot_id)
+    if isinstance(outcome, CommandResult):
+        return outcome
+    return succeeded("已清空本镜视频，参考图已保留", data=outcome)
+
+
 async def delete_version(args: I.VersionScopedInput) -> CommandResult:
     from app import api
 
@@ -151,7 +208,12 @@ async def resume_episode(args: I.EpisodeScopedInput) -> CommandResult:
     outcome = await call_guarded(api.resume_episode, args.episode_id)
     if isinstance(outcome, CommandResult):
         return outcome
-    return succeeded(f"已恢复 {outcome.get('resumed_jobs', 0)} 个暂停中的视频任务", data=outcome)
+    enqueued = outcome.get("enqueued") or []
+    created = sum(1 for item in enqueued if item.get("job_id"))
+    return succeeded(
+        f"已恢复 {outcome.get('resumed_jobs', 0)} 个暂停任务并补建 {created} 个未完成任务",
+        data=outcome,
+    )
 
 
 async def repair_stale_assets(args: I.VideoRepairStaleAssetsInput) -> CommandResult:

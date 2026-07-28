@@ -198,12 +198,20 @@ def _status_from_rows(shot, *, candidate_count: int, retake_count: int,
 
     video_status = _video_status(
         has_adopted=bool(shot["adopted_version_id"]),
-        has_active_job=job is not None,
+        has_active_job=job is not None and job["status"] != S.PAUSED,
         candidate_count=candidate_count,
         latest_version_status=latest_version_status,
     )
 
     return {
+        # 这组字段用来明确回答「任务是否已下发」。只有持久化 job
+        # 存在才算系统已受理；provider_submitted 只在上游返回 task id 后为真。
+        # 前端不再根据「生成中」文案反推下发状态。
+        "task_accepted": job is not None,
+        "task_id": job["id"] if job else None,
+        "task_created_at": job["created_at"] if job else None,
+        "task_updated_at": job["updated_at"] if job else None,
+        "provider_submitted": bool(provider_task_id),
         "video_status": video_status,
         "video_status_label": VIDEO_STATUS_LABELS[video_status],
         "pipeline_status": pipeline_status,
@@ -249,6 +257,7 @@ def episode_pipeline_statuses(episode_id: str, *, conn=None) -> tuple[dict[str, 
             "upstream_generating": 0, "preparing_references": 0,
             "video_ready": 0, "waiting_continuity": 0, "video_qa": 0,
             "queued": 0, "waiting_human": 0, "failed": 0,
+            "paused": 0,
             "video_status_counts": {
                 status: 0 for status in VIDEO_STATUS_LABELS
             },
@@ -279,7 +288,7 @@ def episode_pipeline_statuses(episode_id: str, *, conn=None) -> tuple[dict[str, 
            FROM jobs j
            LEFT JOIN shot_versions v ON v.id=j.version_id
            WHERE j.episode_id=? AND j.kind='video'
-             AND j.status IN ('queued','running','waiting_provider','paused_budget','waiting_retry')
+             AND j.status IN ('queued','running','waiting_provider','paused_budget','waiting_retry','paused')
              AND j.cancellation_requested=0 AND j.abandoned=0
            ORDER BY j.created_at DESC""",
         (episode_id,),
@@ -327,6 +336,7 @@ def episode_pipeline_statuses(episode_id: str, *, conn=None) -> tuple[dict[str, 
     waiting_continuity = 0
     video_qa = 0
     failed = 0
+    paused = 0
     upstream = 0
     video_status_counts = {
         status: 0 for status in VIDEO_STATUS_LABELS
@@ -366,6 +376,8 @@ def episode_pipeline_statuses(episode_id: str, *, conn=None) -> tuple[dict[str, 
         stage = st.get("pipeline_stage") or st.get("current_stage")
         if ps == "queued":
             queued += 1
+        elif ps == S.PAUSED:
+            paused += 1
         elif ps in (S.WAITING_HUMAN, S.BLOCKED):
             waiting_human += 1
         if stage in (S.STAGE_REFERENCE_PROMPT, S.STAGE_REFERENCE_GENERATE, S.STAGE_REFERENCE_QA,
@@ -394,6 +406,7 @@ def episode_pipeline_statuses(episode_id: str, *, conn=None) -> tuple[dict[str, 
         "queued": queued,
         "waiting_human": waiting_human,
         "failed": failed,
+        "paused": paused,
         "video_status_counts": video_status_counts,
     }
     return statuses, summary

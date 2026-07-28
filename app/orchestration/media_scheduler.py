@@ -73,6 +73,72 @@ def reserve_budget(
         raise
 
 
+def extend_budget_reservation(
+    job_id: str,
+    episode_id: str,
+    additional_cny: float,
+    limit_cny: float,
+    *,
+    conn: sqlite3.Connection | None = None,
+) -> bool:
+    """Atomically enlarge one active reservation before an intentional paid resubmit."""
+    db = conn or get_conn()
+    additional = max(0.0, float(additional_cny))
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        existing = db.execute(
+            """SELECT amount_cny, status FROM budget_reservations
+               WHERE job_id=?""",
+            (job_id,),
+        ).fetchone()
+        current = (
+            float(existing["amount_cny"] or 0)
+            if existing and existing["status"] in ACTIVE_RESERVATIONS
+            else 0.0
+        )
+        spent = db.execute(
+            """SELECT COALESCE(SUM(v.cost_cny), 0) AS amount
+               FROM shot_versions v JOIN shots s ON s.id=v.shot_id
+               WHERE s.episode_id=? AND v.status='succeeded'""",
+            (episode_id,),
+        ).fetchone()["amount"]
+        reserved = db.execute(
+            """SELECT COALESCE(SUM(amount_cny), 0) AS amount
+               FROM budget_reservations
+               WHERE scope_type='episode' AND scope_id=?
+                 AND status IN ('reserved','running') AND job_id!=?""",
+            (episode_id, job_id),
+        ).fetchone()["amount"]
+        target = current + additional
+        if float(spent) + float(reserved) + target > float(limit_cny) + 1e-9:
+            db.rollback()
+            return False
+        if existing:
+            db.execute(
+                """UPDATE budget_reservations
+                   SET amount_cny=?, status='reserved', settled_at=NULL,
+                       actual_cost_cny=NULL
+                   WHERE job_id=?""",
+                (target, job_id),
+            )
+        else:
+            db.execute(
+                """INSERT INTO budget_reservations(
+                       id, job_id, scope_type, scope_id, amount_cny, status, created_at
+                   ) VALUES(?,?, 'episode', ?, ?, 'reserved', ?)""",
+                (new_id("budget"), job_id, episode_id, target, now()),
+            )
+        db.execute(
+            "UPDATE jobs SET reserved_cost_cny=?, updated_at=? WHERE id=?",
+            (target, now(), job_id),
+        )
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        raise
+
+
 def settle_budget(job_id: str, actual_cost_cny: float, *, success: bool) -> None:
     db = get_conn()
     status = "settled" if success else "released"

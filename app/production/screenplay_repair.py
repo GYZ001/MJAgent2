@@ -954,7 +954,7 @@ async def run_screenplay_production(
             "last_touched": result.touched_node_ids,
         })
 
-    # activation 预算用尽：checkpoint 并保持 repairing，由调度器续跑
+    # activation 预算用尽：checkpoint 并保持 repairing，等待用户从工作副本继续。
     save_checkpoint(rev.id, {
         **checkpoint,
         "phase": "WAITING_RETRY",
@@ -965,13 +965,13 @@ async def run_screenplay_production(
     })
     conn.execute(
         "UPDATE episodes SET screenplay_status='repairing', screenplay_error=?, screenplay_updated_at=? WHERE id=?",
-        ("自动修复让出：将自动续跑", now(), episode_id),
+        ("本轮局部修复已完成并保存恢复点；仍有问题时可继续局部修复", now(), episode_id),
     )
     conn.commit()
     if run_id:
         evidence_repository.append_event(
             run_id, "REPAIR_YIELD", "info",
-            "单次 activation 预算用尽，已写 checkpoint，等待自动续跑",
+            "单次修复预算用尽，已写入恢复点，可从工作副本继续",
             payload={
                 "activation_no": activation_no,
                 "patches": patches_this_activation,

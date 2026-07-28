@@ -2,8 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 
-from app import api, atomic_io, db, planning, recovery, system_api, task_registry, worker
+import pytest
+from fastapi import HTTPException
+
+from app import (
+    api, atomic_io, db, planning, recovery, rejected_media, system_api, task_registry, worker,
+)
 from app.evidence import repository
 from app.orchestration import api as orchestration_api
 
@@ -48,6 +54,139 @@ def _capture_spawn(monkeypatch):
 
     monkeypatch.setattr(task_registry, "spawn", fake_spawn)
     return spawned
+
+
+def test_screenplay_resume_spawn_failure_restores_previous_state(tmp_path, monkeypatch) -> None:
+    conn = _fresh_database(tmp_path, monkeypatch)
+    conn.execute(
+        """INSERT INTO episodes(
+               id,project_id,episode_no,title,screenplay_status,screenplay_error,
+               screenplay_started_at,screenplay_updated_at,created_at
+           ) VALUES('e1','p1',1,'Episode','failed','上次失败',10,11,1)"""
+    )
+    conn.commit()
+    parent = _paused_run("screenplay", "episode", "e1")
+
+    class Recorder:
+        run_id = "run_not_started"
+        cancel_message: str | None = None
+
+        def cancel(self, message: str) -> None:
+            self.cancel_message = message
+
+    recorder = Recorder()
+
+    async def pending_task():
+        return None
+
+    def fail_spawn(_kind, _key, coro, *, project_id=None):
+        coro.close()
+        raise RuntimeError("event loop unavailable")
+
+    monkeypatch.setattr(task_registry, "active", lambda *_args: False)
+    monkeypatch.setattr(task_registry, "spawn", fail_spawn)
+    monkeypatch.setattr(api, "_new_screenplay_recorder", lambda *args, **kwargs: recorder)
+    monkeypatch.setattr(api, "_recorded_screenplay_task", lambda *args, **kwargs: pending_task())
+
+    with pytest.raises(HTTPException) as failed:
+        orchestration_api._restart_screenplay_run(parent, "resume")
+
+    assert failed.value.status_code == 503
+    assert failed.value.detail["action"] == "retry_resume"
+    row = conn.execute(
+        "SELECT screenplay_status,screenplay_error,screenplay_started_at,screenplay_updated_at "
+        "FROM episodes WHERE id='e1'"
+    ).fetchone()
+    assert dict(row) == {
+        "screenplay_status": "failed",
+        "screenplay_error": "上次失败",
+        "screenplay_started_at": 10,
+        "screenplay_updated_at": 11,
+    }
+    assert recorder.cancel_message == "任务未能启动，剧集状态已回滚"
+
+
+def test_reference_spawn_failures_restore_project_state(tmp_path, monkeypatch) -> None:
+    conn = _fresh_database(tmp_path, monkeypatch)
+    conn.execute(
+        "UPDATE projects SET refs_status='failed',refs_error='旧定妆错误',"
+        "scene_refs_status='warning',scene_refs_error='旧场景提示' WHERE id='p1'"
+    )
+    conn.commit()
+
+    def fail_spawn(_kind, _key, coro, *, project_id=None):
+        coro.close()
+        raise RuntimeError("event loop unavailable")
+
+    monkeypatch.setattr(task_registry, "spawn", fail_spawn)
+
+    with pytest.raises(ValueError, match="定妆任务未能启动"):
+        api._start_refs_generation("p1", None)
+    with pytest.raises(ValueError, match="场景图任务未能启动"):
+        api._start_scene_refs_generation("p1", None)
+
+    project = conn.execute(
+        "SELECT refs_status,refs_error,scene_refs_status,scene_refs_error FROM projects WHERE id='p1'"
+    ).fetchone()
+    assert dict(project) == {
+        "refs_status": "failed",
+        "refs_error": "旧定妆错误",
+        "scene_refs_status": "warning",
+        "scene_refs_error": "旧场景提示",
+    }
+
+
+def test_single_view_redo_spawn_failure_cancels_created_runs(tmp_path, monkeypatch) -> None:
+    conn = _fresh_database(tmp_path, monkeypatch)
+
+    def fail_spawn(_kind, _key, coro, *, project_id=None):
+        coro.close()
+        raise RuntimeError("event loop unavailable")
+
+    monkeypatch.setattr(task_registry, "spawn", fail_spawn)
+
+    with pytest.raises(RuntimeError, match="人物单视角重做任务未能启动"):
+        api._start_portrait_view_redo(
+            "p1", "角色甲", "portrait-1", "profile",
+            quote_id="quote-1", budget_limit_cny=1,
+        )
+    with pytest.raises(RuntimeError, match="场景单视角重做任务未能启动"):
+        api._start_scene_view_redo(
+            "p1", "庭院", "scene-1", "reverse",
+            quote_id="quote-2", budget_limit_cny=1,
+        )
+
+    statuses = [
+        row["status"] for row in conn.execute(
+            "SELECT status FROM workflow_runs "
+            "WHERE workflow_type IN ('portrait_view_redo','scene_view_redo') ORDER BY workflow_type"
+        ).fetchall()
+    ]
+    assert statuses == ["CANCELLED", "CANCELLED"]
+
+
+@pytest.mark.asyncio
+async def test_scene_review_spawn_failure_does_not_leave_false_queued_batch(
+    tmp_path, monkeypatch,
+) -> None:
+    conn = _fresh_database(tmp_path, monkeypatch)
+
+    def fail_spawn(_kind, _key, coro, *, project_id=None):
+        coro.close()
+        raise RuntimeError("event loop unavailable")
+
+    monkeypatch.setattr(task_registry, "spawn", fail_spawn)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.start_scene_history_review("p1")
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail["code"] == "SCENE_REVIEW_START_FAILED"
+    batch = conn.execute(
+        "SELECT status,finished_at FROM scene_review_batches ORDER BY created_at DESC LIMIT 1"
+    ).fetchone()
+    assert batch["status"] == "failed"
+    assert batch["finished_at"] is not None
 
 
 def test_character_reference_restart_preserves_target_and_parent(tmp_path, monkeypatch) -> None:
@@ -244,6 +383,11 @@ def test_unified_startup_recovery_runs_parent_before_all_child_adapters(monkeypa
     monkeypatch.setattr(worker, "recover_and_start", recover("worker_start", 0))
     monkeypatch.setattr(worker, "start_stale_lease_sweeper", recover("lease_sweeper", 0))
     monkeypatch.setattr(atomic_io, "cleanup_abandoned_parts", recover("partial_cleanup", 2))
+    monkeypatch.setattr(
+        rejected_media,
+        "purge_rejected_media",
+        recover("rejected_media", {"artifacts": 2, "records": 3, "files": 2}),
+    )
     monkeypatch.setattr(api, "recover_bible_tasks", recover("character_bible"))
     monkeypatch.setattr(api, "recover_character_ref_tasks", recover("character_references"))
     monkeypatch.setattr(api, "recover_portrait_view_redo_tasks", recover("portrait_view_redo"))
@@ -256,22 +400,87 @@ def test_unified_startup_recovery_runs_parent_before_all_child_adapters(monkeypa
         "app.video_supervisor.recover_video_completion_runs",
         recover("video_completion"),
     )
+    monkeypatch.setattr(
+        api,
+        "recover_project_video_completion_queues",
+        recover("project_video_completion"),
+    )
     monkeypatch.setattr(orchestration_api, "recover_delivery_tasks", recover("delivery"))
 
     report = asyncio.run(recovery.recover_all())
 
     assert calls == [
-        "media", "partial_cleanup", "worker_start", "lease_sweeper", "character_bible",
-            "character_references", "portrait_view_redo", "scene_references", "scene_history_review", "episode_mapping",
-        "screenplay", "storyboard", "video_completion", "delivery",
+        "media", "partial_cleanup", "rejected_media", "worker_start", "lease_sweeper",
+        "character_bible", "character_references", "portrait_view_redo",
+        "scene_references", "scene_history_review", "episode_mapping",
+        "screenplay", "storyboard", "video_completion", "project_video_completion", "delivery",
     ]
-    assert report == {
+    assert {key: value for key, value in report.items() if key != "recovery_meta"} == {
         "media": 1, "abandoned_partial_files_removed": 2, "character_bible": 1,
-            "character_references": 1, "portrait_view_redo": 1, "scene_references": 1,
-            "scene_history_review": 1,
+        "rejected_media_purged": {"artifacts": 2, "records": 3, "files": 2},
+        "character_references": 1, "portrait_view_redo": 1, "scene_references": 1,
+        "scene_history_review": 1,
         "episode_mapping": 1, "screenplay": 1, "storyboard": 1,
-        "video_completion": 1, "delivery": 1,
+        "video_completion": 1, "project_video_completion": 1, "delivery": 1,
     }
+    assert report["recovery_meta"]["failed_steps"] == []
+    assert report["recovery_meta"]["duration_ms"] >= 0
+
+
+def test_startup_recovery_isolates_failed_step_and_continues(monkeypatch) -> None:
+    import app.errors as app_errors
+
+    calls: list[str] = []
+
+    def ok(name: str):
+        def operation(*_args, **_kwargs):
+            calls.append(name)
+            return 0
+        return operation
+
+    def fail_screenplay():
+        calls.append("screenplay")
+        raise RuntimeError("broken screenplay checkpoint")
+
+    monkeypatch.setattr(worker, "recover_media_jobs", ok("media"))
+    monkeypatch.setattr(worker, "recover_and_start", ok("worker_start"))
+    monkeypatch.setattr(worker, "start_stale_lease_sweeper", ok("lease_sweeper"))
+    monkeypatch.setattr(atomic_io, "cleanup_abandoned_parts", ok("partial_cleanup"))
+    monkeypatch.setattr(api, "recover_bible_tasks", ok("character_bible"))
+    monkeypatch.setattr(api, "recover_character_ref_tasks", ok("character_references"))
+    monkeypatch.setattr(api, "recover_portrait_view_redo_tasks", ok("portrait_view_redo"))
+    monkeypatch.setattr(api, "recover_scene_ref_tasks", ok("scene_references"))
+    monkeypatch.setattr(api, "recover_scene_view_redo_tasks", ok("scene_view_redo"))
+    monkeypatch.setattr(api, "recover_scene_review_tasks", ok("scene_history_review"))
+    monkeypatch.setattr(planning, "recover_plan_tasks", ok("episode_mapping"))
+    monkeypatch.setattr(api, "recover_screenplay_tasks", fail_screenplay)
+    monkeypatch.setattr(api, "recover_storyboard_tasks", ok("storyboard"))
+    monkeypatch.setattr(
+        "app.video_supervisor.recover_video_completion_runs",
+        ok("video_completion"),
+    )
+    monkeypatch.setattr(
+        api,
+        "recover_project_video_completion_queues",
+        ok("project_video_completion"),
+    )
+    monkeypatch.setattr(orchestration_api, "recover_delivery_tasks", ok("delivery"))
+    monkeypatch.setattr(
+        app_errors,
+        "log_error",
+        lambda *_args, **_kwargs: SimpleNamespace(error_id="ERR-test"),
+    )
+
+    report = asyncio.run(recovery.recover_all())
+
+    assert calls.index("storyboard") > calls.index("screenplay")
+    assert calls.index("delivery") > calls.index("screenplay")
+    assert report["screenplay"] == {
+        "error": "broken screenplay checkpoint",
+        "error_id": "ERR-test",
+        "exc_type": "RuntimeError",
+    }
+    assert report["recovery_meta"]["failed_steps"] == ["screenplay"]
 
 
 def test_passive_instance_initialization_does_not_fence_active_run(tmp_path, monkeypatch) -> None:

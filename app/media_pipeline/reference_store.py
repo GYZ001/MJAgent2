@@ -30,7 +30,14 @@ def upsert_reference_set_from_meta(
     返回 reference_set_id；若无可持久化参考图则返回 None。
     原 JSON 仍由调用方保留写入，作兼容读取。
     """
-    refs = list(meta.get("reference_images") or [])
+    from app.rejected_media import discard_file, reference_dict_is_rejected
+    refs = []
+    for ref in list(meta.get("reference_images") or []):
+        if reference_dict_is_rejected(ref):
+            discard_file(ref.get("path") or ref.get("image_path"))
+            continue
+        refs.append(ref)
+    meta["reference_images"] = refs
     if not refs:
         existing = meta.get("reference_set_id")
         return existing
@@ -222,6 +229,16 @@ def load_reference_set(set_id: str, *, conn=None) -> dict[str, Any] | None:
             "deleted": bool(a["deleted"]),
             "qa": json.loads(a["qa_json"]) if a["qa_json"] else None,
         }
+        frozen_beat = (
+            item["qa"].get("keyframe_beat")
+            if isinstance(item.get("qa"), dict) and isinstance(item["qa"].get("keyframe_beat"), dict)
+            else None
+        )
+        if frozen_beat:
+            item["keyframe_index"] = frozen_beat.get("beat_index")
+            item["keyframe_total"] = frozen_beat.get("beat_total")
+            item["keyframe_time_ratio"] = frozen_beat.get("time_ratio")
+            item["keyframe_target_desc"] = frozen_beat.get("target_desc")
         for key, col in (
             ("entity_type", "entity_type"),
             ("entity_name", "entity_name"),

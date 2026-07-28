@@ -101,6 +101,7 @@ async def recover_all() -> dict[str, Any]:
         recover_bible_tasks,
         recover_character_ref_tasks,
         recover_portrait_view_redo_tasks,
+        recover_project_video_completion_queues,
         recover_scene_review_tasks,
         recover_scene_ref_tasks,
         recover_scene_view_redo_tasks,
@@ -110,32 +111,76 @@ async def recover_all() -> dict[str, Any]:
     from app.planning import recover_plan_tasks
     from app.orchestration.api import recover_delivery_tasks
 
-    report: dict[str, Any] = {
-        "media": worker.recover_media_jobs(),
-        "abandoned_partial_files_removed": cleanup_abandoned_parts(PROJECTS_DIR),
-    }
-    worker.recover_and_start()
-    worker.start_stale_lease_sweeper()
+    started_at = time.time()
+    started_clock = time.monotonic()
+    report: dict[str, Any] = {}
 
-    report["character_bible"] = recover_bible_tasks()
-    report["character_references"] = recover_character_ref_tasks()
-    report["portrait_view_redo"] = recover_portrait_view_redo_tasks()
-    report["scene_references"] = recover_scene_ref_tasks()
-    scene_view_redo_resumed = recover_scene_view_redo_tasks()
+    def run_step(key: str, operation, *, record_empty: bool = True):
+        try:
+            result = operation()
+        except Exception as exc:  # noqa: BLE001
+            from app.errors import log_error
+            rec = log_error(
+                exc,
+                action=f"startup_recovery.{key}",
+                context={"step": key},
+                meta={"stage": "startup_recovery", "isolation": "step"},
+            )
+            report[key] = {
+                "error": str(exc),
+                "error_id": rec.error_id,
+                "exc_type": type(exc).__name__,
+            }
+            return None
+        if record_empty or result:
+            report[key] = result
+        return result
+
+    run_step("media", worker.recover_media_jobs)
+    run_step(
+        "abandoned_partial_files_removed",
+        lambda: cleanup_abandoned_parts(PROJECTS_DIR),
+    )
+    from app.rejected_media import purge_rejected_media
+    run_step("rejected_media_purged", purge_rejected_media)
+    run_step("media_dispatcher", worker.recover_and_start, record_empty=False)
+    run_step("stale_lease_sweeper", worker.start_stale_lease_sweeper, record_empty=False)
+
+    run_step("character_bible", recover_bible_tasks)
+    run_step("character_references", recover_character_ref_tasks)
+    run_step("portrait_view_redo", recover_portrait_view_redo_tasks)
+    run_step("scene_references", recover_scene_ref_tasks)
+    scene_view_redo_resumed = run_step(
+        "scene_view_redo", recover_scene_view_redo_tasks, record_empty=False,
+    )
     if scene_view_redo_resumed:
         report["scene_view_redo"] = scene_view_redo_resumed
-    scene_review_resumed = recover_scene_review_tasks()
+    scene_review_resumed = run_step(
+        "scene_history_review", recover_scene_review_tasks, record_empty=False,
+    )
     if scene_review_resumed:
         report["scene_history_review"] = scene_review_resumed
-    report["episode_mapping"] = recover_plan_tasks()
-    report["screenplay"] = recover_screenplay_tasks()
-    report["storyboard"] = recover_storyboard_tasks()
-    try:
+    run_step("episode_mapping", recover_plan_tasks)
+    run_step("screenplay", recover_screenplay_tasks)
+    run_step("storyboard", recover_storyboard_tasks)
+
+    def recover_video_completion():
         from app.video_supervisor import recover_video_completion_runs
-        report["video_completion"] = recover_video_completion_runs()
-    except Exception as exc:  # noqa: BLE001
-        report["video_completion"] = {"error": str(exc)}
-    report["delivery"] = recover_delivery_tasks()
+        return recover_video_completion_runs()
+
+    run_step("video_completion", recover_video_completion)
+    run_step("project_video_completion", recover_project_video_completion_queues)
+    run_step("delivery", recover_delivery_tasks)
+    finished_at = time.time()
+    report["recovery_meta"] = {
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "duration_ms": round((time.monotonic() - started_clock) * 1000),
+        "failed_steps": [
+            key for key, value in report.items()
+            if isinstance(value, dict) and value.get("error_id")
+        ],
+    }
 
     global _last_report
     _last_report = report

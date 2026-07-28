@@ -163,6 +163,61 @@ def test_staged_refresh_pack_is_not_exposed_or_selected_before_qa(
     assert candidate_id not in {item["id"] for item in visible}
 
 
+def test_refresh_replaces_current_timeline_segment_without_reusing_episode_one(
+    asset_db,
+) -> None:
+    conn, tmp_path = asset_db
+    bible = _seed_bible_project(conn)
+    initial_path = tmp_path / "initial.jpg"
+    current_path = tmp_path / "current.jpg"
+    candidate_path = tmp_path / "candidate.jpg"
+    for path in (initial_path, current_path, candidate_path):
+        path.write_bytes(b"image")
+
+    initial_id = portraits.register_initial_portrait(
+        conn, "proj_bootstrap", "Hero", str(initial_path),
+        bible.characters[0].appearance_canonical, "initial prompt", 1,
+    )
+    conn.execute(
+        "UPDATE character_portraits SET ep_end=10 WHERE id=?",
+        (initial_id,),
+    )
+    current_id = "portrait_current_11"
+    conn.execute(
+        "INSERT INTO character_portraits("
+        "id, project_id, character_name, ep_start, ep_end, appearance, prompt, "
+        "image_path, bible_version, pack_status, created_at"
+        ") VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            current_id, "proj_bootstrap", "Hero", 11, None,
+            bible.characters[0].appearance_canonical, "episode 11 prompt",
+            str(current_path), 1, "ready", 2,
+        ),
+    )
+    conn.commit()
+
+    candidate_id = portraits.stage_initial_portrait(
+        conn, "proj_bootstrap", "Hero", str(candidate_path),
+        bible.characters[0].appearance_canonical, "latest prompt", 1,
+    )
+    portraits.promote_staged_initial_portrait(
+        conn, "proj_bootstrap", "Hero", candidate_id,
+    )
+
+    rows = conn.execute(
+        "SELECT id, ep_start, ep_end FROM character_portraits "
+        "WHERE project_id='proj_bootstrap' AND character_name='Hero' "
+        "ORDER BY ep_start"
+    ).fetchall()
+    by_id = {row["id"]: row for row in rows}
+    assert by_id[initial_id]["ep_start"] == 1
+    assert by_id[initial_id]["ep_end"] == 10
+    assert by_id[current_id]["ep_start"] <= 0
+    assert by_id[current_id]["ep_end"] == 0
+    assert by_id[candidate_id]["ep_start"] == 11
+    assert by_id[candidate_id]["ep_end"] is None
+
+
 def test_recovered_fresh_batch_does_not_skip_pre_batch_ready_pack(
     asset_db, monkeypatch,
 ) -> None:
