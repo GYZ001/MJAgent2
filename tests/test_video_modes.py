@@ -1024,6 +1024,68 @@ def test_all_three_structurally_invalid_keyframes_are_deleted_and_fall_back_to_a
     }, expected_fingerprint=meta["keyframe_contract_fingerprint"])
 
 
+def test_multi_character_height_contract_blocks_video_when_all_keyframes_fail(monkeypatch, tmp_path) -> None:
+    _patch_reference_build_unit(monkeypatch)
+    import app.multiview as mv
+
+    generated_paths: list[Path] = []
+
+    async def generate_candidate(*, ref_type, **_kwargs):
+        path = tmp_path / f"bad-height-{len(generated_paths) + 1}.jpg"
+        path.write_bytes(b"bad-height")
+        generated_paths.append(path)
+        return ReferenceImageAsset(
+            id=f"bad-height-{len(generated_paths)}", url="u", path=str(path),
+            type=ref_type, source="seedream_generated",
+        )
+
+    async def reject_height(*_args, **_kwargs):
+        return {
+            **_passing_reference_qa(),
+            "overall": 0.9,
+            "relative_height_match": 0.1,
+            "hard_failures": ["relative_scale_mismatch"],
+        }
+
+    monkeypatch.setattr(video_modes, "_generate_one_reference", generate_candidate)
+    monkeypatch.setattr(mv, "review_keyframe_with_evidence", reject_height)
+    bible = Bible(
+        characters=[
+            Character(name="A", role="lead", appearance_canonical="black robe"),
+            Character(name="B", role="lead", appearance_canonical="purple dress"),
+        ],
+        world=World(visual_style_canonical="anime drama style"),
+    )
+    shot = _shot(
+        characters=["A", "B"],
+        action_desc="A与B站在同一地面平视交谈。",
+        first_frame_desc="A与B同身高并肩站立。",
+        last_frame_desc="A与B同身高相对站立。",
+        source_excerpt="A与B站在同一地面平视交谈。",
+    )
+    meta: dict = {}
+
+    assets = asyncio.run(video_modes.build_reference_assets(
+        conn=None, project_id="p", episode_no=1, episode_id="e", shot_id="s",
+        shot=shot, bible=bible, decision=video_modes.default_reference_decision(),
+        existing_meta=meta,
+    ))
+
+    assert len(generated_paths) == 3
+    assert all(not path.exists() for path in generated_paths)
+    assert meta["reference_slots"]["narrative_keyframe"]["status"] == (
+        "blocked_required_height_geometry"
+    )
+    assert meta["narrative_keyframe_missing"] is True
+    assert "keyframe_fallback_mode" not in meta
+    assert "keyframe_structural_fallback_slots" not in meta
+    assert not any(asset.type == "plot_key_frame" for asset in assets)
+    assert not video_modes.reference_gallery_matches_keyframe_contract({
+        **meta,
+        "reference_images": [asset.public_dict() for asset in assets],
+    }, expected_fingerprint=meta["keyframe_contract_fingerprint"])
+
+
 def test_keyframe_best_of_three_all_unverified_keeps_first_deterministically(monkeypatch, tmp_path) -> None:
     _patch_reference_build_unit(monkeypatch)
     import app.multiview as mv
@@ -2252,6 +2314,31 @@ def test_multiple_high_score_character_refs_all_selected() -> None:
     assert len(packed) == 2
     assert {ref["id"] for ref in packed} == {"c1", "g1"}
     assert all(r["selectedForSeedance"] for r in refs)
+
+
+def test_pack_keeps_one_anchor_for_each_distinct_character(monkeypatch) -> None:
+    monkeypatch.setattr(video_modes, "max_character_reference_images", lambda: 1)
+    refs = [
+        {
+            "id": "character-a", "url": "data:image/jpeg;base64,a", "type": "character",
+            "entity_name": "A", "selectedForSeedance": True, "qualityScore": 0.95,
+            "purposes": ["video_input", "qa_anchor"],
+        },
+        {
+            "id": "character-b", "url": "data:image/jpeg;base64,b", "type": "character",
+            "entity_name": "B", "selectedForSeedance": True, "qualityScore": 0.9,
+            "purposes": ["video_input", "qa_anchor"],
+        },
+        {
+            "id": "scene", "url": "data:image/jpeg;base64,s", "type": "scene",
+            "selectedForSeedance": True, "qualityScore": 0.8,
+            "purposes": ["video_input", "qa_anchor"],
+        },
+    ]
+
+    packed = video_modes.pack_reference_images_for_seedance(refs, max_images=3)
+
+    assert {ref["id"] for ref in packed} == {"character-a", "character-b", "scene"}
 
 
 def test_pack_seedance_prefers_score_and_keeps_gallery_selection(monkeypatch) -> None:
