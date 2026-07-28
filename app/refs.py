@@ -89,8 +89,21 @@ def portrait_prompt(visual_style: str, anchor: str) -> str:
 
 
 def _merge_generated_portraits(conn, project_id: str, characters) -> None:
-    """Merge accepted portrait paths into the latest concurrent Bible snapshot."""
-    accepted = {item.name: item.ref_image_path for item in characters if item.ref_image_path}
+    """Merge accepted portrait truth into the latest concurrent Bible snapshot.
+
+    ``portrait_prompt_override`` is allowed to change clothes/hair/body details.
+    Once the newly generated pack is accepted, its derived appearance anchor and
+    image path must be published together; publishing only the path leaves video
+    and keyframe compilation on the previous outfit.
+    """
+    accepted = {
+        item.name: {
+            "ref_image_path": item.ref_image_path,
+            "appearance_canonical": item.appearance_canonical,
+        }
+        for item in characters
+        if item.ref_image_path
+    }
     if not accepted:
         return
     row = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
@@ -99,11 +112,55 @@ def _merge_generated_portraits(conn, project_id: str, characters) -> None:
     latest = json.loads(row["bible_json"])
     for item in latest.get("characters", []):
         if item.get("name") in accepted:
-            item["ref_image_path"] = accepted[item["name"]]
+            published = accepted[item["name"]]
+            item["ref_image_path"] = published["ref_image_path"]
+            item["appearance_canonical"] = published["appearance_canonical"]
     conn.execute(
         "UPDATE projects SET bible_json=? WHERE id=?",
         (json.dumps(latest, ensure_ascii=False), project_id),
     )
+
+
+_PORTRAIT_APPEARANCE_START_MARKERS = (
+    "全身角色立绘定妆照：",
+    "全身角色立绘定妆照:",
+)
+_PORTRAIT_APPEARANCE_STOP_MARKERS = (
+    "正面站立",
+    "正面全身立绘",
+    "中性姿态",
+    "中性表情",
+    "纯浅米色背景",
+    "全身完整可见",
+    "头顶、肩臂",
+    "主体四周保留",
+    "仅保留锚点",
+    "禁止额外",
+    "生成同一角色多视角",
+)
+
+
+def portrait_appearance_anchor(prompt: str | None, fallback: str = "") -> str:
+    """Extract the production appearance anchor from an accepted portrait prompt.
+
+    Portrait prompts often append character-sheet pose/background instructions.
+    Those instructions are useful while drawing the model sheet but conflict with
+    narrative shots, so downstream video/keyframe prompts receive only the visual
+    identity/outfit portion. Free-form prompts without the standard marker remain
+    authoritative after the same composition suffixes are stripped.
+    """
+    text = normalize_prompt_text(prompt or "").strip()
+    if not text:
+        return (fallback or "").strip()
+    for marker in _PORTRAIT_APPEARANCE_START_MARKERS:
+        if marker in text:
+            text = text.split(marker, 1)[1].strip()
+            break
+    stop_positions = [text.find(marker) for marker in _PORTRAIT_APPEARANCE_STOP_MARKERS if marker in text]
+    if stop_positions:
+        text = text[:min(stop_positions)].strip()
+    text = text.strip(" 。，,;；：:")
+    return text or (fallback or "").strip()
 
 
 async def generate_refs(
@@ -197,6 +254,9 @@ async def generate_refs(
             from app.stages import review_portrait_image
             base_prompt = ((c.portrait_prompt_override or "").strip()
                            or portrait_prompt(style, c.appearance_canonical))
+            effective_appearance = portrait_appearance_anchor(
+                base_prompt, c.appearance_canonical,
+            )
             last_error: Exception | None = None
             # Score-only：只生成一次；QA 低分不带 critique 重生（PRD QA-SO #14）。
             for attempt in range(1, 2):
@@ -232,7 +292,7 @@ async def generate_refs(
                         file_path=path,
                         content={
                             "character_name": c.name,
-                            "appearance": c.appearance_canonical,
+                            "appearance": effective_appearance,
                             "prompt": prompt,
                             "attempt": attempt,
                         },
@@ -247,7 +307,7 @@ async def generate_refs(
                         )
                         continue
                     portrait_id = _portraits.stage_initial_portrait(
-                        conn, project_id, c.name, path, c.appearance_canonical, prompt,
+                        conn, project_id, c.name, path, effective_appearance, prompt,
                         bible_version, artifact_id=artifact["id"])
                     # 初始多视角资产包：任一侧视角/整包失败则禁止半包生效
                     from app.multiview import (
@@ -258,7 +318,7 @@ async def generate_refs(
                             project_id=project_id,
                             portrait_id=portrait_id,
                             character_name=c.name,
-                            appearance=c.appearance_canonical,
+                            appearance=effective_appearance,
                             visual_style=style,
                             portrait_prompt=base_prompt,
                             ep_start=1,
@@ -274,6 +334,7 @@ async def generate_refs(
                     )
                     # The Bible path becomes visible only after the required
                     # multiview pack has passed as a whole.
+                    c.appearance_canonical = effective_appearance
                     c.ref_image_path = path
                     break
                 except asyncio.CancelledError:

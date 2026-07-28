@@ -68,8 +68,8 @@ def test_provider_prompt_overrides_conflicting_front_view_and_scale() -> None:
     assert "MANDATORY KEYFRAME CONTRACT (overrides conflicts above)" in prompt
     assert "SIDE CAMERA REQUIRED" in prompt
     assert "exact touch/hold/impact point" in prompt
-    assert "approximately equal upright standing-height baseline" in prompt
-    assert "foreground giant or background miniature" in prompt
+    assert "same canonical upright standing height" in prompt
+    assert "foreground-giant, or background-miniature" in prompt
     assert video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION in prompt
 
 
@@ -233,7 +233,7 @@ def test_keyframe_qa_contract_checks_side_contact_height_and_target(monkeypatch)
     requirements = " ".join(captured["geometry_requirements"])
     assert "互动轴侧面" in requirements
     assert "接触点必须真实连接" in requirements
-    assert "站直参考身高应近似" in requirements
+    assert "站直基准身高、头身比和骨架尺度必须一致" in requirements
     assert captured["shot"]["target_keyframe_desc"] == shot.last_frame_desc
     assert {
         "wrong_camera_angle", "contact_missing", "contact_phase_mismatch", "relative_scale_mismatch",
@@ -466,7 +466,10 @@ def test_collective_roster_is_a_group_not_one_identity(monkeypatch) -> None:
     assert "Named/individual visible identities, each exactly once: 萧家子弟" not in prompt
     assert "Named/individual visible identities, each exactly once: 萧薰儿" in prompt
 
-    monkeypatch.setattr("app.multiview.project_bible_asset_names", lambda _project: ({"萧薰儿"}, set()))
+    monkeypatch.setattr(
+        "app.multiview.project_bible_asset_names",
+        lambda _project, **_kwargs: ({"萧薰儿"}, set()),
+    )
     monkeypatch.setattr("app.multiview.portrait_views_for_episode", lambda *_a, **_k: [])
     monkeypatch.setattr("app.multiview.portrait_row_for_episode", lambda *_a, **_k: None)
     manifest = resolve_shot_asset_dependencies(

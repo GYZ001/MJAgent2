@@ -95,23 +95,40 @@ async def _await_with_job_lease_heartbeat(
     newer attempt has already adopted.
     """
     interval = max(0.01, float(heartbeat_interval_s))
+    # A newly-created thread-local SQLite connection can briefly collide with
+    # another checkpoint commit.  That is not evidence that ownership moved.
+    # Keep enough renewal opportunities inside the lease window while still
+    # cancelling before an actually unrenewable worker can be swept/reclaimed.
+    max_missed_renewals = max(2, int(float(lease_seconds) // interval) - 1)
+
+    async def _renew_once() -> bool | None:
+        try:
+            return await asyncio.to_thread(
+                media_scheduler.renew_lease,
+                job_id,
+                owner,
+                lease_seconds=lease_seconds,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # None means "temporarily unconfirmed".  Explicit False remains
+            # the authoritative CAS signal that another owner took over.
+            return None
 
     async def _heartbeat() -> bool:
+        missed_renewals = 0
         while True:
             await asyncio.sleep(interval)
-            try:
-                owned = await asyncio.to_thread(
-                    media_scheduler.renew_lease,
-                    job_id,
-                    owner,
-                    lease_seconds=lease_seconds,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:  # ownership cannot be proven; fail closed
+            owned = await _renew_once()
+            if owned is None:
+                missed_renewals += 1
+                if missed_renewals < max_missed_renewals:
+                    continue
                 return False
             if not owned:
                 return False
+            missed_renewals = 0
 
     operation_task = asyncio.create_task(awaitable)
     heartbeat_task = asyncio.create_task(_heartbeat())
@@ -128,17 +145,11 @@ async def _await_with_job_lease_heartbeat(
                 raise LeaseLost(f"job lease lost during provider stage: {job_id} / {owner}")
 
         result = await operation_task
-        try:
-            owned = await asyncio.to_thread(
-                media_scheduler.renew_lease,
-                job_id,
-                owner,
-                lease_seconds=lease_seconds,
-            )
-        except Exception:  # ownership cannot be proven; fail closed
-            owned = False
-        if not owned:
+        owned = await _renew_once()
+        if owned is False:
             raise LeaseLost(f"job lease lost after provider stage: {job_id} / {owner}")
+        # A transient DB error here is retried by the synchronous lease fence
+        # immediately following this stage in _run_job.
         return result
     finally:
         for task in (operation_task, heartbeat_task):
@@ -1108,8 +1119,6 @@ async def _prepare_reference_mode_inputs(
             if not isinstance(frozen_tail_contract, dict) or frozen_tail_contract != current_tail_contract:
                 _invalidate_reference_checkpoint("continuity_tail_source_changed")
                 complete_gallery_candidate = False
-        if complete_gallery_candidate and meta.get("reference_gallery_contract_override"):
-            return meta, prompt_text
         from app.multiview import manifest_revisions_match, resolve_shot_asset_dependencies
 
         if complete_gallery_candidate:
@@ -1146,6 +1155,38 @@ async def _prepare_reference_mode_inputs(
     rejection_details: list[dict[str, Any]] = []
     rejected_assets: list = []
 
+    from app.multiview import narrative_keyframe_required, PURPOSE_VIDEO_INPUT, purpose_list
+
+    def _reference_keyframe_gate_passed(current_assets: list) -> bool:
+        """Validate the files returned by the builder, not only its DB checkpoint."""
+        refs = [a.public_dict() for a in current_assets]
+
+        def _has_usable_keyframe(ref: dict) -> bool:
+            path = str(ref.get("path") or ref.get("image_path") or "").strip()
+            url = str(ref.get("url") or "").strip()
+            return (
+                (
+                    str(ref.get("type") or "") == "plot_key_frame"
+                    or video_modes.is_narrative_keyframe_slot(str(ref.get("slot_key") or ""))
+                )
+                and not ref.get("deleted")
+                and ref.get("selectedForSeedance")
+                and PURPOSE_VIDEO_INPUT in purpose_list(ref)
+                and ((bool(path) and Path(path).is_file()) or url.startswith("data:image"))
+            )
+
+        keyframe_ok = any(_has_usable_keyframe(ref) for ref in refs if isinstance(ref, dict))
+        if isinstance(meta.get("keyframe_sequence"), dict):
+            # The sequence contract also understands the explicit structural
+            # fallback where all candidates failed hard-shape QA.
+            keyframe_ok = video_modes.reference_gallery_matches_keyframe_contract(
+                {**meta, "reference_images": refs},
+                expected_fingerprint=current_keyframe_fingerprint,
+            )
+        return not meta.get("narrative_keyframe_missing") and (
+            not narrative_keyframe_required() or keyframe_ok
+        )
+
     def _delete_rejected_assets(items: list) -> None:
         # Never let a recovered/stale worker remove files owned by the new
         # attempt.  This check also extends the lease at every checkpoint.
@@ -1158,7 +1199,6 @@ async def _prepare_reference_mode_inputs(
 
     def _persist_reference_progress(current_assets: list, current_rejected: list) -> None:
         """Checkpoint usable references only; rejected images are irrecoverably removed."""
-        _assert_reference_lease()
         _delete_rejected_assets(current_rejected)
         meta["mode"] = video_modes.REFERENCE_IMAGE_MODE
         meta["mode_decision"] = video_modes.decision_to_dict(decision)
@@ -1247,6 +1287,48 @@ async def _prepare_reference_mode_inputs(
         existing_meta=meta,
     )
 
+    # A pre-fix recovered worker could leave a selected/passed keyframe row
+    # after another stale worker deleted the underlying file.  Anchors still
+    # make ``assets`` truthy, so the ordinary empty-result retry cannot repair
+    # this poisoned checkpoint.  Clear it durably and rebuild once in the same
+    # task before surfacing an error or attempting a paid video submission.
+    if assets and not _reference_keyframe_gate_passed(assets):
+        _assert_reference_lease()
+        log_provider_call(
+            "reference_keyframe_checkpoint_auto_repair",
+            config.MODEL_TEXT,
+            "REFERENCE_CHECKPOINT_AUTO_REPAIR",
+            None,
+            0,
+            meta={
+                "shot_id": shot_id,
+                "reason": "final_keyframe_file_missing",
+                "repair_attempt": 1,
+            },
+        )
+        _delete_rejected_assets(rejected_assets)
+        rejected_assets = []
+        _invalidate_reference_checkpoint("final_keyframe_file_missing")
+        meta["keyframe_file_repair_count"] = int(meta.get("keyframe_file_repair_count") or 0) + 1
+        _set_version(
+            version["id"],
+            image_inputs=json.dumps(meta, ensure_ascii=False),
+            prompt_text=prompt_text,
+        )
+        conn.commit()
+
+        repair_rejection: list[dict[str, Any]] = []
+        assets = await video_modes.build_reference_assets(
+            conn=conn, project_id=job["project_id"], episode_no=ep["episode_no"], episode_id=job["episode_id"],
+            shot_id=shot_id, shot=shot_model, bible=bible, decision=decision, prev_shot=prev_shot,
+            rejection_details=repair_rejection, rejected_out=rejected_assets,
+            on_progress=_persist_reference_progress,
+            allow_missing_continuity_tail=needs_tail,
+            job_id=job["id"],
+            existing_meta=meta,
+        )
+        rejection_details.extend(repair_rejection)
+
     # 静态完成但缺强制尾帧 → 停在 waiting_continuity，不标 complete
     if assets and needs_tail:
         has_tail = any(getattr(a, "type", None) == "previous_shot_frame" for a in assets)
@@ -1325,35 +1407,7 @@ async def _prepare_reference_mode_inputs(
         meta["reference_generation_complete"] = True
         meta["reference_static_ready"] = True
         meta["continuity_anchor_ready"] = True
-        from app.multiview import narrative_keyframe_required, PURPOSE_VIDEO_INPUT, purpose_list
-
-        def _has_usable_keyframe(ref: dict) -> bool:
-            path = str(ref.get("path") or ref.get("image_path") or "").strip()
-            url = str(ref.get("url") or "").strip()
-            return (
-                (
-                    str(ref.get("type") or "") == "plot_key_frame"
-                    or video_modes.is_narrative_keyframe_slot(str(ref.get("slot_key") or ""))
-                )
-                and not ref.get("deleted")
-                and ref.get("selectedForSeedance")
-                and PURPOSE_VIDEO_INPUT in purpose_list(ref)
-                and ((bool(path) and Path(path).is_file()) or url.startswith("data:image"))
-            )
-
-        keyframe_ok = any(
-            _has_usable_keyframe(r)
-            for r in (meta.get("reference_images") or [])
-            if isinstance(r, dict)
-        )
-        if isinstance(meta.get("keyframe_sequence"), dict):
-            # 新时序合同要求每个计划 slot 都有可用 winner；唯一例外是
-            # 3 个候选全部命中结构硬伤的显式降级 slot，此时只用人物/场景锚点继续。
-            keyframe_ok = video_modes.reference_gallery_matches_keyframe_contract(
-                meta,
-                expected_fingerprint=current_keyframe_fingerprint,
-            )
-        if meta.get("narrative_keyframe_missing") or (narrative_keyframe_required() and not keyframe_ok):
+        if not _reference_keyframe_gate_passed(assets):
             _assert_reference_lease()
             meta["narrative_keyframe_missing"] = True
             meta["reference_group_gate_passed"] = False

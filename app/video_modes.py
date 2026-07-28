@@ -33,7 +33,7 @@ REFERENCE_IMAGE_TYPES = {
 
 # 关键帧提示词是分镜级可复用资产的一部分。升级该版本时，未经人工
 # 编辑的旧关键帧不得继续污染新视频版本。
-KEYFRAME_PROMPT_CONTRACT_VERSION = "narrative_keyframe_geometry_hard_gate_v7"
+KEYFRAME_PROMPT_CONTRACT_VERSION = "narrative_keyframe_geometry_hard_gate_v8"
 KEYFRAME_STRUCTURAL_FALLBACK_MODE = "omit_structurally_invalid_keyframe_slots_v1"
 _KEYFRAME_LLM_PROMPT_MAX_CHARS = 1200
 _DEFAULT_KEYFRAME_CANDIDATE_COUNT = 3
@@ -982,10 +982,14 @@ def _keyframe_contract_instructions(shot: Shot, bible: Bible) -> list[str]:
     height_policy = contract.get("relative_height_policy")
     if height_policy == "equal_scale":
         lines.extend([
-            "Keep the same canonical body scale and approximately equal upright standing-height baseline for co-present "
-            "teen/adult characters. Sitting, bowing, leaning, or scripted depth may naturally change current head/eye level.",
-            "Respect scripted depth, but avoid exaggerated forced perspective that turns one character into a foreground "
-            "giant or background miniature. Separate reference-image crop size is identity evidence, never physical height.",
+            "STRICT EQUAL-HEIGHT CONTRACT: co-present teen/adult characters have the same canonical upright standing height, "
+            "head-to-body ratio, and body scale unless the script explicitly states a difference; this is an approximately "
+            "equal upright standing-height baseline with only small natural tolerance.",
+            "When both are standing, place their supporting feet on the same ground/depth plane and align head-top, shoulder, "
+            "hip, and eye-line baselines within a small natural tolerance. Do not make either character child-sized, taller, "
+            "shorter, foreground-giant, or background-miniature.",
+            "Words such as look up, look down, raise the head, or lower the head describe only eye/head/neck direction; they "
+            "never authorize a height difference. Separate reference-image crop size is identity evidence, never physical height.",
         ])
     elif height_policy == "preserve_explicit_difference":
         evidence = "; ".join(
@@ -2165,7 +2169,13 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
 
     video_anchor_assets: list[ReferenceImageAsset] = []
     seen_anchor_characters: set[str] = set()
-    character_anchor_limit = max_character_reference_images()
+    # The setting caps redundant views of one identity, not the number of
+    # distinct named people. Every visible named identity gets one anchor when
+    # capacity allows; otherwise later characters silently lose their outfit and
+    # body-scale evidence at the paid video boundary.
+    character_anchor_limit = max(
+        max_character_reference_images(), len(identity_character_names),
+    )
     for asset in sorted(evidence_assets, key=_anchor_rank):
         if len(video_anchor_assets) >= anchor_budget:
             break
@@ -2880,8 +2890,12 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
         if candidate_pool.get(slot_key) and not eligible_by_slot.get(slot_key)
     ]
     if blocked_slots:
-        # 三张候选若全部存在结构硬伤，删除该槽所有候选，但不阻断视频。
-        # Seedance 继续使用固定人物/场景锚点；双关键帧镜头中另一个合格槽仍可保留。
+        height_relation_requires_keyframe = (
+            _keyframe_contract(shot, bible).get("relative_height_policy") != "single_subject"
+        )
+        # 三张候选若全部存在结构硬伤，删除该槽所有候选。
+        # 单人镜仍可使用历史结构降级；多人身高关系必须由双人关键帧提供
+        # 可执行的视觉几何锚点，不得只靠一句文字继续提交付费视频。
         for slot_key in blocked_slots:
             records: list[dict[str, Any]] = []
             for candidate_no, asset in candidate_pool.get(slot_key, []):
@@ -2906,7 +2920,11 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
                     })
             slot_state[slot_key] = {
                 **(slot_state.get(slot_key) or {}),
-                "status": "omitted_structural_geometry_fallback",
+                "status": (
+                    "blocked_required_height_geometry"
+                    if height_relation_requires_keyframe
+                    else "omitted_structural_geometry_fallback"
+                ),
                 "candidate_count": len(records),
                 "candidates": records,
                 "path": None,
@@ -2915,9 +2933,14 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
         active_candidate_slots.difference_update(blocked_slots)
         selection_ready_slots.difference_update(blocked_slots)
         existing_meta["reference_slots"] = slot_state
-        existing_meta["keyframe_fallback_mode"] = KEYFRAME_STRUCTURAL_FALLBACK_MODE
-        existing_meta["keyframe_structural_fallback_slots"] = sorted(blocked_slots)
-        existing_meta["narrative_keyframe_missing"] = False
+        if height_relation_requires_keyframe:
+            existing_meta.pop("keyframe_fallback_mode", None)
+            existing_meta.pop("keyframe_structural_fallback_slots", None)
+            existing_meta["narrative_keyframe_missing"] = True
+        else:
+            existing_meta["keyframe_fallback_mode"] = KEYFRAME_STRUCTURAL_FALLBACK_MODE
+            existing_meta["keyframe_structural_fallback_slots"] = sorted(blocked_slots)
+            existing_meta["narrative_keyframe_missing"] = False
         _publish_progress()
 
     all_cleanup_errors: list[str] = []
@@ -3360,7 +3383,15 @@ def _apply_redundancy_penalties(assets: list[ReferenceImageAsset]) -> None:
         return (pri, -(a.qualityScore or 0.0))
 
     ranked = sorted(char_refs, key=_rank_key)
-    prefer = max_character_reference_images()
+    distinct_identities = {
+        str(asset.entity_name or "").strip()
+        or next((str(name).strip() for name in asset.relatedCharacterIds if str(name).strip()), "")
+        for asset in char_refs
+    }
+    distinct_identities.discard("")
+    # One anchor per distinct named identity is required evidence, not
+    # redundant imagery. Only extra views beyond that baseline are penalized.
+    prefer = max(max_character_reference_images(), len(distinct_identities))
     penalties: dict[int, float] = {}
     for i, a in enumerate(ranked):
         if i < prefer:
@@ -3472,7 +3503,23 @@ def pack_reference_images_for_seedance(
     timeline_winners.sort(key=_timeline_order)
     usable = non_keyframes + timeline_winners
     limit = max_images if max_images is not None else max_reference_images()
-    char_limit = max_character_reference_images()
+    distinct_character_identities = {
+        str(ref.get("entity_name") or "").strip()
+        or next(
+            (
+                str(name).strip()
+                for name in (ref.get("relatedCharacterIds") or ref.get("related_character_ids") or [])
+                if str(name).strip()
+            ),
+            "",
+        )
+        for ref in usable
+        if str(ref.get("type") or "") == "character"
+    }
+    distinct_character_identities.discard("")
+    char_limit = max(
+        max_character_reference_images(), len(distinct_character_identities),
+    )
     return pack_references_by_purpose(
         usable, max_images=limit, continuity_required=continuity_required, char_limit=char_limit,
     )

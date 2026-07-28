@@ -1456,6 +1456,75 @@ def test_runtime_reference_mode_uses_stored_decision(monkeypatch) -> None:
     assert not out_meta.get("fallback_reason")
 
 
+def test_runtime_auto_repairs_missing_selected_keyframe_file(monkeypatch) -> None:
+    """Anchors must not hide a poisoned keyframe checkpoint left by a stale worker."""
+    build_calls: list[dict] = []
+
+    async def fake_build_reference_assets(**kwargs):
+        meta = kwargs["existing_meta"]
+        build_calls.append(json.loads(json.dumps(meta)))
+        if len(build_calls) == 1:
+            meta.update({
+                "narrative_keyframe_missing": True,
+                "reference_slots": {
+                    "narrative_keyframe": {
+                        "status": "passed",
+                        "path": "/missing/stale-keyframe.jpg",
+                    },
+                },
+            })
+            return [
+                ReferenceImageAsset(
+                    id="character-anchor", url="data:image/jpeg;base64,character",
+                    type="character", source="asset_library",
+                    selectedForSeedance=True, purposes=["video_input", "qa_anchor"],
+                ),
+                ReferenceImageAsset(
+                    id="stale-keyframe", url=None, path="/missing/stale-keyframe.jpg",
+                    type="plot_key_frame", source="seedream_generated",
+                    selectedForSeedance=True, purposes=["video_input", "qa_anchor"],
+                    slot_key="narrative_keyframe", required=True,
+                ),
+            ]
+        meta["narrative_keyframe_missing"] = False
+        return [ReferenceImageAsset(
+            id="repaired-keyframe", url="data:image/jpeg;base64,repaired",
+            type="plot_key_frame", source="seedream_generated",
+            selectedForSeedance=True, purposes=["video_input", "qa_anchor"],
+            slot_key="narrative_keyframe", required=True,
+        )]
+
+    writes: list[dict] = []
+    monkeypatch.setattr(worker, "_set_version", lambda *a, **k: writes.append(k))
+    monkeypatch.setattr(video_modes, "build_reference_assets", fake_build_reference_assets)
+    monkeypatch.setattr("app.media_pipeline.stage_state.set_pipeline_stage", lambda *a, **k: None)
+
+    conn = _FakeConn({"bible_json": _bible().model_dump_json()})
+    meta = {
+        "mode": REFERENCE_IMAGE_MODE,
+        "mode_decision": decision_to_dict(video_modes.default_reference_decision()),
+        "after_shot_id": None,
+    }
+    out_meta, _ = asyncio.run(worker._prepare_reference_mode_inputs(
+        conn,
+        {"id": "j1", "project_id": "p1", "episode_id": "e1", "shot_id": "s1"},
+        {"id": "v1"},
+        _shot_row(),
+        {"episode_no": 1},
+        meta,
+        "PROMPT",
+    ))
+
+    assert len(build_calls) == 2
+    assert build_calls[1]["reference_images"] == []
+    assert build_calls[1]["reference_slots"] == {}
+    assert build_calls[1]["stale_reference_reason"] == "final_keyframe_file_missing"
+    assert out_meta["reference_group_gate_passed"] is True
+    assert out_meta["reference_images"][0]["id"] == "repaired-keyframe"
+    assert out_meta["keyframe_file_repair_count"] == 1
+    assert writes
+
+
 def test_runtime_submits_anchor_only_fallback_after_all_keyframe_candidates_fail(monkeypatch) -> None:
     """3 张候选都有结构硬伤时，执行器不得再用“缺必需关键帧”阻断提交。"""
 
@@ -1516,8 +1585,8 @@ def test_runtime_submits_anchor_only_fallback_after_all_keyframe_candidates_fail
     assert writes
 
 
-def test_complete_gallery_with_changed_dependencies_is_invalidated_before_rebuild(monkeypatch) -> None:
-    """Same prompt version is insufficient when the frozen portrait/scene revisions changed."""
+def test_edited_gallery_with_changed_dependencies_is_invalidated_before_rebuild(monkeypatch) -> None:
+    """Manual gallery edits cannot pin an obsolete portrait/scene revision."""
     captured: dict = {}
 
     async def fake_build_reference_assets(**kwargs):
@@ -1547,6 +1616,8 @@ def test_complete_gallery_with_changed_dependencies_is_invalidated_before_rebuil
         "reference_manifest": {"revision": "old"},
         "reference_manifest_frozen": True,
         "reference_generation_complete": True,
+        "reference_gallery_edited": True,
+        "reference_gallery_contract_override": True,
         "reference_images": [{
             "id": "old", "url": "data:image/jpeg;base64,old", "type": "plot_key_frame",
             "selectedForSeedance": True, "dependency_manifest": {"revision": "old"},

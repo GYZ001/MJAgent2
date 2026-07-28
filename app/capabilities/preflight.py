@@ -67,6 +67,156 @@ def project_delete(args) -> PreflightResult:
     )
 
 
+def episode_plan(args) -> PreflightResult:
+    from app import planning
+
+    conn = get_conn()
+    project = conn.execute(
+        "SELECT id, name, plan_status FROM projects WHERE id=?",
+        (args.project_id,),
+    ).fetchone()
+    if not project:
+        return PreflightResult(
+            command="episode.plan",
+            allowed=False,
+            risk=RiskLevel.R2_MATERIAL,
+            summary="项目不存在",
+            state_fingerprint=_fp({"project_id": args.project_id, "missing": True}),
+            requires_confirmation=False,
+            confirmation_policy=ConfirmationPolicy.WHEN_IMPACT,
+            denial_code="not_found",
+            denial_message="项目不存在",
+        )
+
+    episodes = conn.execute(
+        """SELECT id, episode_no, status, screenplay_status,
+                  screenplay_artifact_id, storyboard_artifact_id, delivery_artifact_id
+           FROM episodes WHERE project_id=? ORDER BY episode_no""",
+        (args.project_id,),
+    ).fetchall()
+    episode_ids = [row["id"] for row in episodes]
+    if episode_ids and not args.replace_existing:
+        return PreflightResult(
+            command="episode.plan",
+            allowed=False,
+            risk=RiskLevel.R2_MATERIAL,
+            summary=f"项目已有 {len(episode_ids)} 集，重新分集必须明确确认替换",
+            affected=AffectedScope(
+                projects=[args.project_id],
+                episodes=episode_ids,
+                extra={"episode_count": len(episode_ids)},
+            ),
+            state_fingerprint=_fp({
+                "project_id": args.project_id,
+                "plan_status": project["plan_status"],
+                "episodes": [dict(row) for row in episodes],
+                "replace_existing": False,
+            }),
+            requires_confirmation=False,
+            confirmation_policy=ConfirmationPolicy.WHEN_IMPACT,
+            denial_code="REPLAN_CONFIRMATION_REQUIRED",
+            denial_message="项目已有分集；确认影响后，以 replace_existing=true 重新提交",
+        )
+
+    blockers = planning.replan_blockers(conn, args.project_id)
+    if blockers["blocked"]:
+        return PreflightResult(
+            command="episode.plan",
+            allowed=False,
+            risk=RiskLevel.R2_MATERIAL,
+            summary="项目仍有可继续或正在运行的下游任务，不能重新分集",
+            affected=AffectedScope(
+                projects=[args.project_id],
+                episodes=episode_ids,
+                extra=blockers,
+            ),
+            state_fingerprint=_fp({
+                "project_id": args.project_id,
+                "plan_status": project["plan_status"],
+                "blockers": blockers,
+            }),
+            requires_confirmation=False,
+            confirmation_policy=ConfirmationPolicy.WHEN_IMPACT,
+            denial_code="REPLAN_ACTIVE_WORK",
+            denial_message="请先在对应工作台或任务中心结束、取消下游任务，再重新分集",
+        )
+
+    chapter_count = int(conn.execute(
+        "SELECT COUNT(*) AS c FROM chapters WHERE project_id=?",
+        (args.project_id,),
+    ).fetchone()["c"])
+    shot_count = int(conn.execute(
+        """SELECT COUNT(*) AS c FROM shots s
+           JOIN episodes e ON e.id=s.episode_id WHERE e.project_id=?""",
+        (args.project_id,),
+    ).fetchone()["c"])
+    media_versions = int(conn.execute(
+        """SELECT COUNT(*) AS c FROM shot_versions v
+           JOIN shots s ON s.id=v.shot_id
+           JOIN episodes e ON e.id=s.episode_id WHERE e.project_id=?""",
+        (args.project_id,),
+    ).fetchone()["c"])
+    packages = [
+        row["id"] for row in conn.execute(
+            """SELECT dp.id FROM delivery_packages dp
+               JOIN episodes e ON e.id=dp.episode_id
+               WHERE e.project_id=? ORDER BY dp.created_at, dp.id""",
+            (args.project_id,),
+        ).fetchall()
+    ]
+    projected_artifacts = sum(
+        bool(row["screenplay_artifact_id"])
+        + bool(row["storyboard_artifact_id"])
+        + bool(row["delivery_artifact_id"])
+        for row in episodes
+    )
+    invalidated = projected_artifacts + media_versions + len(packages)
+    replacing = bool(episode_ids)
+    warnings = []
+    if replacing:
+        warnings = [
+            "现有剧本、分镜、视频和交付投影将从项目中移除；历史运行证据仍保留",
+            "重新分集采用本地章节规则，不调用模型，也不会产生新的模型费用",
+        ]
+    return PreflightResult(
+        command="episode.plan",
+        allowed=True,
+        risk=RiskLevel.R2_MATERIAL if replacing else RiskLevel.R1_REVERSIBLE,
+        summary=(
+            f"将替换项目「{project['name']}」现有 {len(episode_ids)} 集，"
+            f"并按 {chapter_count} 个原文章节重新建立分集"
+            if replacing
+            else f"将按 {chapter_count} 个原文章节创建分集"
+        ),
+        affected=AffectedScope(
+            projects=[args.project_id],
+            episodes=episode_ids,
+            shot_count=shot_count,
+            invalidated_artifacts=invalidated,
+            packages=packages,
+            extra={
+                "episode_count": len(episode_ids),
+                "chapter_count": chapter_count,
+                "media_versions": media_versions,
+                "deterministic_local_rule": True,
+            },
+        ),
+        warnings=warnings,
+        state_fingerprint=_fp({
+            "project_id": args.project_id,
+            "plan_status": project["plan_status"],
+            "chapter_count": chapter_count,
+            "episodes": [dict(row) for row in episodes],
+            "shot_count": shot_count,
+            "media_versions": media_versions,
+            "packages": packages,
+            "replace_existing": bool(args.replace_existing),
+        }),
+        requires_confirmation=False,
+        confirmation_policy=ConfirmationPolicy.WHEN_IMPACT,
+    )
+
+
 def video_clear_episode(args) -> PreflightResult:
     conn = get_conn()
     ep = conn.execute("SELECT id, episode_no, project_id, status FROM episodes WHERE id=?", (args.episode_id,)).fetchone()
@@ -857,6 +1007,7 @@ def delivery_review(args) -> PreflightResult:
 # catalog 挂载用：命令名 → preflight 函数
 PREFLIGHT_MAP: dict[str, Any] = {
     "project.delete": project_delete,
+    "episode.plan": episode_plan,
     "video.clear_episode": video_clear_episode,
     "video.clear_shot": video_clear_shot,
     "video.generate_shot": video_generate_shot,

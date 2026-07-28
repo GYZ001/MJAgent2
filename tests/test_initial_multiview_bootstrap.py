@@ -163,7 +163,7 @@ def test_staged_refresh_pack_is_not_exposed_or_selected_before_qa(
     assert candidate_id not in {item["id"] for item in visible}
 
 
-def test_refresh_replaces_current_timeline_segment_without_reusing_episode_one(
+def test_manual_refresh_replaces_all_timeline_segments_from_episode_one(
     asset_db,
 ) -> None:
     conn, tmp_path = asset_db
@@ -210,11 +210,12 @@ def test_refresh_replaces_current_timeline_segment_without_reusing_episode_one(
         "ORDER BY ep_start"
     ).fetchall()
     by_id = {row["id"]: row for row in rows}
-    assert by_id[initial_id]["ep_start"] == 1
-    assert by_id[initial_id]["ep_end"] == 10
+    assert by_id[initial_id]["ep_start"] <= 0
+    assert by_id[initial_id]["ep_end"] == 0
     assert by_id[current_id]["ep_start"] <= 0
     assert by_id[current_id]["ep_end"] == 0
-    assert by_id[candidate_id]["ep_start"] == 11
+    assert by_id[initial_id]["ep_start"] != by_id[current_id]["ep_start"]
+    assert by_id[candidate_id]["ep_start"] == 1
     assert by_id[candidate_id]["ep_end"] is None
 
 

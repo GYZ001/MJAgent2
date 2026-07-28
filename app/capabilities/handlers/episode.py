@@ -9,7 +9,11 @@ from app.capabilities.schemas import CommandResult
 async def plan(args: I.EpisodePlanInput) -> CommandResult:
     from app import planning
 
-    outcome = await call_guarded(planning.start_plan, args.project_id)
+    outcome = await call_guarded(
+        planning.start_plan,
+        args.project_id,
+        replace_existing=args.replace_existing,
+    )
     if isinstance(outcome, CommandResult):
         return outcome
     return succeeded(

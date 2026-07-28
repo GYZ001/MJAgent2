@@ -197,11 +197,13 @@ def scene_view_prompt(visual_style: str, scene_canonical: str, view_role: str) -
 
 # ---------- 查询 ----------
 
-def portrait_row_for_episode(project_id: str, name: str, episode_no: int | None):
+def portrait_row_for_episode(
+    project_id: str, name: str, episode_no: int | None, *, conn=None,
+):
     if episode_no is None:
         return None
     try:
-        return get_conn().execute(
+        return (conn or get_conn()).execute(
             "SELECT * FROM character_portraits "
             "WHERE project_id=? AND character_name=? AND ep_start<=? AND (ep_end IS NULL OR ep_end>=?) "
             "ORDER BY ep_start DESC LIMIT 1",
@@ -211,11 +213,13 @@ def portrait_row_for_episode(project_id: str, name: str, episode_no: int | None)
         return None
 
 
-def scene_row_for_episode(project_id: str, name: str, episode_no: int | None):
+def scene_row_for_episode(
+    project_id: str, name: str, episode_no: int | None, *, conn=None,
+):
     if episode_no is None:
         return None
     try:
-        return get_conn().execute(
+        return (conn or get_conn()).execute(
             "SELECT * FROM scene_references "
             "WHERE project_id=? AND scene_name=? AND ep_start<=? AND (ep_end IS NULL OR ep_end>=?) "
             "ORDER BY ep_start DESC LIMIT 1",
@@ -225,10 +229,12 @@ def scene_row_for_episode(project_id: str, name: str, episode_no: int | None):
         return None
 
 
-def project_bible_asset_names(project_id: str) -> tuple[set[str], set[str]]:
+def project_bible_asset_names(
+    project_id: str, *, conn=None,
+) -> tuple[set[str], set[str]]:
     """Return the character/scene names that are managed by the project asset library."""
     try:
-        row = get_conn().execute(
+        row = (conn or get_conn()).execute(
             "SELECT bible_json FROM projects WHERE id=?", (project_id,),
         ).fetchone()
         payload = json.loads(row["bible_json"] or "{}") if row else {}
@@ -273,11 +279,12 @@ def list_scene_views(scene_reference_id: str, *, conn=None) -> list[dict[str, An
 
 def portrait_views_for_episode(
     project_id: str, name: str, episode_no: int | None, *, ready_only: bool = False,
+    conn=None,
 ) -> list[dict[str, Any]]:
-    row = portrait_row_for_episode(project_id, name, episode_no)
+    row = portrait_row_for_episode(project_id, name, episode_no, conn=conn)
     if not row:
         return []
-    views = list_portrait_views(row["id"])
+    views = list_portrait_views(row["id"], conn=conn)
     if ready_only:
         views = [v for v in views if v.get("status") == "ready" and v.get("image_path")]
     for v in views:
@@ -290,11 +297,12 @@ def portrait_views_for_episode(
 
 def scene_views_for_episode(
     project_id: str, name: str, episode_no: int | None, *, ready_only: bool = False,
+    conn=None,
 ) -> list[dict[str, Any]]:
-    row = scene_row_for_episode(project_id, name, episode_no)
+    row = scene_row_for_episode(project_id, name, episode_no, conn=conn)
     if not row:
         return []
-    views = list_scene_views(row["id"])
+    views = list_scene_views(row["id"], conn=conn)
     if ready_only:
         views = [v for v in views if v.get("status") == "ready" and v.get("image_path")]
     for v in views:
@@ -442,6 +450,7 @@ def resolve_shot_asset_dependencies(
     shot: Any,
     scene_name: str | None = None,
     ready_only: bool = True,
+    conn=None,
 ) -> dict[str, Any]:
     """解析本镜人物/场景多视角依赖，供关键帧生成与 QA 冻结。
 
@@ -450,7 +459,7 @@ def resolve_shot_asset_dependencies(
     from app.character_policy import is_collective_role
     from app.continuity import effective_characters_visible
 
-    managed_characters, managed_scenes = project_bible_asset_names(project_id)
+    managed_characters, managed_scenes = project_bible_asset_names(project_id, conn=conn)
     characters_out: list[dict[str, Any]] = []
     for name in effective_characters_visible(shot):
         if name not in managed_characters and is_collective_role(name):
@@ -467,9 +476,11 @@ def resolve_shot_asset_dependencies(
             })
             continue
         # 缺视角检测需要看全部视角状态；选中只允许 ready
-        all_views = portrait_views_for_episode(project_id, name, episode_no, ready_only=False)
+        all_views = portrait_views_for_episode(
+            project_id, name, episode_no, ready_only=False, conn=conn,
+        )
         views = [v for v in all_views if v.get("status") == "ready" and v.get("image_path")] if ready_only else all_views
-        row = portrait_row_for_episode(project_id, name, episode_no)
+        row = portrait_row_for_episode(project_id, name, episode_no, conn=conn)
         available = [v.get("view_role") for v in views if v.get("view_role")]
         wanted = select_character_view_roles(shot, name)
         selected = resolve_views_for_roles(
@@ -501,8 +512,10 @@ def resolve_shot_asset_dependencies(
     scene_out = None
     sname = scene_name or getattr(shot, "scene_name", None) or ""
     if sname:
-        all_views = scene_views_for_episode(project_id, sname, episode_no, ready_only=False)
-        row = scene_row_for_episode(project_id, sname, episode_no)
+        all_views = scene_views_for_episode(
+            project_id, sname, episode_no, ready_only=False, conn=conn,
+        )
+        row = scene_row_for_episode(project_id, sname, episode_no, conn=conn)
         pack_usable = scene_pack_is_usable(row, all_views)
         primary_usable = scene_primary_is_usable(row, all_views)
         usable = pack_usable or primary_usable
@@ -2003,9 +2016,10 @@ async def review_keyframe_with_evidence(
         )
     if contract.get("relative_height_policy") == "equal_scale":
         geometry_requirements.append(
-            "本镜无剧情身高差：同框青少年/成人的基础骨架尺度与站直参考身高应近似；"
-            "允许坐、弯腰、行礼、倾身或剧情景深导致当前头部/眼线高度不同，"
-            "但禁止夸张强透视把人物变成前景巨人或后景小人"
+            "本镜无剧情身高差：同框青少年/成人的站直基准身高、头身比和骨架尺度必须一致。"
+            "若当前两人均站立且剧情未写弯腰/跪/坐，双脚必须位于同一地面与景深平面，"
+            "头顶、肩线、髋线与眼线应在自然小误差内齐平；“抬头/仰望/低头”只是头颈与视线动作，"
+            "不是身高差证据。禁止儿童化、前景巨人、后景小人或强透视尺度差"
         )
     elif contract.get("relative_height_policy") == "preserve_explicit_difference":
         height_evidence = "；".join(

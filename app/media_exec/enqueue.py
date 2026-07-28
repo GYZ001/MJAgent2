@@ -545,6 +545,12 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
         raise ValueError("分镜脚本未确认，不能生成视频（PRD 原则 P3：贵的环节前人工把关）")
 
     bible = Bible.model_validate(json.loads(project["bible_json"]))
+    # Compile the paid video request from the accepted per-episode portrait
+    # revision, not from a possibly older project-Bible appearance string.
+    # The worker already resolves this view for keyframes; enqueue must use the
+    # same source or the frozen video prompt can disagree with its reference pack.
+    from app.portraits import bible_for_episode
+    bible = bible_for_episode(ep["project_id"], bible, ep["episode_no"])
     shot = _load_shot_model(shot_row)
     screenplay = None
     if _row_value(ep, "screenplay_json"):
@@ -621,6 +627,28 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
 
     # 参考图是分镜级素材。重抽、改词或带评语只创建新视频版本，不能重新跑参考图生成。
     reference_gallery = _load_reference_gallery(conn, shot_row)
+    from app.multiview import manifest_revisions_match, resolve_shot_asset_dependencies
+
+    current_reference_manifest = resolve_shot_asset_dependencies(
+        project_id=ep["project_id"],
+        episode_no=ep["episode_no"],
+        shot_id=shot_id,
+        shot=shot,
+        scene_name=getattr(shot, "scene_name", "") or None,
+        conn=conn,
+    )
+    if (
+        reference_gallery
+        and isinstance(reference_gallery.get("reference_manifest"), dict)
+        and not manifest_revisions_match(
+            reference_gallery["reference_manifest"], current_reference_manifest,
+        )
+    ):
+        # A new portrait/scene revision invalidates the copied shot gallery even
+        # when a user previously edited that gallery. The worker rechecks this
+        # before provider submission; doing it here also prevents idempotency
+        # from returning an old succeeded video before a new job is created.
+        reference_gallery = None
 
     key_material = (
         prompt_text
@@ -628,6 +656,7 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
         + f"|after:{chain_after_shot_id or ''}"
         + f"|after_version:{chain_after_version_id or ''}"
         + f"|keyframe_prompt_contract:{video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION}"
+        + f"|reference_dependencies:{current_reference_manifest.get('input_fingerprint') or ''}"
     )
     # 只有人工编辑会改变视频输入并打破原幂等键；未编辑画廊沿用历史幂等行为，
     # 普通重复点击仍直接复用已有成功视频。

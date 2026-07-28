@@ -229,3 +229,33 @@ def test_provider_stage_heartbeat_cancels_fenced_worker_before_stale_write(monke
     asyncio.run(run())
     assert writes == []
     assert cancelled == [True]
+
+
+def test_provider_stage_heartbeat_tolerates_transient_renewal_error(monkeypatch) -> None:
+    """A brief SQLite busy/error is not the same as a CAS ownership loss."""
+    attempts = 0
+
+    def flaky_renew(*_args, **_kwargs) -> bool:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return True
+
+    monkeypatch.setattr(worker.media_scheduler, "renew_lease", flaky_renew)
+
+    async def run() -> str:
+        async def slow_reference_work() -> str:
+            await asyncio.sleep(0.035)
+            return "ready"
+
+        return await worker._await_with_job_lease_heartbeat(
+            slow_reference_work(),
+            job_id="j1",
+            owner="worker-a",
+            lease_seconds=0.05,
+            heartbeat_interval_s=0.01,
+        )
+
+    assert asyncio.run(run()) == "ready"
+    assert attempts >= 3

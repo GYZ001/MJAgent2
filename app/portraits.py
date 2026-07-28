@@ -34,7 +34,7 @@ from app.errors import code_ref
 from app.harness import model_gateway
 from app.harness.types import EvidenceArtifact
 from app.ingest import chapter_is_stub, chapter_titles_match
-from app.refs import _safe_name, portrait_prompt
+from app.refs import _safe_name, portrait_appearance_anchor, portrait_prompt
 from app.schemas import Bible, Character, extract_json
 
 FRAGMENT_WINDOW = 220   # 命中角色名前后各取多少字
@@ -1040,42 +1040,41 @@ def stage_initial_portrait(conn, project_id: str, name: str, image_path: str,
 
 
 def promote_staged_initial_portrait(conn, project_id: str, name: str, portrait_id: str) -> None:
-    """整包验收通过后原子替换当前定妆版本。"""
+    """整包验收通过后原子发布为全局初始定妆。
+
+    手工重新定妆与剧情中的分集造型演进是两种操作：前者必须从第 1 集
+    起替换全时间线，后者由 ``_refresh_portrait_on_drift`` 继续维护分段。
+    """
     row = conn.execute(
-        "SELECT id, base_portrait_id FROM character_portraits "
+        "SELECT id FROM character_portraits "
         "WHERE id=? AND project_id=? AND character_name=? AND ep_start=?",
         (portrait_id, project_id, name, STAGED_INITIAL_EP_START),
     ).fetchone()
     if not row:
         raise ValueError(f"定妆候选不存在：{name}")
     with conn:
-        target_start = 1
-        if row["base_portrait_id"]:
-            base = conn.execute(
-                "SELECT ep_start FROM character_portraits WHERE id=?",
-                (row["base_portrait_id"],),
-            ).fetchone()
-            if base and int(base["ep_start"]) > 0:
-                target_start = int(base["ep_start"])
-        current = conn.execute(
-            "SELECT id FROM character_portraits WHERE project_id=? AND character_name=? "
-            "AND id<>? AND ep_end IS NULL AND ep_start<>? ORDER BY created_at DESC LIMIT 1",
-            (project_id, name, portrait_id, STAGED_INITIAL_EP_START),
+        previous = conn.execute(
+            "SELECT id FROM character_portraits "
+            "WHERE project_id=? AND character_name=? AND id<>? AND ep_start>0 "
+            "ORDER BY ep_start, created_at",
+            (project_id, name, portrait_id),
+        ).fetchall()
+        minimum = conn.execute(
+            "SELECT MIN(ep_start) AS value FROM character_portraits "
+            "WHERE project_id=? AND character_name=? AND ep_start<=0",
+            (project_id, name),
         ).fetchone()
-        if current:
-            minimum = conn.execute(
-                "SELECT MIN(ep_start) AS value FROM character_portraits "
-                "WHERE project_id=? AND character_name=? AND ep_start<=0",
-                (project_id, name),
-            ).fetchone()
-            history_start = int(minimum["value"] if minimum and minimum["value"] is not None else 0) - 1
+        history_start = int(
+            minimum["value"] if minimum and minimum["value"] is not None else 0
+        ) - len(previous)
+        for offset, previous_row in enumerate(previous):
             conn.execute(
                 "UPDATE character_portraits SET ep_start=?, ep_end=0 WHERE id=?",
-                (history_start, current["id"]),
+                (history_start + offset, previous_row["id"]),
             )
         conn.execute(
-            "UPDATE character_portraits SET ep_start=?, ep_end=NULL WHERE id=?",
-            (target_start, portrait_id),
+            "UPDATE character_portraits SET ep_start=1, ep_end=NULL WHERE id=?",
+            (portrait_id,),
         )
 
 
@@ -1105,18 +1104,25 @@ def portrait_for_episode(project_id: str, name: str, episode_no: int | None) -> 
 
 
 def appearance_for_episode(project_id: str, name: str, episode_no: int | None) -> str | None:
-    """返回覆盖该集的定妆照外观锚点串；未命中返回 None（调用方回退到 bible 初始锚点）。"""
+    """返回覆盖该集的定妆照有效外观锚点。
+
+    新定妆提示词可以改变服装/发型，因此已验收版本的 ``prompt``
+    比历史 ``appearance`` 列更新。构图、背景等定妆照专用指令会被
+    剥离，避免注入叙事镜头。
+    """
     if episode_no is None:
         return None
     try:
         row = get_conn().execute(
-            "SELECT appearance FROM character_portraits "
+            "SELECT appearance,prompt FROM character_portraits "
             "WHERE project_id=? AND character_name=? AND ep_start<=? AND (ep_end IS NULL OR ep_end>=?) "
             "ORDER BY ep_start DESC LIMIT 1",
             (project_id, name, episode_no, episode_no)).fetchone()
     except sqlite3.OperationalError:
         return None
-    return row["appearance"] if row and row["appearance"] else None
+    if not row:
+        return None
+    return portrait_appearance_anchor(row["prompt"], row["appearance"] or "") or None
 
 
 def bible_for_episode(project_id: str, bible: "Bible", episode_no: int | None) -> "Bible":

@@ -217,12 +217,75 @@ def test_edited_reference_gallery_changes_enqueue_idempotency(monkeypatch) -> No
     assert [r["id"] for r in new_meta["reference_images"]] == ["r_keep", "r_gone"]
 
 
+def test_new_portrait_revision_prevents_old_gallery_and_video_reuse(monkeypatch) -> None:
+    conn = _conn()
+    _seed_project(conn)
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "ensure_media_trace", lambda **_kwargs: (None, None))
+    monkeypatch.setattr(compiler, "compile_prompt", lambda *a, **k: "PROMPT --dur 5")
+
+    current = {"input_fingerprint": "portrait-old"}
+    monkeypatch.setattr(
+        "app.multiview.resolve_shot_asset_dependencies",
+        lambda **_kwargs: dict(current),
+    )
+    monkeypatch.setattr(
+        "app.multiview.manifest_revisions_match",
+        lambda frozen, latest: frozen.get("input_fingerprint") == latest.get("input_fingerprint"),
+    )
+
+    first = worker.enqueue_shot("s1")
+    old_refs = [{
+        "id": "old-character",
+        "url": "data:image/jpeg;base64,old",
+        "type": "character",
+        "source": "asset_library",
+        "selectedForSeedance": True,
+        "library_revision_id": "portrait-old",
+    }]
+    conn.execute(
+        "UPDATE shot_versions SET status='succeeded', image_inputs=? WHERE id=?",
+        (json.dumps({
+            "mode": "REFERENCE_IMAGE_MODE",
+            "reference_images": old_refs,
+            "reference_manifest": dict(current),
+            "reference_gallery_revision": 1,
+            "keyframe_prompt_contract_version": video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION,
+        }), first["version_id"]),
+    )
+    conn.execute(
+        "UPDATE shots SET adopted_version_id=? WHERE id='s1'",
+        (first["version_id"],),
+    )
+    conn.commit()
+
+    current["input_fingerprint"] = "portrait-new"
+    second = worker.enqueue_shot("s1")
+
+    assert second["reused"] is False
+    assert second["version_id"] != first["version_id"]
+    new_meta = json.loads(conn.execute(
+        "SELECT image_inputs FROM shot_versions WHERE id=?",
+        (second["version_id"],),
+    ).fetchone()["image_inputs"])
+    assert "reference_images" not in new_meta
+    assert "reference_gallery_source_version_id" not in new_meta
+
+
 def test_reroll_reuses_unedited_shot_reference_gallery(monkeypatch) -> None:
     conn = _conn()
     _seed_project(conn)
     monkeypatch.setattr(worker, "get_conn", lambda: conn)
     monkeypatch.setattr(worker, "ensure_media_trace", lambda **_kwargs: (None, None))
     monkeypatch.setattr(compiler, "compile_prompt", lambda *a, **k: "PROMPT --dur 5")
+    monkeypatch.setattr(
+        "app.multiview.resolve_shot_asset_dependencies",
+        lambda **_kwargs: {"input_fingerprint": "frozen-manifest"},
+    )
+    monkeypatch.setattr(
+        "app.multiview.manifest_revisions_match",
+        lambda frozen, latest: frozen.get("input_fingerprint") == latest.get("input_fingerprint"),
+    )
 
     first = worker.enqueue_shot("s1")
     refs = [{

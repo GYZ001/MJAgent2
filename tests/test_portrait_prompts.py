@@ -1,9 +1,10 @@
 import json
 import sqlite3
 
-from app.refs import _merge_generated_portraits, portrait_prompt
+from app.refs import _merge_generated_portraits, portrait_appearance_anchor, portrait_prompt
 from app.multiview import character_view_prompt
-from app.schemas import Character
+from app.portraits import bible_for_episode
+from app.schemas import Bible, Character, World
 
 
 def test_spectral_portrait_prompt_does_not_force_neutral_grounded_pose() -> None:
@@ -44,6 +45,53 @@ def test_multiview_prompt_uses_latest_edited_portrait_prompt() -> None:
     assert "视角与构图要求覆盖源提示词" in prompt
 
 
+def test_accepted_portrait_prompt_derives_downstream_outfit_anchor() -> None:
+    latest = (
+        "3D国漫写实风。全身角色立绘定妆照：少女，黑色及腰长发，"
+        "淡紫色古风长裙，金色刺绣纹饰，广袖流仙裙。正面站立，中性表情，"
+        "纯浅米色背景，全身完整可见。"
+    )
+
+    anchor = portrait_appearance_anchor(latest, "淡绿色上衣搭配紧腿长裤")
+
+    assert "淡紫色古风长裙" in anchor
+    assert "紧腿长裤" not in anchor
+    assert "正面站立" not in anchor
+    assert "纯浅米色背景" not in anchor
+
+
+def test_episode_bible_uses_accepted_portrait_prompt_not_stale_appearance(monkeypatch) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE character_portraits("
+        "project_id TEXT, character_name TEXT, ep_start INTEGER, ep_end INTEGER, "
+        "appearance TEXT, prompt TEXT, image_path TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO character_portraits VALUES(?,?,?,?,?,?,?)",
+        (
+            "p", "萧薰儿", 1, None, "淡绿色上衣搭配紧腿长裤",
+            "全身角色立绘定妆照：黑色长发，淡紫色古风长裙，金色刺绣。"
+            "正面站立，纯浅米色背景。",
+            None,
+        ),
+    )
+    monkeypatch.setattr("app.portraits.get_conn", lambda: conn)
+    bible = Bible(
+        characters=[Character(
+            name="萧薰儿", role="主角", appearance_canonical="淡绿色上衣搭配紧腿长裤",
+        )],
+        world=World(visual_style_canonical="3D国漫"),
+    )
+
+    episode_bible = bible_for_episode("p", bible, 1)
+
+    appearance = episode_bible.characters[0].appearance_canonical
+    assert "淡紫色古风长裙" in appearance
+    assert "紧腿长裤" not in appearance
+
+
 def test_portrait_completion_merges_without_erasing_concurrent_scenes() -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -62,4 +110,5 @@ def test_portrait_completion_merges_without_erasing_concurrent_scenes() -> None:
     merged = json.loads(conn.execute("SELECT bible_json FROM projects WHERE id='p'").fetchone()[0])
 
     assert merged["characters"][0]["ref_image_path"] == "accepted.jpg"
+    assert merged["characters"][0]["appearance_canonical"] == "透明苍老人影"
     assert merged["scenes"] == bible["scenes"]

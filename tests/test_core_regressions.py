@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 
 from app import artifacts, db, planning, task_registry, worker
+from app.capabilities import ensure_catalog_loaded, get_command_bus
 from app.compiler import clip_duration_value
 
 
@@ -93,9 +94,9 @@ def test_regex_planner_creates_exactly_one_episode_per_chapter(monkeypatch) -> N
     )
     monkeypatch.setattr(planning, "get_conn", lambda: conn)
     monkeypatch.setattr(
-        planning.worker,
-        "delete_project_episodes",
-        lambda project_id: conn.execute("DELETE FROM episodes WHERE project_id=?", (project_id,)).rowcount,
+        planning,
+        "replan_blockers",
+        lambda _conn, _project_id: {"blocked": False},
     )
 
     asyncio.run(planning.run_regex_plan("p1"))
@@ -107,7 +108,9 @@ def test_regex_planner_creates_exactly_one_episode_per_chapter(monkeypatch) -> N
     assert conn.execute("SELECT plan_status FROM projects WHERE id='p1'").fetchone()[0] == "ready"
 
 
-def test_regex_replan_skips_existing_title_only_duplicate(monkeypatch) -> None:
+def test_regex_replan_skips_existing_title_only_duplicate_and_cleans_media(
+    tmp_path, monkeypatch,
+) -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript(
@@ -133,6 +136,9 @@ def test_regex_replan_skips_existing_title_only_duplicate(monkeypatch) -> None:
           'p1',1927,'第一千六百二十二章双帝之战',
           '第一千六百二十二章双帝之战 魂天帝踏着血云现身，萧炎迎空而起。'
         );
+        INSERT INTO episodes VALUES(
+          'old','p1',99,'旧分集','','','','[99]',50,'done',1
+        );
         """
     )
     rich_body = "魂天帝与萧炎连续交锋，天地在帝境力量下震颤。" * 12
@@ -143,21 +149,28 @@ def test_regex_replan_skips_existing_title_only_duplicate(monkeypatch) -> None:
     conn.commit()
     monkeypatch.setattr(planning, "get_conn", lambda: conn)
     monkeypatch.setattr(
-        planning.worker,
-        "delete_project_episodes",
-        lambda project_id: conn.execute(
-            "DELETE FROM episodes WHERE project_id=?", (project_id,)
-        ).rowcount,
+        planning,
+        "replan_blockers",
+        lambda _conn, _project_id: {"blocked": False},
     )
+    project_root = tmp_path / "projects"
+    old_media = project_root / "p1" / "episodes" / "99" / "old.mp4"
+    old_media.parent.mkdir(parents=True)
+    old_media.write_bytes(b"old")
+    monkeypatch.setattr(planning.config, "PROJECTS_DIR", project_root)
 
     asyncio.run(planning.run_regex_plan("p1"))
 
     rows = conn.execute("SELECT * FROM episodes ORDER BY episode_no").fetchall()
     assert len(rows) == 1
     assert json.loads(rows[0]["source_chapters"]) == [1927]
+    assert rows[0]["id"] != "old"
+    assert not (project_root / "p1" / "episodes").exists()
 
 
-def test_regex_planner_rolls_back_partial_episode_batch(monkeypatch) -> None:
+def test_regex_planner_rolls_back_to_old_plan_and_keeps_media(
+    tmp_path, monkeypatch,
+) -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript(
@@ -181,27 +194,160 @@ def test_regex_planner_rolls_back_partial_episode_batch(monkeypatch) -> None:
         INSERT INTO projects VALUES('p1','running',NULL,NULL,'ingested');
         INSERT INTO chapters VALUES('p1',1,'第一章','第一章 正文一');
         INSERT INTO chapters VALUES('p1',2,'第二章','第二章 正文二');
+        INSERT INTO episodes VALUES(
+          'ep_old','p1',9,'旧分集','','','','[9]',50,'done',1
+        );
         """
     )
     monkeypatch.setattr(planning, "get_conn", lambda: conn)
     monkeypatch.setattr(
-        planning.worker,
-        "delete_project_episodes",
-        lambda project_id: conn.execute(
-            "DELETE FROM episodes WHERE project_id=?", (project_id,)
-        ).rowcount,
+        planning,
+        "replan_blockers",
+        lambda _conn, _project_id: {"blocked": False},
     )
     ids = iter(("ep_same", "ep_same"))
     monkeypatch.setattr(planning, "new_id", lambda _prefix: next(ids))
+    project_root = tmp_path / "projects"
+    old_media = project_root / "p1" / "episodes" / "9" / "old.mp4"
+    old_media.parent.mkdir(parents=True)
+    old_media.write_bytes(b"old")
+    monkeypatch.setattr(planning.config, "PROJECTS_DIR", project_root)
 
     asyncio.run(planning.run_regex_plan("p1"))
 
-    assert conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0] == 0
+    rows = conn.execute("SELECT id, title FROM episodes").fetchall()
+    assert [(row["id"], row["title"]) for row in rows] == [("ep_old", "旧分集")]
+    assert old_media.read_bytes() == b"old"
     project = conn.execute(
         "SELECT plan_status, plan_error FROM projects WHERE id='p1'"
     ).fetchone()
     assert project["plan_status"] == "failed"
     assert project["plan_error"]
+
+
+def test_replan_blocks_durable_run_and_paused_budget_job(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "replan-blockers.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    project_root = tmp_path / "projects"
+    monkeypatch.setattr(planning.config, "PROJECTS_DIR", project_root)
+    db.init_db()
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO projects(id,name,status,plan_status,created_at) "
+        "VALUES('p1','P','planned','running',1)"
+    )
+    conn.execute(
+        "INSERT INTO chapters(project_id,idx,title,content) "
+        "VALUES('p1',1,'第一章','第一章 新正文')"
+    )
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,title,status,created_at) "
+        "VALUES('old','p1',1,'旧分集','done',1)"
+    )
+    conn.execute(
+        """INSERT INTO workflow_runs(
+             id,workflow_type,scope_type,scope_id,status,input_fingerprint,updated_at
+           ) VALUES('run_old','storyboard','episode','old','PAUSED_EXTERNAL','fp',1)"""
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+             id,kind,episode_id,project_id,status,created_at,updated_at
+           ) VALUES('job_old','video','old','p1','paused_budget',1,1)"""
+    )
+    conn.commit()
+    old_media = project_root / "p1" / "episodes" / "1" / "old.mp4"
+    old_media.parent.mkdir(parents=True)
+    old_media.write_bytes(b"old")
+
+    with pytest.raises(Exception) as exc_info:
+        asyncio.run(planning.start_plan("p1", replace_existing=True))
+
+    error = exc_info.value
+    assert getattr(error, "status_code", None) == 409
+    assert error.detail["code"] == "REPLAN_ACTIVE_WORK"
+    assert error.detail["active_media_jobs"] == 1
+    assert error.detail["active_runs"][0]["id"] == "run_old"
+
+    asyncio.run(planning.run_regex_plan("p1"))
+    assert conn.execute("SELECT title FROM episodes WHERE id='old'").fetchone()["title"] == "旧分集"
+    assert old_media.read_bytes() == b"old"
+    state = conn.execute(
+        "SELECT plan_status,plan_error FROM projects WHERE id='p1'"
+    ).fetchone()
+    assert state["plan_status"] == "failed"
+    assert "原分集和媒体均已保留" in state["plan_error"]
+
+
+def test_episode_plan_preflight_binds_destructive_impact(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "replan-preflight.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO projects(id,name,status,plan_status,created_at) "
+        "VALUES('p1','原著项目','planned','ready',1)"
+    )
+    conn.execute(
+        "INSERT INTO chapters(project_id,idx,title,content) "
+        "VALUES('p1',1,'第一章','第一章 正文')"
+    )
+    conn.execute(
+        """INSERT INTO episodes(
+             id,project_id,episode_no,title,status,screenplay_status,
+             screenplay_artifact_id,storyboard_artifact_id,delivery_artifact_id,created_at
+           ) VALUES(
+             'e1','p1',1,'旧分集','done','ready','script_art','board_art','delivery_art',1
+           )"""
+    )
+    conn.execute(
+        "INSERT INTO shots(id,episode_id,shot_no,duration_s) VALUES('s1','e1',1,5)"
+    )
+    conn.execute(
+        """INSERT INTO shot_versions(
+             id,shot_id,version_no,prompt_text,idem_key,status,created_at
+           ) VALUES('v1','s1',1,'prompt','idem','succeeded',1)"""
+    )
+    conn.execute(
+        """INSERT INTO artifacts(
+             id,type,scope_type,scope_id,version,status,trust_level,
+             content_hash,created_at
+           ) VALUES('package_art','delivery_package','episode','e1',1,
+                    'candidate','candidate','hash',1)"""
+    )
+    conn.execute(
+        """INSERT INTO delivery_packages(
+             id,episode_id,artifact_id,status,package_path,manifest_json,
+             quality_report_json,known_issues,created_at
+           ) VALUES('pkg1','e1','package_art','waiting_human','/tmp/pkg',
+                    '{}','{}','[]',1)"""
+    )
+    conn.commit()
+    ensure_catalog_loaded()
+    bus = get_command_bus()
+
+    missing_confirmation = bus.preflight(
+        "episode.plan",
+        {"project_id": "p1", "replace_existing": False},
+    )
+    assert missing_confirmation.allowed is False
+    assert missing_confirmation.denial_code == "REPLAN_CONFIRMATION_REQUIRED"
+
+    impact = bus.preflight(
+        "episode.plan",
+        {"project_id": "p1", "replace_existing": True},
+    )
+    assert impact.allowed is True
+    assert impact.requires_confirmation is True
+    assert impact.affected.episodes == ["e1"]
+    assert impact.affected.shot_count == 1
+    assert impact.affected.invalidated_artifacts == 5
+    assert impact.affected.packages == ["pkg1"]
+    assert impact.estimated_cost_cny is None
+    assert any("不调用模型" in warning for warning in impact.warnings)
 
 
 def test_task_registry_cancels_and_waits_before_returning() -> None:
