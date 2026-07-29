@@ -488,6 +488,14 @@ async def _post_json(client: httpx.AsyncClient, url: str, payload: dict, *,
             if not err.retryable:
                 raise err
             last_err = err
+            # Harness 已为文本模型提供分钟级指数退避。429 若仍在 adapter 内按
+            # 1.5s/3s 立即重放，只会在同一个 TPM 窗口连续失败，并放大限流。
+            if (
+                resp.status_code == 429
+                and kind == "chat"
+                and (merged_meta or {}).get("gateway") == "execution_harness"
+            ):
+                raise err
         except ProviderError:
             raise
         except httpx.TimeoutException as exc:
@@ -501,7 +509,13 @@ async def _post_json(client: httpx.AsyncClient, url: str, payload: dict, *,
             finish_provider_call(call_id, "TIMEOUT", None, latency, error=detail)
             # Base64 大图写超时时，原样重传三次只会持续占满上行。
             # 立即交给上层：图生图可快速降级为无种子生成，VLM 则明确失败。
-            if phase == "write":
+            # Harness 文本请求的 read timeout 也必须交给外层分钟级退避：
+            # 服务端可能仍在生成，adapter 立即重放会制造并行幽灵请求并吃满 TPM。
+            if phase == "write" or (
+                phase == "read"
+                and kind == "chat"
+                and (merged_meta or {}).get("gateway") == "execution_harness"
+            ):
                 raise last_err
         except httpx.HTTPError as exc:
             latency = int((time.time() - start) * 1000)
@@ -616,8 +630,14 @@ async def _chat_with_reasoning_fallback(client: httpx.AsyncClient, url: str, pay
 
 
 def _chat_read_timeout_s(call_meta: dict | None) -> float:
-    """为整版剧本 Baseline 使用独立读超时，其他文本请求保持通用上限。"""
+    """为长结构化生成使用独立读超时，其他文本请求保持通用上限。"""
+    stage_key = str((call_meta or {}).get("stage_key") or "").strip().lower()
     stage = str((call_meta or {}).get("stage") or "").strip().lower()
+    if stage_key == "storyboard_outline":
+        return max(
+            config.TIMEOUT_CHAT_READ,
+            config.TIMEOUT_CHAT_STORYBOARD_OUTLINE_READ,
+        )
     if "baseline" in stage:
         return max(config.TIMEOUT_CHAT_READ, config.TIMEOUT_CHAT_BASELINE_READ)
     return config.TIMEOUT_CHAT_READ

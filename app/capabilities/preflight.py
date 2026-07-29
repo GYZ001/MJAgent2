@@ -308,7 +308,7 @@ def video_clear_shot(args) -> PreflightResult:
 def video_generate_shot(args) -> PreflightResult:
     conn = get_conn()
     shot = conn.execute(
-        "SELECT id, shot_no, episode_id FROM shots WHERE id=?", (args.shot_id,)
+        "SELECT id, shot_no, episode_id, storyboard_adopted FROM shots WHERE id=?", (args.shot_id,)
     ).fetchone()
     if not shot:
         return PreflightResult(
@@ -321,6 +321,18 @@ def video_generate_shot(args) -> PreflightResult:
             confirmation_policy=ConfirmationPolicy.ALWAYS,
             denial_code="not_found",
             denial_message="镜头不存在",
+        )
+    if not bool(shot["storyboard_adopted"]):
+        return PreflightResult(
+            command="video.generate_shot",
+            allowed=False,
+            risk=RiskLevel.R2_MATERIAL,
+            summary="该分镜已取消采纳",
+            state_fingerprint=_fp({"shot_id": args.shot_id, "storyboard_adopted": False}),
+            requires_confirmation=False,
+            confirmation_policy=ConfirmationPolicy.ALWAYS,
+            denial_code="invalid_state",
+            denial_message="本分镜已人工取消采纳，不进入视频生成；请先在分镜台恢复采纳",
         )
     ep = conn.execute(
         "SELECT id, status, episode_no FROM episodes WHERE id=?", (shot["episode_id"],)
@@ -388,11 +400,12 @@ def video_generate_episode(args) -> PreflightResult:
         pass
     pending = conn.execute(
         """SELECT COUNT(*) AS c FROM shots
-           WHERE episode_id=? AND (adopted_version_id IS NULL OR adopted_version_id='')""",
+           WHERE episode_id=? AND storyboard_adopted=1
+             AND (adopted_version_id IS NULL OR adopted_version_id='')""",
         (args.episode_id,),
     ).fetchone()["c"]
     total = conn.execute(
-        "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (args.episode_id,)
+        "SELECT COUNT(*) AS c FROM shots WHERE episode_id=? AND storyboard_adopted=1", (args.episode_id,)
     ).fetchone()["c"]
     estimated = round(max(int(pending or 0), 1) * 3.6, 2)
     confirmed = ep["status"] in {"confirmed", "generating", "done", "mixed"}
@@ -439,11 +452,12 @@ def video_complete_episode(args) -> PreflightResult:
         )
     # Supervisor 已在跑时，resume/抬额允许；fresh 仍可被核心拒绝
     total = conn.execute(
-        "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (args.episode_id,)
+        "SELECT COUNT(*) AS c FROM shots WHERE episode_id=? AND storyboard_adopted=1", (args.episode_id,)
     ).fetchone()["c"]
     uncovered = conn.execute(
         """SELECT COUNT(*) AS c FROM shots
-           WHERE episode_id=? AND (adopted_version_id IS NULL OR adopted_version_id='')""",
+           WHERE episode_id=? AND storyboard_adopted=1
+             AND (adopted_version_id IS NULL OR adopted_version_id='')""",
         (args.episode_id,),
     ).fetchone()["c"]
     grades = {"A": 0, "B": 0, "C": int(uncovered or 0)}
@@ -626,13 +640,20 @@ def storyboard_confirm(args) -> PreflightResult:
     shots = conn.execute(
         "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (args.episode_id,)
     ).fetchone()["c"]
+    forced = bool(getattr(args, "force", False))
     return PreflightResult(
         command="storyboard.confirm",
         allowed=True,
         risk=RiskLevel.R3_DESTRUCTIVE,
-        summary=f"确认第 {ep['episode_no']} 集分镜（{shots} 镜）并解锁付费视频阶段",
+        summary=(
+            f"带风险强行确认第 {ep['episode_no']} 集分镜（{shots} 镜）并解锁付费视频阶段"
+            if forced else f"确认第 {ep['episode_no']} 集分镜（{shots} 镜）并解锁付费视频阶段"
+        ),
         affected=AffectedScope(episodes=[args.episode_id], shot_count=int(shots or 0)),
-        warnings=["确认后将允许产生付费媒体任务"],
+        warnings=(
+            ["仍有待修复必检问题；强行确认会记录人工风险承担", "确认后将允许产生付费媒体任务"]
+            if forced else ["确认后将允许产生付费媒体任务"]
+        ),
         state_fingerprint=_fp({"episode_id": args.episode_id, "status": ep["status"], "shots": shots}),
         requires_confirmation=True,
         confirmation_policy=ConfirmationPolicy.ALWAYS,
@@ -916,6 +937,105 @@ def screenplay_delete(args) -> PreflightResult:
     )
 
 
+def storyboard_clear(args) -> PreflightResult:
+    conn = get_conn()
+    ep = conn.execute(
+        """SELECT id,episode_no,status,storyboard_outline_json,storyboard_artifact_id,
+                  working_storyboard_artifact_id,published_storyboard_artifact_id,
+                  storyboard_production_revision_id,active_storyboard_run_id
+           FROM episodes WHERE id=?""",
+        (args.episode_id,),
+    ).fetchone()
+    if not ep:
+        return PreflightResult(
+            command="storyboard.clear",
+            allowed=False,
+            risk=RiskLevel.R3_DESTRUCTIVE,
+            summary="剧集不存在",
+            state_fingerprint=_fp({"episode_id": args.episode_id, "missing": True}),
+            requires_confirmation=False,
+            confirmation_policy=ConfirmationPolicy.ALWAYS,
+            denial_code="not_found",
+            denial_message="剧集不存在",
+        )
+    shots = int(conn.execute(
+        "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (args.episode_id,),
+    ).fetchone()["c"] or 0)
+    versions = int(conn.execute(
+        """SELECT COUNT(*) AS c FROM shot_versions v
+           JOIN shots s ON s.id=v.shot_id WHERE s.episode_id=?""",
+        (args.episode_id,),
+    ).fetchone()["c"] or 0)
+    runs = int(conn.execute(
+        """SELECT COUNT(*) AS c FROM workflow_runs
+           WHERE workflow_type='storyboard' AND scope_type='episode' AND scope_id=?""",
+        (args.episode_id,),
+    ).fetchone()["c"] or 0)
+    active_runs = int(conn.execute(
+        """SELECT COUNT(*) AS c FROM workflow_runs
+           WHERE workflow_type='storyboard' AND scope_type='episode' AND scope_id=?
+             AND status IN ('CREATED','RUNNING','WAITING_RETRY','PAUSED_EXTERNAL')""",
+        (args.episode_id,),
+    ).fetchone()["c"] or 0)
+    artifacts = int(conn.execute(
+        """SELECT COUNT(*) AS c FROM artifacts
+           WHERE (scope_type='episode' AND scope_id=? AND type IN
+                  ('storyboard','storyboard_outline','storyboard_supervisor_checkpoint',
+                   'video_supervisor_checkpoint','video_coverage_report'))
+              OR (scope_type='storyboard_checkpoint' AND scope_id LIKE ?)""",
+        (args.episode_id, f"{args.episode_id}:%"),
+    ).fetchone()["c"] or 0)
+    has_pointer = any(ep[key] for key in (
+        "storyboard_outline_json", "storyboard_artifact_id",
+        "working_storyboard_artifact_id", "published_storyboard_artifact_id",
+        "storyboard_production_revision_id", "active_storyboard_run_id",
+    ))
+    if not (shots or versions or runs or artifacts or has_pointer):
+        return PreflightResult(
+            command="storyboard.clear",
+            allowed=False,
+            risk=RiskLevel.R3_DESTRUCTIVE,
+            summary="本集没有可清空的分镜数据",
+            state_fingerprint=_fp({"episode_id": args.episode_id, "empty": True}),
+            requires_confirmation=False,
+            confirmation_policy=ConfirmationPolicy.ALWAYS,
+            denial_code="invalid_state",
+            denial_message="本集没有可清空的分镜数据",
+        )
+    return PreflightResult(
+        command="storyboard.clear",
+        allowed=True,
+        risk=RiskLevel.R3_DESTRUCTIVE,
+        summary=f"永久清空第 {ep['episode_no']} 集的全部分镜数据",
+        affected=AffectedScope(
+            episodes=[args.episode_id],
+            shot_count=shots,
+            invalidated_artifacts=artifacts + versions,
+            extra={
+                "active_runs": active_runs,
+                "media_versions": versions,
+                "rerun_scope": "下次从空白开始分镜任务",
+            },
+        ),
+        warnings=[
+            "将停止当前分镜任务，并删除镜头、检查点、分镜运行记录和模型成功响应缓存",
+            "参考图、视频候选和本集成片也会删除；已确认的剧本会保留",
+            "此操作不可恢复",
+        ],
+        state_fingerprint=_fp({
+            "episode_id": args.episode_id,
+            "status": ep["status"],
+            "shots": shots,
+            "versions": versions,
+            "runs": runs,
+            "artifacts": artifacts,
+            "active_run": ep["active_storyboard_run_id"],
+        }),
+        requires_confirmation=True,
+        confirmation_policy=ConfirmationPolicy.ALWAYS,
+    )
+
+
 def bible_update(args) -> PreflightResult:
     conn = get_conn()
     row = conn.execute(
@@ -1018,6 +1138,7 @@ PREFLIGHT_MAP: dict[str, Any] = {
     "shot.update": shot_update,
     "screenplay.update": screenplay_update,
     "screenplay.delete": screenplay_delete,
+    "storyboard.clear": storyboard_clear,
     "bible.update": bible_update,
     "delivery.review": delivery_review,
 }

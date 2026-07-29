@@ -124,6 +124,7 @@ async def adopt_version(args: I.VideoAdoptVersionInput) -> CommandResult:
 
     body = {
         "version_id": args.version_id, "reason": args.reason, "decided_by": "agent",
+        "playback_rate": args.playback_rate,
         "qualification_version": args.qualification_version,
         "idempotency_key": args.idempotency_key, "request_id": args.request_id,
     }

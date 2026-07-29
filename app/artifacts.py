@@ -153,8 +153,15 @@ def delete_episode_shots(episode_id: str) -> int:
     conn = get_conn()
     ep = conn.execute("SELECT project_id, episode_no FROM episodes WHERE id=?", (episode_id,)).fetchone()
     shots = rows_to_dicts(conn.execute(
-        "SELECT id, episode_id FROM shots WHERE episode_id=?", (episode_id,)).fetchall())
+        "SELECT id, episode_id, shot_no FROM shots WHERE episode_id=?", (episode_id,)).fetchall())
+    for shot in shots:
+        _delete_shot_reference_dir(conn, shot)
+        _delete_shot_reference_records(conn, shot["id"])
     _purge_shots(conn, shots)
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='shot_audio'"
+    ).fetchone():
+        conn.execute("DELETE FROM shot_audio WHERE episode_id=?", (episode_id,))
     conn.execute("DELETE FROM shots WHERE episode_id=?", (episode_id,))
     conn.execute("DELETE FROM jobs WHERE episode_id=?", (episode_id,))
     conn.execute(
@@ -509,7 +516,8 @@ def _adopted_video_paths(episode_id: str) -> list[tuple[int, str]]:
         """SELECT s.shot_no, v.video_path
            FROM shots s
            JOIN shot_versions v ON v.id = s.adopted_version_id
-           WHERE s.episode_id=? AND v.status='succeeded' AND v.video_path IS NOT NULL
+           WHERE s.episode_id=? AND s.storyboard_adopted=1
+             AND v.status='succeeded' AND v.video_path IS NOT NULL
            ORDER BY s.shot_no""",
         (episode_id,)).fetchall()
     return [

@@ -285,7 +285,6 @@ def _restart_screenplay_run(run_id: str, trigger_type: str):
 def _restart_storyboard_run(run_id: str, trigger_type: str):
     run = repository.get_run(run_id)
     from app import api as domain_api
-    from app.storyboard_supervisor import load_latest_checkpoint
 
     episode = get_conn().execute(
         "SELECT * FROM episodes WHERE id=?", (run["scope_id"],)
@@ -294,12 +293,6 @@ def _restart_storyboard_run(run_id: str, trigger_type: str):
         raise HTTPException(404, "剧集不存在")
     if task_registry.active("storyboard", episode["id"]):
         raise HTTPException(409, "该剧集已有分镜任务在运行")
-    try:
-        completion_mode = episode["storyboard_completion_mode"] or "ready_for_manual_confirm"
-    except (KeyError, IndexError, TypeError):
-        completion_mode = "ready_for_manual_confirm"
-    cp = load_latest_checkpoint(episode["id"])
-    grant_id = cp.completion_grant_id if cp else None
     recorder = None
     try:
         recorder = domain_api._new_storyboard_recorder(
@@ -307,7 +300,6 @@ def _restart_storyboard_run(run_id: str, trigger_type: str):
             requested_by="api",
             trigger_type=trigger_type,
             parent_run_id=run_id,
-            completion_mode=completion_mode,
         )
         get_conn().execute(
             "UPDATE episodes SET status='scripting',script_error=NULL,"
@@ -319,8 +311,6 @@ def _restart_storyboard_run(run_id: str, trigger_type: str):
             "storyboard", episode["id"],
             domain_api._recorded_storyboard_task(
                 episode["id"], recorder, resume=True,
-                completion_mode=completion_mode,
-                completion_grant_id=grant_id,
             ),
             project_id=episode["project_id"],
         )

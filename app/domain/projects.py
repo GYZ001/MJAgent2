@@ -531,11 +531,11 @@ def project_detail(
         p["episodes"] = rows_to_dicts(conn.execute(
             """SELECT e.id, e.episode_no, e.title, e.status, e.screenplay_status,
                       (SELECT COUNT(*) FROM shots s WHERE s.episode_id=e.id) AS shot_count,
-                      (SELECT COUNT(*) FROM shots s WHERE s.episode_id=e.id AND s.adopted_version_id IS NOT NULL) AS video_count,
-                      (SELECT COUNT(*) FROM shots s WHERE s.episode_id=e.id AND s.adopted_version_id IS NULL
+                      (SELECT COUNT(*) FROM shots s WHERE s.episode_id=e.id AND s.storyboard_adopted=1 AND s.adopted_version_id IS NOT NULL) AS video_count,
+                      (SELECT COUNT(*) FROM shots s WHERE s.episode_id=e.id AND s.storyboard_adopted=1 AND s.adopted_version_id IS NULL
                          AND EXISTS(SELECT 1 FROM shot_versions v WHERE v.shot_id=s.id AND v.status='succeeded')) AS pending_adoption_count,
                       (SELECT COUNT(*) FROM shot_versions v JOIN shots s ON s.id=v.shot_id
-                         WHERE s.episode_id=e.id AND v.status='failed') AS failed_count
+                         WHERE s.episode_id=e.id AND s.storyboard_adopted=1 AND v.status='failed') AS failed_count
                  FROM episodes e WHERE e.project_id=? ORDER BY e.episode_no""",
             (project_id,),
         ).fetchall())

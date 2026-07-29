@@ -4,6 +4,7 @@ import asyncio
 import json
 
 from app import stages
+from app.continuity import dialogue_framing_errors
 from app.loops import AgentLoop, AgentLoopPolicy
 from app.stages import (StoryboardShotDraft, _run_with_agent_loop,
                         normalize_storyboard_shot_candidate)
@@ -18,6 +19,23 @@ def _loop() -> AgentLoop[StoryboardShotDraft]:
         scope_id="ep1:2",
         artifact_type="storyboard_shot",
         policy=AgentLoopPolicy(max_iterations=4, stall_rounds=2, no_gain_rounds=2),
+    )
+
+
+def _dialogue_loop() -> AgentLoop[StoryboardShotDraft]:
+    return AgentLoop(
+        stage_key="storyboard_shot_2",
+        contract_key="storyboard",
+        goal="repair dialogue framing",
+        scope_type="storyboard_checkpoint",
+        scope_id="ep1:2",
+        artifact_type="storyboard_shot",
+        policy=AgentLoopPolicy(
+            max_iterations=4,
+            stall_rounds=2,
+            no_gain_rounds=2,
+            repair_issue_codes=frozenset({"DIALOGUE_FRAMING_INVALID"}),
+        ),
     )
 
 
@@ -114,3 +132,76 @@ def test_storyboard_loop_recovers_broken_json_then_null_event_id(monkeypatch) ->
     assert calls == 2
     assert result.shot.shot_no == 2
     assert result.shot.story_event_id == ""
+
+
+def test_storyboard_dialogue_framing_blocker_requests_repair(monkeypatch) -> None:
+    base_shot = {
+        "shot_no": 2,
+        "duration_s": 5,
+        "shot_size": "中景",
+        "camera_move": "固定",
+        "scene_setting": "日，广场",
+        "characters": ["甲", "乙"],
+        "characters_visible": ["甲", "乙"],
+        "action_desc": "甲站在画面中央面向画外听者，清楚说出自己的决定。",
+        "first_frame_desc": "甲与乙同处画面中央，甲看向画外，尚未开口。",
+        "last_frame_desc": "同一机位，甲说完决定，乙仍站在一旁看着他。",
+        "source_excerpt": "甲抬起头，终于当众说出了自己的决定。",
+        "dialogues": [
+            {
+                "speaker": "甲",
+                "line": "这件事由我来做。",
+                "emotion": "坚定",
+                "delivery": "spoken_dialogue",
+            }
+        ],
+        "transition": "硬切",
+    }
+    repaired_shot = {
+        **base_shot,
+        "shot_size": "近景",
+        "characters": ["甲"],
+        "characters_visible": ["甲"],
+        "first_frame_desc": "甲独自处于近景中央，面向画外听者，尚未开口。",
+        "last_frame_desc": "同一机位，甲说完决定后仍看向画外，神情坚定。",
+    }
+    outputs = [
+        json.dumps(
+            {"episode_no": 1, "is_final": False, "shot": base_shot},
+            ensure_ascii=False,
+        ),
+        json.dumps(
+            {"episode_no": 1, "is_final": False, "shot": repaired_shot},
+            ensure_ascii=False,
+        ),
+    ]
+    calls = 0
+
+    async def fake_chat(*_args, **_kwargs):
+        nonlocal calls
+        value = outputs[calls]
+        calls += 1
+        return value
+
+    monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(stages, "log_provider_call", lambda *_args, **_kwargs: None)
+
+    result = asyncio.run(_run_with_agent_loop(
+        "分镜脚本",
+        "storyboard",
+        "生成第2镜",
+        StoryboardShotDraft,
+        lambda draft: dialogue_framing_errors(draft.shot),
+        loop=_dialogue_loop(),
+        prefill={"episode_no": 1},
+        storyboard_candidate_context={
+            "episode_id": "ep1",
+            "episode_no": 1,
+            "shot_no": 2,
+            "outline_story_event_id": "",
+        },
+    ))
+
+    assert calls == 2
+    assert result.disposition == "PASS"
+    assert dialogue_framing_errors(result.shot) == []

@@ -623,9 +623,10 @@ def _keyframe_required_text_expected(shot: Shot, target: str, target_source: str
 
 def keyframe_visual_contract(shot: Shot, bible: Bible | None = None) -> dict[str, object]:
     """视频编译器与叙事关键帧共用的确定性构图合同。"""
-    from app.continuity import effective_characters_visible
+    from app.continuity import dialogue_focus_subject, effective_characters_visible
 
     visible_characters = effective_characters_visible(shot)
+    dialogue_focus = dialogue_focus_subject(shot)
     bible_names = {c.name for c in bible.characters} if bible is not None else set()
     collective_roles = [
         name for name in visible_characters if name not in bible_names and is_collective_role(name)
@@ -670,7 +671,7 @@ def keyframe_visual_contract(shot: Shot, bible: Bible | None = None) -> dict[str
         and ("独自" in target_keyframe_desc or bool(re.search(r"(?:只剩|仅剩)[^，。]{0,8}(?:一人|他|她)", target_keyframe_desc)))
     )
     target_requires_anonymous_crowd = (
-        not target_forbids_crowd
+        not dialogue_focus and not target_forbids_crowd
         and (
             any(marker in target_keyframe_desc for marker in crowd_markers)
             or bool(collective_context_re.search(target_keyframe_desc))
@@ -678,7 +679,7 @@ def keyframe_visual_contract(shot: Shot, bible: Bible | None = None) -> dict[str
         )
     )
     crowd_context_text = " ".join((target_keyframe_desc, shot.scene_setting or "", shot.action_desc or ""))
-    anonymous_background_allowed = not target_forbids_crowd and (
+    anonymous_background_allowed = not dialogue_focus and not target_forbids_crowd and (
         bool(collective_roles)
         or any(marker in crowd_context_text for marker in (*crowd_markers, "当众"))
         or bool(collective_context_re.search(crowd_context_text))
@@ -709,10 +710,12 @@ def keyframe_visual_contract(shot: Shot, bible: Bible | None = None) -> dict[str
         "visible_characters": visible_characters,
         "individual_visible_characters": individual_characters,
         "collective_visible_roles": collective_roles,
+        "dialogue_focus_subject": dialogue_focus,
+        "dialogue_closeup_required": bool(dialogue_focus),
         "collective_presence_required": (
             bool(collective_roles) or target_requires_anonymous_crowd
         ) and not target_forbids_crowd,
-        "collective_presence_forbidden": target_forbids_crowd,
+        "collective_presence_forbidden": target_forbids_crowd or bool(dialogue_focus),
         "required_text_expected": _keyframe_required_text_expected(
             shot, target_keyframe_desc, target_source,
         ),
@@ -803,7 +806,11 @@ def _compile_reference_roles(shot: Shot, *, continuity_mode: str, with_refs: boo
 def _compile_negative_constraints(shot: Shot, extra_negative: list[str] | None,
                                   continuity_mode: str, *,
                                   bible: Bible | None = None) -> str:
-    from app.continuity import effective_characters_visible, uses_previous_tail_frame
+    from app.continuity import (
+        dialogue_focus_subject,
+        effective_characters_visible,
+        uses_previous_tail_frame,
+    )
     parts = [
         "不要重演前序剧情",
         "不要提前表演下一镜内容",
@@ -827,6 +834,13 @@ def _compile_negative_constraints(shot: Shot, extra_negative: list[str] | None,
     visible = effective_characters_visible(shot)
     if visible:
         parts.append(f"画面可见角色仅限：{'、'.join(visible)}")
+    focus_subject = dialogue_focus_subject(shot)
+    if focus_subject:
+        parts.extend([
+            f"对白镜头只允许「{focus_subject}」一人入画",
+            "听者、其他说话人和人群全部留在画外，不得出现肩膀、背影、倒影或模糊人脸",
+            "不要双人同框、多人站桩或群像构图",
+        ])
     if not uses_previous_tail_frame(continuity_mode):
         parts.append("不要沿用上一镜完整构图或主体尾帧姿势")
     contact_phase = shot_contact_phase(shot)
@@ -868,7 +882,9 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
                    aspect_ratio: str = "9:16") -> str:
     """编译 Seedance 最终提示词（PRD §11）：最小完备、固定段落、禁止原文/前镜完整动作/未来剧情。"""
     from app.continuity import (
+        dialogue_focus_subject,
         derive_continuity_mode,
+        effective_characters_visible,
         effective_primary_action,
         effective_state_in,
         ensure_audio_timeline,
@@ -894,7 +910,10 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
             f"{config.VIDEO_DURATION_MIN_S}~{config.VIDEO_DURATION_MAX_S}s 的整数")
 
     sync_shot_continuity_fields(shot)
+    dialogue_focus = dialogue_focus_subject(shot)
     mode = (continuity_mode or derive_continuity_mode(shot)).strip()
+    if dialogue_focus and mode == "action_continuation":
+        mode = "same_scene_cut"
     if mode not in {"action_continuation", "same_scene_cut", "reaction_cut",
                     "reverse_angle", "insert_detail", "scene_change"}:
         mode = derive_continuity_mode(shot)
@@ -919,14 +938,28 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         )
 
     style = (visual_style or bible.world.visual_style_canonical or "写实国风玄幻动画").strip()
-    scale_hint = _framing_scale_hint(shot.shot_size)
+    render_shot_size = (
+        ("特写" if shot.shot_size == "特写" else "近景")
+        if dialogue_focus else shot.shot_size
+    )
+    render_camera_move = (
+        shot.camera_move
+        if not dialogue_focus or shot.camera_move in {"固定", "推近"}
+        else "固定"
+    )
+    scale_hint = _framing_scale_hint(render_shot_size)
     camera_angle = _resolve_camera_angle(shot)
     # 回写解析后的机位角，便于下游审计/重试与关键帧对齐
     shot.camera_angle = camera_angle
     camera_line = (
-        f"{shot.shot_size}；{camera_angle}；{shot.camera_move}"
+        f"{render_shot_size}；{camera_angle}；{render_camera_move}"
         + (f"。{scale_hint}" if scale_hint else "")
     )
+    if dialogue_focus:
+        camera_line += (
+            f"。竖屏单人对白构图：只拍「{dialogue_focus}」一人的面部、上半身与自然口型，"
+            "视线朝向画外听者；听者和同场其他人物完全不入画"
+        )
     contact_phase = shot_contact_phase(shot)
     if contact_phase == "established":
         camera_line += (
@@ -949,7 +982,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
 
     # 角色/场景锚点（短）
     anchors = []
-    for name in shot.characters:
+    for name in effective_characters_visible(shot):
         if name in bible_map:
             anchors.append(f"{name}：{bible_map[name].appearance_canonical}")
         elif is_collective_role(name):
@@ -1000,6 +1033,11 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     action_block = primary
     if transition_bits:
         action_block = primary + "。" + "".join(transition_bits)
+    if dialogue_focus:
+        action_block += (
+            f"。对白构图以「{dialogue_focus}」为唯一可见主体；"
+            "原动作中提到的听者、围观者和其他角色均视为画外关系，不得画入镜头"
+        )
     action_block += "。只完成这一项主要动作，不重演前序剧情，不提前表演下一镜内容。"
 
     # 明确忽略 prev_action / prev_tail_action 中的完整动作描述（API 兼容保留参数）
@@ -1055,7 +1093,8 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         "FORMAT": f"生成 {shot_dur} 秒、{aspect_ratio}、{style} 完整可直接采用视频；禁止后期。",
         "DO NOT": "；".join(negative_block.split("；")[:6]),
         "CAMERA": (
-            f"{shot.shot_size}；{camera_angle}；{shot.camera_move}"
+            f"{render_shot_size}；{camera_angle}；{render_camera_move}"
+            + (f"；单人对白近景，仅「{dialogue_focus}」入画" if dialogue_focus else "")
             + ("；接触动作侧面机位" if has_contact_action(shot) else "")
         ),
     }

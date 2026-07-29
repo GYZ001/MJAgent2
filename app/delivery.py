@@ -112,7 +112,7 @@ def delivery_readiness(episode_id: str) -> dict[str, Any]:
         raise KeyError(episode_id)
     project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
     shots = rows_to_dicts(conn.execute(
-        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
+        "SELECT * FROM shots WHERE episode_id=? AND storyboard_adopted=1 ORDER BY shot_no", (episode_id,)
     ).fetchall())
     checks: list[dict[str, Any]] = []
 
@@ -121,7 +121,7 @@ def delivery_readiness(episode_id: str) -> dict[str, Any]:
 
     check("shots_present", bool(shots), "至少存在一个分镜", {"count": len(shots)})
     numbers = [shot["shot_no"] for shot in shots]
-    check("shot_order", numbers == list(range(1, len(shots) + 1)), "镜号从 1 连续递增", numbers)
+    check("shot_order", numbers == sorted(set(numbers)), "已采纳镜头按镜号递增且不重复", numbers)
     invalid_durations = [shot["shot_no"] for shot in shots if shot["duration_s"] not in config.ALLOWED_DURATIONS]
     check(
         "shot_duration_range",
@@ -129,7 +129,21 @@ def delivery_readiness(episode_id: str) -> dict[str, Any]:
         f"每镜时长为模型选择的 {config.VIDEO_DURATION_MIN_S}~{config.VIDEO_DURATION_MAX_S} 秒整数",
         {"invalid_shots": invalid_durations},
     )
-    expected_total_duration = sum(shot["duration_s"] for shot in shots)
+    playback_by_shot: dict[str, float] = {}
+    for shot in shots:
+        rate = 1.0
+        if shot["adopted_version_id"]:
+            rate_row = conn.execute(
+                "SELECT playback_rate FROM shot_versions WHERE id=?",
+                (shot["adopted_version_id"],),
+            ).fetchone()
+            if rate_row:
+                rate = float(rate_row["playback_rate"] or 1.0)
+        playback_by_shot[str(shot["id"])] = rate
+    expected_total_duration = sum(
+        float(shot["duration_s"] or 0) / playback_by_shot[str(shot["id"])]
+        for shot in shots
+    )
     final_path = (
         config.PROJECTS_DIR / ep["project_id"] / "episodes" / str(ep["episode_no"])
         / "final" / "episode.mp4"
@@ -188,6 +202,7 @@ def delivery_readiness(episode_id: str) -> dict[str, Any]:
                 "artifact_id": version["artifact_id"],
                 "technical": technical,
                 "adoption_reason": version["adoption_reason"],
+                "playback_rate": playback_by_shot[str(shot["id"])],
                 "qa": qa,
                 "grade": graded,
             })
@@ -382,7 +397,7 @@ def build_delivery_package(
         _sanitize_delivery_value(json.loads(ep["screenplay_json"] or "{}")),
     )
     shot_rows = rows_to_dicts(conn.execute(
-        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
+        "SELECT * FROM shots WHERE episode_id=? AND storyboard_adopted=1 ORDER BY shot_no", (episode_id,)
     ).fetchall())
     for shot in shot_rows:
         for field in ("characters", "dialogues"):

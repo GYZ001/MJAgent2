@@ -25,10 +25,12 @@ class _Client:
 def test_screenplay_baseline_uses_dedicated_long_read_timeout(monkeypatch) -> None:
     monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_READ", 300.0)
     monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_BASELINE_READ", 600.0)
+    monkeypatch.setattr(hiagent.config, "TIMEOUT_CHAT_STORYBOARD_OUTLINE_READ", 720.0)
 
     assert hiagent._chat_read_timeout_s(None) == 300.0
     assert hiagent._chat_read_timeout_s({"stage": "discover_character_candidates"}) == 300.0
     assert hiagent._chat_read_timeout_s({"stage": "剧本首次整版 Baseline"}) == 600.0
+    assert hiagent._chat_read_timeout_s({"stage_key": "storyboard_outline"}) == 720.0
 
 
 def test_post_json_writes_running_before_updating_same_ledger_row(monkeypatch) -> None:
@@ -87,6 +89,67 @@ def test_post_json_write_timeout_is_logged_and_not_retried(monkeypatch) -> None:
     assert events[0][1]["request_bytes"] > 0
     assert "WriteTimeout" in events[1][2]
     assert "phase=write" in events[1][2]
+
+
+def test_harness_chat_read_timeout_is_not_immediately_replayed(monkeypatch) -> None:
+    attempts = 0
+
+    class ReadTimeoutClient:
+        async def post(self, url, *, json, headers):
+            nonlocal attempts
+            attempts += 1
+            raise httpx.ReadTimeout("generation still running")
+
+    monkeypatch.setattr(hiagent, "start_provider_call", lambda *_args, **_kwargs: 7)
+    monkeypatch.setattr(hiagent, "finish_provider_call", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(hiagent.ProviderError) as caught:
+        asyncio.run(hiagent._post_json(
+            ReadTimeoutClient(),
+            "https://example.invalid/chat",
+            {"messages": []},
+            kind="chat",
+            model="test-model",
+            headers={"x": "y"},
+            retries=2,
+            meta={"gateway": "execution_harness"},
+        ))
+
+    assert caught.value.retryable is True
+    assert caught.value.timeout_phase == "read"
+    assert attempts == 1
+
+
+def test_harness_chat_429_is_not_immediately_replayed(monkeypatch) -> None:
+    attempts = 0
+
+    class RateLimitedResponse:
+        status_code = 429
+        text = '{"error":{"message":"TPM limit exceeded"}}'
+
+    class RateLimitedClient:
+        async def post(self, url, *, json, headers):
+            nonlocal attempts
+            attempts += 1
+            return RateLimitedResponse()
+
+    monkeypatch.setattr(hiagent, "start_provider_call", lambda *_args, **_kwargs: 7)
+    monkeypatch.setattr(hiagent, "finish_provider_call", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(hiagent.ProviderError) as caught:
+        asyncio.run(hiagent._post_json(
+            RateLimitedClient(),
+            "https://example.invalid/chat",
+            {"messages": []},
+            kind="chat",
+            model="test-model",
+            headers={"x": "y"},
+            retries=2,
+            meta={"gateway": "execution_harness"},
+        ))
+
+    assert caught.value.retryable is True
+    assert attempts == 1
 
 
 def test_interrupted_provider_operation_links_to_successful_retry(tmp_path, monkeypatch) -> None:

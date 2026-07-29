@@ -12,11 +12,12 @@ def episode_mix_status(episode_id: str) -> dict:
     if not ep:
         return {"ready": False, "shots_total": 0, "shots_ready": 0, "shots": []}
     shots = rows_to_dicts(conn.execute(
-        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)).fetchall())
+        "SELECT * FROM shots WHERE episode_id=? AND storyboard_adopted=1 ORDER BY shot_no", (episode_id,)).fetchall())
     ready = 0
     out = []
     for s in shots:
         vid = None
+        v = None
         if s["adopted_version_id"]:
             v = conn.execute(
                 "SELECT * FROM shot_versions WHERE id=? AND status='succeeded'",
@@ -30,9 +31,11 @@ def episode_mix_status(episode_id: str) -> dict:
                 if rel_path:
                     vid = f"/media/{rel_path}"
                     ready += 1
+        playback_rate = float(v["playback_rate"] or 1.0) if vid and v else 1.0
         out.append({"shot_id": s["id"], "shot_no": s["shot_no"],
                     "duration_s": s["duration_s"], "video_url": vid,
-                    "has_adopted": bool(vid)})
+                    "has_adopted": bool(vid), "playback_rate": playback_rate,
+                    "effective_duration_s": round(float(s["duration_s"] or 0) / playback_rate, 2)})
     skipped_shot_nos = [item["shot_no"] for item in out if not item["has_adopted"]]
     return {
         "episode_id": ep["id"],
@@ -78,11 +81,27 @@ def concatenate_episode(episode_id: str) -> dict:
     if not pieces:
         raise ValueError("本集没有任何已采用的视频片段，先生成/采用后再试")
 
-    piece_shot_nos = [int(shot_no) for shot_no, _path in pieces]
+    from app.video_playback import normalize_playback_rate
+
+    rate_rows = conn.execute(
+        """SELECT s.shot_no, v.playback_rate
+           FROM shots s JOIN shot_versions v ON v.id=s.adopted_version_id
+           WHERE s.episode_id=? AND s.storyboard_adopted=1""",
+        (episode_id,),
+    ).fetchall()
+    rate_by_shot = {
+        int(row["shot_no"]): normalize_playback_rate(row["playback_rate"])
+        for row in rate_rows
+    }
+    piece_specs = [
+        (int(shot_no), path, rate_by_shot.get(int(shot_no), 1.0))
+        for shot_no, path in pieces
+    ]
+    piece_shot_nos = [shot_no for shot_no, _path, _rate in piece_specs]
     all_shot_nos = [
         int(row["shot_no"])
         for row in conn.execute(
-            "SELECT shot_no FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,),
+            "SELECT shot_no FROM shots WHERE episode_id=? AND storyboard_adopted=1 ORDER BY shot_no", (episode_id,),
         ).fetchall()
     ]
     skipped_shot_nos = [shot_no for shot_no in all_shot_nos if shot_no not in set(piece_shot_nos)]
@@ -90,14 +109,19 @@ def concatenate_episode(episode_id: str) -> dict:
     duration_by_shot = {
         int(row["shot_no"]): float(row["duration_s"] or 0)
         for row in conn.execute(
-            "SELECT shot_no,duration_s FROM shots WHERE episode_id=?", (episode_id,),
+            "SELECT shot_no,duration_s FROM shots WHERE episode_id=? AND storyboard_adopted=1", (episode_id,),
         ).fetchall()
     }
-    est_total_dur = sum(duration_by_shot.get(shot_no, 0.0) for shot_no in piece_shot_nos)
+    est_total_dur = sum(
+        duration_by_shot.get(shot_no, 0.0) / rate
+        for shot_no, _path, rate in piece_specs
+    )
     concat_timeout_s = min(1800.0, max(120.0, est_total_dur * 10.0 + 60.0))
 
     final_path = _final_video_path(ep["project_id"], ep["episode_no"])
     if not shutil.which("ffmpeg"):
+        if any(abs(rate - 1.0) > 0.0001 for _shot_no, _path, rate in piece_specs):
+            raise ValueError("当前成片包含倍速定稿镜头，服务端需安装 ffmpeg 后才能按定稿倍速合成")
         # 缺 ffmpeg 的保底：回传首个片段 URL，前端提示用户安装 ffmpeg
         first = next(p for p in pieces if p[1])
         from app.config import PROJECTS_DIR
@@ -110,6 +134,7 @@ def concatenate_episode(episode_id: str) -> dict:
             "shots_total": len(all_shot_nos),
             "shots_skipped": len(skipped_shot_nos),
             "skipped_shot_nos": skipped_shot_nos,
+            "playback_rates": {str(no): rate for no, _path, rate in piece_specs},
             "note": "服务端缺少 ffmpeg，已临时回退为首个片段的直链；请安装 ffmpeg 后重新合成",
         }
 
@@ -118,9 +143,42 @@ def concatenate_episode(episode_id: str) -> dict:
     with tempfile.TemporaryDirectory() as td:
         listfile = _P(td) / "list.txt"
         lines = []
-        for _, vpath in pieces:
+        prepared_specs: list[tuple[int, str, float]] = []
+        for shot_no, vpath, rate in piece_specs:
+            prepared_path = vpath
+            if abs(rate - 1.0) > 0.0001:
+                sped_path = _P(td) / f"shot-{shot_no}-x{rate:.2f}.mp4"
+                speed_cmd = [
+                    "ffmpeg", "-y", "-loglevel", "error", "-i", vpath,
+                    "-map", "0:v:0", "-map", "0:a?",
+                    "-vf", f"setpts=PTS/{rate:.6f}",
+                    "-af", f"atempo={rate:.6f}",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                    "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart",
+                    str(sped_path),
+                ]
+                try:
+                    subprocess.run(
+                        speed_cmd, check=True, capture_output=True, timeout=concat_timeout_s,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    raise ValueError(
+                        f"镜 {shot_no} 的 {rate:g} 倍速定稿处理超时；上一版成片仍保留，可稍后重试"
+                    ) from exc
+                except subprocess.CalledProcessError as exc:
+                    detail = (exc.stderr or b"").decode("utf-8", "replace")[-500:]
+                    raise ValueError(
+                        f"镜 {shot_no} 的 {rate:g} 倍速定稿处理失败；上一版成片仍保留"
+                        + (f"：{detail}" if detail else "")
+                    ) from exc
+                if not sped_path.is_file() or sped_path.stat().st_size <= 0:
+                    raise ValueError(
+                        f"镜 {shot_no} 的 {rate:g} 倍速定稿未产出有效片段；上一版成片仍保留"
+                    )
+                prepared_path = str(sped_path)
+            prepared_specs.append((shot_no, prepared_path, rate))
             # concat demuxer 要求绝对路径并转义单引号
-            safe = vpath.replace("'", "'\\''")
+            safe = prepared_path.replace("'", "'\\''")
             lines.append(f"file '{safe}'")
         listfile.write_text("\n".join(lines), encoding="utf-8")
         silent_video = _P(td) / "concat.mp4"
@@ -153,13 +211,13 @@ def concatenate_episode(episode_id: str) -> dict:
 
     total_dur = 0
     try:
-        for _, vpath in pieces:
+        for shot_no, vpath, rate in piece_specs:
             raw = subprocess.run(
                 ["ffprobe", "-v", "error", "-show_entries", "format=duration",
                  "-of", "csv=p=0", vpath], capture_output=True, text=True, check=True,
                 timeout=30,
             ).stdout.strip()
-            total_dur += float(raw) if raw else 0
+            total_dur += (float(raw) / rate) if raw else 0
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError):
         total_dur = est_total_dur or config.DEFAULT_VIDEO_DURATION_S * len(pieces)
 
@@ -173,6 +231,7 @@ def concatenate_episode(episode_id: str) -> dict:
         "shots_total": len(all_shot_nos),
         "shots_skipped": len(skipped_shot_nos),
         "skipped_shot_nos": skipped_shot_nos,
+        "playback_rates": {str(no): rate for no, _path, rate in piece_specs},
     }
 
 __all__ = [name for name in globals() if not name.startswith("__")]

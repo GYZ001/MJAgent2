@@ -13,6 +13,7 @@ import {
   shotDetailRefreshKey,
   shouldCommitShotDetail,
   videoCandidateNote,
+  videoPlaybackRate,
   videoGenerationConfirmLabel,
   visibleVideoVersions,
 } from './WallPage'
@@ -197,6 +198,12 @@ describe('生成台对象稳定性', () => {
 })
 
 describe('视频预览工作区', () => {
+  it('每个候选读取独立的定稿倍速，并对异常历史值回退为 1×', () => {
+    expect(videoPlaybackRate({ playback_rate: 1.5 })).toBe(1.5)
+    expect(videoPlaybackRate({ playback_rate: null })).toBe(1)
+    expect(videoPlaybackRate({ playback_rate: 9 })).toBe(1)
+  })
+
   it('只保留生成与预览相关页签', () => {
     expect(REVIEW_TABS.map(tab => tab.label)).toEqual(['文字内容', '参考图', '视频预览'])
   })

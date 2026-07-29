@@ -7,6 +7,7 @@ import pytest
 
 from app import db
 from app.domain import video_ops
+from app.domain.video_ops import ConfirmationEvaluation
 from app.evidence import repository
 from app.harness.types import EvidenceArtifact, Issue, IssueSeverity
 from app.production.publish import can_issue_certificate
@@ -92,6 +93,49 @@ def test_confirm_preview_passes_with_low_quality_business_warnings(confirm_db, m
     assert "口播容量偏低；节奏覆盖不足；可拍性评分较低" in preview["warnings"]
     assert "主线覆盖不足，作为 QA 评分警告" in preview["warnings"]
     assert preview["score_only"]["runtime_blocking"] is False
+
+
+def test_force_confirm_is_available_only_after_complete_board_with_repair_issues(
+    confirm_db, monkeypatch,
+):
+    def repairable_evaluation(_ep, board, *_args, **_kwargs):
+        return ConfirmationEvaluation(
+            passed=False,
+            errors=["shot_no=1.dialogue_framing 需要修复"],
+            warnings=[],
+            issues=[],
+            board=board,
+            compact_target=5,
+            estimated_cost_cny=3.6,
+        )
+
+    monkeypatch.setattr(video_ops, "evaluate_storyboard_for_confirmation", repairable_evaluation)
+
+    with pytest.raises(video_ops.HTTPException) as caught:
+        video_ops.create_storyboard_confirmation_preview("e1")
+
+    detail = caught.value.detail
+    assert detail["hard_gates"]["passed"] is False
+    assert detail["force_confirmation"]["allowed"] is True
+    assert detail["preview_token"].startswith("sbpv_")
+
+    with pytest.raises(ValueError, match="未通过结构完整性门禁"):
+        video_ops.confirm_episode_core("e1", preview_token=detail["preview_token"])
+
+    result = video_ops.confirm_episode_core(
+        "e1",
+        preview_token=detail["preview_token"],
+        force=True,
+        force_reason="接受本镜构图风险，先进入生成台验证",
+    )
+
+    assert result["confirmed"] is True
+    assert result["forced"] is True
+    decision = confirm_db.execute(
+        "SELECT decision,reason FROM gate_decisions WHERE gate_key='storyboard'",
+    ).fetchone()
+    assert decision["decision"] == "approve_with_risk"
+    assert "接受本镜构图风险" in decision["reason"]
 
 
 def test_can_issue_certificate_ignores_qa_quality_blockers():

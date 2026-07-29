@@ -248,8 +248,8 @@ export default function SupervisorPanel({
           </div>
           <strong className="supervisor-rail-title">{headline}</strong>
           <p className="supervisor-rail-meta">
-            {prefix > 0 ? `已通过 1–${String(prefix).padStart(2, '0')} 镜` : '尚未通过镜头'}
-            {total > 0 ? ` · 计划 ${total} 镜` : ''}
+            {prefix > 0 ? `安全恢复点到第 ${String(prefix).padStart(2, '0')} 镜` : '尚未建立安全恢复点'}
+            {total > 0 ? ` · 本轮目标 ${total} 镜` : ''}
             {!succeeded && scripting ? ` · 下一镜 ${String(nextNo).padStart(2, '0')}` : ''}
             {supervisor?.strategy && !succeeded ? ` · ${STRATEGY_LABEL[supervisor.strategy] || supervisor.strategy}` : ''}
             {supervisor?.frontier && !succeeded ? `（自第 ${supervisor.frontier} 镜起重做）` : ''}

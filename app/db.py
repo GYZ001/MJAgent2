@@ -101,6 +101,7 @@ CREATE TABLE IF NOT EXISTS shots (
     shot_contract_json TEXT,
     continuity_mode TEXT DEFAULT '',
     observed_state_out TEXT DEFAULT '',
+    storyboard_adopted INTEGER NOT NULL DEFAULT 1,
     adopted_version_id TEXT,
     approved_scene_id TEXT,
     approved_head_scene_id TEXT,
@@ -140,6 +141,7 @@ CREATE TABLE IF NOT EXISTS shot_versions (
     latency_s REAL DEFAULT 0,
     technical_validation_json TEXT,
     adoption_reason TEXT,
+    playback_rate REAL NOT NULL DEFAULT 1.0,
     created_at REAL NOT NULL,
     UNIQUE(shot_id, version_no),
     FOREIGN KEY(shot_id) REFERENCES shots(id) ON DELETE CASCADE
@@ -870,6 +872,8 @@ MIGRATIONS = (
     "ALTER TABLE shots ADD COLUMN shot_contract_json TEXT",
     "ALTER TABLE shots ADD COLUMN continuity_mode TEXT DEFAULT ''",
     "ALTER TABLE shots ADD COLUMN observed_state_out TEXT DEFAULT ''",
+    # 分镜生成后默认采纳；人工取消后不进入生成台、视频补齐、成片与交付。
+    "ALTER TABLE shots ADD COLUMN storyboard_adopted INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE episodes ADD COLUMN story_ledger_json TEXT",
     "ALTER TABLE shot_scenes ADD COLUMN kind TEXT DEFAULT 'tail'",
     "ALTER TABLE shots ADD COLUMN first_frame_desc TEXT DEFAULT ''",
@@ -916,6 +920,8 @@ MIGRATIONS = (
     "ALTER TABLE shots ADD COLUMN storyboard_artifact_id TEXT",
     "ALTER TABLE shot_versions ADD COLUMN technical_validation_json TEXT",
     "ALTER TABLE shot_versions ADD COLUMN adoption_reason TEXT",
+    # 生成台预览/采纳定稿倍速；合成时按该值实际变速，不只是浏览器播放速度。
+    "ALTER TABLE shot_versions ADD COLUMN playback_rate REAL NOT NULL DEFAULT 1.0",
     "ALTER TABLE shot_scenes ADD COLUMN adoption_reason TEXT",
     "ALTER TABLE jobs ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 3",
     "ALTER TABLE jobs ADD COLUMN reserved_cost_cny REAL NOT NULL DEFAULT 0",

@@ -149,9 +149,10 @@ def portrait_appearance_anchor(prompt: str | None, fallback: str = "") -> str:
     identity/outfit portion. Free-form prompts without the standard marker remain
     authoritative after the same composition suffixes are stripped.
     """
+    fallback_text = normalize_prompt_text(fallback or "").strip()
     text = normalize_prompt_text(prompt or "").strip()
     if not text:
-        return (fallback or "").strip()
+        return fallback_text
     for marker in _PORTRAIT_APPEARANCE_START_MARKERS:
         if marker in text:
             text = text.split(marker, 1)[1].strip()
@@ -160,7 +161,10 @@ def portrait_appearance_anchor(prompt: str | None, fallback: str = "") -> str:
     if stop_positions:
         text = text[:min(stop_positions)].strip()
     text = text.strip(" 。，,;；：:")
-    return text or (fallback or "").strip()
+    compact = re.sub(r"\s+", "", text)
+    if len(compact) < 8 and len(re.sub(r"\s+", "", fallback_text)) > len(compact):
+        return fallback_text
+    return text or fallback_text
 
 
 async def generate_refs(

@@ -28,6 +28,7 @@ from app.spoken_contract import (
     RULE_SPOKEN_CAPACITY,
     build_timeline_from_segments,
     capacity_issue,
+    effective_spoken_segments,
     segments_from_dialogues,
     spoken_char_total,
     spoken_speakers,
@@ -44,6 +45,156 @@ _DISTINCT_ACTION_VERBS = (
     "闭上", "睁开", "亮起", "显现", "宣布", "喊出", "点名", "自我介绍", "微笑", "惊叹",
     "倒吸", "窃笑", "转身", "跪下", "站起", "举起", "放下", "拔出", "插入",
 )
+
+DIALOGUE_FOCUS_RISK_TAG = "dialogue_speaker_closeup"
+DIALOGUE_TWO_SHOT_RISK_TAG = "dialogue_two_shot_required"
+DIALOGUE_CLOSEUP_SHOT_SIZES = frozenset({"近景", "特写"})
+DIALOGUE_CLOSEUP_CAMERA_MOVES = frozenset({"固定", "推近"})
+_DIALOGUE_TWO_SHOT_INTERACTION_RE = re.compile(
+    r"搀扶|扶住|抱住|拥抱|握住|抓住|拉住|按住|推开|挡住|托住|"
+    r"递给|递出|接过|抢夺|碰杯|亲吻|背起|抱起|交手|对打|扭打|"
+    r"共同(?:握住|托住|抬起|推动|按住)|同时(?:握住|托住|抬起|推动|按住)"
+)
+
+
+def raw_characters_visible(shot: Shot) -> list[str]:
+    """分镜声明的原始可见人物，不应用对白构图派生规则。"""
+    return [
+        str(name).strip()
+        for name in (shot.characters_visible or shot.characters or [])
+        if str(name).strip()
+    ]
+
+
+def onscreen_dialogue_speakers(shot: Shot) -> list[str]:
+    """按口播顺序返回需要画内对口型的说话人。"""
+    speakers: list[str] = []
+    try:
+        segments = effective_spoken_segments(shot)
+    except (AttributeError, TypeError):
+        # model_copy(update=...) 与历史调用可能绕过字段重校验并留下 dict。
+        # 这里只做只读兼容，不替代 spoken_contract 的正式同步与校验。
+        segments = []
+        timeline_has_spoken = False
+        for item in shot.audio_timeline or []:
+            item_type = item.get("type") if isinstance(item, dict) else item.type
+            if item_type not in {"spoken_dialogue", "offscreen_voice"}:
+                continue
+            timeline_has_spoken = True
+            speaker = (
+                item.get("speaker_id") if isinstance(item, dict) else item.speaker_id
+            )
+            lip_sync = item.get("lip_sync") if isinstance(item, dict) else item.lip_sync
+            if item_type == "spoken_dialogue" and lip_sync and str(speaker or "").strip():
+                normalized = str(speaker).strip()
+                if normalized not in speakers:
+                    speakers.append(normalized)
+        if timeline_has_spoken:
+            return speakers
+        for dialogue in shot.dialogues or []:
+            delivery = (
+                dialogue.get("delivery", "spoken_dialogue")
+                if isinstance(dialogue, dict)
+                else dialogue.delivery
+            )
+            speaker = (
+                dialogue.get("speaker") if isinstance(dialogue, dict) else dialogue.speaker
+            )
+            normalized = str(speaker or "").strip()
+            if delivery == "spoken_dialogue" and normalized and normalized not in speakers:
+                speakers.append(normalized)
+        return speakers
+    for segment in segments:
+        if segment.delivery == "spoken_dialogue" and segment.lip_sync:
+            speaker = (segment.speaker_id or "").strip()
+            if speaker and speaker not in speakers:
+                speakers.append(speaker)
+    return speakers
+
+
+def dialogue_two_shot_required(shot: Shot) -> bool:
+    """仅真实双人肢体互动允许对白镜头保留第二个可见人物。"""
+    speakers = onscreen_dialogue_speakers(shot)
+    visible = raw_characters_visible(shot)
+    if len(speakers) != 1 or len(visible) < 2:
+        return False
+    visual_text = "；".join(
+        str(value or "")
+        for value in (
+            shot.primary_action,
+            shot.action_desc,
+            shot.first_frame_desc,
+            shot.last_frame_desc,
+        )
+    )
+    speaker = speakers[0]
+    others = [name for name in visible if name != speaker]
+    for clause in re.split(r"[，,。；;！？\n]", visual_text):
+        if not _DIALOGUE_TWO_SHOT_INTERACTION_RE.search(clause):
+            continue
+        if speaker not in clause:
+            continue
+        if any(name in clause for name in others):
+            return True
+        if len(visible) == 2 and re.search(r"对方|他|她|其手|其肩|彼此", clause):
+            return True
+    return False
+
+
+def dialogue_focus_subject(shot: Shot) -> str | None:
+    """返回专业对白镜头的唯一画面主体；双人肢体互动属于显式例外。"""
+    speakers = onscreen_dialogue_speakers(shot)
+    if len(speakers) != 1 or dialogue_two_shot_required(shot):
+        return None
+    visible = raw_characters_visible(shot)
+    return speakers[0] if speakers[0] in visible else None
+
+
+def dialogue_framing_errors(shot: Shot, *, strict_composition: bool = True) -> list[str]:
+    """对白镜头构图门禁：一镜一位画内说话人，默认单人近景/特写。"""
+    speakers = onscreen_dialogue_speakers(shot)
+    if not speakers:
+        return []
+    if len(speakers) > 1:
+        return [
+            f"shot_no={shot.shot_no} 同一镜包含多个画内说话人 {speakers}；"
+            "优秀漫剧对白应按话轮拆成相邻正反打，每镜只保留一位画内说话人"
+        ]
+
+    speaker = speakers[0]
+    visible = raw_characters_visible(shot)
+    errors: list[str] = []
+    if speaker not in visible:
+        errors.append(
+            f"shot_no={shot.shot_no} 画内说话人「{speaker}」不在 characters_visible；"
+            "需要口型的说话人必须入画，画外说话请改为 offscreen_voice"
+        )
+        return errors
+    if dialogue_two_shot_required(shot):
+        if len(visible) > 2:
+            errors.append(
+                f"shot_no={shot.shot_no} 虽有双人肢体互动，但画面声明了 {len(visible)} 人；"
+                "对白双人镜最多保留说话人与直接互动对象，其余人物留在画外"
+            )
+        return errors
+    if not strict_composition:
+        return errors
+    if visible != [speaker]:
+        errors.append(
+            f"shot_no={shot.shot_no} 是「{speaker}」的对白镜头，但画面可见角色为 {visible}；"
+            "请只保留说话人，听者和人群留在画外，下一话轮再切反打/反应镜"
+        )
+    if shot.shot_size not in DIALOGUE_CLOSEUP_SHOT_SIZES:
+        errors.append(
+            f"shot_no={shot.shot_no} 是单人对白镜头，shot_size 应为近景或特写，"
+            f"当前为「{shot.shot_size}」"
+        )
+    if shot.camera_move not in DIALOGUE_CLOSEUP_CAMERA_MOVES:
+        errors.append(
+            f"shot_no={shot.shot_no} 是单人对白镜头，camera_move 应为固定或推近，"
+            f"当前为「{shot.camera_move}」"
+        )
+    return errors
 
 
 def effective_state_in(shot: Shot) -> str:
@@ -63,7 +214,8 @@ def effective_primary_action(shot: Shot) -> str:
 
 
 def effective_characters_visible(shot: Shot) -> list[str]:
-    return list(shot.characters_visible or shot.characters or [])
+    focus = dialogue_focus_subject(shot)
+    return [focus] if focus else raw_characters_visible(shot)
 
 
 def effective_audio_cast(shot: Shot) -> list[str]:
@@ -84,6 +236,9 @@ def derive_continuity_mode(shot: Shot, prev: Shot | None = None) -> str:
     当成链首，否则会误报「第一个镜头没有上一镜可承接」。
     """
     mode = (shot.continuity_mode or "").strip()
+    if mode == "action_continuation" and dialogue_focus_subject(shot):
+        # 对白近景是一次明确切镜，不能把上一镜尾帧当作 0 秒构图继续复制。
+        mode = "same_scene_cut"
     if prev is None:
         if mode == "action_continuation" or mode not in CONTINUITY_MODES:
             return "scene_change" if int(shot.shot_no or 0) == 1 else "same_scene_cut"
@@ -120,6 +275,13 @@ def sync_shot_continuity_fields(shot: Shot, prev: Shot | None = None) -> str:
         shot.characters_visible = list(shot.characters or [])
     if not shot.audio_cast:
         shot.audio_cast = effective_audio_cast(shot)
+    focus = dialogue_focus_subject(shot)
+    tags = list(shot.risk_tags or [])
+    if focus and DIALOGUE_FOCUS_RISK_TAG not in tags:
+        tags.append(DIALOGUE_FOCUS_RISK_TAG)
+    if dialogue_two_shot_required(shot) and DIALOGUE_TWO_SHOT_RISK_TAG not in tags:
+        tags.append(DIALOGUE_TWO_SHOT_RISK_TAG)
+    shot.risk_tags = tags
     if not shot.prompt_contract_version:
         shot.prompt_contract_version = PROMPT_CONTRACT_VERSION
     # 首尾帧与 state 双向同步，保持关键帧链路可用
@@ -207,17 +369,11 @@ def spoken_chars_from_shot(shot: Shot) -> int:
 
 
 def speech_capacity_errors(shot: Shot) -> list[str]:
-    """口播容量与主说话人数量的唯一实现（PRD §4.7）。"""
+    """口播容量的唯一实现（PRD §4.7）；说话人构图由 dialogue_framing_errors 负责。"""
     errors: list[str] = []
     capacity = capacity_issue(shot)
     if capacity is not None:
         errors.append(capacity.message)
-    speakers = spoken_speakers(shot)
-    # 允许一主一短应，但同一镜优先单说话人；超过 2 硬失败
-    if len(speakers) > 2:
-        errors.append(
-            f"shot_no={shot.shot_no} 有多个主要说话人 {speakers}；一条视频优先只有一个主要说话人"
-        )
     return errors
 
 
@@ -580,6 +736,7 @@ def preflight_seedance_gates(
     errors: list[str] = []
     errors.extend(action_capacity_errors(shot))
     errors.extend(speech_capacity_errors(shot))
+    errors.extend(dialogue_framing_errors(shot, strict_composition=False))
     errors.extend(state_chain_errors(Storyboard(episode_no=0, shots=([prev, shot] if prev else [shot]))))
     # 只保留本镜报错，避免上一镜 shot_no=N 的状态链错误漏进当前生成
     shot_tag = f"shot_no={shot.shot_no}"

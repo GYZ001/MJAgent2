@@ -7,7 +7,11 @@ from app.evaluations.issues import issue_code, issues_from_messages
 from app.harness.types import IssueSeverity
 from app.loops.base import AgentLoopPolicy
 from app.schemas import Dialogue, PlotSpine, PlotSpineBeat, EpisodeScreenplay, Shot, Storyboard, StoryboardOutline, StoryboardOutlineShot
-from app.storyboard_supervisor import _requires_manual_confirmation
+from app.hiagent import ProviderError
+from app.storyboard_supervisor import (
+    _is_retryable_external_error,
+    _requires_manual_confirmation,
+)
 from app.spoken_contract import spoken_text_of
 from app.validators import (
     key_line_catalog,
@@ -145,6 +149,18 @@ def test_auto_confirm_warning_is_routed_to_manual_ready_state():
         HTTPException(409, "自动确认遇到需要人工判断的警告，请转人工确认")
     )
     assert not _requires_manual_confirmation(HTTPException(409, "分镜硬门禁失败"))
+
+
+def test_retryable_provider_failure_survives_orchestration_wrapping():
+    provider_error = ProviderError("TPM limit exceeded", retryable=True)
+    wrapped = RuntimeError("outline failed")
+    wrapped.__cause__ = provider_error
+
+    assert _is_retryable_external_error(provider_error)
+    assert _is_retryable_external_error(wrapped)
+    assert not _is_retryable_external_error(
+        ProviderError("invalid credentials", retryable=False)
+    )
 
 
 def test_warning_candidate_policy_rejects_blocker_concept():

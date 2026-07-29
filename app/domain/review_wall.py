@@ -77,7 +77,7 @@ def _review_asset_qualification(conn, episode_id: str) -> dict[str, Any]:
         """SELECT v.id AS version_id, v.shot_id, v.version_no, v.image_inputs,
                   s.adopted_version_id
              FROM shot_versions v JOIN shots s ON s.id=v.shot_id
-            WHERE s.episode_id=?
+            WHERE s.episode_id=? AND s.storyboard_adopted=1
             ORDER BY v.shot_id, v.version_no DESC""",
         (episode_id,),
     ).fetchall()
@@ -225,6 +225,12 @@ def _review_upstream_snapshot(episode_id: str) -> dict[str, Any]:
     confirmed = ep.get("status") in {"confirmed", "generating", "done", "mixed"}
     has_artifacts = bool(published_screenplay and published_storyboard)
     assets = _review_asset_qualification(conn, episode_id)
+    active_storyboard_shot_ids = [
+        row["id"] for row in conn.execute(
+            "SELECT id FROM shots WHERE episode_id=? AND storyboard_adopted=1 ORDER BY shot_no",
+            (episode_id,),
+        ).fetchall()
+    ]
     blockers: list[str] = []
     if not published_screenplay:
         blockers.append("尚无已发布剧本")
@@ -246,6 +252,7 @@ def _review_upstream_snapshot(episode_id: str) -> dict[str, Any]:
         "asset_inputs": assets["inputs"],
         "asset_blockers": assets["blockers"],
         "asset_soft_warnings": assets["soft_warnings"],
+        "active_storyboard_shot_ids": active_storyboard_shot_ids,
     }
     qualification_material = {
         **raw,
@@ -285,9 +292,16 @@ def _review_assert_positive_action(episode_id: str, expected_qualification_versi
 
 
 def _review_assert_shot_positive(shot_id: str, expected_qualification_version: str | None = None) -> dict[str, Any]:
-    row = get_conn().execute("SELECT episode_id FROM shots WHERE id=?", (shot_id,)).fetchone()
+    row = get_conn().execute(
+        "SELECT episode_id,storyboard_adopted FROM shots WHERE id=?", (shot_id,),
+    ).fetchone()
     if not row:
         raise HTTPException(404, "镜头不存在")
+    if not bool(row["storyboard_adopted"]):
+        raise HTTPException(409, {
+            "code": "STORYBOARD_SHOT_NOT_ADOPTED",
+            "message": "本分镜已人工取消采纳，不进入生成台；请先在分镜台恢复采纳",
+        })
     return _review_assert_positive_action(row["episode_id"], expected_qualification_version)
 
 

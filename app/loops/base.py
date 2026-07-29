@@ -29,6 +29,10 @@ class AgentLoopPolicy:
     min_quality_gain: float = 0.03
     no_gain_rounds: int = 2
     allow_warning_candidate: bool = False
+    # Some business rules are hard production contracts for a specific loop,
+    # even though Phase 3 normally records business QA as score-only.  Callers
+    # opt those codes into model repair without changing the global QA policy.
+    repair_issue_codes: frozenset[str] = field(default_factory=frozenset)
     # Production Repair：只跑一轮完整生成，无论 QA 是否通过都交出候选给局部 Patch Agent。
     # 禁止再用“重新输出完整 JSON”的修复轮。
     baseline_only: bool = False
@@ -172,8 +176,17 @@ class AgentLoop(Generic[T]):
                 raise
 
             previous_raw = raw
-            structural_issues, _quality_issues = split_structural_quality_issues(issues)
-            repair_issues = structural_issues if value is not None else (structural_issues or issues)
+            structural_issues, quality_issues = split_structural_quality_issues(issues)
+            targeted_repair_issues = [
+                issue
+                for issue in quality_issues
+                if issue.code in self.policy.repair_issue_codes
+            ]
+            repair_issues = (
+                [*structural_issues, *targeted_repair_issues]
+                if value is not None
+                else (structural_issues or issues)
+            )
             issue_history.append(repair_issues)
             fingerprint = issue_fingerprint(repair_issues)
             fingerprint_history.append(fingerprint)

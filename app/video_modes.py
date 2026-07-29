@@ -33,7 +33,7 @@ REFERENCE_IMAGE_TYPES = {
 
 # 关键帧提示词是分镜级可复用资产的一部分。升级该版本时，未经人工
 # 编辑的旧关键帧不得继续污染新视频版本。
-KEYFRAME_PROMPT_CONTRACT_VERSION = "narrative_keyframe_geometry_hard_gate_v8"
+KEYFRAME_PROMPT_CONTRACT_VERSION = "narrative_dialogue_closeup_v9"
 KEYFRAME_STRUCTURAL_FALLBACK_MODE = "omit_structurally_invalid_keyframe_slots_v1"
 _KEYFRAME_LLM_PROMPT_MAX_CHARS = 1200
 _DEFAULT_KEYFRAME_CANDIDATE_COUNT = 3
@@ -930,6 +930,14 @@ def _keyframe_contract_instructions(shot: Shot, bible: Bible) -> list[str]:
         lines.append(
             "Named/individual visible identities, each exactly once: " + ", ".join(individual)
             + ". No omission, duplicate, swap, or identity merge."
+        )
+    dialogue_focus = str(contract.get("dialogue_focus_subject") or "").strip()
+    if dialogue_focus:
+        lines.append(
+            f"SPEAKER CLOSE-UP HARD CONTRACT: '{dialogue_focus}' is the ONLY visible person. "
+            "Use a vertical close-up or medium close-up with a clear face, natural speaking mouth, and eyeline toward "
+            "an offscreen listener. Every listener, other speaker, crowd member, shoulder, back, reflection, silhouette, "
+            "and blurred face stays completely out of frame. No two-shot, group lineup, or crowd composition."
         )
     if contract.get("collective_presence_forbidden"):
         lines.append(

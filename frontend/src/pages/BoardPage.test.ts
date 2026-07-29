@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import type { Shot } from '../api'
+import type { Shot, StoryboardStatus } from '../api'
 import {
   buildStoryboardChanges,
   isStoryboardProblemShot,
   storyboardGateIssueLabel,
+  storyboardProgressCopy,
   storyboardSaveDisabledReason,
+  storyboardShotCheckpointLabel,
   storyboardSpokenChars,
 } from './BoardPage'
 
@@ -16,6 +18,18 @@ function shot(overrides: Partial<Shot> = {}): Shot {
     narration: '', dialogues: [{ speaker: '少年', line: '这封信是谁写的？', emotion: '疑惑' }], transition: '硬切',
     continuity_from_prev: 0, adopted_version_id: null, est_cost_cny: 0, versions: [], video_stale: false,
     spoken_limit: 12, audio_timeline: [{ start_s: 0, end_s: 2, type: 'dialogue', text: '旧台词' }],
+    ...overrides,
+  }
+}
+
+function storyboardStatus(overrides: Partial<StoryboardStatus> = {}): StoryboardStatus {
+  return {
+    contract_version: 'storyboard-workspace.v1', snapshot_version: 1, state_fingerprint: 'fp',
+    state: 'paused', headline: '局部修复已暂停', screenplay_available: true,
+    planned_shots: 17, produced_shots: 9, validated_shots: 2,
+    draft_shots: 9, safe_checkpoint_shots: 2, pending_revalidation_shots: 7,
+    resume_from_shot: 3, final_shot_valid: false, hard_gates_passed: false,
+    confirmed: false, editable: true, confirmable: false, recommended_action: 'resume_storyboard',
     ...overrides,
   }
 }
@@ -47,6 +61,11 @@ describe('分镜台结构化 diff 与问题筛选', () => {
     expect(isStoryboardProblemShot(value)).toBe(true)
   })
 
+  it('质量优化建议不混入必须处理的问题镜', () => {
+    const value = shot({ qa_warnings: ['画面动作含可精简的细节词'] })
+    expect(isStoryboardProblemShot(value)).toBe(false)
+  })
+
   it('把门禁字段翻译为可执行的制作语言', () => {
     expect(storyboardGateIssueLabel('shots[1](shot_no=2).first_frame_desc 太短'))
       .toBe('第 2 镜：首帧画面 太短')
@@ -60,5 +79,19 @@ describe('分镜台结构化 diff 与问题筛选', () => {
     expect(storyboardSaveDisabledReason(true, true, 1)).toContain('删减台词')
     expect(storyboardSaveDisabledReason(true, false, 0)).toContain('选择一个画面角色')
     expect(storyboardSaveDisabledReason(true, false, 1)).toBe('')
+  })
+
+  it('把目标、现有草稿和安全恢复点拆成三个明确口径', () => {
+    const copy = storyboardProgressCopy(storyboardStatus({ final_shot_valid: true }))
+    expect(copy.summary).toBe('本轮目标 17 镜 · 现有草稿 9 镜 · 安全恢复点到第 2 镜')
+    expect(copy.detail).toContain('第 3–9 镜为待重验草稿')
+    expect(copy.detail).toContain('从第 3 镜处理')
+    expect(copy.detail).toContain('收尾标记')
+  })
+
+  it('在镜头轨道区分安全保留镜头与待重验草稿', () => {
+    expect(storyboardShotCheckpointLabel(2, storyboardStatus())?.label).toBe('安全保留')
+    expect(storyboardShotCheckpointLabel(3, storyboardStatus())?.label).toBe('待重验')
+    expect(storyboardShotCheckpointLabel(3, storyboardStatus({ state: 'confirmed' }))).toBeNull()
   })
 })

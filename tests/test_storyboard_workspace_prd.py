@@ -92,7 +92,8 @@ def test_snapshot_version_is_monotonic_and_action_is_unique(storyboard_db):
     }
     assert isinstance(first["recommended_action"], str)
     assert first["hard_gate_issue_count"] == len(first["hard_gate_issues"])
-    assert ep["shots"][0]["preflight_errors"]
+    assert ep["shots"][0]["qa_warnings"]
+    assert not ep["shots"][0].get("preflight_errors")
 
     storyboard_db.execute("UPDATE episodes SET status='scripting' WHERE id='e1'")
     storyboard_db.commit()
@@ -100,6 +101,28 @@ def test_snapshot_version_is_monotonic_and_action_is_unique(storyboard_db):
     assert second["snapshot_version"] > first["snapshot_version"]
     assert second["recommended_action"] == "view_progress"
     assert second["confirmable"] is False
+
+
+def test_status_distinguishes_visible_drafts_from_zero_safe_checkpoint(storyboard_db):
+    save_checkpoint(SupervisorCheckpoint(
+        episode_id="e1",
+        phase="WAITING_RETRY",
+        validated_prefix_end=0,
+        next_shot_no=1,
+        expected_total=5,
+    ))
+    storyboard_db.execute("UPDATE episodes SET status='scripting' WHERE id='e1'")
+    storyboard_db.commit()
+
+    status = api.episode_detail("e1", view="board")["storyboard_status"]
+
+    assert status["state"] == "paused"
+    assert status["planned_shots"] == 5
+    assert status["draft_shots"] == 1
+    assert status["safe_checkpoint_shots"] == 0
+    assert status["pending_revalidation_shots"] == 1
+    assert status["resume_from_shot"] == 1
+    assert "通过" not in status["headline"]
 
 
 def _cancel_test_run(storyboard_db) -> WorkflowRecorder:
@@ -360,6 +383,9 @@ async def test_batch_storyboard_does_not_take_over_durable_active_run(
 async def test_first_storyboard_spawn_failure_restores_episode_state(
     storyboard_db, monkeypatch,
 ):
+    # “开始任务”只接受干净分镜；已有数据必须先明确清空，不能被 create 暗中覆盖。
+    with enter_handler():
+        await api.clear_storyboard("e1")
     storyboard_db.execute(
         "UPDATE episodes SET status='planned',script_error='启动前状态' WHERE id='e1'"
     )
@@ -539,7 +565,7 @@ async def test_batch_storyboard_reports_partial_start_failure(
 
 
 @pytest.mark.asyncio
-async def test_resume_auto_confirm_issues_fresh_grant_from_explicit_preflight(storyboard_db, monkeypatch):
+async def test_resume_ignores_legacy_auto_confirm_request(storyboard_db, monkeypatch):
     from app import task_registry
 
     storyboard_db.execute(
@@ -558,23 +584,19 @@ async def test_resume_auto_confirm_issues_fresh_grant_from_explicit_preflight(st
         "completion_mode": "auto_confirm",
     })
 
-    assert result["completion_mode"] == "auto_confirm"
-    assert result["completion_grant_id"]
-    grant = storyboard_db.execute(
-        "SELECT id,revoked_at,consumed_at FROM completion_grants WHERE id=?",
-        (result["completion_grant_id"],),
-    ).fetchone()
-    assert grant is not None
-    assert grant["revoked_at"] is None
-    assert grant["consumed_at"] is None
+    assert result["completion_mode"] == "ready_for_manual_confirm"
+    assert "completion_grant_id" not in result
+    assert storyboard_db.execute(
+        "SELECT COUNT(*) AS c FROM completion_grants"
+    ).fetchone()["c"] == 0
 
 
 def test_start_preflight_expires_when_state_drifts(storyboard_db):
-    preview = api.storyboard_start_preflight("e1", {"mode": "create"})
+    preview = api.storyboard_start_preflight("e1", {"mode": "resume"})
     storyboard_db.execute("UPDATE episodes SET status='planned' WHERE id='e1'")
     storyboard_db.commit()
     with pytest.raises(HTTPException) as caught:
-        workspace.require_preview(preview["preview_token"], "start:create", "e1")
+        workspace.require_preview(preview["preview_token"], "start:resume", "e1")
     assert caught.value.status_code == 409
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import difflib
 import re
+from typing import Any
 
 from app import config, textmatch
 from app.character_policy import is_functional_extra
@@ -20,6 +21,9 @@ from app.continuity import (
     adaptation_hook_errors,
     sync_shot_continuity_fields,
     count_sequential_action_beats,
+    dialogue_focus_subject,
+    dialogue_framing_errors,
+    dialogue_two_shot_required,
     spoken_chars_from_shot,
 )
 from app.spoken_contract import (
@@ -82,6 +86,15 @@ TRANSITION_HINTS = (
     "与此同时", "转场", "随后", "片刻后", "几小时后", "数小时后", "一夜后", "回到", "另一边",
     "带着", "顺着", "接着", "继续", "仍", "还", "已经",
 )
+
+
+def _named_character_is_explicitly_offscreen(name: str, text: str) -> bool:
+    """允许动作描述交代听者在画外，但不能把其可见动作混进单人对白镜。"""
+    escaped = re.escape(name)
+    return bool(
+        re.search(rf"(?:画外|镜外|不入画|留在画外)[^，。；]{{0,12}}{escaped}", text)
+        or re.search(rf"{escaped}[^，。；]{{0,12}}(?:在画外|于画外|不入画|留在画外)", text)
+    )
 # 换场承接的「移动/抵达」动词：动作里出现这些即说明人物是“走过去/来到”新场景，移动本身就是承接，
 # 不该因为没用到 TRANSITION_HINTS 里那批固定承接词就误判“缺少承接”（实测高频误伤，白耗修复轮次）。
 MOVEMENT_HINTS = (
@@ -372,6 +385,7 @@ def validate_storyboard(
         # 口播容量只在 speech_capacity_errors 里实现一次；此处曾重复计算同一规则，
         # 导致同一根因在确认门输出两条不同文案（VAL-422 根因 R5）。
         errors.extend(speech_capacity_errors(shot))
+        errors.extend(dialogue_framing_errors(shot))
         # 同一镜头只能有一套有效口播：dialogues 与 audio_timeline 分叉即 blocker。
         errors.extend(spoken_contract_coherence_errors(shot))
         # 产品合同：禁止一切旁白/内心OS；信息由真实台词或画面动作承载。
@@ -392,11 +406,6 @@ def validate_storyboard(
                 f"{tag}.characters 共 {len(shot.characters)} 人，超过单镜可渲染上限 3；"
                 "请减少画面角色或拆到相邻镜，禁止群戏调度"
             )
-        speakers = [d.speaker for d in (shot.dialogues or []) if (d.speaker or "").strip()]
-        if len({s for s in speakers}) > 2:
-            errors.append(
-                f"{tag} 开口说话人超过 2 个；单镜最多 2 人开口，其余改旁白/下一镜"
-            )
         for name in shot.characters:
             if bible_names and name not in bible_names and not is_functional_extra(name):
                 errors.append(
@@ -412,6 +421,17 @@ def validate_storyboard(
         visual_text = "".join(
             (shot.action_desc or "", shot.first_frame_desc or "", shot.last_frame_desc or "")
         )
+        focus_subject = dialogue_focus_subject(shot)
+        if focus_subject and not dialogue_two_shot_required(shot):
+            for other_name in sorted(bible_names - {focus_subject}):
+                if other_name not in visual_text:
+                    continue
+                if _named_character_is_explicitly_offscreen(other_name, visual_text):
+                    continue
+                errors.append(
+                    f"{tag} 是「{focus_subject}」的单人对白近景，但 action_desc/首尾帧仍把"
+                    f"「{other_name}」写进可见画面；请把听者明确留在画外，下一话轮再切反打"
+                )
         for name in (item for item in shot.characters if is_functional_extra(item)):
             if name not in visual_text:
                 errors.append(
@@ -1281,7 +1301,27 @@ def defer_establishing_covers(outline: StoryboardOutline, episode_no: int) -> li
     first.covers = ""
     existing = (second.covers or "").strip()
     second.covers = f"{moved}；{existing}" if existing else moved
-    return [{"shot_no": 1, "deferred_to": 2, "covers": moved[:80]}]
+    moved_key_lines = list(first.key_line_ids or [])
+    if moved_key_lines:
+        second.key_line_ids = list(dict.fromkeys([
+            *moved_key_lines,
+            *(second.key_line_ids or []),
+        ]))
+        first.key_line_ids = []
+    moved_audio_cast = list(first.audio_cast or [])
+    if moved_audio_cast:
+        second.audio_cast = list(dict.fromkeys([
+            *moved_audio_cast,
+            *(second.audio_cast or []),
+        ]))
+        first.audio_cast = []
+    return [{
+        "shot_no": 1,
+        "deferred_to": 2,
+        "covers": moved[:80],
+        "key_line_ids": moved_key_lines,
+        "audio_cast": moved_audio_cast,
+    }]
 
 
 def _covers_outside_spoken(covers: str, bible_names: set[str]) -> list[str]:
@@ -2201,6 +2241,164 @@ def assign_outline_delivery_ids(
     return changes
 
 
+def outline_key_line_speaker_errors(
+    outline: StoryboardOutline, screenplay: EpisodeScreenplay
+) -> list[str]:
+    """大纲阶段禁止把不同说话人的关键台词塞进同一视频镜头。"""
+    catalog = key_line_catalog(screenplay)
+    errors: list[str] = []
+    for shot in outline.shots or []:
+        speaker_order: list[str] = []
+        for kid in shot.key_line_ids or []:
+            text = catalog.get(str(kid).strip().upper(), "")
+            speaker = _speaker_name(text)
+            if speaker and speaker not in speaker_order:
+                speaker_order.append(speaker)
+        if len(speaker_order) > 1:
+            errors.append(
+                f"大纲第 {shot.shot_no} 镜分配了多个说话人 {speaker_order}；"
+                "请按话轮拆成相邻单人近景/特写，使用 reverse_angle 或 reaction_cut 正反打"
+            )
+    return errors
+
+
+def _outline_dialogue_two_shot_required(
+    shot: Any, speaker: str,
+) -> bool:
+    """大纲已有明确双人接触动作时，不把直接互动对象错误裁掉。"""
+    visible = [str(name).strip() for name in (shot.characters_visible or []) if str(name).strip()]
+    if len(visible) != 2 or speaker not in visible:
+        return False
+    other = next((name for name in visible if name != speaker), "")
+    text = "；".join(
+        str(value or "")
+        for value in (shot.primary_action, shot.beat, shot.covers)
+    )
+    interaction = re.compile(
+        r"搀扶|扶住|抱住|拥抱|握住|抓住|拉住|推开|挡住|托住|"
+        r"递给|递出|接过|抢夺|碰杯|亲吻|背起|抱起|交手|对打|扭打"
+    )
+    return any(
+        speaker in clause and other in clause and interaction.search(clause)
+        for clause in re.split(r"[，,。；;！？\n]", text)
+    )
+
+
+def split_outline_on_speaker_changes(
+    outline: StoryboardOutline,
+    screenplay: EpisodeScreenplay,
+    *,
+    max_shots: int,
+) -> list[dict]:
+    """按关键台词说话人变化确定性拆镜，同一人的连续短句可保留在一镜。"""
+    from app.schemas import StoryboardOutlineShot
+
+    catalog = key_line_catalog(screenplay)
+    if not catalog or not outline.shots:
+        return []
+    events: list[dict] = []
+    index = 0
+    while index < len(outline.shots):
+        shot = outline.shots[index]
+        kids = [
+            str(kid).strip().upper()
+            for kid in (shot.key_line_ids or [])
+            if str(kid).strip().upper() in catalog
+        ]
+        groups: list[tuple[str, list[str]]] = []
+        for kid in kids:
+            speaker = _speaker_name(catalog[kid])
+            if groups and groups[-1][0] == speaker:
+                groups[-1][1].append(kid)
+            else:
+                groups.append((speaker, [kid]))
+        distinct = [speaker for speaker, _ in groups if speaker]
+        if len(set(distinct)) <= 1:
+            if distinct:
+                if not _outline_dialogue_two_shot_required(shot, distinct[0]):
+                    shot.characters_visible = [distinct[0]]
+                shot.audio_cast = [distinct[0]]
+            index += 1
+            continue
+        needed = len(groups) - 1
+        if len(outline.shots) + needed > max_shots:
+            index += 1
+            continue
+
+        before_count = len(outline.shots)
+        original_state_out = shot.state_out
+        original_beat = shot.beat
+        original_spine = list(shot.spine_beat_ids or [])
+        original_information = list(shot.information_ids or [])
+        original_event = shot.story_event_id
+        original_duration = shot.duration_s or config.DEFAULT_VIDEO_DURATION_S
+        previous_state = shot.state_in
+        new_shots: list[StoryboardOutlineShot] = []
+        for group_index, (speaker, group_kids) in enumerate(groups):
+            lines = [catalog[kid] for kid in group_kids]
+            covers = "；".join(lines)
+            state_out = (
+                original_state_out
+                if group_index == len(groups) - 1
+                else f"{speaker or '当前说话人'}说完本话轮，听者仍留在画外等待反应"
+            )
+            if group_index == 0:
+                target = shot
+                keep_two_shot = _outline_dialogue_two_shot_required(target, speaker)
+                target.key_line_ids = list(group_kids)
+                target.covers = covers
+                if not keep_two_shot:
+                    target.primary_action = f"{speaker}单人近景说出本话轮"
+                target.state_out = state_out
+                target.information_ids = (
+                    original_information if group_index == len(groups) - 1 else []
+                )
+                target.new_information_ids = list(target.information_ids)
+                if not keep_two_shot:
+                    target.characters_visible = [speaker] if speaker else []
+                target.audio_cast = [speaker] if speaker else []
+                target.continuity_mode = (
+                    "same_scene_cut"
+                    if target.continuity_mode == "action_continuation"
+                    else (target.continuity_mode or "same_scene_cut")
+                )
+            else:
+                target = StoryboardOutlineShot(
+                    shot_no=shot.shot_no + group_index,
+                    scene_setting=shot.scene_setting,
+                    beat=f"（对白正反打）{speaker}承接上一话轮作出回应；{original_beat}",
+                    covers=covers,
+                    story_event_id=original_event,
+                    spine_beat_ids=original_spine,
+                    key_line_ids=list(group_kids),
+                    information_ids=(original_information if group_index == len(groups) - 1 else []),
+                    new_information_ids=(original_information if group_index == len(groups) - 1 else []),
+                    state_in=previous_state,
+                    primary_action=f"{speaker}单人近景说出本话轮",
+                    state_out=state_out,
+                    continuity_mode="reverse_angle",
+                    duration_s=original_duration,
+                    characters_visible=[speaker] if speaker else [],
+                    audio_cast=[speaker] if speaker else [],
+                )
+                new_shots.append(target)
+            previous_state = state_out
+        for offset, new_shot in enumerate(new_shots, start=1):
+            outline.shots.insert(index + offset, new_shot)
+        for shot_index, item in enumerate(outline.shots, start=1):
+            item.shot_no = shot_index
+        events.append({
+            "shot_no": index + 1,
+            "speakers": distinct,
+            "groups": [group_kids for _speaker, group_kids in groups],
+            "shots_before": before_count,
+            "shots_after": len(outline.shots),
+            "reason": "dialogue_speaker_change_requires_reverse_shot",
+        })
+        index += len(groups)
+    return events
+
+
 def split_outline_over_key_line_capacity(
     outline: StoryboardOutline,
     screenplay: EpisodeScreenplay,
@@ -2401,6 +2599,7 @@ def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeS
                     f"大纲安排了 drop_list 内容「{d[:40]}」；已声明不拍的支线不得进入大纲"
                 )
                 break
+    errors.extend(outline_key_line_speaker_errors(outline, screenplay))
     errors.extend(outline_key_line_capacity_errors(outline, screenplay))
     errors.extend(outline_atomic_errors(outline))
     return errors

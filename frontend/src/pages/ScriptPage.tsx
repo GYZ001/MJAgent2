@@ -967,7 +967,7 @@ export default function ScriptPage() {
               ) : (
                 <>
                   <li>安全恢复点：{preview.data.checkpoint?.available ? `从第 ${preview.data.checkpoint.resume_from_shot} 镜继续` : '无'}</li>
-                  <li>保留已验证镜头：{preview.data.kept_validated_shots ?? 0}</li>
+                  <li>安全恢复点：已保留前 {preview.data.kept_validated_shots ?? 0} 镜</li>
                   <li>{preview.data.impact}</li>
                   <li>{preview.data.estimate_note}</li>
                 </>

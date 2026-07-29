@@ -8,7 +8,11 @@ except NameError:  # pragma: no cover - used when importing this module directly
 try:
     _board_from_shot_rows
 except NameError:  # pragma: no cover - direct module import
-    from app.domain.storyboard_ops import _board_from_shot_rows
+    from app.domain.storyboard_ops import (
+        _board_from_shot_rows,
+        _finalize_storyboard_evidence,
+        _persist_storyboard_character_policy_repairs,
+    )
 
 def _shot_contract_json(shot: Shot) -> str:
     from app.continuity import shot_contract_dict
@@ -131,6 +135,7 @@ def evaluate_storyboard_for_confirmation(
     """
     from app.evaluations.issues import issues_from_messages
     from app.harness.types import IssueSeverity
+    from app.continuity import dialogue_framing_errors
     from app.validators import prefer_default_shot_durations
 
     board = Storyboard(episode_no=storyboard.episode_no, shots=list(storyboard.shots))
@@ -146,6 +151,18 @@ def evaluate_storyboard_for_confirmation(
 
     structural_errors = _storyboard_structural_errors(board)
     score_warnings = validate_storyboard(board, bible, compact_target)
+    # 对白构图是视频输入结构，不是审美评分：多人可见、错误景别/运镜会直接改变
+    # 参考图和最终画面，必须进入确认硬门禁。动作文字里仍提到画外听者等描述质量
+    # 问题继续保留为 warning，避免旧项目被不必要地整批判废。
+    dialogue_blockers = [
+        message
+        for shot in board.shots
+        for message in dialogue_framing_errors(shot)
+    ]
+    if dialogue_blockers:
+        structural_errors.extend(dialogue_blockers)
+        blocker_set = set(dialogue_blockers)
+        score_warnings = [message for message in score_warnings if message not in blocker_set]
     if screenplay is not None:
         score_warnings.extend(validate_storyboard_soundtrack(board, screenplay, compact_target))
         score_warnings.extend(validate_storyboard_preserves_key_content(board, screenplay))
@@ -250,8 +267,9 @@ def create_storyboard_confirmation_preview(episode_id: str, *, automated: bool =
     warnings: list[str] = list(dict.fromkeys(evaluation.warnings))
     if any(int(shot.duration_s or 0) > 5 for shot in evaluation.board.shots):
         warnings.append("存在超过 5 秒的镜头，已纳入 QA 评分报告")
+    force_allowed = bool(terminal and not evidence_errors and evaluation.errors)
     payload = {
-        "contract_version": "storyboard-confirm.v1",
+        "contract_version": "storyboard-confirm.v2",
         "episode_id": episode_id,
         "storyboard_artifact_id": ep["storyboard_artifact_id"],
         "shot_count": len(rows),
@@ -261,6 +279,15 @@ def create_storyboard_confirmation_preview(episode_id: str, *, automated: bool =
         "hard_gates": {
             "passed": terminal and evaluation.passed and not evidence_errors,
             "errors": hard_errors,
+        },
+        "force_confirmation": {
+            "allowed": force_allowed,
+            "accepted_errors": list(evaluation.errors) if force_allowed else [],
+            "note": (
+                "镜头结构与原文证据完整；可由人工承担风险并强行确认这些待修复问题"
+                if force_allowed else
+                "缺镜、最终镜缺失或原文证据失效不能强行确认"
+            ),
         },
         "warnings": warnings,
         "score_only": {
@@ -275,6 +302,9 @@ def create_storyboard_confirmation_preview(episode_id: str, *, automated: bool =
         },
         "unlocks": ["生成台", "付费视频生成入口"],
     }
+    preview_payload = create_preview("confirm", episode_id, payload) if (
+        payload["hard_gates"]["passed"] or force_allowed
+    ) else payload
     if not payload["hard_gates"]["passed"]:
         try:
             from app.observability.metrics import inc
@@ -284,14 +314,14 @@ def create_storyboard_confirmation_preview(episode_id: str, *, automated: bool =
         raise HTTPException(409, {
             "code": "STORYBOARD_NOT_CONFIRMABLE",
             "message": "分镜尚未通过确认门禁",
-            **payload,
+            **preview_payload,
         })
     try:
         from app.observability.metrics import inc
         inc("storyboard_confirm_preview_total", episode_id=episode_id, passed=True)
     except Exception:  # noqa: BLE001
         pass
-    return create_preview("confirm", episode_id, payload)
+    return preview_payload
 
 
 @router.post("/episodes/{episode_id}/confirm-preview")
@@ -343,6 +373,8 @@ def confirm_episode_core(
     decided_by: str = "user",
     reason: str | None = None,
     preview_token: str | None = None,
+    force: bool = False,
+    force_reason: str | None = None,
 ) -> dict:
     """人工/自动确认门：结构完整即可 confirmed；QA 仅作为评分报告。
     失败抛 ValueError（消息面向 UI）；供路由与 Supervisor 复用。
@@ -370,8 +402,13 @@ def confirm_episode_core(
             "total_duration_s": sum(int(row["duration_s"] or 0) for row in shots),
         }
     preview = require_preview(preview_token, "confirm", episode_id)
-    if not (preview.get("hard_gates") or {}).get("passed"):
+    preview_passed = bool((preview.get("hard_gates") or {}).get("passed"))
+    force_allowed = bool((preview.get("force_confirmation") or {}).get("allowed"))
+    accepted_force_reason = str(force_reason or reason or "").strip()
+    if not preview_passed and not (force and force_allowed):
         raise ValueError("确认预览未通过结构完整性门禁")
+    if force and force_allowed and len(accepted_force_reason) < 4:
+        raise ValueError("强行确认需填写至少 4 个字的风险承担理由")
     ep = _episode_or_404(episode_id)
     conn = get_conn()
     compact_target = _compact_episode_target(ep["target_duration_s"])
@@ -444,7 +481,8 @@ def confirm_episode_core(
         has_real_bible=has_real_bible,
         target_duration_s=compact_target,
     )
-    if not evaluation.passed:
+    forced_errors = list(evaluation.errors) if not evaluation.passed else []
+    if forced_errors and not (force and force_allowed):
         raise ValueError(json.dumps(evaluation.errors, ensure_ascii=False))
     board = evaluation.board
     compact_target = evaluation.compact_target
@@ -455,7 +493,12 @@ def confirm_episode_core(
     storyboard_artifact_id = ep["storyboard_artifact_id"]
     content_hash = None
     if character_artifact_ids or normalized_fields_changed or not storyboard_artifact_id:
-        storyboard_artifact_id = _finalize_storyboard_evidence(episode_id, board)
+        storyboard_artifact_id = _finalize_storyboard_evidence(
+            episode_id,
+            board,
+            forced_errors=forced_errors,
+            force_reason=accepted_force_reason if forced_errors else None,
+        )
     if storyboard_artifact_id:
         art = conn.execute(
             "SELECT content_hash FROM artifacts WHERE id=?", (storyboard_artifact_id,)
@@ -465,7 +508,7 @@ def confirm_episode_core(
     if ep["status"] == "confirmed":
         if storyboard_artifact_id and content_hash:
             existing_gate = conn.execute(
-                "SELECT id FROM gate_decisions WHERE artifact_id=? AND gate_key='storyboard' AND decision='approve'",
+                "SELECT id FROM gate_decisions WHERE artifact_id=? AND gate_key='storyboard' AND decision IN ('approve','approve_with_risk')",
                 (storyboard_artifact_id,),
             ).fetchone()
             if existing_gate:
@@ -483,7 +526,7 @@ def confirm_episode_core(
 
     idempotency_key = f"{episode_id}:{content_hash or storyboard_artifact_id or 'none'}"
     existing = conn.execute(
-        "SELECT id FROM gate_decisions WHERE artifact_id=? AND gate_key='storyboard' AND decision='approve'",
+        "SELECT id FROM gate_decisions WHERE artifact_id=? AND gate_key='storyboard' AND decision IN ('approve','approve_with_risk')",
         (storyboard_artifact_id,),
     ).fetchone() if storyboard_artifact_id else None
     if storyboard_artifact_id and not existing:
@@ -491,7 +534,7 @@ def confirm_episode_core(
             evaluator_type="human",
             evaluator_name="storyboard_reviewer",
             evaluator_version="1.0.0",
-            status="passed",
+            status="warning" if forced_errors else "passed",
             hard_gate_passed=True,
             score=100,
             evidence={
@@ -499,6 +542,9 @@ def confirm_episode_core(
                 "shot_count": len(shots),
                 "decided_by": decided_by,
                 "idempotency_key": idempotency_key,
+                "forced": bool(forced_errors),
+                "accepted_errors": forced_errors,
+                "force_reason": accepted_force_reason if forced_errors else None,
             },
         )
         evidence_repository.commit_artifact(None, storyboard_artifact_id, [human_eval])
@@ -507,8 +553,13 @@ def confirm_episode_core(
                    id, artifact_id, gate_key, decision, decided_by, reason, created_at
                ) VALUES(?,?,?,?,?,?,?)""",
             (
-                new_id("gate"), storyboard_artifact_id, "storyboard", "approve", decided_by,
-                reason or "分镜全量确定性校验通过并确认", now(),
+                new_id("gate"), storyboard_artifact_id, "storyboard",
+                "approve_with_risk" if forced_errors else "approve", decided_by,
+                (
+                    accepted_force_reason
+                    if forced_errors else reason or "分镜全量确定性校验通过并确认"
+                ),
+                now(),
             ),
         )
     active_storyboard_run_id = ep["active_storyboard_run_id"]
@@ -537,6 +588,8 @@ def confirm_episode_core(
         "total_duration_s": sum(s.duration_s for s in shots),
         "target_duration_s": compact_target,
         "idempotency_key": idempotency_key,
+        "forced": bool(forced_errors),
+        "accepted_errors": forced_errors,
     }
 
 
@@ -548,7 +601,13 @@ async def confirm_episode(episode_id: str, body: dict | None = Body(None)):
     body = _as_body_dict(body)
     result = await dispatch(
         "storyboard.confirm",
-        {"episode_id": episode_id, "preview_token": body.get("preview_token")},
+        {
+            "episode_id": episode_id,
+            "preview_token": body.get("preview_token"),
+            "force": bool(body.get("force")),
+            "force_reason": body.get("force_reason"),
+            "reason": body.get("force_reason") or body.get("reason"),
+        },
         initiator="ui",
     )
     return respond_ui(result)
@@ -879,10 +938,21 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
         "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
         (episode_id,)).fetchall()
     board = _board_from_shot_rows(shots_rows, ep["episode_no"])
-    shots = [
-        {"row": dict(row), "shot": board.shots[idx], "prev": board.shots[idx - 1] if idx > 0 else None}
-        for idx, row in enumerate(shots_rows)
-    ]
+    shots = []
+    previous_adopted = None
+    previous_adopted_row = None
+    for idx, row in enumerate(shots_rows):
+        if not bool(row["storyboard_adopted"]):
+            continue
+        current = board.shots[idx]
+        shots.append({
+            "row": dict(row),
+            "shot": current,
+            "prev": previous_adopted,
+            "prev_row": dict(previous_adopted_row) if previous_adopted_row is not None else None,
+        })
+        previous_adopted = current
+        previous_adopted_row = row
     from_no = body.get("from_shot_no")
     if from_no is not None:
         try:
@@ -909,7 +979,7 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
         completed_ids = {
             row["id"] for row in conn.execute(
                 """SELECT s.id FROM shots s
-                   WHERE s.episode_id=? AND (
+                   WHERE s.episode_id=? AND s.storyboard_adopted=1 AND (
                        s.adopted_version_id IS NOT NULL OR EXISTS(
                            SELECT 1 FROM shot_versions v
                            WHERE v.shot_id=s.id AND v.status='succeeded'
@@ -948,8 +1018,7 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
     for s in selected:
         after = None
         if _uses_previous_tail_frame_for_model(s["shot"], s["prev"]) and s["row"]["shot_no"] > 1:
-            pr = _shot_by_no(episode_id, s["row"]["shot_no"] - 1)
-            after = pr["id"] if pr else None
+            after = s["prev_row"]["id"] if s["prev_row"] else None
         try:
             r = worker.enqueue_shot(
                 s["row"]["id"], after_shot_id=after,
@@ -1031,8 +1100,8 @@ async def _generate_shot_core(shot_id: str, body: dict) -> dict:
     prev_shot = None
     if shot_row["shot_no"] > 1:
         prev_row = conn.execute(
-            "SELECT * FROM shots WHERE episode_id=? AND shot_no=?",
-            (shot_row["episode_id"], shot_row["shot_no"] - 1),
+            "SELECT * FROM shots WHERE episode_id=? AND shot_no<? AND storyboard_adopted=1 ORDER BY shot_no DESC LIMIT 1",
+            (shot_row["episode_id"], shot_row["shot_no"]),
         ).fetchone()
     if prev_row:
         models = _board_from_shot_rows([prev_row, shot_row], 0).shots
@@ -1040,8 +1109,7 @@ async def _generate_shot_core(shot_id: str, body: dict) -> dict:
     else:
         shot_model = _board_from_shot_rows([shot_row], 0).shots[0]
     if _uses_previous_tail_frame_for_model(shot_model, prev_shot) and shot_row["shot_no"] > 1:
-        pr = _shot_by_no(shot_row["episode_id"], shot_row["shot_no"] - 1)
-        after = pr["id"] if pr else None
+        after = prev_row["id"] if prev_row else None
     try:
         return worker.enqueue_shot(
             shot_id,
@@ -1091,7 +1159,13 @@ async def stop_shot_video(shot_id: str):
 
 def _adopt_version_core(shot_id: str, body: dict) -> dict:
     """人工采用视频版本的领域逻辑，供 REST 路由与 ``video.adopt_version`` Command Handler 共用。"""
+    from app.video_playback import normalize_playback_rate
+
     version_id = body.get("version_id")
+    try:
+        playback_rate = normalize_playback_rate(body.get("playback_rate"))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     _review_assert_shot_positive(shot_id, body.get("qualification_version"))
     conn = get_conn()
     v = conn.execute("SELECT * FROM shot_versions WHERE id=? AND shot_id=?", (version_id, shot_id)).fetchone()
@@ -1124,12 +1198,18 @@ def _adopt_version_core(shot_id: str, body: dict) -> dict:
         [Evaluation(
             evaluator_type="human", evaluator_name=str(body.get("decided_by") or "user"),
             evaluator_version="1.0.0", status="passed", hard_gate_passed=True,
-            score=100, evidence={"decision": "adopt", "reason": reason},
+            score=100, evidence={
+                "decision": "adopt", "reason": reason, "playback_rate": playback_rate,
+            },
         )],
     )
     shot = conn.execute("SELECT episode_id, adopted_version_id FROM shots WHERE id=?", (shot_id,)).fetchone()
+    previous_rate = float(v["playback_rate"] or 1.0)
     conn.execute("UPDATE shots SET adopted_version_id=? WHERE id=?", (version_id, shot_id))
-    conn.execute("UPDATE shot_versions SET adoption_reason=? WHERE id=?", (reason, version_id))
+    conn.execute(
+        "UPDATE shot_versions SET adoption_reason=?, playback_rate=? WHERE id=?",
+        (reason, playback_rate, version_id),
+    )
     conn.execute(
         """INSERT INTO gate_decisions(
                id, artifact_id, gate_key, decision, decided_by, reason, created_at
@@ -1142,13 +1222,24 @@ def _adopt_version_core(shot_id: str, body: dict) -> dict:
     conn.commit()
     _review_write_audit(
         "video_version.adopt", "shot", shot_id, target_version=version_id,
-        old_state={"adopted_version_id": shot["adopted_version_id"] if shot else None},
-        new_state={"adopted_version_id": version_id}, reason=reason,
+        old_state={
+            "adopted_version_id": shot["adopted_version_id"] if shot else None,
+            "playback_rate": previous_rate,
+        },
+        new_state={"adopted_version_id": version_id, "playback_rate": playback_rate}, reason=reason,
         idempotency_key=body.get("idempotency_key"), request_id=body.get("request_id"),
     )
-    if shot and shot["adopted_version_id"] != version_id:
+    if shot and (
+        shot["adopted_version_id"] != version_id
+        or abs(previous_rate - playback_rate) > 0.0001
+    ):
         worker.invalidate_episode_final(shot["episode_id"])
-    return {"adopted": version_id, "artifact_id": artifact["id"], "reason": reason}
+    return {
+        "adopted": version_id,
+        "artifact_id": artifact["id"],
+        "reason": reason,
+        "playback_rate": playback_rate,
+    }
 
 
 @router.post("/shots/{shot_id}/adopt")
@@ -1159,6 +1250,7 @@ async def adopt_version(shot_id: str, body: dict):
         "video.adopt_version",
         {
             "shot_id": shot_id, "version_id": body.get("version_id"), "reason": body.get("reason"),
+            "playback_rate": body.get("playback_rate", 1.0),
             "qualification_version": body.get("qualification_version"),
             "idempotency_key": body.get("idempotency_key"), "request_id": body.get("request_id"),
         },
@@ -1413,7 +1505,7 @@ async def _complete_episode_core(
 
     conn = get_conn()
     shots_total = conn.execute(
-        "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)
+        "SELECT COUNT(*) AS c FROM shots WHERE episode_id=? AND storyboard_adopted=1", (episode_id,)
     ).fetchone()["c"]
     if int(shots_total or 0) <= 0:
         raise HTTPException(409, "本集尚无分镜")
@@ -2414,7 +2506,7 @@ def stale_assets_preview(episode_id: str):
     conn = get_conn()
     from app.domain.storyboard_ops import _shot_video_is_stale, _shot_adopted_assets_stale
     rows = conn.execute(
-        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
+        "SELECT * FROM shots WHERE episode_id=? AND storyboard_adopted=1 ORDER BY shot_no", (episode_id,)
     ).fetchall()
     items = []
     for row in rows:

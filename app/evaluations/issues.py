@@ -16,6 +16,9 @@ _CODE_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("SPOKEN_TIMELINE_OUT_OF_RANGE", re.compile(r"口播时间段.+超出|SPOKEN_TIMELINE_OUT_OF_RANGE", re.I)),
     ("CONTRACT_FIELD_INVALID", re.compile(r"episode_no|mode|5~10 秒|5-10 秒|时长", re.I)),
     ("SPOKEN_CAPACITY_EXCEEDED", re.compile(r"口播|台词.{0,8}超|字数.{0,6}超|容量上限|超过.{0,12}字", re.I)),
+    ("DIALOGUE_FRAMING_INVALID", re.compile(
+        r"多个画内说话人|单人对白|只保留说话人|近景或特写|对白双人镜|按话轮拆|正反打", re.I
+    )),
     ("LEGACY_COVERAGE_UNCERTAIN", re.compile(r"LEGACY_COVERAGE_UNCERTAIN", re.I)),
     ("STATE_CHAIN_INVALID", re.compile(r"状态链|state_in|state_out|承接", re.I)),
     ("KEY_LINE_MISSING", re.compile(

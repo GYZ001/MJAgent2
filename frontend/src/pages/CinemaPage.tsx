@@ -199,6 +199,7 @@ export default function CinemaPage() {
   }
 
   const selectedPackage = packages.find(item => item.id === selectedPackageId) ?? null
+  const spedShots = mix?.shots.filter(shot => shot.has_adopted && Math.abs((shot.playback_rate ?? 1) - 1) > 0.0001) ?? []
   const canReview = selectedPackage?.status === 'waiting_human'
   const selectedPackageIndex = selectedPackage
     ? packages.findIndex(item => item.id === selectedPackage.id)
@@ -406,7 +407,7 @@ export default function CinemaPage() {
               <span className={`stamp ${canConcatenateMix(mix) ? 'green' : 'gold'}`}>{canConcatenateMix(mix) ? '可合成' : '暂无片段'}</span>
               <div>
                 <b>{mix.shots_ready} 个已采纳片段可合成</b>
-                <span>将按分镜号顺序合成；{Math.max(mix.shots_total - mix.shots_ready, 0)} 镜未采纳或不可用，本次跳过</span>
+                <span>将按分镜号顺序和各镜定稿倍速合成；{Math.max(mix.shots_total - mix.shots_ready, 0)} 镜未采纳或不可用，本次跳过{spedShots.length ? `；${spedShots.length} 镜使用变速定稿` : ''}</span>
               </div>
             </div>
             <div className="cinema-progress" aria-label="成片准备进度">
@@ -791,6 +792,9 @@ export default function CinemaPage() {
                 : '将使用当前各镜采用版本生成本集成片，不会自动生成或批准交付候选。'}
               details={[
                 '合成过程不产生模型生成费用',
+                spedShots.length
+                  ? `倍速定稿：${spedShots.map(shot => `镜 ${shot.shot_no} ${shot.playback_rate}×`).join('、')}`
+                  : '所有采纳片段均按 1× 合成',
                 mix.skipped_shot_nos?.length
                   ? `本次跳过镜号：${mix.skipped_shot_nos.join('、')}`
                   : '本次没有需要跳过的分镜',

@@ -8,11 +8,9 @@ import {
   type Shot,
   type ShotVersion,
 } from '../api'
-import { shotVideoState } from '../shotStatus'
+import { compactShotStage, shotVideoState } from '../shotStatus'
 import DecisionDialog from '../components/DecisionDialog'
 import QueryState from '../components/QueryState'
-import VideoSupervisorPanel from '../components/VideoSupervisorPanel'
-import VideoGenerationActivity, { compactShotStage, summarizeVideoActivity } from '../components/VideoGenerationActivity'
 import {
   artifactTypeLabel,
   statusLabel,
@@ -115,6 +113,7 @@ export function shotDetailRefreshKey(shot: Shot | null): string {
       hasVideo: Boolean(version.video_url),
       error: version.error || null,
       qa: version.qa?.overall ?? null,
+      playbackRate: version.playback_rate ?? 1,
       references: (version.image_inputs?.reference_images ?? []).map(ref => ({
         id: ref.id,
         imageUrl: ref.image_url || null,
@@ -164,6 +163,13 @@ export function episodeGenerationAction(
 }
 
 export type VideoGenerationMode = 'reroll' | 'rewrite' | 'critique'
+
+export const VIDEO_PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 2] as const
+
+export function videoPlaybackRate(version: Pick<ShotVersion, 'playback_rate'>): number {
+  const rate = Number(version.playback_rate ?? 1)
+  return Number.isFinite(rate) && rate >= 0.5 && rate <= 2 ? rate : 1
+}
 
 export function videoGenerationConfirmLabel(mode: VideoGenerationMode, estimatedCost: number): string {
   const action = mode === 'reroll'
@@ -306,9 +312,6 @@ export default function WallPage() {
   const [generationSubmitting, setGenerationSubmitting] = useState(false)
   const [generationOperation, setGenerationOperation] = useState<EpisodeGenerationAction | 'clear' | null>(null)
   const [generationDecision, setGenerationDecision] = useState<EpisodeGenerationAction | 'clear' | null>(null)
-  const [activityRefreshing, setActivityRefreshing] = useState(false)
-  const [lastEpisodeSyncAt, setLastEpisodeSyncAt] = useState<number | null>(null)
-  const [supervisorPanelDismissed, setSupervisorPanelDismissed] = useState(false)
   const [stalePreview, setStalePreview] = useState<Awaited<ReturnType<typeof api.staleAssetsPreview>> | null>(null)
   const [staleSelection, setStaleSelection] = useState<Set<string>>(new Set())
   const [staleBusy, setStaleBusy] = useState(false)
@@ -320,10 +323,6 @@ export default function WallPage() {
   const lastReadyDetail = useRef<Shot | null>(null)
   const contextRequest = useRef(0)
   const positionKey = `manju:review-wall:${projectId || 'project'}:${episodeId || 'episode'}`
-
-  useEffect(() => {
-    if (ep) setLastEpisodeSyncAt(Date.now())
-  }, [ep])
 
   const showToast = useCallback((message: string, action?: { label: string; run: () => void }, persistent = false) => {
     setToast({ message, action })
@@ -440,13 +439,9 @@ export default function WallPage() {
       : !context.upstream.eligible_for_production
         ? context.upstream.blockers.join('；') || '当前生成资格未通过'
         : ''
-  const supervisor = ep?.video_supervisor as import('../components/VideoSupervisorPanel').VideoSupervisorSnapshot | null | undefined
-  const supervisorPhase = typeof supervisor?.phase === 'string' ? supervisor.phase : ''
-  const supervisorTerminal = ['SUCCEEDED_COVERED', 'COMPLETED_DEADLINE_FALLBACK', 'PARTIAL_NO_USABLE_CANDIDATE', 'FAILED_CLOSED', 'CANCELLED'].includes(supervisorPhase)
-  const supervisorTaskRunning = supervisor?.task_running === true
-  const supervisorLive = !supervisorTerminal && supervisorTaskRunning
-  const videoActivity = useMemo(() => summarizeVideoActivity(shots), [shots])
-  const hasCurrentGeneration = supervisorTaskRunning || videoActivity.activeCount > 0
+  const supervisorTaskRunning = ep?.video_supervisor?.task_running === true
+  const generatingCount = shots.filter(shot => shotVideoState(shot).phase === 'generating').length
+  const hasCurrentGeneration = supervisorTaskRunning || generatingCount > 0
   const generationAction = episodeGenerationAction(
     hasCurrentGeneration,
     ep?.pipeline_summary?.paused ?? 0,
@@ -463,10 +458,6 @@ export default function WallPage() {
     : context?.upstream.active_upstream_runs.length
       ? '上游任务运行中，暂不能清空资源'
       : ''
-
-  // 不能用页面上「上一次已终止」的 checkpoint 清掉本次提交态；
-  // 只有新 Supervisor 已被 task registry 观测到运行才交接给服务端状态。
-  useEffect(() => { setSupervisorPanelDismissed(false) }, [episodeId])
 
   const refreshAll = useCallback(async () => {
     const preservedShotId = selectedShotId
@@ -520,7 +511,7 @@ export default function WallPage() {
         reused ? `复用 ${reused} 个已有结果` : '',
         failed ? `${failed} 镜未能入队` : '',
       ].filter(Boolean).join('；') || '请求已返回，正在同步任务状态'
-      showToast(`${message}。「系统已受理」和「供应商已接单」会在进度面板分开显示。`, undefined, failed > 0)
+      showToast(`${message}。可在下方镜头按钮查看实时状态。`, undefined, failed > 0)
       await refreshAll()
     } catch (reason) {
       showToast(reason instanceof Error ? reason.message : String(reason), undefined, true)
@@ -681,20 +672,6 @@ export default function WallPage() {
 
       {staleCount > 0 && <section className="material-fallback-note review-stale-banner" role="status"><span>参考资产已更新：<b>{staleCount}</b> 镜采用版可能使用旧证据。</span><button className="btn small" disabled={staleBusy} onClick={() => { void loadStale() }}>{staleBusy ? '预演中…' : '查看影响与选择修复'}</button></section>}
 
-      <VideoGenerationActivity
-        shots={shots}
-        requestPending={generationSubmitting && generationOperation !== 'clear'}
-        lastSyncedAt={lastEpisodeSyncAt}
-        syncError={error}
-        refreshing={activityRefreshing}
-        onRefresh={() => {
-          setActivityRefreshing(true)
-          void refreshAll().finally(() => setActivityRefreshing(false))
-        }}
-      />
-
-      {!supervisorPanelDismissed && (supervisorLive || (supervisor && !hasCurrentGeneration)) && <VideoSupervisorPanel api={api} episodeId={ep.id} runId={ep.active_video_run_id} supervisor={supervisor} running={supervisorTaskRunning} onChanged={refreshAll} onToast={showToast} onDismiss={() => setSupervisorPanelDismissed(true)} />}
-
       {shots.length === 0 ? (
         <section className="review-business-empty"><div className="big">镜</div><h2>本集尚无可生成镜头</h2><p>当前状态：{episodeState.label}。{episodeState.next}。</p><div><button className="btn" onClick={() => go('script', projectId, ep.id)}>去剧本台</button><button className="btn primary" onClick={() => go('board', projectId, ep.id)}>去分镜台</button><button className="btn ghost" onClick={() => { void refreshAll() }}>刷新</button></div></section>
       ) : (
@@ -717,7 +694,7 @@ export default function WallPage() {
           {contentUpdate && <div className="filter-selection-note" role="status"><b>当前镜头内容已更新</b><span>{contentUpdate}。当前镜头与页签保持不变。</span><button onClick={() => setContentUpdate(null)}>知道了</button></div>}
 
           {tombstoneShotId ? (
-            <section className="review-tombstone" role="alert"><h2>原镜头已删除或无权访问</h2><p>此前保存的镜头已不在当前列表。所有写操作已冻结，不会自动改作相邻镜头。</p><details><summary>技术标识</summary><code>{tombstoneShotId}</code></details><div>{shots.map(shot => <button className="btn small" key={shot.id} onClick={() => selectShot(shot.id)}>选择镜 {shot.shot_no}</button>)}</div></section>
+            <section className="review-tombstone" role="alert"><h2>原镜头已删除、取消采纳或无权访问</h2><p>此前保存的镜头已不在当前生成列表。所有写操作已冻结，不会自动改作相邻镜头。</p><details><summary>技术标识</summary><code>{tombstoneShotId}</code></details><div>{shots.map(shot => <button className="btn small" key={shot.id} onClick={() => selectShot(shot.id)}>选择镜 {shot.shot_no}</button>)}</div></section>
           ) : detail.status === 'loading' ? (
             <section className="review-detail-loading" aria-busy="true"><b>正在加载镜 {selectedSummary?.shot_no} 的完整生成详情…</b><div className="review-skeleton" /><div className="review-skeleton short" /></section>
           ) : detail.status === 'error' ? (
@@ -744,7 +721,7 @@ export default function WallPage() {
           summary={generationDecision === 'generate'
             ? `${shots.length} 镜 · 当前估算合计 ¥${quickGenerationEstimate.toFixed(2)}`
             : generationDecision === 'stop'
-              ? `${videoActivity.activeCount} 镜仍在处理`
+              ? `${generatingCount} 镜仍在处理`
               : generationDecision === 'resume'
                 ? `${(ep.pipeline_summary?.paused ?? 0) + (ep.pipeline_summary?.failed ?? 0)} 镜待继续或重试`
                 : `${shots.length} 个分镜 · ${episodeVideoCandidateCount} 个视频候选 · 已采用 ${adoptedCount} 镜 · 图像资源一并清空`}
@@ -915,7 +892,11 @@ export function countReferenceImages(versions: ShotVersion[]): number {
 }
 
 function VideoPreviewWorkspace({ shot, episodeNo, episodeStatus, context, generating, setGenerating, writeFrozen, onRefresh, onToast }: { shot: Shot; episodeNo: number; episodeStatus: string; context: ReviewWallContext | null; generating: boolean; setGenerating: (busy: boolean) => void; writeFrozen: boolean; onRefresh: () => Promise<void>; onToast: (message: string, action?: { label: string; run: () => void }, persistent?: boolean) => void }) {
+  const videoRef = useRef<HTMLVideoElement>(null)
   const [previewId, setPreviewId] = useState<string | null>(() => resolvePreviewVersionId(shot.versions, null))
+  const [playbackRates, setPlaybackRates] = useState<Record<string, number>>(() => Object.fromEntries(
+    shot.versions.map(version => [version.id, videoPlaybackRate(version)]),
+  ))
   const [adopt, setAdopt] = useState<ShotVersion | null>(null)
   const [adoptReason, setAdoptReason] = useState('')
   const [wizard, setWizard] = useState<VideoGenerationMode | null>(null)
@@ -928,11 +909,21 @@ function VideoPreviewWorkspace({ shot, episodeNo, episodeStatus, context, genera
   const [candidateAction, setCandidateAction] = useState<{ kind: 'archive' | 'restore'; versionId: string } | null>(null)
   const [clearingResources, setClearingResources] = useState(false)
   const [clearResourcesConfirm, setClearResourcesConfirm] = useState(false)
-  const playableKey = shot.versions.map(version => `${version.id}:${Boolean(version.video_url)}`).join('|')
+  const playableKey = shot.versions.map(version => `${version.id}:${Boolean(version.video_url)}:${videoPlaybackRate(version)}`).join('|')
 
   useEffect(() => {
     setPreviewId(current => resolvePreviewVersionId(shot.versions, current))
   }, [playableKey, shot.versions])
+  useEffect(() => {
+    setPlaybackRates(current => Object.fromEntries(
+      shot.versions.map(version => [
+        version.id,
+        Object.prototype.hasOwnProperty.call(current, version.id)
+          ? current[version.id]
+          : videoPlaybackRate(version),
+      ]),
+    ))
+  }, [playableKey, shot.id, shot.versions])
   useEffect(() => { setMediaError(null) }, [previewId])
   useEffect(() => {
     setDeleteTarget(null)
@@ -952,6 +943,13 @@ function VideoPreviewWorkspace({ shot, episodeNo, episodeStatus, context, genera
   }, [prompt, shot.id, wizard])
 
   const selected = shot.versions.find(version => version.id === previewId)
+  const selectedPlaybackRate = selected ? playbackRates[selected.id] ?? videoPlaybackRate(selected) : 1
+  const selectedRateChanged = Boolean(
+    selected && Math.abs(selectedPlaybackRate - videoPlaybackRate(selected)) > 0.0001,
+  )
+  useEffect(() => {
+    if (videoRef.current) videoRef.current.playbackRate = selectedPlaybackRate
+  }, [previewId, selectedPlaybackRate])
   const adoptedVersion = shot.versions.find(version => version.id === shot.adopted_version_id)
   const versions = useMemo(() => visibleVideoVersions(shot.versions), [shot.versions])
   const shotReferenceImageCount = countReferenceImages(shot.versions)
@@ -1000,12 +998,13 @@ function VideoPreviewWorkspace({ shot, episodeNo, episodeStatus, context, genera
 
   const doAdopt = async () => {
     if (!adopt || !context) return
+    const playbackRate = playbackRates[adopt.id] ?? videoPlaybackRate(adopt)
     setAdopting(true)
     try {
-      await api.adoptVersion(shot.id, adopt.id, adoptReason.trim(), context.upstream.qualification_version, newId(`adopt:${adopt.id}`))
+      await api.adoptVersion(shot.id, adopt.id, adoptReason.trim(), playbackRate, context.upstream.qualification_version, newId(`adopt:${adopt.id}`))
       setAdopt(null)
       setPreviewId(adopt.id)
-      onToast(`已采用 v${adopt.version_no}，理由已写入审计`)
+      onToast(`已按 ${playbackRate}× 定稿采用 v${adopt.version_no}，合成将使用该倍速`)
       await onRefresh()
     } catch (error) {
       onToast(error instanceof Error ? error.message : String(error), undefined, true)
@@ -1090,12 +1089,13 @@ function VideoPreviewWorkspace({ shot, episodeNo, episodeStatus, context, genera
     <div className="video-preview-layout">
       <section className="video-preview-player" aria-label="单视频预览">
         <header><div><span>当前预览</span><b>{selected ? `镜 ${shot.shot_no} · v${selected.version_no}` : `镜 ${shot.shot_no}`}</b></div>{selected && <span className={`stamp ${selected.status === 'failed' ? 'red' : selected.status === 'succeeded' ? 'green' : 'gold'}`}>{videoVersionStatusLabel(selected, selected.id === shot.adopted_version_id)}</span>}</header>
-        {selected?.video_url ? <video key={selected.id} src={selected.video_url} controls preload="metadata" onLoadedData={() => setMediaError(null)} onError={() => setMediaError(`无法加载 v${selected.version_no} 的媒体，请检查访问权限或稍后重试`)} /> : <div className="video-preview-empty"><b>暂无可预览视频</b><span>请从右侧选择已生成的候选；排队中或失败版本仍会保留在列表中。</span></div>}
+        {selected?.video_url ? <video ref={videoRef} key={selected.id} src={selected.video_url} controls preload="metadata" onLoadedMetadata={event => { event.currentTarget.playbackRate = selectedPlaybackRate }} onLoadedData={() => setMediaError(null)} onError={() => setMediaError(`无法加载 v${selected.version_no} 的媒体，请检查访问权限或稍后重试`)} /> : <div className="video-preview-empty"><b>暂无可预览视频</b><span>请从右侧选择已生成的候选；排队中或失败版本仍会保留在列表中。</span></div>}
         {mediaError && <div className="review-persistent-error compact" role="alert">{mediaError}</div>}
         {!mediaError && selected?.error && <div className="review-persistent-error compact" role="alert"><b>该候选生成未完成</b><span>候选记录已保留，可调整输入后新建版本。</span><details><summary>查看错误详情</summary><pre>{selected.error}</pre></details></div>}
-        {selected && <div className="video-preview-summary"><span>质检分 <b>{selected.qa?.overall?.toFixed(2) ?? '未评估'}</b></span><span>费用 <b>￥{selected.cost_cny.toFixed(2)}</b></span><span>耗时 <b>{selected.latency_s.toFixed(1)} 秒</b></span></div>}
+        {selected && <div className="video-preview-summary"><span>质检分 <b>{selected.qa?.overall?.toFixed(2) ?? '未评估'}</b></span><span>费用 <b>￥{selected.cost_cny.toFixed(2)}</b></span><span>耗时 <b>{selected.latency_s.toFixed(1)} 秒</b></span><span>定稿倍速 <b>{videoPlaybackRate(selected)}×</b></span></div>}
         {selected?.qa?.issues?.length ? <p className="video-preview-issues">{selected.qa.issues.join('；')}</p> : null}
-        <div className="video-preview-actions">{selected?.video_url && <a className="btn ghost small" href={selected.video_url} download={`ep-${episodeNo}-shot-${shot.shot_no}-v${selected.version_no}-${selected.id === shot.adopted_version_id ? 'adopted' : 'candidate'}.mp4`}>导出当前视频</a>}{selected?.video_url && selected.id !== shot.adopted_version_id && !context?.archived_versions[selected.id] && <button className="btn primary small" disabled={Boolean(adoptDisabledReason)} title={adoptDisabledReason || '采纳前需填写画面质量、连续性或成本判断'} onClick={() => openAdopt(selected)}>采纳当前候选</button>}{selected?.id === shot.adopted_version_id && <><span className="stamp green">当前采用版本</span><button type="button" className="btn ghost small danger" disabled={cancellingAdoption} title="保留候选视频，只取消采纳；下次成片合成将跳过本镜" onClick={() => { void cancelAdoption() }}>{cancellingAdoption ? '取消中…' : '取消采纳'}</button></>}</div>
+        {selected?.video_url && <div className="video-playback-control"><label htmlFor={`video-rate-${selected.id}`}>预览 / 定稿倍速</label><select id={`video-rate-${selected.id}`} value={selectedPlaybackRate} onChange={event => setPlaybackRates(current => ({ ...current, [selected.id]: Number(event.target.value) }))}>{VIDEO_PLAYBACK_RATES.map(rate => <option key={rate} value={rate}>{rate}×</option>)}</select><small>{selectedRateChanged ? `尚未定稿：当前预览 ${selectedPlaybackRate}×` : `已定稿 ${videoPlaybackRate(selected)}×`}；采纳后成片会实际按此倍速合成。</small></div>}
+        <div className="video-preview-actions">{selected?.video_url && <a className="btn ghost small" href={selected.video_url} download={`ep-${episodeNo}-shot-${shot.shot_no}-v${selected.version_no}-${selected.id === shot.adopted_version_id ? 'adopted' : 'candidate'}.mp4`}>导出当前视频</a>}{selected?.video_url && selected.id !== shot.adopted_version_id && !context?.archived_versions[selected.id] && <button className="btn primary small" disabled={Boolean(adoptDisabledReason)} title={adoptDisabledReason || '按当前预览倍速采纳；提交前需填写判断理由'} onClick={() => openAdopt(selected)}>按 {selectedPlaybackRate}× 定稿采纳</button>}{selected?.id === shot.adopted_version_id && <><span className="stamp green">当前采用版本 · {videoPlaybackRate(selected)}×</span>{selectedRateChanged && <button type="button" className="btn primary small" disabled={Boolean(adoptDisabledReason)} onClick={() => openAdopt(selected)}>改为 {selectedPlaybackRate}× 定稿</button>}<button type="button" className="btn ghost small danger" disabled={cancellingAdoption} title="保留候选视频，只取消采纳；下次成片合成将跳过本镜" onClick={() => { void cancelAdoption() }}>{cancellingAdoption ? '取消中…' : '取消采纳'}</button></>}</div>
       </section>
       <section className="video-candidate-list" aria-label="视频候选列表">
         <header><div><b>全部候选</b><span>{versions.length}</span></div><small>按版本从新到旧</small></header>
@@ -1106,7 +1106,7 @@ function VideoPreviewWorkspace({ shot, episodeNo, episodeStatus, context, genera
           return <article className={`video-candidate-card${selectedCandidate ? ' selected' : ''}${adopted ? ' adopted' : ''}${archived ? ' archived' : ''}`} key={version.id}>
             <button type="button" className="video-candidate-select" aria-pressed={selectedCandidate} title={version.video_url ? `选择 v${version.version_no} 预览` : `选择 v${version.version_no} 查看生成状态`} onClick={() => setPreviewId(version.id)}>
               <span className="video-candidate-title"><b>v{version.version_no}</b><span className={`stamp ${version.status === 'failed' ? 'red' : version.status === 'succeeded' ? 'green' : 'gold'}`}>{videoVersionStatusLabel(version, adopted)}</span>{archived && <span className="stamp grey">已归档</span>}</span>
-              <span className="video-candidate-metrics"><span>质检 {version.qa?.overall?.toFixed(2) ?? '—'}</span><span>￥{version.cost_cny.toFixed(2)}</span><span>{version.latency_s.toFixed(1)} 秒</span></span>
+              <span className="video-candidate-metrics"><span>质检 {version.qa?.overall?.toFixed(2) ?? '—'}</span><span>￥{version.cost_cny.toFixed(2)}</span><span>{version.latency_s.toFixed(1)} 秒</span><span>{playbackRates[version.id] ?? videoPlaybackRate(version)}×</span></span>
               <span className="video-candidate-note">{videoCandidateNote(version)}</span>
             </button>
             <div className="video-candidate-actions">{version.video_url && !adopted && !archived && <button type="button" className="btn primary small" disabled={Boolean(adoptDisabledReason || candidateAction)} title={adoptDisabledReason || '采纳前需填写理由'} onClick={() => openAdopt(version)}>采纳</button>}{!adopted && !archived && <button type="button" className="btn ghost small" disabled={Boolean(candidateAction)} title="暂时从候选列表隐藏，可随时恢复" onClick={() => { void archive(version) }}>{candidateAction?.kind === 'archive' && candidateAction.versionId === version.id ? '归档中…' : '归档'}</button>}{!adopted && !archived && !['queued', 'running', 'waiting_provider'].includes(version.status) && <button type="button" className="btn ghost small danger" disabled={Boolean(candidateAction)} title="永久删除此候选，操作前会再次确认" onClick={() => setDeleteTarget(version)}>删除候选</button>}{archived && <button type="button" className="btn ghost small" disabled={Boolean(candidateAction)} title="恢复到可操作的候选列表" onClick={() => { void unarchive(version) }}>{candidateAction?.kind === 'restore' && candidateAction.versionId === version.id ? '恢复中…' : '恢复候选'}</button>}</div>
@@ -1115,7 +1115,7 @@ function VideoPreviewWorkspace({ shot, episodeNo, episodeStatus, context, genera
       </section>
     </div>
     {wizard && <Dialog title="新建视频版本" onClose={() => setWizard(null)} closeDisabled={generating} wide><div className="generation-mode-tabs"><button disabled={generating} className={wizard === 'reroll' ? 'active' : ''} onClick={() => setWizard('reroll')}>按原词新建候选</button><button disabled={generating} className={wizard === 'rewrite' ? 'active' : ''} onClick={() => setWizard('rewrite')}>修改提示词</button><button disabled={generating} className={wizard === 'critique' ? 'active' : ''} onClick={() => setWizard('critique')}>按质检问题修复</button></div><div className="review-impact"><b>{wizard === 'reroll' ? '输入不变，强制创建新候选' : wizard === 'rewrite' ? '将以新生成词创建独立版本' : '将读取当前采用版或最新成功版的视频质检问题'}</b><p>确认后会立即创建任务并可能产生模型费用，当前预计 ￥{shot.est_cost_cny.toFixed(2)}，实际费用以供应商返回为准。旧采用版保留，失败不会覆盖。</p></div>{wizard === 'rewrite' && <><div className="prompt-diff"><div><b>原词</b><pre>{truncateText(adoptedVersion?.prompt_text || shot.prompt_preview || '无')}</pre></div><div><b>新词</b><textarea rows={8} maxLength={8000} disabled={generating} value={prompt} onChange={event => setPrompt(event.target.value)} /></div></div><small>{prompt.length}/8000 字符；草稿按当前镜头保存在本机，未确认提交不会产生费用。</small></>}{wizard === 'critique' && <div className="review-impact"><p>系统会把已有视频质检问题作为本次必须改正项；若暂无成功候选，则按原词创建新候选。</p></div>}<div className="dialog-actions"><button className="btn ghost" disabled={generating} onClick={() => setWizard(null)}>取消（零任务/零扣费）</button><button className="btn primary" disabled={generating || (wizard === 'rewrite' && !prompt.trim())} onClick={() => { void runGeneration() }}>{generating ? '正在提交…' : videoGenerationConfirmLabel(wizard, shot.est_cost_cny)}</button></div></Dialog>}
-    {adopt && <Dialog title={`采纳镜 ${shot.shot_no} 的 v${adopt.version_no}`} onClose={() => setAdopt(null)} closeDisabled={adopting}><div className="review-impact"><p>当前采用：{adoptedVersion ? `v${adoptedVersion.version_no}` : '无'}；目标候选：v{adopt.version_no}。</p><p>目标质检分 {adopt.qa?.overall?.toFixed(2) ?? '未评估'}，费用 ￥{adopt.cost_cny.toFixed(2)}。提交会固定镜头和版本，并写入审计。</p></div><label className="review-field">必填采纳理由<textarea rows={4} disabled={adopting} value={adoptReason} onChange={event => setAdoptReason(event.target.value)} placeholder="说明画面质量、连续性或成本判断" /></label><div className="dialog-actions"><button className="btn ghost" disabled={adopting} onClick={() => setAdopt(null)}>取消</button><button className="btn primary" disabled={adopting || adoptReason.trim().length < 4} onClick={() => { void doAdopt() }}>{adopting ? '采纳中…' : '确认采纳此候选'}</button></div></Dialog>}
+    {adopt && <Dialog title={`${adopt.id === shot.adopted_version_id ? '更新倍速定稿' : '采纳'}镜 ${shot.shot_no} 的 v${adopt.version_no}`} onClose={() => setAdopt(null)} closeDisabled={adopting}><div className="review-impact"><p>当前采用：{adoptedVersion ? `v${adoptedVersion.version_no} · ${videoPlaybackRate(adoptedVersion)}×` : '无'}；目标候选：v{adopt.version_no} · {playbackRates[adopt.id] ?? videoPlaybackRate(adopt)}×。</p><p>目标质检分 {adopt.qa?.overall?.toFixed(2) ?? '未评估'}，费用 ￥{adopt.cost_cny.toFixed(2)}。提交会固定镜头、版本和倍速，并写入审计；成片将使用倍速处理后的片段。</p></div><label className="review-field">必填定稿理由<textarea rows={4} disabled={adopting} value={adoptReason} onChange={event => setAdoptReason(event.target.value)} placeholder="说明画面质量、节奏、连续性或成本判断" /></label><div className="dialog-actions"><button className="btn ghost" disabled={adopting} onClick={() => setAdopt(null)}>取消</button><button className="btn primary" disabled={adopting || adoptReason.trim().length < 4} onClick={() => { void doAdopt() }}>{adopting ? '定稿中…' : `确认按 ${playbackRates[adopt.id] ?? videoPlaybackRate(adopt)}× 定稿采纳`}</button></div></Dialog>}
     {deleteTarget && <Dialog title={`永久删除镜 ${shot.shot_no} 的 v${deleteTarget.version_no}？`} onClose={() => setDeleteTarget(null)} closeDisabled={deleting}><div className="review-impact"><b>此操作无法撤销</b><p>将永久移除此候选记录和关联视频入口；当前采用版与其他候选不受影响。</p><p>已记录费用 ￥{deleteTarget.cost_cny.toFixed(2)} 不会退回。若只想暂时从候选列表隐藏，请取消后使用「归档」。</p></div><div className="dialog-actions"><button type="button" className="btn ghost" disabled={deleting} onClick={() => setDeleteTarget(null)}>保留候选</button><button type="button" className="btn danger" disabled={deleting} onClick={() => { void remove(deleteTarget) }}>{deleting ? '删除中…' : '确认永久删除'}</button></div></Dialog>}
     {clearResourcesConfirm && <DecisionDialog title={`清空镜 ${shot.shot_no} 的全部资源？`} summary={`${versions.length} 个视频候选、${shotReferenceImageCount} 张图像和当前采用关系将被删除`} message="本镜已引入或生成的视频、关键帧和参考图都会清空；剧本和分镜文本保留。" details={['此操作不可撤销，已发生费用不会退回', '后续需重新准备图像并生成视频']} confirmLabel="确认清空本镜资源" cancelLabel="保留资源" danger onClose={() => setClearResourcesConfirm(false)} onConfirm={() => { setClearResourcesConfirm(false); void clearResources() }} />}
   </div>

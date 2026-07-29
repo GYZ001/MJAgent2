@@ -72,6 +72,12 @@ TIMEOUT_CHAT_READ = float(os.environ.get("TIMEOUT_CHAT_READ", "300"))
 # 整版剧本需要同时生成骨架、场次、对白链与正文，实测长章可超过 300s。
 # 单独放宽该阶段，不让短请求共享一个过大超时，也避免已接近完成时整次重发。
 TIMEOUT_CHAT_BASELINE_READ = float(os.environ.get("TIMEOUT_CHAT_BASELINE_READ", "600"))
+# 分镜大纲同样是长结构化生成：需要一次性铺完整集节奏与交付 ID。推理模型在
+# 上游繁忙时可能超过通用 300s；过早断开后立刻重放会让仍在服务端运行的旧请求
+# 与新请求叠加，进一步触发 TPM 限流。
+TIMEOUT_CHAT_STORYBOARD_OUTLINE_READ = float(
+    os.environ.get("TIMEOUT_CHAT_STORYBOARD_OUTLINE_READ", "600")
+)
 TIMEOUT_VIDEO_CREATE = 30.0
 TIMEOUT_VIDEO_POLL = 30.0
 TIMEOUT_DOWNLOAD = 180.0

@@ -146,13 +146,8 @@ class ScreenplayCancelInput(StandardCommandInput):
 
 class StoryboardGenerateInput(StandardCommandInput):
     episode_id: str
-    # fresh 已废弃：映射为创建/恢复 production revision，禁止删光后整版重做
+    # fresh 仅兼容旧调用；有数据时领域层拒绝覆盖，必须显式继续或先清空。
     mode: Literal["create", "resume", "fresh"] = "create"
-    completion_mode: Literal[
-        "ready_for_manual_confirm",
-        "auto_confirm",
-    ] = "ready_for_manual_confirm"
-    completion_grant_id: str | None = None
     preflight_token: str | None = None
 
 
@@ -180,6 +175,13 @@ class ShotUpdateInput(StandardCommandInput):
 class StoryboardConfirmInput(StandardCommandInput):
     episode_id: str
     preview_token: str | None = None
+    force: bool = False
+    force_reason: str | None = None
+
+
+class StoryboardShotAdoptionInput(StandardCommandInput):
+    shot_id: str
+    adopted: bool
 
 
 class VideoGenerateShotInput(StandardCommandInput):
@@ -222,6 +224,7 @@ class VideoAdoptVersionInput(StandardCommandInput):
     shot_id: str
     version_id: str
     qualification_version: str | None = None
+    playback_rate: float = Field(default=1.0, ge=0.5, le=2.0, allow_inf_nan=False)
 
 
 class VideoRepairStaleAssetsInput(StandardCommandInput):

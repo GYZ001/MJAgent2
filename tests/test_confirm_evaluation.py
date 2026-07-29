@@ -90,3 +90,23 @@ def test_evaluate_is_readonly_and_returns_structured_result():
     # 同源：与 preserves_key_content 一致读取有效口播
     key_errs = validate_storyboard_preserves_key_content(result.board, screenplay)
     assert not any("主线台词" in e for e in key_errs)
+
+
+def test_dialogue_composition_is_confirmation_blocker_not_score_warning() -> None:
+    ep = {"id": "ep1", "target_duration_s": 50}
+    shot = _shot(
+        shot_size="中景",
+        characters=["萧炎", "测验员"],
+        characters_visible=["萧炎", "测验员"],
+    )
+
+    result = evaluate_storyboard_for_confirmation(
+        ep,
+        Storyboard(episode_no=1, shots=[shot]),
+        screenplay=None,
+        bible=_minimal_bible(),
+        has_real_bible=False,
+    )
+
+    assert any("只保留说话人" in error for error in result.errors)
+    assert not any("只保留说话人" in warning for warning in result.warnings)

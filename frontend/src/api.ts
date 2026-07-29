@@ -214,12 +214,14 @@ export const api = {
     shotId: string,
     versionId: string,
     reason?: string,
+    playbackRate?: number,
     qualificationVersion?: string,
     idempotencyKey?: string,
   ) =>
     request("POST", `/shots/${shotId}/adopt`, {
       version_id: versionId,
       reason,
+      playback_rate: playbackRate ?? 1,
       qualification_version: qualificationVersion,
       idempotency_key: idempotencyKey,
     }),
@@ -1098,6 +1100,7 @@ export interface ShotVersion {
   latency_s: number;
   artifact_id?: string | null;
   adoption_reason?: string | null;
+  playback_rate?: number | null;
   technical_validation_json?: string | null;
   created_at?: number | null;
   image_inputs?: {
@@ -1273,6 +1276,7 @@ export interface Shot {
   information_ids?: string[];
   continuity_from_prev: number;
   adopted_version_id: string | null;
+  storyboard_adopted?: boolean;
   story_event_id?: string;
   purpose?: string;
   new_information_ids?: string[];
@@ -1298,6 +1302,7 @@ export interface Shot {
   legacy_unvalidated?: boolean;
   is_final?: boolean;
   preflight_errors?: string[];
+  qa_warnings?: string[];
   prompt_preview?: string;
   est_cost_cny: number;
   versions: ShotVersion[];
@@ -1458,6 +1463,13 @@ export interface StoryboardStatus {
   planned_shots: number;
   produced_shots: number;
   validated_shots: number;
+  /** 当前仍保留、可在页面审阅的草稿镜头数。 */
+  draft_shots?: number;
+  /** 连续通过结构检查、可作为安全恢复点保留的镜头数。 */
+  safe_checkpoint_shots?: number;
+  /** 安全恢复点之后、继续任务时可能更新的现有草稿镜头数。 */
+  pending_revalidation_shots?: number;
+  resume_from_shot?: number;
   final_shot_valid: boolean;
   hard_gates_passed: boolean;
   hard_gate_issue_count?: number;
@@ -1524,6 +1536,8 @@ interface MixShot {
   duration_s: number;
   video_url: string | null;
   has_adopted: boolean;
+  playback_rate?: number;
+  effective_duration_s?: number;
 }
 
 export interface MixStatus {
@@ -1548,6 +1562,7 @@ export interface MixResult {
   shots_total?: number;
   shots_skipped?: number;
   skipped_shot_nos?: number[];
+  playback_rates?: Record<string, number>;
   note?: string;
 }
 

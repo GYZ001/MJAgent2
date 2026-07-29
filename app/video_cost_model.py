@@ -128,7 +128,8 @@ def predict_episode_completion_cost(
     if uncovered_shot_ids is None:
         rows = conn.execute(
             """SELECT id, duration_s FROM shots
-               WHERE episode_id=? AND (adopted_version_id IS NULL OR adopted_version_id='')
+               WHERE episode_id=? AND storyboard_adopted=1
+                 AND (adopted_version_id IS NULL OR adopted_version_id='')
                ORDER BY shot_no""",
             (episode_id,),
         ).fetchall()

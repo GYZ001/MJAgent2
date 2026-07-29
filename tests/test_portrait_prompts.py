@@ -60,6 +60,15 @@ def test_accepted_portrait_prompt_derives_downstream_outfit_anchor() -> None:
     assert "纯浅米色背景" not in anchor
 
 
+def test_placeholder_portrait_prompt_falls_back_to_segment_appearance() -> None:
+    anchor = portrait_appearance_anchor(
+        "p",
+        "早期：黑发少年，玄色劲装，目光坚定",
+    )
+
+    assert anchor == "早期：黑发少年，玄色劲装，目光坚定"
+
+
 def test_episode_bible_uses_accepted_portrait_prompt_not_stale_appearance(monkeypatch) -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row

@@ -101,6 +101,64 @@ def _requires_manual_confirmation(exc: HTTPException) -> bool:
     )
 
 
+def _is_retryable_external_error(exc: BaseException) -> bool:
+    """Recognize provider failures even after an orchestration layer wraps them."""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if bool(getattr(current, "retryable", False)):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _pause_for_external_error(
+    cp: SupervisorCheckpoint,
+    conn,
+    episode_id: str,
+    exc: BaseException,
+    *,
+    run_id: str | None,
+    action: str,
+) -> SupervisorCheckpoint:
+    """Persist a safe resumable boundary for a temporary provider failure."""
+    public = errors.record_and_format(
+        exc,
+        action=action,
+        context={"episode_id": episode_id},
+    )
+    note = f"外部依赖暂不可用，已保留分镜检查点，可稍后继续任务：{public}"
+    cp.phase = "PAUSED_EXTERNAL"
+    save_checkpoint(cp, run_id=run_id)
+    conn.execute(
+        "UPDATE episodes SET status='scripting', script_error=? WHERE id=?",
+        (note[:800], episode_id),
+    )
+    conn.commit()
+    if run_id:
+        evidence_repository.append_event(
+            run_id,
+            "SUPERVISOR_PAUSED",
+            "warning",
+            "PAUSED_EXTERNAL",
+            payload={"error_type": type(exc).__name__, "retryable": True},
+        )
+        try:
+            from app.orchestration.state_machine import transition_run
+
+            transition_run(
+                run_id,
+                "RUNNING",
+                "PAUSED_EXTERNAL",
+                note[:800],
+                failure_code="PROVIDER_UNAVAILABLE",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    return cp
+
+
 def load_latest_checkpoint(episode_id: str) -> SupervisorCheckpoint | None:
     conn = get_conn()
     row = conn.execute(
@@ -212,6 +270,11 @@ def _is_structural_storyboard_issue(code: Any = None, message: Any = "") -> bool
         "artifact",
         "id_invalid",
         "invalid_id",
+        "dialogue_framing_invalid",
+        "多个画内说话人",
+        "单人对白",
+        "只保留说话人",
+        "正反打",
     )
     return any(token in text for token in structural_tokens)
 
@@ -230,6 +293,19 @@ def _is_quality_only_repair_plan(plan: RepairPlan) -> bool:
     }
     codes = set(plan.issue_codes or [])
     return bool(codes) and codes.issubset(quality_codes)
+
+
+def _contiguous_shot_rows(rows) -> list:
+    """Return only the validated 1..N prefix, stopping at the first shot_no gap."""
+    prefix = []
+    expected = 1
+    for row in rows:
+        shot_no = int(row["shot_no"])
+        if shot_no != expected:
+            break
+        prefix.append(row)
+        expected += 1
+    return prefix
 
 
 async def run_storyboard_supervisor(
@@ -400,13 +476,32 @@ async def run_storyboard_supervisor(
         except (TypeError, ValueError):
             outline = None
 
+    def _reload_completed(rows=None) -> list[Shot]:
+        """Load only the contiguous prefix and keep checkpoint evidence aligned."""
+        if rows is None:
+            rows = conn.execute(
+                "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
+                (episode_id,),
+            ).fetchall()
+        prefix_rows = _contiguous_shot_rows(rows)
+        shots = (
+            list(_board_from_shot_rows(prefix_rows, ep_data["episode_no"]).shots)
+            if prefix_rows
+            else []
+        )
+        cp.validated_prefix_end = len(shots)
+        cp.next_shot_no = len(shots) + 1
+        cp.validated_shot_artifact_ids = [
+            row["storyboard_artifact_id"]
+            for row in prefix_rows
+            if row["storyboard_artifact_id"]
+        ]
+        return shots
+
     existing_rows = conn.execute(
         "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
     ).fetchall()
-    completed: list[Shot] = (
-        list(_board_from_shot_rows(existing_rows, ep_data["episode_no"]).shots)
-        if existing_rows else []
-    )
+    completed: list[Shot] = _reload_completed(existing_rows)
     if completed:
         recovered_board = Storyboard(episode_no=ep_data["episode_no"], shots=list(completed))
         character_changes = normalize_offbible_characters(recovered_board, bible)
@@ -414,11 +509,6 @@ async def run_storyboard_supervisor(
             conn, episode_id, recovered_board, character_changes
         )
         completed = list(recovered_board.shots)
-        cp.validated_prefix_end = len(completed)
-        cp.next_shot_no = len(completed) + 1
-        cp.validated_shot_artifact_ids = [
-            (r["storyboard_artifact_id"] or "") for r in existing_rows if r["storyboard_artifact_id"]
-        ]
 
     _, max_shots = storyboard_shot_count_range(ep_data["target_duration_s"])
     planned_persisted = len(outline.shots) if (outline and outline.shots) else 0
@@ -479,6 +569,15 @@ async def run_storyboard_supervisor(
                     screenplay=screenplay,
                 )
             except Exception as exc:  # noqa: BLE001
+                if _is_retryable_external_error(exc):
+                    return _pause_for_external_error(
+                        cp,
+                        conn,
+                        episode_id,
+                        exc,
+                        run_id=run_id,
+                        action="storyboard_outline_provider",
+                    )
                 public = errors.record_and_format(
                     exc, action="storyboard_outline_degraded",
                     context={"episode_id": episode_id},
@@ -544,38 +643,23 @@ async def run_storyboard_supervisor(
                     issue_fingerprint_counts=cp.issue_fingerprint_counts,
                 )
                 cp = _apply_repair(cp, plan, conn, episode_id, completed, outline)
-                completed = list(_board_from_shot_rows(
-                    conn.execute(
-                        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
-                    ).fetchall(),
-                    ep_data["episode_no"],
-                ).shots) if cp.validated_prefix_end else []
-                if (cp.last_repair or {}).get("strategy") == "insert_shot" or plan.strategy in {"insert_shot", "replan_outline"}:
-                    outline = None
-                    needs_outline = True
-                    conn.execute(
-                        "UPDATE episodes SET storyboard_outline_json=NULL WHERE id=?", (episode_id,)
-                    )
-                    conn.commit()
+                completed = _reload_completed()
                 shot_loop_broke_for_repair = True
                 break
             except Exception as exc:  # noqa: BLE001
                 # Provider 类故障 → 可恢复暂停
                 msg = str(exc)
-                if any(k in msg.lower() for k in ("timeout", "unavailable", "429", "503", "连接")):
-                    cp.phase = "PAUSED_EXTERNAL"
-                    save_checkpoint(cp, run_id=run_id)
-                    conn.execute(
-                        "UPDATE episodes SET status='scripting', script_error=? WHERE id=?",
-                        (f"外部依赖暂不可用，已暂停待恢复：{msg[:200]}", episode_id),
+                if _is_retryable_external_error(exc) or any(
+                    k in msg.lower() for k in ("timeout", "unavailable", "429", "503", "连接")
+                ):
+                    return _pause_for_external_error(
+                        cp,
+                        conn,
+                        episode_id,
+                        exc,
+                        run_id=run_id,
+                        action="storyboard_shot_provider",
                     )
-                    conn.commit()
-                    if run_id:
-                        evidence_repository.append_event(
-                            run_id, "SUPERVISOR_PAUSED", "warning", "PAUSED_EXTERNAL",
-                            payload={"error": msg[:400]},
-                        )
-                    return cp
                 raise
 
             disposition = getattr(draft, "disposition", "PASS")
@@ -600,7 +684,7 @@ async def run_storyboard_supervisor(
                 rows = conn.execute(
                     "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
                 ).fetchall()
-                completed = list(_board_from_shot_rows(rows, ep_data["episode_no"]).shots) if rows else []
+                completed = _reload_completed(rows)
                 if plan.pause_state:
                     cp.phase = plan.pause_state  # type: ignore[assignment]
                     save_checkpoint(cp, run_id=run_id)
@@ -610,13 +694,6 @@ async def run_storyboard_supervisor(
                     )
                     conn.commit()
                     return cp
-                if (cp.last_repair or {}).get("strategy") == "insert_shot" or plan.strategy in {"insert_shot", "replan_outline"}:
-                    outline = None
-                    needs_outline = True
-                    conn.execute(
-                        "UPDATE episodes SET storyboard_outline_json=NULL WHERE id=?", (episode_id,)
-                    )
-                    conn.commit()
                 shot_loop_broke_for_repair = True
                 break
 
@@ -639,21 +716,16 @@ async def run_storyboard_supervisor(
             _insert_storyboard_shot(
                 conn, episode_id, screenplay, shot, expected_screenplay_artifact_id
             )
-            completed = list(board.shots)
             conn.execute(
                 "UPDATE episodes SET status='scripting', script_error=NULL WHERE id=?", (episode_id,)
             )
             conn.commit()
+            completed = _reload_completed()
             revision = _reconcile_storyboard_plan(
                 conn, episode_id, ep_data["episode_no"], outline, completed, planned_persisted
             )
             if revision is not None:
                 planned_persisted = revision[1]
-            cp.validated_prefix_end = len(completed)
-            cp.next_shot_no = len(completed) + 1
-            art_id = getattr(shot, "evidence_artifact_id", None)
-            if art_id:
-                cp.validated_shot_artifact_ids.append(art_id)
             if run_id:
                 evidence_repository.append_event(
                     run_id, "SHOT_CHECKPOINT_VALIDATED", "info",
@@ -707,7 +779,7 @@ async def run_storyboard_supervisor(
             rows = conn.execute(
                 "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
             ).fetchall()
-            completed = list(_board_from_shot_rows(rows, ep_data["episode_no"]).shots) if rows else []
+            completed = _reload_completed(rows)
             if plan.pause_state:
                 cp.phase = plan.pause_state  # type: ignore[assignment]
                 save_checkpoint(cp, run_id=run_id)
@@ -727,13 +799,6 @@ async def run_storyboard_supervisor(
                     except Exception:  # noqa: BLE001
                         pass
                 return cp
-            if (cp.last_repair or {}).get("strategy") == "insert_shot" or plan.strategy in {"insert_shot", "replan_outline"}:
-                outline = None
-                needs_outline = True
-                conn.execute(
-                    "UPDATE episodes SET storyboard_outline_json=NULL WHERE id=?", (episode_id,)
-                )
-                conn.commit()
             continue
 
         # ---- 通过：finalize + 完成模式 ----
@@ -857,24 +922,21 @@ async def run_storyboard_supervisor(
             rows = conn.execute(
                 "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
             ).fetchall()
-            completed = list(_board_from_shot_rows(rows, ep_data["episode_no"]).shots) if rows else []
-            if (cp.last_repair or {}).get("strategy") == "insert_shot" or plan.strategy in {"insert_shot", "replan_outline"}:
-                outline = None
-                needs_outline = True
+            completed = _reload_completed(rows)
             continue
 
-    # 超出单次 activation 的 repair epoch：让出并自动续跑，不把可修复 QA 结束为 failure
+    # 超出单次 activation 的 repair epoch：停在安全检查点，由用户明确点击继续任务。
     cp.phase = "WAITING_RETRY"
     save_checkpoint(cp, run_id=run_id)
     conn.execute(
         "UPDATE episodes SET status='scripting', script_error=? WHERE id=?",
-        (f"自动修复让出（已完成 {MAX_REPAIR_EPOCHS} 轮局部修补），将自动续跑", episode_id),
+        (f"本轮修复已暂停（已完成 {MAX_REPAIR_EPOCHS} 轮局部修补），请点击继续任务", episode_id),
     )
     conn.commit()
     if run_id:
         evidence_repository.append_event(
             run_id, "REPAIR_YIELD", "info",
-            "分镜修复 activation 预算用尽，已写 checkpoint，等待自动续跑",
+            "分镜修复 activation 预算用尽，已写 checkpoint，等待用户继续",
             payload={"repair_epoch": cp.repair_epoch},
         )
     return cp
@@ -973,18 +1035,32 @@ def _apply_repair(
                 strategy="insert_shot",
             )
     elif strategy == "insert_shot":
-        # 不删除已通过镜头；仅从 frontier 起允许重填/追加
-        deleted = _delete_shot_window(conn, episode_id, frontier, frontier)
-        cp.validated_prefix_end = max(0, frontier - 1)
-        cp.next_shot_no = frontier
+        # 在 frontier 后打开一个真实编号缺口，保留全部已通过镜头与资产。
+        # 后缀必须右移而不是删除；生成循环会从缺口处补入新镜。
+        requested_frontier = frontier
+        max_row = conn.execute(
+            "SELECT MAX(shot_no) AS max_no FROM shots WHERE episode_id=?",
+            (episode_id,),
+        ).fetchone()
+        max_no = int(max_row["max_no"] or 0) if max_row else 0
+        insert_at = min(max(1, requested_frontier + 1), max_no + 1)
+        _open_shot_gap(conn, episode_id, insert_at)
+        frontier = insert_at
+        cp.last_repair = {
+            **(cp.last_repair or {}),
+            "insert_after": requested_frontier,
+            "insertion_point": insert_at,
+        }
+        cp.validated_prefix_end = max(0, insert_at - 1)
+        cp.next_shot_no = insert_at
         cp.validated_shot_artifact_ids = cp.validated_shot_artifact_ids[: max(0, frontier - 1)]
         if outline is not None:
             from copy import deepcopy
-            idx = min(len(outline.shots), max(1, frontier)) - 1
             if outline.shots:
-                extra = deepcopy(outline.shots[idx])
-                extra.shot_no = frontier
-                outline.shots.insert(idx + 1, extra)
+                source_idx = min(len(outline.shots), max(1, requested_frontier)) - 1
+                extra = deepcopy(outline.shots[source_idx])
+                extra.shot_no = insert_at
+                outline.shots.insert(insert_at - 1, extra)
                 for i, node in enumerate(outline.shots, start=1):
                     node.shot_no = i
                 conn.execute(
@@ -1059,12 +1135,22 @@ def _delete_shot_window(conn, episode_id: str, start_no: int, end_no: int) -> in
             commit=False,
         )
         conn.execute("DELETE FROM shots WHERE id=?", (row["id"],))
-    # 重排后续 shot_no，保持连续
-    remaining = conn.execute(
-        "SELECT id, shot_no FROM shots WHERE episode_id=? ORDER BY shot_no",
-        (episode_id,),
+    return len(rows)
+
+
+def _open_shot_gap(conn, episode_id: str, insert_at: int) -> int:
+    """Shift a suffix right by one, preserving IDs/assets and leaving one gap."""
+    insert_at = max(1, int(insert_at))
+    rows = conn.execute(
+        "SELECT id, shot_no FROM shots WHERE episode_id=? AND shot_no>=? "
+        "ORDER BY shot_no DESC",
+        (episode_id, insert_at),
     ).fetchall()
-    for idx, row in enumerate(remaining, start=1):
-        if row["shot_no"] != idx:
-            conn.execute("UPDATE shots SET shot_no=? WHERE id=?", (idx, row["id"]))
+    # Individual descending updates avoid transient UNIQUE(episode_id, shot_no)
+    # collisions while retaining every suffix row in place.
+    for row in rows:
+        conn.execute(
+            "UPDATE shots SET shot_no=? WHERE id=?",
+            (int(row["shot_no"]) + 1, row["id"]),
+        )
     return len(rows)
