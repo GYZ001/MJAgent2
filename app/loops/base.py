@@ -302,6 +302,7 @@ class AgentLoop(Generic[T]):
             needs_replan = exit_reason in {"stalled", "no_quality_gain", "max_iterations"}
             capacity_codes = {
                 "SPOKEN_CAPACITY_EXCEEDED",
+                "ACTION_CAPACITY_EXCEEDED",
                 "SHOT_OUTLINE_COVERAGE",
                 "KEY_LINE_MISSING",
                 "SPINE_MISSING",

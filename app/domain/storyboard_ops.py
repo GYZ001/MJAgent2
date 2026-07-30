@@ -116,18 +116,10 @@ def _sync_storyboard_shot_timing(
         )
 
 
-def _storyboard_has_persisted_work(episode_id: str, ep: dict | None = None) -> bool:
-    """Whether this episode already has storyboard work that must be resumed or cleared.
-
-    Starting a task and continuing a task are deliberately separate user actions.  A
-    fresh start must never silently replace shots or adopt a checkpoint left by an
-    earlier run.
-    """
-    from app.storyboard_supervisor import load_latest_checkpoint
-
+def _storyboard_has_material(episode_id: str, ep: dict | None = None) -> bool:
+    """Return whether the current episode projection still owns storyboard work."""
     episode = ep or dict(_episode_or_404(episode_id))
-    conn = get_conn()
-    shot_count = int(conn.execute(
+    shot_count = int(get_conn().execute(
         "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,),
     ).fetchone()["c"])
     return bool(
@@ -138,8 +130,35 @@ def _storyboard_has_persisted_work(episode_id: str, ep: dict | None = None) -> b
         or episode.get("published_storyboard_artifact_id")
         or episode.get("storyboard_production_revision_id")
         or episode.get("storyboard_completion_certificate_id")
-        or load_latest_checkpoint(episode_id) is not None
     )
+
+
+def _storyboard_checkpoint_matches_screenplay(cp, ep: dict) -> bool:
+    """Legacy checkpoints without an upstream binding remain resumable."""
+    if cp is None:
+        return False
+    bound = str(cp.input_versions.get("screenplay_artifact_id") or "")
+    current = str(ep.get("screenplay_artifact_id") or "")
+    return not bound or not current or bound == current
+
+
+def _storyboard_has_persisted_work(episode_id: str, ep: dict | None = None) -> bool:
+    """Whether this episode already has storyboard work that must be resumed or cleared.
+
+    Starting a task and continuing a task are deliberately separate user actions.  A
+    fresh start must never silently replace shots or adopt a checkpoint left by an
+    earlier run.
+    """
+    from app.storyboard_supervisor import load_latest_checkpoint
+
+    episode = ep or dict(_episode_or_404(episode_id))
+    if _storyboard_has_material(episode_id, episode):
+        return True
+    checkpoint = load_latest_checkpoint(episode_id)
+    # Publishing a new screenplay clears the current storyboard projection but
+    # intentionally keeps historical checkpoint artifacts for audit.  Such a
+    # checkpoint is not resumable work for the new screenplay.
+    return _storyboard_checkpoint_matches_screenplay(checkpoint, episode)
 
 
 def _storyboard_start_preflight_payload(episode_id: str) -> dict:
@@ -153,8 +172,8 @@ def _storyboard_start_preflight_payload(episode_id: str) -> dict:
     shots = int(conn.execute(
         "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,),
     ).fetchone()["c"])
-    cp = load_latest_checkpoint(episode_id)
     action = "resume" if _storyboard_has_persisted_work(episode_id, dict(ep)) else "create"
+    cp = load_latest_checkpoint(episode_id) if action == "resume" else None
     planned = int(cp.expected_total or 0) if cp else 0
     if not planned and ep["storyboard_outline_json"]:
         try:
@@ -984,6 +1003,15 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
     ).fetchone()["c"]
     from app.storyboard_supervisor import load_latest_checkpoint
     cp = load_latest_checkpoint(episode_id)
+    if (
+        cp is not None
+        and not _storyboard_checkpoint_matches_screenplay(cp, dict(ep))
+        and not _storyboard_has_material(episode_id, dict(ep))
+    ):
+        # The old checkpoint is historical evidence for a screenplay version
+        # whose downstream projection has already been cleared.  It cannot be
+        # resumed as shot N+1 of the new screenplay.
+        cp = None
     if not saved and (cp is None or cp.validated_prefix_end <= 0):
         raise HTTPException(409, "当前没有可恢复的 Supervisor / 逐镜 checkpoint，请重新生成分镜")
     last_row = conn.execute(
@@ -2302,6 +2330,23 @@ def episode_detail(episode_id: str, view: str | None = None):
         from app.storyboard_control import control_snapshot
 
         cp = load_latest_checkpoint(episode_id)
+        stale_checkpoint_ignored = False
+        if (
+            cp is not None
+            and not _storyboard_checkpoint_matches_screenplay(cp, ep)
+            and not (_storyboard_has_material(episode_id, ep) or outline)
+        ):
+            stale_checkpoint_ignored = True
+            cp = None
+        if (
+            stale_checkpoint_ignored
+            and ep.get("script_error")
+            == "上游剧本已变更，自动完成授权失效，请重新授权后继续"
+        ):
+            # The database keeps old checkpoint artifacts as audit evidence after
+            # a screenplay publish clears its downstream projection.  Do not leak
+            # that historical pause/error into the new screenplay's board view.
+            ep["script_error"] = None
         ep["supervisor"] = None
         if cp is not None:
             repair = cp.last_repair or {}
@@ -2584,7 +2629,7 @@ async def edit_shot(shot_id: str, body: dict):
         instance.audio_timeline = [item for item in instance.audio_timeline if item.type != "narration"]
     # VAL-422：人工编辑必须重新通过确定性业务校验；「人改过」≠ hard gate 通过。
     from app.continuity import (
-        speech_capacity_errors, spoken_contract_coherence_errors, shot_id_space_errors,
+        action_capacity_errors, speech_capacity_errors, spoken_contract_coherence_errors, shot_id_space_errors,
         state_chain_errors,
     )
     from app.spoken_contract import (
@@ -2610,6 +2655,7 @@ async def edit_shot(shot_id: str, body: dict):
         issue.message for issue in sync.issues
         if issue.severity == "blocker" and issue.rule_id != RULE_SPOKEN_CAPACITY
     ]
+    business_errors.extend(action_capacity_errors(instance))
     business_errors.extend(speech_capacity_errors(instance))
     business_errors.extend(spoken_contract_coherence_errors(instance))
     business_errors.extend(shot_id_space_errors(instance))

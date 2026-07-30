@@ -403,6 +403,44 @@ def count_sequential_action_beats(text: str) -> int:
     return max(1 if raw else 0, min(len(parts), len(unique) or 1))
 
 
+def action_capacity_limit(duration_s: int | None) -> int:
+    """Return the shared storyboard/video limit for sequential action beats."""
+    return 2 if int(duration_s or 5) <= 6 else 3
+
+
+def split_sequential_action_text(text: str) -> tuple[str, str] | None:
+    """Split an overloaded action near its middle distinct verb.
+
+    This is deliberately the structural counterpart of
+    :func:`count_sequential_action_beats`: the storyboard planner and the paid
+    video preflight use the same verb vocabulary, so a plan split cannot drift
+    from the later provider gate.  Subject carry-over is handled by the outline
+    layer, which knows the visible cast.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    matches: list[tuple[int, int]] = []
+    for verb in _DISTINCT_ACTION_VERBS:
+        start = raw.find(verb)
+        if start >= 0:
+            matches.append((start, start + len(verb)))
+    matches.sort()
+    non_overlapping: list[tuple[int, int]] = []
+    for start, end in matches:
+        if non_overlapping and start < non_overlapping[-1][1]:
+            continue
+        non_overlapping.append((start, end))
+    if len(non_overlapping) < 2:
+        return None
+    split_at = non_overlapping[len(non_overlapping) // 2][0]
+    front = raw[:split_at].rstrip(" 　，,；;、。然后接着随后之后再又紧接着同时")
+    back = raw[split_at:].lstrip(" 　，,；;、。")
+    if not front or not back:
+        return None
+    return front, back
+
+
 def action_capacity_errors(shot: Shot) -> list[str]:
     errors: list[str] = []
     # primary_action 常被模型压成一句摘要，真正会交给视频模型执行的细节仍在
@@ -412,7 +450,7 @@ def action_capacity_errors(shot: Shot) -> list[str]:
         text.strip() for text in (effective_primary_action(shot), shot.action_desc or "") if text.strip()
     ]
     beats = max((count_sequential_action_beats(text) for text in action_candidates), default=0)
-    limit = 2 if int(getattr(shot, "duration_s", 5) or 5) <= 6 else 3
+    limit = action_capacity_limit(getattr(shot, "duration_s", 5))
     if beats > limit:
         errors.append(
             f"shot_no={shot.shot_no} 含约 {beats} 个顺序动作节拍，超过 {shot.duration_s}s 镜头容量上限 {limit}；"

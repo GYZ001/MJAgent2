@@ -48,6 +48,20 @@ def test_route_spoken_capacity_never_replans_outline():
     assert split.strategy != "replan_outline"
 
 
+def test_route_action_capacity_to_adjacent_split():
+    issues = [_issue(
+        "ACTION_CAPACITY_EXCEEDED",
+        "shot_no=8 含约 4 个顺序动作节拍，超过 5s 镜头容量上限 2",
+        8,
+    )]
+
+    plan = route_issues(issues, validated_prefix_end=7, next_shot_no=8)
+
+    assert plan.level == "L1"
+    assert plan.strategy == "split_adjacent_shot"
+    assert plan.invalidation_frontier == 8
+
+
 def test_route_state_chain_window():
     plan = route_issues([
         _issue("STATE_CHAIN_INVALID", "shot_no=8 与 shot_no=9 状态链不承接", 8),

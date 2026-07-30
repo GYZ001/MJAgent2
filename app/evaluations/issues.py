@@ -15,6 +15,9 @@ _CODE_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("SPOKEN_TIMELINE_OVERLAP", re.compile(r"口播时间段.+重叠|SPOKEN_TIMELINE_OVERLAP", re.I)),
     ("SPOKEN_TIMELINE_OUT_OF_RANGE", re.compile(r"口播时间段.+超出|SPOKEN_TIMELINE_OUT_OF_RANGE", re.I)),
     ("CONTRACT_FIELD_INVALID", re.compile(r"episode_no|mode|5~10 秒|5-10 秒|时长", re.I)),
+    # 动作容量必须先于通用“容量上限”口播兜底匹配；否则分镜动作过载会被
+    # 错路由为口播问题，并在逐镜 Agent Loop 中作为 score-only 候选漏过。
+    ("ACTION_CAPACITY_EXCEEDED", re.compile(r"顺序动作节拍|主动作过载|动作容量", re.I)),
     ("SPOKEN_CAPACITY_EXCEEDED", re.compile(r"口播|台词.{0,8}超|字数.{0,6}超|容量上限|超过.{0,12}字", re.I)),
     ("DIALOGUE_FRAMING_INVALID", re.compile(
         r"多个画内说话人|单人对白|只保留说话人|近景或特写|对白双人镜|按话轮拆|正反打", re.I

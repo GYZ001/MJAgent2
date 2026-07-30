@@ -126,6 +126,109 @@ def test_status_distinguishes_visible_drafts_from_zero_safe_checkpoint(storyboar
     assert "通过" not in status["headline"]
 
 
+def _leave_stale_checkpoint_after_screenplay_republish(storyboard_db) -> None:
+    storyboard_db.execute("DELETE FROM shots WHERE episode_id='e1'")
+    storyboard_db.execute(
+        """UPDATE episodes
+           SET screenplay_artifact_id='screenplay-v2',
+               storyboard_outline_json=NULL,
+               storyboard_artifact_id=NULL,
+               working_storyboard_artifact_id=NULL,
+               published_storyboard_artifact_id=NULL,
+               storyboard_production_revision_id=NULL,
+               storyboard_completion_certificate_id=NULL,
+               status='scripted',
+               script_error='上游剧本已变更，自动完成授权失效，请重新授权后继续'
+           WHERE id='e1'"""
+    )
+    storyboard_db.commit()
+    save_checkpoint(SupervisorCheckpoint(
+        episode_id="e1",
+        phase="WAITING_AUTHORIZATION",
+        validated_prefix_end=12,
+        next_shot_no=13,
+        expected_total=12,
+        input_versions={"screenplay_artifact_id": "screenplay-v1"},
+    ))
+
+
+def test_republished_screenplay_does_not_resume_checkpoint_from_cleared_board(storyboard_db):
+    _leave_stale_checkpoint_after_screenplay_republish(storyboard_db)
+
+    detail = api.episode_detail("e1", view="board")
+    preview = api.storyboard_start_preflight("e1", {})
+
+    assert detail["supervisor"] is None
+    assert detail["script_error"] is None
+    assert detail["storyboard_status"]["state"] == "empty"
+    assert detail["storyboard_status"]["recommended_action"] == "generate_storyboard"
+    assert detail["storyboard_status"]["resume_from_shot"] == 1
+    assert preview["action"] == "create"
+    assert preview["checkpoint"] == {
+        "available": False,
+        "phase": None,
+        "resume_from_shot": 1,
+    }
+    assert preview["kept_validated_shots"] == 0
+    assert preview["planned_shots"] is None
+
+
+@pytest.mark.asyncio
+async def test_canonical_start_creates_for_republished_screenplay_with_only_stale_checkpoint(
+    storyboard_db, monkeypatch,
+):
+    _leave_stale_checkpoint_after_screenplay_republish(storyboard_db)
+    preview = api.storyboard_start_preflight("e1", {})
+
+    def fake_spawn(_kind, _key, coro, *, project_id=None):
+        coro.close()
+        return object()
+
+    monkeypatch.setattr(task_registry, "spawn", fake_spawn)
+    result = await api.start_storyboard("e1", {
+        "preflight_token": preview["preview_token"],
+    })
+
+    assert result["action"] == "create"
+    episode = storyboard_db.execute(
+        "SELECT status,script_error,active_storyboard_run_id FROM episodes WHERE id='e1'"
+    ).fetchone()
+    assert episode["status"] == "scripting"
+    assert episode["script_error"] is None
+    assert episode["active_storyboard_run_id"] == result["run_id"]
+
+
+@pytest.mark.asyncio
+async def test_direct_resume_rejects_stale_checkpoint_after_board_was_cleared(storyboard_db):
+    _leave_stale_checkpoint_after_screenplay_republish(storyboard_db)
+
+    with pytest.raises(HTTPException, match="重新生成分镜") as caught:
+        await api.resume_storyboard("e1")
+
+    assert caught.value.status_code == 409
+
+
+def test_upstream_mismatch_still_requires_resume_when_current_board_exists(storyboard_db):
+    storyboard_db.execute(
+        "UPDATE episodes SET screenplay_artifact_id='screenplay-v2' WHERE id='e1'"
+    )
+    storyboard_db.commit()
+    save_checkpoint(SupervisorCheckpoint(
+        episode_id="e1",
+        phase="WAITING_AUTHORIZATION",
+        validated_prefix_end=1,
+        next_shot_no=2,
+        expected_total=2,
+        input_versions={"screenplay_artifact_id": "screenplay-v1"},
+    ))
+
+    preview = api.storyboard_start_preflight("e1", {})
+
+    assert preview["action"] == "resume"
+    assert preview["checkpoint"]["available"] is True
+    assert preview["checkpoint"]["resume_from_shot"] == 2
+
+
 def _cancel_test_run(storyboard_db) -> WorkflowRecorder:
     recorder = WorkflowRecorder.create(
         workflow_type="storyboard",

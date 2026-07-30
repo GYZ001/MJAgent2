@@ -35,6 +35,7 @@ _PREFERRED_LEVEL: dict[str, RepairLevel] = {
     "SCHEMA_INVALID": "L1",
     "JSON_INVALID": "L1",
     "SPOKEN_CAPACITY_EXCEEDED": "L1",
+    "ACTION_CAPACITY_EXCEEDED": "L1",
     "SPOKEN_CONTRACT_CONFLICT": "L0",
     "DIALOGUE_FRAMING_INVALID": "L1",
     "SHOT_OUTLINE_COVERAGE": "L1",
@@ -102,10 +103,14 @@ def normalize_strategy(strategy: str) -> RepairStrategy:
 
 def _capacity_needs_adjacent_split(issues: list[Issue]) -> bool:
     """容量超限且文案暗示不可单镜满足 → 相邻插镜/拆镜，绝不整集重规划。"""
-    if not any(issue.code == "SPOKEN_CAPACITY_EXCEEDED" for issue in issues):
+    if not any(
+        issue.code in {"SPOKEN_CAPACITY_EXCEEDED", "ACTION_CAPACITY_EXCEEDED"}
+        for issue in issues
+    ):
         return False
     return any(
-        any(token in (issue.message or "") for token in ("拆", "必保留", "NEEDS_REPLAN", "不可满足", "容量"))
+        issue.code == "ACTION_CAPACITY_EXCEEDED"
+        or any(token in (issue.message or "") for token in ("拆", "必保留", "NEEDS_REPLAN", "不可满足", "容量"))
         for issue in issues
     )
 

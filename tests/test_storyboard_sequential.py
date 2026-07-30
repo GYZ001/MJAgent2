@@ -120,10 +120,11 @@ def test_relevant_text_windows_keeps_current_hint_and_caps_context() -> None:
 
 
 def test_next_shot_uses_bounded_single_shot_output_budget(monkeypatch) -> None:
-    captured: dict[str, int] = {}
+    captured: dict[str, object] = {}
 
     async def fake_agent_loop(*_args, **kwargs):
         captured["max_tokens"] = kwargs["max_tokens"]
+        captured["repair_issue_codes"] = kwargs["loop"].policy.repair_issue_codes
         return _draft(_shot(1), is_final=False)
 
     monkeypatch.setattr(stages, "_run_with_agent_loop", fake_agent_loop)
@@ -146,6 +147,7 @@ def test_next_shot_uses_bounded_single_shot_output_budget(monkeypatch) -> None:
     assert result.shot.shot_no == 1
     assert captured["max_tokens"] == config.STORYBOARD_SHOT_MAX_TOKENS == 8192
     assert captured["max_tokens"] < 65535
+    assert "ACTION_CAPACITY_EXCEEDED" in captured["repair_issue_codes"]
 
 
 def test_invalid_legacy_outline_information_id_is_not_injected_after_validation(monkeypatch) -> None:

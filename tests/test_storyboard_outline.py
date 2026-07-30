@@ -12,6 +12,7 @@ from app.stages import (_maybe_split_outline_covers, _outline_brief,
 from app.validators import (_atomize_claim, _condense, _covers_outside_spoken,
                             downgrade_outline_offbible_spoken,
                             rewrite_outline_abstract_covers,
+                            split_outline_over_action_capacity,
                             validate_storyboard_outline)
 
 KEY_LINE = "我一定要查清斗气消失的真相。"
@@ -65,6 +66,82 @@ def _valid_beats() -> list[str]:
 def test_valid_outline_passes() -> None:
     outline = _outline(_valid_beats(), covers={5: KEY_LINE})
     assert validate_storyboard_outline(outline, _screenplay(), 50) == []
+
+
+def test_action_heavy_outline_is_split_to_video_capacity() -> None:
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                scene_setting="日，萧家广场",
+                beat="萧薰儿转身穿过人群走向萧炎，在他面前停下叫他萧炎哥哥",
+                covers="萧薰儿走到萧炎面前停下，叫出萧炎哥哥",
+                story_event_id="E03",
+                spine_beat_ids=["S05"],
+                key_line_ids=["KL06"],
+                information_ids=["I6"],
+                state_in="萧薰儿受称赞后站在石碑前",
+                primary_action="萧薰儿转身穿过人群走向萧炎并停下",
+                state_out="萧薰儿站在萧炎面前",
+                continuity_mode="same_scene_cut",
+                duration_s=5,
+                characters_visible=["萧薰儿"],
+                audio_cast=["萧薰儿"],
+            ),
+            StoryboardOutlineShot(
+                shot_no=2,
+                scene_setting="日，萧家广场",
+                beat="萧炎抬头回应",
+                duration_s=5,
+            ),
+        ],
+    )
+
+    events = split_outline_over_action_capacity(outline, max_shots=16)
+
+    assert len(events) == 1
+    assert len(outline.shots) == 3
+    front, back = outline.shots[:2]
+    assert "动作容量拆分：前段" in front.beat
+    assert "动作容量拆分：后段" in back.beat
+    assert front.state_out == back.state_in
+    assert front.key_line_ids == [] and back.key_line_ids == ["KL06"]
+    assert front.information_ids == [] and back.information_ids == ["I6"]
+    assert front.audio_cast == [] and back.audio_cast == ["萧薰儿"]
+    assert back.continuity_mode == "action_continuation"
+    assert [shot.shot_no for shot in outline.shots] == [1, 2, 3]
+    # 同一来源节点只允许 +1 相邻镜，重复运行不得继续碎拆。
+    assert split_outline_over_action_capacity(outline, max_shots=16) == []
+
+
+def test_action_split_can_be_forced_when_detailed_shot_expands_outline() -> None:
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[StoryboardOutlineShot(
+            shot_no=1,
+            scene_setting="日，萧家广场",
+            beat="萧薰儿走到魔石碑前触碑，石碑亮起耀眼光芒",
+            covers="萧薰儿走到魔石碑前，手掌触碑面，石碑亮起耀眼光芒",
+            primary_action="萧薰儿走到碑前触碑",
+            state_in="萧薰儿尚在人群中",
+            state_out="石碑亮起耀眼光芒",
+            duration_s=5,
+            characters_visible=["萧薰儿"],
+        )],
+    )
+
+    # 紧凑大纲本身只显式命中两个词表动作；逐镜补写“走出人群”后若被硬门禁拦截，
+    # Repair Router 可强制把当前节点拆为“到碑前触碑 → 石碑亮起”。
+    events = split_outline_over_action_capacity(
+        outline, max_shots=16, shot_nos={1}, force=True,
+    )
+
+    assert len(events) == 1
+    assert len(outline.shots) == 2
+    assert "走到魔石碑前" in outline.shots[0].primary_action
+    assert "亮起" in outline.shots[1].primary_action
+    assert outline.shots[0].state_out == outline.shots[1].state_in
 
 
 def test_outline_does_not_enforce_target_derived_shot_count() -> None:

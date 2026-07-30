@@ -118,6 +118,22 @@ def _pause_for_external_error(
     return cp
 
 
+def _current_storyboard_projection_has_material(conn, episode_id: str, ep) -> bool:
+    """Check current storyboard ownership without considering audit checkpoints."""
+    shot_count = int(conn.execute(
+        "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,),
+    ).fetchone()["c"])
+    return bool(
+        shot_count
+        or ep["storyboard_outline_json"]
+        or ep["storyboard_artifact_id"]
+        or ep["working_storyboard_artifact_id"]
+        or ep["published_storyboard_artifact_id"]
+        or ep["storyboard_production_revision_id"]
+        or ep["storyboard_completion_certificate_id"]
+    )
+
+
 def load_latest_checkpoint(episode_id: str) -> SupervisorCheckpoint | None:
     conn = get_conn()
     row = conn.execute(
@@ -277,7 +293,6 @@ async def run_storyboard_supervisor(
         storyboard_shot_count_range,
         validate_storyboard_preserves_key_content,
     )
-    from app import worker
     from app.domain.storyboard_ops import (
         _board_from_shot_rows,
         _finalize_storyboard_evidence,
@@ -323,16 +338,36 @@ async def run_storyboard_supervisor(
             },
         )
 
-    # 上游版本校验
+    # 上游版本校验。发布新剧本会清空当前分镜投影，但历史 checkpoint 会作为审计
+    # 证据保留；此时应按新剧本重新开始，而不是把旧 checkpoint 误判为可续跑任务。
     if (ep["screenplay_artifact_id"] or "") != (cp.input_versions.get("screenplay_artifact_id") or ""):
-        cp.phase = "WAITING_AUTHORIZATION"
-        save_checkpoint(cp, run_id=run_id)
-        conn.execute(
-            "UPDATE episodes SET status='scripted', script_error=? WHERE id=?",
-            ("上游剧本已变更，自动完成授权失效，请重新授权后继续", episode_id),
-        )
-        conn.commit()
-        return cp
+        if resume and not _current_storyboard_projection_has_material(conn, episode_id, ep):
+            cp = SupervisorCheckpoint(
+                episode_id=episode_id,
+                input_versions={
+                    "screenplay_artifact_id": ep["screenplay_artifact_id"],
+                    "bible_artifact_id": p["bible_artifact_id"] if p else None,
+                },
+                phase="PREFLIGHT",
+            )
+            resume = False
+            if run_id:
+                evidence_repository.append_event(
+                    run_id,
+                    "STALE_STORYBOARD_CHECKPOINT_IGNORED",
+                    "info",
+                    "上游剧本已重新发布且当前分镜为空，已按新剧本重新开始",
+                    payload={"episode_id": episode_id},
+                )
+        else:
+            cp.phase = "WAITING_AUTHORIZATION"
+            save_checkpoint(cp, run_id=run_id)
+            conn.execute(
+                "UPDATE episodes SET status='scripted', script_error=? WHERE id=?",
+                ("上游剧本已变更，自动完成授权失效，请重新授权后继续", episode_id),
+            )
+            conn.commit()
+            return cp
 
     if not resume:
         # 新 production revision 只初始化工作区；任何已有数据都只能续跑，不得全量清空。
@@ -757,17 +792,29 @@ def _apply_repair(
     effective_strategy = strategy
 
     if strategy in {"split_adjacent_shot", "split_shot"}:
-        from app.validators import split_outline_over_key_line_capacity, storyboard_shot_count_range
+        from app.validators import (
+            split_outline_over_action_capacity,
+            split_outline_over_key_line_capacity,
+            storyboard_shot_count_range,
+        )
         from app.domain.common import _load_screenplay
 
         ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
         screenplay = _load_screenplay(ep) if ep else None
         events: list[dict] = []
-        if outline is not None and screenplay is not None:
+        if outline is not None:
             _, max_shots = storyboard_shot_count_range(ep["target_duration_s"] if ep else 50)
-            events = split_outline_over_key_line_capacity(
-                outline, screenplay, max_shots=max_shots,
-            )
+            if "ACTION_CAPACITY_EXCEEDED" in plan.issue_codes:
+                events.extend(split_outline_over_action_capacity(
+                    outline,
+                    max_shots=max_shots,
+                    shot_nos={frontier},
+                    force=True,
+                ))
+            if screenplay is not None and "SPOKEN_CAPACITY_EXCEEDED" in plan.issue_codes:
+                events.extend(split_outline_over_key_line_capacity(
+                    outline, screenplay, max_shots=max_shots,
+                ))
             if events:
                 conn.execute(
                     "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",

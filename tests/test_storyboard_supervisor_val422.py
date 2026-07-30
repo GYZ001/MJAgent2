@@ -128,6 +128,11 @@ def test_issue_code_spoken_capacity():
     assert issue_code("第 9 镜口播超过 10 秒上限 36 字") == "SPOKEN_CAPACITY_EXCEEDED"
 
 
+def test_issue_code_distinguishes_action_capacity_from_spoken_capacity():
+    message = "shot_no=8 含约 4 个顺序动作节拍，超过 5s 镜头容量上限 2；请拆镜"
+    assert issue_code(message) == "ACTION_CAPACITY_EXCEEDED"
+
+
 def test_issue_code_spoken_contract_conflict_is_not_capacity():
     assert issue_code(
         "shot_no=15 dialogues 与 audio_timeline 的口播内容分叉；同一镜头只能有一套有效口播"

@@ -20,7 +20,9 @@ from app.continuity import (
     outline_atomic_errors,
     adaptation_hook_errors,
     sync_shot_continuity_fields,
+    action_capacity_limit,
     count_sequential_action_beats,
+    split_sequential_action_text,
     dialogue_focus_subject,
     dialogue_framing_errors,
     dialogue_two_shot_required,
@@ -2456,6 +2458,163 @@ def split_outline_on_speaker_changes(
             "reason": "dialogue_speaker_change_requires_reverse_shot",
         })
         index += len(groups)
+    return events
+
+
+_ACTION_CAPACITY_SPLIT_MARKER = "动作容量拆分"
+
+
+def _outline_action_candidate(shot: Any) -> tuple[str, int, int]:
+    """Choose the outline field that exposes the richest action sequence."""
+    candidates = [
+        str(value or "").strip()
+        for value in (shot.primary_action, shot.beat, shot.covers)
+        if str(value or "").strip()
+    ]
+    if not candidates:
+        return "", 0, 0
+    scored = [
+        (text, count_sequential_action_beats(text), len(_atomize_claim(text)))
+        for text in candidates
+    ]
+    return max(scored, key=lambda item: (item[1], item[2], len(item[0])))
+
+
+def _split_outline_action_text(
+    text: str,
+    *,
+    limit: int,
+    force: bool,
+) -> tuple[str, str] | None:
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    beats = count_sequential_action_beats(raw)
+    if beats > limit or force:
+        by_verbs = split_sequential_action_text(raw)
+        if by_verbs is not None:
+            return by_verbs
+    atoms = _atomize_claim(raw)
+    if len(atoms) < 2:
+        return None
+    split_at = max(1, len(atoms) // 2)
+    return "；".join(atoms[:split_at]), "；".join(atoms[split_at:])
+
+
+def split_outline_over_action_capacity(
+    outline: StoryboardOutline,
+    *,
+    max_shots: int,
+    shot_nos: set[int] | None = None,
+    force: bool = False,
+) -> list[dict]:
+    """Split action-heavy outline nodes before per-shot generation.
+
+    The threshold comes from the same helper used by the paid-video preflight:
+    up to two sequential beats for 5-6 seconds and three for 7-10 seconds.  A
+    source node is split at most once (``动作容量拆分`` marker), preserving the
+    existing event/spine allocation while moving dialogue and newly delivered
+    information to the latter half.  ``force`` is used only by the local repair
+    router after a detailed shot expands beyond its compact outline wording.
+    """
+    from app.schemas import StoryboardOutlineShot
+
+    if not outline.shots or len(outline.shots) >= max_shots:
+        return []
+    restrict_to_targets = shot_nos is not None
+    targets = {int(no) for no in (shot_nos or set()) if int(no) > 0}
+    events: list[dict] = []
+    index = 0
+    while index < len(outline.shots) and len(outline.shots) < max_shots:
+        if restrict_to_targets and not targets:
+            break
+        shot = outline.shots[index]
+        original_no = int(shot.shot_no)
+        if restrict_to_targets and original_no not in targets:
+            index += 1
+            continue
+        if _ACTION_CAPACITY_SPLIT_MARKER in (shot.beat or ""):
+            targets.discard(original_no)
+            index += 1
+            continue
+        plan_text, beats, atom_count = _outline_action_candidate(shot)
+        limit = action_capacity_limit(shot.duration_s)
+        if not force and beats <= limit:
+            targets.discard(original_no)
+            index += 1
+            continue
+        plan_parts = _split_outline_action_text(plan_text, limit=limit, force=force)
+        if plan_parts is None:
+            targets.discard(original_no)
+            index += 1
+            continue
+        front_action, back_action = plan_parts
+        if not front_action.strip() or not back_action.strip():
+            targets.discard(original_no)
+            index += 1
+            continue
+
+        cover_parts = _split_outline_action_text(
+            shot.covers or "", limit=limit, force=True,
+        )
+        front_covers, back_covers = (
+            cover_parts if cover_parts is not None else ("", shot.covers or "")
+        )
+        before_count = len(outline.shots)
+        original_state_out = shot.state_out
+        original_information = list(shot.information_ids or [])
+        original_new_information = list(shot.new_information_ids or [])
+        original_key_lines = list(shot.key_line_ids or [])
+        original_audio_cast = list(shot.audio_cast or [])
+        intermediate_state = f"{front_action.rstrip('。')}完成，准备承接后续动作"
+
+        shot.beat = f"（{_ACTION_CAPACITY_SPLIT_MARKER}：前段）{front_action}"
+        shot.primary_action = front_action
+        shot.covers = front_covers
+        shot.state_out = intermediate_state
+        shot.key_line_ids = []
+        shot.information_ids = []
+        shot.new_information_ids = []
+        shot.audio_cast = []
+
+        outline.shots.insert(
+            index + 1,
+            StoryboardOutlineShot(
+                shot_no=original_no + 1,
+                scene_setting=shot.scene_setting,
+                beat=f"（{_ACTION_CAPACITY_SPLIT_MARKER}：后段）{back_action}",
+                covers=back_covers,
+                story_event_id=shot.story_event_id,
+                spine_beat_ids=list(shot.spine_beat_ids or []),
+                key_line_ids=original_key_lines,
+                information_ids=original_information,
+                new_information_ids=original_new_information,
+                state_in=intermediate_state,
+                primary_action=back_action,
+                emotion_beat=shot.emotion_beat,
+                state_out=original_state_out,
+                continuity_mode="action_continuation",
+                duration_s=shot.duration_s or config.DEFAULT_VIDEO_DURATION_S,
+                characters_visible=list(shot.characters_visible or []),
+                audio_cast=original_audio_cast,
+            ),
+        )
+        for shot_index, item in enumerate(outline.shots, start=1):
+            item.shot_no = shot_index
+        events.append({
+            "shot_no": original_no,
+            "estimated_action_beats": beats,
+            "action_atoms": atom_count,
+            "capacity": limit,
+            "front_action": front_action,
+            "back_action": back_action,
+            "shots_before": before_count,
+            "shots_after": len(outline.shots),
+            "reason": "sequential_action_beats_exceed_video_capacity",
+            "forced": force,
+        })
+        targets.discard(original_no)
+        index += 2
     return events
 
 
