@@ -495,7 +495,11 @@ def project_detail(
             else:
                 s["ref_image_url"] = None
             soverride = (s.get("scene_prompt_override") or "").strip()
-            s["scene_prompt_effective"] = soverride or scene_ref_prompt(style, s.get("scene_canonical", ""))
+            s["scene_prompt_effective"] = soverride or scene_ref_prompt(
+                style,
+                s.get("scene_canonical", ""),
+                scene_name=s.get("name", ""),
+            )
     p["key_timeline"] = (
         json.loads(p["key_timeline"]) if p["key_timeline"] and (full or view == "bible") else []
     )
@@ -677,12 +681,140 @@ def read_chapter(project_id: str, idx: int):
             "first_idx": bounds["lo"], "last_idx": bounds["hi"], "total": bounds["n"]}
 
 
+def _delete_project_evidence(conn, project_id: str) -> dict[str, int]:
+    """Delete project-scoped Harness evidence before removing business rows."""
+    episode_ids = [
+        row["id"] for row in conn.execute(
+            "SELECT id FROM episodes WHERE project_id=?", (project_id,)
+        ).fetchall()
+    ]
+    shot_ids = [
+        row["id"] for row in conn.execute(
+            """SELECT s.id FROM shots s
+               JOIN episodes e ON e.id=s.episode_id WHERE e.project_id=?""",
+            (project_id,),
+        ).fetchall()
+    ]
+    scope_ids = [project_id, *episode_ids, *shot_ids]
+    scope_marks = ",".join("?" for _ in scope_ids)
+
+    run_ids = {
+        row["id"] for row in conn.execute(
+            f"""SELECT id FROM workflow_runs
+                WHERE scope_id IN ({scope_marks}) OR scope_id LIKE ?""",
+            [*scope_ids, f"{project_id}:%"],
+        ).fetchall()
+    }
+    # Recovery/child runs can use their own scope. Include the whole descendant
+    # chain so no run keeps a parent pointer to a deleted project run.
+    frontier = set(run_ids)
+    while frontier:
+        marks = ",".join("?" for _ in frontier)
+        children = {
+            row["id"] for row in conn.execute(
+                f"""SELECT id FROM workflow_runs
+                    WHERE parent_run_id IN ({marks}) OR recovered_by_run_id IN ({marks})""",
+                [*frontier, *frontier],
+            ).fetchall()
+        } - run_ids
+        run_ids.update(children)
+        frontier = children
+
+    step_ids: set[str] = set()
+    if run_ids:
+        marks = ",".join("?" for _ in run_ids)
+        step_ids = {
+            row["id"] for row in conn.execute(
+                f"SELECT id FROM step_runs WHERE run_id IN ({marks})",
+                list(run_ids),
+            ).fetchall()
+        }
+
+    artifact_params: list[object] = [*scope_ids, f"{project_id}:%"]
+    artifact_where = f"(scope_id IN ({scope_marks}) OR scope_id LIKE ?)"
+    if step_ids:
+        step_marks = ",".join("?" for _ in step_ids)
+        artifact_where += f" OR created_by_step_run_id IN ({step_marks})"
+        artifact_params.extend(step_ids)
+    artifact_ids = {
+        row["id"] for row in conn.execute(
+            f"SELECT id FROM artifacts WHERE {artifact_where}",
+            artifact_params,
+        ).fetchall()
+    }
+
+    if episode_ids:
+        marks = ",".join("?" for _ in episode_ids)
+        conn.execute(f"DELETE FROM delivery_packages WHERE episode_id IN ({marks})", episode_ids)
+        conn.execute(f"DELETE FROM customer_feedback WHERE episode_id IN ({marks})", episode_ids)
+        conn.execute(f"DELETE FROM production_revisions WHERE episode_id IN ({marks})", episode_ids)
+        conn.execute(f"DELETE FROM production_grants WHERE episode_id IN ({marks})", episode_ids)
+        conn.execute(f"DELETE FROM completion_grants WHERE episode_id IN ({marks})", episode_ids)
+        conn.execute(
+            f"DELETE FROM completion_certificates WHERE scope_id IN ({marks})",
+            episode_ids,
+        )
+
+    if artifact_ids:
+        marks = ",".join("?" for _ in artifact_ids)
+        conn.execute(f"DELETE FROM gate_decisions WHERE artifact_id IN ({marks})", list(artifact_ids))
+        conn.execute(f"DELETE FROM evaluations WHERE artifact_id IN ({marks})", list(artifact_ids))
+        conn.execute(
+            f"DELETE FROM completion_certificates WHERE artifact_id IN ({marks})",
+            list(artifact_ids),
+        )
+        conn.execute(
+            f"UPDATE artifacts SET superseded_by_artifact_id=NULL "
+            f"WHERE superseded_by_artifact_id IN ({marks})",
+            list(artifact_ids),
+        )
+        conn.execute(f"DELETE FROM artifacts WHERE id IN ({marks})", list(artifact_ids))
+
+    if run_ids:
+        marks = ",".join("?" for _ in run_ids)
+        conn.execute(f"DELETE FROM gate_decisions WHERE run_id IN ({marks})", list(run_ids))
+        conn.execute(f"DELETE FROM run_events WHERE run_id IN ({marks})", list(run_ids))
+        conn.execute(f"DELETE FROM provider_calls WHERE run_id IN ({marks})", list(run_ids))
+        conn.execute(f"DELETE FROM agent_tool_calls WHERE run_id IN ({marks})", list(run_ids))
+    if step_ids:
+        marks = ",".join("?" for _ in step_ids)
+        conn.execute(f"DELETE FROM evaluations WHERE step_run_id IN ({marks})", list(step_ids))
+        conn.execute(f"DELETE FROM run_events WHERE step_run_id IN ({marks})", list(step_ids))
+        conn.execute(f"DELETE FROM provider_calls WHERE step_run_id IN ({marks})", list(step_ids))
+    if run_ids:
+        marks = ",".join("?" for _ in run_ids)
+        conn.execute(f"DELETE FROM step_runs WHERE run_id IN ({marks})", list(run_ids))
+        conn.execute(
+            f"UPDATE workflow_runs SET parent_run_id=NULL "
+            f"WHERE parent_run_id IN ({marks})",
+            list(run_ids),
+        )
+        conn.execute(
+            f"UPDATE workflow_runs SET recovered_by_run_id=NULL "
+            f"WHERE recovered_by_run_id IN ({marks})",
+            list(run_ids),
+        )
+        conn.execute(f"DELETE FROM workflow_runs WHERE id IN ({marks})", list(run_ids))
+
+    conn.execute(
+        f"DELETE FROM review_action_audit "
+        f"WHERE scope_id IN ({scope_marks}) OR scope_id LIKE ?",
+        [*scope_ids, f"{project_id}:%"],
+    )
+    return {
+        "artifacts": len(artifact_ids),
+        "runs": len(run_ids),
+        "steps": len(step_ids),
+    }
+
+
 async def _delete_project_core(project_id: str) -> dict:
     """删除项目的领域逻辑，供 REST 路由与 ``project.delete`` Command Handler 共用。"""
     _project_or_404(project_id)
     # 先停止并等待所有项目级后台协程退出，防止删库后任务继续回写孤儿版本/参考图。
     cancelled_tasks = await task_registry.cancel_project(project_id)
     conn = get_conn()
+    evidence_removed = _delete_project_evidence(conn, project_id)
     # 文件和衍生产物由同一权威清理函数处理；数据库级联负责关系完整性。
     worker.delete_project_episodes(project_id)
     conn.execute("DELETE FROM chapters WHERE project_id=?", (project_id,))
@@ -694,7 +826,11 @@ async def _delete_project_core(project_id: str) -> dict:
     import shutil
     from app.config import PROJECTS_DIR
     shutil.rmtree(PROJECTS_DIR / project_id, ignore_errors=True)
-    return {"deleted": project_id, "cancelled_tasks": cancelled_tasks}
+    return {
+        "deleted": project_id,
+        "cancelled_tasks": cancelled_tasks,
+        "evidence_removed": evidence_removed,
+    }
 
 
 @router.delete("/projects/{project_id}")

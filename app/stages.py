@@ -2187,7 +2187,11 @@ async def review_scene_image(image_b64: str, frame_desc: str, scene_setting: str
             )
             return mentions_watermark and not mentions_occlusion
 
-        watermark_reported = result.get("watermark_detected") is True
+        provider_mark_reported = any(_watermark_only(item) for item in original_issues)
+        watermark_reported = (
+            result.get("watermark_detected") is True
+            or provider_mark_reported
+        )
         occluding_watermark = any(
             _watermark_only(item) is False
             and any(token in item.lower() for token in ("watermark", "logo", "水印", "ai生成"))
@@ -2199,6 +2203,7 @@ async def review_scene_image(image_b64: str, frame_desc: str, scene_setting: str
             # Preserve the observed fact for audit, while explicitly telling
             # the deterministic policy that this provider mark is allowed by
             # the configured practical-quality mode.
+            result["watermark_detected"] = True
             result["non_occluding_provider_watermark"] = True
             remaining_text_issues = [
                 item for item in result["issues"]

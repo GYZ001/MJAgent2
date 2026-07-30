@@ -92,8 +92,14 @@ def publish_screenplay(
         "status='planned', script_error=NULL WHERE id=?",
         (script.model_dump_json(), now(), artifact_id, episode_id),
     )
-    set_published_artifact(revision_id, artifact_id, certificate_id=cert.certificate_id)
-    consume_completion_certificate(cert.certificate_id)
+    set_published_artifact(
+        revision_id,
+        artifact_id,
+        certificate_id=cert.certificate_id,
+        conn=conn,
+        commit=False,
+    )
+    consume_completion_certificate(cert.certificate_id, conn=conn, commit=False)
     conn.execute("DELETE FROM screenplay_drafts WHERE episode_id=?", (episode_id,))
     conn.commit()
     if previous_artifact_id and previous_artifact_id != artifact_id:
@@ -163,8 +169,14 @@ def publish_storyboard(
         "storyboard_artifact_id=? WHERE id=?",
         (artifact_id, episode_id),
     )
-    set_published_artifact(revision_id, artifact_id, certificate_id=cert.certificate_id)
-    consume_completion_certificate(cert.certificate_id)
+    set_published_artifact(
+        revision_id,
+        artifact_id,
+        certificate_id=cert.certificate_id,
+        conn=conn,
+        commit=False,
+    )
+    consume_completion_certificate(cert.certificate_id, conn=conn, commit=False)
     conn.commit()
     return {
         "episode_id": episode_id,

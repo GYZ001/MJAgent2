@@ -19,10 +19,35 @@ def test_environment_only_prompt_removes_conflicting_human_clauses() -> None:
     assert "摊位林立" in cleaned
     assert "人流" not in cleaned
     assert "护卫" not in cleaned
-    prompt = scene_ref_prompt("国风厚涂", canonical)
+    prompt = scene_ref_prompt("国风厚涂", canonical, scene_name="萧家坊市")
     assert "人流穿梭" not in prompt
     assert "护卫巡视" not in prompt
     assert "无人物" in prompt
+    assert "规范地点名称：萧家坊市" in prompt
+    assert "不得替换成其他地点" in prompt
+    assert "画风最高优先级：必须严格保持「国风厚涂」" in prompt
+    assert "不得擅自切换成与该画风冲突的真人摄影" in prompt
+    assert "再次确认：地点是「萧家坊市」，画风是「国风厚涂」" in prompt
+
+
+def test_environment_prompt_keeps_auditorium_seats_but_removes_people() -> None:
+    from app.scenes import environment_only_scene_canonical, scene_ref_prompt
+
+    canonical = (
+        "室内电影院一号厅，空荡观众席，前排台阶，入口通道，"
+        "观众等待入场，银幕白光照明"
+    )
+    cleaned = environment_only_scene_canonical(canonical)
+    assert "空荡观众席" in cleaned
+    assert "前排台阶" in cleaned
+    assert "入口通道" in cleaned
+    assert "观众等待入场" not in cleaned
+
+    prompt = scene_ref_prompt("2D 动画厚涂", canonical, scene_name="一号厅")
+    assert "空荡观众席" in prompt
+    assert "前排台阶" in prompt
+    assert "入口通道" in prompt
+    assert "观众等待入场" not in prompt
 
 
 def _fresh_db(tmp_path, monkeypatch):

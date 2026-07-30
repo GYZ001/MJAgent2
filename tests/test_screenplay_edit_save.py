@@ -167,6 +167,17 @@ def test_edit_screenplay_does_not_500_on_row_get(client: TestClient) -> None:
     assert row["screenplay_artifact_id"]
     assert row["screenplay_production_revision_id"]
     assert row["screenplay_completion_certificate_id"]
+    published = db.get_conn().execute(
+        "SELECT * FROM episodes WHERE id='e1'"
+    ).fetchone()
+    from app.domain.common import _screenplay_ready
+
+    assert _screenplay_ready(dict(published)) is True
+    consumed = db.get_conn().execute(
+        "SELECT consumed_at FROM completion_certificates WHERE id=?",
+        (row["screenplay_completion_certificate_id"],),
+    ).fetchone()
+    assert consumed["consumed_at"] is not None
     artifact = db.get_conn().execute(
         "SELECT type,status FROM artifacts WHERE id=?", (row["screenplay_artifact_id"],)
     ).fetchone()

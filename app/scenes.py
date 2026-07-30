@@ -79,7 +79,7 @@ def scene_ref_path(project_id: str, scene_name: str, ep_start: int | None = None
 
 
 _SCENE_HUMAN_MENTION_RE = re.compile(
-    r"(人物|角色|人群|人流|行人|路人|顾客|客人|观众|护卫|巡逻|"
+    r"(人物|角色|人群|人流|行人|路人|顾客|客人|观众(?!席)|护卫|巡逻|"
     r"弟子|士兵|摊贩|店主|侍者|工人|百姓|村民|学生|老师|男子|女子|少年|少女)"
 )
 _SCENE_EXPLICIT_EMPTY_RE = re.compile(r"(无人|没有人|空无一人|纯环境)")
@@ -102,15 +102,35 @@ def environment_only_scene_canonical(scene_canonical: str) -> str:
     return "，".join(kept) or "保留该地点的建筑、陈设、光线、材质与空间布局"
 
 
-def scene_ref_prompt(visual_style: str, scene_canonical: str) -> str:
+def scene_ref_prompt(
+    visual_style: str,
+    scene_canonical: str,
+    *,
+    scene_name: str = "",
+) -> str:
     """场景定场图生成词：纯环境、无人物，作为跨集复用的场景锚点。"""
     from app.scene_policy import normalize_scene_prompt
+    location_identity = (
+        f"规范地点名称：{scene_name.strip()}。"
+        "必须呈现与该地点名称一致的建筑功能、陈设和空间类型，不得替换成其他地点。"
+        if scene_name.strip()
+        else ""
+    )
+    style_constraint = (
+        f"画风最高优先级：必须严格保持「{visual_style.strip()}」，"
+        "不得擅自切换成与该画风冲突的真人摄影、照片写实、3D CG 或其他渲染风格。"
+        if visual_style.strip()
+        else ""
+    )
     return normalize_scene_prompt(
-        visual_style,
+        style_constraint,
         f"场景定场图（纯环境、画面中不出现任何人物）："
-        f"{environment_only_scene_canonical(scene_canonical)}",
+        f"{location_identity}{environment_only_scene_canonical(scene_canonical)}",
         "9:16 竖屏，构图完整的环境定场镜头，空间纵深清晰，光影与色调统一，电影质感，高清",
-        "无人物，无文字，无字幕，无水印，无 logo",
+        "画面必须无人物；不得生成任何文字、字幕、招牌字、角标、水印或 logo",
+        f"再次确认：地点是「{scene_name.strip()}」，画风是「{visual_style.strip()}」"
+        if scene_name.strip() and visual_style.strip()
+        else "",
     )
 
 
@@ -468,7 +488,11 @@ async def review_scene_candidate(project_id: str, scene_name: str, artifact_id: 
     bible_data = json.loads(project["bible_json"])
     style = str((bible_data.get("world") or {}).get("visual_style_canonical") or "")
     # 候选可能绑定过去含“人流/护卫”的矛盾生成词；复验始终使用当前纯环境策略。
-    expected = scene_ref_prompt(style, str(scene.get("scene_canonical") or ""))
+    expected = scene_ref_prompt(
+        style,
+        str(scene.get("scene_canonical") or ""),
+        scene_name=scene_name,
+    )
     qa = await _review_scene_ref(
         str(artifact["file_path"]), scene, expected_description=expected,
     )
@@ -661,7 +685,11 @@ async def adopt_scene_candidate(
     prompt = str(content.get("prompt") or scene.get("scene_prompt_override") or "").strip()
     if not prompt:
         style = (bible_data.get("world") or {}).get("visual_style_canonical") or ""
-        prompt = scene_ref_prompt(style, scene.get("scene_canonical") or "")
+        prompt = scene_ref_prompt(
+            style,
+            scene.get("scene_canonical") or "",
+            scene_name=scene_name,
+        )
     pack: dict | None = None
     bible_version = project["bible_version"] or 0
     scene_id: str
@@ -1180,8 +1208,10 @@ async def generate_scene_refs(
                     sc.ref_image_path = adopted["image_path"]
                     continue
             sc.ref_image_path = None
-            base_prompt = ((sc.scene_prompt_override or "").strip()
-                           or scene_ref_prompt(style, sc.scene_canonical))
+            base_prompt = (
+                (sc.scene_prompt_override or "").strip()
+                or scene_ref_prompt(style, sc.scene_canonical, scene_name=sc.name)
+            )
             last_error: Exception | None = None
             # Score-only：只生成一次；QA 低分不带 critique 重生（PRD QA-SO #18）。
             for attempt in range(1, 2):
@@ -1429,7 +1459,7 @@ def _append_scene_to_bible(conn, project_id: str, scene: dict) -> bool:
 async def _generate_and_register_scene(project_id: str, name: str, scene_canonical: str,
                                        style: str, *, ep_start: int, bible_version: int) -> str | None:
     """为新场景出一张定场图并登记到 scene_references（适用集 ep_start~ 至今）。出图失败返回 None。"""
-    base_prompt = scene_ref_prompt(style, scene_canonical)
+    base_prompt = scene_ref_prompt(style, scene_canonical, scene_name=name)
     conn = get_conn()
     # 同场景参考：若该场景已有更早分段的图（同一地点跨集演化），以它做 i2i 锚点保持一致；全新场景则为 None → 纯文生图。
     prior = same_scene_anchor(conn, project_id, name)
@@ -1787,7 +1817,7 @@ async def _refresh_scene_on_state_change(
     if not cur or cur["ep_start"] >= episode_no:
         return None
 
-    base_prompt = scene_ref_prompt(style, new_canonical)
+    base_prompt = scene_ref_prompt(style, new_canonical, scene_name=name)
     prior = cur["image_path"] if cur["image_path"] and Path(cur["image_path"]).exists() else None
     anchor_url = hiagent.data_url_from_file(prior) if prior else None
     dest = str(Path(scene_ref_path(project_id, name, episode_no)).with_name(

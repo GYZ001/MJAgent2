@@ -107,6 +107,7 @@ def test_enqueue_budget_reservation_error_closes_durable_job(monkeypatch) -> Non
     _seed_project(conn)
     monkeypatch.setattr(worker, "get_conn", lambda: conn)
     monkeypatch.setattr(worker, "ensure_media_trace", lambda **_kwargs: (None, None))
+    monkeypatch.setattr(worker.errors, "record_and_format", lambda *_args, **_kwargs: "（测试错误）")
     monkeypatch.setattr(compiler, "compile_prompt", lambda *a, **k: "PROMPT --dur 10")
 
     def fail_reserve(*_args, **_kwargs):
@@ -132,6 +133,7 @@ def test_enqueue_dispatch_error_keeps_job_durably_accepted(monkeypatch) -> None:
     _seed_project(conn)
     monkeypatch.setattr(worker, "get_conn", lambda: conn)
     monkeypatch.setattr(worker, "ensure_media_trace", lambda **_kwargs: (None, None))
+    monkeypatch.setattr(worker.errors, "record_and_format", lambda *_args, **_kwargs: "（测试错误）")
     monkeypatch.setattr(compiler, "compile_prompt", lambda *a, **k: "PROMPT --dur 10")
     monkeypatch.setattr(
         worker.media_scheduler,

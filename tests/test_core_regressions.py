@@ -44,6 +44,89 @@ def test_fresh_database_enforces_parent_links_and_cascades(tmp_path, monkeypatch
     conn.close()
 
 
+def test_project_delete_removes_harness_evidence_and_files(tmp_path, monkeypatch) -> None:
+    from app import config
+    from app.domain import projects as projects_api
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "delete-project.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    conn = db.get_conn()
+    project_root = tmp_path / "projects"
+    monkeypatch.setattr(config, "PROJECTS_DIR", project_root)
+    media = project_root / "p1" / "scene_refs" / "scene.jpg"
+    media.parent.mkdir(parents=True)
+    media.write_bytes(b"image")
+
+    conn.execute(
+        "INSERT INTO projects(id,name,status,created_at) VALUES('p1','P','planned',1)"
+    )
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,status,created_at) "
+        "VALUES('e1','p1',1,'planned',1)"
+    )
+    conn.execute(
+        "INSERT INTO shots(id,episode_id,shot_no,duration_s) VALUES('s1','e1',1,5)"
+    )
+    conn.execute(
+        """INSERT INTO workflow_runs(
+               id,workflow_type,scope_type,scope_id,status,input_fingerprint,updated_at
+           ) VALUES('r1','scene_references','project','p1','SUCCEEDED','fp',1)"""
+    )
+    conn.execute(
+        "INSERT INTO step_runs(id,run_id,step_key,status,started_at) "
+        "VALUES('st1','r1','scene_references','SUCCEEDED',1)"
+    )
+    conn.execute(
+        """INSERT INTO artifacts(
+               id,type,scope_type,scope_id,version,status,trust_level,file_path,
+               content_hash,created_by_step_run_id,created_at
+           ) VALUES('a1','scene_reference','reference_asset','p1:scene:1',1,
+                    'approved','T3',?,'hash','st1',1)""",
+        (str(media),),
+    )
+    conn.execute(
+        """INSERT INTO evaluations(
+               id,artifact_id,step_run_id,evaluator_type,evaluator_name,evaluator_version,
+               status,hard_gate_passed,created_at
+           ) VALUES('ev1','a1','st1','model','qa','1','passed',1,1)"""
+    )
+    conn.execute(
+        """INSERT INTO gate_decisions(
+               id,artifact_id,run_id,gate_key,decision,decided_by,reason,created_at
+           ) VALUES('g1','a1','r1','quality','approve','test','ok',1)"""
+    )
+    conn.execute(
+        """INSERT INTO run_events(
+               id,run_id,step_run_id,ts,event_type,severity,message
+           ) VALUES('re1','r1','st1',1,'STEP_FINISHED','info','done')"""
+    )
+    conn.execute(
+        """INSERT INTO review_action_audit(
+               id,action,scope_type,scope_id,decided_by,created_at
+           ) VALUES('ra1','adopt','reference_asset','p1:scene:1','test',1)"""
+    )
+    conn.commit()
+
+    result = asyncio.run(projects_api._delete_project_core("p1"))
+
+    assert result["evidence_removed"] == {"artifacts": 1, "runs": 1, "steps": 1}
+    for table in (
+        "projects",
+        "episodes",
+        "shots",
+        "workflow_runs",
+        "step_runs",
+        "run_events",
+        "artifacts",
+        "evaluations",
+        "gate_decisions",
+        "review_action_audit",
+    ):
+        assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+    assert not (project_root / "p1").exists()
+
+
 def test_observability_log_retention_keeps_active_calls() -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -204,6 +287,11 @@ def test_regex_planner_rolls_back_to_old_plan_and_keeps_media(
         planning,
         "replan_blockers",
         lambda _conn, _project_id: {"blocked": False},
+    )
+    monkeypatch.setattr(
+        planning.errors,
+        "record_and_format",
+        lambda *_args, **_kwargs: "（测试错误）",
     )
     ids = iter(("ep_same", "ep_same"))
     monkeypatch.setattr(planning, "new_id", lambda _prefix: next(ids))

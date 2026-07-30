@@ -316,16 +316,19 @@ def set_published_artifact(
     artifact_id: str,
     *,
     certificate_id: str | None = None,
+    conn=None,
+    commit: bool = True,
 ) -> None:
-    ensure_production_revisions_table()
-    conn = get_conn()
-    row = conn.execute(
+    if conn is None:
+        ensure_production_revisions_table()
+    db = conn or get_conn()
+    row = db.execute(
         "SELECT * FROM production_revisions WHERE id=?", (revision_id,)
     ).fetchone()
     if not row:
         raise ValueError(f"production revision not found: {revision_id}")
     stamp = now()
-    conn.execute(
+    db.execute(
         "UPDATE production_revisions SET published_artifact_id=?, working_artifact_id=?, "
         "status='published', updated_at=? WHERE id=?",
         (artifact_id, artifact_id, stamp, revision_id),
@@ -334,28 +337,29 @@ def set_published_artifact(
     episode_id = row["episode_id"]
     if kind == "screenplay":
         try:
-            conn.execute(
+            db.execute(
                 "UPDATE episodes SET published_screenplay_artifact_id=?, "
                 "working_screenplay_artifact_id=?, screenplay_artifact_id=?, "
                 "screenplay_completion_certificate_id=? WHERE id=?",
                 (artifact_id, artifact_id, artifact_id, certificate_id, episode_id),
             )
         except Exception:  # noqa: BLE001
-            conn.execute(
+            db.execute(
                 "UPDATE episodes SET screenplay_artifact_id=? WHERE id=?",
                 (artifact_id, episode_id),
             )
     else:
         try:
-            conn.execute(
+            db.execute(
                 "UPDATE episodes SET published_storyboard_artifact_id=?, "
                 "working_storyboard_artifact_id=?, storyboard_artifact_id=?, "
                 "storyboard_completion_certificate_id=? WHERE id=?",
                 (artifact_id, artifact_id, artifact_id, certificate_id, episode_id),
             )
         except Exception:  # noqa: BLE001
-            conn.execute(
+            db.execute(
                 "UPDATE episodes SET storyboard_artifact_id=? WHERE id=?",
                 (artifact_id, episode_id),
             )
-    conn.commit()
+    if commit:
+        db.commit()

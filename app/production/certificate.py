@@ -158,9 +158,11 @@ def issue_completion_certificate(
     return cert
 
 
-def get_completion_certificate(certificate_id: str) -> CompletionCertificate | None:
-    ensure_completion_certificates_table()
-    row = get_conn().execute(
+def get_completion_certificate(certificate_id: str, *, conn=None) -> CompletionCertificate | None:
+    if conn is None:
+        ensure_completion_certificates_table()
+    db = conn or get_conn()
+    row = db.execute(
         "SELECT * FROM completion_certificates WHERE id=?", (certificate_id,)
     ).fetchone()
     if not row:
@@ -225,22 +227,29 @@ def verify_completion_certificate(
     return cert
 
 
-def consume_completion_certificate(certificate_id: str) -> CompletionCertificate:
-    ensure_completion_certificates_table()
-    conn = get_conn()
-    cert = get_completion_certificate(certificate_id)
+def consume_completion_certificate(
+    certificate_id: str,
+    *,
+    conn=None,
+    commit: bool = True,
+) -> CompletionCertificate:
+    if conn is None:
+        ensure_completion_certificates_table()
+    db = conn or get_conn()
+    cert = get_completion_certificate(certificate_id, conn=db)
     if cert is None:
         raise ValueError("完成凭证不存在")
     if cert.consumed_at is not None:
         raise ValueError("完成凭证已被消费")
     stamp = now()
-    conn.execute(
+    cursor = db.execute(
         "UPDATE completion_certificates SET consumed_at=? WHERE id=? AND consumed_at IS NULL",
         (stamp, certificate_id),
     )
-    if conn.total_changes == 0:
+    if cursor.rowcount != 1:
         raise ValueError("完成凭证消费冲突")
-    conn.commit()
+    if commit:
+        db.commit()
     cert.consumed_at = stamp
     return cert
 

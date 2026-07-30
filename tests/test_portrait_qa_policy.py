@@ -78,6 +78,28 @@ def test_seed_qa_allows_minor_foot_crop_with_warning() -> None:
     assert any("轻微裁切" in item for item in result["issues"])
 
 
+def test_seed_qa_allows_summary_that_explicitly_says_minor_crop() -> None:
+    result = normalize_portrait_seed_qa({
+        "identity_match": 0.92,
+        "presentation_match": 0.7,
+        "clean_frame": 0.9,
+        "person_count": 1,
+        "watermark_detected": False,
+        "forbidden_text_detected": False,
+        "full_body_visible": False,
+        "crop_severity": "minor",
+        "anatomy_valid": True,
+        "soft_warnings": ["画面轻微裁切至小腿下部，未显示完整鞋底与脚部"],
+        "hard_failures": [],
+        "issues": ["核心角色设定匹配度较高，仅存在少量细节差异与轻微裁切问题，无硬违规内容"],
+    })
+
+    assert result["status"] == "warning"
+    assert result["hard_gate_passed"] is True
+    assert result["hard_failures"] == []
+    assert any("轻微裁切" in item for item in result["issues"])
+
+
 def test_seed_qa_keeps_major_crop_as_hard_failure() -> None:
     result = normalize_portrait_seed_qa({
         "identity_match": 0.95,

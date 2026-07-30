@@ -220,6 +220,30 @@ def test_scene_reference_qa_ignores_non_occluding_provider_watermark(monkeypatch
     assert "实用质量模式" in qa["warnings"][0]
 
 
+def test_scene_reference_qa_uses_provider_mark_issue_when_boolean_conflicts(monkeypatch) -> None:
+    async def fake_vlm_check(images, expectation, *, call_meta=None):
+        return (
+            '{"expectation_match":0.72,"continuity":1,"clean_frame":0.7,"overall":0.7,'
+            '"person_count":0,"watermark_detected":false,'
+            '"forbidden_text_detected":true,"space_type_matches":true,'
+            '"issues":["画面右下角存在多余的AI生成文字标注，违反无文字要求",'
+            '"画风偏写实，与二维厚涂要求有差异"]}'
+        )
+
+    monkeypatch.setattr(hiagent, "vlm_check", fake_vlm_check)
+    monkeypatch.setattr("app.multiview.watermark_qa_mode", lambda: "ignore_unless_occluding")
+    qa = asyncio.run(review_scene_image(
+        "frame", "二维厚涂电影院门厅", "电影院门厅", [],
+        environment_only=True,
+    ))
+
+    assert qa["watermark_detected"] is True
+    assert qa["forbidden_text_is_provider_mark"] is True
+    assert qa["hard_gate_passed"] is True
+    assert qa["status"] == "warning"
+    assert qa["issues"] == ["画风偏写实，与二维厚涂要求有差异"]
+
+
 def test_scene_reference_qa_keeps_real_overlay_text_as_hard_failure(monkeypatch) -> None:
     async def fake_vlm_check(images, expectation, *, call_meta=None):
         return (

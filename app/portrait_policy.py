@@ -51,6 +51,7 @@ _NON_OCCLUSION_TOKENS = (
     "没有遮挡", "未遮住", "不影响主体", "未影响识别",
 )
 _MINOR_CROP_TOKENS = (
+    "轻微裁切", "轻微截断", "minor crop", "slightly cropped",
     "脚尖", "脚部", "鞋尖", "鞋底", "衣摆", "裙摆", "发梢",
     "toes", "feet", "shoe tip", "hem",
 )
