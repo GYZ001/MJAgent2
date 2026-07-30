@@ -44,6 +44,26 @@ def test_catalog_integrity_and_prd_core_tools() -> None:
     assert validate_catalog_integrity() == []
 
 
+def test_storyboard_exposes_only_the_canonical_generation_route() -> None:
+    registry = get_registry()
+    assert registry.rest_bindings[
+        "POST /api/episodes/{episode_id}/storyboard"
+    ] == "storyboard.generate"
+    assert "POST /api/episodes/{episode_id}/storyboard/resume" not in registry.rest_bindings
+    assert "DELETE /api/episodes/{episode_id}/storyboard" not in registry.rest_bindings
+    assert "storyboard.clear" not in registry.commands
+    assert "storyboard.set_shot_adoption" not in registry.commands
+
+
+def test_screenplay_exposes_draft_repair_instead_of_legacy_revise() -> None:
+    registry = get_registry()
+    assert registry.rest_bindings[
+        "POST /api/episodes/{episode_id}/screenplay/repair-draft"
+    ] == "screenplay.repair_draft"
+    assert "screenplay.revise" not in registry.commands
+    assert "POST /api/episodes/{episode_id}/screenplay/revise" not in registry.rest_bindings
+
+
 def test_mutating_endpoints_fully_classified() -> None:
     report = assert_full_coverage()
     assert report["mutating_routes"] >= 50

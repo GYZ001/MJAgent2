@@ -537,8 +537,6 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
     shot_row = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
     if not shot_row:
         raise ValueError(f"镜头不存在：{shot_id}")
-    if not bool(_row_value(shot_row, "storyboard_adopted", 1)):
-        raise ValueError("本分镜已人工取消采纳，不进入视频生成")
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (shot_row["episode_id"],)).fetchone()
     project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
     if not bool(_row_value(project, "harness_engine_enabled", 1)):
@@ -561,7 +559,7 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
         except (TypeError, ValueError, json.JSONDecodeError):
             screenplay = None
     prior_rows = conn.execute(
-        "SELECT * FROM shots WHERE episode_id=? AND shot_no<? AND storyboard_adopted=1 ORDER BY shot_no",
+        "SELECT * FROM shots WHERE episode_id=? AND shot_no<? ORDER BY shot_no",
         (shot_row["episode_id"], int(shot_row["shot_no"])),
     ).fetchall()
     prior_shots = [_load_shot_model(row) for row in prior_rows]
@@ -579,7 +577,7 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
         prev_row = conn.execute("SELECT * FROM shots WHERE id=?", (after_shot_id,)).fetchone()
     if prev_row is None and int(shot_row["shot_no"]) > 1:
         prev_row = conn.execute(
-            "SELECT * FROM shots WHERE episode_id=? AND shot_no<? AND storyboard_adopted=1 ORDER BY shot_no DESC LIMIT 1",
+            "SELECT * FROM shots WHERE episode_id=? AND shot_no<? ORDER BY shot_no DESC LIMIT 1",
             (shot_row["episode_id"], int(shot_row["shot_no"])),
         ).fetchone()
     prev_shot = _load_shot_model(prev_row) if prev_row else None

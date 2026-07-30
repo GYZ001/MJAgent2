@@ -1,7 +1,6 @@
 """原子发布：Working → Published，消费完成凭证。"""
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from app.db import get_conn, now
@@ -14,31 +13,6 @@ from app.production.certificate import (
 from app.production.patch import load_screenplay_from_artifact
 from app.production.revision import get_production_revision, set_published_artifact
 from app.production.structured_issues import blocker_count, must_fix_count
-
-
-_STRUCTURAL_ISSUE_CODES = {
-    "ARTIFACT_MISSING",
-    "ARTIFACT_HASH_MISMATCH",
-    "FORMAT_CONTRACT_INVALID",
-    "ID_INVALID",
-    "INVALID_ID",
-    "REQUIRED_BINDING_MISSING",
-    "SCHEMA_INVALID",
-    "SOURCE_BINDING_MISSING",
-    "SOURCE_BINDING_INVALID",
-    "VERSION_MISMATCH",
-}
-_STRUCTURAL_ISSUE_TERMS = (
-    "artifact",
-    "schema",
-    "json",
-    "id",
-    "绑定",
-    "缺少必填",
-    "必填字段",
-    "原文证据",
-    "版本已变化",
-)
 
 
 def publish_screenplay(
@@ -86,32 +60,25 @@ def publish_screenplay(
 
     script = load_screenplay_from_artifact(artifact_id)
     conn = get_conn()
+    previous = conn.execute(
+        "SELECT screenplay_artifact_id FROM episodes WHERE id=?", (episode_id,)
+    ).fetchone()
+    previous_artifact_id = previous["screenplay_artifact_id"] if previous else None
     # 仅在此刻清空下游（修订发布）；首次无下游时 noop
     if clear_downstream:
         from app import worker
         worker.delete_episode_shots(episode_id)
-        try:
-            conn.execute(
-                "UPDATE episodes SET storyboard_outline_json=NULL, storyboard_artifact_id=NULL, "
-                "storyboard_warning=NULL, published_storyboard_artifact_id=NULL, "
-                "working_storyboard_artifact_id=NULL WHERE id=?",
-                (episode_id,),
-            )
-        except Exception:  # noqa: BLE001
-            conn.execute(
-                "UPDATE episodes SET storyboard_outline_json=NULL, storyboard_artifact_id=NULL, "
-                "storyboard_warning=NULL WHERE id=?",
-                (episode_id,),
-            )
-
-    ledger_json = json.dumps({
-        "episode_premise": script.episode_premise,
-        "events": [e.model_dump() for e in (script.events or [])],
-        "information_ledger": [i.model_dump() for i in (script.information_ledger or [])],
-        "voice_bible": [v.model_dump() for v in (script.voice_bible or [])],
-        "approved_adaptations": list(script.approved_adaptations or []),
-        "forbidden_additions": list(script.forbidden_additions or []),
-    }, ensure_ascii=False)
+        conn.execute(
+            """UPDATE episodes SET storyboard_outline_json=NULL, storyboard_artifact_id=NULL,
+                      storyboard_warning=NULL, published_storyboard_artifact_id=NULL,
+                      working_storyboard_artifact_id=NULL, active_storyboard_run_id=NULL,
+                      storyboard_production_revision_id=NULL,
+                      storyboard_completion_certificate_id=NULL,
+                      active_video_run_id=NULL, video_control_json=NULL,
+                      delivery_artifact_id=NULL, delivery_status='not_ready'
+                WHERE id=?""",
+            (episode_id,),
+        )
 
     # commit artifact approved
     conn.execute(
@@ -121,13 +88,21 @@ def publish_screenplay(
 
     conn.execute(
         "UPDATE episodes SET screenplay_json=?, screenplay_status='ready', screenplay_error=NULL, "
-        "screenplay_updated_at=?, screenplay_artifact_id=?, story_ledger_json=?, "
+        "screenplay_updated_at=?, screenplay_artifact_id=?, "
         "status='planned', script_error=NULL WHERE id=?",
-        (script.model_dump_json(), now(), artifact_id, ledger_json, episode_id),
+        (script.model_dump_json(), now(), artifact_id, episode_id),
     )
     set_published_artifact(revision_id, artifact_id, certificate_id=cert.certificate_id)
     consume_completion_certificate(cert.certificate_id)
+    conn.execute("DELETE FROM screenplay_drafts WHERE episode_id=?", (episode_id,))
     conn.commit()
+    if previous_artifact_id and previous_artifact_id != artifact_id:
+        from app.evidence import repository as evidence_repository
+        evidence_repository.invalidate_descendants(
+            previous_artifact_id,
+            f"上游剧本已由 {artifact_id} 替代",
+            exclude_ids={artifact_id},
+        )
     return {
         "episode_id": episode_id,
         "artifact_id": artifact_id,
@@ -200,20 +175,6 @@ def publish_storyboard(
     }
 
 
-def _is_structural_issue(issue) -> bool:
-    code = str(getattr(issue, "code", "") or "").upper()
-    evidence = getattr(issue, "evidence", None) or {}
-    rule_id = str(evidence.get("rule_id") or "").lower() if isinstance(evidence, dict) else ""
-    category = str(evidence.get("category") or "").lower() if isinstance(evidence, dict) else ""
-    if code in _STRUCTURAL_ISSUE_CODES or category == "structural":
-        return True
-    text = " ".join(
-        str(part or "")
-        for part in (code, rule_id, getattr(issue, "message", ""))
-    ).lower()
-    return any(term.lower() in text for term in _STRUCTURAL_ISSUE_TERMS)
-
-
 def can_issue_certificate(issues: list) -> bool:
-    structural = [issue for issue in issues if _is_structural_issue(issue)]
-    return blocker_count(structural) == 0 and must_fix_count(structural) == 0
+    """QA 是只读门禁：任何 blocker / must-fix 都必须先由 Repair 生成新候选。"""
+    return blocker_count(issues) == 0 and must_fix_count(issues) == 0

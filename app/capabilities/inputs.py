@@ -102,7 +102,6 @@ class EpisodeScopedInput(StandardCommandInput):
 
 class ScreenplayGenerateInput(StandardCommandInput):
     episode_id: str
-    force: bool = False  # 已废弃：存在 published 时服务端拒绝全量重生
     required_dialogue_lines: list[str] = Field(default_factory=list)
     required_dialogue_occurrence_ids: list[str] = Field(default_factory=list)
 
@@ -111,9 +110,9 @@ class ScreenplayResumeInput(StandardCommandInput):
     episode_id: str
 
 
-class ScreenplayReviseInput(StandardCommandInput):
+class ScreenplayRepairDraftInput(StandardCommandInput):
     episode_id: str
-    instruction: str = ""
+    screenplay: dict[str, Any]
 
 
 class ScreenplayDeleteInput(StandardCommandInput):
@@ -134,7 +133,6 @@ class ScreenplayPatchInput(StandardCommandInput):
 class ScreenplayUpdateInput(StandardCommandInput):
     episode_id: str
     screenplay: dict[str, Any]
-    force: bool = False
 
 
 class ScreenplayCancelInput(StandardCommandInput):
@@ -146,8 +144,6 @@ class ScreenplayCancelInput(StandardCommandInput):
 
 class StoryboardGenerateInput(StandardCommandInput):
     episode_id: str
-    # fresh 仅兼容旧调用；有数据时领域层拒绝覆盖，必须显式继续或先清空。
-    mode: Literal["create", "resume", "fresh"] = "create"
     preflight_token: str | None = None
 
 
@@ -175,13 +171,6 @@ class ShotUpdateInput(StandardCommandInput):
 class StoryboardConfirmInput(StandardCommandInput):
     episode_id: str
     preview_token: str | None = None
-    force: bool = False
-    force_reason: str | None = None
-
-
-class StoryboardShotAdoptionInput(StandardCommandInput):
-    shot_id: str
-    adopted: bool
 
 
 class VideoGenerateShotInput(StandardCommandInput):

@@ -50,18 +50,12 @@ _PREFERRED_LEVEL: dict[str, RepairLevel] = {
 
 _SHOT_NO_RE = re.compile(r"(?:shot_no\s*=\s*|第\s*)(\d+)\s*镜?", re.I)
 
-# 旧策略别名 → 新策略（兼容 checkpoint / 前端文案）
-_LEGACY_STRATEGY_MAP = {
-    "redo_suffix": "repair_window",
-    "replan_outline": "insert_shot",
-}
-
-
 class RepairPlan(BaseModel):
     level: RepairLevel
     strategy: RepairStrategy
     invalidation_frontier: int
     issue_codes: list[str] = Field(default_factory=list)
+    issue_messages: list[str] = Field(default_factory=list)
     fingerprint: str = ""
     reason: str = ""
     pause_state: str | None = None  # WAITING_HUMAN / PAUSED_EXTERNAL / WAITING_AUTHORIZATION
@@ -95,16 +89,15 @@ def strategy_for_level(level: RepairLevel) -> RepairStrategy:
 
 
 def normalize_strategy(strategy: str) -> RepairStrategy:
-    """把遗留 redo_suffix / replan_outline 映射为局部策略。"""
-    mapped = _LEGACY_STRATEGY_MAP.get(strategy, strategy)
+    """只接受当前局部修复策略；未知值安全收口到相邻窗口修复。"""
     allowed = {
         "normalize", "repair_current", "repair_window", "insert_shot",
         "split_shot", "split_adjacent_shot", "delete_shot", "move_shot",
         "waiting_human", "waiting_retry", "waiting_authorization",
     }
-    if mapped not in allowed:
+    if strategy not in allowed:
         return "repair_window"
-    return mapped  # type: ignore[return-value]
+    return strategy  # type: ignore[return-value]
 
 
 def _capacity_needs_adjacent_split(issues: list[Issue]) -> bool:
@@ -180,6 +173,7 @@ def route_issues(
         )
 
     codes = [issue.code for issue in normalized]
+    messages = [issue.message for issue in normalized if issue.message]
     preferred = "L0"
     for code in codes:
         lvl = preferred_level_for_code(code)
@@ -194,6 +188,7 @@ def route_issues(
             strategy="waiting_retry",
             invalidation_frontier=max(1, validated_prefix_end or next_shot_no or 1),
             issue_codes=codes,
+            issue_messages=messages,
             fingerprint=issue_fingerprint(normalized),
             reason="provider_unavailable",
             pause_state="PAUSED_EXTERNAL",
@@ -204,6 +199,7 @@ def route_issues(
             strategy="waiting_authorization",
             invalidation_frontier=max(1, validated_prefix_end or 1),
             issue_codes=codes,
+            issue_messages=messages,
             fingerprint=issue_fingerprint(normalized),
             reason="upstream_version_changed",
             pause_state="WAITING_AUTHORIZATION",
@@ -228,6 +224,7 @@ def route_issues(
                     next_shot_no=next_shot_no,
                 ),
                 issue_codes=codes,
+                issue_messages=messages,
                 fingerprint=fp,
                 reason="stalled_after_upgrade",
                 pause_state="WAITING_HUMAN",
@@ -249,6 +246,7 @@ def route_issues(
             strategy=strategy,
             invalidation_frontier=frontier,
             issue_codes=codes,
+            issue_messages=messages,
             fingerprint=fp,
             reason=f"route:{strategy}:capacity",
             touched_shot_nos=touched,
@@ -263,6 +261,7 @@ def route_issues(
         strategy=strategy,
         invalidation_frontier=frontier,
         issue_codes=codes,
+        issue_messages=messages,
         fingerprint=fp,
         reason=f"route:{level}:{strategy}",
         touched_shot_nos=touched,

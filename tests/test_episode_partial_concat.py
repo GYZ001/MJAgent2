@@ -134,7 +134,7 @@ def test_concat_timeout_preserves_previous_final_video(tmp_path, monkeypatch) ->
     assert final_path.read_bytes() == b"previous-final"
 
 
-def test_cancel_adoption_keeps_candidate_and_marks_shot_to_skip(tmp_path, monkeypatch) -> None:
+def test_cancel_video_adoption_keeps_candidate_and_marks_shot_pending(tmp_path, monkeypatch) -> None:
     conn = _database()
     video_path = tmp_path / "candidate.mp4"
     video_path.write_bytes(b"video")
@@ -160,57 +160,6 @@ def test_cancel_adoption_keeps_candidate_and_marks_shot_to_skip(tmp_path, monkey
     assert video_path.exists()
     assert invalidated == ["e"]
     assert audits
-
-
-def test_cancel_storyboard_adoption_hides_shot_from_generation_and_cinema(
-    tmp_path, monkeypatch,
-) -> None:
-    conn = _database()
-    project_root = tmp_path / "projects"
-    piece = project_root / "p" / "episodes" / "1" / "shots" / "shot-1.mp4"
-    piece.parent.mkdir(parents=True)
-    piece.write_bytes(b"video")
-    _version(conn, shot_no=1, path=piece, adopted=True)
-    conn.commit()
-    invalidated: list[str] = []
-    stopped: list[str] = []
-
-    monkeypatch.setattr(api, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker, "get_conn", lambda: conn)
-    monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
-    monkeypatch.setattr(worker.config, "PROJECTS_DIR", project_root)
-    monkeypatch.setattr(api.worker, "invalidate_episode_final", invalidated.append)
-    monkeypatch.setattr(
-        api.worker,
-        "stop_shot_video_tasks",
-        lambda shot_id: stopped.append(shot_id) or {"shot_id": shot_id},
-    )
-    monkeypatch.setattr(api, "log_provider_call", lambda *_args, **_kwargs: None)
-
-    result = api._set_storyboard_shot_adoption_core(
-        "s1", {"adopted": False, "reason": "本镜不进入成片"},
-    )
-
-    assert result["storyboard_adopted"] is False
-    assert result["candidate_media_preserved"] is True
-    assert conn.execute("SELECT COUNT(*) FROM shot_versions WHERE id='v1'").fetchone()[0] == 1
-    assert stopped == ["s1"]
-    assert invalidated == ["e"]
-    assert worker.episode_mix_status("e")["shots_total"] == 2
-    try:
-        worker.enqueue_shot("s1")
-    except ValueError as exc:
-        assert "取消采纳" in str(exc)
-    else:  # pragma: no cover
-        raise AssertionError("未采纳分镜不得进入生成队列")
-
-
-def test_new_storyboard_shots_are_adopted_by_default() -> None:
-    conn = _database()
-    values = conn.execute(
-        "SELECT storyboard_adopted FROM shots ORDER BY shot_no",
-    ).fetchall()
-    assert [row[0] for row in values] == [1, 1, 1]
 
 
 def test_adopt_version_persists_playback_rate_and_invalidates_previous_mix(

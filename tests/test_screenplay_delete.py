@@ -70,10 +70,8 @@ def _db(tmp_path, monkeypatch):
 def test_script_view_lists_all_source_dialogues_for_multi_select() -> None:
     detail = api.episode_detail("e1", view="script")
 
-    assert detail["source_dialogue_lines"] == [
-        "斗之力，三段！",
-        "只有三段？",
-        "结果无误。",
+    assert [item["text"] for item in detail["source_dialogue_occurrences"]] == [
+        "斗之力，三段！", "只有三段？", "结果无误。",
     ]
     assert detail["required_dialogue_lines"] == ["斗之力，三段！", "只有三段？"]
 
@@ -108,7 +106,7 @@ def test_failed_working_baseline_can_be_deleted_before_any_version_is_published(
     conn.execute(
         """UPDATE episodes SET
                screenplay_json=NULL,
-               screenplay_status='warning',
+               screenplay_status='repairing',
                screenplay_error='WAITING_INPUT: 局部修复失败',
                screenplay_artifact_id=NULL,
                published_screenplay_artifact_id=NULL,

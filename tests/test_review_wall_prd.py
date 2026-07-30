@@ -11,6 +11,12 @@ from fastapi import HTTPException
 from app import api, db, worker
 
 
+def _published_screenplay_json() -> str:
+    from tests.test_screenplay_edit_save import _valid_script
+
+    return _valid_script().model_dump_json()
+
+
 def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -24,9 +30,11 @@ def _conn() -> sqlite3.Connection:
     conn.execute(
         """INSERT INTO episodes(
                id,project_id,episode_no,title,status,screenplay_status,
+               screenplay_json,
                screenplay_artifact_id,storyboard_artifact_id,
                published_screenplay_artifact_id,published_storyboard_artifact_id,created_at
-           ) VALUES('e','p',1,'E','confirmed','ready','screenplay-1','board-1','screenplay-1','board-1',0)"""
+           ) VALUES('e','p',1,'E','confirmed','ready',?,'screenplay-1','board-1','screenplay-1','board-1',0)""",
+        (_published_screenplay_json(),),
     )
     conn.execute(
         """INSERT INTO shots(

@@ -8,7 +8,7 @@
   .\\.venv\\Scripts\\python.exe -m pytest tests/test_golden_storyboard_e2e.py -m golden -s
 
 验收（PRD §18.3）：
-- auto_confirm 跑通并确认
+- Supervisor 跑通后执行显式人工确认
 - 不产生付费视频
 - 写入 golden/runs/ 报表（含 renderability 对照）
 """
@@ -28,7 +28,7 @@ def _live_enabled() -> bool:
 
 @pytest.mark.golden
 @pytest.mark.skipif(not _live_enabled(), reason="需 MANJU_GOLDEN_LIVE=1 + 真实 LLM 密钥")
-def test_golden_yunluo_ep1_auto_confirm_live():
+def test_golden_yunluo_ep1_manual_confirm_live():
     from scripts.run_golden_storyboard import run_golden
 
     report = run_golden(
@@ -70,7 +70,7 @@ def test_golden_report_scaffold_offline(tmp_path, monkeypatch):
         episode_id="ep_test",
         title="陨落的天才",
         score=score,
-        supervisor={"phase": "SUCCEEDED", "outcome": "SUCCEEDED_CONFIRMED"},
+        supervisor={"phase": "SUCCEEDED", "outcome": "SUCCEEDED_READY_FOR_CONFIRM"},
         extra={"confirmed": True, "video_jobs_started": 0},
         out_dir=tmp_path / "golden" / "runs",
     )

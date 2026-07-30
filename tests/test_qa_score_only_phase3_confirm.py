@@ -95,9 +95,7 @@ def test_confirm_preview_passes_with_low_quality_business_warnings(confirm_db, m
     assert preview["score_only"]["runtime_blocking"] is False
 
 
-def test_force_confirm_is_available_only_after_complete_board_with_repair_issues(
-    confirm_db, monkeypatch,
-):
+def test_hard_gate_failure_cannot_be_overridden(confirm_db, monkeypatch):
     def repairable_evaluation(_ep, board, *_args, **_kwargs):
         return ConfirmationEvaluation(
             passed=False,
@@ -116,29 +114,19 @@ def test_force_confirm_is_available_only_after_complete_board_with_repair_issues
 
     detail = caught.value.detail
     assert detail["hard_gates"]["passed"] is False
-    assert detail["force_confirmation"]["allowed"] is True
-    assert detail["preview_token"].startswith("sbpv_")
+    assert "force_confirmation" not in detail
+    assert "preview_token" not in detail
 
-    with pytest.raises(ValueError, match="未通过结构完整性门禁"):
-        video_ops.confirm_episode_core("e1", preview_token=detail["preview_token"])
+    with pytest.raises(video_ops.HTTPException) as confirm_error:
+        video_ops.confirm_episode_core("e1", preview_token=None)
+    assert confirm_error.value.status_code == 428
 
-    result = video_ops.confirm_episode_core(
-        "e1",
-        preview_token=detail["preview_token"],
-        force=True,
-        force_reason="接受本镜构图风险，先进入生成台验证",
-    )
-
-    assert result["confirmed"] is True
-    assert result["forced"] is True
-    decision = confirm_db.execute(
-        "SELECT decision,reason FROM gate_decisions WHERE gate_key='storyboard'",
-    ).fetchone()
-    assert decision["decision"] == "approve_with_risk"
-    assert "接受本镜构图风险" in decision["reason"]
+    assert confirm_db.execute(
+        "SELECT COUNT(*) AS c FROM gate_decisions WHERE gate_key='storyboard'",
+    ).fetchone()["c"] == 0
 
 
-def test_can_issue_certificate_ignores_qa_quality_blockers():
+def test_screenplay_certificate_requires_all_runtime_gate_issues_to_be_fixed():
     qa_issue = Issue(
         code="BUSINESS_RULE_FAILED",
         severity=IssueSeverity.BLOCKER,
@@ -156,5 +144,5 @@ def test_can_issue_certificate_ignores_qa_quality_blockers():
         repairable=True,
     )
 
-    assert can_issue_certificate([qa_issue]) is True
+    assert can_issue_certificate([qa_issue]) is False
     assert can_issue_certificate([structural_issue]) is False

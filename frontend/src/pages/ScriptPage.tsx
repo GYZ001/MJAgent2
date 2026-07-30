@@ -3,6 +3,7 @@ import {
   api,
   DialogueOccurrence,
   EpisodeScreenplay,
+  KeyDialogueChain,
   PlotSpine,
   PlotSpineBeat,
   ScreenplayState,
@@ -23,7 +24,7 @@ type EditorSection = 'spine' | 'body' | 'scenes' | 'evidence'
 type SaveState = 'idle' | 'saving' | 'saved' | 'error'
 
 type ActionPreview = {
-  kind: 'screenplay' | 'storyboard-create' | 'storyboard-resume' | 'screenplay-save'
+  kind: 'screenplay' | 'screenplay-save'
   title: string
   data: Record<string, any>
   idempotencyKey: string
@@ -107,7 +108,12 @@ export default function ScriptPage() {
   const [baselineVersion, setBaselineVersion] = useState<string | null>(null)
   const [dirty, setDirty] = useState(false)
   const [draftSaveState, setDraftSaveState] = useState<SaveState>('idle')
-  const [recoverable, setRecoverable] = useState<{ content?: EpisodeScreenplay; constraints?: { occurrence_ids?: string[] }; baseline?: string | null } | null>(null)
+  const [recoverable, setRecoverable] = useState<{
+    content?: EpisodeScreenplay
+    constraints?: { occurrence_ids?: string[] }
+    baseline?: string | null
+    saved_at?: number
+  } | null>(null)
   const [selectedOccurrenceIds, setSelectedOccurrenceIds] = useState<string[] | null>(null)
   const [manuscriptExpanded, setManuscriptExpanded] = useState(false)
   const [detailsExpanded, setDetailsExpanded] = useState(false)
@@ -118,6 +124,7 @@ export default function ScriptPage() {
   const [conflict, setConflict] = useState<Record<string, any> | null>(null)
   const [discardDraftOpen, setDiscardDraftOpen] = useState(false)
   const [stopConfirmOpen, setStopConfirmOpen] = useState(false)
+  const [qaFailure, setQaFailure] = useState<{ score?: number; errors: string[] } | null>(null)
   const [targetDurationDraft, setTargetDurationDraft] = useState(50)
   const historyRef = useRef<EpisodeScreenplay[]>([])
   const redoRef = useRef<EpisodeScreenplay[]>([])
@@ -134,7 +141,6 @@ export default function ScriptPage() {
     `episode.${episodeId}.screenplay`,
     ep?.screenplay_production?.task_active ?? ep?.screenplay_status === 'running',
   )
-  const storyboardTimer = useTaskTimer(`episode.${episodeId}.storyboard`, ep?.status === 'scripting')
 
   const occurrences = ep?.source_dialogue_occurrences ?? []
   const serverOccurrenceIds = ep?.required_dialogue_occurrence_ids ?? []
@@ -163,11 +169,7 @@ export default function ScriptPage() {
 
   const screenplayTaskActive = ep?.screenplay_production?.task_active ?? ep?.screenplay_status === 'running'
   const canResumeRepair = ep?.screenplay_production?.can_resume_repair
-    ?? (ep?.screenplay_status === 'repairing' || ep?.screenplay_status === 'warning')
-  const legacyDialoguePolicyRecovery = Boolean(
-    ep?.screenplay_production?.legacy_dialogue_policy_recovery_available,
-  )
-
+    ?? ep?.screenplay_status === 'repairing'
   const script = draft ?? ep?.screenplay ?? null
   const editing = draft !== null
 
@@ -210,11 +212,17 @@ export default function ScriptPage() {
     api.get(`/episodes/${ep.id}/screenplay/draft`).then((result: any) => {
       if (cancelled || !result?.draft) return
       const server = result.draft
-      setRecoverable(current => current ?? {
+      const candidate = {
         content: server.content,
         constraints: server.constraints,
         baseline: server.baseline_artifact_id,
-      })
+        saved_at: Number(server.updated_at ?? 0) * 1000,
+      }
+      setRecoverable(current => (
+        !current || Number(candidate.saved_at ?? 0) > Number(current.saved_at ?? 0)
+          ? candidate
+          : current
+      ))
     }).catch(() => { /* 本地草稿仍可恢复 */ })
     return () => { cancelled = true }
   }, [ep, localDraftKey])
@@ -279,6 +287,7 @@ export default function ScriptPage() {
       return updater(cloneScript(current)!)
     })
     setDirty(true)
+    setQaFailure(null)
   }
 
   const undo = () => {
@@ -312,6 +321,7 @@ export default function ScriptPage() {
     redoRef.current = []
     setDirty(false)
     setConflict(null)
+    setQaFailure(null)
   }
 
   const clearWorkingDraft = async () => {
@@ -321,6 +331,7 @@ export default function ScriptPage() {
     setSelectedOccurrenceIds(null)
     setRecoverable(null)
     setConflict(null)
+    setQaFailure(null)
     historyRef.current = []
     redoRef.current = []
     if (localDraftKey) localStorage.removeItem(localDraftKey)
@@ -362,6 +373,11 @@ export default function ScriptPage() {
       const typed = saveError as Error & { status?: number; detail?: any }
       if (typed.status === 409 && ['screenplay_version_conflict', 'version_conflict'].includes(typed.detail?.code)) {
         setConflict(typed.detail)
+      } else if (typed.status === 422 && typed.detail?.code === 'screenplay_qa_failed') {
+        setQaFailure({
+          score: typed.detail.score,
+          errors: typed.detail.errors ?? typed.detail.issues?.map((item: any) => item.message) ?? [typed.message],
+        })
       } else if (typed.status === 403 && typed.message.includes('已取消操作')) {
         toast('未执行发布，工作草稿已保留')
       } else {
@@ -382,22 +398,6 @@ export default function ScriptPage() {
         title: '首次生成剧本预检',
         data,
         idempotencyKey: stableKey(`screenplay:${ep.id}`),
-      })
-    } catch (previewError) {
-      toast((previewError as Error).message, true)
-    } finally { setBusy(false) }
-  }
-
-  const openStoryboardPreview = async (mode: 'create' | 'resume') => {
-    if (!ep || dirty) return
-    setBusy(true)
-    try {
-      const data = await api.post(`/episodes/${ep.id}/storyboard/preflight`, { mode })
-      setPreview({
-        kind: mode === 'resume' ? 'storyboard-resume' : 'storyboard-create',
-        title: mode === 'resume' ? '继续生成分镜预检' : '首次生成分镜预检',
-        data,
-        idempotencyKey: stableKey(`storyboard:${ep.id}:${mode}`),
       })
     } catch (previewError) {
       toast((previewError as Error).message, true)
@@ -426,13 +426,6 @@ export default function ScriptPage() {
       }
       return
     }
-    storyboardTimer.start()
-    const resume = current.kind === 'storyboard-resume'
-    await run(() => api.post(`/episodes/${ep.id}/storyboard${resume ? '/resume' : ''}`, {
-      preflight_token: current.data.preview_token,
-      idempotency_key: current.idempotencyKey,
-    }), resume ? '已从安全恢复点继续分镜' : '分镜生成任务已受理')
-      .catch(() => storyboardTimer.clear())
   }
 
   const resumeRepair = async () => {
@@ -475,6 +468,11 @@ export default function ScriptPage() {
       const typed = previewError as Error & { status?: number; detail?: any }
       if (typed.status === 409 && ['screenplay_version_conflict', 'version_conflict'].includes(typed.detail?.code)) {
         setConflict(typed.detail)
+      } else if (typed.status === 422 && typed.detail?.code === 'screenplay_qa_failed') {
+        setQaFailure({
+          score: typed.detail.score,
+          errors: typed.detail.errors ?? typed.detail.issues?.map((item: any) => item.message) ?? [typed.message],
+        })
       } else {
         toast(typed.message, true)
       }
@@ -488,10 +486,26 @@ export default function ScriptPage() {
       if (result) {
         await clearWorkingDraft()
         screenplayTimer.clear()
-        storyboardTimer.clear()
         toast('当前剧本及下游已删除；必保留台词已保留')
       }
     } catch { /* run 已呈现结果 */ }
+  }
+
+  const repairDraft = async () => {
+    if (!ep || !draft) return
+    screenplayTimer.start()
+    const result = await run(() => api.post(`/episodes/${ep.id}/screenplay/repair-draft`, {
+      screenplay: draft,
+      expected_version: baselineVersion,
+      idempotency_key: stableKey(`screenplay-repair-draft:${ep.id}`),
+    }), '工作草稿已进入独立修复，完成后会重新执行 QA')
+      .catch(() => screenplayTimer.clear())
+    if (!result) return
+    setQaFailure(null)
+    setDraft(null)
+    setDirty(false)
+    setBaselineVersion(null)
+    localStorage.removeItem(localDraftKey)
   }
 
   const validateDraft = (value: EpisodeScreenplay | null) => {
@@ -509,6 +523,7 @@ export default function ScriptPage() {
     ;(value.key_lines ?? []).forEach((line, index) => {
       if (line && !value.full_script_text?.includes(line.replace(/^.{1,12}[：:]/, ''))) sections.evidence.push(`主线台词 ${index + 1} 在正文中不可追溯`)
     })
+    if (!(value.dialogue_chains ?? []).length) sections.evidence.push('主线对白链不能为空')
     return sections
   }
 
@@ -577,14 +592,12 @@ export default function ScriptPage() {
     )
   }
 
-  const state: Pick<ScreenplayState, 'code' | 'message' | 'recommended_action' | 'publish_blocked' | 'storyboard_running' | 'reason' | 'checkpoint_shot'> = ep.screenplay_state ?? {
+  const state: Pick<ScreenplayState, 'code' | 'message' | 'recommended_action' | 'publish_blocked' | 'reason'> = ep.screenplay_state ?? {
     code: 'unknown',
     message: '状态同步中',
     recommended_action: 'refresh',
     publish_blocked: true,
-    storyboard_running: false,
     reason: '',
-    checkpoint_shot: null,
   }
   const screenplayGenerateDisabledReason = busy
     ? '正在处理上一项操作'
@@ -595,11 +608,6 @@ export default function ScriptPage() {
     ? '正在处理上一项操作'
     : totalErrors > 0
       ? `工作草稿还有 ${totalErrors} 项需要修正`
-      : ''
-  const storyboardGenerateDisabledReason = busy
-    ? '正在处理上一项操作'
-    : dirty
-      ? '当前有未发布修改，请先发布或放弃工作草稿'
       : ''
   const dialogueSelectionDisabledReason = busy
     ? '正在处理上一项操作'
@@ -633,18 +641,18 @@ export default function ScriptPage() {
         return <button className="btn primary" disabled={busy}
           aria-label={busy ? '继续局部修复，暂不可用：正在处理上一项操作' : '继续局部修复'}
           title={busy ? '正在处理上一项操作' : undefined} onClick={resumeRepair}>
-          {legacyDialoguePolicyRecovery ? '按当前规则恢复并继续' : '继续局部修复'}
+          继续局部修复
         </button>
       case 'generate_storyboard':
-        return <button className="btn primary" disabled={Boolean(storyboardGenerateDisabledReason)}
-          aria-label={storyboardGenerateDisabledReason ? `首次生成分镜，暂不可用：${storyboardGenerateDisabledReason}` : '首次生成分镜'}
-          title={storyboardGenerateDisabledReason || '生成前会预览范围和费用'} onClick={() => openStoryboardPreview('create')}>首次生成分镜</button>
       case 'resume_storyboard':
-        return <button className="btn primary" disabled={Boolean(storyboardGenerateDisabledReason)}
-          aria-label={storyboardGenerateDisabledReason ? `继续生成分镜，暂不可用：${storyboardGenerateDisabledReason}` : `继续生成分镜，从第 ${(state.checkpoint_shot ?? ep.shot_count ?? 0) + 1} 镜开始`}
-          title={storyboardGenerateDisabledReason || '继续前会预览恢复范围'} onClick={() => openStoryboardPreview('resume')}>继续生成分镜（从第 {(state.checkpoint_shot ?? ep.shot_count ?? 0) + 1} 镜）</button>
       case 'view_storyboard':
-        return <button className="btn primary" onClick={() => go('board', projectId, ep.id)}>查看分镜进度</button>
+        return <button className="btn primary" disabled={dirty}
+          title={dirty ? '请先发布或放弃当前工作草稿' : '分镜的生成、续跑和确认统一在分镜台完成'}
+          onClick={() => go('board', projectId, ep.id)}>进入分镜台</button>
+      case 'view_save_progress':
+        return <button className="btn primary" disabled>正在安全停止下游…</button>
+      case 'view_cancel_progress':
+        return <button className="btn primary" disabled>正在等待任务停止…</button>
       default:
         return <button className="btn primary" disabled={busy} onClick={() => refresh()}>刷新状态</button>
     }
@@ -706,7 +714,6 @@ export default function ScriptPage() {
           <span className="screenplay-row-spacer" />
           {ep.screenplay_evidence && <EvidenceDrawer evidence={ep.screenplay_evidence} label="剧本证据" />}
           <TaskTimer label="剧本" timer={screenplayTimer} />
-          <TaskTimer label="分镜" timer={storyboardTimer} />
         </div>
 
         {recoverable && !editing && (
@@ -828,9 +835,15 @@ export default function ScriptPage() {
                 待处理 {ep.screenplay_production.open_issue_count ?? 0} 项
               </div>
             )}
-            {legacyDialoguePolicyRecovery && (
-              <div className="kv"><b>兼容恢复</b>将恢复旧数量上限裁掉的对白链，再按当前时长规则复验</div>
-            )}
+          </div>
+        )}
+        {qaFailure && (
+          <div className="editor-validation screenplay-qa-failure" role="alert">
+            <b>QA 未通过{qaFailure.score != null ? ` · ${qaFailure.score} 分` : ''}</b>
+            {qaFailure.errors.slice(0, 6).map(item => <span key={item}>{item}</span>)}
+            <button className="btn primary" type="button" disabled={busy} onClick={() => void repairDraft()}>
+              进入独立修复并重新 QA
+            </button>
           </div>
         )}
         {ep.screenplay_error && (
@@ -954,6 +967,14 @@ export default function ScriptPage() {
                 <>
                   <li>原文 {preview.data.input?.source_chars ?? '—'} 字，选中 {preview.data.selected_count ?? 0} 处台词</li>
                   <li>口播估算 {preview.data.selected_seconds ?? 0}s / 目标 {preview.data.target_duration_s}s</li>
+                  <li>
+                    疑似新增人物 {preview.data.cast_impact?.candidate_count ?? 0} 名；
+                    剧本阶段只补人物文字卡，不生成定妆图片
+                  </li>
+                  <li>
+                    定妆资产预计最多 {preview.data.cast_impact?.portrait_asset_stage?.estimated_images ?? 0} 张，
+                    将在独立资产环节确认后补齐
+                  </li>
                   <li>{preview.data.estimate_note}</li>
                 </>
               ) : preview.kind === 'screenplay-save' ? (
@@ -964,25 +985,14 @@ export default function ScriptPage() {
                   ))}
                   <li>{preview.data.impact}</li>
                 </>
-              ) : (
-                <>
-                  <li>安全恢复点：{preview.data.checkpoint?.available ? `从第 ${preview.data.checkpoint.resume_from_shot} 镜继续` : '无'}</li>
-                  <li>安全恢复点：已保留前 {preview.data.kept_validated_shots ?? 0} 镜</li>
-                  <li>{preview.data.impact}</li>
-                  <li>{preview.data.estimate_note}</li>
-                </>
-              )}
+              ) : null}
             </ul>
             <div className="dialog-actions">
               <button className="btn" onClick={() => setPreview(null)}>取消（不执行）</button>
               <button className="btn primary" disabled={Boolean(preview.data.hard_exceeded)} onClick={executePreview}>
                 {preview.kind === 'screenplay'
                   ? '启动首版剧本生成'
-                  : preview.kind === 'storyboard-resume'
-                    ? '继续生成分镜'
-                    : preview.kind === 'screenplay-save'
-                      ? (preview.data.unchanged ? '确认无变更' : '确认发布')
-                      : '首次生成分镜'}
+                  : (preview.data.unchanged ? '确认无变更' : '确认发布')}
               </button>
             </div>
           </section>
@@ -1149,7 +1159,17 @@ function ScreenplayEditor({
           <div><label className="f">阻力<textarea rows={2} value={draft.obstacle ?? ''} onChange={event => updateScript({ obstacle: event.target.value })} /></label></div>
           <div><label className="f">失败代价<textarea rows={2} value={draft.stakes ?? ''} onChange={event => updateScript({ stakes: event.target.value })} /></label></div>
           <div className="full"><label className="f">完整剧本正文 · {(draft.full_script_text ?? '').length.toLocaleString()} 字<textarea rows={24} value={draft.full_script_text ?? ''} onChange={event => updateScript({ full_script_text: event.target.value })} /></label></div>
-          <div className="full"><label className="f">主线台词（每行一条）<textarea rows={5} value={(draft.key_lines ?? []).join('\n')} onChange={event => updateScript({ key_lines: splitLines(event.target.value) })} /></label></div>
+          <div className="full">
+            <div className="structured-section-head">
+              <b>主线对白链</b>
+              <span>对白链是权威数据；主线台词由系统按话轮顺序自动生成。</span>
+            </div>
+            <DialogueChainsEditor
+              chains={draft.dialogue_chains ?? []}
+              onChange={dialogue_chains => updateScript({ dialogue_chains })}
+            />
+          </div>
+          <div className="full"><label className="f">派生主线台词（只读）<textarea readOnly rows={5} value={(draft.dialogue_chains ?? []).flatMap(chain => chain.turns ?? []).filter(turn => turn.speaker.trim() && turn.line.trim()).map(turn => `${turn.speaker}：${turn.line}`).join('\n')} /></label></div>
           <div className="full"><label className="f">主线剧情点（每行一条）<textarea rows={5} value={(draft.key_plot_points ?? []).join('\n')} onChange={event => updateScript({ key_plot_points: splitLines(event.target.value) })} /></label></div>
         </div>
       )}
@@ -1193,6 +1213,73 @@ function ScreenplayEditor({
       )}
       </div>
     </section>
+  )
+}
+
+function DialogueChainsEditor({
+  chains,
+  onChange,
+}: {
+  chains: KeyDialogueChain[]
+  onChange: (chains: KeyDialogueChain[]) => void
+}) {
+  const updateChain = (index: number, patch: Partial<KeyDialogueChain>) => {
+    onChange(chains.map((chain, chainIndex) => chainIndex === index ? { ...chain, ...patch } : chain))
+  }
+  return (
+    <div className="structured-list dialogue-chain-list">
+      {chains.map((chain, chainIndex) => (
+        <article className="structured-row" key={`${chain.chain_id}-${chainIndex}`}>
+          <header>
+            <b>{chain.chain_id || `DC${chainIndex + 1}`}</b>
+            <StructuredListActions
+              index={chainIndex}
+              length={chains.length}
+              onMove={direction => onChange(moveItem(chains, chainIndex, direction))}
+              onDelete={() => onChange(chains.filter((_, index) => index !== chainIndex))}
+            />
+          </header>
+          <div className="structured-fields">
+            <label>对白链编号<input value={chain.chain_id} onChange={event => updateChain(chainIndex, { chain_id: event.target.value })} /></label>
+            <label>同一话题<input value={chain.topic} onChange={event => updateChain(chainIndex, { topic: event.target.value })} /></label>
+          </div>
+          <div className="structured-list compact">
+            {(chain.turns ?? []).map((turn, turnIndex) => (
+              <article className="structured-row" key={`${chain.chain_id}-turn-${turnIndex}`}>
+                <header>
+                  <b>话轮 {turnIndex + 1}</b>
+                  <StructuredListActions
+                    index={turnIndex}
+                    length={chain.turns.length}
+                    onMove={direction => updateChain(chainIndex, { turns: moveItem(chain.turns, turnIndex, direction) })}
+                    onDelete={() => updateChain(chainIndex, { turns: chain.turns.filter((_, index) => index !== turnIndex) })}
+                  />
+                </header>
+                <div className="structured-fields">
+                  <label>说话人<input value={turn.speaker} onChange={event => updateChain(chainIndex, { turns: chain.turns.map((item, index) => index === turnIndex ? { ...item, speaker: event.target.value } : item) })} /></label>
+                  <label>功能
+                    <select value={turn.function} onChange={event => updateChain(chainIndex, { turns: chain.turns.map((item, index) => index === turnIndex ? { ...item, function: event.target.value } : item) })}>
+                      <option value="trigger">触发</option><option value="announcement">宣布</option>
+                      <option value="question">提问</option><option value="response">回应</option>
+                      <option value="decision">决定</option><option value="statement">陈述</option>
+                    </select>
+                  </label>
+                  <label className="wide">剧本台词<textarea rows={2} value={turn.line} onChange={event => updateChain(chainIndex, { turns: chain.turns.map((item, index) => index === turnIndex ? { ...item, line: event.target.value } : item) })} /></label>
+                  <label className="wide">原文台词依据<textarea rows={2} value={turn.source_text} onChange={event => updateChain(chainIndex, { turns: chain.turns.map((item, index) => index === turnIndex ? { ...item, source_text: event.target.value } : item) })} /></label>
+                </div>
+              </article>
+            ))}
+          </div>
+          <button className="btn small" type="button" onClick={() => updateChain(chainIndex, {
+            turns: [...(chain.turns ?? []), { speaker: '', line: '', function: 'statement', source_text: '' }],
+          })}>新增话轮</button>
+        </article>
+      ))}
+      <button className="btn" type="button" onClick={() => onChange([
+        ...chains,
+        { chain_id: `DC${chains.length + 1}`, topic: '', turns: [] },
+      ])}>新增对白链</button>
+    </div>
   )
 }
 

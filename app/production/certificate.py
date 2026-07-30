@@ -66,12 +66,7 @@ def issue_completion_certificate(
     must_fix_issues: int = 0,
     production_revision_id: str | None = None,
 ) -> CompletionCertificate:
-    """签发完成凭证。
-
-    Phase 3 QA is score-only: caller-provided QA blocker/must-fix counts are
-    retained as report metadata and must not prevent issuance. Structural
-    binding checks below remain hard requirements.
-    """
+    """签发完成凭证；剧本必须由同一 Artifact 的只读 QA runtime gate 背书。"""
     if not artifact_id or not artifact_hash:
         raise ValueError("完成凭证必须绑定 artifact_id 与 artifact_hash")
 
@@ -82,6 +77,31 @@ def issue_completion_certificate(
     stored_hash = art.get("content_hash") or evidence_repository.content_hash(art.get("content"))
     if stored_hash != artifact_hash:
         raise ValueError("artifact_hash 与存储内容不一致，拒绝签发凭证")
+    evaluation_ids = list(evaluation_ids or [])
+    if kind == "screenplay":
+        if blockers or must_fix_issues:
+            raise ValueError("剧本仍有 blocker / must-fix，拒绝签发完成凭证")
+        if not evaluation_ids:
+            raise ValueError("剧本完成凭证必须绑定 QA Evaluation")
+        marks = ",".join("?" for _ in evaluation_ids)
+        rows = get_conn().execute(
+            f"""SELECT id,artifact_id,status,hard_gate_passed,evaluation_role,runtime_blocking
+                  FROM evaluations WHERE id IN ({marks})""",
+            evaluation_ids,
+        ).fetchall()
+        by_id = {row["id"]: row for row in rows}
+        if len(by_id) != len(set(evaluation_ids)):
+            raise ValueError("剧本完成凭证引用了不存在的 QA Evaluation")
+        runtime_gate_passed = any(
+            row["artifact_id"] == artifact_id
+            and row["status"] == "passed"
+            and bool(row["hard_gate_passed"])
+            and row["evaluation_role"] == "runtime_gate"
+            and bool(row["runtime_blocking"])
+            for row in rows
+        )
+        if not runtime_gate_passed:
+            raise ValueError("当前 Artifact 没有通过只读 QA runtime gate")
 
     ensure_completion_certificates_table()
     certificate_id = new_id("cert")
@@ -95,7 +115,7 @@ def issue_completion_certificate(
         input_fingerprint=input_fingerprint,
         contract_version=contract_version,
         qa_profile_version=qa_profile_version,
-        evaluation_ids=list(evaluation_ids or []),
+        evaluation_ids=evaluation_ids,
         blockers=max(0, int(blockers or 0)),
         must_fix_issues=max(0, int(must_fix_issues or 0)),
         issued_at=issued_at,

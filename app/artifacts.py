@@ -516,7 +516,7 @@ def _adopted_video_paths(episode_id: str) -> list[tuple[int, str]]:
         """SELECT s.shot_no, v.video_path
            FROM shots s
            JOIN shot_versions v ON v.id = s.adopted_version_id
-           WHERE s.episode_id=? AND s.storyboard_adopted=1
+           WHERE s.episode_id=?
              AND v.status='succeeded' AND v.video_path IS NOT NULL
            ORDER BY s.shot_no""",
         (episode_id,)).fetchall()

@@ -5,9 +5,9 @@ import hashlib
 import re
 from typing import Any
 
-from app.db import get_conn, now
+from app.db import get_conn, get_setting, now
 from app.evidence import repository as evidence_repository
-from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
+from app.harness.types import Evaluation, EvidenceArtifact, Issue
 from app.production.grant import assert_grant_allows, issue_production_grant
 from app.production.metrics import (
     record_activation,
@@ -43,29 +43,12 @@ from app.renderability import OVERDETAIL_TERMS
 
 MAX_REPAIR_ACTIVATION_PATCHES = 12
 MAX_STRATEGY_ATTEMPTS_PER_ISSUE = 3
-SCREENPLAY_REPAIR_PLANNER_VERSION = "screenplay-repair-8"
+SCREENPLAY_REPAIR_PLANNER_VERSION = "screenplay-repair-9"
 
 _SCENE_STORY_FUNCTION_CODES = {
     "SCENE_STORY_FUNCTION_TOO_SHORT",
 }
 _SCENE_NUMBER_RE = re.compile(r"scene_outline\s*第\s*(\d+)\s*场|/scene_blocks/SC(\d+)", re.I)
-
-
-def _score_only_screenplay_issues(issues: list[Issue]) -> list[Issue]:
-    score_only: list[Issue] = []
-    for issue in issues:
-        evidence = {
-            **(issue.evidence or {}),
-            "must_fix": False,
-            "evaluation_role": "score_only",
-            "runtime_blocking": False,
-        }
-        score_only.append(issue.model_copy(update={
-            "severity": IssueSeverity.WARNING,
-            "evidence": evidence,
-            "repairable": False,
-        }))
-    return score_only
 
 
 def _eval_id_from_create(evaluation_row: dict[str, Any] | str | None) -> str:
@@ -90,8 +73,6 @@ def _patch_strategy_key(ops: list[PatchOperation]) -> str:
         return "rederive"
     if op.op == "normalize_overdetail":
         return "normalize_overdetail"
-    if op.op == "prune_dialogue_budget":
-        return "prune_dialogue_budget"
     if op.op == "split_dialogue_chain_by_scene":
         return f"split_dialogue_chain_{(op.target or {}).get('chain_id') or 'unknown'}"
     if kind == "metadata":
@@ -120,17 +101,6 @@ def _strategy_attempt_count(entries: list[str]) -> int:
     )
 
 
-def _used_retired_dialogue_budget_policy(
-    history: dict[str, list[str]] | None,
-) -> bool:
-    return any(
-        entry == "prune_dialogue_budget"
-        or entry.startswith("prune_dialogue_budget:")
-        for entries in (history or {}).values()
-        for entry in (entries or [])
-    )
-
-
 def run_screenplay_qa(
     script: EpisodeScreenplay,
     *,
@@ -153,14 +123,11 @@ def run_screenplay_qa(
         required_dialogue_lines=episode.get("required_dialogue_lines") or [],
     )
     messages.extend(adaptation_hook_errors(script, episode))
-    validator_issues = issues_from_validator_messages(
+    issues = enrich_issues(issues_from_validator_messages(
         list(dict.fromkeys(messages)),
         subject="screenplay",
         stage="screenplay",
-    )
-    issues = _score_only_screenplay_issues(
-        enrich_issues(validator_issues, stage="screenplay", artifact_id=artifact_id)
-    )
+    ), stage="screenplay", artifact_id=artifact_id)
     for issue in issues:
         if artifact_hash:
             issue.evidence["artifact_hash"] = artifact_hash
@@ -168,23 +135,32 @@ def run_screenplay_qa(
             issue.evidence["required_dialogue_lines"] = list(
                 episode.get("required_dialogue_lines") or []
             )
-    status = "passed" if not issues else "warning"
+    score = 100.0 if not issues else max(0.0, 100.0 - 10.0 * len(issues))
+    try:
+        pass_score = min(100.0, max(0.0, float(get_setting("screenplay_qa_pass_score") or 80)))
+    except (TypeError, ValueError):
+        pass_score = 80.0
+    passed = blocker_count(issues) == 0 and must_fix_count(issues) == 0 and score >= pass_score
+    status = "passed" if passed else "failed"
     evaluation = Evaluation(
         evaluator_type="deterministic",
         evaluator_name="screenplay_production_qa",
-        evaluator_version="production-repair-1",
+        evaluator_version="screenplay-qa-gate-2",
         status=status,
-        hard_gate_passed=True,
-        score=100.0 if not issues else max(0.0, 100.0 - 10.0 * len(issues)),
+        hard_gate_passed=passed,
+        evaluation_role="runtime_gate",
+        runtime_blocking=True,
+        score=score,
         issues=issues,
         evidence={
             "artifact_id": artifact_id,
             "artifact_hash": artifact_hash,
             "blocker_count": blocker_count(issues),
             "must_fix_count": must_fix_count(issues),
-            "evaluation_role": "score_only",
-            "runtime_blocking": False,
-            "qa_warning_count": len(issues),
+            "evaluation_role": "runtime_gate",
+            "runtime_blocking": True,
+            "pass_score": pass_score,
+            "verdict": "passed" if passed else "repair_required",
         },
     )
     return issues, evaluation
@@ -334,26 +310,6 @@ def plan_screenplay_patch(
                     target={"kind": "dialogue_chain", "id": chain.chain_id,
                             "chain_id": chain.chain_id},
                 )]
-
-    # 整集精选台词超预算：只删除整条非必保对白链，永不截断问答。
-    # 可读台本正文保留，因此不会为了过 QA 删掉剧情。
-    budget_match = re.search(
-        r"dialogue_chains\s*共\s*\d+\s*个话轮.*?必须为\s*\d+~(\d+)",
-        issue.message or "",
-    )
-    if code == "KEY_LINE_MISSING" and budget_match and not _strategy_was_tried(
-        tried, "prune_dialogue_budget"
-    ):
-        return [PatchOperation(
-            op="prune_dialogue_budget",
-            target={"kind": "dialogue_chains"},
-            value={
-                "max_turns": int(budget_match.group(1)),
-                "required_lines": list(
-                    (issue.evidence or {}).get("required_dialogue_lines") or []
-                ),
-            },
-        )]
 
     # key_lines / full_script_text 等派生投影才允许 rederive。
     if code == "KEY_LINE_MISSING" and not _strategy_was_tried(tried, "rederive"):
@@ -516,6 +472,10 @@ async def run_screenplay_production(
     ).fetchone()
     contract = get_contract("screenplay")
     required_dialogue_fingerprint = "|".join(
+        str(item.get("id") or item.get("text") or "")
+        for item in (episode.get("required_dialogue_occurrences") or [])
+        if isinstance(item, dict)
+    ) or "|".join(
         str(line) for line in (episode.get("required_dialogue_lines") or [])
     )
     input_fp = hashlib.sha256(
@@ -545,21 +505,13 @@ async def run_screenplay_production(
         rev = get_production_revision(rev.id)  # type: ignore[assignment]
 
     checkpoint = dict(rev.checkpoint_json or {})
-    legacy_strategy_history = dict(checkpoint.get("issue_strategy_history") or {})
-    retired_dialogue_budget_prune_detected = bool(
-        checkpoint.get("retired_dialogue_budget_prune_detected")
-        or _used_retired_dialogue_budget_policy(legacy_strategy_history)
-    )
     if checkpoint.get("planner_version") != SCREENPLAY_REPAIR_PLANNER_VERSION:
-        # 新规划器必须能接管旧 working artifact；旧版 exhausted 不能永久封死新策略。
+        # 新规划器接管旧 working artifact 时重置已耗尽策略，不再恢复退役的固定对白上限。
         checkpoint = {
             **checkpoint,
             "planner_version": SCREENPLAY_REPAIR_PLANNER_VERSION,
             "issue_strategy_history": {},
             "yield_reason": "planner_upgraded",
-            "retired_dialogue_budget_prune_detected": (
-                retired_dialogue_budget_prune_detected
-            ),
         }
     strategy_history: dict[str, list[str]] = dict(checkpoint.get("issue_strategy_history") or {})
     patch_ids: list[str] = list(checkpoint.get("patch_artifact_ids") or [])
@@ -590,8 +542,8 @@ async def run_screenplay_production(
         from app.portraits import bible_with_provisional_characters
         bible = bible_with_provisional_characters(bible, draft_audit)
 
-        from app.validators import normalize_screenplay_ledgers
-        normalize_screenplay_ledgers(script)
+        from app.validators import normalize_screenplay_candidate
+        script = normalize_screenplay_candidate(script)
         payload = screenplay_artifact_payload(script)
         baseline_art = evidence_repository.create_artifact(
             EvidenceArtifact(
@@ -615,7 +567,7 @@ async def run_screenplay_production(
         conn.execute(
             "UPDATE episodes SET screenplay_status='repairing', screenplay_error=?, "
             "screenplay_updated_at=? WHERE id=?",
-            ("首次整版 Baseline 已落库，现只做局部 QA Patch", now(), episode_id),
+            ("首次整版 Baseline 已落库，正在执行只读 QA", now(), episode_id),
         )
         conn.commit()
         if run_id:
@@ -626,81 +578,6 @@ async def run_screenplay_production(
             )
     elif not rev.working_artifact_id:
         raise RuntimeError("revision 已有 baseline 计数但缺少 working artifact")
-
-    # 兼容旧版把对白数量软建议当硬上限的历史工作副本。只有审计历史明确记录过
-    # prune_dialogue_budget，且当前链是 Baseline 的未改写子集时，才通过正式 Patch
-    # 恢复被整组裁掉的对白链。正文、人工修改和其他局部 Patch 均不会被覆盖。
-    recovery_state = dict(checkpoint.get("dialogue_policy_recovery") or {})
-    if retired_dialogue_budget_prune_detected and not recovery_state.get("completed"):
-        rev = get_production_revision(rev.id)  # type: ignore[assignment]
-        baseline_id = str(rev.baseline_artifact_id or "")
-        working_id = str(rev.working_artifact_id or "")
-        working_art = evidence_repository.get_artifact(working_id) if working_id else None
-        if baseline_id and working_art:
-            working_hash = (
-                working_art.get("content_hash")
-                or evidence_repository.content_hash(working_art.get("content"))
-            )
-            if rev.grant_id:
-                assert_grant_allows(
-                    rev.grant_id,
-                    command="screenplay.patch",
-                    episode_id=episode_id,
-                )
-            recovery_result = apply_screenplay_patch(
-                PatchRequest(
-                    production_revision_id=rev.id,
-                    expected_artifact_id=working_id,
-                    expected_hash=working_hash,
-                    issue_set_hash="retired-dialogue-budget-policy",
-                    operations=[PatchOperation(
-                        op="restore_dialogue_chains_from_baseline",
-                        target={
-                            "kind": "dialogue_chains",
-                            "baseline_artifact_id": baseline_id,
-                        },
-                    )],
-                    idempotency_key=f"{rev.id}:restore-retired-dialogue-budget",
-                    reason="旧版对白数量上限已退役；恢复曾被整组裁掉的 Baseline 对白链",
-                ),
-                episode_id=episode_id,
-            )
-            completed = bool(recovery_result.ok) or "no-op" in str(
-                recovery_result.error or ""
-            )
-            if recovery_result.patch_artifact_id:
-                patch_ids.append(recovery_result.patch_artifact_id)
-            checkpoint = {
-                **checkpoint,
-                "dialogue_policy_recovery": {
-                    "completed": completed,
-                    "restored": bool(recovery_result.ok),
-                    "baseline_artifact_id": baseline_id,
-                    "working_artifact_id": (
-                        recovery_result.after_artifact_id or working_id
-                    ),
-                    "error": None if completed else recovery_result.error,
-                },
-                "patch_artifact_ids": patch_ids,
-            }
-            save_checkpoint(rev.id, checkpoint)
-            if run_id:
-                evidence_repository.append_event(
-                    run_id,
-                    "RETIRED_DIALOGUE_POLICY_RECOVERED"
-                    if recovery_result.ok
-                    else "RETIRED_DIALOGUE_POLICY_RECOVERY_SKIPPED",
-                    "info" if completed else "warning",
-                    "已按当前规则恢复旧上限裁掉的对白链"
-                    if recovery_result.ok
-                    else "旧对白上限恢复检查未改动工作副本",
-                    payload={
-                        "baseline_artifact_id": baseline_id,
-                        "before_artifact_id": working_id,
-                        "after_artifact_id": recovery_result.after_artifact_id,
-                        "error": recovery_result.error,
-                    },
-                )
 
     # ---- Repair loop ----
     patches_this_activation = 0
@@ -737,14 +614,14 @@ async def run_screenplay_production(
                 record_issue_reopened(kind="screenplay", episode_id=episode_id, fingerprint=fp)
                 reopened.add(fp)
 
-        if can_issue_certificate(issues):
+        if evaluation.status == "passed" and can_issue_certificate(issues):
             if run_id:
                 evidence_repository.append_event(
-                    run_id, "CERTIFYING", "info", "剧本结构可交付，QA 评分报告随凭证附加",
+                    run_id, "CERTIFYING", "info", "剧本 QA 已通过，正在签发完成凭证",
                     payload={
                         "artifact_id": working_id,
                         "evaluation_id": eval_id,
-                        "qa_warning_count": len(issues),
+                        "qa_score": evaluation.score,
                     },
                 )
             # 首次发布清空下游；若已有 published 且同 hash 则仍走 publish

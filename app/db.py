@@ -62,7 +62,6 @@ CREATE TABLE IF NOT EXISTS episodes (
     source_chapters TEXT,
     target_duration_s INTEGER DEFAULT 50,
     screenplay_json TEXT,
-    story_ledger_json TEXT,
     screenplay_status TEXT DEFAULT 'pending',
     screenplay_error TEXT,
     screenplay_started_at REAL,
@@ -101,7 +100,6 @@ CREATE TABLE IF NOT EXISTS shots (
     shot_contract_json TEXT,
     continuity_mode TEXT DEFAULT '',
     observed_state_out TEXT DEFAULT '',
-    storyboard_adopted INTEGER NOT NULL DEFAULT 1,
     adopted_version_id TEXT,
     approved_scene_id TEXT,
     approved_head_scene_id TEXT,
@@ -114,15 +112,12 @@ CREATE TABLE IF NOT EXISTS shots (
 CREATE TABLE IF NOT EXISTS screenplay_drafts (
     id TEXT PRIMARY KEY,
     episode_id TEXT NOT NULL,
-    user_key TEXT NOT NULL DEFAULT 'local',
     baseline_artifact_id TEXT,
-    baseline_hash TEXT,
     content_json TEXT,
     constraint_json TEXT NOT NULL DEFAULT '{}',
-    validation_json TEXT NOT NULL DEFAULT '{}',
     dirty_at REAL NOT NULL,
     updated_at REAL NOT NULL,
-    UNIQUE(episode_id, user_key),
+    UNIQUE(episode_id),
     FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS shot_versions (
@@ -872,9 +867,6 @@ MIGRATIONS = (
     "ALTER TABLE shots ADD COLUMN shot_contract_json TEXT",
     "ALTER TABLE shots ADD COLUMN continuity_mode TEXT DEFAULT ''",
     "ALTER TABLE shots ADD COLUMN observed_state_out TEXT DEFAULT ''",
-    # 分镜生成后默认采纳；人工取消后不进入生成台、视频补齐、成片与交付。
-    "ALTER TABLE shots ADD COLUMN storyboard_adopted INTEGER NOT NULL DEFAULT 1",
-    "ALTER TABLE episodes ADD COLUMN story_ledger_json TEXT",
     "ALTER TABLE shot_scenes ADD COLUMN kind TEXT DEFAULT 'tail'",
     "ALTER TABLE shots ADD COLUMN first_frame_desc TEXT DEFAULT ''",
     "ALTER TABLE shots ADD COLUMN last_frame_desc TEXT DEFAULT ''",
@@ -948,7 +940,6 @@ MIGRATIONS = (
     # 分镜增强项降级可见（大纲失败/场景库维护失败），不覆盖 script_error
     "ALTER TABLE episodes ADD COLUMN storyboard_warning TEXT",
     "ALTER TABLE episodes ADD COLUMN active_storyboard_run_id TEXT",
-    "ALTER TABLE episodes ADD COLUMN storyboard_completion_mode TEXT NOT NULL DEFAULT 'ready_for_manual_confirm'",
     "ALTER TABLE episodes ADD COLUMN active_video_run_id TEXT",
     "ALTER TABLE episodes ADD COLUMN video_completion_mode TEXT NOT NULL DEFAULT 'quick'",
     "ALTER TABLE episodes ADD COLUMN video_control_json TEXT",
@@ -1027,6 +1018,7 @@ CREATE INDEX IF NOT EXISTS idx_provider_calls_operation ON provider_calls(operat
 CREATE INDEX IF NOT EXISTS idx_monitor_audit_object ON monitor_audit(object_type, object_id, ts);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_chapters_project_idx ON chapters(project_id, idx);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_episodes_project_no ON episodes(project_id, episode_no);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_screenplay_drafts_episode ON screenplay_drafts(episode_id);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_shots_episode_no ON shots(episode_id, shot_no);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_versions_shot_no ON shot_versions(shot_id, version_no);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_scenes_shot_kind_no ON shot_scenes(shot_id, kind, version_no);
@@ -1207,6 +1199,13 @@ def _repair_integrity(conn: sqlite3.Connection) -> dict[str, Any]:
           SELECT MIN(rowid) FROM character_portraits GROUP BY project_id, character_name, ep_start);
         DELETE FROM scene_references WHERE rowid NOT IN (
           SELECT MIN(rowid) FROM scene_references GROUP BY project_id, scene_name, ep_start);
+        DELETE FROM screenplay_drafts WHERE rowid NOT IN (
+          SELECT rowid FROM screenplay_drafts latest
+           WHERE latest.rowid=(
+             SELECT newer.rowid FROM screenplay_drafts newer
+              WHERE newer.episode_id=latest.episode_id
+              ORDER BY newer.updated_at DESC, newer.rowid DESC LIMIT 1
+           ));
 
         -- Removing duplicate parents can create new orphans in legacy databases that
         -- did not yet have foreign keys/triggers. Run the child cleanup once more.
@@ -1273,6 +1272,28 @@ def _column_names(conn: sqlite3.Connection, table: str) -> set[str]:
         return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     except sqlite3.OperationalError:
         return set()
+
+
+def _drop_obsolete_storyboard_columns(conn: sqlite3.Connection) -> None:
+    """移除已退出主链路的分镜采纳与自动确认字段。
+
+    旧版可能把部分镜头标为不采纳；新链路要求人工确认后的每个镜头都进入生成台，
+    因此删除字段前先恢复为全量参与，避免升级时继续保留一条隐藏分支。
+    """
+    shot_columns = _column_names(conn, "shots")
+    if "storyboard_adopted" in shot_columns:
+        conn.execute("UPDATE shots SET storyboard_adopted=1 WHERE storyboard_adopted<>1")
+        try:
+            conn.execute("ALTER TABLE shots DROP COLUMN storyboard_adopted")
+        except sqlite3.OperationalError:
+            # 兼容不支持 DROP COLUMN 的旧 SQLite；字段已归一且业务代码不再读取。
+            pass
+    episode_columns = _column_names(conn, "episodes")
+    if "storyboard_completion_mode" in episode_columns:
+        try:
+            conn.execute("ALTER TABLE episodes DROP COLUMN storyboard_completion_mode")
+        except sqlite3.OperationalError:
+            pass
 
 
 def _backfill_multiview_assets(conn: sqlite3.Connection) -> None:
@@ -1353,7 +1374,8 @@ def init_db(*, reconcile_interrupted: bool = False) -> None:
         except sqlite3.OperationalError as exc:
             if "duplicate column name" not in str(exc).lower():
                 raise
-    # 分镜自动确认授权表（Supervisor Completion Grant）
+    _drop_obsolete_storyboard_columns(conn)
+    # 视频补齐授权表；历史分镜自动确认授权会在表初始化时清理。
     try:
         from app.completion_grant import ensure_completion_grants_table
         ensure_completion_grants_table(conn)
@@ -1371,6 +1393,20 @@ def init_db(*, reconcile_interrupted: bool = False) -> None:
         backfill_shot_uids(conn)
     except Exception:  # noqa: BLE001
         pass
+    # 剧本 warning 终态已移除：有工作副本的继续 Repair，其余旧候选明确标为失败。
+    conn.execute(
+        """UPDATE episodes
+              SET screenplay_status=CASE
+                    WHEN COALESCE(working_screenplay_artifact_id, '') != '' THEN 'repairing'
+                    ELSE 'failed'
+                  END,
+                  screenplay_error=COALESCE(
+                    screenplay_error,
+                    '旧版 warning 候选未取得 QA 通过凭证，请继续修复或重新生成'
+                  ),
+                  screenplay_snapshot_version=screenplay_snapshot_version+1
+            WHERE screenplay_status='warning'"""
+    )
     _backfill_multiview_assets(conn)
     _repair_integrity(conn)
     # 旧版把“候选已生成但缺新版 QA 证据”误归类为 ProviderError，并在项目页显示为

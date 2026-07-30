@@ -11,7 +11,6 @@ const SCREENPLAY_STATUS: Record<string, Omit<ProductionStatusMeta, 'known'>> = {
   running: { label: '剧本生成中', tone: 'gold' },
   repairing: { label: '剧本修复中', tone: 'gold' },
   ready: { label: '剧本已就绪', tone: 'green' },
-  warning: { label: '剧本待修复', tone: 'red' },
   failed: { label: '剧本生成失败', tone: 'red' },
 }
 

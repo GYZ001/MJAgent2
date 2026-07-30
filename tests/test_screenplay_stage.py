@@ -3,9 +3,14 @@ import asyncio
 from app import stages
 from app.schemas import (Bible, Character, EpisodeScreenplay, KeyDialogueChain,
                          KeyDialogueTurn, PlotSpine, PlotSpineBeat,
-                         ScreenplayBeat, ScriptScene, World)
+                         ScriptScene, World)
 from app.stages import _render_screenplay_source, generate_screenplay
-from app.validators import source_dialogue_fragments, validate_dialogue_chains, validate_screenplay
+from app.validators import (
+    normalize_screenplay_candidate,
+    source_dialogue_fragments,
+    validate_dialogue_chains,
+    validate_screenplay,
+)
 
 
 def _bible() -> Bible:
@@ -28,31 +33,6 @@ def _empty_bible() -> Bible:
         characters=[],
         world=World(era="", genre="", visual_style_canonical="国漫风格，非真人CG渲染，统一电影感光影，暖灰色调"),
     )
-
-
-def _beat(no: int, beat_type: str = "钩子", source_excerpt: str = "谷言攥着纸杯看向门口。") -> ScreenplayBeat:
-    return ScreenplayBeat(
-        beat_no=no,
-        day_offset=0,
-        time_of_day="上午",
-        location="咖啡厅",
-        characters=["谷言"],
-        dramatic_event="谷言发现门口的人影停下",
-        visible_action="谷言攥紧纸杯抬头看向门口，肩膀明显绷紧",
-        key_dialogues=["你终于来了。"],
-        turn="来者身份暴露",
-        carry="谷言准备追问真相",
-        beat_type=beat_type,
-        source_excerpt=source_excerpt,
-    )
-
-
-def test_screenplay_rejects_legacy_beats_payload() -> None:
-    script = EpisodeScreenplay(episode_no=1, beats=[_beat(1, source_excerpt="")])
-
-    errors = validate_screenplay(script, _bible(), expected_beats=1, episode_no=1)
-
-    assert any("不再接受 beats" in error for error in errors)
 
 
 def _scene(no: int, heading: str, summary: str) -> ScriptScene:
@@ -439,13 +419,15 @@ def test_source_dialogue_inventory_keeps_first_utterance_in_order() -> None:
 
 def test_dialogue_chain_is_authoritative_and_allows_functional_trigger() -> None:
     script, source = _screenplay_with_source_dialogue_chain()
+    normalized = normalize_screenplay_candidate(script)
 
     errors = validate_screenplay(
-        script, _bible(), expected_beats=5, episode_no=1,
+        normalized, _bible(), expected_beats=5, episode_no=1,
         source_text=source, require_dialogue_chains=True,
     )
 
-    assert script.key_lines == [
+    assert script.key_lines == ["模型错误挑选的孤立金句"]
+    assert normalized.key_lines == [
         "测验员：斗之力，三段！", "谷言：只有三段？", "测验员：结果无误。",
     ]
     assert not any("dialogue_chains" in error or "开场第一句对白" in error for error in errors), errors
@@ -653,7 +635,7 @@ def test_initial_screenplay_prompt_contains_d001_and_dialogue_chain_contract(mon
 
     assert "【原文开场对白锚点·硬门禁】" in prompts[0]
     assert "D001：斗之力，三段！" in prompts[0]
-    assert "【用户多选的必保留台词·逐字硬门禁】" in prompts[0]
+    assert "【用户多选的必保留台词·按原文位置绑定·逐字硬门禁】" in prompts[0]
     assert "R001：只有三段？" in prompts[0]
     assert "R002：结果无误。" in prompts[0]
     assert '"dialogue_chains"' in prompts[0]

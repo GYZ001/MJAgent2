@@ -17,9 +17,7 @@ SPINE_BEATS_MAX = 12
 DROP_LIST_MIN = 2
 
 KEY_LINES_MIN = 3
-KEY_LINES_MAX = 6
-# KEY_LINES_MAX 是整集“精选台词”的软预算，不应被误用为单条连续对白链的
-# 硬上限。问答/安慰这类完整语义链允许略长，但仍保留一个防止模型灌水的硬闸。
+# 对白数量不设固定上限；整集预算由口播时长和单链技术熔断共同约束。
 DIALOGUE_CHAIN_TURNS_HARD_MAX = 8
 KEY_PLOT_POINTS_MIN = 4
 KEY_PLOT_POINTS_MAX = 8

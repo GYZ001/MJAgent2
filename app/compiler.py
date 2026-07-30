@@ -550,6 +550,55 @@ def _equal_height_hint(shot: Shot, bible: Bible | None = None) -> str:
     )
 
 
+def _matching_scene(shot: Shot, bible: Bible | None) -> object | None:
+    """按规范场景名匹配 Bible 场景；最长名称优先，避免子串误配。"""
+    if bible is None:
+        return None
+    scenes = list(getattr(bible, "scenes", None) or [])
+    explicit = (shot.scene_name or "").strip()
+    if explicit:
+        for scene in scenes:
+            if (getattr(scene, "name", "") or "").strip() == explicit:
+                return scene
+    setting = (shot.scene_setting or "").strip()
+    matches = [
+        scene for scene in scenes
+        if (getattr(scene, "name", "") or "").strip()
+        and (getattr(scene, "name", "") or "").strip() in setting
+    ]
+    return max(matches, key=lambda item: len((getattr(item, "name", "") or "").strip()), default=None)
+
+
+def _scene_geometry_contract(shot: Shot, bible: Bible | None) -> tuple[str, str, list[str]]:
+    """返回场景文本锚点、固定几何合同与显式地标。
+
+    场景参考图只能帮助“像同一个地方”，不能保证视频时序中的固定物体不 morph。
+    因此把场景圣经的 canonical/landmarks 直接写进视频与关键帧合同。
+    """
+    scene = _matching_scene(shot, bible)
+    canonical = (getattr(scene, "scene_canonical", "") or "").strip() if scene else ""
+    landmarks = [
+        str(item).strip()
+        for item in (getattr(scene, "landmarks", None) or [])
+        if str(item).strip()
+    ]
+    scene_anchor = (
+        f"场景固定锚点：{canonical}"
+        if canonical else (f"场景：{shot.scene_setting}" if shot.scene_setting else "")
+    )
+    explicit_landmarks = "、".join(landmarks)
+    geometry = (
+        "同一视频内固定地标、大型陈设和剧情道具从首帧到尾帧保持同一外形、数量与位置；"
+        "构图内物体不得消失、复制、变形、换位后再出现。人物远离只通过连续走位；"
+        "固定镜头下留在原位，移动镜头下只能正常出画"
+    )
+    if canonical:
+        geometry += f"。当前场景固定布局：{canonical}"
+    if explicit_landmarks:
+        geometry += f"。显式固定地标：{explicit_landmarks}"
+    return scene_anchor, geometry, landmarks
+
+
 def _narrative_keyframe_target_with_source(shot: Shot) -> tuple[str, str]:
     terminal_moments = (
         ("last_frame_desc", shot.last_frame_desc),
@@ -666,10 +715,9 @@ def keyframe_visual_contract(shot: Shot, bible: Bible | None = None) -> dict[str
         rf"|{collective_entity_re}[^，。；！？]{{0,12}}"
         r"(?:散去|散开|全部离开|离开画面|退到画外|退场|消失|不在画面|只在画外)"
     )
-    target_forbids_crowd = bool(collective_absent_re.search(target_keyframe_desc)) or (
-        bool(re.search(collective_entity_re, target_keyframe_desc))
-        and ("独自" in target_keyframe_desc or bool(re.search(r"(?:只剩|仅剩)[^，。]{0,8}(?:一人|他|她)", target_keyframe_desc)))
-    )
+    # “独自站在队尾，与前方人群形成对比”仍明确要求背景人群。旧逻辑只要同时出现
+    # “独自+人群”就判为人群禁入，导致正确关键帧全部被删，视频失去队伍/石碑空间锚点。
+    target_forbids_crowd = bool(collective_absent_re.search(target_keyframe_desc))
     target_requires_anonymous_crowd = (
         not dialogue_focus and not target_forbids_crowd
         and (
@@ -684,6 +732,12 @@ def keyframe_visual_contract(shot: Shot, bible: Bible | None = None) -> dict[str
         or any(marker in crowd_context_text for marker in (*crowd_markers, "当众"))
         or bool(collective_context_re.search(crowd_context_text))
         or "家族子弟" in crowd_context_text
+    )
+    _, scene_geometry, scene_landmarks = _scene_geometry_contract(shot, bible)
+    matched_scene = _matching_scene(shot, bible)
+    scene_canonical = (
+        (getattr(matched_scene, "scene_canonical", "") or "").strip()
+        if matched_scene is not None else ""
     )
     return {
         "target_keyframe_desc": target_keyframe_desc,
@@ -720,6 +774,9 @@ def keyframe_visual_contract(shot: Shot, bible: Bible | None = None) -> dict[str
             shot, target_keyframe_desc, target_source,
         ),
         "spatial_anchor": (shot.spatial_anchor or "").strip(),
+        "scene_canonical": scene_canonical,
+        "scene_landmarks": scene_landmarks,
+        "scene_geometry_contract": scene_geometry,
         "anonymous_background_allowed": anonymous_background_allowed,
     }
 
@@ -787,7 +844,8 @@ def _compile_reference_roles(shot: Shot, *, continuity_mode: str, with_refs: boo
         )
     if continuity_mode in {"same_scene_cut", "reaction_cut", "reverse_angle", "insert_detail"}:
         lines.append(
-            "场景参考仅用于建筑、材质、光线和色调一致；当前镜头需要重新构图。"
+            "场景参考用于锁定建筑、固定地标、大型陈设、材质、光线和色调；当前镜头只重新选择摄影构图，"
+            "不得改动石碑、门、桌台、屏幕等固定物体在世界空间中的位置、数量或外形。"
             "人物参考仅用于身份和服装一致，不复制参考图中的姿势与画面布局。"
         )
     elif continuity_mode == "scene_change":
@@ -860,7 +918,8 @@ def _compile_negative_constraints(shot: Shot, extra_negative: list[str] | None,
         parts.extend(x.strip() for x in extra_negative if x and x.strip())
     # 保留关键安全负面词（精简，避免与条件文字策略冲突）
     parts.append(
-        "避免真人实拍、畸形手、肢体错位、面部崩坏、角色换装漂移、动作瞬移、画风突变、满屏光效遮挡面部"
+        "避免真人实拍、畸形手、肢体错位、面部崩坏、角色换装漂移、动作瞬移、头部突然放大或幼态大头、"
+        "画风突变、满屏光效遮挡面部"
     )
     return "；".join(dict.fromkeys(parts))
 
@@ -882,6 +941,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
                    aspect_ratio: str = "9:16") -> str:
     """编译 Seedance 最终提示词（PRD §11）：最小完备、固定段落、禁止原文/前镜完整动作/未来剧情。"""
     from app.continuity import (
+        dialogue_action_staging_kind,
         dialogue_focus_subject,
         derive_continuity_mode,
         effective_characters_visible,
@@ -911,6 +971,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
 
     sync_shot_continuity_fields(shot)
     dialogue_focus = dialogue_focus_subject(shot)
+    dialogue_staging = dialogue_action_staging_kind(shot)
     mode = (continuity_mode or derive_continuity_mode(shot)).strip()
     if dialogue_focus and mode == "action_continuation":
         mode = "same_scene_cut"
@@ -940,7 +1001,11 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     style = (visual_style or bible.world.visual_style_canonical or "写实国风玄幻动画").strip()
     render_shot_size = (
         ("特写" if shot.shot_size == "特写" else "近景")
-        if dialogue_focus else shot.shot_size
+        if dialogue_focus else (
+            ("全景" if dialogue_staging == "spatial" else "中景")
+            if dialogue_staging and shot.shot_size in {"近景", "特写"}
+            else shot.shot_size
+        )
     )
     render_camera_move = (
         shot.camera_move
@@ -959,6 +1024,12 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         camera_line += (
             f"。竖屏单人对白构图：只拍「{dialogue_focus}」一人的面部、上半身与自然口型，"
             "视线朝向画外听者；听者和同场其他人物完全不入画"
+        )
+    elif dialogue_staging:
+        staging_label = "完整走位和人物与场景的距离变化" if dialogue_staging == "spatial" else "双手、剧情道具与接触关系"
+        camera_line += (
+            f"。动作对白构图：必须完整拍出{staging_label}，说话人口型在动作过程中自然完成；"
+            "动作是主交付，对白不能把画面降级为静态大头或原地站桩"
         )
     contact_phase = shot_contact_phase(shot)
     if contact_phase == "established":
@@ -990,7 +1061,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         else:
             anchors.append(f"{name}：{functional_extra_anchor(name)}")
     character_anchor = "；".join(anchors[:4]) if anchors else "保持人物身份服装一致"
-    scene_anchor = f"场景：{shot.scene_setting}" if shot.scene_setting else ""
+    scene_anchor, scene_geometry, _ = _scene_geometry_contract(shot, bible)
     prop_anchor = ""
     if shot.required_text and (shot.required_text.surface or "").strip():
         prop_anchor = f"文字承载面：{shot.required_text.surface.strip()}"
@@ -1030,14 +1101,23 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
                 + reference_block
             )
 
-    action_block = primary
+    action_block = f"主动作：{primary}"
+    full_action = (shot.action_desc or "").strip()
+    if full_action and full_action != primary:
+        action_block += f"。完整可见执行：{full_action}"
+    action_block += (
+        "。必须从起始状态连续拍到结束状态，按描述顺序完整呈现每个明示的大形体动作和道具状态变化；"
+        "不得只拍站立说话、口型或表情变化来替代动作"
+    )
     if transition_bits:
-        action_block = primary + "。" + "".join(transition_bits)
+        action_block += "。" + "".join(transition_bits)
     if dialogue_focus:
         action_block += (
             f"。对白构图以「{dialogue_focus}」为唯一可见主体；"
             "原动作中提到的听者、围观者和其他角色均视为画外关系，不得画入镜头"
         )
+    elif dialogue_staging:
+        action_block += "。对白与动作同步发生；必须先保证整段动作路径完整可见，再保证自然口型"
     action_block += "。只完成这一项主要动作，不重演前序剧情，不提前表演下一镜内容。"
 
     # 明确忽略 prev_action / prev_tail_action 中的完整动作描述（API 兼容保留参数）
@@ -1047,7 +1127,9 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     audio_block = _compile_audio_timeline(shot, voice_bible)
     text_block = _compile_text_policy(shot)
     consistency_parts = [
-        character_anchor, scene_anchor, prop_anchor, height_hint, f"全片统一画风：{style}",
+        character_anchor, scene_anchor, prop_anchor, height_hint,
+        "人物头身比沿用角色参考的自然比例；参考图裁切大小不代表实体头部大小，禁止跨镜突然大头或幼态化",
+        f"全片统一画风：{style}",
     ]
     consistency_block = "\n".join(p for p in consistency_parts if p)
     negative_block = _compile_negative_constraints(shot, extra_negative, mode, bible=bible)
@@ -1063,6 +1145,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         ("START STATE | 0.0s", state_in, 1),
         ("ONE CURRENT ACTION", action_block, 1),
         (f"END STATE | {shot_dur}.0s", state_out + "。最后状态稳定、清楚、可作为下一镜的叙事依据。", 1),
+        ("PERSISTENT SCENE GEOMETRY", scene_geometry, 1),
         ("CAMERA", camera_line, 4),
         ("AUDIO TIMELINE", audio_block, 2),
         ("ON-SCREEN TEXT", text_block, 2),
@@ -1083,15 +1166,24 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         return len(t) <= config.PROMPT_CHAR_LIMIT
 
     # 压缩策略：先压低优先级段落（通用风格/重复锚点），永不删除优先级 1/2
+    compact_negative_parts = negative_block.split("；")[:6]
+    for marker in (
+            "接触动作禁止正面摆拍",
+            "接近/未命中动作禁止正面摆拍",
+            "松开/分离动作禁止正面摆拍",
+            "禁止同框人物随意一高一低",
+    ):
+        if marker in negative_block and marker not in compact_negative_parts:
+            compact_negative_parts.append(marker)
     compact_map = {
         "CONSISTENCY": "保持人物身份服装与场景材质光线一致。",
         "REFERENCE ROLES": (
             "仅按角色映射使用参考图；连续动作才把尾帧当 0 秒起点，其余模式重新构图。"
             if uses_previous_tail_frame(mode) else
-            "场景/人物参考只锁材质与身份，重新构图，不复制姿势布局。"
+            "场景图锁固定地标，人物图锁身份服装；只换构图，不改固定物体。"
         ),
         "FORMAT": f"生成 {shot_dur} 秒、{aspect_ratio}、{style} 完整可直接采用视频；禁止后期。",
-        "DO NOT": "；".join(negative_block.split("；")[:6]),
+        "DO NOT": "；".join(compact_negative_parts),
         "CAMERA": (
             f"{render_shot_size}；{camera_angle}；{render_camera_move}"
             + (f"；单人对白近景，仅「{dialogue_focus}」入画" if dialogue_focus else "")

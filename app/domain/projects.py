@@ -531,11 +531,11 @@ def project_detail(
         p["episodes"] = rows_to_dicts(conn.execute(
             """SELECT e.id, e.episode_no, e.title, e.status, e.screenplay_status,
                       (SELECT COUNT(*) FROM shots s WHERE s.episode_id=e.id) AS shot_count,
-                      (SELECT COUNT(*) FROM shots s WHERE s.episode_id=e.id AND s.storyboard_adopted=1 AND s.adopted_version_id IS NOT NULL) AS video_count,
-                      (SELECT COUNT(*) FROM shots s WHERE s.episode_id=e.id AND s.storyboard_adopted=1 AND s.adopted_version_id IS NULL
+                      (SELECT COUNT(*) FROM shots s WHERE s.episode_id=e.id AND s.adopted_version_id IS NOT NULL) AS video_count,
+                      (SELECT COUNT(*) FROM shots s WHERE s.episode_id=e.id AND s.adopted_version_id IS NULL
                          AND EXISTS(SELECT 1 FROM shot_versions v WHERE v.shot_id=s.id AND v.status='succeeded')) AS pending_adoption_count,
                       (SELECT COUNT(*) FROM shot_versions v JOIN shots s ON s.id=v.shot_id
-                         WHERE s.episode_id=e.id AND s.storyboard_adopted=1 AND v.status='failed') AS failed_count
+                         WHERE s.episode_id=e.id AND v.status='failed') AS failed_count
                  FROM episodes e WHERE e.project_id=? ORDER BY e.episode_no""",
             (project_id,),
         ).fetchall())
@@ -557,7 +557,7 @@ def project_detail(
         if status_filter == "running":
             clauses.append("(screenplay_status='running' OR status IN ('scripting','generating'))")
         elif status_filter == "failed":
-            clauses.append("(screenplay_status IN ('failed','warning','repairing') OR status LIKE '%failed%')")
+            clauses.append("(screenplay_status IN ('failed','repairing') OR status LIKE '%failed%')")
         elif status_filter == "done":
             clauses.append("status='done'")
         elif status_filter == "pending":
@@ -584,7 +584,7 @@ def project_detail(
                       SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) AS done,
                       SUM(CASE WHEN screenplay_status='running' THEN 1 ELSE 0 END) AS screenplay_running,
                       SUM(CASE WHEN status='scripting' THEN 1 ELSE 0 END) AS scripting,
-                      SUM(CASE WHEN screenplay_status IN ('pending','failed','warning','repairing')
+                      SUM(CASE WHEN screenplay_status IN ('pending','failed','repairing')
                                 OR screenplay_json IS NULL THEN 1 ELSE 0 END) AS screenplay_todo,
                       SUM(CASE WHEN screenplay_status='ready'
                                 AND status IN ('planned','script_failed') THEN 1 ELSE 0 END) AS storyboard_ready
@@ -619,16 +619,10 @@ def project_detail(
         if ep.get("screenplay_json"):
             try:
                 script = EpisodeScreenplay.model_validate(json.loads(ep["screenplay_json"]))
-                ep["screenplay_beats"] = len(script.beats)
-                ep["screenplay_mode"] = _screenplay_mode(script)
                 ep["screenplay_title"] = script.title or ep["title"]
             except (json.JSONDecodeError, TypeError, ValueError):
-                ep["screenplay_beats"] = 0
-                ep["screenplay_mode"] = "unknown"
                 ep["screenplay_title"] = ep["title"]
         else:
-            ep["screenplay_beats"] = 0
-            ep["screenplay_mode"] = "none"
             ep["screenplay_title"] = ep["title"]
         ep.pop("screenplay_json", None)
         outline_raw = ep.pop("storyboard_outline_json", None)

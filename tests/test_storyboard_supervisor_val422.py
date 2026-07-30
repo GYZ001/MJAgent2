@@ -1,8 +1,6 @@
 """Supervisor / VAL-422 门禁相关测试。"""
 from __future__ import annotations
 
-from fastapi import HTTPException
-
 from app.evaluations.issues import issue_code, issues_from_messages
 from app.harness.types import IssueSeverity
 from app.loops.base import AgentLoopPolicy
@@ -10,7 +8,6 @@ from app.schemas import Dialogue, PlotSpine, PlotSpineBeat, EpisodeScreenplay, S
 from app.hiagent import ProviderError
 from app.storyboard_supervisor import (
     _is_retryable_external_error,
-    _requires_manual_confirmation,
 )
 from app.spoken_contract import spoken_text_of
 from app.validators import (
@@ -83,9 +80,11 @@ def test_spine_beat_ids_cover_must_keep():
             must_keep_ending="收束",
         ),
     )
-    # 字面不相似，但有 spine_beat_ids
+    # 可见主体与动作已经落地；spine_beat_ids 负责稳定归属，不要求逐字复述策划摘要。
     shot = _shot(
-        action_desc="萧媚完成测试，人群望向她，她没有走向萧炎。",
+        characters=["萧媚"],
+        characters_visible=["萧媚"],
+        action_desc="萧媚完成测试，玉石显示七段，人群望向她，她没有走向萧炎。",
         first_frame_desc="萧媚站在测试台前，掌心贴上玉石。",
         last_frame_desc="同一机位，玉石亮起，萧媚收回手，人群侧目。",
         spine_beat_ids=["S04"],
@@ -142,13 +141,6 @@ def test_issue_code_spoken_timeline_errors_are_not_capacity():
 
 def test_issue_code_dialogue_context_break_is_key_line_failure():
     assert issue_code("主线对白上下文断裂：角色突然冒出一句回应") == "KEY_LINE_MISSING"
-
-
-def test_auto_confirm_warning_is_routed_to_manual_ready_state():
-    assert _requires_manual_confirmation(
-        HTTPException(409, "自动确认遇到需要人工判断的警告，请转人工确认")
-    )
-    assert not _requires_manual_confirmation(HTTPException(409, "分镜硬门禁失败"))
 
 
 def test_retryable_provider_failure_survives_orchestration_wrapping():

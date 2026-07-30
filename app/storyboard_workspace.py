@@ -43,7 +43,7 @@ def episode_fingerprint(episode_id: str) -> str:
     ep = conn.execute(
         """SELECT id, project_id, source_chapters, status, screenplay_status, screenplay_artifact_id,
                   storyboard_artifact_id, active_storyboard_run_id,
-                  storyboard_completion_mode, storyboard_outline_json
+                  storyboard_outline_json
            FROM episodes WHERE id=?""",
         (episode_id,),
     ).fetchone()
@@ -134,7 +134,7 @@ def finalize_storyboard_cancellation(
     把已经取消的任务显示为运行中。若传入的是已被新 Run 替代的旧 run_id，绝不
     触碰新任务的集状态或 checkpoint。
     """
-    from app.completion_grant import revoke_active_grants_for_episode
+    from app.completion_grant import revoke_active_video_grants_for_episode
     from app.evidence import repository
     from app.orchestration.engine import WorkflowRecorder
     from app.storyboard_supervisor import load_latest_checkpoint, save_checkpoint
@@ -162,12 +162,11 @@ def finalize_storyboard_cancellation(
     if run and run.get("status") in repository.ACTIVE_RUN_STATUSES:
         WorkflowRecorder(effective_run_id).cancel(message)
 
-    revoke_active_grants_for_episode(episode_id)
+    revoke_active_video_grants_for_episode(episode_id)
     checkpoint = load_latest_checkpoint(episode_id)
     if checkpoint is not None and checkpoint.phase != "CANCELLED":
         checkpoint.phase = "CANCELLED"
         checkpoint.outcome = "CANCELLED"
-        checkpoint.completion_grant_id = None
         save_checkpoint(checkpoint, run_id=effective_run_id)
 
     shot_count = int(conn.execute(

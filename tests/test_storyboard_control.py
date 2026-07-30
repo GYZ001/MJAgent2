@@ -92,8 +92,6 @@ def test_handoff_run_marks_waiting_human_when_idle(monkeypatch):
     cp = SupervisorCheckpoint(
         episode_id="e1",
         phase="PAUSED_EXTERNAL",
-        goal="generate_ready",
-        completion_mode="ready_for_manual_confirm",
         validated_prefix_end=3,
         next_shot_no=4,
         expected_total=10,

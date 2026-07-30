@@ -59,31 +59,23 @@ def _is_storyboard_terminal_for_confirmation(
     shot_count: int,
     planned_shots: int,
     final_shot_valid: bool,
-    automated: bool,
 ) -> bool:
-    """Allow the supervisor's internal confirmation phase without weakening manual confirmation."""
+    """只允许人工确认已经停止写入且通过 Supervisor 门禁的完整分镜。"""
     if shot_count <= 0 or shot_count != planned_shots or not final_shot_valid:
+        return False
+    if episode["status"] != "scripted" or episode["script_error"]:
         return False
     if checkpoint is not None:
         phase = str(getattr(checkpoint, "phase", "") or "")
         validated = int(getattr(checkpoint, "validated_prefix_end", 0) or 0)
         expected = int(getattr(checkpoint, "expected_total", 0) or planned_shots)
-        checkpoint_complete = bool(
-            phase in {"PREPARING_CONFIRM", "CONFIRMING", "SUCCEEDED"}
+        return bool(
+            phase == "SUCCEEDED"
             and validated == shot_count
             and expected == shot_count
         )
-        if automated and checkpoint_complete:
-            return True
-        # A stopped internal confirmation may be completed manually once the episode
-        # is no longer being written. The full confirmation evaluation still runs below.
-        if episode["status"] == "scripted" and checkpoint_complete:
-            return True
-    return bool(
-        episode["status"] == "scripted"
-        and not episode["script_error"]
-        and checkpoint is None
-    )
+    # 兼容人工编辑后没有 Supervisor checkpoint 的既有分镜；完整门禁仍会在下方重算。
+    return True
 
 
 def _storyboard_structural_errors(storyboard: Storyboard) -> list[str]:
@@ -204,8 +196,8 @@ def evaluate_storyboard_for_confirmation(
     )
 
 
-def create_storyboard_confirmation_preview(episode_id: str, *, automated: bool = False) -> dict:
-    """计算并签发确认快照；提交与自动确认均消费同一契约。"""
+def create_storyboard_confirmation_preview(episode_id: str) -> dict:
+    """计算并签发人工确认快照。"""
     from app.storyboard_supervisor import load_latest_checkpoint
     from app.storyboard_workspace import create_preview, verify_or_bind_existing_excerpt
 
@@ -239,7 +231,6 @@ def create_storyboard_confirmation_preview(episode_id: str, *, automated: bool =
         shot_count=len(rows),
         planned_shots=planned,
         final_shot_valid=final_valid,
-        automated=automated,
     )
     evidence_errors: list[str] = []
     for row in rows:
@@ -267,7 +258,6 @@ def create_storyboard_confirmation_preview(episode_id: str, *, automated: bool =
     warnings: list[str] = list(dict.fromkeys(evaluation.warnings))
     if any(int(shot.duration_s or 0) > 5 for shot in evaluation.board.shots):
         warnings.append("存在超过 5 秒的镜头，已纳入 QA 评分报告")
-    force_allowed = bool(terminal and not evidence_errors and evaluation.errors)
     payload = {
         "contract_version": "storyboard-confirm.v2",
         "episode_id": episode_id,
@@ -279,15 +269,6 @@ def create_storyboard_confirmation_preview(episode_id: str, *, automated: bool =
         "hard_gates": {
             "passed": terminal and evaluation.passed and not evidence_errors,
             "errors": hard_errors,
-        },
-        "force_confirmation": {
-            "allowed": force_allowed,
-            "accepted_errors": list(evaluation.errors) if force_allowed else [],
-            "note": (
-                "镜头结构与原文证据完整；可由人工承担风险并强行确认这些待修复问题"
-                if force_allowed else
-                "缺镜、最终镜缺失或原文证据失效不能强行确认"
-            ),
         },
         "warnings": warnings,
         "score_only": {
@@ -302,9 +283,7 @@ def create_storyboard_confirmation_preview(episode_id: str, *, automated: bool =
         },
         "unlocks": ["生成台", "付费视频生成入口"],
     }
-    preview_payload = create_preview("confirm", episode_id, payload) if (
-        payload["hard_gates"]["passed"] or force_allowed
-    ) else payload
+    preview_payload = create_preview("confirm", episode_id, payload) if payload["hard_gates"]["passed"] else payload
     if not payload["hard_gates"]["passed"]:
         try:
             from app.observability.metrics import inc
@@ -333,7 +312,6 @@ def _converge_confirmed_storyboard_state(
     episode_id: str,
     *,
     active_storyboard_run_id: str | None,
-    decided_by: str,
 ) -> None:
     """把已确认的业务结果投影到 Supervisor/运行指针/授权状态。
 
@@ -351,20 +329,20 @@ def _converge_confirmed_storyboard_state(
 
         checkpoint = load_latest_checkpoint(episode_id)
         if checkpoint is not None and (
-            checkpoint.phase != "SUCCEEDED" or checkpoint.outcome != "SUCCEEDED_CONFIRMED"
+            checkpoint.phase != "SUCCEEDED"
+            or checkpoint.outcome != "SUCCEEDED_READY_FOR_CONFIRM"
         ):
             checkpoint.phase = "SUCCEEDED"
-            checkpoint.outcome = "SUCCEEDED_CONFIRMED"
+            checkpoint.outcome = "SUCCEEDED_READY_FOR_CONFIRM"
             save_checkpoint(checkpoint, run_id=active_storyboard_run_id)
     except Exception:  # noqa: BLE001 -- 业务确认已完成，辅助投影可在下次重试自愈
         pass
-    if decided_by != "supervisor":
-        try:
-            from app.completion_grant import revoke_active_grants_for_episode
+    try:
+        from app.completion_grant import revoke_active_video_grants_for_episode
 
-            revoke_active_grants_for_episode(episode_id)
-        except Exception:  # noqa: BLE001 -- 不回滚已通过门禁的确认
-            pass
+        revoke_active_video_grants_for_episode(episode_id)
+    except Exception:  # noqa: BLE001 -- 不回滚已通过门禁的确认
+        pass
 
 
 def confirm_episode_core(
@@ -373,10 +351,8 @@ def confirm_episode_core(
     decided_by: str = "user",
     reason: str | None = None,
     preview_token: str | None = None,
-    force: bool = False,
-    force_reason: str | None = None,
 ) -> dict:
-    """人工/自动确认门：结构完整即可 confirmed；QA 仅作为评分报告。
+    """人工确认门：只有整集硬门禁通过的分镜才能 confirmed。
     失败抛 ValueError（消息面向 UI）；供路由与 Supervisor 复用。
     """
     from app.storyboard_workspace import (
@@ -390,7 +366,6 @@ def confirm_episode_core(
         _converge_confirmed_storyboard_state(
             episode_id,
             active_storyboard_run_id=already["active_storyboard_run_id"],
-            decided_by=decided_by,
         )
         shots = get_conn().execute(
             "SELECT duration_s FROM shots WHERE episode_id=?", (episode_id,),
@@ -403,12 +378,8 @@ def confirm_episode_core(
         }
     preview = require_preview(preview_token, "confirm", episode_id)
     preview_passed = bool((preview.get("hard_gates") or {}).get("passed"))
-    force_allowed = bool((preview.get("force_confirmation") or {}).get("allowed"))
-    accepted_force_reason = str(force_reason or reason or "").strip()
-    if not preview_passed and not (force and force_allowed):
+    if not preview_passed:
         raise ValueError("确认预览未通过结构完整性门禁")
-    if force and force_allowed and len(accepted_force_reason) < 4:
-        raise ValueError("强行确认需填写至少 4 个字的风险承担理由")
     ep = _episode_or_404(episode_id)
     conn = get_conn()
     compact_target = _compact_episode_target(ep["target_duration_s"])
@@ -481,8 +452,7 @@ def confirm_episode_core(
         has_real_bible=has_real_bible,
         target_duration_s=compact_target,
     )
-    forced_errors = list(evaluation.errors) if not evaluation.passed else []
-    if forced_errors and not (force and force_allowed):
+    if not evaluation.passed:
         raise ValueError(json.dumps(evaluation.errors, ensure_ascii=False))
     board = evaluation.board
     compact_target = evaluation.compact_target
@@ -493,12 +463,7 @@ def confirm_episode_core(
     storyboard_artifact_id = ep["storyboard_artifact_id"]
     content_hash = None
     if character_artifact_ids or normalized_fields_changed or not storyboard_artifact_id:
-        storyboard_artifact_id = _finalize_storyboard_evidence(
-            episode_id,
-            board,
-            forced_errors=forced_errors,
-            force_reason=accepted_force_reason if forced_errors else None,
-        )
+        storyboard_artifact_id = _finalize_storyboard_evidence(episode_id, board)
     if storyboard_artifact_id:
         art = conn.execute(
             "SELECT content_hash FROM artifacts WHERE id=?", (storyboard_artifact_id,)
@@ -534,7 +499,7 @@ def confirm_episode_core(
             evaluator_type="human",
             evaluator_name="storyboard_reviewer",
             evaluator_version="1.0.0",
-            status="warning" if forced_errors else "passed",
+            status="passed",
             hard_gate_passed=True,
             score=100,
             evidence={
@@ -542,9 +507,6 @@ def confirm_episode_core(
                 "shot_count": len(shots),
                 "decided_by": decided_by,
                 "idempotency_key": idempotency_key,
-                "forced": bool(forced_errors),
-                "accepted_errors": forced_errors,
-                "force_reason": accepted_force_reason if forced_errors else None,
             },
         )
         evidence_repository.commit_artifact(None, storyboard_artifact_id, [human_eval])
@@ -554,11 +516,8 @@ def confirm_episode_core(
                ) VALUES(?,?,?,?,?,?,?)""",
             (
                 new_id("gate"), storyboard_artifact_id, "storyboard",
-                "approve_with_risk" if forced_errors else "approve", decided_by,
-                (
-                    accepted_force_reason
-                    if forced_errors else reason or "分镜全量确定性校验通过并确认"
-                ),
+                "approve", decided_by,
+                reason or "分镜全量确定性校验通过并确认",
                 now(),
             ),
         )
@@ -574,7 +533,6 @@ def confirm_episode_core(
     _converge_confirmed_storyboard_state(
         episode_id,
         active_storyboard_run_id=active_storyboard_run_id,
-        decided_by=decided_by,
     )
     try:
         from app.observability.metrics import inc
@@ -588,8 +546,6 @@ def confirm_episode_core(
         "total_duration_s": sum(s.duration_s for s in shots),
         "target_duration_s": compact_target,
         "idempotency_key": idempotency_key,
-        "forced": bool(forced_errors),
-        "accepted_errors": forced_errors,
     }
 
 
@@ -604,9 +560,7 @@ async def confirm_episode(episode_id: str, body: dict | None = Body(None)):
         {
             "episode_id": episode_id,
             "preview_token": body.get("preview_token"),
-            "force": bool(body.get("force")),
-            "force_reason": body.get("force_reason"),
-            "reason": body.get("force_reason") or body.get("reason"),
+            "reason": body.get("reason"),
         },
         initiator="ui",
     )
@@ -939,20 +893,18 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
         (episode_id,)).fetchall()
     board = _board_from_shot_rows(shots_rows, ep["episode_no"])
     shots = []
-    previous_adopted = None
-    previous_adopted_row = None
+    previous_shot = None
+    previous_shot_row = None
     for idx, row in enumerate(shots_rows):
-        if not bool(row["storyboard_adopted"]):
-            continue
         current = board.shots[idx]
         shots.append({
             "row": dict(row),
             "shot": current,
-            "prev": previous_adopted,
-            "prev_row": dict(previous_adopted_row) if previous_adopted_row is not None else None,
+            "prev": previous_shot,
+            "prev_row": dict(previous_shot_row) if previous_shot_row is not None else None,
         })
-        previous_adopted = current
-        previous_adopted_row = row
+        previous_shot = current
+        previous_shot_row = row
     from_no = body.get("from_shot_no")
     if from_no is not None:
         try:
@@ -979,7 +931,7 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
         completed_ids = {
             row["id"] for row in conn.execute(
                 """SELECT s.id FROM shots s
-                   WHERE s.episode_id=? AND s.storyboard_adopted=1 AND (
+                   WHERE s.episode_id=? AND (
                        s.adopted_version_id IS NOT NULL OR EXISTS(
                            SELECT 1 FROM shot_versions v
                            WHERE v.shot_id=s.id AND v.status='succeeded'
@@ -1100,7 +1052,7 @@ async def _generate_shot_core(shot_id: str, body: dict) -> dict:
     prev_shot = None
     if shot_row["shot_no"] > 1:
         prev_row = conn.execute(
-            "SELECT * FROM shots WHERE episode_id=? AND shot_no<? AND storyboard_adopted=1 ORDER BY shot_no DESC LIMIT 1",
+            "SELECT * FROM shots WHERE episode_id=? AND shot_no<? ORDER BY shot_no DESC LIMIT 1",
             (shot_row["episode_id"], shot_row["shot_no"]),
         ).fetchone()
     if prev_row:
@@ -1505,7 +1457,7 @@ async def _complete_episode_core(
 
     conn = get_conn()
     shots_total = conn.execute(
-        "SELECT COUNT(*) AS c FROM shots WHERE episode_id=? AND storyboard_adopted=1", (episode_id,)
+        "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)
     ).fetchone()["c"]
     if int(shots_total or 0) <= 0:
         raise HTTPException(409, "本集尚无分镜")
@@ -2506,7 +2458,7 @@ def stale_assets_preview(episode_id: str):
     conn = get_conn()
     from app.domain.storyboard_ops import _shot_video_is_stale, _shot_adopted_assets_stale
     rows = conn.execute(
-        "SELECT * FROM shots WHERE episode_id=? AND storyboard_adopted=1 ORDER BY shot_no", (episode_id,)
+        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
     ).fetchall()
     items = []
     for row in rows:

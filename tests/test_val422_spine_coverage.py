@@ -80,11 +80,15 @@ def test_s04_split_across_adjacent_shots_passes() -> None:
     sp = _screenplay_with_spine()
     s5 = _compact_shot(5)
     s5.spine_beat_ids = ["S04"]
+    s5.characters = ["萧媚"]
+    s5.characters_visible = ["萧媚"]
     s5.information_ids = ["I3.1"]
     s5.action_desc = "萧媚上前测出斗之气七段，碑面亮起，人群追捧赞叹"
     s5.dialogues = []
     s6 = _compact_shot(6)
     s6.spine_beat_ids = ["S04"]
+    s6.characters = ["萧媚"]
+    s6.characters_visible = ["萧媚"]
     s6.information_ids = ["I3.3"]
     s6.action_desc = "萧媚望向后排萧炎一眼后转身走开，不再过去"
     s6.dialogues = []
@@ -111,6 +115,8 @@ def test_s04_missing_atom_fails_precisely() -> None:
     sp = _screenplay_with_spine()
     s5 = _compact_shot(5)
     s5.spine_beat_ids = ["S04"]
+    s5.characters = ["萧媚"]
+    s5.characters_visible = ["萧媚"]
     s5.information_ids = ["I3.1"]
     s5.action_desc = "萧媚测出斗之气七段，人群赞叹"
     s5.dialogues = []
@@ -130,10 +136,38 @@ def test_s04_missing_atom_fails_precisely() -> None:
     assert any("I3.3" in e for e in errs), errs
 
 
+def test_spine_id_cannot_replace_visible_action_subject() -> None:
+    sp = _screenplay_with_spine()
+    s5 = _compact_shot(5)
+    s5.spine_beat_ids = ["S04"]
+    s5.characters = ["测验员"]
+    s5.characters_visible = ["测验员"]
+    s5.information_ids = ["I3.1", "I3.3"]
+    s5.action_desc = "测验员站在石碑旁宣布七段成绩，随后看向画外。"
+    s5.dialogues = []
+    s9 = _compact_shot(9)
+    s9.spine_beat_ids = ["S07"]
+    s9.key_line_ids = ["KL02"]
+    s9.action_desc = "薰儿走到萧炎面前，认真安慰萧炎。"
+    s9.dialogues = [
+        Dialogue(
+            speaker="薰儿",
+            line="薰儿相信，你会重新站起来，取回属于你的荣耀与尊严",
+            emotion="坚定",
+        )
+    ]
+
+    errs = validate_spine_delivery_ledger(Storyboard(episode_no=1, shots=[s5, s9]), sp)
+
+    assert any("主线节拍缺少可见动作主体" in error and "S04/萧媚" in error for error in errs), errs
+
+
 def test_s07_split_across_shots_passes() -> None:
     sp = _screenplay_with_spine()
     s5 = _compact_shot(5)
     s5.spine_beat_ids = ["S04"]
+    s5.characters = ["萧媚"]
+    s5.characters_visible = ["萧媚"]
     s5.action_desc = "萧媚测出斗之气七段，人群赞叹；望向萧炎后选择不过去"
     s5.information_ids = ["I3.1", "I3.3"]
     s9 = _compact_shot(9)

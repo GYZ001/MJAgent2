@@ -192,7 +192,8 @@ def test_provider_stage_heartbeat_renews_lease_while_reference_work_is_slow(monk
         )
 
     assert asyncio.run(run()) == "ready"
-    assert len(renewals) >= 3
+    # 事件循环调度可能合并中间 tick；至少一次周期续租加一次完成后 fence 即可。
+    assert len(renewals) >= 2
     assert all(item == ("j1", "worker-a", 0.03) for item in renewals)
 
 

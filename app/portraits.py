@@ -274,8 +274,9 @@ async def ensure_cards_for_text(
     bible: Bible,
     *,
     draft_text: str = "",
+    generate_portraits: bool = True,
 ) -> dict:
-    """Discover and incrementally add important off-bible cast for one screenplay pass."""
+    """发现并补人物卡；定妆出图可拆到独立资产环节。"""
     candidates = await discover_character_candidates(
         source_text, bible, episode_no, draft_text=draft_text,
     )
@@ -290,11 +291,20 @@ async def ensure_cards_for_text(
     errors: list[str] = []
     warnings: list[str] = []
     for item in unknown:
-        result = await ensure_character_card(project_id, item["name"], episode_no)
+        result = await ensure_character_card(
+            project_id,
+            item["name"],
+            episode_no,
+            generate_portrait=generate_portraits,
+        )
         if result.get("status") == "added":
             added.append(result)
             if not result.get("has_portrait"):
-                warnings.append(f"{item['name']}：人物卡已添加，定妆照生成失败，需稍后重试")
+                warnings.append(
+                    f"{item['name']}：人物卡已添加，定妆资产将在独立资产环节补齐"
+                    if result.get("portrait_deferred")
+                    else f"{item['name']}：人物卡已添加，定妆照生成失败，需稍后重试"
+                )
         elif result.get("status") == "pending_review":
             # 兼容旧实现返回值；新流程不应再产生用户待审项。
             errors.append(f"{item['name']}：自动建卡流程未完成")
@@ -362,7 +372,13 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
     }
 
 
-async def ensure_character_card(project_id: str, name: str, from_episode_no: int) -> dict:
+async def ensure_character_card(
+    project_id: str,
+    name: str,
+    from_episode_no: int,
+    *,
+    generate_portrait: bool = True,
+) -> dict:
     """检查新角色的原文份量，并自动完成建卡与定妆包。
 
     AI 只为确实需要跨镜头保持一致的具名角色建卡；路人、一次性功能角色、
@@ -498,6 +514,25 @@ async def ensure_character_card(project_id: str, name: str, from_episode_no: int
             conn.commit()
             return {"status": "error", "name": name, "reason": "character card commit failed"}
         set_setting(_discovery_skip_key(project_id, name), "")
+
+        if not generate_portrait:
+            existing["status"] = "auto_applied_asset_pending"
+            existing["decided_at"] = now()
+            existing["decision_reason"] = "人物卡已加入；定妆包等待独立资产环节确认"
+            conn.execute(
+                "UPDATE projects SET bible_auto_changes_json=? WHERE id=?",
+                (json.dumps(change_items, ensure_ascii=False), project_id),
+            )
+            conn.commit()
+            return {
+                "status": "added",
+                "name": name,
+                "change_id": existing["id"],
+                "has_portrait": False,
+                "portrait_deferred": True,
+                "reason": verdict["reason"],
+                "character_card": card,
+            }
 
         latest = conn.execute(
             "SELECT bible_version FROM projects WHERE id=?", (project_id,),
@@ -791,8 +826,6 @@ async def ensure_cards_for_screenplay(project_id: str, episode_no: int, screenpl
 
     for sc in getattr(screenplay, "scene_outline", None) or []:
         _collect(getattr(sc, "characters", None))
-    for b in getattr(screenplay, "beats", None) or []:
-        _collect(getattr(b, "characters", None))
 
     errors: list[str] = []
 
@@ -831,7 +864,10 @@ async def ensure_cards_for_screenplay(project_id: str, episode_no: int, screenpl
         retry_changes = [
             item for item in all_changes
             if item.get("kind") in {"new_character", "character_discovery", "new_bible_character"}
-            and item.get("status") == "auto_applied_asset_failed"
+            and item.get("status") in {
+                "auto_applied_asset_failed",
+                "auto_applied_asset_pending",
+            }
             and item.get("character") in names
         ]
     else:

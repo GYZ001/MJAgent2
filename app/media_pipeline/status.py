@@ -247,7 +247,7 @@ def episode_pipeline_statuses(episode_id: str, *, conn=None) -> tuple[dict[str, 
     shots = db.execute(
         """SELECT s.id, s.adopted_version_id
            FROM shots s
-           WHERE s.episode_id=? AND s.storyboard_adopted=1
+           WHERE s.episode_id=?
            ORDER BY s.shot_no""",
         (episode_id,),
     ).fetchall()
@@ -277,7 +277,7 @@ def episode_pipeline_statuses(episode_id: str, *, conn=None) -> tuple[dict[str, 
                   ) AS latest_version_status
            FROM shot_versions v
            JOIN shots s ON s.id=v.shot_id
-           WHERE s.episode_id=? AND s.storyboard_adopted=1
+           WHERE s.episode_id=?
            GROUP BY v.shot_id""",
         (episode_id,),
     ).fetchall()
@@ -314,7 +314,7 @@ def episode_pipeline_statuses(episode_id: str, *, conn=None) -> tuple[dict[str, 
            FROM reference_sets rs
            JOIN shots s ON s.id=rs.shot_id
            LEFT JOIN reference_assets ra ON ra.reference_set_id=rs.id
-           WHERE s.episode_id=? AND s.storyboard_adopted=1 AND rs.id IN (
+           WHERE s.episode_id=? AND rs.id IN (
              SELECT newest.id FROM reference_sets newest
              WHERE newest.revision=(
                SELECT MAX(candidate.revision) FROM reference_sets candidate

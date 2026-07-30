@@ -38,38 +38,39 @@ def _shot(no: int = 1, **kwargs) -> Shot:
     return Shot(**base)
 
 
-def test_automated_confirmation_accepts_fully_validated_confirming_checkpoint() -> None:
-    episode = {"status": "scripting", "script_error": None}
+def test_manual_confirmation_accepts_succeeded_checkpoint() -> None:
+    episode = {"status": "scripted", "script_error": None}
     checkpoint = SimpleNamespace(
-        phase="CONFIRMING", validated_prefix_end=11, expected_total=11,
+        phase="SUCCEEDED", validated_prefix_end=11, expected_total=11,
     )
 
     assert _is_storyboard_terminal_for_confirmation(
         episode, checkpoint, shot_count=11, planned_shots=11,
-        final_shot_valid=True, automated=True,
+        final_shot_valid=True,
     )
-    # Manual confirmation remains blocked while the supervisor is actively writing.
+
+    running_episode = {"status": "scripting", "script_error": None}
     assert not _is_storyboard_terminal_for_confirmation(
-        episode, checkpoint, shot_count=11, planned_shots=11,
-        final_shot_valid=True, automated=False,
+        running_episode, checkpoint, shot_count=11, planned_shots=11,
+        final_shot_valid=True,
     )
 
-    stopped_episode = {"status": "scripted", "script_error": "stale confirmation error"}
-    assert _is_storyboard_terminal_for_confirmation(
-        stopped_episode, checkpoint, shot_count=11, planned_shots=11,
-        final_shot_valid=True, automated=False,
+    failed_episode = {"status": "scripted", "script_error": "门禁未通过"}
+    assert not _is_storyboard_terminal_for_confirmation(
+        failed_episode, checkpoint, shot_count=11, planned_shots=11,
+        final_shot_valid=True,
     )
 
 
-def test_automated_confirmation_rejects_incomplete_validated_prefix() -> None:
-    episode = {"status": "scripting", "script_error": None}
+def test_manual_confirmation_rejects_incomplete_validated_prefix() -> None:
+    episode = {"status": "scripted", "script_error": None}
     checkpoint = SimpleNamespace(
-        phase="CONFIRMING", validated_prefix_end=10, expected_total=11,
+        phase="SUCCEEDED", validated_prefix_end=10, expected_total=11,
     )
 
     assert not _is_storyboard_terminal_for_confirmation(
         episode, checkpoint, shot_count=11, planned_shots=11,
-        final_shot_valid=True, automated=True,
+        final_shot_valid=True,
     )
 
 

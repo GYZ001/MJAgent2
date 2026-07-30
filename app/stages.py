@@ -652,15 +652,33 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
         for line in (episode.get("required_dialogue_lines") or [])
         if str(line).strip()
     ]
-    required_dialogue_block = (
-        "【用户多选的必保留台词·逐字硬门禁】\n"
-        + "\n".join(
+    required_dialogue_occurrences = [
+        item for item in (episode.get("required_dialogue_occurrences") or [])
+        if isinstance(item, dict) and str(item.get("text") or "").strip()
+    ]
+    required_dialogue_rows = (
+        [
+            (
+                f"- {item.get('id') or f'R{index:03d}'}｜"
+                f"第{item.get('chapter') or '-'}章·段落{item.get('paragraph') or '-'}："
+                f"{str(item.get('text') or '').strip()}"
+                + (f"\n  上下文：{str(item.get('context') or '').strip()}" if item.get("context") else "")
+            )
+            for index, item in enumerate(required_dialogue_occurrences, start=1)
+        ]
+        if required_dialogue_occurrences
+        else [
             f"- R{index:03d}：{line}"
             for index, line in enumerate(required_dialogue_lines, start=1)
-        )
+        ]
+    )
+    required_dialogue_block = (
+        "【用户多选的必保留台词·按原文位置绑定·逐字硬门禁】\n"
+        + "\n".join(required_dialogue_rows)
         + "\n以上每条都必须进入 dialogue_chains[*].turns[*].source_text 与 line，"
-        "并作为角色真实对白逐字写进 full_script_text；不得概括、改写或只写进动作描述。"
-        if required_dialogue_lines
+        "并作为角色真实对白逐字写进 full_script_text；相同文本的不同 occurrence 仍是不同原文位置，"
+        "不得合并其上下文语义，不得概括、改写或只写进动作描述。"
+        if required_dialogue_rows
         else "【用户多选的必保留台词】本次未额外勾选；仍须遵守开场对白锚点与主线对白链规则。"
     )
     opening_dialogue_block = (
@@ -1199,9 +1217,10 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
 - {ending_rule}
 - 禁止按文本长度机械拆分；超预算时合并。
 
-【导演调度总则】只用大形体动作。对白严格按话轮拆镜：建立镜/群像镜负责交代空间但不承载角色对白；
-一旦角色开口，默认切成该说话人的单人近景或特写，characters_visible 只保留说话人，听者和人群留在画外；
-下一角色回答时新建相邻 reverse_angle/reaction_cut 反打镜。只有说话同时发生搀扶、拥抱、抓住、递接物品等
+【导演调度总则】只用大形体动作。对白严格按话轮拆镜：纯台词/表情镜才切成说话人的单人近景或特写，
+characters_visible 只保留说话人，听者和人群留在画外；若说话同时承担走位、离场、触碑、翻开/拿取道具等
+主线动作，必须规划为中景/全景动作对白镜，让动作主体、动作对象和完整路径可见，不得把动作删成静态口型。
+下一角色回答时新建相邻 reverse_angle/reaction_cut 反打镜。说话同时发生搀扶、拥抱、抓住、递接物品等
 必须看见接触点的双人肢体互动，才允许双人同框；即使例外也最多 2 人可见。人物不能无动机地从无到有。
 
 完整剧本：
@@ -1223,6 +1242,7 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
 3. 相邻两镜 state_out -> state_in 必须能承接，且 primary_action 必须不同、持续前进，严禁停留或复述同一节拍。
 4. 上方主线台词/剧情点/spine 必须分配到 covers，并填写 key_line_ids（KL01..）与 spine_beat_ids（S01..）；drop_list 禁止分配。new_information_ids 只能引用 screenplay.information_ledger 已有 info_id。同一镜必保留口播字数不得超过该镜 duration_s 容量（10s≤{config.MAX_SPOKEN_CHARS_PER_SHOT}字），超限必须拆到相邻镜。
 4b. 同一镜 key_line_ids 只能属于同一说话人；说话人变化就是切镜点。按“甲单人近景说完 → 乙单人反打回应”拆成相邻镜，禁止把问答双方和围观人群同时塞进一个对白镜头。
+4c. 每条 must_keep spine 的 who 必须在分配该 S* 的某一镜中成为可见动作主体，does 必须真正拍出。测验员宣布某人成绩、路人谈论某人，都不能替代拍摄这个人完成“走到石碑前、触碑、离场”等明示动作；需要时在 1~2 镜额度内拆成“动作主体完成动作 → 宣布/反应”。
 5. covers 只写本镜必须拍出/说出的具体事实（可见动作、可听台词、可感知反应、可核对信息点）；禁止写「反差/对比/衬托/呼应/强调/暗示/氛围」等导演意图——意图写入 beat/primary_action/state_out，事实写成双方可见状态（如「薰儿测出七段、人群赞叹；萧炎低头不语」）。
 6. {first_rule}
 7. 每条 scene_setting 写时间+地点短标签；同一连续空间必须保持同一个标签，不要因为人物走到门口/桌边/人群前就改标签。
@@ -1671,7 +1691,7 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
 4. {final_shot_rule}
 5. 如果 is_final=false，本镜结尾要留下清楚的动作/情绪/信息状态，供下一镜继续。
 6. 人物入画/出画必须符合导演调度：characters 里新增的人物，必须在 action_desc 或 first_frame_desc 中写清他/她从哪里来、如何进入画面或如何被镜头发现；上一镜在场但本镜不再可见的人物，必须有退开、离开、被遮挡、留在画外或换场的可见原因。禁止“上一镜没有，下一镜突然站在画面里/突然开口”。
-6b. 若本镜有 spoken_dialogue：默认把画面切成说话人的单人近景/特写，characters=characters_visible=[说话人]，听者与人群只留在画外；同镜不得让第二个人开口。下一话轮用 reverse_angle/reaction_cut 新建相邻反打镜。只有说话同时发生必须看清接触点的双人肢体互动，才允许双人同框并写 risk_tags=["dialogue_two_shot_required"]。
+6b. 若本镜有 spoken_dialogue：仅当本镜是纯台词/表情交付时，才切成说话人的单人近景/特写，characters=characters_visible=[说话人]，听者与人群留在画外。若说话同时包含走近、退后、穿过人群、转身离场、翻开/拿取/触碰剧情道具等大形体动作，必须改用中景/全景完整拍出动作，把 risk_tags 写为 ["dialogue_action_staging"]，不得用静态口型或大头特写替代动作。同镜仍只能有一位 spoken_dialogue 说话人；下一话轮用 reverse_angle/reaction_cut 新建相邻反打镜。说话同时发生必须看清接触点的双人肢体互动时，允许双人同框并写 risk_tags=["dialogue_two_shot_required"]。
 7. continuity_mode 必须从 action_continuation / same_scene_cut / reaction_cut / reverse_angle / insert_detail / scene_change 中选择；只在同一人物同一动作跨镜延续时使用 action_continuation，普通同场景切换用 same_scene_cut / reaction_cut / reverse_angle / insert_detail，跨时空用 scene_change。
 8. new_information_ids 只能从 current_ids / pending_ids 中选择本镜首次交付的信息，禁止自创英文 snake_case ID；若两栏均为空则输出空数组。do_not_repeat 只能填写 do_not_repeat 栏给出的中文剧情内容，不得填写裸 ID；已交付且不允许强化的信息不得重复讲。
 9. 功能性路人合同：{extra_policy}。
@@ -1696,7 +1716,7 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
 上一集结尾：{prev_ending or "（本集为第一集）"}
 
 输出 JSON Schema：
-{{"episode_no": {episode['episode_no']}, "is_final": bool, "shot": {{"shot_no": {shot_no}, "duration_s": int, "shot_size": "远景|全景|中景|近景|特写", "camera_move": "固定|推近|拉远|横摇|跟随", "scene_setting": "短时间+地点标签", "characters": ["画面中实际可见的角色圣经姓名或合法功能性路人标签"], "characters_visible": ["本镜画面可见角色，通常等于 characters；对白镜默认只有说话人"], "action_desc": str, "state_in": "本镜开始的精确人物/道具/信息状态", "primary_action": "本镜唯一主动作/主交付", "state_out": "本镜结束后交给下一镜的精确状态", "continuity_mode": "action_continuation|same_scene_cut|reaction_cut|reverse_angle|insert_detail|scene_change", "story_event_id": "对应 screenplay.events[].event_id（E*）；没有对应事件时必须输出空字符串，禁止输出 null，禁止写 S*", "spine_beat_ids": ["本镜落地的主线节拍 S*，可空"], "key_line_ids": ["本镜说出的关键台词 KL*，可空"], "new_information_ids": ["仅填写 information_ledger 中已有的 I1/I2 等内部编号"], "do_not_repeat": ["只能填写已交付信息的中文内容，禁止裸 ID"], "risk_tags": ["仅双人肢体互动对白镜可写 dialogue_two_shot_required，否则为空"], "audio_cast": ["本镜发声角色/功能性声音"], "audio_timeline": [{{"start_s": float, "end_s": float, "type": "spoken_dialogue|offscreen_voice|ambient_sound", "speaker_id": "角色名/功能性身份或null", "text": str, "lip_sync": bool, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定", "voice_canonical": str}}], "required_text": {{"surface": "道具/屏幕/牌匾等承载面", "exact_text": "需要画面准确出现的文字；无则为空", "appear_start_s": 0.0, "stable_until_s": null, "style": "", "allow_other_text": false}}, "first_frame_desc": "本镜开始的静止画面，25~50字，只写看得见的人物姿态/表情/手部/道具/光效", "last_frame_desc": "本镜结束的静止画面，25~50字，与首帧【同机位同场景同构图】，仅人物动作推进后的状态（不要换镜头/景别/场景）", "source_excerpt": "对应本镜头的小说原文逐字摘录，至少 {SOURCE_EXCERPT_MIN_CHARS} 字，仅作审计证据；其中双引号必须按 JSON 规范转义", "narration": "", "dialogues": [{{"speaker": "必须是本镜头 characters 中的可见角色名或功能性路人标签", "line": str, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定", "delivery": "spoken_dialogue|offscreen_voice"}}], "transition": "{transition_options}"}}}}"""
+{{"episode_no": {episode['episode_no']}, "is_final": bool, "shot": {{"shot_no": {shot_no}, "duration_s": int, "shot_size": "远景|全景|中景|近景|特写", "camera_move": "固定|推近|拉远|横摇|跟随", "scene_setting": "短时间+地点标签", "characters": ["画面中实际可见的角色圣经姓名或合法功能性路人标签"], "characters_visible": ["本镜画面可见角色，通常等于 characters；纯对白近景默认只有说话人"], "action_desc": str, "state_in": "本镜开始的精确人物/道具/信息状态", "primary_action": "本镜唯一主动作/主交付", "state_out": "本镜结束后交给下一镜的精确状态", "continuity_mode": "action_continuation|same_scene_cut|reaction_cut|reverse_angle|insert_detail|scene_change", "story_event_id": "对应 screenplay.events[].event_id（E*）；没有对应事件时必须输出空字符串，禁止输出 null，禁止写 S*", "spine_beat_ids": ["本镜落地的主线节拍 S*，可空"], "key_line_ids": ["本镜说出的关键台词 KL*，可空"], "new_information_ids": ["仅填写 information_ledger 中已有的 I1/I2 等内部编号"], "do_not_repeat": ["只能填写已交付信息的中文内容，禁止裸 ID"], "risk_tags": ["纯对白为空；动作对白写 dialogue_action_staging；双人接触对白写 dialogue_two_shot_required"], "audio_cast": ["本镜发声角色/功能性声音"], "audio_timeline": [{{"start_s": float, "end_s": float, "type": "spoken_dialogue|offscreen_voice|ambient_sound", "speaker_id": "角色名/功能性身份或null", "text": str, "lip_sync": bool, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定", "voice_canonical": str}}], "required_text": {{"surface": "道具/屏幕/牌匾等承载面", "exact_text": "需要画面准确出现的文字；无则为空", "appear_start_s": 0.0, "stable_until_s": null, "style": "", "allow_other_text": false}}, "spatial_anchor": "固定地标/大型道具的方位与距离；同场相邻镜沿用同一世界位置", "first_frame_desc": "本镜开始的静止画面，25~50字，只写看得见的人物姿态/表情/手部/固定地标/道具/光效", "last_frame_desc": "本镜结束的静止画面，25~50字，与首帧【同机位同场景同构图】，固定地标和大型道具不消失不换位，仅人物动作推进", "source_excerpt": "对应本镜头的小说原文逐字摘录，至少 {SOURCE_EXCERPT_MIN_CHARS} 字，仅作审计证据；其中双引号必须按 JSON 规范转义", "narration": "", "dialogues": [{{"speaker": "必须是本镜头 characters 中的可见角色名或功能性路人标签", "line": str, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定", "delivery": "spoken_dialogue|offscreen_voice"}}], "transition": "{transition_options}"}}}}"""
     source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()[:16]
     prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
     log_provider_call(
@@ -1714,7 +1734,6 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
             "source_hash": source_hash,
             "prompt_hash": prompt_hash,
             "contract_version": "renderability_v1",
-            "screenplay_mode": "full_script",
         })
     repair_output_contract = f"""只输出一个 JSON 根对象，根字段为 episode_no、is_final、shot。
 shot 必须是单数对象，shot.shot_no 必须等于 {shot_no}；禁止输出 shots 数组，禁止附带下一镜。
@@ -1864,7 +1883,8 @@ def _storyboard_output_contract(episode: dict, bible: Bible, durations: list[int
    - 正例：首帧「角色A手掌刚贴上石碑，神情平静，碑面无光」；尾帧「同一机位，角色A手掌仍贴在石碑上，碑面亮起，他眉头紧锁」。
    - 各约 20~40 字；不要写超纲微细节、字幕、运镜。
 8c. 【导演调度】无对白的建立镜/动作镜 characters ≤3；入画/出画用走、停、转身等大动作交代；禁止凭空出现/消失。
-8c-1. 【对白构图硬合同】只要存在 spoken_dialogue，默认使用说话人的单人近景或特写：characters 与 characters_visible 都只能写该说话人，camera_move 只能固定或推近；听者、人群和下一位说话人全部留在画外。下一话轮用 reverse_angle/reaction_cut 新建相邻镜。只有说话同时发生搀扶、拥抱、抓住、递接物品等必须显示接触点的双人肢体互动，才允许最多 2 人同框，并在 risk_tags 写 dialogue_two_shot_required。
+8c-1. 【对白构图硬合同】纯台词/表情交付默认使用说话人的单人近景或特写：characters 与 characters_visible 只写说话人，camera_move 只能固定或推近；听者、人群和下一位说话人留在画外。若说话同时包含走位、离场或翻开/拿取/触碰剧情道具等大形体动作，必须使用中景/全景完整拍出动作，并在 risk_tags 写 dialogue_action_staging；禁止用静态口型或大头特写替代动作。下一话轮用 reverse_angle/reaction_cut 新建相邻镜。说话同时发生搀扶、拥抱、抓住、递接物品等必须显示接触点的双人肢体互动时，允许最多 2 人同框，并在 risk_tags 写 dialogue_two_shot_required。
+8c-2. 【固定地标连续性】若场景圣经或本镜出现石碑、门、桌台、屏幕等固定地标/大型道具，spatial_anchor 必须写清其方位；first_frame_desc 与 last_frame_desc 都要保留同一物体的外形、数量和位置。禁止在固定镜头中途消失、复制、换位后重新出现。
 8d. 【接触侧面】触碰/按压/拿取/递出/挥击/搀扶等接触类动作，首尾帧与动作描述按侧面机位书写，写清接触点与相对方位，禁止写成正面端站摆拍。
 8e. 【同框身高】多人物同框默认同身高、眼线齐平；仅当剧情明确需要身高差时才在 action_desc/首尾帧写明（如「高他一头」「孩童仰视」），否则不要写一高一低。
 9. source_excerpt 必填：至少 {SOURCE_EXCERPT_MIN_CHARS} 字，可与相邻镜共享同一主线段落；仅作审计，不得进入 Seedance。
@@ -1913,8 +1933,9 @@ def _storyboard_preflight_contract(episode: dict) -> str:
 7. 每条 action_desc 必须显式写出 characters 中角色姓名与这一个大形体主动作（{ACTION_DESC_TARGET_MIN}~{ACTION_DESC_TARGET_MAX} 字）；禁止超纲细节词与切镜词。
 8. 每条 shot 的 source_excerpt 必填（≥{SOURCE_EXCERPT_MIN_CHARS} 字），可与相邻镜共享主线段落；仅作审计，不得进入 Seedance。
 9. 声轨预检：若完整剧本对应段落有“角色名：台词”且本镜负责交付该信息，必须写 dialogues；内心独白禁止写进 narration（narration 必须为空），改用画面姿态表达；人群嘲讽/恭维写进 action_desc。是否发声服从本镜信息交付与口播容量，禁止为比例凑对白。
-9b. 对白构图预检：统计 spoken_dialogue 的唯一说话人。超过 1 人必须按话轮拆镜；正好 1 人时，除必须显示接触点的双人肢体互动外，characters/characters_visible 必须只含说话人，shot_size=近景或特写，camera_move=固定或推近，听者必须明确留在画外。
+9b. 对白构图预检：统计 spoken_dialogue 的唯一说话人。超过 1 人必须按话轮拆镜。正好 1 人且只有台词/表情交付时，characters/characters_visible 只含说话人，shot_size=近景或特写，camera_move=固定或推近；若台词同时包含走位、离场或剧情道具操作，改用中景/全景并写 dialogue_action_staging，完整保留动作路径；双人接触动作写 dialogue_two_shot_required。
 10. first_frame_desc 与 last_frame_desc 必须同机位、同场景、同构图，只让人物动作从"开始"推进到"结束"；不要让首尾帧变成两个不同的镜头/景别/场景。
+10b. spatial_anchor 必须写清当前构图内固定地标/大型道具的位置；同一视频的首尾帧中，同一石碑、门、桌台或屏幕不得消失、复制、变形或换位。
 11. 人物调度预检：逐条核对上一镜 last_frame_desc、本镜 first_frame_desc、characters、action_desc。任何角色的入画、出画、开口、转身、靠近、退后都必须有可见动作链；如果一句话解释不清，就拆成相邻两镜，不要让视频模型自行脑补。
 
 常见错误 → 正确写法（以下角色A/场景A仅为占位示例，请替换成本集真实角色与场景）：

@@ -33,7 +33,7 @@ REFERENCE_IMAGE_TYPES = {
 
 # 关键帧提示词是分镜级可复用资产的一部分。升级该版本时，未经人工
 # 编辑的旧关键帧不得继续污染新视频版本。
-KEYFRAME_PROMPT_CONTRACT_VERSION = "narrative_dialogue_closeup_v9"
+KEYFRAME_PROMPT_CONTRACT_VERSION = "narrative_action_geometry_v10"
 KEYFRAME_STRUCTURAL_FALLBACK_MODE = "omit_structurally_invalid_keyframe_slots_v1"
 _KEYFRAME_LLM_PROMPT_MAX_CHARS = 1200
 _DEFAULT_KEYFRAME_CANDIDATE_COUNT = 3
@@ -924,6 +924,17 @@ def _keyframe_contract_instructions(shot: Shot, bible: Bible) -> list[str]:
         f"Shot: {shot.shot_size}, camera '{camera_angle}', preserve the scripted scene axis; no montage, endpoint blend, "
         "or neutral character-sheet pose.",
     ]
+    scene_canonical = str(contract.get("scene_canonical") or "").strip()
+    scene_landmarks = [
+        str(item).strip() for item in (contract.get("scene_landmarks") or []) if str(item).strip()
+    ]
+    if scene_canonical or scene_landmarks:
+        lines.append(
+            "FIXED SCENE GEOMETRY: preserve the canonical set layout and every visible permanent landmark exactly; "
+            "never delete, duplicate, morph, resize, or relocate a stele, gate, table, screen, or other fixed prop. "
+            + (f"Canonical scene: {scene_canonical}. " if scene_canonical else "")
+            + (f"Explicit landmarks: {', '.join(scene_landmarks)}." if scene_landmarks else "")
+        )
     individual = [str(name) for name in (contract.get("individual_visible_characters") or []) if str(name).strip()]
     collective = [str(name) for name in (contract.get("collective_visible_roles") or []) if str(name).strip()]
     if individual:
@@ -1011,6 +1022,10 @@ def _keyframe_contract_instructions(shot: Shot, bible: Bible) -> list[str]:
     lines.append(
         "Use natural perspective and physically coherent human scale throughout; never infer physical height from a "
         "reference image's crop or subject size."
+    )
+    lines.append(
+        "Preserve the named character's natural canonical head-to-body ratio even in a close-up; never enlarge the "
+        "physical head, make the body childlike/chibi, or infer anatomy from the reference crop size."
     )
     lines.append(
         "Keep each face, hairstyle, outfit, age, and build faithful to its named anchor. Clean 9:16 portrait still; "
@@ -1545,6 +1560,9 @@ async def write_reference_prompt(shot: Shot, bible: Bible, ref_type: str, *, int
             "shot_size": shot.shot_size,
             "camera_angle": contract.get("camera_angle"),
             "spatial_anchor": contract.get("spatial_anchor"),
+            "scene_canonical": contract.get("scene_canonical"),
+            "scene_landmarks": contract.get("scene_landmarks"),
+            "scene_geometry_contract": contract.get("scene_geometry_contract"),
             "contact_required": contract.get("contact_required"),
             "established_contact_required": contract.get("established_contact_required"),
             "relative_height_policy": contract.get("relative_height_policy"),
@@ -1613,6 +1631,9 @@ async def write_reference_prompt_batch(
             "shot_size": shot.shot_size,
             "camera_angle": contract.get("camera_angle"),
             "spatial_anchor": contract.get("spatial_anchor"),
+            "scene_canonical": contract.get("scene_canonical"),
+            "scene_landmarks": contract.get("scene_landmarks"),
+            "scene_geometry_contract": contract.get("scene_geometry_contract"),
             "contact_required": contract.get("contact_required"),
             "established_contact_required": contract.get("established_contact_required"),
             "relative_height_policy": contract.get("relative_height_policy"),

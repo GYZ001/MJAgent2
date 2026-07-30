@@ -230,6 +230,50 @@ def test_edit_impact_preview_is_read_only_and_detects_downstream(client) -> None
     assert downstream.json()["downstream"]["shots"] == 1
 
 
+def test_qa_failed_manual_draft_keeps_published_version_and_can_enter_repair(monkeypatch) -> None:
+    _seed_episode(with_artifact=True)
+    changed = _valid_script()
+    changed.stakes = ""
+    conn = db.get_conn()
+
+    with enter_handler(), pytest.raises(HTTPException) as caught:
+        asyncio.run(api.edit_screenplay("e1", {
+            "screenplay": changed.model_dump(mode="json"),
+            "expected_version": "art_sp_old",
+        }))
+    assert caught.value.status_code == 422
+    assert caught.value.detail["code"] == "screenplay_qa_failed"
+    before = conn.execute(
+        "SELECT screenplay_artifact_id,screenplay_status FROM episodes WHERE id='e1'"
+    ).fetchone()
+    assert tuple(before) == ("art_sp_old", "ready")
+
+    class Recorder:
+        run_id = "run_manual_repair"
+
+    monkeypatch.setattr(api, "_new_screenplay_recorder", lambda *_args, **_kwargs: Recorder())
+    monkeypatch.setattr(api, "_spawn_screenplay_activation", lambda *_args, **_kwargs: None)
+    with enter_handler():
+        started = asyncio.run(api.repair_screenplay_draft("e1", {
+            "screenplay": changed.model_dump(mode="json"),
+            "expected_version": "art_sp_old",
+        }))
+
+    assert started["status"] == "repairing"
+    episode = conn.execute(
+        "SELECT screenplay_artifact_id,working_screenplay_artifact_id,"
+        "screenplay_status,screenplay_production_revision_id FROM episodes WHERE id='e1'"
+    ).fetchone()
+    assert episode["screenplay_artifact_id"] == "art_sp_old"
+    assert episode["working_screenplay_artifact_id"] == started["artifact_id"]
+    assert episode["screenplay_status"] == "repairing"
+    assert episode["screenplay_production_revision_id"] == started["revision_id"]
+    artifact = conn.execute(
+        "SELECT type,status FROM artifacts WHERE id=?", (started["artifact_id"],)
+    ).fetchone()
+    assert tuple(artifact) == ("screenplay_document", "candidate")
+
+
 def test_successful_storyboard_is_not_reported_as_failed_checkpoint() -> None:
     _seed_episode(with_artifact=True)
     conn = db.get_conn()
@@ -289,7 +333,6 @@ def test_script_page_has_pure_navigation_and_no_pipe_parser() -> None:
     assert "window.confirm(`确认恢复" not in source
     assert "查看分镜台 →" in source
     assert "go('board', projectId, ep.id)" in source
-    assert "storyboard/preflight" in source
     assert "本集目标时长" in source
     assert "/target-duration" in source
     assert "整集节奏预算" in source

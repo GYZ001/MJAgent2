@@ -18,7 +18,6 @@ from app.production.revision import (
 from app.production.screenplay_document import (
     document_to_screenplay,
     normalize_overdetail_text_fields,
-    prune_dialogue_chains_to_budget,
     screenplay_to_document,
     apply_field_patch,
 )
@@ -91,6 +90,30 @@ def _minimal_script(**overrides) -> EpisodeScreenplay:
     )
     data.update(overrides)
     return EpisodeScreenplay(**data)
+
+
+def test_screenplay_qa_is_read_only_and_blocks_failed_candidate() -> None:
+    from app.production.screenplay_repair import run_screenplay_qa
+
+    script = _minimal_script()
+    before = script.model_dump_json()
+
+    issues, evaluation = run_screenplay_qa(
+        script,
+        bible=Bible(characters=[], world=World(visual_style_canonical="测试画风")),
+        source_text="甲：开始",
+        episode={
+            "episode_no": 1,
+            "target_duration_s": 50,
+            "required_dialogue_lines": [],
+        },
+    )
+
+    assert script.model_dump_json() == before
+    assert issues
+    assert evaluation.status == "failed"
+    assert evaluation.evaluation_role == "runtime_gate"
+    assert evaluation.runtime_blocking is True
 
 
 def test_baseline_counter_and_policy_denies_second_generate():
@@ -280,95 +303,6 @@ def test_patch_planner_relabels_invalid_same_speaker_response() -> None:
     assert _patch_strategy_key(ops) == "fix_dialogue_function_DC1_1"
 
 
-def test_dialogue_budget_pruning_keeps_complete_opening_and_required_chains() -> None:
-    def chain(chain_id: str, prefix: str, count: int) -> KeyDialogueChain:
-        return KeyDialogueChain(
-            chain_id=chain_id,
-            topic=f"{prefix}对白主题",
-            turns=[
-                KeyDialogueTurn(
-                    speaker="甲" if index % 2 == 0 else "乙",
-                    line=f"{prefix}{index + 1}",
-                    function="statement",
-                    source_text=f"{prefix}{index + 1}",
-                )
-                for index in range(count)
-            ],
-        )
-
-    script = _minimal_script(dialogue_chains=[
-        chain("DC1", "开场", 3),
-        chain("DC2", "过渡", 4),
-        chain("DC3", "锁定", 2),
-    ])
-
-    patched, touched = prune_dialogue_chains_to_budget(
-        screenplay_to_document(script),
-        max_turns=6,
-        required_lines=["锁定1"],
-    )
-    out = document_to_screenplay(patched)
-
-    assert [item.chain_id for item in out.dialogue_chains] == ["DC1", "DC3"]
-    assert len(out.key_lines) == 5
-    assert "DC2" in touched
-    assert out.full_script_text == script.full_script_text  # 正文不因精选预算被删剧情
-
-
-def test_patch_planner_prunes_dialogue_budget_before_generic_rederive() -> None:
-    from app.production.screenplay_repair import _patch_strategy_key, plan_screenplay_patch
-
-    script = _minimal_script(dialogue_chains=[KeyDialogueChain(
-        chain_id="DC1",
-        topic="开场主线",
-        turns=[
-            KeyDialogueTurn(
-                speaker="甲", line=f"第{index}句", function="statement", source_text=f"第{index}句",
-            )
-            for index in range(7)
-        ],
-    )])
-    issue = structured_issue(
-        code="KEY_LINE_MISSING",
-        message="dialogue_chains 共 11 个话轮；主线对白链总量必须为 3~6，按整组取舍而不是截断回答",
-        subject="screenplay",
-        path="/dialogue_chains",
-        rule_id="dialogue_budget",
-        stage="screenplay",
-    )
-    issue.evidence["required_dialogue_lines"] = ["必保台词"]
-
-    ops = plan_screenplay_patch(issue, script)
-
-    assert len(ops) == 1
-    assert ops[0].op == "prune_dialogue_budget"
-    assert ops[0].value == {"max_turns": 6, "required_lines": ["必保台词"]}
-    assert _patch_strategy_key(ops) == "prune_dialogue_budget"
-
-
-def test_dialogue_budget_issue_is_chosen_before_individual_chain_issue() -> None:
-    from app.production.screenplay_repair import _choose_issue
-
-    cross_scene = structured_issue(
-        code="KEY_LINE_MISSING",
-        message="dialogue_chains[1] 被拆到多个场次；同一触发→回应链必须在同一场完成",
-        subject="screenplay",
-        path="/dialogue_chains",
-        rule_id="chain_scene",
-        stage="screenplay",
-    )
-    budget = structured_issue(
-        code="KEY_LINE_MISSING",
-        message="dialogue_chains 共 11 个话轮；主线对白链总量必须为 3~6，按整组取舍而不是截断回答",
-        subject="screenplay",
-        path="/dialogue_chains",
-        rule_id="dialogue_budget",
-        stage="screenplay",
-    )
-
-    assert _choose_issue([cross_scene, budget]) is budget
-
-
 def test_cross_scene_dialogue_chain_is_split_without_rewriting_body() -> None:
     from app.production.screenplay_document import (
         document_to_screenplay,
@@ -420,128 +354,6 @@ def test_cross_scene_dialogue_chain_is_split_without_rewriting_body() -> None:
     assert result.dialogue_chains[1].chain_id == "DC2"
     assert result.full_script_text == before_body
     assert touched == ["dialogue_chains", "DC1", "DC2"]
-
-
-@pytest.mark.asyncio
-async def test_resume_restores_chains_pruned_by_retired_dialogue_budget(monkeypatch) -> None:
-    from app.evidence import repository as evidence_repository
-    from app.production import screenplay_repair
-    from app.production.revision import (
-        get_production_revision,
-        save_checkpoint,
-        screenplay_production_state,
-    )
-
-    def chain(chain_id: str, line: str) -> KeyDialogueChain:
-        return KeyDialogueChain(
-            chain_id=chain_id,
-            topic=f"{line}对白主题",
-            turns=[KeyDialogueTurn(
-                speaker="甲",
-                line=line,
-                function="statement",
-                source_text=line,
-            )],
-        )
-
-    baseline_script = _minimal_script(
-        stakes="失败将失去资格",
-        dialogue_chains=[
-            chain("DC1", "第一句"),
-            chain("DC2", "第二句"),
-            chain("DC3", "第三句"),
-        ],
-    )
-    working_script = baseline_script.model_copy(deep=True)
-    working_script.dialogue_chains = working_script.dialogue_chains[:2]
-
-    revision = ensure_production_revision(
-        episode_id="ep_p",
-        kind="screenplay",
-        resume=False,
-    )
-    baseline_artifact = evidence_repository.create_artifact(EvidenceArtifact(
-        type="screenplay_document",
-        scope_type="episode",
-        scope_id="ep_p",
-        status="candidate",
-        trust_level="T1",
-        content=screenplay_repair.screenplay_artifact_payload(baseline_script),
-    ))
-    working_artifact = evidence_repository.create_artifact(EvidenceArtifact(
-        type="screenplay_document",
-        scope_type="episode",
-        scope_id="ep_p",
-        status="validated",
-        trust_level="T2",
-        content=screenplay_repair.screenplay_artifact_payload(working_script),
-        parent_artifact_ids=[baseline_artifact["id"]],
-    ))
-    mark_baseline_generated(
-        revision.id,
-        baseline_artifact_id=baseline_artifact["id"],
-        working_artifact_id=working_artifact["id"],
-    )
-    mark_first_evaluation(revision.id, "eval_existing")
-    save_checkpoint(revision.id, {
-        "planner_version": "screenplay-repair-7",
-        "phase": "REPAIR_FAILED",
-        "issue_strategy_history": {
-            "legacy-budget-issue": ["prune_dialogue_budget"],
-        },
-        "patch_artifact_ids": [],
-    })
-
-    assert screenplay_production_state("ep_p")[
-        "legacy_dialogue_policy_recovery_available"
-    ] is True
-
-    def passing_qa(_current, **_kwargs):
-        return [], Evaluation(
-            evaluator_type="deterministic",
-            evaluator_name="test",
-            evaluator_version="1",
-            status="passed",
-            hard_gate_passed=True,
-            score=100,
-            issues=[],
-        )
-
-    async def forbidden_baseline(*_args, **_kwargs):
-        raise AssertionError("兼容恢复不得再次调用整版生成")
-
-    monkeypatch.setattr(screenplay_repair, "run_screenplay_qa", passing_qa)
-    monkeypatch.setattr("app.stages.generate_screenplay_baseline", forbidden_baseline)
-    monkeypatch.setattr(
-        screenplay_repair,
-        "publish_screenplay",
-        lambda **kwargs: {"status": "ready", "artifact_id": kwargs["artifact_id"]},
-    )
-
-    result = await screenplay_repair.run_screenplay_production(
-        episode_id="ep_p",
-        episode={
-            "id": "ep_p",
-            "project_id": "proj_p",
-            "episode_no": 1,
-            "target_duration_s": 50,
-        },
-        source_text="第一句 第二句 第三句",
-        bible=Bible(
-            characters=[],
-            world=World(visual_style_canonical="测试画风"),
-        ),
-        resume=True,
-    )
-
-    assert [item.chain_id for item in result.dialogue_chains] == ["DC1", "DC2", "DC3"]
-    resumed = get_production_revision(revision.id)
-    assert resumed is not None
-    assert resumed.baseline_generation_count == 1
-    assert resumed.checkpoint_json["dialogue_policy_recovery"]["restored"] is True
-    assert screenplay_production_state("ep_p")[
-        "legacy_dialogue_policy_recovery_available"
-    ] is False
 
 
 def test_full_regen_denied_is_a_policy_conflict_not_a_media_error():
@@ -720,12 +532,11 @@ async def test_noop_patch_attempts_consume_activation_budget(monkeypatch):
         resume=True,
     )
 
-    assert attempts == 0
-    published = screenplay_repair.get_production_revision(revision.id)
-    assert published is not None
-    # Score-only：质量 Issue 不再消耗 activation patch 预算，结构可交付即发布。
-    assert published.checkpoint_json["phase"] == "SUCCEEDED"
-    assert published.checkpoint_json.get("yield_reason") is None
+    assert attempts == 2
+    paused = screenplay_repair.get_production_revision(revision.id)
+    assert paused is not None
+    assert paused.checkpoint_json["phase"] == "WAITING_RETRY"
+    assert paused.checkpoint_json["yield_reason"] == "activation_budget"
 
 
 @pytest.mark.asyncio
@@ -801,6 +612,19 @@ def test_certificate_binds_hash_and_rejects_mismatch(monkeypatch):
         )
     )
     h = art["content_hash"] or evidence_repository.content_hash(art["content"])
+    evaluation = evidence_repository.create_evaluation(
+        art["id"],
+        Evaluation(
+            evaluator_type="deterministic",
+            evaluator_name="screenplay_qa",
+            evaluator_version="2",
+            status="passed",
+            hard_gate_passed=True,
+            evaluation_role="runtime_gate",
+            runtime_blocking=True,
+            score=100,
+        ),
+    )
     cert = issue_completion_certificate(
         kind="screenplay",
         scope_id="ep_p",
@@ -808,6 +632,7 @@ def test_certificate_binds_hash_and_rejects_mismatch(monkeypatch):
         artifact_hash=h,
         contract_version="1",
         qa_profile_version="screenplay-qa-1",
+        evaluation_ids=[evaluation["id"]],
     )
     verify_completion_certificate(cert, expected_artifact_hash=h)
     with pytest.raises(ValueError):
@@ -818,7 +643,7 @@ def test_repair_router_no_longer_emits_redo_or_replan():
     assert strategy_for_level("L3") == "insert_shot"
     assert strategy_for_level("L4") == "split_shot"
     assert normalize_strategy("redo_suffix") == "repair_window"
-    assert normalize_strategy("replan_outline") == "insert_shot"
+    assert normalize_strategy("replan_outline") == "repair_window"
 
     plan = route_issues([
         structured_issue(

@@ -502,7 +502,7 @@ def _reconcile_terminal_continuity_blocks(episode_id: str) -> int:
         """SELECT j.id, j.shot_id, j.version_id, j.after_shot_id, s.shot_no
            FROM jobs j JOIN shots s ON s.id=j.shot_id
            WHERE j.episode_id=? AND j.kind='video'
-             AND s.storyboard_adopted=1 AND s.adopted_version_id IS NULL
+             AND s.adopted_version_id IS NULL
              AND j.status IN ('queued','waiting','waiting_retry')
              AND j.after_shot_id IS NOT NULL
              AND j.pipeline_stage=?""",
@@ -585,7 +585,7 @@ def _stop_supervised_video_jobs(episode_id: str, *, run_id: str | None, reason: 
         """SELECT j.id FROM jobs j
            JOIN shots s ON s.id=j.shot_id
            WHERE j.episode_id=? AND j.kind='video'
-             AND s.storyboard_adopted=1 AND s.adopted_version_id IS NULL
+             AND s.adopted_version_id IS NULL
              AND j.status IN (
                'queued','running','waiting_provider','waiting_retry','waiting',
                'waiting_human','paused_budget'
@@ -631,7 +631,7 @@ def rebuild_coverage_ledger(
     conn = get_conn()
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     shot_rows = conn.execute(
-        "SELECT * FROM shots WHERE episode_id=? AND storyboard_adopted=1 ORDER BY shot_no", (episode_id,)
+        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
     ).fetchall()
     chains = _compute_chains(shot_rows)
     ep_sb = ep["storyboard_artifact_id"] if ep else None
@@ -919,7 +919,7 @@ def _after_shot_id(episode_id: str, shot_no: int, *, degrade: bool = False) -> s
 
     conn = get_conn()
     rows = conn.execute(
-        "SELECT * FROM shots WHERE episode_id=? AND storyboard_adopted=1 AND shot_no IN (?, ?) ORDER BY shot_no",
+        "SELECT * FROM shots WHERE episode_id=? AND shot_no IN (?, ?) ORDER BY shot_no",
         (episode_id, shot_no - 1, shot_no),
     ).fetchall()
     if len(rows) < 2:
@@ -1289,9 +1289,7 @@ def _amend_storyboard(
             contract_version="storyboard-amend-draft-2.0.0",
         ))
         conn.execute(
-            """UPDATE episodes SET working_storyboard_artifact_id=?,
-                      storyboard_completion_mode='ready_for_manual_confirm'
-                 WHERE id=?""",
+            "UPDATE episodes SET working_storyboard_artifact_id=? WHERE id=?",
             (art["id"], episode_id),
         )
         conn.commit()
@@ -1638,7 +1636,7 @@ def _reference_asset_scan(episode_id: str) -> tuple[dict[str, Any], dict[str, An
     if not project or not (project["bible_json"] or "").strip():
         return dict(episode), {"characters": [], "scenes": [], "blockers": []}
     rows = conn.execute(
-        "SELECT * FROM shots WHERE episode_id=? AND storyboard_adopted=1 ORDER BY shot_no", (episode_id,),
+        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,),
     ).fetchall()
     from app.domain.storyboard_ops import _board_from_shot_rows
     from app.multiview import scan_episode_reference_asset_gaps
@@ -1806,7 +1804,7 @@ async def run_video_completion_supervisor(
     cp = load_latest_checkpoint(episode_id) if resume else None
     if cp is None:
         shots_total = conn.execute(
-            "SELECT COUNT(*) AS c FROM shots WHERE episode_id=? AND storyboard_adopted=1", (episode_id,)
+            "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)
         ).fetchone()["c"]
         from app.completion_grant import default_max_fallback_shots
         quota = max_fallback_shots if max_fallback_shots is not None else default_max_fallback_shots(int(shots_total or 0))
@@ -2409,7 +2407,7 @@ def preview_video_completion_repair(episode_id: str) -> dict[str, Any]:
     if not ep:
         raise ValueError(f"剧集不存在：{episode_id}")
     shots = conn.execute(
-        "SELECT id, shot_no, adopted_version_id FROM shots WHERE episode_id=? AND storyboard_adopted=1 ORDER BY shot_no",
+        "SELECT id, shot_no, adopted_version_id FROM shots WHERE episode_id=? ORDER BY shot_no",
         (episode_id,),
     ).fetchall()
     plan: list[dict[str, Any]] = []

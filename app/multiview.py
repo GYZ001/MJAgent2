@@ -2030,6 +2030,19 @@ async def review_keyframe_with_evidence(
             + (f"（原文证据：{height_evidence}）" if height_evidence else "")
             + "，不得用强透视夸大"
         )
+    scene_canonical = str(contract.get("scene_canonical") or "").strip()
+    scene_landmarks = [
+        str(item).strip() for item in (contract.get("scene_landmarks") or []) if str(item).strip()
+    ]
+    if scene_canonical or scene_landmarks:
+        geometry_requirements.append(
+            "固定场景几何必须匹配场景圣经；石碑、门、桌台、屏幕等永久地标不得缺失、复制、变形或换位。"
+            + (f"场景锚点：{scene_canonical}" if scene_canonical else "")
+            + (f"；显式地标：{'、'.join(scene_landmarks)}" if scene_landmarks else "")
+        )
+    geometry_requirements.append(
+        "人物保持角色参考中的自然头身比；参考图裁切大小不代表真实头部大小，禁止大头化、幼态化或身体缩小"
+    )
 
     wm_mode = watermark_qa_mode()
     wm_note = (
@@ -2044,6 +2057,8 @@ async def review_keyframe_with_evidence(
         "image_manifest": image_manifest,
         "shot": {
             "scene": getattr(shot, "scene_setting", ""),
+            "scene_canonical": contract.get("scene_canonical"),
+            "scene_landmarks": contract.get("scene_landmarks"),
             "action": getattr(shot, "action_desc", ""),
             "target_keyframe_desc": contract.get("target_keyframe_desc"),
             "target_source": contract.get("target_source"),

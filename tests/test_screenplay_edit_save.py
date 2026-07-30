@@ -10,7 +10,14 @@ from app.capabilities import ensure_catalog_loaded
 from app.capabilities.bus import reset_command_bus_for_tests, set_request_approval_token
 from app.capabilities.policy import reset_approvals_for_tests
 from app.local_session import APPROVAL_HEADER, ensure_session_secret, set_request_session_id
-from app.schemas import Bible, Character, EpisodeScreenplay, World
+from app.schemas import (
+    Bible,
+    Character,
+    EpisodeScreenplay,
+    KeyDialogueChain,
+    KeyDialogueTurn,
+    World,
+)
 from tests.conftest import SessionTestClient
 from tests.test_screenplay_stage import (
     _RAINY_KEY_LINES,
@@ -76,7 +83,20 @@ def _valid_script() -> EpisodeScreenplay:
         ending_hook="谷言刚要追问，门外第二次响起更重的敲门声。",
         source_basis="保留雨夜会面、旧友递钥匙、警告不要信任来人的核心事件，并压缩原文过渡。",
         character_state_changes=["谷言从克制等待转为警觉戒备", "旧友从强撑冷静转为急切示警"],
-        key_lines=_RAINY_KEY_LINES,
+        key_lines=[f"谷言：{line}" for line in _RAINY_KEY_LINES],
+        dialogue_chains=[
+            KeyDialogueChain(
+                chain_id=f"DC{index}",
+                topic=f"雨夜主线对白{index}",
+                turns=[KeyDialogueTurn(
+                    speaker="谷言",
+                    line=line,
+                    function="statement",
+                    source_text=line,
+                )],
+            )
+            for index, line in enumerate(_RAINY_KEY_LINES, start=1)
+        ],
         key_plot_points=_RAINY_KEY_POINTS,
         opening="雨夜等待",
         development="旧友现身并递出钥匙",
@@ -134,12 +154,23 @@ def test_edit_screenplay_does_not_500_on_row_get(client: TestClient) -> None:
     script.logline = "谷言在雨夜等来失踪旧友，真相逼近门槛。（已改）"
     resp = client.put(
         "/api/episodes/e1/screenplay",
-        json={"screenplay": script.model_dump(mode="json"), "force": False},
+        json={"screenplay": script.model_dump(mode="json")},
     )
     assert resp.status_code != 500, resp.text
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body.get("saved") is True or body.get("ok") is True
+    row = db.get_conn().execute(
+        "SELECT screenplay_artifact_id,screenplay_production_revision_id,"
+        "screenplay_completion_certificate_id FROM episodes WHERE id='e1'"
+    ).fetchone()
+    assert row["screenplay_artifact_id"]
+    assert row["screenplay_production_revision_id"]
+    assert row["screenplay_completion_certificate_id"]
+    artifact = db.get_conn().execute(
+        "SELECT type,status FROM artifacts WHERE id=?", (row["screenplay_artifact_id"],)
+    ).fetchone()
+    assert tuple(artifact) == ("screenplay_document", "approved")
 
 
 def test_edit_screenplay_version_conflict_uses_dict_get(client: TestClient) -> None:
@@ -150,7 +181,6 @@ def test_edit_screenplay_version_conflict_uses_dict_get(client: TestClient) -> N
         "/api/episodes/e1/screenplay",
         json={
             "screenplay": script.model_dump(mode="json"),
-            "force": False,
             "expected_version": "art_stale",
         },
     )

@@ -791,7 +791,7 @@ def project_storyboard_metrics(project_id: str):
         raise HTTPException(404, "项目不存在")
     episodes = conn.execute(
         "SELECT id, episode_no, title, status, script_error, active_storyboard_run_id, "
-        "storyboard_completion_mode FROM episodes WHERE project_id=? ORDER BY episode_no",
+        "screenplay_status FROM episodes WHERE project_id=? ORDER BY episode_no",
         (project_id,),
     ).fetchall()
     from app.storyboard_supervisor import load_latest_checkpoint
@@ -816,11 +816,6 @@ def project_storyboard_metrics(project_id: str):
             continue
         if phase:
             phase_counts[phase] = phase_counts.get(phase, 0) + 1
-        mode = None
-        try:
-            mode = ep["storyboard_completion_mode"]
-        except (KeyError, IndexError, TypeError):
-            mode = None
         rows.append({
             "episode_id": ep["id"],
             "episode_no": ep["episode_no"],
@@ -831,7 +826,6 @@ def project_storyboard_metrics(project_id: str):
             "validated_prefix_end": cp.validated_prefix_end if cp else 0,
             "expected_total": cp.expected_total if cp else 0,
             "run_id": ep["active_storyboard_run_id"] or None,
-            "completion_mode": mode,
         })
     return {
         "project_id": project_id,

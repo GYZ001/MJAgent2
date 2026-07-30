@@ -4,7 +4,7 @@
   set MANJU_GOLDEN_LIVE=1
   .\\.venv\\Scripts\\python.exe scripts/run_golden_storyboard.py [--episode-id ep_…] [--timeout 7200]
 
-流程：auto_confirm 启动 Supervisor → 轮询至确认/终态 → score_renderability → 写入 golden/runs/。
+流程：启动 Supervisor → 整集门禁通过 → 显式人工确认 → score_renderability → 写入 golden/runs/。
 不触发付费视频生成。
 """
 from __future__ import annotations
@@ -76,7 +76,7 @@ def write_run_report(
         "label": "yunluo_tiancai_ep1_supervisor",
         "episode_id": episode_id,
         "title": title,
-        "prd": "PRD/分镜全集Supervisor-AgentLoop与自动确认方案.md §18.3",
+        "flow": "剧本定稿 → 分镜生成/修复 → 整集门禁 → 人工确认",
         "supervisor": supervisor,
         "score": score,
         **(extra or {}),
@@ -112,9 +112,10 @@ async def _start_and_wait(
     # 若正在跑，先不重复启动
     ep0 = get_conn().execute("SELECT status FROM episodes WHERE id=?", (episode_id,)).fetchone()
     if ep0 and ep0["status"] != "scripting":
-        started = await storyboard_ops.start_storyboard(
-            episode_id, {"completion_mode": "auto_confirm"}
-        )
+        preview = storyboard_ops.storyboard_start_preflight(episode_id, {})
+        started = await storyboard_ops.start_storyboard(episode_id, {
+            "preflight_token": preview["preview_token"],
+        })
     else:
         started = {"status": "already_running", "run_id": None}
 
@@ -123,7 +124,7 @@ async def _start_and_wait(
     while time.time() < deadline:
         ep = get_conn().execute(
             "SELECT id, status, script_error, storyboard_artifact_id, "
-            "active_storyboard_run_id, storyboard_completion_mode FROM episodes WHERE id=?",
+            "active_storyboard_run_id FROM episodes WHERE id=?",
             (episode_id,),
         ).fetchone()
         cp = load_latest_checkpoint(episode_id)
@@ -139,12 +140,21 @@ async def _start_and_wait(
         if ep and ep["status"] == "confirmed":
             last["confirmed"] = True
             return last
+        if ep and ep["status"] == "scripted" and cp and cp.outcome == "SUCCEEDED_READY_FOR_CONFIRM":
+            from app.domain.video_ops import create_storyboard_confirmation_preview, confirm_episode_core
+
+            confirm_preview = create_storyboard_confirmation_preview(episode_id)
+            confirm_episode_core(
+                episode_id,
+                decided_by="golden_human_reviewer",
+                reason="golden 人工确认步骤",
+                preview_token=confirm_preview["preview_token"],
+            )
+            continue
         if ep and ep["status"] not in {"scripting"} and cp and cp.phase in {
             "WAITING_HUMAN", "WAITING_AUTHORIZATION", "CANCELLED", "SUCCEEDED",
         }:
-            last["confirmed"] = ep["status"] == "confirmed" or (
-                cp.outcome == "SUCCEEDED_CONFIRMED"
-            )
+            last["confirmed"] = ep["status"] == "confirmed"
             if cp.phase == "SUCCEEDED" or last["confirmed"]:
                 return last
             if cp.phase in {"WAITING_HUMAN", "WAITING_AUTHORIZATION", "CANCELLED"}:
@@ -192,11 +202,6 @@ def run_golden(
         and not result.get("timed_out")
         and result.get("phase") not in {"WAITING_HUMAN", "WAITING_AUTHORIZATION", "CANCELLED"}
     )
-    # SUCCEEDED_CONFIRMED 即成功；若 outcome 就绪但 status 未翻，仍算 ok
-    if result.get("outcome") == "SUCCEEDED_CONFIRMED" and video_started == 0:
-        ok = True
-        confirmed = True
-
     report_path = None
     if write_report:
         report_path = write_run_report(

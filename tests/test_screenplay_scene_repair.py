@@ -240,7 +240,7 @@ async def test_old_exhausted_checkpoint_resumes_without_second_baseline(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_business_qa_issue_publishes_score_only_instead_of_repairing(monkeypatch):
+async def test_unrepairable_business_qa_issue_pauses_without_publishing(monkeypatch):
     from app.evidence import repository as evidence_repository
     from app.production import screenplay_repair
 
@@ -310,7 +310,7 @@ async def test_business_qa_issue_publishes_score_only_instead_of_repairing(monke
     ).fetchone()
     assert result.title == script.title
     assert resumed is not None
-    assert resumed.checkpoint_json["phase"] == "SUCCEEDED"
-    assert resumed.checkpoint_json["yield_reason"] is None
-    assert episode["screenplay_status"] == "ready"
-    assert episode["screenplay_error"] is None
+    assert resumed.checkpoint_json["phase"] == "REPAIR_FAILED"
+    assert resumed.checkpoint_json["yield_reason"] == "strategies_exhausted"
+    assert episode["screenplay_status"] == "repairing"
+    assert "REPAIR_FAILED" in episode["screenplay_error"]

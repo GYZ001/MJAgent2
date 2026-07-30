@@ -112,7 +112,7 @@ def delivery_readiness(episode_id: str) -> dict[str, Any]:
         raise KeyError(episode_id)
     project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
     shots = rows_to_dicts(conn.execute(
-        "SELECT * FROM shots WHERE episode_id=? AND storyboard_adopted=1 ORDER BY shot_no", (episode_id,)
+        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
     ).fetchall())
     checks: list[dict[str, Any]] = []
 
@@ -397,7 +397,7 @@ def build_delivery_package(
         _sanitize_delivery_value(json.loads(ep["screenplay_json"] or "{}")),
     )
     shot_rows = rows_to_dicts(conn.execute(
-        "SELECT * FROM shots WHERE episode_id=? AND storyboard_adopted=1 ORDER BY shot_no", (episode_id,)
+        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
     ).fetchall())
     for shot in shot_rows:
         for field in ("characters", "dialogues"):

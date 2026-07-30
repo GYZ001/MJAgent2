@@ -12,7 +12,7 @@ def episode_mix_status(episode_id: str) -> dict:
     if not ep:
         return {"ready": False, "shots_total": 0, "shots_ready": 0, "shots": []}
     shots = rows_to_dicts(conn.execute(
-        "SELECT * FROM shots WHERE episode_id=? AND storyboard_adopted=1 ORDER BY shot_no", (episode_id,)).fetchall())
+        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)).fetchall())
     ready = 0
     out = []
     for s in shots:
@@ -86,7 +86,7 @@ def concatenate_episode(episode_id: str) -> dict:
     rate_rows = conn.execute(
         """SELECT s.shot_no, v.playback_rate
            FROM shots s JOIN shot_versions v ON v.id=s.adopted_version_id
-           WHERE s.episode_id=? AND s.storyboard_adopted=1""",
+           WHERE s.episode_id=?""",
         (episode_id,),
     ).fetchall()
     rate_by_shot = {
@@ -101,7 +101,7 @@ def concatenate_episode(episode_id: str) -> dict:
     all_shot_nos = [
         int(row["shot_no"])
         for row in conn.execute(
-            "SELECT shot_no FROM shots WHERE episode_id=? AND storyboard_adopted=1 ORDER BY shot_no", (episode_id,),
+            "SELECT shot_no FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,),
         ).fetchall()
     ]
     skipped_shot_nos = [shot_no for shot_no in all_shot_nos if shot_no not in set(piece_shot_nos)]
@@ -109,7 +109,7 @@ def concatenate_episode(episode_id: str) -> dict:
     duration_by_shot = {
         int(row["shot_no"]): float(row["duration_s"] or 0)
         for row in conn.execute(
-            "SELECT shot_no,duration_s FROM shots WHERE episode_id=? AND storyboard_adopted=1", (episode_id,),
+            "SELECT shot_no,duration_s FROM shots WHERE episode_id=?", (episode_id,),
         ).fetchall()
     }
     est_total_dur = sum(

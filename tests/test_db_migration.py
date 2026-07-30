@@ -4,6 +4,46 @@ import threading
 from app import db
 
 
+def test_init_db_drops_obsolete_storyboard_branch_columns(tmp_path, monkeypatch) -> None:
+    database = tmp_path / "obsolete-storyboard-columns.db"
+    conn = sqlite3.connect(database)
+    conn.executescript(db.SCHEMA)
+    conn.execute(
+        "ALTER TABLE shots ADD COLUMN storyboard_adopted INTEGER NOT NULL DEFAULT 1"
+    )
+    conn.execute(
+        "ALTER TABLE episodes ADD COLUMN storyboard_completion_mode TEXT "
+        "NOT NULL DEFAULT 'ready_for_manual_confirm'"
+    )
+    conn.execute(
+        "INSERT INTO projects(id,name,status,created_at) VALUES('p1','旧项目','ready',1)"
+    )
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,status,created_at) "
+        "VALUES('e1','p1',1,'scripted',1)"
+    )
+    conn.execute(
+        "INSERT INTO shots(id,episode_id,shot_no,duration_s,storyboard_adopted) "
+        "VALUES('s1','e1',1,5,0)"
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(db, "DB_PATH", database)
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(db, "_local", threading.local())
+
+    db.init_db()
+
+    migrated = db.get_conn()
+    shot_columns = {row[1] for row in migrated.execute("PRAGMA table_info(shots)")}
+    episode_columns = {row[1] for row in migrated.execute("PRAGMA table_info(episodes)")}
+    assert "storyboard_adopted" not in shot_columns
+    assert "storyboard_completion_mode" not in episode_columns
+    assert migrated.execute("SELECT COUNT(*) FROM shots WHERE id='s1'").fetchone()[0] == 1
+    migrated.close()
+
+
 def test_init_db_migrates_old_supporting_keyframe_default_once(tmp_path, monkeypatch) -> None:
     database = tmp_path / "supporting-keyframes.db"
     conn = sqlite3.connect(database)

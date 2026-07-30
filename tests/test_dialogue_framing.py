@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.compiler import compile_prompt, keyframe_visual_contract
 from app.continuity import (
+    dialogue_action_staging_kind,
     dialogue_focus_subject,
     dialogue_framing_errors,
     effective_characters_visible,
@@ -196,6 +197,60 @@ def test_physical_interaction_allows_exactly_two_people() -> None:
     assert dialogue_focus_subject(shot) is None
     assert effective_characters_visible(shot) == ["甲", "乙"]
     assert dialogue_framing_errors(shot) == []
+
+
+def test_dialogue_with_spatial_action_is_not_collapsed_to_static_closeup() -> None:
+    shot = _shot(
+        shot_size="近景",
+        characters=["甲", "乙"],
+        characters_visible=["甲", "乙"],
+        action_desc="甲一边说出决定，一边转身穿过人群走向门外，乙留在原地目送。",
+        first_frame_desc="甲站在乙面前尚未转身，门位于画面右后方。",
+        last_frame_desc="同一机位，甲已走向右后方门口，乙仍留在原位。",
+        primary_action="甲说完后转身走向门外。",
+    )
+
+    assert dialogue_action_staging_kind(shot) == "spatial"
+    assert dialogue_focus_subject(shot) is None
+    assert effective_characters_visible(shot) == ["甲", "乙"]
+    assert any("不能用单人大近景替代" in error for error in dialogue_framing_errors(shot))
+
+    prompt = compile_prompt(shot, _bible())
+    assert "动作对白构图" in prompt
+    assert "不得只拍站立说话、口型或表情变化来替代动作" in prompt
+    assert "全景" in prompt
+    assert "对白镜头只允许「甲」一人入画" not in prompt
+
+
+def test_dialogue_with_story_prop_keeps_hands_and_prop_in_frame() -> None:
+    shot = _shot(
+        shot_size="近景",
+        action_desc="甲翻开手中名册，抬头朝画外宣布下一位测试者的名字。",
+        first_frame_desc="甲站在石碑左侧，双手托住尚未翻开的名册。",
+        last_frame_desc="同一机位，甲保持名册翻开，抬头看向画外。",
+        primary_action="甲翻开名册并宣布名字。",
+    )
+
+    assert dialogue_action_staging_kind(shot) == "prop"
+    prompt = compile_prompt(shot, _bible())
+    assert "中景" in prompt
+    assert "双手、剧情道具与接触关系" in prompt
+
+
+def test_solitary_subject_can_still_keep_scripted_background_crowd() -> None:
+    shot = _shot(
+        dialogues=[],
+        characters=["甲"],
+        characters_visible=["甲"],
+        action_desc="甲退到队伍最后一排独自站立。",
+        primary_action="甲退到队伍最后一排独自站立。",
+        last_frame_desc="甲独自站在队伍最后一排，背对前方人群与石碑，与热闹人群形成对比。",
+        state_out="甲站在队尾，与前方人群拉开距离。",
+    )
+
+    contract = keyframe_visual_contract(shot, _bible())
+    assert contract["collective_presence_forbidden"] is False
+    assert contract["collective_presence_required"] is True
 
 
 def test_offscreen_voice_keeps_listener_as_visual_subject() -> None:

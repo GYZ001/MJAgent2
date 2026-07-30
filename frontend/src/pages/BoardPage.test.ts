@@ -81,17 +81,17 @@ describe('分镜台结构化 diff 与问题筛选', () => {
     expect(storyboardSaveDisabledReason(true, false, 1)).toBe('')
   })
 
-  it('把目标、现有草稿和安全恢复点拆成三个明确口径', () => {
+  it('明确区分目标、工作副本和已校验镜头', () => {
     const copy = storyboardProgressCopy(storyboardStatus({ final_shot_valid: true }))
-    expect(copy.summary).toBe('本轮目标 17 镜 · 现有草稿 9 镜 · 安全恢复点到第 2 镜')
-    expect(copy.detail).toContain('第 3–9 镜为待重验草稿')
-    expect(copy.detail).toContain('从第 3 镜处理')
-    expect(copy.detail).toContain('收尾标记')
+    expect(copy.summary).toBe('目标 17 镜 · 工作副本 9 镜 · 已校验 2 镜')
+    expect(copy.detail).toContain('第 3–9 镜仍待校验')
+    expect(copy.detail).toContain('从第 3 镜继续修复')
+    expect(copy.detail).toContain('人工确认前')
   })
 
-  it('在镜头轨道区分安全保留镜头与待重验草稿', () => {
-    expect(storyboardShotCheckpointLabel(2, storyboardStatus())?.label).toBe('安全保留')
-    expect(storyboardShotCheckpointLabel(3, storyboardStatus())?.label).toBe('待重验')
+  it('在镜头轨道区分已校验和待校验工作副本', () => {
+    expect(storyboardShotCheckpointLabel(2, storyboardStatus())?.label).toBe('已校验')
+    expect(storyboardShotCheckpointLabel(3, storyboardStatus())?.label).toBe('待校验')
     expect(storyboardShotCheckpointLabel(3, storyboardStatus({ state: 'confirmed' }))).toBeNull()
   })
 })

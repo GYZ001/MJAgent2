@@ -135,19 +135,6 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
             "yield_reason": "",
         }
     checkpoint = dict(rev.checkpoint_json or {})
-    strategy_history = dict(checkpoint.get("issue_strategy_history") or {})
-    retired_dialogue_budget_prune_detected = bool(
-        checkpoint.get("retired_dialogue_budget_prune_detected")
-        or any(
-            entry == "prune_dialogue_budget"
-            or entry.startswith("prune_dialogue_budget:")
-            for entries in strategy_history.values()
-            for entry in (entries or [])
-        )
-    )
-    dialogue_policy_recovery = dict(
-        checkpoint.get("dialogue_policy_recovery") or {}
-    )
     has_working_baseline = bool(rev.baseline_done and rev.working_artifact_id)
     return {
         "revision_id": rev.id,
@@ -163,11 +150,6 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
         "patch_count": len(checkpoint.get("patch_artifact_ids") or []),
         "open_issue_count": len(checkpoint.get("open_issue_ids") or []),
         "yield_reason": str(checkpoint.get("yield_reason") or ""),
-        "legacy_dialogue_policy_recovery_available": bool(
-            has_working_baseline
-            and retired_dialogue_budget_prune_detected
-            and not dialogue_policy_recovery.get("completed")
-        ),
     }
 
 

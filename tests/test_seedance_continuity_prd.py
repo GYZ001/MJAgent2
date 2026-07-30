@@ -26,6 +26,7 @@ from app.schemas import (
     EpisodeScreenplay,
     InformationItem,
     RequiredOnScreenText,
+    Scene,
     Shot,
     Storyboard,
     World,
@@ -127,6 +128,43 @@ def test_compile_prompt_excludes_source_excerpt_and_prev_full_action_when_not_co
     assert "source_excerpt" not in prompt
     assert "这段原文不得进入最终提示" not in prompt
     assert prev_action not in prompt
+
+
+def test_compile_prompt_locks_scene_canonical_and_persistent_landmark_geometry() -> None:
+    bible = _bible().model_copy(update={
+        "scenes": [Scene(
+            name="山门",
+            scene_canonical="青石山门中央固定矗立一块黑色试炼石碑，两侧各有一根铜柱，夜间冷色灯火稳定。",
+            landmarks=["中央黑色试炼石碑", "左右铜柱"],
+        )]
+    })
+    shot = _shot(
+        scene_setting="夜，山门",
+        action_desc="林风从黑色试炼石碑前收回手，转身走向后方台阶。",
+        primary_action="林风收回手后转身走向台阶。",
+        first_frame_desc="林风站在中央黑色试炼石碑左侧，右手贴着碑面。",
+        last_frame_desc="同一机位，林风走向后方台阶，中央黑色试炼石碑仍留在原位。",
+    )
+
+    prompt = compile_prompt(shot, bible)
+
+    assert "[PERSISTENT SCENE GEOMETRY]" in prompt
+    assert "场景固定锚点：青石山门中央固定矗立一块黑色试炼石碑" in prompt
+    assert "显式固定地标：中央黑色试炼石碑、左右铜柱" in prompt
+    assert "不得消失、复制、变形、换位后再出现" in prompt
+    assert "头部突然放大或幼态大头" in prompt
+
+
+def test_action_capacity_uses_detailed_action_not_only_primary_summary() -> None:
+    shot = _shot(
+        duration_s=5,
+        primary_action="林风完成测试并退场。",
+        action_desc="林风点头，收回手，转身穿过人群，走到队尾后停下。",
+    )
+
+    errors = action_capacity_errors(shot)
+
+    assert any("顺序动作节拍" in error for error in errors)
 
 
 def test_required_text_none_bans_text_but_required_text_allows_exact_text_without_conflict() -> None:

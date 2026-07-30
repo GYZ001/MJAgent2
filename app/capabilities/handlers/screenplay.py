@@ -13,7 +13,6 @@ async def generate(args: I.ScreenplayGenerateInput) -> CommandResult:
         api.start_screenplay,
         args.episode_id,
         body={
-            "force": args.force,
             "required_dialogue_lines": args.required_dialogue_lines,
             "required_dialogue_occurrence_ids": args.required_dialogue_occurrence_ids,
         },
@@ -44,19 +43,22 @@ async def resume(args: I.ScreenplayResumeInput) -> CommandResult:
     )
 
 
-async def revise(args: I.ScreenplayReviseInput) -> CommandResult:
+async def repair_draft(args: I.ScreenplayRepairDraftInput) -> CommandResult:
     from app import api
 
     outcome = await call_guarded(
-        api.revise_screenplay,
+        api.repair_screenplay_draft,
         args.episode_id,
-        body={"instruction": args.instruction},
+        body={
+            "screenplay": args.screenplay,
+            "expected_version": args.expected_version,
+        },
     )
     if isinstance(outcome, CommandResult):
         return outcome
     run_id = outcome.get("run_id")
     return succeeded(
-        "已从已发布剧本创建工作分支，开始按当前规则复验和局部修复",
+        "工作草稿已进入独立 Repair 环节；修复后会重新执行 QA",
         data=outcome,
         run_id=run_id,
         resource_uris=[f"manju://runs/{run_id}"] if run_id else [],
@@ -131,10 +133,10 @@ async def cancel(args: I.ScreenplayCancelInput) -> CommandResult:
 
 
 async def update(args: I.ScreenplayUpdateInput) -> CommandResult:
-    """结构化保存剧本。页面经 REST 传入 ``force``；Agent/MCP 批准后应传 ``force=True``。"""
+    """结构化保存剧本；发布前由领域层执行只读 QA。"""
     from app import api
 
-    body: dict = {"screenplay": args.screenplay, "force": bool(args.force)}
+    body: dict = {"screenplay": args.screenplay}
     if args.expected_version is not None:
         body["expected_version"] = args.expected_version
     outcome = await call_guarded(api.edit_screenplay, args.episode_id, body)

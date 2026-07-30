@@ -2429,6 +2429,8 @@ def test_build_reference_assets_reuses_frozen_manifest_when_revisions_match(monk
     monkeypatch.setattr(mv, "assert_manifest_allows_production", lambda _m: None)
     monkeypatch.setattr(mv, "library_anchor_assets_from_manifest", lambda _m: [])
     monkeypatch.setattr(mv, "keyframe_seed_paths", lambda _m: [])
+    # 本测试只验证冻结依赖 manifest 的复用，不进入叙事关键帧生产合同。
+    monkeypatch.setattr(mv, "narrative_keyframe_required", lambda: False)
     monkeypatch.setattr(mv, "character_multiview_enabled", lambda: True)
     monkeypatch.setattr(mv, "scene_multiview_enabled", lambda: True)
 

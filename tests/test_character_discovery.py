@@ -406,7 +406,7 @@ def test_discover_character_candidates_filters_functional_extras_and_unseen_name
     assert [item["name"] for item in result] == ["魂天帝", "萧炎"]
 
 
-def test_late_episode_screenplay_auto_adds_character_even_if_portrait_provider_fails(tmp_path, monkeypatch) -> None:
+def test_late_episode_screenplay_auto_adds_character_and_defers_portrait_generation(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "late-episode-character.db")
     monkeypatch.setattr(db._local, "conn", None, raising=False)
     db.init_db()
@@ -454,7 +454,7 @@ def test_late_episode_screenplay_auto_adds_character_even_if_portrait_provider_f
         }
 
     async def portrait_failure(*_args, **_kwargs):
-        raise RuntimeError("image provider unavailable")
+        raise AssertionError("剧本阶段不应调用定妆图 Provider")
 
     generated_with: list[set[str]] = []
 
@@ -524,4 +524,4 @@ def test_late_episode_screenplay_auto_adds_character_even_if_portrait_provider_f
         "SELECT bible_auto_changes_json FROM projects WHERE id='p1'"
     ).fetchone()["bible_auto_changes_json"])
     assert queue[0]["character"] == "魂天帝"
-    assert queue[0]["status"] == "auto_applied_asset_failed"
+    assert queue[0]["status"] == "auto_applied_asset_pending"

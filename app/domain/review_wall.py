@@ -77,7 +77,7 @@ def _review_asset_qualification(conn, episode_id: str) -> dict[str, Any]:
         """SELECT v.id AS version_id, v.shot_id, v.version_no, v.image_inputs,
                   s.adopted_version_id
              FROM shot_versions v JOIN shots s ON s.id=v.shot_id
-            WHERE s.episode_id=? AND s.storyboard_adopted=1
+            WHERE s.episode_id=?
             ORDER BY v.shot_id, v.version_no DESC""",
         (episode_id,),
     ).fetchall()
@@ -161,6 +161,7 @@ def _review_upstream_snapshot(episode_id: str) -> dict[str, Any]:
     ep = dict(ep_row)
     published_screenplay = ep.get("published_screenplay_artifact_id") or ep.get("screenplay_artifact_id")
     published_storyboard = ep.get("published_storyboard_artifact_id") or ep.get("storyboard_artifact_id")
+    screenplay_qualified = _screenplay_ready(ep)
     active: list[dict[str, Any]] = []
     seen_run_ids: set[str] = set()
     for kind, run_id in (
@@ -223,17 +224,17 @@ def _review_upstream_snapshot(episode_id: str) -> dict[str, Any]:
             "stage": None, "updated_at": None, "source": "episode_status",
         })
     confirmed = ep.get("status") in {"confirmed", "generating", "done", "mixed"}
-    has_artifacts = bool(published_screenplay and published_storyboard)
+    has_artifacts = bool(screenplay_qualified and published_screenplay and published_storyboard)
     assets = _review_asset_qualification(conn, episode_id)
     active_storyboard_shot_ids = [
         row["id"] for row in conn.execute(
-            "SELECT id FROM shots WHERE episode_id=? AND storyboard_adopted=1 ORDER BY shot_no",
+            "SELECT id FROM shots WHERE episode_id=? ORDER BY shot_no",
             (episode_id,),
         ).fetchall()
     ]
     blockers: list[str] = []
-    if not published_screenplay:
-        blockers.append("尚无已发布剧本")
+    if not screenplay_qualified:
+        blockers.append("剧本尚未取得与当前版本一致的 QA 通过凭证")
     if not published_storyboard or not confirmed:
         blockers.append("分镜尚未完整确认")
     if active:
@@ -293,15 +294,10 @@ def _review_assert_positive_action(episode_id: str, expected_qualification_versi
 
 def _review_assert_shot_positive(shot_id: str, expected_qualification_version: str | None = None) -> dict[str, Any]:
     row = get_conn().execute(
-        "SELECT episode_id,storyboard_adopted FROM shots WHERE id=?", (shot_id,),
+        "SELECT episode_id FROM shots WHERE id=?", (shot_id,),
     ).fetchone()
     if not row:
         raise HTTPException(404, "镜头不存在")
-    if not bool(row["storyboard_adopted"]):
-        raise HTTPException(409, {
-            "code": "STORYBOARD_SHOT_NOT_ADOPTED",
-            "message": "本分镜已人工取消采纳，不进入生成台；请先在分镜台恢复采纳",
-        })
     return _review_assert_positive_action(row["episode_id"], expected_qualification_version)
 
 

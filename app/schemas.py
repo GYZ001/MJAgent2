@@ -51,7 +51,7 @@ AUDIO_TIMELINE_TYPES = {
     "ambient_sound",
 }
 
-PROMPT_CONTRACT_VERSION = "seedance_dialogue_closeup_v2"
+PROMPT_CONTRACT_VERSION = "seedance_action_geometry_v3"
 
 # 主线节拍 ID（S*）与剧本事件 ID（E*）长得像但语义不同，历史数据把 S07 写进了 story_event_id。
 # 这两个正则是四类 ID 分离（PRD VAL-422 §4.4.1）的判定底座。
@@ -132,23 +132,6 @@ class Bible(BaseModel):
     characters: list[Character]
     world: World
     scenes: list[Scene] = Field(default_factory=list)
-
-
-# 可拍剧本（分集之后、分镜之前）：把小说叙述改写为可继续拆成 5~10s 分镜的场次剧本。
-# 它不写景别/运镜/首尾帧，只锁定人物在场、可见动作、关键台词、局势变化和下一拍钩子。
-class ScreenplayBeat(BaseModel):
-    beat_no: int
-    day_offset: int
-    time_of_day: str
-    location: str
-    characters: list[str] = Field(default_factory=list)
-    dramatic_event: str
-    visible_action: str
-    key_dialogues: list[str] = Field(default_factory=list)
-    turn: str
-    carry: str
-    beat_type: str
-    source_excerpt: str = ""
 
 
 class ScriptScene(BaseModel):
@@ -254,7 +237,7 @@ class EpisodeScreenplay(BaseModel):
     obstacle: str = ""               # 外部+内部阻力（§3.5）
     stakes: str = ""                 # 失败代价/成功代价（§3.5）
     # 主线台词/剧情点（Renderability First）：只保留推动 spine 的内容，禁止全量原文台词入库。
-    key_lines: list[str] = Field(default_factory=list)        # 主线台词 ≤6，含说话人更佳
+    key_lines: list[str] = Field(default_factory=list)        # 由 dialogue_chains 按话轮顺序确定性派生
     # 新生成合同：结构化对白链是 key_lines 的权威来源；key_lines 由后端按 turns 顺序回填。
     dialogue_chains: list[KeyDialogueChain] = Field(default_factory=list)
     key_plot_points: list[str] = Field(default_factory=list)  # 与 spine 对齐的局势变化
@@ -279,10 +262,6 @@ class EpisodeScreenplay(BaseModel):
     forbidden_additions: list[str] = Field(default_factory=list)
     created_at: float | None = None
     updated_at: float | None = None
-    # 历史兼容：旧格式仍按 beat 列表存储
-    beats: list[ScreenplayBeat] = Field(default_factory=list)
-
-
 class Dialogue(BaseModel):
     speaker: str
     line: str

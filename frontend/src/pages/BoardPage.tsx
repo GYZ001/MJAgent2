@@ -55,7 +55,6 @@ type ConfirmPreview = {
   total_duration_s: number
   final_shot_valid: boolean
   hard_gates: { passed: boolean; errors: string[] }
-  force_confirmation?: { allowed: boolean; accepted_errors: string[]; note: string }
   warnings: string[]
   estimated_video_cost_cny: { min: number; max: number; note: string }
   unlocks: string[]
@@ -139,27 +138,26 @@ type StoryboardProgressCopy = {
 }
 
 export function storyboardProgressCopy(status: StoryboardStatus): StoryboardProgressCopy {
-  const draft = status.draft_shots ?? status.produced_shots
-  const safe = Math.min(draft, status.safe_checkpoint_shots ?? status.validated_shots)
-  const resumeFrom = status.resume_from_shot ?? Math.max(1, safe + 1)
+  const working = status.draft_shots ?? status.produced_shots
+  const validated = Math.min(working, status.safe_checkpoint_shots ?? status.validated_shots)
+  const resumeFrom = status.resume_from_shot ?? Math.max(1, validated + 1)
   const target = status.planned_shots > 0 ? `${status.planned_shots} 镜` : '待确定'
-  const safeLabel = safe > 0 ? `到第 ${safe} 镜` : '尚未建立'
-  const summary = `本轮目标 ${target} · 现有草稿 ${draft} 镜 · 安全恢复点${safeLabel}`
+  const summary = `目标 ${target} · 工作副本 ${working} 镜 · 已校验 ${validated} 镜`
 
   if (!['running', 'paused', 'failed'].includes(status.state)) return { summary, detail: null }
-  const pending = status.pending_revalidation_shots ?? Math.max(0, draft - safe)
+  const pending = status.pending_revalidation_shots ?? Math.max(0, working - validated)
   const finalDraftNote = status.final_shot_valid
-    ? '当前草稿虽带收尾标记，但尚未完成整集检查。'
+    ? '工作副本中的收尾标记不代表整集已通过。'
     : ''
   if (pending > 0) {
     return {
       summary,
-      detail: `第 ${safe + 1}–${draft} 镜为待重验草稿，仍可查看；继续任务将从第 ${resumeFrom} 镜处理，这些镜头可能更新。目标镜数也可能随结构修复调整。${finalDraftNote}`,
+      detail: `第 ${validated + 1}–${working} 镜仍待校验；任务将从第 ${resumeFrom} 镜继续修复。人工确认前，轨道中的内容都只是工作副本。${finalDraftNote}`,
     }
   }
   return {
     summary,
-    detail: `已安全保留当前 ${safe} 镜；任务将从第 ${resumeFrom} 镜继续。目标镜数可能随结构修复调整。${finalDraftNote}`,
+    detail: `当前 ${validated} 镜已通过逐镜校验；任务将从第 ${resumeFrom} 镜继续。整集门禁通过并经人工确认后才会交给生成台。${finalDraftNote}`,
   }
 }
 
@@ -171,9 +169,9 @@ export function storyboardShotCheckpointLabel(
   const draft = status.draft_shots ?? status.produced_shots
   const safe = Math.min(draft, status.safe_checkpoint_shots ?? status.validated_shots)
   if (shotNo <= safe) {
-    return { label: '安全保留', className: 'checkpoint-safe', title: '位于安全恢复点内，继续任务时会保留' }
+    return { label: '已校验', className: 'checkpoint-safe', title: '本轮已通过逐镜校验；整集仍需通过门禁并由人工确认' }
   }
-  return { label: '待重验', className: 'checkpoint-pending', title: '位于安全恢复点之后，继续任务时可能更新' }
+  return { label: '待校验', className: 'checkpoint-pending', title: '仍在工作副本中，继续任务时可能更新' }
 }
 
 function fieldId(shotId: string, name: string): string {
@@ -257,7 +255,6 @@ export default function BoardPage() {
   const [recoveredStatus, setRecoveredStatus] = useState<StoryboardStatus | null>(null)
   const [startPreview, setStartPreview] = useState<StartPreview | null>(null)
   const [confirmPreview, setConfirmPreview] = useState<ConfirmPreview | null>(null)
-  const [forceConfirmReason, setForceConfirmReason] = useState('')
   const [structurePreview, setStructurePreview] = useState<StructurePreview | null>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
   const startPreviewTriggerRef = useRef<HTMLElement | null>(null)
@@ -398,11 +395,11 @@ export default function BoardPage() {
     }
   }
 
-  const loadStartPreview = async (mode: 'create' | 'resume') => {
+  const loadStartPreview = async () => {
     startPreviewTriggerRef.current = document.activeElement as HTMLElement | null
     setBusy(true)
     try {
-      const preview = await api.post(`/episodes/${ep.id}/storyboard/preflight`, { mode }) as StartPreview
+      const preview = await api.post(`/episodes/${ep.id}/storyboard/preflight`, {}) as StartPreview
       setStartPreview(preview)
     } catch (caught) {
       toast((caught as Error).message, true)
@@ -430,11 +427,8 @@ export default function BoardPage() {
     const preview = startPreview
     setStartPreview(null)
     storyboardTimer.start()
-    const path = preview.action === 'resume'
-      ? `/episodes/${ep.id}/storyboard/resume`
-      : `/episodes/${ep.id}/storyboard`
     const result = await run(
-      () => api.post(path, {
+      () => api.post(`/episodes/${ep.id}/storyboard`, {
         preflight_token: preview.preview_token,
       }),
       preview.action === 'resume' ? '已从安全检查点继续生成' : '分镜生成已开始',
@@ -445,12 +439,11 @@ export default function BoardPage() {
   const runPrimary = async () => {
     switch (status.recommended_action) {
       case 'go_screenplay': go('script', projectId, ep.id); break
-      case 'generate_storyboard': await loadStartPreview('create'); break
-      case 'resume_storyboard': await loadStartPreview('resume'); break
-      case 'view_progress': break
+      case 'generate_storyboard': await loadStartPreview(); break
+      case 'resume_storyboard': await loadStartPreview(); break
+      case 'view_progress': go('monitor'); break
       case 'confirm_storyboard': {
         setBusy(true)
-        setForceConfirmReason('')
         try { setConfirmPreview(await api.post(`/episodes/${ep.id}/confirm-preview`) as ConfirmPreview) }
         catch (caught) {
           const apiError = caught as ApiError
@@ -469,37 +462,17 @@ export default function BoardPage() {
     }
   }
 
-  const confirmStoryboard = async (force = false) => {
+  const confirmStoryboard = async () => {
     if (!confirmPreview?.preview_token) return
-    if (!confirmPreview.hard_gates.passed && !(force && confirmPreview.force_confirmation?.allowed)) return
-    if (force && forceConfirmReason.trim().length < 4) return
+    if (!confirmPreview.hard_gates.passed) return
     const token = confirmPreview.preview_token
     setConfirmPreview(null)
     await run(
       () => api.post(`/episodes/${ep.id}/confirm`, {
         preview_token: token,
-        force,
-        force_reason: force ? forceConfirmReason.trim() : undefined,
       }),
-      force ? '分镜已带风险强行确认，可以进入生成台' : '分镜已确认，可以进入生成台',
+      '分镜已确认，可以进入生成台',
     )
-  }
-
-  const clearStoryboard = async () => {
-    const result = await run(
-      () => api.del(`/episodes/${ep.id}/storyboard`),
-      '本集分镜已清空，可以重新开始任务',
-    )
-    if (!result) return
-    storyboardTimer.clear()
-    setSelectedShotId(null)
-    setShotEditDirty(false)
-    setPendingShotId(null)
-    setOnlyProblems(false)
-    setSceneFilter('')
-    setCharacterFilter('')
-    setCapacityFilter(false)
-    setRiskFilter(false)
   }
 
   const previewStructure = async (operation: StructurePreview['operation'], targetIndex = absoluteIndex) => {
@@ -534,12 +507,12 @@ export default function BoardPage() {
   }
 
   const primaryLabel: Record<StoryboardStatus['recommended_action'], string> = {
-    go_screenplay: '先去剧本台', generate_storyboard: '开始分镜任务', view_progress: '任务进行中',
+    go_screenplay: '先去剧本台', generate_storyboard: '开始分镜任务', view_progress: '查看任务详情',
     resume_storyboard: '继续分镜任务', confirm_storyboard: '确认分镜',
     go_review_wall: '进入生成台', refresh_status: '状态同步中',
   }
   const showLaunchPanel = !shots.length && (status.state === 'empty' || status.state === 'no_screenplay')
-  const primaryBlocked = ['view_progress', 'refresh_status'].includes(status.recommended_action)
+  const primaryBlocked = status.recommended_action === 'refresh_status'
   const gateIssueCount = status.hard_gate_issue_count ?? status.hard_gate_issues?.length ?? 0
   const progressCopy = storyboardProgressCopy(status)
   const pendingRevalidation = status.pending_revalidation_shots
@@ -571,9 +544,6 @@ export default function BoardPage() {
               onClick={() => void runPrimary()}>
               {busy ? '处理中…' : primaryLabel[status.recommended_action]}
             </button>
-            <button type="button" className="btn ghost danger" disabled={busy}
-              aria-label={busy ? '一键清空分镜，暂不可用：正在处理上一项操作' : '一键清空本集全部分镜'}
-              onClick={() => void clearStoryboard()}>一键清空分镜</button>
           </div>
           {status.state === 'running' && <TaskTimer label="分镜" timer={storyboardTimer} />}
         </div>
@@ -634,7 +604,7 @@ export default function BoardPage() {
             <div className="shot-navigator-head">
               <b>镜头轨道</b>
               <div className="shot-navigator-actions" aria-live="polite">
-                <span>{visibleShots.length ? selectedIndex + 1 : 0} / {visibleShots.length}，问题镜 {shots.filter(isStoryboardProblemShot).length}{pendingRevalidation > 0 ? ` · 待重验 ${pendingRevalidation} 镜` : ''}</span>
+                <span>{visibleShots.length ? selectedIndex + 1 : 0} / {visibleShots.length}，问题镜 {shots.filter(isStoryboardProblemShot).length}{pendingRevalidation > 0 ? ` · 待校验 ${pendingRevalidation} 镜` : ''}</span>
                 <button type="button"
                   aria-label={!visibleShots.length ? '上一镜，暂不可用：当前筛选下没有镜头' : selectedIndex <= 0 ? '上一镜，暂不可用：当前已是筛选结果中的第一镜' : '上一镜'}
                   disabled={selectedIndex <= 0} onClick={() => selectRelative(-1)}>←</button>
@@ -654,8 +624,7 @@ export default function BoardPage() {
                   <span className="shot-nav-badges">
                     {checkpoint && <i className={checkpoint.className} title={checkpoint.title}>{checkpoint.label}</i>}
                     {isStoryboardProblemShot(shot) && <i className="problem">需处理</i>}
-                    {shot.storyboard_adopted === false && <i className="problem">未采纳</i>}
-                    {shot.is_final && <i>{checkpoint?.className === 'checkpoint-pending' ? '草稿收尾' : '最终镜'}</i>}
+                    {shot.is_final && <i>{checkpoint?.className === 'checkpoint-pending' ? '草稿收尾' : '收尾镜'}</i>}
                     {storyboardSpokenChars(shot) > (shot.spoken_limit ?? Infinity) && <i className="problem">口播超限</i>}
                   </span>
                 </button>
@@ -704,7 +673,7 @@ export default function BoardPage() {
         </button></>}>
         {startPreview && <div className="storyboard-preview-card">
           <p><b>{startPreview.action === 'resume'
-            ? `从第 ${startPreview.checkpoint.resume_from_shot} 镜继续；安全恢复点到第 ${startPreview.kept_validated_shots} 镜。`
+            ? `从第 ${startPreview.checkpoint.resume_from_shot} 镜继续；前 ${startPreview.kept_validated_shots} 镜已通过逐镜校验。`
             : '从空白开始生成本集分镜。'}</b></p>
           <p>{startPreview.planned_shots
             ? `计划 ${startPreview.planned_shots} 镜${startPreview.remaining_shots != null ? `，剩余 ${startPreview.remaining_shots} 镜` : ''}。`
@@ -712,15 +681,14 @@ export default function BoardPage() {
         </div>}
       </Modal>
 
-      <Modal open={!!confirmPreview} title={confirmPreview?.hard_gates.passed ? '确认分镜前完整预览' : confirmPreview?.force_confirmation?.allowed ? '分镜仍有待修复问题' : '暂不能确认分镜'} onClose={() => setConfirmPreview(null)}
-        actions={<><button className="btn" onClick={() => setConfirmPreview(null)}>返回审阅</button>{confirmPreview?.hard_gates.passed && confirmPreview.preview_token && <button className="btn primary" onClick={() => void confirmStoryboard()}>批准并确认分镜</button>}{!confirmPreview?.hard_gates.passed && confirmPreview?.force_confirmation?.allowed && confirmPreview.preview_token && <button className="btn danger" disabled={forceConfirmReason.trim().length < 4} title={forceConfirmReason.trim().length < 4 ? '请先填写至少 4 个字的风险承担理由' : '将保留待修复问题记录并解锁生成台'} onClick={() => void confirmStoryboard(true)}>强行确认并进入生成台</button>}</>}>
+      <Modal open={!!confirmPreview} title={confirmPreview?.hard_gates.passed ? '确认分镜前完整预览' : '暂不能确认分镜'} onClose={() => setConfirmPreview(null)}
+        actions={<><button className="btn" onClick={() => setConfirmPreview(null)}>返回审阅</button>{confirmPreview?.hard_gates.passed && confirmPreview.preview_token && <button className="btn primary" onClick={() => void confirmStoryboard()}>批准并确认分镜</button>}</>}>
         {confirmPreview && <div className="storyboard-preview-card">
           <dl><div><dt>当前分镜</dt><dd>{confirmPreview.storyboard_artifact_id ? '已生成，等待确认' : '待定稿'}</dd></div><div><dt>镜头完整性</dt><dd>{confirmPreview.shot_count}/{confirmPreview.planned_shots}</dd></div>
-            <div><dt>总时长</dt><dd>{confirmPreview.total_duration_s}s</dd></div><div><dt>最终镜</dt><dd>{confirmPreview.final_shot_valid ? '有效' : '缺失'}</dd></div>
+            <div><dt>总时长</dt><dd>{confirmPreview.total_duration_s}s</dd></div><div><dt>收尾镜</dt><dd>{confirmPreview.final_shot_valid ? '有效' : '缺失'}</dd></div>
             <div><dt>必检项</dt><dd>{confirmPreview.hard_gates.passed ? '全部通过' : '未通过'}</dd></div><div><dt>预计视频成本</dt><dd>¥{confirmPreview.estimated_video_cost_cny.min}–¥{confirmPreview.estimated_video_cost_cny.max}</dd></div></dl>
           {!!confirmPreview.warnings.length && <div className="warning-banner">{confirmPreview.warnings.map(storyboardGateIssueLabel).join('；')}</div>}
           {!!confirmPreview.hard_gates.errors.length && <div className="error-banner" role="alert"><b>请先处理以下问题：</b><ul>{confirmPreview.hard_gates.errors.map((item, index) => <li key={`${index}-${item}`}>{storyboardGateIssueLabel(item)}</li>)}</ul></div>}
-          {!confirmPreview.hard_gates.passed && confirmPreview.force_confirmation?.allowed && <div className="warning-banner"><b>可强行确认</b><p>{confirmPreview.force_confirmation.note}</p><label className="review-field">风险承担理由（必填）<textarea rows={3} maxLength={500} value={forceConfirmReason} onChange={event => setForceConfirmReason(event.target.value)} placeholder="说明为何暂不修复，以及接受的画面风险" /></label></div>}
           <p>确认后解锁：{confirmPreview.unlocks.join('、')}</p><small>{confirmPreview.estimated_video_cost_cny.note}</small>
         </div>}
       </Modal>
@@ -763,8 +731,6 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
   const [discardDraftId, setDiscardDraftId] = useState<string | null>(null)
   const [discardEditOpen, setDiscardEditOpen] = useState(false)
   const [reloadLatestOpen, setReloadLatestOpen] = useState(false)
-  const [adoptionDecision, setAdoptionDecision] = useState<boolean | null>(null)
-  const [adoptionBusy, setAdoptionBusy] = useState(false)
   const sourceTextRef = useRef<HTMLTextAreaElement>(null)
   const current = edit ?? shot
   const changes = edit && baseline ? buildStoryboardChanges(baseline, edit, sourceBinding) : {}
@@ -953,23 +919,6 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
     } catch (caught) { toast((caught as Error).message, true) }
   }
 
-  const setShotAdoption = async (adopted: boolean) => {
-    setAdoptionDecision(null)
-    setAdoptionBusy(true)
-    try {
-      await api.post(`/shots/${shot.id}/storyboard-adoption`, {
-        adopted,
-        reason: adopted ? '人工恢复采纳，重新进入后续生产' : '人工取消采纳，后续生产跳过本镜',
-      })
-      toast(adopted ? `镜 ${shot.shot_no} 已恢复采纳，将进入生成台和成片台` : `镜 ${shot.shot_no} 已取消采纳，生成台和成片台将跳过`)
-      onChanged()
-    } catch (caught) {
-      toast((caught as Error).message, true)
-    } finally {
-      setAdoptionBusy(false)
-    }
-  }
-
   return (
     <article className={`shot-strip ${edit ? 'editing' : 'reviewing'}`}>
       <header className="shot-head">
@@ -977,16 +926,12 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
           <span className="meta">{current.duration_s}s · {current.shot_size} · {current.camera_move} · {current.transition}</span>
           <span className="meta shot-characters">{current.characters.join(' / ') || '缺角色（需修改）'}</span>
           {isStoryboardProblemShot(shot) && <span className="shot-badge status-needs_revision">需处理</span>}
-          <span className={`shot-badge ${shot.storyboard_adopted === false ? 'status-needs_revision' : 'gate'}`}>{shot.storyboard_adopted === false ? '未采纳 · 后续跳过' : '已采纳'}</span>
-          {shot.is_final && <span className="shot-badge gate">最终镜</span>}
+          {shot.is_final && <span className="shot-badge gate">收尾镜</span>}
         </div>
         <div className="shot-head-actions">
           {shot.spoken_contract_status === 'conflict' && <button className="btn small ghost" onClick={() => setConflictOpen(true)}>解决口播冲突</button>}
           {!edit && !status.editable && <span className="shot-actions-locked" role="status">{writeBlockReason}</span>}
           {!edit ? <>
-            <button className={`btn small ${shot.storyboard_adopted === false ? 'primary' : 'ghost'}`} disabled={adoptionBusy || disabled}
-              title={shot.storyboard_adopted === false ? '恢复后将重新进入生成台与成片台' : '取消后保留分镜和候选，但生成台、补齐与成片都会跳过'}
-              onClick={() => setAdoptionDecision(shot.storyboard_adopted === false)}>{adoptionBusy ? '处理中…' : shot.storyboard_adopted === false ? '恢复采纳' : '取消采纳'}</button>
             <button className="btn small danger shot-delete-action" disabled={Boolean(deleteDisabledReason)}
               aria-label={deleteDisabledReason ? `删除镜头，暂不可用：${deleteDisabledReason}` : '删除镜头'}
               title={deleteDisabledReason || '删除前会展示镜号重排、相邻重验和媒体失效影响'}
@@ -1008,11 +953,6 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
         <div className="shot-conflict-actions"><button className="btn small primary" onClick={() => void resolveConflict('rebuild_timeline_from_dialogues')}>以台词为准</button>
           <button className="btn small" onClick={() => void resolveConflict('rebuild_dialogues_from_timeline')}>以时间轴为准</button><button className="btn small ghost" onClick={() => setConflictOpen(false)}>取消</button></div>
       </div>}
-
-      <Modal open={adoptionDecision !== null} title={adoptionDecision ? `恢复采纳镜 ${shot.shot_no}？` : `取消采纳镜 ${shot.shot_no}？`} onClose={() => setAdoptionDecision(null)}
-        actions={<><button className="btn" onClick={() => setAdoptionDecision(null)}>返回</button><button className={adoptionDecision ? 'btn primary' : 'btn danger'} onClick={() => void setShotAdoption(Boolean(adoptionDecision))}>{adoptionDecision ? '确认恢复采纳' : '确认取消采纳'}</button></>}>
-        <p>{adoptionDecision ? '恢复后，本镜会重新出现在生成台并参与视频补齐；已有视频候选仍可继续使用，采纳视频后会进入下一次成片合成。' : '取消后，本镜文本和已有视频候选都会保留，但不会出现在生成台，不参与视频补齐和成片合成。需要时可随时恢复采纳。'}</p>
-      </Modal>
 
       {!!shot.qa_warnings?.length && <details className="shot-drafts"><summary>质量优化建议（{shot.qa_warnings.length}）</summary>
         <ul>{shot.qa_warnings.map((item, index) => <li key={`${item}-${index}`}>{storyboardGateIssueLabel(item)}</li>)}</ul>
@@ -1078,7 +1018,7 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
               <button type="button" disabled={!previous} aria-label={previous ? `切换到前镜 ${previous.shot_no}` : '切换到前镜，暂不可用：当前已是第一镜'}
                 onClick={() => previous && onSelect(previous.id)}><b>{previous ? `前镜 ${previous.shot_no} · 离开` : '首镜边界'}</b><span>{previous?.state_out || previous?.last_frame_desc || '无前镜依赖'}</span></button>
               <div className={prevConflict || nextConflict ? 'current conflict' : 'current'}><b>本镜 {shot.shot_no}</b><span>{edit.state_in || '未设进入'} → {edit.state_out || '未设离开'}</span></div>
-              <button type="button" disabled={!next} aria-label={next ? `切换到后镜 ${next.shot_no}` : '切换到后镜，暂不可用：当前已是最终镜'}
+              <button type="button" disabled={!next} aria-label={next ? `切换到后镜 ${next.shot_no}` : '切换到后镜，暂不可用：当前已是收尾镜'}
                 onClick={() => next && onSelect(next.id)}><b>{next ? `后镜 ${next.shot_no} · 进入` : '末镜边界'}</b><span>{next?.state_in || next?.first_frame_desc || '无后镜依赖'}</span></button>
             </div>
             {(prevConflict || nextConflict) && <p className="field-error" role="alert">{prevConflict ? '前镜离开与本镜进入不一致。' : ''}{nextConflict ? '本镜离开与后镜进入不一致。' : ''} 可点击邻镜定位。</p>}
@@ -1088,7 +1028,7 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
             <label htmlFor={fieldId(shot.id, 'continuity-mode')}>与上镜关系<select id={fieldId(shot.id, 'continuity-mode')} value={edit.continuity_mode ?? ''} onChange={event => setEdit({ ...edit, continuity_mode: event.target.value })}><option value="">自动/未设定</option>{Object.entries(CONTINUITY_MODES).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
           </details>
 
-          {status.feature_flags?.structure_edit !== false && <section className="shot-structure-actions"><h3>镜头结构</h3><p>{structureDisabledReason || '所有结构动作都会先展示镜号、最终镜、相邻重验和媒体失效影响。'}</p><div>
+          {status.feature_flags?.structure_edit !== false && <section className="shot-structure-actions"><h3>镜头结构</h3><p>{structureDisabledReason || '所有结构动作都会先展示镜号、收尾镜、相邻校验和媒体失效影响。'}</p><div>
             <button className="btn small" disabled={Boolean(structureDisabledReason)}
               aria-label={structureDisabledReason ? `在当前镜后新增，暂不可用：${structureDisabledReason}` : '在当前镜后新增'}
               onClick={() => void onStructure('add_after')}>在当前镜后新增</button>
@@ -1099,7 +1039,7 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
               aria-label={structureDisabledReason ? `前移，暂不可用：${structureDisabledReason}` : !previous ? '前移，暂不可用：当前已是第一镜' : '前移'}
               onClick={() => void onStructure('move', Math.max(0, shot.shot_no - 2))}>前移</button>
             <button className="btn small" disabled={Boolean(structureDisabledReason) || !next}
-              aria-label={structureDisabledReason ? `后移，暂不可用：${structureDisabledReason}` : !next ? '后移，暂不可用：当前已是最终镜' : '后移'}
+              aria-label={structureDisabledReason ? `后移，暂不可用：${structureDisabledReason}` : !next ? '后移，暂不可用：当前已是收尾镜' : '后移'}
               onClick={() => void onStructure('move', shot.shot_no)}>后移</button>
             <button className="btn small danger" disabled={Boolean(structureDisabledReason)}
               aria-label={structureDisabledReason ? `删除镜头，暂不可用：${structureDisabledReason}` : '删除镜头'}
@@ -1124,7 +1064,7 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
 
       <ImpactDialog open={!!impact || impactLoading || !!impactError} title={`保存镜 ${shot.shot_no} 的精确影响`}
         impact={impact} loading={impactLoading} error={impactError} confirmLabel="批准影响并保存"
-        knownEffects={impact ? [`重验镜头：${((impact as unknown as { revalidation_shots?: number[] }).revalidation_shots ?? []).join('、') || '本镜与相邻镜'}`, '失败时只保留工作草稿，不覆盖发布版'] : []}
+        knownEffects={impact ? [`重新校验：${((impact as unknown as { revalidation_shots?: number[] }).revalidation_shots ?? []).join('、') || '本镜与相邻镜'}`, '失败时只保留工作草稿，不覆盖发布版'] : []}
         onClose={() => { setImpact(null); setImpactError(null); setImpactLoading(false) }} onConfirm={() => void save()} />
       <Modal open={discardEditOpen} title={`放弃镜 ${shot.shot_no} 的未保存修改？`} onClose={() => setDiscardEditOpen(false)}
         actions={<><button className="btn" onClick={() => setDiscardEditOpen(false)}>继续编辑</button><button className="btn danger" onClick={() => {

@@ -251,12 +251,6 @@ def _source_text_range_label(source_chapters: list[int]) -> str:
     return f"第 {source_chapters[0]}-{source_chapters[-1]} 章"
 
 
-def _screenplay_mode(script: EpisodeScreenplay | None) -> str:
-    if not script:
-        return "none"
-    return "full_script" if (script.full_script_text or "").strip() else "none"
-
-
 def _prepare_screenplay_for_storage(ep, script: EpisodeScreenplay, *, keep_existing_id: str | None = None,
                                     keep_created_at: float | None = None) -> EpisodeScreenplay:
     source_chapters = json.loads(ep["source_chapters"] or "[]")
@@ -269,7 +263,6 @@ def _prepare_screenplay_for_storage(ep, script: EpisodeScreenplay, *, keep_exist
     script.ending_hook = (script.ending_hook or ep["cliffhanger"] or "").strip()
     script.created_at = keep_created_at or script.created_at or stamp
     script.updated_at = stamp
-    script.beats = []
     return script
 
 
@@ -297,17 +290,48 @@ def purge_legacy_screenplays() -> int:
 
 
 def _screenplay_ready(ep) -> bool:
-    """仅 published/ready 可进分镜；warning/repairing 不可交付。"""
-    status = ep["screenplay_status"] if "screenplay_status" in ep.keys() else None
-    if status in {"warning", "repairing", "running", "failed", "pending"}:
+    """仅带正式投影的 ready 剧本可进分镜。"""
+    data = dict(ep)
+    status = data.get("screenplay_status")
+    if status in {"repairing", "running", "failed", "pending"}:
         return False
-    if not (ep["screenplay_json"] and status == "ready"):
+    screenplay_json = data.get("screenplay_json")
+    if not (screenplay_json and status == "ready"):
         return False
     try:
-        script = EpisodeScreenplay.model_validate(json.loads(ep["screenplay_json"]))
+        script = EpisodeScreenplay.model_validate(json.loads(screenplay_json))
     except (json.JSONDecodeError, TypeError, ValueError):
         return False
-    return bool((script.full_script_text or "").strip())
+    if not (script.full_script_text or "").strip():
+        return False
+    # 新发布链必须持有与当前 Artifact 精确绑定且已消费的完成凭证。
+    # 无 revision 的历史发布版保留兼容读取，迁移后自然进入新合同。
+    revision_id = data.get("screenplay_production_revision_id")
+    if not revision_id:
+        return True
+    certificate_id = data.get("screenplay_completion_certificate_id")
+    artifact_id = data.get("screenplay_artifact_id")
+    if not certificate_id or not artifact_id:
+        return False
+    try:
+        row = get_conn().execute(
+            """SELECT kind,scope_id,artifact_id,blockers,must_fix_issues,consumed_at,
+                      production_revision_id
+                 FROM completion_certificates WHERE id=?""",
+            (certificate_id,),
+        ).fetchone()
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(
+        row
+        and row["kind"] == "screenplay"
+        and row["scope_id"] == data.get("id")
+        and row["artifact_id"] == artifact_id
+        and row["production_revision_id"] == revision_id
+        and int(row["blockers"] or 0) == 0
+        and int(row["must_fix_issues"] or 0) == 0
+        and row["consumed_at"] is not None
+    )
 
 def _media_url(path_str: str | None) -> str | None:
     """把绝对落盘路径转成前端可取的 /media URL（带 mtime 版本号防缓存）。"""

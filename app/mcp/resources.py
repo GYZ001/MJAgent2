@@ -155,7 +155,6 @@ def _read_screenplay(episode_id: str) -> dict[str, Any]:
     return {
         "episode_id": episode_id,
         "screenplay": detail.get("screenplay"),
-        "screenplay_mode": detail.get("screenplay_mode"),
         "screenplay_evidence": detail.get("screenplay_evidence"),
     }
 

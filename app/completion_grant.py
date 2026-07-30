@@ -1,7 +1,6 @@
-"""完成授权（StoryboardCompletionGrant / VideoCompletionGrant）。
+"""视频补齐授权（VideoCompletionGrant）。
 
-分镜：用户显式选择「生成完成后自动确认」时签发。
-视频：用户选择「补齐到全片可用」时签发。
+用户选择「补齐到全片可用」时签发；分镜始终由人工确认，不存在自动确认授权。
 token 只存哈希，不存明文。
 """
 from __future__ import annotations
@@ -17,26 +16,10 @@ from pydantic import BaseModel
 from app.db import get_conn, new_id, now
 
 GRANT_TTL_S = 6 * 3600  # 6 小时
-PERMISSION = "storyboard.generate_and_confirm"
 VIDEO_PERMISSION = "video.complete_episode"
 DEFAULT_VIDEO_BUDGET_CAP_CNY = 150.0
 DEFAULT_VIDEO_WALL_CLOCK_CAP_S = 4 * 3600
 DEFAULT_FALLBACK_QUOTA_FRACTION = 0.2
-
-
-class StoryboardCompletionGrant(BaseModel):
-    grant_id: str
-    episode_id: str
-    project_id: str
-    screenplay_artifact_id: str
-    bible_artifact_id: str | None = None
-    permission: Literal["storyboard.generate_and_confirm"] = PERMISSION
-    kind: Literal["storyboard", "video"] = "storyboard"
-    issued_by: str = "user"
-    issued_at: float
-    expires_at: float
-    consumed_at: float | None = None
-    revoked_at: float | None = None
 
 
 class VideoCompletionGrant(BaseModel):
@@ -83,7 +66,7 @@ def ensure_completion_grants_table(conn=None) -> None:
         )"""
     )
     for stmt in (
-        "ALTER TABLE completion_grants ADD COLUMN kind TEXT NOT NULL DEFAULT 'storyboard'",
+        "ALTER TABLE completion_grants ADD COLUMN kind TEXT NOT NULL DEFAULT 'video'",
         "ALTER TABLE completion_grants ADD COLUMN storyboard_artifact_id TEXT",
         "ALTER TABLE completion_grants ADD COLUMN budget_cap_cny REAL",
         "ALTER TABLE completion_grants ADD COLUMN wall_clock_cap_s REAL",
@@ -97,51 +80,10 @@ def ensure_completion_grants_table(conn=None) -> None:
             db.commit()
         except Exception:  # noqa: BLE001
             pass
+    db.execute(
+        "DELETE FROM completion_grants WHERE kind='storyboard' OR permission='storyboard.generate_and_confirm'"
+    )
     db.commit()
-
-
-def issue_completion_grant(
-    *,
-    episode_id: str,
-    project_id: str,
-    screenplay_artifact_id: str,
-    bible_artifact_id: str | None = None,
-    issued_by: str = "user",
-    ttl_s: int = GRANT_TTL_S,
-    impact_snapshot: dict[str, Any] | None = None,
-) -> tuple[StoryboardCompletionGrant, str]:
-    """签发分镜授权；返回 (grant, plaintext_token)。明文 token 只返回一次，库内只存哈希。"""
-    ensure_completion_grants_table()
-    conn = get_conn()
-    grant_id = new_id("grant")
-    token = secrets.token_urlsafe(24)
-    issued_at = now()
-    expires_at = issued_at + max(60, int(ttl_s))
-    conn.execute(
-        """INSERT INTO completion_grants(
-            id, episode_id, project_id, screenplay_artifact_id, bible_artifact_id,
-            permission, token_hash, issued_by, issued_at, expires_at, consumed_at, revoked_at,
-            impact_snapshot_json, kind
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,NULL,NULL,?,'storyboard')""",
-        (
-            grant_id, episode_id, project_id, screenplay_artifact_id or "",
-            bible_artifact_id, PERMISSION, _hash_token(token), issued_by,
-            issued_at, expires_at,
-            json.dumps(impact_snapshot or {}, ensure_ascii=False),
-        ),
-    )
-    conn.commit()
-    grant = StoryboardCompletionGrant(
-        grant_id=grant_id,
-        episode_id=episode_id,
-        project_id=project_id,
-        screenplay_artifact_id=screenplay_artifact_id or "",
-        bible_artifact_id=bible_artifact_id,
-        issued_by=issued_by,
-        issued_at=issued_at,
-        expires_at=expires_at,
-    )
-    return grant, token
 
 
 def default_max_fallback_shots(shots_total: int) -> int:
@@ -217,28 +159,6 @@ def issue_video_completion_grant(
     return grant, token
 
 
-def _row_to_grant(row) -> StoryboardCompletionGrant:
-    kind = "storyboard"
-    try:
-        kind = row["kind"] or "storyboard"
-    except (KeyError, IndexError, TypeError):
-        kind = "storyboard"
-    return StoryboardCompletionGrant(
-        grant_id=row["id"],
-        episode_id=row["episode_id"],
-        project_id=row["project_id"],
-        screenplay_artifact_id=row["screenplay_artifact_id"] or "",
-        bible_artifact_id=row["bible_artifact_id"],
-        permission=row["permission"],
-        kind=kind if kind in {"storyboard", "video"} else "storyboard",
-        issued_by=row["issued_by"],
-        issued_at=row["issued_at"],
-        expires_at=row["expires_at"],
-        consumed_at=row["consumed_at"],
-        revoked_at=row["revoked_at"],
-    )
-
-
 def _row_to_video_grant(row) -> VideoCompletionGrant:
     def _col(name, default=None):
         try:
@@ -268,14 +188,6 @@ def _row_to_video_grant(row) -> VideoCompletionGrant:
     )
 
 
-def get_grant(grant_id: str) -> StoryboardCompletionGrant | None:
-    ensure_completion_grants_table()
-    row = get_conn().execute(
-        "SELECT * FROM completion_grants WHERE id=?", (grant_id,)
-    ).fetchone()
-    return _row_to_grant(row) if row else None
-
-
 def get_video_grant(grant_id: str) -> VideoCompletionGrant | None:
     ensure_completion_grants_table()
     row = get_conn().execute(
@@ -296,38 +208,6 @@ class GrantValidationError(ValueError):
     def __init__(self, code: str, message: str):
         self.code = code
         super().__init__(message)
-
-
-def validate_grant_for_confirm(
-    grant_id: str,
-    *,
-    episode_id: str,
-    screenplay_artifact_id: str | None,
-    bible_artifact_id: str | None,
-) -> StoryboardCompletionGrant:
-    """确认前校验授权；失败抛 GrantValidationError。"""
-    grant = get_grant(grant_id)
-    if grant is None:
-        raise GrantValidationError("GRANT_NOT_FOUND", "自动确认授权不存在")
-    if grant.episode_id != episode_id:
-        raise GrantValidationError("GRANT_EPISODE_MISMATCH", "授权不属于本集")
-    if grant.revoked_at is not None:
-        raise GrantValidationError("GRANT_REVOKED", "自动确认授权已撤销")
-    if grant.consumed_at is not None:
-        raise GrantValidationError("GRANT_CONSUMED", "自动确认授权已使用")
-    if now() > grant.expires_at:
-        raise GrantValidationError("GRANT_EXPIRED", "自动确认授权已过期")
-    if (screenplay_artifact_id or "") != (grant.screenplay_artifact_id or ""):
-        raise GrantValidationError(
-            "UPSTREAM_VERSION_CHANGED",
-            "剧本 Artifact 已变更，自动确认授权失效",
-        )
-    if (bible_artifact_id or "") != (grant.bible_artifact_id or ""):
-        raise GrantValidationError(
-            "UPSTREAM_VERSION_CHANGED",
-            "人物谱 Artifact 已变更，自动确认授权失效",
-        )
-    return grant
 
 
 def validate_video_grant(
@@ -424,12 +304,12 @@ def revoke_grant(grant_id: str) -> None:
     conn.commit()
 
 
-def revoke_active_grants_for_episode(episode_id: str) -> int:
+def revoke_active_video_grants_for_episode(episode_id: str) -> int:
     ensure_completion_grants_table()
     conn = get_conn()
     cur = conn.execute(
         """UPDATE completion_grants SET revoked_at=?
-           WHERE episode_id=? AND revoked_at IS NULL AND consumed_at IS NULL""",
+           WHERE episode_id=? AND kind='video' AND revoked_at IS NULL AND consumed_at IS NULL""",
         (now(), episode_id),
     )
     conn.commit()

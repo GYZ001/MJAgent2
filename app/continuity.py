@@ -42,8 +42,9 @@ _SEQUENTIAL_ACTION_SPLITTERS = re.compile(
 )
 _DISTINCT_ACTION_VERBS = (
     "走出", "走进", "跑出", "跑向", "走向", "走到", "上前", "离开", "伸手", "触碰", "按住",
-    "闭上", "睁开", "亮起", "显现", "宣布", "喊出", "点名", "自我介绍", "微笑", "惊叹",
-    "倒吸", "窃笑", "转身", "跪下", "站起", "举起", "放下", "拔出", "插入",
+    "穿过", "行至", "退到", "停下", "闭上", "睁开", "亮起", "显现", "宣布", "喊出", "点名",
+    "翻开", "合拢", "抬头", "收回", "触摸", "点头", "自我介绍", "微笑", "惊叹", "倒吸",
+    "窃笑", "转身", "跪下", "站起", "举起", "放下", "拔出", "插入",
 )
 
 DIALOGUE_FOCUS_RISK_TAG = "dialogue_speaker_closeup"
@@ -54,6 +55,19 @@ _DIALOGUE_TWO_SHOT_INTERACTION_RE = re.compile(
     r"搀扶|扶住|抱住|拥抱|握住|抓住|拉住|按住|推开|挡住|托住|"
     r"递给|递出|接过|抢夺|碰杯|亲吻|背起|抱起|交手|对打|扭打|"
     r"共同(?:握住|托住|抬起|推动|按住)|同时(?:握住|托住|抬起|推动|按住)"
+)
+
+# 有对白不等于只能拍脸。角色在说话的同时完成走位、离场或操作剧情道具时，
+# 这些可见动作本身就是主线交付，若仍强制单人大近景，视频模型通常只保留口型，
+# 把走位/道具动作整段省略。此处只识别大形体、可核验动作，不把抬眼、微笑等
+# 表情表演误判成动作调度镜。
+_DIALOGUE_SPATIAL_STAGING_RE = re.compile(
+    r"走(?:向|到|过|进|出|开)|穿过|转身|离开|退(?:到|向|开)|上前|跑(?:向|到|出|进)|"
+    r"快步|缓步|迈步|起身|站起|坐下|跪下|绕过|移步|追上|进入|退出"
+)
+_DIALOGUE_PROP_STAGING_RE = re.compile(
+    r"翻开|合拢|拿起|放下|举起|抬手|伸手|收回手|触碰|触摸|按住|按上|贴上|"
+    r"握住|递出|递给|接过|拔出|推开|拉开|打开|关闭|指向|挥击|敲击|端起|拾起"
 )
 
 
@@ -141,10 +155,40 @@ def dialogue_two_shot_required(shot: Shot) -> bool:
     return False
 
 
+def dialogue_action_staging_kind(shot: Shot) -> str:
+    """返回对白镜必须保留的动作调度类型：spatial / prop / 空。
+
+    ``dialogue_focus_subject`` 会据此放弃“只拍脸”的派生构图，但仍保持一镜只有
+    一位画内说话人。显式 risk tag 供人工编辑/历史数据在词面未命中时强制保留动作。
+    """
+    if len(onscreen_dialogue_speakers(shot)) != 1:
+        return ""
+    visual_text = "；".join(
+        str(value or "")
+        for value in (
+            shot.primary_action,
+            shot.action_desc,
+            shot.first_frame_desc,
+            shot.last_frame_desc,
+        )
+    )
+    if _DIALOGUE_SPATIAL_STAGING_RE.search(visual_text):
+        return "spatial"
+    if _DIALOGUE_PROP_STAGING_RE.search(visual_text):
+        return "prop"
+    if "dialogue_action_staging" in (shot.risk_tags or []):
+        return "prop"
+    return ""
+
+
 def dialogue_focus_subject(shot: Shot) -> str | None:
     """返回专业对白镜头的唯一画面主体；双人肢体互动属于显式例外。"""
     speakers = onscreen_dialogue_speakers(shot)
-    if len(speakers) != 1 or dialogue_two_shot_required(shot):
+    if (
+        len(speakers) != 1
+        or dialogue_two_shot_required(shot)
+        or dialogue_action_staging_kind(shot)
+    ):
         return None
     visible = raw_characters_visible(shot)
     return speakers[0] if speakers[0] in visible else None
@@ -175,6 +219,22 @@ def dialogue_framing_errors(shot: Shot, *, strict_composition: bool = True) -> l
             errors.append(
                 f"shot_no={shot.shot_no} 虽有双人肢体互动，但画面声明了 {len(visible)} 人；"
                 "对白双人镜最多保留说话人与直接互动对象，其余人物留在画外"
+            )
+        return errors
+    staging_kind = dialogue_action_staging_kind(shot)
+    if staging_kind:
+        # 动作对白仍只允许一个画内说话人，但不可为了口型裁掉走位、肢体或剧情道具。
+        # 其他可见角色可作为无台词的直接互动对象/背景关系存在。
+        if staging_kind == "spatial" and shot.shot_size not in {"远景", "全景", "中景"}:
+            errors.append(
+                f"shot_no={shot.shot_no} 的对白同时包含走位/离场等大形体动作，"
+                f"shot_size 应为中景、全景或远景，当前为「{shot.shot_size}」；"
+                "必须完整拍出动作，不能用单人大近景替代"
+            )
+        elif staging_kind == "prop" and shot.shot_size == "特写":
+            errors.append(
+                f"shot_no={shot.shot_no} 的对白同时包含剧情道具操作，shot_size 不得为特写；"
+                "请至少使用近景并完整保留双手、道具和接触关系"
             )
         return errors
     if not strict_composition:
@@ -279,8 +339,12 @@ def sync_shot_continuity_fields(shot: Shot, prev: Shot | None = None) -> str:
     tags = list(shot.risk_tags or [])
     if focus and DIALOGUE_FOCUS_RISK_TAG not in tags:
         tags.append(DIALOGUE_FOCUS_RISK_TAG)
+    elif not focus and DIALOGUE_FOCUS_RISK_TAG in tags:
+        tags.remove(DIALOGUE_FOCUS_RISK_TAG)
     if dialogue_two_shot_required(shot) and DIALOGUE_TWO_SHOT_RISK_TAG not in tags:
         tags.append(DIALOGUE_TWO_SHOT_RISK_TAG)
+    if dialogue_action_staging_kind(shot) and "dialogue_action_staging" not in tags:
+        tags.append("dialogue_action_staging")
     shot.risk_tags = tags
     if not shot.prompt_contract_version:
         shot.prompt_contract_version = PROMPT_CONTRACT_VERSION
@@ -341,8 +405,13 @@ def count_sequential_action_beats(text: str) -> int:
 
 def action_capacity_errors(shot: Shot) -> list[str]:
     errors: list[str] = []
-    action = effective_primary_action(shot)
-    beats = count_sequential_action_beats(action)
+    # primary_action 常被模型压成一句摘要，真正会交给视频模型执行的细节仍在
+    # action_desc。容量必须取两者中节拍更多的一份，否则“穿过人群→停下→开口”
+    # 会以单动作摘要绕过门禁，最终只剩静态口型。
+    action_candidates = [
+        text.strip() for text in (effective_primary_action(shot), shot.action_desc or "") if text.strip()
+    ]
+    beats = max((count_sequential_action_beats(text) for text in action_candidates), default=0)
     limit = 2 if int(getattr(shot, "duration_s", 5) or 5) <= 6 else 3
     if beats > limit:
         errors.append(

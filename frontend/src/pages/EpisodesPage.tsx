@@ -62,7 +62,7 @@ export default function EpisodesPage() {
   const eps = responseMatches ? (p?.episodes ?? []) : []
   const counts = p?.episode_counts
   const totalEpisodes = counts?.total ?? p?.episodes_total ?? eps.length
-  const screenplayTodoCount = counts?.screenplay_todo ?? eps.filter(e => ['pending', 'failed', 'warning'].includes(e.screenplay_status) || !e.screenplay_mode || e.screenplay_mode === 'none').length
+  const screenplayTodoCount = counts?.screenplay_todo ?? eps.filter(e => ['pending', 'failed', 'repairing'].includes(e.screenplay_status)).length
   const screenplayRunningCount = counts?.screenplay_running ?? eps.filter(e => e.screenplay_status === 'running').length
   const storyboardReadyCount = counts?.storyboard_ready ?? eps.filter(e => e.screenplay_status === 'ready' && ['planned', 'script_failed'].includes(e.status)).length
   const scriptingCount = counts?.scripting ?? eps.filter(e => e.status === 'scripting').length
@@ -400,7 +400,6 @@ export default function EpisodesPage() {
               <div className="ep-stamps">
                 <ScreenplayStatusStamp status={ep.screenplay_status} />
                 <EpisodeStatusStamp status={ep.status} />
-                {ep.screenplay_mode === 'full_script' && <span className="ep-note">完整剧本</span>}
                 {ep.screenplay_error && <span className="ep-note err">剧本失败</span>}
               </div>
               <div className="episode-pipeline" aria-label="制作进度">

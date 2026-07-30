@@ -17,9 +17,7 @@ from app.production.screenplay_document import (
     apply_field_patch,
     document_to_screenplay,
     normalize_overdetail_text_fields,
-    prune_dialogue_chains_to_budget,
     rederive_projections,
-    restore_dialogue_chains_from_baseline,
     screenplay_to_document,
     split_dialogue_chain_by_scene,
 )
@@ -125,7 +123,6 @@ def apply_screenplay_patch(
         )
 
     touched: list[str] = []
-    additional_parent_ids: list[str] = []
     working = doc
     for op in request.operations:
         if op.op == "rederive":
@@ -140,48 +137,10 @@ def apply_screenplay_patch(
             )
             touched.extend(nodes)
             continue
-        if op.op == "prune_dialogue_budget":
-            value = op.value if isinstance(op.value, dict) else {}
-            working, nodes = prune_dialogue_chains_to_budget(
-                working,
-                max_turns=int(value.get("max_turns") or 6),
-                required_lines=[str(line) for line in (value.get("required_lines") or [])],
-            )
-            touched.extend(nodes)
-            continue
         if op.op == "split_dialogue_chain_by_scene":
             chain_id = str((op.target or {}).get("chain_id") or (op.target or {}).get("id") or "")
             working, nodes = split_dialogue_chain_by_scene(working, chain_id=chain_id)
             touched.extend(nodes)
-            continue
-        if op.op == "restore_dialogue_chains_from_baseline":
-            baseline_id = str(
-                (op.target or {}).get("baseline_artifact_id")
-                or (op.target or {}).get("id")
-                or ""
-            )
-            baseline_artifact = evidence_repository.get_artifact(baseline_id)
-            if not baseline_artifact:
-                return PatchResult(
-                    ok=False,
-                    before_artifact_id=request.expected_artifact_id,
-                    before_hash=before_hash,
-                    error="Baseline artifact 不存在",
-                )
-            baseline_content = baseline_artifact.get("content") or {}
-            if "screenplay_metadata" in baseline_content:
-                baseline_doc = ScreenplayDocument.model_validate(baseline_content)
-            else:
-                baseline_script = EpisodeScreenplay.model_validate(
-                    baseline_content.get("_projection") or baseline_content
-                )
-                baseline_doc = screenplay_to_document(baseline_script)
-            working, nodes = restore_dialogue_chains_from_baseline(
-                working,
-                baseline=baseline_doc,
-            )
-            touched.extend(nodes)
-            additional_parent_ids.append(baseline_id)
             continue
         if op.op in {"replace_field", "add_field"}:
             working, nodes = apply_field_patch(
@@ -211,8 +170,6 @@ def apply_screenplay_patch(
     working = rederive_projections(working)
     script = document_to_screenplay(working)
     after_content = working.model_dump(mode="json")
-    # 同时保留兼容投影
-    after_content["_projection"] = script.model_dump(mode="json")
     after_hash = evidence_repository.content_hash(after_content)
     if after_hash == before_hash:
         record_noop_rejected(kind="screenplay", episode_id=episode_id)
@@ -236,10 +193,7 @@ def apply_screenplay_patch(
             status="candidate" if local_issues else "validated",
             trust_level="T1" if local_issues else "T2",
             content=after_content,
-            parent_artifact_ids=list(dict.fromkeys([
-                request.expected_artifact_id,
-                *additional_parent_ids,
-            ])),
+            parent_artifact_ids=[request.expected_artifact_id],
             contract_version=rev.contract_version or None,
         )
     )
@@ -269,7 +223,6 @@ def apply_screenplay_patch(
             parent_artifact_ids=list(dict.fromkeys([
                 request.expected_artifact_id,
                 after_art["id"],
-                *additional_parent_ids,
             ])),
             contract_version=rev.contract_version or None,
         )
@@ -324,10 +277,7 @@ def load_screenplay_from_artifact(artifact_id: str) -> EpisodeScreenplay:
 
 
 def screenplay_artifact_payload(script: EpisodeScreenplay) -> dict[str, Any]:
-    doc = screenplay_to_document(script)
-    payload = doc.model_dump(mode="json")
-    payload["_projection"] = script.model_dump(mode="json")
-    return payload
+    return screenplay_to_document(script).model_dump(mode="json")
 
 
 def _local_screenplay_schema_check(script: EpisodeScreenplay) -> list[Issue]:

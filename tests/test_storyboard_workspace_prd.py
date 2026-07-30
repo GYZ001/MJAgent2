@@ -15,7 +15,6 @@ from app.orchestration.engine import WorkflowRecorder
 from app.orchestration.state_machine import transition_run
 from app.storyboard_supervisor import (
     SupervisorCheckpoint,
-    _begin_repair_activation,
     load_latest_checkpoint,
     save_checkpoint,
 )
@@ -106,12 +105,14 @@ def test_snapshot_version_is_monotonic_and_action_is_unique(storyboard_db):
 def test_status_distinguishes_visible_drafts_from_zero_safe_checkpoint(storyboard_db):
     save_checkpoint(SupervisorCheckpoint(
         episode_id="e1",
-        phase="WAITING_RETRY",
+        phase="PAUSED_EXTERNAL",
         validated_prefix_end=0,
         next_shot_no=1,
         expected_total=5,
     ))
-    storyboard_db.execute("UPDATE episodes SET status='scripting' WHERE id='e1'")
+    storyboard_db.execute(
+        "UPDATE episodes SET status='scripting',script_error='外部依赖暂不可用' WHERE id='e1'"
+    )
     storyboard_db.commit()
 
     status = api.episode_detail("e1", view="board")["storyboard_status"]
@@ -169,33 +170,6 @@ def test_recorded_storyboard_task_releases_terminal_write_pointer(storyboard_db,
         "SELECT active_storyboard_run_id FROM episodes WHERE id='e1'",
     ).fetchone()
     assert row["active_storyboard_run_id"] is None
-
-
-def test_waiting_retry_resume_starts_a_fresh_activation_budget():
-    checkpoint = SupervisorCheckpoint(
-        episode_id="e1",
-        phase="WAITING_RETRY",
-        repair_epoch=7,
-        issue_fingerprint_counts={"same-root-cause": 3},
-        last_repair={"strategy": "repair_window"},
-        outcome=None,
-    )
-
-    previous_epoch = _begin_repair_activation(checkpoint, resume=True)
-
-    assert previous_epoch == 7
-    assert checkpoint.repair_epoch == 0
-    assert checkpoint.issue_fingerprint_counts == {"same-root-cause": 3}
-    assert checkpoint.last_repair == {"strategy": "repair_window"}
-
-
-def test_non_retry_checkpoint_does_not_reset_repair_budget():
-    checkpoint = SupervisorCheckpoint(
-        episode_id="e1", phase="GENERATING_SHOTS", repair_epoch=4,
-    )
-
-    assert _begin_repair_activation(checkpoint, resume=True) is None
-    assert checkpoint.repair_epoch == 4
 
 
 @pytest.mark.asyncio
@@ -565,27 +539,26 @@ async def test_batch_storyboard_reports_partial_start_failure(
 
 
 @pytest.mark.asyncio
-async def test_resume_ignores_legacy_auto_confirm_request(storyboard_db, monkeypatch):
+async def test_canonical_start_auto_resumes_existing_work(storyboard_db, monkeypatch):
     from app import task_registry
 
     storyboard_db.execute(
         "UPDATE episodes SET status='script_failed',script_error='可恢复' WHERE id='e1'"
     )
     storyboard_db.commit()
-    preview = api.storyboard_start_preflight("e1", {"mode": "resume"})
+    preview = api.storyboard_start_preflight("e1", {})
+    assert preview["action"] == "resume"
 
     def fake_spawn(_kind, _key, coro, *, project_id=None):
         coro.close()
         return object()
 
     monkeypatch.setattr(task_registry, "spawn", fake_spawn)
-    result = await api.resume_storyboard("e1", {
+    result = await api.start_storyboard("e1", {
         "preflight_token": preview["preview_token"],
-        "completion_mode": "auto_confirm",
     })
 
-    assert result["completion_mode"] == "ready_for_manual_confirm"
-    assert "completion_grant_id" not in result
+    assert result["action"] == "resume"
     assert storyboard_db.execute(
         "SELECT COUNT(*) AS c FROM completion_grants"
     ).fetchone()["c"] == 0
@@ -863,7 +836,7 @@ def test_confirmation_preview_rejects_non_terminal_episode(storyboard_db):
     assert caught.value.detail["code"] == "STORYBOARD_NOT_CONFIRMABLE"
 
 
-def test_automated_confirmation_reports_hard_errors_before_manual_warning(storyboard_db):
+def test_confirmation_reports_hard_errors_and_score_only_warnings(storyboard_db):
     storyboard_db.execute(
         "UPDATE episodes SET status='script_failed', script_error='尚有问题' WHERE id='e1'"
     )
@@ -879,7 +852,7 @@ def test_automated_confirmation_reports_hard_errors_before_manual_warning(storyb
     storyboard_db.commit()
 
     with pytest.raises(HTTPException) as caught:
-        api.create_storyboard_confirmation_preview("e1", automated=True)
+        api.create_storyboard_confirmation_preview("e1")
 
     assert caught.value.status_code == 409
     assert caught.value.detail["code"] == "STORYBOARD_NOT_CONFIRMABLE"
@@ -907,5 +880,5 @@ def test_idempotent_confirmation_converges_terminal_runtime_state(storyboard_db)
     assert episode["script_error"] is None
     checkpoint = load_latest_checkpoint("e1")
     assert checkpoint.phase == "SUCCEEDED"
-    assert checkpoint.outcome == "SUCCEEDED_CONFIRMED"
+    assert checkpoint.outcome == "SUCCEEDED_READY_FOR_CONFIRM"
     recorder.cancel("test cleanup")

@@ -1464,6 +1464,14 @@ def normalize_screenplay_ledgers(script: EpisodeScreenplay) -> EpisodeScreenplay
     return script
 
 
+def normalize_screenplay_candidate(script: EpisodeScreenplay) -> EpisodeScreenplay:
+    """在 QA 之前生成规范化副本；QA 本身不得修改候选内容。"""
+    normalized = script.model_copy(deep=True)
+    normalize_screenplay_ledgers(normalized)
+    normalize_screenplay_dialogue_chains(normalized)
+    return normalized
+
+
 def validate_plot_spine(script: EpisodeScreenplay) -> list[str]:
     """先校验主线骨架，再允许正文通过（Renderability First）。"""
     errors: list[str] = []
@@ -1523,11 +1531,8 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
                         episode_no: int | None = None, source_text: str | None = None,
                         require_dialogue_chains: bool = False,
                         required_dialogue_lines: list[str] | None = None) -> list[str]:
-    """剧本层校验：Renderability First——先 spine，再正文；主线台词有上限，禁止全量原文台词入库。"""
+    """纯 QA：只读取候选并返回问题，不补字段、不覆盖投影、不修改输入。"""
     errors: list[str] = []
-    # 先清洗/回填空壳台账，避免模型「有壳无肉」的 ledger 把整集卡在 WARNING 候选。
-    normalize_screenplay_ledgers(script)
-    normalize_screenplay_dialogue_chains(script)
     errors.extend(validate_dialogue_chains(
         script, source_text=source_text, required=require_dialogue_chains,
         required_dialogue_lines=required_dialogue_lines,
@@ -1746,8 +1751,6 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
             f"key_plot_points 共 {len(key_points)} 条，超过上限 {MAX_KEY_PLOT_POINTS}；"
             "只保留主线局势变化，细节支线放入 drop_list"
         )
-    if script.beats:
-        errors.append("剧本台不再接受 beats 拍卡结构；请重新生成完整剧本")
     event_ids: set[str] = set()
     if not script.events:
         errors.append("events 不能为空；必须把完整剧本拆成可追溯的状态变化事件")
@@ -1971,7 +1974,8 @@ def validate_spine_delivery_ledger(
 ) -> list[str]:
     """结构化主线覆盖（PRD VAL-422 §4.4.3）：以 spine_beat_ids + I*/KL* 台账为主判据。
 
-    - 至少一个镜头声明对应 spine_beat_id 即视为节拍落地（允许跨相邻镜拆分）；
+    - 至少一个镜头声明对应 spine_beat_id，且 beat.who 必须在该镜或相邻镜的可见动作中出现；
+      只写 ID、由测验员宣布结果或由路人谈论当事人，不能替代真正拍出动作主体；
     - 若 beat 绑定了 information_ids/key_line_ids，则这些原子必须由声明该 spine 的镜头
       （或其相邻镜头）交付；
     - 全集没有任何结构化 ID 时，二元字组失败只产生 LEGACY_COVERAGE_UNCERTAIN，
@@ -2005,6 +2009,8 @@ def validate_spine_delivery_ledger(
     missing_beats: list[str] = []
     legacy_uncertain: list[str] = []
     missing_atoms: list[str] = []
+    missing_visual_subjects: list[str] = []
+    missing_visible_actions: list[str] = []
 
     for beat in spine.spine_beats:
         if not beat.must_keep:
@@ -2022,6 +2028,40 @@ def validate_spine_delivery_ledger(
             ]
             window_spoken = "".join(spoken_text_of(s) for s in window)
             window_visual = window_spoken + "".join((s.action_desc or "") for s in window)
+            who_parts = [
+                part.strip()
+                for part in re.split(r"[、，,和与及/／\s]+", (beat.who or "").strip())
+                if part.strip()
+            ]
+            # “他/她/众人”等功能性概括没有稳定人物名，继续由 does/信息原子校验；
+            # 具名动作主体则必须真正进入可见动作文本，不能只靠 S* 编号冒充覆盖。
+            generic_who = {"他", "她", "他们", "她们", "众人", "人群", "围观者", "双方", "所有人"}
+            for who in who_parts:
+                if who in generic_who:
+                    continue
+                subject_shots = [
+                    s for s in window
+                    if any(
+                        who in visible_name or visible_name in who
+                        for visible_name in {
+                            str(name).strip()
+                            for name in [*(s.characters or []), *(s.characters_visible or [])]
+                            if str(name).strip()
+                        }
+                    )
+                ]
+                if not subject_shots:
+                    missing_visual_subjects.append(f"{beat_id}/{who}")
+                    continue
+                subject_action_text = "".join(
+                    (s.primary_action or "")
+                    + (s.action_desc or "")
+                    + (s.first_frame_desc or "")
+                    + (s.last_frame_desc or "")
+                    for s in subject_shots
+                )
+                if (beat.does or "").strip() and _claim_clearly_absent(beat.does, subject_action_text):
+                    missing_visible_actions.append(f"{beat_id}/{who}:{beat.does}")
             for kid in (beat.key_line_ids or []):
                 kid_u = str(kid).strip().upper()
                 text = catalog.get(kid_u)
@@ -2072,6 +2112,26 @@ def validate_spine_delivery_ledger(
         errors.append(
             f"主线节拍缺少必需信息原子/关键台词：{shown}{extra}；"
             "请在声明该 spine_beat_id 的镜头或其相邻镜交付对应 information_id/key_line_id"
+        )
+    if missing_visual_subjects:
+        unique_missing = list(dict.fromkeys(missing_visual_subjects))
+        shown = "；".join(unique_missing[:KEY_CONTENT_MAX_REPORT])
+        extra = (f"（另有 {len(unique_missing) - KEY_CONTENT_MAX_REPORT} 条从略）"
+                 if len(unique_missing) > KEY_CONTENT_MAX_REPORT else "")
+        errors.append(
+            f"主线节拍缺少可见动作主体：{shown}{extra}；"
+            "请让 beat.who 在对应镜头或相邻镜的 action_desc/首尾帧中亲自完成主线动作；"
+            "宣布结果、路人议论或仅填写 spine_beat_ids 都不能替代动作入画"
+        )
+    if missing_visible_actions:
+        unique_missing = list(dict.fromkeys(missing_visible_actions))
+        shown = "；".join(unique_missing[:KEY_CONTENT_MAX_REPORT])
+        extra = (f"（另有 {len(unique_missing) - KEY_CONTENT_MAX_REPORT} 条从略）"
+                 if len(unique_missing) > KEY_CONTENT_MAX_REPORT else "")
+        errors.append(
+            f"主线节拍动作主体已入画但未完成对应动作：{shown}{extra}；"
+            "请在该主体可见的 action_desc/首尾帧中明确拍出 beat.does，"
+            "不要用后续走位、静态反应或他人宣布替代"
         )
     if legacy_uncertain:
         shown = "；".join(legacy_uncertain[:KEY_CONTENT_MAX_REPORT])

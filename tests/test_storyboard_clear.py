@@ -1,16 +1,12 @@
-"""One-click storyboard clearing must leave a truly fresh episode."""
+"""Internal maintenance reset must leave a truly fresh episode."""
 from __future__ import annotations
 
 import asyncio
 import json
 
 import pytest
-from fastapi import HTTPException
-
 from app import api, config, db
-from app.capabilities import ensure_catalog_loaded
 from app.capabilities.direct import enter_handler
-from app.capabilities.registry import get_registry
 from app.schemas import EpisodeScreenplay
 
 
@@ -202,23 +198,13 @@ def test_clear_storyboard_removes_resumable_data_cache_and_downstream_media() ->
     assert not (config.PROJECTS_DIR / "p1" / "delivery" / "pkg1").exists()
 
 
-def test_start_is_rejected_until_existing_storyboard_is_cleared() -> None:
-    with pytest.raises(HTTPException, match="继续任务") as caught:
-        api._storyboard_start_preflight_payload("e1", "create")
-    assert caught.value.status_code == 409
+def test_start_auto_resumes_until_internal_reset_clears_existing_work() -> None:
+    preview = api._storyboard_start_preflight_payload("e1")
+    assert preview["action"] == "resume"
 
     with enter_handler():
         asyncio.run(api.clear_storyboard("e1"))
-    preview = api._storyboard_start_preflight_payload("e1", "create")
+    preview = api._storyboard_start_preflight_payload("e1")
     assert preview["action"] == "create"
     assert preview["kept_validated_shots"] == 0
     assert preview["checkpoint"]["available"] is False
-
-
-def test_clear_route_is_registered_as_destructive_capability() -> None:
-    ensure_catalog_loaded()
-    registry = get_registry()
-    assert registry.rest_bindings[
-        "DELETE /api/episodes/{episode_id}/storyboard"
-    ] == "storyboard.clear"
-    assert registry.commands["storyboard.clear"].title == "一键清空分镜"

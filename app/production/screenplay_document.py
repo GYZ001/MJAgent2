@@ -462,75 +462,6 @@ def normalize_overdetail_text_fields(
     return ScreenplayDocument.model_validate(data), list(dict.fromkeys(filter(None, touched)))
 
 
-def prune_dialogue_chains_to_budget(
-    doc: ScreenplayDocument,
-    *,
-    max_turns: int,
-    required_lines: list[str] | None = None,
-    min_turns: int = 3,
-) -> tuple[ScreenplayDocument, list[str]]:
-    """按整条对白链压缩精选台词，不截断问答，不改写正文。
-
-    首条链是原文开场对白锚点，始终保留；用户锁定台词所在链也始终保留。
-    其余链只在整组加入后仍不超预算时保留。full_script_text 的可读台本
-    保持不变，只缩减后续分镜必须逐句交付的 key_lines。
-    """
-    data = copy.deepcopy(doc.model_dump(mode="json"))
-    chains = list(data.get("dialogue_chains") or [])
-    if not chains:
-        return doc, []
-    cap = max(int(max_turns or 0), int(min_turns or 0), 1)
-
-    def compact(value: Any) -> str:
-        return re.sub(r"[\s\W_]+", "", str(value or ""), flags=re.UNICODE)
-
-    required = [compact(line) for line in (required_lines or []) if compact(line)]
-    keep: set[int] = {0}
-    for index, chain in enumerate(chains):
-        haystack = [
-            compact(turn.get("line"))
-            for turn in (chain.get("turns") or [])
-        ] + [
-            compact(turn.get("source_text"))
-            for turn in (chain.get("turns") or [])
-        ]
-        if any(needle in text for needle in required for text in haystack):
-            keep.add(index)
-
-    def turn_count(indices: set[int]) -> int:
-        return sum(len(chains[index].get("turns") or []) for index in indices)
-
-    for index, chain in enumerate(chains):
-        if index in keep:
-            continue
-        size = len(chain.get("turns") or [])
-        if turn_count(keep) + size <= cap:
-            keep.add(index)
-
-    # 极端情况下首链不足最小数：选最短的后续完整链，也不截断。
-    if turn_count(keep) < min_turns:
-        remaining = [
-            (len(chain.get("turns") or []), index)
-            for index, chain in enumerate(chains)
-            if index not in keep
-        ]
-        for _size, index in sorted(remaining):
-            keep.add(index)
-            if turn_count(keep) >= min_turns:
-                break
-
-    selected = [chain for index, chain in enumerate(chains) if index in keep]
-    if selected == chains:
-        return doc, []
-    removed_ids = [
-        str(chain.get("chain_id") or f"dialogue_chain:{index}")
-        for index, chain in enumerate(chains)
-        if index not in keep
-    ]
-    data["dialogue_chains"] = selected
-    return ScreenplayDocument.model_validate(data), ["dialogue_chains", *removed_ids]
-
-
 def split_dialogue_chain_by_scene(
     doc: ScreenplayDocument,
     *,
@@ -626,46 +557,6 @@ def split_dialogue_chain_by_scene(
         *chains[:chain_index], *replacements, *chains[chain_index + 1:],
     ]
     return ScreenplayDocument.model_validate(data), ["dialogue_chains", chain_id, *created_ids]
-
-
-def restore_dialogue_chains_from_baseline(
-    doc: ScreenplayDocument,
-    *,
-    baseline: ScreenplayDocument,
-) -> tuple[ScreenplayDocument, list[str]]:
-    """恢复被旧版对白数量上限整组裁掉的对白链。
-
-    这是一个严格的兼容性迁移：只有当前链集合是 Baseline 链集合的未改写子集时
-    才恢复。这样可以确认历史操作只是删除了整条链，不会覆盖后续人工修改或其他
-    局部补丁。正文场次与台词完全不动，只恢复可追溯的对白链元数据。
-    """
-    current = [chain.model_dump(mode="json") for chain in (doc.dialogue_chains or [])]
-    original = [chain.model_dump(mode="json") for chain in (baseline.dialogue_chains or [])]
-    if len(original) <= len(current):
-        return doc, []
-
-    original_by_id = {
-        str(chain.get("chain_id") or ""): chain
-        for chain in original
-        if str(chain.get("chain_id") or "")
-    }
-    if not current or any(
-        original_by_id.get(str(chain.get("chain_id") or "")) != chain
-        for chain in current
-    ):
-        return doc, []
-
-    data = copy.deepcopy(doc.model_dump(mode="json"))
-    data["dialogue_chains"] = copy.deepcopy(original)
-    restored_ids = [
-        str(chain.get("chain_id") or "")
-        for chain in original
-        if chain not in current and str(chain.get("chain_id") or "")
-    ]
-    return ScreenplayDocument.model_validate(data), [
-        "dialogue_chains",
-        *restored_ids,
-    ]
 
 
 def _build_scene_blocks(script: EpisodeScreenplay) -> list[SceneBlockNode]:

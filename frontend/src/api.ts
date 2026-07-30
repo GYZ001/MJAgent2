@@ -948,21 +948,6 @@ interface RequiredText {
   style?: string;
 }
 
-interface ScreenplayBeat {
-  beat_no: number;
-  day_offset: number;
-  time_of_day: string;
-  location: string;
-  characters: string[];
-  dramatic_event: string;
-  visible_action: string;
-  key_dialogues: string[];
-  turn: string;
-  carry: string;
-  beat_type: string;
-  source_excerpt: string;
-}
-
 export interface ScriptScene {
   scene_no: number;
   scene_heading: string;
@@ -989,6 +974,26 @@ export interface PlotSpine {
   drop_list?: string[];
 }
 
+export interface KeyDialogueTurn {
+  speaker: string;
+  line: string;
+  function:
+    | "trigger"
+    | "announcement"
+    | "question"
+    | "response"
+    | "decision"
+    | "statement"
+    | string;
+  source_text: string;
+}
+
+export interface KeyDialogueChain {
+  chain_id: string;
+  topic: string;
+  turns: KeyDialogueTurn[];
+}
+
 export interface EpisodeScreenplay {
   id?: string | null;
   episode_no: number;
@@ -1002,6 +1007,7 @@ export interface EpisodeScreenplay {
   obstacle?: string;
   stakes?: string;
   key_lines?: string[];
+  dialogue_chains?: KeyDialogueChain[];
   key_plot_points?: string[];
   plot_spine?: PlotSpine | null;
   scene_outline?: ScriptScene[];
@@ -1023,7 +1029,6 @@ export interface EpisodeScreenplay {
   forbidden_additions?: string[];
   created_at?: number | null;
   updated_at?: number | null;
-  beats: ScreenplayBeat[];
 }
 
 export interface ReferenceImage {
@@ -1276,7 +1281,6 @@ export interface Shot {
   information_ids?: string[];
   continuity_from_prev: number;
   adopted_version_id: string | null;
-  storyboard_adopted?: boolean;
   story_event_id?: string;
   purpose?: string;
   new_information_ids?: string[];
@@ -1348,11 +1352,8 @@ export interface Episode {
   cost_limit_cny?: number;
   screenplay_status: string;
   screenplay_error?: string | null;
-  screenplay_beats?: number;
-  screenplay_mode?: string;
   screenplay_updated_at?: number | null;
   screenplay?: EpisodeScreenplay | null;
-  source_dialogue_lines?: string[] | null;
   source_dialogue_occurrences?: DialogueOccurrence[] | null;
   required_dialogue_lines?: string[];
   required_dialogue_occurrence_ids?: string[];
@@ -1375,7 +1376,6 @@ export interface Episode {
     patch_count?: number;
     open_issue_count?: number;
     yield_reason?: string;
-    legacy_dialogue_policy_recovery_available?: boolean;
   } | null;
   shots?: Shot[];
   storyboard_planned_shots?: number | null;
@@ -1383,14 +1383,11 @@ export interface Episode {
   storyboard_evidence?: ArtifactEvidence | null;
   storyboard_status?: StoryboardStatus | null;
   active_storyboard_run_id?: string | null;
-  storyboard_completion_mode?: string | null;
   active_video_run_id?: string | null;
   video_completion_mode?: string | null;
   video_supervisor?: Record<string, unknown> | null;
   supervisor?: {
     phase: string;
-    goal?: string;
-    completion_mode?: string;
     repair_epoch: number;
     validated_prefix_end: number;
     next_shot_no: number;
@@ -1400,7 +1397,6 @@ export interface Episode {
     frontier?: number;
     issue_codes?: string[];
     last_repair?: Record<string, unknown> | null;
-    completion_grant_id?: string | null;
     pending_control?: { action: string; pending: boolean } | null;
   } | null;
   delivery_artifact_id?: string | null;

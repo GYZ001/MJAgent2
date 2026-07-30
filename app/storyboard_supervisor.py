@@ -1,6 +1,6 @@
 """集级分镜 Supervisor AgentLoop。
 
-以「整集 hard gate 通过（并可选自动确认）」为唯一成功条件；
+以「整集 hard gate 通过并发布为待人工确认」为唯一成功条件；
 业务校验失败进入 Repair Router，不得以 PARTIAL/scripted+error 结束。
 """
 from __future__ import annotations
@@ -8,15 +8,9 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
-from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from app import errors
-from app.completion_grant import (
-    consume_grant,
-    validate_grant_for_confirm,
-    GrantValidationError,
-)
 from app.db import get_conn
 from app.evidence import repository as evidence_repository
 from app.harness.contracts import get_contract
@@ -38,10 +32,7 @@ SupervisorPhase = Literal[
     "GENERATING_SHOTS",
     "VALIDATING_EPISODE",
     "REPAIRING",
-    "PREPARING_CONFIRM",
-    "CONFIRMING",
     "SUCCEEDED",
-    "WAITING_RETRY",
     "PAUSED_EXTERNAL",
     "PAUSED_BUDGET",
     "WAITING_AUTHORIZATION",
@@ -49,15 +40,11 @@ SupervisorPhase = Literal[
     "CANCELLED",
 ]
 
-CompletionMode = Literal["ready_for_manual_confirm", "auto_confirm"]
-
-MAX_REPAIR_EPOCHS = 6
 CHECKPOINT_TYPE = "storyboard_supervisor_checkpoint"
 
 
 class SupervisorCheckpoint(BaseModel):
     episode_id: str
-    goal: Literal["generate_ready", "generate_and_confirm"] = "generate_ready"
     phase: SupervisorPhase = "CREATED"
     repair_epoch: int = 0
     outline_artifact_id: str | None = None
@@ -68,37 +55,9 @@ class SupervisorCheckpoint(BaseModel):
     coverage: dict[str, list[str]] = Field(default_factory=dict)
     pending_issue_ids: list[str] = Field(default_factory=list)
     issue_fingerprint_counts: dict[str, int] = Field(default_factory=dict)
-    completion_grant_id: str | None = None
-    completion_mode: CompletionMode = "ready_for_manual_confirm"
     input_versions: dict[str, str | None] = Field(default_factory=dict)
     last_repair: dict[str, Any] | None = None
-    outcome: str | None = None  # SUCCEEDED_READY_FOR_CONFIRM | SUCCEEDED_CONFIRMED
-
-
-def _begin_repair_activation(cp: SupervisorCheckpoint, *, resume: bool) -> int | None:
-    """为一次新的自动续跑 activation 重置局部修复预算。
-
-    ``repair_epoch`` 是单次 activation 的保险丝，而不是整个分镜任务的永久上限。
-    WAITING_RETRY 检查点若原样带着 ``MAX_REPAIR_EPOCHS + 1`` 恢复，主循环会在生成前
-    立即再次让出，形成“页面一直等待、后台永不续跑”的假恢复。
-
-    指纹计数与 ``last_repair`` 保留，用于跨 activation 识别重复根因并升级策略；这里只
-    重置本次循环预算。
-    """
-    if not resume or cp.phase != "WAITING_RETRY":
-        return None
-    previous_epoch = cp.repair_epoch
-    cp.repair_epoch = 0
-    cp.outcome = None
-    return previous_epoch
-
-
-def _requires_manual_confirmation(exc: HTTPException) -> bool:
-    """自动确认只因可审阅 warning 被拒时，降级为“已就绪待人工确认”。"""
-    return (
-        exc.status_code == 409
-        and "自动确认遇到需要人工判断的警告" in str(exc.detail)
-    )
+    outcome: str | None = None  # SUCCEEDED_READY_FOR_CONFIRM
 
 
 def _is_retryable_external_error(exc: BaseException) -> bool:
@@ -210,20 +169,6 @@ def save_checkpoint(cp: SupervisorCheckpoint, *, run_id: str | None = None) -> s
     return artifact["id"]
 
 
-def _delete_shots_from(conn, episode_id: str, frontier: int) -> int:
-    """删除 frontier 及其之后的镜头（含媒体衍生物由调用方清）。"""
-    rows = conn.execute(
-        "SELECT id, shot_no FROM shots WHERE episode_id=? AND shot_no>=? ORDER BY shot_no",
-        (episode_id, frontier),
-    ).fetchall()
-    from app import worker
-
-    for row in rows:
-        worker.clear_shot_artifacts(row["id"])
-        conn.execute("DELETE FROM shots WHERE id=?", (row["id"],))
-    return len(rows)
-
-
 def _blocker_messages(draft) -> list[str]:
     residual = list(getattr(draft, "residual_errors", []) or [])
     disposition = getattr(draft, "disposition", None)
@@ -312,8 +257,6 @@ async def run_storyboard_supervisor(
     episode_id: str,
     *,
     resume: bool = True,
-    completion_mode: CompletionMode = "ready_for_manual_confirm",
-    completion_grant_id: str | None = None,
     run_id: str | None = None,
     preflight_done: bool = False,
 ) -> SupervisorCheckpoint:
@@ -344,7 +287,7 @@ async def run_storyboard_supervisor(
         _reconcile_storyboard_plan,
         _sync_storyboard_shot_timing,
     )
-    from app.domain.video_ops import confirm_episode_core, evaluate_storyboard_for_confirmation
+    from app.domain.video_ops import evaluate_storyboard_for_confirmation
 
     conn = get_conn()
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
@@ -364,33 +307,19 @@ async def run_storyboard_supervisor(
     if cp is None:
         cp = SupervisorCheckpoint(
             episode_id=episode_id,
-            goal="generate_and_confirm" if completion_mode == "auto_confirm" else "generate_ready",
-            completion_mode=completion_mode,
-            completion_grant_id=completion_grant_id,
             input_versions={
                 "screenplay_artifact_id": ep["screenplay_artifact_id"],
                 "bible_artifact_id": p["bible_artifact_id"] if p else None,
             },
             phase="PREFLIGHT",
         )
-    else:
-        # 恢复时若启动参数带了新的 completion_mode/grant，以启动为准
-        if completion_mode:
-            cp.completion_mode = completion_mode
-            cp.goal = "generate_and_confirm" if completion_mode == "auto_confirm" else "generate_ready"
-        if completion_grant_id:
-            cp.completion_grant_id = completion_grant_id
-
-    resumed_repair_epoch = _begin_repair_activation(cp, resume=resume)
-
     if run_id:
         evidence_repository.append_event(
             run_id, "STORYBOARD_SUPERVISOR_STARTED", "info",
-            f"Supervisor 启动 mode={cp.completion_mode} resume={resume}",
+            f"Supervisor 启动 resume={resume}",
             payload={
                 "episode_id": episode_id,
                 "phase": cp.phase,
-                "resumed_repair_epoch": resumed_repair_epoch,
             },
         )
 
@@ -405,15 +334,8 @@ async def run_storyboard_supervisor(
         conn.commit()
         return cp
 
-    # 确认中重启：幂等查询
-    if resume and cp.phase == "CONFIRMING" and ep["status"] == "confirmed":
-        cp.phase = "SUCCEEDED"
-        cp.outcome = "SUCCEEDED_CONFIRMED"
-        save_checkpoint(cp, run_id=run_id)
-        return cp
-
     if not resume:
-        # 新 production revision：若本 revision 已完成 Baseline+QA，拒绝 fresh 全量清空，改为 resume。
+        # 新 production revision 只初始化工作区；任何已有数据都只能续跑，不得全量清空。
         from app.production.revision import ensure_production_revision, get_active_production_revision
         from app.harness.contracts import get_contract
 
@@ -421,23 +343,6 @@ async def run_storyboard_supervisor(
         if existing_rev and existing_rev.baseline_done and existing_rev.first_evaluation_done:
             resume = True
         else:
-            worker.delete_episode_shots(episode_id)
-            try:
-                conn.execute(
-                    "UPDATE episodes SET storyboard_outline_json=NULL, "
-                    "working_storyboard_artifact_id=NULL, "
-                    "storyboard_artifact_id=COALESCE(published_storyboard_artifact_id, NULL) WHERE id=?",
-                    (episode_id,),
-                )
-            except Exception:  # noqa: BLE001
-                conn.execute(
-                    "UPDATE episodes SET storyboard_outline_json=NULL, storyboard_artifact_id=NULL WHERE id=?",
-                    (episode_id,),
-                )
-            conn.commit()
-            cp.validated_prefix_end = 0
-            cp.next_shot_no = 1
-            cp.validated_shot_artifact_ids = []
             try:
                 contract_ver = get_contract("storyboard").version
             except Exception:  # noqa: BLE001
@@ -515,7 +420,8 @@ async def run_storyboard_supervisor(
     final_feedback: list[str] | None = None
     needs_outline = outline is None
 
-    while cp.repair_epoch <= MAX_REPAIR_EPOCHS:
+    # 修复由 Issue 指纹的无进展检测收口；不再在固定轮数后暴露“点击继续”伪业务状态。
+    while True:
         # 用户 pause / handoff：在安全边界生效
         from app.storyboard_control import consume_control
         ctrl = consume_control(episode_id)
@@ -745,8 +651,6 @@ async def run_storyboard_supervisor(
                 ) or None
 
         if shot_loop_broke_for_repair:
-            if cp.repair_epoch > MAX_REPAIR_EPOCHS:
-                break
             continue
 
         # 逐镜循环因控制请求 break：回主循环顶部消费
@@ -801,7 +705,7 @@ async def run_storyboard_supervisor(
                 return cp
             continue
 
-        # ---- 通过：finalize + 完成模式 ----
+        # ---- 通过：finalize 后统一等待人工确认 ----
         actual_total = sum(int(s.duration_s or 0) for s in completed)
         synced = _compact_episode_target(actual_total or ep_data["target_duration_s"])
         _assert_storyboard_write_authorized(
@@ -809,137 +713,15 @@ async def run_storyboard_supervisor(
         )
         _finalize_storyboard_evidence(episode_id, evaluation.board)
 
-        if cp.completion_mode != "auto_confirm":
-            conn.execute(
-                "UPDATE episodes SET status='scripted', script_error=NULL, target_duration_s=? WHERE id=?",
-                (synced, episode_id),
-            )
-            conn.commit()
-            cp.phase = "SUCCEEDED"
-            cp.outcome = "SUCCEEDED_READY_FOR_CONFIRM"
-            save_checkpoint(cp, run_id=run_id)
-            return cp
-
-        # 自动确认
-        cp.phase = "PREPARING_CONFIRM"
-        save_checkpoint(cp, run_id=run_id)
-        try:
-            if not cp.completion_grant_id:
-                raise GrantValidationError("GRANT_NOT_FOUND", "缺少自动确认授权")
-            ep_now = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
-            proj = conn.execute(
-                "SELECT bible_artifact_id FROM projects WHERE id=?", (ep["project_id"],)
-            ).fetchone()
-            validate_grant_for_confirm(
-                cp.completion_grant_id,
-                episode_id=episode_id,
-                screenplay_artifact_id=ep_now["screenplay_artifact_id"],
-                bible_artifact_id=proj["bible_artifact_id"] if proj else None,
-            )
-            cp.phase = "CONFIRMING"
-            save_checkpoint(cp, run_id=run_id)
-            if run_id:
-                evidence_repository.append_event(
-                    run_id, "AUTO_CONFIRM_STARTED", "info", "开始自动确认",
-                )
-            from app.domain.video_ops import create_storyboard_confirmation_preview
-            confirm_preview = create_storyboard_confirmation_preview(episode_id, automated=True)
-            confirm_episode_core(
-                episode_id,
-                decided_by="supervisor",
-                reason="分镜全量确定性校验通过并由 Supervisor 自动确认",
-                preview_token=confirm_preview["preview_token"],
-            )
-            consume_grant(cp.completion_grant_id)
-            if run_id:
-                evidence_repository.append_event(
-                    run_id, "AUTO_CONFIRM_SUCCEEDED", "info",
-                    "分镜已自动确认；尚未产生视频费用",
-                )
-            cp.phase = "SUCCEEDED"
-            cp.outcome = "SUCCEEDED_CONFIRMED"
-            save_checkpoint(cp, run_id=run_id)
-            return cp
-        except GrantValidationError as exc:
-            cp.phase = "WAITING_AUTHORIZATION"
-            save_checkpoint(cp, run_id=run_id)
-            conn.execute(
-                "UPDATE episodes SET status='scripted', script_error=? WHERE id=?",
-                (str(exc)[:800], episode_id),
-            )
-            conn.commit()
-            if run_id:
-                evidence_repository.append_event(
-                    run_id, "WAITING_AUTHORIZATION", "warning", str(exc)[:200],
-                )
-                try:
-                    from app.orchestration.state_machine import transition_run
-                    transition_run(run_id, "RUNNING", "WAITING_AUTHORIZATION", "grant_invalid")
-                except Exception:  # noqa: BLE001
-                    pass
-            return cp
-        except HTTPException as exc:
-            if not _requires_manual_confirmation(exc):
-                raise
-            # 整集确定性门禁已经通过，只是存在 >5s 镜头等需要人看一眼的 warning。
-            # 这不是“追加镜生成失败”，也不应把 checkpoint 永久卡在 CONFIRMING。
-            conn.execute(
-                "UPDATE episodes SET status='scripted', script_error=NULL WHERE id=?",
-                (episode_id,),
-            )
-            conn.commit()
-            cp.phase = "SUCCEEDED"
-            cp.outcome = "SUCCEEDED_READY_FOR_CONFIRM"
-            save_checkpoint(cp, run_id=run_id)
-            if run_id:
-                evidence_repository.append_event(
-                    run_id,
-                    "AUTO_CONFIRM_NEEDS_HUMAN",
-                    "warning",
-                    str(exc.detail)[:200],
-                )
-            return cp
-        except ValueError as exc:
-            # VAL-422 → 回流 Repair
-            try:
-                err_list = json.loads(str(exc))
-                if not isinstance(err_list, list):
-                    err_list = [str(exc)]
-            except (TypeError, ValueError, json.JSONDecodeError):
-                err_list = [str(exc)]
-            if run_id:
-                evidence_repository.append_event(
-                    run_id, "AUTO_CONFIRM_REJECTED", "warning",
-                    "确认门拒绝，进入修复",
-                    payload={"errors": err_list[:12]},
-                )
-            plan = route_issues(
-                err_list,
-                validated_prefix_end=cp.validated_prefix_end,
-                issue_fingerprint_counts=cp.issue_fingerprint_counts,
-            )
-            cp = _apply_repair(cp, plan, conn, episode_id, completed, outline)
-            rows = conn.execute(
-                "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
-            ).fetchall()
-            completed = _reload_completed(rows)
-            continue
-
-    # 超出单次 activation 的 repair epoch：停在安全检查点，由用户明确点击继续任务。
-    cp.phase = "WAITING_RETRY"
-    save_checkpoint(cp, run_id=run_id)
-    conn.execute(
-        "UPDATE episodes SET status='scripting', script_error=? WHERE id=?",
-        (f"本轮修复已暂停（已完成 {MAX_REPAIR_EPOCHS} 轮局部修补），请点击继续任务", episode_id),
-    )
-    conn.commit()
-    if run_id:
-        evidence_repository.append_event(
-            run_id, "REPAIR_YIELD", "info",
-            "分镜修复 activation 预算用尽，已写 checkpoint，等待用户继续",
-            payload={"repair_epoch": cp.repair_epoch},
+        conn.execute(
+            "UPDATE episodes SET status='scripted', script_error=NULL, target_duration_s=? WHERE id=?",
+            (synced, episode_id),
         )
-    return cp
+        conn.commit()
+        cp.phase = "SUCCEEDED"
+        cp.outcome = "SUCCEEDED_READY_FOR_CONFIRM"
+        save_checkpoint(cp, run_id=run_id)
+        return cp
 
 
 def _apply_repair(
