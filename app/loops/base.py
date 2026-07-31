@@ -283,22 +283,13 @@ class AgentLoop(Generic[T]):
             if stalled or no_gain or exhausted:
                 break
 
-        if self.policy.allow_warning_candidate and last_value is not None:
+        if last_value is not None:
             blockers = [
                 issue for issue in last_value_issues
                 if issue.severity == IssueSeverity.BLOCKER
             ]
-            # PRD VAL-422：warning candidate 只能接受非 blocker；带 blocker 不得冒充通过。
-            if not blockers:
-                return AgentLoopResult(
-                    value=last_value,
-                    status="warning",
-                    exit_reason=exit_reason,
-                    issues=last_value_issues,
-                    iterations=len(issue_history),
-                    artifact_id=last_value_artifact_id,
-                )
-            # 不可满足容量等 blocker 连续 stalled：标记 NEEDS_REPLAN，由 Supervisor 接管。
+            # 容量类先交给 Supervisor 尝试改规划；Supervisor 耗尽后会发布
+            # 当前最佳分镜。其他结构/内容门禁在本循环耗尽后直接降为告警。
             needs_replan = exit_reason in {"stalled", "no_quality_gain", "max_iterations"}
             capacity_codes = {
                 "SPOKEN_CAPACITY_EXCEEDED",
@@ -307,7 +298,7 @@ class AgentLoop(Generic[T]):
                 "KEY_LINE_MISSING",
                 "SPINE_MISSING",
             }
-            if needs_replan and any(
+            if self.policy.allow_warning_candidate and needs_replan and any(
                 issue.code in capacity_codes
                 or "口播" in issue.message
                 or "容量" in issue.message
@@ -323,6 +314,40 @@ class AgentLoop(Generic[T]):
                     iterations=len(issue_history),
                     artifact_id=last_value_artifact_id,
                 )
+            if last_value_artifact_id:
+                try:
+                    repository.commit_artifact(
+                        None,
+                        last_value_artifact_id,
+                        [Evaluation(
+                            evaluator_type="deterministic",
+                            evaluator_name=f"{self.stage_key}_retry_exhausted_fallback",
+                            evaluator_version=self.contract.version,
+                            status="warning",
+                            hard_gate_passed=False,
+                            evaluation_role="score_only",
+                            score_status="scored",
+                            runtime_blocking=False,
+                            retry_eligible=False,
+                            score=round(_quality(last_value_issues) * 100, 2),
+                            issues=last_value_issues,
+                            evidence={
+                                "gate_retry_exhausted": True,
+                                "original_exit_reason": exit_reason,
+                                "iterations": len(issue_history),
+                            },
+                        )],
+                    )
+                except Exception:  # noqa: BLE001 - 保底值仍可交付，证据可后续补记
+                    pass
+            return AgentLoopResult(
+                value=last_value,
+                status="warning",
+                exit_reason="gate_retry_exhausted_fallback",
+                issues=last_value_issues,
+                iterations=len(issue_history),
+                artifact_id=last_value_artifact_id,
+            )
         raise AgentLoopFailure(
             self.stage_key,
             issue_history[-1] if issue_history else [],

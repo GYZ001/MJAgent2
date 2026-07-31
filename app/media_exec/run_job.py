@@ -1417,22 +1417,35 @@ async def _prepare_reference_mode_inputs(
         meta["continuity_anchor_ready"] = True
         if not _reference_keyframe_gate_passed(assets):
             _assert_reference_lease()
-            meta["narrative_keyframe_missing"] = True
-            meta["reference_group_gate_passed"] = False
-            meta["video_input_manifest_frozen"] = False
-            try:
-                from app.media_pipeline.reference_store import upsert_reference_set_from_meta
-                upsert_reference_set_from_meta(
-                    shot_id=shot_id, version_id=version["id"], meta=meta, conn=conn,
-                    static_ready=True, continuity_ready=True, group_gate_passed=False,
-                )
-            except Exception:  # noqa: BLE001
-                pass
-            _set_version(version["id"], image_inputs=json.dumps(meta, ensure_ascii=False), prompt_text=prompt_text)
-            conn.commit()
-            raise errors.ContentGenerationError(
-                "必需叙事关键帧未通过结构门禁或文件不可用，"
-                "已阻止视频提交；请重新生成关键帧。"
+            # 构建器和执行器各已完成一次有界修复。耗尽后不再把 QA/文件门禁
+            # 升级为任务失败：丢掉实际不可读的引用，使用其余锚点；若一个锚点
+            # 都没有，后续以纯文本方式提交视频。
+            usable_assets = []
+            for asset in assets:
+                path = str(getattr(asset, "path", None) or "").strip()
+                url = str(getattr(asset, "url", None) or "").strip()
+                if (path and Path(path).is_file()) or url.startswith("data:image"):
+                    usable_assets.append(asset)
+            assets = usable_assets
+            meta["reference_gate_retry_exhausted"] = True
+            meta["reference_fallback_mode"] = (
+                "available_anchors" if assets else "text_only"
+            )
+            meta["reference_images"] = [asset.public_dict() for asset in assets]
+            meta["narrative_keyframe_missing"] = False
+            meta["reference_group_gate_passed"] = True
+            meta["video_input_manifest_frozen"] = True
+            log_provider_call(
+                "reference_keyframe_gate_exhausted_fallback",
+                config.MODEL_TEXT,
+                "REFERENCE_GATE_EXHAUSTED_FALLBACK",
+                None,
+                0,
+                meta={
+                    "shot_id": shot_id,
+                    "fallback_mode": meta["reference_fallback_mode"],
+                    "usable_reference_count": len(assets),
+                },
             )
         meta["reference_group_gate_passed"] = True
         meta["video_input_manifest_frozen"] = True
@@ -1458,7 +1471,7 @@ async def _prepare_reference_mode_inputs(
         conn.commit()
         return meta, prompt_text
 
-    # ── 参考图模式彻底失败（2 次均失败）—— 记录原始失败原因 ──
+    # ── 参考图模式两次均未得到文件：记录风险并以纯文本默认产物继续 ──
     _delete_rejected_assets(rejected_assets)
     ref_failure_reason = (
         f"参考图模式 2 次尝试均未产出可用资产 "
@@ -1481,13 +1494,21 @@ async def _prepare_reference_mode_inputs(
         "prompt": prompt_text[:500],
     }]
     meta["reference_generation_complete"] = True
+    meta["reference_static_ready"] = True
+    meta["continuity_anchor_ready"] = True
+    meta["reference_group_gate_passed"] = True
+    meta["video_input_manifest_frozen"] = True
+    meta["narrative_keyframe_missing"] = False
+    meta["reference_gate_retry_exhausted"] = True
+    meta["reference_fallback_mode"] = "text_only"
+    meta["reference_images"] = []
     set_pipeline_stage(
-        job["id"], media_stages.STAGE_FAILED,
-        reason_code="REFERENCE_MODE_FAILED", reason_text=ref_failure_reason, conn=conn,
+        job["id"], media_stages.STAGE_VIDEO_READY,
+        scheduler_lane=media_stages.LANE_VIDEO_READY, ready_at=now(), conn=conn,
     )
     _set_version(version["id"], image_inputs=json.dumps(meta, ensure_ascii=False), prompt_text=prompt_text)
     conn.commit()
-    raise ProviderError(f"视频生成任务失败：参考图模式未产出可用参考图（{ref_failure_reason}）")
+    return meta, prompt_text
 
 
 class _ContinuityWait(Exception):

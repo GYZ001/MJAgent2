@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 
+from app.harness.types import Issue, IssueSeverity
+
 try:
     router
 except NameError:  # pragma: no cover - used when importing this module directly
@@ -118,7 +120,7 @@ def _sync_storyboard_shot_timing(
 
 def _storyboard_has_material(episode_id: str, ep: dict | None = None) -> bool:
     """Return whether the current episode projection still owns storyboard work."""
-    episode = ep or dict(_episode_or_404(episode_id))
+    episode = dict(ep) if ep is not None else dict(_episode_or_404(episode_id))
     shot_count = int(get_conn().execute(
         "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,),
     ).fetchone()["c"])
@@ -221,9 +223,11 @@ def _storyboard_start_preflight_payload(episode_id: str) -> dict:
         "kept_validated_shots": kept,
         "planned_shots": planned or None,
         "remaining_shots": remaining,
-        "can_start": not strategies_exhausted,
-        "blocking_reason": (
-            "当前问题的自动修复策略已用尽，请先人工修改问题镜头"
+        "can_start": True,
+        "blocking_reason": None,
+        "gate_retry_exhausted": strategies_exhausted,
+        "warning": (
+            "历史修复策略已用尽；恢复后将发布当前最佳分镜"
             if strategies_exhausted else None
         ),
         "repair": {
@@ -365,12 +369,14 @@ def _finalize_storyboard_evidence(
         )
     except (TypeError, ValueError, json.JSONDecodeError):
         planned_total = 0
+    findings: list[str] = []
     if planned_total and len(board.shots) != planned_total:
-        raise RuntimeError(
-            f"拒绝发布不完整分镜：已完成 {len(board.shots)}/{planned_total} 镜"
-        )
-    if not board.shots or not board.shots[-1].is_final:
-        raise RuntimeError("拒绝发布不完整分镜：最终镜缺失或未标记收束")
+        findings.append(f"分镜数量与计划不同：已完成 {len(board.shots)}/{planned_total} 镜")
+    if not board.shots:
+        raise RuntimeError("没有任何分镜产物可发布")
+    if not board.shots[-1].is_final:
+        board.shots[-1].is_final = True
+        findings.append("最终镜未标记收束，重试耗尽后已将当前尾镜作为默认收束")
     project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
     shot_rows = conn.execute(
         "SELECT id,source_excerpt,storyboard_artifact_id FROM shots "
@@ -378,9 +384,12 @@ def _finalize_storyboard_evidence(
     ).fetchall()
     from app.storyboard_workspace import verify_or_bind_existing_excerpt
     for row in shot_rows:
-        verify_or_bind_existing_excerpt(
-            episode_id, row["id"], row["source_excerpt"] or "",
-        )
+        try:
+            verify_or_bind_existing_excerpt(
+                episode_id, row["id"], row["source_excerpt"] or "",
+            )
+        except Exception as exc:  # noqa: BLE001 - evidence finding is score-only at publish
+            findings.append(f"镜头来源证据未绑定：{exc}")
     parents = [
         artifact_id for artifact_id in (
             project["bible_artifact_id"], ep["screenplay_artifact_id"],
@@ -402,14 +411,26 @@ def _finalize_storyboard_evidence(
         evaluator_type="deterministic",
         evaluator_name="storyboard_full_gate",
         evaluator_version=contract_version,
-        status="passed",
-        hard_gate_passed=True,
-        score=100,
+        status="warning" if findings else "passed",
+        hard_gate_passed=not findings,
+        evaluation_role="score_only",
+        score_status="scored",
+        runtime_blocking=False,
+        retry_eligible=False,
+        score=max(0, 100 - 10 * len(findings)),
+        issues=[Issue(
+            code="STORYBOARD_GATE_EXHAUSTED_WARNING",
+            severity=IssueSeverity.WARNING,
+            subject=episode_id,
+            message=message,
+        ) for message in findings],
         evidence={
             "shot_count": len(board.shots),
             "duration_range_s": [config.VIDEO_DURATION_MIN_S, config.VIDEO_DURATION_MAX_S],
             "duration_decided_by": "model",
             "checkpoint_artifact_ids": parents,
+            "gate_retry_exhausted": bool(findings),
+            "findings": findings,
         },
     )
     artifact = evidence_repository.commit_artifact(None, artifact["id"], [evaluation])
@@ -1142,13 +1163,6 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
         # whose downstream projection has already been cleared.  It cannot be
         # resumed as shot N+1 of the new screenplay.
         cp = None
-    if cp is not None and cp.outcome == "REPAIR_FAILED_STRATEGIES_EXHAUSTED":
-        raise HTTPException(409, {
-            "code": "STORYBOARD_REPAIR_STRATEGIES_EXHAUSTED",
-            "message": "当前问题的自动修复策略已用尽，未创建空转任务",
-            "recovery_action": "请在分镜台修改问题镜头，修改后系统会基于新版本重新校验",
-            "issue_messages": list((cp.last_repair or {}).get("issue_messages") or [])[:12],
-        })
     if not saved and (cp is None or cp.validated_prefix_end <= 0):
         raise HTTPException(409, "当前没有可恢复的 Supervisor / 逐镜 checkpoint，请重新生成分镜")
     last_row = conn.execute(
@@ -3187,44 +3201,7 @@ async def edit_shot(shot_id: str, body: dict):
             continue
         seen_err.add(msg)
         deduped.append(msg)
-    if deduped:
-        # 失败时保留草稿 Artifact，不覆盖已通过 checkpoint。
-        draft_artifact = evidence_repository.create_artifact(EvidenceArtifact(
-            type="storyboard_shot",
-            scope_type="storyboard_checkpoint",
-            scope_id=f"{episode_id}:{shot['shot_no']}",
-            status="needs_revision",
-            trust_level="T1",
-            content=instance.model_dump(mode="json"),
-            parent_artifact_ids=[shot["storyboard_artifact_id"]] if shot["storyboard_artifact_id"] else [],
-            contract_version=get_contract("storyboard").version,
-        ))
-        evidence_repository.create_evaluation(
-            draft_artifact["id"],
-            Evaluation(
-                evaluator_type="human",
-                evaluator_name="storyboard_editor",
-                evaluator_version="1.0.0",
-                status="failed",
-                hard_gate_passed=False,
-                score=0,
-                evidence={
-                    "decision": "authored_or_reviewed",
-                    "shot_id": shot_id,
-                    "issues": deduped[:12],
-                },
-            ),
-        )
-        raise HTTPException(422, {
-            "code": "SHOT_EDIT_VALIDATION_FAILED",
-            "category": "validation",
-            "message": "；".join(deduped),
-            "issues": deduped,
-            "draft_artifact_id": draft_artifact["id"],
-            "checkpoint_preserved": True,
-        })
-
-    # 业务硬校验已通过：人工证据只记录 authored；hard gate 由确定性 Evaluation 单独证明。
+    # 业务结构检查只写评分警告。人工编辑的已成形镜头不能因门禁被拒绝保存。
     conn.execute(
         "UPDATE shots SET duration_s=?, shot_size=?, camera_move=?, scene_setting=?, characters=?, action_desc=?, first_frame_desc=?, last_frame_desc=?, source_excerpt=?, narration=?, dialogues=?, transition=?, continuity_from_prev=?, shot_contract_json=?, continuity_mode=?, observed_state_out=? WHERE id=?",
         (instance.duration_s, instance.shot_size, instance.camera_move, instance.scene_setting,
@@ -3248,9 +3225,7 @@ async def edit_shot(shot_id: str, body: dict):
         contract_version=get_contract("storyboard").version,
     ))
     contract_version = get_contract("storyboard").version
-    # Human authorship is provenance, not a hard gate. Record it separately so the
-    # repository's all-hard-gates-must-pass commit rule only evaluates the actual
-    # deterministic business gate.
+    # Human authorship is provenance, not a hard gate.
     evidence_repository.create_evaluation(
         manual_artifact["id"],
         Evaluation(
@@ -3270,10 +3245,18 @@ async def edit_shot(shot_id: str, body: dict):
             evaluator_type="deterministic",
             evaluator_name="storyboard_shot_business_gate",
             evaluator_version=contract_version,
-            status="passed",
-            hard_gate_passed=True,
-            score=100,
-            evidence={"shot_id": shot_id, "spoken_contract_status": instance.spoken_contract_status},
+            status="warning" if deduped else "passed",
+            hard_gate_passed=not bool(deduped),
+            evaluation_role="score_only",
+            runtime_blocking=False,
+            retry_eligible=False,
+            score=0 if deduped else 100,
+            evidence={
+                "shot_id": shot_id,
+                "spoken_contract_status": instance.spoken_contract_status,
+                "gate_retry_exhausted": bool(deduped),
+                "warnings": deduped[:12],
+            },
         )],
     )
     conn.execute(
@@ -3292,7 +3275,8 @@ async def edit_shot(shot_id: str, body: dict):
         from app.observability.metrics import inc
         inc(
             "storyboard_save_result_total", episode_id=episode_id, shot_id=shot_id,
-            noop=False, validation="passed", source=body.get("change_source") or "standard_edit",
+            noop=False, validation="warning" if deduped else "passed",
+            source=body.get("change_source") or "standard_edit",
         )
     except Exception:  # noqa: BLE001
         pass
@@ -3301,6 +3285,8 @@ async def edit_shot(shot_id: str, body: dict):
         "ok": True,
         "invalidated": invalidated,
         "artifact_id": manual_artifact["id"],
+        "qa_warnings": deduped,
+        "gate_retry_exhausted": bool(deduped),
         "impact": {
             "stale_descendant_ids": [
                 item["id"] for item in impact["descendants"] if item["status"] == "stale"

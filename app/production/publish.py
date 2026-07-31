@@ -143,12 +143,10 @@ def publish_storyboard(
             planned_total = len(json.loads(outline_json).get("shots") or [])
         except (TypeError, ValueError, json.JSONDecodeError):
             planned_total = 0
-    if planned_total and len(shots_payload) != planned_total:
-        raise ValueError(
-            f"拒绝发布不完整分镜：已完成 {len(shots_payload)}/{planned_total} 镜"
-        )
-    if not shots_payload or not bool(shots_payload[-1].get("is_final")):
-        raise ValueError("拒绝发布不完整分镜：最终镜缺失或未标记收束")
+    if not shots_payload:
+        raise ValueError("没有任何分镜产物可发布")
+    # 生成/修复预算耗尽时，当前尾镜就是默认收束；计划数量差异进入评分报告。
+    shots_payload[-1]["is_final"] = True
 
     cert = issue_completion_certificate(
         kind="storyboard",

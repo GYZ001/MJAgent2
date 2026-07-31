@@ -930,13 +930,13 @@ def test_failed_draft_is_listed_and_published_version_unchanged(storyboard_db):
     assert storyboard_db.execute("SELECT storyboard_artifact_id FROM shots WHERE id='s1'").fetchone()[0] == before
 
 
-def test_confirmation_preview_rejects_non_terminal_episode(storyboard_db):
+def test_confirmation_preview_warns_for_non_terminal_episode(storyboard_db):
     storyboard_db.execute("UPDATE episodes SET status='script_failed', script_error='尚有问题' WHERE id='e1'")
     storyboard_db.commit()
-    with pytest.raises(HTTPException) as caught:
-        api.create_storyboard_confirmation_preview("e1")
-    assert caught.value.status_code == 409
-    assert caught.value.detail["code"] == "STORYBOARD_NOT_CONFIRMABLE"
+    preview = api.create_storyboard_confirmation_preview("e1")
+    assert preview["hard_gates"]["passed"] is True
+    assert preview["hard_gates"]["retry_exhausted_fallback"] is True
+    assert any("尚未达到完整终态" in warning for warning in preview["warnings"])
 
 
 def test_confirmation_reports_hard_errors_and_score_only_warnings(storyboard_db):
@@ -954,16 +954,12 @@ def test_confirmation_reports_hard_errors_and_score_only_warnings(storyboard_db)
     )
     storyboard_db.commit()
 
-    with pytest.raises(HTTPException) as caught:
-        api.create_storyboard_confirmation_preview("e1")
-
-    assert caught.value.status_code == 409
-    assert caught.value.detail["code"] == "STORYBOARD_NOT_CONFIRMABLE"
-    warnings = caught.value.detail["warnings"]
+    preview = api.create_storyboard_confirmation_preview("e1")
+    warnings = preview["warnings"]
     assert "存在超过 5 秒的镜头，已纳入 QA 评分报告" in warnings
     # 业务质量问题只进 warnings，不进 hard_gates.errors。
-    hard_errors = caught.value.detail["hard_gates"]["errors"]
-    assert all("低于硬下限" not in str(err) for err in hard_errors)
+    hard_errors = preview["hard_gates"]["errors"]
+    assert hard_errors == []
     assert any("低于硬下限" in str(w) or "action_desc" in str(w) for w in warnings)
 
 

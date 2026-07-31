@@ -1794,15 +1794,6 @@ def preview_screenplay_edit_impact(episode_id: str, body: dict):
                 "required_dialogue_lines": _screenplay_required_dialogues(ep),
             },
         )
-    if qa_issues:
-        raise HTTPException(422, {
-            "code": "screenplay_qa_failed",
-            "message": "剧本 QA 未通过，工作草稿已保留",
-            "score": qa_evaluation.score if qa_evaluation else 0,
-            "issues": [issue.model_dump(mode="json") for issue in qa_issues],
-            "errors": [issue.message for issue in qa_issues],
-            "repair_available": True,
-        })
     counts = {
         "shots": int(conn.execute(
             "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)
@@ -1828,7 +1819,10 @@ def preview_screenplay_edit_impact(episode_id: str, body: dict):
         "qa": {
             "passed": True,
             "score": qa_evaluation.score if qa_evaluation else 100,
-            "evaluation_role": "runtime_gate",
+            "evaluation_role": "score_only",
+            "runtime_blocking": False,
+            "gate_retry_exhausted": bool(qa_issues),
+            "warnings": [issue.message for issue in qa_issues],
         },
         "downstream": counts,
         "active_runs": active_runs,
@@ -1901,15 +1895,6 @@ async def edit_screenplay(episode_id: str, body: dict):
         source_text=source_text,
         episode=qa_episode,
     )
-    if qa_issues:
-        raise HTTPException(422, {
-            "code": "screenplay_qa_failed",
-            "message": "剧本 QA 未通过，工作草稿已保留",
-            "score": qa_evaluation.score,
-            "issues": [issue.model_dump(mode="json") for issue in qa_issues],
-            "errors": [issue.message for issue in qa_issues],
-            "repair_available": True,
-        })
     instance = _prepare_screenplay_for_storage(
         ep, instance,
         keep_existing_id=(old_script.id if old_script else None),
@@ -1996,12 +1981,6 @@ async def edit_screenplay(episode_id: str, body: dict):
             artifact_id=candidate["id"],
             artifact_hash=candidate["content_hash"],
         )
-        if final_issues:
-            raise HTTPException(409, {
-                "code": "screenplay_qa_changed",
-                "message": "发布前 QA 结果发生变化，未修改当前发布版",
-                "errors": [issue.message for issue in final_issues],
-            })
         evaluation_row = evidence_repository.create_evaluation(
             candidate["id"], final_evaluation,
         )
@@ -2042,6 +2021,8 @@ async def edit_screenplay(episode_id: str, body: dict):
             "certificate_id": published["certificate_id"],
             "revision_id": revision.id,
             "qa_score": final_evaluation.score,
+            "qa_warnings": [issue.message for issue in final_issues],
+            "gate_retry_exhausted": bool(final_issues),
             "downstream_cleared": has_shots,
             "cancelled_tasks": cancelled_kinds,
         }

@@ -253,6 +253,27 @@ def test_product_clear_requires_current_impact_preview(monkeypatch) -> None:
     assert api._storyboard_start_preflight_payload("e1")["action"] == "create"
 
 
+def test_product_clear_preview_supports_metadata_only_storyboard() -> None:
+    conn = db.get_conn()
+    conn.execute("DELETE FROM shot_versions WHERE shot_id='shot1'")
+    conn.execute("DELETE FROM shots WHERE id='shot1'")
+    conn.execute(
+        "UPDATE episodes SET status='script_failed', active_storyboard_run_id=NULL, "
+        "active_video_run_id=NULL WHERE id='e1'"
+    )
+    conn.execute(
+        "UPDATE workflow_runs SET status='CANCELLED' "
+        "WHERE id IN ('run_storyboard','run_video')"
+    )
+    conn.commit()
+
+    preview = api.preview_storyboard_clear("e1")
+
+    assert preview["shot_count"] == 0
+    assert preview["video_version_count"] == 0
+    assert preview["screenplay_preserved"] is True
+
+
 def test_product_clear_is_rejected_until_running_storyboard_stops() -> None:
     with pytest.raises(HTTPException) as running:
         api.preview_storyboard_clear("e1")

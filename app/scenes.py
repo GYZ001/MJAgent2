@@ -461,22 +461,8 @@ def scene_ref_exists(conn, project_id: str, name: str) -> bool:
     existing = [r for r in rows if r["image_path"] and Path(r["image_path"]).exists()]
     if not existing:
         return False
-    from app.multiview import (
-        SCENE_REQUIRED_VIEWS,
-        list_scene_views,
-        pack_is_ready,
-        scene_multiview_enabled,
-    )
-    if not scene_multiview_enabled():
-        return True
-    return any(
-        pack_is_ready(
-            row["pack_status"] if "pack_status" in row.keys() else None,
-            list_scene_views(row["id"], conn=conn),
-            SCENE_REQUIRED_VIEWS,
-        )
-        for row in existing
-    )
+    # 主图已经是可交付产物；多视角补齐失败不能让幂等重跑再次烧图。
+    return True
 
 
 def _scene_gate_evaluations(artifact_id: str) -> list[dict]:
@@ -531,12 +517,13 @@ def _qa_dict_from_artifact(artifact_id: str) -> dict:
 
 
 def scene_candidate_gate(artifact_id: str, *, require_current_policy: bool = True) -> dict:
-    """候选的当前判定。旧评估仅供审计，不再覆盖后续复验结论。"""
+    """候选的当前评分结论；任何 QA 状态都不改变文件的采用资格。"""
     row = _latest_scene_gate_evaluation(artifact_id)
     if not row:
         return {
             "state": "unverified", "verified": False, "hard_failures": [],
             "warnings": [], "uncertainties": ["尚未执行新版场景 QA"], "evaluation": None,
+            "runtime_blocking": False, "production_eligible": True,
         }
     evidence = row.get("evidence") or {}
     qa = evidence.get("qa") if isinstance(evidence, dict) else None
@@ -564,6 +551,8 @@ def scene_candidate_gate(artifact_id: str, *, require_current_policy: bool = Tru
         "warnings": list(dict.fromkeys(warnings)),
         "uncertainties": list(dict.fromkeys(uncertainties)),
         "qa": qa, "evaluation": row,
+        "runtime_blocking": False,
+        "production_eligible": True,
     }
 
 
@@ -710,14 +699,7 @@ async def manually_review_and_adopt_scene_candidate(
 
     _scene_candidate_context(project_id, scene_name, artifact_id)
     current = scene_candidate_gate(artifact_id)
-    if current["state"] == "hard_failed":
-        raise ValueError("候选已有明确硬失败，人工复核不得覆盖；请重新出图或重验 QA")
     historical_hard = _historical_explicit_scene_hard_failures(artifact_id)
-    if historical_hard:
-        raise ValueError(
-            "候选历史上存在明确硬失败，人工复核不得覆盖："
-            + "；".join(historical_hard[:4])
-        )
     required = ("person_free", "watermark_free", "forbidden_text_free", "space_type_matches")
     missing = [key for key in required if confirmations.get(key) is not True]
     if missing:
@@ -738,6 +720,9 @@ async def manually_review_and_adopt_scene_candidate(
     qa.update({
         "manual_review": True,
         "manual_review_reason": review_reason,
+        "preexisting_quality_warnings": list(dict.fromkeys([
+            *current.get("hard_failures", []), *historical_hard,
+        ])),
         "policy_version": SCENE_QA_POLICY_VERSION,
         "rule_version": SCENE_QA_RULE_VERSION,
     })
@@ -785,6 +770,9 @@ async def adopt_scene_candidate(
     from app.evidence import repository as evidence_repository
     from app.harness.types import Evaluation
 
+    if not (reason or "").strip():
+        raise ValueError("采纳候选必须填写采纳理由")
+
     conn = get_conn()
     project = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
     if not project or not project["bible_json"]:
@@ -805,12 +793,12 @@ async def adopt_scene_candidate(
     if artifact.get("status") == "stale":
         raise ValueError("候选已过期，不能采纳")
     current_gate = scene_candidate_gate(artifact_id, require_current_policy=False)
-    if current_gate.get("state") == "hard_failed":
-        from app.rejected_media import purge_reference_artifact
-        purge_reference_artifact(conn, artifact_id)
-        raise ValueError("候选已被 QA 明确淘汰并永久删除，请重新生成")
     latest_qa = dict(current_gate.get("qa") or {})
-    warnings = list(current_gate.get("warnings") or [])
+    warnings = list(dict.fromkeys([
+        *(current_gate.get("warnings") or []),
+        *(current_gate.get("hard_failures") or []),
+        *(current_gate.get("uncertainties") or []),
+    ]))
     from app.multiview import scene_multiview_enabled
     multiview_enabled = scene_multiview_enabled()
     if multiview_enabled:
@@ -825,9 +813,6 @@ async def adopt_scene_candidate(
             note = "候选 QA 未达展示阈值（仅评分，不拦截采纳）" + (f"：{detail}" if detail else "")
             if note not in warnings:
                 warnings.append(note)
-    if warnings and not (reason or "").strip():
-        # 软警告仍要求理由，便于审计；但不因 hard_failures 硬拒
-        raise ValueError("候选存在软警告，必须填写采纳理由")
     try:
         content = artifact.get("content")
         if content is None and artifact.get("content_json"):
@@ -846,7 +831,7 @@ async def adopt_scene_candidate(
     if not image_path or not Path(image_path).exists():
         raise ValueError("候选图片文件不存在")
 
-    adopt_reason = (reason or "").strip() or "人工采纳候选"
+    adopt_reason = (reason or "").strip()
     qa = _qa_dict_from_artifact(artifact_id)
     qa = dict(qa)
     if multiview_enabled:
@@ -905,15 +890,17 @@ async def adopt_scene_candidate(
                 optional_views=[role for role in (scene.get("required_views") or []) if role == "action_zone"],
             )
             if not pack_result_ok(pack):
-                raise ValueError(f"候选整包未通过新版硬门禁（status={pack.get('status')}）")
+                warnings.append(
+                    f"候选整包补齐重试耗尽（status={pack.get('status')}），已采用当前可用产物"
+                )
         except asyncio.CancelledError:
             from app.rejected_media import purge_scene_reference
             purge_scene_reference(conn, scene_id)
             raise
         except Exception as exc:
-            from app.rejected_media import purge_scene_reference
-            purge_scene_reference(conn, scene_id)
-            raise ValueError(f"候选整包未通过，当前采用包已保留：{exc}") from exc
+            # 主候选文件已技术落盘；侧视角补齐失败只记录风险，不能撤销本次采用。
+            pack = {"status": "retry_exhausted_fallback", "error": str(exc)[:300]}
+            warnings.append(f"候选整包补齐未完成，已采用当前可用产物：{exc}")
         minimum = conn.execute(
             "SELECT MIN(ep_start) AS value FROM scene_references "
             "WHERE project_id=? AND scene_name=? AND ep_start<=0 AND id<>?",
@@ -927,12 +914,14 @@ async def adopt_scene_candidate(
             "UPDATE scene_references SET ep_start=?,ep_end=0 WHERE id=?",
             (history_start, current["id"]),
         )
+        fallback_pack = not pack_result_ok(pack)
         conn.execute(
-            "UPDATE scene_references SET ep_start=?,ep_end=NULL,pack_status='ready',change_json=? WHERE id=?",
-            (adopted_start, json.dumps({
+            "UPDATE scene_references SET ep_start=?,ep_end=NULL,pack_status=?,change_json=? WHERE id=?",
+            (adopted_start, "partial_fallback" if fallback_pack else "ready", json.dumps({
                 "change_type": "candidate_adoption", "adoption_reason": adopt_reason,
                 "decided_by": str(decided_by or "user"), "previous_version_id": current["id"],
-                "adopted_at": now(),
+                "adopted_at": now(), "gate_retry_exhausted": fallback_pack,
+                "quality_warnings": warnings,
             }, ensure_ascii=False), scene_id),
         )
     elif multiview_enabled and current is not None and not ensure_pack:
@@ -942,12 +931,9 @@ async def adopt_scene_candidate(
             list_scene_views,
             missing_required_views,
             review_scene_pack_consistency,
-            scene_pack_is_usable,
         )
 
         current_views = list_scene_views(current["id"], conn=conn)
-        if not scene_pack_is_usable(current, current_views):
-            raise ValueError("当前场景整包缺少必需视角文件，请先使用“检查并补齐”完成整包")
         try:
             current_group = json.loads(current["group_qa_json"] or "{}")
         except (TypeError, ValueError, json.JSONDecodeError):
@@ -969,10 +955,16 @@ async def adopt_scene_candidate(
             candidate_views.append(candidate_view)
         missing = missing_required_views(candidate_views, required_roles)
         if missing:
-            raise ValueError("当前整包缺少必需视角，不能原子采纳候选：" + "、".join(missing))
+            warnings.append(
+                "当前整包缺少必需视角，已采用现有视图并记录风险：" + "、".join(missing)
+            )
         required_views = [view for view in candidate_views if view.get("view_role") in required_roles]
-        group_qa = await review_scene_pack_consistency(
-            required_views, scene.get("scene_canonical") or "",
+        group_qa = (
+            await review_scene_pack_consistency(
+                required_views, scene.get("scene_canonical") or "",
+            )
+            if required_views
+            else {"status": "unverified", "issues": ["没有可复验视图"]}
         )
         # Score-only：整包 QA 仅写入评分；结构齐全即可采纳（PRD QA-SO #19/#21）。
         group_qa = {
@@ -1030,14 +1022,16 @@ async def adopt_scene_candidate(
         change.update({
             "change_type": "candidate_adoption", "adoption_reason": adopt_reason,
             "decided_by": str(decided_by or "user"), "previous_version_id": history_id,
-            "adopted_at": now(),
+            "adopted_at": now(), "gate_retry_exhausted": bool(missing),
+            "quality_warnings": warnings,
         })
         assignments = [
             "image_path=?", "prompt=?", "qa_json=?", "artifact_id=?", "bible_version=?",
-            "pack_status='ready'", "group_qa_json=?",
+            "pack_status=?", "group_qa_json=?",
         ]
         values: list[object] = [
             image_path, prompt, json.dumps(qa, ensure_ascii=False), artifact_id, bible_version,
+            "partial_fallback" if missing else "ready",
             json.dumps(group_qa, ensure_ascii=False),
         ]
         if "change_json" in cols:
@@ -1111,6 +1105,8 @@ async def adopt_scene_candidate(
         "image_path": image_path,
         "reason": adopt_reason,
         "qa_overall": qa.get("overall"),
+        "soft_warnings": warnings,
+        "gate_retry_exhausted": bool(current_gate.get("hard_failures") or current_gate.get("uncertainties")),
         "pack": pack,
     }
 
@@ -1304,6 +1300,10 @@ async def generate_scene_refs(
             if only_scene is None or isinstance(only_scene, list):
                 piled = list_scene_reference_candidates(conn, project_id, sc.name)
                 if len(piled) > SCENE_CANDIDATE_AUTO_ADOPT_THRESHOLD:
+                    pre_review_best = max(
+                        piled,
+                        key=lambda item: (item["qa_score"], item["created_at"]),
+                    )
                     from app.multiview import scene_multiview_enabled
                     require_policy = scene_multiview_enabled()
                     # Old candidates often have good scores but incomplete
@@ -1315,15 +1315,16 @@ async def generate_scene_refs(
                         )
                         for item in piled
                     }
+                    # 仍对最优旧候选做一次有界复评以改善排序证据；复评结果无论
+                    # 通过与否都不会改变其文件采用资格。
                     already_eligible = any(
-                        gate["verified"]
-                        or (not require_policy and gate["state"] != "hard_failed")
-                        for gate in existing_gates.values()
+                        gate["verified"] for gate in existing_gates.values()
                     )
                     unverified = [
                         item for item in piled
                         if existing_gates[item["artifact_id"]]["state"] == "unverified"
                     ]
+                    reviewed_winner_id: str | None = None
                     if not already_eligible:
                         for item in sorted(
                             unverified,
@@ -1334,36 +1335,17 @@ async def generate_scene_refs(
                                 project_id, sc.name, item["artifact_id"],
                             )
                             if (reviewed.get("gate") or {}).get("verified"):
+                                reviewed_winner_id = item["artifact_id"]
                                 break
                     if unverified and not already_eligible:
                         piled = list_scene_reference_candidates(conn, project_id, sc.name)
-                    eligible = [
-                        item for item in piled
-                        if (
-                            scene_candidate_gate(
-                                item["artifact_id"], require_current_policy=require_policy,
-                            )["verified"]
-                            or (
-                                not require_policy
-                                and scene_candidate_gate(
-                                    item["artifact_id"], require_current_policy=False,
-                                )["state"] != "hard_failed"
-                            )
-                        )
-                    ]
-                    if not eligible:
-                        unverified_count = sum(
-                            scene_candidate_gate(
-                                item["artifact_id"], require_current_policy=require_policy,
-                            )["state"] == "unverified"
-                            for item in piled
-                        )
-                        raise SceneCandidateReviewRequired(
-                            f"已生成 {len(piled)} 张候选，但没有可自动采纳的新版 QA 证据"
-                            f"（{unverified_count} 张待复核）；请在候选页点“重新验 QA”"
-                            "或对未验证候选执行“人工复核后采纳”"
-                        )
-                    best = max(eligible, key=lambda item: (item["qa_score"], item["created_at"]))
+                    # 候选列表已保证文件存在；QA 只用于排序，不能把整批候选判为不可采用。
+                    eligible = list(piled)
+                    preferred_id = reviewed_winner_id or pre_review_best["artifact_id"]
+                    best = next(
+                        (item for item in eligible if item["artifact_id"] == preferred_id),
+                        max(eligible, key=lambda item: (item["qa_score"], item["created_at"])),
+                    )
                     adopted = await adopt_scene_candidate(
                         project_id,
                         sc.name,
@@ -1484,10 +1466,11 @@ async def generate_scene_refs(
                             conn, project_id, sc.name, path, sc.scene_canonical,
                             prompt, qa, bible_version, artifact_id=artifact["id"],
                         )
-                    # 初始场景多视角资产包：反打/整包失败则禁止半包生效
+                    # 初始场景多视角资产包有界补齐；耗尽后发布主图与已有视角。
                     from app.multiview import (
                         ensure_scene_multiview_pack, scene_multiview_enabled, pack_result_ok,
                     )
+                    pack_fallback = False
                     if scene_multiview_enabled():
                         pack = await ensure_scene_multiview_pack(
                             project_id=project_id,
@@ -1500,10 +1483,12 @@ async def generate_scene_refs(
                             optional_views=[role for role in (sc.required_views or []) if role == "action_zone"],
                         )
                         if not pack_result_ok(pack):
-                            raise hiagent.ProviderError(
-                                f"多视角资产包未通过，禁止生效：{sc.name}"
-                                f"（status={pack.get('status')}）"
+                            pack_fallback = True
+                            conn.execute(
+                                "UPDATE scene_references SET pack_status='partial_fallback' WHERE id=?",
+                                (scene_id,),
                             )
+                            conn.commit()
                     if is_atomic_replacement and old_current:
                         # 完整包已通过：先把旧当前版本移入新的历史槽，再把候选切为当前。
                         minimum = conn.execute(
@@ -1521,14 +1506,18 @@ async def generate_scene_refs(
                         )
                         adoption_change = {
                             "change_type": "pack_regeneration", "previous_version_id": old_current["id"],
-                            "adoption_reason": "付费整包重生通过单图及整包硬门禁",
-                            "adopted_at": now(),
+                            "adoption_reason": (
+                                "多视角补齐重试耗尽后采用当前最佳产物"
+                                if pack_fallback else "付费整包重生完成"
+                            ),
+                            "adopted_at": now(), "gate_retry_exhausted": pack_fallback,
                         }
                         if "change_json" in cols:
                             conn.execute(
-                                "UPDATE scene_references SET ep_start=?,ep_end=NULL,pack_status='ready',"
+                                "UPDATE scene_references SET ep_start=?,ep_end=NULL,pack_status=?,"
                                 "change_json=? WHERE id=?",
-                                (adopted_start, json.dumps(adoption_change, ensure_ascii=False), scene_id),
+                                (adopted_start, "partial_fallback" if pack_fallback else "ready",
+                                 json.dumps(adoption_change, ensure_ascii=False), scene_id),
                             )
                         else:
                             conn.execute(
@@ -1536,7 +1525,7 @@ async def generate_scene_refs(
                                 (adopted_start, scene_id),
                             )
                         conn.commit()
-                    # Publish the scene anchor only when all required angles pass.
+                    # 主场景图技术可用即发布；多视角补齐耗尽时保留当前最佳产物。
                     sc.ref_image_path = path
                     break
                 except asyncio.CancelledError:
@@ -1551,8 +1540,6 @@ async def generate_scene_refs(
                         purge_scene_reference(conn, scene_id)
                         scene_id = None
                     sc.ref_image_path = None
-                    if "多视角资产包未通过" in str(exc):
-                        raise
                     last_error = exc
                 except Exception as exc:  # noqa: BLE001 候选失败后在有界循环内修复
                     if scene_id:
@@ -1571,16 +1558,13 @@ async def generate_scene_refs(
     # parallel.  Only merge paths owned by this batch.
     _merge_generated_scene_refs(conn, project_id, targets)
     conn.commit()
-    if errors:
-        message = "部分场景图失败：" + "；".join(errors)[:600]
-        if _scene_failures_are_quality_only(failures):
-            raise SceneCandidateReviewRequired(
-                "场景图候选已生成，但部分场景待复核或整包视角质量未达标："
-                + "；".join(errors)[:600]
-            )
-        if failures and all(isinstance(exc, ContentGenerationError) for exc in failures):
-            raise ContentGenerationError(message)
-        raise hiagent.ProviderError(message)
+    # 单个场景的有界重试耗尽不会回滚其他已生成场景，也不再
+    # 终止后续分镜/视频。缺失的场景使用 scene_canonical 文本锨点保底。
+    return {
+        "generated": [sc.name for sc in targets if sc.ref_image_path],
+        "gate_retry_exhausted": bool(errors),
+        "warnings": errors,
+    }
 
 
 # ---------- 分镜阶段反应式发现新场景（对照 portraits.ensure_character_card 的新角色路径） ----------

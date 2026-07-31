@@ -95,7 +95,7 @@ def test_confirm_preview_passes_with_low_quality_business_warnings(confirm_db, m
     assert preview["score_only"]["runtime_blocking"] is False
 
 
-def test_hard_gate_failure_cannot_be_overridden(confirm_db, monkeypatch):
+def test_hard_gate_failure_becomes_warning_and_can_confirm(confirm_db, monkeypatch):
     def repairable_evaluation(_ep, board, *_args, **_kwargs):
         return ConfirmationEvaluation(
             passed=False,
@@ -109,21 +109,18 @@ def test_hard_gate_failure_cannot_be_overridden(confirm_db, monkeypatch):
 
     monkeypatch.setattr(video_ops, "evaluate_storyboard_for_confirmation", repairable_evaluation)
 
-    with pytest.raises(video_ops.HTTPException) as caught:
-        video_ops.create_storyboard_confirmation_preview("e1")
+    preview = video_ops.create_storyboard_confirmation_preview("e1")
+    assert preview["hard_gates"]["passed"] is True
+    assert preview["hard_gates"]["retry_exhausted_fallback"] is True
+    assert "shot_no=1.dialogue_framing 需要修复" in preview["warnings"]
+    assert preview["preview_token"]
 
-    detail = caught.value.detail
-    assert detail["hard_gates"]["passed"] is False
-    assert "force_confirmation" not in detail
-    assert "preview_token" not in detail
-
-    with pytest.raises(video_ops.HTTPException) as confirm_error:
-        video_ops.confirm_episode_core("e1", preview_token=None)
-    assert confirm_error.value.status_code == 428
+    result = video_ops.confirm_episode_core("e1", preview_token=preview["preview_token"])
+    assert result["confirmed"] is True
 
     assert confirm_db.execute(
         "SELECT COUNT(*) AS c FROM gate_decisions WHERE gate_key='storyboard'",
-    ).fetchone()["c"] == 0
+    ).fetchone()["c"] == 1
 
 
 def test_screenplay_certificate_requires_all_runtime_gate_issues_to_be_fixed():

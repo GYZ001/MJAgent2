@@ -13,6 +13,7 @@ SCORE_ONLY_REASONS = {
     "missing_quality_score",
     "quality_below_threshold_score_only",
     "qa_unverified_score_only",
+    "cross_keyframe_identity_invariance_unverified",
 }
 REJECTED_CANDIDATE_STATUSES = {
     "blocked_deleted",
@@ -46,7 +47,6 @@ def reference_dict_is_rejected(ref: Any) -> bool:
     return bool(
         ref.get("deleted")
         or (reason and reason not in SCORE_ONLY_REASONS)
-        or qa_is_rejected(ref.get("qa"))
     )
 
 
@@ -76,10 +76,15 @@ def _evaluation_rejected(row: Any) -> bool:
     status = str(row["status"] or "").lower()
     role = str(row["evaluation_role"] or "") if "evaluation_role" in row.keys() else ""
     runtime_blocking = bool(row["runtime_blocking"]) if "runtime_blocking" in row.keys() else False
-    if role != "score_only" and (status in {"failed", "error", "rejected"} or runtime_blocking):
+    if role == "score_only":
+        return False
+    if status in {"failed", "error", "rejected"} or runtime_blocking:
         return True
     evidence = _json(row["evidence_json"], {})
-    if qa_is_rejected(evidence.get("qa") if isinstance(evidence, dict) else None):
+    qa = evidence.get("qa") if isinstance(evidence, dict) else None
+    if isinstance(qa, dict) and qa.get("evaluation_role") == "score_only":
+        return False
+    if qa_is_rejected(qa):
         return True
     issues = _json(row["issues_json"], [])
     return qa_is_rejected({"issues": issues})
@@ -293,8 +298,8 @@ def _scrub_shot_galleries(conn) -> tuple[int, int, set[str]]:
     try:
         stale_assets = conn.execute(
             "SELECT id,path FROM reference_assets WHERE deleted=1 "
-            "OR qa_status IN ('failed','rejected','blocked','technical_failed') "
-            "OR generation_status IN ('failed','rejected','blocked','technical_failed','discarded')",
+            "OR qa_status='technical_failed' "
+            "OR generation_status IN ('technical_failed','discarded')",
         ).fetchall()
     except Exception:  # noqa: BLE001 - legacy databases may not have lifecycle columns
         stale_assets = conn.execute(

@@ -159,6 +159,7 @@ _SCORE_ONLY_REJECT_REASONS = {
     "missing_quality_score",
     "qa_unverified_score_only",
     "quality_below_threshold_score_only",
+    "cross_keyframe_identity_invariance_unverified",
 }
 
 
@@ -1959,6 +1960,7 @@ async def _enforce_timeline_keyframe_invariance(
     shot: Shot,
     bible: Bible,
     rejection_details: list[dict[str, Any]] | None = None,
+    rejected_out: list[ReferenceImageAsset] | None = None,
 ) -> tuple[list[ReferenceImageAsset], set[str]]:
     """双关键帧人物不变量硬检查；无法证明一致时安全降级为单关键帧。"""
     timeline = sorted(
@@ -2002,20 +2004,19 @@ async def _enforce_timeline_keyframe_invariance(
     if keeper is None:
         keeper = max(timeline, key=lambda asset: asset.qualityScore or 0.0)
     dropped_slots: set[str] = set()
+    dropped_asset_ids: set[int] = set()
     for asset in timeline:
         if asset is keeper:
             continue
         asset.selectedForSeedance = False
-        asset.deleted = True
+        asset.deleted = False
         asset.rejectReason = "cross_keyframe_identity_invariance_unverified"
         asset.purposes = [purpose for purpose in (asset.purposes or []) if purpose != "video_input"]
+        dropped_asset_ids.add(id(asset))
         if asset.slot_key:
             dropped_slots.add(str(asset.slot_key))
-        if asset.path:
-            try:
-                Path(asset.path).unlink(missing_ok=True)
-            except OSError:
-                pass
+        if rejected_out is not None and asset not in rejected_out:
+            rejected_out.append(asset)
         if rejection_details is not None:
             rejection_details.append({
                 "type": asset.type,
@@ -2025,7 +2026,7 @@ async def _enforce_timeline_keyframe_invariance(
                 "drift": (scores.get(asset.id) or {}).get("drift") or [],
                 "consistency": (scores.get(asset.id) or {}).get("consistency"),
             })
-    return [asset for asset in selected if not asset.deleted], dropped_slots
+    return [asset for asset in selected if id(asset) not in dropped_asset_ids], dropped_slots
 
 
 async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int, episode_id: str,
@@ -2105,23 +2106,28 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
             existing_meta["reference_slots"] = slot_state
 
     if not reuse_frozen:
-        # 进入本集生产前按需补齐 legacy_partial；失败必须响，禁止吞掉后继续关键帧
+        # 进入本集生产前按需补齐 legacy_partial。补齐失败只留作
+        # 风险证据；后续仍用已有主图/其他锨点，必要时回退纯文本视频。
         style = bible.world.visual_style_canonical
+        pack_warnings: list[str] = []
         if character_multiview_enabled():
             for name in identity_character_names:
                 pack = await complete_legacy_character_pack(project_id, name, episode_no, style)
                 if pack is not None and not pack_result_ok(pack):
-                    raise hiagent.ProviderError(
-                        f"人物多视角资产包未就绪，禁止关键帧生产：{name}"
+                    pack_warnings.append(
+                        f"人物多视角补齐重试耗尽：{name}"
                         f"（status={pack.get('status')}）"
                     )
         if scene_name and scene_multiview_enabled():
             pack = await complete_legacy_scene_pack(project_id, scene_name, episode_no, style)
             if pack is not None and not pack_result_ok(pack):
-                raise hiagent.ProviderError(
-                    f"场景多视角资产包未就绪，禁止关键帧生产：{scene_name}"
+                pack_warnings.append(
+                    f"场景多视角补齐重试耗尽：{scene_name}"
                     f"（status={pack.get('status')}）"
                 )
+        if pack_warnings:
+            existing_meta["asset_pack_gate_retry_exhausted"] = True
+            existing_meta["asset_pack_warnings"] = pack_warnings
         manifest = resolve_shot_asset_dependencies(
             project_id=project_id, episode_no=episode_no, shot_id=shot_id, shot=shot,
             scene_name=scene_name or None,
@@ -2129,8 +2135,11 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
         existing_meta["reference_manifest"] = manifest
         existing_meta["reference_manifest_frozen"] = True
 
-    # 不完整资产包硬门禁：缺失侧面/反打等不得继续关键帧与视频
-    assert_manifest_allows_production(manifest)
+    # 兼容保留门禁报告 API，但阻塞项只写入告警，不终止付费链路。
+    manifest_warnings = assert_manifest_allows_production(manifest)
+    if manifest_warnings:
+        existing_meta["asset_manifest_gate_retry_exhausted"] = True
+        existing_meta["asset_manifest_warnings"] = list(manifest_warnings)
 
     # 只有 action_continuation 才把上一镜尾帧作为强制参考图和剪辑点连贯锚点。
     forced: list[ReferenceImageAsset] = []
@@ -2795,8 +2804,13 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
     if empty_slots:
         for slot_key in empty_slots:
             _checkpoint_candidates(slot_key, "technical_failed")
+        existing_meta["keyframe_generation_retry_exhausted"] = True
+        existing_meta["keyframe_generation_warnings"] = [
+            f"{slot_key}: 候选全部生成失败，改用已有锨点或纯文本"
+            for slot_key in empty_slots
+        ]
+        active_candidate_slots.difference_update(empty_slots)
         _publish_progress()
-        raise ProviderError("叙事关键帧候选全部生成失败，未进入视频生成")
 
     # 三张候选并发证据化 QA。任何一张 QA 崩溃时，图片 checkpoint 已经落盘；
     # worker 恢复后只补 QA，不再调付费图片供应商。
@@ -2879,8 +2893,13 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
                     except OSError:
                         pass
             _checkpoint_candidates(slot_key, "technical_failed")
+        existing_meta["keyframe_file_retry_exhausted"] = True
+        existing_meta["keyframe_file_warnings"] = [
+            f"{slot_key}: 候选均不可读，改用已有锨点或纯文本"
+            for slot_key in unreadable_slots
+        ]
+        active_candidate_slots.difference_update(unreadable_slots)
         _publish_progress()
-        raise ProviderError("叙事关键帧候选均不可读，未进入视频生成")
 
     for completed in asyncio.as_completed(qa_tasks):
         slot_key, candidate_no, asset, qa = await completed
@@ -2938,70 +2957,21 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
     eligible_by_slot: dict[str, list[tuple[int, ReferenceImageAsset]]] = {}
     for slot_key in active_candidate_slots:
         pairs = candidate_pool.get(slot_key, [])
-        if is_narrative_keyframe_slot(slot_key):
-            eligible_by_slot[slot_key] = [
-                pair for pair in pairs
-                if not keyframe_runtime_blocking_failures(pair[1].qa or {})
-            ]
-        else:
-            eligible_by_slot[slot_key] = list(pairs)
-    blocked_slots = [
-        slot_key for slot_key in active_candidate_slots
-        if candidate_pool.get(slot_key) and not eligible_by_slot.get(slot_key)
-    ]
-    if blocked_slots:
-        height_relation_requires_keyframe = (
-            _keyframe_contract(shot, bible).get("relative_height_policy") != "single_subject"
-        )
-        # 三张候选若全部存在结构硬伤，删除该槽所有候选。
-        # 单人镜仍可使用历史结构降级；多人身高关系必须由双人关键帧提供
-        # 可执行的视觉几何锚点，不得只靠一句文字继续提交付费视频。
-        for slot_key in blocked_slots:
-            records: list[dict[str, Any]] = []
-            for candidate_no, asset in candidate_pool.get(slot_key, []):
-                asset.selectedForSeedance = False
-                asset.deleted = True
-                asset.rejectReason = "keyframe_structural_hard_failure"
-                if asset.path:
-                    try:
-                        Path(asset.path).unlink(missing_ok=True)
-                    except OSError:
-                        pass
-                records.append(_candidate_record(
-                    slot_key, candidate_no, asset, include_path=False, status="blocked_deleted",
-                ))
-                if rejection_details is not None:
-                    rejection_details.append({
-                        "type": asset.type,
-                        "source": asset.source,
-                        "reason": asset.rejectReason,
-                        "candidate_no": candidate_no,
-                        "hard_failures": sorted(keyframe_runtime_blocking_failures(asset.qa or {})),
-                    })
-            slot_state[slot_key] = {
-                **(slot_state.get(slot_key) or {}),
-                "status": (
-                    "blocked_required_height_geometry"
-                    if height_relation_requires_keyframe
-                    else "omitted_structural_geometry_fallback"
-                ),
-                "candidate_count": len(records),
-                "candidates": records,
-                "path": None,
-                "winner_candidate_no": None,
+        # 所有已落盘、技术可读的候选都可进入最终择优。结构/几何 QA 只决定
+        # 风险标记和排序；三张均有问题时仍保留其中最佳一张。
+        eligible_by_slot[slot_key] = list(pairs)
+        structural = [
+            {
+                "candidate_no": candidate_no,
+                "hard_failures": sorted(keyframe_runtime_blocking_failures(asset.qa or {})),
             }
-        active_candidate_slots.difference_update(blocked_slots)
-        selection_ready_slots.difference_update(blocked_slots)
-        existing_meta["reference_slots"] = slot_state
-        if height_relation_requires_keyframe:
-            existing_meta.pop("keyframe_fallback_mode", None)
-            existing_meta.pop("keyframe_structural_fallback_slots", None)
-            existing_meta["narrative_keyframe_missing"] = True
-        else:
-            existing_meta["keyframe_fallback_mode"] = KEYFRAME_STRUCTURAL_FALLBACK_MODE
-            existing_meta["keyframe_structural_fallback_slots"] = sorted(blocked_slots)
-            existing_meta["narrative_keyframe_missing"] = False
-        _publish_progress()
+            for candidate_no, asset in pairs
+            if keyframe_runtime_blocking_failures(asset.qa or {})
+        ]
+        if structural and len(structural) == len(pairs):
+            slot_state.setdefault(slot_key, {})["gate_retry_exhausted"] = True
+            slot_state[slot_key]["gate_warnings"] = structural
+    existing_meta["reference_slots"] = slot_state
 
     all_cleanup_errors: list[str] = []
     for slot_key in sorted(active_candidate_slots):
@@ -3037,12 +3007,19 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
             passed = keyframe_gate_passed(winner.qa or {}) if (
                 winner.type == "plot_key_frame" or is_narrative_keyframe_slot(slot_key)
             ) else apply_keep_gate(winner)
-            if passed:
+            structural_warnings = keyframe_runtime_blocking_failures(winner.qa or {})
+            if passed and not structural_warnings:
                 winner_status = "passed"
                 winner.rejectReason = None
             else:
                 winner_status = "scored_warning"
                 winner.rejectReason = "quality_below_threshold_score_only"
+                if structural_warnings:
+                    winner.qa = {
+                        **(winner.qa or {}),
+                        "gate_retry_exhausted": True,
+                        "runtime_blocking": False,
+                    }
         if winner not in selected:
             selected.append(winner)
 
@@ -3147,10 +3124,7 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
         _publish_progress()
 
     if all_cleanup_errors:
-        raise ProviderError(
-            "败选关键帧文件清理失败，已隔离视频输入："
-            + "; ".join(all_cleanup_errors)
-        )
+        existing_meta["candidate_cleanup_warnings"] = all_cleanup_errors
 
     # Phase 2：整组相对一致性检查（仅对 video_input 候选）
     if job_id:
@@ -3169,6 +3143,7 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
         shot=shot,
         bible=bible,
         rejection_details=rejection_details,
+        rejected_out=rejected_out,
     )
     if invariant_dropped_slots:
         # 两帧无法证明人物不变量时，回退为单一决定性关键帧，并同步冻结元数据；
@@ -3668,14 +3643,16 @@ def build_seedance_image_inputs(meta: dict[str, Any]) -> list[tuple[str, str]]:
             raise ProviderError("REFERENCE_IMAGE_MODE must not pass first_frame or last_frame.")
         refs = meta.get("reference_images") or []
         if not refs:
-            raise ProviderError("REFERENCE_IMAGE_MODE requires at least one quality-approved reference image.")
+            # 参考图/关键帧重试耗尽后的最终降级：Seedance 支持纯文本 content。
+            # 返回空列表表示继续提交，而不是把已经发生的付费工作判失败。
+            return []
         # 使用中的图按综合分 Top-N 装箱；截断不改 selected，高分未入选仍留在画廊。
         sequence = meta.get("keyframe_sequence") or {}
         beats = sequence.get("beats") if isinstance(sequence, dict) else None
         keyframe_limit = len(beats) if isinstance(beats, list) and beats else _MAX_TIMELINE_KEYFRAMES
         usable = pack_reference_images_for_seedance(refs, max_keyframes=keyframe_limit)
         if not usable:
-            raise ProviderError("REFERENCE_IMAGE_MODE has no selected reference images.")
+            return []
         out: list[tuple[str, str]] = []
         for ref in usable:
             if ref.get("path"):
@@ -3683,7 +3660,7 @@ def build_seedance_image_inputs(meta: dict[str, Any]) -> list[tuple[str, str]]:
             elif ref.get("url"):
                 out.append((ref["url"], "reference_image"))
         if not out:
-            raise ProviderError("REFERENCE_IMAGE_MODE has no selected reference images.")
+            return []
         return out
 
     raise ProviderError("视频生成已固定为参考图模式，不再支持首尾帧输入。")

@@ -2276,32 +2276,25 @@ def _adopt_portrait_by_id(
     ).fetchone()
     if not row:
         raise HTTPException(404, "造型版本不存在")
+    image_path = str(row["image_path"] or "").strip()
+    if not image_path or not Path(image_path).is_file():
+        raise HTTPException(409, {
+            "code": "PORTRAIT_FILE_UNAVAILABLE",
+            "message": "候选定妆主图文件不可用",
+        })
     views = _portrait_views_for(conn, portrait_id)
     hard, soft = _portrait_gate_lists(row, views)
-    if hard:
-        raise HTTPException(
-            409,
-            detail={
-                "code": "PORTRAIT_HARD_FAILED",
-                "message": "候选包存在硬失败，禁止采纳",
-                "hard_failures": hard,
-                "candidate": _portrait_candidate_payload(row, views),
-            },
-        )
-    if soft and (not bypass_soft or not reason.strip()):
-        raise HTTPException(
-            409,
-            detail={
-                "code": "PORTRAIT_SOFT_WARNING_CONFIRM_REQUIRED",
-                "message": "候选包存在软警告，需 bypass_soft=true 并填写 reason",
-                "warnings": soft,
-                "candidate": _portrait_candidate_payload(row, views),
-            },
-        )
+    del bypass_soft
+    quality_warnings = list(dict.fromkeys([*hard, *soft]))
     result = _set_current_portrait(
         conn, project_id, character_name, row, reason=reason, decision=decision,
     )
-    return {**result, "soft_warnings": soft, "candidate": _portrait_candidate_payload(row, views)}
+    return {
+        **result,
+        "soft_warnings": quality_warnings,
+        "gate_retry_exhausted": bool(hard),
+        "candidate": _portrait_candidate_payload(row, views),
+    }
 
 
 @router.get("/projects/{project_id}/characters/{character_name}/portrait-candidates")
@@ -2929,26 +2922,16 @@ async def _evaluate_scene_review_item(conn, row, *, enforce: bool) -> tuple[str,
         **group, "hard_failures": hard, "uncertainties": uncertain, "warnings": warnings,
         "single_view_results": single_results, "result_status": status,
     }
-    if enforce and status in {"hard_failed", "unverified"}:
-        change = _parse_json_value(scene["change_json"] if "change_json" in scene.keys() else None, {}) or {}
-        change.update({
-            "new_references_blocked": True, "blocked_by_review_batch": row["batch_id"],
-            "blocked_at": now(),
-            "reason": "新版场景硬门禁复验失败" if status == "hard_failed" else "新版场景门禁无法完成验证",
-        })
-        conn.execute(
-            "UPDATE scene_references SET pack_status=?,group_qa_json=?,change_json=? WHERE id=?",
-            ("failed" if status == "hard_failed" else "qa_pending",
-             json.dumps(evidence, ensure_ascii=False), json.dumps(change, ensure_ascii=False), scene["id"]),
-        )
-    elif enforce and status in {"passed", "warning"}:
+    if enforce:
         change = _parse_json_value(scene["change_json"] if "change_json" in scene.keys() else None, {}) or {}
         change.update({
             "new_references_blocked": False, "reviewed_by_batch": row["batch_id"],
             "reviewed_at": now(), "review_result": status,
+            "runtime_blocking": False,
+            "gate_retry_exhausted": status in {"hard_failed", "unverified"},
         })
         conn.execute(
-            "UPDATE scene_references SET pack_status='ready',group_qa_json=?,change_json=? WHERE id=?",
+            "UPDATE scene_references SET group_qa_json=?,change_json=? WHERE id=?",
             (json.dumps(evidence, ensure_ascii=False), json.dumps(change, ensure_ascii=False), scene["id"]),
         )
     return status, evidence

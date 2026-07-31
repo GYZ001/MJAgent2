@@ -66,7 +66,7 @@ def issue_completion_certificate(
     must_fix_issues: int = 0,
     production_revision_id: str | None = None,
 ) -> CompletionCertificate:
-    """签发完成凭证；剧本必须由同一 Artifact 的只读 QA runtime gate 背书。"""
+    """签发完成凭证；QA 仅作同一 Artifact 的评分报告。"""
     if not artifact_id or not artifact_hash:
         raise ValueError("完成凭证必须绑定 artifact_id 与 artifact_hash")
 
@@ -79,29 +79,19 @@ def issue_completion_certificate(
         raise ValueError("artifact_hash 与存储内容不一致，拒绝签发凭证")
     evaluation_ids = list(evaluation_ids or [])
     if kind == "screenplay":
-        if blockers or must_fix_issues:
-            raise ValueError("剧本仍有 blocker / must-fix，拒绝签发完成凭证")
-        if not evaluation_ids:
-            raise ValueError("剧本完成凭证必须绑定 QA Evaluation")
-        marks = ",".join("?" for _ in evaluation_ids)
-        rows = get_conn().execute(
-            f"""SELECT id,artifact_id,status,hard_gate_passed,evaluation_role,runtime_blocking
-                  FROM evaluations WHERE id IN ({marks})""",
-            evaluation_ids,
-        ).fetchall()
-        by_id = {row["id"]: row for row in rows}
-        if len(by_id) != len(set(evaluation_ids)):
-            raise ValueError("剧本完成凭证引用了不存在的 QA Evaluation")
-        runtime_gate_passed = any(
-            row["artifact_id"] == artifact_id
-            and row["status"] == "passed"
-            and bool(row["hard_gate_passed"])
-            and row["evaluation_role"] == "runtime_gate"
-            and bool(row["runtime_blocking"])
-            for row in rows
-        )
-        if not runtime_gate_passed:
-            raise ValueError("当前 Artifact 没有通过只读 QA runtime gate")
+        # QA/结构评估只作为凭证附带报告。修复预算耗尽后仍可为当前 working
+        # artifact 签发凭证；artifact/hash/版本一致性仍由下方确定性校验保护。
+        if evaluation_ids:
+            marks = ",".join("?" for _ in evaluation_ids)
+            rows = get_conn().execute(
+                f"SELECT id,artifact_id FROM evaluations WHERE id IN ({marks})",
+                evaluation_ids,
+            ).fetchall()
+            by_id = {row["id"]: row for row in rows}
+            if len(by_id) != len(set(evaluation_ids)):
+                raise ValueError("剧本完成凭证引用了不存在的 QA Evaluation")
+            if any(row["artifact_id"] != artifact_id for row in rows):
+                raise ValueError("剧本完成凭证引用了其他 Artifact 的 Evaluation")
 
     ensure_completion_certificates_table()
     certificate_id = new_id("cert")

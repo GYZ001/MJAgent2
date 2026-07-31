@@ -92,7 +92,7 @@ def _minimal_script(**overrides) -> EpisodeScreenplay:
     return EpisodeScreenplay(**data)
 
 
-def test_screenplay_qa_is_read_only_and_blocks_failed_candidate() -> None:
+def test_screenplay_qa_is_read_only_and_nonblocking() -> None:
     from app.production.screenplay_repair import run_screenplay_qa
 
     script = _minimal_script()
@@ -112,8 +112,8 @@ def test_screenplay_qa_is_read_only_and_blocks_failed_candidate() -> None:
     assert script.model_dump_json() == before
     assert issues
     assert evaluation.status == "failed"
-    assert evaluation.evaluation_role == "runtime_gate"
-    assert evaluation.runtime_blocking is True
+    assert evaluation.evaluation_role == "score_only"
+    assert evaluation.runtime_blocking is False
 
 
 def test_baseline_counter_and_policy_denies_second_generate():
@@ -157,6 +157,36 @@ def test_screenplay_document_patch_stakes_only():
     assert "meta:stakes" in touched
     # 无关场次标题保持
     assert out.scene_outline[0].scene_heading == script.scene_outline[0].scene_heading
+
+
+def test_screenplay_projection_separates_action_labels_and_deduplicates_dialogue():
+    script = _minimal_script(
+        dialogue_chains=[KeyDialogueChain(
+            chain_id="DC1",
+            topic="任务",
+            turns=[KeyDialogueTurn(
+                speaker="甲",
+                line="今晚七点以前完成。",
+                function="announcement",
+                source_text="今晚七点以前完成。",
+            )],
+        )],
+        full_script_text=(
+            "【场1】夜 / 场地\n"
+            "甲侧身让出门缝，看向乙：今晚七点以前完成。\n"
+            "甲：今晚七点以前完成。\n"
+            "银幕上出现画面：旧钟楼在雨中亮起。\n"
+            "陌生杀手：你们来晚了。"
+        ),
+    )
+
+    result = document_to_screenplay(screenplay_to_document(script))
+
+    assert result.full_script_text.count("甲：今晚七点以前完成。") == 1
+    assert "甲侧身让出门缝，看向乙：" not in result.full_script_text
+    assert "银幕上出现画面，旧钟楼在雨中亮起。" in result.full_script_text
+    assert "银幕上出现画面：" not in result.full_script_text
+    assert "陌生杀手：你们来晚了。" in result.full_script_text
 
 
 def test_overdetail_normalizer_only_changes_visual_description() -> None:
@@ -692,8 +722,8 @@ async def test_noop_patch_attempts_consume_activation_budget(monkeypatch):
     assert attempts == 2
     paused = screenplay_repair.get_production_revision(revision.id)
     assert paused is not None
-    assert paused.checkpoint_json["phase"] == "WAITING_RETRY"
-    assert paused.checkpoint_json["yield_reason"] == "activation_budget"
+    assert paused.checkpoint_json["phase"] == "SUCCEEDED"
+    assert paused.checkpoint_json["yield_reason"] == "gate_retry_exhausted_fallback"
 
 
 @pytest.mark.asyncio

@@ -291,8 +291,19 @@ def build_delivery_package(
     operation_started_at: float | None = None,
 ) -> dict[str, Any]:
     readiness = delivery_readiness(episode_id)
-    if readiness["blockers"]:
-        raise ValueError("交付硬门禁未通过：" + "；".join(item["message"] for item in readiness["blockers"]))
+    gate_findings = list(readiness["blockers"])
+    if gate_findings:
+        readiness["warnings"] = [
+            *readiness["warnings"],
+            *[
+                {
+                    **item,
+                    "code": "DELIVERY_GATE_RETRY_EXHAUSTED_FALLBACK",
+                    "message": f"{item['message']}（重试耗尽，已输出当前可用交付包）",
+                }
+                for item in gate_findings
+            ],
+        ]
     if decision not in {None, "approve", "approve_with_risk"}:
         raise ValueError("decision 必须为 approve 或 approve_with_risk")
     if decision == "approve_with_risk" and not (accepted_risk or "").strip():
@@ -443,6 +454,9 @@ def build_delivery_package(
     quality_report = {
         "schema_version": "1.0.0",
         "hard_gate_passed": True,
+        "runtime_blocking": False,
+        "gate_retry_exhausted": bool(gate_findings),
+        "gate_findings": _sanitize_delivery_value(gate_findings),
         "checks": _sanitize_delivery_value(readiness["checks"]),
         "evidence_coverage": readiness["evidence_coverage"],
         "warnings": _sanitize_delivery_value(readiness["warnings"]),
@@ -458,7 +472,7 @@ def build_delivery_package(
     report_html = (
         "<!doctype html><meta charset='utf-8'><title>Delivery Quality Report</title>"
         f"<h1>第 {ep['episode_no']} 集交付质量报告</h1>"
-        f"<p>硬门禁：通过；证据覆盖率：{readiness['evidence_coverage']:.1%}</p>"
+        f"<p>质量检查：仅评分、不阻断；证据覆盖率：{readiness['evidence_coverage']:.1%}</p>"
         "<h2>检查项</h2><ul>"
         + "".join(
             f"<li>{'通过' if item['passed'] else '失败'} · {html.escape(item['message'])}</li>"

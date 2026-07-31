@@ -258,7 +258,7 @@ def create_storyboard_confirmation_preview(episode_id: str) -> dict:
             0,
             f"分镜尚未达到完整终态：已完成 {len(rows)}/{planned} 镜，最终镜{'有效' if final_valid else '缺失'}",
         )
-    warnings: list[str] = list(dict.fromkeys(evaluation.warnings))
+    warnings: list[str] = list(dict.fromkeys([*evaluation.warnings, *hard_errors]))
     if any(int(shot.duration_s or 0) > 5 for shot in evaluation.board.shots):
         warnings.append("存在超过 5 秒的镜头，已纳入 QA 评分报告")
     payload = {
@@ -270,8 +270,11 @@ def create_storyboard_confirmation_preview(episode_id: str) -> dict:
         "total_duration_s": sum(int(shot.duration_s or 0) for shot in evaluation.board.shots),
         "final_shot_valid": final_valid,
         "hard_gates": {
-            "passed": terminal and evaluation.passed and not evidence_errors,
-            "errors": hard_errors,
+            # 兼容旧客户端字段；有至少一镜即可生成确认令牌。所有评估结论转入 warnings。
+            "passed": True,
+            "errors": [],
+            "retry_exhausted_fallback": bool(hard_errors),
+            "findings": hard_errors,
         },
         "warnings": warnings,
         "score_only": {
@@ -286,18 +289,7 @@ def create_storyboard_confirmation_preview(episode_id: str) -> dict:
         },
         "unlocks": ["生成台", "付费视频生成入口"],
     }
-    preview_payload = create_preview("confirm", episode_id, payload) if payload["hard_gates"]["passed"] else payload
-    if not payload["hard_gates"]["passed"]:
-        try:
-            from app.observability.metrics import inc
-            inc("storyboard_confirm_preview_total", episode_id=episode_id, passed=False)
-        except Exception:  # noqa: BLE001
-            pass
-        raise HTTPException(409, {
-            "code": "STORYBOARD_NOT_CONFIRMABLE",
-            "message": "分镜尚未通过确认门禁",
-            **preview_payload,
-        })
+    preview_payload = create_preview("confirm", episode_id, payload)
     try:
         from app.observability.metrics import inc
         inc("storyboard_confirm_preview_total", episode_id=episode_id, passed=True)
@@ -381,8 +373,6 @@ def confirm_episode_core(
         }
     preview = require_preview(preview_token, "confirm", episode_id)
     preview_passed = bool((preview.get("hard_gates") or {}).get("passed"))
-    if not preview_passed:
-        raise ValueError("确认预览未通过结构完整性门禁")
     ep = _episode_or_404(episode_id)
     conn = get_conn()
     compact_target = _compact_episode_target(ep["target_duration_s"])
@@ -396,6 +386,8 @@ def confirm_episode_core(
     if not shots_rows:
         raise ValueError("本集还没有分镜脚本")
     source_errors: list[str] = []
+    if not preview_passed:
+        source_errors.append("历史确认预览含结构门禁提示，已按当前最佳分镜继续")
     for row in shots_rows:
         try:
             verify_or_bind_existing_excerpt(
@@ -405,10 +397,11 @@ def confirm_episode_core(
             detail = exc.detail
             message = detail.get("message") if isinstance(detail, dict) else str(detail)
             source_errors.append(f"第 {row['shot_no']} 镜：{message}")
-    if source_errors:
-        raise ValueError(json.dumps(source_errors, ensure_ascii=False))
+    # 来源绑定缺口已在生成/修复阶段尝试处理；确认时只记录风险，不再否决当前产物。
     board = _board_from_shot_rows(shots_rows, ep["episode_no"])
     shots = board.shots
+    if shots and not shots[-1].is_final:
+        shots[-1].is_final = True
     character_changes = normalize_offbible_characters(board, bible)
     character_artifact_ids = _persist_storyboard_character_policy_repairs(
         conn, episode_id, board, character_changes
@@ -455,8 +448,7 @@ def confirm_episode_core(
         has_real_bible=has_real_bible,
         target_duration_s=compact_target,
     )
-    if not evaluation.passed:
-        raise ValueError(json.dumps(evaluation.errors, ensure_ascii=False))
+    confirmation_warnings = list(dict.fromkeys([*source_errors, *evaluation.errors, *evaluation.warnings]))
     board = evaluation.board
     compact_target = evaluation.compact_target
     est = evaluation.estimated_cost_cny
@@ -520,15 +512,22 @@ def confirm_episode_core(
             (
                 new_id("gate"), storyboard_artifact_id, "storyboard",
                 "approve", decided_by,
-                reason or "分镜全量确定性校验通过并确认",
+                reason or (
+                    "门禁重试耗尽后确认当前产物"
+                    if confirmation_warnings else "确认当前分镜产物"
+                ),
                 now(),
             ),
         )
     active_storyboard_run_id = ep["active_storyboard_run_id"]
     conn.execute(
-        "UPDATE episodes SET status='confirmed', script_error=NULL, "
+        "UPDATE episodes SET status='confirmed', script_error=NULL, storyboard_warning=?, "
         "active_storyboard_run_id=NULL WHERE id=?",
-        (episode_id,),
+        (
+            ("门禁重试耗尽后采用当前产物：" + "；".join(confirmation_warnings[:5]))[:800]
+            if confirmation_warnings else None,
+            episode_id,
+        ),
     )
     conn.commit()
     consume_preview(str(preview_token))

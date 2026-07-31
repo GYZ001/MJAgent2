@@ -728,8 +728,15 @@ async def _refresh_portrait_on_drift(project_id: str, name: str, episode_no: int
                         project_id, name, style, new_appearance,
                         base_path=cur["image_path"], ep_start=episode_no,
                     )
-            if not artifact or artifact["status"] != "approved":
-                raise hiagent.ProviderError(f"角色漂移重绘一致性检查未通过：{name}")
+            if not artifact or artifact["status"] not in {"approved", "validated"}:
+                # 新主图确实不可读时继续使用旧造型；不把内容 QA 变成终态。
+                return {
+                    "ep_start": int(cur["ep_start"] or 1),
+                    "image_path": cur["image_path"],
+                    "pack_status": cur["pack_status"] if pack_supported else "ready",
+                    "portrait_id": cur["id"],
+                    "gate_retry_exhausted": True,
+                }
 
         new_portrait_id = new_id("portrait")
         change_json = json.dumps(change_meta or {}, ensure_ascii=False) if change_meta else None
@@ -759,31 +766,29 @@ async def _refresh_portrait_on_drift(project_id: str, name: str, episode_no: int
         pack_status = "ready"
         if pack_supported:
             from app.multiview import ensure_character_multiview_pack, PACK_STATUS_READY
-            pack = await ensure_character_multiview_pack(
-                project_id=project_id,
-                portrait_id=new_portrait_id,
-                character_name=name,
-                appearance=new_appearance,
-                visual_style=style,
-                ep_start=episode_no,
-                base_portrait_id=cur["id"],
-                primary_qa=qa,
-            )
+            try:
+                pack = await ensure_character_multiview_pack(
+                    project_id=project_id,
+                    portrait_id=new_portrait_id,
+                    character_name=name,
+                    appearance=new_appearance,
+                    visual_style=style,
+                    ep_start=episode_no,
+                    base_portrait_id=cur["id"],
+                    primary_qa=qa,
+                )
+            except Exception as exc:  # noqa: BLE001 - 主图已落盘，多视角耗尽后保底发布
+                pack = {"status": "partial_fallback", "warning": str(exc)[:300]}
             pack_status = pack.get("status") or "failed"
             if pack_status != PACK_STATUS_READY and pack_status != "ready":
-                # 整包失败：删除临时段，旧包继续生效；相关镜头等待人工
-                from app.rejected_media import purge_character_portrait
-                purge_character_portrait(conn, new_portrait_id)
-                raise hiagent.ProviderError(
-                    f"角色多视角资产包未通过，无法切换造型：{name}（waiting_asset_review）"
-                )
+                pack_status = "partial_fallback"
             # 原子切换：关闭旧区间，开放新区间
             conn.execute("UPDATE character_portraits SET ep_end=? WHERE id=?", (episode_no - 1, cur["id"]))
             persistence = (change_meta or {}).get("persistence") or "persistent"
             new_ep_end = episode_no if persistence == "episode" else None
             conn.execute(
                 "UPDATE character_portraits SET ep_end=?, pack_status=? WHERE id=?",
-                (new_ep_end, "ready", new_portrait_id),
+                (new_ep_end, pack_status, new_portrait_id),
             )
             # 若仅本集有效，结束后零付费重新绑定完整旧包（含全部视角，pack_status=ready）
             if persistence == "episode":
@@ -1340,7 +1345,13 @@ async def _generate_discovered_character_portrait(
             qa=qa,
         )
         if artifact["status"] not in {"approved", "validated"}:
-            raise hiagent.ProviderError(f"新角色定妆照技术校验未通过：{name}")
+            if current:
+                return {
+                    "portrait_id": current["id"], "image_path": current["image_path"],
+                    "pack_status": current["pack_status"] if pack_supported else "ready",
+                    "reused": True, "gate_retry_exhausted": True,
+                }
+            raise hiagent.ProviderError(f"新角色定妆照文件不可用：{name}")
 
     portrait_id = new_id("portrait")
     values = {
@@ -1369,21 +1380,24 @@ async def _generate_discovered_character_portrait(
     )
     conn.commit()
 
+    fallback_pack = False
     try:
         if pack_supported:
             from app.multiview import ensure_character_multiview_pack, pack_result_ok
-            pack = await ensure_character_multiview_pack(
-                project_id=project_id,
-                portrait_id=portrait_id,
-                character_name=name,
-                appearance=appearance,
-                visual_style=style,
-                ep_start=ep_start,
-                base_portrait_id=current["id"] if current else None,
-                primary_qa=qa,
-            )
-            if not pack_result_ok(pack):
-                raise hiagent.ProviderError(f"新角色多视角定妆包未通过：{name}")
+            try:
+                pack = await ensure_character_multiview_pack(
+                    project_id=project_id,
+                    portrait_id=portrait_id,
+                    character_name=name,
+                    appearance=appearance,
+                    visual_style=style,
+                    ep_start=ep_start,
+                    base_portrait_id=current["id"] if current else None,
+                    primary_qa=qa,
+                )
+            except Exception as exc:  # noqa: BLE001 - 多视角失败不丢弃已付费主图
+                pack = {"status": "partial_fallback", "warning": str(exc)[:300]}
+            fallback_pack = not pack_result_ok(pack)
             if current and current["id"] != portrait_id:
                 if int(current["ep_start"] or 1) < ep_start:
                     conn.execute(
@@ -1393,8 +1407,8 @@ async def _generate_discovered_character_portrait(
                 else:
                     conn.execute("DELETE FROM character_portraits WHERE id=?", (current["id"],))
             conn.execute(
-                "UPDATE character_portraits SET ep_end=NULL,pack_status='ready' WHERE id=?",
-                (portrait_id,),
+                "UPDATE character_portraits SET ep_end=NULL,pack_status=? WHERE id=?",
+                ("partial_fallback" if fallback_pack else "ready", portrait_id),
             )
             conn.commit()
     except Exception:
@@ -1407,8 +1421,9 @@ async def _generate_discovered_character_portrait(
     return {
         "portrait_id": portrait_id,
         "image_path": image_path,
-        "pack_status": "ready",
+        "pack_status": "partial_fallback" if fallback_pack else "ready",
         "reused": False,
+        "gate_retry_exhausted": fallback_pack,
     }
 
 

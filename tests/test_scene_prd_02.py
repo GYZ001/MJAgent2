@@ -241,7 +241,7 @@ def test_gap_scan_ignores_optional_views_when_primary_is_video_usable(tmp_path, 
     assert result["counts"]["warning"] == 0
 
 
-def test_manual_adoption_deletes_explicit_scene_hard_failure(tmp_path, monkeypatch) -> None:
+def test_manual_adoption_keeps_explicit_scene_hard_failure_as_warning(tmp_path, monkeypatch) -> None:
     conn = _fresh_db(tmp_path, monkeypatch)
     _seed_project(conn)
     image = tmp_path / "watermarked.jpg"
@@ -261,11 +261,14 @@ def test_manual_adoption_deletes_explicit_scene_hard_failure(tmp_path, monkeypat
     ))
     from app.scenes import adopt_scene_candidate
 
-    with pytest.raises(ValueError, match="永久删除"):
-        asyncio.run(adopt_scene_candidate("p", "萧炎卧室", artifact["id"], reason="强行采用"))
-    assert not image.exists()
-    assert repository.get_artifact(artifact["id"]) is None
-    assert conn.execute("SELECT COUNT(*) n FROM scene_references").fetchone()["n"] == 0
+    result = asyncio.run(adopt_scene_candidate(
+        "p", "萧炎卧室", artifact["id"], reason="已知风险仍采用",
+    ))
+    assert result["adopted"] is True
+    assert result["gate_retry_exhausted"] is True
+    assert image.exists()
+    assert repository.get_artifact(artifact["id"])["status"] == "approved"
+    assert conn.execute("SELECT COUNT(*) n FROM scene_references").fetchone()["n"] == 1
 
 
 def _seed_ready_scene_pack(conn, tmp_path):

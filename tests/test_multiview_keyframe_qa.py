@@ -214,11 +214,11 @@ def test_keyframe_gate_and_weighted_overall() -> None:
     qa = {**scores, "overall": overall, "hard_failures": [], "status": "scored"}
     assert keyframe_gate_passed(qa) is True
     bad = {**qa, "overall": None, "status": "unverified", "hard_failures": ["watermark"]}
-    # 普通分数/水印不阻断；明确结构硬伤必须阻断。
+    # 普通分数、水印与结构问题都只作重试/评分依据。
     assert keyframe_gate_passed(bad) is True
     assert keyframe_gate_passed({
         **qa, "overall": 0.99, "hard_failures": ["relative_scale_mismatch"],
-    }) is False
+    }) is True
 
 
 def test_normalize_appearance_change_blocks_identity_by_default() -> None:
@@ -291,9 +291,8 @@ def test_consistency_unverified_not_perfect_score() -> None:
     assert scores["a"]["check_failed"] is True
 
 
-def test_manifest_blocks_incomplete_character_pack() -> None:
+def test_manifest_reports_incomplete_character_pack_without_blocking() -> None:
     from app.multiview import manifest_production_blockers, assert_manifest_allows_production
-    from app import hiagent
 
     incomplete = {
         "characters": [{
@@ -308,8 +307,7 @@ def test_manifest_blocks_incomplete_character_pack() -> None:
     }
     blockers = manifest_production_blockers(incomplete)
     assert any("角色A" in b for b in blockers)
-    with pytest.raises(hiagent.ProviderError, match="禁止关键帧"):
-        assert_manifest_allows_production(incomplete)
+    assert assert_manifest_allows_production(incomplete) == blockers
 
     ready = {
         "characters": [{
@@ -783,7 +781,7 @@ def test_clone_portrait_views_zero_cost_bind(tmp_path, monkeypatch) -> None:
     assert all(Path(v["image_path"]).exists() for v in views)
 
 
-def test_refresh_portrait_pack_failure_does_not_switch(monkeypatch, tmp_path) -> None:
+def test_refresh_portrait_pack_failure_switches_to_primary_fallback(monkeypatch, tmp_path) -> None:
     """整包 QA 失败不得切换版本：临时段删除，旧开区间继续生效。"""
     import asyncio
     import threading
@@ -828,19 +826,22 @@ def test_refresh_portrait_pack_failure_does_not_switch(monkeypatch, tmp_path) ->
     monkeypatch.setattr("app.portraits.record_reference_asset", lambda **k: {"id": "art1", "status": "approved"})
     monkeypatch.setattr("app.multiview.ensure_character_multiview_pack", failed_pack)
 
-    with pytest.raises(hiagent.ProviderError, match="无法切换造型"):
-        asyncio.run(_refresh_portrait_on_drift(
-            "proj", "A", 12, "白发红袍", "anime", 1,
-            change_meta={"persistence": "persistent", "change_dimensions": ["hair", "outfit"]},
-        ))
+    result = asyncio.run(_refresh_portrait_on_drift(
+        "proj", "A", 12, "白发红袍", "anime", 1,
+        change_meta={"persistence": "persistent", "change_dimensions": ["hair", "outfit"]},
+    ))
+    assert result["pack_status"] == "partial_fallback"
 
     rows = conn.execute(
         "SELECT id, ep_start, ep_end, pack_status FROM character_portraits WHERE character_name='A'"
     ).fetchall()
-    assert len(rows) == 1
-    assert rows[0]["id"] == "p_old"
-    assert rows[0]["ep_end"] is None
-    assert rows[0]["pack_status"] == "ready"
+    assert len(rows) == 2
+    old = next(row for row in rows if row["id"] == "p_old")
+    new = next(row for row in rows if row["id"] != "p_old")
+    assert old["ep_end"] == 11
+    assert new["ep_start"] == 12
+    assert new["ep_end"] is None
+    assert new["pack_status"] == "partial_fallback"
 
 
 def test_refresh_portrait_episode_persistence_binds_ready_pack(monkeypatch, tmp_path) -> None:

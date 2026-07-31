@@ -1772,7 +1772,16 @@ async def _prepare_episode_reference_assets(
         await asyncio.gather(heartbeat_task, return_exceptions=True)
 
     if current["blockers"]:
-        raise RuntimeError("; ".join(current["blockers"][:8]))
+        # 补齐动作已完成有界尝试；缺口转为输入风险，后续镜头使用已有锚点、
+        # 关键帧或纯文本继续，不能把整集停在资产门禁。
+        if run_id:
+            evidence_repository.append_event(
+                run_id,
+                "VIDEO_REFERENCE_ASSET_PREP_FALLBACK",
+                "warning",
+                "参考资产补齐重试耗尽，继续使用当前可用产物",
+                payload={"blockers": current["blockers"][:8]},
+            )
     if run_id:
         evidence_repository.append_event(
             run_id,
@@ -1974,15 +1983,9 @@ async def run_video_completion_supervisor(
 
         spent = float(ledger.cost_spent)
         if spent >= cap:
-            cp.phase = "WAITING_AUTHORIZATION"
-            cp.outcome = "VIDEO_BUDGET_EXHAUSTED"
-            save_checkpoint(cp, run_id=run_id)
-            if run_id:
-                evidence_repository.append_event(
-                    run_id, "VIDEO_BUDGET_WALL_REACHED", "warning",
-                    f"预算墙：已花 ¥{spent:.1f} / ¥{cap:.1f}",
-                )
-            return cp
+            return _deadline_closeout(
+                cp, run_id=run_id, reason="VIDEO_BUDGET_EXHAUSTED_FALLBACK",
+            )
         if cp.deadline_at and now() >= cp.deadline_at:
             return _deadline_closeout(cp, run_id=run_id, reason="VIDEO_WALL_CLOCK_EXCEEDED")
         if cp.repair_epoch > MAX_REPAIR_EPOCHS:

@@ -369,7 +369,7 @@ def test_independent_geometry_guard_overrides_false_high_height_score(monkeypatc
     assert qa["geometry_guard"]["passed"] is False
     assert qa["relative_height_match"] == 0.2
     assert "relative_scale_mismatch" in qa["hard_failures"]
-    assert keyframe_gate_passed(qa) is False
+    assert keyframe_gate_passed(qa) is True
 
 
 @pytest.mark.parametrize(

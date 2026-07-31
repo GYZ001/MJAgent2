@@ -110,7 +110,7 @@ def test_initial_character_generation_publishes_complete_three_view_pack(
     assert all(view["image_url"] for view in visible["views"])
 
 
-def test_failed_batch_refresh_keeps_previous_ready_pack(
+def test_failed_batch_refresh_publishes_new_primary_and_preserves_previous_history(
     asset_db, monkeypatch,
 ) -> None:
     conn, _ = asset_db
@@ -126,16 +126,19 @@ def test_failed_batch_refresh_keeps_previous_ready_pack(
         return {"status": "failed", "failed_view": "profile"}
 
     monkeypatch.setattr(multiview, "ensure_character_multiview_pack", fail_new_pack)
-    with pytest.raises(hiagent.ProviderError, match="多视角资产包未通过"):
-        asyncio.run(refs.generate_refs("proj_bootstrap"))
+    asyncio.run(refs.generate_refs("proj_bootstrap"))
 
     rows = conn.execute(
         "SELECT id, ep_start, image_path, pack_status FROM character_portraits "
         "WHERE project_id='proj_bootstrap' AND character_name='Hero' ORDER BY ep_start"
     ).fetchall()
-    assert [(row["id"], row["ep_start"]) for row in rows] == [(previous["id"], 1)]
-    assert rows[0]["image_path"] == previous["image_path"]
-    assert rows[0]["pack_status"] == "ready"
+    assert len(rows) == 2
+    historical = next(row for row in rows if row["id"] == previous["id"])
+    current = next(row for row in rows if row["ep_start"] == 1)
+    assert historical["ep_start"] <= 0
+    assert historical["image_path"] == previous["image_path"]
+    assert current["pack_status"] == "partial_fallback"
+    assert Path(current["image_path"]).is_file()
 
 
 def test_staged_refresh_pack_is_not_exposed_or_selected_before_qa(
@@ -297,8 +300,9 @@ def test_successful_character_is_checkpointed_before_later_character_fails(
 
     monkeypatch.setattr(refs.hiagent, "generate_image", fail_second_character)
 
-    with pytest.raises(hiagent.ProviderError):
-        asyncio.run(refs.generate_refs("proj_bootstrap"))
+    result = asyncio.run(refs.generate_refs("proj_bootstrap"))
+    assert result["gate_retry_exhausted"] is True
+    assert any("可用" in warning or "unavailable" in warning for warning in result["warnings"])
 
     persisted = json.loads(conn.execute(
         "SELECT bible_json FROM projects WHERE id='proj_bootstrap'"
@@ -308,7 +312,7 @@ def test_successful_character_is_checkpointed_before_later_character_fails(
     assert by_name["Villain"]["ref_image_path"] is None
 
 
-def test_failed_initial_pack_is_not_exposed_as_front_only_portrait(
+def test_failed_initial_pack_exposes_front_portrait_as_fallback(
     asset_db, monkeypatch,
 ) -> None:
     conn, _ = asset_db
@@ -320,19 +324,20 @@ def test_failed_initial_pack_is_not_exposed_as_front_only_portrait(
 
     monkeypatch.setattr(multiview, "ensure_character_multiview_pack", failed_pack)
 
-    with pytest.raises(hiagent.ProviderError):
-        asyncio.run(refs.generate_refs("proj_bootstrap"))
+    asyncio.run(refs.generate_refs("proj_bootstrap"))
 
     assert conn.execute(
         "SELECT COUNT(*) AS c FROM character_portraits WHERE project_id='proj_bootstrap'"
-    ).fetchone()["c"] == 0
-    assert conn.execute(
-        "SELECT COUNT(*) AS c FROM character_portrait_views"
-    ).fetchone()["c"] == 0
+    ).fetchone()["c"] == 1
+    portrait = conn.execute(
+        "SELECT image_path,pack_status FROM character_portraits WHERE project_id='proj_bootstrap'"
+    ).fetchone()
+    assert portrait["pack_status"] == "partial_fallback"
+    assert Path(portrait["image_path"]).is_file()
     bible = json.loads(conn.execute(
         "SELECT bible_json FROM projects WHERE id='proj_bootstrap'"
     ).fetchone()["bible_json"])
-    assert bible["characters"][0]["ref_image_path"] is None
+    assert bible["characters"][0]["ref_image_path"] == portrait["image_path"]
 
 
 def test_failed_single_image_qa_is_visible_as_non_adoptable_candidate(
@@ -385,7 +390,7 @@ def test_failed_single_image_qa_is_visible_as_non_adoptable_candidate(
     assert item["image_url"]
 
 
-def test_failed_single_image_qa_raises_quality_gate_error(
+def test_failed_single_image_qa_exhausts_retry_without_blocking_batch(
     asset_db, monkeypatch,
 ) -> None:
     _seed_bible_project(asset_db[0])
@@ -405,8 +410,9 @@ def test_failed_single_image_qa_raises_quality_gate_error(
         lambda **_kwargs: {"id": "artifact_failed", "status": "candidate"},
     )
 
-    with pytest.raises(ContentGenerationError, match="未通过质量校验"):
-        asyncio.run(refs.generate_refs("proj_bootstrap"))
+    result = asyncio.run(refs.generate_refs("proj_bootstrap"))
+    assert result["gate_retry_exhausted"] is True
+    assert result["generated"] == []
 
 
 def test_expression_warning_seed_continues_into_multiview_pack(
@@ -527,7 +533,7 @@ def test_resume_completes_partial_character_pack_instead_of_skipping_it(
     assert persisted["characters"][0]["ref_image_path"] == str(front)
 
 
-def test_scene_exists_requires_complete_pack_when_multiview_is_enabled(
+def test_scene_exists_accepts_primary_fallback_when_multiview_is_incomplete(
     asset_db, monkeypatch,
 ) -> None:
     conn, tmp_path = asset_db
@@ -545,7 +551,7 @@ def test_scene_exists_requires_complete_pack_when_multiview_is_enabled(
         1,
     )
     monkeypatch.setattr(multiview, "scene_multiview_enabled", lambda: True)
-    assert scenes.scene_ref_exists(conn, "proj_bootstrap", "Courtyard") is False
+    assert scenes.scene_ref_exists(conn, "proj_bootstrap", "Courtyard") is True
 
     conn.execute("UPDATE scene_references SET pack_status='ready' WHERE id=?", (scene_id,))
     for role in ("establishing", "reverse_angle"):

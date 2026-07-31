@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from app.evidence import repository as evidence_repository
 from app.evidence.media import record_reference_asset, select_best_video_candidate
 from app.harness.types import Issue, IssueSeverity
 from app.media_pipeline.retry_policy import RetryKind, decide_qa_retake
@@ -59,7 +60,7 @@ def test_keyframe_gate_ignores_low_scores() -> None:
         "overall": 0.95,
         "status": "scored",
         "hard_failures": ["relative_scale_mismatch"],
-    }) is False
+    }) is True
 
 
 def test_pack_ready_is_structural_only() -> None:
@@ -148,7 +149,7 @@ def test_record_reference_asset_commits_low_score_warning(tmp_path, monkeypatch)
     assert int(model["hard_gate_passed"]) == 1
 
 
-def test_record_reference_asset_deletes_explicit_qa_reject(tmp_path, monkeypatch) -> None:
+def test_record_reference_asset_keeps_explicit_qa_reject_as_warning(tmp_path, monkeypatch) -> None:
     from app import db
 
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "qa-reject.db")
@@ -169,12 +170,13 @@ def test_record_reference_asset_deletes_explicit_qa_reject(tmp_path, monkeypatch
         },
     )
 
-    assert artifact["status"] == "rejected_deleted"
-    assert artifact["id"] is None
-    assert not image.exists()
-    assert db.get_conn().execute(
-        "SELECT COUNT(*) AS n FROM artifacts WHERE scope_id='proj:Hero:1'",
-    ).fetchone()["n"] == 0
+    assert artifact["status"] == "approved"
+    assert artifact["id"]
+    assert image.exists()
+    evaluations = evidence_repository.get_evaluations(artifact["id"])
+    model = next(row for row in evaluations if row["evaluator_type"] == "model")
+    assert model["evaluation_role"] == "score_only"
+    assert model["runtime_blocking"] == 0
 
 
 def test_select_best_adopts_technical_even_below_threshold(monkeypatch) -> None:

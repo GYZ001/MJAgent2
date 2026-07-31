@@ -69,11 +69,13 @@ def validate_video_file(path: str, *, expected_duration_s: float = 5.0) -> dict[
                     "VIDEO_DURATION_CONTRACT",
                     f"视频实测 {duration:.2f}s，不符合分镜选择的 {expected_duration_s:.0f}s 合同",
                     str(file_path),
+                    blocker=False,
                 ))
         except (OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
             evidence["probe_error"] = str(exc)[:300]
             issues.append(_issue(
-                "VIDEO_PROBE_UNAVAILABLE", "ffprobe 未能完成解码/时长复验", str(file_path)
+                "VIDEO_PROBE_UNAVAILABLE", "ffprobe 未能完成解码/时长复验", str(file_path),
+                blocker=False,
             ))
     else:
         evidence["duration_verified"] = False
@@ -122,7 +124,7 @@ def _model_evaluation(qa: dict[str, Any] | None, *, subject: str, evaluator_name
         for message in (qa.get("issues") or [])[:20]
     ]
     issues.extend(
-        _issue("SCENE_HARD_GATE", message, subject, blocker=True)
+        _issue("MEDIA_QUALITY_WARNING", message, subject, blocker=False)
         for message in hard_failures[:20]
     )
     if recovered:
@@ -140,6 +142,12 @@ def _model_evaluation(qa: dict[str, Any] | None, *, subject: str, evaluator_name
         status=status,
         hard_gate_passed=not recovered and not explicit_unverified and not hard_failures
         and qa.get("hard_gate_passed") is not False,
+        evaluation_role="score_only",
+        score_status=(
+            "unavailable" if recovered or explicit_unverified or score is None else "scored"
+        ),
+        runtime_blocking=False,
+        retry_eligible=False,
         score=score,
         dimension_scores={
             key: float(value) * 100
@@ -520,8 +528,8 @@ def record_reference_asset(
         subject=scope_id,
         evaluator_name=f"{asset_type}_consistency_qa",
     ) if qa else None
-    from app.rejected_media import discard_file, qa_is_rejected
-    if not technical["passed"] or qa_is_rejected(qa):
+    from app.rejected_media import discard_file
+    if not technical["passed"]:
         discard_file(file_path)
         return {
             "id": None,
@@ -530,10 +538,9 @@ def record_reference_asset(
             "status": "rejected_deleted",
             "file_path": None,
         }
-    # 低分仍只作提示；明确 failed/hard_failures 的落选资源已在上方物理删除。
+    # 所有内容 QA 都只评分。文件技术可用时，即使 QA 明确失败也必须保留并采用，
+    # 避免付费产物在门禁耗尽后被删除。
     if model_eval is not None:
-        model_eval.hard_gate_passed = True
-        model_eval.recovered = False
         if (
             model_eval.score is None
             or model_eval.score < min_score * 100
@@ -555,6 +562,9 @@ def record_reference_asset(
             else:
                 demoted.append(issue)
         model_eval.issues = demoted
+        model_eval.evaluation_role = "score_only"
+        model_eval.runtime_blocking = False
+        model_eval.retry_eligible = False
         model_eval.status = "scored" if model_eval.status in {"failed", "error", "warning"} else model_eval.status
         if model_eval.status not in {"passed", "scored", "warning"}:
             model_eval.status = "scored"

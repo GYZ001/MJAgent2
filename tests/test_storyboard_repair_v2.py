@@ -322,7 +322,7 @@ def test_early_final_marker_cannot_finish_before_persisted_plan() -> None:
     assert _storyboard_generation_is_complete(shots, planned_total=3, max_shots=20) is True
 
 
-def test_finalize_rejects_storyboard_shorter_than_persisted_outline(repair_db) -> None:
+def test_finalize_publishes_short_storyboard_with_retry_exhausted_warning(repair_db) -> None:
     conn, _screenplay = repair_db
     conn.execute(
         "UPDATE episodes SET storyboard_outline_json=? WHERE id='e1'",
@@ -330,8 +330,20 @@ def test_finalize_rejects_storyboard_shorter_than_persisted_outline(repair_db) -
     )
     conn.commit()
 
-    with pytest.raises(RuntimeError, match="已完成 3/4 镜"):
-        _finalize_storyboard_evidence("e1", _current_board(conn))
+    artifact_id = _finalize_storyboard_evidence("e1", _current_board(conn))
+    artifact = conn.execute(
+        "SELECT status FROM artifacts WHERE id=?", (artifact_id,),
+    ).fetchone()
+    assert artifact["status"] == "approved"
+    evaluation = conn.execute(
+        "SELECT evaluation_role,runtime_blocking,status,evidence_json "
+        "FROM evaluations WHERE artifact_id=? ORDER BY created_at DESC LIMIT 1",
+        (artifact_id,),
+    ).fetchone()
+    assert evaluation["evaluation_role"] == "score_only"
+    assert evaluation["runtime_blocking"] == 0
+    assert evaluation["status"] == "warning"
+    assert "3/4" in evaluation["evidence_json"]
 
 
 def test_incomplete_success_recovers_only_current_screenplay_approved_outline(

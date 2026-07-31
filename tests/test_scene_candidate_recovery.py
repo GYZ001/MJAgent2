@@ -428,7 +428,7 @@ def test_manual_review_adopts_only_unverified_candidate_with_audit(tmp_path, mon
     }
 
 
-def test_manual_review_never_overrides_historical_explicit_hard_failure(tmp_path, monkeypatch) -> None:
+def test_manual_review_preserves_historical_hard_failure_as_warning(tmp_path, monkeypatch) -> None:
     _fresh_db(tmp_path, monkeypatch)
     _seed_project(db.get_conn())
     artifact = _candidate(tmp_path)
@@ -444,15 +444,16 @@ def test_manual_review_never_overrides_historical_explicit_hard_failure(tmp_path
     repository.create_evaluation(artifact["id"], _evaluation(incomplete, status="error"))
     monkeypatch.setattr("app.multiview.scene_multiview_enabled", lambda: False)
     from app.scenes import manually_review_and_adopt_scene_candidate
-    with pytest.raises(ValueError, match="历史上存在明确硬失败"):
-        asyncio.run(manually_review_and_adopt_scene_candidate(
-            "p", "萧家坊市", artifact["id"],
-            confirmations={
-                "person_free": True, "watermark_free": True,
-                "forbidden_text_free": True, "space_type_matches": True,
-            },
-            reason="尝试覆盖历史失败",
-        ))
+    result = asyncio.run(manually_review_and_adopt_scene_candidate(
+        "p", "萧家坊市", artifact["id"],
+        confirmations={
+            "person_free": True, "watermark_free": True,
+            "forbidden_text_free": True, "space_type_matches": True,
+        },
+        reason="接受风险并采用当前产物",
+    ))
+    assert result["manual_reviewed"] is True
+    assert result["image_path"] == artifact["file_path"]
 
 
 def test_candidate_recovery_routes_are_registered() -> None:

@@ -348,16 +348,18 @@ def test_payment_quote_expires_and_consumed_quote_replays(monkeypatch) -> None:
     assert row["consumed_run_id"] == "run_1"
 
 
-def test_adopt_portrait_candidate_rejects_hard_failure(monkeypatch) -> None:
+def test_adopt_portrait_candidate_accepts_hard_failure_as_warning(monkeypatch, tmp_path) -> None:
     conn = _memory_conn()
     _seed_bible(conn)
+    image = tmp_path / "portrait-bad.jpg"
+    image.write_bytes(b"portrait")
     conn.execute(
         "INSERT INTO character_portraits("
         "id, project_id, character_name, ep_start, ep_end, appearance, prompt, image_path, "
         "base_portrait_id, bible_version, artifact_id, pack_status, group_qa_json, change_json, created_at"
         ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
-            "portrait_bad", "proj_test", "萧炎", 1, None, "黑发少年", "prompt", None,
+            "portrait_bad", "proj_test", "萧炎", 1, None, "黑发少年", "prompt", str(image),
             None, 1, None, "failed",
             json.dumps({"status": "failed", "hard_failures": ["face_mismatch"], "issues": []}),
             None, 1.0,
@@ -365,54 +367,59 @@ def test_adopt_portrait_candidate_rejects_hard_failure(monkeypatch) -> None:
     )
     conn.commit()
     monkeypatch.setattr(bible_ops, "get_conn", lambda: conn)
+    monkeypatch.setattr(bible_ops, "_media_url", lambda path: str(path))
     monkeypatch.setattr(bible_ops, "_project_or_404", lambda _pid: dict(conn.execute(
         "SELECT * FROM projects WHERE id='proj_test'"
     ).fetchone()))
 
     async def _run():
-        with pytest.raises(HTTPException) as exc:
-            await bible_ops.adopt_portrait_candidate(
-                "proj_test", "萧炎", "portrait_bad",
-                {"reason": "人工检查", "bypass_soft": True},
-            )
-        assert exc.value.status_code == 409
-        assert exc.value.detail["code"] == "PORTRAIT_HARD_FAILED"
+        result = await bible_ops.adopt_portrait_candidate(
+            "proj_test", "萧炎", "portrait_bad",
+            {"reason": "人工检查", "bypass_soft": True},
+        )
+        assert result["adopted"] is True
+        assert result["gate_retry_exhausted"] is True
+        assert "face_mismatch" in result["soft_warnings"]
 
     import asyncio
     asyncio.run(_run())
 
 
-def test_adopt_portrait_candidate_rejects_missing_required_views(monkeypatch) -> None:
+def test_adopt_portrait_candidate_accepts_missing_views_as_warning(monkeypatch, tmp_path) -> None:
     conn = _memory_conn()
     _seed_bible(conn)
+    image = tmp_path / "front.jpg"
+    image.write_bytes(b"front")
     conn.execute(
         "INSERT INTO character_portraits("
         "id, project_id, character_name, ep_start, ep_end, appearance, prompt, image_path, "
         "base_portrait_id, bible_version, artifact_id, pack_status, group_qa_json, change_json, created_at"
         ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
-            "portrait_partial", "proj_test", "萧炎", 1, None, "黑发少年", "prompt", "/tmp/front.jpg",
+            "portrait_partial", "proj_test", "萧炎", 1, None, "黑发少年", "prompt", str(image),
             None, 1, None, "ready", json.dumps({"status": "ready", "issues": []}), None, 1.0,
         ),
     )
     conn.execute(
         "INSERT INTO character_portrait_views(id,portrait_id,view_role,image_path,status,created_at) "
-        "VALUES('view_front','portrait_partial','front_full','/tmp/front.jpg','ready',1)"
+        "VALUES('view_front','portrait_partial','front_full',?,'ready',1)",
+        (str(image),),
     )
     conn.commit()
     monkeypatch.setattr(bible_ops, "get_conn", lambda: conn)
+    monkeypatch.setattr(bible_ops, "_media_url", lambda path: str(path))
     monkeypatch.setattr(bible_ops, "_project_or_404", lambda _pid: dict(conn.execute(
         "SELECT * FROM projects WHERE id='proj_test'"
     ).fetchone()))
 
     import asyncio
     async def _run():
-        with pytest.raises(HTTPException) as exc:
-            await bible_ops.adopt_portrait_candidate(
-                "proj_test", "萧炎", "portrait_partial",
-                {"reason": "人工检查", "bypass_soft": True},
-            )
-        assert exc.value.detail["code"] == "PORTRAIT_HARD_FAILED"
-        assert "missing_required_view=three_quarter" in exc.value.detail["hard_failures"]
+        result = await bible_ops.adopt_portrait_candidate(
+            "proj_test", "萧炎", "portrait_partial",
+            {"reason": "人工检查", "bypass_soft": True},
+        )
+        assert result["adopted"] is True
+        assert result["gate_retry_exhausted"] is True
+        assert "missing_required_view=three_quarter" in result["soft_warnings"]
 
     asyncio.run(_run())

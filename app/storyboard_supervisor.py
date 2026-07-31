@@ -791,6 +791,7 @@ async def run_storyboard_supervisor(
         _board_from_shot_rows,
         _finalize_storyboard_evidence,
         _insert_storyboard_shot,
+        _shot_contract_json,
         _assert_storyboard_write_authorized,
         _persist_storyboard_character_policy_repairs,
         _reconcile_storyboard_plan,
@@ -946,6 +947,66 @@ async def run_storyboard_supervisor(
             if row["storyboard_artifact_id"]
         ]
         return shots
+
+    def _publish_best_effort_storyboard(
+        candidate_shots: list[Shot], *, reason: str,
+    ) -> SupervisorCheckpoint | None:
+        """Publish the current non-empty board after bounded gate repair is exhausted."""
+        if not candidate_shots:
+            return None
+        board = Storyboard(episode_no=ep_data["episode_no"], shots=list(candidate_shots))
+        normalize_continuity(board)
+        relieve_spoken_overflow(board)
+        prefer_default_shot_durations(board)
+        normalize_transition_visuals(board)
+        board.shots[-1].is_final = True
+        rows = conn.execute(
+            "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,),
+        ).fetchall()
+        for row, shot in zip(rows, board.shots):
+            conn.execute(
+                "UPDATE shots SET continuity_from_prev=?,transition=?,duration_s=?,shot_size=?,"
+                "camera_move=?,last_frame_desc=?,shot_contract_json=?,continuity_mode=?,"
+                "observed_state_out=? WHERE id=?",
+                (
+                    int(shot.continuity_from_prev), shot.transition, shot.duration_s,
+                    shot.shot_size, shot.camera_move, shot.last_frame_desc,
+                    _shot_contract_json(shot), shot.continuity_mode, shot.observed_state_out,
+                    row["id"],
+                ),
+            )
+        conn.commit()
+        _finalize_storyboard_evidence(episode_id, board)
+        actual_total = sum(int(shot.duration_s or 0) for shot in board.shots)
+        conn.execute(
+            "UPDATE episodes SET status='scripted',script_error=NULL,storyboard_warning=?,"
+            "target_duration_s=? WHERE id=?",
+            (
+                ("门禁修复次数耗尽，已发布当前最佳分镜：" + reason)[:800],
+                _compact_episode_target(actual_total or ep_data["target_duration_s"]),
+                episode_id,
+            ),
+        )
+        conn.commit()
+        cp.phase = "SUCCEEDED"
+        cp.outcome = "SUCCEEDED_GATE_RETRY_EXHAUSTED_FALLBACK"
+        cp.validated_prefix_end = len(board.shots)
+        cp.next_shot_no = len(board.shots) + 1
+        cp.last_repair = {
+            **(cp.last_repair or {}),
+            "status": "fallback_published",
+            "reason": reason,
+        }
+        save_checkpoint(cp, run_id=run_id)
+        if run_id:
+            evidence_repository.append_event(
+                run_id,
+                "STORYBOARD_GATE_RETRY_EXHAUSTED_FALLBACK",
+                "warning",
+                "分镜门禁重试耗尽，已发布当前最佳产物",
+                payload={"shot_count": len(board.shots), "reason": reason},
+            )
+        return cp
 
     existing_rows = conn.execute(
         "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
@@ -1112,6 +1173,15 @@ async def run_storyboard_supervisor(
                 )
                 cp = _apply_repair(cp, plan, conn, episode_id, completed, outline)
                 if cp.phase in {"WAITING_HUMAN", "WAITING_AUTHORIZATION", "PAUSED_EXTERNAL"}:
+                    if cp.outcome in {
+                        "REPAIR_FAILED_STRATEGIES_EXHAUSTED",
+                        "WAITING_RETRY_ACTIVATION_BUDGET",
+                    }:
+                        fallback = _publish_best_effort_storyboard(
+                            completed, reason=(cp.last_repair or {}).get("reason") or str(exc),
+                        )
+                        if fallback is not None:
+                            return fallback
                     conn.execute(
                         "UPDATE episodes SET status='scripted',script_error=? WHERE id=?",
                         (((cp.last_repair or {}).get("reason") or plan.reason)[:800], episode_id),
@@ -1157,16 +1227,30 @@ async def run_storyboard_supervisor(
                 )
                 cp = _apply_repair(cp, plan, conn, episode_id, completed, outline)
                 if cp.phase in {"WAITING_HUMAN", "WAITING_AUTHORIZATION", "PAUSED_EXTERNAL"}:
-                    save_checkpoint(cp, run_id=run_id)
-                    conn.execute(
-                        "UPDATE episodes SET status='scripted', script_error=? WHERE id=?",
-                        (((cp.last_repair or {}).get("reason") or plan.reason)[:800], episode_id),
-                    )
-                    conn.commit()
-                    return cp
-                completed = _repair_context_shots(conn, cp, ep_data["episode_no"])
-                shot_loop_broke_for_repair = True
-                break
+                    if cp.outcome in {
+                        "REPAIR_FAILED_STRATEGIES_EXHAUSTED",
+                        "WAITING_RETRY_ACTIVATION_BUDGET",
+                    }:
+                        cp.phase = "GENERATING_SHOTS"
+                        cp.outcome = None
+                        cp.last_repair = {
+                            **(cp.last_repair or {}),
+                            "status": "gate_retry_exhausted_accept_candidate",
+                            "reason": (cp.last_repair or {}).get("reason") or plan.reason,
+                        }
+                        save_checkpoint(cp, run_id=run_id)
+                    else:
+                        save_checkpoint(cp, run_id=run_id)
+                        conn.execute(
+                            "UPDATE episodes SET status='scripted', script_error=? WHERE id=?",
+                            (((cp.last_repair or {}).get("reason") or plan.reason)[:800], episode_id),
+                        )
+                        conn.commit()
+                        return cp
+                else:
+                    completed = _repair_context_shots(conn, cp, ep_data["episode_no"])
+                    shot_loop_broke_for_repair = True
+                    break
 
             # PASS / warning-only → 落库 validated
             board = Storyboard(episode_no=ep_data["episode_no"], shots=[*completed, draft.shot])
@@ -1299,6 +1383,15 @@ async def run_storyboard_supervisor(
                     cp, retry_plan, conn, episode_id, list(official_board.shots), outline,
                 )
                 if cp.phase in {"WAITING_HUMAN", "WAITING_AUTHORIZATION", "PAUSED_EXTERNAL"}:
+                    if cp.outcome in {
+                        "REPAIR_FAILED_STRATEGIES_EXHAUSTED",
+                        "WAITING_RETRY_ACTIVATION_BUDGET",
+                    }:
+                        fallback = _publish_best_effort_storyboard(
+                            list(official_board.shots), reason="repair_candidate_no_progress",
+                        )
+                        if fallback is not None:
+                            return fallback
                     conn.execute(
                         "UPDATE episodes SET status='scripted',script_error=? WHERE id=?",
                         ("自动修复未产生质量改善，已安全停止且未修改现有分镜", episode_id),
@@ -1344,20 +1437,17 @@ async def run_storyboard_supervisor(
             or not full_board.shots
             or not full_board.shots[-1].is_final
         ):
-            cp.phase = "WAITING_HUMAN"
-            cp.outcome = "WAITING_RETRY_INCOMPLETE_STORYBOARD"
-            cp.validated_prefix_end = len(full_board.shots)
-            cp.next_shot_no = len(full_board.shots) + 1
-            save_checkpoint(cp, run_id=run_id)
-            conn.execute(
-                "UPDATE episodes SET status='scripted',script_error=? WHERE id=?",
-                (
-                    f"分镜尚未达到完整终态：已完成 {len(full_board.shots)}/"
-                    f"{planned_now or '?'} 镜，未发布不完整版本",
-                    episode_id,
+            fallback = _publish_best_effort_storyboard(
+                list(full_board.shots),
+                reason=(
+                    f"生成次数耗尽：已完成 {len(full_board.shots)}/{planned_now or '?'} 镜"
                 ),
             )
-            conn.commit()
+            if fallback is not None:
+                return fallback
+            cp.phase = "WAITING_HUMAN"
+            cp.outcome = "WAITING_RETRY_NO_STORYBOARD_ARTIFACT"
+            save_checkpoint(cp, run_id=run_id)
             return cp
         p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
         bible = _project_bible_or_placeholder(p)
@@ -1390,6 +1480,15 @@ async def run_storyboard_supervisor(
             )
             cp = _apply_repair(cp, plan, conn, episode_id, completed, outline)
             if cp.phase in {"WAITING_HUMAN", "WAITING_AUTHORIZATION", "PAUSED_EXTERNAL"}:
+                if cp.outcome in {
+                    "REPAIR_FAILED_STRATEGIES_EXHAUSTED",
+                    "WAITING_RETRY_ACTIVATION_BUDGET",
+                }:
+                    fallback = _publish_best_effort_storyboard(
+                        list(evaluation.board.shots), reason="episode_validation_retry_exhausted",
+                    )
+                    if fallback is not None:
+                        return fallback
                 save_checkpoint(cp, run_id=run_id)
                 conn.execute(
                     "UPDATE episodes SET status='scripted', script_error=? WHERE id=?",

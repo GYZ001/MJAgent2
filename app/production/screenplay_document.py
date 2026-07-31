@@ -326,6 +326,33 @@ def _sync_dialogue_chains_into_scenes(doc: ScreenplayDocument) -> None:
             block.dialogue_turns.insert(insert_at, node)
             matches[key] = (block, node)
 
+    # Baseline prose can contain the same spoken line twice, for example once
+    # with a performance cue and once as the authoritative chain projection.
+    # Keep repeated authoritative turns, but discard non-authoritative copies
+    # of a speaker + line already present in the same scene.
+    authoritative_nodes = {
+        id(node)
+        for _block, node in matches.values()
+    }
+    for block in doc.scene_blocks:
+        seen: set[tuple[str, str]] = set()
+        deduped: list[DialogueTurnNode] = []
+        for node in block.dialogue_turns:
+            identity = (
+                _dialogue_identity(node.speaker),
+                _dialogue_identity(node.line),
+            )
+            if (
+                all(identity)
+                and identity in seen
+                and id(node) not in authoritative_nodes
+            ):
+                continue
+            deduped.append(node)
+            if all(identity):
+                seen.add(identity)
+        block.dialogue_turns = deduped
+
 
 def render_full_script_text(doc: ScreenplayDocument) -> str:
     """从 scene_blocks 确定性渲染台本正文。"""
@@ -659,9 +686,32 @@ def split_dialogue_chain_by_scene(
 
 def _build_scene_blocks(script: EpisodeScreenplay) -> list[SceneBlockNode]:
     blocks: list[SceneBlockNode] = []
+    known_speakers: dict[str, str] = {}
+    authoritative_speakers_by_line: dict[str, str] = {}
+    for scene in script.scene_outline or []:
+        for name in scene.characters or []:
+            identity = _dialogue_identity(name)
+            if identity:
+                known_speakers[identity] = name
+    for chain in script.dialogue_chains or []:
+        for turn in chain.turns or []:
+            speaker = (turn.speaker or "").strip()
+            speaker_identity = _dialogue_identity(speaker)
+            line_identity = _dialogue_identity(turn.line)
+            if speaker_identity:
+                known_speakers[speaker_identity] = speaker
+            if line_identity and speaker:
+                existing = authoritative_speakers_by_line.get(line_identity)
+                authoritative_speakers_by_line[line_identity] = (
+                    speaker if existing in {None, speaker} else ""
+                )
     # Prefer scene_outline as structural skeleton
     if script.scene_outline:
-        parsed_body = _parse_full_script_scenes(script.full_script_text or "")
+        parsed_body = _parse_full_script_scenes(
+            script.full_script_text or "",
+            known_speakers=known_speakers,
+            authoritative_speakers_by_line=authoritative_speakers_by_line,
+        )
         for scene in script.scene_outline:
             sid = f"SC{int(scene.scene_no):02d}"
             body = parsed_body.get(int(scene.scene_no), {"actions": [], "turns": []})
@@ -716,7 +766,11 @@ def _build_scene_blocks(script: EpisodeScreenplay) -> list[SceneBlockNode]:
         return blocks
 
     # Fallback: parse full_script_text only
-    parsed = _parse_full_script_scenes(script.full_script_text or "")
+    parsed = _parse_full_script_scenes(
+        script.full_script_text or "",
+        known_speakers=known_speakers,
+        authoritative_speakers_by_line=authoritative_speakers_by_line,
+    )
     if not parsed:
         return [
             SceneBlockNode(
@@ -749,8 +803,20 @@ def _build_scene_blocks(script: EpisodeScreenplay) -> list[SceneBlockNode]:
     return blocks
 
 
-def _parse_full_script_scenes(text: str) -> dict[int, dict[str, Any]]:
+_VISUAL_NARRATION_SPEAKER_PREFIXES = (
+    "银幕", "屏幕", "画面", "投影", "字幕", "电视画面", "手机画面",
+)
+
+
+def _parse_full_script_scenes(
+    text: str,
+    *,
+    known_speakers: dict[str, str] | None = None,
+    authoritative_speakers_by_line: dict[str, str] | None = None,
+) -> dict[int, dict[str, Any]]:
     scenes: dict[int, dict[str, Any]] = {}
+    known_speakers = known_speakers or {}
+    authoritative_speakers_by_line = authoritative_speakers_by_line or {}
     current: int | None = None
     for raw in (text or "").splitlines():
         line = raw.strip()
@@ -774,10 +840,40 @@ def _parse_full_script_scenes(text: str) -> dict[int, dict[str, Any]]:
             scenes.setdefault(1, {"heading": "【场1】", "actions": [], "turns": []})
         dlg = _DIALOGUE_RE.match(line)
         if dlg:
-            scenes[current]["turns"].append({
-                "speaker": dlg.group(1).strip(),
-                "line": dlg.group(2).strip(),
-            })
+            raw_speaker = dlg.group(1).strip()
+            spoken_line = dlg.group(2).strip()
+            canonical_speaker = authoritative_speakers_by_line.get(
+                _dialogue_identity(spoken_line),
+            )
+            speaker_identity = _dialogue_identity(raw_speaker)
+            exact_speaker = known_speakers.get(speaker_identity)
+            starts_with_known_speaker = any(
+                speaker_identity.startswith(identity)
+                for identity in known_speakers
+                if identity and speaker_identity != identity
+            )
+            if canonical_speaker or exact_speaker:
+                scenes[current]["turns"].append({
+                    "speaker": canonical_speaker or exact_speaker,
+                    "line": spoken_line,
+                })
+            elif (
+                starts_with_known_speaker
+                or raw_speaker.startswith(_VISUAL_NARRATION_SPEAKER_PREFIXES)
+            ):
+                # A visual/action label is prose, not a voice actor. Replace
+                # the colon so the rendered projection cannot be parsed back
+                # into a spoken line.
+                scenes[current]["actions"].append(
+                    f"{raw_speaker}，{spoken_line}",
+                )
+            else:
+                # Preserve genuinely unknown named speakers so the existing
+                # character-consistency gate can reject them.
+                scenes[current]["turns"].append({
+                    "speaker": raw_speaker,
+                    "line": spoken_line,
+                })
         else:
             scenes[current]["actions"].append(line)
     return scenes

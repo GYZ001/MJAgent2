@@ -231,7 +231,19 @@ async def generate_refs(
                     except Exception:  # noqa: BLE001 - regular generation retries below
                         pack = None
                     if not pack_result_ok(pack):
-                        continue
+                        # 补齐已尝试但未完成：复用现有主图，不能再次生成并覆盖付费产物。
+                        portrait_row = conn.execute(
+                            "SELECT id FROM character_portraits "
+                            "WHERE project_id=? AND character_name=? AND ep_start=1 "
+                            "ORDER BY created_at DESC LIMIT 1",
+                            (project_id, character.name),
+                        ).fetchone()
+                        if portrait_row:
+                            conn.execute(
+                                "UPDATE character_portraits SET pack_status='partial_fallback' WHERE id=?",
+                                (portrait_row["id"],),
+                            )
+                            conn.commit()
                     row = conn.execute(
                         "SELECT image_path FROM character_portraits "
                         "WHERE project_id=? AND character_name=? AND ep_start=1 "
@@ -313,7 +325,7 @@ async def generate_refs(
                     portrait_id = _portraits.stage_initial_portrait(
                         conn, project_id, c.name, path, effective_appearance, prompt,
                         bible_version, artifact_id=artifact["id"])
-                    # 初始多视角资产包：任一侧视角/整包失败则禁止半包生效
+                    # 初始多视角资产包会有界补齐；耗尽后仍发布已落盘的正面主图。
                     from app.multiview import (
                         ensure_character_multiview_pack, character_multiview_enabled, pack_result_ok,
                     )
@@ -329,15 +341,15 @@ async def generate_refs(
                             primary_qa=qa,
                         )
                         if not pack_result_ok(pack):
-                            raise hiagent.ProviderError(
-                                f"多视角资产包未通过，禁止生效：{c.name}"
-                                f"（status={pack.get('status')}）"
+                            conn.execute(
+                                "UPDATE character_portraits SET pack_status='partial_fallback' WHERE id=?",
+                                (portrait_id,),
                             )
+                            conn.commit()
                     _portraits.promote_staged_initial_portrait(
                         conn, project_id, c.name, portrait_id,
                     )
-                    # The Bible path becomes visible only after the required
-                    # multiview pack has passed as a whole.
+                    # 主图技术可用即进入 Bible；多视角缺口作为风险和后续补齐输入。
                     c.appearance_canonical = effective_appearance
                     c.ref_image_path = path
                     break
@@ -353,8 +365,6 @@ async def generate_refs(
                         purge_character_portrait(conn, portrait_id)
                         portrait_id = None
                     c.ref_image_path = None
-                    if "多视角资产包未通过" in str(exc):
-                        raise
                     last_error = exc
                 except Exception as exc:  # noqa: BLE001 候选失败后在有界循环内修复
                     if portrait_id:
@@ -378,11 +388,13 @@ async def generate_refs(
     # fields owned by this task so its old snapshot cannot erase newly added scenes.
     _merge_generated_portraits(conn, project_id, targets)
     conn.commit()
-    if failures:
-        detail = "；".join(f"{name}：{exc}" for name, exc in failures)[:600]
-        if all(isinstance(exc, ContentGenerationError) for _, exc in failures):
-            raise ContentGenerationError("部分定妆照未通过质量校验：" + detail)
-        raise hiagent.ProviderError("部分定妆照失败：" + detail)
+    # 单个角色的有界生成/补齐耗尽不得把已落盘的其他角色回滚，
+    # 也不得阻塞后续分镜。缺少的角色由文本外观锨点保底。
+    return {
+        "generated": [c.name for c in targets if c.ref_image_path],
+        "gate_retry_exhausted": bool(failures),
+        "warnings": [f"{name}：{exc}" for name, exc in failures],
+    }
 
 
 def refs_as_image_inputs(bible: Bible, character_names: list[str], limit: int,

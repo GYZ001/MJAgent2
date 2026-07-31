@@ -704,16 +704,15 @@ def scan_episode_reference_asset_gaps(
     }
 
 
-def assert_manifest_allows_production(manifest: dict[str, Any] | None) -> None:
-    """生产硬门禁：任一人/场景多视角包未就绪则禁止关键帧与视频。"""
+def assert_manifest_allows_production(manifest: dict[str, Any] | None) -> list[str]:
+    """返回资产缺口供重试和风险记录，但绝不阻断下游生产。
+
+    人物/场景包的补齐仍会在调用前尝试；尝试耗尽后，视频链使用当前已有视图、
+    叙事关键帧或纯文本提示继续。函数名保留以兼容现有调用方。
+    """
     if not character_multiview_enabled() and not scene_multiview_enabled():
-        return
-    blockers = manifest_production_blockers(manifest)
-    if not blockers:
-        return
-    raise hiagent.ProviderError(
-        "多视角资产包不完整，禁止关键帧/视频生产：" + "；".join(blockers)[:600]
-    )
+        return []
+    return manifest_production_blockers(manifest)
 
 
 def library_anchor_assets_from_manifest(manifest: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1788,8 +1787,9 @@ def keyframe_runtime_blocking_failures(qa: dict[str, Any]) -> set[str]:
 
 
 def keyframe_gate_passed(qa: dict[str, Any]) -> bool:
-    """低分不拦截；明确的结构性硬失败必须拦截。"""
-    return not keyframe_runtime_blocking_failures(qa)
+    """关键帧 QA 只评分；结构问题可参与重试/择优，但不拥有失败权。"""
+    del qa
+    return True
 
 
 async def review_keyframe_geometry_guard(

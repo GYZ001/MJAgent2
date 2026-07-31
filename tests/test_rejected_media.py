@@ -108,15 +108,15 @@ def test_purge_rejected_media_removes_files_records_and_gallery_refs(
 
     report = purge_rejected_media(conn)
 
-    assert report["artifacts"] == 1
-    assert not portrait.exists()
-    assert not profile.exists()
+    assert report["artifacts"] == 0
+    assert portrait.exists()
+    assert profile.exists()
     assert not rejected_keyframe.exists()
     assert valid_keyframe.exists()
-    assert conn.execute("SELECT COUNT(*) n FROM artifacts WHERE id='bad'").fetchone()["n"] == 0
+    assert conn.execute("SELECT COUNT(*) n FROM artifacts WHERE id='bad'").fetchone()["n"] == 1
     assert conn.execute(
         "SELECT COUNT(*) n FROM character_portraits WHERE id='portrait'",
-    ).fetchone()["n"] == 0
+    ).fetchone()["n"] == 1
     refs = json.loads(conn.execute(
         "SELECT image_inputs FROM shot_versions WHERE id='v'",
     ).fetchone()["image_inputs"])["reference_images"]
@@ -127,4 +127,4 @@ def test_purge_rejected_media_removes_files_records_and_gallery_refs(
     updated_bible = json.loads(conn.execute(
         "SELECT bible_json FROM projects WHERE id='p'",
     ).fetchone()["bible_json"])
-    assert updated_bible["characters"][0]["ref_image_path"] is None
+    assert updated_bible["characters"][0]["ref_image_path"] == str(portrait)

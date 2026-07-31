@@ -600,7 +600,7 @@ def test_default_reference_build_respects_one_or_two_keyframe_policy(monkeypatch
     })
 
 
-def test_cross_keyframe_identity_drift_deletes_auxiliary_and_keeps_master(monkeypatch, tmp_path) -> None:
+def test_cross_keyframe_identity_drift_keeps_paid_auxiliary_as_warning(monkeypatch, tmp_path) -> None:
     master_path = tmp_path / "master.jpg"
     auxiliary_path = tmp_path / "auxiliary.jpg"
     master_path.write_bytes(b"master")
@@ -629,14 +629,19 @@ def test_cross_keyframe_identity_drift_deletes_auxiliary_and_keeps_master(monkey
         }
 
     monkeypatch.setattr(video_modes, "review_reference_consistency", drift_report)
+    rejected = []
     kept, dropped = asyncio.run(video_modes._enforce_timeline_keyframe_invariance(
         selected=[auxiliary, master], shot=_shot(duration_s=10), bible=_bible(),
+        rejected_out=rejected,
     ))
 
     assert [asset.id for asset in kept] == ["master"]
     assert dropped == {"narrative_keyframe_01"}
     assert master_path.is_file()
-    assert not auxiliary_path.exists()
+    assert auxiliary_path.is_file()
+    assert rejected == [auxiliary]
+    assert auxiliary.deleted is False
+    assert auxiliary.selectedForSeedance is False
 
 
 def test_reference_prompt_numbering_uses_exact_packed_order(monkeypatch) -> None:
@@ -951,7 +956,7 @@ def test_keyframe_best_of_three_selects_highest_and_deletes_losers(monkeypatch, 
     assert video_inputs == [(hiagent.data_url_from_file(str(generated_paths[1])), "reference_image")]
 
 
-def test_all_three_structurally_invalid_keyframes_are_deleted_and_fall_back_to_anchors(monkeypatch, tmp_path) -> None:
+def test_all_three_structurally_invalid_keyframes_keep_best_after_retry_exhaustion(monkeypatch, tmp_path) -> None:
     _patch_reference_build_unit(monkeypatch)
     import app.multiview as mv
 
@@ -1002,29 +1007,29 @@ def test_all_three_structurally_invalid_keyframes_are_deleted_and_fall_back_to_a
     ))
 
     assert len(generated_paths) == 3
-    assert all(not path.exists() for path in generated_paths)
-    assert meta["reference_slots"]["narrative_keyframe"]["status"] == (
-        "omitted_structural_geometry_fallback"
-    )
+    assert sum(path.exists() for path in generated_paths) == 1
+    assert meta["reference_slots"]["narrative_keyframe"]["status"] == "scored_warning"
+    assert meta["reference_slots"]["narrative_keyframe"]["gate_retry_exhausted"] is True
     assert meta["narrative_keyframe_missing"] is False
-    assert meta["keyframe_fallback_mode"] == video_modes.KEYFRAME_STRUCTURAL_FALLBACK_MODE
-    assert meta["keyframe_structural_fallback_slots"] == ["narrative_keyframe"]
-    assert {asset.type for asset in assets if asset.selectedForSeedance} == {"character", "scene"}
-    assert not any(asset.type == "plot_key_frame" for asset in assets)
+    assert "keyframe_fallback_mode" not in meta
+    assert {asset.type for asset in assets if asset.selectedForSeedance} == {
+        "character", "scene", "plot_key_frame",
+    }
+    assert any(asset.type == "plot_key_frame" for asset in assets)
 
     packed = build_seedance_image_inputs({
         **meta,
         "mode": REFERENCE_IMAGE_MODE,
         "reference_images": [asset.public_dict() for asset in assets],
     })
-    assert len(packed) == 2
+    assert len(packed) == 3
     assert video_modes.reference_gallery_matches_keyframe_contract({
         **meta,
         "reference_images": [asset.public_dict() for asset in assets],
     }, expected_fingerprint=meta["keyframe_contract_fingerprint"])
 
 
-def test_multi_character_height_contract_blocks_video_when_all_keyframes_fail(monkeypatch, tmp_path) -> None:
+def test_multi_character_height_contract_keeps_best_when_all_keyframes_fail(monkeypatch, tmp_path) -> None:
     _patch_reference_build_unit(monkeypatch)
     import app.multiview as mv
 
@@ -1072,15 +1077,14 @@ def test_multi_character_height_contract_blocks_video_when_all_keyframes_fail(mo
     ))
 
     assert len(generated_paths) == 3
-    assert all(not path.exists() for path in generated_paths)
-    assert meta["reference_slots"]["narrative_keyframe"]["status"] == (
-        "blocked_required_height_geometry"
-    )
-    assert meta["narrative_keyframe_missing"] is True
+    assert sum(path.exists() for path in generated_paths) == 1
+    assert meta["reference_slots"]["narrative_keyframe"]["status"] == "scored_warning"
+    assert meta["reference_slots"]["narrative_keyframe"]["gate_retry_exhausted"] is True
+    assert meta["narrative_keyframe_missing"] is False
     assert "keyframe_fallback_mode" not in meta
     assert "keyframe_structural_fallback_slots" not in meta
-    assert not any(asset.type == "plot_key_frame" for asset in assets)
-    assert not video_modes.reference_gallery_matches_keyframe_contract({
+    assert any(asset.type == "plot_key_frame" for asset in assets)
+    assert video_modes.reference_gallery_matches_keyframe_contract({
         **meta,
         "reference_images": [asset.public_dict() for asset in assets],
     }, expected_fingerprint=meta["keyframe_contract_fingerprint"])
@@ -1587,8 +1591,8 @@ def test_runtime_auto_repairs_missing_selected_keyframe_file(monkeypatch) -> Non
     assert writes
 
 
-def test_runtime_reports_exhausted_required_keyframe_gate_as_qa_not_provider(monkeypatch) -> None:
-    """图片/质检调用已成功、但必需关键帧仍不可用时，不得误报成 LLM 故障。"""
+def test_runtime_uses_anchor_fallback_when_required_keyframe_gate_is_exhausted(monkeypatch) -> None:
+    """关键帧修复耗尽后继续提交已有锚点，不得把任务判失败。"""
 
     async def fake_build_reference_assets(**kwargs):
         kwargs["existing_meta"].update({
@@ -1616,18 +1620,19 @@ def test_runtime_reports_exhausted_required_keyframe_gate_as_qa_not_provider(mon
         "after_shot_id": None,
     }
 
-    with pytest.raises(errors.ContentGenerationError) as exc_info:
-        asyncio.run(worker._prepare_reference_mode_inputs(
-            conn,
-            {"id": "j1", "project_id": "p1", "episode_id": "e1", "shot_id": "s1"},
-            {"id": "v1"},
-            _shot_row(),
-            {"episode_no": 1},
-            meta,
-            "PROMPT",
-        ))
+    out_meta, _ = asyncio.run(worker._prepare_reference_mode_inputs(
+        conn,
+        {"id": "j1", "project_id": "p1", "episode_id": "e1", "shot_id": "s1"},
+        {"id": "v1"},
+        _shot_row(),
+        {"episode_no": 1},
+        meta,
+        "PROMPT",
+    ))
 
-    assert errors.classify(exc_info.value) == ("quality_gate", "QA")
+    assert out_meta["reference_group_gate_passed"] is True
+    assert out_meta["reference_gate_retry_exhausted"] is True
+    assert out_meta["reference_fallback_mode"] == "available_anchors"
 
 
 def test_runtime_submits_anchor_only_fallback_after_all_keyframe_candidates_fail(monkeypatch) -> None:
@@ -2401,8 +2406,7 @@ def test_pack_seedance_prefers_score_and_keeps_gallery_selection(monkeypatch) ->
     assert all(r["selectedForSeedance"] for r in refs)
 
 
-def test_build_reference_assets_blocks_incomplete_pack(monkeypatch) -> None:
-    """不完整多视角包必须阻止关键帧生成，不得静默继续。"""
+def test_build_reference_assets_warns_and_continues_with_incomplete_pack(monkeypatch) -> None:
     bible = _bible()
     shot = _shot(shot_no=9, scene_name="广场")
     monkeypatch.setattr(video_modes, "character_reference_assets", lambda *a, **k: [])
@@ -2419,15 +2423,22 @@ def test_build_reference_assets_blocks_incomplete_pack(monkeypatch) -> None:
     monkeypatch.setattr(mv, "complete_legacy_scene_pack", failed_pack)
     monkeypatch.setattr(mv, "character_multiview_enabled", lambda: True)
     monkeypatch.setattr(mv, "scene_multiview_enabled", lambda: True)
+    monkeypatch.setattr(mv, "narrative_keyframe_required", lambda: False)
+    monkeypatch.setattr(mv, "resolve_shot_asset_dependencies", lambda **_kwargs: {
+        "characters": [], "scene": None,
+    })
 
     decision = ShotVideoModeDecision(
         mode=REFERENCE_IMAGE_MODE, reason="x", confidence=1.0,
-        referenceImagePlan=ReferenceImagePlan(totalCount=1, generateNewCount=1, types=["plot_key_frame"]),
+        referenceImagePlan=ReferenceImagePlan(totalCount=0, generateNewCount=0, types=[]),
     )
-    with pytest.raises(hiagent.ProviderError, match="禁止关键帧"):
-        asyncio.run(video_modes.build_reference_assets(
-            conn=None, project_id="p", episode_no=1, episode_id="e", shot_id="s",
-            shot=shot, bible=bible, decision=decision, prev_shot=None))
+    meta = {}
+    assets = asyncio.run(video_modes.build_reference_assets(
+        conn=None, project_id="p", episode_no=1, episode_id="e", shot_id="s",
+        shot=shot, bible=bible, decision=decision, prev_shot=None, existing_meta=meta))
+    assert assets == []
+    assert meta["asset_pack_gate_retry_exhausted"] is True
+    assert len(meta["asset_pack_warnings"]) == 2
 
 
 def test_build_reference_assets_reuses_frozen_manifest_when_revisions_match(monkeypatch) -> None:

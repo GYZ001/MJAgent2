@@ -134,11 +134,10 @@ def _review_asset_qualification(conn, episode_id: str) -> dict[str, Any]:
                 warnings.append({**payload, "warning": "hard_gate_not_passed_score_only"})
             if gate in {"failed", "hard_failed", "unverified", "unknown", "ineligible", "pending"}:
                 warnings.append({**payload, "warning": f"gate_status:{gate}"})
-            # 结构缺失才阻断：无实体引用或明确标记文件缺失
+            # 文件缺失会在媒体执行器中有界重建；耗尽后降级为其余锚点/纯文本。
             missing_file = bool(ref.get("file_missing") or ref.get("missing"))
             if missing_file:
-                payload["reason"] = "资产文件缺失"
-                blockers.append(payload)
+                warnings.append({**payload, "warning": "asset_file_missing_retry_then_fallback"})
             else:
                 qualified_inputs.append(payload)
             for warning in ref.get("soft_warnings") or qa.get("issues") or []:
@@ -240,7 +239,8 @@ def _review_upstream_snapshot(episode_id: str) -> dict[str, Any]:
     if active:
         blockers.append("编剧或分镜任务仍在运行")
     if not assets["eligible"]:
-        blockers.append("人物/场景资产硬门禁未通过或未验证")
+        # 兼容历史快照；当前执行路径会重试资产并在耗尽后降级，不再阻断正向生产。
+        assets["soft_warnings"].append({"warning": "asset_retry_then_fallback"})
     raw = {
         "episode_id": episode_id,
         "episode_status": ep.get("status"),
@@ -315,14 +315,13 @@ def _review_assert_reference_restore(version_id: str, ref_id: str) -> dict[str, 
     ref = next((item for item in refs if item.get("id") == ref_id), None)
     if ref is None:
         raise HTTPException(404, "参考图不存在")
-    qa = ref.get("qa") or {}
-    hard = qa.get("hard_failures") or ref.get("hard_failures") or []
-    gate = str(ref.get("gate_status") or ref.get("downstream_eligibility") or qa.get("status") or "unverified").lower()
-    if hard or gate in {"failed", "hard_failed", "unverified", "unknown", "ineligible", "pending"}:
+    path = str(ref.get("path") or ref.get("image_path") or "").strip()
+    url = str(ref.get("url") or "").strip()
+    if not ((path and Path(path).is_file()) or url.startswith("data:image")):
         raise HTTPException(409, {
-            "code": "REFERENCE_NOT_ELIGIBLE",
-            "message": "该参考图硬门禁未通过或尚未验证，不能恢复为新生产输入",
-            "ref_id": ref_id, "hard_failures": hard, "gate_status": gate,
+            "code": "REFERENCE_FILE_UNAVAILABLE",
+            "message": "该参考图文件不可用，无法恢复为生产输入",
+            "ref_id": ref_id,
         })
     return snapshot
 

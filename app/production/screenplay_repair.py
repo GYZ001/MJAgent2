@@ -162,8 +162,10 @@ def run_screenplay_qa(
         evaluator_version="screenplay-qa-gate-2",
         status=status,
         hard_gate_passed=passed,
-        evaluation_role="runtime_gate",
-        runtime_blocking=True,
+        evaluation_role="score_only",
+        score_status="scored",
+        runtime_blocking=False,
+        retry_eligible=bool(issues),
         score=score,
         issues=issues,
         evidence={
@@ -171,10 +173,10 @@ def run_screenplay_qa(
             "artifact_hash": artifact_hash,
             "blocker_count": blocker_count(issues),
             "must_fix_count": must_fix_count(issues),
-            "evaluation_role": "runtime_gate",
-            "runtime_blocking": True,
+            "evaluation_role": "score_only",
+            "runtime_blocking": False,
             "pass_score": pass_score,
-            "verdict": "passed" if passed else "repair_required",
+            "verdict": "passed" if passed else "retry_then_fallback",
         },
     )
     return issues, evaluation
@@ -706,6 +708,62 @@ async def run_screenplay_production(
     activation_no = int(checkpoint.get("activation_no") or 0) + 1
     record_activation(kind="screenplay", episode_id=episode_id, activation_no=activation_no)
 
+    def _publish_retry_exhausted_fallback(
+        current_rev,
+        *,
+        working_id: str,
+        artifact_hash: str,
+        evaluation_id: str | None,
+        open_issues: list[Issue],
+        reason: str,
+    ) -> EpisodeScreenplay:
+        """Publish the best working artifact after bounded repair attempts are exhausted."""
+        result = publish_screenplay(
+            episode_id=episode_id,
+            revision_id=current_rev.id,
+            artifact_id=working_id,
+            artifact_hash=artifact_hash,
+            evaluation_ids=[evaluation_id] if evaluation_id else [],
+            input_fingerprint=current_rev.input_fingerprint,
+            contract_version=current_rev.contract_version,
+            qa_profile_version=current_rev.qa_profile_version,
+            clear_downstream=True,
+        )
+        warning = (
+            "门禁修复次数已耗尽，已发布当前最佳剧本："
+            + "；".join(issue.message for issue in open_issues[:5])
+        )[:800]
+        conn.execute(
+            "UPDATE episodes SET screenplay_status='ready',screenplay_error=NULL,screenplay_updated_at=? WHERE id=?",
+            (now(), episode_id),
+        )
+        conn.commit()
+        save_checkpoint(current_rev.id, {
+            **checkpoint,
+            "phase": "SUCCEEDED",
+            "activation_no": activation_no,
+            "working_artifact_id": working_id,
+            "open_issue_ids": [issue.fingerprint for issue in open_issues],
+            "issue_strategy_history": strategy_history,
+            "patch_artifact_ids": patch_ids,
+            "last_issue_fingerprints": [issue.fingerprint for issue in open_issues],
+            "yield_reason": "gate_retry_exhausted_fallback",
+            "fallback_reason": reason,
+        })
+        if run_id:
+            evidence_repository.append_event(
+                run_id,
+                "PUBLISHED_RETRY_EXHAUSTED_FALLBACK",
+                "warning",
+                "剧本门禁重试耗尽，已发布当前最佳工作副本",
+                payload={
+                    **result,
+                    "reason": reason,
+                    "issue_count": len(open_issues),
+                },
+            )
+        return load_screenplay_from_artifact(working_id)
+
     # ---- Baseline（仅一次）----
     if not rev.baseline_done:
         assert_baseline_allowed(rev, command="screenplay.generate", episode_id=episode_id)
@@ -845,29 +903,14 @@ async def run_screenplay_production(
         # 选择最高依赖 Issue
         issue = _choose_issue(issues)
         if issue is None or not issue.repairable:
-            _mark_waiting_input(episode_id, issues, run_id=run_id)
-            save_checkpoint(rev.id, {
-                **checkpoint,
-                "phase": "WAITING_INPUT",
-                "activation_no": activation_no,
-                "working_artifact_id": working_id,
-                "open_issue_ids": [i.fingerprint for i in issues],
-                "issue_strategy_history": strategy_history,
-                "patch_artifact_ids": patch_ids,
-                "last_issue_fingerprints": list(current_fps),
-            })
-            # 不交付 warning；状态 repairing
-            conn.execute(
-                "UPDATE episodes SET screenplay_status='repairing', screenplay_error=?, "
-                "screenplay_updated_at=? WHERE id=?",
-                (
-                    "自动修复等待输入：" + "；".join(i.message for i in issues[:3]),
-                    now(),
-                    episode_id,
-                ),
+            return _publish_retry_exhausted_fallback(
+                rev,
+                working_id=working_id,
+                artifact_hash=artifact_hash,
+                evaluation_id=eval_id,
+                open_issues=issues,
+                reason="no_repairable_strategy",
             )
-            conn.commit()
-            raise RuntimeError("WAITING_INPUT: " + issues[0].message if issues else "WAITING_INPUT")
 
         ops = plan_screenplay_patch(
             issue,
@@ -886,20 +929,6 @@ async def run_screenplay_production(
                 ops = []
         if not ops:
             strategy_history.setdefault(issue.fingerprint, []).append("exhausted")
-            if bool((issue.evidence or {}).get("requires_user_input", False)):
-                _mark_waiting_input(episode_id, [issue], run_id=run_id)
-                save_checkpoint(rev.id, {
-                    **checkpoint,
-                    "phase": "WAITING_INPUT",
-                    "activation_no": activation_no,
-                    "working_artifact_id": working_id,
-                    "open_issue_ids": [i.fingerprint for i in issues],
-                    "issue_strategy_history": strategy_history,
-                    "patch_artifact_ids": patch_ids,
-                    "last_issue_fingerprints": list(current_fps),
-                    "yield_reason": "user_input_required",
-                })
-                raise RuntimeError(f"WAITING_INPUT: 无法自动解决 {issue.code}: {issue.message}")
             _mark_repair_failed(
                 episode_id,
                 issue,
@@ -907,18 +936,14 @@ async def run_screenplay_production(
                 activation_no=activation_no,
                 patch_count=len(patch_ids),
             )
-            save_checkpoint(rev.id, {
-                **checkpoint,
-                "phase": "REPAIR_FAILED",
-                "activation_no": activation_no,
-                "working_artifact_id": working_id,
-                "open_issue_ids": [i.fingerprint for i in issues],
-                "issue_strategy_history": strategy_history,
-                "patch_artifact_ids": patch_ids,
-                "last_issue_fingerprints": list(current_fps),
-                "yield_reason": "strategies_exhausted",
-            })
-            return script
+            return _publish_retry_exhausted_fallback(
+                rev,
+                working_id=working_id,
+                artifact_hash=artifact_hash,
+                evaluation_id=eval_id,
+                open_issues=issues,
+                reason="strategies_exhausted",
+            )
 
         strategy_key = _patch_strategy_key(ops)
         strategy_history.setdefault(issue.fingerprint, []).append(strategy_key)
@@ -976,18 +1001,14 @@ async def run_screenplay_production(
                         activation_no=activation_no,
                         patch_count=len(patch_ids),
                     )
-                    save_checkpoint(rev.id, {
-                        **checkpoint,
-                        "phase": "REPAIR_FAILED",
-                        "activation_no": activation_no,
-                        "working_artifact_id": working_id,
-                        "open_issue_ids": [i.fingerprint for i in issues],
-                        "issue_strategy_history": strategy_history,
-                        "patch_artifact_ids": patch_ids,
-                        "last_issue_fingerprints": list(current_fps),
-                        "yield_reason": "no_progress",
-                    })
-                    return script
+                    return _publish_retry_exhausted_fallback(
+                        rev,
+                        working_id=working_id,
+                        artifact_hash=artifact_hash,
+                        evaluation_id=eval_id,
+                        open_issues=issues,
+                        reason="no_progress",
+                    )
                 continue
             # CAS 冲突：重新观察
             if "CAS" in (result.error or "") or "hash" in (result.error or "").lower():
@@ -1024,33 +1045,28 @@ async def run_screenplay_production(
             "last_touched": result.touched_node_ids,
         })
 
-    # activation 预算用尽：checkpoint 并保持 repairing，等待用户从工作副本继续。
-    save_checkpoint(rev.id, {
-        **checkpoint,
-        "phase": "WAITING_RETRY",
-        "activation_no": activation_no,
-        "issue_strategy_history": strategy_history,
-        "patch_artifact_ids": patch_ids,
-        "yield_reason": "activation_budget",
-    })
-    conn.execute(
-        "UPDATE episodes SET screenplay_status='repairing', screenplay_error=?, screenplay_updated_at=? WHERE id=?",
-        ("本轮局部修复已完成并保存恢复点；仍有问题时可继续局部修复", now(), episode_id),
-    )
-    conn.commit()
-    if run_id:
-        evidence_repository.append_event(
-            run_id, "REPAIR_YIELD", "info",
-            "单次修复预算用尽，已写入恢复点，可从工作副本继续",
-            payload={
-                "activation_no": activation_no,
-                "patches": patches_this_activation,
-                "attempts": attempts_this_activation,
-            },
-        )
-    # 返回当前工作副本（未发布）——调用方不得把它当 ready
+    # activation 预算用尽：对最终工作副本再评分一次并直接发布，不留失败/等待态。
     rev = get_production_revision(rev.id)  # type: ignore[assignment]
-    return load_screenplay_from_artifact(rev.working_artifact_id)  # type: ignore[arg-type]
+    assert rev and rev.working_artifact_id
+    working_id = rev.working_artifact_id
+    art = evidence_repository.get_artifact(working_id)
+    assert art
+    artifact_hash = art.get("content_hash") or evidence_repository.content_hash(art.get("content"))
+    script = load_screenplay_from_artifact(working_id)
+    issues, evaluation = run_screenplay_qa(
+        script, bible=bible, source_text=source_text, episode=episode,
+        artifact_id=working_id, artifact_hash=artifact_hash,
+    )
+    eval_row = evidence_repository.create_evaluation(working_id, evaluation)
+    eval_id = _eval_id_from_create(eval_row)
+    return _publish_retry_exhausted_fallback(
+        rev,
+        working_id=working_id,
+        artifact_hash=artifact_hash,
+        evaluation_id=eval_id,
+        open_issues=issues,
+        reason="activation_budget_exhausted",
+    )
 
 
 def get_active_safe(episode_id: str):
