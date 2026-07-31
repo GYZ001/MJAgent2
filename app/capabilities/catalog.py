@@ -747,8 +747,8 @@ def _register_commands(registry) -> None:
         ),
         _cmd(
             "storyboard.cancel",
-            title="取消分镜",
-            description="取消分镜生成",
+            title="暂停分镜",
+            description="立即暂停分镜生成并保留工作镜头与安全检查点",
             input_model=I.EpisodeScopedInput,
             risk=RiskLevel.R1_REVERSIBLE,
             confirmation=ConfirmationPolicy.NEVER,

@@ -10873,68 +10873,6 @@ label.f {
   border-color: #9ea3aa;
   background: #f6f4ef;
 }
-.board-more-actions {
-  position: relative;
-}
-.board-more-actions > summary {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  min-height: 36px;
-  list-style: none;
-  cursor: pointer;
-}
-.board-more-actions > summary i {
-  width: 7px;
-  height: 7px;
-  border-right: 1.5px solid currentColor;
-  border-bottom: 1.5px solid currentColor;
-  transform: rotate(45deg) translateY(-2px);
-  transition: transform 0.16s ease;
-}
-.board-more-actions[open] > summary i {
-  transform: rotate(225deg) translate(-1px, -1px);
-}
-.board-more-actions > summary::-webkit-details-marker {
-  display: none;
-}
-.board-more-menu {
-  position: absolute;
-  z-index: 70;
-  top: calc(100% + 6px);
-  right: 0;
-  display: grid;
-  min-width: 210px;
-  padding: 6px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: #fffefa;
-  box-shadow: 0 14px 34px rgba(25, 31, 38, 0.15);
-}
-.board-more-menu button {
-  padding: 9px 10px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--ink-soft);
-  text-align: left;
-  cursor: pointer;
-}
-.board-more-menu button:hover {
-  background: rgba(108, 113, 121, 0.08);
-  color: var(--ink);
-}
-.board-more-menu button.danger {
-  color: var(--cinnabar-deep);
-}
-.board-more-menu button:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-.board-more-menu button:disabled:hover {
-  background: transparent;
-  color: var(--ink-faint);
-}
 .board-sync-banner {
   display: flex;
   align-items: center;
@@ -11647,21 +11585,6 @@ label.f {
     min-width: 0;
     padding: 8px 9px;
     white-space: nowrap;
-  }
-  .board-more-actions > summary {
-    width: 44px;
-    min-height: 44px;
-    overflow: hidden;
-    padding: 8px;
-    color: transparent;
-  }
-  .board-more-actions > summary span,
-  .board-more-actions > summary i {
-    display: none;
-  }
-  .board-more-actions > summary::after {
-    content: "⋯";
-    color: var(--ink-soft);
   }
   .board-stat-strip {
     margin-top: 7px;

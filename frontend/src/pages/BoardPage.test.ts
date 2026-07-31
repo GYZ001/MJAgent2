@@ -9,6 +9,7 @@ import {
   storyboardSaveDisabledReason,
   storyboardShotCheckpointLabel,
   storyboardSpokenChars,
+  storyboardToolbarActions,
 } from './BoardPage'
 
 function shot(overrides: Partial<Shot> = {}): Shot {
@@ -72,6 +73,14 @@ describe('分镜台结构化 diff 与问题筛选', () => {
     expect(storyboardDeleteUsesFullClear([only], only.id)).toBe(true)
     expect(storyboardDeleteUsesFullClear([only, shot({ id: 's2', shot_no: 2 })], only.id)).toBe(false)
     expect(storyboardDeleteUsesFullClear([only], 'other-shot')).toBe(false)
+  })
+
+  it('运行中只提供暂停，停止后才允许清空', () => {
+    expect(storyboardToolbarActions('running')).toEqual({ pause: true, clear: false })
+    expect(storyboardToolbarActions('paused')).toEqual({ pause: false, clear: true })
+    expect(storyboardToolbarActions('failed')).toEqual({ pause: false, clear: true })
+    expect(storyboardToolbarActions('ready_to_confirm')).toEqual({ pause: false, clear: false })
+    expect(storyboardToolbarActions('confirmed')).toEqual({ pause: false, clear: false })
   })
 
   it('把门禁字段翻译为可执行的制作语言', () => {

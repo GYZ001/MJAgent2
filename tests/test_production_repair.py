@@ -163,17 +163,17 @@ def test_overdetail_normalizer_only_changes_visual_description() -> None:
     script = _minimal_script(
         full_script_text=(
             "【场1】夜 / 场地\n"
-            "甲微微点头并站定。\n"
-            "甲：我只是说了‘微微’两个字。"
+            "甲攥紧衣角并站定。\n"
+            "甲：我只是说了‘衣角’两个字。"
         ),
     )
     doc = screenplay_to_document(script)
 
-    patched, touched = normalize_overdetail_text_fields(doc, terms=["微微"])
+    patched, touched = normalize_overdetail_text_fields(doc, terms=["衣角"])
     out = document_to_screenplay(patched)
 
-    assert "甲点头并站定。" in out.full_script_text
-    assert "甲：我只是说了‘微微’两个字。" in out.full_script_text
+    assert "甲攥紧并站定。" in out.full_script_text
+    assert "甲：我只是说了‘衣角’两个字。" in out.full_script_text
     assert touched
 
 
@@ -182,7 +182,7 @@ def test_patch_planner_normalizes_overdetail_without_model_call() -> None:
 
     issue = structured_issue(
         code="OVERDETAIL",
-        message="full_script_text 含超纲细节词：微微；请删除微动作",
+        message="full_script_text 含超纲细节词：衣角；请删除服饰细节",
         subject="screenplay",
         path="/full_script_text",
         rule_id="renderability_overdetail",
@@ -193,7 +193,7 @@ def test_patch_planner_normalizes_overdetail_without_model_call() -> None:
 
     assert len(ops) == 1
     assert ops[0].op == "normalize_overdetail"
-    assert ops[0].value == {"terms": ["微微"]}
+    assert ops[0].value == {"terms": ["衣角"]}
     assert _patch_strategy_key(ops) == "normalize_overdetail"
 
 

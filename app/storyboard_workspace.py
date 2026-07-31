@@ -126,6 +126,7 @@ def finalize_storyboard_cancellation(
     *,
     run_id: str | None = None,
     message: str = "分镜生成已手动取消",
+    paused: bool = False,
 ) -> dict[str, Any]:
     """将分镜取消收口到一个可恢复、可重复执行的终态。
 
@@ -137,7 +138,11 @@ def finalize_storyboard_cancellation(
     from app.completion_grant import revoke_active_video_grants_for_episode
     from app.evidence import repository
     from app.orchestration.engine import WorkflowRecorder
-    from app.storyboard_supervisor import load_latest_checkpoint, save_checkpoint
+    from app.storyboard_supervisor import (
+        SupervisorCheckpoint,
+        load_latest_checkpoint,
+        save_checkpoint,
+    )
 
     conn = get_conn()
     episode = conn.execute(
@@ -163,21 +168,41 @@ def finalize_storyboard_cancellation(
         WorkflowRecorder(effective_run_id).cancel(message)
 
     revoke_active_video_grants_for_episode(episode_id)
-    checkpoint = load_latest_checkpoint(episode_id)
-    if checkpoint is not None and checkpoint.phase != "CANCELLED":
-        checkpoint.phase = "CANCELLED"
-        checkpoint.outcome = "CANCELLED"
-        save_checkpoint(checkpoint, run_id=effective_run_id)
-
     shot_count = int(conn.execute(
         "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)
     ).fetchone()["c"])
-    target_status = "script_failed" if shot_count else "planned"
-    script_error = (
-        f"分镜生成已手动取消：已保留 {shot_count} 个逐镜 checkpoint，"
-        f"恢复时将从第 {shot_count + 1} 镜继续。"
-        if shot_count else None
-    )
+    checkpoint = load_latest_checkpoint(episode_id)
+    checkpoint_created = False
+    if checkpoint is None and paused:
+        checkpoint = SupervisorCheckpoint(
+            episode_id=episode_id,
+            phase="PAUSED_EXTERNAL",
+            outcome="PAUSED_BY_USER",
+            validated_prefix_end=shot_count,
+            next_shot_no=shot_count + 1,
+        )
+        checkpoint_created = True
+    target_checkpoint_phase = "PAUSED_EXTERNAL" if paused else "CANCELLED"
+    target_checkpoint_outcome = "PAUSED_BY_USER" if paused else "CANCELLED"
+    if checkpoint is not None and (
+        checkpoint_created or checkpoint.phase != target_checkpoint_phase
+    ):
+        checkpoint.phase = target_checkpoint_phase
+        checkpoint.outcome = target_checkpoint_outcome
+        save_checkpoint(checkpoint, run_id=effective_run_id)
+
+    target_status = "scripting" if paused else ("script_failed" if shot_count else "planned")
+    if paused:
+        script_error = (
+            f"用户已暂停分镜任务：已保留 {shot_count} 个工作镜头和安全检查点，"
+            "可继续任务或清空分镜。"
+        )
+    else:
+        script_error = (
+            f"分镜生成已手动取消：已保留 {shot_count} 个逐镜 checkpoint，"
+            f"恢复时将从第 {shot_count + 1} 镜继续。"
+            if shot_count else None
+        )
     # 只有仍处于 scripting 的当前任务可改变业务状态；重复取消只清理与本 Run
     # 匹配的遗留指针，不会把已经确认或已由其他流程推进的剧集倒退。
     conn.execute(
@@ -202,6 +227,7 @@ def finalize_storyboard_cancellation(
         "deduplicated": episode["status"] != "scripting",
         "run_id": effective_run_id,
         "checkpoint_phase": checkpoint.phase if checkpoint is not None else None,
+        "paused": paused,
     }
 
 

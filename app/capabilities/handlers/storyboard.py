@@ -40,7 +40,7 @@ async def cancel(args: I.EpisodeScopedInput) -> CommandResult:
     outcome = await call_guarded(api.cancel_storyboard, args.episode_id)
     if isinstance(outcome, CommandResult):
         return outcome
-    return succeeded("分镜生成已停止", data=outcome)
+    return succeeded("分镜任务已暂停", data=outcome)
 
 
 async def confirm(args: I.StoryboardConfirmInput) -> CommandResult:

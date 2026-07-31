@@ -4,7 +4,9 @@ from app.renderability import (
     SHOT_SOFT_MAX,
     find_overdetail_hits,
     overdetail_errors,
+    overdetail_issue_is_active,
     shot_count_budget_errors,
+    strip_overdetail_terms,
 )
 from app.schemas import (
     Bible, Character, EpisodeScreenplay, PlotSpine, PlotSpineBeat, World,
@@ -14,12 +16,19 @@ from app.validators import validate_plot_spine, validate_screenplay, storyboard_
 
 def test_find_overdetail_hits() -> None:
     assert "衣角" in find_overdetail_hits("她攥紧衣角站定")
+    assert find_overdetail_hits("他微微侧身，嘴角上扬") == []
+    assert strip_overdetail_terms("他微微侧身，嘴角上扬") == "他微微侧身，嘴角上扬"
     assert find_overdetail_hits("他走向石碑并抬手贴上碑面") == []
 
 
 def test_overdetail_errors_message() -> None:
-    errs = overdetail_errors("泪珠滑落，嘴角抽搐", "action_desc")
+    errs = overdetail_errors("泪珠滑落，手指指节收紧", "action_desc")
     assert errs and "超纲细节词" in errs[0]
+
+
+def test_persisted_overdetail_issue_follows_current_policy() -> None:
+    assert overdetail_issue_is_active("首帧含超纲细节词：微微、嘴角；请删除") is False
+    assert overdetail_issue_is_active("首帧含超纲细节词：微微、衣角；请删除") is True
 
 
 def test_shot_count_budget() -> None:

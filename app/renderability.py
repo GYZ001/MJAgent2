@@ -32,7 +32,6 @@ SCENE_OUTLINE_MAX = 5
 
 # 超纲词表（命中 → 校验失败；修复方向是删细节，不是补细）
 OVERDETAIL_TERMS: tuple[str, ...] = (
-    "微微",
     "轻轻颤抖",
     "泪珠",
     "眼泪",
@@ -41,7 +40,6 @@ OVERDETAIL_TERMS: tuple[str, ...] = (
     "衣角",
     "发丝",
     "瞳孔",
-    "嘴角",
     "绣纹",
     "纹理",
     "逐个",
@@ -54,7 +52,7 @@ _RENDERABILITY_PROMPT_BLOCK = """【Renderability First·视频模型能力边�
 你在为 AI 视频短剧写作，不是写话剧精排场刊。当代视频模型画不稳微表情、复杂手指与群戏。
 稳定可做：1~2 个主体的大形体（走/停/转身/伸手/开口）、单句短对白、大方向情绪（怒/惊/冷/喜）、一次简单道具接触、固定或轻推运镜。
 禁止写入：微表情/微动作、手部精细、材质服饰堆砌、同镜多节拍、群戏轮流说话、小字长文、抽象文学比喻。
-禁止用词示例：微微、轻轻颤抖、泪珠/眼泪、指节、衣角、发丝、瞳孔、嘴角、绣纹、纹理、逐个、同时说道、分屏、闪回。
+禁止用词示例：轻轻颤抖、泪珠/眼泪、指节、衣角、发丝、瞳孔、绣纹、纹理、逐个、同时说道、分屏、闪回。
 修复方向永远是删除超纲细节、合并碎镜、回到主线骨架——禁止「写得更细」。"""
 
 
@@ -84,6 +82,16 @@ def overdetail_errors(text: str | None, field_path: str) -> list[str]:
         f"{field_path} 含超纲细节词：{shown}{extra}；"
         "请删除微表情/手指/衣褶/材质级描写，只保留大形体可读动作，不要改写得更细"
     ]
+
+
+def overdetail_issue_is_active(message: str | None) -> bool:
+    """Return whether a persisted overdetail issue still violates today's policy."""
+    raw = str(message or "")
+    marker = "含超纲细节词"
+    if marker not in raw:
+        return True
+    listed = raw.split(marker, 1)[1].lstrip("：:").split("；", 1)[0]
+    return any(term in listed for term in OVERDETAIL_TERMS)
 
 
 def strip_overdetail_terms(text: str) -> str:

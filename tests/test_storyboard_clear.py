@@ -201,10 +201,20 @@ def test_clear_storyboard_removes_resumable_data_cache_and_downstream_media() ->
 
 
 def test_product_clear_requires_current_impact_preview(monkeypatch) -> None:
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE episodes SET status='script_failed', active_storyboard_run_id=NULL, "
+        "active_video_run_id=NULL WHERE id='e1'"
+    )
+    conn.execute(
+        "UPDATE workflow_runs SET status='CANCELLED' "
+        "WHERE id IN ('run_storyboard','run_video')"
+    )
+    conn.commit()
     preview = api.preview_storyboard_clear("e1")
     assert preview["shot_count"] == 1
     assert preview["video_version_count"] == 1
-    assert preview["active_task_will_stop"] is True
+    assert preview["active_task_will_stop"] is False
     assert preview["screenplay_preserved"] is True
 
     with pytest.raises(HTTPException) as missing:
@@ -241,6 +251,38 @@ def test_product_clear_requires_current_impact_preview(monkeypatch) -> None:
         "SELECT status FROM production_revisions WHERE id='rev_storyboard'"
     ).fetchone()["status"] == "superseded"
     assert api._storyboard_start_preflight_payload("e1")["action"] == "create"
+
+
+def test_product_clear_is_rejected_until_running_storyboard_stops() -> None:
+    with pytest.raises(HTTPException) as running:
+        api.preview_storyboard_clear("e1")
+    assert running.value.status_code == 409
+    assert "先暂停任务" in str(running.value.detail)
+
+
+def test_storyboard_cancel_is_a_resumable_pause(monkeypatch) -> None:
+    async def stopped(_kind: str, _episode_id: str) -> bool:
+        return True
+
+    monkeypatch.setattr(api.task_registry, "cancel_and_wait", stopped)
+    with enter_handler():
+        result = asyncio.run(api.cancel_storyboard("e1"))
+
+    episode = db.get_conn().execute("SELECT * FROM episodes WHERE id='e1'").fetchone()
+    assert result["paused"] is True
+    assert result["checkpoint_phase"] == "PAUSED_EXTERNAL"
+    assert episode["status"] == "scripting"
+    assert episode["active_storyboard_run_id"] is None
+    assert "用户已暂停" in episode["script_error"]
+    from app.storyboard_supervisor import load_latest_checkpoint
+
+    checkpoint = load_latest_checkpoint("e1")
+    shot_row = db.get_conn().execute("SELECT * FROM shots WHERE id='shot1'").fetchone()
+    status = api._storyboard_status_snapshot(
+        dict(episode), [dict(shot_row)], checkpoint.model_dump(mode="json"),
+    )
+    assert status["state"] == "paused"
+    assert status["recommended_action"] == "resume_storyboard"
 
 
 def test_start_auto_resumes_until_internal_reset_clears_existing_work() -> None:

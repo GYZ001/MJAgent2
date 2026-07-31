@@ -215,6 +215,12 @@ def _classify_http_error(status: int, body: str, key_name: str = "HIAGENT_API_KE
         if "no access to model" in lowered:
             return ProviderError(f"凭证有效，但模型未授权/未开通（HTTP {status}）：{body[:300]}", raw=body)
         return ProviderError(f"鉴权失败，请检查 .env 中的 {key_name}（HTTP {status}）：{body[:300]}", raw=body)
+    if status == 400 and "outputimagesensitivecontentdetected" in lowered:
+        return ProviderError(
+            f"图片输出被安全审核拦截（HTTP 400），将重新生成：{body[:300]}",
+            retryable=True,
+            raw=body,
+        )
     if status == 429:
         return ProviderError(f"网关限流（HTTP 429）：{body[:200]}", retryable=True, raw=body)
     if status >= 500:

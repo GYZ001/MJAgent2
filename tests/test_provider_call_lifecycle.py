@@ -152,6 +152,60 @@ def test_harness_chat_429_is_not_immediately_replayed(monkeypatch) -> None:
     assert attempts == 1
 
 
+def test_output_image_safety_rejection_retries_and_can_recover(monkeypatch) -> None:
+    attempts = 0
+
+    class OutputSafetyResponse:
+        status_code = 400
+        text = (
+            '{"error":{"code":"OutputImageSensitiveContentDetected",'
+            '"message":"output image may contain sensitive information"}}'
+        )
+
+    class SuccessResponse:
+        status_code = 200
+        text = '{"data":[{"url":"https://example.invalid/image.jpg"}]}'
+
+        def json(self):
+            return {"data": [{"url": "https://example.invalid/image.jpg"}]}
+
+    class RecoveringImageClient:
+        async def post(self, url, *, json, headers):
+            nonlocal attempts
+            attempts += 1
+            return OutputSafetyResponse() if attempts == 1 else SuccessResponse()
+
+    monkeypatch.setattr(hiagent, "start_provider_call", lambda *_args, **_kwargs: attempts + 10)
+    monkeypatch.setattr(hiagent, "finish_provider_call", lambda *_args, **_kwargs: None)
+
+    async def no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(hiagent.asyncio, "sleep", no_sleep)
+
+    result = asyncio.run(hiagent._post_json(
+        RecoveringImageClient(),
+        "https://example.invalid/images/generations",
+        {"prompt": "ordinary character portrait"},
+        kind="image_generate",
+        model="test-model",
+        headers={"x": "y"},
+        retries=2,
+    ))
+
+    assert attempts == 2
+    assert result["data"][0]["url"].endswith("image.jpg")
+
+
+def test_input_text_safety_rejection_remains_non_retryable() -> None:
+    error = hiagent._classify_http_error(
+        400,
+        '{"error":{"code":"InputTextSensitiveContentDetected"}}',
+    )
+
+    assert error.retryable is False
+
+
 def test_interrupted_provider_operation_links_to_successful_retry(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-recovery.db")
     monkeypatch.setattr(db._local, "conn", None, raising=False)

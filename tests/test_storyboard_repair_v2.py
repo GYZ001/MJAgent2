@@ -124,7 +124,7 @@ def test_repair_plan_does_not_delete_or_mutate_official_shots(repair_db) -> None
     before = [tuple(row) for row in conn.execute(
         "SELECT id,shot_no,action_desc FROM shots ORDER BY shot_no"
     ).fetchall()]
-    plan = route_issues(["第 2 镜首帧画面含超纲细节词：微微，请删除"])
+    plan = route_issues(["第 2 镜首帧画面含超纲细节词：衣角，请删除"])
     checkpoint = SupervisorCheckpoint(
         episode_id="e1",
         planner_version=STORYBOARD_REPAIR_PLANNER_VERSION,
@@ -307,7 +307,7 @@ def test_validated_projection_does_not_leak_unrelated_derived_fields(repair_db) 
 def test_repair_feedback_is_localized_to_target_shot() -> None:
     messages = [
         "shots[9](shot_no=10) 起连续 3 个镜头景别相同",
-        "第 13 镜首帧画面含超纲细节词：微微、嘴角",
+        "第 13 镜首帧画面含超纲细节词：衣角、指节",
     ]
 
     assert _repair_feedback_for_shot(messages, 10) == [messages[0]]

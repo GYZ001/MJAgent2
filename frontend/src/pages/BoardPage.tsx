@@ -138,6 +138,16 @@ export function storyboardDeleteUsesFullClear(shots: Shot[], selectedShotId: str
   return shots.length === 1 && shots[0]?.id === selectedShotId
 }
 
+export function storyboardToolbarActions(state: StoryboardStatus['state']): {
+  pause: boolean
+  clear: boolean
+} {
+  return {
+    pause: state === 'running',
+    clear: state === 'paused' || state === 'failed',
+  }
+}
+
 export function storyboardGateIssueLabel(message: string): string {
   return message
     .replace(/^shots\[\d+\]\(shot_no=(\d+)\)\./, '第 $1 镜：')
@@ -571,6 +581,14 @@ export default function BoardPage() {
     clearShotFilters()
   }
 
+  const pauseStoryboard = async () => {
+    const result = await run(
+      () => api.post(`/episodes/${ep.id}/storyboard/cancel`, {}),
+      '分镜任务已暂停，工作镜头和安全检查点已保留',
+    )
+    if (result) storyboardTimer.clear()
+  }
+
   const primaryLabel: Record<StoryboardStatus['recommended_action'], string> = {
     go_screenplay: '先去剧本台', generate_storyboard: '开始分镜任务', view_progress: '查看任务详情',
     resume_storyboard: '继续分镜任务', confirm_storyboard: '确认分镜',
@@ -583,6 +601,7 @@ export default function BoardPage() {
   const pendingRevalidation = status.pending_revalidation_shots
     ?? Math.max(0, status.produced_shots - status.validated_shots)
   const terminalFinalShot = status.final_shot_valid && ['ready_to_confirm', 'confirmed'].includes(status.state)
+  const toolbarActions = storyboardToolbarActions(status.state)
 
   return (
     <>
@@ -604,22 +623,28 @@ export default function BoardPage() {
             </div>
           </div>
           <div className="board-action-group">
-            <button id="storyboard-primary-action" type="button" className="btn board-primary-action primary" disabled={busy || primaryBlocked}
-              aria-label={busy ? `${primaryLabel[status.recommended_action]}，暂不可用：正在处理上一项操作` : primaryBlocked ? `${primaryLabel[status.recommended_action]}，暂不可操作` : primaryLabel[status.recommended_action]}
-              onClick={() => void runPrimary()}>
-              {busy ? '处理中…' : primaryLabel[status.recommended_action]}
-            </button>
-            <details className="board-more-actions">
-              <summary className="btn" aria-label="更多分镜操作">更多操作<i aria-hidden="true" /></summary>
-              <div className="board-more-menu">
-                <button type="button" className="danger"
-                  disabled={busy || shotEditDirty}
-                  title={shotEditDirty ? '请先保存或放弃当前镜头修改' : '清空全部镜头、检查点及下游资源，保留剧本'}
-                  onClick={() => void previewClearStoryboard()}>
-                  清空全部分镜
-                </button>
-              </div>
-            </details>
+            {toolbarActions.pause ? <>
+              <button id="storyboard-primary-action" type="button" className="btn board-primary-action danger"
+                disabled={busy} aria-label={busy ? '暂停任务，正在处理' : '暂停分镜任务'}
+                onClick={() => void pauseStoryboard()}>
+                {busy ? '正在暂停…' : '暂停任务'}
+              </button>
+              <button type="button" className="btn" disabled={busy} onClick={() => go('monitor')}>
+                查看任务详情
+              </button>
+            </> : <>
+              <button id="storyboard-primary-action" type="button" className="btn board-primary-action primary" disabled={busy || primaryBlocked}
+                aria-label={busy ? `${primaryLabel[status.recommended_action]}，暂不可用：正在处理上一项操作` : primaryBlocked ? `${primaryLabel[status.recommended_action]}，暂不可操作` : primaryLabel[status.recommended_action]}
+                onClick={() => void runPrimary()}>
+                {busy ? '处理中…' : primaryLabel[status.recommended_action]}
+              </button>
+              {toolbarActions.clear && <button type="button" className="btn danger"
+                disabled={busy || shotEditDirty}
+                title={shotEditDirty ? '请先保存或放弃当前镜头修改' : '清空全部镜头、检查点及下游资源，保留剧本'}
+                onClick={() => void previewClearStoryboard()}>
+                清空分镜
+              </button>}
+            </>}
           </div>
           {status.state === 'running' && <TaskTimer label="分镜" timer={storyboardTimer} />}
         </div>

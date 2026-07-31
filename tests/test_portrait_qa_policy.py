@@ -125,6 +125,32 @@ def test_seed_qa_does_not_invert_positive_no_defect_summary() -> None:
     assert result["hard_failures"] == []
 
 
+def test_seed_qa_does_not_invert_compound_no_crop_watermark_or_text_summary() -> None:
+    result = normalize_portrait_seed_qa({
+        "identity_match": 0.95,
+        "presentation_match": 0.9,
+        "clean_frame": 1.0,
+        "person_count": 1,
+        "watermark_detected": False,
+        "watermark_occluding": False,
+        "forbidden_text_detected": False,
+        "full_body_visible": True,
+        "crop_severity": "none",
+        "anatomy_valid": True,
+        "soft_warnings": ["左手握持旧木制工具箱，双臂未完全自然下垂"],
+        "hard_failures": [],
+        "issues": [
+            "单男性角色立绘，3D国漫风，带有雨夜湿润反光质感，"
+            "背景为浅米色，全身完整无裁切，无水印、文字等遮挡元素，"
+            "核心身份特征匹配锚点要求"
+        ],
+    })
+
+    assert result["hard_gate_passed"] is True
+    assert result["status"] == "warning"
+    assert result["hard_failures"] == []
+
+
 def test_seed_qa_does_not_invert_compound_no_watermark_or_text_summary() -> None:
     result = normalize_portrait_seed_qa({
         "identity_match": 0.9,

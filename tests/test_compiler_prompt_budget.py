@@ -77,7 +77,6 @@ def test_long_reference_prompt_compacts_without_losing_story_anchors() -> None:
     assert len(prompt) <= config.PROMPT_CHAR_LIMIT
     assert "石碑表面骤然亮起刺眼白光" in prompt
     assert "测验员抬头朝人群公布成绩" in prompt
-    assert "微微" not in prompt  # 编译层会剥离不可稳定渲染的微表情/微动作词
     assert "[START STATE" in prompt and "[END STATE" in prompt
     assert "萧炎，斗之力，三段！级别：低级！" in prompt
     assert SOURCE_EXCERPT_MARKER not in prompt

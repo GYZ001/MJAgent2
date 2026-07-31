@@ -1394,8 +1394,7 @@ async def _storyboard_guarded_recorded(
 
 @router.post("/episodes/{episode_id}/storyboard/cancel")
 async def cancel_storyboard(episode_id: str, body: dict | None = Body(None)):
-    """手动取消正在进行的分镜生成请求，解除 scripting 锁定，便于重新发起。
-    用于模型侧卡死/异常导致状态长期停留在“分镜中”的情况。"""
+    """立即暂停分镜任务，保留工作镜头和安全检查点以便继续或清空。"""
     from app.capabilities.dispatch import ui_route
     routed = await ui_route("storyboard.cancel", {"episode_id": episode_id})
     if routed is not None:
@@ -1412,8 +1411,35 @@ async def cancel_storyboard(episode_id: str, body: dict | None = Body(None)):
     return finalize_storyboard_cancellation(
         episode_id,
         run_id=ep["active_storyboard_run_id"],
-        message="已从分镜台取消生成",
+        message="已从分镜台暂停生成",
+        paused=True,
     )
+
+
+def _assert_storyboard_clear_not_running(episode_id: str, ep: dict) -> None:
+    """Clearing is a stopped-state action; never use it as an implicit pause."""
+    from app.storyboard_supervisor import load_latest_checkpoint
+
+    active_run_id = ep.get("active_storyboard_run_id")
+    active_run = (
+        get_conn().execute(
+            "SELECT status FROM workflow_runs WHERE id=?", (active_run_id,),
+        ).fetchone()
+        if active_run_id else None
+    )
+    checkpoint = load_latest_checkpoint(episode_id)
+    stopped_phases = {
+        "PAUSED_EXTERNAL", "PAUSED_BUDGET", "WAITING_HUMAN",
+        "WAITING_AUTHORIZATION", "CANCELLED", "SUCCEEDED",
+    }
+    task_is_live = task_registry.active("storyboard", episode_id)
+    run_is_live = bool(active_run and active_run["status"] in {"CREATED", "RUNNING"})
+    episode_is_live = bool(
+        ep.get("status") == "scripting"
+        and (checkpoint is None or checkpoint.phase not in stopped_phases)
+    )
+    if task_is_live or run_is_live or episode_is_live:
+        raise HTTPException(409, "分镜任务仍在运行，请先暂停任务，再清空分镜")
 
 
 @router.post("/episodes/{episode_id}/storyboard/clear-preview")
@@ -1422,6 +1448,7 @@ def preview_storyboard_clear(episode_id: str):
     from app.storyboard_workspace import create_preview, episode_fingerprint
 
     ep = _episode_or_404(episode_id)
+    _assert_storyboard_clear_not_running(episode_id, dict(ep))
     if not _storyboard_has_material(episode_id, ep):
         raise HTTPException(409, "当前没有可清空的分镜数据")
     conn = get_conn()
@@ -1475,6 +1502,8 @@ async def apply_storyboard_clear(episode_id: str, body: dict):
     """Clear all storyboard/downstream state after an explicit current preview."""
     from app.storyboard_workspace import require_preview
 
+    ep = _episode_or_404(episode_id)
+    _assert_storyboard_clear_not_running(episode_id, dict(ep))
     require_preview(body.get("preview_token"), "storyboard_clear", episode_id)
     return await clear_storyboard_projection(episode_id)
 
@@ -2020,10 +2049,23 @@ def _storyboard_status_snapshot(
         int(value) for value in (repair.get("touched_shot_nos") or [])
         if str(value).isdigit()
     }
-    active_repair_errors = [] if phase == "SUCCEEDED" else [
-        str(message) for message in (repair.get("issue_messages") or []) if str(message).strip()
+    from app.renderability import overdetail_issue_is_active
+
+    raw_repair_errors = [
+        str(message) for message in (repair.get("issue_messages") or [])
+        if str(message).strip()
     ]
-    if not active_repair_errors and paused and ep.get("script_error"):
+    active_repair_errors = [] if phase == "SUCCEEDED" else [
+        message for message in raw_repair_errors
+        if overdetail_issue_is_active(message)
+    ]
+    obsolete_policy_repair = bool(raw_repair_errors and not active_repair_errors)
+    if (
+        not active_repair_errors
+        and paused
+        and ep.get("script_error")
+        and not obsolete_policy_repair
+    ):
         active_repair_errors = [
             value.strip() for value in str(ep.get("script_error") or "").split("；") if value.strip()
         ]
@@ -2149,6 +2191,7 @@ def _storyboard_status_snapshot(
             else "状态组合不安全，请刷新" if invalid or state == "syncing"
             else None
         ),
+        "_obsolete_policy_repair": obsolete_policy_repair,
     }
 
 
@@ -2881,6 +2924,8 @@ def episode_detail(episode_id: str, view: str | None = None):
         ep["storyboard_status"] = _storyboard_status_snapshot(
             ep, shots, ep.get("supervisor"), script,
         )
+        if ep["storyboard_status"].pop("_obsolete_policy_repair", False):
+            ep["script_error"] = None
     ep["pipeline_summary"] = pipeline_summary
     # 视频补齐 Supervisor 面板（生成台）
     if full or view == "wall":
