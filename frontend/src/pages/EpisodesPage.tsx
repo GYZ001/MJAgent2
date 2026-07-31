@@ -15,6 +15,12 @@ const PAGE_SIZE = 15
 const TARGET_DURATION_CHOICES = [40, 50, 60, 70, 80, 90] as const
 type BatchAction = 'replan' | 'screenplay' | 'storyboard'
 
+export function canScanPortraitGaps(
+  project: Pick<Project, 'bible_status' | 'bible'> | null | undefined,
+): boolean {
+  return project?.bible_status === 'ready' && Boolean(project.bible)
+}
+
 export function resolveEpisodePage(
   value: string,
   pageCount: number,
@@ -116,7 +122,10 @@ export default function EpisodesPage() {
   }, [projectId])
 
   useEffect(() => {
-    if (!projectId) return
+    if (!projectId || !canScanPortraitGaps(p)) {
+      setPortraitGap(null)
+      return
+    }
     let cancelled = false
     api.refsGaps(projectId).then(res => {
       if (!cancelled) {

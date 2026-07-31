@@ -176,6 +176,11 @@ def test_scene_reference_qa_treats_empty_environment_as_required(monkeypatch) ->
         assert "画面必须无人" in expectation
         assert "画面无人是合格要求" in expectation
         assert "不要要求角色、人物动作、姿态、表情或互动" in expectation
+        assert "space_type_matches 只判断室内外和地点大类" in expectation
+        assert "售票口大小、柜台形式、内部通道是否完全封闭" in expectation
+        assert "不得因此把 space_type_matches 设为 false" in expectation
+        assert "输出必须自洽" in expectation
+        assert "不得一边声明错地点，一边返回 true" in expectation
         assert call_meta["initiator_label"] == "场景资产主图QA"
         return (
             '{"expectation_match": 0.9, "continuity": 1, "clean_frame": 1, '
@@ -242,6 +247,48 @@ def test_scene_reference_qa_uses_provider_mark_issue_when_boolean_conflicts(monk
     assert qa["hard_gate_passed"] is True
     assert qa["status"] == "warning"
     assert qa["issues"] == ["画风偏写实，与二维厚涂要求有差异"]
+
+
+def test_scene_reference_qa_allows_corner_mark_over_partial_edge_environment(monkeypatch) -> None:
+    async def fake_vlm_check(images, expectation, *, call_meta=None):
+        return (
+            '{"expectation_match":0.9,"continuity":1,"clean_frame":0.8,"overall":0.9,'
+            '"person_count":0,"watermark_detected":true,'
+            '"forbidden_text_detected":true,"space_type_matches":true,'
+            '"issues":["右下角存在AI生成文字水印，遮挡了部分台阶区域"]}'
+        )
+
+    monkeypatch.setattr(hiagent, "vlm_check", fake_vlm_check)
+    monkeypatch.setattr("app.multiview.watermark_qa_mode", lambda: "ignore_unless_occluding")
+    qa = asyncio.run(review_scene_image(
+        "frame", "二维厚涂钟楼旋转楼梯", "钟楼旋转楼梯", [],
+        environment_only=True,
+    ))
+
+    assert qa["hard_gate_passed"] is True
+    assert qa["status"] == "warning"
+    assert qa["issues"] == []
+    assert qa["non_occluding_provider_watermark"] is True
+
+
+def test_scene_reference_qa_rejects_watermark_over_critical_structure(monkeypatch) -> None:
+    async def fake_vlm_check(images, expectation, *, call_meta=None):
+        return (
+            '{"expectation_match":0.9,"continuity":1,"clean_frame":0.4,"overall":0.4,'
+            '"person_count":0,"watermark_detected":true,'
+            '"forbidden_text_detected":true,"space_type_matches":true,'
+            '"issues":["右下角水印大面积遮挡场景主体和关键楼梯结构"]}'
+        )
+
+    monkeypatch.setattr(hiagent, "vlm_check", fake_vlm_check)
+    monkeypatch.setattr("app.multiview.watermark_qa_mode", lambda: "ignore_unless_occluding")
+    qa = asyncio.run(review_scene_image(
+        "frame", "二维厚涂钟楼旋转楼梯", "钟楼旋转楼梯", [],
+        environment_only=True,
+    ))
+
+    assert qa["hard_gate_passed"] is False
+    assert "检测到水印或 Logo" in qa["hard_failures"]
 
 
 def test_scene_reference_qa_keeps_real_overlay_text_as_hard_failure(monkeypatch) -> None:

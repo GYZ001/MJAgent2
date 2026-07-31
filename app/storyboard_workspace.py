@@ -428,9 +428,15 @@ def validate_source_binding(episode_id: str, binding: dict[str, Any]) -> tuple[s
     return excerpt, normalized
 
 
-def persist_source_binding(shot_id: str, normalized: dict[str, Any]) -> None:
-    conn = get_conn()
-    conn.execute(
+def persist_source_binding(
+    shot_id: str,
+    normalized: dict[str, Any],
+    *,
+    conn=None,
+    commit: bool = True,
+) -> None:
+    db_conn = conn or get_conn()
+    db_conn.execute(
         """INSERT INTO storyboard_source_bindings(
                shot_id,chapter_id,chapter_idx,source_version_hash,start_offset,end_offset,
                excerpt_hash,updated_at
@@ -446,7 +452,42 @@ def persist_source_binding(shot_id: str, normalized: dict[str, Any]) -> None:
             normalized["end_offset"], normalized["excerpt_hash"], now(),
         ),
     )
-    conn.commit()
+    if commit:
+        db_conn.commit()
+
+
+def realign_generated_source_binding(
+    episode_id: str,
+    shot_id: str,
+    excerpt: str,
+    *,
+    conn=None,
+    commit: bool = True,
+) -> dict[str, Any]:
+    """Atomically bind an automated repair's exact authorized source excerpt."""
+    candidate = (excerpt or "").strip()
+    if not candidate:
+        raise HTTPException(422, "自动修复候选缺少原文证据")
+    matches: list[tuple[dict[str, Any], int]] = []
+    for source in chapter_sources(episode_id):
+        offset = (source["content"] or "").find(candidate)
+        if offset >= 0:
+            matches.append((source, offset))
+    if not matches:
+        raise HTTPException(422, "自动修复候选的原文证据不属于本集授权原文")
+    source, start = matches[0]
+    normalized = {
+        "chapter_id": int(source["id"]),
+        "chapter_idx": int(source["idx"]),
+        "source_version_hash": source["source_version_hash"],
+        "start_offset": start,
+        "end_offset": start + len(candidate),
+        "excerpt_hash": hashlib.sha256(candidate.encode("utf-8")).hexdigest(),
+    }
+    persist_source_binding(
+        shot_id, normalized, conn=conn, commit=commit,
+    )
+    return normalized
 
 
 def source_binding_for_shot(shot_id: str) -> dict[str, Any] | None:

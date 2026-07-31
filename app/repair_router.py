@@ -218,7 +218,14 @@ def route_issues(
     counts = dict(issue_fingerprint_counts or {})
     prior = counts.get(fp, 0)
     if prior >= 2:
-        level = upgrade_level(level)
+        # Most callers persist fingerprint counts but do not persist/pass the
+        # previous RepairLevel. Escalate from the count itself so a repeated
+        # issue cannot remain at the same local-repair level forever.
+        escalations = 1 if current_level else max(1, prior // 2)
+        for _ in range(escalations):
+            level = upgrade_level(level)
+            if level == "L5":
+                break
         if level == "L5":
             return RepairPlan(
                 level="L5",

@@ -15,6 +15,12 @@ _SPEAKER_PREFIX_RE = re.compile(r"^([^\n：（(:]{1,16})(?:（[^）]{0,12}）)?[
 _NON_CONTENT_RE = re.compile(r"""[\s，。、；;：:！!？?“”"'‘’（）()【】\[\]《》〈〉—…·.,~\-]+""")
 # 句读分隔：把一条复合的关键内容切成原子。纯标点驱动、与具体剧情无关，适用任意题材。
 _CLAIM_SPLIT_RE = re.compile(r"[；;。.！!？?，,、\n]+")
+_SPOKEN_DIGITS = {
+    "零": "0", "〇": "0", "一": "1", "二": "2", "两": "2",
+    "三": "3", "四": "4", "五": "5", "六": "6", "七": "7",
+    "八": "8", "九": "9",
+}
+_DIGIT_SEQUENCE_CHARS = frozenset("0123456789" + "".join(_SPOKEN_DIGITS))
 
 # 关键台词主干连续保留过半即视为"仍在"（容忍前后改写，只要核心句仍出现）。
 KEY_LINE_PRESENT_RATIO = 0.4
@@ -39,6 +45,26 @@ def speaker_name(line: str) -> str | None:
 def condense(text: str) -> str:
     """压成纯内容字符串（去空白与标点），让匹配对标点/排版差异稳健。"""
     return _NON_CONTENT_RE.sub("", text or "")
+
+
+def spoken_digit_sequence_equivalent(left: str, right: str) -> bool:
+    """Return whether two pure digit identifiers have the same spoken digits.
+
+    This intentionally handles only digit-by-digit sequences such as
+    ``7-3-1`` / ``七、三、一``. Mixed prose is excluded so source-fidelity
+    checks remain strict for actual dialogue rewrites.
+    """
+    first = condense(left)
+    second = condense(right)
+    if not first or not second:
+        return False
+    if any(char not in _DIGIT_SEQUENCE_CHARS for char in first + second):
+        return False
+
+    def normalize(value: str) -> str:
+        return "".join(_SPOKEN_DIGITS.get(char, char) for char in value)
+
+    return normalize(first) == normalize(second)
 
 
 def longest_run_ratio(needle: str, haystack: str) -> float:

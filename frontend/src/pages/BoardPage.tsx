@@ -3,6 +3,7 @@ import { api, ApiError, Episode, Shot, StoryboardStatus } from '../api'
 import { useEpisode, useNav } from '../App'
 import EpisodeCrumb from '../components/EpisodeCrumb'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
+import DecisionDialog from '../components/DecisionDialog'
 import ImpactDialog, { ImpactSummary } from '../components/harness/ImpactDialog'
 import QueryState from '../components/QueryState'
 import { useFocusTrap } from '../hooks/useFocusTrap'
@@ -45,6 +46,18 @@ type StartPreview = {
   planned_shots?: number | null
   remaining_shots?: number | null
   checkpoint: { available: boolean; phase?: string | null; resume_from_shot: number }
+  can_start?: boolean
+  blocking_reason?: string | null
+  repair?: {
+    lifetime_repair_count: number
+    activation_no: number
+    activation_attempt_count: number
+    max_attempts_per_activation: number
+    external_calls: number
+    cache_reuses: number
+    candidate_preserves_official_shots: boolean
+    last_issue_messages: string[]
+  }
 }
 
 type ConfirmPreview = {
@@ -78,6 +91,18 @@ type StructurePreview = ImpactSummary & {
   final_shot_impact: string
 }
 
+type StoryboardClearPreview = {
+  preview_token: string
+  shot_count: number
+  video_version_count: number
+  reference_asset_count: number
+  workflow_run_count: number
+  delivery_package_count: number
+  active_task_will_stop: boolean
+  screenplay_preserved: true
+  irreversible: true
+}
+
 function cloneShot(shot: Shot): Shot {
   return JSON.parse(JSON.stringify(shot)) as Shot
 }
@@ -107,6 +132,10 @@ export function isStoryboardProblemShot(shot: Shot): boolean {
     || ['candidate', 'needs_revision', 'rejected', 'stale', 'superseded'].includes(status)
     || storyboardSpokenChars(shot) > (shot.spoken_limit ?? Number.POSITIVE_INFINITY)
     || Boolean(shot.preflight_errors?.length)
+}
+
+export function storyboardDeleteUsesFullClear(shots: Shot[], selectedShotId: string): boolean {
+  return shots.length === 1 && shots[0]?.id === selectedShotId
 }
 
 export function storyboardGateIssueLabel(message: string): string {
@@ -256,6 +285,7 @@ export default function BoardPage() {
   const [startPreview, setStartPreview] = useState<StartPreview | null>(null)
   const [confirmPreview, setConfirmPreview] = useState<ConfirmPreview | null>(null)
   const [structurePreview, setStructurePreview] = useState<StructurePreview | null>(null)
+  const [clearPreview, setClearPreview] = useState<StoryboardClearPreview | null>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
   const startPreviewTriggerRef = useRef<HTMLElement | null>(null)
   const storyboardTimer = useTaskTimer(`episode.${episodeId}.storyboard`, ep?.storyboard_status?.state === 'running')
@@ -379,6 +409,7 @@ export default function BoardPage() {
       </QueryState>
     )
   }
+  const currentEpisodeId = ep.id
 
   const run = async <T,>(fn: () => Promise<T>, message?: string): Promise<T | undefined> => {
     setBusy(true)
@@ -423,7 +454,7 @@ export default function BoardPage() {
   }
 
   const submitStart = async () => {
-    if (!startPreview) return
+    if (!startPreview || startPreview.can_start === false) return
     const preview = startPreview
     setStartPreview(null)
     storyboardTimer.start()
@@ -477,6 +508,10 @@ export default function BoardPage() {
 
   const previewStructure = async (operation: StructurePreview['operation'], targetIndex = absoluteIndex) => {
     if (!selectedShot) return
+    if (operation === 'delete' && storyboardDeleteUsesFullClear(shots, selectedShot.id)) {
+      await previewClearStoryboard()
+      return
+    }
     const newFinalShotId = operation === 'delete' && selectedShot.is_final
       ? shots[Math.max(0, absoluteIndex - 1)]?.id
       : undefined
@@ -504,6 +539,36 @@ export default function BoardPage() {
       new_final_shot_id: preview.new_final_shot_id,
     }), '镜头结构已更新，相邻窗口已进入重新校验') as { created_shot_id?: string } | undefined
     if (result?.created_shot_id) setSelectedShotId(result.created_shot_id)
+  }
+
+  async function previewClearStoryboard() {
+    setBusy(true)
+    try {
+      setClearPreview(await api.post(
+        `/episodes/${currentEpisodeId}/storyboard/clear-preview`,
+        {},
+      ) as StoryboardClearPreview)
+    } catch (caught) {
+      toast((caught as Error).message, true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const clearStoryboard = async () => {
+    if (!clearPreview) return
+    const previewToken = clearPreview.preview_token
+    const deletedShots = clearPreview.shot_count
+    setClearPreview(null)
+    storyboardTimer.clear()
+    const result = await run(
+      () => api.post(`/episodes/${ep.id}/storyboard/clear`, { preview_token: previewToken }),
+      `已清空 ${deletedShots} 个镜头及其下游资源，剧本已保留`,
+    )
+    if (!result) return
+    setSelectedShotId(null)
+    setShotEditDirty(false)
+    clearShotFilters()
   }
 
   const primaryLabel: Record<StoryboardStatus['recommended_action'], string> = {
@@ -544,6 +609,17 @@ export default function BoardPage() {
               onClick={() => void runPrimary()}>
               {busy ? '处理中…' : primaryLabel[status.recommended_action]}
             </button>
+            <details className="board-more-actions">
+              <summary className="btn" aria-label="更多分镜操作">更多操作<i aria-hidden="true" /></summary>
+              <div className="board-more-menu">
+                <button type="button" className="danger"
+                  disabled={busy || shotEditDirty}
+                  title={shotEditDirty ? '请先保存或放弃当前镜头修改' : '清空全部镜头、检查点及下游资源，保留剧本'}
+                  onClick={() => void previewClearStoryboard()}>
+                  清空全部分镜
+                </button>
+              </div>
+            </details>
           </div>
           {status.state === 'running' && <TaskTimer label="分镜" timer={storyboardTimer} />}
         </div>
@@ -667,8 +743,27 @@ export default function BoardPage() {
         <p>当前镜头的逐字段修改尚未保存。切换后输入无法恢复；发布版、失败草稿和下游产物不会变化。</p>
       </Modal>
 
+      {clearPreview && <DecisionDialog
+        title="清空本集全部分镜？"
+        summary={`${clearPreview.shot_count} 个镜头、${clearPreview.video_version_count} 个视频版本、${clearPreview.reference_asset_count} 个参考图资源将被删除`}
+        message="将把本集分镜工作区恢复到未生成状态；当前剧本会完整保留，之后可以从头生成新的分镜。"
+        details={[
+          ...(clearPreview.active_task_will_stop ? ['正在运行的分镜或视频任务会先安全停止'] : []),
+          `将终止当前任务并重置修复检查点；${clearPreview.workflow_run_count} 条历史任务记录保留用于审计，不参与下次生成`,
+          clearPreview.delivery_package_count
+            ? `将删除 ${clearPreview.delivery_package_count} 个下游交付包`
+            : '当前没有下游交付包',
+          '此操作不可撤销，已经产生的模型调用费用不会退回',
+        ]}
+        confirmLabel="确认清空并保留剧本"
+        cancelLabel="取消"
+        danger
+        onClose={() => setClearPreview(null)}
+        onConfirm={() => void clearStoryboard()}
+      />}
+
       <Modal open={!!startPreview} title={startPreview?.action === 'resume' ? '继续分镜任务' : '开始分镜任务'} onClose={closeStartPreview}
-        actions={<><button className="btn" onClick={closeStartPreview}>取消</button><button className="btn primary" onClick={() => void submitStart()}>
+        actions={<><button className="btn" onClick={closeStartPreview}>取消</button><button className="btn primary" disabled={startPreview?.can_start === false} onClick={() => void submitStart()}>
           {startPreview?.action === 'resume' ? '继续任务' : '开始任务'}
         </button></>}>
         {startPreview && <div className="storyboard-preview-card">
@@ -678,6 +773,14 @@ export default function BoardPage() {
           <p>{startPreview.planned_shots
             ? `计划 ${startPreview.planned_shots} 镜${startPreview.remaining_shots != null ? `，剩余 ${startPreview.remaining_shots} 镜` : ''}。`
             : '任务启动后会先规划镜头数量。'}</p>
+          {startPreview.repair && startPreview.action === 'resume' && <p>
+            历史修复 {startPreview.repair.lifetime_repair_count} 次；将开启第 {startPreview.repair.activation_no + 1} 轮，
+            每轮最多 {startPreview.repair.max_attempts_per_activation} 次。候选通过校验前不会覆盖现有分镜。
+          </p>}
+          {startPreview.blocking_reason && <div className="error-banner" role="alert">{startPreview.blocking_reason}</div>}
+          {!!startPreview.repair?.last_issue_messages.length && <div className="warning-banner">
+            {startPreview.repair.last_issue_messages.map(storyboardGateIssueLabel).join('；')}
+          </div>}
         </div>}
       </Modal>
 
@@ -748,6 +851,10 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
       ? writeBlockReason
       : ''
   const deleteDisabledReason = editDisabledReason || (!structureEditEnabled ? '镜头结构编辑已由管理员关闭' : '')
+  const isOnlyShot = !previous && !next
+  const deleteActionTitle = deleteDisabledReason || (isOnlyShot
+    ? '删除最后一镜将清空本集分镜工作区及下游资源，剧本保留；执行前会再次确认'
+    : '删除前会展示镜号重排、相邻重验和媒体失效影响')
   const saveDisabledReason = storyboardSaveDisabledReason(dirty, overCapacity, current.characters.length)
   const structureDisabledReason = disabled
     ? '正在处理上一项操作'
@@ -934,7 +1041,7 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
           {!edit ? <>
             <button className="btn small danger shot-delete-action" disabled={Boolean(deleteDisabledReason)}
               aria-label={deleteDisabledReason ? `删除镜头，暂不可用：${deleteDisabledReason}` : '删除镜头'}
-              title={deleteDisabledReason || '删除前会展示镜号重排、相邻重验和媒体失效影响'}
+              title={deleteActionTitle}
               onClick={() => void onStructure('delete')}>删除镜头</button>
             <button className="btn small" disabled={Boolean(editDisabledReason)}
               aria-label={editDisabledReason ? `修改镜头，暂不可用：${editDisabledReason}` : '修改镜头'}

@@ -86,8 +86,29 @@ interface PendingNavigation {
   commit?: () => void;
 }
 
-const NavCtx = createContext<Nav>(null as unknown as Nav);
-export const useNav = () => useContext(NavCtx);
+const NavCtx = createContext<Nav | null>(null);
+
+export function useNav(): Nav {
+  const context = useContext(NavCtx);
+  const fallback = useMemo<Nav>(() => {
+    const route = readLocation();
+    return {
+      ...route,
+      go: (view, projectId, episodeId, chapterIdx) => {
+        window.location.assign(locationFor(
+          view,
+          projectId === undefined ? route.projectId : projectId,
+          episodeId === undefined ? route.episodeId : episodeId,
+          chapterIdx === undefined ? route.chapterIdx : chapterIdx,
+        ));
+      },
+      requestNavigation: (_target, commit) => commit(),
+      toast: () => undefined,
+      registerNavigationGuard: () => undefined,
+    };
+  }, []);
+  return context ?? fallback;
+}
 
 const SECTIONS: {
   key: View;

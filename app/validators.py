@@ -883,16 +883,19 @@ def _is_grounded_short_utterance(
     source_line: str,
     source_text: str | None,
 ) -> bool:
-    """放行原文中真实存在的单字口语回应（如“哦。”）。
+    """放行有真实原文依据的单字口语回应（如“哦。”“好。”）。
 
-    这类句子本身可演、可配音；字数下限只应拦空值，不应把原文短回应
-    当成视频质量问题。
+    ``line`` 允许把原文动作压成自然回应，但 ``source_text`` 必须逐字命中
+    本集原文。这样字数下限只拦空值，不会放过说明性占位词或无依据对白。
     """
     spoken = _condense(line)
     evidence = _condense(source_line)
-    if not spoken or spoken != evidence:
+    source = _condense(source_text or "")
+    if not spoken or not evidence or (source and evidence not in source):
         return False
-    return not source_text or evidence in _condense(source_text)
+    if spoken == evidence:
+        return True
+    return len(spoken) == 1 and bool(source) and evidence in source
 
 
 def validate_dialogue_chains(
@@ -1034,7 +1037,8 @@ def validate_dialogue_chains(
                 "开场对白是第一条对白链锚点，不能在模型挑选 key_lines 前静默丢失"
             )
         elif (
-            _longest_run_ratio(opening, first_chain_line) < KEY_LINE_PRESENT_RATIO
+            not textmatch.spoken_digit_sequence_equivalent(opening, first_chain_line)
+            and _longest_run_ratio(opening, first_chain_line) < KEY_LINE_PRESENT_RATIO
             and _bigram_coverage(opening, first_chain_line) < KEY_LINE_BIGRAM_COVERAGE
         ):
             errors.append(

@@ -258,6 +258,42 @@ def test_successful_text_operation_can_be_reused_after_local_state_conflict(
     assert json.loads(hit["meta"])["source_provider_call_id"] == call_id
 
 
+def test_semantic_attempt_id_separates_new_repair_from_crash_recovery(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-semantic-cache.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    payload = {
+        "model": "text-model",
+        "messages": [{"role": "user", "content": "byte-identical repair prompt"}],
+        "temperature": 0.7,
+        "max_tokens": 1024,
+    }
+    first_operation = "op_sem_attempt_one"
+    call_id = db.start_provider_call(
+        "chat", "text-model",
+        meta={"operation_id": first_operation},
+        request_json=payload,
+    )
+    db.finish_provider_call(
+        call_id, "OK", 200, 20,
+        response_json={"choices": [{"message": {"content": "first result"}}]},
+    )
+
+    recovered = hiagent._cached_successful_provider_response(
+        "chat", "text-model", payload,
+        {"reuse_successful_operation": True, "operation_id": first_operation},
+    )
+    fresh_attempt = hiagent._cached_successful_provider_response(
+        "chat", "text-model", payload,
+        {"reuse_successful_operation": True, "operation_id": "op_sem_attempt_two"},
+    )
+
+    assert recovered is not None
+    assert fresh_attempt is None
+
+
 def test_custom_text_provider_uses_opt_in_success_cache(monkeypatch) -> None:
     class Client:
         async def __aenter__(self):

@@ -180,9 +180,34 @@ def _storyboard_start_preflight_payload(episode_id: str) -> dict:
             planned = len(json.loads(ep["storyboard_outline_json"] or "{}").get("shots") or [])
         except (TypeError, ValueError, json.JSONDecodeError):
             planned = 0
-    resume_from = (int(cp.next_shot_no) if cp else shots + 1) if action == "resume" else 1
-    kept = min(shots, max(0, resume_from - 1)) if action == "resume" else 0
+    kept = (
+        min(shots, max(0, int(cp.validated_prefix_end or 0)))
+        if action == "resume" and cp else (shots if action == "resume" else 0)
+    )
+    resume_from = kept + 1 if action == "resume" else 1
     remaining = max(0, planned - kept) if planned else None
+    strategies_exhausted = bool(
+        cp and cp.outcome == "REPAIR_FAILED_STRATEGIES_EXHAUSTED"
+    )
+    latest_run = conn.execute(
+        """SELECT id FROM workflow_runs
+           WHERE workflow_type='storyboard' AND scope_type='episode' AND scope_id=?
+           ORDER BY updated_at DESC LIMIT 1""",
+        (episode_id,),
+    ).fetchone()
+    provider_stats = {"external_calls": 0, "cache_reuses": 0}
+    if latest_run:
+        row = conn.execute(
+            """SELECT
+                   SUM(CASE WHEN kind='chat' AND status IN ('OK','SUCCESS','SUCCEEDED') THEN 1 ELSE 0 END) AS external_calls,
+                   SUM(CASE WHEN kind='provider_cache_hit' AND status='REUSED' THEN 1 ELSE 0 END) AS cache_reuses
+               FROM provider_calls WHERE run_id=?""",
+            (latest_run["id"],),
+        ).fetchone()
+        provider_stats = {
+            "external_calls": int(row["external_calls"] or 0) if row else 0,
+            "cache_reuses": int(row["cache_reuses"] or 0) if row else 0,
+        }
     return {
         "episode_id": episode_id,
         "action": action,
@@ -196,6 +221,20 @@ def _storyboard_start_preflight_payload(episode_id: str) -> dict:
         "kept_validated_shots": kept,
         "planned_shots": planned or None,
         "remaining_shots": remaining,
+        "can_start": not strategies_exhausted,
+        "blocking_reason": (
+            "当前问题的自动修复策略已用尽，请先人工修改问题镜头"
+            if strategies_exhausted else None
+        ),
+        "repair": {
+            "lifetime_repair_count": int(cp.repair_epoch or 0) if cp else 0,
+            "activation_no": int(cp.activation_no or 0) if cp else 0,
+            "activation_attempt_count": int(cp.activation_attempt_count or 0) if cp else 0,
+            "max_attempts_per_activation": 6,
+            "candidate_preserves_official_shots": True,
+            "last_issue_messages": list((cp.last_repair or {}).get("issue_messages") or [])[:12] if cp else [],
+            **provider_stats,
+        },
         "impact": "保留已通过逐镜校验的镜头，并从下一镜继续" if action == "resume" else "从空白开始生成本集分镜",
         "estimated_wait_minutes": [max(1, (remaining or planned or 1)), max(2, (remaining or planned or 1) * 3)],
         "estimated_cost_cny": None,
@@ -319,10 +358,29 @@ def _finalize_storyboard_evidence(
 ) -> str:
     conn = get_conn()
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    planned_total = 0
+    try:
+        planned_total = len(
+            json.loads(ep["storyboard_outline_json"] or "{}").get("shots") or []
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        planned_total = 0
+    if planned_total and len(board.shots) != planned_total:
+        raise RuntimeError(
+            f"拒绝发布不完整分镜：已完成 {len(board.shots)}/{planned_total} 镜"
+        )
+    if not board.shots or not board.shots[-1].is_final:
+        raise RuntimeError("拒绝发布不完整分镜：最终镜缺失或未标记收束")
     project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
     shot_rows = conn.execute(
-        "SELECT storyboard_artifact_id FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
+        "SELECT id,source_excerpt,storyboard_artifact_id FROM shots "
+        "WHERE episode_id=? ORDER BY shot_no", (episode_id,)
     ).fetchall()
+    from app.storyboard_workspace import verify_or_bind_existing_excerpt
+    for row in shot_rows:
+        verify_or_bind_existing_excerpt(
+            episode_id, row["id"], row["source_excerpt"] or "",
+        )
     parents = [
         artifact_id for artifact_id in (
             project["bible_artifact_id"], ep["screenplay_artifact_id"],
@@ -355,10 +413,47 @@ def _finalize_storyboard_evidence(
         },
     )
     artifact = evidence_repository.commit_artifact(None, artifact["id"], [evaluation])
-    conn.execute(
-        "UPDATE episodes SET storyboard_artifact_id=? WHERE id=?", (artifact["id"], episode_id)
+    from app.production.publish import publish_storyboard
+    from app.production.revision import (
+        ensure_production_revision,
+        mark_baseline_generated,
+        update_working_artifact,
     )
-    conn.commit()
+
+    revision = ensure_production_revision(
+        episode_id=episode_id,
+        kind="storyboard",
+        input_fingerprint=evidence_repository.content_hash(board.model_dump(mode="json")),
+        contract_version=contract_version,
+        qa_profile_version="storyboard-full-gate-2",
+        resume=True,
+    )
+    if revision.working_artifact_id:
+        update_working_artifact(revision.id, artifact["id"])
+    else:
+        revision = mark_baseline_generated(
+            revision.id,
+            baseline_artifact_id=artifact["id"],
+            working_artifact_id=artifact["id"],
+        )
+    eval_rows = conn.execute(
+        "SELECT id FROM evaluations WHERE artifact_id=? ORDER BY created_at",
+        (artifact["id"],),
+    ).fetchall()
+    publish_storyboard(
+        episode_id=episode_id,
+        revision_id=revision.id,
+        artifact_id=artifact["id"],
+        artifact_hash=artifact.get("content_hash") or evidence_repository.content_hash(
+            board.model_dump(mode="json")
+        ),
+        evaluation_ids=[str(row["id"]) for row in eval_rows],
+        shots_payload=[shot.model_dump(mode="json") for shot in board.shots],
+        outline_json=ep["storyboard_outline_json"],
+        input_fingerprint=revision.input_fingerprint,
+        contract_version=contract_version,
+        qa_profile_version=revision.qa_profile_version or "storyboard-full-gate-2",
+    )
     return str(artifact["id"])
 
 
@@ -443,6 +538,7 @@ async def _storyboard_task(
     *,
     resume: bool = True,
     run_id: str | None = None,
+    new_activation: bool = False,
 ):
     conn = get_conn()
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
@@ -515,11 +611,12 @@ async def _storyboard_task(
 
         # 集级 Supervisor：大纲 → 逐镜 → 整集校验 → 修复，完成后等待人工确认。
         from app.storyboard_supervisor import run_storyboard_supervisor
-        await run_storyboard_supervisor(
+        return await run_storyboard_supervisor(
             episode_id,
             resume=resume,
             run_id=run_id,
             preflight_done=True,
+            new_activation=new_activation,
         )
     except (StageError, Exception) as exc:  # noqa: BLE001
         rec = errors.log_error(exc, action="storyboard_generate", context={"episode_id": episode_id})
@@ -795,6 +892,7 @@ async def _recorded_storyboard_task(
     recorder: WorkflowRecorder,
     *,
     resume: bool,
+    new_activation: bool = False,
 ) -> None:
     recorder.start()
     try:
@@ -813,12 +911,13 @@ async def _recorded_storyboard_task(
                 "screenplay", ep["screenplay_json"],
                 source_artifact_id=ep["screenplay_artifact_id"], limit=24000,
             )
-        await recorder.step(
+        _step_id, supervisor_result = await recorder.step(
             "storyboard",
             lambda: _storyboard_task(
                 episode_id,
                 resume=resume,
                 run_id=getattr(recorder, "run_id", None),
+                new_activation=new_activation,
             ),
             contract_key="storyboard",
             agent_name="storyboard_supervisor",
@@ -829,17 +928,48 @@ async def _recorded_storyboard_task(
             "SELECT status, script_error, storyboard_artifact_id FROM episodes WHERE id=?",
             (episode_id,),
         ).fetchone()
-        if result and result["status"] == "confirmed":
+        phase = str(getattr(supervisor_result, "phase", "") or "")
+        outcome = str(getattr(supervisor_result, "outcome", "") or "")
+        if phase == "SUCCEEDED" or (result and result["status"] == "confirmed"):
             recorder.succeed("分镜已确认（尚未产生视频费用）")
-        elif result and result["status"] == "scripted" and result["storyboard_artifact_id"] and not result["script_error"]:
+        elif phase == "PAUSED_EXTERNAL":
+            from app.orchestration.state_machine import transition_run
+            transition_run(
+                recorder.run_id, "RUNNING", "PAUSED_EXTERNAL",
+                (result["script_error"] if result else None) or outcome or "Supervisor 已暂停",
+                failure_code=(
+                    "PROVIDER_UNAVAILABLE"
+                    if outcome == "PAUSED_PROVIDER_UNAVAILABLE"
+                    else "USER_PAUSE"
+                ),
+            )
+        elif phase == "WAITING_AUTHORIZATION":
+            from app.orchestration.state_machine import transition_run
+            transition_run(
+                recorder.run_id, "RUNNING", "WAITING_AUTHORIZATION",
+                (result["script_error"] if result else None) or outcome,
+                failure_code="WAITING_AUTHORIZATION",
+            )
+        elif phase == "WAITING_HUMAN":
+            from app.orchestration.state_machine import transition_run
+            wait_state = (
+                "WAITING_RETRY"
+                if outcome in {"WAITING_RETRY_ACTIVATION_BUDGET", "WAITING_RETRY_CAS_CONFLICT"}
+                else "WAITING_HUMAN"
+            )
+            transition_run(
+                recorder.run_id, "RUNNING", wait_state,
+                (result["script_error"] if result else None) or outcome or "Supervisor 等待处理",
+                failure_code=outcome or wait_state,
+            )
+        elif (
+            supervisor_result is None
+            and result
+            and result["status"] == "scripted"
+            and result["storyboard_artifact_id"]
+            and not result["script_error"]
+        ):
             recorder.succeed("分镜已完成，等待人工确认")
-        elif result and result["status"] == "scripted" and result["script_error"]:
-            # WAITING_HUMAN / 授权失效等：不是 PARTIAL 业务伪造成功，记为等待态成功保留
-            recorder.partial(result["script_error"])
-        elif result and result["status"] == "scripting":
-            run = evidence_repository.get_run(recorder.run_id)
-            if not run or run.get("status") != "PAUSED_EXTERNAL":
-                recorder.partial(result["script_error"] or "Supervisor 暂停，待恢复")
         else:
             recorder.fail(RuntimeError(result["script_error"] if result else "分镜生成失败"))
     except asyncio.CancelledError:
@@ -1012,6 +1142,13 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
         # whose downstream projection has already been cleared.  It cannot be
         # resumed as shot N+1 of the new screenplay.
         cp = None
+    if cp is not None and cp.outcome == "REPAIR_FAILED_STRATEGIES_EXHAUSTED":
+        raise HTTPException(409, {
+            "code": "STORYBOARD_REPAIR_STRATEGIES_EXHAUSTED",
+            "message": "当前问题的自动修复策略已用尽，未创建空转任务",
+            "recovery_action": "请在分镜台修改问题镜头，修改后系统会基于新版本重新校验",
+            "issue_messages": list((cp.last_repair or {}).get("issue_messages") or [])[:12],
+        })
     if not saved and (cp is None or cp.validated_prefix_end <= 0):
         raise HTTPException(409, "当前没有可恢复的 Supervisor / 逐镜 checkpoint，请重新生成分镜")
     last_row = conn.execute(
@@ -1029,7 +1166,11 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
             pass  # Supervisor 可能需要整集校验/确认，允许恢复
         elif bool(last_contract.get("is_final")):
             # 已收束且无待修复时，默认禁止盲目续跑加镜
-            if cp is None or cp.phase == "SUCCEEDED":
+            checkpoint_is_incomplete = bool(
+                cp is not None
+                and int(cp.expected_total or 0) > int(saved)
+            )
+            if cp is None or (cp.phase == "SUCCEEDED" and not checkpoint_is_incomplete):
                 raise HTTPException(
                     409,
                     f"第 {last_row['shot_no']} 镜已标记收束（is_final），禁止再续跑追加镜头；"
@@ -1069,7 +1210,7 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
         )
         conn.commit()
         coro = _recorded_storyboard_task(
-            episode_id, recorder, resume=True,
+            episode_id, recorder, resume=True, new_activation=True,
         )
         task_registry.spawn(
             "storyboard", episode_id, coro, project_id=ep["project_id"],
@@ -1109,7 +1250,7 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
             "recoverable": True,
         }) from exc
     checkpoint_saved = int(cp.validated_prefix_end or 0) if cp else 0
-    resumed_from_shot = max(int(saved), checkpoint_saved)
+    resumed_from_shot = checkpoint_saved if cp else int(saved)
     checkpoint_next = int(cp.next_shot_no or 0) if cp else 0
     return {
         "status": "scripting",
@@ -1246,7 +1387,9 @@ async def _storyboard_guarded_recorded(
     episode_id: str, sem: asyncio.Semaphore, recorder: WorkflowRecorder
 ) -> None:
     async with sem:
-        await _recorded_storyboard_task(episode_id, recorder, resume=True)
+        await _recorded_storyboard_task(
+            episode_id, recorder, resume=True, new_activation=True,
+        )
 
 
 @router.post("/episodes/{episode_id}/storyboard/cancel")
@@ -1273,8 +1416,266 @@ async def cancel_storyboard(episode_id: str, body: dict | None = Body(None)):
     )
 
 
+@router.post("/episodes/{episode_id}/storyboard/clear-preview")
+def preview_storyboard_clear(episode_id: str):
+    """Return the complete impact of resetting an episode's storyboard workspace."""
+    from app.storyboard_workspace import create_preview, episode_fingerprint
+
+    ep = _episode_or_404(episode_id)
+    if not _storyboard_has_material(episode_id, ep):
+        raise HTTPException(409, "当前没有可清空的分镜数据")
+    conn = get_conn()
+    shot_count = int(conn.execute(
+        "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,),
+    ).fetchone()["c"])
+    video_version_count = int(conn.execute(
+        """SELECT COUNT(*) AS c FROM shot_versions v
+           JOIN shots s ON s.id=v.shot_id WHERE s.episode_id=?""",
+        (episode_id,),
+    ).fetchone()["c"])
+    reference_asset_count = int(conn.execute(
+        """SELECT COUNT(*) AS c FROM reference_assets a
+           JOIN reference_sets r ON r.id=a.reference_set_id
+           JOIN shots s ON s.id=r.shot_id
+           WHERE s.episode_id=? AND a.deleted=0""",
+        (episode_id,),
+    ).fetchone()["c"])
+    workflow_run_count = int(conn.execute(
+        """SELECT COUNT(*) AS c FROM workflow_runs
+           WHERE workflow_type IN ('storyboard','video_completion')
+             AND scope_type='episode' AND scope_id=?""",
+        (episode_id,),
+    ).fetchone()["c"])
+    delivery_package_count = int(conn.execute(
+        "SELECT COUNT(*) AS c FROM delivery_packages WHERE episode_id=?",
+        (episode_id,),
+    ).fetchone()["c"])
+    payload = {
+        "shot_count": shot_count,
+        "video_version_count": video_version_count,
+        "reference_asset_count": reference_asset_count,
+        "workflow_run_count": workflow_run_count,
+        "delivery_package_count": delivery_package_count,
+        "active_task_will_stop": bool(
+            ep["active_storyboard_run_id"] or ep["active_video_run_id"]
+        ),
+        "screenplay_preserved": True,
+        "irreversible": True,
+    }
+    return create_preview(
+        "storyboard_clear",
+        episode_id,
+        payload,
+        baseline_fingerprint=episode_fingerprint(episode_id),
+    )
+
+
+@router.post("/episodes/{episode_id}/storyboard/clear")
+async def apply_storyboard_clear(episode_id: str, body: dict):
+    """Clear all storyboard/downstream state after an explicit current preview."""
+    from app.storyboard_workspace import require_preview
+
+    require_preview(body.get("preview_token"), "storyboard_clear", episode_id)
+    return await clear_storyboard_projection(episode_id)
+
+
+async def clear_storyboard_projection(episode_id: str) -> dict:
+    """Fast product reset: clear current production state while retaining audit history."""
+    cancelled_tasks = 0
+    for kind in ("storyboard", "video_completion"):
+        try:
+            cancelled_tasks += int(await asyncio.wait_for(
+                task_registry.cancel_and_wait(kind, episode_id), timeout=10,
+            ))
+        except TimeoutError as exc:
+            raise HTTPException(
+                409,
+                "相关生成任务未能在 10 秒内安全停止；未开始清空，请稍后重试",
+            ) from exc
+
+    def _reset_projection() -> dict:
+        import shutil
+
+        ep = _episode_or_404(episode_id)
+        if ep["screenplay_publish_fence"]:
+            raise HTTPException(409, "剧本正在发布，请完成后再清空分镜")
+        conn = get_conn()
+        claimed = conn.execute(
+            "UPDATE episodes SET screenplay_publish_fence=1 "
+            "WHERE id=? AND screenplay_publish_fence=0",
+            (episode_id,),
+        )
+        if claimed.rowcount != 1:
+            conn.rollback()
+            raise HTTPException(409, "分镜状态刚刚发生变化，请稍后重试")
+        conn.commit()
+
+        package_paths: list[str] = []
+        try:
+            shot_count = int(conn.execute(
+                "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,),
+            ).fetchone()["c"])
+            media_versions = int(conn.execute(
+                """SELECT COUNT(*) AS c FROM shot_versions v
+                   JOIN shots s ON s.id=v.shot_id WHERE s.episode_id=?""",
+                (episode_id,),
+            ).fetchone()["c"])
+            run_rows = conn.execute(
+                """SELECT id,workflow_type,status FROM workflow_runs
+                   WHERE workflow_type IN ('storyboard','video_completion')
+                     AND scope_type='episode' AND scope_id=?""",
+                (episode_id,),
+            ).fetchall()
+            package_paths = [
+                str(row["package_path"])
+                for row in conn.execute(
+                    "SELECT package_path FROM delivery_packages WHERE episode_id=?",
+                    (episode_id,),
+                ).fetchall()
+                if row["package_path"]
+            ]
+
+            worker.delete_episode_shots(episode_id)
+            conn = get_conn()
+            conn.execute("BEGIN IMMEDIATE")
+            stamp = now()
+            active_run_ids = [
+                str(row["id"])
+                for row in run_rows
+                if row["status"] in evidence_repository.ACTIVE_RUN_STATUSES
+            ]
+            if active_run_ids:
+                marks = ",".join("?" for _ in active_run_ids)
+                conn.execute(
+                    f"""UPDATE step_runs SET status='CANCELLED', finished_at=COALESCE(finished_at,?),
+                           exit_reason=COALESCE(exit_reason,'CLEARED_BY_USER')
+                       WHERE run_id IN ({marks})
+                         AND status NOT IN ('SUCCEEDED','FAILED','CANCELLED')""",
+                    (stamp, *active_run_ids),
+                )
+                conn.execute(
+                    f"""UPDATE provider_calls SET status='CANCELLED',
+                           error=COALESCE(error,'CLEARED_BY_USER')
+                       WHERE run_id IN ({marks}) AND status='RUNNING'""",
+                    active_run_ids,
+                )
+                conn.execute(
+                    f"""UPDATE workflow_runs SET status='CANCELLED',
+                           failure_code='CLEARED_BY_USER',
+                           failure_message='用户清空分镜工作区',
+                           finished_at=COALESCE(finished_at,?), updated_at=?
+                       WHERE id IN ({marks})""",
+                    (stamp, stamp, *active_run_ids),
+                )
+
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='shot_audio'"
+            ).fetchone():
+                conn.execute("DELETE FROM shot_audio WHERE episode_id=?", (episode_id,))
+            conn.execute("DELETE FROM storyboard_action_previews WHERE episode_id=?", (episode_id,))
+            conn.execute("DELETE FROM storyboard_edit_sessions WHERE episode_id=?", (episode_id,))
+            conn.execute("DELETE FROM storyboard_workspace_state WHERE episode_id=?", (episode_id,))
+            conn.execute("DELETE FROM delivery_packages WHERE episode_id=?", (episode_id,))
+            conn.execute(
+                "DELETE FROM completion_grants WHERE episode_id=? AND kind='storyboard'",
+                (episode_id,),
+            )
+            conn.execute(
+                "DELETE FROM production_grants WHERE episode_id=? AND kind='storyboard'",
+                (episode_id,),
+            )
+            conn.execute(
+                """UPDATE production_revisions SET status='superseded', updated_at=?
+                   WHERE episode_id=? AND kind='storyboard' AND status='active'""",
+                (stamp, episode_id),
+            )
+            conn.execute(
+                """UPDATE artifacts SET status='rejected',
+                       stale_reason=COALESCE(stale_reason,'用户已清空分镜工作区')
+                   WHERE type='storyboard_supervisor_checkpoint'
+                     AND scope_type='episode' AND scope_id=?
+                     AND status IN ('candidate','validated','approved')""",
+                (episode_id,),
+            )
+            conn.execute(
+                """UPDATE episodes SET
+                       storyboard_outline_json=NULL,
+                       storyboard_artifact_id=NULL,
+                       storyboard_warning=NULL,
+                       active_storyboard_run_id=NULL,
+                       working_storyboard_artifact_id=NULL,
+                       published_storyboard_artifact_id=NULL,
+                       storyboard_production_revision_id=NULL,
+                       storyboard_completion_certificate_id=NULL,
+                       active_video_run_id=NULL,
+                       video_control_json=NULL,
+                       delivery_artifact_id=NULL,
+                       delivery_status='not_ready',
+                       status='planned',
+                       script_error=NULL,
+                       screenplay_publish_fence=0
+                   WHERE id=?""",
+                (episode_id,),
+            )
+            if "storyboard_control_json" in {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(episodes)").fetchall()
+            }:
+                conn.execute(
+                    "UPDATE episodes SET storyboard_control_json=NULL WHERE id=?",
+                    (episode_id,),
+                )
+            conn.commit()
+
+            projects_root = config.PROJECTS_DIR.resolve()
+            removed_files = 0
+            for raw_path in dict.fromkeys(package_paths):
+                candidate = Path(raw_path)
+                try:
+                    resolved = candidate.resolve()
+                    if resolved == projects_root or projects_root not in resolved.parents:
+                        continue
+                    if resolved.is_dir():
+                        shutil.rmtree(resolved, ignore_errors=True)
+                        removed_files += 1
+                    elif resolved.exists():
+                        resolved.unlink()
+                        removed_files += 1
+                except OSError:
+                    continue
+            storyboard_runs = sum(
+                1 for row in run_rows if row["workflow_type"] == "storyboard"
+            )
+            return {
+                "cleared": True,
+                "episode_id": episode_id,
+                "shots_deleted": shot_count,
+                "media_versions_deleted": media_versions,
+                "storyboard_runs_preserved": storyboard_runs,
+                "downstream_runs_preserved": len(run_rows) - storyboard_runs,
+                "files_deleted": removed_files,
+                "cancelled_tasks": cancelled_tasks,
+                "screenplay_preserved": True,
+                "audit_history_preserved": True,
+            }
+        except Exception:
+            conn = get_conn()
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn = get_conn()
+            conn.execute(
+                "UPDATE episodes SET screenplay_publish_fence=0 WHERE id=?",
+                (episode_id,),
+            )
+            conn.commit()
+
+    return await asyncio.to_thread(_reset_projection)
+
+
 async def clear_storyboard(episode_id: str):
-    """内部维护工具：清理测试/运维环境中的整集分镜痕迹，不暴露产品入口。
+    """清理整集分镜痕迹；产品入口必须先通过 ``storyboard_clear`` 影响预览。
 
     The screenplay is intentionally retained.  Unlike cancellation, clearing also
     removes checkpoints, workflow/provider cache rows, active revisions and all
@@ -1584,7 +1985,18 @@ def _storyboard_status_snapshot(
         "PAUSED_EXTERNAL", "PAUSED_BUDGET", "WAITING_HUMAN", "WAITING_AUTHORIZATION",
         "CANCELLED",
     }
-    paused = phase in {"PAUSED_EXTERNAL", "PAUSED_BUDGET", "WAITING_HUMAN", "WAITING_AUTHORIZATION"}
+    incomplete_terminal_checkpoint = bool(
+        phase == "SUCCEEDED"
+        and (
+            shot_count != planned
+            or passed != shot_count
+            or not final_valid
+        )
+    )
+    paused = (
+        phase in {"PAUSED_EXTERNAL", "PAUSED_BUDGET", "WAITING_HUMAN", "WAITING_AUTHORIZATION"}
+        or incomplete_terminal_checkpoint
+    )
     confirmed = ep.get("status") in {"confirmed", "generating", "done"}
     if confirmed:
         passed = shot_count
@@ -2353,6 +2765,10 @@ def episode_detail(episode_id: str, view: str | None = None):
             ep["supervisor"] = {
                 "phase": cp.phase,
                 "repair_epoch": cp.repair_epoch,
+                "lifetime_repair_count": cp.repair_epoch,
+                "activation_no": cp.activation_no,
+                "activation_attempt_count": cp.activation_attempt_count,
+                "activation_attempt_limit": 6,
                 "validated_prefix_end": cp.validated_prefix_end,
                 "next_shot_no": cp.next_shot_no,
                 "expected_total": cp.expected_total or ep["storyboard_planned_shots"] or 0,

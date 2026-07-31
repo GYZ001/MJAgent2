@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from app import hiagent, video_modes, worker
+from app import errors, hiagent, video_modes, worker
 from app.schemas import Bible, Character, Shot, World
 from app.video_modes import (
     REFERENCE_IMAGE_MODE,
@@ -1585,6 +1585,49 @@ def test_runtime_auto_repairs_missing_selected_keyframe_file(monkeypatch) -> Non
     assert out_meta["reference_images"][0]["id"] == "repaired-keyframe"
     assert out_meta["keyframe_file_repair_count"] == 1
     assert writes
+
+
+def test_runtime_reports_exhausted_required_keyframe_gate_as_qa_not_provider(monkeypatch) -> None:
+    """图片/质检调用已成功、但必需关键帧仍不可用时，不得误报成 LLM 故障。"""
+
+    async def fake_build_reference_assets(**kwargs):
+        kwargs["existing_meta"].update({
+            "narrative_keyframe_missing": True,
+            "reference_group_gate_passed": False,
+        })
+        return [ReferenceImageAsset(
+            id="character-anchor",
+            url="data:image/jpeg;base64,character",
+            type="character",
+            source="asset_library",
+            selectedForSeedance=True,
+            required=True,
+            purposes=["video_input", "qa_anchor"],
+        )]
+
+    monkeypatch.setattr(worker, "_set_version", lambda *a, **k: None)
+    monkeypatch.setattr(video_modes, "build_reference_assets", fake_build_reference_assets)
+    monkeypatch.setattr("app.media_pipeline.stage_state.set_pipeline_stage", lambda *a, **k: None)
+
+    conn = _FakeConn({"bible_json": _bible().model_dump_json()})
+    meta = {
+        "mode": REFERENCE_IMAGE_MODE,
+        "mode_decision": decision_to_dict(video_modes.default_reference_decision()),
+        "after_shot_id": None,
+    }
+
+    with pytest.raises(errors.ContentGenerationError) as exc_info:
+        asyncio.run(worker._prepare_reference_mode_inputs(
+            conn,
+            {"id": "j1", "project_id": "p1", "episode_id": "e1", "shot_id": "s1"},
+            {"id": "v1"},
+            _shot_row(),
+            {"episode_no": 1},
+            meta,
+            "PROMPT",
+        ))
+
+    assert errors.classify(exc_info.value) == ("quality_gate", "QA")
 
 
 def test_runtime_submits_anchor_only_fallback_after_all_keyframe_candidates_fail(monkeypatch) -> None:

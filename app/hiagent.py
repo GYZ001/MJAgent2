@@ -54,7 +54,12 @@ def _cached_successful_provider_response(
     """恢复时复用同一幂等 operation 的成功响应，避免成功结果因状态竞态丢失。"""
     if not bool((meta or {}).get("reuse_successful_operation")):
         return None
-    operation_id = provider_operation_id(kind, model, payload)
+    # A caller may provide a durable semantic operation id.  This is required
+    # for repair workflows: the same semantic attempt must be recoverable after
+    # a process crash, while a *new* repair attempt must never reuse an older
+    # answer merely because its base prompt happens to be byte-identical.
+    operation_id = str((meta or {}).get("operation_id") or "").strip() \
+        or provider_operation_id(kind, model, payload)
     try:
         row = get_conn().execute(
             "SELECT id,response_json FROM provider_calls "

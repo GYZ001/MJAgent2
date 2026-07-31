@@ -18,7 +18,7 @@ def _assert_review_dependency_fence(job, version_id: str, write_point: str) -> N
     """
     conn = get_conn()
     row = conn.execute(
-        "SELECT image_inputs FROM shot_versions WHERE id=?", (version_id,),
+        "SELECT shot_id, image_inputs FROM shot_versions WHERE id=?", (version_id,),
     ).fetchone()
     try:
         meta = json.loads(row["image_inputs"] or "{}") if row else {}
@@ -42,6 +42,13 @@ def _assert_review_dependency_fence(job, version_id: str, write_point: str) -> N
     upstream_equal = all(current.get(key) == captured.get(key) for key in upstream_keys)
     expected_assets = captured.get("asset_inputs") or []
     current_assets = current.get("asset_inputs") or []
+    # The current shot's gallery is produced/updated by this very job.  It is
+    # an output of the run, not an upstream dependency: comparing it here
+    # makes a successful reference build invalidate its own captured token.
+    # Other shots remain fenced, so unrelated asset edits still stop a stale
+    # provider result from becoming a candidate.
+    target_shot_id = row["shot_id"] if row else None
+
     def asset_contract(items):
         return sorted(
             json.dumps(
@@ -49,6 +56,7 @@ def _assert_review_dependency_fence(job, version_id: str, write_point: str) -> N
                 ensure_ascii=False, sort_keys=True,
             )
             for item in items
+            if item.get("shot_id") != target_shot_id
         )
     assets_equal = not expected_assets or asset_contract(current_assets) == asset_contract(expected_assets)
     if current.get("eligible_for_production") and upstream_equal and assets_equal:
@@ -1422,8 +1430,9 @@ async def _prepare_reference_mode_inputs(
                 pass
             _set_version(version["id"], image_inputs=json.dumps(meta, ensure_ascii=False), prompt_text=prompt_text)
             conn.commit()
-            raise ProviderError(
-                "必需叙事关键帧文件缺失或不可用，已阻止视频提交；请重新生成关键帧。"
+            raise errors.ContentGenerationError(
+                "必需叙事关键帧未通过结构门禁或文件不可用，"
+                "已阻止视频提交；请重新生成关键帧。"
             )
         meta["reference_group_gate_passed"] = True
         meta["video_input_manifest_frozen"] = True
@@ -1559,7 +1568,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                 (provider_operation_id, job_id),
             )
             conn.commit()
-        _set_version(version["id"], status="running")
+        _set_version(version["id"], status="running", error=None)
         prompt_text = ensure_source_excerpt_in_prompt(version["prompt_text"], _load_shot_model(shot))
         if prompt_text != version["prompt_text"]:
             _set_version(version["id"], prompt_text=prompt_text)
@@ -1949,7 +1958,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         )
         meta["provider_paid_attempts"] = paid_attempts
         cost = shot_cost_cny(shot["duration_s"]) * paid_attempts
-        _set_version(version["id"], status="succeeded", video_path=str(dest),
+        _set_version(version["id"], status="succeeded", error=None, video_path=str(dest),
                      last_frame_url=result["last_frame_url"], cost_cny=cost, latency_s=latency,
                      image_inputs=json.dumps(meta, ensure_ascii=False))
         # 生成台产生了新片段，旧的整集合成视频即过期 → 删除，避免成片台展示陈旧成品

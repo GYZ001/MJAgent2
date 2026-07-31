@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from difflib import SequenceMatcher
 from typing import Any
 
 from app.db import get_conn, get_setting, now
@@ -49,6 +50,13 @@ _SCENE_STORY_FUNCTION_CODES = {
     "SCENE_STORY_FUNCTION_TOO_SHORT",
 }
 _SCENE_NUMBER_RE = re.compile(r"scene_outline\s*第\s*(\d+)\s*场|/scene_blocks/SC(\d+)", re.I)
+_DIALOGUE_SOURCE_MISMATCH_RE = re.compile(
+    r"dialogue_chains\[(\d+)\]\.turns\[(\d+)\]\.source_text\s+未在本集原文中找到"
+)
+_SOURCE_SENTENCE_RE = re.compile(r"[^。！？!?\n]+[。！？!?]?")
+_SOURCE_EVIDENCE_STOP_CHARS = set(
+    "的一了是在有和与把被就都还又只这那个人我们你他她它说问答"
+)
 
 
 def _eval_id_from_create(evaluation_row: dict[str, Any] | str | None) -> str:
@@ -82,7 +90,13 @@ def _patch_strategy_key(ops: list[PatchOperation]) -> str:
     if kind == "information" and op.path == "event_id":
         return "fix_ledger_event"
     if kind == "dialogue_chain_turn" and op.path == "source_text":
-        return "fix_opening_source_anchor"
+        return str(
+            (op.target or {}).get("strategy")
+            or (
+                f"fix_dialogue_source_{op.target.get('chain_id')}_"
+                f"{op.target.get('turn_index')}"
+            )
+        )
     if kind == "dialogue_chain_turn" and op.path == "function":
         return (
             f"fix_dialogue_function_{op.target.get('chain_id')}_"
@@ -170,6 +184,7 @@ def plan_screenplay_patch(
     issue: Issue,
     script: EpisodeScreenplay,
     *,
+    source_text: str = "",
     strategy_history: dict[str, list[str]] | None = None,
 ) -> list[PatchOperation]:
     """最小范围 Patch 规划（确定性优先，避免整对象替换）。"""
@@ -248,12 +263,44 @@ def plan_screenplay_patch(
                         target={"kind": "metadata", "id": field},
                     )]
 
-    # 原文开场对白锚点：只修 dialogue_chains[0].turns[0].source_text，
-    # 不覆盖整条对白链，更不会重写正文。
-    if code == "SOURCE_FIDELITY" and not _strategy_was_tried(
-        tried, "fix_opening_source_anchor"
+    # 普通话轮的原文依据必须按报错索引精确修复。模型偶尔会写入
+    # “原文叙述转为对白”之类说明性占位词；此时只能替换为本集原文中的
+    # 可核验句子，不能误改开场话轮，也不能用占位词绕过 SOURCE_FIDELITY。
+    mismatch = _DIALOGUE_SOURCE_MISMATCH_RE.search(issue.message or "")
+    if code == "SOURCE_FIDELITY" and mismatch and source_text:
+        chain_index, turn_index = map(int, mismatch.groups())
+        turn_ref = _dialogue_turn_at(script, chain_index, turn_index)
+        if turn_ref is not None:
+            chain, turn = turn_ref
+            strategy = f"fix_dialogue_source_{chain.chain_id}_{turn_index}"
+            if not _strategy_was_tried(tried, strategy):
+                evidence = _best_source_evidence_for_turn(
+                    script,
+                    chain_index=chain_index,
+                    turn_index=turn_index,
+                    source_text=source_text,
+                )
+                if evidence and evidence != (turn.source_text or "").strip():
+                    return [PatchOperation(
+                        op="replace_field",
+                        path="source_text",
+                        value=evidence,
+                        target={
+                            "kind": "dialogue_chain_turn",
+                            "id": f"{chain.chain_id}-T{turn_index + 1}",
+                            "chain_id": chain.chain_id,
+                            "turn_index": turn_index,
+                            "strategy": strategy,
+                        },
+                    )]
+
+    # 原文开场对白锚点：只处理明确的开场锚点错误。
+    if (
+        code == "SOURCE_FIDELITY"
+        and "原文开场第一句对白未作为" in (issue.message or "")
+        and not _strategy_was_tried(tried, "fix_opening_source_anchor")
     ):
-        opening = _extract_quoted_fragment(issue.message or "")
+        opening = _opening_anchor_from_issue(issue.message or "")
         if opening and script.dialogue_chains and script.dialogue_chains[0].turns:
             chain_id = script.dialogue_chains[0].chain_id
             return [PatchOperation(
@@ -265,6 +312,7 @@ def plan_screenplay_patch(
                     "id": f"{chain_id}-T1",
                     "chain_id": chain_id,
                     "turn_index": 0,
+                    "strategy": "fix_opening_source_anchor",
                 },
             )]
 
@@ -428,6 +476,146 @@ def _extract_quoted_fragment(message: str) -> str:
         if m:
             return m.group(1).strip()
     return ""
+
+
+def _opening_anchor_from_issue(message: str) -> str:
+    match = re.search(
+        r"原文开场第一句对白未作为\s+dialogue_chains\[0\]\.turns\[0\]"
+        r"[：:]\s*(.+?)(?:；|;|$)",
+        message,
+    )
+    return match.group(1).strip() if match else ""
+
+
+def _dialogue_turn_at(
+    script: EpisodeScreenplay,
+    chain_index: int,
+    turn_index: int,
+):
+    chains = script.dialogue_chains or []
+    if not 0 <= chain_index < len(chains):
+        return None
+    chain = chains[chain_index]
+    turns = chain.turns or []
+    if not 0 <= turn_index < len(turns):
+        return None
+    return chain, turns[turn_index]
+
+
+def _source_sentence_candidates(source_text: str) -> list[str]:
+    candidates: list[str] = []
+    for paragraph in re.split(r"\n+", source_text or ""):
+        paragraph = paragraph.strip()
+        if not paragraph:
+            continue
+        sentences = [
+            match.group(0).strip()
+            for match in _SOURCE_SENTENCE_RE.finditer(paragraph)
+            if match.group(0).strip()
+        ]
+        for index, sentence in enumerate(sentences):
+            candidates.append(sentence)
+            if index + 1 < len(sentences):
+                candidates.append(f"{sentence}{sentences[index + 1]}")
+    return list(dict.fromkeys(candidates))
+
+
+def _source_evidence_score(candidate: str, target: str, context: str) -> float:
+    compact_candidate = re.sub(r"\W+", "", candidate)
+    compact_target = re.sub(r"\W+", "", target)
+    compact_context = re.sub(r"\W+", "", context)
+    if not compact_candidate or not compact_target:
+        return 0.0
+
+    meaningful_target = {
+        char for char in compact_target
+        if char not in _SOURCE_EVIDENCE_STOP_CHARS
+    }
+    meaningful_overlap = meaningful_target & set(compact_candidate)
+    if len(meaningful_overlap) < 2:
+        return 0.0
+
+    target_bigrams = {
+        compact_target[index:index + 2]
+        for index in range(max(0, len(compact_target) - 1))
+    }
+    candidate_bigrams = {
+        compact_candidate[index:index + 2]
+        for index in range(max(0, len(compact_candidate) - 1))
+    }
+    context_bigrams = {
+        compact_context[index:index + 2]
+        for index in range(max(0, len(compact_context) - 1))
+    }
+    target_coverage = (
+        len(target_bigrams & candidate_bigrams) / len(target_bigrams)
+        if target_bigrams else 0.0
+    )
+    context_coverage = (
+        len(context_bigrams & candidate_bigrams) / len(context_bigrams)
+        if context_bigrams else 0.0
+    )
+    sequence = SequenceMatcher(None, compact_target, compact_candidate).ratio()
+    char_coverage = len(meaningful_overlap) / max(1, len(meaningful_target))
+    length_penalty = min(0.2, max(0, len(compact_candidate) - 100) / 500)
+    return (
+        target_coverage * 5.0
+        + char_coverage * 2.0
+        + sequence
+        + context_coverage * 0.75
+        - length_penalty
+    )
+
+
+def _best_source_evidence_for_turn(
+    script: EpisodeScreenplay,
+    *,
+    chain_index: int,
+    turn_index: int,
+    source_text: str,
+) -> str:
+    turn_ref = _dialogue_turn_at(script, chain_index, turn_index)
+    if turn_ref is None:
+        return ""
+    chain, turn = turn_ref
+    target = (turn.line or "").strip()
+    if not target:
+        return ""
+
+    context_parts = [chain.topic or ""]
+    full_script = script.full_script_text or ""
+    line_offset = full_script.find(target)
+    if line_offset >= 0:
+        headings = list(re.finditer(r"【场\s*(\d+)】", full_script[:line_offset]))
+        if headings:
+            scene_no = int(headings[-1].group(1))
+            scene = next(
+                (
+                    item for item in (script.scene_outline or [])
+                    if int(item.scene_no) == scene_no
+                ),
+                None,
+            )
+            if scene is not None:
+                context_parts.extend([
+                    scene.source_basis or "",
+                    scene.summary or "",
+                    scene.conflict or "",
+                    scene.turn or "",
+                ])
+    context = " ".join(part for part in context_parts if part)
+
+    ranked = sorted(
+        (
+            (_source_evidence_score(candidate, target, context), candidate)
+            for candidate in _source_sentence_candidates(source_text)
+        ),
+        key=lambda item: (item[0], -len(item[1])),
+        reverse=True,
+    )
+    if not ranked or ranked[0][0] < 1.0:
+        return ""
+    return ranked[0][1]
 
 
 def _guess_speaker(line: str, script: EpisodeScreenplay) -> str:
@@ -681,7 +869,12 @@ async def run_screenplay_production(
             conn.commit()
             raise RuntimeError("WAITING_INPUT: " + issues[0].message if issues else "WAITING_INPUT")
 
-        ops = plan_screenplay_patch(issue, script, strategy_history=strategy_history)
+        ops = plan_screenplay_patch(
+            issue,
+            script,
+            source_text=source_text,
+            strategy_history=strategy_history,
+        )
         if not ops:
             # 扩大一层：尝试 LLM 单字段修补
             ops = await _llm_field_patch(issue, script, source_text=source_text)

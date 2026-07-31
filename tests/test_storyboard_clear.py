@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 
 import pytest
 from app import api, config, db
 from app.capabilities.direct import enter_handler
 from app.schemas import EpisodeScreenplay
+from fastapi import HTTPException
 
 
 @pytest.fixture(autouse=True)
@@ -196,6 +198,49 @@ def test_clear_storyboard_removes_resumable_data_cache_and_downstream_media() ->
     assert conn.execute("SELECT COUNT(*) AS c FROM storyboard_workspace_state WHERE episode_id='e1'").fetchone()["c"] == 0
     assert conn.execute("SELECT COUNT(*) AS c FROM delivery_packages WHERE episode_id='e1'").fetchone()["c"] == 0
     assert not (config.PROJECTS_DIR / "p1" / "delivery" / "pkg1").exists()
+
+
+def test_product_clear_requires_current_impact_preview(monkeypatch) -> None:
+    preview = api.preview_storyboard_clear("e1")
+    assert preview["shot_count"] == 1
+    assert preview["video_version_count"] == 1
+    assert preview["active_task_will_stop"] is True
+    assert preview["screenplay_preserved"] is True
+
+    with pytest.raises(HTTPException) as missing:
+        asyncio.run(api.apply_storyboard_clear("e1", {}))
+    assert missing.value.status_code == 428
+    assert db.get_conn().execute(
+        "SELECT COUNT(*) AS c FROM shots WHERE episode_id='e1'"
+    ).fetchone()["c"] == 1
+
+    main_thread = threading.get_ident()
+    original_delete = api.worker.delete_episode_shots
+    delete_thread: list[int] = []
+
+    def recorded_delete(episode_id: str):
+        delete_thread.append(threading.get_ident())
+        return original_delete(episode_id)
+
+    monkeypatch.setattr(api.worker, "delete_episode_shots", recorded_delete)
+    with enter_handler():
+        result = asyncio.run(api.apply_storyboard_clear(
+            "e1", {"preview_token": preview["preview_token"]},
+        ))
+    assert result["cleared"] is True
+    assert result["shots_deleted"] == 1
+    assert delete_thread and delete_thread[0] != main_thread
+    assert result["audit_history_preserved"] is True
+    episode = db.get_conn().execute("SELECT * FROM episodes WHERE id='e1'").fetchone()
+    assert episode["screenplay_artifact_id"] == "art_screenplay"
+    assert episode["storyboard_artifact_id"] is None
+    assert db.get_conn().execute(
+        "SELECT COUNT(*) AS c FROM workflow_runs WHERE id='run_storyboard'"
+    ).fetchone()["c"] == 1
+    assert db.get_conn().execute(
+        "SELECT status FROM production_revisions WHERE id='rev_storyboard'"
+    ).fetchone()["status"] == "superseded"
+    assert api._storyboard_start_preflight_payload("e1")["action"] == "create"
 
 
 def test_start_auto_resumes_until_internal_reset_clears_existing_work() -> None:

@@ -87,6 +87,23 @@ def test_fingerprint_stall_upgrades():
     assert upgrade_level("L1") == "L2"
 
 
+def test_persisted_fingerprint_count_escalates_without_current_level() -> None:
+    issues = [_issue("BUSINESS_RULE_FAILED", "第 10 镜起连续 3 个镜头景别相同", 10)]
+    first = route_issues(issues, validated_prefix_end=9, next_shot_no=10)
+
+    stalled = route_issues(
+        issues,
+        validated_prefix_end=9,
+        next_shot_no=10,
+        issue_fingerprint_counts={first.fingerprint: 8},
+    )
+
+    assert stalled.level == "L5"
+    assert stalled.strategy == "waiting_human"
+    assert stalled.pause_state == "WAITING_HUMAN"
+    assert stalled.reason == "stalled_after_upgrade"
+
+
 def test_frontier_from_message():
     issues = [_issue("KEY_LINE_MISSING", "分镜丢失了剧本标记的 1 条主线台词：薰儿相信", 5)]
     frontier = compute_invalidation_frontier(

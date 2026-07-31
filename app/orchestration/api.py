@@ -310,7 +310,7 @@ def _restart_storyboard_run(run_id: str, trigger_type: str):
         task_registry.spawn(
             "storyboard", episode["id"],
             domain_api._recorded_storyboard_task(
-                episode["id"], recorder, resume=True,
+                episode["id"], recorder, resume=True, new_activation=True,
             ),
             project_id=episode["project_id"],
         )

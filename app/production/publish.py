@@ -1,6 +1,7 @@
 """原子发布：Working → Published，消费完成凭证。"""
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from app.db import get_conn, now
@@ -134,6 +135,20 @@ def publish_storyboard(
     rev = get_production_revision(revision_id)
     if rev is None:
         raise ValueError("production revision 不存在")
+    if rev.working_artifact_id != artifact_id:
+        raise ValueError("只能发布当前 working Artifact")
+    planned_total = 0
+    if outline_json:
+        try:
+            planned_total = len(json.loads(outline_json).get("shots") or [])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            planned_total = 0
+    if planned_total and len(shots_payload) != planned_total:
+        raise ValueError(
+            f"拒绝发布不完整分镜：已完成 {len(shots_payload)}/{planned_total} 镜"
+        )
+    if not shots_payload or not bool(shots_payload[-1].get("is_final")):
+        raise ValueError("拒绝发布不完整分镜：最终镜缺失或未标记收束")
 
     cert = issue_completion_certificate(
         kind="storyboard",

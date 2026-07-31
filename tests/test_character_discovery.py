@@ -97,6 +97,7 @@ def test_ensure_character_card_keeps_auto_added_card_when_portrait_fails(monkeyp
 
     monkeypatch.setattr(portraits, "assess_new_character", fake_assess)
     monkeypatch.setattr(portraits, "_generate_fresh_portrait", boom)
+    monkeypatch.setattr(portraits, "code_ref", lambda *_args, **_kwargs: "（测试错误）")
 
     res = asyncio.run(portraits.ensure_character_card("p1", "美杜莎", 21))
     assert res["status"] == "added" and res["has_portrait"] is False

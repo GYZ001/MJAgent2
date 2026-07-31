@@ -100,6 +100,82 @@ def test_seed_qa_allows_summary_that_explicitly_says_minor_crop() -> None:
     assert any("轻微裁切" in item for item in result["issues"])
 
 
+def test_seed_qa_does_not_invert_positive_no_defect_summary() -> None:
+    result = normalize_portrait_seed_qa({
+        "identity_match": 0.95,
+        "presentation_match": 0.95,
+        "clean_frame": 0.98,
+        "person_count": 1,
+        "watermark_detected": False,
+        "watermark_occluding": False,
+        "forbidden_text_detected": False,
+        "full_body_visible": True,
+        "crop_severity": "none",
+        "anatomy_valid": True,
+        "soft_warnings": [],
+        "hard_failures": [],
+        "issues": [
+            "该单角色立绘符合角色锚点的核心要求，带有雨夜雨滴特效匹配氛围，"
+            "背景为浅米色，全身完整无水印文字遮挡，解剖结构正常"
+        ],
+    })
+
+    assert result["hard_gate_passed"] is True
+    assert result["status"] == "warning"
+    assert result["hard_failures"] == []
+
+
+def test_seed_qa_does_not_invert_compound_no_watermark_or_text_summary() -> None:
+    result = normalize_portrait_seed_qa({
+        "identity_match": 0.9,
+        "presentation_match": 0.85,
+        "clean_frame": 0.95,
+        "person_count": 1,
+        "watermark_detected": False,
+        "watermark_occluding": None,
+        "forbidden_text_detected": False,
+        "full_body_visible": True,
+        "crop_severity": "minor",
+        "anatomy_valid": True,
+        "soft_warnings": ["鞋尖轻微贴近画面底部，属于轻微裁切"],
+        "hard_failures": [],
+        "issues": [
+            "无水印、无遮挡文字/Logo",
+            "人物肢体无畸形，五官正常",
+        ],
+    })
+
+    assert result["hard_gate_passed"] is True
+    assert result["status"] == "warning"
+    assert result["hard_failures"] == []
+
+
+def test_seed_qa_structured_minor_crop_overrides_bottom_crop_wording() -> None:
+    result = normalize_portrait_seed_qa({
+        "identity_match": 0.85,
+        "presentation_match": 0.9,
+        "clean_frame": 0.97,
+        "person_count": 1,
+        "watermark_detected": False,
+        "watermark_occluding": False,
+        "forbidden_text_detected": False,
+        "full_body_visible": True,
+        "crop_severity": "minor",
+        "anatomy_valid": True,
+        "soft_warnings": ["鞋尖接近画面底部边缘"],
+        "hard_failures": [],
+        "issues": [
+            "发型与锚点描述不符",
+            "存在轻微底部裁切",
+        ],
+    })
+
+    assert result["hard_gate_passed"] is True
+    assert result["status"] == "warning"
+    assert result["hard_failures"] == []
+    assert "存在轻微底部裁切" in result["issues"]
+
+
 def test_seed_qa_keeps_major_crop_as_hard_failure() -> None:
     result = normalize_portrait_seed_qa({
         "identity_match": 0.95,
@@ -161,6 +237,32 @@ def test_seed_qa_respects_explicit_non_occluding_watermark_result() -> None:
     assert result["hard_gate_passed"] is True
     assert result["hard_failures"] == []
     assert any("角落水印" in item for item in result["issues"])
+
+
+def test_seed_qa_structured_non_occlusion_overrides_summary_wording() -> None:
+    result = normalize_portrait_seed_qa({
+        "identity_match": 0.95,
+        "presentation_match": 0.85,
+        "clean_frame": 0.92,
+        "person_count": 1,
+        "watermark_detected": True,
+        "watermark_occluding": False,
+        "forbidden_text_detected": False,
+        "full_body_visible": True,
+        "crop_severity": "none",
+        "anatomy_valid": True,
+        "issues": [
+            "整体符合青年女性黑短发、米白风衣、手持电影票的核心角色设定，"
+            "仅存在少量细节偏差与轻微非遮挡水印"
+        ],
+        "soft_warnings": ["画面右下角存在轻微未遮挡主体的水印"],
+        "hard_failures": [],
+    })
+
+    assert result["status"] == "warning"
+    assert result["hard_gate_passed"] is True
+    assert result["hard_failures"] == []
+    assert any("轻微非遮挡水印" in item for item in result["issues"])
 
 
 def test_seed_qa_does_not_double_count_corner_watermark_as_forbidden_text() -> None:

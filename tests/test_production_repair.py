@@ -198,16 +198,23 @@ def test_patch_planner_normalizes_overdetail_without_model_call() -> None:
 
 
 def test_dialogue_chain_turn_patch_changes_only_opening_source_anchor():
-    script = _minimal_script(dialogue_chains=[KeyDialogueChain(
-        chain_id="DC1",
-        topic="测验结果公开",
-        turns=[KeyDialogueTurn(
-            speaker="测验员",
-            line="萧炎，斗之力，三段！级别：低级！",
-            function="announcement",
-            source_text="萧炎，斗之力，三段！级别：低级！",
+    script = _minimal_script(
+        full_script_text=(
+            "【场1】夜 / 场地\n"
+            "甲站在场地中央。\n"
+            "测验员：萧炎，斗之力，三段！级别：低级！"
+        ),
+        dialogue_chains=[KeyDialogueChain(
+            chain_id="DC1",
+            topic="测验结果公开",
+            turns=[KeyDialogueTurn(
+                speaker="测验员",
+                line="萧炎，斗之力，三段！级别：低级！",
+                function="announcement",
+                source_text="萧炎，斗之力，三段！级别：低级！",
+            )],
         )],
-    )])
+    )
     doc = screenplay_to_document(script)
 
     patched, touched = apply_field_patch(
@@ -226,6 +233,55 @@ def test_dialogue_chain_turn_patch_changes_only_opening_source_anchor():
     assert out.dialogue_chains[0].turns[0].line == "萧炎，斗之力，三段！级别：低级！"
     assert out.full_script_text == script.full_script_text
     assert touched == ["DC1-T1", "DC1"]
+
+
+def test_document_projection_inserts_missing_chain_turn_next_to_sibling() -> None:
+    script = _minimal_script(
+        scene_outline=[
+            ScriptScene(
+                scene_no=1,
+                scene_heading="【场1】夜 / 放映室",
+                story_function="更换保险管并恢复供电",
+                characters=["林澈", "苏禾"],
+                summary="林澈确认安全后示意苏禾合闸。",
+                conflict="设备能否安全通电",
+                turn="放映机恢复供电",
+                source_basis="原文合闸段落",
+            ),
+        ],
+        full_script_text=(
+            "【场1】夜 / 放映室\n"
+            "林澈盖好保险仓，退到安全线外。\n"
+            "林澈：保险仓盖好了，退到安全线外。"
+        ),
+        dialogue_chains=[
+            KeyDialogueChain(
+                chain_id="DC2",
+                topic="确认合闸时机",
+                turns=[
+                    KeyDialogueTurn(
+                        speaker="林澈",
+                        line="保险仓盖好了，退到安全线外。",
+                        function="statement",
+                        source_text="林澈盖好保险仓、退到安全线外。",
+                    ),
+                    KeyDialogueTurn(
+                        speaker="苏禾",
+                        line="合闸。",
+                        function="decision",
+                        source_text="苏禾合上电闸。",
+                    ),
+                ],
+            ),
+        ],
+    )
+
+    projected = document_to_screenplay(screenplay_to_document(script))
+    projected_twice = document_to_screenplay(screenplay_to_document(projected))
+
+    assert "林澈：保险仓盖好了，退到安全线外。\n苏禾：合闸。" in projected.full_script_text
+    assert projected.full_script_text.count("苏禾：合闸。") == 1
+    assert projected_twice.full_script_text.count("苏禾：合闸。") == 1
 
 
 def test_patch_planner_recognizes_legacy_rederive_and_repairs_opening_anchor():
@@ -268,6 +324,107 @@ def test_patch_planner_recognizes_legacy_rederive_and_repairs_opening_anchor():
     assert _patch_strategy_key(ops) == "fix_opening_source_anchor"
     assert ops[0].target["kind"] == "dialogue_chain_turn"
     assert ops[0].value == "斗之力，三段！"
+
+
+def test_patch_planner_repairs_indexed_source_placeholder_with_exact_source() -> None:
+    from app.production.screenplay_repair import _patch_strategy_key, plan_screenplay_patch
+
+    source = (
+        "铁柜没有上锁。苏禾拉开柜门，里面没有胶片，只有一只蓝色铁盒。"
+        "林澈接过铁盒，翻到背面，看见父亲留下的手写标签。"
+    )
+    script = _minimal_script(
+        dialogue_chains=[
+            KeyDialogueChain(
+                chain_id="DC1",
+                topic="任务开始",
+                turns=[
+                    KeyDialogueTurn(
+                        speaker="苏禾",
+                        line="先检查铁柜。",
+                        function="announcement",
+                        source_text="铁柜没有上锁。",
+                    ),
+                ],
+            ),
+            KeyDialogueChain(
+                chain_id="DC2",
+                topic="发现蓝色铁盒",
+                turns=[
+                    KeyDialogueTurn(
+                        speaker="林澈",
+                        line="柜里没有胶片。只有这个。",
+                        function="statement",
+                        source_text="（原文叙述转为对白）",
+                    ),
+                ],
+            ),
+        ],
+        full_script_text=(
+            "【场1】夜 / 放映室\n"
+            "苏禾：先检查铁柜。\n"
+            "林澈：柜里没有胶片。只有这个。"
+        ),
+        scene_outline=[
+            ScriptScene(
+                scene_no=1,
+                scene_heading="【场1】夜 / 放映室",
+                story_function="检查铁柜并发现蓝色铁盒",
+                characters=["林澈", "苏禾"],
+                summary="苏禾打开铁柜，林澈发现里面没有胶片。",
+                conflict="胶片缺失",
+                turn="转而检查蓝色铁盒",
+                source_basis="铁柜里没有胶片，只有蓝色铁盒。",
+            ),
+        ],
+    )
+    issue = structured_issue(
+        code="SOURCE_FIDELITY",
+        message=(
+            "dialogue_chains[1].turns[0].source_text 未在本集原文中找到："
+            "（原文叙述转为对白）"
+        ),
+        subject="screenplay",
+        path="/dialogue_chains",
+        rule_id="source_fidelity",
+        stage="screenplay",
+    )
+
+    ops = plan_screenplay_patch(issue, script, source_text=source)
+
+    assert len(ops) == 1
+    assert ops[0].target["chain_id"] == "DC2"
+    assert ops[0].target["turn_index"] == 0
+    assert ops[0].value == "苏禾拉开柜门，里面没有胶片，只有一只蓝色铁盒。"
+    assert ops[0].value in source
+    assert _patch_strategy_key(ops) == "fix_dialogue_source_DC2_0"
+
+
+def test_patch_planner_does_not_treat_generic_source_mismatch_as_opening_anchor() -> None:
+    from app.production.screenplay_repair import plan_screenplay_patch
+
+    script = _minimal_script(dialogue_chains=[KeyDialogueChain(
+        chain_id="DC1",
+        topic="任务开始",
+        turns=[KeyDialogueTurn(
+            speaker="甲",
+            line="开始。",
+            function="announcement",
+            source_text="原文开场。",
+        )],
+    )])
+    issue = structured_issue(
+        code="SOURCE_FIDELITY",
+        message=(
+            "dialogue_chains[9].turns[9].source_text 未在本集原文中找到："
+            "（原文叙述转为对白）"
+        ),
+        subject="screenplay",
+        path="/dialogue_chains",
+        stage="screenplay",
+    )
+
+    assert plan_screenplay_patch(issue, script, source_text="原文开场。") == []
 
 
 def test_patch_planner_relabels_invalid_same_speaker_response() -> None:

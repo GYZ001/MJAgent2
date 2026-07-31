@@ -192,6 +192,7 @@ async def _run_with_agent_loop(
     repair_output_contract: str | None = None,
     prefill: dict | None = None,
     storyboard_candidate_context: dict[str, Any] | None = None,
+    semantic_attempt_id: str | None = None,
 ) -> BaseModel:
     """Phase 2 loop adapter: structured issues, bounded repair and persisted iterations."""
     base_call_meta = {
@@ -208,6 +209,15 @@ async def _run_with_agent_loop(
         latest_issues,
         issue_history,
     ) -> str:
+        semantic_call_meta: dict[str, Any] = {}
+        if semantic_attempt_id:
+            digest = hashlib.sha256(
+                f"{semantic_attempt_id}:inner:{iteration_no}".encode("utf-8")
+            ).hexdigest()[:32]
+            semantic_call_meta = {
+                "semantic_attempt_id": semantic_attempt_id,
+                "operation_id": f"op_sem_{digest}",
+            }
         if iteration_no == 1:
             return await model_gateway.chat(
                 [{"role": "system", "content": SYSTEM_PREFIX}, {"role": "user", "content": user_prompt}],
@@ -218,6 +228,7 @@ async def _run_with_agent_loop(
                     "call_role": "stage_generate",
                     "call_role_label": "主生成",
                     "repair_round": 0,
+                    **semantic_call_meta,
                     # 若相同幂等 operation 已从供应商成功返回、但本地状态机在落库前
                     # 发生恢复竞态，直接复用已记录响应，禁止再次付费生成。
                     "reuse_successful_operation": True,
@@ -269,6 +280,7 @@ async def _run_with_agent_loop(
                 "call_role": "stage_repair",
                 "call_role_label": "定向修复",
                 "repair_round": repair_index,
+                **semantic_call_meta,
                 "latest_issue_codes": [issue.code for issue in latest_issues[:10]],
                 "latest_errors": [issue.message for issue in latest_issues[:10]],
             },
@@ -732,6 +744,7 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
 - `plot_spine.must_keep_ending`：本章收束（与原文本章结局同向；禁止发明下一章钩子）。
 - `plot_spine.drop_list`：至少 2 条「本章有但不拍」的支线/气氛戏/装饰对白。
 - `dialogue_chains`：主线对白的权威来源。每条链写清 chain_id/topic/turns；turns 按原文与正文发生顺序排列，每个 turn 含 speaker/line/function/source_text。
+- `source_text` 必须逐字复制本集源文本中的真实句子或片段。若把原文叙述改成对白，`source_text` 仍须填写对应的原文叙述原句；严禁填写“原文叙述转为对白”“原文无此句”“为衔接补写”等说明性占位词。找不到可逐字引用的原文依据时，删除该话轮，不得虚构依据。
 - 每条对白链必须从 trigger/announcement/question 开始，再接 response/decision；不得从回答开始。测验员、守卫等功能性角色若负责宣布结果或触发主角反应，允许且必须作为链首进入。
 - `key_lines` 由后端按 dialogue_chains.turns 确定性回填，模型仍需输出但不得自行另选；对白话轮不设固定条数上限。用户多选的必保留台词优先级最高，其余按完整语义链取舍，并让总口播服从本集目标时长。
 - `key_lines` 中每一条都必须在 `full_script_text` 里作为“角色名：台词”的真实对白落地；写进动作描述、梗概、source_basis 或清单本身都不算角色说过。
@@ -1541,7 +1554,9 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
                                         prev_ending: str, screenplay: EpisodeScreenplay,
                                         completed_shots: list[Shot],
                                         final_feedback: list[str] | None = None,
-                                        outline: StoryboardOutline | None = None) -> StoryboardShotDraft:
+                                        outline: StoryboardOutline | None = None,
+                                        repair_feedback: list[str] | None = None,
+                                        semantic_attempt_id: str | None = None) -> StoryboardShotDraft:
     """基于已通过镜头生成下一个镜头；业务校验通过才返回，调用方可立即落库给前端增量展示。"""
     if not (screenplay.full_script_text or "").strip():
         raise StageError("分镜脚本", ["旧版拍卡剧本已下线，请先重新生成完整剧本，再进入分镜台"])
@@ -1662,6 +1677,15 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
                 "（例：'萧薰儿越过人群上前，伸手扶住萧炎、低声安慰'），只要画面或声轨体现即算落实，"
                 "不要在压缩里整段略过。\n")
         feedback_block = head + "\n".join(f"- {e}" for e in final_feedback[:10]) + tail
+    repair_feedback_block = ""
+    if repair_feedback:
+        repair_feedback_block = (
+            "\n【本轮局部修复指令·必须逐条解决】\n"
+            "以下是确定性校验器对当前工作副本的真实报错。"
+            "只修正与本镜相关的问题，保留大纲事件、原文证据与已正确字段：\n"
+            + "\n".join(f"- {message}" for message in repair_feedback[:12])
+            + "\n不得原样返回上一个候选；若报错涉及相邻镜头，必须同时参照上一镜的景别与尾状态。\n"
+        )
 
     prompt = f"""任务：为漫剧第 {episode['episode_no']} 集《{episode['title']}》按顺序生成【第 {shot_no} 镜】。
 
@@ -1707,7 +1731,7 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
 
 信息台账上下文（info_id 仅用于内部引用；创作与防重复必须理解其中的中文 content）：
 {ledger_block}
-{brief_block}{budget_block}{feedback_block}
+{brief_block}{budget_block}{feedback_block}{repair_feedback_block}
 当前镜头约束：
 1. 只输出第 {shot_no} 镜，shot.shot_no 必须等于 {shot_no}。
 2. 本集镜头软预算约 {SHOT_SOFT_MIN}~{SHOT_SOFT_MAX}（硬上限 {SHOT_HARD_MAX}）；当前按大纲推进到第 {shot_no}/{expected_total} 镜。本镜必须落实大纲第 {shot_no} 条、推进到新剧情，不得停留或复述已覆盖内容，也不得发明大纲/spine 之外的幻觉镜头。{"只有剧情已完整落到尾钩时才可设置 is_final=true，否则必须继续生成" if allow_finish else "剧情尚未铺到计划收尾，is_final 必须为 false"}。duration_s 默认 {PREFERRED_SHOT_DURATION_S}。
@@ -1827,6 +1851,7 @@ source_excerpt 内的双引号必须按 JSON 规范转义，或改用中文引�
             "shot_no": shot_no,
             "outline_story_event_id": brief.story_event_id if brief is not None else "",
         },
+        semantic_attempt_id=semantic_attempt_id,
     )
     sync_shot_continuity_fields(draft.shot, completed_shots[-1] if completed_shots else None)
     ensure_audio_timeline(draft.shot, screenplay.voice_bible)
@@ -2111,7 +2136,13 @@ async def review_scene_image(image_b64: str, frame_desc: str, scene_setting: str
         expectation_focus = "场景名称、空间类型、建筑结构、陈设、光照、画风与构图是否对得上"
         main_rule = (
             "- 这是纯环境图：画面无人是合格要求，绝不能因没有人物、角色锚点、动作或互动而扣分。\n"
-            "- expectation_match 的主项是场景语义与环境细节；场景名称和预期描述中的明确要求都要核对。"
+            "- expectation_match 的主项是场景语义与环境细节；场景名称和预期描述中的明确要求都要核对。\n"
+            "- space_type_matches 只判断室内外和地点大类。仅当画面实际成为另一类地点时返回 false，"
+            "例如电影院门厅画成海堤、室外街廊、住宅或普通房间。售票口大小、柜台形式、内部通道是否"
+            "完全封闭、灯箱/吸音墙/铜铃等陈设缺失，只写入 issues 并降低 expectation_match，"
+            "不得因此把 space_type_matches 设为 false。\n"
+            "- 输出必须自洽：如果 issues 写出“场景并非预期地点”“实际为另一地点”或同义结论，"
+            "space_type_matches 必须为 false；不得一边声明错地点，一边返回 true。"
         )
     else:
         anchors = "\n".join(character_anchors) or "（缺少角色锚点）"
@@ -2177,28 +2208,44 @@ async def review_scene_image(image_b64: str, frame_desc: str, scene_setting: str
     if ignore_non_occluding_watermark:
         original_issues = [str(item) for item in (result.get("issues") or [])]
 
-        def _watermark_only(issue: str) -> bool:
+        def _provider_corner_mark(issue: str) -> bool:
             lower = issue.lower()
             mentions_watermark = any(
                 token in lower for token in ("watermark", "logo", "水印", "ai生成")
             )
-            mentions_occlusion = any(
-                token in lower for token in ("occlud", "遮挡", "遮住", "覆盖主体")
+            corner_position = any(
+                token in lower for token in (
+                    "右下角", "左下角", "右上角", "左上角",
+                    "corner", "lower right", "lower left", "upper right", "upper left",
+                )
             )
-            return mentions_watermark and not mentions_occlusion
+            critical_occlusion = any(
+                token in lower for token in (
+                    "主体", "关键结构", "主要结构", "核心区域", "中央", "中心",
+                    "大面积", "人物", "脸部", "五官", "main subject", "critical",
+                    "central", "center", "large area",
+                )
+            )
+            mentions_occlusion = any(
+                token in lower for token in ("occlud", "遮挡", "遮住", "覆盖")
+            )
+            return mentions_watermark and (
+                (corner_position and not critical_occlusion)
+                or not mentions_occlusion
+            )
 
-        provider_mark_reported = any(_watermark_only(item) for item in original_issues)
+        provider_mark_reported = any(_provider_corner_mark(item) for item in original_issues)
         watermark_reported = (
             result.get("watermark_detected") is True
             or provider_mark_reported
         )
         occluding_watermark = any(
-            _watermark_only(item) is False
+            _provider_corner_mark(item) is False
             and any(token in item.lower() for token in ("watermark", "logo", "水印", "ai生成"))
             and any(token in item.lower() for token in ("occlud", "遮挡", "遮住", "覆盖主体"))
             for item in original_issues
         )
-        result["issues"] = [item for item in original_issues if not _watermark_only(item)]
+        result["issues"] = [item for item in original_issues if not _provider_corner_mark(item)]
         if watermark_reported and not occluding_watermark:
             # Preserve the observed fact for audit, while explicitly telling
             # the deterministic policy that this provider mark is allowed by

@@ -197,10 +197,90 @@ def test_batch_writer_uses_actual_slot_and_keeps_more_than_600_chars(monkeypatch
     assert len(calls) == 1, "模型按真实槽位返回时不应再浪费一次单图回退调用"
     assert prompts == [long_prompt]
     assert calls[0]["output_schema"]["slots"][0]["slot"] == "narrative_keyframe"
-    assert calls[0]["shot"]["camera_angle"] == "侧面"
-    assert calls[0]["shot"]["target_keyframe_desc"] == _contact_shot().last_frame_desc
-    assert calls[0]["geometry_contract"]["target_contact_phase"] == "established"
-    assert calls[0]["geometry_contract"]["contact_camera_required"] is True
+    planned = calls[0]["slots"][0]
+    assert planned["shot"]["camera_angle"] == "侧面"
+    assert planned["shot"]["target_keyframe_desc"] == _contact_shot().last_frame_desc
+    assert planned["geometry_contract"]["target_contact_phase"] == "established"
+    assert planned["geometry_contract"]["contact_camera_required"] is True
+
+
+def test_required_text_contract_is_consistent_across_beat_prompt_generation_and_qa(monkeypatch) -> None:
+    calls: list[dict] = []
+
+    async def fake_chat(messages, **kwargs):
+        payload = json.loads(messages[1]["content"])
+        calls.append(payload)
+        return json.dumps({
+            "slots": [
+                {"slot": item["slot"], "type": item["type"], "prompt": f"prompt-{item['slot']}"}
+                for item in payload["slots"]
+            ],
+        })
+
+    monkeypatch.setattr(video_modes.model_gateway, "chat", fake_chat)
+    shot = _contact_shot(
+        last_frame_desc="萧炎手掌贴住石碑，碑面显示金色文字。",
+        required_text=RequiredOnScreenText(
+            surface="石碑", exact_text="斗之力三段", appear_start_s=4.0, stable_until_s=5.0,
+        ),
+    )
+    beats = video_modes.narrative_keyframe_beats(shot, 1)
+    beat_shot = video_modes._shot_for_keyframe_beat(shot, beats[0])
+
+    assert beats[0]["time_s"] == 4.0
+    assert keyframe_visual_contract(beat_shot, _bible())["required_text_expected"] is True
+    provider_prompt = video_modes.reference_generation_prompt(
+        beat_shot, _bible(), "plot_key_frame", 1,
+    )
+    assert "the only permitted text is the exact string '斗之力三段'" in provider_prompt
+    assert "Clean 9:16 portrait still; no text or subtitles." not in provider_prompt
+
+    prompts = asyncio.run(video_modes.write_reference_prompt_batch(
+        shot,
+        _bible(),
+        [("narrative_keyframe", "plot_key_frame")],
+        intents=[beats[0]["prompt_intent"]],
+        beats=beats,
+    ))
+
+    assert prompts == ["prompt-narrative_keyframe"]
+    planned = calls[0]["slots"][0]
+    assert planned["geometry_contract"]["required_text_expected"] is True
+    assert "the only permitted text is the exact string '斗之力三段'" in planned["text_constraint"]
+
+
+def test_batch_prompt_uses_each_timeline_beats_own_text_contract(monkeypatch) -> None:
+    captured: dict = {}
+
+    async def fake_chat(messages, **kwargs):
+        captured.update(json.loads(messages[1]["content"]))
+        return json.dumps({
+            "slots": [
+                {"slot": item["slot"], "type": item["type"], "prompt": f"prompt-{item['slot']}"}
+                for item in captured["slots"]
+            ],
+        })
+
+    monkeypatch.setattr(video_modes.model_gateway, "chat", fake_chat)
+    shot = _contact_shot(required_text=RequiredOnScreenText(
+        surface="石碑", exact_text="斗之力三段", appear_start_s=4.0, stable_until_s=5.0,
+    ))
+    beats = video_modes.narrative_keyframe_beats(shot, 2)
+    slots = [(beat["slot_key"], "plot_key_frame") for beat in beats]
+
+    asyncio.run(video_modes.write_reference_prompt_batch(
+        shot,
+        _bible(),
+        slots,
+        intents=[beat["prompt_intent"] for beat in beats],
+        beats=beats,
+    ))
+
+    opening, decisive = captured["slots"]
+    assert opening["geometry_contract"]["required_text_expected"] is False
+    assert opening["text_constraint"] == "no text or subtitles."
+    assert decisive["geometry_contract"]["required_text_expected"] is True
+    assert "the only permitted text is the exact string '斗之力三段'" in decisive["text_constraint"]
 
 
 def test_keyframe_qa_contract_checks_side_contact_height_and_target(monkeypatch) -> None:

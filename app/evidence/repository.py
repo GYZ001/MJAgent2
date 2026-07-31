@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from pathlib import Path
+import sqlite3
+import time
 from typing import Any
 
 from app.db import get_conn, new_id, now, rows_to_dicts
@@ -18,6 +21,8 @@ JSON_FIELDS = {
     "context_manifest_json", "parent_artifact_ids_json", "model_snapshot_json",
     "dimension_scores_json", "issues_json", "evidence_json", "payload_json", "content_json",
 }
+_EVENT_LOCK_RETRY_DELAYS_S = (0.05, 0.1, 0.25)
+_LOGGER = logging.getLogger(__name__)
 
 
 def _json(value: Any) -> str:
@@ -173,13 +178,39 @@ def append_event(
 ) -> str:
     event_id = new_id("evt")
     conn = get_conn()
-    conn.execute(
-        "INSERT INTO run_events(id, run_id, step_run_id, ts, event_type, severity, message, payload_json, trace_id) "
-        "VALUES(?,?,?,?,?,?,?,?,?)",
-        (event_id, run_id, step_run_id, now(), event_type, severity, message, _json(payload or {}), trace_id),
+    values = (
+        event_id,
+        run_id,
+        step_run_id,
+        now(),
+        event_type,
+        severity,
+        message,
+        _json(payload or {}),
+        trace_id,
     )
-    conn.commit()
-    return event_id
+    for attempt in range(len(_EVENT_LOCK_RETRY_DELAYS_S) + 1):
+        try:
+            conn.execute(
+                "INSERT INTO run_events(id, run_id, step_run_id, ts, event_type, severity, message, payload_json, trace_id) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                values,
+            )
+            conn.commit()
+            return event_id
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower():
+                raise
+            conn.rollback()
+            if attempt >= len(_EVENT_LOCK_RETRY_DELAYS_S):
+                _LOGGER.warning(
+                    "Dropped run event after SQLite lock retries: run=%s type=%s",
+                    run_id,
+                    event_type,
+                )
+                return ""
+            time.sleep(_EVENT_LOCK_RETRY_DELAYS_S[attempt])
+    return ""
 
 
 def create_artifact(

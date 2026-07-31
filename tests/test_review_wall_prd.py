@@ -299,6 +299,11 @@ async def test_project_video_queue_spawn_failure_keeps_started_episode_and_repor
 
     monkeypatch.setattr(api, "_complete_episode_core", fake_complete)
     monkeypatch.setattr(api.task_registry, "spawn", fail_project_chain)
+    monkeypatch.setattr(
+        api.errors,
+        "record_and_format",
+        lambda *_args, **_kwargs: "（测试错误）",
+    )
 
     result = await api._complete_project_videos_core("p", {})
 
@@ -848,3 +853,96 @@ def test_worker_does_not_self_fence_when_gallery_is_copied_to_new_version(monkey
     conn.commit()
 
     worker._assert_review_dependency_fence({"episode_id": "e"}, "v2", "candidate")
+
+
+def test_worker_does_not_self_fence_on_gallery_generated_by_current_job(monkeypatch) -> None:
+    conn = _conn()
+    conn.execute(
+        """INSERT INTO shots(
+               id,episode_id,shot_no,duration_s,action_desc,characters,dialogues,
+               storyboard_artifact_id
+           ) VALUES('s2','e',2,5,'other','[]','[]','board-1')"""
+    )
+    stable_reference = {
+        "id": "stable-ref", "selectedForSeedance": True,
+        "gate_status": "passed", "rule_version": "r1",
+    }
+    conn.execute(
+        """INSERT INTO shot_versions(id,shot_id,version_no,prompt_text,idem_key,status,image_inputs,created_at)
+           VALUES('v-other','s2',1,'p','other-key','succeeded',?,0)""",
+        (json.dumps({"reference_images": [stable_reference]}),),
+    )
+    conn.commit()
+    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    snapshot = api._review_upstream_snapshot("e")
+    captured = {
+        key: snapshot.get(key) for key in (
+            "qualification_version", "published_screenplay_artifact_id",
+            "confirmed_storyboard_artifact_id", "screenplay_revision",
+            "storyboard_revision", "asset_inputs", "asset_soft_warnings",
+        )
+    }
+    generated_reference = {
+        "id": "generated-ref", "selectedForSeedance": True,
+        "gate_status": "scored", "rule_version": "keyframe_geometry_qa_v3",
+    }
+    conn.execute(
+        """INSERT INTO shot_versions(id,shot_id,version_no,prompt_text,idem_key,status,image_inputs,created_at)
+           VALUES('v-current','s1',1,'p','current-key','running',?,1)""",
+        (json.dumps({
+            "reference_images": [generated_reference],
+            "review_dependency_snapshot": captured,
+        }),),
+    )
+    conn.commit()
+
+    worker._assert_review_dependency_fence(
+        {"episode_id": "e", "shot_id": "s1"}, "v-current", "candidate",
+    )
+
+
+def test_worker_still_fences_gallery_change_on_another_shot(monkeypatch) -> None:
+    conn = _conn()
+    conn.execute(
+        """INSERT INTO shots(
+               id,episode_id,shot_no,duration_s,action_desc,characters,dialogues,
+               storyboard_artifact_id
+           ) VALUES('s2','e',2,5,'other','[]','[]','board-1')"""
+    )
+    original_reference = {
+        "id": "other-ref", "selectedForSeedance": True,
+        "gate_status": "passed", "rule_version": "r1",
+    }
+    conn.execute(
+        """INSERT INTO shot_versions(id,shot_id,version_no,prompt_text,idem_key,status,image_inputs,created_at)
+           VALUES('v-other','s2',1,'p','other-key','succeeded',?,0)""",
+        (json.dumps({"reference_images": [original_reference]}),),
+    )
+    conn.commit()
+    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    snapshot = api._review_upstream_snapshot("e")
+    captured = {
+        key: snapshot.get(key) for key in (
+            "qualification_version", "published_screenplay_artifact_id",
+            "confirmed_storyboard_artifact_id", "screenplay_revision",
+            "storyboard_revision", "asset_inputs", "asset_soft_warnings",
+        )
+    }
+    conn.execute(
+        """INSERT INTO shot_versions(id,shot_id,version_no,prompt_text,idem_key,status,image_inputs,created_at)
+           VALUES('v-current','s1',1,'p','current-key','running',?,1)""",
+        (json.dumps({"review_dependency_snapshot": captured}),),
+    )
+    changed_reference = {**original_reference, "rule_version": "r2"}
+    conn.execute(
+        "UPDATE shot_versions SET image_inputs=? WHERE id='v-other'",
+        (json.dumps({"reference_images": [changed_reference]}),),
+    )
+    conn.commit()
+
+    with pytest.raises(worker.ReviewDependencyFence):
+        worker._assert_review_dependency_fence(
+            {"episode_id": "e", "shot_id": "s1"}, "v-current", "candidate",
+        )

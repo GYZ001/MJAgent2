@@ -215,6 +215,8 @@ def rederive_projections(doc: ScreenplayDocument) -> ScreenplayDocument:
     # 若 dialogue_chains 空但 scene 有 turns，重建 chains
     if not out.dialogue_chains and any(b.dialogue_turns for b in out.scene_blocks):
         out.dialogue_chains = _chains_from_scene_turns(out.scene_blocks)
+    if out.dialogue_chains and out.scene_blocks:
+        _sync_dialogue_chains_into_scenes(out)
     # 若 chains 有值，回填 key 顺序已由 document_to_screenplay 处理
     # 同步 scene turns 的 chain_id
     chain_by_turn: dict[str, str] = {}
@@ -227,6 +229,102 @@ def rederive_projections(doc: ScreenplayDocument) -> ScreenplayDocument:
             if turn.turn_id in chain_by_turn:
                 turn.chain_id = chain_by_turn[turn.turn_id]
     return out
+
+
+def _dialogue_identity(value: str) -> str:
+    return re.sub(r"[\s，。！？；：、,.!?;:'\"“”‘’（）()《》【】\-—…]+", "", value or "")
+
+
+def _node_index(nodes: list[DialogueTurnNode], target: DialogueTurnNode) -> int:
+    return next((index for index, node in enumerate(nodes) if node is target), len(nodes))
+
+
+def _sync_dialogue_chains_into_scenes(doc: ScreenplayDocument) -> None:
+    """Project authoritative chain turns into scene dialogue without rewriting prose."""
+    matches: dict[tuple[int, int], tuple[SceneBlockNode, DialogueTurnNode]] = {}
+    used_nodes: set[int] = set()
+
+    # Bind body dialogue to authoritative turns first. Punctuation differences
+    # are harmless; speaker + spoken text must still match.
+    for chain_index, chain in enumerate(doc.dialogue_chains):
+        for turn_index, turn in enumerate(chain.turns or []):
+            speaker = _dialogue_identity(turn.speaker)
+            line = _dialogue_identity(turn.line)
+            if not speaker or not line:
+                continue
+            found: tuple[SceneBlockNode, DialogueTurnNode] | None = None
+            for block in doc.scene_blocks:
+                for node in block.dialogue_turns:
+                    if id(node) in used_nodes:
+                        continue
+                    if (
+                        _dialogue_identity(node.speaker) == speaker
+                        and _dialogue_identity(node.line) == line
+                    ):
+                        found = (block, node)
+                        break
+                if found:
+                    break
+            if found is None:
+                continue
+            block, node = found
+            node.turn_id = f"{chain.chain_id}-T{turn_index + 1}"
+            node.chain_id = chain.chain_id
+            node.function = turn.function
+            node.source_text = turn.source_text
+            used_nodes.add(id(node))
+            matches[(chain_index, turn_index)] = (block, node)
+
+    # A chain turn missing from the body is a projection gap, not new creative
+    # content. Insert it beside the nearest matched sibling from the same chain.
+    for chain_index, chain in enumerate(doc.dialogue_chains):
+        turns = list(chain.turns or [])
+        for turn_index, turn in enumerate(turns):
+            key = (chain_index, turn_index)
+            if key in matches or not (turn.speaker or "").strip() or not (turn.line or "").strip():
+                continue
+            previous = next(
+                (
+                    matches[(chain_index, index)]
+                    for index in range(turn_index - 1, -1, -1)
+                    if (chain_index, index) in matches
+                ),
+                None,
+            )
+            following = next(
+                (
+                    matches[(chain_index, index)]
+                    for index in range(turn_index + 1, len(turns))
+                    if (chain_index, index) in matches
+                ),
+                None,
+            )
+            if previous is not None:
+                block, sibling = previous
+                insert_at = _node_index(block.dialogue_turns, sibling) + 1
+            elif following is not None:
+                block, sibling = following
+                insert_at = _node_index(block.dialogue_turns, sibling)
+            else:
+                block = next(
+                    (
+                        item for item in doc.scene_blocks
+                        if _dialogue_identity(turn.speaker)
+                        in {_dialogue_identity(name) for name in item.characters}
+                    ),
+                    doc.scene_blocks[0],
+                )
+                insert_at = len(block.dialogue_turns)
+            node = DialogueTurnNode(
+                turn_id=f"{chain.chain_id}-T{turn_index + 1}",
+                chain_id=chain.chain_id,
+                speaker=turn.speaker,
+                line=turn.line,
+                function=turn.function,
+                source_text=turn.source_text,
+            )
+            block.dialogue_turns.insert(insert_at, node)
+            matches[key] = (block, node)
 
 
 def render_full_script_text(doc: ScreenplayDocument) -> str:

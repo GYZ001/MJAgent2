@@ -1,5 +1,20 @@
 import { describe, expect, it } from 'vitest'
-import { resolveEpisodePage } from './EpisodesPage'
+import { canScanPortraitGaps, resolveEpisodePage } from './EpisodesPage'
+
+describe('人物定妆缺口扫描门禁', () => {
+  it('人物谱未就绪时不请求缺口接口', () => {
+    expect(canScanPortraitGaps(undefined)).toBe(false)
+    expect(canScanPortraitGaps({ bible_status: 'running', bible: null })).toBe(false)
+    expect(canScanPortraitGaps({ bible_status: 'ready', bible: null })).toBe(false)
+  })
+
+  it('人物谱已就绪且有实体时才允许扫描', () => {
+    expect(canScanPortraitGaps({
+      bible_status: 'ready',
+      bible: {} as never,
+    })).toBe(true)
+  })
+})
 
 describe('分集页码跳转', () => {
   it('空值和当前页给出明确反馈', () => {

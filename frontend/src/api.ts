@@ -21,7 +21,11 @@ let sessionToken: string | null = null;
 let sessionReady: Promise<void> | null = null;
 const inflightGets = new Map<string, Promise<any>>();
 
-async function ensureSession(): Promise<void> {
+async function ensureSession(forceRefresh = false): Promise<void> {
+  if (forceRefresh) {
+    sessionToken = null;
+    sessionReady = null;
+  }
   if (sessionToken) return;
   if (!sessionReady) {
     sessionReady = fetch("/api/session")
@@ -89,9 +93,15 @@ async function request(
   method: string,
   path: string,
   body?: unknown,
-  options?: { form?: FormData; approvalToken?: string; _retried?: boolean },
+  options?: {
+    form?: FormData;
+    approvalToken?: string;
+    _retried?: boolean;
+    _sessionRefreshed?: boolean;
+  },
 ): Promise<any> {
-  await ensureSession();
+  const mutating = method !== "GET" && method !== "HEAD";
+  await ensureSession(mutating && !options?._sessionRefreshed);
   const isForm = Boolean(options?.form);
   const headers = baseHeaders(
     !isForm && body !== undefined
@@ -124,6 +134,7 @@ async function request(
         ...options,
         approvalToken: String(payload.approval_token),
         _retried: true,
+        _sessionRefreshed: true,
       });
     }
     // 异步受理（如单视角重做）：直接返回 payload，不再走 handle
@@ -1389,6 +1400,10 @@ export interface Episode {
   supervisor?: {
     phase: string;
     repair_epoch: number;
+    lifetime_repair_count?: number;
+    activation_no?: number;
+    activation_attempt_count?: number;
+    activation_attempt_limit?: number;
     validated_prefix_end: number;
     next_shot_no: number;
     expected_total: number;

@@ -510,6 +510,31 @@ def test_source_grounded_single_character_reply_is_not_rejected_as_empty() -> No
     assert not any("source_text 不能为空" in error for error in errors), errors
 
 
+def test_narrative_grounded_single_character_reply_is_not_rejected_as_empty() -> None:
+    script, _source = _screenplay_with_source_dialogue_chain()
+    script.dialogue_chains[0].turns[-1].line = "好。"
+    script.dialogue_chains[0].turns[-1].source_text = "测验员点头同意。"
+    script.full_script_text = script.full_script_text.replace("结果无误。", "好。")
+    source = "测验员：“斗之力，三段！”\n谷言：“只有三段？”\n测验员点头同意。"
+
+    errors = validate_dialogue_chains(script, source_text=source, required=True)
+
+    assert not any("过短或为空" in error for error in errors), errors
+    assert not any("source_text 未在本集原文中找到" in error for error in errors), errors
+
+
+def test_single_character_reply_with_placeholder_source_is_rejected() -> None:
+    script, source = _screenplay_with_source_dialogue_chain()
+    script.dialogue_chains[0].turns[-1].line = "好。"
+    script.dialogue_chains[0].turns[-1].source_text = "（原文叙述转为对白）"
+    script.full_script_text = script.full_script_text.replace("结果无误。", "好。")
+
+    errors = validate_dialogue_chains(script, source_text=source, required=True)
+
+    assert any("过短或为空" in error for error in errors), errors
+    assert any("source_text 未在本集原文中找到" in error for error in errors), errors
+
+
 def test_dialogue_chain_rejects_missing_first_source_utterance() -> None:
     script, source = _screenplay_with_source_dialogue_chain()
     script.dialogue_chains[0].turns = script.dialogue_chains[0].turns[1:]
@@ -541,6 +566,23 @@ def test_dialogue_chain_rejects_first_anchor_replaced_with_unrelated_line() -> N
     )
 
     assert any("开场对白锚点被改写到失去原意" in error for error in errors), errors
+
+
+def test_dialogue_chain_accepts_digit_identifier_spoken_in_chinese() -> None:
+    script, _source = _screenplay_with_source_dialogue_chain()
+    script.dialogue_chains[0].turns[0].source_text = "7-3-1"
+    script.dialogue_chains[0].turns[0].line = "七、三、一。"
+    script.full_script_text = script.full_script_text.replace(
+        "测验员：斗之力，三段！", "测验员：七、三、一。",
+    )
+    source = "测验员：“7-3-1”\n谷言：“只有三段？”\n测验员：“结果无误。”"
+
+    errors = validate_screenplay(
+        script, _bible(), expected_beats=5, episode_no=1,
+        source_text=source, require_dialogue_chains=True,
+    )
+
+    assert not any("开场对白锚点被改写到失去原意" in error for error in errors), errors
 
 
 def test_dialogue_chain_scene_check_prefers_declared_speaker_over_fuzzy_name_match() -> None:

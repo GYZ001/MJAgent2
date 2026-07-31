@@ -65,6 +65,94 @@ def test_high_score_never_offsets_scene_hard_gate(facts, expected) -> None:
     assert expected in qa["hard_failures"]
 
 
+def test_scene_layout_details_do_not_become_wrong_place_hard_failure() -> None:
+    qa = normalize_scene_image_qa({
+        "overall": 0.3,
+        "person_count": 0,
+        "watermark_detected": False,
+        "forbidden_text_detected": False,
+        "space_type_matches": False,
+        "issues": [
+            "嵌入式售票窗为开放式大窗口，不符合封闭小型交易口",
+            "远端存在开放式通道，未被连续无窗内墙完整包围",
+            "未设置明确的无文字影厅入口，仍存在普通柜台",
+        ],
+    })
+
+    assert qa["status"] == "warning"
+    assert qa["hard_gate_passed"] is True
+    assert qa["space_type_matches"] is False
+    assert qa["space_type_hard_failure"] is False
+    assert qa["hard_failures"] == []
+    assert any("布局差异" in warning for warning in qa["warnings"])
+
+
+def test_scene_wrong_place_evidence_remains_a_hard_failure() -> None:
+    qa = normalize_scene_image_qa({
+        "overall": 0.2,
+        "person_count": 0,
+        "watermark_detected": False,
+        "forbidden_text_detected": False,
+        "space_type_matches": False,
+        "issues": ["电影院门厅实际画成海堤上的半室外雨廊"],
+    })
+
+    assert qa["status"] == "failed"
+    assert qa["hard_gate_passed"] is False
+    assert qa["space_type_hard_failure"] is True
+    assert "场景空间类型与锚点不符" in qa["hard_failures"]
+
+
+def test_explicit_wrong_place_issue_overrides_conflicting_true_boolean() -> None:
+    qa = normalize_scene_image_qa({
+        "overall": 0.5,
+        "person_count": 0,
+        "watermark_detected": False,
+        "forbidden_text_detected": False,
+        "space_type_matches": True,
+        "issues": [
+            "画面实际为影院走廊区域，并非预期的电影院放映室内部，"
+            "未呈现放映室的核心场景元素"
+        ],
+    })
+
+    assert qa["reported_space_type_matches"] is True
+    assert qa["space_type_matches"] is False
+    assert qa["space_type_hard_failure"] is True
+    assert qa["status"] == "failed"
+    assert qa["hard_gate_passed"] is False
+
+
+def test_explicit_indoor_frost_is_a_material_hard_failure() -> None:
+    qa = normalize_scene_image_qa({
+        "overall": 0.7,
+        "person_count": 0,
+        "watermark_detected": False,
+        "forbidden_text_detected": False,
+        "space_type_matches": True,
+        "issues": [
+            "地面及墙角的附着物为白色积雪/霜类物质，"
+            "不符合要求的暖灰褐色薄层细粉尘积灰"
+        ],
+    })
+
+    assert qa["forbidden_material_detected"] is True
+    assert qa["status"] == "failed"
+    assert qa["hard_gate_passed"] is False
+    assert "场景材质出现明确禁止的积雪、冰霜或白色覆盖物" in qa["hard_failures"]
+
+    snow_like = normalize_scene_image_qa({
+        "overall": 0.6,
+        "person_count": 0,
+        "watermark_detected": False,
+        "forbidden_text_detected": False,
+        "space_type_matches": True,
+        "issues": ["地面出现白色水渍/积雪状物质，未使用暖灰褐色薄层细粉尘表现积灰"],
+    })
+    assert snow_like["forbidden_material_detected"] is True
+    assert snow_like["hard_gate_passed"] is False
+
+
 def test_scene_gate_requires_explicit_negative_evidence() -> None:
     qa = normalize_scene_image_qa({"overall": 0.99, "issues": []})
     assert qa["status"] == "unverified"

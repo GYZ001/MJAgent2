@@ -130,7 +130,10 @@ def evaluate_storyboard_for_confirmation(
     from app.continuity import dialogue_framing_errors
     from app.validators import prefer_default_shot_durations
 
-    board = Storyboard(episode_no=storyboard.episode_no, shots=list(storyboard.shots))
+    # Evaluation is a read-only gate.  A shallow list copy still shares every
+    # Shot instance with the caller, so normalizers could mutate the CAS
+    # baseline while validating a repair candidate and create a false conflict.
+    board = Storyboard.model_validate(storyboard.model_dump(mode="json"))
     normalize_offbible_characters(board, bible)
     normalize_continuity(board)
     prefer_default_shot_durations(board)

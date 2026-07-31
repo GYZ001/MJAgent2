@@ -636,14 +636,23 @@ CREATE TABLE IF NOT EXISTS benchmark_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_scope ON workflow_runs(scope_type, scope_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_parent ON workflow_runs(parent_run_id);
 CREATE INDEX IF NOT EXISTS idx_step_runs_run ON step_runs(run_id, started_at, iteration_no);
+CREATE INDEX IF NOT EXISTS idx_step_runs_parent ON step_runs(parent_step_run_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_scope ON artifacts(scope_type, scope_id, type, version);
+CREATE INDEX IF NOT EXISTS idx_artifacts_created_step ON artifacts(created_by_step_run_id);
 CREATE INDEX IF NOT EXISTS idx_evaluations_artifact ON evaluations(artifact_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_evaluations_step ON evaluations(step_run_id);
 CREATE INDEX IF NOT EXISTS idx_run_events_run ON run_events(run_id, ts);
+CREATE INDEX IF NOT EXISTS idx_run_events_step ON run_events(step_run_id);
 CREATE INDEX IF NOT EXISTS idx_budget_scope ON budget_reservations(scope_type, scope_id, status);
 CREATE INDEX IF NOT EXISTS idx_gate_pending ON gate_decisions(gate_key, decision, created_at);
+CREATE INDEX IF NOT EXISTS idx_gate_decisions_run ON gate_decisions(run_id);
 CREATE INDEX IF NOT EXISTS idx_delivery_episode ON delivery_packages(episode_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_feedback_episode ON customer_feedback(episode_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_feedback_revision_run ON customer_feedback(revision_run_id);
+CREATE INDEX IF NOT EXISTS idx_provider_calls_run ON provider_calls(run_id);
+CREATE INDEX IF NOT EXISTS idx_provider_calls_step ON provider_calls(step_run_id);
 CREATE INDEX IF NOT EXISTS idx_benchmark_project ON benchmark_runs(project_id, created_at);
 CREATE TABLE IF NOT EXISTS error_logs (
     id TEXT PRIMARY KEY,             -- 错误ID（ERR-YYYYMMDD-xxxxxx），前端展示 + 后端定位的唯一句柄
@@ -739,6 +748,7 @@ CREATE TABLE IF NOT EXISTS agent_turn_events (
 CREATE INDEX IF NOT EXISTS idx_agent_messages_conv ON agent_messages(conversation_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_agent_turns_conv ON agent_turns(conversation_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_agent_tool_calls_turn ON agent_tool_calls(turn_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_agent_tool_calls_run ON agent_tool_calls(run_id);
 CREATE INDEX IF NOT EXISTS idx_agent_events_turn ON agent_turn_events(turn_id, event_id);
 CREATE TABLE IF NOT EXISTS mcp_tokens (
     id TEXT PRIMARY KEY,

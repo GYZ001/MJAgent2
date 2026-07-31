@@ -4,6 +4,7 @@ import {
   buildStoryboardChanges,
   isStoryboardProblemShot,
   storyboardGateIssueLabel,
+  storyboardDeleteUsesFullClear,
   storyboardProgressCopy,
   storyboardSaveDisabledReason,
   storyboardShotCheckpointLabel,
@@ -64,6 +65,13 @@ describe('分镜台结构化 diff 与问题筛选', () => {
   it('质量优化建议不混入必须处理的问题镜', () => {
     const value = shot({ qa_warnings: ['画面动作含可精简的细节词'] })
     expect(isStoryboardProblemShot(value)).toBe(false)
+  })
+
+  it('删除全剧最后一镜时切换到整集清空流程', () => {
+    const only = shot()
+    expect(storyboardDeleteUsesFullClear([only], only.id)).toBe(true)
+    expect(storyboardDeleteUsesFullClear([only, shot({ id: 's2', shot_no: 2 })], only.id)).toBe(false)
+    expect(storyboardDeleteUsesFullClear([only], 'other-shot')).toBe(false)
   })
 
   it('把门禁字段翻译为可执行的制作语言', () => {

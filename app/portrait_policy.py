@@ -48,7 +48,7 @@ _OCCLUSION_TOKENS = (
 )
 _NON_OCCLUSION_TOKENS = (
     "not occlud", "non-occlud", "does not cover", "未遮挡", "不遮挡",
-    "没有遮挡", "未遮住", "不影响主体", "未影响识别",
+    "没有遮挡", "非遮挡", "未遮住", "不影响主体", "未影响识别",
 )
 _MINOR_CROP_TOKENS = (
     "轻微裁切", "轻微截断", "minor crop", "slightly cropped",
@@ -63,6 +63,23 @@ _MAJOR_CROP_TOKENS = (
     "半身", "腰部以上", "膝盖以上", "头部被截", "脸部被截",
     "下半身缺失", "上半身缺失", "主体大面积", "half body",
     "cropped at the waist", "cropped above the knee", "head cropped",
+)
+_NEGATED_DEFECT_PHRASES = (
+    "无水印、无遮挡文字/logo",
+    "无水印、无文字或logo遮挡",
+    "无遮挡文字/logo",
+    "无遮挡文字或logo",
+    "全身完整无水印文字遮挡",
+    "全身完整且无遮挡",
+    "无水印文字遮挡",
+    "无水印或文字遮挡",
+    "无水印", "没有水印", "未检测到水印",
+    "无文字", "没有文字", "未检测到文字",
+    "无遮挡", "未遮挡", "没有遮挡",
+    "无畸形", "没有畸形", "未发现畸形",
+    "全身完整", "主体完整", "解剖结构正常", "无硬违规内容",
+    "no watermark", "no text", "not occluded", "no occlusion",
+    "full body visible", "anatomy valid", "no hard violation",
 )
 
 
@@ -147,7 +164,10 @@ def deterministic_hard_issue(message: str) -> bool:
     lower = str(message or "").strip().lower()
     if permitted_portrait_warning(lower):
         return False
-    return any(token in lower for token in _DETERMINISTIC_HARD_TOKENS)
+    defect_evidence = lower
+    for phrase in sorted(_NEGATED_DEFECT_PHRASES, key=len, reverse=True):
+        defect_evidence = defect_evidence.replace(phrase, "")
+    return any(token in defect_evidence for token in _DETERMINISTIC_HARD_TOKENS)
 
 
 def _score(value: Any) -> float | None:
@@ -166,9 +186,29 @@ def normalize_portrait_seed_qa(qa: dict[str, Any] | None) -> dict[str, Any]:
     recovered = bool(result.get("qa_recovered"))
     hard, demoted = split_portrait_hard_failures(result.get("hard_failures"))
     raw_issues = string_list(result.get("issues"))
-    hard.extend(message for message in raw_issues if deterministic_hard_issue(message))
+    crop_severity = str(result.get("crop_severity") or "").strip().lower()
+
+    def raw_issue_is_hard(message: str) -> bool:
+        lower = str(message or "").lower()
+        structured_minor_crop = (
+            crop_severity == "minor"
+            and any(token in lower for token in _CROP_SIGNAL_TOKENS)
+            and not any(token in lower for token in _MAJOR_CROP_TOKENS)
+        )
+        structured_non_occluding_watermark = (
+            result.get("watermark_detected") is True
+            and result.get("watermark_occluding") is False
+            and any(token in lower for token in _WATERMARK_TOKENS)
+        )
+        return (
+            not structured_minor_crop
+            and not structured_non_occluding_watermark
+            and deterministic_hard_issue(message)
+        )
+
+    hard.extend(message for message in raw_issues if raw_issue_is_hard(message))
     warnings = unique_messages([
-        *(message for message in raw_issues if not deterministic_hard_issue(message)),
+        *(message for message in raw_issues if not raw_issue_is_hard(message)),
         *string_list(result.get("soft_warnings")),
         *demoted,
     ])
@@ -185,7 +225,6 @@ def normalize_portrait_seed_qa(qa: dict[str, Any] | None) -> dict[str, Any]:
         presentation = 1.0
 
     all_messages = [*string_list(result.get("hard_failures")), *raw_issues]
-    crop_severity = str(result.get("crop_severity") or "").strip().lower()
     minor_crop = crop_severity == "minor" or any(minor_crop_issue(item) for item in all_messages)
     major_crop = crop_severity == "major" or any(
         any(token in str(item).lower() for token in _MAJOR_CROP_TOKENS)

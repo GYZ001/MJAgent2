@@ -1,7 +1,11 @@
-import { describe, expect, it } from 'vitest'
-import { locationFor, routeFromPath } from './App'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { locationFor, routeFromPath, useNav } from './App'
 
 describe('无分集工作台路由', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
   it('为四个工作台保留稳定的项目级 URL', () => {
     expect(locationFor('script', 'project 1', null, null))
       .toBe('/projects/project%201/script')
@@ -29,5 +33,20 @@ describe('无分集工作台路由', () => {
       episodeId: 'e1',
       chapterIdx: null,
     })
+  })
+
+  it('导航 Provider 在热重载窗口缺失时按当前 URL 安全回退', () => {
+    vi.stubGlobal('window', {
+      location: {
+        pathname: '/projects/p1/bible',
+        assign: vi.fn(),
+      },
+    })
+    const Probe = () => {
+      const nav = useNav()
+      return createElement('span', null, `${nav.view}:${nav.projectId}`)
+    }
+
+    expect(renderToStaticMarkup(createElement(Probe))).toContain('bible:p1')
   })
 })

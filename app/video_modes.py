@@ -756,8 +756,30 @@ def narrative_keyframe_beats(shot: Shot, count: int) -> list[dict[str, Any]]:
     else:
         ratios = [i / (count - 1) for i in range(count)]
 
+    # 决定性定格默认放在 64%；但当该定格按镜头合同必须展示剧情文字时，
+    # 时间点必须落在 required_text 的可见窗口内。否则后续会同时生成
+    # “必须画出指定文字”与“当前时刻禁止文字”两份相反合同。
+    decisive_ratio = 0.64
+    decisive_ratio_adjusted = False
+    required_text = getattr(shot, "required_text", None)
+    if required_text is not None and _keyframe_contract(shot, None).get("required_text_expected"):
+        try:
+            duration_s = float(shot.duration_s or 0.0)
+            appear_at = float(required_text.appear_start_s or 0.0)
+            stable_raw = required_text.stable_until_s
+            stable_until = float(stable_raw) if stable_raw is not None else duration_s
+            if duration_s > 0:
+                window_start = max(0.0, min(1.0, appear_at / duration_s))
+                window_end = max(window_start, min(1.0, stable_until / duration_s))
+                decisive_ratio = min(max(decisive_ratio, window_start), window_end)
+                decisive_ratio_adjusted = decisive_ratio != 0.64
+        except (TypeError, ValueError):
+            pass
+
     beats: list[dict[str, Any]] = []
-    decisive_position = min(range(len(ratios)), key=lambda i: abs(ratios[i] - 0.64))
+    decisive_position = min(range(len(ratios)), key=lambda i: abs(ratios[i] - decisive_ratio))
+    if decisive_ratio_adjusted:
+        ratios[decisive_position] = decisive_ratio
     for zero_index, ratio in enumerate(ratios):
         beat_index = zero_index + 1
         if zero_index == decisive_position:
@@ -1601,53 +1623,61 @@ _SLOT_ROLE_CYCLE = [
 
 
 async def write_reference_prompt_batch(
-    shot: Shot, bible: Bible, slots: list[tuple[str, str]], *, intents: list[str | None] | None = None,
+    shot: Shot,
+    bible: Bible,
+    slots: list[tuple[str, str]],
+    *,
+    intents: list[str | None] | None = None,
+    beats: list[dict[str, Any] | None] | None = None,
 ) -> list[str]:
     """一镜一次返回全部槽位提示词合同（P1）。缺项/重复时仅对异常槽回退单图调用。"""
     anchors = _keyframe_character_anchors(shot, bible)
-    contract = _keyframe_contract(shot, bible)
     planned = []
+    slot_shots: list[Shot] = []
     for i, (slot_key, ref_type) in enumerate(slots):
+        beat = beats[i] if beats and i < len(beats) else None
+        slot_shot = _shot_for_keyframe_beat(shot, beat)
+        slot_contract = _keyframe_contract(slot_shot, bible)
+        slot_shots.append(slot_shot)
         planned.append({
             "slot": slot_key,
             "type": ref_type,
             "intent": (intents[i] if intents and i < len(intents) else None) or "",
+            "shot": {
+                "target_keyframe_desc": slot_contract.get("target_keyframe_desc"),
+                "action_context": slot_shot.primary_action or slot_shot.action_desc,
+                "camera_angle": slot_contract.get("camera_angle"),
+                "contact_required": slot_contract.get("contact_required"),
+                "established_contact_required": slot_contract.get("established_contact_required"),
+                "relative_height_policy": slot_contract.get("relative_height_policy"),
+                "height_difference_evidence": slot_contract.get("height_difference_evidence"),
+            },
+            "geometry_contract": slot_contract,
+            "text_constraint": _keyframe_text_instruction(slot_shot, slot_contract),
         })
     payload = {
         "task": (
             "Return exactly the planned slots below, with one concrete English image-generation prompt per slot. "
-            "Do not add, rename, or omit slots. Each non-empty slot intent is that slot's authoritative timeline "
-            "target and overrides the shot-level target_keyframe_desc. Make the slots visibly different moments "
+            "Do not add, rename, or omit slots. Each slot's shot, geometry_contract, text_constraint, and non-empty "
+            "intent are authoritative for that slot. Make the slots visibly different moments "
             "of one chronological shot. Render ONE frozen instant per image; never blend timeline beats, the first "
             "and last frame, or fall back to a neutral lineup."
         ),
         "slots": planned,
         "shot": {
             "scene_setting": shot.scene_setting,
-            "visible_characters": list(contract.get("visible_characters") or []),
+            "visible_characters": list(_keyframe_contract(shot, bible).get("visible_characters") or []),
             "character_appearance": anchors,
-            "target_keyframe_desc": contract.get("target_keyframe_desc"),
-            "action_context": shot.primary_action or shot.action_desc,
             "shot_size": shot.shot_size,
-            "camera_angle": contract.get("camera_angle"),
-            "spatial_anchor": contract.get("spatial_anchor"),
-            "scene_canonical": contract.get("scene_canonical"),
-            "scene_landmarks": contract.get("scene_landmarks"),
-            "scene_geometry_contract": contract.get("scene_geometry_contract"),
-            "contact_required": contract.get("contact_required"),
-            "established_contact_required": contract.get("established_contact_required"),
-            "relative_height_policy": contract.get("relative_height_policy"),
-            "height_difference_evidence": contract.get("height_difference_evidence"),
+            "spatial_anchor": shot.spatial_anchor,
         },
-        "geometry_contract": contract,
         "style": bible.world.visual_style_canonical,
         "constraints": [
-            "English only", "9:16 portrait", _keyframe_text_instruction(shot, contract), "no watermark/logo",
+            "English only", "9:16 portrait", "no watermark/logo",
             "no spoilers for later shots", "show every individual visible identity exactly once; render collective "
             "roles as groups with the target-described multiplicity",
             _MULTI_KEYFRAME_INVARIANCE_NOTE,
-            "obey geometry_contract exactly except that each slot intent overrides its generic target description; "
-            "do not restate the full policy verbatim",
+            "obey each slot's own geometry_contract and text_constraint exactly; do not restate the full policy verbatim",
         ],
         "policy_version": KEYFRAME_PROMPT_CONTRACT_VERSION,
         "output_schema": {
@@ -1680,7 +1710,7 @@ async def write_reference_prompt_batch(
         if prompts[i]:
             continue
         intent = intents[i] if intents and i < len(intents) else None
-        prompts[i] = await write_reference_prompt(shot, bible, ref_type, intent=intent)
+        prompts[i] = await write_reference_prompt(slot_shots[i], bible, ref_type, intent=intent)
     # 近重复检测：若两槽文本高度相似，重写后者
     for i in range(len(prompts)):
         for j in range(i):
@@ -1688,7 +1718,7 @@ async def write_reference_prompt_batch(
             if a and b and a.lower()[:80] == b.lower()[:80]:
                 original_intent = intents[i] if intents and i < len(intents) else ""
                 prompts[i] = await write_reference_prompt(
-                    shot,
+                    slot_shots[i],
                     bible,
                     slots[i][1],
                     intent=(
@@ -2583,6 +2613,7 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
         prompts = await write_reference_prompt_batch(
             shot, bible, [(s, t) for s, t, _, _ in prompts_to_write],
             intents=[o for _, _, o, _ in prompts_to_write],
+            beats=[beat_by_slot.get(s) for s, _, _, _ in prompts_to_write],
         )
         written_by_slot = {
             prompts_to_write[i][0]: prompts[i] or prompts_to_write[i][2]

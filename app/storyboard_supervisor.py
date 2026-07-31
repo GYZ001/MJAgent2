@@ -5,7 +5,10 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import re
+import time
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -41,12 +44,19 @@ SupervisorPhase = Literal[
 ]
 
 CHECKPOINT_TYPE = "storyboard_supervisor_checkpoint"
+STORYBOARD_REPAIR_SAFETY_LIMIT = 24
+STORYBOARD_REPAIR_ACTIVATION_LIMIT = 6
+STORYBOARD_REPAIR_MAX_FINGERPRINT_ATTEMPTS = 4
+STORYBOARD_REPAIR_PLANNER_VERSION = "storyboard-repair-v2"
 
 
 class SupervisorCheckpoint(BaseModel):
     episode_id: str
     phase: SupervisorPhase = "CREATED"
     repair_epoch: int = 0
+    planner_version: str = ""
+    activation_no: int = 0
+    activation_attempt_count: int = 0
     outline_artifact_id: str | None = None
     validated_shot_artifact_ids: list[str] = Field(default_factory=list)
     validated_prefix_end: int = 0
@@ -55,9 +65,33 @@ class SupervisorCheckpoint(BaseModel):
     coverage: dict[str, list[str]] = Field(default_factory=dict)
     pending_issue_ids: list[str] = Field(default_factory=list)
     issue_fingerprint_counts: dict[str, int] = Field(default_factory=dict)
+    issue_strategy_history: dict[str, list[str]] = Field(default_factory=dict)
     input_versions: dict[str, str | None] = Field(default_factory=dict)
     last_repair: dict[str, Any] | None = None
+    repair_candidate_shots: list[dict[str, Any]] = Field(default_factory=list)
+    legacy_repair_audit: dict[str, Any] = Field(default_factory=dict)
     outcome: str | None = None  # SUCCEEDED_READY_FOR_CONFIRM
+
+
+def _migrate_checkpoint(cp: SupervisorCheckpoint) -> SupervisorCheckpoint:
+    """Upgrade legacy runaway checkpoints without erasing their audit counters."""
+    if cp.planner_version == STORYBOARD_REPAIR_PLANNER_VERSION:
+        return cp
+    cp.legacy_repair_audit = {
+        **cp.legacy_repair_audit,
+        "repair_epoch": int(cp.repair_epoch or 0),
+        "issue_fingerprint_counts": dict(cp.issue_fingerprint_counts or {}),
+        "migrated_from": cp.planner_version or "legacy",
+    }
+    # ``repair_epoch`` remains the lifetime audit count.  The corrupt legacy
+    # per-fingerprint counters must not consume the first bounded v2 activation.
+    cp.issue_fingerprint_counts = {}
+    cp.activation_attempt_count = 0
+    cp.repair_candidate_shots = []
+    cp.planner_version = STORYBOARD_REPAIR_PLANNER_VERSION
+    if cp.outcome == "PAUSED_REPAIR_SAFETY_LIMIT":
+        cp.outcome = "WAITING_RETRY_LEGACY_MIGRATED"
+    return cp
 
 
 def _is_retryable_external_error(exc: BaseException) -> bool:
@@ -89,6 +123,7 @@ def _pause_for_external_error(
     )
     note = f"外部依赖暂不可用，已保留分镜检查点，可稍后继续任务：{public}"
     cp.phase = "PAUSED_EXTERNAL"
+    cp.outcome = "PAUSED_PROVIDER_UNAVAILABLE"
     save_checkpoint(cp, run_id=run_id)
     conn.execute(
         "UPDATE episodes SET status='scripting', script_error=? WHERE id=?",
@@ -103,18 +138,6 @@ def _pause_for_external_error(
             "PAUSED_EXTERNAL",
             payload={"error_type": type(exc).__name__, "retryable": True},
         )
-        try:
-            from app.orchestration.state_machine import transition_run
-
-            transition_run(
-                run_id,
-                "RUNNING",
-                "PAUSED_EXTERNAL",
-                note[:800],
-                failure_code="PROVIDER_UNAVAILABLE",
-            )
-        except Exception:  # noqa: BLE001
-            pass
     return cp
 
 
@@ -135,6 +158,16 @@ def _current_storyboard_projection_has_material(conn, episode_id: str, ep) -> bo
 
 
 def load_latest_checkpoint(episode_id: str) -> SupervisorCheckpoint | None:
+    try:
+        from app.production.revision import get_active_production_revision
+
+        revision = get_active_production_revision(episode_id, "storyboard")
+        raw_checkpoint = dict(revision.checkpoint_json or {}) if revision else {}
+        raw_supervisor = raw_checkpoint.get("supervisor_checkpoint")
+        if isinstance(raw_supervisor, dict) and raw_supervisor:
+            return _migrate_checkpoint(SupervisorCheckpoint.model_validate(raw_supervisor))
+    except (TypeError, ValueError):
+        pass
     conn = get_conn()
     row = conn.execute(
         """SELECT id, content_json FROM artifacts
@@ -147,19 +180,61 @@ def load_latest_checkpoint(episode_id: str) -> SupervisorCheckpoint | None:
         return None
     try:
         raw = json.loads(row["content_json"] or "{}")
-        return SupervisorCheckpoint.model_validate(raw)
+        return _migrate_checkpoint(SupervisorCheckpoint.model_validate(raw))
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
 
 
 def save_checkpoint(cp: SupervisorCheckpoint, *, run_id: str | None = None) -> str:
+    cp = _migrate_checkpoint(cp)
+    payload = cp.model_dump(mode="json")
+    payload_hash = evidence_repository.content_hash(payload)
+    # The production revision owns the current mutable recovery point.  Audit
+    # artifacts are appended only when material state changed.
+    try:
+        from app.production.revision import (
+            get_active_production_revision,
+            get_production_revision,
+            save_checkpoint as save_revision_checkpoint,
+        )
+
+        revision = get_active_production_revision(cp.episode_id, "storyboard")
+        if revision is None:
+            pointer = get_conn().execute(
+                "SELECT storyboard_production_revision_id FROM episodes WHERE id=?",
+                (cp.episode_id,),
+            ).fetchone()
+            revision_id = pointer["storyboard_production_revision_id"] if pointer else None
+            revision = get_production_revision(revision_id) if revision_id else None
+        if revision:
+            revision_checkpoint = dict(revision.checkpoint_json or {})
+            revision_checkpoint["supervisor_checkpoint"] = payload
+            revision_checkpoint["activation_no"] = cp.activation_no
+            revision_checkpoint["activation_attempt_count"] = cp.activation_attempt_count
+            revision_checkpoint["lifetime_repair_count"] = cp.repair_epoch
+            revision_checkpoint["phase"] = cp.phase
+            revision_checkpoint["yield_reason"] = cp.outcome
+            save_revision_checkpoint(revision.id, revision_checkpoint)
+    except Exception:  # noqa: BLE001 - legacy databases remain readable
+        pass
+
+    conn = get_conn()
+    latest = conn.execute(
+        """SELECT id,content_hash FROM artifacts
+           WHERE type=? AND scope_type='episode' AND scope_id=?
+             AND status IN ('candidate','validated','approved')
+           ORDER BY created_at DESC LIMIT 1""",
+        (CHECKPOINT_TYPE, cp.episode_id),
+    ).fetchone()
+    if latest and latest["content_hash"] == payload_hash:
+        return str(latest["id"])
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type=CHECKPOINT_TYPE,
         scope_type="episode",
         scope_id=cp.episode_id,
         status="validated",
         trust_level="T2",
-        content=cp.model_dump(mode="json"),
+        content=payload,
         contract_version=get_contract("storyboard").version,
     ))
     evidence_repository.create_evaluation(
@@ -256,6 +331,91 @@ def _is_quality_only_repair_plan(plan: RepairPlan) -> bool:
     return bool(codes) and codes.issubset(quality_codes)
 
 
+def _storyboard_warning_requires_auto_repair(issue: Any) -> bool:
+    """Warnings that are deterministic delivery defects, not taste scores."""
+    code = str(getattr(issue, "code", "") or "")
+    message = str(getattr(issue, "message", "") or "")
+    return bool(
+        code == "OVERDETAIL"
+        or "连续 3 个镜头景别" in message
+        or "连续三个镜头景别" in message
+    )
+
+
+def _storyboard_generation_is_complete(
+    completed: list[Shot], planned_total: int, max_shots: int,
+) -> bool:
+    """Return whether generation may safely leave the per-shot loop.
+
+    A persisted ``is_final`` flag is only authoritative after every planned
+    outline beat has been generated.  Legacy interrupted repairs can leave an
+    early shot marked final while the durable outline still contains later
+    beats; treating that flag as terminal publishes an incomplete storyboard.
+    """
+    count = len(completed)
+    if planned_total > 0 and count >= planned_total:
+        return True
+    if completed and completed[-1].is_final and planned_total <= 0:
+        return True
+    return count >= max_shots
+
+
+def _recover_truncated_outline_from_approved_artifact(
+    conn,
+    ep,
+    cp: SupervisorCheckpoint,
+    outline: StoryboardOutline | None,
+) -> StoryboardOutline | None:
+    """Recover a legacy-truncated mutable outline from its approved artifact.
+
+    This is deliberately narrow: it only runs for a checkpoint that claims a
+    completed publication while the official shot projection is still shorter
+    than that checkpoint.  The recovered artifact must belong to the exact
+    current screenplay version and contain more beats than the mutable JSON.
+    User-approved structure edits therefore remain untouched.
+    """
+    current_count = len(outline.shots) if (outline and outline.shots) else 0
+    shot_count = int(conn.execute(
+        "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (ep["id"],),
+    ).fetchone()["c"])
+    if not (
+        cp.phase == "SUCCEEDED"
+        and int(cp.expected_total or 0) > shot_count
+        and int(cp.expected_total or 0) > current_count
+        and ep["storyboard_artifact_id"]
+        and ep["screenplay_artifact_id"]
+    ):
+        return outline
+
+    rows = conn.execute(
+        """SELECT content_json,parent_artifact_ids_json FROM artifacts
+           WHERE type='storyboard_outline' AND scope_type='episode' AND scope_id=?
+             AND status IN ('approved','validated')
+           ORDER BY created_at DESC""",
+        (ep["id"],),
+    ).fetchall()
+    for row in rows:
+        try:
+            parents = json.loads(row["parent_artifact_ids_json"] or "[]")
+            candidate = StoryboardOutline.model_validate_json(row["content_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if ep["screenplay_artifact_id"] not in parents:
+            continue
+        if len(candidate.shots) <= max(current_count, shot_count):
+            continue
+        conn.execute(
+            "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
+            (candidate.model_dump_json(), ep["id"]),
+        )
+        conn.commit()
+        cp.expected_total = len(candidate.shots)
+        cp.phase = "VALIDATING_OUTLINE"
+        cp.outcome = None
+        return candidate
+    return outline
+
+
 def _contiguous_shot_rows(rows) -> list:
     """Return only the validated 1..N prefix, stopping at the first shot_no gap."""
     prefix = []
@@ -269,12 +429,346 @@ def _contiguous_shot_rows(rows) -> list:
     return prefix
 
 
+def _storyboard_hash(board: Storyboard) -> str:
+    return evidence_repository.content_hash(board.model_dump(mode="json"))
+
+
+def _repair_is_pending(cp: SupervisorCheckpoint) -> bool:
+    repair = cp.last_repair or {}
+    return repair.get("status") in {"candidate_pending", "candidate_generating"}
+
+
+def _repair_feedback_for_shot(messages: list[str], shot_no: int) -> list[str]:
+    localized: list[str] = []
+    for message in messages:
+        targets = {
+            int(value)
+            for value in re.findall(r"(?:shot_no\s*=\s*|第\s*)(\d+)\s*镜?", message, re.I)
+        }
+        if not targets or shot_no in targets:
+            localized.append(message)
+    return localized
+
+
+def _repair_context_shots(conn, cp: SupervisorCheckpoint, episode_no: int) -> list[Shot]:
+    """Return prefix + durable candidates while leaving the official rows untouched."""
+    repair = cp.last_repair or {}
+    start = max(1, int(repair.get("window_start") or cp.next_shot_no or 1))
+    prefix_rows = conn.execute(
+        "SELECT * FROM shots WHERE episode_id=? AND shot_no<? ORDER BY shot_no",
+        (cp.episode_id, start),
+    ).fetchall()
+    prefix = list(_board_from_rows(prefix_rows, episode_no).shots) if prefix_rows else []
+    candidates: list[Shot] = []
+    for raw in cp.repair_candidate_shots:
+        try:
+            candidates.append(Shot.model_validate(raw))
+        except (TypeError, ValueError):
+            continue
+    return [*prefix, *candidates]
+
+
+def _board_from_rows(rows, episode_no: int) -> Storyboard:
+    # Local import avoids the domain module's shared-namespace import cycle.
+    from app.domain.storyboard_ops import _board_from_shot_rows
+
+    return _board_from_shot_rows(rows, episode_no)
+
+
+def _merge_repair_candidate(
+    current: Storyboard,
+    cp: SupervisorCheckpoint,
+) -> Storyboard:
+    repair = cp.last_repair or {}
+    start = max(1, int(repair.get("window_start") or 1))
+    mode = str(repair.get("mode") or "replace")
+    current_shots = [
+        Shot.model_validate(shot.model_dump(mode="json"))
+        for shot in current.shots
+    ]
+    candidates = [Shot.model_validate(raw) for raw in cp.repair_candidate_shots]
+    if mode == "insert":
+        merged = [*current_shots[: start - 1], *candidates, *current_shots[start - 1 :]]
+        for shot_no, shot in enumerate(merged, start=1):
+            shot.shot_no = shot_no
+        return Storyboard(episode_no=current.episode_no, shots=merged)
+    by_no = {int(shot.shot_no): shot for shot in candidates}
+    merged = [by_no.get(int(shot.shot_no), shot) for shot in current_shots]
+    # A failed initial/append generation has no official target row yet.
+    existing_nos = {int(shot.shot_no) for shot in current_shots}
+    merged.extend(shot for shot in candidates if int(shot.shot_no) not in existing_nos)
+    merged.sort(key=lambda shot: int(shot.shot_no))
+    return Storyboard(episode_no=current.episode_no, shots=merged)
+
+
+def _validated_candidate_projection(
+    current: Storyboard,
+    evaluated: Storyboard,
+    cp: SupervisorCheckpoint,
+) -> Storyboard:
+    """Overlay only the evaluated repair window onto the exact CAS baseline.
+
+    Full-gate evaluation may derive render-time fields on every shot.  Those
+    derived values are useful to validate the candidate but are outside a
+    local repair's authorized write window.  Persisting or hashing them would
+    either mutate unrelated shots or produce a projection mismatch.
+    """
+    repair = cp.last_repair or {}
+    start = max(1, int(repair.get("window_start") or 1))
+    raw_count = len(cp.repair_candidate_shots)
+    if str(repair.get("mode") or "replace") == "insert":
+        selected = [
+            shot for shot in evaluated.shots
+            if start <= int(shot.shot_no) < start + raw_count
+        ]
+    else:
+        end = max(start, int(repair.get("window_end") or start))
+        selected = [
+            shot for shot in evaluated.shots
+            if start <= int(shot.shot_no) <= end
+        ]
+    projected_cp = cp.model_copy(deep=True)
+    projected_cp.repair_candidate_shots = [
+        shot.model_dump(mode="json") for shot in selected
+    ]
+    return _merge_repair_candidate(current, projected_cp)
+
+
+def _write_shot_fields(conn, row_id: str, shot: Shot, artifact_id: str | None) -> None:
+    from app.continuity import shot_contract_dict
+    from app.validators import normalize_action_desc
+
+    shot.action_desc = normalize_action_desc(shot.action_desc)
+    conn.execute(
+        """UPDATE shots SET duration_s=?,shot_size=?,camera_move=?,scene_setting=?,scene_name=?,
+                  characters=?,action_desc=?,first_frame_desc=?,last_frame_desc=?,source_excerpt=?,
+                  narration=?,dialogues=?,transition=?,continuity_from_prev=?,shot_contract_json=?,
+                  continuity_mode=?,observed_state_out=?,storyboard_artifact_id=? WHERE id=?""",
+        (
+            shot.duration_s, shot.shot_size, shot.camera_move, shot.scene_setting,
+            shot.scene_name or None, json.dumps(shot.characters, ensure_ascii=False),
+            shot.action_desc, shot.first_frame_desc, shot.last_frame_desc,
+            shot.source_excerpt, shot.narration,
+            json.dumps([item.model_dump() for item in shot.dialogues], ensure_ascii=False),
+            shot.transition, int(shot.continuity_from_prev),
+            json.dumps(shot_contract_dict(shot), ensure_ascii=False),
+            shot.continuity_mode, shot.observed_state_out, artifact_id, row_id,
+        ),
+    )
+
+
+def _ensure_storyboard_revision(
+    episode_id: str,
+    board: Storyboard,
+    *,
+    contract_version: str,
+):
+    from app.production.revision import (
+        ensure_production_revision,
+        mark_baseline_generated,
+    )
+
+    revision = ensure_production_revision(
+        episode_id=episode_id,
+        kind="storyboard",
+        input_fingerprint=_storyboard_hash(board),
+        contract_version=contract_version,
+        qa_profile_version="storyboard-full-gate-2",
+        resume=True,
+    )
+    if revision.working_artifact_id:
+        return revision
+    baseline = evidence_repository.create_artifact(EvidenceArtifact(
+        type="storyboard_document",
+        scope_type="episode",
+        scope_id=episode_id,
+        status="validated",
+        trust_level="T2",
+        content=board.model_dump(mode="json"),
+        contract_version=contract_version,
+    ))
+    return mark_baseline_generated(
+        revision.id,
+        baseline_artifact_id=baseline["id"],
+        working_artifact_id=baseline["id"],
+    )
+
+
+def _commit_repair_candidate(
+    conn,
+    cp: SupervisorCheckpoint,
+    *,
+    episode_id: str,
+    screenplay,
+    current_board: Storyboard,
+    candidate_board: Storyboard,
+    expected_screenplay_artifact_id: str | None,
+    run_id: str | None,
+) -> str:
+    """CAS-commit a validated candidate and its official projection in one transaction."""
+    from app.domain.storyboard_ops import (
+        _assert_storyboard_write_authorized,
+        _insert_storyboard_shot,
+    )
+    from app.production.revision import get_production_revision
+
+    repair = cp.last_repair or {}
+    expected_board_hash = str(repair.get("base_hash") or "")
+    current_hash = _storyboard_hash(current_board)
+    if expected_board_hash and expected_board_hash != current_hash:
+        raise RuntimeError("storyboard working projection CAS conflict")
+
+    contract_version = get_contract("storyboard").version
+    revision = _ensure_storyboard_revision(
+        episode_id, current_board, contract_version=contract_version,
+    )
+    revision = get_production_revision(revision.id)
+    assert revision is not None and revision.working_artifact_id
+    parent_ids = [revision.working_artifact_id]
+    candidate_artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="storyboard_document",
+        scope_type="episode",
+        scope_id=episode_id,
+        status="validated",
+        trust_level="T2",
+        content=candidate_board.model_dump(mode="json"),
+        parent_artifact_ids=parent_ids,
+        contract_version=contract_version,
+    ))
+
+    # Artifact creation commits independently. Re-observe both chain head and
+    # projection inside BEGIN IMMEDIATE before touching official rows.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        _assert_storyboard_write_authorized(
+            conn, episode_id, expected_screenplay_artifact_id,
+        )
+        rows = conn.execute(
+            "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,),
+        ).fetchall()
+        observed = _board_from_rows(rows, current_board.episode_no)
+        if expected_board_hash and _storyboard_hash(observed) != expected_board_hash:
+            raise RuntimeError("storyboard projection changed during repair")
+        chain = conn.execute(
+            "SELECT working_artifact_id FROM production_revisions WHERE id=?",
+            (revision.id,),
+        ).fetchone()
+        if not chain or chain["working_artifact_id"] != revision.working_artifact_id:
+            raise RuntimeError("storyboard working artifact changed during repair")
+
+        mode = str(repair.get("mode") or "replace")
+        start = max(1, int(repair.get("window_start") or 1))
+        raw_candidate_count = len(cp.repair_candidate_shots)
+        if mode == "insert":
+            candidate_shots = [
+                shot for shot in candidate_board.shots
+                if start <= int(shot.shot_no) < start + raw_candidate_count
+            ]
+        else:
+            end = max(start, int(repair.get("window_end") or start))
+            candidate_shots = [
+                shot for shot in candidate_board.shots
+                if start <= int(shot.shot_no) <= end
+            ]
+        if len(candidate_shots) != raw_candidate_count:
+            raise RuntimeError("validated storyboard candidate window mismatch")
+        if mode == "insert":
+            _open_shot_gap(conn, episode_id, start)
+            for shot in candidate_shots:
+                shot_id = _insert_storyboard_shot(
+                    conn, episode_id, screenplay, shot, expected_screenplay_artifact_id,
+                )
+                from app.storyboard_workspace import realign_generated_source_binding
+                realign_generated_source_binding(
+                    episode_id, shot_id, shot.source_excerpt, conn=conn, commit=False,
+                )
+        else:
+            from app import worker
+            from app.storyboard_workspace import realign_generated_source_binding
+
+            for shot in candidate_shots:
+                row = conn.execute(
+                    "SELECT id FROM shots WHERE episode_id=? AND shot_no=?",
+                    (episode_id, shot.shot_no),
+                ).fetchone()
+                artifact_id = getattr(shot, "evidence_artifact_id", None)
+                if row:
+                    worker.clear_shot_artifacts(
+                        row["id"], active_storyboard_run_id=run_id, commit=False,
+                    )
+                    _write_shot_fields(conn, row["id"], shot, artifact_id)
+                    realign_generated_source_binding(
+                        episode_id, row["id"], shot.source_excerpt,
+                        conn=conn, commit=False,
+                    )
+                else:
+                    shot_id = _insert_storyboard_shot(
+                        conn, episode_id, screenplay, shot,
+                        expected_screenplay_artifact_id,
+                    )
+                    realign_generated_source_binding(
+                        episode_id, shot_id, shot.source_excerpt,
+                        conn=conn, commit=False,
+                    )
+        projected_rows = conn.execute(
+            "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,),
+        ).fetchall()
+        projected_board = _board_from_rows(projected_rows, candidate_board.episode_no)
+        if _storyboard_hash(projected_board) != _storyboard_hash(candidate_board):
+            raise RuntimeError("storyboard candidate projection mismatch")
+        conn.execute(
+            "UPDATE production_revisions SET working_artifact_id=?,updated_at=? WHERE id=?",
+            (candidate_artifact["id"], time.time(), revision.id),
+        )
+        conn.execute(
+            "UPDATE episodes SET working_storyboard_artifact_id=? WHERE id=?",
+            (candidate_artifact["id"], episode_id),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    patch_artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="storyboard_patch",
+        scope_type="episode",
+        scope_id=episode_id,
+        status="validated",
+        trust_level="T2",
+        content={
+            "semantic_attempt_id": repair.get("semantic_attempt_id"),
+            "issue_fingerprint": repair.get("fingerprint"),
+            "issue_messages": repair.get("issue_messages") or [],
+            "mode": repair.get("mode"),
+            "window": [repair.get("window_start"), repair.get("window_end")],
+            "before_hash": current_hash,
+            "after_hash": _storyboard_hash(candidate_board),
+            "before_artifact_id": revision.working_artifact_id,
+            "after_artifact_id": candidate_artifact["id"],
+        },
+        parent_artifact_ids=[revision.working_artifact_id, candidate_artifact["id"]],
+        contract_version=contract_version,
+    ))
+    if run_id:
+        evidence_repository.append_event(
+            run_id, "STORYBOARD_PATCH_COMMITTED", "info",
+            f"已原子提交第 {repair.get('window_start')}~{repair.get('window_end')} 镜修复",
+            payload={
+                "patch_artifact_id": patch_artifact["id"],
+                "candidate_artifact_id": candidate_artifact["id"],
+                "semantic_attempt_id": repair.get("semantic_attempt_id"),
+            },
+        )
+    return str(candidate_artifact["id"])
+
+
 async def run_storyboard_supervisor(
     episode_id: str,
     *,
     resume: bool = True,
     run_id: str | None = None,
     preflight_done: bool = False,
+    new_activation: bool = False,
 ) -> SupervisorCheckpoint:
     """集级 Supervisor 主循环。调用前应已完成人物/场景预检（或设 preflight_done=False 由本函数跳过）。"""
     from app.domain.common import (
@@ -327,7 +821,18 @@ async def run_storyboard_supervisor(
                 "bible_artifact_id": p["bible_artifact_id"] if p else None,
             },
             phase="PREFLIGHT",
+            planner_version=STORYBOARD_REPAIR_PLANNER_VERSION,
         )
+    else:
+        cp = _migrate_checkpoint(cp)
+    if new_activation:
+        cp.activation_no = int(cp.activation_no or 0) + 1
+        cp.activation_attempt_count = 0
+        cp.issue_fingerprint_counts = {}
+        cp.repair_candidate_shots = []
+        if cp.last_repair:
+            cp.last_repair = {**cp.last_repair, "status": "superseded_by_new_activation"}
+        cp.outcome = None
     if run_id:
         evidence_repository.append_event(
             run_id, "STORYBOARD_SUPERVISOR_STARTED", "info",
@@ -361,6 +866,7 @@ async def run_storyboard_supervisor(
                 )
         else:
             cp.phase = "WAITING_AUTHORIZATION"
+            cp.outcome = "WAITING_AUTHORIZATION"
             save_checkpoint(cp, run_id=run_id)
             conn.execute(
                 "UPDATE episodes SET status='scripted', script_error=? WHERE id=?",
@@ -415,6 +921,9 @@ async def run_storyboard_supervisor(
             outline = StoryboardOutline.model_validate_json(ep["storyboard_outline_json"])
         except (TypeError, ValueError):
             outline = None
+    outline = _recover_truncated_outline_from_approved_artifact(
+        conn, ep, cp, outline,
+    )
 
     def _reload_completed(rows=None) -> list[Shot]:
         """Load only the contiguous prefix and keep checkpoint evidence aligned."""
@@ -442,6 +951,8 @@ async def run_storyboard_supervisor(
         "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
     ).fetchall()
     completed: list[Shot] = _reload_completed(existing_rows)
+    if _repair_is_pending(cp):
+        completed = _repair_context_shots(conn, cp, ep_data["episode_no"])
     if completed:
         recovered_board = Storyboard(episode_no=ep_data["episode_no"], shots=list(completed))
         character_changes = normalize_offbible_characters(recovered_board, bible)
@@ -455,13 +966,15 @@ async def run_storyboard_supervisor(
     final_feedback: list[str] | None = None
     needs_outline = outline is None
 
-    # 修复由 Issue 指纹的无进展检测收口；不再在固定轮数后暴露“点击继续”伪业务状态。
+    # Every activation is independently bounded. ``repair_epoch`` is lifetime
+    # audit only and must never make a newly-authorized activation a no-op.
     while True:
         # 用户 pause / handoff：在安全边界生效
         from app.storyboard_control import consume_control
         ctrl = consume_control(episode_id)
         if ctrl == "pause":
             cp.phase = "PAUSED_EXTERNAL"
+            cp.outcome = "PAUSED_BY_USER"
             save_checkpoint(cp, run_id=run_id)
             conn.execute(
                 "UPDATE episodes SET status='scripting', script_error=? WHERE id=?",
@@ -473,14 +986,10 @@ async def run_storyboard_supervisor(
                     run_id, "SUPERVISOR_PAUSED", "info", "用户暂停",
                     payload={"phase": cp.phase, "prefix": cp.validated_prefix_end},
                 )
-                try:
-                    from app.orchestration.state_machine import transition_run
-                    transition_run(run_id, "RUNNING", "PAUSED_EXTERNAL", "user_pause")
-                except Exception:  # noqa: BLE001
-                    pass
             return cp
         if ctrl == "handoff":
             cp.phase = "WAITING_HUMAN"
+            cp.outcome = "WAITING_HUMAN_HANDOFF"
             save_checkpoint(cp, run_id=run_id)
             conn.execute(
                 "UPDATE episodes SET status='scripted', script_error=? WHERE id=?",
@@ -492,11 +1001,6 @@ async def run_storyboard_supervisor(
                     run_id, "SUPERVISOR_HANDOFF", "info", "转人工处理",
                     payload={"phase": cp.phase, "last_repair": cp.last_repair},
                 )
-                try:
-                    from app.orchestration.state_machine import transition_run
-                    transition_run(run_id, "RUNNING", "WAITING_HUMAN", "user_handoff")
-                except Exception:  # noqa: BLE001
-                    pass
             return cp
 
         # ---- 大纲 ----
@@ -546,6 +1050,8 @@ async def run_storyboard_supervisor(
             save_checkpoint(cp, run_id=run_id)
 
         # ---- 逐镜 ----
+        if _repair_is_pending(cp):
+            completed = _repair_context_shots(conn, cp, ep_data["episode_no"])
         cp.phase = "GENERATING_SHOTS"
         cp.outcome = None
         # 恢复自 CANCELLED / WAITING_* 检查点时，先持久化新的运行相位，再进入可能
@@ -553,13 +1059,30 @@ async def run_storyboard_supervisor(
         save_checkpoint(cp, run_id=run_id)
         shot_loop_broke_for_repair = False
         while True:
+            active_repair = cp.last_repair or {}
+            repair_pending = _repair_is_pending(cp)
+            if repair_pending and len(completed) >= int(active_repair.get("window_end") or 0):
+                break
             planned_now = len(outline.shots) if (outline and outline.shots) else 0
-            if planned_now > 0 and len(completed) >= planned_now:
+            if not repair_pending and _storyboard_generation_is_complete(
+                completed, planned_now, max_shots,
+            ):
                 break
-            if completed and completed[-1].is_final:
+            if repair_pending and len(completed) >= max_shots:
                 break
-            if len(completed) >= max_shots:
-                break
+
+            # An interrupted legacy run may have marked the old tail final even
+            # though the persisted outline still has work.  Clear it in memory;
+            # it is written back only in the same transaction as the next
+            # validated shot, so a failed provider call never mutates the
+            # official projection.
+            if (
+                not repair_pending
+                and completed
+                and completed[-1].is_final
+                and planned_now > len(completed)
+            ):
+                completed[-1].is_final = False
 
             shot_no = len(completed) + 1
             cp.next_shot_no = shot_no
@@ -575,6 +1098,10 @@ async def run_storyboard_supervisor(
                     completed_shots=completed,
                     final_feedback=final_feedback,
                     outline=outline,
+                    repair_feedback=_repair_feedback_for_shot(
+                        list(active_repair.get("issue_messages") or []), shot_no,
+                    ) if repair_pending else None,
+                    semantic_attempt_id=active_repair.get("semantic_attempt_id") if repair_pending else None,
                 )
             except StageError as exc:
                 plan = route_issues(
@@ -584,7 +1111,14 @@ async def run_storyboard_supervisor(
                     issue_fingerprint_counts=cp.issue_fingerprint_counts,
                 )
                 cp = _apply_repair(cp, plan, conn, episode_id, completed, outline)
-                completed = _reload_completed()
+                if cp.phase in {"WAITING_HUMAN", "WAITING_AUTHORIZATION", "PAUSED_EXTERNAL"}:
+                    conn.execute(
+                        "UPDATE episodes SET status='scripted',script_error=? WHERE id=?",
+                        (((cp.last_repair or {}).get("reason") or plan.reason)[:800], episode_id),
+                    )
+                    conn.commit()
+                    return cp
+                completed = _repair_context_shots(conn, cp, ep_data["episode_no"])
                 shot_loop_broke_for_repair = True
                 break
             except Exception as exc:  # noqa: BLE001
@@ -620,21 +1154,17 @@ async def run_storyboard_supervisor(
                         run_id, "REPAIR_PLAN_SELECTED", "info",
                         f"{plan.strategy} frontier={plan.invalidation_frontier}",
                         payload=plan.model_dump(mode="json"),
-                    )
+                )
                 cp = _apply_repair(cp, plan, conn, episode_id, completed, outline)
-                rows = conn.execute(
-                    "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
-                ).fetchall()
-                completed = _reload_completed(rows)
-                if plan.pause_state:
-                    cp.phase = plan.pause_state  # type: ignore[assignment]
+                if cp.phase in {"WAITING_HUMAN", "WAITING_AUTHORIZATION", "PAUSED_EXTERNAL"}:
                     save_checkpoint(cp, run_id=run_id)
                     conn.execute(
                         "UPDATE episodes SET status='scripted', script_error=? WHERE id=?",
-                        (plan.reason[:800], episode_id),
+                        (((cp.last_repair or {}).get("reason") or plan.reason)[:800], episode_id),
                     )
                     conn.commit()
                     return cp
+                completed = _repair_context_shots(conn, cp, ep_data["episode_no"])
                 shot_loop_broke_for_repair = True
                 break
 
@@ -647,13 +1177,25 @@ async def run_storyboard_supervisor(
             prefer_default_shot_durations(board)
             normalize_transition_visuals(board)
             expected_screenplay_artifact_id = cp.input_versions.get("screenplay_artifact_id")
-            _sync_storyboard_shot_timing(
-                conn, episode_id, board, expected_screenplay_artifact_id
-            )
             shot = board.shots[-1]
             shot.is_final = bool(draft.is_final)
             shot.prompt_contract_version = "renderability_v1"
             object.__setattr__(shot, "evidence_artifact_id", getattr(draft, "evidence_artifact_id", None))
+            if repair_pending:
+                cp.repair_candidate_shots.append(shot.model_dump(mode="json"))
+                cp.last_repair = {
+                    **(cp.last_repair or {}),
+                    "status": "candidate_generating",
+                    "candidate_count": len(cp.repair_candidate_shots),
+                }
+                completed.append(shot)
+                cp.next_shot_no = len(completed) + 1
+                save_checkpoint(cp, run_id=run_id)
+                continue
+
+            _sync_storyboard_shot_timing(
+                conn, episode_id, board, expected_screenplay_artifact_id
+            )
             _insert_storyboard_shot(
                 conn, episode_id, screenplay, shot, expected_screenplay_artifact_id
             )
@@ -667,6 +1209,7 @@ async def run_storyboard_supervisor(
             )
             if revision is not None:
                 planned_persisted = revision[1]
+                cp.expected_total = revision[1]
             if run_id:
                 evidence_repository.append_event(
                     run_id, "SHOT_CHECKPOINT_VALIDATED", "info",
@@ -688,6 +1231,105 @@ async def run_storyboard_supervisor(
         if shot_loop_broke_for_repair:
             continue
 
+        # A repair candidate is fully generated in memory/artifacts. Validate
+        # the merged board before changing any official shot row.
+        if _repair_is_pending(cp):
+            official_rows = conn.execute(
+                "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,),
+            ).fetchall()
+            official_board = _board_from_rows(official_rows, ep_data["episode_no"])
+            repair = cp.last_repair or {}
+            if str(repair.get("base_hash") or "") != _storyboard_hash(official_board):
+                cp.phase = "WAITING_HUMAN"
+                cp.outcome = "WAITING_RETRY_CAS_CONFLICT"
+                cp.last_repair = {**repair, "status": "paused", "reason": "working_projection_changed"}
+                save_checkpoint(cp, run_id=run_id)
+                conn.execute(
+                    "UPDATE episodes SET status='scripted',script_error=? WHERE id=?",
+                    ("分镜在自动修复期间已被其他操作修改，本次候选未覆盖现有内容", episode_id),
+                )
+                conn.commit()
+                return cp
+            candidate_board = _merge_repair_candidate(official_board, cp)
+            mode = str(repair.get("mode") or "replace")
+            p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
+            bible = _project_bible_or_placeholder(p)
+            has_real_bible = bool((p["bible_json"] or "").strip()) if p else False
+            candidate_evaluation = evaluate_storyboard_for_confirmation(
+                ep_data, candidate_board, screenplay, bible,
+                has_real_bible=has_real_bible,
+            )
+            candidate_board = _validated_candidate_projection(
+                official_board, candidate_evaluation.board, cp,
+            )
+            before_codes = set(repair.get("issue_codes") or [])
+            after_messages = [*candidate_evaluation.errors, *candidate_evaluation.warnings]
+            from app.evaluations.issues import issue_code as _issue_code
+            after_codes = {
+                *[getattr(issue, "code", "") for issue in (candidate_evaluation.issues or [])],
+                *[_issue_code(message) for message in candidate_evaluation.errors],
+            }
+            after_codes.discard("")
+            before_messages = list(repair.get("issue_messages") or [])
+            remaining_target_codes = before_codes.intersection(after_codes)
+            resolved_target_codes = before_codes - after_codes
+            improved = bool(
+                mode == "append"
+                or candidate_evaluation.passed and (
+                    not remaining_target_codes
+                    or bool(resolved_target_codes)
+                    or len(after_messages) < max(1, len(before_messages))
+                )
+            )
+            no_op = _storyboard_hash(candidate_board) == _storyboard_hash(official_board)
+            if no_op or not improved:
+                if run_id:
+                    evidence_repository.append_event(
+                        run_id, "STORYBOARD_REPAIR_NO_PROGRESS", "warning",
+                        "候选未改变内容或未解决目标问题，已拒绝覆盖正式分镜",
+                        payload={"no_op": no_op, "before_codes": sorted(before_codes),
+                                 "after_codes": sorted(after_codes)},
+                    )
+                retry_plan = route_issues(
+                    before_messages or after_messages or ["storyboard repair made no progress"],
+                    validated_prefix_end=len(official_board.shots),
+                    issue_fingerprint_counts=cp.issue_fingerprint_counts,
+                )
+                cp = _apply_repair(
+                    cp, retry_plan, conn, episode_id, list(official_board.shots), outline,
+                )
+                if cp.phase in {"WAITING_HUMAN", "WAITING_AUTHORIZATION", "PAUSED_EXTERNAL"}:
+                    conn.execute(
+                        "UPDATE episodes SET status='scripted',script_error=? WHERE id=?",
+                        ("自动修复未产生质量改善，已安全停止且未修改现有分镜", episode_id),
+                    )
+                    conn.commit()
+                    return cp
+                completed = _repair_context_shots(conn, cp, ep_data["episode_no"])
+                continue
+
+            _commit_repair_candidate(
+                conn, cp,
+                episode_id=episode_id,
+                screenplay=screenplay,
+                current_board=official_board,
+                candidate_board=candidate_board,
+                expected_screenplay_artifact_id=cp.input_versions.get("screenplay_artifact_id"),
+                run_id=run_id,
+            )
+            cp.last_repair = {
+                **repair,
+                "status": "applied",
+                "after_hash": _storyboard_hash(candidate_board),
+                "remaining_issue_codes": sorted(after_codes),
+            }
+            cp.repair_candidate_shots = []
+            completed = _reload_completed()
+            cp.phase = "VALIDATING_EPISODE"
+            cp.outcome = None
+            save_checkpoint(cp, run_id=run_id)
+            continue
+
         # 逐镜循环因控制请求 break：回主循环顶部消费
         from app.storyboard_control import peek_control as _peek
         if _peek(episode_id):
@@ -696,48 +1338,66 @@ async def run_storyboard_supervisor(
         # ---- 整集校验 ----
         cp.phase = "VALIDATING_EPISODE"
         full_board = Storyboard(episode_no=ep_data["episode_no"], shots=list(completed))
+        planned_now = len(outline.shots) if (outline and outline.shots) else 0
+        if (
+            (planned_now > 0 and len(full_board.shots) != planned_now)
+            or not full_board.shots
+            or not full_board.shots[-1].is_final
+        ):
+            cp.phase = "WAITING_HUMAN"
+            cp.outcome = "WAITING_RETRY_INCOMPLETE_STORYBOARD"
+            cp.validated_prefix_end = len(full_board.shots)
+            cp.next_shot_no = len(full_board.shots) + 1
+            save_checkpoint(cp, run_id=run_id)
+            conn.execute(
+                "UPDATE episodes SET status='scripted',script_error=? WHERE id=?",
+                (
+                    f"分镜尚未达到完整终态：已完成 {len(full_board.shots)}/"
+                    f"{planned_now or '?'} 镜，未发布不完整版本",
+                    episode_id,
+                ),
+            )
+            conn.commit()
+            return cp
         p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
         bible = _project_bible_or_placeholder(p)
         has_real_bible = bool((p["bible_json"] or "").strip()) if p else False
         evaluation = evaluate_storyboard_for_confirmation(
             ep_data, full_board, screenplay, bible, has_real_bible=has_real_bible,
         )
-        if not evaluation.passed:
+        repair_required_warnings = [
+            issue for issue in (evaluation.issues or [])
+            if _storyboard_warning_requires_auto_repair(issue)
+        ]
+        if not evaluation.passed or repair_required_warnings:
+            repair_inputs = evaluation.errors or repair_required_warnings
             if run_id:
                 evidence_repository.append_event(
                     run_id, "EPISODE_VALIDATION_FAILED", "warning",
-                    f"{len(evaluation.errors)} issues",
-                    payload={"errors": evaluation.errors[:12]},
+                    f"{len(repair_inputs)} issues",
+                    payload={
+                        "errors": evaluation.errors[:12],
+                        "repair_required_warnings": [
+                            getattr(issue, "message", str(issue))
+                            for issue in repair_required_warnings[:12]
+                        ],
+                    },
                 )
             plan = route_issues(
-                evaluation.issues or evaluation.errors,
+                repair_inputs,
                 validated_prefix_end=cp.validated_prefix_end,
                 issue_fingerprint_counts=cp.issue_fingerprint_counts,
             )
             cp = _apply_repair(cp, plan, conn, episode_id, completed, outline)
-            rows = conn.execute(
-                "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
-            ).fetchall()
-            completed = _reload_completed(rows)
-            if plan.pause_state:
-                cp.phase = plan.pause_state  # type: ignore[assignment]
+            if cp.phase in {"WAITING_HUMAN", "WAITING_AUTHORIZATION", "PAUSED_EXTERNAL"}:
                 save_checkpoint(cp, run_id=run_id)
                 conn.execute(
                     "UPDATE episodes SET status='scripted', script_error=? WHERE id=?",
                     (("；".join(evaluation.errors[:5]))[:800], episode_id),
                 )
                 conn.commit()
-                if run_id and plan.pause_state in {
-                    "WAITING_HUMAN", "WAITING_AUTHORIZATION", "PAUSED_EXTERNAL",
-                }:
-                    try:
-                        from app.orchestration.state_machine import transition_run
-                        transition_run(
-                            run_id, "RUNNING", plan.pause_state, "repair_pause",
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
                 return cp
+            completed = _repair_context_shots(conn, cp, ep_data["episode_no"])
             continue
 
         # ---- 通过：finalize 后统一等待人工确认 ----
@@ -767,29 +1427,72 @@ def _apply_repair(
     completed: list[Shot],
     outline: StoryboardOutline | None,
 ) -> SupervisorCheckpoint:
-    """最小范围修复：只触及当前镜或相邻窗口；禁止 redo_suffix / replan_outline。"""
+    """规划一个非破坏式候选窗口；此函数绝不删除正式 shots。"""
     from app.observability.metrics import inc
     from app.repair_router import normalize_strategy
 
-    if _is_quality_only_repair_plan(plan):
+    strategy = normalize_strategy(plan.strategy)
+    if plan.pause_state:
+        cp.phase = plan.pause_state  # type: ignore[assignment]
+        cp.outcome = (
+            "REPAIR_FAILED_STRATEGIES_EXHAUSTED"
+            if plan.pause_state == "WAITING_HUMAN"
+            else plan.reason
+        )
         cp.last_repair = {
             **plan.model_dump(mode="json"),
-            "strategy": "skip_score_only_qa",
-            "skipped": True,
+            "strategy": strategy,
+            "status": "paused",
         }
+        cp.repair_candidate_shots = []
+        save_checkpoint(cp)
+        return cp
+
+    history = list(cp.issue_strategy_history.get(plan.fingerprint, []))
+    if cp.activation_attempt_count >= STORYBOARD_REPAIR_ACTIVATION_LIMIT:
+        cp.phase = "WAITING_HUMAN"
+        cp.outcome = "WAITING_RETRY_ACTIVATION_BUDGET"
+        cp.last_repair = {
+            **plan.model_dump(mode="json"),
+            "strategy": strategy,
+            "status": "paused",
+            "reason": "activation_budget_exhausted",
+        }
+        cp.repair_candidate_shots = []
+        save_checkpoint(cp)
+        return cp
+    if len(history) >= STORYBOARD_REPAIR_MAX_FINGERPRINT_ATTEMPTS:
+        cp.phase = "WAITING_HUMAN"
+        cp.outcome = "REPAIR_FAILED_STRATEGIES_EXHAUSTED"
+        cp.last_repair = {
+            **plan.model_dump(mode="json"),
+            "strategy": strategy,
+            "status": "paused",
+            "reason": "fingerprint_strategy_budget_exhausted",
+        }
+        cp.repair_candidate_shots = []
         save_checkpoint(cp)
         return cp
 
     cp.phase = "REPAIRING"
+    cp.activation_no = max(1, int(cp.activation_no or 0))
+    cp.activation_attempt_count += 1
     cp.repair_epoch += 1
     cp.issue_fingerprint_counts = bump_fingerprint_count(
         cp.issue_fingerprint_counts, plan.fingerprint
     )
-    strategy = normalize_strategy(plan.strategy)
-    cp.last_repair = {**plan.model_dump(mode="json"), "strategy": strategy}
     frontier = max(1, int(plan.invalidation_frontier or 1))
-    deleted = 0
     effective_strategy = strategy
+    rows = conn.execute(
+        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,),
+    ).fetchall()
+    ep = conn.execute("SELECT episode_no,target_duration_s FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    episode_no = int(ep["episode_no"] or 1) if ep else 1
+    current_board = _board_from_rows(rows, episode_no)
+    max_no = max((int(shot.shot_no) for shot in current_board.shots), default=0)
+    mode = "replace" if frontier <= max_no else "append"
+    window_start = frontier
+    window_end = frontier
 
     if strategy in {"split_adjacent_shot", "split_shot"}:
         from app.validators import (
@@ -799,11 +1502,13 @@ def _apply_repair(
         )
         from app.domain.common import _load_screenplay
 
-        ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
-        screenplay = _load_screenplay(ep) if ep else None
+        episode_row = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+        screenplay = _load_screenplay(episode_row) if episode_row else None
         events: list[dict] = []
         if outline is not None:
-            _, max_shots = storyboard_shot_count_range(ep["target_duration_s"] if ep else 50)
+            _, max_shots = storyboard_shot_count_range(
+                episode_row["target_duration_s"] if episode_row else 50
+            )
             if "ACTION_CAPACITY_EXCEEDED" in plan.issue_codes:
                 events.extend(split_outline_over_action_capacity(
                     outline,
@@ -828,12 +1533,9 @@ def _apply_repair(
                     shots_after=len(outline.shots),
                     strategy=strategy,
                 )
-        # 只失效 frontier 一镜（或窗口），不删整后缀
-        window_end = frontier if strategy == "split_shot" else frontier
-        deleted = _delete_shot_window(conn, episode_id, frontier, window_end)
-        cp.validated_prefix_end = max(0, frontier - 1)
-        cp.next_shot_no = frontier
-        cp.validated_shot_artifact_ids = cp.validated_shot_artifact_ids[: max(0, frontier - 1)]
+        mode = "insert"
+        window_start = min(max(1, frontier + 1), max_no + 1)
+        window_end = window_start
         if not events:
             # 大纲无法再拆 → 插入明确节点，绝不整集重规划
             effective_strategy = "insert_shot"
@@ -864,25 +1566,11 @@ def _apply_repair(
                 strategy="insert_shot",
             )
     elif strategy == "insert_shot":
-        # 在 frontier 后打开一个真实编号缺口，保留全部已通过镜头与资产。
-        # 后缀必须右移而不是删除；生成循环会从缺口处补入新镜。
         requested_frontier = frontier
-        max_row = conn.execute(
-            "SELECT MAX(shot_no) AS max_no FROM shots WHERE episode_id=?",
-            (episode_id,),
-        ).fetchone()
-        max_no = int(max_row["max_no"] or 0) if max_row else 0
         insert_at = min(max(1, requested_frontier + 1), max_no + 1)
-        _open_shot_gap(conn, episode_id, insert_at)
-        frontier = insert_at
-        cp.last_repair = {
-            **(cp.last_repair or {}),
-            "insert_after": requested_frontier,
-            "insertion_point": insert_at,
-        }
-        cp.validated_prefix_end = max(0, insert_at - 1)
-        cp.next_shot_no = insert_at
-        cp.validated_shot_artifact_ids = cp.validated_shot_artifact_ids[: max(0, frontier - 1)]
+        mode = "insert"
+        window_start = insert_at
+        window_end = insert_at
         if outline is not None:
             from copy import deepcopy
             if outline.shots:
@@ -897,44 +1585,63 @@ def _apply_repair(
                     (outline.model_dump_json(), episode_id),
                 )
                 cp.expected_total = len(outline.shots)
-        inc("storyboard_insert_shot_total", episode_id=episode_id, shot_no=frontier)
+        inc("storyboard_insert_shot_total", episode_id=episode_id, shot_no=insert_at)
     elif strategy in {"repair_current", "normalize", "delete_shot"}:
-        deleted = _delete_shot_window(conn, episode_id, frontier, frontier)
-        cp.validated_prefix_end = max(0, frontier - 1)
-        cp.next_shot_no = frontier
-        cp.validated_shot_artifact_ids = cp.validated_shot_artifact_ids[: max(0, frontier - 1)]
+        window_start = frontier
+        window_end = frontier
     elif strategy in {"repair_window", "move_shot"}:
-        # 相邻 2~3 镜窗口
-        window_end = frontier + 1
-        deleted = _delete_shot_window(conn, episode_id, frontier, window_end)
-        cp.validated_prefix_end = max(0, frontier - 1)
-        cp.next_shot_no = frontier
-        cp.validated_shot_artifact_ids = cp.validated_shot_artifact_ids[: max(0, frontier - 1)]
+        window_start = frontier
+        window_end = min(max_no, frontier + 1) if max_no >= frontier else frontier
     else:
-        # 未知策略降级为单镜修复
         effective_strategy = "repair_current"
-        deleted = _delete_shot_window(conn, episode_id, frontier, frontier)
-        cp.validated_prefix_end = max(0, frontier - 1)
-        cp.next_shot_no = frontier
-        cp.validated_shot_artifact_ids = cp.validated_shot_artifact_ids[: max(0, frontier - 1)]
+        window_start = frontier
+        window_end = frontier
 
-    cp.last_repair = {**(cp.last_repair or {}), "strategy": effective_strategy}
+    if mode == "append":
+        # A legacy destructive repair may have removed rows before the reported
+        # target. Regenerate the missing contiguous prefix as part of the same
+        # durable candidate, while keeping the target as the window end.
+        window_start = min(window_start, max_no + 1)
+        window_end = max(window_start, window_end)
+
+    attempt_no = len(history) + 1
+    semantic_source = (
+        f"{episode_id}:{cp.activation_no}:{plan.fingerprint}:"
+        f"{effective_strategy}:{window_start}:{window_end}:{attempt_no}"
+    )
+    semantic_attempt_id = "sbatt_" + hashlib.sha256(
+        semantic_source.encode("utf-8")
+    ).hexdigest()[:24]
+    history.append(f"{effective_strategy}:{semantic_attempt_id}")
+    cp.issue_strategy_history = {
+        **cp.issue_strategy_history,
+        plan.fingerprint: history,
+    }
+    cp.last_repair = {
+        **plan.model_dump(mode="json"),
+        "strategy": effective_strategy,
+        "status": "candidate_pending",
+        "mode": mode,
+        "window_start": window_start,
+        "window_end": window_end,
+        "base_hash": _storyboard_hash(current_board),
+        "semantic_attempt_id": semantic_attempt_id,
+        "attempt_no": attempt_no,
+    }
+    cp.repair_candidate_shots = []
+    cp.validated_prefix_end = max(0, window_start - 1)
+    cp.next_shot_no = window_start
+    cp.validated_shot_artifact_ids = cp.validated_shot_artifact_ids[: max(0, window_start - 1)]
     conn.commit()
     save_checkpoint(cp)
     try:
         from app.observability.tracing import current_trace
         rid = current_trace().run_id
-        if rid and deleted:
+        if rid:
             evidence_repository.append_event(
-                rid, "LOCAL_PATCH_INVALIDATED", "info",
-                f"局部失效边界={frontier}，删除 {deleted} 镜（策略={effective_strategy}）",
-                payload={"frontier": frontier, "deleted": deleted, "strategy": effective_strategy},
-            )
-        if rid and effective_strategy in {"insert_shot", "split_shot", "split_adjacent_shot"}:
-            evidence_repository.append_event(
-                rid, "SHOT_STRUCTURE_PATCHED", "info",
-                f"结构修补 strategy={effective_strategy} epoch={cp.repair_epoch}",
-                payload=cp.last_repair or plan.model_dump(mode="json"),
+                rid, "STORYBOARD_REPAIR_CANDIDATE_PLANNED", "info",
+                f"已创建非破坏修复窗口 {window_start}~{window_end}",
+                payload=cp.last_repair or {},
             )
     except Exception:  # noqa: BLE001
         pass
