@@ -261,11 +261,11 @@ MODEL_PROVIDER_KINDS = {
     "zhipu": {"text"},
 }
 BUILTIN_MODELS = (
-    ("hiagent", "d2a5n9rnvvm49eucvnvg", "文本推理模型", ("text",)),
+    ("hiagent", config.DEFAULT_HIAGENT_MODEL_TEXT, "文本推理模型", ("text",)),
     ("hiagent", "d71l5c8nfdb167kligqg", "Text 模型", ("text",)),
-    ("hiagent", "d7ev7il5boeaebtf4sgg", "视觉质检模型", ("vlm",)),
-    ("hiagent", "d7jf6nd5boeaebtfbdqg", "Seedance 视频生成", ("video",)),
-    ("hiagent", "d7ute7ppcc7n89uuqqp0", "Seedream 图像生成", ("image",)),
+    ("hiagent", config.DEFAULT_HIAGENT_MODEL_VLM, "视觉质检模型", ("vlm",)),
+    ("hiagent", config.DEFAULT_HIAGENT_MODEL_VIDEO, "Seedance 视频生成", ("video",)),
+    ("hiagent", config.DEFAULT_HIAGENT_MODEL_IMAGE, "Seedream 图像生成", ("image",)),
     ("openrouter", "z-ai/glm-5.2", "GLM 5.2", ("text",)),
     ("openrouter", "anthropic/claude-opus-4.8", "Claude Opus 4.8", ("text",)),
     ("openrouter", "google/gemini-3.5-flash", "Gemini 3.5 Flash", ("vlm",)),

@@ -20,7 +20,9 @@ _CODE_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("ACTION_CAPACITY_EXCEEDED", re.compile(r"顺序动作节拍|主动作过载|动作容量", re.I)),
     ("SPOKEN_CAPACITY_EXCEEDED", re.compile(r"口播|台词.{0,8}超|字数.{0,6}超|容量上限|超过.{0,12}字", re.I)),
     ("DIALOGUE_FRAMING_INVALID", re.compile(
-        r"多个画内说话人|单人对白|只保留说话人|近景或特写|对白双人镜|按话轮拆|正反打", re.I
+        r"多个画内说话人|单人对白|只保留说话人|近景或特写|对白双人镜|按话轮拆|正反打|"
+        r"剧情道具操作|走位/离场|大形体动作|shot_size\s*不得为特写|不能用单人大近景替代",
+        re.I,
     )),
     ("LEGACY_COVERAGE_UNCERTAIN", re.compile(r"LEGACY_COVERAGE_UNCERTAIN", re.I)),
     ("STATE_CHAIN_INVALID", re.compile(r"状态链|state_in|state_out|承接", re.I)),

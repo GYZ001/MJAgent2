@@ -7,20 +7,27 @@ import pytest
 
 from app import db
 from app.domain.storyboard_ops import _board_from_shot_rows, _finalize_storyboard_evidence
+from app.evidence import repository as evidence_repository
+from app.harness.types import EvidenceArtifact
+from app.production.revision import ensure_production_revision
 from app.repair_router import route_issues
-from app.schemas import EpisodeScreenplay, Shot, Storyboard, StoryboardOutline
+from app.schemas import Dialogue, EpisodeScreenplay, Shot, Storyboard, StoryboardOutline
 from app.storyboard_supervisor import (
     STORYBOARD_REPAIR_PLANNER_VERSION,
     SupervisorCheckpoint,
     _apply_repair,
+    _begin_repair_activation,
     _commit_repair_candidate,
+    _deterministic_dialogue_framing_candidate,
     _merge_repair_candidate,
     _migrate_checkpoint,
     _repair_feedback_for_shot,
     _recover_truncated_outline_from_approved_artifact,
+    _repair_candidate_made_progress,
     _storyboard_generation_is_complete,
     _storyboard_hash,
     _validated_candidate_projection,
+    _withdraw_legacy_failed_publication,
 )
 
 
@@ -106,6 +113,7 @@ def test_legacy_runaway_counter_becomes_audit_not_new_activation_budget() -> Non
         "phase": "WAITING_HUMAN",
         "repair_epoch": 5558,
         "issue_fingerprint_counts": {"old": 5558},
+        "issue_strategy_history": {"old": ["repair_current:old-attempt"]},
         "outcome": "PAUSED_REPAIR_SAFETY_LIMIT",
     })
 
@@ -115,8 +123,109 @@ def test_legacy_runaway_counter_becomes_audit_not_new_activation_budget() -> Non
     assert migrated.repair_epoch == 5558
     assert migrated.activation_attempt_count == 0
     assert migrated.issue_fingerprint_counts == {}
+    assert migrated.issue_strategy_history == {}
     assert migrated.legacy_repair_audit["repair_epoch"] == 5558
+    assert migrated.legacy_repair_audit["issue_strategy_history"] == {
+        "old": ["repair_current:old-attempt"],
+    }
     assert migrated.outcome == "WAITING_RETRY_LEGACY_MIGRATED"
+
+
+def test_new_activation_resets_all_activation_local_repair_budgets() -> None:
+    checkpoint = SupervisorCheckpoint(
+        episode_id="e1",
+        planner_version=STORYBOARD_REPAIR_PLANNER_VERSION,
+        activation_no=2,
+        activation_attempt_count=6,
+        repair_epoch=11,
+        issue_fingerprint_counts={"same-issue": 4},
+        issue_strategy_history={
+            "same-issue": [
+                "repair_current:a1",
+                "repair_current:a2",
+                "repair_window:a3",
+                "repair_window:a4",
+            ],
+        },
+        last_repair={"status": "paused"},
+        repair_candidate_shots=[_shot(2).model_dump(mode="json")],
+        outcome="REPAIR_FAILED_STRATEGIES_EXHAUSTED",
+    )
+
+    activated = _begin_repair_activation(checkpoint)
+
+    assert activated.activation_no == 3
+    assert activated.activation_attempt_count == 0
+    assert activated.repair_epoch == 11
+    assert activated.issue_fingerprint_counts == {}
+    assert activated.issue_strategy_history == {}
+    archived = activated.legacy_repair_audit["completed_activation_histories"][-1]
+    assert archived["activation_no"] == 2
+    assert archived["attempt_count"] == 6
+    assert archived["issue_strategy_history"]["same-issue"][-1] == "repair_window:a4"
+    assert activated.repair_candidate_shots == []
+    assert activated.last_repair["status"] == "superseded_by_new_activation"
+    assert activated.outcome is None
+
+
+def test_new_activation_withdraws_legacy_failed_gate_publication(repair_db) -> None:
+    conn, _screenplay = repair_db
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="storyboard",
+        scope_type="episode",
+        scope_id="e1",
+        status="approved",
+        trust_level="T2",
+        content=_current_board(conn).model_dump(mode="json"),
+    ))
+    revision = ensure_production_revision(
+        episode_id="e1",
+        kind="storyboard",
+        input_fingerprint="legacy-failed-gate",
+        resume=False,
+    )
+    conn.execute(
+        "UPDATE production_revisions SET status='published',working_artifact_id=?,"
+        "published_artifact_id=? WHERE id=?",
+        (artifact["id"], artifact["id"], revision.id),
+    )
+    conn.execute(
+        """UPDATE episodes SET storyboard_artifact_id=?,working_storyboard_artifact_id=?,
+                  published_storyboard_artifact_id=?,storyboard_completion_certificate_id='bad-cert',
+                  storyboard_production_revision_id=? WHERE id='e1'""",
+        (artifact["id"], artifact["id"], artifact["id"], revision.id),
+    )
+    conn.commit()
+    episode = conn.execute("SELECT * FROM episodes WHERE id='e1'").fetchone()
+    checkpoint = SupervisorCheckpoint(
+        episode_id="e1",
+        phase="SUCCEEDED",
+        outcome="SUCCEEDED_GATE_RETRY_EXHAUSTED_FALLBACK",
+    )
+
+    assert _withdraw_legacy_failed_publication(conn, "e1", episode, checkpoint) is True
+
+    current = conn.execute(
+        """SELECT storyboard_artifact_id,working_storyboard_artifact_id,
+                  published_storyboard_artifact_id,storyboard_completion_certificate_id,
+                  storyboard_production_revision_id,storyboard_warning FROM episodes WHERE id='e1'""",
+    ).fetchone()
+    assert all(current[key] is None for key in (
+        "storyboard_artifact_id",
+        "working_storyboard_artifact_id",
+        "published_storyboard_artifact_id",
+        "storyboard_completion_certificate_id",
+        "storyboard_production_revision_id",
+    ))
+    assert "误发布" in current["storyboard_warning"]
+    assert conn.execute(
+        "SELECT status FROM artifacts WHERE id=?", (artifact["id"],),
+    ).fetchone()["status"] == "stale"
+    assert conn.execute(
+        "SELECT status,published_artifact_id FROM production_revisions WHERE id=?",
+        (revision.id,),
+    ).fetchone()["status"] == "superseded"
+    assert conn.execute("SELECT COUNT(*) AS c FROM shots WHERE episode_id='e1'").fetchone()["c"] == 3
 
 
 def test_repair_plan_does_not_delete_or_mutate_official_shots(repair_db) -> None:
@@ -314,6 +423,99 @@ def test_repair_feedback_is_localized_to_target_shot() -> None:
     assert _repair_feedback_for_shot(messages, 13) == [messages[1]]
 
 
+def test_candidate_can_commit_one_of_two_independent_gate_repairs() -> None:
+    shot_11 = "shot_no=11 的对白同时包含剧情道具操作，shot_size 不得为特写"
+    shot_13 = "shot_no=13 的对白同时包含走位/离场等大形体动作，不能用单人大近景替代"
+
+    assert _repair_candidate_made_progress(
+        mode="replace",
+        candidate_passed=False,
+        before_messages=[shot_11, shot_13],
+        after_messages=[shot_13],
+    ) is True
+
+
+def test_candidate_partial_progress_rejects_new_hard_gate_regression() -> None:
+    shot_11 = "shot_no=11 的对白同时包含剧情道具操作，shot_size 不得为特写"
+    shot_13 = "shot_no=13 的对白同时包含走位/离场等大形体动作，不能用单人大近景替代"
+
+    assert _repair_candidate_made_progress(
+        mode="replace",
+        candidate_passed=False,
+        before_messages=[shot_11, shot_13],
+        after_messages=[shot_13, "shot_no=7 缺少必填字段：source_excerpt"],
+    ) is False
+
+
+def test_candidate_without_any_resolved_target_is_not_progress() -> None:
+    issue = "shot_no=11 的对白同时包含剧情道具操作，shot_size 不得为特写"
+
+    assert _repair_candidate_made_progress(
+        mode="replace",
+        candidate_passed=False,
+        before_messages=[issue],
+        after_messages=[issue],
+    ) is False
+
+
+@pytest.mark.parametrize(
+    "action, initial_size, expected_size",
+    [
+        ("少年翻开手中名册，同时宣布下一位测试者的名字。", "特写", "近景"),
+        ("少年说完后转身穿过人群，走向广场出口。", "近景", "中景"),
+    ],
+)
+def test_deterministic_action_dialogue_framing_candidate(
+    action: str, initial_size: str, expected_size: str,
+) -> None:
+    shot = _shot(2, action=action)
+    shot.shot_size = initial_size
+    shot.dialogues = [Dialogue(speaker="少年", line="下一位。", emotion="平静")]
+
+    candidate = _deterministic_dialogue_framing_candidate(shot)
+
+    assert candidate is not None
+    assert candidate.shot_size == expected_size
+    assert "dialogue_action_staging" in candidate.risk_tags
+    assert shot.shot_size == initial_size
+
+
+def test_repair_plan_uses_deterministic_dialogue_candidate_without_provider(repair_db) -> None:
+    conn, _screenplay = repair_db
+    shot = _shot(2, action="少年翻开手中名册，同时宣布下一位测试者的名字。")
+    shot.shot_size = "特写"
+    shot.dialogues = [Dialogue(speaker="少年", line="下一位。", emotion="平静")]
+    conn.execute(
+        "UPDATE shots SET shot_size=?,action_desc=?,dialogues=?,shot_contract_json=? WHERE id='s2'",
+        (
+            shot.shot_size,
+            shot.action_desc,
+            json.dumps([dialogue.model_dump() for dialogue in shot.dialogues], ensure_ascii=False),
+            json.dumps(shot.model_dump(mode="json"), ensure_ascii=False),
+        ),
+    )
+    conn.commit()
+    issue = (
+        "shot_no=2 的对白同时包含剧情道具操作，shot_size 不得为特写；"
+        "请至少使用近景并完整保留双手、道具和接触关系"
+    )
+    plan = route_issues([issue], validated_prefix_end=3)
+    checkpoint = SupervisorCheckpoint(
+        episode_id="e1",
+        planner_version=STORYBOARD_REPAIR_PLANNER_VERSION,
+        validated_prefix_end=3,
+    )
+
+    planned = _apply_repair(
+        checkpoint, plan, conn, "e1", list(_current_board(conn).shots), None,
+    )
+
+    assert planned.last_repair["status"] == "candidate_generating"
+    assert planned.last_repair["deterministic_repair"] == "dialogue_action_framing"
+    assert len(planned.repair_candidate_shots) == 1
+    assert planned.repair_candidate_shots[0]["shot_size"] == "近景"
+
+
 def test_early_final_marker_cannot_finish_before_persisted_plan() -> None:
     shots = [_shot(1), _shot(2), _shot(3)]
 
@@ -322,7 +524,7 @@ def test_early_final_marker_cannot_finish_before_persisted_plan() -> None:
     assert _storyboard_generation_is_complete(shots, planned_total=3, max_shots=20) is True
 
 
-def test_finalize_publishes_short_storyboard_with_retry_exhausted_warning(repair_db) -> None:
+def test_finalize_rejects_short_storyboard_without_publishing_certificate(repair_db) -> None:
     conn, _screenplay = repair_db
     conn.execute(
         "UPDATE episodes SET storyboard_outline_json=? WHERE id='e1'",
@@ -330,20 +532,32 @@ def test_finalize_publishes_short_storyboard_with_retry_exhausted_warning(repair
     )
     conn.commit()
 
-    artifact_id = _finalize_storyboard_evidence("e1", _current_board(conn))
-    artifact = conn.execute(
-        "SELECT status FROM artifacts WHERE id=?", (artifact_id,),
+    with pytest.raises(RuntimeError, match="已完成 3/4 镜"):
+        _finalize_storyboard_evidence("e1", _current_board(conn))
+
+    episode = conn.execute(
+        "SELECT storyboard_artifact_id,storyboard_completion_certificate_id "
+        "FROM episodes WHERE id='e1'",
     ).fetchone()
-    assert artifact["status"] == "approved"
-    evaluation = conn.execute(
-        "SELECT evaluation_role,runtime_blocking,status,evidence_json "
-        "FROM evaluations WHERE artifact_id=? ORDER BY created_at DESC LIMIT 1",
-        (artifact_id,),
-    ).fetchone()
-    assert evaluation["evaluation_role"] == "score_only"
-    assert evaluation["runtime_blocking"] == 0
-    assert evaluation["status"] == "warning"
-    assert "3/4" in evaluation["evidence_json"]
+    assert episode["storyboard_artifact_id"] is None
+    assert episode["storyboard_completion_certificate_id"] is None
+    assert conn.execute(
+        "SELECT COUNT(*) AS c FROM completion_certificates WHERE kind='storyboard' AND scope_id='e1'",
+    ).fetchone()["c"] == 0
+
+
+def test_finalize_never_invents_missing_final_marker(repair_db) -> None:
+    conn, _screenplay = repair_db
+    board = _current_board(conn)
+    board.shots[-1].is_final = False
+
+    with pytest.raises(RuntimeError, match="最终镜未标记收束"):
+        _finalize_storyboard_evidence("e1", board)
+
+    assert board.shots[-1].is_final is False
+    assert conn.execute(
+        "SELECT storyboard_artifact_id FROM episodes WHERE id='e1'",
+    ).fetchone()[0] is None
 
 
 def test_incomplete_success_recovers_only_current_screenplay_approved_outline(

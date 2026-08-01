@@ -1481,6 +1481,8 @@ export interface StoryboardStatus {
   /** 安全恢复点之后、继续任务时可能更新的现有草稿镜头数。 */
   pending_revalidation_shots?: number;
   resume_from_shot?: number;
+  /** 继续任务是生成后续镜头，还是只修复现有完整分镜。 */
+  resume_mode?: "continue_generation" | "repair_existing" | null;
   final_shot_valid: boolean;
   hard_gates_passed: boolean;
   hard_gate_issue_count?: number;

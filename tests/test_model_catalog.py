@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
-from app import hiagent, system_api as api
+from app import config, hiagent, system_api as api
 from app.main import _redact_sensitive
 
 
@@ -92,6 +92,55 @@ def test_builtin_model_credentials_are_saved_by_model_id(monkeypatch) -> None:
 
     credentials = json.loads(store["model_credentials"])
     assert credentials[model_id]["api_key"] == "model-specific-key"
+
+
+def test_default_hiagent_assignments_use_configured_catalog_model_ids(monkeypatch) -> None:
+    expected = {
+        "vlm": config.DEFAULT_HIAGENT_MODEL_VLM,
+        "video": config.DEFAULT_HIAGENT_MODEL_VIDEO,
+        "image": config.DEFAULT_HIAGENT_MODEL_IMAGE,
+    }
+    credentials = {
+        f"builtin:hiagent:{model}": {
+            "base_url": "https://gateway.example.com/v1",
+            "api_key": "model-key",
+        }
+        for model in expected.values()
+    }
+    store = {
+        "custom_models": "[]",
+        "model_credentials": json.dumps(credentials),
+    }
+    monkeypatch.setattr(api, "get_setting", lambda key: store.get(key, ""))
+    monkeypatch.setattr(
+        hiagent,
+        "get_setting",
+        lambda key: store.get(key, config.DEFAULT_SETTINGS.get(key, "")),
+    )
+    monkeypatch.setattr(config, "HIAGENT_API_KEY", "")
+
+    result = api.health()
+
+    for kind, model in expected.items():
+        selection = result["models"][kind]
+        assert selection["provider"] == "hiagent"
+        assert selection["model"] == model
+        assert next(
+            option for option in selection["options"]
+            if option["provider"] == "hiagent"
+        )["available"] is True
+
+
+def test_default_model_ids_preserve_legacy_provider_route(monkeypatch) -> None:
+    store = {"model_route": "openrouter"}
+    monkeypatch.setattr(
+        hiagent,
+        "get_setting",
+        lambda key: store.get(key, config.DEFAULT_SETTINGS.get(key, "")),
+    )
+
+    assert hiagent.active_provider("text") == "openrouter"
+    assert hiagent.active_provider("vlm") == "openrouter"
 
 
 def test_connection_probe_checks_openai_response(monkeypatch) -> None:

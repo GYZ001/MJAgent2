@@ -22,7 +22,7 @@ type MonitorSection =
   | "models"
   | "calls"
   | "settings";
-type ModelKind = "text" | "vlm" | "video" | "image";
+export type ModelKind = "text" | "vlm" | "video" | "image";
 type BlockStatus = "loading" | "ready-empty" | "ready-data" | "error" | "stale";
 type ProviderKey = string;
 
@@ -157,12 +157,12 @@ interface SettingsView {
     settings_edit_v2: boolean;
   };
 }
-interface ModelOption {
+export interface ModelOption {
   provider: ProviderKey;
   model: string;
   available: boolean;
 }
-interface ModelSelection {
+export interface ModelSelection {
   key: ModelKind;
   label: string;
   provider: ProviderKey;
@@ -173,7 +173,7 @@ interface Health {
   ok: boolean;
   models?: Record<ModelKind, ModelSelection>;
 }
-interface CatalogModel {
+export interface CatalogModel {
   id: string;
   provider: ProviderKey;
   model: string;
@@ -311,6 +311,77 @@ function jobStatusLabel(status: string) {
 }
 export function modelBusinessLabel(value: string) {
   return value.trim().toLowerCase() === "text 模型" ? "文本模型" : value;
+}
+
+/**
+ * “available” 表示连接是否就绪，不表示服务商是否支持该职责。
+ * 分配下拉必须保留待配置服务商，否则一个全新环境会把所有选项过滤成空白。
+ */
+export function modelProviderOptions(
+  selection: ModelSelection,
+  catalogItems: CatalogModel[],
+  kind: ModelKind,
+) {
+  const providersWithModels = new Set(
+    catalogItems
+      .filter((item) => item.kinds.includes(kind))
+      .map((item) => item.provider),
+  );
+  const seen = new Set<string>();
+  return selection.options
+    .filter(
+      (option) =>
+        providersWithModels.has(option.provider) ||
+        option.provider === selection.provider,
+    )
+    .filter((option) => {
+      if (seen.has(option.provider)) return false;
+      seen.add(option.provider);
+      return true;
+    })
+    .map((option) => ({
+      ...option,
+      available:
+        option.available ||
+        catalogItems.some(
+          (item) =>
+            item.provider === option.provider &&
+            item.kinds.includes(kind) &&
+            item.key_configured,
+        ),
+    }));
+}
+
+export function modelAssignmentValue(
+  selection: ModelSelection,
+  catalogItems: CatalogModel[],
+  kind: ModelKind,
+  provider: ProviderKey,
+  draftModel?: string,
+) {
+  const models = catalogItems.filter(
+    (item) => item.provider === provider && item.kinds.includes(kind),
+  );
+  const inCatalog = (model: string | undefined) =>
+    Boolean(model && models.some((item) => item.model === model));
+  if (draftModel !== undefined && inCatalog(draftModel)) return draftModel;
+  if (provider === selection.provider && inCatalog(selection.model))
+    return selection.model;
+
+  const providerDefault = selection.options.find(
+    (option) => option.provider === provider,
+  )?.model;
+  const configuredDefault = models.find((item) => item.key_configured)?.model;
+  if (configuredDefault) return configuredDefault;
+  if (inCatalog(providerDefault)) return providerDefault || "";
+  return models[0]?.model || draftModel || providerDefault || "";
+}
+
+export function modelAssignmentSettingKey(
+  provider: ProviderKey,
+  kind: ModelKind,
+) {
+  return provider.startsWith("custom:") ? null : `${provider}_model_${kind}`;
 }
 function workflowLabel(raw?: string) {
   return raw ? WORKFLOW_LABELS[raw] || "其他业务任务" : "任务";
@@ -1751,15 +1822,19 @@ function ModelCenter({
       if (!selection) continue;
       const providerKey =
         draft[`model_${row.key}_provider`] ?? selection.provider;
-      if (providerKey !== selection.provider)
+      const providerChanged = providerKey !== selection.provider;
+      if (providerChanged)
         patch[`model_${row.key}_provider`] = providerKey;
-      const modelKey = `${providerKey === "hiagent" ? "hiagent" : providerKey}_model_${row.key}`;
+      const modelKey = modelAssignmentSettingKey(providerKey, row.key);
+      if (!modelKey) continue;
       const modelValue = draft[modelKey];
       if (
         modelValue &&
-        modelValue !==
-          selection.options.find((option) => option.provider === providerKey)
-            ?.model
+        (providerChanged ||
+          modelValue !==
+            selection.options.find(
+              (option) => option.provider === providerKey,
+            )?.model)
       )
         patch[modelKey] = modelValue;
     }
@@ -1768,11 +1843,39 @@ function ModelCenter({
   const assignmentAffectedRows = MODEL_ROWS.filter((row) =>
     Object.keys(assignmentPatch).some((key) => key.includes(row.key)),
   );
+  const assignmentConnectionIssue = assignmentAffectedRows
+    .map((row) => {
+      const selection = health?.models?.[row.key];
+      if (!selection) return `${row.label}尚未加载完成`;
+      const providerKey =
+        draft[`model_${row.key}_provider`] ?? selection.provider;
+      const modelKey = modelAssignmentSettingKey(providerKey, row.key);
+      const model = modelAssignmentValue(
+        selection,
+        catalog?.items || [],
+        row.key,
+        providerKey,
+        modelKey ? draft[modelKey] : undefined,
+      );
+      const target = catalog?.items.find(
+        (item) =>
+          item.provider === providerKey &&
+          item.model === model &&
+          item.kinds.includes(row.key),
+      );
+      if (!target) return `请先为${row.label}选择一个模型`;
+      if (!target.key_configured)
+        return `请先配置「${modelBusinessLabel(target.label)}」的连接`;
+      return "";
+    })
+    .find(Boolean);
   const assignmentSaveDisabledReason = saving
     ? "正在保存模型分配"
     : !assignmentAffectedRows.length
       ? "当前没有未保存的模型分配"
-      : "";
+      : assignmentConnectionIssue
+        ? assignmentConnectionIssue
+        : "";
   const saveAssignments = async () => {
     if (!settings) return;
     setSaving(true);
@@ -1929,18 +2032,42 @@ function ModelCenter({
             );
           const providerKey =
             draft[`model_${row.key}_provider`] ?? selection.provider;
-          const options = selection.options.filter(
-            (option) => option.available,
+          const options = modelProviderOptions(
+            selection,
+            catalog?.items || [],
+            row.key,
           );
           const models =
             catalog?.items.filter(
               (item) =>
                 item.provider === providerKey && item.kinds.includes(row.key),
             ) || [];
-          const currentModel =
-            draft[`${providerKey}_model_${row.key}`] ??
-            options.find((option) => option.provider === providerKey)?.model ??
-            "";
+          const modelDraftKey = modelAssignmentSettingKey(
+            providerKey,
+            row.key,
+          );
+          const currentModel = modelAssignmentValue(
+            selection,
+            catalog?.items || [],
+            row.key,
+            providerKey,
+            modelDraftKey ? draft[modelDraftKey] : undefined,
+          );
+          const selectedModel = models.find(
+            (item) => item.model === currentModel,
+          );
+          const runningModel = catalog?.items.find(
+            (item) =>
+              item.provider === selection.provider &&
+              item.model === selection.model &&
+              item.kinds.includes(row.key),
+          );
+          const runningReady = Boolean(
+            runningModel?.key_configured ||
+              selection.options.find(
+                (option) => option.provider === selection.provider,
+              )?.available,
+          );
           return (
             <div className="model-row" key={row.key}>
               <div className="model-name">
@@ -1957,17 +2084,34 @@ function ModelCenter({
                 <label className="model-select-field">
                   <span>服务</span>
                   <select
-                    aria-label={row.key === "video" || row.key === "image"
-                      ? `${row.label}服务商，暂不可修改：当前只支持已配置的固定服务`
-                      : `${row.label}服务商`}
-                    value={providerKey}
-                    disabled={row.key === "video" || row.key === "image"}
-                    onChange={(e) =>
-                      setDraft((value) => ({
-                        ...value,
-                        [`model_${row.key}_provider`]: e.target.value,
-                      }))
+                    aria-label={
+                      options.length <= 1
+                        ? `${row.label}服务商，当前只有一个受支持的服务`
+                        : `${row.label}服务商`
                     }
+                    value={providerKey}
+                    disabled={options.length <= 1}
+                    onChange={(e) => {
+                      const nextProvider = e.target.value;
+                      const nextModel = modelAssignmentValue(
+                        selection,
+                        catalog?.items || [],
+                        row.key,
+                        nextProvider,
+                      );
+                      setDraft((value) => {
+                        const next = {
+                          ...value,
+                          [`model_${row.key}_provider`]: nextProvider,
+                        };
+                        const nextModelKey = modelAssignmentSettingKey(
+                          nextProvider,
+                          row.key,
+                        );
+                        if (nextModelKey) next[nextModelKey] = nextModel;
+                        return next;
+                      });
+                    }}
                   >
                     {options.map((option) => (
                       <option key={option.provider} value={option.provider}>
@@ -1976,6 +2120,7 @@ function ModelCenter({
                             (item) => item.provider === option.provider,
                           )?.provider_label ||
                           option.provider}
+                        {option.available ? "" : "（待配置）"}
                       </option>
                     ))}
                   </select>
@@ -1985,17 +2130,20 @@ function ModelCenter({
                   <select
                     aria-label={`${row.label}目标模型`}
                     value={currentModel}
-                    onChange={(e) =>
+                    disabled={!modelDraftKey || models.length <= 1}
+                    onChange={(e) => {
+                      if (!modelDraftKey) return;
                       setDraft((value) => ({
                         ...value,
-                        [`${providerKey}_model_${row.key}`]: e.target.value,
-                      }))
-                    }
+                        [modelDraftKey]: e.target.value,
+                      }));
+                    }}
                   >
                     {models.length ? (
                       models.map((item) => (
                         <option key={item.id} value={item.model}>
                           {modelBusinessLabel(item.label)}
+                          {item.key_configured ? "" : "（待配置）"}
                         </option>
                       ))
                     ) : (
@@ -2005,10 +2153,43 @@ function ModelCenter({
                     )}
                   </select>
                 </label>
+                <div
+                  className={`model-target-status ${selectedModel?.key_configured ? "ready" : "pending"}`}
+                >
+                  <span>
+                    {selectedModel?.key_configured
+                      ? "所选模型连接已配置"
+                      : selectedModel
+                        ? "所选模型待配置；配置后才能保存分配"
+                        : "当前服务下没有可分配模型"}
+                  </span>
+                  {selectedModel && !selectedModel.key_configured && (
+                    <button
+                      type="button"
+                      aria-label={`配置 ${modelBusinessLabel(selectedModel.label)} 的连接`}
+                      onClick={(event) => {
+                        modelDialogTriggerRef.current = event.currentTarget;
+                        setCredential(selectedModel);
+                        setCredentialDraft({
+                          base_url:
+                            selectedModel.base_url ||
+                            defaults[selectedModel.provider] ||
+                            "",
+                          api_key: "",
+                        });
+                        setTestedSignature("");
+                      }}
+                    >
+                      配置连接
+                    </button>
+                  )}
+                </div>
               </div>
               <div className="model-current">
-                <span className="model-live-dot" />
-                当前运行
+                <span
+                  className={`model-live-dot ${runningReady ? "" : "pending"}`}
+                />
+                {runningReady ? "当前运行" : "当前分配未就绪"}
                 <strong>
                   {PROVIDER_LABELS[selection.provider] ||
                     catalog?.items.find(

@@ -39,15 +39,19 @@ type SourceBindingInput = {
   chapter_id: number; source_version_hash: string; start_offset: number; end_offset: number
 }
 
-type StartPreview = {
+export type StartPreview = {
   preview_token: string
   action: 'create' | 'resume'
+  resume_mode?: 'create' | 'continue_generation' | 'repair_existing' | null
   kept_validated_shots: number
   planned_shots?: number | null
   remaining_shots?: number | null
   checkpoint: { available: boolean; phase?: string | null; resume_from_shot: number }
   can_start?: boolean
   blocking_reason?: string | null
+  current_gate_issue_count?: number
+  current_gate_issues?: string[]
+  warning?: string | null
   repair?: {
     lifetime_repair_count: number
     activation_no: number
@@ -185,6 +189,20 @@ export function storyboardProgressCopy(status: StoryboardStatus): StoryboardProg
 
   if (!['running', 'paused', 'failed'].includes(status.state)) return { summary, detail: null }
   const pending = status.pending_revalidation_shots ?? Math.max(0, working - validated)
+  const gateIssueCount = status.hard_gate_issue_count ?? status.hard_gate_issues?.length ?? 0
+  const repairsExisting = status.resume_mode === 'repair_existing'
+    || (
+      status.recommended_action === 'resume_storyboard'
+      && status.final_shot_valid
+      && pending === 0
+      && gateIssueCount > 0
+    )
+  if (repairsExisting) {
+    return {
+      summary,
+      detail: `当前 ${working} 镜已完成逐镜校验，但整集仍有 ${gateIssueCount} 个确认门禁问题。继续任务会重开整集修复，不是从第 ${resumeFrom} 镜续写；修复候选通过前不会覆盖现有镜头。`,
+    }
+  }
   const finalDraftNote = status.final_shot_valid
     ? '工作副本中的收尾标记不代表整集已通过。'
     : ''
@@ -197,6 +215,44 @@ export function storyboardProgressCopy(status: StoryboardStatus): StoryboardProg
   return {
     summary,
     detail: `当前 ${validated} 镜已通过逐镜校验；任务将从第 ${resumeFrom} 镜继续。整集门禁通过并经人工确认后才会交给生成台。${finalDraftNote}`,
+  }
+}
+
+export function storyboardStartPreviewCopy(preview: StartPreview): {
+  title: string
+  confirmLabel: string
+  summary: string
+  detail: string
+} {
+  if (preview.action === 'create') {
+    return {
+      title: '开始本集分镜任务',
+      confirmLabel: '开始任务',
+      summary: '从空白开始生成本集分镜。',
+      detail: preview.planned_shots
+        ? `计划 ${preview.planned_shots} 镜。`
+        : '任务启动后会先规划镜头数量。',
+    }
+  }
+  if (preview.resume_mode === 'repair_existing') {
+    const issueCount = preview.current_gate_issue_count
+      ?? preview.current_gate_issues?.length
+      ?? preview.repair?.last_issue_messages.length
+      ?? 0
+    return {
+      title: '继续修复分镜',
+      confirmLabel: '开始修复',
+      summary: `现有 ${preview.kept_validated_shots} 镜保持不变，重新校验并修复${issueCount ? ` ${issueCount} 个` : ''}确认门禁问题。`,
+      detail: `这是重开整集修复，不是从第 ${preview.checkpoint.resume_from_shot} 镜续写；候选通过前不会覆盖现有镜头。`,
+    }
+  }
+  return {
+    title: '继续分镜任务',
+    confirmLabel: '继续任务',
+    summary: `从第 ${preview.checkpoint.resume_from_shot} 镜继续；前 ${preview.kept_validated_shots} 镜已通过逐镜校验。`,
+    detail: preview.planned_shots
+      ? `计划 ${preview.planned_shots} 镜${preview.remaining_shots != null ? `，剩余 ${preview.remaining_shots} 镜` : ''}。`
+      : '继续任务后会先恢复已有计划。',
   }
 }
 
@@ -472,7 +528,9 @@ export default function BoardPage() {
       () => api.post(`/episodes/${ep.id}/storyboard`, {
         preflight_token: preview.preview_token,
       }),
-      preview.action === 'resume' ? '已从安全检查点继续生成' : '分镜生成已开始',
+      preview.resume_mode === 'repair_existing'
+        ? '已开始重新校验并修复现有分镜'
+        : preview.action === 'resume' ? '已从安全检查点继续生成' : '分镜生成已开始',
     )
     if (!result) storyboardTimer.clear()
   }
@@ -598,6 +656,7 @@ export default function BoardPage() {
   const primaryBlocked = status.recommended_action === 'refresh_status'
   const gateIssueCount = status.hard_gate_issue_count ?? status.hard_gate_issues?.length ?? 0
   const progressCopy = storyboardProgressCopy(status)
+  const startPreviewCopy = startPreview ? storyboardStartPreviewCopy(startPreview) : null
   const pendingRevalidation = status.pending_revalidation_shots
     ?? Math.max(0, status.produced_shots - status.validated_shots)
   const terminalFinalShot = status.final_shot_valid && ['ready_to_confirm', 'confirmed'].includes(status.state)
@@ -787,22 +846,19 @@ export default function BoardPage() {
         onConfirm={() => void clearStoryboard()}
       />}
 
-      <Modal open={!!startPreview} title={startPreview?.action === 'resume' ? '继续分镜任务' : '开始分镜任务'} onClose={closeStartPreview}
+      <Modal open={!!startPreview} title={startPreviewCopy?.title ?? '分镜任务'} onClose={closeStartPreview}
         actions={<><button className="btn" onClick={closeStartPreview}>取消</button><button className="btn primary" disabled={startPreview?.can_start === false} onClick={() => void submitStart()}>
-          {startPreview?.action === 'resume' ? '继续任务' : '开始任务'}
+          {startPreviewCopy?.confirmLabel ?? '继续'}
         </button></>}>
-        {startPreview && <div className="storyboard-preview-card">
-          <p><b>{startPreview.action === 'resume'
-            ? `从第 ${startPreview.checkpoint.resume_from_shot} 镜继续；前 ${startPreview.kept_validated_shots} 镜已通过逐镜校验。`
-            : '从空白开始生成本集分镜。'}</b></p>
-          <p>{startPreview.planned_shots
-            ? `计划 ${startPreview.planned_shots} 镜${startPreview.remaining_shots != null ? `，剩余 ${startPreview.remaining_shots} 镜` : ''}。`
-            : '任务启动后会先规划镜头数量。'}</p>
+        {startPreview && startPreviewCopy && <div className="storyboard-preview-card">
+          <p><b>{startPreviewCopy.summary}</b></p>
+          <p>{startPreviewCopy.detail}</p>
           {startPreview.repair && startPreview.action === 'resume' && <p>
             历史修复 {startPreview.repair.lifetime_repair_count} 次；将开启第 {startPreview.repair.activation_no + 1} 轮，
             每轮最多 {startPreview.repair.max_attempts_per_activation} 次。候选通过校验前不会覆盖现有分镜。
           </p>}
           {startPreview.blocking_reason && <div className="error-banner" role="alert">{startPreview.blocking_reason}</div>}
+          {startPreview.warning && <div className="warning-banner">{startPreview.warning}</div>}
           {!!startPreview.repair?.last_issue_messages.length && <div className="warning-banner">
             {startPreview.repair.last_issue_messages.map(storyboardGateIssueLabel).join('；')}
           </div>}

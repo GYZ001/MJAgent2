@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from app.compiler import compile_prompt, keyframe_visual_contract
 from app.continuity import (
     dialogue_action_staging_kind,
@@ -160,6 +162,31 @@ def test_dialogue_framing_issue_routes_to_current_shot_repair() -> None:
     assert plan.level == "L1"
     assert plan.strategy == "repair_current"
     assert plan.invalidation_frontier == 6
+
+
+@pytest.mark.parametrize(
+    "message, shot_no",
+    [
+        (
+            "shot_no=11 的对白同时包含剧情道具操作，shot_size 不得为特写；"
+            "请至少使用近景并完整保留双手、道具和接触关系",
+            11,
+        ),
+        (
+            "shot_no=13 的对白同时包含走位/离场等大形体动作，shot_size 应为中景、"
+            "全景或远景，当前为「近景」；必须完整拍出动作，不能用单人大近景替代",
+            13,
+        ),
+    ],
+)
+def test_action_dialogue_framing_messages_route_to_targeted_repair(
+    message: str, shot_no: int,
+) -> None:
+    assert issue_code(message) == "DIALOGUE_FRAMING_INVALID"
+    plan = route_issues([message], validated_prefix_end=14)
+    assert plan.level == "L1"
+    assert plan.strategy == "repair_current"
+    assert plan.invalidation_frontier == shot_no
 
 
 def test_storyboard_issue_localization_does_not_prefix_match_shot_numbers() -> None:

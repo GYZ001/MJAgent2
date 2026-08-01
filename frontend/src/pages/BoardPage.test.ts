@@ -9,6 +9,7 @@ import {
   storyboardSaveDisabledReason,
   storyboardShotCheckpointLabel,
   storyboardSpokenChars,
+  storyboardStartPreviewCopy,
   storyboardToolbarActions,
 } from './BoardPage'
 
@@ -104,6 +105,40 @@ describe('分镜台结构化 diff 与问题筛选', () => {
     expect(copy.detail).toContain('第 3–9 镜仍待校验')
     expect(copy.detail).toContain('从第 3 镜继续修复')
     expect(copy.detail).toContain('人工确认前')
+  })
+
+  it('完整收束但门禁失败时明确重开修复而不是追加镜头', () => {
+    const status = storyboardStatus({
+      planned_shots: 14,
+      produced_shots: 14,
+      validated_shots: 14,
+      draft_shots: 14,
+      safe_checkpoint_shots: 14,
+      pending_revalidation_shots: 0,
+      resume_from_shot: 15,
+      resume_mode: 'repair_existing',
+      final_shot_valid: true,
+      hard_gate_issue_count: 2,
+    })
+
+    const progress = storyboardProgressCopy(status)
+    expect(progress.detail).toContain('重开整集修复')
+    expect(progress.detail).toContain('不是从第 15 镜续写')
+
+    const preview = storyboardStartPreviewCopy({
+      preview_token: 'preview-1',
+      action: 'resume',
+      resume_mode: 'repair_existing',
+      kept_validated_shots: 14,
+      planned_shots: 14,
+      remaining_shots: 0,
+      checkpoint: { available: true, phase: 'SUCCEEDED', resume_from_shot: 15 },
+      current_gate_issue_count: 2,
+    })
+    expect(preview.title).toBe('继续修复分镜')
+    expect(preview.confirmLabel).toBe('开始修复')
+    expect(preview.summary).toContain('现有 14 镜保持不变')
+    expect(preview.detail).toContain('不是从第 15 镜续写')
   })
 
   it('在镜头轨道区分已校验和待校验工作副本', () => {

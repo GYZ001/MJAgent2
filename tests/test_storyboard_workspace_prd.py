@@ -126,6 +126,107 @@ def test_status_distinguishes_visible_drafts_from_zero_safe_checkpoint(storyboar
     assert "通过" not in status["headline"]
 
 
+@pytest.mark.asyncio
+async def test_final_tail_with_hard_gates_reopens_existing_repair_instead_of_appending(
+    storyboard_db, monkeypatch,
+):
+    issue = "shot_no=1 的对白构图仍需修复"
+
+    def failed_gate(_ep, board, _screenplay, _bible, **_kwargs):
+        return api.ConfirmationEvaluation(
+            passed=False,
+            errors=[issue],
+            warnings=[],
+            issues=[],
+            board=board,
+            compact_target=10,
+            estimated_cost_cny=0,
+        )
+
+    monkeypatch.setattr(api, "evaluate_storyboard_for_confirmation", failed_gate)
+    save_checkpoint(SupervisorCheckpoint(
+        episode_id="e1",
+        phase="SUCCEEDED",
+        validated_prefix_end=1,
+        next_shot_no=2,
+        expected_total=1,
+        activation_no=1,
+        activation_attempt_count=5,
+        outcome="SUCCEEDED_GATE_RETRY_EXHAUSTED_FALLBACK",
+        input_versions={"screenplay_artifact_id": "screenplay-v1"},
+        last_repair={
+            "status": "fallback_published",
+            "reason": "repair_candidate_no_progress",
+            "issue_messages": [issue],
+        },
+    ))
+
+    detail = api.episode_detail("e1", view="board")
+    status = detail["storyboard_status"]
+    preview = api._storyboard_start_preflight_payload("e1")
+
+    assert status["state"] == "failed"
+    assert status["recommended_action"] == "resume_storyboard"
+    assert status["resume_mode"] == "repair_existing"
+    assert preview["resume_mode"] == "repair_existing"
+    assert preview["can_start"] is True
+    assert preview["kept_validated_shots"] == 1
+    assert preview["remaining_shots"] == 0
+    assert preview["current_gate_issues"] == [issue]
+    assert "重新执行整集门禁" in preview["impact"]
+
+    spawned: dict[str, object] = {}
+
+    def fake_spawn(kind, key, coro, *, project_id=None):
+        spawned.update(kind=kind, key=key, project_id=project_id)
+        coro.close()
+        return object()
+
+    monkeypatch.setattr(task_registry, "spawn", fake_spawn)
+    result = await api.resume_storyboard("e1")
+
+    assert result["action"] == "resume"
+    assert result["next_shot_no"] == 2
+    assert spawned == {"kind": "storyboard", "key": "e1", "project_id": "p1"}
+    assert storyboard_db.execute(
+        "SELECT COUNT(*) AS c FROM shots WHERE episode_id='e1'"
+    ).fetchone()["c"] == 1
+
+
+@pytest.mark.asyncio
+async def test_confirmable_final_tail_still_rejects_blind_resume(storyboard_db, monkeypatch):
+    def passed_gate(_ep, board, _screenplay, _bible, **_kwargs):
+        return api.ConfirmationEvaluation(
+            passed=True,
+            errors=[],
+            warnings=[],
+            issues=[],
+            board=board,
+            compact_target=10,
+            estimated_cost_cny=0,
+        )
+
+    monkeypatch.setattr(api, "evaluate_storyboard_for_confirmation", passed_gate)
+    save_checkpoint(SupervisorCheckpoint(
+        episode_id="e1",
+        phase="SUCCEEDED",
+        validated_prefix_end=1,
+        next_shot_no=2,
+        expected_total=1,
+        outcome="SUCCEEDED_READY_FOR_CONFIRM",
+        input_versions={"screenplay_artifact_id": "screenplay-v1"},
+    ))
+
+    preview = api._storyboard_start_preflight_payload("e1")
+    assert preview["can_start"] is False
+    assert "直接确认分镜" in preview["blocking_reason"]
+
+    with pytest.raises(HTTPException, match="直接确认分镜") as caught:
+        await api.resume_storyboard("e1")
+
+    assert caught.value.status_code == 409
+
+
 def _leave_stale_checkpoint_after_screenplay_republish(storyboard_db) -> None:
     storyboard_db.execute("DELETE FROM shots WHERE episode_id='e1'")
     storyboard_db.execute(

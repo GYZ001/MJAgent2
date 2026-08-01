@@ -127,7 +127,7 @@ for _key in (
     "deepseek_model_text", "zhipu_model_text",
 ):
     SETTINGS_SCHEMA[_key] = {
-        "label": _key, "type": "string", "default": "", "max_length": 180,
+        "label": _key, "type": "string", "default": config.DEFAULT_SETTINGS.get(_key, ""), "max_length": 180,
         "immediate": True, "experimental": False,
     }
 

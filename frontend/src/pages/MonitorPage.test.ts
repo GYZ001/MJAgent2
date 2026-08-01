@@ -6,11 +6,16 @@ import {
   categorizeSettingKeys,
   jobBusinessLabel,
   jobNextStep,
+  modelAssignmentSettingKey,
+  modelAssignmentValue,
   modelBusinessLabel,
+  modelProviderOptions,
   normalizeDraft,
   settingOptionLabel,
   type Call,
   type Job,
+  type CatalogModel,
+  type ModelSelection,
   type SettingSchema,
 } from "./MonitorPage";
 
@@ -173,5 +178,68 @@ describe("模型业务名称", () => {
   it("替换内置占位英文且保留真实模型品牌名", () => {
     expect(modelBusinessLabel("Text 模型")).toBe("文本模型");
     expect(modelBusinessLabel("Claude Opus 4.8")).toBe("Claude Opus 4.8");
+  });
+
+  const selection: ModelSelection = {
+    key: "text",
+    label: "文本模型",
+    provider: "hiagent",
+    model: "",
+    options: [
+      { provider: "hiagent", model: "hiagent-text", available: false },
+      { provider: "openrouter", model: "router-default", available: false },
+      { provider: "openrouter", model: "duplicate", available: false },
+    ],
+  };
+  const catalog: CatalogModel[] = [
+    {
+      id: "hiagent-text",
+      provider: "hiagent",
+      model: "hiagent-text",
+      label: "火山文本",
+      kinds: ["text"],
+      builtin: true,
+      key_configured: false,
+    },
+    {
+      id: "router-default",
+      provider: "openrouter",
+      model: "router-default",
+      label: "路由默认模型",
+      kinds: ["text"],
+      builtin: true,
+      key_configured: false,
+    },
+    {
+      id: "router-ready",
+      provider: "openrouter",
+      model: "router-ready",
+      label: "路由已配置模型",
+      kinds: ["text"],
+      builtin: true,
+      key_configured: true,
+    },
+  ];
+
+  it("未配置连接时仍保留服务分类，不再渲染空下拉框", () => {
+    expect(modelProviderOptions(selection, catalog, "text")).toEqual([
+      { provider: "hiagent", model: "hiagent-text", available: false },
+      { provider: "openrouter", model: "router-default", available: true },
+    ]);
+  });
+
+  it("切换服务时优先选择该服务下已配置的模型", () => {
+    expect(
+      modelAssignmentValue(selection, catalog, "text", "openrouter"),
+    ).toBe("router-ready");
+    expect(
+      modelAssignmentValue(selection, catalog, "text", "hiagent"),
+    ).toBe("hiagent-text");
+  });
+
+  it("自定义服务只保存职责分配，不生成未声明的模型设置键", () => {
+    expect(modelAssignmentSettingKey("openrouter", "text"))
+      .toBe("openrouter_model_text");
+    expect(modelAssignmentSettingKey("custom:model_123", "text")).toBeNull();
   });
 });

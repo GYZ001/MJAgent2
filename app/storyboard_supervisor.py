@@ -81,17 +81,93 @@ def _migrate_checkpoint(cp: SupervisorCheckpoint) -> SupervisorCheckpoint:
         **cp.legacy_repair_audit,
         "repair_epoch": int(cp.repair_epoch or 0),
         "issue_fingerprint_counts": dict(cp.issue_fingerprint_counts or {}),
+        "issue_strategy_history": dict(cp.issue_strategy_history or {}),
         "migrated_from": cp.planner_version or "legacy",
     }
     # ``repair_epoch`` remains the lifetime audit count.  The corrupt legacy
     # per-fingerprint counters must not consume the first bounded v2 activation.
     cp.issue_fingerprint_counts = {}
+    cp.issue_strategy_history = {}
     cp.activation_attempt_count = 0
     cp.repair_candidate_shots = []
     cp.planner_version = STORYBOARD_REPAIR_PLANNER_VERSION
     if cp.outcome == "PAUSED_REPAIR_SAFETY_LIMIT":
         cp.outcome = "WAITING_RETRY_LEGACY_MIGRATED"
     return cp
+
+
+def _begin_repair_activation(cp: SupervisorCheckpoint) -> SupervisorCheckpoint:
+    """Open a fresh bounded repair round without erasing lifetime audit data."""
+    completed_activations = list(
+        cp.legacy_repair_audit.get("completed_activation_histories") or []
+    )
+    if cp.issue_strategy_history:
+        completed_activations.append({
+            "activation_no": int(cp.activation_no or 0),
+            "attempt_count": int(cp.activation_attempt_count or 0),
+            "issue_strategy_history": dict(cp.issue_strategy_history),
+        })
+        cp.legacy_repair_audit = {
+            **cp.legacy_repair_audit,
+            "completed_activation_histories": completed_activations[-20:],
+        }
+    cp.activation_no = int(cp.activation_no or 0) + 1
+    cp.activation_attempt_count = 0
+    cp.issue_fingerprint_counts = {}
+    # Strategy attempts are activation-local.  Reusing the prior activation's
+    # map makes a user-authorized retry exhaust before its first provider call.
+    cp.issue_strategy_history = {}
+    cp.repair_candidate_shots = []
+    if cp.last_repair:
+        cp.last_repair = {**cp.last_repair, "status": "superseded_by_new_activation"}
+    cp.outcome = None
+    return cp
+
+
+def _withdraw_legacy_failed_publication(
+    conn,
+    episode_id: str,
+    episode,
+    cp: SupervisorCheckpoint,
+) -> bool:
+    """Withdraw pointers created by the legacy failed-gate fallback.
+
+    The immutable artifact and certificate remain as audit evidence, but they
+    must not stay addressable as the episode's current published storyboard.
+    """
+    if cp.outcome != "SUCCEEDED_GATE_RETRY_EXHAUSTED_FALLBACK":
+        return False
+    artifact_id = (
+        episode["published_storyboard_artifact_id"]
+        or episode["storyboard_artifact_id"]
+    )
+    revision_id = episode["storyboard_production_revision_id"]
+    reason = "旧版 Supervisor 在整集门禁失败时误发布，现已撤回并等待局部修复"
+    conn.execute(
+        """UPDATE episodes SET storyboard_artifact_id=NULL,
+                  working_storyboard_artifact_id=NULL,
+                  published_storyboard_artifact_id=NULL,
+                  storyboard_completion_certificate_id=NULL,
+                  storyboard_production_revision_id=NULL,
+                  storyboard_warning=?
+           WHERE id=?""",
+        (reason, episode_id),
+    )
+    if revision_id:
+        conn.execute(
+            "UPDATE production_revisions SET status='superseded',published_artifact_id=NULL "
+            "WHERE id=?",
+            (revision_id,),
+        )
+    if artifact_id:
+        conn.execute(
+            "UPDATE artifacts SET status='stale',stale_reason=? WHERE id=? AND status!='rejected'",
+            (reason, artifact_id),
+        )
+    conn.commit()
+    if artifact_id:
+        evidence_repository.invalidate_descendants(artifact_id, reason)
+    return True
 
 
 def _is_retryable_external_error(exc: BaseException) -> bool:
@@ -358,6 +434,44 @@ def _storyboard_generation_is_complete(
     if completed and completed[-1].is_final and planned_total <= 0:
         return True
     return count >= max_shots
+
+
+def _repair_candidate_made_progress(
+    *,
+    mode: str,
+    candidate_passed: bool,
+    before_messages: list[str],
+    after_messages: list[str],
+) -> bool:
+    """Accept monotonic partial repair so independent issues converge in turn."""
+    if candidate_passed or mode == "append":
+        return True
+    before = {str(message).strip() for message in before_messages if str(message).strip()}
+    after = {str(message).strip() for message in after_messages if str(message).strip()}
+    if not before:
+        return False
+    resolved = before - after
+    introduced = after - before
+    return bool(resolved) and not introduced
+
+
+def _deterministic_dialogue_framing_candidate(shot: Shot) -> Shot | None:
+    """Return the smallest contract-preserving framing fix when it is unambiguous."""
+    from app.continuity import dialogue_action_staging_kind
+
+    candidate = Shot.model_validate(shot.model_dump(mode="json"))
+    staging_kind = dialogue_action_staging_kind(candidate)
+    if staging_kind == "spatial" and candidate.shot_size not in {"远景", "全景", "中景"}:
+        candidate.shot_size = "中景"
+    elif staging_kind == "prop" and candidate.shot_size == "特写":
+        candidate.shot_size = "近景"
+    else:
+        return None
+    tags = list(candidate.risk_tags or [])
+    if "dialogue_action_staging" not in tags:
+        tags.append("dialogue_action_staging")
+    candidate.risk_tags = tags
+    return candidate
 
 
 def _recover_truncated_outline_from_approved_artifact(
@@ -791,7 +905,6 @@ async def run_storyboard_supervisor(
         _board_from_shot_rows,
         _finalize_storyboard_evidence,
         _insert_storyboard_shot,
-        _shot_contract_json,
         _assert_storyboard_write_authorized,
         _persist_storyboard_character_policy_repairs,
         _reconcile_storyboard_plan,
@@ -827,13 +940,8 @@ async def run_storyboard_supervisor(
     else:
         cp = _migrate_checkpoint(cp)
     if new_activation:
-        cp.activation_no = int(cp.activation_no or 0) + 1
-        cp.activation_attempt_count = 0
-        cp.issue_fingerprint_counts = {}
-        cp.repair_candidate_shots = []
-        if cp.last_repair:
-            cp.last_repair = {**cp.last_repair, "status": "superseded_by_new_activation"}
-        cp.outcome = None
+        _withdraw_legacy_failed_publication(conn, episode_id, ep, cp)
+        cp = _begin_repair_activation(cp)
     if run_id:
         evidence_repository.append_event(
             run_id, "STORYBOARD_SUPERVISOR_STARTED", "info",
@@ -948,63 +1056,41 @@ async def run_storyboard_supervisor(
         ]
         return shots
 
-    def _publish_best_effort_storyboard(
+    def _preserve_best_effort_storyboard(
         candidate_shots: list[Shot], *, reason: str,
     ) -> SupervisorCheckpoint | None:
-        """Publish the current non-empty board after bounded gate repair is exhausted."""
+        """Preserve the current board without falsely publishing a failed gate."""
         if not candidate_shots:
             return None
-        board = Storyboard(episode_no=ep_data["episode_no"], shots=list(candidate_shots))
-        normalize_continuity(board)
-        relieve_spoken_overflow(board)
-        prefer_default_shot_durations(board)
-        normalize_transition_visuals(board)
-        board.shots[-1].is_final = True
-        rows = conn.execute(
-            "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,),
-        ).fetchall()
-        for row, shot in zip(rows, board.shots):
-            conn.execute(
-                "UPDATE shots SET continuity_from_prev=?,transition=?,duration_s=?,shot_size=?,"
-                "camera_move=?,last_frame_desc=?,shot_contract_json=?,continuity_mode=?,"
-                "observed_state_out=? WHERE id=?",
-                (
-                    int(shot.continuity_from_prev), shot.transition, shot.duration_s,
-                    shot.shot_size, shot.camera_move, shot.last_frame_desc,
-                    _shot_contract_json(shot), shot.continuity_mode, shot.observed_state_out,
-                    row["id"],
-                ),
-            )
-        conn.commit()
-        _finalize_storyboard_evidence(episode_id, board)
-        actual_total = sum(int(shot.duration_s or 0) for shot in board.shots)
+        shot_count = len(candidate_shots)
+        message = f"整集校验仍未通过，已保留全部 {shot_count} 个现有分镜；可继续修复：{reason}"
         conn.execute(
-            "UPDATE episodes SET status='scripted',script_error=NULL,storyboard_warning=?,"
-            "target_duration_s=? WHERE id=?",
+            "UPDATE episodes SET status='scripted',script_error=?,storyboard_warning=? WHERE id=?",
             (
-                ("门禁修复次数耗尽，已发布当前最佳分镜：" + reason)[:800],
-                _compact_episode_target(actual_total or ep_data["target_duration_s"]),
+                message[:800],
+                ("门禁修复次数耗尽，已保留当前分镜：" + reason)[:800],
                 episode_id,
             ),
         )
         conn.commit()
-        cp.phase = "SUCCEEDED"
-        cp.outcome = "SUCCEEDED_GATE_RETRY_EXHAUSTED_FALLBACK"
-        cp.validated_prefix_end = len(board.shots)
-        cp.next_shot_no = len(board.shots) + 1
+        cp.phase = "WAITING_HUMAN"
+        cp.outcome = "WAITING_RETRY_GATE_REPAIR_EXHAUSTED"
+        cp.validated_prefix_end = shot_count
+        cp.next_shot_no = shot_count + 1
         cp.last_repair = {
             **(cp.last_repair or {}),
-            "status": "fallback_published",
+            "status": "best_effort_preserved",
             "reason": reason,
         }
+        cp.repair_candidate_shots = []
         save_checkpoint(cp, run_id=run_id)
         if run_id:
             evidence_repository.append_event(
                 run_id,
-                "STORYBOARD_GATE_RETRY_EXHAUSTED_FALLBACK",
+                "STORYBOARD_GATE_RETRY_EXHAUSTED",
                 "warning",
-                "分镜门禁重试耗尽，已发布当前最佳产物",
-                payload={"shot_count": len(board.shots), "reason": reason},
+                "分镜门禁重试耗尽，已保留当前产物等待继续修复",
+                payload={"shot_count": shot_count, "reason": reason},
             )
         return cp
 
@@ -1177,7 +1263,7 @@ async def run_storyboard_supervisor(
                         "REPAIR_FAILED_STRATEGIES_EXHAUSTED",
                         "WAITING_RETRY_ACTIVATION_BUDGET",
                     }:
-                        fallback = _publish_best_effort_storyboard(
+                        fallback = _preserve_best_effort_storyboard(
                             completed, reason=(cp.last_repair or {}).get("reason") or str(exc),
                         )
                         if fallback is not None:
@@ -1347,7 +1433,12 @@ async def run_storyboard_supervisor(
                 official_board, candidate_evaluation.board, cp,
             )
             before_codes = set(repair.get("issue_codes") or [])
-            after_messages = [*candidate_evaluation.errors, *candidate_evaluation.warnings]
+            repair_required_after = [
+                str(getattr(issue, "message", "") or "")
+                for issue in (candidate_evaluation.issues or [])
+                if _storyboard_warning_requires_auto_repair(issue)
+            ]
+            after_messages = [*candidate_evaluation.errors, *repair_required_after]
             from app.evaluations.issues import issue_code as _issue_code
             after_codes = {
                 *[getattr(issue, "code", "") for issue in (candidate_evaluation.issues or [])],
@@ -1355,15 +1446,11 @@ async def run_storyboard_supervisor(
             }
             after_codes.discard("")
             before_messages = list(repair.get("issue_messages") or [])
-            remaining_target_codes = before_codes.intersection(after_codes)
-            resolved_target_codes = before_codes - after_codes
-            improved = bool(
-                mode == "append"
-                or candidate_evaluation.passed and (
-                    not remaining_target_codes
-                    or bool(resolved_target_codes)
-                    or len(after_messages) < max(1, len(before_messages))
-                )
+            improved = _repair_candidate_made_progress(
+                mode=mode,
+                candidate_passed=candidate_evaluation.passed,
+                before_messages=before_messages,
+                after_messages=after_messages,
             )
             no_op = _storyboard_hash(candidate_board) == _storyboard_hash(official_board)
             if no_op or not improved:
@@ -1387,7 +1474,7 @@ async def run_storyboard_supervisor(
                         "REPAIR_FAILED_STRATEGIES_EXHAUSTED",
                         "WAITING_RETRY_ACTIVATION_BUDGET",
                     }:
-                        fallback = _publish_best_effort_storyboard(
+                        fallback = _preserve_best_effort_storyboard(
                             list(official_board.shots), reason="repair_candidate_no_progress",
                         )
                         if fallback is not None:
@@ -1437,7 +1524,7 @@ async def run_storyboard_supervisor(
             or not full_board.shots
             or not full_board.shots[-1].is_final
         ):
-            fallback = _publish_best_effort_storyboard(
+            fallback = _preserve_best_effort_storyboard(
                 list(full_board.shots),
                 reason=(
                     f"生成次数耗尽：已完成 {len(full_board.shots)}/{planned_now or '?'} 镜"
@@ -1484,7 +1571,7 @@ async def run_storyboard_supervisor(
                     "REPAIR_FAILED_STRATEGIES_EXHAUSTED",
                     "WAITING_RETRY_ACTIVATION_BUDGET",
                 }:
-                    fallback = _publish_best_effort_storyboard(
+                    fallback = _preserve_best_effort_storyboard(
                         list(evaluation.board.shots), reason="episode_validation_retry_exhausted",
                     )
                     if fallback is not None:
@@ -1728,6 +1815,27 @@ def _apply_repair(
         "attempt_no": attempt_no,
     }
     cp.repair_candidate_shots = []
+    if (
+        "DIALOGUE_FRAMING_INVALID" in set(plan.issue_codes or [])
+        and mode == "replace"
+        and window_start == window_end
+    ):
+        target = next(
+            (shot for shot in current_board.shots if int(shot.shot_no) == window_start),
+            None,
+        )
+        deterministic = (
+            _deterministic_dialogue_framing_candidate(target)
+            if target is not None else None
+        )
+        if deterministic is not None:
+            cp.repair_candidate_shots = [deterministic.model_dump(mode="json")]
+            cp.last_repair = {
+                **cp.last_repair,
+                "status": "candidate_generating",
+                "candidate_count": 1,
+                "deterministic_repair": "dialogue_action_framing",
+            }
     cp.validated_prefix_end = max(0, window_start - 1)
     cp.next_shot_no = window_start
     cp.validated_shot_artifact_ids = cp.validated_shot_artifact_ids[: max(0, window_start - 1)]

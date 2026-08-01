@@ -4862,6 +4862,34 @@ table.calls-ledger th:nth-child(6) {
   grid-template-columns: minmax(110px, 0.38fr) minmax(180px, 1fr);
   width: 100%;
 }
+.model-target-status {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-height: 20px;
+  color: var(--ink-faint);
+  font-size: 11px;
+}
+.model-target-status.ready {
+  color: var(--moss);
+}
+.model-target-status.pending {
+  color: var(--cinnabar-deep);
+}
+.model-target-status button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--cinnabar);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.model-target-status button:hover {
+  text-decoration: underline;
+}
 .model-hub .model-current {
   display: grid;
   grid-template-columns: auto 1fr;
@@ -4877,6 +4905,10 @@ table.calls-ledger th:nth-child(6) {
   border-radius: 50%;
   background: #4c9365;
   box-shadow: 0 0 0 3px rgba(76, 147, 101, 0.12);
+}
+.model-live-dot.pending {
+  background: #b87932;
+  box-shadow: 0 0 0 3px rgba(184, 121, 50, 0.13);
 }
 .model-hub .model-current strong {
   color: var(--ink);
@@ -13435,5 +13467,401 @@ summary:focus-visible,
   }
   .inline-reset-confirm > div {
     justify-content: flex-end;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   全局控件兜底层
+   业务组件可以继续用自己的高优先级样式；这里只接住没有 class 的原生控件、
+   浏览器默认外观以及各类弹窗中容易遗漏的表单状态。
+   ═══════════════════════════════════════════════════════════════ */
+:root {
+  --control-border: #cbc9c3;
+  --control-border-hover: #9fa5ad;
+  --control-surface: #fffefa;
+  --control-surface-hover: #fff;
+  --control-ring: rgba(54, 86, 108, 0.14);
+  --control-danger: #b54838;
+}
+
+:where(button:not([class])) {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 11px;
+  border: 1px solid var(--control-border);
+  border-radius: 8px;
+  background: linear-gradient(180deg, #fff, var(--control-surface));
+  color: var(--ink-soft);
+  font: 600 12px/1.35 var(--ui);
+  text-align: center;
+  box-shadow:
+    0 1px 1px rgba(25, 31, 38, 0.04),
+    inset 0 1px rgba(255, 255, 255, 0.85);
+  cursor: pointer;
+  transition:
+    color 0.15s ease,
+    border-color 0.15s ease,
+    background 0.15s ease,
+    box-shadow 0.15s ease,
+    transform 0.15s ease;
+}
+:where(button:not([class]):hover:not(:disabled)) {
+  border-color: var(--control-border-hover);
+  background: var(--control-surface-hover);
+  color: var(--ink);
+  box-shadow: 0 5px 14px rgba(25, 31, 38, 0.08);
+  transform: translateY(-1px);
+}
+:where(button:not([class]):active:not(:disabled)) {
+  box-shadow: 0 1px 2px rgba(25, 31, 38, 0.08);
+  transform: translateY(0);
+}
+
+:where(
+  input:not([type]),
+  input[type="email"],
+  input[type="url"],
+  input[type="tel"],
+  input[type="date"],
+  input[type="datetime-local"],
+  input[type="time"],
+  input[type="month"],
+  input[type="week"]
+) {
+  min-height: 39px;
+  max-width: 100%;
+  padding: 8px 11px;
+  border: 1px solid #d3d1cb;
+  border-radius: 9px;
+  outline: none;
+  background: #fff;
+  color: var(--ink);
+  font: 14px/1.4 var(--ui);
+  box-shadow: none;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease,
+    box-shadow 0.15s ease;
+}
+:where(
+  input:not([type]),
+  input[type="text"],
+  input[type="number"],
+  input[type="email"],
+  input[type="url"],
+  input[type="tel"],
+  input[type="password"],
+  input[type="search"],
+  input[type="date"],
+  input[type="datetime-local"],
+  input[type="time"],
+  textarea,
+  select
+):disabled {
+  border-color: #dedbd4;
+  background: #eeece7;
+  color: #8b9198;
+  box-shadow: none;
+  cursor: not-allowed;
+  opacity: 0.78;
+}
+:where(
+  input:not([type]),
+  input[type="text"],
+  input[type="number"],
+  input[type="email"],
+  input[type="url"],
+  input[type="tel"],
+  input[type="password"],
+  input[type="search"],
+  input[type="date"],
+  input[type="datetime-local"],
+  input[type="time"],
+  textarea,
+  select
+)[aria-invalid="true"] {
+  border-color: rgba(181, 72, 56, 0.72);
+  background: rgba(255, 250, 248, 0.98);
+  box-shadow: 0 0 0 3px rgba(181, 72, 56, 0.1);
+}
+:where(input:not([type]), input[type="text"], input[type="search"], textarea):read-only {
+  background: #f3f1ec;
+  color: var(--ink-soft);
+}
+:where(input[type="checkbox"], input[type="radio"]) {
+  width: 17px;
+  height: 17px;
+  min-height: 17px;
+  flex: 0 0 17px;
+  margin: 0;
+  accent-color: var(--cinnabar);
+  cursor: pointer;
+}
+:where(input[type="checkbox"], input[type="radio"]):disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+:where(input[type="file"]) {
+  max-width: 100%;
+  color: var(--ink-soft);
+  font: 12.5px var(--ui);
+}
+:where(input[type="file"])::file-selector-button {
+  min-height: 34px;
+  margin-right: 10px;
+  padding: 6px 11px;
+  border: 1px solid var(--control-border);
+  border-radius: 8px;
+  background: var(--control-surface);
+  color: var(--ink);
+  font: 600 12px var(--ui);
+  cursor: pointer;
+}
+:where(button, input, textarea, select):disabled {
+  cursor: not-allowed;
+}
+:where(input, textarea, select):focus-visible {
+  outline: none;
+  border-color: #50728a;
+  box-shadow: 0 0 0 3px var(--control-ring);
+}
+
+:where(fieldset) {
+  min-width: 0;
+  border: 1px solid rgba(108, 113, 121, 0.2);
+  border-radius: 10px;
+}
+:where(fieldset > legend) {
+  padding: 0 7px;
+  color: var(--ink-soft);
+  font: 600 11.5px var(--ui);
+}
+
+/* 通用确认弹窗由抽屉式证据层承载，单独恢复为居中的模态布局。 */
+.evidence-backdrop:has(> .impact-dialog) {
+  align-items: center;
+  justify-content: center;
+  padding: clamp(12px, 3vw, 28px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  background: rgba(26, 27, 29, 0.54);
+  backdrop-filter: blur(6px);
+}
+.impact-dialog {
+  width: min(560px, 100%);
+  max-height: min(820px, calc(100dvh - 32px));
+  margin: auto;
+  padding: clamp(18px, 3vw, 26px);
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  border-radius: 16px;
+  background: #fffefa;
+  box-shadow:
+    0 30px 90px rgba(20, 24, 30, 0.24),
+    0 2px 8px rgba(20, 24, 30, 0.08);
+  scrollbar-gutter: stable;
+}
+.impact-dialog > h3 {
+  margin-bottom: 12px;
+  color: var(--ink);
+  font: 600 19px/1.4 var(--serif);
+  letter-spacing: 0.025em;
+}
+.impact-dialog .dialog-actions {
+  align-items: center;
+  gap: 10px;
+  margin-top: 20px;
+  padding-top: 15px;
+  border-top: 1px solid rgba(108, 113, 121, 0.16);
+}
+.impact-dialog .dialog-actions > .btn {
+  min-width: 96px;
+}
+
+:is(
+  .impact-dialog,
+  .review-dialog,
+  .model-modal,
+  .generation-params-modal,
+  .scene-detail-modal,
+  .scene-candidate-modal,
+  .scene-manual-review-dialog,
+  .monitor-drawer,
+  .evidence-drawer
+) {
+  color: var(--ink);
+  overscroll-behavior: contain;
+  scrollbar-color: rgba(116, 125, 136, 0.36) transparent;
+}
+:is(
+  .impact-dialog,
+  .review-dialog,
+  .model-modal,
+  .generation-params-modal,
+  .scene-detail-modal,
+  .scene-candidate-modal,
+  .scene-manual-review-dialog,
+  .monitor-drawer
+) :where(
+  input:not([type]),
+  input[type="text"],
+  input[type="number"],
+  input[type="email"],
+  input[type="url"],
+  input[type="tel"],
+  input[type="password"],
+  input[type="search"],
+  input[type="date"],
+  input[type="datetime-local"],
+  input[type="time"],
+  textarea,
+  select
+) {
+  max-width: 100%;
+}
+:is(
+  .impact-dialog,
+  .review-dialog,
+  .model-modal,
+  .generation-params-modal,
+  .scene-detail-modal,
+  .scene-candidate-modal,
+  .scene-manual-review-dialog,
+  .monitor-drawer
+) :is(input[type="checkbox"], input[type="radio"]) {
+  width: 17px;
+  min-width: 17px;
+  height: 17px;
+  min-height: 17px;
+  padding: 0;
+}
+
+:is(
+  .review-dialog-head > button,
+  .model-modal-head > button,
+  .generation-params-modal-head > button,
+  .scene-detail-modal-head > button,
+  .scene-candidate-modal-head > button,
+  .monitor-drawer > header > button,
+  .evidence-drawer > header > button
+) {
+  display: grid;
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  min-height: 40px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 11px;
+  background: rgba(45, 51, 58, 0.055);
+  color: var(--ink-soft);
+  font: 400 22px/1 var(--ui);
+  box-shadow: none;
+  cursor: pointer;
+  transition:
+    color 0.15s ease,
+    border-color 0.15s ease,
+    background 0.15s ease,
+    transform 0.15s ease;
+}
+:is(
+  .review-dialog-head > button,
+  .model-modal-head > button,
+  .generation-params-modal-head > button,
+  .scene-detail-modal-head > button,
+  .scene-candidate-modal-head > button,
+  .monitor-drawer > header > button,
+  .evidence-drawer > header > button
+):hover:not(:disabled) {
+  border-color: rgba(108, 113, 121, 0.16);
+  background: rgba(45, 51, 58, 0.1);
+  color: var(--ink);
+  transform: none;
+}
+
+.dialog-actions,
+.model-modal-actions,
+.monitor-drawer-actions,
+.scene-manual-review-dialog > footer {
+  row-gap: 10px;
+}
+.model-modal-actions,
+.monitor-drawer-actions,
+.scene-manual-review-dialog > footer {
+  padding-top: 15px;
+  border-top: 1px solid rgba(108, 113, 121, 0.16);
+}
+
+/* 模型能力 fieldset 本身就是 .model-form-field，不能按后代 fieldset 处理。 */
+.model-modal fieldset.model-form-field {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px;
+}
+.model-modal fieldset.model-form-field > legend {
+  padding: 0 7px;
+}
+.model-modal fieldset.model-form-field > label {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 11px;
+  border: 1px solid rgba(108, 113, 121, 0.18);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--ink-soft);
+  font-size: 12px;
+  cursor: pointer;
+}
+.model-modal fieldset.model-form-field > label:hover {
+  border-color: rgba(54, 86, 108, 0.32);
+  background: #fff;
+  color: var(--ink);
+}
+.model-modal fieldset.model-form-field input[type="checkbox"] {
+  width: 17px;
+  min-width: 17px;
+  height: 17px;
+  min-height: 17px;
+  padding: 0;
+}
+
+@media (max-width: 560px) {
+  .evidence-backdrop:has(> .impact-dialog),
+  .review-dialog-backdrop,
+  .model-modal-backdrop,
+  .generation-params-backdrop,
+  .scene-detail-backdrop,
+  .scene-candidate-backdrop,
+  .scene-manual-review-backdrop {
+    align-items: end;
+    padding: 8px;
+  }
+  .impact-dialog,
+  .review-dialog,
+  .model-modal,
+  .generation-params-modal,
+  .scene-detail-modal,
+  .scene-candidate-modal,
+  .scene-manual-review-dialog {
+    max-height: calc(100dvh - 16px);
+    border-radius: 16px 16px 12px 12px;
+  }
+  .impact-dialog .dialog-actions,
+  .model-modal-actions,
+  .scene-manual-review-dialog > footer {
+    align-items: stretch;
+    flex-direction: column-reverse;
+  }
+  .impact-dialog .dialog-actions > button,
+  .model-modal-actions > button,
+  .scene-manual-review-dialog > footer > button {
+    width: 100%;
   }
 }

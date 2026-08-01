@@ -163,6 +163,80 @@ def _storyboard_has_persisted_work(episode_id: str, ep: dict | None = None) -> b
     return _storyboard_checkpoint_matches_screenplay(checkpoint, episode)
 
 
+def _storyboard_resume_decision(episode_id: str, ep: dict | None = None) -> dict:
+    """Project the one authoritative decision for resuming a storyboard.
+
+    ``is_final`` only says that the current tail closes the episode.  It does
+    not say that the whole-board confirmation gates passed.  A completed tail
+    with unresolved hard gates must reopen the Supervisor's non-destructive
+    repair loop, while a genuinely confirmable board must still reject blind
+    append attempts.
+    """
+    episode = dict(ep) if ep is not None else dict(_episode_or_404(episode_id))
+    row = get_conn().execute(
+        "SELECT shot_no,shot_contract_json FROM shots WHERE episode_id=? "
+        "ORDER BY shot_no DESC LIMIT 1",
+        (episode_id,),
+    ).fetchone()
+    tail_is_final = False
+    if row and row["shot_contract_json"]:
+        try:
+            tail_is_final = bool(json.loads(row["shot_contract_json"] or "{}").get("is_final"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            tail_is_final = False
+
+    # An unfinished tail is ordinary checkpoint continuation.
+    if not tail_is_final:
+        return {
+            "allowed": True,
+            "resume_mode": "continue_generation",
+            "blocking_reason": None,
+            "storyboard_status": None,
+        }
+
+    # Use the same atomic projection that drives the primary UI action.  This
+    # prevents preflight from promising a repair that the POST endpoint later
+    # mistakes for an attempt to append after an is_final tail.
+    from app import api as api_facade
+
+    status = api_facade.episode_detail(episode_id, view="board")["storyboard_status"]
+    allowed = status.get("recommended_action") == "resume_storyboard"
+    if allowed:
+        return {
+            "allowed": True,
+            "resume_mode": status.get("resume_mode") or "continue_generation",
+            "blocking_reason": None,
+            "storyboard_status": status,
+        }
+
+    # Preserve recovery from a stale projection whose durable Run has already
+    # ended.  A live task is handled by the caller's deduplication guard; a
+    # confirmed/done episode must never enter this compatibility path.
+    if (
+        episode.get("status") in {"scripting", "script_failed"}
+        and not _storyboard_generation_is_live(episode)
+    ):
+        return {
+            "allowed": True,
+            "resume_mode": "continue_generation",
+            "blocking_reason": None,
+            "storyboard_status": status,
+        }
+
+    if status.get("recommended_action") == "confirm_storyboard":
+        reason = "当前分镜已完整收束且确认门禁已通过，请直接确认分镜，无需继续生成"
+    elif status.get("recommended_action") == "go_review_wall":
+        reason = "当前分镜已经确认，不能再续跑；如需调整请先创建新的制作修订"
+    else:
+        reason = status.get("write_block_reason") or "当前收尾镜后没有可恢复的生成或修复任务"
+    return {
+        "allowed": False,
+        "resume_mode": None,
+        "blocking_reason": reason,
+        "storyboard_status": status,
+    }
+
+
 def _storyboard_start_preflight_payload(episode_id: str) -> dict:
     from app.storyboard_supervisor import load_latest_checkpoint
     from app.storyboard_workspace import episode_fingerprint
@@ -176,6 +250,18 @@ def _storyboard_start_preflight_payload(episode_id: str) -> dict:
     ).fetchone()["c"])
     action = "resume" if _storyboard_has_persisted_work(episode_id, dict(ep)) else "create"
     cp = load_latest_checkpoint(episode_id) if action == "resume" else None
+    resume_decision = (
+        _storyboard_resume_decision(episode_id, dict(ep))
+        if action == "resume"
+        else {
+            "allowed": True,
+            "resume_mode": "create",
+            "blocking_reason": None,
+            "storyboard_status": None,
+        }
+    )
+    current_status = resume_decision.get("storyboard_status") or {}
+    current_gate_issues = list(current_status.get("hard_gate_issues") or [])
     planned = int(cp.expected_total or 0) if cp else 0
     if not planned and ep["storyboard_outline_json"]:
         try:
@@ -189,7 +275,11 @@ def _storyboard_start_preflight_payload(episode_id: str) -> dict:
     resume_from = kept + 1 if action == "resume" else 1
     remaining = max(0, planned - kept) if planned else None
     strategies_exhausted = bool(
-        cp and cp.outcome == "REPAIR_FAILED_STRATEGIES_EXHAUSTED"
+        cp and cp.outcome in {
+            "REPAIR_FAILED_STRATEGIES_EXHAUSTED",
+            "SUCCEEDED_GATE_RETRY_EXHAUSTED_FALLBACK",
+            "WAITING_RETRY_GATE_REPAIR_EXHAUSTED",
+        }
     )
     latest_run = conn.execute(
         """SELECT id FROM workflow_runs
@@ -213,6 +303,7 @@ def _storyboard_start_preflight_payload(episode_id: str) -> dict:
     return {
         "episode_id": episode_id,
         "action": action,
+        "resume_mode": resume_decision["resume_mode"],
         "screenplay_artifact_id": ep["screenplay_artifact_id"],
         "storyboard_artifact_id": ep["storyboard_artifact_id"],
         "checkpoint": {
@@ -223,11 +314,13 @@ def _storyboard_start_preflight_payload(episode_id: str) -> dict:
         "kept_validated_shots": kept,
         "planned_shots": planned or None,
         "remaining_shots": remaining,
-        "can_start": True,
-        "blocking_reason": None,
+        "can_start": bool(resume_decision["allowed"]),
+        "blocking_reason": resume_decision["blocking_reason"],
+        "current_gate_issue_count": len(current_gate_issues),
+        "current_gate_issues": current_gate_issues[:12],
         "gate_retry_exhausted": strategies_exhausted,
         "warning": (
-            "历史修复策略已用尽；恢复后将发布当前最佳分镜"
+            "上一轮修复预算已用尽；继续后将开启新的有界修复轮次，现有分镜在候选通过前保持不变"
             if strategies_exhausted else None
         ),
         "repair": {
@@ -236,10 +329,19 @@ def _storyboard_start_preflight_payload(episode_id: str) -> dict:
             "activation_attempt_count": int(cp.activation_attempt_count or 0) if cp else 0,
             "max_attempts_per_activation": 6,
             "candidate_preserves_official_shots": True,
-            "last_issue_messages": list((cp.last_repair or {}).get("issue_messages") or [])[:12] if cp else [],
+            "last_issue_messages": (
+                current_gate_issues[:12]
+                or (list((cp.last_repair or {}).get("issue_messages") or [])[:12] if cp else [])
+            ),
             **provider_stats,
         },
-        "impact": "保留已通过逐镜校验的镜头，并从下一镜继续" if action == "resume" else "从空白开始生成本集分镜",
+        "impact": (
+            "保留现有镜头，重新执行整集门禁并仅在候选通过后替换问题镜"
+            if resume_decision["resume_mode"] == "repair_existing"
+            else "保留已通过逐镜校验的镜头，并从下一镜继续"
+            if action == "resume"
+            else "从空白开始生成本集分镜"
+        ),
         "estimated_wait_minutes": [max(1, (remaining or planned or 1)), max(2, (remaining or planned or 1) * 3)],
         "estimated_cost_cny": None,
         "estimate_note": "文本生成费用按实际调用结算；不会自动提交付费视频生成",
@@ -370,13 +472,12 @@ def _finalize_storyboard_evidence(
     except (TypeError, ValueError, json.JSONDecodeError):
         planned_total = 0
     findings: list[str] = []
-    if planned_total and len(board.shots) != planned_total:
-        findings.append(f"分镜数量与计划不同：已完成 {len(board.shots)}/{planned_total} 镜")
     if not board.shots:
         raise RuntimeError("没有任何分镜产物可发布")
+    if planned_total and len(board.shots) != planned_total:
+        raise RuntimeError(f"分镜数量与计划不同：已完成 {len(board.shots)}/{planned_total} 镜")
     if not board.shots[-1].is_final:
-        board.shots[-1].is_final = True
-        findings.append("最终镜未标记收束，重试耗尽后已将当前尾镜作为默认收束")
+        raise RuntimeError("最终镜未标记收束，禁止发布未结束的分镜")
     project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
     shot_rows = conn.execute(
         "SELECT id,source_excerpt,storyboard_artifact_id FROM shots "
@@ -951,8 +1052,10 @@ async def _recorded_storyboard_task(
         ).fetchone()
         phase = str(getattr(supervisor_result, "phase", "") or "")
         outcome = str(getattr(supervisor_result, "outcome", "") or "")
-        if phase == "SUCCEEDED" or (result and result["status"] == "confirmed"):
+        if result and result["status"] == "confirmed":
             recorder.succeed("分镜已确认（尚未产生视频费用）")
+        elif phase == "SUCCEEDED" and outcome == "SUCCEEDED_READY_FOR_CONFIRM":
+            recorder.succeed("分镜已完成，等待人工确认")
         elif phase == "PAUSED_EXTERNAL":
             from app.orchestration.state_machine import transition_run
             transition_run(
@@ -975,7 +1078,12 @@ async def _recorded_storyboard_task(
             from app.orchestration.state_machine import transition_run
             wait_state = (
                 "WAITING_RETRY"
-                if outcome in {"WAITING_RETRY_ACTIVATION_BUDGET", "WAITING_RETRY_CAS_CONFLICT"}
+                if outcome in {
+                    "WAITING_RETRY_ACTIVATION_BUDGET",
+                    "WAITING_RETRY_CAS_CONFLICT",
+                    "WAITING_RETRY_GATE_REPAIR_EXHAUSTED",
+                    "WAITING_RETRY_STORYBOARD_INCOMPLETE",
+                }
                 else "WAITING_HUMAN"
             )
             transition_run(
@@ -1165,31 +1273,9 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
         cp = None
     if not saved and (cp is None or cp.validated_prefix_end <= 0):
         raise HTTPException(409, "当前没有可恢复的 Supervisor / 逐镜 checkpoint，请重新生成分镜")
-    last_row = conn.execute(
-        "SELECT shot_no, shot_contract_json FROM shots WHERE episode_id=? ORDER BY shot_no DESC LIMIT 1",
-        (episode_id,),
-    ).fetchone()
-    if last_row and last_row["shot_contract_json"] and not (cp and cp.phase in {
-        "WAITING_HUMAN", "WAITING_AUTHORIZATION", "PAUSED_EXTERNAL", "REPAIRING",
-    }):
-        try:
-            last_contract = json.loads(last_row["shot_contract_json"])
-        except (TypeError, ValueError, json.JSONDecodeError):
-            last_contract = {}
-        if bool(last_contract.get("is_final")) and ep["status"] not in {"scripted"}:
-            pass  # Supervisor 可能需要整集校验/确认，允许恢复
-        elif bool(last_contract.get("is_final")):
-            # 已收束且无待修复时，默认禁止盲目续跑加镜
-            checkpoint_is_incomplete = bool(
-                cp is not None
-                and int(cp.expected_total or 0) > int(saved)
-            )
-            if cp is None or (cp.phase == "SUCCEEDED" and not checkpoint_is_incomplete):
-                raise HTTPException(
-                    409,
-                    f"第 {last_row['shot_no']} 镜已标记收束（is_final），禁止再续跑追加镜头；"
-                    "如需调整请在分镜台修改已有结构",
-                )
+    resume_decision = _storyboard_resume_decision(episode_id, dict(ep))
+    if not resume_decision["allowed"]:
+        raise HTTPException(409, resume_decision["blocking_reason"])
     parent = conn.execute(
         """SELECT id FROM workflow_runs
            WHERE workflow_type='storyboard' AND scope_type='episode' AND scope_id=?
@@ -2139,6 +2225,11 @@ def _storyboard_status_snapshot(
         if localized:
             shot["preflight_errors"] = localized
     full_terminal = bool(terminal_structure and not gate_errors)
+    repairing_existing = bool(
+        final_valid
+        and gate_errors
+        and (planned <= 0 or shot_count >= planned)
+    )
     invalid = bool(
         (running and confirmed)
         or (full_terminal and running)
@@ -2151,7 +2242,13 @@ def _storyboard_status_snapshot(
     elif running:
         state, headline, action = "running", f"分镜任务进行中，当前处理第 {resume_from} 镜", "view_progress"
     elif paused and not terminal_structure:
-        state, headline, action = "paused", f"局部修复已暂停，将从第 {resume_from} 镜继续", "resume_storyboard"
+        state, headline, action = (
+            "paused",
+            "整集修复已暂停，可继续修复现有问题镜"
+            if repairing_existing
+            else f"局部修复已暂停，将从第 {resume_from} 镜继续",
+            "resume_storyboard",
+        )
     elif terminal_structure and gate_errors:
         state, headline, action = "failed", f"还有 {len(gate_errors)} 个确认门禁问题，可继续修改", "resume_storyboard"
     elif ep.get("status") == "script_failed" or (ep.get("script_error") and not full_terminal):
@@ -2174,6 +2271,9 @@ def _storyboard_status_snapshot(
         state = "syncing"
         headline = "分镜台处于安全只读模式，可继续审阅"
         action = "refresh_status"
+    resume_mode = None
+    if action == "resume_storyboard":
+        resume_mode = "repair_existing" if repairing_existing else "continue_generation"
     return {
         "contract_version": "storyboard-workspace.v1",
         "snapshot_version": monotonic_snapshot_version(ep["id"], fingerprint),
@@ -2191,6 +2291,7 @@ def _storyboard_status_snapshot(
         "safe_checkpoint_shots": passed,
         "pending_revalidation_shots": max(0, shot_count - passed),
         "resume_from_shot": resume_from,
+        "resume_mode": resume_mode,
         "final_shot_valid": final_valid,
         "hard_gates_passed": full_terminal or confirmed,
         "hard_gate_issue_count": len(gate_errors),

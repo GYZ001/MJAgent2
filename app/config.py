@@ -38,10 +38,22 @@ _load_env()
 
 HIAGENT_BASE_URL = os.environ.get("HIAGENT_BASE_URL", "").rstrip("/")
 HIAGENT_API_KEY = os.environ.get("HIAGENT_API_KEY", "")
-MODEL_TEXT = os.environ.get("MODEL_TEXT", "")
-MODEL_VIDEO = os.environ.get("MODEL_VIDEO", "")
-MODEL_IMAGE = os.environ.get("MODEL_IMAGE", "")
-MODEL_VLM = os.environ.get("MODEL_VLM", MODEL_TEXT)
+# HiAgent 内置模型的技术标识。模型库、默认职责分配与真实调用必须共用同一来源，
+# 避免“模型测试可用，但 active_model 仍为空”的双轨状态。
+DEFAULT_HIAGENT_MODEL_TEXT = "d2a5n9rnvvm49eucvnvg"
+DEFAULT_HIAGENT_MODEL_VLM = "d7ev7il5boeaebtf4sgg"
+DEFAULT_HIAGENT_MODEL_VIDEO = "d7jf6nd5boeaebtfbdqg"
+DEFAULT_HIAGENT_MODEL_IMAGE = "d7ute7ppcc7n89uuqqp0"
+
+_model_text_env = os.environ.get("MODEL_TEXT", "").strip()
+MODEL_TEXT = _model_text_env or DEFAULT_HIAGENT_MODEL_TEXT
+MODEL_VLM = (
+    os.environ.get("MODEL_VLM", "").strip()
+    or _model_text_env
+    or DEFAULT_HIAGENT_MODEL_VLM
+)
+MODEL_VIDEO = os.environ.get("MODEL_VIDEO", "").strip() or DEFAULT_HIAGENT_MODEL_VIDEO
+MODEL_IMAGE = os.environ.get("MODEL_IMAGE", "").strip() or DEFAULT_HIAGENT_MODEL_IMAGE
 
 # OpenRouter：文本 LLM（分集/分镜）与质检 VLM 的可选第二路由；图像/视频始终走火山 HiAgent。
 # 路由选择存数据库 settings.model_route（hiagent|openrouter），可在监制房切换。
@@ -194,6 +206,12 @@ DEFAULT_SETTINGS = {
     "max_repair_attempts": "8",  # LLM 输出校验失败的最大修复重试次数（含首次）；模型不可用不走此重试
     "screenplay_qa_pass_score": "80",  # 剧本 QA 只评估；低于此分由独立 Repair 修复后复验
     "model_route": "hiagent",           # 文本/质检模型路由：hiagent（火山）| openrouter
+    # 职责分配必须落到明确 Model ID；init_db 以 INSERT OR IGNORE 补齐旧库。
+    # provider 仍沿用 active_provider 的旧版 model_route 兼容逻辑，避免覆盖历史路由。
+    "hiagent_model_text": MODEL_TEXT,
+    "hiagent_model_vlm": MODEL_VLM,
+    "hiagent_model_video": MODEL_VIDEO,
+    "hiagent_model_image": MODEL_IMAGE,
     "storyboard_concurrency": "2",      # 手动批量分镜的并发上限
     # PRD-03 分镜台独立灰度/回滚开关；P0 服务端防线不受 UI 开关影响。
     "storyboard_workspace_safe_readonly": "false",
