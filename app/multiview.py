@@ -1369,6 +1369,18 @@ async def ensure_character_multiview_pack(
                 )
                 conn.commit()
             return {"view_role": view_role, "status": "ready", "id": cur["id"], "reused": True}
+        if _pending_view_can_be_reviewed(cur, fp):
+            if cur and not cur.get("input_fingerprint"):
+                _backfill_view_fingerprint(
+                    conn, table="character_portrait_views", view_id=cur["id"], fingerprint=fp,
+                )
+                conn.commit()
+            return {
+                "view_role": view_role,
+                "status": PACK_STATUS_QA_PENDING,
+                "id": cur["id"],
+                "reused": True,
+            }
         seeds = list(front_seed)
         if base.get("image_path") and Path(base["image_path"]).exists():
             seeds.append(hiagent.data_url_from_file(base["image_path"]))

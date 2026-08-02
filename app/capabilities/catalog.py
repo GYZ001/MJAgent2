@@ -338,6 +338,14 @@ def _register_human_only(registry) -> None:
             rest_routes=("PUT /api/episodes/{episode_id}/target-duration",),
             tags=("human", "episode", "screenplay"),
         ),
+        HumanOnlySpec(
+            "human.delete_episode",
+            "删除单集",
+            "用户在分集规划中确认永久删除一集及其全部下游制作内容",
+            reason="单集删除不可撤销，且属于用户对原著改编范围的人工取舍",
+            rest_routes=("DELETE /api/episodes/{episode_id}",),
+            tags=("human", "episode", "destructive"),
+        ),
     ]:
         registry.register_human_only(spec)
 

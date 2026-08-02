@@ -361,6 +361,28 @@ def test_screenplay_rejects_key_lines_out_of_story_order() -> None:
     assert any("打乱了主线对白顺序" in e for e in errors), errors
 
 
+def test_dialogue_chain_normalization_derives_key_lines_in_script_order() -> None:
+    script = EpisodeScreenplay(
+        episode_no=1,
+        full_script_text="【场1】日 / 广场\n谷言：先把门打开。\n【场2】夜 / 室内\n谷言：最后再关灯。",
+        dialogue_chains=[
+            KeyDialogueChain(
+                chain_id="DC2", topic="收尾",
+                turns=[KeyDialogueTurn(speaker="谷言", line="最后再关灯。")],
+            ),
+            KeyDialogueChain(
+                chain_id="DC1", topic="开场",
+                turns=[KeyDialogueTurn(speaker="谷言", line="先把门打开。")],
+            ),
+        ],
+    )
+
+    normalized = normalize_screenplay_candidate(script)
+
+    assert normalized.key_lines == ["谷言：先把门打开。", "谷言：最后再关灯。"]
+    assert script.key_lines == []
+
+
 def test_long_screenplay_source_retains_head_middle_dialogue_and_tail() -> None:
     source = (
         "开场事实" + ("甲" * 500)

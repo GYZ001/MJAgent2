@@ -1,11 +1,11 @@
 """Renderability First 合同单测。"""
 from app.renderability import (
     SHOT_HARD_MAX,
-    SHOT_SOFT_MAX,
     find_overdetail_hits,
     overdetail_errors,
     overdetail_issue_is_active,
     shot_count_budget_errors,
+    storyboard_repair_issue_is_active,
     strip_overdetail_terms,
 )
 from app.schemas import (
@@ -31,19 +31,25 @@ def test_persisted_overdetail_issue_follows_current_policy() -> None:
     assert overdetail_issue_is_active("首帧含超纲细节词：微微、衣角；请删除") is True
 
 
+def test_retired_shot_size_repair_issue_is_inactive() -> None:
+    assert storyboard_repair_issue_is_active(
+        "shots[13](shot_no=14) 起连续 3 个镜头景别均为「近景」，请交替景别"
+    ) is False
+    assert storyboard_repair_issue_is_active("分镜共 17 镜，超过软预算 16") is False
+    assert storyboard_repair_issue_is_active("shot_no=14 状态链不承接") is True
+
+
 def test_shot_count_budget() -> None:
     assert shot_count_budget_errors(12) == []
-    soft = shot_count_budget_errors(18)
-    assert any("软预算" in e for e in soft)
+    assert shot_count_budget_errors(18) == []
     hard = shot_count_budget_errors(SHOT_HARD_MAX + 1)
     assert any("硬上限" in e for e in hard)
 
 
 def test_storyboard_shot_count_range_is_renderability_budget() -> None:
     lo, hi = storyboard_shot_count_range(50)
-    assert lo == 8
+    assert lo == 1
     assert hi == SHOT_HARD_MAX
-    assert hi >= SHOT_SOFT_MAX
 
 
 def test_validate_plot_spine_requires_beats_and_drops() -> None:

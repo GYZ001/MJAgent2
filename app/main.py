@@ -37,6 +37,7 @@ from app.recovery import (
     release_runtime_recovery_lock,
 )
 from app.orchestration.api import router as orchestration_router
+from app.observability.api import router as observability_router
 from app.system_api import public_router as system_public_router
 from app.system_api import router as system_router
 
@@ -195,6 +196,7 @@ app.include_router(system_public_router)  # health 等公开探活，不要求�
 app.include_router(router, dependencies=_SESSION_DEPS)
 app.include_router(planning_router, dependencies=_SESSION_DEPS)
 app.include_router(orchestration_router, dependencies=_SESSION_DEPS)
+app.include_router(observability_router, dependencies=_SESSION_DEPS)
 app.include_router(system_router, dependencies=_SESSION_DEPS)
 app.include_router(agent_capabilities_router, prefix="/api", dependencies=_SESSION_DEPS)
 app.include_router(agent_conversation_router, prefix="/api")  # 路由自身已带 session deps

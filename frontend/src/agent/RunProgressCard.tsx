@@ -27,7 +27,7 @@ export default function RunProgressCard({
       </div>
       {summary && <p>{summary}</p>}
       {onOpen && (
-        <button type="button" className="btn" onClick={onOpen}>在监制房查看</button>
+        <button type="button" className="btn" onClick={onOpen}>在观测台查看</button>
       )}
     </section>
   )

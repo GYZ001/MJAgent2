@@ -10,7 +10,6 @@ import pytest
 
 from app import api, config, db, hiagent, multiview, portraits, refs, scenes, stages
 from app.domain import bible_ops
-from app.errors import ContentGenerationError
 from app.schemas import Bible, Character, Scene, World
 
 
@@ -108,6 +107,127 @@ def test_initial_character_generation_publishes_complete_three_view_pack(
         "front_full", "three_quarter", "profile",
     }
     assert all(view["image_url"] for view in visible["views"])
+
+
+def test_interrupted_auto_discovered_portrait_resumes_same_candidate(
+    asset_db, monkeypatch,
+) -> None:
+    conn, tmp_path = asset_db
+    bible = _seed_bible_project(conn)
+    primary = tmp_path / "hero-ep19.jpg"
+    primary.write_bytes(b"paid-primary")
+    conn.execute(
+        """INSERT INTO character_portraits(
+               id,project_id,character_name,ep_start,ep_end,appearance,prompt,image_path,
+               base_portrait_id,bible_version,artifact_id,pack_status,created_at
+           ) VALUES('portrait_interrupted','proj_bootstrap','Hero',19,19,?,?,?,?,1,NULL,'generating',1)""",
+        (bible.characters[0].appearance_canonical, "portrait prompt", str(primary), None),
+    )
+    conn.execute(
+        """INSERT INTO character_portrait_views(
+               id,portrait_id,view_role,framing,image_path,prompt,qa_json,status,selected,created_at
+           ) VALUES('front_interrupted','portrait_interrupted','front_full','full_body',?,?,?,'ready',1,1)""",
+        (str(primary), "portrait prompt", json.dumps({"overall": 0.9, "hard_gate_passed": True})),
+    )
+    change = [{
+        "id": "change_interrupted",
+        "kind": "new_character",
+        "status": "auto_applied_asset_pending",
+        "character": "Hero",
+        "ep_start": 19,
+        "payload": {"character_card": bible.characters[0].model_dump(mode="json")},
+    }]
+    conn.execute(
+        "UPDATE projects SET bible_auto_changes_json=? WHERE id='proj_bootstrap'",
+        (json.dumps(change, ensure_ascii=False),),
+    )
+    conn.commit()
+    pack_calls = []
+
+    async def forbidden_primary(*_args, **_kwargs):
+        raise AssertionError("服务重启后不得重复生成已经落盘的主图")
+
+    async def resume_pack(**kwargs):
+        pack_calls.append(kwargs)
+        return {"status": "ready", "portrait_id": kwargs["portrait_id"]}
+
+    monkeypatch.setattr(portraits, "_generate_fresh_portrait", forbidden_primary)
+    monkeypatch.setattr(multiview, "ensure_character_multiview_pack", resume_pack)
+
+    class _Scene:
+        characters = ["Hero"]
+
+    class _Screenplay:
+        scene_outline = [_Scene()]
+
+    result = asyncio.run(portraits.ensure_cards_for_screenplay(
+        "proj_bootstrap", 19, _Screenplay(), bible,
+    ))
+
+    rows = conn.execute(
+        "SELECT id,ep_start,ep_end,pack_status FROM character_portraits "
+        "WHERE project_id='proj_bootstrap' AND character_name='Hero'",
+    ).fetchall()
+    assert [row["id"] for row in rows] == ["portrait_interrupted"]
+    assert (rows[0]["ep_start"], rows[0]["ep_end"], rows[0]["pack_status"]) == (19, None, "ready")
+    assert result["blocking_errors"] == []
+    assert result["added"][0]["portrait_id"] == "portrait_interrupted"
+    assert result["added"][0]["reused"] is True
+    assert pack_calls[0]["portrait_id"] == "portrait_interrupted"
+    stored_change = json.loads(conn.execute(
+        "SELECT bible_auto_changes_json FROM projects WHERE id='proj_bootstrap'",
+    ).fetchone()["bible_auto_changes_json"])[0]
+    assert stored_change["status"] == "auto_applied"
+    assert stored_change["payload"]["portrait_id"] == "portrait_interrupted"
+
+
+def test_interrupted_auto_discovered_portrait_falls_back_without_duplicate(
+    asset_db, monkeypatch,
+) -> None:
+    conn, tmp_path = asset_db
+    bible = _seed_bible_project(conn)
+    primary = tmp_path / "hero-ep20.jpg"
+    primary.write_bytes(b"paid-primary")
+    conn.execute(
+        """INSERT INTO character_portraits(
+               id,project_id,character_name,ep_start,ep_end,appearance,prompt,image_path,
+               base_portrait_id,bible_version,artifact_id,pack_status,created_at
+           ) VALUES('portrait_interrupted','proj_bootstrap','Hero',20,20,?,?,?,?,1,NULL,'generating',1)""",
+        (bible.characters[0].appearance_canonical, "portrait prompt", str(primary), None),
+    )
+    conn.commit()
+
+    async def forbidden_primary(*_args, **_kwargs):
+        raise AssertionError("侧视角恢复失败也不得重复生成主图")
+
+    async def failed_pack(**_kwargs):
+        raise hiagent.ProviderError("provider unavailable after restart")
+
+    monkeypatch.setattr(portraits, "_generate_fresh_portrait", forbidden_primary)
+    monkeypatch.setattr(multiview, "ensure_character_multiview_pack", failed_pack)
+
+    result = asyncio.run(portraits._generate_discovered_character_portrait(
+        "proj_bootstrap",
+        "Hero",
+        bible.world.visual_style_canonical,
+        bible.characters[0].appearance_canonical,
+        ep_start=20,
+        bible_version=1,
+    ))
+
+    row = conn.execute(
+        "SELECT id,ep_end,pack_status FROM character_portraits "
+        "WHERE project_id='proj_bootstrap' AND character_name='Hero'",
+    ).fetchone()
+    assert (row["id"], row["ep_end"], row["pack_status"]) == (
+        "portrait_interrupted", None, "partial_fallback",
+    )
+    assert result["pack_status"] == "partial_fallback"
+    assert result["gate_retry_exhausted"] is True
+    assert conn.execute(
+        "SELECT COUNT(*) AS c FROM character_portraits "
+        "WHERE project_id='proj_bootstrap' AND character_name='Hero'",
+    ).fetchone()["c"] == 1
 
 
 def test_failed_batch_refresh_publishes_new_primary_and_preserves_previous_history(
@@ -675,6 +795,72 @@ def test_pending_reverse_view_is_reviewed_without_regeneration(asset_db, monkeyp
     assert conn.execute(
         "SELECT status FROM scene_reference_views WHERE id='view-reverse_angle'",
     ).fetchone()["status"] == "ready"
+
+
+def test_pending_character_side_view_is_reused_without_regeneration(
+    asset_db, monkeypatch,
+) -> None:
+    conn, _ = asset_db
+    bible = _seed_bible_project(conn)
+    _patch_successful_character_generation(monkeypatch)
+    asyncio.run(refs.generate_refs("proj_bootstrap"))
+    portrait = conn.execute(
+        "SELECT * FROM character_portraits WHERE project_id='proj_bootstrap' "
+        "AND character_name='Hero' AND ep_start=1",
+    ).fetchone()
+    profile = conn.execute(
+        "SELECT image_path FROM character_portrait_views "
+        "WHERE portrait_id=? AND view_role='profile'",
+        (portrait["id"],),
+    ).fetchone()
+    Path(profile["image_path"]).unlink(missing_ok=True)
+    conn.execute(
+        "DELETE FROM character_portrait_views WHERE portrait_id=? AND view_role='profile'",
+        (portrait["id"],),
+    )
+    conn.execute(
+        "UPDATE character_portrait_views SET status='qa_pending',qa_json=NULL "
+        "WHERE portrait_id=? AND view_role='three_quarter'",
+        (portrait["id"],),
+    )
+    conn.execute(
+        "UPDATE character_portraits SET pack_status='generating' WHERE id=?",
+        (portrait["id"],),
+    )
+    conn.commit()
+    generated_roles = []
+    encoded = base64.b64encode(b"replacement-profile").decode("ascii")
+
+    async def generate_only_missing(*_args, **kwargs):
+        generated_roles.append(kwargs["call_meta"]["view_role"])
+        return {"b64_json": encoded}
+
+    monkeypatch.setattr(multiview, "_generate_image", generate_only_missing)
+
+    result = asyncio.run(multiview.ensure_character_multiview_pack(
+        project_id="proj_bootstrap",
+        portrait_id=portrait["id"],
+        character_name="Hero",
+        appearance=bible.characters[0].appearance_canonical,
+        visual_style=bible.world.visual_style_canonical,
+        portrait_prompt=portrait["prompt"],
+        ep_start=1,
+    ))
+
+    assert result["status"] == "ready"
+    assert generated_roles == ["profile"]
+    statuses = {
+        row["view_role"]: row["status"]
+        for row in conn.execute(
+            "SELECT view_role,status FROM character_portrait_views WHERE portrait_id=?",
+            (portrait["id"],),
+        ).fetchall()
+    }
+    assert statuses == {
+        "front_full": "ready",
+        "three_quarter": "ready",
+        "profile": "ready",
+    }
 
 
 def test_stale_assets_preview_accepts_sqlite_episode_rows(asset_db, monkeypatch) -> None:

@@ -249,8 +249,6 @@ def create_storyboard_confirmation_preview(episode_id: str) -> dict:
             f"分镜尚未达到完整终态：已完成 {len(rows)}/{planned} 镜，最终镜{'有效' if final_valid else '缺失'}",
         )
     warnings: list[str] = list(dict.fromkeys([*evaluation.warnings, *hard_errors]))
-    if any(int(shot.duration_s or 0) > 5 for shot in evaluation.board.shots):
-        warnings.append("存在超过 5 秒的镜头，已纳入 QA 评分报告")
     payload = {
         "contract_version": "storyboard-confirm.v2",
         "episode_id": episode_id,

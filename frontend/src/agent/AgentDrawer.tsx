@@ -379,7 +379,11 @@ export default function AgentDrawer({
           }
           go("wall", undefined, episodeId);
         },
-        onOpenCredentials: () => go("monitor"),
+        onOpenCredentials: () => {
+          go("system");
+          window.history.replaceState({}, "", "/system/models");
+          window.dispatchEvent(new PopStateEvent("popstate"));
+        },
       });
       if (!result.ok) toast(result.message || "定位失败", true);
     },
@@ -510,13 +514,15 @@ export default function AgentDrawer({
               onApprove={approve}
               onReject={reject}
               onOpenRun={(runId) => {
-                go("monitor");
+                if (context.project_id) go("observability", context.project_id, null);
+                else go("monitor");
                 const params = new URLSearchParams({
-                  section: "runs",
                   run_id: runId,
                   focus: String(Date.now()),
                 });
-                window.history.replaceState({}, "", `/monitor?${params}`);
+                window.history.replaceState({}, "", context.project_id
+                  ? `/projects/${encodeURIComponent(context.project_id)}/observability/runs?${params}`
+                  : `/monitor?section=runs&${params}`);
                 window.dispatchEvent(new PopStateEvent("popstate"));
               }}
               onOpenEvidence={(id) => {

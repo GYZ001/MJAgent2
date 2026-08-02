@@ -1,4 +1,4 @@
-import { useId, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { api, Project } from '../api'
 import { useNav, usePoll } from '../App'
 import QueryState from '../components/QueryState'
@@ -16,7 +16,7 @@ export default function Studio() {
   const { go, toast } = useNav()
   const { data: projects, refresh, error, loading } = usePoll<Project[]>(() => api.get('/projects'), 6000)
   const [name, setName] = useState('')
-  const [showImport, setShowImport] = useState(false)
+  const [showImport, setShowImport] = useState(window.location.pathname === '/workspaces/new')
   const importTriggerRef = useRef<HTMLButtonElement | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const [drag, setDrag] = useState(false)
@@ -33,6 +33,17 @@ export default function Studio() {
   const uploading = importStage === 'uploading' || importStage === 'creating'
   const emptyProjectList = !loading && !error && projects?.length === 0
   const importVisible = showImport || emptyProjectList
+  const observabilityIntent = new URLSearchParams(window.location.search).get('intent') === 'observability'
+
+  useEffect(() => {
+    const sync = () => setShowImport(window.location.pathname === '/workspaces/new')
+    window.addEventListener('popstate', sync)
+    window.addEventListener('manju:locationchange', sync)
+    return () => {
+      window.removeEventListener('popstate', sync)
+      window.removeEventListener('manju:locationchange', sync)
+    }
+  }, [])
 
   function rejectFile(message: string) {
     setSelectedFile(null)
@@ -101,6 +112,7 @@ export default function Studio() {
       setImportStage('idle')
       setShowImport(false)
       void refresh()
+      window.dispatchEvent(new Event('manju:projects-changed'))
       go('bible', res.project_id, null)
     } catch (e: unknown) {
       const message = (e as Error).message
@@ -123,6 +135,7 @@ export default function Studio() {
         importTriggerRef.current?.focus()
       })
       refresh()
+      window.dispatchEvent(new Event('manju:projects-changed'))
     } catch (e: unknown) {
       toast((e as Error).message, true)
     } finally {
@@ -142,9 +155,9 @@ export default function Studio() {
   return (
     <>
       <header className="desk-head">
-        <div className="crumb">漫剧案头 / 项目中心</div>
+        <div className="crumb">漫剧案头 / 项目空间</div>
         <div className="page-title-row">
-          <h1>项目中心 <span className="sub">从原著到成片，继续你的制作进度</span></h1>
+          <h1>项目空间 <span className="sub">每本小说都是一个独立的创作工作空间</span></h1>
           {!emptyProjectList && (
             <button
               ref={importTriggerRef}
@@ -154,21 +167,33 @@ export default function Studio() {
               aria-controls={importPanelId}
               disabled={uploading}
               aria-label={uploading
-                ? '导入小说，暂不可用：小说正在导入，请等待完成'
-                : importVisible ? '收起小说导入区' : '展开小说导入区'}
+                ? '创建项目空间，暂不可用：小说正在导入，请等待完成'
+                : importVisible ? '收起项目空间创建区' : '展开项目空间创建区'}
               title={uploading ? '小说正在导入，请等待完成' : undefined}
-              onClick={() => setShowImport(value => !value)}
+              onClick={() => {
+                const next = !importVisible
+                setShowImport(next)
+                const target = next ? '/workspaces/new' : '/workspaces'
+                window.history.pushState({}, '', target)
+                window.dispatchEvent(new Event('manju:locationchange'))
+              }}
             >
-              {importVisible ? '收起导入' : '＋ 导入小说'}
+              {importVisible ? '收起创建' : '＋ 创建项目空间'}
             </button>
           )}
         </div>
         <hr className="rule" />
       </header>
 
+      {observabilityIntent && (
+        <div className="monitor-state ready" role="status">
+          旧观测链接未携带可验证的项目。请先从左侧项目空间切换器选择小说，系统会继续打开对应观测页。
+        </div>
+      )}
+
       {importVisible && <section id={importPanelId} className="card import-panel" aria-busy={uploading || undefined}>
         <div className="section-heading">
-          <div><span className="eyebrow">新项目</span><h3>导入一部小说</h3></div>
+          <div><span className="eyebrow">新项目空间</span><h3>上传小说并创建创作空间</h3></div>
           <span className="hint">仅支持非空 TXT · 自动识别 UTF-8、GB18030 和 Big5</span>
         </div>
         <div className="import-grid">

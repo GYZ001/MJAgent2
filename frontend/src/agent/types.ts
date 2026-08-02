@@ -1,7 +1,7 @@
 /** Agent Drawer 类型合同（与后端 app/agent/schemas 对齐）。 */
 export type AgentView =
   | 'studio' | 'bible' | 'scenes' | 'episodes' | 'script'
-  | 'board' | 'wall' | 'cinema' | 'monitor' | 'reader'
+  | 'board' | 'wall' | 'cinema' | 'observability' | 'system' | 'monitor' | 'reader'
 
 export interface ContextEnvelope {
   route: AgentView

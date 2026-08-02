@@ -23,7 +23,6 @@ from app.repair_router import (
     bump_fingerprint_count,
     route_issues,
 )
-from app.renderability import SHOT_SOFT_MAX
 from app.schemas import Shot, Storyboard, StoryboardOutline
 from app.stages import StageError, generate_storyboard_next_shot, generate_storyboard_outline
 
@@ -410,12 +409,7 @@ def _is_quality_only_repair_plan(plan: RepairPlan) -> bool:
 def _storyboard_warning_requires_auto_repair(issue: Any) -> bool:
     """Warnings that are deterministic delivery defects, not taste scores."""
     code = str(getattr(issue, "code", "") or "")
-    message = str(getattr(issue, "message", "") or "")
-    return bool(
-        code == "OVERDETAIL"
-        or "连续 3 个镜头景别" in message
-        or "连续三个镜头景别" in message
-    )
+    return code == "OVERDETAIL"
 
 
 def _storyboard_generation_is_complete(
@@ -1390,13 +1384,10 @@ async def run_storyboard_supervisor(
 
             if draft.is_final:
                 break
-            if len(completed) >= SHOT_SOFT_MAX:
-                final_feedback = None
-            else:
-                final_feedback = validate_storyboard_preserves_key_content(
-                    Storyboard(episode_no=ep_data["episode_no"], shots=list(completed)),
-                    screenplay,
-                ) or None
+            final_feedback = validate_storyboard_preserves_key_content(
+                Storyboard(episode_no=ep_data["episode_no"], shots=list(completed)),
+                screenplay,
+            ) or None
 
         if shot_loop_broke_for_repair:
             continue

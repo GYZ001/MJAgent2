@@ -3,7 +3,7 @@ import { api, type Project } from '../api'
 import type { AgentView, ContextEnvelope } from './types'
 
 const PAGE_LABELS: Record<AgentView, string> = {
-  studio: '项目中心',
+  studio: '项目空间',
   bible: '人物谱',
   scenes: '场景库',
   episodes: '分集规划',
@@ -12,6 +12,8 @@ const PAGE_LABELS: Record<AgentView, string> = {
   wall: '生成台',
   cinema: '成片台',
   monitor: '监制房',
+  observability: '观测台',
+  system: '系统设置',
   reader: '原著阅读',
 }
 

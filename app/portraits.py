@@ -1303,8 +1303,97 @@ async def _generate_discovered_character_portrait(
     不因低分重生。多视角包完整性只看必需视角文件是否齐全。
     """
     conn = get_conn()
-    current = _open_portrait(conn, project_id, name)
     pack_supported = _has_column(conn, "character_portraits", "pack_status")
+    candidate = conn.execute(
+        "SELECT * FROM character_portraits WHERE project_id=? AND character_name=? "
+        "AND ep_start=? ORDER BY created_at DESC LIMIT 1",
+        (project_id, name, ep_start),
+    ).fetchone()
+
+    async def _complete_candidate(
+        row,
+        *,
+        primary_qa: dict | None = None,
+        purge_on_failure: bool,
+    ) -> dict:
+        """补齐并发布同一个候选；重启恢复时不得再占用相同分段键。"""
+        portrait_id = str(row["id"])
+        image_path = str(row["image_path"] or "")
+        candidate_appearance = str(row["appearance"] or appearance)
+        fallback_pack = False
+        try:
+            if pack_supported:
+                from app.multiview import ensure_character_multiview_pack, pack_result_ok
+
+                existing_status = str(row["pack_status"] or "")
+                if existing_status == "ready":
+                    pack = {"status": "ready", "portrait_id": portrait_id, "reused": True}
+                elif existing_status == "partial_fallback":
+                    pack = {
+                        "status": "partial_fallback",
+                        "portrait_id": portrait_id,
+                        "reused": True,
+                    }
+                else:
+                    try:
+                        pack = await ensure_character_multiview_pack(
+                            project_id=project_id,
+                            portrait_id=portrait_id,
+                            character_name=name,
+                            appearance=candidate_appearance,
+                            visual_style=style,
+                            ep_start=ep_start,
+                            base_portrait_id=row["base_portrait_id"],
+                            primary_qa=primary_qa,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - 主图已落盘，侧视角失败安全降级
+                        pack = {"status": "partial_fallback", "warning": str(exc)[:300]}
+                fallback_pack = not pack_result_ok(pack)
+
+                # 候选在多视角完成前只占本集闭区间。发布时再原子切换为开区间；
+                # 服务重启后重复执行本段仍更新同一 portrait_id，不会触发唯一键冲突。
+                current = _open_portrait(conn, project_id, name)
+                if current and current["id"] != portrait_id:
+                    if int(current["ep_start"] or 1) < ep_start:
+                        conn.execute(
+                            "UPDATE character_portraits SET ep_end=? WHERE id=?",
+                            (ep_start - 1, current["id"]),
+                        )
+                    else:
+                        conn.execute("DELETE FROM character_portraits WHERE id=?", (current["id"],))
+                conn.execute(
+                    "UPDATE character_portraits SET ep_end=NULL,pack_status=? WHERE id=?",
+                    ("partial_fallback" if fallback_pack else "ready", portrait_id),
+                )
+                conn.commit()
+
+            _update_bible_appearance(conn, project_id, name, candidate_appearance, image_path)
+            conn.commit()
+        except Exception:
+            # 新候选在本调用内失败可沿用原清理语义；重启前已经付费落盘的候选必须保留，
+            # 让下一次恢复继续使用，不能因为恢复代码自身异常再次烧图。
+            if purge_on_failure:
+                from app.rejected_media import purge_character_portrait
+                purge_character_portrait(conn, portrait_id)
+            raise
+        return {
+            "portrait_id": portrait_id,
+            "image_path": image_path,
+            "pack_status": "partial_fallback" if fallback_pack else "ready",
+            "reused": not purge_on_failure,
+            "gate_retry_exhausted": fallback_pack,
+        }
+
+    # 服务重启可能发生在主图和候选行已落盘、侧视角尚未完成之间。此时该行以
+    # ep_start=ep_end 占用候选槽；必须在原 portrait_id 上续补，不能重生主图后重复 INSERT。
+    if candidate is not None:
+        candidate_path = str(candidate["image_path"] or "")
+        if candidate_path and Path(candidate_path).is_file():
+            return await _complete_candidate(candidate, purge_on_failure=False)
+        from app.rejected_media import purge_character_portrait
+        purge_character_portrait(conn, str(candidate["id"]))
+
+    current = _open_portrait(conn, project_id, name)
     if current and current["image_path"] and Path(current["image_path"]).is_file():
         current_pack = current["pack_status"] if pack_supported else "ready"
         if current_pack == "ready" and int(current["ep_start"] or 1) <= ep_start:
@@ -1379,52 +1468,14 @@ async def _generate_discovered_character_portrait(
         tuple(values[column] for column in columns),
     )
     conn.commit()
-
-    fallback_pack = False
-    try:
-        if pack_supported:
-            from app.multiview import ensure_character_multiview_pack, pack_result_ok
-            try:
-                pack = await ensure_character_multiview_pack(
-                    project_id=project_id,
-                    portrait_id=portrait_id,
-                    character_name=name,
-                    appearance=appearance,
-                    visual_style=style,
-                    ep_start=ep_start,
-                    base_portrait_id=current["id"] if current else None,
-                    primary_qa=qa,
-                )
-            except Exception as exc:  # noqa: BLE001 - 多视角失败不丢弃已付费主图
-                pack = {"status": "partial_fallback", "warning": str(exc)[:300]}
-            fallback_pack = not pack_result_ok(pack)
-            if current and current["id"] != portrait_id:
-                if int(current["ep_start"] or 1) < ep_start:
-                    conn.execute(
-                        "UPDATE character_portraits SET ep_end=? WHERE id=?",
-                        (ep_start - 1, current["id"]),
-                    )
-                else:
-                    conn.execute("DELETE FROM character_portraits WHERE id=?", (current["id"],))
-            conn.execute(
-                "UPDATE character_portraits SET ep_end=NULL,pack_status=? WHERE id=?",
-                ("partial_fallback" if fallback_pack else "ready", portrait_id),
-            )
-            conn.commit()
-    except Exception:
-        from app.rejected_media import purge_character_portrait
-        purge_character_portrait(conn, portrait_id)
-        raise
-
-    _update_bible_appearance(conn, project_id, name, appearance, image_path)
-    conn.commit()
-    return {
-        "portrait_id": portrait_id,
-        "image_path": image_path,
-        "pack_status": "partial_fallback" if fallback_pack else "ready",
-        "reused": False,
-        "gate_retry_exhausted": fallback_pack,
-    }
+    inserted = conn.execute(
+        "SELECT * FROM character_portraits WHERE id=?", (portrait_id,),
+    ).fetchone()
+    return await _complete_candidate(
+        inserted,
+        primary_qa=qa,
+        purge_on_failure=True,
+    )
 
 
 def _has_column(conn, table: str, column: str) -> bool:

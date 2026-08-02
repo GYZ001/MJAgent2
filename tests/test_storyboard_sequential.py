@@ -3,7 +3,7 @@
 覆盖 codex 新增的「按顺序逐镜生成 + 单镜 QA」改造与本次修复：
 - 单镜（非收尾）QA 只拦当前镜与承接问题，整集级检查（镜头数/总时长/关键内容）放行；
 - 自愿收尾时若整集必保留内容还没补齐，不硬塞单镜而是要求继续补镜；
-- 撞到大纲末镜/软预算/硬上限（must_finish）才对主线缺口硬失败，禁止氛围声轨逼出计划外镜；
+- 撞到大纲末镜/技术硬上限（must_finish）才对主线缺口硬失败，禁止氛围声轨逼出计划外镜；
 - 分镜进度按已通过镜头的模型选择时长求和。
 """
 
@@ -91,7 +91,8 @@ def test_progress_block_has_no_episode_duration_limit() -> None:
         shot.duration_s = 5
     low = _storyboard_progress_block(nearly_full)
     assert "13" in low and "65s" in low and "duration_s" in low
-    assert "默认 5s" in low and "软预算" in low
+    assert "默认 5s" in low and "技术硬上限" in low
+    assert "软预算" not in low
     plenty = _storyboard_progress_block([])
     assert "duration_s" in plenty and "is_final=true" in plenty
 

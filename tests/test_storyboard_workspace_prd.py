@@ -1085,7 +1085,7 @@ def test_confirmation_reports_hard_errors_and_score_only_warnings(storyboard_db)
 
     preview = api.create_storyboard_confirmation_preview("e1")
     warnings = preview["warnings"]
-    assert "存在超过 5 秒的镜头，已纳入 QA 评分报告" in warnings
+    assert "存在超过 5 秒的镜头，已纳入 QA 评分报告" not in warnings
     # 业务质量问题只进 warnings，不进 hard_gates.errors。
     hard_errors = preview["hard_gates"]["errors"]
     assert hard_errors == []

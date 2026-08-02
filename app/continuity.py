@@ -1076,7 +1076,7 @@ def outline_atomic_errors(outline: StoryboardOutline) -> list[str]:
         if action and count_sequential_action_beats(action) > 2:
             errors.append(
                 f"{tag} 主动作过载（{action[:40]}…）；请压缩为单一主线动作，"
-                "确需拆镜时计入 8~16 软预算，禁止为细节无限拆碎"
+                "确需拆镜时按剧情自然拆分，禁止为细节无限拆碎"
             )
     return errors
 

@@ -40,7 +40,7 @@ export function resolveEpisodePage(
 }
 
 export default function EpisodesPage() {
-  const { projectId, go, toast } = useNav()
+  const { projectId, episodeId, go, toast } = useNav()
   const [busy, setBusy] = useState(false)
   const [page, setPage] = useState(0)
   const [pageDraft, setPageDraft] = useState('1')
@@ -50,6 +50,7 @@ export default function EpisodesPage() {
   const [focusEpisodeNo, setFocusEpisodeNo] = useState<number | null>(null)
   const [batchConfirm, setBatchConfirm] = useState<BatchAction | null>(null)
   const [batchStopConfirm, setBatchStopConfirm] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<NonNullable<Project['episodes']>[number] | null>(null)
   const deferredSearch = useDeferredValue(search)
   const query = deferredSearch.trim().toLowerCase()
   const { data: p, refresh, error, loading } = usePoll<Project>(
@@ -235,6 +236,23 @@ export default function EpisodesPage() {
     setBatchConfirm(null)
   }
 
+  const deleteEpisode = async () => {
+    if (!deleteTarget) return
+    const target = deleteTarget
+    setDeleteTarget(null)
+    await act(
+      async () => {
+        const result = await api.del(`/episodes/${target.id}`) as { renumbered?: number }
+        toast(
+          result.renumbered
+            ? `第${target.episode_no}集已删除；后续 ${result.renumbered} 集已自动补齐序号`
+            : `第${target.episode_no}集已删除；剧本、分镜、生成和成片台将不再显示该集`,
+        )
+        if (episodeId === target.id) go('episodes', p.id, null)
+      },
+    )
+  }
+
   return (
     <>
       <header className="desk-head">
@@ -418,6 +436,18 @@ export default function EpisodesPage() {
                 <i /><span className={ep.status === 'done' ? 'done' : ''}>成片</span>
               </div>
               <div className="ep-actions">
+                <button
+                  className="btn small ghost danger episode-delete-action"
+                  type="button"
+                  disabled={busy || p.plan_status === 'running'}
+                  aria-label={p.plan_status === 'running'
+                    ? `删除第${ep.episode_no}集，暂不可用：分集规划正在运行`
+                    : `删除第${ep.episode_no}集`}
+                  title={p.plan_status === 'running'
+                    ? '分集规划正在运行，请等待完成后再删除'
+                    : '永久删除本集及全部下游制作内容'}
+                  onClick={() => setDeleteTarget(ep)}
+                >删除本集</button>
                 <button className="btn small primary" onClick={() => go(destination, p.id, ep.id)}>{destinationLabel} →</button>
               </div>
             </div>
@@ -547,6 +577,25 @@ export default function EpisodesPage() {
               toast(`已停止 ${result.stopped} 集剧本生成；已完成剧本和工作副本保留`)
             })
           }}
+        />
+      )}
+      {deleteTarget && (
+        <DecisionDialog
+          title={`删除第${deleteTarget.episode_no}集？`}
+          summary={`《${deleteTarget.title || `第${deleteTarget.episode_no}集`}》将从项目中永久移除`}
+          message="该集的剧本、分镜、生成素材、成片和制作记录都会删除；删除后，后续分集会自动前移补齐序号，四个制作台会同步更新。"
+          details={[
+            `原文章节 ${deleteTarget.source_chapters.join('–')} 会保留，仍可在阅读原著中查看`,
+            deleteTarget.shot_count
+              ? `将同时删除 ${deleteTarget.shot_count} 个分镜及其视频、图片和成片文件`
+              : '当前没有分镜，但已有剧本或制作记录也会一并删除',
+            `已发生费用 ¥${deleteTarget.cost_cny.toFixed(1)} 不会退回；以后重新规划全部分集时，本章可能被重新建立`,
+          ]}
+          confirmLabel="确认永久删除本集"
+          cancelLabel="保留本集"
+          danger
+          onClose={() => setDeleteTarget(null)}
+          onConfirm={() => { void deleteEpisode() }}
         />
       )}
     </>
