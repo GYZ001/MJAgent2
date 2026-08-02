@@ -95,6 +95,27 @@ def test_confirm_preview_passes_with_low_quality_business_warnings(confirm_db, m
     assert preview["score_only"]["runtime_blocking"] is False
 
 
+def test_unlocatable_legacy_excerpt_stays_internal_audit_only(confirm_db, monkeypatch):
+    confirm_db.execute(
+        "UPDATE shots SET source_excerpt=? WHERE id='s1'",
+        ("这是一段长度足够但并非授权章节逐字原文的历史证据",),
+    )
+    confirm_db.commit()
+    monkeypatch.setattr(video_ops, "validate_storyboard", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(video_ops, "validate_storyboard_soundtrack", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(video_ops, "validate_storyboard_preserves_key_content", lambda *_args, **_kwargs: [])
+
+    preview = video_ops.create_storyboard_confirmation_preview("e1")
+
+    assert preview["hard_gates"]["passed"] is True
+    assert not any("授权原文中定位" in warning for warning in preview["warnings"])
+    result = video_ops.confirm_episode_core("e1", preview_token=preview["preview_token"])
+    assert result["confirmed"] is True
+    assert confirm_db.execute(
+        "SELECT storyboard_warning FROM episodes WHERE id='e1'",
+    ).fetchone()["storyboard_warning"] is None
+
+
 def test_hard_gate_failure_becomes_warning_and_can_confirm(confirm_db, monkeypatch):
     def repairable_evaluation(_ep, board, *_args, **_kwargs):
         return ConfirmationEvaluation(

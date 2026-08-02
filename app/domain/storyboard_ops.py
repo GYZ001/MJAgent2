@@ -2069,7 +2069,10 @@ def _storyboard_issue_targets_shot(message: str, index: int, shot_no: int) -> bo
     """精确定位镜头诊断，避免 shot_no=1 误匹配 shot_no=10～19。"""
     if f"shots[{index}](shot_no={shot_no})" in message:
         return True
-    return bool(re.search(rf"(?<!\d)shot_no\s*=\s*{shot_no}(?!\d)", message))
+    return bool(
+        re.search(rf"(?<!\d)shot_no\s*=\s*{shot_no}(?!\d)", message)
+        or re.search(rf"第\s*{shot_no}\s*镜", message)
+    )
 
 
 def _storyboard_status_snapshot(
@@ -2173,8 +2176,6 @@ def _storyboard_status_snapshot(
     score_warnings: list[str] = []
     if terminal_structure:
         try:
-            from app.storyboard_workspace import verify_or_bind_existing_excerpt
-
             board = Storyboard(
                 episode_no=int(ep["episode_no"]),
                 shots=[Shot.model_validate(shot) for shot in shots],
@@ -2193,17 +2194,9 @@ def _storyboard_status_snapshot(
             )
             gate_errors.extend(evaluation.errors)
             score_warnings.extend(evaluation.warnings)
-            for shot in shots:
-                try:
-                    verify_or_bind_existing_excerpt(
-                        ep["id"], shot["id"], shot.get("source_excerpt") or "",
-                        persist_legacy=False,
-                    )
-                except HTTPException as exc:
-                    detail = exc.detail
-                    gate_errors.append(
-                        detail.get("message", str(detail)) if isinstance(detail, dict) else str(detail)
-                    )
+            # 历史 source_excerpt 能否逐字回绑只属于来源审计，不是用户可修复的
+            # 分镜结构错误。发布证据仍会记录该 finding，但不能让状态快照误报
+            # 一个没有镜号、没有修复入口的整集门禁。
         except Exception as exc:  # noqa: BLE001
             gate_errors.append(f"确认门禁暂不可用：{exc}")
     for index, shot in enumerate(shots):

@@ -102,6 +102,34 @@ def test_snapshot_version_is_monotonic_and_action_is_unique(storyboard_db):
     assert second["confirmable"] is False
 
 
+def test_unlocatable_legacy_excerpt_is_not_a_user_facing_gate(storyboard_db):
+    storyboard_db.execute(
+        "UPDATE shots SET source_excerpt=? WHERE id='s1'",
+        ("这是一段长度足够但并非授权章节逐字原文的历史证据",),
+    )
+    storyboard_db.commit()
+
+    episode = api.episode_detail("e1", view="board")
+    status = episode["storyboard_status"]
+
+    assert status["state"] == "ready_to_confirm"
+    assert status["recommended_action"] == "confirm_storyboard"
+    assert not any("授权原文中定位" in issue for issue in status["hard_gate_issues"])
+    assert not episode["shots"][0].get("preflight_errors")
+
+
+def test_real_structural_error_is_attached_to_the_problem_shot(storyboard_db):
+    storyboard_db.execute("UPDATE shots SET source_excerpt='' WHERE id='s1'")
+    storyboard_db.commit()
+
+    episode = api.episode_detail("e1", view="board")
+    status = episode["storyboard_status"]
+
+    assert status["state"] == "failed"
+    assert any("缺少必填字段" in issue for issue in status["hard_gate_issues"])
+    assert any("缺少必填字段" in issue for issue in episode["shots"][0]["preflight_errors"])
+
+
 def test_status_distinguishes_visible_drafts_from_zero_safe_checkpoint(storyboard_db):
     save_checkpoint(SupervisorCheckpoint(
         episode_id="e1",

@@ -202,7 +202,7 @@ def evaluate_storyboard_for_confirmation(
 def create_storyboard_confirmation_preview(episode_id: str) -> dict:
     """计算并签发人工确认快照。"""
     from app.storyboard_supervisor import load_latest_checkpoint
-    from app.storyboard_workspace import create_preview, verify_or_bind_existing_excerpt
+    from app.storyboard_workspace import create_preview
 
     ep = _episode_or_404(episode_id)
     conn = get_conn()
@@ -235,16 +235,6 @@ def create_storyboard_confirmation_preview(episode_id: str) -> dict:
         planned_shots=planned,
         final_shot_valid=final_valid,
     )
-    evidence_errors: list[str] = []
-    for row in rows:
-        try:
-            verify_or_bind_existing_excerpt(
-                episode_id, row["id"], row["source_excerpt"] or "",
-            )
-        except HTTPException as exc:
-            detail = exc.detail
-            message = detail.get("message") if isinstance(detail, dict) else str(detail)
-            evidence_errors.append(f"第 {row['shot_no']} 镜：{message}")
     project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
     bible = _project_bible_or_placeholder(project)
     screenplay = _load_screenplay(ep)
@@ -252,7 +242,7 @@ def create_storyboard_confirmation_preview(episode_id: str) -> dict:
         ep, board, screenplay, bible,
         has_real_bible=bool((project["bible_json"] or "").strip()) if project else False,
     )
-    hard_errors = list(evaluation.errors) + evidence_errors
+    hard_errors = list(evaluation.errors)
     if not terminal:
         hard_errors.insert(
             0,
@@ -371,8 +361,7 @@ def confirm_episode_core(
             "shot_count": len(shots),
             "total_duration_s": sum(int(row["duration_s"] or 0) for row in shots),
         }
-    preview = require_preview(preview_token, "confirm", episode_id)
-    preview_passed = bool((preview.get("hard_gates") or {}).get("passed"))
+    require_preview(preview_token, "confirm", episode_id)
     ep = _episode_or_404(episode_id)
     conn = get_conn()
     compact_target = _compact_episode_target(ep["target_duration_s"])
@@ -385,19 +374,15 @@ def confirm_episode_core(
     shots_rows = conn.execute("SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)).fetchall()
     if not shots_rows:
         raise ValueError("本集还没有分镜脚本")
-    source_errors: list[str] = []
-    if not preview_passed:
-        source_errors.append("历史确认预览含结构门禁提示，已按当前最佳分镜继续")
     for row in shots_rows:
         try:
             verify_or_bind_existing_excerpt(
                 episode_id, row["id"], row["source_excerpt"] or "",
             )
-        except HTTPException as exc:
-            detail = exc.detail
-            message = detail.get("message") if isinstance(detail, dict) else str(detail)
-            source_errors.append(f"第 {row['shot_no']} 镜：{message}")
-    # 来源绑定缺口已在生成/修复阶段尝试处理；确认时只记录风险，不再否决当前产物。
+        except HTTPException:
+            pass
+    # 来源回绑是后台审计 finding：可在 evidence evaluation 中追踪，但不属于
+    # 用户可操作的质量建议，也不应污染确认后的 storyboard_warning。
     board = _board_from_shot_rows(shots_rows, ep["episode_no"])
     shots = board.shots
     if shots and not shots[-1].is_final:
@@ -448,7 +433,7 @@ def confirm_episode_core(
         has_real_bible=has_real_bible,
         target_duration_s=compact_target,
     )
-    confirmation_warnings = list(dict.fromkeys([*source_errors, *evaluation.errors, *evaluation.warnings]))
+    confirmation_warnings = list(dict.fromkeys([*evaluation.errors, *evaluation.warnings]))
     board = evaluation.board
     compact_target = evaluation.compact_target
     est = evaluation.estimated_cost_cny
