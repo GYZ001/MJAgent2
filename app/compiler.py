@@ -599,6 +599,111 @@ def _scene_geometry_contract(shot: Shot, bible: Bible | None) -> tuple[str, str,
     return scene_anchor, geometry, landmarks
 
 
+def _named_character_is_explicitly_offscreen(name: str, text: str) -> bool:
+    """角色名所在短句是否已经明确说明角色不入画。"""
+    escaped = re.escape(name)
+    return bool(
+        re.search(
+            rf"(?:画外|镜外|不入画|留在画外|退到画外)(?:的)?[^，。；！？]{{0,12}}{escaped}",
+            text,
+        )
+        or re.search(
+            rf"{escaped}[^，。；！？]{{0,12}}(?:在画外|于画外|不入画|留在画外|退到画外)",
+            text,
+        )
+    )
+
+
+def _has_unqualified_character_mention(name: str, text: str) -> bool:
+    """可视描述是否把非画内角色当成了未限定的画面对象。"""
+    for clause in re.split(r"[，。；！？]", text or ""):
+        if name in clause and not _named_character_is_explicitly_offscreen(name, clause):
+            return True
+    return False
+
+
+def _mark_character_offscreen(name: str, text: str) -> str:
+    """逐短句标记画外角色，保留已经正确标注的短句。"""
+    if not text or name not in text:
+        return text
+    parts = re.split(r"([，。；！？])", text)
+    for index in range(0, len(parts), 2):
+        clause = parts[index]
+        if name in clause and not _named_character_is_explicitly_offscreen(name, clause):
+            parts[index] = clause.replace(name, f"画外{name}")
+    return "".join(parts)
+
+
+def _project_visual_prompt_to_visible_cast(
+    shot: Shot,
+    *,
+    state_in: str,
+    state_out: str,
+    primary_action: str,
+    full_action: str,
+    visible_names: list[str],
+    bible_names: list[str],
+    continuity_mode: str,
+) -> tuple[str, str, str, str, str]:
+    """把叙事连续性投影为本镜可拍的画面合同。
+
+    ``state_in/state_out`` 仍保留在分镜数据中供叙事连续性使用。只有发送给视频模型的
+    可视字段会在角色名单冲突时改用首尾帧描述，并把非画内人物明确标为画外。
+    连续动作镜依赖上一镜真实尾帧，不在这里重写其起点。
+    """
+    if continuity_mode == "action_continuation":
+        return state_in, state_out, primary_action, full_action, ""
+
+    visible = {name for name in visible_names if name}
+    candidates = [name for name in bible_names if name and name not in visible]
+    visual_fields = (
+        state_in,
+        state_out,
+        primary_action,
+        full_action,
+        shot.first_frame_desc or "",
+        shot.last_frame_desc or "",
+        shot.spatial_anchor or "",
+    )
+    offscreen_names = [
+        name for name in sorted(candidates, key=len, reverse=True)
+        if any(_has_unqualified_character_mention(name, value) for value in visual_fields)
+    ]
+    if not offscreen_names:
+        return state_in, state_out, primary_action, full_action, ""
+
+    state_conflict = any(
+        _has_unqualified_character_mention(name, value)
+        for name in offscreen_names
+        for value in (state_in, state_out)
+    )
+    if state_conflict:
+        state_in = (shot.first_frame_desc or state_in).strip()
+        state_out = (shot.last_frame_desc or state_out).strip()
+
+    for name in offscreen_names:
+        state_in = _mark_character_offscreen(name, state_in)
+        state_out = _mark_character_offscreen(name, state_out)
+        primary_action = _mark_character_offscreen(name, primary_action)
+        full_action = _mark_character_offscreen(name, full_action)
+
+    if visible_names:
+        visible_contract = f"可辨识画面人物仅限：{'、'.join(visible_names)}。"
+    else:
+        visible_contract = "本镜不得出现可辨识人物。"
+    visible_contract += (
+        f"{'、'.join(offscreen_names)}只作为画外叙事关系；"
+        "不得出现其身体、脸、背影、倒影或剪影，也不得把其动作、表情或状态变化可视化。"
+    )
+    return (
+        state_in,
+        state_out,
+        primary_action,
+        full_action,
+        visible_contract,
+    )
+
+
 def _narrative_keyframe_target_with_source(shot: Shot) -> tuple[str, str]:
     terminal_moments = (
         ("last_frame_desc", shot.last_frame_desc),
@@ -993,6 +1098,24 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         shot.state_in = state_in
     state_out = planned_state_out(shot)
     primary = effective_primary_action(shot)
+    full_action = (shot.action_desc or "").strip()
+    visible_names = effective_characters_visible(shot)
+    (
+        state_in,
+        state_out,
+        primary,
+        full_action,
+        visible_cast_block,
+    ) = _project_visual_prompt_to_visible_cast(
+        shot,
+        state_in=state_in,
+        state_out=state_out,
+        primary_action=primary,
+        full_action=full_action,
+        visible_names=visible_names,
+        bible_names=list(bible_map),
+        continuity_mode=mode,
+    )
     if not state_in or not primary or not state_out:
         raise CompileError(
             f"镜头 {shot.shot_no} 缺少 state_in/primary_action/state_out，无法编译最小完备提示词"
@@ -1053,7 +1176,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
 
     # 角色/场景锚点（短）
     anchors = []
-    for name in effective_characters_visible(shot):
+    for name in visible_names:
         if name in bible_map:
             anchors.append(f"{name}：{bible_map[name].appearance_canonical}")
         elif is_collective_role(name):
@@ -1102,7 +1225,6 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
             )
 
     action_block = f"主动作：{primary}"
-    full_action = (shot.action_desc or "").strip()
     if full_action and full_action != primary:
         action_block += f"。完整可见执行：{full_action}"
     action_block += (
@@ -1142,6 +1264,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     sections: list[tuple[str, str, int]] = [
         ("FORMAT", format_block, 5),
         ("REFERENCE ROLES", reference_block, 3),
+        ("VISIBLE CAST", visible_cast_block, 1),
         ("START STATE | 0.0s", state_in, 1),
         ("ONE CURRENT ACTION", action_block, 1),
         (f"END STATE | {shot_dur}.0s", state_out + "。最后状态稳定、清楚、可作为下一镜的叙事依据。", 1),
