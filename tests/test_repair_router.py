@@ -88,7 +88,7 @@ def test_fingerprint_stall_upgrades():
 
 
 def test_persisted_fingerprint_count_escalates_without_current_level() -> None:
-    issues = [_issue("BUSINESS_RULE_FAILED", "第 10 镜起连续 3 个镜头景别相同", 10)]
+    issues = [_issue("BUSINESS_RULE_FAILED", "第 10 镜 camera_move 不在合法枚举中", 10)]
     first = route_issues(issues, validated_prefix_end=9, next_shot_no=10)
 
     stalled = route_issues(

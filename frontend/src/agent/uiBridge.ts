@@ -70,9 +70,9 @@ export function applyUiIntent(
       return { ok: true }
     }
     case 'open_credentials': {
-      go('monitor')
+      go('system')
       extras?.onOpenCredentials?.(intent.model_id)
-      extras?.toast?.('请在监制房专用表单中填写 API Key，勿在对话中发送密钥')
+      extras?.toast?.('请在系统设置的模型中心填写 API Key，勿在对话中发送密钥')
       return { ok: true }
     }
     case 'preview': {

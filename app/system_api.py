@@ -704,6 +704,123 @@ def _call_meta_summary(raw: str | None) -> dict:
     return {key: value for key, value in meta.items() if key in allowed}
 
 
+def _scope_project_id(scope_type: str | None, scope_id: str | None) -> str | None:
+    """Resolve an evidence scope without trusting denormalized UI metadata."""
+    if not scope_type or not scope_id:
+        return None
+    conn = get_conn()
+    if scope_type == "project":
+        row = conn.execute("SELECT id FROM projects WHERE id=?", (scope_id,)).fetchone()
+    elif scope_type == "episode":
+        row = conn.execute("SELECT project_id AS id FROM episodes WHERE id=?", (scope_id,)).fetchone()
+    elif scope_type == "shot":
+        row = conn.execute(
+            "SELECT e.project_id AS id FROM shots s JOIN episodes e ON e.id=s.episode_id WHERE s.id=?",
+            (scope_id,),
+        ).fetchone()
+    else:
+        row = None
+    return str(row["id"]) if row else None
+
+
+def _run_project_id(run_id: str | None) -> str | None:
+    if not run_id:
+        return None
+    row = get_conn().execute(
+        "SELECT scope_type,scope_id FROM workflow_runs WHERE id=?", (run_id,),
+    ).fetchone()
+    return _scope_project_id(row["scope_type"], row["scope_id"]) if row else None
+
+
+def _resolved_project_id(candidates: list[object]) -> str | None:
+    values = {str(value) for value in candidates if value}
+    return next(iter(values)) if len(values) == 1 else None
+
+
+def _project_scope_maps() -> dict[str, dict[str, str]]:
+    """Load immutable scope relations once for high-volume observability queries."""
+    conn = get_conn()
+    episodes = {str(row["id"]): str(row["project_id"]) for row in conn.execute(
+        "SELECT id,project_id FROM episodes"
+    ).fetchall()}
+    shots = {str(row["id"]): str(row["project_id"]) for row in conn.execute(
+        """SELECT s.id,e.project_id FROM shots s JOIN episodes e ON e.id=s.episode_id"""
+    ).fetchall()}
+    runs: dict[str, str] = {}
+    for row in conn.execute("SELECT id,scope_type,scope_id FROM workflow_runs").fetchall():
+        if row["scope_type"] == "project":
+            project_id = str(row["scope_id"])
+        elif row["scope_type"] == "episode":
+            project_id = episodes.get(str(row["scope_id"]))
+        elif row["scope_type"] == "shot":
+            project_id = shots.get(str(row["scope_id"]))
+        else:
+            project_id = None
+        if project_id:
+            runs[str(row["id"])] = project_id
+    steps = {str(row["id"]): str(row["run_id"]) for row in conn.execute(
+        "SELECT id,run_id FROM step_runs"
+    ).fetchall()}
+    return {"episodes": episodes, "shots": shots, "runs": runs, "steps": steps}
+
+
+def _call_project_id(
+    row: dict,
+    context: dict | None = None,
+    scope_maps: dict[str, dict[str, str]] | None = None,
+) -> str | None:
+    context = context or {}
+    run_project = (
+        scope_maps["runs"].get(str(row.get("run_id")))
+        if scope_maps and row.get("run_id") else _run_project_id(row.get("run_id"))
+    )
+    candidates: list[object] = [context.get("project_id"), run_project]
+    step_id = row.get("step_run_id")
+    if step_id:
+        if scope_maps:
+            step_run = scope_maps["steps"].get(str(step_id))
+            candidates.append(scope_maps["runs"].get(step_run or ""))
+        else:
+            step = get_conn().execute("SELECT run_id FROM step_runs WHERE id=?", (step_id,)).fetchone()
+            if step:
+                candidates.append(_run_project_id(step["run_id"]))
+    if context.get("episode_id"):
+        candidates.append(
+            scope_maps["episodes"].get(str(context["episode_id"])) if scope_maps
+            else _scope_project_id("episode", str(context["episode_id"]))
+        )
+    if context.get("shot_id"):
+        candidates.append(
+            scope_maps["shots"].get(str(context["shot_id"])) if scope_maps
+            else _scope_project_id("shot", str(context["shot_id"]))
+        )
+    return _resolved_project_id(candidates)
+
+
+def _job_project_id(
+    row: dict,
+    scope_maps: dict[str, dict[str, str]] | None = None,
+) -> str | None:
+    candidates: list[object] = [row.get("project_id")]
+    run_id = row.get("run_id") or (row.get("id") if row.get("source") == "run" else None)
+    if run_id:
+        candidates.append(
+            scope_maps["runs"].get(str(run_id)) if scope_maps
+            else _run_project_id(str(run_id))
+        )
+    if row.get("episode_id"):
+        candidates.append(
+            scope_maps["episodes"].get(str(row["episode_id"])) if scope_maps
+            else _scope_project_id("episode", str(row["episode_id"]))
+        )
+    if row.get("shot_id"):
+        candidates.append(
+            scope_maps["shots"].get(str(row["shot_id"])) if scope_maps
+            else _scope_project_id("shot", str(row["shot_id"]))
+        )
+    return _resolved_project_id(candidates)
+
+
 @router.get("/system/calls/query")
 def query_calls(
     page: int = Query(default=1, ge=1),
@@ -751,6 +868,7 @@ def query_calls(
              FROM provider_calls {where} ORDER BY id {order}""",
         params,
     ).fetchall())
+    scope_maps = _project_scope_maps() if project_id else None
     catalog = {(item.get("provider"), item.get("model")): item.get("label") for item in _model_catalog()}
     filtered: list[dict] = []
     for row in rows:
@@ -761,7 +879,7 @@ def query_calls(
         if category and row["category"] != category:
             continue
         meta_summary = _call_meta_summary(row.pop("meta", None))
-        if project_id and str(meta_summary.get("project_id") or "") != project_id:
+        if project_id and _call_project_id(row, meta_summary, scope_maps) != project_id:
             continue
         row["context"] = meta_summary
         row["model_label"] = next(
@@ -1061,15 +1179,24 @@ def query_jobs(
 ):
     query_started = time.perf_counter()
     payload = jobs_overview(include_all=True)
+    scope_maps = _project_scope_maps() if project_id else None
+    # 项目观测台的汇总数字必须和列表使用完全相同的强作用域。旧实现虽然
+    # 过滤了 items，却仍返回全局 counts，既误导用户也会泄露其他项目活跃度。
+    scoped_rows = [
+        row for row in payload["recent"]
+        if not project_id or _job_project_id(row, scope_maps) == project_id
+    ]
+    scoped_counts: dict[str, int] = {}
+    for row in scoped_rows:
+        row_status = str(row.get("status") or "unknown")
+        scoped_counts[row_status] = scoped_counts.get(row_status, 0) + 1
     keyword = search.strip().lower()
     wanted_statuses = {
         item.strip() for item in (status or "").split(",") if item.strip()
     }
     items = []
-    for row in payload["recent"]:
+    for row in scoped_rows:
         if wanted_statuses and row.get("status") not in wanted_statuses:
-            continue
-        if project_id and row.get("project_id") != project_id:
             continue
         if workflow and (row.get("workflow_type") or row.get("kind")) != workflow:
             continue
@@ -1092,7 +1219,7 @@ def query_jobs(
     return {
         "items": items[start:start + page_size], "total": total, "page": page,
         "page_size": page_size, "page_count": max(1, (total + page_size - 1) // page_size),
-        "counts": payload["counts"], "startup_recovery": payload["startup_recovery"],
+        "counts": scoped_counts, "startup_recovery": payload["startup_recovery"],
         "server_time": payload["server_time"],
         "query_ms": round((time.perf_counter() - query_started) * 1000, 2),
     }

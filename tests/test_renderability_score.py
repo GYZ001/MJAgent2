@@ -33,7 +33,7 @@ def test_score_against_legacy_24_shot_baseline() -> None:
         screenplay=screenplay, storyboard=storyboard, baseline=baseline
     )
     assert result["metrics"]["shot_count"] == 12
-    assert result["gates"]["shot_count_in_soft_budget"]
+    assert "shot_count_in_soft_budget" not in result["gates"]
     assert result["vs_baseline"]["shot_count_le_70pct_baseline"] is True
     assert result["metrics"]["contract_version"] == "renderability_v1"
 

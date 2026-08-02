@@ -415,7 +415,7 @@ def test_validated_projection_does_not_leak_unrelated_derived_fields(repair_db) 
 
 def test_repair_feedback_is_localized_to_target_shot() -> None:
     messages = [
-        "shots[9](shot_no=10) 起连续 3 个镜头景别相同",
+        "shots[9](shot_no=10).camera_move=「环绕」不在合法枚举中",
         "第 13 镜首帧画面含超纲细节词：衣角、指节",
     ]
 

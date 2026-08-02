@@ -7,9 +7,7 @@ from __future__ import annotations
 
 import re
 
-# 单集镜头软预算（情密章可上浮至 HARD）
-SHOT_SOFT_MIN = 8
-SHOT_SOFT_MAX = 16
+# 单集仅保留防失控的技术硬上限；剧情完整覆盖优先，不设软预算。
 SHOT_HARD_MAX = 20
 
 SPINE_BEATS_MIN = 5
@@ -94,6 +92,18 @@ def overdetail_issue_is_active(message: str | None) -> bool:
     return any(term in listed for term in OVERDETAIL_TERMS)
 
 
+def storyboard_repair_issue_is_active(message: str | None) -> bool:
+    """Hide persisted repair issues whose policy has since been retired."""
+    raw = str(message or "")
+    if (
+        "连续 3 个镜头景别" in raw
+        or "连续三个镜头景别" in raw
+        or "软预算" in raw
+    ):
+        return False
+    return overdetail_issue_is_active(raw)
+
+
 def strip_overdetail_terms(text: str) -> str:
     """编译层第二道闸：剥离超纲词（根治仍在上游合同）。"""
     out = text or ""
@@ -105,17 +115,12 @@ def strip_overdetail_terms(text: str) -> str:
 
 
 def shot_count_budget_errors(n_shots: int, *, context: str = "分镜") -> list[str]:
-    """单集镜头软预算：>16 进入 repair；>20 硬失败。"""
+    """Only reject a runaway shot count beyond the technical safety ceiling."""
     errors: list[str] = []
     if n_shots > SHOT_HARD_MAX:
         errors.append(
             f"{context}共 {n_shots} 镜，超过硬上限 {SHOT_HARD_MAX}；"
-            f"请合并反应镜、删除 drop_list/非 must_keep 支线，压回 {SHOT_SOFT_MAX} 镜以内，禁止继续拆碎"
-        )
-    elif n_shots > SHOT_SOFT_MAX:
-        errors.append(
-            f"{context}共 {n_shots} 镜，超过软预算 {SHOT_SOFT_MAX}（目标约 {SHOT_SOFT_MIN}~{SHOT_SOFT_MAX}）；"
-            "请合并相邻反应镜或压缩对白，不要再拆新镜"
+            f"请检查是否出现重复生成，并压回 {SHOT_HARD_MAX} 镜以内"
         )
     return errors
 

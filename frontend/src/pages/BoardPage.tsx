@@ -540,7 +540,7 @@ export default function BoardPage() {
       case 'go_screenplay': go('script', projectId, ep.id); break
       case 'generate_storyboard': await loadStartPreview(); break
       case 'resume_storyboard': await loadStartPreview(); break
-      case 'view_progress': go('monitor'); break
+      case 'view_progress': go('observability', projectId, null); break
       case 'confirm_storyboard': {
         setBusy(true)
         try { setConfirmPreview(await api.post(`/episodes/${ep.id}/confirm-preview`) as ConfirmPreview) }
@@ -688,7 +688,7 @@ export default function BoardPage() {
                 onClick={() => void pauseStoryboard()}>
                 {busy ? '正在暂停…' : '暂停任务'}
               </button>
-              <button type="button" className="btn" disabled={busy} onClick={() => go('monitor')}>
+              <button type="button" className="btn" disabled={busy} onClick={() => go('observability', projectId, null)}>
                 查看任务详情
               </button>
             </> : <>

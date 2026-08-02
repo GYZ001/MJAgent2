@@ -1,1 +1,1 @@
-"""Run events, traces and quality metrics."""
+"""Project-scoped observability API and helpers."""

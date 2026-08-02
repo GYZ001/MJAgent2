@@ -17,6 +17,7 @@ import type { ContextEnvelope } from "./agent/types";
 import CapabilityApprovalHost from "./components/CapabilityApprovalHost";
 import DecisionDialog from "./components/DecisionDialog";
 import EpisodeCrumb from "./components/EpisodeCrumb";
+import SearchField from "./components/SearchField";
 import { useFocusTrap } from "./hooks/useFocusTrap";
 import { useScrollContainment } from "./useScrollContainment";
 import { AdaptivePoller, type PollInterval } from "./adaptivePoller";
@@ -41,6 +42,8 @@ export type View =
   | "board"
   | "wall"
   | "cinema"
+  | "observability"
+  | "system"
   | "monitor"
   | "reader";
 
@@ -119,7 +122,6 @@ const SECTIONS: {
   needEpisode?: boolean;
   matchViews?: View[];
 }[] = [
-  { key: "studio", label: "项目中心", icon: "书", group: "项目" },
   {
     key: "bible",
     label: "前期准备",
@@ -156,7 +158,13 @@ const SECTIONS: {
     group: "质量交付",
     needEpisode: true,
   },
-  { key: "monitor", label: "监制房", icon: "控", group: "系统" },
+  { key: "observability", label: "观测台", icon: "观", group: "项目观测", needProject: true },
+];
+
+const SYSTEM_SECTIONS: Array<{ key: "overview" | "models" | "settings"; label: string; icon: string }> = [
+  { key: "overview", label: "总览", icon: "总" },
+  { key: "models", label: "模型中心", icon: "模" },
+  { key: "settings", label: "系统设置", icon: "设" },
 ];
 
 const decodePart = (value?: string) =>
@@ -167,6 +175,10 @@ export function routeFromPath(pathname: string): Pick<
   "view" | "projectId" | "episodeId" | "chapterIdx"
 > {
   const parts = pathname.split("/").filter(Boolean);
+  if (parts[0] === "system")
+    return { view: "system", projectId: null, episodeId: null, chapterIdx: null };
+  if (parts[0] === "workspaces")
+    return { view: "studio", projectId: null, episodeId: null, chapterIdx: null };
   if (parts[0] === "monitor")
     return {
       view: "monitor",
@@ -183,6 +195,8 @@ export function routeFromPath(pathname: string): Pick<
     };
   }
   const projectId = decodePart(parts[1]);
+  if (parts[2] === "observability")
+    return { view: "observability", projectId, episodeId: null, chapterIdx: null };
   if (parts[2] === "reader") {
     const idx = Number(parts[3]);
     return {
@@ -231,10 +245,12 @@ export function locationFor(
   episodeId: string | null,
   chapterIdx: number | null,
 ) {
-  if (view === "studio") return "/";
+  if (view === "studio") return "/workspaces";
+  if (view === "system") return "/system/overview";
   if (view === "monitor") return "/monitor";
-  if (!projectId) return "/";
+  if (!projectId) return "/workspaces";
   const project = `/projects/${encodeURIComponent(projectId)}`;
+  if (view === "observability") return `${project}/observability/runs`;
   if (view === "reader") return `${project}/reader/${chapterIdx ?? 1}`;
   if (
     view === "script" ||
@@ -251,6 +267,7 @@ export function locationFor(
 
 export default function App() {
   const initial = readLocation();
+  const initialWasRootRef = useRef(window.location.pathname === "/");
   const [view, setView] = useState<View>(initial.view);
   const [projectId, setProjectId] = useState<string | null>(initial.projectId);
   const [episodeId, setEpisodeId] = useState<string | null>(initial.episodeId);
@@ -262,7 +279,12 @@ export default function App() {
     err: boolean;
   } | null>(null);
   const [spineCollapsed, setSpineCollapsed] = useState(false);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [projectsLoaded, setProjectsLoaded] = useState(false);
+  const [projectSwitcherOpen, setProjectSwitcherOpen] = useState(false);
+  const [projectSearch, setProjectSearch] = useState("");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [routeRevision, setRouteRevision] = useState(0);
   const [unsavedDraft, setUnsavedDraft] = useState(false);
   const [pendingNavigation, setPendingNavigation] =
     useState<PendingNavigation | null>(null);
@@ -276,6 +298,7 @@ export default function App() {
   const restoreAgentFocusRef = useRef(false);
   const toastTimerRef = useRef<number>();
   const spineRef = useRef<HTMLElement | null>(null);
+  const workspaceSwitcherRef = useRef<HTMLDivElement | null>(null);
   const closeMobileNav = useCallback(() => setMobileNavOpen(false), []);
   const mobileNavTrapRef = useFocusTrap(mobileNavOpen, closeMobileNav);
   const bindSpineRef = useCallback(
@@ -286,6 +309,65 @@ export default function App() {
     [mobileNavTrapRef],
   );
   useScrollContainment(spineRef, true);
+  useEffect(() => {
+    if (window.location.pathname === "/") {
+      window.history.replaceState({}, "", "/workspaces");
+      lastLocationRef.current = "/workspaces";
+    }
+  }, []);
+  useEffect(() => {
+    if (!projectSwitcherOpen) return;
+    const closeOutside = (event: MouseEvent) => {
+      if (!workspaceSwitcherRef.current?.contains(event.target as Node)) {
+        setProjectSwitcherOpen(false);
+        setProjectSearch("");
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setProjectSwitcherOpen(false);
+        setProjectSearch("");
+      }
+    };
+    document.addEventListener("mousedown", closeOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("mousedown", closeOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [projectSwitcherOpen]);
+
+  const refreshProjects = useCallback(() => {
+    void api.get("/projects").then((items: Project[]) => {
+      setProjects(items);
+      setProjectsLoaded(true);
+    }).catch(() => setProjectsLoaded(true));
+  }, []);
+  useEffect(() => {
+    refreshProjects();
+    window.addEventListener("manju:projects-changed", refreshProjects);
+    return () => window.removeEventListener("manju:projects-changed", refreshProjects);
+  }, [refreshProjects]);
+  useEffect(() => {
+    if (!projectsLoaded || !initialWasRootRef.current) return;
+    initialWasRootRef.current = false;
+    const lastProjectId = window.localStorage.getItem("manju:last-project-id");
+    if (!lastProjectId || !projects.some((project) => project.id === lastProjectId)) return;
+    const saved = window.localStorage.getItem("manju:last-project-route") || "";
+    const parsed = routeFromPath(saved.split("?")[0] || "/");
+    const target = parsed.projectId === lastProjectId
+      ? saved
+      : `/projects/${encodeURIComponent(lastProjectId)}/bible`;
+    window.history.replaceState({}, "", target);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  }, [projects, projectsLoaded]);
+  useEffect(() => {
+    if (projectId) window.localStorage.setItem("manju:last-project-id", projectId);
+  }, [projectId]);
+  useEffect(() => {
+    setProjectSwitcherOpen(false);
+    setProjectSearch("");
+  }, [view]);
 
   useEffect(() => {
     const mobile = window.matchMedia("(max-width: 720px)");
@@ -299,6 +381,10 @@ export default function App() {
   useEffect(() => {
     const syncLocation = () => {
       lastLocationRef.current = `${window.location.pathname}${window.location.search}`;
+      if (window.location.pathname.startsWith("/projects/")) {
+        window.localStorage.setItem("manju:last-project-route", lastLocationRef.current);
+      }
+      setRouteRevision((revision) => revision + 1);
     };
     window.addEventListener("manju:locationchange", syncLocation);
     return () => window.removeEventListener("manju:locationchange", syncLocation);
@@ -351,7 +437,7 @@ export default function App() {
       eid?: string | null,
       cidx?: number | null,
     ) => {
-      const globalView = v === "studio" || v === "monitor";
+      const globalView = v === "studio" || v === "monitor" || v === "system";
       const nextProjectId = globalView
         ? null
         : pid === undefined
@@ -390,6 +476,9 @@ export default function App() {
       if (currentLocation !== target) {
         window.history.pushState({}, "", target);
         lastLocationRef.current = target;
+        if (target.startsWith("/projects/")) {
+          window.localStorage.setItem("manju:last-project-route", target);
+        }
       }
       setProjectId(nextProjectId);
       setEpisodeId(nextEpisodeId);
@@ -445,6 +534,9 @@ export default function App() {
       next.target,
     );
     lastLocationRef.current = next.target;
+    if (next.target.startsWith("/projects/")) {
+      window.localStorage.setItem("manju:last-project-route", next.target);
+    }
     if (next.historyAction === "replace") {
       window.dispatchEvent(new PopStateEvent("popstate"));
     }
@@ -473,6 +565,10 @@ export default function App() {
         return;
       }
       lastLocationRef.current = attemptedTarget;
+      if (window.location.pathname.startsWith("/projects/")) {
+        window.localStorage.setItem("manju:last-project-route", attemptedTarget);
+      }
+      setRouteRevision((revision) => revision + 1);
       setView(next.view);
       setProjectId(next.projectId);
       setEpisodeId(next.episodeId);
@@ -535,9 +631,7 @@ export default function App() {
     toast,
     registerNavigationGuard,
   };
-  const visibleSections = projectId
-    ? SECTIONS
-    : SECTIONS.filter((s) => s.key === "studio" || s.key === "monitor");
+  const visibleSections = projectId ? SECTIONS : [];
   const agentContext: ContextEnvelope = {
     route: view,
     project_id: projectId,
@@ -570,6 +664,41 @@ export default function App() {
     (groups[section.group] ??= []).push(section);
     return groups;
   }, {});
+  const currentProject = projects.find((project) => project.id === projectId);
+  const currentPathname = routeRevision >= 0 ? window.location.pathname : "";
+  const filteredProjects = projects.filter((project) =>
+    project.name.toLowerCase().includes(projectSearch.trim().toLowerCase()),
+  );
+  const switchProject = (nextProjectId: string) => {
+    setProjectSwitcherOpen(false);
+    setProjectSearch("");
+    if (nextProjectId === projectId) return;
+    const intent = new URLSearchParams(window.location.search);
+    if (view === "studio" && intent.get("intent") === "observability") {
+      const requestedTab = intent.get("tab") || "runs";
+      const tab = ["runs", "jobs", "calls"].includes(requestedTab) ? requestedTab : "runs";
+      const target = `/projects/${encodeURIComponent(nextProjectId)}/observability/${tab}`;
+      requestNavigation(target, () => {
+        window.history.pushState({}, "", target);
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      });
+      return;
+    }
+    if (view === "observability") {
+      const currentTab = window.location.pathname.split("/").filter(Boolean).at(-1);
+      const tab = ["runs", "jobs", "calls"].includes(currentTab || "") ? currentTab : "runs";
+      const target = `/projects/${encodeURIComponent(nextProjectId)}/observability/${tab}`;
+      requestNavigation(target, () => {
+        window.history.pushState({}, "", target);
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      });
+      return;
+    }
+    const targetView: View = view === "studio" || view === "system" || view === "monitor"
+      ? "bible"
+      : view;
+    go(targetView, nextProjectId, null, null);
+  };
 
   return (
     <NavCtx.Provider value={nav}>
@@ -623,7 +752,86 @@ export default function App() {
             ×
           </button>
         </div>
-        <nav aria-label="工作台">
+        {view !== "system" && (
+          <div className="workspace-switcher" ref={workspaceSwitcherRef}>
+            <button
+              type="button"
+              className="workspace-switcher-trigger"
+              aria-expanded={projectSwitcherOpen}
+              onClick={() => setProjectSwitcherOpen((open) => !open)}
+            >
+              <span className="workspace-avatar" aria-hidden="true">书</span>
+              <span><b>{currentProject?.name || "选择项目空间"}</b><small>{currentProject ? "小说创作项目" : "上传小说以创建空间"}</small></span>
+              <i aria-hidden="true">{projectSwitcherOpen ? "⌃" : "⌄"}</i>
+            </button>
+            {projectSwitcherOpen && (
+              <div className="workspace-switcher-popover">
+                <SearchField
+                  value={projectSearch}
+                  onChange={setProjectSearch}
+                  placeholder="搜索项目空间"
+                  ariaLabel="搜索项目空间"
+                />
+                <div className="workspace-switcher-list">
+                  {filteredProjects.map((project) => (
+                    <button
+                      type="button"
+                      key={project.id}
+                      className={`workspace-switcher-option ${project.id === projectId ? "active" : ""}`}
+                      onClick={() => switchProject(project.id)}
+                    >
+                      <span className="workspace-avatar" aria-hidden="true">书</span>
+                      <span><b>{project.name}</b><small>项目空间</small></span>
+                      {project.id === projectId && <i aria-label="当前项目">✓</i>}
+                    </button>
+                  ))}
+                  {!filteredProjects.length && <p>没有匹配的项目空间</p>}
+                </div>
+                <button type="button" className="workspace-create" onClick={() => {
+                  setProjectSwitcherOpen(false);
+                  const target = "/workspaces/new";
+                  requestNavigation(target, () => {
+                    window.history.pushState({}, "", target);
+                    window.dispatchEvent(new PopStateEvent("popstate"));
+                  });
+                }}>
+                  <span className="workspace-create-icon" aria-hidden="true">＋</span>
+                  <span>创建 / 管理项目空间</span>
+                  <i aria-hidden="true">→</i>
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+        {view === "system" ? (
+          <nav aria-label="系统设置">
+            <div className="spine-group">
+              <div className="spine-group-label">系统设置</div>
+              {SYSTEM_SECTIONS.map((section) => {
+                const active = currentPathname.endsWith(`/${section.key}`);
+                return (
+                  <button
+                    key={section.key}
+                    type="button"
+                    className={`spine-item ${active ? "active" : ""}`}
+                    aria-current={active ? "page" : undefined}
+                    onClick={() => {
+                      const target = `/system/${section.key}`;
+                      requestNavigation(target, () => {
+                        window.history.pushState({}, "", target);
+                        window.dispatchEvent(new PopStateEvent("popstate"));
+                      });
+                    }}
+                  >
+                    <span className="spine-icon" aria-hidden="true">{section.icon}</span>
+                    <span className="spine-label">{section.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </nav>
+        ) : (
+        <nav aria-label="项目空间工作台">
           {Object.entries(groupedSections).map(([group, sections]) => (
             <div className="spine-group" key={group}>
               <div className="spine-group-label">{group}</div>
@@ -653,9 +861,38 @@ export default function App() {
             </div>
           ))}
         </nav>
-        <div className="spine-foot">漫剧案头 · 2.0</div>
+        )}
+        <div className="spine-foot">
+          {view === "system" ? (
+            <button className="spine-foot-action" type="button" aria-label="返回项目空间" onClick={() => {
+              const last = window.localStorage.getItem("manju:last-project-id");
+              const saved = window.localStorage.getItem("manju:last-project-route") || "";
+              if (last && projects.some((item) => item.id === last)) {
+                const parsed = routeFromPath(saved.split("?")[0] || "/");
+                const target = parsed.projectId === last
+                  ? saved
+                  : `/projects/${encodeURIComponent(last)}/bible`;
+                requestNavigation(target, () => {
+                  window.history.pushState({}, "", target);
+                  window.dispatchEvent(new PopStateEvent("popstate"));
+                });
+              } else go("studio", null, null);
+            }}>
+              <span className="spine-foot-icon" aria-hidden="true">返</span>
+              <span className="spine-foot-copy"><b>返回项目空间</b><span>继续当前小说创作</span></span>
+              <i className="spine-foot-arrow" aria-hidden="true">←</i>
+            </button>
+          ) : (
+            <button className="spine-foot-action" type="button" aria-label="系统设置" onClick={() => go("system", null, null)}>
+              <span className="spine-foot-icon" aria-hidden="true">设</span>
+              <span className="spine-foot-copy"><b>系统设置</b><span>模型与全局策略</span></span>
+              <i className="spine-foot-arrow" aria-hidden="true">→</i>
+            </button>
+          )}
+          <small>漫剧案头 · 2.0</small>
+        </div>
       </aside>
-      <main className={`desk ${view === "board" ? "board-desk" : ""}`}>
+      <main className={`desk ${view === "board" ? "board-desk" : ""} ${view === "system" ? "system-desk" : ""}`}>
         <Suspense
           fallback={
             <div className="empty route-loading" role="status">
@@ -692,7 +929,11 @@ export default function App() {
           ) : (
             <WorkspaceEmpty label="成片台" view="cinema" />
           ))}
-        {view === "monitor" && <MonitorPage />}
+        {view === "observability" && projectId && (
+          <MonitorPage mode="project" projectId={projectId} projectName={currentProject?.name} />
+        )}
+        {view === "system" && <MonitorPage mode="system" />}
+        {view === "monitor" && <LegacyMonitorRedirect loaded={projectsLoaded} toast={toast} />}
         </Suspense>
       </main>
       {agentEnabled && !agentOpen && (
@@ -762,6 +1003,52 @@ export default function App() {
   );
 }
 
+function LegacyMonitorRedirect({
+  loaded,
+  toast,
+}: {
+  loaded: boolean;
+  toast: (message: string, isErr?: boolean) => void;
+}) {
+  useEffect(() => {
+    if (!loaded) return;
+    const params = new URLSearchParams(window.location.search);
+    const section = params.get("section") || "overview";
+    const move = (target: string) => {
+      window.history.replaceState({}, "", target);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    };
+    if (["overview", "models", "settings"].includes(section)) {
+      params.delete("section");
+      move(`/system/${section}${params.toString() ? `?${params}` : ""}`);
+      return;
+    }
+    const objectQuery = params.get("run_id")
+      ? `run_id=${encodeURIComponent(params.get("run_id")!)}`
+      : params.get("job_id")
+        ? `job_id=${encodeURIComponent(params.get("job_id")!)}&source=auto`
+        : params.get("call_id")
+          ? `call_id=${encodeURIComponent(params.get("call_id")!)}`
+          : "";
+    if (objectQuery) {
+      void api.get(`/observability/resolve?${objectQuery}`).then((result: {
+        project_id: string;
+        section: "runs" | "jobs" | "calls";
+      }) => {
+        params.delete("section");
+        move(`/projects/${encodeURIComponent(result.project_id)}/observability/${result.section}${params.toString() ? `?${params}` : ""}`);
+      }).catch((error) => {
+        toast(`旧观测链接无法迁移：${(error as Error).message}`, true);
+        move("/workspaces");
+      });
+      return;
+    }
+    const nextSection = ["runs", "jobs", "calls"].includes(section) ? section : "runs";
+    move(`/workspaces?intent=observability&tab=${nextSection}`);
+  }, [loaded, toast]);
+  return <div className="empty route-loading" role="status">正在迁移旧观测链接…</div>;
+}
+
 function WorkspaceEmpty({ label, view }: { label: string; view: View }) {
   const { projectId, go } = useNav();
   const titleId = useId();
@@ -793,7 +1080,7 @@ function WorkspaceEmpty({ label, view }: { label: string; view: View }) {
             className="btn"
             onClick={() => go("studio", null, null)}
           >
-            返回项目中心
+            返回项目空间
           </button>
         </div>
       </section>

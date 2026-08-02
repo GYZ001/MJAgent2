@@ -9,8 +9,6 @@ from typing import Any
 from app.renderability import (
     PREFERRED_SHOT_DURATION_S,
     SHOT_HARD_MAX,
-    SHOT_SOFT_MAX,
-    SHOT_SOFT_MIN,
     SPINE_BEATS_MAX,
     SPINE_BEATS_MIN,
     find_overdetail_hits,
@@ -87,7 +85,6 @@ def score_renderability_sample(
     }
 
     gates = {
-        "shot_count_in_soft_budget": SHOT_SOFT_MIN <= n_shots <= SHOT_SOFT_MAX,
         "shot_count_within_hard_max": n_shots <= SHOT_HARD_MAX,
         "spine_beats_in_range": SPINE_BEATS_MIN <= len(beats) <= SPINE_BEATS_MAX,
         "no_overdetail": len(overdetail_hits) == 0,

@@ -22,6 +22,7 @@ type MonitorSection =
   | "models"
   | "calls"
   | "settings";
+export type MonitorMode = "project" | "system" | "legacy";
 export type ModelKind = "text" | "vlm" | "video" | "image";
 type BlockStatus = "loading" | "ready-empty" | "ready-data" | "error" | "stale";
 type ProviderKey = string;
@@ -54,6 +55,7 @@ interface JobsSummary {
   recent: Job[];
   total: number;
   server_time: number;
+  scope?: { type: "project"; project_id: string; project_name: string };
 }
 interface Page<T> {
   items: T[];
@@ -63,6 +65,7 @@ interface Page<T> {
   page_count: number;
   server_time: number;
   query_ms?: number;
+  scope?: { type: "project"; project_id: string; project_name: string };
 }
 interface JobsPage extends Page<Job> {
   counts: Record<string, number>;
@@ -187,6 +190,23 @@ export interface CatalogModel {
 interface ModelCatalog {
   items: CatalogModel[];
 }
+interface SystemOverview {
+  projects: Array<{
+    id: string;
+    name: string;
+    created_at: number;
+    job_counts: Record<string, number>;
+    call_count: number;
+  }>;
+  totals: {
+    projects: number;
+    jobs: number;
+    calls: number;
+    unattributed_jobs: number;
+    unattributed_calls: number;
+  };
+  server_time: number;
+}
 
 const SECTIONS: Array<{
   key: MonitorSection;
@@ -200,6 +220,11 @@ const SECTIONS: Array<{
   { key: "calls", label: "调用日志", description: "分类、摘要与详情" },
   { key: "settings", label: "系统设置", description: "校验、预览与生效" },
 ];
+const SYSTEM_SECTION_DESCRIPTIONS: Partial<Record<MonitorSection, string>> = {
+  overview: "查看全局健康、配置同步与项目级汇总",
+  models: "管理模型分配、服务连接与可用性",
+  settings: "校验、预览并应用全局系统策略",
+};
 const VALID_SECTIONS = new Set(SECTIONS.map((item) => item.key));
 const MODEL_ROWS: Array<{ key: ModelKind; label: string; note: string }> = [
   { key: "text", label: "文本模型", note: "分集、剧本、分镜与文本修复" },
@@ -286,15 +311,38 @@ const CALL_CATEGORY_LABELS = {
 function nowQuery() {
   return new URLSearchParams(window.location.search);
 }
+function assertProjectScope<T extends { scope?: { project_id?: string } }>(payload: T, projectId?: string): T {
+  if (projectId && payload.scope?.project_id !== projectId) {
+    throw new Error("观测响应的项目范围与当前路由不一致，已拒绝渲染");
+  }
+  return payload;
+}
 function querySection() {
+  const tail = window.location.pathname.split("/").filter(Boolean).at(-1);
+  if (tail && VALID_SECTIONS.has(tail as MonitorSection))
+    return tail as MonitorSection;
   const raw = nowQuery().get("section") as MonitorSection | null;
   return raw && VALID_SECTIONS.has(raw) ? raw : "overview";
 }
 function queryTarget(patch: Record<string, string | null>) {
   const params = nowQuery();
-  for (const [key, value] of Object.entries(patch))
+  const requestedSection = patch.section as MonitorSection | null | undefined;
+  for (const [key, value] of Object.entries(patch)) {
+    if (key === "section") continue;
     value ? params.set(key, value) : params.delete(key);
-  return `/monitor${params.toString() ? `?${params}` : ""}`;
+  }
+  let pathname = window.location.pathname;
+  if (requestedSection) {
+    if (/^\/system(?:\/|$)/.test(pathname)) {
+      pathname = `/system/${requestedSection}`;
+    } else if (/\/observability(?:\/|$)/.test(pathname)) {
+      pathname = pathname.replace(/\/observability(?:\/[^/]+)?$/, `/observability/${requestedSection}`);
+    } else {
+      params.set("section", requestedSection);
+      pathname = "/monitor";
+    }
+  }
+  return `${pathname}${params.toString() ? `?${params}` : ""}`;
 }
 function writeQuery(patch: Record<string, string | null>, push = true) {
   const target = queryTarget(patch);
@@ -635,10 +683,12 @@ function JsonSection({
 
 function CallDrawer({
   call,
+  projectId,
   onClose,
   onRun,
 }: {
   call: Call | CallDetail;
+  projectId?: string;
   onClose: () => void;
   onRun: (id: string) => void;
 }) {
@@ -653,7 +703,9 @@ function CallDrawer({
   const load = useCallback(async () => {
     setError("");
     try {
-      const next = (await api.get(`/system/calls/${call.id}`)) as CallDetail;
+      const next = (await api.get(projectId
+        ? `/projects/${encodeURIComponent(projectId)}/observability/calls/${call.id}`
+        : `/system/calls/${call.id}`)) as CallDetail;
       setDetail(next);
       track(
         "call_detail",
@@ -668,7 +720,7 @@ function CallDrawer({
     } catch (e) {
       setError((e as Error).message);
     }
-  }, [call.id]);
+  }, [call.id, projectId]);
   useEffect(() => {
     if ("request_json_size" in call) setDetail(call);
     else void load();
@@ -685,7 +737,9 @@ function CallDrawer({
     setDownloading(true);
     setDownloadError("");
     try {
-      const blob = await api.download(`/system/calls/${call.id}/download`);
+      const blob = await api.download(projectId
+        ? `/projects/${encodeURIComponent(projectId)}/observability/calls/${call.id}/download`
+        : `/system/calls/${call.id}/download`);
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
@@ -847,11 +901,13 @@ function CallDrawer({
 
 function JobDrawer({
   job,
+  projectId,
   onClose,
   onChanged,
   onRun,
 }: {
   job: Job;
+  projectId?: string;
   onClose: () => void;
   onChanged: () => void;
   onRun: (id: string) => void;
@@ -870,13 +926,15 @@ function JobDrawer({
     try {
       setDetail(
         (await api.get(
-          `/system/jobs/${encodeURIComponent(job.id)}?source=${job.source}`,
+          projectId
+            ? `/projects/${encodeURIComponent(projectId)}/observability/jobs/${encodeURIComponent(job.id)}?source=${job.source}`
+            : `/system/jobs/${encodeURIComponent(job.id)}?source=${job.source}`,
         )) as Record<string, unknown>,
       );
     } catch (e) {
       setError((e as Error).message);
     }
-  }, [job.id, job.source]);
+  }, [job.id, job.source, projectId]);
   useEffect(() => {
     void load();
   }, [load]);
@@ -885,18 +943,27 @@ function JobDrawer({
     setError("");
     setActionMessage("");
     try {
-      if (job.source === "run")
+      if (projectId) {
+        await api.post(
+          `/projects/${encodeURIComponent(projectId)}/observability/jobs/${encodeURIComponent(job.id)}/${action}?source=${job.source}`,
+          action === "cancel" ? undefined : {
+            expected_version: job.state_revision ?? 0,
+            allow_new_submission: true,
+          },
+        );
+      } else if (job.source === "run") {
         await api.post(
           `/runs/${encodeURIComponent(job.run_id || job.id)}/${action}`,
           action === "cancel" ? undefined : { allow_new_submission: true },
         );
-      else if (action === "cancel")
+      } else if (action === "cancel") {
         await api.post(`/jobs/${encodeURIComponent(job.id)}/cancel`);
-      else
+      } else {
         await api.post(`/system/jobs/${encodeURIComponent(job.id)}/retry`, {
           expected_version: job.state_revision ?? 0,
           allow_new_submission: true,
         });
+      }
       track("job_action", { action, object_status: job.status }, job.id);
       setActionMessage(
         `${jobWorkLabel(job)}：${action === "cancel" ? "取消请求已接受" : action === "resume" ? "恢复请求已接受，正在从检查点继续" : "重试请求已接受，正在排队"}`,
@@ -2793,17 +2860,38 @@ function ModelCenter({
   );
 }
 
-export default function MonitorPage() {
-  const { toast, registerNavigationGuard, requestNavigation } = useNav();
+export default function MonitorPage({
+  mode = "legacy",
+  projectId,
+  projectName,
+}: {
+  mode?: MonitorMode;
+  projectId?: string;
+  projectName?: string;
+}) {
+  const { go, toast, registerNavigationGuard, requestNavigation } = useNav();
   const initial = nowQuery();
+  const allowedSections = useMemo(() => mode === "project"
+    ? SECTIONS.filter((item) => ["runs", "jobs", "calls"].includes(item.key))
+    : mode === "system"
+      ? SECTIONS.filter((item) => ["overview", "models", "settings"].includes(item.key))
+      : SECTIONS, [mode]);
+  const defaultSection: MonitorSection = mode === "project" ? "runs" : "overview";
+  const initialSection = querySection();
   const [activeSection, setActiveSection] =
-    useState<MonitorSection>(querySection());
+    useState<MonitorSection>(allowedSections.some((item) => item.key === initialSection)
+      ? initialSection
+      : defaultSection);
+  const activeSectionMeta = allowedSections.find((item) => item.key === activeSection)
+    || allowedSections[0];
+  const pageTitle = mode === "system" ? activeSectionMeta.label : "观测台";
+  const pageDescription = mode === "system"
+    ? SYSTEM_SECTION_DESCRIPTIONS[activeSection] || activeSectionMeta.description
+    : "仅展示当前项目的运行、任务与调用数据";
   const [urlNotice, setUrlNotice] = useState("");
   const [jobSearch, setJobSearch] = useState(initial.get("job_search") || "");
   const [jobStatus, setJobStatus] = useState(initial.get("job_status") || "");
-  const [jobProject, setJobProject] = useState(
-    initial.get("job_project") || "",
-  );
+  const [jobProject, setJobProject] = useState(projectId || initial.get("job_project") || "");
   const [jobWorkflow, setJobWorkflow] = useState(
     initial.get("job_workflow") || "",
   );
@@ -2832,9 +2920,7 @@ export default function MonitorPage() {
   const [callModel, setCallModel] = useState(initial.get("call_model") || "");
   const [callFrom, setCallFrom] = useState(initial.get("call_from") || "");
   const [callTo, setCallTo] = useState(initial.get("call_to") || "");
-  const [callProject, setCallProject] = useState(
-    initial.get("call_project") || "",
-  );
+  const [callProject, setCallProject] = useState(projectId || initial.get("call_project") || "");
   const [callFunction, setCallFunction] = useState(
     initial.get("call_function") || "",
   );
@@ -2855,15 +2941,21 @@ export default function MonitorPage() {
     initial.get("run_id"),
   );
   const [focusToken, setFocusToken] = useState(initial.get("focus") || "");
+  const observabilityBase = projectId
+    ? `/projects/${encodeURIComponent(projectId)}/observability`
+    : "";
   const jobsSummaryPoll = usePoll<JobsSummary>(
-    () => api.get("/system/jobs"),
+    async () => assertProjectScope(
+      await api.get(projectId ? `${observabilityBase}/jobs?page_size=100` : "/system/jobs") as JobsSummary,
+      projectId,
+    ),
     4000,
-    [],
+    [mode === "system" ? null : mode, projectId || mode],
   );
   const settingsPoll = usePoll<SettingsView>(
     () => api.get("/settings?include_schema=true"),
     0,
-    [],
+    [mode === "project" ? null : mode],
   );
   const features = settingsPoll.data?.features || {
     overview_state_v2: true,
@@ -2872,23 +2964,33 @@ export default function MonitorPage() {
     call_detail_v2: true,
     settings_edit_v2: true,
   };
-  const healthPoll = usePoll<Health>(() => api.get("/system/health"), 0, []);
-  const catalogPoll = usePoll<ModelCatalog>(() => api.get("/models"), 0, []);
+  const healthPoll = usePoll<Health>(() => api.get("/system/health"), 0, [mode === "project" ? null : mode]);
+  const catalogPoll = usePoll<ModelCatalog>(() => api.get("/models"), 0, [mode === "project" ? null : mode]);
+  const systemOverviewPoll = usePoll<SystemOverview>(
+    () => api.get("/system/overview"),
+    activeSection === "overview" ? 10000 : 0,
+    [mode === "system" ? mode : null, activeSection],
+  );
   const jobQuery = encodeQuery({
     page: jobPage,
     page_size: jobPageSize,
     search: jobSearch,
     status: jobStatus,
-    project_id: jobProject,
+    project_id: projectId ? undefined : jobProject,
     workflow: jobWorkflow,
     from_ts: jobFrom ? new Date(jobFrom).getTime() / 1000 : undefined,
     to_ts: jobTo ? new Date(jobTo).getTime() / 1000 : undefined,
     sort: jobSort,
   });
   const jobsPagePoll = usePoll<JobsPage>(
-    () => api.get(`/system/jobs/query?${jobQuery}`),
+    async () => assertProjectScope(
+      await api.get(projectId
+        ? `${observabilityBase}/jobs?${jobQuery}`
+        : `/system/jobs/query?${jobQuery}`) as JobsPage,
+      projectId,
+    ),
     activeSection === "jobs" ? 4000 : 0,
-    [activeSection, jobQuery],
+    [mode === "system" ? null : mode, activeSection, jobQuery, projectId || mode],
   );
   const callQuery = encodeQuery({
     page: callPage,
@@ -2897,7 +2999,7 @@ export default function MonitorPage() {
     status: callStatus,
     category: callCategory,
     model: callModel,
-    project_id: callProject,
+    project_id: projectId ? undefined : callProject,
     function: callFunction,
     from_ts: callFrom ? new Date(callFrom).getTime() / 1000 : undefined,
     to_ts: callTo ? new Date(callTo).getTime() / 1000 : undefined,
@@ -2905,9 +3007,14 @@ export default function MonitorPage() {
     ids: callIds,
   });
   const callsPagePoll = usePoll<CallsPage>(
-    () => api.get(`/system/calls/query?${callQuery}`),
+    async () => assertProjectScope(
+      await api.get(projectId
+        ? `${observabilityBase}/calls?${callQuery}`
+        : `/system/calls/query?${callQuery}`) as CallsPage,
+      projectId,
+    ),
     activeSection === "calls" || activeSection === "overview" ? 6000 : 0,
-    [activeSection, callQuery],
+    [mode === "system" ? null : mode, activeSection, callQuery, projectId || mode],
   );
   useEffect(() => {
     if (!jobsPagePoll.data || jobPage <= jobsPagePoll.data.page_count) return;
@@ -2931,13 +3038,16 @@ export default function MonitorPage() {
         setActiveSection("overview");
       } else {
         setUrlNotice("");
-        setActiveSection(querySection());
+        const nextSection = querySection();
+        setActiveSection(allowedSections.some((item) => item.key === nextSection)
+          ? nextSection
+          : defaultSection);
       }
       setSelectedRunId(p.get("run_id"));
       setFocusToken(p.get("focus") || "");
       setJobSearch(p.get("job_search") || "");
       setJobStatus(p.get("job_status") || "");
-      setJobProject(p.get("job_project") || "");
+      setJobProject(projectId || p.get("job_project") || "");
       setJobWorkflow(p.get("job_workflow") || "");
       setJobFrom(p.get("job_from") || "");
       setJobTo(p.get("job_to") || "");
@@ -2951,7 +3061,7 @@ export default function MonitorPage() {
       setCallModel(p.get("call_model") || "");
       setCallFrom(p.get("call_from") || "");
       setCallTo(p.get("call_to") || "");
-      setCallProject(p.get("call_project") || "");
+      setCallProject(projectId || p.get("call_project") || "");
       setCallFunction(p.get("call_function") || "");
       setCallSort(p.get("call_sort") || "desc");
       setCallIds(p.get("call_ids") || "");
@@ -2963,7 +3073,7 @@ export default function MonitorPage() {
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
-  }, []);
+  }, [allowedSections, defaultSection, projectId]);
   const openSection = (
     section: MonitorSection,
     patch: Record<string, string | null> = {},
@@ -2976,7 +3086,7 @@ export default function MonitorPage() {
       cleanup.run_id = null;
     }
     const queryPatch = {
-      section: section === "overview" ? null : section,
+      section,
       ...cleanup,
       ...patch,
     };
@@ -3068,7 +3178,7 @@ export default function MonitorPage() {
     [
       jobSearch,
       jobStatus,
-      jobProject,
+      projectId ? "" : jobProject,
       jobWorkflow,
       jobFrom,
       jobTo,
@@ -3082,7 +3192,7 @@ export default function MonitorPage() {
       callModel,
       callFrom,
       callTo,
-      callProject,
+      projectId ? "" : callProject,
       callFunction,
       callSort !== "desc" ? callSort : "",
       callIds,
@@ -3099,7 +3209,9 @@ export default function MonitorPage() {
     if (activeSection !== "jobs" || !selectedJobId) return;
     setObjectLoadError("");
     void api
-      .get(`/system/jobs/${encodeURIComponent(selectedJobId)}?source=auto`)
+      .get(projectId
+        ? `${observabilityBase}/jobs/${encodeURIComponent(selectedJobId)}?source=auto`
+        : `/system/jobs/${encodeURIComponent(selectedJobId)}?source=auto`)
       .then((item) => {
         setSelectedJob(item as Job);
         track(
@@ -3119,13 +3231,15 @@ export default function MonitorPage() {
           selectedJobId,
         );
       });
-  }, [activeSection, selectedJobId]);
+  }, [activeSection, observabilityBase, projectId, selectedJobId]);
   useEffect(() => {
     if (activeSection !== "calls" || !selectedCallId) return;
     if (selectedCall?.id === selectedCallId) return;
     setObjectLoadError("");
     void api
-      .get(`/system/calls/${selectedCallId}`)
+      .get(projectId
+        ? `${observabilityBase}/calls/${selectedCallId}`
+        : `/system/calls/${selectedCallId}`)
       .then((item) => {
         setSelectedCall(item as Call);
         track(
@@ -3145,13 +3259,16 @@ export default function MonitorPage() {
           String(selectedCallId),
         );
       });
-  }, [activeSection, selectedCall?.id, selectedCallId]);
+  }, [activeSection, observabilityBase, projectId, selectedCall?.id, selectedCallId]);
   return (
     <div className="monitor-page">
       <header className="desk-head">
-        <div className="crumb">漫剧案头 / 监制房</div>
+        <div className="crumb">
+          漫剧案头 / {mode === "system" ? pageTitle : `${projectName || "当前项目"} / 观测台`}
+        </div>
         <h1>
-          监制房 <span className="sub">异常与待办优先的制作工作台</span>
+          {pageTitle}{" "}
+          <span className="sub">{pageDescription}</span>
         </h1>
         <hr className="rule" />
       </header>
@@ -3175,14 +3292,17 @@ export default function MonitorPage() {
           </button>
         </div>
       )}
+      {mode === "project" && (
+        <div className="monitor-scope-banner" role="status">
+          <span aria-hidden="true">锁</span>
+          <div><b>{projectName || "当前项目"}</b><small>查询、详情与处理动作均由服务端锁定到本项目</small></div>
+        </div>
+      )}
       <div className="monitor-block-strip" aria-label="数据块状态">
-        {[
-          ["任务", jobsStatus, jobsSummaryPoll.data?.server_time],
-          ["调用", callsStatus, callsPagePoll.data?.server_time],
-          ["设置", settingsStatus, settingsPoll.data?.server_time],
-          ["健康", healthStatus, undefined],
-          ["模型库", catalogStatus, undefined],
-        ].map(([label, status, stamp]) => (
+        {(mode === "system"
+          ? [["设置", settingsStatus, settingsPoll.data?.server_time], ["健康", healthStatus, undefined], ["模型库", catalogStatus, undefined]]
+          : [["任务", jobsStatus, jobsSummaryPoll.data?.server_time], ["调用", callsStatus, callsPagePoll.data?.server_time]]
+        ).map(([label, status, stamp]) => (
           <span className={`monitor-block-chip ${status}`} key={String(label)}>
             {label}：
             {status === "loading"
@@ -3200,32 +3320,34 @@ export default function MonitorPage() {
           </span>
         ))}
       </div>
-      <nav className="monitor-subnav" aria-label="监制房子菜单">
-        {SECTIONS.map((section) => {
-          const badge =
-            section.key === "jobs" && jobsSummaryPoll.data
-              ? (counts.running || 0) +
-                (counts.queued || 0) +
-                (counts.waiting_human || 0)
-              : undefined;
-          return (
-            <button
-              type="button"
-              key={section.key}
-              className={activeSection === section.key ? "active" : ""}
-              aria-current={activeSection === section.key ? "page" : undefined}
-              onClick={() => openSection(section.key)}
-            >
-              <span>
-                {section.label}
-                {badge != null && badge > 0 && <em>{badge}</em>}
-              </span>
-              <small>{section.description}</small>
-            </button>
-          );
-        })}
-      </nav>
-      {activeSection === "overview" && !features.overview_state_v2 && (
+      {mode !== "system" && (
+        <nav className="monitor-subnav" aria-label="观测台子菜单">
+          {allowedSections.map((section) => {
+            const badge =
+              section.key === "jobs" && jobsSummaryPoll.data
+                ? (counts.running || 0) +
+                  (counts.queued || 0) +
+                  (counts.waiting_human || 0)
+                : undefined;
+            return (
+              <button
+                type="button"
+                key={section.key}
+                className={activeSection === section.key ? "active" : ""}
+                aria-current={activeSection === section.key ? "page" : undefined}
+                onClick={() => openSection(section.key)}
+              >
+                <span>
+                  {section.label}
+                  {badge != null && badge > 0 && <em>{badge}</em>}
+                </span>
+                <small>{section.description}</small>
+              </button>
+            );
+          })}
+        </nav>
+      )}
+      {mode !== "system" && activeSection === "overview" && !features.overview_state_v2 && (
         <section
           className="card monitor-section monitor-state stale"
           role="status"
@@ -3233,7 +3355,43 @@ export default function MonitorPage() {
           新版总览已由独立发布开关停用；任务、运行与调用账本仍可从子菜单直接访问。
         </section>
       )}
-      {activeSection === "overview" && features.overview_state_v2 && (
+      {mode === "system" && activeSection === "overview" && (
+        <section className="card monitor-section system-overview">
+          <div className="monitor-section-head">
+            <div><span className="eyebrow">系统级汇总</span><h2>总览</h2></div>
+            <p>只呈现聚合数字；项目运行原始数据请进入对应项目观测台。</p>
+          </div>
+          <DataBoundary
+            status={blockStatus(systemOverviewPoll.loading, systemOverviewPoll.error, systemOverviewPoll.data, !systemOverviewPoll.data)}
+            error={systemOverviewPoll.error}
+            updatedAt={systemOverviewPoll.data?.server_time}
+            onRetry={() => void systemOverviewPoll.refresh()}
+            emptyLabel="系统暂时没有项目"
+          >
+            {systemOverviewPoll.data && (
+              <>
+                <div className="stat-row monitor-stats">
+                  <div className="stat-cell"><div className="s-label">项目空间</div><div className="cost-ink">{systemOverviewPoll.data.totals.projects}</div></div>
+                  <div className="stat-cell"><div className="s-label">任务总数</div><div className="cost-ink">{systemOverviewPoll.data.totals.jobs}</div></div>
+                  <div className="stat-cell"><div className="s-label">调用总数</div><div className="cost-ink">{systemOverviewPoll.data.totals.calls}</div></div>
+                  <div className="stat-cell"><div className="s-label">待治理未归属数据</div><div className="cost-ink">{systemOverviewPoll.data.totals.unattributed_jobs + systemOverviewPoll.data.totals.unattributed_calls}</div></div>
+                </div>
+                <div className="system-project-summary">
+                  {systemOverviewPoll.data.projects.map((project) => (
+                    <button type="button" key={project.id} onClick={() => go("observability", project.id, null)}>
+                      <div><b>{project.name}</b><small>项目级聚合</small></div>
+                      <span>活跃任务 {(project.job_counts.running || 0) + (project.job_counts.queued || 0)}</span>
+                      <span>异常任务 {(project.job_counts.failed || 0) + (project.job_counts.partial || 0)}</span>
+                      <span>调用 {project.call_count}</span>
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </DataBoundary>
+        </section>
+      )}
+      {mode !== "system" && activeSection === "overview" && features.overview_state_v2 && (
         <div className="monitor-section">
           <div className="monitor-section-head">
             <div>
@@ -3517,6 +3675,7 @@ export default function MonitorPage() {
       {activeSection === "runs" && features.run_center_v2 && (
         <div className="monitor-section">
           <RunCenter
+            projectId={projectId}
             selectedRunId={selectedRunId}
             focusToken={focusToken}
             onSelect={(id) => {
@@ -3593,22 +3752,26 @@ export default function MonitorPage() {
                 ))}
               </select>
             </label>
-            <label>
-              <span>指定项目（高级筛选）</span>
-              <input
-                aria-label="按项目技术标识精确筛选任务"
-                value={jobProject}
-                placeholder="输入项目技术标识（可选）"
-                onChange={(e) => {
-                  setJobProject(e.target.value);
-                  setJobPage(1);
-                  writeQuery({
-                    job_project: e.target.value || null,
-                    job_page: null,
-                  });
-                }}
-              />
-            </label>
+            {projectId ? (
+              <div className="monitor-scope-lock" role="status"><span>数据范围</span><b>{projectName || "当前项目"}</b></div>
+            ) : (
+              <label>
+                <span>指定项目（高级筛选）</span>
+                <input
+                  aria-label="按项目技术标识精确筛选任务"
+                  value={jobProject}
+                  placeholder="输入项目技术标识（可选）"
+                  onChange={(e) => {
+                    setJobProject(e.target.value);
+                    setJobPage(1);
+                    writeQuery({
+                      job_project: e.target.value || null,
+                      job_page: null,
+                    });
+                  }}
+                />
+              </label>
+            )}
             <label>
               <span>工作流</span>
               <select
@@ -3915,24 +4078,28 @@ export default function MonitorPage() {
                 }}
               />
             </label>
-            <label>
-              <span>指定项目（高级筛选）</span>
-              <input
-                aria-label="按项目技术标识精确筛选调用"
-                value={callProject}
-                placeholder="输入项目技术标识（可选）"
-                onChange={(e) => {
-                  setCallProject(e.target.value);
-                  setCallIds("");
-                  setCallPage(1);
-                  writeQuery({
-                    call_project: e.target.value || null,
-                    call_ids: null,
-                    call_page: null,
-                  });
-                }}
-              />
-            </label>
+            {projectId ? (
+              <div className="monitor-scope-lock" role="status"><span>数据范围</span><b>{projectName || "当前项目"}</b></div>
+            ) : (
+              <label>
+                <span>指定项目（高级筛选）</span>
+                <input
+                  aria-label="按项目技术标识精确筛选调用"
+                  value={callProject}
+                  placeholder="输入项目技术标识（可选）"
+                  onChange={(e) => {
+                    setCallProject(e.target.value);
+                    setCallIds("");
+                    setCallPage(1);
+                    writeQuery({
+                      call_project: e.target.value || null,
+                      call_ids: null,
+                      call_page: null,
+                    });
+                  }}
+                />
+              </label>
+            )}
             <label>
               <span>指定功能（高级筛选）</span>
               <input
@@ -4197,6 +4364,7 @@ export default function MonitorPage() {
       {selectedCall && features.call_detail_v2 && (
         <CallDrawer
           call={selectedCall}
+          projectId={projectId}
           onClose={() => {
             setSelectedCall(null);
             setSelectedCallId(0);
@@ -4208,6 +4376,7 @@ export default function MonitorPage() {
       {selectedJob && (
         <JobDrawer
           job={selectedJob}
+          projectId={projectId}
           onClose={() => {
             setSelectedJob(null);
             setSelectedJobId("");
@@ -4218,9 +4387,9 @@ export default function MonitorPage() {
               jobsPagePoll.refresh(),
               jobsSummaryPoll.refresh(),
               api
-                .get(
-                  `/system/jobs/${encodeURIComponent(selectedJob.id)}?source=auto`,
-                )
+                .get(projectId
+                  ? `${observabilityBase}/jobs/${encodeURIComponent(selectedJob.id)}?source=auto`
+                  : `/system/jobs/${encodeURIComponent(selectedJob.id)}?source=auto`)
                 .then((item) => setSelectedJob(item as Job)),
             ])
           }

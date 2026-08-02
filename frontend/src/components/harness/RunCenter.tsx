@@ -26,6 +26,7 @@ interface Page<T> {
   page_count: number;
   server_time: number;
   query_ms?: number;
+  scope?: { type: "project"; project_id: string; project_name: string };
 }
 interface GateArtifact {
   id: string;
@@ -145,10 +146,12 @@ function sourcePath(item: GateArtifact) {
 
 function GateDrawer({
   gate,
+  projectId,
   onClose,
   onDone,
 }: {
   gate: GateArtifact;
+  projectId?: string;
   onClose: () => void;
   onDone: () => void;
 }) {
@@ -165,7 +168,9 @@ function GateDrawer({
     setError("");
     try {
       const next = (await api.get(
-        `/artifacts/${encodeURIComponent(gate.id)}`,
+        projectId
+          ? `/projects/${encodeURIComponent(projectId)}/observability/artifacts/${encodeURIComponent(gate.id)}`
+          : `/artifacts/${encodeURIComponent(gate.id)}`,
       )) as ArtifactEvidence;
       setEvidence(next);
       setStale(false);
@@ -174,7 +179,7 @@ function GateDrawer({
     } finally {
       setLoading(false);
     }
-  }, [gate.id]);
+  }, [gate.id, projectId]);
   useEffect(() => {
     void load();
   }, [load]);
@@ -189,7 +194,9 @@ function GateDrawer({
     setBusy(decision);
     setError("");
     try {
-      await api.post(`/gates/${encodeURIComponent(gate.id)}/decision`, {
+      await api.post(projectId
+        ? `/projects/${encodeURIComponent(projectId)}/observability/gates/${encodeURIComponent(gate.id)}/decision`
+        : `/gates/${encodeURIComponent(gate.id)}/decision`, {
         decision,
         reason: reason.trim(),
         expected_version: evidence?.version ?? gate.version,
@@ -383,16 +390,18 @@ export default function RunCenter({
   selectedRunId,
   focusToken,
   onSelect,
+  projectId,
 }: {
   selectedRunId?: string | null;
   focusToken?: string;
   onSelect?: (id: string | null) => void;
+  projectId?: string;
 }) {
   const initial = paramsFromLocation();
   const [search, setSearch] = useState(initial.get("run_search") || "");
   const [status, setStatus] = useState(initial.get("run_status") || "");
   const [workflow, setWorkflow] = useState(initial.get("run_workflow") || "");
-  const [project, setProject] = useState(initial.get("run_project") || "");
+  const [project, setProject] = useState(projectId || initial.get("run_project") || "");
   const [episode, setEpisode] = useState(initial.get("run_episode") || "");
   const [fromTime, setFromTime] = useState(initial.get("run_from") || "");
   const [toTime, setToTime] = useState(initial.get("run_to") || "");
@@ -437,20 +446,23 @@ export default function RunCenter({
     if (search.trim()) p.set("search", search.trim());
     if (status) p.set("status", status);
     if (workflow) p.set("workflow", workflow);
-    if (project.trim()) p.set("project_id", project.trim());
+    if (!projectId && project.trim()) p.set("project_id", project.trim());
     if (episode.trim()) p.set("episode_no", episode.trim());
     if (fromTime) p.set("from_ts", String(new Date(fromTime).getTime() / 1000));
     if (toTime) p.set("to_ts", String(new Date(toTime).getTime() / 1000));
     p.set("sort", sort);
     if (includeHistory) p.set("include_history", "true");
-    return `/runs/query?${p}`;
+    return projectId
+      ? `/projects/${encodeURIComponent(projectId)}/observability/runs?${p}`
+      : `/runs/query?${p}`;
   }, [
     episode,
     fromTime,
     includeHistory,
     page,
     pageSize,
-    project,
+    projectId ? "" : project,
+    projectId,
     search,
     sort,
     status,
@@ -462,6 +474,9 @@ export default function RunCenter({
       if (!background && !runs) setLoading(true);
       try {
         const next = (await api.get(queryPath)) as Page<RunItem>;
+        if (projectId && next.scope?.project_id !== projectId) {
+          throw new Error("运行列表的项目范围与当前路由不一致，已拒绝渲染");
+        }
         setRuns(next);
         setListError("");
         setLoading(false);
@@ -483,12 +498,14 @@ export default function RunCenter({
   );
   const refreshGates = useCallback(async () => {
     try {
-      setGates((await api.get("/gates?limit=100")) as GateArtifact[]);
+      setGates((await api.get(projectId
+        ? `/projects/${encodeURIComponent(projectId)}/observability/gates?limit=100`
+        : "/gates?limit=100")) as GateArtifact[]);
       setGateError("");
     } catch (e) {
       setGateError((e as Error).message);
     }
-  }, []);
+  }, [projectId]);
   useEffect(() => {
     void refreshRuns();
     const timer = window.setInterval(() => void refreshRuns(true), 4000);
@@ -523,7 +540,7 @@ export default function RunCenter({
       setSearch(params.get("run_search") || "");
       setStatus(params.get("run_status") || "");
       setWorkflow(params.get("run_workflow") || "");
-      setProject(params.get("run_project") || "");
+      setProject(projectId || params.get("run_project") || "");
       setEpisode(params.get("run_episode") || "");
       setFromTime(params.get("run_from") || "");
       setToTime(params.get("run_to") || "");
@@ -535,7 +552,7 @@ export default function RunCenter({
     };
     window.addEventListener("popstate", restoreFromUrl);
     return () => window.removeEventListener("popstate", restoreFromUrl);
-  }, []);
+  }, [projectId]);
   useEffect(() => {
     if (!selected) {
       setDetail(null);
@@ -545,10 +562,13 @@ export default function RunCenter({
     }
     const sequence = ++requestSeq.current;
     setDetailError("");
+    const runBase = projectId
+      ? `/projects/${encodeURIComponent(projectId)}/observability/runs`
+      : "/runs";
     Promise.all([
-      api.get(`/runs/${encodeURIComponent(selected)}`),
-      api.get(`/runs/${encodeURIComponent(selected)}/steps`),
-      api.get(`/runs/${encodeURIComponent(selected)}/events?limit=100`),
+      api.get(`${runBase}/${encodeURIComponent(selected)}`),
+      api.get(`${runBase}/${encodeURIComponent(selected)}/steps`),
+      api.get(`${runBase}/${encodeURIComponent(selected)}/events?limit=100`),
     ])
       .then(
         ([nextDetail, nextSteps, nextEvents]: [
@@ -570,7 +590,7 @@ export default function RunCenter({
           setDetailError((e as Error).message);
         }
       });
-  }, [selected]);
+  }, [projectId, selected]);
   useEffect(() => {
     if (!focusToken || !selectedRowRef.current) return;
     selectedRowRef.current.scrollIntoView({
@@ -601,7 +621,9 @@ export default function RunCenter({
     setActionMessage("");
     try {
       const result = await api.post(
-        `/runs/${encodeURIComponent(selected)}/${action}`,
+        projectId
+          ? `/projects/${encodeURIComponent(projectId)}/observability/runs/${encodeURIComponent(selected)}/${action}`
+          : `/runs/${encodeURIComponent(selected)}/${action}`,
       );
       track(
         "job_action",
@@ -613,7 +635,9 @@ export default function RunCenter({
       await refreshRuns(true);
       if (!nextId || nextId === selected) {
         const nextDetail = (await api.get(
-          `/runs/${encodeURIComponent(selected)}`,
+          projectId
+            ? `/projects/${encodeURIComponent(projectId)}/observability/runs/${encodeURIComponent(selected)}`
+            : `/runs/${encodeURIComponent(selected)}`,
         )) as RunItem;
         setDetail(nextDetail);
       }
@@ -634,7 +658,7 @@ export default function RunCenter({
     search,
     status,
     workflow,
-    project,
+    projectId ? "" : project,
     episode,
     fromTime,
     toTime,
@@ -716,21 +740,28 @@ export default function RunCenter({
             ))}
           </select>
         </label>
-        <label>
-          <span>指定项目（高级筛选）</span>
-          <input
-            aria-label="按项目技术标识精确筛选运行"
-            value={project}
-            placeholder="输入项目技术标识（可选）"
-            onChange={(e) => {
-              setProject(e.target.value);
-              updateFilter({
-                run_project: e.target.value || null,
-                run_page: null,
-              });
-            }}
-          />
-        </label>
+        {projectId ? (
+          <div className="monitor-scope-lock" role="status">
+            <span>数据范围</span>
+            <b>当前项目（不可跨项目切换）</b>
+          </div>
+        ) : (
+          <label>
+            <span>指定项目（高级筛选）</span>
+            <input
+              aria-label="按项目技术标识精确筛选运行"
+              value={project}
+              placeholder="输入项目技术标识（可选）"
+              onChange={(e) => {
+                setProject(e.target.value);
+                updateFilter({
+                  run_project: e.target.value || null,
+                  run_page: null,
+                });
+              }}
+            />
+          </label>
+        )}
         <label>
           <span>集数</span>
           <input
@@ -1168,6 +1199,7 @@ export default function RunCenter({
       {openGate && (
         <GateDrawer
           gate={openGate}
+          projectId={projectId}
           onClose={() => setOpenGate(null)}
           onDone={() => void Promise.all([refreshGates(), refreshRuns(true)])}
         />

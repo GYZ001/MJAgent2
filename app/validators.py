@@ -54,7 +54,6 @@ from app.renderability import (
     SCENE_OUTLINE_MAX,
     SCENE_OUTLINE_MIN,
     SHOT_HARD_MAX,
-    SHOT_SOFT_MIN,
     SPINE_BEATS_MAX,
     SPINE_BEATS_MIN,
     duration_gt5_errors,
@@ -143,9 +142,9 @@ def default_scene_transition(prev: Shot | None, shot: Shot) -> str:
 
 
 def storyboard_shot_count_range(target_duration_s: int) -> tuple[int, int]:
-    """Renderability First：软预算约 8~16，硬上限 20（防碎镜）；不再使用百万级熔断当产品上限。"""
+    """镜头数由剧情完整覆盖决定，仅保留防失控的技术硬上限。"""
     _ = target_duration_s
-    return SHOT_SOFT_MIN, SHOT_HARD_MAX
+    return 1, SHOT_HARD_MAX
 
 
 def _voiced_shot_count(shots: list[Shot]) -> int:
@@ -251,6 +250,24 @@ def _contiguous_scene_move(prev_scene: str, scene: str) -> bool:
     return common >= 3
 
 
+def _scene_time_key(scene: str) -> str:
+    """Normalize the explicit time label in ``时间，地点`` scene tags."""
+    raw = re.split(r"[，,]", (scene or "").strip(), maxsplit=1)[0].strip()
+    if any(token in raw for token in ("凌晨", "清晨", "早晨", "上午", "白天", "日间", "日")):
+        return "day"
+    if any(token in raw for token in ("中午", "午后", "下午", "傍晚", "黄昏")):
+        return "late_day"
+    if any(token in raw for token in ("夜晚", "夜里", "深夜", "午夜", "夜")):
+        return "night"
+    return _normalize_scene_label(raw)
+
+
+def _scene_time_changed(prev_scene: str, scene: str) -> bool:
+    previous = _scene_time_key(prev_scene)
+    current = _scene_time_key(scene)
+    return bool(previous and current and previous != current)
+
+
 def _has_transition_visual(transition: str, *parts: str | None) -> bool:
     text = "".join(part or "" for part in parts)
     hints = TRANSITION_VISUAL_HINTS.get(transition, (transition,))
@@ -319,7 +336,6 @@ def validate_storyboard(
             f"节拍单元按 5s 换算要求目标取 {'/'.join(str(x) for x in config.EPISODE_TARGET_CHOICES)}s")
     # 镜头数量和整集总时长不设产品上限；完整覆盖剧本是唯一收束条件。
 
-    prev_sizes: list[str] = []
     scene_last_seen: dict[str, int] = {}
     for i, shot in enumerate(shots):
         shot.action_desc = normalize_action_desc(shot.action_desc)
@@ -525,25 +541,27 @@ def validate_storyboard(
                         f"换场请用 {sorted(SCENE_CUT_TRANSITIONS)} 之一")
                 dialogue_text = "".join(d.line for d in shot.dialogues)
                 # 承接说明判定（放宽，杜绝高频误伤）：满足以下任一即视为已写清承接——
-                # ① 含时间/线索类承接词；② 动作/旁白写了人物移动；③ 同一片连续空间子区域移动。
+                # ① 含时间/线索类承接词；② action/state_in/首帧写了人物移动；
+                # ③ 同一片连续空间子区域移动；④ 时间明确变化；⑤ 切到另一组人物；
+                # ⑥ 远/全景重新建场。只保留“同人物同时间突然跳到无关地点”的高置信度告警。
                 move_explained = (
                     _has_transition_hint(scene, shot.action_desc, shot.narration, dialogue_text)
                     or _has_movement_cue(shot.action_desc, shot.narration)
+                    or _has_transition_hint(shot.state_in, shot.first_frame_desc)
+                    or _has_movement_cue(shot.state_in, shot.first_frame_desc)
                     or _contiguous_scene_move(prev_scene, scene)
+                    or _scene_time_changed(prev_scene, scene)
+                    or not shared_chars
+                    or shot.shot_size in {"远景", "全景"}
                 )
                 if not move_explained:
                     errors.append(
                         f"{tag} 从上一镜「{prev_scene}」切到「{scene}」但缺少承接说明；"
-                        "请在 narration 或 action_desc 写清时间跳跃、线索带入或人物为何来到新场景")
+                        "请在 state_in、首帧或画面动作中写清人物如何来到新地点，或改用远景/全景重新建场")
                 if not _has_transition_visual(shot.transition, prev.last_frame_desc, prev.action_desc):
                     errors.append(
                         f"shots[{i - 1}](shot_no={prev.shot_no}).last_frame_desc 未体现进入镜{shot.shot_no:02d}的「{shot.transition}」转场收尾；"
                         "请在上一镜尾帧写出可见转场视觉，例如渐暗/闪白/遮挡/甩镜模糊/叠化余韵/匹配构图呼应")
-        # V7 景别不三连
-        prev_sizes.append(shot.shot_size)
-        if len(prev_sizes) >= 3 and prev_sizes[-1] == prev_sizes[-2] == prev_sizes[-3]:
-            errors.append(f"{tag} 起连续 3 个镜头景别均为「{shot.shot_size}」，请交替景别")
-
     # V7 shot_no 连续
     expected = list(range(1, len(shots) + 1))
     actual = [s.shot_no for s in shots]
@@ -762,6 +780,36 @@ def _matching_text_indices(needle: str, ordered_texts: list[str]) -> list[int]:
     ]
 
 
+def key_lines_in_story_order(key_lines: list[str], full_script_text: str) -> list[str]:
+    """Return key-line text in its actual screenplay order without changing KL identities.
+
+    ``dialogue_chains`` are model-produced groups and can arrive in topic/importance order.
+    Existing storyboards already persist KL01.. references derived from that list, so validation
+    must sort a copy for narrative-order checks rather than renumbering the stored catalog.
+    """
+    cleaned = [line.strip() for line in key_lines if line and line.strip()]
+    dialogue_turns = _script_dialogue_turns(full_script_text or "")
+    if len(cleaned) < 2 or not dialogue_turns:
+        return cleaned
+    ordered_speakers = [speaker.strip() for _scene, speaker, _spoken in dialogue_turns]
+    ordered_texts = [spoken for _scene, _speaker, spoken in dialogue_turns]
+    fallback_start = len(ordered_texts)
+    ranked: list[tuple[int, int, str]] = []
+    for original_index, line in enumerate(cleaned):
+        expected_speaker = _speaker_name(line)
+        candidates = _matching_text_indices(line, ordered_texts)
+        if expected_speaker:
+            speaker_matches = [
+                index for index in candidates
+                if ordered_speakers[index] == expected_speaker
+            ]
+            if speaker_matches:
+                candidates = speaker_matches
+        position = candidates[0] if candidates else fallback_start + original_index
+        ranked.append((position, original_index, line))
+    return [line for _position, _original_index, line in sorted(ranked)]
+
+
 def key_line_order_errors(
     key_lines: list[str], ordered_texts: list[str], *, subject: str,
 ) -> list[str]:
@@ -874,7 +922,7 @@ def normalize_screenplay_dialogue_chains(script: EpisodeScreenplay) -> EpisodeSc
             line = (turn.line or "").strip()
             if speaker and line:
                 flattened.append(f"{speaker}：{line}")
-    script.key_lines = flattened
+    script.key_lines = key_lines_in_story_order(flattened, script.full_script_text)
     return script
 
 
@@ -1916,7 +1964,9 @@ def validate_storyboard_preserves_key_content(board: Storyboard,
         if (dialogue.line or "").strip()
     ]
     errors.extend(key_line_order_errors(
-        key_lines, ordered_spoken_turns, subject="分镜 dialogues",
+        key_lines_in_story_order(key_lines, screenplay.full_script_text),
+        ordered_spoken_turns,
+        subject="分镜 dialogues",
     ))
 
     spine = screenplay.plot_spine
@@ -1973,6 +2023,28 @@ def key_line_delivery_errors(shot: Shot, screenplay: EpisodeScreenplay | None = 
                 )
         # 无剧本 catalog 时只校验 ID 格式（格式已由 shot_id_space_errors 负责）
     return errors
+
+
+_SPINE_SPOKEN_CLAUSE_MARKERS = (
+    "开口", "说", "宣布", "宣读", "询问", "回答", "回应", "安慰", "反驳",
+    "警告", "告知", "暗示", "提到", "介绍", "嘲笑", "威胁", "拒绝", "同意",
+    "解释", "请求", "承诺", "指出", "相信", "认为", "表示", "承认", "答应",
+    "提醒", "质问", "反问", "感叹",
+)
+
+
+def _spine_delivery_clauses(does: str) -> tuple[list[str], list[str]]:
+    """Split a spine beat into visible-action and spoken-delivery evidence."""
+    clauses = [
+        clause.strip(" ，,；;。")
+        for clause in re.split(r"(?:并且|并|同时|随后|然后|[，,；;])", does or "")
+        if clause.strip(" ，,；;。")
+    ]
+    visible: list[str] = []
+    spoken: list[str] = []
+    for clause in clauses:
+        (spoken if any(marker in clause for marker in _SPINE_SPOKEN_CLAUSE_MARKERS) else visible).append(clause)
+    return visible, spoken
 
 
 def validate_spine_delivery_ledger(
@@ -2066,7 +2138,23 @@ def validate_spine_delivery_ledger(
                     + (s.last_frame_desc or "")
                     for s in subject_shots
                 )
-                if (beat.does or "").strip() and _claim_clearly_absent(beat.does, subject_action_text):
+                subject_spoken_text = "".join(
+                    dialogue.line
+                    for s in subject_shots
+                    for dialogue in (s.dialogues or [])
+                    if (
+                        who == (dialogue.speaker or "").strip()
+                        or who in (dialogue.speaker or "").strip()
+                        or (dialogue.speaker or "").strip() in who
+                    )
+                )
+                visible_clauses, spoken_clauses = _spine_delivery_clauses(beat.does or "")
+                visible_missing = any(
+                    _claim_clearly_absent(clause, subject_action_text)
+                    for clause in visible_clauses
+                )
+                spoken_missing = bool(spoken_clauses) and not subject_spoken_text.strip()
+                if visible_missing or spoken_missing:
                     missing_visible_actions.append(f"{beat_id}/{who}:{beat.does}")
             for kid in (beat.key_line_ids or []):
                 kid_u = str(kid).strip().upper()
@@ -2135,8 +2223,8 @@ def validate_spine_delivery_ledger(
         extra = (f"（另有 {len(unique_missing) - KEY_CONTENT_MAX_REPORT} 条从略）"
                  if len(unique_missing) > KEY_CONTENT_MAX_REPORT else "")
         errors.append(
-            f"主线节拍动作主体已入画但未完成对应动作：{shown}{extra}；"
-            "请在该主体可见的 action_desc/首尾帧中明确拍出 beat.does，"
+            f"主线节拍主体已入画但未完成对应动作/对白交付：{shown}{extra}；"
+            "可见动作请在 action_desc/首尾帧中拍出，口头交付请由该主体在 dialogues 中说出，"
             "不要用后续走位、静态反应或他人宣布替代"
         )
     if legacy_uncertain:
@@ -2799,7 +2887,7 @@ def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeS
             f"大纲未安排 {len(missing_lines)} 条必保留关键台词：{shown}{extra}；"
             "请把每条关键台词分配到对应镜头的 covers，确保整集都规划进去")
     errors.extend(key_line_order_errors(
-        key_lines,
+        key_lines_in_story_order(key_lines, screenplay.full_script_text),
         [(s.beat or "") + (s.covers or "") for s in shots],
         subject="分镜大纲",
     ))

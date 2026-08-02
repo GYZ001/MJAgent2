@@ -681,28 +681,23 @@ def read_chapter(project_id: str, idx: int):
             "first_idx": bounds["lo"], "last_idx": bounds["hi"], "total": bounds["n"]}
 
 
-def _delete_project_evidence(conn, project_id: str) -> dict[str, int]:
-    """Delete project-scoped Harness evidence before removing business rows."""
-    episode_ids = [
-        row["id"] for row in conn.execute(
-            "SELECT id FROM episodes WHERE project_id=?", (project_id,)
-        ).fetchall()
-    ]
-    shot_ids = [
-        row["id"] for row in conn.execute(
-            """SELECT s.id FROM shots s
-               JOIN episodes e ON e.id=s.episode_id WHERE e.project_id=?""",
-            (project_id,),
-        ).fetchall()
-    ]
-    scope_ids = [project_id, *episode_ids, *shot_ids]
+def _delete_scoped_evidence(
+    conn,
+    *,
+    scope_ids: list[str],
+    scope_prefix: str,
+    episode_ids: list[str],
+) -> dict[str, int]:
+    """Delete Harness evidence owned by one project or episode subtree."""
     scope_marks = ",".join("?" for _ in scope_ids)
+    scope_params: list[object] = [*scope_ids, f"{scope_prefix}:%"]
+    scope_where = f"(scope_id IN ({scope_marks}) OR scope_id LIKE ?)"
 
     run_ids = {
         row["id"] for row in conn.execute(
             f"""SELECT id FROM workflow_runs
-                WHERE scope_id IN ({scope_marks}) OR scope_id LIKE ?""",
-            [*scope_ids, f"{project_id}:%"],
+                WHERE {scope_where}""",
+            scope_params,
         ).fetchall()
     }
     # Recovery/child runs can use their own scope. Include the whole descendant
@@ -730,8 +725,8 @@ def _delete_project_evidence(conn, project_id: str) -> dict[str, int]:
             ).fetchall()
         }
 
-    artifact_params: list[object] = [*scope_ids, f"{project_id}:%"]
-    artifact_where = f"(scope_id IN ({scope_marks}) OR scope_id LIKE ?)"
+    artifact_params = list(scope_params)
+    artifact_where = scope_where
     if step_ids:
         step_marks = ",".join("?" for _ in step_ids)
         artifact_where += f" OR created_by_step_run_id IN ({step_marks})"
@@ -798,14 +793,396 @@ def _delete_project_evidence(conn, project_id: str) -> dict[str, int]:
 
     conn.execute(
         f"DELETE FROM review_action_audit "
-        f"WHERE scope_id IN ({scope_marks}) OR scope_id LIKE ?",
-        [*scope_ids, f"{project_id}:%"],
+        f"WHERE {scope_where}",
+        scope_params,
     )
     return {
         "artifacts": len(artifact_ids),
         "runs": len(run_ids),
         "steps": len(step_ids),
     }
+
+
+def _delete_project_evidence(conn, project_id: str) -> dict[str, int]:
+    """Delete project-scoped Harness evidence before removing business rows."""
+    episode_ids = [
+        row["id"] for row in conn.execute(
+            "SELECT id FROM episodes WHERE project_id=?", (project_id,)
+        ).fetchall()
+    ]
+    shot_ids = [
+        row["id"] for row in conn.execute(
+            """SELECT s.id FROM shots s
+               JOIN episodes e ON e.id=s.episode_id WHERE e.project_id=?""",
+            (project_id,),
+        ).fetchall()
+    ]
+    return _delete_scoped_evidence(
+        conn,
+        scope_ids=[project_id, *episode_ids, *shot_ids],
+        scope_prefix=project_id,
+        episode_ids=episode_ids,
+    )
+
+
+def _delete_episode_evidence(conn, episode_id: str) -> dict[str, int]:
+    """Delete only the evidence rooted at one episode and its shots."""
+    shot_ids = [
+        row["id"] for row in conn.execute(
+            "SELECT id FROM shots WHERE episode_id=?", (episode_id,)
+        ).fetchall()
+    ]
+    return _delete_scoped_evidence(
+        conn,
+        scope_ids=[episode_id, *shot_ids],
+        scope_prefix=episode_id,
+        episode_ids=[episode_id],
+    )
+
+
+def _json_with_episode_number(value: str | None, episode_no: int) -> str | None:
+    """Keep mutable screenplay projections aligned with their episode row."""
+    if not value:
+        return value
+    try:
+        payload = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return value
+    if not isinstance(payload, dict):
+        return value
+    payload["episode_no"] = episode_no
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _compact_asset_episode_ranges(
+    conn,
+    *,
+    table: str,
+    name_column: str,
+    project_id: str,
+    surviving_numbers: list[int],
+) -> dict[str, int]:
+    """Project an asset's inclusive episode range onto a compacted sequence."""
+    from bisect import bisect_left, bisect_right
+
+    rows = conn.execute(
+        f"SELECT id,{name_column} AS asset_name,ep_start,ep_end "
+        f"FROM {table} WHERE project_id=? ORDER BY ep_start,id",
+        (project_id,),
+    ).fetchall()
+    mapped: list[dict] = []
+    deleted_ids: set[str] = set()
+    for row in rows:
+        old_start = int(row["ep_start"])
+        old_end = int(row["ep_end"]) if row["ep_end"] is not None else None
+        if old_start <= 0:
+            new_start = old_start
+            new_end = old_end
+            if old_end is not None and old_end > 0:
+                new_end = bisect_right(surviving_numbers, old_end)
+        else:
+            left = bisect_left(surviving_numbers, old_start)
+            if left >= len(surviving_numbers) or (
+                old_end is not None and surviving_numbers[left] > old_end
+            ):
+                deleted_ids.add(row["id"])
+                continue
+            new_start = left + 1
+            new_end = (
+                bisect_right(surviving_numbers, old_end)
+                if old_end is not None
+                else None
+            )
+        if new_end is not None and new_start > new_end:
+            deleted_ids.add(row["id"])
+            continue
+        mapped.append({
+            "id": row["id"],
+            "asset_name": row["asset_name"],
+            "old_start": old_start,
+            "old_end": old_end,
+            "new_start": new_start,
+            "new_end": new_end,
+        })
+
+    # Legacy overlapping ranges can collapse onto the same unique start after a
+    # gap is removed. The latest old range is the one that governed the first
+    # surviving episode, so retain it deterministically.
+    by_key: dict[tuple[str, int], list[dict]] = {}
+    for item in mapped:
+        by_key.setdefault((item["asset_name"], item["new_start"]), []).append(item)
+    for candidates in by_key.values():
+        if len(candidates) <= 1:
+            continue
+        keep = max(candidates, key=lambda item: (item["old_start"], item["id"]))
+        deleted_ids.update(item["id"] for item in candidates if item is not keep)
+    mapped = [item for item in mapped if item["id"] not in deleted_ids]
+
+    if deleted_ids:
+        marks = ",".join("?" for _ in deleted_ids)
+        conn.execute(f"DELETE FROM {table} WHERE id IN ({marks})", sorted(deleted_ids))
+
+    updates = [
+        item for item in mapped
+        if item["old_start"] != item["new_start"] or item["old_end"] != item["new_end"]
+    ]
+    temporary_base = max([*surviving_numbers, 0]) + 1_000_000
+    for index, item in enumerate(updates, start=1):
+        conn.execute(
+            f"UPDATE {table} SET ep_start=? WHERE id=?",
+            (temporary_base + index, item["id"]),
+        )
+    for item in updates:
+        conn.execute(
+            f"UPDATE {table} SET ep_start=?,ep_end=? WHERE id=?",
+            (item["new_start"], item["new_end"], item["id"]),
+        )
+    return {"updated": len(updates), "deleted": len(deleted_ids)}
+
+
+def _replace_episode_path_prefixes(
+    conn,
+    *,
+    project_id: str,
+    number_changes: list[tuple[int, int]],
+) -> int:
+    """Rewrite operational file references after episode directories move."""
+    path_columns = {
+        "artifacts": ("file_path",),
+        "delivery_packages": ("package_path", "manifest_json", "quality_report_json"),
+        "evaluations": ("evidence_json",),
+        "reference_assets": ("path", "dependency_manifest_json"),
+        "shot_scenes": ("image_path",),
+        "shot_versions": (
+            "video_path",
+            "last_frame_url",
+            "technical_validation_json",
+            "image_inputs",
+        ),
+    }
+    available_tables = {
+        row["name"] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    changed = 0
+    for table, columns in path_columns.items():
+        if table not in available_tables:
+            continue
+        available_columns = {
+            row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        for old_no, new_no in number_changes:
+            old_prefix = str(config.PROJECTS_DIR / project_id / "episodes" / str(old_no))
+            new_prefix = str(config.PROJECTS_DIR / project_id / "episodes" / str(new_no))
+            for column in columns:
+                if column not in available_columns:
+                    continue
+                cursor = conn.execute(
+                    f"UPDATE {table} SET {column}=REPLACE({column}, ?, ?) "
+                    f"WHERE {column} LIKE ?",
+                    (old_prefix, new_prefix, f"%{old_prefix}%"),
+                )
+                changed += max(0, cursor.rowcount)
+    return changed
+
+
+def _compact_project_episode_numbers(conn, project_id: str) -> dict[str, object]:
+    """Renumber surviving episodes densely while preserving stable episode IDs."""
+    episodes = conn.execute(
+        "SELECT id,episode_no,screenplay_json,storyboard_outline_json "
+        "FROM episodes WHERE project_id=? ORDER BY episode_no,id",
+        (project_id,),
+    ).fetchall()
+    surviving_numbers = [int(row["episode_no"]) for row in episodes]
+    changes = [
+        (row, new_no)
+        for new_no, row in enumerate(episodes, start=1)
+        if int(row["episode_no"]) != new_no
+    ]
+    if not changes:
+        return {
+            "renumbered": 0,
+            "directories_moved": 0,
+            "path_references_updated": 0,
+            "character_ranges": {"updated": 0, "deleted": 0},
+            "scene_ranges": {"updated": 0, "deleted": 0},
+        }
+
+    episode_root = config.PROJECTS_DIR / project_id / "episodes"
+    number_changes = [(int(row["episode_no"]), new_no) for row, new_no in changes]
+    source_directories = {episode_root / str(old_no) for old_no, _ in number_changes}
+    for _, new_no in number_changes:
+        destination = episode_root / str(new_no)
+        if destination.exists() and destination not in source_directories:
+            raise RuntimeError(f"分集目录重编号目标已存在：{destination}")
+
+    directory_moves: list[tuple[Path, Path, Path]] = []
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if episode_root.exists():
+            for old_no, new_no in number_changes:
+                source = episode_root / str(old_no)
+                if not source.exists():
+                    continue
+                temporary = episode_root / f".{new_id('renumber')}-{old_no}"
+                source.rename(temporary)
+                directory_moves.append((source, temporary, episode_root / str(new_no)))
+
+        temporary_base = max(surviving_numbers) + len(episodes) + 1_000_000
+        for index, (row, _) in enumerate(changes, start=1):
+            conn.execute(
+                "UPDATE episodes SET episode_no=? WHERE id=?",
+                (temporary_base + index, row["id"]),
+            )
+        for row, new_no in changes:
+            conn.execute(
+                """UPDATE episodes
+                      SET episode_no=?,screenplay_json=?,storyboard_outline_json=?
+                    WHERE id=?""",
+                (
+                    new_no,
+                    _json_with_episode_number(row["screenplay_json"], new_no),
+                    _json_with_episode_number(row["storyboard_outline_json"], new_no),
+                    row["id"],
+                ),
+            )
+            draft = conn.execute(
+                "SELECT content_json FROM screenplay_drafts WHERE episode_id=?",
+                (row["id"],),
+            ).fetchone()
+            if draft:
+                conn.execute(
+                    "UPDATE screenplay_drafts SET content_json=? WHERE episode_id=?",
+                    (_json_with_episode_number(draft["content_json"], new_no), row["id"]),
+                )
+
+        character_ranges = _compact_asset_episode_ranges(
+            conn,
+            table="character_portraits",
+            name_column="character_name",
+            project_id=project_id,
+            surviving_numbers=surviving_numbers,
+        )
+        scene_ranges = _compact_asset_episode_ranges(
+            conn,
+            table="scene_references",
+            name_column="scene_name",
+            project_id=project_id,
+            surviving_numbers=surviving_numbers,
+        )
+        path_references_updated = _replace_episode_path_prefixes(
+            conn,
+            project_id=project_id,
+            number_changes=number_changes,
+        )
+        for _, temporary, destination in directory_moves:
+            temporary.rename(destination)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        for source, temporary, destination in reversed(directory_moves):
+            try:
+                if destination.exists():
+                    destination.rename(source)
+                elif temporary.exists():
+                    temporary.rename(source)
+            except OSError:
+                # Preserve the original exception. Any stranded hidden directory
+                # is intentionally not deleted so its media remains recoverable.
+                pass
+        raise
+
+    return {
+        "renumbered": len(changes),
+        "directories_moved": len(directory_moves),
+        "path_references_updated": path_references_updated,
+        "character_ranges": character_ranges,
+        "scene_ranges": scene_ranges,
+    }
+
+
+def _assert_no_other_episode_work(project_id: str, deleting_episode_id: str) -> None:
+    """Avoid renumbering paths while another episode is actively writing them."""
+    from app.planning import ACTIVE_MEDIA_JOB_STATUSES
+
+    conn = get_conn()
+    marks = ",".join("?" for _ in ACTIVE_MEDIA_JOB_STATUSES)
+    active_job = conn.execute(
+        f"""SELECT id FROM jobs
+             WHERE project_id=? AND episode_id!=? AND status IN ({marks})
+             LIMIT 1""",
+        (project_id, deleting_episode_id, *sorted(ACTIVE_MEDIA_JOB_STATUSES)),
+    ).fetchone()
+    other_episode_ids = [
+        row["id"] for row in conn.execute(
+            "SELECT id FROM episodes WHERE project_id=? AND id!=?",
+            (project_id, deleting_episode_id),
+        ).fetchall()
+    ]
+    active_task = any(
+        task_registry.active(kind, episode_id)
+        for episode_id in other_episode_ids
+        for kind in ("screenplay", "storyboard", "video_completion")
+    )
+    if active_job or active_task:
+        raise HTTPException(
+            409,
+            "项目内其他分集仍在生成，请先等待完成或停止任务，再删除并自动重排集号",
+        )
+
+
+async def _delete_episode_core(episode_id: str) -> dict:
+    """Permanently remove one episode and every downstream production asset."""
+    ep = dict(_episode_or_404(episode_id))
+    project = get_conn().execute(
+        "SELECT plan_status FROM projects WHERE id=?", (ep["project_id"],)
+    ).fetchone()
+    if task_registry.active("plan", ep["project_id"]) or (
+        project and project["plan_status"] == "running"
+    ):
+        raise HTTPException(409, "分集规划正在运行，请等待完成后再删除单集")
+    _assert_no_other_episode_work(ep["project_id"], episode_id)
+
+    cancelled_tasks = 0
+    for kind in ("screenplay", "storyboard", "video_completion"):
+        cancelled_tasks += int(await task_registry.cancel_and_wait(kind, episode_id))
+
+    conn = get_conn()
+    # Cancellation finalizers may have refreshed the episode projection. Recheck
+    # existence before deleting its immutable evidence and generated media.
+    ep = conn.execute(
+        "SELECT id,project_id,episode_no,title FROM episodes WHERE id=?",
+        (episode_id,),
+    ).fetchone()
+    if not ep:
+        raise HTTPException(404, f"分集不存在：{episode_id}")
+    evidence_removed = _delete_episode_evidence(conn, episode_id)
+    worker.delete_episode_shots(episode_id)
+    conn.execute("DELETE FROM episodes WHERE id=?", (episode_id,))
+    conn.commit()
+
+    import shutil
+    shutil.rmtree(
+        config.PROJECTS_DIR / ep["project_id"] / "episodes" / str(ep["episode_no"]),
+        ignore_errors=True,
+    )
+    compaction = _compact_project_episode_numbers(conn, ep["project_id"])
+    return {
+        "deleted": episode_id,
+        "project_id": ep["project_id"],
+        "episode_no": ep["episode_no"],
+        "title": ep["title"],
+        "cancelled_tasks": cancelled_tasks,
+        "evidence_removed": evidence_removed,
+        **compaction,
+    }
+
+
+@router.delete("/episodes/{episode_id}")
+async def delete_episode(episode_id: str):
+    return await _delete_episode_core(episode_id)
 
 
 async def _delete_project_core(project_id: str) -> dict:

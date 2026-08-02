@@ -127,6 +127,220 @@ def test_project_delete_removes_harness_evidence_and_files(tmp_path, monkeypatch
     assert not (project_root / "p1").exists()
 
 
+def test_episode_delete_removes_only_target_and_all_downstream_assets(tmp_path, monkeypatch) -> None:
+    from app import config
+    from app.domain import projects as projects_api
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "delete-episode.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    conn = db.get_conn()
+    project_root = tmp_path / "projects"
+    monkeypatch.setattr(config, "PROJECTS_DIR", project_root)
+    episode_root = project_root / "p1" / "episodes" / "1"
+    video = episode_root / "shots" / "1" / "candidate.mp4"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"video")
+    survivor_root = project_root / "p1" / "episodes" / "2"
+    survivor_video = survivor_root / "shots" / "1" / "candidate.mp4"
+    survivor_reference = survivor_root / "shots" / "1" / "references" / "hero.jpg"
+    survivor_video.parent.mkdir(parents=True)
+    survivor_reference.parent.mkdir(parents=True)
+    survivor_video.write_bytes(b"keep-video")
+    survivor_reference.write_bytes(b"keep-reference")
+
+    conn.execute(
+        "INSERT INTO projects(id,name,status,plan_status,created_at) "
+        "VALUES('p1','P','planned','ready',1)"
+    )
+    conn.executemany(
+        """INSERT INTO episodes(
+               id,project_id,episode_no,title,status,screenplay_json,
+               storyboard_outline_json,created_at
+           ) VALUES(?,?,?,?,?,?,?,1)""",
+        [
+            ('e1', 'p1', 1, 'Delete me', 'planned', None, None),
+            (
+                'e2', 'p1', 2, 'Keep me', 'planned',
+                json.dumps({'episode_no': 2, 'title': 'Keep me'}),
+                json.dumps({'episode_no': 2, 'shots': []}),
+            ),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO shots(id,episode_id,shot_no,duration_s) VALUES(?,?,1,5)",
+        [('s1', 'e1'), ('s2', 'e2')],
+    )
+    conn.executemany(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,video_path,
+               technical_validation_json,image_inputs,created_at
+           ) VALUES(?,?,1,'prompt',?,'succeeded',?,?,?,1)""",
+        [
+            ('v1', 's1', 'idem-delete', str(video), None, None),
+            (
+                'v2', 's2', 'idem-keep', str(survivor_video),
+                json.dumps({'video_path': str(survivor_video)}),
+                json.dumps({'image_path': str(survivor_reference)}),
+            ),
+        ],
+    )
+    conn.execute(
+        """INSERT INTO screenplay_drafts(
+               id,episode_id,content_json,dirty_at,updated_at
+           ) VALUES('draft2','e2',?,1,1)""",
+        (json.dumps({'episode_no': 2, 'title': 'Draft'}),),
+    )
+    conn.executemany(
+        """INSERT INTO character_portraits(
+               id,project_id,character_name,ep_start,ep_end,created_at
+           ) VALUES(?,?,?,?,?,1)""",
+        [
+            ('cp-delete', 'p1', 'Deleted only', 1, 1),
+            ('cp-keep', 'p1', 'Hero', 2, None),
+        ],
+    )
+    conn.execute(
+        """INSERT INTO scene_references(
+               id,project_id,scene_name,ep_start,created_at
+           ) VALUES('scene-keep','p1','Courtyard',2,1)"""
+    )
+    conn.execute(
+        """INSERT INTO workflow_runs(
+               id,workflow_type,scope_type,scope_id,status,input_fingerprint,updated_at
+           ) VALUES('r1','screenplay','episode','e1','SUCCEEDED','fp',1)"""
+    )
+    conn.execute(
+        "INSERT INTO step_runs(id,run_id,step_key,status,started_at) "
+        "VALUES('st1','r1','screenplay','SUCCEEDED',1)"
+    )
+    conn.execute(
+        """INSERT INTO artifacts(
+               id,type,scope_type,scope_id,version,status,trust_level,
+               content_hash,created_by_step_run_id,created_at
+           ) VALUES('a1','episode_screenplay','episode','e1',1,
+                    'approved','T3','hash','st1',1)"""
+    )
+    conn.execute(
+        """INSERT INTO artifacts(
+               id,type,scope_type,scope_id,version,status,trust_level,file_path,
+               content_hash,created_at
+           ) VALUES('a2','shot_video','shot','s2',1,
+                    'approved','T3',?,'keep-hash',1)""",
+        (str(survivor_video),),
+    )
+    conn.execute(
+        """INSERT INTO evaluations(
+               id,artifact_id,evaluator_type,evaluator_name,evaluator_version,
+               status,hard_gate_passed,evidence_json,created_at
+           ) VALUES('ev2','a2','rule','video','1','passed',1,?,1)""",
+        (json.dumps({'video_path': str(survivor_video)}),),
+    )
+    conn.execute(
+        """INSERT INTO reference_sets(
+               id,shot_id,fingerprint,created_at,updated_at
+           ) VALUES('set2','s2','fp-keep',1,1)"""
+    )
+    conn.execute(
+        """INSERT INTO reference_assets(
+               id,reference_set_id,asset_type,path,dependency_manifest_json,created_at
+           ) VALUES('ref2','set2','character',?,?,1)""",
+        (str(survivor_reference), json.dumps({'path': str(survivor_reference)})),
+    )
+    conn.commit()
+
+    result = asyncio.run(projects_api._delete_episode_core('e1'))
+
+    assert result['deleted'] == 'e1'
+    assert result['evidence_removed'] == {'artifacts': 1, 'runs': 1, 'steps': 1}
+    assert result['renumbered'] == 1
+    kept = dict(conn.execute("SELECT * FROM episodes WHERE id='e2'").fetchone())
+    assert kept['episode_no'] == 1
+    assert json.loads(kept['screenplay_json'])['episode_no'] == 1
+    assert json.loads(kept['storyboard_outline_json'])['episode_no'] == 1
+    draft = conn.execute(
+        "SELECT content_json FROM screenplay_drafts WHERE episode_id='e2'"
+    ).fetchone()
+    assert json.loads(draft['content_json'])['episode_no'] == 1
+    assert conn.execute("SELECT COUNT(*) FROM shots").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM shot_versions").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM workflow_runs").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM step_runs").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0] == 1
+    moved_root = project_root / 'p1' / 'episodes' / '1'
+    assert (moved_root / 'shots' / '1' / 'candidate.mp4').read_bytes() == b'keep-video'
+    assert (moved_root / 'shots' / '1' / 'references' / 'hero.jpg').read_bytes() == b'keep-reference'
+    moved_prefix = str(moved_root)
+    assert conn.execute("SELECT video_path FROM shot_versions WHERE id='v2'").fetchone()['video_path'].startswith(moved_prefix)
+    assert moved_prefix in conn.execute("SELECT image_inputs FROM shot_versions WHERE id='v2'").fetchone()['image_inputs']
+    assert conn.execute("SELECT file_path FROM artifacts WHERE id='a2'").fetchone()['file_path'].startswith(moved_prefix)
+    assert moved_prefix in conn.execute("SELECT evidence_json FROM evaluations WHERE id='ev2'").fetchone()['evidence_json']
+    assert conn.execute("SELECT path FROM reference_assets WHERE id='ref2'").fetchone()['path'].startswith(moved_prefix)
+    assert conn.execute("SELECT COUNT(*) FROM character_portraits WHERE id='cp-delete'").fetchone()[0] == 0
+    assert conn.execute("SELECT ep_start FROM character_portraits WHERE id='cp-keep'").fetchone()['ep_start'] == 1
+    assert conn.execute("SELECT ep_start FROM scene_references WHERE id='scene-keep'").fetchone()['ep_start'] == 1
+    assert [ep['id'] for ep in projects_api.project_detail('p1', view='picker')['episodes']] == ['e2']
+    assert [ep['id'] for ep in projects_api.project_detail('p1', view='picker_generation')['episodes']] == ['e2']
+    with pytest.raises(projects_api.HTTPException) as exc:
+        projects_api._episode_or_404('e1')
+    assert exc.value.status_code == 404
+
+
+def test_episode_delete_refuses_while_replanning(tmp_path, monkeypatch) -> None:
+    from app.domain import projects as projects_api
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "delete-episode-running-plan.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO projects(id,name,status,plan_status,created_at) "
+        "VALUES('p1','P','planned','running',1)"
+    )
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,status,created_at) "
+        "VALUES('e1','p1',1,'planned',1)"
+    )
+    conn.commit()
+
+    with pytest.raises(projects_api.HTTPException) as exc:
+        asyncio.run(projects_api._delete_episode_core('e1'))
+
+    assert exc.value.status_code == 409
+    assert conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0] == 1
+
+
+def test_episode_delete_compacts_numbers_after_a_middle_episode(tmp_path, monkeypatch) -> None:
+    from app import config
+    from app.domain import projects as projects_api
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "delete-middle-episode.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    conn = db.get_conn()
+    monkeypatch.setattr(config, "PROJECTS_DIR", tmp_path / "projects")
+    conn.execute(
+        "INSERT INTO projects(id,name,status,plan_status,created_at) "
+        "VALUES('p1','P','planned','ready',1)"
+    )
+    conn.executemany(
+        "INSERT INTO episodes(id,project_id,episode_no,status,created_at) "
+        "VALUES(?,'p1',?,'planned',1)",
+        [('e1', 1), ('e2', 2), ('e3', 3)],
+    )
+    conn.commit()
+
+    result = asyncio.run(projects_api._delete_episode_core('e2'))
+
+    assert result['renumbered'] == 1
+    assert [
+        (row['id'], row['episode_no'])
+        for row in conn.execute(
+            "SELECT id,episode_no FROM episodes ORDER BY episode_no"
+        ).fetchall()
+    ] == [('e1', 1), ('e3', 2)]
+
+
 def test_observability_log_retention_keeps_active_calls() -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row

@@ -35,6 +35,22 @@ describe('无分集工作台路由', () => {
     })
   })
 
+  it('项目观测台与系统设置使用隔离的稳定路由', () => {
+    expect(locationFor('observability', 'project 1', null, null))
+      .toBe('/projects/project%201/observability/runs')
+    expect(routeFromPath('/projects/p1/observability/calls')).toEqual({
+      view: 'observability', projectId: 'p1', episodeId: null, chapterIdx: null,
+    })
+    expect(locationFor('system', null, null, null)).toBe('/system/overview')
+    expect(routeFromPath('/system/settings')).toEqual({
+      view: 'system', projectId: null, episodeId: null, chapterIdx: null,
+    })
+    expect(routeFromPath('/workspaces')).toEqual({
+      view: 'studio', projectId: null, episodeId: null, chapterIdx: null,
+    })
+    expect(routeFromPath('/workspaces/new').view).toBe('studio')
+  })
+
   it('导航 Provider 在热重载窗口缺失时按当前 URL 安全回退', () => {
     vi.stubGlobal('window', {
       location: {

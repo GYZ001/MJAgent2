@@ -131,11 +131,22 @@ def test_soft_gap_continue_allowed_while_plan_has_remaining_beats() -> None:
     ) is True
 
 
-def test_soft_gap_continue_blocked_at_soft_max_even_without_plan() -> None:
+def test_soft_gap_continue_allowed_past_retired_soft_max_without_plan() -> None:
     residual = ["本集整集必保留内容/声轨尚未达标，第 16 镜暂不能收尾：请将 is_final 设为 false 继续补镜，在后续镜头补齐"]
     assert api._can_continue_for_soft_gap(
         is_final=True,
         completed_count=16,
+        planned_count=0,
+        max_shots=20,
+        residual=residual,
+    ) is True
+
+
+def test_soft_gap_continue_blocked_at_technical_hard_max() -> None:
+    residual = ["本集整集必保留内容/声轨尚未达标，第 20 镜暂不能收尾：请将 is_final 设为 false 继续补镜，在后续镜头补齐"]
+    assert api._can_continue_for_soft_gap(
+        is_final=True,
+        completed_count=20,
         planned_count=0,
         max_shots=20,
         residual=residual,

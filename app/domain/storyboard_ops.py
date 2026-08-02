@@ -599,13 +599,11 @@ def _can_continue_for_soft_gap(
     """软缺口是否允许再开下一镜。
 
     有大纲时：只有计划里还剩未执行节拍才允许续跑（covers 语义拆分胀长后 planned_count 会变大）。
-    计划已跑完、或已到软预算/硬上限时，禁止再发明大纲外幻觉镜。
+    计划已跑完、或已到技术硬上限时，禁止再发明大纲外幻觉镜。
     """
-    from app.renderability import SHOT_SOFT_MAX
-
     if not is_final:
         return False
-    if completed_count >= max_shots or completed_count >= SHOT_SOFT_MAX:
+    if completed_count >= max_shots:
         return False
     # planned_count>0：大纲驱动；已达当前计划长度则禁止计划外补镜。
     if planned_count > 0 and completed_count >= planned_count:
@@ -2152,7 +2150,7 @@ def _storyboard_status_snapshot(
         int(value) for value in (repair.get("touched_shot_nos") or [])
         if str(value).isdigit()
     }
-    from app.renderability import overdetail_issue_is_active
+    from app.renderability import storyboard_repair_issue_is_active
 
     raw_repair_errors = [
         str(message) for message in (repair.get("issue_messages") or [])
@@ -2160,7 +2158,7 @@ def _storyboard_status_snapshot(
     ]
     active_repair_errors = [] if phase == "SUCCEEDED" else [
         message for message in raw_repair_errors
-        if overdetail_issue_is_active(message)
+        if storyboard_repair_issue_is_active(message)
     ]
     obsolete_policy_repair = bool(raw_repair_errors and not active_repair_errors)
     if (

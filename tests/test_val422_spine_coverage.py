@@ -191,6 +191,71 @@ def test_s07_split_across_shots_passes() -> None:
     assert not any("S07" in e and "未覆盖" in e for e in errs), errs
 
 
+def test_spine_mixed_visible_and_spoken_delivery_uses_the_right_evidence() -> None:
+    """真实回归：药老现身是可见动作，背景暗示由对白交付，不能整句做字面动作匹配。"""
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        plot_spine=PlotSpine(
+            episode_premise="药老提醒萧炎留意薰儿的来历",
+            spine_beats=[PlotSpineBeat(
+                beat_id="S02",
+                who="药老",
+                does="在卧室现身并暗示薰儿背景不凡",
+                turn="萧炎好奇并追问",
+                must_keep=True,
+            )],
+            must_keep_ending="萧炎开始追问",
+            drop_list=[],
+        ),
+    )
+    shot = _compact_shot(1)
+    shot.spine_beat_ids = ["S02"]
+    shot.characters = ["萧炎", "药老"]
+    shot.characters_visible = ["萧炎", "药老"]
+    shot.primary_action = "萧炎放下卷轴，药老现身开口提及薰儿来历"
+    shot.action_desc = "萧炎把卷轴放在桌上，药老半透明身影从戒指上方浮现于桌旁"
+    shot.first_frame_desc = "夜晚卧室内，萧炎站在桌前，戒指发出微光"
+    shot.last_frame_desc = "同一机位，药老半透明身影已经悬浮在木桌右侧"
+    shot.dialogues = [Dialogue(
+        speaker="药老",
+        line="那小丫头，来历似乎有点不一般啊。",
+        emotion="平静",
+    )]
+
+    errors = validate_spine_delivery_ledger(
+        Storyboard(episode_no=1, shots=[shot]), screenplay,
+    )
+
+    assert not any("S02/药老" in error for error in errors), errors
+
+
+def test_spine_spoken_delivery_still_requires_the_subject_to_speak() -> None:
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        plot_spine=PlotSpine(
+            episode_premise="药老提醒萧炎留意薰儿的来历",
+            spine_beats=[PlotSpineBeat(
+                beat_id="S02", who="药老", does="现身并暗示薰儿背景不凡",
+                turn="萧炎开始追问", must_keep=True,
+            )],
+            must_keep_ending="萧炎开始追问", drop_list=[],
+        ),
+    )
+    shot = _compact_shot(1)
+    shot.spine_beat_ids = ["S02"]
+    shot.characters = ["药老"]
+    shot.characters_visible = ["药老"]
+    shot.primary_action = "药老现身"
+    shot.action_desc = "药老半透明身影从戒指上方浮现于桌旁，随后保持沉默"
+    shot.dialogues = []
+
+    errors = validate_spine_delivery_ledger(
+        Storyboard(episode_no=1, shots=[shot]), screenplay,
+    )
+
+    assert any("S02/药老" in error for error in errors), errors
+
+
 def test_story_event_id_cannot_be_spine() -> None:
     shot = _compact_shot(1)
     shot.story_event_id = "S07"

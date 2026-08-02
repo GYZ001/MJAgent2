@@ -69,7 +69,7 @@ def test_storyboard_no_false_missing_transition_for_walk_to_adjacent_area() -> N
 
 
 def test_storyboard_still_flags_unexplained_scene_jump() -> None:
-    """真正无解释的硬跳（换地点、无移动、无时间线索、地点不相干）仍必须报缺少承接。"""
+    """同人物、同时间、非建场景别直接跳到无关地点时仍应提醒。"""
     board = Storyboard(
         episode_no=1,
         shots=[
@@ -80,8 +80,8 @@ def test_storyboard_still_flags_unexplained_scene_jump() -> None:
                  last_frame_desc="萧炎收回手掌，垂眸沉思，密室一片死寂",
                  source_excerpt="萧炎在密室中观察石壁纹路。",
                  narration="", transition="硬切", continuity_from_prev=False),
-            Shot(shot_no=2, duration_s=5, shot_size="远景", camera_move="固定",
-                 scene_setting="日，城外山巅", characters=["萧炎"],
+            Shot(shot_no=2, duration_s=5, shot_size="中景", camera_move="固定",
+                 scene_setting="夜，城外山巅", characters=["萧炎"],
                  action_desc="萧炎独自伫立在山巅之上，望着翻涌的云海，神情复杂，衣袍无风自动",
                  first_frame_desc="开阔山巅上萧炎背对镜头眺望远方云海",
                  last_frame_desc="萧炎侧过身，目光投向天际，云海翻涌",
@@ -93,6 +93,35 @@ def test_storyboard_still_flags_unexplained_scene_jump() -> None:
     errors = validate_storyboard(board, _bible(), target_duration_s=20)
 
     assert any("缺少承接说明" in e for e in errors), errors
+
+
+def test_storyboard_allows_explicit_time_jump_with_new_scene_establishing_frame() -> None:
+    """真实回归：白天斗技堂切到夜晚卧室已有时间跳转和淡入，不应要求旁白解释。"""
+    board = Storyboard(
+        episode_no=1,
+        shots=[
+            Shot(shot_no=1, duration_s=5, shot_size="近景", camera_move="固定",
+                 scene_setting="白天，萧家斗技堂", characters=["萧炎"],
+                 action_desc="萧炎抱紧卷轴走向斗技堂门口，回头看了一眼身后的高大书架",
+                 first_frame_desc="白天斗技堂内，萧炎抱着卷轴站在书架旁",
+                 last_frame_desc="萧炎走到门边，室内光线渐暗，准备淡出淡入下一场景",
+                 source_excerpt="萧炎抱着卷轴离开了斗技堂。", narration="",
+                 transition="硬切", continuity_from_prev=False),
+            Shot(shot_no=2, duration_s=5, shot_size="中景", camera_move="固定",
+                 scene_setting="夜晚，萧炎卧室", characters=["萧炎"],
+                 action_desc="萧炎将怀中的黑色卷轴放在卧室木桌上，抬手按住桌沿站定",
+                 first_frame_desc="夜晚卧室内，萧炎抱着黑色卷轴站在木桌前",
+                 last_frame_desc="同一机位，黑色卷轴已经放在桌上，萧炎在桌边站定",
+                 source_excerpt="夜里萧炎回到房间，将卷轴放在桌上。", narration="",
+                 transition="淡出淡入", continuity_from_prev=False,
+                 continuity_mode="scene_change",
+                 state_in="夜幕降临后，萧炎回到卧室，怀中仍抱着卷轴。"),
+        ],
+    )
+
+    errors = validate_storyboard(board, _bible(), target_duration_s=20)
+
+    assert not any("缺少承接说明" in error for error in errors), errors
 
 
 def _compact_shot(no: int) -> Shot:
@@ -184,6 +213,16 @@ def test_storyboard_allows_as_many_split_shots_as_story_requires() -> None:
     assert not any("镜头数" in e for e in errors), errors
 
 
+def test_storyboard_allows_three_consecutive_shots_with_the_same_size() -> None:
+    board = Storyboard(episode_no=1, shots=[_compact_shot(i) for i in range(1, 4)])
+    for shot in board.shots:
+        shot.shot_size = "近景"
+
+    errors = validate_storyboard(board, _bible(), target_duration_s=50)
+
+    assert not any("连续 3 个镜头景别" in error for error in errors), errors
+
+
 def test_normalize_action_desc_strips_template_sequence_marker() -> None:
     assert normalize_action_desc("先，齐肩黑发发扎低马尾的曲惜从咖啡厅隔板后探身") == (
         "齐肩黑发发扎低马尾的曲惜从咖啡厅隔板后探身"
@@ -198,10 +237,10 @@ def test_normalize_action_desc_keeps_real_words() -> None:
 
 
 def test_storyboard_count_range_is_not_derived_from_target_duration() -> None:
-    """Renderability：镜数软预算固定约 8~20，不再按目标时长线性换算。"""
-    from app.renderability import SHOT_HARD_MAX, SHOT_SOFT_MIN
+    """镜数不再设软预算，仅保留与目标时长无关的技术硬上限。"""
+    from app.renderability import SHOT_HARD_MAX
     for target in (40, 50, 70, 90):
-        assert storyboard_shot_count_range(target) == (SHOT_SOFT_MIN, SHOT_HARD_MAX)
+        assert storyboard_shot_count_range(target) == (1, SHOT_HARD_MAX)
 
 
 # ---------- 分镜防丢失：关键内容保留校验 ----------
@@ -272,6 +311,31 @@ def test_storyboard_preservation_rejects_reversed_key_dialogue_chain() -> None:
     )
 
     assert any("打乱了主线对白顺序" in e for e in errors), errors
+
+
+def test_storyboard_order_check_uses_full_script_order_for_legacy_key_lines() -> None:
+    """真实回归：旧剧本的 key_lines 按话题链排序时，不应反过来指责正确的分镜顺序。"""
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        full_script_text=(
+            "【场1】白天 / 斗技堂\n萧炎：先离开这里。\n"
+            "【场2】夜晚 / 卧室\n萧薰儿：最后再谈修炼。"
+        ),
+        key_lines=[
+            "萧薰儿：最后再谈修炼。",
+            "萧炎：先离开这里。",
+        ],
+    )
+    first = _compact_shot(1)
+    first.dialogues = [Dialogue(speaker="萧炎", line="先离开这里。", emotion="平静")]
+    second = _compact_shot(2)
+    second.dialogues = [Dialogue(speaker="萧薰儿", line="最后再谈修炼。", emotion="平静")]
+
+    errors = validate_storyboard_preserves_key_content(
+        Storyboard(episode_no=1, shots=[first, second]), screenplay,
+    )
+
+    assert not any("打乱了主线对白顺序" in error for error in errors), errors
 
 
 def test_storyboard_preservation_noop_without_manifest() -> None:
