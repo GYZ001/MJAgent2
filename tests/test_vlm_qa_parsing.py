@@ -87,6 +87,7 @@ def test_parse_qa_result_marks_missing_required_score_untrusted() -> None:
 def test_video_qa_caps_overall_at_character_and_action_main_scores(monkeypatch) -> None:
     async def fake_vlm_check(images, expectation, *, call_meta=None):
         assert "overall 不得高于" in expectation
+        assert "明确标为画外的叙事关系人物不得按角色缺失" in expectation
         return (
             '{"character_match": 0.9, "action_match": 0.35, '
             '"clean_frame": 1.0, "overall": 0.95, "issues": ["核心动作未出现"]}'

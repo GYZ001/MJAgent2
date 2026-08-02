@@ -749,6 +749,78 @@ def _visual_anchors_from_version_meta(meta: dict) -> list[dict]:
     return out
 
 
+def _video_qa_shot_model(shot_row):
+    """Load the same shot contract used by paid prompt compilation for video QA."""
+    from app.continuity import apply_shot_contract
+    from app.schemas import Shot
+
+    shot_model = Shot(
+        shot_no=shot_row["shot_no"], duration_s=shot_row["duration_s"],
+        shot_size=shot_row["shot_size"] or "中景",
+        camera_move=shot_row["camera_move"] or "固定",
+        scene_setting=shot_row["scene_setting"] or "",
+        scene_name=(shot_row["scene_name"] if "scene_name" in shot_row.keys() else "") or "",
+        characters=json.loads(shot_row["characters"] or "[]"),
+        action_desc=shot_row["action_desc"] or "",
+        first_frame_desc=(shot_row["first_frame_desc"] if "first_frame_desc" in shot_row.keys() else "") or "",
+        last_frame_desc=(shot_row["last_frame_desc"] if "last_frame_desc" in shot_row.keys() else "") or "",
+        source_excerpt=shot_row["source_excerpt"] or "",
+        narration=shot_row["narration"], dialogues=json.loads(shot_row["dialogues"] or "[]"),
+        transition=shot_row["transition"] or "硬切",
+        continuity_from_prev=bool(shot_row["continuity_from_prev"]),
+        continuity_mode=(shot_row["continuity_mode"] if "continuity_mode" in shot_row.keys() else "") or "",
+        observed_state_out=(shot_row["observed_state_out"] if "observed_state_out" in shot_row.keys() else "") or "",
+    )
+    if "shot_contract_json" in shot_row.keys() and shot_row["shot_contract_json"]:
+        apply_shot_contract(shot_model, shot_row["shot_contract_json"])
+    return shot_model
+
+
+def _video_qa_contract(shot_model, bible_names: list[str]) -> dict[str, str]:
+    """Project narrative state onto the exact visible-cast contract sent to video.
+
+    Story continuity may mention an off-screen listener and even describe their
+    reaction.  Those narrative facts must not become QA requirements when the
+    paid prompt explicitly forbids that listener from appearing.
+    """
+    from app.compiler import project_visual_contract_to_visible_cast
+    from app.continuity import (
+        derive_continuity_mode,
+        effective_characters_visible,
+        effective_primary_action,
+        effective_state_in,
+        planned_state_out,
+    )
+
+    primary_action = effective_primary_action(shot_model)
+    full_action = (shot_model.action_desc or primary_action).strip()
+    state_in = effective_state_in(shot_model)
+    state_out = planned_state_out(shot_model)
+    visible_names = effective_characters_visible(shot_model)
+    mode = (shot_model.continuity_mode or derive_continuity_mode(shot_model)).strip()
+    state_in, state_out, primary_action, full_action, visible_contract = (
+        project_visual_contract_to_visible_cast(
+            shot_model,
+            state_in=state_in,
+            state_out=state_out,
+            primary_action=primary_action,
+            full_action=full_action,
+            visible_names=visible_names,
+            bible_names=bible_names,
+            continuity_mode=mode,
+        )
+    )
+    action_desc = full_action or primary_action
+    if visible_contract:
+        action_desc = f"{action_desc}\n画内角色合同：{visible_contract}"
+    return {
+        "action_desc": action_desc,
+        "state_in": state_in,
+        "state_out": state_out,
+        "visible_cast_contract": visible_contract,
+    }
+
+
 async def critique_version(version_id: str) -> list[str]:
     """取某视频版本的问题清单（AI 评语）：优先用已存的 QA issues；
     若该版本还没质检过，则现场抽帧跑一次 VLM 评审，并回存。供「带评语重生」避免重复犯错。"""
@@ -770,6 +842,8 @@ async def critique_version(version_id: str) -> list[str]:
         bible = json.loads(project["bible_json"])
         anchor_map = {c["name"]: c["appearance_canonical"] for c in bible["characters"]}
         anchors = [anchor_map[n] for n in json.loads(shot["characters"] or "[]") if n in anchor_map]
+        shot_model = _video_qa_shot_model(shot)
+        qa_contract = _video_qa_contract(shot_model, list(anchor_map))
         frames = _extract_qa_frames(v["video_path"], high_risk=_shot_high_risk_for_qa(shot))
         if not frames:
             return []
@@ -782,7 +856,8 @@ async def critique_version(version_id: str) -> list[str]:
                 pass
         visual_anchors = _visual_anchors_from_version_meta(meta)
         qa = await qa_shot(
-            frames, shot["action_desc"], shot["scene_setting"], anchors,
+            frames, qa_contract["action_desc"], shot["scene_setting"], anchors,
+            state_in=qa_contract["state_in"], state_out=qa_contract["state_out"],
             visual_anchors=visual_anchors,
         )
         _set_version(version_id, qa_json=json.dumps(qa, ensure_ascii=False))
@@ -2119,27 +2194,9 @@ async def _maybe_auto_qa(
         anchor_map = {c["name"]: c["appearance_canonical"] for c in bible["characters"]}
         anchors = [anchor_map[n] for n in json.loads(shot["characters"] or "[]") if n in anchor_map]
         from app.stages import qa_shot
-        from app.continuity import (
-            apply_shot_contract,
-            classify_video_hard_failures,
-            effective_primary_action,
-            effective_state_in,
-            planned_state_out,
-        )
-        from app.schemas import Shot
-        shot_model = Shot(
-            shot_no=shot["shot_no"], duration_s=shot["duration_s"], shot_size=shot["shot_size"] or "中景",
-            camera_move=shot["camera_move"] or "固定", scene_setting=shot["scene_setting"] or "",
-            characters=json.loads(shot["characters"] or "[]"), action_desc=shot["action_desc"] or "",
-            first_frame_desc=(shot["first_frame_desc"] if "first_frame_desc" in shot.keys() else "") or "",
-            last_frame_desc=(shot["last_frame_desc"] if "last_frame_desc" in shot.keys() else "") or "",
-            source_excerpt=shot["source_excerpt"] or "",
-            narration=shot["narration"], dialogues=json.loads(shot["dialogues"] or "[]"),
-            transition=shot["transition"] or "硬切",
-            continuity_from_prev=bool(shot["continuity_from_prev"]),
-        )
-        if "shot_contract_json" in shot.keys() and shot["shot_contract_json"]:
-            apply_shot_contract(shot_model, shot["shot_contract_json"])
+        from app.continuity import classify_video_hard_failures
+        shot_model = _video_qa_shot_model(shot)
+        qa_contract = _video_qa_contract(shot_model, list(anchor_map))
         frames = _extract_qa_frames(
             video_path, high_risk=_shot_high_risk_for_qa(shot, shot_model),
         )
@@ -2155,11 +2212,11 @@ async def _maybe_auto_qa(
         _assert_review_dependency_fence(job, version_id, "qa_start")
         qa = await qa_shot(
             frames,
-            effective_primary_action(shot_model) or shot["action_desc"],
+            qa_contract["action_desc"],
             shot["scene_setting"],
             anchors,
-            state_in=effective_state_in(shot_model),
-            state_out=planned_state_out(shot_model),
+            state_in=qa_contract["state_in"],
+            state_out=qa_contract["state_out"],
             duration_s=int(shot_model.duration_s or shot["duration_s"] or 0) or None,
             duration_needs_review=(
                 "duration_gt5_needs_review" in (shot_model.risk_tags or [])

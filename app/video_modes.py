@@ -3458,6 +3458,62 @@ def _finalize_reference_selection(
     return sorted(assets, key=lambda a: a.qualityScore or 0.0, reverse=True)
 
 
+def _reference_identity_names(ref: dict[str, Any]) -> set[str]:
+    """返回参考图明确承载的具名人物身份。"""
+    names = {
+        str(name).strip()
+        for name in (ref.get("relatedCharacterIds") or ref.get("related_character_ids") or [])
+        if str(name).strip()
+    }
+    if str(ref.get("type") or "") == "character":
+        entity_name = str(ref.get("entity_name") or "").strip()
+        if entity_name:
+            names.add(entity_name)
+    return names
+
+
+def _keyframe_identity_names(refs: list[dict[str, Any]]) -> set[str]:
+    names: set[str] = set()
+    for ref in refs:
+        if ref.get("deleted") or not ref.get("selectedForSeedance"):
+            continue
+        is_keyframe = (
+            ref.get("type") == "plot_key_frame"
+            or is_narrative_keyframe_slot(ref.get("slot_key"))
+        )
+        if is_keyframe:
+            names.update(_reference_identity_names(ref))
+    return names
+
+
+def _suppress_character_anchors_covered_by_keyframes(refs: list[dict[str, Any]]) -> None:
+    """关键帧已承载某人物时，不再把该人物定妆照作为第二张主体图发送。
+
+    Seedance 的多图接口在供应商边界只接收通用 ``reference_image``，没有实体 ID
+    可声明两张图是同一个人。同时发送定妆照和含该人物的剧情关键帧会诱发分身。
+    定妆照仍保留为关键帧生成/QA 证据，只从本次视频实际输入中移除。
+    """
+    carried_identities = _keyframe_identity_names(refs)
+    if not carried_identities:
+        return
+    for ref in refs:
+        if (
+            ref.get("deleted")
+            or not ref.get("selectedForSeedance")
+            or ref.get("type") != "character"
+            or not (_reference_identity_names(ref) & carried_identities)
+        ):
+            continue
+        ref["selectedForSeedance"] = False
+        ref["purposes"] = [
+            purpose for purpose in (ref.get("purposes") or [])
+            if purpose != "video_input"
+        ]
+        ref["required"] = False
+        ref["rejectReason"] = None
+        ref["selection_reason"] = "身份已由剧情关键帧承载，避免同一人物双重注入"
+
+
 def pack_reference_images_for_seedance(
     refs: list[dict[str, Any]], *, max_images: int | None = None,
     continuity_required: bool = False,
@@ -3536,6 +3592,19 @@ def pack_reference_images_for_seedance(
                 chosen.append(ref)
         timeline_winners = chosen
     timeline_winners.sort(key=_timeline_order)
+    # 供应商只看到一组无实体 ID 的 reference_image。剧情关键帧已经包含某人物时，
+    # 再发送同一人物的全身定妆照会被解释成第二个画面主体；装箱时确定性去掉该冗余锚点。
+    timeline_identities = set().union(
+        *(_reference_identity_names(ref) for ref in timeline_winners),
+    ) if timeline_winners else set()
+    if timeline_identities:
+        non_keyframes = [
+            ref for ref in non_keyframes
+            if not (
+                ref.get("type") == "character"
+                and (_reference_identity_names(ref) & timeline_identities)
+            )
+        ]
     usable = non_keyframes + timeline_winners
     limit = max_images if max_images is not None else max_reference_images()
     distinct_character_identities = {
@@ -3646,6 +3715,8 @@ def build_seedance_image_inputs(meta: dict[str, Any]) -> list[tuple[str, str]]:
             # 参考图/关键帧重试耗尽后的最终降级：Seedance 支持纯文本 content。
             # 返回空列表表示继续提交，而不是把已经发生的付费工作判失败。
             return []
+        # 同步更新冻结 meta，使“视频实际输入”界面与真正发送给供应商的图片一致。
+        _suppress_character_anchors_covered_by_keyframes(refs)
         # 使用中的图按综合分 Top-N 装箱；截断不改 selected，高分未入选仍留在画廊。
         sequence = meta.get("keyframe_sequence") or {}
         beats = sequence.get("beats") if isinstance(sequence, dict) else None

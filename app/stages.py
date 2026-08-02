@@ -2414,6 +2414,7 @@ async def qa_shot(frames_b64: list[str], action_desc: str, scene_setting: str,
 
 硬规则：
 - 只根据可见证据评分；action/character/outfit/hair 为主项；干净度不能抬高错人/错动作总分。
+- 画内人物是否缺失必须以“画内角色合同”为准；明确标为画外的叙事关系人物不得按角色缺失、互动缺失或状态缺失扣分。
 - overall 不得高于 character_match、action_match、start_state_match、end_state_match、dialogue_match、text_match 最低主项。
 - 缺必需分数时不要伪造满分。
 - failure_types 可用 story_repeat、future_leak、wrong_dialogue、text_error、character_duplicate、state_mismatch、needs_crop、wrong_identity、wrong_outfit、subject_occlusion。

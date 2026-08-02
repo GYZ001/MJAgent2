@@ -634,7 +634,7 @@ def _mark_character_offscreen(name: str, text: str) -> str:
     return "".join(parts)
 
 
-def _project_visual_prompt_to_visible_cast(
+def project_visual_contract_to_visible_cast(
     shot: Shot,
     *,
     state_in: str,
@@ -1106,7 +1106,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         primary,
         full_action,
         visible_cast_block,
-    ) = _project_visual_prompt_to_visible_cast(
+    ) = project_visual_contract_to_visible_cast(
         shot,
         state_in=state_in,
         state_out=state_out,

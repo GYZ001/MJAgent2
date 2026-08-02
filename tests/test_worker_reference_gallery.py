@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from app import compiler, db, stages, video_modes, worker
-from app.schemas import Bible, Character, World
+from app.schemas import Bible, Character, Shot, World
 
 
 def test_video_qa_anchors_ignore_loser_deleted_and_missing_keyframes(tmp_path) -> None:
@@ -36,6 +36,28 @@ def test_video_qa_anchors_ignore_loser_deleted_and_missing_keyframes(tmp_path) -
     })
 
     assert {Path(item["path"]).name for item in anchors} == {"winner.jpg", "scene.jpg"}
+
+
+def test_video_qa_contract_does_not_require_offscreen_listener_reaction() -> None:
+    shot = Shot(
+        shot_no=14, duration_s=10, shot_size="中景", camera_move="固定",
+        scene_setting="夜，后山悬崖",
+        characters=["药老", "萧炎"], characters_visible=["药老"],
+        action_desc="药老悬浮于戒指上方，抬手抚须，向萧炎说明缘由。",
+        first_frame_desc="药老独自悬浮于戒指上方，面朝萧炎方向。",
+        last_frame_desc="药老仍悬浮于戒指上方，望向萧炎方向等待回应。",
+        state_in="萧炎质问完毕，药老面对萧炎，双方对峙持续。",
+        primary_action="药老向萧炎说明缘由。",
+        state_out="药老说完，萧炎沉默并转向理性思考。",
+        continuity_mode="reverse_angle",
+    )
+
+    contract = worker._video_qa_contract(shot, ["药老", "萧炎"])
+
+    assert "萧炎沉默" not in contract["state_out"]
+    assert "画外萧炎方向等待回应" in contract["state_out"]
+    assert "画内角色合同：可辨识画面人物仅限：药老" in contract["action_desc"]
+    assert "萧炎只作为画外叙事关系" in contract["action_desc"]
 
 
 def _conn() -> sqlite3.Connection:
@@ -290,13 +312,32 @@ def test_reroll_reuses_unedited_shot_reference_gallery(monkeypatch) -> None:
     )
 
     first = worker.enqueue_shot("s1")
-    refs = [{
-        "id": "r1",
-        "url": "data:image/jpeg;base64,keep",
-        "type": "plot_key_frame",
-        "source": "seedream_generated",
-        "selectedForSeedance": True,
-    }]
+    refs = [
+        {
+            "id": "character-a",
+            "url": "data:image/jpeg;base64,character",
+            "type": "character",
+            "source": "asset_library",
+            "entity_name": "A",
+            "relatedCharacterIds": ["A"],
+            "selectedForSeedance": True,
+        },
+        {
+            "id": "scene",
+            "url": "data:image/jpeg;base64,scene",
+            "type": "scene",
+            "source": "asset_library",
+            "selectedForSeedance": True,
+        },
+        {
+            "id": "keyframe-a",
+            "url": "data:image/jpeg;base64,keep",
+            "type": "plot_key_frame",
+            "source": "seedream_generated",
+            "relatedCharacterIds": ["A"],
+            "selectedForSeedance": True,
+        },
+    ]
     conn.execute(
         "UPDATE shot_versions SET status='succeeded', image_inputs=? WHERE id=?",
         (json.dumps({
@@ -323,6 +364,14 @@ def test_reroll_reuses_unedited_shot_reference_gallery(monkeypatch) -> None:
     assert rerolled_meta["reference_images"] == refs
     assert rerolled_meta["reference_manifest"] == {"input_fingerprint": "frozen-manifest"}
     assert rerolled_meta["reference_manifest_frozen"] is True
+    rerolled_prompt = conn.execute(
+        "SELECT prompt_text FROM shot_versions WHERE id=?",
+        (rerolled["version_id"],),
+    ).fetchone()["prompt_text"]
+    assert "Reference image 1: use as scene" in rerolled_prompt
+    assert "Reference image 2: use as plot_key_frame" in rerolled_prompt
+    assert "use as character" not in rerolled_prompt
+    assert "Reference image 3:" not in rerolled_prompt
 
 
 def test_legacy_keyframe_gallery_is_not_reused_after_prompt_contract_upgrade(monkeypatch) -> None:

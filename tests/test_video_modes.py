@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from app import errors, hiagent, video_modes, worker
+from app import hiagent, video_modes, worker
 from app.schemas import Bible, Character, Shot, World
 from app.video_modes import (
     REFERENCE_IMAGE_MODE,
@@ -2358,10 +2358,62 @@ def test_multiple_high_score_character_refs_all_selected() -> None:
     for r in refs:
         r["selectedForSeedance"] = True
     packed = video_modes.pack_reference_images_for_seedance(refs, max_images=8)
-    # character 偏好上限只统计定妆锚点；时序关键帧不消耗该配额。
-    assert len(packed) == 2
-    assert {ref["id"] for ref in packed} == {"c1", "g1"}
+    # 关键帧已承载 A 的身份；定妆照留在画廊，但不得作为第二张 A 主体图进入供应商请求。
+    assert [ref["id"] for ref in packed] == ["g1"]
     assert all(r["selectedForSeedance"] for r in refs)
+
+
+def test_seedance_provider_inputs_remove_character_anchor_covered_by_keyframe() -> None:
+    refs = [
+        {
+            "id": "character-a", "url": "data:image/jpeg;base64,YQ==", "type": "character",
+            "entity_name": "A", "relatedCharacterIds": ["A"], "selectedForSeedance": True,
+            "rejectReason": "missing_quality_score",
+            "purposes": ["keyframe_seed", "qa_anchor", "video_input"], "required": True,
+        },
+        {
+            "id": "scene", "url": "data:image/jpeg;base64,cw==", "type": "scene",
+            "selectedForSeedance": True, "purposes": ["qa_anchor", "video_input"],
+        },
+        {
+            "id": "keyframe-a", "url": "data:image/jpeg;base64,aw==", "type": "plot_key_frame",
+            "relatedCharacterIds": ["A"], "selectedForSeedance": True,
+            "slot_key": "narrative_keyframe", "purposes": ["qa_anchor", "video_input"],
+        },
+    ]
+    meta = {"mode": REFERENCE_IMAGE_MODE, "reference_images": refs}
+
+    inputs = video_modes.build_seedance_image_inputs(meta)
+
+    assert inputs == [
+        ("data:image/jpeg;base64,cw==", "reference_image"),
+        ("data:image/jpeg;base64,aw==", "reference_image"),
+    ]
+    assert refs[0]["selectedForSeedance"] is False
+    assert "video_input" not in refs[0]["purposes"]
+    assert refs[0]["rejectReason"] is None
+    assert refs[0]["selection_reason"] == "身份已由剧情关键帧承载，避免同一人物双重注入"
+    assert refs[1]["selectedForSeedance"] is True
+    assert refs[2]["selectedForSeedance"] is True
+
+
+def test_seedance_keeps_anchor_for_identity_missing_from_keyframe() -> None:
+    refs = [
+        {
+            "id": "character-b", "url": "data:image/jpeg;base64,Yg==", "type": "character",
+            "entity_name": "B", "relatedCharacterIds": ["B"], "selectedForSeedance": True,
+            "purposes": ["qa_anchor", "video_input"],
+        },
+        {
+            "id": "keyframe-a", "url": "data:image/jpeg;base64,YQ==", "type": "plot_key_frame",
+            "relatedCharacterIds": ["A"], "selectedForSeedance": True,
+            "slot_key": "narrative_keyframe", "purposes": ["qa_anchor", "video_input"],
+        },
+    ]
+
+    packed = video_modes.pack_reference_images_for_seedance(refs, max_images=9)
+
+    assert [ref["id"] for ref in packed] == ["character-b", "keyframe-a"]
 
 
 def test_pack_keeps_one_anchor_for_each_distinct_character(monkeypatch) -> None:
