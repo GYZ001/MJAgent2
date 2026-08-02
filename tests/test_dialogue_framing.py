@@ -264,6 +264,50 @@ def test_dialogue_with_story_prop_keeps_hands_and_prop_in_frame() -> None:
     assert "双手、剧情道具与接触关系" in prompt
 
 
+def test_prop_dialogue_prompt_does_not_visualize_unreferenced_listener_state() -> None:
+    original_state_in = "乙刚质问完毕，甲面对乙，双方对峙持续。"
+    original_state_out = "甲说完，乙沉默，态度从愤怒转向理性思考。"
+    shot = _shot(
+        characters=["甲", "乙"],
+        characters_visible=["甲"],
+        action_desc="甲面对乙抬手说明缘由，随后收回手等待回应。",
+        first_frame_desc="甲独自处于中景，面朝乙方向，右手尚未抬起。",
+        last_frame_desc="同一机位，甲已收回右手，目光仍望向乙方向。",
+        state_in=original_state_in,
+        primary_action="甲抬手向乙说明缘由。",
+        state_out=original_state_out,
+    )
+
+    assert dialogue_action_staging_kind(shot) == "prop"
+    assert dialogue_focus_subject(shot) is None
+
+    prompt = compile_prompt(shot, _bible(), with_refs=True)
+
+    # 叙事连续性仍保存在分镜数据里，但不再作为矛盾的可视要求发送给视频模型。
+    assert shot.state_in == original_state_in
+    assert shot.state_out == original_state_out
+    assert "乙刚质问完毕" not in prompt
+    assert "乙沉默" not in prompt
+    assert "[VISIBLE CAST]" in prompt
+    assert "可辨识画面人物仅限：甲" in prompt
+    assert "乙只作为画外叙事关系" in prompt
+    assert "面朝画外乙方向" in prompt
+    assert "目光仍望向画外乙方向" in prompt
+    assert "甲抬手向画外乙说明缘由" in prompt
+    assert "character_identity:甲" in prompt
+    assert "character_identity:乙" not in prompt
+
+
+def test_visible_cast_projection_is_inactive_when_visual_states_match_cast() -> None:
+    shot = _shot()
+
+    prompt = compile_prompt(shot, _bible(), with_refs=True)
+
+    assert "[VISIBLE CAST]" not in prompt
+    assert shot.state_in in prompt
+    assert shot.state_out in prompt
+
+
 def test_solitary_subject_can_still_keep_scripted_background_crowd() -> None:
     shot = _shot(
         dialogues=[],
