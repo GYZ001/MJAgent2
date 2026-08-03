@@ -65,6 +65,7 @@ def apply_screenplay_patch(
     *,
     episode_id: str,
     run_local_validate: bool = True,
+    character_resolutions: list[dict] | None = None,
 ) -> PatchResult:
     """在工作副本上应用剧本 Patch，成功则创建新 Artifact 并 CAS 更新 working 指针。"""
     rev = get_production_revision(request.production_revision_id)
@@ -169,6 +170,18 @@ def apply_screenplay_patch(
 
     working = rederive_projections(working)
     script = document_to_screenplay(working)
+    if character_resolutions:
+        from app.portraits import apply_screenplay_character_resolutions
+
+        identity_changes = apply_screenplay_character_resolutions(
+            script, character_resolutions,
+        )
+        if identity_changes:
+            touched.extend(
+                f"character_identity:{item['source_label']}"
+                for item in identity_changes
+            )
+            working = screenplay_to_document(script)
     after_content = working.model_dump(mode="json")
     after_hash = evidence_repository.content_hash(after_content)
     if after_hash == before_hash:

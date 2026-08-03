@@ -10,6 +10,7 @@ import {
   refSourceLabel,
   resolvePreviewVersionId,
   resolveStableShotSelection,
+  reviewContextRefreshKey,
   shotDetailRefreshKey,
   shouldCommitShotDetail,
   videoCandidateNote,
@@ -135,6 +136,20 @@ describe('生成台三类分组与视角标签', () => {
 })
 
 describe('生成台对象稳定性', () => {
+  it('上游确认或运行指针收口时会重新加载生成资格', () => {
+    const running = reviewContextRefreshKey({
+      status: 'scripting',
+      storyboard_artifact_id: 'board-1',
+      active_storyboard_run_id: 'run-1',
+    })
+    const confirmed = reviewContextRefreshKey({
+      status: 'confirmed',
+      storyboard_artifact_id: 'board-2',
+      active_storyboard_run_id: null,
+    })
+    expect(confirmed).not.toBe(running)
+  })
+
   it('5 镜变 4 镜时不会把已删镜头静默换成相邻镜头', () => {
     const result = resolveStableShotSelection(
       [{ id: 's1' }, { id: 's2' }, { id: 's3' }, { id: 's4' }],

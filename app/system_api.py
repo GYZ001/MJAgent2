@@ -19,6 +19,11 @@ from fastapi.responses import PlainTextResponse
 from app import config
 from app.db import get_conn, get_setting, new_id, rows_to_dicts, set_setting
 from app.local_session import require_local_session
+from app.model_capabilities import (
+    apply_token_limit_defaults,
+    extract_provider_token_limits,
+    normalize_token_limits,
+)
 
 router = APIRouter(prefix="/api")
 # 公开探活路由：不挂本机会话依赖（由 main 单独 include）。
@@ -289,13 +294,29 @@ def _custom_models() -> list[dict]:
     return value if isinstance(value, list) else []
 
 
+def _token_capability_overrides() -> dict[str, dict]:
+    try:
+        value = json.loads(get_setting("model_token_capabilities") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 def _model_catalog() -> list[dict]:
+    overrides = _token_capability_overrides()
     builtins = [
-        {"id": f"builtin:{provider}:{model}", "provider": provider, "model": model,
-         "label": label, "kinds": list(kinds), "builtin": True}
+        apply_token_limit_defaults({
+            "id": f"builtin:{provider}:{model}", "provider": provider, "model": model,
+            "label": label, "kinds": list(kinds), "builtin": True,
+            **overrides.get(f"builtin:{provider}:{model}", {}),
+        })
         for provider, model, label, kinds in BUILTIN_MODELS
     ]
-    return [*builtins, *_custom_models()]
+    custom = [
+        apply_token_limit_defaults({**item, **overrides.get(str(item.get("id") or ""), {})})
+        for item in _custom_models() if isinstance(item, dict)
+    ]
+    return [*builtins, *custom]
 
 
 def _public_model(item: dict) -> dict:
@@ -323,10 +344,11 @@ def get_models():
 @router.post("/models")
 async def add_model_route(body: dict):
     from app.capabilities.dispatch import ui_route
-    routed = await ui_route("system.model_create", {"model": body})
+    prepared = await prepare_model_token_capabilities(body)
+    routed = await ui_route("system.model_create", {"model": prepared})
     if routed is not None:
         return routed
-    return add_model(body)
+    return add_model(prepared)
 
 
 def add_model(body: dict):
@@ -363,6 +385,7 @@ def add_model(body: dict):
         "id": item_id, "provider": provider, "model": model,
         "label": label, "kinds": kinds, "builtin": False,
     }
+    item.update(normalize_token_limits(body))
     if custom_provider:
         item.update({"provider_label": provider_label, "base_url": base_url, "api_key": api_key})
     custom = _custom_models()
@@ -422,6 +445,7 @@ async def _probe_openai_model(base_url: str, api_key: str, model: str, kind: str
         raise HTTPException(422, "模型 ID 和 API Key 不能为空")
     _assert_public_http_url(base_url)
     started = time.perf_counter()
+    token_limits = normalize_token_limits({})
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(30, connect=10)) as client:
             response = await client.post(
@@ -429,6 +453,10 @@ async def _probe_openai_model(base_url: str, api_key: str, model: str, kind: str
                 headers={"Authorization": f"Bearer {api_key.strip()}", "Content-Type": "application/json"},
                 json={"model": model.strip(), "messages": [{"role": "user", "content": "Reply with OK only."}], "max_tokens": 8, "temperature": 0},
             )
+            if response.is_success and kind in {"text", "vlm"}:
+                token_limits = await _discover_model_token_capabilities_with_client(
+                    client, base_url, api_key, model,
+                )
     except httpx.HTTPError as exc:
         raise HTTPException(422, f"连接失败：{type(exc).__name__}，请检查 Base URL 和网络") from exc
     latency_ms = int((time.perf_counter() - started) * 1000)
@@ -439,6 +467,7 @@ async def _probe_openai_model(base_url: str, api_key: str, model: str, kind: str
             return {
                 "ok": True, "latency_ms": latency_ms, "probe": "model_recognition",
                 "preview": "凭证与模型识别通过；为避免产生费用，未执行媒体生成",
+                **normalize_token_limits({}),
             }
         if response.status_code in {401, 403}:
             message = "当前 API Key 无效，或没有访问该模型的权限"
@@ -454,7 +483,64 @@ async def _probe_openai_model(base_url: str, api_key: str, model: str, kind: str
         content = response.json()["choices"][0]["message"]["content"]
     except (ValueError, KeyError, IndexError, TypeError) as exc:
         raise HTTPException(422, "服务已响应，但返回格式不是 OpenAI chat/completions 兼容格式") from exc
-    return {"ok": True, "latency_ms": latency_ms, "preview": str(content or "")[:80]}
+    return {
+        "ok": True,
+        "latency_ms": latency_ms,
+        "preview": str(content or "")[:80],
+        **token_limits,
+    }
+
+
+async def _discover_model_token_capabilities_with_client(
+    client: httpx.AsyncClient,
+    base_url: str,
+    api_key: str,
+    model: str,
+) -> dict:
+    """低成本读取供应商模型元数据；不支持 /models 时回退 128K/32K。"""
+    fallback = normalize_token_limits({})
+    get = getattr(client, "get", None)
+    if get is None:
+        return fallback
+    try:
+        response = await get(
+            f"{base_url.strip().rstrip('/')}/models",
+            headers={
+                "Authorization": f"Bearer {api_key.strip()}",
+                "Content-Type": "application/json",
+            },
+        )
+        if not response.is_success:
+            return fallback
+        detected = extract_provider_token_limits(response.json(), model)
+    except (httpx.HTTPError, ValueError, TypeError, KeyError):
+        return fallback
+    return normalize_token_limits(detected)
+
+
+async def prepare_model_token_capabilities(body: dict) -> dict:
+    """新增/编辑模型时自动补齐 token 能力，显式测试结果优先。"""
+    prepared = dict(body or {})
+    if prepared.get("context_window_tokens") or prepared.get("max_output_tokens"):
+        prepared.update(normalize_token_limits(prepared))
+        return prepared
+    base_url = str(prepared.get("base_url") or "").strip().rstrip("/")
+    api_key = str(prepared.get("api_key") or "").strip()
+    model = str(prepared.get("model") or "").strip()
+    kinds = prepared.get("kinds") or []
+    if not (base_url and api_key and model and any(kind in {"text", "vlm"} for kind in kinds)):
+        prepared.update(normalize_token_limits({}))
+        return prepared
+    try:
+        _assert_public_http_url(base_url)
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10, connect=5)) as client:
+            limits = await _discover_model_token_capabilities_with_client(
+                client, base_url, api_key, model,
+            )
+    except (HTTPException, httpx.HTTPError):
+        limits = normalize_token_limits({})
+    prepared.update(limits)
+    return prepared
 
 
 @router.post("/models/test")
@@ -471,10 +557,20 @@ async def test_model_connection(body: dict):
 @router.put("/models/{model_id}")
 async def update_model_route(model_id: str, body: dict):
     from app.capabilities.dispatch import ui_route
-    routed = await ui_route("system.model_update", {"model_id": model_id, "patch": body})
+    current = next((item for item in _custom_models() if item.get("id") == model_id), {})
+    probe_body = {**current, **body}
+    if not str(body.get("api_key") or "").strip() and current.get("api_key"):
+        probe_body["api_key"] = current["api_key"]
+    prepared = await prepare_model_token_capabilities(probe_body)
+    patch = {**body, **{
+        key: prepared[key]
+        for key in ("context_window_tokens", "max_output_tokens", "token_limits_source")
+        if key in prepared
+    }}
+    routed = await ui_route("system.model_update", {"model_id": model_id, "patch": patch})
     if routed is not None:
         return routed
-    return update_model(model_id, body)
+    return update_model(model_id, patch)
 
 
 def update_model(model_id: str, body: dict):
@@ -490,6 +586,8 @@ def update_model(model_id: str, body: dict):
     if not kinds or any(k not in {"text", "vlm"} for k in kinds):
         raise HTTPException(422, "自定义 OpenAI 兼容模型仅支持 Text/VLM")
     item.update({"label": label, "model": model, "kinds": kinds})
+    if any(key in body for key in ("context_window_tokens", "max_output_tokens", "token_limits_source")):
+        item.update(normalize_token_limits({**item, **body}))
     if str(item.get("provider", "")).startswith("custom:"):
         provider_label = str(body.get("provider_label") or item.get("provider_label") or "").strip()
         base_url = str(body.get("base_url") or item.get("base_url") or "").strip().rstrip("/")
@@ -524,7 +622,12 @@ async def test_saved_model(model_id: str, body: dict | None = None):
     model = str(override.get("model") or item.get("model") or "")
     kinds = item.get("kinds") or ["text"]
     kind = "video" if "video" in kinds else "image" if "image" in kinds else "vlm" if "vlm" in kinds and "text" not in kinds else "text"
-    return await _probe_openai_model(base_url, api_key, model, kind)
+    result = await _probe_openai_model(base_url, api_key, model, kind)
+    if kind in {"text", "vlm"}:
+        overrides = _token_capability_overrides()
+        overrides[model_id] = normalize_token_limits(result)
+        set_setting("model_token_capabilities", json.dumps(overrides, ensure_ascii=False))
+    return result
 
 
 @router.delete("/models/{model_id}")
@@ -546,6 +649,10 @@ def delete_model(model_id: str):
         if hiagent.active_provider(kind) == item.get("provider") and hiagent.active_model(kind) == item.get("model"):
             raise HTTPException(409, f"该模型正在用于 {kind}，请先切换后再删除")
     set_setting("custom_models", json.dumps([m for m in custom if m.get("id") != model_id], ensure_ascii=False))
+    overrides = _token_capability_overrides()
+    if model_id in overrides:
+        overrides.pop(model_id, None)
+        set_setting("model_token_capabilities", json.dumps(overrides, ensure_ascii=False))
     return {"ok": True}
 
 

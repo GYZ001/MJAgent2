@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS episodes (
     screenplay_updated_at REAL,
     screenplay_required_dialogues TEXT NOT NULL DEFAULT '[]',
     screenplay_required_dialogue_occurrences TEXT NOT NULL DEFAULT '[]',
+    screenplay_character_resolutions TEXT NOT NULL DEFAULT '[]',
     screenplay_artifact_id TEXT,
     screenplay_publish_fence INTEGER NOT NULL DEFAULT 0,
     screenplay_snapshot_version INTEGER NOT NULL DEFAULT 0,
@@ -89,7 +90,9 @@ CREATE TABLE IF NOT EXISTS shots (
     duration_s INTEGER NOT NULL,
     shot_size TEXT,
     camera_move TEXT,
+    scene_time TEXT DEFAULT '',
     scene_setting TEXT,
+    scene_name TEXT,
     characters TEXT,
     action_desc TEXT,
     source_excerpt TEXT DEFAULT '',
@@ -856,6 +859,36 @@ def get_conn() -> sqlite3.Connection:
     return conn
 
 
+def _quarantine_static_delivery_fallbacks(conn: sqlite3.Connection) -> int:
+    """隔离旧版曾生成的静态图/静音「伪视频」。
+
+    这些行仅作历史证据保留：不再是 succeeded 候选，也不再持有
+    ``adopted_version_id``。操作幂等，不删除用户文件。
+    """
+    fallback_ids = conn.execute(
+        """SELECT id FROM shot_versions
+             WHERE json_valid(image_inputs)
+               AND COALESCE(json_extract(image_inputs,'$.delivery_fallback'),0)=1"""
+    ).fetchall()
+    ids = [str(row["id"]) for row in fallback_ids]
+    if not ids:
+        return 0
+    placeholders = ",".join("?" for _ in ids)
+    conn.execute(
+        f"UPDATE shots SET adopted_version_id=NULL WHERE adopted_version_id IN ({placeholders})",
+        ids,
+    )
+    cursor = conn.execute(
+        f"""UPDATE shot_versions
+               SET status='rejected_static_fallback',
+                   error=COALESCE(NULLIF(error,''), '历史静态图/静音占位已隔离，不具备视频资格')
+             WHERE id IN ({placeholders})
+               AND status!='rejected_static_fallback'""",
+        ids,
+    )
+    return int(cursor.rowcount)
+
+
 # 增量迁移：已有库上加列（首次建表时 SCHEMA 已含则忽略报错）
 MIGRATIONS = (
     "ALTER TABLE jobs ADD COLUMN after_shot_id TEXT",
@@ -899,6 +932,7 @@ MIGRATIONS = (
     "ALTER TABLE projects ADD COLUMN scene_refs_error TEXT",
     "ALTER TABLE projects ADD COLUMN scene_refs_target TEXT",
     "ALTER TABLE shots ADD COLUMN scene_name TEXT",  # 归一化命中的库内规范场景名（渲染期取场景库图复用）
+    "ALTER TABLE shots ADD COLUMN scene_time TEXT DEFAULT ''",  # 独立时间标签，不参与场景图匹配
     "ALTER TABLE jobs ADD COLUMN run_id TEXT",
     "ALTER TABLE jobs ADD COLUMN owner_run_id TEXT",
     "ALTER TABLE jobs ADD COLUMN step_run_id TEXT",
@@ -1009,6 +1043,8 @@ MIGRATIONS = (
     "ALTER TABLE episodes ADD COLUMN screenplay_publish_fence INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE episodes ADD COLUMN screenplay_snapshot_version INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE episodes ADD COLUMN screenplay_constraint_version INTEGER NOT NULL DEFAULT 0",
+    # 人物姓名消歧是剧本生产输入的一部分，必须跨进程恢复、Patch 和手工发布保留。
+    "ALTER TABLE episodes ADD COLUMN screenplay_character_resolutions TEXT NOT NULL DEFAULT '[]'",
     "ALTER TABLE shots ADD COLUMN shot_uid TEXT",
     # QA score-only metadata for typed Evaluation rows.
     "ALTER TABLE evaluations ADD COLUMN evaluation_role TEXT",
@@ -1384,6 +1420,7 @@ def init_db(*, reconcile_interrupted: bool = False) -> None:
         except sqlite3.OperationalError as exc:
             if "duplicate column name" not in str(exc).lower():
                 raise
+    _quarantine_static_delivery_fallbacks(conn)
     _drop_obsolete_storyboard_columns(conn)
     # 视频补齐授权表；历史分镜自动确认授权会在表初始化时清理。
     try:

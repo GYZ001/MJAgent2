@@ -707,6 +707,36 @@ def test_initial_screenplay_prompt_contains_d001_and_dialogue_chain_contract(mon
     assert "对白话轮不设固定条数上限" in prompts[0]
 
 
+def test_screenplay_baseline_keeps_structural_bootstrap_retries(monkeypatch) -> None:
+    captured = {}
+
+    async def fake_loop(_stage, _stage_key, _prompt, *_args, **kwargs):
+        captured["policy"] = kwargs["loop"].policy
+        return EpisodeScreenplay(episode_no=9)
+
+    monkeypatch.setattr(stages, "_run_with_agent_loop", fake_loop)
+    monkeypatch.setattr(stages, "get_setting", lambda key: "8" if key == "max_repair_attempts" else None)
+    episode = {
+        "id": "ep-json-bootstrap",
+        "episode_no": 9,
+        "target_duration_s": 50,
+        "required_dialogue_lines": [],
+    }
+
+    asyncio.run(stages.generate_screenplay_baseline(
+        episode,
+        "原文",
+        _empty_bible(),
+        _prompt="输出剧本 JSON",
+    ))
+
+    policy = captured["policy"]
+    assert policy.max_iterations == 4
+    assert policy.stall_rounds == 2
+    assert policy.no_gain_rounds == 2
+    assert policy.baseline_only is True
+
+
 def test_user_selected_dialogues_are_hard_gates() -> None:
     script, source = _screenplay_with_source_dialogue_chain()
 

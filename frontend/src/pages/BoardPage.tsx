@@ -7,18 +7,20 @@ import DecisionDialog from '../components/DecisionDialog'
 import ImpactDialog, { ImpactSummary } from '../components/harness/ImpactDialog'
 import QueryState from '../components/QueryState'
 import { useFocusTrap } from '../hooks/useFocusTrap'
+import { storyboardTaskNotice } from '../lib/productionNotices'
 
 const SIZES = ['远景', '全景', '中景', '近景', '特写']
 const MOVES = ['固定', '推近', '拉远', '横摇', '跟随']
 const TRANSITIONS = ['硬切', '叠化', '淡出淡入', '黑场', '闪黑', '闪白', '甩镜', '遮挡转场', '匹配剪辑', '声音延续+叠化', '声音先行+淡入']
 const DURATIONS = [5, 6, 7, 8, 9, 10]
+const SCENE_TIMES = ['清晨', '早晨', '上午', '中午', '午后', '傍晚', '黄昏', '夜晚', '深夜']
 const CONTINUITY_MODES: Record<string, string> = {
   action_continuation: '动作延续', same_scene_cut: '同场切换', reaction_cut: '反应镜头',
   reverse_angle: '反打', insert_detail: '细节插入', scene_change: '转场换景',
 }
 
 const EDITABLE_FIELDS: Array<keyof Shot> = [
-  'duration_s', 'shot_size', 'camera_move', 'scene_setting', 'characters', 'action_desc',
+  'duration_s', 'shot_size', 'camera_move', 'scene_time', 'scene_name', 'characters', 'action_desc',
   'first_frame_desc', 'last_frame_desc', 'dialogues', 'transition', 'continuity_from_prev',
   'continuity_mode', 'state_in', 'primary_action', 'state_out', 'characters_visible',
   'audio_cast', 'new_information_ids', 'spine_beat_ids', 'key_line_ids',
@@ -359,7 +361,7 @@ export default function BoardPage() {
   const shots = ep?.shots ?? []
   const visibleShots = useMemo(() => shots.filter(shot => {
     if (onlyProblems && !isStoryboardProblemShot(shot)) return false
-    if (sceneFilter && shot.scene_setting !== sceneFilter) return false
+    if (sceneFilter && (shot.scene_name || shot.scene_setting) !== sceneFilter) return false
     if (characterFilter && ![...(shot.characters ?? []), ...(shot.audio_cast ?? [])].includes(characterFilter)) return false
     if (capacityFilter && storyboardSpokenChars(shot) <= (shot.spoken_limit ?? Number.POSITIVE_INFINITY)) return false
     if (riskFilter && !shot.preflight_errors?.length && !shot.continuity_degraded && !(shot.risk_tags?.length)) return false
@@ -369,6 +371,7 @@ export default function BoardPage() {
   const selectedIndex = visibleShots.findIndex(shot => shot.id === selectedShot?.id)
   const absoluteIndex = shots.findIndex(shot => shot.id === selectedShot?.id)
   const status = ep?.storyboard_status ?? recoveredStatus ?? (ep ? statusFallback(ep) : null)
+  const taskNotice = ep ? storyboardTaskNotice(ep, status?.state) : null
   const filterDisabledReason = shotEditDirty ? '请先保存或放弃当前镜头修改' : ''
   const hasActiveFilters = onlyProblems || Boolean(sceneFilter) || Boolean(characterFilter) || capacityFilter || riskFilter
 
@@ -389,7 +392,7 @@ export default function BoardPage() {
     return () => registerNavigationGuard(null, false)
   }, [registerNavigationGuard, selectedShot, shotEditDirty])
 
-  const scenes = useMemo(() => [...new Set(shots.map(shot => shot.scene_setting).filter(Boolean))], [shots])
+  const scenes = useMemo(() => [...new Set(shots.map(shot => shot.scene_name || shot.scene_setting).filter(Boolean))], [shots])
   const characters = useMemo(() => [...new Set(shots.flatMap(shot => [...(shot.characters ?? []), ...(shot.audio_cast ?? [])]).filter(Boolean))], [shots])
 
   useEffect(() => {
@@ -711,10 +714,13 @@ export default function BoardPage() {
           <b>数字口径</b><span>{progressCopy.detail}</span>
         </div>}
         {status.write_block_reason && status.state === 'syncing' && <div className="board-sync-banner" role="status"><b>正在同步状态</b><span>{status.write_block_reason}</span></div>}
-        {(ep.storyboard_warning || ep.script_error) && (
-          <div className="storyboard-error-details open" role={ep.script_error ? 'alert' : 'status'}>
-            <b>{ep.script_error ? '任务需要处理' : '提示'}</b>
-            <p>{ep.script_error || ep.storyboard_warning}</p>
+        {(taskNotice || ep.storyboard_warning) && (
+          <div
+            className={`storyboard-error-details open ${(taskNotice?.severity ?? 'warning') === 'warning' ? 'warning' : 'error'}`}
+            role={taskNotice?.severity === 'error' ? 'alert' : 'status'}
+          >
+            <b>{taskNotice?.severity === 'error' ? '任务未完成' : taskNotice ? '任务已暂停' : '提示'}</b>
+            <p>{taskNotice?.message || ep.storyboard_warning}</p>
           </div>
         )}
         {!!status.hard_gate_issues?.length && (
@@ -780,7 +786,7 @@ export default function BoardPage() {
                   className={shot.id === selectedShot?.id ? 'active' : ''}
                   onClick={() => requestShotSelect(shot.id)}>
                   <span className="shot-nav-top"><span className="shot-nav-no">镜 {String(shot.shot_no).padStart(2, '0')}</span><span>{shot.duration_s}s</span></span>
-                  <span className="shot-nav-main"><b>{shot.shot_size} · {shot.camera_move}</b><small>{shot.scene_setting}</small></span>
+                  <span className="shot-nav-main"><b>{shot.shot_size} · {shot.camera_move}</b><small>{shot.scene_time ? `${shot.scene_time} · ` : ''}{shot.scene_name || shot.scene_setting}</small></span>
                   <span className="shot-nav-badges">
                     {checkpoint && <i className={checkpoint.className} title={checkpoint.title}>{checkpoint.label}</i>}
                     {isStoryboardProblemShot(shot) && <i className="problem">需处理</i>}
@@ -959,6 +965,10 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
     ...(episode.shots ?? []).flatMap(item => item.characters ?? []),
     ...(episode.screenplay?.scene_outline ?? []).flatMap(scene => scene.characters ?? []),
   ].filter(Boolean))], [episode.shots, episode.screenplay])
+  const sceneOptions = useMemo(() => [...new Set([
+    ...(episode.scene_options ?? []),
+    ...(episode.shots ?? []).map(item => item.scene_name || item.scene_setting),
+  ].filter(Boolean))], [episode.scene_options, episode.shots])
   const informationOptions = useMemo(() => {
     const ledger = episode.screenplay?.information_ledger ?? []
     return ledger.map((item, index) => {
@@ -1168,7 +1178,10 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
               <label htmlFor={fieldId(shot.id, 'move')}>运镜<select id={fieldId(shot.id, 'move')} value={edit.camera_move} onChange={event => setEdit({ ...edit, camera_move: event.target.value })}>{MOVES.map(value => <option key={value}>{value}</option>)}</select></label>
               <label htmlFor={fieldId(shot.id, 'transition')}>转场<select id={fieldId(shot.id, 'transition')} value={edit.transition} onChange={event => setEdit({ ...edit, transition: event.target.value })}>{TRANSITIONS.map(value => <option key={value}>{value}</option>)}</select></label>
             </div>
-            <label htmlFor={fieldId(shot.id, 'scene')}>场景标签<input id={fieldId(shot.id, 'scene')} value={edit.scene_setting} required onChange={event => setEdit({ ...edit, scene_setting: event.target.value })} /></label>
+            <div className="shot-edit-grid">
+              <label htmlFor={fieldId(shot.id, 'scene-time')}>时间标签<input id={fieldId(shot.id, 'scene-time')} list={fieldId(shot.id, 'scene-time-options')} value={edit.scene_time ?? ''} placeholder="黄昏 / 18:30 / 次日清晨" onChange={event => setEdit({ ...edit, scene_time: event.target.value })} /><datalist id={fieldId(shot.id, 'scene-time-options')}>{SCENE_TIMES.map(value => <option key={value} value={value} />)}</datalist><small>可输入早中晚、黄昏或具体时刻</small></label>
+              <label htmlFor={fieldId(shot.id, 'scene-name')}>场景图标签<input id={fieldId(shot.id, 'scene-name')} list={fieldId(shot.id, 'scene-name-options')} value={edit.scene_name ?? ''} required placeholder="选择或输入接近的场景名" onChange={event => setEdit({ ...edit, scene_name: event.target.value })} /><datalist id={fieldId(shot.id, 'scene-name-options')}>{sceneOptions.map(value => <option key={value} value={value} />)}</datalist><small>保存时可模糊匹配，命中后会归一成场景库规范名</small></label>
+            </div>
             <label htmlFor={fieldId(shot.id, 'action')}>画面与动作<textarea id={fieldId(shot.id, 'action')} rows={3} value={edit.action_desc} required onChange={event => setEdit({ ...edit, action_desc: event.target.value })} /></label>
             <div className="shot-edit-grid frames"><label htmlFor={fieldId(shot.id, 'first')}>首帧画面<textarea id={fieldId(shot.id, 'first')} rows={2} value={edit.first_frame_desc} onChange={event => setEdit({ ...edit, first_frame_desc: event.target.value })} /></label>
               <label htmlFor={fieldId(shot.id, 'last')}>尾帧画面<textarea id={fieldId(shot.id, 'last')} rows={2} value={edit.last_frame_desc} onChange={event => setEdit({ ...edit, last_frame_desc: event.target.value })} /></label></div>
@@ -1239,7 +1252,7 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
         </div>
       ) : (
         <div className="shot-review-body">
-          <section className="shot-overview"><div className="shot-visual-brief"><span className="shot-section-label">画面设计</span><h2>{current.scene_setting}</h2><p>{current.action_desc}</p></div>
+          <section className="shot-overview"><div className="shot-visual-brief"><span className="shot-section-label">画面设计</span><h2>{current.scene_name || current.scene_setting}</h2>{current.scene_time && <small>时间：{current.scene_time}</small>}<p>{current.action_desc}</p></div>
             <dl className="shot-specs"><div><dt>时长</dt><dd>{current.duration_s}s</dd></div><div><dt>景别</dt><dd>{current.shot_size}</dd></div><div><dt>运镜</dt><dd>{current.camera_move}</dd></div><div><dt>转场</dt><dd>{current.transition}</dd></div></dl></section>
           <div className="shot-frame-pair shot-continuity-chain" aria-label="镜头状态链"><div className="shot-frame-card"><b>进入状态</b><p>{current.state_in || current.first_frame_desc || '未设置'}</p></div><span aria-hidden>→</span><div className="shot-frame-card"><b>镜头动作</b><p>{current.primary_action || current.action_desc}</p></div><span aria-hidden>→</span><div className="shot-frame-card"><b>离开状态</b><p>{current.state_out || current.last_frame_desc || '未设置'}</p></div></div>
           <section className="shot-spoken-panel"><header className="shot-context-head"><b>本镜台词</b><span>{currentChars} / {spokenLimit} 字</span></header>{overCapacity && <p className="shot-spoken-warn">口播已超出本镜容量</p>}{current.dialogues.length ? current.dialogues.map((line, index) => <div key={index} className="shot-audio-line"><b>{line.speaker}<small>{line.emotion}</small></b><p>「{line.line}」</p></div>) : <p>本镜无台词</p>}</section>

@@ -127,6 +127,21 @@ export function shotDetailRefreshKey(shot: Shot | null): string {
   })
 }
 
+export function reviewContextRefreshKey(ep: {
+  status?: string
+  storyboard_artifact_id?: string | null
+  active_storyboard_run_id?: string | null
+  active_video_run_id?: string | null
+} | null): string {
+  if (!ep) return 'missing'
+  return [
+    ep.status || '',
+    ep.storyboard_artifact_id || '',
+    ep.active_storyboard_run_id || '',
+    ep.active_video_run_id || '',
+  ].join('|')
+}
+
 function commaList(value?: string[]) {
   return (value ?? []).join('、') || '无'
 }
@@ -379,7 +394,16 @@ export default function WallPage() {
     }
   }, [selectedShotId])
 
-  useEffect(() => { void loadContext() }, [loadContext])
+  const contextRefreshKey = reviewContextRefreshKey(ep)
+  useEffect(() => { void loadContext() }, [contextRefreshKey, loadContext])
+
+  // 后端重启时的瞬时网络失败不应把生成台永久留在只读状态。
+  // 保留 fail-closed，但在错误存在期间有界地重读真实资格，成功后自动恢复。
+  useEffect(() => {
+    if (!contextError) return
+    const retry = window.setInterval(() => { void loadContext() }, 3000)
+    return () => window.clearInterval(retry)
+  }, [contextError, loadContext])
 
   useEffect(() => {
     if (!episodeId || selectionReady || loading || !ep) return
@@ -686,7 +710,8 @@ export default function WallPage() {
                 state.grade === 'B' ? '质量需复核' : '',
                 state.continuityDegraded ? '衔接需复核' : '',
               ].filter(Boolean)
-              return <button key={item.id} type="button" title={state.phase === 'generating' ? `${exactStage}${item.pipeline?.task_id ? ` · 任务 ${item.pipeline.task_id}` : ''}` : reviewNotes.join('；') || undefined} data-grade={state.grade || undefined} className={`${item.id === selectedShotId ? 'active ' : ''}${state.railClass}`} onClick={() => selectShot(item.id)} aria-current={item.id === selectedShotId ? 'true' : undefined} aria-label={`镜 ${item.shot_no}，${stageLabel}${reviewNotes.length ? `，${reviewNotes.join('，')}` : ''}`}><b>{String(item.shot_no).padStart(2, '0')}</b><span>{stageLabel}</span>{state.grade === 'B' ? <i className="quality-review-badge">质量需复核</i> : null}{state.continuityDegraded ? <i className="continuity-degraded-badge">衔接需复核</i> : null}</button>
+              const executionDetail = item.pipeline?.reason_text || item.pipeline?.blocked_reason || exactStage
+              return <button key={item.id} type="button" title={state.phase === 'generating' || state.phase === 'generation_failed' ? `${executionDetail}${item.pipeline?.task_id ? ` · 任务 ${item.pipeline.task_id}` : ''}` : reviewNotes.join('；') || undefined} data-grade={state.grade || undefined} className={`${item.id === selectedShotId ? 'active ' : ''}${state.railClass}`} onClick={() => selectShot(item.id)} aria-current={item.id === selectedShotId ? 'true' : undefined} aria-label={`镜 ${item.shot_no}，${stageLabel}${reviewNotes.length ? `，${reviewNotes.join('，')}` : ''}`}><b>{String(item.shot_no).padStart(2, '0')}</b><span>{stageLabel}</span>{state.grade === 'B' ? <i className="quality-review-badge">质量需复核</i> : null}{state.continuityDegraded ? <i className="continuity-degraded-badge">衔接需复核</i> : null}</button>
             })}
             {!filteredShots.length && <div className="rail-empty">当前筛选无命中镜头。<button onClick={() => { setFilters(new Set()); setFilterSource('未筛选') }}>清除筛选</button></div>}
           </nav>
@@ -808,7 +833,7 @@ function ShotWorkbench({ shot, episodeNo, episodeStatus, tab, onTab, context, wr
     event.preventDefault()
     focusTab(REVIEW_TABS[nextIndex].id)
   }
-  return <article className="slide-card"><header className="slide-head"><span className="sn">镜 {shot.shot_no}</span><span className="meta">{shot.shot_size} · {shot.camera_move} · {shot.duration_s}s · {shot.transition}</span><span className="meta">{shot.scene_setting}</span><span className={`stamp ${state.phase === 'adopted' ? 'green' : state.phase === 'generation_failed' ? 'red' : state.phase === 'generating' ? 'gold' : 'grey'}`} title={state.phase === 'generating' ? shot.pipeline?.stage_label || visibleStatus : undefined}>{visibleStatus}</span>{state.grade === 'B' && <span className="quality-review-badge" title={state.fallbackReason || '已有可播放采用版，但画面质量仍建议人工复核'}>质量需复核</span>}{state.continuityDegraded && <span className="continuity-degraded-badge">衔接需复核</span>}</header><nav className="review-tabs" role="tablist" aria-label={`镜 ${shot.shot_no} 生成内容`}>{REVIEW_TABS.map((item, index) => <button id={`review-tab-${shot.id}-${item.id}`} key={item.id} type="button" role="tab" aria-selected={tab === item.id} aria-controls={panelId} tabIndex={tab === item.id ? 0 : -1} className={tab === item.id ? 'active' : ''} onClick={() => onTab(item.id)} onKeyDown={event => onTabKeyDown(event, index)}>{item.label}</button>)}</nav><div id={panelId} className="review-workbench-panel" role="tabpanel" aria-labelledby={`review-tab-${shot.id}-${tab}`}>
+  return <article className="slide-card"><header className="slide-head"><span className="sn">镜 {shot.shot_no}</span><span className="meta">{shot.shot_size} · {shot.camera_move} · {shot.duration_s}s · {shot.transition}</span><span className="meta">{shot.scene_time ? `${shot.scene_time} · ` : ''}{shot.scene_name || shot.scene_setting}</span><span className={`stamp ${state.phase === 'adopted' ? 'green' : state.phase === 'generation_failed' ? 'red' : state.phase === 'generating' ? 'gold' : 'grey'}`} title={state.phase === 'generating' ? shot.pipeline?.stage_label || visibleStatus : undefined}>{visibleStatus}</span>{state.grade === 'B' && <span className="quality-review-badge" title={state.fallbackReason || '已有可播放采用版，但画面质量仍建议人工复核'}>质量需复核</span>}{state.continuityDegraded && <span className="continuity-degraded-badge">衔接需复核</span>}</header><nav className="review-tabs" role="tablist" aria-label={`镜 ${shot.shot_no} 生成内容`}>{REVIEW_TABS.map((item, index) => <button id={`review-tab-${shot.id}-${item.id}`} key={item.id} type="button" role="tab" aria-selected={tab === item.id} aria-controls={panelId} tabIndex={tab === item.id ? 0 : -1} className={tab === item.id ? 'active' : ''} onClick={() => onTab(item.id)} onKeyDown={event => onTabKeyDown(event, index)}>{item.label}</button>)}</nav><div id={panelId} className="review-workbench-panel" role="tabpanel" aria-labelledby={`review-tab-${shot.id}-${tab}`}>
     {tab === 'text' && <InfoSection shot={shot} current={current} />}
     {tab === 'references' && <MaterialGallery shot={shot} productionEligible={!writeFrozen} onOpen={onOpen} onRefresh={onRefresh} onToast={onToast} />}
     {tab === 'videos' && <VideoPreviewWorkspace shot={shot} episodeNo={episodeNo} episodeStatus={episodeStatus} context={context} generating={generating} setGenerating={setGenerating} writeFrozen={writeFrozen} onRefresh={onRefresh} onToast={onToast} />}
@@ -819,7 +844,7 @@ function InfoSection({ shot, current }: { shot: Shot; current?: ShotVersion }) {
   const dialogue = shot.dialogues.map(line => `${line.speaker}：${line.line}${line.emotion && line.emotion !== '平静' ? `（${line.emotion}）` : ''}`).join('\n')
   const prompt = current?.prompt_text || shot.prompt_preview || ''
   const copy = async (text: string) => { try { await navigator.clipboard.writeText(text) } catch { /* clipboard permission */ } }
-  return <div className="info-section"><section className="script-card"><div className="script-card-head">原文摘录 <button className="text-action" onClick={() => { void copy(shot.source_excerpt || '') }}>复制</button></div><div className={`script-source${shot.source_excerpt ? '' : ' empty'}`}>{shot.source_excerpt || '暂无原文摘录'}</div></section><section className="script-card"><div className="script-card-head">镜头信息</div><dl className="script-meta-grid"><Meta label="场景" value={shot.scene_setting} /><Meta label="角色" value={commaList(shot.characters)} /><Meta label="时长" value={`${shot.duration_s}s`} /><Meta label="镜头" value={`${shot.shot_size} / ${shot.camera_move}`} /><Meta label="转场" value={shot.transition} /><Meta label="衔接" value={shot.continuity_mode || (shot.continuity_from_prev ? '接上镜' : '新场景')} /></dl></section><section className="script-card continuity-card"><div className="script-card-head">视频连续性</div><div className="continuity-flow"><div><b>输入状态</b><p>{shot.state_in || shot.first_frame_desc || '未设置'}</p></div><span>→</span><div><b>主要动作</b><p>{shot.primary_action || shot.action_desc || '未设置'}</p></div><span>→</span><div><b>输出状态</b><p>{shot.state_out || shot.last_frame_desc || '未设置'}</p></div></div>{current?.qa?.failure_types?.length ? <div className="continuity-risk" role="status"><b>⚠ 连续性风险</b>{current.qa.failure_types.join('、')}<p>观测输出：{current.qa.observed_state_out || '未返回'}</p></div> : <div className="continuity-ok">✓ 暂无已知高风险差异</div>}<details><summary>技术字段</summary>{prompt && <pre>{truncateText(prompt)}</pre>}</details></section><section className="script-card"><div className="script-card-head">镜头脚本 <button className="text-action" onClick={() => { void copy([shot.action_desc, shot.narration, dialogue].filter(Boolean).join('\n')) }}>复制业务文本</button></div><div className="script-block"><div className="script-paragraph"><span className="script-label">画面</span><p>{shot.action_desc}</p></div>{shot.narration && <div className="script-paragraph"><span className="script-label">旁白</span><p>{shot.narration}</p></div>}{dialogue && <div className="script-paragraph"><span className="script-label">台词</span><pre className="script-dialogues">{dialogue}</pre></div>}</div></section></div>
+  return <div className="info-section"><section className="script-card"><div className="script-card-head">原文摘录 <button className="text-action" onClick={() => { void copy(shot.source_excerpt || '') }}>复制</button></div><div className={`script-source${shot.source_excerpt ? '' : ' empty'}`}>{shot.source_excerpt || '暂无原文摘录'}</div></section><section className="script-card"><div className="script-card-head">镜头信息</div><dl className="script-meta-grid"><Meta label="场景图" value={shot.scene_name || shot.scene_setting} /><Meta label="时间" value={shot.scene_time || "未设置"} /><Meta label="角色" value={commaList(shot.characters)} /><Meta label="时长" value={`${shot.duration_s}s`} /><Meta label="镜头" value={`${shot.shot_size} / ${shot.camera_move}`} /><Meta label="转场" value={shot.transition} /><Meta label="衔接" value={shot.continuity_mode || (shot.continuity_from_prev ? '接上镜' : '新场景')} /></dl></section><section className="script-card continuity-card"><div className="script-card-head">视频连续性</div><div className="continuity-flow"><div><b>输入状态</b><p>{shot.state_in || shot.first_frame_desc || '未设置'}</p></div><span>→</span><div><b>主要动作</b><p>{shot.primary_action || shot.action_desc || '未设置'}</p></div><span>→</span><div><b>输出状态</b><p>{shot.state_out || shot.last_frame_desc || '未设置'}</p></div></div>{current?.qa?.failure_types?.length ? <div className="continuity-risk" role="status"><b>⚠ 连续性风险</b>{current.qa.failure_types.join('、')}<p>观测输出：{current.qa.observed_state_out || '未返回'}</p></div> : <div className="continuity-ok">✓ 暂无已知高风险差异</div>}<details><summary>技术字段</summary>{prompt && <pre>{truncateText(prompt)}</pre>}</details></section><section className="script-card"><div className="script-card-head">镜头脚本 <button className="text-action" onClick={() => { void copy([shot.action_desc, shot.narration, dialogue].filter(Boolean).join('\n')) }}>复制业务文本</button></div><div className="script-block"><div className="script-paragraph"><span className="script-label">画面</span><p>{shot.action_desc}</p></div>{shot.narration && <div className="script-paragraph"><span className="script-label">旁白</span><p>{shot.narration}</p></div>}{dialogue && <div className="script-paragraph"><span className="script-label">台词</span><pre className="script-dialogues">{dialogue}</pre></div>}</div></section></div>
 }
 
 function Meta({ label, value }: { label: string; value: string }) { return <div className="script-meta-item"><dt className="script-meta-label">{label}</dt><dd className="script-meta-value">{value}</dd></div> }
@@ -973,6 +998,11 @@ function VideoPreviewWorkspace({ shot, episodeNo, episodeStatus, context, genera
   const adoptDisabledReason = writeFrozen
     ? context?.upstream.blockers.join('；') || '当前生成资格未通过'
     : ''
+  const pipelineBlocked = shot.pipeline?.pipeline_status === 'waiting_human'
+    || shot.pipeline?.pipeline_stage === 'preflight_blocked'
+    || shot.pipeline?.pipeline_stage === 'waiting_human'
+  const preflightRetrying = shot.pipeline?.pipeline_stage === 'preflight_retry'
+    || shot.pipeline?.pipeline_stage === 'preflight_validating'
 
   const runGeneration = async () => {
     if (!wizard || !context) return
@@ -1059,7 +1089,7 @@ function VideoPreviewWorkspace({ shot, episodeNo, episodeStatus, context, genera
     setCancellingAdoption(true)
     try {
       await api.cancelShotAdoption(shot.id)
-      onToast(`已取消镜 ${shot.shot_no} 的采纳，成片合成时将跳过本镜`)
+      onToast(`已取消镜 ${shot.shot_no} 的采纳；候选仍保留，成片只会使用重新采纳或自动择优的真实模型视频`)
       await onRefresh()
     } catch (error) {
       onToast(error instanceof Error ? error.message : String(error), undefined, true)
@@ -1086,6 +1116,8 @@ function VideoPreviewWorkspace({ shot, episodeNo, episodeStatus, context, genera
       <div><b>本镜视频</b><span>单次估算 ￥{shot.est_cost_cny.toFixed(2)} · 候选 {versions.length} 个</span></div>
       <div className="asset-workspace-actions"><button className="btn primary small" disabled={Boolean(createVideoDisabledReason)} aria-label={createVideoDisabledReason ? `新建视频版本，暂不可用：${createVideoDisabledReason}` : `为镜 ${shot.shot_no} 新建视频版本`} title={createVideoDisabledReason || '提交前会先展示输入方式、范围和估算费用'} onClick={() => { setWizard('reroll'); setPrompt(shot.prompt_preview || '') }}>新建视频版本</button><button type="button" className="btn ghost small danger" disabled={Boolean(clearResourcesDisabledReason)} aria-label={clearResourcesDisabledReason ? `清空资源，暂不可用：${clearResourcesDisabledReason}` : `清空镜 ${shot.shot_no} 的视频和图像资源`} title={clearResourcesDisabledReason || '删除本镜视频、关键帧和参考图'} onClick={() => setClearResourcesConfirm(true)}>{clearingResources ? '清空中…' : '清空资源'}</button></div>
     </section>
+    {pipelineBlocked && <section className="review-persistent-error compact" role="alert"><b>视频任务尚未进入生成</b><span>{shot.pipeline?.reason_text || shot.pipeline?.blocked_reason || '视频输入需要处理后才能继续。'}</span><p>请先按提示修正分镜内容；修正后点击「新建视频版本」会复用当前任务并重新校验，不会重复提交供应商。</p>{shot.pipeline?.task_id && <details><summary>任务信息</summary><code>{shot.pipeline.task_id}</code></details>}</section>}
+    {preflightRetrying && <section className="material-fallback-note" role="status"><b>{shot.pipeline?.pipeline_stage === 'preflight_validating' ? '正在校验视频输入' : '校验遇到瞬时故障，等待自动重试'}</b><span>{shot.pipeline?.reason_text || '此阶段尚未提交供应商，不会产生视频费用。'}{shot.pipeline?.next_retry_at ? ` 下次检查：${new Date(shot.pipeline.next_retry_at * 1000).toLocaleTimeString()}` : ''}</span></section>}
     <div className="video-preview-layout">
       <section className="video-preview-player" aria-label="单视频预览">
         <header><div><span>当前预览</span><b>{selected ? `镜 ${shot.shot_no} · v${selected.version_no}` : `镜 ${shot.shot_no}`}</b></div>{selected && <span className={`stamp ${selected.status === 'failed' ? 'red' : selected.status === 'succeeded' ? 'green' : 'gold'}`}>{videoVersionStatusLabel(selected, selected.id === shot.adopted_version_id)}</span>}</header>
@@ -1095,7 +1127,7 @@ function VideoPreviewWorkspace({ shot, episodeNo, episodeStatus, context, genera
         {selected && <div className="video-preview-summary"><span>质检分 <b>{selected.qa?.overall?.toFixed(2) ?? '未评估'}</b></span><span>费用 <b>￥{selected.cost_cny.toFixed(2)}</b></span><span>耗时 <b>{selected.latency_s.toFixed(1)} 秒</b></span><span>定稿倍速 <b>{videoPlaybackRate(selected)}×</b></span></div>}
         {selected?.qa?.issues?.length ? <p className="video-preview-issues">{selected.qa.issues.join('；')}</p> : null}
         {selected?.video_url && <div className="video-playback-control"><label htmlFor={`video-rate-${selected.id}`}>预览 / 定稿倍速</label><select id={`video-rate-${selected.id}`} value={selectedPlaybackRate} onChange={event => setPlaybackRates(current => ({ ...current, [selected.id]: Number(event.target.value) }))}>{VIDEO_PLAYBACK_RATES.map(rate => <option key={rate} value={rate}>{rate}×</option>)}</select><small>{selectedRateChanged ? `尚未定稿：当前预览 ${selectedPlaybackRate}×` : `已定稿 ${videoPlaybackRate(selected)}×`}；采纳后成片会实际按此倍速合成。</small></div>}
-        <div className="video-preview-actions">{selected?.video_url && <a className="btn ghost small" href={selected.video_url} download={`ep-${episodeNo}-shot-${shot.shot_no}-v${selected.version_no}-${selected.id === shot.adopted_version_id ? 'adopted' : 'candidate'}.mp4`}>导出当前视频</a>}{selected?.video_url && selected.id !== shot.adopted_version_id && !context?.archived_versions[selected.id] && <button className="btn primary small" disabled={Boolean(adoptDisabledReason)} title={adoptDisabledReason || '按当前预览倍速采纳；提交前需填写判断理由'} onClick={() => openAdopt(selected)}>按 {selectedPlaybackRate}× 定稿采纳</button>}{selected?.id === shot.adopted_version_id && <><span className="stamp green">当前采用版本 · {videoPlaybackRate(selected)}×</span>{selectedRateChanged && <button type="button" className="btn primary small" disabled={Boolean(adoptDisabledReason)} onClick={() => openAdopt(selected)}>改为 {selectedPlaybackRate}× 定稿</button>}<button type="button" className="btn ghost small danger" disabled={cancellingAdoption} title="保留候选视频，只取消采纳；下次成片合成将跳过本镜" onClick={() => { void cancelAdoption() }}>{cancellingAdoption ? '取消中…' : '取消采纳'}</button></>}</div>
+        <div className="video-preview-actions">{selected?.video_url && <a className="btn ghost small" href={selected.video_url} download={`ep-${episodeNo}-shot-${shot.shot_no}-v${selected.version_no}-${selected.id === shot.adopted_version_id ? 'adopted' : 'candidate'}.mp4`}>导出当前视频</a>}{selected?.video_url && selected.id !== shot.adopted_version_id && !context?.archived_versions[selected.id] && <button className="btn primary small" disabled={Boolean(adoptDisabledReason)} title={adoptDisabledReason || '按当前预览倍速采纳；提交前需填写判断理由'} onClick={() => openAdopt(selected)}>按 {selectedPlaybackRate}× 定稿采纳</button>}{selected?.id === shot.adopted_version_id && <><span className="stamp green">当前采用版本 · {videoPlaybackRate(selected)}×</span>{selectedRateChanged && <button type="button" className="btn primary small" disabled={Boolean(adoptDisabledReason)} onClick={() => openAdopt(selected)}>改为 {selectedPlaybackRate}× 定稿</button>}<button type="button" className="btn ghost small danger" disabled={cancellingAdoption} title="保留真实模型候选，只取消当前采纳；成片不会用图片或静音片段代替本镜" onClick={() => { void cancelAdoption() }}>{cancellingAdoption ? '取消中…' : '取消采纳'}</button></>}</div>
       </section>
       <section className="video-candidate-list" aria-label="视频候选列表">
         <header><div><b>全部候选</b><span>{versions.length}</span></div><small>按版本从新到旧</small></header>

@@ -69,7 +69,9 @@ class Evaluation(BaseModel):
     evaluator_version: str
     status: Literal["passed", "warning", "failed", "error"]
     hard_gate_passed: bool
-    evaluation_role: Literal["score_only", "runtime_gate", "business_safety"] | None = None
+    evaluation_role: Literal[
+        "score_only", "retry_and_rank", "runtime_gate", "business_safety"
+    ] | None = None
     score_status: str | None = None
     runtime_blocking: bool = False
     retry_eligible: bool = False

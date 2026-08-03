@@ -17,6 +17,36 @@ from app.observability.tracing import bind_trace
 T = TypeVar("T")
 
 
+# 后端事件里的步骤 key 保留英文标识以便审计追踪，但对用户展示的 message 一律走中文映射。
+_STEP_KEY_LABELS: dict[str, str] = {
+    "generate": "生成内容",
+    "validate": "校验内容",
+    "evaluate": "质量评估",
+    "repair": "定向修复",
+    "screenplay": "生成剧本",
+    "storyboard": "生成分镜",
+    "character_bible": "人物谱生成",
+    "character_references": "生成人物参考图",
+    "scene_bible": "场景设定",
+    "scene_references": "生成场景参考图",
+    "episode_mapping": "分集规划",
+    "scene_generation": "生成关键帧",
+    "video_generation": "生成视频",
+    "episode_video_completion": "补齐整集视频",
+    "delivery": "交付",
+    "delivery_package": "生成交付候选",
+    "build_delivery_snapshot": "生成交付快照",
+    "apply_delivery_gate": "应用交付决定",
+}
+
+
+def _step_label(step_key: str) -> str:
+    """Return the Chinese display label for a workflow step key."""
+    if not step_key:
+        return "未命名步骤"
+    return _STEP_KEY_LABELS.get(step_key, step_key)
+
+
 def fingerprint(*parts: Any) -> str:
     encoded = json.dumps(parts, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -98,7 +128,7 @@ class WorkflowRecorder:
         )
         conn.commit()
         repository.append_event(
-            self.run_id, "STEP_STARTED", "info", f"步骤开始：{step_key}", step_run_id=step_id
+            self.run_id, "STEP_STARTED", "info", f"步骤开始：{_step_label(step_key)}", step_run_id=step_id
         )
         try:
             with bind_trace(self.run_id, step_id):
@@ -106,7 +136,7 @@ class WorkflowRecorder:
         except asyncio.CancelledError:
             transition_step(step_id, "RUNNING", "CANCELLED", "运行被取消", decision="cancel")
             repository.append_event(
-                self.run_id, "STEP_CANCELLED", "warning", f"步骤已取消：{step_key}", step_run_id=step_id
+                self.run_id, "STEP_CANCELLED", "warning", f"步骤已取消：{_step_label(step_key)}", step_run_id=step_id
             )
             raise
         except Exception as exc:
@@ -115,14 +145,14 @@ class WorkflowRecorder:
                 error_code=type(exc).__name__.upper(),
             )
             repository.append_event(
-                self.run_id, "STEP_FAILED", "error", f"步骤失败：{step_key}",
+                self.run_id, "STEP_FAILED", "error", f"步骤失败：{_step_label(step_key)}",
                 step_run_id=step_id,
                 payload={"error_type": type(exc).__name__, "message": str(exc)[:1000]},
             )
             raise
         transition_step(step_id, "RUNNING", "SUCCEEDED", "步骤完成", decision="accept")
         repository.append_event(
-            self.run_id, "STEP_SUCCEEDED", "info", f"步骤完成：{step_key}", step_run_id=step_id
+            self.run_id, "STEP_SUCCEEDED", "info", f"步骤完成：{_step_label(step_key)}", step_run_id=step_id
         )
         return step_id, result
 

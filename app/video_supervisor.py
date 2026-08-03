@@ -20,9 +20,14 @@ from app.completion_grant import (
     validate_video_grant,
     GrantValidationError,
 )
+from app.continuity import classify_video_hard_failures
 from app.db import get_conn, now
 from app.evidence import repository as evidence_repository
-from app.evidence.media import grade_shot_video, select_best_video_candidate
+from app.evidence.media import (
+    grade_shot_video,
+    select_best_video_candidate,
+    video_candidate_selection_score,
+)
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
 from app.media_pipeline.stages import ACTIVE_JOB_STATUSES
 from app.video_control import consume_control
@@ -163,12 +168,12 @@ class CoverageLedger(BaseModel):
         return out
 
     def exhausted_but_technically_ok(self) -> list[ShotCoverageEntry]:
-        """attempt 配额用尽但有技术合格候选、可 B 级兜底。"""
+        """attempt 配额用尽但有技术合格候选，必须 best-effort 收口。"""
         out = []
         for e in self.entries:
             if e.adopted_version_id or e.active_job_id:
                 continue
-            if e.grade in {"A", "B"} and not e.chain_stale and not e.video_stale:
+            if e.grade == "A" and not e.chain_stale and not e.video_stale:
                 continue
             if max(e.attempts_paid, e.attempts_dispatched) < e.attempts_budgeted:
                 continue
@@ -666,13 +671,20 @@ def rebuild_coverage_ledger(
             shot_ids,
         ).fetchall():
             sid = row["shot_id"]
-            dispatch_map[sid] = dispatch_map.get(sid, 0) + 1
-            cost_map[sid] = cost_map.get(sid, 0.0) + float(row["cost_cny"] or 0)
             try:
                 version_meta = json.loads(row["image_inputs"] or "{}")
             except (TypeError, ValueError, json.JSONDecodeError):
                 version_meta = {}
-            if row["provider_task_id"] or row["status"] in {"succeeded", "failed", "running", "queued"}:
+            is_delivery_fallback = bool(version_meta.get("delivery_fallback"))
+            if is_delivery_fallback:
+                # 清理前遗留的图片兜底不算视频版本、尝试次数或覆盖率。
+                continue
+            dispatch_map[sid] = dispatch_map.get(sid, 0) + 1
+            cost_map[sid] = cost_map.get(sid, 0.0) + float(row["cost_cny"] or 0)
+            if (
+                row["provider_task_id"]
+                or row["status"] in {"succeeded", "failed", "running", "queued"}
+            ):
                 # 产生过 provider 任务或进入执行的版本计为 paid attempt
                 if row["provider_task_id"] or row["status"] == "succeeded":
                     paid_attempts = max(
@@ -683,17 +695,27 @@ def rebuild_coverage_ledger(
             if row["status"] != "succeeded":
                 continue
             qa = json.loads(row["qa_json"] or "{}")
+            technical = json.loads(row["technical_validation_json"] or "{}")
+            if not technical.get("passed"):
+                continue
             try:
                 score = float(qa.get("overall")) if qa.get("overall") is not None else -1.0
             except (TypeError, ValueError):
                 score = -1.0
+            hard_failures = classify_video_hard_failures(qa, technical=technical)
+            qa_recovered = bool(qa.get("qa_recovered") or qa.get("status") == "unverified")
+            selection_score = video_candidate_selection_score(
+                score, hard_failures, qa_recovered=qa_recovered,
+            )
+            rank = (not qa_recovered, selection_score, score, int(row["version_no"] or 0))
             cur = best_map.get(sid)
-            if cur is None or score >= cur["score"]:
+            if cur is None or rank >= cur["rank"]:
                 best_map[sid] = {
                     "id": row["id"],
                     "score": score,
+                    "rank": rank,
                     "qa": qa,
-                    "technical": json.loads(row["technical_validation_json"] or "{}"),
+                    "technical": technical,
                     "image_inputs": row["image_inputs"],
                 }
 
@@ -713,6 +735,22 @@ def rebuild_coverage_ledger(
         saved = prev_state.get(str(row["shot_no"])) or prev_state.get(sid) or {}
         chain_head, chain_pos, chain_len = chains.get(sid, (row["shot_no"], 0, 1))
         best = best_map.get(sid)
+        adopted_version_id = row["adopted_version_id"]
+        if adopted_version_id:
+            adopted_row = conn.execute(
+                "SELECT status,image_inputs FROM shot_versions WHERE id=?",
+                (adopted_version_id,),
+            ).fetchone()
+            try:
+                adopted_meta = json.loads(adopted_row["image_inputs"] or "{}") if adopted_row else {}
+            except (TypeError, ValueError, json.JSONDecodeError):
+                adopted_meta = {}
+            if (
+                not adopted_row
+                or adopted_meta.get("delivery_fallback")
+                or adopted_row["status"] != "succeeded"
+            ):
+                adopted_version_id = None
         graded = grade_shot_video(
             sid,
             technical=(best or {}).get("technical"),
@@ -776,7 +814,7 @@ def rebuild_coverage_ledger(
             shot_no=int(row["shot_no"]),
             shot_id=sid,
             grade=grade,  # type: ignore[arg-type]
-            adopted_version_id=row["adopted_version_id"],
+            adopted_version_id=adopted_version_id,
             best_version_id=(best or {}).get("id"),
             best_qa_overall=graded["qa_overall"],
             qa_gain_last_2=gain,
@@ -930,7 +968,9 @@ def _after_shot_id(episode_id: str, shot_no: int, *, degrade: bool = False) -> s
         return Shot(
             shot_no=r["shot_no"], duration_s=r["duration_s"] or 5,
             shot_size=r["shot_size"] or "中景", camera_move=r["camera_move"] or "固定",
+            scene_time=(r["scene_time"] if "scene_time" in r.keys() else "") or "",
             scene_setting=r["scene_setting"] or "",
+            scene_name=(r["scene_name"] if "scene_name" in r.keys() else "") or "",
             characters=json.loads(r["characters"] or "[]"),
             action_desc=r["action_desc"] or "",
             continuity_from_prev=bool(r["continuity_from_prev"]),
@@ -1335,7 +1375,7 @@ def _adopt_ready_candidates(
     *,
     run_id: str | None,
 ) -> int:
-    """正常运行期仅采用达到既定 QA 门槛的候选；重生仍由 Supervisor 决策。"""
+    """正常运行期采用达到质量目标或 QA 不可用的候选；其余留给有限重试。"""
     adopted = 0
     for entry in ledger.entries:
         if entry.adopted_version_id or not entry.best_version_id:
@@ -1541,7 +1581,13 @@ def _deadline_closeout(
         cp,
         ledger,
         outcome=cp.outcome,
-        extra={"stopped_jobs": stopped},
+        extra={
+            "stopped_jobs": stopped,
+            "deterministic_fallbacks": {
+                "disabled": True,
+                "reason": "静态图片、轻运动卡和静音片段不具备视频采用资格",
+            },
+        },
     )
     if cp.grant_id:
         try:
@@ -1890,18 +1936,16 @@ async def run_video_completion_supervisor(
             cp=cp,
             run_id=run_id,
         )
-    except Exception as exc:  # noqa: BLE001 - a later UI-authorized resume may retry
-        cp.phase = "PAUSED_EXTERNAL"
-        cp.outcome = "VIDEO_REFERENCE_ASSET_PREP_FAILED"
+    except Exception as exc:  # noqa: BLE001 - 资产失败降级，不得中断整集覆盖
+        cp.quality_target_missed = True
         save_checkpoint(cp, run_id=run_id)
         if run_id:
             evidence_repository.append_event(
                 run_id,
                 "VIDEO_REFERENCE_ASSET_PREP_FAILED",
                 "warning",
-                str(exc)[:600],
+                f"参考资产准备失败，继续使用当前可用资产生成真实模型视频：{str(exc)[:500]}",
             )
-        return cp
 
     wall_cap = float(wall_clock_cap_s if wall_clock_cap_s is not None else (cp.budget.get("wall_clock_cap_s") or 4 * 3600))
     if grant:
@@ -2138,16 +2182,13 @@ async def run_video_completion_supervisor(
                         payload={"shot_no": entry.shot_no},
                     )
 
-        # B 级兜底
+        # 尝试预算耗尽后统一 best-effort 兜底；质量等级和旧 fallback quota
+        # 只用于报告，不得让任何已有可播候选继续空置。
         if allow_fallback_adopt:
             # 刷新 ledger 状态到 cp
             _merge_shot_state(cp, ledger)
             ledger2 = rebuild_coverage_ledger(episode_id, cp=cp)
             for entry in ledger2.exhausted_but_technically_ok():
-                b_count = sum(1 for e in ledger2.entries if e.grade == "B")
-                if b_count >= ledger2.fallback_quota and entry.grade != "B":
-                    # 超配额时挑最低分继续修，不在此兜底新的
-                    continue
                 if _adopt_fallback(entry, episode_id=episode_id, run_id=run_id):
                     progressed = True
 
@@ -2380,6 +2421,10 @@ async def reconcile_stale_video_supervisors() -> int:
 async def video_supervisor_watchdog_loop(interval_s: float = 30.0) -> None:
     while True:
         try:
+            # 轻量级业务巡检始终运行，不要求用户显式开启全片补齐授权。
+            # 它只恢复已请求任务或降级孤儿连续性，不会自行创建新的付费范围。
+            from app import worker
+            worker.reconcile_stalled_video_jobs()
             await reconcile_stale_video_supervisors()
         except asyncio.CancelledError:
             raise

@@ -151,6 +151,10 @@ def test_next_shot_uses_bounded_single_shot_output_budget(monkeypatch) -> None:
     assert "ACTION_CAPACITY_EXCEEDED" in captured["repair_issue_codes"]
 
 
+def test_storyboard_outline_uses_32k_output_budget() -> None:
+    assert config.STORYBOARD_OUTLINE_MAX_TOKENS == 32768
+
+
 def test_invalid_legacy_outline_information_id_is_not_injected_after_validation(monkeypatch) -> None:
     async def fake_agent_loop(*_args, **_kwargs):
         return _draft(_shot(1), is_final=False)
@@ -178,6 +182,25 @@ def test_invalid_legacy_outline_information_id_is_not_injected_after_validation(
 
     assert result.shot.information_ids == []
     assert result.shot.new_information_ids == []
+
+
+def test_unknown_storyboard_identity_is_returned_for_model_repair_without_deleting_dialogue() -> None:
+    shot = _shot(1, dialogues=[Dialogue(speaker="绿袍男子", line="此路不通。")])
+    shot.characters = ["萧炎", "绿袍男子"]
+    shot.characters_visible = ["萧炎", "绿袍男子"]
+    original_dialogue = shot.dialogues[0].model_dump(mode="json")
+
+    errors = _validate(
+        _draft(shot, is_final=False),
+        allow_finish=False,
+        must_finish=False,
+        screenplay=_screenplay(),
+    )
+
+    assert any("未在剧本阶段解析的人物身份：绿袍男子" in error for error in errors)
+    assert shot.characters == ["萧炎", "绿袍男子"]
+    assert shot.characters_visible == ["萧炎", "绿袍男子"]
+    assert shot.dialogues[0].model_dump(mode="json") == original_dialogue
 
 
 # ---------- 单镜 QA 的整集级放行 / 收尾分支 ----------

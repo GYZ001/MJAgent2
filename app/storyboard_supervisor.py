@@ -50,6 +50,27 @@ STORYBOARD_REPAIR_MAX_FINGERPRINT_ATTEMPTS = 4
 STORYBOARD_REPAIR_PLANNER_VERSION = "storyboard-repair-v2"
 
 
+_PHASE_LABELS: dict[str, str] = {
+    "CREATED": "已创建",
+    "PREFLIGHT": "前置资产预检",
+    "PLANNING_OUTLINE": "规划分镜大纲",
+    "VALIDATING_OUTLINE": "校验分镜大纲",
+    "GENERATING_SHOTS": "逐镜生成",
+    "VALIDATING_EPISODE": "整集校验",
+    "REPAIRING": "定向修复",
+    "SUCCEEDED": "已完成",
+    "PAUSED_EXTERNAL": "外部服务暂停",
+    "PAUSED_BUDGET": "预算暂停",
+    "WAITING_AUTHORIZATION": "等待授权",
+    "WAITING_HUMAN": "等待人工",
+    "CANCELLED": "已取消",
+}
+
+
+def _phase_label(phase: str) -> str:
+    return _PHASE_LABELS.get(phase, phase or "未知阶段")
+
+
 class SupervisorCheckpoint(BaseModel):
     episode_id: str
     phase: SupervisorPhase = "CREATED"
@@ -211,7 +232,7 @@ def _pause_for_external_error(
             run_id,
             "SUPERVISOR_PAUSED",
             "warning",
-            "PAUSED_EXTERNAL",
+            "外部服务不可用，已在安全检查点暂停",
             payload={"error_type": type(exc).__name__, "retryable": True},
         )
     return cp
@@ -330,7 +351,7 @@ def save_checkpoint(cp: SupervisorCheckpoint, *, run_id: str | None = None) -> s
             run_id,
             "STORYBOARD_SUPERVISOR_CHECKPOINT",
             "info",
-            f"Supervisor checkpoint phase={cp.phase} prefix={cp.validated_prefix_end}",
+            f"检查点：{_phase_label(cp.phase)}（已通过 {cp.validated_prefix_end} 镜）",
             payload=cp.model_dump(mode="json"),
         )
     return artifact["id"]
@@ -649,12 +670,12 @@ def _write_shot_fields(conn, row_id: str, shot: Shot, artifact_id: str | None) -
 
     shot.action_desc = normalize_action_desc(shot.action_desc)
     conn.execute(
-        """UPDATE shots SET duration_s=?,shot_size=?,camera_move=?,scene_setting=?,scene_name=?,
+        """UPDATE shots SET duration_s=?,shot_size=?,camera_move=?,scene_time=?,scene_setting=?,scene_name=?,
                   characters=?,action_desc=?,first_frame_desc=?,last_frame_desc=?,source_excerpt=?,
                   narration=?,dialogues=?,transition=?,continuity_from_prev=?,shot_contract_json=?,
                   continuity_mode=?,observed_state_out=?,storyboard_artifact_id=? WHERE id=?""",
         (
-            shot.duration_s, shot.shot_size, shot.camera_move, shot.scene_setting,
+            shot.duration_s, shot.shot_size, shot.camera_move, shot.scene_time, shot.scene_setting,
             shot.scene_name or None, json.dumps(shot.characters, ensure_ascii=False),
             shot.action_desc, shot.first_frame_desc, shot.last_frame_desc,
             shot.source_excerpt, shot.narration,
@@ -939,6 +960,7 @@ async def run_storyboard_supervisor(
         _insert_storyboard_shot,
         _assert_storyboard_write_authorized,
         _persist_storyboard_character_policy_repairs,
+        _reconcile_storyboard_scene_projection,
         _reconcile_storyboard_plan,
         _sync_storyboard_shot_timing,
     )
@@ -955,6 +977,8 @@ async def run_storyboard_supervisor(
 
     p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
     bible = _project_bible_or_placeholder(p)
+    _reconcile_storyboard_scene_projection(conn, episode_id, bible)
+    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     ep_data = dict(ep)
     source_text = _episode_source_text(conn, ep)
 
@@ -998,10 +1022,11 @@ async def run_storyboard_supervisor(
     if run_id:
         evidence_repository.append_event(
             run_id, "STORYBOARD_SUPERVISOR_STARTED", "info",
-            f"Supervisor 启动 resume={resume}",
+            "分镜 Supervisor 已启动（断点续跑）" if resume else "分镜 Supervisor 已启动（全新运行）",
             payload={
                 "episode_id": episode_id,
                 "phase": cp.phase,
+                "resume": resume,
             },
         )
 
@@ -1156,6 +1181,9 @@ async def run_storyboard_supervisor(
     if completed:
         recovered_board = Storyboard(episode_no=ep_data["episode_no"], shots=list(completed))
         character_changes = normalize_offbible_characters(recovered_board, bible)
+        # 恢复路径面对的是已经落库的旧合同。规范化器已原子剥离可见角色、
+        # 声轨和引用中的幽灵身份，并把台词文本保留为修复证据；在这里再抛错
+        # 会让确定性修复永远无法落盘。新生成候选仍在下方严格拒绝未知身份。
         _persist_storyboard_character_policy_repairs(
             conn, episode_id, recovered_board, character_changes
         )
@@ -1361,7 +1389,7 @@ async def run_storyboard_supervisor(
                 if run_id:
                     evidence_repository.append_event(
                         run_id, "REPAIR_PLAN_SELECTED", "info",
-                        f"{plan.strategy} frontier={plan.invalidation_frontier}",
+                        f"已选择修复策略：{plan.strategy}，回退至第 {plan.invalidation_frontier} 镜",
                         payload=plan.model_dump(mode="json"),
                 )
                 cp = _apply_repair(cp, plan, conn, episode_id, completed, outline)
@@ -1394,8 +1422,18 @@ async def run_storyboard_supervisor(
             # PASS / warning-only → 落库 validated
             board = Storyboard(episode_no=ep_data["episode_no"], shots=[*completed, draft.shot])
             normalize_continuity(board)
-            for c in normalize_offbible_characters(board, bible):
-                pass  # 已归一
+            character_changes = normalize_offbible_characters(board, bible)
+            stripped = sorted({
+                str(change.get("stripped") or "").strip()
+                for change in character_changes
+                if str(change.get("stripped") or "").strip()
+            })
+            if stripped:
+                raise StageError("分镜人物合同", [
+                    "分镜候选残留未解析人物身份："
+                    + "、".join(stripped)
+                    + "；未写入镜头，请严格使用发布剧本中的人物身份"
+                ])
             relieve_spoken_overflow(board)
             prefer_default_shot_durations(board)
             normalize_transition_visuals(board)
@@ -1601,7 +1639,7 @@ async def run_storyboard_supervisor(
             if run_id:
                 evidence_repository.append_event(
                     run_id, "EPISODE_VALIDATION_FAILED", "warning",
-                    f"{len(repair_inputs)} issues",
+                    f"整集校验发现 {len(repair_inputs)} 项问题，进入定向修复",
                     payload={
                         "errors": evaluation.errors[:12],
                         "repair_required_warnings": [

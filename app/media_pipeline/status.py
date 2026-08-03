@@ -52,6 +52,10 @@ def _macro_status_from_job(job) -> str:
         return "waiting"
     if status == "running":
         return "running"
+    if status == S.WAITING_RETRY:
+        return "waiting"
+    if status == S.WAITING_HUMAN:
+        return S.WAITING_HUMAN
     if status == "queued":
         persisted = read_job_pipeline(job)
         stage = persisted.get("pipeline_stage")
@@ -101,6 +105,10 @@ def _status_from_rows(shot, *, candidate_count: int, retake_count: int,
                 current_stage = S.STAGE_VIDEO_GENERATING
             elif status == "paused_budget":
                 current_stage = S.STAGE_PAUSED_BUDGET
+            elif status == S.WAITING_RETRY and not job["version_id"]:
+                current_stage = S.STAGE_PREFLIGHT_RETRY
+            elif status == S.WAITING_HUMAN and not job["version_id"]:
+                current_stage = S.STAGE_PREFLIGHT_BLOCKED
             elif status == "running":
                 current_stage = S.STAGE_VIDEO_DOWNLOADING if provider_task_id else S.STAGE_REFERENCE_GENERATE
             elif status == "queued":
@@ -141,6 +149,8 @@ def _status_from_rows(shot, *, candidate_count: int, retake_count: int,
 
         # next_stage 粗映射
         _NEXT = {
+            S.STAGE_PREFLIGHT_VALIDATING: S.STAGE_JOB_QUEUED,
+            S.STAGE_PREFLIGHT_RETRY: S.STAGE_PREFLIGHT_VALIDATING,
             S.STAGE_JOB_QUEUED: S.STAGE_REFERENCE_PROMPT,
             S.STAGE_REFERENCE_PROMPT: S.STAGE_REFERENCE_GENERATE,
             S.STAGE_REFERENCE_GENERATE: S.STAGE_REFERENCE_QA,
@@ -196,11 +206,18 @@ def _status_from_rows(shot, *, candidate_count: int, retake_count: int,
     if stage_started_at:
         stage_elapsed_s = max(0.0, now() - float(stage_started_at))
 
+    blocked_without_candidate = bool(job) and (
+        job["status"] == S.WAITING_HUMAN
+        or current_stage in (S.STAGE_PREFLIGHT_BLOCKED, S.STAGE_WAITING_HUMAN)
+    )
     video_status = _video_status(
         has_adopted=bool(shot["adopted_version_id"]),
-        has_active_job=job is not None and job["status"] != S.PAUSED,
+        has_active_job=(
+            job is not None
+            and job["status"] not in (S.PAUSED, S.WAITING_HUMAN)
+        ),
         candidate_count=candidate_count,
-        latest_version_status=latest_version_status,
+        latest_version_status="failed" if blocked_without_candidate else latest_version_status,
     )
 
     return {
@@ -211,6 +228,8 @@ def _status_from_rows(shot, *, candidate_count: int, retake_count: int,
         "task_id": job["id"] if job else None,
         "task_created_at": job["created_at"] if job else None,
         "task_updated_at": job["updated_at"] if job else None,
+        "next_retry_at": job["next_retry_at"] if job else None,
+        "retry_count": int(job["retry_count"] or 0) if job else 0,
         "provider_submitted": bool(provider_task_id),
         "video_status": video_status,
         "video_status_label": VIDEO_STATUS_LABELS[video_status],
@@ -288,7 +307,10 @@ def episode_pipeline_statuses(episode_id: str, *, conn=None) -> tuple[dict[str, 
            FROM jobs j
            LEFT JOIN shot_versions v ON v.id=j.version_id
            WHERE j.episode_id=? AND j.kind='video'
-             AND j.status IN ('queued','running','waiting_provider','paused_budget','waiting_retry','paused')
+             AND j.status IN (
+               'queued','running','waiting_provider','paused_budget',
+               'waiting_retry','waiting_human','paused'
+             )
              AND j.cancellation_requested=0 AND j.abandoned=0
            ORDER BY j.created_at DESC""",
         (episode_id,),

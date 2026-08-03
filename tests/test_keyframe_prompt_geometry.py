@@ -221,7 +221,8 @@ def test_required_text_contract_is_consistent_across_beat_prompt_generation_and_
     shot = _contact_shot(
         last_frame_desc="萧炎手掌贴住石碑，碑面显示金色文字。",
         required_text=RequiredOnScreenText(
-            surface="石碑", exact_text="斗之力三段", appear_start_s=4.0, stable_until_s=5.0,
+            surface="石碑", exact_text="斗之力三段", strategy="embedded_prop",
+            appear_start_s=4.0, stable_until_s=5.0,
         ),
     )
     beats = video_modes.narrative_keyframe_beats(shot, 1)
@@ -263,7 +264,8 @@ def test_batch_prompt_uses_each_timeline_beats_own_text_contract(monkeypatch) ->
 
     monkeypatch.setattr(video_modes.model_gateway, "chat", fake_chat)
     shot = _contact_shot(required_text=RequiredOnScreenText(
-        surface="石碑", exact_text="斗之力三段", appear_start_s=4.0, stable_until_s=5.0,
+        surface="石碑", exact_text="斗之力三段", strategy="embedded_prop",
+        appear_start_s=4.0, stable_until_s=5.0,
     ))
     beats = video_modes.narrative_keyframe_beats(shot, 2)
     slots = [(beat["slot_key"], "plot_key_frame") for beat in beats]
@@ -668,7 +670,8 @@ def test_required_text_is_only_forced_when_active_at_target_instant() -> None:
         last_frame_desc="",
         state_out="",
         required_text=RequiredOnScreenText(
-            surface="石碑", exact_text="斗之气：七段", appear_start_s=4.0,
+            surface="石碑", exact_text="斗之气：七段", strategy="embedded_prop",
+            appear_start_s=4.0,
         ),
     )
     early_contract = keyframe_visual_contract(early, _bible())
@@ -678,7 +681,8 @@ def test_required_text_is_only_forced_when_active_at_target_instant() -> None:
     assert "the only permitted text" not in early_prompt
 
     end = _contact_shot(required_text=RequiredOnScreenText(
-        surface="石碑", exact_text="斗之气：七段", appear_start_s=4.0,
+        surface="石碑", exact_text="斗之气：七段", strategy="embedded_prop",
+        appear_start_s=4.0,
     ))
     end_contract = keyframe_visual_contract(end, _bible())
     end_prompt = video_modes.reference_generation_prompt(end, _bible(), "plot_key_frame", 1)
@@ -699,7 +703,7 @@ def test_required_text_end_target_respects_inclusive_timing_boundaries(
     appear_start: float, stable_until: float | None, expected: bool,
 ) -> None:
     shot = _contact_shot(required_text=RequiredOnScreenText(
-        surface="石碑", exact_text="斗之气：七段",
+        surface="石碑", exact_text="斗之气：七段", strategy="embedded_prop",
         appear_start_s=appear_start, stable_until_s=stable_until,
     ))
     assert keyframe_visual_contract(shot, _bible())["required_text_expected"] is expected

@@ -79,6 +79,8 @@ async def delete(args: I.ScreenplayDeleteInput) -> CommandResult:
 
 
 async def patch(args: I.ScreenplayPatchInput) -> CommandResult:
+    from app.db import get_conn
+    from app.portraits import load_screenplay_character_resolutions
     from app.production.patch import PatchOperation, PatchRequest, apply_screenplay_patch
     from app.capabilities.handlers.common import failed
 
@@ -93,6 +95,9 @@ async def patch(args: I.ScreenplayPatchInput) -> CommandResult:
             reason=args.reason,
         ),
         episode_id=args.episode_id,
+        character_resolutions=load_screenplay_character_resolutions(
+            get_conn(), args.episode_id,
+        ),
     )
     if not result.ok:
         return failed(result.error or "patch failed", error_code="patch_rejected")

@@ -9,7 +9,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from app import api, db
+from app import api, db, portraits
 from app.capabilities.direct import enter_handler
 from app.main import app
 from tests.conftest import SessionTestClient
@@ -230,6 +230,86 @@ def test_edit_impact_preview_is_read_only_and_detects_downstream(client) -> None
     assert downstream.json()["downstream"]["shots"] == 1
 
 
+def test_edit_impact_preview_defers_identity_judgement_to_publish_model(client) -> None:
+    _seed_episode(with_artifact=True)
+    changed = _valid_script().model_dump(mode="json")
+    changed["scene_outline"][0]["characters"].append("青衣人")
+    before = db.get_conn().execute(
+        "SELECT screenplay_character_resolutions,screenplay_json FROM episodes WHERE id='e1'"
+    ).fetchone()
+
+    response = client.post("/api/episodes/e1/screenplay/impact-preview", json={
+        "screenplay": changed,
+        "expected_version": "art_sp_old",
+    })
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["qa"]["runtime_blocking"] is False
+    assert payload["character_identity_preflight"] == {
+        "required": True,
+        "status": "pending_model_resolution",
+        "lookahead_chapters": 10,
+        "message": "发布时会先由模型结合未来 10 章解析人物真名；无可靠真名时自动映射为路人角色",
+    }
+    after = db.get_conn().execute(
+        "SELECT screenplay_character_resolutions,screenplay_json FROM episodes WHERE id='e1'"
+    ).fetchone()
+    assert dict(after) == dict(before)
+
+
+def test_unchanged_legacy_identity_still_requires_screenplay_preflight(client) -> None:
+    _seed_episode(with_artifact=True)
+    legacy = _valid_script().model_dump(mode="json")
+    legacy["scene_outline"][0]["characters"].append("青衣人")
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE episodes SET screenplay_json=? WHERE id='e1'",
+        (json.dumps(legacy, ensure_ascii=False),),
+    )
+    conn.commit()
+
+    response = client.post("/api/episodes/e1/screenplay/impact-preview", json={
+        "screenplay": legacy,
+        "expected_version": "art_sp_old",
+    })
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["unchanged"] is True
+    assert payload["character_identity_preflight"]["required"] is True
+
+
+def test_manual_publish_turns_identity_model_failure_into_retriable_screenplay_error(monkeypatch) -> None:
+    _seed_episode(with_artifact=True)
+    conn = db.get_conn()
+    conn.execute("INSERT INTO shots(id,episode_id,shot_no,duration_s) VALUES('s1','e1',1,5)")
+    conn.commit()
+    changed = _valid_script()
+    changed.scene_outline[0].characters.append("青衣人")
+
+    async def unavailable(*_args, **_kwargs):
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", unavailable)
+    with enter_handler(), pytest.raises(HTTPException) as caught:
+        asyncio.run(api.edit_screenplay("e1", {
+            "screenplay": changed.model_dump(mode="json"),
+            "expected_version": "art_sp_old",
+        }))
+
+    assert caught.value.status_code == 422
+    assert caught.value.detail["code"] == "screenplay_character_discovery_failed"
+    assert "剧本阶段重试" in caught.value.detail["errors"][0]
+    row = conn.execute(
+        "SELECT screenplay_artifact_id,screenplay_json FROM episodes WHERE id='e1'"
+    ).fetchone()
+    assert row["screenplay_artifact_id"] == "art_sp_old"
+    assert conn.execute(
+        "SELECT COUNT(*) AS c FROM shots WHERE episode_id='e1'"
+    ).fetchone()["c"] == 1
+
+
 def test_qa_failed_manual_draft_publishes_with_score_only_warnings() -> None:
     _seed_episode(with_artifact=True)
     changed = _valid_script()
@@ -253,6 +333,89 @@ def test_qa_failed_manual_draft_publishes_with_score_only_warnings() -> None:
         "SELECT type,status FROM artifacts WHERE id=?", (result["artifact_id"],)
     ).fetchone()
     assert tuple(artifact) == ("screenplay_document", "approved")
+
+
+def test_manual_screenplay_edit_uses_model_identity_resolution_before_publish(monkeypatch) -> None:
+    _seed_episode(with_artifact=True)
+    changed = _valid_script()
+    changed.scene_outline[0].characters.append("青衣人")
+    changed.scene_outline[0].summary += "青衣人短暂送来一封信后离开。"
+    changed.full_script_text = changed.full_script_text.replace(
+        "雨水顺着玻璃滑下",
+        "青衣人放下一封信后离开。雨水顺着玻璃滑下",
+        1,
+    )
+
+    async def fake_chat(_messages, **_kwargs):
+        return json.dumps({"characters": [{
+            "source_label": "青衣人",
+            "canonical_name": "",
+            "identity_kind": "functional",
+            "kind": "onscreen",
+            "evidence": "青衣人送信后离开",
+            "future_evidence": "",
+        }]}, ensure_ascii=False)
+
+    monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
+    with enter_handler():
+        result = asyncio.run(api.edit_screenplay("e1", {
+            "screenplay": changed.model_dump(mode="json"),
+            "expected_version": "art_sp_old",
+        }))
+
+    assert result["saved"] is True
+    row = db.get_conn().execute(
+        "SELECT screenplay_json,screenplay_character_resolutions FROM episodes WHERE id='e1'"
+    ).fetchone()
+    published = json.loads(row["screenplay_json"])
+    resolutions = json.loads(row["screenplay_character_resolutions"])
+    assert "青衣人" not in published["scene_outline"][0]["characters"]
+    assert "路人甲" in published["scene_outline"][0]["characters"]
+    assert resolutions[0]["source_label"] == "青衣人"
+    assert resolutions[0]["canonical_name"] == "路人甲"
+
+
+def test_unchanged_legacy_screenplay_is_canonicalized_before_noop_return(monkeypatch) -> None:
+    _seed_episode(with_artifact=True)
+    legacy = _valid_script()
+    legacy.scene_outline[0].characters.append("青衣人")
+    legacy.scene_outline[0].summary += "青衣人短暂送来一封信后离开。"
+    legacy.full_script_text = legacy.full_script_text.replace(
+        "雨水顺着玻璃滑下",
+        "青衣人放下一封信后离开。雨水顺着玻璃滑下",
+        1,
+    )
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE episodes SET screenplay_json=? WHERE id='e1'",
+        (legacy.model_dump_json(),),
+    )
+    conn.commit()
+
+    async def fake_chat(_messages, **_kwargs):
+        return json.dumps({"characters": [{
+            "source_label": "青衣人",
+            "canonical_name": "",
+            "identity_kind": "functional",
+            "kind": "onscreen",
+            "evidence": "青衣人送信后离开",
+            "future_evidence": "",
+        }]}, ensure_ascii=False)
+
+    monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
+    with enter_handler():
+        result = asyncio.run(api.edit_screenplay("e1", {
+            "screenplay": legacy.model_dump(mode="json"),
+            "expected_version": "art_sp_old",
+        }))
+
+    assert result["saved"] is True
+    assert result["unchanged"] is False
+    published = json.loads(conn.execute(
+        "SELECT screenplay_json FROM episodes WHERE id='e1'"
+    ).fetchone()["screenplay_json"])
+    assert "青衣人" not in published["scene_outline"][0]["characters"]
+    assert "路人甲" in published["scene_outline"][0]["characters"]
 
 
 def test_successful_storyboard_is_not_reported_as_failed_checkpoint() -> None:

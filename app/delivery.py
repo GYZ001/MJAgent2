@@ -159,10 +159,21 @@ def delivery_readiness(episode_id: str) -> dict[str, Any]:
         ],
     }
     final_valid = bool(final_technical.get("passed"))
+    final_outdated = final_path.with_suffix(".stale").is_file()
+    final_technical["outdated"] = final_outdated
+    final_edit_report: dict[str, Any] | None = None
+    final_edit_report_path = final_path.with_name("episode.edit-report.json")
+    if final_edit_report_path.is_file():
+        try:
+            loaded_report = json.loads(final_edit_report_path.read_text(encoding="utf-8"))
+            if isinstance(loaded_report, dict):
+                final_edit_report = loaded_report
+        except (OSError, ValueError, TypeError):
+            final_edit_report = None
     check(
         "final_video",
-        final_valid,
-        f"整集成片可解码且时长约为 {expected_total_duration} 秒",
+        final_valid and not final_outdated,
+        f"整集成片可解码、与当前采纳镜头一致且时长约为 {expected_total_duration} 秒",
         final_technical,
     )
     video_items: list[dict[str, Any]] = []
@@ -246,6 +257,27 @@ def delivery_readiness(episode_id: str) -> dict[str, Any]:
             "message": "已采用视频存在分身、错误文字等质量风险（仅评分，不阻断交付）",
             "detail": {"fatal_shots": fatal_quality},
         })
+    if final_edit_report:
+        if final_edit_report.get("ok") is not True:
+            warnings.append({
+                "code": "FINAL_EDIT_FALLBACK",
+                "message": "终剪增强失败，已使用完整时间线基础合成交付",
+                "detail": final_edit_report,
+            })
+        for failure in final_edit_report.get("text_failures") or []:
+            warnings.append({
+                "shot_no": failure.get("shot_no"),
+                "code": "DETERMINISTIC_TEXT_INSERT_FAILED",
+                "message": "确定性文字插入未完成，已保留无字可播片段",
+                "detail": failure,
+            })
+        boundary = final_edit_report.get("boundary_report") or {}
+        if int(boundary.get("issue_count") or 0) > 0:
+            warnings.append({
+                "code": "BOUNDARY_CONTINUITY_RISK",
+                "message": f"终剪发现 {int(boundary['issue_count'])} 项跨镜结构化连续性风险，未阻断交付",
+                "detail": boundary,
+            })
     for item in video_items:
         for issue in (item.get("technical") or {}).get("issues") or []:
             severity = issue.get("severity") if isinstance(issue, dict) else None
@@ -266,6 +298,7 @@ def delivery_readiness(episode_id: str) -> dict[str, Any]:
         "evidence_coverage": round(coverage, 4),
         "source_artifacts": source_artifacts,
         "videos": video_items,
+        "final_edit_report": final_edit_report,
     }
 
 
@@ -423,6 +456,15 @@ def build_delivery_package(
     final_copy = _copy_if_present(str(final_source), package_dir / "media" / "episode.mp4")
     if final_copy:
         files.append({"role": "final_video", "path": final_copy.relative_to(package_dir).as_posix()})
+    final_edit_source = final_source.with_name("episode.edit-report.json")
+    final_edit_copy = _copy_if_present(
+        str(final_edit_source), package_dir / "reports" / "final-edit.json",
+    )
+    if final_edit_copy:
+        files.append({
+            "role": "final_edit_report",
+            "path": final_edit_copy.relative_to(package_dir).as_posix(),
+        })
     for item in readiness["videos"]:
         dest = package_dir / "media" / "shots" / f"shot-{item['shot_no']:03d}.mp4"
         copied = _copy_if_present(item.get("path"), dest)
@@ -460,6 +502,7 @@ def build_delivery_package(
         "checks": _sanitize_delivery_value(readiness["checks"]),
         "evidence_coverage": readiness["evidence_coverage"],
         "warnings": _sanitize_delivery_value(readiness["warnings"]),
+        "final_edit": _sanitize_delivery_value(readiness.get("final_edit_report")),
         "human_decision": {
             "decision": decision,
             "decided_by": decided_by,
@@ -473,6 +516,7 @@ def build_delivery_package(
         "<!doctype html><meta charset='utf-8'><title>Delivery Quality Report</title>"
         f"<h1>第 {ep['episode_no']} 集交付质量报告</h1>"
         f"<p>质量检查：仅评分、不阻断；证据覆盖率：{readiness['evidence_coverage']:.1%}</p>"
+        f"<p>终剪状态：{'已执行确定性终剪' if (readiness.get('final_edit_report') or {}).get('ok') else '基础合成降级或无终剪报告'}</p>"
         "<h2>检查项</h2><ul>"
         + "".join(
             f"<li>{'通过' if item['passed'] else '失败'} · {html.escape(item['message'])}</li>"

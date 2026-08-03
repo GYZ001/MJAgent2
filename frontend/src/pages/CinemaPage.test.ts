@@ -7,13 +7,60 @@ import {
   deliveryWarningLabel,
   formatDeliveryTime,
   nextCinemaTab,
+  reconcileMixStatus,
 } from './CinemaPage'
+import type { MixStatus } from '../api'
 
 describe('成片可合成条件', () => {
-  it('只需一个已采纳可用片段，不要求全部分镜完成', () => {
-    expect(canConcatenateMix({ shots_ready: 1 })).toBe(true)
-    expect(canConcatenateMix({ shots_ready: 0 })).toBe(false)
+  it('任意一个真实视频已完成就允许合成当前片段', () => {
+    expect(canConcatenateMix({ ready: true, shots_ready: 1 })).toBe(true)
+    expect(canConcatenateMix({ ready: false, shots_ready: 0 })).toBe(false)
     expect(canConcatenateMix(null)).toBe(false)
+  })
+})
+
+describe('成片状态刷新', () => {
+  const mix = (overrides: Partial<MixStatus> = {}): MixStatus => ({
+    episode_id: 'episode-1',
+    title: '第一集',
+    episode_no: 1,
+    shots_total: 2,
+    shots_ready: 1,
+    ready: true,
+    final_video_url: '/media/project/episodes/1/final/episode.mp4',
+    final_video_stale: false,
+    shots: [],
+    ...overrides,
+  })
+
+  it('轮询返回相同内容时复用旧对象，避免整页无意义重渲染', () => {
+    const previous = mix()
+    expect(reconcileMixStatus(previous, mix())).toBe(previous)
+  })
+
+  it('刷新中的空成品地址不会移除已经展示的合成成品', () => {
+    const previous = mix({ final_edit_report: { ok: true } })
+    const next = reconcileMixStatus(previous, mix({
+      shots_ready: 2,
+      final_video_url: null,
+    }))
+
+    expect(next.final_video_url).toBe(previous.final_video_url)
+    expect(next.final_video_stale).toBe(true)
+    expect(next.final_edit_report).toEqual({ ok: true })
+    expect(next.shots_ready).toBe(2)
+  })
+
+  it('重新合成返回新版本地址时立即切换到覆盖后的成品', () => {
+    const previous = mix({
+      final_video_url: '/media/project/episodes/1/final/episode.mp4?v=old',
+    })
+    const next = reconcileMixStatus(previous, mix({
+      final_video_url: '/media/project/episodes/1/final/episode.mp4?v=new',
+    }))
+
+    expect(next).not.toBe(previous)
+    expect(next.final_video_url).toContain('v=new')
   })
 })
 

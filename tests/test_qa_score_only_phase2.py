@@ -1,4 +1,4 @@
-"""PRD QA-SO：QA 只评分，禁止驱动重抽/过滤/拦截（阶段 2 媒体路径）。"""
+"""交付优先 QA：内容问题驱动有限重试，但永不阻断或删除素材。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -13,15 +13,15 @@ from app.video_modes import ReferenceImageAsset, apply_keep_gate, consistency_re
 from app.video_repair_router import route as route_video_repair
 
 
-def test_decide_qa_retake_always_denies() -> None:
+def test_decide_qa_retake_allows_bounded_quality_retry() -> None:
     decision = decide_qa_retake(
         auto_retake_count=0,
         qa_overall=0.1,
         hard_failures=["character_duplicate", "text_error"],
     )
-    assert decision.allow is False
+    assert decision.allow is True
     assert decision.kind == RetryKind.QA_RETAKE
-    assert decision.create_new_version is False
+    assert decision.create_new_version is True
 
 
 def test_reference_retries_are_zero() -> None:
@@ -104,7 +104,7 @@ def test_video_qa_issues_are_warnings_not_blockers() -> None:
     assert all(i.severity == IssueSeverity.WARNING for i in qa_issues)
 
 
-def test_repair_router_rejects_qa_only_issues() -> None:
+def test_repair_router_turns_qa_issue_into_directed_retry() -> None:
     plan = route_video_repair([
         Issue(
             code="VIDEO_QA_CHARACTER_DUPLICATE",
@@ -113,9 +113,9 @@ def test_repair_router_rejects_qa_only_issues() -> None:
             message="分身",
         ),
     ])
-    assert plan.is_paid is False
-    assert plan.strategy == "handoff_human"
-    assert "不自动" in plan.reason or "评分" in plan.reason
+    assert plan.is_paid is True
+    assert plan.strategy == "retake_directed"
+    assert plan.pause_state is None
 
 
 def test_record_reference_asset_commits_low_score_warning(tmp_path, monkeypatch) -> None:
@@ -179,7 +179,7 @@ def test_record_reference_asset_keeps_explicit_qa_reject_as_warning(tmp_path, mo
     assert model["runtime_blocking"] == 0
 
 
-def test_select_best_adopts_technical_even_below_threshold(monkeypatch) -> None:
+def test_select_best_defers_low_quality_until_forced_closeout(monkeypatch) -> None:
     import json
     import sqlite3
 
@@ -210,6 +210,8 @@ def test_select_best_adopts_technical_even_below_threshold(monkeypatch) -> None:
     monkeypatch.setattr(media, "merge_observed_state_out_into_shot_contract", lambda *a, **k: None)
 
     selected = select_best_video_candidate("s")
-    assert selected is not None
-    assert selected["version_id"] == "high"
-    assert selected["fallback"] is True
+    assert selected is None
+    forced = select_best_video_candidate("s", force_best=True)
+    assert forced is not None
+    assert forced["version_id"] == "high"
+    assert forced["fallback"] is True

@@ -954,9 +954,46 @@ interface AudioTimelineItem {
 interface RequiredText {
   surface: string;
   exact_text: string;
+  strategy?: "audio_only" | "deterministic_insert" | "embedded_prop" | "none" | string;
+  delivery_owner_shot_no?: number | null;
   appear_start_s?: number;
   stable_until_s?: number | null;
   style?: string;
+  allow_other_text?: boolean;
+  max_other_text?: number;
+  font_role?: string;
+  reading_priority?: string;
+}
+
+interface ContinuityState {
+  scene?: {
+    scene_revision_id?: string;
+    time_of_day?: string;
+    lighting_state?: string;
+    axis_id?: string;
+    landmarks?: Record<string, string>;
+  };
+  characters?: Record<string, {
+    look_revision_id?: string;
+    outfit_revision_id?: string;
+    visibility?: string;
+    screen_side?: string;
+    pose?: string;
+    facing?: string;
+    gaze_target?: string;
+    left_hand?: string;
+    right_hand?: string;
+  }>;
+  props?: Record<string, {
+    canonical_name?: string;
+    revision_id?: string;
+    owner?: string;
+    location?: string;
+    form?: string;
+    visibility?: string;
+    text_state?: string;
+    required?: boolean;
+  }>;
 }
 
 export interface ScriptScene {
@@ -1191,6 +1228,8 @@ export interface ShotPipelineStatus {
   task_id?: string | null;
   task_created_at?: number | null;
   task_updated_at?: number | null;
+  next_retry_at?: number | null;
+  retry_count?: number;
   /** 供应商已返回 task id，表示实际生成请求已下发上游。 */
   provider_submitted?: boolean;
   video_status?:
@@ -1274,6 +1313,8 @@ export interface Shot {
   duration_s: number;
   shot_size: string;
   camera_move: string;
+  scene_time: string;
+  scene_name: string;
   scene_setting: string;
   characters: string[];
   action_desc: string;
@@ -1310,6 +1351,8 @@ export interface Shot {
   audio_cast?: string[];
   audio_timeline?: AudioTimelineItem[];
   required_text?: RequiredText | null;
+  continuity_state_in?: ContinuityState;
+  continuity_state_out?: ContinuityState;
   reference_roles?: string[];
   do_not_repeat?: string[];
   risk_tags?: string[];
@@ -1365,6 +1408,7 @@ export interface Episode {
   screenplay_error?: string | null;
   screenplay_updated_at?: number | null;
   screenplay?: EpisodeScreenplay | null;
+  scene_options?: string[];
   source_dialogue_occurrences?: DialogueOccurrence[] | null;
   required_dialogue_lines?: string[];
   required_dialogue_occurrence_ids?: string[];
@@ -1549,6 +1593,7 @@ interface MixShot {
   duration_s: number;
   video_url: string | null;
   has_adopted: boolean;
+  has_model_candidate?: boolean;
   playback_rate?: number;
   effective_duration_s?: number;
 }
@@ -1560,10 +1605,15 @@ export interface MixStatus {
   shots_total: number;
   shots_ready: number;
   ready: boolean;
+  generation_active?: boolean;
+  active_shot_nos?: number[];
   all_ready?: boolean;
   shots_skipped?: number;
   skipped_shot_nos?: number[];
   final_video_url: string | null;
+  final_video_stale?: boolean;
+  final_is_partial?: boolean;
+  final_edit_report?: Record<string, unknown> | null;
   shots: MixShot[];
 }
 
@@ -1575,7 +1625,11 @@ export interface MixResult {
   shots_total?: number;
   shots_skipped?: number;
   skipped_shot_nos?: number[];
+  included_shot_nos?: number[];
+  partial?: boolean;
+  final_video_stale?: boolean;
   playback_rates?: Record<string, number>;
+  final_edit?: Record<string, unknown>;
   note?: string;
 }
 

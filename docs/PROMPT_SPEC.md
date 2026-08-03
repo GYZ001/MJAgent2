@@ -161,7 +161,8 @@
 
 第 i 镜实现第 i 拍。关键变化：
 - `scene_setting` 必须逐字等于剧本表渲染标签（代码校验）→ 时间线与场景标签稳定
-- `continuity_from_prev` / `transition` **由代码从场景标签推导覆盖**（同场景=接上镜+硬切，跨场景=明确换场转场，硬切会被改成默认换场），不再依赖模型自觉，消除一整类返工
+- `continuity_mode` 是真实连续性语义；只有 `action_continuation` 使用上镜尾帧作为视频 0 秒起点。`transition` 存在后一镜上，表示它如何从前一镜进入，并由最终编辑执行
+- `continuity_state_in/out` 保存场景版本/光线/轴线、人物 look/outfit/手部占用、道具 revision/owner/location/form/text_state；代码从上镜 `out` 继承未改字段
 - `key_dialogues` 优先写入 dialogues；`visible_action + turn + carry` 决定 action_desc 的主动作、局势推进和镜尾落点
 - 声轨纪律（2026-07-25 改：禁止旁白）：分镜只保留真实台词（dialogues）；`narration` 必须为空；禁止内心OS/画外解说。人群嘲讽/恭维写进 action_desc。不能把有对白的剧本压成纯画面卡。
 - 首尾帧纪律（v12 新增）：`first_frame_desc` 与 `last_frame_desc` 必须【同机位、同场景、同构图】，只让人物动作从开始推进到结束；二者不能完全相同（`_too_similar` ≥0.85 会退回），但绝不能变成两个不同的镜头/景别/场景——否则 5~10s 视频在两帧间出现反常识的跳变/形变
@@ -181,7 +182,7 @@
 大纲动作容量与视频生成前门禁共用同一阈值：5~6 秒最多 2 个顺序动作节拍，7~10 秒最多 3 个。`primary_action`、`beat` 或 `covers` 暴露出超限动作链时，规划器优先确定性拆成前后相邻两镜；若逐镜扩写（例如补写人物入画路径）才导致超限，当前镜 Agent Loop 必须先定向修复，仍不可满足时由局部 Repair Router 拆该大纲节点，不重做整集。
 修复轮会在候选之后再次声明这份输出合同；warning 回退必须让候选内容、残余 Issue 与 Artifact 来自同一次 schema-valid 迭代，退出提示按实际的 `stalled`、`no_quality_gain` 或 `max_iterations` 展示。
 
-**功能性路人合同**：有姓名、重要或需要跨镜/跨集保持身份的角色仍必须来自角色圣经。无姓名且无需持久定妆的群演可以使用确定性通用标签进入 `characters` 并在 `dialogues` 开口，例如 `测验员`、`裁判`、`守卫`、`路人甲/乙/丙`、`族人甲`、`弟子乙`。这类标签必须命中代码白名单，并在 `action_desc` 或首尾帧中明确可见；编译器只为当前镜注入通用职业外观锚点，不创建角色圣经身份或定妆资产。其它圣经外具体姓名仍由硬门禁拒绝。分类结果写入运行账本，不能静默放行。
+**功能性路人合同**：有姓名、重要或需要跨镜/跨集保持身份的角色仍必须来自角色圣经。无姓名且无需持久定妆的群演可以使用确定性通用标签进入 `characters` 并在 `dialogues` 开口，例如 `测验员`、`裁判`、`守卫`、`路人甲/乙/丙`、`族人甲`、`弟子乙`。编译器只为当前镜注入通用职业外观锚点，不创建角色圣经身份或定妆资产。「当前称谓是稳定姓名、与后文某真名为同一人，还是一次性角色」必须由剧本人物预检模型根据语义与上下文判断，不得使用服饰/性别/年龄后缀词表猜测。模型会用带重叠的批次读取本集之后完整 10 章；有唯一同一性证据则映射为真名，并必须完成最小人物卡，不能再按“戏份少”降回路人；只有没有可靠真名时，才在剧本发布前编号为不冲突的 `路人甲/乙/丙/丁`。决议与证据持久化到 episode，恢复与 Patch 后重放；任何未映射的圣经外身份都是不可豁免的剧本发布 blocker，不得进入分镜。
 
 ```
 任务：为漫剧第 {episode_no} 集《{title}》编写分镜脚本。
@@ -199,7 +200,7 @@
 10. source_excerpt 必填：每条 shot 必须带对应小说原文摘录，至少 8 字、不设上限，必须从下方"本集改编源文本"逐字摘录；可以截取最相关的连续段落，不要改写成摘要，不要写分镜解释。它会作为 Seedance prompt 的兜底参考。
 11. 每个 5~10s 视频段必须推进一个明确的新动作、信息或局势变化。禁止单纯场景氛围、人物姿态、重复上一镜内容。
 12. 【硬性·禁旁白】narration 必须为空；禁止内心OS/画外解说。无法开口的信息改用画面姿态表达。
-13. 角色名必须准确：characters 不能为空；具体姓名、重要角色和跨镜持续角色只能使用角色圣经里的准确姓名。允许功能性路人通用标签（测验员、守卫、路人甲/乙/丙、族人甲、弟子乙等），但必须在 action_desc 或首尾帧中明确入画。幕后发消息者、纸条落款、屏幕昵称、AI 软件名不算出场角色。
+13. 角色名必须准确：characters 不能为空；具体姓名、重要角色和跨镜持续角色只能使用角色圣经里的准确姓名。允许功能性路人通用标签（测验员、守卫、路人甲/乙/丙、族人甲、弟子乙等），但必须在 action_desc 或首尾帧中明确入画。体貌称谓必须先在剧本阶段解析真名或改为路人编号，不得原样进入分镜。幕后发消息者、纸条落款、屏幕昵称、AI 软件名不算出场角色。
 14. action_desc 必须显式写出本镜头主要角色的准确姓名，不能只写"他/她/男人/女人/镜头/纸张"；每个动作节点都优先围绕人物表情、动作、道具反应和剧情后果展开。
 15. dialogues 只写人物实际开口台词，dialogues[*].speaker 必须在本镜头 characters 中；不要把纸条文字、屏幕文字、手机通知写成 speaker。
 16. 单句台词可按人物语气灵活长短，但单镜台词纯文字（不计标点）必须符合第 4 条所选时长的口播预算；关键长台词超过 10s 容量时请拆成连续相邻镜头分段说。emotion 只能取：平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定。台词从原著提炼为口语化短句，但优先保留关键细节和人物说话风格：{各角色 speech_style}
@@ -208,7 +209,7 @@
 19. 同一 scene_setting 的镜头必须连续排列，不能被其他场景打断；同一场景的 scene_setting 必须逐字相同，格式建议："时间，地点"。
 20. shot_size 由当前动作、人物调度和情绪表达决定；剧情需要时允许连续镜头使用相同景别，不得仅为形式变化牺牲可拍性。情绪高点可优先考虑特写。
 21. 相邻镜头必须有明确上下文接力：同场景连续镜头 continuity_from_prev=true，下一镜 action_desc 的开头必须承接上一镜结尾的动作、道具、屏幕内容或情绪；换时间/地点时 continuity_from_prev=false，且 narration 或 action_desc 必须写清转场原因/时间跳跃。
-22. 转场设计：同场景连续镜只能用"硬切"；只要 scene_setting 与上一镜不同，就必须选择明确转场，禁止硬切。普通时空跳转优先"淡出淡入"；情绪/回忆延续优先"声音延续+叠化"；悬疑冲击用"闪黑/闪白"；动作追逐用"甩镜/遮挡转场"；有构图呼应时用"匹配剪辑"。换场前一镜的 last_frame_desc 必须带转场结尾，换场镜的 first_frame_desc 必须是新时间/新地点的建立画面。
+22. 转场设计：同场景连续镜只能用"硬切"；只要 scene_name/scene_time 与上镜不同，就选择明确换场方式。转场由 final_edit 执行；前镜尾帧和后镜首帧都保留干净稳定句柄，不在原始片段里预烧叠化/闪光/黑场。
 23. 第 1 个镜头必须呈现本集 hook：{hook}
     最后 1 个镜头必须呈现悬念钩：{cliffhanger}
 
@@ -224,7 +225,7 @@
    - continuity_from_prev 必须为 false；
    - transition 必须选择明确换场方式，绝不能用"硬切"；
    - narration 或 action_desc 必须写清承接原因、时间跳跃或线索带入，建议出现：次日、第二天、清晨、与此同时、随后、几小时后、带着 等承接词；
-   - 上一镜 last_frame_desc 必须带这个转场的结尾视觉，本镜 first_frame_desc 必须是新时间/新地点的建立画面；
+   - 上一镜 last_frame_desc 保留干净稳定的动作结果，本镜 first_frame_desc 是新时间/新地点的建立画面；不预烧转场特效；
    - 如果只是同一段连续动作里从房间走到门口/楼道/桌边/窗前，不要改 scene_setting，继续沿用上一镜主场景标签，把移动写进 action_desc。
 5. scene_setting 是稳定短标签，不是镜头内容：同一连续时空统一写同一个"时间，主地点"，例如"当日，场景A"；不要在相邻镜头里改成"当日，场景A楼道外/桌前/门口"导致断链。
 6. characters 只写本镜头实际可见/在场的人；屏幕发信人、纸条落款、新闻里提到的人、AI 软件名不算 characters。它们只能写在 action_desc 或 narration。
@@ -254,12 +255,12 @@
   剧情载荷足够、action_desc 是一个连贯主动作（2~4 个动作片段、不塞快切）、台词 speaker 在本镜头 characters 中且不能是旁白、与上一镜有动作/道具/情绪/信息承接。
 
 镜头连贯铁律（成片是否连贯取决于此，与 app/stages.py 同步）：
-- 视频生成前会先产出首/尾关键图：每个场景起始镜（含第1镜、换场镜）生成首图+尾图；同场景连续镜只生成尾图，并用上一镜尾图作为本镜首帧输入 Seedance。
-- 同一场景内 continuity_from_prev=true，相邻成链镜头动作严格承接：上一镜 action_desc 的结束状态 = 本镜起始状态。
+- 只有 `action_continuation` 把上镜尾帧当作本镜 0 秒输入；`same_scene_cut/reverse_angle/reaction_cut/insert_detail` 继承结构化状态，但重新构图。
+- 相邻镜头以 `continuity_state_out -> continuity_state_in` 承接；无明示动作改变的人物、道具、轴线与光线字段由代码继承。
 - 下一镜不要重新介绍同一场景，不要把上一镜已经完成的发现/动作重新讲一遍；必须推进到"因此发生了什么"。
 - 如果必须跨时间或跨地点，transition 必须选择明确换场，禁止"硬切"；普通时空跳转用"淡出淡入"，情绪/回忆延续用"声音延续+叠化"，悬疑冲击用"闪黑/闪白"，动作追逐用"甩镜/遮挡转场"，构图呼应用"匹配剪辑"。continuity_from_prev=false，并在 narration 或 action_desc 写清"次日/几小时后/与此同时/他带着某线索来到某处"这类承接语；换场镜会使用自己的首图开启新场景。
 - 每个场景首镜（链头）优先远景/全景交代环境，并生成自己的首图+尾图。
-- 场景切换 transition 表示"从上一镜进入本镜"的方式；同场景内硬切。换场前一镜的 last_frame_desc 写出对应结尾视觉（渐暗、闪白、遮挡、甩镜模糊、叠化余韵等），换场镜的 first_frame_desc 落到新时间/新地点的建立画面。
+- 场景切换 transition 表示"从上一镜进入本镜"的方式；由 final_edit 使用 xfade/acrossfade 执行，生成模型只提供可剪辑句柄。
 - 角色不得凭空出现，中途登场须写明入场方式。
 
 本集改编源文本：
@@ -276,8 +277,16 @@
      "shot_no": int, "duration_s": int,
      "shot_size": "远景|全景|中景|近景|特写",
      "camera_move": "固定|推近|拉远|横摇|跟随",
-     "scene_setting": str, "characters": [str], // 可见的角色圣经姓名或合法功能性路人标签
+     "scene_time": str, "scene_name": str, "scene_setting": str,
+     "characters": [str], // 可见的角色圣经姓名或合法功能性路人标签
      "action_desc": str, "source_excerpt": str, // 对应本镜头的小说原文逐字摘录
+     "state_in": str, "primary_action": str, "state_out": str,
+     "continuity_mode": "action_continuation|same_scene_cut|reaction_cut|reverse_angle|insert_detail|scene_change",
+     "continuity_state_in": {"scene": {}, "characters": {}, "props": {}},
+     "continuity_state_out": {"scene": {}, "characters": {}, "props": {}},
+     "required_text": {"surface": str, "exact_text": str,
+                       "strategy": "deterministic_insert|audio_only|embedded_prop|none",
+                       "delivery_owner_shot_no": int|null},
      "story_event_id": str, // 无对应事件时为 ""，不得为 null
      "new_information_ids": [str], // 只引用 information_ledger 中的 I1/I2 等内部编号
      "narration": str|null,
@@ -310,11 +319,11 @@
 
 ## D. Prompt 编译（确定性代码，非 LLM——列在此处仅为完整性）
 
-### D1. Seedance 连续性提示词合同（`seedance_continuity_v1`）
+### D1. Seedance 结构化连续性提示词合同（`seedance_structured_continuity_v4`）
 
-视频最终 prompt 由 `app.compiler.compile_prompt` 确定性编译，合同版本写入 `prompt_contract_version=seedance_continuity_v1`。核心输入是 `continuity_mode` 与状态链：`state_in`、`primary_action`、`state_out`；仅 `action_continuation` 可使用上一镜尾帧作为 0 秒起点，其余模式必须重新构图。
+视频最终 prompt 由 `app.compiler.compile_prompt` 确定性编译，合同版本写入 `prompt_contract_version=seedance_structured_continuity_v4`。核心输入是 `continuity_mode`、自然语言状态链与可比较的 `continuity_state_in/out`；仅 `action_continuation` 可使用上一镜尾帧作为 0 秒起点，其余模式必须重新构图。
 
-最终 prompt 固定包含 FORMAT、REFERENCE ROLES、START STATE、ONE CURRENT ACTION、END STATE、AUDIO TIMELINE、ON-SCREEN TEXT、DO NOT 等段落。`source_excerpt` 只作为上游改编证据与校验依据，禁止进入 Seedance 最终 prompt；最终文本也不得包含 `SOURCE_EXCERPT_MARKER` 或上一镜完整 action 描述。
+最终 prompt 固定包含 FORMAT、REFERENCE ROLES、START STATE、ONE CURRENT ACTION、END STATE、STRUCTURED CONTINUITY、AUDIO TIMELINE、ON-SCREEN TEXT、DO NOT 等段落。`required_text.strategy=deterministic_insert` 时，原始视频明确禁字，精确中文由终剪渲染；转场也只由 final_edit 执行，避免双重转场。`source_excerpt` 只作为上游改编证据与校验依据，禁止进入 Seedance 最终 prompt。
 
 信息台账实行“内部编号、中文语义”双层合同：`new_information_ids` 只保存 `I1`、`I2` 这类稳定去重键，界面通过 `information_ledger[].content` 展示中文内容；历史 snake_case ID 可保留用于兼容，但会在接口层派生中文说明。生成视频前，`do_not_repeat` 必须解析成中文剧情约束；无法解析的裸 ID 会被过滤，绝不直接发送给 Seedance。
 

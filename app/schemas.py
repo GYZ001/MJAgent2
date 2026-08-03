@@ -51,7 +51,7 @@ AUDIO_TIMELINE_TYPES = {
     "ambient_sound",
 }
 
-PROMPT_CONTRACT_VERSION = "seedance_action_geometry_v3"
+PROMPT_CONTRACT_VERSION = "seedance_structured_continuity_v4"
 
 # 主线节拍 ID（S*）与剧本事件 ID（E*）长得像但语义不同，历史数据把 S07 写进了 story_event_id。
 # 这两个正则是四类 ID 分离（PRD VAL-422 §4.4.1）的判定底座。
@@ -265,6 +265,37 @@ class EpisodeScreenplay(BaseModel):
     forbidden_additions: list[str] = Field(default_factory=list)
     created_at: float | None = None
     updated_at: float | None = None
+
+
+def normalize_screenplay_json_shape(obj: dict) -> tuple[dict, list[str]]:
+    """Hoist screenplay fields accidentally nested under ``plot_spine``.
+
+    A missing close brace after ``plot_spine.drop_list`` leaves all following
+    root fields inside ``plot_spine``.  The payload can become syntactically
+    valid after its final brace is closed, while Pydantic would silently ignore
+    those misplaced extras.  Only fields declared by ``EpisodeScreenplay`` and
+    not declared by ``PlotSpine`` are eligible; explicit root values win.
+    """
+    spine = obj.get("plot_spine")
+    if not isinstance(spine, dict):
+        return obj, []
+    misplaced = [
+        key
+        for key in spine
+        if key in EpisodeScreenplay.model_fields and key not in PlotSpine.model_fields
+    ]
+    if not misplaced:
+        return obj, []
+
+    normalized = dict(obj)
+    normalized_spine = dict(spine)
+    for key in misplaced:
+        value = normalized_spine.pop(key)
+        normalized.setdefault(key, value)
+    normalized["plot_spine"] = normalized_spine
+    return normalized, misplaced
+
+
 class Dialogue(BaseModel):
     speaker: str
     line: str
@@ -284,13 +315,57 @@ class AudioTimelineItem(BaseModel):
     voice_canonical: str = ""
 
 
+class SceneContinuityState(BaseModel):
+    scene_revision_id: str = ""
+    time_of_day: str = ""
+    lighting_state: str = ""
+    axis_id: str = ""
+    landmarks: dict[str, str] = Field(default_factory=dict)
+
+
+class CharacterContinuityState(BaseModel):
+    look_revision_id: str = ""
+    outfit_revision_id: str = ""
+    visibility: str = "visible"
+    screen_side: str = ""
+    pose: str = ""
+    facing: str = ""
+    gaze_target: str = ""
+    left_hand: str = ""
+    right_hand: str = ""
+
+
+class PropContinuityState(BaseModel):
+    canonical_name: str = ""
+    revision_id: str = ""
+    owner: str = ""
+    location: str = ""
+    form: str = ""
+    visibility: str = "optional"
+    text_state: str = "none"
+    required: bool = False
+
+
+class ContinuityState(BaseModel):
+    """可比较的镜头状态快照；自然语言 state_in/state_out 仍作为生成提示。"""
+
+    scene: SceneContinuityState = Field(default_factory=SceneContinuityState)
+    characters: dict[str, CharacterContinuityState] = Field(default_factory=dict)
+    props: dict[str, PropContinuityState] = Field(default_factory=dict)
+
+
 class RequiredOnScreenText(BaseModel):
     surface: str = ""
     exact_text: str = ""
+    strategy: str = "deterministic_insert"
+    delivery_owner_shot_no: int | None = None
     appear_start_s: float = 0.0
     stable_until_s: float | None = None
     style: str = ""
     allow_other_text: bool = False
+    max_other_text: int = 0
+    font_role: str = "classical_serif"
+    reading_priority: str = "plot_critical"
 
 
 class Shot(BaseModel):
@@ -298,9 +373,11 @@ class Shot(BaseModel):
     duration_s: int
     shot_size: str
     camera_move: str
-    scene_setting: str
-    # 归一化命中的库内规范场景名（由 validate_storyboard_scenes 回填；LLM 通常不输出）。
-    # 渲染期据此取场景库图复用；为空时回退到用 scene_setting 文本匹配。
+    # 时间与场景图身份是两个独立维度。scene_time 允许早/中/晚/黄昏/具体时刻。
+    scene_time: str = ""
+    # 旧的「时间，地点」混合字段，只作兼容显示；新流程不再用它选场景图。
+    scene_setting: str = ""
+    # 库内规范场景名，与场景图一一对应。模糊输入命中后必须回填成该规范名。
     scene_name: str = ""
     characters: list[str] = Field(default_factory=list)
     action_desc: str
@@ -334,6 +411,8 @@ class Shot(BaseModel):
     audio_cast: list[str] = Field(default_factory=list)
     audio_timeline: list[AudioTimelineItem] = Field(default_factory=list)
     required_text: RequiredOnScreenText | None = None
+    continuity_state_in: ContinuityState = Field(default_factory=ContinuityState)
+    continuity_state_out: ContinuityState = Field(default_factory=ContinuityState)
     reference_roles: list[str] = Field(default_factory=list)
     do_not_repeat: list[str] = Field(default_factory=list)
     risk_tags: list[str] = Field(default_factory=list)
@@ -358,7 +437,9 @@ class StoryboardOutlineShot(BaseModel):
     逐镜填充阶段据此把整集剧情均匀铺满，避免多镜停留在同一情绪/同一句原文。"""
 
     shot_no: int
-    scene_setting: str = ""   # 时间+地点短标签
+    scene_time: str = ""      # 独立时间标签，可为具体时刻
+    scene_name: str = ""      # 场景图素材库的规范名
+    scene_setting: str = ""   # 旧数据/显示兼容字段
     beat: str = ""            # 本镜推进的剧情（一句话：谁做了什么 / 局势如何变化 / 与上一镜的区别）
     covers: str = ""          # 本镜落实的必保留关键台词/剧情点（可空）
     # 原子分镜规划字段（PRD §7）：大纲阶段即锁定状态链与连续性模式
@@ -432,6 +513,43 @@ def _escape_unescaped_inner_quotes(text: str) -> str:
     return "".join(repaired)
 
 
+def _close_missing_root_object(text: str) -> str:
+    """Close one unambiguous missing root ``}`` at end-of-output.
+
+    Providers occasionally emit an otherwise complete object but stop after the
+    final child value (commonly an array), omitting only the outermost closing
+    brace.  This repair is intentionally narrower than a general JSON repairer:
+    strings must be closed, every nested container must already be balanced,
+    and the root object must be the sole remaining open container.
+    """
+    expected_closers: list[str] = []
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            expected_closers.append("}")
+        elif char == "[":
+            expected_closers.append("]")
+        elif char in "}]":
+            if not expected_closers or expected_closers[-1] != char:
+                return text
+            expected_closers.pop()
+
+    if not in_string and not escaped and expected_closers == ["}"]:
+        return text + "}"
+    return text
+
+
 def extract_json(text: str, *, repair_unescaped_inner_quotes: bool = False) -> dict:
     """从模型输出中提取第一个完整 JSON 对象。失败抛 ValueError（含原文摘要）。"""
     cleaned = re.sub(r"```(?:json)?\s*", "", text, flags=re.IGNORECASE).replace("```", "").strip()
@@ -452,9 +570,25 @@ def extract_json(text: str, *, repair_unescaped_inner_quotes: bool = False) -> d
         try:
             obj, _ = json.JSONDecoder().raw_decode(cleaned[start:])
         except json.JSONDecodeError as exc:
+            candidate = cleaned[start:]
+            candidate_error = exc
             if repair_unescaped_inner_quotes:
-                repaired = _escape_unescaped_inner_quotes(cleaned[start:])
-                if repaired != cleaned[start:]:
+                repaired = _escape_unescaped_inner_quotes(candidate)
+                if repaired != candidate:
+                    try:
+                        obj, _ = json.JSONDecoder().raw_decode(repaired)
+                    except json.JSONDecodeError as repaired_exc:
+                        candidate_error = repaired_exc
+                    else:
+                        if isinstance(obj, dict):
+                            return obj
+                    candidate = repaired
+            # Only an EOF failure may be eligible.  Missing commas and damaged
+            # inner structure fail before EOF and must still enter the repair
+            # loop instead of being silently guessed here.
+            if candidate_error.pos >= len(candidate):
+                repaired = _close_missing_root_object(candidate)
+                if repaired != candidate:
                     try:
                         obj, _ = json.JSONDecoder().raw_decode(repaired)
                     except json.JSONDecodeError:

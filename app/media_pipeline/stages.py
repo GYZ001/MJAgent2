@@ -25,6 +25,9 @@ STAGE_QA = "video_qa"
 STAGE_ADOPT = "video_adopt"
 
 # PRD §6.1 细粒度 pipeline_stage
+STAGE_PREFLIGHT_VALIDATING = "preflight_validating"
+STAGE_PREFLIGHT_RETRY = "preflight_retry"
+STAGE_PREFLIGHT_BLOCKED = "preflight_blocked"
 STAGE_JOB_QUEUED = "job_queued"
 STAGE_REFERENCE_PROMPT = "reference_prompt"
 STAGE_REFERENCE_GENERATE = "reference_generate"
@@ -48,6 +51,9 @@ STAGE_CANCELLED = "cancelled"
 STAGE_PAUSED_BUDGET = "paused_budget"
 
 PIPELINE_STAGES = frozenset({
+    STAGE_PREFLIGHT_VALIDATING,
+    STAGE_PREFLIGHT_RETRY,
+    STAGE_PREFLIGHT_BLOCKED,
     STAGE_JOB_QUEUED,
     STAGE_REFERENCE_PROMPT,
     STAGE_REFERENCE_GENERATE,
@@ -101,6 +107,9 @@ ACTIVE_JOB_STATUSES = frozenset({
 PROVIDER_HELD_STATUSES = frozenset({WAITING_PROVIDER, RUNNING})
 
 PIPELINE_STAGE_LABELS = {
+    STAGE_PREFLIGHT_VALIDATING: "正在校验视频输入",
+    STAGE_PREFLIGHT_RETRY: "入队校验等待自动重试",
+    STAGE_PREFLIGHT_BLOCKED: "入队校验需要处理",
     STAGE_JOB_QUEUED: "已入队",
     STAGE_REFERENCE_PROMPT: "编写参考图提示词",
     STAGE_REFERENCE_GENERATE: "生成参考图",

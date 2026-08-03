@@ -10,6 +10,11 @@ describe('制作状态文案', () => {
 
   it('覆盖当前与兼容分集状态', () => {
     expect(episodeStatusMeta('scripted').label).toBe('分镜待确认')
+    expect(episodeStatusMeta('scripted', '等待人工修正')).toEqual({
+      label: '分镜待处理',
+      tone: 'gold',
+      known: true,
+    })
     expect(episodeStatusMeta('paused_budget').label).toBe('视频因预算暂停')
     expect(episodeStatusMeta('done').label).toBe('本集已成片')
   })

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from pathlib import Path
 
 from app import db, scenes
@@ -11,12 +12,19 @@ from app.schemas import (
     Scene,
     ScriptScene,
     Shot,
+    Storyboard,
     StoryboardOutline,
     StoryboardOutlineShot,
     World,
 )
 from app.stages import _scene_library_block
+from app.domain.storyboard_ops import (
+    _reconcile_storyboard_scene_projection,
+    _sync_storyboard_scene_bindings,
+)
 from app.validators import (
+    validate_storyboard_screenplay_scene_alignment,
+    validate_storyboard_scenes,
     validate_storyboard_outline_scene_alignment,
     validate_storyboard_shot_scene_alignment,
 )
@@ -156,6 +164,124 @@ def test_each_shot_must_follow_its_outline_scene() -> None:
         expected_scene_setting="日，蛇人族大殿",
     )
     assert any("第 1 镜" in error and "本镜必须使用「蛇人族大殿」" in error for error in errors)
+
+
+def test_overlapping_scene_aliases_do_not_create_false_missing_scene() -> None:
+    bible = _bible("大青山山顶", "大青山顶山崖")
+    bible.scenes[0].aliases = ["黄昏 / 大青山顶"]
+    bible.scenes[1].aliases = ["黄昏 / 大青山顶边缘至山崖", "黄昏 / 大青山崖边"]
+    screenplay = _screenplay().model_copy(update={
+        "episode_no": 1,
+        "scene_outline": [
+            ScriptScene(
+                scene_no=1,
+                scene_heading="黄昏 / 大青山顶",
+                story_function="孟浩在山顶结束落榜后的自省",
+                summary="孟浩在山顶扔下葫芦并准备下山。",
+            ),
+            ScriptScene(
+                scene_no=2,
+                scene_heading="黄昏 / 大青山顶边缘至山崖",
+                story_function="孟浩到崖边发现被困的王有材",
+                summary="孟浩在山崖边听到呼救并俯身查看。",
+            ),
+        ],
+    })
+    board = Storyboard(
+        episode_no=1,
+        shots=[
+            _shot("黄昏，大青山山顶", shot_no=1),
+            _shot("黄昏，大青山顶山崖", shot_no=2),
+        ],
+    )
+    # 模拟旧版「先遇到短别名就返回」造成的历史误绑定。
+    board.shots[1].scene_name = "大青山山顶"
+
+    assert validate_storyboard_scenes(board, bible) == []
+    assert board.shots[1].scene_time == "黄昏"
+    assert board.shots[1].scene_name == "大青山顶山崖"
+    assert validate_storyboard_screenplay_scene_alignment(board, screenplay, bible) == []
+
+
+def test_validated_scene_binding_is_persisted_for_downstream_generation() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE shots (id TEXT, episode_id TEXT, shot_no INTEGER, "
+        "scene_time TEXT, scene_setting TEXT, scene_name TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO shots(id,episode_id,shot_no,scene_time,scene_setting,scene_name) "
+        "VALUES('shot-5','ep-1',5,'','黄昏，大青山顶山崖',?)",
+        ("大青山山顶",),
+    )
+    shot = _shot("黄昏，大青山顶山崖", shot_no=5)
+    shot.scene_time = "黄昏"
+    shot.scene_name = "大青山顶山崖"
+
+    changed = _sync_storyboard_scene_bindings(
+        conn, "ep-1", Storyboard(episode_no=1, shots=[shot]),
+    )
+
+    assert changed == 1
+    row = conn.execute(
+        "SELECT scene_time,scene_setting,scene_name FROM shots WHERE id='shot-5'"
+    ).fetchone()
+    assert dict(row) == {
+        "scene_time": "黄昏",
+        "scene_setting": "黄昏，大青山顶山崖",
+        "scene_name": "大青山顶山崖",
+    }
+
+
+def test_scene_projection_reconciliation_does_not_wait_for_full_episode_success() -> None:
+    bible = _bible("大青山山顶", "大青山顶山崖")
+    bible.scenes[0].aliases = ["黄昏 / 大青山顶"]
+    bible.scenes[1].aliases = ["黄昏 / 大青山顶边缘至山崖"]
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=5,
+                scene_setting="黄昏，大青山顶山崖",
+                beat="孟浩听到呼救走到崖边向下看",
+            ),
+        ],
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE episodes (id TEXT, storyboard_outline_json TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE shots (id TEXT, episode_id TEXT, shot_no INTEGER, "
+        "scene_time TEXT, scene_setting TEXT, scene_name TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO episodes VALUES('ep-1', ?)", (outline.model_dump_json(),),
+    )
+    conn.execute(
+        "INSERT INTO shots VALUES('shot-5','ep-1',5,'','黄昏，大青山顶山崖','大青山山顶')"
+    )
+
+    changed = _reconcile_storyboard_scene_projection(conn, "ep-1", bible)
+
+    assert changed == {"shots": 1, "outline_shots": 1}
+    shot = conn.execute(
+        "SELECT scene_time,scene_setting,scene_name FROM shots WHERE id='shot-5'"
+    ).fetchone()
+    assert dict(shot) == {
+        "scene_time": "黄昏",
+        "scene_setting": "黄昏，大青山顶山崖",
+        "scene_name": "大青山顶山崖",
+    }
+    saved_outline = StoryboardOutline.model_validate_json(
+        conn.execute(
+            "SELECT storyboard_outline_json FROM episodes WHERE id='ep-1'"
+        ).fetchone()["storyboard_outline_json"]
+    )
+    assert saved_outline.shots[0].scene_time == "黄昏"
+    assert saved_outline.shots[0].scene_name == "大青山顶山崖"
 
 
 def test_scene_preflight_waits_for_each_relevant_scene_image(tmp_path, monkeypatch) -> None:

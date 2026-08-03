@@ -16,7 +16,8 @@ import {
 function shot(overrides: Partial<Shot> = {}): Shot {
   return {
     id: 's1', episode_id: 'e1', shot_no: 1, duration_s: 5, shot_size: '中景', camera_move: '固定',
-    scene_setting: '白天，房间', characters: ['少年'], action_desc: '少年推门拿起信件',
+    scene_time: '白天', scene_name: '房间', scene_setting: '白天，房间',
+    characters: ['少年'], action_desc: '少年推门拿起信件',
     first_frame_desc: '少年站在门外', last_frame_desc: '少年拿着信件', source_excerpt: '少年推开房门。',
     narration: '', dialogues: [{ speaker: '少年', line: '这封信是谁写的？', emotion: '疑惑' }], transition: '硬切',
     continuity_from_prev: 0, adopted_version_id: null, est_cost_cny: 0, versions: [], video_stale: false,
@@ -50,6 +51,17 @@ describe('分镜台结构化 diff 与问题筛选', () => {
     const diff = buildStoryboardChanges(baseline, edited, null)
     expect(diff.dialogues).toEqual(edited.dialogues)
     expect(diff).not.toHaveProperty('audio_timeline')
+  })
+
+  it('时间与场景图标签独立提交，不再编辑兼容 scene_setting', () => {
+    const baseline = shot()
+    const edited = structuredClone(baseline)
+    edited.scene_time = '18:30'
+    edited.scene_name = '房间内堂'
+    const diff = buildStoryboardChanges(baseline, edited, null)
+
+    expect(diff).toEqual({ scene_time: '18:30', scene_name: '房间内堂' })
+    expect(diff).not.toHaveProperty('scene_setting')
   })
 
   it('原文绑定作为结构化来源提交', () => {

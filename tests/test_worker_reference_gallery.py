@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from app import compiler, db, stages, video_modes, worker
-from app.schemas import Bible, Character, Shot, World
+from app.schemas import Bible, Character, Dialogue, RequiredOnScreenText, Shot, World
 
 
 def test_video_qa_anchors_ignore_loser_deleted_and_missing_keyframes(tmp_path) -> None:
@@ -58,6 +58,26 @@ def test_video_qa_contract_does_not_require_offscreen_listener_reaction() -> Non
     assert "画外萧炎方向等待回应" in contract["state_out"]
     assert "画内角色合同：可辨识画面人物仅限：药老" in contract["action_desc"]
     assert "萧炎只作为画外叙事关系" in contract["action_desc"]
+
+
+def test_video_qa_contract_carries_dialogue_and_exact_screen_text() -> None:
+    shot = Shot(
+        shot_no=3,
+        duration_s=5,
+        shot_size="特写",
+        camera_move="固定",
+        scene_setting="室内，公告栏前",
+        action_desc="主角读出公告。",
+        dialogues=[Dialogue(speaker="主角", line="我被录取了。")],
+        required_text=RequiredOnScreenText(
+            surface="公告", exact_text="录取通知", strategy="embedded_prop",
+        ),
+    )
+
+    contract = worker._video_qa_contract(shot, ["主角"])
+
+    assert contract["required_dialogue"] == "主角：我被录取了。"
+    assert contract["required_text"] == "录取通知"
 
 
 def _conn() -> sqlite3.Connection:
@@ -368,8 +388,8 @@ def test_reroll_reuses_unedited_shot_reference_gallery(monkeypatch) -> None:
         "SELECT prompt_text FROM shot_versions WHERE id=?",
         (rerolled["version_id"],),
     ).fetchone()["prompt_text"]
-    assert "Reference image 1: use as scene" in rerolled_prompt
-    assert "Reference image 2: use as plot_key_frame" in rerolled_prompt
+    assert "Reference image 1: use as plot_key_frame" in rerolled_prompt
+    assert "Reference image 2: use as scene" in rerolled_prompt
     assert "use as character" not in rerolled_prompt
     assert "Reference image 3:" not in rerolled_prompt
 
@@ -539,6 +559,62 @@ def test_low_qa_video_stops_auto_retake_after_limit(monkeypatch) -> None:
     assert force_best is True
 
 
+def test_low_qa_video_schedules_bounded_directed_retake(monkeypatch) -> None:
+    conn = _conn()
+    _seed_project(conn)
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker.shutil, "which", lambda _name: "/usr/bin/tool")
+    monkeypatch.setattr(worker, "_extract_frames", lambda _path: ["frame"])
+    monkeypatch.setattr(
+        worker,
+        "get_setting",
+        lambda key: {
+            "auto_qa": "true",
+            "auto_retake_threshold": "0.6",
+            "video_auto_retake_limit": "2",
+        }.get(key),
+    )
+    monkeypatch.setattr(worker, "log_provider_call", lambda *_args, **_kwargs: None)
+
+    async def low_qa(*_args, **_kwargs):
+        return {"overall": 0.2, "issues": ["核心动作没有完成"]}
+
+    monkeypatch.setattr(stages, "qa_shot", low_qa)
+    enqueued: list[dict] = []
+    monkeypatch.setattr(
+        worker,
+        "enqueue_shot",
+        lambda shot_id, **kwargs: enqueued.append({"shot_id": shot_id, **kwargs})
+        or {"version_id": "next"},
+    )
+    version = worker.new_id("ver")
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id, shot_id, version_no, prompt_text, idem_key, status, video_path,
+               image_inputs, created_at
+           ) VALUES(?, 's1', 1, 'PROMPT', 'idem-retry', 'succeeded', '/tmp/v.mp4', ?, 1.0)""",
+        (version, json.dumps({"auto_retake_count": 0, "reference_images": []})),
+    )
+    conn.commit()
+
+    force_best = asyncio.run(worker._maybe_auto_qa({
+        "id": "j-retry",
+        "shot_id": "s1",
+        "project_id": "p1",
+        "after_shot_id": None,
+    }, version, "/tmp/v.mp4"))
+
+    assert force_best is False
+    assert len(enqueued) == 1
+    assert enqueued[0]["auto_retake_count"] == 1
+    assert enqueued[0]["reroll"] is True
+    qa = json.loads(conn.execute(
+        "SELECT qa_json FROM shot_versions WHERE id=?", (version,),
+    ).fetchone()["qa_json"])
+    assert qa["evaluation_role"] == "retry_and_rank"
+    assert qa["retry_eligible"] is True
+
+
 def test_complete_mode_qa_records_score_but_defers_retake_to_supervisor(monkeypatch) -> None:
     conn = _conn()
     _seed_project(conn)
@@ -584,13 +660,12 @@ def test_complete_mode_qa_records_score_but_defers_retake_to_supervisor(monkeypa
     }, version, "/tmp/v.mp4", allow_autonomous_retake=False))
 
     assert enqueued == []
-    # Score-only：即使 allow_autonomous_retake=False，也只旁路评分并返回 True；
-    # complete 模式下由外层调用方把 force_best 置 False，禁止 Worker 自行采用。
-    assert force_best is True
+    # complete 模式不由 Worker 重抽/采用，返回 False 交给 Supervisor 的预算闭环。
+    assert force_best is False
     qa = json.loads(conn.execute(
         "SELECT qa_json FROM shot_versions WHERE id=?", (version,),
     ).fetchone()["qa_json"])
     assert qa["overall"] == 0.1
-    assert qa.get("evaluation_role") == "score_only"
+    assert qa.get("evaluation_role") == "retry_and_rank"
     assert qa.get("runtime_blocking") is False
-    assert qa.get("retry_eligible") is False
+    assert qa.get("retry_eligible") is True

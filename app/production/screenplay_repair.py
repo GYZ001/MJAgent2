@@ -30,6 +30,7 @@ from app.production.revision import (
     mark_baseline_generated,
     mark_first_evaluation,
     save_checkpoint,
+    update_working_artifact,
 )
 from app.production.structured_issues import (
     blocker_count,
@@ -37,6 +38,7 @@ from app.production.structured_issues import (
     issue_set_hash,
     issues_from_validator_messages,
     must_fix_count,
+    structured_issue,
 )
 from app.schemas import Bible, EpisodeScreenplay
 from app.renderability import OVERDETAIL_TERMS
@@ -44,7 +46,14 @@ from app.renderability import OVERDETAIL_TERMS
 
 MAX_REPAIR_ACTIVATION_PATCHES = 12
 MAX_STRATEGY_ATTEMPTS_PER_ISSUE = 3
-SCREENPLAY_REPAIR_PLANNER_VERSION = "screenplay-repair-9"
+SCREENPLAY_REPAIR_PLANNER_VERSION = "screenplay-repair-10"
+NON_WAIVABLE_SCREENPLAY_ISSUE_CODES = frozenset({
+    "CHARACTER_IDENTITY_UNRESOLVED",
+})
+
+
+class ScreenplayIdentityGateError(RuntimeError):
+    """人物身份未解决时保留可操作的剧本阶段诊断。"""
 
 _SCENE_STORY_FUNCTION_CODES = {
     "SCENE_STORY_FUNCTION_TOO_SHORT",
@@ -63,6 +72,11 @@ def _eval_id_from_create(evaluation_row: dict[str, Any] | str | None) -> str:
     if isinstance(evaluation_row, dict):
         return str(evaluation_row.get("id") or "")
     return str(evaluation_row or "")
+
+
+def non_waivable_screenplay_issues(issues: list[Issue]) -> list[Issue]:
+    """只有会让下游身份/资产合同失真的问题禁止降级发布。"""
+    return [issue for issue in issues if issue.code in NON_WAIVABLE_SCREENPLAY_ISSUE_CODES]
 
 
 def _strategy_was_tried(entries: list[str], strategy: str) -> bool:
@@ -136,12 +150,37 @@ def run_screenplay_qa(
         require_dialogue_chains=True,
         required_dialogue_lines=episode.get("required_dialogue_lines") or [],
     )
+    from app.portraits import (
+        screenplay_character_resolution_errors,
+        screenplay_unknown_identity_errors,
+    )
+    identity_messages = screenplay_character_resolution_errors(
+        script,
+        episode.get("character_resolutions") or [],
+    )
+    identity_messages.extend(screenplay_unknown_identity_errors(script, bible))
     messages.extend(adaptation_hook_errors(script, episode))
     issues = enrich_issues(issues_from_validator_messages(
         list(dict.fromkeys(messages)),
         subject="screenplay",
         stage="screenplay",
     ), stage="screenplay", artifact_id=artifact_id)
+    issues.extend(
+        structured_issue(
+            code="CHARACTER_IDENTITY_UNRESOLVED",
+            message=message,
+            subject="screenplay",
+            path="/character_identities",
+            rule_id="character_identity_must_resolve_before_publish",
+            repairable=True,
+            requires_user_input=False,
+            must_fix=True,
+            artifact_id=artifact_id,
+            artifact_hash=artifact_hash,
+            stage="screenplay",
+        )
+        for message in dict.fromkeys(identity_messages)
+    )
     for issue in issues:
         if artifact_hash:
             issue.evidence["artifact_hash"] = artifact_hash
@@ -156,15 +195,16 @@ def run_screenplay_qa(
         pass_score = 80.0
     passed = blocker_count(issues) == 0 and must_fix_count(issues) == 0 and score >= pass_score
     status = "passed" if passed else "failed"
+    hard_identity_issues = non_waivable_screenplay_issues(issues)
     evaluation = Evaluation(
         evaluator_type="deterministic",
         evaluator_name="screenplay_production_qa",
         evaluator_version="screenplay-qa-gate-2",
         status=status,
         hard_gate_passed=passed,
-        evaluation_role="score_only",
+        evaluation_role="business_safety" if hard_identity_issues else "score_only",
         score_status="scored",
-        runtime_blocking=False,
+        runtime_blocking=bool(hard_identity_issues),
         retry_eligible=bool(issues),
         score=score,
         issues=issues,
@@ -173,8 +213,8 @@ def run_screenplay_qa(
             "artifact_hash": artifact_hash,
             "blocker_count": blocker_count(issues),
             "must_fix_count": must_fix_count(issues),
-            "evaluation_role": "score_only",
-            "runtime_blocking": False,
+            "evaluation_role": "business_safety" if hard_identity_issues else "score_only",
+            "runtime_blocking": bool(hard_identity_issues),
             "pass_score": pass_score,
             "verdict": "passed" if passed else "retry_then_fallback",
         },
@@ -680,7 +720,7 @@ async def run_screenplay_production(
         kind="screenplay",
         input_fingerprint=input_fp,
         contract_version=contract.version,
-        qa_profile_version="screenplay-qa-1",
+        qa_profile_version="screenplay-qa-gate-2",
         resume=resume,
     )
     # 签发 Production Grant
@@ -718,6 +758,42 @@ async def run_screenplay_production(
         reason: str,
     ) -> EpisodeScreenplay:
         """Publish the best working artifact after bounded repair attempts are exhausted."""
+        hard_identity_issues = non_waivable_screenplay_issues(open_issues)
+        if hard_identity_issues:
+            message = (
+                "剧本人物身份预检未通过，已在剧本阶段停止："
+                + "；".join(issue.message for issue in hard_identity_issues[:5])
+            )[:800]
+            conn.execute(
+                "UPDATE episodes SET screenplay_status='failed',screenplay_error=?,screenplay_updated_at=? "
+                "WHERE id=?",
+                (message, now(), episode_id),
+            )
+            conn.commit()
+            save_checkpoint(current_rev.id, {
+                **checkpoint,
+                "phase": "FAILED",
+                "activation_no": activation_no,
+                "working_artifact_id": working_id,
+                "open_issue_ids": [issue.fingerprint for issue in open_issues],
+                "issue_strategy_history": strategy_history,
+                "patch_artifact_ids": patch_ids,
+                "last_issue_fingerprints": [issue.fingerprint for issue in open_issues],
+                "yield_reason": "character_identity_hard_gate",
+                "fallback_reason": reason,
+            })
+            if run_id:
+                evidence_repository.append_event(
+                    run_id,
+                    "CHARACTER_IDENTITY_HARD_GATE_BLOCKED",
+                    "error",
+                    "人物身份未解决，禁止发布剧本和启动分镜",
+                    payload={
+                        "reason": reason,
+                        "issues": [issue.model_dump(mode="json") for issue in hard_identity_issues],
+                    },
+                )
+            raise ScreenplayIdentityGateError(message)
         result = publish_screenplay(
             episode_id=episode_id,
             revision_id=current_rev.id,
@@ -729,10 +805,6 @@ async def run_screenplay_production(
             qa_profile_version=current_rev.qa_profile_version,
             clear_downstream=True,
         )
-        warning = (
-            "门禁修复次数已耗尽，已发布当前最佳剧本："
-            + "；".join(issue.message for issue in open_issues[:5])
-        )[:800]
         conn.execute(
             "UPDATE episodes SET screenplay_status='ready',screenplay_error=NULL,screenplay_updated_at=? WHERE id=?",
             (now(), episode_id),
@@ -776,10 +848,23 @@ async def run_screenplay_production(
         script = await generate_screenplay_baseline(
             episode, source_text, bible, prev_ending=prev_ending,
         )
+        # 即使模型在正文中沿用了“绿袍男子/大汉”，也要在
+        # Baseline 落库与 QA 之前按预检结果原子性改成真名或路人编号。
+        from app.portraits import apply_screenplay_character_resolutions
+        apply_screenplay_character_resolutions(
+            script,
+            episode.get("character_resolutions") or [],
+        )
         # 增量人物：只追加 Bible，不二次完整生成
         draft_audit = await ensure_source_characters_incremental(
             episode_id, source_text, draft_text=script.model_dump_json(),
         )
+        from app.portraits import merge_screenplay_character_resolutions
+        episode["character_resolutions"] = merge_screenplay_character_resolutions(
+            episode.get("character_resolutions") or [],
+            draft_audit.get("resolutions") or [],
+        )
+        apply_screenplay_character_resolutions(script, episode["character_resolutions"])
         if draft_audit.get("added"):
             # 重新加载 bible，仅 patch 受影响的 speaker/voice（最小）
             p = conn.execute("SELECT * FROM projects WHERE id=?", (episode["project_id"],)).fetchone()
@@ -838,6 +923,45 @@ async def run_screenplay_production(
         assert art
         artifact_hash = art.get("content_hash") or evidence_repository.content_hash(art.get("content"))
         script = load_screenplay_from_artifact(working_id)
+
+        # 身份决议可能来自 Baseline 后审计、服务恢复或人工入口。无论从哪条路
+        # 进入 Repair，都先把它派生为新的 working artifact，再做 QA/局部 Patch。
+        from app.portraits import apply_screenplay_character_resolutions
+        identity_changes = apply_screenplay_character_resolutions(
+            script,
+            episode.get("character_resolutions") or [],
+        )
+        if identity_changes:
+            identity_artifact = evidence_repository.create_artifact(
+                EvidenceArtifact(
+                    type="screenplay_document",
+                    scope_type="episode",
+                    scope_id=episode_id,
+                    status="candidate",
+                    trust_level="T1",
+                    content=screenplay_artifact_payload(script),
+                    parent_artifact_ids=[working_id],
+                    contract_version=rev.contract_version or None,
+                )
+            )
+            update_working_artifact(
+                rev.id,
+                identity_artifact["id"],
+                expected_hash=artifact_hash,
+            )
+            if run_id:
+                evidence_repository.append_event(
+                    run_id,
+                    "CHARACTER_IDENTITY_RESOLUTIONS_APPLIED",
+                    "info",
+                    "已在 QA 前重放剧本人物身份决议",
+                    payload={
+                        "before_artifact_id": working_id,
+                        "after_artifact_id": identity_artifact["id"],
+                        "changes": identity_changes,
+                    },
+                )
+            continue
 
         issues, evaluation = run_screenplay_qa(
             script,
@@ -973,6 +1097,7 @@ async def run_screenplay_production(
                 reason=issue.message[:200],
             ),
             episode_id=episode_id,
+            character_resolutions=episode.get("character_resolutions") or [],
         )
         if not result.ok:
             strategy_history.setdefault(issue.fingerprint, []).append(

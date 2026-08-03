@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,8 +13,19 @@ from app.evidence import repository as evidence_repository
 from app.harness.types import EvidenceArtifact
 from app.production.revision import ensure_production_revision
 from app.repair_router import route_issues
-from app.schemas import Dialogue, EpisodeScreenplay, Shot, Storyboard, StoryboardOutline
+from app.schemas import (
+    Bible,
+    Character,
+    Dialogue,
+    EpisodeScreenplay,
+    Shot,
+    Storyboard,
+    StoryboardOutline,
+    StoryboardOutlineShot,
+    World,
+)
 from app.source_excerpt import align_source_excerpt
+from app.storyboard_control import request_control
 from app.storyboard_supervisor import (
     STORYBOARD_REPAIR_PLANNER_VERSION,
     SupervisorCheckpoint,
@@ -29,6 +42,8 @@ from app.storyboard_supervisor import (
     _storyboard_hash,
     _validated_candidate_projection,
     _withdraw_legacy_failed_publication,
+    run_storyboard_supervisor,
+    save_checkpoint,
 )
 
 
@@ -106,6 +121,125 @@ def _current_board(conn) -> Storyboard:
         "SELECT * FROM shots WHERE episode_id='e1' ORDER BY shot_no"
     ).fetchall()
     return _board_from_shot_rows(rows, 1)
+
+
+def test_resume_atomically_cleans_legacy_ghost_contract_before_gate(
+    repair_db, monkeypatch
+) -> None:
+    """“继续修复”必须先清理旧合同，再跑整集门禁，不应再调用模型重写。"""
+    conn, _screenplay = repair_db
+    bible = Bible(
+        characters=[Character(
+            name="少年",
+            role="主角",
+            appearance_canonical="十六岁黑发少年，蓝色长衫，身形清瘦，目光坚定，衣着朴素整洁",
+            personality="坚定",
+        )],
+        world=World(
+            era="古代",
+            genre="剧情",
+            visual_style_canonical="国风动画电影感，光影稳定克制",
+        ),
+    )
+    conn.execute(
+        "UPDATE projects SET bible_json=? WHERE id='p1'",
+        (bible.model_dump_json(),),
+    )
+    row = conn.execute("SELECT shot_contract_json FROM shots WHERE id='s1'").fetchone()
+    contract = json.loads(row["shot_contract_json"] or "{}")
+    contract.update({
+        "characters_visible": ["韩枫", "少年"],
+        "audio_cast": ["韩枫"],
+        "audio_timeline": [{
+            "start_s": 0.5,
+            "end_s": 2.5,
+            "type": "spoken_dialogue",
+            "speaker_id": "韩枫",
+            "text": "立刻停下。",
+            "lip_sync": True,
+            "emotion": "平静",
+            "voice_canonical": "",
+        }],
+        "reference_roles": ["character_identity:韩枫"],
+    })
+    conn.execute(
+        "UPDATE shots SET shot_contract_json=? WHERE id='s1'",
+        (json.dumps(contract, ensure_ascii=False),),
+    )
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=number,
+                scene_setting="日，广场",
+                beat=f"少年完成第{number}步动作",
+                state_in="少年站在石碑前",
+                primary_action=f"少年完成第{number}步动作",
+                state_out="少年停在石碑旁",
+                continuity_mode="same_scene_cut",
+                duration_s=5,
+                characters_visible=["少年"],
+            )
+            for number in range(1, 4)
+        ],
+    )
+    conn.execute(
+        "UPDATE episodes SET storyboard_outline_json=? WHERE id='e1'",
+        (outline.model_dump_json(),),
+    )
+    conn.commit()
+    # 全量套件中其他控制测试也使用 e1；清理进程内 pause/handoff，
+    # 保证本测试只验证恢复路径。
+    request_control("e1", "clear")
+    save_checkpoint(SupervisorCheckpoint(
+        episode_id="e1",
+        phase="WAITING_HUMAN",
+        outcome="WAITING_RETRY_GATE_REPAIR_EXHAUSTED",
+        validated_prefix_end=3,
+        next_shot_no=4,
+        expected_total=3,
+        input_versions={"screenplay_artifact_id": "sp1"},
+        planner_version=STORYBOARD_REPAIR_PLANNER_VERSION,
+        last_repair={
+            "status": "best_effort_preserved",
+            "issue_messages": ["Prompt 编译失败：not a functional extra: 韩枫"],
+        },
+    ))
+
+    async def _unexpected_generation(*_args, **_kwargs):
+        raise AssertionError("确定性角色合同修复通过后不应再调用镜头生成模型")
+
+    def _passed_evaluation(_ep, board, *_args, **_kwargs):
+        return SimpleNamespace(
+            passed=True,
+            errors=[],
+            warnings=[],
+            issues=[],
+            board=board,
+        )
+
+    import app.domain.storyboard_ops as storyboard_ops
+    import app.domain.video_ops as video_ops
+    import app.storyboard_supervisor as supervisor_module
+
+    monkeypatch.setattr(supervisor_module, "generate_storyboard_next_shot", _unexpected_generation)
+    monkeypatch.setattr(video_ops, "evaluate_storyboard_for_confirmation", _passed_evaluation)
+    monkeypatch.setattr(storyboard_ops, "_finalize_storyboard_evidence", lambda *_args: "art-final")
+
+    checkpoint = asyncio.run(run_storyboard_supervisor(
+        "e1",
+        resume=True,
+        preflight_done=True,
+        new_activation=True,
+    ))
+
+    assert checkpoint.phase == "SUCCEEDED"
+    repaired = conn.execute("SELECT * FROM shots WHERE id='s1'").fetchone()
+    repaired_contract = json.loads(repaired["shot_contract_json"])
+    assert repaired_contract["characters_visible"] == ["少年"]
+    assert repaired_contract["audio_cast"] == []
+    assert repaired_contract["audio_timeline"] == []
+    assert repaired_contract["reference_roles"] == []
 
 
 def test_legacy_runaway_counter_becomes_audit_not_new_activation_budget() -> None:

@@ -97,7 +97,9 @@ def test_video_qa_caps_overall_at_character_and_action_main_scores(monkeypatch) 
     qa = asyncio.run(qa_shot(["frame"], "角色拿起钥匙", "夜，咖啡厅", ["黑发灰衣"]))
 
     assert qa["overall"] == 0.35
-    assert qa["qa_recovered"] is False
+    # 主项低分仍然要保留；但模型漏回其他必需字段时不能伪装成完整 QA。
+    assert qa["qa_recovered"] is True
+    assert qa["status"] == "unverified"
 
 
 def test_portrait_qa_uses_anchor_specific_nonhuman_rules(monkeypatch) -> None:

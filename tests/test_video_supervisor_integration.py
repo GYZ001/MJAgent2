@@ -415,7 +415,7 @@ def test_apply_cascade_reads_planned_state_from_contract_on_production_schema(me
     assert downstream.chain_stale is True
 
 
-def test_deadline_closeout_adopts_best_candidate_cancels_jobs_and_stops(memdb):
+def test_deadline_closeout_adopts_best_candidate_without_image_fallback(memdb, tmp_path, monkeypatch):
     eid, _ = _seed_episode(memdb, 4)
     memdb.execute(
         "UPDATE episodes SET status='generating', video_completion_mode='complete' WHERE id=?",
@@ -428,6 +428,9 @@ def test_deadline_closeout_adopts_best_candidate_cancels_jobs_and_stops(memdb):
     candidate = _add_succeeded_version(
         memdb, f"{eid}_shot_4", qa={"overall": 0.2, "failure_types": ["state_mismatch"]},
     )
+    candidate_path = tmp_path / "candidate-shot-4.mp4"
+    candidate_path.write_bytes(b"candidate")
+    memdb.execute("UPDATE shot_versions SET video_path=? WHERE id=?", (str(candidate_path), candidate))
     memdb.execute("UPDATE shots SET adopted_version_id=NULL WHERE id=?", (f"{eid}_shot_4",))
     # 镜2永远等待镜1尾帧；收口必须把它停止，不能继续显示 active。
     memdb.execute(
@@ -468,6 +471,7 @@ def test_deadline_closeout_adopts_best_candidate_cancels_jobs_and_stops(memdb):
 
     assert result.phase == "PARTIAL_NO_USABLE_CANDIDATE"
     assert result.missing_shots == [1, 2]
+    assert {item["shot_no"] for item in result.closeout_adoptions} == {4}
     assert memdb.execute(
         "SELECT adopted_version_id FROM shots WHERE id=?", (f"{eid}_shot_4",),
     ).fetchone()["adopted_version_id"] == candidate
@@ -584,13 +588,16 @@ def test_repair_preview_is_strictly_read_only(memdb):
 
 
 @pytest.mark.asyncio
-async def test_watchdog_closes_stale_run_when_task_record_is_missing(memdb, monkeypatch):
+async def test_watchdog_closes_stale_run_when_task_record_is_missing(memdb, monkeypatch, tmp_path):
     import app.video_supervisor as video_supervisor
 
     eid, _ = _seed_episode(memdb, 1)
     candidate = _add_succeeded_version(
         memdb, f"{eid}_shot_1", qa={"overall": 0.2, "failure_types": ["state_mismatch"]},
     )
+    candidate_path = tmp_path / "watchdog-candidate.mp4"
+    candidate_path.write_bytes(b"candidate")
+    memdb.execute("UPDATE shot_versions SET video_path=? WHERE id=?", (str(candidate_path), candidate))
     memdb.execute("UPDATE shots SET adopted_version_id=NULL WHERE id=?", (f"{eid}_shot_1",))
     run_id = evidence_repository.create_run(
         workflow_type="episode_video_completion",
@@ -989,8 +996,8 @@ def test_router_needs_crop_auto_crop():
             evidence={"path": "1", "rule_id": "needs_crop"},
         )
     ])
-    assert plan.level == "L6"
-    assert plan.strategy == "handoff_human"
+    assert plan.level == "L2"
+    assert plan.strategy == "auto_crop"
     assert plan.is_paid is False
 
 

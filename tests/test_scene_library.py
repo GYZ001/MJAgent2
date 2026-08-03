@@ -1,6 +1,6 @@
 """场景图素材库相关校验与注入的单元测试。"""
 from app.schemas import Bible, Character, Scene, Shot, Storyboard, World
-from app.validators import (match_scene_name, validate_scene_bible,
+from app.validators import (canonicalize_storyboard_scene, match_scene_name, validate_scene_bible,
                             validate_storyboard_scenes)
 from app.scenes import scene_refs_as_image_inputs
 
@@ -57,6 +57,48 @@ def test_match_scene_name_no_match_returns_none() -> None:
     assert match_scene_name("任意场景", []) is None
 
 
+def test_match_scene_name_prefers_specific_scene_over_earlier_prefix_alias() -> None:
+    scenes = [
+        Scene(
+            name="大青山山顶",
+            scene_canonical="大青山山顶的固定地貌、落日光线与山河远景锚点，环境稳定清晰，无人物无文字",
+            aliases=["黄昏 / 大青山顶"],
+        ),
+        Scene(
+            name="大青山顶山崖",
+            scene_canonical="大青山顶山崖与半山裂缝、藤条和崖壁的固定空间锚点，环境稳定清晰，无人物无文字",
+            aliases=["黄昏 / 大青山顶边缘至山崖", "黄昏 / 大青山崖边"],
+        ),
+    ]
+
+    assert match_scene_name(
+        "黄昏，大青山顶山崖", scenes, allow_fuzzy=False,
+    ) == "大青山顶山崖"
+    assert match_scene_name(
+        "黄昏 / 大青山顶边缘至山崖", scenes, allow_fuzzy=False,
+    ) == "大青山顶山崖"
+
+
+def test_match_scene_name_rejects_equal_rank_ambiguity() -> None:
+    scenes = [
+        Scene(name="东院", scene_canonical="东院固定空间环境锚点描述足够完整，无人物无文字", aliases=["旧院"]),
+        Scene(name="西院", scene_canonical="西院固定空间环境锚点描述足够完整，无人物无文字", aliases=["旧院"]),
+    ]
+
+    assert match_scene_name("夜，旧院", scenes, allow_fuzzy=False) is None
+
+
+def test_match_scene_name_uses_text_order_for_compound_location() -> None:
+    scenes = [
+        Scene(name="黑山外围", scene_canonical="黑山外围固定空间环境锚点描述足够完整，无人物无文字"),
+        Scene(name="荒山林海", scene_canonical="荒山林海固定空间环境锚点描述足够完整，无人物无文字"),
+    ]
+
+    assert match_scene_name(
+        "日 / 荒山林海至黑山外围", scenes, allow_fuzzy=False,
+    ) == "荒山林海"
+
+
 # ---------- validate_storyboard_scenes ----------
 
 def _shot(no: int, scene_setting: str) -> Shot:
@@ -80,7 +122,45 @@ def test_validate_storyboard_scenes_backfills_scene_name_on_match() -> None:
     board = Storyboard(episode_no=1, shots=[shot])
     errors = validate_storyboard_scenes(board, bible)
     assert errors == []
+    assert board.shots[0].scene_time == "白日"
     assert board.shots[0].scene_name == "宗门广场"
+    assert board.shots[0].scene_setting == "白日，宗门广场"
+
+
+def test_separate_scene_time_does_not_affect_scene_image_binding() -> None:
+    bible = _bible_with_scenes()
+    shot = _shot(1, "")
+    shot.scene_time = "18:30"
+    shot.scene_name = "宗门广场"
+    board = Storyboard(episode_no=1, shots=[shot])
+
+    assert validate_storyboard_scenes(board, bible) == []
+    assert shot.scene_time == "18:30"
+    assert shot.scene_name == "宗门广场"
+    assert shot.scene_setting == "18:30，宗门广场"
+
+
+def test_fuzzy_scene_input_is_persisted_as_canonical_scene_name() -> None:
+    bible = _bible_with_scenes()
+    shot = _shot(1, "")
+    shot.scene_time = "黄昏"
+    shot.scene_name = "宗门广场中央"
+    board = Storyboard(episode_no=1, shots=[shot])
+
+    assert validate_storyboard_scenes(board, bible) == []
+    assert shot.scene_name == "宗门广场"
+    assert shot.scene_setting == "黄昏，宗门广场"
+
+
+def test_explicit_scene_edit_is_not_overridden_by_stale_legacy_setting() -> None:
+    bible = _bible_with_scenes()
+    shot = _shot(1, "白日，宗门广场")
+    shot.scene_time = ""
+    shot.scene_name = "破败客栈内"
+
+    assert canonicalize_storyboard_scene(shot, bible, prefer_explicit=True) == "破败客栈内"
+    assert shot.scene_time == ""
+    assert shot.scene_setting == "破败客栈内"
 
 
 def test_validate_storyboard_scenes_flags_out_of_library_scene() -> None:

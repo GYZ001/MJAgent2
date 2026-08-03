@@ -60,20 +60,23 @@ def test_channel_defaults_balanced() -> None:
     assert channel_limit(S.RESOURCE_VIDEO_SUBMIT) >= 1
 
 
-def test_qa_retake_requires_explicit_failure_and_caps_at_one() -> None:
-    """QA 只评分：低分和结构性失败都不触发自动重抽。"""
+def test_qa_retake_uses_bounded_budget_then_closes_best_effort() -> None:
+    """低分或结构性失败触发有限重抽，耗尽后自动择优。"""
     low_only = decide_qa_retake(auto_retake_count=0, qa_overall=0.2, threshold=0.6)
-    assert not low_only.allow
+    assert low_only.allow
     d_hard = decide_qa_retake(
         auto_retake_count=0, qa_overall=0.8, threshold=0.6, hard_failures=["story_repeat"]
     )
-    assert not d_hard.allow
+    assert d_hard.allow
     assert d_hard.attempt == 0
     exhausted = decide_qa_retake(
-        auto_retake_count=1, qa_overall=0.8, threshold=0.6, hard_failures=["story_repeat"]
+        auto_retake_count=d_hard.max_attempts,
+        qa_overall=0.8,
+        threshold=0.6,
+        hard_failures=["story_repeat"],
     )
     assert not exhausted.allow
-    assert exhausted.attempt == 1
+    assert exhausted.attempt == d_hard.max_attempts
 
 
 def test_reference_set_persist(monkeypatch) -> None:

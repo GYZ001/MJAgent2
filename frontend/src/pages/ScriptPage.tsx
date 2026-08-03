@@ -19,6 +19,7 @@ import { EpisodeStatusStamp, ScreenplayStatusStamp } from '../components/Product
 import QueryState from '../components/QueryState'
 import OperationError from '../components/OperationError'
 import { useFocusTrap } from '../hooks/useFocusTrap'
+import { screenplayTaskNotice, storyboardTaskNotice } from '../lib/productionNotices'
 
 type EditorSection = 'spine' | 'body' | 'scenes' | 'evidence'
 type SaveState = 'idle' | 'saving' | 'saved' | 'error'
@@ -65,6 +66,10 @@ const moveItem = <T,>(items: T[], index: number, direction: -1 | 1): T[] => {
 
 const stableKey = (prefix: string) => `${prefix}:${Date.now()}:${Math.random().toString(36).slice(2)}`
 const TARGET_DURATION_CHOICES = [40, 50, 60, 70, 80, 90] as const
+const SCREENPLAY_IDENTITY_ERROR_CODES = new Set([
+  'screenplay_character_discovery_failed',
+  'screenplay_character_identity_unresolved',
+])
 
 function StructuredListActions({
   index,
@@ -172,6 +177,10 @@ export default function ScriptPage() {
     ?? ep?.screenplay_status === 'repairing'
   const script = draft ?? ep?.screenplay ?? null
   const editing = draft !== null
+  const screenplayNotice = ep ? screenplayTaskNotice(ep) : null
+  const storyboardNotice = ep
+    ? storyboardTaskNotice(ep, ep.storyboard_status?.state)
+    : null
 
   const localDraftKey = ep ? `manju:screenplay-draft:${projectId}:${ep.id}` : ''
   const draftEpisodeId = ep?.id
@@ -378,6 +387,11 @@ export default function ScriptPage() {
           score: typed.detail.score,
           errors: typed.detail.errors ?? typed.detail.issues?.map((item: any) => item.message) ?? [typed.message],
         })
+      } else if (typed.status === 422 && SCREENPLAY_IDENTITY_ERROR_CODES.has(typed.detail?.code)) {
+        setQaFailure({
+          errors: typed.detail.errors ?? [typed.detail.message ?? typed.message],
+        })
+        toast('人物身份预检未通过，草稿与现有分镜均已保留', true)
       } else if (typed.status === 403 && typed.message.includes('已取消操作')) {
         toast('未执行发布，工作草稿已保留')
       } else {
@@ -473,6 +487,11 @@ export default function ScriptPage() {
           score: typed.detail.score,
           errors: typed.detail.errors ?? typed.detail.issues?.map((item: any) => item.message) ?? [typed.message],
         })
+      } else if (typed.status === 422 && SCREENPLAY_IDENTITY_ERROR_CODES.has(typed.detail?.code)) {
+        setQaFailure({
+          errors: typed.detail.errors ?? [typed.detail.message ?? typed.message],
+        })
+        toast('人物身份预检未通过，草稿与现有分镜均已保留', true)
       } else {
         toast(typed.message, true)
       }
@@ -674,7 +693,7 @@ export default function ScriptPage() {
       <section className="card script-toolbar">
         <div className="screenplay-primary-row">
           <div className="screenplay-state-copy">
-            <div><ScreenplayStatusStamp status={ep.screenplay_status} /> <EpisodeStatusStamp status={ep.status} /></div>
+            <div><ScreenplayStatusStamp status={ep.screenplay_status} /> <EpisodeStatusStamp status={ep.status} issue={storyboardNotice?.message} /></div>
             <strong>{state.message}</strong>
             {state.reason && <small>{state.reason}</small>}
           </div>
@@ -846,20 +865,24 @@ export default function ScriptPage() {
             </button>
           </div>
         )}
-        {ep.screenplay_error && (
+        {screenplayNotice && (
           <OperationError
-            title="剧本生成有待处理信息"
-            message={ep.screenplay_error}
-            guidance="已发布剧本和工作草稿会保留。请按顶部主操作继续修复或重新生成。"
-            detailLabel="查看剧本错误详情"
+            title={screenplayNotice.severity === 'error' ? '剧本生成未完成' : '剧本修复等待继续'}
+            message={screenplayNotice.message}
+            guidance={screenplayNotice.severity === 'error'
+              ? '已发布剧本和工作草稿会保留。请按顶部主操作重新生成。'
+              : '这不是失败结果；工作副本和安全恢复点已保留，可按顶部主操作继续局部修复。'}
+            variant={screenplayNotice.severity}
+            detailLabel={screenplayNotice.severity === 'error' ? '查看剧本错误详情' : '查看剧本处理详情'}
           />
         )}
-        {ep.script_error && (
+        {storyboardNotice && (
           <OperationError
-            title="分镜生成有待处理信息"
-            message={ep.script_error}
-            guidance="已有镜头与安全恢复点会保留。请到分镜台继续修复或重新生成。"
-            detailLabel="查看分镜错误详情"
+            title={storyboardNotice.severity === 'error' ? '分镜生成未完成' : '分镜任务已暂停'}
+            message={storyboardNotice.message}
+            guidance="已有镜头与安全恢复点会保留。请到分镜台按当前状态继续处理。"
+            variant={storyboardNotice.severity}
+            detailLabel={storyboardNotice.severity === 'error' ? '查看分镜错误详情' : '查看暂停详情'}
           />
         )}
       </section>
@@ -983,6 +1006,9 @@ export default function ScriptPage() {
                   {(preview.data.diff ?? []).map((item: any) => (
                     <li key={item.field}>{item.section}：{item.before_chars} 字符 → {item.after_chars} 字符</li>
                   ))}
+                  {preview.data.character_identity_preflight?.required && (
+                    <li>{preview.data.character_identity_preflight.message}</li>
+                  )}
                   <li>{preview.data.impact}</li>
                 </>
               ) : null}

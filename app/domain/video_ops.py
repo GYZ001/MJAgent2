@@ -137,7 +137,7 @@ def evaluate_storyboard_for_confirmation(
     # Shot instance with the caller, so normalizers could mutate the CAS
     # baseline while validating a repair candidate and create a false conflict.
     board = Storyboard.model_validate(storyboard.model_dump(mode="json"))
-    normalize_offbible_characters(board, bible)
+    character_changes = normalize_offbible_characters(board, bible)
     normalize_continuity(board)
     prefer_default_shot_durations(board)
     normalize_transition_visuals(board)
@@ -148,6 +148,17 @@ def evaluate_storyboard_for_confirmation(
     compact_target = _compact_episode_target(actual_total or compact_target)
 
     structural_errors = _storyboard_structural_errors(board)
+    stripped = sorted({
+        str(change.get("stripped") or "").strip()
+        for change in character_changes
+        if str(change.get("stripped") or "").strip()
+    })
+    if stripped:
+        structural_errors.append(
+            "分镜残留未在剧本阶段解析的人物身份："
+            + "、".join(stripped)
+            + "；禁止确认和视频生产"
+        )
     if screenplay is not None:
         structural_errors.extend(
             validate_storyboard_screenplay_scene_alignment(board, screenplay, bible)
@@ -309,6 +320,47 @@ def _converge_confirmed_storyboard_state(
     active_storyboard_run_id 仍存在」状态。
     """
     conn = get_conn()
+    # episode.active_* 只是快速指针，生成资格为了 fail-closed 还会反查
+    # durable workflow_runs。服务重启恢复发生竞态时，可能留下一条没有
+    # active 指针的 PAUSED_EXTERNAL 孤儿；若确认时只清指针，生成台会
+    # 同时看到“已确认”与“分镜仍在运行”。人工确认是这些上游运行的
+    # 最终终点，必须把未恢复的持久运行、步骤和供应商调用一并收口。
+    active_statuses = tuple(sorted(evidence_repository.ACTIVE_RUN_STATUSES))
+    marks = ",".join("?" for _ in active_statuses)
+    stale_runs = conn.execute(
+        f"""SELECT id FROM workflow_runs
+              WHERE scope_type='episode' AND scope_id=?
+                AND workflow_type IN ('screenplay','storyboard')
+                AND status IN ({marks})
+                AND recovered_by_run_id IS NULL""",
+        (episode_id, *active_statuses),
+    ).fetchall()
+    stale_run_ids = [str(row["id"]) for row in stale_runs]
+    if stale_run_ids:
+        run_marks = ",".join("?" for _ in stale_run_ids)
+        stamp = now()
+        conn.execute(
+            f"""UPDATE step_runs SET status='CANCELLED',
+                       finished_at=COALESCE(finished_at,?),
+                       exit_reason=COALESCE(exit_reason,'SUPERSEDED_BY_STORYBOARD_CONFIRMATION')
+                   WHERE run_id IN ({run_marks})
+                     AND status NOT IN ('SUCCEEDED','WARNING','FAILED','CANCELLED','SKIPPED')""",
+            (stamp, *stale_run_ids),
+        )
+        conn.execute(
+            f"""UPDATE provider_calls SET status='CANCELLED',
+                       error=COALESCE(error,'SUPERSEDED_BY_STORYBOARD_CONFIRMATION')
+                   WHERE run_id IN ({run_marks}) AND status='RUNNING'""",
+            stale_run_ids,
+        )
+        conn.execute(
+            f"""UPDATE workflow_runs SET status='CANCELLED',
+                       failure_code='SUPERSEDED_BY_STORYBOARD_CONFIRMATION',
+                       failure_message='分镜已经人工确认，旧上游运行已收口',
+                       finished_at=COALESCE(finished_at,?), updated_at=?
+                   WHERE id IN ({run_marks})""",
+            (stamp, stamp, *stale_run_ids),
+        )
     conn.execute(
         "UPDATE episodes SET script_error=NULL, active_storyboard_run_id=NULL WHERE id=?",
         (episode_id,),
@@ -393,6 +445,17 @@ def confirm_episode_core(
     if shots and not shots[-1].is_final:
         shots[-1].is_final = True
     character_changes = normalize_offbible_characters(board, bible)
+    stripped = sorted({
+        str(change.get("stripped") or "").strip()
+        for change in character_changes
+        if str(change.get("stripped") or "").strip()
+    })
+    if stripped:
+        raise ValueError(
+            "分镜残留未在剧本阶段解析的人物身份："
+            + "、".join(stripped)
+            + "；已停止确认，未删除人物或台词"
+        )
     character_artifact_ids = _persist_storyboard_character_policy_repairs(
         conn, episode_id, board, character_changes
     )
@@ -444,10 +507,27 @@ def confirm_episode_core(
     est = evaluation.estimated_cost_cny
     shots = board.shots
 
-    # 幂等：已 confirmed 且 artifact hash 相同 → 直接成功；hash 不同则拒绝覆盖。
+    # 人工镜头编辑会产生新的 shot artifact，但不会变更旧的
+    # episode.storyboard_artifact_id。仅看“整集指针是否存在”会把旧整集
+    # 快照再次发布，导致页面是新台词、证据链却仍指向被删台词的旧版。
+    # 因此确认时必须比较“当前整板内容 hash”，任一镜人工修订都必须
+    # 先派生新的整集证据，再通过人工确认门。
     storyboard_artifact_id = ep["storyboard_artifact_id"]
     content_hash = None
-    if character_artifact_ids or normalized_fields_changed or not storyboard_artifact_id:
+    current_board_hash = evidence_repository.content_hash(board.model_dump(mode="json"))
+    stored_board_hash = None
+    if storyboard_artifact_id:
+        stored = conn.execute(
+            "SELECT content_hash FROM artifacts WHERE id=?", (storyboard_artifact_id,)
+        ).fetchone()
+        stored_board_hash = stored["content_hash"] if stored else None
+    storyboard_snapshot_changed = stored_board_hash != current_board_hash
+    if (
+        character_artifact_ids
+        or normalized_fields_changed
+        or not storyboard_artifact_id
+        or storyboard_snapshot_changed
+    ):
         storyboard_artifact_id = _finalize_storyboard_evidence(episode_id, board)
     if storyboard_artifact_id:
         art = conn.execute(
@@ -1031,7 +1111,13 @@ async def _generate_shot_core(shot_id: str, body: dict) -> dict:
                                (shot_row["adopted_version_id"],)).fetchone()
         if not ref:
             ref = conn.execute(
-                "SELECT id FROM shot_versions WHERE shot_id=? AND status='succeeded' ORDER BY version_no DESC LIMIT 1",
+                """SELECT id FROM shot_versions
+                   WHERE shot_id=? AND status='succeeded'
+                     AND NOT (
+                       json_valid(image_inputs)
+                       AND COALESCE(json_extract(image_inputs,'$.delivery_fallback'),0)=1
+                     )
+                   ORDER BY version_no DESC LIMIT 1""",
                 (shot_id,)).fetchone()
         if ref:
             critique = await worker.critique_version(ref["id"])
@@ -1204,7 +1290,7 @@ async def adopt_version(shot_id: str, body: dict):
 
 
 def _cancel_shot_adoption_core(shot_id: str) -> dict:
-    """保留候选视频，只取消本镜采纳关系；后续成片合成自动跳过。"""
+    """保留真实模型候选，只取消本镜采纳关系；后续合成不得使用图片代替。"""
     conn = get_conn()
     shot = conn.execute(
         "SELECT id,episode_id,adopted_version_id FROM shots WHERE id=?", (shot_id,),
@@ -1224,7 +1310,7 @@ def _cancel_shot_adoption_core(shot_id: str) -> dict:
         target_version=previous,
         old_state={"adopted_version_id": previous},
         new_state={"adopted_version_id": None},
-        reason="用户取消采纳，成片合成时跳过本镜",
+        reason="用户取消采纳；保留真实模型候选，成片禁止使用图片或静音片段代替",
     )
     return {
         "shot_id": shot_id,
@@ -1374,7 +1460,7 @@ async def _recorded_video_completion_task(
             max_fallback_shots=max_fallback_shots,
             allow_storyboard_edit=allow_storyboard_edit,
         )
-        if result.phase == "SUCCEEDED_COVERED":
+        if result.phase in {"SUCCEEDED_COVERED", "COMPLETED_DEADLINE_FALLBACK"}:
             recorder.succeed(result.outcome or "SUCCEEDED_COVERED")
         elif result.phase == "CANCELLED":
             recorder.cancel()
@@ -1793,10 +1879,10 @@ def _video_completion_user_contract(
         }
     if phase == "PARTIAL_NO_USABLE_CANDIDATE":
         missing = len(projection.get("missing_shots") or [])
-        suffix = f"，仍有 {missing} 个镜头缺少可用候选" if missing else ""
+        suffix = f"，仍有 {missing} 个镜头未能生成技术可播版" if missing else ""
         return {
             "user_state": "failed",
-            "message": f"全片补齐已停止{suffix}",
+            "message": f"确定性缺镜兜底遇到技术故障{suffix}，已保留所有现有结果",
             "next_actions": [
                 action("repair_preview", "查看修复预演", "GET", f"{base}/repair-preview"),
                 action("start_completion", "重新授权并补齐", "POST", base, True),

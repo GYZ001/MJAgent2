@@ -143,7 +143,7 @@ async def cancel_adoption(args: I.ShotScopedInput) -> CommandResult:
     if not outcome.get("previous_adopted_version_id"):
         return succeeded("本镜当前未采纳任何版本", data={**outcome, "idempotent": True})
     return succeeded(
-        "已取消本镜采纳，合成时将跳过",
+        "已取消本镜采纳；真实模型候选仍保留，成片不会使用图片代替",
         data=outcome,
         resource_uris=[f"manju://shots/{args.shot_id}"],
     )

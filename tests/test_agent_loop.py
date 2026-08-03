@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 
-import pytest
 from pydantic import BaseModel
 
 from app import api, db, stages

@@ -281,7 +281,8 @@ def purge_legacy_screenplays() -> int:
             continue
         worker.delete_episode_shots(ep["id"])
         conn.execute(
-            "UPDATE episodes SET screenplay_json=NULL, screenplay_status='pending', screenplay_error=?, status='planned', script_error=NULL WHERE id=?",
+            "UPDATE episodes SET screenplay_json=NULL, screenplay_character_resolutions='[]', "
+            "screenplay_status='pending', screenplay_error=?, status='planned', script_error=NULL WHERE id=?",
             (LEGACY_SCREENPLAY_PURGED_ERROR, ep["id"]),
         )
         purged += 1

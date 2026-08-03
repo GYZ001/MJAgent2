@@ -8,7 +8,8 @@ from app.harness.types import Issue, IssueSeverity
 
 DEFAULT_FATAL_FAILURE_TYPES = ("character_duplicate", "text_error")
 
-# QA / classify 失败码 → Issue code（Score-only：QA 一律 WARNING，不升 BLOCKER，PRD QA-SO #30）
+# QA / classify 失败码 → Issue code。内容问题保持 WARNING：用于有限重试和排序，
+# 永远不能单独把整集置为失败或等待人工。
 _QA_CODE_MAP: dict[str, tuple[str, IssueSeverity]] = {
     "character_duplicate": ("VIDEO_QA_CHARACTER_DUPLICATE", IssueSeverity.WARNING),
     "text_error": ("VIDEO_QA_TEXT_ARTIFACT", IssueSeverity.WARNING),
@@ -17,6 +18,15 @@ _QA_CODE_MAP: dict[str, tuple[str, IssueSeverity]] = {
     "future_leak": ("VIDEO_QA_FUTURE_LEAK", IssueSeverity.WARNING),
     "wrong_dialogue": ("VIDEO_QA_WRONG_DIALOGUE", IssueSeverity.WARNING),
     "needs_crop": ("VIDEO_QA_NEEDS_CROP", IssueSeverity.WARNING),
+    "wrong_identity": ("VIDEO_QA_WRONG_IDENTITY", IssueSeverity.WARNING),
+    "wrong_outfit": ("VIDEO_QA_WRONG_OUTFIT", IssueSeverity.WARNING),
+    "subject_occlusion": ("VIDEO_QA_SUBJECT_OCCLUSION", IssueSeverity.WARNING),
+    "action_missing": ("VIDEO_QA_ACTION_MISSING", IssueSeverity.WARNING),
+    "prop_identity_mismatch": ("VIDEO_QA_PROP_IDENTITY", IssueSeverity.WARNING),
+    "prop_state_mismatch": ("VIDEO_QA_PROP_STATE", IssueSeverity.WARNING),
+    "object_count_mismatch": ("VIDEO_QA_OBJECT_COUNT", IssueSeverity.WARNING),
+    "wrong_camera_axis": ("VIDEO_QA_CAMERA_AXIS", IssueSeverity.WARNING),
+    "geometry_guard_unverified": ("VIDEO_QA_GEOMETRY", IssueSeverity.WARNING),
 }
 
 _TECHNICAL_CODE_MAP: dict[str, tuple[str, IssueSeverity]] = {
@@ -127,7 +137,7 @@ def issues_from_qa(
             shot_id=shot_id,
             message=f"视频 QA 质量风险：{ft}",
             shot_no=shot_no, version_id=version_id, job_id=job_id, rule_id=ft,
-            repair_hint="仅评分展示；如需重做请用户主动触发",
+            repair_hint="在镜头质量预算内定向重试；预算耗尽后自动择优，不阻断交付",
         ))
 
     if qa.get("qa_recovered"):

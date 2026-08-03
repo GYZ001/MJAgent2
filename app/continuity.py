@@ -17,6 +17,7 @@ from app.schemas import (
     SPINE_BEAT_ID_RE,
     STORY_EVENT_ID_RE,
     AudioTimelineItem,
+    ContinuityState,
     EpisodeScreenplay,
     RequiredOnScreenText,
     Shot,
@@ -24,6 +25,7 @@ from app.schemas import (
     StoryboardOutline,
     VoiceCanonical,
 )
+from app.scene_contract import same_scene, scene_time_of
 from app.spoken_contract import (
     RULE_SPOKEN_CAPACITY,
     build_timeline_from_segments,
@@ -305,8 +307,9 @@ def derive_continuity_mode(shot: Shot, prev: Shot | None = None) -> str:
         return mode
     if mode in CONTINUITY_MODES:
         return mode
-    same_scene = (shot.scene_setting or "").strip() == (prev.scene_setting or "").strip()
-    if not same_scene:
+    same_location = same_scene(shot, prev)
+    same_time = scene_time_of(shot) == scene_time_of(prev)
+    if not same_location or not same_time:
         return "scene_change"
     # 旧数据 continuity_from_prev=true：仅表示同场景接镜，不是动作连续；默认 same_scene_cut
     if shot.continuity_from_prev:
@@ -314,11 +317,87 @@ def derive_continuity_mode(shot: Shot, prev: Shot | None = None) -> str:
     return "same_scene_cut"
 
 
+def _merge_structured_entity(base: Any, overlay: Any) -> Any:
+    """Merge a partial structured state without erasing inherited values with defaults."""
+    merged = base.model_copy(deep=True)
+    explicit = set(getattr(overlay, "model_fields_set", set()))
+    for field in type(overlay).model_fields:
+        value = getattr(overlay, field)
+        if isinstance(value, str):
+            if value.strip() and (field in explicit or not str(getattr(merged, field, "")).strip()):
+                setattr(merged, field, value.strip())
+        elif isinstance(value, dict):
+            if value:
+                current = dict(getattr(merged, field, {}) or {})
+                current.update({str(key): str(item) for key, item in value.items() if str(item).strip()})
+                setattr(merged, field, current)
+        elif field in explicit:
+            setattr(merged, field, value)
+    return merged
+
+
+def _merge_structured_state(base: ContinuityState, overlay: ContinuityState) -> ContinuityState:
+    merged = base.model_copy(deep=True)
+    merged.scene = _merge_structured_entity(merged.scene, overlay.scene)
+    for name, state in overlay.characters.items():
+        existing = merged.characters.get(name)
+        merged.characters[name] = (
+            _merge_structured_entity(existing, state) if existing is not None else state.model_copy(deep=True)
+        )
+    for prop_id, state in overlay.props.items():
+        existing = merged.props.get(prop_id)
+        merged.props[prop_id] = (
+            _merge_structured_entity(existing, state) if existing is not None else state.model_copy(deep=True)
+        )
+    return merged
+
+
+def _carried_state_across_scene(state: ContinuityState) -> ContinuityState:
+    """Scene changes keep entity identity/state, never the old environment geometry."""
+    characters = {}
+    for name, item in state.characters.items():
+        carried = item.model_copy(deep=True)
+        # 画面方位和表演姿态属于旧场景构图，跨场继承会制造错误的站位约束。
+        carried.screen_side = ""
+        carried.pose = ""
+        carried.facing = ""
+        carried.gaze_target = ""
+        characters[name] = carried
+    carried = ContinuityState(
+        characters=characters,
+        props={prop_id: item.model_copy(deep=True) for prop_id, item in state.props.items()},
+    )
+    return carried
+
+
+def inherit_structured_continuity_state(shot: Shot, prev: Shot | None = None) -> None:
+    """Deterministically fill unchanged structured fields across a shot boundary.
+
+    The model remains responsible only for explicit changes. This helper never judges or
+    blocks a shot; it produces a complete comparison baseline for prompting and reports.
+    """
+    state_in = shot.continuity_state_in or ContinuityState()
+    if prev is not None:
+        previous_out = prev.continuity_state_out or ContinuityState()
+        base = (
+            _carried_state_across_scene(previous_out)
+            if derive_continuity_mode(shot, prev) == "scene_change"
+            else previous_out
+        )
+        state_in = _merge_structured_state(base, state_in)
+    shot.continuity_state_in = state_in
+    shot.continuity_state_out = _merge_structured_state(
+        state_in,
+        shot.continuity_state_out or ContinuityState(),
+    )
+
+
 def sync_shot_continuity_fields(shot: Shot, prev: Shot | None = None) -> str:
     """回填 state/continuity/visible 字段，并同步 legacy continuity_from_prev。"""
     mode = derive_continuity_mode(shot, prev)
     shot.continuity_mode = mode
     shot.continuity_from_prev = uses_previous_tail_frame(mode)
+    inherit_structured_continuity_state(shot, prev)
     if not (shot.state_in or "").strip():
         shot.state_in = (shot.first_frame_desc or "").strip()
     if not (shot.state_out or "").strip():
@@ -370,8 +449,9 @@ def normalize_board_continuity(board: Storyboard) -> None:
             shot.continuity_from_prev = False
             shot.transition = "硬切"
             continue
-        same_scene = (shot.scene_setting or "").strip() == (prev.scene_setting or "").strip()
-        if not same_scene:
+        same_location = same_scene(shot, prev)
+        same_time = scene_time_of(shot) == scene_time_of(prev)
+        if not same_location or not same_time:
             shot.continuity_mode = "scene_change"
             shot.continuity_from_prev = False
             if shot.transition == "硬切":
@@ -704,15 +784,131 @@ def state_chain_errors(board: Storyboard) -> list[str]:
                     "action_continuation 要求当前 state_in 等于上一镜实际尾状态"
                 )
         if prev is not None:
-            same_scene = (shot.scene_setting or "").strip() == (prev.scene_setting or "").strip()
-            if mode == "scene_change" and same_scene:
-                errors.append(f"{tag}.continuity_mode=scene_change 但 scene_setting 与上一镜相同")
-            if mode != "scene_change" and not same_scene:
+            same_context = (
+                same_scene(shot, prev)
+                and scene_time_of(shot) == scene_time_of(prev)
+            )
+            if mode == "scene_change" and same_context:
+                errors.append(f"{tag}.continuity_mode=scene_change 但 scene_name/scene_time 与上一镜相同")
+            if mode != "scene_change" and not same_context:
                 errors.append(
-                    f"{tag}.continuity_mode={mode} 但 scene_setting 从「{prev.scene_setting}」变为「{shot.scene_setting}」；"
+                    f"{tag}.continuity_mode={mode} 但 scene_name/scene_time 已变化；"
                     "跨场应使用 scene_change"
                 )
     return errors
+
+
+def _state_value(value: str | None) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def structured_boundary_issues(prev: Shot, current: Shot) -> list[dict[str, Any]]:
+    """比较上一镜结束与当前镜开始的结构化状态。
+
+    返回值只用于定向修复与风险报告，不得单独阻断生成或合成。
+    """
+    before = prev.continuity_state_out or ContinuityState()
+    after = current.continuity_state_in or ContinuityState()
+    mode = derive_continuity_mode(current, prev)
+    issues: list[dict[str, Any]] = []
+
+    def add(code: str, subject: str, expected: str, actual: str, severity: str = "warning") -> None:
+        issues.append({
+            "code": code,
+            "severity": severity,
+            "from_shot_no": prev.shot_no,
+            "to_shot_no": current.shot_no,
+            "subject": subject,
+            "expected": expected,
+            "actual": actual,
+            "repairable": True,
+            "runtime_blocking": False,
+        })
+
+    if mode != "scene_change":
+        scene_pairs = (
+            ("scene_revision_id", "BOUNDARY_SCENE_REVISION"),
+            ("time_of_day", "BOUNDARY_TIME_OF_DAY"),
+            ("lighting_state", "BOUNDARY_LIGHTING"),
+            ("axis_id", "BOUNDARY_CAMERA_AXIS"),
+        )
+        for field, code in scene_pairs:
+            expected = _state_value(getattr(before.scene, field, ""))
+            actual = _state_value(getattr(after.scene, field, ""))
+            if expected and actual and expected != actual:
+                add(code, f"scene.{field}", expected, actual)
+        for landmark, expected_raw in before.scene.landmarks.items():
+            expected = _state_value(expected_raw)
+            actual = _state_value(after.scene.landmarks.get(landmark))
+            if expected and actual and expected != actual:
+                add("BOUNDARY_LANDMARK", f"scene.landmarks.{landmark}", expected, actual)
+
+    for name, expected_character in before.characters.items():
+        actual_character = after.characters.get(name)
+        if not actual_character:
+            continue
+        for field, code in (
+            ("look_revision_id", "BOUNDARY_CHARACTER_IDENTITY"),
+            ("outfit_revision_id", "BOUNDARY_CHARACTER_OUTFIT"),
+        ):
+            expected = _state_value(getattr(expected_character, field, ""))
+            actual = _state_value(getattr(actual_character, field, ""))
+            if expected and actual and expected != actual:
+                add(code, f"characters.{name}.{field}", expected, actual, "high")
+        # 反打允许画面左右改变，但手持物与姿态状态仍需承接。
+        if mode != "reverse_angle":
+            expected_side = _state_value(expected_character.screen_side)
+            actual_side = _state_value(actual_character.screen_side)
+            if expected_side and actual_side and expected_side != actual_side:
+                add("BOUNDARY_SCREEN_SIDE", f"characters.{name}.screen_side", expected_side, actual_side)
+        for hand in ("left_hand", "right_hand"):
+            expected = _state_value(getattr(expected_character, hand, ""))
+            actual = _state_value(getattr(actual_character, hand, ""))
+            if expected and actual and expected != actual:
+                add("BOUNDARY_HAND_OCCUPANCY", f"characters.{name}.{hand}", expected, actual)
+
+    for prop_id, expected_prop in before.props.items():
+        actual_prop = after.props.get(prop_id)
+        if not actual_prop:
+            if expected_prop.required or expected_prop.visibility == "required":
+                add(
+                    "BOUNDARY_PROP_MISSING",
+                    f"props.{prop_id}",
+                    expected_prop.canonical_name or prop_id,
+                    "missing",
+                    "high",
+                )
+            continue
+        for field, code, severity in (
+            ("revision_id", "BOUNDARY_PROP_IDENTITY", "high"),
+            ("owner", "BOUNDARY_PROP_OWNER", "high"),
+            ("location", "BOUNDARY_PROP_LOCATION", "warning"),
+            ("form", "BOUNDARY_PROP_FORM", "high"),
+            ("text_state", "BOUNDARY_PROP_TEXT_STATE", "warning"),
+        ):
+            expected = _state_value(getattr(expected_prop, field, ""))
+            actual = _state_value(getattr(actual_prop, field, ""))
+            if expected and actual and expected != actual:
+                add(code, f"props.{prop_id}.{field}", expected, actual, severity)
+    return issues
+
+
+def structured_state_prompt(shot: Shot) -> str:
+    """把结构化状态渲染为紧凑的生成约束；空合同不增加 prompt 噪声。"""
+    state_in = shot.continuity_state_in or ContinuityState()
+    state_out = shot.continuity_state_out or ContinuityState()
+    if not (
+        state_in.characters or state_in.props or state_out.characters or state_out.props
+        or any(state_in.scene.model_dump().values()) or any(state_out.scene.model_dump().values())
+    ):
+        return ""
+    return (
+        "结构化起始状态："
+        + json.dumps(state_in.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"))
+        + "\n结构化结束状态："
+        + json.dumps(state_out.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"))
+        + "\n未在当前主动作中明示改变的 revision_id、owner、location、form、手持状态与空间轴线必须保持不变。"
+    )
 
 
 def _too_divergent(prev_out: str, state_in: str) -> bool:
@@ -749,6 +945,16 @@ def required_text_conflict_errors(shot: Shot, prompt_text: str | None = None) ->
     return errors
 
 
+def required_text_strategy(shot: Shot) -> str:
+    required = shot.required_text
+    if not required or not (required.exact_text or "").strip():
+        return "none"
+    strategy = str(getattr(required, "strategy", "") or "deterministic_insert").strip()
+    if strategy not in {"audio_only", "deterministic_insert", "embedded_prop", "none"}:
+        return "deterministic_insert"
+    return strategy
+
+
 def _allowed_prompt_verbatim_texts(shot: Shot) -> list[str]:
     """最终提示词中允许原样出现的文本（台词 / 画面必现字），不视为 source_excerpt 泄漏。"""
     allowed: list[str] = []
@@ -772,10 +978,61 @@ def _allowed_prompt_verbatim_texts(shot: Shot) -> list[str]:
     return sorted(dict.fromkeys(allowed), key=len, reverse=True)
 
 
+SOURCE_EXCERPT_MIN_OVERLAP = 24
+
+
+def source_excerpt_overlap_spans(
+    text: str,
+    excerpt: str,
+    *,
+    min_chars: int = SOURCE_EXCERPT_MIN_OVERLAP,
+) -> list[tuple[int, int]]:
+    """返回 ``text`` 中与原文任意位置连续重合的区间。
+
+    旧逻辑只检查 ``excerpt[:24]``，因此原文中段被复制进 prompt 时会漏检。
+    这里使用 24 字种子并向右扩展，既能覆盖任意中段，也避免把短的常用句式
+    当成原文泄漏。返回值按文本顺序排列且不会重叠。
+    """
+    haystack = text or ""
+    source = (excerpt or "").strip()
+    threshold = max(1, int(min_chars))
+    if len(haystack) < threshold or len(source) < threshold:
+        return []
+
+    source_windows: dict[str, list[int]] = {}
+    for index in range(0, len(source) - threshold + 1):
+        source_windows.setdefault(source[index:index + threshold], []).append(index)
+
+    spans: list[tuple[int, int]] = []
+    cursor = 0
+    last_seed = len(haystack) - threshold
+    while cursor <= last_seed:
+        starts = source_windows.get(haystack[cursor:cursor + threshold])
+        if not starts:
+            cursor += 1
+            continue
+        best_end = cursor + threshold
+        for source_start in starts:
+            text_end = cursor + threshold
+            source_end = source_start + threshold
+            while (
+                text_end < len(haystack)
+                and source_end < len(source)
+                and haystack[text_end] == source[source_end]
+            ):
+                text_end += 1
+                source_end += 1
+            best_end = max(best_end, text_end)
+        spans.append((cursor, best_end))
+        cursor = best_end
+    return spans
+
+
 def forbidden_prompt_content_errors(prompt_text: str, shot: Shot) -> list[str]:
     """最终提示词不得含原文/完整前镜动作/未来剧情。
 
-    台词与画面必现字可以与 source_excerpt 重合；从 prompt 中剔除这些允许文本后再扫原文前缀。
+    台词与画面必现字可以与 source_excerpt 重合；从 prompt 中剔除这些允许文本后，
+    扫描原文任意位置的长连续片段。
     """
     errors: list[str] = []
     text = prompt_text or ""
@@ -787,8 +1044,8 @@ def forbidden_prompt_content_errors(prompt_text: str, shot: Shot) -> list[str]:
         for allowed in _allowed_prompt_verbatim_texts(shot):
             if allowed:
                 remainder = remainder.replace(allowed, "")
-        # 允许极短偶然重合；超过 24 字连续命中视为注入原文
-        if excerpt[:24] in remainder:
+        # 允许极短偶然重合；任意位置超过 24 字连续命中视为注入原文。
+        if source_excerpt_overlap_spans(remainder, excerpt):
             errors.append(f"shot_no={shot.shot_no} 最终提示词包含 source_excerpt 原文内容")
     return errors
 
@@ -814,8 +1071,13 @@ def reference_role_plan(
             if is_collective_role(name) and (individual_names is None or name not in individual_names)
             else f"character_identity:{name}"
         )
-    if shot.required_text and (shot.required_text.exact_text or "").strip():
+    if required_text_strategy(shot) == "embedded_prop":
         roles.append("text_surface_reference")
+    for prop_id, prop in (shot.continuity_state_in.props or {}).items():
+        if prop.revision_id:
+            roles.append(f"prop_identity:{prop_id}")
+        if prop.form:
+            roles.append(f"prop_state:{prop_id}:{prop.form}")
     if shot.reference_roles:
         # 保留显式声明，同时保证强制规则
         auto_entity_roles = {
@@ -878,12 +1140,6 @@ def preflight_seedance_gates(
                 if marker not in prompt_text:
                     errors.append(f"shot_no={shot.shot_no} 提示词缺少必填段落 {marker}")
 
-    # 需要后期能力才能成立的转场
-    if shot.transition in {"声音延续+叠化", "声音先行+淡入"}:
-        errors.append(
-            f"shot_no={shot.shot_no} transition={shot.transition} 依赖后期声画桥接；"
-            "本项目无后期能力，请改用单侧可完成的硬切/淡出淡入/遮挡转场"
-        )
     return errors
 
 
@@ -922,6 +1178,8 @@ def shot_contract_dict(shot: Shot) -> dict[str, Any]:
         "audio_cast": list(shot.audio_cast or []),
         "audio_timeline": [x.model_dump() for x in (shot.audio_timeline or [])],
         "required_text": required,
+        "continuity_state_in": shot.continuity_state_in.model_dump(mode="json"),
+        "continuity_state_out": shot.continuity_state_out.model_dump(mode="json"),
         "reference_roles": list(shot.reference_roles or []),
         "do_not_repeat": list(shot.do_not_repeat or []),
         "risk_tags": list(shot.risk_tags or []),
@@ -960,6 +1218,9 @@ def apply_shot_contract(shot: Shot, payload: dict[str, Any] | str | None) -> Sho
     if "required_text" in data:
         rt = data["required_text"]
         shot.required_text = RequiredOnScreenText.model_validate(rt) if rt else None
+    for key in ("continuity_state_in", "continuity_state_out"):
+        if key in data and data[key] is not None:
+            setattr(shot, key, ContinuityState.model_validate(data[key] or {}))
     if "legacy_unvalidated" in data:
         shot.legacy_unvalidated = bool(data["legacy_unvalidated"])
     if "is_final" in data:
@@ -1086,9 +1347,20 @@ HARD_QA_FAILURE_TYPES = {
     "future_leak",
     "wrong_dialogue",
     "text_error",
+    "required_text_error",
     "character_duplicate",
     "state_mismatch",
     "needs_crop",
+    "wrong_identity",
+    "wrong_outfit",
+    "subject_occlusion",
+    "action_missing",
+    "wrong_action",
+    "prop_identity_mismatch",
+    "prop_state_mismatch",
+    "object_count_mismatch",
+    "wrong_camera_axis",
+    "geometry_guard_unverified",
 }
 
 
@@ -1101,7 +1373,11 @@ def classify_video_hard_failures(qa: dict[str, Any] | None, *,
     if technical and not technical.get("passed", True):
         failures.append("needs_crop")
     issues = [str(x).lower() for x in (qa.get("issues") or [])]
-    failure_types = [str(x) for x in (qa.get("failure_types") or [])]
+    aliases = {
+        "wrong_action": "action_missing",
+        "required_text_error": "text_error",
+    }
+    failure_types = [aliases.get(str(x), str(x)) for x in (qa.get("failure_types") or [])]
     for ft in failure_types:
         if ft in HARD_QA_FAILURE_TYPES and ft not in failures:
             failures.append(ft)
@@ -1116,9 +1392,19 @@ def classify_video_hard_failures(qa: dict[str, Any] | None, *,
         ("文字", "text_error"),
         ("乱码", "text_error"),
         ("字幕", "text_error"),
+        ("错人", "wrong_identity"),
+        ("身份", "wrong_identity"),
+        ("换脸", "wrong_identity"),
+        ("服装", "wrong_outfit"),
         ("复制", "character_duplicate"),
         ("分身", "character_duplicate"),
         ("双人", "character_duplicate"),
+        ("动作缺失", "action_missing"),
+        ("没有完成动作", "action_missing"),
+        ("道具变形", "prop_identity_mismatch"),
+        ("道具消失", "prop_state_mismatch"),
+        ("数量", "object_count_mismatch"),
+        ("越轴", "wrong_camera_axis"),
         ("首帧", "state_mismatch"),
         ("尾帧", "state_mismatch"),
         ("状态", "state_mismatch"),
@@ -1129,14 +1415,28 @@ def classify_video_hard_failures(qa: dict[str, Any] | None, *,
         if keyword in joined and code not in failures:
             failures.append(code)
     # 分项硬门槛
-    for key in ("start_state_match", "end_state_match", "action_match", "character_match"):
+    for key in (
+        "start_state_match", "end_state_match", "action_match", "character_match",
+        "prop_identity_match", "prop_state_match", "object_count_match", "camera_axis_match",
+    ):
         try:
             score = float(qa.get(key)) if qa.get(key) is not None else None
         except (TypeError, ValueError):
             score = None
-        if score is not None and score < 0.45 and "state_mismatch" not in failures:
-            if key in {"start_state_match", "end_state_match"}:
-                failures.append("state_mismatch")
+        if score is None or score >= 0.45:
+            continue
+        failure = {
+            "start_state_match": "state_mismatch",
+            "end_state_match": "state_mismatch",
+            "action_match": "action_missing",
+            "character_match": "wrong_identity",
+            "prop_identity_match": "prop_identity_mismatch",
+            "prop_state_match": "prop_state_mismatch",
+            "object_count_match": "object_count_mismatch",
+            "camera_axis_match": "wrong_camera_axis",
+        }[key]
+        if failure not in failures:
+            failures.append(failure)
     return failures
 
 
@@ -1154,6 +1454,42 @@ def retry_patch_for_failure(failure_type: str) -> dict[str, Any]:
         "character_duplicate": {
             "extra_negative": ["画面中不要出现重复人物/分身/双重人物"],
             "hint": "移除不该出现的参考图；写明精确人数",
+        },
+        "wrong_identity": {
+            "extra_negative": ["角色身份必须与人物真值图一致，禁止换脸、换年龄或生成其他角色"],
+            "hint": "强化人物身份参考图；减少同框干扰角色",
+        },
+        "wrong_outfit": {
+            "extra_negative": ["服装款式、主色、发型和发饰必须与人物真值图一致"],
+            "hint": "锁定人物造型版本，移除冲突参考图",
+        },
+        "action_missing": {
+            "extra_negative": ["必须完整执行本镜唯一核心动作，禁止只站立、只说话或用镜头运动代替动作"],
+            "hint": "把动作收敛为一个可见事件；必要时拆镜",
+        },
+        "prop_identity_mismatch": {
+            "extra_negative": ["关键道具外形、材质、颜色和数量必须与道具真值图一致，禁止融合或变形"],
+            "hint": "注入唯一道具状态图；减少同镜道具操作数量",
+        },
+        "prop_state_mismatch": {
+            "extra_negative": ["关键道具必须从指定持有人、位置和开合状态开始并保持到动作发生"],
+            "hint": "核对道具 owner/form/location 状态链",
+        },
+        "object_count_mismatch": {
+            "extra_negative": ["画面中的人物与关键道具数量必须严格等于镜头合同"],
+            "hint": "在提示中明确人数和逐件道具数量",
+        },
+        "wrong_camera_axis": {
+            "extra_negative": ["保持既定空间轴线、人物屏幕方位和视线方向，禁止越轴"],
+            "hint": "使用上一镜尾状态约束下一镜关键帧机位",
+        },
+        "subject_occlusion": {
+            "extra_negative": ["主体脸部、手部动作和关键道具不得被遮挡"],
+            "hint": "调整构图并降低前景遮挡",
+        },
+        "geometry_guard_unverified": {
+            "extra_negative": ["固定地标、人物比例与关键道具几何关系必须清楚可见且保持稳定"],
+            "hint": "收敛构图并强化空间地标",
         },
         "wrong_dialogue": {
             "extra_negative": ["不要用通用旁白替代指定角色声音", "不要改写指定台词"],

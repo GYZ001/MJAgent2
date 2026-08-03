@@ -43,7 +43,13 @@ export function screenplayStatusMeta(status: string | null | undefined): Product
   return productionStatusMeta(status, SCREENPLAY_STATUS, '剧本状态待确认')
 }
 
-export function episodeStatusMeta(status: string | null | undefined): ProductionStatusMeta {
+export function episodeStatusMeta(
+  status: string | null | undefined,
+  issue?: string | null,
+): ProductionStatusMeta {
+  if (status === 'scripted' && issue?.trim()) {
+    return { label: '分镜待处理', tone: 'gold', known: true }
+  }
   return productionStatusMeta(status, EPISODE_STATUS, '制作状态待确认')
 }
 
@@ -68,6 +74,12 @@ export function ScreenplayStatusStamp({ status }: { status: string | null | unde
   return <StatusStamp status={status} meta={screenplayStatusMeta(status)} />
 }
 
-export function EpisodeStatusStamp({ status }: { status: string | null | undefined }) {
-  return <StatusStamp status={status} meta={episodeStatusMeta(status)} />
+export function EpisodeStatusStamp({
+  status,
+  issue,
+}: {
+  status: string | null | undefined
+  issue?: string | null
+}) {
+  return <StatusStamp status={status} meta={episodeStatusMeta(status, issue)} />
 }

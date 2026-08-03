@@ -518,18 +518,41 @@ async def _screenplay_character_discovery(
             "errors": [], "warnings": ["项目尚无人物谱，已跳过增量人物发现"],
         }
     bible = _project_bible_or_placeholder(project)
-    from app.portraits import ensure_cards_for_text
-
-    result = await ensure_cards_for_text(
-        ep["project_id"],
-        ep["episode_no"],
-        source_text,
-        bible,
-        draft_text=draft_text,
-        generate_portraits=False,
+    from app.portraits import (
+        ensure_cards_for_text,
+        persist_screenplay_character_resolutions,
     )
+
+    try:
+        result = await ensure_cards_for_text(
+            ep["project_id"],
+            ep["episode_no"],
+            source_text,
+            bible,
+            draft_text=draft_text,
+            generate_portraits=False,
+        )
+    except StageError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 统一转成剧本阶段可恢复诊断
+        from app.errors import code_ref
+
+        public = code_ref(
+            exc,
+            action="screenplay_character_discovery",
+            context={"episode_id": episode_id, "project_id": ep["project_id"]},
+        )
+        raise StageError(
+            "新人物发现",
+            [f"人物身份模型暂未完成本集预检，请在剧本阶段重试（{public}）"],
+        ) from exc
     if result.get("errors"):
         raise StageError("新人物发现", list(result["errors"]))
+    result["resolutions"] = persist_screenplay_character_resolutions(
+        conn,
+        episode_id,
+        result.get("resolutions") or [],
+    )
     for warning in result.get("warnings") or []:
         errors.log_error(
             None,
@@ -575,6 +598,16 @@ async def _screenplay_task(
         )
         if preflight_result is None:
             preflight_result = await _screenplay_character_discovery(episode_id, source_text)
+        # 身份映射必须随 Baseline、恢复 Patch 和手工发布重放。
+        # 持久化的只是姓名决议与证据，不传递后续章节剧情。
+        from app.portraits import (
+            load_screenplay_character_resolutions,
+            merge_screenplay_character_resolutions,
+        )
+        ep_data["character_resolutions"] = merge_screenplay_character_resolutions(
+            load_screenplay_character_resolutions(conn, episode_id),
+            preflight_result.get("resolutions") or [],
+        )
         if preflight_result.get("added"):
             p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
             bible = _project_bible_or_placeholder(p)
@@ -685,6 +718,14 @@ async def _screenplay_task(
             conn.execute(
                 "UPDATE episodes SET screenplay_status='repairing', screenplay_error=?, screenplay_updated_at=? WHERE id=?",
                 (msg[:800], now(), episode_id))
+            conn.commit()
+            return None
+        if type(exc).__name__ == "ScreenplayIdentityGateError":
+            conn.execute(
+                "UPDATE episodes SET screenplay_status='failed', screenplay_error=?, "
+                "screenplay_updated_at=? WHERE id=?",
+                (msg[:800], now(), episode_id),
+            )
             conn.commit()
             return None
         public = errors.record_and_format(exc, action="screenplay_generate", context={"episode_id": episode_id})
@@ -862,20 +903,67 @@ async def _recorded_screenplay_task(
         )
         production_state = _screenplay_production_state(episode_id)
         if production_state["operation"] == "repair":
-            # Character discovery is a Baseline preflight.  Re-running it for
-            # every Patch activation wastes a model call and makes a local
-            # repair look like another full generation in the call log.
-            preflight = {
-                "added": [],
-                "skipped": "baseline_already_exists",
-            }
-            evidence_repository.append_event(
-                recorder.run_id,
-                "CHARACTER_DISCOVERY_SKIPPED",
-                "info",
-                "已有 Baseline，续跑局部修复时跳过人物发现模型调用",
-                payload={"episode_id": episode_id},
+            # 正常 Patch 续跑复用已持久化决议，不重复花模型成本；但迁移前的
+            # legacy working artifact 若仍有未知身份，必须先补做一次剧本身份审计。
+            from app.portraits import (
+                apply_screenplay_character_resolutions,
+                load_screenplay_character_resolutions,
+                screenplay_unknown_identity_errors,
             )
+            from app.production.patch import load_screenplay_from_artifact
+            from app.production.revision import get_active_production_revision
+
+            conn = get_conn()
+            persisted_resolutions = load_screenplay_character_resolutions(
+                conn, episode_id,
+            )
+            ep = conn.execute(
+                "SELECT * FROM episodes WHERE id=?", (episode_id,),
+            ).fetchone()
+            project = conn.execute(
+                "SELECT * FROM projects WHERE id=?", (ep["project_id"],),
+            ).fetchone()
+            bible = _project_bible_or_placeholder(project)
+            revision = get_active_production_revision(episode_id, "screenplay")
+            requires_legacy_audit = False
+            if bible.characters and revision and revision.working_artifact_id:
+                working_script = load_screenplay_from_artifact(
+                    revision.working_artifact_id,
+                )
+                apply_screenplay_character_resolutions(
+                    working_script, persisted_resolutions,
+                )
+                requires_legacy_audit = bool(
+                    screenplay_unknown_identity_errors(working_script, bible)
+                )
+            if requires_legacy_audit:
+                _, preflight = await recorder.step(
+                    "character_discovery_resume_audit",
+                    lambda: _screenplay_character_discovery(
+                        episode_id,
+                        discovery_source,
+                        draft_text=working_script.model_dump_json(),
+                    ),
+                    agent_name="screenplay_character_discovery",
+                    context_manifest={
+                        "episode_id": episode_id,
+                        "source_chars": len(discovery_source),
+                        "phase": "legacy_working_artifact_audit",
+                    },
+                )
+            else:
+                preflight = {
+                    "added": [],
+                    "resolutions": persisted_resolutions,
+                    "skipped": "baseline_identity_already_resolved",
+                }
+                evidence_repository.append_event(
+                    recorder.run_id,
+                    "CHARACTER_DISCOVERY_SKIPPED",
+                    "info",
+                    "已有 Baseline 且人物身份已解析，续跑局部修复时复用持久化决议",
+                    payload={"episode_id": episode_id},
+                )
         else:
             _, preflight = await recorder.step(
                 "character_discovery",
@@ -1315,7 +1403,16 @@ async def repair_screenplay_draft(episode_id: str, body: dict | None = Body(None
         mark_first_evaluation,
         save_checkpoint,
     )
-    from app.production.screenplay_repair import run_screenplay_qa
+    from app.production.screenplay_repair import (
+        SCREENPLAY_REPAIR_PLANNER_VERSION,
+        non_waivable_screenplay_issues,
+        run_screenplay_qa,
+    )
+    from app.portraits import (
+        apply_screenplay_character_resolutions,
+        load_screenplay_character_resolutions,
+        screenplay_unknown_identity_errors,
+    )
     from app.validators import normalize_screenplay_candidate
 
     body = _as_body_dict(body)
@@ -1359,16 +1456,46 @@ async def repair_screenplay_draft(episode_id: str, body: dict | None = Body(None
     conn = get_conn()
     project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
     source_text = _episode_source_text(conn, ep)
+    resolutions = load_screenplay_character_resolutions(conn, episode_id)
+    apply_screenplay_character_resolutions(instance, resolutions)
+    instance = normalize_screenplay_candidate(instance)
+    bible = _project_bible_or_placeholder(project)
+    if screenplay_unknown_identity_errors(instance, bible):
+        try:
+            await _screenplay_character_discovery(
+                episode_id,
+                source_text,
+                draft_text=instance.model_dump_json(),
+            )
+        except StageError as exc:
+            raise HTTPException(422, {
+                "code": "screenplay_character_discovery_failed",
+                "message": "剧本人物身份预检未通过",
+                "errors": exc.errors,
+            }) from exc
+        resolutions = load_screenplay_character_resolutions(conn, episode_id)
+        apply_screenplay_character_resolutions(instance, resolutions)
+        instance = normalize_screenplay_candidate(instance)
+        project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
+        bible = _project_bible_or_placeholder(project)
     qa_episode = {
         **ep,
         "required_dialogue_lines": _screenplay_required_dialogues(ep),
+        "character_resolutions": resolutions,
     }
     issues, evaluation = run_screenplay_qa(
         instance,
-        bible=_project_bible_or_placeholder(project),
+        bible=bible,
         source_text=source_text,
         episode=qa_episode,
     )
+    hard_identity_issues = non_waivable_screenplay_issues(issues)
+    if hard_identity_issues:
+        raise HTTPException(422, {
+            "code": "screenplay_character_identity_unresolved",
+            "message": "剧本人物身份未解决，未启动 Repair",
+            "errors": [issue.message for issue in hard_identity_issues],
+        })
     if not issues:
         raise HTTPException(409, {
             "code": "screenplay_qa_already_passed",
@@ -1406,7 +1533,7 @@ async def repair_screenplay_draft(episode_id: str, body: dict | None = Body(None
     )
     bound_issues, bound_evaluation = run_screenplay_qa(
         instance,
-        bible=_project_bible_or_placeholder(project),
+        bible=bible,
         source_text=source_text,
         episode=qa_episode,
         artifact_id=artifact["id"],
@@ -1422,7 +1549,7 @@ async def repair_screenplay_draft(episode_id: str, body: dict | None = Body(None
     ) or f"eval-{artifact['id']}"
     mark_first_evaluation(revision.id, evaluation_id)
     save_checkpoint(revision.id, {
-        "planner_version": "screenplay-repair-9",
+        "planner_version": SCREENPLAY_REPAIR_PLANNER_VERSION,
         "phase": "QA_FAILED",
         "activation_no": 0,
         "working_artifact_id": artifact["id"],
@@ -1521,6 +1648,7 @@ async def delete_screenplay(episode_id: str):
     conn.execute(
         """UPDATE episodes SET
             screenplay_json=NULL,
+            screenplay_character_resolutions='[]',
             screenplay_status='pending',
             screenplay_error=NULL,
             screenplay_started_at=NULL,
@@ -1771,29 +1899,46 @@ def preview_screenplay_edit_impact(episode_id: str, body: dict):
             "message": "剧本结构校验未通过",
             "errors": validation_errors,
         })
-    from app.production.screenplay_repair import run_screenplay_qa
+    from app.production.screenplay_repair import (
+        non_waivable_screenplay_issues,
+        run_screenplay_qa,
+    )
+    from app.portraits import (
+        apply_screenplay_character_resolutions,
+        load_screenplay_character_resolutions,
+        screenplay_unknown_identity_errors,
+    )
     from app.validators import normalize_screenplay_candidate
 
+    instance = normalize_screenplay_candidate(instance)
+    conn = get_conn()
+    resolutions = load_screenplay_character_resolutions(conn, episode_id)
+    apply_screenplay_character_resolutions(instance, resolutions)
     instance = normalize_screenplay_candidate(instance)
     current_script = _load_screenplay(ep)
     comparable_current = (
         normalize_screenplay_candidate(current_script) if current_script else None
     )
     diff = _screenplay_field_diff(comparable_current, instance)
-    conn = get_conn()
     qa_issues = []
     qa_evaluation = None
-    if diff:
-        project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
+    project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
+    bible = _project_bible_or_placeholder(project)
+    identity_preflight_required = bool(
+        screenplay_unknown_identity_errors(instance, bible)
+    )
+    if diff or identity_preflight_required:
         qa_issues, qa_evaluation = run_screenplay_qa(
             instance,
-            bible=_project_bible_or_placeholder(project),
+            bible=bible,
             source_text=_episode_source_text(conn, ep),
             episode={
                 **ep,
                 "required_dialogue_lines": _screenplay_required_dialogues(ep),
+                "character_resolutions": resolutions,
             },
         )
+    hard_identity_issues = non_waivable_screenplay_issues(qa_issues)
     counts = {
         "shots": int(conn.execute(
             "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)
@@ -1817,12 +1962,23 @@ def preview_screenplay_edit_impact(episode_id: str, body: dict):
         "diff": diff,
         "changed_sections": sorted({item["section"] for item in diff}),
         "qa": {
+            # 影响预览严格只读，不能在这里运行会建卡/持久化决议的模型预检。
+            # 正式 PUT 会先执行未来 10 章模型消歧，只有仍无法落实时才拒绝发布。
             "passed": True,
             "score": qa_evaluation.score if qa_evaluation else 100,
             "evaluation_role": "score_only",
             "runtime_blocking": False,
             "gate_retry_exhausted": bool(qa_issues),
             "warnings": [issue.message for issue in qa_issues],
+        },
+        "character_identity_preflight": {
+            "required": bool(hard_identity_issues),
+            "status": "pending_model_resolution" if hard_identity_issues else "resolved",
+            "lookahead_chapters": 10,
+            "message": (
+                "发布时会先由模型结合未来 10 章解析人物真名；无可靠真名时自动映射为路人角色"
+                if hard_identity_issues else "人物身份已满足当前剧本合同"
+            ),
         },
         "downstream": counts,
         "active_runs": active_runs,
@@ -1869,13 +2025,49 @@ async def edit_screenplay(episode_id: str, body: dict):
             "message": "剧本结构校验未通过",
             "errors": validation_errors,
         })
-    from app.production.screenplay_repair import run_screenplay_qa
+    from app.production.screenplay_repair import (
+        non_waivable_screenplay_issues,
+        run_screenplay_qa,
+    )
+    from app.portraits import (
+        apply_screenplay_character_resolutions,
+        load_screenplay_character_resolutions,
+        screenplay_unknown_identity_errors,
+    )
     from app.validators import normalize_screenplay_candidate
 
     instance = normalize_screenplay_candidate(instance)
     conn = get_conn()
     old_script = _load_screenplay(ep)
     normalized_old = normalize_screenplay_candidate(old_script) if old_script else None
+    project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
+    source_text = _episode_source_text(conn, ep)
+    resolutions = load_screenplay_character_resolutions(conn, episode_id)
+    apply_screenplay_character_resolutions(instance, resolutions)
+    instance = normalize_screenplay_candidate(instance)
+    bible = _project_bible_or_placeholder(project)
+    if screenplay_unknown_identity_errors(instance, bible):
+        # 手工剧本仍属于剧本阶段：新称谓在落库前由同一模型向后 10 章消歧。
+        try:
+            await _screenplay_character_discovery(
+                episode_id,
+                source_text,
+                draft_text=instance.model_dump_json(),
+            )
+        except StageError as exc:
+            raise HTTPException(422, {
+                "code": "screenplay_character_discovery_failed",
+                "message": "剧本人物身份预检未通过",
+                "errors": exc.errors,
+            }) from exc
+        resolutions = load_screenplay_character_resolutions(conn, episode_id)
+        apply_screenplay_character_resolutions(instance, resolutions)
+        instance = normalize_screenplay_candidate(instance)
+        # 人物预检可能新增真名角色卡，QA 必须使用最新 Bible。
+        project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
+        bible = _project_bible_or_placeholder(project)
+    # “内容相同”只能在身份映射落实后判断。否则历史发布版中的大汉/青衣人
+    # 会绕过剧本闸门，并把成本问题推迟到分镜阶段。
     if normalized_old and not _screenplay_field_diff(normalized_old, instance):
         return {
             "saved": True,
@@ -1883,18 +2075,24 @@ async def edit_screenplay(episode_id: str, body: dict):
             "artifact_id": current_version or None,
             "downstream_cleared": False,
         }
-    project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
-    source_text = _episode_source_text(conn, ep)
     qa_episode = {
         **ep,
         "required_dialogue_lines": _screenplay_required_dialogues(ep),
+        "character_resolutions": resolutions,
     }
     qa_issues, qa_evaluation = run_screenplay_qa(
         instance,
-        bible=_project_bible_or_placeholder(project),
+        bible=bible,
         source_text=source_text,
         episode=qa_episode,
     )
+    hard_identity_issues = non_waivable_screenplay_issues(qa_issues)
+    if hard_identity_issues:
+        raise HTTPException(422, {
+            "code": "screenplay_character_identity_unresolved",
+            "message": "剧本人物身份未解决，未发布也未清空分镜",
+            "errors": [issue.message for issue in hard_identity_issues],
+        })
     instance = _prepare_screenplay_for_storage(
         ep, instance,
         keep_existing_id=(old_script.id if old_script else None),
@@ -1981,6 +2179,13 @@ async def edit_screenplay(episode_id: str, body: dict):
             artifact_id=candidate["id"],
             artifact_hash=candidate["content_hash"],
         )
+        hard_identity_issues = non_waivable_screenplay_issues(final_issues)
+        if hard_identity_issues:
+            raise HTTPException(422, {
+                "code": "screenplay_character_identity_unresolved",
+                "message": "发布前人物身份复核未通过",
+                "errors": [issue.message for issue in hard_identity_issues],
+            })
         evaluation_row = evidence_repository.create_evaluation(
             candidate["id"], final_evaluation,
         )

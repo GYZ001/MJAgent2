@@ -83,6 +83,10 @@ export function shotVideoState(shot: Shot): ShotVideoState {
       } else if (playableCandidate) {
         phase = 'pending_adoption'
       } else if (
+        shot.pipeline?.pipeline_status === 'waiting_human'
+        || shot.pipeline?.pipeline_stage === 'preflight_blocked'
+        || shot.pipeline?.pipeline_stage === 'waiting_human'
+        ||
         shot.pipeline?.pipeline_status === 'failed'
         || latest?.status === 'failed'
         || versions.some(version => version.status === 'failed')
@@ -135,6 +139,9 @@ export function compactShotStage(shot: Shot): string {
   const current = progress?.current
   const total = progress?.total
   const labels: Record<string, string> = {
+    preflight_validating: '校验视频输入',
+    preflight_retry: '校验失败，自动重试',
+    preflight_blocked: '输入校验未通过',
     job_queued: '已入队',
     reference_prompt: '准备参考图词',
     reference_generate: current != null && total ? `候选图 ${current}/${total}` : '生成候选图',

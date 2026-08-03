@@ -28,6 +28,10 @@ from app import config
 from app.atomic_io import atomic_write_bytes
 from app.db import (finish_provider_call, get_conn, get_setting, log_provider_call,
                     provider_operation_id, start_provider_call)
+from app.model_capabilities import (
+    DEFAULT_MAX_OUTPUT_TOKENS,
+    active_model_token_limits,
+)
 
 BAILIAN_TEXT_FREE_MODELS = (
     "qwen3.7-max-2026-06-08",
@@ -627,6 +631,12 @@ async def _chat_with_reasoning_fallback(client: httpx.AsyncClient, url: str, pay
         fallback_payload = {**payload, "temperature": temperature}
         # 移除 OpenRouter 风格的 reasoning 参数
         fallback_payload.pop("reasoning", None)
+        # DeepSeek/智谱等路径原请求可能根本没有 reasoning 字段。此时所谓降级请求
+        # 与首轮逐字相同，重复发送只会再次耗尽预算并产生费用，必须直接结束。
+        if fallback_payload == payload:
+            raise ProviderError(
+                f"模型推理耗尽输出预算，且当前接口不支持关闭推理（{_empty_content_detail(data)}）"
+            )
         fallback_meta = {
             **(call_meta or {}),
             "reasoning_fallback": True,
@@ -661,9 +671,26 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
     图像/视频始终走火山）。"""
     timeout = httpx.Timeout(connect=10, read=_chat_read_timeout_s(call_meta), write=30, pool=10)
     provider = active_provider("text")
+    selected_model = model or active_model("text", provider)
+    token_limits = active_model_token_limits(provider, selected_model, get_setting)
+    requested_max_tokens = max(1, int(max_tokens))
+    runtime_output_limit = min(
+        DEFAULT_MAX_OUTPUT_TOKENS,
+        int(token_limits["max_output_tokens"]),
+    )
+    max_tokens = min(requested_max_tokens, runtime_output_limit)
+    call_meta = {
+        **(call_meta or {}),
+        "model_context_window_tokens": int(token_limits["context_window_tokens"]),
+        "model_max_output_tokens": int(token_limits["max_output_tokens"]),
+        "runtime_output_limit_tokens": runtime_output_limit,
+        "token_limits_source": token_limits["token_limits_source"],
+        "requested_max_tokens": requested_max_tokens,
+        "effective_max_tokens": max_tokens,
+    }
     async with httpx.AsyncClient(timeout=timeout) as client:
         if provider == "openrouter":
-            or_model = active_model("text", "openrouter")
+            or_model = selected_model
             base_url, model_headers = _model_connection("openrouter", or_model, config.OPENROUTER_BASE_URL, config.OPENROUTER_API_KEY)
             payload: dict[str, Any] = {"model": or_model, "messages": messages, "max_tokens": max_tokens}
             effort = (config.OPENROUTER_TEXT_REASONING_EFFORT or "").strip().lower()
@@ -676,14 +703,14 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
                 kind="chat", model=or_model, headers=model_headers,
                 key_name="OPENROUTER_API_KEY", temperature=temperature, call_meta=call_meta)
         elif provider == "bailian":
-            bailian_model = active_model("text", "bailian")
+            bailian_model = selected_model
             payload = {"messages": messages, "temperature": temperature, "max_tokens": max_tokens}
             data, _ = await _post_bailian_chat_with_fallback(
                 client, payload, fallback_kind="text", log_kind="chat",
                 preferred_model=bailian_model, meta=call_meta)
             content = _chat_content(data, label="chat")
         elif provider == "deepseek":
-            deepseek_model = active_model("text", "deepseek")
+            deepseek_model = selected_model
             try:
                 base_url, model_headers = _model_connection("deepseek", deepseek_model, config.DEEPSEEK_BASE_URL, config.DEEPSEEK_API_KEY)
             except ProviderError:
@@ -694,7 +721,7 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
                 kind="chat", model=deepseek_model, headers=model_headers,
                 key_name="DEEPSEEK_API_KEY", temperature=temperature, call_meta=call_meta)
         elif provider == "zhipu":
-            zhipu_model = active_model("text", "zhipu")
+            zhipu_model = selected_model
             try:
                 base_url, model_headers = _model_connection("zhipu", zhipu_model, config.ZHIPU_BASE_URL, config.ZHIPU_API_KEY)
             except ProviderError:
@@ -705,7 +732,7 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
                 kind="chat", model=zhipu_model, headers=model_headers,
                 key_name="ZHIPU_API_KEY", temperature=temperature, call_meta=call_meta)
         elif provider.startswith("custom:"):
-            custom_model = active_model("text", provider)
+            custom_model = selected_model
             base_url, headers = _model_connection(provider, custom_model)
             payload = {"model": custom_model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
             data = _cached_successful_provider_response(
@@ -717,7 +744,7 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
                                         key_name=f"model:{custom_model}", meta=call_meta)
             content = _chat_content(data, label="custom chat")
         else:
-            model = model or active_model("text", "hiagent")
+            model = selected_model
             base_url, model_headers = _model_connection("hiagent", model, config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY)
             payload = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
             data = _cached_successful_provider_response("chat", model, payload, call_meta)

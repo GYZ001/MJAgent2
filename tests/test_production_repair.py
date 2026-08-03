@@ -25,6 +25,7 @@ from app.production.structured_issues import enrich_issues, issue_set_hash, stru
 from app.repair_router import route_issues, strategy_for_level, normalize_strategy
 from app.schemas import (
     Bible,
+    Character,
     EpisodeScreenplay,
     KeyDialogueChain,
     KeyDialogueTurn,
@@ -114,6 +115,138 @@ def test_screenplay_qa_is_read_only_and_nonblocking() -> None:
     assert evaluation.status == "failed"
     assert evaluation.evaluation_role == "score_only"
     assert evaluation.runtime_blocking is False
+
+
+def test_unresolved_character_identity_is_a_non_waivable_runtime_gate() -> None:
+    from app.production.screenplay_repair import (
+        non_waivable_screenplay_issues,
+        run_screenplay_qa,
+    )
+
+    script = _minimal_script()
+    issues, evaluation = run_screenplay_qa(
+        script,
+        bible=Bible(
+            characters=[],
+            world=World(visual_style_canonical="测试画风"),
+        ),
+        source_text="甲：开始",
+        episode={
+            "episode_no": 1,
+            "target_duration_s": 50,
+            "required_dialogue_lines": [],
+        },
+    )
+    # 无真实 Bible 的历史占位流程不开身份门禁。
+    assert non_waivable_screenplay_issues(issues) == []
+    assert evaluation.runtime_blocking is False
+
+    issues, evaluation = run_screenplay_qa(
+        script,
+        bible=Bible(
+            characters=[Character(
+                name="萧炎",
+                role="主角",
+                appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰佩火纹玉佩",
+            )],
+            world=World(visual_style_canonical="测试画风"),
+        ),
+        source_text="甲：开始",
+        episode={
+            "episode_no": 1,
+            "target_duration_s": 50,
+            "required_dialogue_lines": [],
+        },
+    )
+    hard = non_waivable_screenplay_issues(issues)
+    assert hard and all(issue.code == "CHARACTER_IDENTITY_UNRESOLVED" for issue in hard)
+    assert evaluation.evaluation_role == "business_safety"
+    assert evaluation.runtime_blocking is True
+
+
+@pytest.mark.asyncio
+async def test_retry_exhaustion_never_publishes_unresolved_character_identity(monkeypatch):
+    from app.evidence import repository as evidence_repository
+    from app.production import screenplay_repair
+
+    revision = ensure_production_revision(
+        episode_id="ep_p",
+        kind="screenplay",
+        resume=False,
+    )
+    script = _minimal_script(stakes="失败将失去资格")
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id="ep_p",
+        status="candidate",
+        trust_level="T1",
+        content=screenplay_repair.screenplay_artifact_payload(script),
+    ))
+    mark_baseline_generated(
+        revision.id,
+        baseline_artifact_id=artifact["id"],
+        working_artifact_id=artifact["id"],
+    )
+    mark_first_evaluation(revision.id, "eval_existing")
+    issue = structured_issue(
+        code="CHARACTER_IDENTITY_UNRESOLVED",
+        message="剧本人物身份未解决：「青衣人」",
+        subject="screenplay",
+        path="/character_identities",
+        rule_id="character_identity_must_resolve_before_publish",
+        stage="screenplay",
+    )
+    evaluation = Evaluation(
+        evaluator_type="deterministic",
+        evaluator_name="test",
+        evaluator_version="1",
+        status="failed",
+        hard_gate_passed=False,
+        evaluation_role="business_safety",
+        runtime_blocking=True,
+        score=0,
+        issues=[issue],
+    )
+    monkeypatch.setattr(
+        screenplay_repair,
+        "run_screenplay_qa",
+        lambda *_args, **_kwargs: ([issue], evaluation),
+    )
+    monkeypatch.setattr(screenplay_repair, "plan_screenplay_patch", lambda *_args, **_kwargs: [])
+
+    async def no_llm_patch(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(screenplay_repair, "_llm_field_patch", no_llm_patch)
+
+    def forbidden_publish(**_kwargs):
+        raise AssertionError("人物身份 blocker 不得发布")
+
+    monkeypatch.setattr(screenplay_repair, "publish_screenplay", forbidden_publish)
+
+    with pytest.raises(RuntimeError, match="人物身份预检未通过"):
+        await screenplay_repair.run_screenplay_production(
+            episode_id="ep_p",
+            episode={
+                "id": "ep_p",
+                "project_id": "proj_p",
+                "episode_no": 1,
+                "target_duration_s": 50,
+            },
+            source_text="原文",
+            bible=Bible(
+                characters=[],
+                world=World(visual_style_canonical="测试画风"),
+            ),
+            resume=True,
+        )
+
+    row = db.get_conn().execute(
+        "SELECT screenplay_status, screenplay_error FROM episodes WHERE id='ep_p'"
+    ).fetchone()
+    assert row["screenplay_status"] == "failed"
+    assert "人物身份" in row["screenplay_error"]
 
 
 def test_baseline_counter_and_policy_denies_second_generate():
@@ -690,7 +823,8 @@ async def test_noop_patch_attempts_consume_activation_budget(monkeypatch):
 
     attempts = 0
 
-    def fake_apply(request, *, episode_id):
+    def fake_apply(request, *, episode_id, character_resolutions=None):
+        del character_resolutions
         nonlocal attempts
         attempts += 1
         return PatchResult(
@@ -724,6 +858,65 @@ async def test_noop_patch_attempts_consume_activation_budget(monkeypatch):
     assert paused is not None
     assert paused.checkpoint_json["phase"] == "SUCCEEDED"
     assert paused.checkpoint_json["yield_reason"] == "gate_retry_exhausted_fallback"
+
+
+@pytest.mark.asyncio
+async def test_resume_replays_persisted_identity_before_first_qa(monkeypatch):
+    from app.evidence import repository as evidence_repository
+    from app.production import screenplay_repair
+
+    revision = ensure_production_revision(
+        episode_id="ep_p",
+        kind="screenplay",
+        resume=False,
+    )
+    script = _minimal_script(stakes="失败将失去资格")
+    script.scene_outline[0].characters.append("青衣人")
+    script.full_script_text += "\n青衣人：此路不通。"
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id="ep_p",
+        status="candidate",
+        trust_level="T1",
+        content=screenplay_repair.screenplay_artifact_payload(script),
+    ))
+    mark_baseline_generated(
+        revision.id,
+        baseline_artifact_id=artifact["id"],
+        working_artifact_id=artifact["id"],
+    )
+
+    def stop_after_identity(candidate, **_kwargs):
+        assert "青衣人" not in candidate.scene_outline[0].characters
+        assert "路人甲" in candidate.scene_outline[0].characters
+        assert "路人甲：此路不通。" in candidate.full_script_text
+        raise RuntimeError("identity replay verified")
+
+    monkeypatch.setattr(screenplay_repair, "run_screenplay_qa", stop_after_identity)
+
+    with pytest.raises(RuntimeError, match="identity replay verified"):
+        await screenplay_repair.run_screenplay_production(
+            episode_id="ep_p",
+            episode={
+                "id": "ep_p",
+                "project_id": "proj_p",
+                "episode_no": 1,
+                "target_duration_s": 50,
+                "character_resolutions": [{
+                    "source_label": "青衣人",
+                    "canonical_name": "路人甲",
+                    "resolution": "functional_extra",
+                }],
+            },
+            source_text="青衣人拦路。",
+            bible=Bible(characters=[], world=World(visual_style_canonical="测试画风")),
+            resume=True,
+        )
+
+    updated = screenplay_repair.get_production_revision(revision.id)
+    assert updated is not None
+    assert updated.working_artifact_id != artifact["id"]
 
 
 @pytest.mark.asyncio
@@ -766,7 +959,8 @@ async def test_recorded_repair_resume_skips_character_discovery_model_call(monke
     assert result is not None
     assert captured_preflight == [{
         "added": [],
-        "skipped": "baseline_already_exists",
+        "resolutions": [],
+        "skipped": "baseline_identity_already_resolved",
     }]
 
 

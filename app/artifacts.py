@@ -6,6 +6,7 @@ import shutil
 from pathlib import Path
 
 from app import config
+from app.atomic_io import atomic_write_text
 from app.db import get_conn, rows_to_dicts
 
 _CLEAR_TERMINAL_RUN_STATES = {
@@ -112,7 +113,7 @@ def _rollback_episodes(conn, ep_ids: set[str]) -> None:
 
 def purge_character_video_artifacts(project_id: str, character_names: list[str]) -> dict:
     """角色定妆照重做后，清理所有用到该角色的镜头已生成产物：
-    生成台关键帧、各版本视频、相关任务、整集成品，并把对应剧集回退到“已确认”，
+    生成台关键帧、各版本视频和相关任务，标记整集成品待更新，并把对应剧集回退到“已确认”，
     强制后续基于新定妆照重新生成，避免新旧画风/形象混用。"""
     targets = {n for n in character_names if n}
     if not targets:
@@ -187,7 +188,7 @@ def purge_project_video_artifacts(project_id: str) -> dict:
 
 
 def delete_video_version(version_id: str) -> str | None:
-    """删除单个视频版本（含视频/尾帧文件、相关任务）；若是采用版则清空采用并使该集成品失效。
+    """删除单个视频版本（含视频/尾帧文件、相关任务）；若是采用版则清空采用并标记该集成品待更新。
     返回所属 shot_id。"""
     conn = get_conn()
     v = conn.execute("SELECT * FROM shot_versions WHERE id=?", (version_id,)).fetchone()
@@ -208,8 +209,8 @@ def delete_video_version(version_id: str) -> str | None:
 
 
 def purge_shot_videos(shot_id: str) -> int:
-    """删除某镜的全部视频版本（含视频/尾帧文件、相关任务），清空采用标记，并使该集成品失效。
-    用于：该镜关键帧被删空后，旧成片已无首尾帧依据，应一并删除。返回删除的版本数。"""
+    """删除某镜的全部视频版本（含视频/尾帧文件、相关任务），清空采用标记，并标记该集成品待更新。
+    用于：该镜关键帧被删空后，旧成片已无首尾帧依据，但仍作为历史成品保留。返回删除的版本数。"""
     conn = get_conn()
     shot = conn.execute("SELECT episode_id FROM shots WHERE id=?", (shot_id,)).fetchone()
     if not shot:
@@ -403,7 +404,7 @@ def invalidate_shot_video_derivatives(shot_id: str) -> dict:
 
 
 def invalidate_episode_final(episode_id: str) -> bool:
-    """采用版本变化后删除旧整集合成；镜头版本本身仍保留。"""
+    """采用版本变化后标记旧整集合成为待更新；旧成品本身仍保留。"""
     conn = get_conn()
     ep = conn.execute(
         "SELECT project_id, episode_no FROM episodes WHERE id=?", (episode_id,)
@@ -499,12 +500,17 @@ def clear_episode_artifacts(episode_id: str) -> dict:
 
 
 def _invalidate_final_video(project_id: str, episode_no: int) -> None:
-    """删除某集已合成的整集成品（如存在）。在生成台产生新片段后调用，
-    使成片台回到“需重新合成”的状态，而非展示与当前片段不一致的旧成品。"""
+    """标记某集已合成的整集成品为待更新，但不删除用户已经得到的成品。
+
+    生成任务与成片台刷新是并行的。过去这里直接删除 ``episode.mp4``，会让
+    正在播放的成片在下一次状态轮询时突然消失。现在用同目录的轻量标记记录
+    “当前采纳关系已变化”，旧成品继续可预览/下载，交付门禁则要求重新合成。
+    """
     final_path = config.PROJECTS_DIR / project_id / "episodes" / str(episode_no) / "final" / "episode.mp4"
+    stale_path = final_path.with_suffix(".stale")
     try:
         if final_path.exists():
-            final_path.unlink()
+            atomic_write_text(stale_path, "outdated\n")
     except OSError:
         pass
 
@@ -518,6 +524,10 @@ def _adopted_video_paths(episode_id: str) -> list[tuple[int, str]]:
            JOIN shot_versions v ON v.id = s.adopted_version_id
            WHERE s.episode_id=?
              AND v.status='succeeded' AND v.video_path IS NOT NULL
+             AND NOT (
+               json_valid(v.image_inputs)
+               AND COALESCE(json_extract(v.image_inputs,'$.delivery_fallback'),0)=1
+             )
            ORDER BY s.shot_no""",
         (episode_id,)).fetchall()
     return [

@@ -168,6 +168,29 @@ def test_upstream_snapshot_finds_recoverable_run_without_episode_pointer(monkeyp
     assert "编剧或分镜任务仍在运行" in snapshot["blockers"]
 
 
+def test_upstream_snapshot_ignores_restart_orphan_superseded_by_success(monkeypatch) -> None:
+    conn = _conn()
+    conn.execute(
+        """INSERT INTO workflow_runs(
+               id,workflow_type,scope_type,scope_id,status,input_fingerprint,
+               updated_at,failure_code
+           ) VALUES('run-orphan','storyboard','episode','e','PAUSED_EXTERNAL','old',1,'SERVICE_RESTART')"""
+    )
+    conn.execute(
+        """INSERT INTO workflow_runs(
+               id,workflow_type,scope_type,scope_id,status,input_fingerprint,
+               updated_at,finished_at
+           ) VALUES('run-success','storyboard','episode','e','SUCCEEDED','new',2,2)"""
+    )
+    conn.commit()
+    monkeypatch.setattr(api, "get_conn", lambda: conn)
+
+    snapshot = api._review_upstream_snapshot("e")
+
+    assert snapshot["eligible_for_production"] is True
+    assert snapshot["active_upstream_runs"] == []
+
+
 def test_upstream_snapshot_finds_live_task_without_durable_pointer(monkeypatch) -> None:
     conn = _conn()
     monkeypatch.setattr(api, "get_conn", lambda: conn)
@@ -271,6 +294,43 @@ async def test_video_completion_shutdown_pauses_run_for_recovery(monkeypatch) ->
 
     assert recorder.paused is True
     assert recorder.cancelled is False
+
+
+@pytest.mark.asyncio
+async def test_deadline_fallback_completion_records_success(monkeypatch) -> None:
+    import app.video_supervisor as video_supervisor
+    from app.media_exec import enqueue as media_enqueue
+
+    class Recorder:
+        run_id = "run-fallback"
+        succeeded_with = None
+        partial_with = None
+
+        def start(self):
+            return None
+
+        def succeed(self, outcome):
+            self.succeeded_with = outcome
+
+        def partial(self, outcome):
+            self.partial_with = outcome
+
+    async def completed(*_args, **_kwargs):
+        return SimpleNamespace(
+            phase="COMPLETED_DEADLINE_FALLBACK",
+            outcome="COMPLETED_DEADLINE_FALLBACK",
+        )
+
+    recorder = Recorder()
+    monkeypatch.setattr(video_supervisor, "run_video_completion_resilient", completed)
+    monkeypatch.setattr(media_enqueue, "reconcile_episode_generation_status", lambda _eid: None)
+
+    await api._recorded_video_completion_task(
+        "e", recorder, resume=True, grant_id="grant",
+    )
+
+    assert recorder.succeeded_with == "COMPLETED_DEADLINE_FALLBACK"
+    assert recorder.partial_with is None
 
 
 @pytest.mark.asyncio

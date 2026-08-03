@@ -167,7 +167,7 @@ def test_action_capacity_uses_detailed_action_not_only_primary_summary() -> None
     assert any("顺序动作节拍" in error for error in errors)
 
 
-def test_required_text_none_bans_text_but_required_text_allows_exact_text_without_conflict() -> None:
+def test_required_text_defaults_to_deterministic_insert_and_keeps_raw_video_textless() -> None:
     no_text = compile_prompt(_shot(required_text=None), _bible())
     assert "画面中不出现任何文字" in no_text
 
@@ -184,7 +184,19 @@ def test_required_text_none_bans_text_but_required_text_allows_exact_text_withou
 
     assert "禁地" in with_text
     assert "画面中不出现任何文字" not in with_text
-    assert "除「禁地」外不要出现任何其他文字" in with_text
+    assert "精确中文由服务端确定性插入" in with_text
+    assert "不要生成字幕、乱码、可读道具字样或水印" in with_text
+    assert "除「禁地」外不要出现任何其他文字" not in with_text
+
+
+def test_embedded_prop_text_remains_an_explicit_opt_in() -> None:
+    shot = _shot(required_text=RequiredOnScreenText(
+        surface="山门木牌", exact_text="禁地", strategy="embedded_prop",
+    ))
+
+    prompt = compile_prompt(shot, _bible())
+
+    assert "除「禁地」外不要出现任何其他文字" in prompt
 
 
 def test_offscreen_speaker_keeps_speaker_id_not_narration() -> None:
@@ -339,8 +351,8 @@ def test_classify_video_hard_failures_detects_story_repeat_and_related_failures(
     assert "needs_crop" in failures
 
 
-def test_select_best_video_candidate_rejects_below_threshold_and_hard_failures(monkeypatch) -> None:
-    """Score-only：技术合格即可采纳；QA 阈值/硬失败只影响排序与 fallback 标记。"""
+def test_select_best_video_candidate_defers_then_force_selects_by_risk(monkeypatch) -> None:
+    """仍有重试预算时不抢先采用；收口时综合风险优先于原始总分。"""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript("""
@@ -376,16 +388,16 @@ def test_select_best_video_candidate_rejects_below_threshold_and_hard_failures(m
 
     selected = media.select_best_video_candidate("s")
 
-    assert selected is not None
-    # 0.95 有 hard failure，0.7 无 hard failure 但低于阈值 → 都进 technical_pool；
-    # qualified 为空时取最高分 hard（0.95）作为 fallback。
-    assert selected["version_id"] == "hard"
-    assert selected["fallback"] is True
-    assert conn.execute("SELECT adopted_version_id FROM shots WHERE id='s'").fetchone()[0] == "hard"
+    assert selected is None
+    assert conn.execute("SELECT adopted_version_id FROM shots WHERE id='s'").fetchone()[0] is None
+    forced = media.select_best_video_candidate("s", force_best=True)
+    assert forced and forced["version_id"] == "low"
+    assert forced["fallback"] is True
+    assert conn.execute("SELECT adopted_version_id FROM shots WHERE id='s'").fetchone()[0] == "low"
 
 
-def test_select_best_video_candidate_force_adopts_highest_when_retakes_exhausted(monkeypatch) -> None:
-    """重抽名额用尽后：即使未过 QA / 有硬门禁，也采纳技术合格中最高分（即使只有一个）。"""
+def test_select_best_video_candidate_force_adopts_lowest_risk_when_retakes_exhausted(monkeypatch) -> None:
+    """重抽名额用尽后采纳技术合格中综合风险最低者，而非盲选总分最高者。"""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript("""
@@ -419,16 +431,16 @@ def test_select_best_video_candidate_force_adopts_highest_when_retakes_exhausted
     import app.artifacts
     monkeypatch.setattr(app.artifacts, "invalidate_episode_final", lambda _: False)
 
-    selected = media.select_best_video_candidate("s")
+    selected = media.select_best_video_candidate("s", force_best=True)
 
-    assert selected and selected["version_id"] == "best_low"
+    assert selected and selected["version_id"] == "low"
     assert selected["fallback"] is True
-    assert "技术合格" in selected["reason"] or "最高分" in selected["reason"] or "仅评分" in selected["reason"]
-    assert conn.execute("SELECT adopted_version_id FROM shots WHERE id='s'").fetchone()[0] == "best_low"
+    assert "综合风险最低" in selected["reason"]
+    assert conn.execute("SELECT adopted_version_id FROM shots WHERE id='s'").fetchone()[0] == "low"
 
 
 def test_select_best_video_candidate_force_best_adopts_single_below_threshold(monkeypatch) -> None:
-    """QA 只评分：仅一个技术合格视频即使未达展示阈值也采纳，force_best 被忽略。"""
+    """单条低分候选先留给重试；预算耗尽后必须自动采用。"""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript("""
@@ -449,9 +461,8 @@ def test_select_best_video_candidate_force_best_adopts_single_below_threshold(mo
     monkeypatch.setattr(media, "get_setting", lambda key: "true" if key == "video_hard_gate_enabled" else None)
 
     selected = media.select_best_video_candidate("s")
-    assert selected and selected["version_id"] == "only"
-    assert selected["fallback"] is True
-    assert conn.execute("SELECT adopted_version_id FROM shots WHERE id='s'").fetchone()[0] == "only"
+    assert selected is None
+    assert conn.execute("SELECT adopted_version_id FROM shots WHERE id='s'").fetchone()[0] is None
     forced = media.select_best_video_candidate("s", force_best=True)
     assert forced and forced["version_id"] == "only"
 
@@ -542,6 +553,39 @@ def test_source_excerpt_in_action_block_still_forbidden() -> None:
     )
     prompt = compile_prompt(shot, _bible(), continuity_mode="same_scene_cut")
     assert any("source_excerpt 原文内容" in err for err in forbidden_prompt_content_errors(prompt, shot))
+
+
+def test_source_excerpt_middle_segment_is_also_forbidden() -> None:
+    excerpt = (
+        "林风先抬头确认山门无人值守，随后按住铜环，"
+        "听见门后传来连续而细微的脚步声，最后退到石阶边缘。"
+    )
+    shot = _shot(source_excerpt=excerpt, continuity_mode="same_scene_cut")
+    middle = excerpt[18:18 + 30]
+
+    errors = forbidden_prompt_content_errors(f"画面动作：{middle}", shot)
+
+    assert any("source_excerpt 原文内容" in err for err in errors)
+
+
+def test_final_prompt_scrubber_preserves_allowed_dialogue_and_removes_other_excerpt() -> None:
+    from app.compiler import ensure_source_excerpt_in_prompt
+
+    line = "苏婉认真提醒林风，眼前山门机关一旦触发便不可逆转。"
+    excerpt = line + "她说完后退到石阶边缘，右手仍紧握剑柄。"
+    shot = _shot(
+        source_excerpt=excerpt,
+        dialogues=[Dialogue(speaker="苏婉", line=line, emotion="坚定")],
+        continuity_mode="same_scene_cut",
+    )
+    leaked_middle = excerpt[len(line):]
+    prompt = f"[AUDIO TIMELINE]\n苏婉「{line}」\n\n[ONE CURRENT ACTION]\n{leaked_middle}"
+
+    scrubbed = ensure_source_excerpt_in_prompt(prompt, shot)
+
+    assert line in scrubbed
+    assert leaked_middle not in scrubbed
+    assert not forbidden_prompt_content_errors(scrubbed, shot)
 
 
 def test_preflight_does_not_leak_prev_shot_errors() -> None:

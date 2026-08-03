@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Shot, ShotVersion } from './api'
-import { countAdoptedVideos, formatPipelineSummary, shotVideoState } from './shotStatus'
+import { compactShotStage, countAdoptedVideos, formatPipelineSummary, shotVideoState } from './shotStatus'
 
 function version(partial: Partial<ShotVersion> & Pick<ShotVersion, 'id' | 'status'>): ShotVersion {
   return {
@@ -95,6 +95,34 @@ describe('shotVideoState', () => {
 
     expect(state.phase).toBe('generating')
     expect(state.label).toBe('生成中')
+  })
+
+  it('入队校验阻塞显示失败，自动重试显示明确阶段', () => {
+    const blocked = shot({
+      pipeline: {
+        task_accepted: true,
+        pipeline_status: 'waiting_human',
+        pipeline_stage: 'preflight_blocked',
+        reason_text: '视频输入校验未通过',
+        candidate_count: 0,
+        retake_count: 0,
+      },
+    })
+    expect(shotVideoState(blocked).phase).toBe('generation_failed')
+    expect(compactShotStage(blocked)).toBe('输入校验未通过')
+
+    const retrying = shot({
+      video_status: 'generating',
+      pipeline: {
+        task_accepted: true,
+        pipeline_status: 'waiting',
+        pipeline_stage: 'preflight_retry',
+        candidate_count: 0,
+        retake_count: 0,
+      },
+    })
+    expect(shotVideoState(retrying).phase).toBe('generating')
+    expect(compactShotStage(retrying)).toBe('校验失败，自动重试')
   })
 
   it('兼容旧响应时仍按同一五态规则归并', () => {

@@ -897,7 +897,7 @@ def _register_commands(registry) -> None:
         _cmd(
             "video.cancel_adoption",
             title="取消采纳视频",
-            description="保留视频候选，只取消本镜采纳关系；合成时将跳过本镜",
+            description="保留真实模型视频候选，只取消本镜采纳关系；成片禁止使用图片或静音片段代替",
             input_model=I.ShotScopedInput,
             risk=RiskLevel.R2_MATERIAL,
             confirmation=ConfirmationPolicy.ALWAYS,

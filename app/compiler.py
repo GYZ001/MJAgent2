@@ -9,7 +9,10 @@ import re
 
 from app import config
 from app.character_policy import (
-    collective_role_anchor, functional_extra_anchor, is_collective_role, is_functional_extra,
+    collective_role_anchor,
+    functional_extra_anchor,
+    is_allowed_storyboard_character,
+    is_collective_role,
 )
 from app.renderability import strip_overdetail_terms
 from app.schemas import Bible, Shot
@@ -44,38 +47,19 @@ NO_BGM_SUFFIX = "全程不要任何背景音乐、不要配乐、不要 BGM；�
 SOURCE_EXCERPT_PROMPT_MAX = 260
 SOURCE_EXCERPT_MARKER = "小说原文兜底参考："
 
-TRANSITION_VIDEO_HINTS = {
-    "叠化": "画面柔和交叠，前一画面逐渐被下一场景气氛替代",
-    "淡出淡入": "画面先缓慢变暗或变亮，再进入新场景，明确时间或空间跳转",
-    "黑场": "画面短暂压入黑场，再进入下一镜",
-    "闪黑": "用一瞬黑闪制造断裂感和悬疑冲击",
-    "闪白": "用强光白闪制造冲击或记忆断片",
-    "甩镜": "镜头快速横甩并产生运动模糊，在模糊中衔接新场景",
-    "遮挡转场": "让人物、门、衣袖、阴影或物体掠过镜头遮住画面后转场",
-    "匹配剪辑": "用相近形状、动作、颜色或构图建立视觉呼应后切换",
-    "声音延续+叠化": "上一镜的台词或环境声像回忆一样延续，同时画面柔和叠化",
-    "声音先行+淡入": "下一场景的声音先出现，画面再淡入新场景",
-}
-
-
 def _clean_transition(transition: str | None) -> str:
     transition = (transition or "").strip()
     if not transition or transition == "硬切":
         return ""
     return transition
 
-
-def _transition_hint(transition: str) -> str:
-    return TRANSITION_VIDEO_HINTS.get(transition, "用明确的视觉转场完成场景切换")
-
-
 def _incoming_transition_line(transition: str | None) -> str:
     transition = _clean_transition(transition)
     if not transition:
         return ""
     return (
-        f"本镜开头转场：从上一镜以「{transition}」进入，{_transition_hint(transition)}；"
-        "开头约0.5到1秒完成过渡，随后落稳到本镜首帧和新场景，不要误以为仍在上一地点。"
+        f"最终编辑会用「{transition}」将上一镜接入本镜；"
+        "原始片段从稳定、干净的本镜首帧开始，不自行叠化、闪黑、闪白或重复转场。"
     )
 
 
@@ -90,9 +74,9 @@ def _outgoing_transition_line(transition: str | None, next_scene: str | None = N
         if next_first_frame_desc and next_first_frame_desc.strip() else ""
     )
     return (
-        f"本镜结尾转场：以「{transition}」连接下一镜{target}{first_frame}。"
-        f"{_transition_hint(transition)}；最后约0.5到1秒执行转场，保留本镜动作结果，"
-        "不要把下一场景完整拍成本镜内容。"
+        f"最终编辑会以「{transition}」连接下一镜{target}{first_frame}。"
+        "本镜末尾预留约0.3秒稳定的动作结果；不自行生成转场特效，"
+        "不要把下一场景拍成本镜内容。"
     )
 
 
@@ -107,8 +91,8 @@ def _scene_tail_transition_line(transition: str | None, next_scene: str | None =
         if next_first_frame_desc and next_first_frame_desc.strip() else ""
     )
     return (
-        f"转场尾帧要求：本尾图需要为「{transition}」做收尾，{target}{first_frame}；"
-        "这仍是一张静止尾帧，只表现渐暗、闪白、遮挡、甩镜运动模糊、叠化余韵或匹配剪辑呼应等可见视觉，不生成字幕文字。"
+        f"编辑衔接尾帧：最终编辑将用「{transition}」进入下一镜，{target}{first_frame}；"
+        "本尾图只保留稳定、干净、可重叠的动作结果，不预烧渐暗、闪白、叠化或字幕。"
     )
 
 
@@ -119,6 +103,39 @@ class CompileError(ValueError):
     误报为 500 系统内部错误。
     """
     pass
+
+
+def _shot_character_contract_names(shot: Shot) -> list[str]:
+    """Prompt 可能消费到的全部角色身份，不只是 legacy ``characters``。"""
+    names: list[str] = [
+        *((name or "").strip() for name in (shot.characters or [])),
+        *((name or "").strip() for name in (shot.characters_visible or [])),
+        *((name or "").strip() for name in (shot.audio_cast or [])),
+        *((dialogue.speaker or "").strip() for dialogue in (shot.dialogues or [])),
+        *((item.speaker_id or "").strip() for item in (shot.audio_timeline or [])),
+    ]
+    for role in shot.reference_roles or []:
+        prefix, separator, name = str(role or "").partition(":")
+        if separator and prefix in {"character_identity", "collective_group"}:
+            names.append(name.strip())
+    return list(dict.fromkeys(name for name in names if name))
+
+
+def _assert_shot_character_contract(shot: Shot, bible: Bible, *, context: str = "Prompt") -> None:
+    bible_names = {character.name for character in bible.characters}
+    invalid = [
+        name
+        for name in _shot_character_contract_names(shot)
+        if not is_allowed_storyboard_character(
+            name, bible_names, allow_without_bible=False,
+        )
+    ]
+    if invalid:
+        raise CompileError(
+            f"镜头 {shot.shot_no} {context} 角色合同残留了既不在角色圣经、"
+            f"也不是功能性路人或群体标签的角色：{invalid}；"
+            "请先同步 characters、characters_visible、声轨与参考角色"
+        )
 
 
 def clip_duration_value(value: int | float | str | None) -> int:
@@ -264,14 +281,56 @@ def sanitize_seedance_prompt(prompt_text: str, *, aggressive: bool = False,
 
 
 def ensure_source_excerpt_in_prompt(prompt_text: str, shot: Shot) -> str:
-    """兼容旧调用点：PRD 禁止把原文章节送入 Seedance，因此只做规范化与消毒，不再注入原文。"""
-    text = normalize_video_args(prompt_text, shot.duration_s)
-    # 若历史 prompt 仍含原文标记，主动剥离
-    if SOURCE_EXCERPT_MARKER in text:
-        body, args = _split_video_args(text, shot.duration_s)
-        body = re.sub(rf"{re.escape(SOURCE_EXCERPT_MARKER)}[^。；\n]*[。；\n]?", "", body)
-        body = re.sub(r"\s+", " ", body).strip(" 。；")
-        text = f"{body}{args}" if body else args.strip()
+    """在最终供应商边界移除非法原文，同时保留合同内合法对白/必现文字。
+
+    这是入队与 worker 提交共用的最后一道防线：新编译 prompt、人工 override 和
+    历史排队版本都会经过这里。原文重合被替换为确定性的合同提示，不会因为一段
+    脏字段直接让整个镜头失败，也不会把章节原文发送给视频供应商。
+    """
+    from app.continuity import (
+        _allowed_prompt_verbatim_texts,
+        source_excerpt_overlap_spans,
+    )
+
+    body, args = _split_video_args(prompt_text, shot.duration_s)
+
+    # 历史版本把兜底原文作为末尾独立行；分段 prompt 整行移除，旧单行格式则
+    # 从 marker 截到结尾（video args 已由 _split_video_args 单独保存）。
+    if SOURCE_EXCERPT_MARKER in body:
+        if "\n" in body:
+            kept_lines: list[str] = []
+            for line in body.splitlines():
+                if SOURCE_EXCERPT_MARKER not in line:
+                    kept_lines.append(line)
+                    continue
+                prefix = line.split(SOURCE_EXCERPT_MARKER, 1)[0].rstrip(" ：:；;")
+                if prefix:
+                    kept_lines.append(prefix)
+            body = "\n".join(kept_lines)
+        else:
+            body = body.split(SOURCE_EXCERPT_MARKER, 1)[0].rstrip(" ：:；;")
+
+    excerpt = (shot.source_excerpt or "").strip()
+    protected: list[tuple[str, str]] = []
+    if excerpt:
+        for index, allowed in enumerate(_allowed_prompt_verbatim_texts(shot)):
+            if not allowed or allowed not in body:
+                continue
+            token = f"__MANJU_ALLOWED_VERBATIM_{index}__"
+            while token in body:
+                token += "_"
+            body = body.replace(allowed, token)
+            protected.append((token, allowed))
+
+        spans = source_excerpt_overlap_spans(body, excerpt)
+        replacement = "按本镜主动作与首尾状态概括呈现，不复述小说原文"
+        for start, end in reversed(spans):
+            body = body[:start] + replacement + body[end:]
+
+        for token, allowed in protected:
+            body = body.replace(token, allowed)
+
+    text = f"{body}{args}" if body.strip() else args.strip()
     return sanitize_seedance_prompt(text)
 
 
@@ -747,9 +806,13 @@ def narrative_keyframe_target(shot: Shot) -> str:
 
 
 def _keyframe_required_text_expected(shot: Shot, target: str, target_source: str) -> bool:
+    from app.continuity import required_text_strategy
+
     required = getattr(shot, "required_text", None)
     exact = str(getattr(required, "exact_text", "") or "").strip() if required is not None else ""
     if not exact:
+        return False
+    if required_text_strategy(shot) != "embedded_prop":
         return False
     if exact in (target or ""):
         return True
@@ -888,10 +951,25 @@ def keyframe_visual_contract(shot: Shot, bible: Bible | None = None) -> dict[str
 
 
 def _compile_text_policy(shot: Shot) -> str:
+    from app.continuity import required_text_strategy
+
     required = getattr(shot, "required_text", None)
     if required is not None and (getattr(required, "exact_text", None) or "").strip():
         exact = required.exact_text.strip()
         surface = (required.surface or "画面指定表面").strip()
+        strategy = required_text_strategy(shot)
+        if strategy == "audio_only":
+            return (
+                f"只通过对白/画外音交付「{exact}」的信息；{surface}上不出现可读文字。"
+                "画面中禁止字幕、标志、水印或乱码。"
+            )
+        if strategy == "deterministic_insert":
+            return (
+                f"只生成无字、干净的「{surface}」与人物表演；不得尝试拼写「{exact}」。"
+                "精确中文由服务端确定性插入镜头交付，原始视频禁止任何可读字。"
+            )
+        if strategy == "none":
+            return "画面不出现任何文字、字幕、标志或水印。"
         style = (required.style or "清晰可读").strip()
         start = getattr(required, "appear_start_s", 0.0) or 0.0
         until = getattr(required, "stable_until_s", None)
@@ -972,13 +1050,17 @@ def _compile_negative_constraints(shot: Shot, extra_negative: list[str] | None,
     from app.continuity import (
         dialogue_focus_subject,
         effective_characters_visible,
+        required_text_strategy,
         uses_previous_tail_frame,
     )
     parts = [
         "不要重演前序剧情",
         "不要提前表演下一镜内容",
-        "不要生成字幕、乱码或水印" if not (shot.required_text and (shot.required_text.exact_text or "").strip())
-        else f"除「{(shot.required_text.exact_text or '').strip()}」外不要出现任何其他文字",
+        (
+            f"除「{(shot.required_text.exact_text or '').strip()}」外不要出现任何其他文字"
+            if required_text_strategy(shot) == "embedded_prop"
+            else "不要生成字幕、乱码、可读道具字样或水印"
+        ),
         "不要出现镜头内未指定的人物",
         "不要复制人物或生成分身",
     ]
@@ -1055,20 +1137,15 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         ensure_audio_timeline,
         planned_state_out,
         reference_role_plan,
+        required_text_strategy,
+        structured_state_prompt,
         sync_shot_continuity_fields,
         uses_previous_tail_frame,
     )
     from app.schemas import PROMPT_CONTRACT_VERSION
 
     bible_map = {c.name: c for c in bible.characters}
-    missing = [
-        name for name in shot.characters
-        if name not in bible_map and not is_functional_extra(name) and not is_collective_role(name)
-    ]
-    if missing:
-        raise CompileError(
-            f"镜头 {shot.shot_no} 引用了既不在角色圣经、也不是功能性路人的角色：{missing}"
-        )
+    _assert_shot_character_contract(shot, bible)
     if shot.duration_s not in config.ALLOWED_DURATIONS:
         raise CompileError(
             f"镜头 {shot.shot_no} 时长 {shot.duration_s}s 不合法，视频生成时长必须为 "
@@ -1190,25 +1267,29 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         prop_anchor = f"文字承载面：{shot.required_text.surface.strip()}"
     height_hint = _equal_height_hint(shot, bible)
 
-    # 转场：仅描述本镜可完成的视觉出口/入口，不注入下一镜详细剧情
+    # 转场由最终编辑执行；生成模型只提供干净可重叠的句柄。
     transition_bits: list[str] = []
     if incoming_transition and _clean_transition(incoming_transition):
         transition_bits.append(
-            f"本镜开头以「{_clean_transition(incoming_transition)}」进入并尽快落稳到起始状态；"
-            "不要误以为仍在上一地点。"
+            f"最终编辑会以「{_clean_transition(incoming_transition)}」接入本镜；"
+            "本镜直接从稳定起始状态开始，不自行重复转场。"
         )
     if outgoing_transition and _clean_transition(outgoing_transition):
         # 不写入 next_first_frame_desc / 下一镜详细内容（PRD 禁止未来剧情）
         target = f"，为切换到「{next_scene.strip()}」留出视觉出口" if next_scene and next_scene.strip() else ""
         transition_bits.append(
-            f"本镜结尾以「{_clean_transition(outgoing_transition)}」收束{target}；"
-            f"{_transition_hint(_clean_transition(outgoing_transition))}；"
-            "不要把下一场景完整拍成本镜内容。"
+            f"最终编辑会以「{_clean_transition(outgoing_transition)}」将本镜连到下一镜{target}；"
+            "末尾保留约0.3秒稳定动作结果，不自行生成渐变、闪光或叠化，"
+            "不把下一场景拍进本镜。"
         )
 
+    post_text_note = "最终编辑只负责镜间转场、音量归一化"
+    if required_text_strategy(shot) == "deterministic_insert":
+        post_text_note += "与精确文字插入"
+    post_text_note += "；不得依赖后期补齐剧情动作、配音或关键音效。"
     format_block = (
         f"生成 {shot_dur} 秒、{aspect_ratio}、{style} 的完整可直接采用视频。"
-        "不得依赖后期裁切、配音、字幕叠加或音效补充。"
+        f"{post_text_note}"
         "全程不要任何背景音乐或 BGM；声音只保留指定人声与必要环境音。"
     )
     reference_block = _compile_reference_roles(
@@ -1248,6 +1329,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
 
     audio_block = _compile_audio_timeline(shot, voice_bible)
     text_block = _compile_text_policy(shot)
+    structured_state_block = structured_state_prompt(shot)
     consistency_parts = [
         character_anchor, scene_anchor, prop_anchor, height_hint,
         "人物头身比沿用角色参考的自然比例；参考图裁切大小不代表实体头部大小，禁止跨镜突然大头或幼态化",
@@ -1267,7 +1349,8 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         ("VISIBLE CAST", visible_cast_block, 1),
         ("START STATE | 0.0s", state_in, 1),
         ("ONE CURRENT ACTION", action_block, 1),
-        (f"END STATE | {shot_dur}.0s", state_out + "。最后状态稳定、清楚、可作为下一镜的叙事依据。", 1),
+        (f"END STATE | {shot_dur}.0s", state_out + "。结尾稳定，可供下镜承接。", 1),
+        ("STRUCTURED CONTINUITY", structured_state_block, 1),
         ("PERSISTENT SCENE GEOMETRY", scene_geometry, 1),
         ("CAMERA", camera_line, 4),
         ("AUDIO TIMELINE", audio_block, 2),
@@ -1305,7 +1388,10 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
             if uses_previous_tail_frame(mode) else
             "场景图锁固定地标，人物图锁身份服装；只换构图，不改固定物体。"
         ),
-        "FORMAT": f"生成 {shot_dur} 秒、{aspect_ratio}、{style} 完整可直接采用视频；禁止后期。",
+        "FORMAT": (
+            f"生成 {shot_dur} 秒、{aspect_ratio}、{style} 可用片段；"
+            "终剪限转场/音量/指定文字。"
+        ),
         "DO NOT": "；".join(compact_negative_parts),
         "CAMERA": (
             f"{render_shot_size}；{camera_angle}；{render_camera_move}"
@@ -1396,14 +1482,7 @@ def compile_scene_prompt(shot: Shot, bible: Bible, *, kind: str = "tail",
     if kind not in ("head", "tail"):
         raise CompileError(f"未知关键帧类型：{kind}")
     bible_map = {c.name: c for c in bible.characters}
-    missing = [
-        name for name in shot.characters
-        if name not in bible_map and not is_functional_extra(name) and not is_collective_role(name)
-    ]
-    if missing:
-        raise CompileError(
-            f"镜头 {shot.shot_no} 关键帧引用了既不在角色圣经、也不是功能性路人的角色：{missing}"
-        )
+    _assert_shot_character_contract(shot, bible, context="关键帧")
     anchors = "；".join(
         bible_map[name].appearance_canonical
         if name in bible_map else (

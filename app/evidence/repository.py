@@ -66,6 +66,28 @@ def _is_model_qa_name(evaluator_name: str) -> bool:
     return "qa" in lowered or "quality" in lowered
 
 
+_WORKFLOW_LABELS: dict[str, str] = {
+    "character_bible": "人物谱生成",
+    "character_references": "人物定妆照",
+    "scene_bible": "场景设定",
+    "scene_references": "场景参考图",
+    "episode_mapping": "分集规划",
+    "screenplay": "剧本生成",
+    "storyboard": "分镜生成",
+    "scene_generation": "关键帧生成",
+    "video_generation": "视频生成",
+    "episode_video_completion": "全片视频补齐",
+    "delivery": "交付",
+    "delivery_package": "交付候选生成",
+}
+
+
+def _workflow_label(workflow_type: str) -> str:
+    if not workflow_type:
+        return "未命名流程"
+    return _WORKFLOW_LABELS.get(workflow_type, workflow_type)
+
+
 def content_hash(content: Any | None = None, file_path: str | None = None) -> str:
     digest = hashlib.sha256()
     if content is not None:
@@ -126,7 +148,7 @@ def create_run(
             (run_id, stamp, parent_run_id),
         )
     conn.commit()
-    append_event(run_id, "RUN_CREATED", "info", f"创建运行：{workflow_type}")
+    append_event(run_id, "RUN_CREATED", "info", f"创建运行：{_workflow_label(workflow_type)}")
     if parent_run_id:
         append_event(
             parent_run_id, "RUN_RECOVERED", "info", "已自动创建续跑任务",

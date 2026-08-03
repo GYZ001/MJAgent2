@@ -26,9 +26,9 @@ from app.loops import AgentLoop, AgentLoopFailure, AgentLoopPolicy
 from app.schemas import (Bible, CAMERA_MOVES, EMOTIONS, EpisodeScreenplay,
                          SHOT_SIZES, Scene, Shot, Storyboard, StoryboardOutline,
                          StoryboardOutlineShot, TRANSITIONS,
-                         extract_json, schema_errors)
-from app.validators import (SCENE_SETTING_MAX_CHARS,
-                            SOURCE_EXCERPT_MIN_CHARS,
+                         extract_json, normalize_screenplay_json_shape,
+                         schema_errors)
+from app.validators import (SOURCE_EXCERPT_MIN_CHARS,
                             defer_establishing_covers,
                             downgrade_outline_offbible_spoken,
                             rewrite_outline_abstract_covers,
@@ -295,6 +295,19 @@ async def _run_with_agent_loop(
         except ValueError as exc:
             messages = [str(exc)]
             return None, issues_from_messages(messages, subject=f"{loop.scope_type}:{loop.scope_id}")
+        if model_cls is EpisodeScreenplay:
+            obj, moved_fields = normalize_screenplay_json_shape(obj)
+            if moved_fields:
+                log_provider_call(
+                    "screenplay_candidate_normalization", config.MODEL_TEXT,
+                    "NORMALIZED", None, 0,
+                    meta={
+                        "episode_id": loop.scope_id,
+                        "stage": stage,
+                        "change": "hoist_fields_from_plot_spine",
+                        "moved_fields": moved_fields,
+                    },
+                )
         if model_cls is StoryboardShotDraft and storyboard_candidate_context is not None:
             obj, normalizations = normalize_storyboard_shot_candidate(
                 obj,
@@ -644,6 +657,31 @@ def _render_screenplay_source(source_text: str, budget: int = SCREENPLAY_SOURCE_
     return head + marker_a + dialogue_evidence + marker_b + tail
 
 
+def _character_resolution_prompt_block(episode: dict) -> str:
+    """把剧本预检的姓名消歧结果转成生产硬合同。"""
+    rows: list[str] = []
+    for item in episode.get("character_resolutions") or []:
+        if not isinstance(item, dict):
+            continue
+        source_label = str(item.get("source_label") or "").strip()
+        canonical_name = str(item.get("canonical_name") or "").strip()
+        if not source_label or not canonical_name or source_label == canonical_name:
+            continue
+        kind = "后文真名" if item.get("resolution") == "future_identity" else "一次性路人"
+        rows.append(f"- 原文称谓「{source_label}」 → {kind}「{canonical_name}」")
+    if not rows:
+        return "【角色身份预解析】本集没有需要替换的过渡称谓。"
+    return (
+        "【角色身份预解析·剧本发布硬门禁】\n"
+        + "\n".join(rows)
+        + "\n除 dialogue_chains[*].turns[*].source_text 等必须逐字保留的原文证据外，"
+          "scene_outline.characters、对白 speaker、voice_bible、information_ledger.speaker_id "
+          "和 full_script_text 中的角色称谓必须全部使用箭头右侧名称；"
+          "禁止再把箭头左侧称谓当成新角色。"
+          "后续章节只用于确认姓名，严禁在本集泄露其任何剧情。"
+    )
+
+
 async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
                               prev_ending: str = "") -> EpisodeScreenplay:
     """小说 -> 完整剧本。
@@ -654,6 +692,7 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
     """
     speech_styles = "；".join(f"{c.name}：{c.speech_style}" for c in bible.characters if c.speech_style)
     bible_names_inline = "、".join(c.name for c in bible.characters) or "（角色圣经为空）"
+    character_resolution_block = _character_resolution_prompt_block(episode)
     episode_hook = (episode.get("hook") or "").strip()
     episode_cliffhanger = (episode.get("cliffhanger") or "").strip()
     no_episode_hook = not episode_hook and not episode_cliffhanger
@@ -776,7 +815,7 @@ B. `full_script_text`：真正的剧本正文；只写大形体动作与主线�
    dramatic_question / protagonist_goal / obstacle / stakes 必填；
    key_lines 至少 {3} 条且须按发生顺序写进正文，不设固定条数上限；上下文依赖台词必须与触发话轮组成连续对白链；总口播服从本集目标时长；key_plot_points {KEY_PLOT_POINTS_MIN}~{KEY_PLOT_POINTS_MAX} 条。
 3. `scene_outline` 必须是 3~5 场的连续场次结构，scene_no 从 1 连续递增。
-   【硬性·角色圣经】scene_outline[*].characters 中的具名角色只能填角色圣经准确姓名（{bible_names_inline}）；无需跨集定妆的临时人物允许使用测验员、守卫、围观者、路人甲等通用功能性身份标签。
+   【硬性·角色圣经】scene_outline[*].characters 中的具名角色只能填角色圣经准确姓名（{bible_names_inline}）；无需跨集定妆的临时人物只能使用测验员、守卫、围观者、路人甲等通用功能性身份标签。绿袍男子/青衣女子/大汉等过渡称谓不是可直接放行的标签，必须执行下方预解析映射。
 4. full_script_text 必须是一篇连续故事正文，且必须带场次标题、动作段、对白段；「【场N】」数量必须与 scene_outline 一致。
 5. full_script_text 不能是一大段梗概；必须像台本分行书写。
 6. full_script_text 中禁止出现：拍01、拍1、拍 01、镜头、景别、运镜、首帧、尾帧、参考图、提示词、prompt；并禁止超纲细节词（眼泪/指节/衣角/发丝/瞳孔/分屏/闪回等）。
@@ -810,6 +849,8 @@ B. `full_script_text`：真正的剧本正文；只写大形体动作与主线�
 角色圣经（姓名、关系、说话风格必须遵守）：
 {bible.model_dump_json()}
 
+{character_resolution_block}
+
 角色说话风格：
 {speech_styles or '（无额外说话风格）'}
 
@@ -834,13 +875,20 @@ async def generate_screenplay_baseline(
     _prompt: str | None = None,
     _no_episode_hook: bool | None = None,
 ) -> EpisodeScreenplay:
-    """仅一次完整 Baseline 生成。无论 QA 是否通过都返回可解析候选，交由局部 Patch。"""
+    """仅一次有效 Baseline 生成。无论 QA 是否通过都返回可解析候选，交由局部 Patch。"""
     if _prompt is None:
         # 复用 generate_screenplay 的 prompt 构建：直接再调一次会递归，故要求调用方传入
         # 或走 generate_screenplay 包装。此处保留独立入口供 Production Repair 使用。
         return await generate_screenplay(episode, source_text, bible, prev_ending=prev_ending)
 
     no_episode_hook = bool(_no_episode_hook)
+    # Baseline-only 禁止对已成形剧本做第二次整版 QA 重写，但首轮若连
+    # Pydantic 候选都没有产生（JSON/结构错误），必须允许受限的结构修复。
+    # 一旦出现首个可解析候选，baseline_only 会立即交给局部 Patch。
+    structural_bootstrap_iterations = min(
+        max(int(get_setting("max_repair_attempts") or 4), 1),
+        4,
+    )
     loop = AgentLoop(
         stage_key="screenplay",
         contract_key="screenplay",
@@ -849,21 +897,36 @@ async def generate_screenplay_baseline(
         scope_id=str(episode.get("id") or f"episode-{episode['episode_no']}"),
         artifact_type="episode_screenplay",
         policy=AgentLoopPolicy(
-            max_iterations=1,
-            stall_rounds=1,
+            max_iterations=structural_bootstrap_iterations,
+            stall_rounds=min(2, structural_bootstrap_iterations),
             min_quality_gain=0.03,
-            no_gain_rounds=1,
+            no_gain_rounds=2,
             allow_warning_candidate=False,
             baseline_only=True,
         ),
     )
 
     def _check_screenplay(s: EpisodeScreenplay) -> list[str]:
+        # 身份消歧是 Baseline 构建规范化，必须在首次 QA 之前落实，
+        # 避免为“绿袍男子→路人甲”浪费一轮模型修复。
+        from app.portraits import (
+            apply_screenplay_character_resolutions,
+            screenplay_character_resolution_errors,
+        )
+        resolutions = list(episode.get("character_resolutions") or [])
+        apply_screenplay_character_resolutions(
+            s,
+            resolutions,
+        )
         errors = validate_screenplay(
             s, bible, max(1, episode["target_duration_s"] // config.VIDEO_DURATION_MIN_S),
             episode_no=episode["episode_no"], source_text=source_text,
             require_dialogue_chains=True,
             required_dialogue_lines=episode.get("required_dialogue_lines") or [])
+        errors.extend(screenplay_character_resolution_errors(
+            s,
+            resolutions,
+        ))
         errors.extend(adaptation_hook_errors(s, episode))
         if no_episode_hook:
             ending = (s.ending_hook or "").strip()
@@ -938,8 +1001,7 @@ def _storyboard_key_content_block(screenplay: EpisodeScreenplay) -> str:
 
 
 def _scene_library_block(bible: Bible, screenplay: EpisodeScreenplay | None = None) -> str:
-    """渲染「可用场景图素材库」清单注入分镜 prompt：要求 scene_setting 收敛到库内规范场景名，
-    保证后续每个场景能复用同一张场景库图（跨镜/跨集一致）。库为空时返回空串（不约束）。"""
+    """注入可用场景图清单：scene_name 选图，scene_time 独立表达时间。"""
     scenes = list(getattr(bible, "scenes", None) or [])
     if screenplay is not None and screenplay.scene_outline:
         relevant = set(resolve_screenplay_scene_names(screenplay, bible))
@@ -950,10 +1012,10 @@ def _scene_library_block(bible: Bible, screenplay: EpisodeScreenplay | None = No
         f"- {sc.name}：{sc.scene_canonical}" for sc in scenes if getattr(sc, "name", ""))
     names = "、".join(sc.name for sc in scenes if getattr(sc, "name", ""))
     return (
-        "【本集已就绪场景图】（只列本集剧本真实场次；scene_setting 的地点必须"
-        "收敛到其中一个场景名，以便同场景跨镜复用同一张场景图、保持场景一致）：\n"
+        "【本集已就绪场景图】（scene_name 与下列场景图一一对应）：\n"
         f"{rows}\n"
-        f"硬性要求：每个镜头的 scene_setting 写成「时间，{{库内场景名}}」，地点必须是上列之一（{names}）；"
+        f"硬性要求：scene_name 必须直接填上列规范名之一（{names}）；"
+        "scene_time 单独填早/中/晚/黄昏/具体时刻，不得把时间混入 scene_name。"
         "禁止借用本集剧本之外的相似场景，也禁止自创场景；本集新地点已经由系统在分镜前自动建库并完成场景图。\n"
     )
 
@@ -974,6 +1036,8 @@ def _render_completed_shots_context(shots: list[Shot]) -> str:
         rows.append({
             "shot_no": shot.shot_no,
             "duration_s": shot.duration_s,
+            "scene_time": shot.scene_time,
+            "scene_name": shot.scene_name,
             "scene_setting": shot.scene_setting,
             "characters_visible": shot.characters_visible or shot.characters,
             "continuity_mode": shot.continuity_mode,
@@ -1094,26 +1158,38 @@ def _filter_partial_storyboard_errors(
 
 def _normalized_candidate_board(episode_no: int, completed_shots: list[Shot], shot: Shot,
                                 bible: Bible | None = None,
-                                target_duration_s: int | None = None) -> Storyboard:
-    board = Storyboard(episode_no=episode_no, shots=[*completed_shots, shot])
+                                target_duration_s: int | None = None) -> tuple[Storyboard, list[str]]:
+    raw_board = Storyboard(episode_no=episode_no, shots=[*completed_shots, shot])
+    # 在副本上做合同规范化。未知人物不能靠代码静默删掉；它必须作为
+    # 当前候选的模型修复反馈返回，原始台词和角色字段保持完整。
+    board = Storyboard.model_validate(raw_board.model_dump(mode="json"))
     normalize_continuity(board)
-    # ① 确定性角色分类：功能性路人保留并补入 characters；具体姓名服从角色圣经；其它未知角色剥离。
-    # 须在清空旁白之前——未知角色剥离可能把宣告并入 action_desc。
-    normalize_offbible_characters(board, bible)
+    character_changes = normalize_offbible_characters(board, bible)
+    stripped = sorted({
+        str(change.get("stripped") or "").strip()
+        for change in character_changes
+        if str(change.get("stripped") or "").strip()
+    })
+    if stripped:
+        return raw_board, [
+            "分镜候选使用了未在剧本阶段解析的人物身份："
+            + "、".join(stripped)
+            + "；不得删除人物或台词，请严格改用已发布剧本中的人物谱正名/路人编号"
+        ]
     # ② 产品禁止旁白/内心OS：确定性清空 narration 与 timeline narration 轨。
     relieve_spoken_overflow(board)
     prefer_default_shot_durations(board)
     normalize_transition_visuals(board)
     for s in board.shots:
         s.action_desc = normalize_action_desc(s.action_desc)
-    return board
+    return board, []
 
 
 def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict, bible: Bible,
                                     screenplay: EpisodeScreenplay, completed_shots: list[Shot],
                                     shot_no: int, allow_finish: bool, must_finish: bool,
                                     outline_covers: str = "", later_planned_covers: str = "",
-                                    outline_scene_setting: str = "",
+                                    outline_scene_name: str = "",
                                     source_text: str = "") -> list[str]:
     errors: list[str] = []
     if draft.episode_no != episode["episode_no"]:
@@ -1145,7 +1221,10 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
     # 相邻镜允许共享同一主线段落的 source_excerpt（Renderability：不再用「必须推进原文」逼碎镜）。
 
     target = episode["target_duration_s"]
-    board = _normalized_candidate_board(episode["episode_no"], completed_shots, draft.shot, bible, target)
+    board, identity_errors = _normalized_candidate_board(
+        episode["episode_no"], completed_shots, draft.shot, bible, target,
+    )
+    errors.extend(identity_errors)
     current = board.shots[-1]
     partial_errors = (
         validate_storyboard(board, bible, target)
@@ -1160,7 +1239,7 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
         current,
         screenplay,
         bible,
-        expected_scene_setting=outline_scene_setting,
+        expected_scene_name=outline_scene_name,
     ))
     # 向前承接：复合 covers 里已在前序镜头落实的事实不再算本镜漏戏（呼应大纲"可拆到相邻多镜"）。
     from app.spoken_contract import spoken_text_of as _spoken_text_of
@@ -1269,7 +1348,7 @@ characters_visible 只保留说话人，听者和人群留在画外；若说话�
 4d. 动作容量与视频生成门禁完全一致：5~6s 最多 2 个顺序动作节拍，7~10s 最多 3 个。入画/转身、穿行/走到、停下、操作道具、结果显现、开口分别计入真实节拍；primary_action、beat、covers 任一字段超限，都必须在同一 spine 内拆成前后相邻两镜，后半承接前半 state_out。禁止只把 primary_action 写短、却把多动作继续塞在 beat/covers 里绕过门禁。
 5. covers 只写本镜必须拍出/说出的具体事实（可见动作、可听台词、可感知反应、可核对信息点）；禁止写「反差/对比/衬托/呼应/强调/暗示/氛围」等导演意图——意图写入 beat/primary_action/state_out，事实写成双方可见状态（如「薰儿测出七段、人群赞叹；萧炎低头不语」）。
 6. {first_rule}
-7. 每条 scene_setting 写时间+地点短标签；同一连续空间必须保持同一个标签，不要因为人物走到门口/桌边/人群前就改标签。
+7. scene_time 与 scene_name 分开填：scene_time 可为早/中/晚/黄昏/具体时刻；scene_name 必须是场景库规范名，同一物理场景不因人物走到门口/桌边而改名。
 8. beat 必须写清人物调度：入画/出画用走、停、转身等大动作原因。
 9. continuity_mode 必须从 action_continuation / same_scene_cut / reaction_cut / reverse_angle / insert_detail / scene_change 中选择；只有 action_continuation 表示承接上一镜同一动作尾状态，其他同场景切换不得冒充动作连续。
 10. story_event_id 只写剧本事件 E*；主线节拍写 spine_beat_ids（S*）；禁止把 S* 写入 story_event_id。
@@ -1277,7 +1356,7 @@ characters_visible 只保留说话人，听者和人群留在画外；若说话�
 本集目标时长 {target}s。上一集结尾：{prev_ending or "（本集为第一集）"}
 
 输出 JSON（不要解释、不要 Markdown）：
-{{"episode_no": {episode['episode_no']}, "shots": [{{"shot_no": int, "scene_setting": "时间+地点短标签", "beat": "兼容字段：本镜推进的剧情一句话", "covers": "本镜必须拍出/说出的具体事实（禁止反差/对比等导演抽象）", "state_in": "本镜开始时人物/道具/信息状态", "primary_action": "本镜唯一主动作/主交付", "state_out": "本镜结束时的新状态", "continuity_mode": "action_continuation|same_scene_cut|reaction_cut|reverse_angle|insert_detail|scene_change", "story_event_id": "对应 screenplay.events[].event_id（E*）或空", "spine_beat_ids": ["S01"], "key_line_ids": ["KL01"], "new_information_ids": ["本镜首次交付的信息ID，可空"], "duration_s": 5, "characters_visible": ["本镜画面可见角色"], "audio_cast": ["本镜发声角色/功能性声音，可空"]}}]}}"""
+{{"episode_no": {episode['episode_no']}, "shots": [{{"shot_no": int, "scene_time": "早|中|晚|黄昏|具体时刻", "scene_name": "上方场景库规范名", "beat": "兼容字段：本镜推进的剧情一句话", "covers": "本镜必须拍出/说出的具体事实（禁止反差/对比等导演抽象）", "state_in": "本镜开始时人物/道具/信息状态", "primary_action": "本镜唯一主动作/主交付", "state_out": "本镜结束时的新状态", "continuity_mode": "action_continuation|same_scene_cut|reaction_cut|reverse_angle|insert_detail|scene_change", "story_event_id": "对应 screenplay.events[].event_id（E*）或空", "spine_beat_ids": ["S01"], "key_line_ids": ["KL01"], "new_information_ids": ["本镜首次交付的信息ID，可空"], "duration_s": 5, "characters_visible": ["本镜画面可见角色"], "audio_cast": ["本镜发声角色/功能性声音，可空"]}}]}}"""
     log_provider_call(
         "storyboard_outline_prompt", config.MODEL_TEXT, "PROMPT_READY", None, 0,
         meta={"episode_id": episode.get("id"), "episode_no": episode.get("episode_no"),
@@ -1357,7 +1436,8 @@ characters_visible 只保留说话人，听者和人群留在画外；若说话�
     )
     outline = await _run_with_agent_loop(
         "分镜大纲", "storyboard_outline", prompt, StoryboardOutline, _check,
-        loop=outline_loop, temperature=0.6, max_tokens=4096,
+        loop=outline_loop, temperature=0.6,
+        max_tokens=config.STORYBOARD_OUTLINE_MAX_TOKENS,
         repair_user_prompt_limit=None,
         prefill={"episode_no": episode["episode_no"]},
     )
@@ -1411,7 +1491,8 @@ def _render_storyboard_outline(
     total = len(outline.shots)
     rows = []
     for s in outline.shots:
-        scene = f"｜{s.scene_setting}" if (s.scene_setting or "").strip() else ""
+        scene_label = s.scene_name or s.scene_setting
+        scene = f"｜{s.scene_time or '时间未定'}｜{scene_label}" if scene_label else ""
         covers = f"｜落实：{s.covers}" if (s.covers or "").strip() else ""
         state = ""
         if (s.state_in or s.primary_action or s.state_out):
@@ -1545,6 +1626,8 @@ def _maybe_split_outline_covers(outline: StoryboardOutline | None, shot_no: int,
             shot_no - 1 + offset,
             StoryboardOutlineShot(
                 shot_no=shot_no + offset,
+                scene_time=current.scene_time,
+                scene_name=current.scene_name,
                 scene_setting=current.scene_setting,
                 beat=f"（语义拆分：第{shot_no}镜后续状态变化）{chunk}",
                 covers=chunk,
@@ -1661,7 +1744,9 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
             + (f"- 落实关键内容：{brief.covers}\n"
                "  这些内容必须明确写进本镜 action_desc 或有效口播（dialogues/audio_timeline）；"
                "只出现在 covers/source_excerpt 里不算完成。\n" if (brief.covers or '').strip() else "")
-            + (f"- 计划场景：{brief.scene_setting}\n" if (brief.scene_setting or '').strip() else "")
+            + (f"- 计划时间：{brief.scene_time}\n" if (brief.scene_time or '').strip() else "")
+            + (f"- 计划场景图：{brief.scene_name or brief.scene_setting}\n"
+               if (brief.scene_name or brief.scene_setting or '').strip() else "")
         )
     context_hints = [
         brief.beat if brief is not None else "",
@@ -1753,11 +1838,13 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
 7. continuity_mode 必须从 action_continuation / same_scene_cut / reaction_cut / reverse_angle / insert_detail / scene_change 中选择；只在同一人物同一动作跨镜延续时使用 action_continuation，普通同场景切换用 same_scene_cut / reaction_cut / reverse_angle / insert_detail，跨时空用 scene_change。
 8. new_information_ids 只能从 current_ids / pending_ids 中选择本镜首次交付的信息，禁止自创英文 snake_case ID；若两栏均为空则输出空数组。do_not_repeat 只能填写 do_not_repeat 栏给出的中文剧情内容，不得填写裸 ID；已交付且不允许强化的信息不得重复讲。
 9. 功能性路人合同：{extra_policy}。
+10. continuity_state_in/out 是跨镜唯一结构化状态快照。未被本镜 primary_action 明确改变的场景 revision/axis/光线、人物 look/outfit revision、道具 revision/owner/location/form 必须从上一镜原样继承；不确定的字段用空字符串，不得自创 ID。
+11. 有精确中文时 required_text.strategy 默认 deterministic_insert，只安排唯一 delivery_owner_shot_no；除非文字必须跟随运动道具，否则禁止选 embedded_prop。其他镜头只保持道具形状/色块，不重复要求模型拼字。
 
 拆分原则：
 1. 按完整剧本的因果链继续往后拆，不能跳过中间关键事件，也不能重写已通过镜头已经覆盖的内容。
 2. 每条 shot 都要推进剧情，且承接上一条的动作、情绪或信息状态。
-3. scene_setting 只写时间+地点短标签，characters 只写实际出现在画面中、且入画原因已经交代清楚的角色；对白镜头不要把“同场在场人物”误当成“当前画面可见人物”全部塞入。
+3. scene_time 只写时间，scene_name 只写场景库规范名；characters 只写实际出现在画面中、且入画原因已经交代清楚的角色；对白镜头不要把“同场在场人物”误当成“当前画面可见人物”全部塞入。
 4. 优先用真实台词+画面动作表达信息；narration 必须为空；禁止内心OS/旁白，无法开口的信息用姿态与表情大方向表达。
 5. 每条 shot 都必须能追溯到完整剧本与原文依据，不要空泛扩写。
 6. 第 1 镜处理：{'【本集是第一集】第 1 镜是全片开场建场镜，主任务是交代故事背景（世界观/主角处境/核心设定）为全片铺底，再自然带出本集 hook。' if int(episode.get('episode_no') or 0) == 1 else first_shot_entry_rule}
@@ -1774,7 +1861,7 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
 上一集结尾：{prev_ending or "（本集为第一集）"}
 
 输出 JSON Schema：
-{{"episode_no": {episode['episode_no']}, "is_final": bool, "shot": {{"shot_no": {shot_no}, "duration_s": int, "shot_size": "远景|全景|中景|近景|特写", "camera_move": "固定|推近|拉远|横摇|跟随", "scene_setting": "短时间+地点标签", "characters": ["画面中实际可见的角色圣经姓名或合法功能性路人标签"], "characters_visible": ["本镜画面可见角色，通常等于 characters；纯对白近景默认只有说话人"], "action_desc": str, "state_in": "本镜开始的精确人物/道具/信息状态", "primary_action": "本镜唯一主动作/主交付", "state_out": "本镜结束后交给下一镜的精确状态", "continuity_mode": "action_continuation|same_scene_cut|reaction_cut|reverse_angle|insert_detail|scene_change", "story_event_id": "对应 screenplay.events[].event_id（E*）；没有对应事件时必须输出空字符串，禁止输出 null，禁止写 S*", "spine_beat_ids": ["本镜落地的主线节拍 S*，可空"], "key_line_ids": ["本镜说出的关键台词 KL*，可空"], "new_information_ids": ["仅填写 information_ledger 中已有的 I1/I2 等内部编号"], "do_not_repeat": ["只能填写已交付信息的中文内容，禁止裸 ID"], "risk_tags": ["纯对白为空；动作对白写 dialogue_action_staging；双人接触对白写 dialogue_two_shot_required"], "audio_cast": ["本镜发声角色/功能性声音"], "audio_timeline": [{{"start_s": float, "end_s": float, "type": "spoken_dialogue|offscreen_voice|ambient_sound", "speaker_id": "角色名/功能性身份或null", "text": str, "lip_sync": bool, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定", "voice_canonical": str}}], "required_text": {{"surface": "道具/屏幕/牌匾等承载面", "exact_text": "需要画面准确出现的文字；无则为空", "appear_start_s": 0.0, "stable_until_s": null, "style": "", "allow_other_text": false}}, "spatial_anchor": "固定地标/大型道具的方位与距离；同场相邻镜沿用同一世界位置", "first_frame_desc": "本镜开始的静止画面，25~50字，只写看得见的人物姿态/表情/手部/固定地标/道具/光效", "last_frame_desc": "本镜结束的静止画面，25~50字，与首帧【同机位同场景同构图】，固定地标和大型道具不消失不换位，仅人物动作推进", "source_excerpt": "对应本镜头的小说原文逐字摘录，至少 {SOURCE_EXCERPT_MIN_CHARS} 字，仅作审计证据；其中双引号必须按 JSON 规范转义", "narration": "", "dialogues": [{{"speaker": "必须是本镜头 characters 中的可见角色名或功能性路人标签", "line": str, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定", "delivery": "spoken_dialogue|offscreen_voice"}}], "transition": "{transition_options}"}}}}"""
+{{"episode_no": {episode['episode_no']}, "is_final": bool, "shot": {{"shot_no": {shot_no}, "duration_s": int, "shot_size": "远景|全景|中景|近景|特写", "camera_move": "固定|推近|拉远|横摇|跟随", "scene_time": "早|中|晚|黄昏|具体时刻", "scene_name": "上方场景库规范名", "characters": ["画面中实际可见的角色圣经姓名或合法功能性路人标签"], "characters_visible": ["本镜画面可见角色，通常等于 characters；纯对白近景默认只有说话人"], "action_desc": str, "state_in": "本镜开始的精确人物/道具/信息状态", "primary_action": "本镜唯一主动作/主交付", "state_out": "本镜结束后交给下一镜的精确状态", "continuity_mode": "action_continuation|same_scene_cut|reaction_cut|reverse_angle|insert_detail|scene_change", "continuity_state_in": {{"scene": {{"scene_revision_id": str, "time_of_day": str, "lighting_state": str, "axis_id": str, "landmarks": {{"landmark": "screen_side"}}}}, "characters": {{"角色名": {{"look_revision_id": str, "outfit_revision_id": str, "visibility": str, "screen_side": str, "pose": str, "facing": str, "gaze_target": str, "left_hand": str, "right_hand": str}}}}, "props": {{"prop_id": {{"canonical_name": str, "revision_id": str, "owner": str, "location": str, "form": str, "visibility": "required|optional|hidden", "text_state": str, "required": bool}}}}}}, "continuity_state_out": "与 continuity_state_in 同结构，只改写本镜主动作真正改变的字段", "story_event_id": "对应 screenplay.events[].event_id（E*）；没有对应事件时必须输出空字符串，禁止输出 null，禁止写 S*", "spine_beat_ids": ["本镜落地的主线节拍 S*，可空"], "key_line_ids": ["本镜说出的关键台词 KL*，可空"], "new_information_ids": ["仅填写 information_ledger 中已有的 I1/I2 等内部编号"], "do_not_repeat": ["只能填写已交付信息的中文内容，禁止裸 ID"], "risk_tags": ["纯对白为空；动作对白写 dialogue_action_staging；双人接触对白写 dialogue_two_shot_required"], "audio_cast": ["本镜发声角色/功能性声音"], "audio_timeline": [{{"start_s": float, "end_s": float, "type": "spoken_dialogue|offscreen_voice|ambient_sound", "speaker_id": "角色名/功能性身份或null", "text": str, "lip_sync": bool, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定", "voice_canonical": str}}], "required_text": {{"surface": "道具/屏幕/牌匾等承载面", "exact_text": "需要画面准确出现的文字；无则为空", "strategy": "deterministic_insert|audio_only|embedded_prop|none", "delivery_owner_shot_no": int, "appear_start_s": 0.0, "stable_until_s": null, "style": "", "allow_other_text": false, "max_other_text": 0, "font_role": "classical_serif", "reading_priority": "plot_critical"}}, "spatial_anchor": "固定地标/大型道具的方位与距离；同场相邻镜沿用同一世界位置", "first_frame_desc": "本镜开始的静止画面，25~50字，只写看得见的人物姿态/表情/手部/固定地标/道具/光效", "last_frame_desc": "本镜结束的静止画面，25~50字，与首帧【同机位同场景同构图】，固定地标和大型道具不消失不换位，仅人物动作推进", "source_excerpt": "对应本镜头的小说原文逐字摘录，至少 {SOURCE_EXCERPT_MIN_CHARS} 字，仅作审计证据；其中双引号必须按 JSON 规范转义", "narration": "", "dialogues": [{{"speaker": "必须是本镜头 characters 中的可见角色名或功能性路人标签", "line": str, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定", "delivery": "spoken_dialogue|offscreen_voice"}}], "transition": "{transition_options}"}}}}"""
     source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()[:16]
     prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
     log_provider_call(
@@ -1842,7 +1929,7 @@ source_excerpt 内的双引号必须按 JSON 规范转义，或改用中文引�
             allow_finish=allow_finish,
             must_finish=must_finish,
             outline_covers=(brief.covers if brief is not None else ""),
-            outline_scene_setting=(brief.scene_setting if brief is not None else ""),
+            outline_scene_name=((brief.scene_name or brief.scene_setting) if brief is not None else ""),
             # 向后承接：大纲排给后续镜头的事实留给后面拍，本镜不因此报漏戏。
             later_planned_covers="".join(
                 (s.covers or "") for s in (outline.shots[shot_no:] if (outline and outline.shots) else [])
@@ -1879,7 +1966,13 @@ source_excerpt 内的双引号必须按 JSON 规范转义，或改用中文引�
             draft.shot.new_information_ids = list(current_info_ids)
     # 防重复约束是给后续创作/视频模型理解的中文语义，不持久化裸内部 ID。
     draft.shot.do_not_repeat = list(ledger_context.get("do_not_repeat") or [])
-    _normalized_candidate_board(episode["episode_no"], completed_shots, draft.shot, bible, episode["target_duration_s"])
+    normalized_board, identity_errors = _normalized_candidate_board(
+        episode["episode_no"], completed_shots, draft.shot, bible,
+        episode["target_duration_s"],
+    )
+    if identity_errors:
+        raise StageError("分镜人物合同", identity_errors)
+    draft.shot = normalized_board.shots[-1]
     return draft
 
 
@@ -1963,9 +2056,9 @@ def _storyboard_output_contract(episode: dict, bible: Bible, durations: list[int
 14. action_desc 必须显式写出本镜头主要角色的准确姓名。
 15. dialogues 只写人物实际开口台词，dialogues[*].speaker 必须在本镜头 characters 中；同镜所有 spoken_dialogue 必须属于同一 speaker。
 16. 【单镜】台词纯文字口播必须满足第 4 条上限。emotion 只能取：{'|'.join(sorted(EMOTIONS))}。说话风格：{speech_styles or '（无额外说话风格）'}。
-17. scene_setting 建议 {SCENE_SETTING_MAX_CHARS} 字以内，只写"时间，地点"。
+17. scene_time 独立写时间段或具体时刻；scene_name 只写场景库规范名，与场景图一一对应。
 18. shot_size 只能取：{'|'.join(sorted(SHOT_SIZES))}；camera_move 只能取：{'|'.join(sorted(CAMERA_MOVES))}；transition 只能取：{'|'.join(sorted(TRANSITIONS))}。
-19. 同一 scene_setting 的镜头必须连续排列；同一场景的 scene_setting 必须逐字相同。
+19. 同一 scene_name 的镜头尽量连续排列；时间变化只改 scene_time，不得改写 scene_name 来伪造新场景。
 20. shot_size 由当前动作、人物调度和情绪表达决定；剧情需要时允许连续镜头使用相同景别，禁止仅为形式变化牺牲可拍性。
 21. 相邻镜头用 continuity_mode 表达承接；action_continuation 仅用于同一人物同一动作跨镜延续。
 22. 转场设计：同场景连续镜只能用"硬切"；换场不得硬切。
@@ -1980,21 +2073,21 @@ def _storyboard_preflight_contract(episode: dict) -> str:
     hints = "、".join(TRANSITION_HINTS[:12])
     return f"""首轮输出前必须逐镜预检（这些就是代码校验器的具体判定条件，不要等返工）：
 1. 镜头数由完整覆盖剧情决定（技术硬上限 {SHOT_HARD_MAX}）；每条 duration_s **默认 {PREFERRED_SHOT_DURATION_S}s**，仅当口播或连续动作需要时取到 {config.VIDEO_DURATION_MAX_S}s。动作容量与视频门禁一致：5~6s≤2 个顺序节拍，7~10s≤3 个；超限优先在同 spine 内拆为前后相邻两镜，禁止为无关细节无限拆碎。
-2. 第 1 镜 continuity_mode 不得为 action_continuation；第 2 镜开始逐条和上一镜比较 state_out、scene_setting 与角色可见状态。
-3. 如果本镜 scene_setting 与上一镜完全相同：
+2. 第 1 镜 continuity_mode 不得为 action_continuation；第 2 镜开始逐条和上一镜比较 state_out、scene_name、scene_time 与角色可见状态。
+3. 如果本镜 scene_name 与 scene_time 均与上一镜相同：
    - continuity_mode 必须是 same_scene_cut / reaction_cut / reverse_angle / insert_detail / action_continuation 之一；
    - 只有同一人物同一动作跨镜延续时才能使用 action_continuation，且 state_in 必须承接上一镜 state_out/observed_state_out；
    - transition 必须为"硬切"；
    - characters 至少保留上一镜的 1 个核心人物；
    - action_desc/state_in 必须承接上一镜结尾的人物位置、道具/屏幕内容、动作或情绪，不能重新介绍场景或重复上一镜发现；
    - 如果本镜 characters 比上一镜多了某个角色，必须写清他/她“走进、上前、转身露出、从人群中出来、被带入”等入画过程；如果少了某个角色，必须写清他/她退开、离开、被遮挡、留在画外或换到另一人反应，禁止凭空出现/消失。
-4. 如果本镜 scene_setting 与上一镜不同：
+4. 如果本镜 scene_name 或 scene_time 与上一镜不同：
    - continuity_mode 必须为 scene_change；
    - transition 必须选择明确的换场方式，绝不能用"硬切"；普通时空跳转优先"淡出淡入"，情绪/回忆延续优先"声音延续+叠化"，悬疑冲击用"闪黑/闪白"，动作追逐用"甩镜/遮挡转场"，有构图呼应时用"匹配剪辑"；
    - action_desc 必须写清承接原因、时间跳跃或线索带入，建议出现：{hints} 等承接词；
-   - 上一镜 last_frame_desc 必须带这个转场的结尾视觉，本镜 first_frame_desc 必须是新时间/新地点的建立画面；
-   - 如果只是同一段连续动作里从房间走到门口/楼道/桌边/窗前，不要改 scene_setting，继续沿用上一镜主场景标签，把移动写进 action_desc。
-5. scene_setting 是稳定短标签，不是镜头内容：同一连续时空统一写同一个"时间，主地点"，例如"当日，场景A"；不要在相邻镜头里改成"当日，场景A楼道外/桌前/门口"导致断链。
+   - 转场由最终编辑执行；上一镜 last_frame_desc 必须保留稳定、干净的动作结果，本镜 first_frame_desc 是新时间/新地点的建立画面；两侧都不预烧叠化/闪黑/闪白效果；
+   - 如果只是同一段连续动作里从房间走到门口/楼道/桌边/窗前，不要改 scene_name，把移动写进 action_desc。
+5. scene_name 是稳定的场景图身份，必须沿用库内规范名；scene_time 是独立时间维度。不要把楼道外/桌前/门口等镜头内容改写成新的 scene_name。
 6. characters 只写本镜头实际可见/在场且已交代入画原因的人；允许第 13 条定义的功能性路人，具体姓名仍必须来自角色圣经。屏幕发信人、纸条落款、新闻里提到的人、AI 软件名不算 characters。
 7. 每条 action_desc 必须显式写出 characters 中角色姓名与这一个大形体主动作（{ACTION_DESC_TARGET_MIN}~{ACTION_DESC_TARGET_MAX} 字）；禁止超纲细节词与切镜词。
 8. 每条 shot 的 source_excerpt 必填（≥{SOURCE_EXCERPT_MIN_CHARS} 字），可与相邻镜共享主线段落；仅作审计，不得进入 Seedance。
@@ -2005,7 +2098,7 @@ def _storyboard_preflight_contract(episode: dict) -> str:
 11. 人物调度预检：逐条核对上一镜 last_frame_desc、本镜 first_frame_desc、characters、action_desc。任何角色的入画、出画、开口、转身、靠近、退后都必须有可见动作链；如果一句话解释不清，就拆成相邻两镜，不要让视频模型自行脑补。
 
 常见错误 → 正确写法（以下角色A/场景A仅为占位示例，请替换成本集真实角色与场景）：
-- 错：上一镜"当日，场景A"，本镜"当日，场景A楼道外"，transition="硬切"，又没有解释。对：若是角色A从房内走到门口，scene_setting 仍写"当日，场景A"，continuity_mode="action_continuation"，state_in 承接上一镜 state_out，action_desc 写"角色A攥着上一镜的纸页走向门口……"。
+- 错：上一镜 scene_name="场景A"，本镜改成"场景A楼道外"。对：若角色A只是从房内走到门口，scene_name 仍写库内"场景A"，scene_time 独立保持，移动写进 action_desc。
 - 错：纸条上出现一个落款名就把 characters 写成 ["该落款名"]。对：如果画面只拍到角色A和纸条，characters 写 ["角色A"]，纸条文字放 action_desc。
 - 错：下一镜重新说"场景A昏暗、桌上有电脑"。对：下一镜直接从上一镜结尾继续，写"角色A仍盯着刚弹出的新闻推送，手指停在屏幕上，随后抬头望向门口，最后攥紧纸页。"。"""
 
@@ -2352,6 +2445,8 @@ async def review_portrait_image(image_b64: str, appearance_anchor: str) -> dict:
 async def qa_shot(frames_b64: list[str], action_desc: str, scene_setting: str,
                   character_anchors: list[str], state_in: str = "", state_out: str = "",
                   required_dialogue: str = "", required_text: str = "",
+                  structured_state: str = "", tracked_props: bool = False,
+                  tracked_axis: bool = False,
                   *, duration_s: int | None = None,
                   duration_needs_review: bool = False,
                   visual_anchors: list[dict] | None = None,
@@ -2410,6 +2505,7 @@ async def qa_shot(frames_b64: list[str], action_desc: str, scene_setting: str,
 预期场景：{scene_setting}
 预期对白/声轨：{required_dialogue or '（无指定；若画面无法判断则 dialogue_match 给 1）'}
 预期画面文字：{required_text or '（无指定；若无文字要求则 text_match 给 1）'}
+结构化连续性合同：{structured_state or '（未提供；相关项给 1）'}
 预期角色外观：
 {anchors}
 {duration_block}
@@ -2420,39 +2516,51 @@ async def qa_shot(frames_b64: list[str], action_desc: str, scene_setting: str,
 4. outfit_match / hair_match / face_identity / scene_match  与真值一致；脸不可见时 face_identity 可为 null
 5. clean_frame      {wm_rule}
 6. start_state_match / end_state_match / dialogue_match / text_match  同前
-{"7. duration_justified  超过默认时长是否必要" if duration_block else ""}
+7. prop_identity_match / prop_state_match / object_count_match  跟踪道具的版本外形、owner/location/form 及数量是否一致
+8. camera_axis_match  若合同提供 axis_id，人物左右关系和视线轴不得无理由翻转
+{"9. duration_justified  超过默认时长是否必要" if duration_block else ""}
 
 硬规则：
 - 只根据可见证据评分；action/character/outfit/hair 为主项；干净度不能抬高错人/错动作总分。
 - 画内人物是否缺失必须以“画内角色合同”为准；明确标为画外的叙事关系人物不得按角色缺失、互动缺失或状态缺失扣分。
-- overall 不得高于 character_match、action_match、start_state_match、end_state_match、dialogue_match、text_match 最低主项。
+- overall 不得高于 character_match、action_match、start_state_match、end_state_match、dialogue_match、text_match，以及合同启用的道具/轴线主项。
 - 缺必需分数时不要伪造满分。
-- failure_types 可用 story_repeat、future_leak、wrong_dialogue、text_error、character_duplicate、state_mismatch、needs_crop、wrong_identity、wrong_outfit、subject_occlusion。
+- failure_types 可用 story_repeat、future_leak、wrong_dialogue、text_error、character_duplicate、state_mismatch、needs_crop、wrong_identity、wrong_outfit、subject_occlusion、action_missing、prop_identity_mismatch、prop_state_mismatch、object_count_mismatch、wrong_camera_axis、geometry_guard_unverified。
 {"- duration_justified=false 时 overall≤0.55。" if duration_block else ""}
 
-只输出 JSON：{{"character_match": float, "action_match": float, "body_proportion": float, "outfit_match": float, "hair_match": float, "face_identity": float|null, "scene_match": float, "clean_frame": float, "start_state_match": float, "end_state_match": float, "dialogue_match": float, "text_match": float, "no_story_repeat": bool, "no_future_leak": bool, "no_character_duplicate": bool, "whole_clip_usable": bool, "failure_types": [str], "observed_state_out": str, "overall": float, "issues": [str]{', "duration_justified": bool' if duration_block else ''}}}"""
+只输出 JSON：{{"character_match": float, "action_match": float, "body_proportion": float, "outfit_match": float, "hair_match": float, "face_identity": float|null, "scene_match": float, "clean_frame": float, "start_state_match": float, "end_state_match": float, "dialogue_match": float, "text_match": float, "prop_identity_match": float, "prop_state_match": float, "object_count_match": float, "camera_axis_match": float, "no_story_repeat": bool, "no_future_leak": bool, "no_character_duplicate": bool, "whole_clip_usable": bool, "failure_types": [str], "observed_state_out": str, "overall": float, "issues": [str]{', "duration_justified": bool' if duration_block else ''}}}"""
     try:
         raw = await hiagent.vlm_check(
             all_frames, expectation,
             call_meta={"initiator_label": "视频自动质检", "scene_setting": scene_setting,
                        "anchor_count": max(0, len(all_frames) - len(frames_b64))})
+        defaults: dict[str, float] = {}
+        if not state_in:
+            defaults["start_state_match"] = 1.0
+        if not state_out:
+            defaults["end_state_match"] = 1.0
+        if not required_dialogue:
+            defaults["dialogue_match"] = 1.0
+        if not required_text:
+            defaults["text_match"] = 1.0
+        if not tracked_props:
+            defaults.update({
+                "prop_identity_match": 1.0,
+                "prop_state_match": 1.0,
+                "object_count_match": 1.0,
+            })
+        if not tracked_axis:
+            defaults["camera_axis_match"] = 1.0
         result = _parse_qa_result(
             raw,
             [
                 "character_match", "action_match", "body_proportion", "outfit_match", "hair_match",
                 "scene_match", "clean_frame",
                 "start_state_match", "end_state_match", "dialogue_match", "text_match",
+                "prop_identity_match", "prop_state_match", "object_count_match",
+                "camera_axis_match",
             ],
-            defaults={
-                "start_state_match": 1.0,
-                "end_state_match": 1.0,
-                "dialogue_match": 1.0,
-                "text_match": 1.0,
-                "body_proportion": 1.0,
-                "outfit_match": 1.0,
-                "hair_match": 1.0,
-                "scene_match": 1.0,
-            },
+            defaults=defaults,
         )
     except Exception as exc:  # noqa: BLE001
         return {
@@ -2477,6 +2585,12 @@ async def qa_shot(frames_b64: list[str], action_desc: str, scene_setting: str,
         for key in ("character_match", "action_match", "start_state_match",
                     "end_state_match", "dialogue_match", "text_match")
     ]
+    if tracked_props:
+        caps.extend(_score_or_none(result.get(key)) for key in (
+            "prop_identity_match", "prop_state_match", "object_count_match",
+        ))
+    if tracked_axis:
+        caps.append(_score_or_none(result.get("camera_axis_match")))
     caps = [score for score in caps if score is not None]
     if caps:
         result["overall"] = round(min(float(result["overall"]), *caps), 3)

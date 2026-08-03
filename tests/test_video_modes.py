@@ -375,7 +375,7 @@ def test_reference_mode_keeps_one_winner_per_timeline_slot() -> None:
     ]
 
 
-def test_reference_pack_prioritizes_anchors_and_caps_timeline_at_two(monkeypatch) -> None:
+def test_reference_pack_prioritizes_timeline_and_props_before_scene_and_character(monkeypatch) -> None:
     monkeypatch.setattr(video_modes, "max_character_reference_images", lambda: 1)
     timeline = [
         {
@@ -433,7 +433,9 @@ def test_reference_pack_prioritizes_anchors_and_caps_timeline_at_two(monkeypatch
     packed = video_modes.pack_reference_images_for_seedance(refs, max_images=9)
 
     assert len([ref for ref in packed if ref["type"] == "plot_key_frame"]) == 2
-    assert [ref["id"] for ref in packed[:2]] == ["character-a", "scene-main"]
+    assert [ref["id"] for ref in packed] == [
+        "beat-1", "beat-5", "prop-overflow", "scene-main", "character-a",
+    ]
     assert {ref["id"] for ref in packed if ref["type"] == "plot_key_frame"} == {
         "beat-1", "beat-5",
     }
@@ -530,8 +532,8 @@ def test_default_reference_build_respects_one_or_two_keyframe_policy(monkeypatch
 
     packed = video_modes.pack_reference_images_for_seedance([asset.public_dict() for asset in assets])
     assert len(packed) == 3
-    assert [ref["type"] for ref in packed[:2]] == ["character", "scene"]
-    assert [ref["keyframe_index"] for ref in packed[2:]] == [1]
+    assert [ref["type"] for ref in packed] == ["plot_key_frame", "scene", "character"]
+    assert packed[0]["keyframe_index"] == 1
 
     generation_calls.clear()
     long_meta: dict = {}
@@ -555,8 +557,10 @@ def test_default_reference_build_respects_one_or_two_keyframe_policy(monkeypatch
         asset.public_dict() for asset in long_assets
     ])
     assert len(long_packed) == 4
-    assert [ref["type"] for ref in long_packed[:2]] == ["character", "scene"]
-    assert [ref["keyframe_index"] for ref in long_packed[2:]] == [1, 2]
+    assert [ref["type"] for ref in long_packed] == [
+        "plot_key_frame", "plot_key_frame", "scene", "character",
+    ]
+    assert [ref["keyframe_index"] for ref in long_packed[:2]] == [1, 2]
 
     async def review_consistency_with_drift(*, candidates, **_kwargs):
         return {
@@ -673,11 +677,11 @@ def test_reference_prompt_numbering_uses_exact_packed_order(monkeypatch) -> None
     note = video_modes.append_reference_prompt_notes("PROMPT", assets)
     packed = video_modes.pack_reference_images_for_seedance([asset.public_dict() for asset in assets])
 
-    assert [ref["id"] for ref in packed] == ["character", "scene", "early", "late"]
-    assert "Reference image 1: use as character" in note
-    assert "Reference image 2: use as scene" in note
-    assert "Reference image 3: use as plot key frame" in note and "freeze only: opening target" in note
-    assert "Reference image 4: use as plot key frame" in note and "freeze only: closing target" in note
+    assert [ref["id"] for ref in packed] == ["early", "late", "scene", "character"]
+    assert "Reference image 1: use as plot key frame" in note and "freeze only: opening target" in note
+    assert "Reference image 2: use as plot key frame" in note and "freeze only: closing target" in note
+    assert "Reference image 3: use as scene" in note
+    assert "Reference image 4: use as character" in note
     assert "chronological waypoints of ONE continuous shot" in note
 
 
@@ -2386,8 +2390,8 @@ def test_seedance_provider_inputs_remove_character_anchor_covered_by_keyframe() 
     inputs = video_modes.build_seedance_image_inputs(meta)
 
     assert inputs == [
-        ("data:image/jpeg;base64,cw==", "reference_image"),
         ("data:image/jpeg;base64,aw==", "reference_image"),
+        ("data:image/jpeg;base64,cw==", "reference_image"),
     ]
     assert refs[0]["selectedForSeedance"] is False
     assert "video_input" not in refs[0]["purposes"]
@@ -2413,7 +2417,7 @@ def test_seedance_keeps_anchor_for_identity_missing_from_keyframe() -> None:
 
     packed = video_modes.pack_reference_images_for_seedance(refs, max_images=9)
 
-    assert [ref["id"] for ref in packed] == ["character-b", "keyframe-a"]
+    assert [ref["id"] for ref in packed] == ["keyframe-a", "character-b"]
 
 
 def test_pack_keeps_one_anchor_for_each_distinct_character(monkeypatch) -> None:

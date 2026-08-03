@@ -80,6 +80,15 @@ def test_delivery_package_reaches_t5_and_feedback_preserves_snapshot(tmp_path, m
 
     readiness = delivery.delivery_readiness("e")
     assert readiness["ready"] is True and readiness["evidence_coverage"] == 1
+    final_stale = final_video.with_suffix(".stale")
+    final_stale.write_text("outdated\n", encoding="utf-8")
+    outdated = delivery.delivery_readiness("e")
+    assert outdated["ready"] is False
+    assert any(
+        item["key"] == "final_video" and item["evidence"]["outdated"] is True
+        for item in outdated["blockers"]
+    )
+    final_stale.unlink()
     conn.execute(
         "UPDATE shot_versions SET qa_json=? WHERE id='v'",
         (json.dumps({"overall": 0.9, "failure_types": ["character_duplicate"]}),),

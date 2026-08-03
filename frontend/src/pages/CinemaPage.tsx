@@ -28,8 +28,28 @@ export function nextCinemaTab(current: CinemaTab, key: string): CinemaTab | null
   return null
 }
 
-export function canConcatenateMix(mix: Pick<MixStatus, 'shots_ready'> | null): boolean {
-  return Boolean(mix && mix.shots_ready > 0)
+export function canConcatenateMix(mix: Pick<MixStatus, 'ready' | 'shots_ready'> | null): boolean {
+  return Boolean(mix && mix.ready && mix.shots_ready > 0)
+}
+
+/**
+ * 状态轮询只更新真正变化的字段，并保护已经展示的整集成品。
+ *
+ * 合成请求完成与较早发出的状态请求可能交错返回；较早响应中的空 URL 不应把
+ * 刚得到或正在播放的成品从页面移除。后端会继续保留旧文件，这里也为旧服务端
+ * 和瞬时响应提供一层展示保护。
+ */
+export function reconcileMixStatus(previous: MixStatus | null, incoming: MixStatus): MixStatus {
+  if (!previous || previous.episode_id !== incoming.episode_id) return incoming
+  const next = previous.final_video_url && !incoming.final_video_url
+    ? {
+        ...incoming,
+        final_video_url: previous.final_video_url,
+        final_video_stale: true,
+        final_edit_report: incoming.final_edit_report ?? previous.final_edit_report,
+      }
+    : incoming
+  return JSON.stringify(previous) === JSON.stringify(next) ? previous : next
 }
 
 export function deliveryWarningLabel(value: string): string {
@@ -129,14 +149,20 @@ export default function CinemaPage() {
     records: null,
   })
   const dialogTriggerRef = useRef<HTMLElement | null>(null)
+  const mixRefreshVersionRef = useRef(0)
   const mixTimer = useTaskTimer(`episode.${episodeId}.mix`, mixBusy)
 
   const refreshMix = () => {
     if (!episodeId) return Promise.resolve()
+    const requestVersion = ++mixRefreshVersionRef.current
     setMixError(null)
     return api.get(`/episodes/${episodeId}/mix-status`)
-      .then((d: unknown) => setMix(d as MixStatus))
+      .then((d: unknown) => {
+        if (requestVersion !== mixRefreshVersionRef.current) return
+        setMix(previous => reconcileMixStatus(previous, d as MixStatus))
+      })
       .catch(e => {
+        if (requestVersion !== mixRefreshVersionRef.current) return
         const message = String(e.message || e)
         setMixError(message)
         toast('成片状态刷新失败，当前保留上次成功结果', true)
@@ -306,10 +332,18 @@ export default function CinemaPage() {
         toast(result.note || '服务端缺少视频合成组件，当前仅返回首个片段，不能视为最终成片', true)
       } else {
         if (result.video_url) {
-          setMix(previous => previous ? { ...previous, final_video_url: result.video_url } : previous)
+          // 让合成开始前发出的旧状态请求失效，避免它稍后以空 URL 覆盖新成品。
+          mixRefreshVersionRef.current += 1
+          setMix(previous => previous ? {
+            ...previous,
+            final_video_url: result.video_url,
+            final_video_stale: false,
+            final_is_partial: Boolean(result.partial),
+            final_edit_report: result.final_edit ?? previous.final_edit_report,
+          } : previous)
         }
         const skipped = result.shots_skipped ?? Math.max((result.shots_total ?? currentMix.shots_total) - result.shots, 0)
-        toast(`已按分镜顺序合成 ${result.shots} 个片段，共约 ${result.total_duration_s} 秒${skipped ? `；跳过 ${skipped} 镜` : ''}`)
+        toast(`已按镜号合成 ${result.shots} 个真实视频片段，共约 ${result.total_duration_s} 秒${skipped ? `；跳过 ${skipped} 个尚未完成的镜头` : ''}`)
       }
       refreshMix()
       refreshDelivery()
@@ -405,10 +439,19 @@ export default function CinemaPage() {
           )}
           <section className="card cinema-status">
             <div className="cinema-status-copy">
-              <span className={`stamp ${canConcatenateMix(mix) ? 'green' : 'gold'}`}>{canConcatenateMix(mix) ? '可合成' : '暂无片段'}</span>
+              <span className={`stamp ${canConcatenateMix(mix) ? 'green' : 'gold'}`}>
+                {canConcatenateMix(mix) ? '可合成当前片段' : mix.generation_active ? '模型生成中' : '暂无真实视频'}
+              </span>
               <div>
-                <b>{mix.shots_ready} 个已采纳片段可合成</b>
-                <span>将按分镜号顺序和各镜定稿倍速合成；{Math.max(mix.shots_total - mix.shots_ready, 0)} 镜未采纳或不可用，本次跳过{spedShots.length ? `；${spedShots.length} 镜使用变速定稿` : ''}</span>
+                <b>{mix.shots_ready} 个真实视频片段可合成</b>
+                <span>将按分镜号顺序合成当前已有的真实视频；缺失或生成中的镜头直接跳过，不使用静态图片、轻运动卡或静音片段代替{spedShots.length ? `；${spedShots.length} 镜使用变速定稿` : ''}</span>
+                {mix.final_edit_report && (
+                  <span>
+                    {mix.final_edit_report.ok === true
+                      ? '当前成片已执行确定性文字、镜间转场与音轨衔接'
+                      : '当前成片已使用基础合成降级，但时间线仍完整交付'}
+                  </span>
+                )}
               </div>
             </div>
             <div className="cinema-progress" aria-label="成片准备进度">
@@ -423,15 +466,15 @@ export default function CinemaPage() {
                   mixBusy
                     ? '合成成品，正在处理中'
                     : !canConcatenateMix(mix)
-                      ? '合成成品，暂不可用：至少需要 1 个已采纳且可用的视频'
+                      ? '合成成品，暂不可用：当前还没有任何真实模型视频'
                       : '合成成品'
                 }
                 title={
                   mixBusy
                     ? '成品正在合成，请稍候'
                     : !canConcatenateMix(mix)
-                      ? '至少需要 1 个已采纳且可用的视频'
-                      : '按分镜顺序合成已采纳视频，未采纳分镜自动跳过'
+                      ? '请等待至少一个真实模型视频落盘'
+                      : '按镜号合成当前已有真实视频；未完成镜头会跳过，未采纳真实候选会先自动择优'
                 }
                 onClick={event => {
                   dialogTriggerRef.current = event.currentTarget
@@ -440,7 +483,7 @@ export default function CinemaPage() {
               >合成成品</button>
               {mix.final_video_url && (
                 <a className="btn" href={mix.final_video_url} download={`episode-${ep.episode_no}-final.mp4`} style={{ textDecoration: 'none' }}>
-                  下载成品
+                  {mix.final_video_stale ? '下载现有成品' : '下载成品'}
                 </a>
               )}
               <TaskTimer label="合成" timer={mixTimer} />
@@ -506,15 +549,26 @@ export default function CinemaPage() {
             >
               <div className="section-heading">
                 <div><span className="eyebrow">最终成片</span><h3>《{ep.title}》</h3></div>
-                {mix.final_video_url && <span className="stamp green">最新合成版</span>}
+                {mix.final_video_url && (
+                  <span className={`stamp ${mix.final_video_stale ? 'gold' : 'green'}`}>
+                    {mix.final_video_stale ? '现有成品 · 待更新' : mix.final_is_partial ? '最新阶段成片' : '最新完整合成版'}
+                  </span>
+                )}
               </div>
               {mix.final_video_url ? (
-                <video src={mix.final_video_url} controls playsInline preload="metadata" />
+                <>
+                  <video src={mix.final_video_url} controls playsInline preload="metadata" />
+                  {mix.final_video_stale && (
+                    <p className="hint" role="status">
+                      新的分镜成品已就绪；当前合成成品继续保留并可正常播放，重新合成后会更新为最新版本。
+                    </p>
+                  )}
+                </>
               ) : (
                 <div className="cinema-preview-empty">
                   <span>▶</span>
-                  <b>{canConcatenateMix(mix) ? '已有可用采纳片段，可以合成' : '成品尚未生成'}</b>
-                  <p>{canConcatenateMix(mix) ? '点击上方“合成成品”；未采纳分镜会自动跳过。' : '至少生成并采纳 1 个可用视频后即可合成。'}</p>
+                  <b>{canConcatenateMix(mix) ? `当前可合成 ${mix.shots_ready} 个真实视频片段` : mix.generation_active ? '等待第一个真实视频落盘' : '当前还没有真实模型视频'}</b>
+                  <p>{canConcatenateMix(mix) ? '点击上方“合成成品”；未完成镜头会跳过，以后可随时重新合成更新。' : '系统不会使用静态图片、轻运动卡或静音片段冒充视频。'}</p>
                 </div>
               )}
             </section>
@@ -786,19 +840,19 @@ export default function CinemaPage() {
 
           {mixConfirmOpen && (
             <DecisionDialog
-              title={mix.final_video_url ? '重新合成本集成品？' : '合成本集成品？'}
-              summary={`${mix.shots_ready} 个已采用镜头将按镜号顺序合成`}
+              title={mix.final_video_stale ? '更新合成本集成品？' : mix.final_video_url ? '重新合成本集成品？' : '合成本集成品？'}
+              summary={`将按镜号合成当前 ${mix.shots_ready} 个真实视频片段；其余 ${Math.max(mix.shots_total - mix.shots_ready, 0)} 镜直接跳过`}
               message={mix.final_video_url
                 ? '现有最新成片入口会更新为本次结果；镜头候选、采用关系和既有交付记录不会随之删除。'
-                : '将使用当前各镜采用版本生成本集成片，不会自动生成或批准交付候选。'}
+                : '将使用当前已有的真实采用版；未采纳但已有可播放模型候选的分镜会先自动择优，其余镜头跳过。'}
               details={[
                 '合成过程不产生模型生成费用',
                 spedShots.length
                   ? `倍速定稿：${spedShots.map(shot => `镜 ${shot.shot_no} ${shot.playback_rate}×`).join('、')}`
                   : '所有采纳片段均按 1× 合成',
                 mix.skipped_shot_nos?.length
-                  ? `本次跳过镜号：${mix.skipped_shot_nos.join('、')}`
-                  : '本次没有需要跳过的分镜',
+                  ? `本次直接跳过尚无真实视频的镜号：${mix.skipped_shot_nos.join('、')}`
+                  : '所有分镜均已有真实视频',
                 '若视频合成组件不可用，系统会明确提示，首个片段不会冒充最终成片',
               ]}
               confirmLabel={mix.final_video_url ? '确认重新合成' : '确认合成成品'}

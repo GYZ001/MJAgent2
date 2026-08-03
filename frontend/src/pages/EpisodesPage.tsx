@@ -10,6 +10,7 @@ import { EpisodeStatusStamp, ScreenplayStatusStamp } from '../components/Product
 import OperationError from '../components/OperationError'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { formatBookTitle } from '../lib/bookTitle'
+import { storyboardTaskNotice } from '../lib/productionNotices'
 
 const PAGE_SIZE = 15
 const TARGET_DURATION_CHOICES = [40, 50, 60, 70, 80, 90] as const
@@ -378,6 +379,7 @@ export default function EpisodesPage() {
         {!listUpdating && pageEps.map(ep => {
           const firstCh = ep.source_chapters[0]
           const preview = (chapterPreview.get(firstCh) ?? ep.synopsis ?? '').trim()
+          const storyboardNotice = storyboardTaskNotice(ep, ep.storyboard_status?.state)
           const destination = ep.status === 'done' ? 'cinema'
             : ['confirmed', 'generating', 'paused_budget'].includes(ep.status) ? 'wall'
               : ep.screenplay_status === 'ready' ? 'board' : 'script'
@@ -426,8 +428,7 @@ export default function EpisodesPage() {
               </div>
               <div className="ep-stamps">
                 <ScreenplayStatusStamp status={ep.screenplay_status} />
-                <EpisodeStatusStamp status={ep.status} />
-                {ep.screenplay_error && <span className="ep-note err">剧本失败</span>}
+                <EpisodeStatusStamp status={ep.status} issue={storyboardNotice?.message} />
               </div>
               <div className="episode-pipeline" aria-label="制作进度">
                 <span className={ep.screenplay_status === 'ready' ? 'done' : ep.screenplay_status === 'running' ? 'active' : ''}>剧本</span>

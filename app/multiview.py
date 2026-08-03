@@ -2393,23 +2393,25 @@ def _keyframe_sequence_key(ref: dict[str, Any]) -> tuple[float, float, float, st
 
 
 def ref_pack_priority(ref: dict[str, Any]) -> tuple[Any, ...]:
-    """装箱稳定排序：连续帧、人物/场景锚点、剧情时序帧、其他。"""
+    """装箱稳定排序：连续帧、剧情帧、道具、场景、人物、风格。"""
     rtype = str(ref.get("type") or "")
     purposes = set(purpose_list(ref))
     slot = str(ref.get("slot_key") or "")
     if rtype == "previous_shot_frame" or "previous_shot" in str(ref.get("source") or ""):
         tier = 0
-    elif rtype == "character":
-        tier = 1
-    elif rtype == "scene":
-        tier = 2
     elif rtype == ASSET_TYPE_PLOT_KEY_FRAME or _is_narrative_keyframe_slot(slot) or "keyframe" in purposes:
+        tier = 1
+    elif rtype == "prop":
+        tier = 2
+    elif rtype == "scene":
         tier = 3
-    elif rtype in {"prop", "style"}:
+    elif rtype == "character":
         tier = 4
-    else:
+    elif rtype == "style":
         tier = 5
-    if tier == 3:
+    else:
+        tier = 6
+    if tier == 1:
         return (tier, *_keyframe_sequence_key(ref))
     return (tier, -_ref_quality(ref), str(ref.get("id") or ""))
 
@@ -2421,7 +2423,7 @@ def pack_references_by_purpose(
     continuity_required: bool = False,
     char_limit: int = 1,
 ) -> list[dict[str, Any]]:
-    """按角色装箱：锚点先占位，其余容量按剧情时序填入关键帧。
+    """按连续性价值装箱，确保稀缺槽位优先给动作与道具真值。
 
     上一镜尾帧与至少一张剧情关键帧是结构必需项；当 ``max_images``
     容得下两者时不可被人物/场景图挤掉。人物配额只统计 character
@@ -2439,53 +2441,18 @@ def pack_references_by_purpose(
     if not usable:
         return []
 
-    tails = sorted([
-        ref for ref in usable
-        if str(ref.get("type") or "") == "previous_shot_frame"
-        or "previous_shot" in str(ref.get("source") or "")
-    ], key=ref_pack_priority)
-    keyframes = sorted([
-        ref for ref in usable
-        if str(ref.get("type") or "") == ASSET_TYPE_PLOT_KEY_FRAME
-        or _is_narrative_keyframe_slot(str(ref.get("slot_key") or ""))
-    ], key=_keyframe_sequence_key)
-    all_characters = sorted([
-        ref for ref in usable if str(ref.get("type") or "") == "character"
-    ], key=ref_pack_priority)
-    characters = all_characters[:max(0, int(char_limit))]
-    scenes = sorted([
-        ref for ref in usable if str(ref.get("type") or "") == "scene"
-    ], key=ref_pack_priority)
-    classified_ids = {id(ref) for ref in [*tails, *keyframes, *all_characters, *scenes]}
-    extras = sorted([
-        ref for ref in usable if id(ref) not in classified_ids
-    ], key=ref_pack_priority)
-
-    # 正常产线 max_images>=2。先冻结必需份数，再让人物/场景锚点
-    # 占据剩余容量，避免锚点把唯一关键帧挤出。
-    tail = tails[0] if tails else None
-    required_count = int(tail is not None) + int(bool(keyframes))
-    anchor_capacity = max(0, limit - min(limit, required_count))
-    anchors = [*characters, *scenes]
-    chosen_anchors = anchors[:anchor_capacity]
-
-    packed: list[dict[str, Any]] = []
-    if tail is not None and len(packed) < limit:
-        packed.append(tail)
-    for ref in chosen_anchors:
-        if len(packed) >= limit:
-            break
-        packed.append(ref)
-    for ref in keyframes:
-        if len(packed) >= limit:
-            break
-        packed.append(ref)
-    # 当不存在关键帧，或锚点+关键帧未填满上限时，再放入其他用途。
-    for ref in extras:
-        if len(packed) >= limit:
-            break
-        packed.append(ref)
-    return packed
+    character_limit = max(0, int(char_limit))
+    characters_seen = 0
+    eligible: list[dict[str, Any]] = []
+    for ref in sorted(usable, key=ref_pack_priority):
+        if str(ref.get("type") or "") == "character":
+            if characters_seen >= character_limit:
+                continue
+            characters_seen += 1
+        eligible.append(ref)
+    # continuity_required 保留 API 语义；有真实尾帧时它始终是最高优先级。
+    _ = continuity_required
+    return eligible[:limit]
 
 
 def enrich_ref_dict_metadata(ref: dict[str, Any], **extra: Any) -> dict[str, Any]:

@@ -19,15 +19,24 @@ def test_retry_by_error_class_rejects_qa_quality_score_classes() -> None:
         assert decision.allow is False
 
 
-def test_decide_qa_retake_is_score_only_denied() -> None:
+def test_decide_qa_retake_is_bounded_and_never_blocks_closeout() -> None:
     decision = decide_qa_retake(
         auto_retake_count=0,
         qa_overall=0.1,
         threshold=0.8,
         hard_failures=["score_below", "consistency_drift"],
     )
-    assert decision.allow is False
-    assert decision.create_new_version is False
+    assert decision.allow is True
+    assert decision.create_new_version is True
+    exhausted = decide_qa_retake(
+        auto_retake_count=decision.max_attempts,
+        qa_overall=0.1,
+        threshold=0.8,
+        hard_failures=["score_below"],
+    )
+    assert exhausted.allow is False
+    assert exhausted.create_new_version is False
+    assert "自动择优" in exhausted.reason
 
 
 def test_frontend_scene_usability_does_not_use_hard_gate_for_availability() -> None:

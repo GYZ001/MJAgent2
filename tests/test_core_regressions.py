@@ -753,7 +753,9 @@ def test_video_derivatives_are_removed_when_visual_basis_changes(tmp_path, monke
     result = worker.invalidate_shot_video_derivatives("s1")
 
     assert result == {"shot_id": "s1", "videos": 1, "references": 1}
-    assert not references.exists() and not video.exists() and not final.exists()
+    assert not references.exists() and not video.exists()
+    assert final.read_bytes() == b"final"
+    assert final.with_suffix(".stale").read_text(encoding="utf-8") == "outdated\n"
     row = conn.execute("SELECT adopted_version_id, mode_plan FROM shots WHERE id='s1'").fetchone()
     assert row["adopted_version_id"] is None and row["mode_plan"] is None
 

@@ -195,6 +195,25 @@ def _review_upstream_snapshot(episode_id: str) -> dict[str, Any]:
     for run in durable_runs:
         if run["id"] in seen_run_ids:
             continue
+        # 历史兼容：旧版重启恢复竞态会留下 PAUSED_EXTERNAL 孤儿。
+        # 若它已有更新的同类成功运行，当前剧集也已发布确认，
+        # 这条旧运行已被可证明地取代，不应永久锁死生成资格。
+        superseded_restart_orphan = False
+        if (
+            run["status"] == "PAUSED_EXTERNAL"
+            and ep.get("status") in {"confirmed", "generating", "done", "mixed"}
+            and published_storyboard
+        ):
+            successor = conn.execute(
+                """SELECT 1 FROM workflow_runs
+                     WHERE scope_type='episode' AND scope_id=? AND workflow_type=?
+                       AND status='SUCCEEDED' AND updated_at>=?
+                     LIMIT 1""",
+                (episode_id, run["workflow_type"], run["updated_at"] or 0),
+            ).fetchone()
+            superseded_restart_orphan = successor is not None
+        if superseded_restart_orphan:
+            continue
         seen_run_ids.add(run["id"])
         active.append({
             "kind": run["workflow_type"],

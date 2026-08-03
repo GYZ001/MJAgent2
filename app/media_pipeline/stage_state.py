@@ -118,7 +118,9 @@ def read_job_pipeline(job_row) -> dict[str, Any]:
 
 def stage_label(stage: str | None, *, progress: dict | None = None, reason_text: str | None = None) -> str:
     if reason_text and stage in (
-        S.STAGE_WAITING_CONTINUITY, S.STAGE_WAITING_VIDEO_SLOT, S.STAGE_WAITING_HUMAN, S.STAGE_FAILED,
+        S.STAGE_PREFLIGHT_RETRY, S.STAGE_PREFLIGHT_BLOCKED,
+        S.STAGE_WAITING_CONTINUITY, S.STAGE_WAITING_VIDEO_SLOT,
+        S.STAGE_WAITING_HUMAN, S.STAGE_FAILED,
     ):
         return reason_text
     label = S.PIPELINE_STAGE_LABELS.get(stage or "", stage or "未知阶段")

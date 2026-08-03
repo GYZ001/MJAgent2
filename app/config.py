@@ -121,6 +121,22 @@ VIDEO_PROVIDER_MAX_WAIT = float(os.environ.get("VIDEO_PROVIDER_MAX_WAIT", str(6 
 # 退避按 BASE * 2^(attempt-1) 秒：30s / 60s / 120s，三次合计 ~3.5min，足以越过常见的上游瞬时抖动。
 VIDEO_JOB_MAX_RETRIES = 3
 VIDEO_JOB_RETRY_BASE_DELAY = 30.0
+# 视频入队前校验也必须进入持久任务生命周期。校验本身不调用付费供应商，
+# 因此可以用更短的有界重试；确定性的内容门禁失败会直接转人工，不盲目重放。
+VIDEO_PREFLIGHT_MAX_RETRIES = max(
+    0, int(os.environ.get("VIDEO_PREFLIGHT_MAX_RETRIES", "2"))
+)
+VIDEO_PREFLIGHT_RETRY_BASE_DELAY = max(
+    1.0, float(os.environ.get("VIDEO_PREFLIGHT_RETRY_BASE_DELAY", "15"))
+)
+VIDEO_PREFLIGHT_VALIDATION_TIMEOUT = max(
+    10.0, float(os.environ.get("VIDEO_PREFLIGHT_VALIDATION_TIMEOUT", "45"))
+)
+# 连续镜只有在上游已无可恢复任务时才会使用该超时降级；上游仍在真实生成时
+# 不会因为超过此时长而断开连续性。
+VIDEO_CONTINUITY_ORPHAN_TIMEOUT = max(
+    30.0, float(os.environ.get("VIDEO_CONTINUITY_ORPHAN_TIMEOUT", "180"))
+)
 
 # 文本模型调用由 Harness 网关做外层有界重试。provider adapter 内部的 1.5s / 3s
 # 快速重试只处理瞬时网络抖动，跨不过按分钟计算的 TPM 限流窗口；外层退避仍重放
@@ -134,6 +150,12 @@ TEXT_PROVIDER_RETRY_BASE_DELAY = max(
 # 计入过高的 TPM 配额并触发 429；8192 足够容纳单镜候选及定向修复，同时保留余量。
 STORYBOARD_SHOT_MAX_TOKENS = max(
     1024, min(int(os.environ.get("STORYBOARD_SHOT_MAX_TOKENS", "8192")), 16384)
+)
+
+# 分镜大纲需要一次性输出整集节奏与镜头合同。4K 会让推理模型在正文前耗尽预算；
+# 默认提升到约 32K，同时保留环境变量以便对供应商的更低硬上限做部署级覆盖。
+STORYBOARD_OUTLINE_MAX_TOKENS = max(
+    8192, min(int(os.environ.get("STORYBOARD_OUTLINE_MAX_TOKENS", "32768")), 65536)
 )
 
 # 分镜时长：默认 5s（PREFERRED）；6~10s 仅当口播/连续动作需要，并进入 AI 审核。
@@ -171,6 +193,8 @@ IMAGE_PRICE_PER_UNIT = 0.2  # CNY
 
 # 可在 settings 表覆盖的默认值
 DEFAULT_SETTINGS = {
+    # 模型 token 能力探测结果；未知/既有模型由运行时兼容为 128K context / 32K output。
+    "model_token_capabilities": "{}",
     # 兼容旧键；新调度以分通道为准（见 media_pipeline.concurrency）
     "video_concurrency": "15",
     "auto_concurrency": "15",
@@ -199,7 +223,8 @@ DEFAULT_SETTINGS = {
     "max_ref_images": "2",            # 单镜头最多附几张定妆照
     "auto_qa": "true",
     "auto_retake_threshold": "0.6",
-    "video_hard_gate_enabled": "true",
+    # 内容 QA 只驱动有限重抽：2 表示首条之外最多再试 2 条，耗尽后自动择优。
+    "video_auto_retake_limit": "2",
     # VAL-422：口播一致性 / 结构化主线门禁分阶段开关
     "spoken_contract_audit_mode": "enforce",  # audit_only | enforce
     "spine_structured_hard_gate": "true",     # false 时 LEGACY_COVERAGE_UNCERTAIN 降为 warning

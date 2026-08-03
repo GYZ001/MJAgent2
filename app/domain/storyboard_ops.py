@@ -22,6 +22,7 @@ def _apply_contract_to_public_shot(target: dict) -> None:
         duration_s=target["duration_s"],
         shot_size=target["shot_size"],
         camera_move=target["camera_move"],
+        scene_time=target.get("scene_time") or "",
         scene_setting=target["scene_setting"],
         scene_name=target.get("scene_name") or "",
         characters=target.get("characters") or [],
@@ -43,9 +44,10 @@ def _apply_contract_to_public_shot(target: dict) -> None:
             "new_information_ids", "reinforcement_info_ids", "spoken_contract_status",
             "state_in", "primary_action", "emotion_beat", "state_out", "observed_state_out",
             "continuity_mode", "characters_visible", "audio_cast", "audio_timeline",
-            "required_text", "reference_roles", "do_not_repeat", "risk_tags",
+            "required_text", "continuity_state_in", "continuity_state_out",
+            "reference_roles", "do_not_repeat", "risk_tags",
             "prompt_contract_version", "legacy_unvalidated", "camera_angle",
-            "spatial_anchor", "is_final",
+            "spatial_anchor", "is_final", "scene_time", "scene_name", "scene_setting",
         }:
             target[key] = value
     target["spoken_content_chars"] = spoken_chars_from_shot(shot)
@@ -90,10 +92,11 @@ def _insert_storyboard_shot(
     shot_id = new_id("shot")
     shot.action_desc = normalize_action_desc(shot.action_desc)
     conn.execute(
-        "INSERT INTO shots(id, episode_id, script_id, shot_no, duration_s, shot_size, camera_move, scene_setting, scene_name, characters, action_desc, first_frame_desc, last_frame_desc, source_excerpt, narration, dialogues, transition, continuity_from_prev, shot_contract_json, continuity_mode, observed_state_out, storyboard_artifact_id) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO shots(id, episode_id, script_id, shot_no, duration_s, shot_size, camera_move, scene_time, scene_setting, scene_name, characters, action_desc, first_frame_desc, last_frame_desc, source_excerpt, narration, dialogues, transition, continuity_from_prev, shot_contract_json, continuity_mode, observed_state_out, storyboard_artifact_id) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (shot_id, episode_id, screenplay.id, shot.shot_no, shot.duration_s, shot.shot_size, shot.camera_move,
-         shot.scene_setting, shot.scene_name or None, json.dumps(shot.characters, ensure_ascii=False), shot.action_desc,
+         shot.scene_time, shot.scene_setting, shot.scene_name or None,
+         json.dumps(shot.characters, ensure_ascii=False), shot.action_desc,
          shot.first_frame_desc, shot.last_frame_desc, shot.source_excerpt, shot.narration,
          json.dumps([d.model_dump() for d in shot.dialogues], ensure_ascii=False),
          shot.transition, int(shot.continuity_from_prev), _shot_contract_json(shot),
@@ -116,6 +119,105 @@ def _sync_storyboard_shot_timing(
              _shot_contract_json(shot), shot.continuity_mode, shot.observed_state_out,
              episode_id, shot.shot_no),
         )
+
+
+def _sync_storyboard_scene_bindings(conn, episode_id: str, board: Storyboard) -> int:
+    """回写分离后的时间、规范场景图身份及兼容显示文案。
+
+    模糊/旧式输入只允许出现在校验入口；一旦命中，正式投影必须固化为
+    ``scene_name`` 规范名，以保证后续选图一一对应。
+    """
+    rows = conn.execute(
+        "SELECT id,shot_no,scene_time,scene_setting,scene_name FROM shots WHERE episode_id=? ORDER BY shot_no",
+        (episode_id,),
+    ).fetchall()
+    by_shot_no = {int(row["shot_no"]): row for row in rows}
+    changed = 0
+    for shot in board.shots:
+        row = by_shot_no.get(int(shot.shot_no))
+        if row is None:
+            continue
+        current = (
+            str(row["scene_time"] or "").strip(),
+            str(row["scene_setting"] or "").strip(),
+            str(row["scene_name"] or "").strip(),
+        )
+        resolved_time = str(shot.scene_time or "").strip()
+        resolved = str(shot.scene_name or "").strip()
+        resolved_setting = str(shot.scene_setting or "").strip()
+        if current == (resolved_time, resolved_setting, resolved):
+            continue
+        conn.execute(
+            "UPDATE shots SET scene_time=?,scene_setting=?,scene_name=? WHERE id=?",
+            (resolved_time, resolved_setting, resolved or None, row["id"]),
+        )
+        changed += 1
+    return changed
+
+
+def _reconcile_storyboard_scene_projection(conn, episode_id: str, bible: Bible) -> dict[str, int]:
+    """幂等对账正式镜头与分镜大纲的场景投影。
+
+    场景归一是确定性派生过程，不应依赖「整集所有门禁通过」才落库。
+    否则只要台词、连续性等任一无关问题存在，已经判定正确的 scene_name
+    仍会长期停留在内存副本，导致页面、选图和暂停检查点持续读到旧绑定。
+    """
+    from types import SimpleNamespace
+    from app.validators import canonicalize_storyboard_scene
+
+    scenes = getattr(bible, "scenes", None) or []
+    if not scenes:
+        return {"shots": 0, "outline_shots": 0}
+
+    shot_changes = 0
+    rows = conn.execute(
+        "SELECT id,scene_time,scene_setting,scene_name FROM shots WHERE episode_id=?",
+        (episode_id,),
+    ).fetchall()
+    for row in rows:
+        target = SimpleNamespace(
+            scene_time=str(row["scene_time"] or ""),
+            scene_setting=str(row["scene_setting"] or ""),
+            scene_name=str(row["scene_name"] or ""),
+        )
+        before = (target.scene_time, target.scene_setting, target.scene_name)
+        if not canonicalize_storyboard_scene(target, bible):
+            continue
+        after = (target.scene_time, target.scene_setting, target.scene_name)
+        if after == before:
+            continue
+        conn.execute(
+            "UPDATE shots SET scene_time=?,scene_setting=?,scene_name=? WHERE id=?",
+            (*after, row["id"]),
+        )
+        shot_changes += 1
+
+    outline_changes = 0
+    episode = conn.execute(
+        "SELECT storyboard_outline_json FROM episodes WHERE id=?", (episode_id,),
+    ).fetchone()
+    raw_outline = episode["storyboard_outline_json"] if episode else None
+    if raw_outline:
+        try:
+            outline = StoryboardOutline.model_validate_json(raw_outline)
+        except (TypeError, ValueError):
+            outline = None
+        if outline is not None:
+            for brief in outline.shots:
+                before = (brief.scene_time, brief.scene_setting, brief.scene_name)
+                if not canonicalize_storyboard_scene(brief, bible):
+                    continue
+                if (brief.scene_time, brief.scene_setting, brief.scene_name) != before:
+                    outline_changes += 1
+            if outline_changes:
+                conn.execute(
+                    "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
+                    (outline.model_dump_json(), episode_id),
+                )
+
+    if shot_changes or outline_changes:
+        conn.commit()
+    return {"shots": shot_changes, "outline_shots": outline_changes}
 
 
 def _storyboard_has_material(episode_id: str, ep: dict | None = None) -> bool:
@@ -478,6 +580,10 @@ def _finalize_storyboard_evidence(
         raise RuntimeError(f"分镜数量与计划不同：已完成 {len(board.shots)}/{planned_total} 镜")
     if not board.shots[-1].is_final:
         raise RuntimeError("最终镜未标记收束，禁止发布未结束的分镜")
+    if _sync_storyboard_scene_bindings(conn, episode_id, board):
+        # 这是由当前门禁确定的派生外键修复，即使后续证据发布失败也应保留，
+        # 避免下次重试继续读取已经证伪的历史场景绑定。
+        conn.commit()
     project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
     shot_rows = conn.execute(
         "SELECT id,source_excerpt,storyboard_artifact_id FROM shots "
@@ -634,6 +740,8 @@ def _reconcile_storyboard_plan(conn, episode_id: str, episode_no: int,
             beat = "".join(raw.split())[:60] or "逐镜细化新增镜头"
             outline.shots.append(StoryboardOutlineShot(
                 shot_no=len(outline.shots) + 1,
+                scene_time=shot.scene_time or "",
+                scene_name=shot.scene_name or "",
                 scene_setting=shot.scene_setting or "",
                 beat=beat,
                 covers="",
@@ -662,6 +770,17 @@ async def _storyboard_task(
 ):
     conn = get_conn()
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+
+    def _preflight_event(event_type: str, message: str, *, payload: dict | None = None,
+                         severity: str = "info") -> None:
+        if not run_id:
+            return
+        from app.evidence import repository as _evidence_repository
+        _evidence_repository.append_event(
+            run_id, event_type, severity, message,
+            payload={"episode_id": episode_id, "episode_no": ep["episode_no"], **(payload or {})},
+        )
+
     try:
         conn.execute("UPDATE episodes SET status='scripting', script_error=NULL, storyboard_warning=NULL WHERE id=?", (episode_id,))
         conn.commit()
@@ -671,9 +790,30 @@ async def _storyboard_task(
         p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
         bible = _project_bible_or_placeholder(p)
         # 定妆照按集反应式维护（在分镜展开前）
+        _preflight_event(
+            "STORYBOARD_PREFLIGHT_PORTRAITS_STARTED",
+            "开始预检人物定妆：检查外观漂移与本集新增角色",
+        )
         from app.portraits import ensure_cards_for_screenplay
         disc = await ensure_cards_for_screenplay(
             ep["project_id"], ep["episode_no"], screenplay, bible,
+        )
+        redrawn_names = [item.get("name") for item in (disc.get("redrawn") or []) if item.get("name")]
+        added_names = [item.get("name") for item in (disc.get("added") or []) if item.get("name")]
+        if redrawn_names or added_names:
+            summary_parts: list[str] = []
+            if added_names:
+                summary_parts.append(f"新增定妆 {len(added_names)} 位（{'、'.join(added_names)}）")
+            if redrawn_names:
+                summary_parts.append(f"漂移重绘 {len(redrawn_names)} 位（{'、'.join(redrawn_names)}）")
+            summary = "；".join(summary_parts)
+        else:
+            summary = "无角色需要重绘或新增"
+        _preflight_event(
+            "STORYBOARD_PREFLIGHT_PORTRAITS_FINISHED",
+            f"人物定妆预检完成：{summary}",
+            payload={"added": added_names, "redrawn": redrawn_names,
+                     "warnings": len(disc.get("errors") or [])},
         )
         if disc.get("blocking_errors"):
             raise StageError("新人物发现", list(disc["blocking_errors"]))
@@ -691,9 +831,30 @@ async def _storyboard_task(
         if disc.get("added") or disc.get("redrawn"):
             p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
             bible = _project_bible_or_placeholder(p)
+        _preflight_event(
+            "STORYBOARD_PREFLIGHT_SCENES_STARTED",
+            "开始预检场景：自动建库并等待场景图落盘",
+        )
         from app.scenes import ensure_scenes_for_storyboard
         sdisc = await ensure_scenes_for_storyboard(
             ep["project_id"], ep["episode_no"], screenplay, bible,
+        )
+        sc_added_names = [item.get("name") for item in (sdisc.get("added") or []) if item.get("name")]
+        sc_evolved_names = [item.get("name") for item in (sdisc.get("evolved") or []) if item.get("name")]
+        if sc_added_names or sc_evolved_names:
+            summary_parts: list[str] = []
+            if sc_added_names:
+                summary_parts.append(f"新建场景 {len(sc_added_names)} 个（{'、'.join(sc_added_names)}）")
+            if sc_evolved_names:
+                summary_parts.append(f"状态演进 {len(sc_evolved_names)} 个（{'、'.join(sc_evolved_names)}）")
+            scene_summary = "；".join(summary_parts)
+        else:
+            scene_summary = "本集无新场景，也未发生场景永久变化"
+        _preflight_event(
+            "STORYBOARD_PREFLIGHT_SCENES_FINISHED",
+            f"场景预检完成：{scene_summary}",
+            payload={"added": sc_added_names, "evolved": sc_evolved_names,
+                     "warnings": len(sdisc.get("errors") or [])},
         )
         if sdisc.get("blocking_errors"):
             raise StageError(
@@ -725,6 +886,11 @@ async def _storyboard_task(
 
             evidence_repair = repair_generated_source_bindings(episode_id)
             if evidence_repair["bound"]:
+                _preflight_event(
+                    "STORYBOARD_SOURCE_EVIDENCE_REALIGNED",
+                    f"续跑前修复源文引用：已绑定 {evidence_repair.get('bound', 0)} 条证据",
+                    payload=evidence_repair,
+                )
                 log_provider_call(
                     "storyboard_source_evidence_repair",
                     config.MODEL_TEXT,
@@ -733,6 +899,11 @@ async def _storyboard_task(
                     0,
                     meta={"episode_id": episode_id, **evidence_repair},
                 )
+
+        _preflight_event(
+            "STORYBOARD_PREFLIGHT_FINISHED",
+            "分镜前置资产就绪，交由分镜 Supervisor 展开生成",
+        )
 
         # 集级 Supervisor：大纲 → 逐镜 → 整集校验 → 修复，完成后等待人工确认。
         from app.storyboard_supervisor import run_storyboard_supervisor
@@ -2139,12 +2310,15 @@ def _storyboard_status_snapshot(
         1,
         int((supervisor or {}).get("next_shot_no") or (passed + 1)),
     )
-    terminal_structure = bool(
+    complete_structure = bool(
         ep.get("status") == "scripted"
         and shot_count > 0
         and planned == shot_count
         and passed == shot_count
         and final_valid
+    )
+    terminal_structure = bool(
+        complete_structure
         and (
             not supervisor
             or phase == "SUCCEEDED"
@@ -2177,8 +2351,15 @@ def _storyboard_status_snapshot(
         ]
     gate_errors: list[str] = list(dict.fromkeys(active_repair_errors))
     score_warnings: list[str] = []
-    if terminal_structure:
+    if complete_structure:
         try:
+            try:
+                current_gate_evaluator = evaluate_storyboard_for_confirmation
+            except NameError:
+                # 直接导入 domain 模块时没有 app.api 的共享命名空间注入。
+                from app.domain.video_ops import (
+                    evaluate_storyboard_for_confirmation as current_gate_evaluator,
+                )
             board = Storyboard(
                 episode_no=int(ep["episode_no"]),
                 shots=[Shot.model_validate(shot) for shot in shots],
@@ -2187,7 +2368,7 @@ def _storyboard_status_snapshot(
                 "SELECT * FROM projects WHERE id=?", (ep["project_id"],),
             ).fetchone()
             bible = _project_bible_or_placeholder(project)
-            evaluation = evaluate_storyboard_for_confirmation(
+            evaluation = current_gate_evaluator(
                 ep,
                 board,
                 screenplay,
@@ -2195,8 +2376,14 @@ def _storyboard_status_snapshot(
                 has_real_bible=bool((project["bible_json"] or "").strip()) if project else False,
                 record_metrics=False,
             )
-            gate_errors.extend(evaluation.errors)
+            # 完整镜头投影的当前同源评估才是门禁真值。
+            # 暂停 checkpoint 仅是当时的恢复点，不能让已被确定性
+            # 对账修复的旧问题永久覆盖当前数据。
+            gate_errors = list(dict.fromkeys(evaluation.errors))
             score_warnings.extend(evaluation.warnings)
+            terminal_structure = complete_structure
+            if not gate_errors and (raw_repair_errors or ep.get("script_error")):
+                obsolete_policy_repair = True
             # 历史 source_excerpt 能否逐字回绑只属于来源审计，不是用户可修复的
             # 分镜结构错误。发布证据仍会记录该 finding，但不能让状态快照误报
             # 一个没有镜号、没有修复入口的整集门禁。
@@ -2666,6 +2853,8 @@ def apply_storyboard_structure(episode_id: str, body: dict):
             prior = previous_outline_by_id.get(target["id"])
         brief = prior.model_copy(deep=True) if prior else StoryboardOutlineShot(shot_no=int(row["shot_no"]))
         brief.shot_no = int(row["shot_no"])
+        brief.scene_time = model.scene_time or ""
+        brief.scene_name = model.scene_name or ""
         brief.scene_setting = model.scene_setting or ""
         brief.beat = (model.action_desc or model.primary_action or "请补充本镜画面动作").strip()
         brief.covers = model.source_excerpt or ""
@@ -2748,6 +2937,8 @@ def _public_shot_versions(conn, shot_id: str, *, include_inputs: bool) -> list[d
                       video_path, qa_json, cost_cny, latency_s, artifact_id,
                       adoption_reason, playback_rate, technical_validation_json, created_at,
                       provider_task_id,
+                      CASE WHEN status='rejected_static_fallback'
+                           THEN 1 ELSE 0 END AS delivery_fallback,
                       CASE WHEN length(image_inputs) <= ? THEN image_inputs END AS image_inputs,
                       CASE WHEN length(image_inputs) > ? THEN 1 ELSE 0 END AS image_inputs_omitted
                FROM shot_versions WHERE shot_id=? ORDER BY version_no DESC""",
@@ -2758,11 +2949,17 @@ def _public_shot_versions(conn, shot_id: str, *, include_inputs: bool) -> list[d
             """SELECT id, shot_id, version_no, '' AS prompt_text, status, error,
                       video_path, qa_json, cost_cny, latency_s, artifact_id,
                       adoption_reason, playback_rate, technical_validation_json, created_at,
-                      provider_task_id, NULL AS image_inputs
+                      provider_task_id,
+                      CASE WHEN status='rejected_static_fallback'
+                           THEN 1 ELSE 0 END AS delivery_fallback,
+                      NULL AS image_inputs
                FROM shot_versions WHERE shot_id=? ORDER BY version_no DESC""",
             (shot_id,),
         ).fetchall()
-    versions = rows_to_dicts(rows)
+    versions = [
+        version for version in rows_to_dicts(rows)
+        if not bool(version.pop("delivery_fallback", 0))
+    ]
     from app.config import PROJECTS_DIR
     reference_lineage: dict[str, list[str]] = {}
     if include_inputs:
@@ -2834,6 +3031,24 @@ def episode_detail(episode_id: str, view: str | None = None):
     ep["source_chapters"] = json.loads(ep["source_chapters"] or "[]")
     script = _load_screenplay(ep) if full or view in ("script", "board") else None
     ep["screenplay"] = script.model_dump() if script and (full or view in ("script", "board")) else None
+    ep["scene_options"] = []
+    if full or view in ("board", "wall"):
+        project = conn.execute(
+            "SELECT * FROM projects WHERE id=?", (ep["project_id"],)
+        ).fetchone()
+        project_bible = _project_bible_or_placeholder(project)
+        scene_reconciliation = _reconcile_storyboard_scene_projection(
+            conn, episode_id, project_bible,
+        )
+        if scene_reconciliation["outline_shots"]:
+            refreshed = conn.execute(
+                "SELECT storyboard_outline_json FROM episodes WHERE id=?", (episode_id,),
+            ).fetchone()
+            ep["storyboard_outline_json"] = refreshed["storyboard_outline_json"]
+        if full or view == "board":
+            ep["scene_options"] = [
+                scene.name for scene in (project_bible.scenes or []) if (scene.name or "").strip()
+            ]
     ep["required_dialogue_lines"] = _screenplay_required_dialogues(ep)
     if full or view == "script":
         from app.domain.screenplay_ops import (
@@ -3015,6 +3230,11 @@ def episode_detail(episode_id: str, view: str | None = None):
             continue
 
         s["versions"] = _public_shot_versions(conn, s["id"], include_inputs=full)
+        if s.get("adopted_version_id") and not any(
+            version["id"] == s["adopted_version_id"] for version in s["versions"]
+        ):
+            s["delivery_fallback_active"] = True
+            s["adopted_version_id"] = None
         s["pipeline"] = pipeline_statuses.get(s["id"])
         s["video_status"] = (
             s["pipeline"].get("video_status") if s["pipeline"] else None
@@ -3085,6 +3305,11 @@ def shot_review_detail(shot_id: str):
         shot["mode_plan"] = None
     shot["storyboard_evidence"] = None
     shot["versions"] = _public_shot_versions(conn, shot_id, include_inputs=True)
+    if shot.get("adopted_version_id") and not any(
+        version["id"] == shot["adopted_version_id"] for version in shot["versions"]
+    ):
+        shot["delivery_fallback_active"] = True
+        shot["adopted_version_id"] = None
     try:
         from app.media_pipeline.status import shot_pipeline_status
         shot["pipeline"] = shot_pipeline_status(shot_id, conn=conn)
@@ -3173,14 +3398,15 @@ async def edit_shot(shot_id: str, body: dict):
     merged["continuity_from_prev"] = bool(merged["continuity_from_prev"])
     _apply_contract_to_public_shot(merged)
     editable_keys = (
-        "duration_s", "shot_size", "camera_move", "scene_setting", "characters",
+        "duration_s", "shot_size", "camera_move", "scene_time", "scene_name", "scene_setting", "characters",
         "action_desc", "first_frame_desc", "last_frame_desc", "source_excerpt", "narration",
         "dialogues", "transition", "continuity_from_prev",
         "story_event_id", "purpose", "spine_beat_ids", "key_line_ids", "information_ids",
         "new_information_ids", "reinforcement_info_ids", "spoken_contract_status",
         "state_in", "primary_action", "emotion_beat", "state_out", "observed_state_out",
         "continuity_mode", "characters_visible", "audio_cast", "audio_timeline",
-        "required_text", "reference_roles", "do_not_repeat", "risk_tags",
+        "required_text", "continuity_state_in", "continuity_state_out",
+        "reference_roles", "do_not_repeat", "risk_tags",
         "prompt_contract_version", "legacy_unvalidated", "camera_angle",
         "spatial_anchor", "is_final",
     )
@@ -3210,6 +3436,7 @@ async def edit_shot(shot_id: str, body: dict):
         spoken_text_of,
     )
     from app.validators import (
+        normalize_offbible_characters,
         validate_storyboard_shot_covers_outline,
         validate_storyboard_preserves_key_content,
         key_line_delivery_errors,
@@ -3217,6 +3444,41 @@ async def edit_shot(shot_id: str, body: dict):
     episode_id = shot["episode_id"]
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     screenplay = _load_screenplay(ep) if ep is not None else None
+    # 人工保存与确认门共用同一角色合同：临时描述角色开口时，
+    # 在派生 timeline 之前就补齐可见名单，避免台词被错降级为画外音，
+    # 更避免“保存后存在、确认后消失”。
+    project_bible = None
+    if ep is not None:
+        project = conn.execute(
+            "SELECT * FROM projects WHERE id=?", (ep["project_id"],)
+        ).fetchone()
+        project_bible = _project_bible_or_placeholder(project)
+        character_changes = normalize_offbible_characters(
+            Storyboard(episode_no=ep["episode_no"], shots=[instance]),
+            project_bible,
+        )
+        stripped = sorted({
+            str(change.get("stripped") or "").strip()
+            for change in character_changes
+            if str(change.get("stripped") or "").strip()
+        })
+        if stripped:
+            raise HTTPException(422, {
+                "code": "storyboard_character_identity_unresolved",
+                "message": "分镜不允许新增未解析的人物称谓，本次未保存、未删除台词",
+                "characters": stripped,
+                "action": "请先在剧本阶段完成未来 10 章身份消歧",
+            })
+        from app.validators import canonicalize_storyboard_scene
+        if getattr(project_bible, "scenes", None) and not canonicalize_storyboard_scene(
+            instance,
+            project_bible,
+            prefer_explicit=bool({"scene_time", "scene_name"} & set(submitted_changes)),
+        ):
+            raise HTTPException(
+                422,
+                "场景标签无法唯一匹配场景图；请输入更接近的场景名，或直接选择库内规范名",
+            )
     changed_fields = {key for key in submitted_changes if key != "source_binding"}
     sync = synchronize_spoken_contract(
         instance,
@@ -3300,8 +3562,9 @@ async def edit_shot(shot_id: str, body: dict):
         deduped.append(msg)
     # 业务结构检查只写评分警告。人工编辑的已成形镜头不能因门禁被拒绝保存。
     conn.execute(
-        "UPDATE shots SET duration_s=?, shot_size=?, camera_move=?, scene_setting=?, characters=?, action_desc=?, first_frame_desc=?, last_frame_desc=?, source_excerpt=?, narration=?, dialogues=?, transition=?, continuity_from_prev=?, shot_contract_json=?, continuity_mode=?, observed_state_out=? WHERE id=?",
-        (instance.duration_s, instance.shot_size, instance.camera_move, instance.scene_setting,
+        "UPDATE shots SET duration_s=?, shot_size=?, camera_move=?, scene_time=?, scene_setting=?, scene_name=?, characters=?, action_desc=?, first_frame_desc=?, last_frame_desc=?, source_excerpt=?, narration=?, dialogues=?, transition=?, continuity_from_prev=?, shot_contract_json=?, continuity_mode=?, observed_state_out=? WHERE id=?",
+        (instance.duration_s, instance.shot_size, instance.camera_move, instance.scene_time,
+         instance.scene_setting, instance.scene_name or None,
          json.dumps(instance.characters, ensure_ascii=False), instance.action_desc, instance.first_frame_desc, instance.last_frame_desc,
          instance.source_excerpt, instance.narration,
          json.dumps([d.model_dump() for d in instance.dialogues], ensure_ascii=False),
@@ -3364,7 +3627,12 @@ async def edit_shot(shot_id: str, body: dict):
     # 任一分镜字段都参与参考图或视频 prompt。保存后统一清理全部旧衍生产物，
     # 避免 done/generating 状态继续展示旧成片；剧集必须重新确认后才能花钱生成。
     invalidated = worker.clear_shot_artifacts(shot_id)
-    conn.execute("UPDATE episodes SET status='scripted' WHERE id=?", (episode_id,))
+    # 任一人工修订都使上次确认的评分警告失效。若不同步清空，
+    # 即使当前台词合同已通过 0 错误预检，页面仍会展示旧的“缺失台词”。
+    conn.execute(
+        "UPDATE episodes SET status='scripted', storyboard_warning=NULL WHERE id=?",
+        (episode_id,),
+    )
     conn.commit()
     consume_preview(str(body["preview_token"]))
     close_edit_session(str(body["edit_session_token"]), "saved")
@@ -3509,7 +3777,10 @@ async def resolve_spoken_conflict(shot_id: str, body: dict):
         from app.continuity import apply_shot_contract
         temp = Shot(
             shot_no=shot["shot_no"], duration_s=shot["duration_s"], shot_size=shot["shot_size"],
-            camera_move=shot["camera_move"], scene_setting=shot["scene_setting"],
+            camera_move=shot["camera_move"],
+            scene_time=(shot["scene_time"] if "scene_time" in shot.keys() else "") or "",
+            scene_setting=shot["scene_setting"],
+            scene_name=(shot["scene_name"] if "scene_name" in shot.keys() else "") or "",
             characters=json.loads(shot["characters"] or "[]"),
             action_desc=shot["action_desc"], first_frame_desc=shot["first_frame_desc"] or "",
             last_frame_desc=shot["last_frame_desc"] or "", source_excerpt=shot["source_excerpt"] or "",
@@ -3594,6 +3865,7 @@ def _board_from_shot_rows(rows, episode_no: int) -> Storyboard:
     for r in rows:
         shot = Shot(
             shot_no=r["shot_no"], duration_s=r["duration_s"], shot_size=r["shot_size"], camera_move=r["camera_move"],
+            scene_time=(r["scene_time"] if "scene_time" in r.keys() else "") or "",
             scene_setting=r["scene_setting"], scene_name=(r["scene_name"] if "scene_name" in r.keys() else "") or "",
             characters=json.loads(r["characters"] or "[]"),
             action_desc=r["action_desc"], first_frame_desc=r["first_frame_desc"] or "", last_frame_desc=r["last_frame_desc"] or "",

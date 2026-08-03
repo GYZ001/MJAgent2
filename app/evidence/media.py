@@ -142,12 +142,12 @@ def _model_evaluation(qa: dict[str, Any] | None, *, subject: str, evaluator_name
         status=status,
         hard_gate_passed=not recovered and not explicit_unverified and not hard_failures
         and qa.get("hard_gate_passed") is not False,
-        evaluation_role="score_only",
+        evaluation_role=(qa.get("evaluation_role") or "retry_and_rank"),
         score_status=(
             "unavailable" if recovered or explicit_unverified or score is None else "scored"
         ),
         runtime_blocking=False,
-        retry_eligible=False,
+        retry_eligible=bool(qa.get("retry_eligible")),
         score=score,
         dimension_scores={
             key: float(value) * 100
@@ -158,12 +158,6 @@ def _model_evaluation(qa: dict[str, Any] | None, *, subject: str, evaluator_name
         evidence={"qa": qa},
         recovered=recovered,
     )
-
-
-def _video_hard_gate_enabled() -> bool:
-    return str(get_setting("video_hard_gate_enabled") or "true").strip().lower() not in {
-        "0", "false", "no", "off"
-    }
 
 
 def merge_observed_state_out_into_shot_contract(shot_id: str, observed_state_out: str) -> None:
@@ -262,6 +256,18 @@ def _qa_overall(qa: dict[str, Any]) -> float | None:
         return None
 
 
+def _version_is_delivery_fallback(row: Any) -> bool:
+    """历史图片/静音占位版本不具备模型视频资格。"""
+    if row is None:
+        return False
+    try:
+        raw_meta = row.get("image_inputs") if isinstance(row, dict) else row["image_inputs"]
+        meta = json.loads(raw_meta or "{}")
+    except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return bool(isinstance(meta, dict) and meta.get("delivery_fallback"))
+
+
 def grade_shot_video(
     shot_id: str | None = None,
     *,
@@ -277,7 +283,10 @@ def grade_shot_video(
     from app.video_issues import fatal_failure_types, is_fatal_failure_code
 
     conn = get_conn()
-    row = version_row
+    row = dict(version_row) if version_row is not None else None
+    rejected_fallback = _version_is_delivery_fallback(row)
+    if rejected_fallback:
+        row = None
     if row is None and shot_id:
         shot = conn.execute(
             "SELECT adopted_version_id FROM shots WHERE id=?", (shot_id,)
@@ -285,15 +294,28 @@ def grade_shot_video(
         vid = shot["adopted_version_id"] if shot else None
         if vid:
             row = conn.execute("SELECT * FROM shot_versions WHERE id=?", (vid,)).fetchone()
-        if row is None and shot_id:
-            row = conn.execute(
+            if _version_is_delivery_fallback(row):
+                row = None
+                rejected_fallback = True
+        if row is None:
+            candidates = conn.execute(
                 """SELECT * FROM shot_versions
                    WHERE shot_id=? AND status='succeeded'
-                   ORDER BY version_no DESC LIMIT 1""",
+                   ORDER BY version_no DESC""",
                 (shot_id,),
-            ).fetchone()
+            ).fetchall()
+            row = next(
+                (candidate for candidate in candidates if not _version_is_delivery_fallback(candidate)),
+                None,
+            )
     if row is not None and not isinstance(row, dict):
         row = dict(row)
+
+    # 调用方若显式传入了历史占位版本的检测结果，不能让它们在
+    # 已拒绝该版本后继续伪装成 A/B 级视频。找到真实候选时由其落库证据重算。
+    if rejected_fallback:
+        technical = None
+        qa = None
 
     if technical is None and row is not None:
         technical = json.loads(row.get("technical_validation_json") or "{}")
@@ -364,29 +386,36 @@ def grade_shot_video(
     }
 
 
-def _shot_retakes_exhausted(conn: Any, shot_id: str) -> bool:
-    """自动重抽名额是否已用尽（任一成功版本的 auto_retake_count ≥ 上限）。"""
-    from app.media_pipeline.retry_policy import auto_retake_limit
+_SELECTION_RISK_WEIGHTS = {
+    "character_duplicate": 0.45,
+    "wrong_identity": 0.45,
+    "action_missing": 0.40,
+    "wrong_dialogue": 0.35,
+    "future_leak": 0.30,
+    "prop_identity_mismatch": 0.28,
+    "object_count_mismatch": 0.28,
+    "prop_state_mismatch": 0.24,
+    "state_mismatch": 0.22,
+    "story_repeat": 0.30,
+    "wrong_outfit": 0.18,
+    "wrong_camera_axis": 0.16,
+    "geometry_guard_unverified": 0.14,
+    # 文字与轻裁切有确定性后期路径，不能压过错人、分身或动作缺失。
+    "text_error": 0.10,
+    "subject_occlusion": 0.10,
+    "needs_crop": 0.06,
+}
 
-    limit = auto_retake_limit()
-    rows = conn.execute(
-        "SELECT image_inputs FROM shot_versions WHERE shot_id=? AND status='succeeded'",
-        (shot_id,),
-    ).fetchall()
-    for row in rows:
-        try:
-            meta = json.loads(row["image_inputs"] or "{}")
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(meta, dict):
-            continue
-        try:
-            count = int(meta.get("auto_retake_count") or 0)
-        except (TypeError, ValueError):
-            count = 0
-        if count >= limit:
-            return True
-    return False
+
+def video_candidate_selection_score(
+    score: float, hard_failures: list[str], *, qa_recovered: bool
+) -> float:
+    """跨 Worker/Supervisor 共用的候选排序分；不是交付门禁。"""
+    base = score if score >= 0 else 0.0
+    penalty = sum(_SELECTION_RISK_WEIGHTS.get(code, 0.12) for code in set(hard_failures))
+    if qa_recovered:
+        penalty += 0.08
+    return round(base - penalty, 4)
 
 
 def select_best_video_candidate(
@@ -394,10 +423,10 @@ def select_best_video_candidate(
 ) -> dict[str, Any] | None:
     """比较技术合格候选并落盘采用理由。
 
-    Score-only（PRD QA-SO #29）：技术可解码即具备采用资格；QA 分数仅用于排序与展示。
-    ``force_best`` 保留兼容；不再因「等待 QA 重抽」而返回 None。
+    ``force_best=False`` 只在达到质量目标或 QA 全部不可用时采用；否则返回
+    ``None`` 让 Supervisor/Worker 使用剩余预算定向重试。``force_best=True``
+    表示预算已耗尽，必须选择当前综合风险最低的可播放候选完成交付。
     """
-    del force_best
     conn = get_conn()
     threshold_row = conn.execute(
         "SELECT value FROM settings WHERE key='auto_retake_threshold'"
@@ -412,6 +441,10 @@ def select_best_video_candidate(
     ).fetchall()
     technical_pool: list[dict[str, Any]] = []
     for row in rows:
+        # 确定性交付兜底不是模型候选，不能参与 best-of-N，也不能因版本号较新
+        # 覆盖已经有动作和声音的真实视频。
+        if _version_is_delivery_fallback(row):
+            continue
         technical = json.loads(row["technical_validation_json"] or "{}")
         if not technical:
             try:
@@ -431,8 +464,15 @@ def select_best_video_candidate(
             "score": score if score is not None else -1.0,
             "qa": qa,
             "hard_failures": hard_failures,
-            "qa_recovered": bool(qa.get("qa_recovered")),
+            "qa_recovered": bool(
+                qa.get("qa_recovered")
+                or qa.get("status") in {"unverified", "pending"}
+                or score is None
+            ),
         }
+        entry["selection_score"] = video_candidate_selection_score(
+            entry["score"], hard_failures, qa_recovered=entry["qa_recovered"]
+        )
         technical_pool.append(entry)
 
     if not technical_pool:
@@ -445,22 +485,40 @@ def select_best_video_candidate(
         and not entry["hard_failures"]
         and entry["score"] >= threshold
     ]
+    scored_pool = [entry for entry in technical_pool if not entry["qa_recovered"] and entry["score"] >= 0]
+    if not qualified and not force_best and scored_pool:
+        return None
+
     candidates = qualified or technical_pool
     fallback = not bool(qualified)
 
-    ordered = sorted(candidates, key=lambda item: (item["score"], item["version_no"]), reverse=True)
+    ordered = sorted(
+        candidates,
+        key=lambda item: (
+            not item["qa_recovered"],
+            item["selection_score"],
+            item["score"],
+            item["version_no"],
+        ),
+        reverse=True,
+    )
     best = ordered[0]
-    margin = best["score"] - ordered[1]["score"] if len(ordered) > 1 else best["score"]
+    margin = (
+        best["selection_score"] - ordered[1]["selection_score"]
+        if len(ordered) > 1 else best["selection_score"]
+    )
     if fallback:
         reason = (
-            f"自动比较 {len(ordered)} 个技术合格视频（QA 仅评分）；"
-            f"采纳最高分 v{best['version_no']}，质量分 {best['score']:.3f}"
-            f"（展示阈值 {threshold:.3f}），领先次优 {margin:.3f}。"
+            f"质量预算耗尽/QA 不可用后自动比较 {len(ordered)} 个技术合格视频；"
+            f"采纳综合风险最低的 v{best['version_no']}，QA={best['score']:.3f}，"
+            f"选择分={best['selection_score']:.3f}（目标 {threshold:.3f}），"
+            f"领先次优 {margin:.3f}，剩余问题={best['hard_failures']}。"
         )
     else:
         reason = (
             f"自动比较 {len(ordered)} 个技术合格候选；选择 v{best['version_no']}，"
-            f"质量分 {best['score']:.3f}，领先次优 {margin:.3f}。"
+            f"QA={best['score']:.3f}，选择分={best['selection_score']:.3f}，"
+            f"领先次优 {margin:.3f}。"
         )
     previous = conn.execute(
         "SELECT adopted_version_id FROM shots WHERE id=?", (shot_id,)

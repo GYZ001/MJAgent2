@@ -758,6 +758,7 @@ def _video_qa_shot_model(shot_row):
         shot_no=shot_row["shot_no"], duration_s=shot_row["duration_s"],
         shot_size=shot_row["shot_size"] or "中景",
         camera_move=shot_row["camera_move"] or "固定",
+        scene_time=(shot_row["scene_time"] if "scene_time" in shot_row.keys() else "") or "",
         scene_setting=shot_row["scene_setting"] or "",
         scene_name=(shot_row["scene_name"] if "scene_name" in shot_row.keys() else "") or "",
         characters=json.loads(shot_row["characters"] or "[]"),
@@ -776,7 +777,7 @@ def _video_qa_shot_model(shot_row):
     return shot_model
 
 
-def _video_qa_contract(shot_model, bible_names: list[str]) -> dict[str, str]:
+def _video_qa_contract(shot_model, bible_names: list[str]) -> dict[str, Any]:
     """Project narrative state onto the exact visible-cast contract sent to video.
 
     Story continuity may mention an off-screen listener and even describe their
@@ -790,6 +791,7 @@ def _video_qa_contract(shot_model, bible_names: list[str]) -> dict[str, str]:
         effective_primary_action,
         effective_state_in,
         planned_state_out,
+        structured_state_prompt,
     )
 
     primary_action = effective_primary_action(shot_model)
@@ -813,11 +815,36 @@ def _video_qa_contract(shot_model, bible_names: list[str]) -> dict[str, str]:
     action_desc = full_action or primary_action
     if visible_contract:
         action_desc = f"{action_desc}\n画内角色合同：{visible_contract}"
+    required_dialogue = "\n".join(
+        f"{dialogue.speaker}：{dialogue.line}"
+        for dialogue in (shot_model.dialogues or [])
+        if (dialogue.line or "").strip()
+    )
+    from app.continuity import required_text_strategy
+
+    required_text = ""
+    if shot_model.required_text and required_text_strategy(shot_model) == "embedded_prop":
+        required_text = (
+            shot_model.required_text.exact_text or shot_model.required_text.surface or ""
+        ).strip()
+    structured_state = structured_state_prompt(shot_model)
+    tracked_props = bool(
+        shot_model.continuity_state_in.props or shot_model.continuity_state_out.props
+    )
+    tracked_axis = bool(
+        (shot_model.continuity_state_in.scene.axis_id or "").strip()
+        or (shot_model.continuity_state_out.scene.axis_id or "").strip()
+    )
     return {
         "action_desc": action_desc,
         "state_in": state_in,
         "state_out": state_out,
         "visible_cast_contract": visible_contract,
+        "required_dialogue": required_dialogue,
+        "required_text": required_text,
+        "structured_state": structured_state,
+        "tracked_props": tracked_props,
+        "tracked_axis": tracked_axis,
     }
 
 
@@ -858,6 +885,9 @@ async def critique_version(version_id: str) -> list[str]:
         qa = await qa_shot(
             frames, qa_contract["action_desc"], shot["scene_setting"], anchors,
             state_in=qa_contract["state_in"], state_out=qa_contract["state_out"],
+            structured_state=qa_contract["structured_state"],
+            tracked_props=qa_contract["tracked_props"],
+            tracked_axis=qa_contract["tracked_axis"],
             visual_anchors=visual_anchors,
         )
         _set_version(version_id, qa_json=json.dumps(qa, ensure_ascii=False))
@@ -2178,12 +2208,12 @@ async def _maybe_auto_qa(
     *,
     allow_autonomous_retake: bool = True,
 ) -> bool:
-    """旁路视频评分（PRD QA-SO）：只写 ``qa_json``，永不触发 ``QA_RETAKE`` / enqueue。
+    """评分并决定是否在预算内定向重抽。
 
-    返回 True 表示评分流程结束，调用方可用 ``force_best`` 在技术合格视频中选取版本。
-    ``allow_autonomous_retake`` 保留签名兼容，但本函数不再据此创建付费重抽。
+    返回 ``False`` 表示已安排下一条候选，或由 complete Supervisor 接管；当前
+    版本先保留但不立即采用。返回 ``True`` 表示达到目标、QA 不可用或预算耗尽，
+    调用方应立即 best-effort 择优，绝不能因内容 QA 停住任务。
     """
-    del allow_autonomous_retake
     if get_setting("auto_qa") != "true" or not shutil.which("ffmpeg"):
         return True
     conn = get_conn()
@@ -2217,6 +2247,11 @@ async def _maybe_auto_qa(
             anchors,
             state_in=qa_contract["state_in"],
             state_out=qa_contract["state_out"],
+            required_dialogue=qa_contract["required_dialogue"],
+            required_text=qa_contract["required_text"],
+            structured_state=qa_contract["structured_state"],
+            tracked_props=qa_contract["tracked_props"],
+            tracked_axis=qa_contract["tracked_axis"],
             duration_s=int(shot_model.duration_s or shot["duration_s"] or 0) or None,
             duration_needs_review=(
                 "duration_gt5_needs_review" in (shot_model.risk_tags or [])
@@ -2224,36 +2259,94 @@ async def _maybe_auto_qa(
             ),
             visual_anchors=visual_anchors,
         )
-        qa["evaluation_role"] = "score_only"
-        qa["runtime_blocking"] = False
-        qa["retry_eligible"] = False
-        if qa.get("overall") is None or qa.get("status") == "unverified" or qa.get("qa_recovered"):
-            qa["score_status"] = "unavailable"
-        else:
-            qa["score_status"] = "scored"
         dependency = meta_for_qa.get("review_dependency_snapshot") or {}
         if dependency.get("asset_soft_warnings"):
             qa["input_asset_soft_warnings"] = dependency["asset_soft_warnings"]
         if dependency.get("asset_inputs"):
             qa["input_asset_qualification"] = dependency["asset_inputs"]
-        _assert_review_dependency_fence(job, version_id, "qa_result")
-        _set_version(version_id, qa_json=json.dumps(qa, ensure_ascii=False))
         version = conn.execute("SELECT * FROM shot_versions WHERE id=?", (version_id,)).fetchone()
         hard_failures = classify_video_hard_failures(
             qa,
             technical=json.loads(version["technical_validation_json"] or "{}") if version else {},
         )
+        from app.media_pipeline.retry_policy import decide_qa_retake
+
+        try:
+            retake_count = int(meta_for_qa.get("auto_retake_count") or 0)
+        except (TypeError, ValueError):
+            retake_count = 0
+        qa_unavailable = bool(
+            qa.get("overall") is None
+            or qa.get("status") == "unverified"
+            or qa.get("qa_recovered")
+        )
+        decision = decide_qa_retake(
+            auto_retake_count=retake_count,
+            qa_overall=None if qa_unavailable else qa.get("overall"),
+            threshold=get_setting("auto_retake_threshold") or 0.6,
+            hard_failures=[] if qa_unavailable else hard_failures,
+        )
+        qa["evaluation_role"] = "retry_and_rank"
+        qa["runtime_blocking"] = False
+        qa["retry_eligible"] = decision.allow
+        qa["retry_decision"] = {
+            "allow": decision.allow,
+            "attempt": decision.attempt,
+            "max_attempts": decision.max_attempts,
+            "reason": decision.reason,
+        }
+        qa["score_status"] = "unavailable" if qa_unavailable else "scored"
+        _assert_review_dependency_fence(job, version_id, "qa_result")
+        _set_version(version_id, qa_json=json.dumps(qa, ensure_ascii=False))
         log_provider_call(
-            "vlm_qa", config.MODEL_VLM, "QA_SCORE_ONLY", None, 0,
+            "vlm_qa", config.MODEL_VLM, "QA_RETRY_AND_RANK", None, 0,
             meta={
                 "shot_id": job["shot_id"],
                 "version_id": version_id,
                 "overall": qa.get("overall"),
                 "score_status": qa.get("score_status"),
                 "hard_failures": hard_failures,
-                "retake": False,
+                "retake": bool(decision.allow and allow_autonomous_retake),
+                "retake_count": retake_count,
+                "retake_limit": decision.max_attempts,
             },
         )
+
+        if decision.allow and allow_autonomous_retake:
+            from app.continuity import retry_patch_for_failure
+
+            negatives: list[str] = []
+            critiques: list[str] = []
+            for failure in hard_failures:
+                patch = retry_patch_for_failure(failure)
+                for item in patch.get("extra_negative") or []:
+                    if item not in negatives:
+                        negatives.append(str(item))
+                hint = str(patch.get("hint") or "").strip()
+                if hint and hint not in critiques:
+                    critiques.append(hint)
+            if not critiques:
+                critiques.append(decision.reason)
+            try:
+                queued = enqueue_shot(
+                    job["shot_id"],
+                    reroll=True,
+                    after_shot_id=job["after_shot_id"],
+                    auto_retake_count=retake_count + 1,
+                    dependency_snapshot=dependency or None,
+                    extra_negative=negatives[:8],
+                    critique=critiques[:6],
+                )
+                if not queued.get("paused_budget"):
+                    return False
+            except Exception as exc:  # noqa: BLE001 - 重抽失败必须退回当前最佳，不中断交付
+                log_provider_call(
+                    "video_qa_retake", config.MODEL_VIDEO, "RETAKE_ENQUEUE_FAILED",
+                    None, 0, error=str(exc),
+                    meta={"shot_id": job["shot_id"], "version_id": version_id},
+                )
+        elif decision.allow and not allow_autonomous_retake:
+            return False
         return True
     except ReviewDependencyFence:
         raise
@@ -2263,7 +2356,7 @@ async def _maybe_auto_qa(
             qa_json=json.dumps({
                 "overall": None,
                 "issues": [f"质检未完成：{exc}"],
-                "evaluation_role": "score_only",
+                "evaluation_role": "retry_and_rank",
                 "score_status": "unavailable",
                 "runtime_blocking": False,
                 "retry_eligible": False,
@@ -2489,7 +2582,325 @@ def recover_media_jobs() -> int:
             resumed += 1
     if resumed:
         conn.commit()
+    try:
+        reconcile_stalled_video_jobs()
+    except Exception as exc:  # noqa: BLE001 启动恢复各子域隔离，媒体 lease 恢复仍需成功
+        errors.record_and_format(
+            exc,
+            action="startup_recovery.media_stalls",
+            context={"resumed_media_jobs": resumed},
+        )
     return resumed
+
+
+def _degrade_orphaned_continuity_job(conn, row) -> bool:
+    """上游已无可恢复任务时，把连续镜降级为独立首帧并重新排队。"""
+    from app.compiler import CompileError, compile_prompt
+    from app.continuity import preflight_seedance_gates, shot_contract_dict
+    from app.media_pipeline import stages as media_stages
+    from app.media_pipeline.scheduler import continuity_anchor_ready
+    from app.media_pipeline.stage_state import set_pipeline_stage
+    from app.observability.metrics import inc
+    from app.portraits import bible_for_episode
+    from app.schemas import Bible
+
+    after_shot_id = row["after_shot_id"]
+    if not after_shot_id or not row["version_id"]:
+        return False
+    ready, reason = continuity_anchor_ready(conn, after_shot_id)
+    if ready:
+        return False
+    # 上游还有活跃任务时继续等；只处理已明确需要人工或上游已不存在的孤儿链。
+    if "人工" not in str(reason or "") and "不存在" not in str(reason or ""):
+        return False
+
+    job = conn.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone()
+    version = conn.execute(
+        "SELECT * FROM shot_versions WHERE id=?", (row["version_id"],)
+    ).fetchone()
+    shot_row = conn.execute(
+        "SELECT * FROM shots WHERE id=?", (row["shot_id"],)
+    ).fetchone()
+    ep = conn.execute(
+        "SELECT * FROM episodes WHERE id=?", (row["episode_id"],)
+    ).fetchone()
+    project = conn.execute(
+        "SELECT * FROM projects WHERE id=?", (row["project_id"],)
+    ).fetchone()
+    if not all((job, version, shot_row, ep, project)):
+        return False
+
+    shot = _load_shot_model(shot_row)
+    shot.continuity_mode = "same_scene_cut"
+    shot.continuity_from_prev = False
+    bible = bible_for_episode(
+        ep["project_id"],
+        Bible.model_validate(json.loads(project["bible_json"])),
+        ep["episode_no"],
+    )
+    outgoing = _outgoing_transition_context(conn, shot_row)
+    try:
+        prompt_text = compile_prompt(
+            shot,
+            bible,
+            with_refs=True,
+            from_scene=False,
+            chained=False,
+            critique=None,
+            prev_tail_action=None,
+            with_last_frame=False,
+            incoming_transition=None,
+            outgoing_transition=outgoing["transition"] if outgoing else None,
+            next_scene=outgoing["next_scene"] if outgoing else None,
+            next_first_frame_desc=outgoing["next_first_frame_desc"] if outgoing else None,
+            continuity_mode="same_scene_cut",
+            prev_state_out=None,
+        )
+        prompt_text = ensure_source_excerpt_in_prompt(prompt_text, shot)
+        errors_found = preflight_seedance_gates(
+            shot, prev=None, prompt_text=prompt_text,
+        )
+        if errors_found:
+            raise CompileError("；".join(errors_found))
+    except Exception as exc:
+        message = f"连续性自动降级未通过输入校验：{exc}"
+        conn.execute(
+            """UPDATE jobs SET status='waiting_human', error=?, reason_code=?,
+                      reason_text=?, next_retry_at=NULL, updated_at=?
+               WHERE id=? AND version_id=?""",
+            (
+                message, "VIDEO_CONTINUITY_DEGRADE_FAILED", message,
+                now(), row["id"], row["version_id"],
+            ),
+        )
+        set_pipeline_stage(
+            row["id"],
+            media_stages.STAGE_WAITING_HUMAN,
+            reason_code="VIDEO_CONTINUITY_DEGRADE_FAILED",
+            reason_text=message,
+            conn=conn,
+        )
+        conn.execute(
+            "UPDATE shot_versions SET status='waiting_human', error=? WHERE id=?",
+            (message, row["version_id"]),
+        )
+        conn.commit()
+        inc(
+            "video_continuity_degrade_failed_total",
+            episode_id=row["episode_id"],
+            shot_id=row["shot_id"],
+        )
+        return False
+
+    try:
+        meta = json.loads(version["image_inputs"] or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        meta = {}
+    refs = [
+        ref for ref in (meta.get("reference_images") or [])
+        if isinstance(ref, dict) and ref.get("type") != "previous_shot_frame"
+    ]
+    meta.update({
+        "after_shot_id": None,
+        "after_version_id": None,
+        "continuity_mode": "same_scene_cut",
+        "prev_state_out": None,
+        "continuity_degraded": True,
+        "continuity_degraded_reason": "upstream_anchor_unavailable_timeout",
+        "reference_images": refs,
+        "reference_generation_complete": False,
+        "continuity_anchor_ready": True,
+        "reference_group_gate_passed": False,
+        "video_input_manifest_frozen": False,
+        "shot_contract_json": json.dumps(shot_contract_dict(shot), ensure_ascii=False),
+    })
+    note = "上一镜已无可恢复尾帧，等待超时后已自动改为独立首帧继续生成"
+    conn.execute(
+        """UPDATE shot_versions
+           SET status='queued', error=NULL, prompt_text=?, image_inputs=?
+           WHERE id=?""",
+        (prompt_text, json.dumps(meta, ensure_ascii=False), row["version_id"]),
+    )
+    conn.execute(
+        """UPDATE jobs
+           SET status='queued', error=?, after_shot_id=NULL, after_version_id=NULL,
+               next_retry_at=?, reason_code='CONTINUITY_DEGRADED_TIMEOUT',
+               reason_text=?, lease_owner=NULL, lease_expires_at=NULL, updated_at=?
+           WHERE id=? AND version_id=? AND status IN ('queued','waiting_retry','waiting_human')""",
+        (note, now(), note, now(), row["id"], row["version_id"]),
+    )
+    set_pipeline_stage(
+        row["id"],
+        media_stages.STAGE_JOB_QUEUED,
+        reason_code="CONTINUITY_DEGRADED_TIMEOUT",
+        reason_text=note,
+        stage_progress={
+            "auto_recovery": "continuity_degraded",
+            "blocked_by_shot_id": after_shot_id,
+        },
+        conn=conn,
+    )
+    conn.commit()
+    inc(
+        "video_continuity_degraded_timeout_total",
+        episode_id=row["episode_id"],
+        shot_id=row["shot_id"],
+        blocked_by_shot_id=after_shot_id,
+    )
+    return True
+
+
+def reconcile_stalled_video_jobs(limit: int = 50) -> dict[str, int]:
+    """周期修复没有 worker 能消费的业务级卡死状态。"""
+    from app.observability.metrics import inc
+
+    conn = get_conn()
+    stamp = now()
+    report = {
+        "redundant_preflight_closed": 0,
+        "legacy_jobless_recovered": 0,
+        "legacy_preflight_reactivated": 0,
+        "preflight_retried": 0,
+        "continuity_degraded": 0,
+        "episodes_reconciled": 0,
+    }
+
+    redundant = conn.execute(
+        """UPDATE jobs
+           SET status='cancelled', cancellation_requested=1,
+               reason_code='SUPERSEDED_PREFLIGHT',
+               reason_text='已有成功采用版，关闭并发产生的冗余校验任务',
+               error='已有成功采用版，关闭并发产生的冗余校验任务',
+               next_retry_at=NULL, stage_status='complete', updated_at=?
+           WHERE kind='video' AND version_id IS NULL
+             AND status IN ('waiting_retry','waiting_human')
+             AND cancellation_requested=0 AND abandoned=0
+             AND EXISTS (
+               SELECT 1
+               FROM shots s
+               JOIN shot_versions v ON v.id=s.adopted_version_id
+               WHERE s.id=jobs.shot_id AND v.status='succeeded'
+             )""",
+        (stamp,),
+    ).rowcount
+    if redundant:
+        conn.commit()
+        report["redundant_preflight_closed"] = int(redundant)
+
+    # 兼容修复上线前的历史事故：当时 preflight 发生在 jobs INSERT 之前，
+    # 因而只留下 issue artifact。仅恢复 24 小时内、整集仍处于 generating、
+    # 且从未创建过版本或任务的明确 VIDEO_PREFLIGHT_BLOCKED 镜头。
+    legacy_rows = rows_to_dicts(conn.execute(
+        """SELECT a.scope_id AS shot_id, a.content_json
+           FROM artifacts a
+           JOIN shots s ON s.id=a.scope_id
+           JOIN episodes e ON e.id=s.episode_id
+           WHERE a.type='video_shot_issue'
+             AND a.scope_type='shot'
+             AND a.status IN ('candidate','validated','approved')
+             AND a.created_at>=?
+             AND e.status='generating'
+             AND NOT EXISTS (
+               SELECT 1 FROM shot_versions v WHERE v.shot_id=s.id
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM jobs j WHERE j.shot_id=s.id AND j.kind='video'
+             )
+           ORDER BY a.created_at DESC LIMIT ?""",
+        (stamp - 86400.0, max(1, int(limit))),
+    ))
+    seen_legacy: set[str] = set()
+    for row in legacy_rows:
+        shot_id = row["shot_id"]
+        if shot_id in seen_legacy:
+            continue
+        seen_legacy.add(shot_id)
+        try:
+            payload = json.loads(row["content_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        codes = {
+            str(item.get("code") or "")
+            for item in (payload.get("issues") or [])
+            if isinstance(item, dict)
+        }
+        if "VIDEO_PREFLIGHT_BLOCKED" not in codes:
+            continue
+        try:
+            enqueue_shot(shot_id)
+        except Exception:
+            # 新版 enqueue 已经把失败镜头纳入可见任务状态。
+            pass
+        if conn.execute(
+            "SELECT 1 FROM jobs WHERE shot_id=? AND kind='video' LIMIT 1",
+            (shot_id,),
+        ).fetchone():
+            report["legacy_jobless_recovered"] += 1
+
+    preflight_rows = rows_to_dicts(conn.execute(
+        """SELECT id, shot_id, status FROM jobs
+           WHERE kind='video' AND version_id IS NULL
+             AND (
+               (status='waiting_retry' AND (next_retry_at IS NULL OR next_retry_at<=?))
+               OR (
+                 status='waiting_human'
+                 AND reason_code='VIDEO_PREFLIGHT_BLOCKED'
+                 AND retry_count<?
+                 AND (error LIKE '%source_excerpt 原文内容%'
+                      OR reason_text LIKE '%source_excerpt 原文内容%')
+               )
+             )
+             AND cancellation_requested=0 AND abandoned=0
+           ORDER BY updated_at LIMIT ?""",
+        (stamp, int(config.VIDEO_PREFLIGHT_MAX_RETRIES), max(1, int(limit))),
+    ))
+    for row in preflight_rows:
+        try:
+            result = enqueue_shot(row["shot_id"])
+            if result.get("task_accepted") or result.get("reused"):
+                report["preflight_retried"] += 1
+                if row["status"] == "waiting_human":
+                    report["legacy_preflight_reactivated"] += 1
+        except Exception:
+            # enqueue_shot 已持久化新的 retry / waiting_human 状态。
+            continue
+
+    cutoff = stamp - float(config.VIDEO_CONTINUITY_ORPHAN_TIMEOUT)
+    continuity_rows = rows_to_dicts(conn.execute(
+        """SELECT id, shot_id, version_id, episode_id, project_id, after_shot_id
+           FROM jobs
+           WHERE kind='video' AND version_id IS NOT NULL
+             AND pipeline_stage='waiting_continuity_anchor'
+             AND status IN ('queued','waiting_retry','waiting_human')
+             AND COALESCE(stage_started_at, updated_at, created_at)<=?
+             AND cancellation_requested=0 AND abandoned=0
+           ORDER BY COALESCE(stage_started_at, updated_at, created_at)
+           LIMIT ?""",
+        (cutoff, max(1, int(limit))),
+    ))
+    for row in continuity_rows:
+        try:
+            if _degrade_orphaned_continuity_job(conn, row):
+                report["continuity_degraded"] += 1
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+
+    episode_rows = conn.execute(
+        "SELECT id FROM episodes WHERE status='generating'"
+    ).fetchall()
+    for row in episode_rows:
+        try:
+            if reconcile_episode_generation_status(row["id"]):
+                report["episodes_reconciled"] += 1
+        except Exception:
+            continue
+    total = sum(report.values())
+    if total:
+        inc("video_stall_sweeper_repairs_total", value=total, **report)
+    return report
 
 
 _SWEEPER_INTERVAL_SECONDS = 60.0
@@ -2521,8 +2932,6 @@ async def _stale_lease_sweeper(interval_seconds: float = _SWEEPER_INTERVAL_SECON
                          AND abandoned=0""",
                     (stamp,),
                 ))
-                if not rows:
-                    continue
                 resumed = 0
                 for r in rows:
                     if _recover_one_media_job(
@@ -2532,6 +2941,7 @@ async def _stale_lease_sweeper(interval_seconds: float = _SWEEPER_INTERVAL_SECON
                         resumed += 1
                 if resumed:
                     conn.commit()
+                reconcile_stalled_video_jobs()
             except Exception:  # noqa: BLE001 周期任务不能死
                 pass
     except asyncio.CancelledError:

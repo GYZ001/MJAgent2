@@ -11403,6 +11403,11 @@ label.f {
   display: block;
   font-weight: 650;
 }
+.storyboard-error-details.warning {
+  border-top-color: rgba(176, 130, 31, 0.28);
+  background: #fff9e8;
+  color: #7c5a0d;
+}
 .storyboard-empty {
   min-height: 280px;
 }

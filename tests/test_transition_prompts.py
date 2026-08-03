@@ -77,8 +77,9 @@ def test_video_prompt_contains_incoming_and_outgoing_transition() -> None:
         next_first_frame_desc="藏书阁暖黄灯光下，萧薰儿独坐书案前。",
     )
 
-    assert "本镜开头以「叠化」进入" in prompt
-    assert "本镜结尾以「淡出淡入」收束" in prompt
+    assert "最终编辑会以「叠化」接入本镜" in prompt
+    assert "最终编辑会以「淡出淡入」将本镜连到下一镜" in prompt
+    assert "不自行生成渐变、闪光或叠化" in prompt
     assert "首日傍晚，藏书阁" in prompt
     # 禁止把下一镜详细首帧剧情注入当前提示词
     assert "萧薰儿独坐书案前" not in prompt
@@ -101,5 +102,6 @@ def test_tail_keyframe_prompt_contains_transition_tail_requirement() -> None:
         next_scene="首日傍晚，藏书阁",
     )
 
-    assert "转场尾帧要求" in prompt
+    assert "编辑衔接尾帧" in prompt
     assert "闪白" in prompt
+    assert "不预烧渐暗、闪白、叠化" in prompt

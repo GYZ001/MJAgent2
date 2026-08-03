@@ -22,6 +22,29 @@ Producer = Callable[[int, str | None, list[Issue], list[list[Issue]]], Awaitable
 Evaluator = Callable[[str], tuple[T | None, list[Issue]]]
 
 
+# stage_key 是稳定的技术标识，写入 message 时映射成对用户友好的中文名。
+_STAGE_KEY_LABELS: dict[str, str] = {
+    "character_bible": "人物谱",
+    "character_references": "人物定妆照",
+    "scene_bible": "场景设定",
+    "scene_references": "场景参考图",
+    "episode_mapping": "分集规划",
+    "screenplay": "剧本",
+    "storyboard": "分镜",
+    "storyboard_outline": "分镜大纲",
+    "storyboard_shot": "分镜镜头",
+    "storyboard_repair": "分镜修复",
+    "scene_generation": "关键帧",
+    "video_generation": "视频",
+}
+
+
+def _stage_label(stage_key: str) -> str:
+    if not stage_key:
+        return "未命名阶段"
+    return _STAGE_KEY_LABELS.get(stage_key, stage_key)
+
+
 @dataclass(frozen=True, slots=True)
 class AgentLoopPolicy:
     max_iterations: int = 4
@@ -387,7 +410,7 @@ class AgentLoop(Generic[T]):
             trace.run_id,
             "AGENT_ITERATION_STARTED",
             "info",
-            f"{self.stage_key} 第 {iteration_no} 轮开始",
+            f"{_stage_label(self.stage_key)} 第 {iteration_no} 轮开始",
             step_run_id=step_id,
         )
         return step_id

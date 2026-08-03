@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 from app import hiagent
 
@@ -68,3 +69,113 @@ def test_openrouter_does_not_retry_unrelated_empty_content(monkeypatch) -> None:
     else:
         raise AssertionError("expected ProviderError")
     assert calls == 1
+
+
+def test_reasoning_fallback_never_replays_an_identical_deepseek_request(monkeypatch) -> None:
+    calls: list[dict] = []
+
+    async def fake_post_json(client, url, payload, *, kind, model, retries=2,
+                             headers=None, key_name="", meta=None):
+        calls.append(payload)
+        return {
+            "choices": [{
+                "finish_reason": "length",
+                "message": {"content": None, "reasoning_content": "thinking"},
+            }],
+            "usage": {"completion_tokens": 32768},
+        }
+
+    monkeypatch.setattr(hiagent, "active_provider", lambda kind: "deepseek")
+    monkeypatch.setattr(hiagent, "active_model", lambda kind, provider=None: "deepseek-reasoner")
+    monkeypatch.setattr(
+        hiagent, "_model_connection",
+        lambda *args: ("https://deepseek.test/v1", {"Authorization": "Bearer test"}),
+    )
+    monkeypatch.setattr(hiagent, "_post_json", fake_post_json)
+
+    try:
+        asyncio.run(hiagent.chat([{"role": "user", "content": "return json"}]))
+    except hiagent.ProviderError as exc:
+        assert "不支持关闭推理" in str(exc)
+    else:
+        raise AssertionError("expected ProviderError")
+
+    assert len(calls) == 1
+
+
+def test_text_requests_are_capped_by_active_model_output_limit(monkeypatch) -> None:
+    captured: dict = {}
+    provider = "custom:model_cap"
+    model = "vendor/model-cap"
+
+    async def fake_post_json(client, url, payload, *, kind, model, retries=2,
+                             headers=None, key_name="", meta=None):
+        captured["payload"] = payload
+        captured["meta"] = meta
+        return {"choices": [{"finish_reason": "stop", "message": {"content": "ok"}}]}
+
+    settings = {
+        "custom_models": json.dumps([{
+            "id": "model_cap",
+            "provider": provider,
+            "model": model,
+            "kinds": ["text"],
+            "context_window_tokens": 262144,
+            "max_output_tokens": 16384,
+            "token_limits_source": "provider_metadata",
+        }]),
+    }
+    monkeypatch.setattr(hiagent, "get_setting", lambda key: settings.get(key, ""))
+    monkeypatch.setattr(hiagent, "active_provider", lambda kind: provider)
+    monkeypatch.setattr(hiagent, "active_model", lambda kind, provider=None: model)
+    monkeypatch.setattr(
+        hiagent, "_model_connection",
+        lambda *args: ("https://custom.test/v1", {"Authorization": "Bearer test"}),
+    )
+    monkeypatch.setattr(hiagent, "_post_json", fake_post_json)
+
+    content = asyncio.run(hiagent.chat(
+        [{"role": "user", "content": "return json"}],
+        max_tokens=65535,
+    ))
+
+    assert content == "ok"
+    assert captured["payload"]["max_tokens"] == 16384
+    assert captured["meta"]["requested_max_tokens"] == 65535
+    assert captured["meta"]["effective_max_tokens"] == 16384
+
+
+def test_text_requests_stay_near_32k_when_model_supports_more(monkeypatch) -> None:
+    captured: dict = {}
+
+    async def fake_post_json(client, url, payload, *, kind, model, retries=2,
+                             headers=None, key_name="", meta=None):
+        captured["payload"] = payload
+        captured["meta"] = meta
+        return {"choices": [{"finish_reason": "stop", "message": {"content": "ok"}}]}
+
+    settings = {
+        "model_token_capabilities": json.dumps({
+            "builtin:openrouter:vendor/large-output": {
+                "context_window_tokens": 262144,
+                "max_output_tokens": 49152,
+                "token_limits_source": "provider_metadata",
+            },
+        }),
+    }
+    monkeypatch.setattr(hiagent, "get_setting", lambda key: settings.get(key, ""))
+    monkeypatch.setattr(hiagent, "active_provider", lambda kind: "openrouter")
+    monkeypatch.setattr(hiagent, "active_model", lambda kind, provider=None: "vendor/large-output")
+    monkeypatch.setattr(hiagent.config, "OPENROUTER_TEXT_REASONING_EFFORT", "none")
+    monkeypatch.setattr(
+        hiagent, "_model_connection",
+        lambda *args: ("https://openrouter.test/v1", {"Authorization": "Bearer test"}),
+    )
+    monkeypatch.setattr(hiagent, "_post_json", fake_post_json)
+
+    assert asyncio.run(hiagent.chat(
+        [{"role": "user", "content": "return json"}], max_tokens=65535,
+    )) == "ok"
+    assert captured["payload"]["max_tokens"] == 32768
+    assert captured["meta"]["model_max_output_tokens"] == 49152
+    assert captured["meta"]["runtime_output_limit_tokens"] == 32768

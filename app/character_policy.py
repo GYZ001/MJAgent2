@@ -9,7 +9,7 @@ import re
 FUNCTIONAL_EXTRA_ROLES = frozenset({
     "测验员", "裁判", "主持人", "司仪", "店员", "服务员", "侍者", "守卫", "门卫",
     "护卫", "保安", "司机", "医生", "护士", "记者", "警员", "官差", "伙计", "小二",
-    "传令兵", "随从", "仆人", "侍女", "宫女", "太监", "管家", "长老",
+    "传令兵", "随从", "仆人", "侍女", "宫女", "太监", "管家", "管事", "长老",
 })
 FUNCTIONAL_EXTRA_BASES = frozenset({
     "路人", "围观者", "群众", "族人", "弟子", "学生", "顾客", "客人", "村民", "士兵",
@@ -42,7 +42,10 @@ def is_functional_extra(name: str) -> bool:
     value = (name or "").strip()
     if not value or len(value) > 8:
         return False
-    if value in FUNCTIONAL_EXTRA_ROLES or value in FUNCTIONAL_EXTRA_BARE_LABELS:
+    if (
+        value in FUNCTIONAL_EXTRA_ROLES
+        or value in FUNCTIONAL_EXTRA_BARE_LABELS
+    ):
         return True
     if any(
         value == modifier + role
@@ -80,6 +83,29 @@ def is_collective_role(name: str) -> bool:
     return any(value.endswith(suffix) for suffix in _COLLECTIVE_ROLE_SUFFIXES)
 
 
+def is_allowed_storyboard_character(
+    name: str,
+    bible_names: set[str] | frozenset[str],
+    *,
+    allow_without_bible: bool = True,
+) -> bool:
+    """判定一个镜头角色标签是否能进入渲染合同。
+
+    可见名单、声轨和 Prompt 编译必须共用这一口径，否则就会出现
+    ``characters`` 已修复、``characters_visible`` 却仍携带旧名的“幽灵角色”。
+    没有真实角色圣经时不做强制删除，保持占位圣经的历史兼容行为。
+    """
+    value = (name or "").strip()
+    if not value:
+        return False
+    return (
+        (not bible_names and allow_without_bible)
+        or value in bible_names
+        or is_functional_extra(value)
+        or is_collective_role(value)
+    )
+
+
 def collective_role_anchor(name: str) -> str:
     """群体名单项的画面锚点：锁阵营/服饰语义，不伪造单人身份。"""
     if not is_collective_role(name):
@@ -104,6 +130,9 @@ def functional_extra_policy_text() -> str:
     """Shared prompt wording for the deterministic storyboard contract."""
     return (
         "允许无姓名、无需跨集定妆的功能性路人进入 characters 并开口，例如测验员、裁判、"
-        "店员、守卫、路人甲/乙/丙、族人甲、弟子乙；这类角色必须使用通用身份标签，"
+        "店员、守卫、路人甲/乙/丙、族人甲、弟子乙；这类角色必须使用通用身份标签。"
+        "原文只写绿袍男子/青衣女子/大汉/陌生人等过渡称谓时，不得直接放行："
+        "必须先向后解析真名，"
+        "无真名则改用不冲突的路人甲/乙/丙/丁；"
         "并在 action_desc 或首尾帧中明确可见。任何具体姓名、重要配角或跨镜持续角色仍必须来自角色圣经"
     )

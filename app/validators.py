@@ -8,7 +8,11 @@ import re
 from typing import Any
 
 from app import config, textmatch
-from app.character_policy import is_functional_extra
+from app.character_policy import (
+    is_allowed_storyboard_character,
+    is_collective_role,
+    is_functional_extra,
+)
 from app.continuity import (
     normalize_board_continuity,
     state_chain_errors,
@@ -35,11 +39,18 @@ from app.spoken_contract import (
     max_speech_chars,
     segments_from_timeline,
     spoken_text_of,
+    synchronize_spoken_contract,
     validate_spoken_contract,
 )
 from app.schemas import (Bible, EpisodeScreenplay, InformationItem, Shot, Storyboard,
                          StoryboardOutline, StoryEvent, SHOT_SIZES, CAMERA_MOVES, TRANSITIONS,
                          CONTINUITY_MODES, DELIVERY_OWNERS)
+from app.scene_contract import (
+    compose_scene_setting,
+    scene_name_of,
+    scene_time_of,
+    split_legacy_scene_setting,
+)
 from app.renderability import (
     ACTION_DESC_HARD_MIN,
     ACTION_DESC_TARGET_MAX,
@@ -113,22 +124,8 @@ SAME_SCENE_CONTINUITY_MODES = {
     "reverse_angle",
     "insert_detail",
 }
-TRANSITION_VISUAL_HINTS = {
-    "叠化": ("叠化", "渐", "柔", "余韵", "模糊", "压低"),
-    "淡出淡入": ("淡出", "淡入", "渐暗", "渐黑", "渐亮", "压暗", "暗下"),
-    "黑场": ("黑场", "黑", "暗"),
-    "闪黑": ("闪黑", "黑", "暗"),
-    "闪白": ("闪白", "白", "强光", "亮", "刺眼"),
-    "甩镜": ("甩", "模糊", "横摇", "拖影", "运动"),
-    "遮挡转场": ("遮挡", "掠过", "遮住", "挡住", "黑影", "衣袖", "门"),
-    "匹配剪辑": ("匹配", "呼应", "相同", "同样", "圆", "构图"),
-    "声音延续+叠化": ("叠化", "余音", "话音", "声音", "回响", "渐"),
-    "声音先行+淡入": ("声音", "先行", "淡入", "渐", "传来"),
-}
-
-
 def default_scene_transition(prev: Shot | None, shot: Shot) -> str:
-    """根据换场关系给一个稳定默认值。禁止选用依赖后期声画桥的转场。"""
+    """根据换场关系给一个稳定默认值，交由最终编辑执行。"""
     if not prev:
         return "硬切"
     text = f"{prev.narration or ''}{shot.narration or ''}{prev.action_desc}{shot.action_desc}"
@@ -229,8 +226,8 @@ def _has_movement_cue(*parts: str | None) -> bool:
 
 
 def _scene_location(scene: str) -> str:
-    """scene_setting 形如「时间，地点」；取地点部分用于判断是否同一片连续空间。"""
-    return scene.split("，")[-1].strip()
+    """兼容旧的「时间，地点」字段；新流程传入的就是 scene_name。"""
+    return split_legacy_scene_setting(scene)[1]
 
 
 def _contiguous_scene_move(prev_scene: str, scene: str) -> bool:
@@ -250,9 +247,9 @@ def _contiguous_scene_move(prev_scene: str, scene: str) -> bool:
     return common >= 3
 
 
-def _scene_time_key(scene: str) -> str:
-    """Normalize the explicit time label in ``时间，地点`` scene tags."""
-    raw = re.split(r"[，,]", (scene or "").strip(), maxsplit=1)[0].strip()
+def _scene_time_key(scene_time: str) -> str:
+    """Normalize an explicit, independent scene time label."""
+    raw = (scene_time or "").strip()
     if any(token in raw for token in ("凌晨", "清晨", "早晨", "上午", "白天", "日间", "日")):
         return "day"
     if any(token in raw for token in ("中午", "午后", "下午", "傍晚", "黄昏")):
@@ -262,46 +259,15 @@ def _scene_time_key(scene: str) -> str:
     return _normalize_scene_label(raw)
 
 
-def _scene_time_changed(prev_scene: str, scene: str) -> bool:
-    previous = _scene_time_key(prev_scene)
-    current = _scene_time_key(scene)
+def _scene_time_changed(prev_time: str, scene_time: str) -> bool:
+    previous = _scene_time_key(prev_time)
+    current = _scene_time_key(scene_time)
     return bool(previous and current and previous != current)
 
 
-def _has_transition_visual(transition: str, *parts: str | None) -> bool:
-    text = "".join(part or "" for part in parts)
-    hints = TRANSITION_VISUAL_HINTS.get(transition, (transition,))
-    return any(hint in text for hint in hints)
-
-
-def _transition_visual_suffix(transition: str) -> str:
-    return {
-        "叠化": "，画面边缘轻微模糊并留下叠化余韵",
-        "淡出淡入": "，画面光线逐渐压暗，准备淡出淡入下一场景",
-        "黑场": "，画面逐渐压黑进入黑场",
-        "闪黑": "，画面瞬间闪黑作为转场收尾",
-        "闪白": "，画面被刺眼白光短暂吞没形成闪白转场",
-        "甩镜": "，画面带出快速甩动的运动模糊",
-        "遮挡转场": "，前景人影掠过遮住画面形成遮挡转场",
-        "匹配剪辑": "，画面构图保持呼应以衔接下一镜",
-        "声音延续+叠化": "，话音余韵未散，画面边缘渐渐叠化",
-        "声音先行+淡入": "，下一场景的声音先行传来，画面准备淡入",
-    }.get(transition, f"，画面带出{transition}的转场收尾")
-
-
 def normalize_transition_visuals(board: Storyboard) -> None:
-    """非硬切换场时，自动在上一镜尾帧补转场视觉。
-
-    这是跨镜字段：生成当前镜时已经落库的上一镜不方便让模型修改，确认门应做确定性补齐。
-    """
-    for i in range(1, len(board.shots)):
-        shot = board.shots[i]
-        prev = board.shots[i - 1]
-        if shot.continuity_from_prev or shot.transition == "硬切":
-            continue
-        if _has_transition_visual(shot.transition, prev.last_frame_desc, prev.action_desc):
-            continue
-        prev.last_frame_desc = (prev.last_frame_desc or "").rstrip("。") + _transition_visual_suffix(shot.transition) + "。"
+    """保留旧入口；转场由最终编辑统一执行，不再污染原始镜头描述。"""
+    _ = board
 
 
 _LEADING_ACTION_SEQUENCE_RE = re.compile(r"^\s*(?:先|首先)\s*(?:[，,、。；;：:]|…+|\.{2,})\s*")
@@ -326,6 +292,10 @@ def validate_storyboard(
     shots = board.shots
     if not shots:
         return ["shots 为空；请按完整剧本至少生成一个 5~10 秒镜头"]
+
+    # 先将模糊/旧式输入归一成规范 scene_name，后续连续性只比较
+    # 场景图身份，不再把时间文案混进场景图外键。
+    errors.extend(validate_storyboard_scenes(board, bible))
 
     bible_names = {c.name for c in bible.characters}
 
@@ -425,12 +395,54 @@ def validate_storyboard(
                 "请减少画面角色或拆到相邻镜，禁止群戏调度"
             )
         for name in shot.characters:
-            if bible_names and name not in bible_names and not is_functional_extra(name):
+            if not is_allowed_storyboard_character(name, bible_names):
                 errors.append(
                     f"{tag}.characters 含「{name}」，既不在角色圣经中，也不是允许的功能性路人标签；"
                     f"圣经角色为：{'/'.join(sorted(bible_names))}。无姓名群演请使用测验员、守卫、"
                     "路人甲/乙/丙、族人甲、弟子乙等通用身份标签"
                 )
+        # characters 不是唯一的角色来源。Prompt 会从 characters_visible、
+        # audio_cast/audio_timeline 和 reference_roles 继续取名，所以必须在同一门禁
+        # 中检查，防止旧合同绕过 characters 校验后在编译阶段爆炸。
+        # 空的 characters_visible 会在渲染时合法回退到 characters，
+        # 这里只校验“显式扩展合同”，避免同一 legacy 错误重复报两次。
+        declared_visible = list(shot.characters_visible or [])
+        for name in declared_visible:
+            if not is_allowed_storyboard_character(name, bible_names):
+                errors.append(
+                    f"{tag}.characters_visible 含「{name}」，既不在角色圣经中，"
+                    "也不是允许的功能性路人或群体标签；请同步镜头角色合同"
+                )
+            elif name not in shot.characters:
+                errors.append(
+                    f"{tag}.characters_visible 含「{name}」，但 characters 中没有该角色；"
+                    "可见名单必须是镜头角色名单的子集"
+                )
+        contract_speakers = list(shot.audio_cast or [])
+        contract_speakers.extend(
+            (item.speaker_id or "").strip()
+            for item in (shot.audio_timeline or [])
+            if (item.speaker_id or "").strip()
+        )
+        contract_speakers.extend(
+            (dialogue.speaker or "").strip()
+            for dialogue in (shot.dialogues or [])
+            if (dialogue.speaker or "").strip()
+        )
+        for name in dict.fromkeys(contract_speakers):
+            if not is_allowed_storyboard_character(name, bible_names):
+                errors.append(
+                    f"{tag}.声轨角色「{name}」既不在角色圣经中，"
+                    "也不是允许的功能性路人或群体标签"
+                )
+        for role in shot.reference_roles or []:
+            prefix, separator, name = str(role or "").partition(":")
+            if separator and prefix in {"character_identity", "collective_group"}:
+                if not is_allowed_storyboard_character(name, bible_names):
+                    errors.append(
+                        f"{tag}.reference_roles 残留非法角色「{name}」；"
+                        "请重建角色参考合同"
+                    )
         named_mentions = [name for name in shot.characters if name in shot.action_desc]
         if shot.characters and not named_mentions:
             errors.append(
@@ -476,10 +488,8 @@ def validate_storyboard(
             errors.append(f"{tag}.camera_move=「{shot.camera_move}」不在 {sorted(CAMERA_MOVES)}")
         if shot.transition not in TRANSITIONS:
             errors.append(f"{tag}.transition=「{shot.transition}」不在 {sorted(TRANSITIONS)}")
-        # V6 场景连续性（场景标签长度上限校验已取消）。
-        # 按主场景判定：同一地点的子机位标签（"广场" vs "广场·中央石台"）视为同一场景，
-        # 不算被打断——否则模型给同一地点加子机位后会误报"场景被打断"，逼出无谓重试。
-        scene = shot.scene_setting.strip()
+        # V6 场景连续性以规范 scene_name 为唯一身份。
+        scene = scene_name_of(shot)
         scene_key = _scene_contiguity_key(scene)
         if scene_key in scene_last_seen and scene_last_seen[scene_key] != i - 1:
             errors.append(f"场景「{scene}」在 shots[{scene_last_seen[scene_key]}] 与 shots[{i}] 间被其他场景打断，同场景镜头必须连续排列")
@@ -497,14 +507,15 @@ def validate_storyboard(
                 errors.append(f"{tag}.continuity_from_prev=true，但第一个镜头没有上一镜可承接")
         elif mode in CONTINUITY_MODES:
             prev = shots[i - 1]
-            prev_scene = prev.scene_setting.strip()
-            same_scene = scene == prev_scene
+            prev_scene = scene_name_of(prev)
+            time_changed = _scene_time_changed(scene_time_of(prev), scene_time_of(shot))
+            same_scene = scene == prev_scene and not time_changed
             shared_chars = set(prev.characters) & set(shot.characters)
             if same_scene and mode == "scene_change":
-                errors.append(f"{tag}.continuity_mode=scene_change 但 scene_setting 与上一镜同为「{scene}」")
+                errors.append(f"{tag}.continuity_mode=scene_change 但 scene_name/scene_time 与上一镜相同")
             if not same_scene and mode != "scene_change":
                 errors.append(
-                    f"{tag}.continuity_mode={mode} 但 scene_setting 从「{prev_scene}」变为「{scene}」；"
+                    f"{tag}.continuity_mode={mode} 但 scene_name 或 scene_time 已变化；"
                     "跨时间/地点必须使用 scene_change")
             if mode == "action_continuation":
                 if shot.transition != "硬切":
@@ -518,8 +529,8 @@ def validate_storyboard(
             elif mode in SAME_SCENE_CONTINUITY_MODES:
                 if not same_scene:
                     errors.append(
-                        f"{tag}.continuity_mode={mode} 但 scene_setting 从「{prev_scene}」变为「{scene}」；"
-                        "同场景切换模式必须沿用同一时间地点")
+                        f"{tag}.continuity_mode={mode} 但 scene_name 或 scene_time 已变化；"
+                        "同场景切换模式必须沿用同一场景与时间")
                 if shot.transition != "硬切":
                     errors.append(f"{tag}.transition=「{shot.transition}」，{mode} 必须使用「硬切」")
                 if shot.continuity_from_prev:
@@ -533,7 +544,7 @@ def validate_storyboard(
                         "换场不得使用上一镜尾帧连续参考")
                 if shot.transition == "硬切":
                     errors.append(
-                        f"{tag}.transition=硬切 但 continuity_mode=scene_change 且 scene_setting 从「{prev_scene}」切到「{scene}」；"
+                        f"{tag}.transition=硬切 但 continuity_mode=scene_change（「{prev_scene}」→「{scene}」）；"
                         f"跨时间/地点请用 {sorted(SCENE_CUT_TRANSITIONS)} 之一，并写清承接")
                 elif shot.transition not in SCENE_CUT_TRANSITIONS:
                     errors.append(
@@ -550,7 +561,7 @@ def validate_storyboard(
                     or _has_transition_hint(shot.state_in, shot.first_frame_desc)
                     or _has_movement_cue(shot.state_in, shot.first_frame_desc)
                     or _contiguous_scene_move(prev_scene, scene)
-                    or _scene_time_changed(prev_scene, scene)
+                    or time_changed
                     or not shared_chars
                     or shot.shot_size in {"远景", "全景"}
                 )
@@ -558,19 +569,13 @@ def validate_storyboard(
                     errors.append(
                         f"{tag} 从上一镜「{prev_scene}」切到「{scene}」但缺少承接说明；"
                         "请在 state_in、首帧或画面动作中写清人物如何来到新地点，或改用远景/全景重新建场")
-                if not _has_transition_visual(shot.transition, prev.last_frame_desc, prev.action_desc):
-                    errors.append(
-                        f"shots[{i - 1}](shot_no={prev.shot_no}).last_frame_desc 未体现进入镜{shot.shot_no:02d}的「{shot.transition}」转场收尾；"
-                        "请在上一镜尾帧写出可见转场视觉，例如渐暗/闪白/遮挡/甩镜模糊/叠化余韵/匹配构图呼应")
     # V7 shot_no 连续
     expected = list(range(1, len(shots) + 1))
     actual = [s.shot_no for s in shots]
     if actual != expected:
         errors.append(f"shot_no 必须为连续递增 1..{len(shots)}，当前为 {actual}")
 
-    # V12 场景必须落在场景图素材库内（库非空时；同时回填 shot.scene_name 供渲染期复用同一张场景图）
     errors.extend(adjacent_spoken_repeat_errors(board))
-    errors.extend(validate_storyboard_scenes(board, bible))
     errors.extend(state_chain_errors(board))
     errors.extend(shot_count_budget_errors(len(shots), context="分镜"))
 
@@ -579,49 +584,139 @@ def validate_storyboard(
 # ---------- 场景图素材库：场景标签 → 库内规范场景的归一化匹配 ----------
 
 def _normalize_scene_label(s: str) -> str:
-    """去掉时间前缀/标点/空白，得到纯地点 token，用于场景标签的容错匹配。"""
+    """去掉标点/空白，得到稳定 token，用于场景标签的容错匹配。"""
     return re.sub(r"[\s，,。.：:；;/、|]+", "", (s or "").strip())
 
 
+def _scene_label_variants(value: str) -> list[str]:
+    """返回场景匹配用 token：地点优先，同时保留完整标签供已确认别名精确命中。"""
+    raw = (value or "").strip()
+    variants: list[str] = []
+    _, legacy_location = split_legacy_scene_setting(raw)
+    location = _normalize_scene_label(legacy_location)
+    if location:
+        variants.append(location)
+    full = _normalize_scene_label(raw)
+    if full and full not in variants:
+        variants.append(full)
+    return variants
+
+
 def _scene_contiguity_key(scene: str) -> str:
-    """场景连续性的归一化主键：剥掉子机位/子区域后缀（"·中央石台""-树荫下"等），
-    让同一地点的不同机位标签算同一场景，避免"加了子机位 = 场景被打断"的误报。"""
-    base = re.split(r"[·・·\-—/]", (scene or "").strip(), maxsplit=1)[0]
+    """将历史子机位后缀收敛到规范主场景。"""
+    base = re.split(r"[·・•\-—/]", (scene or "").strip(), maxsplit=1)[0]
     return _normalize_scene_label(base)
 
 
-def match_scene_name(scene_setting: str, scenes, *, allow_fuzzy: bool = True) -> str | None:
-    """把分镜 scene_setting 归一化匹配到 bible.scenes 中的规范场景名。
-    容错：去标点后规范名是 setting 的子串（或反之）即命中（最强）；否则取相似度最高且 ≥0.6 的场景。
-    返回命中的规范场景名，或 None（无库/无匹配）。"""
-    setting = (scene_setting or "").strip()
+def match_scene_name(scene_label: str, scenes, *, allow_fuzzy: bool = True) -> str | None:
+    """把手输/旧式场景候选名归一化匹配到 bible.scenes 的规范场景名。
+    优先级：精确地点/别名 > 最具体的包含关系 > 可选模糊匹配。所有场景统一
+    比较后再选最优，禁止由场景库顺序决定结果；最高分并列时返回 None，避免把
+    一个歧义标签静默绑定到错误场景。
+    """
+    setting = (scene_label or "").strip()
     if not setting or not scenes:
         return None
-    norm_setting = _normalize_scene_label(setting)
-    if not norm_setting:
+    setting_variants = _scene_label_variants(setting)
+    if not setting_variants:
         return None
-    best: str | None = None
-    best_score = 0.0
+    containment_by_scene: dict[str, tuple[int, int, int]] = {}
+    fuzzy_by_scene: dict[str, float] = {}
     for sc in scenes:
         name = (getattr(sc, "name", "") or "").strip()
-        labels = [name, *(getattr(sc, "aliases", None) or [])]
-        normalized_labels = [
-            _normalize_scene_label(str(label)) for label in labels if str(label or "").strip()
-        ]
-        if not normalized_labels:
+        if not name:
             continue
-        if any(
-            norm_label in norm_setting or norm_setting in norm_label
-            for norm_label in normalized_labels
-        ):
-            return name  # 规范名/已确认别名的包含命中，最强
-        ratio = max(
+        labels = [name, *(getattr(sc, "aliases", None) or [])]
+        label_variants = list(dict.fromkeys(
+            variant
+            for label in labels
+            if str(label or "").strip()
+            for variant in _scene_label_variants(str(label))
+        ))
+        if not label_variants:
+            continue
+        best_containment: tuple[int, int, int] | None = None
+        for norm_setting in setting_variants:
+            for norm_label in label_variants:
+                if norm_label == norm_setting:
+                    rank = (3, len(norm_label), 0)
+                elif norm_label in norm_setting:
+                    # 候选标签完整出现在输入中；越长越具体。相同长度的复合地点
+                    # （如「荒山林海至黑山外围」）按文本出现顺序取起点，不能再受
+                    # 场景库数组顺序影响。
+                    rank = (2, len(norm_label), -norm_setting.index(norm_label))
+                elif norm_setting in norm_label:
+                    # 输入只是候选标签的一部分，可信度低于上一种包含方向。
+                    rank = (1, len(norm_setting), 0)
+                else:
+                    continue
+                if best_containment is None or rank > best_containment:
+                    best_containment = rank
+        if best_containment is not None:
+            previous = containment_by_scene.get(name)
+            if previous is None or best_containment > previous:
+                containment_by_scene[name] = best_containment
+        fuzzy_by_scene[name] = max(
             difflib.SequenceMatcher(None, norm_label, norm_setting).ratio()
-            for norm_label in normalized_labels
+            for norm_label in label_variants
+            for norm_setting in setting_variants
         )
-        if ratio > best_score:
-            best_score, best = ratio, name
-    return best if allow_fuzzy and best_score >= 0.6 else None
+
+    if containment_by_scene:
+        best_rank = max(containment_by_scene.values())
+        winners = [name for name, rank in containment_by_scene.items() if rank == best_rank]
+        return winners[0] if len(winners) == 1 else None
+    if not allow_fuzzy or not fuzzy_by_scene:
+        return None
+    best_score = max(fuzzy_by_scene.values())
+    if best_score < 0.6:
+        return None
+    winners = [
+        name for name, score in fuzzy_by_scene.items()
+        if abs(score - best_score) < 1e-12
+    ]
+    return winners[0] if len(winners) == 1 else None
+
+
+def canonicalize_storyboard_scene(
+    target: Shot | Any,
+    bible: Bible,
+    *,
+    prefer_explicit: bool = False,
+) -> str | None:
+    """解析一次模糊/旧式输入，立即回填规范 scene_name。
+
+    新数据优先信任独立 ``scene_name``。旧数据没有 ``scene_time`` 时，
+    若混合 ``scene_setting`` 可解析到更准确的场景，则用它修正历史误绑定。
+    """
+    scenes = getattr(bible, "scenes", None) or []
+    if not scenes:
+        return None
+    explicit_name = str(getattr(target, "scene_name", "") or "").strip()
+    explicit_time = str(getattr(target, "scene_time", "") or "").strip()
+    legacy_setting = str(getattr(target, "scene_setting", "") or "").strip()
+    legacy_time, legacy_name = split_legacy_scene_setting(legacy_setting)
+
+    matched = match_scene_name(explicit_name, scenes) if explicit_name else None
+    legacy_match = match_scene_name(legacy_name, scenes) if legacy_name else None
+    if not prefer_explicit and not explicit_time and legacy_time and legacy_match:
+        # 旧行的 scene_name 可能由过去的「最先命中」算法误绑；迁移时重算。
+        matched = legacy_match
+    elif not matched:
+        matched = legacy_match
+
+    if not prefer_explicit and not explicit_time and legacy_time:
+        target.scene_time = legacy_time
+    if not matched:
+        target.scene_name = ""
+        return None
+    target.scene_name = matched
+    target.scene_setting = compose_scene_setting(
+        str(getattr(target, "scene_time", "") or ""),
+        matched,
+        fallback=legacy_setting,
+    )
+    return matched
 
 
 def resolve_screenplay_scene_names(
@@ -675,10 +770,11 @@ def validate_storyboard_outline_scene_alignment(
     used: list[str] = []
     last_index = -1
     for shot in outline.shots:
-        matched = match_scene_name(shot.scene_setting, bible.scenes, allow_fuzzy=False)
+        matched = canonicalize_storyboard_scene(shot, bible)
         if not matched:
+            label = shot.scene_name or shot.scene_setting
             errors.append(
-                f"大纲第 {shot.shot_no} 镜场景「{shot.scene_setting}」未命中规范场景"
+                f"大纲第 {shot.shot_no} 镜场景「{label}」未命中规范场景图"
             )
             continue
         used.append(matched)
@@ -706,26 +802,28 @@ def validate_storyboard_shot_scene_alignment(
     screenplay: EpisodeScreenplay | None,
     bible: Bible,
     *,
+    expected_scene_name: str = "",
     expected_scene_setting: str = "",
 ) -> list[str]:
     """逐镜硬门禁：当前镜既要属于本集剧本，也要服从本镜大纲指定场景。"""
     errors = _screenplay_scene_resolution_errors(screenplay, bible)
     if errors:
         return errors
-    actual = match_scene_name(shot.scene_setting, bible.scenes, allow_fuzzy=False)
+    actual = canonicalize_storyboard_scene(shot, bible)
     allowed = resolve_screenplay_scene_names(screenplay, bible)
     if allowed and actual not in set(allowed):
         errors.append(
-            f"第 {shot.shot_no} 镜场景「{shot.scene_setting}」与本集剧本不一致；"
+            f"第 {shot.shot_no} 镜 scene_name「{shot.scene_name or shot.scene_setting}」与本集剧本不一致；"
             f"只能使用：{'、'.join(allowed)}"
         )
+    expected_label = expected_scene_name or expected_scene_setting
     expected = (
-        match_scene_name(expected_scene_setting, bible.scenes, allow_fuzzy=False)
-        if expected_scene_setting else None
+        match_scene_name(expected_label, bible.scenes)
+        if expected_label else None
     )
     if expected and actual != expected:
         errors.append(
-            f"第 {shot.shot_no} 镜场景「{shot.scene_setting}」偏离本镜大纲；"
+            f"第 {shot.shot_no} 镜 scene_name「{shot.scene_name or shot.scene_setting}」偏离本镜大纲；"
             f"本镜必须使用「{expected}」"
         )
     return errors
@@ -745,12 +843,12 @@ def validate_storyboard_screenplay_scene_alignment(
     used: list[str] = []
     last_index = -1
     for shot in board.shots:
-        matched = match_scene_name(shot.scene_setting, bible.scenes, allow_fuzzy=False)
+        matched = canonicalize_storyboard_scene(shot, bible)
         if matched:
             used.append(matched)
         if matched not in expected_index:
             errors.append(
-                f"第 {shot.shot_no} 镜场景「{shot.scene_setting}」与本集剧本不一致；"
+                f"第 {shot.shot_no} 镜 scene_name「{shot.scene_name or shot.scene_setting}」与本集剧本不一致；"
                 f"只能使用：{'、'.join(expected)}"
             )
             continue
@@ -767,8 +865,10 @@ def validate_storyboard_screenplay_scene_alignment(
 
 
 def validate_storyboard_scenes(board: Storyboard, bible: Bible) -> list[str]:
-    """V12：每个 shot.scene_setting 必须映射到场景图素材库（bible.scenes）里的规范场景，
-    命中则回填 shot.scene_name（渲染期据此为同一场景复用同一张场景库图，跨镜/跨集一致）。
+    """V12：每个 shot 必须归一到场景图素材库的规范 ``scene_name``。
+
+    ``scene_time`` 不参与场景图匹配；模糊/旧式标签仅解析一次，命中后立即
+    回填规范名，确保后续选图一一对应。
     务实优先：库为空（旧项目或尚未生成场景圣经）时直接放行，绝不误伤。"""
     scenes = getattr(bible, "scenes", None) or []
     if not scenes:
@@ -776,14 +876,12 @@ def validate_storyboard_scenes(board: Storyboard, bible: Bible) -> list[str]:
     errors: list[str] = []
     names = "/".join(sc.name for sc in scenes if getattr(sc, "name", ""))
     for i, shot in enumerate(board.shots):
-        matched = match_scene_name(shot.scene_setting, scenes)
-        if matched:
-            shot.scene_name = matched
-        else:
-            shot.scene_name = ""
+        original_label = shot.scene_name or shot.scene_setting
+        matched = canonicalize_storyboard_scene(shot, bible)
+        if not matched:
             errors.append(
-                f"shots[{i}](shot_no={shot.shot_no}).scene_setting=「{shot.scene_setting}」不在场景图素材库内；"
-                f"scene_setting 必须收敛到库内规范场景之一：{names}；"
+                f"shots[{i}](shot_no={shot.shot_no}).scene_name=「{original_label}」不在场景图素材库内；"
+                f"scene_name 必须命中并归一成库内规范场景之一：{names}；"
                 "若确为剧情需要的新场景，必须先完成该场景的自动建库与专属场景图，禁止借用相似旧场景")
     return errors
 
@@ -822,6 +920,15 @@ def _iter_script_sound_matches(full_text: str):
         if "/" in speaker or "【" in speaker:
             continue
         yield match
+
+
+def screenplay_speaker_names(full_text: str) -> list[str]:
+    """Return distinct speaker IDs using the canonical screenplay-line parser."""
+    return list(dict.fromkeys(
+        match.group(1).strip()
+        for match in _iter_script_sound_matches(full_text)
+        if match.group(1).strip()
+    ))
 
 
 def _script_dialogue_turns(full_text: str) -> list[tuple[int, str, str]]:
@@ -1821,11 +1928,11 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         errors.append("full_script_text 对白行过少；请按“角色名：台词”写出真正可演的对白")
     if bible_names:
         offbible_speakers = sorted({
-            match.group(1).strip()
-            for match in _iter_script_sound_matches(full_text)
-            if match.group(1).strip() != "旁白"
-            and match.group(1).strip() not in bible_names
-            and not is_functional_extra(match.group(1).strip())
+            speaker
+            for speaker in screenplay_speaker_names(full_text)
+            if speaker != "旁白"
+            and speaker not in bible_names
+            and not is_functional_extra(speaker)
         })
         if offbible_speakers:
             errors.append(
@@ -2671,6 +2778,8 @@ def split_outline_on_speaker_changes(
             else:
                 target = StoryboardOutlineShot(
                     shot_no=shot.shot_no + group_index,
+                    scene_time=shot.scene_time,
+                    scene_name=shot.scene_name,
                     scene_setting=shot.scene_setting,
                     beat=f"（对白正反打）{speaker}承接上一话轮作出回应；{original_beat}",
                     covers=covers,
@@ -2825,6 +2934,8 @@ def split_outline_over_action_capacity(
             index + 1,
             StoryboardOutlineShot(
                 shot_no=original_no + 1,
+                scene_time=shot.scene_time,
+                scene_name=shot.scene_name,
                 scene_setting=shot.scene_setting,
                 beat=f"（{_ACTION_CAPACITY_SPLIT_MARKER}：后段）{back_action}",
                 covers=back_covers,
@@ -2930,6 +3041,8 @@ def split_outline_over_key_line_capacity(
             insert_at,
             StoryboardOutlineShot(
                 shot_no=current.shot_no + 1,
+                scene_time=current.scene_time,
+                scene_name=current.scene_name,
                 scene_setting=current.scene_setting,
                 beat=f"（容量拆分：承接第{current.shot_no}镜关键台词）{back}",
                 covers=back,
@@ -3221,34 +3334,96 @@ def _canonical_bible_name(name: str, bible_names: set[str]) -> str | None:
     return next(iter(hits)) if len(hits) == 1 else None
 
 
-def _rename_shot_character(shot: Shot, old: str, new: str) -> None:
-    """把镜头里某个角色名整体改写为圣经正名：characters 之外，dialogues.speaker 与画面文本一并替换，
-    避免改了 characters 却漏改 speaker/action_desc 触发其它校验。
-
-    仅当别名不是正名的子串时才替换画面文本——否则 replace('萧薰','萧薰儿') 会把文本里已有的
-    '萧薰儿'撑成'萧薰儿儿'。speaker 是精确等值匹配、不受此问题影响，照常改。"""
-    if old not in new:
-        for field in ("action_desc", "first_frame_desc", "last_frame_desc", "narration"):
-            val = getattr(shot, field, None)
-            if val:
-                setattr(shot, field, val.replace(old, new))
-    for d in shot.dialogues:
-        if d.speaker == old:
-            d.speaker = new
+_CHARACTER_TEXT_FIELDS = (
+    "action_desc", "first_frame_desc", "last_frame_desc", "narration",
+    "state_in", "primary_action", "state_out", "observed_state_out",
+    "purpose", "emotion_beat", "spatial_anchor",
+)
+_CHARACTER_REFERENCE_PREFIXES = frozenset({"character_identity", "collective_group"})
 
 
-def _offload_extra_character_voice(shot: Shot, name: str) -> None:
-    """把被剥离路人（测验员/围观者甲等）的台词移出 dialogues，内容不丢、降级为 action_desc。
+def _dedupe_names(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(name for name in values if name))
 
-    产品禁止旁白：不再转写进 narration。人群声与宣告一律并入 action_desc 画面描写。
+
+def _replace_character_mention(text: str, old: str, new: str) -> str:
+    """在不把正名撑长的前提下替换别名。
+
+    例如「萧薰」→「萧薰儿」时，已有「萧薰儿」不能变成「萧薰儿儿」，
+    但单独的「萧薰」仍应同步，否则会留下新的合同分叉。
     """
-    moved = [(d.line or "").strip() for d in shot.dialogues if d.speaker == name and (d.line or "").strip()]
-    shot.dialogues = [d for d in shot.dialogues if d.speaker != name]
-    if not moved:
-        return
-    text = "；".join(moved)
-    merged = (shot.action_desc or "").rstrip("。； ")
-    shot.action_desc = f"{merged}；{name}{text}。" if merged else f"{name}{text}。"
+    if not text or old == new:
+        return text
+    if new.startswith(old):
+        suffix = new[len(old):]
+        if suffix:
+            return re.sub(re.escape(old) + rf"(?!{re.escape(suffix)})", new, text)
+    return text.replace(old, new)
+
+
+def _rename_shot_character(shot: Shot, old: str, new: str) -> None:
+    """把别名在整个镜头合同中原子性改为圣经正名。"""
+    for field in _CHARACTER_TEXT_FIELDS:
+        value = getattr(shot, field, None)
+        if value:
+            setattr(shot, field, _replace_character_mention(value, old, new))
+    for field in ("characters", "characters_visible", "audio_cast"):
+        values = list(getattr(shot, field, None) or [])
+        setattr(shot, field, _dedupe_names([new if name == old else name for name in values]))
+    shot.do_not_repeat = [
+        _replace_character_mention(value, old, new)
+        for value in (shot.do_not_repeat or [])
+    ]
+    shot.reference_roles = [
+        f"{prefix}:{new}" if separator and prefix in _CHARACTER_REFERENCE_PREFIXES and name == old else role
+        for role in (shot.reference_roles or [])
+        for prefix, separator, name in [str(role or "").partition(":")]
+    ]
+    for dialogue in shot.dialogues:
+        if dialogue.speaker == old:
+            dialogue.speaker = new
+    for item in shot.audio_timeline:
+        if (item.speaker_id or "").strip() == old:
+            item.speaker_id = new
+
+
+def _strip_shot_character_contract(shot: Shot, name: str) -> list[str]:
+    """原子性剥离非法角色，并保留其台词文本作为修复证据。
+
+    不能只删 dialogues：audio_timeline 优先级更高，会把旧说话人再派生回
+    characters_visible；reference_roles 则会使下游继续查找不存在的角色参考图。
+    """
+    moved: list[str] = []
+    for dialogue in shot.dialogues:
+        if dialogue.speaker == name and (dialogue.line or "").strip():
+            moved.append(dialogue.line.strip())
+    for item in shot.audio_timeline:
+        if (item.speaker_id or "").strip() == name and (item.text or "").strip():
+            moved.append(item.text.strip())
+    shot.characters = [value for value in shot.characters if value != name]
+    shot.characters_visible = [value for value in shot.characters_visible if value != name]
+    shot.audio_cast = [value for value in shot.audio_cast if value != name]
+    shot.dialogues = [dialogue for dialogue in shot.dialogues if dialogue.speaker != name]
+    shot.audio_timeline = [
+        item for item in shot.audio_timeline if (item.speaker_id or "").strip() != name
+    ]
+    shot.reference_roles = [
+        role
+        for role in (shot.reference_roles or [])
+        if not (
+            (parts := str(role or "").partition(":"))[1]
+            and parts[0] in _CHARACTER_REFERENCE_PREFIXES
+            and parts[2] == name
+        )
+    ]
+    # dialogues 与 timeline 往往是同一条台词，去重后只留一份。
+    moved = list(dict.fromkeys(moved))
+    additions = [line for line in moved if line not in (shot.action_desc or "")]
+    if additions:
+        evidence = "；".join(f"待修复台词信息「{line}」" for line in additions)
+        merged = (shot.action_desc or "").rstrip("。； ")
+        shot.action_desc = f"{merged}；{evidence}。" if merged else f"{evidence}。"
+    return moved
 
 
 def normalize_offbible_characters(board: Storyboard, bible: Bible | None) -> list[dict]:
@@ -3260,53 +3435,215 @@ def normalize_offbible_characters(board: Storyboard, bible: Bible | None) -> lis
     通用身份标签留在镜头中：
     - 能唯一对应到某圣经角色（别名/简称/错字）→ 规范成圣经正名（characters、speaker、画面文本一并替换）；
     - 功能性路人（测验员、路人甲等）→ 保留在 characters；若只作为 dialogue speaker 出现则补入 characters；
-    - 其它圣经外名字 → 从 characters 剥离，其台词降级为画面/旁白。
+    - 其它圣经外名字 → 从可见、声轨、参考图等整个镜头合同原子性剥离，
+      其台词文本暂存为 action_desc 修复证据；
+    - characters_visible/audio_cast/audio_timeline/reference_roles 中的历史残留也按同一规则处理。
     就地修改 board，返回带分类依据的调整记录供监控与 Harness 留痕。"""
     bible_names = {c.name for c in bible.characters} if bible else set()
     changes: list[dict] = []
     for shot in board.shots:
+        if not bible_names:
+            continue
+        stripped_names: set[str] = set()
+
+        def _normalize_name(name: str) -> tuple[str | None, str]:
+            value = (name or "").strip()
+            if not value:
+                return None, "empty"
+            if value in bible_names:
+                return value, "bible"
+            canonical = _canonical_bible_name(value, bible_names)
+            if canonical:
+                return canonical, "alias"
+            if is_functional_extra(value):
+                return value, "functional_extra"
+            if is_collective_role(value):
+                return value, "collective"
+            return None, "offbible"
+
+        def _strip(name: str, source: str) -> None:
+            if name in stripped_names:
+                return
+            moved = _strip_shot_character_contract(shot, name)
+            stripped_names.add(name)
+            changes.append({
+                "shot_no": shot.shot_no,
+                "stripped": name,
+                "source": source,
+                "moved_voice_lines": len(moved),
+                "mutated": True,
+            })
+
         kept: list[str] = []
-        for name in shot.characters:
-            if not bible_names or name in bible_names:
-                kept.append(name)
-                continue
-            canon = _canonical_bible_name(name, bible_names)
-            if canon:
-                _rename_shot_character(shot, name, canon)
-                kept.append(canon)
+        for name in list(shot.characters):
+            normalized, kind = _normalize_name(name)
+            if normalized is None:
+                _strip(name, "characters")
+            elif kind == "alias":
+                _rename_shot_character(shot, name, normalized)
+                kept.append(normalized)
                 changes.append({
                     "shot_no": shot.shot_no,
-                    "renamed": f"{name}→{canon}",
+                    "renamed": f"{name}→{normalized}",
+                    "source": "characters",
                     "mutated": True,
                 })
-            elif is_functional_extra(name):
-                kept.append(name)
+            else:
+                kept.append(normalized)
+            if kind == "functional_extra":
                 changes.append({
                     "shot_no": shot.shot_no,
-                    "allowed_functional_extra": name,
+                    "allowed_functional_extra": normalized,
                     "source": "characters",
                     "mutated": False,
                 })
-            else:
-                _offload_extra_character_voice(shot, name)
+            elif kind == "collective":
                 changes.append({
                     "shot_no": shot.shot_no,
-                    "stripped": name,
+                    "allowed_collective": normalized,
+                    "source": "characters",
+                    "mutated": False,
+                })
+        shot.characters = _dedupe_names(kept)
+
+        # 修复可见名单：它可以是 characters 的子集（例如单人对白特写），
+        # 但绝不得引入 characters 之外的新身份。
+        visible: list[str] = []
+        for name in list(shot.characters_visible):
+            normalized, kind = _normalize_name(name)
+            if normalized is None:
+                _strip(name, "characters_visible")
+                continue
+            if kind == "alias":
+                _rename_shot_character(shot, name, normalized)
+                changes.append({
+                    "shot_no": shot.shot_no,
+                    "renamed": f"{name}→{normalized}",
+                    "source": "characters_visible",
                     "mutated": True,
                 })
-        # 去重保序（规范后可能与既有正名重复）
-        seen: set[str] = set()
-        shot.characters = [n for n in kept if not (n in seen or seen.add(n))]
-        for dialogue in shot.dialogues:
+            if normalized not in shot.characters:
+                shot.characters.append(normalized)
+                changes.append({
+                    "shot_no": shot.shot_no,
+                    "added_from_visible": normalized,
+                    "mutated": True,
+                })
+            visible.append(normalized)
+        shot.characters = _dedupe_names(shot.characters)
+        shot.characters_visible = _dedupe_names(visible)
+
+        # 说话人可能只存在于 dialogues/timeline/audio_cast；最后统一扫一次，
+        # 防止部分修复数据把旧角色从声轨反向注入可见名单。
+        speaker_names = [
+            *((dialogue.speaker or "").strip() for dialogue in shot.dialogues),
+            *((item.speaker_id or "").strip() for item in shot.audio_timeline),
+            *((name or "").strip() for name in shot.audio_cast),
+        ]
+        for name in dict.fromkeys(value for value in speaker_names if value):
+            normalized, kind = _normalize_name(name)
+            if normalized is None:
+                _strip(name, "spoken_contract")
+                continue
+            if kind == "alias":
+                _rename_shot_character(shot, name, normalized)
+                changes.append({
+                    "shot_no": shot.shot_no,
+                    "renamed": f"{name}→{normalized}",
+                    "source": "spoken_contract",
+                    "mutated": True,
+                })
+
+        # 画内开口者必须同时进入 characters / characters_visible / audio_cast。
+        # 旧链路只补 characters，使人工新增的台词在保存时被派生成
+        # offscreen_voice，确认时又因可见合同不一致而被删除。
+        visible_speakers: list[str] = []
+        audible_speakers: list[str] = []
+        for dialogue in list(shot.dialogues):
             speaker = (dialogue.speaker or "").strip()
-            if speaker and speaker not in shot.characters and is_functional_extra(speaker):
+            normalized, _kind = _normalize_name(speaker)
+            if normalized is None:
+                continue
+            audible_speakers.append(normalized)
+            if (getattr(dialogue, "delivery", "spoken_dialogue") or "spoken_dialogue") == "spoken_dialogue":
+                visible_speakers.append(normalized)
+        for item in shot.audio_timeline:
+            speaker = (item.speaker_id or "").strip()
+            normalized, _kind = _normalize_name(speaker)
+            if normalized is None or item.type not in {"spoken_dialogue", "offscreen_voice"}:
+                continue
+            audible_speakers.append(normalized)
+            if item.type == "spoken_dialogue":
+                visible_speakers.append(normalized)
+
+        roster_changed_for_dialogue = False
+        if visible_speakers and not shot.characters_visible:
+            shot.characters_visible = list(shot.characters)
+        for speaker in dict.fromkeys(visible_speakers):
+            if speaker not in shot.characters:
                 shot.characters.append(speaker)
+                roster_changed_for_dialogue = True
                 changes.append({
                     "shot_no": shot.shot_no,
                     "allowed_functional_extra": speaker,
                     "source": "dialogue_speaker",
                     "mutated": True,
                 })
+            if speaker not in shot.characters_visible:
+                shot.characters_visible.append(speaker)
+                roster_changed_for_dialogue = True
+                changes.append({
+                    "shot_no": shot.shot_no,
+                    "added_visible_speaker": speaker,
+                    "source": "spoken_contract",
+                    "mutated": True,
+                })
+        for speaker in dict.fromkeys(audible_speakers):
+            if speaker not in shot.audio_cast:
+                shot.audio_cast.append(speaker)
+                changes.append({
+                    "shot_no": shot.shot_no,
+                    "added_audio_cast": speaker,
+                    "source": "spoken_contract",
+                    "mutated": True,
+                })
+        shot.characters = _dedupe_names(shot.characters)
+        shot.characters_visible = _dedupe_names(shot.characters_visible)
+        shot.audio_cast = _dedupe_names(shot.audio_cast)
+        if roster_changed_for_dialogue and shot.dialogues:
+            sync = synchronize_spoken_contract(shot, changed_fields={"dialogues"})
+            if sync.changed:
+                changes.append({
+                    "shot_no": shot.shot_no,
+                    "synchronized_spoken_contract": True,
+                    "actions": sync.actions,
+                    "mutated": True,
+                })
+
+        # 参考角色可能是唯一的残留来源；它不能越过可见/声轨校验。
+        rebuilt_roles: list[str] = []
+        for role in shot.reference_roles or []:
+            prefix, separator, name = str(role or "").partition(":")
+            if not separator or prefix not in _CHARACTER_REFERENCE_PREFIXES:
+                rebuilt_roles.append(role)
+                continue
+            normalized, kind = _normalize_name(name)
+            if normalized is None:
+                changes.append({
+                    "shot_no": shot.shot_no,
+                    "stripped_reference_role": name,
+                    "mutated": True,
+                })
+                continue
+            rebuilt_roles.append(f"{prefix}:{normalized}")
+            if kind == "alias":
+                changes.append({
+                    "shot_no": shot.shot_no,
+                    "renamed": f"{name}→{normalized}",
+                    "source": "reference_roles",
+                    "mutated": True,
+                })
+        shot.reference_roles = list(dict.fromkeys(rebuilt_roles))
     return changes
 
 

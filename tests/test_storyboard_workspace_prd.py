@@ -9,6 +9,7 @@ from app import api, db, task_registry
 from app.capabilities.direct import enter_handler
 from app.evidence import repository
 from app.harness.types import EvidenceArtifact
+from app.schemas import Bible, Character, World
 from app import storyboard_workspace as workspace
 from app.orchestration import api as orchestration_api
 from app.orchestration.engine import WorkflowRecorder
@@ -128,6 +129,45 @@ def test_real_structural_error_is_attached_to_the_problem_shot(storyboard_db):
     assert status["state"] == "failed"
     assert any("缺少必填字段" in issue for issue in status["hard_gate_issues"])
     assert any("缺少必填字段" in issue for issue in episode["shots"][0]["preflight_errors"])
+
+
+def test_complete_board_uses_current_gate_instead_of_stale_paused_issue(
+    storyboard_db, monkeypatch,
+):
+    stale_issue = "整集分镜遗漏本集剧本场景：旧场景名"
+
+    def current_gate(_ep, board, _screenplay, _bible, **_kwargs):
+        return api.ConfirmationEvaluation(
+            passed=True,
+            errors=[],
+            warnings=[],
+            issues=[],
+            board=board,
+            compact_target=10,
+            estimated_cost_cny=0,
+        )
+
+    monkeypatch.setattr(api, "evaluate_storyboard_for_confirmation", current_gate)
+    save_checkpoint(SupervisorCheckpoint(
+        episode_id="e1",
+        phase="WAITING_HUMAN",
+        validated_prefix_end=1,
+        next_shot_no=2,
+        expected_total=1,
+        last_repair={"issue_messages": [stale_issue]},
+    ))
+    storyboard_db.execute(
+        "UPDATE episodes SET status='scripted',script_error=? WHERE id='e1'",
+        (stale_issue,),
+    )
+    storyboard_db.commit()
+
+    detail = api.episode_detail("e1", view="board")
+    status = detail["storyboard_status"]
+
+    assert status["state"] == "ready_to_confirm"
+    assert status["hard_gate_issues"] == []
+    assert detail["script_error"] is None
 
 
 def test_status_distinguishes_visible_drafts_from_zero_safe_checkpoint(storyboard_db):
@@ -917,6 +957,62 @@ def test_shot_edit_commits_deterministic_gate_without_treating_authorship_as_fai
     assert any(row["evaluator_name"] == "storyboard_shot_business_gate" and row["hard_gate_passed"] for row in evaluations)
 
 
+def test_manual_dialogue_edit_cannot_reintroduce_unresolved_descriptive_identity(storyboard_db):
+    bible = Bible(
+        characters=[Character(
+            name="少年",
+            role="主角",
+            appearance_canonical="十六岁黑发少年，蓝色长衫，身形清瘦，目光坚定，衣着朴素整洁",
+            personality="坚定",
+        )],
+        world=World(
+            era="古代",
+            genre="剧情",
+            visual_style_canonical="国风动画电影感，光影稳定克制",
+        ),
+    )
+    storyboard_db.execute(
+        "UPDATE projects SET bible_json=? WHERE id='p1'", (bible.model_dump_json(),)
+    )
+    storyboard_db.execute(
+        "UPDATE episodes SET storyboard_warning='上次确认的缺失台词警告' WHERE id='e1'"
+    )
+    storyboard_db.commit()
+    session = workspace.create_edit_session("s1")
+    changes = {
+        "action_desc": "绿袍男子站在少年面前厉声警告，少年紧张地看向他。",
+        "dialogues": [{
+            "speaker": "绿袍男子",
+            "line": "再说一句废话，直接割了你的舌头。",
+            "emotion": "冷厉",
+            "delivery": "spoken_dialogue",
+        }],
+    }
+    preview = api.preview_shot_edit_impact("s1", {
+        "edit_session_token": session["edit_session_token"],
+        "changes": changes,
+    })
+
+    before = dict(storyboard_db.execute("SELECT * FROM shots WHERE id='s1'").fetchone())
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(api.edit_shot("s1", {
+            **changes,
+            "expected_version": session["baseline_artifact_id"],
+            "edit_session_token": session["edit_session_token"],
+            "preview_token": preview["preview_token"],
+            "baseline_content_hash": session["baseline_content_hash"],
+            "change_source": "regression_described_extra_dialogue",
+        }))
+
+    assert caught.value.status_code == 422
+    assert caught.value.detail["code"] == "storyboard_character_identity_unresolved"
+    row = dict(storyboard_db.execute("SELECT * FROM shots WHERE id='s1'").fetchone())
+    assert row == before
+    assert storyboard_db.execute(
+        "SELECT storyboard_warning FROM episodes WHERE id='e1'"
+    ).fetchone()[0] == "上次确认的缺失台词警告"
+
+
 def test_free_text_source_edit_is_rejected(storyboard_db):
     session = workspace.create_edit_session("s1")
     with pytest.raises(HTTPException) as caught:
@@ -1092,8 +1188,39 @@ def test_confirmation_reports_hard_errors_and_score_only_warnings(storyboard_db)
     assert any("低于硬下限" in str(w) or "action_desc" in str(w) for w in warnings)
 
 
+def test_confirmation_rebuilds_episode_artifact_after_manual_shot_artifact_change(storyboard_db):
+    old_episode_artifact = storyboard_db.execute(
+        "SELECT storyboard_artifact_id FROM episodes WHERE id='e1'"
+    ).fetchone()[0]
+    current_shot_artifact = storyboard_db.execute(
+        "SELECT storyboard_artifact_id FROM shots WHERE id='s1'"
+    ).fetchone()[0]
+    preview = api.create_storyboard_confirmation_preview("e1")
+
+    result = api.confirm_episode_core("e1", preview_token=preview["preview_token"])
+
+    episode = storyboard_db.execute(
+        "SELECT status,storyboard_artifact_id,published_storyboard_artifact_id "
+        "FROM episodes WHERE id='e1'"
+    ).fetchone()
+    assert result["confirmed"] is True
+    assert episode["status"] == "confirmed"
+    assert episode["storyboard_artifact_id"] != old_episode_artifact
+    assert episode["published_storyboard_artifact_id"] == episode["storyboard_artifact_id"]
+    artifact = repository.get_artifact(episode["storyboard_artifact_id"])
+    assert current_shot_artifact in artifact["parent_artifact_ids"]
+
+
 def test_idempotent_confirmation_converges_terminal_runtime_state(storyboard_db):
     recorder = _cancel_test_run(storyboard_db)
+    orphan = WorkflowRecorder.create(
+        workflow_type="storyboard",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="orphan-paused-run",
+    )
+    orphan.start()
+    orphan.pause_external("服务重启后遗留")
     storyboard_db.execute("UPDATE episodes SET status='confirmed' WHERE id='e1'")
     storyboard_db.commit()
 
@@ -1106,7 +1233,15 @@ def test_idempotent_confirmation_converges_terminal_runtime_state(storyboard_db)
     ).fetchone()
     assert episode["active_storyboard_run_id"] is None
     assert episode["script_error"] is None
+    run_states = {
+        row["id"]: row["status"]
+        for row in storyboard_db.execute(
+            "SELECT id,status FROM workflow_runs WHERE id IN (?,?)",
+            (recorder.run_id, orphan.run_id),
+        ).fetchall()
+    }
+    assert run_states == {recorder.run_id: "CANCELLED", orphan.run_id: "CANCELLED"}
+    assert api._review_upstream_snapshot("e1")["eligible_for_production"] is True
     checkpoint = load_latest_checkpoint("e1")
     assert checkpoint.phase == "SUCCEEDED"
     assert checkpoint.outcome == "SUCCEEDED_READY_FOR_CONFIRM"
-    recorder.cancel("test cleanup")

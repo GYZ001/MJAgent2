@@ -186,6 +186,9 @@ export interface CatalogModel {
   provider_label?: string;
   base_url?: string;
   key_configured?: boolean;
+  context_window_tokens?: number;
+  max_output_tokens?: number;
+  token_limits_source?: string;
 }
 interface ModelCatalog {
   items: CatalogModel[];
@@ -359,6 +362,18 @@ function jobStatusLabel(status: string) {
 }
 export function modelBusinessLabel(value: string) {
   return value.trim().toLowerCase() === "text 模型" ? "文本模型" : value;
+}
+
+function formatTokenCapacity(value?: number) {
+  if (!value) return "待检测";
+  if (value >= 1024 && value % 1024 === 0) return `${value / 1024}K`;
+  return value.toLocaleString("zh-CN");
+}
+
+function tokenLimitSourceLabel(source?: string) {
+  if (source === "provider_metadata") return "供应商元数据";
+  if (source === "configured") return "已配置";
+  return "128K/32K 兼容默认";
 }
 
 /**
@@ -1856,6 +1871,11 @@ function ModelCenter({
     kinds: ["text"] as ModelKind[],
   });
   const [newTested, setNewTested] = useState("");
+  const [newTokenLimits, setNewTokenLimits] = useState<{
+    context_window_tokens?: number;
+    max_output_tokens?: number;
+    token_limits_source?: string;
+  }>({});
   const [newTesting, setNewTesting] = useState(false);
   const [modelSaving, setModelSaving] = useState(false);
   const libraryTriggerRef = useRef<HTMLElement | null>(null);
@@ -1982,8 +2002,12 @@ function ModelCenter({
       );
       setTestStates((s) => ({
         ...s,
-        [item.id]: { state: "ok", note: `${result.latency_ms} ms` },
+        [item.id]: {
+          state: "ok",
+          note: `${result.latency_ms} ms · 上下文 ${formatTokenCapacity(result.context_window_tokens)} · 输出 ${formatTokenCapacity(result.max_output_tokens)}`,
+        },
       }));
+      await refreshCatalog();
     } catch (e) {
       setTestStates((s) => ({
         ...s,
@@ -2081,6 +2105,7 @@ function ModelCenter({
                 kinds: ["text"],
               });
               setNewTested("");
+              setNewTokenLimits({});
               setNewModel(true);
             }}
           >
@@ -2407,6 +2432,11 @@ function ModelCenter({
                               item.provider}
                           </code>
                           <span>{item.kinds.map((kind) => MODEL_KIND_LABELS[kind]).join(" / ")}</span>
+                          {(item.kinds.includes("text") || item.kinds.includes("vlm")) && (
+                            <span>
+                              上下文 {formatTokenCapacity(item.context_window_tokens)} · 输出 {formatTokenCapacity(item.max_output_tokens)} · {tokenLimitSourceLabel(item.token_limits_source)}
+                            </span>
+                          )}
                           <details className="model-library-technical">
                             <summary>技术标识</summary>
                             <code>{item.model}</code>
@@ -2467,6 +2497,11 @@ function ModelCenter({
                                   kinds: item.kinds,
                                 });
                                 setNewTested("");
+                                setNewTokenLimits({
+                                  context_window_tokens: item.context_window_tokens,
+                                  max_output_tokens: item.max_output_tokens,
+                                  token_limits_source: item.token_limits_source,
+                                });
                               }}
                             >
                               编辑
@@ -2738,16 +2773,20 @@ function ModelCenter({
                 onClick={async () => {
                   setNewTesting(true);
                   try {
-                    if (editingModel)
-                      await api.post(
+                    const result = editingModel
+                      ? await api.post(
                         `/models/${encodeURIComponent(editingModel.id)}/test`,
                         modelDraft,
-                      );
-                    else
-                      await api.post("/models/test", {
+                      )
+                      : await api.post("/models/test", {
                         ...modelDraft,
                         provider: "custom",
                       });
+                    setNewTokenLimits({
+                      context_window_tokens: result.context_window_tokens,
+                      max_output_tokens: result.max_output_tokens,
+                      token_limits_source: result.token_limits_source,
+                    });
                     setNewTested(newSignature);
                     toast("连接测试通过");
                   } catch (e) {
@@ -2770,11 +2809,12 @@ function ModelCenter({
                     if (editingModel)
                       await api.put(
                         `/models/${encodeURIComponent(editingModel.id)}`,
-                        modelDraft,
+                        { ...modelDraft, ...newTokenLimits },
                       );
                     else
                       await api.post("/models", {
                         ...modelDraft,
+                        ...newTokenLimits,
                         provider: "custom",
                       });
                     await refreshCatalog();

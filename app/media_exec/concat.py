@@ -5,15 +5,58 @@ try:
 except NameError:  # pragma: no cover - used when importing this module directly
     from app.media_exec.common import *
 
+
+_ACTIVE_VIDEO_JOB_STATUSES = ("queued", "running", "waiting_provider", "waiting_retry")
+
+
+def _active_generation_shot_nos(conn, episode_id: str) -> list[int]:
+    placeholders = ",".join("?" for _ in _ACTIVE_VIDEO_JOB_STATUSES)
+    rows = conn.execute(
+        f"""SELECT DISTINCT s.shot_no
+              FROM jobs j JOIN shots s ON s.id=j.shot_id
+             WHERE s.episode_id=? AND j.status IN ({placeholders})
+             ORDER BY s.shot_no""",
+        (episode_id, *_ACTIVE_VIDEO_JOB_STATUSES),
+    ).fetchall()
+    return [int(row["shot_no"]) for row in rows]
+
+
+def _is_delivery_fallback(row) -> bool:
+    if row is None:
+        return False
+    try:
+        meta = json.loads(row["image_inputs"] or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return bool(isinstance(meta, dict) and meta.get("delivery_fallback"))
+
+
+def _playable_model_candidate(conn, shot_id: str):
+    rows = conn.execute(
+        """SELECT * FROM shot_versions
+           WHERE shot_id=? AND status='succeeded' AND video_path IS NOT NULL
+           ORDER BY version_no DESC""",
+        (shot_id,),
+    ).fetchall()
+    return next(
+        (
+            row for row in rows
+            if not _is_delivery_fallback(row)
+            and row["video_path"]
+            and Path(row["video_path"]).is_file()
+        ),
+        None,
+    )
+
+
 def episode_mix_status(episode_id: str) -> dict:
-    """返回每镜采纳片段及合成状态；至少一个可用片段即可合成。"""
+    """返回当前已有真实视频的可合成状态。"""
     conn = get_conn()
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     if not ep:
         return {"ready": False, "shots_total": 0, "shots_ready": 0, "shots": []}
     shots = rows_to_dicts(conn.execute(
         "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)).fetchall())
-    ready = 0
     out = []
     for s in shots:
         vid = None
@@ -22,7 +65,10 @@ def episode_mix_status(episode_id: str) -> dict:
             v = conn.execute(
                 "SELECT * FROM shot_versions WHERE id=? AND status='succeeded'",
                 (s["adopted_version_id"],)).fetchone()
-            if v and v["video_path"] and Path(v["video_path"]).is_file():
+            if (
+                v and not _is_delivery_fallback(v)
+                and v["video_path"] and Path(v["video_path"]).is_file()
+            ):
                 from app.config import PROJECTS_DIR
                 try:
                     rel_path = Path(v["video_path"]).relative_to(PROJECTS_DIR).as_posix()
@@ -30,36 +76,67 @@ def episode_mix_status(episode_id: str) -> dict:
                     rel_path = None
                 if rel_path:
                     vid = f"/media/{rel_path}"
-                    ready += 1
         playback_rate = float(v["playback_rate"] or 1.0) if vid and v else 1.0
+        model_candidate = _playable_model_candidate(conn, s["id"])
         out.append({"shot_id": s["id"], "shot_no": s["shot_no"],
                     "duration_s": s["duration_s"], "video_url": vid,
-                    "has_adopted": bool(vid), "playback_rate": playback_rate,
+                    "has_adopted": bool(vid),
+                    "has_model_candidate": bool(model_candidate),
+                    "playback_rate": playback_rate,
                     "effective_duration_s": round(float(s["duration_s"] or 0) / playback_rate, 2)})
-    skipped_shot_nos = [item["shot_no"] for item in out if not item["has_adopted"]]
+    available = sum(1 for item in out if item["has_model_candidate"])
+    skipped_shot_nos = [item["shot_no"] for item in out if not item["has_model_candidate"]]
+    active_shot_nos = _active_generation_shot_nos(conn, episode_id)
+    final_path = _final_video_path(ep["project_id"], ep["episode_no"])
+    final_edit_report = _read_edit_report(final_path)
+    final_timeline = (
+        final_edit_report.get("timeline")
+        if isinstance(final_edit_report, dict) else None
+    )
     return {
         "episode_id": ep["id"],
         "title": ep["title"],
         "episode_no": ep["episode_no"],
         "shots_total": len(shots),
-        "shots_ready": ready,
-        # ready 表示“可发起合成”，而不再表示所有分镜已齐。
-        "ready": ready > 0,
-        "all_ready": len(shots) > 0 and ready == len(shots),
+        "shots_ready": available,
+        # 部分合成是主流程：任意一镜真实视频已落盘即可合成，
+        # 其他缺镜/生成中镜头只做透明跳过，不生成图片占位。
+        "ready": available > 0,
+        "generation_active": bool(active_shot_nos),
+        "active_shot_nos": active_shot_nos,
+        "all_ready": len(shots) > 0 and available == len(shots),
         "shots_skipped": len(skipped_shot_nos),
         "skipped_shot_nos": skipped_shot_nos,
         "final_video_url": _existing_final_url(ep),
+        "final_video_stale": _final_video_is_stale(ep),
+        "final_is_partial": bool(
+            isinstance(final_timeline, dict) and final_timeline.get("partial")
+        ),
+        "final_edit_report": final_edit_report,
         "shots": out,
     }
 
 
 def _existing_final_url(ep_row) -> str | None:
-    from app.config import PROJECTS_DIR
     final_path = _final_video_path(ep_row["project_id"], ep_row["episode_no"])
     if final_path.exists():
-        rel_path = final_path.relative_to(PROJECTS_DIR).as_posix()
-        return f"/media/{rel_path}"
+        return _versioned_final_url(final_path)
     return None
+
+
+def _versioned_final_url(final_path: Path) -> str:
+    """返回随成品文件变化的 URL，避免重新合成后浏览器继续播放旧缓存。"""
+    from app.config import PROJECTS_DIR
+
+    rel_path = final_path.relative_to(PROJECTS_DIR).as_posix()
+    stat = final_path.stat()
+    revision = f"{stat.st_mtime_ns}-{stat.st_size}"
+    return f"/media/{rel_path}?v={revision}"
+
+
+def _final_video_is_stale(ep_row) -> bool:
+    final_path = _final_video_path(ep_row["project_id"], ep_row["episode_no"])
+    return final_path.is_file() and final_path.with_suffix(".stale").is_file()
 
 
 def _final_video_path(project_id: str, episode_no: int) -> Path:
@@ -68,18 +145,70 @@ def _final_video_path(project_id: str, episode_no: int) -> Path:
     return d / "episode.mp4"
 
 
+def _edit_report_path(final_path: Path) -> Path:
+    return final_path.with_name("episode.edit-report.json")
+
+
+def _read_edit_report(final_path: Path) -> dict | None:
+    path = _edit_report_path(final_path)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def concatenate_episode(episode_id: str) -> dict:
-    """把本集可用的已采纳镜头按镜号拼接成 MP4，未采纳镜头直接跳过。
-    返回 {video_url, shots, total_duration_s}。系统未装 ffmpeg 时明确失败，不返回伪成片。
+    """把当前已有的真实模型视频按镜号拼接成 MP4。
+
+    只接受真实模型视频。内容 QA 低分不拦截，但静态图片、轻运动卡和静音片段
+    不具备成片资格。缺镜或生成中镜头直接跳过；任何时候只要已有一镜
+    真实视频就允许生成当前阶段成片。
     """
     from pathlib import Path as _P
     conn = get_conn()
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     if not ep:
         raise ValueError("剧集不存在")
+    if not shutil.which("ffmpeg"):
+        raise ValueError(
+            "服务端未找到视频合成组件 ffmpeg；请安装 ffmpeg 或修正服务启动 PATH 后重试，"
+            "本次未生成成片"
+        )
+
+    # 恢复/人工合成时，低分但可播放的真实模型候选可以强制择优；确定性图片
+    # 兜底已从候选池排除，绝不能借此获得 adopted_version_id。
+    from app.evidence.media import select_best_video_candidate
+
+    missing_model_shot_nos: list[int] = []
+    shot_rows = conn.execute(
+        "SELECT id,shot_no,adopted_version_id FROM shots WHERE episode_id=? ORDER BY shot_no",
+        (episode_id,),
+    ).fetchall()
+    for shot in shot_rows:
+        adopted = (
+            conn.execute(
+                "SELECT * FROM shot_versions WHERE id=? AND status='succeeded'",
+                (shot["adopted_version_id"],),
+            ).fetchone()
+            if shot["adopted_version_id"] else None
+        )
+        if (
+            adopted and not _is_delivery_fallback(adopted)
+            and adopted["video_path"] and Path(adopted["video_path"]).is_file()
+        ):
+            continue
+        selected = select_best_video_candidate(shot["id"], force_best=True)
+        if not selected:
+            missing_model_shot_nos.append(int(shot["shot_no"]))
     pieces = _adopted_video_paths(episode_id)
     if not pieces:
-        raise ValueError("本集没有任何已采用的视频片段，先生成/采用后再试")
+        raise ValueError(
+            "本集当前还没有任何可播放的真实模型视频；"
+            "不会使用静态图片或静音片段冒充成片"
+        )
 
     from app.video_playback import normalize_playback_rate
 
@@ -119,11 +248,59 @@ def concatenate_episode(episode_id: str) -> dict:
     concat_timeout_s = min(1800.0, max(120.0, est_total_dur * 10.0 + 60.0))
 
     final_path = _final_video_path(ep["project_id"], ep["episode_no"])
-    if not shutil.which("ffmpeg"):
-        raise ValueError(
-            "服务端未找到视频合成组件 ffmpeg；请安装 ffmpeg 或修正服务启动 PATH 后重试，"
-            "本次未生成成片"
+    common_result = {
+        "shots": len(pieces),
+        "ffmpeg_missing": False,
+        "shots_total": len(all_shot_nos),
+        "shots_skipped": len(skipped_shot_nos),
+        "skipped_shot_nos": skipped_shot_nos,
+        "included_shot_nos": piece_shot_nos,
+        "partial": bool(skipped_shot_nos),
+        "final_video_stale": False,
+        "fallback_shots_created": 0,
+        "fallback_shots_reused": 0,
+        "playback_rates": {str(no): rate for no, _path, rate in piece_specs},
+    }
+
+    # final-edit 是质量增强层，不是交付门禁。任何字体/滤镜/转场失败都回退到
+    # 下方的传统硬拼，上一版成片仍在原子替换成功前保持可用。
+    final_edit_failure: str | None = None
+    try:
+        from app.atomic_io import atomic_write_text
+        from app.final_edit import render_episode_final_edit
+
+        with tempfile.TemporaryDirectory() as edit_td:
+            edit_dir = _P(edit_td)
+            edited_video = edit_dir / "final-edit.mp4"
+            edit_report = render_episode_final_edit(
+                conn,
+                episode_id,
+                piece_specs,
+                edited_video,
+                edit_dir,
+            )
+            edit_report["timeline"] = {
+                "partial": bool(skipped_shot_nos),
+                "shots_total": len(all_shot_nos),
+                "included_shot_nos": piece_shot_nos,
+                "skipped_shot_nos": skipped_shot_nos,
+                "missing_model_shot_nos": missing_model_shot_nos,
+            }
+            atomic_copy(edited_video, final_path)
+        final_path.with_suffix(".stale").unlink(missing_ok=True)
+        report_path = _edit_report_path(final_path)
+        atomic_write_text(
+            report_path,
+            json.dumps(edit_report, ensure_ascii=False, indent=2),
         )
+        return {
+            "video_url": _versioned_final_url(final_path),
+            "total_duration_s": round(float(edit_report["total_duration_s"]), 1),
+            **common_result,
+            "final_edit": edit_report,
+        }
+    except Exception as exc:  # noqa: BLE001 - 质量增强失败必须继续完整交付
+        final_edit_failure = f"{type(exc).__name__}: {exc}"[:1000]
 
     # 用 concat demuxer 优先无重编码直粘（画质无损）；但 -c copy 要求各片段编码参数
     # （像素格式/timebase/SAR/profile）完全一致，否则会失败或花屏。一旦失败，回退重编码兜底。
@@ -195,6 +372,9 @@ def concatenate_episode(episode_id: str) -> dict:
         if not silent_video.is_file() or silent_video.stat().st_size <= 0:
             raise ValueError("ffmpeg 未产出有效成片，上一版成片仍保留，可检查片段后重试")
         atomic_copy(silent_video, final_path)
+        # 新成片已经原子替换成功，此时才清除“待更新”标记。合成失败时旧成片和
+        # 标记都会保留，状态轮询不会把正在观看的成品入口移除。
+        final_path.with_suffix(".stale").unlink(missing_ok=True)
 
     total_dur = 0
     try:
@@ -208,17 +388,31 @@ def concatenate_episode(episode_id: str) -> dict:
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError):
         total_dur = est_total_dur or config.DEFAULT_VIDEO_DURATION_S * len(pieces)
 
-    from app.config import PROJECTS_DIR
-    rel_path = final_path.relative_to(PROJECTS_DIR).as_posix()
+    fallback_edit_report = {
+        "ok": False,
+        "fallback": "draft_concat",
+        "error": final_edit_failure,
+        "runtime_blocking": False,
+        "timeline": {
+            "partial": bool(skipped_shot_nos),
+            "shots_total": len(all_shot_nos),
+            "included_shot_nos": piece_shot_nos,
+            "skipped_shot_nos": skipped_shot_nos,
+            "missing_model_shot_nos": missing_model_shot_nos,
+        },
+    }
+    from app.atomic_io import atomic_write_text
+
+    atomic_write_text(
+        _edit_report_path(final_path),
+        json.dumps(fallback_edit_report, ensure_ascii=False, indent=2),
+    )
     return {
-        "video_url": f"/media/{rel_path}",
-        "shots": len(pieces),
+        # 文件已经在上方原子覆盖；版本参数确保前端把它作为新的媒体资源加载。
+        "video_url": _versioned_final_url(final_path),
         "total_duration_s": round(total_dur, 1),
-        "ffmpeg_missing": False,
-        "shots_total": len(all_shot_nos),
-        "shots_skipped": len(skipped_shot_nos),
-        "skipped_shot_nos": skipped_shot_nos,
-        "playback_rates": {str(no): rate for no, _path, rate in piece_specs},
+        **common_result,
+        "final_edit": fallback_edit_report,
     }
 
 __all__ = [name for name in globals() if not name.startswith("__")]

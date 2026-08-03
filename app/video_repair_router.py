@@ -43,6 +43,15 @@ _PREFERRED_LEVEL: dict[str, RepairLevel] = {
     "VIDEO_QA_FUTURE_LEAK": "L2",
     "VIDEO_QA_WRONG_DIALOGUE": "L2",
     "VIDEO_QA_NEEDS_CROP": "L2",
+    "VIDEO_QA_WRONG_IDENTITY": "L2",
+    "VIDEO_QA_WRONG_OUTFIT": "L2",
+    "VIDEO_QA_SUBJECT_OCCLUSION": "L2",
+    "VIDEO_QA_ACTION_MISSING": "L2",
+    "VIDEO_QA_PROP_IDENTITY": "L2",
+    "VIDEO_QA_PROP_STATE": "L2",
+    "VIDEO_QA_OBJECT_COUNT": "L2",
+    "VIDEO_QA_CAMERA_AXIS": "L2",
+    "VIDEO_QA_GEOMETRY": "L2",
     "VIDEO_REFERENCE_UNAVAILABLE": "L3",
     "VIDEO_CHAIN_ANCHOR_BLOCKED": "L3",
     "VIDEO_PROVIDER_SAFETY": "L4",
@@ -105,6 +114,10 @@ def strategy_for_level(
                 "VIDEO_QA_CHARACTER_DUPLICATE",
                 "VIDEO_QA_TEXT_ARTIFACT",
                 "VIDEO_QA_STATE_MISMATCH",
+                "VIDEO_QA_WRONG_IDENTITY",
+                "VIDEO_QA_ACTION_MISSING",
+                "VIDEO_QA_PROP_IDENTITY",
+                "VIDEO_QA_PROP_STATE",
             }
         ):
             return "auto_crop"
@@ -149,6 +162,15 @@ def _directed_patch(issues: list[Issue]) -> tuple[list[str], list[str]]:
                 "VIDEO_QA_FUTURE_LEAK": "future_leak",
                 "VIDEO_QA_WRONG_DIALOGUE": "wrong_dialogue",
                 "VIDEO_QA_NEEDS_CROP": "needs_crop",
+                "VIDEO_QA_WRONG_IDENTITY": "wrong_identity",
+                "VIDEO_QA_WRONG_OUTFIT": "wrong_outfit",
+                "VIDEO_QA_SUBJECT_OCCLUSION": "subject_occlusion",
+                "VIDEO_QA_ACTION_MISSING": "action_missing",
+                "VIDEO_QA_PROP_IDENTITY": "prop_identity_mismatch",
+                "VIDEO_QA_PROP_STATE": "prop_state_mismatch",
+                "VIDEO_QA_OBJECT_COUNT": "object_count_mismatch",
+                "VIDEO_QA_CAMERA_AXIS": "wrong_camera_axis",
+                "VIDEO_QA_GEOMETRY": "geometry_guard_unverified",
             }
             rule = reverse.get(issue.code, "")
         if not rule:
@@ -190,18 +212,27 @@ def route(
         elif isinstance(item, dict):
             normalized.append(Issue.model_validate(item))
 
-    # Score-only：QA 类 Issue 不得驱动付费修复（PRD QA-SO #30）。
-    qa_only = [i for i in normalized if str(i.code).startswith("VIDEO_QA_")]
-    actionable = [i for i in normalized if not str(i.code).startswith("VIDEO_QA_")]
-    if not actionable:
+    qa_only = bool(normalized) and all(str(i.code).startswith("VIDEO_QA_") for i in normalized)
+    if qa_only:
+        codes = [i.code for i in normalized]
+        # QA 是有限优化信号，不参与 L3–L6 的暂停/人工升级。次数与成本上限由
+        # Supervisor 统一控制；路由器只给下一次尝试提供可执行方向。
+        level: RepairLevel = "L1" if set(codes) <= {"VIDEO_QA_LOW_SCORE"} else "L2"
+        history = list(qa_history or [])
+        if len(history) >= 2 and history[-1] - history[-2] < MIN_QA_GAIN:
+            level = "L2"
+        strategy = strategy_for_level(level, issues=normalized)
+        negatives, critiques = _directed_patch(normalized) if strategy == "retake_directed" else ([], [])
         return VideoRepairPlan(
-            level="L6",
-            strategy="handoff_human",
-            issue_codes=[i.code for i in qa_only],
-            reason="仅有 QA 评分问题，不自动重抽/重建；交还用户主动重做",
-            is_paid=False,
+            level=level,
+            strategy=strategy,
+            issue_codes=codes,
+            fingerprint=normalized[0].fingerprint,
+            reason=f"QA 有界质量重试：{', '.join(codes[:4])}",
+            is_paid=strategy not in {"requeue_no_charge", "handoff_human", "auto_crop"},
+            extra_negative=negatives,
+            critique=critiques,
         )
-    normalized = actionable
 
     counts = dict(fingerprint_counts or {})
     chain_position = int(getattr(entry, "chain_position", 0) or 0) if entry else 0
@@ -368,4 +399,3 @@ def should_cascade(
     if d_pos - n_pos > MAX_CHAIN_CASCADE_DEPTH:
         return False
     return True
-

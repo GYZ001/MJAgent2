@@ -31,6 +31,29 @@ def test_custom_model_can_be_added_to_catalog(monkeypatch) -> None:
     saved = json.loads(store["custom_models"])
     assert saved[0]["model"] == "vendor/new-model"
     assert api.get_models()["items"][-1]["label"] == "New Model"
+    assert created["context_window_tokens"] == 128 * 1024
+    assert created["max_output_tokens"] == 32 * 1024
+    assert created["token_limits_source"] == "default_128k_32k"
+
+
+def test_legacy_catalog_models_receive_128k_32k_compatibility_defaults(monkeypatch) -> None:
+    store = {
+        "custom_models": json.dumps([{
+            "id": "model_legacy",
+            "provider": "openrouter",
+            "model": "vendor/legacy",
+            "label": "Legacy",
+            "kinds": ["text"],
+            "builtin": False,
+        }]),
+    }
+    monkeypatch.setattr(api, "get_setting", lambda key: store.get(key, ""))
+
+    model = next(item for item in api.get_models()["items"] if item["id"] == "model_legacy")
+
+    assert model["context_window_tokens"] == 131072
+    assert model["max_output_tokens"] == 32768
+    assert model["token_limits_source"] == "default_128k_32k"
 
 
 def test_custom_model_rejects_unsupported_capability(monkeypatch) -> None:
@@ -169,6 +192,51 @@ def test_connection_probe_checks_openai_response(monkeypatch) -> None:
 
     assert result["ok"] is True
     assert result["preview"] == "OK"
+    assert result["context_window_tokens"] == 131072
+    assert result["max_output_tokens"] == 32768
+
+
+def test_connection_probe_reads_provider_token_metadata(monkeypatch) -> None:
+    class ChatResponse:
+        is_success = True
+        status_code = 200
+        text = '{"choices": [{"message": {"content": "OK"}}]}'
+
+        def json(self):
+            return {"choices": [{"message": {"content": "OK"}}]}
+
+    class ModelsResponse:
+        is_success = True
+
+        def json(self):
+            return {
+                "data": [{
+                    "id": "model-a",
+                    "context_length": 262144,
+                    "top_provider": {"max_completion_tokens": 49152},
+                }],
+            }
+
+    class Client:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return None
+        async def post(self, *args, **kwargs): return ChatResponse()
+        async def get(self, *args, **kwargs): return ModelsResponse()
+
+    monkeypatch.setattr(api.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(
+        api.socket, "getaddrinfo",
+        lambda host, port, **kwargs: [(api.socket.AF_INET, api.socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))],
+    )
+
+    result = asyncio.run(api._probe_openai_model(
+        "https://example.com/v1", "secret", "model-a", "text",
+    ))
+
+    assert result["context_window_tokens"] == 262144
+    assert result["max_output_tokens"] == 49152
+    assert result["token_limits_source"] == "provider_metadata"
 
 
 def test_custom_model_can_be_edited_then_deleted(monkeypatch) -> None:
