@@ -65,6 +65,20 @@ def is_functional_extra(name: str) -> bool:
     )
 
 
+def generic_functional_extra_role(name: str) -> str | None:
+    """Collapse a one-character surname plus minor job title to its generic role."""
+    value = (name or "").strip()
+    if not value:
+        return None
+    if is_functional_extra(value):
+        return value
+    for role in sorted(FUNCTIONAL_EXTRA_ROLES, key=len, reverse=True):
+        prefix = value[:-len(role)] if value.endswith(role) else ""
+        if role and re.fullmatch(r"[\u3400-\u9fff]", prefix):
+            return role
+    return None
+
+
 def is_collective_role(name: str) -> bool:
     """返回这个可见名单项是否表示群体，而不是一个需锁定身份的人。
 

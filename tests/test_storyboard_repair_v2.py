@@ -791,6 +791,33 @@ def test_deterministic_action_dialogue_framing_candidate(
     assert shot.shot_size == initial_size
 
 
+def test_deterministic_single_dialogue_marks_named_listener_offscreen() -> None:
+    shot = _shot(
+        2,
+        action="少年看向纳兰嫣然，平静说出少女名字。",
+    )
+    shot.shot_size = "近景"
+    shot.characters = ["少年"]
+    shot.characters_visible = ["少年"]
+    shot.dialogues = [Dialogue(speaker="少年", line="纳兰嫣然。", emotion="平静")]
+    shot.first_frame_desc = "少年近景，目光看向纳兰嫣然。"
+    shot.last_frame_desc = "少年说完后仍看着纳兰嫣然。"
+    issue = (
+        "shots[1](shot_no=2) 是「少年」的单人对白近景，但 action_desc/首尾帧仍把"
+        "「纳兰嫣然」写进可见画面；请把听者明确留在画外，下一话轮再切反打"
+    )
+
+    candidate = _deterministic_dialogue_framing_candidate(shot, [issue])
+
+    assert candidate is not None
+    assert candidate.characters == ["少年"]
+    assert candidate.characters_visible == ["少年"]
+    assert "画外纳兰嫣然" in candidate.action_desc
+    assert "画外纳兰嫣然" in candidate.first_frame_desc
+    assert "画外纳兰嫣然" in candidate.last_frame_desc
+    assert "画外" not in shot.action_desc
+
+
 def test_repair_plan_uses_deterministic_dialogue_candidate_without_provider(repair_db) -> None:
     conn, _screenplay = repair_db
     shot = _shot(2, action="少年翻开手中名册，同时宣布下一位测试者的名字。")

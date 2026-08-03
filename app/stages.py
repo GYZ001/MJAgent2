@@ -35,6 +35,7 @@ from app.validators import (SOURCE_EXCERPT_MIN_CHARS,
                             TRANSITION_HINTS, _atomize_claim, _condense, _covers_has_crowd,
                             _covers_has_spoken, _covers_outside_spoken,
                             normalize_action_desc, normalize_continuity,
+                            normalize_dialogue_focus_offscreen_mentions,
                             normalize_offbible_characters, normalize_transition_visuals,
                             prefer_default_shot_durations,
                             relieve_spoken_overflow,
@@ -1176,6 +1177,7 @@ def _normalized_candidate_board(episode_no: int, completed_shots: list[Shot], sh
             + "、".join(stripped)
             + "；不得删除人物或台词，请严格改用已发布剧本中的人物谱正名/路人编号"
         ]
+    normalize_dialogue_focus_offscreen_mentions(board, bible)
     # ② 产品禁止旁白/内心OS：确定性清空 narration 与 timeline narration 轨。
     relieve_spoken_overflow(board)
     prefer_default_shot_durations(board)

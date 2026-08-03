@@ -16,6 +16,7 @@ from app.continuity import (
     reference_role_plan,
     resolve_do_not_repeat_texts,
     speech_capacity_errors,
+    sync_shot_continuity_fields,
     uses_previous_tail_frame,
 )
 from app.evidence import media
@@ -94,6 +95,22 @@ def test_5s_multi_action_rejected_by_capacity_and_preflight() -> None:
 
     assert any("顺序动作节拍" in err for err in direct)
     assert any("顺序动作节拍" in err for err in preflight)
+
+
+def test_short_primary_action_uses_complete_action_desc_for_generation() -> None:
+    action_desc = "林风收起迟疑神情，认真看向画外同伴，开口承诺日后归还借款。"
+    shot = _shot(
+        action_desc=action_desc,
+        primary_action="林风承诺还钱",
+    )
+
+    sync_shot_continuity_fields(shot)
+
+    assert shot.primary_action == action_desc
+    assert not any(
+        "primary_action 缺失或过短" in error
+        for error in preflight_seedance_gates(shot)
+    )
 
 
 def test_only_action_continuation_uses_previous_tail_frame() -> None:

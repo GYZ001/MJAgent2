@@ -3480,6 +3480,53 @@ def _strip_shot_character_contract(shot: Shot, name: str) -> list[str]:
     return moved
 
 
+def normalize_dialogue_focus_offscreen_mentions(
+    board: Storyboard,
+    bible: Bible | None,
+) -> list[dict]:
+    """Project pure dialogue closeups to one visible speaker before validation."""
+    bible_names = {character.name for character in bible.characters} if bible else set()
+    changes: list[dict] = []
+    for shot in board.shots:
+        focus = dialogue_focus_subject(shot)
+        if not focus or dialogue_two_shot_required(shot):
+            continue
+        mutated_fields: list[str] = []
+        if shot.characters != [focus]:
+            shot.characters = [focus]
+            mutated_fields.append("characters")
+        if shot.characters_visible != [focus]:
+            shot.characters_visible = [focus]
+            mutated_fields.append("characters_visible")
+        offscreen_names: list[str] = []
+        for name in sorted(bible_names - {focus}, key=len, reverse=True):
+            pattern = re.compile(rf"(?<!画外){re.escape(name)}")
+            name_changed = False
+            for field in (
+                "action_desc", "state_in", "primary_action", "state_out",
+                "first_frame_desc", "last_frame_desc", "spatial_anchor",
+            ):
+                value = getattr(shot, field, None)
+                if (
+                    value
+                    and name in value
+                    and not _named_character_is_explicitly_offscreen(name, value)
+                ):
+                    setattr(shot, field, pattern.sub(f"画外{name}", value))
+                    mutated_fields.append(field)
+                    name_changed = True
+            if name_changed:
+                offscreen_names.append(name)
+        if mutated_fields:
+            changes.append({
+                "shot_no": shot.shot_no,
+                "dialogue_focus": focus,
+                "marked_offscreen": offscreen_names,
+                "fields": list(dict.fromkeys(mutated_fields)),
+            })
+    return changes
+
+
 def normalize_offbible_characters(board: Storyboard, bible: Bible | None) -> list[dict]:
     """按角色圣经与功能性路人合同确定性规范镜头角色。
 

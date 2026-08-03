@@ -471,23 +471,57 @@ def _repair_candidate_made_progress(
     return bool(resolved) and not introduced
 
 
-def _deterministic_dialogue_framing_candidate(shot: Shot) -> Shot | None:
+def _deterministic_dialogue_framing_candidate(
+    shot: Shot,
+    issue_messages: list[str] | None = None,
+) -> Shot | None:
     """Return the smallest contract-preserving framing fix when it is unambiguous."""
     from app.continuity import dialogue_action_staging_kind
 
     candidate = Shot.model_validate(shot.model_dump(mode="json"))
+    changed = False
     staging_kind = dialogue_action_staging_kind(candidate)
     if staging_kind == "spatial" and candidate.shot_size not in {"远景", "全景", "中景"}:
         candidate.shot_size = "中景"
+        changed = True
     elif staging_kind == "prop" and candidate.shot_size == "特写":
         candidate.shot_size = "近景"
-    else:
-        return None
-    tags = list(candidate.risk_tags or [])
-    if "dialogue_action_staging" not in tags:
-        tags.append("dialogue_action_staging")
-    candidate.risk_tags = tags
-    return candidate
+        changed = True
+    if changed:
+        tags = list(candidate.risk_tags or [])
+        if "dialogue_action_staging" not in tags:
+            tags.append("dialogue_action_staging")
+        candidate.risk_tags = tags
+
+    messages = [str(message or "") for message in (issue_messages or [])]
+    speakers = {
+        match.group(1).strip()
+        for message in messages
+        for match in re.finditer(r"是「([^」]+)」的单人对白近景", message)
+        if match.group(1).strip()
+    }
+    offscreen_names = {
+        match.group(1).strip()
+        for message in messages
+        for match in re.finditer(r"仍把「([^」]+)」写进可见画面", message)
+        if match.group(1).strip()
+    }
+    if len(speakers) == 1 and offscreen_names:
+        speaker = next(iter(speakers))
+        candidate.characters = [speaker]
+        candidate.characters_visible = [speaker]
+        for name in offscreen_names - {speaker}:
+            pattern = re.compile(rf"(?<!画外){re.escape(name)}")
+            for field in (
+                "action_desc", "state_in", "primary_action", "state_out",
+                "first_frame_desc", "last_frame_desc", "spatial_anchor",
+            ):
+                value = getattr(candidate, field, None)
+                if value and name in value:
+                    setattr(candidate, field, pattern.sub(f"画外{name}", value))
+                    changed = True
+
+    return candidate if changed else None
 
 
 def _recover_truncated_outline_from_approved_artifact(
@@ -1495,6 +1529,8 @@ async def run_storyboard_supervisor(
                     + "、".join(stripped)
                     + "；未写入镜头，请严格使用发布剧本中的人物身份"
                 ])
+            from app.validators import normalize_dialogue_focus_offscreen_mentions
+            normalize_dialogue_focus_offscreen_mentions(board, bible)
             relieve_spoken_overflow(board)
             prefer_default_shot_durations(board)
             normalize_transition_visuals(board)
@@ -2013,7 +2049,7 @@ def _apply_repair(
             None,
         )
         deterministic = (
-            _deterministic_dialogue_framing_candidate(target)
+            _deterministic_dialogue_framing_candidate(target, plan.issue_messages)
             if target is not None else None
         )
         if deterministic is not None:

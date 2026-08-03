@@ -402,8 +402,10 @@ def sync_shot_continuity_fields(shot: Shot, prev: Shot | None = None) -> str:
         shot.state_in = (shot.first_frame_desc or "").strip()
     if not (shot.state_out or "").strip():
         shot.state_out = (shot.last_frame_desc or "").strip()
-    if not (shot.primary_action or "").strip():
-        shot.primary_action = (shot.action_desc or "").strip()
+    primary_action = (shot.primary_action or "").strip()
+    action_desc = (shot.action_desc or "").strip()
+    if not primary_action or (len(primary_action) < 8 and len(action_desc) >= 8):
+        shot.primary_action = action_desc
     # 旧镜头可能缺首尾帧，或首尾帧过短：用主动作合成最小可用状态
     action_fallback = (shot.primary_action or shot.action_desc or "").strip()
     if len((shot.state_in or "").strip()) < 8 and action_fallback:

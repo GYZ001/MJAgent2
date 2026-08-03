@@ -1152,6 +1152,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
             f"{config.VIDEO_DURATION_MIN_S}~{config.VIDEO_DURATION_MAX_S}s 的整数")
 
     sync_shot_continuity_fields(shot)
+    visible_names = effective_characters_visible(shot)
     dialogue_focus = dialogue_focus_subject(shot)
     dialogue_staging = dialogue_action_staging_kind(shot)
     mode = (continuity_mode or derive_continuity_mode(shot)).strip()
@@ -1176,7 +1177,6 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     state_out = planned_state_out(shot)
     primary = effective_primary_action(shot)
     full_action = (shot.action_desc or "").strip()
-    visible_names = effective_characters_visible(shot)
     (
         state_in,
         state_out,

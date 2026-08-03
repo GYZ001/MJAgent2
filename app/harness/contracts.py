@@ -50,7 +50,7 @@ _CONTRACTS: dict[str, StageContract] = {
     ),
     "storyboard": StageContract(
         key="storyboard",
-        version="2.1.2",
+        version="2.1.7",
         input_types=["episode_screenplay"],
         output_type="storyboard",
         invariants=[
@@ -60,6 +60,7 @@ _CONTRACTS: dict[str, StageContract] = {
             "sequential generation emits exactly one singular shot per iteration",
             "single-shot output tokens are bounded independently from full-screenplay generation",
             "functional extras use deterministic generic labels and never mint persistent bible identities",
+            "effective visible characters must belong to the bible or a deterministic extra class",
         ],
         max_iterations=4,
     ),

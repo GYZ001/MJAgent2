@@ -65,30 +65,35 @@ def _cached_successful_provider_response(
     operation_id = str((meta or {}).get("operation_id") or "").strip() \
         or provider_operation_id(kind, model, payload)
     try:
-        row = get_conn().execute(
-            "SELECT id,response_json FROM provider_calls "
+        rows = get_conn().execute(
+            "SELECT id,response_json,meta FROM provider_calls "
             "WHERE operation_id=? AND status IN ('OK','SUCCESS','SUCCEEDED') "
-            "AND response_json IS NOT NULL ORDER BY id DESC LIMIT 1",
+            "AND response_json IS NOT NULL ORDER BY id DESC LIMIT 20",
             (operation_id,),
-        ).fetchone()
-        if not row or not row["response_json"]:
-            return None
-        value = json.loads(row["response_json"])
-        if not isinstance(value, dict):
-            return None
-        log_provider_call(
-            "provider_cache_hit",
-            model,
-            "REUSED",
-            None,
-            0,
-            meta={
-                **(meta or {}),
-                "operation_id": operation_id,
-                "source_provider_call_id": int(row["id"]),
-            },
-        )
-        return value
+        ).fetchall()
+        expected_contract = str((meta or {}).get("contract_version") or "").strip()
+        for row in rows:
+            if expected_contract:
+                stored_meta = json.loads(row["meta"] or "{}")
+                if str(stored_meta.get("contract_version") or "").strip() != expected_contract:
+                    continue
+            value = json.loads(row["response_json"])
+            if not isinstance(value, dict):
+                continue
+            log_provider_call(
+                "provider_cache_hit",
+                model,
+                "REUSED",
+                None,
+                0,
+                meta={
+                    **(meta or {}),
+                    "operation_id": operation_id,
+                    "source_provider_call_id": int(row["id"]),
+                },
+            )
+            return value
+        return None
     except (json.JSONDecodeError, sqlite3.Error, TypeError, ValueError):
         return None
 

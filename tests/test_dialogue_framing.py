@@ -26,6 +26,7 @@ from app.schemas import (
 )
 from app.validators import (
     defer_establishing_covers,
+    normalize_dialogue_focus_offscreen_mentions,
     outline_key_line_speaker_errors,
     split_outline_on_speaker_changes,
     validate_storyboard,
@@ -131,6 +132,49 @@ def test_full_storyboard_gate_rejects_group_dialogue_composition() -> None:
 
     assert any("只保留说话人" in error for error in errors)
     assert any("近景或特写" in error for error in errors)
+
+
+def test_dialogue_focus_normalization_marks_listener_offscreen_before_validation() -> None:
+    shot = _shot(
+        characters=["甲", "乙"],
+        characters_visible=["甲", "乙"],
+        action_desc="甲正对乙站定，以克制语气说出自己的最终决定。",
+        first_frame_desc="甲与乙同处近景，甲看向乙，嘴唇尚未张开。",
+        last_frame_desc="同一机位，甲说完后仍注视乙，神情已经转为坚定。",
+        state_in="甲看向乙，尚未开口。",
+        primary_action="甲向乙说出自己的决定。",
+        state_out="甲说完后等待乙回应。",
+    )
+    board = Storyboard(episode_no=1, shots=[shot])
+
+    assert any("只保留说话人" in error for error in dialogue_framing_errors(shot))
+
+    changes = normalize_dialogue_focus_offscreen_mentions(board, _bible())
+
+    assert shot.characters == ["甲"]
+    assert shot.characters_visible == ["甲"]
+    assert "画外乙" in shot.action_desc
+    assert "画外乙" in shot.first_frame_desc
+    assert "画外乙" in shot.last_frame_desc
+    assert changes == [{
+        "shot_no": 2,
+        "dialogue_focus": "甲",
+        "marked_offscreen": ["乙"],
+        "fields": [
+            "characters",
+            "characters_visible",
+            "action_desc",
+            "state_in",
+            "primary_action",
+            "state_out",
+            "first_frame_desc",
+            "last_frame_desc",
+        ],
+    }]
+
+    errors = validate_storyboard(board, _bible(), target_duration_s=40)
+    assert not any("只保留说话人" in error for error in errors)
+    assert not any("单人对白近景" in error for error in errors)
 
 
 def test_two_visible_speakers_must_split_into_reverse_shots() -> None:

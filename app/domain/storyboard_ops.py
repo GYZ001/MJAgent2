@@ -936,6 +936,8 @@ async def _storyboard_task(
 
 def recover_storyboard_tasks() -> int:
     """恢复被服务重启中断的分镜任务，不接管用户主动暂停的 Run。"""
+    from app.generation_concurrency import PRIORITY_RECOVERY
+
     conn = get_conn()
     rows = conn.execute(
         "SELECT * FROM episodes "
@@ -981,7 +983,13 @@ def recover_storyboard_tasks() -> int:
             conn.commit()
             task_registry.spawn(
                 "storyboard", episode_id,
-                _recorded_storyboard_task(episode_id, recorder, resume=True),
+                _storyboard_guarded_recorded(
+                    episode_id,
+                    recorder,
+                    resume=True,
+                    new_activation=False,
+                    priority=PRIORITY_RECOVERY,
+                ),
                 project_id=row["project_id"],
             )
             resumed += 1
@@ -1371,8 +1379,12 @@ async def start_storyboard(episode_id: str, body: dict | None = Body(None)):
             (recorder.run_id, episode_id),
         )
         conn.commit()
-        coro = _recorded_storyboard_task(
-            episode_id, recorder, resume=False,
+        coro = _storyboard_guarded_recorded(
+            episode_id,
+            recorder,
+            resume=False,
+            new_activation=False,
+            priority=0,
         )
         task_registry.spawn(
             "storyboard", episode_id, coro, project_id=ep["project_id"],
@@ -1483,8 +1495,12 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
             (recorder.run_id, episode_id),
         )
         conn.commit()
-        coro = _recorded_storyboard_task(
-            episode_id, recorder, resume=True, new_activation=True,
+        coro = _storyboard_guarded_recorded(
+            episode_id,
+            recorder,
+            resume=True,
+            new_activation=True,
+            priority=0,
         )
         task_registry.spawn(
             "storyboard", episode_id, coro, project_id=ep["project_id"],
@@ -1536,20 +1552,13 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
     }
 
 
-async def _storyboard_guarded(episode_id: str, sem: asyncio.Semaphore):
-    """带并发上限的分镜任务，用于批量生成时不一次性打爆模型网关。"""
-    async with sem:
-        recorder = _new_storyboard_recorder(episode_id, trigger_type="batch")
-        await _recorded_storyboard_task(episode_id, recorder, resume=True)
-        return recorder.run_id
-
-
 @router.post("/projects/{project_id}/storyboard-all")
 async def start_storyboard_all(project_id: str):
     """为本项目所有【待分镜】(planned) 剧集批量生成分镜，限并发逐集触发。
     必须是 async def：sync 路由跑在无事件循环的线程池里，asyncio.create_task 会抛
     'no running event loop'，导致状态已置为 scripting 但任务从未启动（前端显示分镜中、模型却收不到请求）。
     同时回收状态卡在 scripting 但无在跑任务的孤儿集，便于一键修复。"""
+    from app.generation_concurrency import PRIORITY_BATCH
     from app.capabilities.dispatch import ui_route
     routed = await ui_route("storyboard.generate_batch", {"project_id": project_id})
     if routed is not None:
@@ -1571,7 +1580,6 @@ async def start_storyboard_all(project_id: str):
     ]
     if not candidates:
         raise HTTPException(409, "没有可展开分镜的剧集（需先生成剧本，且状态为待分镜/分镜失败/卡住的分镜中）")
-    sem = asyncio.Semaphore(max(int(get_setting("storyboard_concurrency") or 2), 1))
     run_ids: list[str] = []
     failed_to_start: list[dict] = []
     for candidate in candidates:
@@ -1613,7 +1621,13 @@ async def start_storyboard_all(project_id: str):
             })
             continue
         conn.commit()
-        coro = _storyboard_guarded_recorded(eid, sem, recorder)
+        coro = _storyboard_guarded_recorded(
+            eid,
+            recorder,
+            resume=True,
+            new_activation=True,
+            priority=PRIORITY_BATCH,
+        )
         try:
             task_registry.spawn(
                 "storyboard", eid, coro, project_id=project_id,
@@ -1658,12 +1672,25 @@ async def start_storyboard_all(project_id: str):
 
 
 async def _storyboard_guarded_recorded(
-    episode_id: str, sem: asyncio.Semaphore, recorder: WorkflowRecorder
+    episode_id: str,
+    recorder: WorkflowRecorder,
+    *,
+    resume: bool,
+    new_activation: bool,
+    priority: int,
 ) -> None:
-    async with sem:
-        await _recorded_storyboard_task(
-            episode_id, recorder, resume=True, new_activation=True,
-        )
+    from app.generation_concurrency import run_with_generation_slot
+
+    await run_with_generation_slot(
+        "storyboard",
+        lambda: _recorded_storyboard_task(
+            episode_id,
+            recorder,
+            resume=resume,
+            new_activation=new_activation,
+        ),
+        priority=priority,
+    )
 
 
 @router.post("/episodes/{episode_id}/storyboard/cancel")
@@ -2287,10 +2314,14 @@ def _storyboard_status_snapshot(
     )
     final_valid = bool(shots and shots[-1].get("is_final"))
     phase = str((supervisor or {}).get("phase") or "")
-    running = ep.get("status") == "scripting" and phase not in {
-        "PAUSED_EXTERNAL", "PAUSED_BUDGET", "WAITING_HUMAN", "WAITING_AUTHORIZATION",
-        "CANCELLED",
-    }
+    active_run_live = _storyboard_generation_is_live(ep)
+    running = ep.get("status") == "scripting" and (
+        active_run_live
+        or phase not in {
+            "PAUSED_EXTERNAL", "PAUSED_BUDGET", "WAITING_HUMAN",
+            "WAITING_AUTHORIZATION", "CANCELLED",
+        }
+    )
     incomplete_terminal_checkpoint = bool(
         phase == "SUCCEEDED"
         and (
@@ -2299,8 +2330,11 @@ def _storyboard_status_snapshot(
             or not final_valid
         )
     )
-    paused = (
-        phase in {"PAUSED_EXTERNAL", "PAUSED_BUDGET", "WAITING_HUMAN", "WAITING_AUTHORIZATION"}
+    paused = not active_run_live and (
+        phase in {
+            "PAUSED_EXTERNAL", "PAUSED_BUDGET",
+            "WAITING_HUMAN", "WAITING_AUTHORIZATION",
+        }
         or incomplete_terminal_checkpoint
     )
     confirmed = ep.get("status") in {"confirmed", "generating", "done"}

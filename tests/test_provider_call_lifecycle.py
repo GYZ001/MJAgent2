@@ -312,6 +312,47 @@ def test_successful_text_operation_can_be_reused_after_local_state_conflict(
     assert json.loads(hit["meta"])["source_provider_call_id"] == call_id
 
 
+def test_success_cache_requires_matching_contract_version(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-contract-cache.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    payload = {
+        "model": "text-model",
+        "messages": [{"role": "user", "content": "same"}],
+        "temperature": 0.7,
+        "max_tokens": 1024,
+    }
+    call_id = db.start_provider_call(
+        "chat",
+        "text-model",
+        meta={"contract_version": "2.1.2"},
+        request_json=payload,
+    )
+    db.finish_provider_call(
+        call_id,
+        "OK",
+        200,
+        25,
+        response_json={"choices": [{"message": {"content": "old contract result"}}]},
+    )
+
+    stale = hiagent._cached_successful_provider_response(
+        "chat",
+        "text-model",
+        payload,
+        {"reuse_successful_operation": True, "contract_version": "2.1.3"},
+    )
+    matching = hiagent._cached_successful_provider_response(
+        "chat",
+        "text-model",
+        payload,
+        {"reuse_successful_operation": True, "contract_version": "2.1.2"},
+    )
+
+    assert stale is None
+    assert matching == {"choices": [{"message": {"content": "old contract result"}}]}
+
+
 def test_semantic_attempt_id_separates_new_repair_from_crash_recovery(
     tmp_path, monkeypatch,
 ) -> None:

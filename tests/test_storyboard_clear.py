@@ -306,6 +306,39 @@ def test_storyboard_cancel_is_a_resumable_pause(monkeypatch) -> None:
     assert status["recommended_action"] == "resume_storyboard"
 
 
+def test_live_run_overrides_stale_paused_checkpoint_in_status_projection() -> None:
+    from app.storyboard_supervisor import SupervisorCheckpoint, save_checkpoint
+
+    save_checkpoint(SupervisorCheckpoint(
+        episode_id="e1",
+        phase="PAUSED_EXTERNAL",
+        outcome="PAUSED_BY_USER",
+        validated_prefix_end=0,
+        next_shot_no=1,
+    ))
+    episode = dict(db.get_conn().execute(
+        "SELECT * FROM episodes WHERE id='e1'"
+    ).fetchone())
+    shot = dict(db.get_conn().execute(
+        "SELECT * FROM shots WHERE id='shot1'"
+    ).fetchone())
+
+    status = api._storyboard_status_snapshot(
+        episode,
+        [shot],
+        {
+            "phase": "PAUSED_EXTERNAL",
+            "outcome": "PAUSED_BY_USER",
+            "validated_prefix_end": 0,
+            "next_shot_no": 1,
+        },
+    )
+
+    assert status["state"] == "running"
+    assert status["recommended_action"] == "view_progress"
+    assert status["task_phase"] == "PAUSED_EXTERNAL"
+
+
 def test_start_auto_resumes_until_internal_reset_clears_existing_work() -> None:
     preview = api._storyboard_start_preflight_payload("e1")
     assert preview["action"] == "resume"

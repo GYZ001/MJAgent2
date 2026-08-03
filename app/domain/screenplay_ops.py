@@ -427,6 +427,8 @@ def _screenplay_fallback_status(ep) -> str:
 
 def recover_screenplay_tasks() -> int:
     """Resume only work that was actually interrupted by a service restart."""
+    from app.generation_concurrency import PRIORITY_RECOVERY
+
     conn = get_conn()
     rows = conn.execute(
         """SELECT e.*
@@ -469,6 +471,11 @@ def recover_screenplay_tasks() -> int:
                 status=row["screenplay_status"],
                 message=row["screenplay_error"],
                 preserve_started_at=True,
+                task_factory=lambda episode_id=episode_id, recorder=recorder: _screenplay_guarded(
+                    episode_id,
+                    recorder,
+                    priority=PRIORITY_RECOVERY,
+                ),
             )
         except Exception as exc:  # noqa: BLE001 - recover remaining episodes independently
             public = errors.record_and_format(
@@ -807,7 +814,7 @@ def _spawn_screenplay_activation(
         task_coro = (
             task_factory()
             if task_factory is not None
-            else _recorded_screenplay_task(episode_id, recorder)
+            else _screenplay_guarded(episode_id, recorder)
         )
         task_registry.spawn(
             "screenplay",
@@ -1687,15 +1694,22 @@ async def delete_screenplay(episode_id: str):
 
 async def _screenplay_guarded(
     episode_id: str,
-    sem: asyncio.Semaphore,
     recorder: WorkflowRecorder,
+    *,
+    priority: int = 0,
 ):
-    async with sem:
-        await _recorded_screenplay_task(episode_id, recorder)
+    from app.generation_concurrency import run_with_generation_slot
+
+    await run_with_generation_slot(
+        "screenplay",
+        lambda: _recorded_screenplay_task(episode_id, recorder),
+        priority=priority,
+    )
 
 
 @router.post("/projects/{project_id}/screenplay-all")
 async def start_screenplay_all(project_id: str):
+    from app.generation_concurrency import PRIORITY_BATCH
     from app.capabilities.dispatch import ui_route
     routed = await ui_route("screenplay.generate_batch", {"project_id": project_id})
     if routed is not None:
@@ -1717,7 +1731,6 @@ async def start_screenplay_all(project_id: str):
     ]
     if not selected:
         raise HTTPException(409, "没有待生成剧本的剧集")
-    sem = asyncio.Semaphore(max(int(get_setting("storyboard_concurrency") or 2), 1))
     run_ids: list[str] = []
     failed_to_start: list[dict] = []
     for row in selected:
@@ -1749,7 +1762,9 @@ async def start_screenplay_all(project_id: str):
                     if is_repair else None
                 ),
                 task_factory=lambda eid=eid, recorder=recorder: _screenplay_guarded(
-                    eid, sem, recorder
+                    eid,
+                    recorder,
+                    priority=PRIORITY_BATCH,
                 ),
             )
             run_ids.append(recorder.run_id)
