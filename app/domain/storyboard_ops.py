@@ -691,27 +691,32 @@ async def _storyboard_task(
         if disc.get("added") or disc.get("redrawn"):
             p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
             bible = _project_bible_or_placeholder(p)
-        try:
-            from app.scenes import ensure_scenes_for_storyboard
-            sdisc = await ensure_scenes_for_storyboard(ep["project_id"], ep["episode_no"], screenplay, bible)
-            if sdisc.get("added"):
-                p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
-                bible = _project_bible_or_placeholder(p)
-        except Exception as exc:  # noqa: BLE001
-            public = errors.record_and_format(
-                exc,
-                action="storyboard_scene_lib_degraded",
+        from app.scenes import ensure_scenes_for_storyboard
+        sdisc = await ensure_scenes_for_storyboard(
+            ep["project_id"], ep["episode_no"], screenplay, bible,
+        )
+        if sdisc.get("blocking_errors"):
+            raise StageError(
+                "场景图准备",
+                [
+                    "相关场景图仍在自动准备，未使用其它场景替代；可稍后继续分镜",
+                    *list(sdisc["blocking_errors"]),
+                ],
+            )
+        for warning in sdisc.get("errors") or []:
+            errors.log_error(
+                None,
+                action="storyboard_scene_maintenance_warning",
                 context={
                     "project_id": ep["project_id"],
                     "episode_id": episode_id,
                     "episode_no": ep["episode_no"],
                 },
+                message=warning,
             )
-            conn.execute(
-                "UPDATE episodes SET storyboard_warning=? WHERE id=?",
-                (f"场景库维护失败，已按现有库继续分镜：{public}", episode_id),
-            )
-            conn.commit()
+        # 场景自动建库/出图会推进 bible 版本；分镜 prompt 必须使用最新本集场景集合。
+        p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
+        bible = _project_bible_or_placeholder(p)
 
         # 恢复旧 checkpoint 时先把模型产生的引号漂移/拼接式证据收敛为授权原文中的
         # 连续片段。严格匹配不足的内容保持未解决，仍由确认门禁拦截。

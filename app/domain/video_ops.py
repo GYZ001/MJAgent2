@@ -128,7 +128,10 @@ def evaluate_storyboard_for_confirmation(
     from app.evaluations.issues import issues_from_messages
     from app.harness.types import IssueSeverity
     from app.continuity import dialogue_framing_errors
-    from app.validators import prefer_default_shot_durations
+    from app.validators import (
+        prefer_default_shot_durations,
+        validate_storyboard_screenplay_scene_alignment,
+    )
 
     # Evaluation is a read-only gate.  A shallow list copy still shares every
     # Shot instance with the caller, so normalizers could mutate the CAS
@@ -145,6 +148,10 @@ def evaluate_storyboard_for_confirmation(
     compact_target = _compact_episode_target(actual_total or compact_target)
 
     structural_errors = _storyboard_structural_errors(board)
+    if screenplay is not None:
+        structural_errors.extend(
+            validate_storyboard_screenplay_scene_alignment(board, screenplay, bible)
+        )
     score_warnings = validate_storyboard(board, bible, compact_target)
     # 对白构图是视频输入结构，不是审美评分：多人可见、错误景别/运镜会直接改变
     # 参考图和最终画面，必须进入确认硬门禁。动作文字里仍提到画外听者等描述质量

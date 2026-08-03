@@ -590,7 +590,7 @@ def _scene_contiguity_key(scene: str) -> str:
     return _normalize_scene_label(base)
 
 
-def match_scene_name(scene_setting: str, scenes) -> str | None:
+def match_scene_name(scene_setting: str, scenes, *, allow_fuzzy: bool = True) -> str | None:
     """把分镜 scene_setting 归一化匹配到 bible.scenes 中的规范场景名。
     容错：去标点后规范名是 setting 的子串（或反之）即命中（最强）；否则取相似度最高且 ≥0.6 的场景。
     返回命中的规范场景名，或 None（无库/无匹配）。"""
@@ -604,15 +604,166 @@ def match_scene_name(scene_setting: str, scenes) -> str | None:
     best_score = 0.0
     for sc in scenes:
         name = (getattr(sc, "name", "") or "").strip()
-        norm_name = _normalize_scene_label(name)
-        if not norm_name:
+        labels = [name, *(getattr(sc, "aliases", None) or [])]
+        normalized_labels = [
+            _normalize_scene_label(str(label)) for label in labels if str(label or "").strip()
+        ]
+        if not normalized_labels:
             continue
-        if norm_name in norm_setting or norm_setting in norm_name:
-            return name  # 子串命中，最强
-        ratio = difflib.SequenceMatcher(None, norm_name, norm_setting).ratio()
+        if any(
+            norm_label in norm_setting or norm_setting in norm_label
+            for norm_label in normalized_labels
+        ):
+            return name  # 规范名/已确认别名的包含命中，最强
+        ratio = max(
+            difflib.SequenceMatcher(None, norm_label, norm_setting).ratio()
+            for norm_label in normalized_labels
+        )
         if ratio > best_score:
             best_score, best = ratio, name
-    return best if best_score >= 0.6 else None
+    return best if allow_fuzzy and best_score >= 0.6 else None
+
+
+def resolve_screenplay_scene_names(
+    screenplay: EpisodeScreenplay | None,
+    bible: Bible,
+) -> list[str]:
+    """按剧本场次顺序解析本集真正会使用的规范场景名，并按首次出现去重。"""
+    if screenplay is None:
+        return []
+    scenes = getattr(bible, "scenes", None) or []
+    resolved: list[str] = []
+    seen: set[str] = set()
+    for scene in screenplay.scene_outline or []:
+        name = match_scene_name(scene.scene_heading, scenes, allow_fuzzy=False)
+        if name and name not in seen:
+            seen.add(name)
+            resolved.append(name)
+    return resolved
+
+
+def _screenplay_scene_resolution_errors(
+    screenplay: EpisodeScreenplay | None,
+    bible: Bible,
+) -> list[str]:
+    if screenplay is None or not (screenplay.scene_outline or []):
+        return []
+    scenes = getattr(bible, "scenes", None) or []
+    if not scenes:
+        return ["本集剧本已有场次，但相关场景尚未完成自动建库与场景图生成"]
+    errors: list[str] = []
+    for scene in screenplay.scene_outline or []:
+        if not match_scene_name(scene.scene_heading, scenes, allow_fuzzy=False):
+            errors.append(
+                f"剧本第 {scene.scene_no} 场「{scene.scene_heading}」尚未解析到规范场景；"
+                "请先完成该场景的自动建库与场景图生成"
+            )
+    return errors
+
+
+def validate_storyboard_outline_scene_alignment(
+    outline: StoryboardOutline,
+    screenplay: EpisodeScreenplay | None,
+    bible: Bible,
+) -> list[str]:
+    """大纲只能按剧本场次顺序使用本集场景，不能从全片场景库借错地点。"""
+    errors = _screenplay_scene_resolution_errors(screenplay, bible)
+    expected = resolve_screenplay_scene_names(screenplay, bible)
+    if errors or not expected:
+        return errors
+    expected_index = {name: index for index, name in enumerate(expected)}
+    used: list[str] = []
+    last_index = -1
+    for shot in outline.shots:
+        matched = match_scene_name(shot.scene_setting, bible.scenes, allow_fuzzy=False)
+        if not matched:
+            errors.append(
+                f"大纲第 {shot.shot_no} 镜场景「{shot.scene_setting}」未命中规范场景"
+            )
+            continue
+        used.append(matched)
+        if matched not in expected_index:
+            errors.append(
+                f"大纲第 {shot.shot_no} 镜误用了「{matched}」；本集剧本只允许场景："
+                f"{'、'.join(expected)}"
+            )
+            continue
+        current_index = expected_index[matched]
+        if current_index < last_index:
+            errors.append(
+                f"大纲第 {shot.shot_no} 镜场景倒退到「{matched}」；"
+                "场景必须按剧本场次顺序推进"
+            )
+        last_index = max(last_index, current_index)
+    missing = [name for name in expected if name not in used]
+    if missing:
+        errors.append(f"分镜大纲遗漏本集剧本场景：{'、'.join(missing)}")
+    return errors
+
+
+def validate_storyboard_shot_scene_alignment(
+    shot: Shot,
+    screenplay: EpisodeScreenplay | None,
+    bible: Bible,
+    *,
+    expected_scene_setting: str = "",
+) -> list[str]:
+    """逐镜硬门禁：当前镜既要属于本集剧本，也要服从本镜大纲指定场景。"""
+    errors = _screenplay_scene_resolution_errors(screenplay, bible)
+    if errors:
+        return errors
+    actual = match_scene_name(shot.scene_setting, bible.scenes, allow_fuzzy=False)
+    allowed = resolve_screenplay_scene_names(screenplay, bible)
+    if allowed and actual not in set(allowed):
+        errors.append(
+            f"第 {shot.shot_no} 镜场景「{shot.scene_setting}」与本集剧本不一致；"
+            f"只能使用：{'、'.join(allowed)}"
+        )
+    expected = (
+        match_scene_name(expected_scene_setting, bible.scenes, allow_fuzzy=False)
+        if expected_scene_setting else None
+    )
+    if expected and actual != expected:
+        errors.append(
+            f"第 {shot.shot_no} 镜场景「{shot.scene_setting}」偏离本镜大纲；"
+            f"本镜必须使用「{expected}」"
+        )
+    return errors
+
+
+def validate_storyboard_screenplay_scene_alignment(
+    board: Storyboard,
+    screenplay: EpisodeScreenplay | None,
+    bible: Bible,
+) -> list[str]:
+    """整集/确认门禁：拒绝任何来自本集剧本之外的场景，并检查场次顺序与覆盖。"""
+    errors = _screenplay_scene_resolution_errors(screenplay, bible)
+    expected = resolve_screenplay_scene_names(screenplay, bible)
+    if errors or not expected:
+        return errors
+    expected_index = {name: index for index, name in enumerate(expected)}
+    used: list[str] = []
+    last_index = -1
+    for shot in board.shots:
+        matched = match_scene_name(shot.scene_setting, bible.scenes, allow_fuzzy=False)
+        if matched:
+            used.append(matched)
+        if matched not in expected_index:
+            errors.append(
+                f"第 {shot.shot_no} 镜场景「{shot.scene_setting}」与本集剧本不一致；"
+                f"只能使用：{'、'.join(expected)}"
+            )
+            continue
+        current_index = expected_index[matched]
+        if current_index < last_index:
+            errors.append(
+                f"第 {shot.shot_no} 镜场景倒退到「{matched}」；场景必须按剧本场次顺序推进"
+            )
+        last_index = max(last_index, current_index)
+    missing = [name for name in expected if name not in used]
+    if missing:
+        errors.append(f"整集分镜遗漏本集剧本场景：{'、'.join(missing)}")
+    return errors
 
 
 def validate_storyboard_scenes(board: Storyboard, bible: Bible) -> list[str]:
@@ -632,7 +783,8 @@ def validate_storyboard_scenes(board: Storyboard, bible: Bible) -> list[str]:
             shot.scene_name = ""
             errors.append(
                 f"shots[{i}](shot_no={shot.shot_no}).scene_setting=「{shot.scene_setting}」不在场景图素材库内；"
-                f"scene_setting 必须收敛到库内规范场景之一：{names}（若确为剧情需要的新场景，请沿用语义最接近的库内场景名）")
+                f"scene_setting 必须收敛到库内规范场景之一：{names}；"
+                "若确为剧情需要的新场景，必须先完成该场景的自动建库与专属场景图，禁止借用相似旧场景")
     return errors
 
 
@@ -2913,6 +3065,8 @@ def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeS
     errors.extend(outline_key_line_speaker_errors(outline, screenplay))
     errors.extend(outline_key_line_capacity_errors(outline, screenplay))
     errors.extend(outline_atomic_errors(outline))
+    if bible is not None:
+        errors.extend(validate_storyboard_outline_scene_alignment(outline, screenplay, bible))
     return errors
 
 

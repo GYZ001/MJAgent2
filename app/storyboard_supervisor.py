@@ -11,6 +11,7 @@ import re
 import time
 from typing import Any, Literal
 
+from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from app import errors
@@ -726,6 +727,47 @@ def _commit_repair_candidate(
     if expected_board_hash and expected_board_hash != current_hash:
         raise RuntimeError("storyboard working projection CAS conflict")
 
+    mode = str(repair.get("mode") or "replace")
+    start = max(1, int(repair.get("window_start") or 1))
+    end = max(start, int(repair.get("window_end") or start))
+    raw_candidate_count = len(cp.repair_candidate_shots)
+    candidate_end = (
+        start + raw_candidate_count - 1
+        if mode == "insert"
+        else end
+    )
+    official_by_no = {int(shot.shot_no): shot for shot in current_board.shots}
+    from app.storyboard_workspace import align_generated_source_evidence
+
+    for shot in candidate_board.shots:
+        shot_no = int(shot.shot_no)
+        if start <= shot_no <= candidate_end:
+            evidence_candidates: list[str] = []
+            if mode != "insert":
+                official = official_by_no.get(shot_no)
+                if official is not None and official.source_excerpt.strip():
+                    evidence_candidates.append(official.source_excerpt)
+            evidence_candidates.extend([
+                shot.source_excerpt,
+                *[dialogue.line for dialogue in shot.dialogues],
+                shot.narration,
+            ])
+            alignment_error: HTTPException | None = None
+            for evidence in evidence_candidates:
+                if not evidence.strip():
+                    continue
+                try:
+                    shot.source_excerpt, _binding = align_generated_source_evidence(
+                        episode_id, evidence,
+                    )
+                    break
+                except HTTPException as exc:
+                    alignment_error = exc
+            else:
+                raise alignment_error or HTTPException(
+                    422, "自动修复候选缺少可证明的原文证据",
+                )
+
     contract_version = get_contract("storyboard").version
     revision = _ensure_storyboard_revision(
         episode_id, current_board, contract_version=contract_version,
@@ -764,16 +806,12 @@ def _commit_repair_candidate(
         if not chain or chain["working_artifact_id"] != revision.working_artifact_id:
             raise RuntimeError("storyboard working artifact changed during repair")
 
-        mode = str(repair.get("mode") or "replace")
-        start = max(1, int(repair.get("window_start") or 1))
-        raw_candidate_count = len(cp.repair_candidate_shots)
         if mode == "insert":
             candidate_shots = [
                 shot for shot in candidate_board.shots
                 if start <= int(shot.shot_no) < start + raw_candidate_count
             ]
         else:
-            end = max(start, int(repair.get("window_end") or start))
             candidate_shots = [
                 shot for shot in candidate_board.shots
                 if start <= int(shot.shot_no) <= end
@@ -878,7 +916,7 @@ async def run_storyboard_supervisor(
     preflight_done: bool = False,
     new_activation: bool = False,
 ) -> SupervisorCheckpoint:
-    """集级 Supervisor 主循环。调用前应已完成人物/场景预检（或设 preflight_done=False 由本函数跳过）。"""
+    """集级 Supervisor 主循环；任何入口都会在生成镜头前完成人物/场景资产预检。"""
     from app.domain.common import (
         _compact_episode_target,
         _episode_source_text,
@@ -919,6 +957,27 @@ async def run_storyboard_supervisor(
     bible = _project_bible_or_placeholder(p)
     ep_data = dict(ep)
     source_text = _episode_source_text(conn, ep)
+
+    if not preflight_done:
+        from app.portraits import ensure_cards_for_screenplay
+        character_result = await ensure_cards_for_screenplay(
+            ep["project_id"], ep["episode_no"], screenplay, bible,
+        )
+        if character_result.get("blocking_errors"):
+            raise StageError("人物图准备", list(character_result["blocking_errors"]))
+        p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
+        bible = _project_bible_or_placeholder(p)
+        from app.scenes import ensure_scenes_for_storyboard
+        scene_result = await ensure_scenes_for_storyboard(
+            ep["project_id"], ep["episode_no"], screenplay, bible,
+        )
+        if scene_result.get("blocking_errors"):
+            raise StageError(
+                "场景图准备",
+                ["相关场景图仍在自动准备，未使用其它场景替代", *scene_result["blocking_errors"]],
+            )
+        p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
+        bible = _project_bible_or_placeholder(p)
 
     cp = load_latest_checkpoint(episode_id) if resume else None
     if cp is None:

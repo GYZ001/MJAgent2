@@ -123,6 +123,9 @@ class Scene(BaseModel):
     first_episode: int | None = None
     required_views: list[str] = Field(default_factory=list)
     discovery_sources: list[str] = Field(default_factory=list)
+    # 剧本场次标题可能使用同一地点的简称/旧称。别名只用于把剧本地点稳定解析到
+    # 同一规范场景，避免为了一个称谓差异重复建场景或误借其它场景图。
+    aliases: list[str] = Field(default_factory=list)
     # 待审状态变化获批后先记录目标锚点和生效集；完成费用确认与整包重绘后才转为正式锚点。
     pending_state_canonical: str | None = None
     pending_state_ep_start: int | None = None

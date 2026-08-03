@@ -785,7 +785,7 @@ def test_refresh_portrait_pack_failure_switches_to_primary_fallback(monkeypatch,
     """整包 QA 失败不得切换版本：临时段删除，旧开区间继续生效。"""
     import asyncio
     import threading
-    from app import db, hiagent
+    from app import db
     from app.portraits import _refresh_portrait_on_drift
 
     database = tmp_path / "drift.db"
@@ -842,6 +842,89 @@ def test_refresh_portrait_pack_failure_switches_to_primary_fallback(monkeypatch,
     assert new["ep_start"] == 12
     assert new["ep_end"] is None
     assert new["pack_status"] == "partial_fallback"
+
+
+def test_refresh_portrait_replaces_archived_same_episode_segment(monkeypatch, tmp_path) -> None:
+    import asyncio
+    import threading
+
+    from app import db
+    from app.portraits import _refresh_portrait_on_drift
+
+    database = tmp_path / "drift-stale-segment.db"
+    monkeypatch.setattr(db, "DB_PATH", database)
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(db, "_local", threading.local())
+    db.init_db()
+    conn = db.get_conn()
+    old_image = tmp_path / "old.jpg"
+    old_image.write_bytes(b"old")
+    stale_image = tmp_path / "stale.jpg"
+    stale_image.write_bytes(b"stale")
+    conn.execute(
+        "INSERT INTO projects(id, name, bible_json, bible_version, created_at) "
+        "VALUES('proj','t',?,?,1)",
+        (json.dumps({"characters": [{"name": "A", "appearance_canonical": "黑发"}],
+                     "world": {"visual_style_canonical": "anime"}}), 1),
+    )
+    conn.execute(
+        """INSERT INTO character_portraits(
+               id,project_id,character_name,ep_start,ep_end,appearance,prompt,
+               image_path,bible_version,pack_status,created_at
+           ) VALUES('p_old','proj','A',1,NULL,'黑发','old',?,1,'ready',1)""",
+        (str(old_image),),
+    )
+    conn.execute(
+        """INSERT INTO character_portraits(
+               id,project_id,character_name,ep_start,ep_end,appearance,prompt,
+               image_path,base_portrait_id,bible_version,pack_status,created_at
+           ) VALUES('p_stale','proj','A',12,0,'白发','stale',?,'p_old',1,'ready',2)""",
+        (str(stale_image),),
+    )
+    conn.execute(
+        """INSERT INTO character_portrait_views(
+               id,portrait_id,view_role,framing,image_path,prompt,status,selected,created_at
+           ) VALUES('v_stale','p_stale','front_full','full',?,'stale','ready',1,2)""",
+        (str(stale_image),),
+    )
+    conn.commit()
+
+    async def fake_redraw(*_args, **_kwargs):
+        image = tmp_path / "new.jpg"
+        image.write_bytes(b"new")
+        return str(image), "new prompt"
+
+    async def fake_review(*_args, **_kwargs):
+        return {"overall": 0.95, "status": "approved", "issues": []}
+
+    async def failed_pack(**_kwargs):
+        return {"status": "failed"}
+
+    monkeypatch.setattr("app.portraits._redraw_portrait", fake_redraw)
+    monkeypatch.setattr("app.portraits._review_portrait_asset", fake_review)
+    monkeypatch.setattr(
+        "app.portraits.record_reference_asset",
+        lambda **_kwargs: {"id": "art1", "status": "approved"},
+    )
+    monkeypatch.setattr("app.multiview.ensure_character_multiview_pack", failed_pack)
+
+    result = asyncio.run(_refresh_portrait_on_drift(
+        "proj", "A", 12, "白发红袍", "anime", 1,
+        change_meta={"persistence": "persistent"},
+    ))
+
+    rows = conn.execute(
+        "SELECT id,ep_start,ep_end FROM character_portraits "
+        "WHERE project_id='proj' AND character_name='A' ORDER BY ep_start"
+    ).fetchall()
+    assert result and result["ep_start"] == 12
+    assert len(rows) == 2
+    assert rows[0]["id"] == "p_old" and rows[0]["ep_end"] == 11
+    assert rows[1]["id"] != "p_stale"
+    assert rows[1]["ep_start"] == 12 and rows[1]["ep_end"] is None
+    assert conn.execute(
+        "SELECT COUNT(*) FROM character_portrait_views WHERE portrait_id='p_stale'"
+    ).fetchone()[0] == 0
 
 
 def test_refresh_portrait_episode_persistence_binds_ready_pack(monkeypatch, tmp_path) -> None:

@@ -490,30 +490,47 @@ def realign_generated_source_binding(
     conn=None,
     commit: bool = True,
 ) -> dict[str, Any]:
-    """Atomically bind an automated repair's exact authorized source excerpt."""
+    """Atomically align and bind an automated repair's authorized source excerpt."""
+    candidate, normalized = align_generated_source_evidence(episode_id, excerpt)
+    db_conn = conn or get_conn()
+    db_conn.execute(
+        "UPDATE shots SET source_excerpt=? WHERE id=?",
+        (candidate, shot_id),
+    )
+    persist_source_binding(
+        shot_id, normalized, conn=db_conn, commit=commit,
+    )
+    return {**normalized, "source_excerpt": candidate}
+
+
+def align_generated_source_evidence(
+    episode_id: str,
+    excerpt: str,
+) -> tuple[str, dict[str, Any]]:
+    """Resolve model-selected evidence to the strongest authorized contiguous slice."""
     candidate = (excerpt or "").strip()
     if not candidate:
         raise HTTPException(422, "自动修复候选缺少原文证据")
-    matches: list[tuple[dict[str, Any], int]] = []
+    matches = []
     for source in chapter_sources(episode_id):
-        offset = (source["content"] or "").find(candidate)
-        if offset >= 0:
-            matches.append((source, offset))
+        aligned = align_source_excerpt(candidate, source["content"] or "")
+        if aligned is not None:
+            matches.append((aligned.match_chars, int(aligned.exact), source, aligned))
     if not matches:
         raise HTTPException(422, "自动修复候选的原文证据不属于本集授权原文")
-    source, start = matches[0]
+    _score, _exact, source, aligned = max(
+        matches, key=lambda item: (item[0], item[1]),
+    )
+    candidate = aligned.excerpt
     normalized = {
         "chapter_id": int(source["id"]),
         "chapter_idx": int(source["idx"]),
         "source_version_hash": source["source_version_hash"],
-        "start_offset": start,
-        "end_offset": start + len(candidate),
+        "start_offset": aligned.start_offset,
+        "end_offset": aligned.end_offset,
         "excerpt_hash": hashlib.sha256(candidate.encode("utf-8")).hexdigest(),
     }
-    persist_source_binding(
-        shot_id, normalized, conn=conn, commit=commit,
-    )
-    return normalized
+    return candidate, normalized
 
 
 def source_binding_for_shot(shot_id: str) -> dict[str, Any] | None:

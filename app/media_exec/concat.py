@@ -70,7 +70,7 @@ def _final_video_path(project_id: str, episode_no: int) -> Path:
 
 def concatenate_episode(episode_id: str) -> dict:
     """把本集可用的已采纳镜头按镜号拼接成 MP4，未采纳镜头直接跳过。
-    返回 {video_url, shots, total_duration_s}。若系统未装 ffmpeg 则返回占位说明。
+    返回 {video_url, shots, total_duration_s}。系统未装 ffmpeg 时明确失败，不返回伪成片。
     """
     from pathlib import Path as _P
     conn = get_conn()
@@ -120,23 +120,10 @@ def concatenate_episode(episode_id: str) -> dict:
 
     final_path = _final_video_path(ep["project_id"], ep["episode_no"])
     if not shutil.which("ffmpeg"):
-        if any(abs(rate - 1.0) > 0.0001 for _shot_no, _path, rate in piece_specs):
-            raise ValueError("当前成片包含倍速定稿镜头，服务端需安装 ffmpeg 后才能按定稿倍速合成")
-        # 缺 ffmpeg 的保底：回传首个片段 URL，前端提示用户安装 ffmpeg
-        first = next(p for p in pieces if p[1])
-        from app.config import PROJECTS_DIR
-        rel_path = Path(first[1]).relative_to(PROJECTS_DIR).as_posix()
-        return {
-            "video_url": f"/media/{rel_path}",
-            "shots": len(pieces),
-            "total_duration_s": est_total_dur or config.DEFAULT_VIDEO_DURATION_S * len(pieces),
-            "ffmpeg_missing": True,
-            "shots_total": len(all_shot_nos),
-            "shots_skipped": len(skipped_shot_nos),
-            "skipped_shot_nos": skipped_shot_nos,
-            "playback_rates": {str(no): rate for no, _path, rate in piece_specs},
-            "note": "服务端缺少 ffmpeg，已临时回退为首个片段的直链；请安装 ffmpeg 后重新合成",
-        }
+        raise ValueError(
+            "服务端未找到视频合成组件 ffmpeg；请安装 ffmpeg 或修正服务启动 PATH 后重试，"
+            "本次未生成成片"
+        )
 
     # 用 concat demuxer 优先无重编码直粘（画质无损）；但 -c copy 要求各片段编码参数
     # （像素格式/timebase/SAR/profile）完全一致，否则会失败或花屏。一旦失败，回退重编码兜底。

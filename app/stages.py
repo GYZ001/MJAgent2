@@ -43,6 +43,8 @@ from app.validators import (SCENE_SETTING_MAX_CHARS,
                             validate_bible, validate_screenplay,
                             validate_scene_bible,
                             validate_storyboard,
+                            resolve_screenplay_scene_names,
+                            validate_storyboard_shot_scene_alignment,
                             validate_storyboard_shot_covers_outline,
                             validate_storyboard_outline,
                             validate_storyboard_preserves_key_content,
@@ -935,21 +937,24 @@ def _storyboard_key_content_block(screenplay: EpisodeScreenplay) -> str:
     return "\n".join(blocks) + "\n"
 
 
-def _scene_library_block(bible: Bible) -> str:
+def _scene_library_block(bible: Bible, screenplay: EpisodeScreenplay | None = None) -> str:
     """渲染「可用场景图素材库」清单注入分镜 prompt：要求 scene_setting 收敛到库内规范场景名，
     保证后续每个场景能复用同一张场景库图（跨镜/跨集一致）。库为空时返回空串（不约束）。"""
-    scenes = getattr(bible, "scenes", None) or []
+    scenes = list(getattr(bible, "scenes", None) or [])
+    if screenplay is not None and screenplay.scene_outline:
+        relevant = set(resolve_screenplay_scene_names(screenplay, bible))
+        scenes = [scene for scene in scenes if scene.name in relevant]
     if not scenes:
         return ""
     rows = "\n".join(
         f"- {sc.name}：{sc.scene_canonical}" for sc in scenes if getattr(sc, "name", ""))
     names = "、".join(sc.name for sc in scenes if getattr(sc, "name", ""))
     return (
-        "【可用场景图素材库】（本片所有镜头的场景必须从下列规范场景中选用，scene_setting 的地点部分必须"
-        "收敛到其中一个场景名，以便同场景跨镜/跨集复用同一张场景图、保持场景一致）：\n"
+        "【本集已就绪场景图】（只列本集剧本真实场次；scene_setting 的地点必须"
+        "收敛到其中一个场景名，以便同场景跨镜复用同一张场景图、保持场景一致）：\n"
         f"{rows}\n"
         f"硬性要求：每个镜头的 scene_setting 写成「时间，{{库内场景名}}」，地点必须是上列之一（{names}）；"
-        "确有剧情需要的新地点时，沿用语义最接近的库内场景名，不要自创库外场景。\n"
+        "禁止借用本集剧本之外的相似场景，也禁止自创场景；本集新地点已经由系统在分镜前自动建库并完成场景图。\n"
     )
 
 
@@ -1108,6 +1113,7 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
                                     screenplay: EpisodeScreenplay, completed_shots: list[Shot],
                                     shot_no: int, allow_finish: bool, must_finish: bool,
                                     outline_covers: str = "", later_planned_covers: str = "",
+                                    outline_scene_setting: str = "",
                                     source_text: str = "") -> list[str]:
     errors: list[str] = []
     if draft.episode_no != episode["episode_no"]:
@@ -1149,6 +1155,12 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
         partial_errors,
         current_index=len(completed_shots),
         current_shot_no=shot_no,
+    ))
+    errors.extend(validate_storyboard_shot_scene_alignment(
+        current,
+        screenplay,
+        bible,
+        expected_scene_setting=outline_scene_setting,
     ))
     # 向前承接：复合 covers 里已在前序镜头落实的事实不再算本镜漏戏（呼应大纲"可拆到相邻多镜"）。
     from app.spoken_contract import spoken_text_of as _spoken_text_of
@@ -1195,7 +1207,7 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
     target = episode["target_duration_s"]
     min_shots, max_shots = storyboard_shot_count_range(target)
     key_content_block = _storyboard_key_content_block(screenplay)
-    scene_library_block = _scene_library_block(bible)
+    scene_library_block = _scene_library_block(bible, screenplay)
     is_first = int(episode.get("episode_no") or 0) == 1
     episode_hook = (episode.get("hook") or "").strip()
     episode_cliffhanger = (episode.get("cliffhanger") or "").strip()
@@ -1566,7 +1578,7 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
     preflight_contract = _storyboard_preflight_contract(episode)
     transition_options = "|".join(sorted(TRANSITIONS))
     key_content_block = _storyboard_key_content_block(screenplay)
-    scene_library_block = _scene_library_block(bible)
+    scene_library_block = _scene_library_block(bible, screenplay)
     min_shots, max_shots = storyboard_shot_count_range(episode["target_duration_s"])
     shot_no = len(completed_shots) + 1
     # 方案 C：当前镜大纲 covers 若"不可单镜完成"（依赖圣经外角色开口 或 同时要求角色开口+人群声），
@@ -1830,6 +1842,7 @@ source_excerpt 内的双引号必须按 JSON 规范转义，或改用中文引�
             allow_finish=allow_finish,
             must_finish=must_finish,
             outline_covers=(brief.covers if brief is not None else ""),
+            outline_scene_setting=(brief.scene_setting if brief is not None else ""),
             # 向后承接：大纲排给后续镜头的事实留给后面拍，本镜不因此报漏戏。
             later_planned_covers="".join(
                 (s.covers or "") for s in (outline.shots[shot_no:] if (outline and outline.shots) else [])

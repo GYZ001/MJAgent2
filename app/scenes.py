@@ -38,6 +38,30 @@ SCENE_BIBLE_CHAPTER_WINDOW = 20
 SCENE_CANDIDATE_AUTO_ADOPT_THRESHOLD = 4
 SCENE_CANDIDATE_AUTO_REVIEW_LIMIT = 2
 
+_reactive_scene_locks: dict[tuple[str, str], asyncio.Lock] = {}
+_reactive_scene_locks_guard = asyncio.Lock()
+_reactive_bible_locks: dict[str, asyncio.Lock] = {}
+_reactive_bible_locks_guard = asyncio.Lock()
+
+
+async def _reactive_scene_lock(project_id: str, name: str) -> asyncio.Lock:
+    async with _reactive_scene_locks_guard:
+        key = (project_id, name)
+        lock = _reactive_scene_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _reactive_scene_locks[key] = lock
+        return lock
+
+
+async def _reactive_bible_lock(project_id: str) -> asyncio.Lock:
+    async with _reactive_bible_locks_guard:
+        lock = _reactive_bible_locks.get(project_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _reactive_bible_locks[project_id] = lock
+        return lock
+
 
 class SceneCandidateReviewRequired(Exception):
     """图片候选已经落盘，但当前没有可自动采纳的新版硬门禁证据。
@@ -1571,26 +1595,26 @@ async def generate_scene_refs(
 
 async def assess_new_scene(label: str, context: str, *, style: str,
                            known_names: list[str], ep_label: str) -> dict:
-    """判断剧本里出现、场景库里没有的地点是否值得【单独建场景并出图】，并产出场景字段。
-    返回 {important, reason, name, scene_canonical, location_kind}。"""
+    """把已确认剧本场次解析为新场景或已有场景别名，并产出自动建库字段。"""
     known = "、".join(known_names) or "（无）"
-    prompt = f"""任务：判断漫剧里出现的地点「{label}」是否值得【加入场景图素材库并单独出一张场景定场图】（用作跨集复用的环境锚点）。
+    prompt = f"""任务：把已确认剧本场次地点「{label}」解析成可用于分镜的规范场景。
 
 全片画风（场景锚点必须与之一致）：{style}
-已有规范场景（若「{label}」其实是这些场景的同一地点/别称，则 important=false）：
+已有规范场景（若「{label}」其实是这些场景的同一地点/别称，则 important=false，并在 existing_scene_name 返回下列某个完整名称）：
 {known}
 
 本场景相关剧本上下文（{ep_label}）：
 {context[:4000]}
 
 判定口径：
-- important=true 仅当：「{label}」是【真正的新地点】，且【反复出现 / 有戏份 / 画面感强】，值得稳定其环境外观。
-- important=false：一次性过场、只被提及、或其实是已有场景的同一地点。
+- 这是已确认剧本中真实开拍的场次，不得因一次性过场而省略场景。
+- important=true：它是已有列表之外的真正新地点，必须自动加入场景库并生成场景图。
+- important=false：仅当它确实是已有场景的别名/简称；existing_scene_name 必须返回已有列表中的完整名称。
 - name：稳定的场景短标签（4~10 字），不要与已有场景重名。
 - scene_canonical 是"固定场景锚点串"：30~60 字，须含 地点/室内外/光线时段/标志陈设/氛围色调；只写视觉可见的环境信息，不写人物、不写剧情动作。必须贴合画风「{style}」，是 CG/动画/漫画类非真人渲染场景，严禁真人实拍/实景照片描述。
 
 只输出一个 JSON 对象：
-{{"important": true/false, "reason": "一句话依据", "name": str, "scene_canonical": str, "location_kind": "室内|室外|其他"}}"""
+{{"important": true/false, "existing_scene_name": "已有规范场景完整名称或空字符串", "reason": "一句话依据", "name": str, "scene_canonical": str, "location_kind": "室内|室外|其他"}}"""
     raw = await model_gateway.chat(
         [{"role": "user", "content": prompt}], temperature=0.3, max_tokens=600,
         call_meta={"stage": "assess_new_scene", "scene_label": label},
@@ -1605,6 +1629,7 @@ async def assess_new_scene(label: str, context: str, *, style: str,
         important = False  # 锚点太稀薄不足以稳定定场 → 不入库
     return {
         "important": important,
+        "existing_scene_name": (obj.get("existing_scene_name") or "").strip(),
         "reason": (obj.get("reason") or "").strip(),
         "name": name,
         "scene_canonical": canonical,
@@ -1613,18 +1638,48 @@ async def assess_new_scene(label: str, context: str, *, style: str,
 
 
 def _append_scene_to_bible(conn, project_id: str, scene: dict) -> bool:
-    """把新场景追加进 bible_json.scenes（按 name 去重，重读再写以免覆盖并发编辑）。返回是否新增。"""
+    """把 AI 已确认的新场景追加进 bible，并推进版本；内部处理不产生人工待审。"""
     row = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
     if not row or not row["bible_json"]:
         return False
     data = json.loads(row["bible_json"])
     if scene.get("name") in {s.get("name") for s in data.get("scenes", [])}:
         return False
-    data.setdefault("scenes", []).append(scene)
-    conn.execute("UPDATE projects SET bible_json=? WHERE id=?",
-                 (json.dumps(data, ensure_ascii=False), project_id))
+    normalized = Scene.model_validate(scene).model_dump(mode="json")
+    data.setdefault("scenes", []).append(normalized)
+    Bible.model_validate(data)
+    conn.execute(
+        "UPDATE projects SET bible_json=?, bible_version=COALESCE(bible_version,0)+1 WHERE id=?",
+        (json.dumps(data, ensure_ascii=False), project_id),
+    )
     conn.commit()
     return True
+
+
+def _append_scene_alias(conn, project_id: str, scene_name: str, alias: str) -> bool:
+    alias = (alias or "").strip()
+    if not alias:
+        return False
+    row = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
+    if not row or not row["bible_json"]:
+        return False
+    data = json.loads(row["bible_json"])
+    for scene in data.get("scenes", []):
+        if scene.get("name") != scene_name:
+            continue
+        aliases = [str(item).strip() for item in (scene.get("aliases") or []) if str(item).strip()]
+        if alias in aliases:
+            return False
+        aliases.append(alias)
+        scene["aliases"] = aliases
+        Bible.model_validate(data)
+        conn.execute(
+            "UPDATE projects SET bible_json=?, bible_version=COALESCE(bible_version,0)+1 WHERE id=?",
+            (json.dumps(data, ensure_ascii=False), project_id),
+        )
+        conn.commit()
+        return True
+    return False
 
 
 async def _generate_and_register_scene(project_id: str, name: str, scene_canonical: str,
@@ -1717,7 +1772,7 @@ def _queue_scene_auto_change(
     conn, project_id: str, *, kind: str, scene_name: str, episode_no: int,
     reason: str, payload: dict,
 ) -> dict:
-    """自动发现只进入待审队列；绝不在用户确认费用前生成图片。"""
+    """保留内部场景发现审计；场景由 AI 自动处理，不再形成用户待审队列。"""
     row = conn.execute(
         "SELECT bible_auto_changes_json FROM projects WHERE id=?", (project_id,),
     ).fetchone()
@@ -1726,15 +1781,23 @@ def _queue_scene_auto_change(
     except (TypeError, ValueError, json.JSONDecodeError):
         items = []
     fingerprint = f"{kind}:{scene_name}:{episode_no}"
-    existing = next((item for item in items if item.get("fingerprint") == fingerprint
-                     and item.get("status") in {"pending_review", "approved"}), None)
+    existing = next((item for item in items if item.get("fingerprint") == fingerprint), None)
     if existing:
+        if existing.get("status") != "auto_applied":
+            existing["status"] = "processing"
+            existing["reason"] = reason or existing.get("reason") or ""
+            existing["payload"] = payload or existing.get("payload") or {}
+            conn.execute(
+                "UPDATE projects SET bible_auto_changes_json=? WHERE id=?",
+                (json.dumps(items, ensure_ascii=False), project_id),
+            )
+            conn.commit()
         return existing
     item = {
         "id": new_id("scene_change"), "fingerprint": fingerprint,
-        "kind": kind, "status": "pending_review", "scene": scene_name,
+        "kind": kind, "status": "processing", "scene": scene_name,
         "ep_start": episode_no, "reason": reason, "payload": payload,
-        "requires_payment_confirmation": True, "created_at": now(),
+        "decided_by": "ai_scene_preflight", "created_at": now(),
     }
     items.append(item)
     conn.execute(
@@ -1745,8 +1808,93 @@ def _queue_scene_auto_change(
     return item
 
 
+def _mark_scene_auto_change(
+    conn,
+    project_id: str,
+    change_id: str,
+    *,
+    status: str,
+    reason: str,
+    image_path: str | None = None,
+) -> None:
+    row = conn.execute(
+        "SELECT bible_auto_changes_json FROM projects WHERE id=?", (project_id,),
+    ).fetchone()
+    try:
+        items = json.loads(row["bible_auto_changes_json"] or "[]") if row else []
+    except (TypeError, ValueError, json.JSONDecodeError):
+        items = []
+    for item in items:
+        if item.get("id") != change_id:
+            continue
+        item["status"] = status
+        item["decided_by"] = "ai_scene_preflight"
+        item["decided_at"] = now()
+        item["decision_reason"] = reason
+        if image_path:
+            item.setdefault("payload", {})["image_path"] = image_path
+        break
+    conn.execute(
+        "UPDATE projects SET bible_auto_changes_json=? WHERE id=?",
+        (json.dumps(items, ensure_ascii=False), project_id),
+    )
+    conn.commit()
+
+
+async def _ensure_reactive_scene_image(
+    project_id: str,
+    scene: Scene,
+    *,
+    episode_no: int,
+    style: str,
+    bible_version: int,
+) -> dict:
+    """等待本集场景主图落盘；并发/恢复时复用同一场景版本，不借用其它地点。"""
+    current_path = scene_ref_for_episode(project_id, scene.name, episode_no)
+    if current_path:
+        return {"image_path": current_path, "reused": True}
+    lock = await _reactive_scene_lock(project_id, scene.name)
+    async with lock:
+        current_path = scene_ref_for_episode(project_id, scene.name, episode_no)
+        if current_path:
+            return {"image_path": current_path, "reused": True}
+        conn = get_conn()
+        broken = conn.execute(
+            "SELECT id,image_path FROM scene_references WHERE project_id=? AND scene_name=? "
+            "AND ep_start=? ORDER BY created_at DESC LIMIT 1",
+            (project_id, scene.name, episode_no),
+        ).fetchone()
+        if broken and not (broken["image_path"] and Path(broken["image_path"]).is_file()):
+            conn.execute("DELETE FROM scene_references WHERE id=?", (broken["id"],))
+            conn.commit()
+        image_path = await _generate_and_register_scene(
+            project_id,
+            scene.name,
+            scene.scene_canonical,
+            style,
+            ep_start=episode_no,
+            bible_version=bible_version,
+        )
+        if not image_path or not Path(image_path).is_file():
+            raise hiagent.ProviderError(f"场景图未能落盘：{scene.name}")
+        _update_bible_scene_canonical(
+            conn, project_id, scene.name, scene.scene_canonical, image_path,
+        )
+        pack_status = "primary_ready"
+        try:
+            from app.multiview import complete_legacy_scene_pack, scene_multiview_enabled
+            if scene_multiview_enabled():
+                pack = await complete_legacy_scene_pack(
+                    project_id, scene.name, episode_no, style,
+                )
+                pack_status = str((pack or {}).get("status") or "primary_ready")
+        except Exception:  # noqa: BLE001 主图已经可用；附加视角沿用人物包的安全降级语义
+            pack_status = "partial_fallback"
+        return {"image_path": image_path, "reused": False, "pack_status": pack_status}
+
+
 async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenplay, bible) -> dict:
-    """剧本就绪后只发现并排入待审队列；未确认费用前不出图、不扣费。"""
+    """分镜前反应式维护本集场景：AI 自动建库、等待场景图就绪，再交给分镜。"""
     scenes = list(getattr(bible, "scenes", None) or [])
     style = bible.world.visual_style_canonical
     conn = get_conn()
@@ -1756,11 +1904,15 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
         (getattr(sc, "scene_heading", "") or "").strip(): (getattr(sc, "summary", "") or "")
         for sc in (getattr(screenplay, "scene_outline", None) or [])
     }
-    unmatched = [lb for lb in labels if not match_scene_name(lb, scenes)]
+    unmatched = [
+        lb for lb in labels
+        if not match_scene_name(lb, scenes, allow_fuzzy=False)
+    ]
 
     added: list[dict] = []
     evolved: list[dict] = []
     errors: list[str] = []
+    blocking_errors: list[str] = []
     for label in unmatched:
         context = f"{label}：{summary_by_heading.get(label, '')}".strip()
         try:
@@ -1768,29 +1920,129 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
                 label, context, style=style, known_names=[s.name for s in scenes],
                 ep_label=f"第 {episode_no} 集")
         except Exception as exc:  # noqa: BLE001
-            errors.append(f"{label}：评估失败"
-                          + code_ref(exc, action="assess_new_scene",
-                                     context={"project_id": project_id, "scene": label, "episode_no": episode_no}))
+            message = f"{label}：场景识别失败" + code_ref(
+                exc, action="assess_new_scene",
+                context={"project_id": project_id, "scene": label, "episode_no": episode_no},
+            )
+            errors.append(message)
+            blocking_errors.append(message)
             continue
         if not verdict["important"]:
+            existing_name = verdict.get("existing_scene_name") or ""
+            if existing_name not in {scene.name for scene in scenes}:
+                message = f"{label}：AI 未能解析为新场景或已有场景别名"
+                errors.append(message)
+                blocking_errors.append(message)
+                continue
+            bible_lock = await _reactive_bible_lock(project_id)
+            async with bible_lock:
+                _append_scene_alias(conn, project_id, existing_name, label)
+            project_row = conn.execute(
+                "SELECT bible_json FROM projects WHERE id=?", (project_id,),
+            ).fetchone()
+            scenes = Bible.model_validate(json.loads(project_row["bible_json"])).scenes
             continue
         name = verdict["name"]
-        if match_scene_name(name, scenes) or name in {s.name for s in scenes}:
+        if match_scene_name(name, scenes, allow_fuzzy=False) or name in {s.name for s in scenes}:
             continue
+        scene_payload = {
+            "name": name,
+            "scene_canonical": verdict["scene_canonical"],
+            "location_kind": verdict["location_kind"],
+            "first_episode": episode_no,
+            "discovery_sources": [context[:500]],
+            "aliases": [label] if label != name else [],
+        }
         queued = _queue_scene_auto_change(
             conn, project_id, kind="scene_discovery", scene_name=name, episode_no=episode_no,
             reason=verdict["reason"], payload={
-                "scene": {
-                    "name": name, "scene_canonical": verdict["scene_canonical"],
-                    "location_kind": verdict["location_kind"], "first_episode": episode_no,
-                    "discovery_sources": [context[:500]],
-                },
+                "scene": scene_payload,
                 "source_episode": episode_no, "source_episode_label": f"第 {episode_no} 集",
                 "evidence_fragments": [context[:500]],
                 "duplicate_candidates": [s.name for s in scenes if name in s.name or s.name in name],
             },
         )
-        added.append({"name": name, "reason": verdict["reason"], "queued": True, "change_id": queued["id"], "has_image": False})
+        try:
+            bible_lock = await _reactive_bible_lock(project_id)
+            async with bible_lock:
+                appended = _append_scene_to_bible(conn, project_id, scene_payload)
+            project_row = conn.execute(
+                "SELECT bible_json FROM projects WHERE id=?", (project_id,),
+            ).fetchone()
+            scenes = Bible.model_validate(json.loads(project_row["bible_json"])).scenes
+            if not appended and not match_scene_name(label, scenes, allow_fuzzy=False):
+                raise ValueError("scene bible commit failed")
+            added.append({
+                "name": name, "reason": verdict["reason"], "change_id": queued["id"],
+                "has_image": False, "auto_applied": True,
+            })
+        except Exception as exc:  # noqa: BLE001
+            message = f"{name}：自动加入场景库失败" + code_ref(
+                exc, action="auto_apply_scene_discovery",
+                context={"project_id": project_id, "scene": name, "episode_no": episode_no},
+            )
+            _mark_scene_auto_change(
+                conn, project_id, queued["id"], status="auto_apply_failed", reason=message,
+            )
+            errors.append(message)
+            blocking_errors.append(message)
+
+    # 所有本集剧本场景都必须等到自己的主图落盘；不存在“借最接近旧场景继续分镜”。
+    project_row = conn.execute(
+        "SELECT bible_json,bible_version FROM projects WHERE id=?", (project_id,),
+    ).fetchone()
+    current_bible = Bible.model_validate(json.loads(project_row["bible_json"]))
+    scenes = list(current_bible.scenes)
+    relevant_names: list[str] = []
+    for label in labels:
+        matched = match_scene_name(label, scenes, allow_fuzzy=False)
+        if not matched:
+            message = f"{label}：相关场景仍未完成自动建库"
+            if message not in blocking_errors:
+                blocking_errors.append(message)
+            continue
+        if matched not in relevant_names:
+            relevant_names.append(matched)
+    by_name = {scene.name: scene for scene in scenes}
+    for name in relevant_names:
+        scene = by_name[name]
+        try:
+            ready = await _ensure_reactive_scene_image(
+                project_id,
+                scene,
+                episode_no=episode_no,
+                style=current_bible.world.visual_style_canonical,
+                bible_version=int(project_row["bible_version"] or 0),
+            )
+        except Exception as exc:  # noqa: BLE001
+            message = f"{name}：自动场景图生成尚未就绪" + code_ref(
+                exc, action="auto_generate_storyboard_scene",
+                context={"project_id": project_id, "scene": name, "episode_no": episode_no},
+            )
+            errors.append(message)
+            blocking_errors.append(message)
+            continue
+        for item in added:
+            if item.get("name") == name:
+                item["has_image"] = True
+                item.update(ready)
+        change_rows = conn.execute(
+            "SELECT bible_auto_changes_json FROM projects WHERE id=?", (project_id,),
+        ).fetchone()
+        try:
+            all_changes = json.loads(change_rows["bible_auto_changes_json"] or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            all_changes = []
+        for change in all_changes:
+            if change.get("kind") == "scene_discovery" and change.get("scene") == name:
+                _mark_scene_auto_change(
+                    conn,
+                    project_id,
+                    str(change.get("id") or ""),
+                    status="auto_applied",
+                    reason="AI 已自动采纳场景并等待场景图落盘后放行分镜",
+                    image_path=ready["image_path"],
+                )
 
     # ② 已入库场景的永久状态演进（损毁/重建等）
     try:
@@ -1810,7 +2062,33 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
                             "evidence_fragments": [str(meta.get("evidence_excerpt") or meta.get("reason") or "")],
                         },
                     )
-                    evolved.append({"name": name, "queued": True, "change_id": queued["id"], "reason": meta.get("reason")})
+                    project_state = conn.execute(
+                        "SELECT bible_version FROM projects WHERE id=?", (project_id,),
+                    ).fetchone()
+                    refreshed = await _refresh_scene_on_state_change(
+                        project_id,
+                        name,
+                        episode_no,
+                        meta["new_scene_canonical"],
+                        current_bible.world.visual_style_canonical,
+                        int(project_state["bible_version"] or 0),
+                        change_meta={
+                            "change_dimensions": meta.get("change_dimensions") or [],
+                            "persistence": meta.get("persistence") or "persistent",
+                            "reason": meta.get("reason") or "",
+                            "evidence_excerpt": meta.get("evidence_excerpt") or "",
+                        },
+                    )
+                    if refreshed:
+                        _mark_scene_auto_change(
+                            conn, project_id, queued["id"], status="auto_applied",
+                            reason="AI 已自动采纳场景状态变化并完成场景图更新",
+                            image_path=refreshed.get("image_path"),
+                        )
+                    evolved.append({
+                        "name": name, "change_id": queued["id"], "reason": meta.get("reason"),
+                        "auto_applied": bool(refreshed), **(refreshed or {}),
+                    })
                 except Exception as exc:  # noqa: BLE001
                     errors.append(
                         f"{name}@第{episode_no}集场景演进失败"
@@ -1821,7 +2099,14 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
         errors.append("场景状态演进探测失败" + code_ref(exc, action="screen_scene_state_changes",
                                                     context={"project_id": project_id, "episode_no": episode_no}))
 
-    return {"checked": len(unmatched), "added": added, "evolved": evolved, "errors": errors}
+    return {
+        "checked": len(unmatched),
+        "added": added,
+        "evolved": evolved,
+        "errors": errors,
+        "blocking_errors": blocking_errors,
+        "ready_scenes": relevant_names,
+    }
 
 
 def _open_scene_ref(conn, project_id: str, name: str):
@@ -1838,7 +2123,7 @@ def _known_scene_change_entries(conn, project_id, episode_no, screenplay, scenes
     labels = _collect_scene_labels(screenplay)
     by_name = {s.name: s for s in scenes}
     for label in labels:
-        name = match_scene_name(label, scenes)
+        name = match_scene_name(label, scenes, allow_fuzzy=False)
         if not name and label in by_name:
             name = label
         if not name or name not in by_name:

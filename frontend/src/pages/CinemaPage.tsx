@@ -301,12 +301,13 @@ export default function CinemaPage() {
     setMixBusy(true)
     try {
       const result = (await api.post(`/episodes/${ep.id}/concatenate`)) as MixResult
-      if (result.video_url) {
-        setMix(previous => previous ? { ...previous, final_video_url: result.video_url } : previous)
-      }
       if (result.ffmpeg_missing) {
+        mixTimer.clear()
         toast(result.note || '服务端缺少视频合成组件，当前仅返回首个片段，不能视为最终成片', true)
       } else {
+        if (result.video_url) {
+          setMix(previous => previous ? { ...previous, final_video_url: result.video_url } : previous)
+        }
         const skipped = result.shots_skipped ?? Math.max((result.shots_total ?? currentMix.shots_total) - result.shots, 0)
         toast(`已按分镜顺序合成 ${result.shots} 个片段，共约 ${result.total_duration_s} 秒${skipped ? `；跳过 ${skipped} 镜` : ''}`)
       }

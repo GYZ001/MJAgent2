@@ -738,6 +738,20 @@ async def _refresh_portrait_on_drift(project_id: str, name: str, episode_no: int
                     "gate_retry_exhausted": True,
                 }
 
+        stale_segment = conn.execute(
+            "SELECT id,ep_end FROM character_portraits "
+            "WHERE project_id=? AND character_name=? AND ep_start=?",
+            (project_id, name, episode_no),
+        ).fetchone()
+        if stale_segment and stale_segment["id"] != cur["id"]:
+            stale_end = stale_segment["ep_end"]
+            if stale_end is None or int(stale_end) >= episode_no:
+                return None
+            conn.execute(
+                "DELETE FROM character_portraits WHERE id=?",
+                (stale_segment["id"],),
+            )
+
         new_portrait_id = new_id("portrait")
         change_json = json.dumps(change_meta or {}, ensure_ascii=False) if change_meta else None
         # 先插入临时段（不关闭旧区间）；整包通过后再原子切换

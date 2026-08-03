@@ -12,7 +12,6 @@ import ImageCompareModal from '../components/ImageCompareModal'
 import PaymentConfirmDialog from '../components/PaymentConfirmDialog'
 import PrepSubnav from '../components/PrepSubnav'
 import QueryState from '../components/QueryState'
-import AutoChangeQueue from '../components/AutoChangeQueue'
 import DecisionDialog from '../components/DecisionDialog'
 import OperationError from '../components/OperationError'
 import { useFillPageSize } from '../hooks/useFillPageSize'
@@ -214,7 +213,7 @@ export default function ScenesPage() {
 
       <section className="card">
         <h3>场景图素材库
-          <span className="hint">一键扫描缺图和不可用图；确需生图时才会进入费用确认</span>
+          <span className="hint">手动扫描现有资产缺口；分镜所需新场景由 AI 自动准备</span>
         </h3>
         {!hasBible && (
           <div className="hint">请先到「人物谱」生成角色圣经；场景圣经会在人物谱定稿后自动生成。</div>
@@ -276,7 +275,7 @@ export default function ScenesPage() {
         )}
         {scenes.length > 0 && (
           <div className="hint library-note">
-            分镜阶段会把镜头收敛到规范场景；新场景或永久状态变化只进入待审队列，批准后仍须单独确认费用才会出图。
+            分镜阶段由 AI 自动识别本集场景并等待对应场景图就绪，无需人工处理场景更新。
           </div>
         )}
       </section>
@@ -355,7 +354,6 @@ export default function ScenesPage() {
           )}
         </section>
       )}
-      {hasBible && <AutoChangeQueue projectId={p.id} onChanged={refresh} scope="scene" />}
       {candidatePreview && (
         <SceneCandidateModal
           projectId={p.id}

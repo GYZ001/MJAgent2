@@ -45,7 +45,7 @@ def _version(conn: sqlite3.Connection, *, shot_no: int, path: Path, adopted: boo
         )
 
 
-def test_partial_episode_can_mix_one_adopted_video_and_skip_other_shots(
+def test_partial_episode_is_ready_but_missing_ffmpeg_does_not_return_fake_mix(
     tmp_path, monkeypatch,
 ) -> None:
     conn = _database()
@@ -76,13 +76,13 @@ def test_partial_episode_can_mix_one_adopted_video_and_skip_other_shots(
     assert status["skipped_shot_nos"] == [2, 3]
     assert [item["shot_no"] for item in status["shots"] if item["has_adopted"]] == [1]
 
-    result = worker.concatenate_episode("e")
-
-    assert result["shots"] == 1
-    assert result["shots_skipped"] == 2
-    assert result["skipped_shot_nos"] == [2, 3]
-    assert result["total_duration_s"] == 6
-    assert result["video_url"].endswith("/shot-1.mp4")
+    try:
+        worker.concatenate_episode("e")
+    except ValueError as exc:
+        assert "未找到视频合成组件 ffmpeg" in str(exc)
+        assert "本次未生成成片" in str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("缺少 ffmpeg 时不得把首个片段冒充最终成片")
 
 
 def test_episode_without_adopted_video_still_cannot_mix(tmp_path, monkeypatch) -> None:

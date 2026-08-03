@@ -12,6 +12,7 @@ from app.harness.types import EvidenceArtifact
 from app.production.revision import ensure_production_revision
 from app.repair_router import route_issues
 from app.schemas import Dialogue, EpisodeScreenplay, Shot, Storyboard, StoryboardOutline
+from app.source_excerpt import align_source_excerpt
 from app.storyboard_supervisor import (
     STORYBOARD_REPAIR_PLANNER_VERSION,
     SupervisorCheckpoint,
@@ -299,6 +300,123 @@ def test_validated_candidate_commits_atomically_and_preserves_shot_identity(
     assert conn.execute(
         "SELECT working_storyboard_artifact_id FROM episodes WHERE id='e1'"
     ).fetchone()[0]
+
+
+def test_repair_candidate_preserves_official_source_evidence(
+    repair_db, monkeypatch,
+) -> None:
+    conn, screenplay = repair_db
+    stitched_excerpt = "少年走到石碑前……上面显现的清晰结果。"
+    conn.execute(
+        "UPDATE shots SET source_excerpt=? WHERE id='s2'",
+        (stitched_excerpt,),
+    )
+    conn.commit()
+    current = _current_board(conn)
+    replacement = _shot(2, action="只修复画面，不应改写原文证据。")
+    replacement.source_excerpt = "模型拼接出的非连续原文片段。"
+    checkpoint = SupervisorCheckpoint(
+        episode_id="e1",
+        planner_version=STORYBOARD_REPAIR_PLANNER_VERSION,
+        last_repair={
+            "status": "candidate_generating",
+            "mode": "replace",
+            "window_start": 2,
+            "window_end": 2,
+            "base_hash": _storyboard_hash(current),
+            "semantic_attempt_id": "sbatt_source_evidence",
+            "fingerprint": "fp-source-evidence",
+            "issue_messages": ["第 2 镜画面需修复"],
+        },
+        repair_candidate_shots=[replacement.model_dump(mode="json")],
+    )
+    candidate = _merge_repair_candidate(current, checkpoint)
+    monkeypatch.setattr(
+        "app.worker.clear_shot_artifacts", lambda *_args, **_kwargs: None,
+    )
+
+    _commit_repair_candidate(
+        conn,
+        checkpoint,
+        episode_id="e1",
+        screenplay=screenplay,
+        current_board=current,
+        candidate_board=candidate,
+        expected_screenplay_artifact_id="sp1",
+        run_id=None,
+    )
+
+    source = conn.execute(
+        "SELECT content FROM chapters WHERE project_id='p1' AND idx=1"
+    ).fetchone()["content"]
+    aligned = align_source_excerpt(stitched_excerpt, source)
+    assert aligned is not None
+    row = conn.execute(
+        "SELECT source_excerpt FROM shots WHERE id='s2'"
+    ).fetchone()
+    binding = conn.execute(
+        "SELECT shot_id FROM storyboard_source_bindings WHERE shot_id='s2'"
+    ).fetchone()
+    assert candidate.shots[1].source_excerpt == aligned.excerpt
+    assert row["source_excerpt"] == aligned.excerpt
+    assert binding["shot_id"] == "s2"
+
+
+def test_repair_candidate_uses_authorized_candidate_when_official_evidence_is_invalid(
+    repair_db, monkeypatch,
+) -> None:
+    conn, screenplay = repair_db
+    conn.execute(
+        "UPDATE shots SET source_excerpt='拼接后无法证明的旧证据' WHERE id='s2'"
+    )
+    conn.commit()
+    current = _current_board(conn)
+    replacement = _shot(2, action="修复画面并提供可证明的连续原文。")
+    replacement.source_excerpt = "候选片段同样无法证明"
+    authorized_dialogue = _shot(2).source_excerpt
+    replacement.dialogues = [
+        Dialogue(speaker="少年", line=authorized_dialogue, emotion="平静"),
+    ]
+    checkpoint = SupervisorCheckpoint(
+        episode_id="e1",
+        planner_version=STORYBOARD_REPAIR_PLANNER_VERSION,
+        last_repair={
+            "status": "candidate_generating",
+            "mode": "replace",
+            "window_start": 2,
+            "window_end": 2,
+            "base_hash": _storyboard_hash(current),
+            "semantic_attempt_id": "sbatt_candidate_evidence",
+            "fingerprint": "fp-candidate-evidence",
+            "issue_messages": ["第 2 镜画面需修复"],
+        },
+        repair_candidate_shots=[replacement.model_dump(mode="json")],
+    )
+    candidate = _merge_repair_candidate(current, checkpoint)
+    monkeypatch.setattr(
+        "app.worker.clear_shot_artifacts", lambda *_args, **_kwargs: None,
+    )
+
+    _commit_repair_candidate(
+        conn,
+        checkpoint,
+        episode_id="e1",
+        screenplay=screenplay,
+        current_board=current,
+        candidate_board=candidate,
+        expected_screenplay_artifact_id="sp1",
+        run_id=None,
+    )
+
+    row = conn.execute(
+        "SELECT source_excerpt FROM shots WHERE id='s2'"
+    ).fetchone()
+    binding = conn.execute(
+        "SELECT shot_id FROM storyboard_source_bindings WHERE shot_id='s2'"
+    ).fetchone()
+    assert row["source_excerpt"] == authorized_dialogue
+    assert candidate.shots[1].source_excerpt == authorized_dialogue
+    assert binding["shot_id"] == "s2"
 
 
 def test_commit_persists_normalized_candidate_not_raw_model_payload(
