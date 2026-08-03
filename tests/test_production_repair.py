@@ -920,6 +920,81 @@ async def test_resume_replays_persisted_identity_before_first_qa(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_identity_replay_with_unchanged_payload_reaches_qa(monkeypatch):
+    from app.evidence import repository as evidence_repository
+    from app.production import screenplay_repair
+    from app.portraits import apply_screenplay_character_resolutions
+
+    revision = ensure_production_revision(
+        episode_id="ep_p",
+        kind="screenplay",
+        resume=False,
+    )
+    script = _minimal_script(stakes="失败将失去资格")
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id="ep_p",
+        status="candidate",
+        trust_level="T1",
+        content=screenplay_repair.screenplay_artifact_payload(script),
+    ))
+    mark_baseline_generated(
+        revision.id,
+        baseline_artifact_id=artifact["id"],
+        working_artifact_id=artifact["id"],
+    )
+
+    def report_non_material_change(candidate, _resolutions):
+        before = screenplay_repair.screenplay_artifact_payload(candidate)
+        changes = apply_screenplay_character_resolutions(candidate, [{
+            "source_label": "许师姐",
+            "canonical_name": "许清",
+            "resolution": "future_identity",
+        }])
+        assert screenplay_repair.screenplay_artifact_payload(candidate) == before
+        return changes or [{
+            "source_label": "许师姐",
+            "canonical_name": "许清",
+            "resolution": "future_identity",
+        }]
+
+    def stop_at_qa(*_args, **_kwargs):
+        raise RuntimeError("qa reached")
+
+    monkeypatch.setattr(
+        "app.portraits.apply_screenplay_character_resolutions",
+        report_non_material_change,
+    )
+    monkeypatch.setattr(screenplay_repair, "run_screenplay_qa", stop_at_qa)
+
+    with pytest.raises(RuntimeError, match="qa reached"):
+        await screenplay_repair.run_screenplay_production(
+            episode_id="ep_p",
+            episode={
+                "id": "ep_p",
+                "project_id": "proj_p",
+                "episode_no": 1,
+                "target_duration_s": 50,
+                "character_resolutions": [{
+                    "source_label": "许师姐",
+                    "canonical_name": "许清",
+                    "resolution": "future_identity",
+                }],
+            },
+            source_text="原文",
+            bible=Bible(characters=[], world=World(visual_style_canonical="测试画风")),
+            resume=True,
+        )
+
+    updated = screenplay_repair.get_production_revision(revision.id)
+    assert updated is not None
+    derived = evidence_repository.get_artifact(updated.working_artifact_id)
+    assert derived is not None
+    assert derived["version"] == artifact["version"] + 1
+
+
+@pytest.mark.asyncio
 async def test_recorded_repair_resume_skips_character_discovery_model_call(monkeypatch):
     from app.domain import screenplay_ops
 

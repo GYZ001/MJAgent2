@@ -932,6 +932,15 @@ async def run_screenplay_production(
             episode.get("character_resolutions") or [],
         )
         if identity_changes:
+            identity_payload = screenplay_artifact_payload(script)
+            identity_hash = evidence_repository.content_hash(identity_payload)
+            if identity_hash == artifact_hash:
+                # Some labels remain in non-identity prose by design. The
+                # resolver may report those replacements on every replay even
+                # though the canonical artifact payload is already identical.
+                # Hash equality is the authoritative idempotency boundary.
+                identity_changes = []
+        if identity_changes:
             identity_artifact = evidence_repository.create_artifact(
                 EvidenceArtifact(
                     type="screenplay_document",
@@ -939,7 +948,7 @@ async def run_screenplay_production(
                     scope_id=episode_id,
                     status="candidate",
                     trust_level="T1",
-                    content=screenplay_artifact_payload(script),
+                    content=identity_payload,
                     parent_artifact_ids=[working_id],
                     contract_version=rev.contract_version or None,
                 )
