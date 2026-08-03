@@ -77,6 +77,7 @@ type ConfirmPreview = {
   warnings: string[]
   estimated_video_cost_cny: { min: number; max: number; note: string }
   unlocks: string[]
+  recovery_action?: string | null
 }
 
 type DraftItem = {
@@ -879,7 +880,10 @@ export default function BoardPage() {
             <div><dt>必检项</dt><dd>{confirmPreview.hard_gates.passed ? '全部通过' : '未通过'}</dd></div><div><dt>预计视频成本</dt><dd>¥{confirmPreview.estimated_video_cost_cny.min}–¥{confirmPreview.estimated_video_cost_cny.max}</dd></div></dl>
           {!!confirmPreview.warnings.length && <div className="warning-banner">{confirmPreview.warnings.map(storyboardGateIssueLabel).join('；')}</div>}
           {!!confirmPreview.hard_gates.errors.length && <div className="error-banner" role="alert"><b>请先处理以下问题：</b><ul>{confirmPreview.hard_gates.errors.map((item, index) => <li key={`${index}-${item}`}>{storyboardGateIssueLabel(item)}</li>)}</ul></div>}
-          <p>确认后解锁：{confirmPreview.unlocks.join('、')}</p><small>{confirmPreview.estimated_video_cost_cny.note}</small>
+          {confirmPreview.hard_gates.passed
+            ? <p>确认后解锁：{confirmPreview.unlocks.join('、')}</p>
+            : <p>处理方式：{confirmPreview.recovery_action || '返回分镜台继续修复，全部必检项通过后再确认'}</p>}
+          <small>{confirmPreview.estimated_video_cost_cny.note}</small>
         </div>}
       </Modal>
 

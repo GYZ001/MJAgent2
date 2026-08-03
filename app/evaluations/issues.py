@@ -49,12 +49,37 @@ _CODE_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("FORMAT_CONTRACT_INVALID", re.compile(r"场次|段落|镜头语言|禁用词|full_script_text", re.I)),
 )
 
+# These codes describe missing or contradictory delivery contracts.  They are
+# not subjective quality scores and must be resolved before storyboard
+# confirmation can unlock paid media.
+STORYBOARD_CONFIRMATION_BLOCKER_CODES = frozenset({
+    "SPOKEN_CONTRACT_CONFLICT",
+    "SPOKEN_TIMELINE_OVERLAP",
+    "SPOKEN_TIMELINE_OUT_OF_RANGE",
+    "STATE_CHAIN_INVALID",
+    "KEY_LINE_MISSING",
+    "SPINE_MISSING",
+    "KEY_CONTENT_MISSING",
+    "SHOT_OUTLINE_COVERAGE",
+    "DROP_LIST_REINTRODUCED",
+    "PLAN_EXHAUSTED_NOT_FINAL",
+})
+
 
 def issue_code(message: str) -> str:
     for code, pattern in _CODE_RULES:
         if pattern.search(message):
             return code
     return "BUSINESS_RULE_FAILED"
+
+
+def is_storyboard_confirmation_blocker(message_or_issue: str | Issue) -> bool:
+    code = (
+        message_or_issue.code
+        if isinstance(message_or_issue, Issue)
+        else issue_code(str(message_or_issue))
+    )
+    return code in STORYBOARD_CONFIRMATION_BLOCKER_CODES
 
 
 _FIELD_ERROR_RE = re.compile(r"^字段\s+([^：:]+)[：:]\s*(.+)$", re.I)

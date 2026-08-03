@@ -1840,6 +1840,56 @@ def validate_plot_spine(script: EpisodeScreenplay) -> list[str]:
     return errors
 
 
+def validate_screenplay_spine_delivery(
+    script: EpisodeScreenplay,
+    *,
+    action_text: str,
+) -> list[str]:
+    """Require every must-keep spine beat to be performed in the screenplay body."""
+    spine = script.plot_spine
+    if not spine or not spine.spine_beats:
+        return []
+    dialogue_turns = _script_dialogue_turns(script.full_script_text or "")
+    missing: list[str] = []
+    for beat in spine.spine_beats:
+        if not beat.must_keep:
+            continue
+        visible_clauses, spoken_clauses = _spine_delivery_clauses(beat.does or "")
+        visible_missing = [
+            clause for clause in visible_clauses
+            if _claim_clearly_absent(clause, action_text)
+        ]
+        speaker = (beat.who or "").strip()
+        spoken_by_owner = "".join(
+            spoken for _scene_no, actual_speaker, spoken in dialogue_turns
+            if (
+                not speaker
+                or speaker == actual_speaker
+                or speaker in actual_speaker
+                or actual_speaker in speaker
+            )
+        )
+        spoken_missing = [
+            clause for clause in spoken_clauses
+            if _claim_clearly_absent(clause, spoken_by_owner)
+        ]
+        if visible_missing or spoken_missing:
+            missing.append(
+                f"{beat.beat_id}/{speaker}:{beat.does}"
+            )
+    if not missing:
+        return []
+    shown = "；".join(missing[:KEY_CONTENT_MAX_REPORT])
+    extra = (
+        f"（另有 {len(missing) - KEY_CONTENT_MAX_REPORT} 条从略）"
+        if len(missing) > KEY_CONTENT_MAX_REPORT else ""
+    )
+    return [
+        f"full_script_text 未交付 {len(missing)} 条 must_keep 主线节拍：{shown}{extra}；"
+        "必须在对应场次的动作段或角色对白中完整演出，不能只写在 plot_spine/scene_outline 摘要里"
+    ]
+
+
 def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats: int,
                         episode_no: int | None = None, source_text: str | None = None,
                         require_dialogue_chains: bool = False,
@@ -1908,6 +1958,10 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         if not SCRIPT_DIALOGUE_LINE_RE.match(line.strip())
         and not SCRIPT_SCENE_HEADING_RE.match(line.strip())
     )
+    errors.extend(validate_screenplay_spine_delivery(
+        script,
+        action_text=action_text,
+    ))
     errors.extend(overdetail_errors(action_text, "full_script_text"))
     for term in FULL_SCRIPT_FORBIDDEN_TERMS:
         if term in full_text:

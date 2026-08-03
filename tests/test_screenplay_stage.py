@@ -102,14 +102,15 @@ _RAINY_KEY_POINTS = [
 def test_full_script_screenplay_validation_passes() -> None:
     full_script_text = "\n\n".join([
         "【场1】夜 / 咖啡厅最里侧",
-        "雨水顺着玻璃滑下，谷言独自守在最里面的位置，指尖一直压着已经凉透的纸杯，目光钉在门口。",
+        "雨水顺着玻璃滑下，谷言独自在咖啡厅等待旧友，指尖一直压着已经凉透的纸杯，目光钉在门口。",
         "谷言（压低声音）：还有十分钟，他要是再不来，我就走。",
         "【场2】夜 / 咖啡厅门口",
-        "门上的风铃忽然响起，谷言抬头，看见失踪多日的旧友站在雨幕里，脸色苍白，袖口还沾着暗红的血迹。",
+        "门上的风铃忽然响起，失踪多日的旧友带着血迹推门现身，谷言猛地抬头。",
         "谷言（猛地起身）：你这几天到底躲到哪去了？",
         "【场3】夜 / 咖啡厅座位",
         "旧友坐下后没有寒暄，只把一把冰凉的储物柜钥匙缓缓推到谷言手边，声音压得极低，眼神不停瞟向门外，仿佛随时会有人闯进来。",
         "谷言（攥紧钥匙）：你到底想说什么？别绕了，把今晚的事一次讲清楚。",
+        "话音未落，门外再次响起更重的敲门声。",
     ])
     script = EpisodeScreenplay(
         episode_no=1,
@@ -146,17 +147,18 @@ def test_full_script_screenplay_passes_with_single_newline_lines() -> None:
     旧实现按空行块计数只得 1~3 块、误判“段落过少”。修复后按非空行计数，应通过。"""
     full_script_text = "\n".join([
         "【场1】夜 / 咖啡厅最里侧",
-        "雨水顺着玻璃滑下，谷言独自守在最里面的位置。",
+        "雨水顺着玻璃滑下，谷言独自在咖啡厅等待旧友。",
         "他指尖一直压着已经凉透的纸杯，目光钉在门口。",
         "谷言（压低声音）：还有十分钟，他要是再不来，我就走。",
         "【场2】夜 / 咖啡厅门口",
-        "门上的风铃忽然响起，谷言抬头看向门口。",
-        "失踪多日的旧友站在雨幕里，脸色苍白，袖口沾着暗红血迹。",
+        "门上的风铃忽然响起，失踪多日的旧友带着血迹推门现身。",
+        "谷言抬头看向门口，旧友脸色苍白，肩膀剧烈起伏。",
         "谷言（猛地起身）：你这几天到底躲到哪去了？",
         "【场3】夜 / 咖啡厅座位",
         "旧友坐下后没有寒暄，只把一把冰凉的储物柜钥匙缓缓推到谷言手边。",
         "他声音压得极低，眼神不停瞟向门外，仿佛随时都会有人闯进来抓他。",
         "谷言（攥紧钥匙）：你到底想说什么？别再绕了，把今晚的事一次讲清楚。",
+        "话音未落，门外再次响起更重的敲门声。",
     ])
     script = EpisodeScreenplay(
         episode_no=1,
@@ -244,17 +246,18 @@ def _valid_rainy_script(**overrides) -> EpisodeScreenplay:
     """构造一份完全合法的"雨夜敲门"剧本，供单点变异测试复用。"""
     full_script_text = "\n".join([
         "【场1】夜 / 咖啡厅最里侧",
-        "雨水顺着玻璃滑下，谷言独自守在最里面的位置，指尖压着凉透的纸杯，目光钉在门口。",
+        "雨水顺着玻璃滑下，谷言独自在咖啡厅等待旧友，指尖压着凉透的纸杯，目光钉在门口。",
         "他又看了一眼手机上没有任何新消息的屏幕，喉结上下滚动了一下，最终把杯子推远。",
         "谷言（压低声音）：还有十分钟，他要是再不来，我就走。",
         "【场2】夜 / 咖啡厅门口",
-        "门上风铃忽然响起，谷言抬头，看见失踪多日的旧友站在雨幕里，袖口沾着暗红血迹。",
+        "门上风铃忽然响起，失踪多日的旧友带着血迹推门现身，谷言猛地抬头。",
         "旧友撑着门框，肩膀剧烈起伏，像是一路被人追赶着才勉强逃到这里，眼神惊惶不定。",
         "谷言（猛地起身）：你这几天到底躲到哪去了？",
         "【场3】夜 / 咖啡厅座位",
         "旧友坐下没有寒暄，只把一把冰凉的储物柜钥匙缓缓推到谷言手边，眼神不停瞟向门外。",
         "他压低声音反复叮嘱，谁来找都不能把钥匙交出去，说完又死死攥住谷言的手腕。",
         "谷言（攥紧钥匙）：你到底想说什么？别绕了，把今晚的事一次讲清楚。",
+        "话音未落，门外再次响起更重的敲门声。",
     ])
     base = dict(
         episode_no=1,
@@ -791,6 +794,18 @@ def test_screenplay_rejects_missing_plot_spine() -> None:
 
 def test_valid_rainy_script_passes() -> None:
     assert validate_screenplay(_valid_rainy_script(), _bible(), expected_beats=5, episode_no=1) == []
+
+
+def test_screenplay_rejects_must_keep_spine_missing_from_full_script() -> None:
+    script = _valid_rainy_script()
+    script.plot_spine.spine_beats[0].does = "在屋顶点燃红色信号并等待远处回应"
+
+    errors = validate_screenplay(script, _bible(), expected_beats=5, episode_no=1)
+
+    assert any(
+        "full_script_text 未交付" in error and "S01/谷言" in error
+        for error in errors
+    )
 
 
 def test_full_script_screenplay_rejects_shot_language() -> None:

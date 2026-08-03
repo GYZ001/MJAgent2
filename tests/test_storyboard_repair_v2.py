@@ -389,6 +389,65 @@ def test_repair_plan_does_not_delete_or_mutate_official_shots(repair_db) -> None
     assert planned.repair_candidate_shots == []
 
 
+def test_spine_missing_insert_targets_earliest_declared_beat(repair_db) -> None:
+    conn, _screenplay = repair_db
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=number,
+                scene_setting="日，广场",
+                beat=f"少年完成第{number}步动作",
+                spine_beat_ids=[f"S{number:02d}"],
+                primary_action=f"少年完成第{number}步动作",
+                state_in="少年站在石碑前",
+                state_out="少年完成动作",
+                characters_visible=["少年"],
+            )
+            for number in range(1, 4)
+        ],
+    )
+    for number in range(1, 4):
+        shot = _shot(number)
+        shot.spine_beat_ids = [f"S{number:02d}"]
+        conn.execute(
+            "UPDATE shots SET shot_contract_json=? WHERE id=?",
+            (shot.model_dump_json(), f"s{number}"),
+        )
+    conn.commit()
+    plan = route_issues(
+        ["主线节拍主体已入画但未完成对应动作/对白交付：S01/少年:在屋顶点燃红色信号"],
+        validated_prefix_end=3,
+        next_shot_no=4,
+    )
+
+    planned = _apply_repair(
+        SupervisorCheckpoint(
+            episode_id="e1",
+            planner_version=STORYBOARD_REPAIR_PLANNER_VERSION,
+            validated_prefix_end=3,
+        ),
+        plan,
+        conn,
+        "e1",
+        list(_current_board(conn).shots),
+        outline,
+    )
+
+    assert planned.last_repair["mode"] == "insert"
+    assert planned.last_repair["window_start"] == 2
+    assert planned.last_repair["window_end"] == 2
+    candidate_outline = StoryboardOutline.model_validate(
+        planned.last_repair["candidate_outline"]
+    )
+    assert len(candidate_outline.shots) == 4
+    assert candidate_outline.shots[1].spine_beat_ids == ["S01"]
+    assert candidate_outline.shots[1].primary_action == "在屋顶点燃红色信号"
+    assert conn.execute(
+        "SELECT storyboard_outline_json FROM episodes WHERE id='e1'"
+    ).fetchone()[0] is None
+
+
 def test_validated_candidate_commits_atomically_and_preserves_shot_identity(
     repair_db, monkeypatch,
 ) -> None:

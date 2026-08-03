@@ -119,6 +119,17 @@ def test_unlocatable_legacy_excerpt_is_not_a_user_facing_gate(storyboard_db):
     assert not episode["shots"][0].get("preflight_errors")
 
 
+def test_episode_detail_does_not_run_scene_projection_writes(storyboard_db, monkeypatch):
+    def unexpected_write(*_args, **_kwargs):
+        raise AssertionError("GET episode detail must not reconcile persistent scene fields")
+
+    monkeypatch.setattr(api, "_reconcile_storyboard_scene_projection", unexpected_write)
+
+    detail = api.episode_detail("e1", view="board")
+
+    assert detail["id"] == "e1"
+
+
 def test_real_structural_error_is_attached_to_the_problem_shot(storyboard_db):
     storyboard_db.execute("UPDATE shots SET source_excerpt='' WHERE id='s1'")
     storyboard_db.commit()
@@ -168,6 +179,36 @@ def test_complete_board_uses_current_gate_instead_of_stale_paused_issue(
     assert status["state"] == "ready_to_confirm"
     assert status["hard_gate_issues"] == []
     assert detail["script_error"] is None
+
+
+def test_legacy_confirmed_board_reopens_when_current_hard_gate_fails(
+    storyboard_db, monkeypatch,
+):
+    issue = "主线节拍主体已入画但未完成对应动作/对白交付：S03/少年"
+
+    def failed_gate(_ep, board, _screenplay, _bible, **_kwargs):
+        return api.ConfirmationEvaluation(
+            passed=False,
+            errors=[issue],
+            warnings=[],
+            issues=[],
+            board=board,
+            compact_target=10,
+            estimated_cost_cny=0,
+        )
+
+    monkeypatch.setattr(api, "evaluate_storyboard_for_confirmation", failed_gate)
+    storyboard_db.execute("UPDATE episodes SET status='confirmed' WHERE id='e1'")
+    storyboard_db.commit()
+
+    status = api.episode_detail("e1", view="board")["storyboard_status"]
+
+    assert status["state"] == "failed"
+    assert status["confirmed"] is True
+    assert status["hard_gates_passed"] is False
+    assert status["hard_gate_issues"] == [issue]
+    assert status["recommended_action"] == "resume_storyboard"
+    assert status["confirmable"] is False
 
 
 def test_status_distinguishes_visible_drafts_from_zero_safe_checkpoint(storyboard_db):
@@ -1155,13 +1196,16 @@ def test_failed_draft_is_listed_and_published_version_unchanged(storyboard_db):
     assert storyboard_db.execute("SELECT storyboard_artifact_id FROM shots WHERE id='s1'").fetchone()[0] == before
 
 
-def test_confirmation_preview_warns_for_non_terminal_episode(storyboard_db):
+def test_confirmation_preview_blocks_non_terminal_episode(storyboard_db):
     storyboard_db.execute("UPDATE episodes SET status='script_failed', script_error='尚有问题' WHERE id='e1'")
     storyboard_db.commit()
-    preview = api.create_storyboard_confirmation_preview("e1")
-    assert preview["hard_gates"]["passed"] is True
-    assert preview["hard_gates"]["retry_exhausted_fallback"] is True
-    assert any("尚未达到完整终态" in warning for warning in preview["warnings"])
+    with pytest.raises(HTTPException) as caught:
+        api.create_storyboard_confirmation_preview("e1")
+    assert caught.value.status_code == 409
+    preview = caught.value.detail
+    assert preview["hard_gates"]["passed"] is False
+    assert any("尚未达到完整终态" in error for error in preview["hard_gates"]["errors"])
+    assert "preview_token" not in preview
 
 
 def test_confirmation_reports_hard_errors_and_score_only_warnings(storyboard_db):
@@ -1179,12 +1223,14 @@ def test_confirmation_reports_hard_errors_and_score_only_warnings(storyboard_db)
     )
     storyboard_db.commit()
 
-    preview = api.create_storyboard_confirmation_preview("e1")
+    with pytest.raises(HTTPException) as caught:
+        api.create_storyboard_confirmation_preview("e1")
+    preview = caught.value.detail
     warnings = preview["warnings"]
     assert "存在超过 5 秒的镜头，已纳入 QA 评分报告" not in warnings
-    # 业务质量问题只进 warnings，不进 hard_gates.errors。
     hard_errors = preview["hard_gates"]["errors"]
-    assert hard_errors == []
+    assert hard_errors
+    assert any("尚未达到完整终态" in error for error in hard_errors)
     assert any("低于硬下限" in str(w) or "action_desc" in str(w) for w in warnings)
 
 

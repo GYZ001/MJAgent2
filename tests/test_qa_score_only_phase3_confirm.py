@@ -4,6 +4,7 @@ import json
 import threading
 
 import pytest
+from fastapi import HTTPException
 
 from app import db
 from app.domain import video_ops
@@ -95,6 +96,26 @@ def test_confirm_preview_passes_with_low_quality_business_warnings(confirm_db, m
     assert preview["score_only"]["runtime_blocking"] is False
 
 
+def test_must_keep_spine_delivery_warning_is_promoted_to_blocker(confirm_db, monkeypatch):
+    issue = (
+        "主线节拍主体已入画但未完成对应动作/对白交付："
+        "S03/少年:在密室修炼一夜并明确修为进展"
+    )
+    monkeypatch.setattr(video_ops, "validate_storyboard", lambda *_args, **_kwargs: [issue])
+    monkeypatch.setattr(video_ops, "validate_storyboard_soundtrack", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        video_ops, "validate_storyboard_preserves_key_content", lambda *_args, **_kwargs: [],
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        video_ops.create_storyboard_confirmation_preview("e1")
+
+    preview = caught.value.detail
+    assert preview["hard_gates"]["passed"] is False
+    assert preview["hard_gates"]["errors"] == [issue]
+    assert issue not in preview["warnings"]
+
+
 def test_unlocatable_legacy_excerpt_stays_internal_audit_only(confirm_db, monkeypatch):
     confirm_db.execute(
         "UPDATE shots SET source_excerpt=? WHERE id='s1'",
@@ -116,7 +137,7 @@ def test_unlocatable_legacy_excerpt_stays_internal_audit_only(confirm_db, monkey
     ).fetchone()["storyboard_warning"] is None
 
 
-def test_hard_gate_failure_becomes_warning_and_can_confirm(confirm_db, monkeypatch):
+def test_hard_gate_failure_blocks_confirmation_preview(confirm_db, monkeypatch):
     def repairable_evaluation(_ep, board, *_args, **_kwargs):
         return ConfirmationEvaluation(
             passed=False,
@@ -130,18 +151,82 @@ def test_hard_gate_failure_becomes_warning_and_can_confirm(confirm_db, monkeypat
 
     monkeypatch.setattr(video_ops, "evaluate_storyboard_for_confirmation", repairable_evaluation)
 
-    preview = video_ops.create_storyboard_confirmation_preview("e1")
-    assert preview["hard_gates"]["passed"] is True
-    assert preview["hard_gates"]["retry_exhausted_fallback"] is True
-    assert "shot_no=1.dialogue_framing 需要修复" in preview["warnings"]
-    assert preview["preview_token"]
+    with pytest.raises(HTTPException) as caught:
+        video_ops.create_storyboard_confirmation_preview("e1")
 
-    result = video_ops.confirm_episode_core("e1", preview_token=preview["preview_token"])
-    assert result["confirmed"] is True
-
+    assert caught.value.status_code == 409
+    preview = caught.value.detail
+    assert preview["hard_gates"]["passed"] is False
+    assert preview["hard_gates"]["errors"] == ["shot_no=1.dialogue_framing 需要修复"]
+    assert preview["unlocks"] == []
+    assert "继续修复" in preview["recovery_action"]
+    assert "preview_token" not in preview
     assert confirm_db.execute(
         "SELECT COUNT(*) AS c FROM gate_decisions WHERE gate_key='storyboard'",
-    ).fetchone()["c"] == 1
+    ).fetchone()["c"] == 0
+
+
+def test_confirmation_submit_rechecks_hard_gates_after_preview(confirm_db, monkeypatch):
+    def passed_evaluation(_ep, board, *_args, **_kwargs):
+        return ConfirmationEvaluation(
+            passed=True,
+            errors=[],
+            warnings=[],
+            issues=[],
+            board=board,
+            compact_target=5,
+            estimated_cost_cny=3.6,
+        )
+
+    def failed_evaluation(_ep, board, *_args, **_kwargs):
+        return ConfirmationEvaluation(
+            passed=False,
+            errors=["主线节拍仍未完成"],
+            warnings=[],
+            issues=[],
+            board=board,
+            compact_target=5,
+            estimated_cost_cny=3.6,
+        )
+
+    monkeypatch.setattr(video_ops, "evaluate_storyboard_for_confirmation", passed_evaluation)
+    preview = video_ops.create_storyboard_confirmation_preview("e1")
+    monkeypatch.setattr(video_ops, "evaluate_storyboard_for_confirmation", failed_evaluation)
+
+    with pytest.raises(ValueError, match="主线节拍仍未完成"):
+        video_ops.confirm_episode_core("e1", preview_token=preview["preview_token"])
+
+    assert confirm_db.execute(
+        "SELECT status FROM episodes WHERE id='e1'",
+    ).fetchone()["status"] == "scripted"
+    assert confirm_db.execute(
+        "SELECT COUNT(*) AS c FROM gate_decisions WHERE gate_key='storyboard'",
+    ).fetchone()["c"] == 0
+
+
+def test_legacy_confirmed_board_is_blocked_before_paid_generation(confirm_db, monkeypatch):
+    def failed_evaluation(_ep, board, *_args, **_kwargs):
+        return ConfirmationEvaluation(
+            passed=False,
+            errors=["主线节拍仍未完成"],
+            warnings=[],
+            issues=[],
+            board=board,
+            compact_target=5,
+            estimated_cost_cny=3.6,
+        )
+
+    confirm_db.execute("UPDATE episodes SET status='confirmed' WHERE id='e1'")
+    confirm_db.commit()
+    monkeypatch.setattr(video_ops, "evaluate_storyboard_for_confirmation", failed_evaluation)
+
+    with pytest.raises(HTTPException) as caught:
+        video_ops._assert_storyboard_generation_gate("e1")
+
+    assert caught.value.status_code == 409
+    assert caught.value.detail["code"] == "STORYBOARD_CONFIRMATION_REQUIRED"
+    assert caught.value.detail["errors"] == ["主线节拍仍未完成"]
+    assert "返回分镜台" in caught.value.detail["recovery_action"]
 
 
 def test_screenplay_certificate_requires_all_runtime_gate_issues_to_be_fixed():

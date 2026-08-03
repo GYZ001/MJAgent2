@@ -235,6 +235,7 @@ async def test_video_completion_spawn_failure_is_retryable_and_rolls_back(monkey
 
     monkeypatch.setattr(api.task_registry, "active", lambda *_args: False)
     monkeypatch.setattr(api.task_registry, "spawn", fail_spawn)
+    monkeypatch.setattr(api, "_assert_storyboard_generation_gate", lambda *_args: None)
 
     with pytest.raises(HTTPException) as failed:
         await api._complete_episode_core("e", {"mode": "fresh"})
@@ -484,6 +485,7 @@ async def test_video_completion_rejects_existing_durable_active_run(monkeypatch)
     ):
         monkeypatch.setattr(module, "get_conn", lambda: conn)
     monkeypatch.setattr(api.task_registry, "active", lambda *_args: False)
+    monkeypatch.setattr(api, "_assert_storyboard_generation_gate", lambda *_args: None)
 
     with pytest.raises(HTTPException) as rejected:
         await api._complete_episode_core("e", {"mode": "fresh"})
@@ -568,6 +570,7 @@ async def test_video_resume_without_grant_has_no_state_side_effect(monkeypatch) 
     conn = _conn()
     monkeypatch.setattr(api, "get_conn", lambda: conn)
     monkeypatch.setattr(api.task_registry, "active", lambda *_args: False)
+    monkeypatch.setattr(api, "_assert_storyboard_generation_gate", lambda *_args: None)
 
     with pytest.raises(HTTPException) as rejected:
         await api._complete_episode_core("e", {"mode": "resume"})

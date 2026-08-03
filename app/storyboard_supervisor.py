@@ -24,7 +24,7 @@ from app.repair_router import (
     bump_fingerprint_count,
     route_issues,
 )
-from app.schemas import Shot, Storyboard, StoryboardOutline
+from app.schemas import Shot, Storyboard, StoryboardOutline, StoryboardOutlineShot
 from app.stages import StageError, generate_storyboard_next_shot, generate_storyboard_outline
 
 SupervisorPhase = Literal[
@@ -580,6 +580,54 @@ def _repair_feedback_for_shot(messages: list[str], shot_no: int) -> list[str]:
     return localized
 
 
+def _repair_outline_for_checkpoint(
+    cp: SupervisorCheckpoint,
+    fallback: StoryboardOutline | None,
+) -> StoryboardOutline | None:
+    raw = (cp.last_repair or {}).get("candidate_outline")
+    if raw:
+        try:
+            return StoryboardOutline.model_validate(raw)
+        except (TypeError, ValueError):
+            pass
+    return fallback
+
+
+def _missing_spine_targets(plan: RepairPlan) -> list[tuple[str, str, str]]:
+    targets: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for message in plan.issue_messages or []:
+        for beat_id, who, does in re.findall(
+            r"\b(S\d+)\s*/\s*([^:：；]+)\s*[:：]\s*([^；]+)",
+            message,
+            re.I,
+        ):
+            normalized = beat_id.upper()
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            targets.append((normalized, who.strip(), does.strip()))
+    return targets
+
+
+def _retarget_spine_repair_brief(
+    brief: StoryboardOutlineShot,
+    target: tuple[str, str, str] | None,
+) -> None:
+    if target is None:
+        return
+    beat_id, who, does = target
+    brief.beat = f"{who}{does}"
+    brief.covers = does
+    brief.spine_beat_ids = [beat_id]
+    brief.key_line_ids = []
+    brief.information_ids = []
+    brief.new_information_ids = []
+    brief.primary_action = does
+    brief.characters_visible = [who] if who else []
+    brief.audio_cast = []
+
+
 def _repair_context_shots(conn, cp: SupervisorCheckpoint, episode_no: int) -> list[Shot]:
     """Return prefix + durable candidates while leaving the official rows untouched."""
     repair = cp.last_repair or {}
@@ -743,6 +791,7 @@ def _commit_repair_candidate(
     from app.production.revision import get_production_revision
 
     repair = cp.last_repair or {}
+    candidate_outline = _repair_outline_for_checkpoint(cp, None)
     expected_board_hash = str(repair.get("base_hash") or "")
     current_hash = _storyboard_hash(current_board)
     if expected_board_hash and expected_board_hash != current_hash:
@@ -877,6 +926,11 @@ def _commit_repair_candidate(
                         episode_id, shot_id, shot.source_excerpt,
                         conn=conn, commit=False,
                     )
+        if candidate_outline is not None:
+            conn.execute(
+                "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
+                (candidate_outline.model_dump_json(), episode_id),
+            )
         projected_rows = conn.execute(
             "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,),
         ).fetchall()
@@ -1289,9 +1343,16 @@ async def run_storyboard_supervisor(
         while True:
             active_repair = cp.last_repair or {}
             repair_pending = _repair_is_pending(cp)
+            generation_outline = (
+                _repair_outline_for_checkpoint(cp, outline)
+                if repair_pending else outline
+            )
             if repair_pending and len(completed) >= int(active_repair.get("window_end") or 0):
                 break
-            planned_now = len(outline.shots) if (outline and outline.shots) else 0
+            planned_now = (
+                len(generation_outline.shots)
+                if (generation_outline and generation_outline.shots) else 0
+            )
             if not repair_pending and _storyboard_generation_is_complete(
                 completed, planned_now, max_shots,
             ):
@@ -1325,7 +1386,7 @@ async def run_storyboard_supervisor(
                     screenplay=screenplay,
                     completed_shots=completed,
                     final_feedback=final_feedback,
-                    outline=outline,
+                    outline=generation_outline,
                     repair_feedback=_repair_feedback_for_shot(
                         list(active_repair.get("issue_messages") or []), shot_no,
                     ) if repair_pending else None,
@@ -1576,6 +1637,7 @@ async def run_storyboard_supervisor(
                 completed = _repair_context_shots(conn, cp, ep_data["episode_no"])
                 continue
 
+            committed_outline = _repair_outline_for_checkpoint(cp, outline)
             _commit_repair_candidate(
                 conn, cp,
                 episode_id=episode_id,
@@ -1585,6 +1647,10 @@ async def run_storyboard_supervisor(
                 expected_screenplay_artifact_id=cp.input_versions.get("screenplay_artifact_id"),
                 run_id=run_id,
             )
+            if committed_outline is not None:
+                outline = committed_outline
+                planned_persisted = len(outline.shots)
+                cp.expected_total = planned_persisted
             cp.last_repair = {
                 **repair,
                 "status": "applied",
@@ -1760,9 +1826,45 @@ def _apply_repair(
     rows = conn.execute(
         "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,),
     ).fetchall()
-    ep = conn.execute("SELECT episode_no,target_duration_s FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    ep = conn.execute(
+        "SELECT episode_no,target_duration_s,storyboard_outline_json "
+        "FROM episodes WHERE id=?",
+        (episode_id,),
+    ).fetchone()
     episode_no = int(ep["episode_no"] or 1) if ep else 1
     current_board = _board_from_rows(rows, episode_no)
+    official_outline = None
+    if ep and ep["storyboard_outline_json"]:
+        try:
+            official_outline = StoryboardOutline.model_validate_json(
+                ep["storyboard_outline_json"]
+            )
+        except (TypeError, ValueError):
+            official_outline = None
+    candidate_outline = (
+        (official_outline or outline).model_copy(deep=True)
+        if (official_outline or outline) is not None else None
+    )
+    spine_targets = _missing_spine_targets(plan)
+    active_spine_target: tuple[str, str, str] | None = None
+    if "SPINE_MISSING" in set(plan.issue_codes or []):
+        target_by_id = {target[0]: target for target in spine_targets}
+        bound = [
+            (int(shot.shot_no), target_by_id[beat_id])
+            for shot in current_board.shots
+            for value in (shot.spine_beat_ids or [])
+            if (beat_id := str(value).upper()) in target_by_id
+        ]
+        bound_shot_nos = [shot_no for shot_no, _target in bound]
+        if bound_shot_nos:
+            # Place the first local repair beside the earliest affected beat.
+            # Subsequent full-gate passes will route any remaining beat IDs.
+            frontier = min(frontier, min(bound_shot_nos))
+            active_spine_target = next(
+                target for shot_no, target in bound if shot_no == frontier
+            )
+        elif spine_targets:
+            active_spine_target = spine_targets[0]
     max_no = max((int(shot.shot_no) for shot in current_board.shots), default=0)
     mode = "replace" if frontier <= max_no else "append"
     window_start = frontier
@@ -1779,32 +1881,27 @@ def _apply_repair(
         episode_row = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
         screenplay = _load_screenplay(episode_row) if episode_row else None
         events: list[dict] = []
-        if outline is not None:
+        if candidate_outline is not None:
             _, max_shots = storyboard_shot_count_range(
                 episode_row["target_duration_s"] if episode_row else 50
             )
             if "ACTION_CAPACITY_EXCEEDED" in plan.issue_codes:
                 events.extend(split_outline_over_action_capacity(
-                    outline,
+                    candidate_outline,
                     max_shots=max_shots,
                     shot_nos={frontier},
                     force=True,
                 ))
             if screenplay is not None and "SPOKEN_CAPACITY_EXCEEDED" in plan.issue_codes:
                 events.extend(split_outline_over_key_line_capacity(
-                    outline, screenplay, max_shots=max_shots,
+                    candidate_outline, screenplay, max_shots=max_shots,
                 ))
             if events:
-                conn.execute(
-                    "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
-                    (outline.model_dump_json(), episode_id),
-                )
-                cp.expected_total = len(outline.shots)
                 inc(
                     "storyboard_split_shot_total",
                     episode_id=episode_id,
                     shot_no=frontier,
-                    shots_after=len(outline.shots),
+                    shots_after=len(candidate_outline.shots),
                     strategy=strategy,
                 )
         mode = "insert"
@@ -1818,21 +1915,19 @@ def _apply_repair(
                 "strategy": "insert_shot",
                 "reason": "split_noop_escalate_insert",
             }
-            if outline is not None and frontier <= len(outline.shots):
+            if candidate_outline is not None and frontier <= len(candidate_outline.shots):
                 # 在 frontier 处复制相邻大纲节点作为插镜占位
                 from copy import deepcopy
-                src = outline.shots[min(len(outline.shots), frontier) - 1]
+                src = candidate_outline.shots[
+                    min(len(candidate_outline.shots), frontier) - 1
+                ]
                 extra = deepcopy(src)
                 extra.shot_no = frontier
+                _retarget_spine_repair_brief(extra, active_spine_target)
                 # 重排后续编号由后续生成填充；这里扩展计划长度
-                outline.shots.insert(frontier - 1, extra)
-                for i, node in enumerate(outline.shots, start=1):
+                candidate_outline.shots.insert(frontier - 1, extra)
+                for i, node in enumerate(candidate_outline.shots, start=1):
                     node.shot_no = i
-                conn.execute(
-                    "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
-                    (outline.model_dump_json(), episode_id),
-                )
-                cp.expected_total = len(outline.shots)
             inc(
                 "storyboard_insert_shot_total",
                 episode_id=episode_id,
@@ -1845,20 +1940,18 @@ def _apply_repair(
         mode = "insert"
         window_start = insert_at
         window_end = insert_at
-        if outline is not None:
+        if candidate_outline is not None:
             from copy import deepcopy
-            if outline.shots:
-                source_idx = min(len(outline.shots), max(1, requested_frontier)) - 1
-                extra = deepcopy(outline.shots[source_idx])
+            if candidate_outline.shots:
+                source_idx = min(
+                    len(candidate_outline.shots), max(1, requested_frontier)
+                ) - 1
+                extra = deepcopy(candidate_outline.shots[source_idx])
                 extra.shot_no = insert_at
-                outline.shots.insert(insert_at - 1, extra)
-                for i, node in enumerate(outline.shots, start=1):
+                _retarget_spine_repair_brief(extra, active_spine_target)
+                candidate_outline.shots.insert(insert_at - 1, extra)
+                for i, node in enumerate(candidate_outline.shots, start=1):
                     node.shot_no = i
-                conn.execute(
-                    "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
-                    (outline.model_dump_json(), episode_id),
-                )
-                cp.expected_total = len(outline.shots)
         inc("storyboard_insert_shot_total", episode_id=episode_id, shot_no=insert_at)
     elif strategy in {"repair_current", "normalize", "delete_shot"}:
         window_start = frontier
@@ -1901,6 +1994,13 @@ def _apply_repair(
         "base_hash": _storyboard_hash(current_board),
         "semantic_attempt_id": semantic_attempt_id,
         "attempt_no": attempt_no,
+        "candidate_outline": (
+            candidate_outline.model_dump(mode="json")
+            if candidate_outline is not None else None
+        ),
+        "candidate_expected_total": (
+            len(candidate_outline.shots) if candidate_outline is not None else 0
+        ),
     }
     cp.repair_candidate_shots = []
     if (

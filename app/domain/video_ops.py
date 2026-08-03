@@ -78,6 +78,42 @@ def _is_storyboard_terminal_for_confirmation(
     return True
 
 
+def _storyboard_confirmation_progress(episode, rows) -> dict:
+    """Return the current terminal-state facts used by preview and submit."""
+    from app.storyboard_supervisor import load_latest_checkpoint
+
+    checkpoint = load_latest_checkpoint(episode["id"])
+    outline_count = 0
+    try:
+        outline_count = len(
+            json.loads(episode["storyboard_outline_json"] or "{}").get("shots") or []
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        outline_count = 0
+    structural_draft = episode["storyboard_artifact_id"] is None and outline_count > 0
+    planned = int(
+        (outline_count if structural_draft else 0)
+        or (checkpoint.expected_total if checkpoint else 0)
+        or outline_count
+        or len(rows)
+    )
+    board = _board_from_shot_rows(rows, episode["episode_no"])
+    final_valid = bool(board.shots and board.shots[-1].is_final)
+    return {
+        "checkpoint": checkpoint,
+        "planned_shots": planned,
+        "board": board,
+        "final_shot_valid": final_valid,
+        "terminal": _is_storyboard_terminal_for_confirmation(
+            episode,
+            checkpoint,
+            shot_count=len(rows),
+            planned_shots=planned,
+            final_shot_valid=final_valid,
+        ),
+    }
+
+
 def _storyboard_structural_errors(storyboard: Storyboard) -> list[str]:
     errors: list[str] = []
     shots = list(storyboard.shots or [])
@@ -125,7 +161,10 @@ def evaluate_storyboard_for_confirmation(
 
     Supervisor 与确认门必须共用此函数，避免「Supervisor 认为通过、确认门又用另一套规则失败」。
     """
-    from app.evaluations.issues import issues_from_messages
+    from app.evaluations.issues import (
+        is_storyboard_confirmation_blocker,
+        issues_from_messages,
+    )
     from app.harness.types import IssueSeverity
     from app.continuity import dialogue_framing_errors
     from app.validators import (
@@ -179,6 +218,14 @@ def evaluate_storyboard_for_confirmation(
     if screenplay is not None:
         score_warnings.extend(validate_storyboard_soundtrack(board, screenplay, compact_target))
         score_warnings.extend(validate_storyboard_preserves_key_content(board, screenplay))
+    delivery_blockers = [
+        message for message in score_warnings
+        if is_storyboard_confirmation_blocker(message)
+    ]
+    if delivery_blockers:
+        structural_errors.extend(delivery_blockers)
+        blocker_set = set(delivery_blockers)
+        score_warnings = [message for message in score_warnings if message not in blocker_set]
     if has_real_bible and not structural_errors:
         try:
             for s in board.shots:
@@ -217,9 +264,42 @@ def evaluate_storyboard_for_confirmation(
     )
 
 
+def _assert_storyboard_generation_gate(episode_id: str) -> None:
+    """Fail closed before any new paid media work for legacy confirmations."""
+    conn = get_conn()
+    episode = _episode_or_404(episode_id)
+    rows = conn.execute(
+        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,),
+    ).fetchall()
+    if not rows:
+        raise HTTPException(409, "本集尚无分镜")
+    project = conn.execute(
+        "SELECT * FROM projects WHERE id=?", (episode["project_id"],),
+    ).fetchone()
+    try:
+        evaluation = evaluate_storyboard_for_confirmation(
+            episode,
+            _board_from_shot_rows(rows, episode["episode_no"]),
+            _load_screenplay(episode),
+            _project_bible_or_placeholder(project),
+            has_real_bible=bool((project["bible_json"] or "").strip()) if project else False,
+            record_metrics=False,
+        )
+        hard_errors = list(dict.fromkeys(evaluation.errors))
+    except Exception as exc:  # legacy malformed rows must fail closed, not return HTTP 500
+        hard_errors = [f"分镜结构无法通过确认评估：{exc}"]
+    if hard_errors:
+        raise HTTPException(409, {
+            "code": "STORYBOARD_CONFIRMATION_REQUIRED",
+            "message": f"当前分镜仍有 {len(hard_errors)} 个确认门禁问题，尚不能启动付费视频",
+            "errors": hard_errors[:30],
+            "recovery_action": "返回分镜台继续修复；全部硬门禁通过并重新确认后再生成视频",
+            "episode_id": episode_id,
+        })
+
+
 def create_storyboard_confirmation_preview(episode_id: str) -> dict:
     """计算并签发人工确认快照。"""
-    from app.storyboard_supervisor import load_latest_checkpoint
     from app.storyboard_workspace import create_preview
 
     ep = _episode_or_404(episode_id)
@@ -229,30 +309,10 @@ def create_storyboard_confirmation_preview(episode_id: str) -> dict:
     ).fetchall()
     if not rows:
         raise HTTPException(409, "本集还没有分镜")
-    cp = load_latest_checkpoint(episode_id)
-    outline_count = 0
-    try:
-        outline_count = len(json.loads(ep["storyboard_outline_json"] or "{}").get("shots") or [])
-    except (TypeError, ValueError, json.JSONDecodeError):
-        outline_count = 0
-    # 结构调整会撤销整集 artifact 并重写大纲；此时旧 checkpoint 仅是历史生成记录，
-    # 确认门必须以用户刚批准的新结构为准。
-    structural_draft = ep["storyboard_artifact_id"] is None and outline_count > 0
-    planned = int(
-        (outline_count if structural_draft else 0)
-        or (cp.expected_total if cp else 0)
-        or outline_count
-        or len(rows)
-    )
-    board = _board_from_shot_rows(rows, ep["episode_no"])
-    final_valid = bool(board.shots and board.shots[-1].is_final)
-    terminal = _is_storyboard_terminal_for_confirmation(
-        ep,
-        cp,
-        shot_count=len(rows),
-        planned_shots=planned,
-        final_shot_valid=final_valid,
-    )
+    progress = _storyboard_confirmation_progress(ep, rows)
+    planned = progress["planned_shots"]
+    board = progress["board"]
+    final_valid = progress["final_shot_valid"]
     project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
     bible = _project_bible_or_placeholder(project)
     screenplay = _load_screenplay(ep)
@@ -261,14 +321,15 @@ def create_storyboard_confirmation_preview(episode_id: str) -> dict:
         has_real_bible=bool((project["bible_json"] or "").strip()) if project else False,
     )
     hard_errors = list(evaluation.errors)
-    if not terminal:
+    if not progress["terminal"]:
         hard_errors.insert(
             0,
             f"分镜尚未达到完整终态：已完成 {len(rows)}/{planned} 镜，最终镜{'有效' if final_valid else '缺失'}",
         )
-    warnings: list[str] = list(dict.fromkeys([*evaluation.warnings, *hard_errors]))
+    hard_errors = list(dict.fromkeys(hard_errors))
+    warnings = list(dict.fromkeys(evaluation.warnings))
     payload = {
-        "contract_version": "storyboard-confirm.v2",
+        "contract_version": "storyboard-confirm.v3",
         "episode_id": episode_id,
         "storyboard_artifact_id": ep["storyboard_artifact_id"],
         "shot_count": len(rows),
@@ -276,11 +337,10 @@ def create_storyboard_confirmation_preview(episode_id: str) -> dict:
         "total_duration_s": sum(int(shot.duration_s or 0) for shot in evaluation.board.shots),
         "final_shot_valid": final_valid,
         "hard_gates": {
-            # 兼容旧客户端字段；有至少一镜即可生成确认令牌。所有评估结论转入 warnings。
-            "passed": True,
-            "errors": [],
-            "retry_exhausted_fallback": bool(hard_errors),
-            "findings": hard_errors,
+            "passed": not hard_errors,
+            "errors": hard_errors,
+            "retry_exhausted_fallback": False,
+            "findings": [],
         },
         "warnings": warnings,
         "score_only": {
@@ -293,8 +353,19 @@ def create_storyboard_confirmation_preview(episode_id: str) -> dict:
             "max": evaluation.estimated_cost_cny,
             "note": "按当前服务端费率估算；确认不会自动提交付费视频",
         },
-        "unlocks": ["生成台", "付费视频生成入口"],
+        "unlocks": [] if hard_errors else ["生成台", "付费视频生成入口"],
+        "recovery_action": (
+            "返回分镜台继续修复；全部硬门禁通过后再确认"
+            if hard_errors else None
+        ),
     }
+    if hard_errors:
+        try:
+            from app.observability.metrics import inc
+            inc("storyboard_confirm_preview_total", episode_id=episode_id, passed=False)
+        except Exception:  # noqa: BLE001
+            pass
+        raise HTTPException(409, detail=payload)
     preview_payload = create_preview("confirm", episode_id, payload)
     try:
         from app.observability.metrics import inc
@@ -431,6 +502,13 @@ def confirm_episode_core(
     shots_rows = conn.execute("SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)).fetchall()
     if not shots_rows:
         raise ValueError("本集还没有分镜脚本")
+    progress = _storyboard_confirmation_progress(ep, shots_rows)
+    if not progress["terminal"]:
+        raise ValueError(
+            "分镜尚未达到完整终态："
+            f"已完成 {len(shots_rows)}/{progress['planned_shots']} 镜，"
+            f"最终镜{'有效' if progress['final_shot_valid'] else '缺失'}"
+        )
     for row in shots_rows:
         try:
             verify_or_bind_existing_excerpt(
@@ -501,7 +579,13 @@ def confirm_episode_core(
         has_real_bible=has_real_bible,
         target_duration_s=compact_target,
     )
-    confirmation_warnings = list(dict.fromkeys([*evaluation.errors, *evaluation.warnings]))
+    confirmation_errors = list(dict.fromkeys(evaluation.errors))
+    if confirmation_errors:
+        raise ValueError(
+            f"分镜确认门禁未通过（{len(confirmation_errors)} 项）："
+            + "；".join(confirmation_errors[:5])
+        )
+    confirmation_warnings = list(dict.fromkeys(evaluation.warnings))
     board = evaluation.board
     compact_target = evaluation.compact_target
     est = evaluation.estimated_cost_cny
@@ -952,6 +1036,7 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
     )
     if ep["status"] not in ("confirmed", "generating", "done"):
         raise HTTPException(409, "分镜脚本未确认（先在工作台点击确认分镜）")
+    _assert_storyboard_generation_gate(episode_id)
     # Supervisor 运行期间拒绝快速模式，避免重复付费
     try:
         mode = ep["video_completion_mode"]
@@ -1097,6 +1182,7 @@ async def _generate_shot_core(shot_id: str, body: dict) -> dict:
     shot_row = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
     if not shot_row:
         raise HTTPException(404, "镜头不存在")
+    _assert_storyboard_generation_gate(shot_row["episode_id"])
     qualification = _review_assert_shot_positive(
         shot_id, body.get("qualification_version"),
     )
@@ -1525,6 +1611,7 @@ async def _complete_episode_core(
     _review_assert_positive_action(episode_id, body.get("qualification_version"))
     if ep["status"] not in ("confirmed", "generating", "done"):
         raise HTTPException(409, "分镜脚本未确认（先在工作台点击确认分镜）")
+    _assert_storyboard_generation_gate(episode_id)
     _ensure_video_episode_columns()
     mode = body.get("mode") or "fresh"
     if mode not in {"fresh", "resume"}:

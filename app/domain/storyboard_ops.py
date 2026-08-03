@@ -2311,7 +2311,7 @@ def _storyboard_status_snapshot(
         int((supervisor or {}).get("next_shot_no") or (passed + 1)),
     )
     complete_structure = bool(
-        ep.get("status") == "scripted"
+        ep.get("status") in {"scripted", "confirmed", "generating", "done"}
         and shot_count > 0
         and planned == shot_count
         and passed == shot_count
@@ -2476,7 +2476,7 @@ def _storyboard_status_snapshot(
         "resume_from_shot": resume_from,
         "resume_mode": resume_mode,
         "final_shot_valid": final_valid,
-        "hard_gates_passed": full_terminal or confirmed,
+        "hard_gates_passed": bool(not gate_errors and (full_terminal or confirmed)),
         "hard_gate_issue_count": len(gate_errors),
         "hard_gate_issues": gate_errors[:30],
         "feature_flags": feature_flags,
@@ -3037,14 +3037,6 @@ def episode_detail(episode_id: str, view: str | None = None):
             "SELECT * FROM projects WHERE id=?", (ep["project_id"],)
         ).fetchone()
         project_bible = _project_bible_or_placeholder(project)
-        scene_reconciliation = _reconcile_storyboard_scene_projection(
-            conn, episode_id, project_bible,
-        )
-        if scene_reconciliation["outline_shots"]:
-            refreshed = conn.execute(
-                "SELECT storyboard_outline_json FROM episodes WHERE id=?", (episode_id,),
-            ).fetchone()
-            ep["storyboard_outline_json"] = refreshed["storyboard_outline_json"]
         if full or view == "board":
             ep["scene_options"] = [
                 scene.name for scene in (project_bible.scenes or []) if (scene.name or "").strip()
