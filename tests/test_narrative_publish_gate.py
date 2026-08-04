@@ -13,6 +13,8 @@ from app.narrative_calibration import (
     GLOBAL_CALIBRATION_SCOPE_ID,
     HUMAN_CALIBRATION_CONTRACT_VERSION,
     CalibrationReport,
+    HumanOneWatchFreeze,
+    HumanOneWatchObservation,
 )
 from app.production.certificate import (
     consume_completion_certificate,
@@ -126,11 +128,89 @@ def _install_passing_review_model(monkeypatch) -> None:
 
 
 def _install_global_calibration(review_artifact_id: str) -> dict:
+    observation_artifacts = []
+    for ordinal, (prior_id, target_id, score) in enumerate((
+        ("AP-cold", "XD-cold", 0.95),
+        ("AP-context", "XD-context", 0.95),
+    ), start=1):
+        observation_id = f"human-{ordinal}"
+        freeze = HumanOneWatchFreeze(
+            observation_id=observation_id,
+            participant_id_hash=f"participant-{ordinal}",
+            scope_id="episode-generic",
+            audience_prior_id=prior_id,
+            narrative_review_artifact_id=review_artifact_id,
+            watched_once=True,
+            spontaneous_recall_frozen=True,
+            spontaneous_recall={"free_text": "frozen test recall"},
+            content_dimensions={"genre": "test", "form": "test"},
+        )
+        freeze_artifact = evidence_repository.create_artifact(EvidenceArtifact(
+            type="human_one_watch_spontaneous_recall",
+            scope_type="episode",
+            scope_id="episode-generic",
+            status="validated",
+            trust_level="T4",
+            content=freeze.model_dump(mode="json"),
+            parent_artifact_ids=[review_artifact_id],
+            contract_version="human-one-watch.v1",
+        ))
+        evidence_repository.create_evaluation(
+            freeze_artifact["id"],
+            Evaluation(
+                evaluator_type="human",
+                evaluator_name="one_watch_freeze_gate",
+                evaluator_version="human-one-watch.v1",
+                status="passed",
+                hard_gate_passed=True,
+                evaluation_role="runtime_gate",
+                runtime_blocking=True,
+            ),
+        )
+        observation = HumanOneWatchObservation(
+            **freeze.model_dump(mode="json"),
+            target_delta_observations=[{
+                "audience_prior_id": prior_id,
+                "target_delta_id": target_id,
+                "observed_score": score,
+            }],
+        )
+        observation_artifact = evidence_repository.create_artifact(
+            EvidenceArtifact(
+                type="human_one_watch_observation",
+                scope_type="episode",
+                scope_id="episode-generic",
+                status="validated",
+                trust_level="T4",
+                content=observation.model_dump(mode="json"),
+                parent_artifact_ids=[
+                    review_artifact_id,
+                    freeze_artifact["id"],
+                ],
+                contract_version="human-one-watch.v1",
+            )
+        )
+        evidence_repository.create_evaluation(
+            observation_artifact["id"],
+            Evaluation(
+                evaluator_type="human",
+                evaluator_name="one_watch_protocol",
+                evaluator_version="human-one-watch.v1",
+                status="passed",
+                hard_gate_passed=True,
+                evaluation_role="score_only",
+                score_status="observation_only",
+            ),
+        )
+        observation_artifacts.append(observation_artifact)
     report = CalibrationReport(
         calibration_report_id="CAL-TEST-AUTHORITY",
         calibration_scope_id=GLOBAL_CALIBRATION_SCOPE_ID,
         scope_ids=["episode-generic", "episode-generic-2"],
-        observation_ids=["human-1", "human-2"],
+        observation_ids=[
+            artifact["content"]["observation_id"]
+            for artifact in observation_artifacts
+        ],
         narrative_review_artifact_ids=[review_artifact_id],
         required_dimension_axes=["genre", "form"],
         sample_summary={
@@ -156,7 +236,10 @@ def _install_global_calibration(review_artifact_id: str) -> dict:
         status="candidate",
         trust_level="T4",
         content=report.model_dump(mode="json"),
-        parent_artifact_ids=[review_artifact_id],
+        parent_artifact_ids=[
+            review_artifact_id,
+            *[artifact["id"] for artifact in observation_artifacts],
+        ],
         contract_version=HUMAN_CALIBRATION_CONTRACT_VERSION,
     ))
     return evidence_repository.commit_artifact(

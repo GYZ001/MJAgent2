@@ -344,10 +344,26 @@ def _require_review_lineage(artifact_ids: Sequence[str]) -> list[dict[str, Any]]
         artifact = evidence_repository.get_artifact(artifact_id)
         if artifact is None:
             errors.append(f"[CALIBRATION_PARENT_MISSING] {artifact_id}")
-        else:
-            artifacts.append(artifact)
-    if artifacts and not any(item.get("type") == "narrative_review_report" for item in artifacts):
-        errors.append("[CALIBRATION_REVIEW_REPORT_MISSING] 父证据中至少需要一份 narrative_review_report")
+            continue
+        if artifact.get("type") != "narrative_review_report":
+            errors.append(f"[CALIBRATION_REVIEW_REPORT_MISSING] {artifact_id} 不是 narrative_review_report")
+            continue
+        if artifact.get("status") in {
+            "stale", "rejected", "superseded", "needs_revision",
+        }:
+            errors.append(f"[CALIBRATION_REVIEW_REPORT_INVALID] {artifact_id} 状态不可用")
+            continue
+        try:
+            current_hash = evidence_repository.content_hash(
+                artifact.get("content"),
+                artifact.get("file_path"),
+            )
+        except (OSError, TypeError, ValueError):
+            current_hash = ""
+        if current_hash != artifact.get("content_hash"):
+            errors.append(f"[CALIBRATION_REVIEW_HASH_DRIFT] {artifact_id}")
+            continue
+        artifacts.append(artifact)
     if errors:
         raise CalibrationContractError(errors)
     return artifacts
@@ -529,6 +545,123 @@ def persist_human_one_watch_observation(
         ),
     )
     return artifact
+
+
+def _verified_human_observation_artifact(
+    artifact_id: str,
+    *,
+    allowed_review_ids: set[str],
+) -> tuple[HumanOneWatchObservation | None, list[str]]:
+    artifact = evidence_repository.get_artifact(artifact_id)
+    errors: list[str] = []
+    if (
+        artifact is None
+        or artifact.get("type") != "human_one_watch_observation"
+        or artifact.get("status")
+        in {"stale", "rejected", "superseded", "needs_revision"}
+    ):
+        return None, [f"[CALIBRATION_OBSERVATION_TYPE_INVALID] {artifact_id}"]
+    try:
+        current_hash = evidence_repository.content_hash(
+            artifact.get("content"),
+            artifact.get("file_path"),
+        )
+    except (OSError, TypeError, ValueError):
+        current_hash = ""
+    if current_hash != artifact.get("content_hash"):
+        errors.append(f"[CALIBRATION_OBSERVATION_HASH_DRIFT] {artifact_id}")
+    try:
+        observation = HumanOneWatchObservation.model_validate(
+            artifact.get("content") or {}
+        )
+    except Exception as exc:
+        return None, [
+            *errors,
+            f"[CALIBRATION_OBSERVATION_SCHEMA_INVALID] {artifact_id}: {exc}",
+        ]
+    if observation.narrative_review_artifact_id not in allowed_review_ids:
+        errors.append(
+            f"[CALIBRATION_OBSERVATION_REVIEW_MISMATCH] {artifact_id}"
+        )
+    parents = set(artifact.get("parent_artifact_ids") or [])
+    if observation.narrative_review_artifact_id not in parents:
+        errors.append(
+            f"[CALIBRATION_OBSERVATION_REVIEW_LINEAGE_MISSING] {artifact_id}"
+        )
+    freeze_rows = [
+        evidence_repository.get_artifact(str(parent_id))
+        for parent_id in parents
+    ]
+    freezes = [
+        item for item in freeze_rows
+        if item is not None
+        and item.get("type") == "human_one_watch_spontaneous_recall"
+        and item.get("status") == "validated"
+    ]
+    if len(freezes) != 1:
+        errors.append(f"[CALIBRATION_OBSERVATION_FREEZE_INVALID] {artifact_id}")
+    else:
+        freeze_artifact = freezes[0]
+        try:
+            freeze_hash = evidence_repository.content_hash(
+                freeze_artifact.get("content"),
+                freeze_artifact.get("file_path"),
+            )
+        except (OSError, TypeError, ValueError):
+            freeze_hash = ""
+        if freeze_hash != freeze_artifact.get("content_hash"):
+            errors.append(
+                f"[CALIBRATION_OBSERVATION_FREEZE_HASH_DRIFT] {artifact_id}"
+            )
+        try:
+            freeze = HumanOneWatchFreeze.model_validate(
+                freeze_artifact.get("content") or {}
+            )
+        except Exception as exc:
+            errors.append(
+                f"[CALIBRATION_OBSERVATION_FREEZE_SCHEMA_INVALID] {artifact_id}: {exc}"
+            )
+        else:
+            if (
+                freeze.observation_id != observation.observation_id
+                or freeze.participant_id_hash != observation.participant_id_hash
+                or freeze.scope_id != observation.scope_id
+                or freeze.audience_prior_id != observation.audience_prior_id
+                or freeze.narrative_review_artifact_id
+                != observation.narrative_review_artifact_id
+                or freeze.spontaneous_recall != observation.spontaneous_recall
+                or freeze.content_dimensions != observation.content_dimensions
+            ):
+                errors.append(
+                    f"[CALIBRATION_OBSERVATION_FREEZE_DRIFT] {artifact_id}"
+                )
+        freeze_gates = [
+            item
+            for item in evidence_repository.get_evaluations(
+                str(freeze_artifact["id"])
+            )
+            if item.get("evaluator_name") == "one_watch_freeze_gate"
+            and item.get("evaluator_version") == HUMAN_ONE_WATCH_CONTRACT_VERSION
+            and item.get("evaluation_role") == "runtime_gate"
+            and bool(item.get("runtime_blocking"))
+            and item.get("status") == "passed"
+            and bool(item.get("hard_gate_passed"))
+        ]
+        if len(freeze_gates) != 1:
+            errors.append(
+                f"[CALIBRATION_OBSERVATION_FREEZE_GATE_INVALID] {artifact_id}"
+            )
+    observation_gates = [
+        item
+        for item in evidence_repository.get_evaluations(artifact_id)
+        if item.get("evaluator_name") == "one_watch_protocol"
+        and item.get("evaluator_version") == HUMAN_ONE_WATCH_CONTRACT_VERSION
+        and item.get("status") == "passed"
+        and bool(item.get("hard_gate_passed"))
+    ]
+    if len(observation_gates) != 1:
+        errors.append(f"[CALIBRATION_OBSERVATION_GATE_INVALID] {artifact_id}")
+    return observation, errors
 
 
 def _variance(values: Sequence[float]) -> float | None:
@@ -990,19 +1123,22 @@ def persist_calibration_report(
     observed_report_ids: set[str] = set()
     errors: list[str] = []
     for artifact_id in observation_ids:
-        artifact = evidence_repository.get_artifact(artifact_id)
-        if artifact is None:
-            errors.append(f"[CALIBRATION_PARENT_MISSING] {artifact_id}")
-            continue
-        if artifact.get("type") != "human_one_watch_observation":
-            errors.append(f"[CALIBRATION_OBSERVATION_TYPE_INVALID] {artifact_id}")
-            continue
-        content = artifact.get("content") or {}
-        observed_report_ids.add(str(content.get("observation_id") or ""))
+        observation, observation_errors = _verified_human_observation_artifact(
+            artifact_id,
+            allowed_review_ids=set(review_ids),
+        )
+        errors.extend(observation_errors)
+        if observation is not None:
+            observed_report_ids.add(observation.observation_id)
     missing_observations = set(report.observation_ids) - observed_report_ids
+    extra_observations = observed_report_ids - set(report.observation_ids)
     if missing_observations:
         errors.append(
             f"[CALIBRATION_OBSERVATION_LINEAGE_INCOMPLETE] {sorted(missing_observations)}"
+        )
+    if extra_observations:
+        errors.append(
+            f"[CALIBRATION_OBSERVATION_LINEAGE_EXTRA] {sorted(extra_observations)}"
         )
     if errors:
         raise CalibrationContractError(errors)
@@ -1117,6 +1253,33 @@ def require_current_calibration_authority(
     parents = set(artifact.get("parent_artifact_ids") or [])
     if not set(report.narrative_review_artifact_ids).issubset(parents):
         errors.append("[NARRATIVE_CALIBRATION_LINEAGE_INCOMPLETE] 当前校准缺少审读父证据")
+    try:
+        _require_review_lineage(report.narrative_review_artifact_ids)
+    except CalibrationContractError as exc:
+        errors.extend(exc.errors)
+    observation_parent_ids = [
+        str(parent_id)
+        for parent_id in parents
+        if (
+            (parent := evidence_repository.get_artifact(str(parent_id)))
+            is not None
+            and parent.get("type") == "human_one_watch_observation"
+        )
+    ]
+    verified_observation_ids: set[str] = set()
+    for observation_artifact_id in observation_parent_ids:
+        observation, observation_errors = _verified_human_observation_artifact(
+            observation_artifact_id,
+            allowed_review_ids=set(report.narrative_review_artifact_ids),
+        )
+        errors.extend(observation_errors)
+        if observation is not None:
+            verified_observation_ids.add(observation.observation_id)
+    if verified_observation_ids != set(report.observation_ids):
+        errors.append(
+            "[NARRATIVE_CALIBRATION_OBSERVATION_LINEAGE_INVALID] "
+            "校准报告与真人观察父证据不完全一致"
+        )
     gate_rows = [
         item
         for item in evidence_repository.get_evaluations(artifact_id)

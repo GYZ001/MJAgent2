@@ -2216,6 +2216,46 @@ async def run_storyboard_supervisor(
                     return cp
                 completed = _repair_context_shots(conn, cp, ep_data["episode_no"])
                 continue
+            try:
+                from app.narrative_calibration import (
+                    assert_report_meets_current_calibration,
+                )
+
+                assert_report_meets_current_calibration(
+                    narrative_review_report,
+                )
+            except Exception as exc:  # noqa: BLE001 - explicit bootstrap gate
+                cp.phase = "WAITING_HUMAN"
+                cp.outcome = "WAITING_HUMAN_CALIBRATION"
+                cp.validated_prefix_end = len(evaluation.board.shots)
+                cp.next_shot_no = len(evaluation.board.shots) + 1
+                cp.last_repair = {
+                    "status": "waiting_human_calibration",
+                    "reason": str(exc),
+                    "narrative_review_artifact_ids": (
+                        narrative_review_artifact_ids
+                    ),
+                    "candidate_outline_published": False,
+                }
+                save_checkpoint(cp, run_id=run_id)
+                conn.execute(
+                    """UPDATE episodes
+                          SET status='scripted',
+                              narrative_status='needs_review',
+                              narrative_review_artifact_id=NULL,
+                              narrative_calibration_artifact_id=NULL,
+                              script_error=?
+                        WHERE id=?""",
+                    (
+                        (
+                            "分镜结构与冷观众审读已完成，正在等待真人一次观看校准："
+                            + str(exc)
+                        )[:800],
+                        episode_id,
+                    ),
+                )
+                conn.commit()
+                return cp
         if narrative_authority:
             _finalize_storyboard_evidence(
                 episode_id,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 
 import pytest
 
@@ -756,6 +757,94 @@ def test_episode_6_accident_misjudgment_reveal_training_relationship_golden() ->
     _rename_entities_and_surface_text(screenplay, board)
     assert validate_screenplay_narrative(screenplay, require=True) == []
     assert validate_storyboard_narrative(board, screenplay) == []
+
+
+@pytest.mark.parametrize(
+    ("genre", "form", "surface_seed"),
+    [
+        ("都市", "误会澄清", "city"),
+        ("悬疑", "证据揭示", "mystery"),
+        ("修仙", "规则验证", "cultivation"),
+        ("喜剧", "反差兑现", "comedy"),
+        ("现实", "纯对白", "dialogue"),
+        ("动作", "多场景追逐", "chase"),
+        ("心理", "回忆梦境", "dream"),
+        ("剧情", "戏剧反讽", "irony"),
+        ("史诗", "长铺垫兑现", "payoff"),
+    ],
+)
+def test_cross_genre_surface_metamorphisms_preserve_relation_verdict(
+    genre: str,
+    form: str,
+    surface_seed: str,
+) -> None:
+    screenplay, board = _episode_6_relationship_golden()
+    screenplay.title = f"{genre}-{form}"
+    _rename_entities_and_surface_text(screenplay, board)
+    for index, proposition in enumerate(
+        screenplay.narrative_plan.propositions,
+        start=1,
+    ):
+        proposition.canonical_statement = (
+            f"{surface_seed} surface proposition {index}"
+        )
+    for index, action in enumerate(
+        screenplay.narrative_plan.atomic_actions,
+        start=1,
+    ):
+        action.semantic_intent = f"{surface_seed} fictional action {index}"
+        action.completion_condition = (
+            f"{surface_seed} relation {index} becomes observable"
+        )
+
+    assert validate_screenplay_narrative(screenplay, require=True) == []
+    assert validate_storyboard_narrative(board, screenplay) == []
+
+
+def test_seeded_random_event_dags_preserve_topology_and_detect_reversal() -> None:
+    rng = random.Random(20260804)
+    for sample in range(30):
+        screenplay = _screenplay()
+        plan = screenplay.narrative_plan
+        event_count = rng.randint(3, 9)
+        events = [plan.events[0]]
+        for index in range(1, event_count):
+            eligible = [item.event_id for item in events]
+            parent_count = rng.randint(1, min(3, len(eligible)))
+            parents = sorted(
+                rng.sample(eligible, parent_count),
+                key=eligible.index,
+            )
+            event = NarrativeEvent(
+                event_id=f"R-{sample}-{index}",
+                proposition_ids=["P-story"],
+                causal_parent_ids=parents,
+                must_keep=True,
+                delivery_scope_id="episode-generic",
+                delivery_policy="carry",
+            )
+            events.append(event)
+        plan.events = events
+
+        assert validate_screenplay_narrative(screenplay, require=True) == []
+
+        victim_index = rng.randrange(1, len(plan.events))
+        victim = plan.events[victim_index]
+        parent_id = victim.causal_parent_ids[0]
+        parent_index = next(
+            index for index, item in enumerate(plan.events)
+            if item.event_id == parent_id
+        )
+        moved_parent = plan.events.pop(parent_index)
+        new_victim_index = next(
+            index for index, item in enumerate(plan.events)
+            if item.event_id == victim.event_id
+        )
+        plan.events.insert(new_victim_index + 1, moved_parent)
+
+        assert "EVENT_CAUSAL_ORDER" in _codes(
+            validate_screenplay_narrative(screenplay, require=True)
+        )
 
 
 def test_screenplay_document_roundtrip_preserves_the_authoritative_graph() -> None:
