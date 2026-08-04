@@ -338,13 +338,32 @@ def shot_content_hash(shot_row) -> str:
     return digest({key: shot_row[key] for key in keys})
 
 
+def _storyboard_run_active(conn, episode_id: str) -> bool:
+    from app import task_registry
+
+    if task_registry.active("storyboard", episode_id):
+        return True
+    active_statuses = tuple(sorted(evidence_repository.ACTIVE_RUN_STATUSES))
+    marks = ",".join("?" for _ in active_statuses)
+    row = conn.execute(
+        f"""SELECT 1 FROM workflow_runs
+              WHERE scope_type='episode' AND scope_id=?
+                AND workflow_type='storyboard'
+                AND status IN ({marks})
+                AND recovered_by_run_id IS NULL
+              LIMIT 1""",
+        (episode_id, *active_statuses),
+    ).fetchone()
+    return bool(row)
+
+
 def create_edit_session(shot_id: str) -> dict[str, Any]:
     conn = get_conn()
     shot = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
     if not shot:
         raise HTTPException(404, "镜头不存在")
     ep = conn.execute("SELECT status FROM episodes WHERE id=?", (shot["episode_id"],)).fetchone()
-    if not ep or ep["status"] == "scripting":
+    if not ep or _storyboard_run_active(conn, shot["episode_id"]):
         raise HTTPException(409, "分镜正在生成或修复；请先暂停并等待进入可编辑状态")
     token = f"sblease_{secrets.token_urlsafe(24)}"
     baseline_hash = shot_content_hash(shot)
@@ -379,7 +398,7 @@ def require_edit_session(token: str | None, shot_id: str) -> dict[str, Any]:
         raise HTTPException(409, "编辑租约已过期；本地内容仍保留，请重新取得编辑基线")
     shot = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
     ep = conn.execute("SELECT status FROM episodes WHERE id=?", (row["episode_id"],)).fetchone()
-    if not shot or not ep or ep["status"] == "scripting":
+    if not shot or not ep or _storyboard_run_active(conn, row["episode_id"]):
         raise HTTPException(409, "任务已恢复运行，当前草稿只能保留，不能发布")
     current_hash = shot_content_hash(shot)
     if (shot["storyboard_artifact_id"] or None) != (row["baseline_artifact_id"] or None) or current_hash != row["baseline_content_hash"]:

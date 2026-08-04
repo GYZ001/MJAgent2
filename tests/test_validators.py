@@ -1,7 +1,7 @@
 from app.schemas import Bible, Character, Dialogue, EpisodeScreenplay, Shot, Storyboard, World
 from app.validators import (_contiguous_scene_move, _has_movement_cue, _has_transition_hint,
                             adjacent_spoken_repeat_errors,
-                            normalize_action_desc, validate_storyboard,
+                            key_line_catalog, normalize_action_desc, validate_storyboard,
                             storyboard_shot_count_range,
                             validate_storyboard_preserves_key_content,
                             validate_storyboard_shot_covers_outline)
@@ -336,6 +336,37 @@ def test_storyboard_order_check_uses_full_script_order_for_legacy_key_lines() ->
     )
 
     assert not any("打乱了主线对白顺序" in error for error in errors), errors
+
+
+def test_storyboard_ignores_legacy_narrator_key_line_without_renumbering_ids() -> None:
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        full_script_text=(
+            "【场1】白天 / 山林\n旁白：砰、轰。\n"
+            "萧炎：先离开这里。\n萧薰儿：最后再谈修炼。"
+        ),
+        key_lines=[
+            "旁白：砰、轰。",
+            "萧炎：先离开这里。",
+            "萧薰儿：最后再谈修炼。",
+        ],
+    )
+    first = _compact_shot(1)
+    first.dialogues = [Dialogue(speaker="萧炎", line="先离开这里。", emotion="平静")]
+    second = _compact_shot(2)
+    second.dialogues = [Dialogue(speaker="萧薰儿", line="最后再谈修炼。", emotion="平静")]
+    second.dialogues.append(Dialogue(speaker="萧炎", line="砰、轰。", emotion="平静"))
+
+    errors = validate_storyboard_preserves_key_content(
+        Storyboard(episode_no=1, shots=[first, second]), screenplay,
+    )
+
+    assert key_line_catalog(screenplay) == {
+        "KL02": "萧炎：先离开这里。",
+        "KL03": "萧薰儿：最后再谈修炼。",
+    }
+    assert not any("打乱了主线对白顺序" in error for error in errors), errors
+    assert not any("丢失了剧本标记" in error for error in errors), errors
 
 
 def test_storyboard_preservation_noop_without_manifest() -> None:

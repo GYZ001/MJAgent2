@@ -386,6 +386,27 @@ def test_dialogue_chain_normalization_derives_key_lines_in_script_order() -> Non
     assert script.key_lines == []
 
 
+def test_dialogue_chain_normalization_excludes_narrator_from_key_lines() -> None:
+    script = EpisodeScreenplay(
+        episode_no=1,
+        full_script_text="【场1】日 / 山林\n旁白：砰、轰。\n谷言：门开了。",
+        dialogue_chains=[
+            KeyDialogueChain(
+                chain_id="DC1",
+                topic="开门",
+                turns=[
+                    KeyDialogueTurn(speaker="旁白", line="砰、轰。"),
+                    KeyDialogueTurn(speaker="谷言", line="门开了。"),
+                ],
+            ),
+        ],
+    )
+
+    normalized = normalize_screenplay_candidate(script)
+
+    assert normalized.key_lines == ["谷言：门开了。"]
+
+
 def test_long_screenplay_source_retains_head_middle_dialogue_and_tail() -> None:
     source = (
         "开场事实" + ("甲" * 500)

@@ -887,11 +887,35 @@ def test_start_preflight_expires_when_state_drifts(storyboard_db):
 
 
 def test_running_state_cannot_acquire_edit_lease(storyboard_db):
-    storyboard_db.execute("UPDATE episodes SET status='scripting' WHERE id='e1'")
+    recorder = WorkflowRecorder.create(
+        workflow_type="storyboard",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="active-edit-guard",
+    )
+    recorder.start()
+    storyboard_db.execute(
+        "UPDATE episodes SET status='scripting',active_storyboard_run_id=? WHERE id='e1'",
+        (recorder.run_id,),
+    )
     storyboard_db.commit()
     with pytest.raises(HTTPException) as caught:
         workspace.create_edit_session("s1")
     assert caught.value.status_code == 409
+
+
+def test_paused_scripting_state_can_acquire_edit_lease(storyboard_db):
+    storyboard_db.execute(
+        """UPDATE episodes
+              SET status='scripting',active_storyboard_run_id=NULL,
+                  script_error='用户已暂停分镜任务'
+            WHERE id='e1'"""
+    )
+    storyboard_db.commit()
+
+    session = workspace.create_edit_session("s1")
+
+    assert session["edit_session_token"].startswith("sblease_")
 
 
 def test_stale_edit_session_is_rejected_without_borrowing_new_version(storyboard_db):
@@ -996,6 +1020,31 @@ def test_shot_edit_commits_deterministic_gate_without_treating_authorship_as_fai
     evaluations = repository.get_evaluations(result["artifact_id"])
     assert any(row["evaluator_name"] == "storyboard_editor" and not row["hard_gate_passed"] for row in evaluations)
     assert any(row["evaluator_name"] == "storyboard_shot_business_gate" and row["hard_gate_passed"] for row in evaluations)
+
+
+def test_manual_duration_edit_records_reviewed_duration_contract(storyboard_db):
+    session = workspace.create_edit_session("s1")
+    changes = {"duration_s": 10}
+    preview = api.preview_shot_edit_impact("s1", {
+        "edit_session_token": session["edit_session_token"],
+        "changes": changes,
+    })
+
+    asyncio.run(api.edit_shot("s1", {
+        **changes,
+        "expected_version": session["baseline_artifact_id"],
+        "edit_session_token": session["edit_session_token"],
+        "preview_token": preview["preview_token"],
+        "baseline_content_hash": session["baseline_content_hash"],
+        "change_source": "test_manual_duration",
+    }))
+
+    row = storyboard_db.execute(
+        "SELECT duration_s,shot_contract_json FROM shots WHERE id='s1'"
+    ).fetchone()
+    contract = json.loads(row["shot_contract_json"])
+    assert row["duration_s"] == 10
+    assert "duration_human_reviewed" in contract["risk_tags"]
 
 
 def test_manual_dialogue_edit_cannot_reintroduce_unresolved_descriptive_identity(storyboard_db):

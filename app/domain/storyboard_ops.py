@@ -91,6 +91,11 @@ def _insert_storyboard_shot(
     _assert_storyboard_write_authorized(conn, episode_id, expected_screenplay_artifact_id)
     shot_id = new_id("shot")
     shot.action_desc = normalize_action_desc(shot.action_desc)
+    from app.renderability import HUMAN_DURATION_REVIEW_TAG
+    shot.risk_tags = [
+        tag for tag in (shot.risk_tags or [])
+        if tag != HUMAN_DURATION_REVIEW_TAG
+    ]
     conn.execute(
         "INSERT INTO shots(id, episode_id, script_id, shot_no, duration_s, shot_size, camera_move, scene_time, scene_setting, scene_name, characters, action_desc, first_frame_desc, last_frame_desc, source_excerpt, narration, dialogues, transition, continuity_from_prev, shot_contract_json, continuity_mode, observed_state_out, storyboard_artifact_id) "
         "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -3585,6 +3590,20 @@ async def edit_shot(shot_id: str, body: dict):
             merged[key] = body[key]
     # 时长 clamp 到产品侧合法区间；缺省/非法时回退默认时长。
     merged["duration_s"] = clip_duration_value(merged.get("duration_s"))
+    if "duration_s" in submitted_changes:
+        from app.renderability import (
+            DURATION_REVIEW_RISK_TAG,
+            HUMAN_DURATION_REVIEW_TAG,
+            PREFERRED_SHOT_DURATION_S,
+        )
+
+        duration_tags = [
+            tag for tag in (merged.get("risk_tags") or [])
+            if tag not in {DURATION_REVIEW_RISK_TAG, HUMAN_DURATION_REVIEW_TAG}
+        ]
+        if int(merged["duration_s"]) > PREFERRED_SHOT_DURATION_S:
+            duration_tags.append(HUMAN_DURATION_REVIEW_TAG)
+        merged["risk_tags"] = duration_tags
     instance, errors = schema_errors(Shot, {k: merged[k] for k in (
         "shot_no", *editable_keys,
     )})

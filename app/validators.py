@@ -58,6 +58,7 @@ from app.renderability import (
     DROP_LIST_MIN,
     DIALOGUE_CHAIN_TURNS_HARD_MAX,
     DURATION_REVIEW_RISK_TAG,
+    HUMAN_DURATION_REVIEW_TAG,
     KEY_LINES_MIN,
     KEY_PLOT_POINTS_MAX,
     KEY_PLOT_POINTS_MIN,
@@ -319,17 +320,19 @@ def validate_storyboard(
         action_beats_for_dur = count_sequential_action_beats(
             (shot.primary_action or shot.action_desc or "").strip()
         )
-        errors.extend(duration_gt5_errors(
-            shot_no=shot.shot_no,
-            duration_s=shot.duration_s,
-            spoken_chars=spoken_for_dur,
-            action_beats=action_beats_for_dur,
-        ))
+        if HUMAN_DURATION_REVIEW_TAG not in (shot.risk_tags or []):
+            errors.extend(duration_gt5_errors(
+                shot_no=shot.shot_no,
+                duration_s=shot.duration_s,
+                spoken_chars=spoken_for_dur,
+                action_beats=action_beats_for_dur,
+            ))
         if (
             int(shot.duration_s or 0) > PREFERRED_SHOT_DURATION_S
             and not shot_duration_should_prefer_five(
                 spoken_chars=spoken_for_dur, action_beats=action_beats_for_dur
             )
+            and HUMAN_DURATION_REVIEW_TAG not in (shot.risk_tags or [])
             and DURATION_REVIEW_RISK_TAG not in (shot.risk_tags or [])
         ):
             tags = list(shot.risk_tags or [])
@@ -1179,7 +1182,7 @@ def normalize_screenplay_dialogue_chains(script: EpisodeScreenplay) -> EpisodeSc
         for turn in chain.turns or []:
             speaker = (turn.speaker or "").strip()
             line = (turn.line or "").strip()
-            if speaker and line:
+            if speaker and speaker != "旁白" and line:
                 flattened.append(f"{speaker}：{line}")
     script.key_lines = key_lines_in_story_order(flattened, script.full_script_text)
     return script
@@ -2257,7 +2260,7 @@ def validate_storyboard_preserves_key_content(board: Storyboard,
     shots = board.shots
     if not shots:
         return errors
-    key_lines = [ln.strip() for ln in (screenplay.key_lines or []) if ln and ln.strip()]
+    key_lines = list(key_line_catalog(screenplay).values())
     key_points = [pt.strip() for pt in (screenplay.key_plot_points or []) if pt and pt.strip()]
 
     # 关键台词只认有效口播（spoken_text_of）；source_excerpt 是审计证据，不能证明「已说出」。
@@ -2649,7 +2652,7 @@ def key_line_catalog(screenplay: EpisodeScreenplay) -> dict[str, str]:
     catalog: dict[str, str] = {}
     for idx, line in enumerate(screenplay.key_lines or [], start=1):
         text = (line or "").strip()
-        if not text:
+        if not text or _speaker_name(text) == "旁白":
             continue
         catalog[f"KL{idx:02d}"] = text
     return catalog
@@ -3232,7 +3235,7 @@ def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeS
             )
     # 关键台词/剧情点必须在大纲里被分配到某一镜（beat 或 covers 中体现），否则后段必丢戏。
     plan_text = "".join((s.beat or "") + (s.covers or "") for s in shots)
-    key_lines = [ln.strip() for ln in (screenplay.key_lines or []) if ln and ln.strip()]
+    key_lines = list(key_line_catalog(screenplay).values())
     key_points = [pt.strip() for pt in (screenplay.key_plot_points or []) if pt and pt.strip()]
     missing_lines = [
         ln for ln in key_lines
@@ -3383,6 +3386,17 @@ def prefer_default_shot_durations(board: Storyboard) -> list[dict]:
             (shot.primary_action or shot.action_desc or "").strip()
         )
         tags = list(shot.risk_tags or [])
+        if HUMAN_DURATION_REVIEW_TAG in tags:
+            if DURATION_REVIEW_RISK_TAG in tags:
+                shot.risk_tags = [
+                    tag for tag in tags if tag != DURATION_REVIEW_RISK_TAG
+                ]
+            changes.append({
+                "shot_no": shot.shot_no,
+                "duration_s": shot.duration_s,
+                "reason": "human_duration_review_preserved",
+            })
+            continue
         if shot_duration_should_prefer_five(spoken_chars=spoken, action_beats=beats):
             duration_changed = int(shot.duration_s or 0) != PREFERRED_SHOT_DURATION_S
             if duration_changed:

@@ -128,6 +128,7 @@ def shot_count_budget_errors(n_shots: int, *, context: str = "分镜") -> list[s
 # 单镜默认时长：主线压缩后优先 5s；>5 仅当口播/动作确实放不下，且进入 AI 审核标记。
 PREFERRED_SHOT_DURATION_S = 5
 DURATION_REVIEW_RISK_TAG = "duration_gt5_needs_review"
+HUMAN_DURATION_REVIEW_TAG = "duration_human_reviewed"
 
 
 def episode_target_from_spine(spine_beat_count: int) -> int:

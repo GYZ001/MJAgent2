@@ -1013,6 +1013,22 @@ def test_publish_rebinds_inserted_and_shifted_shots_to_current_evidence(
     assert historical["status"] == "superseded"
 
 
+def test_generated_shot_cannot_claim_human_duration_review(repair_db) -> None:
+    conn, screenplay = repair_db
+    generated = _shot(4, action="模型新增镜头")
+    generated.duration_s = 10
+    generated.risk_tags = ["duration_human_reviewed"]
+
+    _insert_storyboard_shot(conn, "e1", screenplay, generated, "sp1")
+    row = conn.execute(
+        "SELECT shot_contract_json FROM shots WHERE episode_id='e1' AND shot_no=4"
+    ).fetchone()
+
+    assert "duration_human_reviewed" not in json.loads(
+        row["shot_contract_json"]
+    )["risk_tags"]
+
+
 def test_validated_projection_does_not_leak_unrelated_derived_fields(repair_db) -> None:
     conn, _screenplay = repair_db
     current = _current_board(conn)

@@ -128,6 +128,25 @@ def test_duration_normalization_retimes_coherent_spoken_timeline() -> None:
     )
 
 
+def test_duration_normalization_preserves_human_reviewed_duration() -> None:
+    from app.renderability import HUMAN_DURATION_REVIEW_TAG
+
+    shot = _shot_with_line("走吧。", duration_s=10)
+    shot.risk_tags = [HUMAN_DURATION_REVIEW_TAG]
+
+    changes = prefer_default_shot_durations(Storyboard(episode_no=1, shots=[shot]))
+
+    assert shot.duration_s == 10
+    assert any(
+        item.get("reason") == "human_duration_review_preserved"
+        for item in changes
+    )
+    errors = validate_storyboard(
+        Storyboard(episode_no=1, shots=[shot]), _bible(), target_duration_s=50,
+    )
+    assert not any("duration_s=10 过长" in error for error in errors)
+
+
 def test_duration_normalization_does_not_hide_spoken_contract_conflict() -> None:
     shot = _shot_with_line("甲。", duration_s=10)
     shot.audio_timeline[0].text = "乙。"
