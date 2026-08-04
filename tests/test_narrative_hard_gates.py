@@ -387,7 +387,7 @@ def test_source_span_scope_and_entity_references_are_exact_and_authoritative() -
         require=True,
         source_text=source_text,
         expected_scope_id="episode-generic",
-        authorized_source_chapter_ids={"chapter-1"},
+        authorized_source_chapter_ids={"1"},
     ) == []
 
     excerpt.source_span.chapter_id = "foreign-project/chapter-999"
@@ -397,7 +397,7 @@ def test_source_span_scope_and_entity_references_are_exact_and_authoritative() -
             require=True,
             source_text=source_text,
             expected_scope_id="episode-generic",
-            authorized_source_chapter_ids={"chapter-1"},
+            authorized_source_chapter_ids={"1"},
         )
     )
     excerpt.source_span.chapter_id = "chapter-1"
@@ -409,7 +409,7 @@ def test_source_span_scope_and_entity_references_are_exact_and_authoritative() -
             require=True,
             source_text=source_text,
             expected_scope_id="another-scope",
-            authorized_source_chapter_ids={"chapter-1"},
+            authorized_source_chapter_ids={"1"},
         )
     )
     codes = _codes(
@@ -418,7 +418,7 @@ def test_source_span_scope_and_entity_references_are_exact_and_authoritative() -
             require=True,
             source_text=source_text,
             expected_scope_id="another-scope",
-            authorized_source_chapter_ids={"chapter-1"},
+            authorized_source_chapter_ids={"1"},
         )
     )
     assert "NARRATIVE_SCOPE_MISMATCH" in codes

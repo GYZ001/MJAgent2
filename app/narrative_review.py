@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from pydantic import BaseModel, Field
+
 from app.evidence import repository as evidence_repository
 from app.harness import model_gateway
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
@@ -29,9 +31,10 @@ from app.schemas import (
     extract_json,
 )
 
-BLIND_READER_PROMPT_VERSION = "blind-audience.v2"
+BLIND_READER_PROMPT_VERSION = "blind-audience.v3"
 COMPARATOR_PROMPT_VERSION = "narrative-comparator.v1"
 BLIND_PERCEPTUAL_INPUT_ARTIFACT_TYPE = "blind_audience_perceptual_input"
+BLIND_FIRST_PASS_ARTIFACT_TYPE = "blind_audience_spontaneous_recall"
 
 _BLIND_FORBIDDEN_CONTRACT_KEYS = {
     "narrative_plan",
@@ -65,6 +68,33 @@ class NarrativeReviewError(RuntimeError):
     def __init__(self, errors: list[str]):
         self.errors = list(errors)
         super().__init__("；".join(self.errors[:6]))
+
+
+class BlindAudienceFirstPass(BaseModel):
+    observation_id: str
+    audience_prior_id: str
+    anchor: dict[str, str] = Field(default_factory=dict)
+    spontaneous_recall: dict[str, Any] = Field(default_factory=dict)
+    noticed_attention_target_ids: list[str] = Field(default_factory=list)
+    spatial_temporal_model: dict[str, Any] = Field(default_factory=dict)
+    felt_affective_state: dict[str, Any] = Field(default_factory=dict)
+    perceived_relationship_deltas: list[dict[str, Any]] = Field(default_factory=list)
+    perceived_stakes: list[str] = Field(default_factory=list)
+    experienced_pressure_curve: list[dict[str, Any]] = Field(default_factory=list)
+    experienced_rhythm: dict[str, Any] = Field(default_factory=dict)
+    next_event_expectations: list[str] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+    spontaneous_supporting_evidence_ids: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+
+
+class BlindAudienceNeutralFollowup(BaseModel):
+    observation_id: str
+    audience_prior_id: str
+    neutral_followup_observations: list[dict[str, Any] | str] = Field(
+        default_factory=list,
+    )
+    supporting_evidence_ids: list[str] = Field(default_factory=list)
 
 
 def _resolve_review_screenplay_authority(
@@ -136,6 +166,20 @@ def verify_persisted_narrative_review(
     errors: list[str] = []
     if any(item is None for item in artifacts.values()):
         errors.append("[NARRATIVE_REVIEW_ARTIFACT_MISSING] 审读证据链含不存在的 Artifact")
+    for artifact_id, artifact in artifacts.items():
+        if artifact is None:
+            continue
+        try:
+            actual_hash = evidence_repository.content_hash(
+                artifact.get("content"),
+                artifact.get("file_path"),
+            )
+        except (OSError, TypeError, ValueError):
+            actual_hash = ""
+        if actual_hash != artifact.get("content_hash"):
+            errors.append(
+                f"[NARRATIVE_REVIEW_ARTIFACT_HASH_DRIFT] {artifact_id} 内容与存储指纹不一致"
+            )
     usable = {
         artifact_id: item
         for artifact_id, item in artifacts.items()
@@ -149,6 +193,10 @@ def verify_persisted_narrative_review(
     perceptual_input_rows = [
         (artifact_id, item) for artifact_id, item in usable.items()
         if item.get("type") == BLIND_PERCEPTUAL_INPUT_ARTIFACT_TYPE
+    ]
+    first_pass_rows = [
+        (artifact_id, item) for artifact_id, item in usable.items()
+        if item.get("type") == BLIND_FIRST_PASS_ARTIFACT_TYPE
     ]
     reports = [
         (artifact_id, item) for artifact_id, item in usable.items()
@@ -173,6 +221,11 @@ def verify_persisted_narrative_review(
         errors.append(
             "[BLIND_PERCEPTUAL_INPUT_COVERAGE_INVALID] "
             "每个 audience prior 必须且只能有一个精确感知输入 Artifact"
+        )
+    if len(first_pass_rows) != len(expected_priors):
+        errors.append(
+            "[BLIND_FIRST_PASS_COVERAGE_INVALID] "
+            "每个 audience prior 必须且只能有一个已冻结首次自由复述 Artifact"
         )
 
     current_parents = _current_review_input_parent_artifact_ids(
@@ -253,6 +306,102 @@ def verify_persisted_narrative_review(
         perceptual_by_prior[prior_id] = (perceptual_artifact_id, content)
 
     conn = evidence_repository.get_conn()
+    first_pass_by_prior: dict[str, tuple[str, BlindAudienceFirstPass]] = {}
+    for first_pass_artifact_id, artifact in first_pass_rows:
+        try:
+            first_pass = BlindAudienceFirstPass.model_validate(
+                artifact.get("content") or {}
+            )
+        except Exception as exc:  # noqa: BLE001 - persisted contract boundary
+            errors.append(f"[BLIND_FIRST_PASS_INVALID] {exc}")
+            continue
+        prior_id = first_pass.audience_prior_id
+        if prior_id in first_pass_by_prior:
+            errors.append(f"[BLIND_FIRST_PASS_DUPLICATE] prior={prior_id}")
+            continue
+        if prior_id not in expected_prior_by_id:
+            errors.append(f"[BLIND_FIRST_PASS_PRIOR_INVALID] prior={prior_id}")
+            continue
+        perceptual_row = perceptual_by_prior.get(prior_id)
+        if perceptual_row is None:
+            errors.append(f"[BLIND_FIRST_PASS_INPUT_MISSING] prior={prior_id}")
+            continue
+        perceptual_artifact_id, perceptual_content = perceptual_row
+        if (
+            artifact.get("scope_type") != "episode"
+            or artifact.get("scope_id") != episode_id
+            or artifact.get("prompt_version") != BLIND_READER_PROMPT_VERSION
+        ):
+            errors.append(f"[BLIND_FIRST_PASS_SCOPE_OR_VERSION_INVALID] prior={prior_id}")
+        expected_parents = [*base_review_parents, perceptual_artifact_id]
+        if list(artifact.get("parent_artifact_ids") or []) != expected_parents:
+            errors.append(f"[BLIND_FIRST_PASS_LINEAGE_INVALID] prior={prior_id}")
+        if first_pass.observation_id != perceptual_content.get("observation_id"):
+            errors.append(f"[BLIND_FIRST_PASS_ID_DRIFT] prior={prior_id}")
+        visible_handles = {
+            handle
+            for shot in (
+                perceptual_content.get("model_prompt_payload", {})
+                .get("input", {})
+                .get("ordered_storyboard_as_seen", [])
+            )
+            for handle in shot.get("observable_evidence_handles") or []
+        }
+        if not set(first_pass.spontaneous_supporting_evidence_ids).issubset(
+            visible_handles
+        ):
+            errors.append(f"[BLIND_FIRST_PASS_EVIDENCE_NOT_VISIBLE] prior={prior_id}")
+        if _contains_forbidden_contract_key(
+            first_pass.spontaneous_recall,
+            {
+                "target_deltas", "target_delta_id", "director_objective",
+                "withheld_propositions",
+            },
+        ):
+            errors.append(f"[BLIND_REVIEW_TARGET_LEAK] prior={prior_id}")
+        isolation_gate = conn.execute(
+            """SELECT evaluator_version,evidence_json FROM evaluations
+                 WHERE artifact_id=?
+                   AND evaluator_name='blind_review_isolation_gate'
+                   AND evaluator_version=?
+                   AND evaluation_role='runtime_gate'
+                   AND runtime_blocking=1
+                   AND status='passed' AND hard_gate_passed=1
+                 LIMIT 1""",
+            (first_pass_artifact_id, BLIND_READER_PROMPT_VERSION),
+        ).fetchone()
+        if isolation_gate is None:
+            errors.append(
+                f"[NARRATIVE_REVIEW_ISOLATION_GATE_MISSING] prior={prior_id}"
+            )
+        else:
+            try:
+                gate_evidence = json.loads(isolation_gate["evidence_json"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                gate_evidence = {}
+            expected_gate_evidence = {
+                "audience_prior_id": prior_id,
+                "target_free_payload": True,
+                "perceptual_input_artifact_id": perceptual_artifact_id,
+                "serializer_version": AUDIENCE_PERCEPTUAL_SURFACE_VERSION,
+                "prompt_version": BLIND_READER_PROMPT_VERSION,
+                "perceptual_surface_hash": perceptual_content.get(
+                    "perceptual_surface_hash"
+                ),
+                "prompt_payload_hash": perceptual_content.get(
+                    "prompt_payload_hash"
+                ),
+                "first_pass_frozen": True,
+            }
+            if gate_evidence != expected_gate_evidence:
+                errors.append(
+                    f"[NARRATIVE_REVIEW_ISOLATION_EVIDENCE_DRIFT] prior={prior_id}"
+                )
+        first_pass_by_prior[prior_id] = (
+            first_pass_artifact_id,
+            first_pass,
+        )
+
     observation_by_prior: dict[str, tuple[str, BlindAudienceObservation]] = {}
     for observation_artifact_id, artifact in observation_rows:
         try:
@@ -284,11 +433,22 @@ def verify_persisted_narrative_review(
             )
         if artifact.get("prompt_version") != BLIND_READER_PROMPT_VERSION:
             errors.append("[NARRATIVE_REVIEW_OBSERVATION_PROMPT_DRIFT] 冻结观察 prompt 版本已变化")
-        expected_observation_parents = [*base_review_parents, perceptual_artifact_id]
+        first_pass_row = first_pass_by_prior.get(prior_id)
+        if first_pass_row is None:
+            errors.append(
+                f"[NARRATIVE_REVIEW_OBSERVATION_FIRST_PASS_MISSING] prior={prior_id}"
+            )
+            continue
+        first_pass_artifact_id, first_pass = first_pass_row
+        expected_observation_parents = [
+            *base_review_parents,
+            perceptual_artifact_id,
+            first_pass_artifact_id,
+        ]
         if list(artifact.get("parent_artifact_ids") or []) != expected_observation_parents:
             errors.append(
                 "[NARRATIVE_REVIEW_OBSERVATION_LINEAGE_INVALID] "
-                "冷观众观察未精确继承当前剧本、分镜输入与逐先验感知 payload"
+                "冷观众观察未精确继承当前剧本、分镜输入、感知 payload 与冻结首轮"
             )
         if observation.observation_id != perceptual_content.get("observation_id"):
             errors.append("[NARRATIVE_REVIEW_OBSERVATION_ID_DRIFT] 冻结观察与感知输入 ID 不一致")
@@ -303,38 +463,33 @@ def verify_persisted_narrative_review(
         }
         if not set(observation.supporting_evidence_ids).issubset(visible_handles):
             errors.append("[BLIND_EVIDENCE_NOT_VISIBLE] 冻结观察引用了精确 payload 中不存在的证据")
-        isolation_gate = conn.execute(
-            """SELECT evaluator_version,evidence_json FROM evaluations
-                 WHERE artifact_id=?
-                   AND evaluator_name='blind_review_isolation_gate'
-                   AND evaluator_version=?
-                   AND evaluation_role='runtime_gate'
-                   AND runtime_blocking=1
-                   AND status='passed' AND hard_gate_passed=1
-                 LIMIT 1""",
-            (observation_artifact_id, BLIND_READER_PROMPT_VERSION),
-        ).fetchone()
-        if isolation_gate is None:
+        frozen_fields_match = all((
+            observation.observation_id == first_pass.observation_id,
+            observation.audience_prior_id == first_pass.audience_prior_id,
+            observation.spontaneous_recall == first_pass.spontaneous_recall,
+            observation.noticed_attention_target_ids
+            == first_pass.noticed_attention_target_ids,
+            observation.spatial_temporal_model
+            == first_pass.spatial_temporal_model,
+            observation.felt_affective_state
+            == first_pass.felt_affective_state,
+            observation.perceived_relationship_deltas
+            == first_pass.perceived_relationship_deltas,
+            observation.perceived_stakes == first_pass.perceived_stakes,
+            observation.experienced_pressure_curve
+            == first_pass.experienced_pressure_curve,
+            observation.experienced_rhythm == first_pass.experienced_rhythm,
+            observation.next_event_expectations
+            == first_pass.next_event_expectations,
+            observation.uncertainties == first_pass.uncertainties,
+            observation.spontaneous_supporting_evidence_ids
+            == first_pass.spontaneous_supporting_evidence_ids,
+            observation.confidence == first_pass.confidence,
+        ))
+        if not frozen_fields_match:
             errors.append(
-                "[NARRATIVE_REVIEW_ISOLATION_GATE_MISSING] "
-                "冷观众观察缺少同 Artifact 的隔离 runtime gate"
+                f"[BLIND_FIRST_PASS_MUTATED_AFTER_FREEZE] prior={prior_id}"
             )
-        else:
-            try:
-                gate_evidence = json.loads(isolation_gate["evidence_json"] or "{}")
-            except (TypeError, ValueError, json.JSONDecodeError):
-                gate_evidence = {}
-            expected_gate_evidence = {
-                "audience_prior_id": prior_id,
-                "target_free_payload": True,
-                "perceptual_input_artifact_id": perceptual_artifact_id,
-                "serializer_version": AUDIENCE_PERCEPTUAL_SURFACE_VERSION,
-                "prompt_version": BLIND_READER_PROMPT_VERSION,
-                "perceptual_surface_hash": perceptual_content.get("perceptual_surface_hash"),
-                "prompt_payload_hash": perceptual_content.get("prompt_payload_hash"),
-            }
-            if gate_evidence != expected_gate_evidence:
-                errors.append("[NARRATIVE_REVIEW_ISOLATION_EVIDENCE_DRIFT] 隔离门未绑定精确 payload hash")
         if _contains_forbidden_contract_key(
             observation.spontaneous_recall,
             {"target_deltas", "target_delta_id", "director_objective", "withheld_propositions"},
@@ -366,6 +521,7 @@ def verify_persisted_narrative_review(
                 for prior in expected_priors
                 for artifact_id in (
                     perceptual_by_prior.get(prior.audience_prior_id, ("", {}))[0],
+                    first_pass_by_prior.get(prior.audience_prior_id, ("", None))[0],
                     observation_by_prior.get(prior.audience_prior_id, ("", None))[0],
                 )
                 if artifact_id
@@ -654,7 +810,7 @@ async def _structured_call(
 
 def _blind_prompt(payload: dict[str, Any], *, observation_id: str) -> dict[str, Any]:
     return {
-        "task": "模拟一次连续观看；先冻结自由复述，再做不暗示答案的中性观察",
+        "task": "模拟一次连续观看并只输出首次自由复述；本轮结束后结果立即冻结",
         "input": payload,
         "output_contract": {
             "observation_id": observation_id,
@@ -667,7 +823,6 @@ def _blind_prompt(payload: dict[str, Any], *, observation_id: str) -> dict[str, 
                 "character_goal_hypotheses": [],
                 "active_question_ids": [],
             },
-            "neutral_followup_observations": [],
             "noticed_attention_target_ids": [],
             "spatial_temporal_model": {},
             "felt_affective_state": {},
@@ -682,17 +837,41 @@ def _blind_prompt(payload: dict[str, Any], *, observation_id: str) -> dict[str, 
             "next_event_expectations": [],
             "uncertainties": [],
             "spontaneous_supporting_evidence_ids": [],
-            "supporting_evidence_ids": [],
             "confidence": 0.0,
         },
         "hard_rules": [
-            "spontaneous_recall 必须先完成并视为冻结",
-            "spontaneous_supporting_evidence_ids 必须在任何追问前与 spontaneous_recall 一起冻结",
-            "neutral_followup_observations 不得反写 spontaneous_recall",
+            "本轮只能完成未被追问提示的 spontaneous_recall",
+            "spontaneous_supporting_evidence_ids 必须与 spontaneous_recall 同时提交并冻结",
+            "禁止输出 neutral_followup_observations 或任何追问结果",
             "只依据 input.ordered_storyboard_as_seen 中按顺序实际呈现的首尾帧、可见动作、"
             "时码声轨、时码文字与剪辑关系",
             "不得用剧本、原文或未拍内容补全分镜中没有呈现的信息",
             "不得输出 director_objective、target_deltas 或猜测目标答案",
+        ],
+    }
+
+
+def _blind_followup_prompt(
+    payload: dict[str, Any],
+    first_pass: BlindAudienceFirstPass,
+) -> dict[str, Any]:
+    return {
+        "task": "在首次自由复述已经不可变冻结后，记录不暗示目标答案的中性追问观察",
+        "input": payload,
+        "frozen_first_pass": first_pass.model_dump(mode="json"),
+        "output_contract": {
+            "observation_id": first_pass.observation_id,
+            "audience_prior_id": first_pass.audience_prior_id,
+            "neutral_followup_observations": [],
+            "supporting_evidence_ids": list(
+                first_pass.spontaneous_supporting_evidence_ids
+            ),
+        },
+        "hard_rules": [
+            "不得输出或改写 spontaneous_recall、首轮证据、置信度及任何首次观看结论",
+            "追问必须中性，不得包含 target_delta、导演目标、原文答案或未来内容",
+            "supporting_evidence_ids 只能引用 input 中存在的可见证据句柄",
+            "追问所得只作补充观察，不能计入首次理解率",
         ],
     }
 
@@ -887,6 +1066,7 @@ async def run_blind_audience_review(
     parents = [review_input_parent_ids[0], str(storyboard_artifact_id)]
     observations: list[BlindAudienceObservation] = []
     perceptual_input_artifact_ids: list[str] = []
+    first_pass_artifact_ids: list[str] = []
     observation_artifact_ids: list[str] = []
     for ordinal, prior in enumerate(plan.audience_priors, start=1):
         observation_id = f"BAO-{episode_id}-{ordinal}"
@@ -912,25 +1092,25 @@ async def run_blind_audience_review(
         perceptual_input_artifact_id = str(perceptual_input_artifact["id"])
         artifact_ids.append(perceptual_input_artifact_id)
         perceptual_input_artifact_ids.append(perceptual_input_artifact_id)
-        observation = await _structured_call(
+        first_pass = await _structured_call(
             system=_BLIND_SYSTEM,
             prompt=perceptual_input_content["model_prompt_payload"],
-            model_cls=BlindAudienceObservation,
-            call_role="blind_reader",
+            model_cls=BlindAudienceFirstPass,
+            call_role="blind_reader_first_pass",
             episode_id=episode_id,
         )
-        if observation.observation_id != observation_id:
+        if first_pass.observation_id != observation_id:
             raise NarrativeReviewError([
-                f"[BLIND_OBSERVATION_ID_MISMATCH] 冷观众输出 {observation.observation_id}，"
+                f"[BLIND_OBSERVATION_ID_MISMATCH] 冷观众输出 {first_pass.observation_id}，"
                 f"本轮只能输出 {observation_id}"
             ])
-        if observation.audience_prior_id != prior.audience_prior_id:
+        if first_pass.audience_prior_id != prior.audience_prior_id:
             raise NarrativeReviewError([
-                f"[BLIND_PRIOR_MISMATCH] 冷观众输出 {observation.audience_prior_id}，"
+                f"[BLIND_PRIOR_MISMATCH] 冷观众输出 {first_pass.audience_prior_id}，"
                 f"本轮只能输出 {prior.audience_prior_id}"
             ])
         if _contains_forbidden_contract_key(
-            observation.spontaneous_recall,
+            first_pass.spontaneous_recall,
             {"target_deltas", "target_delta_id", "director_objective", "withheld_propositions"},
         ):
             raise NarrativeReviewError(["[BLIND_REVIEW_TARGET_LEAK] 冷观众自由复述泄漏了导演目标"])
@@ -941,29 +1121,33 @@ async def run_blind_audience_review(
             ]
             for evidence_id in shot.get("observable_evidence_handles") or []
         }
-        if not set(observation.supporting_evidence_ids).issubset(visible_handles):
-            raise NarrativeReviewError([
-                "[BLIND_EVIDENCE_NOT_VISIBLE] 冷观众引用了输入中不存在的可见证据句柄"
-            ])
-        if not set(observation.spontaneous_supporting_evidence_ids).issubset(
-            observation.supporting_evidence_ids
+        if not set(first_pass.spontaneous_supporting_evidence_ids).issubset(
+            visible_handles
         ):
             raise NarrativeReviewError([
-                "[BLIND_SPONTANEOUS_EVIDENCE_INVALID] 首轮冻结证据不是观察实际可见证据的子集"
+                "[BLIND_EVIDENCE_NOT_VISIBLE] 冷观众首轮引用了输入中不存在的证据句柄"
             ])
-        artifact = evidence_repository.create_artifact(EvidenceArtifact(
-            type="blind_audience_observation",
-            scope_type="episode",
-            scope_id=episode_id,
-            status="validated",
-            trust_level="T2",
-            content=observation.model_dump(mode="json"),
-            parent_artifact_ids=[*parents, perceptual_input_artifact_id],
-            contract_version=NARRATIVE_CONTRACT_VERSION,
-            prompt_version=BLIND_READER_PROMPT_VERSION,
-        ))
+        first_pass_artifact = evidence_repository.create_artifact(
+            EvidenceArtifact(
+                type=BLIND_FIRST_PASS_ARTIFACT_TYPE,
+                scope_type="episode",
+                scope_id=episode_id,
+                status="validated",
+                trust_level="T2",
+                content=first_pass.model_dump(mode="json"),
+                parent_artifact_ids=[
+                    *parents,
+                    perceptual_input_artifact_id,
+                ],
+                contract_version=NARRATIVE_CONTRACT_VERSION,
+                prompt_version=BLIND_READER_PROMPT_VERSION,
+            )
+        )
+        first_pass_artifact_id = str(first_pass_artifact["id"])
+        artifact_ids.append(first_pass_artifact_id)
+        first_pass_artifact_ids.append(first_pass_artifact_id)
         evidence_repository.create_evaluation(
-            artifact["id"],
+            first_pass_artifact_id,
             Evaluation(
                 evaluator_type="deterministic",
                 evaluator_name="blind_review_isolation_gate",
@@ -985,9 +1169,57 @@ async def run_blind_audience_review(
                     "prompt_payload_hash": perceptual_input_content[
                         "prompt_payload_hash"
                     ],
+                    "first_pass_frozen": True,
                 },
             ),
         )
+        followup = await _structured_call(
+            system=_BLIND_SYSTEM,
+            prompt=_blind_followup_prompt(
+                perceptual_input_content["model_prompt_payload"]["input"],
+                first_pass,
+            ),
+            model_cls=BlindAudienceNeutralFollowup,
+            call_role="blind_reader_neutral_followup",
+            episode_id=episode_id,
+        )
+        if (
+            followup.observation_id != observation_id
+            or followup.audience_prior_id != prior.audience_prior_id
+        ):
+            raise NarrativeReviewError([
+                "[BLIND_FOLLOWUP_ID_MISMATCH] 中性追问输出与冻结首轮不属于同一观察"
+            ])
+        if not set(followup.supporting_evidence_ids).issubset(visible_handles):
+            raise NarrativeReviewError([
+                "[BLIND_FOLLOWUP_EVIDENCE_NOT_VISIBLE] 中性追问引用了输入外证据"
+            ])
+        supporting_evidence_ids = list(dict.fromkeys([
+            *first_pass.spontaneous_supporting_evidence_ids,
+            *followup.supporting_evidence_ids,
+        ]))
+        observation = BlindAudienceObservation.model_validate({
+            **first_pass.model_dump(mode="json"),
+            "neutral_followup_observations": (
+                followup.neutral_followup_observations
+            ),
+            "supporting_evidence_ids": supporting_evidence_ids,
+        })
+        artifact = evidence_repository.create_artifact(EvidenceArtifact(
+            type="blind_audience_observation",
+            scope_type="episode",
+            scope_id=episode_id,
+            status="validated",
+            trust_level="T2",
+            content=observation.model_dump(mode="json"),
+            parent_artifact_ids=[
+                *parents,
+                perceptual_input_artifact_id,
+                first_pass_artifact_id,
+            ],
+            contract_version=NARRATIVE_CONTRACT_VERSION,
+            prompt_version=BLIND_READER_PROMPT_VERSION,
+        ))
         observations.append(observation)
         observation_artifact_id = str(artifact["id"])
         artifact_ids.append(observation_artifact_id)
@@ -1058,7 +1290,9 @@ async def run_blind_audience_review(
                 artifact_id
                 for pair in zip(
                     perceptual_input_artifact_ids,
+                    first_pass_artifact_ids,
                     observation_artifact_ids,
+                    strict=True,
                 )
                 for artifact_id in pair
             ],
@@ -1096,6 +1330,7 @@ async def run_blind_audience_review(
         evidence={
             "report_artifact_id": report_artifact["id"],
             "perceptual_input_artifact_ids": perceptual_input_artifact_ids,
+            "first_pass_artifact_ids": first_pass_artifact_ids,
             "observation_artifact_ids": observation_artifact_ids,
             "perceptual_surface_version": AUDIENCE_PERCEPTUAL_SURFACE_VERSION,
             "blind_prompt_version": BLIND_READER_PROMPT_VERSION,

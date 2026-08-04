@@ -909,7 +909,7 @@ function ShotWorkbench({ shot, episodeNo, episodeStatus, tab, onTab, context, wr
   </div></article>
 }
 
-function InfoSection({ shot, current }: { shot: Shot; current?: ShotVersion }) {
+export function InfoSection({ shot, current }: { shot: Shot; current?: ShotVersion }) {
   const dialogue = (shot.dialogues ?? []).map(line => `${line.speaker}：${line.line}${line.emotion && line.emotion !== '平静' ? `（${line.emotion}）` : ''}`).join('\n')
   const prompt = current?.prompt_text || shot.prompt_preview || ''
   const modePlan = shot.mode_plan

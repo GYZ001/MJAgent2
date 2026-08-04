@@ -84,8 +84,18 @@ def _runtime_gate(
 def _install_passing_review_model(monkeypatch) -> None:
     async def fake_chat(messages, **kwargs):
         payload = json.loads(messages[1]["content"])
-        if kwargs["call_meta"]["call_role"] == "blind_reader":
+        if kwargs["call_meta"]["call_role"] == "blind_reader_first_pass":
             return json.dumps(_observation(payload), ensure_ascii=False)
+        if kwargs["call_meta"]["call_role"] == "blind_reader_neutral_followup":
+            contract = payload["output_contract"]
+            return json.dumps(
+                {
+                    **contract,
+                    "neutral_followup_observations": [],
+                    "supporting_evidence_ids": ["EV-1"],
+                },
+                ensure_ascii=False,
+            )
         contract = payload["output_contract"]
         return json.dumps(
             {

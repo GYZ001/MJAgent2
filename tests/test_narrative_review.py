@@ -15,6 +15,7 @@ from app.narrative import (
     audience_perceptual_surface_hash,
 )
 from app.narrative_review import (
+    BLIND_FIRST_PASS_ARTIFACT_TYPE,
     BLIND_PERCEPTUAL_INPUT_ARTIFACT_TYPE,
     BLIND_READER_PROMPT_VERSION,
     NarrativeReviewError,
@@ -61,8 +62,18 @@ def _observation(payload: dict) -> dict:
 
 async def _passing_chat(messages, **kwargs):
     payload = json.loads(messages[1]["content"])
-    if kwargs["call_meta"]["call_role"] == "blind_reader":
+    if kwargs["call_meta"]["call_role"] == "blind_reader_first_pass":
         return json.dumps(_observation(payload), ensure_ascii=False)
+    if kwargs["call_meta"]["call_role"] == "blind_reader_neutral_followup":
+        contract = payload["output_contract"]
+        return json.dumps(
+            {
+                **contract,
+                "neutral_followup_observations": [],
+                "supporting_evidence_ids": ["EV-1"],
+            },
+            ensure_ascii=False,
+        )
     contract = payload["output_contract"]
     return json.dumps(
         {
@@ -330,9 +341,19 @@ async def test_blind_review_isolates_models_and_persists_lineage_before_comparis
         role = kwargs["call_meta"]["call_role"]
         call_roles.append(role)
         payload = json.loads(messages[1]["content"])
-        if role == "blind_reader":
+        if role == "blind_reader_first_pass":
             blind_inputs.append(payload["input"])
             return json.dumps(_observation(payload), ensure_ascii=False)
+        if role == "blind_reader_neutral_followup":
+            contract = payload["output_contract"]
+            return json.dumps(
+                {
+                    **contract,
+                    "neutral_followup_observations": [],
+                    "supporting_evidence_ids": ["EV-1"],
+                },
+                ensure_ascii=False,
+            )
 
         persisted_before_comparison = db.get_conn().execute(
             "SELECT COUNT(*) AS count FROM artifacts "
@@ -369,11 +390,17 @@ async def test_blind_review_isolates_models_and_persists_lineage_before_comparis
         screenplay_artifact_id=screenplay_artifact["id"],
     )
 
-    assert call_roles == ["blind_reader", "blind_reader", "intent_comparator"]
+    assert call_roles == [
+        "blind_reader_first_pass",
+        "blind_reader_neutral_followup",
+        "blind_reader_first_pass",
+        "blind_reader_neutral_followup",
+        "intent_comparator",
+    ]
     assert persisted_before_comparison == 2
     assert len(observations) == 2
     assert report.decision == "pass"
-    assert len(artifact_ids) == 6
+    assert len(artifact_ids) == 8
 
     for model_input in blind_inputs:
         serialized_input = json.dumps(model_input, ensure_ascii=False)
@@ -402,6 +429,11 @@ async def test_blind_review_isolates_models_and_persists_lineage_before_comparis
         if artifact is not None
         and artifact["type"] == BLIND_PERCEPTUAL_INPUT_ARTIFACT_TYPE
     ]
+    first_pass_artifacts = [
+        artifact for artifact in artifacts
+        if artifact is not None
+        and artifact["type"] == BLIND_FIRST_PASS_ARTIFACT_TYPE
+    ]
     assert len(perceptual_input_artifacts) == 2
     assert all(
         artifact["contract_version"] == AUDIENCE_PERCEPTUAL_SURFACE_VERSION
@@ -420,6 +452,7 @@ async def test_blind_review_isolates_models_and_persists_lineage_before_comparis
         for model_input in blind_inputs
     }
     assert len(observation_artifacts) == 2
+    assert len(first_pass_artifacts) == 2
     assert all(artifact["status"] == "validated" for artifact in observation_artifacts)
     assert all(
         screenplay_artifact["id"] in artifact["parent_artifact_ids"]
@@ -431,6 +464,9 @@ async def test_blind_review_isolates_models_and_persists_lineage_before_comparis
         report_artifact["parent_artifact_ids"]
     )
     assert {artifact["id"] for artifact in perceptual_input_artifacts} <= set(
+        report_artifact["parent_artifact_ids"]
+    )
+    assert {artifact["id"] for artifact in first_pass_artifacts} <= set(
         report_artifact["parent_artifact_ids"]
     )
     assert verify_persisted_narrative_review(

@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import type { Shot, ShotVersion, ReferenceImage } from '../api'
 import {
+  InfoSection,
   REVIEW_TABS,
   currentVersionRefs,
   classifyReferenceBuckets,
@@ -143,6 +146,33 @@ describe('生成台对象稳定性', () => {
     expect(videoModeReasonText(undefined)).toBe('由整集关系计划生成')
     expect(videoModeReasonText(['FIRST_SHOT_NO_PREDECESSOR']))
       .toBe('FIRST_SHOT_NO_PREDECESSOR')
+  })
+
+  it('历史模式计划可完整渲染文字内容，不因缺少新字段崩溃', () => {
+    const shot = {
+      id: 's1',
+      shot_no: 1,
+      mode_plan: {
+        mode: 'REFERENCE_IMAGE_MODE',
+        confidence: 1,
+      },
+      dialogues: [],
+      characters: [],
+      versions: [],
+      duration_s: 5,
+      shot_size: '远景',
+      camera_move: '固定',
+      scene_setting: '广场',
+      transition: '硬切',
+      continuity_from_prev: 0,
+      action_desc: '角色走入画面。',
+      source_excerpt: '',
+    } as unknown as Shot
+
+    const html = renderToStaticMarkup(createElement(InfoSection, { shot }))
+
+    expect(html).toContain('由整集关系计划生成')
+    expect(html).toContain('参考图')
   })
 
   it('上游确认或运行指针收口时会重新加载生成资格', () => {

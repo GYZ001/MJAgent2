@@ -353,12 +353,79 @@ def _require_review_lineage(artifact_ids: Sequence[str]) -> list[dict[str, Any]]
     return artifacts
 
 
+def persist_human_one_watch_freeze(
+    freeze: HumanOneWatchFreeze,
+    *,
+    screenplay: EpisodeScreenplay,
+    narrative_review_artifact_ids: Sequence[str],
+) -> dict[str, Any]:
+    """Persist the first pass before any target-scored observation is accepted."""
+    plan = screenplay.narrative_plan
+    errors: list[str] = []
+    if plan is None:
+        errors.append("[CALIBRATION_PLAN_MISSING] 首轮观察缺少叙事合同")
+    else:
+        if freeze.scope_id != plan.scope_id:
+            errors.append(
+                f"[HUMAN_SCOPE_MISMATCH] observation={freeze.scope_id} plan={plan.scope_id}"
+            )
+        if freeze.audience_prior_id not in {
+            item.audience_prior_id for item in plan.audience_priors
+        }:
+            errors.append(f"[HUMAN_PRIOR_UNKNOWN] {freeze.audience_prior_id}")
+    review_ids = list(dict.fromkeys(
+        str(item) for item in narrative_review_artifact_ids if str(item)
+    ))
+    _require_review_lineage(review_ids)
+    if freeze.narrative_review_artifact_id not in review_ids:
+        errors.append(
+            "[HUMAN_REVIEW_LINEAGE_MISMATCH] freeze.narrative_review_artifact_id "
+            "必须在父证据链中"
+        )
+    if errors:
+        raise CalibrationContractError(errors)
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="human_one_watch_spontaneous_recall",
+        scope_type="episode",
+        scope_id=freeze.scope_id,
+        status="validated",
+        trust_level="T4",
+        content=freeze.model_dump(mode="json"),
+        parent_artifact_ids=review_ids,
+        contract_version=HUMAN_ONE_WATCH_CONTRACT_VERSION,
+    ))
+    evidence_repository.create_evaluation(
+        artifact["id"],
+        Evaluation(
+            evaluator_type="human",
+            evaluator_name="one_watch_freeze_gate",
+            evaluator_version=HUMAN_ONE_WATCH_CONTRACT_VERSION,
+            status="passed",
+            hard_gate_passed=True,
+            evaluation_role="runtime_gate",
+            score_status="observation_only",
+            runtime_blocking=True,
+            score=None,
+            evidence={
+                "observation_id": freeze.observation_id,
+                "audience_prior_id": freeze.audience_prior_id,
+                "spontaneous_recall_frozen": True,
+                "narrative_review_artifact_id": (
+                    freeze.narrative_review_artifact_id
+                ),
+            },
+            confidence=freeze.confidence,
+        ),
+    )
+    return artifact
+
+
 def persist_human_one_watch_observation(
     observation: HumanOneWatchObservation,
     *,
     screenplay: EpisodeScreenplay,
     narrative_review_artifact_ids: Sequence[str],
-    additional_parent_artifact_ids: Sequence[str] = (),
+    frozen_recall_artifact_id: str,
 ) -> dict[str, Any]:
     """Validate and persist one human observation with review lineage."""
     errors = validate_human_one_watch_observation(observation, screenplay)
@@ -371,9 +438,57 @@ def persist_human_one_watch_observation(
             "[HUMAN_REVIEW_LINEAGE_MISMATCH] observation.narrative_review_artifact_id "
             "必须在父证据链中"
         ])
+    freeze_artifact = evidence_repository.get_artifact(
+        str(frozen_recall_artifact_id)
+    )
+    if (
+        freeze_artifact is None
+        or freeze_artifact.get("type") != "human_one_watch_spontaneous_recall"
+        or freeze_artifact.get("status") != "validated"
+    ):
+        raise CalibrationContractError([
+            "[HUMAN_FREEZE_ARTIFACT_INVALID] 目标评分前必须先持久化有效首轮冻结"
+        ])
+    try:
+        freeze = HumanOneWatchFreeze.model_validate(
+            freeze_artifact.get("content") or {}
+        )
+    except Exception as exc:
+        raise CalibrationContractError([
+            f"[HUMAN_FREEZE_ARTIFACT_INVALID] {exc}"
+        ]) from exc
+    if (
+        freeze.observation_id != observation.observation_id
+        or freeze.participant_id_hash != observation.participant_id_hash
+        or freeze.scope_id != observation.scope_id
+        or freeze.audience_prior_id != observation.audience_prior_id
+        or freeze.narrative_review_artifact_id
+        != observation.narrative_review_artifact_id
+        or freeze.spontaneous_recall != observation.spontaneous_recall
+        or freeze.content_dimensions != observation.content_dimensions
+    ):
+        raise CalibrationContractError([
+            "[HUMAN_FREEZE_OBSERVATION_DRIFT] 最终观察改写了已冻结首轮身份、复述或样本维度"
+        ])
+    freeze_gates = [
+        item
+        for item in evidence_repository.get_evaluations(
+            str(frozen_recall_artifact_id)
+        )
+        if item.get("evaluator_name") == "one_watch_freeze_gate"
+        and item.get("evaluator_version") == HUMAN_ONE_WATCH_CONTRACT_VERSION
+        and item.get("evaluation_role") == "runtime_gate"
+        and bool(item.get("runtime_blocking"))
+        and item.get("status") == "passed"
+        and bool(item.get("hard_gate_passed"))
+    ]
+    if len(freeze_gates) != 1:
+        raise CalibrationContractError([
+            "[HUMAN_FREEZE_GATE_INVALID] 首轮冻结缺少唯一通过的隔离门禁"
+        ])
     parents = list(dict.fromkeys([
         *review_ids,
-        *(str(item) for item in additional_parent_artifact_ids if str(item)),
+        str(frozen_recall_artifact_id),
     ]))
     for artifact_id in parents:
         if evidence_repository.get_artifact(artifact_id) is None:
