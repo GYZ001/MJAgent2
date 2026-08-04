@@ -26,6 +26,16 @@ def test_video_mode_api_surface_is_registered() -> None:
     assert expected <= routes
 
 
+def test_missing_video_plan_is_a_normal_empty_state(monkeypatch) -> None:
+    monkeypatch.setattr(api, "_episode_or_404", lambda _episode_id: {"id": "e"})
+    monkeypatch.setattr(
+        "app.video_plan.load_latest_plan",
+        lambda _episode_id: None,
+    )
+
+    assert api.get_episode_video_generation_plan("e") is None
+
+
 @pytest.mark.asyncio
 async def test_paid_capability_probe_requires_explicit_confirmation() -> None:
     with pytest.raises(HTTPException) as exc:
