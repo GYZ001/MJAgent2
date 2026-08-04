@@ -1727,7 +1727,18 @@ POST /episodes/{id}/cognitive-bridge-plan/{plan_id}/counterfactual-test
 
 回滚只切换读取路径，不删除新表和证据。所有生成请求保留输入 revision，确保能复现当时决策。
 
-### 8.4 视频模式灰度顺序
+### 8.4 真实分镜合同迁移顺序
+
+1. 为 `shot_contract_json` 增加 Schema version，并新增 `primary_action_id`、`current_action_phase_id`、动作完成状态和 `boundary_intent_from_prev`；旧字段继续可读但标记 provenance；
+2. 对已发布分镜生成只读 `ShotTaskProjection`，不修改原镜头；AI 依据整集上下文生成边界候选及字段证据；
+3. 运行 `旧 continuity_mode/continuity_from_prev` 与新边界意图差异报告。差异只进入修复队列，不能自动用新值覆盖用户分镜；
+4. 新生成/新编辑分镜在发布前必须原生产出新合同，`first_frame_desc/action_desc/last_frame_desc` 与结构状态、动作 ID/phase 双向校验；
+5. 编译器影子生成三种模式请求，比较事件、动作、对白、终态和素材 manifest，确认除控制角色外语义等价；
+6. 完成历史集迁移并通过变形测试后，执行路径切到新 projection/plan；此时删除旧字段对生成依赖的控制权，但保留显示与审计。
+
+不得通过给历史 `action_desc` 跑固定动词/接触词表来批量生成 action phase；必须使用语义模型提出、字段证据约束、整集状态图校验的迁移结果。
+
+### 8.5 视频模式灰度顺序
 
 1. **Shadow**：AI 只生成模式计划，不改变现有提交；统计与人工判断、相邻镜 QA 的差异；
 2. **Capability gate**：上线异步能力探针、Web URL 发布服务和三种 payload adapter，但默认不启用真续写；
@@ -1763,6 +1774,12 @@ per_shot_loudness
 boundary_loudness_delta
 planned_mode_distribution
 actual_mode_distribution
+shot_projection_coverage_rate
+boundary_intent_coverage_rate
+storyboard_mode_alignment_pass_rate
+legacy_continuity_conflict_rate
+prompt_payload_fingerprint_mismatch_count
+keyword_mode_selector_invocation_count
 mode_degradation_rate
 mode_plan_reconcile_rate
 dependency_wait_duration
@@ -1948,13 +1965,16 @@ tests/test_video_mode_audience_evidence.py
 2. 删除 `SPINE_MISSING -> insert_shot` 固定修复；
 3. 建立主要动作唯一所有权与事件拓扑门禁；
 4. 用状态差分和动作阶段替代固定动词计数；
-5. 欠交付采用窗口重写/语义拆分，结构修复通过全图校验后原子提交；
-6. 编译器加入动态“已完成/当前变化/未来保留”合同；
-7. 上游改变后确定性失效所有下游产物；
-8. 建立 StoryTruth/CharacterBelief/AudienceBelief 三张图，禁止从世界真值直接复制观众认知；
-9. 为所有被后续剧情依赖的关键命题建立 `AssimilationTask`、证据合同和截止事件；
-10. 建立人物“感知 → 判断 → 目标变化 → 选择 → 行动”门禁；
-11. 通过图差分识别认知注入，落实缺口测试、删除测试和最小充分桥接，禁止内容类别模板。
+5. 从真实 `Shot + shot_contract_json` 建立版本化 `ShotTaskProjection`，禁止另建脱离分镜台的模式输入；
+6. 为每个非首镜建立带字段证据的 `ShotBoundaryIntent`，`continuity_mode/continuity_from_prev` 不再直接决定生成依赖；
+7. 分镜合同过载、起止状态矛盾、动作 phase 或边界 unknown 必须由 Agent 修复后再规划，不得静默参考图兜底；
+8. 欠交付采用窗口重写/语义拆分，结构修复通过全图校验后原子提交；
+9. 编译器加入动态“已完成/当前变化/未来保留”合同，并改为只消费已验证 projection/plan；
+10. 上游改变后确定性失效所有下游产物；
+11. 建立 StoryTruth/CharacterBelief/AudienceBelief 三张图，禁止从世界真值直接复制观众认知；
+12. 为所有被后续剧情依赖的关键命题建立 `AssimilationTask`、证据合同和截止事件；
+13. 建立人物“感知 → 判断 → 目标变化 → 选择 → 行动”门禁；
+14. 通过图差分识别认知注入，落实缺口测试、删除测试和最小充分桥接，禁止内容类别模板。
 
 ### P1：让真实视频参与连续性闭环
 
@@ -2008,8 +2028,14 @@ tests/test_video_mode_audience_evidence.py
 - [ ] 有意悬念能维持目标未知状态，表达遗漏不能借“悬念”通过；
 - [ ] 具有新认知功能的验证性重复不会被误删，无认知增量的重复不会通过；
 - [ ] 计划状态与视频观测状态分离且可 reconcile；
+- [ ] 每个已发布真实 `Shot` 都有可追溯到 `shots` 基础列和 `shot_contract_json` 的 `ShotTaskProjection`，不存在脱离分镜台的第二套模式输入；
+- [ ] 每个非首镜都有 `ShotBoundaryIntent`，其时间、空间、剪辑、动作阶段、状态交接和轨迹依赖均带字段证据；
+- [ ] 分镜合同矛盾、过载或 unknown 会先由 Agent 修复分镜，不会进入模式选择或静默参考图兜底；
 - [ ] 第一镜固定参考图，第 2 镜起均有 AI 生成、确定性校验的版本化模式计划；
+- [ ] `continuity_mode/continuity_from_prev`、场景名相等、动作/接触/对白词组和题材标签均不能直接决定生成模式；
 - [ ] 三种模式均有独立输入合同、payload adapter、幂等键、QA 与有限回退路径；
+- [ ] 三种模式的 prompt 均引用同一个事件、动作 ID/phase、信息、对白和目标终态，只改变控制素材与对应说明；
+- [ ] prompt、payload、输入素材 manifest 和 QA expectation 的 `shot_projection_fingerprint/boundary_intent_id/plan_revision` 完全一致；
 - [ ] 视频输入的“参考能力”和“真续写能力”分别探针、分别准入；
 - [ ] 调度器按真实素材依赖构建 DAG，有依赖串行、无依赖安全并行；
 - [ ] planned mode、actual mode、降级原因、等待依赖和能力快照全程可追溯；
