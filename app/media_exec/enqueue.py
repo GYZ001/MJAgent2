@@ -1092,6 +1092,83 @@ def _auto_repair_embedded_source_dialogue(shot_id: str, error_text: str) -> dict
     }
 
 
+def _assert_enqueue_storyboard_authority(shot_id: str):
+    """Resolve the immutable screenplay and fence narrative paid work.
+
+    This check intentionally runs before a preflight job is created and before
+    any legacy row normalizer can mutate the storyboard projection.  Historical
+    plan-null episodes keep their explicit compatibility path; once durable
+    narrative authority exists, deleting a mutable pointer can never downgrade
+    the episode back into that path.
+    """
+    conn = get_conn()
+    shot = conn.execute(
+        "SELECT episode_id FROM shots WHERE id=?", (shot_id,),
+    ).fetchone()
+    if shot is None:
+        raise ValueError(f"镜头不存在：{shot_id}")
+    episode_id = str(shot["episode_id"])
+    from app.production.screenplay_authority import (
+        DownstreamScreenplayContext,
+        episode_requires_immutable_screenplay_authority,
+        resolve_downstream_screenplay,
+    )
+
+    try:
+        context = resolve_downstream_screenplay(episode_id, conn=conn)
+    except ValueError as exc:
+        episode = conn.execute(
+            "SELECT * FROM episodes WHERE id=?", (episode_id,),
+        ).fetchone()
+        raw_projection = (
+            _row_value(episode, "screenplay_json") if episode is not None else None
+        )
+        if (
+            episode is not None
+            and not raw_projection
+            and not episode_requires_immutable_screenplay_authority(
+                episode, conn=conn,
+            )
+        ):
+            # Truly historical jobs can predate even the mutable screenplay
+            # projection.  This compatibility object is explicitly plan-null;
+            # any durable Artifact/revision/review evidence above makes the
+            # branch unreachable and the same deletion fail closed.
+            from app.schemas import EpisodeScreenplay
+
+            context = DownstreamScreenplayContext(
+                screenplay=EpisodeScreenplay(
+                    episode_no=int(_row_value(episode, "episode_no", 1) or 1),
+                ),
+                narrative_authority_required=False,
+                immutable_authority_required=False,
+            )
+        else:
+            raise ValueError(f"当前剧本权威链无法验证：{exc}") from exc
+    if not context.narrative_authority_required:
+        return context
+
+    episode = conn.execute(
+        "SELECT * FROM episodes WHERE id=?", (episode_id,),
+    ).fetchone()
+    from app.domain.video_ops import _has_current_storyboard_completion_certificate
+
+    if episode is None or not _has_current_storyboard_completion_certificate(
+        conn, episode,
+    ):
+        raise ValueError(
+            "[NARRATIVE_CERTIFICATE_REQUIRED] 当前叙事分镜缺少与正式 "
+            "Artifact、冷观众审读和完成证书精确绑定的生产权威"
+        )
+    # Recompute the release manifest here as a content-addressed final check.
+    # The per-shot plan verifier repeats it below and workers repeat it again at
+    # every provider submission/write boundary.
+    from app.video_plan import current_storyboard_release_manifest
+
+    current_storyboard_release_manifest(episode_id, conn=conn)
+    return context
+
+
 def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
                  extra_negative: list[str] | None = None, reroll: bool = False,
                  critique: list[str] | None = None, after_shot_id: str | None = None,
@@ -1100,6 +1177,13 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
                  dependency_snapshot: dict[str, Any] | None = None,
                  critique_sources: list[dict[str, Any]] | None = None) -> dict:
     """持久化校验状态，并对可确定的结构错误执行有界修复链后重试。"""
+    authority_context = _assert_enqueue_storyboard_authority(shot_id)
+    narrative_authority = authority_context.narrative_authority_required
+    if narrative_authority and (prompt_override or "").strip():
+        raise ValueError(
+            "[NARRATIVE_PROMPT_OVERRIDE_REQUIRES_CANDIDATE] 叙事权威镜头不允许用"
+            "自由文本覆盖已审读的分镜语义；请通过受控分镜候选修订后重新发布"
+        )
     preflight_job_id = _begin_video_preflight_job(
         shot_id, supervisor_run_id=supervisor_run_id,
     )
@@ -1116,7 +1200,7 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
         "preflight_job_id": preflight_job_id,
     }
     repairs: list[dict[str, Any]] = []
-    if prompt_override is None:
+    if prompt_override is None and not narrative_authority:
         # “待修复台词信息「…」”是已知的旧分镜结构。先迁移再编译，可避免
         # 故意制造一次 409；error_text 仅作为规则选择器，不代表此处已失败。
         repair = _auto_repair_embedded_source_dialogue(
@@ -1153,7 +1237,11 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
         except Exception as exc:
             last_exc = exc
             repair = None
-            if prompt_override is None and len(repairs) < local_repair_limit:
+            if (
+                prompt_override is None
+                and not narrative_authority
+                and len(repairs) < local_repair_limit
+            ):
                 repair = _auto_repair_embedded_source_dialogue(shot_id, str(exc))
                 if repair is None:
                     repair = _auto_expand_source_dialogue_duration(shot_id, str(exc))
@@ -1214,8 +1302,15 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         shot_contract_dict,
         uses_previous_tail_frame,
     )
-    from app.schemas import Bible, EpisodeScreenplay
-
+    authority_context = _assert_enqueue_storyboard_authority(shot_id)
+    if (
+        authority_context.narrative_authority_required
+        and (prompt_override or "").strip()
+    ):
+        raise ValueError(
+            "[NARRATIVE_PROMPT_OVERRIDE_REQUIRES_CANDIDATE] 叙事权威镜头不允许用"
+            "自由文本覆盖已审读的分镜语义；请通过受控分镜候选修订后重新发布"
+        )
     conn = get_conn()
     shot_row = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
     if not shot_row:
@@ -1227,7 +1322,9 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
     if ep["status"] not in ("confirmed", "generating", "done"):
         raise ValueError("分镜脚本未确认，不能生成视频（PRD 原则 P3：贵的环节前人工把关）")
 
-    bible = Bible.model_validate(json.loads(project["bible_json"]))
+    from app.domain.common import _project_bible_or_placeholder
+
+    bible = _project_bible_or_placeholder(project)
     # Compile the paid video request from the accepted per-episode portrait
     # revision, not from a possibly older project-Bible appearance string.
     # The worker already resolves this view for keyframes; enqueue must use the
@@ -1235,12 +1332,7 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
     from app.portraits import bible_for_episode
     bible = bible_for_episode(ep["project_id"], bible, ep["episode_no"])
     shot = _load_shot_model(shot_row)
-    screenplay = None
-    if _row_value(ep, "screenplay_json"):
-        try:
-            screenplay = EpisodeScreenplay.model_validate(json.loads(ep["screenplay_json"]))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            screenplay = None
+    screenplay = authority_context.screenplay
     prior_rows = conn.execute(
         "SELECT * FROM shots WHERE episode_id=? AND shot_no<? ORDER BY shot_no",
         (shot_row["episode_id"], int(shot_row["shot_no"])),
@@ -1249,16 +1341,50 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
     # Persisted legacy boards may contain snake_case ledger IDs. Resolve them
     # to Chinese semantics at the final model boundary; unresolved IDs vanish.
     shot.do_not_repeat = resolve_do_not_repeat_texts(shot, screenplay, prior_shots)
-    decision = _decision_from_mode_plan(shot_row) or video_modes.default_reference_decision()
-    if decision.mode != video_modes.REFERENCE_IMAGE_MODE:
-        decision = video_modes.default_reference_decision()
+    shot_plan = None
+    if authority_context.narrative_authority_required:
+        from app.video_plan import get_shot_plan
+
+        shot_plan = get_shot_plan(shot_id, conn=conn)
+        if shot_plan is None:
+            raise ValueError(
+                "[VIDEO_PLAN_REQUIRED] 叙事镜头必须绑定当前已验证的 "
+                "EpisodeVideoGenerationPlan，禁止默认回退参考图模式"
+            )
+        decision = video_modes.dict_to_decision(
+            shot_plan.model_dump(mode="json")
+        )
+    else:
+        decision = (
+            _decision_from_mode_plan(shot_row)
+            or video_modes.default_reference_decision()
+        )
+        if decision.mode != video_modes.REFERENCE_IMAGE_MODE:
+            decision = video_modes.default_reference_decision()
 
     # 跨镜连贯只继承上一镜的实际/计划尾状态；不得把上一镜完整动作描述塞进 prompt。
     # after_shot_id 无效时回退到 shot_no-1，避免 action_continuation 在缺 prev 时被当成链首误杀。
     prev_row = None
-    if after_shot_id:
-        prev_row = conn.execute("SELECT * FROM shots WHERE id=?", (after_shot_id,)).fetchone()
-    if prev_row is None and int(shot_row["shot_no"]) > 1:
+    planned_dependency_id = (
+        str(shot_plan.depends_on_shot_id)
+        if shot_plan is not None and shot_plan.depends_on_shot_id
+        else None
+    )
+    if (
+        shot_plan is not None
+        and after_shot_id is not None
+        and after_shot_id != planned_dependency_id
+    ):
+        raise ValueError("请求的前序镜头与已发布视频计划不一致")
+    dependency_id = planned_dependency_id if shot_plan is not None else after_shot_id
+    if dependency_id:
+        prev_row = conn.execute(
+            "SELECT * FROM shots WHERE id=? AND episode_id=?",
+            (dependency_id, shot_row["episode_id"]),
+        ).fetchone()
+        if prev_row is None and shot_plan is not None:
+            raise ValueError("视频计划引用的前序镜头不存在或不属于本集")
+    if prev_row is None and shot_plan is None and int(shot_row["shot_no"]) > 1:
         prev_row = conn.execute(
             "SELECT * FROM shots WHERE episode_id=? AND shot_no<? ORDER BY shot_no DESC LIMIT 1",
             (shot_row["episode_id"], int(shot_row["shot_no"])),
@@ -1267,12 +1393,23 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
     continuity_mode = derive_continuity_mode(shot, prev_shot)
     shot.continuity_mode = continuity_mode
     prev_state_out = effective_state_out(prev_shot) if prev_shot else None
-    prompt_prev_state_out = prev_state_out if uses_previous_tail_frame(continuity_mode) else None
+    planned_state_dependency = (
+        shot_plan is not None and shot_plan.state_dependency != "none"
+    )
+    prompt_prev_state_out = (
+        prev_state_out
+        if planned_state_dependency or uses_previous_tail_frame(continuity_mode)
+        else None
+    )
     if prompt_prev_state_out:
         shot.state_in = prompt_prev_state_out
     chain_after_shot_id = (
-        (prev_row["id"] if prev_row else None)
-        if uses_previous_tail_frame(continuity_mode) else None
+        planned_dependency_id
+        if shot_plan is not None
+        else (
+            (prev_row["id"] if prev_row else None)
+            if uses_previous_tail_frame(continuity_mode) else None
+        )
     )
     chain_after_version_id = (
         _row_value(prev_row, "adopted_version_id")
@@ -1302,7 +1439,9 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
                                   next_scene=outgoing_transition["next_scene"] if outgoing_transition else None,
                                   next_first_frame_desc=outgoing_transition["next_first_frame_desc"] if outgoing_transition else None,
                                   continuity_mode=continuity_mode,
-                                  prev_state_out=prompt_prev_state_out))
+                                  prev_state_out=prompt_prev_state_out,
+                                  voice_bible=screenplay.voice_bible,
+                                  screenplay=screenplay))
     raw_source_errors = [
         error for error in forbidden_prompt_content_errors(raw_prompt_text, shot)
         if "原文章节摘录" in error or "source_excerpt 原文内容" in error
@@ -1336,6 +1475,8 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         shot=shot,
         scene_name=getattr(shot, "scene_name", "") or None,
         conn=conn,
+        bible=bible,
+        screenplay=screenplay,
     )
     if (
         reference_gallery
@@ -1352,7 +1493,7 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
 
     key_material = (
         prompt_text
-        + f"|mode:{video_modes.REFERENCE_IMAGE_MODE}|plan:{video_modes.decision_to_dict(decision)}"
+        + f"|mode:{decision.mode}|plan:{video_modes.decision_to_dict(decision)}"
         + f"|after:{chain_after_shot_id or ''}"
         + f"|after_version:{chain_after_version_id or ''}"
         + f"|keyframe_prompt_contract:{video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION}"
@@ -1406,6 +1547,24 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         "shot_contract_json": json.dumps(shot_contract_dict(shot), ensure_ascii=False),
         "keyframe_prompt_contract_version": video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION,
     }
+    if shot_plan is not None:
+        image_meta.update({
+            "episode_video_plan_id": shot_plan.episode_video_plan_id,
+            "shot_plan_id": shot_plan.shot_plan_id,
+            "plan_revision": shot_plan.plan_revision,
+            "source_storyboard_revision_id": shot_plan.source_storyboard_revision_id,
+            "capability_snapshot_id": shot_plan.capability_snapshot_id,
+            "input_revision_fingerprints": dict(
+                shot_plan.input_revision_fingerprints
+            ),
+            "planned_mode": shot_plan.mode.value,
+            "actual_mode": shot_plan.mode.value,
+            "video_input_intent": (
+                shot_plan.video_input_intent.value
+                if shot_plan.video_input_intent is not None else None
+            ),
+            "depends_on_shot_id": shot_plan.depends_on_shot_id,
+        })
     if preflight_repair:
         image_meta["preflight_auto_repair"] = preflight_repair
     if dependency_snapshot:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
@@ -488,6 +489,77 @@ def test_orphaned_continuity_wait_degrades_after_timeout(
     assert meta["continuity_degraded"] is True
     assert meta["continuity_mode"] == "same_scene_cut"
     assert meta["after_shot_id"] is None
+
+
+def test_planned_orphan_advances_versioned_fallback_without_rewriting_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _conn()
+    _seed(conn, two_shots=True)
+    _patch_enqueue_runtime(monkeypatch, conn)
+    monkeypatch.setattr(config, "VIDEO_CONTINUITY_ORPHAN_TIMEOUT", 30.0)
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,image_inputs,created_at
+           ) VALUES('v2','s2',1,'已冻结的计划提示词','idem-v2','queued',?,1)""",
+        (json.dumps({
+            "mode": "VIDEO_INPUT_MODE",
+            "shot_plan_id": "svp-old",
+            "after_shot_id": "s1",
+            "review_dependency_snapshot": {"qualification_version": "q1"},
+        }),),
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,version_id,episode_id,project_id,status,
+               after_shot_id,pipeline_stage,stage_started_at,created_at,updated_at
+           ) VALUES(
+               'j2','video','s2','v2','e1','p1','waiting_human',
+               's1','waiting_dependency',1,1,1
+           )"""
+    )
+    conn.commit()
+    import app.video_plan as video_plan
+
+    monkeypatch.setattr(
+        video_plan,
+        "create_fallback_plan_revision",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            plan_revision=2,
+            mode=SimpleNamespace(value="REFERENCE_IMAGE_MODE"),
+            depends_on_shot_id=None,
+        ),
+    )
+    enqueued: list[dict] = []
+    monkeypatch.setattr(
+        worker,
+        "enqueue_shot",
+        lambda shot_id, **kwargs: enqueued.append({"shot_id": shot_id, **kwargs}),
+    )
+
+    report = worker.reconcile_stalled_video_jobs()
+
+    assert report["continuity_degraded"] == 1
+    job = conn.execute(
+        "SELECT status,reason_code FROM jobs WHERE id='j2'"
+    ).fetchone()
+    assert dict(job) == {
+        "status": "degraded",
+        "reason_code": "PLANNED_FALLBACK_APPLIED",
+    }
+    version = conn.execute(
+        "SELECT prompt_text,status FROM shot_versions WHERE id='v2'"
+    ).fetchone()
+    assert dict(version) == {
+        "prompt_text": "已冻结的计划提示词",
+        "status": "failed",
+    }
+    assert enqueued == [{
+        "shot_id": "s2",
+        "reroll": True,
+        "after_shot_id": None,
+        "dependency_snapshot": {"qualification_version": "q1"},
+    }]
 
 
 def test_legacy_jobless_preflight_issue_is_adopted_by_new_state_machine(

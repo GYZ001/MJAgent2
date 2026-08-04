@@ -43,14 +43,14 @@ def episode_fingerprint(episode_id: str) -> str:
     ep = conn.execute(
         """SELECT id, project_id, source_chapters, status, screenplay_status, screenplay_artifact_id,
                   storyboard_artifact_id, active_storyboard_run_id,
-                  storyboard_outline_json
+                  storyboard_outline_json, screenplay_json
            FROM episodes WHERE id=?""",
         (episode_id,),
     ).fetchone()
     if not ep:
         raise HTTPException(404, "剧集不存在")
     shots = conn.execute(
-        """SELECT id, shot_no, storyboard_artifact_id, duration_s, shot_contract_json,
+        """SELECT id, shot_uid, shot_no, storyboard_artifact_id, duration_s, shot_contract_json,
                   action_desc, first_frame_desc, last_frame_desc, source_excerpt,
                   characters, dialogues, transition
            FROM shots WHERE episode_id=? ORDER BY shot_no""",

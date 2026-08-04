@@ -419,6 +419,13 @@ def build_delivery_package(
             "quality_report": quality_report,
             "archive_recovered": archive_recovered,
         }
+    # A delivery snapshot is a production output, not an editor preview.  The
+    # mutable episode projection is only accepted for genuinely legacy,
+    # plan-null episodes; modern episodes must be re-resolved through their
+    # consumed immutable screenplay authority before bytes are written.
+    from app.production.screenplay_authority import resolve_downstream_screenplay
+
+    screenplay_context = resolve_downstream_screenplay(episode_id, conn=conn)
     package_dir = (delivery_root / package_id).resolve()
     if not package_dir.is_relative_to(delivery_root):
         raise ValueError("非法的 package_id")
@@ -438,7 +445,9 @@ def build_delivery_package(
     )
     _write_json(
         snapshots / "screenplay.json",
-        _sanitize_delivery_value(json.loads(ep["screenplay_json"] or "{}")),
+        _sanitize_delivery_value(
+            screenplay_context.screenplay.model_dump(mode="json")
+        ),
     )
     shot_rows = rows_to_dicts(conn.execute(
         "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)

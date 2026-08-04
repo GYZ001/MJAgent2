@@ -1314,15 +1314,44 @@ async def chat_with_tools(
     return _parse_assistant_turn(data, label="chat_tools")
 
 
-async def create_video_task(prompt_text: str, *, image_urls: list[tuple[str, str]] | None = None,
-                            call_meta: dict | None = None) -> str:
-    """创建 Seedance 任务，返回 task id。image_urls: [(url, role)]，role ∈ first_frame/last_frame/reference_image。"""
+async def create_video_task(
+    prompt_text: str,
+    *,
+    image_urls: list[tuple[str, str]] | None = None,
+    video_urls: list[tuple[str, str]] | None = None,
+    return_last_frame: bool = False,
+    call_meta: dict | None = None,
+) -> str:
+    """创建 Seedance 任务；图片角色与 reference_video 角色在本地先做互斥校验。"""
+    image_roles = [str(role) for _url, role in (image_urls or [])]
+    video_roles = [str(role) for _url, role in (video_urls or [])]
+    valid_image_roles = {"first_frame", "last_frame", "reference_image"}
+    if any(role not in valid_image_roles for role in image_roles):
+        raise ProviderError(f"非法视频图片输入角色：{image_roles}")
+    if any(role != "reference_video" for role in video_roles):
+        raise ProviderError(f"非法视频输入角色：{video_roles}")
+    if video_roles and image_roles:
+        raise ProviderError("reference_video 不能与 reference_image/first_frame/last_frame 混用")
+    if "reference_image" in image_roles and (
+        "first_frame" in image_roles or "last_frame" in image_roles
+    ):
+        raise ProviderError("reference_image 不能与 first_frame/last_frame 混用")
+    if ("first_frame" in image_roles) != ("last_frame" in image_roles):
+        raise ProviderError("首尾帧模式必须同时提供 first_frame 与 last_frame")
+    for url, _role in video_urls or []:
+        if str(url).startswith("data:") or not str(url).startswith(("http://", "https://")):
+            raise ProviderError("reference_video 必须是供应商可访问的 http(s) Web URL")
+
     content: list[dict[str, Any]] = [{"type": "text", "text": prompt_text}]
     for url, role in image_urls or []:
         content.append({"type": "image_url", "image_url": {"url": url}, "role": role})
+    for url, role in video_urls or []:
+        content.append({"type": "video_url", "video_url": {"url": url}, "role": role})
     model = active_model("video", "hiagent")
     base_url, model_headers = _model_connection("hiagent", model, config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY)
     payload = {"model": model, "content": content}
+    if return_last_frame:
+        payload["return_last_frame"] = True
     if call_meta and call_meta.get("operation_id"):
         operation_id = str(call_meta["operation_id"])
     elif call_meta and call_meta.get("version_id"):

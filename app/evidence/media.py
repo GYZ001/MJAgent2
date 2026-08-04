@@ -160,27 +160,45 @@ def _model_evaluation(qa: dict[str, Any] | None, *, subject: str, evaluator_name
     )
 
 
-def merge_observed_state_out_into_shot_contract(shot_id: str, observed_state_out: str) -> None:
+def persist_candidate_observed_state_out(
+    version_id: str,
+    observed_state_out: str,
+) -> None:
+    """Persist runtime observation on the candidate, never the storyboard.
+
+    ``shots`` and ``shot_contract_json`` are the published narrative
+    projection.  A model observation from one generated candidate is evidence
+    about that candidate, not permission to revise the authored end state.
+    """
     observed = (observed_state_out or "").strip()
     if not observed:
         return
     conn = get_conn()
     row = conn.execute(
-        "SELECT shot_contract_json FROM shots WHERE id=?", (shot_id,)
+        "SELECT qa_json FROM shot_versions WHERE id=?", (version_id,)
     ).fetchone()
-    contract: dict[str, Any] = {}
-    if row and row["shot_contract_json"]:
-        try:
-            loaded = json.loads(row["shot_contract_json"])
-            if isinstance(loaded, dict):
-                contract = loaded
-        except (TypeError, ValueError):
-            contract = {}
-    contract["observed_state_out"] = observed
+    if row is None:
+        raise ValueError("视频候选不存在，无法保存运行观测")
+    try:
+        qa = json.loads(row["qa_json"] or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        qa = {}
+    if not isinstance(qa, dict):
+        qa = {}
+    qa["observed_state_out"] = observed
     conn.execute(
-        "UPDATE shots SET observed_state_out=?, shot_contract_json=? WHERE id=?",
-        (observed, json.dumps(contract, ensure_ascii=False), shot_id),
+        "UPDATE shot_versions SET qa_json=? WHERE id=?",
+        (json.dumps(qa, ensure_ascii=False), version_id),
     )
+
+
+def merge_observed_state_out_into_shot_contract(
+    shot_id: str,
+    observed_state_out: str,
+) -> None:
+    """Removed unsafe API kept as an explicit fail-closed compatibility seam."""
+    del shot_id, observed_state_out
+    raise ValueError("运行观测不能反写已发布分镜合同")
 
 
 def record_video_candidate(version_id: str, *, step_run_id: str | None = None) -> dict[str, Any]:
@@ -525,7 +543,7 @@ def select_best_video_candidate(
     ).fetchone()
     observed_state_out = (best.get("qa") or {}).get("observed_state_out")
     if observed_state_out:
-        merge_observed_state_out_into_shot_contract(shot_id, str(observed_state_out))
+        persist_candidate_observed_state_out(best["id"], str(observed_state_out))
     conn.execute("UPDATE shots SET adopted_version_id=? WHERE id=?", (best["id"], shot_id))
     conn.execute("UPDATE shot_versions SET adoption_reason=? WHERE id=?", (reason, best["id"]))
     conn.commit()

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from difflib import SequenceMatcher
 from typing import Any
@@ -55,6 +56,10 @@ NON_WAIVABLE_SCREENPLAY_ISSUE_CODES = frozenset({
 
 class ScreenplayIdentityGateError(RuntimeError):
     """人物身份未解决时保留可操作的剧本阶段诊断。"""
+
+
+class ScreenplayNarrativeGateError(RuntimeError):
+    """修复耗尽仍未通过硬门禁；工作稿保留，但绝不发布。"""
 
 _SCENE_STORY_FUNCTION_CODES = {
     "SCENE_STORY_FUNCTION_TOO_SHORT",
@@ -140,8 +145,57 @@ def run_screenplay_qa(
     artifact_hash: str | None = None,
 ) -> tuple[list[Issue], Evaluation]:
     from app import config
+    from app.narrative import validate_screenplay_narrative
     from app.stages import adaptation_hook_errors
     from app.validators import validate_screenplay
+    from app.harness.contracts import get_contract
+    from app.production.screenplay_authority import (
+        SCREENPLAY_QA_PROFILE_VERSION,
+        screenplay_authority_fingerprint,
+    )
+
+    authority_error = ""
+    try:
+        authority_input_fingerprint = screenplay_authority_fingerprint(
+            str(episode.get("id") or ""),
+            source_text=source_text,
+            bible=bible,
+            contract_version=get_contract("screenplay").version,
+            qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+        )
+    except ValueError as exc:
+        # Isolated unit tests may validate a detached screenplay fixture.  A
+        # real persisted episode, however, must never fall back when its source
+        # authority disagrees with the QA input.
+        if "episode not found" in str(exc):
+            fallback_material = {
+                "authority_contract": "screenplay-source-authority.v1",
+                "episode_id": str(episode.get("id") or ""),
+                "source_text": source_text,
+                "bible": bible.model_dump(mode="json"),
+                "constraints": {
+                    key: episode.get(key)
+                    for key in (
+                        "title", "hook", "cliffhanger", "synopsis",
+                        "target_duration_s", "required_dialogue_lines",
+                        "required_dialogue_occurrences", "character_resolutions",
+                    )
+                },
+                "contract_version": get_contract("screenplay").version,
+                "qa_profile_version": SCREENPLAY_QA_PROFILE_VERSION,
+            }
+            authority_input_fingerprint = hashlib.sha256(
+                json.dumps(
+                    fallback_material,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+        else:
+            authority_error = str(exc)
+            authority_input_fingerprint = ""
 
     expected = max(1, int(episode.get("target_duration_s") or 50) // config.VIDEO_DURATION_MIN_S)
     messages = validate_screenplay(
@@ -150,6 +204,14 @@ def run_screenplay_qa(
         source_text=source_text,
         require_dialogue_chains=True,
         required_dialogue_lines=episode.get("required_dialogue_lines") or [],
+    )
+    messages.extend(
+        validate_screenplay_narrative(
+            script,
+            require=True,
+            source_text=source_text,
+            expected_scope_id=str(episode.get("id") or script.id or "") or None,
+        )
     )
     from app.portraits import (
         screenplay_character_resolution_errors,
@@ -161,6 +223,8 @@ def run_screenplay_qa(
     )
     identity_messages.extend(screenplay_unknown_identity_errors(script, bible))
     messages.extend(adaptation_hook_errors(script, episode))
+    if authority_error:
+        messages.append(f"[SCREENPLAY_SOURCE_AUTHORITY_MISMATCH] {authority_error}")
     issues = enrich_issues(issues_from_validator_messages(
         list(dict.fromkeys(messages)),
         subject="screenplay",
@@ -197,27 +261,35 @@ def run_screenplay_qa(
     passed = blocker_count(issues) == 0 and must_fix_count(issues) == 0 and score >= pass_score
     status = "passed" if passed else "failed"
     hard_identity_issues = non_waivable_screenplay_issues(issues)
+    narrative_gate = script.narrative_plan is not None
+    evaluation_role = (
+        "business_safety" if hard_identity_issues
+        else "runtime_gate" if narrative_gate
+        else "score_only"
+    )
+    runtime_blocking = bool(hard_identity_issues or narrative_gate)
     evaluation = Evaluation(
         evaluator_type="deterministic",
         evaluator_name="screenplay_production_qa",
         evaluator_version="screenplay-qa-gate-2",
         status=status,
         hard_gate_passed=passed,
-        evaluation_role="business_safety" if hard_identity_issues else "score_only",
+        evaluation_role=evaluation_role,
         score_status="scored",
-        runtime_blocking=bool(hard_identity_issues),
+        runtime_blocking=runtime_blocking,
         retry_eligible=bool(issues),
         score=score,
         issues=issues,
         evidence={
             "artifact_id": artifact_id,
             "artifact_hash": artifact_hash,
+            "authority_input_fingerprint": authority_input_fingerprint,
             "blocker_count": blocker_count(issues),
             "must_fix_count": must_fix_count(issues),
-            "evaluation_role": "business_safety" if hard_identity_issues else "score_only",
-            "runtime_blocking": bool(hard_identity_issues),
+            "evaluation_role": evaluation_role,
+            "runtime_blocking": runtime_blocking,
             "pass_score": pass_score,
-            "verdict": "passed" if passed else "retry_then_fallback",
+            "verdict": "passed" if passed else "repair_or_needs_review",
         },
     )
     return issues, evaluation
@@ -698,23 +770,17 @@ async def run_screenplay_production(
     from app.stages import generate_screenplay_baseline
 
     conn = get_conn()
-    project = conn.execute(
-        "SELECT id, bible_version FROM projects WHERE id=?", (episode["project_id"],)
-    ).fetchone()
     contract = get_contract("screenplay")
-    required_dialogue_fingerprint = "|".join(
-        str(item.get("id") or item.get("text") or "")
-        for item in (episode.get("required_dialogue_occurrences") or [])
-        if isinstance(item, dict)
-    ) or "|".join(
-        str(line) for line in (episode.get("required_dialogue_lines") or [])
+    from app.production.screenplay_authority import screenplay_authority_fingerprint
+
+    input_fp = screenplay_authority_fingerprint(
+        episode_id,
+        conn=conn,
+        source_text=source_text,
+        bible=bible,
+        contract_version=contract.version,
+        qa_profile_version="screenplay-qa-gate-2",
     )
-    input_fp = hashlib.sha256(
-        (
-            f"{episode_id}|{source_text[:2000]}|"
-            f"{project['bible_version'] if project else 0}|{required_dialogue_fingerprint}"
-        ).encode()
-    ).hexdigest()
 
     rev = ensure_production_revision(
         episode_id=episode_id,
@@ -758,7 +824,12 @@ async def run_screenplay_production(
         open_issues: list[Issue],
         reason: str,
     ) -> EpisodeScreenplay:
-        """Publish the best working artifact after bounded repair attempts are exhausted."""
+        """Preserve the working artifact and stop when hard gates remain open.
+
+        This function intentionally keeps its historical name so persisted
+        checkpoints can resume across the upgrade.  It no longer issues a
+        completion certificate or publishes an unvalidated candidate.
+        """
         hard_identity_issues = non_waivable_screenplay_issues(open_issues)
         if hard_identity_issues:
             message = (
@@ -795,47 +866,40 @@ async def run_screenplay_production(
                     },
                 )
             raise ScreenplayIdentityGateError(message)
-        result = publish_screenplay(
-            episode_id=episode_id,
-            revision_id=current_rev.id,
-            artifact_id=working_id,
-            artifact_hash=artifact_hash,
-            evaluation_ids=[evaluation_id] if evaluation_id else [],
-            input_fingerprint=current_rev.input_fingerprint,
-            contract_version=current_rev.contract_version,
-            qa_profile_version=current_rev.qa_profile_version,
-            clear_downstream=True,
-        )
+        message = (
+            "剧本工作稿已保留，但叙事/质量硬门禁仍未通过，禁止发布："
+            + "；".join(issue.message for issue in open_issues[:5])
+        )[:1200]
         conn.execute(
-            "UPDATE episodes SET screenplay_status='ready',screenplay_error=NULL,screenplay_updated_at=? WHERE id=?",
-            (now(), episode_id),
+            "UPDATE episodes SET screenplay_status='repairing',screenplay_error=?,screenplay_updated_at=? WHERE id=?",
+            (message, now(), episode_id),
         )
         conn.commit()
         save_checkpoint(current_rev.id, {
             **checkpoint,
-            "phase": "SUCCEEDED",
+            "phase": "WAITING_HUMAN",
             "activation_no": activation_no,
             "working_artifact_id": working_id,
             "open_issue_ids": [issue.fingerprint for issue in open_issues],
             "issue_strategy_history": strategy_history,
             "patch_artifact_ids": patch_ids,
             "last_issue_fingerprints": [issue.fingerprint for issue in open_issues],
-            "yield_reason": "gate_retry_exhausted_fallback",
+            "yield_reason": "narrative_gate_needs_review",
             "fallback_reason": reason,
         })
         if run_id:
             evidence_repository.append_event(
                 run_id,
-                "PUBLISHED_RETRY_EXHAUSTED_FALLBACK",
-                "warning",
-                "剧本门禁重试耗尽，已发布当前最佳工作副本",
+                "NARRATIVE_GATE_NEEDS_REVIEW",
+                "error",
+                "剧本门禁重试耗尽；工作稿已保留，未发布",
                 payload={
-                    **result,
+                    "artifact_id": working_id,
                     "reason": reason,
                     "issue_count": len(open_issues),
                 },
             )
-        return load_screenplay_from_artifact(working_id)
+        raise ScreenplayNarrativeGateError(message)
 
     # ---- Baseline（仅一次）----
     if not rev.baseline_done:
@@ -1056,15 +1120,21 @@ async def run_screenplay_production(
                 reason="no_repairable_strategy",
             )
 
-        ops = plan_screenplay_patch(
-            issue,
-            script,
-            source_text=source_text,
-            strategy_history=strategy_history,
-        )
-        if not ops:
-            # 扩大一层：尝试 LLM 单字段修补
+        if script.narrative_plan is not None:
+            # New narrative artifacts always use semantic candidate comparison.
+            # Issue codes remain diagnostics and never select a patch strategy.
             ops = await _llm_field_patch(issue, script, source_text=source_text)
+        else:
+            # Read-only compatibility for pre-contract artifacts.  New
+            # generation cannot enter this legacy deterministic adapter.
+            ops = plan_screenplay_patch(
+                issue,
+                script,
+                source_text=source_text,
+                strategy_history=strategy_history,
+            )
+            if not ops:
+                ops = await _llm_field_patch(issue, script, source_text=source_text)
         if ops:
             proposed_key = _patch_strategy_key(ops)
             if _strategy_was_tried(
@@ -1222,29 +1292,27 @@ def get_active_safe(episode_id: str):
 def _choose_issue(issues: list[Issue]) -> Issue | None:
     if not issues:
         return None
-    priority = {
-        "SCHEMA_INVALID": 0,
-        "SCENE_STORY_FUNCTION_TOO_SHORT": 1,
-        "SCENE_FIELD_INVALID": 1,
-        "DRAMATIC_CONTRACT_INCOMPLETE": 1,
-        "LEDGER_INVALID": 2,
-        "KEY_LINE_MISSING": 3,
-        "PLOT_SPINE_INVALID": 4,
-        "CHARACTER_CONSISTENCY": 5,
-        "FORMAT_CONTRACT_INVALID": 6,
-        "SOURCE_FIDELITY": 7,
-        "OVERDETAIL": 8,
-    }
     repairable = [i for i in issues if i.repairable]
     pool = repairable or issues
 
-    def issue_priority(issue: Issue) -> tuple[float, str]:
-        base = float(priority.get(issue.code, 50))
-        # 先缩减整集“必交付对白链”集合，再检查集合内单链。
-        # 否则会先去移动/改写一条本应整组取舍的非必保链。
-        if issue.code == "KEY_LINE_MISSING" and "dialogue_chains 共" in issue.message:
-            base -= 0.5
-        return base, issue.fingerprint
+    severity_order = {"blocker": 0, "error": 1, "warning": 2, "info": 3}
+
+    def issue_priority(issue: Issue) -> tuple[float, float, float, str]:
+        evidence = issue.evidence or {}
+        severity_value = getattr(issue.severity, "value", issue.severity)
+        severity = severity_order.get(str(severity_value), 4)
+        # Producers may expose graph depth/affected scope, but missing values
+        # remain neutral.  These are relation properties, never issue-code or
+        # story-word mappings.
+        try:
+            dependency_depth = float(evidence.get("dependency_depth", 0))
+        except (TypeError, ValueError):
+            dependency_depth = 0.0
+        try:
+            affected_scope = float(evidence.get("affected_scope_size", 1))
+        except (TypeError, ValueError):
+            affected_scope = 1.0
+        return severity, dependency_depth, -affected_scope, issue.fingerprint
 
     return sorted(pool, key=issue_priority)[0]
 
@@ -1304,30 +1372,258 @@ def _mark_repair_failed(
         )
 
 
+def _identity_contract_repair_policy() -> dict[str, Any]:
+    """Return the typed, content-agnostic identity rules used by graph repair."""
+    return {
+        "authority": (
+            "identity_contracts 是所有非角色圣经身份的唯一权威声明；"
+            "修复不得引入未声明的实体、场次人物或非旁白说话人"
+        ),
+        "contract_fields": {
+            "identity_id": "稳定图引用 ID",
+            "display_name": "剧本与对白使用的精确显示名",
+            "kind": "基于当前来源和戏剧职责的开放语义",
+            "visual_policy": "canonical | contextual | collective | offscreen_only",
+            "visual_canonical": "非 offscreen_only 必填的中性视觉锚点",
+            "asset_requirement": "required | optional | forbidden",
+            "voice_ids": "精确回指 voice_bible.speaker_id",
+            "evidence": {
+                "source_evidence_ids": [],
+                "proposition_ids": [],
+                "adaptation_decision_ids": [],
+                "rationale": "身份决策的可追溯理由",
+            },
+        },
+        "typed_invariants": [
+            "canonical 必须 asset_requirement=required",
+            "offscreen_only 必须 asset_requirement=forbidden",
+            "除 offscreen_only 外 visual_canonical 必填",
+            "纯旁白可由 voice_bible.role_type=narrator 表达；其他画外说话人仍需合同与 voice_ids",
+        ],
+        "semantic_decision": (
+            "具名新角色、一次性功能身份、群体或纯画外身份均按当前语义意图决策；"
+            "禁止使用姓名、称谓、身份类型或题材白名单"
+        ),
+    }
+
+
 async def _llm_field_patch(
     issue: Issue,
     script: EpisodeScreenplay,
     *,
     source_text: str,
 ) -> list[PatchOperation]:
-    """受限 LLM：只产出单字段 JSON patch，失败则返回空。"""
+    """Compare semantic candidates, then return one bounded candidate patch.
+
+    New narrative artifacts never map an issue code to an operation.  The AI
+    compares at least two relation-level candidates and the selected candidate
+    is CAS-applied to an isolated working artifact before full-graph QA.
+    """
     path = str((issue.evidence or {}).get("path") or "")
     field = path.strip("/").split("/")[-1] if path else ""
     dramatic_fields = {"stakes", "obstacle", "protagonist_goal", "dramatic_question"}
-    if field not in dramatic_fields and issue.code != "DRAMATIC_CONTRACT_INCOMPLETE":
-        # 尝试从 message 推断
-        for f in dramatic_fields:
-            if f in (issue.message or ""):
-                field = f
-                break
-    if field not in dramatic_fields:
+    if script.narrative_plan is None:
+        if field not in dramatic_fields:
+            for candidate_field in dramatic_fields:
+                if candidate_field in (issue.message or ""):
+                    field = candidate_field
+                    break
+        if field not in dramatic_fields:
+            return []
+        value = _heuristic_fill_dramatic_field(field, script)
+        return ([PatchOperation(
+            op="replace_field",
+            path=field,
+            value=value,
+            target={"kind": "metadata", "id": field},
+        )] if value else [])
+
+    from app.harness import model_gateway
+    from app.production.screenplay_document import screenplay_to_document
+    from app.schemas import extract_json
+
+    document = screenplay_to_document(script)
+    prompt = {
+        "task": "诊断当前剧本叙事关系缺口，比较至少两个最小候选，再选择一个局部候选",
+        "issue": issue.model_dump(mode="json"),
+        "screenplay_document": document.model_dump(mode="json"),
+        "authorized_source_excerpt": source_text[:16000],
+        "identity_contract_policy": _identity_contract_repair_policy(),
+        "operation_contract": {
+            "op": "replace_field | create_node | delete_node | move_node | insert_node",
+            "path": "单个现存字段；结构操作留空",
+            "target": {
+                "kind": "narrative_node | metadata | scene | dialogue_chain_turn",
+                "collection": "narrative_plan 的 schema 列表字段（包括 identity_contracts）；非叙事节点可省略",
+                "id": "现存节点 ID；create_node 时为新节点 ID",
+                "parent_id": "创建嵌套节点时的现存父节点 ID，可省略",
+                "parent_field": "父节点中的列表字段，可省略",
+                "to_index": "移动/插入位置，可省略",
+            },
+            "value": "replace 的新字段值或 create 的完整单节点",
+        },
+        "output_contract": {
+            "semantic_gap": "自由语义诊断；无法归类时仍需保留",
+            "unclassified_dimensions": [],
+            "candidate_plans": [{
+                "candidate_id": "CANDIDATE-ID",
+                "operations": [],
+                "satisfies_gap_test": False,
+                "passes_deletion_test": False,
+                "passes_marginal_gain_test": False,
+                "preserves_invariants": False,
+                "expected_narrative_gain": 0.0,
+                "destructive_cost": 0.0,
+                "rationale": "关系、证据和状态理由",
+            }],
+            "selected_candidate_id": "CANDIDATE-ID",
+            "selection_reason": "为什么是最小充分修改",
+        },
+        "rules": [
+            "candidate_plans 至少两个；问题码只描述失败关系，不得决定操作",
+            "选中候选只能含 1~3 个局部操作，不得替换根对象或整个集合",
+            "允许创建/删除/移动单个叙事节点，但必须证明全图引用、DAG、状态、信念和观众路径可恢复",
+            "新增必须通过缺口与边际增益测试；删除必须通过删除测试；所有候选必须保持不变量",
+            "不得修改现存节点的身份 ID",
+            "create/replace 一旦引入新 identity_id、display_name 或非旁白 voice ID，同一候选必须以局部操作创建或补齐完整 identity_contracts 节点及 voice_ids 连接；否则候选无效",
+            "修复可以更正身份合同本身，但不得借修复器绕过已有角色圣经或已发布身份合同的 ID 权威",
+            "来源证据必须逐字来自 authorized_source_excerpt",
+            "改写命题不得直接挂原文证据，角色/观众信念不得补入不可感知证据",
+            "修复后仍会运行整图 DAG、状态、信念与观众路径全量复验",
+        ],
+    }
+    raw = await model_gateway.chat(
+        [
+            {"role": "system", "content": "你是叙事图局部修复器。只输出 JSON，不按题材或剧情关键词判断。"},
+            {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
+        ],
+        temperature=0.1,
+        max_tokens=4096,
+        call_meta={
+            "stage": "screenplay_narrative_patch",
+            "stage_key": "narrative_graph_patch",
+            "call_role": "semantic_patch_planner",
+            "contract_version": "narrative-continuity.v1",
+        },
+    )
+    try:
+        payload = extract_json(raw)
+        candidates = list(payload.get("candidate_plans") or [])
+        if len(candidates) < 2:
+            return []
+        selected_id = str(payload.get("selected_candidate_id") or "")
+        selected = next((
+            item for item in candidates
+            if isinstance(item, dict) and str(item.get("candidate_id") or "") == selected_id
+        ), None)
+        if selected is None or not bool(selected.get("preserves_invariants")):
+            return []
+        raw_ops = list(selected.get("operations") or [])
+        if not 1 <= len(raw_ops) <= 3:
+            return []
+        operations = [PatchOperation.model_validate(item) for item in raw_ops]
+    except Exception:  # noqa: BLE001 - model output is untrusted
         return []
-    value = _heuristic_fill_dramatic_field(field, script)
-    if not value:
+    if any(operation.op in {"create_node", "insert_node"} for operation in operations) and not (
+        bool(selected.get("satisfies_gap_test"))
+        and bool(selected.get("passes_marginal_gain_test"))
+    ):
         return []
-    return [PatchOperation(
-        op="replace_field",
-        path=field,
-        value=value,
-        target={"kind": "metadata", "id": field},
-    )]
+    if any(operation.op == "delete_node" for operation in operations) and not bool(
+        selected.get("passes_deletion_test")
+    ):
+        return []
+
+    plan_data = script.narrative_plan.model_dump(mode="json")
+    safe: list[PatchOperation] = []
+    for operation in operations:
+        target = operation.target or {}
+        kind = str(target.get("kind") or "")
+        if operation.op not in {
+            "replace_field", "create_node", "insert_node", "delete_node", "move_node",
+        }:
+            return []
+        if kind == "narrative_node":
+            collection = str(target.get("collection") or "")
+            node_id = str(target.get("id") or "")
+            nodes = plan_data.get(collection)
+            if not isinstance(nodes, list) or not node_id:
+                return []
+
+            def find_node(value: Any) -> dict[str, Any] | None:
+                if isinstance(value, dict):
+                    if any(
+                        key.endswith("_id") and str(candidate or "") == node_id
+                        for key, candidate in value.items()
+                    ):
+                        return value
+                    for child in value.values():
+                        found = find_node(child)
+                        if found is not None:
+                            return found
+                elif isinstance(value, list):
+                    for child in value:
+                        found = find_node(child)
+                        if found is not None:
+                            return found
+                return None
+
+            node = find_node(nodes)
+            if operation.op == "replace_field":
+                patch_field = operation.path.split(".")[-1]
+                if node is None or patch_field not in node:
+                    return []
+                if patch_field.endswith("_id") and str(node.get(patch_field) or "") == node_id:
+                    return []
+                if patch_field in {"verbatim_excerpt", "source_text"} and str(
+                    operation.value or ""
+                ) not in source_text:
+                    return []
+            elif operation.op in {"delete_node", "move_node"} and node is None:
+                return []
+            elif operation.op in {"create_node", "insert_node"}:
+                if node is not None or not isinstance(operation.value, dict):
+                    return []
+        elif operation.op != "replace_field" or kind not in {
+            "metadata", "scene", "screenplay_scene", "dialogue_chain_turn",
+        }:
+            return []
+        elif not operation.path or operation.path in {"/", "$", "full_script_text"}:
+            return []
+        if operation.path.split(".")[-1] in {"source_text", "verbatim_excerpt"} and str(
+            operation.value or ""
+        ) not in source_text:
+            return []
+        selection_evidence = {
+            "semantic_gap": payload.get("semantic_gap"),
+            "candidate_ids": [item.get("candidate_id") for item in candidates if isinstance(item, dict)],
+            "selected_candidate_id": selected_id,
+            "selection_reason": payload.get("selection_reason"),
+            "unclassified_dimensions": payload.get("unclassified_dimensions") or [],
+            "expected_narrative_gain": selected.get("expected_narrative_gain"),
+            "destructive_cost": selected.get("destructive_cost"),
+        }
+        operation.target = {**target, "semantic_selection": selection_evidence}
+        safe.append(operation)
+    try:
+        from app.production.patch import _create_node, _delete_node, _structure_op
+        from app.production.screenplay_document import apply_field_patch
+
+        candidate_document = document
+        for operation in safe:
+            if operation.op == "replace_field":
+                candidate_document, _ = apply_field_patch(
+                    candidate_document,
+                    path=operation.path,
+                    value=operation.value,
+                    target=operation.target,
+                )
+            elif operation.op in {"create_node", "insert_node"}:
+                candidate_document, _ = _create_node(candidate_document, operation)
+            elif operation.op == "delete_node":
+                candidate_document, _ = _delete_node(candidate_document, operation)
+            elif operation.op == "move_node":
+                candidate_document, _ = _structure_op(candidate_document, operation)
+    except Exception:  # noqa: BLE001 - reject an invalid model-authored candidate
+        return []
+    return safe

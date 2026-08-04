@@ -202,7 +202,16 @@ def test_dialogue_framing_issue_routes_to_current_shot_repair() -> None:
 
     assert issue_code(message) == "DIALOGUE_FRAMING_INVALID"
     assert _is_structural_storyboard_issue(issue_code(message), message) is True
-    plan = route_issues([message], validated_prefix_end=5, next_shot_no=6)
+    plan = route_issues(
+        [message],
+        validated_prefix_end=5,
+        next_shot_no=6,
+        semantic_diagnosis={
+            "scope": "current_shot",
+            "selected_strategy": "repair_current",
+            "reason": "构图合同可在当前镜内重写，不需要新增剧情镜头",
+        },
+    )
     assert plan.level == "L1"
     assert plan.strategy == "repair_current"
     assert plan.invalidation_frontier == 6
@@ -227,7 +236,15 @@ def test_action_dialogue_framing_messages_route_to_targeted_repair(
     message: str, shot_no: int,
 ) -> None:
     assert issue_code(message) == "DIALOGUE_FRAMING_INVALID"
-    plan = route_issues([message], validated_prefix_end=14)
+    plan = route_issues(
+        [message],
+        validated_prefix_end=14,
+        semantic_diagnosis={
+            "scope": "current_shot",
+            "selected_strategy": "repair_current",
+            "reason": "当前镜的景别/构图可局部修正且不改变叙事所有权",
+        },
+    )
     assert plan.level == "L1"
     assert plan.strategy == "repair_current"
     assert plan.invalidation_frontier == shot_no

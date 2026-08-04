@@ -1373,7 +1373,14 @@ def job_detail(job_id: str, source: str = "job"):
     ).fetchone()
     if not row:
         raise HTTPException(404, "媒体任务不存在")
-    return {**dict(row), "source": "job"}
+    result = {**dict(row), "source": "job"}
+    if row["kind"] == "video":
+        try:
+            from app.video_plan import mode_audit_for_job
+            result["video_mode_audit"] = mode_audit_for_job(job_id)
+        except Exception:  # noqa: BLE001 - monitoring enrichment must not hide the task
+            result["video_mode_audit"] = None
+    return result
 
 
 @router.post("/system/jobs/{job_id}/retry")

@@ -1524,6 +1524,8 @@ async def repair_screenplay_draft(episode_id: str, body: dict | None = Body(None
         raise HTTPException(409, "下游任务尚未终止，未启动剧本 Repair")
 
     contract_version = get_contract("screenplay").version
+    from app.production.screenplay_authority import screenplay_authority_fingerprint
+
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_document",
         scope_type="episode",
@@ -1537,7 +1539,14 @@ async def repair_screenplay_draft(episode_id: str, body: dict | None = Body(None
     revision = ensure_production_revision(
         episode_id=episode_id,
         kind="screenplay",
-        input_fingerprint=f"manual-repair:{artifact['content_hash']}",
+        input_fingerprint=screenplay_authority_fingerprint(
+            episode_id,
+            conn=conn,
+            source_text=source_text,
+            bible=bible,
+            contract_version=contract_version,
+            qa_profile_version="screenplay-qa-gate-2",
+        ),
         contract_version=contract_version,
         qa_profile_version="screenplay-qa-gate-2",
         resume=False,
@@ -2170,10 +2179,19 @@ async def edit_screenplay(episode_id: str, body: dict):
         )
 
         contract_version = get_contract("screenplay").version
+        from app.production.screenplay_authority import screenplay_authority_fingerprint
+
         revision = ensure_production_revision(
             episode_id=episode_id,
             kind="screenplay",
-            input_fingerprint=f"manual:{latest_version}:{instance.updated_at}",
+            input_fingerprint=screenplay_authority_fingerprint(
+                episode_id,
+                conn=conn,
+                source_text=source_text,
+                bible=bible,
+                contract_version=contract_version,
+                qa_profile_version="screenplay-qa-gate-2",
+            ),
             contract_version=contract_version,
             qa_profile_version="screenplay-qa-gate-2",
             resume=False,

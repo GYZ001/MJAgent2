@@ -1,4 +1,4 @@
-"""Repair Router：局部策略回归（无 redo_suffix / replan_outline）。"""
+"""Repair Router：语义候选选择回归（无 code→strategy 白名单）。"""
 from __future__ import annotations
 
 from app.harness.types import Issue, IssueSeverity
@@ -22,19 +22,34 @@ def _issue(code: str, message: str, shot_no: int = 9) -> Issue:
     )
 
 
-def test_preferred_levels():
-    assert preferred_level_for_code("SCHEMA_INVALID") == "L1"
-    assert preferred_level_for_code("STATE_CHAIN_INVALID") == "L2"
-    assert preferred_level_for_code("SPINE_MISSING") == "L3"
-    assert preferred_level_for_code("PLAN_EXHAUSTED_NOT_FINAL") == "L3"
+def test_issue_code_does_not_prescribe_a_repair_level():
+    levels = {
+        preferred_level_for_code(code)
+        for code in (
+            "SCHEMA_INVALID",
+            "STATE_CHAIN_INVALID",
+            "SPINE_MISSING",
+            "PLAN_EXHAUSTED_NOT_FINAL",
+            "SEMANTIC_GAP_OTHER",
+        )
+    }
+
+    assert levels == {"L1"}
 
 
 def test_route_spoken_capacity_never_replans_outline():
-    """容量超限走拆镜/插镜；升到 L4 后仍禁止整集重规划。"""
+    """同一容量问题保留多种候选，由语义诊断选择，绝不整集重规划。"""
     issues = [_issue("SPOKEN_CAPACITY_EXCEEDED", "第 9 镜必保留台词超过 10 秒容量，请拆镜")]
     first = route_issues(issues, validated_prefix_end=8, next_shot_no=9)
-    assert first.level == "L1"
-    assert first.strategy == "split_adjacent_shot"
+    assert first.level == "L2"
+    assert first.strategy == "repair_window"
+    assert first.needs_semantic_selection is True
+    assert {candidate.strategy for candidate in first.candidates} >= {
+        "repair_current",
+        "repair_window",
+        "insert_shot",
+        "split_adjacent_shot",
+    }
     assert first.invalidation_frontier <= 9
 
     split = route_issues(
@@ -42,10 +57,19 @@ def test_route_spoken_capacity_never_replans_outline():
         validated_prefix_end=8,
         next_shot_no=9,
         current_level="L4",
+        semantic_diagnosis={
+            "scope": "adjacent_window",
+            "selected_strategy": "split_adjacent_shot",
+            "reason": "单镜无法同时提供台词和独立处理时间",
+        },
     )
     assert split.level == "L4"
-    assert split.strategy == "split_shot"
-    assert split.strategy != "replan_outline"
+    assert split.strategy == "split_adjacent_shot"
+    assert split.needs_semantic_selection is False
+    assert all(
+        candidate.strategy not in {"redo_suffix", "replan_outline"}
+        for candidate in split.candidates
+    )
 
 
 def test_route_action_capacity_to_adjacent_split():
@@ -55,11 +79,19 @@ def test_route_action_capacity_to_adjacent_split():
         8,
     )]
 
-    plan = route_issues(issues, validated_prefix_end=7, next_shot_no=8)
+    plan = route_issues(
+        issues,
+        validated_prefix_end=7,
+        next_shot_no=8,
+        semantic_diagnosis={
+            "scope": "adjacent_window",
+            "selected_strategy": "split_adjacent_shot",
+        },
+    )
 
-    assert plan.level == "L1"
+    assert plan.level == "L2"
     assert plan.strategy == "split_adjacent_shot"
-    assert plan.invalidation_frontier == 8
+    assert plan.invalidation_frontier == 7
 
 
 def test_route_compiled_prompt_overflow_to_reported_shot() -> None:
@@ -71,7 +103,11 @@ def test_route_compiled_prompt_overflow_to_reported_shot() -> None:
     plan = route_issues([message], validated_prefix_end=17)
 
     assert plan.issue_codes == ["ACTION_CAPACITY_EXCEEDED"]
-    assert plan.strategy == "split_adjacent_shot"
+    assert plan.strategy == "repair_window"
+    assert plan.needs_semantic_selection is True
+    assert "split_adjacent_shot" in {
+        candidate.strategy for candidate in plan.candidates
+    }
     assert plan.invalidation_frontier == 1
 
 
@@ -133,9 +169,96 @@ def test_provider_pauses_external():
     assert plan.strategy == "waiting_retry"
 
 
-def test_spine_missing_inserts_not_redo_suffix():
-    plan = route_issues([
+def test_structured_operational_state_pauses_without_story_code_mapping():
+    issue = _issue("SEMANTIC_GAP_OTHER", "外部模型当前不可用", 3)
+    issue.evidence["operational_kind"] = "provider_unavailable"
+
+    plan = route_issues([issue], validated_prefix_end=2)
+
+    assert plan.pause_state == "PAUSED_EXTERNAL"
+    assert plan.strategy == "waiting_retry"
+
+
+def test_spine_missing_requires_semantic_selection_before_insert():
+    issues = [
         _issue("SPINE_MISSING", "must_keep spine 未覆盖 第 3 镜", 3),
-    ], validated_prefix_end=2, next_shot_no=3)
-    assert plan.strategy == "insert_shot"
-    assert plan.strategy not in {"redo_suffix", "replan_outline"}
+    ]
+
+    undecided = route_issues(issues, validated_prefix_end=2, next_shot_no=3)
+    selected = route_issues(
+        issues,
+        validated_prefix_end=2,
+        next_shot_no=3,
+        semantic_diagnosis={
+            "scope": "structure",
+            "selected_strategy": "insert_shot",
+            "reason": "删除测试证明现有窗口无法承载缺失事件",
+        },
+    )
+
+    assert undecided.strategy == "repair_window"
+    assert undecided.needs_semantic_selection is True
+    assert "insert_shot" in {candidate.strategy for candidate in undecided.candidates}
+    assert selected.level == "L3"
+    assert selected.strategy == "insert_shot"
+    assert selected.needs_semantic_selection is False
+    assert all(
+        candidate.strategy not in {"redo_suffix", "replan_outline"}
+        for candidate in selected.candidates
+    )
+
+
+def test_same_unknown_issue_can_choose_different_repairs_from_semantic_evidence():
+    issues = [_issue("SEMANTIC_GAP_OTHER", "开放语义缺口", 6)]
+
+    local = route_issues(
+        issues,
+        validated_prefix_end=5,
+        semantic_diagnosis={
+            "scope": "current_shot",
+            "selected_strategy": "repair_current",
+            "candidate_scores": {"repair_current": 0.8, "insert_shot": 0.1},
+        },
+    )
+    bridge = route_issues(
+        issues,
+        validated_prefix_end=5,
+        semantic_diagnosis={
+            "scope": "structure",
+            "selected_strategy": "insert_shot",
+            "candidate_scores": {"repair_current": 0.1, "insert_shot": 0.9},
+        },
+    )
+
+    assert local.issue_codes == bridge.issue_codes == ["SEMANTIC_GAP_OTHER"]
+    assert local.strategy == "repair_current"
+    assert bridge.strategy == "insert_shot"
+    assert {candidate.strategy for candidate in local.candidates} == {
+        candidate.strategy for candidate in bridge.candidates
+    }
+
+
+def test_unknown_strategy_without_verified_operations_fails_closed() -> None:
+    plan = route_issues(
+        [_issue("SEMANTIC_GAP_OTHER", "开放关系需要新修复意图", 6)],
+        validated_prefix_end=5,
+        semantic_diagnosis={
+            "scope": "structure",
+            "selected_strategy": "repair_open_relation",
+            "candidate_assessments": [{
+                "strategy": "repair_open_relation",
+                "expected_narrative_gain": 0.9,
+                "outline_operations": [{
+                    "op": "unavailable_runtime_capability",
+                    "target": {"shot_id": "SH-6"},
+                }],
+            }],
+            "execution_verified": False,
+        },
+    )
+
+    assert plan.strategy == "waiting_human"
+    assert plan.pause_state == "WAITING_HUMAN"
+    assert plan.reason == "semantic_strategy_not_executable"
+    assert plan.selected_candidate_id is None
+    assert plan.needs_semantic_selection is True

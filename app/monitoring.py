@@ -101,6 +101,16 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     "storyboard_source_rebind_enabled": _boolean("分镜原文重绑定", "true", experimental=True),
     "video_reference_batch_prompt": _boolean("批量参考图提示词", "true"),
     "video_reference_role_adaptive": _boolean("质量角色自适应", "false", experimental=True),
+    "video_plan_confidence_floor": _number(
+        "视频计划最低置信度", "0.55", 0, 1, step=.05, integer=False,
+    ),
+    "video_plan_allow_unknown_dimensions": _boolean(
+        "允许未知关系进入计划", "false", experimental=True,
+    ),
+    "provider_media_max_download_bytes": _number(
+        "视频参考素材大小上限", str(512 * 1024 * 1024),
+        1_048_576, 2_147_483_648, unit="字节",
+    ),
     "media_scheduler_policy": {
         "label": "调度策略", "type": "enum", "default": "stage_aware",
         "options": ["legacy", "stage_aware"], "immediate": True,
@@ -125,9 +135,14 @@ for _key in (
     "hiagent_model_text", "hiagent_model_vlm", "hiagent_model_video", "hiagent_model_image",
     "openrouter_model_text", "openrouter_model_vlm", "bailian_model_text", "bailian_model_vlm",
     "deepseek_model_text", "zhipu_model_text",
+    "provider_media_public_base_url",
 ):
     SETTINGS_SCHEMA[_key] = {
-        "label": _key, "type": "string", "default": config.DEFAULT_SETTINGS.get(_key, ""), "max_length": 180,
+        "label": (
+            "视频参考媒体公开基址"
+            if _key == "provider_media_public_base_url" else _key
+        ),
+        "type": "string", "default": config.DEFAULT_SETTINGS.get(_key, ""), "max_length": 500,
         "immediate": True, "experimental": False,
     }
 

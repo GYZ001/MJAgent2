@@ -22,7 +22,7 @@ def test_legacy_keyframe_enqueue_is_rejected_with_video_guidance() -> None:
         worker.enqueue_scene("legacy-shot")
 
 
-def test_legacy_mode_plan_is_upgraded_before_video_generation() -> None:
+def test_legacy_mode_plan_cannot_bypass_episode_planning() -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("CREATE TABLE shots(id TEXT PRIMARY KEY, mode_plan TEXT)")
@@ -31,9 +31,10 @@ def test_legacy_mode_plan_is_upgraded_before_video_generation() -> None:
         ("shot-8", json.dumps({"mode": "FIRST_LAST_FRAME_MODE"})),
     )
 
-    asyncio.run(api._ensure_shot_mode_plan(conn, "shot-8"))
+    with pytest.raises(ValueError, match="不能绕过整集规划"):
+        asyncio.run(api._ensure_shot_mode_plan(conn, "shot-8"))
 
-    stored = json.loads(
-        conn.execute("SELECT mode_plan FROM shots WHERE id='shot-8'").fetchone()["mode_plan"]
-    )
-    assert stored["mode"] == "REFERENCE_IMAGE_MODE"
+    stored = json.loads(conn.execute(
+        "SELECT mode_plan FROM shots WHERE id='shot-8'"
+    ).fetchone()["mode_plan"])
+    assert stored["mode"] == "FIRST_LAST_FRAME_MODE"

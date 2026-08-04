@@ -196,7 +196,9 @@ def apply_screenplay_patch(
 
     local_issues: list[Issue] = []
     if run_local_validate:
-        local_issues = _local_screenplay_schema_check(script)
+        local_issues = _local_screenplay_schema_check(
+            script, expected_scope_id=episode_id,
+        )
 
     after_art = evidence_repository.create_artifact(
         EvidenceArtifact(
@@ -293,7 +295,12 @@ def screenplay_artifact_payload(script: EpisodeScreenplay) -> dict[str, Any]:
     return screenplay_to_document(script).model_dump(mode="json")
 
 
-def _local_screenplay_schema_check(script: EpisodeScreenplay) -> list[Issue]:
+def _local_screenplay_schema_check(
+    script: EpisodeScreenplay,
+    *,
+    expected_scope_id: str | None = None,
+) -> list[Issue]:
+    from app.narrative import validate_screenplay_narrative
     from app.production.structured_issues import structured_issue
 
     issues: list[Issue] = []
@@ -316,13 +323,113 @@ def _local_screenplay_schema_check(script: EpisodeScreenplay) -> list[Issue]:
             rule_id="episode_no_required",
             stage="screenplay",
         ))
+    for message in validate_screenplay_narrative(
+        script,
+        require=True,
+        expected_scope_id=expected_scope_id,
+    ):
+        code = "NARRATIVE_CONTRACT_INVALID"
+        if message.startswith("[") and "]" in message:
+            code = message[1:message.index("]")]
+        issues.append(structured_issue(
+            code=code,
+            message=message,
+            subject="screenplay",
+            path="/narrative_plan",
+            rule_id="narrative_graph_full_validation",
+            related_node_ids=["narrative_plan"],
+            repairable=True,
+            must_fix=True,
+            stage="screenplay",
+        ))
     return issues
+
+
+def _narrative_node_location(
+    value: Any,
+    node_id: str,
+) -> tuple[dict[str, Any], list[Any] | None, int | None] | None:
+    """Find any nested narrative node by its schema identity, without story rules."""
+    if isinstance(value, dict):
+        if any(
+            key.endswith("_id") and str(candidate or "") == node_id
+            for key, candidate in value.items()
+        ):
+            return value, None, None
+        for child in value.values():
+            found = _narrative_node_location(child, node_id)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            if isinstance(child, dict) and any(
+                key.endswith("_id") and str(candidate or "") == node_id
+                for key, candidate in child.items()
+            ):
+                return child, value, index
+            found = _narrative_node_location(child, node_id)
+            if found is not None:
+                return found
+    return None
+
+
+def _all_narrative_identity_values(value: Any) -> set[str]:
+    result: set[str] = set()
+    if isinstance(value, dict):
+        result.update(
+            str(candidate)
+            for key, candidate in value.items()
+            if key.endswith("_id") and str(candidate or "").strip()
+        )
+        for child in value.values():
+            result.update(_all_narrative_identity_values(child))
+    elif isinstance(value, list):
+        for child in value:
+            result.update(_all_narrative_identity_values(child))
+    return result
 
 
 def _create_node(doc: ScreenplayDocument, op: PatchOperation) -> tuple[ScreenplayDocument, list[str]]:
     data = copy.deepcopy(doc.model_dump(mode="json"))
     kind = (op.target or {}).get("kind") or ""
     value = op.value if isinstance(op.value, dict) else {}
+    if kind == "narrative_node":
+        plan = data.get("narrative_plan")
+        collection = str((op.target or {}).get("collection") or "").strip()
+        if not isinstance(plan, dict) or not isinstance(plan.get(collection), list):
+            raise KeyError(f"narrative collection not found: {collection}")
+        node_ids = [
+            str(candidate)
+            for key, candidate in value.items()
+            if key.endswith("_id") and str(candidate or "").strip()
+        ]
+        if not node_ids:
+            raise KeyError("new narrative node must have a stable *_id")
+        existing_ids = _all_narrative_identity_values(plan)
+        if any(node_id in existing_ids for node_id in node_ids):
+            raise KeyError(f"narrative node id already exists: {node_ids}")
+        parent_id = str((op.target or {}).get("parent_id") or "").strip()
+        parent_field = str((op.target or {}).get("parent_field") or "").strip()
+        destination = plan[collection]
+        if parent_id:
+            parent_location = _narrative_node_location(plan[collection], parent_id)
+            if parent_location is None:
+                raise KeyError(f"narrative parent not found: {collection}/{parent_id}")
+            parent = parent_location[0]
+            destination = parent.get(parent_field)
+            if not isinstance(destination, list):
+                raise KeyError(
+                    f"narrative parent field is not a list: {parent_id}/{parent_field}"
+                )
+        insert_at = (op.target or {}).get("to_index")
+        if insert_at is None:
+            destination.append(value)
+        else:
+            index = max(0, min(len(destination), int(insert_at)))
+            destination.insert(index, value)
+        return ScreenplayDocument.model_validate(data), [
+            f"narrative:{collection}:{node_ids[0]}"
+        ]
     if kind in {"screenplay_scene", "scene"}:
         scenes = data.setdefault("scene_blocks", [])
         scene_no = len(scenes) + 1
@@ -372,6 +479,19 @@ def _delete_node(doc: ScreenplayDocument, op: PatchOperation) -> tuple[Screenpla
     node_id = str((op.target or {}).get("id") or "")
     if not node_id or node_id in {"*", "ALL", "all"}:
         raise FullRegenDenied("禁止 delete-all")
+    if kind == "narrative_node":
+        plan = data.get("narrative_plan")
+        collection = str((op.target or {}).get("collection") or "").strip()
+        if not isinstance(plan, dict) or not isinstance(plan.get(collection), list):
+            raise KeyError(f"narrative collection not found: {collection}")
+        location = _narrative_node_location(plan[collection], node_id)
+        if location is None or location[1] is None or location[2] is None:
+            raise KeyError(f"narrative node not found: {collection}/{node_id}")
+        _node, parent_list, index = location
+        parent_list.pop(index)
+        return ScreenplayDocument.model_validate(data), [
+            f"narrative:{collection}:{node_id}"
+        ]
     if kind in {"screenplay_scene", "scene"}:
         before = len(data.get("scene_blocks") or [])
         data["scene_blocks"] = [
@@ -426,6 +546,21 @@ def _structure_op(doc: ScreenplayDocument, op: PatchOperation) -> tuple[Screenpl
         data = copy.deepcopy(doc.model_dump(mode="json"))
         node_id = str((op.target or {}).get("id") or "")
         to_index = int((op.target or {}).get("to_index") or 0)
+        if (op.target or {}).get("kind") == "narrative_node":
+            plan = data.get("narrative_plan")
+            collection = str((op.target or {}).get("collection") or "").strip()
+            if not isinstance(plan, dict) or not isinstance(plan.get(collection), list):
+                raise KeyError(f"narrative collection not found: {collection}")
+            location = _narrative_node_location(plan[collection], node_id)
+            if location is None or location[1] is None or location[2] is None:
+                raise KeyError(f"narrative node not found: {collection}/{node_id}")
+            node, parent_list, index = location
+            parent_list.pop(index)
+            to_index = max(0, min(len(parent_list), to_index))
+            parent_list.insert(to_index, node)
+            return ScreenplayDocument.model_validate(data), [
+                f"narrative:{collection}:{node_id}"
+            ]
         blocks = data.get("scene_blocks") or []
         idx = next((i for i, b in enumerate(blocks) if b.get("scene_id") == node_id), -1)
         if idx < 0:

@@ -26,6 +26,7 @@ from app.continuity import (
     sync_shot_continuity_fields,
     action_capacity_limit,
     count_sequential_action_beats,
+    narrative_action_capacity_profile,
     split_sequential_action_text,
     dialogue_focus_subject,
     dialogue_framing_errors,
@@ -42,9 +43,9 @@ from app.spoken_contract import (
     synchronize_spoken_contract,
     validate_spoken_contract,
 )
-from app.schemas import (Bible, EpisodeScreenplay, InformationItem, Shot, Storyboard,
-                         StoryboardOutline, StoryEvent, SHOT_SIZES, CAMERA_MOVES, TRANSITIONS,
-                         CONTINUITY_MODES, DELIVERY_OWNERS)
+from app.schemas import (Bible, EpisodeScreenplay, InformationItem, NarrativeContinuityPlan,
+                         Shot, Storyboard, StoryboardOutline, StoryEvent, SHOT_SIZES,
+                         CAMERA_MOVES, TRANSITIONS, CONTINUITY_MODES, DELIVERY_OWNERS)
 from app.scene_contract import (
     compose_scene_setting,
     scene_name_of,
@@ -284,10 +285,26 @@ def normalize_action_desc(text: str | None) -> str:
         normalized = cleaned
 
 
+def _shot_capacity_budget_total(shot: Shot) -> float:
+    """Return the open-dimensional viewing work assigned to one ShotTask."""
+    budget = getattr(shot, "capacity_budget", None)
+    if budget is None:
+        return 0.0
+    return sum(
+        float(value or 0.0)
+        for field, value in budget.model_dump().items()
+        if field != "other_reason" and isinstance(value, (int, float))
+    )
+
+
 def validate_storyboard(
     board: Storyboard,
     bible: Bible,
     target_duration_s: int,
+    *,
+    narrative_authority: bool = False,
+    narrative_plan: NarrativeContinuityPlan | None = None,
+    screenplay: EpisodeScreenplay | None = None,
 ) -> list[str]:
     errors: list[str] = []
     shots = board.shots
@@ -299,6 +316,64 @@ def validate_storyboard(
     errors.extend(validate_storyboard_scenes(board, bible))
 
     bible_names = {c.name for c in bible.characters}
+    narrative_character_ids: set[str] = set()
+    narrative_actions: dict[str, Any] = {}
+    identity_resolver = None
+    if narrative_authority and narrative_plan is not None:
+        narrative_actions = {
+            action.action_id: action for action in narrative_plan.atomic_actions
+        }
+        narrative_character_ids.update(
+            character_id
+            for action in narrative_plan.atomic_actions
+            for character_id in [*action.actor_ids, *action.target_ids]
+            if character_id
+        )
+        narrative_character_ids.update(
+            entity_id
+            for proposition in narrative_plan.propositions
+            for entity_id in proposition.entity_ids
+            if entity_id
+        )
+        narrative_character_ids.update(
+            fact.subject_id
+            for fact in narrative_plan.state_facts
+            if fact.subject_id
+        )
+        narrative_character_ids.update(
+            state.character_id
+            for state in narrative_plan.character_states
+            if state.character_id
+        )
+        narrative_character_ids.update(
+            belief.character_id
+            for belief in narrative_plan.character_beliefs
+            if belief.character_id
+        )
+        narrative_character_ids.update(
+            scene.point_of_view_character_id
+            for scene in narrative_plan.scene_contracts
+            if scene.point_of_view_character_id
+        )
+        # Bible identities remain valid presentation aliases; every additional
+        # identity must come from the authority graph rather than a canned role
+        # vocabulary.
+        narrative_character_ids.update(bible_names)
+        from app.identity_contracts import (
+            IdentityContractError,
+            narrative_identity_resolver,
+        )
+
+        if screenplay is None or screenplay.narrative_plan is not narrative_plan:
+            errors.append(
+                "[NARRATIVE_IDENTITY_AUTHORITY_MISSING] narrative 分镜校验必须提供"
+                "同一已发布 EpisodeScreenplay，禁止只用孤立 graph 推断身份政策"
+            )
+        else:
+            try:
+                identity_resolver = narrative_identity_resolver(bible, screenplay)
+            except IdentityContractError as exc:
+                errors.append(f"[NARRATIVE_IDENTITY_CONTRACT_INVALID] {exc}")
 
     beat_unit = config.VIDEO_DURATION_MIN_S
     if target_duration_s % beat_unit != 0:
@@ -309,7 +384,12 @@ def validate_storyboard(
 
     scene_last_seen: dict[str, int] = {}
     for i, shot in enumerate(shots):
-        shot.action_desc = normalize_action_desc(shot.action_desc)
+        # The historical cleanup below recognizes one Chinese template token.
+        # It is safe only for legacy, contract-less boards.  A narrative board
+        # carries AI-authored atomic-action identity and must never be rewritten
+        # by vocabulary heuristics before graph validation.
+        if not narrative_authority:
+            shot.action_desc = normalize_action_desc(shot.action_desc)
         tag = f"shots[{i}](shot_no={shot.shot_no})"
         # V2 时长合法取值
         if shot.duration_s not in config.ALLOWED_DURATIONS:
@@ -317,16 +397,27 @@ def validate_storyboard(
                 f"{tag}.duration_s={shot.duration_s}，必须由模型按本镜动作与口播判断为 "
                 f"{config.VIDEO_DURATION_MIN_S}~{config.VIDEO_DURATION_MAX_S}s 的整数")
         spoken_for_dur = spoken_chars_from_shot(shot)
-        action_beats_for_dur = count_sequential_action_beats(
-            (shot.primary_action or shot.action_desc or "").strip()
-        )
+        if narrative_authority:
+            action_beats_for_dur, action_min_s, _contract_errors = (
+                narrative_action_capacity_profile(shot, narrative_plan)
+            )
+            narrative_viewing_min_s = max(
+                action_min_s,
+                _shot_capacity_budget_total(shot),
+            )
+        else:
+            action_beats_for_dur = count_sequential_action_beats(
+                (shot.primary_action or shot.action_desc or "").strip()
+            )
+            action_min_s = 0.0
         if HUMAN_DURATION_REVIEW_TAG not in (shot.risk_tags or []):
-            errors.extend(duration_gt5_errors(
-                shot_no=shot.shot_no,
-                duration_s=shot.duration_s,
-                spoken_chars=spoken_for_dur,
-                action_beats=action_beats_for_dur,
-            ))
+            if not narrative_authority or narrative_viewing_min_s <= PREFERRED_SHOT_DURATION_S:
+                errors.extend(duration_gt5_errors(
+                    shot_no=shot.shot_no,
+                    duration_s=shot.duration_s,
+                    spoken_chars=spoken_for_dur,
+                    action_beats=action_beats_for_dur,
+                ))
         if (
             int(shot.duration_s or 0) > PREFERRED_SHOT_DURATION_S
             and not shot_duration_should_prefer_five(
@@ -353,14 +444,16 @@ def validate_storyboard(
             errors.append(
                 f"{tag}.source_excerpt 仅 {source_len} 字；每个分镜必须带对应小说原文摘录，"
                 f"请从本集原文中逐字摘录至少 {SOURCE_EXCERPT_MIN_CHARS} 字作为上游改编证据与审核追溯，不得送入 Seedance")
-        errors.extend(overdetail_errors(shot.action_desc, f"{tag}.action_desc"))
-        errors.extend(overdetail_errors(shot.first_frame_desc, f"{tag}.first_frame_desc"))
-        errors.extend(overdetail_errors(shot.last_frame_desc, f"{tag}.last_frame_desc"))
-        cut_markers = _explicit_cut_markers(shot.action_desc)
-        if cut_markers:
-            errors.append(
-                f"{tag}.action_desc 出现多镜头/快切标记 {cut_markers}；单镜只拍一个连贯动作，"
-                "请删掉切镜/闪回/分屏等跳切，把多余剧情拆到相邻镜或写入画面动作")
+        if not narrative_authority:
+            errors.extend(overdetail_errors(shot.action_desc, f"{tag}.action_desc"))
+            errors.extend(overdetail_errors(shot.first_frame_desc, f"{tag}.first_frame_desc"))
+            errors.extend(overdetail_errors(shot.last_frame_desc, f"{tag}.last_frame_desc"))
+        if not narrative_authority:
+            cut_markers = _explicit_cut_markers(shot.action_desc)
+            if cut_markers:
+                errors.append(
+                    f"{tag}.action_desc 出现多镜头/快切标记 {cut_markers}；单镜只拍一个连贯动作，"
+                    "请删掉切镜/闪回/分屏等跳切，把多余剧情拆到相邻镜或写入画面动作")
         # 首尾帧：必须填写且明显不同（否则生成的首图/尾图一模一样、视频没有动作）
         ff = (shot.first_frame_desc or "").strip()
         lf = (shot.last_frame_desc or "").strip()
@@ -368,15 +461,22 @@ def validate_storyboard(
             errors.append(f"{tag}.first_frame_desc 太短或缺失；请写本镜【开始】的静止画面（动作发生前，25~50字）")
         if len(lf) < 10:
             errors.append(f"{tag}.last_frame_desc 太短或缺失；请写本镜【结束】的静止画面（动作完成后，25~50字）")
-        if ff and lf and _too_similar(ff, lf):
+        if not narrative_authority and ff and lf and _too_similar(ff, lf):
             errors.append(
                 f"{tag} 首帧与尾帧画面描述几乎相同；二者必须明显不同（动作前 vs 动作后，体现姿态/表情/手部/道具的可见变化），"
                 "否则首图尾图会一模一样、视频没有动作")
-        errors.extend(action_capacity_errors(shot))
+        errors.extend(action_capacity_errors(
+            shot,
+            narrative_authority=narrative_authority,
+            narrative_plan=narrative_plan,
+        ))
         # 口播容量只在 speech_capacity_errors 里实现一次；此处曾重复计算同一规则，
         # 导致同一根因在确认门输出两条不同文案（VAL-422 根因 R5）。
         errors.extend(speech_capacity_errors(shot))
-        errors.extend(dialogue_framing_errors(shot))
+        errors.extend(dialogue_framing_errors(
+            shot,
+            narrative_authority=narrative_authority,
+        ))
         # 同一镜头只能有一套有效口播：dialogues 与 audio_timeline 分叉即 blocker。
         errors.extend(spoken_contract_coherence_errors(shot))
         # 产品合同：禁止一切旁白/内心OS；信息由真实台词或画面动作承载。
@@ -387,7 +487,7 @@ def validate_storyboard(
                 "改用 dialogues 真实台词或 action_desc 画面动作")
         errors.extend(shot_id_space_errors(shot))
         # V4 角色合法性
-        if not shot.characters:
+        if not shot.characters and not narrative_authority:
             errors.append(
                 f"{tag}.characters 为空；每个视频段至少包含 1 个画面角色，"
                 "可以是角色圣经成员或功能性路人"
@@ -398,7 +498,16 @@ def validate_storyboard(
                 "请减少画面角色或拆到相邻镜，禁止群戏调度"
             )
         for name in shot.characters:
-            if not is_allowed_storyboard_character(name, bible_names):
+            if narrative_authority:
+                try:
+                    if identity_resolver is None:
+                        raise IdentityContractError("身份解析器不可用")
+                    identity_resolver.resolve(name, usage="visual")
+                except IdentityContractError as exc:
+                    errors.append(
+                        f"[NARRATIVE_CHARACTER_REF_MISSING] {tag}.characters 含「{name}」：{exc}"
+                    )
+            elif not narrative_authority and not is_allowed_storyboard_character(name, bible_names):
                 errors.append(
                     f"{tag}.characters 含「{name}」，既不在角色圣经中，也不是允许的功能性路人标签；"
                     f"圣经角色为：{'/'.join(sorted(bible_names))}。无姓名群演请使用测验员、守卫、"
@@ -409,9 +518,93 @@ def validate_storyboard(
         # 中检查，防止旧合同绕过 characters 校验后在编译阶段爆炸。
         # 空的 characters_visible 会在渲染时合法回退到 characters，
         # 这里只校验“显式扩展合同”，避免同一 legacy 错误重复报两次。
+        task_actor_ids = {
+            actor_id
+            for action_id in [
+                *([shot.primary_action_id] if shot.primary_action_id else []),
+                *(shot.supporting_action_ids or []),
+            ]
+            for action in [narrative_actions.get(action_id)]
+            if action is not None
+            for actor_id in action.actor_ids
+        }
+        task_target_ids = {
+            target_id
+            for action_id in [
+                *([shot.primary_action_id] if shot.primary_action_id else []),
+                *(shot.supporting_action_ids or []),
+            ]
+            for action in [narrative_actions.get(action_id)]
+            if action is not None
+            for target_id in action.target_ids
+        }
+        delivered_actor_ids = {
+            *shot.characters,
+            *(shot.characters_visible or []),
+            *(shot.visible_entity_ids or []),
+            *(shot.audio_cast or []),
+            *(
+                (dialogue.speaker or "").strip()
+                for dialogue in (shot.dialogues or [])
+                if (dialogue.speaker or "").strip()
+            ),
+            *(shot.offscreen_action_actor_ids or []),
+        }
+        delivered_target_ids = {
+            *shot.characters,
+            *(shot.characters_visible or []),
+            *(shot.visible_entity_ids or []),
+            *(shot.audio_cast or []),
+            *(shot.offscreen_action_target_ids or []),
+        }
+        missing_task_actors = task_actor_ids - delivered_actor_ids
+        if narrative_authority and missing_task_actors:
+            errors.append(
+                f"[NARRATIVE_ACTION_ACTOR_UNDELIVERED] {tag} 执行者 "
+                f"{sorted(missing_task_actors)} 既未可见/可听，也未通过 "
+                "offscreen_action_actor_ids 显式声明画外交付"
+            )
+        invalid_offscreen_actors = set(shot.offscreen_action_actor_ids or []) - task_actor_ids
+        if narrative_authority and invalid_offscreen_actors:
+            errors.append(
+                f"[NARRATIVE_OFFSCREEN_ACTOR_INVALID] {tag}.offscreen_action_actor_ids "
+                f"含非本镜绑定动作执行者 {sorted(invalid_offscreen_actors)}"
+            )
+        missing_task_targets = task_target_ids - delivered_target_ids
+        if narrative_authority and missing_task_targets:
+            errors.append(
+                f"[NARRATIVE_ACTION_TARGET_UNDELIVERED] {tag} 作用对象 "
+                f"{sorted(missing_task_targets)} 既未可见/可听，也未通过 "
+                "offscreen_action_target_ids 显式声明画外交付"
+            )
+        invalid_offscreen_targets = (
+            set(shot.offscreen_action_target_ids or []) - task_target_ids
+        )
+        if narrative_authority and invalid_offscreen_targets:
+            errors.append(
+                f"[NARRATIVE_OFFSCREEN_TARGET_INVALID] {tag}.offscreen_action_target_ids "
+                f"含非本镜绑定动作作用对象 {sorted(invalid_offscreen_targets)}"
+            )
+
+        for entity_id in shot.visible_entity_ids or []:
+            if narrative_authority and entity_id not in narrative_character_ids:
+                errors.append(
+                    f"[NARRATIVE_ENTITY_REF_MISSING] {tag}.visible_entity_ids 含"
+                    f"权威图未定义的实体「{entity_id}」"
+                )
+
         declared_visible = list(shot.characters_visible or [])
         for name in declared_visible:
-            if not is_allowed_storyboard_character(name, bible_names):
+            if narrative_authority:
+                try:
+                    if identity_resolver is None:
+                        raise IdentityContractError("身份解析器不可用")
+                    identity_resolver.resolve(name, usage="visual")
+                except IdentityContractError as exc:
+                    errors.append(
+                        f"[NARRATIVE_CHARACTER_REF_MISSING] {tag}.characters_visible 含「{name}」：{exc}"
+                    )
+            elif not narrative_authority and not is_allowed_storyboard_character(name, bible_names):
                 errors.append(
                     f"{tag}.characters_visible 含「{name}」，既不在角色圣经中，"
                     "也不是允许的功能性路人或群体标签；请同步镜头角色合同"
@@ -433,7 +626,16 @@ def validate_storyboard(
             if (dialogue.speaker or "").strip()
         )
         for name in dict.fromkeys(contract_speakers):
-            if not is_allowed_storyboard_character(name, bible_names):
+            if narrative_authority:
+                try:
+                    if identity_resolver is None:
+                        raise IdentityContractError("身份解析器不可用")
+                    identity_resolver.resolve(name, usage="voice")
+                except IdentityContractError as exc:
+                    errors.append(
+                        f"[NARRATIVE_SPEAKER_REF_MISSING] {tag}.声轨角色「{name}」：{exc}"
+                    )
+            elif not narrative_authority and not is_allowed_storyboard_character(name, bible_names):
                 errors.append(
                     f"{tag}.声轨角色「{name}」既不在角色圣经中，"
                     "也不是允许的功能性路人或群体标签"
@@ -441,31 +643,48 @@ def validate_storyboard(
         for role in shot.reference_roles or []:
             prefix, separator, name = str(role or "").partition(":")
             if separator and prefix in {"character_identity", "collective_group"}:
-                if not is_allowed_storyboard_character(name, bible_names):
+                if narrative_authority:
+                    try:
+                        if identity_resolver is None:
+                            raise IdentityContractError("身份解析器不可用")
+                        identity = identity_resolver.resolve(name, usage="visual")
+                        if (prefix == "collective_group") != identity.is_collective:
+                            raise IdentityContractError(
+                                f"reference role={prefix} 与 visual_policy={identity.visual_policy} 不一致"
+                            )
+                    except IdentityContractError as exc:
+                        errors.append(
+                            f"[NARRATIVE_REFERENCE_ROLE_MISSING] {tag}.reference_roles 引用「{name}」：{exc}"
+                        )
+                elif not narrative_authority and not is_allowed_storyboard_character(name, bible_names):
                     errors.append(
                         f"{tag}.reference_roles 残留非法角色「{name}」；"
                         "请重建角色参考合同"
                     )
         named_mentions = [name for name in shot.characters if name in shot.action_desc]
-        if shot.characters and not named_mentions:
+        if shot.characters and not named_mentions and not narrative_authority:
             errors.append(
                 f"{tag}.action_desc 未出现本镜头角色名；必须用 characters 中的准确姓名"
                 "（角色圣经成员或功能性路人标签）写人物动作，不要只写他/她/纸张/镜头/场景")
         visual_text = "".join(
             (shot.action_desc or "", shot.first_frame_desc or "", shot.last_frame_desc or "")
         )
-        focus_subject = dialogue_focus_subject(shot)
-        if focus_subject and not dialogue_two_shot_required(shot):
-            for other_name in sorted(bible_names - {focus_subject}):
-                if other_name not in visual_text:
-                    continue
-                if _named_character_is_explicitly_offscreen(other_name, visual_text):
-                    continue
-                errors.append(
-                    f"{tag} 是「{focus_subject}」的单人对白近景，但 action_desc/首尾帧仍把"
-                    f"「{other_name}」写进可见画面；请把听者明确留在画外，下一话轮再切反打"
-                )
-        for name in (item for item in shot.characters if is_functional_extra(item)):
+        if not narrative_authority:
+            focus_subject = dialogue_focus_subject(shot)
+            if focus_subject and not dialogue_two_shot_required(shot):
+                for other_name in sorted(bible_names - {focus_subject}):
+                    if other_name not in visual_text:
+                        continue
+                    if _named_character_is_explicitly_offscreen(other_name, visual_text):
+                        continue
+                    errors.append(
+                        f"{tag} 是「{focus_subject}」的单人对白近景，但 action_desc/首尾帧仍把"
+                        f"「{other_name}」写进可见画面；请把听者明确留在画外，下一话轮再切反打"
+                    )
+        for name in (
+            item for item in shot.characters
+            if not narrative_authority and is_functional_extra(item)
+        ):
             if name not in visual_text:
                 errors.append(
                     f"{tag}.characters 中的功能性路人「{name}」未在 action_desc/首尾帧中明确入画；"
@@ -500,7 +719,11 @@ def validate_storyboard(
         # V6+ 连贯性：使用 continuity_mode 表达“是否使用上一镜尾帧”，不再把同场景布尔等同动作连续。
         # 始终 sync：无 prev 时会降级 action_continuation，与 derive_continuity_mode / 入队门禁一致。
         prev_for_mode = shots[i - 1] if i > 0 else None
-        mode = sync_shot_continuity_fields(shot, prev_for_mode)
+        mode = (
+            (shot.continuity_mode or "").strip()
+            if narrative_authority
+            else sync_shot_continuity_fields(shot, prev_for_mode)
+        )
         if mode not in CONTINUITY_MODES:
             errors.append(f"{tag}.continuity_mode=「{mode}」不在 {sorted(CONTINUITY_MODES)}")
         if i == 0:
@@ -523,7 +746,7 @@ def validate_storyboard(
             if mode == "action_continuation":
                 if shot.transition != "硬切":
                     errors.append(f"{tag}.transition=「{shot.transition}」，action_continuation 必须使用「硬切」")
-                if not shared_chars and not _has_movement_cue(
+                if not narrative_authority and not shared_chars and not _has_movement_cue(
                     prev.action_desc, prev.narration, shot.action_desc, shot.narration
                 ):
                     errors.append(
@@ -558,7 +781,7 @@ def validate_storyboard(
                 # ① 含时间/线索类承接词；② action/state_in/首帧写了人物移动；
                 # ③ 同一片连续空间子区域移动；④ 时间明确变化；⑤ 切到另一组人物；
                 # ⑥ 远/全景重新建场。只保留“同人物同时间突然跳到无关地点”的高置信度告警。
-                move_explained = (
+                move_explained = narrative_authority or (
                     _has_transition_hint(scene, shot.action_desc, shot.narration, dialogue_text)
                     or _has_movement_cue(shot.action_desc, shot.narration)
                     or _has_transition_hint(shot.state_in, shot.first_frame_desc)
@@ -579,7 +802,10 @@ def validate_storyboard(
         errors.append(f"shot_no 必须为连续递增 1..{len(shots)}，当前为 {actual}")
 
     errors.extend(adjacent_spoken_repeat_errors(board))
-    errors.extend(state_chain_errors(board))
+    errors.extend(state_chain_errors(
+        board,
+        narrative_authority=narrative_authority,
+    ))
     errors.extend(shot_count_budget_errors(len(shots), context="分镜"))
 
     return errors
@@ -1788,7 +2014,11 @@ def normalize_screenplay_candidate(script: EpisodeScreenplay) -> EpisodeScreenpl
     return normalized
 
 
-def validate_plot_spine(script: EpisodeScreenplay) -> list[str]:
+def validate_plot_spine(
+    script: EpisodeScreenplay,
+    *,
+    narrative_authority: bool = False,
+) -> list[str]:
     """先校验主线骨架，再允许正文通过（Renderability First）。"""
     errors: list[str] = []
     spine = script.plot_spine
@@ -1825,8 +2055,9 @@ def validate_plot_spine(script: EpisodeScreenplay) -> list[str]:
             errors.append(f"{tag}.turn 过短；请写局势变化")
         if beat.must_keep:
             must_keep_count += 1
-        errors.extend(overdetail_errors(
-            f"{beat.who}{beat.does}{beat.turn}", tag))
+        if not narrative_authority:
+            errors.extend(overdetail_errors(
+                f"{beat.who}{beat.does}{beat.turn}", tag))
     if beats and must_keep_count < 3:
         errors.append(
             f"plot_spine 中 must_keep=true 仅 {must_keep_count} 条；主线因果至少保留 3 条必拍节拍"
@@ -1909,6 +2140,16 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
                         required_dialogue_lines: list[str] | None = None) -> list[str]:
     """纯 QA：只读取候选并返回问题，不补字段、不覆盖投影、不修改输入。"""
     errors: list[str] = []
+    narrative_authority = script.narrative_plan is not None
+    if narrative_authority:
+        from app.narrative import validate_screenplay_narrative
+
+        errors.extend(validate_screenplay_narrative(
+            script,
+            require=True,
+            source_text=source_text,
+            expected_scope_id=str(script.id) if script.id else None,
+        ))
     errors.extend(validate_dialogue_chains(
         script, source_text=source_text, required=require_dialogue_chains,
         required_dialogue_lines=required_dialogue_lines,
@@ -1917,7 +2158,10 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         errors.append(f"episode_no={script.episode_no}，必须等于 {episode_no}")
     if (script.mode or "full_script") != "full_script":
         errors.append(f"mode=「{script.mode}」非法；剧本台仅支持 full_script")
-    errors.extend(validate_plot_spine(script))
+    errors.extend(validate_plot_spine(
+        script,
+        narrative_authority=narrative_authority,
+    ))
     if len((script.title or "").strip()) < 2:
         errors.append("title 过短或缺失；请填写本集标题")
     if len((script.logline or "").strip()) < 8:
@@ -1931,6 +2175,27 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
             f"{SCENE_OUTLINE_MIN}~{SCENE_OUTLINE_MAX} 场连续场次结构"
         )
     bible_names = {c.name for c in bible.characters}
+    narrative_character_ids = set(bible_names)
+    if script.narrative_plan is not None:
+        narrative_character_ids.update(
+            actor_id
+            for action in script.narrative_plan.atomic_actions
+            for actor_id in action.actor_ids
+            if actor_id
+        )
+        narrative_character_ids.update(
+            state.character_id
+            for state in script.narrative_plan.character_states
+            if state.character_id
+        )
+        narrative_character_ids.update(
+            belief.character_id
+            for belief in script.narrative_plan.character_beliefs
+            if belief.character_id
+        )
+        narrative_character_ids.update(
+            voice.speaker_id for voice in script.voice_bible if voice.speaker_id
+        )
     for i, scene in enumerate(scenes, start=1):
         heading = (scene.scene_heading or "").strip()
         tag = f"scene_outline 第{i}场" + (f"「{heading}」" if heading else "")
@@ -1948,14 +2213,20 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
             errors.append(f"{tag}.source_basis 过短；请保留本场原文依据")
         if not scene.characters:
             errors.append(f"{tag}.characters 不能为空；请写本场实际参与角色")
-        unknown = [
-            name for name in scene.characters
-            if name not in bible_names and not is_functional_extra(name)
-        ]
-        if bible_names and unknown:
-            errors.append(f"{tag}.characters 含角色圣经外角色：{unknown}")
-        errors.extend(overdetail_errors(
-            f"{scene.summary}{scene.conflict}{scene.turn}", tag))
+        unknown = (
+            [name for name in scene.characters if name not in narrative_character_ids]
+            if narrative_authority
+            else [
+                name for name in scene.characters
+                if name not in bible_names and not is_functional_extra(name)
+            ]
+        )
+        if unknown and (narrative_authority or bible_names):
+            contract_name = "叙事权威图" if narrative_authority else "角色圣经"
+            errors.append(f"{tag}.characters 含{contract_name}外角色：{unknown}")
+        if not narrative_authority:
+            errors.extend(overdetail_errors(
+                f"{scene.summary}{scene.conflict}{scene.turn}", tag))
     full_text = (script.full_script_text or "").strip()
     spine_n = len((script.plot_spine.spine_beats if script.plot_spine else None) or [])
     min_script_chars = max(160, spine_n * 36 if spine_n else max(160, expected_beats * 30))
@@ -1975,7 +2246,8 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         script,
         action_text=action_text,
     ))
-    errors.extend(overdetail_errors(action_text, "full_script_text"))
+    if not narrative_authority:
+        errors.extend(overdetail_errors(action_text, "full_script_text"))
     for term in FULL_SCRIPT_FORBIDDEN_TERMS:
         if term in full_text:
             errors.append(f"full_script_text 含禁用词「{term}」；剧本台正文不能写拍卡/分镜/执行语言")
@@ -1993,20 +2265,29 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
     ]
     if len(dialogue_lines) < 2:
         errors.append("full_script_text 对白行过少；请按“角色名：台词”写出真正可演的对白")
-    if bible_names:
+    if bible_names or narrative_authority:
         offbible_speakers = sorted({
             speaker
             for speaker in screenplay_speaker_names(full_text)
             if speaker != "旁白"
-            and speaker not in bible_names
-            and not is_functional_extra(speaker)
+            and (
+                speaker not in narrative_character_ids
+                if narrative_authority
+                else speaker not in bible_names and not is_functional_extra(speaker)
+            )
         })
         if offbible_speakers:
-            errors.append(
-                "full_script_text 含未进入人物谱的具名说话人："
-                f"{offbible_speakers}；重要具名角色必须先由人物发现步骤补进人物谱，"
-                "无需定妆的临时角色请改用测验员/守卫/围观者等功能性身份标签"
-            )
+            if narrative_authority:
+                errors.append(
+                    "full_script_text 含未受叙事权威图/voice_bible 定义的说话人："
+                    f"{offbible_speakers}；请根据来源证据与戏剧职责补全身份合同"
+                )
+            else:
+                errors.append(
+                    "full_script_text 含未进入人物谱的具名说话人："
+                    f"{offbible_speakers}；重要具名角色必须先由人物发现步骤补进人物谱，"
+                    "无需定妆的临时角色请改用功能性身份标签"
+                )
     if len((script.emotional_curve or "").strip()) < 6:
         errors.append("emotional_curve 过短或缺失；请说明本集情绪推进")
     ending_hook = (script.ending_hook or "").strip()
@@ -2029,23 +2310,34 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         errors.append(
             f"key_lines 仅 {len(key_lines)} 条；请保留至少 {MIN_KEY_LINES} 条推动主线的台词")
     bible_names = {c.name for c in bible.characters}
-    if bible_names:
+    if bible_names or narrative_authority:
         non_bible_key_lines = []
         for ln in key_lines:
             speaker = _speaker_name(ln)
             if not speaker:
                 continue
-            if speaker not in bible_names and not is_functional_extra(speaker):
+            invalid_speaker = (
+                speaker not in narrative_character_ids
+                if narrative_authority
+                else speaker not in bible_names and not is_functional_extra(speaker)
+            )
+            if invalid_speaker:
                 non_bible_key_lines.append(ln)
         if non_bible_key_lines:
             shown = "；".join(non_bible_key_lines[:KEY_CONTENT_MAX_REPORT])
             extra = (f"（另有 {len(non_bible_key_lines) - KEY_CONTENT_MAX_REPORT} 条从略）"
                      if len(non_bible_key_lines) > KEY_CONTENT_MAX_REPORT else "")
-            errors.append(
-                f"key_lines 有 {len(non_bible_key_lines)} 条含非人物谱角色台词：{shown}{extra}"
-                f"；key_lines 只能保留角色圣经角色（{'、'.join(sorted(bible_names))}）的台词，"
-                "测验员/守卫等功能性角色可作为对白链触发者进入 key_lines；旁白不得进入；"
-                "其他具名角色必须先补进人物谱")
+            if narrative_authority:
+                errors.append(
+                    f"key_lines 有 {len(non_bible_key_lines)} 条含未受叙事权威图/voice_bible "
+                    f"定义的说话人：{shown}{extra}"
+                )
+            else:
+                errors.append(
+                    f"key_lines 有 {len(non_bible_key_lines)} 条含非人物谱角色台词：{shown}{extra}"
+                    f"；key_lines 只能保留角色圣经角色（{'、'.join(sorted(bible_names))}）的台词，"
+                    "功能性角色可作为对白链触发者进入 key_lines；旁白不得进入；"
+                    "其他具名角色必须先补进人物谱")
     # 主线台词只能由真正的“角色名：台词”行交付。旧校验拿整个 full_script_text
     # 当 haystack，导致模型把台词抄进动作描述/梗概也能通过，页面看得到 key_lines
     # 清单，角色却从未开口。
@@ -2146,8 +2438,9 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         for field in ("state_in", "visible_change", "state_out"):
             if len((getattr(event, field, "") or "").strip()) < 4:
                 errors.append(f"{tag}.{field} 缺失或过短；事件必须写清状态输入、可见变化和状态输出")
-        errors.extend(overdetail_errors(
-            f"{event.visible_change}{event.state_in}{event.state_out}", tag))
+        if not narrative_authority:
+            errors.extend(overdetail_errors(
+                f"{event.visible_change}{event.state_in}{event.state_out}", tag))
     info_ids: set[str] = set()
     if not script.information_ledger:
         errors.append("information_ledger 不能为空；必须为观众需要获得的剧情信息建立中文交付台账")
@@ -2256,6 +2549,14 @@ def validate_storyboard_preserves_key_content(board: Storyboard,
     这里看"剧本里那几句金句/那几个关键反转有没有真的落到镜头里"，专治"重要台词/剧情被静默丢弃"。
     务实优先：用模糊匹配只拦【明显丢失】，命中即放行；剧本未声明清单时（旧数据/兜底）直接放行。
     """
+    # A narrative contract has stable action/event/fact/target-delta ownership
+    # and a complete audience hand-off graph.  Text overlap against key-line or
+    # plot-point prose is a legacy migration aid only; using it here would make
+    # a valid semantic paraphrase fail on a fixed vocabulary threshold.  The
+    # narrative graph gate is fail-closed and is invoked by every modern caller.
+    if screenplay.narrative_plan is not None:
+        return []
+
     errors: list[str] = []
     shots = board.shots
     if not shots:
@@ -2604,6 +2905,7 @@ def validate_spine_delivery_ledger(
 def validate_storyboard_shot_covers_outline(
     shot: Shot, covers: str, shot_no: int,
     *, prior_text: str = "", later_planned_covers: str = "",
+    narrative_authority: bool = False,
 ) -> list[str]:
     """逐镜填充阶段校验：大纲声明本镜要落实的 covers，必须真的进入本镜文本。
 
@@ -2619,6 +2921,13 @@ def validate_storyboard_shot_covers_outline(
     - 向前承接：该原子已在前序已通过镜头（prior_text）里体现；
     - 向后承接：大纲把同一事实也排给了后续镜头（later_planned_covers），留给后面拍。
     """
+    # The authority path compares the typed outline task to the shot and then
+    # validates the full narrative graph.  ``covers`` is free prose retained
+    # for readers, so atomising it and applying synonym tables would be a
+    # language-specific second source of truth.
+    if narrative_authority:
+        return []
+
     atoms = _atomize_claim(covers)
     if not atoms:
         return []
@@ -2915,6 +3224,26 @@ def split_outline_on_speaker_changes(
 _ACTION_CAPACITY_SPLIT_MARKER = "动作容量拆分"
 
 
+def narrative_outline_action_capacity_errors(
+    outline: StoryboardOutline,
+    narrative_plan: NarrativeContinuityPlan | None,
+) -> list[str]:
+    """Validate outline ShotTasks from AtomicAction structure, never prose.
+
+    This is the authority-path counterpart of the legacy deterministic
+    splitter.  It reports an invalid allocation for semantic AI repair instead
+    of rewriting IDs/state ownership after the fact.
+    """
+    errors: list[str] = []
+    for shot in outline.shots or []:
+        errors.extend(action_capacity_errors(
+            shot,  # StoryboardOutlineShot exposes the same narrative task fields.
+            narrative_authority=True,
+            narrative_plan=narrative_plan,
+        ))
+    return list(dict.fromkeys(errors))
+
+
 def _outline_action_candidate(shot: Any) -> tuple[str, int, int]:
     """Choose the outline field that exposes the richest action sequence."""
     candidates = [
@@ -2958,6 +3287,8 @@ def split_outline_over_action_capacity(
     max_shots: int,
     shot_nos: set[int] | None = None,
     force: bool = False,
+    narrative_authority: bool = False,
+    narrative_plan: NarrativeContinuityPlan | None = None,
 ) -> list[dict]:
     """Split action-heavy outline nodes before per-shot generation.
 
@@ -2969,6 +3300,16 @@ def split_outline_over_action_capacity(
     router after a detailed shot expands beyond its compact outline wording.
     """
     from app.schemas import StoryboardOutlineShot
+
+    if narrative_authority:
+        # The authority graph owns action identity, state effects and legal
+        # phase boundaries.  A text splitter cannot safely manufacture a new
+        # ShotTask, so semantic repair consumes
+        # narrative_outline_action_capacity_errors() and proposes a complete
+        # candidate allocation instead.  ``narrative_plan`` is accepted here
+        # to make accidental authority-path calls explicit and auditable.
+        _ = narrative_plan
+        return []
 
     if not outline.shots or len(outline.shots) >= max_shots:
         return []
@@ -3297,10 +3638,18 @@ def validate_storyboard_continuity_contract(
 ) -> list[str]:
     """PRD 连续性合同校验：状态链、信息台账、单镜动作/口播容量。"""
     errors: list[str] = []
+    narrative_plan = screenplay.narrative_plan if screenplay else None
     for shot in board.shots:
-        errors.extend(action_capacity_errors(shot))
+        errors.extend(action_capacity_errors(
+            shot,
+            narrative_authority=narrative_plan is not None,
+            narrative_plan=narrative_plan,
+        ))
         errors.extend(speech_capacity_errors(shot))
-    errors.extend(state_chain_errors(board))
+    errors.extend(state_chain_errors(
+        board,
+        narrative_authority=narrative_plan is not None,
+    ))
     errors.extend(information_ledger_errors(board, screenplay))
     return errors
 
@@ -3377,14 +3726,37 @@ def _retime_coherent_spoken_timeline(shot: Shot) -> bool:
     return True
 
 
-def prefer_default_shot_durations(board: Storyboard) -> list[dict]:
+def prefer_default_shot_durations(
+    board: Storyboard,
+    *,
+    narrative_authority: bool = False,
+    narrative_plan: NarrativeContinuityPlan | None = None,
+) -> list[dict]:
     """主线压缩：能 5s 讲完的镜压回 5s；仍需 6~10s 的镜打上 AI 审核标记。"""
     changes: list[dict] = []
     for shot in board.shots:
         spoken = spoken_char_count(shot)
-        beats = count_sequential_action_beats(
-            (shot.primary_action or shot.action_desc or "").strip()
-        )
+        if narrative_authority:
+            beats, minimum_s, contract_errors = narrative_action_capacity_profile(
+                shot, narrative_plan,
+            )
+            # Missing/drifted authority data must be reported by the validator;
+            # duration normalization may not guess a safe rewrite.
+            fits_default = (
+                not contract_errors
+                and minimum_s <= PREFERRED_SHOT_DURATION_S
+                and beats <= action_capacity_limit(PREFERRED_SHOT_DURATION_S)
+                and _shot_capacity_budget_total(shot) <= PREFERRED_SHOT_DURATION_S
+                and spoken <= config.max_spoken_chars_for_duration(PREFERRED_SHOT_DURATION_S)
+            )
+        else:
+            beats = count_sequential_action_beats(
+                (shot.primary_action or shot.action_desc or "").strip()
+            )
+            fits_default = shot_duration_should_prefer_five(
+                spoken_chars=spoken,
+                action_beats=beats,
+            )
         tags = list(shot.risk_tags or [])
         if HUMAN_DURATION_REVIEW_TAG in tags:
             if DURATION_REVIEW_RISK_TAG in tags:
@@ -3397,7 +3769,7 @@ def prefer_default_shot_durations(board: Storyboard) -> list[dict]:
                 "reason": "human_duration_review_preserved",
             })
             continue
-        if shot_duration_should_prefer_five(spoken_chars=spoken, action_beats=beats):
+        if fits_default:
             duration_changed = int(shot.duration_s or 0) != PREFERRED_SHOT_DURATION_S
             if duration_changed:
                 changes.append({

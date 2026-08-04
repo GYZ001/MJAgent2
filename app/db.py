@@ -74,6 +74,8 @@ CREATE TABLE IF NOT EXISTS episodes (
     screenplay_snapshot_version INTEGER NOT NULL DEFAULT 0,
     screenplay_constraint_version INTEGER NOT NULL DEFAULT 0,
     storyboard_artifact_id TEXT,
+    narrative_status TEXT NOT NULL DEFAULT 'needs_review',
+    narrative_review_artifact_id TEXT,
     delivery_artifact_id TEXT,
     delivery_status TEXT NOT NULL DEFAULT 'not_ready',
     status TEXT DEFAULT 'planned',
@@ -84,6 +86,7 @@ CREATE TABLE IF NOT EXISTS episodes (
 );
 CREATE TABLE IF NOT EXISTS shots (
     id TEXT PRIMARY KEY,
+    shot_uid TEXT,
     episode_id TEXT NOT NULL,
     script_id TEXT,
     shot_no INTEGER NOT NULL,
@@ -845,6 +848,214 @@ CREATE TABLE IF NOT EXISTS reference_assets (
     FOREIGN KEY(reference_set_id) REFERENCES reference_sets(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_reference_assets_set ON reference_assets(reference_set_id, sort_order);
+
+CREATE TABLE IF NOT EXISTS provider_video_capability_snapshots (
+    id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    region TEXT NOT NULL DEFAULT '',
+    gateway TEXT NOT NULL DEFAULT '',
+    api_version TEXT NOT NULL DEFAULT '',
+    capabilities_json TEXT NOT NULL,
+    probe_time REAL NOT NULL,
+    probe_task_id TEXT,
+    probe_result TEXT NOT NULL DEFAULT 'unverified',
+    technical_success INTEGER NOT NULL DEFAULT 0,
+    semantic_continuation_success INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_video_capability_lookup
+    ON provider_video_capability_snapshots(provider, model, probe_time DESC);
+
+CREATE TABLE IF NOT EXISTS episode_video_generation_plans (
+    id TEXT PRIMARY KEY,
+    episode_id TEXT NOT NULL,
+    plan_revision INTEGER NOT NULL,
+    source_storyboard_revision_id TEXT NOT NULL,
+    published_storyboard_artifact_id TEXT NOT NULL DEFAULT '',
+    published_storyboard_artifact_hash TEXT NOT NULL DEFAULT '',
+    completion_certificate_id TEXT NOT NULL DEFAULT '',
+    narrative_review_artifact_id TEXT NOT NULL DEFAULT '',
+    release_qualification_hash TEXT NOT NULL DEFAULT '',
+    capability_snapshot_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'draft',
+    planner_provider TEXT,
+    planner_model TEXT,
+    planner_prompt_fingerprint TEXT,
+    blockers_json TEXT NOT NULL DEFAULT '[]',
+    estimated_latency_ms INTEGER NOT NULL DEFAULT 0,
+    estimated_cost REAL NOT NULL DEFAULT 0,
+    critical_path_latency_ms INTEGER NOT NULL DEFAULT 0,
+    safe_parallelism_ratio REAL NOT NULL DEFAULT 1,
+    created_at REAL NOT NULL,
+    UNIQUE(episode_id, plan_revision),
+    FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE,
+    FOREIGN KEY(capability_snapshot_id)
+        REFERENCES provider_video_capability_snapshots(id)
+);
+CREATE INDEX IF NOT EXISTS idx_episode_video_plans
+    ON episode_video_generation_plans(episode_id, plan_revision DESC);
+
+CREATE TABLE IF NOT EXISTS shot_video_generation_plans (
+    id TEXT PRIMARY KEY,
+    episode_video_plan_id TEXT NOT NULL,
+    shot_id TEXT NOT NULL,
+    shot_no INTEGER NOT NULL,
+    planned_mode TEXT NOT NULL,
+    actual_mode TEXT,
+    video_input_intent TEXT,
+    depends_on_shot_id TEXT,
+    relations_json TEXT NOT NULL DEFAULT '{}',
+    state_dependency TEXT NOT NULL DEFAULT 'none',
+    motion_dependency TEXT NOT NULL DEFAULT 'none',
+    required_assets_json TEXT NOT NULL DEFAULT '[]',
+    reason_codes_json TEXT NOT NULL DEFAULT '[]',
+    confidence REAL NOT NULL DEFAULT 0,
+    unknown_dimensions_json TEXT NOT NULL DEFAULT '[]',
+    fallback_order_json TEXT NOT NULL DEFAULT '[]',
+    max_attempts INTEGER NOT NULL DEFAULT 2,
+    max_cost REAL NOT NULL DEFAULT 0,
+    timeout_s REAL NOT NULL DEFAULT 7200,
+    estimated_latency_ms INTEGER NOT NULL DEFAULT 0,
+    estimated_cost REAL NOT NULL DEFAULT 0,
+    critical_path_group TEXT,
+    capability_snapshot_id TEXT NOT NULL,
+    input_fingerprints_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'planned',
+    degraded_from_mode TEXT,
+    degraded_to_mode TEXT,
+    degraded_reason TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    UNIQUE(episode_video_plan_id, shot_id),
+    FOREIGN KEY(episode_video_plan_id)
+        REFERENCES episode_video_generation_plans(id) ON DELETE CASCADE,
+    FOREIGN KEY(shot_id) REFERENCES shots(id) ON DELETE CASCADE,
+    FOREIGN KEY(depends_on_shot_id) REFERENCES shots(id) ON DELETE SET NULL,
+    FOREIGN KEY(capability_snapshot_id)
+        REFERENCES provider_video_capability_snapshots(id)
+);
+CREATE INDEX IF NOT EXISTS idx_shot_video_plan_lookup
+    ON shot_video_generation_plans(shot_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS video_plan_dependencies (
+    id TEXT PRIMARY KEY,
+    episode_video_plan_id TEXT NOT NULL,
+    shot_plan_id TEXT NOT NULL,
+    shot_id TEXT NOT NULL,
+    depends_on_shot_id TEXT NOT NULL,
+    dependency_kind TEXT NOT NULL,
+    upstream_adopted_version_id TEXT,
+    resolved_at REAL,
+    created_at REAL NOT NULL,
+    UNIQUE(episode_video_plan_id, shot_id, depends_on_shot_id, dependency_kind),
+    FOREIGN KEY(episode_video_plan_id)
+        REFERENCES episode_video_generation_plans(id) ON DELETE CASCADE,
+    FOREIGN KEY(shot_plan_id)
+        REFERENCES shot_video_generation_plans(id) ON DELETE CASCADE,
+    FOREIGN KEY(shot_id) REFERENCES shots(id) ON DELETE CASCADE,
+    FOREIGN KEY(depends_on_shot_id) REFERENCES shots(id) ON DELETE CASCADE,
+    FOREIGN KEY(upstream_adopted_version_id)
+        REFERENCES shot_versions(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_video_plan_dependencies_upstream
+    ON video_plan_dependencies(episode_video_plan_id, depends_on_shot_id);
+
+CREATE TABLE IF NOT EXISTS video_boundary_assets (
+    id TEXT PRIMARY KEY,
+    episode_video_plan_id TEXT NOT NULL,
+    shot_plan_id TEXT NOT NULL,
+    shot_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    source TEXT NOT NULL,
+    source_revision_id TEXT,
+    source_shot_id TEXT,
+    source_adopted_version_id TEXT,
+    path TEXT,
+    url TEXT,
+    sha256 TEXT,
+    mime TEXT,
+    width INTEGER,
+    height INTEGER,
+    qa_status TEXT NOT NULL DEFAULT 'pending',
+    qa_json TEXT NOT NULL DEFAULT '{}',
+    fingerprint TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    UNIQUE(shot_plan_id, role, fingerprint),
+    FOREIGN KEY(episode_video_plan_id)
+        REFERENCES episode_video_generation_plans(id) ON DELETE CASCADE,
+    FOREIGN KEY(shot_plan_id)
+        REFERENCES shot_video_generation_plans(id) ON DELETE CASCADE,
+    FOREIGN KEY(shot_id) REFERENCES shots(id) ON DELETE CASCADE,
+    FOREIGN KEY(source_shot_id) REFERENCES shots(id) ON DELETE SET NULL,
+    FOREIGN KEY(source_adopted_version_id)
+        REFERENCES shot_versions(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_video_boundary_assets_shot
+    ON video_boundary_assets(shot_id, role, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS provider_media_publications (
+    id TEXT PRIMARY KEY,
+    source_revision_id TEXT NOT NULL,
+    source_url TEXT,
+    local_path TEXT,
+    published_url TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    mime TEXT NOT NULL,
+    duration_s REAL,
+    width INTEGER,
+    height INTEGER,
+    url_expires_at REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ready',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_provider_media_publication_source
+    ON provider_media_publications(source_revision_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS video_generation_attempts (
+    id TEXT PRIMARY KEY,
+    shot_plan_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    attempt_no INTEGER NOT NULL,
+    planned_mode TEXT NOT NULL,
+    actual_mode TEXT NOT NULL,
+    video_input_intent TEXT,
+    status TEXT NOT NULL,
+    provider_task_id TEXT,
+    error TEXT,
+    latency_ms INTEGER,
+    cost REAL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    UNIQUE(version_id, attempt_no),
+    FOREIGN KEY(shot_plan_id)
+        REFERENCES shot_video_generation_plans(id) ON DELETE CASCADE,
+    FOREIGN KEY(version_id) REFERENCES shot_versions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_video_attempts_plan
+    ON video_generation_attempts(shot_plan_id, attempt_no);
+
+CREATE TABLE IF NOT EXISTS video_mode_qa_results (
+    id TEXT PRIMARY KEY,
+    shot_plan_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    planned_mode TEXT NOT NULL,
+    actual_mode TEXT NOT NULL,
+    technical_success INTEGER NOT NULL DEFAULT 0,
+    semantic_success INTEGER,
+    boundary_start_match REAL,
+    boundary_end_match REAL,
+    result_json TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL,
+    UNIQUE(version_id, actual_mode),
+    FOREIGN KEY(shot_plan_id)
+        REFERENCES shot_video_generation_plans(id) ON DELETE CASCADE,
+    FOREIGN KEY(version_id) REFERENCES shot_versions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_video_mode_qa_plan
+    ON video_mode_qa_results(shot_plan_id, created_at DESC);
 """
 
 
@@ -921,6 +1132,11 @@ MIGRATIONS = (
     "ALTER TABLE episodes ADD COLUMN screenplay_updated_at REAL",
     "ALTER TABLE episodes ADD COLUMN screenplay_required_dialogues TEXT NOT NULL DEFAULT '[]'",
     "ALTER TABLE shots ADD COLUMN mode_plan TEXT",
+    "ALTER TABLE episode_video_generation_plans ADD COLUMN published_storyboard_artifact_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE episode_video_generation_plans ADD COLUMN published_storyboard_artifact_hash TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE episode_video_generation_plans ADD COLUMN completion_certificate_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE episode_video_generation_plans ADD COLUMN narrative_review_artifact_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE episode_video_generation_plans ADD COLUMN release_qualification_hash TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE projects ADD COLUMN bible_feedback TEXT",  # 持久化重谱打回要求，供进程重启后恢复人物谱任务
     "ALTER TABLE projects ADD COLUMN portraits_status TEXT DEFAULT 'idle'",  # 按集刷新定妆照任务状态
     "ALTER TABLE projects ADD COLUMN portraits_error TEXT",
@@ -1038,6 +1254,8 @@ MIGRATIONS = (
     "ALTER TABLE episodes ADD COLUMN storyboard_production_revision_id TEXT",
     "ALTER TABLE episodes ADD COLUMN screenplay_completion_certificate_id TEXT",
     "ALTER TABLE episodes ADD COLUMN storyboard_completion_certificate_id TEXT",
+    "ALTER TABLE episodes ADD COLUMN narrative_status TEXT NOT NULL DEFAULT 'needs_review'",
+    "ALTER TABLE episodes ADD COLUMN narrative_review_artifact_id TEXT",
     # 剧本台安全发布、occurrence 约束与轻量状态快照。
     "ALTER TABLE episodes ADD COLUMN screenplay_required_dialogue_occurrences TEXT NOT NULL DEFAULT '[]'",
     "ALTER TABLE episodes ADD COLUMN screenplay_publish_fence INTEGER NOT NULL DEFAULT 0",
@@ -1066,6 +1284,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_chapters_project_idx ON chapters(project_id
 CREATE UNIQUE INDEX IF NOT EXISTS uq_episodes_project_no ON episodes(project_id, episode_no);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_screenplay_drafts_episode ON screenplay_drafts(episode_id);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_shots_episode_no ON shots(episode_id, shot_no);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_shots_uid ON shots(shot_uid) WHERE shot_uid IS NOT NULL AND shot_uid!='';
 CREATE UNIQUE INDEX IF NOT EXISTS uq_versions_shot_no ON shot_versions(shot_id, version_no);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_scenes_shot_kind_no ON shot_scenes(shot_id, kind, version_no);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_portraits_segment ON character_portraits(project_id, character_name, ep_start);

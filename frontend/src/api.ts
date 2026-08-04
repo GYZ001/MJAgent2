@@ -181,6 +181,44 @@ export const api = {
   /* ── 便捷方法 ── */
   episodeGenerate: (episodeId: string) =>
     request("POST", `/episodes/${episodeId}/generate`),
+  createVideoGenerationPlan: (
+    episodeId: string,
+    force = false,
+  ): Promise<EpisodeVideoGenerationPlan> =>
+    request("POST", `/episodes/${episodeId}/video-generation-plan`, { force }),
+  getVideoGenerationPlan: (
+    episodeId: string,
+  ): Promise<EpisodeVideoGenerationPlan | null> =>
+    request("GET", `/episodes/${episodeId}/video-generation-plan`),
+  validateVideoGenerationPlan: (episodeId: string) =>
+    request("POST", `/episodes/${episodeId}/video-generation-plan/validate`),
+  reconcileVideoGenerationPlan: (
+    episodeId: string,
+    body?: { shot_id?: string; adopted_version_id?: string },
+  ) =>
+    request("POST", `/episodes/${episodeId}/video-generation-plan/reconcile`, body || {}),
+  overrideVideoGenerationPlan: (
+    episodeId: string,
+    body: {
+      shot_id: string;
+      mode: VideoGenerationMode;
+      video_input_intent?: VideoInputIntent | null;
+      depends_on_shot_id?: string | null;
+      required_assets: VideoPlanAssetRequirement[];
+      reason: string;
+    },
+  ): Promise<EpisodeVideoGenerationPlan> =>
+    request("POST", `/episodes/${episodeId}/video-generation-plan/override`, body),
+  executeVideoGenerationPlan: (
+    episodeId: string,
+    planId: string,
+    body?: Record<string, unknown>,
+  ) =>
+    request(
+      "POST",
+      `/episodes/${episodeId}/video-generation-plan/${planId}/execute`,
+      body || {},
+    ),
   stopEpisodeVideo: (episodeId: string) =>
     request("POST", `/episodes/${episodeId}/video/stop`) as Promise<{
       episode_id: string;
@@ -1075,8 +1113,204 @@ export interface EpisodeScreenplay {
   voice_bible?: Record<string, unknown>[];
   approved_adaptations?: string[];
   forbidden_additions?: string[];
+  narrative_plan?: Record<string, unknown> | null;
   created_at?: number | null;
   updated_at?: number | null;
+}
+
+export interface NarrativeContractSummary {
+  contract_version: string;
+  proposition_count: number;
+  event_count: number;
+  audience_prior_count: number;
+  experience_intent_count: number;
+  assimilation_task_count: number;
+}
+
+export interface NarrativeReviewSummary {
+  artifact_id: string;
+  version: number;
+  status: string;
+  decision: string | null;
+  low_percentile: Record<string, unknown>;
+  inference_variance: number;
+  reason: string;
+}
+
+export interface ShotContribution {
+  shot_contribution_id: string;
+  experience_intent_ids: string[];
+  target_delta_ids: string[];
+  assimilation_task_ids: string[];
+  evidence_ids: string[];
+  story_delta_fact_ids: string[];
+  character_state_delta_ids: string[];
+  audience_state_delta_ids: string[];
+  affective_delta: Record<string, unknown>;
+  spatial_temporal_delta: Record<string, unknown>;
+  dramatic_pressure_delta: number;
+}
+
+export interface ShotCapacityBudget {
+  action_phase_s: number;
+  spoken_and_text_s: number;
+  attention_switch_s: number;
+  inference_processing_s: number;
+  reaction_registration_s: number;
+  spatial_reorientation_s: number;
+  entry_exit_settle_s: number;
+  other_s: number;
+  other_reason?: string | null;
+}
+
+export interface AudienceStatePathRef {
+  audience_prior_id: string;
+  audience_state_in_id: string;
+  audience_state_out_target_id: string;
+}
+
+export interface NarrativeBoundaryContract {
+  boundary_id: string;
+  previous_shot_id: string;
+  next_shot_id: string;
+  narrative_relation: string;
+  required_state_invariants: string[];
+  allowed_state_deltas: string[];
+  state_delta_transitions: Array<{
+    transition_id: string;
+    basis_type: string;
+    source_fact_id?: string | null;
+    target_fact_id?: string | null;
+    basis_action_phase_id?: string | null;
+    custom_basis?: string | null;
+    reason: string;
+  }>;
+  forbidden_replay_action_ids: string[];
+  handoff_action_phase_id?: string | null;
+  spatial_orientation_contract: Record<string, unknown>;
+  temporal_orientation_contract: Record<string, unknown>;
+  audience_state_handoffs: Record<string, unknown>[];
+  affective_handoff: Record<string, unknown>;
+  cut_motivation: string;
+}
+
+export type VideoGenerationMode =
+  | "REFERENCE_IMAGE_MODE"
+  | "FIRST_LAST_FRAME_MODE"
+  | "VIDEO_INPUT_MODE";
+
+export type VideoInputIntent =
+  | "CONTINUE_PREVIOUS_TAKE"
+  | "MOTION_REFERENCE"
+  | "CAMERA_REFERENCE"
+  | "RHYTHM_REFERENCE"
+  | "AUDIO_REFERENCE";
+
+export type VideoPlanAssetSource =
+  | "ASSET_REVISION"
+  | "STATIC_BOUNDARY_ASSET"
+  | "PREVIOUS_ADOPTED_TAIL"
+  | "PREVIOUS_ADOPTED_VIDEO";
+
+export type VideoPlanAssetRole =
+  | "identity_reference"
+  | "scene_reference"
+  | "prop_reference"
+  | "style_reference"
+  | "first_frame"
+  | "last_frame"
+  | "previous_adopted_video"
+  | "motion_reference_video"
+  | "camera_reference_video"
+  | "audio_reference_video";
+
+export interface VideoPlanAssetRequirement {
+  role: VideoPlanAssetRole;
+  source: VideoPlanAssetSource;
+  asset_revision_id?: string | null;
+  source_shot_id?: string | null;
+  fingerprint?: string | null;
+}
+
+export interface ShotVideoRelations {
+  temporal: "same_moment" | "elapsed" | "jump" | "new_domain" | "unknown";
+  spatial: "same_space" | "adjacent_space" | "new_space" | "unknown";
+  edit:
+    | "continuous_take"
+    | "match_cut"
+    | "angle_cut"
+    | "reaction_cut"
+    | "reverse_angle"
+    | "insert_cut"
+    | "montage"
+    | "scene_cut"
+    | "unknown";
+  action:
+    | "continues_same_action"
+    | "starts_new_action"
+    | "shows_result"
+    | "observes_result"
+    | "no_action"
+    | "unknown";
+}
+
+export interface ShotVideoGenerationPlan {
+  shot_plan_id: string;
+  episode_video_plan_id: string;
+  plan_revision: number;
+  source_storyboard_revision_id: string;
+  shot_id: string;
+  published_shot_id: string;
+  shot_no: number;
+  mode: VideoGenerationMode;
+  planned_mode: VideoGenerationMode | null;
+  actual_mode: VideoGenerationMode | null;
+  video_input_intent: VideoInputIntent | null;
+  depends_on_shot_id: string | null;
+  relations: ShotVideoRelations;
+  state_dependency: "none" | "start_only" | "start_and_end" | "full_trajectory";
+  motion_dependency: "none" | "pose" | "trajectory" | "camera" | "rhythm" | "audio";
+  required_assets: VideoPlanAssetRequirement[];
+  reason_codes: string[];
+  confidence: number;
+  unknown_dimensions: string[];
+  fallback_order: VideoGenerationMode[];
+  max_attempts: number;
+  max_cost: number;
+  timeout_s: number;
+  estimated_latency_ms: number;
+  estimated_cost: number;
+  critical_path_group: string | null;
+  capability_snapshot_id: string;
+  input_revision_fingerprints: Record<string, string>;
+  status: string;
+  degraded_from_mode: VideoGenerationMode | null;
+  degraded_to_mode: VideoGenerationMode | null;
+  degraded_reason: string | null;
+}
+
+export interface EpisodeVideoGenerationPlan {
+  episode_video_plan_id: string;
+  episode_id: string;
+  plan_revision: number;
+  source_storyboard_revision_id: string;
+  published_storyboard_artifact_id: string;
+  published_storyboard_artifact_hash: string;
+  completion_certificate_id: string;
+  narrative_review_artifact_id: string;
+  release_qualification_hash: string;
+  capability_snapshot_id: string;
+  status: "draft" | "valid" | "blocked" | "superseded" | "stale";
+  planner_provider: string;
+  planner_model: string;
+  planner_prompt_fingerprint: string;
+  shots: ShotVideoGenerationPlan[];
+  blockers: Array<Record<string, unknown>>;
+  estimated_latency_ms: number;
+  estimated_cost: number;
+  critical_path_latency_ms: number;
+  safe_parallelism_ratio: number;
+  created_at: number;
 }
 
 export interface ReferenceImage {
@@ -1157,6 +1391,19 @@ export interface ShotVersion {
   technical_validation_json?: string | null;
   created_at?: number | null;
   image_inputs?: {
+    mode?: VideoGenerationMode;
+    planned_mode?: VideoGenerationMode;
+    actual_mode?: VideoGenerationMode | null;
+    video_input_intent?: VideoInputIntent | null;
+    episode_video_plan_id?: string | null;
+    shot_plan_id?: string | null;
+    plan_revision?: number | null;
+    capability_snapshot_id?: string | null;
+    after_shot_id?: string | null;
+    plan_status?: string | null;
+    degraded_reason?: string | null;
+    stale?: boolean;
+    stale_reason?: string | null;
     reference_image_used?: boolean;
     reference_images?: ReferenceImage[];
     reference_failure_logs?: {
@@ -1358,6 +1605,28 @@ export interface Shot {
   risk_tags?: string[];
   prompt_contract_version?: string;
   legacy_unvalidated?: boolean;
+  shot_id?: string;
+  scene_id?: string;
+  event_ids?: string[];
+  primary_action_id?: string | null;
+  supporting_action_ids?: string[];
+  action_phase_ids?: string[];
+  visible_entity_ids?: string[];
+  offscreen_action_actor_ids?: string[];
+  offscreen_action_target_ids?: string[];
+  capacity_budget?: ShotCapacityBudget | null;
+  shot_contribution?: ShotContribution | null;
+  audience_state_paths?: AudienceStatePathRef[];
+  planned_state_in_fact_ids?: string[];
+  planned_delta_add_fact_ids?: string[];
+  planned_delta_remove_fact_ids?: string[];
+  planned_state_out_fact_ids?: string[];
+  completed_before_action_ids?: string[];
+  completed_before_action_phase_ids?: string[];
+  reserved_future_event_ids?: string[];
+  readability_window_ids?: string[];
+  narrative_boundary_from_previous?: NarrativeBoundaryContract | null;
+  mode_plan?: ShotVideoGenerationPlan | null;
   is_final?: boolean;
   preflight_errors?: string[];
   qa_warnings?: string[];
@@ -1408,6 +1677,9 @@ export interface Episode {
   screenplay_error?: string | null;
   screenplay_updated_at?: number | null;
   screenplay?: EpisodeScreenplay | null;
+  narrative_contract_summary?: NarrativeContractSummary | null;
+  narrative_review_summary?: NarrativeReviewSummary | null;
+  narrative_metrics?: Record<string, unknown> | null;
   scene_options?: string[];
   source_dialogue_occurrences?: DialogueOccurrence[] | null;
   required_dialogue_lines?: string[];

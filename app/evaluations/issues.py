@@ -69,8 +69,13 @@ STORYBOARD_CONFIRMATION_BLOCKER_CODES = frozenset({
     "PLAN_EXHAUSTED_NOT_FINAL",
 })
 
+_EXPLICIT_CODE_RE = re.compile(r"^\s*\[([A-Z][A-Z0-9_]{2,80})\]")
+
 
 def issue_code(message: str) -> str:
+    explicit = _EXPLICIT_CODE_RE.match(message or "")
+    if explicit:
+        return explicit.group(1)
     for code, pattern in _CODE_RULES:
         if pattern.search(message):
             return code
@@ -83,7 +88,12 @@ def is_storyboard_confirmation_blocker(message_or_issue: str | Issue) -> bool:
         if isinstance(message_or_issue, Issue)
         else issue_code(str(message_or_issue))
     )
-    return code in STORYBOARD_CONFIRMATION_BLOCKER_CODES
+    return (
+        code in STORYBOARD_CONFIRMATION_BLOCKER_CODES
+        or bool(_EXPLICIT_CODE_RE.match(
+            message_or_issue.message if isinstance(message_or_issue, Issue) else str(message_or_issue)
+        ))
+    )
 
 
 _FIELD_ERROR_RE = re.compile(r"^字段\s+([^：:]+)[：:]\s*(.+)$", re.I)

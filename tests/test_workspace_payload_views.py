@@ -86,6 +86,174 @@ def test_workspace_episode_views_do_not_expand_historical_inputs(monkeypatch) ->
     assert not any("json_extract" in sql.lower() for sql in statements)
 
 
+def test_narrative_summaries_and_shot_contract_are_scoped_to_script_and_board(
+    monkeypatch,
+) -> None:
+    conn = _conn()
+    _seed_episode(conn)
+    screenplay = {
+        "episode_no": 1,
+        "narrative_plan": {
+            "contract_version": "narrative-continuity.v1",
+            "scope_id": "e1",
+            "propositions": [
+                {
+                    "proposition_id": "PROP-1",
+                    "canonical_statement": "The letter changes the hero's goal.",
+                    "narrative_domain": "adapted_story",
+                }
+            ],
+            "events": [{"event_id": "EVENT-1"}],
+            "audience_priors": [
+                {
+                    "audience_prior_id": "PRIOR-1",
+                    "audience_description": "First-time viewer",
+                }
+            ],
+            "experience_intents": [
+                {
+                    "experience_intent_id": "INTENT-1",
+                    "scope_id": "e1",
+                    "director_objective": "Notice the letter before the reaction.",
+                }
+            ],
+            "assimilation_tasks": [
+                {
+                    "assimilation_task_id": "TASK-1",
+                    "experience_intent_id": "INTENT-1",
+                    "audience_path_id": "PATH-1",
+                    "target_delta_id": "DELTA-1",
+                    "satisfaction_criteria": "Viewer connects the letter to the reaction.",
+                }
+            ],
+        },
+    }
+    conn.execute(
+        "UPDATE episodes SET screenplay_json=? WHERE id='e1'",
+        (json.dumps(screenplay),),
+    )
+    shot_contract = {
+        "shot_id": "SHOT-1",
+        "scene_id": "SCENE-1",
+        "event_ids": ["EVENT-1"],
+        "primary_action_id": "ACTION-1",
+        "supporting_action_ids": ["ACTION-2"],
+        "shot_contribution": {
+            "shot_contribution_id": "CONTRIB-1",
+            "experience_intent_ids": ["INTENT-1"],
+            "target_delta_ids": ["DELTA-1"],
+            "assimilation_task_ids": ["TASK-1"],
+            "evidence_ids": ["EVIDENCE-1"],
+        },
+        "audience_state_paths": [
+            {
+                "audience_prior_id": "PRIOR-1",
+                "audience_state_in_id": "AUDIENCE-IN-1",
+                "audience_state_out_target_id": "AUDIENCE-OUT-1",
+            }
+        ],
+        "planned_state_in_fact_ids": ["FACT-1"],
+        "planned_delta_add_fact_ids": ["FACT-2"],
+        "planned_delta_remove_fact_ids": ["FACT-1"],
+        "planned_state_out_fact_ids": ["FACT-2"],
+        "completed_before_action_ids": ["ACTION-0"],
+        "reserved_future_event_ids": ["EVENT-2"],
+        "readability_window_ids": ["WINDOW-1"],
+        "narrative_boundary_from_previous": {
+            "boundary_id": "BOUNDARY-1",
+            "previous_shot_id": "SHOT-0",
+            "next_shot_id": "SHOT-1",
+            "narrative_relation": "consequence",
+            "forbidden_replay_action_ids": ["ACTION-0"],
+            "cut_motivation": "Reveal the consequence, not the completed action.",
+        },
+    }
+    conn.execute(
+        "UPDATE shots SET shot_contract_json=? WHERE id='s1'",
+        (json.dumps(shot_contract),),
+    )
+    report_rows = [
+        (
+            "review-1",
+            1,
+            "validated",
+            {"decision": "pass", "low_percentile_result": {"score": 0.9}},
+        ),
+        (
+            "review-2",
+            2,
+            "needs_revision",
+            {
+                "decision": "revise",
+                "low_percentile_result": {"score": 0.35, "prior_id": "PRIOR-1"},
+                "inference_variance": 0.42,
+                "reason": "The causal link is not yet readable.",
+                "evidence_gap_ids": ["PRIVATE-GAP-1"],
+            },
+        ),
+        (
+            "review-3",
+            3,
+            "stale",
+            {"decision": "pass", "reason": "Historical result"},
+        ),
+    ]
+    conn.executemany(
+        """INSERT INTO artifacts(
+               id, type, scope_type, scope_id, version, status, trust_level,
+               content_json, content_hash, created_at
+           ) VALUES(?, 'narrative_review_report', 'episode', 'e1', ?, ?, 'T2', ?, ?, ?)""",
+        [
+            (artifact_id, version, status, json.dumps(content), artifact_id, version)
+            for artifact_id, version, status, content in report_rows
+        ],
+    )
+    conn.commit()
+    _patch_storyboard_db(monkeypatch, conn)
+
+    script = storyboard_ops.episode_detail("e1", "script")
+    board = storyboard_ops.episode_detail("e1", "board")
+    wall = storyboard_ops.episode_detail("e1", "wall")
+
+    expected_contract_summary = {
+        "contract_version": "narrative-continuity.v1",
+        "proposition_count": 1,
+        "event_count": 1,
+        "audience_prior_count": 1,
+        "experience_intent_count": 1,
+        "assimilation_task_count": 1,
+    }
+    expected_review_summary = {
+        "artifact_id": "review-2",
+        "version": 2,
+        "status": "needs_revision",
+        "decision": "revise",
+        "low_percentile": {"score": 0.35, "prior_id": "PRIOR-1"},
+        "inference_variance": 0.42,
+        "reason": "The causal link is not yet readable.",
+    }
+    assert script["narrative_contract_summary"] == expected_contract_summary
+    assert board["narrative_contract_summary"] == expected_contract_summary
+    assert script["narrative_review_summary"] == expected_review_summary
+    assert board["narrative_review_summary"] == expected_review_summary
+    assert "evidence_gap_ids" not in board["narrative_review_summary"]
+    assert wall["narrative_contract_summary"] is None
+    assert wall["narrative_review_summary"] is None
+    assert board["narrative_metrics"]["contract_present"] is True
+    assert "audience_processing_debt" in board["narrative_metrics"]
+    assert wall["narrative_metrics"] is None
+
+    public_shot = board["shots"][0]
+    for key, expected in shot_contract.items():
+        if key in {"shot_contribution", "narrative_boundary_from_previous"}:
+            continue
+        assert public_shot[key] == expected
+    for key, expected in shot_contract["shot_contribution"].items():
+        assert public_shot["shot_contribution"][key] == expected
+    for key, expected in shot_contract["narrative_boundary_from_previous"].items():
+        assert public_shot["narrative_boundary_from_previous"][key] == expected
+
+
 def test_review_detail_omits_oversized_legacy_inputs(monkeypatch) -> None:
     conn = _conn()
     _seed_episode(conn)

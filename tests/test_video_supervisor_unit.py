@@ -274,9 +274,31 @@ def test_video_grant_episode_binding(tmp_path, monkeypatch):
     )
 
     db.init_db()
+    conn = db.get_conn()
+    episode_id = db.new_id("ep_test_grant")
+    project_id = db.new_id("proj_x")
+    conn.execute(
+        "INSERT INTO projects(id,name,status,created_at) VALUES(?,?, 'created', 1)",
+        (project_id, "grant scope"),
+    )
+    conn.execute(
+        """INSERT INTO episodes(
+               id,project_id,episode_no,title,status,storyboard_artifact_id,created_at
+           ) VALUES(?,?,1,'grant episode','confirmed','art_sb_v1',1)""",
+        (episode_id, project_id),
+    )
+    conn.execute(
+        """INSERT INTO shots(
+               id,episode_id,shot_no,duration_s,shot_size,camera_move,
+               scene_setting,characters,action_desc,dialogues,continuity_from_prev
+           ) VALUES(?,?,1,5,'中景','固定','室内','[]',
+                    '人物在空间中完成一个可见且连续的主动作。','[]',0)""",
+        (f"{episode_id}_shot", episode_id),
+    )
+    conn.commit()
     grant, token = issue_video_completion_grant(
-        episode_id="ep_test_grant",
-        project_id="proj_x",
+        episode_id=episode_id,
+        project_id=project_id,
         storyboard_artifact_id="art_sb_v1",
         budget_cap_cny=100,
         shots_total=10,
@@ -284,7 +306,7 @@ def test_video_grant_episode_binding(tmp_path, monkeypatch):
     assert token
     ok = validate_video_grant(
         grant.grant_id,
-        episode_id="ep_test_grant",
+        episode_id=episode_id,
         storyboard_artifact_id="art_sb_v1",
     )
     assert ok.budget_cap_cny == 100
@@ -300,7 +322,7 @@ def test_video_grant_episode_binding(tmp_path, monkeypatch):
     with pytest.raises(GrantValidationError) as ei2:
         validate_video_grant(
             grant.grant_id,
-            episode_id="ep_test_grant",
+            episode_id=episode_id,
             storyboard_artifact_id="art_sb_CHANGED",
         )
     assert ei2.value.code == "UPSTREAM_VERSION_CHANGED"

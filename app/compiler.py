@@ -15,7 +15,7 @@ from app.character_policy import (
     is_collective_role,
 )
 from app.renderability import strip_overdetail_terms
-from app.schemas import Bible, Shot
+from app.schemas import Bible, EpisodeScreenplay, Shot
 
 # 全知视角的结尾悬念钩旁白（"可他不知道…/殊不知…/然而…"）念在台词【之后】；
 # 其余旁白（情境画外音、人物内心OS、人群声）都是先给情境、人物再开口反应，必须念在台词【之前】。
@@ -121,7 +121,51 @@ def _shot_character_contract_names(shot: Shot) -> list[str]:
     return list(dict.fromkeys(name for name in names if name))
 
 
-def _assert_shot_character_contract(shot: Shot, bible: Bible, *, context: str = "Prompt") -> None:
+def _shot_visual_contract_names(shot: Shot) -> list[str]:
+    names = [
+        *((name or "").strip() for name in (shot.characters or [])),
+        *((name or "").strip() for name in (shot.characters_visible or [])),
+    ]
+    for role in shot.reference_roles or []:
+        prefix, separator, name = str(role or "").partition(":")
+        if separator and prefix in {"character_identity", "collective_group"}:
+            names.append(name.strip())
+    return list(dict.fromkeys(name for name in names if name))
+
+
+def _shot_voice_contract_names(shot: Shot) -> list[str]:
+    names = [
+        *((name or "").strip() for name in (shot.audio_cast or [])),
+        *((dialogue.speaker or "").strip() for dialogue in (shot.dialogues or [])),
+        *((item.speaker_id or "").strip() for item in (shot.audio_timeline or [])),
+    ]
+    return list(dict.fromkeys(name for name in names if name))
+
+
+def _assert_shot_character_contract(
+    shot: Shot,
+    bible: Bible,
+    *,
+    context: str = "Prompt",
+    screenplay: EpisodeScreenplay | None = None,
+):
+    if screenplay is not None and screenplay.narrative_plan is not None:
+        from app.identity_contracts import (
+            IdentityContractError,
+            narrative_identity_resolver,
+        )
+
+        try:
+            resolver = narrative_identity_resolver(bible, screenplay)
+            for name in _shot_visual_contract_names(shot):
+                resolver.resolve(name, usage="visual")
+            for name in _shot_voice_contract_names(shot):
+                resolver.resolve(name, usage="voice")
+        except IdentityContractError as exc:
+            raise CompileError(
+                f"镜头 {shot.shot_no} {context} typed identity contract 无法解析：{exc}"
+            ) from exc
+        return resolver
     bible_names = {character.name for character in bible.characters}
     invalid = [
         name
@@ -136,6 +180,7 @@ def _assert_shot_character_contract(shot: Shot, bible: Bible, *, context: str = 
             f"也不是功能性路人或群体标签的角色：{invalid}；"
             "请先同步 characters、characters_visible、声轨与参考角色"
         )
+    return None
 
 
 def clip_duration_value(value: int | float | str | None) -> int:
@@ -587,14 +632,23 @@ def _resolve_camera_angle(shot: Shot) -> str:
     return current or "平视"
 
 
-def _equal_height_hint(shot: Shot, bible: Bible | None = None) -> str:
+def _equal_height_hint(
+    shot: Shot,
+    bible: Bible | None = None,
+    *,
+    collective_names: set[str] | None = None,
+) -> str:
     """多人物同框：无明示身高差时锁定站立同高/齐眼线，避免随机一高一低。"""
     from app.continuity import effective_characters_visible
 
     bible_names = {c.name for c in bible.characters} if bible is not None else set()
     individuals = [
         name for name in effective_characters_visible(shot)
-        if name in bible_names or not is_collective_role(name)
+        if (
+            name not in collective_names
+            if collective_names is not None
+            else name in bible_names or not is_collective_role(name)
+        )
     ]
     if len(individuals) < 2:
         return ""
@@ -838,16 +892,35 @@ def _keyframe_required_text_expected(shot: Shot, target: str, target_source: str
     return appear_at <= target_time and (stable_until is None or target_time <= stable_until)
 
 
-def keyframe_visual_contract(shot: Shot, bible: Bible | None = None) -> dict[str, object]:
+def keyframe_visual_contract(
+    shot: Shot,
+    bible: Bible | None = None,
+    *,
+    screenplay: EpisodeScreenplay | None = None,
+) -> dict[str, object]:
     """视频编译器与叙事关键帧共用的确定性构图合同。"""
     from app.continuity import dialogue_focus_subject, effective_characters_visible
 
     visible_characters = effective_characters_visible(shot)
     dialogue_focus = dialogue_focus_subject(shot)
     bible_names = {c.name for c in bible.characters} if bible is not None else set()
-    collective_roles = [
-        name for name in visible_characters if name not in bible_names and is_collective_role(name)
-    ]
+    identity_resolver = None
+    if screenplay is not None and screenplay.narrative_plan is not None:
+        if bible is None:
+            raise CompileError("narrative 关键帧合同缺少 Bible，无法解析身份")
+        identity_resolver = _assert_shot_character_contract(
+            shot, bible, context="关键帧构图", screenplay=screenplay,
+        )
+        collective_roles = [
+            name
+            for name in visible_characters
+            if identity_resolver.resolve(name, usage="visual").is_collective
+        ]
+    else:
+        collective_roles = [
+            name for name in visible_characters
+            if name not in bible_names and is_collective_role(name)
+        ]
     individual_characters = [name for name in visible_characters if name not in collective_roles]
     target_keyframe_desc, target_source = _narrative_keyframe_target_with_source(shot)
     target_contact_phase = contact_action_phase(target_keyframe_desc)
@@ -885,21 +958,33 @@ def keyframe_visual_contract(shot: Shot, bible: Bible | None = None) -> dict[str
     )
     # “独自站在队尾，与前方人群形成对比”仍明确要求背景人群。旧逻辑只要同时出现
     # “独自+人群”就判为人群禁入，导致正确关键帧全部被删，视频失去队伍/石碑空间锚点。
-    target_forbids_crowd = bool(collective_absent_re.search(target_keyframe_desc))
+    target_forbids_crowd = (
+        False
+        if identity_resolver is not None
+        else bool(collective_absent_re.search(target_keyframe_desc))
+    )
     target_requires_anonymous_crowd = (
-        not dialogue_focus and not target_forbids_crowd
-        and (
-            any(marker in target_keyframe_desc for marker in crowd_markers)
-            or bool(collective_context_re.search(target_keyframe_desc))
-            or "家族子弟" in target_keyframe_desc
+        bool(collective_roles) and not dialogue_focus and not target_forbids_crowd
+        if identity_resolver is not None
+        else (
+            not dialogue_focus and not target_forbids_crowd
+            and (
+                any(marker in target_keyframe_desc for marker in crowd_markers)
+                or bool(collective_context_re.search(target_keyframe_desc))
+                or "家族子弟" in target_keyframe_desc
+            )
         )
     )
     crowd_context_text = " ".join((target_keyframe_desc, shot.scene_setting or "", shot.action_desc or ""))
-    anonymous_background_allowed = not dialogue_focus and not target_forbids_crowd and (
-        bool(collective_roles)
-        or any(marker in crowd_context_text for marker in (*crowd_markers, "当众"))
-        or bool(collective_context_re.search(crowd_context_text))
-        or "家族子弟" in crowd_context_text
+    anonymous_background_allowed = (
+        not dialogue_focus and not target_forbids_crowd and bool(collective_roles)
+        if identity_resolver is not None
+        else not dialogue_focus and not target_forbids_crowd and (
+            bool(collective_roles)
+            or any(marker in crowd_context_text for marker in (*crowd_markers, "当众"))
+            or bool(collective_context_re.search(crowd_context_text))
+            or "家族子弟" in crowd_context_text
+        )
     )
     _, scene_geometry, scene_landmarks = _scene_geometry_contract(shot, bible)
     matched_scene = _matching_scene(shot, bible)
@@ -1013,10 +1098,14 @@ def _compile_audio_timeline(shot: Shot, voice_bible: list | None = None) -> str:
 
 
 def _compile_reference_roles(shot: Shot, *, continuity_mode: str, with_refs: bool,
-                             chained: bool, individual_names: set[str] | None = None) -> str:
+                             chained: bool, individual_names: set[str] | None = None,
+                             collective_names: set[str] | None = None) -> str:
     from app.continuity import reference_role_plan, uses_previous_tail_frame
     roles = reference_role_plan(
-        shot, continuity_mode=continuity_mode, individual_names=individual_names,
+        shot,
+        continuity_mode=continuity_mode,
+        individual_names=individual_names,
+        collective_names=collective_names,
     )
     lines: list[str] = []
     if uses_previous_tail_frame(continuity_mode) and (chained or "start_state_reference" in roles):
@@ -1046,7 +1135,8 @@ def _compile_reference_roles(shot: Shot, *, continuity_mode: str, with_refs: boo
 
 def _compile_negative_constraints(shot: Shot, extra_negative: list[str] | None,
                                   continuity_mode: str, *,
-                                  bible: Bible | None = None) -> str:
+                                  bible: Bible | None = None,
+                                  collective_names: set[str] | None = None) -> str:
     from app.continuity import (
         dialogue_focus_subject,
         effective_characters_visible,
@@ -1097,7 +1187,12 @@ def _compile_negative_constraints(shot: Shot, extra_negative: list[str] | None,
         parts.append("松开/分离动作禁止正面摆拍；保留已分开的清晰间距，禁止重新画成已接触")
     bible_names = {c.name for c in bible.characters} if bible is not None else set()
     individual_visible = [
-        name for name in visible if name in bible_names or not is_collective_role(name)
+        name for name in visible
+        if (
+            name not in collective_names
+            if collective_names is not None
+            else name in bible_names or not is_collective_role(name)
+        )
     ]
     if len(individual_visible) >= 2 and not has_explicit_height_difference(shot, bible):
         parts.append("禁止同框人物随意一高一低或眼线错位")
@@ -1124,6 +1219,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
                    continuity_mode: str | None = None,
                    prev_state_out: str | None = None,
                    voice_bible: list | None = None,
+                   screenplay: EpisodeScreenplay | None = None,
                    visual_style: str | None = None,
                    aspect_ratio: str = "9:16") -> str:
     """编译 Seedance 最终提示词（PRD §11）：最小完备、固定段落、禁止原文/前镜完整动作/未来剧情。"""
@@ -1145,7 +1241,9 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     from app.schemas import PROMPT_CONTRACT_VERSION
 
     bible_map = {c.name: c for c in bible.characters}
-    _assert_shot_character_contract(shot, bible)
+    identity_resolver = _assert_shot_character_contract(
+        shot, bible, screenplay=screenplay,
+    )
     if shot.duration_s not in config.ALLOWED_DURATIONS:
         raise CompileError(
             f"镜头 {shot.shot_no} 时长 {shot.duration_s}s 不合法，视频生成时长必须为 "
@@ -1164,8 +1262,32 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     shot.continuity_mode = mode
     shot.prompt_contract_version = PROMPT_CONTRACT_VERSION
     ensure_audio_timeline(shot, voice_bible)
+    if identity_resolver is not None:
+        # ``ensure_audio_timeline`` may deterministically materialise entries
+        # that were absent on the input shot; validate the final provider cast.
+        for name in _shot_voice_contract_names(shot):
+            identity_resolver.resolve(name, usage="voice")
+        collective_names = {
+            name
+            for name in visible_names
+            if identity_resolver.resolve(name, usage="visual").is_collective
+        }
+        individual_names = set(visible_names) - collective_names
+        known_identity_tokens = list(dict.fromkeys(
+            token
+            for identity in identity_resolver.identities
+            for token in (identity.identity_id, identity.display_name)
+            if token
+        ))
+    else:
+        collective_names = None
+        individual_names = set(bible_map)
+        known_identity_tokens = list(bible_map)
     shot.reference_roles = reference_role_plan(
-        shot, continuity_mode=mode, individual_names=set(bible_map),
+        shot,
+        continuity_mode=mode,
+        individual_names=individual_names,
+        collective_names=collective_names,
     )
 
     shot_dur = clip_duration(shot)
@@ -1190,7 +1312,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         primary_action=primary,
         full_action=full_action,
         visible_names=visible_names,
-        bible_names=list(bible_map),
+        bible_names=known_identity_tokens,
         continuity_mode=mode,
     )
     if not state_in or not primary or not state_out:
@@ -1254,7 +1376,9 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     # 角色/场景锚点（短）
     anchors = []
     for name in visible_names:
-        if name in bible_map:
+        if identity_resolver is not None:
+            anchors.append(f"{name}：{identity_resolver.visual_anchor(name)}")
+        elif name in bible_map:
             anchors.append(f"{name}：{bible_map[name].appearance_canonical}")
         elif is_collective_role(name):
             anchors.append(f"{name}：{collective_role_anchor(name)}")
@@ -1265,7 +1389,9 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     prop_anchor = ""
     if shot.required_text and (shot.required_text.surface or "").strip():
         prop_anchor = f"文字承载面：{shot.required_text.surface.strip()}"
-    height_hint = _equal_height_hint(shot, bible)
+    height_hint = _equal_height_hint(
+        shot, bible, collective_names=collective_names,
+    )
 
     # 转场由最终编辑执行；生成模型只提供干净可重叠的句柄。
     transition_bits: list[str] = []
@@ -1295,7 +1421,8 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     reference_block = _compile_reference_roles(
         shot, continuity_mode=mode, with_refs=with_refs,
         chained=chained or uses_previous_tail_frame(mode),
-        individual_names=set(bible_map),
+        individual_names=individual_names,
+        collective_names=collective_names,
     )
     # 兼容旧 chained/from_scene 调用：仅 action_continuation 才强调尾帧起点
     if uses_previous_tail_frame(mode) and (chained or from_scene or with_last_frame):
@@ -1336,7 +1463,13 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         f"全片统一画风：{style}",
     ]
     consistency_block = "\n".join(p for p in consistency_parts if p)
-    negative_block = _compile_negative_constraints(shot, extra_negative, mode, bible=bible)
+    negative_block = _compile_negative_constraints(
+        shot,
+        extra_negative,
+        mode,
+        bible=bible,
+        collective_names=collective_names,
+    )
     if critique:
         negative_block += "；上一版必须改正：" + "；".join(
             c.strip() for c in critique[:6] if c and c.strip()
@@ -1476,17 +1609,26 @@ SCENE_EFFECT_RESTRAINT = "光效/特效服从剧情：日常场景克制写实�
 def compile_scene_prompt(shot: Shot, bible: Bible, *, kind: str = "tail",
                          outgoing_transition: str | None = None,
                          next_scene: str | None = None,
-                         next_first_frame_desc: str | None = None) -> str:
+                         next_first_frame_desc: str | None = None,
+                         screenplay: EpisodeScreenplay | None = None) -> str:
     """编译“场景关键帧”图像生成 prompt（Seedream 用）：画风 + 场景 + 在场人物锚点 +
     本镜动作的【首图/尾图定格】。生成的图随后作为 Seedance 视频首尾帧。"""
     if kind not in ("head", "tail"):
         raise CompileError(f"未知关键帧类型：{kind}")
     bible_map = {c.name: c for c in bible.characters}
-    _assert_shot_character_contract(shot, bible, context="关键帧")
+    identity_resolver = _assert_shot_character_contract(
+        shot, bible, context="关键帧", screenplay=screenplay,
+    )
     anchors = "；".join(
-        bible_map[name].appearance_canonical
-        if name in bible_map else (
-            collective_role_anchor(name) if is_collective_role(name) else functional_extra_anchor(name)
+        identity_resolver.visual_anchor(name)
+        if identity_resolver is not None
+        else (
+            bible_map[name].appearance_canonical
+            if name in bible_map else (
+                collective_role_anchor(name)
+                if is_collective_role(name)
+                else functional_extra_anchor(name)
+            )
         )
         for name in shot.characters
     )

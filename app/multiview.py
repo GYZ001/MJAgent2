@@ -451,21 +451,50 @@ def resolve_shot_asset_dependencies(
     scene_name: str | None = None,
     ready_only: bool = True,
     conn=None,
+    bible=None,
+    screenplay=None,
 ) -> dict[str, Any]:
     """解析本镜人物/场景多视角依赖，供关键帧生成与 QA 冻结。
 
     生产路径默认 ready_only=True：非 ready 视角不得进入依赖与后续生成。
     """
-    from app.character_policy import is_collective_role
     from app.continuity import effective_characters_visible
 
     managed_characters, managed_scenes = project_bible_asset_names(project_id, conn=conn)
+    identity_resolver = None
+    if screenplay is not None and getattr(screenplay, "narrative_plan", None) is not None:
+        if bible is None:
+            raise ValueError("narrative 资产依赖解析缺少 Bible")
+        from app.identity_contracts import narrative_identity_resolver
+
+        identity_resolver = narrative_identity_resolver(bible, screenplay)
+    else:
+        from app.character_policy import is_collective_role
+
     characters_out: list[dict[str, Any]] = []
     for name in effective_characters_visible(shot):
-        if name not in managed_characters and is_collective_role(name):
+        if identity_resolver is not None:
+            identity = identity_resolver.resolve(name, usage="visual")
+            asset_name = identity.asset_name
+            asset_required = identity.requires_asset
+            asset_allowed = identity.allows_asset
+            role_kind = identity.visual_policy
+        else:
+            identity = None
+            asset_name = name
+            asset_required = name in managed_characters
+            asset_allowed = True
+            role_kind = "collective" if is_collective_role(name) else "legacy"
+        if not asset_allowed or (
+            identity_resolver is None
+            and name not in managed_characters
+            and is_collective_role(name)
+        ):
             characters_out.append({
                 "name": name,
-                "role_kind": "collective",
+                "identity_id": identity.identity_id if identity is not None else name,
+                "asset_name": asset_name,
+                "role_kind": role_kind,
                 "asset_required": False,
                 "look_revision_id": None,
                 "pack_status": None,
@@ -477,10 +506,10 @@ def resolve_shot_asset_dependencies(
             continue
         # 缺视角检测需要看全部视角状态；选中只允许 ready
         all_views = portrait_views_for_episode(
-            project_id, name, episode_no, ready_only=False, conn=conn,
+            project_id, asset_name, episode_no, ready_only=False, conn=conn,
         )
         views = [v for v in all_views if v.get("status") == "ready" and v.get("image_path")] if ready_only else all_views
-        row = portrait_row_for_episode(project_id, name, episode_no, conn=conn)
+        row = portrait_row_for_episode(project_id, asset_name, episode_no, conn=conn)
         available = [v.get("view_role") for v in views if v.get("view_role")]
         wanted = select_character_view_roles(shot, name)
         selected = resolve_views_for_roles(
@@ -488,10 +517,13 @@ def resolve_shot_asset_dependencies(
         )
         characters_out.append({
             "name": name,
+            "identity_id": identity.identity_id if identity is not None else name,
+            "asset_name": asset_name,
+            "role_kind": role_kind,
             # Storyboards may contain one-off extras that intentionally have no
             # reusable library identity. Keep them auditable without requiring
             # a canonical multiview pack.
-            "asset_required": name in managed_characters,
+            "asset_required": asset_required,
             "look_revision_id": row["id"] if row else None,
             "pack_status": (row["pack_status"] if row and "pack_status" in row.keys() else None),
             "selected_view_ids": [v["id"] for v in selected],
@@ -657,6 +689,8 @@ def scan_episode_reference_asset_gaps(
     project_id: str,
     episode_no: int,
     shots: list[tuple[str, Any]],
+    bible=None,
+    screenplay=None,
 ) -> dict[str, Any]:
     """Read-only production preflight for the reusable assets used by an episode."""
     missing_characters: set[str] = set()
@@ -669,6 +703,8 @@ def scan_episode_reference_asset_gaps(
             shot_id=shot_id,
             shot=shot,
             scene_name=(getattr(shot, "scene_name", None) or None),
+            bible=bible,
+            screenplay=screenplay,
         )
         shot_blockers = manifest_production_blockers(manifest)
         if shot_blockers:
@@ -1926,12 +1962,19 @@ async def review_keyframe_with_evidence(
     bible: Any,
     visual_anchors: list[dict[str, Any]],
     ref_type: str = ASSET_TYPE_PLOT_KEY_FRAME,
+    screenplay=None,
 ) -> dict[str, Any]:
     """关键帧证据化 QA：候选图 + 人物/场景真值图对照。"""
     if not visual_evidence_qa_enabled():
         # 回退：无证据时仍打分，但不伪装满分
         from app.video_modes import review_reference_image
-        qa = await review_reference_image(candidate_b64, shot=shot, bible=bible, ref_type=ref_type)
+        qa = await review_reference_image(
+            candidate_b64,
+            shot=shot,
+            bible=bible,
+            ref_type=ref_type,
+            screenplay=screenplay,
+        )
         qa.setdefault("status", "scored")
         return qa
 
@@ -1955,23 +1998,36 @@ async def review_keyframe_with_evidence(
         })
 
     image_manifest = build_image_manifest(manifest_entries)
-    from app.character_policy import (
-        collective_role_anchor, functional_extra_anchor, is_collective_role, is_functional_extra,
-    )
     from app.compiler import keyframe_visual_contract
 
-    contract = keyframe_visual_contract(shot, bible)
+    contract = keyframe_visual_contract(shot, bible, screenplay=screenplay)
     target_contact_phase = str(contract.get("target_contact_phase") or "none")
     contact_phase_required = target_contact_phase in {"approach", "established", "separated"}
     by_name = {c.name: c for c in getattr(bible, "characters", []) or []}
     anchors_txt = []
-    for name in contract.get("visible_characters") or []:
-        if name in by_name:
-            anchors_txt.append(f"{name}: {by_name[name].appearance_canonical}")
-        elif is_collective_role(str(name)):
-            anchors_txt.append(f"{name}: {collective_role_anchor(str(name))}")
-        elif is_functional_extra(str(name)):
-            anchors_txt.append(f"{name}: {functional_extra_anchor(str(name))}")
+    if screenplay is not None and getattr(screenplay, "narrative_plan", None) is not None:
+        from app.identity_contracts import narrative_identity_resolver
+
+        resolver = narrative_identity_resolver(bible, screenplay)
+        anchors_txt.extend(
+            f"{name}: {resolver.visual_anchor(str(name))}"
+            for name in contract.get("visible_characters") or []
+        )
+    else:
+        from app.character_policy import (
+            collective_role_anchor,
+            functional_extra_anchor,
+            is_collective_role,
+            is_functional_extra,
+        )
+
+        for name in contract.get("visible_characters") or []:
+            if name in by_name:
+                anchors_txt.append(f"{name}: {by_name[name].appearance_canonical}")
+            elif is_collective_role(str(name)):
+                anchors_txt.append(f"{name}: {collective_role_anchor(str(name))}")
+            elif is_functional_extra(str(name)):
+                anchors_txt.append(f"{name}: {functional_extra_anchor(str(name))}")
 
     geometry_requirements = [
         f"唯一目标定格：{contract.get('target_keyframe_desc') or getattr(shot, 'action_desc', '')}",

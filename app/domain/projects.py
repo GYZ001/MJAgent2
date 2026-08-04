@@ -1038,16 +1038,13 @@ def _compact_project_episode_numbers(conn, project_id: str) -> dict[str, object]
             )
         for row, new_no in changes:
             conn.execute(
-                """UPDATE episodes
-                      SET episode_no=?,screenplay_json=?,storyboard_outline_json=?
-                    WHERE id=?""",
-                (
-                    new_no,
-                    _json_with_episode_number(row["screenplay_json"], new_no),
-                    _json_with_episode_number(row["storyboard_outline_json"], new_no),
-                    row["id"],
-                ),
+                "UPDATE episodes SET episode_no=? WHERE id=?",
+                (new_no, row["id"]),
             )
+            # Published screenplay/storyboard JSON is an immutable projection
+            # of content-addressed artifacts.  Episode numbering is display
+            # metadata keyed by the stable episode id; renumbering must not
+            # silently rewrite certified narrative content.
             draft = conn.execute(
                 "SELECT content_json FROM screenplay_drafts WHERE episode_id=?",
                 (row["id"],),

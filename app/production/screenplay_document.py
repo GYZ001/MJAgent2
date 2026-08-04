@@ -17,6 +17,7 @@ from app.schemas import (
     InformationItem,
     KeyDialogueChain,
     KeyDialogueTurn,
+    NarrativeContinuityPlan,
     PlotSpine,
     ScriptScene,
     StoryEvent,
@@ -86,6 +87,9 @@ class ScreenplayDocument(BaseModel):
     """权威可修补结构。"""
 
     screenplay_metadata: ScreenplayMetadata = Field(default_factory=ScreenplayMetadata)
+    # 叙事图是剧本文档的权威内容，不是可从散文投影重建的缓存。
+    # 因此 EpisodeScreenplay <-> ScreenplayDocument 必须完整往返它。
+    narrative_plan: NarrativeContinuityPlan | None = None
     plot_spine: PlotSpine | None = None
     scene_blocks: list[SceneBlockNode] = Field(default_factory=list)
     story_events: list[StoryEvent] = Field(default_factory=list)
@@ -131,6 +135,11 @@ def screenplay_to_document(script: EpisodeScreenplay) -> ScreenplayDocument:
     scene_blocks = _build_scene_blocks(script)
     return ScreenplayDocument(
         screenplay_metadata=meta,
+        narrative_plan=(
+            script.narrative_plan.model_copy(deep=True)
+            if script.narrative_plan is not None
+            else None
+        ),
         plot_spine=script.plot_spine,
         scene_blocks=scene_blocks,
         story_events=list(script.events or []),
@@ -187,6 +196,11 @@ def document_to_screenplay(doc: ScreenplayDocument) -> EpisodeScreenplay:
         conflict=meta.conflict,
         climax=meta.climax,
         episode_premise=meta.episode_premise,
+        narrative_plan=(
+            rederived.narrative_plan.model_copy(deep=True)
+            if rederived.narrative_plan is not None
+            else None
+        ),
         events=list(rederived.story_events),
         information_ledger=list(rederived.information_ledger),
         voice_bible=list(rederived.voice_bible),
@@ -405,7 +419,51 @@ def apply_field_patch(
         touched.append("plot_spine")
         return ScreenplayDocument.model_validate(data), touched
 
+    # Unified narrative graph node.  The collection and node identity come
+    # from the schema/issue evidence; story words never participate in routing.
+    # This keeps post-QA repair granular without replacing the whole graph.
     kind = (target.get("kind") or "").strip()
+    if kind == "narrative_node" or path.startswith("narrative_plan."):
+        plan = data.get("narrative_plan")
+        if not isinstance(plan, dict):
+            raise KeyError("narrative_plan not found")
+        collection = str(target.get("collection") or "").strip()
+        if not collection and path.startswith("narrative_plan."):
+            parts = path.split(".")
+            collection = parts[1] if len(parts) > 1 else ""
+        nodes = plan.get(collection)
+        if not isinstance(nodes, list):
+            raise KeyError(f"narrative collection not found: {collection}")
+        node_id = str(target.get("id") or "").strip()
+
+        def find_nested(value: Any) -> dict[str, Any] | None:
+            if isinstance(value, dict):
+                if any(
+                    key.endswith("_id") and str(candidate or "") == node_id
+                    for key, candidate in value.items()
+                ):
+                    return value
+                for child in value.values():
+                    found = find_nested(child)
+                    if found is not None:
+                        return found
+            elif isinstance(value, list):
+                for child in value:
+                    found = find_nested(child)
+                    if found is not None:
+                        return found
+            return None
+
+        node = find_nested(nodes)
+        if node is None:
+            raise KeyError(f"narrative node not found: {collection}/{node_id}")
+        field = path.split(".")[-1]
+        if field not in node:
+            raise KeyError(f"unsupported narrative node field: {field}")
+        node[field] = value
+        touched.append(f"narrative:{collection}:{node_id}")
+        return ScreenplayDocument.model_validate(data), touched
+
     node_id = str(target.get("id") or "").strip()
 
     if kind in {"screenplay_scene", "scene"} or path.startswith("scene_blocks"):

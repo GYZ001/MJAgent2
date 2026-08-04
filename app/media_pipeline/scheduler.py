@@ -18,7 +18,12 @@ from app.media_pipeline.retry_policy import (
 )
 
 
-def continuity_anchor_ready(conn, after_shot_id: str | None) -> tuple[bool, str | None]:
+def continuity_anchor_ready(
+    conn,
+    after_shot_id: str | None,
+    *,
+    require_adopted: bool = False,
+) -> tuple[bool, str | None]:
     """连续镜是否已有可用尾帧锚点。
 
     返回 (ready, blocked_reason)。
@@ -46,6 +51,17 @@ def continuity_anchor_ready(conn, after_shot_id: str | None) -> tuple[bool, str 
 
     if shot["adopted_version_id"] and _tech_ok(shot["adopted_version_id"]):
         return True, None
+    if require_adopted:
+        active = conn.execute(
+            """SELECT COUNT(*) c FROM jobs
+               WHERE shot_id=? AND kind='video'
+                 AND status IN ('queued','running','waiting_provider','waiting_retry')
+                 AND cancellation_requested=0 AND abandoned=0""",
+            (after_shot_id,),
+        ).fetchone()["c"]
+        if active:
+            return False, "等待上一镜生成并采用"
+        return False, "上一镜尚未采用可用视频，待人工处理"
 
     candidates = conn.execute(
         """SELECT id FROM shot_versions

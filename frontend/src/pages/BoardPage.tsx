@@ -327,6 +327,49 @@ function StoryboardLaunchPanel({ episode, status, busy, onPrimary }: {
   )
 }
 
+function NarrativeReadinessPanel({ episode }: { episode: Episode }) {
+  const summary = episode.narrative_contract_summary
+  if (!summary) return null
+  const metrics = episode.narrative_metrics || {}
+  const review = episode.narrative_review_summary
+  const numberMetric = (key: string) => {
+    const value = metrics[key]
+    return typeof value === 'number' && Number.isFinite(value) ? value : null
+  }
+  const percentMetric = (key: string) => {
+    const value = numberMetric(key)
+    return value === null ? '待计算' : `${Math.round(value * 100)}%`
+  }
+  const duplicateActions = numberMetric('duplicate_primary_action_count')
+  const stateRegressions = numberMetric('state_regression_count')
+  const processingDebt = numberMetric('audience_processing_debt')
+  const ready = metrics.narrative_ready === true
+  const reviewCopy = review?.decision === 'pass'
+    ? '冷观众审读通过'
+    : review?.decision === 'revise'
+      ? '冷观众要求修订'
+      : review?.decision === 'needs_human_review'
+        ? '等待人工复核'
+        : '等待冷观众审读'
+
+  return <section className="card narrative-readiness" aria-label="全链路叙事一致性">
+    <header>
+      <div><b>全链路叙事一致性</b><span>同一事件、动作、人物认知与观众理解合同贯穿剧本和分镜</span></div>
+      <span className={`stamp ${ready ? 'green' : 'gold'}`}>{ready ? '叙事就绪' : reviewCopy}</span>
+    </header>
+    <dl>
+      <div><dt>命题 / 事件</dt><dd>{summary.proposition_count} / {summary.event_count}</dd></div>
+      <div><dt>目标观众路径</dt><dd>{summary.audience_prior_count}</dd></div>
+      <div><dt>事件交付覆盖</dt><dd>{percentMetric('event_coverage_rate')}</dd></div>
+      <div><dt>重复主动作</dt><dd>{duplicateActions ?? '待计算'}</dd></div>
+      <div><dt>状态回退</dt><dd>{stateRegressions ?? '待计算'}</dd></div>
+      <div><dt>观众处理欠债</dt><dd>{processingDebt === null ? '待计算' : `${processingDebt.toFixed(1)}s`}</dd></div>
+    </dl>
+    {review?.reason && <p>{review.reason}</p>}
+    <details><summary>查看理解与结构指标</summary><p>体验意图覆盖 {percentMetric('experience_intent_coverage_rate')} · 认知任务截止通过 {percentMetric('assimilation_deadline_pass_rate')} · 镜头功能贡献 {percentMetric('shot_contribution_coverage')}</p><p>系统逐个观众先验验收，不以平均高分替代低分位失败。</p></details>
+  </section>
+}
+
 function statusFallback(ep: Episode): StoryboardStatus {
   return {
     contract_version: 'storyboard-workspace.v1', snapshot_version: 0, state_fingerprint: '',
@@ -673,6 +716,8 @@ export default function BoardPage() {
         <h1>分镜台 <span className="sub">《{ep.title}》 · 安全审阅、修镜并交接下游</span></h1>
         <hr className="rule" />
       </header>
+
+      <NarrativeReadinessPanel episode={ep} />
 
       {showLaunchPanel ? (
         <StoryboardLaunchPanel episode={ep} status={status} busy={busy} onPrimary={() => { void runPrimary() }} />

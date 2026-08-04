@@ -41,6 +41,489 @@ def _review_json(value: Any, default: Any) -> Any:
         return default
 
 
+_REVIEW_INVALID_ARTIFACT_STATUSES = {
+    "stale", "rejected", "superseded", "needs_revision",
+}
+
+
+def _review_artifact_binding(
+    conn,
+    *,
+    artifact_id: str | None,
+    episode_id: str,
+    expected_types: set[str],
+) -> dict[str, Any]:
+    """Return a content-addressed artifact binding without trusting its pointer."""
+    binding: dict[str, Any] = {
+        "artifact_id": artifact_id,
+        "content_hash": None,
+        "status": None,
+        "verified": False,
+        "content": None,
+        "parent_artifact_ids": [],
+    }
+    if not artifact_id:
+        return binding
+    try:
+        row = conn.execute(
+            """SELECT id,type,scope_type,scope_id,status,content_json,content_hash,
+                      parent_artifact_ids_json,contract_version,prompt_version
+                 FROM artifacts WHERE id=?""",
+            (artifact_id,),
+        ).fetchone()
+    except Exception:  # legacy databases do not own authoritative artifacts
+        return binding
+    if row is None:
+        return binding
+    content = _review_json(row["content_json"], None)
+    parents = _review_json(row["parent_artifact_ids_json"], [])
+    if not isinstance(parents, list):
+        parents = []
+    try:
+        from app.evidence.repository import content_hash
+
+        computed_hash = content_hash(content)
+    except Exception:  # a hash service failure is an invalid binding
+        computed_hash = None
+    binding.update({
+        "artifact_id": row["id"],
+        "artifact_type": row["type"],
+        "content_hash": row["content_hash"],
+        "computed_hash": computed_hash,
+        "status": row["status"],
+        "contract_version": row["contract_version"],
+        "prompt_version": row["prompt_version"],
+        "content": content,
+        "parent_artifact_ids": [str(item) for item in parents if item],
+        "verified": bool(
+            row["type"] in expected_types
+            and row["scope_type"] == "episode"
+            and row["scope_id"] == episode_id
+            and row["status"] not in _REVIEW_INVALID_ARTIFACT_STATUSES
+            and content is not None
+            and computed_hash
+            and row["content_hash"] == computed_hash
+        ),
+    })
+    return binding
+
+
+def _review_certificate_binding(
+    conn,
+    *,
+    certificate_id: str | None,
+    kind: str,
+    episode_id: str,
+    artifact_id: str | None,
+    artifact_hash: str | None,
+    production_revision_id: str | None,
+    artifact_contract_version: str | None,
+    review_comparator_version: str | None = None,
+) -> dict[str, Any]:
+    """Verify the consumed release certificate and its exact gate evidence."""
+    binding: dict[str, Any] = {
+        "certificate_id": certificate_id,
+        "verified": False,
+        "evaluation_ids": [],
+        "evaluation_fingerprint": None,
+    }
+    if not certificate_id or not artifact_id or not artifact_hash or not production_revision_id:
+        return binding
+    try:
+        row = conn.execute(
+            """SELECT id,kind,scope_id,artifact_id,artifact_hash,input_fingerprint,
+                      contract_version,qa_profile_version,
+                      evaluation_ids_json,blockers,must_fix_issues,
+                      production_revision_id,consumed_at
+                 FROM completion_certificates WHERE id=?""",
+            (certificate_id,),
+        ).fetchone()
+    except Exception:
+        return binding
+    if row is None:
+        return binding
+    evaluation_ids = _review_json(row["evaluation_ids_json"], [])
+    if not isinstance(evaluation_ids, list):
+        evaluation_ids = []
+    evaluation_ids = list(dict.fromkeys(str(item) for item in evaluation_ids if item))
+    evaluation_rows: list[Any] = []
+    if evaluation_ids:
+        marks = ",".join("?" for _ in evaluation_ids)
+        evaluation_rows = conn.execute(
+            f"""SELECT id,artifact_id,evaluator_name,evaluator_version,status,
+                       hard_gate_passed,evaluation_role,runtime_blocking,issues_json
+                  FROM evaluations WHERE id IN ({marks})""",
+            evaluation_ids,
+        ).fetchall()
+    evaluation_projection = sorted(
+        ({key: item[key] for key in item.keys()} for item in evaluation_rows),
+        key=lambda item: item["id"],
+    )
+    exact_evaluations = bool(
+        len(evaluation_projection) == len(evaluation_ids)
+        and all(item["artifact_id"] == artifact_id for item in evaluation_projection)
+    )
+
+    def _passed(name: str, *, evaluator_version: str | None) -> bool:
+        matches = [item for item in evaluation_projection if item["evaluator_name"] == name]
+        if len(matches) != 1 or not evaluator_version:
+            return False
+        item = matches[0]
+        issues = _review_json(item.get("issues_json"), [])
+        blocking_issue = bool(
+            not isinstance(issues, list)
+            or any(
+                isinstance(issue, dict)
+                and (
+                    str(issue.get("severity") or "").lower() == "blocker"
+                    or bool(issue.get("must_fix"))
+                )
+                for issue in issues
+            )
+        )
+        return bool(
+            item["evaluator_version"] == evaluator_version
+            and item["status"] == "passed"
+            and bool(item["hard_gate_passed"])
+            and item["evaluation_role"] == "runtime_gate"
+            and bool(item["runtime_blocking"])
+            and not blocking_issue
+        )
+
+    required_gates_passed = (
+        _passed(
+            "screenplay_production_qa",
+            evaluator_version=row["qa_profile_version"],
+        )
+        if kind == "screenplay"
+        else (
+            _passed(
+                "storyboard_full_gate",
+                evaluator_version=row["contract_version"],
+            )
+            and _passed(
+                "narrative_blind_comparator",
+                evaluator_version=review_comparator_version,
+            )
+        )
+    )
+    try:
+        revision = conn.execute(
+            "SELECT * FROM production_revisions WHERE id=?",
+            (production_revision_id,),
+        ).fetchone()
+    except Exception:  # legacy schemas cannot prove a narrative revision
+        revision = None
+    revision_verified = bool(
+        revision
+        and revision["kind"] == kind
+        and revision["episode_id"] == episode_id
+        and revision["status"] == "published"
+        and revision["working_artifact_id"] == artifact_id
+        and revision["published_artifact_id"] == artifact_id
+        and str(revision["input_fingerprint"] or "") == str(row["input_fingerprint"] or "")
+        and str(revision["contract_version"] or "") == str(row["contract_version"] or "")
+        and str(revision["qa_profile_version"] or "") == str(row["qa_profile_version"] or "")
+    )
+    binding.update({
+        "certificate_id": row["id"],
+        "artifact_id": row["artifact_id"],
+        "artifact_hash": row["artifact_hash"],
+        "production_revision_id": row["production_revision_id"],
+        "contract_version": row["contract_version"],
+        "qa_profile_version": row["qa_profile_version"],
+        "consumed": row["consumed_at"] is not None,
+        "evaluation_ids": evaluation_ids,
+        "evaluation_fingerprint": _review_sha(evaluation_projection),
+        "verified": bool(
+            row["kind"] == kind
+            and row["scope_id"] == episode_id
+            and row["artifact_id"] == artifact_id
+            and row["artifact_hash"] == artifact_hash
+            and row["production_revision_id"] == production_revision_id
+            and bool(row["contract_version"])
+            and row["contract_version"] == artifact_contract_version
+            and bool(row["qa_profile_version"])
+            and int(row["blockers"] or 0) == 0
+            and int(row["must_fix_issues"] or 0) == 0
+            and row["consumed_at"] is not None
+            and exact_evaluations
+            and required_gates_passed
+            and revision_verified
+        ),
+    })
+    return binding
+
+
+def _review_narrative_authority_snapshot(conn, ep: dict[str, Any]) -> dict[str, Any]:
+    """Bind every release fact required by a narrative-authority episode.
+
+    This contract is intentionally content-addressed.  It does not infer story
+    meaning from names or genres; the presence of the typed narrative plan is
+    the sole authority switch.
+    """
+    raw_screenplay = _review_json(ep.get("screenplay_json"), None)
+    raw_requires_authority = bool(
+        isinstance(raw_screenplay, dict)
+        and raw_screenplay.get("narrative_plan") is not None
+    )
+    from app.production.screenplay_authority import (
+        episode_requires_immutable_screenplay_authority,
+        resolve_downstream_screenplay,
+    )
+
+    immutable_required = episode_requires_immutable_screenplay_authority(
+        ep,
+        conn=conn,
+    )
+    try:
+        screenplay_context = resolve_downstream_screenplay(
+            str(ep.get("id") or ""),
+            conn=conn,
+        )
+        screenplay = screenplay_context.screenplay
+    except Exception as exc:
+        required = bool(immutable_required or raw_requires_authority)
+        invalid_version = (
+            _review_sha({
+                "episode_id": ep.get("id"),
+                "screenplay_projection": raw_screenplay,
+                "error": "NARRATIVE_SCREENPLAY_PROJECTION_INVALID",
+                "detail": str(exc),
+            })[:32]
+            if required
+            else None
+        )
+        return {
+            "required": required,
+            "verified": False,
+            "authority_version": invalid_version,
+            "errors": ["NARRATIVE_SCREENPLAY_PROJECTION_INVALID"],
+        }
+    if not screenplay_context.narrative_authority_required:
+        return {
+            "required": False,
+            "verified": True,
+            "authority_version": None,
+            "errors": [],
+        }
+
+    episode_id = str(ep.get("id") or "")
+    errors: list[str] = []
+    screenplay_id = ep.get("published_screenplay_artifact_id")
+    storyboard_id = ep.get("published_storyboard_artifact_id")
+    report_id = ep.get("narrative_review_artifact_id")
+    if screenplay_id != ep.get("screenplay_artifact_id"):
+        errors.append("NARRATIVE_SCREENPLAY_NOT_CURRENT_PUBLISHED_ARTIFACT")
+    if storyboard_id != ep.get("storyboard_artifact_id"):
+        errors.append("NARRATIVE_STORYBOARD_NOT_CURRENT_PUBLISHED_ARTIFACT")
+
+    screenplay_artifact = _review_artifact_binding(
+        conn,
+        artifact_id=screenplay_id,
+        episode_id=episode_id,
+        expected_types={"screenplay_document"},
+    )
+    storyboard_artifact = _review_artifact_binding(
+        conn,
+        artifact_id=storyboard_id,
+        episode_id=episode_id,
+        expected_types={"storyboard", "storyboard_document"},
+    )
+    review_artifact = _review_artifact_binding(
+        conn,
+        artifact_id=report_id,
+        episode_id=episode_id,
+        expected_types={"narrative_review_report"},
+    )
+    if not screenplay_artifact["verified"]:
+        errors.append("NARRATIVE_SCREENPLAY_ARTIFACT_UNVERIFIED")
+    if not storyboard_artifact["verified"]:
+        errors.append("NARRATIVE_STORYBOARD_ARTIFACT_UNVERIFIED")
+    if not review_artifact["verified"]:
+        errors.append("NARRATIVE_REVIEW_ARTIFACT_UNVERIFIED")
+
+    screenplay_projection_verified = False
+    if screenplay_artifact["verified"]:
+        try:
+            content = screenplay_artifact["content"]
+            if isinstance(content, dict) and "screenplay_metadata" in content:
+                from app.production.screenplay_document import (
+                    ScreenplayDocument,
+                    document_to_screenplay,
+                )
+
+                artifact_screenplay = document_to_screenplay(
+                    ScreenplayDocument.model_validate(content)
+                )
+            elif isinstance(content, dict) and "_projection" in content:
+                artifact_screenplay = EpisodeScreenplay.model_validate(content["_projection"])
+            else:
+                artifact_screenplay = EpisodeScreenplay.model_validate(content)
+            screenplay_projection_verified = (
+                artifact_screenplay.model_dump(mode="json")
+                == screenplay.model_dump(mode="json")
+            )
+        except Exception:
+            screenplay_projection_verified = False
+    if not screenplay_projection_verified:
+        errors.append("NARRATIVE_SCREENPLAY_PROJECTION_DRIFT")
+
+    shots_projection_hash: str | None = None
+    shots_projection_verified = False
+    board = None
+    board_payload: dict[str, Any] | None = None
+    try:
+        from app.evidence.repository import content_hash
+
+        try:
+            board_builder = _board_from_shot_rows
+        except NameError:  # pragma: no cover - direct module import compatibility
+            from app.domain.storyboard_ops import _board_from_shot_rows as board_builder
+
+        shot_rows = conn.execute(
+            "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
+            (episode_id,),
+        ).fetchall()
+        board = board_builder(shot_rows, int(ep.get("episode_no") or 1))
+        board_payload = board.model_dump(mode="json")
+        from app.narrative import storyboard_authority_projection
+
+        current_authority_projection = storyboard_authority_projection(board)
+        artifact_authority_projection = storyboard_authority_projection(
+            storyboard_artifact["content"]
+        )
+        shots_projection_hash = content_hash(current_authority_projection)
+        shots_projection_verified = bool(
+            storyboard_artifact["verified"]
+            and artifact_authority_projection == current_authority_projection
+        )
+    except Exception:
+        shots_projection_verified = False
+    if not shots_projection_verified:
+        errors.append("NARRATIVE_SHOTS_PROJECTION_DRIFT")
+
+    review_verified = False
+    if (
+        ep.get("narrative_status") == "ready"
+        and board is not None
+        and storyboard_artifact["verified"]
+        and review_artifact["verified"]
+        and report_id in storyboard_artifact["parent_artifact_ids"]
+    ):
+        try:
+            from app.narrative_review import verify_review_chain_for_storyboard_artifact
+
+            persisted = {
+                "id": storyboard_artifact["artifact_id"],
+                "type": storyboard_artifact["artifact_type"],
+                "scope_type": "episode",
+                "scope_id": episode_id,
+                "status": storyboard_artifact["status"],
+                "content": storyboard_artifact["content"],
+                "content_hash": storyboard_artifact["content_hash"],
+                "parent_artifact_ids": storyboard_artifact["parent_artifact_ids"],
+            }
+            verified_report_id = verify_review_chain_for_storyboard_artifact(
+                episode_id=episode_id,
+                screenplay=screenplay,
+                storyboard_artifact=persisted,
+            )
+            review_verified = verified_report_id == report_id
+        except Exception:
+            review_verified = False
+    if not review_verified:
+        errors.append("NARRATIVE_REVIEW_CHAIN_UNVERIFIED")
+
+    screenplay_certificate = _review_certificate_binding(
+        conn,
+        certificate_id=ep.get("screenplay_completion_certificate_id"),
+        kind="screenplay",
+        episode_id=episode_id,
+        artifact_id=screenplay_id,
+        artifact_hash=screenplay_artifact.get("content_hash"),
+        production_revision_id=ep.get("screenplay_production_revision_id"),
+        artifact_contract_version=screenplay_artifact.get("contract_version"),
+    )
+    storyboard_certificate = _review_certificate_binding(
+        conn,
+        certificate_id=ep.get("storyboard_completion_certificate_id"),
+        kind="storyboard",
+        episode_id=episode_id,
+        artifact_id=storyboard_id,
+        artifact_hash=storyboard_artifact.get("content_hash"),
+        production_revision_id=ep.get("storyboard_production_revision_id"),
+        artifact_contract_version=storyboard_artifact.get("contract_version"),
+        review_comparator_version=review_artifact.get("prompt_version"),
+    )
+    if not screenplay_certificate["verified"]:
+        errors.append("NARRATIVE_SCREENPLAY_CERTIFICATE_UNVERIFIED")
+    if not storyboard_certificate["verified"]:
+        errors.append("NARRATIVE_STORYBOARD_CERTIFICATE_UNVERIFIED")
+
+    completion_authority_verified = False
+    if board_payload is not None:
+        try:
+            from app.production.certificate import (
+                verify_current_storyboard_completion_authority,
+            )
+
+            verify_current_storyboard_completion_authority(
+                episode=ep,
+                current_storyboard_content=board_payload,
+            )
+            completion_authority_verified = True
+        except Exception:
+            completion_authority_verified = False
+    if not completion_authority_verified:
+        errors.append("NARRATIVE_STORYBOARD_COMPLETION_AUTHORITY_UNVERIFIED")
+
+    material = {
+        "episode_id": episode_id,
+        "published_screenplay": {
+            key: screenplay_artifact.get(key)
+            for key in ("artifact_id", "content_hash", "status", "verified")
+        },
+        "published_storyboard": {
+            key: storyboard_artifact.get(key)
+            for key in ("artifact_id", "content_hash", "status", "verified")
+        },
+        "narrative_review": {
+            "artifact_id": review_artifact.get("artifact_id"),
+            "content_hash": review_artifact.get("content_hash"),
+            "verified": review_verified,
+        },
+        "screenplay_certificate": screenplay_certificate,
+        "storyboard_certificate": storyboard_certificate,
+        "storyboard_completion_authority_verified": completion_authority_verified,
+        "shots_projection_hash": shots_projection_hash,
+        "shots_projection_verified": shots_projection_verified,
+        "screenplay_projection_verified": screenplay_projection_verified,
+        "errors": sorted(set(errors)),
+    }
+    authority_version = _review_sha(material)[:32]
+    return {
+        "required": True,
+        "verified": not errors,
+        "authority_version": authority_version,
+        "published_screenplay_artifact_id": screenplay_artifact.get("artifact_id"),
+        "published_screenplay_artifact_hash": screenplay_artifact.get("content_hash"),
+        "published_storyboard_artifact_id": storyboard_artifact.get("artifact_id"),
+        "published_storyboard_artifact_hash": storyboard_artifact.get("content_hash"),
+        "narrative_review_artifact_id": review_artifact.get("artifact_id"),
+        "narrative_review_artifact_hash": review_artifact.get("content_hash"),
+        "narrative_review_verified": review_verified,
+        "screenplay_completion_certificate_id": screenplay_certificate.get("certificate_id"),
+        "screenplay_certificate_verified": screenplay_certificate.get("verified", False),
+        "storyboard_completion_certificate_id": storyboard_certificate.get("certificate_id"),
+        "storyboard_certificate_verified": storyboard_certificate.get("verified", False),
+        "storyboard_completion_authority_verified": completion_authority_verified,
+        "shots_projection_hash": shots_projection_hash,
+        "shots_projection_verified": shots_projection_verified,
+        "errors": sorted(set(errors)),
+    }
+
+
 def _ensure_review_wall_tables(conn=None) -> None:
     """存量数据库的进程内兼容迁移。"""
     db = conn or get_conn()
@@ -244,6 +727,7 @@ def _review_upstream_snapshot(episode_id: str) -> dict[str, Any]:
     confirmed = ep.get("status") in {"confirmed", "generating", "done", "mixed"}
     has_artifacts = bool(screenplay_qualified and published_screenplay and published_storyboard)
     assets = _review_asset_qualification(conn, episode_id)
+    narrative_authority = _review_narrative_authority_snapshot(conn, ep)
     active_storyboard_shot_ids = [
         row["id"] for row in conn.execute(
             "SELECT id FROM shots WHERE episode_id=? ORDER BY shot_no",
@@ -257,6 +741,8 @@ def _review_upstream_snapshot(episode_id: str) -> dict[str, Any]:
         blockers.append("分镜尚未完整确认")
     if active:
         blockers.append("编剧或分镜任务仍在运行")
+    if narrative_authority["required"] and not narrative_authority["verified"]:
+        blockers.append("叙事发布依赖已缺失或与当前正式投影不一致")
     if not assets["eligible"]:
         # 兼容历史快照；当前执行路径会重试资产并在耗尽后降级，不再阻断正向生产。
         assets["soft_warnings"].append({"warning": "asset_retry_then_fallback"})
@@ -273,6 +759,10 @@ def _review_upstream_snapshot(episode_id: str) -> dict[str, Any]:
         "asset_blockers": assets["blockers"],
         "asset_soft_warnings": assets["soft_warnings"],
         "active_storyboard_shot_ids": active_storyboard_shot_ids,
+        "narrative_authority_required": bool(narrative_authority["required"]),
+        "narrative_authority_verified": bool(narrative_authority["verified"]),
+        "narrative_authority_version": narrative_authority.get("authority_version"),
+        "narrative_authority": narrative_authority,
     }
     qualification_material = {
         **raw,
@@ -284,10 +774,22 @@ def _review_upstream_snapshot(episode_id: str) -> dict[str, Any]:
             for item in assets["inputs"]
         ],
     }
+    qualification_digest = _review_sha(qualification_material)[:32]
+    qualification_version = (
+        f"{narrative_authority['authority_version']}:{qualification_digest}"
+        if narrative_authority["required"]
+        else qualification_digest
+    )
     return {
         **raw,
-        "qualification_version": _review_sha(qualification_material)[:32],
-        "eligible_for_production": bool(confirmed and has_artifacts and not active and assets["eligible"]),
+        "qualification_version": qualification_version,
+        "eligible_for_production": bool(
+            confirmed
+            and has_artifacts
+            and not active
+            and assets["eligible"]
+            and (not narrative_authority["required"] or narrative_authority["verified"])
+        ),
         "blockers": blockers,
         "assets": assets,
         "server_time": now(),

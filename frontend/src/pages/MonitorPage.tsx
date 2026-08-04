@@ -71,6 +71,27 @@ interface JobsPage extends Page<Job> {
   counts: Record<string, number>;
   startup_recovery?: Record<string, number>;
 }
+interface VideoModeAudit {
+  planned_mode?: string | null;
+  actual_mode?: string | null;
+  video_input_intent?: string | null;
+  depends_on_shot_id?: string | null;
+  status?: string | null;
+  degraded_from_mode?: string | null;
+  degraded_to_mode?: string | null;
+  degraded_reason?: string | null;
+  capability_snapshot_id?: string | null;
+  stale?: boolean;
+  stale_reason?: string | null;
+}
+
+function monitorVideoModeLabel(mode?: string | null) {
+  return ({
+    REFERENCE_IMAGE_MODE: "参考图",
+    FIRST_LAST_FRAME_MODE: "首尾帧",
+    VIDEO_INPUT_MODE: "视频参考",
+  } as Record<string, string>)[mode || ""] || mode || "待执行";
+}
 interface CallContext {
   project_id?: string;
   project_name?: string;
@@ -1009,6 +1030,11 @@ function JobDrawer({
   const canCancel =
     job.source !== "screenplay" &&
     ["running", "queued", "recovering"].includes(job.status);
+  const modeAudit = (
+    detail?.video_mode_audit && typeof detail.video_mode_audit === "object"
+      ? detail.video_mode_audit
+      : null
+  ) as VideoModeAudit | null;
   return (
     <div
       className="monitor-drawer-backdrop"
@@ -1069,6 +1095,21 @@ function JobDrawer({
         )}
         {!detail && !error && (
           <div className="monitor-loading">正在加载任务详情…</div>
+        )}
+        {modeAudit && (
+          <section className="monitor-impact">
+            <b>视频生成方式</b>
+            <span>
+              {monitorVideoModeLabel(modeAudit.planned_mode)}
+              {" → "}
+              {monitorVideoModeLabel(modeAudit.actual_mode)}
+            </span>
+            {modeAudit.depends_on_shot_id && <span>等待依赖：上一镜采用视频或尾帧</span>}
+            {modeAudit.video_input_intent && <span>视频参考意图：{modeAudit.video_input_intent}</span>}
+            {modeAudit.degraded_reason && <span>降级原因：{modeAudit.degraded_reason}</span>}
+            {modeAudit.stale && <span>当前结果已失效：{modeAudit.stale_reason || "上游采用版本已变化"}</span>}
+            <details><summary>能力与计划版本</summary><code>{modeAudit.capability_snapshot_id || "未记录能力快照"}</code></details>
+          </section>
         )}
         {detail && (
           <details className="job-technical-details">
@@ -1207,6 +1248,8 @@ const SETTING_GROUP_DEFINITIONS: SettingGroupDefinition[] = [
       "video_ready_low_watermark",
       "video_ready_high_watermark",
       "media_scheduler_policy",
+      "video_plan_confidence_floor",
+      "video_plan_allow_unknown_dimensions",
       "video_concurrency",
       "auto_concurrency",
     ],
@@ -1242,7 +1285,12 @@ const SETTING_GROUP_DEFINITIONS: SettingGroupDefinition[] = [
     title: "下载、落盘与交付",
     description: "控制生成结果下载、本地校验和交付文件写入速度。",
     affects: ["媒体下载", "文件校验", "交付候选"],
-    keys: ["download_concurrency", "finalize_concurrency"],
+    keys: [
+      "download_concurrency",
+      "finalize_concurrency",
+      "provider_media_public_base_url",
+      "provider_media_max_download_bytes",
+    ],
   },
   {
     id: "budget-logs",
@@ -1278,6 +1326,8 @@ const SETTING_FIELD_IMPACTS: Record<string, string> = {
   video_ready_low_watermark: "就绪任务不足此数量时加快准备",
   video_ready_high_watermark: "就绪任务达到此数量后放缓准备",
   media_scheduler_policy: "任务队列选择下一项媒体工作的方式",
+  video_plan_confidence_floor: "AI 模式计划低于此置信度时阻止付费提交",
+  video_plan_allow_unknown_dimensions: "是否允许时空、剪辑或动作关系仍未知的计划继续",
   video_concurrency: "仍使用旧链路时的视频并发兼容值",
   auto_concurrency: "旧版自动生成流程的并发兼容值",
   reference_pipeline_concurrency: "同时推进多少条参考图准备流水线",
@@ -1293,6 +1343,8 @@ const SETTING_FIELD_IMPACTS: Record<string, string> = {
   max_repair_attempts: "同一问题允许自动修复的最大次数",
   download_concurrency: "同时下载多少个模型生成结果",
   finalize_concurrency: "同时执行多少个文件落盘与校验任务",
+  provider_media_public_base_url: "自有对象存储或 CDN 中项目媒体目录的公开基址",
+  provider_media_max_download_bytes: "参考视频发布校验允许读取的最大文件大小",
   episode_cost_limit_cny: "单集达到此费用后暂停继续产生费用",
   provider_call_retention_days: "调用日志可在监制房查询的保留天数",
   error_log_retention_days: "错误记录可用于排障的保留天数",

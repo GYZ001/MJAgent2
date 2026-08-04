@@ -2,13 +2,22 @@
 from __future__ import annotations
 
 import json
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 from app.db import get_conn, new_id, now
 from app.evidence import repository as evidence_repository
 from app.production.metrics import record_certificate_issued, record_publish_without_certificate
+
+
+_SCREENPLAY_GATE_EVALUATOR = "screenplay_production_qa"
+_STORYBOARD_GATE_EVALUATOR = "storyboard_full_gate"
+_NARRATIVE_REVIEW_EVALUATOR = "narrative_blind_comparator"
+_CURRENT_QA_PROFILE = {
+    "screenplay": "screenplay-qa-gate-2",
+    "storyboard": "storyboard-full-gate-2",
+}
 
 
 class CompletionCertificate(BaseModel):
@@ -52,6 +61,225 @@ def ensure_completion_certificates_table(conn=None) -> None:
     db.commit()
 
 
+def _load_evaluation_rows(evaluation_ids: list[str]) -> list[Any]:
+    if not evaluation_ids:
+        return []
+    marks = ",".join("?" for _ in evaluation_ids)
+    return list(get_conn().execute(
+        f"""SELECT id,artifact_id,status,hard_gate_passed,evaluation_role,
+                   evaluator_name,evaluator_version,runtime_blocking,issues_json
+              FROM evaluations WHERE id IN ({marks})""",
+        evaluation_ids,
+    ).fetchall())
+
+
+def _row_has_blocking_issue(row: Any) -> bool:
+    try:
+        issues = json.loads(row["issues_json"] or "[]")
+    except (TypeError, json.JSONDecodeError):
+        return True
+    if not isinstance(issues, list):
+        return True
+    return any(
+        isinstance(issue, dict)
+        and (
+            str(issue.get("severity") or "").lower() == "blocker"
+            or bool(issue.get("must_fix"))
+        )
+        for issue in issues
+    )
+
+
+def _is_passing_runtime_gate(row: Any) -> bool:
+    return bool(
+        row["evaluation_role"] == "runtime_gate"
+        and bool(row["runtime_blocking"])
+        and row["status"] == "passed"
+        and bool(row["hard_gate_passed"])
+        and not _row_has_blocking_issue(row)
+    )
+
+
+def _required_exact_runtime_gate(
+    rows: list[Any],
+    *,
+    evaluator_name: str,
+    evaluator_version: str,
+) -> Any:
+    named = [row for row in rows if row["evaluator_name"] == evaluator_name]
+    if len(named) != 1:
+        raise ValueError(
+            f"完成凭证必须精确引用一个 {evaluator_name} runtime gate"
+        )
+    row = named[0]
+    if not evaluator_version or row["evaluator_version"] != evaluator_version:
+        raise ValueError(
+            f"完成凭证的 {evaluator_name} evaluator_version 与当前契约不匹配"
+        )
+    if not _is_passing_runtime_gate(row):
+        raise ValueError(
+            f"完成凭证的 {evaluator_name} 必须是已通过且 runtime_blocking 的 runtime_gate"
+        )
+    return row
+
+
+def _narrative_screenplay_for_artifact(
+    *,
+    kind: Literal["screenplay", "storyboard"],
+    scope_id: str,
+    artifact: dict[str, Any],
+):
+    """Return the authoritative screenplay only when this artifact uses it.
+
+    A missing plan is the explicit legacy boundary.  A malformed non-empty
+    projection is not silently downgraded to legacy.
+    """
+    from app.schemas import EpisodeScreenplay
+
+    if kind == "screenplay":
+        content = artifact.get("content")
+        if not isinstance(content, dict):
+            return None
+        projection = content.get("_projection")
+        narrative_payload = (
+            projection.get("narrative_plan")
+            if isinstance(projection, dict)
+            else content.get("narrative_plan")
+        )
+        if narrative_payload is None:
+            return None
+        try:
+            if "screenplay_metadata" in content:
+                from app.production.screenplay_document import (
+                    ScreenplayDocument,
+                    document_to_screenplay,
+                )
+
+                return document_to_screenplay(ScreenplayDocument.model_validate(content))
+            if isinstance(projection, dict):
+                return EpisodeScreenplay.model_validate(projection)
+            return EpisodeScreenplay.model_validate(content)
+        except Exception as exc:  # noqa: BLE001 - immutable authority boundary
+            raise ValueError(f"剧本 Artifact 的叙事权威契约无法验证：{exc}") from exc
+
+    episode = get_conn().execute(
+        "SELECT screenplay_json FROM episodes WHERE id=?",
+        (scope_id,),
+    ).fetchone()
+    if episode is None:
+        raise ValueError("分镜完成凭证所属剧集不存在")
+    raw = episode["screenplay_json"]
+    if not raw:
+        return None
+    try:
+        screenplay = EpisodeScreenplay.model_validate_json(raw)
+    except Exception as exc:  # noqa: BLE001 - malformed current projection fails closed
+        raise ValueError(f"当前剧本投影无法验证：{exc}") from exc
+    return screenplay if screenplay.narrative_plan is not None else None
+
+
+def _validate_revision_binding(
+    *,
+    kind: Literal["screenplay", "storyboard"],
+    scope_id: str,
+    artifact_id: str,
+    input_fingerprint: str,
+    contract_version: str,
+    qa_profile_version: str,
+    production_revision_id: str | None,
+    allow_published: bool = False,
+) -> None:
+    if not production_revision_id:
+        raise ValueError("叙事完成凭证必须绑定 production revision")
+    row = get_conn().execute(
+        "SELECT * FROM production_revisions WHERE id=?",
+        (production_revision_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError("完成凭证绑定的 production revision 不存在")
+    valid_statuses = {"active", "published"} if allow_published else {"active"}
+    if (
+        row["kind"] != kind
+        or row["episode_id"] != scope_id
+        or row["status"] not in valid_statuses
+        or row["working_artifact_id"] != artifact_id
+        or (
+            row["status"] == "published"
+            and row["published_artifact_id"] != artifact_id
+        )
+    ):
+        raise ValueError("完成凭证未绑定当前 working/published revision")
+    exact_fields = {
+        "input_fingerprint": input_fingerprint,
+        "contract_version": contract_version,
+        "qa_profile_version": qa_profile_version,
+    }
+    for field, supplied in exact_fields.items():
+        if str(row[field] or "") != str(supplied or ""):
+            raise ValueError(f"完成凭证 {field} 与 production revision 不匹配")
+
+
+def _validate_narrative_certificate_authority(
+    *,
+    kind: Literal["screenplay", "storyboard"],
+    scope_id: str,
+    artifact: dict[str, Any],
+    rows: list[Any],
+    contract_version: str,
+    qa_profile_version: str,
+) -> bool:
+    screenplay = _narrative_screenplay_for_artifact(
+        kind=kind,
+        scope_id=scope_id,
+        artifact=artifact,
+    )
+    if screenplay is None:
+        return False
+
+    artifact_contract = str(artifact.get("contract_version") or "")
+    if not contract_version or contract_version != artifact_contract:
+        raise ValueError("叙事完成凭证必须精确匹配当前 Artifact contract_version")
+    if qa_profile_version != _CURRENT_QA_PROFILE[kind]:
+        raise ValueError("叙事完成凭证的 qa_profile_version 与当前运行契约不匹配")
+
+    if kind == "screenplay":
+        _required_exact_runtime_gate(
+            rows,
+            evaluator_name=_SCREENPLAY_GATE_EVALUATOR,
+            evaluator_version=qa_profile_version,
+        )
+        return True
+
+    try:
+        from app.narrative_review import (
+            COMPARATOR_PROMPT_VERSION,
+            verify_review_chain_for_storyboard_artifact,
+        )
+
+        report_id = verify_review_chain_for_storyboard_artifact(
+            episode_id=scope_id,
+            screenplay=screenplay,
+            storyboard_artifact=artifact,
+        )
+    except Exception as exc:  # noqa: BLE001 - release evidence boundary
+        raise ValueError(f"分镜完成凭证的冷观众证据链无效：{exc}") from exc
+    report_artifact = evidence_repository.get_artifact(report_id)
+    comparator_version = str((report_artifact or {}).get("prompt_version") or "")
+    if comparator_version != COMPARATOR_PROMPT_VERSION:
+        raise ValueError("冷观众审读报告的 comparator 版本与当前运行契约不匹配")
+    _required_exact_runtime_gate(
+        rows,
+        evaluator_name=_STORYBOARD_GATE_EVALUATOR,
+        evaluator_version=contract_version,
+    )
+    _required_exact_runtime_gate(
+        rows,
+        evaluator_name=_NARRATIVE_REVIEW_EVALUATOR,
+        evaluator_version=comparator_version,
+    )
+    return True
+
+
 def issue_completion_certificate(
     *,
     kind: Literal["screenplay", "storyboard"],
@@ -74,24 +302,55 @@ def issue_completion_certificate(
     art = evidence_repository.get_artifact(artifact_id)
     if not art:
         raise ValueError(f"artifact 不存在: {artifact_id}")
+    if (
+        art.get("scope_type") != "episode"
+        or art.get("scope_id") != scope_id
+        or art.get("status") not in {"validated", "approved"}
+    ):
+        raise ValueError("完成凭证只能绑定当前集的可用 validated/approved Artifact")
     stored_hash = art.get("content_hash") or evidence_repository.content_hash(art.get("content"))
     if stored_hash != artifact_hash:
         raise ValueError("artifact_hash 与存储内容不一致，拒绝签发凭证")
+    if int(blockers or 0) > 0 or int(must_fix_issues or 0) > 0:
+        raise ValueError("完成凭证不能带有 blocker 或 must-fix")
     evaluation_ids = list(evaluation_ids or [])
-    if kind == "screenplay":
-        # QA/结构评估只作为凭证附带报告。修复预算耗尽后仍可为当前 working
-        # artifact 签发凭证；artifact/hash/版本一致性仍由下方确定性校验保护。
-        if evaluation_ids:
-            marks = ",".join("?" for _ in evaluation_ids)
-            rows = get_conn().execute(
-                f"SELECT id,artifact_id FROM evaluations WHERE id IN ({marks})",
-                evaluation_ids,
-            ).fetchall()
-            by_id = {row["id"]: row for row in rows}
-            if len(by_id) != len(set(evaluation_ids)):
-                raise ValueError("剧本完成凭证引用了不存在的 QA Evaluation")
-            if any(row["artifact_id"] != artifact_id for row in rows):
-                raise ValueError("剧本完成凭证引用了其他 Artifact 的 Evaluation")
+    rows = _load_evaluation_rows(evaluation_ids)
+    by_id = {row["id"]: row for row in rows}
+    if len(by_id) != len(set(evaluation_ids)):
+        raise ValueError("完成凭证引用了不存在的 Evaluation")
+    if any(row["artifact_id"] != artifact_id for row in rows):
+        raise ValueError("完成凭证引用了其他 Artifact 的 Evaluation")
+    runtime_gates = [
+        row for row in rows
+        if row["evaluation_role"] in {"runtime_gate", "business_safety"}
+    ]
+    if any(
+        not bool(row["hard_gate_passed"])
+        or row["status"] in {"failed", "error"}
+        for row in runtime_gates
+    ):
+        raise ValueError("引用的 runtime gate 尚未通过，拒绝签发完成凭证")
+    if any(_row_has_blocking_issue(row) for row in runtime_gates):
+        raise ValueError("runtime gate 仍含 blocker 或 must-fix，拒绝签发完成凭证")
+
+    narrative_authority = _validate_narrative_certificate_authority(
+        kind=kind,
+        scope_id=scope_id,
+        artifact=art,
+        rows=rows,
+        contract_version=contract_version,
+        qa_profile_version=qa_profile_version,
+    )
+    if narrative_authority:
+        _validate_revision_binding(
+            kind=kind,
+            scope_id=scope_id,
+            artifact_id=artifact_id,
+            input_fingerprint=input_fingerprint,
+            contract_version=contract_version,
+            qa_profile_version=qa_profile_version,
+            production_revision_id=production_revision_id,
+        )
 
     ensure_completion_certificates_table()
     certificate_id = new_id("cert")
@@ -179,6 +438,29 @@ def get_completion_certificate(certificate_id: str, *, conn=None) -> CompletionC
     )
 
 
+def completion_certificate_has_narrative_evidence(certificate_id: str | None) -> bool:
+    """Detect an existing narrative release without trusting mutable episode flags."""
+    if not certificate_id:
+        return False
+    cert = get_completion_certificate(str(certificate_id))
+    if cert is None:
+        return False
+    try:
+        if any(
+            row["evaluator_name"] == _NARRATIVE_REVIEW_EVALUATOR
+            for row in _load_evaluation_rows(cert.evaluation_ids)
+        ):
+            return True
+        artifact = evidence_repository.get_artifact(cert.artifact_id) or {}
+        return any(
+            (parent := evidence_repository.get_artifact(str(parent_id))) is not None
+            and parent.get("type") == "narrative_review_report"
+            for parent_id in artifact.get("parent_artifact_ids") or []
+        )
+    except Exception:  # noqa: BLE001 - detection is only an additional downgrade marker
+        return False
+
+
 def verify_completion_certificate(
     certificate: CompletionCertificate | str,
     *,
@@ -187,16 +469,31 @@ def verify_completion_certificate(
     expected_input_fingerprint: str | None = None,
     expected_contract_version: str | None = None,
     expected_qa_profile_version: str | None = None,
+    expected_kind: Literal["screenplay", "storyboard"] | None = None,
+    expected_scope_id: str | None = None,
+    expected_production_revision_id: str | None = None,
+    allow_consumed: bool = False,
 ) -> CompletionCertificate:
-    cert = (
-        get_completion_certificate(certificate)
-        if isinstance(certificate, str)
-        else certificate
+    # The database row is authoritative even when the caller passes a model.
+    # Otherwise a caller could construct a look-alike certificate object and
+    # bypass the immutable evaluation set recorded at issuance.
+    certificate_id = (
+        certificate if isinstance(certificate, str) else certificate.certificate_id
     )
+    cert = get_completion_certificate(certificate_id)
     if cert is None:
         raise ValueError("完成凭证不存在")
-    if cert.consumed_at is not None:
+    if cert.consumed_at is not None and not allow_consumed:
         raise ValueError("完成凭证已被消费，不可重放")
+    if expected_kind and cert.kind != expected_kind:
+        raise ValueError("完成凭证 kind 不匹配")
+    if expected_scope_id and cert.scope_id != expected_scope_id:
+        raise ValueError("完成凭证 scope_id 不匹配")
+    if (
+        expected_production_revision_id
+        and cert.production_revision_id != expected_production_revision_id
+    ):
+        raise ValueError("完成凭证 production_revision_id 不匹配")
     if expected_artifact_id and cert.artifact_id != expected_artifact_id:
         raise ValueError("完成凭证 artifact_id 不匹配")
     if expected_artifact_hash and cert.artifact_hash != expected_artifact_hash:
@@ -211,9 +508,121 @@ def verify_completion_certificate(
     art = evidence_repository.get_artifact(cert.artifact_id)
     if not art:
         raise ValueError("凭证绑定的 artifact 已不存在")
+    if (
+        art.get("scope_type") != "episode"
+        or art.get("scope_id") != cert.scope_id
+        or art.get("status") not in {"validated", "approved"}
+    ):
+        raise ValueError("凭证绑定的 artifact 范围或当前状态已失效")
     current_hash = art.get("content_hash") or evidence_repository.content_hash(art.get("content"))
     if current_hash != cert.artifact_hash:
         raise ValueError("凭证绑定的 artifact 内容已变化")
+    if cert.blockers or cert.must_fix_issues:
+        raise ValueError("完成凭证仍含 blocker 或 must-fix")
+
+    rows = _load_evaluation_rows(cert.evaluation_ids)
+    if len({row["id"] for row in rows}) != len(set(cert.evaluation_ids)):
+        raise ValueError("完成凭证引用的 Evaluation 已缺失")
+    if any(row["artifact_id"] != cert.artifact_id for row in rows):
+        raise ValueError("完成凭证的 Evaluation 与 Artifact 绑定已漂移")
+    narrative_authority = _validate_narrative_certificate_authority(
+        kind=cert.kind,
+        scope_id=cert.scope_id,
+        artifact=art,
+        rows=rows,
+        contract_version=cert.contract_version,
+        qa_profile_version=cert.qa_profile_version,
+    )
+    if narrative_authority:
+        runtime_gates = [
+            row for row in rows
+            if row["evaluation_role"] in {"runtime_gate", "business_safety"}
+        ]
+        if any(
+            not bool(row["runtime_blocking"])
+            or not bool(row["hard_gate_passed"])
+            or row["status"] != "passed"
+            or _row_has_blocking_issue(row)
+            for row in runtime_gates
+        ):
+            raise ValueError("完成凭证的 runtime gate 已失效")
+        _validate_revision_binding(
+            kind=cert.kind,
+            scope_id=cert.scope_id,
+            artifact_id=cert.artifact_id,
+            input_fingerprint=cert.input_fingerprint,
+            contract_version=cert.contract_version,
+            qa_profile_version=cert.qa_profile_version,
+            production_revision_id=cert.production_revision_id,
+            allow_published=allow_consumed,
+        )
+    return cert
+
+
+def verify_current_storyboard_completion_authority(
+    *,
+    episode: Any,
+    current_storyboard_content: dict[str, Any],
+) -> CompletionCertificate:
+    """Verify the consumed certificate that authorizes paid narrative work.
+
+    Live re-evaluation is deliberately absent: this function accepts only the
+    immutable certificate/evaluation/review lineage for the exact published
+    storyboard projection.
+    """
+    data = dict(episode)
+    from app.production.screenplay_authority import resolve_downstream_screenplay
+
+    screenplay_context = resolve_downstream_screenplay(
+        str(data.get("id") or ""),
+        conn=get_conn(),
+    )
+    screenplay = screenplay_context.screenplay
+    if not screenplay_context.narrative_authority_required:
+        raise ValueError("当前剧集不使用叙事权威凭证")
+
+    certificate_id = str(data.get("storyboard_completion_certificate_id") or "")
+    artifact_id = str(data.get("storyboard_artifact_id") or "")
+    revision_id = str(data.get("storyboard_production_revision_id") or "")
+    if not certificate_id or not artifact_id or not revision_id:
+        raise ValueError("当前叙事分镜缺少完成凭证、Artifact 或 production revision")
+    if (
+        data.get("narrative_status") != "ready"
+        or not data.get("narrative_review_artifact_id")
+    ):
+        raise ValueError("当前叙事分镜尚未取得有效冷观众审读结论")
+
+    cert = verify_completion_certificate(
+        certificate_id,
+        expected_kind="storyboard",
+        expected_scope_id=str(data.get("id") or ""),
+        expected_artifact_id=artifact_id,
+        expected_production_revision_id=revision_id,
+        allow_consumed=True,
+    )
+    if cert.consumed_at is None:
+        raise ValueError("当前叙事完成凭证尚未被原子发布消费")
+    artifact = evidence_repository.get_artifact(artifact_id)
+    from app.narrative import storyboard_authority_projection
+
+    if (
+        artifact is None
+        or storyboard_authority_projection(artifact.get("content") or {})
+        != storyboard_authority_projection(current_storyboard_content)
+    ):
+        raise ValueError("当前 shots 投影与完成凭证绑定的 Storyboard Artifact 不一致")
+    try:
+        from app.narrative_review import verify_review_chain_for_storyboard_artifact
+
+        report_id = verify_review_chain_for_storyboard_artifact(
+            episode_id=str(data.get("id") or ""),
+            screenplay=screenplay,
+            storyboard_artifact=artifact,
+        )
+    except Exception as exc:  # noqa: BLE001 - paid boundary fails closed
+        raise ValueError(f"当前叙事审读证据链已失效：{exc}") from exc
+    if report_id != data.get("narrative_review_artifact_id"):
+        raise ValueError("当前剧集的冷观众审读指针已漂移")
     return cert
 
 

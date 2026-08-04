@@ -148,6 +148,7 @@ export function compactShotStage(shot: Shot): string {
     reference_qa: current != null && total ? `参考图质检 ${current}/${total}` : '参考图质检',
     reference_consistency: '参考图一致性',
     waiting_continuity_anchor: '等待上一镜',
+    waiting_dependency: '等待上一镜采用素材',
     continuity_assembling: '装配连续性',
     video_ready: '视频输入就绪',
     waiting_video_slot: pipeline?.queue_position ? `等待名额（前方 ${pipeline.queue_position}）` : '等待视频名额',

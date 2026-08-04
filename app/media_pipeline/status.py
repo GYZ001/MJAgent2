@@ -60,7 +60,8 @@ def _macro_status_from_job(job) -> str:
         persisted = read_job_pipeline(job)
         stage = persisted.get("pipeline_stage")
         if stage in (
-            S.STAGE_WAITING_CONTINUITY, S.STAGE_WAITING_VIDEO_SLOT, S.STAGE_WAITING_HUMAN,
+            S.STAGE_WAITING_CONTINUITY, S.STAGE_WAITING_DEPENDENCY,
+            S.STAGE_WAITING_VIDEO_SLOT, S.STAGE_WAITING_HUMAN,
         ):
             return "waiting"
         return "queued"
@@ -124,17 +125,24 @@ def _status_from_rows(shot, *, candidate_count: int, retake_count: int,
         if provider_task_id and current_stage in (
             S.STAGE_REFERENCE_PROMPT, S.STAGE_REFERENCE_GENERATE, S.STAGE_REFERENCE_QA,
             S.STAGE_REFERENCE_CONSISTENCY, S.STAGE_REFERENCE, S.STAGE_JOB_QUEUED,
-            S.STAGE_WAITING_CONTINUITY, S.STAGE_VIDEO_READY, S.STAGE_WAITING_VIDEO_SLOT,
+            S.STAGE_WAITING_CONTINUITY, S.STAGE_WAITING_DEPENDENCY,
+            S.STAGE_VIDEO_READY, S.STAGE_WAITING_VIDEO_SLOT,
         ):
             current_stage = S.STAGE_VIDEO_GENERATING if job["status"] == S.WAITING_PROVIDER else S.STAGE_VIDEO_DOWNLOADING
 
         if job["provider_submitted_at"]:
             provider_elapsed_s = max(0.0, now() - float(job["provider_submitted_at"]))
 
-        if job["after_shot_id"] and current_stage == S.STAGE_WAITING_CONTINUITY:
+        if job["after_shot_id"] and current_stage in (
+            S.STAGE_WAITING_CONTINUITY, S.STAGE_WAITING_DEPENDENCY,
+        ):
             blocked_by_shot_id = job["after_shot_id"]
             from app.media_pipeline.scheduler import continuity_anchor_ready
-            ready, reason = continuity_anchor_ready(db, job["after_shot_id"])
+            ready, reason = continuity_anchor_ready(
+                db,
+                job["after_shot_id"],
+                require_adopted=current_stage == S.STAGE_WAITING_DEPENDENCY,
+            )
             if not ready:
                 pipeline_status = "waiting"
                 blocked_reason = reason_text or reason
@@ -144,7 +152,11 @@ def _status_from_rows(shot, *, candidate_count: int, retake_count: int,
 
         if current_stage == S.STAGE_WAITING_HUMAN or pipeline_status == S.WAITING_HUMAN:
             pipeline_status = S.WAITING_HUMAN
-        if reason_text and current_stage in (S.STAGE_WAITING_CONTINUITY, S.STAGE_WAITING_VIDEO_SLOT):
+        if reason_text and current_stage in (
+            S.STAGE_WAITING_CONTINUITY,
+            S.STAGE_WAITING_DEPENDENCY,
+            S.STAGE_WAITING_VIDEO_SLOT,
+        ):
             blocked_reason = reason_text
 
         # next_stage 粗映射
@@ -157,6 +169,7 @@ def _status_from_rows(shot, *, candidate_count: int, retake_count: int,
             S.STAGE_REFERENCE_QA: S.STAGE_REFERENCE_CONSISTENCY,
             S.STAGE_REFERENCE_CONSISTENCY: S.STAGE_VIDEO_READY,
             S.STAGE_WAITING_CONTINUITY: S.STAGE_CONTINUITY_ASSEMBLING,
+            S.STAGE_WAITING_DEPENDENCY: S.STAGE_VIDEO_READY,
             S.STAGE_CONTINUITY_ASSEMBLING: S.STAGE_VIDEO_READY,
             S.STAGE_VIDEO_READY: S.STAGE_VIDEO_SUBMITTING,
             S.STAGE_WAITING_VIDEO_SLOT: S.STAGE_VIDEO_SUBMITTING,
@@ -407,7 +420,7 @@ def episode_pipeline_statuses(episode_id: str, *, conn=None) -> tuple[dict[str, 
             preparing_refs += 1
         if stage in (S.STAGE_VIDEO_READY, S.STAGE_WAITING_VIDEO_SLOT):
             video_ready += 1
-        if stage == S.STAGE_WAITING_CONTINUITY:
+        if stage in (S.STAGE_WAITING_CONTINUITY, S.STAGE_WAITING_DEPENDENCY):
             waiting_continuity += 1
         if stage in (S.STAGE_VIDEO_QA, S.STAGE_VIDEO_TECHNICAL):
             video_qa += 1

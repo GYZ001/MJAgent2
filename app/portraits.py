@@ -489,6 +489,199 @@ def _replace_screenplay_body_label(text: str, source_label: str, canonical_name:
     return "".join(lines)
 
 
+def _replace_identity_value(value, source_label: str, canonical_name: str):
+    """Replace exact identity values recursively without touching source spans."""
+    if isinstance(value, str):
+        return canonical_name if value == source_label else value
+    if isinstance(value, list):
+        return [
+            _replace_identity_value(item, source_label, canonical_name)
+            for item in value
+        ]
+    if isinstance(value, tuple):
+        return tuple(
+            _replace_identity_value(item, source_label, canonical_name)
+            for item in value
+        )
+    if isinstance(value, dict):
+        return {
+            (
+                canonical_name if str(key) == source_label else key
+            ): _replace_identity_value(item, source_label, canonical_name)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _identity_value_contains(value, identity: str) -> bool:
+    if isinstance(value, str):
+        return value == identity
+    if isinstance(value, (list, tuple)):
+        return any(_identity_value_contains(item, identity) for item in value)
+    if isinstance(value, dict):
+        return any(
+            str(key) == identity or _identity_value_contains(item, identity)
+            for key, item in value.items()
+        )
+    return False
+
+
+def _replace_narrative_plan_identity(
+    plan,
+    source_label: str,
+    canonical_name: str,
+) -> bool:
+    """Atomically update every authoritative entity reference in one plan.
+
+    SourceEvidence and direct source excerpts remain immutable.  The mapping is
+    AI/project supplied; this routine validates no role vocabulary and merely
+    applies one resolved identity consistently across the relation graph.
+    """
+    if plan is None:
+        return False
+    before = plan.model_dump(mode="json")
+
+    for proposition in plan.propositions:
+        proposition.entity_ids = list(dict.fromkeys(
+            canonical_name if entity_id == source_label else entity_id
+            for entity_id in proposition.entity_ids
+        ))
+        proposition.canonical_statement = _replace_resolved_label(
+            proposition.canonical_statement, source_label, canonical_name,
+        )
+    for fact in plan.state_facts:
+        if fact.subject_id == source_label:
+            fact.subject_id = canonical_name
+        fact.value.data = _replace_identity_value(
+            fact.value.data, source_label, canonical_name,
+        )
+    for evidence in plan.evidence:
+        evidence.perceivable_by = list(dict.fromkeys(
+            canonical_name if entity_id == source_label else entity_id
+            for entity_id in evidence.perceivable_by
+        ))
+        evidence.observable_claim = _replace_resolved_label(
+            evidence.observable_claim, source_label, canonical_name,
+        )
+        evidence.competing_attention_ids = list(dict.fromkeys(
+            canonical_name if entity_id == source_label else entity_id
+            for entity_id in evidence.competing_attention_ids
+        ))
+    for question in plan.dramatic_questions:
+        question.question_text = _replace_resolved_label(
+            question.question_text, source_label, canonical_name,
+        )
+    for action in plan.atomic_actions:
+        action.actor_ids = list(dict.fromkeys(
+            canonical_name if entity_id == source_label else entity_id
+            for entity_id in action.actor_ids
+        ))
+        action.target_ids = list(dict.fromkeys(
+            canonical_name if entity_id == source_label else entity_id
+            for entity_id in action.target_ids
+        ))
+        for field in ("semantic_intent", "completion_condition", "decision_not_applicable_reason"):
+            value = getattr(action, field, None)
+            if isinstance(value, str):
+                setattr(action, field, _replace_resolved_label(value, source_label, canonical_name))
+        for phase in action.temporal_phases:
+            phase.start_condition = _replace_resolved_label(
+                phase.start_condition, source_label, canonical_name,
+            )
+            phase.end_condition = _replace_resolved_label(
+                phase.end_condition, source_label, canonical_name,
+            )
+    for event in plan.events:
+        event.character_goal_effects = _replace_identity_value(
+            event.character_goal_effects, source_label, canonical_name,
+        )
+    for state in plan.character_states:
+        if state.character_id == source_label:
+            state.character_id = canonical_name
+        state.relationship_state = _replace_identity_value(
+            state.relationship_state, source_label, canonical_name,
+        )
+        state.emotion = _replace_identity_value(
+            state.emotion, source_label, canonical_name,
+        )
+        state.tactic = _replace_resolved_label(
+            state.tactic, source_label, canonical_name,
+        )
+    for belief in plan.character_beliefs:
+        if belief.character_id == source_label:
+            belief.character_id = canonical_name
+    for prior in plan.audience_priors:
+        prior.audience_description = _replace_resolved_label(
+            prior.audience_description, source_label, canonical_name,
+        )
+        prior.familiarity_assumptions = _replace_identity_value(
+            prior.familiarity_assumptions, source_label, canonical_name,
+        )
+    for state in plan.audience_states:
+        for field in (
+            "causal_hypotheses",
+            "character_goal_hypotheses",
+            "spatial_model",
+            "temporal_model",
+            "working_memory",
+            "affective_state",
+        ):
+            setattr(
+                state,
+                field,
+                _replace_identity_value(
+                    getattr(state, field), source_label, canonical_name,
+                ),
+            )
+        state.attention_residue_ids = list(dict.fromkeys(
+            canonical_name if entity_id == source_label else entity_id
+            for entity_id in state.attention_residue_ids
+        ))
+    for intent in plan.experience_intents:
+        intent.attention_target_ids = list(dict.fromkeys(
+            canonical_name if entity_id == source_label else entity_id
+            for entity_id in intent.attention_target_ids
+        ))
+        intent.director_objective = _replace_resolved_label(
+            intent.director_objective, source_label, canonical_name,
+        )
+        intent.forbidden_misconceptions = [
+            _replace_resolved_label(value, source_label, canonical_name)
+            for value in intent.forbidden_misconceptions
+        ]
+    for scene in plan.scene_contracts:
+        if scene.point_of_view_character_id == source_label:
+            scene.point_of_view_character_id = canonical_name
+        scene.relationship_deltas = _replace_identity_value(
+            scene.relationship_deltas, source_label, canonical_name,
+        )
+        for field in (
+            "not_applicable_reason",
+            "alternative_dramatic_function",
+            "value_polarity_in",
+            "value_polarity_out",
+            "scene_button",
+        ):
+            value = getattr(scene, field, None)
+            if isinstance(value, str):
+                setattr(scene, field, _replace_resolved_label(value, source_label, canonical_name))
+    for arc in plan.arc_contracts:
+        for field in ("not_applicable_reason", "alternative_dramatic_function"):
+            value = getattr(arc, field, None)
+            if isinstance(value, str):
+                setattr(arc, field, _replace_resolved_label(value, source_label, canonical_name))
+        arc.pressure_curve = _replace_identity_value(
+            arc.pressure_curve, source_label, canonical_name,
+        )
+        arc.information_density_curve = _replace_identity_value(
+            arc.information_density_curve, source_label, canonical_name,
+        )
+        arc.processing_beats = _replace_identity_value(
+            arc.processing_beats, source_label, canonical_name,
+        )
+    return plan.model_dump(mode="json") != before
+
+
 def apply_screenplay_character_resolutions(screenplay, resolutions: list[dict] | None) -> list[dict]:
     """在剧本进入 QA/发布之前原子性落实人物身份映射。
 
@@ -562,9 +755,18 @@ def apply_screenplay_character_resolutions(screenplay, resolutions: list[dict] |
         for voice in getattr(screenplay, "voice_bible", None) or []:
             if (voice.speaker_id or "").strip() == source_label:
                 voice.speaker_id = canonical_name
-                if is_functional_extra(canonical_name):
+                if getattr(screenplay, "narrative_plan", None) is not None:
+                    if item.get("resolution") == "functional_extra":
+                        voice.role_type = "functional_character"
+                elif is_functional_extra(canonical_name):
                     voice.role_type = "functional_character"
                 changed = True
+
+        changed = _replace_narrative_plan_identity(
+            getattr(screenplay, "narrative_plan", None),
+            source_label,
+            canonical_name,
+        ) or changed
 
         for field in (
             "logline", "dramatic_question", "protagonist_goal", "obstacle", "stakes",
@@ -628,6 +830,58 @@ def screenplay_character_resolution_errors(screenplay, resolutions: list[dict] |
         )
         if speaker_pattern.search(body):
             residual_paths.append("full_script_text.speaker")
+        plan = getattr(screenplay, "narrative_plan", None)
+        if plan is not None:
+            for index, proposition in enumerate(plan.propositions):
+                if source_label in proposition.entity_ids:
+                    residual_paths.append(f"narrative_plan.propositions[{index}].entity_ids")
+            for index, fact in enumerate(plan.state_facts):
+                if fact.subject_id == source_label or _identity_value_contains(
+                    fact.value.data, source_label,
+                ):
+                    residual_paths.append(f"narrative_plan.state_facts[{index}]")
+            for index, evidence in enumerate(plan.evidence):
+                if source_label in {
+                    *evidence.perceivable_by,
+                    *evidence.competing_attention_ids,
+                }:
+                    residual_paths.append(f"narrative_plan.evidence[{index}]")
+            for index, action in enumerate(plan.atomic_actions):
+                if source_label in {*action.actor_ids, *action.target_ids}:
+                    residual_paths.append(f"narrative_plan.atomic_actions[{index}]")
+            for index, state in enumerate(plan.character_states):
+                if (
+                    state.character_id == source_label
+                    or _identity_value_contains(state.relationship_state, source_label)
+                    or _identity_value_contains(state.emotion, source_label)
+                ):
+                    residual_paths.append(f"narrative_plan.character_states[{index}]")
+            for index, belief in enumerate(plan.character_beliefs):
+                if belief.character_id == source_label:
+                    residual_paths.append(f"narrative_plan.character_beliefs[{index}]")
+            for index, state in enumerate(plan.audience_states):
+                if any(
+                    _identity_value_contains(getattr(state, field), source_label)
+                    for field in (
+                        "causal_hypotheses",
+                        "character_goal_hypotheses",
+                        "spatial_model",
+                        "temporal_model",
+                        "working_memory",
+                        "attention_residue_ids",
+                        "affective_state",
+                    )
+                ):
+                    residual_paths.append(f"narrative_plan.audience_states[{index}]")
+            for index, intent in enumerate(plan.experience_intents):
+                if source_label in intent.attention_target_ids:
+                    residual_paths.append(f"narrative_plan.experience_intents[{index}]")
+            for index, scene in enumerate(plan.scene_contracts):
+                if (
+                    scene.point_of_view_character_id == source_label
+                    or _identity_value_contains(scene.relationship_deltas, source_label)
+                ):
+                    residual_paths.append(f"narrative_plan.scene_contracts[{index}]")
         if residual_paths:
             errors.append(
                 f"角色身份预解析未落实：「{source_label}」必须在剧本阶段改为「{canonical_name}」；"
@@ -639,43 +893,67 @@ def screenplay_character_resolution_errors(screenplay, resolutions: list[dict] |
 def screenplay_unknown_identity_errors(screenplay, bible: Bible) -> list[str]:
     """确定性检查“模型判断是否已经落地”，不猜测称谓语义。"""
     bible_names = {character.name for character in bible.characters}
-    if not bible_names:
+    narrative_plan = getattr(screenplay, "narrative_plan", None)
+    narrative_authority = narrative_plan is not None
+    if not bible_names and not narrative_authority:
         # 保留无真实人物谱项目的历史占位流程；有 Bible 时才启用身份硬门禁。
         return []
+    resolver = None
+    if narrative_authority:
+        from app.identity_contracts import (
+            IdentityContractError,
+            narrative_identity_resolver,
+        )
+
+        try:
+            resolver = narrative_identity_resolver(bible, screenplay)
+        except IdentityContractError as exc:
+            return [f"剧本身份合同无法解析：{exc}"]
     locations: dict[str, list[str]] = {}
 
-    def collect(raw_name: str, path: str) -> None:
+    def collect(raw_name: str, path: str, *, usage: str) -> None:
         name = str(raw_name or "").strip()
-        if (
-            not name
-            or name == "旁白"
-            or name in bible_names
-            or is_functional_extra(name)
-        ):
+        if not name:
+            return
+        if narrative_authority:
+            try:
+                resolver.resolve(name, usage=usage)
+                return
+            except IdentityContractError:
+                pass
+        elif name == "旁白" or name in bible_names:
+            return
+        elif is_functional_extra(name):
             return
         locations.setdefault(name, []).append(path)
 
     for scene_index, scene in enumerate(getattr(screenplay, "scene_outline", None) or []):
         for name in scene.characters or []:
-            collect(name, f"scene_outline[{scene_index}].characters")
+            collect(name, f"scene_outline[{scene_index}].characters", usage="visual")
     for chain_index, chain in enumerate(getattr(screenplay, "dialogue_chains", None) or []):
         for turn_index, turn in enumerate(chain.turns or []):
-            collect(turn.speaker, f"dialogue_chains[{chain_index}].turns[{turn_index}].speaker")
+            collect(
+                turn.speaker,
+                f"dialogue_chains[{chain_index}].turns[{turn_index}].speaker",
+                usage="voice",
+            )
     for index, item in enumerate(getattr(screenplay, "information_ledger", None) or []):
-        collect(item.speaker_id, f"information_ledger[{index}].speaker_id")
-    for index, item in enumerate(getattr(screenplay, "voice_bible", None) or []):
-        if (item.role_type or "").strip() != "narrator":
-            collect(item.speaker_id, f"voice_bible[{index}].speaker_id")
+        collect(item.speaker_id, f"information_ledger[{index}].speaker_id", usage="voice")
     # 与 validate_screenplay 共用同一台本解析器，避免把“地点：”“场景：”
     # 这类台本标签误当成人名。这里只检查模型决议是否落地，不猜称谓语义。
     from app.validators import screenplay_speaker_names
     for speaker in screenplay_speaker_names(
         getattr(screenplay, "full_script_text", "") or ""
     ):
-        collect(speaker, "full_script_text.speaker")
+        collect(speaker, "full_script_text.speaker", usage="voice")
     return [
-        f"剧本人物身份未解决：「{name}」既不在人物谱，也未被人物预检模型映射为一次性角色；"
-        f"位置：{', '.join(paths[:8])}"
+        f"剧本人物身份未解决：「{name}」既不在人物谱，"
+        + (
+            "也未由本集 identity_contracts + voice_bible 定义可见/声音政策；"
+            if narrative_authority
+            else "也未被人物预检模型映射为一次性角色；"
+        )
+        + f"位置：{', '.join(paths[:8])}"
         for name, paths in locations.items()
     ]
 
@@ -1470,18 +1748,87 @@ async def ensure_cards_for_screenplay(project_id: str, episode_no: int, screenpl
 
     errors: list[str] = []
 
-    # ① 新角色必须已在剧本阶段完成模型消歧和建卡。
-    unknown = [n for n in names if n not in bible_names and not is_functional_extra(n)]
+    # ① Narrative 路径只消费 typed resolver；legacy 仍保留旧分类器。
+    narrative_authority = getattr(screenplay, "narrative_plan", None) is not None
+    identity_by_token: dict[str, object] = {}
+    resolver_error = ""
+    if narrative_authority:
+        from app.identity_contracts import (
+            IdentityContractError,
+            narrative_identity_resolver,
+        )
+
+        try:
+            identity_resolver = narrative_identity_resolver(bible, screenplay)
+            for name in names:
+                identity_by_token[name] = identity_resolver.resolve(name, usage="visual")
+        except IdentityContractError as exc:
+            resolver_error = str(exc)
+    unknown = (
+        ([resolver_error] if resolver_error else [])
+        if narrative_authority
+        else [n for n in names if n not in bible_names and not is_functional_extra(n)]
+    )
     added: list[dict] = []
-    blocking_errors: list[str] = [
-        f"剧本人物身份未完成：「{name}」未进入人物谱，也不是已编号的一次性角色；"
-        "请回到剧本阶段重跑人物身份预检"
-        for name in unknown
-    ]
+    blocking_errors: list[str] = []
+    if narrative_authority and resolver_error:
+        blocking_errors.append(f"剧本 typed identity contract 未完成：{resolver_error}")
+    elif not narrative_authority:
+        blocking_errors.extend(
+            f"剧本人物身份未完成：「{name}」未进入人物谱，也不是已编号的一次性角色；"
+            "请回到剧本阶段重跑人物身份预检"
+            for name in unknown
+        )
 
     # 剧本阶段若遇到供应商短暂失败，人物卡已保留；分镜前对这些系统失败项
     # 自动补齐定妆包。这是内部自愈，不再转换为用户待审任务。
     conn = get_conn()
+    # typed policy 要求资产的非 Bible 身份，直接使用合同的稳定视觉锚点
+    # 建立本集定妆包。不需资产的一次性/群体/画外身份不会被名称规则误建卡。
+    if narrative_authority and not resolver_error:
+        project_row = conn.execute(
+            "SELECT bible_version FROM projects WHERE id=?", (project_id,),
+        ).fetchone()
+        bible_version = int(project_row["bible_version"] or 0) if project_row else 0
+        generated_asset_ids: set[str] = set()
+        for identity in identity_by_token.values():
+            if not identity.requires_asset or identity.asset_name in bible_names:
+                continue
+            if identity.identity_id in generated_asset_ids:
+                continue
+            generated_asset_ids.add(identity.identity_id)
+            try:
+                card_lock = await _card_lock(project_id, identity.asset_name)
+                async with card_lock:
+                    portrait = await _generate_discovered_character_portrait(
+                        project_id,
+                        identity.asset_name,
+                        bible.world.visual_style_canonical,
+                        identity.visual_anchor(),
+                        ep_start=episode_no,
+                        bible_version=bible_version,
+                    )
+            except Exception as exc:  # noqa: BLE001 - required policy must fail closed
+                public = code_ref(
+                    exc,
+                    action="ensure_narrative_identity_asset",
+                    context={
+                        "project_id": project_id,
+                        "identity_id": identity.identity_id,
+                        "episode_no": episode_no,
+                    },
+                )
+                blocking_errors.append(
+                    f"身份「{identity.display_name}」合同要求人物资产，但定妆包生成失败{public}"
+                )
+                continue
+            added.append({
+                "status": "added",
+                "name": identity.display_name,
+                "identity_id": identity.identity_id,
+                "has_portrait": True,
+                **portrait,
+            })
     retry_changes: list[dict] = []
     if _has_column(conn, "projects", "bible_auto_changes_json"):
         change_row = conn.execute(

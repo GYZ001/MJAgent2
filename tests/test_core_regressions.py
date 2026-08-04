@@ -256,8 +256,11 @@ def test_episode_delete_removes_only_target_and_all_downstream_assets(tmp_path, 
     assert result['renumbered'] == 1
     kept = dict(conn.execute("SELECT * FROM episodes WHERE id='e2'").fetchone())
     assert kept['episode_no'] == 1
-    assert json.loads(kept['screenplay_json'])['episode_no'] == 1
-    assert json.loads(kept['storyboard_outline_json'])['episode_no'] == 1
+    # Published projections remain byte-identical to their content-addressed
+    # artifacts; the authoritative display number lives on episodes. Drafts,
+    # which have no certificate lineage, are updated below.
+    assert json.loads(kept['screenplay_json'])['episode_no'] == 2
+    assert json.loads(kept['storyboard_outline_json'])['episode_no'] == 2
     draft = conn.execute(
         "SELECT content_json FROM screenplay_drafts WHERE episode_id='e2'"
     ).fetchone()

@@ -1,0 +1,752 @@
+"""Human one-watch calibration for narrative review predictions.
+
+The protocol is deliberately content-agnostic.  It validates identity,
+isolation, pair coverage and statistical estimability; genres, formats and any
+additional dimensions remain open values supplied by the study.  Sparse or
+unstable evidence is reported as ``needs_review`` and never converted into a
+synthetic perfect score.
+"""
+from __future__ import annotations
+
+from collections import defaultdict
+import json
+import math
+from statistics import fmean
+from typing import Any, Iterable, Sequence
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.evidence import repository as evidence_repository
+from app.harness.types import Evaluation, EvidenceArtifact
+from app.schemas import EpisodeScreenplay
+
+
+HUMAN_ONE_WATCH_CONTRACT_VERSION = "human-one-watch.v1"
+HUMAN_CALIBRATION_CONTRACT_VERSION = "narrative-human-calibration.v1"
+DEFAULT_CROSS_CONTENT_DIMENSIONS = ("genre", "form")
+
+__all__ = [
+    "CalibrationContractError",
+    "CalibrationReport",
+    "DimensionCalibrationResult",
+    "HumanOneWatchObservation",
+    "HumanTargetDeltaObservation",
+    "ModelTargetEstimate",
+    "build_calibration_report",
+    "calibrate_and_persist_human_one_watch",
+    "persist_calibration_report",
+    "persist_human_one_watch_observation",
+    "validate_human_one_watch_observation",
+]
+
+
+class CalibrationContractError(ValueError):
+    """Raised for invalid protocol data, IDs or evidence lineage."""
+
+    def __init__(self, errors: Iterable[str]):
+        self.errors = list(dict.fromkeys(str(item) for item in errors if str(item)))
+        super().__init__("；".join(self.errors[:8]))
+
+
+class _OpenSemanticModel(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+
+class HumanTargetDeltaObservation(_OpenSemanticModel):
+    """A backend-adjudicated result bound to one prior/target pair.
+
+    ``observed_interpretation`` and ``elicitation_context`` are intentionally
+    open JSON.  They describe what the participant actually expressed; they
+    are not a list of allowed story meanings.
+    """
+
+    audience_prior_id: str
+    target_delta_id: str
+    observed_score: float = Field(ge=0.0, le=1.0)
+    observed_interpretation: dict[str, Any] = Field(default_factory=dict)
+    supporting_response_refs: list[str] = Field(default_factory=list)
+    elicitation_context: dict[str, Any] = Field(default_factory=dict)
+    adjudication_status: str = "observed"
+    uncertainty: str | None = None
+
+
+class HumanOneWatchObservation(_OpenSemanticModel):
+    """One isolated human viewing, with protocol facts made explicit."""
+
+    observation_id: str
+    participant_id_hash: str
+    scope_id: str
+    audience_prior_id: str
+    narrative_review_artifact_id: str
+    watched_once: bool
+    watch_count: int = Field(default=1, ge=0)
+    replay_or_seek_used: bool = False
+    source_material_seen: bool = False
+    target_answers_seen: bool = False
+    director_intent_seen: bool = False
+    spontaneous_recall_frozen: bool = True
+    spontaneous_recall: dict[str, Any] = Field(default_factory=dict)
+    neutral_followup_observations: list[dict[str, Any] | str] = Field(default_factory=list)
+    target_delta_observations: list[HumanTargetDeltaObservation] = Field(default_factory=list)
+    content_dimensions: dict[str, Any] = Field(default_factory=dict)
+    collection_context: dict[str, Any] = Field(default_factory=dict)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _one_watch_isolation_gate(self) -> "HumanOneWatchObservation":
+        errors: list[str] = []
+        if not self.watched_once or self.watch_count != 1:
+            errors.append("[HUMAN_WATCH_COUNT_INVALID] watched_once=true 且 watch_count=1 才是一次观看")
+        if self.replay_or_seek_used:
+            errors.append("[HUMAN_REPLAY_USED] 一次观看观察不得回放或拖动")
+        if self.source_material_seen:
+            errors.append("[HUMAN_SOURCE_EXPOSED] 观众已看过原文，不得作为冷启动样本")
+        if self.target_answers_seen or self.director_intent_seen:
+            errors.append("[HUMAN_TARGET_EXPOSED] 观众已看过目标答案/导演意图")
+        if not self.spontaneous_recall_frozen:
+            errors.append("[HUMAN_RECALL_NOT_FROZEN] 自由复述必须在中性追问前冻结")
+        if not self.observation_id.strip() or not self.participant_id_hash.strip():
+            errors.append("[HUMAN_OBSERVATION_ID_MISSING] observation_id/participant_id_hash 不能为空")
+        if not self.scope_id.strip() or not self.audience_prior_id.strip():
+            errors.append("[HUMAN_SCOPE_PRIOR_MISSING] scope_id/audience_prior_id 不能为空")
+        if not self.narrative_review_artifact_id.strip():
+            errors.append("[HUMAN_REVIEW_LINEAGE_MISSING] 必须绑定 narrative review artifact")
+        seen: set[tuple[str, str]] = set()
+        for item in self.target_delta_observations:
+            pair = (item.audience_prior_id, item.target_delta_id)
+            if item.audience_prior_id != self.audience_prior_id:
+                errors.append(
+                    f"[HUMAN_PAIR_PRIOR_MISMATCH] {pair} 不属于本轮先验 {self.audience_prior_id}"
+                )
+            if pair in seen:
+                errors.append(f"[HUMAN_PAIR_DUPLICATE] 重复观察 {pair}")
+            seen.add(pair)
+        if not self.target_delta_observations:
+            errors.append("[HUMAN_TARGET_OBSERVATIONS_EMPTY] 缺少逐目标观察")
+        if errors:
+            raise ValueError("；".join(errors))
+        return self
+
+
+class ModelTargetEstimate(_OpenSemanticModel):
+    scope_id: str
+    audience_prior_id: str
+    target_delta_id: str
+    predicted_score: float = Field(ge=0.0, le=1.0)
+    narrative_review_artifact_id: str
+    estimate_context: dict[str, Any] = Field(default_factory=dict)
+
+
+class CalibrationPairResult(_OpenSemanticModel):
+    scope_id: str
+    audience_prior_id: str
+    target_delta_id: str
+    human_sample_count: int = 0
+    human_mean_score: float | None = None
+    human_score_variance: float | None = None
+    model_predicted_score: float | None = None
+    absolute_error: float | None = None
+    status: str = "needs_review"
+
+
+class DimensionCalibrationResult(_OpenSemanticModel):
+    dimension_name: str
+    dimension_value: str
+    observation_count: int = 0
+    paired_target_count: int = 0
+    correlation: float | None = None
+    status: str = "insufficient"
+    reason: str = ""
+
+
+class CalibrationReport(_OpenSemanticModel):
+    calibration_report_id: str
+    calibration_scope_id: str
+    contract_version: str = HUMAN_CALIBRATION_CONTRACT_VERSION
+    scope_ids: list[str] = Field(default_factory=list)
+    observation_ids: list[str] = Field(default_factory=list)
+    narrative_review_artifact_ids: list[str] = Field(default_factory=list)
+    required_dimension_axes: list[str] = Field(default_factory=list)
+    sample_summary: dict[str, Any] = Field(default_factory=dict)
+    pair_results: list[CalibrationPairResult] = Field(default_factory=list)
+    dimension_results: list[DimensionCalibrationResult] = Field(default_factory=list)
+    correlation_analysis: dict[str, Any] = Field(default_factory=dict)
+    coverage_gaps: list[str] = Field(default_factory=list)
+    stability_issues: list[str] = Field(default_factory=list)
+    calibration_score: float | None = None
+    confidence_status: str = "needs_review"
+    decision: str = "needs_review"
+    reason: str = ""
+    evidence_lineage: dict[str, Any] = Field(default_factory=dict)
+
+
+PairKey = tuple[str, str, str]
+
+
+def _expected_pairs(
+    screenplays: Sequence[EpisodeScreenplay],
+) -> tuple[dict[PairKey, Any], dict[tuple[str, str], set[str]]]:
+    pairs: dict[PairKey, Any] = {}
+    by_prior: dict[tuple[str, str], set[str]] = defaultdict(set)
+    scope_ids: set[str] = set()
+    errors: list[str] = []
+    for screenplay in screenplays:
+        plan = screenplay.narrative_plan
+        if plan is None:
+            errors.append(f"[CALIBRATION_PLAN_MISSING] episode_no={screenplay.episode_no}")
+            continue
+        scope_id = plan.scope_id.strip()
+        if not scope_id:
+            errors.append(f"[CALIBRATION_SCOPE_MISSING] episode_no={screenplay.episode_no}")
+            continue
+        if scope_id in scope_ids:
+            errors.append(f"[CALIBRATION_SCOPE_DUPLICATE] {scope_id}")
+            continue
+        scope_ids.add(scope_id)
+        prior_ids = {item.audience_prior_id for item in plan.audience_priors}
+        for intent in plan.experience_intents:
+            for path in intent.audience_paths:
+                if path.audience_prior_id not in prior_ids:
+                    errors.append(
+                        f"[CALIBRATION_PRIOR_UNKNOWN] {scope_id}/{path.audience_prior_id}"
+                    )
+                for delta in path.target_deltas:
+                    key = (scope_id, path.audience_prior_id, delta.target_delta_id)
+                    if key in pairs:
+                        errors.append(f"[CALIBRATION_PAIR_DUPLICATE] {key}")
+                    pairs[key] = delta
+                    by_prior[(scope_id, path.audience_prior_id)].add(delta.target_delta_id)
+    if errors:
+        raise CalibrationContractError(errors)
+    if not pairs:
+        raise CalibrationContractError(["[CALIBRATION_PAIRS_EMPTY] 叙事合同没有可校准的 prior/target_delta 对"])
+    return pairs, by_prior
+
+
+def validate_human_one_watch_observation(
+    observation: HumanOneWatchObservation,
+    screenplay: EpisodeScreenplay,
+) -> list[str]:
+    """Validate one observation against its authoritative audience paths."""
+    try:
+        expected, by_prior = _expected_pairs([screenplay])
+    except CalibrationContractError as exc:
+        return exc.errors
+    plan = screenplay.narrative_plan
+    assert plan is not None
+    errors: list[str] = []
+    if observation.scope_id != plan.scope_id:
+        errors.append(
+            f"[HUMAN_SCOPE_MISMATCH] observation={observation.scope_id} plan={plan.scope_id}"
+        )
+    expected_targets = by_prior.get((plan.scope_id, observation.audience_prior_id))
+    if expected_targets is None:
+        errors.append(
+            f"[HUMAN_PRIOR_UNKNOWN] {observation.audience_prior_id} 不属于 {plan.scope_id}"
+        )
+        expected_targets = set()
+    actual_targets = {item.target_delta_id for item in observation.target_delta_observations}
+    missing = expected_targets - actual_targets
+    extra = actual_targets - expected_targets
+    if missing:
+        errors.append(f"[HUMAN_PAIR_MISSING] {observation.observation_id} 缺少 {sorted(missing)}")
+    if extra:
+        errors.append(f"[HUMAN_PAIR_UNKNOWN] {observation.observation_id} 包含 {sorted(extra)}")
+    for item in observation.target_delta_observations:
+        key = (observation.scope_id, item.audience_prior_id, item.target_delta_id)
+        if key not in expected:
+            errors.append(f"[HUMAN_PAIR_UNKNOWN] {key}")
+    return list(dict.fromkeys(errors))
+
+
+def _require_review_lineage(artifact_ids: Sequence[str]) -> list[dict[str, Any]]:
+    ids = list(dict.fromkeys(str(item) for item in artifact_ids if str(item)))
+    if not ids:
+        raise CalibrationContractError(["[CALIBRATION_REVIEW_LINEAGE_MISSING] 缺少 narrative review artifact"])
+    artifacts: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for artifact_id in ids:
+        artifact = evidence_repository.get_artifact(artifact_id)
+        if artifact is None:
+            errors.append(f"[CALIBRATION_PARENT_MISSING] {artifact_id}")
+        else:
+            artifacts.append(artifact)
+    if artifacts and not any(item.get("type") == "narrative_review_report" for item in artifacts):
+        errors.append("[CALIBRATION_REVIEW_REPORT_MISSING] 父证据中至少需要一份 narrative_review_report")
+    if errors:
+        raise CalibrationContractError(errors)
+    return artifacts
+
+
+def persist_human_one_watch_observation(
+    observation: HumanOneWatchObservation,
+    *,
+    screenplay: EpisodeScreenplay,
+    narrative_review_artifact_ids: Sequence[str],
+    additional_parent_artifact_ids: Sequence[str] = (),
+) -> dict[str, Any]:
+    """Validate and persist one human observation with review lineage."""
+    errors = validate_human_one_watch_observation(observation, screenplay)
+    if errors:
+        raise CalibrationContractError(errors)
+    review_ids = list(dict.fromkeys(str(item) for item in narrative_review_artifact_ids if str(item)))
+    _require_review_lineage(review_ids)
+    if observation.narrative_review_artifact_id not in review_ids:
+        raise CalibrationContractError([
+            "[HUMAN_REVIEW_LINEAGE_MISMATCH] observation.narrative_review_artifact_id "
+            "必须在父证据链中"
+        ])
+    parents = list(dict.fromkeys([
+        *review_ids,
+        *(str(item) for item in additional_parent_artifact_ids if str(item)),
+    ]))
+    for artifact_id in parents:
+        if evidence_repository.get_artifact(artifact_id) is None:
+            raise CalibrationContractError([f"[CALIBRATION_PARENT_MISSING] {artifact_id}"])
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="human_one_watch_observation",
+        scope_type="episode",
+        scope_id=observation.scope_id,
+        status="validated",
+        trust_level="T4",
+        content=observation.model_dump(mode="json"),
+        parent_artifact_ids=parents,
+        contract_version=HUMAN_ONE_WATCH_CONTRACT_VERSION,
+    ))
+    evidence_repository.create_evaluation(
+        artifact["id"],
+        Evaluation(
+            evaluator_type="human",
+            evaluator_name="one_watch_protocol",
+            evaluator_version=HUMAN_ONE_WATCH_CONTRACT_VERSION,
+            status="passed",
+            hard_gate_passed=True,
+            evaluation_role="score_only",
+            score_status="observation_only",
+            runtime_blocking=False,
+            score=None,
+            evidence={
+                "watched_once": True,
+                "source_material_seen": False,
+                "target_answers_seen": False,
+                "audience_prior_id": observation.audience_prior_id,
+                "paired_target_delta_ids": [
+                    item.target_delta_id for item in observation.target_delta_observations
+                ],
+                "narrative_review_artifact_ids": review_ids,
+            },
+            confidence=observation.confidence,
+        ),
+    )
+    return artifact
+
+
+def _variance(values: Sequence[float]) -> float | None:
+    if not values:
+        return None
+    mean = fmean(values)
+    return fmean((value - mean) ** 2 for value in values)
+
+
+def _pearson(xs: Sequence[float], ys: Sequence[float]) -> float | None:
+    if len(xs) != len(ys) or len(xs) < 3:
+        return None
+    x_mean, y_mean = fmean(xs), fmean(ys)
+    x_var = sum((value - x_mean) ** 2 for value in xs)
+    y_var = sum((value - y_mean) ** 2 for value in ys)
+    if x_var <= 0.0 or y_var <= 0.0:
+        return None
+    value = sum(
+        (x - x_mean) * (y - y_mean)
+        for x, y in zip(xs, ys, strict=True)
+    ) / math.sqrt(x_var * y_var)
+    return max(-1.0, min(1.0, value))
+
+
+def _dimension_values(value: Any) -> list[str]:
+    if value is None:
+        return []
+    raw_values = value if isinstance(value, (list, tuple, set)) else [value]
+    values: list[str] = []
+    for item in raw_values:
+        if isinstance(item, str):
+            canonical = item.strip()
+        else:
+            canonical = json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if canonical and canonical not in values:
+            values.append(canonical)
+    return values
+
+
+def _aggregate_pair_scores(
+    observations: Sequence[HumanOneWatchObservation],
+) -> dict[PairKey, list[float]]:
+    scores: dict[PairKey, list[float]] = defaultdict(list)
+    for observation in observations:
+        for result in observation.target_delta_observations:
+            scores[(
+                observation.scope_id,
+                result.audience_prior_id,
+                result.target_delta_id,
+            )].append(result.observed_score)
+    return scores
+
+
+def _dimension_result(
+    *,
+    axis: str,
+    value: str,
+    observations: Sequence[HumanOneWatchObservation],
+    estimate_map: dict[PairKey, ModelTargetEstimate],
+) -> DimensionCalibrationResult:
+    selected = [
+        observation for observation in observations
+        if value in _dimension_values(observation.content_dimensions.get(axis))
+    ]
+    scores = _aggregate_pair_scores(selected)
+    paired = [
+        (estimate_map[key].predicted_score, fmean(human_scores))
+        for key, human_scores in scores.items()
+        if key in estimate_map and human_scores
+    ]
+    correlation = _pearson(
+        [item[0] for item in paired],
+        [item[1] for item in paired],
+    )
+    return DimensionCalibrationResult(
+        dimension_name=axis,
+        dimension_value=value,
+        observation_count=len(selected),
+        paired_target_count=len(paired),
+        correlation=correlation,
+        status="estimable" if correlation is not None else "insufficient",
+        reason=(
+            "该分组可估计模型与人类的相关性"
+            if correlation is not None
+            else "该分组的成对目标数不足或分数无方差"
+        ),
+    )
+
+
+def build_calibration_report(
+    *,
+    calibration_report_id: str,
+    calibration_scope_id: str,
+    screenplays: Sequence[EpisodeScreenplay],
+    observations: Sequence[HumanOneWatchObservation],
+    model_estimates: Sequence[ModelTargetEstimate],
+    required_dimension_axes: Sequence[str] = DEFAULT_CROSS_CONTENT_DIMENSIONS,
+) -> CalibrationReport:
+    """Build a conservative calibration report from paired human/model data."""
+    expected, by_prior = _expected_pairs(screenplays)
+    screenplay_by_scope = {
+        screenplay.narrative_plan.scope_id: screenplay
+        for screenplay in screenplays
+        if screenplay.narrative_plan is not None
+    }
+    structural_errors: list[str] = []
+    observation_ids: set[str] = set()
+    for observation in observations:
+        if observation.observation_id in observation_ids:
+            structural_errors.append(f"[HUMAN_OBSERVATION_DUPLICATE] {observation.observation_id}")
+        observation_ids.add(observation.observation_id)
+        screenplay = screenplay_by_scope.get(observation.scope_id)
+        if screenplay is None:
+            structural_errors.append(f"[HUMAN_SCOPE_UNKNOWN] {observation.scope_id}")
+            continue
+        structural_errors.extend(validate_human_one_watch_observation(observation, screenplay))
+    estimate_map: dict[PairKey, ModelTargetEstimate] = {}
+    for estimate in model_estimates:
+        key = (estimate.scope_id, estimate.audience_prior_id, estimate.target_delta_id)
+        if key not in expected:
+            structural_errors.append(f"[MODEL_ESTIMATE_PAIR_UNKNOWN] {key}")
+        if key in estimate_map:
+            structural_errors.append(f"[MODEL_ESTIMATE_PAIR_DUPLICATE] {key}")
+        estimate_map[key] = estimate
+    if structural_errors:
+        raise CalibrationContractError(structural_errors)
+
+    human_scores = _aggregate_pair_scores(observations)
+    human_participants: dict[PairKey, set[str]] = defaultdict(set)
+    for observation in observations:
+        for result in observation.target_delta_observations:
+            human_participants[(
+                observation.scope_id,
+                result.audience_prior_id,
+                result.target_delta_id,
+            )].add(observation.participant_id_hash)
+    pair_results: list[CalibrationPairResult] = []
+    coverage_gaps: list[str] = []
+    for key in sorted(expected):
+        scores = human_scores.get(key, [])
+        estimate = estimate_map.get(key)
+        if not scores:
+            coverage_gaps.append(f"[HUMAN_PAIR_SAMPLE_MISSING] {key}")
+        elif len(human_participants.get(key, set())) < 2:
+            # Two independent viewers is the minimum needed to observe any
+            # within-pair human variability.  This is an estimability rule,
+            # not a content/category threshold.
+            coverage_gaps.append(
+                f"[HUMAN_PAIR_REPLICATION_INSUFFICIENT] {key} "
+                f"participants={len(human_participants.get(key, set()))}"
+            )
+        if estimate is None:
+            coverage_gaps.append(f"[MODEL_ESTIMATE_MISSING] {key}")
+        human_mean = fmean(scores) if scores else None
+        predicted = estimate.predicted_score if estimate is not None else None
+        pair_results.append(CalibrationPairResult(
+            scope_id=key[0],
+            audience_prior_id=key[1],
+            target_delta_id=key[2],
+            human_sample_count=len(scores),
+            human_mean_score=human_mean,
+            human_score_variance=_variance(scores),
+            model_predicted_score=predicted,
+            absolute_error=(
+                abs(human_mean - predicted)
+                if human_mean is not None and predicted is not None else None
+            ),
+            status="paired" if human_mean is not None and predicted is not None else "needs_review",
+        ))
+
+    paired_results = [
+        item for item in pair_results
+        if item.human_mean_score is not None and item.model_predicted_score is not None
+    ]
+    model_values = [float(item.model_predicted_score) for item in paired_results]
+    human_values = [float(item.human_mean_score) for item in paired_results]
+    model_constant = bool(model_values) and _variance(model_values) == 0.0
+    human_constant = bool(human_values) and _variance(human_values) == 0.0
+    overall_correlation = _pearson(model_values, human_values)
+    stability_issues: list[str] = []
+    if model_constant:
+        stability_issues.append("[MODEL_SCORES_CONSTANT] 模型配对分数为常量，无法证明区分能力")
+    if human_constant:
+        stability_issues.append("[HUMAN_SCORES_CONSTANT] 人类配对分数为常量，无法估计相关性")
+    if overall_correlation is None:
+        stability_issues.append("[CORRELATION_NOT_ESTIMABLE] 成对样本不足或分数无方差")
+    elif overall_correlation <= 0.0:
+        stability_issues.append("[CORRELATION_NON_POSITIVE] 模型与人类观察未呈稳定正相关")
+
+    axes = list(dict.fromkeys(str(axis).strip() for axis in required_dimension_axes if str(axis).strip()))
+    dimension_results: list[DimensionCalibrationResult] = []
+    for axis in axes:
+        missing_observation_ids = [
+            item.observation_id for item in observations
+            if not _dimension_values(item.content_dimensions.get(axis))
+        ]
+        if missing_observation_ids:
+            coverage_gaps.append(
+                f"[DIMENSION_VALUE_MISSING] axis={axis} observations={sorted(missing_observation_ids)}"
+            )
+        values = sorted({
+            value
+            for observation in observations
+            for value in _dimension_values(observation.content_dimensions.get(axis))
+        })
+        if len(values) < 2:
+            coverage_gaps.append(
+                f"[CROSS_DIMENSION_SAMPLE_INSUFFICIENT] axis={axis} distinct_values={len(values)}"
+            )
+        for value in values:
+            result = _dimension_result(
+                axis=axis,
+                value=value,
+                observations=observations,
+                estimate_map=estimate_map,
+            )
+            dimension_results.append(result)
+            if result.correlation is None:
+                stability_issues.append(
+                    f"[DIMENSION_CORRELATION_NOT_ESTIMABLE] axis={axis} value={value}"
+                )
+
+    estimated_dimension_correlations = [
+        item.correlation for item in dimension_results if item.correlation is not None
+    ]
+    if overall_correlation is not None and estimated_dimension_correlations:
+        if any(value == 0.0 or value * overall_correlation <= 0.0
+               for value in estimated_dimension_correlations):
+            stability_issues.append(
+                "[CORRELATION_UNSTABLE_ACROSS_DIMENSIONS] 分组相关方向与总体不一致"
+            )
+
+    # Leave-one-scope-out checks whether a single work determines the result.
+    leave_one_scope_out: dict[str, float | None] = {}
+    scope_ids = sorted(screenplay_by_scope)
+    if len(scope_ids) < 2:
+        coverage_gaps.append(
+            f"[CROSS_SCOPE_SAMPLE_INSUFFICIENT] distinct_scopes={len(scope_ids)}"
+        )
+    else:
+        for held_out in scope_ids:
+            subset = [item for item in paired_results if item.scope_id != held_out]
+            correlation = _pearson(
+                [float(item.model_predicted_score) for item in subset],
+                [float(item.human_mean_score) for item in subset],
+            )
+            leave_one_scope_out[held_out] = correlation
+            if correlation is None:
+                stability_issues.append(
+                    f"[LEAVE_ONE_SCOPE_CORRELATION_NOT_ESTIMABLE] held_out={held_out}"
+                )
+            elif overall_correlation is not None and (
+                correlation == 0.0 or correlation * overall_correlation <= 0.0
+            ):
+                stability_issues.append(
+                    f"[CORRELATION_UNSTABLE_BY_SCOPE] held_out={held_out}"
+                )
+
+    coverage_gaps = list(dict.fromkeys(coverage_gaps))
+    stability_issues = list(dict.fromkeys(stability_issues))
+    calibrated = not coverage_gaps and not stability_issues and overall_correlation is not None
+    reason_items = [*coverage_gaps, *stability_issues]
+    return CalibrationReport(
+        calibration_report_id=calibration_report_id,
+        calibration_scope_id=calibration_scope_id,
+        scope_ids=scope_ids,
+        observation_ids=sorted(observation_ids),
+        narrative_review_artifact_ids=sorted({
+            *[item.narrative_review_artifact_id for item in observations],
+            *[item.narrative_review_artifact_id for item in model_estimates],
+        }),
+        required_dimension_axes=axes,
+        sample_summary={
+            "observation_count": len(observations),
+            "participant_count": len({item.participant_id_hash for item in observations}),
+            "expected_pair_count": len(expected),
+            "paired_target_count": len(paired_results),
+            "scope_count": len(scope_ids),
+            "per_prior_expected_target_counts": {
+                f"{scope}/{prior}": len(targets)
+                for (scope, prior), targets in sorted(by_prior.items())
+            },
+        },
+        pair_results=pair_results,
+        dimension_results=dimension_results,
+        correlation_analysis={
+            "overall_pearson": overall_correlation,
+            "leave_one_scope_out": leave_one_scope_out,
+            "model_scores_constant": model_constant,
+            "human_scores_constant": human_constant,
+            "stability_rule": (
+                "总体及可估计的跨维度/留一作品相关方向必须一致；"
+                "无法估计时保持 needs_review"
+            ),
+        },
+        coverage_gaps=coverage_gaps,
+        stability_issues=stability_issues,
+        calibration_score=overall_correlation if calibrated else None,
+        confidence_status="supported" if calibrated else "needs_review",
+        decision="calibrated" if calibrated else "needs_review",
+        reason=(
+            "跨作品与跨维度成对证据可估计且方向稳定"
+            if calibrated else "；".join(reason_items) or "校准证据需人工复核"
+        ),
+        evidence_lineage={
+            "observation_contract_version": HUMAN_ONE_WATCH_CONTRACT_VERSION,
+            "model_estimate_review_artifact_ids": sorted({
+                item.narrative_review_artifact_id for item in model_estimates
+            }),
+        },
+    )
+
+
+def persist_calibration_report(
+    report: CalibrationReport,
+    *,
+    observation_artifact_ids: Sequence[str],
+    narrative_review_artifact_ids: Sequence[str],
+) -> dict[str, Any]:
+    """Persist a calibration report and bind every raw/review parent."""
+    review_ids = list(dict.fromkeys(str(item) for item in narrative_review_artifact_ids if str(item)))
+    _require_review_lineage(review_ids)
+    if set(report.narrative_review_artifact_ids) - set(review_ids):
+        raise CalibrationContractError([
+            "[CALIBRATION_REVIEW_LINEAGE_INCOMPLETE] report 引用的 review artifact 未全部纳入父链"
+        ])
+    observation_ids = list(dict.fromkeys(str(item) for item in observation_artifact_ids if str(item)))
+    observed_report_ids: set[str] = set()
+    errors: list[str] = []
+    for artifact_id in observation_ids:
+        artifact = evidence_repository.get_artifact(artifact_id)
+        if artifact is None:
+            errors.append(f"[CALIBRATION_PARENT_MISSING] {artifact_id}")
+            continue
+        if artifact.get("type") != "human_one_watch_observation":
+            errors.append(f"[CALIBRATION_OBSERVATION_TYPE_INVALID] {artifact_id}")
+            continue
+        content = artifact.get("content") or {}
+        observed_report_ids.add(str(content.get("observation_id") or ""))
+    missing_observations = set(report.observation_ids) - observed_report_ids
+    if missing_observations:
+        errors.append(
+            f"[CALIBRATION_OBSERVATION_LINEAGE_INCOMPLETE] {sorted(missing_observations)}"
+        )
+    if errors:
+        raise CalibrationContractError(errors)
+    parents = list(dict.fromkeys([*review_ids, *observation_ids]))
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="human_one_watch_calibration_report",
+        scope_type="calibration",
+        scope_id=report.calibration_scope_id,
+        status="validated" if report.decision == "calibrated" else "needs_revision",
+        trust_level="T4",
+        content=report.model_dump(mode="json"),
+        parent_artifact_ids=parents,
+        contract_version=HUMAN_CALIBRATION_CONTRACT_VERSION,
+    ))
+    calibrated = report.decision == "calibrated"
+    evidence_repository.create_evaluation(
+        artifact["id"],
+        Evaluation(
+            evaluator_type="deterministic",
+            evaluator_name="human_one_watch_calibration",
+            evaluator_version=HUMAN_CALIBRATION_CONTRACT_VERSION,
+            status="passed" if calibrated else "warning",
+            hard_gate_passed=calibrated,
+            evaluation_role="score_only",
+            score_status="calibrated" if calibrated else "unknown",
+            runtime_blocking=False,
+            score=(
+                max(0.0, min(100.0, float(report.calibration_score) * 100.0))
+                if calibrated and report.calibration_score is not None else None
+            ),
+            evidence={
+                "decision": report.decision,
+                "coverage_gaps": report.coverage_gaps,
+                "stability_issues": report.stability_issues,
+                "narrative_review_artifact_ids": review_ids,
+                "observation_artifact_ids": observation_ids,
+            },
+        ),
+    )
+    return artifact
+
+
+def calibrate_and_persist_human_one_watch(
+    *,
+    calibration_report_id: str,
+    calibration_scope_id: str,
+    screenplays: Sequence[EpisodeScreenplay],
+    observations: Sequence[HumanOneWatchObservation],
+    model_estimates: Sequence[ModelTargetEstimate],
+    observation_artifact_ids: Sequence[str],
+    narrative_review_artifact_ids: Sequence[str],
+    required_dimension_axes: Sequence[str] = DEFAULT_CROSS_CONTENT_DIMENSIONS,
+) -> tuple[CalibrationReport, dict[str, Any]]:
+    """Public end-to-end service for building and persisting calibration."""
+    report = build_calibration_report(
+        calibration_report_id=calibration_report_id,
+        calibration_scope_id=calibration_scope_id,
+        screenplays=screenplays,
+        observations=observations,
+        model_estimates=model_estimates,
+        required_dimension_axes=required_dimension_axes,
+    )
+    artifact = persist_calibration_report(
+        report,
+        observation_artifact_ids=observation_artifact_ids,
+        narrative_review_artifact_ids=narrative_review_artifact_ids,
+    )
+    return report, artifact

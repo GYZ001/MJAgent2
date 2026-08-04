@@ -37,6 +37,7 @@ from app.validators import (SOURCE_EXCERPT_MIN_CHARS,
                             normalize_action_desc, normalize_continuity,
                             normalize_dialogue_focus_offscreen_mentions,
                             normalize_offbible_characters, normalize_transition_visuals,
+                            narrative_outline_action_capacity_errors,
                             prefer_default_shot_durations,
                             relieve_spoken_overflow,
                             source_dialogue_fragments,
@@ -95,6 +96,13 @@ _SHOT_NULLABLE_TEXT_FIELDS = frozenset({
 _SHOT_NULLABLE_LIST_FIELDS = frozenset({
     "dialogues", "new_information_ids", "reinforcement_info_ids", "characters_visible",
     "audio_cast", "audio_timeline", "reference_roles", "do_not_repeat", "risk_tags",
+    "event_ids", "supporting_action_ids", "action_phase_ids", "visible_entity_ids",
+    "offscreen_action_actor_ids", "offscreen_action_target_ids", "audience_state_paths",
+    "planned_state_in_fact_ids",
+    "planned_delta_add_fact_ids", "planned_delta_remove_fact_ids",
+    "planned_state_out_fact_ids", "completed_before_action_ids",
+    "completed_before_action_phase_ids", "reserved_future_event_ids",
+    "readability_window_ids",
 })
 
 
@@ -683,6 +691,531 @@ def _character_resolution_prompt_block(episode: dict) -> str:
     )
 
 
+def _narrative_plan_schema_example(scope_id: str) -> str:
+    """Render the complete narrative-plan JSON surface without story templates.
+
+    Values are ID/relationship examples only.  The surrounding prompt explicitly
+    forbids copying audience categories or content from this example; every
+    semantic value must be inferred from the current source and adaptation.
+    """
+    example = {
+        "contract_version": "narrative-continuity.v1",
+        "scope_id": scope_id,
+        "source_evidence": [{
+            "source_evidence_id": "SE-1",
+            "source_span": {"chapter_id": "current-source-chapter", "start": 0, "end": 12},
+            "verbatim_excerpt": "从本集授权原文逐字摘录",
+            "confidence": 1.0,
+        }],
+        "identity_contracts": [
+            {
+                "identity_id": "character-id",
+                "display_name": "当前来源与戏剧职责定义的显示名",
+                "kind": "由来源证据与本集语义推导的开放身份性质",
+                "visual_policy": "contextual",
+                "visual_canonical": "足以跨镜识别当前身份的中性视觉锚点",
+                "asset_requirement": "optional",
+                "voice_ids": ["voice-id"],
+                "evidence": {
+                    "source_evidence_ids": ["SE-1"],
+                    "proposition_ids": ["P-SOURCE-1", "P-ADAPTED-1"],
+                    "adaptation_decision_ids": ["AD-1"],
+                    "rationale": "为什么该身份及其视觉、资产、声音策略对本集是必要且充分的",
+                },
+            },
+            {
+                "identity_id": "entity-id",
+                "display_name": "当前叙事中被动作或状态引用的实体名",
+                "kind": "由当前命题与作用关系推导的开放实体性质",
+                "visual_policy": "contextual",
+                "visual_canonical": "足以识别当前实体与其状态变化的视觉锚点",
+                "asset_requirement": "optional",
+                "voice_ids": [],
+                "evidence": {
+                    "source_evidence_ids": ["SE-1"],
+                    "proposition_ids": ["P-SOURCE-1", "P-ADAPTED-1"],
+                    "adaptation_decision_ids": ["AD-1"],
+                    "rationale": "该实体被本集命题、事实或动作实际引用的证据理由",
+                },
+            },
+        ],
+        "propositions": [
+            {
+                "proposition_id": "P-SOURCE-1",
+                "canonical_statement": "不可再拆的原文命题",
+                "narrative_domain": "source_canon",
+                "entity_ids": ["entity-id", "character-id"],
+                "direct_source_evidence_ids": ["SE-1"],
+                "domain_truth_status": "true",
+            },
+            {
+                "proposition_id": "P-ADAPTED-1",
+                "canonical_statement": "改编后的不可再拆命题",
+                "narrative_domain": "adapted_story",
+                "entity_ids": ["entity-id", "character-id"],
+                "direct_source_evidence_ids": [],
+                "domain_truth_status": "true",
+            },
+        ],
+        "adaptation_decisions": [{
+            "adaptation_decision_id": "AD-1",
+            "source_proposition_ids": ["P-SOURCE-1"],
+            "adapted_proposition_ids": ["P-ADAPTED-1"],
+            "relation": "preserve",
+            "custom_relation": None,
+            "creative_reason": "本集改编理由",
+            "protected_causal_effect_ids": ["P-ADAPTED-1"],
+            "affected_event_ids": ["E-1", "E-2"],
+            "uncertainty": None,
+        }],
+        "state_facts": [
+            {
+                "fact_id": "F-1",
+                "proposition_id": "P-ADAPTED-1",
+                "subject_id": "entity-id",
+                "predicate_id": "project-semantic-predicate-id",
+                "value": {"kind": "text", "data": "事件前状态"},
+                "time_scope": "main@1",
+                "visibility": "visible",
+                "provenance": "screenplay",
+                "confidence": 1.0,
+            },
+            {
+                "fact_id": "F-2",
+                "proposition_id": "P-ADAPTED-1",
+                "subject_id": "entity-id",
+                "predicate_id": "project-semantic-predicate-id",
+                "value": {"kind": "text", "data": "原因事件完成后、结果行动前的状态"},
+                "time_scope": "main@2",
+                "visibility": "visible",
+                "provenance": "screenplay",
+                "confidence": 1.0,
+            },
+            {
+                "fact_id": "F-3",
+                "proposition_id": "P-ADAPTED-1",
+                "subject_id": "entity-id",
+                "predicate_id": "project-semantic-predicate-id",
+                "value": {"kind": "text", "data": "结果行动完成后的状态"},
+                "time_scope": "main@3",
+                "visibility": "visible",
+                "provenance": "screenplay",
+                "confidence": 1.0,
+            },
+        ],
+        "initial_state_fact_ids": ["F-1"],
+        "evidence": [
+            {
+                "evidence_id": "EV-1",
+                "anchor": {"type": "event", "id": "E-1"},
+                "observable_claim": "执行者与观众在原因事件当下实际可感知的内容",
+                "perceivable_by": ["character-id", "audience"],
+                "supports_proposition_ids": ["P-ADAPTED-1"],
+                "planned_salience": 0.8,
+                "planned_duration_s": 1.5,
+                "competing_attention_ids": [],
+            },
+            {
+                "evidence_id": "EV-2",
+                "anchor": {"type": "event", "id": "E-2"},
+                "observable_claim": "观察者可核对结果行动已完成",
+                "perceivable_by": ["character-id", "audience"],
+                "supports_proposition_ids": ["P-ADAPTED-1"],
+                "planned_salience": 0.7,
+                "planned_duration_s": 0.5,
+                "competing_attention_ids": [],
+            },
+        ],
+        "dramatic_questions": [{
+            "dramatic_question_id": "DQ-1",
+            "question_text": "观众此时应追问的问题",
+            "target_proposition_ids": ["P-ADAPTED-1"],
+            "open_anchor": {"type": "event", "id": "E-1"},
+            "intended_resolution_scope_id": scope_id,
+            "desired_state_while_open": "unknown",
+            "resolution_anchor": None,
+            "status": "open",
+        }],
+        "events": [
+            {
+                "event_id": "E-1",
+                "proposition_ids": ["P-ADAPTED-1"],
+                "causal_parent_ids": [],
+                "precondition_fact_ids": ["F-1"],
+                "action_ids": [],
+                "effects_add": ["F-2"],
+                "effects_remove": ["F-1"],
+                "character_goal_effects": [],
+                "downstream_dependency_event_ids": ["E-2"],
+                "salience": 0.8,
+                "irreversibility": 0.5,
+                "must_keep": True,
+                "delivery_scope_id": scope_id,
+                "delivery_policy": "deliver",
+                "primary_delivery_window_id": "RW-1",
+            },
+            {
+                "event_id": "E-2",
+                "proposition_ids": ["P-ADAPTED-1"],
+                "causal_parent_ids": ["E-1"],
+                "precondition_fact_ids": ["F-2"],
+                "action_ids": ["A-1"],
+                "effects_add": ["F-3"],
+                "effects_remove": ["F-2"],
+                "character_goal_effects": [],
+                "downstream_dependency_event_ids": [],
+                "salience": 0.8,
+                "irreversibility": 0.6,
+                "must_keep": True,
+                "delivery_scope_id": scope_id,
+                "delivery_policy": "deliver",
+                "primary_delivery_window_id": "RW-2",
+            },
+        ],
+        "atomic_actions": [{
+            "action_id": "A-1",
+            "actor_ids": ["character-id"],
+            "target_ids": ["entity-id"],
+            "semantic_intent": "该动作在故事中完成什么",
+            "precondition_fact_ids": ["F-2"],
+            "effects_add": ["F-3"],
+            "effects_remove": ["F-2"],
+            "completion_condition": "观察者可验证的完成条件",
+            "decision_requirement": "applies",
+            "decision_not_applicable_reason": None,
+            "temporal_phases": [{
+                "phase_id": "A-1/P1",
+                "start_condition": "开始条件",
+                "end_condition": "结束条件",
+                "estimated_min_s": 1.0,
+            }],
+            "splittable_boundaries": ["A-1/P1"],
+        }],
+        "action_relation_audits": [],
+        "character_states": [{
+            "character_state_id": "CDS-1",
+            "character_id": "character-id",
+            "anchor": {"type": "event", "id": "E-1"},
+            "goal_proposition_ids": ["P-ADAPTED-1"],
+            "stakes_proposition_ids": [],
+            "relationship_state": {},
+            "emotion": {"label": "自由语义", "intensity": 0.5, "observable_evidence": ["EV-1"]},
+            "pressure": 0.5,
+            "tactic": "当前手段",
+        }],
+        "character_beliefs": [{
+            "character_belief_id": "CB-1",
+            "character_id": "character-id",
+            "anchor": {"type": "event", "id": "E-1"},
+            "perceived_evidence_ids": ["EV-1"],
+            "beliefs": [{
+                "proposition_id": "P-ADAPTED-1",
+                "stance": "suspected",
+                "confidence": 0.6,
+                "evidence_ids": ["EV-1"],
+            }],
+            "misbelief_proposition_ids": [],
+            "decision_proposition_ids": ["P-ADAPTED-1"],
+            "decision_basis_ids": ["EV-1"],
+            "decision_action_ids": ["A-1"],
+        }],
+        "audience_priors": [
+            {
+                "audience_prior_id": "AP-1",
+                "scope_id": scope_id,
+                "audience_description": "由当前项目语义推导的一次观看先验 A",
+                "assumed_known_proposition_ids": [],
+                "assumed_unknown_proposition_ids": ["P-ADAPTED-1"],
+                "familiarity_assumptions": [],
+                "language_and_context_assumptions": [],
+                "attention_memory_assumptions": {},
+                "calibration_source": "needs_review",
+            },
+            {
+                "audience_prior_id": "AP-2",
+                "scope_id": scope_id,
+                "audience_description": "与 A 具有不同已知命题或记忆条件的当前项目先验 B",
+                "assumed_known_proposition_ids": ["P-ADAPTED-1"],
+                "assumed_unknown_proposition_ids": [],
+                "familiarity_assumptions": [],
+                "language_and_context_assumptions": [],
+                "attention_memory_assumptions": {},
+                "calibration_source": "needs_review",
+            },
+        ],
+        "audience_states": [
+            {
+                "audience_state_id": "AS-AP1-IN",
+                "audience_prior_id": "AP-1",
+                "anchor": {"type": "event", "id": "E-1"},
+                "beliefs": [{
+                    "proposition_id": "P-ADAPTED-1",
+                    "stance": "unknown",
+                    "confidence": 0.0,
+                    "evidence_ids": [],
+                }],
+                "causal_hypotheses": [],
+                "character_goal_hypotheses": {},
+                "spatial_model": {},
+                "temporal_model": {},
+                "active_question_ids": ["DQ-1"],
+                "working_memory": [{"proposition_id": "P-ADAPTED-1", "retention_confidence": 0.7}],
+                "attention_residue_ids": [],
+                "affective_state": {},
+            },
+            {
+                "audience_state_id": "AS-AP1-OUT",
+                "audience_prior_id": "AP-1",
+                "anchor": {"type": "event", "id": "E-1"},
+                "beliefs": [{
+                    "proposition_id": "P-ADAPTED-1",
+                    "stance": "suspected",
+                    "confidence": 0.6,
+                    "evidence_ids": ["EV-1"],
+                }],
+                "causal_hypotheses": [],
+                "character_goal_hypotheses": {},
+                "spatial_model": {},
+                "temporal_model": {},
+                "active_question_ids": ["DQ-1"],
+                "working_memory": [{"proposition_id": "P-ADAPTED-1", "retention_confidence": 0.7}],
+                "attention_residue_ids": [],
+                "affective_state": {},
+            },
+            {
+                "audience_state_id": "AS-AP2-IN",
+                "audience_prior_id": "AP-2",
+                "anchor": {"type": "event", "id": "E-1"},
+                "beliefs": [],
+                "causal_hypotheses": [],
+                "character_goal_hypotheses": {},
+                "spatial_model": {},
+                "temporal_model": {},
+                "active_question_ids": ["DQ-1"],
+                "working_memory": [{"proposition_id": "P-ADAPTED-1", "retention_confidence": 0.7}],
+                "attention_residue_ids": [],
+                "affective_state": {},
+            },
+            {
+                "audience_state_id": "AS-AP2-OUT",
+                "audience_prior_id": "AP-2",
+                "anchor": {"type": "event", "id": "E-1"},
+                "beliefs": [],
+                "causal_hypotheses": [],
+                "character_goal_hypotheses": {},
+                "spatial_model": {},
+                "temporal_model": {},
+                "active_question_ids": ["DQ-1"],
+                "working_memory": [{"proposition_id": "P-ADAPTED-1", "retention_confidence": 0.7}],
+                "attention_residue_ids": ["DQ-1"],
+                "affective_state": {},
+            },
+        ],
+        "experience_intents": [{
+            "experience_intent_id": "XI-1",
+            "scope_id": scope_id,
+            "anchor_event_ids": ["E-1"],
+            "director_objective": "这一段希望观众经历的状态变化",
+            "attention_target_ids": ["P-ADAPTED-1"],
+            "audience_paths": [
+                {
+                    "audience_path_id": "XP-AP1-1",
+                    "audience_prior_id": "AP-1",
+                    "audience_state_in_id": "AS-AP1-IN",
+                    "audience_state_out_target_id": "AS-AP1-OUT",
+                    "target_deltas": [{
+                        "target_delta_id": "XD-AP1-1",
+                        "dimension": "belief",
+                        "proposition_ids": ["P-ADAPTED-1"],
+                        "description": "该先验观众需要发生的状态差",
+                        "from_state": {"stance": "unknown", "confidence": 0.0},
+                        "to_state": {"stance": "suspected", "confidence": 0.6},
+                        "target_confidence": 0.6,
+                        "required_processing_s": 1.0,
+                        "deadline_event_id": "E-2",
+                        "primary_delivery_window_id": "RW-1",
+                        "custom_dimension": None,
+                    }],
+                },
+                {
+                    "audience_path_id": "XP-AP2-1",
+                    "audience_prior_id": "AP-2",
+                    "audience_state_in_id": "AS-AP2-IN",
+                    "audience_state_out_target_id": "AS-AP2-OUT",
+                    "target_deltas": [{
+                        "target_delta_id": "XD-AP2-1",
+                        "dimension": "attention",
+                        "proposition_ids": ["P-ADAPTED-1"],
+                        "description": "该先验观众需要把注意集中到仍未解决的问题",
+                        "from_state": {"attention_residue_ids": []},
+                        "to_state": {"attention_residue_ids": ["DQ-1"]},
+                        "target_confidence": None,
+                        "required_processing_s": 0.5,
+                        "deadline_event_id": "E-2",
+                        "primary_delivery_window_id": "RW-1",
+                        "custom_dimension": None,
+                    }],
+                },
+            ],
+            "withheld_propositions": [],
+            "forbidden_misconceptions": [],
+        }],
+        "assimilation_tasks": [{
+            "assimilation_task_id": "AT-1",
+            "experience_intent_id": "XI-1",
+            "audience_path_id": "XP-AP1-1",
+            "target_delta_id": "XD-AP1-1",
+            "required_prior_proposition_ids": [],
+            "downstream_dependency_event_ids": ["E-2"],
+            "satisfaction_criteria": "可由冷观众观察验证的达成条件",
+            "status": "planned",
+        }],
+        "readability_windows": [
+            {
+                "readability_window_id": "RW-1",
+                "event_ids": ["E-1"],
+                "proposition_ids": ["P-ADAPTED-1"],
+                "target_delta_ids": ["XD-AP1-1", "XD-AP2-1"],
+                "shot_ids": [],
+                "attention_target_ids": ["P-ADAPTED-1"],
+                "evidence_ids": ["EV-1"],
+                "scheduled_processing_s": 1.0,
+                "planned_available_s": 1.0,
+                "competing_attention_ids": [],
+                "readability_reason": "在下游事件使用前交付证据并留出逐先验处理时间",
+                "status": "planned",
+            },
+            {
+                "readability_window_id": "RW-2",
+                "event_ids": ["E-2"],
+                "proposition_ids": ["P-ADAPTED-1"],
+                "target_delta_ids": [],
+                "shot_ids": [],
+                "attention_target_ids": ["P-ADAPTED-1"],
+                "evidence_ids": ["EV-2"],
+                "scheduled_processing_s": 0.5,
+                "planned_available_s": 0.5,
+                "competing_attention_ids": [],
+                "readability_reason": "让行动完成条件在切离前可观察",
+                "status": "planned",
+            },
+        ],
+        "setup_payoff_contracts": [{
+            "setup_payoff_id": "SP-1",
+            "setup_proposition_ids": ["P-ADAPTED-1"],
+            "setup_event_ids": ["E-1"],
+            "payoff_event_ids": ["E-2"],
+            "intended_inference_ids": ["P-ADAPTED-1"],
+            "retention_deadline_event_id": "E-2",
+            "minimum_retention_confidence": 0.5,
+            "recall_needed": False,
+            "status": "paid_off",
+        }],
+        "scene_contracts": [{
+            "scene_id": "SC01",
+            "applicability": "applies",
+            "not_applicable_reason": None,
+            "alternative_dramatic_function": None,
+            "scene_question_id": "DQ-1",
+            "point_of_view_character_id": "character-id",
+            "audience_state_paths": [
+                {"audience_prior_id": "AP-1", "audience_state_in_id": "AS-AP1-IN", "audience_state_out_target_id": "AS-AP1-OUT"},
+                {"audience_prior_id": "AP-2", "audience_state_in_id": "AS-AP2-IN", "audience_state_out_target_id": "AS-AP2-OUT"},
+            ],
+            "character_state_in_ids": ["CDS-1"],
+            "goal_proposition_ids": ["P-ADAPTED-1"],
+            "obstacle_proposition_ids": ["P-ADAPTED-1"],
+            "stakes_proposition_ids": ["P-ADAPTED-1"],
+            "pressure_curve": [{"anchor": {"type": "event", "id": "E-1"}, "value": 0.5}],
+            "turn_event_ids": ["E-2"],
+            "value_polarity_in": "入场价值",
+            "value_polarity_out": "离场价值",
+            "relationship_deltas": [],
+            "character_state_out_ids": ["CDS-1"],
+            "scene_button": "场景结束时交给下一场的决定、问题或冲击",
+        }],
+        "arc_contracts": [{
+            "arc_id": "ARC-EPISODE",
+            "scope": "episode",
+            "applicability": "applies",
+            "not_applicable_reason": None,
+            "alternative_dramatic_function": None,
+            "core_question_ids": ["DQ-1"],
+            "promise_proposition_ids": ["P-ADAPTED-1"],
+            "escalation_event_ids": ["E-1"],
+            "climax_event_ids": ["E-2"],
+            "payoff_contract_ids": ["SP-1"],
+            "pressure_curve": [{"anchor": {"type": "event", "id": "E-1"}, "value": 0.5}],
+            "information_density_curve": [{"anchor": {"type": "event", "id": "E-1"}, "value": 0.5}],
+            "processing_beats": [{"anchor": {"type": "event", "id": "E-1"}, "purpose": "消化、停顿或转向"}],
+            "ending_hook_question_ids": [],
+            "resolved_question_ids": [],
+            "carried_question_ids": ["DQ-1"],
+        }],
+    }
+    return json.dumps(example, ensure_ascii=False, separators=(",", ":"))
+
+
+def _narrative_plan_prompt_block(scope_id: str) -> str:
+    return (
+        "【全链路叙事连续性合同·剧本发布硬门禁】\n"
+        "顶层必须输出 narrative_plan，并且它是下游分镜与冷观众审读的唯一叙事权威：\n"
+        "1. 先从授权原文逐字抽取 SourceEvidence，再建 source_canon 命题；"
+        "SourceSpan.start/end 必须精确切出 verbatim_excerpt，不得只让摘录在原文某处出现；"
+        "改编命题必须属于 adapted_story，通过 AdaptationDecision 连接，"
+        "实质改写后不得继承原文 direct_source_evidence_ids。命题 entity_ids 合并构成本作用域身份图，"
+        "fact.subject_id、action actor/target、人物状态与可感知者都必须引用其中身份。\n"
+        "1b. identity_contracts 是非角色圣经身份的唯一权威注册表。identity_id 供命题、事实、"
+        "动作、状态与信念精确引用，display_name 供场次、剧本正文与对白精确引用；kind 是基于当前"
+        "来源和戏剧职责的开放语义，不得使用姓名、称谓或题材白名单判定。无论具名新角色、"
+        "一次性功能身份、群体身份或画外说话人，都必须由当前语义意图选择 visual_policy："
+        "canonical 表示需持久定妆且 asset_requirement=required；contextual 表示仅在当前上下文保持识别；"
+        "collective 用群体构成锚点而非伪造单一人物；offscreen_only 表示纯画外且必须 "
+        "asset_requirement=forbidden。除 offscreen_only 外 visual_canonical 必填，canonical 必须 required。"
+        "voice_ids 必须精确回指 voice_bible.speaker_id；evidence 必须以 source_evidence_ids、proposition_ids、"
+        "adaptation_decision_ids 和 rationale 说明身份决策。除纯旁白可仅由 voice_bible.role_type=narrator 表达外，"
+        "任何未在角色圣经中的可见身份或说话人，以及任何进入 identity/entity、scene characters、dialogue speaker"
+        "或 information speaker 的身份，都必须先有完整合同；未声明身份不得进入剧本或分镜。\n"
+        "2. events 必须按因果拓扑顺序排列：每个 causal_parent_id 位于当前事件之前，"
+        "每个 downstream_dependency_event_id 位于其后，全图无环。只有 initial_state_fact_ids 中显式列出的 StateFact "
+        "可作为初始成立集逐事件重放；其他事实必须有唯一 effects_add 生产者。precondition 和 effects_remove 必须当下成立，"
+        "effects_add 必须当下未成立；不得从未来取前置事实、重复建立已成立事实或无效移除。\n"
+        "3. AtomicAction 必须有执行者或作用对象、语义意图、可观察完成条件与唯一阶段 ID；"
+        "effects_add/effects_remove 不得重叠。事件引用某动作时，事件的 precondition_fact_ids、effects_add、"
+        "effects_remove 必须分别完整覆盖该动作的同名集合，不得只写动作摘要却丢掉状态效果。"
+        "对所有不同 ID 但主体、目标、前置、效果、完成条件高度等价或语义同义的动作，"
+        "必须输出 ActionSemanticRelationAudit；功能性重复只有在后一事件因果依赖前一事件，且绑定"
+        "新 target_delta、人物状态或可感知证据时才能保留；不得用动作词表判断。\n"
+        "4. NarrativeEvidence 只写锚点当下真正可感知的证据。每个执行状态变化动作的 actor，"
+        "在该事件或更早锚点必须同时有 CharacterDramaticState 与 CharacterBeliefSnapshot；"
+        "decision_action_ids、decision_proposition_ids 与 decision_basis_ids 必须三者成对非空，并精确授权当前动作；"
+        "决策依据只能是角色已感知的证据"
+        "或已持有的命题，不得使用角色不可感知/未来证据。\n"
+        "5. audience_priors 至少 2 条，必须根据当前项目的已知命题、熟悉度和记忆条件动态推导；"
+        "禁止固定人群名单、题材白名单或复制下方示例描述。\n"
+        "6. 每个 ExperienceIntent 对每个 audience_prior 恰好一条 audience_path；每条路径有独立入场状态、"
+        "结构上真正发生变化的目标状态与 target_deltas。每个 delta 的 dimension 必须在对应 AudienceState "
+        "字段中真正改变，from_state 不得等于 to_state；必须填 required_processing_s、"
+        "deadline_event_id 和唯一 primary_delivery_window_id，不得用平均观众替代逐先验计算。\n"
+        "7. 只在现有证据无法推出目标状态时创建 AssimilationTask；"
+        "新事物是否需要桥接由先验差、推断路径、下游依赖、注意竞争和记忆衰减推导，"
+        "不按内容类别打补丁。任务必须精确引用 intent/path/delta，并声明可盲审的达成标准及下游依赖；"
+        "分镜中只能有一个 shot_contribution 作为任务主交付，且必须在 delta 截止事件与所有下游依赖事件中"
+        "最早一个的所在镜或之前完成。\n"
+        "8. 为必交付事件与目标变化创建 ReadabilityWindow；剧本阶段 shot_ids 可为空。"
+        "每个窗口先按 audience_prior 分组求和其 target_deltas.required_processing_s，"
+        "scheduled_processing_s 必须不小于各先验分组和的最大值，且 planned_available_s 不小于 scheduled_processing_s。"
+        "deliver+must_keep 事件和每个 target_delta 都必须反向引用唯一主窗口，窗口 event_ids/target_delta_ids "
+        "也必须回引它们。\n"
+        "9. 同时输出 SceneDramaticContract、NarrativeArcContract 和 SetupPayoffContract；"
+        "非传统段落可设 not_applicable，但必须给出替代戏剧功能，不得强套模板。\n"
+        "10. 所有 ID 必须唯一且引用存在；AI 不确定时使用 uncertainty/needs_review，"
+        "禁止用剧情关键词、动作词表、集数特判或内容类别到修复方案的固定映射。\n"
+        "narrative_plan 的完整 JSON 字段与关系结构见文末输出 Schema；"
+        "其中示例值只说明引用关系，严禁复制为本集语义。"
+    )
+
+
 async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
                               prev_ending: str = "") -> EpisodeScreenplay:
     """小说 -> 完整剧本。
@@ -694,6 +1227,10 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
     speech_styles = "；".join(f"{c.name}：{c.speech_style}" for c in bible.characters if c.speech_style)
     bible_names_inline = "、".join(c.name for c in bible.characters) or "（角色圣经为空）"
     character_resolution_block = _character_resolution_prompt_block(episode)
+    narrative_scope_id = str(
+        episode.get("id") or f"episode-{episode['episode_no']}"
+    )
+    narrative_plan_schema = _narrative_plan_schema_example(narrative_scope_id)
     episode_hook = (episode.get("hook") or "").strip()
     episode_cliffhanger = (episode.get("cliffhanger") or "").strip()
     no_episode_hook = not episode_hook and not episode_cliffhanger
@@ -737,7 +1274,7 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
         "【原文开场对白锚点·硬门禁】\n"
         f"- D001：{opening_dialogue_anchor}\n"
         "D001 必须进入 dialogue_chains[0].turns[0].source_text，并在 adapted line/full_script_text 中落地。"
-        "即使说话人是测验员、守卫等功能性角色，只要它触发后续主角反应，就必须整组保留。"
+        "即使说话人不需跨集定妆，只要其有原文依据且负责触发后续反应，也必须按完整因果链保留。"
         if opening_dialogue_anchor
         else "【原文开场对白锚点】本集原文未检测到显式对白。"
     )
@@ -748,7 +1285,7 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
     )
     screenplay_ending_rule = (
         "本集 episode hook 与 cliffhanger 均为空/空白：ending_hook 必须写成「无集级钩子」；"
-        "禁止发明戒指发光、药老暗示、神秘人出现等原文没有的下一集钩子。"
+        "禁止发明任何未受原文命题、事件与改编决策支持的下一集钩子。"
         if no_episode_hook
         else (
             "本集 cliffhanger 为空：剧本结尾只收束到原文真实状态，ending_hook 可写「无集级钩子」，"
@@ -774,7 +1311,7 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
 
 【导演级连续性要求】只写大形体可读调度，不要微表情/手指/衣褶：
 - 每场开头交代本场已在场人物与大致位置；人物不能突然出现。
-- 入场/离场/走近/退后用走、停、转身、伸手等大动作交代。
+- 人物或作用对象跨越空间/可见性边界时，用 AtomicAction.temporal_phases 的可观察起止条件完整交代；不以预设动作词表限制表演。
 - 每场结尾留下「人物位置 + 情绪大方向 + 关键道具状态」供下一场承接。
 
 【最重要·Renderability First·主线压缩】目标时长 {episode['target_duration_s']} 秒只作节奏参考。
@@ -785,7 +1322,7 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
 - `plot_spine.drop_list`：至少 2 条「本章有但不拍」的支线/气氛戏/装饰对白。
 - `dialogue_chains`：主线对白的权威来源。每条链写清 chain_id/topic/turns；turns 按原文与正文发生顺序排列，每个 turn 含 speaker/line/function/source_text。
 - `source_text` 必须逐字复制本集源文本中的真实句子或片段。若把原文叙述改成对白，`source_text` 仍须填写对应的原文叙述原句；严禁填写“原文叙述转为对白”“原文无此句”“为衔接补写”等说明性占位词。找不到可逐字引用的原文依据时，删除该话轮，不得虚构依据。
-- 每条对白链必须从 trigger/announcement/question 开始，再接 response/decision；不得从回答开始。测验员、守卫等功能性角色若负责宣布结果或触发主角反应，允许且必须作为链首进入。
+- 每条对白链必须从 trigger/announcement/question 开始，再接 response/decision；不得从回答开始。任何有原文依据、且负责宣布结果或触发反应的说话人，都必须作为链首进入；不按职业或题材名称筛选。
 - `key_lines` 由后端按 dialogue_chains.turns 确定性回填，模型仍需输出但不得自行另选；对白话轮不设固定条数上限。用户多选的必保留台词优先级最高，其余按完整语义链取舍，并让总口播服从本集目标时长。
 - `key_lines` 中每一条都必须在 `full_script_text` 里作为“角色名：台词”的真实对白落地；写进动作描述、梗概、source_basis 或清单本身都不算角色说过。
 - `key_lines` 必须按正文发生顺序排列，并按“对白链”取舍：若保留回答、安慰、反驳、引用对方旧话，必须连同触发它的前一角色话轮一起保留；宁可删除另一组支线对白，也不得只摘一句回答让角色突兀开口。
@@ -816,7 +1353,7 @@ B. `full_script_text`：真正的剧本正文；只写大形体动作与主线�
    dramatic_question / protagonist_goal / obstacle / stakes 必填；
    key_lines 至少 {3} 条且须按发生顺序写进正文，不设固定条数上限；上下文依赖台词必须与触发话轮组成连续对白链；总口播服从本集目标时长；key_plot_points {KEY_PLOT_POINTS_MIN}~{KEY_PLOT_POINTS_MAX} 条。
 3. `scene_outline` 必须是 3~5 场的连续场次结构，scene_no 从 1 连续递增。
-   【硬性·角色圣经】scene_outline[*].characters 中的具名角色只能填角色圣经准确姓名（{bible_names_inline}）；无需跨集定妆的临时人物只能使用测验员、守卫、围观者、路人甲等通用功能性身份标签。绿袍男子/青衣女子/大汉等过渡称谓不是可直接放行的标签，必须执行下方预解析映射。
+   【硬性·角色身份】scene_outline[*].characters 只能填角色圣经准确姓名（{bible_names_inline}）或 narrative_plan.identity_contracts[*].display_name。任何非角色圣经身份都必须先有身份合同，并由当前来源、戏剧职责、可见性与跨镜持久性语义决定 kind / visual_policy / asset_requirement；不得按固定姓名、称谓、角色类型或题材名单猜测。画外说话人仍须以 voice_ids 连接 voice_bible，只有 role_type=narrator 的纯旁白可不创建身份合同。
 4. full_script_text 必须是一篇连续故事正文，且必须带场次标题、动作段、对白段；「【场N】」数量必须与 scene_outline 一致。
 5. full_script_text 不能是一大段梗概；必须像台本分行书写。
 6. full_script_text 中禁止出现：拍01、拍1、拍 01、镜头、景别、运镜、首帧、尾帧、参考图、提示词、prompt；并禁止超纲细节词（眼泪/指节/衣角/发丝/瞳孔/分屏/闪回等）。
@@ -835,6 +1372,8 @@ B. `full_script_text`：真正的剧本正文；只写大形体动作与主线�
 - approved_adaptations[] / forbidden_additions[]。
 规则：原文没有的事件默认不得创建；若确需为连贯性补小动作，events[].adaptation_addition 必须为 true，必须写 adaptation_reason，且 approved 必须为 false。
 空钩子规则：本集 hook=「{episode_hook or '（空）'}」、cliffhanger=「{episode_cliffhanger or '（空）'}」；若二者均为空/空白，ending_hook 只能写「无集级钩子」，不得发明原文没有的下一集钩子。
+
+{_narrative_plan_prompt_block(narrative_scope_id)}
 
 本集规划信息：
 - 概要（只用于理解，不可替代原文）：{episode.get('synopsis') or ''}
@@ -859,7 +1398,7 @@ B. `full_script_text`：真正的剧本正文；只写大形体动作与主线�
 {_render_screenplay_source(source_text)}
 
 输出 JSON Schema：
-{{"episode_no": {episode['episode_no']}, "mode": "full_script", "title": str, "logline": str, "script_format_note": "一句话说明正文采用的台本格式", "plot_spine": {{"episode_premise": "一句话本集目标", "spine_beats": [{{"beat_id": "S01", "who": str, "does": str, "turn": str, "must_keep": true}}], "must_keep_ending": str, "drop_list": [str, str]}}, "dramatic_question": "本集戏剧问题（一句话）", "protagonist_goal": "主角外在目标", "obstacle": "外部+内部阻力", "stakes": "失败代价", "dialogue_chains": [{{"chain_id": "DC1", "topic": "同一话题", "turns": [{{"speaker": "测验员或人物谱角色", "line": "适合表演的改编台词", "function": "trigger|announcement|question|response|decision|statement", "source_text": "对应原文对白原句"}}]}}], "key_lines": ["由后端按 dialogue_chains.turns 回填；不要另选孤立金句"], "key_plot_points": ["与spine对齐的局势变化，{KEY_PLOT_POINTS_MIN}~{KEY_PLOT_POINTS_MAX}条"], "scene_outline": [{{"scene_no": int, "scene_heading": "场次标题", "story_function": "8~40字，写明本场造成的剧情变化；禁止只写进入/升级/转折/收束", "characters": [str], "summary": "本场戏剧内容概括", "conflict": str, "turn": "交给下一场的状态变化", "source_basis": "原文依据"}}], "full_script_text": str, "character_state_changes": [str], "emotional_curve": str, "ending_hook": "若 hook/cliffhanger 均为空则固定为「无集级钩子」", "source_basis": str, "adaptation_direction": str, "opening": str, "development": str, "conflict": str, "climax": str, "episode_premise": "一句话本集目标", "events": [{{"event_id": "E1", "source_span": "原文位置或摘句", "source_fact": "原文事实", "state_in": "事件前状态", "trigger": "触发因素", "visible_change": "可见/可听变化", "state_out": "事件后状态", "must_keep": true, "adaptation_addition": false, "adaptation_reason": "", "approved": false}}], "information_ledger": [{{"info_id": "I1", "event_id": "E1", "content": "观众必须获得的信息", "delivery_owner": "visual_action|spoken_dialogue|offscreen_voice|narration|on_screen_text|ambient_sound", "speaker_id": "角色名/旁白/功能性身份或null", "exact_text": "需逐字交付时填写，否则null", "reinforcement_allowed": false, "status": "unassigned"}}], "voice_bible": [{{"speaker_id": "角色名/旁白/功能性身份", "voice_canonical": "声音与语气规范", "language": "普通话", "role_type": "named_character|functional_character|narrator"}}], "approved_adaptations": [str], "forbidden_additions": [str]}}"""
+{{"episode_no": {episode['episode_no']}, "mode": "full_script", "title": str, "logline": str, "script_format_note": "一句话说明正文采用的台本格式", "plot_spine": {{"episode_premise": "一句话本集目标", "spine_beats": [{{"beat_id": "S01", "who": str, "does": str, "turn": str, "must_keep": true}}], "must_keep_ending": str, "drop_list": [str, str]}}, "dramatic_question": "本集戏剧问题（一句话）", "protagonist_goal": "主角外在目标", "obstacle": "外部+内部阻力", "stakes": "失败代价", "dialogue_chains": [{{"chain_id": "DC1", "topic": "同一话题", "turns": [{{"speaker": "引用角色圣经准确姓名或 narrative_plan.identity_contracts[].display_name", "line": "适合表演的改编台词", "function": "trigger|announcement|question|response|decision|statement", "source_text": "对应原文对白原句"}}]}}], "key_lines": ["由后端按 dialogue_chains.turns 回填；不要另选孤立金句"], "key_plot_points": ["与spine对齐的局势变化，{KEY_PLOT_POINTS_MIN}~{KEY_PLOT_POINTS_MAX}条"], "scene_outline": [{{"scene_no": int, "scene_heading": "场次标题", "story_function": "8~40字，写明本场造成的剧情变化；禁止只写进入/升级/转折/收束", "characters": ["角色圣经准确姓名或 identity_contract.display_name"], "summary": "本场戏剧内容概括", "conflict": str, "turn": "交给下一场的状态变化", "source_basis": "原文依据"}}], "full_script_text": str, "character_state_changes": [str], "emotional_curve": str, "ending_hook": "若 hook/cliffhanger 均为空则固定为「无集级钩子」", "source_basis": str, "adaptation_direction": str, "opening": str, "development": str, "conflict": str, "climax": str, "episode_premise": "一句话本集目标", "events": [{{"event_id": "E1", "source_span": "原文位置或摘句", "source_fact": "原文事实", "state_in": "事件前状态", "trigger": "触发因素", "visible_change": "可见/可听变化", "state_out": "事件后状态", "must_keep": true, "adaptation_addition": false, "adaptation_reason": "", "approved": false}}], "information_ledger": [{{"info_id": "I1", "event_id": "E1", "content": "观众必须获得的信息", "delivery_owner": "visual_action|spoken_dialogue|offscreen_voice|narration|on_screen_text|ambient_sound", "speaker_id": "精确引用 voice_bible.speaker_id 或 null", "exact_text": "需逐字交付时填写，否则null", "reinforcement_allowed": false, "status": "unassigned"}}], "voice_bible": [{{"speaker_id": "唯一 voice ID；非旁白的非圣经说话人必须被 identity_contract.voice_ids 回指", "voice_canonical": "声音与语气规范", "language": "普通话", "role_type": "开放语义；纯旁白使用 narrator"}}], "approved_adaptations": [str], "forbidden_additions": [str], "narrative_plan": {narrative_plan_schema}}}"""
     # Production Repair：完整生成只允许一次；QA 后禁止“重新输出完整 JSON”。
     return await generate_screenplay_baseline(
         episode, source_text, bible, prev_ending=prev_ending, _prompt=prompt,
@@ -929,6 +1468,18 @@ async def generate_screenplay_baseline(
             resolutions,
         ))
         errors.extend(adaptation_hook_errors(s, episode))
+        # New productions must carry one authoritative narrative graph.  Keep
+        # this import local so legacy tooling that imports ``stages`` without
+        # executing the screenplay stage does not create an import cycle.
+        from app.narrative import validate_screenplay_narrative
+        errors.extend(validate_screenplay_narrative(
+            s,
+            require=True,
+            source_text=source_text,
+            expected_scope_id=str(
+                episode.get("id") or f"episode-{episode['episode_no']}"
+            ),
+        ))
         if no_episode_hook:
             ending = (s.ending_hook or "").strip()
             explicit_no_hook = ending in {"无", "无钩子", "无集级钩子", "（无）"} or ending.startswith("无集级")
@@ -951,6 +1502,248 @@ async def generate_screenplay_baseline(
     return script
 
 
+def _compact_narrative_plan_context(screenplay: EpisodeScreenplay) -> str:
+    """Project the authority graph into a compact, ID-preserving storyboard context.
+
+    The storyboard does not need verbatim source spans or calibration prose on
+    every call, but it must see every ownership/state/deadline relation.  This
+    projection deliberately keeps semantic IDs and graph edges instead of
+    summarizing them into lossy natural language.
+    """
+    plan = screenplay.narrative_plan
+    if plan is None:
+        return "【叙事连续性权威图】缺失；新生产不得规划分镜。\n"
+
+    payload = {
+        "contract_version": plan.contract_version,
+        "scope_id": plan.scope_id,
+        "initial_state_fact_ids": list(plan.initial_state_fact_ids),
+        "source_evidence": [
+            {
+                "source_evidence_id": item.source_evidence_id,
+                "source_span": item.source_span.model_dump(mode="json"),
+                "verbatim_excerpt": item.verbatim_excerpt[:120],
+                "confidence": item.confidence,
+            }
+            for item in plan.source_evidence
+        ],
+        "propositions": [
+            {
+                "proposition_id": item.proposition_id,
+                "canonical_statement": item.canonical_statement,
+                "narrative_domain": item.narrative_domain,
+                "entity_ids": list(item.entity_ids),
+                "direct_source_evidence_ids": item.direct_source_evidence_ids,
+                "domain_truth_status": item.domain_truth_status,
+            }
+            for item in plan.propositions
+        ],
+        "adaptation_decisions": [
+            item.model_dump(mode="json") for item in plan.adaptation_decisions
+        ],
+        "state_facts": [item.model_dump(mode="json") for item in plan.state_facts],
+        "evidence": [item.model_dump(mode="json") for item in plan.evidence],
+        "dramatic_questions": [
+            item.model_dump(mode="json") for item in plan.dramatic_questions
+        ],
+        "events": [item.model_dump(mode="json") for item in plan.events],
+        "atomic_actions": [
+            item.model_dump(mode="json") for item in plan.atomic_actions
+        ],
+        "action_relation_audits": [
+            item.model_dump(mode="json") for item in plan.action_relation_audits
+        ],
+        "character_states": [
+            item.model_dump(mode="json") for item in plan.character_states
+        ],
+        "character_beliefs": [
+            item.model_dump(mode="json") for item in plan.character_beliefs
+        ],
+        "audience_priors": [
+            item.model_dump(mode="json") for item in plan.audience_priors
+        ],
+        "audience_states": [
+            item.model_dump(mode="json") for item in plan.audience_states
+        ],
+        "experience_intents": [
+            item.model_dump(mode="json") for item in plan.experience_intents
+        ],
+        "assimilation_tasks": [
+            item.model_dump(mode="json") for item in plan.assimilation_tasks
+        ],
+        "readability_windows": [
+            item.model_dump(mode="json") for item in plan.readability_windows
+        ],
+        "setup_payoff_contracts": [
+            item.model_dump(mode="json") for item in plan.setup_payoff_contracts
+        ],
+        "scene_contracts": [
+            item.model_dump(mode="json") for item in plan.scene_contracts
+        ],
+        "arc_contracts": [
+            item.model_dump(mode="json") for item in plan.arc_contracts
+        ],
+    }
+    return (
+        "【叙事连续性权威图·分镜只能引用不得改写】\n"
+        + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        + "\n"
+    )
+
+
+def _storyboard_narrative_contract_block(*, include_outline_windows: bool) -> str:
+    """Return the ID-level narrative task contract shared by both shot stages.
+
+    This is deliberately relation-driven: it never guesses a genre, audience
+    category, transition keyword, or a canned "bridge shot" recipe.  The model
+    must bind every value to the screenplay's authoritative narrative graph.
+    """
+    shot_schema = {
+        "shot_id": "SH001（本集唯一、稳定）",
+        "scene_id": "引用 narrative_plan.scene_contracts[].scene_id",
+        "event_ids": ["引用 narrative_plan.events[].event_id"],
+        "primary_action_id": "引用 narrative_plan.atomic_actions[].action_id；无主动作的功能镜可为 null",
+        "supporting_action_ids": [],
+        "action_phase_ids": ["仅引用本镜实际执行的 temporal phase_id；跨镜动作不得重复分配阶段"],
+        "visible_entity_ids": ["本镜实际可见且由权威图定义的 actor/target/entity ID"],
+        "offscreen_action_actor_ids": ["仅填写本镜绑定动作中明确在画外执行的 actor_id"],
+        "offscreen_action_target_ids": ["仅填写本镜绑定动作中明确在画外承受作用的 target_id"],
+        "capacity_budget": {
+            "action_phase_s": 0.0,
+            "spoken_and_text_s": 0.0,
+            "attention_switch_s": 0.0,
+            "inference_processing_s": 0.0,
+            "reaction_registration_s": 0.0,
+            "spatial_reorientation_s": 0.0,
+            "entry_exit_settle_s": 0.0,
+            "other_s": 0.0,
+            "other_reason": None,
+        },
+        "shot_contribution": {
+            "shot_contribution_id": "SCONTRIB-SH001（本集唯一）",
+            "experience_intent_ids": ["引用 narrative_plan.experience_intents[].experience_intent_id"],
+            "target_delta_ids": ["仅在本镜是该目标差的唯一主交付镜时引用 target_delta_id"],
+            "assimilation_task_ids": ["引用本镜实际承担的 assimilation_task_id"],
+            "evidence_ids": ["引用本镜让角色/观众实际可感知的 evidence_id"],
+            "story_delta_fact_ids": ["引用本镜真正产生的 fact_id"],
+            "character_state_delta_ids": ["引用本镜真正改变的 character_state_id/character_belief_id"],
+            "audience_state_delta_ids": ["引用本镜实际产生的 audience_state_id"],
+            "affective_delta": {},
+            "spatial_temporal_delta": {},
+            "dramatic_pressure_delta": 0.0,
+        },
+        "audience_state_paths": [{
+            "audience_prior_id": "AP-ID（每个 audience_prior 均必须一条）",
+            "audience_state_in_id": "引用该先验的入口 audience_state_id",
+            "audience_state_out_target_id": "引用该先验的出口 audience_state_id",
+        }],
+        "planned_state_in_fact_ids": ["本镜开始已成立的 fact_id"],
+        "planned_delta_add_fact_ids": ["本镜新建立的 fact_id"],
+        "planned_delta_remove_fact_ids": ["本镜作废的 fact_id"],
+        "planned_state_out_fact_ids": ["本镜结束仍成立的 fact_id"],
+        "completed_before_action_ids": ["在本镜之前已完成、不得重演的 action_id"],
+        "completed_before_action_phase_ids": ["在本镜之前已完成、不得重演的 phase_id"],
+        "reserved_future_event_ids": ["明确留给未来镜头、本镜不得泄露的 event_id"],
+        "readability_window_ids": ["本镜为之提供证据/注意/处理时间的 readability_window_id"],
+        "narrative_boundary_from_previous": None,
+    }
+    later_boundary_schema = {
+        "boundary_id": "NB-SH001-SH002（本集唯一）",
+        "previous_shot_id": "紧邻上一镜 shot_id",
+        "next_shot_id": "本镜 shot_id",
+        "narrative_relation": "两镜的真实叙事关系，由上下文推导",
+        "required_state_invariants": ["同时存在于上镜出态和本镜入态、切换后必须保持的 fact_id"],
+        "allowed_state_deltas": ["上镜出态与本镜入态对称差中、该边界明确允许的 fact_id"],
+        "state_delta_transitions": [{
+            "transition_id": "本集唯一的结构关系 ID",
+            "basis_type": "timeline_change|viewpoint_visibility_change|spatial_reorientation|action_phase_handoff|other",
+            "source_fact_id": "变化前 fact_id 或 null",
+            "target_fact_id": "变化后 fact_id 或 null",
+            "basis_action_phase_id": "仅 action_phase_handoff 时引用 phase_id，否则 null",
+            "custom_basis": "仅 other 时说明开放关系，否则 null",
+            "reason": "该结构关系为何允许此状态变化",
+        }],
+        "forbidden_replay_action_ids": ["上文已完成、本镜不得重演的 action_id"],
+        "handoff_action_phase_id": "若为同一动作跨镜，引用合法 phase_id；否则 null",
+        "spatial_orientation_contract": {},
+        "temporal_orientation_contract": {},
+        "audience_state_handoffs": [{
+            "audience_prior_id": "AP-ID（所有先验各一条）",
+            "previous_state_out_id": "必须等于上镜该先验 audience_state_out_target_id",
+            "next_state_in_id": "必须等于本镜该先验 audience_state_in_id",
+        }],
+        "affective_handoff": {},
+        "cut_motivation": "为何此刻切换观众注意，必须非空",
+    }
+    root_schema = ""
+    if include_outline_windows:
+        root_schema = (
+            "\n大纲根对象还必须输出 `readability_windows`：从 narrative_plan.readability_windows "
+            "按 ID 复制语义关系，为每个窗口填入实际承担的 shot_ids，并按实际分镜时长计算 "
+            "planned_available_s。窗口列出的每个 shot_id 必须在该镜 readability_window_ids 回引，"
+            "镜头引用的每个窗口也必须在窗口 shot_ids 反向引用；planned_available_s 不得大于"
+            "绑定镜头总时长，且不得小于 scheduled_processing_s。不得无依据标记 satisfied。根字段结构：\n"
+            + json.dumps({
+                "readability_windows": [{
+                    "readability_window_id": "RW-ID",
+                    "event_ids": ["E-ID"],
+                    "proposition_ids": ["P-ID"],
+                    "target_delta_ids": ["XD-ID"],
+                    "shot_ids": ["SH001"],
+                    "attention_target_ids": ["P-ID"],
+                    "evidence_ids": ["EV-ID"],
+                    "scheduled_processing_s": 1.0,
+                    "planned_available_s": 1.0,
+                    "competing_attention_ids": [],
+                    "readability_reason": "下游依赖与可读性原因",
+                    "status": "planned",
+                }],
+                "cognitive_bridge_plans": [],
+            }, ensure_ascii=False, separators=(",", ":"))
+        )
+    return (
+        "【叙事任务与镜间交接·必须合并进每个 shot 的 JSON 合同】\n"
+        "1. 所有 ID 只能引用上方 narrative_plan 中实际存在的对象；不得自创语义、类型白名单或固定补镜模板。\n"
+        "2. shot_id 必须本集唯一且在大纲→逐镜→审核中保持不变；event_ids/scene_id 必须绑定权威图。\n"
+        "3. event_ids 在全集的首次出现必须保持 narrative_plan.events 的因果拓扑顺序；"
+        "deliver+must_keep 事件必须在其 primary_delivery_window_id 绑定的实际镜头中出现。\n"
+        "4. primary_action_id 可为 null：建立、反应、证据、吸收/处理镜只要有真实功能就合法；"
+        "但 shot_contribution 必填且至少一个贡献维度非空/非零，不允许纯填充镜。\n"
+        "5. 每个被事件引用的 action_id 恰好一个 primary owner；有 temporal_phases 时，owner 必须是交付首阶段的镜头。"
+        "每镜 action_phase_ids 只列本镜真实执行阶段，同一动作可跨相邻镜按定义顺序各交付一次；起始阶段镜承接 precondition，"
+        "结束阶段镜承接全部 effects。无阶段动作只能作为一个不可拆的 primary action，不能作为 supporting action。\n"
+        "5a. capacity_budget 必填：action_phase_s 不得低于本镜 action_phase_ids 的 estimated_min_s 总和；"
+        "全部开放观看任务预算之和不得超过 duration_s。只有 AtomicAction.splittable_boundaries 声明的边界才可跨镜拆分；"
+        "无合法边界时由 AI 上溯重构动作与镜头任务，禁止按文本切词拆镜。completed_before_action_ids 与 "
+        "completed_before_action_phase_ids 必须精确继承前序实际完成账本，并阻止重演。\n"
+        "5b. 动作 actor 必须出现在 visible_entity_ids/characters/characters_visible/audio_cast 中，"
+        "或作为本动作 actor 明确列入 offscreen_action_actor_ids。动作 target 也必须可见/可听，"
+        "或明确列入 offscreen_action_target_ids；任一画外作用都必须绑定观众可感知证据，"
+        "不得用固定身份名单猜测。\n"
+        "6. 状态方程是精确集合等式：planned_state_out_fact_ids = "
+        "(planned_state_in_fact_ids - planned_delta_remove_fact_ids) ∪ planned_delta_add_fact_ids。"
+        "remove 必须是 in 的子集，add/remove 不得重叠；镜内事件的全部 precondition 必须在 in，"
+        "全部 effects 必须在对应 add/remove，shot_contribution.story_delta_fact_ids 必须属于本镜 add∪remove。\n"
+        "7. audience_state_paths 必须覆盖 narrative_plan 的每个 audience_prior；同一先验在本镜的入口状态必须"
+        "精确等于上镜出口状态。不得用‘平均观众’覆盖多先验差异。\n"
+        "8. 每个 target_delta_id 恰好由一镜作为主交付，主交付镜必须位于 deadline_event_id 所在镜或之前，"
+        "且必须属于 delta.primary_delivery_window_id 的 shot_ids。每个 assimilation_task_id 也恰好由一镜主承担，"
+        "并在其 target delta 截止事件与 downstream_dependency_event_ids 中最早事件的所在镜或之前完成。\n"
+        "9. readability_window_ids 只分给真正提供证据、注意聚焦或观众处理时间的镜头；"
+        "镜头与窗口的 shot_ids 必须双向互指，不得只写一边。reserved_future_event_ids 不得在当前镜泄露。\n"
+        "10. 第一镜 narrative_boundary_from_previous 必须为 null；第二镜起必填边界对象，精确连接真实相邻 shot_id。"
+        "默认本镜 in 等于上镜 out；若存在跨边界变化，两者对称差必须全部由 allowed_state_deltas 明确授权，"
+        "required_state_invariants 必须同时存在于上镜 out 与本镜 in。边界还必须对每个先验精确交接"
+        "previous_state_out_id→next_state_in_id，并解释此刻为何切换注意。\n"
+        "每个 shot 除原有字段外必须合并以下结构（字符串是类型/引用说明，不得原样抄成内容）：\n"
+        + json.dumps(shot_schema, ensure_ascii=False, separators=(",", ":"))
+        + "\n第二镜起 narrative_boundary_from_previous 对象结构示例：\n"
+        + json.dumps(later_boundary_schema, ensure_ascii=False, separators=(",", ":"))
+        + root_schema
+        + "\n"
+    )
+
+
 def _storyboard_key_content_block(screenplay: EpisodeScreenplay) -> str:
     """把剧本台主线合同渲染成分镜 prompt 区块（spine + key_lines/points + drop_list）。"""
     key_lines = [ln.strip() for ln in (screenplay.key_lines or []) if ln and ln.strip()]
@@ -969,7 +1762,7 @@ def _storyboard_key_content_block(screenplay: EpisodeScreenplay) -> str:
     else:
         lines_text = "\n".join(f"- {ln}" for ln in key_lines) or "（剧本未单列，请从完整剧本文本中提取主线对白）"
     points_text = "\n".join(f"- {pt}" for pt in key_points) or "（剧本未单列，请从完整剧本文本中提取主线剧情）"
-    blocks: list[str] = []
+    blocks: list[str] = [_compact_narrative_plan_context(screenplay), ""]
     spine = screenplay.plot_spine
     if spine:
         beats = spine.spine_beats or []
@@ -1159,13 +1952,23 @@ def _filter_partial_storyboard_errors(
 
 def _normalized_candidate_board(episode_no: int, completed_shots: list[Shot], shot: Shot,
                                 bible: Bible | None = None,
-                                target_duration_s: int | None = None) -> tuple[Storyboard, list[str]]:
+                                target_duration_s: int | None = None,
+                                *,
+                                narrative_authority: bool = False,
+                                narrative_plan: Any | None = None) -> tuple[Storyboard, list[str]]:
     raw_board = Storyboard(episode_no=episode_no, shots=[*completed_shots, shot])
     # 在副本上做合同规范化。未知人物不能靠代码静默删掉；它必须作为
     # 当前候选的模型修复反馈返回，原始台词和角色字段保持完整。
     board = Storyboard.model_validate(raw_board.model_dump(mode="json"))
-    normalize_continuity(board)
-    character_changes = normalize_offbible_characters(board, bible)
+    if not narrative_authority:
+        normalize_continuity(board)
+    # The legacy normalizer classifies identities with a fixed functional-role
+    # vocabulary and may destructively strip an authority-graph entity.  New
+    # ShotTasks are validated against narrative character/action references in
+    # validate_storyboard; do not mutate them here.
+    character_changes = (
+        [] if narrative_authority else normalize_offbible_characters(board, bible)
+    )
     stripped = sorted({
         str(change.get("stripped") or "").strip()
         for change in character_changes
@@ -1177,23 +1980,39 @@ def _normalized_candidate_board(episode_no: int, completed_shots: list[Shot], sh
             + "、".join(stripped)
             + "；不得删除人物或台词，请严格改用已发布剧本中的人物谱正名/路人编号"
         ]
-    normalize_dialogue_focus_offscreen_mentions(board, bible)
+    if not narrative_authority:
+        normalize_dialogue_focus_offscreen_mentions(board, bible)
     # ② 产品禁止旁白/内心OS：确定性清空 narration 与 timeline narration 轨。
     relieve_spoken_overflow(board)
-    prefer_default_shot_durations(board)
+    prefer_default_shot_durations(
+        board,
+        narrative_authority=narrative_authority,
+        narrative_plan=narrative_plan,
+    )
     normalize_transition_visuals(board)
-    for s in board.shots:
-        s.action_desc = normalize_action_desc(s.action_desc)
+    if not narrative_authority:
+        for s in board.shots:
+            s.action_desc = normalize_action_desc(s.action_desc)
     return board, []
 
 
 def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict, bible: Bible,
                                     screenplay: EpisodeScreenplay, completed_shots: list[Shot],
                                     shot_no: int, allow_finish: bool, must_finish: bool,
+                                    narrative_authority: bool | None = None,
                                     outline_covers: str = "", later_planned_covers: str = "",
                                     outline_scene_name: str = "",
+                                    outline_narrative_task: StoryboardOutlineShot | None = None,
                                     source_text: str = "") -> list[str]:
     errors: list[str] = []
+    expected_narrative_authority = screenplay.narrative_plan is not None
+    if narrative_authority is None:
+        narrative_authority = expected_narrative_authority
+    elif narrative_authority != expected_narrative_authority:
+        errors.append(
+            "[NARRATIVE_AUTHORITY_MODE_MISMATCH] 逐镜校验模式必须与 "
+            "screenplay.narrative_plan 的存在性一致"
+        )
     if draft.episode_no != episode["episode_no"]:
         errors.append(f"episode_no={draft.episode_no}，必须等于 {episode['episode_no']}")
     if draft.shot.shot_no != shot_no:
@@ -1225,11 +2044,20 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
     target = episode["target_duration_s"]
     board, identity_errors = _normalized_candidate_board(
         episode["episode_no"], completed_shots, draft.shot, bible, target,
+        narrative_authority=narrative_authority,
+        narrative_plan=screenplay.narrative_plan,
     )
     errors.extend(identity_errors)
     current = board.shots[-1]
     partial_errors = (
-        validate_storyboard(board, bible, target)
+        validate_storyboard(
+            board,
+            bible,
+            target,
+            narrative_authority=narrative_authority,
+            narrative_plan=screenplay.narrative_plan,
+            screenplay=screenplay,
+        )
         + information_ledger_errors(board, screenplay)
     )
     errors.extend(_filter_partial_storyboard_errors(
@@ -1249,12 +2077,54 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
         (s.action_desc or "") + _spoken_text_of(s)
         for s in board.shots[:-1]
     )
-    errors.extend(validate_storyboard_shot_covers_outline(
-        current, outline_covers, shot_no,
-        prior_text=prior_text, later_planned_covers=later_planned_covers))
+    if outline_narrative_task is None:
+        errors.extend(validate_storyboard_shot_covers_outline(
+            current, outline_covers, shot_no,
+            prior_text=prior_text, later_planned_covers=later_planned_covers,
+        ))
+
+    # The outline owns narrative allocation.  Compare the complete structural
+    # task instead of re-inferring it from prose, while leaving legacy outlines
+    # (whose narrative fields are all empty) on their existing compatibility path.
+    if outline_narrative_task is not None:
+        narrative_fields = (
+            "shot_id", "scene_id", "event_ids", "primary_action_id",
+            "supporting_action_ids", "action_phase_ids", "visible_entity_ids",
+            "offscreen_action_actor_ids", "offscreen_action_target_ids",
+            "capacity_budget", "shot_contribution",
+            "audience_state_paths",
+            "planned_state_in_fact_ids", "planned_delta_add_fact_ids",
+            "planned_delta_remove_fact_ids", "planned_state_out_fact_ids",
+            "completed_before_action_ids", "completed_before_action_phase_ids",
+            "reserved_future_event_ids",
+            "readability_window_ids", "narrative_boundary_from_previous",
+        )
+        planned = outline_narrative_task.model_dump(mode="json", include=set(narrative_fields))
+        if any(value not in (None, "", [], {}) for value in planned.values()):
+            actual = current.model_dump(mode="json", include=set(narrative_fields))
+            for field in narrative_fields:
+                if actual.get(field) != planned.get(field):
+                    errors.append(
+                        f"[OUTLINE_NARRATIVE_TASK_DRIFT] shot_no={shot_no}.{field} "
+                        "必须原样承接分镜大纲的权威叙事任务"
+                    )
+
+    # Validate the full accepted prefix against the same narrative authority
+    # graph.  Prefix mode checks references, ownership collisions, replay and
+    # hand-offs without demanding delivery of future events; the closing shot
+    # upgrades to the complete-episode gate.
+    from app.narrative import validate_storyboard_narrative
+    errors.extend(validate_storyboard_narrative(
+        board,
+        screenplay,
+        complete=bool(draft.is_final or must_finish),
+        expected_scope_id=str(
+            episode.get("id") or f"episode-{episode['episode_no']}"
+        ),
+    ))
 
     if not (draft.is_final or must_finish):
-        return errors
+        return list(dict.fromkeys(errors))
 
     # 收尾镜才跑整集兜底校验。必保留台词/剧情点、声轨这类"靠后续镜头分担"的缺口，
     # 在自愿收尾时不硬塞进单镜（那会让修复回路卡死），而是要求改判 is_final=false 继续补镜；
@@ -1276,7 +2146,7 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
                 f"本集整集必保留内容/声轨尚未达标，第 {shot_no} 镜暂不能收尾："
                 "请将 is_final 设为 false 继续补镜，在后续镜头补齐——"
                 + "；".join(episode_errors[:6]))
-    return errors
+    return list(dict.fromkeys(errors))
 
 
 async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bible,
@@ -1288,16 +2158,56 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
     target = episode["target_duration_s"]
     min_shots, max_shots = storyboard_shot_count_range(target)
     key_content_block = _storyboard_key_content_block(screenplay)
+    narrative_shot_contract = _storyboard_narrative_contract_block(
+        include_outline_windows=True,
+    )
     scene_library_block = _scene_library_block(bible, screenplay)
     is_first = int(episode.get("episode_no") or 0) == 1
     episode_hook = (episode.get("hook") or "").strip()
     episode_cliffhanger = (episode.get("cliffhanger") or "").strip()
-    first_rule = ("【本集是第一集】第 1 镜是全片开场建场镜：先交代世界观/主角处境/核心设定，再带出本集 hook。"
-                  if is_first else (
-                      f"第 1 镜要尽快进入本集 hook：{episode_hook}。"
-                      if episode_hook else
-                      "第 1 镜按剧本真实开场自然进入，不得因 episode hook 为空而发明额外钩子。"
-                  ))
+    narrative_authority = screenplay.narrative_plan is not None
+    if narrative_authority:
+        first_rule = (
+            "第 1 镜必须按 narrative_plan 中的首个可交付事件、观众先验与 "
+            "readability window 定义开场；是否需要建场/引导镜由 assimilation task 判断，"
+            "不得因集数或固定套路强行添加。"
+        )
+        rhythm_rule = (
+            "镜头功能必须覆盖 narrative_plan.scene_contracts/arc_contracts 中实际声明为 "
+            "applies 的压力、转折、兑现与处理节拍；not_applicable 的戏剧功能不得强套。"
+        )
+        director_staging_rule = (
+            "调度必须执行 ShotTask.action_phase_ids 分配阶段的 actor/target、起止条件与"
+            "completion_condition；对白、空间移动、作用对象变化或反应是否同镜，"
+            "由动作前置/效果、阶段可观察性、观众注意任务和状态边界决定，"
+            "不得套用预设动作词、道具类型或互动类型清单。"
+        )
+        outline_action_capacity_rule = (
+            "动作容量只按 ShotTask.action_phase_ids 实际分配的 AtomicAction temporal phases "
+            "的 estimated_min_s 总和计算，不设与语义无关的阶段个数阈值；"
+            "阶段最短时间总和不得超过镜长。"
+            "capacity_budget.action_phase_s 不得低于阶段最短时间，全部观看任务预算总和不得超过镜长。"
+            "超限时由 AI 保持 precondition/effects/completion、阶段顺序与状态方程，"
+            "只在 splittable_boundaries 声明的阶段边界重新分配相邻 ShotTask；"
+            "无合法边界时上溯重构动作与任务，"
+            "beat/covers/primary_action 的用词和同义改写不参与计数。"
+        )
+    else:
+        first_rule = ("【本集是第一集】第 1 镜是全片开场建场镜：先交代世界观/主角处境/核心设定，再带出本集 hook。"
+                      if is_first else (
+                          f"第 1 镜要尽快进入本集 hook：{episode_hook}。"
+                          if episode_hook else
+                          "第 1 镜按剧本真实开场自然进入，不得因 episode hook 为空而发明额外钩子。"
+                      ))
+        rhythm_rule = "N 条镜头必须覆盖开端→发展→冲突→高潮→收束，篇幅按主线状态变化分配。"
+        director_staging_rule = (
+            "只用大形体动作。对白严格按话轮拆镜；若对白同时承担走位、离场或道具操作，"
+            "必须规划为中景/全景动作对白镜；必须看见接触点的双人肢体互动才允许双人同框。"
+        )
+        outline_action_capacity_rule = (
+            "动作容量与视频生成门禁一致：5~6s 最多 2 个顺序动作节拍，"
+            "7~10s 最多 3 个；primary_action、beat、covers 任一字段超限都要拆镜。"
+        )
     ending_rule = (
         f"最后一镜落到本集尾钩：{episode_cliffhanger}。"
         if episode_cliffhanger else
@@ -1316,16 +2226,12 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
 {renderability_prompt_block()}
 
 最重要的目标是节奏：后续会严格按这份大纲逐镜填充，所以——
-- 每一条镜头都必须包含 state_in、primary_action、state_out，且 state_out 必须相对 state_in 发生可见/可听变化；禁止两条镜头停留在同一情绪、同一个动作或同一句信息上空耗时长。
-- N 条镜头必须覆盖开端→发展→冲突→高潮→收束，篇幅按主线状态变化分配。
+- 每一条镜头都必须包含 state_in、state_out 和非空 shot_contribution。只要为当前叙事意图交付真实的证据、观众认知、情绪、时空定向或压力差，建立镜/反应镜/吸收镜的 primary_action_id 可为 null；但禁止两条镜头重复交付同一 action/target_delta，也禁止纯填充。
+- {rhythm_rule}
 - {ending_rule}
 - 禁止按文本长度机械拆分；每次拆镜必须对应新的动作、话轮或信息节拍。
 
-【导演调度总则】只用大形体动作。对白严格按话轮拆镜：纯台词/表情镜才切成说话人的单人近景或特写，
-characters_visible 只保留说话人，听者和人群留在画外；若说话同时承担走位、离场、触碑、翻开/拿取道具等
-主线动作，必须规划为中景/全景动作对白镜，让动作主体、动作对象和完整路径可见，不得把动作删成静态口型。
-下一角色回答时新建相邻 reverse_angle/reaction_cut 反打镜。说话同时发生搀扶、拥抱、抓住、递接物品等
-必须看见接触点的双人肢体互动，才允许双人同框；即使例外也最多 2 人可见。人物不能无动机地从无到有。
+【导演调度总则】{director_staging_rule}
 
 完整剧本：
 标题：{screenplay.title}
@@ -1340,20 +2246,23 @@ characters_visible 只保留说话人，听者和人群留在画外；若说话�
 结尾钩子：{screenplay.ending_hook}
 
 {key_content_block}
-{scene_library_block}硬性约束：
+{scene_library_block}
+{narrative_shot_contract}
+硬性约束：
 1. 镜头数由完整覆盖主线决定，技术硬上限 {SHOT_HARD_MAX}；shot_no 从 1 连续递增。大纲 duration_s **默认 5**；仅必要时取 6~10。同 spine 事件通常 1~2 镜；禁止为无关细节无限拆镜。
-2. 每条保留 beat/covers 兼容旧流程，但重点必须填写 state_in、primary_action、state_out、continuity_mode、story_event_id、spine_beat_ids、key_line_ids、new_information_ids、duration_s、characters_visible、audio_cast。beat 只作为一句话摘要，不得替代状态字段。
-3. 相邻两镜 state_out -> state_in 必须能承接，且 primary_action 必须不同、持续前进，严禁停留或复述同一节拍。
+2. 每条保留 beat/covers 兼容旧流程，同时必须填写上方叙事任务合同的 shot_id、scene_id、event_ids、primary_action_id、supporting_action_ids、action_phase_ids、visible_entity_ids、offscreen_action_actor_ids、offscreen_action_target_ids、capacity_budget、shot_contribution、逐先验 audience_state_paths、事实状态差、动作/阶段完成账本、readability_window_ids 与 boundary。state_in/primary_action/state_out、continuity_mode、story_event_id、spine_beat_ids、key_line_ids、new_information_ids、duration_s、characters_visible、audio_cast 继续保留。beat 只作为一句话摘要，不得替代结构化任务。
+3. 相邻两镜 state_out -> state_in 与每个观众先验的 audience_state_out_target_id -> audience_state_in_id 都必须精确承接。primary_action_id 非空时必须唯一归属且不同于 completed_before_action_ids；为 null 时仍必须用 shot_contribution 证明新的叙事功能。
 4. 上方主线台词/剧情点/spine 必须分配到 covers，并填写 key_line_ids（KL01..）与 spine_beat_ids（S01..）；drop_list 禁止分配。new_information_ids 只能引用 screenplay.information_ledger 已有 info_id。同一镜必保留口播字数不得超过该镜 duration_s 容量（10s≤{config.MAX_SPOKEN_CHARS_PER_SHOT}字），超限必须拆到相邻镜。
 4b. 同一镜 key_line_ids 只能属于同一说话人；说话人变化就是切镜点。按“甲单人近景说完 → 乙单人反打回应”拆成相邻镜，禁止把问答双方和围观人群同时塞进一个对白镜头。
-4c. 每条 must_keep spine 的 who 必须在分配该 S* 的某一镜中成为可见动作主体，does 必须真正拍出。测验员宣布某人成绩、路人谈论某人，都不能替代拍摄这个人完成“走到石碑前、触碑、离场”等明示动作；需要时在 1~2 镜额度内拆成“动作主体完成动作 → 宣布/反应”。
-4d. 动作容量与视频生成门禁完全一致：5~6s 最多 2 个顺序动作节拍，7~10s 最多 3 个。入画/转身、穿行/走到、停下、操作道具、结果显现、开口分别计入真实节拍；primary_action、beat、covers 任一字段超限，都必须在同一 spine 内拆成前后相邻两镜，后半承接前半 state_out。禁止只把 primary_action 写短、却把多动作继续塞在 beat/covers 里绕过门禁。
-5. covers 只写本镜必须拍出/说出的具体事实（可见动作、可听台词、可感知反应、可核对信息点）；禁止写「反差/对比/衬托/呼应/强调/暗示/氛围」等导演意图——意图写入 beat/primary_action/state_out，事实写成双方可见状态（如「薰儿测出七段、人群赞叹；萧炎低头不语」）。
+4c. 每条 must_keep spine 的 who 必须在分配该 S* 的某一镜中成为可见动作主体，does 必须真正拍出。旁观者的宣告、转述或评论不能替代事件主体完成原子动作；是否拆成“动作完成 → 结果/反应”由 action temporal phases、镜头时长与 readability budget 共同判定。
+4d. {outline_action_capacity_rule}
+5. covers 只写本镜必须拍出/说出的具体事实（可见动作、可听台词、可感知反应、可核对信息点）；禁止用纯抽象导演意图代替可观测证据；意图写入 shot_contribution/affective_delta，可拍事实写入 beat/primary_action/state_out。
 6. {first_rule}
 7. scene_time 与 scene_name 分开填：scene_time 可为早/中/晚/黄昏/具体时刻；scene_name 必须是场景库规范名，同一物理场景不因人物走到门口/桌边而改名。
-8. beat 必须写清人物调度：入画/出画用走、停、转身等大动作原因。
+8. beat 必须写清人物或作用对象跨越可见性/空间边界的原因、起始条件与完成条件。
 9. continuity_mode 必须从 action_continuation / same_scene_cut / reaction_cut / reverse_angle / insert_detail / scene_change 中选择；只有 action_continuation 表示承接上一镜同一动作尾状态，其他同场景切换不得冒充动作连续。
 10. story_event_id 只写剧本事件 E*；主线节拍写 spine_beat_ids（S*）；禁止把 S* 写入 story_event_id。
+11. event_ids 是 narrative_plan.events 的权威引用；若同一事件也存在旧 events[] 台账，story_event_id 必须与 event_ids 中对应的主事件同义并优先复用同一 ID。第一镜 boundary 必须为 null，后续每镜的 boundary 必须连接真实相邻 shot_id 并阻止动作重演。
 
 本集目标时长 {target}s。上一集结尾：{prev_ending or "（本集为第一集）"}
 
@@ -1368,6 +2277,50 @@ characters_visible 只保留说话人，听者和人群留在画外；若说话�
     logged_abstract_rewrites: set[tuple[int, str]] = set()
 
     def _check(o: StoryboardOutline) -> list[str]:
+        if screenplay.narrative_plan is not None:
+            # New artifacts are governed by the authority graph.  Keep this
+            # preflight structural and relation-based: legacy covers wording,
+            # episode-number heuristics and deterministic content transformers
+            # must not rewrite an AI-authored narrative allocation.
+            narrative_errors: list[str] = []
+            if not o.shots:
+                narrative_errors.append("[OUTLINE_EMPTY] 分镜大纲不能为空")
+            if len(o.shots) > SHOT_HARD_MAX:
+                narrative_errors.append(
+                    f"[OUTLINE_HARD_LIMIT] 分镜数 {len(o.shots)} 超过技术上限 {SHOT_HARD_MAX}"
+                )
+            actual_order = [shot.shot_no for shot in o.shots]
+            expected_order = list(range(1, len(o.shots) + 1))
+            if actual_order != expected_order:
+                narrative_errors.append(
+                    f"[OUTLINE_ORDER_INVALID] shot_no 必须为 {expected_order}，当前 {actual_order}"
+                )
+            for shot in o.shots:
+                if not (
+                    config.VIDEO_DURATION_MIN_S
+                    <= int(shot.duration_s or 0)
+                    <= config.VIDEO_DURATION_MAX_S
+                ):
+                    narrative_errors.append(
+                        f"[OUTLINE_DURATION_INVALID] shot_id={shot.shot_id or shot.shot_no} "
+                        f"duration_s 必须在 {config.VIDEO_DURATION_MIN_S}~{config.VIDEO_DURATION_MAX_S}"
+                    )
+            narrative_errors.extend(narrative_outline_action_capacity_errors(
+                o,
+                screenplay.narrative_plan,
+            ))
+            from app.narrative import validate_storyboard_narrative
+
+            narrative_errors.extend(validate_storyboard_narrative(
+                board=None,
+                screenplay=screenplay,
+                outline=o,
+                complete=True,
+                expected_scope_id=str(
+                    episode.get("id") or f"episode-{episode['episode_no']}"
+                ),
+            ))
+            return list(dict.fromkeys(narrative_errors))
         # 方案 A2：校验前先确定性降级——把 covers 里"被圣经外角色开口宣告"改写为旁白转述，
         # 从源头消灭"删角色↔保留角色"死循环，让模型不必反复 reroute（避免修复停滞）。再做大纲校验。
         for c in downgrade_outline_offbible_spoken(o, bible):
@@ -1422,7 +2375,18 @@ characters_visible 只保留说话人，听者和人群留在画外；若说话�
                 meta={"episode_id": episode.get("id"), "episode_no": episode.get("episode_no"),
                       "stage": "分镜大纲", **ev},
             )
-        return validate_storyboard_outline(o, screenplay, target, bible=bible)
+        errors = validate_storyboard_outline(o, screenplay, target, bible=bible)
+        from app.narrative import validate_storyboard_narrative
+        errors.extend(validate_storyboard_narrative(
+            board=None,
+            screenplay=screenplay,
+            outline=o,
+            complete=True,
+            expected_scope_id=str(
+                episode.get("id") or f"episode-{episode['episode_no']}"
+            ),
+        ))
+        return list(dict.fromkeys(errors))
 
     outline_loop = AgentLoop(
         stage_key="storyboard_outline",
@@ -1443,6 +2407,11 @@ characters_visible 只保留说话人，听者和人群留在画外；若说话�
         repair_user_prompt_limit=None,
         prefill={"episode_no": episode["episode_no"]},
     )
+    if screenplay.narrative_plan is not None:
+        # The model output already passed the complete graph gate in ``_check``.
+        # Returning it verbatim preserves stable IDs, ownership and hand-offs;
+        # any later repair must go through semantic candidate comparison.
+        return outline
     # 减重试 #2：第一集第 1 镜是强制建场镜，把派给它的判决/反转类 covers 顺延合并到第 2 镜，
     # 避免逐镜阶段"照建场写→漏 covers / 硬塞判决→引入圣经外角色"的连环重试。
     # 在校验通过后做确定性顺延，不扰动大纲修复回路。
@@ -1479,6 +2448,21 @@ characters_visible 只保留说话人，听者和人群留在画外；若说话�
             meta={"episode_id": episode.get("id"), "episode_no": episode.get("episode_no"),
                   "stage": "分镜大纲", "phase": "post_defer", **ev},
         )
+    # Post-processing is allowed to change allocation only when the resulting
+    # artifact still satisfies the same authority graph.  Never publish a
+    # deterministically split/deferred outline whose IDs or ownership drifted.
+    from app.narrative import validate_storyboard_narrative
+    post_narrative_errors = validate_storyboard_narrative(
+        board=None,
+        screenplay=screenplay,
+        outline=outline,
+        complete=True,
+        expected_scope_id=str(
+            episode.get("id") or f"episode-{episode['episode_no']}"
+        ),
+    )
+    if post_narrative_errors:
+        raise StageError("分镜大纲叙事合同", post_narrative_errors)
     return outline
 
 
@@ -1505,8 +2489,33 @@ def _render_storyboard_outline(
             if valid_info_ids is None or info_id in valid_info_ids
         ]
         info = f"｜info:{','.join(info_ids)}" if info_ids else ""
+        narrative_bits = [
+            f"shot_id:{s.shot_id}" if s.shot_id else "",
+            f"scene_id:{s.scene_id}" if s.scene_id else "",
+            f"events:{','.join(s.event_ids)}" if s.event_ids else "",
+            f"action:{s.primary_action_id}" if s.primary_action_id else "action:null",
+            (
+                f"contribution:{s.shot_contribution.shot_contribution_id}"
+                if s.shot_contribution else "contribution:缺失"
+            ),
+            (
+                "target_deltas:" + ",".join(s.shot_contribution.target_delta_ids)
+                if s.shot_contribution and s.shot_contribution.target_delta_ids else ""
+            ),
+            f"windows:{','.join(s.readability_window_ids)}" if s.readability_window_ids else "",
+            (
+                f"boundary:{s.narrative_boundary_from_previous.boundary_id}"
+                if s.narrative_boundary_from_previous else "boundary:null"
+            ),
+        ]
+        narrative = "｜叙事任务：" + " / ".join(
+            item for item in narrative_bits if item
+        )
         mark = "  ← 本镜" if s.shot_no == current_shot_no else ""
-        rows.append(f"第{s.shot_no}/{total}镜{scene}：{s.beat}{state}{event}{info}{covers}{mark}")
+        rows.append(
+            f"第{s.shot_no}/{total}镜{scene}：{s.beat}{state}{event}{info}"
+            f"{narrative}{covers}{mark}"
+        )
     return "本集分镜大纲（全局节奏计划，按它推进；本镜只落实标注「← 本镜」的那一条）：\n" + "\n".join(rows)
 
 
@@ -1657,21 +2666,40 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
         raise StageError("分镜脚本", ["旧版拍卡剧本已下线，请先重新生成完整剧本，再进入分镜台"])
 
     speech_styles = "；".join(f"{c.name}：{c.speech_style}" for c in bible.characters if c.speech_style)
-    extra_policy = functional_extra_policy_text()
     durations = sorted(config.ALLOWED_DURATIONS)
-    output_contract = _storyboard_output_contract(episode, bible, durations, speech_styles)
-    preflight_contract = _storyboard_preflight_contract(episode)
+    narrative_authority = screenplay.narrative_plan is not None
+    extra_policy = (
+        "本镜任何身份必须引用人物谱或叙事权威图/voice_bible 中由当前来源与戏剧职责定义的唯一身份；"
+        "不得从固定功能角色名单选择或根据外表描述自创身份"
+        if narrative_authority
+        else functional_extra_policy_text()
+    )
+    output_contract = _storyboard_output_contract(
+        episode,
+        bible,
+        durations,
+        speech_styles,
+        narrative_authority=narrative_authority,
+    )
+    preflight_contract = _storyboard_preflight_contract(
+        episode,
+        narrative_authority=narrative_authority,
+    )
     transition_options = "|".join(sorted(TRANSITIONS))
     key_content_block = _storyboard_key_content_block(screenplay)
+    narrative_shot_contract = _storyboard_narrative_contract_block(
+        include_outline_windows=False,
+    )
     scene_library_block = _scene_library_block(bible, screenplay)
     min_shots, max_shots = storyboard_shot_count_range(episode["target_duration_s"])
     shot_no = len(completed_shots) + 1
     # 方案 C：当前镜大纲 covers 若"不可单镜完成"（依赖圣经外角色开口 或 同时要求角色开口+人群声），
     # 在调用 LLM 前自动拆成足够多段并插入相邻节拍，让本镜只落实当前段，避免逐镜修复打转。
     # 拆分后 outline.shots 变长，下方 expected_total / allow_finish / must_finish 自动按新长度计算。
-    _maybe_split_outline_covers(outline, shot_no, bible, max_shots)
+    if not narrative_authority:
+        _maybe_split_outline_covers(outline, shot_no, bible, max_shots)
     # VAL-422：关键台词字数超单镜容量时，在逐镜生成前拆镜并重排 shot_no。
-    if outline is not None:
+    if outline is not None and not narrative_authority:
         from app.validators import (
             split_outline_over_action_capacity,
             split_outline_on_speaker_changes,
@@ -1719,6 +2747,40 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
         if episode_hook else
         "第 1 镜按剧本真实开场自然进入；本集 hook 为空，禁止发明额外开场钩子。"
     )
+    if narrative_authority:
+        first_shot_entry_rule = (
+            "严格执行大纲首镜的 event/action/contribution/audience path 与 readability window；"
+            "是否需要建场或引导镜已由 assimilation task 与处理预算决定，不得按集数强加。"
+        )
+        shot_action_capacity_rule = (
+            "本镜动作容量只按大纲传入的 action_phase_ids 实际分配阶段及其 "
+            "estimated_min_s 计算，不设固定阶段个数阈值；阶段最短时间总和不得超过 duration_s。"
+            "capacity_budget.action_phase_s 必须覆盖阶段最短时间，全部观看任务预算总和不得超过 duration_s。"
+            "跨镜时只在 splittable_boundaries 声明边界分配阶段；无合法边界则上溯重构任务。"
+            "action_desc 只能将本镜已分配阶段可拍化，不得增加新前置、效果或完成条件；"
+            "用词、同义改写与题材动作名称均不参与计数。"
+        )
+        shot_staging_rule = (
+            "人物或作用对象的可见性/空间状态变化必须由大纲的阶段起止条件与"
+            "planned_state_in/out 解释；不得用固定入画动作词或题材道具模板补写。"
+        )
+        shot_dialogue_staging_rule = (
+            "有台词时，根据本镜 temporal phase、actor/target 同框可观察性与"
+            "shot_contribution 的注意任务决定景别、可见角色与是否切分话轮；"
+            "不以预设走位、道具操作或肢体互动词表触发。"
+        )
+    else:
+        shot_action_capacity_rule = (
+            "5~6s 的 action_desc/primary_action 最多 2 个顺序动作节拍，"
+            "7~10s 最多 3 个；入画、转身、穿行、停下、道具操作、结果显现与开口按顺序计数。"
+        )
+        shot_staging_rule = (
+            "characters 里新增人物必须写清如何进入画面；减少人物必须写清离开、遮挡、画外或换场原因。"
+        )
+        shot_dialogue_staging_rule = (
+            "纯台词/表情交付用说话人单人近景/特写；台词同时有走位、离场或道具操作时用中景/全景，"
+            "并写 dialogue_action_staging；必须看清接触点的双人互动写 dialogue_two_shot_required。"
+        )
     budget_block = _storyboard_progress_block(completed_shots)
     brief = _outline_brief(outline, shot_no)
     valid_info_ids = {item.info_id for item in screenplay.information_ledger or []}
@@ -1749,6 +2811,27 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
             + (f"- 计划时间：{brief.scene_time}\n" if (brief.scene_time or '').strip() else "")
             + (f"- 计划场景图：{brief.scene_name or brief.scene_setting}\n"
                if (brief.scene_name or brief.scene_setting or '').strip() else "")
+            + (
+                "- 叙事任务合同（从大纲原样承接 ID/归属/边界，禁止重新发明）：\n"
+                + json.dumps({
+                    key: value
+                    for key, value in brief.model_dump(mode="json").items()
+                    if key in {
+                        "shot_id", "scene_id", "event_ids", "primary_action_id",
+                        "supporting_action_ids", "action_phase_ids",
+                        "visible_entity_ids", "offscreen_action_actor_ids",
+                        "offscreen_action_target_ids",
+                        "capacity_budget", "shot_contribution",
+                        "audience_state_paths", "planned_state_in_fact_ids",
+                        "planned_delta_add_fact_ids", "planned_delta_remove_fact_ids",
+                        "planned_state_out_fact_ids", "completed_before_action_ids",
+                        "completed_before_action_phase_ids",
+                        "reserved_future_event_ids", "readability_window_ids",
+                        "narrative_boundary_from_previous",
+                    }
+                }, ensure_ascii=False, separators=(",", ":"))
+                + "\n"
+            )
         )
     context_hints = [
         brief.beat if brief is not None else "",
@@ -1763,14 +2846,14 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
     feedback_block = ""
     if final_feedback:
         # ④ 软剧情点保护：临近收尾时把"未落实必保留内容"升级为最高优先级，并明确剧情点可用
-        # action_desc 直接拍出来（不必逐字台词）——避免"萧薰儿上前安慰"这类无台词软剧情被整段略过。
+        # action_desc 直接拍出来（不必逐字台词），避免无台词但具有因果或关系增量的剧情被略过。
         head = ("\n【收尾前必须补齐·最高优先级】本集即将收尾，但以下剧本必保留内容仍未落实；"
                 "请【本镜或紧接的下一镜】优先把它们拍出来/念出来，未全部落实前不得设 is_final=true：\n"
                 if allow_finish else
                 "\n【本集仍有未落实的必保留内容】（整集校验：以下内容尚未出现在已通过镜头中）：\n")
         tail = ("\n落实方式：关键台词写进 dialogues（人物开口）；"
-                "其余主线事实写进 action_desc 的可见动作"
-                "（例：'萧薰儿越过人群上前，伸手扶住萧炎、低声安慰'），只要画面或声轨体现即算落实，"
+                "其余主线事实写进 action_desc 的可见动作，"
+                "并说明该动作实际改变的事件、关系或观众状态；只要画面或声轨可感知即算落实，"
                 "不要在压缩里整段略过。\n")
         feedback_block = head + "\n".join(f"- {e}" for e in final_feedback[:10]) + tail
     repair_feedback_block = ""
@@ -1813,7 +2896,9 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
 {screenplay.source_basis}
 
 {key_content_block}
-{scene_library_block}辅助结构：
+{scene_library_block}
+{narrative_shot_contract}
+辅助结构：
 - 开端：{screenplay.opening or '（未单列）'}
 - 发展：{screenplay.development or '（未单列）'}
 - 冲突：{screenplay.conflict or '（未单列）'}
@@ -1831,12 +2916,16 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
 当前镜头约束：
 1. 只输出第 {shot_no} 镜，shot.shot_no 必须等于 {shot_no}。
 2. 本集镜头数由完整覆盖剧情决定（技术硬上限 {SHOT_HARD_MAX}）；当前按大纲推进到第 {shot_no}/{expected_total} 镜。本镜必须落实大纲第 {shot_no} 条、推进到新剧情，不得停留或复述已覆盖内容，也不得发明大纲/spine 之外的幻觉镜头。{"只有剧情已完整落到尾钩时才可设置 is_final=true，否则必须继续生成" if allow_finish else "剧情尚未铺到计划收尾，is_final 必须为 false"}。duration_s 默认 {PREFERRED_SHOT_DURATION_S}。
-2b. 动作容量必须与视频生成门禁一致：5~6s 的 action_desc/primary_action 最多 2 个顺序动作节拍，7~10s 最多 3 个。入画/转身、穿行/走到、停下、操作道具、结果显现、开口都按实际顺序计数；不得把大纲的一条主动作扩写成更多动作。若角色入画说明会新增节拍，只落实当前大纲拆分后的这一段，把后续结果或对白留给下一镜。
+2b. 动作容量必须与视频生成门禁一致：{shot_action_capacity_rule}
+2c. shot_id、scene_id、event_ids、primary_action_id、supporting_action_ids、action_phase_ids、visible_entity_ids、offscreen_action_actor_ids、offscreen_action_target_ids、capacity_budget、shot_contribution、audience_state_paths、事实状态差、completed_before_action_ids、completed_before_action_phase_ids、reserved_future_event_ids、readability_window_ids 和 narrative_boundary_from_previous 必须从本镜大纲任务原样承接。只能补全可拍表达，不得重新分配 ID 归属。
+2d. primary_action_id 可为 null，但 shot_contribution 必须非空；支撑/反应/建立/吸收镜必须明确交付证据、观众状态差、情绪、时空定向或戏剧压力中至少一项，不得借 null 产生无功能空镜。
 3. 从第 2 镜开始，必须明确承接上一镜的 state_out/observed_state_out；不要重演上一镜完整 action_desc。若 continuity_mode=action_continuation，state_in 必须等于上一镜实际尾状态；若换场或反应切，写清线索带入、时间跳转或视角切换原因。
+3b. audience_state_paths 必须逐一覆盖 narrative_plan 中的全部 audience_prior；从第 2 镜起，每个先验的本镜 audience_state_in_id 必须精确等于上镜 audience_state_out_target_id。边界合同也必须记录同样的逐先验 handoff。
+3c. 第 1 镜 narrative_boundary_from_previous 必须为 null；从第 2 镜起必须连接上一镜与本镜真实 shot_id，列出不变量、允许差量、已完成禁止重演的 action_id，并给出非空 cut_motivation。
 4. {final_shot_rule}
 5. 如果 is_final=false，本镜结尾要留下清楚的动作/情绪/信息状态，供下一镜继续。
-6. 人物入画/出画必须符合导演调度：characters 里新增的人物，必须在 action_desc 或 first_frame_desc 中写清他/她从哪里来、如何进入画面或如何被镜头发现；上一镜在场但本镜不再可见的人物，必须有退开、离开、被遮挡、留在画外或换场的可见原因。禁止“上一镜没有，下一镜突然站在画面里/突然开口”。
-6b. 若本镜有 spoken_dialogue：仅当本镜是纯台词/表情交付时，才切成说话人的单人近景/特写，characters=characters_visible=[说话人]，听者与人群留在画外。若说话同时包含走近、退后、穿过人群、转身离场、翻开/拿取/触碰剧情道具等大形体动作，必须改用中景/全景完整拍出动作，把 risk_tags 写为 ["dialogue_action_staging"]，不得用静态口型或大头特写替代动作。同镜仍只能有一位 spoken_dialogue 说话人；下一话轮用 reverse_angle/reaction_cut 新建相邻反打镜。说话同时发生必须看清接触点的双人肢体互动时，允许双人同框并写 risk_tags=["dialogue_two_shot_required"]。
+6. 人物与作用对象的连续调度：{shot_staging_rule}
+6b. 若本镜有 spoken_dialogue：{shot_dialogue_staging_rule}
 7. continuity_mode 必须从 action_continuation / same_scene_cut / reaction_cut / reverse_angle / insert_detail / scene_change 中选择；只在同一人物同一动作跨镜延续时使用 action_continuation，普通同场景切换用 same_scene_cut / reaction_cut / reverse_angle / insert_detail，跨时空用 scene_change。
 8. new_information_ids 只能从 current_ids / pending_ids 中选择本镜首次交付的信息，禁止自创英文 snake_case ID；若两栏均为空则输出空数组。do_not_repeat 只能填写 do_not_repeat 栏给出的中文剧情内容，不得填写裸 ID；已交付且不允许强化的信息不得重复讲。
 9. 功能性路人合同：{extra_policy}。
@@ -1849,7 +2938,7 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
 3. scene_time 只写时间，scene_name 只写场景库规范名；characters 只写实际出现在画面中、且入画原因已经交代清楚的角色；对白镜头不要把“同场在场人物”误当成“当前画面可见人物”全部塞入。
 4. 优先用真实台词+画面动作表达信息；narration 必须为空；禁止内心OS/旁白，无法开口的信息用姿态与表情大方向表达。
 5. 每条 shot 都必须能追溯到完整剧本与原文依据，不要空泛扩写。
-6. 第 1 镜处理：{'【本集是第一集】第 1 镜是全片开场建场镜，主任务是交代故事背景（世界观/主角处境/核心设定）为全片铺底，再自然带出本集 hook。' if int(episode.get('episode_no') or 0) == 1 else first_shot_entry_rule}
+6. 第 1 镜处理：{first_shot_entry_rule if narrative_authority else ('【本集是第一集】第 1 镜是全片开场建场镜，主任务是交代故事背景（世界观/主角处境/核心设定）为全片铺底，再自然带出本集 hook。' if int(episode.get('episode_no') or 0) == 1 else first_shot_entry_rule)}
 7. 最后 1 镜规则：{final_shot_rule}
 
 {output_contract}
@@ -1863,7 +2952,7 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
 上一集结尾：{prev_ending or "（本集为第一集）"}
 
 输出 JSON Schema：
-{{"episode_no": {episode['episode_no']}, "is_final": bool, "shot": {{"shot_no": {shot_no}, "duration_s": int, "shot_size": "远景|全景|中景|近景|特写", "camera_move": "固定|推近|拉远|横摇|跟随", "scene_time": "早|中|晚|黄昏|具体时刻", "scene_name": "上方场景库规范名", "characters": ["画面中实际可见的角色圣经姓名或合法功能性路人标签"], "characters_visible": ["本镜画面可见角色，通常等于 characters；纯对白近景默认只有说话人"], "action_desc": str, "state_in": "本镜开始的精确人物/道具/信息状态", "primary_action": "本镜唯一主动作/主交付", "state_out": "本镜结束后交给下一镜的精确状态", "continuity_mode": "action_continuation|same_scene_cut|reaction_cut|reverse_angle|insert_detail|scene_change", "continuity_state_in": {{"scene": {{"scene_revision_id": str, "time_of_day": str, "lighting_state": str, "axis_id": str, "landmarks": {{"landmark": "screen_side"}}}}, "characters": {{"角色名": {{"look_revision_id": str, "outfit_revision_id": str, "visibility": str, "screen_side": str, "pose": str, "facing": str, "gaze_target": str, "left_hand": str, "right_hand": str}}}}, "props": {{"prop_id": {{"canonical_name": str, "revision_id": str, "owner": str, "location": str, "form": str, "visibility": "required|optional|hidden", "text_state": str, "required": bool}}}}}}, "continuity_state_out": "与 continuity_state_in 同结构，只改写本镜主动作真正改变的字段", "story_event_id": "对应 screenplay.events[].event_id（E*）；没有对应事件时必须输出空字符串，禁止输出 null，禁止写 S*", "spine_beat_ids": ["本镜落地的主线节拍 S*，可空"], "key_line_ids": ["本镜说出的关键台词 KL*，可空"], "new_information_ids": ["仅填写 information_ledger 中已有的 I1/I2 等内部编号"], "do_not_repeat": ["只能填写已交付信息的中文内容，禁止裸 ID"], "risk_tags": ["纯对白为空；动作对白写 dialogue_action_staging；双人接触对白写 dialogue_two_shot_required"], "audio_cast": ["本镜发声角色/功能性声音"], "audio_timeline": [{{"start_s": float, "end_s": float, "type": "spoken_dialogue|offscreen_voice|ambient_sound", "speaker_id": "角色名/功能性身份或null", "text": str, "lip_sync": bool, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定", "voice_canonical": str}}], "required_text": {{"surface": "道具/屏幕/牌匾等承载面", "exact_text": "需要画面准确出现的文字；无则为空", "strategy": "deterministic_insert|audio_only|embedded_prop|none", "delivery_owner_shot_no": int, "appear_start_s": 0.0, "stable_until_s": null, "style": "", "allow_other_text": false, "max_other_text": 0, "font_role": "classical_serif", "reading_priority": "plot_critical"}}, "spatial_anchor": "固定地标/大型道具的方位与距离；同场相邻镜沿用同一世界位置", "first_frame_desc": "本镜开始的静止画面，25~50字，只写看得见的人物姿态/表情/手部/固定地标/道具/光效", "last_frame_desc": "本镜结束的静止画面，25~50字，与首帧【同机位同场景同构图】，固定地标和大型道具不消失不换位，仅人物动作推进", "source_excerpt": "对应本镜头的小说原文逐字摘录，至少 {SOURCE_EXCERPT_MIN_CHARS} 字，仅作审计证据；其中双引号必须按 JSON 规范转义", "narration": "", "dialogues": [{{"speaker": "必须是本镜头 characters 中的可见角色名或功能性路人标签", "line": str, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定", "delivery": "spoken_dialogue|offscreen_voice"}}], "transition": "{transition_options}"}}}}"""
+{{"episode_no": {episode['episode_no']}, "is_final": bool, "shot": {{"shot_no": {shot_no}, "duration_s": int, "shot_size": "远景|全景|中景|近景|特写", "camera_move": "固定|推近|拉远|横摇|跟随", "scene_time": "早|中|晚|黄昏|具体时刻", "scene_name": "上方场景库规范名", "characters": ["画面中实际可见且受人物谱或叙事权威图定义的身份"], "characters_visible": ["本镜画面实际可见的已定义身份"], "action_desc": str, "state_in": "本镜开始的精确实体/信息状态", "primary_action": "本镜权威任务的可拍表达", "state_out": "本镜结束后交给下一镜的精确状态", "continuity_mode": "action_continuation|same_scene_cut|reaction_cut|reverse_angle|insert_detail|scene_change", "continuity_state_in": {{"scene": {{"scene_revision_id": str, "time_of_day": str, "lighting_state": str, "axis_id": str, "landmarks": {{"landmark": "screen_side"}}}}, "characters": {{"权威身份ID": {{"look_revision_id": str, "outfit_revision_id": str, "visibility": str, "screen_side": str, "pose": str, "facing": str, "gaze_target": str, "left_hand": str, "right_hand": str}}}}, "props": {{"实体ID": {{"canonical_name": str, "revision_id": str, "owner": str, "location": str, "form": str, "visibility": "required|optional|hidden", "text_state": str, "required": bool}}}}}}, "continuity_state_out": "与 continuity_state_in 同结构，只改写本镜任务真正改变的字段", "story_event_id": "对应 screenplay.events[].event_id（E*）；没有对应事件时必须输出空字符串，禁止输出 null，禁止写 S*", "spine_beat_ids": ["本镜落地的主线节拍 S*，可空"], "key_line_ids": ["本镜说出的关键台词 KL*，可空"], "new_information_ids": ["仅填写 information_ledger 中已有的内部编号"], "do_not_repeat": ["只能填写已交付信息的语义内容，禁止裸 ID"], "risk_tags": ["根据当前 ShotTask 实际导演风险填写"], "audio_cast": ["本镜受权威图/voice_bible 定义的发声身份"], "audio_timeline": [{{"start_s": float, "end_s": float, "type": "spoken_dialogue|offscreen_voice|ambient_sound", "speaker_id": "引用 voice_bible.speaker_id 或 null", "text": str, "lip_sync": bool, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定", "voice_canonical": str}}], "required_text": {{"surface": "当前事件实际定义的可读承载实体", "exact_text": "需要画面准确出现的文字；无则为空", "strategy": "deterministic_insert|audio_only|embedded_prop|none", "delivery_owner_shot_no": int, "appear_start_s": 0.0, "stable_until_s": null, "style": "", "allow_other_text": false, "max_other_text": 0, "font_role": "classical_serif", "reading_priority": "plot_critical"}}, "spatial_anchor": "continuity_state 中未被本镜动作改变的固定环境实体方位", "first_frame_desc": "本镜开始的静止画面，只呈现权威任务的起始条件", "last_frame_desc": "与首帧同机位同场景同构图，只呈现本镜 allowed state delta 与完成条件", "source_excerpt": "对应本镜头的授权来源逐字摘录，至少 {SOURCE_EXCERPT_MIN_CHARS} 字，仅作审计证据", "narration": "", "dialogues": [{{"speaker": "必须引用本镜 characters/audio_cast 中已定义的身份", "line": str, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定", "delivery": "spoken_dialogue|offscreen_voice"}}], "transition": "{transition_options}"}}}}"""
     source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()[:16]
     prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
     log_provider_call(
@@ -1886,8 +2975,10 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
 shot 必须是单数对象，shot.shot_no 必须等于 {shot_no}；禁止输出 shots 数组，禁止附带下一镜。
 shot.story_event_id 必须是 JSON 字符串；没有对应事件时输出 ""，禁止输出 null。
 source_excerpt 内的双引号必须按 JSON 规范转义，或改用中文引号，不能破坏根对象语法。
-动作容量必须通过与视频生成相同的硬门禁：5~6s 最多 2 个顺序动作节拍，7~10s 最多 3 个；修复时必须直接删减/收束当前镜动作，不得只改写摘要字段。
-如果当前内容仍超过最长 {config.VIDEO_DURATION_MAX_S}s 的容量，只压缩本镜到大纲已分配的内容；后续节拍由系统在下一轮逐镜生成。"""
+动作容量必须通过与视频生成相同的硬门禁：{shot_action_capacity_rule}
+如果当前内容仍超过最长 {config.VIDEO_DURATION_MAX_S}s 的容量，只压缩本镜到大纲已分配的内容；后续节拍由系统在下一轮逐镜生成。
+修复时仍必须完整输出 shot 的叙事任务字段，不得因只修一项错误而丢失 ID、贡献、逐先验路径或镜间边界。
+{narrative_shot_contract}"""
     repair_context = f"""当前仅修复第 {shot_no} 镜，不得输出其他镜头。
 本镜大纲：{brief.beat if brief is not None else '（按完整大纲继续推进）'}
 本镜必落内容：{brief.covers if brief is not None else '（无单列项）'}
@@ -1895,9 +2986,13 @@ source_excerpt 内的双引号必须按 JSON 规范转义，或改用中文引�
 功能性路人：{extra_policy}。
 合法时长：{config.VIDEO_DURATION_MIN_S}~{config.VIDEO_DURATION_MAX_S}s 整数，由模型按动作与口播选择最短可用时长；
 口播上限随时长变化（5s={config.max_spoken_chars_for_duration(5)}字，10s={config.max_spoken_chars_for_duration(10)}字）。
-动作上限随时长变化（5~6s=2 个顺序动作节拍，7~10s=3 个）；action_desc 与 primary_action 任一超限都不能通过。
+动作上限：{shot_action_capacity_rule}
 合法景别：{'|'.join(sorted(SHOT_SIZES))}；合法运镜：{'|'.join(sorted(CAMERA_MOVES))}；合法转场：{transition_options}。
 上一镜详细承接：{_render_completed_shots_context(completed_shots[-1:])}
+本镜大纲叙事任务（必须原样承接）：
+{json.dumps(brief.model_dump(mode="json") if brief is not None else {}, ensure_ascii=False, separators=(",", ":"))}
+剧本叙事权威图：
+{_compact_narrative_plan_context(screenplay)}
 本镜相关剧本：
 {screenplay_window}
 本镜可逐字摘录原文：
@@ -1930,8 +3025,10 @@ source_excerpt 内的双引号必须按 JSON 规范转义，或改用中文引�
             shot_no=shot_no,
             allow_finish=allow_finish,
             must_finish=must_finish,
+            narrative_authority=narrative_authority,
             outline_covers=(brief.covers if brief is not None else ""),
             outline_scene_name=((brief.scene_name or brief.scene_setting) if brief is not None else ""),
+            outline_narrative_task=brief,
             # 向后承接：大纲排给后续镜头的事实留给后面拍，本镜不因此报漏戏。
             later_planned_covers="".join(
                 (s.covers or "") for s in (outline.shots[shot_no:] if (outline and outline.shots) else [])
@@ -1952,7 +3049,8 @@ source_excerpt 内的双引号必须按 JSON 规范转义，或改用中文引�
         },
         semantic_attempt_id=semantic_attempt_id,
     )
-    sync_shot_continuity_fields(draft.shot, completed_shots[-1] if completed_shots else None)
+    if not narrative_authority:
+        sync_shot_continuity_fields(draft.shot, completed_shots[-1] if completed_shots else None)
     ensure_audio_timeline(draft.shot, screenplay.voice_bible)
     # 大纲已分配的结构化 ID：模型漏填时从 brief 回填，保证主线台账可跨镜聚合。
     if brief is not None:
@@ -1971,6 +3069,8 @@ source_excerpt 内的双引号必须按 JSON 规范转义，或改用中文引�
     normalized_board, identity_errors = _normalized_candidate_board(
         episode["episode_no"], completed_shots, draft.shot, bible,
         episode["target_duration_s"],
+        narrative_authority=narrative_authority,
+        narrative_plan=screenplay.narrative_plan,
     )
     if identity_errors:
         raise StageError("分镜人物合同", identity_errors)
@@ -1980,7 +3080,11 @@ source_excerpt 内的双引号必须按 JSON 规范转义，或改用中文引�
 
 # ---------- C2. 单集分镜脚本（基于完整剧本拆分） ----------
 
-def _first_shot_rule(episode: dict) -> str:
+def _first_shot_rule(
+    episode: dict,
+    *,
+    narrative_authority: bool = False,
+) -> str:
     """第 1 镜的写作要求：常规集=直接进 hook；但【第一集第一镜】是全片开场，主要职责是交代故事背景
     （世界观/主角处境/基本设定），为后续剧情铺底，而不是急着推进情节或抛冲突。"""
     hook = (episode.get("hook") or "").strip()
@@ -1990,6 +3094,14 @@ def _first_shot_rule(episode: dict) -> str:
         if cliffhanger else
         "最后 1 个镜头只收束到剧本/原文已有状态；本集 cliffhanger 为空，禁止发明下一集钩子"
     )
+    if narrative_authority:
+        return (
+            "23. 第 1 镜严格执行叙事权威合同中的首个合法事件、入场状态、"
+            "AudiencePriorContract 与 AssimilationTask；是否需要建场、铺垫、揭示或直接入戏，"
+            "由当前观众的认知缺口、事件前置和独立可读窗口决定，不得按集数或题材套用开场模板。\n"
+            "    已由入场先验或上游镜头交付的信息不得重演；未具备的关键前置必须在其截止事件前以可感知证据交付。\n"
+            f"    {ending}"
+        )
     if int(episode.get("episode_no") or 0) == 1:
         return (
             f"23. 【第一集第一镜=全片开场建场镜，特殊规则，优先级最高】这一镜的主要任务是【交代故事背景】，"
@@ -2016,8 +3128,14 @@ def _first_shot_rule(episode: dict) -> str:
     return f"23. {opening}\n    {ending}"
 
 
-def _storyboard_output_contract(episode: dict, bible: Bible, durations: list[int],
-                                speech_styles: str) -> str:
+def _storyboard_output_contract(
+    episode: dict,
+    bible: Bible,
+    durations: list[int],
+    speech_styles: str,
+    *,
+    narrative_authority: bool = False,
+) -> str:
     target = episode["target_duration_s"]
     min_shots, max_shots = storyboard_shot_count_range(target)
     character_names = "、".join(c.name for c in bible.characters) or "（角色圣经为空）"
@@ -2025,7 +3143,56 @@ def _storyboard_output_contract(episode: dict, bible: Bible, durations: list[int
     speech_budgets = "、".join(
         f"{value}s≤{config.max_spoken_chars_for_duration(value)}字" for value in durations
     )
-    extra_policy = functional_extra_policy_text()
+    if narrative_authority:
+        extra_policy = (
+            "非人物谱身份必须由叙事权威图的 actor/character 引用与 "
+            "voice_bible 中带来源证据的戏剧职责定义，不得从固定功能角色名单选择"
+        )
+        action_capacity_contract = (
+            "6a. 【硬性·动作容量】只按 ShotTask.action_phase_ids 实际引用的 "
+            "AtomicAction.temporal_phases 与 estimated_min_s 计算，capacity_budget.action_phase_s "
+            "必须覆盖阶段最短时间、全部观看任务预算总和不得超过 duration_s。若超限，必须保持 "
+            "precondition/effects/completion、阶段顺序与状态方程，由 AI 仅在 splittable_boundaries "
+            "声明的边界重新分配 ShotTask；没有合法边界则上溯重构。任何动作用词或同义改写都不参与容量判定。"
+        )
+        staging_contract = (
+            "8c. 【导演调度】画面角色、作用对象和注意目标必须服从 ShotTask 的 "
+            "actor/target、temporal phase 起止条件与 shot_contribution；跨越可见性或空间边界时，"
+            "以 planned_state_in/out 和 continuity boundary 完整解释，不按动作词表套模板。\n"
+            "8c-1. 【对白构图】单人、多人、动作对白与话轮切分由当前阶段的可观察性、"
+            "actor/target 同框必要性、口播容量与观众注意任务决定；不得依赖预设互动/道具词组触发。"
+        )
+        reference_contract = (
+            "8c-2. 【固定参照连续性】spatial_anchor 引用本镜 continuity_state 中实际声明且"
+            "不随主动作改变的环境实体；首尾帧只能发生 allowed state delta，不得增删、复制或换位未改变实体。"
+        )
+        contact_contract = (
+            "8d. 【作用关系可观察性】当 AtomicAction 需要 actor/target 发生空间作用时，"
+            "机位、首尾帧与动作描述必须让影响可观察，并与 completion_condition 可核对；不套接触动作词模板。"
+        )
+        physical_contract = (
+            "25. 表演必须符合 AtomicAction 的起止条件、角色/对象能力与世界物理合同；"
+            "若原方案不可拍，由 AI 保留语义意图与效果后重写可观察实现，不使用固定手势清单。"
+        )
+    else:
+        extra_policy = functional_extra_policy_text()
+        action_capacity_contract = (
+            "6a. 【硬性·动作容量】与视频生成前门禁使用同一阈值：5~6s 最多 2 个顺序动作节拍，"
+            "7~10s 最多 3 个；超限时在大纲阶段拆成前后相邻两镜。"
+        )
+        staging_contract = (
+            "8c. 【导演调度】无对白的建立镜/动作镜 characters ≤3；人物进出画需交代大动作。\n"
+            "8c-1. 【对白构图硬合同】纯台词/表情交付默认使用说话人单人近景或特写；"
+            "对白同时承担空间调度时必须完整拍出动作。"
+        )
+        reference_contract = (
+            "8c-2. 【固定参照连续性】若场景圣经或本镜存在不随主动作移动的环境参照物，"
+            "spatial_anchor 必须写清其方位，首尾帧保持形态、数量和位置。"
+        )
+        contact_contract = (
+            "8d. 【接触侧面】接触类动作的首尾帧与动作描述按侧面机位书写，写清接触点与相对方位。"
+        )
+        physical_contract = "25. 动作符合物理；复杂手势改写成更稳的简单动作。"
     return f"""硬性输出规范（以下规则由代码校验，违反会被退回重写；请首轮直接满足）：
 1. episode_no 必须等于 {episode['episode_no']}；shots 按剧情顺序排列，shot_no 必须从 1 开始连续递增，不能跳号、重复或乱序。
 2. 整集镜头数由完整覆盖 must_keep spine 与主线台词决定；仅保留 {SHOT_HARD_MAX} 镜技术硬上限防止失控重复生成。
@@ -2035,18 +3202,17 @@ def _storyboard_output_contract(episode: dict, bible: Bible, durations: list[int
    - 【硬性·音画同步】口播预算随 duration_s 增长：{speech_budgets}。选择时长后，动作与口播必须都能在该时长内自然完成。
    - 【硬性·拆镜边界】不同时间、地点、主动作必须拆镜；同 spine 事件通常 1~2 镜封顶。
 5. 关键：每条 shot 只表现【一个】连贯主动作（大形体可读）。严禁出现"切到/切至/镜头切/镜头转向/闪回/回忆画面/分屏/下一个镜头/→"。禁止微表情/衣角/眼泪/指节等超纲词。
-6. 单镜要像一个真实可拍的连续动作（例如"他走向石碑并抬手贴上碑面"是一个动作；"她哭→镜头切到门口→闪回六年前"才是错误快切）。
-6a. 【硬性·动作容量】与视频生成前门禁使用同一阈值：5~6s 最多 2 个顺序动作节拍，7~10s 最多 3 个。入画/转身、穿行/走到、停下、操作道具、结果显现、开口均按顺序计数；超限时在大纲阶段拆成前后相邻两镜，不得靠缩写 primary_action、扩写 action_desc 绕过。
+6. 单镜要像一个真实可拍的连续动作：主体、目标、起始状态和完成条件一致；若时空、主动作或注意任务已发生边界变化，必须在自然阶段边界分镜。
+{action_capacity_contract}
 7. 声轨纪律（重要）：分镜只保留【真实台词】（dialogues）；禁止旁白、内心OS、画外解说。人群/气氛声写进 action_desc。不能把有对白的剧本压成纯画面卡；是否开口由本镜信息交付与口播容量决定。同一镜最多一个 spoken_dialogue 说话人；问答双方必须按话轮拆成相邻正反打。
 8. action_desc 目标 {ACTION_DESC_TARGET_MIN}~{ACTION_DESC_TARGET_MAX} 字：写清主体姓名与这一个大形体主动作；不要罗列多个镜头，不要写运镜术语。
 8b. 【关键·首尾帧】每条 shot 必须给出 first_frame_desc 与 last_frame_desc：
    - 二者必须是【同一机位、同一场景、同一构图】下，这一个连贯动作的开始与结束瞬间。
-   - 正例：首帧「角色A手掌刚贴上石碑，神情平静，碑面无光」；尾帧「同一机位，角色A手掌仍贴在石碑上，碑面亮起，他眉头紧锁」。
+   - 首帧写主动作尚未完成的可见起始状态；尾帧保留同一机位、同一主体与同一固定参照物，只呈现本镜实际交付的状态增量。
    - 各约 20~40 字；不要写超纲微细节、字幕、运镜。
-8c. 【导演调度】无对白的建立镜/动作镜 characters ≤3；入画/出画用走、停、转身等大动作交代；禁止凭空出现/消失。
-8c-1. 【对白构图硬合同】纯台词/表情交付默认使用说话人的单人近景或特写：characters 与 characters_visible 只写说话人，camera_move 只能固定或推近；听者、人群和下一位说话人留在画外。若说话同时包含走位、离场或翻开/拿取/触碰剧情道具等大形体动作，必须使用中景/全景完整拍出动作，并在 risk_tags 写 dialogue_action_staging；禁止用静态口型或大头特写替代动作。下一话轮用 reverse_angle/reaction_cut 新建相邻镜。说话同时发生搀扶、拥抱、抓住、递接物品等必须显示接触点的双人肢体互动时，允许最多 2 人同框，并在 risk_tags 写 dialogue_two_shot_required。
-8c-2. 【固定地标连续性】若场景圣经或本镜出现石碑、门、桌台、屏幕等固定地标/大型道具，spatial_anchor 必须写清其方位；first_frame_desc 与 last_frame_desc 都要保留同一物体的外形、数量和位置。禁止在固定镜头中途消失、复制、换位后重新出现。
-8d. 【接触侧面】触碰/按压/拿取/递出/挥击/搀扶等接触类动作，首尾帧与动作描述按侧面机位书写，写清接触点与相对方位，禁止写成正面端站摆拍。
+{staging_contract}
+{reference_contract}
+{contact_contract}
 8e. 【同框身高】多人物同框默认同身高、眼线齐平；仅当剧情明确需要身高差时才在 action_desc/首尾帧写明（如「高他一头」「孩童仰视」），否则不要写一高一低。
 9. source_excerpt 必填：至少 {SOURCE_EXCERPT_MIN_CHARS} 字，可与相邻镜共享同一主线段落；仅作审计，不得进入 Seedance。
 10. 字数只校验必要下限；优先保证主线可看，不要为凑数字堆细节。
@@ -2064,14 +3230,31 @@ def _storyboard_output_contract(episode: dict, bible: Bible, durations: list[int
 20. shot_size 由当前动作、人物调度和情绪表达决定；剧情需要时允许连续镜头使用相同景别，禁止仅为形式变化牺牲可拍性。
 21. 相邻镜头用 continuity_mode 表达承接；action_continuation 仅用于同一人物同一动作跨镜延续。
 22. 转场设计：同场景连续镜只能用"硬切"；换场不得硬切。
-{_first_shot_rule(episode)}
+{_first_shot_rule(episode, narrative_authority=narrative_authority)}
 24. 特效服从剧情，日常对话写实克制。
-25. 动作符合物理；复杂手势改写成更稳的简单动作（掌心托物、握拳、伸手按住）。"""
+{physical_contract}"""
 
 
-def _storyboard_preflight_contract(episode: dict) -> str:
+def _storyboard_preflight_contract(
+    episode: dict,
+    *,
+    narrative_authority: bool = False,
+) -> str:
     target = episode["target_duration_s"]
     min_shots, max_shots = storyboard_shot_count_range(target)
+    if narrative_authority:
+        return f"""首轮输出前必须逐镜预检（叙事权威路径）：
+1. 镜头数由完整交付因果图、target delta 与 assimilation task 决定，技术硬上限 {SHOT_HARD_MAX}。
+2. 动作容量只读取 ShotTask.action_phase_ids 实际分配的 AtomicAction phases；不设固定阶段个数阈值，capacity_budget.action_phase_s 不得低于这些阶段的 estimated_min_s 总和、全部观看任务预算总和不得超过 duration_s。动作用词、同义词与题材词不参与判定。
+3. 动作首阶段镜的 precondition_fact_ids 必须在 planned_state_in；末阶段镜的 effects_add/remove 必须在本镜状态差；completion_condition 必须在末阶段镜的 last_frame/observed_state_out 可核对。中间阶段不得冒充完整动作结果。
+4. 若超容，由 AI 在 AtomicAction.splittable_boundaries 声明的边界提出新的相邻 ShotTask 阶段分配；必须保持事件拓扑、状态方程、action owner、阶段顺序、观众路径、deadline 与可读窗口。无合法边界时上溯重构动作与任务，禁止文本分隔器自动拆镜。
+5. 第一镜 boundary 必须为 null；后续镜头必须精确连接相邻 shot_id，传递状态不变量、允许差量、已完成动作与每个 audience prior 的状态。
+6. 画面角色、声源与参考身份只能引用叙事图/voice_bible 中由当前来源和戏剧职责定义的身份，不得从固定功能角色名单选择。
+7. 首尾帧保持同一构图和未被本镜动作改变的 continuity_state，只呈现 allowed state delta；固定参照对象由实际状态合同确定，不套题材道具模板。
+8. 景别、可见角色、作用对象与对白切分必须让当前 temporal phase、evidence 和注意任务可观察；不依赖预设互动/道具词组触发。
+9. 声轨按本镜信息交付与口播容量决定；同镜对白语义、dialogues 和 audio_timeline 必须一致。
+10. source_excerpt 必须是当前授权来源的可追溯证据，不得进入视频提示词。
+11. 在输出前对本镜执行状态方程、阶段时间、动作防重演、观众状态交接与窗口截止时间的联合校验。"""
     hints = "、".join(TRANSITION_HINTS[:12])
     return f"""首轮输出前必须逐镜预检（这些就是代码校验器的具体判定条件，不要等返工）：
 1. 镜头数由完整覆盖剧情决定（技术硬上限 {SHOT_HARD_MAX}）；每条 duration_s **默认 {PREFERRED_SHOT_DURATION_S}s**，仅当口播或连续动作需要时取到 {config.VIDEO_DURATION_MAX_S}s。动作容量与视频门禁一致：5~6s≤2 个顺序节拍，7~10s≤3 个；超限优先在同 spine 内拆为前后相邻两镜，禁止为无关细节无限拆碎。
@@ -2259,8 +3442,8 @@ async def review_scene_image(image_b64: str, frame_desc: str, scene_setting: str
         main_rule = (
             "- expectation_match 是本次评审的【主项】。若预期画面里人物在与某对象/另一人互动"
             "（触碰/按压/拿取/递出/挥击/指向/注视/搀扶等），而画面中人物只是正面端站、"
-            "双手垂放、目视镜头，或朝向/接触与描述不符（例如该摸石碑却没碰到石碑、"
-            "身体正对镜头而非转向石碑），expectation_match 必须 ≤0.4。"
+            "主体姿态、朝向或 actor/target 作用关系与当前 AtomicAction 的"
+            "起止条件不符时，expectation_match 必须 ≤0.4。"
         )
     from app.multiview import watermark_qa_mode
     ignore_non_occluding_watermark = watermark_qa_mode() == "ignore_unless_occluding"
@@ -2296,7 +3479,7 @@ async def review_scene_image(image_b64: str, frame_desc: str, scene_setting: str
 评分硬规则（务必遵守）：
 {main_rule}
 - overall 不得高于 expectation_match：动作/朝向/互动不对就是不合格，画面再干净、画风再连贯也不能给高 overall。
-- issues 里必须逐条点明具体不符之处（例如"人物未触碰石碑、身体正对镜头而非转向石碑"），供下一版定向改正。
+- issues 里必须逐条点明当前主体、作用对象、空间关系、起止条件或完成条件的具体不符之处，供下一版定向改正。
 
 只输出 JSON：{{"expectation_match": float, "continuity": float, "clean_frame": float, "overall": float, "person_count": int|null, "watermark_detected": bool|null, "forbidden_text_detected": bool|null, "space_type_matches": bool|null, "issues": [str], "uncertainties": [str]}}"""
     frames = [image_b64] + ([prev_image_b64] if prev_image_b64 else [])
@@ -2610,4 +3793,73 @@ async def qa_shot(frames_b64: list[str], action_desc: str, scene_setting: str,
         ]
     result["image_manifest"] = effective_manifest
     result["status"] = "unverified" if result.get("qa_recovered") else "scored"
+    return result
+
+
+def evaluate_video_mode_qa(
+    *,
+    meta: dict,
+    qa: dict,
+    technical: dict,
+) -> dict:
+    """Build mode-specific evidence without conflating technical and semantic success."""
+    from app.video_plan import VideoInputIntent
+
+    mode = str(meta.get("actual_mode") or meta.get("mode") or "")
+    technical_success = bool(technical.get("passed"))
+    result: dict = {
+        "planned_mode": meta.get("planned_mode") or mode,
+        "actual_mode": mode,
+        "technical_success": technical_success,
+        "semantic_success": None,
+        "input_roles_valid": False,
+        "issues": [],
+    }
+    if mode == "REFERENCE_IMAGE_MODE":
+        result["input_roles_valid"] = bool(
+            not meta.get("first_frame_used")
+            and not meta.get("last_frame_used")
+            and not meta.get("reference_video_used")
+        )
+        result["semantic_success"] = (
+            bool(qa.get("overall") is not None and float(qa["overall"]) >= 0.6)
+            if qa.get("status") != "unverified" else None
+        )
+    elif mode == "FIRST_LAST_FRAME_MODE":
+        result["input_roles_valid"] = bool(
+            meta.get("first_frame_used")
+            and meta.get("last_frame_used")
+            and not meta.get("reference_image_used")
+            and not meta.get("reference_video_used")
+        )
+        result["boundary_start_match"] = qa.get("start_state_match")
+        result["boundary_end_match"] = qa.get("end_state_match")
+        if qa.get("status") != "unverified":
+            try:
+                result["semantic_success"] = bool(
+                    float(qa.get("start_state_match")) >= 0.6
+                    and float(qa.get("end_state_match")) >= 0.6
+                )
+            except (TypeError, ValueError):
+                result["semantic_success"] = None
+    elif mode == "VIDEO_INPUT_MODE":
+        result["input_roles_valid"] = bool(
+            meta.get("reference_video_used")
+            and not meta.get("reference_image_used")
+            and not meta.get("first_frame_used")
+            and not meta.get("last_frame_used")
+        )
+        intent = str(meta.get("video_input_intent") or "")
+        result["video_input_intent"] = intent
+        result["provider_read_video"] = technical_success
+        if intent == VideoInputIntent.CONTINUE_PREVIOUS_TAKE.value:
+            # A normal VLM content score cannot certify trajectory continuation.
+            result["semantic_success"] = None
+            result["issues"].append("真续写需通过独立多样本边界语义回归")
+        elif qa.get("status") != "unverified" and qa.get("overall") is not None:
+            result["semantic_success"] = bool(float(qa["overall"]) >= 0.6)
+    else:
+        result["issues"].append("未知 actual_mode")
+    if not result["input_roles_valid"]:
+        result["issues"].append("供应商输入角色与计划模式不一致")
     return result

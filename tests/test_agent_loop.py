@@ -412,7 +412,10 @@ def test_screenplay_task_keeps_repairing_without_publishing_warning(
         fake_production,
     )
 
-    result = asyncio.run(api._screenplay_task("e1"))
+    result = asyncio.run(api._screenplay_task(
+        "e1",
+        preflight_result={"resolutions": [], "added": []},
+    ))
 
     row = conn.execute(
         "SELECT screenplay_status, screenplay_error, screenplay_json "

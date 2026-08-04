@@ -323,6 +323,59 @@ def test_video_resubmit_checkpoint_is_persisted_atomically() -> None:
     }
 
 
+def test_reference_mode_submission_authority_failure_precedes_paid_marker(
+    monkeypatch,
+) -> None:
+    import app.video_plan as video_plan
+
+    conn = _conn()
+    conn.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,status,provider_non_cancellable,created_at,updated_at
+           ) VALUES('j-plan','video','s-plan','running',0,1,1)"""
+    )
+    conn.commit()
+    job = conn.execute("SELECT * FROM jobs WHERE id='j-plan'").fetchone()
+    calls: list[dict] = []
+
+    def reject_submission(**kwargs):
+        calls.append(kwargs)
+        raise video_plan.VideoPlanValidationError([{
+            "code": "SHOT_CONTRACT_FINGERPRINT_STALE",
+            "shot_id": "s-plan",
+        }])
+
+    monkeypatch.setattr(
+        video_plan,
+        "assert_video_provider_submission_authority",
+        reject_submission,
+    )
+
+    with pytest.raises(worker.VideoPlanStaleFence):
+        worker._assert_video_provider_submission_authority(
+            conn,
+            job=job,
+            meta={
+                "mode": "REFERENCE_IMAGE_MODE",
+                "shot_plan_id": "svp-plan",
+                "capability_snapshot_id": "cap-plan",
+            },
+            actual_mode="REFERENCE_IMAGE_MODE",
+            write_point="provider_non_cancellable",
+        )
+
+    assert calls == [{
+        "shot_id": "s-plan",
+        "shot_plan_id": "svp-plan",
+        "actual_mode": "REFERENCE_IMAGE_MODE",
+        "expected_capability_snapshot_id": "cap-plan",
+        "conn": conn,
+    }]
+    assert conn.execute(
+        "SELECT provider_non_cancellable FROM jobs WHERE id='j-plan'",
+    ).fetchone()["provider_non_cancellable"] == 0
+
+
 def test_manual_retry_distinguishes_poll_from_new_submission(monkeypatch) -> None:
     import app.monitoring as monitoring
     import app.system_api as system_api

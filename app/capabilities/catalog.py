@@ -807,7 +807,10 @@ def _register_commands(registry) -> None:
             scopes={"manju:generation-media"},
             side_effect="creates_paid_video_batch",
             handler=h_video.generate_episode,
-            rest_routes=("POST /api/episodes/{episode_id}/generate",),
+            rest_routes=(
+                "POST /api/episodes/{episode_id}/generate",
+                "POST /api/episodes/{episode_id}/video-generation-plan/{plan_id}/execute",
+            ),
             tags=("video",),
         ),
         _cmd(
@@ -1412,6 +1415,12 @@ def _register_exemptions(registry) -> None:
         "POST /api/system/monitor/events": "前端监控事件采集入口；只记录遥测，不执行领域动作",
         "POST /api/versions/{version_id}/archive": "生成台人工归档操作；不删除媒体，不向 Agent/MCP 开放",
         "DELETE /api/versions/{version_id}/archive": "生成台人工取消归档操作；不向 Agent/MCP 开放",
+        "POST /api/episodes/{episode_id}/video-generation-plan": "整集 AI 模式计划阶段；只生成并校验版本化计划，不创建视频供应商付费任务",
+        "POST /api/episodes/{episode_id}/video-generation-plan/validate": "视频模式计划确定性只读复核；不创建或执行媒体任务",
+        "POST /api/episodes/{episode_id}/video-generation-plan/reconcile": "采用版本变更后的工具输入绑定与 stale 标记；不创建新付费任务",
+        "POST /api/episodes/{episode_id}/video-generation-plan/override": "生成台运营调试的人工覆盖入口；必须记录理由且生成新计划 revision，不向 Agent/MCP 开放",
+        "POST /api/video-capabilities/{provider}/{model:path}/probe": "供应商能力真实付费探针；仅本机操作者显式 confirm 后执行，不向 Agent/MCP 开放",
+        "POST /api/provider-media-publications": "内部媒体发布协议入口；仅发布项目自有媒体并执行 URL/哈希校验，不作为 Agent 领域工具",
     }.items():
         registry.exempt_rest(route, reason)
     registry.exempt_rest(

@@ -14277,6 +14277,81 @@ summary:focus-visible,
   padding: 0;
 }
 
+.narrative-readiness,
+.video-plan-summary {
+  padding: 14px 16px;
+  border: 1px solid rgba(54, 86, 108, 0.16);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.82);
+}
+.narrative-readiness {
+  margin: 12px 0;
+}
+.video-plan-summary {
+  margin: 12px 18px;
+}
+.narrative-readiness > header,
+.narrative-readiness > header > div,
+.video-plan-summary > header,
+.video-plan-summary > header > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.narrative-readiness > header,
+.video-plan-summary > header {
+  justify-content: space-between;
+}
+.narrative-readiness > header > div,
+.video-plan-summary > header > div {
+  align-items: baseline;
+}
+.narrative-readiness > header span,
+.narrative-readiness details,
+.narrative-readiness > p,
+.video-plan-summary > header span,
+.video-plan-summary details,
+.video-mode-audit > p {
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+.narrative-readiness dl,
+.video-plan-summary dl {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(90px, 1fr));
+  gap: 8px;
+  margin: 12px 0 8px;
+}
+.narrative-readiness dl > div,
+.video-plan-summary dl > div {
+  padding: 9px 10px;
+  border-radius: 10px;
+  background: rgba(54, 86, 108, 0.055);
+}
+.narrative-readiness dt,
+.video-plan-summary dt {
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+.narrative-readiness dd,
+.video-plan-summary dd {
+  margin: 3px 0 0;
+  font-weight: 650;
+}
+.video-plan-blockers {
+  margin-top: 10px;
+  color: var(--danger);
+  font-size: 12px;
+}
+.video-mode-route {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 10px;
+  background: rgba(54, 86, 108, 0.055);
+}
+
 @media (max-width: 560px) {
   .evidence-backdrop:has(> .impact-dialog),
   .review-dialog-backdrop,
@@ -14308,5 +14383,9 @@ summary:focus-visible,
   .model-modal-actions > button,
   .scene-manual-review-dialog > footer > button {
     width: 100%;
+  }
+  .narrative-readiness dl,
+  .video-plan-summary dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

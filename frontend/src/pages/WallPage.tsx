@@ -3,6 +3,7 @@ import EpisodeCrumb from '../components/EpisodeCrumb'
 import { useEpisode, useNav } from '../App'
 import {
   api,
+  type EpisodeVideoGenerationPlan,
   type ReferenceImage,
   type ReviewWallContext,
   type Shot,
@@ -33,6 +34,16 @@ export const REVIEW_TABS: Array<{ id: ReviewTab; label: string }> = [
 
 const generationDraftKey = (shotId: string) => `manju:video-generation-draft:${shotId}`
 const EMPTY_SHOTS: Shot[] = []
+
+const VIDEO_MODE_LABEL = {
+  REFERENCE_IMAGE_MODE: '参考图',
+  FIRST_LAST_FRAME_MODE: '首尾帧',
+  VIDEO_INPUT_MODE: '视频参考',
+} as const
+
+function videoModeLabel(mode?: string | null) {
+  return VIDEO_MODE_LABEL[mode as keyof typeof VIDEO_MODE_LABEL] || mode || '待规划'
+}
 
 const EPISODE_STATUS: Record<string, { label: string; next: string }> = {
   planned: { label: '待制作', next: '请先完成剧本和分镜' },
@@ -331,6 +342,7 @@ export default function WallPage() {
   const [reviewTab, setReviewTab] = useState<ReviewTab>('text')
   const [detail, setDetail] = useState<DetailState>({ status: 'idle' })
   const [context, setContext] = useState<ReviewWallContext | null>(null)
+  const [videoPlan, setVideoPlan] = useState<EpisodeVideoGenerationPlan | null>(null)
   const [contextError, setContextError] = useState<string | null>(null)
   const [filters, setFilters] = useState<Set<ShotFilter>>(new Set())
   const [filterSource, setFilterSource] = useState('未筛选')
@@ -379,6 +391,18 @@ export default function WallPage() {
     }
   }, [episodeId])
 
+  const loadVideoPlan = useCallback(async () => {
+    if (!episodeId) return null
+    try {
+      const plan = await api.getVideoGenerationPlan(episodeId)
+      setVideoPlan(plan)
+      return plan
+    } catch {
+      setVideoPlan(null)
+      return null
+    }
+  }, [episodeId])
+
   const loadDetail = useCallback(async (shotId: string) => {
     const request = ++detailRequest.current
     // Keep an already rendered workbench mounted during background sync. This
@@ -409,6 +433,7 @@ export default function WallPage() {
 
   const contextRefreshKey = reviewContextRefreshKey(ep)
   useEffect(() => { void loadContext() }, [contextRefreshKey, loadContext])
+  useEffect(() => { void loadVideoPlan() }, [contextRefreshKey, loadVideoPlan])
 
   // 后端重启时的瞬时网络失败不应把生成台永久留在只读状态。
   // 保留 fail-closed，但在错误存在期间有界地重读真实资格，成功后自动恢复。
@@ -500,7 +525,7 @@ export default function WallPage() {
   const refreshAll = useCallback(async () => {
     const preservedShotId = selectedShotId
     const next = await refresh()
-    await loadContext()
+    await Promise.all([loadContext(), loadVideoPlan()])
     if (!preservedShotId) return
     if (!next?.shots?.some(shot => shot.id === preservedShotId)) {
       detailRequest.current += 1
@@ -509,7 +534,7 @@ export default function WallPage() {
       return
     }
     await loadDetail(preservedShotId)
-  }, [loadContext, loadDetail, refresh, selectedShotId])
+  }, [loadContext, loadDetail, loadVideoPlan, refresh, selectedShotId])
 
   const navigateIn = useCallback((direction: -1 | 1) => {
     if (!filteredShots.length) return
@@ -550,6 +575,7 @@ export default function WallPage() {
         failed ? `${failed} 镜未能入队` : '',
       ].filter(Boolean).join('；') || '请求已返回，正在同步任务状态'
       showToast(`${message}。可在下方镜头按钮查看实时状态。`, undefined, failed > 0)
+      await loadVideoPlan()
       await refreshAll()
     } catch (reason) {
       showToast(reason instanceof Error ? reason.message : String(reason), undefined, true)
@@ -707,6 +733,7 @@ export default function WallPage() {
 
       {contextError && <section className="review-persistent-error" role="alert"><b>生成资格加载失败</b><span>当前保持只读，不会用空资格继续生成或采用。</span><details><summary>查看错误详情</summary><pre>{contextError}</pre></details><button className="btn small" onClick={() => { void loadContext() }}>重试加载</button></section>}
       {context && !context.upstream.eligible_for_production && <section className="review-blocked-banner" role="status"><b>当前不可生成</b><span>{context.upstream.blockers.join('；')}。查看、停止旧任务和废弃/隔离仍可用，生成、恢复、采用和修复已保护。</span><button className="btn small" onClick={() => go(ep.status === 'scripting' || ep.status === 'planned' ? 'script' : 'board', projectId, ep.id)}>去{ep.status === 'scripting' || ep.status === 'planned' ? '剧本台' : '分镜台'}处理</button><details><summary>技术详情</summary><code>{context.upstream.qualification_version}</code></details></section>}
+      {videoPlan && <VideoPlanSummary plan={videoPlan} />}
 
       {staleCount > 0 && <section className="material-fallback-note review-stale-banner" role="status"><span>参考资产已更新：<b>{staleCount}</b> 镜采用版可能使用旧证据。</span><button className="btn small" disabled={staleBusy} onClick={() => { void loadStale() }}>{staleBusy ? '预演中…' : '查看影响与选择修复'}</button></section>}
 
@@ -799,6 +826,30 @@ export default function WallPage() {
   )
 }
 
+function VideoPlanSummary({ plan }: { plan: EpisodeVideoGenerationPlan }) {
+  const distribution = plan.shots.reduce<Record<string, number>>((counts, shot) => {
+    counts[shot.mode] = (counts[shot.mode] || 0) + 1
+    return counts
+  }, {})
+  const waiting = plan.shots.filter(shot =>
+    shot.status === 'waiting_dependency' || Boolean(shot.depends_on_shot_id),
+  ).length
+  const shotNoById = new Map(plan.shots.map(shot => [shot.shot_id, shot.shot_no]))
+  return <section className="video-plan-summary" aria-label="AI 视频生成计划">
+    <header><div><b>AI 生成计划</b><span>系统已按镜间真实素材依赖安排安全并行</span></div><span className={`stamp ${plan.status === 'valid' ? 'green' : 'gold'}`}>{plan.status === 'valid' ? '可执行' : '需处理'}</span></header>
+    <dl>
+      <div><dt>参考图</dt><dd>{distribution.REFERENCE_IMAGE_MODE || 0} 镜</dd></div>
+      <div><dt>首尾帧</dt><dd>{distribution.FIRST_LAST_FRAME_MODE || 0} 镜</dd></div>
+      <div><dt>视频参考</dt><dd>{distribution.VIDEO_INPUT_MODE || 0} 镜</dd></div>
+      <div><dt>等待依赖</dt><dd>{waiting} 镜</dd></div>
+      <div><dt>预计费用</dt><dd>¥{plan.estimated_cost.toFixed(2)}</dd></div>
+      <div><dt>关键路径</dt><dd>{Math.ceil(plan.critical_path_latency_ms / 60000)} 分钟</dd></div>
+    </dl>
+    {plan.blockers.length > 0 && <div className="video-plan-blockers" role="alert">计划仍有 {plan.blockers.length} 项阻塞，请返回分镜台或模型能力设置处理。</div>}
+    <details><summary>查看计划依据与依赖</summary><p>无依赖镜头可并行；需要上一镜实际采用视频或尾帧的镜头会等待。计划 revision {plan.plan_revision}，安全并行比例 {Math.round(plan.safe_parallelism_ratio * 100)}%。</p>{plan.shots.filter(shot => shot.depends_on_shot_id).map(shot => <p key={shot.shot_id}>镜 {shot.shot_no} 等待镜 {shotNoById.get(shot.depends_on_shot_id!) || '上游'} · {videoModeLabel(shot.mode)}</p>)}</details>
+  </section>
+}
+
 function PipelineFilters({ shots, active, onSelect }: { shots: Shot[]; active: Set<ShotFilter>; onSelect: (filter: ShotFilter, label: string) => void }) {
   const items: Array<{ filter: ShotFilter; label: string }> = [
     { filter: 'unproduced', label: '待生成' }, { filter: 'generating', label: '生成中' },
@@ -857,8 +908,10 @@ function ShotWorkbench({ shot, episodeNo, episodeStatus, tab, onTab, context, wr
 function InfoSection({ shot, current }: { shot: Shot; current?: ShotVersion }) {
   const dialogue = shot.dialogues.map(line => `${line.speaker}：${line.line}${line.emotion && line.emotion !== '平静' ? `（${line.emotion}）` : ''}`).join('\n')
   const prompt = current?.prompt_text || shot.prompt_preview || ''
+  const modePlan = shot.mode_plan
+  const actualMode = current?.image_inputs?.actual_mode
   const copy = async (text: string) => { try { await navigator.clipboard.writeText(text) } catch { /* clipboard permission */ } }
-  return <div className="info-section"><section className="script-card"><div className="script-card-head">原文摘录 <button className="text-action" onClick={() => { void copy(shot.source_excerpt || '') }}>复制</button></div><div className={`script-source${shot.source_excerpt ? '' : ' empty'}`}>{shot.source_excerpt || '暂无原文摘录'}</div></section><section className="script-card"><div className="script-card-head">镜头信息</div><dl className="script-meta-grid"><Meta label="场景图" value={shot.scene_name || shot.scene_setting} /><Meta label="时间" value={shot.scene_time || "未设置"} /><Meta label="角色" value={commaList(shot.characters)} /><Meta label="时长" value={`${shot.duration_s}s`} /><Meta label="镜头" value={`${shot.shot_size} / ${shot.camera_move}`} /><Meta label="转场" value={shot.transition} /><Meta label="衔接" value={shot.continuity_mode || (shot.continuity_from_prev ? '接上镜' : '新场景')} /></dl></section><section className="script-card continuity-card"><div className="script-card-head">视频连续性</div><div className="continuity-flow"><div><b>输入状态</b><p>{shot.state_in || shot.first_frame_desc || '未设置'}</p></div><span>→</span><div><b>主要动作</b><p>{shot.primary_action || shot.action_desc || '未设置'}</p></div><span>→</span><div><b>输出状态</b><p>{shot.state_out || shot.last_frame_desc || '未设置'}</p></div></div>{current?.qa?.failure_types?.length ? <div className="continuity-risk" role="status"><b>⚠ 连续性风险</b>{current.qa.failure_types.join('、')}<p>观测输出：{current.qa.observed_state_out || '未返回'}</p></div> : <div className="continuity-ok">✓ 暂无已知高风险差异</div>}<details><summary>技术字段</summary>{prompt && <pre>{truncateText(prompt)}</pre>}</details></section><section className="script-card"><div className="script-card-head">镜头脚本 <button className="text-action" onClick={() => { void copy([shot.action_desc, shot.narration, dialogue].filter(Boolean).join('\n')) }}>复制业务文本</button></div><div className="script-block"><div className="script-paragraph"><span className="script-label">画面</span><p>{shot.action_desc}</p></div>{shot.narration && <div className="script-paragraph"><span className="script-label">旁白</span><p>{shot.narration}</p></div>}{dialogue && <div className="script-paragraph"><span className="script-label">台词</span><pre className="script-dialogues">{dialogue}</pre></div>}</div></section></div>
+  return <div className="info-section">{modePlan && <section className="script-card video-mode-audit"><div className="script-card-head">视频生成方式</div><div className="video-mode-route"><b>{videoModeLabel(modePlan.mode)}</b><span>→</span><b>{actualMode ? videoModeLabel(actualMode) : modePlan.depends_on_shot_id ? '等待上游素材' : '待执行'}</b></div><p>{modePlan.degraded_reason || (modePlan.depends_on_shot_id ? '上一镜采用后自动绑定真实视频或尾帧；不会使用临时候选。' : '本镜无动态上游素材依赖，可安全并行。')}</p><details><summary>计划依据</summary><p>{modePlan.reason_codes.join('、') || '由整集关系计划生成'}</p><p>置信度 {Math.round(modePlan.confidence * 100)}% · {modePlan.video_input_intent ? `参考意图 ${modePlan.video_input_intent}` : '无视频参考意图'}</p></details></section>}<section className="script-card"><div className="script-card-head">原文摘录 <button className="text-action" onClick={() => { void copy(shot.source_excerpt || '') }}>复制</button></div><div className={`script-source${shot.source_excerpt ? '' : ' empty'}`}>{shot.source_excerpt || '暂无原文摘录'}</div></section><section className="script-card"><div className="script-card-head">镜头信息</div><dl className="script-meta-grid"><Meta label="场景图" value={shot.scene_name || shot.scene_setting} /><Meta label="时间" value={shot.scene_time || "未设置"} /><Meta label="角色" value={commaList(shot.characters)} /><Meta label="时长" value={`${shot.duration_s}s`} /><Meta label="镜头" value={`${shot.shot_size} / ${shot.camera_move}`} /><Meta label="转场" value={shot.transition} /><Meta label="衔接" value={shot.continuity_mode || (shot.continuity_from_prev ? '接上镜' : '新场景')} /></dl></section><section className="script-card continuity-card"><div className="script-card-head">视频连续性</div><div className="continuity-flow"><div><b>输入状态</b><p>{shot.state_in || shot.first_frame_desc || '未设置'}</p></div><span>→</span><div><b>主要动作</b><p>{shot.primary_action || shot.action_desc || '未设置'}</p></div><span>→</span><div><b>输出状态</b><p>{shot.state_out || shot.last_frame_desc || '未设置'}</p></div></div>{current?.qa?.failure_types?.length ? <div className="continuity-risk" role="status"><b>连续性风险</b>{current.qa.failure_types.join('、')}<p>观测输出：{current.qa.observed_state_out || '未返回'}</p></div> : <div className="continuity-ok">暂无已知高风险差异</div>}<details><summary>技术字段</summary>{prompt && <pre>{truncateText(prompt)}</pre>}</details></section><section className="script-card"><div className="script-card-head">镜头脚本 <button className="text-action" onClick={() => { void copy([shot.action_desc, shot.narration, dialogue].filter(Boolean).join('\n')) }}>复制业务文本</button></div><div className="script-block"><div className="script-paragraph"><span className="script-label">画面</span><p>{shot.action_desc}</p></div>{shot.narration && <div className="script-paragraph"><span className="script-label">旁白</span><p>{shot.narration}</p></div>}{dialogue && <div className="script-paragraph"><span className="script-label">台词</span><pre className="script-dialogues">{dialogue}</pre></div>}</div></section></div>
 }
 
 function Meta({ label, value }: { label: string; value: string }) { return <div className="script-meta-item"><dt className="script-meta-label">{label}</dt><dd className="script-meta-value">{value}</dd></div> }

@@ -30,27 +30,40 @@ def test_audit_legacy_spoken_conflict() -> None:
     assert audit_legacy_spoken_contract(shot) == "conflict"
 
 
-def test_route_capacity_prefers_split_adjacent() -> None:
+def test_route_capacity_keeps_split_as_candidate_until_semantically_selected() -> None:
     plan = route_issues(
         ["shot_no=9 台词纯文字 65 字，超过 10s 口播上限 36 字；请拆镜或把必保留台词挪走"],
         validated_prefix_end=8,
         next_shot_no=9,
     )
-    assert plan.strategy == "split_adjacent_shot"
-    assert plan.invalidation_frontier == 9
+    assert plan.strategy == "repair_window"
+    assert plan.needs_semantic_selection is True
+    assert "split_adjacent_shot" in {
+        candidate.strategy for candidate in plan.candidates
+    }
+    assert plan.invalidation_frontier == 8
 
 
 def test_route_capacity_escalates_to_split_after_stall() -> None:
     msg = "shot_no=9 台词纯文字 65 字，超过 10s 口播上限 36 字；请拆镜"
     first = route_issues([msg], validated_prefix_end=8, next_shot_no=9)
-    assert first.strategy == "split_adjacent_shot"
-    # 连续 stalled 升到 L4 后走拆镜，禁止整集重规划
+    assert first.strategy == "repair_window"
+    # 连续 stalled 只升级影响范围；具体是否拆镜仍由语义诊断选择。
     stalled = route_issues(
         [msg],
         validated_prefix_end=8,
         next_shot_no=9,
         current_level="L3",
         issue_fingerprint_counts={first.fingerprint: 2},
+        semantic_diagnosis={
+            "scope": "adjacent_window",
+            "selected_strategy": "split_adjacent_shot",
+            "reason": "现镜的台词与处理时间无法同时满足",
+        },
     )
-    assert stalled.strategy == "split_shot"
-    assert stalled.strategy != "replan_outline"
+    assert stalled.level == "L4"
+    assert stalled.strategy == "split_adjacent_shot"
+    assert all(
+        candidate.strategy not in {"redo_suffix", "replan_outline"}
+        for candidate in stalled.candidates
+    )

@@ -9,7 +9,7 @@ import shutil
 import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable
 
 from app import config, hiagent
 from app.atomic_io import atomic_write_bytes
@@ -17,10 +17,16 @@ from app.harness import model_gateway
 from app.db import get_setting, new_id
 from app.errors import code_ref
 from app.hiagent import ProviderError
-from app.schemas import Bible, Shot, extract_json
+from app.schemas import Bible, EpisodeScreenplay, Shot, extract_json
+from app.video_plan import (
+    VideoGenerationMode as VideoGenerationModeEnum,
+    VideoInputIntent,
+)
 
 REFERENCE_IMAGE_MODE = "REFERENCE_IMAGE_MODE"
-VideoGenerationMode = Literal["REFERENCE_IMAGE_MODE"]
+FIRST_LAST_FRAME_MODE = "FIRST_LAST_FRAME_MODE"
+VIDEO_INPUT_MODE = "VIDEO_INPUT_MODE"
+VideoGenerationMode = VideoGenerationModeEnum
 
 REFERENCE_IMAGE_TYPES = {
     "character",
@@ -47,6 +53,13 @@ _MULTI_KEYFRAME_INVARIANCE_NOTE = (
 )
 
 
+def _screenplay_call_kwargs(
+    screenplay: EpisodeScreenplay | None,
+) -> dict[str, EpisodeScreenplay]:
+    """Avoid changing legacy monkeypatch/callable signatures for a null context."""
+    return {"screenplay": screenplay} if screenplay is not None else {}
+
+
 @dataclass
 class ReferenceImagePlan:
     totalCount: int = 1
@@ -66,6 +79,16 @@ class ShotVideoModeDecision:
     needReusePreviousScene: bool = False
     needGenerateNewReferences: bool = False
     referenceImagePlan: ReferenceImagePlan = field(default_factory=ReferenceImagePlan)
+    videoInputIntent: str | None = None
+    dependsOnShotId: str | None = None
+    requiredAssets: list[dict[str, Any]] = field(default_factory=list)
+    fallbackOrder: list[str] = field(default_factory=list)
+    episodeVideoPlanId: str | None = None
+    shotPlanId: str | None = None
+    planRevision: int | None = None
+    sourceStoryboardRevisionId: str | None = None
+    capabilitySnapshotId: str | None = None
+    inputRevisionFingerprints: dict[str, str] = field(default_factory=dict)
     llmUsed: bool = False
     defaulted: bool = False
 
@@ -393,11 +416,23 @@ def _parse_ref_prompts(raw: Any) -> list[dict[str, str]]:
 
 
 class ShotVideoModeSelector:
-    """兼容壳：模式已锁死 REFERENCE_IMAGE_MODE，select 直接返回 default_reference_decision。"""
+    """Legacy selector facade; production mode choices come from the episode plan."""
 
     async def select(self, shot: Shot, bible: Bible, *, shot_row: Any | None = None,
                      prev_shot: Any | None = None) -> ShotVideoModeDecision:
-        return default_reference_decision()
+        if shot_row is not None:
+            try:
+                shot_id = shot_row["id"]
+            except (KeyError, TypeError):
+                shot_id = None
+            if shot_id:
+                from app.video_plan import get_shot_plan
+                planned = get_shot_plan(str(shot_id))
+                if planned is not None:
+                    return dict_to_decision(planned.model_dump(mode="json"))
+        if int(shot.shot_no or 0) == 1:
+            return default_reference_decision()
+        raise ProviderError("第 2 镜起必须先发布整集 EpisodeVideoGenerationPlan")
 
 
 def default_reference_decision() -> ShotVideoModeDecision:
@@ -408,11 +443,11 @@ def default_reference_decision() -> ShotVideoModeDecision:
         types=["plot_key_frame"] * _MAX_TIMELINE_KEYFRAMES,
     )
     reason = (
-        "已固定使用参考图模式；人物/场景锚点之外，0–7 秒严格生成 1 张关键帧，"
+        "第一镜无前序视频，按计划不变量使用参考图模式；人物/场景锚点之外，0–7 秒生成 1 张关键帧，"
         "超过 7 秒仅在存在两个明确剧情阶段时生成 2 张。"
     )
     if not narrative_keyframe_required():
-        reason = "已固定使用参考图模式生成视频。"
+        reason = "第一镜无前序视频，按计划不变量使用参考图模式。"
     return ShotVideoModeDecision(
         mode=REFERENCE_IMAGE_MODE,
         reason=reason,
@@ -435,12 +470,32 @@ def dict_to_decision(data: dict[str, Any]) -> ShotVideoModeDecision:
     generate = int(plan_data.get("generateNewCount", default_plan.generateNewCount) or default_plan.generateNewCount)
     reuse = int(plan_data.get("reusePreviousSceneCount", default_plan.reusePreviousSceneCount) or 0)
     types = list(plan_data.get("types") or default_plan.types)
+    try:
+        mode = VideoGenerationModeEnum(str(data.get("mode") or REFERENCE_IMAGE_MODE))
+    except ValueError:
+        mode = VideoGenerationModeEnum.REFERENCE_IMAGE_MODE
+    required_assets = data.get("requiredAssets")
+    if required_assets is None:
+        required_assets = data.get("required_assets")
+    fallback_order = data.get("fallbackOrder")
+    if fallback_order is None:
+        fallback_order = data.get("fallback_order")
+    intent = data.get("videoInputIntent")
+    if intent is None:
+        intent = data.get("video_input_intent")
+    depends_on = data.get("dependsOnShotId")
+    if depends_on is None:
+        depends_on = data.get("depends_on_shot_id")
     return ShotVideoModeDecision(
-        mode=REFERENCE_IMAGE_MODE,
+        mode=mode,
         reason=str(data.get("reason") or default_reference_decision().reason),
         confidence=float(data.get("confidence", 1.0)),
         needReusePreviousScene=bool(data.get("needReusePreviousScene")),
-        needGenerateNewReferences=True,
+        needGenerateNewReferences=(
+            bool(data.get("needGenerateNewReferences"))
+            if "needGenerateNewReferences" in data
+            else mode == VideoGenerationModeEnum.REFERENCE_IMAGE_MODE
+        ),
         referenceImagePlan=ReferenceImagePlan(
             totalCount=total,
             reusePreviousSceneCount=reuse,
@@ -448,8 +503,31 @@ def dict_to_decision(data: dict[str, Any]) -> ShotVideoModeDecision:
             types=types,
             prompts=_parse_ref_prompts(plan_data.get("prompts")),
         ),
+        videoInputIntent=str(intent) if intent else None,
+        dependsOnShotId=str(depends_on) if depends_on else None,
+        requiredAssets=list(required_assets or []),
+        fallbackOrder=[
+            str(item.value if isinstance(item, VideoGenerationModeEnum) else item)
+            for item in (fallback_order or [])
+        ],
+        episodeVideoPlanId=data.get("episodeVideoPlanId") or data.get("episode_video_plan_id"),
+        shotPlanId=data.get("shotPlanId") or data.get("shot_plan_id"),
+        planRevision=data.get("planRevision") or data.get("plan_revision"),
+        sourceStoryboardRevisionId=(
+            data.get("sourceStoryboardRevisionId")
+            or data.get("source_storyboard_revision_id")
+        ),
+        capabilitySnapshotId=(
+            data.get("capabilitySnapshotId")
+            or data.get("capability_snapshot_id")
+        ),
+        inputRevisionFingerprints=dict(
+            data.get("inputRevisionFingerprints")
+            or data.get("input_revision_fingerprints")
+            or {}
+        ),
         llmUsed=bool(data.get("llmUsed")),
-        defaulted=True,
+        defaulted=bool(data.get("defaulted")),
     )
 
 
@@ -635,12 +713,26 @@ def scene_reference_assets(bible: Bible, scene_name: str, *, project_id: str | N
         return []
 
 
-def _keyframe_character_anchors(shot: Shot, bible: Bible) -> dict[str, str]:
+def _keyframe_character_anchors(
+    shot: Shot,
+    bible: Bible,
+    *,
+    screenplay: EpisodeScreenplay | None = None,
+) -> dict[str, str]:
     """关键帧的可见人物锚点；功能性路人不能因为没有人物谱资产而被漏掉。"""
+    from app.continuity import effective_characters_visible
+
+    if screenplay is not None and screenplay.narrative_plan is not None:
+        from app.identity_contracts import narrative_identity_resolver
+
+        resolver = narrative_identity_resolver(bible, screenplay)
+        return {
+            name: resolver.visual_anchor(name)
+            for name in effective_characters_visible(shot)
+        }
     from app.character_policy import (
         collective_role_anchor, functional_extra_anchor, is_collective_role, is_functional_extra,
     )
-    from app.continuity import effective_characters_visible
 
     by_name = {c.name: c for c in bible.characters}
     anchors: dict[str, str] = {}
@@ -659,10 +751,15 @@ def _keyframe_character_anchors(shot: Shot, bible: Bible) -> dict[str, str]:
     return anchors
 
 
-def _keyframe_contract(shot: Shot, bible: Bible) -> dict[str, Any]:
+def _keyframe_contract(
+    shot: Shot,
+    bible: Bible | None,
+    *,
+    screenplay: EpisodeScreenplay | None = None,
+) -> dict[str, Any]:
     from app.compiler import keyframe_visual_contract
 
-    return keyframe_visual_contract(shot, bible)
+    return keyframe_visual_contract(shot, bible, screenplay=screenplay)
 
 
 def is_narrative_keyframe_slot(slot_key: str | None) -> bool:
@@ -896,7 +993,12 @@ def _shot_for_keyframe_beat(shot: Shot, beat: dict[str, Any] | None) -> Shot:
     return shot.model_copy(deep=True, update=update)
 
 
-def keyframe_contract_fingerprint(shot: Shot, bible: Bible) -> str:
+def keyframe_contract_fingerprint(
+    shot: Shot,
+    bible: Bible,
+    *,
+    screenplay: EpisodeScreenplay | None = None,
+) -> str:
     """冻结一张叙事关键帧的镜头级语义。
 
     全局 policy version 只能表示“规则代码没变”；动作、机位、可见人物或必需文字
@@ -916,7 +1018,7 @@ def keyframe_contract_fingerprint(shot: Shot, bible: Bible) -> str:
     ]
     payload = {
         "policy_version": KEYFRAME_PROMPT_CONTRACT_VERSION,
-        "geometry": _keyframe_contract(shot, bible),
+        "geometry": _keyframe_contract(shot, bible, screenplay=screenplay),
         "scene_setting": (getattr(shot, "scene_setting", "") or "").strip(),
         "shot_size": (getattr(shot, "shot_size", "") or "").strip(),
         "camera_move": (getattr(shot, "camera_move", "") or "").strip(),
@@ -929,15 +1031,22 @@ def keyframe_contract_fingerprint(shot: Shot, bible: Bible) -> str:
         },
         "required_text": required_text_payload,
         "visual_style": (getattr(getattr(bible, "world", None), "visual_style_canonical", "") or "").strip(),
-        "character_anchors": _keyframe_character_anchors(shot, bible),
+        "character_anchors": _keyframe_character_anchors(
+            shot, bible, screenplay=screenplay,
+        ),
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def _keyframe_contract_instructions(shot: Shot, bible: Bible) -> list[str]:
+def _keyframe_contract_instructions(
+    shot: Shot,
+    bible: Bible,
+    *,
+    screenplay: EpisodeScreenplay | None = None,
+) -> list[str]:
     """最终发给图片模型的硬约束；必须放在 LLM 文案之后，以覆盖冲突描述。"""
-    contract = _keyframe_contract(shot, bible)
+    contract = _keyframe_contract(shot, bible, screenplay=screenplay)
     target = str(contract["target_keyframe_desc"] or "the shot's decisive action").strip()
     camera_angle = str(contract["camera_angle"] or "eye-level").strip()
     visible = [str(name) for name in (contract.get("visible_characters") or []) if str(name).strip()]
@@ -1176,16 +1285,23 @@ def reference_gallery_matches_keyframe_contract(
     return True
 
 
-def reference_generation_prompt(shot: Shot, bible: Bible, ref_type: str, index: int,
-                                *, content_override: str | None = None) -> str:
-    anchors = _keyframe_character_anchors(shot, bible)
+def reference_generation_prompt(
+    shot: Shot,
+    bible: Bible,
+    ref_type: str,
+    index: int,
+    *,
+    content_override: str | None = None,
+    screenplay: EpisodeScreenplay | None = None,
+) -> str:
+    anchors = _keyframe_character_anchors(shot, bible, screenplay=screenplay)
     anchor_text = "; ".join(f"{name}: {appearance}" for name, appearance in anchors.items())
     # content_override：LLM 按剧本写的内容提示词。它只能补充美术细节，不能覆盖下方
     # 确定性构图合同。最终合同在截断后追加，避免第二人物/接触点被截掉。
     if content_override:
         body = content_override.strip()[:_KEYFRAME_LLM_PROMPT_MAX_CHARS]
     else:
-        contract = _keyframe_contract(shot, bible)
+        contract = _keyframe_contract(shot, bible, screenplay=screenplay)
         body = (
             f"Create one clean 9:16 anime-drama reference image for Seedance. "
             f"Reference type: {ref_type}. Shot {shot.shot_no}. Scene: {shot.scene_setting}. "
@@ -1201,16 +1317,26 @@ def reference_generation_prompt(shot: Shot, bible: Bible, ref_type: str, index: 
             + "No text, no subtitles, no watermark, no logo, no extra limbs, no motion blur. 9:16 portrait. "
             "The image must be suitable as a Seedance 2.0 reference image."
         )
-    mandatory = " ".join(_keyframe_contract_instructions(shot, bible))
+    mandatory = " ".join(
+        _keyframe_contract_instructions(shot, bible, screenplay=screenplay)
+    )
     return f"{common}{mandatory} Policy version: {KEYFRAME_PROMPT_CONTRACT_VERSION}."
 
 
-async def review_reference_image(image_b64: str, *, shot: Shot, bible: Bible, ref_type: str) -> dict[str, Any]:
-    anchors = []
-    by_name = {c.name: c for c in bible.characters}
-    for name in shot.characters:
-        if name in by_name:
-            anchors.append(f"{name}: {by_name[name].appearance_canonical}")
+async def review_reference_image(
+    image_b64: str,
+    *,
+    shot: Shot,
+    bible: Bible,
+    ref_type: str,
+    screenplay: EpisodeScreenplay | None = None,
+) -> dict[str, Any]:
+    anchors = [
+        f"{name}: {anchor}"
+        for name, anchor in _keyframe_character_anchors(
+            shot, bible, screenplay=screenplay,
+        ).items()
+    ]
     expectation = {
         "task": "Quality check one Seedance reference image.",
         "ref_type": ref_type,
@@ -1299,7 +1425,8 @@ async def _generate_image_with_seed_fallback(prompt: str, seed_inputs: list[str]
 
 async def review_reference_consistency(*, candidates: list[ReferenceImageAsset],
                                        anchors: list[ReferenceImageAsset],
-                                       shot: Shot, bible: Bible) -> dict[str, Any]:
+                                       shot: Shot, bible: Bible,
+                                       screenplay: EpisodeScreenplay | None = None) -> dict[str, Any]:
     """相对一致性检查 Agent（Phase 2）：把锚点图（定妆照/上镜尾帧=真值）与候选新参考图【一起】喂给 VLM，
     逐张给候选打「与锚点及同镜其他帧的一致性」分并点名漂移维度
     （服饰/发型/长相/体型/身高比例/画风/环境）。
@@ -1326,9 +1453,13 @@ async def review_reference_consistency(*, candidates: list[ReferenceImageAsset],
     if not cand_pairs:
         return {"candidates": [], "overall": 1.0, "failed": False}
 
-    char_txt = "; ".join(f"{c.name}: {c.appearance_canonical}"
-                         for c in bible.characters if c.name in shot.characters)
-    geometry = _keyframe_contract(shot, bible)
+    char_txt = "; ".join(
+        f"{name}: {anchor}"
+        for name, anchor in _keyframe_character_anchors(
+            shot, bible, screenplay=screenplay,
+        ).items()
+    )
+    geometry = _keyframe_contract(shot, bible, screenplay=screenplay)
     k, n = len(anchor_b64), len(cand_pairs)
     expectation = (
         f"You are a reference-image CONSISTENCY reviewer for ONE anime-drama shot. I send {k + n} images "
@@ -1422,10 +1553,18 @@ async def _generate_one_reference(*, project_id: str, episode_no: int, shot: Sho
                                   ref_type: str, index: int, content_override: str | None = None,
                                   seed_inputs: list[str] | None = None,
                                   extra_instruction: str | None = None,
-                                  skip_inline_qa: bool = False) -> ReferenceImageAsset:
+                                  skip_inline_qa: bool = False,
+                                  screenplay: EpisodeScreenplay | None = None) -> ReferenceImageAsset:
     from app.continuity import effective_characters_visible
 
-    prompt = reference_generation_prompt(shot, bible, ref_type, index, content_override=content_override)
+    prompt = reference_generation_prompt(
+        shot,
+        bible,
+        ref_type,
+        index,
+        content_override=content_override,
+        screenplay=screenplay,
+    )
     if seed_inputs:
         prompt += _SEED_USAGE_NOTE
     if extra_instruction:
@@ -1464,7 +1603,13 @@ async def _generate_one_reference(*, project_id: str, episode_no: int, shot: Sho
             ),
         )
         return asset
-    qa = await review_reference_image(hiagent.encode_image_file(str(dest)), shot=shot, bible=bible, ref_type=ref_type)
+    qa = await review_reference_image(
+        hiagent.encode_image_file(str(dest)),
+        shot=shot,
+        bible=bible,
+        ref_type=ref_type,
+        **_screenplay_call_kwargs(screenplay),
+    )
     abs_score = float(qa.get("overall", 0))
     qa = {**qa, "absolute_quality": abs_score}
     asset = _asset_from_path(
@@ -1559,11 +1704,18 @@ def previous_tail_reference_asset(conn: Any, prev_shot: Any, *, dest_dir: Path) 
     return None
 
 
-async def write_reference_prompt(shot: Shot, bible: Bible, ref_type: str, *, intent: str | None = None) -> str:
+async def write_reference_prompt(
+    shot: Shot,
+    bible: Bible,
+    ref_type: str,
+    *,
+    intent: str | None = None,
+    screenplay: EpisodeScreenplay | None = None,
+) -> str:
     """为【单张】新参考图独立写一条详尽的 Seedream 英文提示词（一图一次 LLM 调用）。
     逐图独立调用 + 上游并发，避免一次性写多张时模型偷懒只给空泛短提示。失败返回空串（上游回退模板）。"""
-    anchors = _keyframe_character_anchors(shot, bible)
-    contract = _keyframe_contract(shot, bible)
+    anchors = _keyframe_character_anchors(shot, bible, screenplay=screenplay)
+    contract = _keyframe_contract(shot, bible, screenplay=screenplay)
     payload = {
         "task": (
             "Write ONE concrete English image-generation prompt for ONE narrative keyframe still. "
@@ -1630,15 +1782,18 @@ async def write_reference_prompt_batch(
     *,
     intents: list[str | None] | None = None,
     beats: list[dict[str, Any] | None] | None = None,
+    screenplay: EpisodeScreenplay | None = None,
 ) -> list[str]:
     """一镜一次返回全部槽位提示词合同（P1）。缺项/重复时仅对异常槽回退单图调用。"""
-    anchors = _keyframe_character_anchors(shot, bible)
+    anchors = _keyframe_character_anchors(shot, bible, screenplay=screenplay)
     planned = []
     slot_shots: list[Shot] = []
     for i, (slot_key, ref_type) in enumerate(slots):
         beat = beats[i] if beats and i < len(beats) else None
         slot_shot = _shot_for_keyframe_beat(shot, beat)
-        slot_contract = _keyframe_contract(slot_shot, bible)
+        slot_contract = _keyframe_contract(
+            slot_shot, bible, screenplay=screenplay,
+        )
         slot_shots.append(slot_shot)
         planned.append({
             "slot": slot_key,
@@ -1667,7 +1822,9 @@ async def write_reference_prompt_batch(
         "slots": planned,
         "shot": {
             "scene_setting": shot.scene_setting,
-            "visible_characters": list(_keyframe_contract(shot, bible).get("visible_characters") or []),
+            "visible_characters": list(
+                _keyframe_contract(shot, bible, screenplay=screenplay).get("visible_characters") or []
+            ),
             "character_appearance": anchors,
             "shot_size": shot.shot_size,
             "spatial_anchor": shot.spatial_anchor,
@@ -1711,7 +1868,10 @@ async def write_reference_prompt_batch(
         if prompts[i]:
             continue
         intent = intents[i] if intents and i < len(intents) else None
-        prompts[i] = await write_reference_prompt(slot_shots[i], bible, ref_type, intent=intent)
+        prompts[i] = await write_reference_prompt(
+            slot_shots[i], bible, ref_type, intent=intent,
+            **_screenplay_call_kwargs(screenplay),
+        )
     # 近重复检测：若两槽文本高度相似，重写后者
     for i in range(len(prompts)):
         for j in range(i):
@@ -1725,6 +1885,7 @@ async def write_reference_prompt_batch(
                     intent=(
                         f"{original_intent} Make this frozen instant visibly distinct from slot {slots[j][0]}."
                     ),
+                    **_screenplay_call_kwargs(screenplay),
                 ) or prompts[i]
     return prompts
 
@@ -1733,7 +1894,8 @@ async def _generate_reference_keep_best(*, project_id: str, episode_no: int, sho
                                         ref_type: str, index: int, content_override: str | None,
                                         retries: int, seed_inputs: list[str] | None = None,
                                         extra_instruction: str | None = None,
-                                        skip_inline_qa: bool = False) -> tuple[ReferenceImageAsset | None, list[ReferenceImageAsset], list[dict[str, Any]]]:
+                                        skip_inline_qa: bool = False,
+                                        screenplay: EpisodeScreenplay | None = None) -> tuple[ReferenceImageAsset | None, list[ReferenceImageAsset], list[dict[str, Any]]]:
     """生成单张参考图，QA 不达标则重试；最终返回过审资产，或（全部不达标时）保留分数最高的一版兜底。
     skip_inline_qa=True 时生成后不跑单图 VLM（交给批量 QA）。"""
     rejections: list[dict[str, Any]] = []
@@ -1746,7 +1908,8 @@ async def _generate_reference_keep_best(*, project_id: str, episode_no: int, sho
                 project_id=project_id, episode_no=episode_no, shot=shot, bible=bible,
                 ref_type=ref_type, index=attempt_index, content_override=content_override,
                 seed_inputs=seed_inputs, extra_instruction=extra_instruction,
-                skip_inline_qa=skip_inline_qa)
+                skip_inline_qa=skip_inline_qa,
+                **_screenplay_call_kwargs(screenplay))
         except Exception as exc:
             rejections.append({"type": ref_type, "source": "seedream_generated",
                                "reason": "参考图生成异常" + code_ref(
@@ -1853,7 +2016,8 @@ def _mark_below_threshold(rejection_details: list[dict[str, Any]] | None,
 
 async def _regenerate_for_consistency(*, project_id: str, episode_no: int, shot: Shot, bible: Bible,
                                       ref_type: str, index: int, seeds: list[str],
-                                      drift: list[str]) -> ReferenceImageAsset | None:
+                                      drift: list[str],
+                                      screenplay: EpisodeScreenplay | None = None) -> ReferenceImageAsset | None:
     """漂移图从锚点 i2i 重生：强约束「服饰/发型/长相/画风/环境与锚点完全一致，只改姿态」。"""
     note = ("Regenerate to FIX consistency versus the reference anchors"
             + (": " + ", ".join(drift) if drift else "")
@@ -1863,7 +2027,8 @@ async def _regenerate_for_consistency(*, project_id: str, episode_no: int, shot:
         asset = await _generate_one_reference(
             project_id=project_id, episode_no=episode_no, shot=shot, bible=bible,
             ref_type=ref_type, index=index, content_override=None,
-            seed_inputs=seeds or None, extra_instruction=note)
+            seed_inputs=seeds or None, extra_instruction=note,
+            **_screenplay_call_kwargs(screenplay))
     except Exception:  # noqa: BLE001 单张重生失败不拖垮整镜
         return None
     return asset
@@ -1872,7 +2037,8 @@ async def _regenerate_for_consistency(*, project_id: str, episode_no: int, shot:
 async def _enforce_reference_consistency(*, selected: list[ReferenceImageAsset], shot: Shot, bible: Bible,
                                          project_id: str, episode_no: int,
                                          rejection_details: list[dict[str, Any]] | None = None,
-                                         rejected_out: list[ReferenceImageAsset] | None = None
+                                         rejected_out: list[ReferenceImageAsset] | None = None,
+                                         screenplay: EpisodeScreenplay | None = None,
                                          ) -> list[ReferenceImageAsset]:
     """Phase 2：以锚点为真值检查候选一致性；低一致性格分并可选 i2i 重生提分。
 
@@ -1892,7 +2058,8 @@ async def _enforce_reference_consistency(*, selected: list[ReferenceImageAsset],
     current = list(candidates)
     extras_kept: list[ReferenceImageAsset] = []
     report = await review_reference_consistency(
-        candidates=current, anchors=anchors, shot=shot, bible=bible)
+        candidates=current, anchors=anchors, shot=shot, bible=bible,
+        **_screenplay_call_kwargs(screenplay))
     scores = _consistency_scores(report)
     _annotate_consistency(current, scores)
     if report.get("failed"):
@@ -1912,7 +2079,8 @@ async def _enforce_reference_consistency(*, selected: list[ReferenceImageAsset],
             drift = scores.get(cand.id, {}).get("drift") or []
             new_asset = await _regenerate_for_consistency(
                 project_id=project_id, episode_no=episode_no, shot=shot, bible=bible,
-                ref_type=cand.type, index=9000 + attempt * 100 + i, seeds=seeds, drift=drift)
+                ref_type=cand.type, index=9000 + attempt * 100 + i, seeds=seeds, drift=drift,
+                **_screenplay_call_kwargs(screenplay))
             if new_asset is None:
                 continue
             # 原图：按已扣一致性重算；≥门禁则仍留下，否则进废弃（理由仅为分数不足）
@@ -1929,7 +2097,8 @@ async def _enforce_reference_consistency(*, selected: list[ReferenceImageAsset],
         if not changed:
             break
         report = await review_reference_consistency(
-            candidates=current, anchors=anchors, shot=shot, bible=bible)
+            candidates=current, anchors=anchors, shot=shot, bible=bible,
+            **_screenplay_call_kwargs(screenplay))
         scores = _consistency_scores(report)
         _annotate_consistency(current, scores)
         if report.get("failed"):
@@ -1961,6 +2130,7 @@ async def _enforce_timeline_keyframe_invariance(
     bible: Bible,
     rejection_details: list[dict[str, Any]] | None = None,
     rejected_out: list[ReferenceImageAsset] | None = None,
+    screenplay: EpisodeScreenplay | None = None,
 ) -> tuple[list[ReferenceImageAsset], set[str]]:
     """双关键帧人物不变量硬检查；无法证明一致时安全降级为单关键帧。"""
     timeline = sorted(
@@ -1981,6 +2151,7 @@ async def _enforce_timeline_keyframe_invariance(
     ]
     report = await review_reference_consistency(
         candidates=timeline, anchors=anchors, shot=shot, bible=bible,
+        **_screenplay_call_kwargs(screenplay),
     )
     scores = _consistency_scores(report)
     _annotate_consistency(timeline, scores)
@@ -2039,7 +2210,8 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
                                  ] | None = None,
                                  allow_missing_continuity_tail: bool = False,
                                  job_id: str | None = None,
-                                 existing_meta: dict[str, Any] | None = None) -> list[ReferenceImageAsset]:
+                                 existing_meta: dict[str, Any] | None = None,
+                                 screenplay: EpisodeScreenplay | None = None) -> list[ReferenceImageAsset]:
     from app.multiview import (
         PURPOSE_KEYFRAME_SEED, PURPOSE_QA_ANCHOR, PURPOSE_VIDEO_INPUT,
         NARRATIVE_KEYFRAME_SLOT, resolve_shot_asset_dependencies, keyframe_seed_paths,
@@ -2057,7 +2229,9 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
     # 的候选全部命中结构硬伤时，才会在下方重新写入。
     existing_meta.pop("keyframe_fallback_mode", None)
     existing_meta.pop("keyframe_structural_fallback_slots", None)
-    current_keyframe_fingerprint = keyframe_contract_fingerprint(shot, bible)
+    current_keyframe_fingerprint = keyframe_contract_fingerprint(
+        shot, bible, screenplay=screenplay,
+    )
     prior_prompt_contract = str(existing_meta.get("keyframe_prompt_contract_version") or "")
     prompt_contract_changed = prior_prompt_contract != KEYFRAME_PROMPT_CONTRACT_VERSION
     prior_keyframe_fingerprint = str(existing_meta.get("keyframe_contract_fingerprint") or "")
@@ -2083,9 +2257,22 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
     from app.continuity import effective_characters_visible
     visible_character_names = effective_characters_visible(shot)
     bible_character_names = {character.name for character in bible.characters}
-    # 只有 Bible 具名角色才有可复用定妆资产。功能性路人保留文字锚点，但不得
-    # 抢占 refs_as_image_inputs 的前 N 个名额，导致后面主角定妆种子被截掉。
-    identity_character_names = [name for name in visible_character_names if name in bible_character_names]
+    if screenplay is not None and screenplay.narrative_plan is not None:
+        from app.identity_contracts import narrative_identity_resolver
+
+        identity_resolver = narrative_identity_resolver(bible, screenplay)
+        visible_identities = [
+            identity_resolver.resolve(name, usage="visual")
+            for name in visible_character_names
+        ]
+        identity_character_names = list(dict.fromkeys(
+            identity.asset_name for identity in visible_identities if identity.allows_asset
+        ))
+    else:
+        # Legacy keeps its historical Bible-only reusable-asset policy.
+        identity_character_names = [
+            name for name in visible_character_names if name in bible_character_names
+        ]
 
     # 冻结依赖 manifest：worker 重启复用；若本集人物/场景版本已变则判 stale 并重建
     reuse_frozen = False
@@ -2093,7 +2280,7 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
     if not prompt_contract_changed and existing_meta.get("reference_manifest_frozen") and isinstance(frozen_manifest, dict):
         current_probe = resolve_shot_asset_dependencies(
             project_id=project_id, episode_no=episode_no, shot_id=shot_id, shot=shot,
-            scene_name=scene_name or None,
+            scene_name=scene_name or None, conn=conn, bible=bible, screenplay=screenplay,
         )
         if manifest_revisions_match(frozen_manifest, current_probe):
             manifest = frozen_manifest
@@ -2130,7 +2317,7 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
             existing_meta["asset_pack_warnings"] = pack_warnings
         manifest = resolve_shot_asset_dependencies(
             project_id=project_id, episode_no=episode_no, shot_id=shot_id, shot=shot,
-            scene_name=scene_name or None,
+            scene_name=scene_name or None, conn=conn, bible=bible, screenplay=screenplay,
         )
         existing_meta["reference_manifest"] = manifest
         existing_meta["reference_manifest_frozen"] = True
@@ -2144,7 +2331,10 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
     # 只有 action_continuation 才把上一镜尾帧作为强制参考图和剪辑点连贯锚点。
     forced: list[ReferenceImageAsset] = []
     from app.continuity import derive_continuity_mode, uses_previous_tail_frame
-    needs_tail = uses_previous_tail_frame(derive_continuity_mode(shot, prev=prev_shot))
+    needs_tail = (
+        not decision.shotPlanId
+        and uses_previous_tail_frame(derive_continuity_mode(shot, prev=prev_shot))
+    )
     if needs_tail:
         prev = prev_shot
         if prev is None and int(getattr(shot, "shot_no", 0) or 0) > 1:
@@ -2623,6 +2813,7 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
             shot, bible, [(s, t) for s, t, _, _ in prompts_to_write],
             intents=[o for _, _, o, _ in prompts_to_write],
             beats=[beat_by_slot.get(s) for s, _, _, _ in prompts_to_write],
+            **_screenplay_call_kwargs(screenplay),
         )
         written_by_slot = {
             prompts_to_write[i][0]: prompts[i] or prompts_to_write[i][2]
@@ -2635,7 +2826,10 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
     elif prompts_to_write and reference_prompt_async():
         async def _resolve(slot_key: str, ref_type: str, brief: str | None) -> str | None:
             beat_shot = _shot_for_keyframe_beat(shot, beat_by_slot.get(slot_key))
-            written = await write_reference_prompt(beat_shot, bible, ref_type, intent=brief)
+            written = await write_reference_prompt(
+                beat_shot, bible, ref_type, intent=brief,
+                **_screenplay_call_kwargs(screenplay),
+            )
             return written or brief or None
         resolved = await asyncio.gather(*[
             _resolve(slot_key, ref_type, brief)
@@ -2739,6 +2933,7 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
                 seed_inputs=_seeds_for(ref_type),
                 extra_instruction=extra_instruction if ref_type == "plot_key_frame" else None,
                 skip_inline_qa=True,
+                **_screenplay_call_kwargs(screenplay),
             )
             return slot_key, ref_type, candidate_no, asset, discarded, rej
 
@@ -2831,9 +3026,16 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
                 bible=bible,
                 visual_anchors=visual_anchors,
                 ref_type=ref_type,
+                **_screenplay_call_kwargs(screenplay),
             )
         else:
-            qa = await review_reference_image(payload, shot=shot, bible=bible, ref_type=ref_type)
+            qa = await review_reference_image(
+                payload,
+                shot=shot,
+                bible=bible,
+                ref_type=ref_type,
+                **_screenplay_call_kwargs(screenplay),
+            )
             qa.setdefault("status", "scored")
         return slot_key, candidate_no, asset, qa
 
@@ -3137,13 +3339,15 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
     video_candidates = [a for a in selected if PURPOSE_VIDEO_INPUT in (a.purposes or []) or a.type == "previous_shot_frame"]
     video_candidates = await _enforce_reference_consistency(
         selected=video_candidates, shot=shot, bible=bible, project_id=project_id, episode_no=episode_no,
-        rejection_details=rejection_details, rejected_out=rejected_out)
+        rejection_details=rejection_details, rejected_out=rejected_out,
+        screenplay=screenplay)
     video_candidates, invariant_dropped_slots = await _enforce_timeline_keyframe_invariance(
         selected=video_candidates,
         shot=shot,
         bible=bible,
         rejection_details=rejection_details,
         rejected_out=rejected_out,
+        screenplay=screenplay,
     )
     if invariant_dropped_slots:
         # 两帧无法证明人物不变量时，回退为单一决定性关键帧，并同步冻结元数据；
@@ -3279,6 +3483,7 @@ async def assemble_continuity_tail(
     shot: Shot, bible: Bible, meta: dict[str, Any], prev_shot: Any | None,
     rejection_details: list[dict[str, Any]] | None = None,
     rejected_out: list[ReferenceImageAsset] | None = None,
+    screenplay: EpisodeScreenplay | None = None,
 ) -> list[ReferenceImageAsset]:
     """尾帧到达后：装配连续性参考并做最终组门禁；不重跑已通过静态槽位。"""
     from app.multiview import PURPOSE_VIDEO_INPUT, purpose_list
@@ -3374,6 +3579,7 @@ async def assemble_continuity_tail(
     selected = await _enforce_reference_consistency(
         selected=selected, shot=shot, bible=bible, project_id=project_id, episode_no=episode_no,
         rejection_details=rejection_details, rejected_out=rejected_out,
+        screenplay=screenplay,
     )
     selected = _dedupe_assets(selected)
     selected = _finalize_reference_selection(
@@ -3708,8 +3914,14 @@ def append_reference_prompt_notes(prompt_text: str, assets: list[ReferenceImageA
 def build_seedance_image_inputs(meta: dict[str, Any]) -> list[tuple[str, str]]:
     mode = meta.get("mode") or REFERENCE_IMAGE_MODE
     if mode == REFERENCE_IMAGE_MODE:
-        if meta.get("first_frame_path") or meta.get("last_frame_path"):
-            raise ProviderError("REFERENCE_IMAGE_MODE must not pass first_frame or last_frame.")
+        if (
+            meta.get("first_frame_path")
+            or meta.get("last_frame_path")
+            or meta.get("video_input_url")
+        ):
+            raise ProviderError(
+                "REFERENCE_IMAGE_MODE 不能混入 first_frame、last_frame 或 reference_video"
+            )
         refs = meta.get("reference_images") or []
         if not refs:
             # 参考图/关键帧重试耗尽后的最终降级：Seedance 支持纯文本 content。
@@ -3734,4 +3946,57 @@ def build_seedance_image_inputs(meta: dict[str, Any]) -> list[tuple[str, str]]:
             return []
         return out
 
-    raise ProviderError("视频生成已固定为参考图模式，不再支持首尾帧输入。")
+    if mode == FIRST_LAST_FRAME_MODE:
+        if meta.get("reference_images") or meta.get("video_input_url"):
+            raise ProviderError(
+                "FIRST_LAST_FRAME_MODE 不能混入 reference_image 或 reference_video"
+            )
+        first = str(meta.get("first_frame_path") or meta.get("first_frame_url") or "").strip()
+        last = str(meta.get("last_frame_path") or meta.get("last_frame_url") or "").strip()
+        if not first or not last:
+            raise ProviderError("FIRST_LAST_FRAME_MODE 必须同时提供 first_frame 和 last_frame")
+
+        def _resolve(value: str) -> str:
+            if value.startswith(("data:", "http://", "https://")):
+                return value
+            path = Path(value)
+            if not path.is_file():
+                raise ProviderError(f"首尾帧文件不存在：{value}")
+            return hiagent.data_url_from_file(value)
+
+        return [(_resolve(first), "first_frame"), (_resolve(last), "last_frame")]
+
+    if mode == VIDEO_INPUT_MODE:
+        if (
+            meta.get("reference_images")
+            or meta.get("first_frame_path")
+            or meta.get("last_frame_path")
+            or meta.get("first_frame_url")
+            or meta.get("last_frame_url")
+        ):
+            raise ProviderError(
+                "VIDEO_INPUT_MODE 不能混入 reference_image、first_frame 或 last_frame"
+            )
+        return []
+
+    raise ProviderError(f"未知视频生成模式：{mode}")
+
+
+def build_seedance_video_inputs(meta: dict[str, Any]) -> list[tuple[str, str]]:
+    mode = meta.get("mode") or REFERENCE_IMAGE_MODE
+    if mode != VIDEO_INPUT_MODE:
+        if meta.get("video_input_url"):
+            raise ProviderError(f"{mode} 不能携带 reference_video")
+        return []
+    url = str(meta.get("video_input_url") or "").strip()
+    if not url:
+        raise ProviderError("VIDEO_INPUT_MODE 缺少供应商可访问的 reference_video URL")
+    if url.startswith("data:"):
+        raise ProviderError("reference_video 必须是 Web URL，禁止提交 data URL")
+    if not url.startswith(("http://", "https://")):
+        raise ProviderError("reference_video 必须是 http(s) Web URL")
+    try:
+        VideoInputIntent(str(meta.get("video_input_intent") or ""))
+    except ValueError as exc:
+        raise ProviderError("VIDEO_INPUT_MODE 缺少合法 video_input_intent") from exc
+    return [(url, "reference_video")]

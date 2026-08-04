@@ -837,27 +837,35 @@ async def test_noop_patch_attempts_consume_activation_budget(monkeypatch):
     monkeypatch.setattr(screenplay_repair, "apply_screenplay_patch", fake_apply)
     monkeypatch.setattr(screenplay_repair, "MAX_REPAIR_ACTIVATION_PATCHES", 2)
 
-    await screenplay_repair.run_screenplay_production(
-        episode_id="ep_p",
-        episode={
-            "id": "ep_p",
-            "project_id": "proj_p",
-            "episode_no": 1,
-            "target_duration_s": 50,
-        },
-        source_text="原文",
-        bible=Bible(
-            characters=[],
-            world=World(visual_style_canonical="测试画风"),
-        ),
-        resume=True,
-    )
+    with pytest.raises(screenplay_repair.ScreenplayNarrativeGateError):
+        await screenplay_repair.run_screenplay_production(
+            episode_id="ep_p",
+            episode={
+                "id": "ep_p",
+                "project_id": "proj_p",
+                "episode_no": 1,
+                "target_duration_s": 50,
+            },
+            source_text="原文",
+            bible=Bible(
+                characters=[],
+                world=World(visual_style_canonical="测试画风"),
+            ),
+            resume=True,
+        )
 
     assert attempts == 2
     paused = screenplay_repair.get_production_revision(revision.id)
+    episode = db.get_conn().execute(
+        "SELECT screenplay_status,screenplay_error FROM episodes WHERE id='ep_p'"
+    ).fetchone()
     assert paused is not None
-    assert paused.checkpoint_json["phase"] == "SUCCEEDED"
-    assert paused.checkpoint_json["yield_reason"] == "gate_retry_exhausted_fallback"
+    assert paused.working_artifact_id == artifact["id"]
+    assert paused.published_artifact_id is None
+    assert paused.checkpoint_json["phase"] == "WAITING_HUMAN"
+    assert paused.checkpoint_json["yield_reason"] == "narrative_gate_needs_review"
+    assert episode["screenplay_status"] == "repairing"
+    assert "禁止发布" in episode["screenplay_error"]
 
 
 @pytest.mark.asyncio
@@ -1111,8 +1119,8 @@ def test_certificate_binds_hash_and_rejects_mismatch(monkeypatch):
 def test_repair_router_no_longer_emits_redo_or_replan():
     assert strategy_for_level("L3") == "insert_shot"
     assert strategy_for_level("L4") == "split_shot"
-    assert normalize_strategy("redo_suffix") == "repair_window"
-    assert normalize_strategy("replan_outline") == "repair_window"
+    assert normalize_strategy("redo_suffix") == "redo_suffix"
+    assert normalize_strategy("replan_outline") == "replan_outline"
 
     plan = route_issues([
         structured_issue(
@@ -1124,7 +1132,13 @@ def test_repair_router_no_longer_emits_redo_or_replan():
             stage="storyboard",
         )
     ], validated_prefix_end=4, next_shot_no=5)
-    assert plan.strategy == "insert_shot"
+    assert plan.strategy == "repair_window"
+    assert plan.needs_semantic_selection is True
+    assert "insert_shot" in {candidate.strategy for candidate in plan.candidates}
+    assert all(
+        candidate.strategy not in {"redo_suffix", "replan_outline"}
+        for candidate in plan.candidates
+    )
     assert plan.strategy not in {"redo_suffix", "replan_outline"}
 
     capacity = route_issues([
@@ -1136,8 +1150,15 @@ def test_repair_router_no_longer_emits_redo_or_replan():
             stage="storyboard",
         )
     ], validated_prefix_end=8, next_shot_no=9, current_level="L4")
-    assert capacity.strategy in {"split_shot", "split_adjacent_shot"}
-    assert capacity.strategy != "replan_outline"
+    assert capacity.strategy == "repair_window"
+    assert capacity.needs_semantic_selection is True
+    assert "split_adjacent_shot" in {
+        candidate.strategy for candidate in capacity.candidates
+    }
+    assert all(
+        candidate.strategy not in {"redo_suffix", "replan_outline"}
+        for candidate in capacity.candidates
+    )
 
 
 def test_apply_screenplay_patch_cas_and_noop(monkeypatch):

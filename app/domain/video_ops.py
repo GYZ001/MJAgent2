@@ -176,9 +176,17 @@ def evaluate_storyboard_for_confirmation(
     # Shot instance with the caller, so normalizers could mutate the CAS
     # baseline while validating a repair candidate and create a false conflict.
     board = Storyboard.model_validate(storyboard.model_dump(mode="json"))
-    character_changes = normalize_offbible_characters(board, bible)
-    normalize_continuity(board)
-    prefer_default_shot_durations(board)
+    narrative_plan = screenplay.narrative_plan if screenplay is not None else None
+    character_changes = (
+        [] if narrative_plan is not None else normalize_offbible_characters(board, bible)
+    )
+    if narrative_plan is None:
+        normalize_continuity(board)
+    prefer_default_shot_durations(
+        board,
+        narrative_authority=narrative_plan is not None,
+        narrative_plan=narrative_plan,
+    )
     normalize_transition_visuals(board)
     compact_target = _compact_episode_target(
         target_duration_s if target_duration_s is not None else episode["target_duration_s"]
@@ -202,14 +210,84 @@ def evaluate_storyboard_for_confirmation(
         structural_errors.extend(
             validate_storyboard_screenplay_scene_alignment(board, screenplay, bible)
         )
-    score_warnings = validate_storyboard(board, bible, compact_target)
+        if screenplay.narrative_plan is not None:
+            from app.narrative import validate_storyboard_narrative
+
+            structural_errors.extend(validate_storyboard_narrative(
+                board,
+                screenplay,
+                complete=True,
+                expected_scope_id=str(episode["id"]),
+            ))
+            try:
+                episode_data = dict(episode)
+            except Exception:  # noqa: BLE001
+                episode_data = {}
+            if episode_data.get("status") != "scripting":
+                artifact_id = episode_data.get("storyboard_artifact_id")
+                review_passed = False
+                if (
+                    artifact_id
+                    and episode_data.get("narrative_status") == "ready"
+                    and episode_data.get("narrative_review_artifact_id")
+                ):
+                    from app.evidence import repository as evidence_repository
+                    from app.narrative_review import (
+                        verify_review_chain_for_storyboard_artifact,
+                    )
+
+                    artifact = evidence_repository.get_artifact(str(artifact_id))
+                    try:
+                        report_id = verify_review_chain_for_storyboard_artifact(
+                            episode_id=str(episode_data.get("id") or ""),
+                            screenplay=screenplay,
+                            storyboard_artifact=artifact or {},
+                        )
+                    except Exception:  # noqa: BLE001 - live release-gate boundary
+                        report_id = ""
+                    row = get_conn().execute(
+                        """SELECT 1 FROM evaluations
+                            WHERE artifact_id=?
+                              AND evaluator_name='narrative_blind_comparator'
+                              AND evaluation_role='runtime_gate'
+                              AND runtime_blocking=1
+                              AND status='passed' AND hard_gate_passed=1
+                            LIMIT 1""",
+                        (artifact_id,),
+                    ).fetchone()
+                    from app.narrative import storyboard_authority_projection
+
+                    review_passed = bool(
+                        row
+                        and report_id
+                        and report_id == episode_data.get("narrative_review_artifact_id")
+                        and artifact is not None
+                        and storyboard_authority_projection(
+                            artifact.get("content") or {}
+                        )
+                        == storyboard_authority_projection(board)
+                    )
+                if not review_passed:
+                    structural_errors.append(
+                        "[NARRATIVE_REVIEW_MISSING] 当前分镜缺少有效的多先验冷观众审读，禁止确认"
+                    )
+    score_warnings = validate_storyboard(
+        board,
+        bible,
+        compact_target,
+        narrative_authority=narrative_plan is not None,
+        narrative_plan=narrative_plan,
+    )
     # 对白构图是视频输入结构，不是审美评分：多人可见、错误景别/运镜会直接改变
     # 参考图和最终画面，必须进入确认硬门禁。动作文字里仍提到画外听者等描述质量
     # 问题继续保留为 warning，避免旧项目被不必要地整批判废。
     dialogue_blockers = [
         message
         for shot in board.shots
-        for message in dialogue_framing_errors(shot)
+        for message in dialogue_framing_errors(
+            shot,
+            narrative_authority=narrative_plan is not None,
+        )
     ]
     if dialogue_blockers:
         structural_errors.extend(dialogue_blockers)
@@ -229,7 +307,7 @@ def evaluate_storyboard_for_confirmation(
     if has_real_bible and not structural_errors:
         try:
             for s in board.shots:
-                compile_prompt(s, bible)
+                compile_prompt(s, bible, screenplay=screenplay)
         except Exception as exc:  # noqa: BLE001
             structural_errors.append(f"Prompt 编译失败：{exc}")
     try:
@@ -272,16 +350,56 @@ def _has_current_storyboard_completion_certificate(conn, episode) -> bool:
     if not certificate_id or not artifact_id or not revision_id:
         return False
     try:
+        from app.production.screenplay_authority import resolve_downstream_screenplay
+
+        screenplay_context = resolve_downstream_screenplay(
+            str(data.get("id") or ""),
+            conn=conn,
+        )
+        has_narrative_plan = screenplay_context.narrative_authority_required
+    except Exception:  # noqa: BLE001 - immutable authority drift fails closed
+        return False
+    if has_narrative_plan and (
+        data.get("narrative_status") != "ready"
+        or not data.get("narrative_review_artifact_id")
+    ):
+        return False
+    if has_narrative_plan:
+        try:
+            from app.production.certificate import (
+                verify_current_storyboard_completion_authority,
+            )
+
+            shot_rows = conn.execute(
+                "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
+                (data.get("id"),),
+            ).fetchall()
+            current_board = _board_from_shot_rows(
+                shot_rows,
+                int(data.get("episode_no") or 1),
+            )
+            verify_current_storyboard_completion_authority(
+                episode=episode,
+                current_storyboard_content=current_board.model_dump(mode="json"),
+            )
+            return True
+        except Exception:  # noqa: BLE001 - paid authority fast path fails closed
+            return False
+
+    # Explicit plan-null compatibility: retain the pre-narrative certificate
+    # shape without imposing the new evaluator contract on legacy projects.
+    try:
         row = conn.execute(
             """SELECT c.kind,c.scope_id,c.artifact_id,c.artifact_hash,c.blockers,
                       c.must_fix_issues,c.production_revision_id,c.consumed_at,
-                      a.content_hash AS current_artifact_hash
+                      a.content_hash AS current_artifact_hash,
+                      a.status AS current_artifact_status
                  FROM completion_certificates c
                  JOIN artifacts a ON a.id=c.artifact_id
                 WHERE c.id=?""",
             (certificate_id,),
         ).fetchone()
-    except Exception:  # noqa: BLE001 - legacy databases fall through to live evaluation
+    except Exception:  # noqa: BLE001 - legacy databases use live diagnostics
         return False
     return bool(
         row
@@ -290,6 +408,8 @@ def _has_current_storyboard_completion_certificate(conn, episode) -> bool:
         and row["artifact_id"] == artifact_id
         and row["production_revision_id"] == revision_id
         and row["artifact_hash"] == row["current_artifact_hash"]
+        and row["current_artifact_status"]
+        not in {"stale", "rejected", "superseded", "needs_revision"}
         and int(row["blockers"] or 0) == 0
         and int(row["must_fix_issues"] or 0) == 0
         and row["consumed_at"] is not None
@@ -297,7 +417,12 @@ def _has_current_storyboard_completion_certificate(conn, episode) -> bool:
 
 
 def _assert_storyboard_generation_gate(episode_id: str) -> None:
-    """Trust the current certificate; fail closed for legacy confirmations."""
+    """Authorize paid work from a current certificate, never a live score.
+
+    For explicit plan-null projects the historical live hard-gate fallback is
+    retained.  Once a narrative plan exists, live evaluation is diagnostic
+    only and cannot mint authority in place of immutable release evidence.
+    """
     conn = get_conn()
     episode = _episode_or_404(episode_id)
     rows = conn.execute(
@@ -307,14 +432,50 @@ def _assert_storyboard_generation_gate(episode_id: str) -> None:
         raise HTTPException(409, "本集尚无分镜")
     if _has_current_storyboard_completion_certificate(conn, episode):
         return
+    screenplay = None
+    screenplay_error = None
+    narrative_authority = False
+    try:
+        from app.production.screenplay_authority import resolve_downstream_screenplay
+
+        screenplay_context = resolve_downstream_screenplay(episode_id, conn=conn)
+        screenplay = screenplay_context.screenplay
+        narrative_authority = screenplay_context.narrative_authority_required
+    except Exception as exc:  # noqa: BLE001 - malformed authority fails closed
+        screenplay_error = exc
+        from app.production.screenplay_authority import (
+            episode_requires_immutable_screenplay_authority,
+        )
+
+        narrative_authority = episode_requires_immutable_screenplay_authority(
+            episode, conn=conn,
+        )
+    narrative_authority = bool(
+        narrative_authority
+        or dict(episode).get("narrative_review_artifact_id")
+        or dict(episode).get("narrative_status") == "ready"
+    )
+    if not narrative_authority and dict(episode).get("storyboard_completion_certificate_id"):
+        try:
+            from app.production.certificate import (
+                completion_certificate_has_narrative_evidence,
+            )
+
+            narrative_authority = completion_certificate_has_narrative_evidence(
+                dict(episode).get("storyboard_completion_certificate_id")
+            )
+        except Exception:  # noqa: BLE001 - live diagnostics below still fail malformed rows
+            pass
     project = conn.execute(
         "SELECT * FROM projects WHERE id=?", (episode["project_id"],),
     ).fetchone()
     try:
+        if screenplay_error is not None:
+            raise screenplay_error
         evaluation = evaluate_storyboard_for_confirmation(
             episode,
             _board_from_shot_rows(rows, episode["episode_no"]),
-            _load_screenplay(episode),
+            screenplay,
             _project_bible_or_placeholder(project),
             has_real_bible=bool((project["bible_json"] or "").strip()) if project else False,
             record_metrics=False,
@@ -322,6 +483,13 @@ def _assert_storyboard_generation_gate(episode_id: str) -> None:
         hard_errors = list(dict.fromkeys(evaluation.errors))
     except Exception as exc:  # legacy malformed rows must fail closed, not return HTTP 500
         hard_errors = [f"分镜结构无法通过确认评估：{exc}"]
+    if narrative_authority:
+        hard_errors.insert(
+            0,
+            "[NARRATIVE_CERTIFICATE_REQUIRED] 当前叙事分镜缺少或失去与发布 "
+            "Artifact 精确绑定的完成凭证；实时评估仅用于诊断，不能授权付费生成",
+        )
+    hard_errors = list(dict.fromkeys(hard_errors))
     if hard_errors:
         raise HTTPException(409, {
             "code": "STORYBOARD_CONFIRMATION_REQUIRED",
@@ -349,7 +517,15 @@ def create_storyboard_confirmation_preview(episode_id: str) -> dict:
     final_valid = progress["final_shot_valid"]
     project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
     bible = _project_bible_or_placeholder(project)
-    screenplay = _load_screenplay(ep)
+    from app.production.screenplay_authority import resolve_downstream_screenplay
+
+    try:
+        screenplay = resolve_downstream_screenplay(episode_id, conn=conn).screenplay
+    except ValueError as exc:
+        # Preview is an authorization input.  A modern episode with a broken
+        # immutable chain must not produce a new confirmation token from a
+        # mutable page copy.
+        raise HTTPException(409, f"当前剧本权威链无法验证：{exc}") from exc
     evaluation = evaluate_storyboard_for_confirmation(
         ep, board, screenplay, bible,
         has_real_bible=bool((project["bible_json"] or "").strip()) if project else False,
@@ -510,6 +686,43 @@ def confirm_episode_core(
 
     already = _episode_or_404(episode_id)
     if already["status"] == "confirmed":
+        if not already["screenplay_json"]:
+            from app.production.screenplay_authority import (
+                episode_requires_immutable_screenplay_authority,
+            )
+
+            if episode_requires_immutable_screenplay_authority(
+                already,
+                conn=get_conn(),
+            ):
+                raise ValueError(
+                    "已确认剧本权威链的页面投影缺失，"
+                    "不能降级后幂等重申确认"
+                )
+            has_narrative_plan = False
+        else:
+            try:
+                from app.production.screenplay_authority import (
+                    resolve_downstream_screenplay,
+                )
+
+                screenplay_context = resolve_downstream_screenplay(
+                    episode_id,
+                    conn=get_conn(),
+                )
+                has_narrative_plan = screenplay_context.narrative_authority_required
+            except Exception as exc:  # noqa: BLE001 - confirmed authority is fail closed
+                raise ValueError(
+                    f"已确认剧本权威链已漂移，不能幂等重申确认：{exc}"
+                ) from exc
+        if (
+            has_narrative_plan
+            and not _has_current_storyboard_completion_certificate(get_conn(), already)
+        ):
+            raise ValueError(
+                "已确认分镜的完成凭证或冷观众审读证据已失效，"
+                "不能幂等重申确认；请返回分镜台重新修复与审读"
+            )
         _converge_confirmed_storyboard_state(
             episode_id,
             active_storyboard_run_id=already["active_storyboard_run_id"],
@@ -526,13 +739,25 @@ def confirm_episode_core(
     require_preview(preview_token, "confirm", episode_id)
     ep = _episode_or_404(episode_id)
     conn = get_conn()
-    compact_target = _compact_episode_target(ep["target_duration_s"])
-    if compact_target != ep["target_duration_s"]:
-        conn.execute("UPDATE episodes SET target_duration_s=? WHERE id=?", (compact_target, episode_id))
-        conn.commit()
     p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
     has_real_bible = bool((p["bible_json"] or "").strip())
     bible = _project_bible_or_placeholder(p)
+    from app.production.screenplay_authority import resolve_downstream_screenplay
+
+    screenplay_context = resolve_downstream_screenplay(episode_id, conn=conn)
+    screenplay = screenplay_context.screenplay
+    narrative_authority = screenplay_context.narrative_authority_required
+    compact_target = (
+        int(ep["target_duration_s"] or 0)
+        if narrative_authority
+        else _compact_episode_target(ep["target_duration_s"])
+    )
+    if not narrative_authority and compact_target != ep["target_duration_s"]:
+        conn.execute(
+            "UPDATE episodes SET target_duration_s=? WHERE id=?",
+            (compact_target, episode_id),
+        )
+        conn.commit()
     shots_rows = conn.execute("SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)).fetchall()
     if not shots_rows:
         raise ValueError("本集还没有分镜脚本")
@@ -543,20 +768,32 @@ def confirm_episode_core(
             f"已完成 {len(shots_rows)}/{progress['planned_shots']} 镜，"
             f"最终镜{'有效' if progress['final_shot_valid'] else '缺失'}"
         )
-    for row in shots_rows:
-        try:
-            verify_or_bind_existing_excerpt(
-                episode_id, row["id"], row["source_excerpt"] or "",
-            )
-        except HTTPException:
-            pass
+    if not narrative_authority:
+        for row in shots_rows:
+            try:
+                verify_or_bind_existing_excerpt(
+                    episode_id, row["id"], row["source_excerpt"] or "",
+                )
+            except HTTPException:
+                pass
     # 来源回绑是后台审计 finding：可在 evidence evaluation 中追踪，但不属于
     # 用户可操作的质量建议，也不应污染确认后的 storyboard_warning。
     board = _board_from_shot_rows(shots_rows, ep["episode_no"])
     shots = board.shots
-    if shots and not shots[-1].is_final:
+    if narrative_authority:
+        from app.production.certificate import (
+            verify_current_storyboard_completion_authority,
+        )
+
+        verify_current_storyboard_completion_authority(
+            episode=ep,
+            current_storyboard_content=board.model_dump(mode="json"),
+        )
+    if shots and not shots[-1].is_final and not narrative_authority:
         shots[-1].is_final = True
-    character_changes = normalize_offbible_characters(board, bible)
+    character_changes = (
+        [] if narrative_authority else normalize_offbible_characters(board, bible)
+    )
     stripped = sorted({
         str(change.get("stripped") or "").strip()
         for change in character_changes
@@ -568,8 +805,12 @@ def confirm_episode_core(
             + "、".join(stripped)
             + "；已停止确认，未删除人物或台词"
         )
-    character_artifact_ids = _persist_storyboard_character_policy_repairs(
-        conn, episode_id, board, character_changes
+    character_artifact_ids = (
+        []
+        if narrative_authority
+        else _persist_storyboard_character_policy_repairs(
+            conn, episode_id, board, character_changes
+        )
     )
     before = [
         (
@@ -579,13 +820,15 @@ def confirm_episode_core(
         )
         for r, s in zip(shots_rows, shots)
     ]
-    normalize_continuity(board)
-    from app.validators import prefer_default_shot_durations
-    prefer_default_shot_durations(board)
-    normalize_transition_visuals(board)
+    if not narrative_authority:
+        normalize_continuity(board)
+        from app.validators import prefer_default_shot_durations
+
+        prefer_default_shot_durations(board)
+        normalize_transition_visuals(board)
     actual_total = sum(int(s.duration_s or 0) for s in shots)
     synced_target = _compact_episode_target(actual_total or compact_target)
-    if synced_target != compact_target:
+    if not narrative_authority and synced_target != compact_target:
         compact_target = synced_target
         conn.execute("UPDATE episodes SET target_duration_s=? WHERE id=?", (compact_target, episode_id))
     normalized_fields_changed = False
@@ -596,13 +839,18 @@ def confirm_episode_core(
                 or old_contract != _shot_contract_json(s)
                 or (r["last_frame_desc"] or "") != s.last_frame_desc):
             normalized_fields_changed = True
+            if narrative_authority:
+                raise ValueError(
+                    "已发布叙事分镜与当前权威投影不一致，"
+                    "禁止在确认阶段原地归一化"
+                )
             conn.execute(
                 "UPDATE shots SET continuity_from_prev=?, transition=?, duration_s=?, shot_size=?, camera_move=?, last_frame_desc=?, shot_contract_json=?, continuity_mode=?, observed_state_out=? WHERE id=?",
                 (int(s.continuity_from_prev), s.transition, s.duration_s, s.shot_size, s.camera_move,
                  s.last_frame_desc, _shot_contract_json(s), s.continuity_mode, s.observed_state_out, r["id"]))
-    conn.commit()
+    if not narrative_authority:
+        conn.commit()
 
-    screenplay = _load_screenplay(ep)
     # 重新从当前（可能已归一）镜头构建 board，再跑同源只读评估。
     board = _board_from_shot_rows(
         conn.execute("SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)).fetchall(),
@@ -632,24 +880,51 @@ def confirm_episode_core(
     # 先派生新的整集证据，再通过人工确认门。
     storyboard_artifact_id = ep["storyboard_artifact_id"]
     content_hash = None
-    current_board_hash = evidence_repository.content_hash(board.model_dump(mode="json"))
+    current_board_payload = board.model_dump(mode="json")
+    if narrative_authority:
+        from app.narrative import storyboard_authority_projection
+
+        current_board_payload = storyboard_authority_projection(board)
+    current_board_hash = evidence_repository.content_hash(current_board_payload)
     stored_board_hash = None
+    stored_board_payload = None
     if storyboard_artifact_id:
         stored = conn.execute(
-            "SELECT content_hash FROM artifacts WHERE id=?", (storyboard_artifact_id,)
+            "SELECT content_hash,content_json FROM artifacts WHERE id=?",
+            (storyboard_artifact_id,),
         ).fetchone()
         stored_board_hash = stored["content_hash"] if stored else None
+        if stored and stored["content_json"]:
+            try:
+                stored_board_payload = json.loads(stored["content_json"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                stored_board_payload = None
+    if narrative_authority and stored_board_payload is not None:
+        stored_board_hash = evidence_repository.content_hash(
+            storyboard_authority_projection(stored_board_payload)
+        )
     storyboard_snapshot_changed = stored_board_hash != current_board_hash
     from app.domain.storyboard_ops import _storyboard_shot_evidence_requires_rebind
-    storyboard_shot_evidence_changed = _storyboard_shot_evidence_requires_rebind(
-        conn, episode_id, board,
+    storyboard_shot_evidence_changed = bool(
+        not narrative_authority
+        and _storyboard_shot_evidence_requires_rebind(conn, episode_id, board)
     )
+    if narrative_authority and (
+        not storyboard_artifact_id or storyboard_snapshot_changed
+    ):
+        raise ValueError(
+            "当前叙事分镜不再等同已发布 Artifact，"
+            "请生成语义修订候选并重新完成盲审发布"
+        )
     if (
-        character_artifact_ids
-        or normalized_fields_changed
-        or not storyboard_artifact_id
-        or storyboard_snapshot_changed
-        or storyboard_shot_evidence_changed
+        not narrative_authority
+        and (
+            character_artifact_ids
+            or normalized_fields_changed
+            or not storyboard_artifact_id
+            or storyboard_snapshot_changed
+            or storyboard_shot_evidence_changed
+        )
     ):
         storyboard_artifact_id = _finalize_storyboard_evidence(episode_id, board)
     if storyboard_artifact_id:
@@ -1049,7 +1324,396 @@ async def restore_reference_image(version_id: str, ref_id: str, body: dict | Non
     )
 
 
-# ----- 视频生成（固定参考图模式） -----
+# ----- 版本化三模式视频计划与能力 -----
+
+
+@router.post("/episodes/{episode_id}/video-generation-plan")
+async def create_episode_video_generation_plan(
+    episode_id: str,
+    body: dict | None = None,
+):
+    _episode_or_404(episode_id)
+    _assert_storyboard_generation_gate(episode_id)
+    from app.video_plan import VideoPlanValidationError, generate_episode_plan
+
+    try:
+        plan = await generate_episode_plan(
+            episode_id, force=bool((body or {}).get("force")),
+        )
+    except VideoPlanValidationError as exc:
+        raise HTTPException(409, {
+            "status": "BLOCKED_UPSTREAM_CONTRACT",
+            "blockers": exc.issues,
+        }) from exc
+    return plan.model_dump(mode="json")
+
+
+@router.get("/episodes/{episode_id}/video-generation-plan")
+def get_episode_video_generation_plan(episode_id: str):
+    _episode_or_404(episode_id)
+    from app.video_plan import load_latest_plan
+
+    plan = load_latest_plan(episode_id)
+    if not plan:
+        return None
+    return plan.model_dump(mode="json")
+
+
+@router.post("/episodes/{episode_id}/video-generation-plan/validate")
+def validate_episode_video_generation_plan(episode_id: str):
+    _episode_or_404(episode_id)
+    from app.video_plan import (
+        VideoPlanValidationError,
+        capability_snapshot_by_id,
+        current_storyboard_release_manifest,
+        load_latest_plan,
+        validate_episode_plan,
+    )
+
+    conn = get_conn()
+    plan = load_latest_plan(episode_id, conn=conn)
+    if not plan:
+        raise HTTPException(404, "本集尚未生成视频模式计划")
+    snapshot = capability_snapshot_by_id(plan.capability_snapshot_id, conn=conn)
+    if not snapshot:
+        raise HTTPException(409, "计划引用的供应商能力快照不存在")
+    rows = conn.execute(
+        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
+        (episode_id,),
+    ).fetchall()
+    try:
+        release_manifest = current_storyboard_release_manifest(
+            episode_id,
+            conn=conn,
+        )
+        validate_episode_plan(
+            plan,
+            list(rows),
+            snapshot,
+            release_manifest=release_manifest,
+        )
+    except (ValueError, VideoPlanValidationError) as exc:
+        blockers = (
+            exc.issues
+            if isinstance(exc, VideoPlanValidationError)
+            else [{"code": "STORYBOARD_RELEASE_AUTHORITY_STALE", "message": str(exc)}]
+        )
+        raise HTTPException(409, {"valid": False, "blockers": blockers}) from exc
+    return {"valid": True, "plan": plan.model_dump(mode="json")}
+
+
+@router.post("/episodes/{episode_id}/video-generation-plan/reconcile")
+def reconcile_episode_video_generation_plan(
+    episode_id: str,
+    body: dict | None = None,
+):
+    _episode_or_404(episode_id)
+    from app.video_plan import reconcile_adopted_revision
+
+    conn = get_conn()
+    payload = body or {}
+    shot_id = payload.get("shot_id")
+    version_id = payload.get("adopted_version_id")
+    if shot_id:
+        row = conn.execute(
+            "SELECT adopted_version_id FROM shots WHERE id=? AND episode_id=?",
+            (shot_id, episode_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "镜头不存在")
+        adopted = version_id or row["adopted_version_id"]
+        if not adopted:
+            raise HTTPException(409, "该镜头尚未采用视频")
+        result = reconcile_adopted_revision(shot_id, adopted, conn=conn)
+        conn.commit()
+        return result
+    results = []
+    for row in conn.execute(
+        """SELECT id,adopted_version_id FROM shots
+           WHERE episode_id=? AND adopted_version_id IS NOT NULL ORDER BY shot_no""",
+        (episode_id,),
+    ).fetchall():
+        results.append(reconcile_adopted_revision(
+            row["id"], row["adopted_version_id"], conn=conn,
+        ))
+    conn.commit()
+    return {
+        "episode_id": episode_id,
+        "bound": sum(item["bound"] for item in results),
+        "stale_shot_ids": sorted({
+            shot for item in results for shot in item["stale_shot_ids"]
+        }),
+    }
+
+
+@router.post("/episodes/{episode_id}/video-generation-plan/override")
+def override_episode_video_generation_plan(
+    episode_id: str,
+    body: dict | None = None,
+):
+    _episode_or_404(episode_id)
+    from app.video_plan import (
+        PlanAssetRequirement,
+        VideoGenerationMode,
+        VideoInputIntent,
+        VideoPlanValidationError,
+        capability_snapshot_by_id,
+        current_storyboard_release_manifest,
+        load_latest_plan,
+        publish_plan,
+        validate_episode_plan,
+    )
+
+    payload = body or {}
+    if not payload.get("reason"):
+        raise HTTPException(422, "人工覆盖必须填写原因")
+    conn = get_conn()
+    current = load_latest_plan(episode_id, conn=conn)
+    if not current:
+        raise HTTPException(404, "本集尚未生成视频模式计划")
+    target = next(
+        (item for item in current.shots if item.shot_id == payload.get("shot_id")),
+        None,
+    )
+    if not target:
+        raise HTTPException(404, "待覆盖镜头不属于当前计划")
+    try:
+        override_mode = VideoGenerationMode(payload.get("mode"))
+        override_intent = (
+            VideoInputIntent(payload["video_input_intent"])
+            if payload.get("video_input_intent") else None
+        )
+        override_assets = [
+            PlanAssetRequirement.model_validate(asset)
+            for asset in (payload.get("required_assets") or [])
+        ]
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, f"人工覆盖模式或素材合同无效：{exc}") from exc
+    next_revision = int(conn.execute(
+        "SELECT COALESCE(MAX(plan_revision),0)+1 n FROM episode_video_generation_plans WHERE episode_id=?",
+        (episode_id,),
+    ).fetchone()["n"])
+    replacement = current.model_copy(deep=True)
+    replacement.episode_video_plan_id = new_id("evp")
+    replacement.plan_revision = next_revision
+    replacement.status = "draft"
+    replacement.created_at = now()
+    for item in replacement.shots:
+        item.shot_plan_id = new_id("svp")
+        item.episode_video_plan_id = replacement.episode_video_plan_id
+        item.plan_revision = next_revision
+        if item.shot_id != target.shot_id:
+            continue
+        item.mode = override_mode
+        item.planned_mode = item.mode
+        item.video_input_intent = override_intent
+        item.depends_on_shot_id = payload.get("depends_on_shot_id")
+        item.required_assets = override_assets
+        item.reason_codes = [
+            *item.reason_codes,
+            "MANUAL_OPERATION_OVERRIDE",
+        ]
+        item.input_revision_fingerprints["manual_override_reason"] = _review_sha(
+            payload["reason"]
+        )
+    snapshot = capability_snapshot_by_id(
+        replacement.capability_snapshot_id, conn=conn,
+    )
+    rows = conn.execute(
+        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
+        (episode_id,),
+    ).fetchall()
+    try:
+        if not snapshot:
+            raise VideoPlanValidationError([{"code": "CAPABILITY_SNAPSHOT_MISSING"}])
+        release_manifest = current_storyboard_release_manifest(
+            episode_id, conn=conn,
+        )
+        validate_episode_plan(
+            replacement,
+            list(rows),
+            snapshot,
+            release_manifest=release_manifest,
+        )
+    except (ValueError, VideoPlanValidationError) as exc:
+        issues = exc.issues if isinstance(exc, VideoPlanValidationError) else [{"code": str(exc)}]
+        raise HTTPException(409, {"valid": False, "blockers": issues}) from exc
+    publish_plan(replacement, conn=conn)
+    conn.commit()
+    return replacement.model_dump(mode="json")
+
+
+@router.post(
+    "/episodes/{episode_id}/video-generation-plan/{plan_id}/execute"
+)
+async def execute_episode_video_generation_plan(
+    episode_id: str,
+    plan_id: str,
+    body: dict | None = None,
+):
+    from app.video_plan import load_latest_plan
+
+    plan = load_latest_plan(episode_id)
+    if not plan or plan.episode_video_plan_id != plan_id or plan.status != "valid":
+        raise HTTPException(409, "只能执行当前有效的视频模式计划")
+    from app.capabilities.dispatch import dispatch, respond_ui
+    payload = body or {}
+    result = await dispatch(
+        "video.generate_episode",
+        {
+            "episode_id": episode_id,
+            "idempotency_key": payload.get("idempotency_key"),
+            "request_id": payload.get("request_id"),
+            "approval_token": payload.get("approval_token"),
+        },
+        initiator="ui",
+    )
+    return respond_ui(result)
+
+
+@router.get("/video-capabilities/{provider}/{model:path}")
+def get_video_capabilities(provider: str, model: str):
+    from app.video_plan import current_capability_snapshot
+
+    return current_capability_snapshot(
+        provider=provider, model=model,
+    ).model_dump(mode="json")
+
+
+@router.post("/video-capabilities/{provider}/{model:path}/probe")
+async def probe_video_capability(
+    provider: str,
+    model: str,
+    body: dict | None = None,
+):
+    from app import hiagent
+    from app.video_plan import (
+        ProviderVideoCapabilitySnapshot,
+        current_capability_snapshot,
+        save_capability_snapshot,
+    )
+
+    payload = body or {}
+    if payload.get("confirm") is not True:
+        raise HTTPException(409, "能力探针会创建真实付费任务，必须显式提交 confirm=true")
+    capability = str(payload.get("capability") or "")
+    base = current_capability_snapshot(provider=provider, model=model)
+    image_urls: list[tuple[str, str]] = []
+    video_urls: list[tuple[str, str]] = []
+    if capability == "reference_image":
+        image_urls = [(str(payload.get("reference_image_url") or ""), "reference_image")]
+    elif capability == "first_last_pair":
+        image_urls = [
+            (str(payload.get("first_frame_url") or ""), "first_frame"),
+            (str(payload.get("last_frame_url") or ""), "last_frame"),
+        ]
+    elif capability in {"reference_video", "true_video_continuation"}:
+        video_urls = [(str(payload.get("reference_video_url") or ""), "reference_video")]
+    else:
+        raise HTTPException(422, "未知能力探针类型")
+    if any(not url.strip() for url, _role in [*image_urls, *video_urls]):
+        raise HTTPException(422, "能力探针缺少对应的受控输入素材 URL")
+    task_id = None
+    result = None
+    provider_error = None
+    try:
+        task_id = await hiagent.create_video_task(
+            str(payload.get("prompt") or "受控能力探针：保持输入主体、场景与画面风格。"),
+            image_urls=image_urls,
+            video_urls=video_urls,
+            return_last_frame=bool(payload.get("return_last_frame")),
+            call_meta={"stage": "provider_video_capability_probe", "capability": capability},
+        )
+        deadline = time.time() + float(payload.get("timeout_s") or 1800)
+        while time.time() < deadline:
+            result = await hiagent.poll_video_task(
+                task_id,
+                call_meta={"stage": "provider_video_capability_probe", "capability": capability},
+            )
+            if result["status"] in {"succeeded", "failed"}:
+                break
+            await asyncio.sleep(float(payload.get("poll_interval_s") or 10))
+    except Exception as exc:
+        provider_error = exc
+    technical_success = bool(
+        not provider_error and result and result.get("status") == "succeeded"
+    )
+    failure_reason = (
+        f"{type(provider_error).__name__}:{provider_error}"
+        if provider_error else (result or {}).get("error") or "timeout"
+    )
+    values = base.model_dump(mode="json")
+    values.update({
+        "id": new_id("cap"),
+        "provider": provider,
+        "model": model,
+        "probe_time": now(),
+        "probe_task_id": task_id,
+        "probe_result": (
+            "succeeded" if technical_success else f"failed:{failure_reason}"
+        ),
+        "technical_success": technical_success,
+    })
+    if payload.get("return_last_frame"):
+        values["supports_return_last_frame"] = bool(
+            technical_success and (result or {}).get("last_frame_url")
+        )
+    if capability == "reference_image":
+        values["supports_reference_image"] = technical_success
+    elif capability == "first_last_pair":
+        values["supports_first_frame"] = technical_success
+        values["supports_last_frame"] = technical_success
+        values["supports_first_last_pair"] = technical_success
+    elif capability == "reference_video":
+        values["supports_reference_video"] = technical_success
+    else:
+        semantic_success = bool(
+            technical_success
+            and payload.get("semantic_regression_passed") is True
+            and int(payload.get("semantic_sample_count") or 0) >= 20
+        )
+        values["supports_true_video_continuation"] = semantic_success
+        values["semantic_continuation_success"] = semantic_success
+    snapshot = ProviderVideoCapabilitySnapshot.model_validate(values)
+    save_capability_snapshot(snapshot)
+    if provider_error:
+        raise HTTPException(
+            409,
+            {
+                "message": f"能力探针失败：{provider_error}",
+                "capability_snapshot_id": snapshot.id,
+            },
+        ) from provider_error
+    return snapshot.model_dump(mode="json")
+
+
+@router.post("/provider-media-publications")
+async def create_provider_media_publication(body: dict | None = None):
+    from app.video_plan import ProviderMediaPublicationService
+
+    payload = body or {}
+    try:
+        return await ProviderMediaPublicationService().publish(
+            source_revision_id=str(payload.get("source_revision_id") or ""),
+            source_url=payload.get("source_url"),
+            local_path=payload.get("local_path"),
+            expires_at=payload.get("expires_at"),
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@router.get("/jobs/{job_id}/video-mode-audit")
+def get_job_video_mode_audit(job_id: str):
+    from app.video_plan import mode_audit_for_job
+
+    audit = mode_audit_for_job(job_id)
+    if not audit:
+        raise HTTPException(404, "视频任务不存在")
+    return audit
+
+
+# ----- 视频生成（三模式 AI 计划） -----
 
 def _shot_by_no(episode_id: str, shot_no: int):
     return get_conn().execute(
@@ -1058,8 +1722,7 @@ def _shot_by_no(episode_id: str, shot_no: int):
 
 @router.post("/episodes/{episode_id}/generate")
 async def generate_episode(episode_id: str, body: dict | None = None):
-    """批量生成整集视频（固定参考图模式）：每个视频任务内部生成/复用参考图并提交 Seedance。
-    body.from_shot_no：只从该镜起、沿其连续段往后重生（中途改动后用）。"""
+    """先生成并校验整集三模式计划，再按素材依赖 DAG 安全入队。"""
     from app.capabilities.dispatch import ui_route
     routed = await ui_route("video.generate_episode", {"episode_id": episode_id})
     if routed is not None:
@@ -1121,6 +1784,29 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
     shots_rows = conn.execute(
         "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
         (episode_id,)).fetchall()
+    from app.video_plan import (
+        VideoPlanValidationError,
+        generate_episode_plan,
+        load_latest_plan,
+    )
+    try:
+        plan = load_latest_plan(episode_id, conn=conn)
+        requested_plan_id = body.get("plan_id")
+        if requested_plan_id:
+            if not plan or plan.episode_video_plan_id != requested_plan_id:
+                raise HTTPException(409, "请求执行的计划不是当前有效 revision")
+        else:
+            plan = await generate_episode_plan(
+                episode_id, force=bool(body.get("force_replan")), conn=conn,
+            )
+    except VideoPlanValidationError as exc:
+        raise HTTPException(409, {
+            "status": "BLOCKED_UPSTREAM_CONTRACT",
+            "blockers": exc.issues,
+        }) from exc
+    if not plan or plan.status != "valid":
+        raise HTTPException(409, "视频模式计划尚未通过确定性校验")
+    plan_by_shot = {item.shot_id: item for item in plan.shots}
     board = _board_from_shot_rows(shots_rows, ep["episode_no"])
     shots = []
     previous_shot = None
@@ -1143,14 +1829,22 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
             pass
     if from_no:
         selected = []
-        for i, s in enumerate(shots):
+        for s in shots:
             if s["row"]["shot_no"] == from_no:
-                selected = [s]
-                for nxt in shots[i + 1:]:
-                    if _uses_previous_tail_frame_for_model(nxt["shot"], nxt["prev"]):
-                        selected.append(nxt)
-                    else:
-                        break
+                selected_ids = {s["row"]["id"]}
+                changed = True
+                while changed:
+                    changed = False
+                    for item in plan.shots:
+                        if (
+                            item.depends_on_shot_id in selected_ids
+                            and item.shot_id not in selected_ids
+                        ):
+                            selected_ids.add(item.shot_id)
+                            changed = True
+                selected = [
+                    item for item in shots if item["row"]["id"] in selected_ids
+                ]
                 break
         if not selected:
             raise HTTPException(404, f"未找到镜 {from_no}")
@@ -1176,10 +1870,29 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
     # Quick generation must not create one doomed paid-version record per shot.
     # The completion supervisor owns the self-healing asset preparation path.
     from app.multiview import scan_episode_reference_asset_gaps
+    from app.domain.common import _project_bible_or_placeholder
+    from app.production.screenplay_authority import resolve_downstream_screenplay
+    from app.schemas import EpisodeScreenplay
+
+    project = conn.execute(
+        "SELECT * FROM projects WHERE id=?", (ep["project_id"],),
+    ).fetchone()
+    bible = _project_bible_or_placeholder(project)
+    projection = EpisodeScreenplay.model_validate_json(ep["screenplay_json"])
+    try:
+        screenplay = resolve_downstream_screenplay(episode_id, conn=conn).screenplay
+    except ValueError as exc:
+        if projection.narrative_plan is not None:
+            raise HTTPException(
+                409, f"当前叙事剧本权威链无法验证：{exc}",
+            ) from exc
+        screenplay = projection
     asset_gaps = scan_episode_reference_asset_gaps(
         project_id=ep["project_id"],
         episode_no=int(ep["episode_no"]),
         shots=[(item["row"]["id"], item["shot"]) for item in selected],
+        bible=bible,
+        screenplay=screenplay,
     )
     if asset_gaps["blockers"]:
         names = [
@@ -1193,14 +1906,17 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
         )
     # 不再预先清空 adopted_version_id：新版本成功并通过技术门禁后由
     # select_best_video_candidate 比较切换；任务失败时保留原可交付采用结果。
-    # 固定参考图模式：批量生成前确保每个选中镜都有固定参考图计划。
-    for s in selected:
-        await _ensure_shot_mode_plan(conn, s["row"]["id"])
     results = []
     for s in selected:
-        after = None
-        if _uses_previous_tail_frame_for_model(s["shot"], s["prev"]) and s["row"]["shot_no"] > 1:
-            after = s["prev_row"]["id"] if s["prev_row"] else None
+        shot_plan = plan_by_shot.get(s["row"]["id"])
+        if not shot_plan:
+            results.append({
+                "shot_id": s["row"]["id"],
+                "error": "当前计划未覆盖该镜头，已阻止入队",
+                "issue_codes": ["VIDEO_PLAN_SHOT_MISSING"],
+            })
+            continue
+        after = shot_plan.depends_on_shot_id
         try:
             r = worker.enqueue_shot(
                 s["row"]["id"], after_shot_id=after,
@@ -1241,6 +1957,18 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
             })
     conn.commit()
     return {
+        "episode_video_plan_id": plan.episode_video_plan_id,
+        "plan_revision": plan.plan_revision,
+        "mode_distribution": {
+            mode: sum(1 for item in plan.shots if item.mode.value == mode)
+            for mode in (
+                "REFERENCE_IMAGE_MODE",
+                "FIRST_LAST_FRAME_MODE",
+                "VIDEO_INPUT_MODE",
+            )
+        },
+        "critical_path_latency_ms": plan.critical_path_latency_ms,
+        "estimated_cost": plan.estimated_cost,
         "enqueued": results,
         "skipped_completed": completed_count,
         "selected_shots": len(selected),
@@ -1279,24 +2007,44 @@ async def _generate_shot_core(shot_id: str, body: dict) -> dict:
         if ref:
             critique = await worker.critique_version(ref["id"])
             critique_sources.append({"source": "video_qa", "version_id": ref["id"]})
-    # 固定参考图模式：生成前确保已有固定参考图计划。
-    await _ensure_shot_mode_plan(conn, shot_id)
-    # 同场景接上镜时，参考图模式可复用上一镜可用素材作为参考。
-    after = None
-    prev_row = None
-    prev_shot = None
-    if shot_row["shot_no"] > 1:
-        prev_row = conn.execute(
-            "SELECT * FROM shots WHERE episode_id=? AND shot_no<? ORDER BY shot_no DESC LIMIT 1",
-            (shot_row["episode_id"], shot_row["shot_no"]),
-        ).fetchone()
-    if prev_row:
-        models = _board_from_shot_rows([prev_row, shot_row], 0).shots
-        prev_shot, shot_model = models[0], models[1]
-    else:
-        shot_model = _board_from_shot_rows([shot_row], 0).shots[0]
-    if _uses_previous_tail_frame_for_model(shot_model, prev_shot) and shot_row["shot_no"] > 1:
-        after = prev_row["id"] if prev_row else None
+    from app.video_plan import (
+        VideoPlanValidationError,
+        create_local_replan_revision,
+        generate_episode_plan,
+    )
+    try:
+        plan = await generate_episode_plan(shot_row["episode_id"], conn=conn)
+        if (
+            body.get("reroll")
+            or body.get("with_critique")
+            or body.get("prompt_override")
+        ):
+            replan_reason = (
+                "critique_guided_redo"
+                if body.get("with_critique")
+                else (
+                    "prompt_override_redo"
+                    if body.get("prompt_override")
+                    else "single_shot_reroll"
+                )
+            )
+            plan = create_local_replan_revision(
+                shot_id,
+                reason=replan_reason,
+                conn=conn,
+            )
+    except VideoPlanValidationError as exc:
+        raise HTTPException(409, {
+            "status": "BLOCKED_UPSTREAM_CONTRACT",
+            "blockers": exc.issues,
+        }) from exc
+    shot_plan = next(
+        (item for item in plan.shots if item.shot_id == shot_id),
+        None,
+    )
+    if not shot_plan:
+        raise HTTPException(409, "当前有效视频模式计划未覆盖该镜头")
+    after = shot_plan.depends_on_shot_id
     try:
         return worker.enqueue_shot(
             shot_id,
@@ -1375,7 +2123,10 @@ def _adopt_version_core(shot_id: str, body: dict) -> dict:
     qa = json.loads(v["qa_json"] or "{}")
     observed_state_out = qa.get("observed_state_out")
     if observed_state_out:
-        media_evidence.merge_observed_state_out_into_shot_contract(shot_id, str(observed_state_out))
+        media_evidence.persist_candidate_observed_state_out(
+            version_id,
+            str(observed_state_out),
+        )
     reason = str(body.get("reason") or "").strip()
     if len(reason) < 4 or reason in {"人工横向比较后采用", "默认", "同意"}:
         raise HTTPException(422, "请填写有效的采用理由（至少 4 个字，说明质量、成本或版本比较）")
@@ -1406,6 +2157,10 @@ def _adopt_version_core(shot_id: str, body: dict) -> dict:
             str(body.get("decided_by") or "user"), reason, now(),
         ),
     )
+    from app.video_plan import reconcile_adopted_revision
+    reconcile_result = reconcile_adopted_revision(
+        shot_id, version_id, conn=conn,
+    )
     conn.commit()
     _review_write_audit(
         "video_version.adopt", "shot", shot_id, target_version=version_id,
@@ -1426,6 +2181,7 @@ def _adopt_version_core(shot_id: str, body: dict) -> dict:
         "artifact_id": artifact["id"],
         "reason": reason,
         "playback_rate": playback_rate,
+        "video_plan_reconcile": reconcile_result,
     }
 
 
@@ -1458,6 +2214,10 @@ def _cancel_shot_adoption_core(shot_id: str) -> dict:
     if not previous:
         return {"shot_id": shot_id, "previous_adopted_version_id": None, "adopted_version_id": None}
     conn.execute("UPDATE shots SET adopted_version_id=NULL WHERE id=?", (shot_id,))
+    from app.video_plan import reconcile_adopted_revision
+    reconcile_result = reconcile_adopted_revision(
+        shot_id, "__unadopted__", conn=conn,
+    )
     conn.commit()
     worker.invalidate_episode_final(shot["episode_id"])
     _review_write_audit(
@@ -1473,6 +2233,7 @@ def _cancel_shot_adoption_core(shot_id: str) -> dict:
         "shot_id": shot_id,
         "previous_adopted_version_id": previous,
         "adopted_version_id": None,
+        "video_plan_reconcile": reconcile_result,
     }
 
 

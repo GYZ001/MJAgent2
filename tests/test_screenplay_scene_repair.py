@@ -240,7 +240,7 @@ async def test_old_exhausted_checkpoint_resumes_without_second_baseline(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_unrepairable_business_qa_issue_publishes_current_best(monkeypatch):
+async def test_unrepairable_business_qa_issue_preserves_working_without_publishing(monkeypatch):
     from app.evidence import repository as evidence_repository
     from app.production import screenplay_repair
 
@@ -288,29 +288,31 @@ async def test_unrepairable_business_qa_issue_publishes_current_best(monkeypatch
         lambda *_args, **_kwargs: ([issue], evaluation),
     )
 
-    result = await screenplay_repair.run_screenplay_production(
-        episode_id="ep_scene",
-        episode={
-            "id": "ep_scene",
-            "project_id": "proj_scene",
-            "episode_no": 1,
-            "target_duration_s": 60,
-        },
-        source_text="原文",
-        bible=Bible(
-            characters=[],
-            world=World(visual_style_canonical="测试画风"),
-        ),
-        resume=True,
-    )
+    with pytest.raises(screenplay_repair.ScreenplayNarrativeGateError):
+        await screenplay_repair.run_screenplay_production(
+            episode_id="ep_scene",
+            episode={
+                "id": "ep_scene",
+                "project_id": "proj_scene",
+                "episode_no": 1,
+                "target_duration_s": 60,
+            },
+            source_text="原文",
+            bible=Bible(
+                characters=[],
+                world=World(visual_style_canonical="测试画风"),
+            ),
+            resume=True,
+        )
 
     resumed = screenplay_repair.get_production_revision(revision.id)
     episode = db.get_conn().execute(
         "SELECT screenplay_status, screenplay_error FROM episodes WHERE id='ep_scene'"
     ).fetchone()
-    assert result.title == script.title
     assert resumed is not None
-    assert resumed.checkpoint_json["phase"] == "SUCCEEDED"
-    assert resumed.checkpoint_json["yield_reason"] == "gate_retry_exhausted_fallback"
-    assert episode["screenplay_status"] == "ready"
-    assert episode["screenplay_error"] is None
+    assert resumed.working_artifact_id == artifact["id"]
+    assert resumed.published_artifact_id is None
+    assert resumed.checkpoint_json["phase"] == "WAITING_HUMAN"
+    assert resumed.checkpoint_json["yield_reason"] == "narrative_gate_needs_review"
+    assert episode["screenplay_status"] == "repairing"
+    assert "禁止发布" in episode["screenplay_error"]

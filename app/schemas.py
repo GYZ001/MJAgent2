@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import re
 
-from typing import TypeVar
+from typing import Literal, TypeVar
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
@@ -224,6 +224,445 @@ class KeyDialogueChain(BaseModel):
     turns: list[KeyDialogueTurn] = Field(default_factory=list)
 
 
+# ---------- Unified narrative-continuity contract ----------
+#
+# These models deliberately describe relations and observable deltas instead of
+# genre/story keyword lists.  The LLM may use ``other``/free semantic fields for
+# concepts that the contract did not anticipate; deterministic validation only
+# checks identity, provenance, ownership and state hand-offs.
+
+
+class NarrativeAnchor(BaseModel):
+    type: str
+    id: str
+
+
+class SourceSpan(BaseModel):
+    chapter_id: str = ""
+    start: int = 0
+    end: int = 0
+
+
+class SourceEvidence(BaseModel):
+    source_evidence_id: str
+    source_span: SourceSpan = Field(default_factory=SourceSpan)
+    verbatim_excerpt: str
+    confidence: float = 1.0
+
+
+class NarrativeProposition(BaseModel):
+    proposition_id: str
+    canonical_statement: str
+    narrative_domain: str  # source_canon | adapted_story
+    entity_ids: list[str] = Field(default_factory=list)
+    direct_source_evidence_ids: list[str] = Field(default_factory=list)
+    domain_truth_status: str = "true"
+
+
+class AdaptationDecision(BaseModel):
+    adaptation_decision_id: str
+    source_proposition_ids: list[str] = Field(default_factory=list)
+    adapted_proposition_ids: list[str] = Field(default_factory=list)
+    relation: str = "preserve"
+    custom_relation: str | None = None
+    creative_reason: str = ""
+    protected_causal_effect_ids: list[str] = Field(default_factory=list)
+    affected_event_ids: list[str] = Field(default_factory=list)
+    uncertainty: str | None = None
+
+
+class StateFactValue(BaseModel):
+    kind: str = "text"
+    data: object = ""
+
+
+class StateFact(BaseModel):
+    fact_id: str
+    proposition_id: str
+    subject_id: str
+    predicate_id: str
+    value: StateFactValue = Field(default_factory=StateFactValue)
+    time_scope: str = ""
+    visibility: str = "unknown"
+    provenance: str = "screenplay"
+    confidence: float = 1.0
+
+
+class NarrativeEvidence(BaseModel):
+    evidence_id: str
+    anchor: NarrativeAnchor
+    observable_claim: str
+    perceivable_by: list[str] = Field(default_factory=list)
+    supports_proposition_ids: list[str] = Field(default_factory=list)
+    planned_salience: float = 0.0
+    planned_duration_s: float | None = None
+    competing_attention_ids: list[str] = Field(default_factory=list)
+
+
+class DramaticQuestion(BaseModel):
+    dramatic_question_id: str
+    question_text: str
+    target_proposition_ids: list[str] = Field(default_factory=list)
+    open_anchor: NarrativeAnchor
+    intended_resolution_scope_id: str = ""
+    desired_state_while_open: str = "unknown"
+    resolution_anchor: NarrativeAnchor | None = None
+    status: str = "open"
+
+
+class AtomicActionPhase(BaseModel):
+    phase_id: str
+    start_condition: str = ""
+    end_condition: str = ""
+    estimated_min_s: float = 0.0
+
+
+class AtomicAction(BaseModel):
+    action_id: str
+    actor_ids: list[str] = Field(default_factory=list)
+    target_ids: list[str] = Field(default_factory=list)
+    semantic_intent: str
+    precondition_fact_ids: list[str] = Field(default_factory=list)
+    effects_add: list[str] = Field(default_factory=list)
+    effects_remove: list[str] = Field(default_factory=list)
+    completion_condition: str
+    decision_requirement: str = "applies"
+    decision_not_applicable_reason: str | None = None
+    temporal_phases: list[AtomicActionPhase] = Field(default_factory=list)
+    splittable_boundaries: list[str] = Field(default_factory=list)
+
+
+class ActionSemanticRelationAudit(BaseModel):
+    """AI semantic comparison for actions that may repeat across different IDs."""
+
+    action_relation_audit_id: str
+    action_ids: list[str] = Field(default_factory=list)
+    semantically_equivalent: bool
+    functional_repeat: bool | None = None
+    added_target_delta_ids: list[str] = Field(default_factory=list)
+    added_character_state_ids: list[str] = Field(default_factory=list)
+    added_evidence_ids: list[str] = Field(default_factory=list)
+    causal_basis_event_ids: list[str] = Field(default_factory=list)
+    decision: str = "needs_review"
+    reason: str = ""
+
+
+class NarrativeEvent(BaseModel):
+    event_id: str
+    proposition_ids: list[str] = Field(default_factory=list)
+    causal_parent_ids: list[str] = Field(default_factory=list)
+    precondition_fact_ids: list[str] = Field(default_factory=list)
+    action_ids: list[str] = Field(default_factory=list)
+    effects_add: list[str] = Field(default_factory=list)
+    effects_remove: list[str] = Field(default_factory=list)
+    character_goal_effects: list[dict] = Field(default_factory=list)
+    downstream_dependency_event_ids: list[str] = Field(default_factory=list)
+    salience: float = 0.0
+    irreversibility: float = 0.0
+    must_keep: bool = True
+    delivery_scope_id: str = "episode"
+    delivery_policy: str = "deliver"
+    primary_delivery_window_id: str | None = None
+
+
+class CharacterDramaticState(BaseModel):
+    character_state_id: str
+    character_id: str
+    anchor: NarrativeAnchor
+    goal_proposition_ids: list[str] = Field(default_factory=list)
+    stakes_proposition_ids: list[str] = Field(default_factory=list)
+    relationship_state: dict = Field(default_factory=dict)
+    emotion: dict = Field(default_factory=dict)
+    pressure: float = 0.0
+    tactic: str = ""
+
+
+class BeliefItem(BaseModel):
+    proposition_id: str
+    stance: str = "unknown"
+    confidence: float = 0.0
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class CharacterBeliefSnapshot(BaseModel):
+    character_belief_id: str
+    character_id: str
+    anchor: NarrativeAnchor
+    perceived_evidence_ids: list[str] = Field(default_factory=list)
+    beliefs: list[BeliefItem] = Field(default_factory=list)
+    misbelief_proposition_ids: list[str] = Field(default_factory=list)
+    decision_proposition_ids: list[str] = Field(default_factory=list)
+    decision_basis_ids: list[str] = Field(default_factory=list)
+    decision_action_ids: list[str] = Field(default_factory=list)
+
+
+class AudienceStateSnapshot(BaseModel):
+    audience_state_id: str
+    audience_prior_id: str
+    anchor: NarrativeAnchor
+    beliefs: list[BeliefItem] = Field(default_factory=list)
+    causal_hypotheses: list[dict | str] = Field(default_factory=list)
+    character_goal_hypotheses: dict = Field(default_factory=dict)
+    spatial_model: dict = Field(default_factory=dict)
+    temporal_model: dict = Field(default_factory=dict)
+    active_question_ids: list[str] = Field(default_factory=list)
+    working_memory: list[dict] = Field(default_factory=list)
+    attention_residue_ids: list[str] = Field(default_factory=list)
+    affective_state: dict = Field(default_factory=dict)
+
+
+class AudiencePriorContract(BaseModel):
+    audience_prior_id: str
+    scope_id: str = "episode"
+    audience_description: str
+    assumed_known_proposition_ids: list[str] = Field(default_factory=list)
+    assumed_unknown_proposition_ids: list[str] = Field(default_factory=list)
+    familiarity_assumptions: list[dict] = Field(default_factory=list)
+    language_and_context_assumptions: list[str] = Field(default_factory=list)
+    attention_memory_assumptions: dict = Field(default_factory=dict)
+    calibration_source: str = "needs_review"
+
+
+class TargetDelta(BaseModel):
+    target_delta_id: str
+    dimension: str
+    proposition_ids: list[str] = Field(default_factory=list)
+    description: str
+    from_state: dict = Field(default_factory=dict)
+    to_state: dict = Field(default_factory=dict)
+    target_confidence: float | None = None
+    required_processing_s: float = 0.0
+    deadline_event_id: str
+    primary_delivery_window_id: str | None = None
+    custom_dimension: str | None = None
+
+
+class AudiencePath(BaseModel):
+    audience_path_id: str
+    audience_prior_id: str
+    audience_state_in_id: str
+    audience_state_out_target_id: str
+    target_deltas: list[TargetDelta] = Field(default_factory=list)
+
+
+class WithheldProposition(BaseModel):
+    proposition_id: str
+    reason: str
+    future_disclosure_anchor: NarrativeAnchor | None = None
+    carried_question_id: str | None = None
+
+
+class ExperienceIntent(BaseModel):
+    experience_intent_id: str
+    scope_id: str
+    anchor_event_ids: list[str] = Field(default_factory=list)
+    director_objective: str
+    attention_target_ids: list[str] = Field(default_factory=list)
+    audience_paths: list[AudiencePath] = Field(default_factory=list)
+    withheld_propositions: list[WithheldProposition] = Field(default_factory=list)
+    forbidden_misconceptions: list[str] = Field(default_factory=list)
+
+
+class AssimilationTask(BaseModel):
+    assimilation_task_id: str
+    experience_intent_id: str
+    audience_path_id: str
+    target_delta_id: str
+    required_prior_proposition_ids: list[str] = Field(default_factory=list)
+    downstream_dependency_event_ids: list[str] = Field(default_factory=list)
+    satisfaction_criteria: str
+    status: str = "open"
+
+
+class ShotContribution(BaseModel):
+    shot_contribution_id: str
+    experience_intent_ids: list[str] = Field(default_factory=list)
+    target_delta_ids: list[str] = Field(default_factory=list)
+    assimilation_task_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    story_delta_fact_ids: list[str] = Field(default_factory=list)
+    character_state_delta_ids: list[str] = Field(default_factory=list)
+    audience_state_delta_ids: list[str] = Field(default_factory=list)
+    affective_delta: dict = Field(default_factory=dict)
+    spatial_temporal_delta: dict = Field(default_factory=dict)
+    dramatic_pressure_delta: float = 0.0
+
+
+class ShotCapacityBudget(BaseModel):
+    """Joint single-shot time budget proposed by AI and relation-checked.
+
+    The dimensions describe viewing work, not story categories.  Deterministic
+    validation derives lower bounds from action phases, spoken/on-screen text,
+    evidence and target deltas, then verifies the joint total against the shot.
+    """
+
+    action_phase_s: float = 0.0
+    spoken_and_text_s: float = 0.0
+    attention_switch_s: float = 0.0
+    inference_processing_s: float = 0.0
+    reaction_registration_s: float = 0.0
+    spatial_reorientation_s: float = 0.0
+    entry_exit_settle_s: float = 0.0
+    other_s: float = 0.0
+    other_reason: str | None = None
+
+
+class ReadabilityWindow(BaseModel):
+    readability_window_id: str
+    event_ids: list[str] = Field(default_factory=list)
+    proposition_ids: list[str] = Field(default_factory=list)
+    target_delta_ids: list[str] = Field(default_factory=list)
+    shot_ids: list[str] = Field(default_factory=list)
+    attention_target_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    scheduled_processing_s: float = 0.0
+    planned_available_s: float = 0.0
+    competing_attention_ids: list[str] = Field(default_factory=list)
+    readability_reason: str = ""
+    status: str = "planned"
+
+
+class SetupPayoffContract(BaseModel):
+    setup_payoff_id: str
+    setup_proposition_ids: list[str] = Field(default_factory=list)
+    setup_event_ids: list[str] = Field(default_factory=list)
+    payoff_event_ids: list[str] = Field(default_factory=list)
+    intended_inference_ids: list[str] = Field(default_factory=list)
+    retention_deadline_event_id: str = ""
+    minimum_retention_confidence: float = 0.0
+    recall_needed: bool | None = None
+    status: str = "open"
+
+
+class AudienceStatePathRef(BaseModel):
+    audience_prior_id: str
+    audience_state_in_id: str
+    audience_state_out_target_id: str
+
+
+class SceneDramaticContract(BaseModel):
+    scene_id: str
+    applicability: str = "applies"
+    not_applicable_reason: str | None = None
+    alternative_dramatic_function: str | None = None
+    scene_question_id: str | None = None
+    point_of_view_character_id: str | None = None
+    audience_state_paths: list[AudienceStatePathRef] = Field(default_factory=list)
+    character_state_in_ids: list[str] = Field(default_factory=list)
+    goal_proposition_ids: list[str] = Field(default_factory=list)
+    obstacle_proposition_ids: list[str] = Field(default_factory=list)
+    stakes_proposition_ids: list[str] = Field(default_factory=list)
+    pressure_curve: list[dict] = Field(default_factory=list)
+    turn_event_ids: list[str] = Field(default_factory=list)
+    value_polarity_in: str = ""
+    value_polarity_out: str = ""
+    relationship_deltas: list[dict] = Field(default_factory=list)
+    character_state_out_ids: list[str] = Field(default_factory=list)
+    scene_button: str = ""
+
+
+class NarrativeArcContract(BaseModel):
+    arc_id: str
+    scope: str = "episode"
+    applicability: str = "applies"
+    not_applicable_reason: str | None = None
+    alternative_dramatic_function: str | None = None
+    core_question_ids: list[str] = Field(default_factory=list)
+    promise_proposition_ids: list[str] = Field(default_factory=list)
+    escalation_event_ids: list[str] = Field(default_factory=list)
+    climax_event_ids: list[str] = Field(default_factory=list)
+    payoff_contract_ids: list[str] = Field(default_factory=list)
+    pressure_curve: list[dict] = Field(default_factory=list)
+    information_density_curve: list[dict] = Field(default_factory=list)
+    processing_beats: list[dict] = Field(default_factory=list)
+    ending_hook_question_ids: list[str] = Field(default_factory=list)
+    resolved_question_ids: list[str] = Field(default_factory=list)
+    carried_question_ids: list[str] = Field(default_factory=list)
+
+
+class IdentityContractEvidence(BaseModel):
+    """Auditable basis for one AI-resolved narrative identity.
+
+    The lists point back into the same narrative plan.  ``rationale`` explains
+    the semantic decision (persistent person, transient visible role,
+    collective, or voice-only presence) without relying on a vocabulary of
+    accepted names.
+    """
+
+    source_evidence_ids: list[str] = Field(default_factory=list)
+    proposition_ids: list[str] = Field(default_factory=list)
+    adaptation_decision_ids: list[str] = Field(default_factory=list)
+    rationale: str = ""
+
+
+class NarrativeIdentityContract(BaseModel):
+    """Typed operational policy for an identity used by this episode.
+
+    ``kind`` intentionally remains an open semantic label selected by the AI.
+    Rendering and asset behaviour are controlled only by the typed policy
+    fields, never by matching a display name against a role-name whitelist.
+    """
+
+    identity_id: str
+    display_name: str
+    kind: str
+    visual_policy: Literal[
+        "canonical", "contextual", "collective", "offscreen_only",
+    ]
+    visual_canonical: str = ""
+    asset_requirement: Literal["required", "optional", "forbidden"]
+    voice_ids: list[str] = Field(default_factory=list)
+    evidence: IdentityContractEvidence = Field(default_factory=IdentityContractEvidence)
+
+    @model_validator(mode="after")
+    def _validate_operational_policy(self) -> "NarrativeIdentityContract":
+        if not self.identity_id.strip():
+            raise ValueError("identity_id 不能为空")
+        if not self.display_name.strip():
+            raise ValueError("display_name 不能为空")
+        if not self.kind.strip():
+            raise ValueError("kind 不能为空")
+        if self.visual_policy == "offscreen_only":
+            if self.asset_requirement != "forbidden":
+                raise ValueError("offscreen_only 身份的 asset_requirement 必须为 forbidden")
+        elif not self.visual_canonical.strip():
+            raise ValueError("可见身份必须提供 visual_canonical")
+        if self.visual_policy == "canonical" and self.asset_requirement != "required":
+            raise ValueError("canonical 身份的 asset_requirement 必须为 required")
+        normalized_voice_ids = [value.strip() for value in self.voice_ids]
+        if any(not value for value in normalized_voice_ids):
+            raise ValueError("voice_ids 不能包含空值")
+        if len(normalized_voice_ids) != len(set(normalized_voice_ids)):
+            raise ValueError("voice_ids 不能重复")
+        return self
+
+
+class NarrativeContinuityPlan(BaseModel):
+    contract_version: str = "narrative-continuity.v1"
+    scope_id: str
+    source_evidence: list[SourceEvidence] = Field(default_factory=list)
+    propositions: list[NarrativeProposition] = Field(default_factory=list)
+    adaptation_decisions: list[AdaptationDecision] = Field(default_factory=list)
+    state_facts: list[StateFact] = Field(default_factory=list)
+    initial_state_fact_ids: list[str] = Field(default_factory=list)
+    evidence: list[NarrativeEvidence] = Field(default_factory=list)
+    dramatic_questions: list[DramaticQuestion] = Field(default_factory=list)
+    events: list[NarrativeEvent] = Field(default_factory=list)
+    atomic_actions: list[AtomicAction] = Field(default_factory=list)
+    action_relation_audits: list[ActionSemanticRelationAudit] = Field(default_factory=list)
+    character_states: list[CharacterDramaticState] = Field(default_factory=list)
+    character_beliefs: list[CharacterBeliefSnapshot] = Field(default_factory=list)
+    audience_priors: list[AudiencePriorContract] = Field(default_factory=list)
+    audience_states: list[AudienceStateSnapshot] = Field(default_factory=list)
+    experience_intents: list[ExperienceIntent] = Field(default_factory=list)
+    assimilation_tasks: list[AssimilationTask] = Field(default_factory=list)
+    readability_windows: list[ReadabilityWindow] = Field(default_factory=list)
+    setup_payoff_contracts: list[SetupPayoffContract] = Field(default_factory=list)
+    scene_contracts: list[SceneDramaticContract] = Field(default_factory=list)
+    arc_contracts: list[NarrativeArcContract] = Field(default_factory=list)
+    identity_contracts: list[NarrativeIdentityContract] = Field(default_factory=list)
+
+
 class EpisodeScreenplay(BaseModel):
     episode_no: int
     # 完整剧本源数据（新格式）
@@ -263,6 +702,10 @@ class EpisodeScreenplay(BaseModel):
     voice_bible: list[VoiceCanonical] = Field(default_factory=list)
     approved_adaptations: list[str] = Field(default_factory=list)
     forbidden_additions: list[str] = Field(default_factory=list)
+    # One authoritative graph shared by screenplay, storyboard and blind review.
+    # Optional only so legacy published artifacts remain readable; every newly
+    # generated artifact is hard-gated by app.narrative.validate_*.
+    narrative_plan: NarrativeContinuityPlan | None = None
     created_at: float | None = None
     updated_at: float | None = None
 
@@ -370,6 +813,7 @@ class RequiredOnScreenText(BaseModel):
 
 class Shot(BaseModel):
     shot_no: int
+    shot_uid: str = ""
     duration_s: int
     shot_size: str
     camera_move: str
@@ -421,6 +865,29 @@ class Shot(BaseModel):
     camera_angle: str = ""
     spatial_anchor: str = ""
     is_final: bool = False
+    # Narrative task.  A reaction/establishing/processing shot may have no
+    # primary action, but it must still own a non-empty evidence contribution.
+    shot_id: str = ""
+    scene_id: str = ""
+    event_ids: list[str] = Field(default_factory=list)
+    primary_action_id: str | None = None
+    supporting_action_ids: list[str] = Field(default_factory=list)
+    action_phase_ids: list[str] = Field(default_factory=list)
+    visible_entity_ids: list[str] = Field(default_factory=list)
+    offscreen_action_actor_ids: list[str] = Field(default_factory=list)
+    offscreen_action_target_ids: list[str] = Field(default_factory=list)
+    capacity_budget: ShotCapacityBudget | None = None
+    shot_contribution: ShotContribution | None = None
+    audience_state_paths: list[AudienceStatePathRef] = Field(default_factory=list)
+    planned_state_in_fact_ids: list[str] = Field(default_factory=list)
+    planned_delta_add_fact_ids: list[str] = Field(default_factory=list)
+    planned_delta_remove_fact_ids: list[str] = Field(default_factory=list)
+    planned_state_out_fact_ids: list[str] = Field(default_factory=list)
+    completed_before_action_ids: list[str] = Field(default_factory=list)
+    completed_before_action_phase_ids: list[str] = Field(default_factory=list)
+    reserved_future_event_ids: list[str] = Field(default_factory=list)
+    readability_window_ids: list[str] = Field(default_factory=list)
+    narrative_boundary_from_previous: "NarrativeBoundaryContract | None" = None
 
     @model_validator(mode="after")
     def _sync_information_ids(self) -> "Shot":
@@ -458,6 +925,27 @@ class StoryboardOutlineShot(BaseModel):
     duration_s: int | None = None
     characters_visible: list[str] = Field(default_factory=list)
     audio_cast: list[str] = Field(default_factory=list)
+    shot_id: str = ""
+    scene_id: str = ""
+    event_ids: list[str] = Field(default_factory=list)
+    primary_action_id: str | None = None
+    supporting_action_ids: list[str] = Field(default_factory=list)
+    action_phase_ids: list[str] = Field(default_factory=list)
+    visible_entity_ids: list[str] = Field(default_factory=list)
+    offscreen_action_actor_ids: list[str] = Field(default_factory=list)
+    offscreen_action_target_ids: list[str] = Field(default_factory=list)
+    capacity_budget: ShotCapacityBudget | None = None
+    shot_contribution: ShotContribution | None = None
+    audience_state_paths: list[AudienceStatePathRef] = Field(default_factory=list)
+    planned_state_in_fact_ids: list[str] = Field(default_factory=list)
+    planned_delta_add_fact_ids: list[str] = Field(default_factory=list)
+    planned_delta_remove_fact_ids: list[str] = Field(default_factory=list)
+    planned_state_out_fact_ids: list[str] = Field(default_factory=list)
+    completed_before_action_ids: list[str] = Field(default_factory=list)
+    completed_before_action_phase_ids: list[str] = Field(default_factory=list)
+    reserved_future_event_ids: list[str] = Field(default_factory=list)
+    readability_window_ids: list[str] = Field(default_factory=list)
+    narrative_boundary_from_previous: "NarrativeBoundaryContract | None" = None
 
     @model_validator(mode="after")
     def _sync_information_ids(self) -> "StoryboardOutlineShot":
@@ -469,6 +957,124 @@ class StoryboardOutline(BaseModel):
 
     episode_no: int
     shots: list[StoryboardOutlineShot] = Field(default_factory=list)
+    readability_windows: list[ReadabilityWindow] = Field(default_factory=list)
+    cognitive_bridge_plans: list["CognitiveBridgePlan"] = Field(default_factory=list)
+
+
+class BoundaryStateTransition(BaseModel):
+    """Auditable reason for a world-state difference across a cut.
+
+    The basis describes a structural relation (timeline, viewpoint, spatial
+    model or an action phase), never a story object/category.  Unknown
+    relations remain representable through ``other`` but require human review
+    before narrative-ready publication.
+    """
+
+    transition_id: str
+    basis_type: str
+    source_fact_id: str | None = None
+    target_fact_id: str | None = None
+    basis_action_phase_id: str | None = None
+    custom_basis: str | None = None
+    reason: str = ""
+
+
+class NarrativeBoundaryContract(BaseModel):
+    boundary_id: str
+    previous_shot_id: str
+    next_shot_id: str
+    narrative_relation: str
+    required_state_invariants: list[str] = Field(default_factory=list)
+    allowed_state_deltas: list[str] = Field(default_factory=list)
+    state_delta_transitions: list[BoundaryStateTransition] = Field(default_factory=list)
+    forbidden_replay_action_ids: list[str] = Field(default_factory=list)
+    handoff_action_phase_id: str | None = None
+    spatial_orientation_contract: dict = Field(default_factory=dict)
+    temporal_orientation_contract: dict = Field(default_factory=dict)
+    audience_state_handoffs: list[dict] = Field(default_factory=list)
+    affective_handoff: dict = Field(default_factory=dict)
+    cut_motivation: str
+
+
+class CognitiveBridgePlan(BaseModel):
+    bridge_plan_id: str
+    assimilation_task_ids: list[str] = Field(default_factory=list)
+    candidate_changes: list[dict] = Field(default_factory=list)
+    expected_audience_delta: dict = Field(default_factory=dict)
+    affected_shot_ids: list[str] = Field(default_factory=list)
+    added_shot_ids: list[str] = Field(default_factory=list)
+    removed_shot_ids: list[str] = Field(default_factory=list)
+    estimated_screen_time_delta: float = 0.0
+    deletion_test_result: dict = Field(default_factory=dict)
+    marginal_gain_result: dict = Field(default_factory=dict)
+    selection_reason: str = ""
+
+
+class BlindAudienceObservation(BaseModel):
+    observation_id: str
+    audience_prior_id: str
+    anchor: NarrativeAnchor
+    spontaneous_recall: dict = Field(default_factory=dict)
+    neutral_followup_observations: list[dict | str] = Field(default_factory=list)
+    noticed_attention_target_ids: list[str] = Field(default_factory=list)
+    spatial_temporal_model: dict = Field(default_factory=dict)
+    felt_affective_state: dict = Field(default_factory=dict)
+    perceived_relationship_deltas: list[dict] = Field(default_factory=list)
+    perceived_stakes: list[str] = Field(default_factory=list)
+    experienced_pressure_curve: list[dict] = Field(default_factory=list)
+    experienced_rhythm: dict = Field(default_factory=dict)
+    next_event_expectations: list[str] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+    # Evidence handles explicitly present in the frozen, unprompted first pass.
+    # Follow-up observations may add to supporting_evidence_ids but can never
+    # retroactively populate this ledger.
+    spontaneous_supporting_evidence_ids: list[str] = Field(default_factory=list)
+    supporting_evidence_ids: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+
+
+class TargetDeltaResult(BaseModel):
+    audience_prior_id: str
+    target_delta_id: str
+    result: str
+    # The comparator must make every conclusion auditable.  Observation IDs
+    # point at frozen first-pass recalls; evidence IDs point at opaque handles
+    # the cold reader actually saw.  They are deliberately absent from the
+    # director-facing target contract and therefore cannot prompt the answer.
+    supporting_observation_ids: list[str] = Field(default_factory=list)
+    supporting_evidence_ids: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
+class NarrativeReviewReport(BaseModel):
+    narrative_review_report_id: str
+    scope_id: str
+    experience_intent_ids: list[str] = Field(default_factory=list)
+    observation_ids: list[str] = Field(default_factory=list)
+    target_delta_results: list[TargetDeltaResult] = Field(default_factory=list)
+    character_goal_readability_result: dict = Field(default_factory=dict)
+    attention_alignment_result: dict = Field(default_factory=dict)
+    spatial_temporal_orientation_result: dict = Field(default_factory=dict)
+    affective_alignment_result: dict = Field(default_factory=dict)
+    relationship_change_result: dict = Field(default_factory=dict)
+    stakes_readability_result: dict = Field(default_factory=dict)
+    pressure_rhythm_result: dict = Field(default_factory=dict)
+    action_functional_repetition_result: dict = Field(default_factory=dict)
+    next_expectation_result: dict = Field(default_factory=dict)
+    intentional_ambiguity_result: dict = Field(default_factory=dict)
+    low_percentile_result: dict = Field(default_factory=dict)
+    inference_variance: float = 0.0
+    evidence_gap_ids: list[str] = Field(default_factory=list)
+    unintended_inference_ids: list[str] = Field(default_factory=list)
+    decision: str = "needs_human_review"
+    reason: str = ""
+
+
+# Resolve the forward reference used by Shot/StoryboardOutlineShot without
+# moving the existing public classes (many callers import them by location).
+Shot.model_rebuild()
+StoryboardOutlineShot.model_rebuild()
+StoryboardOutline.model_rebuild()
 
 
 def _escape_unescaped_inner_quotes(text: str) -> str:

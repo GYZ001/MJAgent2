@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
@@ -305,6 +306,115 @@ def _screenplay_ready(ep) -> bool:
         return False
     if not (script.full_script_text or "").strip():
         return False
+    # Any modern published chain is resolved as one immutable authority even
+    # when the mutable projection claims ``narrative_plan=null``.  This closes
+    # the downgrade path where stripping the plan could otherwise enter the
+    # historical compatibility branch.  Truly historical plan-null rows have
+    # none of these publication fields and keep the legacy behavior below.
+    # A published-artifact pointer predates the narrative authority chain and
+    # therefore cannot, by itself, distinguish a legacy episode.  Durable
+    # authority evidence does: a production revision/certificate or narrative
+    # review is only created by the modern release path.  If any such evidence
+    # survives while the mutable projection loses its plan, resolve fail-closed
+    # instead of letting that mutation downgrade into legacy compatibility.
+    has_modern_authority = any(
+        data.get(field)
+        for field in (
+            "screenplay_completion_certificate_id",
+            "screenplay_production_revision_id",
+            "narrative_review_artifact_id",
+        )
+    )
+    published_script = None
+    published_artifact = None
+    if has_modern_authority:
+        current_artifact_id = str(data.get("screenplay_artifact_id") or "")
+        published_artifact_id = str(
+            data.get("published_screenplay_artifact_id") or ""
+        )
+        if not current_artifact_id or current_artifact_id != published_artifact_id:
+            return False
+        published_artifact = evidence_repository.get_artifact(published_artifact_id)
+        if (
+            published_artifact is None
+            or published_artifact.get("type") != "screenplay_document"
+            or published_artifact.get("scope_type") != "episode"
+            or published_artifact.get("scope_id") != str(data.get("id") or "")
+            or published_artifact.get("status") != "approved"
+        ):
+            return False
+        try:
+            from app.production.patch import load_screenplay_from_artifact
+
+            published_script = load_screenplay_from_artifact(published_artifact_id)
+            current_hash = evidence_repository.content_hash(
+                published_artifact.get("content"),
+                published_artifact.get("file_path"),
+            )
+        except Exception:  # noqa: BLE001 - readiness is fail closed
+            return False
+        if (
+            current_hash != str(published_artifact.get("content_hash") or "")
+            or published_script.model_dump(mode="json")
+            != script.model_dump(mode="json")
+        ):
+            return False
+
+    if (
+        script.narrative_plan is not None
+        or (
+            published_script is not None
+            and published_script.narrative_plan is not None
+        )
+    ):
+        try:
+            from app.production.screenplay_authority import (
+                resolve_current_screenplay_authority,
+            )
+
+            resolved = resolve_current_screenplay_authority(
+                str(data.get("id") or ""),
+                require_narrative=True,
+            )
+            return resolved.screenplay.model_dump(mode="json") == script.model_dump(mode="json")
+        except Exception:  # noqa: BLE001 - readiness is a fail-closed predicate
+            return False
+    if has_modern_authority:
+        try:
+            from app.production.certificate import verify_completion_certificate
+
+            cert = verify_completion_certificate(
+                str(data.get("screenplay_completion_certificate_id") or ""),
+                expected_kind="screenplay",
+                expected_scope_id=str(data.get("id") or ""),
+                expected_artifact_id=str(data.get("screenplay_artifact_id") or ""),
+                expected_artifact_hash=str(
+                    (published_artifact or {}).get("content_hash") or ""
+                ),
+                expected_production_revision_id=str(
+                    data.get("screenplay_production_revision_id") or ""
+                ),
+                allow_consumed=True,
+            )
+            if cert.consumed_at is None:
+                return False
+            revision = get_conn().execute(
+                "SELECT kind,episode_id,status,working_artifact_id,published_artifact_id "
+                "FROM production_revisions WHERE id=?",
+                (str(data.get("screenplay_production_revision_id") or ""),),
+            ).fetchone()
+            return bool(
+                revision
+                and revision["kind"] == "screenplay"
+                and revision["episode_id"] == data.get("id")
+                and revision["status"] == "published"
+                and revision["working_artifact_id"]
+                == data.get("screenplay_artifact_id")
+                and revision["published_artifact_id"]
+                == data.get("screenplay_artifact_id")
+            )
+        except Exception:  # noqa: BLE001 - compatibility still fails closed on drift
+            return False
     # 新发布链必须持有与当前 Artifact 精确绑定且已消费的完成凭证。
     # 无 revision 的历史发布版保留兼容读取，迁移后自然进入新合同。
     revision_id = data.get("screenplay_production_revision_id")

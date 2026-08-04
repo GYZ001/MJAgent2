@@ -487,6 +487,102 @@ def test_repair_plan_does_not_delete_or_mutate_official_shots(repair_db) -> None
     assert planned.repair_candidate_shots == []
 
 
+def test_cognitive_bridge_is_isolated_until_candidate_commit(
+    repair_db, monkeypatch,
+) -> None:
+    conn, screenplay = repair_db
+    official_outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=number,
+                scene_setting="日，广场",
+                beat=f"节拍{number}",
+            )
+            for number in range(1, 4)
+        ],
+    )
+    official_json = official_outline.model_dump_json()
+    conn.execute(
+        "UPDATE episodes SET storyboard_outline_json=? WHERE id='e1'",
+        (official_json,),
+    )
+    conn.commit()
+    plan = route_issues(
+        ["shot_no=2 的观众理解跳跃，需局部补足证据交付"],
+        validated_prefix_end=3,
+        semantic_diagnosis={
+            "scope": "current_shot",
+            "selected_strategy": "repair_current",
+            "reason": "仅修复当前镜的证据交付",
+            "semantic_gap": "一个观众先验未获得必要证据",
+            "assimilation_task_ids": ["AT-1"],
+            "affected_relation_ids": ["XI-1"],
+            "candidate_assessments": [{
+                "strategy": "repair_current",
+                "passes_deletion_test": True,
+                "passes_marginal_gain_test": True,
+                "expected_narrative_gain": 0.7,
+            }],
+            "selection_reason": "局部贡献足以弥补缺口",
+        },
+    )
+
+    checkpoint = _apply_repair(
+        SupervisorCheckpoint(
+            episode_id="e1",
+            planner_version=STORYBOARD_REPAIR_PLANNER_VERSION,
+            validated_prefix_end=3,
+        ),
+        plan,
+        conn,
+        "e1",
+        list(_current_board(conn).shots),
+        official_outline,
+    )
+
+    # Planning is candidate-only: neither the DB projection nor the caller's
+    # official outline object may observe the bridge before full-gate commit.
+    assert conn.execute(
+        "SELECT storyboard_outline_json FROM episodes WHERE id='e1'"
+    ).fetchone()[0] == official_json
+    assert official_outline.cognitive_bridge_plans == []
+    candidate_outline = StoryboardOutline.model_validate(
+        checkpoint.last_repair["candidate_outline"]
+    )
+    assert [item.assimilation_task_ids for item in candidate_outline.cognitive_bridge_plans] == [
+        ["AT-1"]
+    ]
+
+    current = _current_board(conn)
+    replacement = _shot(2, action="少年指向石碑结果，让证据在画面中完整停留。")
+    checkpoint.repair_candidate_shots = [replacement.model_dump(mode="json")]
+    candidate_board = _merge_repair_candidate(current, checkpoint)
+    monkeypatch.setattr(
+        "app.worker.clear_shot_artifacts", lambda *_args, **_kwargs: None,
+    )
+
+    _commit_repair_candidate(
+        conn,
+        checkpoint,
+        episode_id="e1",
+        screenplay=screenplay,
+        current_board=current,
+        candidate_board=candidate_board,
+        expected_screenplay_artifact_id="sp1",
+        run_id=None,
+    )
+
+    committed_outline = StoryboardOutline.model_validate_json(
+        conn.execute(
+            "SELECT storyboard_outline_json FROM episodes WHERE id='e1'"
+        ).fetchone()[0]
+    )
+    assert [item.assimilation_task_ids for item in committed_outline.cognitive_bridge_plans] == [
+        ["AT-1"]
+    ]
+
+
 def test_spine_missing_insert_targets_earliest_declared_beat(repair_db) -> None:
     conn, _screenplay = repair_db
     outline = StoryboardOutline(
@@ -517,6 +613,11 @@ def test_spine_missing_insert_targets_earliest_declared_beat(repair_db) -> None:
         ["主线节拍主体已入画但未完成对应动作/对白交付：S01/少年:在屋顶点燃红色信号"],
         validated_prefix_end=3,
         next_shot_no=4,
+        semantic_diagnosis={
+            "scope": "structure",
+            "selected_strategy": "insert_shot",
+            "reason": "该测试验证已判定需要插镜后的最早节拍定位",
+        },
     )
 
     planned = _apply_repair(
@@ -577,7 +678,11 @@ def test_spine_repair_uses_bound_shot_when_another_issue_has_earlier_frontier(
     plan = route_issues([
         "第 1 镜缺少必填字段：scene_name",
         "主线节拍主体已入画但未完成对应动作/对白交付：S03/少年:举起信物",
-    ], validated_prefix_end=3)
+    ], validated_prefix_end=3, semantic_diagnosis={
+        "scope": "structure",
+        "selected_strategy": "insert_shot",
+        "reason": "该测试验证插镜目标绑定不被其他更早问题覆盖",
+    })
 
     planned = _apply_repair(
         SupervisorCheckpoint(
@@ -1181,7 +1286,15 @@ def test_repair_plan_uses_deterministic_dialogue_candidate_without_provider(repa
         "shot_no=2 的对白同时包含剧情道具操作，shot_size 不得为特写；"
         "请至少使用近景并完整保留双手、道具和接触关系"
     )
-    plan = route_issues([issue], validated_prefix_end=3)
+    plan = route_issues(
+        [issue],
+        validated_prefix_end=3,
+        semantic_diagnosis={
+            "scope": "current_shot",
+            "selected_strategy": "repair_current",
+            "reason": "景别与双手道具构图可在当前镜确定性修正",
+        },
+    )
     checkpoint = SupervisorCheckpoint(
         episode_id="e1",
         planner_version=STORYBOARD_REPAIR_PLANNER_VERSION,

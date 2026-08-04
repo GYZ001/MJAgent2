@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from app.completion_grant import (
     DEFAULT_VIDEO_BUDGET_CAP_CNY,
     VideoCompletionGrant,
+    bind_video_grant_generation_plan,
     consume_grant,
     get_video_grant,
     validate_video_grant,
@@ -30,6 +31,7 @@ from app.evidence.media import (
 )
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
 from app.media_pipeline.stages import ACTIVE_JOB_STATUSES
+from app.schemas import Shot, Storyboard, extract_json
 from app.video_control import consume_control
 from app.video_issues import (
     is_fatal,
@@ -202,6 +204,10 @@ class VideoSupervisorCheckpoint(BaseModel):
     control_plane_recoveries: int = 0
     grant_id: str | None = None
     storyboard_artifact_id: str | None = None
+    episode_video_plan_id: str | None = None
+    episode_video_plan_revision: int | None = None
+    video_plan_release_hash: str | None = None
+    capability_snapshot_id: str | None = None
     budget: dict[str, float] = Field(default_factory=dict)
     coverage: dict[str, Any] = Field(default_factory=dict)
     shot_state: dict[str, dict[str, Any]] = Field(default_factory=dict)
@@ -210,6 +216,196 @@ class VideoSupervisorCheckpoint(BaseModel):
     idle_ticks: int = 0
     tick_interval_s: float = SUPERVISOR_TICK_INTERVAL_S
     first_pass_done: bool = False
+
+
+class StoryboardRepairAffectedAuthority(BaseModel):
+    """Narrative graph identities whose ownership/readability may be affected."""
+
+    action_ids: list[str] = Field(default_factory=list)
+    event_ids: list[str] = Field(default_factory=list)
+    action_phase_ids: list[str] = Field(default_factory=list)
+    experience_intent_ids: list[str] = Field(default_factory=list)
+
+
+class StoryboardRepairProposal(BaseModel):
+    """Typed semantic proposal; it is evidence, never an official mutation."""
+
+    proposal_id: str = Field(min_length=1)
+    base_shot_id: str = Field(min_length=1)
+    operation: Literal["replace", "split"]
+    reason: str = Field(min_length=1)
+    expected_total_duration_s: int = Field(gt=0)
+    affected_authority: StoryboardRepairAffectedAuthority = Field(
+        default_factory=StoryboardRepairAffectedAuthority
+    )
+    candidate_shots: list[Shot] = Field(min_length=1, max_length=2)
+
+
+def _verify_supervisor_paid_authority(
+    cp: VideoSupervisorCheckpoint,
+    *,
+    stage: str,
+) -> VideoCompletionGrant | None:
+    """One fail-closed verifier shared by every Supervisor paid boundary."""
+    del stage  # retained in the signature for boundary-specific audit callers
+    conn = get_conn()
+    episode = conn.execute(
+        "SELECT * FROM episodes WHERE id=?",
+        (cp.episode_id,),
+    ).fetchone()
+    if episode is None:
+        raise GrantValidationError("GRANT_SCOPE_MISSING", "视频补齐分集已不存在")
+    current_storyboard_id = str(episode["storyboard_artifact_id"] or "")
+    if not cp.grant_id:
+        # Explicit compatibility boundary for historical plan-null episodes.
+        # Any durable screenplay authority makes an unauthorised paid run a
+        # hard failure even if the mutable projection was stripped.
+        from app.production.screenplay_authority import (
+            episode_requires_immutable_screenplay_authority,
+            resolve_downstream_screenplay,
+        )
+
+        immutable_required = episode_requires_immutable_screenplay_authority(
+            episode,
+            conn=conn,
+        )
+        try:
+            context = resolve_downstream_screenplay(cp.episode_id, conn=conn)
+        except ValueError as exc:
+            if immutable_required:
+                raise GrantValidationError(
+                    "RELEASE_QUALIFICATION_INVALID",
+                    f"当前剧本发布权威无法解析：{exc}",
+                ) from exc
+            context = None
+        if immutable_required or (
+            context is not None and context.immutable_authority_required
+        ):
+            raise GrantValidationError(
+                "VIDEO_COMPLETION_GRANT_REQUIRED",
+                "带耐久发布权威的分集在付费阶段前必须有补齐授权",
+            )
+        return None
+    grant = validate_video_grant(
+        cp.grant_id,
+        episode_id=cp.episode_id,
+        storyboard_artifact_id=current_storyboard_id,
+    )
+    plan_binding = dict(grant.release_qualification.get("generation_plan") or {})
+    if plan_binding.get("applicable"):
+        expected = {
+            "episode_video_plan_id": grant.episode_video_plan_id,
+            "episode_video_plan_revision": grant.episode_video_plan_revision,
+            "video_plan_release_hash": grant.video_plan_release_hash,
+            "capability_snapshot_id": grant.capability_snapshot_id,
+        }
+        actual = {
+            "episode_video_plan_id": cp.episode_video_plan_id,
+            "episode_video_plan_revision": cp.episode_video_plan_revision,
+            "video_plan_release_hash": cp.video_plan_release_hash,
+            "capability_snapshot_id": cp.capability_snapshot_id,
+        }
+        if actual != expected:
+            raise GrantValidationError(
+                "CHECKPOINT_PLAN_BINDING_CHANGED",
+                "Supervisor checkpoint 与授权的当前视频计划不一致",
+            )
+    return grant
+
+
+async def _ensure_supervisor_video_plan(
+    cp: VideoSupervisorCheckpoint,
+) -> VideoCompletionGrant | None:
+    """Generate/validate and bind the plan before any paid asset or video call."""
+    checkpoint_binding = (
+        cp.episode_video_plan_id,
+        cp.episode_video_plan_revision,
+        cp.video_plan_release_hash,
+        cp.capability_snapshot_id,
+    )
+    if cp.grant_id and not any(value is not None for value in checkpoint_binding):
+        # New and pre-migration checkpoints acquire their binding exactly once
+        # from the content-addressed grant before paid work begins.
+        grant = validate_video_grant(
+            cp.grant_id,
+            episode_id=cp.episode_id,
+            storyboard_artifact_id=cp.storyboard_artifact_id,
+        )
+    else:
+        grant = _verify_supervisor_paid_authority(cp, stage="video_plan_preflight")
+    if grant is None:
+        return None
+    from app.video_plan import (
+        VideoPlanValidationError,
+        generate_episode_plan,
+        load_latest_plan,
+        verify_episode_plan_is_current,
+    )
+
+    conn = get_conn()
+    plan = load_latest_plan(cp.episode_id, conn=conn)
+    if (
+        plan is None
+        or plan.status != "valid"
+        or not verify_episode_plan_is_current(plan, conn=conn, mark_stale=False)
+    ):
+        # Planning may itself call an external model, so recheck the release
+        # immediately before it.  A pending plan slot is the only permitted
+        # mutation of the grant after this point.
+        _verify_supervisor_paid_authority(cp, stage="video_plan_generation")
+        try:
+            plan = await generate_episode_plan(
+                cp.episode_id,
+                force=plan is not None,
+                conn=conn,
+            )
+        except (ValueError, VideoPlanValidationError) as exc:
+            raise GrantValidationError("VIDEO_PLAN_INVALID", str(exc)) from exc
+    if (
+        plan.status != "valid"
+        or not verify_episode_plan_is_current(plan, conn=conn, mark_stale=False)
+    ):
+        raise GrantValidationError(
+            "VIDEO_PLAN_INVALID",
+            "Supervisor 启动前未取得当前有效的整集视频计划",
+        )
+    if not grant.episode_video_plan_id:
+        grant = bind_video_grant_generation_plan(
+            grant.grant_id,
+            episode_id=cp.episode_id,
+            storyboard_artifact_id=cp.storyboard_artifact_id,
+        )
+    if (
+        grant.episode_video_plan_id != plan.episode_video_plan_id
+        or grant.episode_video_plan_revision != int(plan.plan_revision)
+        or grant.video_plan_release_hash != plan.release_qualification_hash
+        or grant.capability_snapshot_id != plan.capability_snapshot_id
+    ):
+        raise GrantValidationError(
+            "VIDEO_PLAN_BINDING_CHANGED",
+            "当前有效视频计划与用户授权的计划不一致",
+        )
+    checkpoint_binding = (
+        cp.episode_video_plan_id,
+        cp.episode_video_plan_revision,
+        cp.video_plan_release_hash,
+        cp.capability_snapshot_id,
+    )
+    if any(value is not None for value in checkpoint_binding) and checkpoint_binding != (
+        grant.episode_video_plan_id,
+        grant.episode_video_plan_revision,
+        grant.video_plan_release_hash,
+        grant.capability_snapshot_id,
+    ):
+        raise GrantValidationError(
+            "CHECKPOINT_PLAN_BINDING_CHANGED",
+            "Supervisor checkpoint 已绑定另一个视频计划 revision",
+        )
+    cp.episode_video_plan_id = grant.episode_video_plan_id
+    cp.episode_video_plan_revision = grant.episode_video_plan_revision
+    cp.video_plan_release_hash = grant.video_plan_release_hash
+    cp.capability_snapshot_id = grant.capability_snapshot_id
+    return _verify_supervisor_paid_authority(cp, stage="video_plan_bound")
 
 
 def load_latest_checkpoint(episode_id: str) -> VideoSupervisorCheckpoint | None:
@@ -274,6 +470,12 @@ def save_checkpoint(cp: VideoSupervisorCheckpoint, *, run_id: str | None = None)
             "last_plan": cp.last_plan,
             "outcome": cp.outcome,
             "dispatch_fenced_at": cp.dispatch_fenced_at,
+            "grant_id": cp.grant_id,
+            "storyboard_artifact_id": cp.storyboard_artifact_id,
+            "episode_video_plan_id": cp.episode_video_plan_id,
+            "episode_video_plan_revision": cp.episode_video_plan_revision,
+            "video_plan_release_hash": cp.video_plan_release_hash,
+            "capability_snapshot_id": cp.capability_snapshot_id,
         }.items())
         if (
             phase_equivalent
@@ -986,6 +1188,7 @@ def _dispatch(
     *,
     episode_id: str,
     run_id: str | None,
+    cp: VideoSupervisorCheckpoint | None = None,
     plan: VideoRepairPlan | None = None,
     first: bool = False,
 ) -> bool:
@@ -1030,6 +1233,15 @@ def _dispatch(
                     payload={"shot_no": entry.shot_no, "phase": latest.phase if latest else None},
                 )
             return False
+
+    authority_checkpoint = cp or (load_latest_checkpoint(episode_id) if run_id else None)
+    if authority_checkpoint is not None:
+        # Last reversible boundary before worker.enqueue_shot can create paid
+        # provider work.  Do not turn authority drift into a generic QA issue.
+        _verify_supervisor_paid_authority(
+            authority_checkpoint,
+            stage="video_provider_enqueue",
+        )
 
     kwargs: dict[str, Any] = {}
     degrade = bool(plan and plan.degrade_chain)
@@ -1089,12 +1301,19 @@ def _dispatch(
                 conn.commit()
             except Exception:  # noqa: BLE001
                 conn.rollback()
+        if authority_checkpoint is not None:
+            _verify_supervisor_paid_authority(
+                authority_checkpoint,
+                stage="video_provider_enqueue_commit",
+            )
         result = worker.enqueue_shot(entry.shot_id, **{
             k: v for k, v in kwargs.items() if k != "supervisor_meta"
         })
         # 把 supervisor meta 写入新建 version
         if result.get("version_id") and kwargs.get("supervisor_meta"):
             _patch_version_supervisor_meta(result["version_id"], kwargs["supervisor_meta"])
+    except GrantValidationError:
+        raise
     except (CompileError, ValueError) as exc:
         issues = issues_from_enqueue_error(exc, shot_id=entry.shot_id, shot_no=entry.shot_no)
         persist_shot_issue(
@@ -1250,7 +1469,288 @@ def _adopt_fallback(entry: ShotCoverageEntry, *, episode_id: str, run_id: str | 
     return True
 
 
-def _amend_storyboard(
+def _repair_authority_ids(shots: list[Shot]) -> StoryboardRepairAffectedAuthority:
+    action_ids: set[str] = set()
+    event_ids: set[str] = set()
+    phase_ids: set[str] = set()
+    experience_ids: set[str] = set()
+    for shot in shots:
+        action_ids.update(
+            value
+            for value in [shot.primary_action_id, *(shot.supporting_action_ids or [])]
+            if value
+        )
+        event_ids.update(value for value in (shot.event_ids or []) if value)
+        phase_ids.update(value for value in (shot.action_phase_ids or []) if value)
+        if shot.shot_contribution:
+            experience_ids.update(
+                value
+                for value in shot.shot_contribution.experience_intent_ids
+                if value
+            )
+    return StoryboardRepairAffectedAuthority(
+        action_ids=sorted(action_ids),
+        event_ids=sorted(event_ids),
+        action_phase_ids=sorted(phase_ids),
+        experience_intent_ids=sorted(experience_ids),
+    )
+
+
+def _candidate_storyboard_from_repair(
+    board: Storyboard,
+    *,
+    shot_index: int,
+    proposal: StoryboardRepairProposal,
+) -> Storyboard:
+    shots = [shot.model_copy(deep=True) for shot in board.shots]
+    replacements = [shot.model_copy(deep=True) for shot in proposal.candidate_shots]
+    shots[shot_index : shot_index + 1] = replacements
+    # shot_no is a display/order projection. Structural insertion shifts later
+    # numbers but never edits authored state, action or audience contracts.
+    for index, shot in enumerate(shots, start=1):
+        shot.shot_no = index
+    return Storyboard(episode_no=board.episode_no, shots=shots)
+
+
+def _validate_storyboard_repair_proposal(
+    proposal: StoryboardRepairProposal,
+    *,
+    board: Storyboard,
+    shot_index: int,
+    database_shot_id: str,
+    screenplay,
+    bible,
+    target_duration_s: int,
+    episode_id: str,
+) -> tuple[Storyboard | None, list[str]]:
+    errors: list[str] = []
+    original = board.shots[shot_index]
+    original_authority_id = (
+        str(original.shot_id or "").strip() or database_shot_id
+    )
+    if proposal.base_shot_id != database_shot_id:
+        errors.append("base_shot_id 必须精确绑定当前数据库 Shot")
+    expected_count = 1 if proposal.operation == "replace" else 2
+    if len(proposal.candidate_shots) != expected_count:
+        errors.append(f"{proposal.operation} 操作必须输出 {expected_count} 个完整 Shot")
+    candidate_ids = [str(shot.shot_id or "").strip() for shot in proposal.candidate_shots]
+    if candidate_ids and candidate_ids[0] != original_authority_id:
+        errors.append("候选首镜必须保留被修复 Shot 的权威 ID")
+    if any(not value for value in candidate_ids) or len(set(candidate_ids)) != len(candidate_ids):
+        errors.append("候选 Shot 必须具有非空且不重复的稳定 ID")
+    first_no = int(original.shot_no)
+    if [shot.shot_no for shot in proposal.candidate_shots] != list(
+        range(first_no, first_no + expected_count)
+    ):
+        errors.append("候选 Shot 的 shot_no 必须从被修复镜头开始连续排列")
+    proposed_duration = sum(int(shot.duration_s or 0) for shot in proposal.candidate_shots)
+    if proposed_duration != proposal.expected_total_duration_s:
+        errors.append("预计时长必须等于所有候选 Shot 的时长之和")
+
+    expected_affected = _repair_authority_ids([original, *proposal.candidate_shots])
+    for field in (
+        "action_ids",
+        "event_ids",
+        "action_phase_ids",
+        "experience_intent_ids",
+    ):
+        proposed = list(getattr(proposal.affected_authority, field))
+        expected = list(getattr(expected_affected, field))
+        if len(proposed) != len(set(proposed)) or set(proposed) != set(expected):
+            errors.append(
+                "affected_authority 必须完整列出原镜头与候选镜头触及的 "
+                f"{field}"
+            )
+
+    narrative_plan = screenplay.narrative_plan if screenplay is not None else None
+    if narrative_plan is not None:
+        known_actions = {item.action_id for item in narrative_plan.atomic_actions}
+        known_events = {item.event_id for item in narrative_plan.events}
+        known_phases = {
+            phase.phase_id
+            for action in narrative_plan.atomic_actions
+            for phase in action.temporal_phases
+        }
+        known_experiences = {
+            item.experience_intent_id for item in narrative_plan.experience_intents
+        }
+        for values, known, label in (
+            (proposal.affected_authority.action_ids, known_actions, "action"),
+            (proposal.affected_authority.event_ids, known_events, "event"),
+            (proposal.affected_authority.action_phase_ids, known_phases, "phase"),
+            (
+                proposal.affected_authority.experience_intent_ids,
+                known_experiences,
+                "experience",
+            ),
+        ):
+            missing = sorted(set(values) - known)
+            if missing:
+                errors.append(f"affected_authority 含不存在的 {label} IDs: {missing}")
+
+    candidate_board: Storyboard | None = None
+    if not errors:
+        candidate_board = _candidate_storyboard_from_repair(
+            board,
+            shot_index=shot_index,
+            proposal=proposal,
+        )
+        from app.validators import (
+            validate_storyboard,
+            validate_storyboard_continuity_contract,
+            validate_storyboard_preserves_key_content,
+            validate_storyboard_soundtrack,
+        )
+
+        errors.extend(validate_storyboard(
+            candidate_board,
+            bible,
+            target_duration_s,
+            narrative_authority=narrative_plan is not None,
+            narrative_plan=narrative_plan,
+            screenplay=screenplay,
+        ))
+        errors.extend(validate_storyboard_continuity_contract(
+            candidate_board,
+            screenplay,
+        ))
+        if screenplay is not None:
+            errors.extend(validate_storyboard_soundtrack(
+                candidate_board,
+                screenplay,
+                target_duration_s,
+            ))
+            errors.extend(validate_storyboard_preserves_key_content(
+                candidate_board,
+                screenplay,
+            ))
+        if narrative_plan is not None:
+            from app.narrative import validate_storyboard_narrative
+
+            errors.extend(validate_storyboard_narrative(
+                candidate_board,
+                screenplay,
+                complete=True,
+                expected_scope_id=episode_id,
+            ))
+    return candidate_board, list(dict.fromkeys(errors))
+
+
+async def _semantic_storyboard_repair_proposal(
+    *,
+    board: Storyboard,
+    shot_index: int,
+    database_shot_id: str,
+    screenplay,
+    bible,
+    target_duration_s: int,
+    episode_id: str,
+    repair_plan: VideoRepairPlan | None,
+    observed_issue_codes: list[str],
+    authority_checkpoint: VideoSupervisorCheckpoint | None = None,
+) -> tuple[StoryboardRepairProposal, Storyboard]:
+    from app.harness import model_gateway
+
+    current = board.shots[shot_index]
+    prompt = {
+        "task": (
+            "As a continuity director, infer the semantic cause of this failed shot and "
+            "propose either one complete replacement Shot or a two-Shot split. "
+            "Do not edit any unrelated shot and do not select a repair from issue wording."
+        ),
+        "episode_id": episode_id,
+        "database_shot_id": database_shot_id,
+        "repair_evidence": {
+            "structured_issue_codes": observed_issue_codes,
+            "router_reason": repair_plan.reason if repair_plan else None,
+            "router_issue_evidence": (
+                repair_plan.model_dump(mode="json") if repair_plan else None
+            ),
+        },
+        "current_shot_index": shot_index,
+        "current_shot": current.model_dump(mode="json"),
+        "previous_shot": (
+            board.shots[shot_index - 1].model_dump(mode="json")
+            if shot_index > 0 else None
+        ),
+        "next_shot": (
+            board.shots[shot_index + 1].model_dump(mode="json")
+            if shot_index + 1 < len(board.shots) else None
+        ),
+        "complete_storyboard": board.model_dump(mode="json"),
+        "screenplay_authority": (
+            screenplay.model_dump(mode="json") if screenplay is not None else None
+        ),
+        "bible": bible.model_dump(mode="json"),
+        "target_duration_s": target_duration_s,
+        "output_schema": StoryboardRepairProposal.model_json_schema(),
+        "constraints": [
+            "candidate_shots are complete Shot objects, not patches",
+            "replace returns exactly one candidate; split returns exactly two",
+            "the first candidate preserves the current authority shot_id",
+            "affected_authority is derived from semantic graph relations",
+            "preserve causal topology, action ownership, state hand-offs and audience processing",
+        ],
+    }
+    prior = ""
+    errors: list[str] = []
+    for attempt in range(1, 3):
+        if authority_checkpoint is not None:
+            _verify_supervisor_paid_authority(
+                authority_checkpoint,
+                stage="semantic_storyboard_repair_model",
+            )
+        request = json.dumps(prompt, ensure_ascii=False)
+        if errors:
+            request += (
+                "\nThe previous proposal failed deterministic validation. Return a full corrected JSON proposal.\n- "
+                + "\n- ".join(errors[:20])
+                + "\nPrevious proposal:\n"
+                + prior[:16000]
+            )
+        prior = await model_gateway.chat(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a senior film director repairing a storyboard from semantic "
+                        "intent, narrative relations and audience comprehension. Output JSON only."
+                    ),
+                },
+                {"role": "user", "content": request},
+            ],
+            temperature=0.2,
+            max_tokens=16384,
+            call_meta={
+                "stage": "video_supervisor_storyboard_repair",
+                "stage_key": "semantic_storyboard_repair_proposal",
+                "call_role": "continuity_director",
+                "episode_id": episode_id,
+                "repair_round": attempt - 1,
+                "contract_version": "storyboard-semantic-repair-proposal.v1",
+            },
+        )
+        try:
+            proposal = StoryboardRepairProposal.model_validate(extract_json(prior))
+        except Exception as exc:  # noqa: BLE001 - untrusted model boundary
+            errors = [f"JSON/Schema invalid: {exc}"]
+            continue
+        candidate, errors = _validate_storyboard_repair_proposal(
+            proposal,
+            board=board,
+            shot_index=shot_index,
+            database_shot_id=database_shot_id,
+            screenplay=screenplay,
+            bible=bible,
+            target_duration_s=target_duration_s,
+            episode_id=episode_id,
+        )
+        if not errors and candidate is not None:
+            return proposal, candidate
+    raise ValueError("; ".join(errors[:20]) or "semantic repair model returned no proposal")
+
+
+async def _amend_storyboard(
     entry: ShotCoverageEntry,
     *,
     grant: VideoCompletionGrant,
@@ -1265,68 +1765,93 @@ def _amend_storyboard(
     """
     if not grant.allow_storyboard_edit:
         return False
-    from app.validators import normalize_action_desc
-
     conn = get_conn()
     row = conn.execute("SELECT * FROM shots WHERE id=?", (entry.shot_id,)).fetchone()
     if not row:
         return False
-    episode_id = row["episode_id"]
-    codes = set((plan.issue_codes if plan else entry.last_issue_codes) or [])
-    patch: dict[str, Any] = {}
-    if "VIDEO_DURATION_CONTRACT" in codes or not codes:
-        cur = int(row["duration_s"] or 5)
-        new_dur = 5 if cur > 7 else 8
-        new_dur = max(5, min(10, new_dur))
-        if new_dur == cur:
-            new_dur = 6 if cur != 6 else 7
-        if new_dur != cur:
-            patch["duration_s"] = new_dur
+    episode_id = str(row["episode_id"])
+    try:
+        authority_checkpoint = VideoSupervisorCheckpoint(
+            episode_id=episode_id,
+            grant_id=grant.grant_id,
+            storyboard_artifact_id=grant.storyboard_artifact_id,
+            episode_video_plan_id=grant.episode_video_plan_id,
+            episode_video_plan_revision=grant.episode_video_plan_revision,
+            video_plan_release_hash=grant.video_plan_release_hash,
+            capability_snapshot_id=grant.capability_snapshot_id,
+        )
+        _verify_supervisor_paid_authority(
+            authority_checkpoint,
+            stage="semantic_storyboard_repair",
+        )
+        episode = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+        project = conn.execute(
+            "SELECT bible_json FROM projects WHERE id=?", (episode["project_id"],)
+        ).fetchone()
+        if not project or not str(project["bible_json"] or "").strip():
+            raise ValueError("当前项目缺少可验证的 Bible，不能生成分镜修复候选")
+        from app.schemas import Bible
+        from app.production.screenplay_authority import resolve_downstream_screenplay
+        from app.domain.storyboard_ops import _board_from_shot_rows
 
-    action = normalize_action_desc(row["action_desc"] or "") or (row["action_desc"] or "")
-    original_action = action
-    import re
-    action = re.sub(r"[（(][^）)]{0,40}(?:后期|裁切|字幕|特效|配音)[^）)]*[）)]", "", action)
-    action = re.sub(r"(?:快切|闪回|蒙太奇|分屏)[，,]?", "", action)
-    if len(action) > 80:
-        action = action[:78].rstrip("，,。；; ") + "。"
-    if action.strip() and action.strip() != (original_action or "").strip():
-        patch["action_desc"] = action.strip()
-
-    split_proposal: dict[str, Any] | None = None
-    if "VIDEO_PREFLIGHT_BLOCKED" in codes and "拆" not in (row["action_desc"] or ""):
-        text = (action or row["action_desc"] or "")
-        if text.count("然后") + text.count("接着") + text.count("随后") >= 2:
-            parts = re.split(r"(?:然后|接着|随后)", text, maxsplit=1)
-            if len(parts) == 2 and len(parts[0].strip()) >= 12 and len(parts[1].strip()) >= 12:
-                half = max(5, min(10, int((row["duration_s"] or 8) // 2) or 5))
-                split_proposal = {
-                    "first_action_desc": parts[0].strip().rstrip("，,") + "。",
-                    "second_action_desc": parts[1].strip().rstrip("，,") + "。",
-                    "duration_s_each": half,
-                }
-    if not patch and not split_proposal:
+        bible = Bible.model_validate_json(project["bible_json"])
+        try:
+            screenplay = resolve_downstream_screenplay(
+                episode_id,
+                conn=conn,
+            ).screenplay
+        except ValueError:
+            screenplay = None
+        rows = conn.execute(
+            "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
+            (episode_id,),
+        ).fetchall()
+        board = _board_from_shot_rows(rows, int(episode["episode_no"] or 1))
+        shot_index = next(
+            index for index, item in enumerate(rows) if item["id"] == entry.shot_id
+        )
+        proposal, candidate_board = await _semantic_storyboard_repair_proposal(
+            board=board,
+            shot_index=shot_index,
+            database_shot_id=entry.shot_id,
+            screenplay=screenplay,
+            bible=bible,
+            target_duration_s=int(episode["target_duration_s"] or 0),
+            episode_id=episode_id,
+            repair_plan=plan,
+            observed_issue_codes=list(
+                (plan.issue_codes if plan else entry.last_issue_codes) or []
+            ),
+            authority_checkpoint=authority_checkpoint,
+        )
+    except GrantValidationError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - model/validator failure pauses for human
+        if run_id:
+            evidence_repository.append_event(
+                run_id,
+                "VIDEO_STORYBOARD_PROPOSAL_REJECTED",
+                "warning",
+                "AI 分镜语义修复候选未通过，已转人工",
+                payload={"shot_id": entry.shot_id, "error": str(exc)[:2000]},
+            )
         return False
     try:
-        from app.evidence import repository as evidence_repository
-        from app.harness.types import EvidenceArtifact
         art = evidence_repository.create_artifact(EvidenceArtifact(
-            type="storyboard",
+            type="storyboard_repair_proposal",
             scope_type="episode",
             scope_id=episode_id,
             status="candidate",
             trust_level="T1",
             content={
-                "amended_by": "video_supervisor_l5",
-                "shot_id": entry.shot_id,
-                "shot_no": entry.shot_no,
+                "proposed_by": "video_supervisor_semantic_director",
                 "base_storyboard_artifact_id": grant.storyboard_artifact_id,
-                "patch": patch,
-                "split_proposal": split_proposal,
+                "proposal": proposal.model_dump(mode="json"),
+                "candidate_storyboard": candidate_board.model_dump(mode="json"),
                 "requires_manual_confirmation": True,
             },
             parent_artifact_ids=[grant.storyboard_artifact_id] if grant.storyboard_artifact_id else [],
-            contract_version="storyboard-amend-draft-2.0.0",
+            contract_version="storyboard-semantic-repair-proposal.v1",
         ))
         conn.execute(
             "UPDATE episodes SET working_storyboard_artifact_id=? WHERE id=?",
@@ -1342,7 +1867,14 @@ def _amend_storyboard(
             evidence_repository.append_event(
                 run_id, "VIDEO_STORYBOARD_DRAFT_CREATED", "warning",
                 f"第 {entry.shot_no} 镜 L5 修改草稿待重新确认",
-                payload={"shot_id": entry.shot_id, "artifact_id": art["id"], "split": bool(split_proposal)},
+                payload={
+                    "shot_id": entry.shot_id,
+                    "artifact_id": art["id"],
+                    "operation": proposal.operation,
+                    "affected_authority": proposal.affected_authority.model_dump(
+                        mode="json"
+                    ),
+                },
             )
         return True
     except Exception:  # noqa: BLE001
@@ -1350,8 +1882,12 @@ def _amend_storyboard(
 
 
 # 兼容旧名
-def _amend_storyboard_duration(entry: ShotCoverageEntry, *, grant: VideoCompletionGrant) -> bool:
-    return _amend_storyboard(entry, grant=grant)
+async def _amend_storyboard_duration(
+    entry: ShotCoverageEntry,
+    *,
+    grant: VideoCompletionGrant,
+) -> bool:
+    return await _amend_storyboard(entry, grant=grant)
 
 
 def _try_auto_crop(entry: ShotCoverageEntry, *, run_id: str | None) -> bool:
@@ -1686,12 +2222,18 @@ def _reference_asset_scan(episode_id: str) -> tuple[dict[str, Any], dict[str, An
     ).fetchall()
     from app.domain.storyboard_ops import _board_from_shot_rows
     from app.multiview import scan_episode_reference_asset_gaps
+    from app.production.screenplay_authority import resolve_downstream_screenplay
+    from app.schemas import Bible
 
     board = _board_from_shot_rows(rows, int(episode["episode_no"]))
+    bible = Bible.model_validate_json(project["bible_json"])
+    screenplay = resolve_downstream_screenplay(episode_id, conn=conn).screenplay
     scan = scan_episode_reference_asset_gaps(
         project_id=episode["project_id"],
         episode_no=int(episode["episode_no"]),
         shots=[(row["id"], board.shots[index]) for index, row in enumerate(rows)],
+        bible=bible,
+        screenplay=screenplay,
     )
     return dict(episode), scan
 
@@ -1736,6 +2278,7 @@ async def _prepare_episode_reference_assets(
     run_id: str | None,
 ) -> dict[str, Any]:
     """Prepare only missing Bible-managed assets before any video dispatch."""
+    _verify_supervisor_paid_authority(cp, stage="reference_asset_scan")
     episode, initial = _reference_asset_scan(episode_id)
     if not initial["blockers"]:
         return initial
@@ -1779,6 +2322,10 @@ async def _prepare_episode_reference_assets(
                 from app.multiview import complete_legacy_character_pack
 
                 for name in current["characters"]:
+                    _verify_supervisor_paid_authority(
+                        cp,
+                        stage="character_pack_completion",
+                    )
                     pack = await complete_legacy_character_pack(
                         project_id, name, episode_no, visual_style,
                     )
@@ -1786,6 +2333,10 @@ async def _prepare_episode_reference_assets(
                         initial_characters.append(name)
             if initial_characters:
                 from app.refs import generate_refs
+                _verify_supervisor_paid_authority(
+                    cp,
+                    stage="character_reference_generation",
+                )
                 await generate_refs(
                     project_id,
                     only_characters=initial_characters,
@@ -1799,6 +2350,10 @@ async def _prepare_episode_reference_assets(
                 from app.multiview import complete_legacy_scene_pack
 
                 for name in current["scenes"]:
+                    _verify_supervisor_paid_authority(
+                        cp,
+                        stage="scene_pack_completion",
+                    )
                     pack = await complete_legacy_scene_pack(
                         project_id, name, episode_no, visual_style,
                     )
@@ -1806,6 +2361,10 @@ async def _prepare_episode_reference_assets(
                         initial_scenes.append(name)
             if initial_scenes:
                 from app.scenes import generate_scene_refs
+                _verify_supervisor_paid_authority(
+                    cp,
+                    stage="scene_reference_generation",
+                )
                 await generate_scene_refs(
                     project_id,
                     only_scene=initial_scenes,
@@ -1923,6 +2482,15 @@ async def run_video_completion_supervisor(
             save_checkpoint(cp, run_id=run_id)
             return cp
 
+    try:
+        grant = await _ensure_supervisor_video_plan(cp)
+        save_checkpoint(cp, run_id=run_id)
+    except GrantValidationError as exc:
+        cp.phase = "WAITING_AUTHORIZATION"
+        cp.outcome = exc.code
+        save_checkpoint(cp, run_id=run_id)
+        return cp
+
     if run_id:
         evidence_repository.append_event(
             run_id, "VIDEO_SUPERVISOR_STARTED", "info",
@@ -1936,6 +2504,11 @@ async def run_video_completion_supervisor(
             cp=cp,
             run_id=run_id,
         )
+    except GrantValidationError as exc:
+        cp.phase = "WAITING_AUTHORIZATION"
+        cp.outcome = exc.code
+        save_checkpoint(cp, run_id=run_id)
+        return cp
     except Exception as exc:  # noqa: BLE001 - 资产失败降级，不得中断整集覆盖
         cp.quality_target_missed = True
         save_checkpoint(cp, run_id=run_id)
@@ -1978,27 +2551,26 @@ async def run_video_completion_supervisor(
             cp.tick_interval_s = SUPERVISOR_TICK_INTERVAL_S
             cp.idle_ticks = 0
 
-        if not _assert_storyboard_version(cp):
-            cp.phase = "WAITING_AUTHORIZATION"
-            cp.outcome = "VIDEO_STORYBOARD_CHANGED"
+        # Budget top-ups remain visible, while every authored or plan drift is
+        # re-evaluated instead of trusting a cached grant row.
+        try:
+            g = _verify_supervisor_paid_authority(cp, stage="supervisor_tick")
+        except GrantValidationError as exc:
+            cp.phase = (
+                "CANCELLED" if exc.code == "GRANT_REVOKED"
+                else "WAITING_AUTHORIZATION"
+            )
+            cp.outcome = exc.code
             save_checkpoint(cp, run_id=run_id)
             return cp
-
-        # 刷新 grant 预算（可能被抬额）
-        if cp.grant_id:
-            g = get_video_grant(cp.grant_id)
-            if g and g.revoked_at:
-                cp.phase = "CANCELLED"
-                save_checkpoint(cp, run_id=run_id)
-                return cp
-            if g:
-                cp.budget["cap_cny"] = float(g.budget_cap_cny)
-                wall_cap = float(g.wall_clock_cap_s)
-                cp.deadline_at = float(g.deadline_at)
-                cp.budget["wall_clock_cap_s"] = wall_cap
-                allow_fallback_adopt = g.allow_fallback_adopt
-                allow_storyboard_edit = g.allow_storyboard_edit
-                grant = g
+        if g:
+            cp.budget["cap_cny"] = float(g.budget_cap_cny)
+            wall_cap = float(g.wall_clock_cap_s)
+            cp.deadline_at = float(g.deadline_at)
+            cp.budget["wall_clock_cap_s"] = wall_cap
+            allow_fallback_adopt = g.allow_fallback_adopt
+            allow_storyboard_edit = g.allow_storyboard_edit
+            grant = g
 
         cp.tick_no += 1
         cp.phase = "PLANNING_COVERAGE"
@@ -2059,7 +2631,20 @@ async def run_video_completion_supervisor(
                 if not cp.first_pass_done and spent >= soft_cap:
                     continue
                 cp.phase = "DISPATCHING"
-                if _dispatch(entry, episode_id=episode_id, run_id=run_id, first=True):
+                try:
+                    dispatched = _dispatch(
+                        entry,
+                        episode_id=episode_id,
+                        run_id=run_id,
+                        cp=cp,
+                        first=True,
+                    )
+                except GrantValidationError as exc:
+                    cp.phase = "WAITING_AUTHORIZATION"
+                    cp.outcome = exc.code
+                    save_checkpoint(cp, run_id=run_id)
+                    return cp
+                if dispatched:
                     progressed = True
                     spent = float(rebuild_coverage_ledger(episode_id, cp=cp).cost_spent)
                 continue
@@ -2111,14 +2696,38 @@ async def run_video_completion_supervisor(
                 continue
 
             if plan.strategy == "amend_storyboard":
-                if grant and _amend_storyboard(entry, grant=grant, plan=plan, run_id=run_id):
+                try:
+                    amended = bool(
+                        grant
+                        and grant.allow_storyboard_edit
+                        and await _amend_storyboard(
+                            entry,
+                            grant=grant,
+                            plan=plan,
+                            run_id=run_id,
+                        )
+                    )
+                except GrantValidationError as exc:
+                    cp.phase = "WAITING_AUTHORIZATION"
+                    cp.outcome = exc.code
+                    _merge_shot_state(cp, ledger)
+                    save_checkpoint(cp, run_id=run_id)
+                    return cp
+                if amended:
                     cp.phase = "WAITING_HUMAN"
                     cp.outcome = "已创建分镜修改草稿；视频流水线已暂停，等待分镜台完整终态与人工重新确认"
                     _merge_shot_state(cp, ledger)
                     save_checkpoint(cp, run_id=run_id)
                     return cp
+                if grant and grant.allow_storyboard_edit:
+                    cp.phase = "WAITING_HUMAN"
+                    cp.outcome = "AI 语义分镜修复候选未通过全链路验证，需要人工处理"
+                    _merge_shot_state(cp, ledger)
+                    save_checkpoint(cp, run_id=run_id)
+                    return cp
                 else:
                     cp.phase = "WAITING_AUTHORIZATION"
+                    cp.outcome = "STORYBOARD_REPAIR_PROPOSAL_NOT_AUTHORIZED"
                     save_checkpoint(cp, run_id=run_id)
                     return cp
                 continue
@@ -2166,7 +2775,20 @@ async def run_video_completion_supervisor(
                     run_id, "VIDEO_REPAIR_PLAN_SELECTED", "info",
                     plan.reason, payload=cp.last_plan,
                 )
-            if _dispatch(entry, episode_id=episode_id, run_id=run_id, plan=plan):
+            try:
+                dispatched = _dispatch(
+                    entry,
+                    episode_id=episode_id,
+                    run_id=run_id,
+                    cp=cp,
+                    plan=plan,
+                )
+            except GrantValidationError as exc:
+                cp.phase = "WAITING_AUTHORIZATION"
+                cp.outcome = exc.code
+                save_checkpoint(cp, run_id=run_id)
+                return cp
+            if dispatched:
                 progressed = True
                 cascaded = _apply_cascade(entry, ledger, cp)
                 if cascaded and run_id:
@@ -2342,6 +2964,13 @@ async def reconcile_stale_video_supervisors() -> int:
         if not task_running and cp.deadline_at is None:
             return False
         if heartbeat and now() - heartbeat <= SUPERVISOR_HEARTBEAT_STALE_S:
+            return False
+        try:
+            _verify_supervisor_paid_authority(cp, stage="watchdog_takeover")
+        except GrantValidationError as exc:
+            cp.phase = "WAITING_AUTHORIZATION"
+            cp.outcome = exc.code
+            save_checkpoint(cp, run_id=cp.run_id)
             return False
         if task_running:
             await task_registry.cancel_and_wait("video_completion", episode_id)
@@ -2592,13 +3221,10 @@ def recover_video_completion_runs() -> int:
             return False
         if cp.grant_id and not deadline_due:
             try:
-                validate_video_grant(
-                    cp.grant_id,
-                    episode_id=episode_id,
-                    storyboard_artifact_id=row["storyboard_artifact_id"],
-                )
-            except GrantValidationError:
+                _verify_supervisor_paid_authority(cp, stage="service_restart_resume")
+            except GrantValidationError as exc:
                 cp.phase = "WAITING_AUTHORIZATION"
+                cp.outcome = exc.code
                 save_checkpoint(cp)
                 return False
 

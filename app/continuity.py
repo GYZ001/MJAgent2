@@ -10,6 +10,7 @@ from typing import Any
 
 from app import config
 from app.schemas import (
+    AudienceStatePathRef,
     CONTINUITY_MODES,
     DELIVERY_OWNERS,
     KEY_LINE_ID_RE,
@@ -19,8 +20,12 @@ from app.schemas import (
     AudioTimelineItem,
     ContinuityState,
     EpisodeScreenplay,
+    NarrativeBoundaryContract,
+    NarrativeContinuityPlan,
     RequiredOnScreenText,
     Shot,
+    ShotCapacityBudget,
+    ShotContribution,
     Storyboard,
     StoryboardOutline,
     VoiceCanonical,
@@ -128,8 +133,17 @@ def onscreen_dialogue_speakers(shot: Shot) -> list[str]:
     return speakers
 
 
-def dialogue_two_shot_required(shot: Shot) -> bool:
+def dialogue_two_shot_required(
+    shot: Shot,
+    *,
+    narrative_authority: bool = False,
+) -> bool:
     """仅真实双人肢体互动允许对白镜头保留第二个可见人物。"""
+    if narrative_authority:
+        # The model classifies the actor/target visibility intent from the
+        # authority graph.  Do not re-infer it from a language-specific list of
+        # contact verbs.
+        return DIALOGUE_TWO_SHOT_RISK_TAG in (shot.risk_tags or [])
     speakers = onscreen_dialogue_speakers(shot)
     visible = raw_characters_visible(shot)
     if len(speakers) != 1 or len(visible) < 2:
@@ -157,7 +171,11 @@ def dialogue_two_shot_required(shot: Shot) -> bool:
     return False
 
 
-def dialogue_action_staging_kind(shot: Shot) -> str:
+def dialogue_action_staging_kind(
+    shot: Shot,
+    *,
+    narrative_authority: bool = False,
+) -> str:
     """返回对白镜必须保留的动作调度类型：spatial / prop / 空。
 
     ``dialogue_focus_subject`` 会据此放弃“只拍脸”的派生构图，但仍保持一镜只有
@@ -165,6 +183,8 @@ def dialogue_action_staging_kind(shot: Shot) -> str:
     """
     if len(onscreen_dialogue_speakers(shot)) != 1:
         return ""
+    if narrative_authority:
+        return "semantic" if "dialogue_action_staging" in (shot.risk_tags or []) else ""
     visual_text = "；".join(
         str(value or "")
         for value in (
@@ -183,20 +203,29 @@ def dialogue_action_staging_kind(shot: Shot) -> str:
     return ""
 
 
-def dialogue_focus_subject(shot: Shot) -> str | None:
+def dialogue_focus_subject(
+    shot: Shot,
+    *,
+    narrative_authority: bool = False,
+) -> str | None:
     """返回专业对白镜头的唯一画面主体；双人肢体互动属于显式例外。"""
     speakers = onscreen_dialogue_speakers(shot)
     if (
         len(speakers) != 1
-        or dialogue_two_shot_required(shot)
-        or dialogue_action_staging_kind(shot)
+        or dialogue_two_shot_required(shot, narrative_authority=narrative_authority)
+        or dialogue_action_staging_kind(shot, narrative_authority=narrative_authority)
     ):
         return None
     visible = raw_characters_visible(shot)
     return speakers[0] if speakers[0] in visible else None
 
 
-def dialogue_framing_errors(shot: Shot, *, strict_composition: bool = True) -> list[str]:
+def dialogue_framing_errors(
+    shot: Shot,
+    *,
+    strict_composition: bool = True,
+    narrative_authority: bool = False,
+) -> list[str]:
     """对白镜头构图门禁：一镜一位画内说话人，默认单人近景/特写。"""
     speakers = onscreen_dialogue_speakers(shot)
     if not speakers:
@@ -216,14 +245,17 @@ def dialogue_framing_errors(shot: Shot, *, strict_composition: bool = True) -> l
             "需要口型的说话人必须入画，画外说话请改为 offscreen_voice"
         )
         return errors
-    if dialogue_two_shot_required(shot):
+    if dialogue_two_shot_required(shot, narrative_authority=narrative_authority):
         if len(visible) > 2:
             errors.append(
                 f"shot_no={shot.shot_no} 虽有双人肢体互动，但画面声明了 {len(visible)} 人；"
                 "对白双人镜最多保留说话人与直接互动对象，其余人物留在画外"
             )
         return errors
-    staging_kind = dialogue_action_staging_kind(shot)
+    staging_kind = dialogue_action_staging_kind(
+        shot,
+        narrative_authority=narrative_authority,
+    )
     if staging_kind:
         # 动作对白仍只允许一个画内说话人，但不可为了口型裁掉走位、肢体或剧情道具。
         # 其他可见角色可作为无台词的直接互动对象/背景关系存在。
@@ -523,8 +555,194 @@ def split_sequential_action_text(text: str) -> tuple[str, str] | None:
     return front, back
 
 
-def action_capacity_errors(shot: Shot) -> list[str]:
+def narrative_action_capacity_profile(
+    shot: Any,
+    narrative_plan: NarrativeContinuityPlan | None,
+) -> tuple[int, float, list[str]]:
+    """Return the action demand declared by the narrative authority graph.
+
+    The new contract deliberately does not inspect ``action_desc`` or a verb
+    vocabulary.  A shot task names its primary/supporting ``AtomicAction``
+    objects and explicitly assigns ``action_phase_ids`` to this shot.  Those
+    assigned phases are the sequential execution units; an action may span
+    multiple adjacent shots without every shot being charged for every phase.
+    Preconditions are required where the first phase starts and effects where
+    the last phase completes.  An action without explicit phases is one
+    indivisible primary-action unit.
+
+    The returned tuple is ``(phase_count, estimated_min_s, contract_errors)``.
+    Keeping the profile independent of prose makes fictional actions and
+    synonymous rewrites capacity-equivalent by construction.
+    """
+    if narrative_plan is None:
+        return 0, 0.0, [
+            f"[NARRATIVE_ACTION_AUTHORITY_MISSING] shot_no={shot.shot_no} "
+            "启用了叙事权威校验但缺少 narrative_plan"
+        ]
+
+    action_by_id = {
+        str(action.action_id).strip(): action
+        for action in narrative_plan.atomic_actions
+        if str(action.action_id).strip()
+    }
+    phase_by_id = {
+        str(phase.phase_id).strip(): (action, phase)
+        for action in narrative_plan.atomic_actions
+        for phase in (action.temporal_phases or [])
+        if str(phase.phase_id).strip()
+    }
+    task_action_ids = list(dict.fromkeys([
+        *(
+            [str(shot.primary_action_id).strip()]
+            if getattr(shot, "primary_action_id", None)
+            else []
+        ),
+        *[
+            str(action_id).strip()
+            for action_id in (getattr(shot, "supporting_action_ids", []) or [])
+            if str(action_id).strip()
+        ],
+    ]))
+    raw_phase_ids = [
+        str(phase_id).strip()
+        for phase_id in (getattr(shot, "action_phase_ids", []) or [])
+    ]
+    assigned_phase_ids = list(dict.fromkeys(
+        phase_id for phase_id in raw_phase_ids if phase_id
+    ))
     errors: list[str] = []
+    if any(not phase_id for phase_id in raw_phase_ids) or len(assigned_phase_ids) != len(raw_phase_ids):
+        errors.append(
+            f"[NARRATIVE_ACTION_PHASE_ASSIGNMENT_INVALID] shot_no={shot.shot_no} "
+            "action_phase_ids 含空值或重复阶段"
+        )
+
+    if not task_action_ids:
+        # Establishing/reaction/assimilation shots may intentionally be
+        # action-free; their ShotContribution is validated by narrative.py.
+        if assigned_phase_ids:
+            errors.append(
+                f"[NARRATIVE_ACTION_PHASE_WITHOUT_ACTION] shot_no={shot.shot_no} "
+                "未绑定 AtomicAction 却分配了 action_phase_ids"
+            )
+        return 0, 0.0, errors
+
+    phase_count = 0
+    estimated_min_s = 0.0
+    task_state_in = set(getattr(shot, "planned_state_in_fact_ids", []) or [])
+    task_adds = set(getattr(shot, "planned_delta_add_fact_ids", []) or [])
+    task_removes = set(getattr(shot, "planned_delta_remove_fact_ids", []) or [])
+    valid_assigned: dict[str, tuple[Any, Any]] = {}
+    for phase_id in assigned_phase_ids:
+        owned = phase_by_id.get(phase_id)
+        if owned is None:
+            errors.append(
+                f"[NARRATIVE_ACTION_PHASE_REF_MISSING] shot_no={shot.shot_no} "
+                f"action_phase_ids 引用了不存在的阶段 {phase_id}"
+            )
+            continue
+        owner, phase = owned
+        if str(owner.action_id).strip() not in task_action_ids:
+            errors.append(
+                f"[NARRATIVE_ACTION_PHASE_OWNER_MISMATCH] shot_no={shot.shot_no} "
+                f"阶段 {phase_id} 不属于本镜绑定的 AtomicAction"
+            )
+            continue
+        valid_assigned[phase_id] = (owner, phase)
+
+    for action_id in task_action_ids:
+        action = action_by_id.get(action_id)
+        if action is None:
+            errors.append(
+                f"[NARRATIVE_ACTION_REF_MISSING] shot_no={shot.shot_no} "
+                f"镜头任务引用了不存在的 AtomicAction {action_id}"
+            )
+            continue
+        phases = list(action.temporal_phases or [])
+        phase_ids = [str(phase.phase_id).strip() for phase in phases]
+        delivered_phase_ids = [
+            phase_id for phase_id in assigned_phase_ids if phase_id in set(phase_ids)
+        ]
+        if phases and not delivered_phase_ids:
+            errors.append(
+                f"[NARRATIVE_ACTION_PHASE_ASSIGNMENT_MISSING] shot_no={shot.shot_no} "
+                f"AtomicAction {action_id} 未声明本镜实际负责的 action_phase_ids"
+            )
+        elif not phases:
+            if action_id in set(getattr(shot, "supporting_action_ids", []) or []):
+                errors.append(
+                    f"[NARRATIVE_PHASELESS_SUPPORTING_ACTION_INVALID] shot_no={shot.shot_no} "
+                    f"AtomicAction {action_id} 没有可分阶段，不得作为 supporting action"
+                )
+            else:
+                phase_count += 1
+        else:
+            phase_count += len(delivered_phase_ids)
+            estimated_min_s += sum(
+                max(0.0, float(valid_assigned[phase_id][1].estimated_min_s or 0.0))
+                for phase_id in delivered_phase_ids
+                if phase_id in valid_assigned
+            )
+
+        starts_action = not phases or bool(phase_ids and phase_ids[0] in delivered_phase_ids)
+        completes_action = not phases or bool(phase_ids and phase_ids[-1] in delivered_phase_ids)
+        missing_preconditions = (
+            set(action.precondition_fact_ids) - task_state_in if starts_action else set()
+        )
+        missing_adds = set(action.effects_add) - task_adds if completes_action else set()
+        missing_removes = set(action.effects_remove) - task_removes if completes_action else set()
+        if missing_preconditions or missing_adds or missing_removes:
+            details: list[str] = []
+            if missing_preconditions:
+                details.append(f"precondition={sorted(missing_preconditions)}")
+            if missing_adds:
+                details.append(f"effects_add={sorted(missing_adds)}")
+            if missing_removes:
+                details.append(f"effects_remove={sorted(missing_removes)}")
+            errors.append(
+                f"[NARRATIVE_SHOT_TASK_ACTION_DRIFT] shot_no={shot.shot_no} "
+                f"未完整承接 {action_id} 的前置/效果合同：{', '.join(details)}"
+            )
+        if not str(action.completion_condition or "").strip():
+            errors.append(
+                f"[NARRATIVE_ACTION_COMPLETION_MISSING] shot_no={shot.shot_no} "
+                f"AtomicAction {action_id} 缺少可观察完成条件"
+            )
+
+    budget = getattr(shot, "capacity_budget", None)
+    if budget is not None and float(budget.action_phase_s or 0.0) + 1e-9 < estimated_min_s:
+        errors.append(
+            f"[NARRATIVE_ACTION_BUDGET_UNDERSTATED] shot_no={shot.shot_no} "
+            f"capacity_budget.action_phase_s={float(budget.action_phase_s or 0.0):g}s，"
+            f"低于已分配阶段的最短执行时间 {estimated_min_s:g}s"
+        )
+    return phase_count, estimated_min_s, errors
+
+
+def action_capacity_errors(
+    shot: Shot,
+    *,
+    narrative_authority: bool = False,
+    narrative_plan: NarrativeContinuityPlan | None = None,
+) -> list[str]:
+    errors: list[str] = []
+    if narrative_authority:
+        phases, estimated_min_s, contract_errors = narrative_action_capacity_profile(
+            shot, narrative_plan,
+        )
+        errors.extend(contract_errors)
+        # The authority path is governed by an explicit time equation, not a
+        # genre-agnostic phase-count table.  Three very short observable phases
+        # can be cheaper than one long transformation; only their declared
+        # minimum time and the joint audience-task budget determine feasibility.
+        if estimated_min_s > float(getattr(shot, "duration_s", 0) or 0):
+            errors.append(
+                f"[NARRATIVE_ACTION_TIME_CAPACITY_EXCEEDED] shot_no={shot.shot_no} "
+                f"AtomicAction 阶段最短执行时间 {estimated_min_s:g}s "
+                f"超过镜头时长 {shot.duration_s}s"
+            )
+        return list(dict.fromkeys(errors))
+
     # primary_action 常被模型压成一句摘要，真正会交给视频模型执行的细节仍在
     # action_desc。容量必须取两者中节拍更多的一份，否则“穿过人群→停下→开口”
     # 会以单动作摘要绕过门禁，最终只剩静态口型。
@@ -728,7 +946,13 @@ def information_ledger_errors(
     board: Storyboard,
     screenplay: EpisodeScreenplay | None,
 ) -> list[str]:
-    """未标记强化的 info_id 不得重复交付。"""
+    """Validate the legacy ledger without mutating screenplay truth.
+
+    New narrative contracts assign delivery to a per-prior target delta in
+    ``ShotContribution``.  Repeating an info alias may be a valid suspicion →
+    confirmation or recall beat, so only the narrative ownership validator may
+    decide it.  The old ID rule remains solely for legacy artifacts.
+    """
     if not screenplay or not screenplay.information_ledger:
         return []
     errors: list[str] = []
@@ -742,7 +966,11 @@ def information_ledger_errors(
                     "new_information_ids 只能引用 screenplay.information_ledger"
                 )
                 continue
-            if info_id in delivered and info_id not in (shot.reinforcement_info_ids or []):
+            if (
+                screenplay.narrative_plan is None
+                and info_id in delivered
+                and info_id not in (shot.reinforcement_info_ids or [])
+            ):
                 item = ledger.get(info_id)
                 reinforce = bool(item and item.reinforcement_allowed)
                 if not reinforce:
@@ -751,17 +979,22 @@ def information_ledger_errors(
                         f"（{item.content if item else ''}）；如需强调请标记 reinforcement_allowed / reinforcement_info_ids"
                     )
             delivered[info_id] = shot.shot_no
-            if info_id in ledger and ledger[info_id].status == "unassigned":
-                ledger[info_id].status = "assigned"
-                ledger[info_id].assigned_shot_no = shot.shot_no
     return errors
 
 
-def state_chain_errors(board: Storyboard) -> list[str]:
+def state_chain_errors(
+    board: Storyboard,
+    *,
+    narrative_authority: bool = False,
+) -> list[str]:
     errors: list[str] = []
     for i, shot in enumerate(board.shots):
         prev = board.shots[i - 1] if i > 0 else None
-        mode = sync_shot_continuity_fields(shot, prev)
+        mode = (
+            (shot.continuity_mode or "").strip()
+            if narrative_authority
+            else sync_shot_continuity_fields(shot, prev)
+        )
         state_in = effective_state_in(shot)
         state_out = planned_state_out(shot)
         action = effective_primary_action(shot)
@@ -770,7 +1003,11 @@ def state_chain_errors(board: Storyboard) -> list[str]:
             errors.append(f"{tag}.state_in 缺失或过短；必须写清精确起始状态")
         if len(state_out) < 8:
             errors.append(f"{tag}.state_out 缺失或过短；必须写清精确结束状态")
-        if len(action) < 8:
+        # A reaction, establishing, processing or spatial-orientation shot may
+        # intentionally have no new atomic action.  Its structured narrative
+        # contribution is the hard contract; legacy shots still require the
+        # textual primary action for backward compatibility.
+        if len(action) < 8 and shot.shot_contribution is None:
             errors.append(f"{tag}.primary_action 缺失或过短")
         if mode not in CONTINUITY_MODES:
             errors.append(f"{tag}.continuity_mode=「{mode}」不在 {sorted(CONTINUITY_MODES)}")
@@ -778,8 +1015,19 @@ def state_chain_errors(board: Storyboard) -> list[str]:
             errors.append(f"{tag}.continuity_mode=action_continuation，但第一个镜头没有上一镜可承接")
         if prev is not None and mode == "action_continuation":
             prev_out = effective_state_out(prev)
-            # 粗粒度一致性：当前 state_in 应引用上一镜结束状态的关键语义，不能完全无关
-            if prev_out and state_in and _too_divergent(prev_out, state_in):
+            # Contract-less boards have no stable state IDs, so their legacy
+            # fallback can only compare prose.  Narrative boards instead carry
+            # explicit fact sets and boundary contracts, which are checked by
+            # ``validate_storyboard_narrative``.  Never reject a modern board
+            # merely because two natural-language renderings share too few
+            # Chinese bigrams: that is a language-specific guess, not state
+            # evidence.
+            if (
+                not narrative_authority
+                and prev_out
+                and state_in
+                and _too_divergent(prev_out, state_in)
+            ):
                 errors.append(
                     f"{tag}.state_in 与上一镜 state_out/observed_state_out 矛盾："
                     f"上一镜结束于「{prev_out[:40]}」，本镜却从「{state_in[:40]}」开始；"
@@ -1057,6 +1305,7 @@ def reference_role_plan(
     *,
     continuity_mode: str | None = None,
     individual_names: set[str] | None = None,
+    collective_names: set[str] | None = None,
 ) -> list[str]:
     from app.character_policy import is_collective_role
 
@@ -1068,9 +1317,14 @@ def reference_role_plan(
         roles.append("scene_reference")
     visible_names = effective_characters_visible(shot)
     for name in visible_names:
+        is_collective = (
+            name in collective_names
+            if collective_names is not None
+            else is_collective_role(name)
+        )
         roles.append(
             f"collective_group:{name}"
-            if is_collective_role(name) and (individual_names is None or name not in individual_names)
+            if is_collective and (individual_names is None or name not in individual_names)
             else f"character_identity:{name}"
         )
     if required_text_strategy(shot) == "embedded_prop":
@@ -1102,27 +1356,41 @@ def preflight_seedance_gates(
     delivered_info_ids: set[str] | None = None,
 ) -> list[str]:
     """生成前静态门禁（PRD §14.1）：任一项失败不得提交 Seedance。"""
-    sync_shot_continuity_fields(shot, prev)
+    narrative_plan = screenplay.narrative_plan if screenplay else None
+    if narrative_plan is None:
+        sync_shot_continuity_fields(shot, prev)
     ensure_audio_timeline(shot, screenplay.voice_bible if screenplay else None)
     errors: list[str] = []
-    errors.extend(action_capacity_errors(shot))
+    errors.extend(action_capacity_errors(
+        shot,
+        narrative_authority=narrative_plan is not None,
+        narrative_plan=narrative_plan,
+    ))
     errors.extend(speech_capacity_errors(shot))
-    errors.extend(dialogue_framing_errors(shot, strict_composition=False))
-    errors.extend(state_chain_errors(Storyboard(episode_no=0, shots=([prev, shot] if prev else [shot]))))
+    errors.extend(dialogue_framing_errors(
+        shot,
+        strict_composition=False,
+        narrative_authority=narrative_plan is not None,
+    ))
+    errors.extend(state_chain_errors(
+        Storyboard(episode_no=0, shots=([prev, shot] if prev else [shot])),
+        narrative_authority=narrative_plan is not None,
+    ))
     # 只保留本镜报错，避免上一镜 shot_no=N 的状态链错误漏进当前生成
     shot_tag = f"shot_no={shot.shot_no}"
     errors = [e for e in errors if shot_tag in e]
 
-    delivered = delivered_info_ids or set()
-    for info_id in shot.new_information_ids or []:
-        if info_id in delivered and info_id not in (shot.reinforcement_info_ids or []):
-            item = None
-            if screenplay:
-                item = next((x for x in screenplay.information_ledger if x.info_id == info_id), None)
-            if not (item and item.reinforcement_allowed):
-                errors.append(
-                    f"shot_no={shot.shot_no} new_information_ids 含已交付信息 {info_id} 且未标记有意强化"
-                )
+    if narrative_plan is None:
+        delivered = delivered_info_ids or set()
+        for info_id in shot.new_information_ids or []:
+            if info_id in delivered and info_id not in (shot.reinforcement_info_ids or []):
+                item = None
+                if screenplay:
+                    item = next((x for x in screenplay.information_ledger if x.info_id == info_id), None)
+                if not (item and item.reinforcement_allowed):
+                    errors.append(
+                        f"shot_no={shot.shot_no} new_information_ids 含已交付信息 {info_id} 且未标记有意强化"
+                    )
 
     mode = shot.continuity_mode
     roles = reference_role_plan(shot, continuity_mode=mode)
@@ -1151,7 +1419,7 @@ def mark_legacy_unvalidated(shot: Shot) -> None:
         and (shot.state_out or shot.last_frame_desc)
         and (shot.continuity_mode in CONTINUITY_MODES)
         and (shot.audio_timeline or shot.dialogues is not None)
-        and (shot.story_event_id or shot.new_information_ids)
+        and (shot.story_event_id or shot.new_information_ids or shot.shot_contribution)
     )
     shot.legacy_unvalidated = bool(missing)
 
@@ -1161,6 +1429,21 @@ def shot_contract_dict(shot: Shot) -> dict[str, Any]:
     required = None
     if shot.required_text is not None:
         required = shot.required_text.model_dump()
+    shot_contribution = (
+        shot.shot_contribution.model_dump(mode="json")
+        if shot.shot_contribution is not None
+        else None
+    )
+    narrative_boundary = (
+        shot.narrative_boundary_from_previous.model_dump(mode="json")
+        if shot.narrative_boundary_from_previous is not None
+        else None
+    )
+    capacity_budget = (
+        shot.capacity_budget.model_dump(mode="json")
+        if shot.capacity_budget is not None
+        else None
+    )
     return {
         "story_event_id": shot.story_event_id,
         "purpose": shot.purpose,
@@ -1190,6 +1473,33 @@ def shot_contract_dict(shot: Shot) -> dict[str, Any]:
         "camera_angle": shot.camera_angle,
         "spatial_anchor": shot.spatial_anchor,
         "is_final": bool(shot.is_final),
+        # 纯叙事任务同样属于镜头的权威合同。它们只存在内存模型会导致
+        # 服务重启、人工编辑或修复投影后丢失观众状态与证据所有权。
+        "shot_id": shot.shot_id,
+        "scene_id": shot.scene_id,
+        "event_ids": list(shot.event_ids or []),
+        "primary_action_id": shot.primary_action_id,
+        "supporting_action_ids": list(shot.supporting_action_ids or []),
+        "action_phase_ids": list(shot.action_phase_ids or []),
+        "visible_entity_ids": list(shot.visible_entity_ids or []),
+        "offscreen_action_actor_ids": list(shot.offscreen_action_actor_ids or []),
+        "offscreen_action_target_ids": list(shot.offscreen_action_target_ids or []),
+        "capacity_budget": capacity_budget,
+        "shot_contribution": shot_contribution,
+        "audience_state_paths": [
+            item.model_dump(mode="json") for item in (shot.audience_state_paths or [])
+        ],
+        "planned_state_in_fact_ids": list(shot.planned_state_in_fact_ids or []),
+        "planned_delta_add_fact_ids": list(shot.planned_delta_add_fact_ids or []),
+        "planned_delta_remove_fact_ids": list(shot.planned_delta_remove_fact_ids or []),
+        "planned_state_out_fact_ids": list(shot.planned_state_out_fact_ids or []),
+        "completed_before_action_ids": list(shot.completed_before_action_ids or []),
+        "completed_before_action_phase_ids": list(
+            shot.completed_before_action_phase_ids or []
+        ),
+        "reserved_future_event_ids": list(shot.reserved_future_event_ids or []),
+        "readability_window_ids": list(shot.readability_window_ids or []),
+        "narrative_boundary_from_previous": narrative_boundary,
     }
 
 
@@ -1208,9 +1518,22 @@ def apply_shot_contract(shot: Shot, payload: dict[str, Any] | str | None) -> Sho
         "spine_beat_ids", "key_line_ids", "information_ids",
         "new_information_ids", "reinforcement_info_ids", "characters_visible",
         "audio_cast", "reference_roles", "do_not_repeat", "risk_tags",
+        "event_ids", "supporting_action_ids", "planned_state_in_fact_ids",
+        "action_phase_ids", "visible_entity_ids", "offscreen_action_actor_ids",
+        "offscreen_action_target_ids",
+        "planned_delta_add_fact_ids", "planned_delta_remove_fact_ids",
+        "planned_state_out_fact_ids", "completed_before_action_ids",
+        "completed_before_action_phase_ids",
+        "reserved_future_event_ids", "readability_window_ids",
     ):
         if key in data and data[key] is not None:
             setattr(shot, key, list(data[key] or []))
+    for key in ("shot_id", "scene_id"):
+        if key in data and data[key] is not None:
+            setattr(shot, key, str(data[key]))
+    if "primary_action_id" in data:
+        value = data["primary_action_id"]
+        shot.primary_action_id = str(value) if value not in (None, "") else None
     # 旧 payload 只有 new_information_ids；schema 校验器已双向归一，此处补齐直接 setattr 的分支。
     merged_info = list(dict.fromkeys([*(shot.information_ids or []), *(shot.new_information_ids or [])]))
     shot.information_ids = merged_info
@@ -1220,6 +1543,24 @@ def apply_shot_contract(shot: Shot, payload: dict[str, Any] | str | None) -> Sho
     if "required_text" in data:
         rt = data["required_text"]
         shot.required_text = RequiredOnScreenText.model_validate(rt) if rt else None
+    if "shot_contribution" in data:
+        contribution = data["shot_contribution"]
+        shot.shot_contribution = (
+            ShotContribution.model_validate(contribution) if contribution else None
+        )
+    if "capacity_budget" in data:
+        budget = data["capacity_budget"]
+        shot.capacity_budget = ShotCapacityBudget.model_validate(budget) if budget else None
+    if "audience_state_paths" in data:
+        shot.audience_state_paths = [
+            AudienceStatePathRef.model_validate(item)
+            for item in (data["audience_state_paths"] or [])
+        ]
+    if "narrative_boundary_from_previous" in data:
+        boundary = data["narrative_boundary_from_previous"]
+        shot.narrative_boundary_from_previous = (
+            NarrativeBoundaryContract.model_validate(boundary) if boundary else None
+        )
     for key in ("continuity_state_in", "continuity_state_out"):
         if key in data and data[key] is not None:
             setattr(shot, key, ContinuityState.model_validate(data[key] or {}))

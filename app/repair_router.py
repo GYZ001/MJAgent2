@@ -1,10 +1,14 @@
-"""分镜集级 Repair Router：把结构化 Issue 映射为最小修复范围与策略。
+"""Constraint-driven storyboard repair routing.
 
-PRD《剧本分镜一次生成与Agent局部自愈交付方案》：
-删除 redo_suffix / replan_outline；L3/L4 改为 insert_shot / split_shot。
+Issue codes identify violated invariants; they never prescribe a unique edit.
+The router exposes an open candidate set and consumes an optional semantic
+diagnosis (normally produced by :mod:`app.narrative_repair`).  Deterministic
+code only limits the affected window, checks operational pauses and chooses a
+safe reversible fallback when semantic diagnosis is unavailable.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Literal
 
@@ -14,45 +18,29 @@ from app.evaluations.issues import issue_code, issue_fingerprint
 from app.harness.types import Issue, IssueSeverity
 
 RepairLevel = Literal["L0", "L1", "L2", "L3", "L4", "L5"]
-RepairStrategy = Literal[
-    "normalize",
-    "repair_current",
-    "repair_window",
-    "insert_shot",
-    "split_shot",
-    "split_adjacent_shot",
-    "delete_shot",
-    "move_shot",
-    "waiting_human",
-    "waiting_retry",
-    "waiting_authorization",
-]
+# Strategy is an AI-authored semantic intent, not an executor enum.  Runtime
+# safety is established by a typed ``outline_operations`` program and the
+# complete narrative graph gate.  Keeping this surface open prevents a new
+# narrative relation from being silently rewritten to a legacy repair mode.
+RepairStrategy = str
 
 LEVEL_ORDER: list[RepairLevel] = ["L0", "L1", "L2", "L3", "L4", "L5"]
-
-# Issue code → 首选层级（不再映射到整版重做）
-_PREFERRED_LEVEL: dict[str, RepairLevel] = {
-    "SCHEMA_INVALID": "L1",
-    "JSON_INVALID": "L1",
-    "SPOKEN_CAPACITY_EXCEEDED": "L1",
-    "ACTION_CAPACITY_EXCEEDED": "L1",
-    "SPOKEN_CONTRACT_CONFLICT": "L0",
-    "DIALOGUE_FRAMING_INVALID": "L1",
-    "SHOT_OUTLINE_COVERAGE": "L1",
-    "STATE_CHAIN_INVALID": "L2",
-    "KEY_LINE_MISSING": "L2",
-    "SPINE_MISSING": "L3",  # 插入明确镜头，不删后缀
-    "KEY_CONTENT_MISSING": "L2",
-    "DROP_LIST_REINTRODUCED": "L1",
-    "PLAN_EXHAUSTED_NOT_FINAL": "L3",  # 追加 final / 修最后窗口，不重规划大纲
-    "PROVIDER_UNAVAILABLE": "L5",
-    "UPSTREAM_VERSION_CHANGED": "L5",
-}
 
 _SHOT_NO_RE = re.compile(
     r"(?:shot_no\s*=\s*|第\s*|镜头\s*)(\d+)\s*镜?",
     re.I,
 )
+
+class RepairCandidate(BaseModel):
+    candidate_id: str
+    strategy: RepairStrategy
+    touched_shot_nos: list[int] = Field(default_factory=list)
+    expected_narrative_gain: float = 0.0
+    destructive_cost: float = 0.0
+    invariant_risks: list[str] = Field(default_factory=list)
+    semantic_assumptions: list[str] = Field(default_factory=list)
+    rationale: str = ""
+
 
 class RepairPlan(BaseModel):
     level: RepairLevel
@@ -64,6 +52,10 @@ class RepairPlan(BaseModel):
     reason: str = ""
     pause_state: str | None = None  # WAITING_HUMAN / PAUSED_EXTERNAL / WAITING_AUTHORIZATION
     touched_shot_nos: list[int] = Field(default_factory=list)
+    candidates: list[RepairCandidate] = Field(default_factory=list)
+    selected_candidate_id: str | None = None
+    semantic_diagnosis: dict = Field(default_factory=dict)
+    needs_semantic_selection: bool = False
 
 
 def _extract_shot_nos(issues: list[Issue]) -> list[int]:
@@ -78,7 +70,14 @@ def _extract_shot_nos(issues: list[Issue]) -> list[int]:
 
 
 def preferred_level_for_code(code: str) -> RepairLevel:
-    return _PREFERRED_LEVEL.get(code, "L1")
+    """Deprecated compatibility shim: content issue codes carry no repair level.
+
+    Operational pauses are handled by explicit issue evidence in
+    :func:`route_issues`; every content code deliberately returns the same
+    neutral local scope.
+    """
+    _ = code
+    return "L1"
 
 
 def strategy_for_level(level: RepairLevel) -> RepairStrategy:
@@ -93,29 +92,11 @@ def strategy_for_level(level: RepairLevel) -> RepairStrategy:
 
 
 def normalize_strategy(strategy: str) -> RepairStrategy:
-    """只接受当前局部修复策略；未知值安全收口到相邻窗口修复。"""
-    allowed = {
-        "normalize", "repair_current", "repair_window", "insert_shot",
-        "split_shot", "split_adjacent_shot", "delete_shot", "move_shot",
-        "waiting_human", "waiting_retry", "waiting_authorization",
-    }
-    if strategy not in allowed:
-        return "repair_window"
-    return strategy  # type: ignore[return-value]
-
-
-def _capacity_needs_adjacent_split(issues: list[Issue]) -> bool:
-    """容量超限且文案暗示不可单镜满足 → 相邻插镜/拆镜，绝不整集重规划。"""
-    if not any(
-        issue.code in {"SPOKEN_CAPACITY_EXCEEDED", "ACTION_CAPACITY_EXCEEDED"}
-        for issue in issues
-    ):
-        return False
-    return any(
-        issue.code == "ACTION_CAPACITY_EXCEEDED"
-        or any(token in (issue.message or "") for token in ("拆", "必保留", "NEEDS_REPLAN", "不可满足", "容量"))
-        for issue in issues
-    )
+    """Canonicalize public aliases without erasing an open semantic intent."""
+    normalized = str(strategy or "").strip()
+    if normalized == "split_shot":
+        return "split_adjacent_shot"
+    return normalized
 
 
 def upgrade_level(level: RepairLevel) -> RepairLevel:
@@ -157,8 +138,13 @@ def route_issues(
     next_shot_no: int | None = None,
     issue_fingerprint_counts: dict[str, int] | None = None,
     current_level: RepairLevel | None = None,
+    semantic_diagnosis: dict | None = None,
 ) -> RepairPlan:
-    """将 Issue 列表映射为局部 RepairPlan；相同 fingerprint 连续出现则升级层级，但不整版重做。"""
+    """Build candidates and select by semantic evidence, never by issue code.
+
+    ``semantic_diagnosis`` is open JSON.  Its stable interoperability surface is
+    ``scope`` and ``selected_strategy``; unknown dimensions remain preserved.
+    """
     normalized: list[Issue] = []
     for item in issues:
         if isinstance(item, Issue):
@@ -180,17 +166,18 @@ def route_issues(
             reason="empty_issues",
         )
 
-    codes = [issue.code for issue in normalized]
+    codes = [issue.code or "SEMANTIC_GAP_OTHER" for issue in normalized]
     messages = [issue.message for issue in normalized if issue.message]
-    preferred = "L0"
-    for code in codes:
-        lvl = preferred_level_for_code(code)
-        if LEVEL_ORDER.index(lvl) > LEVEL_ORDER.index(preferred):
-            preferred = lvl
+    diagnosis = dict(semantic_diagnosis or {})
 
-    capacity_split = _capacity_needs_adjacent_split(normalized)
-
-    if any(c == "PROVIDER_UNAVAILABLE" for c in codes):
+    # These are execution-state facts, not story semantics.  Prefer structured
+    # evidence and retain legacy codes only as a transport compatibility layer.
+    operational_kind = next((
+        str(issue.evidence.get("operational_kind") or "")
+        for issue in normalized
+        if issue.evidence.get("operational_kind")
+    ), "")
+    if operational_kind == "provider_unavailable" or any(c == "PROVIDER_UNAVAILABLE" for c in codes):
         return RepairPlan(
             level="L5",
             strategy="waiting_retry",
@@ -201,7 +188,7 @@ def route_issues(
             reason="provider_unavailable",
             pause_state="PAUSED_EXTERNAL",
         )
-    if any(c == "UPSTREAM_VERSION_CHANGED" for c in codes):
+    if operational_kind == "upstream_version_changed" or any(c == "UPSTREAM_VERSION_CHANGED" for c in codes):
         return RepairPlan(
             level="L5",
             strategy="waiting_authorization",
@@ -213,7 +200,15 @@ def route_issues(
             pause_state="WAITING_AUTHORIZATION",
         )
 
-    level: RepairLevel = preferred
+    scope_to_level: dict[str, RepairLevel] = {
+        "normalize": "L0",
+        "current_shot": "L1",
+        "adjacent_window": "L2",
+        "structure": "L3",
+        "multi_shot_structure": "L4",
+        "human": "L5",
+    }
+    level: RepairLevel = scope_to_level.get(str(diagnosis.get("scope") or ""), "L2")
     if current_level and LEVEL_ORDER.index(current_level) > LEVEL_ORDER.index(level):
         level = current_level
 
@@ -253,33 +248,139 @@ def route_issues(
     )
     touched = sorted({n for n in _extract_shot_nos(normalized) if n > 0} or {frontier})
 
-    # 容量不可满足：始终走拆镜/插镜，永不 replan_outline
-    if capacity_split:
-        strategy: RepairStrategy = "split_adjacent_shot" if level in {"L0", "L1", "L2"} else "split_shot"
-        return RepairPlan(
-            level=level,
-            strategy=strategy,
-            invalidation_frontier=frontier,
-            issue_codes=codes,
-            issue_messages=messages,
-            fingerprint=fp,
-            reason=f"route:{strategy}:capacity",
+    window = sorted(set([*touched, *[max(1, n - 1) for n in touched], *[n + 1 for n in touched]]))
+    candidates = [
+        RepairCandidate(
+            candidate_id="candidate-repair-current",
+            strategy="repair_current",
             touched_shot_nos=touched,
-        )
+            destructive_cost=0.1,
+            rationale="在原镜中重新组织证据、状态或节奏",
+        ),
+        RepairCandidate(
+            candidate_id="candidate-repair-window",
+            strategy="repair_window",
+            touched_shot_nos=window,
+            destructive_cost=0.2,
+            rationale="在相邻窗口重分配贡献并保持整集顺序",
+        ),
+        RepairCandidate(
+            candidate_id="candidate-insert",
+            strategy="insert_shot",
+            touched_shot_nos=touched,
+            destructive_cost=0.35,
+            rationale="仅在真实认知/状态缺口无法由现镜承载时增加支持镜",
+        ),
+        RepairCandidate(
+            candidate_id="candidate-split",
+            strategy="split_adjacent_shot",
+            touched_shot_nos=window,
+            destructive_cost=0.4,
+            rationale="把超出单窗口处理能力的贡献拆到相邻镜",
+        ),
+        RepairCandidate(
+            candidate_id="candidate-delete",
+            strategy="delete_shot",
+            touched_shot_nos=touched,
+            destructive_cost=0.7,
+            invariant_risks=["must_keep_event", "setup_payoff", "audience_handoff"],
+            rationale="仅当删除测试证明镜头无边际叙事贡献时删除",
+        ),
+        RepairCandidate(
+            candidate_id="candidate-move",
+            strategy="move_shot",
+            touched_shot_nos=window,
+            destructive_cost=0.6,
+            invariant_risks=["event_dag", "state_precondition", "audience_handoff"],
+            rationale="仅当事件拓扑和状态前置条件允许时移动",
+        ),
+    ]
+    by_strategy = {candidate.strategy: candidate for candidate in candidates}
+    raw_selected_strategy = str(diagnosis.get("selected_strategy") or "").strip()
+    selected_strategy = normalize_strategy(raw_selected_strategy)
+    selected_assessment = next((
+        item
+        for item in list(diagnosis.get("candidate_assessments") or [])
+        if normalize_strategy(str(item.get("strategy") or "")) == selected_strategy
+    ), None)
 
-    strategy = strategy_for_level(level)
-    # spine 缺失 → insert_shot；结局未收束 → insert_shot（追加 final）
-    if "SPINE_MISSING" in codes or "PLAN_EXHAUSTED_NOT_FINAL" in codes:
-        strategy = "insert_shot"
+    selected = by_strategy.get(selected_strategy)
+    if selected is None and raw_selected_strategy:
+        # An open strategy is executable only when it came through the semantic
+        # planner's typed-operation + complete-graph validation boundary.  A
+        # caller cannot smuggle an unknown strategy into a legacy branch merely
+        # by naming it or by attaching unverified JSON.
+        outline_operations = (
+            list(selected_assessment.get("outline_operations") or [])
+            if isinstance(selected_assessment, dict) else []
+        )
+        if diagnosis.get("execution_verified") is True and outline_operations:
+            digest = hashlib.sha256(
+                selected_strategy.encode("utf-8")
+            ).hexdigest()[:12]
+            selected = RepairCandidate(
+                candidate_id=f"candidate-open-{digest}",
+                strategy=selected_strategy,
+                touched_shot_nos=touched,
+                expected_narrative_gain=float(
+                    selected_assessment.get("expected_narrative_gain") or 0.0
+                ),
+                destructive_cost=float(
+                    selected_assessment.get("destructive_cost") or 0.0
+                ),
+                invariant_risks=list(
+                    selected_assessment.get("invariant_risks") or []
+                ),
+                semantic_assumptions=list(
+                    selected_assessment.get("semantic_assumptions") or []
+                ),
+                rationale=str(selected_assessment.get("rationale") or ""),
+            )
+            candidates.append(selected)
+            by_strategy[selected_strategy] = selected
+        else:
+            return RepairPlan(
+                level="L5",
+                strategy="waiting_human",
+                invalidation_frontier=frontier,
+                issue_codes=codes,
+                issue_messages=messages,
+                fingerprint=fp,
+                reason="semantic_strategy_not_executable",
+                pause_state="WAITING_HUMAN",
+                touched_shot_nos=touched,
+                candidates=candidates,
+                semantic_diagnosis=diagnosis,
+                needs_semantic_selection=True,
+            )
+    if selected is None:
+        selected = by_strategy["repair_window"]
+    candidate_scores = diagnosis.get("candidate_scores") or {}
+    normalized_scores = {
+        normalize_strategy(str(candidate_strategy)): score
+        for candidate_strategy, score in candidate_scores.items()
+    }
+    for candidate in candidates:
+        score = normalized_scores.get(normalize_strategy(candidate.strategy))
+        if isinstance(score, (int, float)):
+            candidate.expected_narrative_gain = float(score)
+    if not raw_selected_strategy:
+        # No semantic evidence: choose the least destructive content-preserving
+        # window and explicitly require semantic selection before destructive edits.
+        selected = by_strategy["repair_window"]
     return RepairPlan(
         level=level,
-        strategy=strategy,
+        strategy=selected.strategy,
         invalidation_frontier=frontier,
         issue_codes=codes,
         issue_messages=messages,
         fingerprint=fp,
-        reason=f"route:{level}:{strategy}",
-        touched_shot_nos=touched,
+        reason=f"constraint_selection:{selected.candidate_id}",
+        touched_shot_nos=selected.touched_shot_nos,
+        candidates=candidates,
+        selected_candidate_id=selected.candidate_id,
+        semantic_diagnosis=diagnosis,
+        needs_semantic_selection=not bool(raw_selected_strategy),
     )
 
 
