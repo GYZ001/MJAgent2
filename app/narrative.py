@@ -3015,6 +3015,11 @@ def compute_narrative_metrics(
         (result.audience_prior_id, result.target_delta_id)
         for result in (report.target_delta_results if report else [])
     }
+    calibration_ready = bool(
+        human_calibration
+        and human_calibration.get("ready") is True
+        and human_calibration.get("status") == "calibrated"
+    )
     ready = (
         not validate_storyboard_narrative(board, screenplay, complete=True)
         and report is not None
@@ -3024,6 +3029,7 @@ def compute_narrative_metrics(
         and bool(report.observation_ids)
         and actual_review_keys == expected_review_keys
         and all(result.result == "satisfied" for result in report.target_delta_results)
+        and calibration_ready
     )
     def ratio(numerator: int | float, denominator: int | float) -> float | None:
         return float(numerator) / float(denominator) if denominator else None
@@ -3218,11 +3224,14 @@ def compute_narrative_metrics(
     )
     correlation = None
     if human_calibration:
-        correlation = blind_ai_human_comprehension_correlation(
-            list(human_calibration.get("ai_scores") or []),
-            list(human_calibration.get("human_scores") or []),
-            min_samples=int(human_calibration.get("min_samples") or 8),
-        )["correlation"]
+        if isinstance(human_calibration.get("calibration_score"), (int, float)):
+            correlation = float(human_calibration["calibration_score"])
+        elif human_calibration.get("ai_scores") or human_calibration.get("human_scores"):
+            correlation = blind_ai_human_comprehension_correlation(
+                list(human_calibration.get("ai_scores") or []),
+                list(human_calibration.get("human_scores") or []),
+                min_samples=int(human_calibration.get("min_samples") or 8),
+            )["correlation"]
 
     metrics = {
         "contract_present": True,

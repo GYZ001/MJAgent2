@@ -1191,10 +1191,23 @@ def test_narrative_ready_requires_a_complete_satisfied_result_for_every_prior_pa
         _board(),
         complete_report,
         observations=observations,
+        human_calibration={
+            "ready": True,
+            "status": "calibrated",
+            "calibration_score": 1.0,
+        },
     )
 
     assert complete_metrics["low_percentile_understanding"] == 1.0
     assert complete_metrics["narrative_ready"] is True
+
+    uncalibrated_metrics = compute_narrative_metrics(
+        screenplay,
+        _board(),
+        complete_report,
+        observations=observations,
+    )
+    assert uncalibrated_metrics["narrative_ready"] is False
 
     incomplete_report = complete_report.model_copy(deep=True)
     incomplete_report.target_delta_results.pop()
@@ -1204,6 +1217,11 @@ def test_narrative_ready_requires_a_complete_satisfied_result_for_every_prior_pa
         _board(),
         incomplete_report,
         observations=observations,
+        human_calibration={
+            "ready": True,
+            "status": "calibrated",
+            "calibration_score": 1.0,
+        },
     )
 
     assert incomplete_metrics["narrative_ready"] is False

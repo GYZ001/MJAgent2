@@ -3723,6 +3723,7 @@ def episode_detail(episode_id: str, view: str | None = None):
             review_report,
             outline=narrative_outline,
             observations=review_observations,
+            human_calibration=ep.get("narrative_calibration_summary"),
         )
     # 预估只按模型选择的实际分镜时长累计；单集不设总时长产品上限。
     ep["cost_cny"] = worker.episode_cost(episode_id)

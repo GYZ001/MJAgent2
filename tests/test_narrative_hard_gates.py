@@ -44,6 +44,7 @@ from test_narrative_continuity import (
     _paths,
     _review_dimension_results,
     _screenplay,
+    _episode_6_relationship_golden,
     _settled_followup_shot,
     _shot,
 )
@@ -341,6 +342,66 @@ def test_functional_repeat_requires_real_delta_and_causal_dependency() -> None:
     plan.events[1].causal_parent_ids = []
     assert "ACTION_FUNCTIONAL_REPEAT_CAUSAL_GAP" in _codes(
         validate_screenplay_narrative(screenplay, require=True)
+    )
+
+
+def test_episode_6_full_accident_matrix_is_caught_by_general_relations() -> None:
+    screenplay, board = _episode_6_relationship_golden()
+
+    # “到达后再逃离”的根因是事件拓扑颠倒，与地点和作品名无关。
+    reversed_board = board.model_copy(deep=True)
+    reversed_board.shots[0], reversed_board.shots[1] = (
+        reversed_board.shots[1],
+        reversed_board.shots[0],
+    )
+    assert "STORYBOARD_EVENT_ORDER_INVALID" in _codes(
+        validate_storyboard_narrative(reversed_board, screenplay)
+    )
+
+    # “重复修炼”是同一 primary_action 的重复所有权。
+    repeated_training = board.model_copy(deep=True)
+    duplicate = repeated_training.shots[-1].model_copy(deep=True)
+    duplicate.shot_no = len(repeated_training.shots) + 1
+    duplicate.shot_id = "SH-E6-DUPLICATE-TRAINING"
+    duplicate.shot_contribution.shot_contribution_id = (
+        "SCN-E6-DUPLICATE-TRAINING"
+    )
+    repeated_training.shots.append(duplicate)
+    assert "ACTION_PRIMARY_OWNER_DUPLICATE" in _codes(
+        validate_storyboard_narrative(repeated_training, screenplay)
+    )
+
+    # “灵泉揭示/人物接收/决定挤在一镜”由联合处理时间拦截。
+    overloaded_reveal = board.model_copy(deep=True)
+    reveal = overloaded_reveal.shots[2]
+    reveal.capacity_budget.inference_processing_s = 0.0
+    reveal.shot_contribution.target_delta_ids = ["XD-cold", "XD-context"]
+    assert "SHOT_INFERENCE_CAPACITY_EXCEEDED" in _codes(
+        validate_storyboard_narrative(overloaded_reveal, screenplay)
+    )
+
+    # “铜镜触发藏在抓鸡动作中”由竞争注意证据预算拦截。
+    attention_collision = board.model_copy(deep=True)
+    evidence = next(
+        item for item in screenplay.narrative_plan.evidence
+        if item.evidence_id == "EV-E6-REVEAL"
+    )
+    previous_duration = evidence.planned_duration_s
+    previous_competing = list(evidence.competing_attention_ids)
+    evidence.planned_duration_s = 2.0
+    evidence.competing_attention_ids = ["unrelated-visible-action"]
+    attention_collision.shots[2].capacity_budget.attention_switch_s = 0.0
+    assert "SHOT_ATTENTION_CAPACITY_EXCEEDED" in _codes(
+        validate_storyboard_narrative(attention_collision, screenplay)
+    )
+    evidence.planned_duration_s = previous_duration
+    evidence.competing_attention_ids = previous_competing
+
+    # “鹿实验后生死/位置回退”归入状态回退，不靠鹿或铜镜关键词。
+    regressed_result = board.model_copy(deep=True)
+    regressed_result.shots[-1].planned_delta_remove_fact_ids = ["F-before"]
+    assert "SHOT_STATE_REGRESSION" in _codes(
+        validate_storyboard_narrative(regressed_result, screenplay)
     )
 
 
