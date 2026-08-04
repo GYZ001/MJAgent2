@@ -8,7 +8,13 @@ from types import SimpleNamespace
 import pytest
 
 from app import db
-from app.domain.storyboard_ops import _board_from_shot_rows, _finalize_storyboard_evidence
+from app.domain.storyboard_ops import (
+    _board_from_shot_rows,
+    _ensure_current_storyboard_shot_artifacts,
+    _finalize_storyboard_evidence,
+    _insert_storyboard_shot,
+    _storyboard_shot_evidence_requires_rebind,
+)
 from app.evidence import repository as evidence_repository
 from app.harness.types import EvidenceArtifact
 from app.production.revision import ensure_production_revision
@@ -35,11 +41,13 @@ from app.storyboard_supervisor import (
     _deterministic_dialogue_framing_candidate,
     _merge_repair_candidate,
     _migrate_checkpoint,
+    _open_shot_gap,
     _repair_feedback_for_shot,
     _recover_truncated_outline_from_approved_artifact,
     _repair_candidate_made_progress,
     _retarget_spine_repair_brief,
     _retarget_spine_repair_shot,
+    _shot_checkpoint_payload,
     _storyboard_generation_is_complete,
     _storyboard_hash,
     _validated_candidate_projection,
@@ -942,6 +950,67 @@ def test_candidate_merge_never_mutates_cas_baseline(repair_db) -> None:
 
     assert len(merged.shots) == len(current.shots) + 1
     assert _storyboard_hash(current) == baseline_hash
+
+
+def test_candidate_checkpoint_preserves_evidence_artifact_id(repair_db) -> None:
+    conn, _screenplay = repair_db
+    current = _current_board(conn)
+    inserted = _shot(2, action="插入候选")
+    object.__setattr__(inserted, "evidence_artifact_id", "art-inserted")
+    checkpoint = SupervisorCheckpoint(
+        episode_id="e1",
+        last_repair={"mode": "insert", "window_start": 2},
+        repair_candidate_shots=[_shot_checkpoint_payload(inserted)],
+    )
+
+    merged = _merge_repair_candidate(current, checkpoint)
+
+    assert getattr(merged.shots[1], "evidence_artifact_id", None) == "art-inserted"
+
+
+def test_publish_rebinds_inserted_and_shifted_shots_to_current_evidence(
+    repair_db,
+) -> None:
+    conn, screenplay = repair_db
+    old_shot = _shot(2)
+    old_artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="storyboard_shot",
+        scope_type="storyboard_checkpoint",
+        scope_id="e1:2",
+        status="approved",
+        trust_level="T2",
+        content=old_shot.model_dump(mode="json"),
+    ))
+    conn.execute(
+        "UPDATE shots SET storyboard_artifact_id=? WHERE id='s2'",
+        (old_artifact["id"],),
+    )
+    conn.commit()
+
+    _open_shot_gap(conn, "e1", 2)
+    inserted = _shot(2, action="新增主线镜头")
+    inserted.is_final = False
+    _insert_storyboard_shot(conn, "e1", screenplay, inserted, "sp1")
+    conn.commit()
+    board = _current_board(conn)
+
+    assert _storyboard_shot_evidence_requires_rebind(conn, "e1", board) is True
+    rows = _ensure_current_storyboard_shot_artifacts(conn, "e1", board)
+
+    assert len(rows) == 4
+    assert _storyboard_shot_evidence_requires_rebind(conn, "e1", board) is False
+    for row, shot in zip(rows, board.shots):
+        artifact = evidence_repository.get_artifact(row["storyboard_artifact_id"])
+        assert artifact is not None
+        assert artifact["scope_id"] == f"e1:{shot.shot_no}"
+        assert artifact["status"] == "approved"
+        assert artifact["content_hash"] == evidence_repository.content_hash(
+            shot.model_dump(mode="json")
+        )
+    historical = evidence_repository.get_artifact(old_artifact["id"])
+    assert historical is not None
+    assert historical["content"]["shot_no"] == 2
+    assert historical["status"] == "superseded"
 
 
 def test_validated_projection_does_not_leak_unrelated_derived_fields(repair_db) -> None:

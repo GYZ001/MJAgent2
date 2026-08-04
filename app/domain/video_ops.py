@@ -640,11 +640,16 @@ def confirm_episode_core(
         ).fetchone()
         stored_board_hash = stored["content_hash"] if stored else None
     storyboard_snapshot_changed = stored_board_hash != current_board_hash
+    from app.domain.storyboard_ops import _storyboard_shot_evidence_requires_rebind
+    storyboard_shot_evidence_changed = _storyboard_shot_evidence_requires_rebind(
+        conn, episode_id, board,
+    )
     if (
         character_artifact_ids
         or normalized_fields_changed
         or not storyboard_artifact_id
         or storyboard_snapshot_changed
+        or storyboard_shot_evidence_changed
     ):
         storyboard_artifact_id = _finalize_storyboard_evidence(episode_id, board)
     if storyboard_artifact_id:

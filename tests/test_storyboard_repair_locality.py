@@ -81,3 +81,42 @@ def test_insert_opens_gap_without_deleting_suffix() -> None:
         ("s3", 4),
         ("s4", 5),
     ]
+
+
+def test_insert_preserves_immutable_checkpoint_until_publish_rebind() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE shots("
+        "id TEXT PRIMARY KEY, episode_id TEXT NOT NULL, shot_no INTEGER NOT NULL, "
+        "storyboard_artifact_id TEXT, UNIQUE(episode_id, shot_no))"
+    )
+    conn.execute(
+        "CREATE TABLE artifacts("
+        "id TEXT PRIMARY KEY,type TEXT,scope_type TEXT,scope_id TEXT,version INTEGER,"
+        "status TEXT,superseded_by_artifact_id TEXT,stale_reason TEXT,approved_at REAL)"
+    )
+    conn.executemany(
+        "INSERT INTO artifacts VALUES(?, 'storyboard_shot', 'storyboard_checkpoint', ?, 1, ?, ?, NULL, 1)",
+        [
+            ("a2", "e1:2", "superseded", "replacement"),
+            ("a3", "e1:3", "approved", None),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO shots VALUES(?, 'e1', ?, ?)",
+        [("s2", 2, "a2"), ("s3", 3, "a3")],
+    )
+
+    assert _open_shot_gap(conn, "e1", 2) == 2
+
+    rows = conn.execute(
+        """SELECT s.id,s.shot_no,s.storyboard_artifact_id,
+                  a.scope_id,a.status,a.superseded_by_artifact_id
+             FROM shots s JOIN artifacts a ON a.id=s.storyboard_artifact_id
+            ORDER BY s.shot_no"""
+    ).fetchall()
+    assert [tuple(row) for row in rows] == [
+        ("s2", 3, "a2", "e1:2", "superseded", "replacement"),
+        ("s3", 4, "a3", "e1:3", "approved", None),
+    ]

@@ -864,6 +864,7 @@ async def test_noop_patch_attempts_consume_activation_budget(monkeypatch):
 async def test_resume_replays_persisted_identity_before_first_qa(monkeypatch):
     from app.evidence import repository as evidence_repository
     from app.production import screenplay_repair
+    from app.portraits import apply_screenplay_character_resolutions
 
     revision = ensure_production_revision(
         episode_id="ep_p",
@@ -887,12 +888,23 @@ async def test_resume_replays_persisted_identity_before_first_qa(monkeypatch):
         working_artifact_id=artifact["id"],
     )
 
+    identity_replay_count = 0
+
+    def apply_identity_once(candidate, resolutions):
+        nonlocal identity_replay_count
+        identity_replay_count += 1
+        return apply_screenplay_character_resolutions(candidate, resolutions)
+
     def stop_after_identity(candidate, **_kwargs):
         assert "青衣人" not in candidate.scene_outline[0].characters
         assert "路人甲" in candidate.scene_outline[0].characters
         assert "路人甲：此路不通。" in candidate.full_script_text
         raise RuntimeError("identity replay verified")
 
+    monkeypatch.setattr(
+        "app.portraits.apply_screenplay_character_resolutions",
+        apply_identity_once,
+    )
     monkeypatch.setattr(screenplay_repair, "run_screenplay_qa", stop_after_identity)
 
     with pytest.raises(RuntimeError, match="identity replay verified"):
@@ -917,6 +929,7 @@ async def test_resume_replays_persisted_identity_before_first_qa(monkeypatch):
     updated = screenplay_repair.get_production_revision(revision.id)
     assert updated is not None
     assert updated.working_artifact_id != artifact["id"]
+    assert identity_replay_count == 1
 
 
 @pytest.mark.asyncio

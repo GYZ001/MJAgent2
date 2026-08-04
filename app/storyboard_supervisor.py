@@ -755,10 +755,34 @@ def _repair_context_shots(conn, cp: SupervisorCheckpoint, episode_no: int) -> li
     candidates: list[Shot] = []
     for raw in cp.repair_candidate_shots:
         try:
-            candidates.append(Shot.model_validate(raw))
+            candidates.append(_shot_from_checkpoint(raw))
         except (TypeError, ValueError):
             continue
     return [*prefix, *candidates]
+
+
+def _shot_checkpoint_payload(
+    shot: Shot,
+    *,
+    fallback: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Persist runtime evidence lineage alongside the schema-bound shot."""
+    payload = shot.model_dump(mode="json")
+    artifact_id = (
+        getattr(shot, "evidence_artifact_id", None)
+        or (fallback or {}).get("_evidence_artifact_id")
+    )
+    if artifact_id:
+        payload["_evidence_artifact_id"] = str(artifact_id)
+    return payload
+
+
+def _shot_from_checkpoint(raw: dict[str, Any]) -> Shot:
+    shot = Shot.model_validate(raw)
+    artifact_id = raw.get("_evidence_artifact_id")
+    if artifact_id:
+        object.__setattr__(shot, "evidence_artifact_id", str(artifact_id))
+    return shot
 
 
 def _board_from_rows(rows, episode_no: int) -> Storyboard:
@@ -779,7 +803,7 @@ def _merge_repair_candidate(
         Shot.model_validate(shot.model_dump(mode="json"))
         for shot in current.shots
     ]
-    candidates = [Shot.model_validate(raw) for raw in cp.repair_candidate_shots]
+    candidates = [_shot_from_checkpoint(raw) for raw in cp.repair_candidate_shots]
     if mode == "insert":
         merged = [*current_shots[: start - 1], *candidates, *current_shots[start - 1 :]]
         for shot_no, shot in enumerate(merged, start=1):
@@ -822,7 +846,15 @@ def _validated_candidate_projection(
         ]
     projected_cp = cp.model_copy(deep=True)
     projected_cp.repair_candidate_shots = [
-        shot.model_dump(mode="json") for shot in selected
+        _shot_checkpoint_payload(
+            shot,
+            fallback=(
+                cp.repair_candidate_shots[index]
+                if index < len(cp.repair_candidate_shots)
+                else None
+            ),
+        )
+        for index, shot in enumerate(selected)
     ]
     return _merge_repair_candidate(current, projected_cp)
 
@@ -1704,7 +1736,7 @@ async def run_storyboard_supervisor(
                     repair_brief,
                     spine_target,
                 )
-                cp.repair_candidate_shots.append(shot.model_dump(mode="json"))
+                cp.repair_candidate_shots.append(_shot_checkpoint_payload(shot))
                 cp.last_repair = {
                     **(cp.last_repair or {}),
                     "status": "candidate_generating",
@@ -2230,7 +2262,7 @@ def _apply_repair(
             if target is not None else None
         )
         if deterministic is not None:
-            cp.repair_candidate_shots = [deterministic.model_dump(mode="json")]
+            cp.repair_candidate_shots = [_shot_checkpoint_payload(deterministic)]
             cp.last_repair = {
                 **cp.last_repair,
                 "status": "candidate_generating",

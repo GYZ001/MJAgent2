@@ -560,6 +560,118 @@ def _persist_storyboard_character_policy_repairs(
     return artifact_ids
 
 
+def _ensure_current_storyboard_shot_artifacts(
+    conn,
+    episode_id: str,
+    board: Storyboard,
+):
+    """Bind every current shot to immutable evidence for its current number and content."""
+    rows = conn.execute(
+        "SELECT id,shot_no,source_excerpt,storyboard_artifact_id FROM shots "
+        "WHERE episode_id=? ORDER BY shot_no",
+        (episode_id,),
+    ).fetchall()
+    if len(rows) != len(board.shots):
+        raise RuntimeError(
+            f"分镜证据对账失败：投影 {len(rows)} 镜，待发布内容 {len(board.shots)} 镜"
+        )
+    contract_version = get_contract("storyboard").version
+    for row, shot in zip(rows, board.shots):
+        if int(row["shot_no"]) != int(shot.shot_no):
+            raise RuntimeError("分镜证据对账失败：镜头顺序与待发布内容不一致")
+        content = shot.model_dump(mode="json")
+        current_id = row["storyboard_artifact_id"]
+        if _storyboard_shot_artifact_matches(
+            conn, episode_id, shot, current_id,
+        ):
+            continue
+
+        artifact = evidence_repository.create_artifact(EvidenceArtifact(
+            type="storyboard_shot",
+            scope_type="storyboard_checkpoint",
+            scope_id=f"{episode_id}:{shot.shot_no}",
+            status="candidate",
+            trust_level="T1",
+            content=content,
+            parent_artifact_ids=[str(current_id)] if current_id else [],
+            contract_version=contract_version,
+        ))
+        evaluation = Evaluation(
+            evaluator_type="deterministic",
+            evaluator_name="storyboard_projection_rebind",
+            evaluator_version=contract_version,
+            status="passed",
+            hard_gate_passed=True,
+            score=100,
+            evidence={
+                "episode_id": episode_id,
+                "shot_no": int(shot.shot_no),
+                "previous_artifact_id": current_id,
+                "reason": "current shot projection and immutable evidence were realigned",
+            },
+        )
+        artifact = evidence_repository.commit_artifact(
+            None, artifact["id"], [evaluation],
+        )
+        conn.execute(
+            "UPDATE shots SET storyboard_artifact_id=? WHERE id=?",
+            (artifact["id"], row["id"]),
+        )
+        conn.commit()
+
+    return conn.execute(
+        "SELECT id,shot_no,source_excerpt,storyboard_artifact_id FROM shots "
+        "WHERE episode_id=? ORDER BY shot_no",
+        (episode_id,),
+    ).fetchall()
+
+
+def _storyboard_shot_artifact_matches(
+    conn,
+    episode_id: str,
+    shot: Shot,
+    artifact_id: str | None,
+) -> bool:
+    if not artifact_id:
+        return False
+    current = conn.execute(
+        """SELECT type,scope_type,scope_id,status,content_hash
+             FROM artifacts WHERE id=?""",
+        (artifact_id,),
+    ).fetchone()
+    return bool(
+        current
+        and current["type"] == "storyboard_shot"
+        and current["scope_type"] == "storyboard_checkpoint"
+        and current["scope_id"] == f"{episode_id}:{shot.shot_no}"
+        and current["status"] == "approved"
+        and current["content_hash"] == evidence_repository.content_hash(
+            shot.model_dump(mode="json")
+        )
+    )
+
+
+def _storyboard_shot_evidence_requires_rebind(
+    conn,
+    episode_id: str,
+    board: Storyboard,
+) -> bool:
+    rows = conn.execute(
+        "SELECT shot_no,storyboard_artifact_id FROM shots "
+        "WHERE episode_id=? ORDER BY shot_no",
+        (episode_id,),
+    ).fetchall()
+    if len(rows) != len(board.shots):
+        return True
+    return any(
+        int(row["shot_no"]) != int(shot.shot_no)
+        or not _storyboard_shot_artifact_matches(
+            conn, episode_id, shot, row["storyboard_artifact_id"],
+        )
+        for row, shot in zip(rows, board.shots)
+    )
+
+
 def _finalize_storyboard_evidence(
     episode_id: str,
     board: Storyboard,
@@ -585,10 +697,9 @@ def _finalize_storyboard_evidence(
         # 避免下次重试继续读取已经证伪的历史场景绑定。
         conn.commit()
     project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
-    shot_rows = conn.execute(
-        "SELECT id,source_excerpt,storyboard_artifact_id FROM shots "
-        "WHERE episode_id=? ORDER BY shot_no", (episode_id,)
-    ).fetchall()
+    shot_rows = _ensure_current_storyboard_shot_artifacts(
+        conn, episode_id, board,
+    )
     from app.storyboard_workspace import verify_or_bind_existing_excerpt
     for row in shot_rows:
         try:
@@ -597,12 +708,36 @@ def _finalize_storyboard_evidence(
             )
         except Exception as exc:  # noqa: BLE001 - evidence finding is score-only at publish
             findings.append(f"镜头来源证据未绑定：{exc}")
-    parents = [
-        artifact_id for artifact_id in (
-            project["bible_artifact_id"], ep["screenplay_artifact_id"],
-            *(row["storyboard_artifact_id"] for row in shot_rows),
-        ) if artifact_id
-    ]
+    shot_parent_ids: list[str] = []
+    for row in shot_rows:
+        artifact_id = row["storyboard_artifact_id"]
+        if not artifact_id:
+            continue
+        shot_parent_ids.append(str(artifact_id))
+        artifact_row = conn.execute(
+            "SELECT parent_artifact_ids_json FROM artifacts WHERE id=?",
+            (artifact_id,),
+        ).fetchone()
+        if artifact_row:
+            try:
+                shot_parent_ids.extend(
+                    str(item)
+                    for item in json.loads(
+                        artifact_row["parent_artifact_ids_json"] or "[]"
+                    )
+                    if item
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+    parents = list(dict.fromkeys(
+        str(artifact_id)
+        for artifact_id in (
+            project["bible_artifact_id"],
+            ep["screenplay_artifact_id"],
+            *shot_parent_ids,
+        )
+        if artifact_id
+    ))
     contract_version = get_contract("storyboard").version
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type="storyboard",

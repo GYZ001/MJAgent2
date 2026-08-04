@@ -45,6 +45,7 @@ from app.renderability import OVERDETAIL_TERMS
 
 
 MAX_REPAIR_ACTIVATION_PATCHES = 12
+MAX_REPAIR_ACTIVATION_PASSES = 32
 MAX_STRATEGY_ATTEMPTS_PER_ISSUE = 3
 SCREENPLAY_REPAIR_PLANNER_VERSION = "screenplay-repair-10"
 NON_WAIVABLE_SCREENPLAY_ISSUE_CODES = frozenset({
@@ -913,9 +914,14 @@ async def run_screenplay_production(
     # ---- Repair loop ----
     patches_this_activation = 0
     attempts_this_activation = 0
+    passes_this_activation = 0
     prev_issue_fps: set[str] = set(checkpoint.get("last_issue_fingerprints") or [])
 
-    while attempts_this_activation < MAX_REPAIR_ACTIVATION_PATCHES:
+    while (
+        attempts_this_activation < MAX_REPAIR_ACTIVATION_PATCHES
+        and passes_this_activation < MAX_REPAIR_ACTIVATION_PASSES
+    ):
+        passes_this_activation += 1
         rev = get_production_revision(rev.id)  # type: ignore[assignment]
         working_id = rev.working_artifact_id
         assert working_id
@@ -970,7 +976,12 @@ async def run_screenplay_production(
                         "changes": identity_changes,
                     },
                 )
-            continue
+            # Continue QA from the normalized artifact in this iteration. A
+            # separate loop turn here is unbounded by the patch budget and can
+            # persist duplicate artifacts forever if normalization oscillates
+            # or a stale worker repeatedly reports the same material change.
+            working_id = identity_artifact["id"]
+            artifact_hash = identity_hash
 
         issues, evaluation = run_screenplay_qa(
             script,
