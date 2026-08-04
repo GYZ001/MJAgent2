@@ -6,6 +6,7 @@ import sqlite3
 from app import db, storyboard_workspace
 from app.domain import common, projects, storyboard_ops
 from app.media_pipeline.status import episode_pipeline_statuses
+from app.schemas import EpisodeScreenplay
 
 
 def _conn() -> sqlite3.Connection:
@@ -266,6 +267,44 @@ def test_review_detail_omits_oversized_legacy_inputs(monkeypatch) -> None:
     assert versions["v1"]["image_inputs"]["omitted_for_size"] is False
     assert versions["v2"]["image_inputs"]["omitted_for_size"] is True
     assert versions["v2"]["image_inputs"]["reference_images"] == []
+    assert review["video_status"] == "adopted"
+
+
+def test_review_detail_reads_published_artifact_when_write_authority_is_stale(
+    monkeypatch,
+) -> None:
+    conn = _conn()
+    _seed_episode(conn)
+    conn.execute(
+        """UPDATE episodes
+              SET screenplay_artifact_id='screenplay-published',
+                  published_screenplay_artifact_id='screenplay-published'
+            WHERE id='e1'"""
+    )
+    conn.commit()
+    _patch_storyboard_db(monkeypatch, conn)
+    monkeypatch.setattr(
+        "app.production.screenplay_authority.resolve_downstream_screenplay",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ValueError("完成凭证 input_fingerprint 已变化")
+        ),
+    )
+    monkeypatch.setattr(
+        "app.production.screenplay_authority.episode_requires_immutable_screenplay_authority",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "app.production.patch.load_screenplay_from_artifact",
+        lambda artifact_id: EpisodeScreenplay(
+            episode_no=1,
+            title=f"published:{artifact_id}",
+            full_script_text="【场1】日 / 室内\n角色完成动作。",
+        ),
+    )
+
+    review = storyboard_ops.shot_review_detail("s1")
+
+    assert review["id"] == "s1"
     assert review["video_status"] == "adopted"
 
 
