@@ -47,7 +47,7 @@ from app.renderability import DIALOGUE_CHAIN_TURNS_HARD_MAX, OVERDETAIL_TERMS
 
 MAX_REPAIR_ACTIVATION_PATCHES = 12
 MAX_REPAIR_ACTIVATION_PASSES = 32
-MAX_STRATEGY_ATTEMPTS_PER_ISSUE = 3
+MAX_STRATEGY_ATTEMPTS_PER_ISSUE = 5
 SCREENPLAY_REPAIR_PLANNER_VERSION = "screenplay-repair-13"
 NON_WAIVABLE_SCREENPLAY_ISSUE_CODES = frozenset({
     "CHARACTER_IDENTITY_UNRESOLVED",
@@ -2050,6 +2050,72 @@ def _narrative_collection_for_node(
     return matches[0] if len(matches) == 1 else None
 
 
+def _expand_single_action_event_closure(
+    operations: list[PatchOperation],
+    plan_data: dict[str, Any],
+) -> list[PatchOperation]:
+    """Keep a one-action event's fact transition fields structurally aligned."""
+    expanded = [operation.model_copy(deep=True) for operation in operations]
+    existing = {
+        (
+            str((operation.target or {}).get("id") or ""),
+            re.split(r"[./]+", operation.path.strip("/"))[-1],
+        )
+        for operation in expanded
+    }
+    events = plan_data.get("events")
+    actions = plan_data.get("atomic_actions")
+    if not isinstance(events, list) or not isinstance(actions, list):
+        return expanded
+
+    for operation in list(expanded):
+        if operation.op != "replace_field":
+            continue
+        target = operation.target or {}
+        node_id = str(target.get("id") or "").strip()
+        collection = str(target.get("collection") or "").strip()
+        if not collection and node_id:
+            collection = _narrative_collection_for_node(plan_data, node_id) or ""
+        field = re.split(r"[./]+", operation.path.strip("/"))[-1]
+        if collection != "events" or field not in {
+            "precondition_fact_ids", "effects_add", "effects_remove",
+        }:
+            continue
+        event = _find_narrative_node(events, node_id)
+        if event is None:
+            continue
+        action_ids = [
+            str(action_id)
+            for action_id in (event.get("action_ids") or [])
+            if str(action_id).strip()
+        ]
+        if len(action_ids) != 1:
+            continue
+        action = _find_narrative_node(actions, action_ids[0])
+        old_value = event.get(field)
+        if (
+            action is None
+            or not isinstance(old_value, list)
+            or not isinstance(operation.value, list)
+            or action.get(field) != old_value
+            or (action_ids[0], field) in existing
+        ):
+            continue
+        expanded.append(PatchOperation(
+            op="replace_field",
+            path=field,
+            value=list(operation.value),
+            target={
+                "kind": "narrative_node",
+                "collection": "atomic_actions",
+                "id": action_ids[0],
+                "derived_from_event_id": node_id,
+            },
+        ))
+        existing.add((action_ids[0], field))
+    return expanded
+
+
 def _resolve_narrative_patch_owner(
     nodes: list[Any],
     *,
@@ -2396,6 +2462,12 @@ async def _llm_field_patch_once(
         return []
 
     plan_data = script.narrative_plan.model_dump(mode="json")
+    operations = _expand_single_action_event_closure(
+        operations,
+        plan_data,
+    )
+    if len(operations) > 3:
+        return []
     safe: list[PatchOperation] = []
     for operation in operations:
         target = operation.target or {}
@@ -2590,8 +2662,15 @@ async def _llm_field_patch_once(
     if issue.message in candidate_errors:
         if rejection_feedback is not None:
             rejection_feedback.append(
-                "候选应用后当前错误仍然存在，说明缺失关系没有被实际补齐："
-                f"{issue.message}",
+                "以下候选操作隔离应用后，当前错误仍然存在，说明缺失关系没有被"
+                "实际补齐。候选操作="
+                + json.dumps(
+                    [operation.model_dump(mode="json") for operation in safe],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )[:2400]
+                + "；错误="
+                + issue.message,
             )
         return []
     introduced = sorted(set(candidate_errors) - baseline_errors)

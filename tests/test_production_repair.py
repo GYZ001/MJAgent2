@@ -1807,6 +1807,50 @@ def test_narrative_node_alias_resolves_unique_schema_collection():
     assert _narrative_collection_for_node(plan, "missing") is None
 
 
+def test_event_fact_patch_expands_to_its_single_atomic_action():
+    from app.production.patch import PatchOperation
+    from app.production.screenplay_repair import (
+        _expand_single_action_event_closure,
+    )
+
+    plan = NarrativeContinuityPlan.model_validate({
+        "scope_id": "ep_p",
+        "events": [{
+            "event_id": "E4",
+            "action_ids": ["A2"],
+            "effects_add": ["F-5"],
+        }],
+        "atomic_actions": [{
+            "action_id": "A2",
+            "actor_ids": ["甲"],
+            "semantic_intent": "完成动作",
+            "effects_add": ["F-5"],
+            "completion_condition": "动作完成",
+            "temporal_phases": [{
+                "phase_id": "A2/P1",
+                "start_condition": "开始",
+                "end_condition": "完成",
+                "estimated_min_s": 1.0,
+            }],
+        }],
+    }).model_dump(mode="json")
+    operations = [PatchOperation(
+        op="replace_field",
+        path="effects_add",
+        value=[],
+        target={"kind": "event", "id": "E4"},
+    )]
+
+    expanded = _expand_single_action_event_closure(operations, plan)
+
+    assert len(expanded) == 2
+    derived = expanded[1]
+    assert derived.path == "effects_add"
+    assert derived.value == []
+    assert derived.target["collection"] == "atomic_actions"
+    assert derived.target["id"] == "A2"
+
+
 def test_dialogue_turn_target_derives_chain_and_index_from_stable_turn_id():
     from app.production.screenplay_document import screenplay_to_document
     from app.production.screenplay_repair import (
