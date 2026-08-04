@@ -107,6 +107,48 @@ def _latest_narrative_review_summary(conn, episode_id: str) -> dict | None:
     }
 
 
+def _narrative_calibration_summary(episode: dict) -> dict:
+    bound_artifact_id = str(
+        episode.get("narrative_calibration_artifact_id") or ""
+    )
+    try:
+        from app.narrative_calibration import require_current_calibration_authority
+
+        authority = require_current_calibration_authority()
+    except Exception as exc:  # noqa: BLE001 - presentation of a blocked gate
+        errors = list(getattr(exc, "errors", []) or [str(exc)])
+        return {
+            "ready": False,
+            "status": "needs_review",
+            "artifact_id": None,
+            "bound_artifact_id": bound_artifact_id or None,
+            "model_pass_threshold": None,
+            "blockers": errors,
+        }
+    return {
+        "ready": bool(
+            bound_artifact_id
+            and bound_artifact_id == authority.artifact_id
+            and episode.get("narrative_status") == "ready"
+        ),
+        "status": (
+            "calibrated"
+            if bound_artifact_id == authority.artifact_id
+            else "awaiting_republish"
+        ),
+        "artifact_id": authority.artifact_id,
+        "bound_artifact_id": bound_artifact_id or None,
+        "model_pass_threshold": authority.model_pass_threshold,
+        "calibration_score": authority.report.calibration_score,
+        "sample_summary": authority.report.sample_summary,
+        "blockers": (
+            []
+            if bound_artifact_id == authority.artifact_id
+            else ["当前分镜尚未绑定最新真人一次观看校准，请重新完成审读发布"]
+        ),
+    }
+
+
 def _apply_contract_to_public_shot(target: dict) -> None:
     from app.continuity import apply_shot_contract, spoken_chars_from_shot
     from app.spoken_contract import max_speech_chars
@@ -3495,6 +3537,12 @@ def episode_detail(episode_id: str, view: str | None = None):
     ep["narrative_review_summary"] = (
         _latest_narrative_review_summary(conn, episode_id)
         if narrative_workspace else None
+    )
+    ep["narrative_calibration_summary"] = (
+        _narrative_calibration_summary(ep)
+        if narrative_workspace and script is not None
+        and script.narrative_plan is not None
+        else None
     )
     ep["scene_options"] = []
     if full or view in ("board", "wall"):

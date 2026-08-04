@@ -312,6 +312,21 @@ def rebuild_narrative_calibration(body: dict | None = Body(None)):
     episode_ids = list(dict.fromkeys(
         str(item) for item in (payload.get("episode_ids") or []) if str(item)
     ))
+    if not episode_ids:
+        episode_ids = [
+            str(row["id"])
+            for row in get_conn().execute(
+                """SELECT DISTINCT e.id
+                     FROM episodes e
+                     JOIN artifacts a
+                       ON a.type='human_one_watch_observation'
+                      AND a.scope_type='episode'
+                      AND a.scope_id=e.id
+                      AND a.status NOT IN
+                          ('stale','rejected','superseded','needs_revision')
+                    ORDER BY e.id"""
+            ).fetchall()
+        ]
     if len(episode_ids) < 2:
         raise HTTPException(422, "跨作品校准至少需要两集不同内容")
     requested_axes = list(dict.fromkeys(
@@ -381,7 +396,7 @@ def rebuild_narrative_calibration(body: dict | None = Body(None)):
             required_dimension_axes=requested_axes,
         )
         artifact = None
-        if payload.get("activate") is True or report.decision != "calibrated":
+        if payload.get("activate") is True:
             artifact = persist_calibration_report(
                 report,
                 observation_artifact_ids=observation_artifact_ids,

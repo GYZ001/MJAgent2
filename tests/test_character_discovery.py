@@ -80,6 +80,84 @@ def test_ensure_character_card_auto_adds_prominent_character_and_portrait(monkey
     assert cnt == 1
 
 
+def test_required_identity_card_accepts_complete_card_despite_importance_vote(
+    monkeypatch,
+) -> None:
+    conn = _make_conn()
+    _seed_project(conn, "丁力听令后带人巡查山门。")
+    _patch_settings(monkeypatch, conn)
+
+    async def fake_assess(*_args, **kwargs):
+        assert kwargs["require_identity_card"] is True
+        return {
+            "important": False,
+            "reason": "只出现一次",
+            "role": "重要配角",
+            "appearance_canonical": (
+                "成年黑发男子，身穿深灰色皮甲短衫，腰间佩刀，"
+                "体格壮实，左眉留有一道浅疤"
+            ),
+            "personality": "服从命令",
+            "speech_style": "简短应答",
+            "relationships": [],
+        }
+
+    monkeypatch.setattr(portraits, "assess_new_character", fake_assess)
+
+    result = asyncio.run(portraits.ensure_character_card(
+        "p1",
+        "丁力",
+        21,
+        generate_portrait=False,
+        require_identity_card=True,
+    ))
+
+    assert result["status"] == "added"
+    characters = json.loads(
+        conn.execute(
+            "SELECT bible_json FROM projects WHERE id='p1'",
+        ).fetchone()["bible_json"],
+    )["characters"]
+    assert any(character["name"] == "丁力" for character in characters)
+
+
+def test_required_identity_card_prompt_does_not_reapply_importance_gate(
+    monkeypatch,
+) -> None:
+    captured: list[str] = []
+
+    async def fake_chat(messages, **_kwargs):
+        captured.append(messages[0]["content"])
+        return json.dumps({
+            "important": False,
+            "reason": "只出现一次",
+            "role": "重要配角",
+            "appearance_canonical": (
+                "成年黑发男子，身穿深灰色皮甲短衫，腰间佩刀，"
+                "体格壮实，左眉留有一道浅疤"
+            ),
+            "personality": "服从命令",
+            "speech_style": "简短应答",
+            "relationships": [],
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
+
+    result = asyncio.run(portraits.assess_new_character(
+        "丁力",
+        "丁力听令后带人巡查山门。",
+        style="国风",
+        known_names=["萧炎"],
+        ep_label="第 21 集",
+        require_identity_card=True,
+    ))
+
+    assert result["important"] is False
+    assert result["card_complete"] is True
+    assert "本次任务不是重新判断戏份重要度" in captured[0]
+    assert "不得因只出现一次而拒绝建卡" in captured[0]
+
+
 def test_ensure_character_card_keeps_auto_added_card_when_portrait_fails(monkeypatch) -> None:
     conn = _make_conn()
     _seed_project(conn, "美杜莎现身，紫色长发。美杜莎再次出手。美杜莎统领蛇人一族。" * 3)

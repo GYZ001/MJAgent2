@@ -11,11 +11,13 @@ from app.evidence import repository as evidence_repository
 from app.harness.types import EvidenceArtifact
 from app.narrative_calibration import (
     CalibrationContractError,
+    HumanOneWatchFreeze,
     HumanOneWatchObservation,
     HumanTargetDeltaObservation,
     ModelTargetEstimate,
     build_calibration_report,
     persist_calibration_report,
+    persist_human_one_watch_freeze,
     persist_human_one_watch_observation,
     validate_human_one_watch_observation,
 )
@@ -76,6 +78,24 @@ def _estimate(scope_id: str, prior_id: str, score: float) -> ModelTargetEstimate
         target_delta_id=_delta_id(prior_id),
         predicted_score=score,
         narrative_review_artifact_id=f"review-{scope_id}",
+    )
+
+
+def _persist_freeze(
+    observation: HumanOneWatchObservation,
+    screenplay: EpisodeScreenplay,
+    review_artifact_id: str,
+) -> dict:
+    freeze = HumanOneWatchFreeze.model_validate(
+        observation.model_dump(
+            mode="json",
+            exclude={"neutral_followup_observations", "target_delta_observations"},
+        )
+    )
+    return persist_human_one_watch_freeze(
+        freeze,
+        screenplay=screenplay,
+        narrative_review_artifact_ids=[review_artifact_id],
     )
 
 
@@ -240,6 +260,31 @@ def test_opposing_cross_dimension_correlations_stay_needs_review() -> None:
     )
 
 
+def test_model_and_human_scores_must_bind_the_same_review_artifact() -> None:
+    screenplay = _screenplay("scope-1")
+    observations = [
+        _observation("scope-1", "AP-1", 0.2),
+        _observation("scope-1", "AP-2", 0.9),
+    ]
+    estimates = [
+        _estimate("scope-1", "AP-1", 0.2),
+        _estimate("scope-1", "AP-2", 0.9),
+    ]
+    estimates[0].narrative_review_artifact_id = "another-review-version"
+
+    with pytest.raises(
+        CalibrationContractError,
+        match="MODEL_HUMAN_REVIEW_LINEAGE_MISMATCH",
+    ):
+        build_calibration_report(
+            calibration_report_id="CAL-LINEAGE",
+            calibration_scope_id="corpus-lineage",
+            screenplays=[screenplay],
+            observations=observations,
+            model_estimates=estimates,
+        )
+
+
 def test_human_and_calibration_artifacts_preserve_review_lineage(
     calibration_db,
 ) -> None:
@@ -257,14 +302,21 @@ def test_human_and_calibration_artifacts_preserve_review_lineage(
         _observation("scope-1", "AP-1", 1.0, review_artifact_id=review["id"]),
         _observation("scope-1", "AP-2", 1.0, review_artifact_id=review["id"]),
     ]
-    observation_artifacts = [
-        persist_human_one_watch_observation(
+    observation_artifacts = []
+    for observation in observations:
+        freeze_artifact = _persist_freeze(
             observation,
-            screenplay=screenplay,
-            narrative_review_artifact_ids=[review["id"]],
+            screenplay,
+            review["id"],
         )
-        for observation in observations
-    ]
+        observation_artifacts.append(
+            persist_human_one_watch_observation(
+                observation,
+                screenplay=screenplay,
+                narrative_review_artifact_ids=[review["id"]],
+                frozen_recall_artifact_id=freeze_artifact["id"],
+            )
+        )
     estimates = [
         ModelTargetEstimate(
             scope_id="scope-1",
@@ -322,4 +374,39 @@ def test_observation_persistence_rejects_missing_review_report_lineage(
             observation,
             screenplay=screenplay,
             narrative_review_artifact_ids=[wrong_parent["id"]],
+            frozen_recall_artifact_id="missing-freeze",
+        )
+
+
+def test_final_human_observation_cannot_rewrite_frozen_recall(
+    calibration_db,
+) -> None:
+    screenplay = _screenplay("scope-1")
+    review = evidence_repository.create_artifact(EvidenceArtifact(
+        id="review-scope-1",
+        type="narrative_review_report",
+        scope_type="episode",
+        scope_id="scope-1",
+        status="validated",
+        trust_level="T2",
+        content={"decision": "pass"},
+    ))
+    observation = _observation(
+        "scope-1",
+        "AP-1",
+        0.8,
+        review_artifact_id=review["id"],
+    )
+    freeze = _persist_freeze(observation, screenplay, review["id"])
+    observation.spontaneous_recall = {"free_text": "rewritten after targets"}
+
+    with pytest.raises(
+        CalibrationContractError,
+        match="HUMAN_FREEZE_OBSERVATION_DRIFT",
+    ):
+        persist_human_one_watch_observation(
+            observation,
+            screenplay=screenplay,
+            narrative_review_artifact_ids=[review["id"]],
+            frozen_recall_artifact_id=freeze["id"],
         )

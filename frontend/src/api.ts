@@ -1137,6 +1137,17 @@ export interface NarrativeReviewSummary {
   reason: string;
 }
 
+export interface NarrativeCalibrationSummary {
+  ready: boolean;
+  status: "calibrated" | "awaiting_republish" | "needs_review";
+  artifact_id?: string | null;
+  bound_artifact_id?: string | null;
+  model_pass_threshold?: number | null;
+  calibration_score?: number | null;
+  sample_summary?: Record<string, unknown>;
+  blockers: string[];
+}
+
 export interface ShotContribution {
   shot_contribution_id: string;
   experience_intent_ids: string[];
@@ -1679,6 +1690,7 @@ export interface Episode {
   screenplay?: EpisodeScreenplay | null;
   narrative_contract_summary?: NarrativeContractSummary | null;
   narrative_review_summary?: NarrativeReviewSummary | null;
+  narrative_calibration_summary?: NarrativeCalibrationSummary | null;
   narrative_metrics?: Record<string, unknown> | null;
   scene_options?: string[];
   source_dialogue_occurrences?: DialogueOccurrence[] | null;

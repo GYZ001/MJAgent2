@@ -9,6 +9,11 @@ from app.evidence import repository as evidence_repository
 from app.harness.contracts import get_contract
 from app.harness.types import Evaluation, EvidenceArtifact
 from app.narrative_review import COMPARATOR_PROMPT_VERSION
+from app.narrative_calibration import (
+    GLOBAL_CALIBRATION_SCOPE_ID,
+    HUMAN_CALIBRATION_CONTRACT_VERSION,
+    CalibrationReport,
+)
 from app.production.certificate import (
     consume_completion_certificate,
     issue_completion_certificate,
@@ -120,6 +125,58 @@ def _install_passing_review_model(monkeypatch) -> None:
     monkeypatch.setattr("app.narrative_review.model_gateway.chat", fake_chat)
 
 
+def _install_global_calibration(review_artifact_id: str) -> dict:
+    report = CalibrationReport(
+        calibration_report_id="CAL-TEST-AUTHORITY",
+        calibration_scope_id=GLOBAL_CALIBRATION_SCOPE_ID,
+        scope_ids=["episode-generic", "episode-generic-2"],
+        observation_ids=["human-1", "human-2"],
+        narrative_review_artifact_ids=[review_artifact_id],
+        required_dimension_axes=["genre", "form"],
+        sample_summary={
+            "observation_count": 4,
+            "participant_count": 4,
+            "expected_pair_count": 4,
+            "paired_target_count": 4,
+            "scope_count": 2,
+        },
+        calibration_score=1.0,
+        minimum_correlation=0.6,
+        human_success_threshold=0.8,
+        recommended_model_pass_threshold=0.8,
+        threshold_analysis={"selected": {"balanced_accuracy": 1.0}},
+        confidence_status="supported",
+        decision="calibrated",
+        reason="test-only cross-content authority fixture",
+    )
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="human_one_watch_calibration_report",
+        scope_type="calibration",
+        scope_id=GLOBAL_CALIBRATION_SCOPE_ID,
+        status="candidate",
+        trust_level="T4",
+        content=report.model_dump(mode="json"),
+        parent_artifact_ids=[review_artifact_id],
+        contract_version=HUMAN_CALIBRATION_CONTRACT_VERSION,
+    ))
+    return evidence_repository.commit_artifact(
+        None,
+        artifact["id"],
+        [Evaluation(
+            evaluator_type="deterministic",
+            evaluator_name="human_one_watch_calibration",
+            evaluator_version=HUMAN_CALIBRATION_CONTRACT_VERSION,
+            status="passed",
+            hard_gate_passed=True,
+            evaluation_role="runtime_gate",
+            score_status="calibrated",
+            runtime_blocking=True,
+            score=100,
+            evidence={"model_pass_threshold": 0.8},
+        )],
+    )
+
+
 async def _reviewed_publish_candidate(monkeypatch) -> dict:
     screenplay = _screenplay()
     board = _board()
@@ -200,11 +257,21 @@ async def _reviewed_publish_candidate(monkeypatch) -> dict:
         board=board,
         screenplay_artifact_id=screenplay_artifact["id"],
     )
+    report_artifact_id = next(
+        artifact_id
+        for artifact_id in review_artifact_ids
+        if evidence_repository.get_artifact(artifact_id)["type"]
+        == "narrative_review_report"
+    )
+    calibration_artifact = _install_global_calibration(report_artifact_id)
     storyboard_contract = get_contract("storyboard").version
     working_candidate = _artifact(
         artifact_type="storyboard_document",
         content=board.model_dump(mode="json"),
-        parent_artifact_ids=review_artifact_ids,
+        parent_artifact_ids=[
+            *review_artifact_ids,
+            calibration_artifact["id"],
+        ],
         contract_version=storyboard_contract,
     )
     revision = ensure_production_revision(
@@ -240,6 +307,12 @@ async def _reviewed_publish_candidate(monkeypatch) -> dict:
         if (artifact := evidence_repository.get_artifact(artifact_id)) is not None
         and artifact["type"] == "blind_audience_observation"
     ]
+    first_pass_artifacts = [
+        artifact
+        for artifact_id in review_artifact_ids
+        if (artifact := evidence_repository.get_artifact(artifact_id)) is not None
+        and artifact["type"] == "blind_audience_spontaneous_recall"
+    ]
     return {
         "screenplay": screenplay,
         "screenplay_artifact": screenplay_artifact,
@@ -247,8 +320,10 @@ async def _reviewed_publish_candidate(monkeypatch) -> dict:
         "board": board,
         "report": report,
         "review_artifact_ids": review_artifact_ids,
+        "calibration_artifact": calibration_artifact,
         "review_input": artifacts["storyboard_review_input"],
         "observation_artifacts": observation_artifacts,
+        "first_pass_artifacts": first_pass_artifacts,
         "report_artifact": artifacts["narrative_review_report"],
         "working_candidate": working_candidate,
         "revision": revision,
@@ -561,11 +636,11 @@ async def test_storyboard_publish_rejects_observation_without_isolation_gate(
     monkeypatch,
 ) -> None:
     case = await _reviewed_publish_candidate(monkeypatch)
-    observation = case["observation_artifacts"][0]
+    first_pass = case["first_pass_artifacts"][0]
     conn = db.get_conn()
     conn.execute(
         "DELETE FROM evaluations WHERE artifact_id=? AND evaluator_name='blind_review_isolation_gate'",
-        (observation["id"],),
+        (first_pass["id"],),
     )
     conn.commit()
 

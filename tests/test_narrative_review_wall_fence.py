@@ -19,6 +19,7 @@ from app.production.revision import (
 )
 from tests.test_narrative_publish_gate import (
     _artifact,
+    _install_global_calibration,
     _install_passing_review_model,
     _runtime_gate,
 )
@@ -50,10 +51,20 @@ async def _published_authority_case(monkeypatch) -> dict:
         board=board,
         screenplay_artifact_id=screenplay_artifact["id"],
     )
+    report_artifact = next(
+        artifact
+        for artifact_id in review_artifact_ids
+        if (artifact := evidence_repository.get_artifact(artifact_id)) is not None
+        and artifact["type"] == "narrative_review_report"
+    )
+    calibration_artifact = _install_global_calibration(report_artifact["id"])
     working_candidate = _artifact(
         artifact_type="storyboard_document",
         content=board.model_dump(mode="json"),
-        parent_artifact_ids=review_artifact_ids,
+        parent_artifact_ids=[
+            *review_artifact_ids,
+            calibration_artifact["id"],
+        ],
     )
     revision = ensure_production_revision(
         episode_id="episode-generic",
@@ -71,16 +82,11 @@ async def _published_authority_case(monkeypatch) -> dict:
     full_gate = _runtime_gate(
         working_candidate["id"], evaluator_name="storyboard_full_gate",
     )
-    report_artifact = next(
-        artifact
-        for artifact_id in review_artifact_ids
-        if (artifact := evidence_repository.get_artifact(artifact_id)) is not None
-        and artifact["type"] == "narrative_review_report"
-    )
     case = {
         "screenplay_artifact": screenplay_artifact,
         "working_candidate": working_candidate,
         "report_artifact": report_artifact,
+        "calibration_artifact": calibration_artifact,
         "revision": revision,
         "exact_review": exact_review,
         "full_gate": full_gate,
@@ -140,12 +146,14 @@ async def _published_authority_case(monkeypatch) -> dict:
         """UPDATE episodes
               SET status='confirmed',
                   storyboard_artifact_id=?,published_storyboard_artifact_id=?,
-                  narrative_status='ready',narrative_review_artifact_id=?
+                  narrative_status='ready',narrative_review_artifact_id=?,
+                  narrative_calibration_artifact_id=?
             WHERE id='episode-generic'""",
         (
             case["working_candidate"]["id"],
             case["working_candidate"]["id"],
             case["report_artifact"]["id"],
+            case["calibration_artifact"]["id"],
         ),
     )
     conn.commit()

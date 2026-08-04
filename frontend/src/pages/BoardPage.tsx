@@ -327,11 +327,226 @@ function StoryboardLaunchPanel({ episode, status, busy, onPrimary }: {
   )
 }
 
-function NarrativeReadinessPanel({ episode }: { episode: Episode }) {
+type CalibrationProtocol = {
+  narrative_review_artifact_id: string
+  audience_priors: Array<{
+    audience_prior_id: string
+    audience_description: string
+    existing_observation_count: number
+  }>
+}
+
+type FrozenHumanWatch = {
+  freeze_artifact_id: string
+  observation_id: string
+  audience_prior_id: string
+  target_contract: Array<{
+    target_delta_id: string
+    dimension: string
+    description: string
+  }>
+}
+
+async function participantHash(value: string) {
+  const bytes = new TextEncoder().encode(value.trim())
+  const digest = await crypto.subtle.digest('SHA-256', bytes)
+  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
+}
+
+function HumanCalibrationControls({
+  episode,
+  notify,
+  onChanged,
+}: {
+  episode: Episode
+  notify: (message: string, error?: boolean) => void
+  onChanged: () => Promise<unknown> | unknown
+}) {
+  const [protocol, setProtocol] = useState<CalibrationProtocol | null>(null)
+  const [participant, setParticipant] = useState('')
+  const [priorId, setPriorId] = useState('')
+  const [genre, setGenre] = useState('')
+  const [form, setForm] = useState('')
+  const [recall, setRecall] = useState('')
+  const [protocolConfirmed, setProtocolConfirmed] = useState(false)
+  const [frozen, setFrozen] = useState<FrozenHumanWatch | null>(null)
+  const [scores, setScores] = useState<Record<string, number>>({})
+  const [interpretations, setInterpretations] = useState<Record<string, string>>({})
+  const [calibrationPreview, setCalibrationPreview] = useState<Record<string, any> | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  async function loadProtocol() {
+    setBusy(true)
+    try {
+      const next = await api.get(`/episodes/${episode.id}/narrative-calibration/protocol`) as CalibrationProtocol
+      setProtocol(next)
+      setPriorId(current => current || next.audience_priors[0]?.audience_prior_id || '')
+    } catch (caught) {
+      notify((caught as Error).message, true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const freezeBlockedReason = !protocolConfirmed
+    ? '请先确认一次观看协议'
+    : !participant.trim()
+      ? '请填写匿名参与者编号'
+      : !priorId
+        ? '请选择目标观众前提'
+        : !genre.trim() || !form.trim()
+          ? '请填写题材与叙事形式标签'
+          : !recall.trim()
+            ? '请填写首次自由复述'
+            : null
+
+  async function freezeRecall() {
+    if (freezeBlockedReason) return
+    setBusy(true)
+    try {
+      const result = await api.post(
+        `/episodes/${episode.id}/narrative-calibration/freeze`,
+        {
+          participant_id_hash: await participantHash(participant),
+          audience_prior_id: priorId,
+          watched_once: true,
+          watch_count: 1,
+          replay_or_seek_used: false,
+          source_material_seen: false,
+          target_answers_seen: false,
+          director_intent_seen: false,
+          spontaneous_recall_frozen: true,
+          spontaneous_recall: { free_text: recall.trim() },
+          content_dimensions: { genre: genre.trim(), form: form.trim() },
+          collection_context: { source: 'board_calibration_ui' },
+        },
+      ) as FrozenHumanWatch
+      setFrozen(result)
+      setScores(Object.fromEntries(result.target_contract.map(item => [item.target_delta_id, 50])))
+      notify('首次复述已冻结，现在可以记录中性追问后的观察')
+    } catch (caught) {
+      notify((caught as Error).message, true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function submitObservation() {
+    if (!frozen) return
+    setBusy(true)
+    try {
+      await api.post(`/episodes/${episode.id}/narrative-calibration/observations`, {
+        freeze_artifact_id: frozen.freeze_artifact_id,
+        neutral_followup_observations: [],
+        target_delta_observations: frozen.target_contract.map(item => ({
+          audience_prior_id: frozen.audience_prior_id,
+          target_delta_id: item.target_delta_id,
+          observed_score: (scores[item.target_delta_id] ?? 0) / 100,
+          observed_interpretation: {
+            free_text: interpretations[item.target_delta_id]?.trim() || '未补充文字说明',
+          },
+        })),
+      })
+      setFrozen(null)
+      setRecall('')
+      setProtocolConfirmed(false)
+      setScores({})
+      setInterpretations({})
+      await onChanged()
+      await loadProtocol()
+      notify('真人一次观看观察已纳入校准样本')
+    } catch (caught) {
+      notify((caught as Error).message, true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function rebuildCalibration(activate: boolean) {
+    setBusy(true)
+    try {
+      const result = await api.post('/narrative-calibration/rebuild', { activate }) as Record<string, any>
+      setCalibrationPreview(result)
+      if (activate) {
+        await onChanged()
+        notify(result.activated ? '真人校准权威已激活' : '样本仍未达到激活条件', !result.activated)
+      }
+    } catch (caught) {
+      notify((caught as Error).message, true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return <details className="narrative-calibration-controls">
+    <summary>真人一次观看校准</summary>
+    {!protocol ? <button type="button" className="btn" disabled={busy} onClick={() => void loadProtocol()}>
+      {busy ? '正在读取…' : '开始记录真人样本'}
+    </button> : <>
+      {!frozen ? <div className="narrative-calibration-form">
+        <label>匿名参与者编号<input value={participant} onChange={event => setParticipant(event.target.value)} /></label>
+        <label>观看前提<select value={priorId} onChange={event => setPriorId(event.target.value)}>
+          {protocol.audience_priors.map(item => <option key={item.audience_prior_id} value={item.audience_prior_id}>
+            {item.audience_description}（已有 {item.existing_observation_count} 份）
+          </option>)}
+        </select></label>
+        <label>题材标签<input value={genre} onChange={event => setGenre(event.target.value)} placeholder="例如：都市悬疑" /></label>
+        <label>叙事形式<input value={form} onChange={event => setForm(event.target.value)} placeholder="例如：纯对白或追逐" /></label>
+        <label className="wide">首次自由复述<textarea value={recall} onChange={event => setRecall(event.target.value)}
+          placeholder="只记录第一次看完后自然记住的人物、因果、问题和下一步预期" /></label>
+        <label className="wide calibration-confirm"><input type="checkbox" checked={protocolConfirmed}
+          onChange={event => setProtocolConfirmed(event.target.checked)} />
+          我确认参与者只连续观看一次，未回放、未看原文、目标答案或导演意图
+        </label>
+        <button type="button" className="btn primary" disabled={busy || Boolean(freezeBlockedReason)}
+          title={freezeBlockedReason || undefined} onClick={() => void freezeRecall()}>
+          冻结首次复述
+        </button>
+        {freezeBlockedReason && <small>{freezeBlockedReason}</small>}
+      </div> : <div className="narrative-calibration-targets">
+        <p>首次复述已冻结。以下评分不会反写首次理解率。</p>
+        {frozen.target_contract.map(item => <fieldset key={item.target_delta_id}>
+          <legend>{item.description}</legend>
+          <label>实际达成度 {scores[item.target_delta_id] ?? 50}%
+            <input type="range" min="0" max="100" step="5" value={scores[item.target_delta_id] ?? 50}
+              onChange={event => setScores(current => ({ ...current, [item.target_delta_id]: Number(event.target.value) }))} />
+          </label>
+          <label>观察说明<textarea value={interpretations[item.target_delta_id] || ''}
+            onChange={event => setInterpretations(current => ({ ...current, [item.target_delta_id]: event.target.value }))} /></label>
+        </fieldset>)}
+        <button type="button" className="btn primary" disabled={busy} onClick={() => void submitObservation()}>
+          提交真人观察
+        </button>
+      </div>}
+      <div className="narrative-calibration-rebuild">
+        <button type="button" className="btn" disabled={busy} onClick={() => void rebuildCalibration(false)}>预览全局校准</button>
+        {calibrationPreview?.report && <p>
+          样本 {calibrationPreview.report.sample_summary?.observation_count ?? 0} 份 ·
+          结论 {calibrationPreview.report.decision === 'calibrated' ? '可激活' : '仍需补样本'}
+        </p>}
+        {calibrationPreview?.report?.decision === 'calibrated' && !calibrationPreview.activated &&
+          <button type="button" className="btn primary" disabled={busy} onClick={() => void rebuildCalibration(true)}>
+            激活校准权威
+          </button>}
+      </div>
+    </>}
+  </details>
+}
+
+function NarrativeReadinessPanel({
+  episode,
+  notify,
+  onChanged,
+}: {
+  episode: Episode
+  notify: (message: string, error?: boolean) => void
+  onChanged: () => Promise<unknown> | unknown
+}) {
   const summary = episode.narrative_contract_summary
   if (!summary) return null
   const metrics = episode.narrative_metrics || {}
   const review = episode.narrative_review_summary
+  const calibration = episode.narrative_calibration_summary
   const numberMetric = (key: string) => {
     const value = metrics[key]
     return typeof value === 'number' && Number.isFinite(value) ? value : null
@@ -343,9 +558,11 @@ function NarrativeReadinessPanel({ episode }: { episode: Episode }) {
   const duplicateActions = numberMetric('duplicate_primary_action_count')
   const stateRegressions = numberMetric('state_regression_count')
   const processingDebt = numberMetric('audience_processing_debt')
-  const ready = metrics.narrative_ready === true
+  const ready = metrics.narrative_ready === true && calibration?.ready === true
   const reviewCopy = review?.decision === 'pass'
-    ? '冷观众审读通过'
+    ? calibration?.ready
+      ? '冷观众与真人校准通过'
+      : '等待真人校准'
     : review?.decision === 'revise'
       ? '冷观众要求修订'
       : review?.decision === 'needs_human_review'
@@ -364,9 +581,12 @@ function NarrativeReadinessPanel({ episode }: { episode: Episode }) {
       <div><dt>重复主动作</dt><dd>{duplicateActions ?? '待计算'}</dd></div>
       <div><dt>状态回退</dt><dd>{stateRegressions ?? '待计算'}</dd></div>
       <div><dt>观众处理欠债</dt><dd>{processingDebt === null ? '待计算' : `${processingDebt.toFixed(1)}s`}</dd></div>
+      <div><dt>真人校准</dt><dd>{calibration?.ready ? '当前版本已绑定' : '待完成'}</dd></div>
     </dl>
     {review?.reason && <p>{review.reason}</p>}
+    {calibration?.blockers?.length ? <p className="narrative-calibration-blocker">{calibration.blockers[0]}</p> : null}
     <details><summary>查看理解与结构指标</summary><p>体验意图覆盖 {percentMetric('experience_intent_coverage_rate')} · 认知任务截止通过 {percentMetric('assimilation_deadline_pass_rate')} · 镜头功能贡献 {percentMetric('shot_contribution_coverage')}</p><p>系统逐个观众先验验收，不以平均高分替代低分位失败。</p></details>
+    <HumanCalibrationControls episode={episode} notify={notify} onChanged={onChanged} />
   </section>
 }
 
@@ -717,7 +937,7 @@ export default function BoardPage() {
         <hr className="rule" />
       </header>
 
-      <NarrativeReadinessPanel episode={ep} />
+      <NarrativeReadinessPanel episode={ep} notify={toast} onChanged={refresh} />
 
       {showLaunchPanel ? (
         <StoryboardLaunchPanel episode={ep} status={status} busy={busy} onPrimary={() => { void runPrimary() }} />

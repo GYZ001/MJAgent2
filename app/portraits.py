@@ -1146,10 +1146,20 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
     返回 {important, reason, role, appearance_canonical, personality, speech_style, relationships}。"""
     known = "、".join(known_names) or "（无）"
     identity_contract = (
-        "身份消歧模型已用上下文确认这是真名；本次必须输出 important=true 和完整人物卡字段，"
-        "不得再因戏份少把真名改成路人。"
+        "身份消歧模型已用上下文确认这是稳定真名；本次任务不是重新判断戏份重要度，"
+        "而是生成完整的最小人物卡。无论戏份多少都输出 important=true；"
+        "原文未给出的可视字段按项目画风作保守补全。"
         if require_identity_card else
         "请判断该称谓是否值得单独建人物卡并定妆。"
+    )
+    decision_contract = (
+        f"- identity_card_required=true：固定输出 important=true，并完成 30~80 字"
+        f" appearance_canonical；不得因只出现一次而拒绝建卡。"
+        if require_identity_card else
+        f"- important=true 仅当：「{name}」是【真正的新角色】，且在这段剧情里"
+        "【反复出场 / 有正面戏份 / 画面感强】，值得稳定其外观。\n"
+        "- important=false：路人、只被提及一两次、纯功能性提及，"
+        "或其实是已有角色的别名/外号/尊称。"
     )
     prompt = f"""任务：判断小说角色「{name}」是否值得【单独建人物卡并定妆】（用作漫剧出镜的一致性锚点）。
 
@@ -1162,8 +1172,7 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
 {fragments[:12000]}
 
 判定口径：
-- important=true 仅当：「{name}」是【真正的新角色】，且在这段剧情里【反复出场 / 有正面戏份 / 画面感强】，值得稳定其外观。
-- important=false：路人、只被提及一两次、纯功能性提及，或其实是已有角色的别名/外号/尊称。
+{decision_contract}
 - appearance_canonical 是"固定外观锚点串"：40~60 字，须含 性别年龄感/发型发色/服装款式与颜色/1 个标志性特征；只写视觉可见信息，不写性格。原著未写处按画风（{style}）合理补全并保持内部一致。
 
 只输出一个 JSON 对象：
@@ -1177,7 +1186,9 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
     appearance = (obj.get("appearance_canonical") or "").strip()
     if len(appearance) > APPEARANCE_MAX:
         appearance = appearance[:APPEARANCE_MAX]
-    if important and len(appearance) < APPEARANCE_MIN:
+    role = (obj.get("role") or "重要配角").strip() or "重要配角"
+    card_complete = APPEARANCE_MIN <= len(appearance) <= APPEARANCE_MAX and bool(role)
+    if important and not card_complete:
         important = False  # 外观太稀薄不足以稳定定妆 → 不建卡
     known_set = set(known_names)
     # 只保留指向【已知角色】且 relation 非空的关系；Relationship.to/relation 必填，漏 relation 会让校验崩。
@@ -1188,8 +1199,9 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
     ]
     return {
         "important": important,
+        "card_complete": card_complete,
         "reason": (obj.get("reason") or "").strip(),
-        "role": (obj.get("role") or "重要配角").strip() or "重要配角",
+        "role": role,
         "appearance_canonical": appearance,
         "personality": (obj.get("personality") or "").strip(),
         "speech_style": (obj.get("speech_style") or "").strip(),
@@ -1297,7 +1309,15 @@ async def ensure_character_card(
                 return {"status": "error", "name": name,
                         "reason": "新角色评估失败" + code_ref(exc, action="assess_new_character",
                                                               context={"project_id": project_id, "name": name})}
-            if not verdict["important"]:
+            card_complete = bool(verdict.get("card_complete")) or (
+                bool(str(verdict.get("role") or "").strip())
+                and APPEARANCE_MIN
+                <= len(str(verdict.get("appearance_canonical") or "").strip())
+                <= APPEARANCE_MAX
+            )
+            if not verdict["important"] and not (
+                require_identity_card and card_complete
+            ):
                 if require_identity_card:
                     return {
                         "status": "error", "name": name,
