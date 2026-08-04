@@ -128,6 +128,35 @@ def screenplay_authorized_source_chapter_ids(
     }
 
 
+def screenplay_authorized_source_chapters(
+    episode_id: str,
+    *,
+    conn: Any | None = None,
+) -> dict[str, str]:
+    """Return episode-scoped chapter text keyed by both database ID and index."""
+    db = conn or get_conn()
+    episode = db.execute(
+        "SELECT * FROM episodes WHERE id=?",
+        (episode_id,),
+    ).fetchone()
+    if episode is None:
+        raise ValueError(f"episode not found: {episode_id}")
+    records, _source_text = _source_records(db, episode)
+    ids = [int(record["chapter_id"]) for record in records]
+    if not ids:
+        return {}
+    marks = ",".join("?" for _ in ids)
+    rows = db.execute(
+        f"SELECT id,idx,content FROM chapters WHERE id IN ({marks})",
+        ids,
+    ).fetchall()
+    return {
+        str(key): str(row["content"] or "")
+        for row in rows
+        for key in (row["id"], row["idx"])
+    }
+
+
 def screenplay_authority_material(
     episode_id: str,
     *,
@@ -511,12 +540,10 @@ def resolve_current_screenplay_authority(
         require=require_narrative,
         source_text=source_text,
         expected_scope_id=episode_id,
-        authorized_source_chapter_ids={
-            str(value)
-            for record in records
-            for value in (record.get("chapter_id"), record.get("chapter_idx"))
-            if value not in (None, "")
-        },
+        authorized_source_chapters=screenplay_authorized_source_chapters(
+            episode_id,
+            conn=db,
+        ),
     )
     if errors:
         raise ValueError("已发布剧本无法在当前原文上重验：" + "；".join(errors[:6]))

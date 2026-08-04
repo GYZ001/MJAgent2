@@ -395,6 +395,7 @@ def validate_screenplay_narrative(
     source_text: str | None = None,
     expected_scope_id: str | None = None,
     authorized_source_chapter_ids: Iterable[str | int] | None = None,
+    authorized_source_chapters: dict[str, str] | None = None,
 ) -> list[str]:
     """Validate the one authoritative screenplay narrative graph.
 
@@ -446,6 +447,17 @@ def validate_screenplay_narrative(
         if authorized_source_chapter_ids is not None
         else None
     )
+    chapter_text_by_id = (
+        {
+            _norm(chapter_id): str(text)
+            for chapter_id, text in authorized_source_chapters.items()
+            if _norm(chapter_id)
+        }
+        if authorized_source_chapters is not None
+        else None
+    )
+    if chapter_text_by_id is not None:
+        authorized_chapter_ids = set(chapter_text_by_id)
     for evidence_id, evidence in index.source_evidence.items():
         excerpt = _norm(evidence.verbatim_excerpt)
         span = evidence.source_span
@@ -463,6 +475,20 @@ def validate_screenplay_narrative(
             errors.append(f"[SOURCE_SPAN_INVALID] {evidence_id}.source_span 必须满足 0 <= start < end")
         if not excerpt:
             errors.append(f"[SOURCE_EVIDENCE_EMPTY] {evidence_id}.verbatim_excerpt 不能为空")
+        elif chapter_text_by_id is not None and _norm(span.chapter_id) in chapter_text_by_id:
+            chapter_text = chapter_text_by_id[_norm(span.chapter_id)]
+            if span.end > len(chapter_text):
+                errors.append(
+                    f"[SOURCE_SPAN_OUT_OF_RANGE] {evidence_id}.source_span.end "
+                    "超出对应授权章节正文"
+                )
+            else:
+                exact_slice = _norm(chapter_text[span.start:span.end])
+                if exact_slice != excerpt:
+                    errors.append(
+                        f"[SOURCE_SPAN_EXACT_MISMATCH] {evidence_id} 的章节内 "
+                        "start/end 切片与逐字摘录不一致"
+                    )
         elif raw_source:
             if span.end > len(raw_source):
                 errors.append(f"[SOURCE_SPAN_OUT_OF_RANGE] {evidence_id}.source_span.end 超出授权原文")

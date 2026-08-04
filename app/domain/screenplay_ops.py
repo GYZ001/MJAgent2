@@ -596,6 +596,16 @@ async def _screenplay_task(
         p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
         bible = _project_bible_or_placeholder(p)
         source_text = _episode_source_text(conn, ep)
+        from app.production.screenplay_authority import (
+            screenplay_authorized_source_chapters,
+        )
+
+        ep_data["authorized_source_chapters"] = (
+            screenplay_authorized_source_chapters(
+                episode_id,
+                conn=conn,
+            )
+        )
         occurrence_ids = _screenplay_required_occurrence_ids(ep)
         occurrences = _screenplay_occurrences(
             source_text, json.loads(ep["source_chapters"] or "[]")

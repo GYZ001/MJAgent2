@@ -1261,6 +1261,21 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
         for value in parsed_source_chapters
         if str(value).strip()
     ]
+    raw_authorized_source_chapters = episode.get(
+        "authorized_source_chapters",
+    ) or {}
+    authorized_source_chapters = {
+        chapter_id: str(raw_authorized_source_chapters.get(chapter_id) or "")
+        for chapter_id in authorized_source_chapter_ids
+        if chapter_id in raw_authorized_source_chapters
+    }
+    source_with_ids = (
+        "\n\n".join(
+            f"【chapter_id={chapter_id}】\n{chapter_text}"
+            for chapter_id, chapter_text in authorized_source_chapters.items()
+        )
+        or source_text
+    )
     narrative_plan_schema = _narrative_plan_schema_example(
         narrative_scope_id,
         source_chapter_ids=authorized_source_chapter_ids,
@@ -1430,7 +1445,7 @@ B. `full_script_text`：真正的剧本正文；只写大形体动作与主线�
 {speech_styles or '（无额外说话风格）'}
 
 本集改编源文本：
-{_render_screenplay_source(source_text)}
+{_render_screenplay_source(source_with_ids)}
 
 输出 JSON Schema：
 {{"episode_no": {episode['episode_no']}, "mode": "full_script", "title": str, "logline": str, "script_format_note": "一句话说明正文采用的台本格式", "plot_spine": {{"episode_premise": "一句话本集目标", "spine_beats": [{{"beat_id": "S01", "who": str, "does": str, "turn": str, "must_keep": true}}], "must_keep_ending": str, "drop_list": [str, str]}}, "dramatic_question": "本集戏剧问题（一句话）", "protagonist_goal": "主角外在目标", "obstacle": "外部+内部阻力", "stakes": "失败代价", "dialogue_chains": [{{"chain_id": "DC1", "topic": "同一话题", "turns": [{{"speaker": "引用角色圣经准确姓名或 narrative_plan.identity_contracts[].display_name", "line": "适合表演的改编台词", "function": "trigger|announcement|question|response|decision|statement", "source_text": "对应原文对白原句"}}]}}], "key_lines": ["由后端按 dialogue_chains.turns 回填；不要另选孤立金句"], "key_plot_points": ["与spine对齐的局势变化，{KEY_PLOT_POINTS_MIN}~{KEY_PLOT_POINTS_MAX}条"], "scene_outline": [{{"scene_no": int, "scene_heading": "场次标题", "story_function": "8~40字，写明本场造成的剧情变化；禁止只写进入/升级/转折/收束", "characters": ["角色圣经准确姓名或 identity_contract.display_name"], "summary": "本场戏剧内容概括", "conflict": str, "turn": "交给下一场的状态变化", "source_basis": "原文依据"}}], "full_script_text": str, "character_state_changes": [str], "emotional_curve": str, "ending_hook": "若 hook/cliffhanger 均为空则固定为「无集级钩子」", "source_basis": str, "adaptation_direction": str, "opening": str, "development": str, "conflict": str, "climax": str, "episode_premise": "一句话本集目标", "events": [{{"event_id": "E1", "source_span": "原文位置或摘句", "source_fact": "原文事实", "state_in": "事件前状态", "trigger": "触发因素", "visible_change": "可见/可听变化", "state_out": "事件后状态", "must_keep": true, "adaptation_addition": false, "adaptation_reason": "", "approved": false}}], "information_ledger": [{{"info_id": "I1", "event_id": "E1", "content": "观众必须获得的信息", "delivery_owner": "visual_action|spoken_dialogue|offscreen_voice|narration|on_screen_text|ambient_sound", "speaker_id": "精确引用 voice_bible.speaker_id 或 null", "exact_text": "需逐字交付时填写，否则null", "reinforcement_allowed": false, "status": "unassigned"}}], "voice_bible": [{{"speaker_id": "唯一 voice ID；非旁白的非圣经说话人必须被 identity_contract.voice_ids 回指", "voice_canonical": "声音与语气规范", "language": "普通话", "role_type": "开放语义；纯旁白使用 narrator"}}], "approved_adaptations": [str], "forbidden_additions": [str], "narrative_plan": {narrative_plan_schema}}}"""
@@ -1514,7 +1529,10 @@ async def generate_screenplay_baseline(
             expected_scope_id=str(
                 episode.get("id") or f"episode-{episode['episode_no']}"
             ),
-            authorized_source_chapter_ids=authorized_source_chapter_ids,
+            authorized_source_chapters=(
+                authorized_source_chapters
+                if authorized_source_chapters else None
+            ),
         ))
         if no_episode_hook:
             ending = (s.ending_hook or "").strip()

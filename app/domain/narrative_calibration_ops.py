@@ -23,7 +23,7 @@ from app.narrative_calibration import (
 )
 from app.narrative_review import verify_persisted_narrative_review
 from app.production.screenplay_authority import resolve_current_screenplay_authority
-from app.schemas import NarrativeReviewReport
+from app.schemas import NarrativeReviewReport, Storyboard
 
 try:
     router
@@ -69,15 +69,24 @@ def _current_calibration_review_bundle(
         )
     except Exception as exc:
         raise HTTPException(409, f"当前冷观众审读报告无法解析：{exc}") from exc
+    review_parent_artifacts = [
+        evidence_repository.get_artifact(str(parent_id))
+        for parent_id in (report_artifact.get("parent_artifact_ids") or [])
+    ]
+    review_inputs = [
+        item
+        for item in review_parent_artifacts
+        if item is not None
+        and item.get("type") == "storyboard_review_input"
+        and item.get("status")
+        not in {"stale", "rejected", "superseded", "needs_revision"}
+    ]
+    if len(review_inputs) != 1:
+        raise HTTPException(409, "当前冷观众报告缺少唯一不可变分镜审读输入")
     try:
-        board_builder = _board_from_shot_rows
-    except NameError:  # pragma: no cover - direct module import compatibility
-        from app.domain.storyboard_ops import _board_from_shot_rows as board_builder
-    rows = conn.execute(
-        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
-        (episode_id,),
-    ).fetchall()
-    board = board_builder(rows, int(episode["episode_no"] or 1))
+        board = Storyboard.model_validate(review_inputs[0].get("content") or {})
+    except Exception as exc:
+        raise HTTPException(409, f"当前分镜审读输入无法解析：{exc}") from exc
     artifact_ids = list(dict.fromkeys([
         str(report_artifact["id"]),
         *[
