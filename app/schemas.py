@@ -252,6 +252,7 @@ class SourceEvidence(BaseModel):
 
 class NarrativeProposition(BaseModel):
     proposition_id: str
+    semantic_identity_key: str = ""
     canonical_statement: str
     narrative_domain: str  # source_canon | adapted_story
     entity_ids: list[str] = Field(default_factory=list)
