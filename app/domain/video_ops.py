@@ -133,7 +133,7 @@ def _storyboard_structural_errors(storyboard: Storyboard) -> list[str]:
         required = {
             "shot_size": shot.shot_size,
             "camera_move": shot.camera_move,
-            "scene_setting": shot.scene_setting,
+            "scene_name": shot.scene_name or shot.scene_setting,
             "action_desc": shot.action_desc,
             "first_frame_desc": shot.first_frame_desc,
             "last_frame_desc": shot.last_frame_desc,
@@ -264,8 +264,40 @@ def evaluate_storyboard_for_confirmation(
     )
 
 
+def _has_current_storyboard_completion_certificate(conn, episode) -> bool:
+    data = dict(episode)
+    certificate_id = data.get("storyboard_completion_certificate_id")
+    artifact_id = data.get("storyboard_artifact_id")
+    revision_id = data.get("storyboard_production_revision_id")
+    if not certificate_id or not artifact_id or not revision_id:
+        return False
+    try:
+        row = conn.execute(
+            """SELECT c.kind,c.scope_id,c.artifact_id,c.artifact_hash,c.blockers,
+                      c.must_fix_issues,c.production_revision_id,c.consumed_at,
+                      a.content_hash AS current_artifact_hash
+                 FROM completion_certificates c
+                 JOIN artifacts a ON a.id=c.artifact_id
+                WHERE c.id=?""",
+            (certificate_id,),
+        ).fetchone()
+    except Exception:  # noqa: BLE001 - legacy databases fall through to live evaluation
+        return False
+    return bool(
+        row
+        and row["kind"] == "storyboard"
+        and row["scope_id"] == data.get("id")
+        and row["artifact_id"] == artifact_id
+        and row["production_revision_id"] == revision_id
+        and row["artifact_hash"] == row["current_artifact_hash"]
+        and int(row["blockers"] or 0) == 0
+        and int(row["must_fix_issues"] or 0) == 0
+        and row["consumed_at"] is not None
+    )
+
+
 def _assert_storyboard_generation_gate(episode_id: str) -> None:
-    """Fail closed before any new paid media work for legacy confirmations."""
+    """Trust the current certificate; fail closed for legacy confirmations."""
     conn = get_conn()
     episode = _episode_or_404(episode_id)
     rows = conn.execute(
@@ -273,6 +305,8 @@ def _assert_storyboard_generation_gate(episode_id: str) -> None:
     ).fetchall()
     if not rows:
         raise HTTPException(409, "本集尚无分镜")
+    if _has_current_storyboard_completion_certificate(conn, episode):
+        return
     project = conn.execute(
         "SELECT * FROM projects WHERE id=?", (episode["project_id"],),
     ).fetchone()
@@ -1028,6 +1062,40 @@ async def generate_episode(episode_id: str, body: dict | None = None):
     return await _generate_episode_core(episode_id, body or {})
 
 
+def _adopt_reused_completed_version(
+    conn,
+    *,
+    shot_id: str,
+    version_id: str,
+) -> bool:
+    """Adopt an idempotently reused version only when it is deliverable."""
+    version = conn.execute(
+        """SELECT status,video_path,technical_validation_json
+             FROM shot_versions
+            WHERE id=? AND shot_id=?""",
+        (version_id, shot_id),
+    ).fetchone()
+    if (
+        not version
+        or version["status"] != "succeeded"
+        or not version["video_path"]
+        or not Path(str(version["video_path"])).is_file()
+    ):
+        return False
+    try:
+        technical = json.loads(version["technical_validation_json"] or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if technical and not technical.get("passed"):
+        return False
+    updated = conn.execute(
+        """UPDATE shots SET adopted_version_id=?
+            WHERE id=? AND (adopted_version_id IS NULL OR adopted_version_id='')""",
+        (version_id, shot_id),
+    )
+    return updated.rowcount == 1
+
+
 async def _generate_episode_core(episode_id: str, body: dict) -> dict:
     """Create/reuse jobs for an episode; ``only_incomplete`` powers Continue."""
     ep = _episode_or_404(episode_id)
@@ -1133,16 +1201,14 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
                 s["row"]["id"], after_shot_id=after,
                 dependency_snapshot=qualification,
             )
-            # 幂等命中（已有相同成片）：若当前无采用版，把复用版标为采用
+            # enqueue_shot also reports active/paused same-key jobs as reused.
+            # Only an already deliverable completed version may be adopted here.
             if r.get("reused") and r.get("version_id"):
-                row = conn.execute(
-                    "SELECT adopted_version_id FROM shots WHERE id=?", (s["row"]["id"],)
-                ).fetchone()
-                if not row or not row["adopted_version_id"]:
-                    conn.execute(
-                        "UPDATE shots SET adopted_version_id=? WHERE id=?",
-                        (r["version_id"], s["row"]["id"]),
-                    )
+                _adopt_reused_completed_version(
+                    conn,
+                    shot_id=s["row"]["id"],
+                    version_id=r["version_id"],
+                )
             results.append({"shot_id": s["row"]["id"], **r})
         except Exception as exc:  # noqa: BLE001
             public = errors.record_and_format(exc, action="enqueue_shot",

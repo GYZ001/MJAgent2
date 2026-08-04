@@ -25,6 +25,7 @@ from app.db import get_conn, new_id, now
 from app.evidence.media import record_reference_asset
 from app.harness import model_gateway
 from app.refs import _safe_name
+from app.scene_contract import split_legacy_scene_setting
 from app.schemas import Bible, Scene, extract_json
 from app.validators import match_scene_name
 
@@ -52,6 +53,23 @@ async def _reactive_scene_lock(project_id: str, name: str) -> asyncio.Lock:
             lock = asyncio.Lock()
             _reactive_scene_locks[key] = lock
         return lock
+
+
+def _exact_known_scene_name(value: str, scenes: list[Scene]) -> str | None:
+    """Match canonical discovery names without collapsing interior/exterior."""
+
+    def identity_key(label: str) -> str:
+        _time, location = split_legacy_scene_setting(label)
+        return re.sub(r"[\s，,。.：:；;/、|]+", "", location.strip())
+
+    target = identity_key(value)
+    if not target:
+        return None
+    for scene in scenes:
+        labels = [scene.name, *(scene.aliases or [])]
+        if any(identity_key(str(label or "")) == target for label in labels):
+            return scene.name
+    return None
 
 
 async def _reactive_bible_lock(project_id: str) -> asyncio.Lock:
@@ -1943,7 +1961,7 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
             scenes = Bible.model_validate(json.loads(project_row["bible_json"])).scenes
             continue
         name = verdict["name"]
-        if match_scene_name(name, scenes, allow_fuzzy=False) or name in {s.name for s in scenes}:
+        if _exact_known_scene_name(name, scenes):
             continue
         scene_payload = {
             "name": name,

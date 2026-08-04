@@ -12,6 +12,8 @@ import {
   resolveStableShotSelection,
   reviewContextRefreshKey,
   shotDetailRefreshKey,
+  shotHasActiveGeneration,
+  shotHasPausedGeneration,
   shouldCommitShotDetail,
   videoCandidateNote,
   videoPlaybackRate,
@@ -278,5 +280,23 @@ describe('整集生成按钮状态', () => {
     expect(episodeGenerationAction(false, 2, 0)).toBe('resume')
     expect(episodeGenerationAction(false, 0, 1)).toBe('resume')
     expect(episodeGenerationAction(false, 0, 0)).toBe('generate')
+  })
+
+  it('预算暂停镜头不冒充活动任务', () => {
+    const paused = {
+      video_status: 'generating',
+      pipeline: { pipeline_status: 'paused_budget' },
+      versions: [],
+    } as unknown as Shot
+    const running = {
+      video_status: 'generating',
+      pipeline: { pipeline_status: 'waiting_provider' },
+      versions: [],
+    } as unknown as Shot
+
+    expect(shotHasActiveGeneration(paused)).toBe(false)
+    expect(shotHasPausedGeneration(paused)).toBe(true)
+    expect(shotHasActiveGeneration(running)).toBe(true)
+    expect(shotHasPausedGeneration(running)).toBe(false)
   })
 })

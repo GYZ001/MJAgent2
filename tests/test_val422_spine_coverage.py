@@ -229,6 +229,48 @@ def test_spine_mixed_visible_and_spoken_delivery_uses_the_right_evidence() -> No
     assert not any("S02/药老" in error for error in errors), errors
 
 
+def test_spine_receptive_delivery_can_come_from_another_speaker() -> None:
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        plot_spine=PlotSpine(
+            episode_premise="孟浩救人并得知众人被抓",
+            spine_beats=[PlotSpineBeat(
+                beat_id="S03",
+                who="孟浩",
+                does="找来藤条顺下崖救人，与王有材对话得知他们被会飞的女人抓来",
+                turn="孟浩开始相信仙人存在",
+                must_keep=True,
+            )],
+            must_keep_ending="孟浩得知众人被抓",
+            drop_list=[],
+        ),
+    )
+    rescue = _compact_shot(1)
+    rescue.spine_beat_ids = ["S03"]
+    rescue.characters = ["孟浩"]
+    rescue.characters_visible = ["孟浩"]
+    rescue.primary_action = "孟浩找来藤条顺下山崖救人"
+    rescue.action_desc = "孟浩抱着藤条跑回崖边，弯腰将藤条顺下山崖救人"
+    rescue.dialogues = []
+    explanation = _compact_shot(2)
+    explanation.spine_beat_ids = ["S03"]
+    explanation.characters = ["王有材"]
+    explanation.characters_visible = ["王有材"]
+    explanation.action_desc = "王有材抓住藤条，抬头向崖上的孟浩解释"
+    explanation.dialogues = [Dialogue(
+        speaker="王有材",
+        line="我们是被一个会飞的女人抓来的。",
+        emotion="惊恐",
+    )]
+
+    errors = validate_spine_delivery_ledger(
+        Storyboard(episode_no=1, shots=[rescue, explanation]),
+        screenplay,
+    )
+
+    assert not any("S03/孟浩" in error for error in errors), errors
+
+
 def test_spine_spoken_delivery_still_requires_the_subject_to_speak() -> None:
     screenplay = EpisodeScreenplay(
         episode_no=1,

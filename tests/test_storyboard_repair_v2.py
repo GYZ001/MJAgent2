@@ -38,6 +38,8 @@ from app.storyboard_supervisor import (
     _repair_feedback_for_shot,
     _recover_truncated_outline_from_approved_artifact,
     _repair_candidate_made_progress,
+    _retarget_spine_repair_brief,
+    _retarget_spine_repair_shot,
     _storyboard_generation_is_complete,
     _storyboard_hash,
     _validated_candidate_projection,
@@ -240,6 +242,94 @@ def test_resume_atomically_cleans_legacy_ghost_contract_before_gate(
     assert repaired_contract["audio_cast"] == []
     assert repaired_contract["audio_timeline"] == []
     assert repaired_contract["reference_roles"] == []
+
+
+def test_resume_discards_pending_candidate_when_current_gate_already_passes(
+    repair_db, monkeypatch,
+) -> None:
+    conn, _screenplay = repair_db
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=number,
+                scene_setting="日，广场",
+                beat=f"少年完成第{number}步动作",
+            )
+            for number in range(1, 4)
+        ],
+    )
+    conn.execute(
+        "UPDATE episodes SET storyboard_outline_json=? WHERE id='e1'",
+        (outline.model_dump_json(),),
+    )
+    conn.commit()
+    request_control("e1", "clear")
+    current = _current_board(conn)
+    save_checkpoint(SupervisorCheckpoint(
+        episode_id="e1",
+        phase="PAUSED_EXTERNAL",
+        outcome="PAUSED_BY_USER",
+        validated_prefix_end=3,
+        next_shot_no=2,
+        expected_total=3,
+        input_versions={"screenplay_artifact_id": "sp1"},
+        planner_version=STORYBOARD_REPAIR_PLANNER_VERSION,
+        last_repair={
+            "status": "candidate_pending",
+            "mode": "insert",
+            "window_start": 2,
+            "window_end": 2,
+            "base_hash": _storyboard_hash(current),
+            "fingerprint": "obsolete-policy-gate",
+            "candidate_outline": outline.model_dump(mode="json"),
+            "issue_messages": ["旧门禁问题"],
+        },
+        repair_candidate_shots=[_shot(2, action="不应继续生成的过期候选").model_dump(mode="json")],
+    ))
+
+    async def _unexpected_generation(*_args, **_kwargs):
+        raise AssertionError("当前正式分镜已通过新门禁，不应恢复过期候选")
+
+    def _passed_evaluation(_ep, board, *_args, **_kwargs):
+        return SimpleNamespace(
+            passed=True,
+            errors=[],
+            warnings=[],
+            issues=[],
+            board=board,
+        )
+
+    import app.domain.storyboard_ops as storyboard_ops
+    import app.domain.video_ops as video_ops
+    import app.storyboard_supervisor as supervisor_module
+
+    monkeypatch.setattr(
+        supervisor_module,
+        "generate_storyboard_next_shot",
+        _unexpected_generation,
+    )
+    monkeypatch.setattr(
+        video_ops,
+        "evaluate_storyboard_for_confirmation",
+        _passed_evaluation,
+    )
+    monkeypatch.setattr(
+        storyboard_ops,
+        "_finalize_storyboard_evidence",
+        lambda *_args: "art-final",
+    )
+
+    checkpoint = asyncio.run(run_storyboard_supervisor(
+        "e1",
+        resume=True,
+        preflight_done=True,
+        new_activation=False,
+    ))
+
+    assert checkpoint.phase == "SUCCEEDED"
+    assert checkpoint.repair_candidate_shots == []
+    assert checkpoint.last_repair["status"] == "obsolete_current_gate_passed"
 
 
 def test_legacy_runaway_counter_becomes_audit_not_new_activation_budget() -> None:
@@ -446,6 +536,155 @@ def test_spine_missing_insert_targets_earliest_declared_beat(repair_db) -> None:
     assert conn.execute(
         "SELECT storyboard_outline_json FROM episodes WHERE id='e1'"
     ).fetchone()[0] is None
+
+
+def test_spine_repair_uses_bound_shot_when_another_issue_has_earlier_frontier(
+    repair_db,
+) -> None:
+    conn, _screenplay = repair_db
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=number,
+                scene_setting="日，广场",
+                beat=f"少年完成第{number}步动作",
+                spine_beat_ids=[f"S{number:02d}"],
+                primary_action=f"少年完成第{number}步动作",
+                state_in="少年站在石碑前",
+                state_out="少年完成动作",
+                characters_visible=["少年"],
+            )
+            for number in range(1, 4)
+        ],
+    )
+    for number in range(1, 4):
+        shot = _shot(number)
+        shot.spine_beat_ids = [f"S{number:02d}"]
+        conn.execute(
+            "UPDATE shots SET shot_contract_json=? WHERE id=?",
+            (shot.model_dump_json(), f"s{number}"),
+        )
+    conn.commit()
+    plan = route_issues([
+        "第 1 镜缺少必填字段：scene_name",
+        "主线节拍主体已入画但未完成对应动作/对白交付：S03/少年:举起信物",
+    ], validated_prefix_end=3)
+
+    planned = _apply_repair(
+        SupervisorCheckpoint(
+            episode_id="e1",
+            planner_version=STORYBOARD_REPAIR_PLANNER_VERSION,
+            validated_prefix_end=3,
+        ),
+        plan,
+        conn,
+        "e1",
+        list(_current_board(conn).shots),
+        outline,
+    )
+
+    assert planned.last_repair["mode"] == "insert"
+    assert planned.last_repair["window_start"] == 4
+    candidate_outline = StoryboardOutline.model_validate(
+        planned.last_repair["candidate_outline"]
+    )
+    assert candidate_outline.shots[3].spine_beat_ids == ["S03"]
+    assert candidate_outline.shots[3].primary_action == "举起信物"
+
+
+def test_spine_repair_preserves_spoken_delivery_contract() -> None:
+    brief = StoryboardOutlineShot(
+        shot_no=6,
+        scene_setting="黄昏，青石空地",
+        beat="路人丙说明门规",
+        spine_beat_ids=["S02"],
+        key_line_ids=["KL05", "KL06"],
+        information_ids=["I02"],
+        new_information_ids=["I02"],
+        primary_action="路人丙说明门规",
+        characters_visible=["孟浩", "路人丙"],
+        audio_cast=[],
+    )
+
+    _retarget_spine_repair_brief(
+        brief,
+        ("S02", "路人丙", "交代杂役规则并发放凝气卷"),
+    )
+
+    assert brief.spine_beat_ids == ["S02"]
+    assert brief.key_line_ids == ["KL05", "KL06"]
+    assert brief.information_ids == ["I02"]
+    assert brief.new_information_ids == ["I02"]
+    assert brief.characters_visible == ["孟浩", "路人丙"]
+    assert brief.audio_cast == ["路人丙"]
+
+
+def test_spine_repair_treats_muttering_to_self_as_spoken_delivery() -> None:
+    from app.validators import _spine_delivery_clauses
+
+    visible, spoken, receptive = _spine_delivery_clauses(
+        "在宝阁内被珠光宝气震撼，喃喃自语"
+    )
+    assert visible == ["在宝阁内被珠光宝气震撼"]
+    assert spoken == ["喃喃自语"]
+    assert receptive == []
+
+    brief = StoryboardOutlineShot(
+        shot_no=2,
+        scene_setting="日，外宗宝阁内",
+        beat="孟浩浏览宝物",
+        spine_beat_ids=["S01"],
+        primary_action="孟浩浏览宝物",
+        characters_visible=["孟浩"],
+        audio_cast=[],
+    )
+    _retarget_spine_repair_brief(
+        brief,
+        ("S01", "孟浩", "在宝阁内被珠光宝气震撼，喃喃自语"),
+    )
+
+    assert brief.audio_cast == ["孟浩"]
+
+
+def test_generated_spine_repair_reapplies_authorized_contract() -> None:
+    brief = StoryboardOutlineShot(
+        shot_no=9,
+        scene_setting="晚，外宗住所内",
+        beat="孟浩研究铜镜",
+        spine_beat_ids=["S05"],
+        key_line_ids=["KL06"],
+        information_ids=["I05"],
+        new_information_ids=["I05"],
+        primary_action="孟浩研究铜镜",
+        characters_visible=["孟浩"],
+        audio_cast=["孟浩"],
+    )
+    shot = _shot(9, action="孟浩放下端详许久的铜镜后闭目打坐")
+    shot.characters_visible = ["孟浩"]
+    shot.audio_cast = []
+    shot.key_line_ids = []
+    shot.information_ids = []
+    shot.new_information_ids = []
+
+    _retarget_spine_repair_shot(
+        shot,
+        brief,
+        (
+            "S05",
+            "孟浩",
+            "在外宗住所研究铜镜至深夜无果，喃喃身份转变",
+        ),
+    )
+
+    assert shot.primary_action == (
+        "在外宗住所研究铜镜至深夜无果，喃喃身份转变"
+    )
+    assert shot.spine_beat_ids == ["S05"]
+    assert shot.key_line_ids == ["KL06"]
+    assert shot.information_ids == ["I05"]
+    assert shot.new_information_ids == ["I05"]
+    assert shot.audio_cast == ["孟浩"]
 
 
 def test_validated_candidate_commits_atomically_and_preserves_shot_identity(
@@ -767,6 +1006,26 @@ def test_candidate_without_any_resolved_target_is_not_progress() -> None:
         before_messages=[issue],
         after_messages=[issue],
     ) is False
+
+
+def test_candidate_can_resolve_one_target_from_combined_spine_issue() -> None:
+    conflict = "shot_no=16 dialogues 与 audio_timeline 的口播内容分叉"
+    warning = "shots[1](shot_no=2).last_frame_desc 含超纲细节词：眼泪"
+    combined_spine = (
+        "主线节拍主体已入画但未完成对应动作/对白交付："
+        "S01/李富贵:一路哭闹抱怨；S02/路人丙:交代杂役规则并发放凝气卷"
+    )
+    remaining_spine = (
+        "主线节拍主体已入画但未完成对应动作/对白交付："
+        "S02/路人丙:交代杂役规则并发放凝气卷"
+    )
+
+    assert _repair_candidate_made_progress(
+        mode="insert",
+        candidate_passed=False,
+        before_messages=[conflict, combined_spine, warning],
+        after_messages=[conflict, remaining_spine, warning],
+    ) is True
 
 
 @pytest.mark.parametrize(

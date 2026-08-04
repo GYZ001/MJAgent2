@@ -49,7 +49,10 @@ _PREFERRED_LEVEL: dict[str, RepairLevel] = {
     "UPSTREAM_VERSION_CHANGED": "L5",
 }
 
-_SHOT_NO_RE = re.compile(r"(?:shot_no\s*=\s*|第\s*)(\d+)\s*镜?", re.I)
+_SHOT_NO_RE = re.compile(
+    r"(?:shot_no\s*=\s*|第\s*|镜头\s*)(\d+)\s*镜?",
+    re.I,
+)
 
 class RepairPlan(BaseModel):
     level: RepairLevel

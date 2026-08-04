@@ -462,13 +462,45 @@ def _repair_candidate_made_progress(
     """Accept monotonic partial repair so independent issues converge in turn."""
     if candidate_passed or mode == "append":
         return True
-    before = {str(message).strip() for message in before_messages if str(message).strip()}
-    after = {str(message).strip() for message in after_messages if str(message).strip()}
+    before = _repair_message_atoms(before_messages)
+    after = _repair_message_atoms(after_messages)
     if not before:
         return False
     resolved = before - after
     introduced = after - before
     return bool(resolved) and not introduced
+
+
+def _repair_message_atoms(messages: list[str]) -> set[tuple[str, str]]:
+    """Split combined gate messages into stable repair targets."""
+    from app.evaluations.issues import issue_code
+
+    atoms: set[tuple[str, str]] = set()
+    for value in messages:
+        message = str(value or "").strip()
+        if not message:
+            continue
+        code = issue_code(message)
+        target_ids = {
+            match.upper()
+            for match in re.findall(r"(?<![A-Z0-9])(?:KL|S|I)\d+(?![A-Z0-9])", message, re.I)
+        }
+        if target_ids:
+            atoms.update((code, target_id) for target_id in target_ids)
+            continue
+        shot_nos = {
+            match.group(1)
+            for match in re.finditer(
+                r"(?:shot_no\s*=\s*|第\s*|镜头\s*)(\d+)\s*镜?",
+                message,
+                re.I,
+            )
+        }
+        if shot_nos:
+            atoms.update((code, f"shot:{shot_no}") for shot_no in shot_nos)
+            continue
+        atoms.add((code, message))
+    return atoms
 
 
 def _deterministic_dialogue_framing_candidate(
@@ -650,16 +682,65 @@ def _retarget_spine_repair_brief(
 ) -> None:
     if target is None:
         return
+    from app.validators import _spine_delivery_clauses
+
     beat_id, who, does = target
     brief.beat = f"{who}{does}"
     brief.covers = does
     brief.spine_beat_ids = [beat_id]
-    brief.key_line_ids = []
-    brief.information_ids = []
-    brief.new_information_ids = []
     brief.primary_action = does
-    brief.characters_visible = [who] if who else []
-    brief.audio_cast = []
+    visible = [str(name).strip() for name in (brief.characters_visible or []) if str(name).strip()]
+    if who and who not in visible:
+        visible.insert(0, who)
+    brief.characters_visible = visible
+    _visible_clauses, spoken_clauses, _receptive_clauses = _spine_delivery_clauses(does)
+    audio_cast = [str(name).strip() for name in (brief.audio_cast or []) if str(name).strip()]
+    if spoken_clauses and who and who not in audio_cast:
+        audio_cast.insert(0, who)
+    brief.audio_cast = audio_cast
+
+
+def _retarget_spine_repair_shot(
+    shot: Shot,
+    brief: StoryboardOutlineShot | None,
+    target: tuple[str, str, str] | None,
+) -> None:
+    """Reapply the authorized spine contract after model paraphrasing."""
+    if target is None:
+        return
+    from app.validators import _spine_delivery_clauses
+
+    beat_id, who, does = target
+    shot.primary_action = does
+    shot.spine_beat_ids = [beat_id]
+    visible = [
+        str(name).strip()
+        for name in (shot.characters_visible or [])
+        if str(name).strip()
+    ]
+    if who and who not in visible:
+        visible.insert(0, who)
+    shot.characters_visible = visible
+    if brief is not None:
+        for field_name in (
+            "key_line_ids",
+            "information_ids",
+            "new_information_ids",
+        ):
+            required = list(getattr(brief, field_name, None) or [])
+            if required:
+                setattr(shot, field_name, required)
+    _visible_clauses, spoken_clauses, _receptive_clauses = (
+        _spine_delivery_clauses(does)
+    )
+    audio_cast = [
+        str(name).strip()
+        for name in (shot.audio_cast or [])
+        if str(name).strip()
+    ]
+    if spoken_clauses and who and who not in audio_cast:
+        audio_cast.insert(0, who)
+    shot.audio_cast = audio_cast
 
 
 def _repair_context_shots(conn, cp: SupervisorCheckpoint, episode_no: int) -> list[Shot]:
@@ -1200,6 +1281,66 @@ async def run_storyboard_supervisor(
         conn, ep, cp, outline,
     )
 
+    # A code/policy update can make a previously pending repair obsolete. Before
+    # resuming its provider call, re-evaluate a structurally complete official
+    # board and keep it when the current gate already passes.
+    if resume and _repair_is_pending(cp) and outline and outline.shots:
+        current_rows = conn.execute(
+            "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
+            (episode_id,),
+        ).fetchall()
+        current_prefix = _contiguous_shot_rows(current_rows)
+        current_board = (
+            _board_from_shot_rows(current_prefix, ep_data["episode_no"])
+            if current_prefix else None
+        )
+        if (
+            current_board is not None
+            and len(current_board.shots) == len(outline.shots)
+            and current_board.shots[-1].is_final
+        ):
+            current_evaluation = evaluate_storyboard_for_confirmation(
+                ep_data,
+                current_board,
+                screenplay,
+                bible,
+                has_real_bible=bool((p["bible_json"] or "").strip()) if p else False,
+            )
+            repair_warnings = [
+                issue for issue in (current_evaluation.issues or [])
+                if _storyboard_warning_requires_auto_repair(issue)
+            ]
+            if current_evaluation.passed and not repair_warnings:
+                previous_repair = cp.last_repair or {}
+                cp.last_repair = {
+                    **previous_repair,
+                    "status": "obsolete_current_gate_passed",
+                    "remaining_issue_codes": [],
+                }
+                cp.repair_candidate_shots = []
+                cp.phase = "VALIDATING_EPISODE"
+                cp.outcome = None
+                cp.expected_total = len(current_board.shots)
+                cp.validated_prefix_end = len(current_board.shots)
+                cp.next_shot_no = len(current_board.shots) + 1
+                cp.validated_shot_artifact_ids = [
+                    row["storyboard_artifact_id"]
+                    for row in current_prefix
+                    if row["storyboard_artifact_id"]
+                ]
+                save_checkpoint(cp, run_id=run_id)
+                if run_id:
+                    evidence_repository.append_event(
+                        run_id,
+                        "OBSOLETE_STORYBOARD_REPAIR_CLEARED",
+                        "info",
+                        "当前正式分镜已通过最新门禁，已丢弃过期修复候选",
+                        payload={
+                            "shot_count": len(current_board.shots),
+                            "previous_fingerprint": previous_repair.get("fingerprint"),
+                        },
+                    )
+
     def _reload_completed(rows=None) -> list[Shot]:
         """Load only the contiguous prefix and keep checkpoint evidence aligned."""
         if rows is None:
@@ -1540,6 +1681,29 @@ async def run_storyboard_supervisor(
             shot.prompt_contract_version = "renderability_v1"
             object.__setattr__(shot, "evidence_artifact_id", getattr(draft, "evidence_artifact_id", None))
             if repair_pending:
+                target_data = active_repair.get("spine_target") or {}
+                spine_target = (
+                    (
+                        str(target_data.get("beat_id") or ""),
+                        str(target_data.get("who") or ""),
+                        str(target_data.get("does") or ""),
+                    )
+                    if target_data.get("beat_id") and target_data.get("does")
+                    else None
+                )
+                repair_brief = (
+                    generation_outline.shots[shot_no - 1]
+                    if (
+                        generation_outline is not None
+                        and 0 < shot_no <= len(generation_outline.shots)
+                    )
+                    else None
+                )
+                _retarget_spine_repair_shot(
+                    shot,
+                    repair_brief,
+                    spine_target,
+                )
                 cp.repair_candidate_shots.append(shot.model_dump(mode="json"))
                 cp.last_repair = {
                     **(cp.last_repair or {}),
@@ -1737,7 +1901,12 @@ async def run_storyboard_supervisor(
             if _storyboard_warning_requires_auto_repair(issue)
         ]
         if not evaluation.passed or repair_required_warnings:
-            repair_inputs = evaluation.errors or repair_required_warnings
+            repair_warning_messages = [
+                str(getattr(issue, "message", "") or "")
+                for issue in repair_required_warnings
+                if str(getattr(issue, "message", "") or "").strip()
+            ]
+            repair_inputs = [*evaluation.errors, *repair_warning_messages]
             if run_id:
                 evidence_repository.append_event(
                     run_id, "EPISODE_VALIDATION_FAILED", "warning",
@@ -1895,7 +2064,7 @@ def _apply_repair(
         if bound_shot_nos:
             # Place the first local repair beside the earliest affected beat.
             # Subsequent full-gate passes will route any remaining beat IDs.
-            frontier = min(frontier, min(bound_shot_nos))
+            frontier = min(bound_shot_nos)
             active_spine_target = next(
                 target for shot_no, target in bound if shot_no == frontier
             )
@@ -2030,6 +2199,14 @@ def _apply_repair(
         "base_hash": _storyboard_hash(current_board),
         "semantic_attempt_id": semantic_attempt_id,
         "attempt_no": attempt_no,
+        "spine_target": (
+            {
+                "beat_id": active_spine_target[0],
+                "who": active_spine_target[1],
+                "does": active_spine_target[2],
+            }
+            if active_spine_target is not None else None
+        ),
         "candidate_outline": (
             candidate_outline.model_dump(mode="json")
             if candidate_outline is not None else None

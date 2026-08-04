@@ -36,7 +36,10 @@ def _load_env() -> None:
 
 _load_env()
 
-HIAGENT_BASE_URL = os.environ.get("HIAGENT_BASE_URL", "").rstrip("/")
+DEFAULT_HIAGENT_BASE_URL = "https://hia.volcenginepaas.com/api/aigw/v1"
+HIAGENT_BASE_URL = os.environ.get(
+    "HIAGENT_BASE_URL", DEFAULT_HIAGENT_BASE_URL
+).rstrip("/")
 HIAGENT_API_KEY = os.environ.get("HIAGENT_API_KEY", "")
 # HiAgent 内置模型的技术标识。模型库、默认职责分配与真实调用必须共用同一来源，
 # 避免“模型测试可用，但 active_model 仍为空”的双轨状态。
@@ -184,7 +187,7 @@ def max_spoken_chars_for_duration(duration_s: int) -> int:
 
 
 MAX_SPOKEN_CHARS_PER_SHOT = max_spoken_chars_for_duration(VIDEO_DURATION_MAX_S)
-PROMPT_CHAR_LIMIT = 1500  # 保守值，触发真实上限后回填
+PROMPT_CHAR_LIMIT = 8000  # 与生成台提示词编辑合同一致
 VIDEO_PRICE_PER_SECOND = 0.8  # CNY，1.0 配置单价
 
 # Seedream 定妆照（实测：尺寸下限 3,686,400 像素；1440x2560 与视频 9:16 同比例）

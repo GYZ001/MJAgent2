@@ -62,6 +62,19 @@ def test_route_action_capacity_to_adjacent_split():
     assert plan.invalidation_frontier == 8
 
 
+def test_route_compiled_prompt_overflow_to_reported_shot() -> None:
+    message = (
+        "Prompt 编译失败：镜头 1 必填提示词段落总长 2006 超过上限 1500；"
+        "说明镜头任务过载，请回到分镜阶段拆分"
+    )
+
+    plan = route_issues([message], validated_prefix_end=17)
+
+    assert plan.issue_codes == ["ACTION_CAPACITY_EXCEEDED"]
+    assert plan.strategy == "split_adjacent_shot"
+    assert plan.invalidation_frontier == 1
+
+
 def test_route_state_chain_window():
     plan = route_issues([
         _issue("STATE_CHAIN_INVALID", "shot_no=8 与 shot_no=9 状态链不承接", 8),

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from app.domain.video_ops import (ConfirmationEvaluation,
                                   _is_storyboard_terminal_for_confirmation,
+                                  _storyboard_structural_errors,
                                   evaluate_storyboard_for_confirmation)
 from app.schemas import Bible, Character, Dialogue, EpisodeScreenplay, Shot, Storyboard, World
 from app.validators import validate_storyboard_preserves_key_content
@@ -72,6 +73,16 @@ def test_manual_confirmation_rejects_incomplete_validated_prefix() -> None:
         episode, checkpoint, shot_count=11, planned_shots=11,
         final_shot_valid=True,
     )
+
+
+def test_structural_gate_accepts_canonical_scene_fields_without_legacy_setting() -> None:
+    shot = _shot(scene_time="日", scene_name="广场", scene_setting="")
+
+    errors = _storyboard_structural_errors(
+        Storyboard(episode_no=1, shots=[shot])
+    )
+
+    assert not any("scene_name" in error for error in errors)
 
 
 def test_evaluate_is_readonly_and_returns_structured_result():

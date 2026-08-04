@@ -9,6 +9,11 @@ from app import config, hiagent, system_api as api
 from app.main import _redact_sensitive
 
 
+def test_builtin_hiagent_gateway_has_a_working_default() -> None:
+    assert config.DEFAULT_HIAGENT_BASE_URL == "https://hia.volcenginepaas.com/api/aigw/v1"
+    assert config.HIAGENT_BASE_URL
+
+
 def _settings_store(monkeypatch):
     store = {"custom_models": "[]"}
     monkeypatch.setattr(api, "get_setting", lambda key: store.get(key, ""))

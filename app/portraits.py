@@ -293,10 +293,12 @@ async def discover_character_candidates(
 规则：
 1. 找出本集原文/草稿中实际出场或开口的人，source_label 填本集对他/她的原始称谓。
 2. 若当前文本或这批后续章节有明确同一人证据，identity_kind="named"，canonical_name 填稳定真名。
-3. 姓名单独出现不算证据；必须能确认与 source_label 是同一人，有歧义一律不猜。
-4. 若是一次性角色，或在可见线索中无法确认稳定真名，identity_kind="functional"、canonical_name=""。
-5. 不得输出只在后续章节出场、本集并未出场/开口的人；后文只能用于身份消歧。
-6. evidence 给本集依据；future_evidence 只给姓名同一性依据，不摘录后续剧情。
+3. canonical_name 必须是文本明确给出的人名，或“当前人物谱已有角色”中的稳定名；姓氏加师兄/师姐、
+   长老等称谓、职位、外貌标签都不是真名（除非它已在当前人物谱中），这类情况必须判为 functional。
+4. 姓名单独出现不算同一人证据；必须能确认该真名与 source_label 是同一人，有歧义一律不猜。
+5. 若是一次性角色，或在可见线索中无法确认稳定真名，identity_kind="functional"、canonical_name=""。
+6. 不得输出只在后续章节出场、本集并未出场/开口的人；后文只能用于身份消歧。
+7. evidence 给本集依据；future_evidence 只给姓名同一性依据，不摘录后续剧情。
 
 只输出 JSON：
 {{"characters": [{{"source_label": "本集称谓", "canonical_name": "真名或空串", "identity_kind": "named|functional", "kind": "onscreen|mentioned", "evidence": "本集依据", "future_evidence": "同一性依据或空串"}}]}}"""
@@ -1390,6 +1392,62 @@ async def _refresh_portrait_on_drift(project_id: str, name: str, episode_no: int
                 "portrait_id": new_portrait_id}
 
 
+def _backfill_matching_future_portrait(
+    conn,
+    *,
+    project_id: str,
+    name: str,
+    episode_no: int,
+    appearance: str,
+) -> dict | None:
+    """Extend an identical ready pack when discovery assigned a future start."""
+    covered = conn.execute(
+        "SELECT id FROM character_portraits "
+        "WHERE project_id=? AND character_name=? AND ep_start<=? "
+        "AND (ep_end IS NULL OR ep_end>=?) LIMIT 1",
+        (project_id, name, episode_no, episode_no),
+    ).fetchone()
+    if covered:
+        return None
+    pack_supported = _has_column(conn, "character_portraits", "pack_status")
+    pack_clause = "AND pack_status='ready'" if pack_supported else ""
+    future = conn.execute(
+        "SELECT * FROM character_portraits "
+        "WHERE project_id=? AND character_name=? AND ep_start>? "
+        f"{pack_clause} ORDER BY ep_start ASC LIMIT 1",
+        (project_id, name, episode_no),
+    ).fetchone()
+    if not future:
+        return None
+    if (future["appearance"] or "").strip() != (appearance or "").strip():
+        return None
+    image_path = str(future["image_path"] or "")
+    if not image_path or not Path(image_path).is_file():
+        return None
+    same_start = conn.execute(
+        "SELECT id FROM character_portraits "
+        "WHERE project_id=? AND character_name=? AND ep_start=? AND id<>? LIMIT 1",
+        (project_id, name, episode_no, future["id"]),
+    ).fetchone()
+    if same_start:
+        return None
+    original_start = int(future["ep_start"])
+    conn.execute(
+        "UPDATE character_portraits SET ep_start=? WHERE id=? AND ep_start=?",
+        (episode_no, future["id"], original_start),
+    )
+    conn.commit()
+    return {
+        "name": name,
+        "portrait_id": future["id"],
+        "ep_start": episode_no,
+        "previous_ep_start": original_start,
+        "image_path": image_path,
+        "pack_status": future["pack_status"] if pack_supported else "ready",
+        "reused": True,
+    }
+
+
 async def ensure_cards_for_screenplay(project_id: str, episode_no: int, screenplay, bible) -> dict:
     """剧本就绪后（分镜展开前）反应式维护本集出场角色的定妆照：
       ① 剧本外身份在这里只做快速阻断，不再延迟到分镜阶段建卡；
@@ -1487,8 +1545,22 @@ async def ensure_cards_for_screenplay(project_id: str, episode_no: int, screenpl
         )
         conn.commit()
 
-    # ② 已有角色按集漂移（只判本集之前就已有定妆照的角色；本集新建的天然是最新）
+    # 未来章节扫描可能先发现真实姓名，但当前集剧本已经使用该角色。
+    # 若完整包外观与人物谱锚点完全一致，零付费向前扩展适用区间。
+    backfilled: list[dict] = []
     by_name = {c.name: c for c in bible.characters}
+    for name in (item for item in names if item in bible_names):
+        result = _backfill_matching_future_portrait(
+            conn,
+            project_id=project_id,
+            name=name,
+            episode_no=episode_no,
+            appearance=by_name[name].appearance_canonical,
+        )
+        if result:
+            backfilled.append(result)
+
+    # ② 已有角色按集漂移（只判本集之前就已有定妆照的角色；本集新建的天然是最新）
     src_text = _episode_source_text(conn, project_id, episode_no)
     entries: list[dict] = []
     if src_text:
@@ -1536,6 +1608,7 @@ async def ensure_cards_for_screenplay(project_id: str, episode_no: int, screenpl
     return {
         "checked": len(unknown),
         "added": added,
+        "backfilled": backfilled,
         "redrawn": redrawn,
         "errors": errors,
         "blocking_errors": blocking_errors,

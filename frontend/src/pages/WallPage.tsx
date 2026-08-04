@@ -177,6 +177,19 @@ export function episodeGenerationAction(
   return 'generate'
 }
 
+export function shotHasActiveGeneration(shot: Shot): boolean {
+  const status = shot.pipeline?.pipeline_status
+  if (['paused_budget', 'waiting_budget', 'waiting_human', 'paused_external'].includes(status || '')) {
+    return false
+  }
+  return shotVideoState(shot).phase === 'generating'
+}
+
+export function shotHasPausedGeneration(shot: Shot): boolean {
+  return ['paused_budget', 'waiting_budget', 'waiting_human', 'paused_external']
+    .includes(shot.pipeline?.pipeline_status || '')
+}
+
 export type VideoGenerationMode = 'reroll' | 'rewrite' | 'critique'
 
 export const VIDEO_PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 2] as const
@@ -464,11 +477,12 @@ export default function WallPage() {
         ? context.upstream.blockers.join('；') || '当前生成资格未通过'
         : ''
   const supervisorTaskRunning = ep?.video_supervisor?.task_running === true
-  const generatingCount = shots.filter(shot => shotVideoState(shot).phase === 'generating').length
+  const generatingCount = shots.filter(shotHasActiveGeneration).length
+  const pausedGenerationCount = shots.filter(shotHasPausedGeneration).length
   const hasCurrentGeneration = supervisorTaskRunning || generatingCount > 0
   const generationAction = episodeGenerationAction(
     hasCurrentGeneration,
-    ep?.pipeline_summary?.paused ?? 0,
+    Math.max(ep?.pipeline_summary?.paused ?? 0, pausedGenerationCount),
     ep?.pipeline_summary?.failed ?? 0,
   )
   const quickGenerationEstimate = shots.reduce((sum, shot) => sum + (shot.est_cost_cny || 0), 0)

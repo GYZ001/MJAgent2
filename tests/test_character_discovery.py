@@ -361,6 +361,51 @@ def test_no_drift_redraw_when_portrait_starts_at_or_after_this_episode(monkeypat
     assert out["redrawn"] == [] and calls["screen"] == 0  # ep_start>=本集 → 直接跳过，连判定都不调
 
 
+def test_ensure_cards_backfills_identical_ready_future_portrait(
+    monkeypatch, tmp_path,
+) -> None:
+    conn = _make_conn()
+    _seed_project(conn, "萧炎在本集登场。")
+    _patch_settings(monkeypatch, conn)
+    image = tmp_path / "xiao_ep22.jpg"
+    image.write_bytes(b"ready")
+    appearance = "黑发少年，玄色劲装，目光坚定，身形修长，腰佩火纹玉佩"
+    _insert_portrait(conn, "p1", "萧炎", 22, None, appearance, str(image))
+
+    async def unexpected_screen(*_args, **_kwargs):
+        raise AssertionError("向前扩展相同完整包后不应再判外观漂移")
+
+    monkeypatch.setattr(portraits, "screen_appearance_changes", unexpected_screen)
+
+    class _Scene:
+        characters = ["萧炎"]
+
+    class _Screenplay:
+        scene_outline = [_Scene()]
+        beats: list = []
+
+    bible = Bible.model_validate(json.loads(
+        conn.execute("SELECT bible_json FROM projects WHERE id='p1'").fetchone()["bible_json"]))
+    out = asyncio.run(
+        portraits.ensure_cards_for_screenplay("p1", 21, _Screenplay(), bible)
+    )
+
+    row = conn.execute(
+        "SELECT ep_start,ep_end FROM character_portraits WHERE character_name='萧炎'"
+    ).fetchone()
+    assert (row["ep_start"], row["ep_end"]) == (21, None)
+    assert out["backfilled"] == [{
+        "name": "萧炎",
+        "portrait_id": "po_萧炎_22",
+        "ep_start": 21,
+        "previous_ep_start": 22,
+        "image_path": str(image),
+        "pack_status": "ready",
+        "reused": True,
+    }]
+    assert out["redrawn"] == []
+
+
 def test_bible_for_episode_picks_segment_anchor(monkeypatch) -> None:
     conn = _make_conn()
     _seed_project(conn, "x")
@@ -433,6 +478,8 @@ def test_screenplay_discovery_resolves_appearance_label_from_next_ten_chapters(m
         assert "绿袍男子摘下斗笠" in prompt
         assert "丁力再次现身" in prompt
         assert "超出十章" not in prompt
+        assert "姓氏加师兄/师姐" in prompt
+        assert "这类情况必须判为 functional" in prompt
         return json.dumps({
             "characters": [{
                 "source_label": "绿袍男子",

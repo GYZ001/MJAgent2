@@ -142,6 +142,51 @@ def test_repeated_dialogue_text_has_distinct_occurrence_ids() -> None:
     assert matches[0]["offset"] != matches[1]["offset"]
 
 
+def test_character_discovery_bootstraps_placeholder_bible(monkeypatch) -> None:
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO projects(id,name,status,bible_status,created_at) "
+        "VALUES('p1','P','planned','idle',1)"
+    )
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,title,source_chapters,created_at) "
+        "VALUES('e1','p1',1,'E','[1]',1)"
+    )
+    conn.commit()
+    observed = {}
+
+    async def fake_ensure(project_id, episode_no, source_text, bible, **kwargs):
+        observed.update({
+            "project_id": project_id,
+            "episode_no": episode_no,
+            "source_text": source_text,
+            "characters": list(bible.characters),
+            "generate_portraits": kwargs["generate_portraits"],
+        })
+        return {
+            "checked": 0, "candidates": [], "added": [], "skipped": [],
+            "resolutions": [], "errors": [], "warnings": [],
+        }
+
+    monkeypatch.setattr(portraits, "ensure_cards_for_text", fake_ensure)
+
+    result = asyncio.run(api._screenplay_character_discovery("e1", "孟浩走上山顶。"))
+
+    project = conn.execute(
+        "SELECT bible_json,bible_status FROM projects WHERE id='p1'"
+    ).fetchone()
+    assert json.loads(project["bible_json"])["world"]["visual_style_canonical"]
+    assert project["bible_status"] == "idle"
+    assert observed == {
+        "project_id": "p1",
+        "episode_no": 1,
+        "source_text": "孟浩走上山顶。",
+        "characters": [],
+        "generate_portraits": False,
+    }
+    assert result["resolutions"] == []
+
+
 def test_nested_curly_quotes_do_not_truncate_dialogue_occurrence() -> None:
     source = "【第一章】\n“三段？嘿嘿，果然不出我所料，这个“天才”这一年又是在原地踏步！”"
     items = api._screenplay_occurrences(source, [1])

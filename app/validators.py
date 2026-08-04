@@ -1854,12 +1854,15 @@ def validate_screenplay_spine_delivery(
     for beat in spine.spine_beats:
         if not beat.must_keep:
             continue
-        visible_clauses, spoken_clauses = _spine_delivery_clauses(beat.does or "")
+        visible_clauses, spoken_clauses, receptive_clauses = (
+            _spine_delivery_clauses(beat.does or "")
+        )
         visible_missing = [
             clause for clause in visible_clauses
             if _claim_clearly_absent(clause, action_text)
         ]
         speaker = (beat.who or "").strip()
+        all_spoken = "".join(spoken for _scene_no, _speaker, spoken in dialogue_turns)
         spoken_by_owner = "".join(
             spoken for _scene_no, actual_speaker, spoken in dialogue_turns
             if (
@@ -1873,7 +1876,14 @@ def validate_screenplay_spine_delivery(
             clause for clause in spoken_clauses
             if _claim_clearly_absent(clause, spoken_by_owner)
         ]
-        if visible_missing or spoken_missing:
+        receptive_missing = [
+            clause for clause in receptive_clauses
+            if _claim_clearly_absent(
+                _spine_receptive_claim(clause),
+                action_text + all_spoken,
+            )
+        ]
+        if visible_missing or spoken_missing or receptive_missing:
             missing.append(
                 f"{beat.beat_id}/{speaker}:{beat.does}"
             )
@@ -2342,11 +2352,19 @@ _SPINE_SPOKEN_CLAUSE_MARKERS = (
     "开口", "说", "宣布", "宣读", "询问", "回答", "回应", "安慰", "反驳",
     "警告", "告知", "暗示", "提到", "介绍", "嘲笑", "威胁", "拒绝", "同意",
     "解释", "请求", "承诺", "指出", "相信", "认为", "表示", "承认", "答应",
-    "提醒", "质问", "反问", "感叹",
+    "提醒", "质问", "反问", "感叹", "对话", "吩咐", "抱怨", "嘀咕", "交代",
+    "命令", "劝告", "叮嘱", "讲述", "诉说", "哭诉", "呵斥", "冷哼",
+    "自语", "喃喃",
+)
+
+_SPINE_RECEPTIVE_CLAUSE_MARKERS = (
+    "听到", "听见", "听说", "得知", "获悉", "知晓", "了解到", "意识到",
 )
 
 
-def _spine_delivery_clauses(does: str) -> tuple[list[str], list[str]]:
+def _spine_delivery_clauses(
+    does: str,
+) -> tuple[list[str], list[str], list[str]]:
     """Split a spine beat into visible-action and spoken-delivery evidence."""
     clauses = [
         clause.strip(" ，,；;。")
@@ -2355,9 +2373,23 @@ def _spine_delivery_clauses(does: str) -> tuple[list[str], list[str]]:
     ]
     visible: list[str] = []
     spoken: list[str] = []
+    receptive: list[str] = []
     for clause in clauses:
-        (spoken if any(marker in clause for marker in _SPINE_SPOKEN_CLAUSE_MARKERS) else visible).append(clause)
-    return visible, spoken
+        if any(marker in clause for marker in _SPINE_RECEPTIVE_CLAUSE_MARKERS):
+            receptive.append(clause)
+        elif any(marker in clause for marker in _SPINE_SPOKEN_CLAUSE_MARKERS):
+            spoken.append(clause)
+        else:
+            visible.append(clause)
+    return visible, spoken, receptive
+
+
+def _spine_receptive_claim(clause: str) -> str:
+    """Strip the receiver framing and keep the fact supplied by the scene."""
+    for marker in _SPINE_RECEPTIVE_CLAUSE_MARKERS:
+        if marker in clause:
+            return clause.split(marker, 1)[1].strip() or clause
+    return clause
 
 
 def validate_spine_delivery_ledger(
@@ -2461,13 +2493,22 @@ def validate_spine_delivery_ledger(
                         or (dialogue.speaker or "").strip() in who
                     )
                 )
-                visible_clauses, spoken_clauses = _spine_delivery_clauses(beat.does or "")
+                visible_clauses, spoken_clauses, receptive_clauses = (
+                    _spine_delivery_clauses(beat.does or "")
+                )
                 visible_missing = any(
                     _claim_clearly_absent(clause, subject_action_text)
                     for clause in visible_clauses
                 )
                 spoken_missing = bool(spoken_clauses) and not subject_spoken_text.strip()
-                if visible_missing or spoken_missing:
+                receptive_missing = any(
+                    _claim_clearly_absent(
+                        _spine_receptive_claim(clause),
+                        window_visual,
+                    )
+                    for clause in receptive_clauses
+                )
+                if visible_missing or spoken_missing or receptive_missing:
                     missing_visible_actions.append(f"{beat_id}/{who}:{beat.does}")
             for kid in (beat.key_line_ids or []):
                 kid_u = str(kid).strip().upper()

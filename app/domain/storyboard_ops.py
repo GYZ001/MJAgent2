@@ -1750,7 +1750,16 @@ def preview_storyboard_clear(episode_id: str):
 
     ep = _episode_or_404(episode_id)
     _assert_storyboard_clear_not_running(episode_id, dict(ep))
-    if not _storyboard_has_material(episode_id, ep):
+    # A task can stop before its first shot with either a zero-prefix checkpoint
+    # or only a preflight failure projection. Both must remain clearable;
+    # otherwise Resume and Clear reject the same empty workspace.
+    stopped_preflight_failure = bool(
+        ep["status"] == "script_failed" and str(ep["script_error"] or "").strip()
+    )
+    if (
+        not _storyboard_has_persisted_work(episode_id, dict(ep))
+        and not stopped_preflight_failure
+    ):
         raise HTTPException(409, "当前没有可清空的分镜数据")
     conn = get_conn()
     shot_count = int(conn.execute(

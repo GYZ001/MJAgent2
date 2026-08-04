@@ -340,6 +340,64 @@ def test_new_screenplay_scene_is_ai_adopted_and_hidden_from_human_queue(tmp_path
     assert change["decided_by"] == "ai_scene_preflight"
 
 
+def test_new_interior_scene_is_not_collapsed_to_generic_exterior_alias(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    bible = _bible("外宗宝阁前")
+    bible.scenes[0].aliases = ["日 / 外宗宝阁"]
+    _fresh_project(tmp_path, monkeypatch, bible)
+    generated: list[str] = []
+    _install_fake_scene_generator(tmp_path, monkeypatch, generated)
+
+    async def fake_assess(*_args, **_kwargs):
+        return {
+            "important": True,
+            "existing_scene_name": "",
+            "reason": "宝阁内部与门前外景是不同物理空间",
+            "name": "外宗宝阁内",
+            "scene_canonical": (
+                "室内日间，外宗宝阁内部多层木架陈列法器宝物，"
+                "暖灰色调，国漫风格，电影感光影，无人物"
+            ),
+            "location_kind": "室内",
+        }
+
+    async def no_state_changes(*_args, **_kwargs):
+        return {}
+
+    screenplay = EpisodeScreenplay(
+        episode_no=4,
+        title="一面铜镜",
+        full_script_text="【场1】日 / 宝阁内\n孟浩走入宝阁。",
+        scene_outline=[
+            ScriptScene(
+                scene_no=1,
+                scene_heading="日 / 宝阁内",
+                story_function="孟浩发现铜镜",
+                summary="孟浩在宝阁内部的木架间发现一面铜镜。",
+                turn="孟浩拿起铜镜",
+                source_basis="孟浩进入宝阁内部查看法宝",
+            ),
+        ],
+    )
+    monkeypatch.setattr(scenes, "assess_new_scene", fake_assess)
+    monkeypatch.setattr(scenes, "screen_scene_state_changes", no_state_changes)
+
+    result = asyncio.run(
+        scenes.ensure_scenes_for_storyboard("p1", 4, screenplay, bible)
+    )
+
+    assert result["blocking_errors"] == []
+    assert generated == ["外宗宝阁内"]
+    current = Bible.model_validate_json(
+        db.get_conn().execute(
+            "SELECT bible_json FROM projects WHERE id='p1'"
+        ).fetchone()["bible_json"]
+    )
+    assert {scene.name for scene in current.scenes} == {"外宗宝阁前", "外宗宝阁内"}
+
+
 def test_scene_preflight_does_not_continue_when_own_image_is_unavailable(tmp_path, monkeypatch) -> None:
     bible = _bible("蛇人族大殿", "蛇人族城墙上空")
     _fresh_project(tmp_path, monkeypatch, bible)

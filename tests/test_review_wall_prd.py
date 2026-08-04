@@ -740,6 +740,70 @@ def test_persisted_new_run_overrides_old_terminal_checkpoint_after_restart() -> 
 
 
 @pytest.mark.asyncio
+async def test_generate_episode_reused_active_version_is_not_adopted(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from app import multiview
+
+    conn = _conn()
+    conn.execute(
+        """UPDATE shots
+              SET shot_size='中景',camera_move='固定',scene_setting='室内'
+            WHERE id='s1'"""
+    )
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,created_at
+           ) VALUES('v-reused','s1',1,'p','k','running',0)"""
+    )
+    conn.commit()
+    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    monkeypatch.setattr(
+        api,
+        "_review_assert_positive_action",
+        lambda *_args, **_kwargs: {"qualification_version": "q1"},
+    )
+    monkeypatch.setattr(api, "_assert_storyboard_generation_gate", lambda _episode_id: None)
+    monkeypatch.setattr(
+        multiview,
+        "scan_episode_reference_asset_gaps",
+        lambda **_kwargs: {"blockers": [], "characters": [], "scenes": []},
+    )
+
+    async def ensure_mode_plan(_conn, _shot_id):
+        return None
+
+    monkeypatch.setattr(api, "_ensure_shot_mode_plan", ensure_mode_plan)
+    monkeypatch.setattr(
+        api.worker,
+        "enqueue_shot",
+        lambda *_args, **_kwargs: {"reused": True, "version_id": "v-reused"},
+    )
+
+    await api._generate_episode_core("e", {})
+    assert conn.execute(
+        "SELECT adopted_version_id FROM shots WHERE id='s1'"
+    ).fetchone()["adopted_version_id"] is None
+
+    video_path = tmp_path / "reused.mp4"
+    video_path.write_bytes(b"video")
+    conn.execute(
+        """UPDATE shot_versions
+              SET status='succeeded',video_path=?,
+                  technical_validation_json='{"passed":true}'
+            WHERE id='v-reused'""",
+        (str(video_path),),
+    )
+    conn.commit()
+
+    await api._generate_episode_core("e", {})
+    assert conn.execute(
+        "SELECT adopted_version_id FROM shots WHERE id='s1'"
+    ).fetchone()["adopted_version_id"] == "v-reused"
+
+
+@pytest.mark.asyncio
 async def test_resume_episode_reports_when_nothing_can_resume(monkeypatch) -> None:
     conn = _conn()
     monkeypatch.setattr(api, "get_conn", lambda: conn)

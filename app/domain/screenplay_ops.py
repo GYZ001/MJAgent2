@@ -517,13 +517,22 @@ async def _screenplay_character_discovery(
     if not ep:
         raise StageError("新人物发现", ["剧集不存在"])
     project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
-    if not project or not (project["bible_json"] or "").strip():
-        # Preserve the existing placeholder-bible workflow. Projects with a real
-        # bible must pass discovery; placeholder projects can still draft text.
-        return {
-            "checked": 0, "candidates": [], "added": [], "skipped": [],
-            "errors": [], "warnings": ["项目尚无人物谱，已跳过增量人物发现"],
-        }
+    if not project:
+        raise StageError("新人物发现", ["项目不存在"])
+    if not (project["bible_json"] or "").strip():
+        # 剧本允许先于完整人物谱生产，但人物身份不能因此绕过预检。先原子写入
+        # 最小骨架，后续仍由既有增量流程建文字卡；bible_status 保持原值，
+        # 不把这个骨架伪装成用户已完成的人物谱。
+        placeholder = _project_bible_or_placeholder(project)
+        conn.execute(
+            "UPDATE projects SET bible_json=? "
+            "WHERE id=? AND COALESCE(TRIM(bible_json), '')=''",
+            (placeholder.model_dump_json(), ep["project_id"]),
+        )
+        conn.commit()
+        project = conn.execute(
+            "SELECT * FROM projects WHERE id=?", (ep["project_id"],)
+        ).fetchone()
     bible = _project_bible_or_placeholder(project)
     from app.portraits import (
         ensure_cards_for_text,

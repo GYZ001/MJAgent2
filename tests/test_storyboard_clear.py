@@ -274,6 +274,109 @@ def test_product_clear_preview_supports_metadata_only_storyboard() -> None:
     assert preview["screenplay_preserved"] is True
 
 
+def test_product_clear_supports_zero_prefix_paused_checkpoint() -> None:
+    from app.storyboard_supervisor import SupervisorCheckpoint
+
+    conn = db.get_conn()
+    conn.execute("DELETE FROM shot_versions WHERE shot_id='shot1'")
+    conn.execute("DELETE FROM shots WHERE id='shot1'")
+    conn.execute(
+        """UPDATE episodes SET
+               status='scripting',
+               script_error='用户已暂停分镜任务：已保留 0 个工作镜头和安全检查点',
+               storyboard_outline_json=NULL,
+               storyboard_artifact_id=NULL,
+               working_storyboard_artifact_id=NULL,
+               published_storyboard_artifact_id=NULL,
+               storyboard_production_revision_id=NULL,
+               storyboard_completion_certificate_id=NULL,
+               active_storyboard_run_id=NULL,
+               active_video_run_id=NULL,
+               delivery_artifact_id=NULL,
+               delivery_status='not_ready'
+           WHERE id='e1'"""
+    )
+    conn.execute(
+        "UPDATE workflow_runs SET status='CANCELLED' "
+        "WHERE id IN ('run_storyboard','run_video')"
+    )
+    checkpoint = SupervisorCheckpoint(
+        episode_id="e1",
+        phase="PAUSED_EXTERNAL",
+        outcome="PAUSED_BY_USER",
+        validated_prefix_end=0,
+        next_shot_no=1,
+    )
+    conn.execute(
+        """UPDATE artifacts
+              SET content_json=?,status='validated'
+            WHERE id='art_checkpoint'""",
+        (checkpoint.model_dump_json(),),
+    )
+    conn.commit()
+
+    preview = api.preview_storyboard_clear("e1")
+    assert preview["shot_count"] == 0
+    assert preview["workflow_run_count"] == 2
+
+    with enter_handler():
+        result = asyncio.run(api.apply_storyboard_clear(
+            "e1",
+            {"preview_token": preview["preview_token"]},
+        ))
+
+    assert result["cleared"] is True
+    episode = db.get_conn().execute(
+        "SELECT status,script_error FROM episodes WHERE id='e1'"
+    ).fetchone()
+    assert dict(episode) == {"status": "planned", "script_error": None}
+
+
+def test_product_clear_supports_preflight_failure_before_checkpoint() -> None:
+    conn = db.get_conn()
+    conn.execute("DELETE FROM shot_versions WHERE shot_id='shot1'")
+    conn.execute("DELETE FROM shots WHERE id='shot1'")
+    conn.execute("DELETE FROM evaluations WHERE artifact_id='art_checkpoint'")
+    conn.execute("DELETE FROM artifacts WHERE id='art_checkpoint'")
+    conn.execute(
+        """UPDATE episodes SET
+               status='script_failed',
+               script_error='[场景图准备] 宝阁内尚未完成自动建库',
+               storyboard_outline_json=NULL,
+               storyboard_artifact_id=NULL,
+               working_storyboard_artifact_id=NULL,
+               published_storyboard_artifact_id=NULL,
+               storyboard_production_revision_id=NULL,
+               storyboard_completion_certificate_id=NULL,
+               active_storyboard_run_id=NULL,
+               active_video_run_id=NULL,
+               delivery_artifact_id=NULL,
+               delivery_status='not_ready'
+           WHERE id='e1'"""
+    )
+    conn.execute(
+        "UPDATE workflow_runs SET status='FAILED' "
+        "WHERE id IN ('run_storyboard','run_video')"
+    )
+    conn.commit()
+
+    preview = api.preview_storyboard_clear("e1")
+    assert preview["shot_count"] == 0
+    assert preview["workflow_run_count"] == 2
+
+    with enter_handler():
+        result = asyncio.run(api.apply_storyboard_clear(
+            "e1",
+            {"preview_token": preview["preview_token"]},
+        ))
+
+    assert result["cleared"] is True
+    episode = db.get_conn().execute(
+        "SELECT status,script_error FROM episodes WHERE id='e1'"
+    ).fetchone()
+    assert dict(episode) == {"status": "planned", "script_error": None}
+
+
 def test_product_clear_is_rejected_until_running_storyboard_stops() -> None:
     with pytest.raises(HTTPException) as running:
         api.preview_storyboard_clear("e1")

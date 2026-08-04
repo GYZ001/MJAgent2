@@ -7,6 +7,10 @@ from app.harness.types import Issue, IssueSeverity
 
 
 _CODE_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("ACTION_CAPACITY_EXCEEDED", re.compile(
+        r"Prompt 编译失败.+镜头\s*\d+.+总长.+超过上限|镜头任务过载",
+        re.I,
+    )),
     ("SCHEMA_INVALID", re.compile(r"字段|schema|JSON|解析|类型|必填", re.I)),
     ("SOURCE_FIDELITY", re.compile(r"原文|来源|source|依据|凭空", re.I)),
     # 口播相关诊断必须先匹配具体合同/时间轴错误，再匹配容量兜底。

@@ -229,6 +229,50 @@ def test_legacy_confirmed_board_is_blocked_before_paid_generation(confirm_db, mo
     assert "返回分镜台" in caught.value.detail["recovery_action"]
 
 
+def test_current_storyboard_certificate_survives_downstream_observation(
+    confirm_db, monkeypatch,
+):
+    from app.production.certificate import (
+        consume_completion_certificate,
+        issue_completion_certificate,
+    )
+
+    artifact = confirm_db.execute(
+        "SELECT id,content_hash FROM artifacts WHERE scope_id='e1' AND type='storyboard'"
+    ).fetchone()
+    certificate = issue_completion_certificate(
+        kind="storyboard",
+        scope_id="e1",
+        artifact_id=artifact["id"],
+        artifact_hash=artifact["content_hash"],
+        production_revision_id="rev-current",
+    )
+    consume_completion_certificate(certificate.certificate_id)
+    confirm_db.execute(
+        """UPDATE episodes
+              SET status='confirmed',
+                  storyboard_production_revision_id='rev-current',
+                  storyboard_completion_certificate_id=?
+            WHERE id='e1'""",
+        (certificate.certificate_id,),
+    )
+    confirm_db.execute(
+        "UPDATE shots SET observed_state_out='视频质检返回的下游实际画面' WHERE id='s1'"
+    )
+    confirm_db.commit()
+
+    def unexpected_evaluation(*_args, **_kwargs):
+        raise AssertionError("当前完成证书有效时不应被下游视频观测重新打开分镜门禁")
+
+    monkeypatch.setattr(
+        video_ops,
+        "evaluate_storyboard_for_confirmation",
+        unexpected_evaluation,
+    )
+
+    video_ops._assert_storyboard_generation_gate("e1")
+
+
 def test_screenplay_certificate_requires_all_runtime_gate_issues_to_be_fixed():
     qa_issue = Issue(
         code="BUSINESS_RULE_FAILED",

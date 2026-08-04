@@ -3,6 +3,10 @@ from app.compiler import CompileError, compile_prompt, SOURCE_EXCERPT_MARKER
 from app.schemas import Bible, Character, Dialogue, Shot, World
 
 
+def test_default_prompt_budget_matches_generation_editor_contract() -> None:
+    assert config.PROMPT_CHAR_LIMIT == 8000
+
+
 def _bible() -> Bible:
     return Bible(
         characters=[
