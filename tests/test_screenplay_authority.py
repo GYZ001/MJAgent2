@@ -104,8 +104,9 @@ def test_resolver_fails_closed_on_every_authority_layer_drift(drift: str) -> Non
         )
     elif drift == "source":
         conn.execute(
-            "INSERT INTO chapters(project_id,idx,title,content) VALUES(?,?,?,?)",
-            ("project-generic", 1, "Changed source", "New source authority."),
+                """UPDATE chapters SET title=?,content=?
+                    WHERE project_id=? AND idx=?""",
+                ("Changed source", "New source authority.", "project-generic", 1),
         )
         conn.execute(
             "UPDATE episodes SET source_chapters='[1]' WHERE id='episode-generic'"

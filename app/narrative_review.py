@@ -761,6 +761,7 @@ def _comparator_prompt(
                     "audience_prior_id": path.audience_prior_id,
                     "target_delta_id": delta.target_delta_id,
                     "result": "satisfied|missed|contradicted|needs_review",
+                    "predicted_score": 0.0,
                     "supporting_observation_ids": [item.observation_id for item in observations if item.audience_prior_id == path.audience_prior_id],
                     "supporting_evidence_ids": [],
                     "reason": "只基于同先验冻结复述与其实际引用证据的比较理由",
@@ -799,6 +800,8 @@ def _comparator_prompt(
         },
         "hard_rules": [
             "逐 audience_prior_id、逐 target_delta_id 比较，禁止先平均",
+            "每个 target_delta_result 必须给出 0..1 predicted_score，表示仅基于冻结首轮观察时"
+            "该目标实际达成的模型置信度；不得按最终 decision 统一填 0 或 1",
             "只有 spontaneous_recall 自发出现且可下钻到 spontaneous_supporting_evidence_ids 的理解可计首轮达成",
             "故意隐藏须按 withheld_propositions/延续问题判断，不得误报为遗漏",
             "任何低分位关键路径 missed/contradicted/needs_review 时不得判 pass",

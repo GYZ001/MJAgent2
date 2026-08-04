@@ -107,10 +107,15 @@ def _persist_review_projection(screenplay, board, screenplay_artifact=None):
         ("project-generic", "Generic", "created", db.now()),
     )
     conn.execute(
+        """INSERT INTO chapters(project_id,idx,title,content)
+           VALUES('project-generic',1,'Chapter 1',
+                  'An observable change occurs.')""",
+    )
+    conn.execute(
         """INSERT INTO episodes(
                id,project_id,episode_no,screenplay_json,screenplay_status,
-               screenplay_artifact_id,status,created_at
-           ) VALUES(?,?,?,?,?,?,?,?)""",
+               screenplay_artifact_id,source_chapters,status,created_at
+           ) VALUES(?,?,?,?,?,?,?,?,?)""",
         (
             "episode-generic",
             "project-generic",
@@ -118,6 +123,7 @@ def _persist_review_projection(screenplay, board, screenplay_artifact=None):
             screenplay.model_dump_json(),
             "ready",
             screenplay_artifact["id"],
+            "[1]",
             "scripted",
             db.now(),
         ),

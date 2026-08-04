@@ -101,6 +101,33 @@ def _source_records(conn: Any, episode: Any) -> tuple[list[dict[str, Any]], str]
     return records, source_text
 
 
+def screenplay_authorized_source_chapter_ids(
+    episode_id: str,
+    *,
+    conn: Any | None = None,
+) -> set[str]:
+    """Return every stable chapter handle accepted by the narrative contract.
+
+    Historical prompts used chapter indices while current source records also
+    expose database IDs.  Both resolve to the same episode-scoped chapter rows;
+    arbitrary IDs from another project or episode remain invalid.
+    """
+    db = conn or get_conn()
+    episode = db.execute(
+        "SELECT * FROM episodes WHERE id=?",
+        (episode_id,),
+    ).fetchone()
+    if episode is None:
+        raise ValueError(f"episode not found: {episode_id}")
+    records, _source_text = _source_records(db, episode)
+    return {
+        str(value)
+        for record in records
+        for value in (record.get("chapter_id"), record.get("chapter_idx"))
+        if value not in (None, "")
+    }
+
+
 def screenplay_authority_material(
     episode_id: str,
     *,
@@ -475,7 +502,7 @@ def resolve_current_screenplay_authority(
     if evidence.get("authority_input_fingerprint") != input_fingerprint:
         raise ValueError("剧本 QA 与当前原文/Bible/改编约束指纹不一致")
 
-    _records, source_text = _source_records(db, episode)
+    records, source_text = _source_records(db, episode)
     from app.narrative import validate_screenplay_narrative
 
     errors = validate_screenplay_narrative(
@@ -483,6 +510,12 @@ def resolve_current_screenplay_authority(
         require=require_narrative,
         source_text=source_text,
         expected_scope_id=episode_id,
+        authorized_source_chapter_ids={
+            str(value)
+            for record in records
+            for value in (record.get("chapter_id"), record.get("chapter_idx"))
+            if value not in (None, "")
+        },
     )
     if errors:
         raise ValueError("已发布剧本无法在当前原文上重验：" + "；".join(errors[:6]))

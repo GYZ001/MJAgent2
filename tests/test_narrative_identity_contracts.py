@@ -97,6 +97,7 @@ def _screenplay() -> EpisodeScreenplay:
             propositions=[
                 NarrativeProposition(
                     proposition_id="P1",
+                    semantic_identity_key="source-declared-identities",
                     canonical_statement="The declared identities participate in this episode.",
                     narrative_domain="source_canon",
                     entity_ids=[item.identity_id for item in contracts],
@@ -215,4 +216,3 @@ def test_offscreen_contract_cannot_be_misused_as_visible_keyframe_subject() -> N
 
     with pytest.raises(CompileError, match="只允许画外"):
         keyframe_visual_contract(shot, _bible(), screenplay=screenplay)
-

@@ -36,6 +36,7 @@ def _narrative_plan() -> NarrativeContinuityPlan:
             "propositions": [
                 {
                     "proposition_id": "P-source",
+                    "semantic_identity_key": "source-dormant-rule",
                     "canonical_statement": "The source establishes a dormant rule.",
                     "narrative_domain": "source_canon",
                     "entity_ids": ["entity-1"],
@@ -44,6 +45,7 @@ def _narrative_plan() -> NarrativeContinuityPlan:
                 },
                 {
                     "proposition_id": "P-adapted",
+                    "semantic_identity_key": "adapted-gradual-rule-reveal",
                     "canonical_statement": "The adapted story reveals the rule gradually.",
                     "narrative_domain": "adapted_story",
                     "entity_ids": ["entity-1"],

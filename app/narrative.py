@@ -394,6 +394,7 @@ def validate_screenplay_narrative(
     require: bool = False,
     source_text: str | None = None,
     expected_scope_id: str | None = None,
+    authorized_source_chapter_ids: Iterable[str | int] | None = None,
 ) -> list[str]:
     """Validate the one authoritative screenplay narrative graph.
 
@@ -436,11 +437,28 @@ def validate_screenplay_narrative(
     _require_refs(plan.initial_state_fact_ids, index.facts, errors, "initial_state_fact_ids")
 
     raw_source = source_text or ""
+    authorized_chapter_ids = (
+        {
+            _norm(value)
+            for value in authorized_source_chapter_ids
+            if _norm(value)
+        }
+        if authorized_source_chapter_ids is not None
+        else None
+    )
     for evidence_id, evidence in index.source_evidence.items():
         excerpt = _norm(evidence.verbatim_excerpt)
         span = evidence.source_span
         if not _norm(span.chapter_id):
             errors.append(f"[SOURCE_SPAN_CHAPTER_MISSING] {evidence_id}.source_span.chapter_id 不能为空")
+        elif (
+            authorized_chapter_ids is not None
+            and _norm(span.chapter_id) not in authorized_chapter_ids
+        ):
+            errors.append(
+                f"[SOURCE_SPAN_CHAPTER_OUT_OF_SCOPE] {evidence_id}.source_span.chapter_id="
+                f"{span.chapter_id} 不属于当前剧集授权章节"
+            )
         if span.start < 0 or span.end <= span.start:
             errors.append(f"[SOURCE_SPAN_INVALID] {evidence_id}.source_span 必须满足 0 <= start < end")
         if not excerpt:
@@ -515,11 +533,45 @@ def validate_screenplay_narrative(
                 f"[IDENTITY_GRAPH_LINK_MISSING] {identity_id} 既未进入命题身份图，"
                 "也未通过 evidence.proposition_ids/voice_ids 绑定叙事用途"
             )
+    proposition_identity_owners: dict[tuple[str, str], str] = {}
+    proposition_statement_owners: dict[tuple[str, str], str] = {}
     for proposition_id, proposition in index.propositions.items():
+        semantic_identity_key = _norm(proposition.semantic_identity_key)
+        if not semantic_identity_key:
+            errors.append(
+                f"[PROPOSITION_SEMANTIC_IDENTITY_MISSING] "
+                f"{proposition_id}.semantic_identity_key 不能为空"
+            )
         if not _norm(proposition.canonical_statement):
             errors.append(f"[PROPOSITION_STATEMENT_MISSING] {proposition_id}.canonical_statement 不能为空")
         if proposition.narrative_domain not in {"source_canon", "adapted_story"}:
             errors.append(f"[PROPOSITION_DOMAIN_INVALID] {proposition_id}.narrative_domain 非法")
+        if semantic_identity_key and proposition.narrative_domain in {
+            "source_canon", "adapted_story",
+        }:
+            identity = (proposition.narrative_domain, semantic_identity_key)
+            previous = proposition_identity_owners.get(identity)
+            if previous:
+                errors.append(
+                    f"[PROPOSITION_SEMANTIC_IDENTITY_DUPLICATE] 同一叙事域内 "
+                    f"{previous}/{proposition_id} 共用了语义身份 {semantic_identity_key}；"
+                    "同一命题只能保留一个 proposition_id"
+                )
+            else:
+                proposition_identity_owners[identity] = proposition_id
+            statement_identity = (
+                proposition.narrative_domain,
+                _norm(proposition.canonical_statement).casefold(),
+            )
+            previous_statement = proposition_statement_owners.get(statement_identity)
+            if previous_statement:
+                errors.append(
+                    f"[PROPOSITION_CANONICAL_DUPLICATE] 同一叙事域内 "
+                    f"{previous_statement}/{proposition_id} 的 canonical_statement 完全相同；"
+                    "不得用不同 semantic_identity_key 绕过命题归一"
+                )
+            else:
+                proposition_statement_owners[statement_identity] = proposition_id
         if proposition.domain_truth_status not in {"true", "false", "undetermined", "not_applicable"}:
             errors.append(f"[PROPOSITION_TRUTH_STATUS_INVALID] {proposition_id}.domain_truth_status 非法")
         _require_refs(proposition.direct_source_evidence_ids, index.source_evidence, errors, proposition_id)
@@ -2255,10 +2307,22 @@ def validate_storyboard_narrative(
                     f"[SHOT_SPOKEN_TEXT_CAPACITY_EXCEEDED] {label} 口播/屏幕文字最少需要 "
                     f"{spoken_min_s:.3f}s"
                 )
-            target_processing_min_s = sum(
-                max(0.0, delta_paths[delta_id][1].required_processing_s)
-                for delta_id in set(contribution.target_delta_ids if contribution else [])
-                if delta_id in delta_paths
+            processing_by_prior: defaultdict[str, float] = defaultdict(float)
+            for delta_id in set(
+                contribution.target_delta_ids if contribution else []
+            ):
+                if delta_id not in delta_paths:
+                    continue
+                prior_id, delta = delta_paths[delta_id]
+                processing_by_prior[prior_id] += max(
+                    0.0, delta.required_processing_s,
+                )
+            # Audience priors watch the same screen time in parallel.  Sum
+            # sequential work inside each path, then gate on the most demanding
+            # path; adding paths together would double-charge one shared second.
+            target_processing_min_s = max(
+                processing_by_prior.values(),
+                default=0.0,
             )
             if components["inference_processing_s"] + 1e-9 < target_processing_min_s:
                 errors.append(
@@ -2742,6 +2806,13 @@ def validate_blind_review(
         _require_refs(result.supporting_evidence_ids, index.evidence, errors, "target_delta_results")
         if result.result not in {"satisfied", "missed", "contradicted", "needs_review"}:
             errors.append(f"[REVIEW_RESULT_INVALID] {key} 的 result 非法")
+        if (
+            result.predicted_score is None
+            or not 0 <= float(result.predicted_score) <= 1
+        ):
+            errors.append(
+                f"[REVIEW_PREDICTED_SCORE_INVALID] {key} 必须提供 0..1 的模型预测分数"
+            )
         if not _norm(result.reason):
             errors.append(f"[REVIEW_RESULT_REASON_MISSING] {key} 缺少证据比较理由")
         for observation_id in result.supporting_observation_ids:

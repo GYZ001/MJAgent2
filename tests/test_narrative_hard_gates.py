@@ -30,6 +30,7 @@ from app.schemas import (
     NarrativeAnchor,
     NarrativeEvent,
     NarrativeEvidence,
+    NarrativeProposition,
     NarrativeReviewReport,
     SetupPayoffContract,
     ShotCapacityBudget,
@@ -251,6 +252,18 @@ def test_joint_shot_budget_rejects_action_inference_and_speech_overbooking() -> 
     assert "SHOT_SPOKEN_TEXT_CAPACITY_EXCEEDED" not in codes
 
 
+def test_parallel_audience_priors_share_the_same_processing_time() -> None:
+    screenplay, board = _two_phase_action_story()
+    shot = board.shots[1]
+    # Both priors require one second while watching the same second of screen
+    # time.  They are parallel paths, not two sequential audience tasks.
+    shot.capacity_budget.inference_processing_s = 1.0
+
+    codes = _codes(validate_storyboard_narrative(board, screenplay))
+
+    assert "SHOT_INFERENCE_CAPACITY_EXCEEDED" not in codes
+
+
 def _equivalent_action_story() -> object:
     screenplay = _screenplay()
     plan = screenplay.narrative_plan
@@ -374,8 +387,20 @@ def test_source_span_scope_and_entity_references_are_exact_and_authoritative() -
         require=True,
         source_text=source_text,
         expected_scope_id="episode-generic",
+        authorized_source_chapter_ids={"chapter-1"},
     ) == []
 
+    excerpt.source_span.chapter_id = "foreign-project/chapter-999"
+    assert "SOURCE_SPAN_CHAPTER_OUT_OF_SCOPE" in _codes(
+        validate_screenplay_narrative(
+            screenplay,
+            require=True,
+            source_text=source_text,
+            expected_scope_id="episode-generic",
+            authorized_source_chapter_ids={"chapter-1"},
+        )
+    )
+    excerpt.source_span.chapter_id = "chapter-1"
     excerpt.source_span.start += 1
     excerpt.source_span.end += 1
     assert "SOURCE_SPAN_EXACT_MISMATCH" in _codes(
@@ -384,6 +409,7 @@ def test_source_span_scope_and_entity_references_are_exact_and_authoritative() -
             require=True,
             source_text=source_text,
             expected_scope_id="another-scope",
+            authorized_source_chapter_ids={"chapter-1"},
         )
     )
     codes = _codes(
@@ -392,6 +418,7 @@ def test_source_span_scope_and_entity_references_are_exact_and_authoritative() -
             require=True,
             source_text=source_text,
             expected_scope_id="another-scope",
+            authorized_source_chapter_ids={"chapter-1"},
         )
     )
     assert "NARRATIVE_SCOPE_MISMATCH" in codes
@@ -400,6 +427,29 @@ def test_source_span_scope_and_entity_references_are_exact_and_authoritative() -
     assert "NARRATIVE_ENTITY_UNDECLARED" in _codes(
         validate_screenplay_narrative(screenplay, require=True)
     )
+
+
+def test_same_domain_semantic_identity_cannot_fork_into_multiple_ids() -> None:
+    screenplay = _screenplay()
+    plan = screenplay.narrative_plan
+    original = next(
+        item for item in plan.propositions
+        if item.narrative_domain == "adapted_story"
+    )
+    plan.propositions.append(
+        NarrativeProposition(
+            proposition_id="P-story-alias",
+            semantic_identity_key=original.semantic_identity_key,
+            canonical_statement="A synonymous surface form of the same proposition.",
+            narrative_domain="adapted_story",
+            entity_ids=list(original.entity_ids),
+        )
+    )
+    plan.adaptation_decisions[0].adapted_proposition_ids.append("P-story-alias")
+
+    codes = _codes(validate_screenplay_narrative(screenplay, require=True))
+
+    assert "PROPOSITION_SEMANTIC_IDENTITY_DUPLICATE" in codes
 
 
 def _setup_payoff_story(

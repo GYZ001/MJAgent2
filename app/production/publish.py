@@ -39,12 +39,19 @@ def publish_screenplay(
     conn = get_conn()
     if script.narrative_plan is not None:
         from app.narrative import validate_screenplay_narrative
-        from app.production.screenplay_authority import screenplay_authority_fingerprint
+        from app.production.screenplay_authority import (
+            screenplay_authority_fingerprint,
+            screenplay_authorized_source_chapter_ids,
+        )
 
         narrative_errors = validate_screenplay_narrative(
             script,
             require=True,
             expected_scope_id=episode_id,
+            authorized_source_chapter_ids=screenplay_authorized_source_chapter_ids(
+                episode_id,
+                conn=conn,
+            ),
         )
         if narrative_errors:
             raise ValueError("剧本叙事硬门禁未通过：" + "；".join(narrative_errors[:6]))

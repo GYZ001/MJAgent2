@@ -45,7 +45,7 @@ def _plan() -> NarrativeContinuityPlan:
             "source_evidence": [
                 {
                     "source_evidence_id": "SE-1",
-                    "source_span": {"chapter_id": "chapter-1", "start": 0, "end": 18},
+                    "source_span": {"chapter_id": "1", "start": 12, "end": 40},
                     "verbatim_excerpt": "An observable change occurs.",
                     "confidence": 1.0,
                 }
@@ -53,12 +53,14 @@ def _plan() -> NarrativeContinuityPlan:
             "propositions": [
                 {
                     "proposition_id": "P-source",
+                    "semantic_identity_key": "source-observable-change",
                     "canonical_statement": "The source establishes a change.",
                     "narrative_domain": "source_canon",
                     "direct_source_evidence_ids": ["SE-1"],
                 },
                 {
                     "proposition_id": "P-story",
+                    "semantic_identity_key": "adapted-observable-change",
                     "canonical_statement": "The adaptation presents the change.",
                     "narrative_domain": "adapted_story",
                     "entity_ids": ["entity-1", "character-1"],
@@ -972,6 +974,7 @@ def test_withheld_proposition_cannot_leak_before_its_disclosure_anchor() -> None
     plan.propositions.append(
         NarrativeProposition(
             proposition_id="P-secret",
+            semantic_identity_key="adapted-later-resolution",
             canonical_statement="A later observation resolves the open interpretation.",
             narrative_domain="adapted_story",
         )

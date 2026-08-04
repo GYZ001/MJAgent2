@@ -205,12 +205,29 @@ def run_screenplay_qa(
         require_dialogue_chains=True,
         required_dialogue_lines=episode.get("required_dialogue_lines") or [],
     )
+    source_chapter_contract_present = "source_chapters" in episode
+    raw_source_chapters = episode.get("source_chapters") or []
+    if isinstance(raw_source_chapters, str):
+        try:
+            raw_source_chapters = json.loads(raw_source_chapters)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raw_source_chapters = []
+    authorized_source_chapter_ids = [
+        str(value)
+        for value in raw_source_chapters
+        if str(value or "").strip()
+    ]
     messages.extend(
         validate_screenplay_narrative(
             script,
             require=True,
             source_text=source_text,
             expected_scope_id=str(episode.get("id") or script.id or "") or None,
+            authorized_source_chapter_ids=(
+                authorized_source_chapter_ids
+                if source_chapter_contract_present
+                else None
+            ),
         )
     )
     from app.portraits import (

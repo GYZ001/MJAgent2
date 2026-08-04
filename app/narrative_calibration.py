@@ -9,6 +9,7 @@ synthetic perfect score.
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 import json
 import math
 from statistics import fmean
@@ -18,24 +19,35 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.evidence import repository as evidence_repository
 from app.harness.types import Evaluation, EvidenceArtifact
-from app.schemas import EpisodeScreenplay
+from app.narrative import NARRATIVE_CONTRACT_VERSION
+from app.narrative_review import (
+    BLIND_READER_PROMPT_VERSION,
+    COMPARATOR_PROMPT_VERSION,
+)
+from app.schemas import EpisodeScreenplay, NarrativeReviewReport
 
 
 HUMAN_ONE_WATCH_CONTRACT_VERSION = "human-one-watch.v1"
 HUMAN_CALIBRATION_CONTRACT_VERSION = "narrative-human-calibration.v1"
 DEFAULT_CROSS_CONTENT_DIMENSIONS = ("genre", "form")
+GLOBAL_CALIBRATION_SCOPE_ID = "global-narrative-continuity"
+DEFAULT_MINIMUM_CORRELATION = 0.6
+DEFAULT_HUMAN_SUCCESS_THRESHOLD = 0.8
 
 __all__ = [
     "CalibrationContractError",
+    "CurrentCalibrationAuthority",
     "CalibrationReport",
     "DimensionCalibrationResult",
     "HumanOneWatchObservation",
     "HumanTargetDeltaObservation",
     "ModelTargetEstimate",
     "build_calibration_report",
+    "assert_report_meets_current_calibration",
     "calibrate_and_persist_human_one_watch",
     "persist_calibration_report",
     "persist_human_one_watch_observation",
+    "require_current_calibration_authority",
     "validate_human_one_watch_observation",
 ]
 
@@ -163,6 +175,9 @@ class CalibrationReport(_OpenSemanticModel):
     calibration_report_id: str
     calibration_scope_id: str
     contract_version: str = HUMAN_CALIBRATION_CONTRACT_VERSION
+    narrative_contract_version: str = NARRATIVE_CONTRACT_VERSION
+    blind_prompt_version: str = BLIND_READER_PROMPT_VERSION
+    comparator_prompt_version: str = COMPARATOR_PROMPT_VERSION
     scope_ids: list[str] = Field(default_factory=list)
     observation_ids: list[str] = Field(default_factory=list)
     narrative_review_artifact_ids: list[str] = Field(default_factory=list)
@@ -174,6 +189,10 @@ class CalibrationReport(_OpenSemanticModel):
     coverage_gaps: list[str] = Field(default_factory=list)
     stability_issues: list[str] = Field(default_factory=list)
     calibration_score: float | None = None
+    minimum_correlation: float = DEFAULT_MINIMUM_CORRELATION
+    human_success_threshold: float = DEFAULT_HUMAN_SUCCESS_THRESHOLD
+    recommended_model_pass_threshold: float | None = None
+    threshold_analysis: dict[str, Any] = Field(default_factory=dict)
     confidence_status: str = "needs_review"
     decision: str = "needs_review"
     reason: str = ""
@@ -181,6 +200,14 @@ class CalibrationReport(_OpenSemanticModel):
 
 
 PairKey = tuple[str, str, str]
+
+
+@dataclass(frozen=True)
+class CurrentCalibrationAuthority:
+    artifact_id: str
+    artifact_hash: str
+    report: CalibrationReport
+    model_pass_threshold: float
 
 
 def _expected_pairs(
@@ -392,6 +419,92 @@ def _aggregate_pair_scores(
     return scores
 
 
+def _derive_model_pass_threshold(
+    paired_results: Sequence[CalibrationPairResult],
+    *,
+    human_success_threshold: float,
+) -> tuple[float | None, dict[str, Any], list[str]]:
+    """Derive one content-agnostic model threshold from human outcomes.
+
+    Candidate thresholds come only from observed model scores.  Selection
+    maximizes balanced accuracy against the human one-watch pass label, with
+    recall and the stricter threshold used as deterministic tie breakers.
+    """
+    rows = [
+        (
+            float(item.model_predicted_score),
+            float(item.human_mean_score) >= human_success_threshold,
+        )
+        for item in paired_results
+        if item.model_predicted_score is not None
+        and item.human_mean_score is not None
+    ]
+    positives = sum(label for _score, label in rows)
+    negatives = len(rows) - positives
+    if not rows or not positives or not negatives:
+        return None, {
+            "paired_count": len(rows),
+            "human_positive_count": positives,
+            "human_negative_count": negatives,
+        }, ["[CALIBRATION_THRESHOLD_NOT_ESTIMABLE] 人类样本必须同时包含达成与未达成目标"]
+
+    scores = sorted({score for score, _label in rows})
+    candidates = sorted({
+        0.0,
+        1.0,
+        *scores,
+        *[
+            (left + right) / 2.0
+            for left, right in zip(scores, scores[1:], strict=False)
+        ],
+    })
+    ranked: list[dict[str, Any]] = []
+    for threshold in candidates:
+        true_positive = sum(
+            score >= threshold and label for score, label in rows
+        )
+        true_negative = sum(
+            score < threshold and not label for score, label in rows
+        )
+        false_positive = negatives - true_negative
+        false_negative = positives - true_positive
+        recall = true_positive / positives
+        specificity = true_negative / negatives
+        ranked.append({
+            "threshold": threshold,
+            "balanced_accuracy": (recall + specificity) / 2.0,
+            "recall": recall,
+            "specificity": specificity,
+            "false_positive_count": false_positive,
+            "false_negative_count": false_negative,
+        })
+    selected = max(
+        ranked,
+        key=lambda item: (
+            item["balanced_accuracy"],
+            item["recall"],
+            item["specificity"],
+            item["threshold"],
+        ),
+    )
+    issues = []
+    if selected["balanced_accuracy"] < 0.7:
+        issues.append(
+            "[CALIBRATION_THRESHOLD_UNSTABLE] 数据驱动阈值的平衡准确率低于 0.7"
+        )
+    return float(selected["threshold"]), {
+        "selection_rule": (
+            "最大化人类一次观看标签的 balanced_accuracy；"
+            "并列时优先 recall、specificity 与更严格阈值"
+        ),
+        "human_success_threshold": human_success_threshold,
+        "paired_count": len(rows),
+        "human_positive_count": positives,
+        "human_negative_count": negatives,
+        "selected": selected,
+    }, issues
+
+
 def _dimension_result(
     *,
     axis: str,
@@ -436,6 +549,8 @@ def build_calibration_report(
     observations: Sequence[HumanOneWatchObservation],
     model_estimates: Sequence[ModelTargetEstimate],
     required_dimension_axes: Sequence[str] = DEFAULT_CROSS_CONTENT_DIMENSIONS,
+    minimum_correlation: float = DEFAULT_MINIMUM_CORRELATION,
+    human_success_threshold: float = DEFAULT_HUMAN_SUCCESS_THRESHOLD,
 ) -> CalibrationReport:
     """Build a conservative calibration report from paired human/model data."""
     expected, by_prior = _expected_pairs(screenplays)
@@ -446,6 +561,7 @@ def build_calibration_report(
     }
     structural_errors: list[str] = []
     observation_ids: set[str] = set()
+    human_review_ids_by_pair: dict[PairKey, set[str]] = defaultdict(set)
     for observation in observations:
         if observation.observation_id in observation_ids:
             structural_errors.append(f"[HUMAN_OBSERVATION_DUPLICATE] {observation.observation_id}")
@@ -455,6 +571,12 @@ def build_calibration_report(
             structural_errors.append(f"[HUMAN_SCOPE_UNKNOWN] {observation.scope_id}")
             continue
         structural_errors.extend(validate_human_one_watch_observation(observation, screenplay))
+        for item in observation.target_delta_observations:
+            human_review_ids_by_pair[(
+                observation.scope_id,
+                item.audience_prior_id,
+                item.target_delta_id,
+            )].add(observation.narrative_review_artifact_id)
     estimate_map: dict[PairKey, ModelTargetEstimate] = {}
     for estimate in model_estimates:
         key = (estimate.scope_id, estimate.audience_prior_id, estimate.target_delta_id)
@@ -462,6 +584,16 @@ def build_calibration_report(
             structural_errors.append(f"[MODEL_ESTIMATE_PAIR_UNKNOWN] {key}")
         if key in estimate_map:
             structural_errors.append(f"[MODEL_ESTIMATE_PAIR_DUPLICATE] {key}")
+        human_review_ids = human_review_ids_by_pair.get(key, set())
+        if len(human_review_ids) > 1:
+            structural_errors.append(
+                f"[HUMAN_REVIEW_LINEAGE_CONFLICT] {key} 的人类观察跨越多个审读版本"
+            )
+        elif human_review_ids and estimate.narrative_review_artifact_id not in human_review_ids:
+            structural_errors.append(
+                f"[MODEL_HUMAN_REVIEW_LINEAGE_MISMATCH] {key} 的模型估计与"
+                "人类观察不属于同一 narrative_review_artifact"
+            )
         estimate_map[key] = estimate
     if structural_errors:
         raise CalibrationContractError(structural_errors)
@@ -525,8 +657,11 @@ def build_calibration_report(
         stability_issues.append("[HUMAN_SCORES_CONSTANT] 人类配对分数为常量，无法估计相关性")
     if overall_correlation is None:
         stability_issues.append("[CORRELATION_NOT_ESTIMABLE] 成对样本不足或分数无方差")
-    elif overall_correlation <= 0.0:
-        stability_issues.append("[CORRELATION_NON_POSITIVE] 模型与人类观察未呈稳定正相关")
+    elif overall_correlation < minimum_correlation:
+        stability_issues.append(
+            f"[CORRELATION_BELOW_THRESHOLD] 模型与人类观察相关性 "
+            f"{overall_correlation:.3f} 低于统一阈值 {minimum_correlation:.3f}"
+        )
 
     axes = list(dict.fromkeys(str(axis).strip() for axis in required_dimension_axes if str(axis).strip()))
     dimension_results: list[DimensionCalibrationResult] = []
@@ -559,6 +694,11 @@ def build_calibration_report(
             if result.correlation is None:
                 stability_issues.append(
                     f"[DIMENSION_CORRELATION_NOT_ESTIMABLE] axis={axis} value={value}"
+                )
+            elif result.correlation < minimum_correlation:
+                stability_issues.append(
+                    f"[DIMENSION_CORRELATION_BELOW_THRESHOLD] axis={axis} "
+                    f"value={value} correlation={result.correlation:.3f}"
                 )
 
     estimated_dimension_correlations = [
@@ -597,9 +737,21 @@ def build_calibration_report(
                     f"[CORRELATION_UNSTABLE_BY_SCOPE] held_out={held_out}"
                 )
 
+    model_pass_threshold, threshold_analysis, threshold_issues = (
+        _derive_model_pass_threshold(
+            paired_results,
+            human_success_threshold=human_success_threshold,
+        )
+    )
+    stability_issues.extend(threshold_issues)
     coverage_gaps = list(dict.fromkeys(coverage_gaps))
     stability_issues = list(dict.fromkeys(stability_issues))
-    calibrated = not coverage_gaps and not stability_issues and overall_correlation is not None
+    calibrated = (
+        not coverage_gaps
+        and not stability_issues
+        and overall_correlation is not None
+        and model_pass_threshold is not None
+    )
     reason_items = [*coverage_gaps, *stability_issues]
     return CalibrationReport(
         calibration_report_id=calibration_report_id,
@@ -637,6 +789,12 @@ def build_calibration_report(
         coverage_gaps=coverage_gaps,
         stability_issues=stability_issues,
         calibration_score=overall_correlation if calibrated else None,
+        minimum_correlation=minimum_correlation,
+        human_success_threshold=human_success_threshold,
+        recommended_model_pass_threshold=(
+            model_pass_threshold if calibrated else None
+        ),
+        threshold_analysis=threshold_analysis,
         confidence_status="supported" if calibrated else "needs_review",
         decision="calibrated" if calibrated else "needs_review",
         reason=(

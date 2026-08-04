@@ -1038,6 +1038,7 @@ class TargetDeltaResult(BaseModel):
     audience_prior_id: str
     target_delta_id: str
     result: str
+    predicted_score: float | None = None
     # The comparator must make every conclusion auditable.  Observation IDs
     # point at frozen first-pass recalls; evidence IDs point at opaque handles
     # the cold reader actually saw.  They are deliberately absent from the

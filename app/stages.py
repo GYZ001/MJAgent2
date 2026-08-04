@@ -691,19 +691,30 @@ def _character_resolution_prompt_block(episode: dict) -> str:
     )
 
 
-def _narrative_plan_schema_example(scope_id: str) -> str:
+def _narrative_plan_schema_example(
+    scope_id: str,
+    *,
+    source_chapter_ids: list[str] | None = None,
+) -> str:
     """Render the complete narrative-plan JSON surface without story templates.
 
     Values are ID/relationship examples only.  The surrounding prompt explicitly
     forbids copying audience categories or content from this example; every
     semantic value must be inferred from the current source and adaptation.
     """
+    example_chapter_id = (
+        source_chapter_ids[0] if source_chapter_ids else "current-source-chapter"
+    )
     example = {
         "contract_version": "narrative-continuity.v1",
         "scope_id": scope_id,
         "source_evidence": [{
             "source_evidence_id": "SE-1",
-            "source_span": {"chapter_id": "current-source-chapter", "start": 0, "end": 12},
+            "source_span": {
+                "chapter_id": example_chapter_id,
+                "start": 0,
+                "end": 12,
+            },
             "verbatim_excerpt": "从本集授权原文逐字摘录",
             "confidence": 1.0,
         }],
@@ -742,6 +753,7 @@ def _narrative_plan_schema_example(scope_id: str) -> str:
         "propositions": [
             {
                 "proposition_id": "P-SOURCE-1",
+                "semantic_identity_key": "当前项目内该原文命题的语义身份键",
                 "canonical_statement": "不可再拆的原文命题",
                 "narrative_domain": "source_canon",
                 "entity_ids": ["entity-id", "character-id"],
@@ -750,6 +762,7 @@ def _narrative_plan_schema_example(scope_id: str) -> str:
             },
             {
                 "proposition_id": "P-ADAPTED-1",
+                "semantic_identity_key": "当前项目内该改编命题的语义身份键",
                 "canonical_statement": "改编后的不可再拆命题",
                 "narrative_domain": "adapted_story",
                 "entity_ids": ["entity-id", "character-id"],
@@ -1162,9 +1175,14 @@ def _narrative_plan_prompt_block(scope_id: str) -> str:
         "顶层必须输出 narrative_plan，并且它是下游分镜与冷观众审读的唯一叙事权威：\n"
         "1. 先从授权原文逐字抽取 SourceEvidence，再建 source_canon 命题；"
         "SourceSpan.start/end 必须精确切出 verbatim_excerpt，不得只让摘录在原文某处出现；"
+        "SourceSpan.chapter_id 只能使用本次输入明确列出的授权章节 ID；"
         "改编命题必须属于 adapted_story，通过 AdaptationDecision 连接，"
         "实质改写后不得继承原文 direct_source_evidence_ids。命题 entity_ids 合并构成本作用域身份图，"
         "fact.subject_id、action actor/target、人物状态与可感知者都必须引用其中身份。\n"
+        "1a. 每条命题必须填写 semantic_identity_key，键由当前项目语义归一产生，不来自全局词表。"
+        "同一 narrative_domain 中语义等价的陈述必须共用同一键，并最终只保留一个 proposition_id；"
+        "不得通过同义改写、语序变化或更换 ID 重复创建同一命题。来源域与改编域可以分别拥有自己的键，"
+        "但必须通过 AdaptationDecision 连接。\n"
         "1b. identity_contracts 是非角色圣经身份的唯一权威注册表。identity_id 供命题、事实、"
         "动作、状态与信念精确引用，display_name 供场次、剧本正文与对白精确引用；kind 是基于当前"
         "来源和戏剧职责的开放语义，不得使用姓名、称谓或题材白名单判定。无论具名新角色、"
@@ -1230,7 +1248,23 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
     narrative_scope_id = str(
         episode.get("id") or f"episode-{episode['episode_no']}"
     )
-    narrative_plan_schema = _narrative_plan_schema_example(narrative_scope_id)
+    raw_source_chapters = episode.get("source_chapters") or []
+    if isinstance(raw_source_chapters, str):
+        try:
+            parsed_source_chapters = json.loads(raw_source_chapters)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed_source_chapters = []
+    else:
+        parsed_source_chapters = list(raw_source_chapters)
+    authorized_source_chapter_ids = [
+        str(value).strip()
+        for value in parsed_source_chapters
+        if str(value).strip()
+    ]
+    narrative_plan_schema = _narrative_plan_schema_example(
+        narrative_scope_id,
+        source_chapter_ids=authorized_source_chapter_ids,
+    )
     episode_hook = (episode.get("hook") or "").strip()
     episode_cliffhanger = (episode.get("cliffhanger") or "").strip()
     no_episode_hook = not episode_hook and not episode_cliffhanger
@@ -1381,6 +1415,7 @@ B. `full_script_text`：真正的剧本正文；只写大形体动作与主线�
 - 本集 cliffhanger：{episode_cliffhanger or '（空）'}
 - 上一集结尾：{prev_ending or '（本集为第一集）'}
 - 本集目标时长：{episode['target_duration_s']} 秒
+- SourceEvidence 允许使用的章节 ID：{authorized_source_chapter_ids or ['（缺失，必须 needs_review）']}
 
 {opening_dialogue_block}
 
@@ -1479,6 +1514,7 @@ async def generate_screenplay_baseline(
             expected_scope_id=str(
                 episode.get("id") or f"episode-{episode['episode_no']}"
             ),
+            authorized_source_chapter_ids=authorized_source_chapter_ids,
         ))
         if no_episode_hook:
             ending = (s.ending_hook or "").strip()
