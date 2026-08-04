@@ -41,14 +41,14 @@ def publish_screenplay(
         from app.narrative import validate_screenplay_narrative
         from app.production.screenplay_authority import (
             screenplay_authority_fingerprint,
-            screenplay_authorized_source_chapter_ids,
+            screenplay_authorized_source_chapters,
         )
 
         narrative_errors = validate_screenplay_narrative(
             script,
             require=True,
             expected_scope_id=episode_id,
-            authorized_source_chapter_ids=screenplay_authorized_source_chapter_ids(
+            authorized_source_chapters=screenplay_authorized_source_chapters(
                 episode_id,
                 conn=conn,
             ),

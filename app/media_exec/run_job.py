@@ -3601,20 +3601,24 @@ def _degrade_orphaned_continuity_job(conn, row) -> bool:
         ep["episode_no"],
     )
     screenplay = None
-    if _row_value(ep, "id"):
-        # Recovery can lead to another provider submission.  It must consume
-        # the same screenplay authority as normal generation rather than a
-        # possibly edited page projection.
-        from app.production.screenplay_authority import resolve_downstream_screenplay
+    from app.production.screenplay_authority import (
+        episode_requires_immutable_screenplay_authority,
+        resolve_downstream_screenplay,
+    )
 
+    if episode_requires_immutable_screenplay_authority(ep, conn=conn):
+        # Modern recovery can lead to another provider submission and must
+        # consume the same immutable screenplay authority as normal generation.
         screenplay = resolve_downstream_screenplay(
             str(_row_value(ep, "id")), conn=conn,
         ).screenplay
-    elif ep["screenplay_json"]:
-        # Lightweight unit-test rows without an episode id are an explicit
-        # legacy compatibility path and cannot resolve database authority.
+    elif _row_value(ep, "screenplay_json"):
+        # Explicit legacy plan-null rows retain their historical timeout
+        # recovery; this branch cannot rewrite a typed narrative plan.
         try:
-            screenplay = EpisodeScreenplay.model_validate_json(ep["screenplay_json"])
+            screenplay = EpisodeScreenplay.model_validate_json(
+                _row_value(ep, "screenplay_json"),
+            )
         except (TypeError, ValueError):
             screenplay = None
     outgoing = _outgoing_transition_context(conn, shot_row)

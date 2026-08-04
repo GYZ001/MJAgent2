@@ -46,7 +46,7 @@ def _plan() -> NarrativeContinuityPlan:
             "source_evidence": [
                 {
                     "source_evidence_id": "SE-1",
-                    "source_span": {"chapter_id": "1", "start": 12, "end": 40},
+                    "source_span": {"chapter_id": "1", "start": 0, "end": 28},
                     "verbatim_excerpt": "An observable change occurs.",
                     "confidence": 1.0,
                 }

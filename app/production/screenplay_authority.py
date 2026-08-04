@@ -352,6 +352,19 @@ def resolve_downstream_screenplay(
     try:
         projection = EpisodeScreenplay.model_validate_json(raw_projection)
     except Exception as exc:
+        if not episode_requires_immutable_screenplay_authority(
+            episode,
+            conn=db,
+        ):
+            return DownstreamScreenplayContext(
+                screenplay=EpisodeScreenplay(
+                    episode_no=int(
+                        _episode_value(episode, "episode_no", 1) or 1
+                    ),
+                ),
+                narrative_authority_required=False,
+                immutable_authority_required=False,
+            )
         raise ValueError(f"当前剧本投影无法验证：{exc}") from exc
 
     durable_authority = episode_requires_immutable_screenplay_authority(

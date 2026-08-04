@@ -465,7 +465,12 @@ function HumanCalibrationControls({
   async function rebuildCalibration(activate: boolean) {
     setBusy(true)
     try {
-      const result = await api.post('/narrative-calibration/rebuild', { activate }) as Record<string, any>
+      const result = await api.post('/narrative-calibration/rebuild', {
+        activate,
+        expected_report_fingerprint: activate
+          ? calibrationPreview?.activation_fingerprint
+          : undefined,
+      }) as Record<string, any>
       setCalibrationPreview(result)
       if (activate) {
         await onChanged()

@@ -217,6 +217,19 @@ def run_screenplay_qa(
         for value in raw_source_chapters
         if str(value or "").strip()
     ]
+    authorized_source_chapters = None
+    episode_id = str(episode.get("id") or "")
+    if source_chapter_contract_present and episode_id:
+        try:
+            from app.production.screenplay_authority import (
+                screenplay_authorized_source_chapters,
+            )
+
+            authorized_source_chapters = screenplay_authorized_source_chapters(
+                episode_id,
+            )
+        except ValueError:
+            authorized_source_chapters = None
     messages.extend(
         validate_screenplay_narrative(
             script,
@@ -226,8 +239,10 @@ def run_screenplay_qa(
             authorized_source_chapter_ids=(
                 authorized_source_chapter_ids
                 if source_chapter_contract_present
+                and authorized_source_chapters is None
                 else None
             ),
+            authorized_source_chapters=authorized_source_chapters,
         )
     )
     from app.portraits import (

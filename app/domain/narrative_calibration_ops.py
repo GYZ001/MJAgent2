@@ -404,8 +404,18 @@ def rebuild_narrative_calibration(body: dict | None = Body(None)):
             model_estimates=model_estimates,
             required_dimension_axes=requested_axes,
         )
+        activation_fingerprint = evidence_repository.content_hash(
+            report.model_dump(mode="json"),
+        )
         artifact = None
         if payload.get("activate") is True:
+            if str(payload.get("expected_report_fingerprint") or "") != (
+                activation_fingerprint
+            ):
+                raise CalibrationContractError([
+                    "[CALIBRATION_ACTIVATION_PREVIEW_STALE] "
+                    "激活前必须提交当前校准预览指纹；样本变化后需重新预览"
+                ])
             artifact = persist_calibration_report(
                 report,
                 observation_artifact_ids=observation_artifact_ids,
@@ -422,5 +432,6 @@ def rebuild_narrative_calibration(body: dict | None = Body(None)):
             artifact is not None and artifact.get("status") == "approved"
         ),
         "artifact_id": artifact.get("id") if artifact else None,
+        "activation_fingerprint": activation_fingerprint,
         "report": report.model_dump(mode="json"),
     }
