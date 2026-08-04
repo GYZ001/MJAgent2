@@ -25,6 +25,7 @@ class ProjectScopedInput(StandardCommandInput):
 class BibleGenerateInput(StandardCommandInput):
     project_id: str
     feedback: str | None = None
+    style_name: str | None = None
     confirm: bool = False
     quote_id: str | None = None
     require_quote_id: bool = False

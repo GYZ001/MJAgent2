@@ -5,6 +5,34 @@ try:
 except NameError:  # pragma: no cover - used when importing this module directly
     from app.domain.common import *
 
+from app.visual_styles import (
+    DEFAULT_VISUAL_STYLE_NAME,
+    default_visual_style_prompt,
+    visual_style_options,
+    visual_style_prompt,
+)
+
+
+def _project_columns(conn) -> set[str]:
+    return {row[1] for row in conn.execute("PRAGMA table_info(projects)").fetchall()}
+
+
+def _supports_bible_style_name(conn) -> bool:
+    return "bible_style_name" in _project_columns(conn)
+
+
+def _normalize_visual_style_name(style_name: str | None) -> str:
+    name = (style_name or DEFAULT_VISUAL_STYLE_NAME).strip()
+    if visual_style_prompt(name) is None:
+        raise HTTPException(422, "请选择有效的统一画面风格")
+    return name
+
+
+def _visual_style_prompt_or_default(style_name: str | None) -> str:
+    name = _normalize_visual_style_name(style_name)
+    return visual_style_prompt(name) or default_visual_style_prompt()
+
+
 def _parse_json_value(value, default=None):
     if value in (None, ""):
         return default
@@ -173,6 +201,22 @@ def _new_refs_recorder(
     )
 
 
+def _active_refs_run(project_id: str):
+    return get_conn().execute(
+        """SELECT id FROM workflow_runs
+           WHERE workflow_type='character_references'
+             AND scope_type='project'
+             AND scope_id=?
+             AND status='RUNNING'
+           ORDER BY updated_at DESC LIMIT 1""",
+        (project_id,),
+    ).fetchone()
+
+
+def _refs_generation_busy(project_id: str) -> bool:
+    return _refs_task_active(project_id) or _active_refs_run(project_id) is not None
+
+
 def _start_refs_generation(
     project_id: str,
     only_character: str | None,
@@ -186,7 +230,7 @@ def _start_refs_generation(
 
     返回可追踪的任务与 run id；已有同项目任务时返回 None。
     """
-    if _refs_task_active(project_id):
+    if _refs_generation_busy(project_id):
         return None
     conn = get_conn()
     previous = conn.execute(
@@ -367,8 +411,10 @@ def recover_bible_tasks() -> int:
     进程重启/reload 会丢掉内存里的 asyncio.Task，但 DB 仍是 running。
     与其在下次访问时判孤儿并报错，不如用持久化的 feedback 重新拉起任务续跑。"""
     conn = get_conn()
+    style_column = "bible_style_name" if _supports_bible_style_name(conn) else "NULL AS bible_style_name"
     rows = conn.execute(
-        "SELECT id, bible_feedback FROM projects WHERE bible_status='running'").fetchall()
+        f"SELECT id, bible_feedback, {style_column} FROM projects WHERE bible_status='running'"
+    ).fetchall()
     resumed = 0
     for r in rows:
         pid = r["id"]
@@ -386,11 +432,15 @@ def recover_bible_tasks() -> int:
             recorder = _new_bible_recorder(
                 pid, trigger_type="resume", requested_by="system",
                 parent_run_id=parent["id"] if parent else None,
+                style_name=r["bible_style_name"],
             )
             task_registry.spawn(
                 "bible",
                 pid,
-                _recorded_bible_task(pid, feedback, recorder, trigger_full_refs=True),
+                _recorded_bible_task(
+                    pid, feedback, recorder, trigger_full_refs=True,
+                    style_name=r["bible_style_name"],
+                ),
                 project_id=pid,
             )
             resumed += 1
@@ -417,8 +467,17 @@ def recover_character_ref_tasks() -> int:
     """Resume portrait batches without changing their original refresh semantics."""
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id, refs_target, refs_resume, refs_batch_started_at "
-        "FROM projects WHERE refs_status='running'"
+        """SELECT id, refs_target, refs_resume, refs_batch_started_at
+           FROM projects p
+           WHERE refs_status='running'
+              OR EXISTS (
+                  SELECT 1 FROM workflow_runs wr
+                   WHERE wr.workflow_type='character_references'
+                     AND wr.scope_type='project'
+                     AND wr.scope_id=p.id
+                     AND wr.status='PAUSED_EXTERNAL'
+                     AND wr.recovered_by_run_id IS NULL
+              )"""
     ).fetchall()
     resumed = 0
     for row in rows:
@@ -523,9 +582,22 @@ def recover_scene_ref_tasks() -> int:
             conn.commit()
     return resumed
 
-async def _bible_task(project_id: str, feedback: str = "", *, trigger_full_refs: bool = True):
+async def _bible_task(
+    project_id: str,
+    feedback: str = "",
+    *,
+    trigger_full_refs: bool = True,
+    style_name: str | None = None,
+):
     conn = get_conn()
     try:
+        if style_name is None and _supports_bible_style_name(conn):
+            style_row = conn.execute(
+                "SELECT bible_style_name FROM projects WHERE id=?", (project_id,),
+            ).fetchone()
+            style_name = style_row["bible_style_name"] if style_row else None
+        style_name = _normalize_visual_style_name(style_name)
+        style_prompt = _visual_style_prompt_or_default(style_name)
         chapters = rows_to_dicts(conn.execute(
             "SELECT * FROM chapters WHERE project_id=? ORDER BY idx", (project_id,)).fetchall())
         timeout_s = max(int(get_setting("bible_task_timeout_s") or BIBLE_TASK_TIMEOUT_S), 60)
@@ -537,7 +609,8 @@ async def _bible_task(project_id: str, feedback: str = "", *, trigger_full_refs:
             old_bible = json.loads(old_row["bible_json"])
         bible = await asyncio.wait_for(
             generate_bible(
-                chapters, feedback=feedback, previous_bible=old_bible, project_id=project_id
+                chapters, feedback=feedback, previous_bible=old_bible,
+                project_id=project_id, visual_style_prompt=style_prompt,
             ),
             timeout=timeout_s,
         )
@@ -646,11 +719,16 @@ def _new_bible_recorder(
     requested_by: str = "user",
     trigger_type: str = "manual",
     parent_run_id: str | None = None,
+    style_name: str | None = None,
 ) -> WorkflowRecorder:
     conn = get_conn()
     chapters = rows_to_dicts(conn.execute(
         "SELECT idx, title, content FROM chapters WHERE project_id=? ORDER BY idx", (project_id,)
     ).fetchall())
+    if style_name is None and _supports_bible_style_name(conn):
+        row = conn.execute("SELECT bible_style_name FROM projects WHERE id=?", (project_id,)).fetchone()
+        style_name = row["bible_style_name"] if row else None
+    style_name = _normalize_visual_style_name(style_name)
     project = conn.execute(
         "SELECT bible_version, bible_feedback FROM projects WHERE id=?", (project_id,)
     ).fetchone()
@@ -660,11 +738,12 @@ def _new_bible_recorder(
         scope_id=project_id,
         input_fingerprint=fingerprint(
             chapters, project["bible_version"] if project else 0,
-            project["bible_feedback"] if project else None,
+            project["bible_feedback"] if project else None, style_name,
         ),
         requested_by=requested_by,
         trigger_type=trigger_type,
         policy_snapshot={"max_iterations": 4, "warning_blocks_downstream": True},
+        config_snapshot={"style_name": style_name},
         parent_run_id=parent_run_id,
     )
 
@@ -675,6 +754,7 @@ async def _recorded_bible_task(
     recorder: WorkflowRecorder,
     *,
     trigger_full_refs: bool,
+    style_name: str | None = None,
 ) -> None:
     recorder.start()
     try:
@@ -686,7 +766,10 @@ async def _recorded_bible_task(
         context.add_text("chapters", "\n\n".join(ch["content"] for ch in chapters), limit=60000)
         await recorder.step(
             "character_bible",
-            lambda: _bible_task(project_id, feedback, trigger_full_refs=trigger_full_refs),
+            lambda: _bible_task(
+                project_id, feedback, trigger_full_refs=trigger_full_refs,
+                style_name=style_name,
+            ),
             contract_key="character_bible",
             agent_name="character_bible",
             context_manifest=context.manifest(),
@@ -716,6 +799,7 @@ async def _start_bible_core(
     confirm: bool = False,
     quote_id: str | None = None,
     require_quote_id: bool = False,
+    style_name: str | None = None,
 ) -> dict:
     """启动人物谱生成的领域逻辑，供 REST 路由与 ``bible.generate`` Command Handler 共用。"""
     p = _project_or_404(project_id)
@@ -727,7 +811,8 @@ async def _start_bible_core(
     feedback = feedback.strip()
     if len(feedback) > 2000:
         raise HTTPException(400, "打回要求过长，请控制在 2000 字以内")
-    precheck = _compute_bible_generate_precheck(project_id)
+    style_name = _normalize_visual_style_name(style_name)
+    precheck = _compute_bible_generate_precheck(project_id, style_name=style_name)
     if not confirm:
         raise _payment_confirm_required(precheck)
     quote_row = _validate_payment_quote(project_id, quote_id, precheck)
@@ -738,28 +823,53 @@ async def _start_bible_core(
         }
     conn = get_conn()
     # 持久化 feedback：进程重启后 recover_bible_tasks 能用相同入参续跑，而非中断报错
-    conn.execute("UPDATE projects SET bible_status='running', bible_error=NULL, bible_feedback=? WHERE id=?",
-                 (feedback, project_id))
+    if _supports_bible_style_name(conn):
+        conn.execute(
+            "UPDATE projects SET bible_status='running', bible_error=NULL, "
+            "bible_feedback=?, bible_style_name=? WHERE id=?",
+            (feedback, style_name, project_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE projects SET bible_status='running', bible_error=NULL, bible_feedback=? WHERE id=?",
+            (feedback, project_id),
+        )
     conn.commit()
     recorder = None
     try:
-        recorder = _new_bible_recorder(project_id)
+        recorder = _new_bible_recorder(project_id, style_name=style_name)
         task_registry.spawn(
             "bible",
             project_id,
-            _recorded_bible_task(project_id, feedback, recorder, trigger_full_refs=True),
+            _recorded_bible_task(
+                project_id, feedback, recorder, trigger_full_refs=True,
+                style_name=style_name,
+            ),
             project_id=project_id,
         )
     except Exception as exc:
-        conn.execute(
-            "UPDATE projects SET bible_status=?, bible_error=?, bible_feedback=? WHERE id=?",
-            (
-                p["bible_status"],
-                p["bible_error"],
-                p.get("bible_feedback"),
-                project_id,
-            ),
-        )
+        if _supports_bible_style_name(conn):
+            conn.execute(
+                "UPDATE projects SET bible_status=?, bible_error=?, "
+                "bible_feedback=?, bible_style_name=? WHERE id=?",
+                (
+                    p["bible_status"],
+                    p["bible_error"],
+                    p.get("bible_feedback"),
+                    p.get("bible_style_name"),
+                    project_id,
+                ),
+            )
+        else:
+            conn.execute(
+                "UPDATE projects SET bible_status=?, bible_error=?, bible_feedback=? WHERE id=?",
+                (
+                    p["bible_status"],
+                    p["bible_error"],
+                    p.get("bible_feedback"),
+                    project_id,
+                ),
+            )
         conn.commit()
         if recorder is not None:
             try:
@@ -791,6 +901,7 @@ async def start_bible(project_id: str, body: dict | None = Body(None)):
             "confirm": payload.get("confirm") is True,
             "quote_id": payload.get("quote_id"),
             "require_quote_id": True,
+            "style_name": payload.get("style_name"),
             "idempotency_key": payload.get("idempotency_key") or payload.get("quote_id"),
         },
         initiator="ui",
@@ -1203,11 +1314,12 @@ async def refs_cost_precheck(project_id: str, body: dict | None = None):
     ))
 
 
-def _compute_bible_generate_precheck(project_id: str) -> dict:
+def _compute_bible_generate_precheck(project_id: str, *, style_name: str | None = None) -> dict:
     """计算首次人物谱+定妆范围；不签发可执行凭证。"""
     from app.config import IMAGE_PRICE_PER_UNIT
     from app.multiview import CHARACTER_REQUIRED_VIEWS
 
+    style_name = _normalize_visual_style_name(style_name)
     p = _project_or_404(project_id)
     unit = float(IMAGE_PRICE_PER_UNIT)
     views_per = len(CHARACTER_REQUIRED_VIEWS)
@@ -1233,6 +1345,7 @@ def _compute_bible_generate_precheck(project_id: str) -> dict:
         "image_count": image_count,
         "unit": unit,
         "bible_version": p.get("bible_version"),
+        "style_name": style_name,
     })
     return {
         "quote_id": scope_fingerprint,
@@ -1241,6 +1354,7 @@ def _compute_bible_generate_precheck(project_id: str) -> dict:
         "quote_expires_at": computed_at + 300,
         "project_id": project_id,
         "action": "generate_bible_and_refs",
+        "style_name": style_name,
         "character_count": char_count,
         "character_names": names,
         "views_per_character": views_per,
@@ -1261,9 +1375,21 @@ def _compute_bible_generate_precheck(project_id: str) -> dict:
 
 
 @router.post("/projects/{project_id}/bible/generate-precheck")
-async def bible_generate_precheck(project_id: str):
+async def bible_generate_precheck(project_id: str, body: dict | None = None):
     """签发首次生成人物谱+定妆的服务端费用凭证。"""
-    return _issue_payment_quote(_compute_bible_generate_precheck(project_id))
+    payload = body or {}
+    return _issue_payment_quote(_compute_bible_generate_precheck(
+        project_id, style_name=payload.get("style_name"),
+    ))
+
+
+@router.get("/projects/{project_id}/bible/visual-styles")
+async def bible_visual_styles(project_id: str):
+    _project_or_404(project_id)
+    return {
+        "default": DEFAULT_VISUAL_STYLE_NAME,
+        "items": visual_style_options(),
+    }
 
 
 @router.get("/projects/{project_id}/refs/gaps")
@@ -1285,8 +1411,17 @@ async def refs_progress(project_id: str):
     from app.multiview import CHARACTER_REQUIRED_VIEWS
 
     p = _project_or_404(project_id)
+    effective_refs_status = "running" if _refs_generation_busy(project_id) else p.get("refs_status")
     if not p.get("bible_json"):
-        return {"project_id": project_id, "total": 0, "ready": 0, "failed": 0, "missing": 0, "items": []}
+        return {
+            "project_id": project_id,
+            "refs_status": effective_refs_status,
+            "total": 0,
+            "ready": 0,
+            "failed": 0,
+            "missing": 0,
+            "items": [],
+        }
     bible = json.loads(p["bible_json"])
     conn = get_conn()
     items = []
@@ -1327,11 +1462,13 @@ async def refs_progress(project_id: str):
             "status": status,
             "pack_status": pack,
             "missing_views": need,
-            "current": p.get("refs_target") == name,
+            "current": effective_refs_status == "running" and (
+                p.get("refs_target") == name or not p.get("refs_target")
+            ),
         })
     return {
         "project_id": project_id,
-        "refs_status": p.get("refs_status"),
+        "refs_status": effective_refs_status,
         "refs_target": p.get("refs_target"),
         "total": len(items),
         "ready": ready,
@@ -2482,7 +2619,7 @@ async def start_refs(project_id: str, body: dict | None = None):
     p = _project_or_404(project_id)
     if not p["bible_json"]:
         raise HTTPException(409, "请先生成角色圣经")
-    if _refs_task_active(project_id) or p["refs_status"] == "running":
+    if _refs_generation_busy(project_id) or p["refs_status"] == "running":
         raise HTTPException(409, "定妆照正在生成中")
     only = payload.get("character")
     if only and selected_names and only not in selected_names:
@@ -3242,7 +3379,7 @@ async def preview_scene_bible(project_id: str):
         "SELECT * FROM chapters WHERE project_id=? ORDER BY idx LIMIT ?",
         (project_id, SCENE_BIBLE_CHAPTER_WINDOW),
     ).fetchall())
-    _, scenes = await generate_scene_bible(chapters, bible, project_id=project_id)
+    scenes = await generate_scene_bible(chapters, bible, project_id=project_id)
     scene_payloads = [scene.model_dump(mode="json") for scene in scenes]
     quote = _issue_payment_quote(compute_scene_cost_precheck(
         project_id,

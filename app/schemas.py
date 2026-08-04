@@ -712,32 +712,78 @@ class EpisodeScreenplay(BaseModel):
 
 
 def normalize_screenplay_json_shape(obj: dict) -> tuple[dict, list[str]]:
-    """Hoist screenplay fields accidentally nested under ``plot_spine``.
+    """Repair lossless, mechanically recognizable screenplay shape drift.
 
     A missing close brace after ``plot_spine.drop_list`` leaves all following
     root fields inside ``plot_spine``.  The payload can become syntactically
     valid after its final brace is closed, while Pydantic would silently ignore
     those misplaced extras.  Only fields declared by ``EpisodeScreenplay`` and
     not declared by ``PlotSpine`` are eligible; explicit root values win.
-    """
-    spine = obj.get("plot_spine")
-    if not isinstance(spine, dict):
-        return obj, []
-    misplaced = [
-        key
-        for key in spine
-        if key in EpisodeScreenplay.model_fields and key not in PlotSpine.model_fields
-    ]
-    if not misplaced:
-        return obj, []
 
+    Some providers also serialize free-form familiarity assumptions as strings
+    even though the contract requires objects.  Preserve the text under a
+    descriptive key instead of spending another full screenplay generation on
+    a schema-only correction.
+    """
     normalized = dict(obj)
-    normalized_spine = dict(spine)
-    for key in misplaced:
-        value = normalized_spine.pop(key)
-        normalized.setdefault(key, value)
-    normalized["plot_spine"] = normalized_spine
-    return normalized, misplaced
+    changes: list[str] = []
+    spine = obj.get("plot_spine")
+    if isinstance(spine, dict):
+        misplaced = [
+            key
+            for key in spine
+            if key in EpisodeScreenplay.model_fields and key not in PlotSpine.model_fields
+        ]
+        if misplaced:
+            normalized_spine = dict(spine)
+            for key in misplaced:
+                value = normalized_spine.pop(key)
+                normalized.setdefault(key, value)
+            normalized["plot_spine"] = normalized_spine
+            changes.extend(misplaced)
+
+    plan = normalized.get("narrative_plan")
+    if isinstance(plan, dict):
+        priors = plan.get("audience_priors")
+        if isinstance(priors, list):
+            normalized_priors: list[object] = []
+            priors_changed = False
+            for prior_index, prior in enumerate(priors):
+                if not isinstance(prior, dict):
+                    normalized_priors.append(prior)
+                    continue
+                assumptions = prior.get("familiarity_assumptions")
+                if not isinstance(assumptions, list):
+                    normalized_priors.append(prior)
+                    continue
+                normalized_assumptions: list[object] = []
+                prior_changed = False
+                for assumption_index, assumption in enumerate(assumptions):
+                    if isinstance(assumption, str) and assumption.strip():
+                        normalized_assumptions.append({
+                            "description": assumption.strip(),
+                        })
+                        changes.append(
+                            "narrative_plan.audience_priors"
+                            f"[{prior_index}].familiarity_assumptions"
+                            f"[{assumption_index}]"
+                        )
+                        prior_changed = True
+                    else:
+                        normalized_assumptions.append(assumption)
+                if prior_changed:
+                    normalized_prior = dict(prior)
+                    normalized_prior["familiarity_assumptions"] = normalized_assumptions
+                    normalized_priors.append(normalized_prior)
+                    priors_changed = True
+                else:
+                    normalized_priors.append(prior)
+            if priors_changed:
+                normalized_plan = dict(plan)
+                normalized_plan["audience_priors"] = normalized_priors
+                normalized["narrative_plan"] = normalized_plan
+
+    return normalized, changes
 
 
 class Dialogue(BaseModel):

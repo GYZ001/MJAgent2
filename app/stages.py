@@ -305,16 +305,16 @@ async def _run_with_agent_loop(
             messages = [str(exc)]
             return None, issues_from_messages(messages, subject=f"{loop.scope_type}:{loop.scope_id}")
         if model_cls is EpisodeScreenplay:
-            obj, moved_fields = normalize_screenplay_json_shape(obj)
-            if moved_fields:
+            obj, normalized_paths = normalize_screenplay_json_shape(obj)
+            if normalized_paths:
                 log_provider_call(
                     "screenplay_candidate_normalization", config.MODEL_TEXT,
                     "NORMALIZED", None, 0,
                     meta={
                         "episode_id": loop.scope_id,
                         "stage": stage,
-                        "change": "hoist_fields_from_plot_spine",
-                        "moved_fields": moved_fields,
+                        "change": "normalize_screenplay_candidate_shape",
+                        "normalized_paths": normalized_paths,
                     },
                 )
         if model_cls is StoryboardShotDraft and storyboard_candidate_context is not None:
@@ -491,7 +491,8 @@ def _render_bible_source(chapters: list[dict], budget: int = BIBLE_SOURCE_BUDGET
 
 
 async def generate_bible(chapters: list[dict], feedback: str = "", previous_bible: dict | None = None,
-                         project_id: str | None = None) -> Bible:
+                         project_id: str | None = None,
+                         visual_style_prompt: str | None = None) -> Bible:
     chapters_text = _render_bible_source(chapters)
     previous_part = ""
     if previous_bible:
@@ -511,6 +512,16 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
 - 如果用户指出身份、关系、外观或称谓错误，必须按要求修正，并保持后续 relationships 一致。
 - 不要把同一人物的外号、尊称、简称拆成多个角色；统一为原文最稳定的正式姓名。
 """
+    visual_style_part = ""
+    if visual_style_prompt:
+        visual_style_part = f"""
+统一画风（最高优先级，必须逐字写入 world.visual_style_canonical）：
+{visual_style_prompt}
+
+执行方式：
+- 不得改写、扩写、缩写或替换该统一画风提示词。
+- 角色外观、场景、定妆照和后续视频提示词都必须服从该统一画风。
+"""
     prompt = f"""任务：从小说文本中提取角色圣经与世界观，用于后续 AI 视频生成的一致性控制。
 
 要求：
@@ -522,7 +533,7 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
 6. relationships 只描述【已收录角色之间】的关系：relationships.to 必须逐字等于本次 characters 里某个角色的 name，不要指向未收录的人物（否则代码校验会因「关系指向未知角色」退回重写）。与圈外人物的关系请省略，或并入 personality 文字描述。
 
 小说文本：
-{chapters_text}{previous_part}{feedback_part}
+{chapters_text}{previous_part}{feedback_part}{visual_style_part}
 
 输出 JSON Schema：
 {{"characters": [{{"name": str, "role": "主角|重要配角|反派", "appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}]}}], "world": {{"era": str, "genre": str, "visual_style_canonical": str}}}}"""
@@ -541,10 +552,13 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
             allow_warning_candidate=True,
         ),
     )
-    return await _run_with_agent_loop(
+    bible = await _run_with_agent_loop(
         "角色圣经", "character_bible", prompt, Bible, validate_bible,
         loop=loop, temperature=0.5, max_tokens=16384,
     )
+    if visual_style_prompt:
+        bible.world.visual_style_canonical = visual_style_prompt
+    return bible
 
 
 # ---------- A2. 场景圣经（场景图素材库的规范场景，跨集场景一致性核心） ----------
@@ -1190,7 +1204,9 @@ def _narrative_plan_prompt_block(scope_id: str) -> str:
         "canonical 表示需持久定妆且 asset_requirement=required；contextual 表示仅在当前上下文保持识别；"
         "collective 用群体构成锚点而非伪造单一人物；offscreen_only 表示纯画外且必须 "
         "asset_requirement=forbidden。除 offscreen_only 外 visual_canonical 必填，canonical 必须 required。"
-        "voice_ids 必须精确回指 voice_bible.speaker_id；evidence 必须以 source_evidence_ids、proposition_ids、"
+        "voice_ids 必须精确回指 voice_bible.speaker_id；Bible 已有角色的 speaker_id 必须直接使用"
+        "人物谱准确姓名，禁止另造 V-MH 一类声音别名；非 Bible 身份才通过 identity_contract.voice_ids 连接。"
+        "evidence 必须以 source_evidence_ids、proposition_ids、"
         "adaptation_decision_ids 和 rationale 说明身份决策。除纯旁白可仅由 voice_bible.role_type=narrator 表达外，"
         "任何未在角色圣经中的可见身份或说话人，以及任何进入 identity/entity、scene characters、dialogue speaker"
         "或 information speaker 的身份，都必须先有完整合同；未声明身份不得进入剧本或分镜。\n"
@@ -1402,7 +1418,7 @@ B. `full_script_text`：真正的剧本正文；只写大形体动作与主线�
    dramatic_question / protagonist_goal / obstacle / stakes 必填；
    key_lines 至少 {3} 条且须按发生顺序写进正文，不设固定条数上限；上下文依赖台词必须与触发话轮组成连续对白链；总口播服从本集目标时长；key_plot_points {KEY_PLOT_POINTS_MIN}~{KEY_PLOT_POINTS_MAX} 条。
 3. `scene_outline` 必须是 3~5 场的连续场次结构，scene_no 从 1 连续递增。
-   【硬性·角色身份】scene_outline[*].characters 只能填角色圣经准确姓名（{bible_names_inline}）或 narrative_plan.identity_contracts[*].display_name。任何非角色圣经身份都必须先有身份合同，并由当前来源、戏剧职责、可见性与跨镜持久性语义决定 kind / visual_policy / asset_requirement；不得按固定姓名、称谓、角色类型或题材名单猜测。画外说话人仍须以 voice_ids 连接 voice_bible，只有 role_type=narrator 的纯旁白可不创建身份合同。
+   【硬性·角色身份】scene_outline[*].characters 只能填角色圣经准确姓名（{bible_names_inline}）或 narrative_plan.identity_contracts[*].display_name。任何非角色圣经身份都必须先有身份合同，并由当前来源、戏剧职责、可见性与跨镜持久性语义决定 kind / visual_policy / asset_requirement；不得按固定姓名、称谓、角色类型或题材名单猜测。Bible 已有角色的 voice_bible.speaker_id 必须逐字使用人物谱姓名，禁止另造 V-MH 一类声音别名；非 Bible 画外说话人仍须以 voice_ids 连接 voice_bible，只有 role_type=narrator 的纯旁白可不创建身份合同。
 4. full_script_text 必须是一篇连续故事正文，且必须带场次标题、动作段、对白段；「【场N】」数量必须与 scene_outline 一致。
 5. full_script_text 不能是一大段梗概；必须像台本分行书写。
 6. full_script_text 中禁止出现：拍01、拍1、拍 01、镜头、景别、运镜、首帧、尾帧、参考图、提示词、prompt；并禁止超纲细节词（眼泪/指节/衣角/发丝/瞳孔/分屏/闪回等）。
@@ -1417,7 +1433,9 @@ B. `full_script_text`：真正的剧本正文；只写大形体动作与主线�
 - events[]：建议与 must_keep spine 一一对应（约 5~12 条）。每条必须有非空 event_id（如 E1）、visible_change、state_out；禁止输出空壳事件。
 - information_ledger[]：条数 ≤ spine_beats×2；每条必须有非空中文 content、合法 info_id（I1/I2）、以及对应 events[].event_id。
   【硬性】禁止输出 content 为空或 event_id 为空的台账项；写不出完整台账时，按每条 must_keep spine 只产出一条即可。
-- voice_bible[]：每个元素包含 speaker_id、voice_canonical、language、role_type。
+- voice_bible[]：每个元素包含 speaker_id、voice_canonical、language、role_type。Bible 已有角色的
+  speaker_id 必须逐字等于人物谱姓名；非 Bible 说话人的 speaker_id 必须逐字出现在对应
+  identity_contract.voice_ids；禁止生成 V-MH、VOICE-01 等没有显式身份绑定的独立声音编号。
 - approved_adaptations[] / forbidden_additions[]。
 规则：原文没有的事件默认不得创建；若确需为连贯性补小动作，events[].adaptation_addition 必须为 true，必须写 adaptation_reason，且 approved 必须为 false。
 空钩子规则：本集 hook=「{episode_hook or '（空）'}」、cliffhanger=「{episode_cliffhanger or '（空）'}」；若二者均为空/空白，ending_hook 只能写「无集级钩子」，不得发明原文没有的下一集钩子。
@@ -1448,7 +1466,7 @@ B. `full_script_text`：真正的剧本正文；只写大形体动作与主线�
 {_render_screenplay_source(source_with_ids)}
 
 输出 JSON Schema：
-{{"episode_no": {episode['episode_no']}, "mode": "full_script", "title": str, "logline": str, "script_format_note": "一句话说明正文采用的台本格式", "plot_spine": {{"episode_premise": "一句话本集目标", "spine_beats": [{{"beat_id": "S01", "who": str, "does": str, "turn": str, "must_keep": true}}], "must_keep_ending": str, "drop_list": [str, str]}}, "dramatic_question": "本集戏剧问题（一句话）", "protagonist_goal": "主角外在目标", "obstacle": "外部+内部阻力", "stakes": "失败代价", "dialogue_chains": [{{"chain_id": "DC1", "topic": "同一话题", "turns": [{{"speaker": "引用角色圣经准确姓名或 narrative_plan.identity_contracts[].display_name", "line": "适合表演的改编台词", "function": "trigger|announcement|question|response|decision|statement", "source_text": "对应原文对白原句"}}]}}], "key_lines": ["由后端按 dialogue_chains.turns 回填；不要另选孤立金句"], "key_plot_points": ["与spine对齐的局势变化，{KEY_PLOT_POINTS_MIN}~{KEY_PLOT_POINTS_MAX}条"], "scene_outline": [{{"scene_no": int, "scene_heading": "场次标题", "story_function": "8~40字，写明本场造成的剧情变化；禁止只写进入/升级/转折/收束", "characters": ["角色圣经准确姓名或 identity_contract.display_name"], "summary": "本场戏剧内容概括", "conflict": str, "turn": "交给下一场的状态变化", "source_basis": "原文依据"}}], "full_script_text": str, "character_state_changes": [str], "emotional_curve": str, "ending_hook": "若 hook/cliffhanger 均为空则固定为「无集级钩子」", "source_basis": str, "adaptation_direction": str, "opening": str, "development": str, "conflict": str, "climax": str, "episode_premise": "一句话本集目标", "events": [{{"event_id": "E1", "source_span": "原文位置或摘句", "source_fact": "原文事实", "state_in": "事件前状态", "trigger": "触发因素", "visible_change": "可见/可听变化", "state_out": "事件后状态", "must_keep": true, "adaptation_addition": false, "adaptation_reason": "", "approved": false}}], "information_ledger": [{{"info_id": "I1", "event_id": "E1", "content": "观众必须获得的信息", "delivery_owner": "visual_action|spoken_dialogue|offscreen_voice|narration|on_screen_text|ambient_sound", "speaker_id": "精确引用 voice_bible.speaker_id 或 null", "exact_text": "需逐字交付时填写，否则null", "reinforcement_allowed": false, "status": "unassigned"}}], "voice_bible": [{{"speaker_id": "唯一 voice ID；非旁白的非圣经说话人必须被 identity_contract.voice_ids 回指", "voice_canonical": "声音与语气规范", "language": "普通话", "role_type": "开放语义；纯旁白使用 narrator"}}], "approved_adaptations": [str], "forbidden_additions": [str], "narrative_plan": {narrative_plan_schema}}}"""
+{{"episode_no": {episode['episode_no']}, "mode": "full_script", "title": str, "logline": str, "script_format_note": "一句话说明正文采用的台本格式", "plot_spine": {{"episode_premise": "一句话本集目标", "spine_beats": [{{"beat_id": "S01", "who": str, "does": str, "turn": str, "must_keep": true}}], "must_keep_ending": str, "drop_list": [str, str]}}, "dramatic_question": "本集戏剧问题（一句话）", "protagonist_goal": "主角外在目标", "obstacle": "外部+内部阻力", "stakes": "失败代价", "dialogue_chains": [{{"chain_id": "DC1", "topic": "同一话题", "turns": [{{"speaker": "引用角色圣经准确姓名或 narrative_plan.identity_contracts[].display_name", "line": "适合表演的改编台词", "function": "trigger|announcement|question|response|decision|statement", "source_text": "对应原文对白原句"}}]}}], "key_lines": ["由后端按 dialogue_chains.turns 回填；不要另选孤立金句"], "key_plot_points": ["与spine对齐的局势变化，{KEY_PLOT_POINTS_MIN}~{KEY_PLOT_POINTS_MAX}条"], "scene_outline": [{{"scene_no": int, "scene_heading": "场次标题", "story_function": "8~40字，写明本场造成的剧情变化；禁止只写进入/升级/转折/收束", "characters": ["角色圣经准确姓名或 identity_contract.display_name"], "summary": "本场戏剧内容概括", "conflict": str, "turn": "交给下一场的状态变化", "source_basis": "原文依据"}}], "full_script_text": str, "character_state_changes": [str], "emotional_curve": str, "ending_hook": "若 hook/cliffhanger 均为空则固定为「无集级钩子」", "source_basis": str, "adaptation_direction": str, "opening": str, "development": str, "conflict": str, "climax": str, "episode_premise": "一句话本集目标", "events": [{{"event_id": "E1", "source_span": "原文位置或摘句", "source_fact": "原文事实", "state_in": "事件前状态", "trigger": "触发因素", "visible_change": "可见/可听变化", "state_out": "事件后状态", "must_keep": true, "adaptation_addition": false, "adaptation_reason": "", "approved": false}}], "information_ledger": [{{"info_id": "I1", "event_id": "E1", "content": "观众必须获得的信息", "delivery_owner": "visual_action|spoken_dialogue|offscreen_voice|narration|on_screen_text|ambient_sound", "speaker_id": "精确引用 voice_bible.speaker_id 或 null", "exact_text": "需逐字交付时填写，否则null", "reinforcement_allowed": false, "status": "unassigned"}}], "voice_bible": [{{"speaker_id": "Bible 角色逐字使用人物谱姓名；非 Bible 身份使用 identity_contract.voice_ids 中已声明的 ID", "voice_canonical": "声音与语气规范", "language": "普通话", "role_type": "开放语义；纯旁白使用 narrator"}}], "approved_adaptations": [str], "forbidden_additions": [str], "narrative_plan": {narrative_plan_schema}}}"""
     # Production Repair：完整生成只允许一次；QA 后禁止“重新输出完整 JSON”。
     return await generate_screenplay_baseline(
         episode, source_text, bible, prev_ending=prev_ending, _prompt=prompt,
@@ -1472,6 +1490,15 @@ async def generate_screenplay_baseline(
         return await generate_screenplay(episode, source_text, bible, prev_ending=prev_ending)
 
     no_episode_hook = bool(_no_episode_hook)
+    raw_authorized_source_chapters = episode.get("authorized_source_chapters") or {}
+    authorized_source_chapters = (
+        {
+            str(chapter_id): str(chapter_text)
+            for chapter_id, chapter_text in raw_authorized_source_chapters.items()
+            if str(chapter_id).strip() and str(chapter_text).strip()
+        }
+        if isinstance(raw_authorized_source_chapters, dict) else {}
+    )
     # Baseline-only 禁止对已成形剧本做第二次整版 QA 重写，但首轮若连
     # Pydantic 候选都没有产生（JSON/结构错误），必须允许受限的结构修复。
     # 一旦出现首个可解析候选，baseline_only 会立即交给局部 Patch。
@@ -1512,7 +1539,9 @@ async def generate_screenplay_baseline(
             s, bible, max(1, episode["target_duration_s"] // config.VIDEO_DURATION_MIN_S),
             episode_no=episode["episode_no"], source_text=source_text,
             require_dialogue_chains=True,
-            required_dialogue_lines=episode.get("required_dialogue_lines") or [])
+            required_dialogue_lines=episode.get("required_dialogue_lines") or [],
+            validate_narrative=False,
+        )
         errors.extend(screenplay_character_resolution_errors(
             s,
             resolutions,

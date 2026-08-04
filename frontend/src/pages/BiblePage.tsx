@@ -43,6 +43,7 @@ type PaymentQuote = RefsCostPrecheck & {
 }
 
 type PaymentSelection = { characters: string[] }
+type VisualStyleOption = { name: string; description: string }
 
 export function currentPortrait(character: Character): Portrait | null {
   const portraits = [...(character.portraits ?? [])]
@@ -424,6 +425,11 @@ export default function BiblePage() {
   const [paySelectable, setPaySelectable] = useState(false)
   const [payScopeTitle, setPayScopeTitle] = useState<string | undefined>(undefined)
   const payActionRef = useRef<null | ((selection: PaymentSelection) => Promise<void>)>(null)
+  const [styleOpen, setStyleOpen] = useState(false)
+  const [styleLoading, setStyleLoading] = useState(false)
+  const [styleError, setStyleError] = useState<string | null>(null)
+  const [styleOptions, setStyleOptions] = useState<VisualStyleOption[]>([])
+  const [selectedStyle, setSelectedStyle] = useState('')
   const [impactMode, setImpactMode] = useState<'bible' | 'character'>('bible')
   const [pendingCharacterSave, setPendingCharacterSave] = useState<{ name: string; character: Character } | null>(null)
   const editingRef = useRef<Bible | null>(null)
@@ -572,13 +578,13 @@ export default function BiblePage() {
       }
     }
     void load()
-    const running = p.bible_status === 'running' || p.refs_status === 'running'
+    const running = p.bible_status === 'running' || p.refs_status === 'running' || refsProgress?.refs_status === 'running'
     const id = running ? window.setInterval(load, 3500) : null
     return () => {
       cancelled = true
       if (id != null) window.clearInterval(id)
     }
-  }, [p?.id, p?.bible, p?.bible_status, p?.refs_status])
+  }, [p?.id, p?.bible, p?.bible_status, p?.refs_status, refsProgress?.refs_status])
 
   if (error && !p) return <QueryState loading={false} error={error} hasData={false} objectName="人物谱" onRetry={refresh}>{null}</QueryState>
   if (!p) return <QueryState loading={loading !== false} error={null} hasData={false} objectName="人物谱" onRetry={refresh}>{null}</QueryState>
@@ -597,7 +603,9 @@ export default function BiblePage() {
   ).sort((left, right) => compareCharacters(left.c, right.c, charFilters.sort, p))
   const curCharPage = Math.min(charPage, charPageCount - 1)
   const pagedChars = filteredChars.slice(curCharPage * pageSize, curCharPage * pageSize + pageSize)
-  const generating = p.bible_status === 'running' || p.refs_status === 'running'
+  const refsRunning = p.refs_status === 'running' || refsProgress?.refs_status === 'running'
+  const generating = p.bible_status === 'running' || refsRunning
+  const visualStyleDisplayName = bible?.world.visual_style_canonical?.trim() || '未设置统一画风'
   const paramsCharacter = paramsCharacterName
     ? bible?.characters.find(character => character.name === paramsCharacterName) ?? null
     : null
@@ -691,7 +699,7 @@ export default function BiblePage() {
     } catch { /* ignore invalid local backup */ }
   }
 
-  const startBible = async () => {
+  const startBibleAfterStyle = async (styleName: string) => {
     await openPayment(
       p.bible ? '重新生成人物谱和定妆照' : '开始生成人物谱和定妆照',
       {},
@@ -699,13 +707,38 @@ export default function BiblePage() {
         bibleTimer.start()
         refsTimer.start()
         await api.post(`/projects/${p.id}/bible`, {
-          confirm: true, quote_id: quote.quote_id, idempotency_key: quote.quote_id,
+          confirm: true,
+          quote_id: quote.quote_id,
+          idempotency_key: quote.quote_id,
+          style_name: styleName,
         })
         toast('人物谱与定妆照生成已开始')
         refresh()
       },
-      () => api.bibleGeneratePrecheck(p.id),
+      () => api.bibleGeneratePrecheck(p.id, { style_name: styleName }),
     )
+  }
+
+  const startBible = async () => {
+    setStyleOpen(true)
+    setStyleLoading(true)
+    setStyleError(null)
+    try {
+      const result = await api.bibleVisualStyles(p.id)
+      const names = result.items.map(item => item.name).filter(Boolean)
+      setStyleOptions(result.items)
+      setSelectedStyle(
+        p.bible_style_name && names.includes(p.bible_style_name)
+          ? p.bible_style_name
+          : result.default || names[0] || '',
+      )
+    } catch (e: unknown) {
+      setStyleError((e as Error).message)
+      setStyleOptions([])
+      setSelectedStyle('')
+    } finally {
+      setStyleLoading(false)
+    }
   }
 
   const stopGeneration = async () => {
@@ -1076,7 +1109,7 @@ export default function BiblePage() {
             </button>
           )}
           {p.bible_status === 'running' && <span className="stamp gold">谱写中（约 1~3 分钟）</span>}
-          {p.refs_status === 'running' && <span className="stamp gold">定妆中</span>}
+          {refsRunning && <span className="stamp gold">定妆中</span>}
           {p.bible && <span className="stamp green">第 {p.bible_version ?? 1} 稿</span>}
           {dirty && <span className="stamp gold">未保存修订 · {dirtyCount} 项</span>}
           {editing && draftState === 'saving' && <span className="stamp grey">草稿保存中</span>}
@@ -1115,7 +1148,7 @@ export default function BiblePage() {
         )}
         {!generating && p.bible && (
           <div className="hint library-note">
-            更新人物谱角色设定或统一画面风格并定稿后，可选择角色重新生成定妆照；新图通过质检前不会替换已采用成品。
+            更新人物谱角色设定并定稿后，可选择角色重新生成定妆照；如需更换统一画风，请重新生成人物谱并选择风格。新图通过质检前不会替换已采用成品。
           </div>
         )}
         {p.bible_status === 'failed' && (
@@ -1155,16 +1188,13 @@ export default function BiblePage() {
             </div>
           </div>
           <label className="f">统一画面风格（会用于每个镜头）</label>
-          {editing
-            ? <textarea aria-label="统一画面风格" rows={2} value={editing.world.visual_style_canonical}
-                onChange={e => updateEditing(current => ({
-                  ...current,
-                  world: { ...current.world, visual_style_canonical: e.target.value },
-                }))} />
-            : <div style={{ fontSize: 14, background: 'rgba(181,68,52,0.05)', borderLeft: '3px solid var(--cinnabar)', padding: '8px 12px', borderRadius: '0 6px 6px 0', lineHeight: 1.9 }}>{bible.world.visual_style_canonical}</div>}
+          <div style={{ fontSize: 14, background: 'rgba(181,68,52,0.05)', borderLeft: '3px solid var(--cinnabar)', padding: '8px 12px', borderRadius: '0 6px 6px 0', lineHeight: 1.9 }}>
+            {visualStyleDisplayName}
+          </div>
+          {editing && <p className="hint">画风提示词由后端统一管理；如需更换画风，请重新生成人物谱并选择新的风格。</p>}
           <div style={{ height: 16 }} />
           <div className="library-note-row">
-            {p.refs_status === 'running' && <span className="stamp gold">定妆中</span>}
+            {refsRunning && <span className="stamp gold">定妆中</span>}
             <span style={{ fontSize: 12.5, color: 'var(--ink-faint)' }}>
               启动后会先为全部角色生成初始定妆照；随后在分镜阶段按集判断角色外观是否相比当前定妆照大变，大变才图生图重绘并切分适用集，新登场重要人物会自动补人物卡并生成定妆照
             </span>
@@ -1194,7 +1224,7 @@ export default function BiblePage() {
               const hasPortraitImage = portraits.some(portrait =>
                 (!!portrait.image_url || (portrait.views ?? []).some(view => !!view.image_url)),
               )
-              const fitting = p.refs_status === 'running' && (
+              const fitting = refsRunning && (
                 p.refs_target === c.name
                 || (!p.refs_target && portraits.some(portrait => portrait.pack_status === 'generating'))
               )
@@ -1388,6 +1418,26 @@ export default function BiblePage() {
           void act(() => run(selection))
         }}
       />
+      <VisualStyleDialog
+        open={styleOpen}
+        loading={styleLoading}
+        error={styleError}
+        options={styleOptions}
+        selected={selectedStyle}
+        onSelect={setSelectedStyle}
+        onClose={() => {
+          setStyleOpen(false)
+          setStyleError(null)
+        }}
+        onConfirm={() => {
+          if (!selectedStyle) {
+            setStyleError('请先选择统一画面风格')
+            return
+          }
+          setStyleOpen(false)
+          void startBibleAfterStyle(selectedStyle)
+        }}
+      />
       {skipConfirm && (
         <SkipConfirmDialog
           data={skipConfirm}
@@ -1483,7 +1533,7 @@ export default function BiblePage() {
               : '未设置'}</p></div>
           </div>
           <PortraitBlock projectId={p.id} character={paramsCharacter}
-            disabled={busy || p.refs_status === 'running'} onChanged={refresh}
+            disabled={busy || refsRunning} onChanged={refresh}
             regenerate={() => openPayment(
               `重新生成「${paramsCharacter.name}」定妆照`,
               { character: paramsCharacter.name },
@@ -1889,6 +1939,71 @@ function SkipConfirmDialog({
         <div className="dialog-actions">
           <button type="button" className="btn" onClick={onClose}>返回补齐</button>
           <button type="button" className="btn primary" onClick={onConfirm}>确认跳过，继续分集</button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function VisualStyleDialog({
+  open,
+  loading,
+  error,
+  options,
+  selected,
+  onSelect,
+  onClose,
+  onConfirm,
+}: {
+  open: boolean
+  loading: boolean
+  error: string | null
+  options: VisualStyleOption[]
+  selected: string
+  onSelect: (name: string) => void
+  onClose: () => void
+  onConfirm: () => void
+}) {
+  const trapRef = useFocusTrap(open, onClose)
+  if (!open) return null
+  return (
+    <div className="evidence-backdrop" role="presentation" onMouseDown={event => {
+      if (event.currentTarget === event.target) onClose()
+    }}>
+      <section ref={trapRef} className="impact-dialog" role="dialog" aria-modal="true" aria-label="选择统一画面风格">
+        <h3>选择统一画面风格</h3>
+        <p>该风格会写入后端任务合同，后续人物、场景、分镜和视频都会沿用。页面只展示风格名称和用途说明。</p>
+        {loading && <div className="query-inline">正在读取风格列表…</div>}
+        {error && <div className="error-banner" role="alert">{error}</div>}
+        {!loading && !error && (
+          <div className="visual-style-list" role="listbox" aria-label="统一画面风格列表">
+            {options.map(option => (
+              <button
+                key={option.name}
+                type="button"
+                className={`visual-style-option${selected === option.name ? ' selected' : ''}`}
+                aria-pressed={selected === option.name}
+                onClick={() => onSelect(option.name)}
+              >
+                <span>
+                  <b>{option.name}</b>
+                  <small>{option.description}</small>
+                </span>
+                {selected === option.name && <em>已选</em>}
+              </button>
+            ))}
+          </div>
+        )}
+        <div className="dialog-actions">
+          <button type="button" className="btn" onClick={onClose}>取消</button>
+          <button
+            type="button"
+            className="btn primary"
+            disabled={loading || !!error || !selected}
+            onClick={onConfirm}
+          >
+            确认风格并预览费用
+          </button>
         </div>
       </section>
     </div>

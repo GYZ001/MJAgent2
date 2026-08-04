@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS projects (
     bible_version INTEGER DEFAULT 0,
     bible_status TEXT DEFAULT 'idle',
     bible_error TEXT,
+    bible_style_name TEXT,
     plan_status TEXT DEFAULT 'idle',
     plan_error TEXT,
     key_timeline TEXT,
@@ -1111,6 +1112,7 @@ MIGRATIONS = (
     "ALTER TABLE projects ADD COLUMN refs_status TEXT DEFAULT 'idle'",
     "ALTER TABLE projects ADD COLUMN refs_error TEXT",
     "ALTER TABLE projects ADD COLUMN refs_target TEXT",
+    "ALTER TABLE projects ADD COLUMN bible_style_name TEXT",
     # 持久化定妆批次语义：0=按最新设定全量重生，1=仅续跑缺口。
     # 进程重启后必须保留这个区别，否则全量重生会被误恢复成“跳过旧成品”。
     "ALTER TABLE projects ADD COLUMN refs_resume INTEGER NOT NULL DEFAULT 1",

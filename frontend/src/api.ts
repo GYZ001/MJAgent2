@@ -549,15 +549,22 @@ export const api = {
       `/projects/${projectId}/bible/impact-preview`,
       body,
     ) as Promise<BibleImpactPreview>,
-  bibleGeneratePrecheck: (projectId: string) =>
+  bibleVisualStyles: (projectId: string) =>
+    request("GET", `/projects/${projectId}/bible/visual-styles`) as Promise<{
+      default: string;
+      items: Array<{ name: string; description: string }>;
+    }>,
+  bibleGeneratePrecheck: (projectId: string, body?: { style_name?: string }) =>
     request(
       "POST",
       `/projects/${projectId}/bible/generate-precheck`,
+      body || {},
     ) as Promise<
       RefsCostPrecheck & {
         estimated_duration_min?: number[];
         estimate_note?: string;
         character_names?: string[];
+        style_name?: string;
       }
     >,
   refsPrecheck: (
@@ -2102,6 +2109,7 @@ export interface Project {
   novel_chars: number;
   bible_status: string;
   bible_error?: string;
+  bible_style_name?: string | null;
   plan_status: string;
   plan_error?: string;
   bible_version?: number;

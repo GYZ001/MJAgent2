@@ -42,13 +42,13 @@ from app.production.structured_issues import (
     structured_issue,
 )
 from app.schemas import Bible, EpisodeScreenplay
-from app.renderability import OVERDETAIL_TERMS
+from app.renderability import DIALOGUE_CHAIN_TURNS_HARD_MAX, OVERDETAIL_TERMS
 
 
 MAX_REPAIR_ACTIVATION_PATCHES = 12
 MAX_REPAIR_ACTIVATION_PASSES = 32
 MAX_STRATEGY_ATTEMPTS_PER_ISSUE = 3
-SCREENPLAY_REPAIR_PLANNER_VERSION = "screenplay-repair-10"
+SCREENPLAY_REPAIR_PLANNER_VERSION = "screenplay-repair-13"
 NON_WAIVABLE_SCREENPLAY_ISSUE_CODES = frozenset({
     "CHARACTER_IDENTITY_UNRESOLVED",
 })
@@ -83,6 +83,27 @@ def _eval_id_from_create(evaluation_row: dict[str, Any] | str | None) -> str:
 def non_waivable_screenplay_issues(issues: list[Issue]) -> list[Issue]:
     """只有会让下游身份/资产合同失真的问题禁止降级发布。"""
     return [issue for issue in issues if issue.code in NON_WAIVABLE_SCREENPLAY_ISSUE_CODES]
+
+
+def _gate_failure_message(
+    open_issues: list[Issue],
+    *,
+    failed_issue: Issue | None,
+) -> str:
+    """Put the issue that actually stopped repair ahead of the remaining backlog."""
+    ordered: list[Issue] = []
+    seen: set[tuple[str, str]] = set()
+    for issue in ([failed_issue] if failed_issue is not None else []) + open_issues:
+        identity = (issue.fingerprint, issue.message)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        ordered.append(issue)
+
+    prefix = "剧本工作稿已保留，但叙事/质量硬门禁仍未通过，禁止发布："
+    if failed_issue is not None:
+        prefix += f"自动修复停止于 {failed_issue.code}："
+    return (prefix + "；".join(issue.message for issue in ordered[:5]))[:1200]
 
 
 def _strategy_was_tried(entries: list[str], strategy: str) -> bool:
@@ -204,6 +225,7 @@ def run_screenplay_qa(
         source_text=source_text,
         require_dialogue_chains=True,
         required_dialogue_lines=episode.get("required_dialogue_lines") or [],
+        validate_narrative=False,
     )
     source_chapter_contract_present = "source_chapters" in episode
     raw_source_chapters = episode.get("source_chapters") or []
@@ -506,28 +528,14 @@ def plan_screenplay_patch(
                             "chain_id": chain.chain_id},
                 )]
 
-    # key_lines / full_script_text 等派生投影才允许 rederive。
-    if code == "KEY_LINE_MISSING" and not _strategy_was_tried(tried, "rederive"):
+    # key_lines / full_script_text 等纯派生投影才允许 rederive。上下文断裂必须
+    # 修复权威 dialogue_chain，重建投影不会补出缺失的触发话轮。
+    if (
+        code == "KEY_LINE_MISSING"
+        and "主线对白上下文断裂" not in (issue.message or "")
+        and not _strategy_was_tried(tried, "rederive")
+    ):
         return [PatchOperation(op="rederive")]
-
-    # 对白链触发：尝试在首场插入 trigger turn
-    if code == "KEY_LINE_MISSING" and not _strategy_was_tried(tried, "insert_trigger"):
-        scene_id = next((n for n in related if n.startswith("SC")), None)
-        if not scene_id and script.scene_outline:
-            scene_id = f"SC{int(script.scene_outline[0].scene_no):02d}"
-        line = _extract_quoted_fragment(issue.message or "")
-        if scene_id and line:
-            return [PatchOperation(
-                op="create_node",
-                target={"kind": "dialogue_turn", "scene_id": scene_id},
-                value={
-                    "chain_id": "DC_FIX",
-                    "speaker": _guess_speaker(line, script),
-                    "line": line,
-                    "function": "trigger",
-                    "source_text": line,
-                },
-            )]
 
     # 可拍性细节词不值得再次调用模型；只清理画面描述字段，保留对白和原文证据。
     if code == "OVERDETAIL" and not _strategy_was_tried(tried, "normalize_overdetail"):
@@ -540,6 +548,30 @@ def plan_screenplay_patch(
             )]
 
     return ops
+
+
+async def _plan_screenplay_repair_operations(
+    issue: Issue,
+    script: EpisodeScreenplay,
+    *,
+    source_text: str,
+    strategy_history: dict[str, list[str]],
+) -> list[PatchOperation]:
+    """Prefer bounded document operations; use semantic planning for graph gaps."""
+    operations = plan_screenplay_patch(
+        issue,
+        script,
+        source_text=source_text,
+        strategy_history=strategy_history,
+    )
+    if operations:
+        return operations
+    return await _llm_field_patch(
+        issue,
+        script,
+        source_text=source_text,
+        strategy_history=strategy_history.get(issue.fingerprint, []),
+    )
 
 
 def _heuristic_fill_dramatic_field(field: str, script: EpisodeScreenplay) -> str:
@@ -615,14 +647,6 @@ def _derive_scene_story_function(scene: Any) -> str:
     if heading:
         return f"承接{heading}场景并推动本场局势变化"
     return "推动本场核心冲突并形成后续状态变化"
-
-
-def _extract_quoted_fragment(message: str) -> str:
-    for pattern in (r"[「『]([^」』]+)[」』]", r"[“\"]([^”\"]+)[”\"]", r"：([^\s；;]{2,40})"):
-        m = re.search(pattern, message)
-        if m:
-            return m.group(1).strip()
-    return ""
 
 
 def _opening_anchor_from_issue(message: str) -> str:
@@ -765,14 +789,381 @@ def _best_source_evidence_for_turn(
     return ranked[0][1]
 
 
-def _guess_speaker(line: str, script: EpisodeScreenplay) -> str:
-    for chain in script.dialogue_chains or []:
-        for turn in chain.turns:
-            if turn.line and turn.line in line:
-                return turn.speaker or "角色"
-    if script.scene_outline and script.scene_outline[0].characters:
-        return script.scene_outline[0].characters[0]
-    return "角色"
+def _source_evidence_span(
+    chapter: str,
+    excerpt: str,
+) -> tuple[int, int, str | None] | None:
+    """Resolve one exact raw span, optionally expanding a proven excerpt elision."""
+    from app.narrative import normalize_source_evidence_text
+
+    normalized_excerpt = normalize_source_evidence_text(excerpt)
+    raw_positions = [
+        raw_index
+        for raw_index, char in enumerate(chapter)
+        if not char.isspace()
+    ]
+    normalized_chapter = "".join(chapter[index] for index in raw_positions)
+    if not normalized_excerpt or not raw_positions:
+        return None
+
+    def occurrences(haystack: str, needle: str) -> list[int]:
+        found: list[int] = []
+        cursor = 0
+        while needle:
+            offset = haystack.find(needle, cursor)
+            if offset < 0:
+                break
+            found.append(offset)
+            cursor = offset + 1
+        return found
+
+    exact_offsets = occurrences(normalized_chapter, normalized_excerpt)
+    if len(exact_offsets) == 1:
+        offset = exact_offsets[0]
+        return (
+            raw_positions[offset],
+            raw_positions[offset + len(normalized_excerpt) - 1] + 1,
+            None,
+        )
+    if exact_offsets or len(normalized_excerpt) < 24:
+        return None
+
+    # A model may concatenate two exact source regions while omitting an
+    # irrelevant paragraph. Recover only when unique prefix/suffix anchors prove
+    # one bounded containing span and the authored excerpt is an ordered
+    # subsequence of it. This expands evidence; it never invents or fuzzy-edits it.
+    anchor_size = min(32, max(12, len(normalized_excerpt) // 8))
+    prefix = normalized_excerpt[:anchor_size]
+    suffix = normalized_excerpt[-anchor_size:]
+    prefix_offsets = occurrences(normalized_chapter, prefix)
+    suffix_offsets = occurrences(normalized_chapter, suffix)
+    candidates: list[tuple[int, int, int]] = []
+    max_extra = max(200, min(1000, len(normalized_excerpt)))
+
+    for start in prefix_offsets:
+        for suffix_start in suffix_offsets:
+            end = suffix_start + len(suffix)
+            if end <= start or end - start < len(normalized_excerpt):
+                continue
+            segment = normalized_chapter[start:end]
+            extra = len(segment) - len(normalized_excerpt)
+            if extra > max_extra:
+                continue
+            cursor = 0
+            for char in segment:
+                if cursor < len(normalized_excerpt) and char == normalized_excerpt[cursor]:
+                    cursor += 1
+            if cursor == len(normalized_excerpt):
+                candidates.append((extra, start, end))
+
+    if not candidates:
+        return None
+    candidates.sort()
+    best_extra = candidates[0][0]
+    best = [item for item in candidates if item[0] == best_extra]
+    if len(best) != 1:
+        return None
+    _extra, start, end = best[0]
+    raw_start = raw_positions[start]
+    raw_end = raw_positions[end - 1] + 1
+    return raw_start, raw_end, chapter[raw_start:raw_end]
+
+
+def _normalize_screenplay_narrative_graph(
+    script: EpisodeScreenplay,
+    *,
+    authorized_source_chapters: dict[str, str] | None,
+) -> list[dict[str, Any]]:
+    """Repair exact source offsets and unambiguous event-ID punctuation drift."""
+    plan = script.narrative_plan
+    if plan is None:
+        return []
+    data = plan.model_dump(mode="json")
+    changes: list[dict[str, Any]] = []
+
+    for index, chain in enumerate(script.dialogue_chains or []):
+        topic = (chain.topic or "").strip()
+        if len(topic) >= 4 or not chain.turns:
+            continue
+        speakers = list(dict.fromkeys(
+            (turn.speaker or "").strip()
+            for turn in chain.turns
+            if (turn.speaker or "").strip()
+        ))
+        subject = (chain.turns[0].line or "").strip()[:16].strip("，。！？ ")
+        normalized_topic = (
+            f"{'与'.join(speakers[:2]) or '角色'}围绕"
+            f"{subject or '当前事件'}的对话"
+        )
+        changes.append({
+            "kind": "dialogue_topic",
+            "id": chain.chain_id or f"dialogue-chain-{index}",
+            "from": topic,
+            "to": normalized_topic,
+        })
+        chain.topic = normalized_topic
+
+    raw_chapters = (
+        authorized_source_chapters
+        if isinstance(authorized_source_chapters, dict)
+        else {}
+    )
+    chapters = {
+        str(chapter_id): str(text)
+        for chapter_id, text in raw_chapters.items()
+        if str(chapter_id).strip() and str(text)
+    }
+    for index, evidence in enumerate(data.get("source_evidence") or []):
+        if not isinstance(evidence, dict):
+            continue
+        span = evidence.get("source_span")
+        excerpt = str(evidence.get("verbatim_excerpt") or "")
+        if not isinstance(span, dict) or not excerpt:
+            continue
+        chapter = chapters.get(str(span.get("chapter_id") or ""))
+        if chapter is None:
+            continue
+        resolved = _source_evidence_span(chapter, excerpt)
+        if resolved is None:
+            continue
+        start, end, expanded_excerpt = resolved
+        evidence_id = evidence.get("source_evidence_id") or f"source-{index}"
+        if expanded_excerpt is not None and expanded_excerpt != excerpt:
+            changes.append({
+                "kind": "source_excerpt_expanded",
+                "id": evidence_id,
+                "from_chars": len(excerpt),
+                "to_chars": len(expanded_excerpt),
+            })
+            evidence["verbatim_excerpt"] = expanded_excerpt
+        if span.get("start") != start or span.get("end") != end:
+            changes.append({
+                "kind": "source_span",
+                "id": evidence_id,
+                "from": {"start": span.get("start"), "end": span.get("end")},
+                "to": {"start": start, "end": end},
+            })
+            span["start"] = start
+            span["end"] = end
+
+    event_ids = {
+        str(event.get("event_id") or "").strip()
+        for event in (data.get("events") or [])
+        if isinstance(event, dict) and str(event.get("event_id") or "").strip()
+    }
+    event_aliases: dict[str, list[str]] = {}
+    for event_id in event_ids:
+        alias = re.sub(r"[^a-z0-9]+", "", event_id.casefold())
+        if alias:
+            event_aliases.setdefault(alias, []).append(event_id)
+
+    def canonical_event_id(value: Any) -> str:
+        raw = str(value or "").strip()
+        if not raw or raw in event_ids:
+            return raw
+        alias = re.sub(r"[^a-z0-9]+", "", raw.casefold())
+        matches = event_aliases.get(alias) or []
+        return matches[0] if len(matches) == 1 else raw
+
+    def walk(value: Any, path: str = "") -> None:
+        if isinstance(value, dict):
+            is_event_anchor = str(value.get("type") or "").strip() == "event"
+            for key, child in list(value.items()):
+                child_path = f"{path}.{key}" if path else key
+                if key == "id" and is_event_anchor:
+                    normalized = canonical_event_id(child)
+                    if normalized != child:
+                        changes.append({
+                            "kind": "event_ref",
+                            "path": child_path,
+                            "from": child,
+                            "to": normalized,
+                        })
+                        value[key] = normalized
+                elif key.endswith("event_id"):
+                    normalized = canonical_event_id(child)
+                    if normalized != child:
+                        changes.append({
+                            "kind": "event_ref",
+                            "path": child_path,
+                            "from": child,
+                            "to": normalized,
+                        })
+                        value[key] = normalized
+                elif key.endswith("event_ids") or key == "causal_parent_ids":
+                    if isinstance(child, list):
+                        normalized_values = [
+                            canonical_event_id(item) for item in child
+                        ]
+                        if normalized_values != child:
+                            changes.append({
+                                "kind": "event_refs",
+                                "path": child_path,
+                                "from": child,
+                                "to": normalized_values,
+                            })
+                            value[key] = normalized_values
+                else:
+                    walk(child, child_path)
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                walk(child, f"{path}[{index}]")
+
+    walk(data)
+    fact_propositions = {
+        str(fact.get("fact_id") or "").strip(): str(
+            fact.get("proposition_id") or ""
+        ).strip()
+        for fact in (data.get("state_facts") or [])
+        if (
+            isinstance(fact, dict)
+            and str(fact.get("fact_id") or "").strip()
+            and str(fact.get("proposition_id") or "").strip()
+        )
+    }
+    for event in data.get("events") or []:
+        if not isinstance(event, dict):
+            continue
+        existing = list(event.get("proposition_ids") or [])
+        required = [
+            fact_propositions[fact_id]
+            for fact_id in (
+                *(event.get("precondition_fact_ids") or []),
+                *(event.get("effects_add") or []),
+                *(event.get("effects_remove") or []),
+            )
+            if fact_id in fact_propositions
+        ]
+        normalized = list(dict.fromkeys([*existing, *required]))
+        if normalized != existing:
+            changes.append({
+                "kind": "event_proposition_refs",
+                "id": event.get("event_id"),
+                "from": existing,
+                "to": normalized,
+            })
+            event["proposition_ids"] = normalized
+
+    stance_aliases = {
+        "accepted": "believed",
+        "disbelieved": "rejected",
+        "uncertain": "suspected",
+    }
+    for snapshot in data.get("character_beliefs") or []:
+        if not isinstance(snapshot, dict):
+            continue
+        for belief in snapshot.get("beliefs") or []:
+            if not isinstance(belief, dict):
+                continue
+            stance = str(belief.get("stance") or "").strip()
+            normalized = stance_aliases.get(stance, stance)
+            if normalized == stance:
+                continue
+            changes.append({
+                "kind": "belief_stance",
+                "id": (
+                    f"{snapshot.get('character_belief_id')}/"
+                    f"{belief.get('proposition_id')}"
+                ),
+                "from": stance,
+                "to": normalized,
+            })
+            belief["stance"] = normalized
+
+    delta_requirements: dict[str, tuple[str, float]] = {}
+    delta_windows: dict[str, str] = {}
+    for intent in data.get("experience_intents") or []:
+        if not isinstance(intent, dict):
+            continue
+        for path in intent.get("audience_paths") or []:
+            if not isinstance(path, dict):
+                continue
+            prior_id = str(path.get("audience_prior_id") or "unknown")
+            for delta in path.get("target_deltas") or []:
+                if not isinstance(delta, dict):
+                    continue
+                delta_id = str(delta.get("target_delta_id") or "").strip()
+                if not delta_id:
+                    continue
+                try:
+                    required = max(
+                        0.0, float(delta.get("required_processing_s") or 0),
+                    )
+                except (TypeError, ValueError):
+                    required = 0.0
+                delta_requirements[delta_id] = (prior_id, required)
+                window_id = str(
+                    delta.get("primary_delivery_window_id") or ""
+                ).strip()
+                if window_id:
+                    delta_windows[delta_id] = window_id
+    windows_by_id = {
+        str(window.get("readability_window_id") or ""): window
+        for window in (data.get("readability_windows") or [])
+        if (
+            isinstance(window, dict)
+            and str(window.get("readability_window_id") or "").strip()
+        )
+    }
+    for delta_id, window_id in delta_windows.items():
+        window = windows_by_id.get(window_id)
+        if window is None:
+            continue
+        existing_ids = list(window.get("target_delta_ids") or [])
+        if delta_id in existing_ids:
+            continue
+        normalized_ids = [*existing_ids, delta_id]
+        changes.append({
+            "kind": "readability_target_delta_ref",
+            "id": window_id,
+            "from": existing_ids,
+            "to": normalized_ids,
+        })
+        window["target_delta_ids"] = normalized_ids
+    for window in data.get("readability_windows") or []:
+        if not isinstance(window, dict):
+            continue
+        required_by_prior: dict[str, float] = {}
+        for delta_id in window.get("target_delta_ids") or []:
+            prior_id, required = delta_requirements.get(
+                str(delta_id), ("unknown", 0.0),
+            )
+            required_by_prior[prior_id] = (
+                required_by_prior.get(prior_id, 0.0) + required
+            )
+        required_processing = max(required_by_prior.values(), default=0.0)
+        try:
+            scheduled = float(window.get("scheduled_processing_s") or 0)
+        except (TypeError, ValueError):
+            scheduled = 0.0
+        try:
+            available = float(window.get("planned_available_s") or 0)
+        except (TypeError, ValueError):
+            available = 0.0
+        normalized_scheduled = max(scheduled, required_processing)
+        normalized_available = max(available, normalized_scheduled)
+        if (
+            normalized_scheduled != scheduled
+            or normalized_available != available
+        ):
+            changes.append({
+                "kind": "readability_budget",
+                "id": window.get("readability_window_id"),
+                "from": {
+                    "scheduled_processing_s": scheduled,
+                    "planned_available_s": available,
+                },
+                "to": {
+                    "scheduled_processing_s": normalized_scheduled,
+                    "planned_available_s": normalized_available,
+                },
+            })
+            window["scheduled_processing_s"] = normalized_scheduled
+            window["planned_available_s"] = normalized_available
+
+    if changes:
+        script.narrative_plan = type(plan).model_validate(data)
+    return changes
 
 
 async def ensure_source_characters_incremental(
@@ -855,6 +1246,7 @@ async def run_screenplay_production(
         evaluation_id: str | None,
         open_issues: list[Issue],
         reason: str,
+        failed_issue: Issue | None = None,
     ) -> EpisodeScreenplay:
         """Preserve the working artifact and stop when hard gates remain open.
 
@@ -898,10 +1290,10 @@ async def run_screenplay_production(
                     },
                 )
             raise ScreenplayIdentityGateError(message)
-        message = (
-            "剧本工作稿已保留，但叙事/质量硬门禁仍未通过，禁止发布："
-            + "；".join(issue.message for issue in open_issues[:5])
-        )[:1200]
+        message = _gate_failure_message(
+            open_issues,
+            failed_issue=failed_issue,
+        )
         conn.execute(
             "UPDATE episodes SET screenplay_status='repairing',screenplay_error=?,screenplay_updated_at=? WHERE id=?",
             (message, now(), episode_id),
@@ -929,6 +1321,10 @@ async def run_screenplay_production(
                     "artifact_id": working_id,
                     "reason": reason,
                     "issue_count": len(open_issues),
+                    "failed_issue": (
+                        failed_issue.model_dump(mode="json")
+                        if failed_issue is not None else None
+                    ),
                 },
             )
         raise ScreenplayNarrativeGateError(message)
@@ -947,15 +1343,37 @@ async def run_screenplay_production(
         )
         # 即使模型在正文中沿用了“绿袍男子/大汉”，也要在
         # Baseline 落库与 QA 之前按预检结果原子性改成真名或路人编号。
-        from app.portraits import apply_screenplay_character_resolutions
+        from app.portraits import (
+            apply_screenplay_character_resolutions,
+            normalize_screenplay_voice_ids,
+            screenplay_unknown_identity_errors,
+        )
         apply_screenplay_character_resolutions(
             script,
             episode.get("character_resolutions") or [],
         )
-        # 增量人物：只追加 Bible，不二次完整生成
-        draft_audit = await ensure_source_characters_incremental(
-            episode_id, source_text, draft_text=script.model_dump_json(),
-        )
+        normalize_screenplay_voice_ids(script, bible)
+        # 增量人物只在本地身份门禁仍发现缺口时调用模型。角色已由首次预检、
+        # Bible 和 typed contract 覆盖时，避免重复发送整份原文与剧本草稿。
+        draft_identity_errors = screenplay_unknown_identity_errors(script, bible)
+        if draft_identity_errors:
+            draft_audit = await ensure_source_characters_incremental(
+                episode_id, source_text, draft_text=script.model_dump_json(),
+            )
+        else:
+            draft_audit = {
+                "added": [],
+                "resolutions": [],
+                "skipped": "static_identity_contract_complete",
+            }
+            if run_id:
+                evidence_repository.append_event(
+                    run_id,
+                    "CHARACTER_DISCOVERY_DRAFT_AUDIT_SKIPPED",
+                    "info",
+                    "Baseline 身份合同已静态闭合，跳过生成后人物模型审计",
+                    payload={"episode_id": episode_id},
+                )
         from app.portraits import merge_screenplay_character_resolutions
         episode["character_resolutions"] = merge_screenplay_character_resolutions(
             episode.get("character_resolutions") or [],
@@ -969,6 +1387,11 @@ async def run_screenplay_production(
             bible = _project_bible_or_placeholder(p)
         from app.portraits import bible_with_provisional_characters
         bible = bible_with_provisional_characters(bible, draft_audit)
+        normalize_screenplay_voice_ids(script, bible)
+        _normalize_screenplay_narrative_graph(
+            script,
+            authorized_source_chapters=episode.get("authorized_source_chapters"),
+        )
 
         from app.validators import normalize_screenplay_candidate
         script = normalize_screenplay_candidate(script)
@@ -1028,56 +1451,66 @@ async def run_screenplay_production(
 
         # 身份决议可能来自 Baseline 后审计、服务恢复或人工入口。无论从哪条路
         # 进入 Repair，都先把它派生为新的 working artifact，再做 QA/局部 Patch。
-        from app.portraits import apply_screenplay_character_resolutions
-        identity_changes = apply_screenplay_character_resolutions(
+        from app.portraits import (
+            apply_screenplay_character_resolutions,
+            normalize_screenplay_voice_ids,
+        )
+        normalization_changes = apply_screenplay_character_resolutions(
             script,
             episode.get("character_resolutions") or [],
         )
-        if identity_changes:
-            identity_payload = screenplay_artifact_payload(script)
-            identity_hash = evidence_repository.content_hash(identity_payload)
-            if identity_hash == artifact_hash:
+        normalization_changes.extend(normalize_screenplay_voice_ids(script, bible))
+        normalization_changes.extend(_normalize_screenplay_narrative_graph(
+            script,
+            authorized_source_chapters=episode.get("authorized_source_chapters"),
+        ))
+        if normalization_changes:
+            normalization_payload = screenplay_artifact_payload(script)
+            normalization_hash = evidence_repository.content_hash(
+                normalization_payload
+            )
+            if normalization_hash == artifact_hash:
                 # Some labels remain in non-identity prose by design. The
                 # resolver may report those replacements on every replay even
                 # though the canonical artifact payload is already identical.
                 # Hash equality is the authoritative idempotency boundary.
-                identity_changes = []
-        if identity_changes:
-            identity_artifact = evidence_repository.create_artifact(
+                normalization_changes = []
+        if normalization_changes:
+            normalization_artifact = evidence_repository.create_artifact(
                 EvidenceArtifact(
                     type="screenplay_document",
                     scope_type="episode",
                     scope_id=episode_id,
                     status="candidate",
                     trust_level="T1",
-                    content=identity_payload,
+                    content=normalization_payload,
                     parent_artifact_ids=[working_id],
                     contract_version=rev.contract_version or None,
                 )
             )
             update_working_artifact(
                 rev.id,
-                identity_artifact["id"],
+                normalization_artifact["id"],
                 expected_hash=artifact_hash,
             )
             if run_id:
                 evidence_repository.append_event(
                     run_id,
-                    "CHARACTER_IDENTITY_RESOLUTIONS_APPLIED",
+                    "SCREENPLAY_DETERMINISTIC_NORMALIZATION_APPLIED",
                     "info",
-                    "已在 QA 前重放剧本人物身份决议",
+                    "已在 QA 前应用身份、来源与事件引用的确定性归一化",
                     payload={
                         "before_artifact_id": working_id,
-                        "after_artifact_id": identity_artifact["id"],
-                        "changes": identity_changes,
+                        "after_artifact_id": normalization_artifact["id"],
+                        "changes": normalization_changes,
                     },
                 )
             # Continue QA from the normalized artifact in this iteration. A
             # separate loop turn here is unbounded by the patch budget and can
             # persist duplicate artifacts forever if normalization oscillates
             # or a stale worker repeatedly reports the same material change.
-            working_id = identity_artifact["id"]
-            artifact_hash = identity_hash
+            working_id = normalization_artifact["id"]
+            artifact_hash = normalization_hash
 
         issues, evaluation = run_screenplay_qa(
             script,
@@ -1141,7 +1574,11 @@ async def run_screenplay_production(
             return load_screenplay_from_artifact(working_id)
 
         # 选择最高依赖 Issue
-        issue = _choose_issue(issues)
+        # Identity authority is a non-waivable prerequisite for every later
+        # graph repair.  Resolve it before spending a model call on unrelated
+        # narrative quality issues.
+        hard_identity_issues = non_waivable_screenplay_issues(issues)
+        issue = _choose_issue(hard_identity_issues or issues)
         if issue is None or not issue.repairable:
             return _publish_retry_exhausted_fallback(
                 rev,
@@ -1150,23 +1587,18 @@ async def run_screenplay_production(
                 evaluation_id=eval_id,
                 open_issues=issues,
                 reason="no_repairable_strategy",
+                failed_issue=issue,
             )
 
-        if script.narrative_plan is not None:
-            # New narrative artifacts always use semantic candidate comparison.
-            # Issue codes remain diagnostics and never select a patch strategy.
-            ops = await _llm_field_patch(issue, script, source_text=source_text)
-        else:
-            # Read-only compatibility for pre-contract artifacts.  New
-            # generation cannot enter this legacy deterministic adapter.
-            ops = plan_screenplay_patch(
-                issue,
-                script,
-                source_text=source_text,
-                strategy_history=strategy_history,
-            )
-            if not ops:
-                ops = await _llm_field_patch(issue, script, source_text=source_text)
+        # Document-local repairs remain deterministic even when the screenplay
+        # also carries a narrative graph. Graph relationship gaps have no such
+        # operation and therefore fall through to semantic candidate planning.
+        ops = await _plan_screenplay_repair_operations(
+            issue,
+            script,
+            source_text=source_text,
+            strategy_history=strategy_history,
+        )
         if ops:
             proposed_key = _patch_strategy_key(ops)
             if _strategy_was_tried(
@@ -1189,6 +1621,7 @@ async def run_screenplay_production(
                 evaluation_id=eval_id,
                 open_issues=issues,
                 reason="strategies_exhausted",
+                failed_issue=issue,
             )
 
         strategy_key = _patch_strategy_key(ops)
@@ -1255,6 +1688,7 @@ async def run_screenplay_production(
                         evaluation_id=eval_id,
                         open_issues=issues,
                         reason="no_progress",
+                        failed_issue=issue,
                     )
                 continue
             # CAS 冲突：重新观察
@@ -1329,7 +1763,8 @@ def _choose_issue(issues: list[Issue]) -> Issue | None:
 
     severity_order = {"blocker": 0, "error": 1, "warning": 2, "info": 3}
 
-    def issue_priority(issue: Issue) -> tuple[float, float, float, str]:
+    def issue_priority(item: tuple[int, Issue]) -> tuple[float, float, float, int]:
+        index, issue = item
         evidence = issue.evidence or {}
         severity_value = getattr(issue.severity, "value", issue.severity)
         severity = severity_order.get(str(severity_value), 4)
@@ -1344,9 +1779,12 @@ def _choose_issue(issues: list[Issue]) -> Issue | None:
             affected_scope = float(evidence.get("affected_scope_size", 1))
         except (TypeError, ValueError):
             affected_scope = 1.0
-        return severity, dependency_depth, -affected_scope, issue.fingerprint
+        # Validator order is the dependency-neutral final tiebreaker. Sorting by
+        # fingerprint here used to turn a missing graph annotation into an
+        # accidental alphabetical repair policy.
+        return severity, dependency_depth, -affected_scope, index
 
-    return sorted(pool, key=issue_priority)[0]
+    return min(enumerate(pool), key=issue_priority)[1]
 
 
 def _mark_waiting_input(episode_id: str, issues: list[Issue], *, run_id: str | None) -> None:
@@ -1439,11 +1877,370 @@ def _identity_contract_repair_policy() -> dict[str, Any]:
     }
 
 
+def _issue_acceptance_test(issue: Issue) -> str:
+    return (
+        "把候选隔离应用到当前完整文档后，必须让 issue.message 从同一组确定性"
+        "校验结果中消失，且不得新增任何校验错误。目标节点和字段只能由文档内"
+        "稳定 ID、直接字段所有权与现行 schema 推导；来源内容必须可追溯到"
+        "authorized_source_excerpt，禁止按问题码、题材、角色名或文本关键词套用模板"
+    )
+
+
+def _dialogue_chain_replacement_is_local(
+    document: Any,
+    *,
+    chain_id: str,
+    turns: Any,
+) -> bool:
+    """Allow chain repair only by selecting existing body dialogue without deletion."""
+    from app.production.screenplay_document import action_block_spoken_identity
+
+    if (
+        not isinstance(turns, list)
+        or not 1 <= len(turns) <= DIALOGUE_CHAIN_TURNS_HARD_MAX
+    ):
+        return False
+    body_turns = {
+        ((turn.speaker or "").strip(), (turn.line or "").strip())
+        for block in document.scene_blocks
+        for turn in block.dialogue_turns
+        if (turn.speaker or "").strip() and (turn.line or "").strip()
+    }
+    body_turns.update(
+        spoken
+        for block in document.scene_blocks
+        for action in block.action_blocks
+        if (spoken := action_block_spoken_identity(action.text)) is not None
+    )
+    current_chain = next(
+        (
+            chain for chain in document.dialogue_chains
+            if (chain.chain_id or "").strip() == chain_id
+        ),
+        None,
+    )
+    if current_chain is None:
+        return False
+    current_turns = {
+        ((turn.speaker or "").strip(), (turn.line or "").strip())
+        for turn in current_chain.turns
+    }
+    candidate_turns: list[tuple[str, str]] = []
+    for turn in turns:
+        if not isinstance(turn, dict):
+            return False
+        identity = (
+            str(turn.get("speaker") or "").strip(),
+            str(turn.get("line") or "").strip(),
+        )
+        if (
+            not all(identity)
+            or identity not in body_turns
+        ):
+            return False
+        candidate_turns.append(identity)
+    return (
+        len(candidate_turns) == len(set(candidate_turns))
+        and current_turns.issubset(set(candidate_turns))
+    )
+
+
+def _source_references_are_grounded(value: Any, source_text: str) -> bool:
+    """Validate every nested source-bearing field against the authorized source."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key in {"source_text", "verbatim_excerpt"}:
+                excerpt = str(child or "").strip()
+                if excerpt and excerpt not in source_text:
+                    return False
+            if not _source_references_are_grounded(child, source_text):
+                return False
+    elif isinstance(value, list):
+        return all(
+            _source_references_are_grounded(child, source_text)
+            for child in value
+        )
+    return True
+
+
+def _normalize_dialogue_source_references(
+    value: Any,
+    source_text: str,
+) -> Any:
+    """Resolve a non-exact dialogue citation only when one source utterance matches."""
+    if isinstance(value, list):
+        return [
+            _normalize_dialogue_source_references(child, source_text)
+            for child in value
+        ]
+    if not isinstance(value, dict):
+        return value
+
+    normalized = {
+        key: _normalize_dialogue_source_references(child, source_text)
+        for key, child in value.items()
+    }
+    citation = str(normalized.get("source_text") or "").strip()
+    line = str(normalized.get("line") or "").strip()
+    speaker = str(normalized.get("speaker") or "").strip()
+    if not citation or citation in source_text or not line or not speaker:
+        return normalized
+
+    from app import textmatch
+    from app.validators import (
+        KEY_LINE_BIGRAM_COVERAGE,
+        KEY_LINE_PRESENT_RATIO,
+        source_dialogue_fragments,
+    )
+
+    ranked: list[tuple[float, str]] = []
+    for candidate in source_dialogue_fragments(source_text):
+        run_score = textmatch.longest_run_ratio(line, candidate)
+        coverage = textmatch.bigram_coverage(line, candidate)
+        if (
+            run_score >= KEY_LINE_PRESENT_RATIO
+            or coverage >= KEY_LINE_BIGRAM_COVERAGE
+        ):
+            ranked.append((max(run_score, coverage), candidate))
+    if not ranked:
+        return normalized
+    ranked.sort(key=lambda item: (-item[0], len(item[1]), item[1]))
+    best_score = ranked[0][0]
+    best = {
+        candidate
+        for score, candidate in ranked
+        if abs(score - best_score) < 1e-9
+    }
+    if len(best) == 1:
+        normalized["source_text"] = next(iter(best))
+    return normalized
+
+
+def _find_narrative_node(value: Any, node_id: str) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        if any(
+            key.endswith("_id") and str(candidate or "") == node_id
+            for key, candidate in value.items()
+        ):
+            return value
+        for child in value.values():
+            found = _find_narrative_node(child, node_id)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = _find_narrative_node(child, node_id)
+            if found is not None:
+                return found
+    return None
+
+
+def _narrative_collection_for_node(
+    plan_data: dict[str, Any],
+    node_id: str,
+) -> str | None:
+    matches = [
+        collection
+        for collection, nodes in plan_data.items()
+        if (
+            isinstance(nodes, list)
+            and _find_narrative_node(nodes, node_id) is not None
+        )
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _resolve_narrative_patch_owner(
+    nodes: list[Any],
+    *,
+    node_id: str,
+    patch_field: str,
+    issue: Issue,
+) -> tuple[dict[str, Any], str] | None:
+    """Resolve a wrongly targeted ancestor only when schema evidence is unique."""
+    ancestor = _find_narrative_node(nodes, node_id)
+    if ancestor is None:
+        return None
+    if patch_field in ancestor:
+        return ancestor, node_id
+
+    owners: list[dict[str, Any]] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, dict):
+            if patch_field in value:
+                owners.append(value)
+            for child in value.values():
+                collect(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect(child)
+
+    collect(ancestor)
+    evidence = issue.evidence or {}
+    issue_locator = " ".join([
+        issue.message or "",
+        str(evidence.get("path") or ""),
+        *[str(value) for value in evidence.get("related_node_ids") or []],
+    ])
+    mentioned: list[tuple[dict[str, Any], str]] = []
+    for owner in owners:
+        for key, candidate in owner.items():
+            candidate_id = str(candidate or "").strip()
+            if (
+                key.endswith("_id")
+                and candidate_id
+                and candidate_id in issue_locator
+            ):
+                mentioned.append((owner, candidate_id))
+
+    unique_mentions = {
+        (id(owner), candidate_id): (owner, candidate_id)
+        for owner, candidate_id in mentioned
+    }
+    if len(unique_mentions) == 1:
+        return next(iter(unique_mentions.values()))
+    if len(owners) == 1:
+        identity_values = [
+            str(candidate or "").strip()
+            for key, candidate in owners[0].items()
+            if key.endswith("_id") and str(candidate or "").strip()
+        ]
+        if len(identity_values) == 1:
+            return owners[0], identity_values[0]
+    return None
+
+
+def _normalize_patch_operation_payload(item: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(item)
+    target = dict(item.get("target") or {})
+    has_field_path = bool(str(item.get("path") or "").strip())
+    if has_field_path:
+        normalized["op"] = "replace_field"
+    for key in ("parent_id", "parent_field", "to_index"):
+        if key in item and key not in target:
+            target[key] = item[key]
+    if (
+        not has_field_path
+        and target.get("parent_id")
+        and not target.get("parent_field")
+    ):
+        target.pop("parent_id", None)
+    normalized["target"] = target
+    return normalized
+
+
+def _candidate_is_executable(
+    candidate: dict[str, Any],
+    document: Any,
+) -> bool:
+    """Probe a candidate with the production executor on an isolated document."""
+    from app.production.patch import (
+        PatchOperation,
+        apply_patch_operation_to_document,
+    )
+
+    operations = candidate.get("operations")
+    if not isinstance(operations, list) or not 1 <= len(operations) <= 3:
+        return False
+    working = document
+    try:
+        for raw in operations:
+            if not isinstance(raw, dict):
+                return False
+            operation = PatchOperation.model_validate(
+                _normalize_patch_operation_payload(raw),
+            )
+            working, _ = apply_patch_operation_to_document(working, operation)
+    except Exception:  # noqa: BLE001 - probing untrusted model output
+        return False
+    return True
+
+
+def _resolve_dialogue_chain_turn_target(
+    document,
+    *,
+    target: dict[str, Any],
+    patch_field: str,
+) -> dict[str, Any] | None:
+    turn_id = str(target.get("turn_id") or target.get("id") or "").strip()
+    chain_id = str(target.get("chain_id") or "").strip()
+    turn_index = target.get("turn_index")
+    match = re.fullmatch(r"(.+)-T(\d+)", turn_id, re.I)
+    if not chain_id and match:
+        chain_id = match.group(1)
+    if turn_index is None and match:
+        turn_index = int(match.group(2)) - 1
+    if not chain_id or turn_index is None:
+        return None
+    try:
+        turn_index = int(turn_index)
+    except (TypeError, ValueError):
+        return None
+    chain = next(
+        (
+            item for item in document.dialogue_chains
+            if (item.chain_id or "").strip() == chain_id
+        ),
+        None,
+    )
+    if (
+        chain is None
+        or not 0 <= turn_index < len(chain.turns or [])
+        or patch_field not in type(chain.turns[turn_index]).model_fields
+    ):
+        return None
+    return {
+        **target,
+        "id": turn_id or f"{chain_id}-T{turn_index + 1}",
+        "turn_id": turn_id or f"{chain_id}-T{turn_index + 1}",
+        "chain_id": chain_id,
+        "turn_index": turn_index,
+    }
+
+
 async def _llm_field_patch(
     issue: Issue,
     script: EpisodeScreenplay,
     *,
     source_text: str,
+    strategy_history: list[str] | None = None,
+) -> list[PatchOperation]:
+    """Retry rejected or duplicate semantic candidates with explicit feedback."""
+    feedback: list[str] = []
+    tried = list(strategy_history or [])
+    for planner_attempt in range(1, MAX_STRATEGY_ATTEMPTS_PER_ISSUE + 1):
+        operations = await _llm_field_patch_once(
+            issue,
+            script,
+            source_text=source_text,
+            planner_attempt=planner_attempt,
+            rejection_feedback=feedback,
+        )
+        if not operations:
+            feedback.append(
+                "上一候选未通过本地结构、Schema 或确定性不变量校验。"
+                "replace_field.target.id 必须指向直接拥有 path 字段的节点，"
+                "不得指向其祖先；请提交不同候选。"
+            )
+            continue
+        strategy_key = _patch_strategy_key(operations)
+        if _strategy_was_tried(tried, strategy_key):
+            feedback.append(
+                f"策略 {strategy_key} 已尝试过；必须提供不同且仍满足验收测试的局部候选。"
+            )
+            continue
+        return operations
+    return []
+
+
+async def _llm_field_patch_once(
+    issue: Issue,
+    script: EpisodeScreenplay,
+    *,
+    source_text: str,
+    planner_attempt: int = 1,
+    rejection_feedback: list[str] | None = None,
 ) -> list[PatchOperation]:
     """Compare semantic candidates, then return one bounded candidate patch.
 
@@ -1477,17 +2274,20 @@ async def _llm_field_patch(
     document = screenplay_to_document(script)
     prompt = {
         "task": "诊断当前剧本叙事关系缺口，比较至少两个最小候选，再选择一个局部候选",
+        "planner_attempt": planner_attempt,
+        "prior_rejections": list(rejection_feedback or []),
         "issue": issue.model_dump(mode="json"),
+        "acceptance_test": _issue_acceptance_test(issue),
         "screenplay_document": document.model_dump(mode="json"),
-        "authorized_source_excerpt": source_text[:16000],
+        "authorized_source_excerpt": source_text,
         "identity_contract_policy": _identity_contract_repair_policy(),
         "operation_contract": {
-            "op": "replace_field | create_node | delete_node | move_node | insert_node",
+            "op": "使用当前 PatchOperation 协议；每个候选会由生产执行器在副本上探测可执行性",
             "path": "单个现存字段；结构操作留空",
             "target": {
-                "kind": "narrative_node | metadata | scene | dialogue_chain_turn",
+                "kind": "目标节点在当前文档 schema 中的类型；不得按固定类型清单猜测",
                 "collection": "narrative_plan 的 schema 列表字段（包括 identity_contracts）；非叙事节点可省略",
-                "id": "现存节点 ID；create_node 时为新节点 ID",
+                "id": "replace 时必须是直接拥有 path 字段的节点 ID；create_node 时必须是新节点自身 ID",
                 "parent_id": "创建嵌套节点时的现存父节点 ID，可省略",
                 "parent_field": "父节点中的列表字段，可省略",
                 "to_index": "移动/插入位置，可省略",
@@ -1513,7 +2313,10 @@ async def _llm_field_patch(
         },
         "rules": [
             "candidate_plans 至少两个；问题码只描述失败关系，不得决定操作",
+            "选中候选必须逐字满足 acceptance_test；修复相邻语义但未消除当前 issue 的候选无效",
             "选中候选只能含 1~3 个局部操作，不得替换根对象或整个集合",
+            "replace_field.path 只写目标节点的直接字段名，target.id 必须是该字段所属节点自身 ID，禁止用祖先节点 ID",
+            "create_node 的 target.id 必须等于 value 内新节点的稳定 *_id；嵌套创建时 parent_id 指向直接父节点",
             "允许创建/删除/移动单个叙事节点，但必须证明全图引用、DAG、状态、信念和观众路径可恢复",
             "新增必须通过缺口与边际增益测试；删除必须通过删除测试；所有候选必须保持不变量",
             "不得修改现存节点的身份 ID",
@@ -1536,6 +2339,8 @@ async def _llm_field_patch(
             "stage_key": "narrative_graph_patch",
             "call_role": "semantic_patch_planner",
             "contract_version": "narrative-continuity.v1",
+            "reuse_successful_operation": True,
+            "planner_attempt": planner_attempt,
         },
     )
     try:
@@ -1544,16 +2349,40 @@ async def _llm_field_patch(
         if len(candidates) < 2:
             return []
         selected_id = str(payload.get("selected_candidate_id") or "")
-        selected = next((
+        model_selected = next((
             item for item in candidates
             if isinstance(item, dict) and str(item.get("candidate_id") or "") == selected_id
         ), None)
-        if selected is None or not bool(selected.get("preserves_invariants")):
+        ordered_candidates = [
+            *([model_selected] if isinstance(model_selected, dict) else []),
+            *[
+                item for item in candidates
+                if isinstance(item, dict) and item is not model_selected
+            ],
+        ]
+        selected = next((
+            item for item in ordered_candidates
+            if (
+                bool(item.get("satisfies_gap_test"))
+                and bool(item.get("preserves_invariants"))
+                and _candidate_is_executable(item, document)
+            )
+        ), None)
+        if selected is None:
             return []
+        selected_id = str(selected.get("candidate_id") or "")
+        used_model_selection = selected is model_selected
         raw_ops = list(selected.get("operations") or [])
         if not 1 <= len(raw_ops) <= 3:
             return []
-        operations = [PatchOperation.model_validate(item) for item in raw_ops]
+        normalized_ops: list[dict[str, Any]] = []
+        for item in raw_ops:
+            if not isinstance(item, dict):
+                return []
+            normalized_ops.append(_normalize_patch_operation_payload(item))
+        operations = [
+            PatchOperation.model_validate(item) for item in normalized_ops
+        ]
     except Exception:  # noqa: BLE001 - model output is untrusted
         return []
     if any(operation.op in {"create_node", "insert_node"} for operation in operations) and not (
@@ -1570,67 +2399,143 @@ async def _llm_field_patch(
     safe: list[PatchOperation] = []
     for operation in operations:
         target = operation.target or {}
-        kind = str(target.get("kind") or "")
-        if operation.op not in {
-            "replace_field", "create_node", "insert_node", "delete_node", "move_node",
-        }:
-            return []
-        if kind == "narrative_node":
-            collection = str(target.get("collection") or "")
-            node_id = str(target.get("id") or "")
-            nodes = plan_data.get(collection)
-            if not isinstance(nodes, list) or not node_id:
-                return []
+        operation.value = _normalize_dialogue_source_references(
+            operation.value,
+            source_text,
+        )
+        raw_collection = str(target.get("collection") or "").strip()
+        collection = re.split(r"[.\[]+", raw_collection, maxsplit=1)[0]
+        node_id = str(target.get("id") or "")
+        if not collection and node_id:
+            collection = (
+                _narrative_collection_for_node(plan_data, node_id) or ""
+            )
+        nodes = plan_data.get(collection)
+        if isinstance(nodes, list) and node_id:
+            target = {
+                **target,
+                "kind": "narrative_node",
+                "collection": collection,
+                "normalized_from_kind": str(target.get("kind") or ""),
+            }
 
-            def find_node(value: Any) -> dict[str, Any] | None:
-                if isinstance(value, dict):
-                    if any(
-                        key.endswith("_id") and str(candidate or "") == node_id
-                        for key, candidate in value.items()
-                    ):
-                        return value
-                    for child in value.values():
-                        found = find_node(child)
-                        if found is not None:
-                            return found
-                elif isinstance(value, list):
-                    for child in value:
-                        found = find_node(child)
-                        if found is not None:
-                            return found
-                return None
-
-            node = find_node(nodes)
+            node = _find_narrative_node(nodes, node_id)
             if operation.op == "replace_field":
-                patch_field = operation.path.split(".")[-1]
-                if node is None or patch_field not in node:
+                patch_field = re.split(
+                    r"[./]+", operation.path.strip("/"),
+                )[-1]
+                resolved_owner = _resolve_narrative_patch_owner(
+                    nodes,
+                    node_id=node_id,
+                    patch_field=patch_field,
+                    issue=issue,
+                )
+                if resolved_owner is None:
                     return []
+                node, resolved_node_id = resolved_owner
+                if resolved_node_id != node_id:
+                    target = {
+                        **target,
+                        "id": resolved_node_id,
+                        "retargeted_from_id": node_id,
+                    }
+                    node_id = resolved_node_id
                 if patch_field.endswith("_id") and str(node.get(patch_field) or "") == node_id:
                     return []
                 if patch_field in {"verbatim_excerpt", "source_text"} and str(
                     operation.value or ""
                 ) not in source_text:
                     return []
+                operation.path = patch_field
+                if patch_field == "target_deltas" and isinstance(
+                    operation.value, list,
+                ):
+                    valid_proposition_ids = {
+                        str(item.get("proposition_id") or "")
+                        for item in (plan_data.get("propositions") or [])
+                        if isinstance(item, dict)
+                    }
+                    operation.value = [
+                        {
+                            **delta,
+                            "proposition_ids": [
+                                proposition_id
+                                for proposition_id in (
+                                    delta.get("proposition_ids") or []
+                                )
+                                if proposition_id in valid_proposition_ids
+                            ],
+                        }
+                        if isinstance(delta, dict) else delta
+                        for delta in operation.value
+                    ]
             elif operation.op in {"delete_node", "move_node"} and node is None:
                 return []
             elif operation.op in {"create_node", "insert_node"}:
                 if node is not None or not isinstance(operation.value, dict):
                     return []
-        elif operation.op != "replace_field" or kind not in {
-            "metadata", "scene", "screenplay_scene", "dialogue_chain_turn",
-        }:
-            return []
-        elif not operation.path or operation.path in {"/", "$", "full_script_text"}:
-            return []
-        if operation.path.split(".")[-1] in {"source_text", "verbatim_excerpt"} and str(
-            operation.value or ""
-        ) not in source_text:
+        elif operation.op == "replace_field":
+            from app.production.screenplay_document import resolve_field_patch_target
+
+            if not operation.path or operation.path in {"/", "$", "full_script_text"}:
+                return []
+            patch_field = re.split(
+                r"[./]+", operation.path.strip("/"),
+            )[-1]
+            target = resolve_field_patch_target(
+                document,
+                path=patch_field,
+                target=target,
+            )
+            chain_id = str(
+                target.get("chain_id") or target.get("id") or "",
+            ).strip()
+            chain = next(
+                (
+                    item for item in document.dialogue_chains
+                    if (item.chain_id or "").strip() == chain_id
+                ),
+                None,
+            )
+            if chain is not None and patch_field == "turns":
+                if not _dialogue_chain_replacement_is_local(
+                    document,
+                    chain_id=chain_id,
+                    turns=operation.value,
+                ):
+                    return []
+                target = {
+                    **target,
+                    "kind": "dialogue_chain",
+                    "id": chain_id,
+                    "chain_id": chain_id,
+                }
+            else:
+                resolved_turn = _resolve_dialogue_chain_turn_target(
+                    document,
+                    target=target,
+                    patch_field=patch_field,
+                )
+                if resolved_turn is not None:
+                    target = {
+                        **resolved_turn,
+                        "kind": "dialogue_chain_turn",
+                    }
+            operation.path = patch_field
+        if not _source_references_are_grounded(operation.value, source_text):
             return []
         selection_evidence = {
             "semantic_gap": payload.get("semantic_gap"),
             "candidate_ids": [item.get("candidate_id") for item in candidates if isinstance(item, dict)],
             "selected_candidate_id": selected_id,
-            "selection_reason": payload.get("selection_reason"),
+            "selection_reason": (
+                payload.get("selection_reason")
+                if used_model_selection
+                else (
+                    "模型首选候选无法由当前 schema 与生产执行器解释；采用首个满足 "
+                    f"gap/invariant 且可隔离执行的备选：{selected.get('rationale') or selected_id}"
+                )
+            ),
             "unclassified_dimensions": payload.get("unclassified_dimensions") or [],
             "expected_narrative_gain": selected.get("expected_narrative_gain"),
             "destructive_cost": selected.get("destructive_cost"),
@@ -1638,24 +2543,63 @@ async def _llm_field_patch(
         operation.target = {**target, "semantic_selection": selection_evidence}
         safe.append(operation)
     try:
-        from app.production.patch import _create_node, _delete_node, _structure_op
-        from app.production.screenplay_document import apply_field_patch
+        from app.production.patch import apply_patch_operation_to_document
 
         candidate_document = document
         for operation in safe:
-            if operation.op == "replace_field":
-                candidate_document, _ = apply_field_patch(
-                    candidate_document,
-                    path=operation.path,
-                    value=operation.value,
-                    target=operation.target,
-                )
-            elif operation.op in {"create_node", "insert_node"}:
-                candidate_document, _ = _create_node(candidate_document, operation)
-            elif operation.op == "delete_node":
-                candidate_document, _ = _delete_node(candidate_document, operation)
-            elif operation.op == "move_node":
-                candidate_document, _ = _structure_op(candidate_document, operation)
+            candidate_document, _ = apply_patch_operation_to_document(
+                candidate_document,
+                operation,
+            )
     except Exception:  # noqa: BLE001 - reject an invalid model-authored candidate
+        return []
+    try:
+        from app.narrative import validate_screenplay_narrative
+        from app.production.screenplay_document import document_to_screenplay
+        from app.validators import validate_screenplay
+
+        def targeted_errors(candidate: EpisodeScreenplay) -> list[str]:
+            errors = validate_screenplay_narrative(candidate, require=True)
+            errors.extend(validate_screenplay(
+                candidate,
+                Bible(
+                    characters=[],
+                    world={"visual_style_canonical": ""},
+                ),
+                expected_beats=max(1, len(candidate.scene_outline or [])),
+                episode_no=candidate.episode_no,
+                source_text=source_text,
+                require_dialogue_chains=True,
+                validate_narrative=False,
+            ))
+            return errors
+
+        baseline_errors = set(targeted_errors(document_to_screenplay(document)))
+        candidate_script = document_to_screenplay(candidate_document)
+        _normalize_screenplay_narrative_graph(
+            candidate_script,
+            authorized_source_chapters=None,
+        )
+        candidate_errors = targeted_errors(candidate_script)
+    except Exception as exc:  # noqa: BLE001 - local candidate validation must fail closed
+        if rejection_feedback is not None:
+            rejection_feedback.append(
+                f"候选隔离复验失败：{type(exc).__name__}: {exc}",
+            )
+        return []
+    if issue.message in candidate_errors:
+        if rejection_feedback is not None:
+            rejection_feedback.append(
+                "候选应用后当前错误仍然存在，说明缺失关系没有被实际补齐："
+                f"{issue.message}",
+            )
+        return []
+    introduced = sorted(set(candidate_errors) - baseline_errors)
+    if introduced:
+        if rejection_feedback is not None:
+            rejection_feedback.append(
+                "候选引入了新的确定性校验错误："
+                + "；".join(introduced[:4]),
+            )
         return []
     return safe

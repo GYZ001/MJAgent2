@@ -226,11 +226,13 @@ def rederive_projections(doc: ScreenplayDocument) -> ScreenplayDocument:
             if not turn.turn_id:
                 chain = turn.chain_id or f"DC{idx}"
                 turn.turn_id = f"{chain}-T{t_idx}"
+    _remove_cross_scene_prefixed_duplicates(out)
     # 若 dialogue_chains 空但 scene 有 turns，重建 chains
     if not out.dialogue_chains and any(b.dialogue_turns for b in out.scene_blocks):
         out.dialogue_chains = _chains_from_scene_turns(out.scene_blocks)
     if out.dialogue_chains and out.scene_blocks:
         _sync_dialogue_chains_into_scenes(out)
+        _remove_actions_projected_as_dialogue(out)
     # 若 chains 有值，回填 key 顺序已由 document_to_screenplay 处理
     # 同步 scene turns 的 chain_id
     chain_by_turn: dict[str, str] = {}
@@ -249,8 +251,75 @@ def _dialogue_identity(value: str) -> str:
     return re.sub(r"[\s，。！？；：、,.!?;:'\"“”‘’（）()《》【】\-—…]+", "", value or "")
 
 
+def action_block_spoken_identity(text: str) -> tuple[str, str] | None:
+    """Parse legacy ``角色（表演），台词`` prose into a spoken identity."""
+    match = re.match(
+        r"^(?P<speaker>[^，,：:。！？!?\n（）()]{1,16})"
+        r"(?:[（(][^）)\n]{1,12}[）)])?\s*[，,：:]\s*(?P<line>\S.+)$",
+        (text or "").strip(),
+    )
+    if match is None:
+        return None
+    return match.group("speaker").strip(), match.group("line").strip()
+
+
 def _node_index(nodes: list[DialogueTurnNode], target: DialogueTurnNode) -> int:
     return next((index for index, node in enumerate(nodes) if node is target), len(nodes))
+
+
+def _remove_cross_scene_prefixed_duplicates(doc: ScreenplayDocument) -> None:
+    """Drop a legacy injected turn whose line repeats its speaker and another body turn."""
+    canonical_turns = {
+        (_dialogue_identity(turn.speaker), _dialogue_identity(turn.line))
+        for block in doc.scene_blocks
+        for turn in block.dialogue_turns
+        if (turn.speaker or "").strip() and (turn.line or "").strip()
+        and not re.match(
+            rf"^{re.escape((turn.speaker or '').strip())}\s*[：:]\s*",
+            (turn.line or "").strip(),
+        )
+    }
+    for block in doc.scene_blocks:
+        retained: list[DialogueTurnNode] = []
+        for turn in block.dialogue_turns:
+            speaker = (turn.speaker or "").strip()
+            line = (turn.line or "").strip()
+            prefix = re.match(
+                rf"^{re.escape(speaker)}\s*[：:]\s*" if speaker else r"$^",
+                line,
+            )
+            if prefix is not None:
+                unprefixed = line[prefix.end():].strip()
+                identity = (
+                    _dialogue_identity(speaker),
+                    _dialogue_identity(unprefixed),
+                )
+                if all(identity) and identity in canonical_turns:
+                    continue
+            retained.append(turn)
+        block.dialogue_turns = retained
+
+
+def _remove_actions_projected_as_dialogue(doc: ScreenplayDocument) -> None:
+    """Once a cue-prefixed action becomes a chain turn, keep only the dialogue node."""
+    for block in doc.scene_blocks:
+        dialogue_identities = {
+            (
+                _dialogue_identity(turn.speaker),
+                _dialogue_identity(turn.line),
+            )
+            for turn in block.dialogue_turns
+            if (turn.speaker or "").strip() and (turn.line or "").strip()
+        }
+        retained: list[ActionBlockNode] = []
+        for action in block.action_blocks:
+            spoken = action_block_spoken_identity(action.text)
+            if spoken is not None:
+                identity = tuple(_dialogue_identity(value) for value in spoken)
+                if all(identity) and identity in dialogue_identities:
+                    continue
+            retained.append(action)
+        block.action_blocks = retained
 
 
 def _sync_dialogue_chains_into_scenes(doc: ScreenplayDocument) -> None:
@@ -392,6 +461,95 @@ def render_full_script_text(doc: ScreenplayDocument) -> str:
     return text
 
 
+def resolve_field_patch_target(
+    doc: ScreenplayDocument,
+    *,
+    path: str,
+    target: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Infer a direct field owner from stable IDs and the live document schema."""
+    resolved = dict(target or {})
+    if resolved.get("kind") == "narrative_node" or path.startswith("narrative_plan."):
+        return resolved
+    node_id = str(
+        resolved.get("id")
+        or resolved.get("turn_id")
+        or resolved.get("chain_id")
+        or ""
+    ).strip()
+    field = re.split(r"[./]+", (path or "").strip("/"))[-1]
+    if not field:
+        return resolved
+
+    candidates: list[dict[str, Any]] = []
+
+    def add(kind: str, identity: str, model: BaseModel, **extra: Any) -> None:
+        if node_id and identity != node_id:
+            return
+        if field not in type(model).model_fields:
+            return
+        candidates.append({
+            **resolved,
+            "kind": kind,
+            "id": identity,
+            **extra,
+        })
+
+    metadata_id = node_id.removeprefix("meta:")
+    if field in ScreenplayMetadata.model_fields and metadata_id in {"", field}:
+        candidates.append({**resolved, "kind": "metadata", "id": field})
+
+    for block in doc.scene_blocks:
+        add("scene", block.scene_id, block)
+        for action in block.action_blocks:
+            add(
+                "action_block",
+                action.action_id,
+                action,
+                scene_id=block.scene_id,
+            )
+        for turn in block.dialogue_turns:
+            add(
+                "dialogue_turn",
+                turn.turn_id,
+                turn,
+                scene_id=block.scene_id,
+            )
+
+    for chain in doc.dialogue_chains:
+        add("dialogue_chain", chain.chain_id, chain, chain_id=chain.chain_id)
+        for turn_index, turn in enumerate(chain.turns or []):
+            turn_id = f"{chain.chain_id}-T{turn_index + 1}"
+            add(
+                "dialogue_chain_turn",
+                turn_id,
+                turn,
+                turn_id=turn_id,
+                chain_id=chain.chain_id,
+                turn_index=turn_index,
+            )
+
+    for event in doc.story_events:
+        add("story_event", event.event_id, event)
+    for item in doc.information_ledger:
+        add("information", item.info_id, item)
+    for voice in doc.voice_bible:
+        add("voice", voice.speaker_id, voice)
+
+    unique = {
+        (
+            candidate.get("kind"),
+            candidate.get("id"),
+            candidate.get("scene_id"),
+            candidate.get("turn_index"),
+        ): candidate
+        for candidate in candidates
+    }
+    if len(unique) == 1:
+        return next(iter(unique.values()))
+    return resolved
+
+
 def apply_field_patch(
     doc: ScreenplayDocument,
     *,
@@ -464,7 +622,24 @@ def apply_field_patch(
         touched.append(f"narrative:{collection}:{node_id}")
         return ScreenplayDocument.model_validate(data), touched
 
+    target = resolve_field_patch_target(doc, path=path, target=target)
+    kind = str(target.get("kind") or "").strip()
     node_id = str(target.get("id") or "").strip()
+
+    if kind in {"scene_action_block", "action_block"} or node_id.upper().startswith("AC"):
+        action_ref = _find_action_block(data, node_id, path)
+        if action_ref is None:
+            raise KeyError(f"scene action block not found: {node_id or path}")
+        block, action = action_ref
+        field = path.split(".")[-1] if "." in path else path
+        if field not in action or field == "action_id":
+            raise KeyError(f"unsupported scene action field: {field}")
+        action[field] = value
+        touched.extend([
+            action.get("action_id") or node_id,
+            block.get("scene_id") or "",
+        ])
+        return ScreenplayDocument.model_validate(data), touched
 
     if kind in {"screenplay_scene", "scene"} or path.startswith("scene_blocks"):
         block = _find_scene(data, node_id, path)
@@ -1008,6 +1183,22 @@ def _find_scene(data: dict, node_id: str, path: str) -> dict | None:
         idx = int(m2.group(1))
         if 0 <= idx < len(blocks):
             return blocks[idx]
+    return None
+
+
+def _find_action_block(
+    data: dict,
+    node_id: str,
+    path: str,
+) -> tuple[dict, dict] | None:
+    wanted = node_id.upper()
+    match = re.search(r"(AC\d+-\d+)", path, re.I)
+    if not wanted and match:
+        wanted = match.group(1).upper()
+    for block in data.get("scene_blocks") or []:
+        for action in block.get("action_blocks") or []:
+            if str(action.get("action_id") or "").upper() == wanted:
+                return block, action
     return None
 
 

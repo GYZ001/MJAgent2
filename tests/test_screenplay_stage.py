@@ -355,6 +355,83 @@ def test_screenplay_accepts_reply_with_prior_other_character_turn() -> None:
     assert not any("主线对白上下文断裂" in e for e in errors), errors
 
 
+def test_orphan_reply_check_prefers_exact_speaker_for_short_line() -> None:
+    script = _valid_rainy_script()
+    script.full_script_text = "\n".join([
+        "【场1】日 / 门厅",
+        "谷言：你好啊，今天来得早。",
+        "测验员：一起行动好吗？",
+        "谷言：好啊！",
+    ])
+    script.key_lines = [
+        "谷言：你好啊，今天来得早。",
+        "测验员：一起行动好吗？",
+        "谷言：好啊！",
+    ]
+    script.dialogue_chains = [KeyDialogueChain(
+        chain_id="DC1",
+        topic="确认一起行动",
+        turns=[
+            KeyDialogueTurn(
+                speaker="谷言",
+                line="你好啊，今天来得早。",
+                function="statement",
+                source_text="你好啊，今天来得早。",
+            ),
+            KeyDialogueTurn(
+                speaker="测验员",
+                line="一起行动好吗？",
+                function="question",
+                source_text="一起行动好吗？",
+            ),
+            KeyDialogueTurn(
+                speaker="谷言",
+                line="好啊！",
+                function="response",
+                source_text="好啊！",
+            ),
+        ],
+    )]
+
+    errors = validate_screenplay(
+        script,
+        _bible(),
+        expected_beats=5,
+        episode_no=1,
+    )
+
+    assert not any("主线对白上下文断裂" in error for error in errors), errors
+
+
+def test_screenplay_uses_structured_announcement_over_context_marker() -> None:
+    """“你可是某人”是身份确认；结构化 announcement 不应被“可是”误判为回应。"""
+    announcement = "你……可是谷言，先坐下再说。"
+    script = _valid_rainy_script()
+    script.full_script_text = script.full_script_text.replace(
+        "谷言（攥紧钥匙）：你到底想说什么？别绕了，把今晚的事一次讲清楚。",
+        f"谷言：{announcement}",
+    )
+    script.key_lines[-1] = f"谷言：{announcement}"
+    script.dialogue_chains = [
+        KeyDialogueChain(
+            chain_id="DC1",
+            topic="确认来人身份",
+            turns=[
+                KeyDialogueTurn(
+                    speaker="谷言",
+                    line=announcement,
+                    function="announcement",
+                    source_text=announcement,
+                ),
+            ],
+        ),
+    ]
+
+    errors = validate_screenplay(script, _bible(), expected_beats=5, episode_no=1)
+
+    assert not any("主线对白上下文断裂" in e for e in errors), errors
+
+
 def test_screenplay_rejects_key_lines_out_of_story_order() -> None:
     script = _valid_rainy_script()
     script.key_lines = list(reversed(script.key_lines))
@@ -759,6 +836,44 @@ def test_screenplay_baseline_keeps_structural_bootstrap_retries(monkeypatch) -> 
     assert policy.stall_rounds == 2
     assert policy.no_gain_rounds == 2
     assert policy.baseline_only is True
+
+
+def test_screenplay_baseline_passes_authorized_source_chapters_to_narrative_validator(monkeypatch) -> None:
+    captured = {}
+
+    async def fake_loop(_stage, _stage_key, _prompt, _model, business_validate, **kwargs):
+        captured["policy"] = kwargs["loop"].policy
+        script = EpisodeScreenplay(episode_no=9, ending_hook="无集级钩子")
+        captured["errors"] = business_validate(script)
+        return script
+
+    def fake_validate_narrative(_script, **kwargs):
+        captured["authorized_source_chapters"] = kwargs.get("authorized_source_chapters")
+        return []
+
+    monkeypatch.setattr(stages, "_run_with_agent_loop", fake_loop)
+    monkeypatch.setattr(stages, "validate_screenplay", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        "app.narrative.validate_screenplay_narrative",
+        fake_validate_narrative,
+    )
+    episode = {
+        "id": "ep-json-bootstrap",
+        "episode_no": 9,
+        "target_duration_s": 50,
+        "required_dialogue_lines": [],
+        "authorized_source_chapters": {"1": "第一章正文", "2": ""},
+    }
+
+    asyncio.run(stages.generate_screenplay_baseline(
+        episode,
+        "原文",
+        _empty_bible(),
+        _prompt="输出剧本 JSON",
+    ))
+
+    assert captured["errors"] == []
+    assert captured["authorized_source_chapters"] == {"1": "第一章正文"}
 
 
 def test_user_selected_dialogues_are_hard_gates() -> None:

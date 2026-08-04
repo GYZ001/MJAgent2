@@ -1,9 +1,71 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 try:
     router
 except NameError:  # pragma: no cover - used when importing this module directly
     from app.domain.common import *
+
+
+_SQLITE_IN_CHUNK_SIZE = 400
+
+
+def _in_chunks(values: Iterable[object], size: int | None = None):
+    size = size or _SQLITE_IN_CHUNK_SIZE
+    items = list(values)
+    for index in range(0, len(items), size):
+        yield items[index:index + size]
+
+
+def _marks(values: list[object]) -> str:
+    return ",".join("?" for _ in values)
+
+
+def _ids_by_in(conn, sql_template: str, values: Iterable[object]) -> set[str]:
+    ids: set[str] = set()
+    for chunk in _in_chunks(values):
+        ids.update(
+            row["id"] for row in conn.execute(
+                sql_template.format(marks=_marks(chunk)),
+                chunk,
+            ).fetchall()
+        )
+    return ids
+
+
+def _execute_by_in(conn, sql_template: str, values: Iterable[object]) -> int:
+    affected = 0
+    for chunk in _in_chunks(values):
+        cursor = conn.execute(sql_template.format(marks=_marks(chunk)), chunk)
+        affected += max(0, cursor.rowcount)
+    return affected
+
+
+def _scope_ids(conn, table: str, *, scope_ids: Iterable[str],
+               scope_prefix: str, id_column: str = "id") -> set[str]:
+    ids = {
+        row[id_column] for row in conn.execute(
+            f"SELECT {id_column} FROM {table} WHERE scope_id LIKE ?",
+            (f"{scope_prefix}:%",),
+        ).fetchall()
+    }
+    ids.update(_ids_by_in(
+        conn,
+        f"SELECT {id_column} AS id FROM {table} WHERE scope_id IN ({{marks}})",
+        scope_ids,
+    ))
+    return ids
+
+
+def _delete_scope_rows(conn, table: str, *, scope_ids: Iterable[str],
+                       scope_prefix: str) -> None:
+    conn.execute(f"DELETE FROM {table} WHERE scope_id LIKE ?", (f"{scope_prefix}:%",))
+    _execute_by_in(
+        conn,
+        f"DELETE FROM {table} WHERE scope_id IN ({{marks}})",
+        scope_ids,
+    )
 
 
 def _present_refs_error(conn, value: str | None) -> str | None:
@@ -689,112 +751,167 @@ def _delete_scoped_evidence(
     episode_ids: list[str],
 ) -> dict[str, int]:
     """Delete Harness evidence owned by one project or episode subtree."""
-    scope_marks = ",".join("?" for _ in scope_ids)
-    scope_params: list[object] = [*scope_ids, f"{scope_prefix}:%"]
-    scope_where = f"(scope_id IN ({scope_marks}) OR scope_id LIKE ?)"
-
-    run_ids = {
-        row["id"] for row in conn.execute(
-            f"""SELECT id FROM workflow_runs
-                WHERE {scope_where}""",
-            scope_params,
-        ).fetchall()
-    }
+    run_ids = _scope_ids(
+        conn,
+        "workflow_runs",
+        scope_ids=scope_ids,
+        scope_prefix=scope_prefix,
+    )
     # Recovery/child runs can use their own scope. Include the whole descendant
     # chain so no run keeps a parent pointer to a deleted project run.
     frontier = set(run_ids)
     while frontier:
-        marks = ",".join("?" for _ in frontier)
-        children = {
-            row["id"] for row in conn.execute(
-                f"""SELECT id FROM workflow_runs
-                    WHERE parent_run_id IN ({marks}) OR recovered_by_run_id IN ({marks})""",
-                [*frontier, *frontier],
-            ).fetchall()
-        } - run_ids
+        children: set[str] = set()
+        for chunk in _in_chunks(frontier):
+            marks = _marks(chunk)
+            children.update(
+                row["id"] for row in conn.execute(
+                    f"""SELECT id FROM workflow_runs
+                        WHERE parent_run_id IN ({marks})
+                           OR recovered_by_run_id IN ({marks})""",
+                    [*chunk, *chunk],
+                ).fetchall()
+            )
+        children -= run_ids
         run_ids.update(children)
         frontier = children
 
     step_ids: set[str] = set()
     if run_ids:
-        marks = ",".join("?" for _ in run_ids)
-        step_ids = {
-            row["id"] for row in conn.execute(
-                f"SELECT id FROM step_runs WHERE run_id IN ({marks})",
-                list(run_ids),
-            ).fetchall()
-        }
+        step_ids = _ids_by_in(
+            conn,
+            "SELECT id FROM step_runs WHERE run_id IN ({marks})",
+            run_ids,
+        )
 
-    artifact_params = list(scope_params)
-    artifact_where = scope_where
+    artifact_ids = _scope_ids(
+        conn,
+        "artifacts",
+        scope_ids=scope_ids,
+        scope_prefix=scope_prefix,
+    )
     if step_ids:
-        step_marks = ",".join("?" for _ in step_ids)
-        artifact_where += f" OR created_by_step_run_id IN ({step_marks})"
-        artifact_params.extend(step_ids)
-    artifact_ids = {
-        row["id"] for row in conn.execute(
-            f"SELECT id FROM artifacts WHERE {artifact_where}",
-            artifact_params,
-        ).fetchall()
-    }
+        artifact_ids.update(_ids_by_in(
+            conn,
+            "SELECT id FROM artifacts WHERE created_by_step_run_id IN ({marks})",
+            step_ids,
+        ))
+    provider_call_ids: set[object] = set()
+    if run_ids:
+        provider_call_ids.update(_ids_by_in(
+            conn,
+            "SELECT id FROM provider_calls WHERE run_id IN ({marks})",
+            run_ids,
+        ))
+    if step_ids:
+        provider_call_ids.update(_ids_by_in(
+            conn,
+            "SELECT id FROM provider_calls WHERE step_run_id IN ({marks})",
+            step_ids,
+        ))
 
     if episode_ids:
-        marks = ",".join("?" for _ in episode_ids)
-        conn.execute(f"DELETE FROM delivery_packages WHERE episode_id IN ({marks})", episode_ids)
-        conn.execute(f"DELETE FROM customer_feedback WHERE episode_id IN ({marks})", episode_ids)
-        conn.execute(f"DELETE FROM production_revisions WHERE episode_id IN ({marks})", episode_ids)
-        conn.execute(f"DELETE FROM production_grants WHERE episode_id IN ({marks})", episode_ids)
-        conn.execute(f"DELETE FROM completion_grants WHERE episode_id IN ({marks})", episode_ids)
-        conn.execute(
-            f"DELETE FROM completion_certificates WHERE scope_id IN ({marks})",
+        _execute_by_in(
+            conn,
+            "DELETE FROM delivery_packages WHERE episode_id IN ({marks})",
+            episode_ids,
+        )
+        _execute_by_in(
+            conn,
+            "DELETE FROM customer_feedback WHERE episode_id IN ({marks})",
+            episode_ids,
+        )
+        _execute_by_in(
+            conn,
+            "DELETE FROM production_revisions WHERE episode_id IN ({marks})",
+            episode_ids,
+        )
+        _execute_by_in(
+            conn,
+            "DELETE FROM production_grants WHERE episode_id IN ({marks})",
+            episode_ids,
+        )
+        _execute_by_in(
+            conn,
+            "DELETE FROM completion_grants WHERE episode_id IN ({marks})",
+            episode_ids,
+        )
+        _execute_by_in(
+            conn,
+            "DELETE FROM completion_certificates WHERE scope_id IN ({marks})",
             episode_ids,
         )
 
     if artifact_ids:
-        marks = ",".join("?" for _ in artifact_ids)
-        conn.execute(f"DELETE FROM gate_decisions WHERE artifact_id IN ({marks})", list(artifact_ids))
-        conn.execute(f"DELETE FROM evaluations WHERE artifact_id IN ({marks})", list(artifact_ids))
-        conn.execute(
-            f"DELETE FROM completion_certificates WHERE artifact_id IN ({marks})",
-            list(artifact_ids),
+        _execute_by_in(
+            conn,
+            "DELETE FROM gate_decisions WHERE artifact_id IN ({marks})",
+            artifact_ids,
         )
-        conn.execute(
-            f"UPDATE artifacts SET superseded_by_artifact_id=NULL "
-            f"WHERE superseded_by_artifact_id IN ({marks})",
-            list(artifact_ids),
+        _execute_by_in(
+            conn,
+            "DELETE FROM evaluations WHERE artifact_id IN ({marks})",
+            artifact_ids,
         )
-        conn.execute(f"DELETE FROM artifacts WHERE id IN ({marks})", list(artifact_ids))
+        _execute_by_in(
+            conn,
+            "DELETE FROM completion_certificates WHERE artifact_id IN ({marks})",
+            artifact_ids,
+        )
+        _execute_by_in(
+            conn,
+            "UPDATE artifacts SET superseded_by_artifact_id=NULL "
+            "WHERE superseded_by_artifact_id IN ({marks})",
+            artifact_ids,
+        )
+        _execute_by_in(
+            conn,
+            "DELETE FROM artifacts WHERE id IN ({marks})",
+            artifact_ids,
+        )
 
     if run_ids:
-        marks = ",".join("?" for _ in run_ids)
-        conn.execute(f"DELETE FROM gate_decisions WHERE run_id IN ({marks})", list(run_ids))
-        conn.execute(f"DELETE FROM run_events WHERE run_id IN ({marks})", list(run_ids))
-        conn.execute(f"DELETE FROM provider_calls WHERE run_id IN ({marks})", list(run_ids))
-        conn.execute(f"DELETE FROM agent_tool_calls WHERE run_id IN ({marks})", list(run_ids))
+        _execute_by_in(conn, "DELETE FROM gate_decisions WHERE run_id IN ({marks})", run_ids)
+        _execute_by_in(conn, "DELETE FROM run_events WHERE run_id IN ({marks})", run_ids)
+        _execute_by_in(conn, "DELETE FROM agent_tool_calls WHERE run_id IN ({marks})", run_ids)
     if step_ids:
-        marks = ",".join("?" for _ in step_ids)
-        conn.execute(f"DELETE FROM evaluations WHERE step_run_id IN ({marks})", list(step_ids))
-        conn.execute(f"DELETE FROM run_events WHERE step_run_id IN ({marks})", list(step_ids))
-        conn.execute(f"DELETE FROM provider_calls WHERE step_run_id IN ({marks})", list(step_ids))
+        _execute_by_in(conn, "DELETE FROM evaluations WHERE step_run_id IN ({marks})", step_ids)
+        _execute_by_in(conn, "DELETE FROM run_events WHERE step_run_id IN ({marks})", step_ids)
+    if provider_call_ids:
+        _execute_by_in(
+            conn,
+            "UPDATE provider_calls SET supersedes_call_id=NULL "
+            "WHERE supersedes_call_id IN ({marks})",
+            provider_call_ids,
+        )
+        _execute_by_in(
+            conn,
+            "UPDATE provider_calls SET superseded_by_call_id=NULL "
+            "WHERE superseded_by_call_id IN ({marks})",
+            provider_call_ids,
+        )
+        _execute_by_in(conn, "DELETE FROM provider_calls WHERE id IN ({marks})", provider_call_ids)
     if run_ids:
-        marks = ",".join("?" for _ in run_ids)
-        conn.execute(f"DELETE FROM step_runs WHERE run_id IN ({marks})", list(run_ids))
-        conn.execute(
-            f"UPDATE workflow_runs SET parent_run_id=NULL "
-            f"WHERE parent_run_id IN ({marks})",
-            list(run_ids),
+        _execute_by_in(conn, "DELETE FROM step_runs WHERE run_id IN ({marks})", run_ids)
+        _execute_by_in(
+            conn,
+            "UPDATE workflow_runs SET parent_run_id=NULL "
+            "WHERE parent_run_id IN ({marks})",
+            run_ids,
         )
-        conn.execute(
-            f"UPDATE workflow_runs SET recovered_by_run_id=NULL "
-            f"WHERE recovered_by_run_id IN ({marks})",
-            list(run_ids),
+        _execute_by_in(
+            conn,
+            "UPDATE workflow_runs SET recovered_by_run_id=NULL "
+            "WHERE recovered_by_run_id IN ({marks})",
+            run_ids,
         )
-        conn.execute(f"DELETE FROM workflow_runs WHERE id IN ({marks})", list(run_ids))
+        _execute_by_in(conn, "DELETE FROM workflow_runs WHERE id IN ({marks})", run_ids)
 
-    conn.execute(
-        f"DELETE FROM review_action_audit "
-        f"WHERE {scope_where}",
-        scope_params,
+    _delete_scope_rows(
+        conn,
+        "review_action_audit",
+        scope_ids=scope_ids,
+        scope_prefix=scope_prefix,
     )
     return {
         "artifacts": len(artifact_ids),

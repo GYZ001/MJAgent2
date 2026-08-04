@@ -739,6 +739,13 @@ async def _screenplay_task(
             # 已被恢复任务替代的旧协程可能在 socket 返回后才观察到围栏；
             # 它不得覆盖新运行的剧集状态。
             raise
+        from app.production.screenplay_repair import ScreenplayNarrativeGateError
+
+        if isinstance(exc, ScreenplayNarrativeGateError):
+            # run_screenplay_production 已保存 working artifact、repairing 状态和
+            # WAITING_HUMAN checkpoint。让编排层将 Run 收束为 PARTIAL，禁止在此
+            # 用通用 SYS 错误覆盖可恢复诊断。
+            raise
         msg = str(exc)
         if msg.startswith("WAITING_INPUT"):
             conn.execute(
@@ -934,6 +941,7 @@ async def _recorded_screenplay_task(
             from app.portraits import (
                 apply_screenplay_character_resolutions,
                 load_screenplay_character_resolutions,
+                normalize_screenplay_voice_ids,
                 screenplay_unknown_identity_errors,
             )
             from app.production.patch import load_screenplay_from_artifact
@@ -959,6 +967,7 @@ async def _recorded_screenplay_task(
                 apply_screenplay_character_resolutions(
                     working_script, persisted_resolutions,
                 )
+                normalize_screenplay_voice_ids(working_script, bible)
                 requires_legacy_audit = bool(
                     screenplay_unknown_identity_errors(working_script, bible)
                 )
@@ -1055,6 +1064,19 @@ async def _recorded_screenplay_task(
         # 旧运行已被新的恢复运行围栏；不再回写剧集，也不把这种协调竞态报成内容失败。
         return None
     except Exception as exc:  # noqa: BLE001 -- failure is persisted for Run Center
+        from app.production.screenplay_repair import ScreenplayNarrativeGateError
+
+        if isinstance(exc, ScreenplayNarrativeGateError):
+            errors.log_error(
+                exc,
+                action="screenplay_repair",
+                context={"episode_id": episode_id, "phase": "narrative_gate"},
+            )
+            try:
+                recorder.partial(str(exc))
+            except StateConflict:
+                pass
+            return None
         row = get_conn().execute(
             "SELECT screenplay_status, screenplay_error FROM episodes WHERE id=?", (episode_id,)
         ).fetchone()

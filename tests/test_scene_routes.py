@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sqlite3
 
 import pytest
@@ -7,6 +8,7 @@ from fastapi import HTTPException
 from app import api, task_registry
 from app.api import router
 from app.domain import bible_ops
+from app.schemas import Scene
 
 
 def test_scene_library_routes_accept_post() -> None:
@@ -71,3 +73,86 @@ def test_scene_bible_formal_request_keeps_confirmed_payload_out_of_legacy_bus(
 
     assert preview_required.value.status_code == 409
     assert preview_required.value.detail["code"] == "SCENE_PREVIEW_REQUIRED"
+
+
+def test_scene_bible_preview_accepts_scene_list_return(monkeypatch) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE chapters(project_id TEXT, idx INTEGER, content TEXT)")
+    conn.execute("INSERT INTO chapters VALUES('p', 1, '青山脚下')")
+    conn.commit()
+    bible_json = json.dumps({
+        "characters": [],
+        "world": {"visual_style_canonical": "国漫风格", "era": "", "genre": "仙侠"},
+    }, ensure_ascii=False)
+
+    async def fake_generate_scene_bible(*_args, **_kwargs):
+        return [Scene(name="青山脚下", scene_canonical="青山脚下的山路，晨雾弥漫，古树与石阶环绕", location_kind="室外")]
+
+    monkeypatch.setattr(bible_ops, "_project_or_404", lambda _project_id: {"bible_json": bible_json})
+    monkeypatch.setattr(bible_ops, "get_conn", lambda: conn)
+    monkeypatch.setattr("app.stages.generate_scene_bible", fake_generate_scene_bible)
+    monkeypatch.setattr(
+        bible_ops,
+        "compute_scene_cost_precheck",
+        lambda project_id, **kwargs: {"project_id": project_id, **kwargs},
+    )
+    monkeypatch.setattr(bible_ops, "_issue_payment_quote", lambda quote: {"quote_id": "quote-scene", **quote})
+
+    result = asyncio.run(bible_ops.preview_scene_bible("p"))
+
+    assert result["scenes"][0]["name"] == "青山脚下"
+    assert result["precheck"]["quote_id"] == "quote-scene"
+    assert result["generates_images"] is False
+
+
+def test_scene_bible_handoff_unwraps_recorder_step_result(monkeypatch) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE projects(id TEXT PRIMARY KEY, bible_json TEXT, scene_refs_status TEXT, scene_refs_error TEXT)"
+    )
+    conn.execute("CREATE TABLE chapters(project_id TEXT, idx INTEGER, content TEXT)")
+    bible_json = json.dumps({
+        "characters": [],
+        "world": {"visual_style_canonical": "国漫风格", "era": "", "genre": "仙侠"},
+    }, ensure_ascii=False)
+    conn.execute("INSERT INTO projects VALUES('p', ?, 'running', NULL)", (bible_json,))
+    conn.execute("INSERT INTO chapters VALUES('p', 1, '青山脚下')")
+    conn.commit()
+    started: list[tuple[str, object]] = []
+
+    class Recorder:
+        run_id = "run-scene-bible"
+
+        def start(self) -> None:
+            pass
+
+        async def step(self, *_args, **_kwargs):
+            return "step-scene-bible", [
+                Scene(name="青山脚下", scene_canonical="青山脚下的山路，晨雾弥漫，古树与石阶环绕", location_kind="室外"),
+            ]
+
+        def succeed(self, _message: str) -> None:
+            pass
+
+        def cancel(self) -> None:
+            pass
+
+        def fail(self, _exc: Exception) -> None:
+            raise AssertionError("scene bible should not fail")
+
+    monkeypatch.setattr(bible_ops, "get_conn", lambda: conn)
+    monkeypatch.setattr(bible_ops.WorkflowRecorder, "create", lambda **_kwargs: Recorder())
+    monkeypatch.setattr(
+        bible_ops,
+        "_start_scene_refs_generation",
+        lambda project_id, target: started.append((project_id, target)) or True,
+    )
+
+    asyncio.run(bible_ops._scene_bible_and_refs("p"))
+
+    project = conn.execute("SELECT bible_json FROM projects WHERE id='p'").fetchone()
+    payload = json.loads(project["bible_json"])
+    assert payload["scenes"][0]["name"] == "青山脚下"
+    assert started == [("p", None)]

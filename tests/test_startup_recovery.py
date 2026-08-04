@@ -235,6 +235,32 @@ def test_character_reference_restart_preserves_fresh_batch_boundary(tmp_path, mo
     }]
 
 
+def test_character_reference_restart_recovers_paused_run_when_project_flag_is_idle(
+    tmp_path, monkeypatch,
+) -> None:
+    conn = _fresh_database(tmp_path, monkeypatch)
+    conn.execute(
+        "UPDATE projects SET refs_status='idle', refs_target=NULL, refs_resume=0, "
+        "refs_batch_started_at=456.5 WHERE id='p1'"
+    )
+    parent = _paused_run("character_references", "project", "p1")
+    seen: list[dict] = []
+    monkeypatch.setattr(api, "_refs_task_active", lambda _pid: False)
+    monkeypatch.setattr(
+        api,
+        "_start_refs_generation",
+        lambda project_id, target, **kwargs: seen.append({
+            "project_id": project_id, "target": target, **kwargs,
+        }) or True,
+    )
+
+    assert api.recover_character_ref_tasks() == 1
+    assert seen == [{
+        "project_id": "p1", "target": None, "only_characters": None,
+        "resume": True, "fresh_after": 456.5, "parent_run_id": parent,
+    }]
+
+
 def test_fresh_character_reference_batch_persists_restart_mode(tmp_path, monkeypatch) -> None:
     conn = _fresh_database(tmp_path, monkeypatch)
     spawned = _capture_spawn(monkeypatch)
@@ -254,6 +280,41 @@ def test_fresh_character_reference_batch_persists_restart_mode(tmp_path, monkeyp
     assert row["refs_resume"] == 0
     assert row["refs_batch_started_at"] is not None
     assert spawned == [("refs", "p1")]
+
+
+def test_running_character_reference_run_keeps_refs_busy_when_project_flag_is_idle(
+    tmp_path, monkeypatch,
+) -> None:
+    conn = _fresh_database(tmp_path, monkeypatch)
+    bible = {
+        "characters": [{
+            "name": "萧炎",
+            "role": "主角",
+            "appearance_canonical": "黑发少年，身穿玄色劲装，目光坚定，身形修长，腰佩玉佩",
+            "personality": "坚韧",
+            "speech_style": "沉稳",
+            "relationships": [],
+        }],
+        "world": {"visual_style_canonical": "国漫风格", "era": "", "genre": ""},
+    }
+    conn.execute(
+        "UPDATE projects SET bible_json=?, refs_status='idle' WHERE id='p1'",
+        (json.dumps(bible, ensure_ascii=False),),
+    )
+    run_id = repository.create_run(
+        workflow_type="character_references",
+        scope_type="project",
+        scope_id="p1",
+        input_fingerprint="refs-running",
+    )
+    conn.execute("UPDATE workflow_runs SET status='RUNNING' WHERE id=?", (run_id,))
+    conn.commit()
+    monkeypatch.setattr(api, "_refs_task_active", lambda _pid: False)
+
+    assert api._start_refs_generation("p1", None) is None
+    progress = asyncio.run(api.refs_progress("p1"))
+    assert progress["refs_status"] == "running"
+    assert progress["missing"] == 1
 
 
 def test_portrait_view_redo_is_recreated_from_paused_run(tmp_path, monkeypatch) -> None:

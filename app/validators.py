@@ -1259,6 +1259,26 @@ def _is_context_dependent_dialogue(line: str) -> bool:
     return any(marker in compact for marker in _CONTEXT_DEPENDENT_DIALOGUE_MARKERS)
 
 
+def _structured_key_line_functions(
+    script: EpisodeScreenplay,
+    line: str,
+) -> set[str]:
+    """Return authoritative dialogue functions for an exact structured key line."""
+    spoken = _condense(_strip_speaker(line or ""))
+    expected_speaker = _condense(_speaker_name(line or ""))
+    if not spoken:
+        return set()
+    functions: set[str] = set()
+    for chain in script.dialogue_chains or []:
+        for turn in chain.turns or []:
+            if _condense(turn.line or "") != spoken:
+                continue
+            if expected_speaker and _condense(turn.speaker or "") != expected_speaker:
+                continue
+            functions.add((turn.function or "").strip())
+    return functions
+
+
 def _matching_text_indices(needle: str, ordered_texts: list[str]) -> list[int]:
     core = _strip_speaker(needle)
     return [
@@ -2108,7 +2128,13 @@ def validate_screenplay_spine_delivery(
         )
         spoken_missing = [
             clause for clause in spoken_clauses
-            if _claim_clearly_absent(clause, spoken_by_owner)
+            if (
+                _claim_clearly_absent(clause, spoken_by_owner)
+                and _claim_clearly_absent(
+                    clause,
+                    action_text + "\n" + all_spoken,
+                )
+            )
         ]
         receptive_missing = [
             clause for clause in receptive_clauses
@@ -2137,11 +2163,12 @@ def validate_screenplay_spine_delivery(
 def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats: int,
                         episode_no: int | None = None, source_text: str | None = None,
                         require_dialogue_chains: bool = False,
-                        required_dialogue_lines: list[str] | None = None) -> list[str]:
+                        required_dialogue_lines: list[str] | None = None,
+                        validate_narrative: bool = True) -> list[str]:
     """纯 QA：只读取候选并返回问题，不补字段、不覆盖投影、不修改输入。"""
     errors: list[str] = []
     narrative_authority = script.narrative_plan is not None
-    if narrative_authority:
+    if narrative_authority and validate_narrative:
         from app.narrative import validate_screenplay_narrative
 
         errors.extend(validate_screenplay_narrative(
@@ -2177,6 +2204,12 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
     bible_names = {c.name for c in bible.characters}
     narrative_character_ids = set(bible_names)
     if script.narrative_plan is not None:
+        for identity in script.narrative_plan.identity_contracts:
+            narrative_character_ids.update({
+                identity.identity_id,
+                identity.display_name,
+                *identity.voice_ids,
+            })
         narrative_character_ids.update(
             actor_id
             for action in script.narrative_plan.atomic_actions
@@ -2387,13 +2420,37 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         for index in _matching_text_indices(key_line, spoken_turn_texts)
     }
     for line in key_lines:
-        if not _is_context_dependent_dialogue(line):
+        structured_functions = _structured_key_line_functions(script, line)
+        is_context_dependent = (
+            bool(structured_functions & _DIALOGUE_RESPONSE_FUNCTIONS)
+            if structured_functions
+            else _is_context_dependent_dialogue(line)
+        )
+        if not is_context_dependent:
             continue
         candidates = _matching_text_indices(
             line, [spoken for _scene_no, _speaker, spoken in dialogue_turns]
         )
         if not candidates:
             continue
+        expected_speaker = _speaker_name(line)
+        spoken_core = _condense(_strip_speaker(line))
+        exact_speaker_candidates = [
+            index for index in candidates
+            if (
+                (not expected_speaker or dialogue_turns[index][1] == expected_speaker)
+                and _condense(dialogue_turns[index][2]) == spoken_core
+            )
+        ]
+        if exact_speaker_candidates:
+            candidates = exact_speaker_candidates
+        elif expected_speaker:
+            same_speaker_candidates = [
+                index for index in candidates
+                if dialogue_turns[index][1] == expected_speaker
+            ]
+            if same_speaker_candidates:
+                candidates = same_speaker_candidates
         turn_index = candidates[0]
         scene_no, speaker, _spoken = dialogue_turns[turn_index]
         prior_context = [

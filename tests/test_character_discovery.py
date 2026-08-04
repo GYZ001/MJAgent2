@@ -5,7 +5,7 @@ import sqlite3
 from app import api, db, portraits
 from app.schemas import (Bible, Character, EpisodeScreenplay, InformationItem,
                          KeyDialogueChain, KeyDialogueTurn, ScriptScene,
-                         VoiceCanonical, World)
+                         NarrativeContinuityPlan, VoiceCanonical, World)
 
 
 def _make_conn() -> sqlite3.Connection:
@@ -513,7 +513,8 @@ def test_discover_character_candidates_filters_functional_extras_and_unseen_name
         )],
     )
 
-    async def fake_chat(*_args, **_kwargs):
+    async def fake_chat(*_args, **kwargs):
+        assert kwargs["call_meta"]["reuse_successful_operation"] is True
         return json.dumps({
             "characters": [
                 {"name": "魂天帝", "kind": "onscreen", "evidence": "魂天帝踏着血云现身"},
@@ -912,6 +913,104 @@ def test_identity_gate_uses_shared_speaker_parser_and_allows_narrator() -> None:
     errors = portraits.screenplay_unknown_identity_errors(script, bible)
     assert len(errors) == 1
     assert "青衣人" in errors[0]
+
+
+def test_voice_alias_is_normalized_only_from_unambiguous_ledger_identity() -> None:
+    bible = Bible(
+        world=World(visual_style_canonical="国风"),
+        characters=[
+            Character(
+                name="孟浩",
+                role="主角",
+                appearance_canonical="黑发书生，青色长衫，身形清瘦，背着旧书箱",
+            ),
+            Character(
+                name="王有材",
+                role="重要配角",
+                appearance_canonical="圆脸少年，粗布短衣，身形敦实，神态慌张",
+            ),
+        ],
+    )
+    script = EpisodeScreenplay(
+        episode_no=1,
+        narrative_plan=NarrativeContinuityPlan(scope_id="episode-1"),
+        scene_outline=[ScriptScene(
+            scene_no=1,
+            scene_heading="【场1】日 / 山顶",
+            story_function="孟浩决定离开山顶寻找出路",
+            characters=["孟浩", "王有材"],
+            summary="孟浩听见王有材求救，转身寻找声音来源。",
+        )],
+        full_script_text=(
+            "【场1】日 / 山顶\n"
+            "孟浩：又落榜了。\n"
+            "王有材：救命！"
+        ),
+        dialogue_chains=[KeyDialogueChain(
+            chain_id="DC1",
+            turns=[
+                KeyDialogueTurn(
+                    speaker="孟浩",
+                    line="又落榜了。",
+                    source_text="又落榜了。",
+                ),
+                KeyDialogueTurn(
+                    speaker="王有材",
+                    line="救命！",
+                    source_text="救命！",
+                ),
+            ],
+        )],
+        information_ledger=[
+            InformationItem(
+                info_id="I1",
+                content="孟浩连续三年科举落榜",
+                speaker_id="V-MH",
+            ),
+            InformationItem(
+                info_id="I2",
+                content="孟浩听见王有材在山崖下求救",
+                exact_text="救命！",
+                speaker_id="V-WYC",
+            ),
+            InformationItem(
+                info_id="I3",
+                content="山崖下同时传来孟浩与王有材的声音",
+                speaker_id="V-AMBIGUOUS",
+            ),
+        ],
+        voice_bible=[
+            VoiceCanonical(
+                speaker_id="V-MH",
+                voice_canonical="清瘦书生的年轻嗓音",
+            ),
+            VoiceCanonical(
+                speaker_id="V-WYC",
+                voice_canonical="慌张的少年嗓音",
+            ),
+            VoiceCanonical(
+                speaker_id="V-AMBIGUOUS",
+                voice_canonical="少年嗓音",
+            ),
+        ],
+    )
+
+    changes = portraits.normalize_screenplay_voice_ids(script, bible)
+
+    assert changes == [{
+        "source_label": "V-MH",
+        "canonical_name": "孟浩",
+        "resolution": "voice_alias_from_ledger",
+    }, {
+        "source_label": "V-WYC",
+        "canonical_name": "王有材",
+        "resolution": "voice_alias_from_ledger",
+    }]
+    assert script.voice_bible[0].speaker_id == "孟浩"
+    assert script.information_ledger[0].speaker_id == "孟浩"
+    assert script.voice_bible[1].speaker_id == "王有材"
+    assert script.information_ledger[1].speaker_id == "王有材"
+    assert script.voice_bible[2].speaker_id == "V-AMBIGUOUS"
 
 
 def test_late_episode_screenplay_auto_adds_character_and_defers_portrait_generation(tmp_path, monkeypatch) -> None:

@@ -311,6 +311,11 @@ async def discover_character_candidates(
                 "episode_no": episode_no,
                 "future_batch": batch_index,
                 "future_batches": len(future_chunks),
+                # Character discovery is deterministic for the same persisted
+                # screenplay operation.  A worker restart after the provider
+                # returned must reuse that response instead of paying for and
+                # waiting on the same multi-chapter audit again.
+                "reuse_successful_operation": True,
             },
         )
         obj = extract_json(raw)
@@ -541,6 +546,16 @@ def _replace_narrative_plan_identity(
         return False
     before = plan.model_dump(mode="json")
 
+    for contract in plan.identity_contracts:
+        if contract.display_name == source_label:
+            contract.display_name = canonical_name
+        contract.voice_ids = list(dict.fromkeys(
+            canonical_name if voice_id == source_label else voice_id
+            for voice_id in contract.voice_ids
+        ))
+        contract.evidence.rationale = _replace_resolved_label(
+            contract.evidence.rationale, source_label, canonical_name,
+        )
     for proposition in plan.propositions:
         proposition.entity_ids = list(dict.fromkeys(
             canonical_name if entity_id == source_label else entity_id
@@ -797,6 +812,133 @@ def apply_screenplay_character_resolutions(screenplay, resolutions: list[dict] |
                 "canonical_name": canonical_name,
                 "resolution": item.get("resolution") or "unknown",
             })
+    return changes
+
+
+def normalize_screenplay_voice_ids(screenplay, bible: Bible) -> list[dict]:
+    """Replace an unbound model voice alias with one provable Bible identity.
+
+    New prompts require Bible character names as speaker IDs.  This migration
+    path handles existing working artifacts without guessing from initials or
+    role labels: the alias must own ledger text that names exactly one Bible
+    character, and that character must actually speak in the screenplay.
+    Ambiguous aliases remain untouched so the identity gate still fails closed.
+    """
+    plan = getattr(screenplay, "narrative_plan", None)
+    if plan is None:
+        return []
+    bible_names = {
+        str(character.name or "").strip()
+        for character in bible.characters
+        if str(character.name or "").strip()
+    }
+    if not bible_names:
+        return []
+
+    explicitly_bound = {
+        str(voice_id or "").strip()
+        for contract in plan.identity_contracts
+        for voice_id in contract.voice_ids
+        if str(voice_id or "").strip()
+    }
+    dialogue_speakers = {
+        str(turn.speaker or "").strip()
+        for chain in (getattr(screenplay, "dialogue_chains", None) or [])
+        for turn in (chain.turns or [])
+        if str(turn.speaker or "").strip()
+    }
+    from app.validators import screenplay_speaker_names
+
+    dialogue_speakers.update(screenplay_speaker_names(
+        getattr(screenplay, "full_script_text", "") or "",
+    ))
+    existing_voice_ids = {
+        str(voice.speaker_id or "").strip()
+        for voice in (getattr(screenplay, "voice_bible", None) or [])
+        if str(voice.speaker_id or "").strip()
+    }
+    dialogue_turns = [
+        (
+            str(turn.speaker or "").strip(),
+            str(turn.line or "").strip(),
+        )
+        for chain in (getattr(screenplay, "dialogue_chains", None) or [])
+        for turn in (chain.turns or [])
+        if str(turn.speaker or "").strip() and str(turn.line or "").strip()
+    ]
+    changes: list[dict] = []
+
+    for voice in getattr(screenplay, "voice_bible", None) or []:
+        source_id = str(voice.speaker_id or "").strip()
+        if (
+            not source_id
+            or str(voice.role_type or "").strip() == "narrator"
+            or source_id in bible_names
+            or source_id in explicitly_bound
+        ):
+            continue
+        ledger_items = [
+            item
+            for item in (getattr(screenplay, "information_ledger", None) or [])
+            if str(item.speaker_id or "").strip() == source_id
+        ]
+        if not ledger_items:
+            continue
+        ledger_text = "\n".join(
+            f"{item.content or ''}\n{item.exact_text or ''}"
+            for item in ledger_items
+        )
+        exact_texts = {
+            str(item.exact_text or "").strip()
+            for item in ledger_items
+            if str(item.exact_text or "").strip()
+        }
+        exact_speakers = {
+            speaker
+            for speaker, line in dialogue_turns
+            for exact_text in exact_texts
+            if (
+                speaker in bible_names
+                and (exact_text == line or exact_text in line or line in exact_text)
+            )
+        }
+        mentioned_candidates = {
+            name
+            for name in bible_names
+            if name in dialogue_speakers and name in ledger_text
+        }
+        leading_candidates = {
+            name
+            for name in mentioned_candidates
+            if any(
+                str(item.content or "").strip().startswith(name)
+                for item in ledger_items
+            )
+        }
+        candidates = (
+            exact_speakers
+            if len(exact_speakers) == 1
+            else mentioned_candidates
+            if len(mentioned_candidates) == 1
+            else leading_candidates
+        )
+        if len(candidates) != 1:
+            continue
+        canonical_name = next(iter(candidates))
+        if canonical_name in existing_voice_ids:
+            continue
+
+        voice.speaker_id = canonical_name
+        for item in ledger_items:
+            item.speaker_id = canonical_name
+        existing_voice_ids.discard(source_id)
+        existing_voice_ids.add(canonical_name)
+        changes.append({
+            "source_label": source_id,
+            "canonical_name": canonical_name,
+            "resolution": "voice_alias_from_ledger",
+        })
+
     return changes
 
 

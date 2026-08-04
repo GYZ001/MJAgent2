@@ -114,6 +114,31 @@ def test_screenplay_shape_hoists_fields_misnested_under_plot_spine() -> None:
     }
 
 
+def test_screenplay_shape_preserves_string_familiarity_assumptions_as_objects() -> None:
+    payload = {
+        "episode_no": 1,
+        "narrative_plan": {
+            "audience_priors": [{
+                "audience_prior_id": "AP-1",
+                "familiarity_assumptions": ["知道科举，但不了解修仙宗门"],
+            }],
+        },
+    }
+
+    normalized, changes = normalize_screenplay_json_shape(payload)
+
+    assumptions = normalized["narrative_plan"]["audience_priors"][0][
+        "familiarity_assumptions"
+    ]
+    assert assumptions == [{"description": "知道科举，但不了解修仙宗门"}]
+    assert changes == [
+        "narrative_plan.audience_priors[0].familiarity_assumptions[0]",
+    ]
+    assert payload["narrative_plan"]["audience_priors"][0][
+        "familiarity_assumptions"
+    ] == ["知道科举，但不了解修仙宗门"]
+
+
 def test_json_stage_failure_has_specific_error_code_and_non_blind_hint() -> None:
     exc = StageError("剧本首次整版 Baseline", ["JSON 解析失败（line 39）"])
     assert errors.classify(exc) == ("generation", "JSON")

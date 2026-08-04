@@ -72,7 +72,7 @@ def classify(exc: BaseException | None, http_status: int | None = None) -> tuple
 
     用类名判断 ProviderError/StageError，避免 import app.hiagent/app.stages 造成环依赖。"""
     name = type(exc).__name__ if exc is not None else ""
-    if name == "ContentGenerationError":
+    if name in {"ContentGenerationError", "ScreenplayNarrativeGateError"}:
         return "quality_gate", "QA"
     if name == "ProviderError":
         return "provider", "LLM"

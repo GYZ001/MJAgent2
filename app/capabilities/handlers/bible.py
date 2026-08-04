@@ -16,6 +16,7 @@ async def generate(args: I.BibleGenerateInput) -> CommandResult:
         confirm=bool(args.confirm),
         quote_id=args.quote_id,
         require_quote_id=bool(args.require_quote_id),
+        style_name=args.style_name,
     )
     if isinstance(outcome, CommandResult):
         return outcome

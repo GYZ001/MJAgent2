@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from app import portraits
 from app.character_policy import is_collective_role, is_functional_extra
 from app.compiler import CompileError, compile_prompt, keyframe_visual_contract
 from app.identity_contracts import IdentityContractError, narrative_identity_resolver
@@ -14,6 +15,7 @@ from app.schemas import (
     NarrativeContinuityPlan,
     NarrativeIdentityContract,
     NarrativeProposition,
+    ScriptScene,
     Shot,
     SourceEvidence,
     SourceSpan,
@@ -163,6 +165,45 @@ def test_resolver_handles_named_transient_collective_and_offscreen_by_policy() -
     assert offscreen.visual_policy == "offscreen_only"
     with pytest.raises(IdentityContractError, match="只允许画外"):
         resolver.resolve("井下回声", usage="visual")
+
+
+def test_character_resolution_updates_contract_display_name_but_keeps_stable_id() -> None:
+    screenplay = _screenplay()
+
+    changes = portraits.apply_screenplay_character_resolutions(screenplay, [{
+        "source_label": "云吞七号",
+        "canonical_name": "路人甲",
+        "resolution": "functional_extra",
+    }])
+
+    contract = screenplay.narrative_plan.identity_contracts[1]
+    assert changes
+    assert contract.identity_id == "transient-node"
+    assert contract.display_name == "路人甲"
+    resolver = narrative_identity_resolver(_bible(), screenplay)
+    assert resolver.resolve("路人甲").identity_id == "transient-node"
+    screenplay.scene_outline = [ScriptScene(
+        scene_no=1,
+        scene_heading="【场1】日 / 地下圆厅",
+        story_function="路人甲推门引发议会成员转身",
+        characters=["路人甲"],
+        summary="路人甲推开木门，厅内成员同时转身看向入口。",
+        conflict="来者身份不明，议会保持戒备。",
+        turn="木门打开，双方正式照面。",
+        source_basis="原文写来者推门进入地下圆厅。",
+    )]
+    from app.validators import validate_screenplay
+
+    errors = validate_screenplay(
+        screenplay,
+        _bible(),
+        expected_beats=1,
+        validate_narrative=False,
+    )
+    assert not any(
+        "叙事权威图外角色" in error and "路人甲" in error
+        for error in errors
+    )
 
 
 def test_narrative_compiler_uses_typed_policy_not_role_name_classifiers() -> None:

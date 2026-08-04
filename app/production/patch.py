@@ -60,6 +60,46 @@ def _artifact_content_hash(artifact: dict[str, Any]) -> str:
     return artifact.get("content_hash") or evidence_repository.content_hash(artifact.get("content"))
 
 
+def apply_patch_operation_to_document(
+    document: ScreenplayDocument,
+    operation: PatchOperation,
+) -> tuple[ScreenplayDocument, list[str]]:
+    """Execute one operation on an isolated document using the production path."""
+    if operation.op == "rederive":
+        return rederive_projections(document), ["rederive"]
+    if operation.op == "normalize_overdetail":
+        raw_terms = (
+            operation.value.get("terms")
+            if isinstance(operation.value, dict)
+            else []
+        )
+        return normalize_overdetail_text_fields(
+            document,
+            terms=[str(term) for term in (raw_terms or [])],
+        )
+    if operation.op == "split_dialogue_chain_by_scene":
+        chain_id = str(
+            (operation.target or {}).get("chain_id")
+            or (operation.target or {}).get("id")
+            or ""
+        )
+        return split_dialogue_chain_by_scene(document, chain_id=chain_id)
+    if operation.op in {"replace_field", "add_field"}:
+        return apply_field_patch(
+            document,
+            path=operation.path,
+            value=operation.value,
+            target=operation.target,
+        )
+    if operation.op == "create_node":
+        return _create_node(document, operation)
+    if operation.op == "delete_node":
+        return _delete_node(document, operation)
+    if operation.op in {"insert_node", "split_node", "move_node"}:
+        return _structure_op(document, operation)
+    raise FullRegenDenied(f"不支持的 op: {operation.op}")
+
+
 def apply_screenplay_patch(
     request: PatchRequest,
     *,
@@ -126,47 +166,16 @@ def apply_screenplay_patch(
     touched: list[str] = []
     working = doc
     for op in request.operations:
-        if op.op == "rederive":
-            working = rederive_projections(working)
-            touched.append("rederive")
-            continue
-        if op.op == "normalize_overdetail":
-            raw_terms = op.value.get("terms") if isinstance(op.value, dict) else []
-            working, nodes = normalize_overdetail_text_fields(
-                working,
-                terms=[str(term) for term in (raw_terms or [])],
+        try:
+            working, nodes = apply_patch_operation_to_document(working, op)
+        except FullRegenDenied as exc:
+            return PatchResult(
+                ok=False,
+                before_artifact_id=request.expected_artifact_id,
+                before_hash=before_hash,
+                error=str(exc),
             )
-            touched.extend(nodes)
-            continue
-        if op.op == "split_dialogue_chain_by_scene":
-            chain_id = str((op.target or {}).get("chain_id") or (op.target or {}).get("id") or "")
-            working, nodes = split_dialogue_chain_by_scene(working, chain_id=chain_id)
-            touched.extend(nodes)
-            continue
-        if op.op in {"replace_field", "add_field"}:
-            working, nodes = apply_field_patch(
-                working, path=op.path, value=op.value, target=op.target,
-            )
-            touched.extend(nodes)
-            continue
-        if op.op == "create_node":
-            working, nodes = _create_node(working, op)
-            touched.extend(nodes)
-            continue
-        if op.op == "delete_node":
-            working, nodes = _delete_node(working, op)
-            touched.extend(nodes)
-            continue
-        if op.op in {"insert_node", "split_node", "move_node"}:
-            working, nodes = _structure_op(working, op)
-            touched.extend(nodes)
-            continue
-        return PatchResult(
-            ok=False,
-            before_artifact_id=request.expected_artifact_id,
-            before_hash=before_hash,
-            error=f"不支持的 op: {op.op}",
-        )
+        touched.extend(nodes)
 
     working = rederive_projections(working)
     script = document_to_screenplay(working)
@@ -373,22 +382,6 @@ def _narrative_node_location(
     return None
 
 
-def _all_narrative_identity_values(value: Any) -> set[str]:
-    result: set[str] = set()
-    if isinstance(value, dict):
-        result.update(
-            str(candidate)
-            for key, candidate in value.items()
-            if key.endswith("_id") and str(candidate or "").strip()
-        )
-        for child in value.values():
-            result.update(_all_narrative_identity_values(child))
-    elif isinstance(value, list):
-        for child in value:
-            result.update(_all_narrative_identity_values(child))
-    return result
-
-
 def _create_node(doc: ScreenplayDocument, op: PatchOperation) -> tuple[ScreenplayDocument, list[str]]:
     data = copy.deepcopy(doc.model_dump(mode="json"))
     kind = (op.target or {}).get("kind") or ""
@@ -398,16 +391,26 @@ def _create_node(doc: ScreenplayDocument, op: PatchOperation) -> tuple[Screenpla
         collection = str((op.target or {}).get("collection") or "").strip()
         if not isinstance(plan, dict) or not isinstance(plan.get(collection), list):
             raise KeyError(f"narrative collection not found: {collection}")
-        node_ids = [
-            str(candidate)
+        target_node_id = str((op.target or {}).get("id") or "").strip()
+        identity_fields = [
+            key
             for key, candidate in value.items()
-            if key.endswith("_id") and str(candidate or "").strip()
+            if (
+                key.endswith("_id")
+                and target_node_id
+                and str(candidate or "").strip() == target_node_id
+            )
         ]
-        if not node_ids:
-            raise KeyError("new narrative node must have a stable *_id")
-        existing_ids = _all_narrative_identity_values(plan)
-        if any(node_id in existing_ids for node_id in node_ids):
-            raise KeyError(f"narrative node id already exists: {node_ids}")
+        if not target_node_id or not identity_fields:
+            raise KeyError(
+                "new narrative node must expose target.id through a stable *_id field"
+            )
+        existing = _narrative_node_location(plan[collection], target_node_id)
+        if existing is not None and any(
+            str(existing[0].get(field) or "").strip() == target_node_id
+            for field in identity_fields
+        ):
+            raise KeyError(f"narrative node id already exists: {target_node_id}")
         parent_id = str((op.target or {}).get("parent_id") or "").strip()
         parent_field = str((op.target or {}).get("parent_field") or "").strip()
         destination = plan[collection]
@@ -428,7 +431,7 @@ def _create_node(doc: ScreenplayDocument, op: PatchOperation) -> tuple[Screenpla
             index = max(0, min(len(destination), int(insert_at)))
             destination.insert(index, value)
         return ScreenplayDocument.model_validate(data), [
-            f"narrative:{collection}:{node_ids[0]}"
+            f"narrative:{collection}:{target_node_id}"
         ]
     if kind in {"screenplay_scene", "scene"}:
         scenes = data.setdefault("scene_blocks", [])

@@ -42,6 +42,8 @@ def test_narrative_plan_prompt_declares_every_example_entity_with_typed_policy()
         for policy in ("canonical", "contextual", "collective", "offscreen_only")
     )
     assert "voice_ids 必须精确回指 voice_bible.speaker_id" in prompt
+    assert "speaker_id 必须直接使用人物谱准确姓名" in prompt
+    assert "禁止另造 V-MH 一类声音别名" in prompt
 
 
 def test_narrative_repair_prompt_policy_preserves_identity_fail_closed_rules() -> None:

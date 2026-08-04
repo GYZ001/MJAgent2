@@ -29,6 +29,8 @@ from app.schemas import (
     EpisodeScreenplay,
     KeyDialogueChain,
     KeyDialogueTurn,
+    NarrativeContinuityPlan,
+    NarrativeEvent,
     PlotSpine,
     PlotSpineBeat,
     ScriptScene,
@@ -278,6 +280,126 @@ def test_patch_ops_reject_root_replace_and_delete_all():
     ])
 
 
+def test_create_narrative_node_does_not_treat_event_reference_as_node_identity():
+    from app.production.patch import PatchOperation, _create_node
+
+    script = _minimal_script(
+        narrative_plan=NarrativeContinuityPlan(
+            scope_id="ep_p",
+            events=[NarrativeEvent(event_id="E-5")],
+        ),
+    )
+    operation = PatchOperation(
+        op="create_node",
+        target={
+            "kind": "narrative_node",
+            "collection": "setup_payoff_contracts",
+            "id": "SP-2",
+        },
+        value={
+            "setup_payoff_id": "SP-2",
+            "setup_proposition_ids": ["P-1"],
+            "setup_event_ids": ["E-1"],
+            "payoff_event_ids": ["E-5"],
+            "retention_deadline_event_id": "E-5",
+        },
+    )
+
+    patched, touched = _create_node(screenplay_to_document(script), operation)
+
+    assert patched.narrative_plan.setup_payoff_contracts[0].setup_payoff_id == "SP-2"
+    assert patched.narrative_plan.setup_payoff_contracts[0].retention_deadline_event_id == "E-5"
+    assert touched == ["narrative:setup_payoff_contracts:SP-2"]
+
+
+def test_narrative_graph_normalizer_repairs_unique_source_span_and_event_aliases():
+    from app.production.screenplay_repair import (
+        _normalize_screenplay_narrative_graph,
+    )
+
+    chapter = "前文。又落榜了……后文。"
+    script = _minimal_script(
+        narrative_plan=NarrativeContinuityPlan.model_validate({
+            "scope_id": "ep_p",
+            "source_evidence": [{
+                "source_evidence_id": "SE-1",
+                "source_span": {"chapter_id": "1", "start": 0, "end": 2},
+                "verbatim_excerpt": "又落榜了……",
+            }],
+            "adaptation_decisions": [{
+                "adaptation_decision_id": "AD-1",
+                "affected_event_ids": ["E1"],
+            }],
+            "dramatic_questions": [{
+                "dramatic_question_id": "DQ-1",
+                "question_text": "他会如何选择？",
+                "open_anchor": {"type": "event", "id": "E1"},
+                "resolution_anchor": {"type": "event", "id": "E2"},
+            }],
+            "evidence": [{
+                "evidence_id": "EV-1",
+                "anchor": {"type": "event", "id": "E1"},
+                "observable_claim": "他再次落榜。",
+            }],
+            "state_facts": [{
+                "fact_id": "F-1",
+                "proposition_id": "P-1",
+                "subject_id": "甲",
+                "predicate_id": "state",
+            }],
+            "events": [
+                {"event_id": "E-1", "precondition_fact_ids": ["F-1"]},
+                {"event_id": "E-2"},
+            ],
+            "character_beliefs": [{
+                "character_belief_id": "CB-1",
+                "character_id": "甲",
+                "anchor": {"type": "event", "id": "E1"},
+                "beliefs": [{
+                    "proposition_id": "P-1",
+                    "stance": "disbelieved",
+                }],
+            }],
+            "setup_payoff_contracts": [{
+                "setup_payoff_id": "SP-1",
+                "setup_event_ids": ["E1"],
+                "payoff_event_ids": ["E2"],
+                "retention_deadline_event_id": "E2",
+            }],
+        }),
+    )
+
+    changes = _normalize_screenplay_narrative_graph(
+        script,
+        authorized_source_chapters={"1": chapter},
+    )
+
+    source = script.narrative_plan.source_evidence[0]
+    assert source.source_span.start == chapter.index(source.verbatim_excerpt)
+    assert source.source_span.end == source.source_span.start + len(
+        source.verbatim_excerpt
+    )
+    assert script.narrative_plan.adaptation_decisions[0].affected_event_ids == [
+        "E-1"
+    ]
+    assert script.narrative_plan.dramatic_questions[0].open_anchor.id == "E-1"
+    assert script.narrative_plan.dramatic_questions[0].resolution_anchor.id == "E-2"
+    assert script.narrative_plan.evidence[0].anchor.id == "E-1"
+    payoff = script.narrative_plan.setup_payoff_contracts[0]
+    assert payoff.setup_event_ids == ["E-1"]
+    assert payoff.payoff_event_ids == ["E-2"]
+    assert payoff.retention_deadline_event_id == "E-2"
+    assert script.narrative_plan.events[0].proposition_ids == ["P-1"]
+    assert script.narrative_plan.character_beliefs[0].beliefs[0].stance == "rejected"
+    assert {item["kind"] for item in changes} == {
+        "source_span",
+        "event_ref",
+        "event_refs",
+        "event_proposition_refs",
+        "belief_stance",
+    }
+
+
 def test_screenplay_document_patch_stakes_only():
     script = _minimal_script()
     doc = screenplay_to_document(script)
@@ -398,6 +520,115 @@ def test_dialogue_chain_turn_patch_changes_only_opening_source_anchor():
     assert touched == ["DC1-T1", "DC1"]
 
 
+def test_dialogue_chain_replacement_only_selects_existing_body_turns() -> None:
+    from app.production.screenplay_repair import (
+        _dialogue_chain_replacement_is_local,
+        _normalize_dialogue_source_references,
+    )
+
+    script = _minimal_script(
+        full_script_text=(
+            "【场1】夜 / 场地\n"
+            "甲：救命。\n"
+            "乙：你怎么在这里？\n"
+            "丙（大声），飞！\n"
+            "甲：别听他说，我是被抓来的。"
+        ),
+        dialogue_chains=[
+            KeyDialogueChain(
+                chain_id="DC1",
+                topic="获救说明",
+                turns=[
+                    KeyDialogueTurn(
+                        speaker="甲",
+                        line="救命。",
+                        function="trigger",
+                        source_text="救命。",
+                    ),
+                    KeyDialogueTurn(
+                        speaker="甲",
+                        line="别听他说，我是被抓来的。",
+                        function="response",
+                        source_text="别听他说，我是被抓来的。",
+                    ),
+                ],
+            ),
+        ],
+    )
+    document = screenplay_to_document(script)
+    repaired_turns = [
+        {
+            "speaker": "甲",
+            "line": "救命。",
+            "function": "trigger",
+            "source_text": "救命。",
+        },
+        {
+            "speaker": "乙",
+            "line": "你怎么在这里？",
+            "function": "question",
+            "source_text": "你怎么在这里？",
+        },
+        {
+            "speaker": "丙",
+            "line": "飞！",
+            "function": "statement",
+            "source_text": "飞！",
+        },
+        {
+            "speaker": "甲",
+            "line": "别听他说，我是被抓来的。",
+            "function": "response",
+            "source_text": "别听他说，我是被抓来的。",
+        },
+    ]
+
+    assert _dialogue_chain_replacement_is_local(
+        document,
+        chain_id="DC1",
+        turns=repaired_turns,
+    )
+    assert not _dialogue_chain_replacement_is_local(
+        document,
+        chain_id="DC1",
+        turns=repaired_turns + [{
+            "speaker": "乙",
+            "line": "正文中不存在的新增对白。",
+            "function": "statement",
+            "source_text": "原文叙述",
+        }],
+    )
+    assert not _dialogue_chain_replacement_is_local(
+        document,
+        chain_id="DC1",
+        turns=repaired_turns[1:],
+    )
+    patched, _ = apply_field_patch(
+        document,
+        path="turns",
+        value=repaired_turns,
+        target={"kind": "future_dialogue_container", "id": "DC1"},
+    )
+    projected = document_to_screenplay(patched)
+    assert "丙：飞！" in projected.full_script_text
+    assert "丙（大声），飞！" not in projected.full_script_text
+
+    source = (
+        "“不止是我，还有附近县其他几人，我们都在这里，"
+        "孟兄先别说了，快救我们出去。”"
+    )
+    normalized = _normalize_dialogue_source_references(
+        {
+            "speaker": "甲",
+            "line": "不止是我，还有附近县其他几人，孟兄快救我们出去。",
+            "source_text": "不止是我，还有附近县其他几人，孟兄快救我们出去。",
+        },
+        source,
+    )
+    assert normalized["source_text"] in source
+    assert "我们都在这里" in normalized["source_text"]
+
+
 def test_document_projection_inserts_missing_chain_turn_next_to_sibling() -> None:
     script = _minimal_script(
         scene_outline=[
@@ -445,6 +676,84 @@ def test_document_projection_inserts_missing_chain_turn_next_to_sibling() -> Non
     assert "林澈：保险仓盖好了，退到安全线外。\n苏禾：合闸。" in projected.full_script_text
     assert projected.full_script_text.count("苏禾：合闸。") == 1
     assert projected_twice.full_script_text.count("苏禾：合闸。") == 1
+
+
+def test_document_projection_removes_legacy_cross_scene_prefixed_duplicate() -> None:
+    script = _minimal_script(
+        scene_outline=[
+            ScriptScene(
+                scene_no=1,
+                scene_heading="【场1】夜 / 山顶",
+                story_function="建立等待状态",
+                characters=["甲"],
+                summary="甲在山顶等待消息并观察远处动静。",
+                conflict="消息迟迟没有出现",
+                turn="远处传来呼喊",
+                source_basis="甲在山顶等待消息。",
+            ),
+            ScriptScene(
+                scene_no=2,
+                scene_heading="【场2】夜 / 山腰",
+                story_function="完成问答并交付真相",
+                characters=["甲", "乙"],
+                summary="乙追问真相，甲说明自己被人抓来。",
+                conflict="乙不确定甲是否可信",
+                turn="甲交代被抓经过",
+                source_basis="甲说明自己被人抓来。",
+            ),
+        ],
+        full_script_text=(
+            "【场1】夜 / 山顶\n"
+            "甲：甲：别听他说，我是被抓来的。\n"
+            "【场2】夜 / 山腰\n"
+            "乙：你怎么在这里？\n"
+            "甲：别听他说，我是被抓来的。"
+        ),
+        dialogue_chains=[
+            KeyDialogueChain(
+                chain_id="DC1",
+                topic="被抓经过",
+                turns=[
+                    KeyDialogueTurn(
+                        speaker="乙",
+                        line="你怎么在这里？",
+                        function="question",
+                        source_text="你怎么在这里？",
+                    ),
+                    KeyDialogueTurn(
+                        speaker="甲",
+                        line="别听他说，我是被抓来的。",
+                        function="response",
+                        source_text="别听他说，我是被抓来的。",
+                    ),
+                ],
+            ),
+        ],
+    )
+
+    projected = document_to_screenplay(screenplay_to_document(script))
+
+    assert "甲：甲：别听他说" not in projected.full_script_text
+    assert projected.full_script_text.count("甲：别听他说，我是被抓来的。") == 1
+    assert projected.scene_outline[1].scene_no == 2
+
+
+def test_context_gap_skips_unsafe_rederive_and_trigger_insertion() -> None:
+    from app.production.screenplay_repair import plan_screenplay_patch
+
+    issue = structured_issue(
+        code="KEY_LINE_MISSING",
+        message=(
+            "主线对白上下文断裂：甲：别听他说，我是被抓来的。；"
+            "必须把同一场前两轮内另一角色的触发台词也列入 key_lines"
+        ),
+        subject="screenplay",
+        path="/dialogue_chains",
+        rule_id="key_line_context",
+        stage="screenplay",
+    )
+
+    assert plan_screenplay_patch(issue, _minimal_script()) == []
 
 
 def test_patch_planner_recognizes_legacy_rederive_and_repairs_opening_anchor():
@@ -674,6 +983,61 @@ def test_cross_scene_dialogue_chain_is_split_without_rewriting_body() -> None:
     assert result.dialogue_chains[1].chain_id == "DC2"
     assert result.full_script_text == before_body
     assert touched == ["dialogue_chains", "DC1", "DC2"]
+
+
+@pytest.mark.asyncio
+async def test_narrative_screenplay_uses_deterministic_document_patch_first(
+    monkeypatch,
+) -> None:
+    from app.production import screenplay_repair
+
+    script = _minimal_script(
+        narrative_plan=NarrativeContinuityPlan(scope_id="ep_p"),
+        dialogue_chains=[KeyDialogueChain(
+            chain_id="DC1",
+            topic="宣布与回应",
+            turns=[
+                KeyDialogueTurn(
+                    speaker="甲",
+                    line="结果公布。",
+                    function="announcement",
+                    source_text="结果公布。",
+                ),
+                KeyDialogueTurn(
+                    speaker="乙",
+                    line="我不接受。",
+                    function="response",
+                    source_text="我不接受。",
+                ),
+            ],
+        )],
+    )
+    issue = structured_issue(
+        code="KEY_LINE_MISSING",
+        message="dialogue_chains[0] 被拆到多个场次；同一触发→回应链必须在同一场完成",
+        subject="screenplay",
+        path="/dialogue_chains",
+        stage="screenplay",
+    )
+
+    async def forbidden_semantic_planner(*_args, **_kwargs):
+        raise AssertionError("文档结构问题不应调用叙事图语义规划器")
+
+    monkeypatch.setattr(
+        screenplay_repair,
+        "_llm_field_patch",
+        forbidden_semantic_planner,
+    )
+
+    operations = await screenplay_repair._plan_screenplay_repair_operations(
+        issue,
+        script,
+        source_text="原文",
+        strategy_history={},
+    )
+
+    assert len(operations) == 1
+    assert operations[0].op == "split_dialogue_chain_by_scene"
 
 
 def test_full_regen_denied_is_a_policy_conflict_not_a_media_error():
@@ -1211,3 +1575,419 @@ def test_apply_screenplay_patch_cas_and_noop(monkeypatch):
     )
     assert not noop.ok
     assert "no-op" in (noop.error or "")
+
+
+def test_source_span_normalizer_maps_hard_wrapped_import_text():
+    from app.narrative import (
+        normalize_source_evidence_text,
+        validate_screenplay_narrative,
+    )
+    from app.production.screenplay_repair import (
+        _normalize_screenplay_narrative_graph,
+    )
+
+    chapter = "开头。\n阿宾考上私立专校，在学校旁边租了间学\n生房，只在周末回家。\n结尾。"
+    excerpt = "阿宾考上私立专校，在学校旁边租了间学生房，只在周末回家。"
+    script = _minimal_script(
+        narrative_plan=NarrativeContinuityPlan.model_validate({
+            "scope_id": "ep_p",
+            "source_evidence": [{
+                "source_evidence_id": "SE-1",
+                "source_span": {"chapter_id": "1", "start": 0, "end": 2},
+                "verbatim_excerpt": excerpt,
+            }],
+        }),
+    )
+
+    changes = _normalize_screenplay_narrative_graph(
+        script,
+        authorized_source_chapters={"1": chapter},
+    )
+
+    evidence = script.narrative_plan.source_evidence[0]
+    raw_slice = chapter[evidence.source_span.start:evidence.source_span.end]
+    assert normalize_source_evidence_text(raw_slice) == (
+        normalize_source_evidence_text(excerpt)
+    )
+    assert any(change["kind"] == "source_span" for change in changes)
+    validation_errors = validate_screenplay_narrative(
+        script,
+        require=True,
+        expected_scope_id="ep_p",
+        authorized_source_chapters={"1": chapter},
+    )
+    assert not any(
+        "SOURCE_SPAN_EXACT_MISMATCH" in error for error in validation_errors
+    )
+
+
+def test_spine_spoken_clause_accepts_visible_action_performance():
+    from app.validators import validate_screenplay_spine_delivery
+
+    script = _minimal_script(
+        plot_spine=PlotSpine(
+            episode_premise="胡太太邀请阿宾帮忙整理家",
+            spine_beats=[PlotSpineBeat(
+                beat_id="S05",
+                who="胡太太",
+                does="邀请阿宾帮忙整理家，许诺晚上请他吃饭，阿宾答应",
+                turn="两人开始共同整理",
+                must_keep=True,
+            )],
+            must_keep_ending="两人开始共同整理客厅",
+            drop_list=["无关闲聊", "重复环境描写"],
+        ),
+    )
+    action_text = (
+        "胡太太邀请阿宾帮忙整理家，许诺晚上请他吃饭，"
+        "阿宾点头答应，两人开始搬动家具。"
+    )
+
+    assert validate_screenplay_spine_delivery(
+        script,
+        action_text=action_text,
+    ) == []
+
+
+def test_source_span_normalizer_expands_one_uniquely_proven_elision():
+    from app.narrative import (
+        normalize_source_evidence_text,
+        validate_screenplay_narrative,
+    )
+    from app.production.screenplay_repair import (
+        _normalize_screenplay_narrative_graph,
+    )
+
+    first = "胡太太请阿宾帮忙拿包裹，两人一起走到六楼客厅。"
+    omitted = "阿宾上楼时看见窗外景色，又在门口停留了一会儿。"
+    second = "胡太太询问阿宾下午是否有空，请他一起整理家具。"
+    chapter = f"前文。{first}{omitted}{second}后文。"
+    excerpt = first + second
+    script = _minimal_script(
+        narrative_plan=NarrativeContinuityPlan.model_validate({
+            "scope_id": "ep_p",
+            "source_evidence": [{
+                "source_evidence_id": "SE-1",
+                "source_span": {"chapter_id": "1", "start": 0, "end": 2},
+                "verbatim_excerpt": excerpt,
+            }],
+        }),
+    )
+
+    changes = _normalize_screenplay_narrative_graph(
+        script,
+        authorized_source_chapters={"1": chapter},
+    )
+
+    evidence = script.narrative_plan.source_evidence[0]
+    raw_slice = chapter[evidence.source_span.start:evidence.source_span.end]
+    assert normalize_source_evidence_text(raw_slice) == (
+        normalize_source_evidence_text(evidence.verbatim_excerpt)
+    )
+    assert omitted in evidence.verbatim_excerpt
+    assert any(
+        change["kind"] == "source_excerpt_expanded" for change in changes
+    )
+    validation_errors = validate_screenplay_narrative(
+        script,
+        require=True,
+        expected_scope_id="ep_p",
+        authorized_source_chapters={"1": chapter},
+    )
+    assert not any(
+        "SOURCE_SPAN_EXACT_MISMATCH" in error for error in validation_errors
+    )
+
+
+def test_gate_failure_summary_prioritizes_actual_failed_issue():
+    from app.production.screenplay_repair import _gate_failure_message
+
+    backlog = structured_issue(
+        code="KEY_LINE_MISSING",
+        message="对白链跨场",
+        subject="screenplay",
+        path="/dialogue_chains",
+        stage="screenplay",
+    )
+    failed = structured_issue(
+        code="AUDIENCE_BELIEF_DIFF_UNASSIGNED",
+        message="观众信念变化缺少命题绑定",
+        subject="screenplay",
+        path="/audience_paths/XP-1",
+        stage="screenplay",
+    )
+
+    message = _gate_failure_message([backlog, failed], failed_issue=failed)
+
+    assert "自动修复停止于 AUDIENCE_BELIEF_DIFF_UNASSIGNED" in message
+    assert message.index(failed.message) < message.index(backlog.message)
+
+
+def test_issue_selection_preserves_validator_order_when_metadata_ties():
+    from app.production.screenplay_repair import _choose_issue
+
+    first = structured_issue(
+        code="Z_FIRST_BY_VALIDATOR",
+        message="上游问题",
+        subject="screenplay",
+        stage="screenplay",
+    )
+    second = structured_issue(
+        code="A_SECOND_BY_VALIDATOR",
+        message="下游问题",
+        subject="screenplay",
+        stage="screenplay",
+    )
+
+    assert _choose_issue([first, second]) is first
+
+
+def test_narrative_patch_retargets_ancestor_to_named_direct_field_owner():
+    from app.production.screenplay_repair import _resolve_narrative_patch_owner
+
+    plan = NarrativeContinuityPlan.model_validate({
+        "scope_id": "ep_p",
+        "experience_intents": [{
+            "experience_intent_id": "XI-1",
+            "scope_id": "ep_p",
+            "director_objective": "测试观众路径",
+            "audience_paths": [
+                {
+                    "audience_path_id": "XP-AP1-1",
+                    "audience_prior_id": "AP-1",
+                    "audience_state_in_id": "AS-1-IN",
+                    "audience_state_out_target_id": "AS-1-OUT",
+                    "target_deltas": [],
+                },
+                {
+                    "audience_path_id": "XP-AP2-1",
+                    "audience_prior_id": "AP-2",
+                    "audience_state_in_id": "AS-2-IN",
+                    "audience_state_out_target_id": "AS-2-OUT",
+                    "target_deltas": [],
+                },
+            ],
+        }],
+    }).model_dump(mode="json")
+    issue = structured_issue(
+        code="AUDIENCE_BELIEF_DIFF_UNASSIGNED",
+        message="XP-AP2-1 信念变化没有绑定相应命题",
+        subject="screenplay",
+        path="/audience_belief_diff_unassigned",
+        stage="screenplay",
+    )
+
+    resolved = _resolve_narrative_patch_owner(
+        plan["experience_intents"],
+        node_id="XI-1",
+        patch_field="target_deltas",
+        issue=issue,
+    )
+
+    assert resolved is not None
+    owner, owner_id = resolved
+    assert owner_id == "XP-AP2-1"
+    assert owner["audience_path_id"] == "XP-AP2-1"
+
+
+def test_narrative_node_alias_resolves_unique_schema_collection():
+    from app.production.screenplay_repair import (
+        _narrative_collection_for_node,
+    )
+
+    plan = NarrativeContinuityPlan.model_validate({
+        "scope_id": "ep_p",
+        "events": [
+            {"event_id": "E3", "effects_add": ["F-5"]},
+            {"event_id": "E4", "effects_add": ["F-5"]},
+        ],
+    }).model_dump(mode="json")
+
+    assert _narrative_collection_for_node(plan, "E3") == "events"
+    assert _narrative_collection_for_node(plan, "missing") is None
+
+
+def test_dialogue_turn_target_derives_chain_and_index_from_stable_turn_id():
+    from app.production.screenplay_document import screenplay_to_document
+    from app.production.screenplay_repair import (
+        _resolve_dialogue_chain_turn_target,
+    )
+
+    script = _minimal_script(dialogue_chains=[KeyDialogueChain(
+        chain_id="DC3",
+        topic="整理家",
+        turns=[
+            KeyDialogueTurn(
+                speaker="甲",
+                line="开始整理。",
+                function="statement",
+                source_text="开始整理。",
+            ),
+            KeyDialogueTurn(
+                speaker="乙",
+                line="好的。",
+                function="response",
+                source_text="好的。",
+            ),
+        ],
+    )])
+
+    target = _resolve_dialogue_chain_turn_target(
+        screenplay_to_document(script),
+        target={"kind": "dialogue_chain_turn", "id": "DC3-T2"},
+        patch_field="line",
+    )
+
+    assert target is not None
+    assert target["chain_id"] == "DC3"
+    assert target["turn_index"] == 1
+
+
+def test_candidate_executability_uses_production_patch_path():
+    from app.production.screenplay_repair import (
+        _candidate_is_executable,
+    )
+
+    document = screenplay_to_document(_minimal_script())
+    destructive = {
+        "operations": [{
+            "op": "replace_field",
+            "path": "dialogue_turns",
+            "target": {"kind": "scene", "id": "SC01"},
+            "value": [],
+        }],
+    }
+    bounded = {
+        "operations": [{
+            "op": "replace",
+            "path": "text",
+            "target": {"kind": "future_action_type", "id": "AC01-01"},
+            "value": "甲在场地中央站定，准备应战。",
+        }],
+    }
+
+    assert _candidate_is_executable(destructive, document) is False
+    assert _candidate_is_executable(bounded, document) is True
+
+
+@pytest.mark.asyncio
+async def test_semantic_patch_retries_rejected_and_duplicate_candidates(monkeypatch):
+    from app.production import screenplay_repair
+    from app.production.patch import PatchOperation
+
+    issue = structured_issue(
+        code="AUDIENCE_BELIEF_DIFF_UNASSIGNED",
+        message="XP-1 缺少命题绑定",
+        subject="screenplay",
+        path="/audience_paths/XP-1",
+        stage="screenplay",
+    )
+    rejected = PatchOperation(
+        op="replace_field",
+        path="stakes",
+        value="失败代价",
+        target={"kind": "metadata", "id": "stakes"},
+    )
+    fresh = PatchOperation(
+        op="replace_field",
+        path="obstacle",
+        value="新增阻力",
+        target={"kind": "metadata", "id": "obstacle"},
+    )
+    attempts: list[tuple[int, list[str]]] = []
+
+    async def fake_once(*_args, planner_attempt=1, rejection_feedback=None, **_kwargs):
+        attempts.append((planner_attempt, list(rejection_feedback or [])))
+        if planner_attempt == 1:
+            return []
+        if planner_attempt == 2:
+            return [rejected]
+        return [fresh]
+
+    monkeypatch.setattr(screenplay_repair, "_llm_field_patch_once", fake_once)
+
+    operations = await screenplay_repair._llm_field_patch(
+        issue,
+        _minimal_script(),
+        source_text="原文",
+        strategy_history=["fill_stakes"],
+    )
+
+    assert operations == [fresh]
+    assert [attempt for attempt, _feedback in attempts] == [1, 2, 3]
+    assert not attempts[0][1]
+    assert "未通过本地结构" in attempts[1][1][0]
+    assert "fill_stakes" in attempts[2][1][-1]
+
+
+def test_screenplay_narrative_gate_is_quality_error():
+    from app.production.screenplay_repair import ScreenplayNarrativeGateError
+
+    assert errors.classify(ScreenplayNarrativeGateError("门禁未通过")) == (
+        "quality_gate",
+        "QA",
+    )
+
+
+@pytest.mark.asyncio
+async def test_recorded_narrative_gate_preserves_repair_state_and_partial_run(
+    monkeypatch,
+):
+    from app.domain import screenplay_ops
+    from app.production import screenplay_repair
+
+    message = "剧本工作稿已保留，但叙事/质量硬门禁仍未通过，禁止发布"
+
+    async def fake_discovery(*_args, **_kwargs):
+        return {"added": [], "resolutions": [], "warnings": []}
+
+    async def fake_production(*_args, **_kwargs):
+        conn = db.get_conn()
+        conn.execute(
+            "UPDATE episodes SET screenplay_status='repairing', screenplay_error=? "
+            "WHERE id='ep_p'",
+            (message,),
+        )
+        conn.commit()
+        raise screenplay_repair.ScreenplayNarrativeGateError(message)
+
+    monkeypatch.setattr(
+        screenplay_ops,
+        "_screenplay_character_discovery",
+        fake_discovery,
+    )
+    monkeypatch.setattr(
+        screenplay_repair,
+        "run_screenplay_production",
+        fake_production,
+    )
+    recorder = screenplay_ops._new_screenplay_recorder("ep_p")
+
+    result = await screenplay_ops._recorded_screenplay_task("ep_p", recorder)
+
+    assert result is None
+    episode = db.get_conn().execute(
+        "SELECT screenplay_status, screenplay_error FROM episodes WHERE id='ep_p'"
+    ).fetchone()
+    run = db.get_conn().execute(
+        "SELECT status, failure_code, failure_message FROM workflow_runs WHERE id=?",
+        (recorder.run_id,),
+    ).fetchone()
+    step = db.get_conn().execute(
+        "SELECT status, error_code FROM step_runs WHERE run_id=? AND step_key='screenplay'",
+        (recorder.run_id,),
+    ).fetchone()
+    error_log = db.get_conn().execute(
+        "SELECT code, category FROM error_logs WHERE action='screenplay_repair' "
+        "ORDER BY ts DESC LIMIT 1"
+    ).fetchone()
+
+    assert episode["screenplay_status"] == "repairing"
+    assert episode["screenplay_error"] == message
+    assert run["status"] == "PARTIAL"
+    assert run["failure_code"] == "PARTIAL_RESULT"
+    assert run["failure_message"] == message
+    assert step["status"] == "FAILED"
+    assert step["error_code"] == "SCREENPLAYNARRATIVEGATEERROR"
+    assert error_log["code"] == "QA"
+    assert error_log["category"] == "quality_gate"

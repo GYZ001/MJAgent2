@@ -127,6 +127,156 @@ def test_project_delete_removes_harness_evidence_and_files(tmp_path, monkeypatch
     assert not (project_root / "p1").exists()
 
 
+def test_project_evidence_delete_chunks_large_workflow_frontier(tmp_path, monkeypatch) -> None:
+    from app.domain import projects as projects_api
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "delete-project-large-frontier.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    conn = db.get_conn()
+
+    conn.execute(
+        "INSERT INTO projects(id,name,status,created_at) VALUES('p-big','P','planned',1)"
+    )
+    conn.execute(
+        """INSERT INTO workflow_runs(
+               id,workflow_type,scope_type,scope_id,status,input_fingerprint,updated_at
+           ) VALUES('run-root','scene_references','project','p-big','SUCCEEDED','fp',1)"""
+    )
+    child_count = 30
+    conn.executemany(
+        """INSERT INTO workflow_runs(
+               id,workflow_type,scope_type,scope_id,parent_run_id,status,
+               input_fingerprint,updated_at
+           ) VALUES(?,?,?,?,?,'SUCCEEDED','fp',1)""",
+        [
+            (
+                f"run-child-{index}",
+                "scene_references",
+                "internal",
+                f"external:{index}",
+                "run-root",
+            )
+            for index in range(child_count)
+        ],
+    )
+    run_ids = ["run-root", *(f"run-child-{index}" for index in range(child_count))]
+    conn.executemany(
+        "INSERT INTO step_runs(id,run_id,step_key,status,started_at) "
+        "VALUES(?,?,?, 'SUCCEEDED', 1)",
+        [(f"step-{index}", run_id, "scene_references") for index, run_id in enumerate(run_ids)],
+    )
+    conn.executemany(
+        """INSERT INTO artifacts(
+               id,type,scope_type,scope_id,version,status,trust_level,
+               content_hash,created_by_step_run_id,created_at
+           ) VALUES(?,?,?,?,1,'approved','T3',?,?,1)""",
+        [
+            (
+                f"artifact-{index}",
+                "trace",
+                "internal",
+                f"external:{index}",
+                f"hash-{index}",
+                f"step-{index}",
+            )
+            for index in range(len(run_ids))
+        ],
+    )
+    conn.executemany(
+        """INSERT INTO evaluations(
+               id,artifact_id,step_run_id,evaluator_type,evaluator_name,evaluator_version,
+               status,hard_gate_passed,created_at
+           ) VALUES(?,?,?,?, 'qa', '1', 'passed', 1, 1)""",
+        [
+            (f"eval-{index}", f"artifact-{index}", f"step-{index}", "rule")
+            for index in range(len(run_ids))
+        ],
+    )
+    conn.executemany(
+        """INSERT INTO gate_decisions(
+               id,artifact_id,run_id,gate_key,decision,decided_by,reason,created_at
+           ) VALUES(?,?,?,?, 'approve', 'test', 'ok', 1)""",
+        [
+            (f"gate-{index}", f"artifact-{index}", run_id, "quality")
+            for index, run_id in enumerate(run_ids)
+        ],
+    )
+    conn.executemany(
+        """INSERT INTO run_events(
+               id,run_id,step_run_id,ts,event_type,severity,message
+           ) VALUES(?,?,?,?, 'STEP_FINISHED', 'info', 'done')""",
+        [
+            (f"event-{index}", run_id, f"step-{index}", 1)
+            for index, run_id in enumerate(run_ids)
+        ],
+    )
+    conn.execute(
+        """INSERT INTO provider_calls(
+               id,ts,kind,status,run_id,step_run_id
+           ) VALUES(1,1,'text','INTERRUPTED',?,?)""",
+        (run_ids[0], "step-0"),
+    )
+    conn.execute(
+        """INSERT INTO provider_calls(
+               id,ts,kind,status,run_id,step_run_id,supersedes_call_id
+           ) VALUES(2,2,'text','SUCCEEDED',?,?,1)""",
+        (run_ids[1], "step-1"),
+    )
+    conn.execute("UPDATE provider_calls SET superseded_by_call_id=2 WHERE id=1")
+    conn.execute(
+        """INSERT INTO provider_calls(
+               id,ts,kind,status,supersedes_call_id
+           ) VALUES(3,3,'text','SUCCEEDED',1)"""
+    )
+    conn.executemany(
+        """INSERT INTO review_action_audit(
+               id,action,scope_type,scope_id,decided_by,created_at
+           ) VALUES(?,?,?,?, 'test', 1)""",
+        [
+            ("audit-project", "adopt", "project", "p-big"),
+            ("audit-prefixed", "adopt", "reference_asset", "p-big:scene:1"),
+        ],
+    )
+    conn.commit()
+
+    class LimitedConn:
+        def __init__(self, wrapped, max_params: int) -> None:
+            self.wrapped = wrapped
+            self.max_params = max_params
+
+        def execute(self, sql, params=()):
+            params = tuple(params or ())
+            assert len(params) <= self.max_params
+            return self.wrapped.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self.wrapped, name)
+
+    monkeypatch.setattr(projects_api, "_SQLITE_IN_CHUNK_SIZE", 8)
+    result = projects_api._delete_project_evidence(LimitedConn(conn, 20), "p-big")
+
+    assert result == {"artifacts": len(run_ids), "runs": len(run_ids), "steps": len(run_ids)}
+    for table in (
+        "workflow_runs",
+        "step_runs",
+        "run_events",
+        "artifacts",
+        "evaluations",
+        "gate_decisions",
+        "review_action_audit",
+    ):
+        assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+    remaining_provider_calls = [
+        dict(row) for row in conn.execute(
+            "SELECT id,supersedes_call_id,superseded_by_call_id FROM provider_calls"
+        ).fetchall()
+    ]
+    assert remaining_provider_calls == [
+        {"id": 3, "supersedes_call_id": None, "superseded_by_call_id": None}
+    ]
+
+
 def test_episode_delete_removes_only_target_and_all_downstream_assets(tmp_path, monkeypatch) -> None:
     from app import config
     from app.domain import projects as projects_api

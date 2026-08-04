@@ -56,6 +56,11 @@ def _norm(value: object) -> str:
     return " ".join(str(value or "").split())
 
 
+def normalize_source_evidence_text(value: object) -> str:
+    """Ignore import-time wrapping while preserving every non-whitespace character."""
+    return "".join(str(value or "").split())
+
+
 def _ids(items: Iterable[Any], field: str, errors: list[str], label: str) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for index, item in enumerate(items):
@@ -459,7 +464,7 @@ def validate_screenplay_narrative(
     if chapter_text_by_id is not None:
         authorized_chapter_ids = set(chapter_text_by_id)
     for evidence_id, evidence in index.source_evidence.items():
-        excerpt = _norm(evidence.verbatim_excerpt)
+        excerpt = normalize_source_evidence_text(evidence.verbatim_excerpt)
         span = evidence.source_span
         if not _norm(span.chapter_id):
             errors.append(f"[SOURCE_SPAN_CHAPTER_MISSING] {evidence_id}.source_span.chapter_id 不能为空")
@@ -483,7 +488,9 @@ def validate_screenplay_narrative(
                     "超出对应授权章节正文"
                 )
             else:
-                exact_slice = _norm(chapter_text[span.start:span.end])
+                exact_slice = normalize_source_evidence_text(
+                    chapter_text[span.start:span.end]
+                )
                 if exact_slice != excerpt:
                     errors.append(
                         f"[SOURCE_SPAN_EXACT_MISMATCH] {evidence_id} 的章节内 "
@@ -493,7 +500,9 @@ def validate_screenplay_narrative(
             if span.end > len(raw_source):
                 errors.append(f"[SOURCE_SPAN_OUT_OF_RANGE] {evidence_id}.source_span.end 超出授权原文")
             else:
-                exact_slice = _norm(raw_source[span.start:span.end])
+                exact_slice = normalize_source_evidence_text(
+                    raw_source[span.start:span.end]
+                )
                 if exact_slice != excerpt:
                     errors.append(
                         f"[SOURCE_SPAN_EXACT_MISMATCH] {evidence_id} 的 start/end 切片与逐字摘录不一致"
