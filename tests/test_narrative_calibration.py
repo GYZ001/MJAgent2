@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import threading
 
 from pydantic import ValidationError
@@ -410,3 +411,20 @@ def test_final_human_observation_cannot_rewrite_frozen_recall(
             narrative_review_artifact_ids=[review["id"]],
             frozen_recall_artifact_id=freeze["id"],
         )
+
+
+def test_board_ui_exposes_two_stage_human_calibration_without_internal_codes() -> None:
+    source = (
+        Path(__file__).parents[1]
+        / "frontend"
+        / "src"
+        / "pages"
+        / "BoardPage.tsx"
+    ).read_text(encoding="utf-8")
+
+    assert "narrative-calibration/freeze" in source
+    assert "narrative-calibration/observations" in source
+    assert source.index("冻结首次复述") < source.index("提交真人观察")
+    assert "title={freezeBlockedReason || undefined}" in source
+    assert "human_one_watch_calibration_report" not in source
+    assert "NARRATIVE_CALIBRATION_REQUIRED" not in source

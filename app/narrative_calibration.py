@@ -1113,6 +1113,16 @@ def persist_calibration_report(
     narrative_review_artifact_ids: Sequence[str],
 ) -> dict[str, Any]:
     """Persist a calibration report and bind every raw/review parent."""
+    previous_rows = evidence_repository.get_conn().execute(
+        """SELECT id FROM artifacts
+           WHERE type='human_one_watch_calibration_report'
+             AND scope_type='calibration' AND scope_id=?
+             AND status='approved'""",
+        (GLOBAL_CALIBRATION_SCOPE_ID,),
+    ).fetchall()
+    previous_approved_ids = {
+        str(row["id"]) for row in previous_rows
+    }
     review_ids = list(dict.fromkeys(str(item) for item in narrative_review_artifact_ids if str(item)))
     _require_review_lineage(review_ids)
     if set(report.narrative_review_artifact_ids) - set(review_ids):
@@ -1180,11 +1190,22 @@ def persist_calibration_report(
         },
     )
     if calibrated:
-        return evidence_repository.commit_artifact(
+        committed = evidence_repository.commit_artifact(
             None,
             artifact["id"],
             [evaluation],
         )
+        if previous_approved_ids:
+            conn = evidence_repository.get_conn()
+            marks = ",".join("?" for _ in previous_approved_ids)
+            conn.execute(
+                f"""UPDATE episodes
+                       SET narrative_status='needs_review'
+                     WHERE narrative_calibration_artifact_id IN ({marks})""",
+                tuple(sorted(previous_approved_ids)),
+            )
+            conn.commit()
+        return committed
     evidence_repository.create_evaluation(artifact["id"], evaluation)
     return evidence_repository.get_artifact(artifact["id"]) or artifact
 
@@ -1267,6 +1288,7 @@ def require_current_calibration_authority(
         )
     ]
     verified_observation_ids: set[str] = set()
+    verified_observations: list[HumanOneWatchObservation] = []
     for observation_artifact_id in observation_parent_ids:
         observation, observation_errors = _verified_human_observation_artifact(
             observation_artifact_id,
@@ -1275,10 +1297,68 @@ def require_current_calibration_authority(
         errors.extend(observation_errors)
         if observation is not None:
             verified_observation_ids.add(observation.observation_id)
+            verified_observations.append(observation)
     if verified_observation_ids != set(report.observation_ids):
         errors.append(
             "[NARRATIVE_CALIBRATION_OBSERVATION_LINEAGE_INVALID] "
             "校准报告与真人观察父证据不完全一致"
+        )
+    observed_scope_ids = {
+        item.scope_id for item in verified_observations
+    }
+    observed_review_ids = {
+        item.narrative_review_artifact_id for item in verified_observations
+    }
+    observed_participants = {
+        item.participant_id_hash for item in verified_observations
+    }
+    if observed_scope_ids != set(report.scope_ids) or len(observed_scope_ids) < 2:
+        errors.append(
+            "[NARRATIVE_CALIBRATION_SCOPE_COVERAGE_INVALID] "
+            "校准报告必须与至少两个真人样本作用域完全一致"
+        )
+    if observed_review_ids != set(report.narrative_review_artifact_ids):
+        errors.append(
+            "[NARRATIVE_CALIBRATION_REVIEW_COVERAGE_INVALID] "
+            "校准报告与真人观察绑定的审读版本不完全一致"
+        )
+    if not set(DEFAULT_CROSS_CONTENT_DIMENSIONS).issubset(
+        report.required_dimension_axes
+    ):
+        errors.append(
+            "[NARRATIVE_CALIBRATION_DIMENSION_COVERAGE_INVALID] "
+            "校准缺少 genre/form 跨内容维度"
+        )
+    summary = report.sample_summary
+    if (
+        int(summary.get("observation_count") or 0)
+        != len(verified_observations)
+        or int(summary.get("participant_count") or 0)
+        != len(observed_participants)
+        or int(summary.get("scope_count") or 0)
+        != len(observed_scope_ids)
+    ):
+        errors.append(
+            "[NARRATIVE_CALIBRATION_SAMPLE_SUMMARY_DRIFT] "
+            "校准样本汇总与不可变真人观察不一致"
+        )
+    expected_pair_keys = {
+        (
+            observation.scope_id,
+            result.audience_prior_id,
+            result.target_delta_id,
+        )
+        for observation in verified_observations
+        for result in observation.target_delta_observations
+    }
+    report_pair_keys = {
+        (item.scope_id, item.audience_prior_id, item.target_delta_id)
+        for item in report.pair_results
+    }
+    if not expected_pair_keys or report_pair_keys != expected_pair_keys:
+        errors.append(
+            "[NARRATIVE_CALIBRATION_PAIR_RESULTS_DRIFT] "
+            "校准逐目标结果与真人观察不完全一致"
         )
     gate_rows = [
         item

@@ -159,6 +159,7 @@ class EpisodeVideoGenerationPlan(BaseModel):
     published_storyboard_artifact_hash: str = ""
     completion_certificate_id: str = ""
     narrative_review_artifact_id: str = ""
+    narrative_calibration_artifact_id: str = ""
     release_qualification_hash: str = ""
     capability_snapshot_id: str
     status: Literal["draft", "valid", "blocked", "superseded", "stale"] = "draft"
@@ -249,6 +250,9 @@ def current_storyboard_release_manifest(
     review_artifact_id = str(
         _row_value(episode, "narrative_review_artifact_id", "") or ""
     )
+    calibration_artifact_id = str(
+        _row_value(episode, "narrative_calibration_artifact_id", "") or ""
+    )
     from app.production.screenplay_authority import (
         episode_requires_immutable_screenplay_authority,
         resolve_downstream_screenplay,
@@ -268,6 +272,7 @@ def current_storyboard_release_manifest(
                 "screenplay_completion_certificate_id",
                 "screenplay_production_revision_id",
                 "narrative_review_artifact_id",
+                "narrative_calibration_artifact_id",
             )
         )
         if (
@@ -289,8 +294,9 @@ def current_storyboard_release_manifest(
         or published_artifact_id != projected_artifact_id
         or not certificate_id
         or not review_artifact_id
+        or not calibration_artifact_id
     ):
-        raise ValueError("叙事项目缺少当前分镜 Artifact/凭证/冷观众审读绑定")
+        raise ValueError("叙事项目缺少当前分镜 Artifact/凭证/冷观众审读/真人校准绑定")
     artifact_id = published_artifact_id or projected_artifact_id
     if not artifact_id:
         raise ValueError("当前分镜缺少已发布 Artifact")
@@ -348,12 +354,14 @@ def current_storyboard_release_manifest(
         "published_storyboard_artifact_hash": artifact_hash,
         "completion_certificate_id": certificate_id,
         "narrative_review_artifact_id": review_artifact_id,
+        "narrative_calibration_artifact_id": calibration_artifact_id,
     })
     return {
         "published_storyboard_artifact_id": artifact_id,
         "published_storyboard_artifact_hash": artifact_hash,
         "completion_certificate_id": certificate_id,
         "narrative_review_artifact_id": review_artifact_id,
+        "narrative_calibration_artifact_id": calibration_artifact_id,
         "release_qualification_hash": qualification_hash,
     }
 
@@ -368,6 +376,9 @@ def bind_plan_release_identity(
     plan.published_storyboard_artifact_hash = manifest["published_storyboard_artifact_hash"]
     plan.completion_certificate_id = manifest["completion_certificate_id"]
     plan.narrative_review_artifact_id = manifest["narrative_review_artifact_id"]
+    plan.narrative_calibration_artifact_id = manifest[
+        "narrative_calibration_artifact_id"
+    ]
     plan.release_qualification_hash = manifest["release_qualification_hash"]
     by_id = {str(row["id"]): row for row in shot_rows}
     aliases: dict[str, str] = {}
@@ -561,6 +572,7 @@ def validate_episode_plan(
             "published_storyboard_artifact_hash",
             "completion_certificate_id",
             "narrative_review_artifact_id",
+            "narrative_calibration_artifact_id",
             "release_qualification_hash",
         )
         for field in release_fields:
@@ -1234,11 +1246,12 @@ def publish_plan(plan: EpisodeVideoGenerationPlan, *, conn=None) -> EpisodeVideo
                id,episode_id,plan_revision,source_storyboard_revision_id,
                published_storyboard_artifact_id,published_storyboard_artifact_hash,
                completion_certificate_id,narrative_review_artifact_id,
+               narrative_calibration_artifact_id,
                release_qualification_hash,
                capability_snapshot_id,status,planner_provider,planner_model,
                planner_prompt_fingerprint,blockers_json,estimated_latency_ms,
                estimated_cost,critical_path_latency_ms,safe_parallelism_ratio,created_at
-           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             plan.episode_video_plan_id, plan.episode_id, plan.plan_revision,
             plan.source_storyboard_revision_id,
@@ -1246,6 +1259,7 @@ def publish_plan(plan: EpisodeVideoGenerationPlan, *, conn=None) -> EpisodeVideo
             plan.published_storyboard_artifact_hash,
             plan.completion_certificate_id,
             plan.narrative_review_artifact_id,
+            plan.narrative_calibration_artifact_id,
             plan.release_qualification_hash,
             plan.capability_snapshot_id,
             plan.status, plan.planner_provider, plan.planner_model,
@@ -1392,6 +1406,9 @@ def load_latest_plan(episode_id: str, *, conn=None) -> EpisodeVideoGenerationPla
         completion_certificate_id=_row_value(parent, "completion_certificate_id", ""),
         narrative_review_artifact_id=_row_value(
             parent, "narrative_review_artifact_id", "",
+        ),
+        narrative_calibration_artifact_id=_row_value(
+            parent, "narrative_calibration_artifact_id", "",
         ),
         release_qualification_hash=_row_value(
             parent, "release_qualification_hash", "",

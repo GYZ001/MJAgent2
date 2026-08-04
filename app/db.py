@@ -877,6 +877,7 @@ CREATE TABLE IF NOT EXISTS episode_video_generation_plans (
     published_storyboard_artifact_hash TEXT NOT NULL DEFAULT '',
     completion_certificate_id TEXT NOT NULL DEFAULT '',
     narrative_review_artifact_id TEXT NOT NULL DEFAULT '',
+    narrative_calibration_artifact_id TEXT NOT NULL DEFAULT '',
     release_qualification_hash TEXT NOT NULL DEFAULT '',
     capability_snapshot_id TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'draft',
@@ -1137,6 +1138,7 @@ MIGRATIONS = (
     "ALTER TABLE episode_video_generation_plans ADD COLUMN published_storyboard_artifact_hash TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE episode_video_generation_plans ADD COLUMN completion_certificate_id TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE episode_video_generation_plans ADD COLUMN narrative_review_artifact_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE episode_video_generation_plans ADD COLUMN narrative_calibration_artifact_id TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE episode_video_generation_plans ADD COLUMN release_qualification_hash TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE projects ADD COLUMN bible_feedback TEXT",  # 持久化重谱打回要求，供进程重启后恢复人物谱任务
     "ALTER TABLE projects ADD COLUMN portraits_status TEXT DEFAULT 'idle'",  # 按集刷新定妆照任务状态

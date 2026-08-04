@@ -128,31 +128,56 @@ def _install_passing_review_model(monkeypatch) -> None:
 
 
 def _install_global_calibration(review_artifact_id: str) -> dict:
+    secondary_review = evidence_repository.create_artifact(EvidenceArtifact(
+        type="narrative_review_report",
+        scope_type="episode",
+        scope_id="episode-generic-2",
+        status="validated",
+        trust_level="T2",
+        content={"decision": "revise"},
+    ))
     observation_artifacts = []
-    for ordinal, (prior_id, target_id, score) in enumerate((
-        ("AP-cold", "XD-cold", 0.95),
-        ("AP-context", "XD-context", 0.95),
-    ), start=1):
+    rows = (
+        (
+            "episode-generic", review_artifact_id,
+            "AP-cold", "XD-cold", 0.95, "genre-a", "form-a",
+        ),
+        (
+            "episode-generic", review_artifact_id,
+            "AP-context", "XD-context", 0.95, "genre-a", "form-a",
+        ),
+        (
+            "episode-generic-2", secondary_review["id"],
+            "AP-cold", "XD-cold", 0.2, "genre-b", "form-b",
+        ),
+        (
+            "episode-generic-2", secondary_review["id"],
+            "AP-context", "XD-context", 0.4, "genre-b", "form-b",
+        ),
+    )
+    for ordinal, (
+        scope_id, bound_review_id, prior_id, target_id, score, genre, form,
+    ) in enumerate(rows, start=1):
         observation_id = f"human-{ordinal}"
         freeze = HumanOneWatchFreeze(
             observation_id=observation_id,
             participant_id_hash=f"participant-{ordinal}",
-            scope_id="episode-generic",
+            scope_id=scope_id,
             audience_prior_id=prior_id,
-            narrative_review_artifact_id=review_artifact_id,
+            narrative_review_artifact_id=bound_review_id,
             watched_once=True,
             spontaneous_recall_frozen=True,
             spontaneous_recall={"free_text": "frozen test recall"},
-            content_dimensions={"genre": "test", "form": "test"},
+            content_dimensions={"genre": genre, "form": form},
         )
         freeze_artifact = evidence_repository.create_artifact(EvidenceArtifact(
             type="human_one_watch_spontaneous_recall",
             scope_type="episode",
-            scope_id="episode-generic",
+            scope_id=scope_id,
             status="validated",
             trust_level="T4",
             content=freeze.model_dump(mode="json"),
-            parent_artifact_ids=[review_artifact_id],
+            parent_artifact_ids=[bound_review_id],
             contract_version="human-one-watch.v1",
         ))
         evidence_repository.create_evaluation(
@@ -179,12 +204,12 @@ def _install_global_calibration(review_artifact_id: str) -> dict:
             EvidenceArtifact(
                 type="human_one_watch_observation",
                 scope_type="episode",
-                scope_id="episode-generic",
+                scope_id=scope_id,
                 status="validated",
                 trust_level="T4",
                 content=observation.model_dump(mode="json"),
                 parent_artifact_ids=[
-                    review_artifact_id,
+                    bound_review_id,
                     freeze_artifact["id"],
                 ],
                 contract_version="human-one-watch.v1",
@@ -211,7 +236,10 @@ def _install_global_calibration(review_artifact_id: str) -> dict:
             artifact["content"]["observation_id"]
             for artifact in observation_artifacts
         ],
-        narrative_review_artifact_ids=[review_artifact_id],
+        narrative_review_artifact_ids=[
+            review_artifact_id,
+            secondary_review["id"],
+        ],
         required_dimension_axes=["genre", "form"],
         sample_summary={
             "observation_count": 4,
@@ -220,6 +248,21 @@ def _install_global_calibration(review_artifact_id: str) -> dict:
             "paired_target_count": 4,
             "scope_count": 2,
         },
+        pair_results=[
+            {
+                "scope_id": scope_id,
+                "audience_prior_id": prior_id,
+                "target_delta_id": target_id,
+                "human_sample_count": 1,
+                "human_mean_score": score,
+                "model_predicted_score": score,
+                "absolute_error": 0.0,
+                "status": "paired",
+            }
+            for (
+                scope_id, _review_id, prior_id, target_id, score, _genre, _form,
+            ) in rows
+        ],
         calibration_score=1.0,
         minimum_correlation=0.6,
         human_success_threshold=0.8,
@@ -238,6 +281,7 @@ def _install_global_calibration(review_artifact_id: str) -> dict:
         content=report.model_dump(mode="json"),
         parent_artifact_ids=[
             review_artifact_id,
+            secondary_review["id"],
             *[artifact["id"] for artifact in observation_artifacts],
         ],
         contract_version=HUMAN_CALIBRATION_CONTRACT_VERSION,
