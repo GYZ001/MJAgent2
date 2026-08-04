@@ -589,8 +589,9 @@ def verify_current_storyboard_completion_authority(
     if (
         data.get("narrative_status") != "ready"
         or not data.get("narrative_review_artifact_id")
+        or not data.get("narrative_calibration_artifact_id")
     ):
-        raise ValueError("当前叙事分镜尚未取得有效冷观众审读结论")
+        raise ValueError("当前叙事分镜尚未取得有效冷观众审读与真人校准结论")
 
     cert = verify_completion_certificate(
         certificate_id,
@@ -623,6 +624,26 @@ def verify_current_storyboard_completion_authority(
         raise ValueError(f"当前叙事审读证据链已失效：{exc}") from exc
     if report_id != data.get("narrative_review_artifact_id"):
         raise ValueError("当前剧集的冷观众审读指针已漂移")
+    try:
+        from app.narrative_calibration import (
+            assert_report_meets_current_calibration,
+        )
+        from app.schemas import NarrativeReviewReport
+
+        review_artifact = evidence_repository.get_artifact(str(report_id))
+        report = NarrativeReviewReport.model_validate(
+            (review_artifact or {}).get("content") or {}
+        )
+        calibration = assert_report_meets_current_calibration(
+            report,
+            expected_calibration_artifact_id=str(
+                data.get("narrative_calibration_artifact_id") or ""
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 - paid authority fails closed
+        raise ValueError(f"当前真人一次观看校准权威已失效：{exc}") from exc
+    if calibration.artifact_id not in set(artifact.get("parent_artifact_ids") or []):
+        raise ValueError("当前分镜 Artifact 未绑定其真人校准权威")
     return cert
 
 

@@ -145,6 +145,7 @@ def publish_screenplay(
                       storyboard_production_revision_id=NULL,
                       storyboard_completion_certificate_id=NULL,
                       narrative_status='needs_review', narrative_review_artifact_id=NULL,
+                      narrative_calibration_artifact_id=NULL,
                       active_video_run_id=NULL, video_control_json=NULL,
                       delivery_artifact_id=NULL, delivery_status='not_ready'
                 WHERE id=?""",
@@ -235,6 +236,9 @@ def publish_storyboard(
         "shots": shots_payload,
     })
     board_artifact = evidence_repository.get_artifact(artifact_id)
+    narrative_authority = False
+    verified_review_artifact_id: str | None = None
+    calibration_authority = None
     if (
         board_artifact is None
         or board_artifact.get("type") not in {"storyboard", "storyboard_document"}
@@ -259,6 +263,7 @@ def publish_storyboard(
 
         screenplay_context = resolve_downstream_screenplay(episode_id, conn=conn)
         screenplay = screenplay_context.screenplay
+        narrative_authority = screenplay_context.narrative_authority_required
         if screenplay_context.narrative_authority_required:
             outline = StoryboardOutline.model_validate_json(outline_json) if outline_json else None
             narrative_errors = validate_storyboard_narrative(
@@ -292,7 +297,7 @@ def publish_storyboard(
                 persisted_report = NarrativeReviewReport.model_validate(
                     report_artifacts[0].get("content")
                 )
-                verify_persisted_narrative_review(
+                verified_review_artifact_id = verify_persisted_narrative_review(
                     episode_id=episode_id,
                     screenplay=screenplay,
                     board=board,
@@ -301,6 +306,20 @@ def publish_storyboard(
                 )
             except (NarrativeReviewError, ValueError) as exc:
                 raise ValueError(f"冷观众审读证据链无效，禁止发布分镜：{exc}") from exc
+            try:
+                from app.narrative_calibration import (
+                    assert_report_meets_current_calibration,
+                )
+
+                calibration_authority = assert_report_meets_current_calibration(
+                    persisted_report,
+                )
+            except Exception as exc:  # noqa: BLE001 - human release authority
+                raise ValueError(f"真人一次观看校准未就绪，禁止发布分镜：{exc}") from exc
+            if calibration_authority.artifact_id not in parent_ids:
+                raise ValueError(
+                    "待发布分镜 Artifact 未直接绑定当前真人一次观看校准权威"
+                )
             if not evaluation_ids:
                 raise ValueError("分镜叙事发布缺少冷观众 runtime-gate Evaluation")
             marks = ",".join("?" for _ in evaluation_ids)
@@ -347,11 +366,31 @@ def publish_storyboard(
             "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
             (outline_json, episode_id),
         )
-    conn.execute(
-        "UPDATE episodes SET status='scripted', script_error=NULL, storyboard_warning=NULL, "
-        "storyboard_artifact_id=? WHERE id=?",
-        (artifact_id, episode_id),
-    )
+    if narrative_authority:
+        conn.execute(
+            """UPDATE episodes
+                  SET status='scripted', script_error=NULL, storyboard_warning=NULL,
+                      storyboard_artifact_id=?, narrative_status='ready',
+                      narrative_review_artifact_id=?,
+                      narrative_calibration_artifact_id=?
+                WHERE id=?""",
+            (
+                artifact_id,
+                verified_review_artifact_id,
+                calibration_authority.artifact_id,
+                episode_id,
+            ),
+        )
+    else:
+        conn.execute(
+            """UPDATE episodes
+                  SET status='scripted', script_error=NULL, storyboard_warning=NULL,
+                      storyboard_artifact_id=?, narrative_status='legacy_unvalidated',
+                      narrative_review_artifact_id=NULL,
+                      narrative_calibration_artifact_id=NULL
+                WHERE id=?""",
+            (artifact_id, episode_id),
+        )
     set_published_artifact(
         revision_id,
         artifact_id,

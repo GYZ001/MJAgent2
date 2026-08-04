@@ -776,6 +776,7 @@ def _finalize_storyboard_evidence(
 ) -> str:
     conn = get_conn()
     verified_review_artifact_id: str | None = None
+    calibration_authority = None
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     planned_total = 0
     try:
@@ -838,6 +839,16 @@ def _finalize_storyboard_evidence(
             )
         except Exception as exc:  # noqa: BLE001 - persisted release-gate boundary
             raise RuntimeError(f"分镜冷观众审读未通过或已因分镜变化失效：{exc}") from exc
+        try:
+            from app.narrative_calibration import (
+                assert_report_meets_current_calibration,
+            )
+
+            calibration_authority = assert_report_meets_current_calibration(
+                narrative_review_report,
+            )
+        except Exception as exc:  # noqa: BLE001 - human calibration release gate
+            raise RuntimeError(f"真人一次观看校准未就绪，禁止发布叙事分镜：{exc}") from exc
     if _sync_storyboard_scene_bindings(conn, episode_id, board):
         # 这是由当前门禁确定的派生外键修复，即使后续证据发布失败也应保留，
         # 避免下次重试继续读取已经证伪的历史场景绑定。
@@ -884,6 +895,10 @@ def _finalize_storyboard_evidence(
             ep["screenplay_artifact_id"],
             *shot_parent_ids,
             *(narrative_review_artifact_ids or []),
+            (
+                calibration_authority.artifact_id
+                if calibration_authority is not None else None
+            ),
         )
         if artifact_id
     ))
@@ -939,6 +954,10 @@ def _finalize_storyboard_evidence(
             evidence={
                 "narrative_review_report": narrative_review_report.model_dump(mode="json"),
                 "narrative_review_artifact_ids": list(narrative_review_artifact_ids or []),
+                "narrative_calibration_artifact_id": calibration_authority.artifact_id,
+                "human_calibrated_model_threshold": (
+                    calibration_authority.model_pass_threshold
+                ),
             },
         )
         evidence_repository.create_evaluation(
@@ -987,12 +1006,20 @@ def _finalize_storyboard_evidence(
     )
     if narrative_authority:
         conn.execute(
-            "UPDATE episodes SET narrative_status='ready', narrative_review_artifact_id=? WHERE id=?",
-            (verified_review_artifact_id, episode_id),
+            "UPDATE episodes SET narrative_status='ready', "
+            "narrative_review_artifact_id=?, narrative_calibration_artifact_id=? "
+            "WHERE id=?",
+            (
+                verified_review_artifact_id,
+                calibration_authority.artifact_id,
+                episode_id,
+            ),
         )
     else:
         conn.execute(
-            "UPDATE episodes SET narrative_status='legacy_unvalidated', narrative_review_artifact_id=NULL WHERE id=?",
+            "UPDATE episodes SET narrative_status='legacy_unvalidated', "
+            "narrative_review_artifact_id=NULL, "
+            "narrative_calibration_artifact_id=NULL WHERE id=?",
             (episode_id,),
         )
     conn.commit()

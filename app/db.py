@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS episodes (
     storyboard_artifact_id TEXT,
     narrative_status TEXT NOT NULL DEFAULT 'needs_review',
     narrative_review_artifact_id TEXT,
+    narrative_calibration_artifact_id TEXT,
     delivery_artifact_id TEXT,
     delivery_status TEXT NOT NULL DEFAULT 'not_ready',
     status TEXT DEFAULT 'planned',
@@ -1256,6 +1257,7 @@ MIGRATIONS = (
     "ALTER TABLE episodes ADD COLUMN storyboard_completion_certificate_id TEXT",
     "ALTER TABLE episodes ADD COLUMN narrative_status TEXT NOT NULL DEFAULT 'needs_review'",
     "ALTER TABLE episodes ADD COLUMN narrative_review_artifact_id TEXT",
+    "ALTER TABLE episodes ADD COLUMN narrative_calibration_artifact_id TEXT",
     # 剧本台安全发布、occurrence 约束与轻量状态快照。
     "ALTER TABLE episodes ADD COLUMN screenplay_required_dialogue_occurrences TEXT NOT NULL DEFAULT '[]'",
     "ALTER TABLE episodes ADD COLUMN screenplay_publish_fence INTEGER NOT NULL DEFAULT 0",

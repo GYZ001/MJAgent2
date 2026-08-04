@@ -525,7 +525,8 @@ def invalidate_episode_narrative_review(
         )
     conn.execute(
         "UPDATE episodes SET narrative_status='needs_review', "
-        "narrative_review_artifact_id=NULL WHERE id=?",
+        "narrative_review_artifact_id=NULL, "
+        "narrative_calibration_artifact_id=NULL WHERE id=?",
         (episode_id,),
     )
     if commit:

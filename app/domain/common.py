@@ -323,6 +323,7 @@ def _screenplay_ready(ep) -> bool:
             "screenplay_completion_certificate_id",
             "screenplay_production_revision_id",
             "narrative_review_artifact_id",
+            "narrative_calibration_artifact_id",
         )
     )
     published_script = None

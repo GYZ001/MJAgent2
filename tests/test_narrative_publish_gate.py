@@ -94,6 +94,7 @@ def _install_passing_review_model(monkeypatch) -> None:
                     {
                         **item,
                         "result": "satisfied",
+                        "predicted_score": 0.95,
                         "supporting_evidence_ids": ["EV-1"],
                         "reason": "The same-prior frozen recall registered the evidence.",
                     }

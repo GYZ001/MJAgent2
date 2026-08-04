@@ -18,6 +18,7 @@ import {
   videoCandidateNote,
   videoPlaybackRate,
   videoGenerationConfirmLabel,
+  videoModeReasonText,
   visibleVideoVersions,
 } from './WallPage'
 
@@ -138,6 +139,12 @@ describe('生成台三类分组与视角标签', () => {
 })
 
 describe('生成台对象稳定性', () => {
+  it('历史模式计划缺少 reason_codes 时使用兼容文案', () => {
+    expect(videoModeReasonText(undefined)).toBe('由整集关系计划生成')
+    expect(videoModeReasonText(['FIRST_SHOT_NO_PREDECESSOR']))
+      .toBe('FIRST_SHOT_NO_PREDECESSOR')
+  })
+
   it('上游确认或运行指针收口时会重新加载生成资格', () => {
     const running = reviewContextRefreshKey({
       status: 'scripting',

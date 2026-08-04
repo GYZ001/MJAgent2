@@ -39,6 +39,7 @@ __all__ = [
     "CurrentCalibrationAuthority",
     "CalibrationReport",
     "DimensionCalibrationResult",
+    "HumanOneWatchFreeze",
     "HumanOneWatchObservation",
     "HumanTargetDeltaObservation",
     "ModelTargetEstimate",
@@ -46,6 +47,7 @@ __all__ = [
     "assert_report_meets_current_calibration",
     "calibrate_and_persist_human_one_watch",
     "persist_calibration_report",
+    "persist_human_one_watch_freeze",
     "persist_human_one_watch_observation",
     "require_current_calibration_authority",
     "validate_human_one_watch_observation",
@@ -80,6 +82,52 @@ class HumanTargetDeltaObservation(_OpenSemanticModel):
     elicitation_context: dict[str, Any] = Field(default_factory=dict)
     adjudication_status: str = "observed"
     uncertainty: str | None = None
+
+
+class HumanOneWatchFreeze(_OpenSemanticModel):
+    """Immutable first-pass recall captured before targets become visible."""
+
+    observation_id: str
+    participant_id_hash: str
+    scope_id: str
+    audience_prior_id: str
+    narrative_review_artifact_id: str
+    watched_once: bool
+    watch_count: int = Field(default=1, ge=0)
+    replay_or_seek_used: bool = False
+    source_material_seen: bool = False
+    target_answers_seen: bool = False
+    director_intent_seen: bool = False
+    spontaneous_recall_frozen: bool = True
+    spontaneous_recall: dict[str, Any] = Field(default_factory=dict)
+    content_dimensions: dict[str, Any] = Field(default_factory=dict)
+    collection_context: dict[str, Any] = Field(default_factory=dict)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _validate_freeze(self) -> "HumanOneWatchFreeze":
+        errors: list[str] = []
+        if not self.watched_once or self.watch_count != 1:
+            errors.append("[HUMAN_WATCH_COUNT_INVALID] watched_once=true 且 watch_count=1 才是一次观看")
+        if self.replay_or_seek_used:
+            errors.append("[HUMAN_REPLAY_USED] 首轮观察不得回放或拖动")
+        if self.source_material_seen:
+            errors.append("[HUMAN_SOURCE_EXPOSED] 首轮观众已看过原文")
+        if self.target_answers_seen or self.director_intent_seen:
+            errors.append("[HUMAN_TARGET_EXPOSED] 冻结前不得展示目标答案或导演意图")
+        if not self.spontaneous_recall_frozen:
+            errors.append("[HUMAN_RECALL_NOT_FROZEN] 首轮自由复述必须冻结")
+        if not self.observation_id.strip() or not self.participant_id_hash.strip():
+            errors.append("[HUMAN_OBSERVATION_ID_MISSING] observation_id/participant_id_hash 不能为空")
+        if not self.scope_id.strip() or not self.audience_prior_id.strip():
+            errors.append("[HUMAN_SCOPE_PRIOR_MISSING] scope_id/audience_prior_id 不能为空")
+        if not self.narrative_review_artifact_id.strip():
+            errors.append("[HUMAN_REVIEW_LINEAGE_MISSING] 必须绑定 narrative review artifact")
+        if not self.spontaneous_recall:
+            errors.append("[HUMAN_SPONTANEOUS_RECALL_EMPTY] 首轮自由复述不能为空")
+        if errors:
+            raise ValueError("；".join(errors))
+        return self
 
 
 class HumanOneWatchObservation(_OpenSemanticModel):
@@ -844,42 +892,163 @@ def persist_calibration_report(
     if errors:
         raise CalibrationContractError(errors)
     parents = list(dict.fromkeys([*review_ids, *observation_ids]))
+    calibrated = report.decision == "calibrated"
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type="human_one_watch_calibration_report",
         scope_type="calibration",
         scope_id=report.calibration_scope_id,
-        status="validated" if report.decision == "calibrated" else "needs_revision",
+        status="candidate" if calibrated else "needs_revision",
         trust_level="T4",
         content=report.model_dump(mode="json"),
         parent_artifact_ids=parents,
         contract_version=HUMAN_CALIBRATION_CONTRACT_VERSION,
     ))
-    calibrated = report.decision == "calibrated"
-    evidence_repository.create_evaluation(
-        artifact["id"],
-        Evaluation(
-            evaluator_type="deterministic",
-            evaluator_name="human_one_watch_calibration",
-            evaluator_version=HUMAN_CALIBRATION_CONTRACT_VERSION,
-            status="passed" if calibrated else "warning",
-            hard_gate_passed=calibrated,
-            evaluation_role="score_only",
-            score_status="calibrated" if calibrated else "unknown",
-            runtime_blocking=False,
-            score=(
-                max(0.0, min(100.0, float(report.calibration_score) * 100.0))
-                if calibrated and report.calibration_score is not None else None
-            ),
-            evidence={
-                "decision": report.decision,
-                "coverage_gaps": report.coverage_gaps,
-                "stability_issues": report.stability_issues,
-                "narrative_review_artifact_ids": review_ids,
-                "observation_artifact_ids": observation_ids,
-            },
+    evaluation = Evaluation(
+        evaluator_type="deterministic",
+        evaluator_name="human_one_watch_calibration",
+        evaluator_version=HUMAN_CALIBRATION_CONTRACT_VERSION,
+        status="passed" if calibrated else "warning",
+        hard_gate_passed=calibrated,
+        evaluation_role="runtime_gate" if calibrated else "score_only",
+        score_status="calibrated" if calibrated else "unknown",
+        runtime_blocking=calibrated,
+        score=(
+            max(0.0, min(100.0, float(report.calibration_score) * 100.0))
+            if calibrated and report.calibration_score is not None else None
         ),
+        evidence={
+            "decision": report.decision,
+            "coverage_gaps": report.coverage_gaps,
+            "stability_issues": report.stability_issues,
+            "narrative_review_artifact_ids": review_ids,
+            "observation_artifact_ids": observation_ids,
+            "model_pass_threshold": report.recommended_model_pass_threshold,
+            "narrative_contract_version": report.narrative_contract_version,
+            "blind_prompt_version": report.blind_prompt_version,
+            "comparator_prompt_version": report.comparator_prompt_version,
+        },
     )
-    return artifact
+    if calibrated:
+        return evidence_repository.commit_artifact(
+            None,
+            artifact["id"],
+            [evaluation],
+        )
+    evidence_repository.create_evaluation(artifact["id"], evaluation)
+    return evidence_repository.get_artifact(artifact["id"]) or artifact
+
+
+def require_current_calibration_authority(
+    *,
+    expected_artifact_id: str | None = None,
+) -> CurrentCalibrationAuthority:
+    """Resolve the active cross-content human calibration or fail closed."""
+    conn = evidence_repository.get_conn()
+    row = conn.execute(
+        """SELECT id FROM artifacts
+           WHERE type='human_one_watch_calibration_report'
+             AND scope_type='calibration' AND scope_id=?
+             AND status='approved'
+           ORDER BY version DESC LIMIT 1""",
+        (GLOBAL_CALIBRATION_SCOPE_ID,),
+    ).fetchone()
+    if row is None:
+        raise CalibrationContractError([
+            "[NARRATIVE_CALIBRATION_REQUIRED] 尚无通过跨作品真人一次观看校准的当前权威"
+        ])
+    artifact_id = str(row["id"])
+    if expected_artifact_id and artifact_id != str(expected_artifact_id):
+        raise CalibrationContractError([
+            "[NARRATIVE_CALIBRATION_STALE] 分镜绑定的真人校准版本已不是当前权威"
+        ])
+    artifact = evidence_repository.get_artifact(artifact_id)
+    if artifact is None:
+        raise CalibrationContractError([
+            "[NARRATIVE_CALIBRATION_ARTIFACT_MISSING] 当前校准 Artifact 不存在"
+        ])
+    current_hash = evidence_repository.content_hash(
+        artifact.get("content"),
+        artifact.get("file_path"),
+    )
+    if current_hash != artifact.get("content_hash"):
+        raise CalibrationContractError([
+            "[NARRATIVE_CALIBRATION_HASH_DRIFT] 当前校准内容与存储指纹不一致"
+        ])
+    try:
+        report = CalibrationReport.model_validate(artifact.get("content") or {})
+    except Exception as exc:  # noqa: BLE001 - immutable authority boundary
+        raise CalibrationContractError([
+            f"[NARRATIVE_CALIBRATION_SCHEMA_INVALID] {exc}"
+        ]) from exc
+    errors: list[str] = []
+    if report.calibration_scope_id != GLOBAL_CALIBRATION_SCOPE_ID:
+        errors.append("[NARRATIVE_CALIBRATION_SCOPE_INVALID] 校准作用域不是全局叙事合同")
+    if report.decision != "calibrated" or report.confidence_status != "supported":
+        errors.append("[NARRATIVE_CALIBRATION_NOT_SUPPORTED] 当前校准结论未达到 supported")
+    if report.narrative_contract_version != NARRATIVE_CONTRACT_VERSION:
+        errors.append("[NARRATIVE_CALIBRATION_CONTRACT_DRIFT] 叙事合同版本已变化")
+    if report.blind_prompt_version != BLIND_READER_PROMPT_VERSION:
+        errors.append("[NARRATIVE_CALIBRATION_BLIND_PROMPT_DRIFT] 冷观众合同版本已变化")
+    if report.comparator_prompt_version != COMPARATOR_PROMPT_VERSION:
+        errors.append("[NARRATIVE_CALIBRATION_COMPARATOR_DRIFT] 比较器合同版本已变化")
+    threshold = report.recommended_model_pass_threshold
+    if threshold is None or not 0 <= float(threshold) <= 1:
+        errors.append("[NARRATIVE_CALIBRATION_THRESHOLD_MISSING] 当前校准没有有效模型门槛")
+    if (
+        report.calibration_score is None
+        or report.calibration_score < report.minimum_correlation
+    ):
+        errors.append("[NARRATIVE_CALIBRATION_CORRELATION_LOW] 当前相关性未达到校准阈值")
+    parents = set(artifact.get("parent_artifact_ids") or [])
+    if not set(report.narrative_review_artifact_ids).issubset(parents):
+        errors.append("[NARRATIVE_CALIBRATION_LINEAGE_INCOMPLETE] 当前校准缺少审读父证据")
+    gate_rows = [
+        item
+        for item in evidence_repository.get_evaluations(artifact_id)
+        if item.get("evaluator_name") == "human_one_watch_calibration"
+        and item.get("evaluator_version") == HUMAN_CALIBRATION_CONTRACT_VERSION
+        and item.get("evaluation_role") == "runtime_gate"
+        and bool(item.get("runtime_blocking"))
+        and item.get("status") == "passed"
+        and bool(item.get("hard_gate_passed"))
+    ]
+    if len(gate_rows) != 1:
+        errors.append("[NARRATIVE_CALIBRATION_GATE_INVALID] 当前校准缺少唯一通过的 runtime gate")
+    if errors:
+        raise CalibrationContractError(errors)
+    return CurrentCalibrationAuthority(
+        artifact_id=artifact_id,
+        artifact_hash=current_hash,
+        report=report,
+        model_pass_threshold=float(threshold),
+    )
+
+
+def assert_report_meets_current_calibration(
+    report: NarrativeReviewReport,
+    *,
+    expected_calibration_artifact_id: str | None = None,
+) -> CurrentCalibrationAuthority:
+    """Apply the human-derived threshold to one frozen AI review report."""
+    authority = require_current_calibration_authority(
+        expected_artifact_id=expected_calibration_artifact_id,
+    )
+    failed = [
+        (
+            result.audience_prior_id,
+            result.target_delta_id,
+            result.predicted_score,
+        )
+        for result in report.target_delta_results
+        if result.predicted_score is None
+        or float(result.predicted_score) < authority.model_pass_threshold
+    ]
+    if failed:
+        raise CalibrationContractError([
+            "[NARRATIVE_REVIEW_BELOW_HUMAN_CALIBRATED_THRESHOLD] "
+            f"以下逐先验目标低于 {authority.model_pass_threshold:.3f}：{failed}"
+        ])
+    return authority
 
 
 def calibrate_and_persist_human_one_watch(
@@ -892,6 +1061,8 @@ def calibrate_and_persist_human_one_watch(
     observation_artifact_ids: Sequence[str],
     narrative_review_artifact_ids: Sequence[str],
     required_dimension_axes: Sequence[str] = DEFAULT_CROSS_CONTENT_DIMENSIONS,
+    minimum_correlation: float = DEFAULT_MINIMUM_CORRELATION,
+    human_success_threshold: float = DEFAULT_HUMAN_SUCCESS_THRESHOLD,
 ) -> tuple[CalibrationReport, dict[str, Any]]:
     """Public end-to-end service for building and persisting calibration."""
     report = build_calibration_report(
@@ -901,6 +1072,8 @@ def calibrate_and_persist_human_one_watch(
         observations=observations,
         model_estimates=model_estimates,
         required_dimension_axes=required_dimension_axes,
+        minimum_correlation=minimum_correlation,
+        human_success_threshold=human_success_threshold,
     )
     artifact = persist_calibration_report(
         report,

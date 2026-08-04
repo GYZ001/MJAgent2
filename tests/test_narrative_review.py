@@ -71,6 +71,7 @@ async def _passing_chat(messages, **kwargs):
                 {
                     **item,
                     "result": "satisfied",
+                        "predicted_score": 0.95,
                     "supporting_evidence_ids": ["EV-1"],
                     "reason": "The frozen observation registered the visible result.",
                 }
@@ -342,6 +343,7 @@ async def test_blind_review_isolates_models_and_persists_lineage_before_comparis
             {
                 **item,
                 "result": "satisfied",
+                "predicted_score": 0.95,
                 "supporting_evidence_ids": ["EV-1"],
                 "reason": "The frozen observation explicitly registered the visible result.",
             }

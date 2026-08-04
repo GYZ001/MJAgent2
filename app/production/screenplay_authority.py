@@ -267,6 +267,7 @@ def episode_requires_immutable_screenplay_authority(
             "screenplay_completion_certificate_id",
             "screenplay_production_revision_id",
             "narrative_review_artifact_id",
+            "narrative_calibration_artifact_id",
         )
     ):
         return True

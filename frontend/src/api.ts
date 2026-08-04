@@ -1271,7 +1271,7 @@ export interface ShotVideoGenerationPlan {
   state_dependency: "none" | "start_only" | "start_and_end" | "full_trajectory";
   motion_dependency: "none" | "pose" | "trajectory" | "camera" | "rhythm" | "audio";
   required_assets: VideoPlanAssetRequirement[];
-  reason_codes: string[];
+  reason_codes?: string[];
   confidence: number;
   unknown_dimensions: string[];
   fallback_order: VideoGenerationMode[];
