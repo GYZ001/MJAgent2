@@ -8,6 +8,7 @@ import {
   currentPortrait,
   currentPortraitViews,
   mergeBibleThreeWay,
+  portraitAvailability,
 } from './BiblePage'
 
 const character = (name: string) => ({ name } as Character)
@@ -51,6 +52,37 @@ describe('人物谱步骤状态', () => {
       bible_status: 'ready',
       refs_status: 'failed',
     })).toBe('problem')
+  })
+
+  it('结构完整的低分定妆只提示质量风险，不标记为不可用', () => {
+    const lowScoreCharacter = {
+      name: '萧炎',
+      portraits: [{
+        id: 'current',
+        ep_start: 1,
+        ep_end: null,
+        pack_status: 'ready',
+        image_url: '/front.jpg',
+        views: [
+          { view_role: 'front_full', status: 'ready', image_url: '/front.jpg' },
+          { view_role: 'three_quarter', status: 'ready', image_url: '/three-quarter.jpg' },
+          { view_role: 'profile', status: 'ready', image_url: '/profile.jpg' },
+        ],
+        group_qa: {
+          overall: 0.1,
+          status: 'failed',
+          issues: ['人物一致性偏低'],
+          hard_failures: ['watermark'],
+        },
+      }],
+    } as Character
+
+    expect(portraitAvailability(lowScoreCharacter, false)).toBe('warning')
+    expect(bibleStepStatus({
+      bible: bible([lowScoreCharacter]),
+      bible_status: 'ready',
+      refs_status: 'ready',
+    })).toBe('done')
   })
 })
 

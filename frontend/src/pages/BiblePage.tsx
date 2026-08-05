@@ -60,7 +60,7 @@ type PortraitAvailability =
   | 'unverified'
   | 'missing'
 
-function portraitAvailability(character: Character, fitting: boolean): PortraitAvailability {
+export function portraitAvailability(character: Character, fitting: boolean): PortraitAvailability {
   if (fitting) return 'generating'
   const portrait = currentPortrait(character)
   if (!portrait || (!portrait.image_url && !(portrait.views ?? []).some(v => v.image_url))) {
@@ -76,14 +76,13 @@ function portraitAvailability(character: Character, fitting: boolean): PortraitA
   )
   if (REQUIRED_CHARACTER_VIEWS.some(role => !readyViewRoles.has(role))) return 'failed'
   const qa = portrait.group_qa
-  const hard = (qa?.hard_failures ?? []).length > 0 || qa?.status === 'failed'
-  if (hard) return 'failed'
   if (status === 'ready' || !status) {
     if (typeof qa?.overall === 'number') {
-      if (qa.overall >= CHAR_QA_PASS) {
-        return (qa.issues ?? []).length ? 'warning' : 'passed'
-      }
-      return 'failed'
+      const hasQualityRisk = qa.overall < CHAR_QA_PASS
+        || (qa.issues ?? []).length > 0
+        || (qa.hard_failures ?? []).length > 0
+        || ['failed', 'warning'].includes(qa.status || '')
+      return hasQualityRisk ? 'warning' : 'passed'
     }
     return status === 'ready' ? 'unverified' : 'unverified'
   }
@@ -821,7 +820,7 @@ export default function BiblePage() {
           quote_id: effectiveQuote.quote_id,
           idempotency_key: effectiveQuote.quote_id,
         })
-        toast('已按最新人物设定与画风开始批量重新生成；新包通过质检前保留旧成品')
+        toast('已按最新人物设定与画风开始批量重新生成；新包结构完整前保留旧成品')
         refresh()
       },
       undefined,

@@ -255,7 +255,7 @@ export default function CharacterQaPanel({
             })}
           </div>
         )}
-        <p className="hint">采用规则：全部必检项通过后才会自动采用当前包；失败包不会替换下游正在使用的版本。人工确认也不能绕过必检项。</p>
+        <p className="hint">采用规则：三视角文件齐全并可读取后即可采用；质量分数与问题仅供评审，不阻止采用。技术失败不会替换下游正在使用的版本。</p>
         <div className="dialog-actions">
           <button type="button" className="btn primary" onClick={onClose}>关闭</button>
         </div>

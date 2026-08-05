@@ -1265,9 +1265,9 @@ def compute_refs_cost_precheck(
         "budget_cap_cny": max_retry,
         "scope": missing_roles,
         "old_asset_policy": (
-            "已落盘且合格的视角保留；失败不替换当前采用包"
+            "已落盘且可读取的视角保留；技术失败不替换当前采用包"
             if resume else
-            "使用最新角色提示词与全局画风生成；新包通过整包 QA 后才替换旧包"
+            "使用最新角色设定与全局画风生成；新包三视角文件齐全并可读取后替换旧包，质量评分只作提示"
         ),
         "idempotency_hint": "同一 quote_id 重复确认不会扩大范围；服务端仍做最终校验",
         "stop_policy": "可停止；已扣费步骤不退款，已完成成品保留",
@@ -2537,8 +2537,8 @@ async def _refs_task(
     )
     try:
         recorder.start()
-        # 先生成并通过 QA，成功后才使旧定妆的下游产物失效。
-        # 这样生成失败/中止不会破坏当前可用链路。
+        # 新包结构完整后才使旧定妆的下游产物失效；质量评分不参与采用资格。
+        # 这样技术失败或中止不会破坏当前可用链路。
         p = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
         if only_characters:
             names = only_characters
@@ -2564,7 +2564,7 @@ async def _refs_task(
             (project_id,),
         )
         conn.commit()
-        recorder.succeed("人物参考资产已生成并通过证据门禁")
+        recorder.succeed("人物参考资产已生成且结构完整")
     except asyncio.CancelledError:
         if task_registry.shutdown_in_progress():
             recorder.pause_external("服务重启，定妆任务等待自动恢复")

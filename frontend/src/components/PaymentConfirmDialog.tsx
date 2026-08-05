@@ -3,6 +3,11 @@ import type { RefsCostPrecheck, SceneCostPrecheck } from '../api'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 
 type PaymentSelection = { characters: string[]; scenes?: string[] }
+type PaymentPrecheck = (RefsCostPrecheck | SceneCostPrecheck) & {
+  estimated_duration_min?: number[]
+  estimate_note?: string
+  character_names?: string[]
+}
 
 function scopeCharacter(item: Record<string, unknown>): string {
   return String(item.character || item.name || item.character_name || '').trim()
@@ -38,6 +43,42 @@ function viewLabel(value: unknown): string {
   return VIEW_LABELS[key] || key
 }
 
+export function paymentSelectionSummary(
+  precheck: PaymentPrecheck,
+  selection: PaymentSelection,
+): {
+  itemCount: number
+  imageCount: number
+  estimatedCostCny: number
+  maxRetryBudgetCny: number
+  budgetCapCny: number
+} {
+  const sceneQuote = 'scene_count' in precheck
+  const selected = new Set(sceneQuote ? (selection.scenes ?? []) : selection.characters)
+  const scope = precheck.scope.filter(item => {
+    const name = sceneQuote ? scopeScene(item) : scopeCharacter(item)
+    return name && selected.has(name)
+  })
+  const imageCount = scope.reduce((total, item) => {
+    if (Array.isArray(item.views)) return total + item.views.length
+    return total + (item.view_role ? 1 : 0)
+  }, 0)
+  const estimatedCostCny = Number((imageCount * precheck.unit_price_cny).toFixed(2))
+  const retryRatio = precheck.estimated_cost_cny > 0
+    ? precheck.max_retry_budget_cny / precheck.estimated_cost_cny
+    : 1
+  const capRatio = precheck.estimated_cost_cny > 0
+    ? precheck.budget_cap_cny / precheck.estimated_cost_cny
+    : 1
+  return {
+    itemCount: selected.size,
+    imageCount,
+    estimatedCostCny,
+    maxRetryBudgetCny: Number((estimatedCostCny * retryRatio).toFixed(2)),
+    budgetCapCny: Number((estimatedCostCny * capRatio).toFixed(2)),
+  }
+}
+
 export default function PaymentConfirmDialog({
   open,
   title,
@@ -51,11 +92,7 @@ export default function PaymentConfirmDialog({
 }: {
   open: boolean
   title: string
-  precheck?: ((RefsCostPrecheck | SceneCostPrecheck) & {
-    estimated_duration_min?: number[]
-    estimate_note?: string
-    character_names?: string[]
-  }) | null
+  precheck?: PaymentPrecheck | null
   loading?: boolean
   error?: string | null
   onConfirm: (selection: PaymentSelection) => void
@@ -109,6 +146,12 @@ export default function PaymentConfirmDialog({
   const selectedSet = new Set(selectedCharacters)
   const selectedSceneSet = new Set(selectedScenes)
   const sceneQuote = precheck && 'scene_count' in precheck ? precheck as SceneCostPrecheck : null
+  const selectedSummary = precheck && (showSelection || showSceneSelection)
+    ? paymentSelectionSummary(precheck, {
+      characters: selectedCharacters,
+      scenes: selectedScenes,
+    })
+    : null
 
   return (
     <div className="evidence-backdrop" role="presentation" onMouseDown={event => {
@@ -123,13 +166,13 @@ export default function PaymentConfirmDialog({
             <p>确认后才会创建付费任务；取消不会扣费、不会替换资产。</p>
             <ul>
               <li>范围：{sceneQuote
-                ? `${sceneQuote.scene_count} 个场景 · ${sceneQuote.actual_view_count} 个实际视角`
-                : `${(precheck as RefsCostPrecheck).character_count} 个角色 · 每角色 ${(precheck as RefsCostPrecheck).views_per_character} 视角`}</li>
+                ? `${selectedSummary?.itemCount ?? sceneQuote.scene_count} 个场景 · ${selectedSummary?.imageCount ?? sceneQuote.actual_view_count} 个实际视角`
+                : `${selectedSummary?.itemCount ?? (precheck as RefsCostPrecheck).character_count} 个角色 · 每角色 ${(precheck as RefsCostPrecheck).views_per_character} 视角`}</li>
               {!!precheck.character_names?.length && (
                 <li>角色：{precheck.character_names.slice(0, 12).join('、')}{precheck.character_names.length > 12 ? '…' : ''}</li>
               )}
-              <li>预计图片：{precheck.image_count} 张 × ¥{precheck.unit_price_cny} = ¥{precheck.estimated_cost_cny}</li>
-              <li>最大重试预算 / 费用上限：¥{precheck.max_retry_budget_cny} / ¥{precheck.budget_cap_cny}</li>
+              <li>预计图片：{selectedSummary?.imageCount ?? precheck.image_count} 张 × ¥{precheck.unit_price_cny} = ¥{selectedSummary?.estimatedCostCny ?? precheck.estimated_cost_cny}</li>
+              <li>最大重试预算 / 费用上限：¥{selectedSummary?.maxRetryBudgetCny ?? precheck.max_retry_budget_cny} / ¥{selectedSummary?.budgetCapCny ?? precheck.budget_cap_cny}</li>
               {duration && <li>预计耗时：约 {duration[0]}~{duration[1]} 分钟</li>}
               {precheck.estimate_note && <li>{paymentPolicyText(precheck.estimate_note)}</li>}
               {precheck.old_asset_policy && <li>{paymentPolicyText(precheck.old_asset_policy)}</li>}
