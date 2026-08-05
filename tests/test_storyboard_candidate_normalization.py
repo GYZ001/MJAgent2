@@ -522,6 +522,39 @@ def test_storyboard_candidate_derives_scene_change_and_transition() -> None:
     }
 
 
+def test_storyboard_candidate_uses_hard_cut_for_derived_same_scene_mode() -> None:
+    normalized, changes = normalize_storyboard_shot_candidate(
+        {
+            "episode_no": 1,
+            "shot": {
+                "shot_no": 9,
+                "scene_name": "同一办公室",
+                "scene_time": "白天",
+                "continuity_mode": "scene_change",
+                "transition": "叠化",
+            },
+        },
+        episode_no=1,
+        shot_no=9,
+        outline_narrative_task={
+            "scene_name": "同一办公室",
+            "scene_time": "白天",
+            "continuity_mode": "scene_change",
+        },
+        previous_scene_name="同一办公室",
+        previous_scene_time="白天",
+    )
+
+    assert normalized["shot"]["continuity_mode"] == "same_scene_cut"
+    assert normalized["shot"]["transition"] == "硬切"
+    assert {
+        change["reason"] for change in changes
+    } >= {
+        "derived_scene_continuity",
+        "derived_scene_transition",
+    }
+
+
 def test_storyboard_candidate_adds_lip_sync_speaker_to_visible_ids() -> None:
     normalized, changes = normalize_storyboard_shot_candidate(
         {

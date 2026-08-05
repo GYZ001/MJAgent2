@@ -20,6 +20,8 @@ from app.production.screenplay_repair import plan_screenplay_patch
 from app.production.structured_issues import issues_from_validator_messages
 from app.schemas import (
     AudioTimelineItem,
+    AtomicAction,
+    AtomicActionPhase,
     KeyDialogueChain,
     KeyDialogueTurn,
     NarrativeEvent,
@@ -33,6 +35,32 @@ from app.validators import (
     validate_dialogue_chains,
 )
 from tests.test_narrative_continuity import _board, _screenplay
+
+
+def _attach_generic_action(screenplay) -> AtomicAction:
+    action = AtomicAction(
+        action_id="ACT-1",
+        actor_ids=["character-1"],
+        target_ids=["entity-1"],
+        semantic_intent="The actor changes the target after speaking.",
+        precondition_fact_ids=["F-before"],
+        effects_add=["F-after"],
+        effects_remove=["F-before"],
+        completion_condition="The target visibly holds the completed state.",
+        decision_requirement="not_applicable",
+        decision_not_applicable_reason="The event directly requires the action.",
+        temporal_phases=[
+            AtomicActionPhase(
+                phase_id="ACT-1/finish",
+                start_condition="The dialogue has finished.",
+                end_condition="The completed target state is visible.",
+                estimated_min_s=1.0,
+            ),
+        ],
+    )
+    screenplay.narrative_plan.atomic_actions.append(action)
+    screenplay.narrative_plan.events[0].action_ids = [action.action_id]
+    return action
 
 
 def test_narrative_outline_projects_graph_owned_fields_deterministically() -> None:
@@ -84,6 +112,7 @@ def test_narrative_outline_projects_graph_owned_fields_deterministically() -> No
 
 def test_narrative_outline_splits_dialogue_when_speaker_changes() -> None:
     screenplay = _screenplay()
+    action = _attach_generic_action(screenplay)
     screenplay.dialogue_chains = [
         KeyDialogueChain(
             chain_id="DC1",
@@ -136,11 +165,7 @@ def test_narrative_outline_splits_dialogue_when_speaker_changes() -> None:
     ]
     action_owner = next(
         shot for shot in outline.shots
-        if shot.primary_action_id == "ACT-1"
-    )
-    action = next(
-        item for item in screenplay.narrative_plan.atomic_actions
-        if item.action_id == "ACT-1"
+        if shot.primary_action_id == action.action_id
     )
     assert action_owner.shot_no > max(
         shot.shot_no for shot in dialogue_shots
@@ -157,6 +182,7 @@ def test_narrative_outline_splits_dialogue_when_speaker_changes() -> None:
 
 def test_stale_split_action_owner_is_reprojected_before_shot_generation() -> None:
     screenplay = _screenplay()
+    action = _attach_generic_action(screenplay)
     screenplay.dialogue_chains = [
         KeyDialogueChain(
             chain_id="DC1",
@@ -184,7 +210,7 @@ def test_stale_split_action_owner_is_reprojected_before_shot_generation() -> Non
                 shot_no=2,
                 event_ids=["E-1"],
                 story_event_id="E-1",
-                primary_action_id="ACT-1",
+                primary_action_id=action.action_id,
                 state_in="The event has not started.",
                 primary_action="The actor repeats the opening speech.",
                 state_out="The opening speech is about to begin.",
@@ -193,11 +219,6 @@ def test_stale_split_action_owner_is_reprojected_before_shot_generation() -> Non
             ),
         ],
     )
-    action = next(
-        item for item in screenplay.narrative_plan.atomic_actions
-        if item.action_id == "ACT-1"
-    )
-
     changes = normalize_split_action_owner_completions(
         outline,
         screenplay,
