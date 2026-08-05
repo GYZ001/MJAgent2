@@ -1454,6 +1454,7 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         effective_state_out,
         forbidden_prompt_content_errors,
         preflight_seedance_gates,
+        resolve_first_last_boundary_relation,
         resolve_do_not_repeat_texts,
         shot_contract_dict,
         uses_previous_tail_frame,
@@ -1573,6 +1574,24 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
     prev_shot = _load_shot_model(prompt_prev_row) if prompt_prev_row else None
     continuity_mode = derive_continuity_mode(shot, prev_shot)
     shot.continuity_mode = continuity_mode
+    boundary_relation_edit = (
+        shot_plan.relations.edit if shot_plan is not None else None
+    )
+    boundary_relation_action = (
+        shot_plan.relations.action if shot_plan is not None else None
+    )
+    boundary_relation_reason = "planned_relation"
+    if first_frame_requirement is not None:
+        (
+            boundary_relation_edit,
+            boundary_relation_action,
+            boundary_relation_reason,
+        ) = resolve_first_last_boundary_relation(
+            shot,
+            prev_shot,
+            planned_edit=boundary_relation_edit,
+            planned_action=boundary_relation_action,
+        )
     prev_state_out = effective_state_out(prev_shot) if prev_shot else None
     boundary_start_state = None
     if boundary_prev_row is not None and prev_shot is not None:
@@ -1641,12 +1660,8 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
                                       shot_plan.mode.value if shot_plan is not None else decision.mode
                                   ),
                                   first_frame_source=first_frame_source,
-                                  boundary_relation_edit=(
-                                      shot_plan.relations.edit if shot_plan is not None else None
-                                  ),
-                                  boundary_relation_action=(
-                                      shot_plan.relations.action if shot_plan is not None else None
-                                  ),
+                                  boundary_relation_edit=boundary_relation_edit,
+                                  boundary_relation_action=boundary_relation_action,
                                   boundary_start_state=boundary_start_state))
     raw_source_errors = [
         error for error in forbidden_prompt_content_errors(raw_prompt_text, shot)
@@ -1763,12 +1778,9 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
             ),
             "first_frame_source": first_frame_source,
             "source_shot_id": boundary_source_shot_id,
-            "relation_edit": (
-                shot_plan.relations.edit if shot_plan is not None else None
-            ),
-            "relation_action": (
-                shot_plan.relations.action if shot_plan is not None else None
-            ),
+            "relation_edit": boundary_relation_edit,
+            "relation_action": boundary_relation_action,
+            "relation_normalization_reason": boundary_relation_reason,
             "start_state": boundary_start_state,
         },
     }

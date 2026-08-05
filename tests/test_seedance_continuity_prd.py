@@ -14,6 +14,7 @@ from app.continuity import (
     information_ledger_errors,
     preflight_seedance_gates,
     reference_role_plan,
+    resolve_first_last_boundary_relation,
     resolve_do_not_repeat_texts,
     speech_capacity_errors,
     sync_shot_continuity_fields,
@@ -179,6 +180,34 @@ def test_first_last_prompt_uses_real_boundary_contract_and_moving_camera() -> No
     assert "林风独自站在山门左侧" in prompt
     assert "平稳横摇并小幅弧形绕拍" in prompt
     assert "不要沿用上一镜完整构图或主体尾帧姿势" not in prompt
+
+
+def test_first_last_relation_uses_reverse_angle_when_speaker_changes() -> None:
+    previous = _shot(
+        shot_no=2,
+        characters=["林风"],
+        characters_visible=["林风"],
+        dialogues=[Dialogue(speaker="林风", line="你要去哪里？", emotion="平静")],
+    )
+    current = _shot(
+        shot_no=3,
+        characters=["苏婉"],
+        characters_visible=["苏婉"],
+        dialogues=[Dialogue(speaker="苏婉", line="去山门。", emotion="平静")],
+    )
+
+    edit, action, reason = resolve_first_last_boundary_relation(
+        current,
+        previous,
+        planned_edit="angle_cut",
+        planned_action="continues_same_action",
+    )
+
+    assert (edit, action, reason) == (
+        "reverse_angle",
+        "starts_new_action",
+        "onscreen_speaker_changed",
+    )
 
 
 def test_only_action_continuation_uses_previous_tail_frame() -> None:

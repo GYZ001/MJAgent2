@@ -2105,8 +2105,21 @@ async def _prepare_first_last_mode_inputs(
     if not first_req or not last_req:
         raise ProviderError("首尾帧计划缺少 first_frame 或 last_frame 素材合同")
     plan_relations = getattr(shot_plan, "relations", None)
-    relation_edit = str(getattr(plan_relations, "edit", "unknown") or "unknown")
-    relation_action = str(getattr(plan_relations, "action", "unknown") or "unknown")
+    boundary_prompt_contract = (
+        meta.get("boundary_prompt_contract")
+        if isinstance(meta.get("boundary_prompt_contract"), dict)
+        else {}
+    )
+    relation_edit = str(
+        boundary_prompt_contract.get("relation_edit")
+        or getattr(plan_relations, "edit", "unknown")
+        or "unknown"
+    )
+    relation_action = str(
+        boundary_prompt_contract.get("relation_action")
+        or getattr(plan_relations, "action", "unknown")
+        or "unknown"
+    )
     from app.multiview import keyframe_seed_paths, resolve_shot_asset_dependencies
 
     manifest = resolve_shot_asset_dependencies(
