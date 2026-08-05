@@ -109,6 +109,8 @@ def test_seeded_keyframe_omits_redundant_textual_character_appearance() -> None:
     assert "Visible named identities, each exactly once: subject 1" in seeded
     assert "subject 2留在画外" in seeded
     assert "Reference images are authoritative for identity, outfit" in seeded
+    assert "fictional synthetic 3D CG characters" in seeded
+    assert "not a photograph or live-action capture" in seeded
     assert "MULTI-KEYFRAME IDENTITY LOCK" not in seeded
 
 

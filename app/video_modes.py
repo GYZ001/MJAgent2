@@ -39,7 +39,7 @@ REFERENCE_IMAGE_TYPES = {
 
 # 关键帧提示词是分镜级可复用资产的一部分。升级该版本时，未经人工
 # 编辑的旧关键帧不得继续污染新视频版本。
-KEYFRAME_PROMPT_CONTRACT_VERSION = "narrative_action_geometry_v13"
+KEYFRAME_PROMPT_CONTRACT_VERSION = "narrative_action_geometry_v14"
 KEYFRAME_STRUCTURAL_FALLBACK_MODE = "omit_structurally_invalid_keyframe_slots_v1"
 _KEYFRAME_LLM_PROMPT_MAX_CHARS = 1200
 _DEFAULT_KEYFRAME_CANDIDATE_COUNT = 3
@@ -1511,6 +1511,11 @@ def reference_generation_prompt(
             (
                 "Reference images are authoritative for identity, outfit, "
                 "proportions, environment, and visual style."
+            ),
+            (
+                "All visible identities are fictional synthetic 3D CG characters "
+                "with unmistakable rendered-surface shading; the output is not a "
+                "photograph or live-action capture."
             ),
             (
                 "Render the target as one physically continuous progression "
