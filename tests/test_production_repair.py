@@ -2369,6 +2369,81 @@ def test_source_span_normalizer_expands_one_uniquely_proven_elision():
     )
 
 
+def test_source_span_normalizer_expands_long_unique_elision():
+    from app.narrative import normalize_source_evidence_text
+    from app.production.screenplay_repair import (
+        _normalize_screenplay_narrative_graph,
+    )
+
+    first = "调查员进入仓库并确认门锁完好，随后开始逐项核对货架。"
+    omitted = "中间保存完整授权正文。" * 400
+    second = "调查员在最深处找到遗失的蓝色档案盒并完成登记。"
+    chapter = first + omitted + second
+    script = _minimal_script(
+        narrative_plan=NarrativeContinuityPlan.model_validate({
+            "scope_id": "ep_p",
+            "source_evidence": [{
+                "source_evidence_id": "SE-LONG",
+                "source_span": {"chapter_id": "1", "start": 0, "end": 2},
+                "verbatim_excerpt": first + "……" + second,
+            }],
+        }),
+    )
+
+    changes = _normalize_screenplay_narrative_graph(
+        script,
+        authorized_source_chapters={"1": chapter},
+    )
+
+    evidence = script.narrative_plan.source_evidence[0]
+    raw_slice = chapter[evidence.source_span.start:evidence.source_span.end]
+    assert normalize_source_evidence_text(raw_slice) == (
+        normalize_source_evidence_text(evidence.verbatim_excerpt)
+    )
+    assert omitted in evidence.verbatim_excerpt
+    assert any(
+        change["kind"] == "source_excerpt_expanded" for change in changes
+    )
+
+
+def test_source_span_normalizer_uses_linked_proposition_for_duplicate_excerpt():
+    from app.production.screenplay_repair import (
+        _normalize_screenplay_narrative_graph,
+    )
+
+    excerpt = "咚咚"
+    first = "旧仓库的木钟发出咚咚声，值班员随手关上了门。"
+    second = "调查员追到地下室，听见咚咚声后找到了被困的同伴。"
+    chapter = first + "无关过渡。" * 80 + second
+    expected_start = chapter.rindex(excerpt)
+    script = _minimal_script(
+        narrative_plan=NarrativeContinuityPlan.model_validate({
+            "scope_id": "ep_p",
+            "source_evidence": [{
+                "source_evidence_id": "SE-DUP",
+                "source_span": {"chapter_id": "1", "start": 0, "end": 2},
+                "verbatim_excerpt": excerpt,
+            }],
+            "propositions": [{
+                "proposition_id": "P-RESCUE",
+                "canonical_statement": "调查员追到地下室并找到被困的同伴",
+                "narrative_domain": "source_canon",
+                "direct_source_evidence_ids": ["SE-DUP"],
+            }],
+        }),
+    )
+
+    changes = _normalize_screenplay_narrative_graph(
+        script,
+        authorized_source_chapters={"1": chapter},
+    )
+
+    evidence = script.narrative_plan.source_evidence[0]
+    assert evidence.source_span.start == expected_start
+    assert evidence.source_span.end == expected_start + len(excerpt)
+    assert any(change["kind"] == "source_span" for change in changes)
+
+
 def test_gate_failure_summary_prioritizes_actual_failed_issue():
     from app.production.screenplay_repair import _gate_failure_message
 

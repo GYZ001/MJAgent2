@@ -1486,6 +1486,8 @@ def _best_source_evidence_for_turn(
 def _source_evidence_span(
     chapter: str,
     excerpt: str,
+    *,
+    context: str = "",
 ) -> tuple[int, int, str | None] | None:
     """Resolve one exact raw span, optionally expanding a proven excerpt elision."""
     from app.narrative import normalize_source_evidence_text
@@ -1519,48 +1521,73 @@ def _source_evidence_span(
             raw_positions[offset + len(normalized_excerpt) - 1] + 1,
             None,
         )
-    if exact_offsets or len(normalized_excerpt) < 24:
+    if len(exact_offsets) > 1 and context:
+        ranked: list[tuple[float, int]] = []
+        for offset in exact_offsets:
+            raw_start = raw_positions[offset]
+            raw_end = raw_positions[offset + len(normalized_excerpt) - 1] + 1
+            window = chapter[
+                max(0, raw_start - 320):min(len(chapter), raw_end + 320)
+            ]
+            score = max(
+                textmatch.longest_run_ratio(context, window),
+                textmatch.bigram_coverage(context, window),
+            )
+            ranked.append((score, offset))
+        ranked.sort(reverse=True)
+        best_score, best_offset = ranked[0]
+        second_score = ranked[1][0] if len(ranked) > 1 else -1.0
+        if best_score >= 0.2 and best_score - second_score >= 0.03:
+            return (
+                raw_positions[best_offset],
+                raw_positions[
+                    best_offset + len(normalized_excerpt) - 1
+                ] + 1,
+                None,
+            )
+    match_excerpt = re.sub(
+        r"(?:…{2,}|\.{3,})",
+        "",
+        normalized_excerpt,
+    )
+    if exact_offsets or len(match_excerpt) < 24:
         return None
 
     # A model may concatenate two exact source regions while omitting an
     # irrelevant paragraph. Recover only when unique prefix/suffix anchors prove
     # one bounded containing span and the authored excerpt is an ordered
     # subsequence of it. This expands evidence; it never invents or fuzzy-edits it.
-    anchor_size = min(32, max(12, len(normalized_excerpt) // 8))
-    prefix = normalized_excerpt[:anchor_size]
-    suffix = normalized_excerpt[-anchor_size:]
+    anchor_size = min(32, max(12, len(match_excerpt) // 8))
+    prefix = match_excerpt[:anchor_size]
+    suffix = match_excerpt[-anchor_size:]
     prefix_offsets = occurrences(normalized_chapter, prefix)
     suffix_offsets = occurrences(normalized_chapter, suffix)
     candidates: list[tuple[int, int, int]] = []
-    max_extra = max(200, min(4000, len(normalized_excerpt) * 2))
-
     for start in prefix_offsets:
         for suffix_start in suffix_offsets:
             end = suffix_start + len(suffix)
-            if end <= start or end - start < len(normalized_excerpt):
+            if end <= start or end - start < len(match_excerpt):
                 continue
             segment = normalized_chapter[start:end]
-            extra = len(segment) - len(normalized_excerpt)
-            if extra > max_extra:
-                continue
+            extra = len(segment) - len(match_excerpt)
             cursor = 0
             for char in segment:
-                if cursor < len(normalized_excerpt) and char == normalized_excerpt[cursor]:
+                if cursor < len(match_excerpt) and char == match_excerpt[cursor]:
                     cursor += 1
             matching_coverage = (
                 sum(
                     block.size
                     for block in SequenceMatcher(
                         None,
-                        normalized_excerpt,
+                        match_excerpt,
                         segment,
                         autojunk=False,
                     ).get_matching_blocks()
                 )
-                / max(1, len(normalized_excerpt))
+                / max(1, len(match_excerpt))
             )
             if (
-                cursor == len(normalized_excerpt)
+                cursor == len(match_excerpt)
                 or matching_coverage >= 0.98
             ):
                 candidates.append((extra, start, end))
@@ -1650,6 +1677,15 @@ def _normalize_screenplay_narrative_graph(
         script,
         "\n".join(dict.fromkeys(chapters.values())),
     ))
+    source_contexts: dict[str, list[str]] = {}
+    for proposition in data.get("propositions") or []:
+        if not isinstance(proposition, dict):
+            continue
+        statement = str(proposition.get("canonical_statement") or "").strip()
+        if not statement:
+            continue
+        for evidence_id in proposition.get("direct_source_evidence_ids") or []:
+            source_contexts.setdefault(str(evidence_id), []).append(statement)
     for index, evidence in enumerate(data.get("source_evidence") or []):
         if not isinstance(evidence, dict):
             continue
@@ -1660,11 +1696,15 @@ def _normalize_screenplay_narrative_graph(
         chapter = chapters.get(str(span.get("chapter_id") or ""))
         if chapter is None:
             continue
-        resolved = _source_evidence_span(chapter, excerpt)
+        evidence_id = evidence.get("source_evidence_id") or f"source-{index}"
+        resolved = _source_evidence_span(
+            chapter,
+            excerpt,
+            context=" ".join(source_contexts.get(str(evidence_id), [])),
+        )
         if resolved is None:
             continue
         start, end, expanded_excerpt = resolved
-        evidence_id = evidence.get("source_evidence_id") or f"source-{index}"
         if expanded_excerpt is not None and expanded_excerpt != excerpt:
             changes.append({
                 "kind": "source_excerpt_expanded",
