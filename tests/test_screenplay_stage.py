@@ -1,9 +1,10 @@
 import asyncio
 
 from app import stages
-from app.schemas import (Bible, Character, EpisodeScreenplay, KeyDialogueChain,
-                         KeyDialogueTurn, PlotSpine, PlotSpineBeat,
-                         ScriptScene, World)
+from app.schemas import (Bible, Character, EpisodeScreenplay, InformationItem,
+                         KeyDialogueChain, KeyDialogueTurn, PlotSpine,
+                         PlotSpineBeat, ScriptScene, StoryEvent,
+                         VoiceCanonical, World)
 from app.stages import _render_screenplay_source, generate_screenplay
 from app.validators import (
     normalize_screenplay_candidate,
@@ -482,6 +483,67 @@ def test_dialogue_chain_normalization_excludes_narrator_from_key_lines() -> None
     normalized = normalize_screenplay_candidate(script)
 
     assert normalized.key_lines == ["谷言：门开了。"]
+
+
+def test_ledger_normalization_resolves_composite_speaker_from_content() -> None:
+    script = EpisodeScreenplay(
+        episode_no=1,
+        events=[
+            StoryEvent(
+                event_id="E1",
+                visible_change="胡太太邀请阿宾一起吃饭。",
+                state_out="二人准备同行。",
+            )
+        ],
+        information_ledger=[
+            InformationItem(
+                info_id="I1",
+                event_id="E1",
+                content="胡太太今天放假，邀请阿宾一起去快餐店。",
+                delivery_owner="spoken_dialogue",
+                speaker_id="阿宾、胡太太",
+            )
+        ],
+        voice_bible=[
+            VoiceCanonical(speaker_id="阿宾", voice_canonical="青年男声"),
+            VoiceCanonical(speaker_id="胡太太", voice_canonical="温柔女声"),
+        ],
+    )
+
+    normalized = normalize_screenplay_candidate(script)
+
+    assert normalized.information_ledger[0].speaker_id == "胡太太"
+    assert script.information_ledger[0].speaker_id == "阿宾、胡太太"
+
+
+def test_ledger_normalization_keeps_ambiguous_composite_speaker_for_repair() -> None:
+    script = EpisodeScreenplay(
+        episode_no=1,
+        events=[
+            StoryEvent(
+                event_id="E1",
+                visible_change="二人完成问答。",
+                state_out="信息已经交付。",
+            )
+        ],
+        information_ledger=[
+            InformationItem(
+                info_id="I1",
+                event_id="E1",
+                content="二人通过问答确认了出行安排。",
+                delivery_owner="spoken_dialogue",
+                speaker_id="阿宾、胡太太",
+            )
+        ],
+        voice_bible=[
+            VoiceCanonical(speaker_id="阿宾", voice_canonical="青年男声"),
+            VoiceCanonical(speaker_id="胡太太", voice_canonical="温柔女声"),
+        ],
+    )
+
+    normalized = normalize_screenplay_candidate(script)
+
+    assert normalized.information_ledger[0].speaker_id == "阿宾、胡太太"
 
 
 def test_long_screenplay_source_retains_head_middle_dialogue_and_tail() -> None:

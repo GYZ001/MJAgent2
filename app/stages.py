@@ -1905,6 +1905,8 @@ B. `full_script_text`：真正的剧本正文；只写大形体动作与主线�
 - events[]：建议与 must_keep spine 一一对应（约 5~12 条）。每条必须有非空 event_id（如 E1）、visible_change、state_out；禁止输出空壳事件。
 - information_ledger[]：条数 ≤ spine_beats×2；每条必须有非空中文 content、合法 info_id（I1/I2）、以及对应 events[].event_id。
   【硬性】禁止输出 content 为空或 event_id 为空的台账项；写不出完整台账时，按每条 must_keep spine 只产出一条即可。
+  speaker_id 只能是一个 voice_bible.speaker_id 或 null，禁止写“甲、乙”“甲与乙”等组合值；
+  多人对话共同交付一条信息时，填写该信息的主交付说话人，无法唯一确定则拆成多条信息项。
 - voice_bible[]：每个元素包含 speaker_id、voice_canonical、language、role_type。Bible 已有角色的
   speaker_id 必须逐字等于人物谱姓名；非 Bible 说话人的 speaker_id 必须逐字出现在对应
   identity_contract.voice_ids；禁止生成 V-MH、VOICE-01 等没有显式身份绑定的独立声音编号。

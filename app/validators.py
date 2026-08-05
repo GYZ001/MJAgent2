@@ -1974,6 +1974,51 @@ def normalize_screenplay_ledgers(script: EpisodeScreenplay) -> EpisodeScreenplay
             ))
     script.events = cleaned_events
     event_ids = {(e.event_id or "").strip() for e in cleaned_events if (e.event_id or "").strip()}
+    known_voice_ids = {
+        str(item.speaker_id or "").strip()
+        for item in (script.voice_bible or [])
+        if str(item.speaker_id or "").strip()
+    }
+    known_voice_ids.update(
+        str(turn.speaker or "").strip()
+        for chain in (script.dialogue_chains or [])
+        for turn in (chain.turns or [])
+        if str(turn.speaker or "").strip()
+    )
+
+    def normalized_speaker_id(item: InformationItem) -> str | None:
+        raw = str(item.speaker_id or "").strip()
+        if not raw or raw in known_voice_ids:
+            return raw or None
+        candidates = [
+            speaker
+            for speaker in known_voice_ids
+            if speaker and speaker in raw
+        ]
+        if len(candidates) == 1:
+            return candidates[0]
+        evidence = "；".join(
+            value
+            for value in (
+                str(item.content or "").strip(),
+                str(item.exact_text or "").strip(),
+            )
+            if value
+        )
+        positions = sorted(
+            (
+                evidence.find(speaker),
+                speaker,
+            )
+            for speaker in candidates
+            if evidence.find(speaker) >= 0
+        )
+        if positions and (
+            len(positions) == 1
+            or positions[0][0] < positions[1][0]
+        ):
+            return positions[0][1]
+        return raw
 
     # 3) 清洗 ledger：丢掉无中文 content 的空壳；event_id 空/非法时按序号挂到事件
     cleaned_ledger: list[InformationItem] = []
@@ -1999,7 +2044,7 @@ def normalize_screenplay_ledgers(script: EpisodeScreenplay) -> EpisodeScreenplay
             event_id=eid,
             content=content,
             delivery_owner=item.delivery_owner if item.delivery_owner in DELIVERY_OWNERS else "visual_action",
-            speaker_id=item.speaker_id,
+            speaker_id=normalized_speaker_id(item),
             exact_text=item.exact_text,
             reinforcement_allowed=bool(item.reinforcement_allowed),
             status=(item.status or "unassigned"),
