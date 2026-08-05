@@ -1574,6 +1574,9 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
     prev_shot = _load_shot_model(prompt_prev_row) if prompt_prev_row else None
     continuity_mode = derive_continuity_mode(shot, prev_shot)
     shot.continuity_mode = continuity_mode
+    shot.continuity_from_prev = uses_previous_tail_frame(continuity_mode)
+    if continuity_mode != "scene_change":
+        shot.transition = "硬切"
     boundary_relation_edit = (
         shot_plan.relations.edit if shot_plan is not None else None
     )

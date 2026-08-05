@@ -621,6 +621,27 @@ def test_action_continuation_with_prev_still_allowed() -> None:
     assert second.continuity_mode == "action_continuation"
 
 
+def test_continuity_mode_is_derived_from_scene_and_time_context() -> None:
+    first = _shot(
+        shot_no=1,
+        scene_setting="日，办公室",
+        continuity_mode="scene_change",
+    )
+    same_context = _shot(
+        shot_no=2,
+        scene_setting="日，办公室",
+        continuity_mode="scene_change",
+    )
+    changed_context = _shot(
+        shot_no=3,
+        scene_setting="夜，街道",
+        continuity_mode="same_scene_cut",
+    )
+
+    assert derive_continuity_mode(same_context, prev=first) == "same_scene_cut"
+    assert derive_continuity_mode(changed_context, prev=same_context) == "scene_change"
+
+
 def test_dialogue_matching_source_excerpt_prefix_is_not_forbidden_leak() -> None:
     """ERR-20260725-f24b91：台词与 source_excerpt 前缀相同且只出现在对白中，不得误杀。"""
     line = "萧炎哥哥，以前你曾经与薰儿说过，要能放下，才能拿起，提放自如，是自在人！"

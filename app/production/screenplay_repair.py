@@ -1430,7 +1430,7 @@ def _source_evidence_span(
     prefix_offsets = occurrences(normalized_chapter, prefix)
     suffix_offsets = occurrences(normalized_chapter, suffix)
     candidates: list[tuple[int, int, int]] = []
-    max_extra = max(200, min(1000, len(normalized_excerpt)))
+    max_extra = max(200, min(4000, len(normalized_excerpt) * 2))
 
     for start in prefix_offsets:
         for suffix_start in suffix_offsets:
@@ -1445,7 +1445,22 @@ def _source_evidence_span(
             for char in segment:
                 if cursor < len(normalized_excerpt) and char == normalized_excerpt[cursor]:
                     cursor += 1
-            if cursor == len(normalized_excerpt):
+            matching_coverage = (
+                sum(
+                    block.size
+                    for block in SequenceMatcher(
+                        None,
+                        normalized_excerpt,
+                        segment,
+                        autojunk=False,
+                    ).get_matching_blocks()
+                )
+                / max(1, len(normalized_excerpt))
+            )
+            if (
+                cursor == len(normalized_excerpt)
+                or matching_coverage >= 0.98
+            ):
                 candidates.append((extra, start, end))
 
     if not candidates:
