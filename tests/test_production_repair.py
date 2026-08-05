@@ -2075,6 +2075,17 @@ def test_certificate_binds_hash_and_rejects_mismatch(monkeypatch):
     verify_completion_certificate(cert, expected_artifact_hash=h)
     with pytest.raises(ValueError):
         verify_completion_certificate(cert, expected_artifact_hash="deadbeef")
+    db.get_conn().execute(
+        "UPDATE artifacts SET status='stale' WHERE id=?",
+        (art["id"],),
+    )
+    db.get_conn().commit()
+    with pytest.raises(ValueError, match="artifact 范围或当前状态已失效"):
+        verify_completion_certificate(cert)
+    verify_completion_certificate(
+        cert,
+        allow_stale_artifact_for_revision=True,
+    )
 
 
 def test_repair_router_no_longer_emits_redo_or_replan():

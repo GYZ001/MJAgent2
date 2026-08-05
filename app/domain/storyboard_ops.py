@@ -1275,7 +1275,6 @@ async def _storyboard_task(
                 )
             from app.production.certificate import (
                 verify_completion_certificate,
-                verify_current_storyboard_completion_authority,
             )
             from app.narrative import storyboard_authority_projection
 
@@ -1296,6 +1295,7 @@ async def _storyboard_task(
                     ep["storyboard_production_revision_id"] or ""
                 ),
                 allow_consumed=True,
+                allow_stale_artifact_for_revision=True,
             )
             projection_restored = bool(
                 storyboard_authority_projection(board)
@@ -1343,10 +1343,11 @@ async def _storyboard_task(
                     severity="warning",
                 )
 
-            verify_current_storyboard_completion_authority(
-                episode=ep,
-                current_storyboard_content=board.model_dump(mode="json"),
-            )
+            # The immutable baseline was verified above with its exact
+            # artifact, revision and evaluation set. A stale baseline may
+            # seed an isolated revision, but it no longer authorizes
+            # downstream work; the replacement publish issues a new
+            # completion certificate.
             p = conn.execute(
                 "SELECT * FROM projects WHERE id=?",
                 (ep["project_id"],),

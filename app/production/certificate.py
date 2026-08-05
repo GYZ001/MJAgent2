@@ -480,6 +480,7 @@ def verify_completion_certificate(
     expected_scope_id: str | None = None,
     expected_production_revision_id: str | None = None,
     allow_consumed: bool = False,
+    allow_stale_artifact_for_revision: bool = False,
 ) -> CompletionCertificate:
     # The database row is authoritative even when the caller passes a model.
     # Otherwise a caller could construct a look-alike certificate object and
@@ -515,10 +516,13 @@ def verify_completion_certificate(
     art = evidence_repository.get_artifact(cert.artifact_id)
     if not art:
         raise ValueError("凭证绑定的 artifact 已不存在")
+    allowed_artifact_statuses = {"validated", "approved"}
+    if allow_stale_artifact_for_revision:
+        allowed_artifact_statuses.add("stale")
     if (
         art.get("scope_type") != "episode"
         or art.get("scope_id") != cert.scope_id
-        or art.get("status") not in {"validated", "approved"}
+        or art.get("status") not in allowed_artifact_statuses
     ):
         raise ValueError("凭证绑定的 artifact 范围或当前状态已失效")
     current_hash = art.get("content_hash") or evidence_repository.content_hash(art.get("content"))
