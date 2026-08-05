@@ -7,8 +7,10 @@ from app import stages
 from app.continuity import dialogue_framing_errors
 from app.loops import AgentLoop, AgentLoopPolicy
 from app.stages import (StoryboardShotDraft, _run_with_agent_loop,
+                        align_storyboard_source_evidence,
                         normalize_storyboard_outline_candidate,
                         normalize_storyboard_shot_candidate)
+from app.storyboard_supervisor import _blocker_messages
 
 
 def _loop() -> AgentLoop[StoryboardShotDraft]:
@@ -66,6 +68,60 @@ def test_storyboard_candidate_normalizes_nullable_contract_fields() -> None:
         "episode_no", "shot.shot_no", "shot.story_event_id",
         "shot.state_in", "shot.new_information_ids", "shot.audio_cast",
     }
+
+
+def test_storyboard_source_evidence_can_use_source_backed_audio() -> None:
+    source = "门外忽然传来一阵急促的敲门声，屋内两人同时停下动作。"
+    draft = StoryboardShotDraft.model_validate({
+        "episode_no": 1,
+        "shot": {
+            "shot_no": 1,
+            "duration_s": 5,
+            "shot_size": "中景",
+            "camera_move": "固定",
+            "scene_setting": "日，室内",
+            "characters": ["甲"],
+            "action_desc": "甲听见门外动静后停下手里的动作。",
+            "first_frame_desc": "甲站在桌边整理文件。",
+            "last_frame_desc": "同一机位，甲停下动作看向门口。",
+            "source_excerpt": "模型改写后无法直接回绑的证据。",
+            "audio_timeline": [{
+                "start_s": 1.0,
+                "end_s": 2.0,
+                "type": "ambient_sound",
+                "speaker_id": None,
+                "text": "门外忽然传来一阵急促的敲门声",
+                "lip_sync": False,
+                "emotion": "平静",
+                "voice_canonical": "急促敲门声",
+            }],
+            "transition": "硬切",
+        },
+    })
+
+    aligned = align_storyboard_source_evidence(draft.shot, source)
+
+    assert aligned is not None
+    assert aligned.excerpt == "门外忽然传来一阵急促的敲门声"
+    assert aligned.exact is True
+
+
+def test_source_fidelity_issue_remains_a_structural_blocker() -> None:
+    message = "shot.source_excerpt 无法在本集授权原文中找到连续依据"
+    draft = StoryboardShotDraft.model_construct(
+        episode_no=1,
+        shot=None,
+        is_final=False,
+    )
+    object.__setattr__(draft, "disposition", "WARNING")
+    object.__setattr__(draft, "residual_errors", [message])
+    object.__setattr__(draft, "residual_issues", [{
+        "code": "SOURCE_FIDELITY",
+        "message": message,
+        "severity": "blocker",
+    }])
+
+    assert _blocker_messages(draft) == [message]
 
 
 def test_storyboard_candidate_restores_shot_fields_misplaced_at_root() -> None:

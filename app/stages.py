@@ -62,7 +62,7 @@ from app.renderability import (
     SHOT_HARD_MAX,
     renderability_prompt_block,
 )
-from app.source_excerpt import align_source_excerpt
+from app.source_excerpt import AlignedExcerpt, align_source_excerpt
 
 SYSTEM_PREFIX = (
     "你是专业的竖屏漫剧（动态漫画短剧）编剧与分镜师。\n"
@@ -2555,6 +2555,30 @@ def _normalized_candidate_board(episode_no: int, completed_shots: list[Shot], sh
     return board, []
 
 
+def align_storyboard_source_evidence(
+    shot: Shot,
+    source_text: str,
+) -> AlignedExcerpt | None:
+    """Return the first delivery field backed by authorized contiguous source."""
+    candidates = [
+        shot.source_excerpt,
+        *[dialogue.line for dialogue in shot.dialogues],
+        shot.narration,
+        *[item.text for item in shot.audio_timeline],
+    ]
+    return next((
+        aligned
+        for candidate in candidates
+        if str(candidate or "").strip()
+        for aligned in [align_source_excerpt(
+            str(candidate),
+            source_text,
+            min_match_chars=SOURCE_EXCERPT_MIN_CHARS,
+        )]
+        if aligned is not None
+    ), None)
+
+
 def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict, bible: Bible,
                                     screenplay: EpisodeScreenplay, completed_shots: list[Shot],
                                     shot_no: int, allow_finish: bool, must_finish: bool,
@@ -2588,23 +2612,10 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
             f"当前已到本集收束位（大纲末镜/技术硬上限），第 {shot_no} 镜必须收束到尾钩并设置 is_final=true"
         )
 
-    evidence_candidates = [
-        draft.shot.source_excerpt,
-        *[dialogue.line for dialogue in draft.shot.dialogues],
-        draft.shot.narration,
-        *[item.text for item in draft.shot.audio_timeline],
-    ]
-    aligned_excerpt = next((
-        aligned
-        for candidate in evidence_candidates
-        if str(candidate or "").strip()
-        for aligned in [align_source_excerpt(
-            str(candidate),
-            source_text,
-            min_match_chars=SOURCE_EXCERPT_MIN_CHARS,
-        )]
-        if aligned is not None
-    ), None)
+    aligned_excerpt = align_storyboard_source_evidence(
+        draft.shot,
+        source_text,
+    )
     if aligned_excerpt is None:
         if not str(draft.shot.source_excerpt or "").strip():
             errors.append(
