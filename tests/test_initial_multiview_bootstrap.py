@@ -124,7 +124,11 @@ def test_initial_character_generation_uses_batch_scoped_recovery_operation(
 
     monkeypatch.setattr(refs.hiagent, "generate_image", capture_primary)
 
-    asyncio.run(refs.generate_refs("proj_bootstrap", fresh_after=123.5))
+    asyncio.run(refs.generate_refs(
+        "proj_bootstrap",
+        fresh_after=None,
+        operation_started_at=123.5,
+    ))
 
     assert captured[0]["reuse_successful_operation"] is True
     assert captured[0]["operation_id"].startswith("op_portrait_")

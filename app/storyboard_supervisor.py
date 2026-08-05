@@ -882,6 +882,8 @@ def _recover_outline_from_current_artifact(
         "OUTLINE_HARD_LIMIT",
         "OUTLINE_ORDER_INVALID",
         "OUTLINE_DURATION_INVALID",
+        "OUTLINE_KEY_LINE_CAPACITY_INVALID",
+        "OUTLINE_KEY_LINE_SPEAKER_MIXED",
     }
     from app.loops.base import is_structural_issue
 
@@ -906,9 +908,18 @@ def _recover_outline_from_current_artifact(
         if not outline.shots:
             continue
         evaluation_rows = conn.execute(
-            "SELECT issues_json FROM evaluations WHERE artifact_id=?",
+            """SELECT status,hard_gate_passed,evaluation_role,runtime_blocking,
+                      issues_json
+                 FROM evaluations WHERE artifact_id=?""",
             (artifact_id,),
         ).fetchall()
+        if not evaluation_rows or any(
+            not bool(row["hard_gate_passed"])
+            or bool(row["runtime_blocking"])
+            or row["status"] == "failed"
+            for row in evaluation_rows
+        ):
+            continue
         requires_format_repair = False
         for row in evaluation_rows:
             try:

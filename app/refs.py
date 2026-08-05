@@ -264,6 +264,7 @@ async def generate_refs(
     only_characters: list[str] | None = None,
     resume: bool = False,
     fresh_after: float | None = None,
+    operation_started_at: float | None = None,
 ) -> None:
     """为项目全部（或指定）角色生成定妆照，写回 bible_json 的 ref_image_path。"""
     conn = get_conn()
@@ -371,9 +372,9 @@ async def generate_refs(
                         "portrait_mode": "initial",
                         "attempt": attempt,
                     }
-                    if fresh_after is not None:
+                    if operation_started_at is not None:
                         operation_material = (
-                            f"{project_id}:{fresh_after}:{c.name}:initial_portrait"
+                            f"{project_id}:{operation_started_at}:{c.name}:initial_portrait"
                         )
                         call_meta.update({
                             "operation_id": "op_portrait_" + hashlib.sha256(

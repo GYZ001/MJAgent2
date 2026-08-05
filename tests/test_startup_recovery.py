@@ -300,6 +300,24 @@ def test_fresh_character_reference_batch_persists_restart_mode(tmp_path, monkeyp
     assert spawned == [("refs", "p1")]
 
 
+def test_gap_character_reference_batch_persists_operation_boundary(tmp_path, monkeypatch) -> None:
+    conn = _fresh_database(tmp_path, monkeypatch)
+    spawned = _capture_spawn(monkeypatch)
+    monkeypatch.setattr(api, "_refs_task_active", lambda _pid: False)
+
+    started = api._start_refs_generation(
+        "p1", None, only_characters=["药老"], resume=True,
+    )
+
+    assert started and started["task_id"] == "refs:p1"
+    row = conn.execute(
+        "SELECT refs_resume,refs_batch_started_at FROM projects WHERE id='p1'"
+    ).fetchone()
+    assert row["refs_resume"] == 1
+    assert row["refs_batch_started_at"] is not None
+    assert spawned == [("refs", "p1")]
+
+
 def test_running_character_reference_run_keeps_refs_busy_when_project_flag_is_idle(
     tmp_path, monkeypatch,
 ) -> None:

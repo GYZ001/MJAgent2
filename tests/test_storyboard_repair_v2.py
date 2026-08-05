@@ -50,6 +50,7 @@ from app.storyboard_supervisor import (
     _open_shot_gap,
     _repair_is_pending,
     _repair_feedback_for_shot,
+    _recover_outline_from_current_artifact,
     _recover_truncated_outline_from_approved_artifact,
     _repair_candidate_made_progress,
     _retarget_spine_repair_brief,
@@ -1563,6 +1564,64 @@ def test_finalize_never_invents_missing_final_marker(repair_db) -> None:
     assert conn.execute(
         "SELECT storyboard_artifact_id FROM episodes WHERE id='e1'",
     ).fetchone()[0] is None
+
+
+@pytest.mark.parametrize(
+    ("hard_gate_passed", "runtime_blocking", "expected_recovery"),
+    [(0, 1, False), (1, 0, True)],
+)
+def test_outline_recovery_requires_nonblocking_evaluation(
+    repair_db,
+    hard_gate_passed: int,
+    runtime_blocking: int,
+    expected_recovery: bool,
+) -> None:
+    conn, _screenplay = repair_db
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[StoryboardOutlineShot(
+            shot_no=1,
+            shot_id="SH-RECOVER",
+            beat="少年走到石碑前查看结果",
+        )],
+    )
+    conn.execute(
+        """INSERT INTO artifacts(
+               id,type,scope_type,scope_id,version,status,trust_level,content_json,
+               content_hash,parent_artifact_ids_json,created_at
+           ) VALUES('outline-recovery','storyboard_outline','episode','e1',1,
+                    'candidate','T1',?,'outline-recovery-hash','[]',10)""",
+        (outline.model_dump_json(),),
+    )
+    conn.execute(
+        """INSERT INTO evaluations(
+               id,artifact_id,evaluator_type,evaluator_name,evaluator_version,
+               status,hard_gate_passed,evaluation_role,runtime_blocking,
+               issues_json,created_at
+           ) VALUES('eval-outline-recovery','outline-recovery','deterministic',
+                    'storyboard_outline_validator','3.0.0',?,?,?,?,'[]',11)""",
+        (
+            "warning" if hard_gate_passed else "failed",
+            hard_gate_passed,
+            "score_only" if hard_gate_passed else None,
+            runtime_blocking,
+        ),
+    )
+    conn.commit()
+    episode = conn.execute("SELECT * FROM episodes WHERE id='e1'").fetchone()
+    checkpoint = SupervisorCheckpoint(episode_id="e1")
+
+    recovered = _recover_outline_from_current_artifact(
+        conn,
+        episode,
+        checkpoint,
+    )
+
+    assert (recovered is not None) is expected_recovery
+    if expected_recovery:
+        assert checkpoint.outline_artifact_id == "outline-recovery"
+    else:
+        assert checkpoint.outline_artifact_id is None
 
 
 def test_incomplete_success_recovers_only_current_screenplay_approved_outline(

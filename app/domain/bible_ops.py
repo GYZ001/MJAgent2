@@ -239,10 +239,18 @@ def _start_refs_generation(
         (project_id,),
     ).fetchone()
     target_payload = _refs_target_payload(only_character, only_characters)
-    # fresh_after 只在“全量重生被进程恢复”时传入；新的全量批次在此冻结起点。
-    # 恢复时 generate_refs 使用 resume=True，但只跳过该起点之后已提交的新包。
-    batch_started_at = fresh_after if fresh_after is not None else (None if resume else now())
-    persisted_resume = 0 if batch_started_at is not None else 1
+    # ``fresh_after`` controls which ready packs resume may skip.  The operation
+    # batch timestamp is separate and always durable so paid image calls can be
+    # reused after a restart, including gap-only resume batches.
+    previous_batch_started_at = previous["refs_batch_started_at"] if previous else None
+    batch_started_at = (
+        fresh_after
+        if fresh_after is not None
+        else previous_batch_started_at
+        if resume and previous_batch_started_at is not None
+        else now()
+    )
+    persisted_resume = 1 if resume and fresh_after is None else 0
     if target_payload is None:
         conn.execute(
             "UPDATE projects SET refs_status='running', refs_error=NULL, refs_target=NULL, "
@@ -269,7 +277,9 @@ def _start_refs_generation(
             "refs", project_id,
             _refs_task(
                 project_id, only_character, only_characters=only_characters,
-                resume=resume, fresh_after=batch_started_at, parent_run_id=parent_run_id,
+                resume=resume, fresh_after=fresh_after,
+                operation_started_at=batch_started_at,
+                parent_run_id=parent_run_id,
                 requested_by=requested_by, trigger_type=trigger_type, recorder=recorder,
             ),
             project_id=project_id,
@@ -2602,6 +2612,7 @@ async def _refs_task(
     only_characters: list[str] | None = None,
     resume: bool = False,
     fresh_after: float | None = None,
+    operation_started_at: float | None = None,
     parent_run_id: str | None = None,
     requested_by: str = "user",
     trigger_type: str = "manual",
@@ -2632,6 +2643,7 @@ async def _refs_task(
             lambda: generate_refs(
                 project_id, only_character, only_characters=only_characters,
                 resume=resume, fresh_after=fresh_after,
+                operation_started_at=operation_started_at,
             ),
             agent_name="reference_asset_loop",
         )
