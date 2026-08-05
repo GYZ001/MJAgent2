@@ -161,10 +161,7 @@ def evaluate_storyboard_for_confirmation(
 
     Supervisor 与确认门必须共用此函数，避免「Supervisor 认为通过、确认门又用另一套规则失败」。
     """
-    from app.evaluations.issues import (
-        is_storyboard_confirmation_blocker,
-        issues_from_messages,
-    )
+    from app.evaluations.issues import issues_from_messages
     from app.harness.types import IssueSeverity
     from app.continuity import dialogue_framing_errors
     from app.validators import (
@@ -206,8 +203,9 @@ def evaluate_storyboard_for_confirmation(
             + "、".join(stripped)
             + "；禁止确认和视频生产"
         )
+    score_warnings: list[str] = []
     if screenplay is not None:
-        structural_errors.extend(
+        score_warnings.extend(
             validate_storyboard_screenplay_scene_alignment(board, screenplay, bible)
         )
         if screenplay.narrative_plan is not None:
@@ -231,77 +229,22 @@ def evaluate_storyboard_for_confirmation(
                     structural_errors.append(
                         "[STORYBOARD_OUTLINE_INVALID] 当前分镜大纲无法解析"
                     )
-            structural_errors.extend(validate_storyboard_narrative(
+            score_warnings.extend(validate_storyboard_narrative(
                 board,
                 screenplay,
                 outline=outline,
                 complete=True,
                 expected_scope_id=str(episode["id"]),
             ))
-            try:
-                episode_data = dict(episode)
-            except Exception:  # noqa: BLE001
-                episode_data = {}
-            if episode_data.get("status") != "scripting":
-                artifact_id = episode_data.get("storyboard_artifact_id")
-                review_passed = False
-                if (
-                    artifact_id
-                    and episode_data.get("narrative_status") == "ready"
-                    and episode_data.get("narrative_review_artifact_id")
-                ):
-                    from app.evidence import repository as evidence_repository
-                    from app.narrative_review import (
-                        verify_review_chain_for_storyboard_artifact,
-                    )
-
-                    artifact = evidence_repository.get_artifact(str(artifact_id))
-                    try:
-                        report_id = verify_review_chain_for_storyboard_artifact(
-                            episode_id=str(episode_data.get("id") or ""),
-                            screenplay=screenplay,
-                            storyboard_artifact=artifact or {},
-                        )
-                    except Exception:  # noqa: BLE001 - live release-gate boundary
-                        report_id = ""
-                    row = get_conn().execute(
-                        """SELECT 1 FROM evaluations
-                            WHERE artifact_id=?
-                              AND evaluator_name='narrative_blind_comparator'
-                              AND evaluation_role='runtime_gate'
-                              AND runtime_blocking=1
-                              AND status='passed' AND hard_gate_passed=1
-                            LIMIT 1""",
-                        (artifact_id,),
-                    ).fetchone()
-                    from app.narrative import storyboard_authority_projection
-
-                    review_passed = bool(
-                        row
-                        and report_id
-                        and report_id == episode_data.get("narrative_review_artifact_id")
-                        and artifact is not None
-                        and storyboard_authority_projection(
-                            artifact.get("content") or {}
-                        )
-                        == storyboard_authority_projection(board)
-                    )
-                if not review_passed:
-                    structural_errors.append(
-                        "[NARRATIVE_REVIEW_MISSING] 当前分镜缺少有效的多先验冷观众审读，禁止确认"
-                    )
-    score_warnings = validate_storyboard(
+    score_warnings.extend(validate_storyboard(
         board,
         bible,
         compact_target,
         narrative_authority=narrative_plan is not None,
         narrative_plan=narrative_plan,
         screenplay=screenplay,
-    )
-    # 对白构图是视频输入结构，不是审美评分：多人可见、错误景别/运镜会直接改变
-    # 参考图和最终画面，必须进入确认硬门禁。动作文字里仍提到画外听者等描述质量
-    # 问题继续保留为 warning，避免旧项目被不必要地整批判废。
-    dialogue_blockers = [
+    ))
+    dialogue_findings = [
         message
         for shot in board.shots
         for message in dialogue_framing_errors(
@@ -309,21 +252,10 @@ def evaluate_storyboard_for_confirmation(
             narrative_authority=narrative_plan is not None,
         )
     ]
-    if dialogue_blockers:
-        structural_errors.extend(dialogue_blockers)
-        blocker_set = set(dialogue_blockers)
-        score_warnings = [message for message in score_warnings if message not in blocker_set]
+    score_warnings.extend(dialogue_findings)
     if screenplay is not None:
         score_warnings.extend(validate_storyboard_soundtrack(board, screenplay, compact_target))
         score_warnings.extend(validate_storyboard_preserves_key_content(board, screenplay))
-    delivery_blockers = [
-        message for message in score_warnings
-        if is_storyboard_confirmation_blocker(message)
-    ]
-    if delivery_blockers:
-        structural_errors.extend(delivery_blockers)
-        blocker_set = set(delivery_blockers)
-        score_warnings = [message for message in score_warnings if message not in blocker_set]
     if has_real_bible and not structural_errors:
         try:
             for s in board.shots:
@@ -378,11 +310,6 @@ def _has_current_storyboard_completion_certificate(conn, episode) -> bool:
         )
         has_narrative_plan = screenplay_context.narrative_authority_required
     except Exception:  # noqa: BLE001 - immutable authority drift fails closed
-        return False
-    if has_narrative_plan and (
-        data.get("narrative_status") != "ready"
-        or not data.get("narrative_review_artifact_id")
-    ):
         return False
     if has_narrative_plan:
         try:
@@ -740,8 +667,8 @@ def confirm_episode_core(
             and not _has_current_storyboard_completion_certificate(get_conn(), already)
         ):
             raise ValueError(
-                "已确认分镜的完成凭证或冷观众审读证据已失效，"
-                "不能幂等重申确认；请返回分镜台重新修复与审读"
+                "已确认分镜的完成凭证或正式镜头投影已失效，"
+                "不能幂等重申确认；请返回分镜台重新发布"
             )
         _converge_confirmed_storyboard_state(
             episode_id,
@@ -934,7 +861,7 @@ def confirm_episode_core(
     ):
         raise ValueError(
             "当前叙事分镜不再等同已发布 Artifact，"
-            "请生成语义修订候选并重新完成盲审发布"
+            "请生成修订候选并重新发布"
         )
     if (
         not narrative_authority

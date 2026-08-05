@@ -18,7 +18,7 @@ from app import errors
 from app.db import get_conn
 from app.evidence import repository as evidence_repository
 from app.harness.contracts import get_contract
-from app.harness.types import Evaluation, EvidenceArtifact
+from app.harness.types import Evaluation, EvidenceArtifact, Issue
 from app.repair_router import (
     RepairPlan,
     bump_fingerprint_count,
@@ -424,9 +424,8 @@ def _is_structural_storyboard_issue(code: Any = None, message: Any = "") -> bool
 
 
 def _storyboard_warning_requires_auto_repair(issue: Any) -> bool:
-    """Warnings that are deterministic delivery defects, not taste scores."""
-    code = str(getattr(issue, "code", "") or "")
-    return code == "OVERDETAIL"
+    """QA findings never authorize another model generation."""
+    return False
 
 
 def _storyboard_generation_is_complete(
@@ -605,6 +604,99 @@ def _recover_truncated_outline_from_approved_artifact(
         cp.outcome = None
         return candidate
     return outline
+
+
+def _recover_outline_from_current_artifact(
+    conn,
+    ep,
+    cp: SupervisorCheckpoint,
+) -> StoryboardOutline | None:
+    """Reuse a parseable outline candidate when only score-only findings remain."""
+    candidate_ids: list[str] = []
+    if cp.outline_artifact_id:
+        candidate_ids.append(str(cp.outline_artifact_id))
+    rows = conn.execute(
+        """SELECT id FROM artifacts
+           WHERE type='storyboard_outline' AND scope_type='episode' AND scope_id=?
+             AND status IN ('candidate','validated','approved')
+           ORDER BY created_at DESC""",
+        (ep["id"],),
+    ).fetchall()
+    candidate_ids.extend(str(row["id"]) for row in rows)
+    expected_parents = {
+        str(value)
+        for value in (
+            cp.input_versions.get("screenplay_artifact_id"),
+            cp.input_versions.get("bible_artifact_id"),
+        )
+        if value
+    }
+    repairable_outline_codes = {
+        "OUTLINE_EMPTY",
+        "OUTLINE_HARD_LIMIT",
+        "OUTLINE_ORDER_INVALID",
+        "OUTLINE_DURATION_INVALID",
+    }
+    from app.loops.base import is_structural_issue
+
+    for artifact_id in dict.fromkeys(candidate_ids):
+        artifact = evidence_repository.get_artifact(artifact_id)
+        if (
+            artifact is None
+            or artifact.get("type") != "storyboard_outline"
+            or artifact.get("scope_type") != "episode"
+            or artifact.get("scope_id") != ep["id"]
+            or artifact.get("status")
+            in {"stale", "rejected", "superseded", "needs_revision"}
+            or not expected_parents.issubset(
+                set(artifact.get("parent_artifact_ids") or [])
+            )
+        ):
+            continue
+        try:
+            outline = StoryboardOutline.model_validate(artifact.get("content") or {})
+        except (TypeError, ValueError):
+            continue
+        if not outline.shots:
+            continue
+        evaluation_rows = conn.execute(
+            "SELECT issues_json FROM evaluations WHERE artifact_id=?",
+            (artifact_id,),
+        ).fetchall()
+        requires_format_repair = False
+        for row in evaluation_rows:
+            try:
+                raw_issues = json.loads(row["issues_json"] or "[]")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                requires_format_repair = True
+                break
+            for raw_issue in raw_issues:
+                try:
+                    issue = Issue.model_validate(raw_issue)
+                except (TypeError, ValueError):
+                    requires_format_repair = True
+                    break
+                if (
+                    issue.code in repairable_outline_codes
+                    or is_structural_issue(issue)
+                ):
+                    requires_format_repair = True
+                    break
+            if requires_format_repair:
+                break
+        if requires_format_repair:
+            continue
+        cp.outline_artifact_id = artifact_id
+        cp.expected_total = len(outline.shots)
+        cp.phase = "VALIDATING_OUTLINE"
+        cp.outcome = None
+        conn.execute(
+            "UPDATE episodes SET storyboard_outline_json=?, storyboard_warning=NULL WHERE id=?",
+            (outline.model_dump_json(), ep["id"]),
+        )
+        conn.commit()
+        return outline
+    return None
 
 
 def _contiguous_shot_rows(rows) -> list:
@@ -1488,6 +1580,10 @@ async def run_storyboard_supervisor(
     outline = _recover_truncated_outline_from_approved_artifact(
         conn, ep, cp, outline,
     )
+    if outline is None:
+        outline = _recover_outline_from_current_artifact(conn, ep, cp)
+        if outline is not None:
+            save_checkpoint(cp, run_id=run_id)
 
     # A code/policy update can make a previously pending repair obsolete. Before
     # resuming its provider call, re-evaluate a structurally complete official
@@ -1782,6 +1878,9 @@ async def run_storyboard_supervisor(
                 (outline.model_dump_json(), episode_id),
             )
             conn.commit()
+            cp.outline_artifact_id = str(
+                getattr(outline, "evidence_artifact_id", "") or ""
+            ) or None
             cp.phase = "VALIDATING_OUTLINE"
             cp.expected_total = len(outline.shots)
             planned_persisted = len(outline.shots)

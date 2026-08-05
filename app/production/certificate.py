@@ -571,11 +571,11 @@ def verify_current_storyboard_completion_authority(
     episode: Any,
     current_storyboard_content: dict[str, Any],
 ) -> CompletionCertificate:
-    """Verify the consumed certificate that authorizes paid narrative work.
+    """Verify the consumed certificate that authorizes downstream work.
 
-    Live re-evaluation is deliberately absent: this function accepts only the
-    immutable certificate/evaluation/review lineage for the exact published
-    storyboard projection.
+    QA and audience-review reports are deliberately absent from this authority.
+    The immutable certificate, revision and exact published projection are the
+    release facts; optional scores cannot grant or revoke production access.
     """
     data = dict(episode)
     from app.production.screenplay_authority import resolve_downstream_screenplay
@@ -584,7 +584,6 @@ def verify_current_storyboard_completion_authority(
         str(data.get("id") or ""),
         conn=get_conn(),
     )
-    screenplay = screenplay_context.screenplay
     if not screenplay_context.narrative_authority_required:
         raise ValueError("当前剧集不使用叙事权威凭证")
 
@@ -593,12 +592,6 @@ def verify_current_storyboard_completion_authority(
     revision_id = str(data.get("storyboard_production_revision_id") or "")
     if not certificate_id or not artifact_id or not revision_id:
         raise ValueError("当前叙事分镜缺少完成凭证、Artifact 或 production revision")
-    if (
-        data.get("narrative_status") != "ready"
-        or not data.get("narrative_review_artifact_id")
-        or not data.get("narrative_calibration_artifact_id")
-    ):
-        raise ValueError("当前叙事分镜尚未取得有效冷观众审读与真人校准结论")
 
     cert = verify_completion_certificate(
         certificate_id,
@@ -619,38 +612,6 @@ def verify_current_storyboard_completion_authority(
         != storyboard_authority_projection(current_storyboard_content)
     ):
         raise ValueError("当前 shots 投影与完成凭证绑定的 Storyboard Artifact 不一致")
-    try:
-        from app.narrative_review import verify_review_chain_for_storyboard_artifact
-
-        report_id = verify_review_chain_for_storyboard_artifact(
-            episode_id=str(data.get("id") or ""),
-            screenplay=screenplay,
-            storyboard_artifact=artifact,
-        )
-    except Exception as exc:  # noqa: BLE001 - paid boundary fails closed
-        raise ValueError(f"当前叙事审读证据链已失效：{exc}") from exc
-    if report_id != data.get("narrative_review_artifact_id"):
-        raise ValueError("当前剧集的冷观众审读指针已漂移")
-    try:
-        from app.narrative_calibration import (
-            assert_report_meets_current_calibration,
-        )
-        from app.schemas import NarrativeReviewReport
-
-        review_artifact = evidence_repository.get_artifact(str(report_id))
-        report = NarrativeReviewReport.model_validate(
-            (review_artifact or {}).get("content") or {}
-        )
-        calibration = assert_report_meets_current_calibration(
-            report,
-            expected_calibration_artifact_id=str(
-                data.get("narrative_calibration_artifact_id") or ""
-            ),
-        )
-    except Exception as exc:  # noqa: BLE001 - paid authority fails closed
-        raise ValueError(f"当前真人一次观看校准权威已失效：{exc}") from exc
-    if calibration.artifact_id not in set(artifact.get("parent_artifact_ids") or []):
-        raise ValueError("当前分镜 Artifact 未绑定其真人校准权威")
     return cert
 
 
