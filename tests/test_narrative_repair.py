@@ -165,6 +165,38 @@ async def test_model_diagnosis_compares_open_candidates_without_issue_code_routi
 
 
 @pytest.mark.asyncio
+async def test_uncommitted_candidate_retries_current_slot_before_semantic_planning(
+    monkeypatch,
+) -> None:
+    async def must_not_run(*_args, **_kwargs):
+        raise AssertionError("uncommitted candidate must not invoke semantic planning")
+
+    monkeypatch.setattr("app.narrative_repair.model_gateway.chat", must_not_run)
+    issue = Issue(
+        code="CONTRACT_FIELD_INVALID",
+        severity=IssueSeverity.BLOCKER,
+        subject="shot:2",
+        message="The generated candidate violates a local contract.",
+        repairable=True,
+    )
+
+    plan = await route_narrative_issues(
+        [issue],
+        episode_id="episode-generic",
+        screenplay=_screenplay(),
+        board=_board(),
+        validated_prefix_end=1,
+        next_shot_no=2,
+        uncommitted_candidate=True,
+    )
+
+    assert plan.strategy == "repair_current"
+    assert plan.pause_state is None
+    assert plan.needs_semantic_selection is False
+    assert plan.semantic_diagnosis["execution_verified"] is True
+
+
+@pytest.mark.asyncio
 async def test_provider_failure_pauses_instead_of_substituting_a_fixed_strategy(
     monkeypatch,
 ) -> None:

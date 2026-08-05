@@ -506,6 +506,7 @@ async def route_narrative_issues(
     next_shot_no: int | None = None,
     issue_fingerprint_counts: dict[str, int] | None = None,
     current_level=None,
+    uncommitted_candidate: bool = False,
 ):
     """Semantic front door used by the live Supervisor.
 
@@ -526,6 +527,28 @@ async def route_narrative_issues(
         )
         for item in issues
     ]
+    if uncommitted_candidate:
+        local_plan = route_issues(
+            normalized,
+            validated_prefix_end=validated_prefix_end,
+            next_shot_no=next_shot_no,
+            issue_fingerprint_counts=issue_fingerprint_counts,
+            current_level=current_level,
+            semantic_diagnosis={
+                "scope": "current_shot",
+                "selected_strategy": "repair_current",
+                "selection_reason": (
+                    "候选尚未提交，首次修复只重试当前大纲槽位"
+                ),
+                "execution_verified": True,
+            },
+        )
+        prior_attempts = int(
+            (issue_fingerprint_counts or {}).get(local_plan.fingerprint, 0)
+        )
+        if prior_attempts == 0:
+            return local_plan
+
     diagnosis_payload: dict[str, Any] | None = None
     try:
         diagnosis = await diagnose_narrative_repair(

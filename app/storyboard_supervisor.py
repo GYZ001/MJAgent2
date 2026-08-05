@@ -1589,6 +1589,10 @@ async def run_storyboard_supervisor(
             screenplay=screenplay,
             board=board,
             outline=outline,
+            uncommitted_candidate=(
+                next_shot_no is not None
+                and next_shot_no == len(board.shots) + 1
+            ),
             **route_kwargs,
         )
 
