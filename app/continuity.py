@@ -1382,17 +1382,18 @@ def preflight_seedance_gates(
         sync_shot_continuity_fields(shot, prev)
     ensure_audio_timeline(shot, screenplay.voice_bible if screenplay else None)
     errors: list[str] = []
-    errors.extend(action_capacity_errors(
-        shot,
-        narrative_authority=narrative_plan is not None,
-        narrative_plan=narrative_plan,
-    ))
-    errors.extend(speech_capacity_errors(shot))
-    errors.extend(dialogue_framing_errors(
-        shot,
-        strict_composition=False,
-        narrative_authority=narrative_plan is not None,
-    ))
+    if narrative_plan is None:
+        errors.extend(action_capacity_errors(
+            shot,
+            narrative_authority=False,
+            narrative_plan=None,
+        ))
+        errors.extend(speech_capacity_errors(shot))
+        errors.extend(dialogue_framing_errors(
+            shot,
+            strict_composition=False,
+            narrative_authority=False,
+        ))
     errors.extend(state_chain_errors(
         Storyboard(episode_no=0, shots=([prev, shot] if prev else [shot])),
         narrative_authority=narrative_plan is not None,

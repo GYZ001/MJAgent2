@@ -316,6 +316,26 @@ def test_narrative_dialogue_staging_is_intent_tagged_not_verb_matched() -> None:
     assert dialogue_framing_errors(second, narrative_authority=True) == []
 
 
+def test_narrative_video_preflight_keeps_dialogue_composition_score_only() -> None:
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        narrative_plan=_plan(phase_durations=[2.0]),
+    )
+    shot = _shot("说话人一边移动一边完成对白。")
+    shot.shot_size = "近景"
+    shot.characters = ["entity-performer", "entity-target"]
+    shot.characters_visible = list(shot.characters)
+    shot.dialogues = [Dialogue(
+        speaker="entity-performer",
+        line="Proceed.",
+    )]
+    shot.risk_tags = ["dialogue_action_staging"]
+
+    errors = preflight_seedance_gates(shot, screenplay=screenplay)
+
+    assert not any("不能用单人大近景替代" in error for error in errors)
+
+
 def test_narrative_state_handoff_never_uses_surface_language_overlap() -> None:
     """Modern boundaries are facts/contracts, never Chinese-bigram similarity."""
     first = _shot("A deliberately abstract first action.")
