@@ -3551,7 +3551,7 @@ async def _llm_field_patch_once(
     )
     try:
         plan_data = script.narrative_plan.model_dump(mode="json")
-        payload = extract_json(raw)
+        payload = extract_json(raw, repair_unescaped_inner_quotes=True)
         candidates = list(payload.get("candidate_plans") or [])
         if len(candidates) < 2:
             return []

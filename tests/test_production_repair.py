@@ -2493,6 +2493,44 @@ async def test_semantic_patch_retries_rejected_and_duplicate_candidates(monkeypa
     assert "fill_stakes" in attempts[2][1][-1]
 
 
+@pytest.mark.asyncio
+async def test_semantic_patch_repairs_unescaped_inner_quotes(monkeypatch):
+    from app import schemas
+    from app.harness import model_gateway
+    from app.production import screenplay_repair
+
+    issue = structured_issue(
+        code="MUST_KEEP_SPINE_BEAT_NOT_PERFORMED",
+        message='节拍"许清判定资质"未完整演出',
+        subject="screenplay",
+        path="/scene_blocks/SC03",
+        stage="screenplay",
+    )
+    script = _minimal_script(
+        narrative_plan=NarrativeContinuityPlan(scope_id="ep_test"),
+    )
+    options: dict = {}
+
+    async def fake_chat(*_args, **_kwargs):
+        return '{"candidate_plans":[]}'
+
+    def fake_extract(text, **kwargs):
+        options.update(kwargs)
+        return {"candidate_plans": []}
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(schemas, "extract_json", fake_extract)
+
+    result = await screenplay_repair._llm_field_patch_once(
+        issue,
+        script,
+        source_text="许清说道：有些资质。",
+    )
+
+    assert result == []
+    assert options["repair_unescaped_inner_quotes"] is True
+
+
 def test_screenplay_narrative_gate_is_quality_error():
     from app.production.screenplay_repair import ScreenplayNarrativeGateError
 
