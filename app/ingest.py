@@ -28,10 +28,11 @@ SOCIAL_AD_RE = re.compile(
 PUBLISHING_PROMO_RE = re.compile(
     r"(?:推荐票|推荐榜|周推荐|月推荐|会员点击|起点币|新书发布会|发布\s*vip\s*章节|"
     r"免费抽奖|大转盘抽奖|"
-    r"ipadmini|支持正版|码字)"
+    r"ipadmini|支持正版|码字|耳根)"
     r"|(?:求|投|给|支持|呼唤|拜托|别忘|争|拼|保底|双倍|冲).{0,12}月票"
     r"|月票.{0,24}(?:求|投|给|支持|呼唤|拜托|别忘|榜|第一|过万|爆发|订阅|双倍|保底|危机)"
     r"|(?:收藏.{0,24}(?:新书|推荐票|抽奖|奖励|会员点击)|新书.{0,24}收藏)"
+    r"|(?:兄弟姐妹|道友们|大大们).{0,40}(?:爆发|更新|推荐|月票|订阅|活动)"
     r"|(?:第[0-9一二三四五六七八九十百]+更|[0-9一二三四五六七八九十]+更(?:送上|爆发))"
     r"|(?:今日|今天|凌晨|晚上|白天).{0,24}(?:爆发|更新|还有[0-9一二三四五六七八九十]+[章更])"
     r"|(?:手游|游戏).{0,24}(?:公测|下载地址|礼包)",
@@ -43,7 +44,7 @@ AUTHOR_NOTE_RE = re.compile(
     r"商城|实体书|码字|老婆|女儿|生日|见面会|签售|公测|游戏)",
     re.IGNORECASE,
 )
-PROMO_SEPARATOR_RE = re.compile(r"(?:[-_=~*]{4,}|[－—～·]{4,})")
+PROMO_SEPARATOR_RE = re.compile(r"(?:[-_=~*]{4,}|[－—～·]{2,})")
 SEPARATOR_ONLY_RE = re.compile(r"^(?:[-_=~*]{4,}|[－—～·]{4,})$")
 TRAILING_JUNK_ONLY_RE = re.compile(r"^[;；,，:：|丨]+$")
 TRAILING_SERIAL_MARKER_RE = re.compile(
@@ -101,8 +102,6 @@ def clean_text(text: str) -> tuple[str, int]:
             return 1
         return 0
 
-    author_note_block = False
-
     def looks_like_chapter_heading(value: str) -> bool:
         if CHAPTER_RE.fullmatch(value):
             return True
@@ -112,6 +111,33 @@ def clean_text(text: str) -> tuple[str, int]:
         remainder = value[match.end():].strip()
         return bool(remainder) and len(remainder) <= 48
 
+    # Remove multi-line author-note blocks introduced by a standalone separator.
+    # Stop before the next normal or malformed chapter heading so merged source
+    # chapters remain available for the splitter to recover.
+    index = 0
+    while index < len(lines):
+        if not SEPARATOR_ONLY_RE.fullmatch(lines[index].strip()):
+            index += 1
+            continue
+        end = index + 1
+        probe: list[str] = []
+        while end < len(lines):
+            candidate = lines[end].strip()
+            if candidate and looks_like_chapter_heading(candidate):
+                break
+            if candidate and len(probe) < 4:
+                probe.append(candidate)
+            end += 1
+        probe_text = "\n".join(probe)
+        if probe_text and (
+            PUBLISHING_PROMO_RE.search(probe_text) or AUTHOR_NOTE_RE.search(probe_text)
+        ):
+            removed += sum(1 for value in lines[index:end] if value.strip())
+            lines[index:end] = [""] * (end - index)
+        index = max(index + 1, end)
+
+    author_note_block = False
+
     for line in lines:
         stripped = line.strip()
         stripped, serial_marker_count = TRAILING_SERIAL_MARKER_RE.subn("", stripped)
@@ -119,10 +145,13 @@ def clean_text(text: str) -> tuple[str, int]:
         if author_note_block:
             if stripped and looks_like_chapter_heading(stripped):
                 author_note_block = False
-            else:
-                if stripped:
-                    removed += 1
+            elif stripped and (
+                PUBLISHING_PROMO_RE.search(stripped) or AUTHOR_NOTE_RE.search(stripped)
+            ):
+                removed += 1
                 continue
+            else:
+                author_note_block = False
         if serial_marker_count and not stripped:
             removed += drop_separator_before_ad()
             removed += 1
@@ -135,27 +164,30 @@ def clean_text(text: str) -> tuple[str, int]:
         )
         prior_nonempty = next((item for item in reversed(kept) if item), "")
         after_separator = bool(prior_nonempty and SEPARATOR_ONLY_RE.fullmatch(prior_nonempty))
+        inline_note_prefix = ""
+        for match in reversed(list(PROMO_SEPARATOR_RE.finditer(stripped))):
+            suffix = stripped[match.end():].strip()
+            if suffix and (
+                PUBLISHING_PROMO_RE.search(suffix) or AUTHOR_NOTE_RE.search(suffix)
+            ):
+                inline_note_prefix = stripped[:match.start()].strip()
+                break
         is_author_note = bool(
-            stripped and after_separator and len(stripped) <= 1200
-            and AUTHOR_NOTE_RE.search(stripped)
+            stripped and len(stripped) <= 1200 and (
+                (after_separator and AUTHOR_NOTE_RE.search(stripped))
+                or inline_note_prefix
+            )
         )
         if stripped and (is_publishing_promo or is_author_note):
             # Scraped chapters often append an author note after a decorative
             # separator on the same line. Preserve the story sentence before it.
-            prefix = ""
-            for match in reversed(list(PROMO_SEPARATOR_RE.finditer(stripped))):
-                suffix = stripped[match.end():].strip()
-                if suffix and (
-                    PUBLISHING_PROMO_RE.search(suffix) or AUTHOR_NOTE_RE.search(suffix)
-                ):
-                    prefix = stripped[:match.start()].strip()
-                    break
+            prefix = inline_note_prefix
             if prefix:
                 kept.append(prefix)
             else:
                 removed += drop_separator_before_ad()
             removed += 1
-            author_note_block = after_separator or bool(prefix)
+            author_note_block = after_separator
             continue
         if stripped and (
             any(marker in stripped for marker in AD_MARKERS) or is_social_ad

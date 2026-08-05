@@ -154,3 +154,31 @@ def test_clean_text_removes_orphaned_trailing_separator() -> None:
 
     assert cleaned == "“这里是什么地方？”\n“靠山宗。”"
     assert removed == 2
+
+
+def test_clean_text_removes_multiline_author_note_but_keeps_following_malformed_heading() -> None:
+    cleaned, removed = clean_text(
+        "孟浩收起画轴，继续查看最后一个口袋。\n"
+        "－－－－－－－－\n"
+        "今天作者过生日，感谢读者一路支持。\n"
+        "妻子准备了蛋糕，孩子也很开心。\n"
+        "第五十三你要怎么谢我？\n"
+        "“这个储物袋太大了。”孟浩喃喃。"
+    )
+
+    assert cleaned == (
+        "孟浩收起画轴，继续查看最后一个口袋。\n"
+        "\n"
+        "第五十三你要怎么谢我？\n"
+        "“这个储物袋太大了。”孟浩喃喃。"
+    )
+    assert removed == 3
+
+
+def test_clean_text_preserves_story_before_inline_author_note() -> None:
+    cleaned, removed = clean_text(
+        "孟浩转身向大青山走去。－－－－这本书里的妖，是耳根想写的天地大妖。"
+    )
+
+    assert cleaned == "孟浩转身向大青山走去。"
+    assert removed == 1
