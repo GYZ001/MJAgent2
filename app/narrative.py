@@ -1840,7 +1840,11 @@ def validate_storyboard_narrative(
     contribution_character_owners: dict[str, str] = {}
     contribution_audience_owners: dict[str, str] = {}
     delta_paths = {
-        delta.target_delta_id: (path.audience_prior_id, delta)
+        delta.target_delta_id: (
+            path.audience_prior_id,
+            delta,
+            path.audience_state_out_target_id,
+        )
         for intent in plan.experience_intents
         for path in intent.audience_paths
         for delta in path.target_deltas
@@ -2294,7 +2298,7 @@ def validate_storyboard_narrative(
                 path_contract = delta_paths.get(delta_id)
                 if path_contract is None:
                     continue
-                prior_id, delta = path_contract
+                prior_id, delta, final_state_id = path_contract
                 current_path = current_paths.get(prior_id)
                 if current_path is None:
                     errors.append(f"[SHOT_TARGET_PRIOR_PATH_MISSING] {label}/{delta_id} 没有对应观众路径")
@@ -2303,8 +2307,24 @@ def validate_storyboard_narrative(
                 state_out = index.audience_states.get(current_path.audience_state_out_target_id)
                 if state_in and not _target_state_fragment_matches(delta, delta.from_state, state_in):
                     errors.append(f"[SHOT_TARGET_FROM_STATE_MISMATCH] {label}/{delta_id} 未从合同约定的观众状态出发")
-                if state_out and not _target_state_fragment_matches(delta, delta.to_state, state_out):
-                    errors.append(f"[SHOT_TARGET_TO_STATE_MISMATCH] {label}/{delta_id} 未到达合同约定的观众状态")
+                if state_out and not _target_state_fragment_matches(
+                    delta,
+                    delta.to_state,
+                    state_out,
+                ):
+                    final_state = index.audience_states.get(final_state_id)
+                    coarse_snapshot_holds = (
+                        current_path.audience_state_in_id
+                        == current_path.audience_state_out_target_id
+                        and final_state is not None
+                        and _target_state_fragment_matches(
+                            delta,
+                            delta.to_state,
+                            final_state,
+                        )
+                    )
+                    if not coarse_snapshot_holds:
+                        errors.append(f"[SHOT_TARGET_TO_STATE_MISMATCH] {label}/{delta_id} 未到达合同约定的观众状态")
             if contribution.affective_delta and not any(
                 _declared_change_matches(
                     contribution.affective_delta,
@@ -2420,7 +2440,7 @@ def validate_storyboard_narrative(
             ):
                 if delta_id not in delta_paths:
                     continue
-                prior_id, delta = delta_paths[delta_id]
+                prior_id, delta, _final_state_id = delta_paths[delta_id]
                 processing_by_prior[prior_id] += max(
                     0.0, delta.required_processing_s,
                 )

@@ -227,10 +227,20 @@ def normalize_narrative_storyboard_outline(
                 for state in plan.audience_states
                 if state.audience_prior_id == path.audience_prior_id
             ]
-            for index, delta in enumerate(ordered):
+            deadline_groups: list[list[Any]] = []
+            for delta in ordered:
+                if (
+                    not deadline_groups
+                    or deadline_groups[-1][0].deadline_event_id
+                    != delta.deadline_event_id
+                ):
+                    deadline_groups.append([])
+                deadline_groups[-1].append(delta)
+            current_state_id = path.audience_state_in_id
+            for group_index, group in enumerate(deadline_groups):
                 destination = path.audience_state_out_target_id
-                if index + 1 < len(ordered):
-                    next_delta = ordered[index + 1]
+                if group_index + 1 < len(deadline_groups):
+                    next_group = deadline_groups[group_index + 1]
                     candidates = [
                         state.audience_state_id
                         for state in prior_states
@@ -240,27 +250,42 @@ def normalize_narrative_storyboard_outline(
                                 path.audience_state_in_id,
                                 path.audience_state_out_target_id,
                             }
-                            and _target_state_fragment_matches(
-                                delta,
-                                delta.to_state,
-                                state,
+                            and all(
+                                _target_state_fragment_matches(
+                                    delta,
+                                    delta.to_state,
+                                    state,
+                                )
+                                for delta in group
                             )
-                            and _target_state_fragment_matches(
-                                next_delta,
-                                next_delta.from_state,
-                                state,
+                            and all(
+                                _target_state_fragment_matches(
+                                    next_delta,
+                                    next_delta.from_state,
+                                    state,
+                                )
+                                for next_delta in next_group
                             )
                         )
                     ]
-                    if len(candidates) != 1:
-                        return []
-                    destination = candidates[0]
-                delta_paths[delta.target_delta_id] = (
-                    path.audience_prior_id,
-                    delta,
-                    destination,
-                )
-                delta_destinations[delta.target_delta_id] = destination
+                    # Some authority graphs intentionally expose only the
+                    # initial and final audience snapshots. In that case the
+                    # delta ledger still records this deadline's contribution,
+                    # while the coarse snapshot ID remains unchanged until a
+                    # declared later state is reached.
+                    destination = (
+                        candidates[0]
+                        if len(candidates) == 1
+                        else current_state_id
+                    )
+                for delta in group:
+                    delta_paths[delta.target_delta_id] = (
+                        path.audience_prior_id,
+                        delta,
+                        destination,
+                    )
+                    delta_destinations[delta.target_delta_id] = destination
+                current_state_id = destination
 
     deltas_by_event: defaultdict[str, list[str]] = defaultdict(list)
     for delta_id, (_prior_id, delta, _destination) in delta_paths.items():
@@ -302,8 +327,9 @@ def normalize_narrative_storyboard_outline(
         dialogue_groups: list[list[str]] = []
         current_group: list[str] = []
         current_chars = 0
+        current_speaker = ""
         for key_id in event_key_ids:
-            _speaker, line, _chain_id = key_line_meta[key_id]
+            speaker, line, _chain_id = key_line_meta[key_id]
             line_chars = len(
                 "".join(
                     character
@@ -313,14 +339,18 @@ def normalize_narrative_storyboard_outline(
             )
             if (
                 current_group
-                and current_chars + line_chars
-                > config.MAX_SPOKEN_CHARS_PER_SHOT
+                and (
+                    speaker != current_speaker
+                    or current_chars + line_chars
+                    > config.MAX_SPOKEN_CHARS_PER_SHOT
+                )
             ):
                 dialogue_groups.append(current_group)
                 current_group = []
                 current_chars = 0
             current_group.append(key_id)
             current_chars += line_chars
+            current_speaker = speaker
         if current_group:
             dialogue_groups.append(current_group)
 
