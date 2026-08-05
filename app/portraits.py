@@ -318,7 +318,7 @@ async def discover_character_candidates(
                 "reuse_successful_operation": True,
             },
         )
-        obj = extract_json(raw)
+        obj = extract_json(raw, repair_unescaped_inner_quotes=True)
         identity_haystack = f"{current_haystack}\n{future_chunk}"
         for item in obj.get("characters") or []:
             if not isinstance(item, dict):

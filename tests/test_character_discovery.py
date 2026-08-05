@@ -534,6 +534,34 @@ def test_discover_character_candidates_filters_functional_extras_and_unseen_name
     assert [item["name"] for item in result] == ["魂天帝", "萧炎"]
 
 
+def test_discover_character_candidates_repairs_unescaped_evidence_quotes(monkeypatch) -> None:
+    bible = Bible(
+        world=World(visual_style_canonical="国风"),
+        characters=[Character(
+            name="孟浩",
+            role="主角",
+            appearance_canonical="黑发书生，青色长衫，目光清澈",
+        )],
+    )
+
+    async def fake_chat(*_args, **_kwargs):
+        return (
+            '```json\n{"characters":[{"source_label":"孟浩",'
+            '"canonical_name":"孟浩","identity_kind":"named","kind":"onscreen",'
+            '"evidence":"原文写道"孟浩说道"。","future_evidence":""}]}\n```'
+        )
+
+    monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
+    result = asyncio.run(portraits.discover_character_candidates(
+        "孟浩说道，他要去靠山宗。",
+        bible,
+        1,
+    ))
+
+    assert result[0]["name"] == "孟浩"
+    assert result[0]["evidence"] == '原文写道"孟浩说道"。'
+
+
 def test_screenplay_discovery_resolves_appearance_label_from_next_ten_chapters(monkeypatch) -> None:
     conn = _make_conn()
     _seed_project(conn, "绿袍男子拦在萧炎面前，厉声呵斥。")
