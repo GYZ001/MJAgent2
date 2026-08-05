@@ -1595,8 +1595,8 @@ def test_runtime_auto_repairs_missing_selected_keyframe_file(monkeypatch) -> Non
     assert writes
 
 
-def test_runtime_uses_anchor_fallback_when_required_keyframe_gate_is_exhausted(monkeypatch) -> None:
-    """关键帧修复耗尽后继续提交已有锚点，不得把任务判失败。"""
+def test_runtime_requires_repair_when_required_keyframe_gate_is_exhausted(monkeypatch) -> None:
+    """关键帧修复耗尽后保持参考图模式，不得用弱输入继续提交。"""
 
     async def fake_build_reference_assets(**kwargs):
         kwargs["existing_meta"].update({
@@ -1624,19 +1624,23 @@ def test_runtime_uses_anchor_fallback_when_required_keyframe_gate_is_exhausted(m
         "after_shot_id": None,
     }
 
-    out_meta, _ = asyncio.run(worker._prepare_reference_mode_inputs(
-        conn,
-        {"id": "j1", "project_id": "p1", "episode_id": "e1", "shot_id": "s1"},
-        {"id": "v1"},
-        _shot_row(),
-        {"episode_no": 1},
-        meta,
-        "PROMPT",
-    ))
+    with pytest.raises(
+        worker.VideoInputRepairRequired,
+        match="参考图关键帧",
+    ):
+        asyncio.run(worker._prepare_reference_mode_inputs(
+            conn,
+            {"id": "j1", "project_id": "p1", "episode_id": "e1", "shot_id": "s1"},
+            {"id": "v1"},
+            _shot_row(),
+            {"episode_no": 1},
+            meta,
+            "PROMPT",
+        ))
 
-    assert out_meta["reference_group_gate_passed"] is True
-    assert out_meta["reference_gate_retry_exhausted"] is True
-    assert out_meta["reference_fallback_mode"] == "available_anchors"
+    assert meta["reference_group_gate_passed"] is False
+    assert meta["reference_gate_retry_exhausted"] is True
+    assert "reference_fallback_mode" not in meta
 
 
 def test_runtime_submits_anchor_only_fallback_after_all_keyframe_candidates_fail(monkeypatch) -> None:

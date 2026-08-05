@@ -31,6 +31,7 @@ from app.continuity import (
     dialogue_focus_subject,
     dialogue_framing_errors,
     dialogue_two_shot_required,
+    implicit_speech_without_dialogue_errors,
     spoken_chars_from_shot,
 )
 from app.spoken_contract import (
@@ -479,6 +480,7 @@ def validate_storyboard(
         ))
         # 同一镜头只能有一套有效口播：dialogues 与 audio_timeline 分叉即 blocker。
         errors.extend(spoken_contract_coherence_errors(shot))
+        errors.extend(implicit_speech_without_dialogue_errors(shot))
         # 产品合同：禁止一切旁白/内心OS；信息由真实台词或画面动作承载。
         narration_len = len((shot.narration or "").strip())
         if narration_len > 0:

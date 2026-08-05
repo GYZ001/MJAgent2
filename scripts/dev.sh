@@ -92,12 +92,19 @@ if not inherit_proxy:
 backend_args = [
     "./.venv/bin/uvicorn", "app.main:app",
     "--host", "127.0.0.1", "--port", "8230",
+    "--timeout-keep-alive", "1",
+    "--timeout-graceful-shutdown", "3",
 ]
 backend_reload = be_env.get("MJ_BACKEND_RELOAD", "").strip().lower() in {
     "1", "true", "yes", "on",
 }
 if backend_reload:
-    backend_args.extend(["--reload", "--reload-dir", "app"])
+    backend_args.extend([
+        "--reload", "--reload-dir", "app",
+        "--reload-exclude", "__pycache__",
+        "--reload-exclude", "*.pyc",
+        "--reload-delay", "2",
+    ])
 b = subprocess.Popen(
     backend_args,
     cwd=root, stdin=dn, stdout=be, stderr=be, env=be_env, start_new_session=True)

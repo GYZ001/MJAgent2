@@ -490,6 +490,26 @@ def clear_episode_artifacts(episode_id: str) -> dict:
             refs += _delete_shot_reference_dir(conn, s)
             _delete_shot_reference_records(conn, s["id"])
             conn.execute("UPDATE shots SET mode_plan=NULL WHERE id=?", (s["id"],))
+        # A resource clear is a new execution epoch. Keep historical plans and
+        # attempts for audit, but never reactivate a failure-derived fallback
+        # revision when the user starts the episode again.
+        conn.execute(
+            """UPDATE shot_video_generation_plans
+                  SET status='stale',updated_at=strftime('%s','now')
+                WHERE episode_video_plan_id IN (
+                    SELECT id FROM episode_video_generation_plans
+                    WHERE episode_id=?
+                      AND status IN ('draft','valid','blocked','stale')
+                )""",
+            (episode_id,),
+        )
+        conn.execute(
+            """UPDATE episode_video_generation_plans
+                  SET status='superseded'
+                WHERE episode_id=?
+                  AND status IN ('draft','valid','blocked','stale')""",
+            (episode_id,),
+        )
         versions, affected_eps = _purge_shots(conn, shots)
         _rollback_episodes(conn, affected_eps or {episode_id})
         conn.commit()

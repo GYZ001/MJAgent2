@@ -162,7 +162,7 @@ export function storyboardToolbarActions(state: StoryboardStatus['state']): {
 } {
   return {
     pause: state === 'running',
-    clear: state === 'paused' || state === 'failed',
+    clear: ['paused', 'failed', 'ready_to_confirm', 'confirmed'].includes(state),
   }
 }
 

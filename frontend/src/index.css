@@ -2195,6 +2195,28 @@ label.f {
 .material-review > .asset-workspace-toolbar {
   margin: -2px -2px 10px;
 }
+.material-video-input {
+  display: grid;
+  gap: 10px;
+  padding: 16px 18px;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: var(--card);
+}
+.material-video-input video {
+  width: min(100%, 720px);
+  max-height: 420px;
+  border-radius: 8px;
+  background: #111;
+}
+.material-video-input > div {
+  display: grid;
+  gap: 3px;
+}
+.material-video-input span {
+  color: var(--ink-faint);
+  font-size: 11px;
+}
 .version-list {
   border: 1px solid var(--hairline);
   border-radius: 12px;

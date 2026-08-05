@@ -22,7 +22,7 @@
 3. 取消无条件全并行，改为依赖 DAG：真正依赖上一镜实际视频/尾帧的节点等待，无依赖节点继续安全并行。
 4. AI 负责理解语义关系，确定性校验器负责检查第一镜规则、能力支持、素材角色互斥、依赖无环、资产可访问、幂等和预算，不允许 AI 直接绕过工具合同提交付费任务。
 5. `VIDEO_INPUT_MODE` 必须区分“参考视频”和“真续写”。当前实测已经证明接口支持 Web URL 参考视频，但尚未证明能可靠无缝承接上一镜，因此首轮只开放运动/运镜/节奏/音频参考；真续写需要单独语义准入。
-6. 任何模式失败都必须显式记录 planned/actual mode 与降级原因，禁止执行层静默改回参考图。
+6. 任何模式失败都必须保持 `actual_mode = planned_mode` 并显式记录失败或待修复原因；禁止执行层切换到其他模式、移除强输入后弱化提交，或静默改回参考图。
 7. 工具层只消费上游已发布合同。如果输入分镜矛盾、缺少边界状态或超出供应商能力，返回结构化 blocker；不得自行改写剧情或插镜。
 
 ```mermaid
@@ -49,7 +49,7 @@ flowchart LR
 - 本地媒体转供应商可访问 Web URL；
 - 首尾帧、上一镜视频等输入素材的依赖解析；
 - 有依赖串行、无依赖并行的 DAG 调度；
-- 任务幂等、断点恢复、stale、取消、重试和有限回退；
+- 任务幂等、断点恢复、stale、取消和同模式有限修复；
 - planned mode、actual mode、输入 revision、供应商任务和时延成本的审计；
 - 与模式合同有关的技术 QA。
 
@@ -163,9 +163,8 @@ supports_return_last_frame = false
 
 适合：
 
-- 第一镜；
+- 每个连续场景的第一镜；
 - 新时间域或新空间；
-- 同场景但有意换机位、反打、反应、插入特写；
 - 当前镜头应重新构图，不应继承上一镜完整像素和运动；
 - 上一镜只提供状态证据，不是当前视频的强起点。
 
@@ -182,7 +181,7 @@ supports_return_last_frame = false
 }
 ```
 
-注意：同场景并不排除参考图模式。影视剪辑中的反打、反应和插入特写通常需要重构图；强行沿用上一镜尾帧反而会把有意切镜误做成动作续接。
+确定性规则：`new_domain`、`new_space` 或 `scene_cut` 开启新场景组。每个场景组只允许首镜使用参考图模式；场景内后续镜头统一使用首尾帧模式。
 
 ### 4.2 `FIRST_LAST_FRAME_MODE`
 
@@ -211,9 +210,11 @@ supports_return_last_frame = false
 
 首帧是否依赖上一镜由素材来源决定：
 
-- 来自上一镜采用视频真实尾帧：等待上一镜采用；
-- 来自上游已发布的静态起始关键帧：无需等待上一镜视频；
-- 起止帧互相矛盾或身份/场景 QA 未通过：禁止提交视频任务。
+- 场景内第二镜：来自场景首镜采用视频真实尾帧，等待该首镜采用；
+- 场景内第三镜起：直接复用紧邻上一镜预生成的静态尾帧，`source=PREVIOUS_STATIC_TAIL`，不等待上一镜视频；
+- 每个首尾帧镜头在调度开始后先独立生成自己的静态尾帧；该尾帧也是下一镜的静态首帧来源；
+- 静态边界复用只保留文件存在、可解码、宽高比、分辨率和来源指纹等确定性门禁，不执行首尾帧语义配对 QA；
+- 尺寸可统一时生成当前任务私有副本，禁止原地修改上游共享尾帧。
 
 若供应商不允许参考图与首尾帧混用，人物、场景和道具一致性必须前移到关键帧生成及关键帧 QA，不能在视频 payload 中偷偷加入互斥角色。
 
@@ -260,7 +261,7 @@ AUDIO_REFERENCE
 三种模式是不同输入合同，不是“高级/中级/低级”质量层级：
 
 - 参考图不是低配兜底；有意切镜时它往往最正确；
-- 首尾帧不是所有同场景剧情的默认；它约束的是确定起止状态；
+- 连续场景内除首镜外统一使用首尾帧，镜间共享静态边界避免无意义串行；
 - 视频输入不是所有复杂动作的默认；它约束的是运动/视频参考意图；
 - 模式选择错误时，增加提示词或重试次数通常无法弥补合同错误。
 
@@ -271,8 +272,8 @@ AUDIO_REFERENCE
 ### 5.1 规划时机
 
 1. 分镜 checkpoint 发布后，付费视频生成前，生成整集计划；
-2. 第一镜由校验器固定为参考图；
-3. 第 2 镜至末镜由 AI 一次规划，避免每个 worker 各自解释分镜；
+2. AI 只判断通用时空/剪辑关系；确定性校验器据此划分场景组；
+3. 每个场景首镜固定为参考图，组内其余镜头固定为首尾帧；
 4. 上一镜采用后，只对消费其实际视频/尾帧的下一节点执行 JIT reconcile；
 5. 上游分镜或资产 revision 变化时，生成新计划 revision，旧计划保持可审计但不得继续提交。
 
@@ -309,13 +310,13 @@ continuity_risk         identity | prop | spatial | pose | action | camera | aud
 
 ### 5.4 决策原则
 
-1. 第一镜：`REFERENCE_IMAGE_MODE`；
-2. 新时间域、新地点或有意重新构图：`REFERENCE_IMAGE_MODE`；
-3. 同一连续时空且同一未完成动作/运镜需要继承完整轨迹：只有真续写能力验证后才选 `VIDEO_INPUT_MODE + CONTINUE_PREVIOUS_TAKE`；
-4. 起始和结束状态都必须固定，但无需继承完整轨迹：`FIRST_LAST_FRAME_MODE`；
-5. 同场景反打、反应、插入特写或新动作：默认重新构图，不因场景相同自动选择首尾帧/视频输入；
-6. 复杂运动只提升 `MOTION_REFERENCE` 的候选权重，不直接决定模式；
-7. 证据不足时输出 `unknown_dimensions` 和低置信度，由项目策略决定阻断或显式降级；
+1. 整集第一镜及 `new_domain/new_space/scene_cut` 镜头：`REFERENCE_IMAGE_MODE`；
+2. 场景内第二镜：`FIRST_LAST_FRAME_MODE`，首帧取场景首镜真实采用视频尾帧；
+3. 场景内第三镜起：`FIRST_LAST_FRAME_MODE`，首帧取紧邻上一镜预生成静态尾帧；
+4. 静态尾帧资产依赖不写入 `depends_on_shot_id`，只有真实视频/真实尾帧依赖进入执行 DAG；
+5. `VIDEO_INPUT_MODE` 保留为显式视频参考实验合同，不参与默认场景生产路由；
+6. 复杂运动、人物名、地点名、题材或动作词不得改变上述场景边界不变量；
+7. 证据不足时输出 `unknown_dimensions` 和低置信度，由项目策略阻断；
 8. 供应商能力不支持的模式不得出现在有效计划中。
 
 ### 5.5 模式计划 Schema
@@ -355,6 +356,9 @@ continuity_risk         identity | prop | spatial | pose | action | camera | aud
 ```text
 FIRST_SHOT_NO_PREDECESSOR
 SCENE_DOMAIN_CHANGED
+SCENE_ENTRY_REFERENCE_IMAGE
+SCENE_SECOND_SHOT_ACTUAL_TAIL
+PREVIOUS_STATIC_TAIL_REUSED
 INTENTIONAL_RECOMPOSITION
 EXACT_START_END_STATE_REQUIRED
 CONTINUOUS_ACTION_TRAJECTORY_REQUIRED
@@ -370,6 +374,9 @@ reason code 只描述通用关系，不得包含剧情实体。
 AI 计划必须通过：
 
 - 第一镜模式不变量；
+- 每个场景组只有首镜为参考图，组内后续镜头均为首尾帧；
+- 场景第二镜首帧来源必须是 `PREVIOUS_ADOPTED_TAIL`，且只依赖场景首镜；
+- 场景第三镜起首帧来源必须是紧邻上一镜的 `PREVIOUS_STATIC_TAIL`，不得形成视频执行依赖；
 - 所有 shot ID、revision、asset ID 引用存在且属于当前集；
 - `depends_on_shot_id` 指向合法上游并且整图无环；
 - 模式所需输入角色齐全；
@@ -377,7 +384,8 @@ AI 计划必须通过：
 - `VIDEO_INPUT_MODE` 引用已采用视频，不引用临时候选或整集拼接成片；
 - 当前能力快照支持计划模式和媒体格式；
 - 输入 URL 在预计任务读取窗口内可访问；
-- fallback 有限、无循环、成本和尝试次数有界；
+- `fallback_order` 必须为空，自动跨模式 fallback 被禁止；
+- 同模式修复的成本和尝试次数有界；
 - 幂等键包含全部影响输出的 revision。
 
 任何一项失败，计划不得进入队列；执行层不能自行选择参考图补空。
@@ -519,7 +527,7 @@ JIT 阶段只校正工具输入，不改写分镜语义。
 
 ---
 
-## 9. 模式失败与有限回退
+## 9. 模式失败、同模式修复与阻断
 
 | 失败 | 通用处置 |
 |---|---|
@@ -528,25 +536,27 @@ JIT 阶段只校正工具输入，不改写分镜语义。
 | Web URL 不可达或 TTL 不足 | 重新发布/签名并校验 |
 | 普通参考视频可用但真续写未验证 | 真续写计划阻断；仅允许已准入参考意图 |
 | 上一镜视频未采用 | 保持 `waiting_dependency`，不使用临时候选偷跑 |
-| 首尾帧缺失或互相矛盾 | 回到边界素材准备，不提交视频任务 |
-| 供应商不支持计划模式 | 生成显式降级计划 revision，或阻断；禁止执行层静默改模式 |
+| 静态尾帧缺失、不可解码、尺寸或比例不兼容 | 在 `FIRST_LAST_FRAME_MODE` 内只重建当前镜静态尾帧；耗尽后 `waiting_human` |
+| 上一镜静态尾帧仍在生成 | `WAITING_STATIC_BOUNDARY_ASSET` 短暂等待，不等待上一镜视频完成 |
+| 参考图缺失或关键帧门禁未通过 | 在 `REFERENCE_IMAGE_MODE` 内有限重建；禁止丢弃种子或纯文本提交 |
+| 供应商不支持计划模式 | 原模式失败并提示更换视频模型；禁止执行层改模式 |
 | 上游 adopted revision 变化 | 失效消费旧素材的后代 |
-| 供应商异步失败 | 记录终态错误，有限重试后执行计划内 fallback |
+| 供应商瞬时失败 | 保持原模式有限重试和断点恢复 |
+| 供应商异步终态明确拒绝 | 原模式 `failed`，记录稳定错误码并提示更换模型 |
 | 超出成本/时延预算 | 停止新付费尝试，输出 best-effort/blocked，不篡改质量事实 |
 
 每个计划节点必须有：
 
 ```text
-fallback_order
+fallback_order = []
 max_attempts
 max_cost
 timeout
-degraded_from_mode
-degraded_to_mode
-degraded_reason
+repair_reason
+provider_rejection_code
 ```
 
-fallback 不能形成循环，也不能因“默认参考图”而失去审计信息。
+新计划禁止自动跨模式 fallback。历史降级字段只保留旧任务审计，不得驱动新执行。
 
 ---
 
@@ -573,8 +583,10 @@ fallback 不能形成循环，也不能因“默认参考图”而失去审计�
 
 - 输出首部与 first frame 状态匹配；
 - 输出尾部与 last frame 状态匹配；
-- 首尾帧身份、场景、尺寸、比例一致；
-- 上一镜尾帧来源可追溯到 adopted revision。
+- 输入首尾帧文件可解码，宽高比兼容且分辨率已统一；
+- 不执行输入首尾帧身份/场景语义配对 QA；
+- 场景第二镜首帧可追溯到场景首镜 adopted revision；
+- 场景第三镜起首帧可追溯到上一镜静态 `last_frame` 边界资产。
 
 `VIDEO_INPUT_MODE`：
 
@@ -625,8 +637,9 @@ source_storyboard_revision_id
 capability_snapshot_id
 required_asset_ids
 input_fingerprints
-fallback_order
-degraded_reason
+fallback_order（新计划恒为 `[]`，仅兼容历史审计）
+repair_reason
+provider_rejection_code
 estimated / actual latency and cost
 ```
 
@@ -660,7 +673,7 @@ GET  /jobs/{id}/video-mode-audit
 2. AI 生成整集模式计划；
 3. 展示模式分布、关键路径、预计时长/成本和 blocker；
 4. 无 blocker 时自动执行；
-5. 每镜展示 `planned_mode → actual_mode`、输入素材、等待依赖、fallback、stale 和降级原因；
+5. 每镜展示 `planned_mode → actual_mode`、输入素材、等待依赖、同模式修复、stale 和模型拒绝原因；
 6. 人工覆盖只作为调试/运营能力，覆盖后生成新 plan revision，不能直接改正在运行的任务 meta。
 
 监控台状态至少包括：
@@ -677,7 +690,6 @@ qa
 succeeded
 failed
 stale
-degraded
 ```
 
 ---
@@ -690,12 +702,12 @@ degraded
 | `app/hiagent.py` | 支持 reference image、first/last frame、reference video 三种 payload；保留角色互斥和能力校验 |
 | `app/capabilities/inputs.py` | 从静态声明升级为版本化、经异步探针验证的能力快照 |
 | `app/media_exec/enqueue.py` | 从计划构建 DAG；移除仅对 `action_continuation` 的特例依赖 |
-| `app/media_exec/run_job.py` | 执行 planned mode；移除强制写回参考图；采用后触发工具层 reconcile |
+| `app/media_exec/run_job.py` | 执行 planned mode；移除强制写回参考图和跨模式 fallback；采用后触发工具层 reconcile |
 | `app/media_exec/scheduler.py` | 按依赖就绪与资源预算调度安全并行，支持 stale、恢复和幂等 |
 | `app/media_exec/reference_store.py` | 扩展为边界资产与参考视频 revision 存储，保留 hash、来源与消费关系 |
 | `app/domain/video_ops.py` | 集级生成先建计划；单镜重做复用相同计划协议 |
 | `app/stages.py` | 增加模式特定技术 QA 和真续写语义准入证据 |
-| `frontend/src/api.ts` | 增加计划、能力、依赖、actual mode 与降级原因类型/API |
+| `frontend/src/api.ts` | 增加计划、能力、依赖、actual mode、同模式修复与模型拒绝类型/API |
 | `frontend/src/pages/WallPage.tsx` | 默认 AI 计划与可审计人工覆盖，不把手选模式作为主流程 |
 | `frontend/src/pages/MonitorPage.tsx` | 展示 DAG、关键路径、等待原因、能力快照和模式审计 |
 | 数据迁移 | 新增计划、能力、媒体发布、依赖和模式 QA 的版本化存储 |
@@ -779,24 +791,26 @@ tests/test_video_mode_ui_contract.py
 
 1. 第一镜始终是参考图模式；
 2. 第 2 镜起均有版本化 AI 计划；
-3. 相同场景不自动等于首尾帧；
+3. 每个场景只有首镜为参考图，组内其余镜头均为首尾帧；
 4. 打斗不自动等于视频输入；
-5. 反打、反应和插入特写不会因同场景误继承上一镜视频；
+5. 反打、反应和插入特写复用静态边界，不误继承上一镜完整视频；
 6. 同一未完成动作只有真续写能力通过后才可规划 `CONTINUE_PREVIOUS_TAKE`；
 7. 普通参考视频能力不会被误报为真续写；
 8. data URL 在提交前被拒绝或转换，不再产生已知非法付费任务；
 9. 创建成功、异步失败时能力探针仍判失败；
 10. `return_last_frame` 缺失时稳定使用本地抽帧；
-11. 首尾帧互斥输入、缺帧、尺寸不一致在提交前失败；
-12. 无依赖节点可越过等待节点安全并行；
-13. DAG 循环在计划发布前失败；
-14. 上游 adopted revision 变化使消费旧素材的后代 stale；
-15. stale 且不可取消的供应商结果不会自动采用；
-16. 切换模式、素材 revision 或能力快照不会误命中旧幂等任务；
-17. 降级始终有 from/to/reason，不静默参考图；
-18. 重启后计划、依赖、provider task 和重试状态可恢复；
-19. AI 输出非法 ID、非法模式或缺字段时不会进入执行器；
-20. 人工覆盖生成新 plan revision 并失效正确后代范围。
+11. 首尾帧互斥输入、缺帧、不可解码和尺寸不一致在提交前修复或阻断；
+12. 所有首尾帧镜头可并行预生成自己的静态尾帧；
+13. 每个场景只有第二镜等待首镜真实尾帧，第三镜起不等待上一镜视频；
+14. DAG 循环在计划发布前失败；
+15. 上游 adopted revision 变化使消费旧素材的后代 stale；
+16. stale 且不可取消的供应商结果不会自动采用；
+17. 切换模式、素材 revision 或能力快照不会误命中旧幂等任务；
+18. 任何模式失败都保持 planned/actual mode 一致，不生成跨模式 fallback revision；
+19. 首尾帧与参考图本地问题只在原模式内修复，模型终态拒绝才标记失败并提示换模型；
+20. 重启后计划、依赖、provider task 和重试状态可恢复；
+21. AI 输出非法 ID、非法模式或缺字段时不会进入执行器；
+22. 人工覆盖生成新 plan revision 并失效正确后代范围。
 
 ---
 
@@ -807,7 +821,7 @@ tests/test_video_mode_ui_contract.py
 3. **Reference + first/last**：启用两模式自动规划和依赖 DAG；
 4. **Reference-video experiment**：只开放 `MOTION/CAMERA/RHYTHM/AUDIO_REFERENCE`；
 5. **Continuation canary**：真续写语义回归通过后小流量开放；
-6. **Full auto**：第一镜参考图，后续 AI 规划，JIT reconcile，确定性校验守门。
+6. **Full auto**：每场首镜参考图、组内共享静态尾帧，只有场景第二镜等待真实尾帧，确定性校验守门。
 
 回滚按能力和模式关闭，不删除历史计划、任务与证据，也不恢复执行层静默强制参考图。
 
@@ -842,7 +856,7 @@ latency_per_mode
 
 - [ ] 原导演/编剧 PRD 不包含三模式工具实现细节；
 - [ ] 第一镜固定参考图，第 2 镜起均有 AI 生成并经确定性校验的版本化模式计划；
-- [ ] 三种模式均有独立输入合同、供应商 adapter、幂等键、技术 QA 和有限回退；
+- [ ] 三种模式均有独立输入合同、供应商 adapter、幂等键、技术 QA 和同模式有限修复；
 - [ ] `REFERENCE_IMAGE_MODE` 不再是执行异常的静默默认值；
 - [ ] 视频参考能力与真续写能力分别探针、分别准入；
 - [ ] 当前通道的视频 Web URL 要求已经进入媒体发布与提交前校验；
@@ -850,7 +864,8 @@ latency_per_mode
 - [ ] AI 只引用已发布分镜/资产 ID，不拥有剧情改写权；
 - [ ] 模式选择不依赖场景名、打斗词、动作词表、镜号、剧集或题材特判；
 - [ ] 调度器按真实素材依赖构建 DAG，有依赖串行、无依赖安全并行；
-- [ ] planned/actual mode、输入 revision、能力快照、等待、stale 和降级原因可追溯；
+- [ ] planned/actual mode、输入 revision、能力快照、等待、stale、修复和模型拒绝原因可追溯；
+- [ ] 新计划 `fallback_order` 恒为空，执行器不会跨模式降级、丢种子或纯文本弱化提交；
 - [ ] 上游 adopted revision 改变会失效所有消费旧边界素材的后代；
 - [ ] API 创建成功但异步失败不会被登记为能力通过；
 - [ ] data URL、互斥输入、缺失素材和不可达 URL 在付费提交前被拦截；

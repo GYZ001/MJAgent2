@@ -39,7 +39,7 @@ REFERENCE_IMAGE_TYPES = {
 
 # 关键帧提示词是分镜级可复用资产的一部分。升级该版本时，未经人工
 # 编辑的旧关键帧不得继续污染新视频版本。
-KEYFRAME_PROMPT_CONTRACT_VERSION = "narrative_action_geometry_v11"
+KEYFRAME_PROMPT_CONTRACT_VERSION = "narrative_action_geometry_v12"
 KEYFRAME_STRUCTURAL_FALLBACK_MODE = "omit_structurally_invalid_keyframe_slots_v1"
 _KEYFRAME_LLM_PROMPT_MAX_CHARS = 1200
 _DEFAULT_KEYFRAME_CANDIDATE_COUNT = 3
@@ -1396,31 +1396,13 @@ _SEED_USAGE_NOTE = (
 
 async def _generate_image_with_seed_fallback(prompt: str, seed_inputs: list[str] | None, *,
                                              call_meta: dict | None = None) -> dict[str, Any]:
-    """带 i2i 种子生成参考图；仅在图片输入明确不可用时才降级为纯文生图。
-
-    429/5xx/读超时等瞬时错误必须保留人物/场景种子交给上层重试，不能静默产出
-    一张失去身份锚点的“成功”关键帧。上传写超时可去种子快速降级，因为原样重传
-    大图只会继续占满上行。
-    """
-    try:
-        return await hiagent.generate_image(
-            prompt, size=config.REF_IMAGE_SIZE, image_inputs=seed_inputs or None, call_meta=call_meta)
-    except ProviderError as exc:
-        if not seed_inputs:
-            raise
-        detail = f"{exc} {getattr(exc, 'raw', '')}".lower()
-        unsupported_markers = (
-            "unsupported image", "image input is not supported", "reference image is not supported",
-            "does not support image", "unsupported_image", "invalid image input", "image edit not supported",
-            "不支持图片输入", "不支持参考图", "不支持图生图",
-        )
-        seedless_fallback_allowed = (
-            getattr(exc, "timeout_phase", None) == "write"
-            or any(marker in detail for marker in unsupported_markers)
-        )
-        if not seedless_fallback_allowed:
-            raise
-        return await hiagent.generate_image(prompt, size=config.REF_IMAGE_SIZE, call_meta=call_meta)
+    """Generate with the complete seed contract; never drop identity inputs."""
+    return await hiagent.generate_image(
+        prompt,
+        size=config.REF_IMAGE_SIZE,
+        image_inputs=seed_inputs or None,
+        call_meta=call_meta,
+    )
 
 
 async def review_reference_consistency(*, candidates: list[ReferenceImageAsset],
@@ -3854,6 +3836,7 @@ REFERENCE_SINGLE_INSTANCE_NOTE = (
     "每个角色在整个画面里只能出现一次，严禁把参考图里的人物当作额外的前景或背景对象再画一遍，"
     "不要分身/复制/双重同一角色，不要出现一个贴满画面的巨大人物剪影遮挡主体，不要人物与人物穿模重叠。"
 )
+REFERENCE_PROMPT_NOTE_MARKER = " Use the provided reference images as follows: "
 
 
 def append_reference_prompt_notes(prompt_text: str, assets: list[ReferenceImageAsset]) -> str:
@@ -3903,7 +3886,7 @@ def append_reference_prompt_notes(prompt_text: str, assets: list[ReferenceImageA
             + _MULTI_KEYFRAME_INVARIANCE_NOTE
         )
     note = (
-        " Use the provided reference images as follows: "
+        REFERENCE_PROMPT_NOTE_MARKER
         + " ".join(lines)
         + sequence_note
         + REFERENCE_SINGLE_INSTANCE_NOTE
@@ -3924,9 +3907,9 @@ def build_seedance_image_inputs(meta: dict[str, Any]) -> list[tuple[str, str]]:
             )
         refs = meta.get("reference_images") or []
         if not refs:
-            # 参考图/关键帧重试耗尽后的最终降级：Seedance 支持纯文本 content。
-            # 返回空列表表示继续提交，而不是把已经发生的付费工作判失败。
-            return []
+            raise ProviderError(
+                "REFERENCE_IMAGE_MODE 缺少通过门禁的 reference_image，禁止纯文本提交"
+            )
         # 同步更新冻结 meta，使“视频实际输入”界面与真正发送给供应商的图片一致。
         _suppress_character_anchors_covered_by_keyframes(refs)
         # 使用中的图按综合分 Top-N 装箱；截断不改 selected，高分未入选仍留在画廊。
@@ -3935,7 +3918,9 @@ def build_seedance_image_inputs(meta: dict[str, Any]) -> list[tuple[str, str]]:
         keyframe_limit = len(beats) if isinstance(beats, list) and beats else _MAX_TIMELINE_KEYFRAMES
         usable = pack_reference_images_for_seedance(refs, max_keyframes=keyframe_limit)
         if not usable:
-            return []
+            raise ProviderError(
+                "REFERENCE_IMAGE_MODE 没有可提交的 reference_image"
+            )
         out: list[tuple[str, str]] = []
         for ref in usable:
             if ref.get("path"):
@@ -3943,7 +3928,9 @@ def build_seedance_image_inputs(meta: dict[str, Any]) -> list[tuple[str, str]]:
             elif ref.get("url"):
                 out.append((ref["url"], "reference_image"))
         if not out:
-            return []
+            raise ProviderError(
+                "REFERENCE_IMAGE_MODE 的 reference_image 文件或 URL 不可用"
+            )
         return out
 
     if mode == FIRST_LAST_FRAME_MODE:

@@ -1518,6 +1518,22 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         if decision.mode != video_modes.REFERENCE_IMAGE_MODE:
             decision = video_modes.default_reference_decision()
 
+    first_frame_requirement = None
+    first_frame_source = None
+    boundary_source_shot_id = None
+    if shot_plan is not None and shot_plan.mode.value == video_modes.FIRST_LAST_FRAME_MODE:
+        first_frame_requirement = next(
+            (
+                item
+                for item in shot_plan.required_assets
+                if item.role == "first_frame"
+            ),
+            None,
+        )
+        if first_frame_requirement is not None:
+            first_frame_source = first_frame_requirement.source.value
+            boundary_source_shot_id = first_frame_requirement.source_shot_id
+
     # 跨镜连贯只继承上一镜的实际/计划尾状态；不得把上一镜完整动作描述塞进 prompt。
     # after_shot_id 无效时回退到 shot_no-1，避免 action_continuation 在缺 prev 时被当成链首误杀。
     prev_row = None
@@ -1545,10 +1561,28 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
             "SELECT * FROM shots WHERE episode_id=? AND shot_no<? ORDER BY shot_no DESC LIMIT 1",
             (shot_row["episode_id"], int(shot_row["shot_no"])),
         ).fetchone()
-    prev_shot = _load_shot_model(prev_row) if prev_row else None
+    boundary_prev_row = None
+    if boundary_source_shot_id:
+        boundary_prev_row = conn.execute(
+            "SELECT * FROM shots WHERE id=? AND episode_id=?",
+            (boundary_source_shot_id, shot_row["episode_id"]),
+        ).fetchone()
+        if boundary_prev_row is None:
+            raise ValueError("视频计划的首帧来源镜头不存在或不属于本集")
+    prompt_prev_row = boundary_prev_row or prev_row
+    prev_shot = _load_shot_model(prompt_prev_row) if prompt_prev_row else None
     continuity_mode = derive_continuity_mode(shot, prev_shot)
     shot.continuity_mode = continuity_mode
     prev_state_out = effective_state_out(prev_shot) if prev_shot else None
+    boundary_start_state = None
+    if boundary_prev_row is not None and prev_shot is not None:
+        if first_frame_source == "PREVIOUS_STATIC_TAIL":
+            boundary_start_state = (
+                (prev_shot.last_frame_desc or "").strip()
+                or prev_state_out
+            )
+        else:
+            boundary_start_state = prev_state_out
     planned_state_dependency = (
         shot_plan is not None and shot_plan.state_dependency != "none"
     )
@@ -1602,7 +1636,18 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
                                   continuity_mode=continuity_mode,
                                   prev_state_out=prompt_prev_state_out,
                                   voice_bible=screenplay.voice_bible,
-                                  screenplay=screenplay))
+                                  screenplay=screenplay,
+                                  video_generation_mode=(
+                                      shot_plan.mode.value if shot_plan is not None else decision.mode
+                                  ),
+                                  first_frame_source=first_frame_source,
+                                  boundary_relation_edit=(
+                                      shot_plan.relations.edit if shot_plan is not None else None
+                                  ),
+                                  boundary_relation_action=(
+                                      shot_plan.relations.action if shot_plan is not None else None
+                                  ),
+                                  boundary_start_state=boundary_start_state))
     raw_source_errors = [
         error for error in forbidden_prompt_content_errors(raw_prompt_text, shot)
         if "原文章节摘录" in error or "source_excerpt 原文内容" in error
@@ -1712,6 +1757,20 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         "supervisor_run_id": supervisor_run_id,
         "shot_contract_json": json.dumps(shot_contract_dict(shot), ensure_ascii=False),
         "keyframe_prompt_contract_version": video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION,
+        "boundary_prompt_contract": {
+            "video_generation_mode": (
+                shot_plan.mode.value if shot_plan is not None else decision.mode
+            ),
+            "first_frame_source": first_frame_source,
+            "source_shot_id": boundary_source_shot_id,
+            "relation_edit": (
+                shot_plan.relations.edit if shot_plan is not None else None
+            ),
+            "relation_action": (
+                shot_plan.relations.action if shot_plan is not None else None
+            ),
+            "start_state": boundary_start_state,
+        },
     }
     if shot_plan is not None:
         image_meta.update({
@@ -1773,15 +1832,7 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         (version_id, shot_id, version_no, prompt_text, key, now(),
          json.dumps(image_meta, ensure_ascii=False)))
     job_id = preflight_job_id or new_id("job")
-    # 补齐模式：优先读视频 grant 的 budget_cap_cny
-    budget_limit = float(get_setting("episode_cost_limit_cny") or 100)
-    try:
-        from app.completion_grant import active_video_grant_budget_cap
-        grant_cap = active_video_grant_budget_cap(ep["id"])
-        if grant_cap is not None:
-            budget_limit = float(grant_cap)
-    except Exception:  # noqa: BLE001
-        pass
+    budget_limit = episode_video_budget_limit(str(ep["id"]))
     run_id, step_run_id = ensure_media_trace(
         workflow_type="video_generation", scope_id=shot_id,
         input_value={"prompt": prompt_text, "version": version_no}, budget_limit_cny=budget_limit,
@@ -1823,10 +1874,9 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         pass
     conn.execute("UPDATE episodes SET status='generating' WHERE id=? AND status='confirmed'", (ep["id"],))
     conn.commit()
-    estimate = (
-        shot_cost_cny(shot.duration_s)
-        + config.IMAGE_PRICE_PER_UNIT * video_modes.estimated_keyframe_generation_count()
-    )
+    from app.video_cost_model import initial_shot_generation_cost
+
+    estimate = initial_shot_generation_cost(float(shot.duration_s))
     try:
         reserved = media_scheduler.reserve_budget(
             job_id, ep["id"], estimate, budget_limit, conn=conn

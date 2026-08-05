@@ -1070,11 +1070,13 @@ def _compile_audio_timeline(shot: Shot, voice_bible: list | None = None) -> str:
     from app.continuity import ensure_audio_timeline
     ensure_audio_timeline(shot, voice_bible)
     lines: list[str] = []
+    has_spoken_content = False
     for item in shot.audio_timeline:
         span = f"{item.start_s:g}–{item.end_s:g} 秒"
         if item.type == "ambient_sound":
             lines.append(f"{span}：{item.text or '自然环境声'}")
             continue
+        has_spoken_content = True
         speaker = item.speaker_id or "未知"
         voice = (item.voice_canonical or "").strip()
         voice_bit = f"，声音特征：{voice}" if voice else ""
@@ -1093,13 +1095,24 @@ def _compile_audio_timeline(shot: Shot, voice_bible: list | None = None) -> str:
             lines.append(
                 f"{span}：画面中的{speaker}以{emotion}语气开口说「{item.text}」{voice_bit}；{lip}。"
             )
-    lines.append("所有对白和必要声音必须由本条视频直接生成并在片段结束前完整结束；只生成指定说话人和指定台词。")
+    if has_spoken_content:
+        lines.append(
+            "所有对白和必要声音必须由本条视频直接生成并在片段结束前完整结束；"
+            "只生成指定说话人和指定台词。"
+        )
+    else:
+        lines.append(
+            "本镜没有任何指定台词、画外音或旁白；所有人物全程闭口，不做说话口型，"
+            "不得自行补充问候、应答、语气词或任何可辨识人声。"
+        )
     return "\n".join(lines)
 
 
 def _compile_reference_roles(shot: Shot, *, continuity_mode: str, with_refs: bool,
                              chained: bool, individual_names: set[str] | None = None,
-                             collective_names: set[str] | None = None) -> str:
+                             collective_names: set[str] | None = None,
+                             video_generation_mode: str | None = None,
+                             first_frame_source: str | None = None) -> str:
     from app.continuity import reference_role_plan, uses_previous_tail_frame
     roles = reference_role_plan(
         shot,
@@ -1108,6 +1121,24 @@ def _compile_reference_roles(shot: Shot, *, continuity_mode: str, with_refs: boo
         collective_names=collective_names,
     )
     lines: list[str] = []
+    if video_generation_mode == "FIRST_LAST_FRAME_MODE":
+        source_label = {
+            "PREVIOUS_ADOPTED_TAIL": "上一镜采用视频的真实尾帧",
+            "PREVIOUS_STATIC_TAIL": "上一镜已冻结的静态尾帧",
+            "STATIC_BOUNDARY_ASSET": "本镜独立生成的静态首帧",
+        }.get(first_frame_source or "", "已冻结的首帧")
+        lines.extend([
+            f"输入中的 first_frame 是{source_label}，也是本视频 0.0 秒必须逐像素承接的真实起点；"
+            "不得先重画、换人、换景或跳到另一构图。",
+            "输入中的 last_frame 是本视频结束时必须到达的真实终点。first_frame/last_frame 是时间边界，"
+            "不是普通风格参考；只允许用连续可见动作与平稳摄影运动在两者之间过渡。",
+        ])
+        if roles:
+            lines.append("当前镜角色/场景锚点映射：" + "、".join(roles) + "。")
+        lines.append(
+            "禁止把首尾图叠在一起，禁止溶图、换脸、人物融合、凭空消失、瞬移、硬切或中途切场景。"
+        )
+        return "\n".join(lines)
     if uses_previous_tail_frame(continuity_mode) and (chained or "start_state_reference" in roles):
         lines.append(
             "参考图 A 是上一镜真实结束帧，也是本视频 0.0 秒的强制起始状态。"
@@ -1136,7 +1167,8 @@ def _compile_reference_roles(shot: Shot, *, continuity_mode: str, with_refs: boo
 def _compile_negative_constraints(shot: Shot, extra_negative: list[str] | None,
                                   continuity_mode: str, *,
                                   bible: Bible | None = None,
-                                  collective_names: set[str] | None = None) -> str:
+                                  collective_names: set[str] | None = None,
+                                  first_last_boundary: bool = False) -> str:
     from app.continuity import (
         dialogue_focus_subject,
         effective_characters_visible,
@@ -1168,16 +1200,33 @@ def _compile_negative_constraints(shot: Shot, extra_negative: list[str] | None,
             parts.append("画外说话人不要入画，也不要用旁白腔替代")
     visible = effective_characters_visible(shot)
     if visible:
-        parts.append(f"画面可见角色仅限：{'、'.join(visible)}")
+        if first_last_boundary:
+            parts.append(
+                f"完成首帧边界运镜后的当前动作可见角色仅限：{'、'.join(visible)}；"
+                "输入首帧中已有的边界人物只可随连续运镜自然出画，不得变形、融合或被复制"
+            )
+        else:
+            parts.append(f"画面可见角色仅限：{'、'.join(visible)}")
     focus_subject = dialogue_focus_subject(shot)
     if focus_subject:
-        parts.extend([
-            f"对白镜头只允许「{focus_subject}」一人入画",
-            "听者、其他说话人和人群全部留在画外，不得出现肩膀、背影、倒影或模糊人脸",
-            "不要双人同框、多人站桩或群像构图",
-        ])
-    if not uses_previous_tail_frame(continuity_mode):
+        if first_last_boundary:
+            parts.extend([
+                f"完成首帧边界运镜后，对白镜头只允许「{focus_subject}」一人入画",
+                "首帧已有听者只能随连续运镜自然出画；运镜完成后，听者、其他说话人和人群留在画外",
+                "当前对白构图不要双人站桩或群像构图",
+            ])
+        else:
+            parts.extend([
+                f"对白镜头只允许「{focus_subject}」一人入画",
+                "听者、其他说话人和人群全部留在画外，不得出现肩膀、背影、倒影或模糊人脸",
+                "不要双人同框、多人站桩或群像构图",
+            ])
+    if not uses_previous_tail_frame(continuity_mode) and not first_last_boundary:
         parts.append("不要沿用上一镜完整构图或主体尾帧姿势")
+    if first_last_boundary:
+        parts.append(
+            "不得忽略或重画首帧；不得用溶图、变形、换脸、人物融合、瞬移或硬切伪造首尾帧过渡"
+        )
     contact_phase = shot_contact_phase(shot)
     if contact_phase == "established":
         parts.append("已接触动作禁止正面摆拍、禁止手悬空或接触点留缝")
@@ -1206,6 +1255,37 @@ def _compile_negative_constraints(shot: Shot, extra_negative: list[str] | None,
     return "；".join(dict.fromkeys(parts))
 
 
+def _first_last_boundary_path(
+    *,
+    duration_s: int,
+    first_frame_source: str | None,
+    relation_edit: str | None,
+    relation_action: str | None,
+) -> tuple[str, str]:
+    edit = (relation_edit or "unknown").strip()
+    action = (relation_action or "unknown").strip()
+    camera_move = {
+        "reverse_angle": "平稳横摇并小幅弧形绕拍",
+        "reaction_cut": "平稳横摇转向反应主体",
+        "angle_cut": "平稳横摇或小幅弧移完成构图调整",
+        "insert_cut": "平稳推近到细节构图",
+        "match_cut": "沿匹配方向平稳移动",
+        "continuous_take": "保持连续机位运动",
+    }.get(edit, "采用最短路径的平稳横摇或小幅弧移")
+    source_label = {
+        "PREVIOUS_ADOPTED_TAIL": "上一镜真实尾帧",
+        "PREVIOUS_STATIC_TAIL": "上一镜静态尾帧",
+        "STATIC_BOUNDARY_ASSET": "本镜静态首帧",
+    }.get(first_frame_source or "", "输入首帧")
+    path = (
+        f"{source_label}就是 0.0 秒画面，输入尾帧就是 {duration_s}.0 秒画面。"
+        f"剪辑关系={edit}，动作关系={action}；使用“{camera_move}”和符合物理规律的人物动作，"
+        "沿连续可解释路径从首帧准确到达尾帧。构图变化必须由镜头运动或人物正常出入画完成，"
+        "不得把两个定格直接融合、渐变换脸、复制人物、瞬移或硬切。"
+    )
+    return path, camera_move
+
+
 def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = None,
                    *, with_refs: bool = False, chained: bool = False,
                    prev_action: str | None = None, from_scene: bool = False,
@@ -1221,7 +1301,12 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
                    voice_bible: list | None = None,
                    screenplay: EpisodeScreenplay | None = None,
                    visual_style: str | None = None,
-                   aspect_ratio: str = "9:16") -> str:
+                   aspect_ratio: str = "9:16",
+                   video_generation_mode: str | None = None,
+                   first_frame_source: str | None = None,
+                   boundary_relation_edit: str | None = None,
+                   boundary_relation_action: str | None = None,
+                   boundary_start_state: str | None = None) -> str:
     """编译 Seedance 最终提示词（PRD §11）：最小完备、固定段落、禁止原文/前镜完整动作/未来剧情。"""
     from app.continuity import (
         dialogue_action_staging_kind,
@@ -1231,6 +1316,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         effective_primary_action,
         effective_state_in,
         ensure_audio_timeline,
+        implicit_speech_without_dialogue_errors,
         planned_state_out,
         reference_role_plan,
         required_text_strategy,
@@ -1259,9 +1345,13 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     if mode not in {"action_continuation", "same_scene_cut", "reaction_cut",
                     "reverse_angle", "insert_detail", "scene_change"}:
         mode = derive_continuity_mode(shot)
+    first_last_boundary = video_generation_mode == "FIRST_LAST_FRAME_MODE"
     shot.continuity_mode = mode
     shot.prompt_contract_version = PROMPT_CONTRACT_VERSION
     ensure_audio_timeline(shot, voice_bible)
+    implicit_speech_errors = implicit_speech_without_dialogue_errors(shot)
+    if implicit_speech_errors:
+        raise CompileError("；".join(implicit_speech_errors))
     if identity_resolver is not None:
         # ``ensure_audio_timeline`` may deterministically materialise entries
         # that were absent on the input shot; validate the final provider cast.
@@ -1292,11 +1382,15 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
 
     shot_dur = clip_duration(shot)
     state_in = effective_state_in(shot)
-    if uses_previous_tail_frame(mode) and (prev_state_out or "").strip():
+    if first_last_boundary and (boundary_start_state or "").strip():
+        state_in = boundary_start_state.strip()
+    elif uses_previous_tail_frame(mode) and (prev_state_out or "").strip():
         # 连续动作：以实际/计划尾状态为强制起点（不使用上一镜完整 action_desc）
         state_in = prev_state_out.strip()
         shot.state_in = state_in
     state_out = planned_state_out(shot)
+    if first_last_boundary and (shot.last_frame_desc or "").strip():
+        state_out = shot.last_frame_desc.strip()
     primary = effective_primary_action(shot)
     full_action = (shot.action_desc or "").strip()
     (
@@ -1315,6 +1409,15 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         bible_names=known_identity_tokens,
         continuity_mode=mode,
     )
+    if first_last_boundary and (boundary_start_state or "").strip():
+        # 0 秒画面由真实首帧控制。可见角色投影只约束当前动作，不得把上游
+        # 边界人物从 START STATE 文本中抹掉后再要求模型重画首帧。
+        state_in = boundary_start_state.strip()
+        if visible_cast_block:
+            visible_cast_block += (
+                "以上当前动作可见名单从首帧边界运镜完成后生效；"
+                "输入首帧已有边界人物必须先原样保留，再通过连续运镜自然出画。"
+            )
     if not state_in or not primary or not state_out:
         raise CompileError(
             f"镜头 {shot.shot_no} 缺少 state_in/primary_action/state_out，无法编译最小完备提示词"
@@ -1334,6 +1437,14 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         if not dialogue_focus or shot.camera_move in {"固定", "推近"}
         else "固定"
     )
+    boundary_path = ""
+    if first_last_boundary:
+        boundary_path, render_camera_move = _first_last_boundary_path(
+            duration_s=shot_dur,
+            first_frame_source=first_frame_source,
+            relation_edit=boundary_relation_edit,
+            relation_action=boundary_relation_action,
+        )
     scale_hint = _framing_scale_hint(render_shot_size)
     camera_angle = _resolve_camera_angle(shot)
     # 回写解析后的机位角，便于下游审计/重试与关键帧对齐
@@ -1343,8 +1454,10 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         + (f"。{scale_hint}" if scale_hint else "")
     )
     if dialogue_focus:
+        boundary_camera_prefix = "完成首帧边界的连续运镜后，" if first_last_boundary else ""
         camera_line += (
-            f"。竖屏单人对白构图：只拍「{dialogue_focus}」一人的面部、上半身与自然口型，"
+            f"。{boundary_camera_prefix}竖屏单人对白构图只拍「{dialogue_focus}」"
+            "一人的面部、上半身与自然口型，"
             "视线朝向画外听者；听者和同场其他人物完全不入画"
         )
     elif dialogue_staging:
@@ -1423,6 +1536,8 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         chained=chained or uses_previous_tail_frame(mode),
         individual_names=individual_names,
         collective_names=collective_names,
+        video_generation_mode=video_generation_mode,
+        first_frame_source=first_frame_source,
     )
     # 兼容旧 chained/from_scene 调用：仅 action_continuation 才强调尾帧起点
     if uses_previous_tail_frame(mode) and (chained or from_scene or with_last_frame):
@@ -1442,10 +1557,16 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     if transition_bits:
         action_block += "。" + "".join(transition_bits)
     if dialogue_focus:
-        action_block += (
-            f"。对白构图以「{dialogue_focus}」为唯一可见主体；"
-            "原动作中提到的听者、围观者和其他角色均视为画外关系，不得画入镜头"
-        )
+        if first_last_boundary:
+            action_block += (
+                f"。首帧边界运镜完成后，对白构图以「{dialogue_focus}」为唯一可见主体；"
+                "输入首帧已有听者只能通过连续运镜自然出画，之后保持为画外关系"
+            )
+        else:
+            action_block += (
+                f"。对白构图以「{dialogue_focus}」为唯一可见主体；"
+                "原动作中提到的听者、围观者和其他角色均视为画外关系，不得画入镜头"
+            )
     elif dialogue_staging:
         action_block += "。对白与动作同步发生；必须先保证整段动作路径完整可见，再保证自然口型"
     action_block += "。只完成这一项主要动作，不重演前序剧情，不提前表演下一镜内容。"
@@ -1469,6 +1590,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         mode,
         bible=bible,
         collective_names=collective_names,
+        first_last_boundary=first_last_boundary,
     )
     if critique:
         negative_block += "；上一版必须改正：" + "；".join(
@@ -1481,6 +1603,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         ("REFERENCE ROLES", reference_block, 3),
         ("VISIBLE CAST", visible_cast_block, 1),
         ("START STATE | 0.0s", state_in, 1),
+        ("FIRST-LAST CONTINUOUS PATH", boundary_path, 1),
         ("ONE CURRENT ACTION", action_block, 1),
         (f"END STATE | {shot_dur}.0s", state_out + "。结尾稳定，可供下镜承接。", 1),
         ("STRUCTURED CONTINUITY", structured_state_block, 1),

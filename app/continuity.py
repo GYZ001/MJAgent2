@@ -63,6 +63,12 @@ _DIALOGUE_TWO_SHOT_INTERACTION_RE = re.compile(
     r"递给|递出|接过|抢夺|碰杯|亲吻|背起|抱起|交手|对打|扭打|"
     r"共同(?:握住|托住|抬起|推动|按住)|同时(?:握住|托住|抬起|推动|按住)"
 )
+_IMPLICIT_SPEECH_RE = re.compile(
+    r"开口|说出|说完|说话|问话|打招呼|询问|回答|回应|"
+    r"宣读|宣布|告知|解释|质问|反问|请求|承诺|喊出|呼喊|"
+    r"念出|念道|嘀咕|喃喃|自语|台词|口型|"
+    r"嘴(?:巴|唇)[^，。；！？]{0,8}(?:张开|微张|开合|翕动)"
+)
 
 # 有对白不等于只能拍脸。角色在说话的同时完成走位、离场或操作剧情道具时，
 # 这些可见动作本身就是主线交付，若仍强制单人大近景，视频模型通常只保留口型，
@@ -805,6 +811,30 @@ def speech_capacity_errors(shot: Shot) -> list[str]:
     return errors
 
 
+def implicit_speech_without_dialogue_errors(shot: Shot) -> list[str]:
+    """Reject visual instructions that force a silent shot to invent speech."""
+    if effective_spoken_segments(shot):
+        return []
+    conflicts: list[str] = []
+    for field in (
+        "primary_action",
+        "action_desc",
+        "first_frame_desc",
+        "last_frame_desc",
+    ):
+        value = str(getattr(shot, field, "") or "").strip()
+        if _IMPLICIT_SPEECH_RE.search(value):
+            conflicts.append(f"{field}=「{value[:48]}」")
+    if not conflicts:
+        return []
+    return [
+        f"shot_no={shot.shot_no} 没有有效 dialogues/audio_timeline 口播，"
+        f"但画面合同要求人物说话（{'；'.join(conflicts)}）；"
+        "禁止让视频模型自行发明台词。请补入有原文/剧本依据的准确台词，"
+        "或把本镜改为明确闭口的非语言动作/反应镜"
+    ]
+
+
 def spoken_contract_coherence_errors(shot: Shot) -> list[str]:
     """口播字段一致性与时间轴合法性；容量由 speech_capacity_errors 单独负责，避免重复报告。"""
     return [
@@ -1382,6 +1412,7 @@ def preflight_seedance_gates(
         sync_shot_continuity_fields(shot, prev)
     ensure_audio_timeline(shot, screenplay.voice_bible if screenplay else None)
     errors: list[str] = []
+    errors.extend(implicit_speech_without_dialogue_errors(shot))
     if narrative_plan is None:
         errors.extend(action_capacity_errors(
             shot,

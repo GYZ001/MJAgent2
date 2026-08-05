@@ -1260,6 +1260,7 @@ export type VideoInputIntent =
 export type VideoPlanAssetSource =
   | "ASSET_REVISION"
   | "STATIC_BOUNDARY_ASSET"
+  | "PREVIOUS_STATIC_TAIL"
   | "PREVIOUS_ADOPTED_TAIL"
   | "PREVIOUS_ADOPTED_VIDEO";
 
@@ -1442,6 +1443,18 @@ export interface ShotVersion {
   technical_validation_json?: string | null;
   created_at?: number | null;
   image_inputs?: {
+    first_frame_used?: boolean;
+    first_frame_src?: string | null;
+    first_frame_source?: VideoPlanAssetSource | null;
+    first_frame_scene_id?: string | null;
+    first_frame_image_url?: string | null;
+    last_frame_used?: boolean;
+    last_frame_src?: string | null;
+    last_frame_source?: VideoPlanAssetSource | null;
+    last_frame_scene_id?: string | null;
+    last_frame_image_url?: string | null;
+    video_input_url?: string | null;
+    video_input_source_revision_id?: string | null;
     mode?: VideoGenerationMode;
     planned_mode?: VideoGenerationMode;
     actual_mode?: VideoGenerationMode | null;

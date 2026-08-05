@@ -102,12 +102,12 @@ describe('分镜台结构化 diff 与问题筛选', () => {
     expect(storyboardDeleteUsesFullClear([only], 'other-shot')).toBe(false)
   })
 
-  it('运行中只提供暂停，停止后才允许清空', () => {
+  it('运行中只提供暂停，所有有分镜的停止态都允许清空', () => {
     expect(storyboardToolbarActions('running')).toEqual({ pause: true, clear: false })
     expect(storyboardToolbarActions('paused')).toEqual({ pause: false, clear: true })
     expect(storyboardToolbarActions('failed')).toEqual({ pause: false, clear: true })
-    expect(storyboardToolbarActions('ready_to_confirm')).toEqual({ pause: false, clear: false })
-    expect(storyboardToolbarActions('confirmed')).toEqual({ pause: false, clear: false })
+    expect(storyboardToolbarActions('ready_to_confirm')).toEqual({ pause: false, clear: true })
+    expect(storyboardToolbarActions('confirmed')).toEqual({ pause: false, clear: true })
   })
 
   it('把门禁字段翻译为可执行的制作语言', () => {

@@ -168,3 +168,54 @@ def test_resource_clear_removes_video_images_and_reference_indexes(tmp_path, mon
         "SELECT adopted_version_id,approved_scene_id,mode_plan FROM shots WHERE id='s'"
     ).fetchone()
     assert tuple(shot) == (None, None, None)
+
+
+def test_episode_resource_clear_supersedes_active_video_plan(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    conn = _database()
+    conn.execute(
+        """INSERT INTO provider_video_capability_snapshots(
+               id,provider,model,capabilities_json,probe_time,probe_result,
+               technical_success,created_at
+           ) VALUES('cap','provider','model','{}',0,'succeeded',1,0)"""
+    )
+    conn.execute(
+        """INSERT INTO episode_video_generation_plans(
+               id,episode_id,plan_revision,source_storyboard_revision_id,
+               capability_snapshot_id,status,created_at
+           ) VALUES('plan','e',1,'storyboard','cap','valid',0)"""
+    )
+    conn.execute(
+        """INSERT INTO shot_video_generation_plans(
+               id,episode_video_plan_id,shot_id,shot_no,planned_mode,
+               capability_snapshot_id,status,created_at,updated_at
+           ) VALUES(
+               'shot-plan','plan','s',1,'FIRST_LAST_FRAME_MODE',
+               'cap','planned',0,0
+           )"""
+    )
+    conn.execute(
+        "UPDATE shots SET mode_plan=? WHERE id='s'",
+        (json.dumps({"mode": "FIRST_LAST_FRAME_MODE"}),),
+    )
+    conn.commit()
+    monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
+    monkeypatch.setattr(
+        artifacts.config,
+        "PROJECTS_DIR",
+        tmp_path / "projects",
+    )
+
+    artifacts.clear_episode_artifacts("e")
+
+    assert conn.execute(
+        "SELECT status FROM episode_video_generation_plans WHERE id='plan'"
+    ).fetchone()[0] == "superseded"
+    assert conn.execute(
+        "SELECT status FROM shot_video_generation_plans WHERE id='shot-plan'"
+    ).fetchone()[0] == "stale"
+    assert conn.execute(
+        "SELECT mode_plan FROM shots WHERE id='s'"
+    ).fetchone()[0] is None

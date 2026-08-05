@@ -674,23 +674,27 @@ def test_prepare_image_data_urls_records_compression_stats(monkeypatch) -> None:
     assert stats["media_input_compressed_count"] == 1
 
 
-def test_seeded_image_write_timeout_immediately_falls_back_without_seed(monkeypatch) -> None:
+def test_seeded_image_write_timeout_never_drops_identity_seed(monkeypatch) -> None:
     seen_inputs: list[list[str] | None] = []
 
     async def fake_generate_image(prompt, *, size, image_inputs=None, call_meta=None):
         seen_inputs.append(image_inputs)
-        if image_inputs:
-            raise hiagent.ProviderError("上传超时", retryable=True, timeout_phase="write")
-        return {"url": "https://example.invalid/generated.jpg"}
+        raise hiagent.ProviderError(
+            "上传超时",
+            retryable=True,
+            timeout_phase="write",
+        )
 
     monkeypatch.setattr(hiagent, "generate_image", fake_generate_image)
 
-    result = asyncio.run(video_modes._generate_image_with_seed_fallback(
-        "prompt", ["data:image/jpeg;base64,abc"], call_meta={"shot_no": 1},
-    ))
+    with pytest.raises(hiagent.ProviderError, match="上传超时"):
+        asyncio.run(video_modes._generate_image_with_seed_fallback(
+            "prompt",
+            ["data:image/jpeg;base64,abc"],
+            call_meta={"shot_no": 1},
+        ))
 
-    assert result["url"].endswith("generated.jpg")
-    assert seen_inputs == [["data:image/jpeg;base64,abc"], None]
+    assert seen_inputs == [["data:image/jpeg;base64,abc"]]
 
 
 def test_seeded_image_transient_provider_error_never_drops_identity_seed(monkeypatch) -> None:

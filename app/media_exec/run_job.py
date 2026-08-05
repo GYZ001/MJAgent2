@@ -14,6 +14,10 @@ class VideoPlanStaleFence(RuntimeError):
     """The provider result belongs to a superseded or stale video plan."""
 
 
+class VideoInputRepairRequired(RuntimeError):
+    """The planned mode is still valid, but its local input assets need repair."""
+
+
 def _assert_video_provider_submission_authority(
     conn,
     *,
@@ -21,20 +25,20 @@ def _assert_video_provider_submission_authority(
     meta: dict[str, Any],
     actual_mode: str,
     write_point: str,
-) -> None:
+) -> Any | None:
     """Use one fail-closed authority check at every paid submission boundary."""
     shot_plan_id = str(meta.get("shot_plan_id") or "")
     if not shot_plan_id:
         # Compatibility boundary for legacy plan-null jobs. Narrative authority
         # jobs cannot reach this branch because enqueue requires a bound plan.
-        return
+        return None
     try:
         from app.video_plan import (
             VideoPlanValidationError,
             assert_video_provider_submission_authority,
         )
 
-        assert_video_provider_submission_authority(
+        selected, _snapshot = assert_video_provider_submission_authority(
             shot_id=str(job["shot_id"]),
             shot_plan_id=shot_plan_id,
             actual_mode=actual_mode,
@@ -45,6 +49,7 @@ def _assert_video_provider_submission_authority(
             ),
             conn=conn,
         )
+        return selected
     except VideoPlanValidationError as exc:
         raise VideoPlanStaleFence(json.dumps({
             "code": "VIDEO_PROVIDER_SUBMISSION_AUTHORITY_STALE",
@@ -1154,6 +1159,13 @@ def _set_version(version_id: str, **fields) -> None:
 
 def _is_seedance_text_sensitive(message: str | None) -> bool:
     text = (message or "").lower()
+    if (
+        "inputimagesensitivecontentdetected" in text
+        or "input image" in text
+        or "输入图片" in (message or "")
+        or "输入图像" in (message or "")
+    ):
+        return False
     return (
         "inputtextsensitivecontentdetected" in text
         or "sensitive information" in text
@@ -1161,6 +1173,58 @@ def _is_seedance_text_sensitive(message: str | None) -> bool:
         or "输入文本" in (message or "")
         or "敏感" in (message or "")
     )
+
+
+def _is_seedance_input_image_sensitive(message: str | None) -> bool:
+    text = (message or "").lower()
+    original = message or ""
+    return (
+        "inputimagesensitivecontentdetected" in text
+        or (
+            "input image" in text
+            and (
+                "real person" in text
+                or "privacyinformation" in text
+                or "privacy information" in text
+            )
+        )
+        or (
+            ("输入图片" in original or "输入图像" in original)
+            and ("真人" in original or "隐私" in original or "敏感" in original)
+        )
+    )
+
+
+def _video_model_rejection_guidance(
+    meta: dict[str, Any],
+    message: str,
+) -> tuple[str, str] | None:
+    """Return an actionable public error only for an explicit model rejection."""
+    mode = str(meta.get("mode") or meta.get("planned_mode") or "")
+    if _is_seedance_input_image_sensitive(message):
+        mode_label = {
+            video_modes.FIRST_LAST_FRAME_MODE: "首尾帧",
+            video_modes.REFERENCE_IMAGE_MODE: "参考图",
+            video_modes.VIDEO_INPUT_MODE: "参考视频",
+        }.get(mode, "视觉")
+        return (
+            "VIDEO_INPUT_PRIVACY_REJECTED",
+            f"当前视频模型拒绝了{mode_label}输入，系统已保持 {mode or '原计划模式'} "
+            "失败且没有切换生成方式。请到「系统设置 → 模型中心」更换视频模型后重试。",
+        )
+    if _is_seedance_text_sensitive(message):
+        return (
+            "VIDEO_TEXT_REJECTED",
+            f"当前视频模型拒绝了文本输入，系统已保持 {mode or '原计划模式'} "
+            "失败且没有切换生成方式。请修订输入或更换视频模型后重试。",
+        )
+    if _is_seedance_copyright_restricted(message):
+        return (
+            "VIDEO_COPYRIGHT_REJECTED",
+            f"当前视频模型终态拒绝了生成请求，系统已保持 {mode or '原计划模式'} "
+            "失败且没有切换生成方式。请更换视频模型或处理版权输入后重试。",
+        )
+    return None
 
 
 _SEEDANCE_COPYRIGHT_MAX_RETRIES = 2
@@ -1236,15 +1300,7 @@ def _paid_video_attempt_count(conn, version_id: str) -> int:
 
 def _reserve_video_resubmit(job, shot) -> bool:
     """Reserve one additional payable attempt before changing operation_id."""
-    limit = float(get_setting("episode_cost_limit_cny") or 100)
-    try:
-        from app.completion_grant import active_video_grant_budget_cap
-
-        grant_cap = active_video_grant_budget_cap(job["episode_id"])
-        if grant_cap is not None:
-            limit = float(grant_cap)
-    except Exception:  # noqa: BLE001
-        pass
+    limit = episode_video_budget_limit(str(job["episode_id"]))
     return media_scheduler.extend_budget_reservation(
         job["id"],
         job["episode_id"],
@@ -1333,7 +1389,15 @@ def _ip_genericization_terms(conn, project_id: str) -> tuple[tuple[str, str], ..
 
 
 def _video_image_inputs_from_meta(meta: dict) -> list[tuple[str, str]]:
-    return video_modes.build_seedance_image_inputs(meta)
+    try:
+        return video_modes.build_seedance_image_inputs(meta)
+    except ProviderError as exc:
+        if meta.get("mode") in {
+            video_modes.REFERENCE_IMAGE_MODE,
+            video_modes.FIRST_LAST_FRAME_MODE,
+        }:
+            raise VideoInputRepairRequired(str(exc)) from exc
+        raise
 
 
 async def _prepare_reference_mode_inputs(
@@ -1753,35 +1817,26 @@ async def _prepare_reference_mode_inputs(
         meta["continuity_anchor_ready"] = True
         if not _reference_keyframe_gate_passed(assets):
             _assert_reference_lease()
-            # 构建器和执行器各已完成一次有界修复。耗尽后不再把 QA/文件门禁
-            # 升级为任务失败：丢掉实际不可读的引用，使用其余锚点；若一个锚点
-            # 都没有，后续以纯文本方式提交视频。
-            usable_assets = []
-            for asset in assets:
-                path = str(getattr(asset, "path", None) or "").strip()
-                url = str(getattr(asset, "url", None) or "").strip()
-                if (path and Path(path).is_file()) or url.startswith("data:image"):
-                    usable_assets.append(asset)
-            assets = usable_assets
             meta["reference_gate_retry_exhausted"] = True
-            meta["reference_fallback_mode"] = (
-                "available_anchors" if assets else "text_only"
-            )
-            meta["reference_images"] = [asset.public_dict() for asset in assets]
-            meta["narrative_keyframe_missing"] = False
-            meta["reference_group_gate_passed"] = True
-            meta["video_input_manifest_frozen"] = True
+            meta["reference_group_gate_passed"] = False
+            meta["video_input_manifest_frozen"] = False
             log_provider_call(
-                "reference_keyframe_gate_exhausted_fallback",
+                "reference_keyframe_gate_repair_required",
                 config.MODEL_TEXT,
-                "REFERENCE_GATE_EXHAUSTED_FALLBACK",
+                "REPAIR_REQUIRED",
                 None,
                 0,
                 meta={
                     "shot_id": shot_id,
-                    "fallback_mode": meta["reference_fallback_mode"],
-                    "usable_reference_count": len(assets),
+                    "mode": video_modes.REFERENCE_IMAGE_MODE,
                 },
+            )
+            _set_version(
+                version["id"],
+                image_inputs=json.dumps(meta, ensure_ascii=False),
+            )
+            raise VideoInputRepairRequired(
+                "参考图关键帧文件或生成前质量门禁未通过"
             )
         meta["reference_group_gate_passed"] = True
         meta["video_input_manifest_frozen"] = True
@@ -1807,7 +1862,7 @@ async def _prepare_reference_mode_inputs(
         conn.commit()
         return meta, prompt_text
 
-    # ── 参考图模式两次均未得到文件：记录风险并以纯文本默认产物继续 ──
+    # ── 参考图模式两次均未得到文件：保留原模式并进入修复 ──
     _delete_rejected_assets(rejected_assets)
     ref_failure_reason = (
         f"参考图模式 2 次尝试均未产出可用资产 "
@@ -1829,30 +1884,29 @@ async def _prepare_reference_mode_inputs(
         "rejection_details": rejection_details[:10],
         "prompt": prompt_text[:500],
     }]
-    meta["reference_generation_complete"] = True
-    meta["reference_static_ready"] = True
-    meta["continuity_anchor_ready"] = True
-    meta["reference_group_gate_passed"] = True
-    meta["video_input_manifest_frozen"] = True
-    meta["narrative_keyframe_missing"] = False
+    meta["reference_generation_complete"] = False
+    meta["reference_static_ready"] = False
+    meta["continuity_anchor_ready"] = False
+    meta["reference_group_gate_passed"] = False
+    meta["video_input_manifest_frozen"] = False
+    meta["narrative_keyframe_missing"] = True
     meta["reference_gate_retry_exhausted"] = True
-    meta["reference_fallback_mode"] = "text_only"
     meta["reference_images"] = []
-    set_pipeline_stage(
-        job["id"], media_stages.STAGE_VIDEO_READY,
-        scheduler_lane=media_stages.LANE_VIDEO_READY, ready_at=now(), conn=conn,
+    _set_version(
+        version["id"],
+        image_inputs=json.dumps(meta, ensure_ascii=False),
+        prompt_text=prompt_text,
     )
-    _set_version(version["id"], image_inputs=json.dumps(meta, ensure_ascii=False), prompt_text=prompt_text)
-    conn.commit()
-    return meta, prompt_text
+    raise VideoInputRepairRequired(ref_failure_reason)
 
 
 class _ContinuityWait(Exception):
-    """静态参考已齐、等待上一镜尾帧；由 _run_job 转为排队等待。"""
+    """Local inputs are progressing but one declared boundary is not ready."""
 
-    def __init__(self, reason: str):
+    def __init__(self, reason: str, *, reason_code: str = "WAITING_VIDEO_PLAN_DEPENDENCY"):
         super().__init__(reason)
         self.reason = reason
+        self.reason_code = reason_code
 
 
 def _image_dimensions(path: str) -> tuple[int, int]:
@@ -1868,6 +1922,70 @@ def _image_dimensions(path: str) -> tuple[int, int]:
         return int(stream.get("width") or 0), int(stream.get("height") or 0)
     except (OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError, IndexError):
         return 0, 0
+
+
+def _normalize_boundary_pair(
+    first_path: str,
+    last_path: str,
+) -> tuple[str, str, tuple[int, int]]:
+    """Normalize an aspect-compatible pair to one deterministic resolution."""
+    sizes = {
+        first_path: _image_dimensions(first_path),
+        last_path: _image_dimensions(last_path),
+    }
+    if any(not all(size) for size in sizes.values()):
+        raise VideoInputRepairRequired(
+            "首尾帧尺寸不可识别："
+            f"first={sizes[first_path]}, last={sizes[last_path]}"
+        )
+    first_size = sizes[first_path]
+    last_size = sizes[last_path]
+    cross_error = abs(
+        first_size[0] * last_size[1] - last_size[0] * first_size[1]
+    )
+    cross_scale = max(
+        first_size[0] * last_size[1],
+        last_size[0] * first_size[1],
+        1,
+    )
+    if cross_error / cross_scale > 0.005:
+        raise VideoInputRepairRequired(
+            "首尾帧宽高比不一致，禁止裁切后伪造边界合同："
+            f"first={first_size}, last={last_size}"
+        )
+    target = min((first_size, last_size), key=lambda size: size[0] * size[1])
+    for path, size in sizes.items():
+        if size == target:
+            continue
+        source = Path(path)
+        if not source.is_file():
+            raise VideoInputRepairRequired(f"首尾帧文件不存在：{path}")
+        with tempfile.NamedTemporaryFile(
+            prefix=f".{source.stem}.normalized-",
+            suffix=source.suffix or ".jpg",
+            dir=source.parent,
+            delete=False,
+        ) as handle:
+            normalized = Path(handle.name)
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-v", "error", "-i", str(source),
+                    "-vf", f"scale={target[0]}:{target[1]}:flags=lanczos",
+                    "-frames:v", "1", str(normalized),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=True,
+            )
+            normalized.replace(source)
+        except (OSError, subprocess.SubprocessError) as exc:
+            normalized.unlink(missing_ok=True)
+            raise VideoInputRepairRequired(
+                f"首尾帧统一尺寸失败：{type(exc).__name__}: {exc}"
+            ) from exc
+    return first_path, last_path, target
 
 
 def _load_boundary_asset(conn, shot_plan_id: str, role: str, fingerprint: str):
@@ -1913,18 +2031,55 @@ def _persist_boundary_asset(
     )
 
 
+def _resolve_current_execution_plan(
+    conn,
+    shot_id: str,
+    meta: dict,
+):
+    """Rebind an equivalent sibling-replanned contract to the current plan."""
+    from app.video_plan import active_plan_is_current, get_shot_plan
+
+    current = get_shot_plan(shot_id, conn=conn)
+    submitted_id = str(meta.get("shot_plan_id") or "")
+    if current is None or not submitted_id:
+        return None
+    if current.shot_plan_id == submitted_id:
+        return current
+    if not active_plan_is_current(submitted_id, conn=conn):
+        return None
+    meta.setdefault("submitted_shot_plan_id", submitted_id)
+    meta.setdefault(
+        "submitted_episode_video_plan_id",
+        meta.get("episode_video_plan_id"),
+    )
+    meta.update({
+        "shot_plan_id": current.shot_plan_id,
+        "episode_video_plan_id": current.episode_video_plan_id,
+        "plan_revision": current.plan_revision,
+        "source_storyboard_revision_id": current.source_storyboard_revision_id,
+        "capability_snapshot_id": current.capability_snapshot_id,
+        "input_revision_fingerprints": dict(current.input_revision_fingerprints),
+        "planned_mode": current.mode.value,
+        "equivalent_plan_rebound": True,
+        "equivalent_plan_rebound_at": now(),
+    })
+    return current
+
+
 async def _prepare_first_last_mode_inputs(
     conn, job, version, shot, ep, meta: dict, prompt_text: str,
     *, lease_owner: str,
 ) -> tuple[dict, str]:
     from app.schemas import Bible
-    from app.video_plan import AssetSource, get_shot_plan
+    from app.video_plan import AssetSource
     from app.media_pipeline import stages as media_stages
     from app.media_pipeline.stage_state import set_pipeline_stage
 
-    shot_plan = get_shot_plan(job["shot_id"], conn=conn)
-    if not shot_plan or shot_plan.shot_plan_id != meta.get("shot_plan_id"):
-        raise ProviderError("首尾帧计划已过期，禁止继续提交")
+    shot_plan = _resolve_current_execution_plan(
+        conn, str(job["shot_id"]), meta,
+    )
+    if shot_plan is None:
+        raise VideoInputRepairRequired("首尾帧计划已过期，需要重新规划")
     current_first = str(meta.get("first_frame_path") or "")
     current_last = str(meta.get("last_frame_path") or "")
     if current_first and current_last and Path(current_first).is_file() and Path(current_last).is_file():
@@ -1949,6 +2104,9 @@ async def _prepare_first_last_mode_inputs(
     last_req = requirements.get("last_frame")
     if not first_req or not last_req:
         raise ProviderError("首尾帧计划缺少 first_frame 或 last_frame 素材合同")
+    plan_relations = getattr(shot_plan, "relations", None)
+    relation_edit = str(getattr(plan_relations, "edit", "unknown") or "unknown")
+    relation_action = str(getattr(plan_relations, "action", "unknown") or "unknown")
     from app.multiview import keyframe_seed_paths, resolve_shot_asset_dependencies
 
     manifest = resolve_shot_asset_dependencies(
@@ -1979,23 +2137,41 @@ async def _prepare_first_last_mode_inputs(
     set_pipeline_stage(
         job["id"], media_stages.STAGE_REFERENCE_GENERATE,
         reason_code="PREPARING_BOUNDARY_FRAMES",
-        reason_text="正在准备首尾边界帧",
+        reason_text="正在按真实首帧生成连续尾帧",
         conn=conn,
     )
     conn.commit()
 
-    async def _resolve(role: str, requirement, description: str, index: int) -> str:
+    async def _resolve(
+        role: str,
+        requirement,
+        description: str,
+        index: int,
+        *,
+        pair_attempt: int,
+        seed_inputs: list[str],
+        pair_start_fingerprint: str | None = None,
+    ) -> str:
         _assert_job_lease(job["id"], lease_owner)
         source_revision = str(requirement.asset_revision_id or shot_plan.source_storyboard_revision_id)
         upstream_version_id = None
         source_shot_id = requirement.source_shot_id or shot_plan.depends_on_shot_id
+        upstream_static_asset = None
         fingerprint_material: dict[str, Any] = {
             "shot_plan_id": shot_plan.shot_plan_id,
             "role": role,
             "source": requirement.source.value,
             "source_revision": source_revision,
             "description": description,
+            "boundary_contract": "shared_static_tail_v3",
+            "generation_attempt": (
+                pair_attempt
+                if requirement.source == AssetSource.STATIC_BOUNDARY_ASSET
+                else 1
+            ),
         }
+        if pair_start_fingerprint:
+            fingerprint_material["pair_start_fingerprint"] = pair_start_fingerprint
         if requirement.source == AssetSource.PREVIOUS_ADOPTED_TAIL:
             previous = conn.execute(
                 "SELECT * FROM shots WHERE id=? AND episode_id=?",
@@ -2005,6 +2181,45 @@ async def _prepare_first_last_mode_inputs(
             if not previous or not upstream_version_id:
                 raise _ContinuityWait("等待上一镜采用后提取真实尾帧")
             fingerprint_material["upstream_adopted_version_id"] = upstream_version_id
+        elif requirement.source == AssetSource.PREVIOUS_STATIC_TAIL:
+            source_plan = conn.execute(
+                """SELECT id FROM shot_video_generation_plans
+                   WHERE episode_video_plan_id=? AND shot_id=?""",
+                (shot_plan.episode_video_plan_id, source_shot_id),
+            ).fetchone()
+            if source_plan:
+                upstream_static_asset = conn.execute(
+                    """SELECT * FROM video_boundary_assets
+                       WHERE episode_video_plan_id=? AND shot_plan_id=?
+                         AND role='last_frame' AND qa_status='passed'
+                       ORDER BY created_at DESC LIMIT 1""",
+                    (shot_plan.episode_video_plan_id, source_plan["id"]),
+                ).fetchone()
+            if (
+                not upstream_static_asset
+                or not upstream_static_asset["path"]
+                or not Path(upstream_static_asset["path"]).is_file()
+            ):
+                source_job = conn.execute(
+                    """SELECT status FROM jobs
+                       WHERE episode_id=? AND shot_id=? AND kind='video'
+                       ORDER BY created_at DESC LIMIT 1""",
+                    (job["episode_id"], source_shot_id),
+                ).fetchone()
+                if source_job and source_job["status"] in {
+                    "failed", "waiting_human", "cancelled", "paused",
+                }:
+                    raise VideoInputRepairRequired(
+                        "上一镜静态尾帧未生成成功，需要保持首尾帧模式修复该边界素材"
+                    )
+                raise _ContinuityWait(
+                    "等待上一镜预生成静态尾帧",
+                    reason_code="WAITING_STATIC_BOUNDARY_ASSET",
+                )
+            fingerprint_material.update({
+                "upstream_boundary_fingerprint": upstream_static_asset["fingerprint"],
+                "upstream_boundary_sha256": upstream_static_asset["sha256"],
+            })
         fingerprint = hashlib.sha256(
             json.dumps(
                 fingerprint_material, ensure_ascii=False, sort_keys=True,
@@ -2023,8 +2238,35 @@ async def _prepare_first_last_mode_inputs(
                 conn, previous, dest_dir=dest_dir,
             )
             if not asset or not asset.path:
-                raise ProviderError("上一镜采用视频无法稳定抽取尾帧")
+                raise VideoInputRepairRequired("上一镜采用视频无法稳定抽取尾帧")
             asset.qa = {**(asset.qa or {}), "source_adopted_version_id": upstream_version_id}
+        elif requirement.source == AssetSource.PREVIOUS_STATIC_TAIL:
+            source_path = Path(str(upstream_static_asset["path"]))
+            dest_dir = (
+                config.PROJECTS_DIR / job["project_id"] / "episodes"
+                / str(ep["episode_no"]) / "shots" / str(shot["shot_no"])
+                / "boundaries"
+            )
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest_path = dest_dir / (
+                f"first-from-{source_shot_id}-"
+                f"{str(upstream_static_asset['sha256'])[:12]}"
+                f"{source_path.suffix or '.jpg'}"
+            )
+            if not dest_path.is_file():
+                shutil.copy2(source_path, dest_path)
+            asset = video_modes.ReferenceImageAsset(
+                id=f"{shot_plan.shot_plan_id}:first_frame",
+                url="",
+                type="plot_key_frame",
+                source="previous_static_tail",
+                path=str(dest_path),
+                qa={
+                    "source_boundary_asset_id": upstream_static_asset["id"],
+                    "source_boundary_fingerprint": upstream_static_asset["fingerprint"],
+                    "shared_without_regeneration": True,
+                },
+            )
         elif requirement.source == AssetSource.STATIC_BOUNDARY_ASSET:
             asset = await video_modes._generate_one_reference(
                 project_id=job["project_id"],
@@ -2032,23 +2274,31 @@ async def _prepare_first_last_mode_inputs(
                 shot=shot_model,
                 bible=bible,
                 ref_type="plot_key_frame",
-                index=index,
+                index=index + pair_attempt - 1,
                 content_override=description,
-                seed_inputs=boundary_seed_inputs,
+                seed_inputs=seed_inputs,
                 extra_instruction=(
-                    "FIRST/LAST PAIR IDENTITY LOCK: keep identical character identity, "
-                    "outfit, body build, environment, lighting and fixed landmarks; "
-                    "only the contracted action state may change."
+                    "FIRST/LAST CONTINUITY ENDPOINT: reference image 1 is the exact "
+                    "first-frame boundary for this shot. Render only the contracted "
+                    "final state reached after one physically continuous take. Preserve "
+                    "identity, outfit, environment, fixed landmarks, screen direction, "
+                    "and scale from that boundary while allowing the scripted action and "
+                    "camera relation to progress. Do not blend endpoints, morph faces, "
+                    "merge people, teleport, hard-cut, or copy the start pose. "
+                    f"Edit relation: {relation_edit}; "
+                    f"action relation: {relation_action}."
                 ),
                 skip_inline_qa=False,
                 screenplay=screenplay,
             )
             if not asset.path or not Path(asset.path).is_file():
-                raise ProviderError(f"{role} 边界帧生成后文件不可用")
+                raise VideoInputRepairRequired(f"{role} 边界帧生成后文件不可用")
             if not asset.selectedForSeedance:
-                raise ProviderError(f"{role} 边界帧未通过生成前质量门禁")
+                raise VideoInputRepairRequired(f"{role} 边界帧未通过生成前质量门禁")
         else:
-            raise ProviderError(f"{role} 使用了不支持的素材来源：{requirement.source.value}")
+            raise VideoInputRepairRequired(
+                f"{role} 使用了不支持的素材来源：{requirement.source.value}"
+            )
         qa = dict(asset.qa or {})
         _persist_boundary_asset(
             conn,
@@ -2065,56 +2315,137 @@ async def _prepare_first_last_mode_inputs(
         conn.commit()
         return str(asset.path)
 
-    first_path, last_path = await asyncio.gather(
-        _resolve("first_frame", first_req, shot_model.first_frame_desc, 901),
-        _resolve("last_frame", last_req, shot_model.last_frame_desc, 902),
+    tail_attempt_limit = max(1, min(3, int(shot_plan.max_attempts or 1)))
+    first_path = await _resolve(
+        "first_frame",
+        first_req,
+        shot_model.first_frame_desc,
+        901,
+        pair_attempt=1,
+        seed_inputs=boundary_seed_inputs,
     )
-    first_size = _image_dimensions(first_path)
-    last_size = _image_dimensions(last_path)
-    if not all(first_size) or first_size != last_size:
-        raise ProviderError(
-            f"首尾帧尺寸不一致或不可识别：first={first_size}, last={last_size}"
+    first_bytes = Path(first_path).read_bytes()
+    first_fingerprint = hashlib.sha256(first_bytes).hexdigest()
+    first_seed = hiagent.data_url_from_file(first_path)
+    tail_seed_inputs = list(dict.fromkeys([
+        first_seed,
+        *boundary_seed_inputs[:3],
+    ]))
+    last_path = ""
+    first_size = (0, 0)
+    last_repair_error = ""
+    for tail_attempt in range(1, tail_attempt_limit + 1):
+        try:
+            last_path = await _resolve(
+                "last_frame",
+                last_req,
+                shot_model.last_frame_desc,
+                902,
+                pair_attempt=tail_attempt,
+                seed_inputs=tail_seed_inputs,
+                pair_start_fingerprint=first_fingerprint,
+            )
+        except VideoInputRepairRequired as exc:
+            last_repair_error = str(exc)
+            log_provider_call(
+                "last_frame_same_mode_repair",
+                config.MODEL_IMAGE,
+                "REPAIRING",
+                None,
+                0,
+                meta={
+                    "shot_id": job["shot_id"],
+                    "shot_plan_id": shot_plan.shot_plan_id,
+                    "tail_attempt": tail_attempt,
+                    "tail_attempt_limit": tail_attempt_limit,
+                    "reason": last_repair_error,
+                },
+            )
+            continue
+        break
+    else:
+        raise VideoInputRepairRequired(
+            f"{last_repair_error or '尾帧输入准备未通过'}；"
+            f"已在 FIRST_LAST_FRAME_MODE 内修复 {tail_attempt_limit} 次，"
+            "未更改生成模式"
         )
-    pair_assets = [
-        video_modes.ReferenceImageAsset(
-            id=f"{shot_plan.shot_plan_id}:{role}",
-            url="",
-            type="plot_key_frame",
-            source="video_boundary_asset",
-            path=path,
-        )
-        for role, path in (("first_frame", first_path), ("last_frame", last_path))
-    ]
-    pair_qa = await video_modes.review_reference_consistency(
-        candidates=pair_assets,
-        anchors=[],
-        shot=shot_model,
-        bible=bible,
-    )
-    pair_score = pair_qa.get("overall")
-    if (
-        pair_qa.get("failed")
-        or pair_score is None
-        or float(pair_score) < video_modes.quality_threshold()
+
+    while True:
+        try:
+            first_path, last_path, first_size = _normalize_boundary_pair(
+                first_path, last_path,
+            )
+            break
+        except VideoInputRepairRequired as exc:
+            if tail_attempt >= tail_attempt_limit:
+                raise
+            conn.execute(
+                """UPDATE video_boundary_assets
+                      SET qa_status='failed'
+                    WHERE shot_plan_id=? AND role='last_frame' AND path=?""",
+                (shot_plan.shot_plan_id, last_path),
+            )
+            conn.commit()
+            tail_attempt += 1
+            log_provider_call(
+                "last_frame_dimension_repair",
+                config.MODEL_IMAGE,
+                "REPAIRING",
+                None,
+                0,
+                meta={
+                    "shot_id": job["shot_id"],
+                    "shot_plan_id": shot_plan.shot_plan_id,
+                    "tail_attempt": tail_attempt,
+                    "tail_attempt_limit": tail_attempt_limit,
+                    "reason": str(exc),
+                },
+            )
+            last_path = await _resolve(
+                "last_frame",
+                last_req,
+                shot_model.last_frame_desc,
+                902,
+                pair_attempt=tail_attempt,
+                seed_inputs=tail_seed_inputs,
+                pair_start_fingerprint=first_fingerprint,
+            )
+    for role, path in (
+        ("first_frame", first_path),
+        ("last_frame", last_path),
     ):
-        raise ProviderError(
-            "首尾帧身份、服装、场景或固定地标的一致性未通过，禁止提交视频任务"
+        raw = Path(path).read_bytes()
+        conn.execute(
+            """UPDATE video_boundary_assets
+                  SET path=?,sha256=?,width=?,height=?
+                WHERE shot_plan_id=? AND role=? AND path=?""",
+            (
+                path,
+                hashlib.sha256(raw).hexdigest(),
+                first_size[0],
+                first_size[1],
+                shot_plan.shot_plan_id,
+                role,
+                path,
+            ),
         )
-    conn.execute(
-        """UPDATE video_boundary_assets
-              SET qa_json=json_set(qa_json,'$.pair_consistency',json(?))
-            WHERE shot_plan_id=? AND role IN ('first_frame','last_frame')""",
-        (
-            json.dumps(pair_qa, ensure_ascii=False),
-            shot_plan.shot_plan_id,
-        ),
-    )
+    boundary_contract = {
+        "status": "deterministic_checks_only",
+        "semantic_pair_review_performed": False,
+        "first_frame_source": first_req.source.value,
+        "last_frame_source": last_req.source.value,
+        "shared_boundary_contract": "shared_static_tail_v3",
+        "tail_conditioned_on_first_frame": True,
+        "first_frame_sha256": first_fingerprint,
+        "relation_edit": relation_edit,
+        "relation_action": relation_action,
+    }
     meta["first_frame_path"] = first_path
     meta["last_frame_path"] = last_path
     meta["reference_images"] = []
     meta.pop("video_input_url", None)
     meta["boundary_frame_dimensions"] = list(first_size)
-    meta["boundary_pair_qa"] = pair_qa
+    meta["boundary_pair_qa"] = boundary_contract
     meta["reference_generation_complete"] = True
     meta["video_input_manifest_frozen"] = True
     meta["plan_status"] = "ready"
@@ -2139,21 +2470,22 @@ async def _prepare_video_input_mode(
         VideoGenerationMode,
         capability_allows,
         current_capability_snapshot,
-        get_shot_plan,
     )
     from app.media_pipeline import stages as media_stages
     from app.media_pipeline.stage_state import set_pipeline_stage
 
-    shot_plan = get_shot_plan(job["shot_id"], conn=conn)
-    if not shot_plan or shot_plan.shot_plan_id != meta.get("shot_plan_id"):
-        raise ProviderError("视频输入计划已过期，禁止继续提交")
+    shot_plan = _resolve_current_execution_plan(
+        conn, str(job["shot_id"]), meta,
+    )
+    if shot_plan is None:
+        raise VideoInputRepairRequired("视频输入计划已过期，需要重新规划")
     snapshot = current_capability_snapshot(
         provider=None, model=None, conn=conn,
     )
     if snapshot.id != shot_plan.capability_snapshot_id or not capability_allows(
         snapshot, VideoGenerationMode.VIDEO_INPUT_MODE, shot_plan.video_input_intent,
     ):
-        raise ProviderError("当前能力快照未准入该视频输入意图")
+        raise VideoInputRepairRequired("当前能力快照未准入该视频输入意图")
     upstream_id = shot_plan.depends_on_shot_id
     previous = conn.execute(
         "SELECT * FROM shots WHERE id=? AND episode_id=?",
@@ -2243,13 +2575,50 @@ async def _prepare_planned_mode_inputs(
     # media publication can all incur external work before the final video
     # submit.  One mode-neutral authority fence must therefore run before mode
     # dispatch, not merely before create_video_task.
-    _assert_video_provider_submission_authority(
+    selected_plan = _assert_video_provider_submission_authority(
         conn,
         job=job,
         meta=meta,
         actual_mode=str(mode),
         write_point="planned_mode_input_prepare",
     )
+    if (
+        selected_plan is not None
+        and selected_plan.shot_plan_id != meta.get("shot_plan_id")
+    ):
+        # A fallback/local replan publishes a new episode revision. Unchanged
+        # sibling contracts remain executable, but every persisted identity
+        # must be rebound before preparing assets or recording attempts.
+        meta["submitted_shot_plan_id"] = meta.get("shot_plan_id")
+        meta["submitted_episode_video_plan_id"] = meta.get(
+            "episode_video_plan_id"
+        )
+        meta.update({
+            "shot_plan_id": selected_plan.shot_plan_id,
+            "episode_video_plan_id": selected_plan.episode_video_plan_id,
+            "plan_revision": selected_plan.plan_revision,
+            "source_storyboard_revision_id": (
+                selected_plan.source_storyboard_revision_id
+            ),
+            "capability_snapshot_id": selected_plan.capability_snapshot_id,
+            "input_revision_fingerprints": dict(
+                selected_plan.input_revision_fingerprints
+            ),
+            "planned_mode": selected_plan.mode.value,
+            "actual_mode": selected_plan.mode.value,
+            "video_input_intent": (
+                selected_plan.video_input_intent.value
+                if selected_plan.video_input_intent is not None
+                else None
+            ),
+            "depends_on_shot_id": selected_plan.depends_on_shot_id,
+            "stale_plan_recovered": True,
+            "stale_plan_recovered_at": now(),
+        })
+        _set_version(
+            version["id"],
+            image_inputs=json.dumps(meta, ensure_ascii=False),
+        )
     if mode == video_modes.REFERENCE_IMAGE_MODE:
         return await _prepare_reference_mode_inputs(
             conn, job, version, shot, ep, meta, prompt_text,
@@ -2365,7 +2734,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                     else media_stages.STAGE_WAITING_CONTINUITY
                 ),
                 reason_code=(
-                    "WAITING_VIDEO_PLAN_DEPENDENCY"
+                    wait_exc.reason_code
                     if meta.get("shot_plan_id")
                     else "WAITING_CONTINUITY_ANCHOR"
                 ),
@@ -3046,12 +3415,82 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             media_scheduler.settle_budget(job_id, 0.0, success=False)
             reconcile_episode_generation_status(job["episode_id"])
         return
+    except VideoInputRepairRequired as exc:
+        repair_mode = str(
+            meta.get("mode") or meta.get("planned_mode")
+            or video_modes.REFERENCE_IMAGE_MODE
+        )
+        repair_label = {
+            video_modes.FIRST_LAST_FRAME_MODE: "首尾帧",
+            video_modes.REFERENCE_IMAGE_MODE: "参考图",
+            video_modes.VIDEO_INPUT_MODE: "参考视频",
+        }.get(repair_mode, "视频输入")
+        repair_code = {
+            video_modes.FIRST_LAST_FRAME_MODE: "FIRST_LAST_FRAME_REPAIR_REQUIRED",
+            video_modes.REFERENCE_IMAGE_MODE: "REFERENCE_IMAGE_REPAIR_REQUIRED",
+            video_modes.VIDEO_INPUT_MODE: "VIDEO_INPUT_REPAIR_REQUIRED",
+        }.get(repair_mode, "VIDEO_INPUT_REPAIR_REQUIRED")
+        record = errors.log_error(
+            exc,
+            action="video_mode_input_repair",
+            context={
+                "shot_id": job["shot_id"],
+                "version_id": version["id"],
+                "job_id": job_id,
+                "mode": meta.get("mode"),
+            },
+        )
+        message = (
+            f"{repair_label}输入仍需修复：{exc}。本镜保持 "
+            f"{repair_mode}，"
+            "未切换生成方式，也未提交不合格输入。"
+            f"（{repair_code} · {record.error_id}）"
+        )
+        conn.execute(
+            """UPDATE jobs
+                  SET status='waiting_human',error=?,
+                      reason_code=?,
+                      reason_text=?,lease_owner=NULL,lease_expires_at=NULL,
+                      next_retry_at=NULL,updated_at=?
+                WHERE id=? AND lease_owner=?""",
+            (message, repair_code, message, now(), job_id, owner),
+        )
+        conn.execute(
+            "UPDATE shot_versions SET status='waiting_human',error=? WHERE id=?",
+            (message, version["id"]),
+        )
+        conn.execute(
+            """UPDATE shot_video_generation_plans
+                  SET status='waiting_asset',updated_at=?
+                WHERE id=?""",
+            (now(), str(meta.get("shot_plan_id") or "")),
+        )
+        conn.commit()
+        media_scheduler.settle_budget(job_id, 0.0, success=False)
+        mark_media_job_state(
+            _row_value(job, "run_id"),
+            _row_value(job, "step_run_id"),
+            "waiting_human",
+            message,
+        )
+        reconcile_episode_generation_status(job["episode_id"])
+        return
     except (ProviderError, Exception) as exc:  # noqa: BLE001 失败要响：原文进日志，前端给码+分类
         if not media_scheduler.renew_lease(job_id, owner, lease_seconds=180.0):
             return
-        public = errors.record_and_format(
+        record = errors.log_error(
             exc, action="shot_video_generate",
             context={"shot_id": job["shot_id"], "version_id": version["id"], "job_id": job_id})
+        guidance = (
+            _video_model_rejection_guidance(meta, str(exc))
+            if isinstance(exc, ProviderError)
+            else None
+        )
+        reason_code = guidance[0] if guidance else None
+        public = (
+            f"{guidance[1]}（{guidance[0]} · {record.error_id}）"
+            if guidance else record.public
+        )
         # 上游瞬时故障（超时/网络/限流/5xx）先 job 级延迟重排，扛过分钟级抖动；
         # 重试次数耗尽或不可重试的错误才永久判失败。
         if isinstance(exc, ProviderError) and _schedule_job_retry(
@@ -3059,52 +3498,24 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         ):
             _set_version(version["id"], status="queued")
             return
-        if isinstance(exc, ProviderError) and meta.get("shot_plan_id"):
-            from app.video_plan import create_fallback_plan_revision
-
-            fallback = create_fallback_plan_revision(
-                str(meta["shot_plan_id"]),
-                reason=str(exc),
-                conn=conn,
+        conn.execute(
+            """UPDATE video_generation_attempts
+                  SET status='failed',error=?,updated_at=?
+                WHERE version_id=? AND status='provider_running'""",
+            (str(exc)[:2000], now(), version["id"]),
+        )
+        if meta.get("shot_plan_id"):
+            conn.execute(
+                """UPDATE shot_video_generation_plans
+                      SET status='failed',updated_at=? WHERE id=?""",
+                (now(), str(meta["shot_plan_id"])),
             )
-            if fallback is not None:
-                conn.execute(
-                    """UPDATE video_generation_attempts
-                          SET status='failed',error=?,updated_at=?
-                        WHERE version_id=? AND status='provider_running'""",
-                    (str(exc)[:2000], now(), version["id"]),
-                )
-                conn.commit()
-                _set_version(
-                    version["id"], status="failed",
-                    error=f"计划模式失败，已显式降级为 {fallback.mode.value}：{public}",
-                )
-                if _set_job(
-                    job_id,
-                    "degraded",
-                    f"已创建计划 revision {fallback.plan_revision} 并改用 {fallback.mode.value}",
-                    lease_owner=owner,
-                ):
-                    media_scheduler.settle_budget(job_id, 0.0, success=False)
-                try:
-                    enqueue_shot(
-                        job["shot_id"],
-                        reroll=True,
-                        after_shot_id=fallback.depends_on_shot_id,
-                        dependency_snapshot=meta.get("review_dependency_snapshot"),
-                    )
-                except Exception as fallback_exc:  # noqa: BLE001
-                    errors.record_and_format(
-                        fallback_exc,
-                        action="video_mode_fallback_enqueue",
-                        context={
-                            "shot_id": job["shot_id"],
-                            "from_shot_plan_id": meta["shot_plan_id"],
-                            "to_shot_plan_id": fallback.shot_plan_id,
-                        },
-                    )
-                reconcile_episode_generation_status(job["episode_id"])
-                return
+        if reason_code:
+            conn.execute(
+                "UPDATE jobs SET reason_code=?,reason_text=? WHERE id=?",
+                (reason_code, public, job_id),
+            )
+        conn.commit()
         _set_version(version["id"], status="failed", error=public)
         if _set_job(job_id, "failed", public, lease_owner=owner):
             media_scheduler.settle_budget(job_id, 0.0, success=False)
@@ -3501,16 +3912,11 @@ def recover_media_jobs() -> int:
     return resumed
 
 
-def _degrade_orphaned_continuity_job(conn, row) -> bool:
-    """上游已无可恢复任务时，把连续镜降级为独立首帧并重新排队。"""
-    from app.compiler import CompileError, compile_prompt
-    from app.continuity import preflight_seedance_gates, shot_contract_dict
+def _block_orphaned_continuity_job(conn, row) -> bool:
+    """Keep the planned dependency and surface repair instead of degrading."""
     from app.media_pipeline import stages as media_stages
     from app.media_pipeline.scheduler import continuity_anchor_ready
     from app.media_pipeline.stage_state import set_pipeline_stage
-    from app.observability.metrics import inc
-    from app.portraits import bible_for_episode
-    from app.schemas import Bible, EpisodeScreenplay
 
     after_shot_id = row["after_shot_id"]
     if not after_shot_id or not row["version_id"]:
@@ -3522,20 +3928,10 @@ def _degrade_orphaned_continuity_job(conn, row) -> bool:
     if "人工" not in str(reason or "") and "不存在" not in str(reason or ""):
         return False
 
-    job = conn.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone()
     version = conn.execute(
         "SELECT * FROM shot_versions WHERE id=?", (row["version_id"],)
     ).fetchone()
-    shot_row = conn.execute(
-        "SELECT * FROM shots WHERE id=?", (row["shot_id"],)
-    ).fetchone()
-    ep = conn.execute(
-        "SELECT * FROM episodes WHERE id=?", (row["episode_id"],)
-    ).fetchone()
-    project = conn.execute(
-        "SELECT * FROM projects WHERE id=?", (row["project_id"],)
-    ).fetchone()
-    if not all((job, version, shot_row, ep, project)):
+    if version is None:
         return False
 
     try:
@@ -3544,224 +3940,56 @@ def _degrade_orphaned_continuity_job(conn, row) -> bool:
         planned_meta = {}
     shot_plan_id = str(planned_meta.get("shot_plan_id") or "")
     if shot_plan_id:
-        # Versioned plans own every mode/dependency change.  An unavailable
-        # upstream anchor is a semantic execution condition, not permission for
-        # this watchdog to rewrite the prompt and silently choose a default
-        # mode.  Advance the AI-authored finite fallback chain as a new plan
-        # revision, then enqueue a fresh version bound to that revision.
-        from app.video_plan import create_fallback_plan_revision
-
-        fallback_reason = (
-            "planned upstream continuity anchor is no longer recoverable: "
-            f"{reason or after_shot_id}"
-        )
-        fallback = create_fallback_plan_revision(
-            shot_plan_id,
-            reason=fallback_reason,
-            conn=conn,
-        )
-        if fallback is None:
-            message = "视频计划的上游依赖已失效，且没有经计划验证的可用降级模式"
-            conn.execute(
-                """UPDATE jobs
-                      SET status='waiting_human', error=?,
-                          reason_code='VIDEO_PLAN_FALLBACK_EXHAUSTED',
-                          reason_text=?, next_retry_at=NULL, updated_at=?
-                    WHERE id=?""",
-                (message, message, now(), row["id"]),
-            )
-            conn.execute(
-                "UPDATE shot_versions SET status='waiting_human',error=? WHERE id=?",
-                (message, row["version_id"]),
-            )
-            set_pipeline_stage(
-                row["id"],
-                media_stages.STAGE_WAITING_HUMAN,
-                reason_code="VIDEO_PLAN_FALLBACK_EXHAUSTED",
-                reason_text=message,
-                conn=conn,
-            )
-            conn.commit()
-            return False
-
-        note = (
-            f"上游依赖不可恢复，已创建计划 revision "
-            f"{fallback.plan_revision} 并切换为 {fallback.mode.value}"
+        message = (
+            "计划依赖的上一镜采用视频或真实尾帧当前不可恢复；"
+            "本镜保持原生成模式等待修复，系统未改用其他模式。"
         )
         conn.execute(
             """UPDATE jobs
-                  SET status='degraded', error=?, reason_code='PLANNED_FALLBACK_APPLIED',
-                      reason_text=?, next_retry_at=NULL, updated_at=?
+                  SET status='waiting_human',error=?,
+                      reason_code='VIDEO_PLAN_DEPENDENCY_REPAIR_REQUIRED',
+                      reason_text=?,next_retry_at=NULL,updated_at=?
                 WHERE id=?""",
-            (note, note, now(), row["id"]),
+            (message, message, now(), row["id"]),
         )
         conn.execute(
-            "UPDATE shot_versions SET status='failed',error=? WHERE id=?",
-            (note, row["version_id"]),
-        )
-        conn.commit()
-        try:
-            enqueue_shot(
-                row["shot_id"],
-                reroll=True,
-                after_shot_id=fallback.depends_on_shot_id,
-                dependency_snapshot=planned_meta.get("review_dependency_snapshot"),
-            )
-        except Exception as exc:  # noqa: BLE001 - persist actionable recovery state
-            message = f"计划降级版本已发布，但新任务入队失败：{exc}"
-            conn.execute(
-                """UPDATE jobs
-                      SET status='waiting_human', error=?,
-                          reason_code='VIDEO_PLAN_FALLBACK_ENQUEUE_FAILED',
-                          reason_text=?, updated_at=? WHERE id=?""",
-                (message, message, now(), row["id"]),
-            )
-            conn.commit()
-            return False
-        return True
-
-    shot = _load_shot_model(shot_row)
-    shot.continuity_mode = "same_scene_cut"
-    shot.continuity_from_prev = False
-    bible = bible_for_episode(
-        ep["project_id"],
-        Bible.model_validate(json.loads(project["bible_json"])),
-        ep["episode_no"],
-    )
-    screenplay = None
-    from app.production.screenplay_authority import (
-        episode_requires_immutable_screenplay_authority,
-        resolve_downstream_screenplay,
-    )
-
-    if episode_requires_immutable_screenplay_authority(ep, conn=conn):
-        # Modern recovery can lead to another provider submission and must
-        # consume the same immutable screenplay authority as normal generation.
-        screenplay = resolve_downstream_screenplay(
-            str(_row_value(ep, "id")), conn=conn,
-        ).screenplay
-    elif _row_value(ep, "screenplay_json"):
-        # Explicit legacy plan-null rows retain their historical timeout
-        # recovery; this branch cannot rewrite a typed narrative plan.
-        try:
-            screenplay = EpisodeScreenplay.model_validate_json(
-                _row_value(ep, "screenplay_json"),
-            )
-        except (TypeError, ValueError):
-            screenplay = None
-    outgoing = _outgoing_transition_context(conn, shot_row)
-    try:
-        prompt_text = compile_prompt(
-            shot,
-            bible,
-            with_refs=True,
-            from_scene=False,
-            chained=False,
-            critique=None,
-            prev_tail_action=None,
-            with_last_frame=False,
-            incoming_transition=None,
-            outgoing_transition=outgoing["transition"] if outgoing else None,
-            next_scene=outgoing["next_scene"] if outgoing else None,
-            next_first_frame_desc=outgoing["next_first_frame_desc"] if outgoing else None,
-            continuity_mode="same_scene_cut",
-            prev_state_out=None,
-            screenplay=screenplay,
-        )
-        prompt_text = ensure_source_excerpt_in_prompt(prompt_text, shot)
-        errors_found = preflight_seedance_gates(
-            shot,
-            prev=None,
-            prompt_text=prompt_text,
-            screenplay=screenplay,
-        )
-        if errors_found:
-            raise CompileError("；".join(errors_found))
-    except Exception as exc:
-        message = f"连续性自动降级未通过输入校验：{exc}"
-        conn.execute(
-            """UPDATE jobs SET status='waiting_human', error=?, reason_code=?,
-                      reason_text=?, next_retry_at=NULL, updated_at=?
-               WHERE id=? AND version_id=?""",
-            (
-                message, "VIDEO_CONTINUITY_DEGRADE_FAILED", message,
-                now(), row["id"], row["version_id"],
-            ),
+            "UPDATE shot_versions SET status='waiting_human',error=? WHERE id=?",
+            (message, row["version_id"]),
         )
         set_pipeline_stage(
             row["id"],
             media_stages.STAGE_WAITING_HUMAN,
-            reason_code="VIDEO_CONTINUITY_DEGRADE_FAILED",
+            reason_code="VIDEO_PLAN_DEPENDENCY_REPAIR_REQUIRED",
             reason_text=message,
             conn=conn,
         )
-        conn.execute(
-            "UPDATE shot_versions SET status='waiting_human', error=? WHERE id=?",
-            (message, row["version_id"]),
-        )
         conn.commit()
-        inc(
-            "video_continuity_degrade_failed_total",
-            episode_id=row["episode_id"],
-            shot_id=row["shot_id"],
-        )
-        return False
+        return True
 
-    try:
-        meta = json.loads(version["image_inputs"] or "{}")
-    except (TypeError, ValueError, json.JSONDecodeError):
-        meta = {}
-    refs = [
-        ref for ref in (meta.get("reference_images") or [])
-        if isinstance(ref, dict) and ref.get("type") != "previous_shot_frame"
-    ]
-    meta.update({
-        "after_shot_id": None,
-        "after_version_id": None,
-        "continuity_mode": "same_scene_cut",
-        "prev_state_out": None,
-        "continuity_degraded": True,
-        "continuity_degraded_reason": "upstream_anchor_unavailable_timeout",
-        "reference_images": refs,
-        "reference_generation_complete": False,
-        "continuity_anchor_ready": True,
-        "reference_group_gate_passed": False,
-        "video_input_manifest_frozen": False,
-        "shot_contract_json": json.dumps(shot_contract_dict(shot), ensure_ascii=False),
-    })
-    note = "上一镜已无可恢复尾帧，等待超时后已自动改为独立首帧继续生成"
-    conn.execute(
-        """UPDATE shot_versions
-           SET status='queued', error=NULL, prompt_text=?, image_inputs=?
-           WHERE id=?""",
-        (prompt_text, json.dumps(meta, ensure_ascii=False), row["version_id"]),
+    message = (
+        "历史连续性任务缺少可恢复的上一镜尾帧；系统未改写提示词、"
+        "未移除依赖，也未切换生成模式。请修复上游镜头后重新生成。"
     )
     conn.execute(
         """UPDATE jobs
-           SET status='queued', error=?, after_shot_id=NULL, after_version_id=NULL,
-               next_retry_at=?, reason_code='CONTINUITY_DEGRADED_TIMEOUT',
-               reason_text=?, lease_owner=NULL, lease_expires_at=NULL, updated_at=?
-           WHERE id=? AND version_id=? AND status IN ('queued','waiting_retry','waiting_human')""",
-        (note, now(), note, now(), row["id"], row["version_id"]),
+              SET status='waiting_human',error=?,
+                  reason_code='VIDEO_DEPENDENCY_REPAIR_REQUIRED',
+                  reason_text=?,next_retry_at=NULL,updated_at=?
+            WHERE id=?""",
+        (message, message, now(), row["id"]),
+    )
+    conn.execute(
+        "UPDATE shot_versions SET status='waiting_human',error=? WHERE id=?",
+        (message, row["version_id"]),
     )
     set_pipeline_stage(
         row["id"],
-        media_stages.STAGE_JOB_QUEUED,
-        reason_code="CONTINUITY_DEGRADED_TIMEOUT",
-        reason_text=note,
-        stage_progress={
-            "auto_recovery": "continuity_degraded",
-            "blocked_by_shot_id": after_shot_id,
-        },
+        media_stages.STAGE_WAITING_HUMAN,
+        reason_code="VIDEO_DEPENDENCY_REPAIR_REQUIRED",
+        reason_text=message,
         conn=conn,
     )
     conn.commit()
-    inc(
-        "video_continuity_degraded_timeout_total",
-        episode_id=row["episode_id"],
-        shot_id=row["shot_id"],
-        blocked_by_shot_id=after_shot_id,
-    )
     return True
 
 
@@ -3777,6 +4005,8 @@ def reconcile_stalled_video_jobs(limit: int = 50) -> dict[str, int]:
         "legacy_preflight_reactivated": 0,
         "preflight_retried": 0,
         "continuity_degraded": 0,
+        "dependency_repair_required": 0,
+        "budget_resumed": 0,
         "episodes_reconciled": 0,
     }
 
@@ -3895,8 +4125,22 @@ def reconcile_stalled_video_jobs(limit: int = 50) -> dict[str, int]:
     ))
     for row in continuity_rows:
         try:
-            if _degrade_orphaned_continuity_job(conn, row):
-                report["continuity_degraded"] += 1
+            if _block_orphaned_continuity_job(conn, row):
+                report["dependency_repair_required"] += 1
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+
+    paused_budget_episodes = conn.execute(
+        """SELECT DISTINCT episode_id FROM jobs
+           WHERE kind='video' AND status='paused_budget'
+             AND cancellation_requested=0 AND abandoned=0"""
+    ).fetchall()
+    for row in paused_budget_episodes:
+        try:
+            report["budget_resumed"] += retry_paused(str(row["episode_id"]))
         except Exception:
             try:
                 conn.rollback()
@@ -4061,28 +4305,39 @@ async def stop() -> None:
 
 
 def retry_paused(episode_id: str, *, job_id: str | None = None) -> int:
-    """成本上限调高后恢复预算暂停任务；可限定为一个明确的 job。"""
+    """Resume budget-paused work against the current user-approved cap."""
     conn = get_conn()
+    budget_limit = episode_video_budget_limit(episode_id)
     if job_id:
         rows = conn.execute(
-            """SELECT id, reserved_cost_cny, kind FROM jobs
-               WHERE episode_id=? AND id=? AND status='paused_budget'""",
+            """SELECT j.id,j.reserved_cost_cny,j.kind,s.duration_s
+                 FROM jobs j LEFT JOIN shots s ON s.id=j.shot_id
+                WHERE j.episode_id=? AND j.id=? AND j.status='paused_budget'""",
             (episode_id, job_id),
         ).fetchall()
     else:
         rows = conn.execute(
-            """SELECT id, reserved_cost_cny, kind FROM jobs
-               WHERE episode_id=? AND status='paused_budget'""",
+            """SELECT j.id,j.reserved_cost_cny,j.kind,s.duration_s
+                 FROM jobs j LEFT JOIN shots s ON s.id=j.shot_id
+                WHERE j.episode_id=? AND j.status='paused_budget'""",
             (episode_id,),
         ).fetchall()
     resumed = 0
     for r in rows:
         estimate = float(r["reserved_cost_cny"] or 0)
         if estimate <= 0:
-            estimate = config.IMAGE_PRICE_PER_UNIT if r["kind"] == "scene" else 1.0
+            estimate = (
+                config.IMAGE_PRICE_PER_UNIT
+                if r["kind"] == "scene"
+                else (
+                    shot_cost_cny(int(r["duration_s"] or 5))
+                    + config.IMAGE_PRICE_PER_UNIT
+                    * video_modes.estimated_keyframe_generation_count()
+                )
+            )
         if media_scheduler.reserve_budget(
             r["id"], episode_id, estimate,
-            float(get_setting("episode_cost_limit_cny") or 100), conn=conn,
+            budget_limit, conn=conn,
         ):
             changed = conn.execute(
                 """UPDATE jobs SET status='queued', error=NULL, next_retry_at=NULL, updated_at=?

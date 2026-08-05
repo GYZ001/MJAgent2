@@ -3673,6 +3673,23 @@ def _public_shot_versions(conn, shot_id: str, *, include_inputs: bool) -> list[d
         version.pop("qa_json", None)
         meta = json.loads(version.get("image_inputs") or "{}") if include_inputs else {}
         inputs_omitted = bool(version.pop("image_inputs_omitted", 0))
+        boundary_contract = (
+            meta.get("boundary_pair_qa")
+            if isinstance(meta.get("boundary_pair_qa"), dict)
+            else {}
+        )
+        upstream_video_url = None
+        upstream_video_revision = str(
+            meta.get("upstream_adopted_video_revision") or ""
+        )
+        if upstream_video_revision:
+            upstream_video = conn.execute(
+                """SELECT video_path FROM shot_versions
+                   WHERE id=? AND status='succeeded'""",
+                (upstream_video_revision,),
+            ).fetchone()
+            if upstream_video:
+                upstream_video_url = _media_url(upstream_video["video_path"])
         refs = [
             _public_reference_image(ref)
             for ref in (meta.get("reference_images") or [])
@@ -3683,12 +3700,16 @@ def _public_shot_versions(conn, shot_id: str, *, include_inputs: bool) -> list[d
         version["image_inputs"] = {
             "first_frame_used": bool(meta.get("first_frame_used")),
             "first_frame_src": meta.get("first_frame_src"),
+            "first_frame_source": boundary_contract.get("first_frame_source"),
             "first_frame_scene_id": meta.get("first_frame_scene_id"),
             "first_frame_image_url": _media_url(meta.get("first_frame_path")),
             "last_frame_used": bool(meta.get("last_frame_used")),
             "last_frame_src": meta.get("last_frame_src"),
+            "last_frame_source": boundary_contract.get("last_frame_source"),
             "last_frame_scene_id": meta.get("last_frame_scene_id"),
             "last_frame_image_url": _media_url(meta.get("last_frame_path")),
+            "video_input_url": upstream_video_url or meta.get("video_input_url"),
+            "video_input_source_revision_id": upstream_video_revision or None,
             "mode": meta.get("mode"),
             "mode_decision": meta.get("mode_decision"),
             "reference_image_used": bool(meta.get("reference_image_used")),
@@ -3958,7 +3979,9 @@ def episode_detail(episode_id: str, view: str | None = None):
         _apply_contract_to_public_shot(s)
         from app.continuity import information_items_for_shot
         s["new_information_items"] = information_items_for_shot(s, script)
-        s["est_cost_cny"] = shot_cost_cny(s["duration_s"])
+        from app.video_cost_model import initial_shot_generation_cost
+
+        s["est_cost_cny"] = initial_shot_generation_cost(s["duration_s"])
         if s.get("storyboard_artifact_id") and (full or view == "board"):
             shot_artifact = evidence_repository.get_artifact(s["storyboard_artifact_id"])
             if shot_artifact:
@@ -4094,7 +4117,9 @@ def shot_review_detail(shot_id: str):
             else:
                 screenplay = _load_screenplay(dict(episode_row))
     shot["new_information_items"] = information_items_for_shot(shot, screenplay)
-    shot["est_cost_cny"] = shot_cost_cny(shot["duration_s"])
+    from app.video_cost_model import initial_shot_generation_cost
+
+    shot["est_cost_cny"] = initial_shot_generation_cost(shot["duration_s"])
     shot["video_stale"] = _shot_video_is_stale(
         conn, shot, episode_row["storyboard_artifact_id"] if episode_row else None
     )

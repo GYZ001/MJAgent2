@@ -113,6 +113,60 @@ def test_short_primary_action_uses_complete_action_desc_for_generation() -> None
     )
 
 
+def test_silent_shot_cannot_require_character_to_invent_dialogue() -> None:
+    shot = _shot(
+        action_desc="林风看向苏婉，开口主动和她打招呼。",
+        primary_action="林风开口打招呼并等待回应。",
+        first_frame_desc="林风看向苏婉，嘴唇微张准备说话。",
+        last_frame_desc="同一机位，林风刚说完话，等待苏婉回应。",
+        dialogues=[],
+        audio_timeline=[],
+    )
+
+    errors = preflight_seedance_gates(shot)
+
+    assert any("禁止让视频模型自行发明台词" in error for error in errors)
+    with pytest.raises(CompileError, match="没有有效 dialogues/audio_timeline"):
+        compile_prompt(shot, _bible())
+
+
+def test_silent_prompt_explicitly_forbids_speech_and_lip_motion() -> None:
+    prompt = compile_prompt(_shot(), _bible())
+
+    assert "所有人物全程闭口，不做说话口型" in prompt
+    assert "不得自行补充问候、应答、语气词" in prompt
+
+
+def test_first_last_prompt_uses_real_boundary_contract_and_moving_camera() -> None:
+    shot = _shot(
+        shot_no=3,
+        action_desc="苏婉转身看向林风，抬手指向山门。",
+        primary_action="苏婉转身并抬手指向山门。",
+        first_frame_desc="苏婉站在山门右侧，双手自然垂下。",
+        last_frame_desc="苏婉仍在山门右侧，右手已经指向铜环。",
+        state_in="苏婉站在山门右侧，尚未动作。",
+        state_out="苏婉右手已经指向铜环。",
+        characters=["苏婉"],
+        characters_visible=["苏婉"],
+    )
+
+    prompt = compile_prompt(
+        shot,
+        _bible(),
+        video_generation_mode="FIRST_LAST_FRAME_MODE",
+        first_frame_source="PREVIOUS_STATIC_TAIL",
+        boundary_relation_edit="reverse_angle",
+        boundary_relation_action="starts_new_action",
+        boundary_start_state="林风独自站在山门左侧，刚收回按住铜环的右手。",
+    )
+
+    assert "first_frame 是上一镜已冻结的静态尾帧" in prompt
+    assert "[FIRST-LAST CONTINUOUS PATH]" in prompt
+    assert "林风独自站在山门左侧" in prompt
+    assert "平稳横摇并小幅弧形绕拍" in prompt
+    assert "不要沿用上一镜完整构图或主体尾帧姿势" not in prompt
+
+
 def test_only_action_continuation_uses_previous_tail_frame() -> None:
     expected = {
         "action_continuation": True,

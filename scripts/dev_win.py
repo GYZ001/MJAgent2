@@ -128,12 +128,26 @@ def _start() -> tuple[subprocess.Popen[bytes], subprocess.Popen[bytes]]:
         "127.0.0.1",
         "--port",
         "8230",
+        "--timeout-keep-alive",
+        "1",
+        "--timeout-graceful-shutdown",
+        "3",
     ]
     backend_reload = os.environ.get("MJ_BACKEND_RELOAD", "").strip().lower() in {
         "1", "true", "yes", "on",
     }
     if backend_reload:
-        backend_args.extend(["--reload", "--reload-dir", "app"])
+        backend_args.extend([
+            "--reload",
+            "--reload-dir",
+            "app",
+            "--reload-exclude",
+            "__pycache__",
+            "--reload-exclude",
+            "*.pyc",
+            "--reload-delay",
+            "2",
+        ])
     b = subprocess.Popen(
         backend_args,
         cwd=str(ROOT),

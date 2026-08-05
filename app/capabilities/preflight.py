@@ -306,7 +306,7 @@ def video_clear_shot(args) -> PreflightResult:
 
 
 def video_generate_shot(args) -> PreflightResult:
-    from app.compiler import shot_cost_cny
+    from app.video_cost_model import initial_shot_generation_cost
 
     conn = get_conn()
     shot = conn.execute(
@@ -328,7 +328,7 @@ def video_generate_shot(args) -> PreflightResult:
         "SELECT id, status, episode_no FROM episodes WHERE id=?", (shot["episode_id"],)
     ).fetchone()
     confirmed = bool(ep and ep["status"] in {"confirmed", "generating", "done", "mixed"})
-    estimated = float(shot_cost_cny(int(shot["duration_s"] or 0)))
+    estimated = initial_shot_generation_cost(float(shot["duration_s"] or 0))
     return PreflightResult(
         command="video.generate_shot",
         allowed=True,
@@ -355,7 +355,7 @@ def video_generate_shot(args) -> PreflightResult:
 
 
 def video_generate_episode(args) -> PreflightResult:
-    from app.compiler import shot_cost_cny
+    from app.video_cost_model import initial_shot_generation_cost
 
     conn = get_conn()
     ep = conn.execute(
@@ -410,7 +410,7 @@ def video_generate_episode(args) -> PreflightResult:
         (args.episode_id,),
     ).fetchall()
     estimated = round(sum(
-        shot_cost_cny(int(row["duration_s"] or 0))
+        initial_shot_generation_cost(float(row["duration_s"] or 0))
         for row in payable_rows
     ), 2)
     confirmed = ep["status"] in {"confirmed", "generating", "done", "mixed"}

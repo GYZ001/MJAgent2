@@ -133,10 +133,12 @@ def test_dependency_dag_keeps_independent_shots_parallel() -> None:
             _shot(
                 2,
                 VideoGenerationMode.FIRST_LAST_FRAME_MODE,
+                depends_on="SH-1",
                 required_assets=[
                     PlanAssetRequirement(
                         role="first_frame",
-                        source=AssetSource.STATIC_BOUNDARY_ASSET,
+                        source=AssetSource.PREVIOUS_ADOPTED_TAIL,
+                        source_shot_id="SH-1",
                     ),
                     PlanAssetRequirement(
                         role="last_frame",
@@ -146,15 +148,17 @@ def test_dependency_dag_keeps_independent_shots_parallel() -> None:
             ),
             _shot(
                 3,
-                VideoGenerationMode.VIDEO_INPUT_MODE,
-                depends_on="SH-1",
-                intent=VideoInputIntent.MOTION_REFERENCE,
+                VideoGenerationMode.FIRST_LAST_FRAME_MODE,
                 required_assets=[
                     PlanAssetRequirement(
-                        role="previous_adopted_video",
-                        source=AssetSource.PREVIOUS_ADOPTED_VIDEO,
-                        source_shot_id="SH-1",
-                    )
+                        role="first_frame",
+                        source=AssetSource.PREVIOUS_STATIC_TAIL,
+                        source_shot_id="SH-2",
+                    ),
+                    PlanAssetRequirement(
+                        role="last_frame",
+                        source=AssetSource.STATIC_BOUNDARY_ASSET,
+                    ),
                 ],
             ),
         ],
@@ -163,8 +167,10 @@ def test_dependency_dag_keeps_independent_shots_parallel() -> None:
     result = _validate_plan(plan, conn, _snapshot())
 
     assert result.shots[0].mode == VideoGenerationMode.REFERENCE_IMAGE_MODE
-    assert result.shots[1].depends_on_shot_id is None
-    assert result.shots[2].depends_on_shot_id == "s1"
+    assert result.shots[1].depends_on_shot_id == "s1"
+    assert result.shots[2].depends_on_shot_id is None
+    assert result.shots[2].required_assets[0].source == AssetSource.PREVIOUS_STATIC_TAIL
+    assert result.shots[2].required_assets[0].source_shot_id == "s2"
     assert result.safe_parallelism_ratio == pytest.approx(2 / 3, abs=0.001)
     assert result.critical_path_latency_ms == 200
 

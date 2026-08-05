@@ -51,7 +51,7 @@ AUDIO_TIMELINE_TYPES = {
     "ambient_sound",
 }
 
-PROMPT_CONTRACT_VERSION = "seedance_structured_continuity_v4"
+PROMPT_CONTRACT_VERSION = "seedance_structured_continuity_v5"
 
 # 主线节拍 ID（S*）与剧本事件 ID（E*）长得像但语义不同，历史数据把 S07 写进了 story_event_id。
 # 这两个正则是四类 ID 分离（PRD VAL-422 §4.4.1）的判定底座。
