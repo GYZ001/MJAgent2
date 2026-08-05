@@ -471,6 +471,10 @@ async def _post_json(client: httpx.AsyncClient, url: str, payload: dict, *,
         # receive the same durable operation identifier in observability metadata.
         req_headers["Idempotency-Key"] = idempotency_key
     request_bytes = _request_size_bytes(payload)
+    harness_text_request = bool(
+        kind == "chat"
+        and (merged_meta or {}).get("gateway") == "execution_harness"
+    )
     for attempt in range(retries + 1):
         start = time.time()
         attempt_meta = {
@@ -498,6 +502,8 @@ async def _post_json(client: httpx.AsyncClient, url: str, payload: dict, *,
                         response_json={"status_code": 200, "body": snippet},
                     )
                     last_err = err
+                    if harness_text_request:
+                        raise err
                     continue
                 finish_provider_call(call_id, "OK", 200, latency, response_json=data)
                 return data
@@ -510,11 +516,7 @@ async def _post_json(client: httpx.AsyncClient, url: str, payload: dict, *,
             last_err = err
             # Harness 已为文本模型提供分钟级指数退避。429 若仍在 adapter 内按
             # 1.5s/3s 立即重放，只会在同一个 TPM 窗口连续失败，并放大限流。
-            if (
-                resp.status_code == 429
-                and kind == "chat"
-                and (merged_meta or {}).get("gateway") == "execution_harness"
-            ):
+            if harness_text_request:
                 raise err
         except ProviderError:
             raise
@@ -531,16 +533,14 @@ async def _post_json(client: httpx.AsyncClient, url: str, payload: dict, *,
             # 立即交给上层：图生图可快速降级为无种子生成，VLM 则明确失败。
             # Harness 文本请求的 read timeout 也必须交给外层分钟级退避：
             # 服务端可能仍在生成，adapter 立即重放会制造并行幽灵请求并吃满 TPM。
-            if phase == "write" or (
-                phase == "read"
-                and kind == "chat"
-                and (merged_meta or {}).get("gateway") == "execution_harness"
-            ):
+            if phase == "write" or harness_text_request:
                 raise last_err
         except httpx.HTTPError as exc:
             latency = int((time.time() - start) * 1000)
             last_err = ProviderError(f"网络错误：{exc}", retryable=True)
             finish_provider_call(call_id, "NETWORK_ERROR", None, latency, error=str(exc))
+            if harness_text_request:
+                raise last_err
         except Exception as exc:
             latency = int((time.time() - start) * 1000)
             finish_provider_call(call_id, "FAILED", None, latency, error=str(exc))
@@ -563,8 +563,14 @@ async def _post_bailian_chat_with_fallback(client: httpx.AsyncClient, payload: d
     for candidate in models:
         attempt_payload = {**payload, "model": candidate}
         try:
-            data = await _post_json(client, url, attempt_payload, kind=log_kind, model=candidate,
-                                    headers=headers, key_name="BAILIAN_API_KEY", meta=meta)
+            data = _cached_successful_provider_response(
+                log_kind, candidate, attempt_payload, meta,
+            )
+            if data is None:
+                data = await _post_json(
+                    client, url, attempt_payload, kind=log_kind, model=candidate,
+                    headers=headers, key_name="BAILIAN_API_KEY", meta=meta,
+                )
             return data, candidate
         except ProviderError as exc:
             _remember_bailian_failure(fallback_kind, candidate)
@@ -628,8 +634,12 @@ async def _chat_with_reasoning_fallback(client: httpx.AsyncClient, url: str, pay
                                      kind: str, model: str, headers: dict | None, key_name: str,
                                      temperature: float, call_meta: dict | None = None) -> str:
     """封装推理模型的降级重试逻辑：若首轮因推理过长导致 content 为空，则关闭推理重试一次。"""
-    data = await _post_json(client, url, payload, kind=kind, model=model,
-                            headers=headers, key_name=key_name, meta=call_meta)
+    data = _cached_successful_provider_response(kind, model, payload, call_meta)
+    if data is None:
+        data = await _post_json(
+            client, url, payload, kind=kind, model=model,
+            headers=headers, key_name=key_name, meta=call_meta,
+        )
     content = _chat_content(data, label=kind)
     if not content.strip() and _reasoning_used_all_output_budget(data):
         # 思考过长时重试；移除 OpenRouter reasoning 参数，使用普通生成。

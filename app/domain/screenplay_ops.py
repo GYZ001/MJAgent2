@@ -500,7 +500,7 @@ def recover_screenplay_tasks() -> int:
             )
             retry_status = "repairing" if row["screenplay_status"] == "repairing" else "failed"
             retry_hint = (
-                "局部修复恢复点已保留，请点击「继续局部修复」"
+                "工作副本已保留，请点击「继续剧本流程」"
                 if retry_status == "repairing"
                 else "原文与约束已保留，请重新发起首版剧本"
             )
@@ -2274,6 +2274,7 @@ async def edit_screenplay(episode_id: str, body: dict):
             contract_version=contract_version,
             qa_profile_version="screenplay-qa-gate-2",
             resume=False,
+            sync_episode_pointer=False,
         )
         candidate = evidence_repository.create_artifact(
             EvidenceArtifact(

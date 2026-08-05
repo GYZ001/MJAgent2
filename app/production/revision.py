@@ -255,6 +255,7 @@ def ensure_production_revision(
     qa_profile_version: str = "",
     grant_id: str | None = None,
     resume: bool = True,
+    sync_episode_pointer: bool = True,
 ) -> ProductionRevision:
     """获取或创建 active revision。resume=True 时复用已有 active；False 时归档旧的并新建。"""
     ensure_production_revisions_table()
@@ -283,16 +284,13 @@ def ensure_production_revision(
             contract_version, qa_profile_version, grant_id, stamp, stamp,
         ),
     )
-    # 同步 episode 指针
-    col = (
-        "screenplay_production_revision_id"
-        if kind == "screenplay"
-        else "storyboard_production_revision_id"
-    )
-    try:
+    if sync_episode_pointer:
+        col = (
+            "screenplay_production_revision_id"
+            if kind == "screenplay"
+            else "storyboard_production_revision_id"
+        )
         conn.execute(f"UPDATE episodes SET {col}=? WHERE id=?", (revision_id, episode_id))
-    except Exception:  # noqa: BLE001 — 列可能尚未迁移
-        pass
     conn.commit()
     return get_production_revision(revision_id)  # type: ignore[return-value]
 
@@ -429,30 +427,26 @@ def set_published_artifact(
     kind = row["kind"]
     episode_id = row["episode_id"]
     if kind == "screenplay":
-        try:
-            db.execute(
-                "UPDATE episodes SET published_screenplay_artifact_id=?, "
-                "working_screenplay_artifact_id=?, screenplay_artifact_id=?, "
-                "screenplay_completion_certificate_id=? WHERE id=?",
-                (artifact_id, artifact_id, artifact_id, certificate_id, episode_id),
-            )
-        except Exception:  # noqa: BLE001
-            db.execute(
-                "UPDATE episodes SET screenplay_artifact_id=? WHERE id=?",
-                (artifact_id, episode_id),
-            )
+        db.execute(
+            "UPDATE episodes SET published_screenplay_artifact_id=?, "
+            "working_screenplay_artifact_id=?, screenplay_artifact_id=?, "
+            "screenplay_completion_certificate_id=?, "
+            "screenplay_production_revision_id=? WHERE id=?",
+            (
+                artifact_id, artifact_id, artifact_id, certificate_id,
+                revision_id, episode_id,
+            ),
+        )
     else:
-        try:
-            db.execute(
-                "UPDATE episodes SET published_storyboard_artifact_id=?, "
-                "working_storyboard_artifact_id=?, storyboard_artifact_id=?, "
-                "storyboard_completion_certificate_id=? WHERE id=?",
-                (artifact_id, artifact_id, artifact_id, certificate_id, episode_id),
-            )
-        except Exception:  # noqa: BLE001
-            db.execute(
-                "UPDATE episodes SET storyboard_artifact_id=? WHERE id=?",
-                (artifact_id, episode_id),
-            )
+        db.execute(
+            "UPDATE episodes SET published_storyboard_artifact_id=?, "
+            "working_storyboard_artifact_id=?, storyboard_artifact_id=?, "
+            "storyboard_completion_certificate_id=?, "
+            "storyboard_production_revision_id=? WHERE id=?",
+            (
+                artifact_id, artifact_id, artifact_id, certificate_id,
+                revision_id, episode_id,
+            ),
+        )
     if commit:
         db.commit()

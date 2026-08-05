@@ -21,7 +21,7 @@ async def generate(args: I.ScreenplayGenerateInput) -> CommandResult:
         return outcome
     run_id = outcome.get("run_id")
     return succeeded(
-        "可交付剧本生产已启动（一次 Baseline + 局部自愈）",
+        "可交付剧本流程已启动（人物识别 → 一次 Baseline → 结构校验 → 评分 → 发布）",
         data=outcome,
         run_id=run_id,
         resource_uris=[f"manju://runs/{run_id}"] if run_id else [],
@@ -36,7 +36,7 @@ async def resume(args: I.ScreenplayResumeInput) -> CommandResult:
         return outcome
     run_id = outcome.get("run_id")
     return succeeded(
-        "剧本工作副本已继续执行局部修复（不会再次整版生成）",
+        "剧本工作副本已继续执行结构校验、评分与发布（不会再次整版生成）",
         data=outcome,
         run_id=run_id,
         resource_uris=[f"manju://runs/{run_id}"] if run_id else [],

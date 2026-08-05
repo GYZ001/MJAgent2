@@ -122,6 +122,33 @@ def test_harness_chat_read_timeout_is_not_immediately_replayed(monkeypatch) -> N
     assert attempts == 1
 
 
+def test_harness_chat_network_error_has_single_adapter_attempt(monkeypatch) -> None:
+    attempts = 0
+
+    class NetworkErrorClient:
+        async def post(self, url, *, json, headers):
+            nonlocal attempts
+            attempts += 1
+            raise httpx.ConnectError("connection reset")
+
+    monkeypatch.setattr(hiagent, "start_provider_call", lambda *_args, **_kwargs: 7)
+    monkeypatch.setattr(hiagent, "finish_provider_call", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(hiagent.ProviderError, match="网络错误"):
+        asyncio.run(hiagent._post_json(
+            NetworkErrorClient(),
+            "https://example.invalid/chat",
+            {"messages": []},
+            kind="chat",
+            model="test-model",
+            headers={"x": "y"},
+            retries=2,
+            meta={"gateway": "execution_harness"},
+        ))
+
+    assert attempts == 1
+
+
 def test_harness_chat_429_is_not_immediately_replayed(monkeypatch) -> None:
     attempts = 0
 

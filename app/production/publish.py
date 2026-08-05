@@ -134,10 +134,9 @@ def publish_screenplay(
         "SELECT screenplay_artifact_id FROM episodes WHERE id=?", (episode_id,)
     ).fetchone()
     previous_artifact_id = previous["screenplay_artifact_id"] if previous else None
-    # 仅在此刻清空下游（修订发布）；首次无下游时 noop
+    # 在发布事务中先切断下游权威指针。旧镜头/文件的物理清理必须在
+    # 新剧本提交后执行；否则发布后半段失败会同时丢失旧下游和新发布。
     if clear_downstream:
-        from app import worker
-        worker.delete_episode_shots(episode_id)
         conn.execute(
             """UPDATE episodes SET storyboard_outline_json=NULL, storyboard_artifact_id=NULL,
                       storyboard_warning=NULL, published_storyboard_artifact_id=NULL,
@@ -175,6 +174,14 @@ def publish_screenplay(
     consume_completion_certificate(cert.certificate_id, conn=conn, commit=False)
     conn.execute("DELETE FROM screenplay_drafts WHERE episode_id=?", (episode_id,))
     conn.commit()
+    downstream_cleanup_error = None
+    if clear_downstream:
+        try:
+            from app import worker
+
+            worker.delete_episode_shots(episode_id)
+        except Exception as exc:  # noqa: BLE001 - published authority remains valid
+            downstream_cleanup_error = str(exc)
     if previous_artifact_id and previous_artifact_id != artifact_id:
         from app.evidence import repository as evidence_repository
         evidence_repository.invalidate_descendants(
@@ -182,12 +189,16 @@ def publish_screenplay(
             f"上游剧本已由 {artifact_id} 替代",
             exclude_ids={artifact_id},
         )
-    return {
+    result = {
         "episode_id": episode_id,
         "artifact_id": artifact_id,
         "certificate_id": cert.certificate_id,
         "status": "ready",
     }
+    if downstream_cleanup_error:
+        result["downstream_cleanup_pending"] = True
+        result["downstream_cleanup_error"] = downstream_cleanup_error
+    return result
 
 
 def publish_storyboard(
