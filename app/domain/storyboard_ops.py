@@ -2662,7 +2662,7 @@ async def clear_storyboard_projection(episode_id: str) -> dict:
             conn.execute(
                 """UPDATE artifacts SET status='rejected',
                        stale_reason=COALESCE(stale_reason,'用户已清空分镜工作区')
-                   WHERE type='storyboard_supervisor_checkpoint'
+                   WHERE type IN ('storyboard_supervisor_checkpoint','storyboard_outline')
                      AND scope_type='episode' AND scope_id=?
                      AND status IN ('candidate','validated','approved')""",
                 (episode_id,),
