@@ -32,6 +32,8 @@ def test_ordinary_portrait_prompt_keeps_standard_model_sheet_pose() -> None:
     assert "正面站立，中性表情，双臂自然下垂" in prompt
     assert "鞋底均不得贴边或出画" in prompt
     assert "8% 安全边距" in prompt
+    assert "明显动画化比例和非照片级卡通渲染材质" in prompt
+    assert "不得生成可误认成真人照片的写实人脸" in prompt
     assert "禁止额外火焰、斗气光环" in prompt
 
 
@@ -63,6 +65,20 @@ def test_production_anchor_removes_behavior_and_subjective_identity_claims() -> 
     production_anchor = production_appearance_anchor(anchor)
 
     assert production_anchor == "40岁男性，短发，身材微胖，深色西装配白衬衫"
+
+
+def test_production_anchor_removes_sexualized_body_and_hosiery_emphasis() -> None:
+    anchor = (
+        "24岁女性，黑色长发，杏眼秀眉，身材丰满修长，"
+        "常穿简约通勤衬衫配及膝裙、丝袜、高跟鞋"
+    )
+
+    production_anchor = production_appearance_anchor(anchor)
+
+    assert production_anchor == (
+        "24岁女性，黑色长发，杏眼秀眉，"
+        "常穿简约通勤衬衫配及膝裙、高跟鞋"
+    )
 
 
 def test_multiview_prompt_uses_latest_edited_portrait_prompt() -> None:

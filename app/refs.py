@@ -74,7 +74,11 @@ _NON_STATIC_APPEARANCE_RE = re.compile(
     r"色欲|算计感|侵略感|迂腐|猥琐|含春|撩人|志在必得)",
 )
 _NON_NEUTRAL_CLOTHING_RE = re.compile(
-    r"(?:露肤|露腰|暴露|低领|深V|透视|镂空|吊带|超短|高开衩)",
+    r"(?:露肤|露腰|暴露|低领|深V|透视|镂空|吊带|超短|高开衩|丝袜|网袜|吊袜)",
+    re.IGNORECASE,
+)
+_SEXUALIZED_BODY_EMPHASIS_RE = re.compile(
+    r"(?:身材|体型|身体|曲线)[^，,；;。]*(?:丰满|丰腴|性感|凹凸|曲线)",
     re.IGNORECASE,
 )
 _APPEARANCE_LIST_PREFIX_RE = re.compile(
@@ -83,6 +87,10 @@ _APPEARANCE_LIST_PREFIX_RE = re.compile(
 _PORTRAIT_CLOTHING_CONTRACT = (
     "常规角色设定图着装，服装面料不透明并完整覆盖身体，"
     "重点呈现面部、发型、外层服装和可见配饰"
+)
+_PORTRAIT_PRIVACY_SAFE_STYLE = (
+    "人物面部与皮肤必须采用明显动画化比例和非照片级卡通渲染材质，"
+    "保持虚构角色辨识度但不得生成可误认成真人照片的写实人脸"
 )
 PRODUCTION_APPEARANCE_MIN_CHARS = 20
 PRODUCTION_APPEARANCE_MAX_CHARS = 80
@@ -94,6 +102,7 @@ def contains_non_production_appearance(anchor: str) -> bool:
         or _CLOTHING_HIDDEN_SKIN_MARK_RE.search(anchor or "")
         or _NON_STATIC_APPEARANCE_RE.search(anchor or "")
         or _NON_NEUTRAL_CLOTHING_RE.search(anchor or "")
+        or _SEXUALIZED_BODY_EMPHASIS_RE.search(anchor or "")
     )
 
 
@@ -113,7 +122,7 @@ def production_appearance_anchor(anchor: str) -> str:
         items_text = match.group("items") if match else clause
         items = [
             item.strip()
-            for item in re.split(r"[、与和及]+", items_text)
+            for item in re.split(r"(?:[、与和]|及(?!膝))+", items_text)
             if item.strip() and not contains_non_production_appearance(item)
         ]
         if items:
@@ -173,7 +182,7 @@ def portrait_prompt(visual_style: str, anchor: str) -> str:
         f"{style}。全身角色立绘定妆照：{body}。"
         "正面站立，中性表情，双臂自然下垂，纯浅米色背景，全身完整可见。"
         "头顶、肩臂和鞋底均不得贴边或出画，主体四周保留至少 8% 安全边距。"
-        f"{_PORTRAIT_CLOTHING_CONTRACT}。"
+        f"{_PORTRAIT_CLOTHING_CONTRACT}。{_PORTRAIT_PRIVACY_SAFE_STYLE}。"
         "仅保留锚点明确要求的特效，禁止额外火焰、斗气光环、文字、水印和 logo"
     )
 
