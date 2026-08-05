@@ -47,6 +47,9 @@ def storyboard_authority_projection(
     from app.continuity import PROMPT_CONTRACT_VERSION
 
     for shot in payload.get("shots") or []:
+        # QA/display annotations are mutable sidecar evidence. They must never
+        # revoke an immutable storyboard release or trigger paid regeneration.
+        shot.pop("risk_tags", None)
         if not shot.get("prompt_contract_version"):
             shot["prompt_contract_version"] = PROMPT_CONTRACT_VERSION
     return payload

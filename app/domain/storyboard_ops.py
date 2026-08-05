@@ -1203,13 +1203,118 @@ async def _storyboard_task(
             and ep["storyboard_completion_certificate_id"]
         )
         if resume and published_storyboard_authority:
-            raise StageError(
-                "分镜脚本",
-                [
-                    "当前叙事分镜已原子发布，不能在正式 shots 上原地续跑；"
-                    "请创建语义修订候选，通过整板验证与冷观众盲审后重新发布"
-                ],
+            rows = conn.execute(
+                "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
+                (episode_id,),
+            ).fetchall()
+            board = _board_from_shot_rows(rows, ep["episode_no"])
+            from app.production.certificate import (
+                verify_current_storyboard_completion_authority,
             )
+
+            verify_current_storyboard_completion_authority(
+                episode=ep,
+                current_storyboard_content=board.model_dump(mode="json"),
+            )
+            p = conn.execute(
+                "SELECT * FROM projects WHERE id=?",
+                (ep["project_id"],),
+            ).fetchone()
+            bible = _project_bible_or_placeholder(p)
+            from app.identity_contracts import (
+                canonicalize_storyboard_operational_identities,
+            )
+
+            identity_repairs = canonicalize_storyboard_operational_identities(
+                board,
+                bible,
+                screenplay,
+            )
+            if not identity_repairs or ep["status"] in {
+                "confirmed", "generating", "done", "mixed",
+            }:
+                raise StageError(
+                    "分镜脚本",
+                    [
+                        "当前叙事分镜已原子发布，不能在正式 shots 上原地续跑；"
+                        "请创建语义修订候选并重新发布"
+                    ],
+                )
+            old_artifact_id = str(ep["published_storyboard_artifact_id"])
+            old_revision_id = str(ep["storyboard_production_revision_id"] or "")
+            stamp = now()
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                if old_revision_id:
+                    conn.execute(
+                        """UPDATE production_revisions
+                              SET status='superseded',updated_at=?
+                            WHERE id=? AND status='published'
+                              AND published_artifact_id=?""",
+                        (stamp, old_revision_id, old_artifact_id),
+                    )
+                conn.execute(
+                    """UPDATE artifacts
+                          SET status='superseded',
+                              stale_reason='deterministic_identity_projection_rebind'
+                        WHERE id=? AND status IN ('validated','approved')""",
+                    (old_artifact_id,),
+                )
+                conn.execute(
+                    """UPDATE episodes
+                          SET storyboard_artifact_id=NULL,
+                              working_storyboard_artifact_id=NULL,
+                              published_storyboard_artifact_id=NULL,
+                              storyboard_completion_certificate_id=NULL,
+                              storyboard_production_revision_id=NULL,
+                              narrative_status='needs_review',
+                              narrative_review_artifact_id=NULL,
+                              narrative_calibration_artifact_id=NULL
+                        WHERE id=? AND status='scripted'
+                          AND published_storyboard_artifact_id=?
+                          AND storyboard_completion_certificate_id=?""",
+                    (
+                        episode_id,
+                        old_artifact_id,
+                        ep["storyboard_completion_certificate_id"],
+                    ),
+                )
+                if conn.execute("SELECT changes() AS c").fetchone()["c"] != 1:
+                    raise RuntimeError("分镜身份修订撤下旧发布指针发生并发冲突")
+                from app.storyboard_supervisor import _write_shot_fields
+
+                for row, shot in zip(rows, board.shots):
+                    _write_shot_fields(
+                        conn,
+                        str(row["id"]),
+                        shot,
+                        None,
+                        narrative_authority=True,
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            _ensure_current_storyboard_shot_artifacts(
+                conn,
+                episode_id,
+                board,
+            )
+            conn.commit()
+            _preflight_event(
+                "STORYBOARD_IDENTITY_PROJECTION_REVISION_CREATED",
+                "已撤下未确认旧版并创建确定性身份修订工作投影",
+                payload={
+                    "old_artifact_id": old_artifact_id,
+                    "old_revision_id": old_revision_id,
+                    "repairs": identity_repairs,
+                },
+            )
+            ep = conn.execute(
+                "SELECT * FROM episodes WHERE id=?",
+                (episode_id,),
+            ).fetchone()
+            published_storyboard_authority = False
         conn.execute("UPDATE episodes SET status='scripting', script_error=NULL, storyboard_warning=NULL WHERE id=?", (episode_id,))
         conn.commit()
         p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()

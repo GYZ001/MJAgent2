@@ -57,6 +57,18 @@ def _episode_and_live_evaluation(case: dict):
     return episode, evaluation
 
 
+def test_storyboard_authority_projection_excludes_score_only_risk_tags() -> None:
+    from app.narrative import storyboard_authority_projection
+
+    before = _board()
+    after = before.model_copy(deep=True)
+    after.shots[0].risk_tags = ["duration_gt5_needs_review"]
+
+    assert storyboard_authority_projection(after) == storyboard_authority_projection(
+        before
+    )
+
+
 def _assert_optional_review_does_not_revoke_authority(case: dict) -> None:
     episode, evaluation = _episode_and_live_evaluation(case)
     assert video_ops._has_current_storyboard_completion_certificate(db.get_conn(), episode) is True
