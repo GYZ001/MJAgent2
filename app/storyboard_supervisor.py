@@ -159,6 +159,94 @@ def _begin_repair_activation(cp: SupervisorCheckpoint) -> SupervisorCheckpoint:
     return cp
 
 
+def prepare_published_storyboard_repair(
+    episode_id: str,
+    issue_messages: list[str],
+) -> SupervisorCheckpoint:
+    """Create an isolated repair window for a published, unconfirmed board."""
+    conn = get_conn()
+    episode = conn.execute(
+        "SELECT * FROM episodes WHERE id=?",
+        (episode_id,),
+    ).fetchone()
+    if episode is None:
+        raise StageError("分镜修复", ["剧集不存在"])
+    rows = conn.execute(
+        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
+        (episode_id,),
+    ).fetchall()
+    if not rows:
+        raise StageError("分镜修复", ["当前没有可建立修订候选的正式分镜"])
+    from app.domain.storyboard_ops import _board_from_shot_rows
+
+    board = _board_from_shot_rows(rows, int(episode["episode_no"] or 1))
+    checkpoint = load_latest_checkpoint(episode_id) or SupervisorCheckpoint(
+        episode_id=episode_id,
+        planner_version=STORYBOARD_REPAIR_PLANNER_VERSION,
+        validated_prefix_end=len(board.shots),
+        next_shot_no=len(board.shots) + 1,
+        expected_total=len(board.shots),
+        input_versions={
+            "screenplay_artifact_id": episode["screenplay_artifact_id"],
+        },
+    )
+    checkpoint = _begin_repair_activation(checkpoint)
+    checkpoint.validated_prefix_end = len(board.shots)
+    checkpoint.next_shot_no = len(board.shots) + 1
+    checkpoint.expected_total = max(
+        int(checkpoint.expected_total or 0),
+        len(board.shots),
+    )
+    outline = None
+    if episode["storyboard_outline_json"]:
+        try:
+            outline = StoryboardOutline.model_validate_json(
+                episode["storyboard_outline_json"]
+            )
+        except (TypeError, ValueError):
+            outline = None
+
+    explicit_targets = {
+        int(match.group(1))
+        for message in issue_messages
+        for match in re.finditer(
+            r"(?:shot_no\s*=\s*|第\s*|镜头\s*)(\d+)\s*镜?",
+            str(message or ""),
+            re.I,
+        )
+    }
+    local_scope = len(explicit_targets) == 1
+    plan = route_issues(
+        issue_messages,
+        validated_prefix_end=len(board.shots),
+        semantic_diagnosis={
+            "scope": "current_shot" if local_scope else "adjacent_window",
+            "selected_strategy": "repair_current" if local_scope else "repair_window",
+            "selection_reason": (
+                "发布后门禁问题已定位到单个正式镜头"
+                if local_scope else
+                "发布后门禁问题需要在相邻正式镜头窗口中隔离修复"
+            ),
+            "execution_verified": True,
+        },
+    )
+    checkpoint = _apply_repair(
+        checkpoint,
+        plan,
+        conn,
+        episode_id,
+        list(board.shots),
+        outline,
+    )
+    if not _repair_is_pending(checkpoint):
+        raise StageError(
+            "分镜修复",
+            ["未能为发布后门禁问题建立隔离修订候选"],
+        )
+    save_checkpoint(checkpoint)
+    return checkpoint
+
+
 def _withdraw_legacy_failed_publication(
     conn,
     episode_id: str,
