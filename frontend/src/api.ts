@@ -119,6 +119,16 @@ async function request(
         : undefined,
   });
 
+  // 后端重启后，已打开页面可能仍缓存旧会话。401 表示请求尚未进入业务处理，
+  // 因此可以安全地重新领取会话并只重试一次，避免页面永久停在失败/加载状态。
+  if (resp.status === 401 && !options?._sessionRefreshed) {
+    await ensureSession(true);
+    return request(method, path, body, {
+      ...options,
+      _sessionRefreshed: true,
+    });
+  }
+
   if (resp.status === 202) {
     const payload = await resp.json();
     if (payload?.status === "waiting_approval") {
