@@ -123,7 +123,10 @@ def production_appearance_anchor(anchor: str) -> str:
 def missing_production_appearance_dimensions(anchor: str) -> list[str]:
     safe = production_appearance_anchor(anchor)
     missing = []
-    if not re.search(r"(?:岁|男性|女性|青年|中年|老年|少年|少女|老人|人影)", safe):
+    if not re.search(
+        r"(?:岁|成年|男性|女性|男子|女子|男人|女人|青年|中年|老年|少年|少女|老人|人影)",
+        safe,
+    ):
         missing.append("年龄性别")
     if not re.search(r"(?:发|须|脸|面|眼|眉|肤|身形|身材|体型|高|矮|胖|瘦|形态|人影)", safe):
         missing.append("外形")

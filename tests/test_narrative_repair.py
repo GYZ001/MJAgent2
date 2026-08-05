@@ -269,6 +269,43 @@ def test_open_semantic_operation_requires_a_declared_runtime_executor() -> None:
     assert any("必须提供可执行" in error for error in errors)
 
 
+def test_semantic_diagnosis_rejects_whole_outline_rewrite_for_local_issue() -> None:
+    replacement = StoryboardOutlineShot.model_validate(
+        _shot().model_dump(mode="json")
+    )
+    rewrite = SemanticCandidateAssessment(
+        strategy="rewrite_many_shots",
+        expected_narrative_gain=0.9,
+        destructive_cost=0.2,
+        satisfies_gap_test=True,
+        passes_marginal_gain_test=True,
+        preserves_invariants=True,
+        outline_operations=[
+            SemanticOutlineOperation(
+                op=f"rewrite-shot-{shot_no}",
+                executor="replace_outline_shot",
+                target={"shot_no": 1},
+                value=replacement,
+            )
+            for shot_no in range(4)
+        ],
+    )
+    diagnosis = SemanticRepairDiagnosis(
+        diagnosis_id="NRD-local-bound",
+        semantic_gap="One local capacity relation is invalid.",
+        candidate_assessments=[
+            _assessment("repair_current", gain=0.3, cost=0.1),
+            rewrite,
+        ],
+        selected_strategy=rewrite.strategy,
+        selection_reason="The model attempted to rewrite unrelated shots.",
+    )
+
+    assert "选中候选最多允许 3 个局部大纲操作" in (
+        validate_semantic_diagnosis(diagnosis)
+    )
+
+
 @pytest.mark.asyncio
 async def test_open_strategy_and_operation_execute_after_typed_full_graph_validation(
     monkeypatch: pytest.MonkeyPatch,

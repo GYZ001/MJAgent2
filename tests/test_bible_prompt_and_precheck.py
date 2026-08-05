@@ -59,7 +59,7 @@ def test_bible_accepts_compact_complete_production_identity() -> None:
         characters=[Character(
             name="角色甲",
             role="反派",
-            appearance_canonical="三十岁男性，短发身材高大，常穿深色正装",
+            appearance_canonical="三十岁男性，短发身材高大，常穿深色正装配黑皮鞋",
         )],
         world=World(visual_style_canonical="3D动漫CG渲染，虚构数字角色，电影光影"),
     )

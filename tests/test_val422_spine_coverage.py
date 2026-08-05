@@ -349,6 +349,10 @@ def test_outline_capacity_split_moves_key_lines() -> None:
     )
     before = outline_key_line_capacity_errors(outline, sp)
     assert before, before
+    assert all(
+        error.startswith("[OUTLINE_KEY_LINE_CAPACITY_INVALID]")
+        for error in before
+    )
     events = split_outline_over_key_line_capacity(outline, sp, max_shots=16)
     assert events, "应触发容量拆镜"
     assert len(outline.shots) >= 3

@@ -1,6 +1,7 @@
 """AI semantic diagnosis and constraint-based repair candidate selection."""
 from __future__ import annotations
 
+from collections import Counter
 import json
 from typing import Any, Literal, cast
 
@@ -269,6 +270,8 @@ def _compact_context(
     board: Storyboard,
     outline: StoryboardOutline | None,
 ) -> dict[str, Any]:
+    from app.validators import key_line_catalog
+
     plan = screenplay.narrative_plan
     index = index_narrative_plan(plan) if plan else None
     return {
@@ -309,7 +312,33 @@ def _compact_context(
             for shot in board.shots
         ],
         "outline": outline.model_dump(mode="json") if outline else None,
+        "key_line_catalog": key_line_catalog(screenplay),
+        "outline_local_hard_errors": (
+            _outline_local_hard_errors(outline, screenplay)
+            if outline is not None else []
+        ),
     }
+
+
+def _outline_local_hard_errors(
+    outline: StoryboardOutline,
+    screenplay: EpisodeScreenplay,
+) -> list[str]:
+    from app.validators import (
+        outline_key_line_capacity_errors,
+        outline_key_line_speaker_errors,
+    )
+
+    return list(dict.fromkeys([
+        *outline_key_line_capacity_errors(outline, screenplay),
+        *outline_key_line_speaker_errors(outline, screenplay),
+    ]))
+
+
+def _error_code_counts(messages: list[str]) -> Counter[str]:
+    from app.evaluations.issues import issue_code
+
+    return Counter(issue_code(message) or message for message in messages)
 
 
 def validate_semantic_diagnosis(diagnosis: SemanticRepairDiagnosis) -> list[str]:
@@ -324,6 +353,8 @@ def validate_semantic_diagnosis(diagnosis: SemanticRepairDiagnosis) -> list[str]
     if selected is None:
         errors.append("selected_strategy 没有对应候选评估")
     if selected is not None:
+        if len(selected.outline_operations) > 3:
+            errors.append("选中候选最多允许 3 个局部大纲操作")
         executable_ops: list[OutlineExecutorOp] = []
         for operation in selected.outline_operations:
             try:
@@ -425,6 +456,9 @@ async def diagnose_narrative_repair(
         "hard_rules": [
             "至少比较两个候选，不得由 issue code 直接选唯一动作",
             "能改现镜时不增镜；增镜必须通过 gap 与 marginal gain",
+            "key_line_catalog 中的 KL* 是逐字必保留合同；只能在相邻镜间重分配，禁止删除、改写或遗漏，且顺序不变",
+            "单镜时长必须为 5~10 秒；当必保留台词总字数超过 10 秒容量时，原镜压缩在数学上不可行，结构拆分具有可验证边际收益",
+            "选中候选只能包含 1~3 个局部 outline_operations，不得借局部问题重写整集大纲",
             "删除/移动必须证明因果、状态、角色信念、观众路径与铺垫兑现不变量",
             "outline_operations 只能引用当前权威图的稳定 ID；新建/替换节点必须输出完整字段",
             "未预设的 strategy/op 必须绑定当前可用 executor；需要新执行器能力时不得猜测或降级",
@@ -439,6 +473,23 @@ async def diagnose_narrative_repair(
     }
     prior = ""
     errors: list[str] = []
+    baseline_graph_errors: list[str] = []
+    baseline_local_errors: list[str] = []
+    if outline is not None:
+        from app.narrative import validate_storyboard_narrative
+
+        baseline_graph_errors = validate_storyboard_narrative(
+            board=None,
+            screenplay=screenplay,
+            outline=outline,
+            complete=True,
+            expected_scope_id=episode_id,
+        )
+        baseline_local_errors = _outline_local_hard_errors(
+            outline,
+            screenplay,
+        )
+    baseline_graph_counts = _error_code_counts(baseline_graph_errors)
     for attempt in range(1, max_attempts + 1):
         user = json.dumps(prompt, ensure_ascii=False)
         if errors:
@@ -481,13 +532,40 @@ async def diagnose_narrative_repair(
                     )
                     from app.narrative import validate_storyboard_narrative
 
-                    errors.extend(validate_storyboard_narrative(
+                    candidate_graph_errors = validate_storyboard_narrative(
                         board=None,
                         screenplay=screenplay,
                         outline=candidate_outline,
                         complete=True,
                         expected_scope_id=episode_id,
-                    ))
+                    )
+                    candidate_graph_counts = _error_code_counts(
+                        candidate_graph_errors,
+                    )
+                    regressed_codes = {
+                        code
+                        for code, count in candidate_graph_counts.items()
+                        if count > baseline_graph_counts.get(code, 0)
+                    }
+                    errors.extend([
+                        message
+                        for message in candidate_graph_errors
+                        if _error_code_counts([message]).keys()
+                        & regressed_codes
+                    ])
+                    candidate_local_errors = _outline_local_hard_errors(
+                        candidate_outline,
+                        screenplay,
+                    )
+                    if (
+                        baseline_local_errors
+                        and len(candidate_local_errors)
+                        >= len(baseline_local_errors)
+                    ):
+                        errors.append(
+                            "候选没有减少当前大纲的必保留台词容量/说话人硬错误："
+                            + "；".join(candidate_local_errors[:4])
+                        )
                 except Exception as exc:  # noqa: BLE001 - candidate boundary
                     errors.append(f"大纲结构候选无法安全应用：{exc}")
         if not errors:

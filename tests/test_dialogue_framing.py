@@ -430,7 +430,12 @@ def test_outline_splits_every_speaker_change() -> None:
         ],
     )
 
-    assert outline_key_line_speaker_errors(outline, screenplay)
+    speaker_errors = outline_key_line_speaker_errors(outline, screenplay)
+    assert speaker_errors
+    assert all(
+        error.startswith("[OUTLINE_KEY_LINE_SPEAKER_MIXED]")
+        for error in speaker_errors
+    )
     events = split_outline_on_speaker_changes(outline, screenplay, max_shots=8)
 
     assert len(events) == 1
