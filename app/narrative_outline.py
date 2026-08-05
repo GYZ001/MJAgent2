@@ -18,6 +18,76 @@ from app.schemas import (
 )
 
 
+def normalize_split_action_owner_completions(
+    outline: StoryboardOutline,
+    screenplay: EpisodeScreenplay,
+) -> list[dict[str, Any]]:
+    """Repair terminal action shots created after an event's dialogue splits."""
+    plan = screenplay.narrative_plan
+    if plan is None:
+        return []
+
+    dialogue_event_ids = {
+        event_id
+        for shot in outline.shots
+        if shot.key_line_ids
+        for event_id in (
+            list(shot.event_ids)
+            or ([shot.story_event_id] if shot.story_event_id else [])
+        )
+    }
+    actions = {
+        action.action_id: action
+        for action in plan.atomic_actions
+    }
+    changes: list[dict[str, Any]] = []
+    for shot in outline.shots:
+        event_ids = (
+            list(shot.event_ids)
+            or ([shot.story_event_id] if shot.story_event_id else [])
+        )
+        if (
+            not shot.primary_action_id
+            or shot.key_line_ids
+            or shot.audio_cast
+            or not dialogue_event_ids.intersection(event_ids)
+        ):
+            continue
+        action_ids = [
+            shot.primary_action_id,
+            *shot.supporting_action_ids,
+        ]
+        completion_parts = [
+            str(action.completion_condition or "").strip()
+            for action_id in action_ids
+            for action in [actions.get(action_id)]
+            if action is not None
+            and str(action.completion_condition or "").strip()
+        ]
+        completion = "；".join(dict.fromkeys(completion_parts))
+        if not completion:
+            continue
+        for field, value in (
+            ("state_in", ""),
+            ("primary_action", completion),
+            ("state_out", completion),
+            ("beat", completion),
+            ("covers", completion),
+        ):
+            current = getattr(shot, field)
+            if current == value:
+                continue
+            setattr(shot, field, value)
+            changes.append({
+                "shot_no": shot.shot_no,
+                "field": field,
+                "from": current,
+                "to": value,
+                "reason": "split_event_action_completion",
+            })
+    return changes
+
+
 def normalize_narrative_storyboard_outline(
     outline: StoryboardOutline,
     screenplay: EpisodeScreenplay,
@@ -776,4 +846,10 @@ def normalize_narrative_storyboard_outline(
     outline.shots = normalized.shots
     outline.readability_windows = normalized.readability_windows
     outline.cognitive_bridge_plans = []
+    changes.extend(
+        normalize_split_action_owner_completions(
+            outline,
+            screenplay,
+        )
+    )
     return changes

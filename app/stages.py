@@ -319,6 +319,18 @@ def normalize_storyboard_shot_candidate(
                 "reason": "derived_scene_transition",
             })
             shot["transition"] = "叠化"
+        elif (
+            expected_continuity
+            and expected_continuity != "scene_change"
+            and shot.get("transition") != "硬切"
+        ):
+            changes.append({
+                "field": "shot.transition",
+                "from": shot.get("transition"),
+                "to": "硬切",
+                "reason": "derived_scene_transition",
+            })
+            shot["transition"] = "硬切"
 
         planned_audio_cast = outline_narrative_task.get("audio_cast")
         if isinstance(planned_audio_cast, list):
@@ -3522,6 +3534,29 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
             log_provider_call(
                 "storyboard_outline_capacity_split", config.MODEL_TEXT, "KEY_LINE_CAPACITY_SPLIT", None, 0,
                 meta={"episode_id": episode.get("id"), "shot_no": shot_no, "phase": "pre_shot", **ev},
+            )
+    if outline is not None and narrative_authority:
+        from app.narrative_outline import (
+            normalize_split_action_owner_completions,
+        )
+
+        completion_changes = normalize_split_action_owner_completions(
+            outline,
+            screenplay,
+        )
+        if completion_changes:
+            log_provider_call(
+                "storyboard_outline_action_completion_projection",
+                config.MODEL_TEXT,
+                "NORMALIZED",
+                None,
+                0,
+                meta={
+                    "episode_id": episode.get("id"),
+                    "shot_no": shot_no,
+                    "phase": "pre_shot",
+                    "changes": completion_changes,
+                },
             )
     # 有大纲时由计划的镜头数决定收尾时机（执行完整份大纲，避免提前收尾把后段剧情挤掉）；
     # 无大纲时回退到基础镜头数下限。

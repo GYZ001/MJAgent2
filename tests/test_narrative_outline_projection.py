@@ -6,7 +6,10 @@ from app.narrative import (
     validate_screenplay_narrative,
     validate_storyboard_narrative,
 )
-from app.narrative_outline import normalize_narrative_storyboard_outline
+from app.narrative_outline import (
+    normalize_narrative_storyboard_outline,
+    normalize_split_action_owner_completions,
+)
 from app.production.patch import apply_patch_operation_to_document
 from app.production.policy import assert_patch_ops_allowed
 from app.production.screenplay_document import (
@@ -131,7 +134,82 @@ def test_narrative_outline_splits_dialogue_when_speaker_changes() -> None:
         ["character-1"],
         ["character-2"],
     ]
+    action_owner = next(
+        shot for shot in outline.shots
+        if shot.primary_action_id == "ACT-1"
+    )
+    action = next(
+        item for item in screenplay.narrative_plan.atomic_actions
+        if item.action_id == "ACT-1"
+    )
+    assert action_owner.shot_no > max(
+        shot.shot_no for shot in dialogue_shots
+    )
+    assert action_owner.key_line_ids == []
+    assert action_owner.audio_cast == []
+    assert action_owner.state_in == ""
+    assert action_owner.primary_action == action.completion_condition
+    assert action_owner.state_out == action.completion_condition
+    assert action_owner.beat == action.completion_condition
+    assert action_owner.covers == action.completion_condition
     assert outline_key_line_speaker_errors(outline, screenplay) == []
+
+
+def test_stale_split_action_owner_is_reprojected_before_shot_generation() -> None:
+    screenplay = _screenplay()
+    screenplay.dialogue_chains = [
+        KeyDialogueChain(
+            chain_id="DC1",
+            topic="Action with dialogue",
+            turns=[
+                KeyDialogueTurn(
+                    speaker="character-1",
+                    line="The actor speaks before the action completes.",
+                    source_text="The actor speaks before the action completes.",
+                ),
+            ],
+        )
+    ]
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                event_ids=["E-1"],
+                story_event_id="E-1",
+                key_line_ids=["KL01"],
+                audio_cast=["character-1"],
+            ),
+            StoryboardOutlineShot(
+                shot_no=2,
+                event_ids=["E-1"],
+                story_event_id="E-1",
+                primary_action_id="ACT-1",
+                state_in="The event has not started.",
+                primary_action="The actor repeats the opening speech.",
+                state_out="The opening speech is about to begin.",
+                beat="The actor repeats the opening speech.",
+                covers="The actor repeats the opening speech.",
+            ),
+        ],
+    )
+    action = next(
+        item for item in screenplay.narrative_plan.atomic_actions
+        if item.action_id == "ACT-1"
+    )
+
+    changes = normalize_split_action_owner_completions(
+        outline,
+        screenplay,
+    )
+
+    owner = outline.shots[1]
+    assert changes
+    assert owner.state_in == ""
+    assert owner.primary_action == action.completion_condition
+    assert owner.state_out == action.completion_condition
+    assert owner.beat == action.completion_condition
+    assert owner.covers == action.completion_condition
 
 
 def test_narrative_outline_keeps_coarse_snapshot_until_later_deadline() -> None:
