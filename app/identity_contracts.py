@@ -351,6 +351,23 @@ def canonicalize_storyboard_operational_identities(
             canonical_speaker = line_speakers.get(_clean(item.text))
             if canonical_speaker and _clean(item.speaker_id):
                 token_map[_clean(item.speaker_id)] = canonical_speaker
+        actual_speakers = list(dict.fromkeys(
+            speaker
+            for speaker in (
+                *(
+                    line_speakers.get(_clean(dialogue.line), "")
+                    for dialogue in (shot.dialogues or [])
+                ),
+                *(
+                    line_speakers.get(_clean(item.text), "")
+                    for item in (shot.audio_timeline or [])
+                    if item.speaker_id
+                ),
+            )
+            if speaker
+        ))
+        for internal, display in zip(shot.audio_cast, actual_speakers):
+            token_map[_clean(internal)] = display
 
     # When the visible list and business-name list are positionally complete,
     # their shared ordering is an explicit shot contract rather than inference.

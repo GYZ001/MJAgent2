@@ -217,7 +217,7 @@ def test_storyboard_operational_identity_projection_uses_contract_and_dialogue()
         speaker_id="主角",
         voice_canonical="young lead voice",
     ))
-    screenplay.key_lines = ["主角：出发。"]
+    screenplay.key_lines = ["主角：出发。", "阿烬：请进。"]
     shot = _shot(
         characters=["主角", "云吞七号"],
         characters_visible=["character-main", "transient-node"],
@@ -228,7 +228,18 @@ def test_storyboard_operational_identity_projection_uses_contract_and_dialogue()
             delivery="spoken_dialogue",
         )],
     )
-    board = Storyboard(episode_no=1, shots=[shot])
+    second = _shot(
+        shot_no=2,
+        characters=["阿烬", "主角"],
+        characters_visible=["newcomer-7"],
+        audio_cast=["newcomer-7", "character-main"],
+        dialogues=[Dialogue(
+            speaker="newcomer-7",
+            line="请进。",
+            delivery="spoken_dialogue",
+        )],
+    )
+    board = Storyboard(episode_no=1, shots=[shot, second])
 
     changes = canonicalize_storyboard_operational_identities(
         board,
@@ -240,6 +251,7 @@ def test_storyboard_operational_identity_projection_uses_contract_and_dialogue()
     assert board.shots[0].characters_visible == ["主角", "云吞七号"]
     assert board.shots[0].audio_cast == ["主角"]
     assert board.shots[0].dialogues[0].speaker == "主角"
+    assert board.shots[1].audio_cast == ["阿烬", "主角"]
 
 
 def test_narrative_compiler_uses_typed_policy_not_role_name_classifiers() -> None:

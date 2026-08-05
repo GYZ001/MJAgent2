@@ -1260,7 +1260,7 @@ async def _storyboard_task(
                         WHERE id=? AND status IN ('validated','approved')""",
                     (old_artifact_id,),
                 )
-                conn.execute(
+                episode_update = conn.execute(
                     """UPDATE episodes
                           SET storyboard_artifact_id=NULL,
                               working_storyboard_artifact_id=NULL,
@@ -1270,7 +1270,7 @@ async def _storyboard_task(
                               narrative_status='needs_review',
                               narrative_review_artifact_id=NULL,
                               narrative_calibration_artifact_id=NULL
-                        WHERE id=? AND status='scripted'
+                        WHERE id=? AND status IN ('scripted','scripting')
                           AND published_storyboard_artifact_id=?
                           AND storyboard_completion_certificate_id=?""",
                     (
@@ -1279,7 +1279,7 @@ async def _storyboard_task(
                         ep["storyboard_completion_certificate_id"],
                     ),
                 )
-                if conn.execute("SELECT changes() AS c").fetchone()["c"] != 1:
+                if episode_update.rowcount != 1:
                     raise RuntimeError("分镜身份修订撤下旧发布指针发生并发冲突")
                 from app.storyboard_supervisor import _write_shot_fields
 
