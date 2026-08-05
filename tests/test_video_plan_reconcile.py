@@ -338,6 +338,143 @@ def test_local_replan_changes_only_target_contract_identity(monkeypatch) -> None
     assert selected.shot_id == "s1"
 
 
+def test_recover_equivalent_stale_provider_job_without_new_create(monkeypatch) -> None:
+    conn = _conn()
+    monkeypatch.setattr(hiagent, "active_provider", lambda _kind: "provider")
+    monkeypatch.setattr(
+        hiagent,
+        "active_model",
+        lambda _kind, _provider=None: "model",
+    )
+    replacement = create_local_replan_revision(
+        "s1",
+        reason="target_only_replan",
+        conn=conn,
+    )
+    current = next(item for item in replacement.shots if item.shot_id == "s2")
+    assert active_plan_is_current("svp-2", conn=conn) is True
+
+    meta = {
+        "mode": "VIDEO_INPUT_MODE",
+        "planned_mode": "VIDEO_INPUT_MODE",
+        "actual_mode": "VIDEO_INPUT_MODE",
+        "episode_video_plan_id": "evp-1",
+        "shot_plan_id": "svp-2",
+        "plan_revision": 1,
+        "source_storyboard_revision_id": "storyboard_rev_1",
+        "capability_snapshot_id": "cap-1",
+        "input_revision_fingerprints": dict(
+            next(item for item in replacement.shots if item.shot_id == "s2").input_revision_fingerprints
+        ),
+    }
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,provider_task_id,
+               status,error,image_inputs,created_at
+           ) VALUES('stale-v','s2',1,'prompt','stale-key','provider-task',
+                    'stale','plan stale',?,1)""",
+        (json.dumps(meta),),
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,version_id,episode_id,project_id,status,error,
+               created_at,updated_at,provider_operation_id,provider_create_state,
+               provider_non_cancellable
+           ) VALUES('stale-job','video','s2','stale-v','e','p','stale',
+                    'plan stale',1,1,'video-create-stale-v','accepted',1)"""
+    )
+    conn.execute(
+        """INSERT INTO budget_reservations(
+               id,job_id,scope_type,scope_id,amount_cny,status,created_at,
+               settled_at,actual_cost_cny
+           ) VALUES('budget-stale','stale-job','episode','e',5,'released',1,2,0)"""
+    )
+    conn.execute(
+        """INSERT INTO video_generation_attempts(
+               id,shot_plan_id,version_id,attempt_no,planned_mode,actual_mode,
+               status,provider_task_id,created_at,updated_at
+           ) VALUES('attempt-stale','svp-2','stale-v',1,'VIDEO_INPUT_MODE',
+                    'VIDEO_INPUT_MODE','provider_running','provider-task',1,1)"""
+    )
+    conn.commit()
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    creates_before = conn.execute(
+        "SELECT COUNT(*) FROM provider_calls WHERE kind='video_create'"
+    ).fetchone()[0]
+
+    result = worker.recover_equivalent_stale_provider_jobs("e")
+
+    assert result["recovered_jobs"] == 1
+    assert result["provider_task_ids"] == ["provider-task"]
+    assert result["provider_create_calls"] == 0
+    assert conn.execute(
+        "SELECT status FROM jobs WHERE id='stale-job'"
+    ).fetchone()[0] == "waiting_provider"
+    version = conn.execute(
+        "SELECT status,image_inputs FROM shot_versions WHERE id='stale-v'"
+    ).fetchone()
+    recovered_meta = json.loads(version["image_inputs"])
+    assert version["status"] == "running"
+    assert recovered_meta["submitted_shot_plan_id"] == "svp-2"
+    assert recovered_meta["shot_plan_id"] == current.shot_plan_id
+    assert conn.execute(
+        "SELECT shot_plan_id FROM video_generation_attempts WHERE id='attempt-stale'"
+    ).fetchone()[0] == current.shot_plan_id
+    creates_after = conn.execute(
+        "SELECT COUNT(*) FROM provider_calls WHERE kind='video_create'"
+    ).fetchone()[0]
+    assert creates_after == creates_before
+
+
+def test_recovery_keeps_older_task_stale_when_shot_has_usable_candidate(
+    monkeypatch,
+) -> None:
+    conn = _conn()
+    monkeypatch.setattr(hiagent, "active_provider", lambda _kind: "provider")
+    monkeypatch.setattr(
+        hiagent,
+        "active_model",
+        lambda _kind, _provider=None: "model",
+    )
+    create_local_replan_revision("s2", reason="target_only_replan", conn=conn)
+    assert active_plan_is_current("svp-1", conn=conn) is True
+    meta = json.dumps({
+        "mode": "REFERENCE_IMAGE_MODE",
+        "planned_mode": "REFERENCE_IMAGE_MODE",
+        "actual_mode": "REFERENCE_IMAGE_MODE",
+        "episode_video_plan_id": "evp-1",
+        "shot_plan_id": "svp-1",
+    })
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,provider_task_id,
+               status,error,image_inputs,created_at
+           ) VALUES('older-stale','s1',3,'prompt','older-key','older-task',
+                    'stale','plan stale',?,1)""",
+        (meta,),
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,version_id,episode_id,project_id,status,error,
+               created_at,updated_at,provider_operation_id,provider_create_state,
+               provider_non_cancellable
+           ) VALUES('older-job','video','s1','older-stale','e','p','stale',
+                    'plan stale',1,1,'video-create-older-stale','accepted',1)"""
+    )
+    conn.commit()
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+
+    result = worker.recover_equivalent_stale_provider_jobs("e")
+
+    assert result["recovered_jobs"] == 0
+    assert conn.execute(
+        "SELECT status FROM jobs WHERE id='older-job'"
+    ).fetchone()[0] == "stale"
+    assert conn.execute(
+        "SELECT status FROM shot_versions WHERE id='older-stale'"
+    ).fetchone()[0] == "stale"
+
+
 def test_reference_mode_paid_submission_rejects_current_shot_contract_drift(
     monkeypatch,
 ) -> None:

@@ -2969,6 +2969,10 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         if _set_job(job_id, "stale", public, lease_owner=owner):
             media_scheduler.settle_budget(job_id, 0.0, success=False)
             reconcile_episode_generation_status(job["episode_id"])
+            # A sibling-only replan may preserve this shot's complete execution
+            # contract. Recover the accepted provider handle in place when that
+            # equivalence can be proven; never issue another create call.
+            recover_equivalent_stale_provider_jobs(job["episode_id"])
         return
     except ReviewDependencyFence as exc:
         public = str(exc)
@@ -3277,6 +3281,17 @@ def recover_and_start(loop_concurrency: int | None = None) -> None:
     _drain_memory_queue(_video_ready_queue)
     _drain_memory_queue(_poll_queue)
     conn = get_conn()
+    stale_provider_episode_ids = [
+        row["episode_id"]
+        for row in conn.execute(
+            """SELECT DISTINCT episode_id FROM jobs
+                WHERE kind='video' AND status='stale'
+                  AND provider_non_cancellable=1
+                  AND cancellation_requested=0 AND abandoned=0"""
+        ).fetchall()
+    ]
+    for episode_id in stale_provider_episode_ids:
+        recover_equivalent_stale_provider_jobs(episode_id)
     generating_episode_ids = [
         row["id"] for row in conn.execute(
             "SELECT id FROM episodes WHERE status='generating'"
