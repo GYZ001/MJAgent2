@@ -1211,10 +1211,14 @@ def get_screenplay_draft(episode_id: str):
     for source, target in (
         ("content_json", "content"), ("constraint_json", "constraints"),
     ):
+        raw = value.pop(source)
+        if raw is None:
+            value[target] = None if target == "content" else {}
+            continue
         try:
-            value[target] = json.loads(value.pop(source) or "{}")
+            value[target] = json.loads(raw or "{}")
         except (TypeError, json.JSONDecodeError):
-            value[target] = {}
+            value[target] = None if target == "content" else {}
     return {"draft": value}
 
 

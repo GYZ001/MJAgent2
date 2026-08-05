@@ -119,6 +119,19 @@ def test_server_draft_survives_version_conflict(client) -> None:
     assert recovered["content"]["title"] == draft["title"]
 
 
+def test_constraint_only_server_draft_does_not_become_empty_screenplay(client) -> None:
+    _seed_episode(with_artifact=False)
+    saved = client.put("/api/episodes/e1/screenplay/draft", json={
+        "constraints": {"occurrence_ids": ["dlg_one"]},
+        "baseline_artifact_id": None,
+    })
+
+    assert saved.status_code == 200
+    recovered = client.get("/api/episodes/e1/screenplay/draft").json()["draft"]
+    assert recovered["content"] is None
+    assert recovered["constraints"] == {"occurrence_ids": ["dlg_one"]}
+
+
 def test_repeated_dialogue_text_has_distinct_occurrence_ids() -> None:
     conn = db.get_conn()
     conn.execute("INSERT INTO projects(id,name,status,created_at) VALUES('p1','P','planned',1)")
