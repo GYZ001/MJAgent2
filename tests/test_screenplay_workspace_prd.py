@@ -546,6 +546,20 @@ def test_successful_storyboard_is_not_reported_as_failed_checkpoint() -> None:
     assert failed["checkpoint_shot"] == 5
 
 
+def test_invalid_published_certificate_recommends_revalidation(monkeypatch) -> None:
+    _seed_episode(with_artifact=True)
+    conn = db.get_conn()
+    ep = dict(conn.execute("SELECT * FROM episodes WHERE id='e1'").fetchone())
+    ep["screenplay_status"] = "ready"
+    monkeypatch.setattr(api, "_screenplay_ready", lambda _ep: False)
+
+    state = api._screenplay_status_snapshot(ep, shot_count=8, production={})
+
+    assert state["code"] == "qa_certificate_invalid"
+    assert state["recommended_action"] == "resume_screenplay"
+    assert "重新校验" in state["message"]
+
+
 def test_dialogue_grouping_only_suggests_clear_semantic_pairs() -> None:
     source = "\n".join([
         "甲：「你为什么来？」",

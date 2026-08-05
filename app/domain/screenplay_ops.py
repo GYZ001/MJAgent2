@@ -232,7 +232,11 @@ def _screenplay_status_snapshot(ep, *, shot_count: int, production: dict | None 
             "resume_screenplay",
         )
     elif screenplay_status == "ready" and not screenplay_ready:
-        code, message, action = "qa_certificate_invalid", "剧本 QA 凭证与当前版本不一致", "refresh"
+        code, message, action = (
+            "qa_certificate_invalid",
+            "上游版本已变化，需重新校验剧本并签发完成凭证",
+            "resume_screenplay",
+        )
     elif screenplay_status == "ready" and storyboard_active:
         code, message, action = "ready_storyboard_running", "剧本已交付｜分镜生成中", "view_storyboard"
     elif screenplay_status == "ready" and checkpoint:
@@ -1406,6 +1410,78 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
     }
 
 
+def _prepare_published_screenplay_revalidation(ep: dict):
+    """Create a new revision that revalidates immutable published content."""
+    from app.harness.contracts import get_contract
+    from app.production.patch import load_screenplay_from_artifact
+    from app.production.revision import (
+        ensure_production_revision,
+        mark_baseline_generated,
+        save_checkpoint,
+    )
+    from app.production.screenplay_authority import (
+        SCREENPLAY_QA_PROFILE_VERSION,
+        screenplay_authority_fingerprint,
+    )
+
+    episode_id = str(ep["id"])
+    artifact_id = str(ep.get("published_screenplay_artifact_id") or "")
+    artifact = evidence_repository.get_artifact(artifact_id)
+    if (
+        not artifact
+        or artifact.get("type") != "screenplay_document"
+        or artifact.get("scope_id") != episode_id
+        or artifact.get("status") != "approved"
+    ):
+        raise HTTPException(409, "当前发布剧本缺少可复验的权威 Artifact")
+    try:
+        load_screenplay_from_artifact(artifact_id)
+    except Exception as exc:
+        raise HTTPException(409, "当前发布剧本 Artifact 无法读取") from exc
+
+    conn = get_conn()
+    project = conn.execute(
+        "SELECT * FROM projects WHERE id=?", (ep["project_id"],)
+    ).fetchone()
+    bible = _project_bible_or_placeholder(project)
+    source_text = _episode_source_text(conn, ep)
+    contract = get_contract("screenplay")
+    input_fingerprint = screenplay_authority_fingerprint(
+        episode_id,
+        conn=conn,
+        source_text=source_text,
+        bible=bible,
+        contract_version=contract.version,
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+    )
+    revision = ensure_production_revision(
+        episode_id=episode_id,
+        kind="screenplay",
+        input_fingerprint=input_fingerprint,
+        contract_version=contract.version,
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+        resume=False,
+    )
+    revision = mark_baseline_generated(
+        revision.id,
+        baseline_artifact_id=artifact_id,
+        working_artifact_id=artifact_id,
+    )
+    save_checkpoint(revision.id, {
+        "phase": "REVALIDATING_PUBLISHED",
+        "working_artifact_id": artifact_id,
+        "source_revision_id": ep.get("screenplay_production_revision_id"),
+        "yield_reason": "upstream_input_fingerprint_changed",
+    })
+    conn.execute(
+        "UPDATE episodes SET screenplay_status='repairing',screenplay_error=?,"
+        "screenplay_updated_at=? WHERE id=?",
+        ("上游版本已变化，正在重新校验已发布剧本", now(), episode_id),
+    )
+    conn.commit()
+    return revision
+
+
 @router.post("/episodes/{episode_id}/screenplay/resume")
 async def resume_screenplay(episode_id: str, body: dict | None = Body(None)):
     """Continue deterministic stages from an existing working Baseline."""
@@ -1431,6 +1507,13 @@ async def resume_screenplay(episode_id: str, body: dict | None = Body(None)):
             "deduplicated": True,
         }
     rev = get_active_production_revision(episode_id, "screenplay")
+    if (
+        rev is None
+        and ep["screenplay_status"] == "ready"
+        and ep["published_screenplay_artifact_id"]
+        and not _screenplay_ready(ep)
+    ):
+        rev = _prepare_published_screenplay_revalidation(dict(ep))
     if not rev or not rev.baseline_done or not rev.working_artifact_id:
         raise HTTPException(409, "没有可继续的剧本工作副本；请使用「首次生成整版」")
 
