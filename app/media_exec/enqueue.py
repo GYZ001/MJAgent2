@@ -1145,20 +1145,27 @@ def _assert_enqueue_storyboard_authority(shot_id: str):
             )
         else:
             raise ValueError(f"当前剧本权威链无法验证：{exc}") from exc
-    if not context.narrative_authority_required:
-        return context
-
     episode = conn.execute(
         "SELECT * FROM episodes WHERE id=?", (episode_id,),
     ).fetchone()
+    if episode is None or episode["status"] not in {
+        "confirmed", "generating", "done", "mixed",
+    }:
+        raise ValueError(
+            "[STORYBOARD_CONFIRMATION_REQUIRED] 分镜尚未人工确认，"
+            "不能创建视频预检或付费任务"
+        )
+    if not context.narrative_authority_required:
+        return context
+
     from app.domain.video_ops import _has_current_storyboard_completion_certificate
 
-    if episode is None or not _has_current_storyboard_completion_certificate(
+    if not _has_current_storyboard_completion_certificate(
         conn, episode,
     ):
         raise ValueError(
             "[NARRATIVE_CERTIFICATE_REQUIRED] 当前叙事分镜缺少与正式 "
-            "Artifact、冷观众审读和完成证书精确绑定的生产权威"
+            "Artifact、镜头投影和完成证书精确绑定的生产权威"
         )
     # Recompute the release manifest here as a content-addressed final check.
     # The per-shot plan verifier repeats it below and workers repeat it again at
@@ -1182,7 +1189,7 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
     if narrative_authority and (prompt_override or "").strip():
         raise ValueError(
             "[NARRATIVE_PROMPT_OVERRIDE_REQUIRES_CANDIDATE] 叙事权威镜头不允许用"
-            "自由文本覆盖已审读的分镜语义；请通过受控分镜候选修订后重新发布"
+            "自由文本覆盖已发布的分镜语义；请通过受控分镜候选修订后重新发布"
         )
     preflight_job_id = _begin_video_preflight_job(
         shot_id, supervisor_run_id=supervisor_run_id,

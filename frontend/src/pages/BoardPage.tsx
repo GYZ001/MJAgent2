@@ -203,7 +203,7 @@ export function storyboardProgressCopy(status: StoryboardStatus): StoryboardProg
   if (repairsExisting) {
     return {
       summary,
-      detail: `当前 ${working} 镜已完成逐镜校验，但整集仍有 ${gateIssueCount} 个确认门禁问题。继续任务会重开整集修复，不是从第 ${resumeFrom} 镜续写；修复候选通过前不会覆盖现有镜头。`,
+      detail: `当前 ${working} 镜已完成逐镜校验，但整集仍有 ${gateIssueCount} 个确认必检项。继续任务会重开整集修复，不是从第 ${resumeFrom} 镜续写；修复候选通过前不会覆盖现有镜头。`,
     }
   }
   const finalDraftNote = status.final_shot_valid
@@ -217,7 +217,7 @@ export function storyboardProgressCopy(status: StoryboardStatus): StoryboardProg
   }
   return {
     summary,
-    detail: `当前 ${validated} 镜已通过逐镜校验；任务将从第 ${resumeFrom} 镜继续。整集门禁通过并经人工确认后才会交给生成台。${finalDraftNote}`,
+    detail: `当前 ${validated} 镜已通过逐镜校验；任务将从第 ${resumeFrom} 镜继续。镜头完整并经人工确认后才会交给生成台。${finalDraftNote}`,
   }
 }
 
@@ -245,7 +245,7 @@ export function storyboardStartPreviewCopy(preview: StartPreview): {
     return {
       title: '继续修复分镜',
       confirmLabel: '开始修复',
-      summary: `现有 ${preview.kept_validated_shots} 镜保持不变，重新校验并修复${issueCount ? ` ${issueCount} 个` : ''}确认门禁问题。`,
+      summary: `现有 ${preview.kept_validated_shots} 镜保持不变，重新校验并修复${issueCount ? ` ${issueCount} 个` : ''}确认必检项。`,
       detail: `这是重开整集修复，不是从第 ${preview.checkpoint.resume_from_shot} 镜续写；候选通过前不会覆盖现有镜头。`,
     }
   }
@@ -267,7 +267,7 @@ export function storyboardShotCheckpointLabel(
   const draft = status.draft_shots ?? status.produced_shots
   const safe = Math.min(draft, status.safe_checkpoint_shots ?? status.validated_shots)
   if (shotNo <= safe) {
-    return { label: '已校验', className: 'checkpoint-safe', title: '本轮已通过逐镜校验；整集仍需通过门禁并由人工确认' }
+    return { label: '已校验', className: 'checkpoint-safe', title: '本轮已通过逐镜校验；整集仍需完成结构检查并由人工确认' }
   }
   return { label: '待校验', className: 'checkpoint-pending', title: '仍在工作副本中，继续任务时可能更新' }
 }
@@ -502,7 +502,7 @@ function HumanCalibrationControls({
   return <details className="narrative-calibration-controls">
     <summary>一次观看校准</summary>
     <div className="narrative-calibration-rebuild">
-      <p>优先使用多先验 AI 一次观看模拟；模拟不足时取消额外校准层，冷观众硬门禁仍然生效。</p>
+      <p>AI 一次观看模拟与真人样本均为可选评分，只用于提示观众理解风险，不影响分镜发布、确认或后续生成。</p>
       <button type="button" className="btn primary" disabled={busy}
         onClick={() => void activateAiSimulation()}>
         {busy ? '正在模拟…' : '运行 AI 一次观看模拟'}
@@ -589,24 +589,24 @@ function NarrativeReadinessPanel({
   const duplicateActions = numberMetric('duplicate_primary_action_count')
   const stateRegressions = numberMetric('state_regression_count')
   const processingDebt = numberMetric('audience_processing_debt')
-  const ready = metrics.narrative_ready === true && calibration?.ready === true
+  const scored = review?.decision === 'pass' || review?.decision === 'revise'
   const calibrationMode = calibration?.authority_mode
   const reviewCopy = review?.decision === 'pass'
     ? calibration?.ready
       ? calibrationMode === 'human_calibration'
-        ? '冷观众与真人校准通过'
-        : '冷观众与 AI 模拟通过'
-      : '等待一次观看校准'
+        ? '冷观众与真人样本已评分'
+        : '冷观众与 AI 模拟已评分'
+      : '冷观众评分已完成'
     : review?.decision === 'revise'
-      ? '冷观众要求修订'
+      ? '评分提示存在风险'
       : review?.decision === 'needs_human_review'
-        ? '等待人工复核'
-        : '等待冷观众审读'
+        ? '评分建议人工复核'
+        : '尚未运行可选评分'
 
   return <section className="card narrative-readiness" aria-label="全链路叙事一致性">
     <header>
-      <div><b>全链路叙事一致性</b><span>同一事件、动作、人物认知与观众理解合同贯穿剧本和分镜</span></div>
-      <span className={`stamp ${ready ? 'green' : 'gold'}`}>{ready ? '叙事就绪' : reviewCopy}</span>
+      <div><b>叙事理解评分（可选）</b><span>检查事件、动作、人物认知与观众理解风险，不改变生产资格</span></div>
+      <span className={`stamp ${scored ? 'green' : 'gold'}`}>{reviewCopy}</span>
     </header>
     <dl>
       <div><dt>命题 / 事件</dt><dd>{summary.proposition_count} / {summary.event_count}</dd></div>
@@ -617,11 +617,12 @@ function NarrativeReadinessPanel({
       <div><dt>观众处理欠债</dt><dd>{processingDebt === null ? '待计算' : `${processingDebt.toFixed(1)}s`}</dd></div>
       <div><dt>一次观看</dt><dd>{calibration?.ready
         ? calibrationMode === 'human_calibration' ? '真人校准已绑定' : 'AI 模拟已绑定'
-        : '待完成'}</dd></div>
+        : '未评分'}</dd></div>
     </dl>
+    <p>评分仅供审阅；镜头结构完整、版本证据一致并经人工确认后即可进入生成台。</p>
     {review?.reason && <p>{review.reason}</p>}
-    {calibration?.blockers?.length ? <p className="narrative-calibration-blocker">{calibration.blockers[0]}</p> : null}
-    <details><summary>查看理解与结构指标</summary><p>体验意图覆盖 {percentMetric('experience_intent_coverage_rate')} · 认知任务截止通过 {percentMetric('assimilation_deadline_pass_rate')} · 镜头功能贡献 {percentMetric('shot_contribution_coverage')}</p><p>系统逐个观众先验验收，不以平均高分替代低分位失败。</p></details>
+    {calibration?.blockers?.length ? <p className="narrative-calibration-blocker">可选评分提示：{calibration.blockers[0]}</p> : null}
+    <details><summary>查看理解与结构指标</summary><p>体验意图覆盖 {percentMetric('experience_intent_coverage_rate')} · 认知任务截止通过 {percentMetric('assimilation_deadline_pass_rate')} · 镜头功能贡献 {percentMetric('shot_contribution_coverage')}</p><p>系统逐个观众路径给出风险提示，低分不会触发自动修镜或阻止发布。</p></details>
     <HumanCalibrationControls episode={episode} notify={notify} onChanged={onChanged} />
   </section>
 }

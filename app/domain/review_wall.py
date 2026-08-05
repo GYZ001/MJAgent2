@@ -164,7 +164,7 @@ def _review_certificate_binding(
         and all(item["artifact_id"] == artifact_id for item in evaluation_projection)
     )
 
-    def _passed(name: str, *, evaluator_version: str | None) -> bool:
+    def _qualified(name: str, *, evaluator_version: str | None) -> bool:
         matches = [item for item in evaluation_projection if item["evaluator_name"] == name]
         if len(matches) != 1 or not evaluator_version:
             return False
@@ -181,30 +181,31 @@ def _review_certificate_binding(
                 for issue in issues
             )
         )
-        return bool(
-            item["evaluator_version"] == evaluator_version
-            and item["status"] == "passed"
+        score_only = bool(
+            item["evaluation_role"] == "score_only"
+            and not bool(item["runtime_blocking"])
+        )
+        legacy_runtime_gate = bool(
+            item["status"] == "passed"
             and bool(item["hard_gate_passed"])
             and item["evaluation_role"] == "runtime_gate"
             and bool(item["runtime_blocking"])
             and not blocking_issue
         )
+        return bool(
+            item["evaluator_version"] == evaluator_version
+            and (score_only or legacy_runtime_gate)
+        )
 
     required_gates_passed = (
-        _passed(
+        _qualified(
             "screenplay_production_qa",
             evaluator_version=row["qa_profile_version"],
         )
         if kind == "screenplay"
-        else (
-            _passed(
-                "storyboard_full_gate",
-                evaluator_version=row["contract_version"],
-            )
-            and _passed(
-                "narrative_blind_comparator",
-                evaluator_version=review_comparator_version,
-            )
+        else _qualified(
+            "storyboard_full_gate",
+            evaluator_version=row["contract_version"],
         )
     )
     try:
@@ -345,8 +346,6 @@ def _review_narrative_authority_snapshot(conn, ep: dict[str, Any]) -> dict[str, 
         errors.append("NARRATIVE_SCREENPLAY_ARTIFACT_UNVERIFIED")
     if not storyboard_artifact["verified"]:
         errors.append("NARRATIVE_STORYBOARD_ARTIFACT_UNVERIFIED")
-    if not review_artifact["verified"]:
-        errors.append("NARRATIVE_REVIEW_ARTIFACT_UNVERIFIED")
     calibration_verified = False
     if calibration_id:
         try:
@@ -366,8 +365,6 @@ def _review_narrative_authority_snapshot(conn, ep: dict[str, Any]) -> dict[str, 
             )
         except Exception:
             calibration_verified = False
-    if not calibration_verified:
-        errors.append("NARRATIVE_CALIBRATION_AUTHORITY_UNVERIFIED")
 
     screenplay_projection_verified = False
     if screenplay_artifact["verified"]:
@@ -458,9 +455,6 @@ def _review_narrative_authority_snapshot(conn, ep: dict[str, Any]) -> dict[str, 
             review_verified = verified_report_id == report_id
         except Exception:
             review_verified = False
-    if not review_verified:
-        errors.append("NARRATIVE_REVIEW_CHAIN_UNVERIFIED")
-
     screenplay_certificate = _review_certificate_binding(
         conn,
         certificate_id=ep.get("screenplay_completion_certificate_id"),
@@ -480,7 +474,6 @@ def _review_narrative_authority_snapshot(conn, ep: dict[str, Any]) -> dict[str, 
         artifact_hash=storyboard_artifact.get("content_hash"),
         production_revision_id=ep.get("storyboard_production_revision_id"),
         artifact_contract_version=storyboard_artifact.get("contract_version"),
-        review_comparator_version=review_artifact.get("prompt_version"),
     )
     if not screenplay_certificate["verified"]:
         errors.append("NARRATIVE_SCREENPLAY_CERTIFICATE_UNVERIFIED")
@@ -513,19 +506,6 @@ def _review_narrative_authority_snapshot(conn, ep: dict[str, Any]) -> dict[str, 
         "published_storyboard": {
             key: storyboard_artifact.get(key)
             for key in ("artifact_id", "content_hash", "status", "verified")
-        },
-        "narrative_review": {
-            "artifact_id": review_artifact.get("artifact_id"),
-            "content_hash": review_artifact.get("content_hash"),
-            "verified": review_verified,
-        },
-        "narrative_calibration": {
-            "artifact_id": calibration_id,
-            "content_hash": (
-                calibration_artifact.get("content_hash")
-                if calibration_artifact else None
-            ),
-            "verified": calibration_verified,
         },
         "screenplay_certificate": screenplay_certificate,
         "storyboard_certificate": storyboard_certificate,
@@ -776,7 +756,7 @@ def _review_upstream_snapshot(episode_id: str) -> dict[str, Any]:
     ]
     blockers: list[str] = []
     if not screenplay_qualified:
-        blockers.append("剧本尚未取得与当前版本一致的 QA 通过凭证")
+        blockers.append("剧本尚未取得与当前版本一致的完成凭证")
     if not published_storyboard or not confirmed:
         blockers.append("分镜尚未完整确认")
     if active:
@@ -806,6 +786,12 @@ def _review_upstream_snapshot(episode_id: str) -> dict[str, Any]:
     }
     qualification_material = {
         **raw,
+        "narrative_authority": {
+            key: value
+            for key, value in narrative_authority.items()
+            if not key.startswith("narrative_review")
+            and not key.startswith("narrative_calibration")
+        },
         # The gallery may be copied into a newly queued version. The version
         # row is lineage, not an upstream dependency; hashing it would make a
         # run invalidate itself even when every asset/rule verdict is equal.

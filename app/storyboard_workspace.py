@@ -140,13 +140,14 @@ def finalize_storyboard_cancellation(
     from app.orchestration.engine import WorkflowRecorder
     from app.storyboard_supervisor import (
         SupervisorCheckpoint,
+        _recover_outline_from_current_artifact,
         load_latest_checkpoint,
         save_checkpoint,
     )
 
     conn = get_conn()
     episode = conn.execute(
-        "SELECT status,active_storyboard_run_id FROM episodes WHERE id=?",
+        "SELECT * FROM episodes WHERE id=?",
         (episode_id,),
     ).fetchone()
     if not episode:
@@ -172,6 +173,14 @@ def finalize_storyboard_cancellation(
         "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)
     ).fetchone()["c"])
     checkpoint = load_latest_checkpoint(episode_id)
+    if checkpoint is not None and not episode["storyboard_outline_json"]:
+        recovered_outline = _recover_outline_from_current_artifact(
+            conn,
+            episode,
+            checkpoint,
+        )
+        if recovered_outline is not None:
+            save_checkpoint(checkpoint, run_id=effective_run_id)
     checkpoint_created = False
     if checkpoint is None and paused:
         checkpoint = SupervisorCheckpoint(
@@ -193,8 +202,14 @@ def finalize_storyboard_cancellation(
 
     target_status = "scripting" if paused else ("script_failed" if shot_count else "planned")
     if paused:
+        outline_note = (
+            "，首版分镜大纲也已保留"
+            if checkpoint is not None and checkpoint.outline_artifact_id
+            else ""
+        )
         script_error = (
-            f"用户已暂停分镜任务：已保留 {shot_count} 个工作镜头和安全检查点，"
+            f"用户已暂停分镜任务：已保留 {shot_count} 个工作镜头和安全检查点"
+            f"{outline_note}，"
             "可继续任务或清空分镜。"
         )
     else:

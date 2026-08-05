@@ -96,7 +96,7 @@ def test_confirm_preview_passes_with_low_quality_business_warnings(confirm_db, m
     assert preview["score_only"]["runtime_blocking"] is False
 
 
-def test_must_keep_spine_delivery_warning_is_promoted_to_blocker(confirm_db, monkeypatch):
+def test_must_keep_spine_delivery_finding_remains_score_only(confirm_db, monkeypatch):
     issue = (
         "主线节拍主体已入画但未完成对应动作/对白交付："
         "S03/少年:在密室修炼一夜并明确修为进展"
@@ -107,13 +107,11 @@ def test_must_keep_spine_delivery_warning_is_promoted_to_blocker(confirm_db, mon
         video_ops, "validate_storyboard_preserves_key_content", lambda *_args, **_kwargs: [],
     )
 
-    with pytest.raises(HTTPException) as caught:
-        video_ops.create_storyboard_confirmation_preview("e1")
+    preview = video_ops.create_storyboard_confirmation_preview("e1")
 
-    preview = caught.value.detail
-    assert preview["hard_gates"]["passed"] is False
-    assert preview["hard_gates"]["errors"] == [issue]
-    assert issue not in preview["warnings"]
+    assert preview["hard_gates"]["passed"] is True
+    assert preview["hard_gates"]["errors"] == []
+    assert issue in preview["warnings"]
 
 
 def test_unlocatable_legacy_excerpt_stays_internal_audit_only(confirm_db, monkeypatch):

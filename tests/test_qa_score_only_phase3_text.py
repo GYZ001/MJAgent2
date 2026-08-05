@@ -51,6 +51,39 @@ def test_agent_loop_does_not_recall_producer_for_quality_only_issues() -> None:
     assert result.issues[0].code == "BUSINESS_RULE_FAILED"
 
 
+def test_required_suffix_narrative_issue_is_not_treated_as_schema_failure() -> None:
+    loop: AgentLoop[Candidate] = AgentLoop(
+        stage_key="storyboard_outline",
+        contract_key="storyboard",
+        goal="keep a parseable outline",
+        scope_type="episode",
+        scope_id="e1",
+        artifact_type="storyboard_outline",
+        policy=AgentLoopPolicy(max_iterations=2),
+    )
+    calls: list[int] = []
+
+    async def producer(iteration: int, *_args) -> str:
+        calls.append(iteration)
+        return json.dumps({"value": 1})
+
+    def evaluator(raw: str):
+        return Candidate.model_validate(json.loads(raw)), [
+            Issue(
+                code="CHARACTER_BELIEF_TRANSITION_REQUIRED",
+                severity=IssueSeverity.BLOCKER,
+                subject="episode:e1",
+                message="人物认知变化表达不足",
+                repairable=True,
+            )
+        ]
+
+    result = asyncio.run(loop.run(producer, evaluator))
+
+    assert calls == [1]
+    assert result.exit_reason == "score_only_quality"
+
+
 def test_commit_artifact_accepts_failed_score_only_qa_when_file_eval_passes(
     tmp_path, monkeypatch
 ) -> None:

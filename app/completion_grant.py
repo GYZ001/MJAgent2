@@ -351,18 +351,21 @@ def _narrative_review_material(
     *,
     screenplay_material: dict[str, Any],
 ) -> dict[str, Any]:
-    if not screenplay_material.get("narrative_authority_required"):
-        return {"required": False, "verified": True}
-    from app.domain.review_wall import _review_upstream_snapshot
+    """Keep the legacy qualification slot explicitly score-only.
 
-    snapshot = _review_upstream_snapshot(episode_id)
-    authority = dict(snapshot.get("narrative_authority") or {})
-    if not authority.get("required") or not authority.get("verified"):
-        raise ValueError("narrative release authority is not currently verified")
-    # Deliberately exclude gallery/episode lifecycle facts. They are production
-    # inputs, not authored release identity, and asset preparation may update
-    # them without changing the approved story.
-    return authority
+    Storyboard release authority is already verified by
+    ``_storyboard_release_material``. Optional audience scoring is not an
+    authored input and must not invalidate a paid-work grant when it changes.
+    """
+    return {
+        "required": False,
+        "verified": True,
+        "evaluation_role": "score_only",
+        "episode_id": episode_id,
+        "narrative_project": bool(
+            screenplay_material.get("narrative_authority_required")
+        ),
+    }
 
 
 def _generation_plan_material(

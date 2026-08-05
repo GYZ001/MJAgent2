@@ -654,7 +654,7 @@ async def test_storyboard_publish_rejects_review_gate_from_another_candidate(
     )
     wrong_review = _runtime_gate(reviewed_candidate["id"], evaluator_name="narrative_blind_comparator")
 
-    with pytest.raises(ValueError, match="冷观众多先验审读未通过或已失效"):
+    with pytest.raises(ValueError, match="其他 Artifact"):
         publish_storyboard(
             **case["publish_kwargs"],
             evaluation_ids=[wrong_review["id"]],
@@ -674,7 +674,7 @@ async def test_storyboard_publish_rejects_review_gate_from_another_candidate(
 
 
 @pytest.mark.asyncio
-async def test_storyboard_publish_rejects_stale_review_report(monkeypatch) -> None:
+async def test_storyboard_publish_ignores_stale_optional_review_report(monkeypatch) -> None:
     case = await _reviewed_publish_candidate(monkeypatch)
     conn = db.get_conn()
     conn.execute(
@@ -683,17 +683,15 @@ async def test_storyboard_publish_rejects_stale_review_report(monkeypatch) -> No
     )
     conn.commit()
 
-    with pytest.raises(ValueError, match="NARRATIVE_REVIEW_REPORT_INVALID"):
-        publish_storyboard(
-            **case["publish_kwargs"],
-            evaluation_ids=[case["exact_review"]["id"]],
-        )
-
-    _assert_storyboard_not_published(case["revision"].id)
+    result = publish_storyboard(
+        **case["publish_kwargs"],
+        evaluation_ids=[case["full_gate"]["id"]],
+    )
+    assert result["artifact_id"] == case["working_candidate"]["id"]
 
 
 @pytest.mark.asyncio
-async def test_storyboard_publish_rejects_pass_json_without_report_gate(
+async def test_storyboard_publish_does_not_require_optional_report_gate(
     monkeypatch,
 ) -> None:
     case = await _reviewed_publish_candidate(monkeypatch)
@@ -704,17 +702,15 @@ async def test_storyboard_publish_rejects_pass_json_without_report_gate(
     )
     conn.commit()
 
-    with pytest.raises(ValueError, match="NARRATIVE_REVIEW_GATE_MISSING"):
-        publish_storyboard(
-            **case["publish_kwargs"],
-            evaluation_ids=[case["exact_review"]["id"]],
-        )
-
-    _assert_storyboard_not_published(case["revision"].id)
+    result = publish_storyboard(
+        **case["publish_kwargs"],
+        evaluation_ids=[case["full_gate"]["id"]],
+    )
+    assert result["artifact_id"] == case["working_candidate"]["id"]
 
 
 @pytest.mark.asyncio
-async def test_storyboard_publish_rejects_review_input_without_current_shot_lineage(
+async def test_storyboard_publish_ignores_optional_review_input_lineage(
     monkeypatch,
 ) -> None:
     case = await _reviewed_publish_candidate(monkeypatch)
@@ -728,17 +724,15 @@ async def test_storyboard_publish_rejects_review_input_without_current_shot_line
     )
     conn.commit()
 
-    with pytest.raises(ValueError, match="NARRATIVE_REVIEW_LINEAGE_DRIFT"):
-        publish_storyboard(
-            **case["publish_kwargs"],
-            evaluation_ids=[case["exact_review"]["id"]],
-        )
-
-    _assert_storyboard_not_published(case["revision"].id)
+    result = publish_storyboard(
+        **case["publish_kwargs"],
+        evaluation_ids=[case["full_gate"]["id"]],
+    )
+    assert result["artifact_id"] == case["working_candidate"]["id"]
 
 
 @pytest.mark.asyncio
-async def test_storyboard_publish_rejects_observation_without_review_input_lineage(
+async def test_storyboard_publish_ignores_optional_observation_lineage(
     monkeypatch,
 ) -> None:
     case = await _reviewed_publish_candidate(monkeypatch)
@@ -750,17 +744,15 @@ async def test_storyboard_publish_rejects_observation_without_review_input_linea
     )
     conn.commit()
 
-    with pytest.raises(ValueError, match="NARRATIVE_REVIEW_OBSERVATION_LINEAGE_INVALID"):
-        publish_storyboard(
-            **case["publish_kwargs"],
-            evaluation_ids=[case["exact_review"]["id"]],
-        )
-
-    _assert_storyboard_not_published(case["revision"].id)
+    result = publish_storyboard(
+        **case["publish_kwargs"],
+        evaluation_ids=[case["full_gate"]["id"]],
+    )
+    assert result["artifact_id"] == case["working_candidate"]["id"]
 
 
 @pytest.mark.asyncio
-async def test_storyboard_publish_rejects_observation_without_isolation_gate(
+async def test_storyboard_publish_ignores_optional_observation_isolation_gate(
     monkeypatch,
 ) -> None:
     case = await _reviewed_publish_candidate(monkeypatch)
@@ -772,13 +764,11 @@ async def test_storyboard_publish_rejects_observation_without_isolation_gate(
     )
     conn.commit()
 
-    with pytest.raises(ValueError, match="NARRATIVE_REVIEW_ISOLATION_GATE_MISSING"):
-        publish_storyboard(
-            **case["publish_kwargs"],
-            evaluation_ids=[case["exact_review"]["id"]],
-        )
-
-    _assert_storyboard_not_published(case["revision"].id)
+    result = publish_storyboard(
+        **case["publish_kwargs"],
+        evaluation_ids=[case["full_gate"]["id"]],
+    )
+    assert result["artifact_id"] == case["working_candidate"]["id"]
 
 
 @pytest.mark.asyncio

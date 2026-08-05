@@ -247,12 +247,6 @@ def current_storyboard_release_manifest(
     certificate_id = str(
         _row_value(episode, "storyboard_completion_certificate_id", "") or ""
     )
-    review_artifact_id = str(
-        _row_value(episode, "narrative_review_artifact_id", "") or ""
-    )
-    calibration_artifact_id = str(
-        _row_value(episode, "narrative_calibration_artifact_id", "") or ""
-    )
     from app.production.screenplay_authority import (
         episode_requires_immutable_screenplay_authority,
         resolve_downstream_screenplay,
@@ -293,10 +287,8 @@ def current_storyboard_release_manifest(
         not published_artifact_id
         or published_artifact_id != projected_artifact_id
         or not certificate_id
-        or not review_artifact_id
-        or not calibration_artifact_id
     ):
-        raise ValueError("叙事项目缺少当前分镜 Artifact/凭证/冷观众审读/真人校准绑定")
+        raise ValueError("叙事项目缺少当前分镜 Artifact 或完成凭证绑定")
     artifact_id = published_artifact_id or projected_artifact_id
     if not artifact_id:
         raise ValueError("当前分镜缺少已发布 Artifact")
@@ -348,20 +340,20 @@ def current_storyboard_release_manifest(
             current_storyboard_content=board.model_dump(mode="json"),
         )
     qualification_hash = _hash({
-        "manifest_version": "storyboard-release-manifest.v1",
+        "manifest_version": "storyboard-release-manifest.v2",
         "episode_id": episode_id,
         "published_storyboard_artifact_id": artifact_id,
         "published_storyboard_artifact_hash": artifact_hash,
         "completion_certificate_id": certificate_id,
-        "narrative_review_artifact_id": review_artifact_id,
-        "narrative_calibration_artifact_id": calibration_artifact_id,
     })
     return {
         "published_storyboard_artifact_id": artifact_id,
         "published_storyboard_artifact_hash": artifact_hash,
         "completion_certificate_id": certificate_id,
-        "narrative_review_artifact_id": review_artifact_id,
-        "narrative_calibration_artifact_id": calibration_artifact_id,
+        # Deprecated compatibility fields. Optional QA must not alter release
+        # identity or invalidate an already published generation plan.
+        "narrative_review_artifact_id": "",
+        "narrative_calibration_artifact_id": "",
         "release_qualification_hash": qualification_hash,
     }
 
@@ -571,8 +563,6 @@ def validate_episode_plan(
             "published_storyboard_artifact_id",
             "published_storyboard_artifact_hash",
             "completion_certificate_id",
-            "narrative_review_artifact_id",
-            "narrative_calibration_artifact_id",
             "release_qualification_hash",
         )
         for field in release_fields:

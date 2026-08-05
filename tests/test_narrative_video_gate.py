@@ -34,7 +34,8 @@ async def _published_narrative_case(monkeypatch) -> dict:
     )
     conn = db.get_conn()
     conn.execute(
-        "UPDATE episodes SET narrative_status='ready', narrative_review_artifact_id=? WHERE id='episode-generic'",
+        "UPDATE episodes SET status='confirmed', narrative_status='ready', "
+        "narrative_review_artifact_id=? WHERE id='episode-generic'",
         (case["report_artifact"]["id"],),
     )
     conn.commit()
@@ -56,17 +57,11 @@ def _episode_and_live_evaluation(case: dict):
     return episode, evaluation
 
 
-def _assert_narrative_review_rejected(case: dict) -> None:
+def _assert_optional_review_does_not_revoke_authority(case: dict) -> None:
     episode, evaluation = _episode_and_live_evaluation(case)
-    assert video_ops._has_current_storyboard_completion_certificate(db.get_conn(), episode) is False
-    assert any("NARRATIVE_REVIEW_MISSING" in error for error in evaluation.errors)
-    with pytest.raises(HTTPException) as generation_error:
-        video_ops._assert_storyboard_generation_gate("episode-generic")
-    assert generation_error.value.status_code == 409
-    with pytest.raises(HTTPException) as preview_error:
-        video_ops.create_storyboard_confirmation_preview("episode-generic")
-    assert preview_error.value.status_code == 409
-    assert any("NARRATIVE_REVIEW_MISSING" in error for error in preview_error.value.detail["hard_gates"]["errors"])
+    assert video_ops._has_current_storyboard_completion_certificate(db.get_conn(), episode) is True
+    assert not any("NARRATIVE_REVIEW_MISSING" in error for error in evaluation.errors)
+    video_ops._assert_storyboard_generation_gate("episode-generic")
 
 
 @pytest.mark.asyncio
@@ -111,7 +106,7 @@ async def test_internal_enqueue_checks_narrative_authority_before_creating_job(
 
     monkeypatch.setattr(worker, "_begin_video_preflight_job", should_not_begin)
 
-    with pytest.raises(ValueError, match="NARRATIVE_CERTIFICATE_REQUIRED"):
+    with pytest.raises(ValueError, match="STORYBOARD_CONFIRMATION_REQUIRED"):
         worker.enqueue_shot("shot-row-1")
 
     assert began_preflight is False
@@ -121,6 +116,10 @@ def test_internal_enqueue_preserves_explicit_plan_null_compatibility() -> None:
     screenplay = _screenplay()
     screenplay.narrative_plan = None
     _persist_review_projection(screenplay, _board())
+    db.get_conn().execute(
+        "UPDATE episodes SET status='confirmed' WHERE id='episode-generic'"
+    )
+    db.get_conn().commit()
     from app import worker
 
     worker._assert_enqueue_storyboard_authority("shot-row-1")
@@ -193,7 +192,7 @@ async def test_video_release_manifest_cannot_downgrade_modern_authority_to_legac
     conn = db.get_conn()
     manifest = current_storyboard_release_manifest("episode-generic", conn=conn)
     assert manifest["completion_certificate_id"]
-    assert manifest["narrative_review_artifact_id"]
+    assert manifest["narrative_review_artifact_id"] == ""
 
     if downgrade == "missing_projection":
         conn.execute(
@@ -411,7 +410,7 @@ async def test_confirmation_authority_failure_never_mutates_target_duration(
 
 
 @pytest.mark.asyncio
-async def test_video_gate_rejects_stale_review_behind_current_certificate(
+async def test_video_gate_ignores_stale_optional_review_behind_current_certificate(
     monkeypatch,
 ) -> None:
     case = await _published_narrative_case(monkeypatch)
@@ -422,11 +421,11 @@ async def test_video_gate_rejects_stale_review_behind_current_certificate(
     )
     conn.commit()
 
-    _assert_narrative_review_rejected(case)
+    _assert_optional_review_does_not_revoke_authority(case)
 
 
 @pytest.mark.asyncio
-async def test_confirmed_idempotency_revalidates_stale_narrative_evidence(
+async def test_confirmed_idempotency_ignores_stale_optional_review(
     monkeypatch,
 ) -> None:
     case = await _published_narrative_case(monkeypatch)
@@ -440,12 +439,13 @@ async def test_confirmed_idempotency_revalidates_stale_narrative_evidence(
     )
     conn.commit()
 
-    with pytest.raises(ValueError, match="不能幂等重申确认"):
-        video_ops.confirm_episode_core("episode-generic")
+    result = video_ops.confirm_episode_core("episode-generic")
+    assert result["confirmed"] is True
+    assert result["idempotent"] is True
 
 
 @pytest.mark.asyncio
-async def test_video_gate_rejects_review_pointer_not_in_storyboard_lineage(
+async def test_video_gate_ignores_optional_review_pointer_lineage(
     monkeypatch,
 ) -> None:
     case = await _published_narrative_case(monkeypatch)
@@ -460,11 +460,11 @@ async def test_video_gate_rejects_review_pointer_not_in_storyboard_lineage(
     )
     conn.commit()
 
-    _assert_narrative_review_rejected(case)
+    _assert_optional_review_does_not_revoke_authority(case)
 
 
 @pytest.mark.asyncio
-async def test_video_gate_rejects_review_input_without_current_shot_lineage(
+async def test_video_gate_ignores_optional_review_input_lineage(
     monkeypatch,
 ) -> None:
     case = await _published_narrative_case(monkeypatch)
@@ -478,4 +478,4 @@ async def test_video_gate_rejects_review_input_without_current_shot_lineage(
     )
     conn.commit()
 
-    _assert_narrative_review_rejected(case)
+    _assert_optional_review_does_not_revoke_authority(case)

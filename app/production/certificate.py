@@ -329,7 +329,7 @@ def issue_completion_certificate(
         raise ValueError("完成凭证引用了其他 Artifact 的 Evaluation")
     runtime_gates = [
         row for row in rows
-        if row["evaluation_role"] in {"runtime_gate", "business_safety"}
+        if row["evaluation_role"] == "business_safety"
     ]
     if any(
         not bool(row["hard_gate_passed"])
@@ -543,7 +543,7 @@ def verify_completion_certificate(
     if narrative_authority:
         runtime_gates = [
             row for row in rows
-            if row["evaluation_role"] in {"runtime_gate", "business_safety"}
+            if row["evaluation_role"] == "business_safety"
         ]
         if any(
             not bool(row["runtime_blocking"])
