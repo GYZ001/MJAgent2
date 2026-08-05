@@ -2531,6 +2531,21 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                             actual_mode=actual_mode,
                             write_point="provider_non_cancellable",
                         )
+                        from app.completion_grant import reserve_provider_video_budget
+
+                        budget_claimed = reserve_provider_video_budget(
+                            episode_id=str(job["episode_id"]),
+                            job_id=job_id,
+                            version_id=str(version["id"]),
+                            operation_id=provider_operation_id,
+                            amount_cny=shot_cost_cny(int(shot["duration_s"] or 0)),
+                            conn=conn,
+                        )
+                        if budget_claimed is False:
+                            raise VideoBudgetAuthorizationError(
+                                "本次供应商视频调用将超过用户已批准的费用上限；"
+                                "任务已在付费调用前暂停"
+                            )
                         marked = conn.execute(
                             """UPDATE jobs
                                SET provider_non_cancellable=1, updated_at=?
@@ -2587,6 +2602,14 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                                     "version_no": version["version_no"],
                                     "operation_id": provider_operation_id,
                                 })
+                            from app.completion_grant import mark_provider_video_budget_claim
+
+                            mark_provider_video_budget_claim(
+                                provider_operation_id,
+                                "accepted",
+                                conn=conn,
+                            )
+                            conn.commit()
                             report_healthy(media_stages.RESOURCE_VIDEO_SUBMIT)
                         except ProviderError as submit_exc:
                             if getattr(submit_exc, "retryable", False) or "429" in str(submit_exc):
@@ -2595,6 +2618,14 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                     _assert_job_lease(job_id, owner)
                 except ProviderError as exc:
                     _assert_job_lease(job_id, owner)
+                    if not exc.retryable:
+                        from app.completion_grant import mark_provider_video_budget_claim
+
+                        mark_provider_video_budget_claim(
+                            provider_operation_id,
+                            "released",
+                            conn=conn,
+                        )
                     conn.execute(
                         "UPDATE jobs SET provider_create_state=?, provider_non_cancellable=?, "
                         "updated_at=? WHERE id=?",
@@ -2846,6 +2877,9 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         _set_version(version["id"], status="succeeded", error=None, video_path=str(dest),
                      last_frame_url=result["last_frame_url"], cost_cny=cost, latency_s=latency,
                      image_inputs=json.dumps(meta, ensure_ascii=False))
+        from app.completion_grant import mark_provider_video_budget_claim
+
+        mark_provider_video_budget_claim(provider_operation_id, "settled")
         if meta.get("shot_plan_id"):
             from app.video_plan import VideoGenerationMode, get_shot_plan, record_mode_attempt
             active_shot_plan = get_shot_plan(job["shot_id"], conn=conn)
@@ -2962,6 +2996,37 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             media_scheduler.settle_budget(job_id, cost, success=True)
             reconcile_episode_generation_status(job["episode_id"])
     except LeaseLost:
+        return
+    except VideoBudgetAuthorizationError as exc:
+        message = str(exc)
+        conn.execute(
+            """UPDATE jobs
+                  SET status='paused_budget',error=?,reason_code='VIDEO_BUDGET_NOT_AUTHORIZED',
+                      reason_text=?,provider_non_cancellable=0,
+                      provider_create_state='not_started',
+                      lease_owner=NULL,lease_expires_at=NULL,next_retry_at=NULL,
+                      updated_at=?
+                WHERE id=? AND status='running' AND lease_owner=?""",
+            (message, message, now(), job_id, owner),
+        )
+        conn.execute(
+            "UPDATE shot_versions SET status='paused_budget',error=? WHERE id=?",
+            (message, version["id"]),
+        )
+        conn.execute(
+            """UPDATE budget_reservations
+                  SET status='released',settled_at=?,actual_cost_cny=0
+                WHERE job_id=? AND status IN ('reserved','running')""",
+            (now(), job_id),
+        )
+        conn.commit()
+        mark_media_job_state(
+            _row_value(job, "run_id"),
+            _row_value(job, "step_run_id"),
+            "paused_budget",
+            message,
+        )
+        reconcile_episode_generation_status(job["episode_id"])
         return
     except VideoPlanStaleFence as exc:
         public = str(exc)

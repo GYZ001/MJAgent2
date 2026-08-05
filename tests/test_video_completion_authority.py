@@ -7,7 +7,11 @@ import pytest
 from app import db
 from app.completion_grant import (
     GrantValidationError,
+    authorize_episode_video_budget_increment,
+    episode_video_budget_snapshot,
     issue_video_completion_grant,
+    mark_provider_video_budget_claim,
+    reserve_provider_video_budget,
     validate_video_grant,
 )
 from app.schemas import Bible, Shot, Storyboard, World
@@ -40,6 +44,92 @@ def _issue_published_grant(case: dict):
         shots_total=len(case["board"].shots),
     )
     return grant
+
+
+def test_provider_video_budget_claims_never_exceed_approved_cap() -> None:
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO projects(id,name,status,created_at) VALUES('budget-p','P','created',1)"
+    )
+    conn.execute(
+        """INSERT INTO episodes(id,project_id,episode_no,status,created_at)
+           VALUES('budget-e','budget-p',1,'confirmed',1)"""
+    )
+    conn.execute(
+        """INSERT INTO shots(
+               id,episode_id,shot_no,duration_s,characters,dialogues
+           ) VALUES('budget-s','budget-e',1,5,'[]','[]')"""
+    )
+    for index in (1, 2):
+        conn.execute(
+            """INSERT INTO shot_versions(
+                   id,shot_id,version_no,prompt_text,idem_key,status,created_at
+               ) VALUES(?,?,?,?,?,'queued',1)""",
+            (
+                f"budget-v{index}",
+                "budget-s",
+                index,
+                "prompt",
+                f"budget-key-{index}",
+            ),
+        )
+        conn.execute(
+            """INSERT INTO jobs(
+                   id,kind,shot_id,version_id,episode_id,project_id,status,
+                   created_at,updated_at
+               ) VALUES(?,?,?,?,?,?,'queued',1,1)""",
+            (
+                f"budget-j{index}",
+                "video",
+                "budget-s",
+                f"budget-v{index}",
+                "budget-e",
+                "budget-p",
+            ),
+        )
+    conn.commit()
+
+    cap = authorize_episode_video_budget_increment(
+        "budget-e",
+        4.0,
+        source="test-approval",
+    )
+    assert cap == 4.0
+    assert reserve_provider_video_budget(
+        episode_id="budget-e",
+        job_id="budget-j1",
+        version_id="budget-v1",
+        operation_id="video-create-budget-v1",
+        amount_cny=4.0,
+    ) is True
+    mark_provider_video_budget_claim("video-create-budget-v1", "accepted")
+    assert reserve_provider_video_budget(
+        episode_id="budget-e",
+        job_id="budget-j2",
+        version_id="budget-v2",
+        operation_id="video-create-budget-v2",
+        amount_cny=4.0,
+    ) is False
+    assert episode_video_budget_snapshot("budget-e") == {
+        "baseline_cny": 0.0,
+        "claimed_cny": 4.0,
+        "used_cny": 4.0,
+        "cap_cny": 4.0,
+        "remaining_cny": 0.0,
+    }
+
+    authorize_episode_video_budget_increment(
+        "budget-e",
+        4.0,
+        source="test-topup",
+    )
+    assert reserve_provider_video_budget(
+        episode_id="budget-e",
+        job_id="budget-j2",
+        version_id="budget-v2",
+        operation_id="video-create-budget-v2",
+        amount_cny=4.0,
+    ) is True
 
 
 @pytest.mark.parametrize("drift", ["certificate", "shots"])

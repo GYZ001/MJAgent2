@@ -8,8 +8,21 @@ from app.capabilities.schemas import CommandResult
 
 async def generate_episode(args: I.EpisodeScopedInput) -> CommandResult:
     from app import api
+    from app.capabilities.preflight import video_generate_episode
+    from app.completion_grant import authorize_episode_video_budget_increment
 
-    outcome = await call_guarded(api._generate_episode_core, args.episode_id, {})
+    approved_cost = float(video_generate_episode(args).estimated_cost_cny or 0)
+    if approved_cost > 0:
+        authorize_episode_video_budget_increment(
+            args.episode_id,
+            approved_cost,
+            source="capability:video.generate_episode",
+        )
+    outcome = await call_guarded(
+        api._generate_episode_core,
+        args.episode_id,
+        {"authorized_video_cost_cny": approved_cost},
+    )
     if isinstance(outcome, CommandResult):
         return outcome
     enqueued = outcome.get("enqueued") or []
@@ -74,6 +87,22 @@ async def complete_project(args: I.VideoCompleteProjectInput) -> CommandResult:
 
 async def generate_shot(args: I.VideoGenerateShotInput) -> CommandResult:
     from app import api
+    from app.capabilities.preflight import video_generate_shot
+    from app.completion_grant import authorize_episode_video_budget_increment
+
+    approved_cost = float(video_generate_shot(args).estimated_cost_cny or 0)
+    if approved_cost > 0:
+        from app.db import get_conn
+
+        shot = get_conn().execute(
+            "SELECT episode_id FROM shots WHERE id=?", (args.shot_id,),
+        ).fetchone()
+        if shot:
+            authorize_episode_video_budget_increment(
+                str(shot["episode_id"]),
+                approved_cost,
+                source="capability:video.generate_shot",
+            )
 
     body = {
         "prompt_override": args.prompt_override,
@@ -82,6 +111,7 @@ async def generate_shot(args: I.VideoGenerateShotInput) -> CommandResult:
         "qualification_version": args.qualification_version,
         "idempotency_key": args.idempotency_key,
         "request_id": args.request_id,
+        "authorized_video_cost_cny": approved_cost,
     }
     outcome = await call_guarded(api._generate_shot_core, args.shot_id, body)
     if isinstance(outcome, CommandResult):

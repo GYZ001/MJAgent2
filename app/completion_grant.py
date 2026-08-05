@@ -48,6 +48,263 @@ class VideoCompletionGrant(BaseModel):
     revoked_at: float | None = None
 
 
+class VideoBudgetAuthorizationError(RuntimeError):
+    """A payable provider video call would exceed the user-approved cap."""
+
+
+def ensure_video_budget_authority_tables(conn=None) -> None:
+    db = conn or get_conn()
+    db.executescript(
+        """CREATE TABLE IF NOT EXISTS episode_video_budget_authorities (
+               episode_id TEXT PRIMARY KEY,
+               baseline_cny REAL NOT NULL DEFAULT 0,
+               cap_cny REAL NOT NULL,
+               source TEXT NOT NULL,
+               authorized_at REAL NOT NULL,
+               updated_at REAL NOT NULL,
+               FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE
+           );
+           CREATE TABLE IF NOT EXISTS provider_video_budget_claims (
+               operation_id TEXT PRIMARY KEY,
+               episode_id TEXT NOT NULL,
+               job_id TEXT NOT NULL,
+               version_id TEXT NOT NULL,
+               amount_cny REAL NOT NULL,
+               status TEXT NOT NULL,
+               created_at REAL NOT NULL,
+               updated_at REAL NOT NULL,
+               FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE,
+               FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+               FOREIGN KEY(version_id) REFERENCES shot_versions(id) ON DELETE CASCADE
+           );
+           CREATE INDEX IF NOT EXISTS idx_provider_video_budget_episode
+               ON provider_video_budget_claims(episode_id,status);"""
+    )
+    if conn is None:
+        db.commit()
+
+
+def _historical_video_liability(episode_id: str, *, conn) -> float:
+    """Best available cost for provider tasks accepted before the claim ledger."""
+    from app.compiler import shot_cost_cny
+
+    rows = conn.execute(
+        """SELECT v.cost_cny,v.provider_task_id,v.image_inputs,s.duration_s
+             FROM shot_versions v
+             JOIN shots s ON s.id=v.shot_id
+            WHERE s.episode_id=?
+              AND (
+                  COALESCE(v.cost_cny,0)>0
+                  OR (v.provider_task_id IS NOT NULL AND v.provider_task_id!='')
+              )""",
+        (episode_id,),
+    ).fetchall()
+    total = 0.0
+    for row in rows:
+        cost = float(row["cost_cny"] or 0)
+        if cost > 0:
+            total += cost
+            continue
+        try:
+            meta = json.loads(row["image_inputs"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            meta = {}
+        attempts = max(1, int(meta.get("provider_paid_attempts") or 0))
+        total += shot_cost_cny(int(row["duration_s"] or 0)) * attempts
+    return round(total, 6)
+
+
+def authorize_episode_video_budget_increment(
+    episode_id: str,
+    increment_cny: float,
+    *,
+    source: str,
+    conn=None,
+) -> float:
+    """Add one explicitly approved payable-video amount to the episode cap."""
+    amount = float(increment_cny)
+    if not math.isfinite(amount) or amount < 0:
+        raise ValueError("视频授权额度必须是非负有限数")
+    db = conn or get_conn()
+    ensure_video_budget_authority_tables(db)
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        current = db.execute(
+            "SELECT baseline_cny,cap_cny FROM episode_video_budget_authorities WHERE episode_id=?",
+            (episode_id,),
+        ).fetchone()
+        stamp = now()
+        if current:
+            baseline = float(current["baseline_cny"] or 0)
+            cap = float(current["cap_cny"] or 0) + amount
+        else:
+            baseline = _historical_video_liability(episode_id, conn=db)
+            cap = baseline + amount
+        db.execute(
+            """INSERT INTO episode_video_budget_authorities(
+                   episode_id,baseline_cny,cap_cny,source,authorized_at,updated_at
+               ) VALUES(?,?,?,?,?,?)
+               ON CONFLICT(episode_id) DO UPDATE SET
+                   cap_cny=excluded.cap_cny,source=excluded.source,
+                   authorized_at=excluded.authorized_at,updated_at=excluded.updated_at""",
+            (episode_id, baseline, cap, source, stamp, stamp),
+        )
+        db.commit()
+        return round(cap, 6)
+    except Exception:
+        db.rollback()
+        raise
+
+
+def authorize_episode_video_budget_absolute(
+    episode_id: str,
+    cap_cny: float,
+    *,
+    source: str,
+    conn=None,
+) -> float:
+    """Persist an absolute completion-run cap without forgetting sunk liability."""
+    requested = float(cap_cny)
+    if not math.isfinite(requested) or requested < 0:
+        raise ValueError("视频授权上限必须是非负有限数")
+    db = conn or get_conn()
+    ensure_video_budget_authority_tables(db)
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        current = db.execute(
+            "SELECT baseline_cny,cap_cny FROM episode_video_budget_authorities WHERE episode_id=?",
+            (episode_id,),
+        ).fetchone()
+        baseline = (
+            float(current["baseline_cny"] or 0)
+            if current else _historical_video_liability(episode_id, conn=db)
+        )
+        cap = max(
+            baseline,
+            requested,
+            float(current["cap_cny"] or 0) if current else 0.0,
+        )
+        stamp = now()
+        db.execute(
+            """INSERT INTO episode_video_budget_authorities(
+                   episode_id,baseline_cny,cap_cny,source,authorized_at,updated_at
+               ) VALUES(?,?,?,?,?,?)
+               ON CONFLICT(episode_id) DO UPDATE SET
+                   cap_cny=excluded.cap_cny,source=excluded.source,
+                   authorized_at=excluded.authorized_at,updated_at=excluded.updated_at""",
+            (episode_id, baseline, cap, source, stamp, stamp),
+        )
+        db.commit()
+        return round(cap, 6)
+    except Exception:
+        db.rollback()
+        raise
+
+
+def episode_video_budget_snapshot(episode_id: str, *, conn=None) -> dict[str, float] | None:
+    db = conn or get_conn()
+    ensure_video_budget_authority_tables(db)
+    row = db.execute(
+        "SELECT baseline_cny,cap_cny FROM episode_video_budget_authorities WHERE episode_id=?",
+        (episode_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    claimed = float(db.execute(
+        """SELECT COALESCE(SUM(amount_cny),0) AS amount
+             FROM provider_video_budget_claims
+            WHERE episode_id=? AND status!='released'""",
+        (episode_id,),
+    ).fetchone()["amount"] or 0)
+    baseline = float(row["baseline_cny"] or 0)
+    cap = float(row["cap_cny"] or 0)
+    return {
+        "baseline_cny": baseline,
+        "claimed_cny": claimed,
+        "used_cny": round(baseline + claimed, 6),
+        "cap_cny": cap,
+        "remaining_cny": round(max(0.0, cap - baseline - claimed), 6),
+    }
+
+
+def reserve_provider_video_budget(
+    *,
+    episode_id: str,
+    job_id: str,
+    version_id: str,
+    operation_id: str,
+    amount_cny: float,
+    conn=None,
+) -> bool | None:
+    """Atomically claim one provider create cost.
+
+    ``None`` is the explicit legacy compatibility result when no user approval
+    ledger exists. Modern public paid commands create the ledger before enqueue.
+    """
+    amount = max(0.0, float(amount_cny))
+    db = conn or get_conn()
+    ensure_video_budget_authority_tables(db)
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        authority = db.execute(
+            "SELECT baseline_cny,cap_cny FROM episode_video_budget_authorities WHERE episode_id=?",
+            (episode_id,),
+        ).fetchone()
+        if authority is None:
+            db.commit()
+            return None
+        existing = db.execute(
+            "SELECT status FROM provider_video_budget_claims WHERE operation_id=?",
+            (operation_id,),
+        ).fetchone()
+        if existing and existing["status"] != "released":
+            db.commit()
+            return True
+        claimed = float(db.execute(
+            """SELECT COALESCE(SUM(amount_cny),0) AS amount
+                 FROM provider_video_budget_claims
+                WHERE episode_id=? AND status!='released'""",
+            (episode_id,),
+        ).fetchone()["amount"] or 0)
+        used = float(authority["baseline_cny"] or 0) + claimed
+        cap = float(authority["cap_cny"] or 0)
+        if used + amount > cap + 1e-9:
+            db.rollback()
+            return False
+        stamp = now()
+        db.execute(
+            """INSERT INTO provider_video_budget_claims(
+                   operation_id,episode_id,job_id,version_id,amount_cny,
+                   status,created_at,updated_at
+               ) VALUES(?,?,?,?,?,'reserved',?,?)
+               ON CONFLICT(operation_id) DO UPDATE SET
+                   status='reserved',updated_at=excluded.updated_at""",
+            (operation_id, episode_id, job_id, version_id, amount, stamp, stamp),
+        )
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        raise
+
+
+def mark_provider_video_budget_claim(
+    operation_id: str,
+    status: Literal["accepted", "settled", "released"],
+    *,
+    conn=None,
+) -> None:
+    db = conn or get_conn()
+    ensure_video_budget_authority_tables(db)
+    db.execute(
+        """UPDATE provider_video_budget_claims
+              SET status=?,updated_at=? WHERE operation_id=?""",
+        (status, now(), operation_id),
+    )
+    if conn is None:
+        db.commit()
+
+
 def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
@@ -548,6 +805,12 @@ def issue_video_completion_grant(
         ),
     )
     conn.commit()
+    authorize_episode_video_budget_absolute(
+        episode_id,
+        cap,
+        source=f"completion_grant:{grant_id}",
+        conn=conn,
+    )
     grant = VideoCompletionGrant(
         grant_id=grant_id,
         episode_id=episode_id,
@@ -811,6 +1074,12 @@ def bump_video_grant_budget(
         (new_cap, new_wall, new_deadline, new_expires, grant_id),
     )
     conn.commit()
+    authorize_episode_video_budget_absolute(
+        grant.episode_id,
+        new_cap,
+        source=f"completion_grant_topup:{grant_id}",
+        conn=conn,
+    )
     updated = get_video_grant(grant_id)
     assert updated is not None
     return updated

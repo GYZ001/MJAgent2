@@ -306,9 +306,11 @@ def video_clear_shot(args) -> PreflightResult:
 
 
 def video_generate_shot(args) -> PreflightResult:
+    from app.compiler import shot_cost_cny
+
     conn = get_conn()
     shot = conn.execute(
-        "SELECT id, shot_no, episode_id FROM shots WHERE id=?", (args.shot_id,)
+        "SELECT id, shot_no, episode_id, duration_s FROM shots WHERE id=?", (args.shot_id,)
     ).fetchone()
     if not shot:
         return PreflightResult(
@@ -326,8 +328,7 @@ def video_generate_shot(args) -> PreflightResult:
         "SELECT id, status, episode_no FROM episodes WHERE id=?", (shot["episode_id"],)
     ).fetchone()
     confirmed = bool(ep and ep["status"] in {"confirmed", "generating", "done", "mixed"})
-    # 粗估：单镜视频默认成本上限，实际以预算预留为准
-    estimated = 3.6
+    estimated = float(shot_cost_cny(int(shot["duration_s"] or 0)))
     return PreflightResult(
         command="video.generate_shot",
         allowed=True,
@@ -354,6 +355,8 @@ def video_generate_shot(args) -> PreflightResult:
 
 
 def video_generate_episode(args) -> PreflightResult:
+    from app.compiler import shot_cost_cny
+
     conn = get_conn()
     ep = conn.execute(
         "SELECT id, episode_no, status FROM episodes WHERE id=?", (args.episode_id,)
@@ -395,7 +398,21 @@ def video_generate_episode(args) -> PreflightResult:
     total = conn.execute(
         "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (args.episode_id,)
     ).fetchone()["c"]
-    estimated = round(max(int(pending or 0), 1) * 3.6, 2)
+    payable_rows = conn.execute(
+        """SELECT s.duration_s FROM shots s
+            WHERE s.episode_id=?
+              AND (s.adopted_version_id IS NULL OR s.adopted_version_id='')
+              AND NOT EXISTS (
+                  SELECT 1 FROM shot_versions v
+                   WHERE v.shot_id=s.id AND v.status='succeeded'
+                     AND v.video_path IS NOT NULL AND v.video_path!=''
+              )""",
+        (args.episode_id,),
+    ).fetchall()
+    estimated = round(sum(
+        shot_cost_cny(int(row["duration_s"] or 0))
+        for row in payable_rows
+    ), 2)
     confirmed = ep["status"] in {"confirmed", "generating", "done", "mixed"}
     return PreflightResult(
         command="video.generate_episode",
