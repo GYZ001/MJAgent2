@@ -2933,7 +2933,6 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
         ))
         return list(dict.fromkeys(errors))
 
-    narrative_outline = screenplay.narrative_plan is not None
     outline_loop = AgentLoop(
         stage_key="storyboard_outline",
         contract_key="storyboard",
@@ -2942,13 +2941,19 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
         scope_id=str(episode.get("id") or f"episode-{episode['episode_no']}"),
         artifact_type="storyboard_outline",
         policy=AgentLoopPolicy(
-            max_iterations=8 if narrative_outline else 1,
-            stall_rounds=4 if narrative_outline else 1,
-            min_quality_gain=0.01 if narrative_outline else 0.03,
-            no_gain_rounds=4 if narrative_outline else 1,
+            max_iterations=2,
+            stall_rounds=2,
+            min_quality_gain=0.03,
+            no_gain_rounds=2,
             allow_warning_candidate=False,
-            repair_all_blockers=narrative_outline,
-            baseline_only=not narrative_outline,
+            repair_issue_codes=frozenset({
+                "OUTLINE_EMPTY",
+                "OUTLINE_HARD_LIMIT",
+                "OUTLINE_ORDER_INVALID",
+                "OUTLINE_DURATION_INVALID",
+            }),
+            repair_all_blockers=False,
+            baseline_only=False,
         ),
     )
     outline = await _run_with_agent_loop(
@@ -2956,7 +2961,7 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
         loop=outline_loop, temperature=0.6,
         max_tokens=config.STORYBOARD_OUTLINE_MAX_TOKENS,
         repair_user_prompt_limit=None,
-        repair_candidate_limit=None if narrative_outline else 6000,
+        repair_candidate_limit=6000,
         prefill={"episode_no": episode["episode_no"]},
     )
     if screenplay.narrative_plan is not None:
@@ -3557,12 +3562,13 @@ source_excerpt 内的双引号必须按 JSON 规范转义，或改用中文引�
         scope_id=f"{episode.get('id') or episode['episode_no']}:{shot_no}",
         artifact_type="storyboard_shot",
         policy=AgentLoopPolicy(
-            max_iterations=4, stall_rounds=2, min_quality_gain=0.03,
-            no_gain_rounds=2, allow_warning_candidate=True,
-            repair_issue_codes=frozenset({
-                "DIALOGUE_FRAMING_INVALID",
-                "ACTION_CAPACITY_EXCEEDED",
-            }),
+            max_iterations=2,
+            stall_rounds=2,
+            min_quality_gain=0.03,
+            no_gain_rounds=2,
+            allow_warning_candidate=False,
+            repair_issue_codes=frozenset(),
+            repair_all_blockers=False,
         ),
     )
     draft = await _run_with_agent_loop(

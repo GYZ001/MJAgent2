@@ -853,7 +853,6 @@ def _finalize_storyboard_evidence(
         from app.narrative import (
             validate_storyboard_narrative,
         )
-        from app.narrative_review import verify_persisted_narrative_review
 
         narrative_errors = validate_storyboard_narrative(
             board,
@@ -866,32 +865,32 @@ def _finalize_storyboard_evidence(
             complete=True,
             expected_scope_id=episode_id,
         )
-        if narrative_errors:
-            raise RuntimeError(
-                "分镜叙事硬门禁未通过：" + "；".join(narrative_errors[:8])
-            )
-        if narrative_review_report is None:
-            raise RuntimeError("分镜冷观众审读报告缺失，禁止发布")
-        try:
-            verified_review_artifact_id = verify_persisted_narrative_review(
-                episode_id=episode_id,
-                screenplay=screenplay,
-                board=board,
-                report=narrative_review_report,
-                artifact_ids=list(narrative_review_artifact_ids or []),
-            )
-        except Exception as exc:  # noqa: BLE001 - persisted release-gate boundary
-            raise RuntimeError(f"分镜冷观众审读未通过或已因分镜变化失效：{exc}") from exc
-        try:
-            from app.narrative_calibration import (
-                assert_report_meets_current_calibration,
-            )
+        findings.extend(narrative_errors)
+        if narrative_review_report is not None:
+            try:
+                from app.narrative_review import verify_persisted_narrative_review
 
-            calibration_authority = assert_report_meets_current_calibration(
-                narrative_review_report,
-            )
-        except Exception as exc:  # noqa: BLE001 - human calibration release gate
-            raise RuntimeError(f"真人一次观看校准未就绪，禁止发布叙事分镜：{exc}") from exc
+                verified_review_artifact_id = verify_persisted_narrative_review(
+                    episode_id=episode_id,
+                    screenplay=screenplay,
+                    board=board,
+                    report=narrative_review_report,
+                    artifact_ids=list(narrative_review_artifact_ids or []),
+                )
+            except Exception as exc:  # noqa: BLE001 - score-only evidence
+                findings.append(f"冷观众审读证据不可用：{exc}")
+            try:
+                from app.narrative_calibration import (
+                    assert_report_meets_current_calibration,
+                )
+
+                calibration_authority = assert_report_meets_current_calibration(
+                    narrative_review_report,
+                )
+            except Exception as exc:  # noqa: BLE001 - optional score-only calibration
+                findings.append(f"一次观看校准未就绪：{exc}")
+        else:
+            findings.append("尚未运行可选的冷观众一次观看评分")
     if _sync_storyboard_scene_bindings(conn, episode_id, board):
         # 这是由当前门禁确定的派生外键修复，即使后续证据发布失败也应保留，
         # 避免下次重试继续读取已经证伪的历史场景绑定。
@@ -908,8 +907,6 @@ def _finalize_storyboard_evidence(
             )
         except Exception as exc:  # noqa: BLE001 - evidence finding is score-only at publish
             findings.append(f"镜头来源证据未绑定：{exc}")
-    if narrative_authority and findings:
-        raise RuntimeError("分镜来源证据硬门禁未通过：" + "；".join(findings[:8]))
     shot_parent_ids: list[str] = []
     for row in shot_rows:
         artifact_id = row["storyboard_artifact_id"]
@@ -961,10 +958,10 @@ def _finalize_storyboard_evidence(
         evaluator_name="storyboard_full_gate",
         evaluator_version=contract_version,
         status="warning" if findings else "passed",
-        hard_gate_passed=not findings,
-        evaluation_role="runtime_gate" if narrative_authority else "score_only",
+        hard_gate_passed=True,
+        evaluation_role="score_only",
         score_status="scored",
-        runtime_blocking=narrative_authority,
+        runtime_blocking=False,
         retry_eligible=False,
         score=max(0, 100 - 10 * len(findings)),
         issues=[Issue(
@@ -984,28 +981,29 @@ def _finalize_storyboard_evidence(
     )
     artifact = evidence_repository.commit_artifact(None, artifact["id"], [evaluation])
     if narrative_authority:
-        narrative_evaluation = Evaluation(
-            evaluator_type="model",
-            evaluator_name="narrative_blind_comparator",
-            evaluator_version="narrative-comparator.v1",
-            status="passed",
-            hard_gate_passed=True,
-            evaluation_role="runtime_gate",
-            runtime_blocking=True,
-            retry_eligible=False,
-            score=100,
-            evidence={
-                "narrative_review_report": narrative_review_report.model_dump(mode="json"),
-                "narrative_review_artifact_ids": list(narrative_review_artifact_ids or []),
-                "narrative_calibration_artifact_id": calibration_authority.artifact_id,
-                "human_calibrated_model_threshold": (
-                    calibration_authority.model_pass_threshold
-                ),
-            },
-        )
-        evidence_repository.create_evaluation(
-            artifact["id"], narrative_evaluation,
-        )
+        if narrative_review_report is not None:
+            narrative_evaluation = Evaluation(
+                evaluator_type="model",
+                evaluator_name="narrative_blind_comparator",
+                evaluator_version="narrative-comparator.v1",
+                status="warning" if findings else "passed",
+                hard_gate_passed=True,
+                evaluation_role="score_only",
+                runtime_blocking=False,
+                retry_eligible=False,
+                score=100 if not findings else 0,
+                evidence={
+                    "narrative_review_report": narrative_review_report.model_dump(mode="json"),
+                    "narrative_review_artifact_ids": list(narrative_review_artifact_ids or []),
+                    "narrative_calibration_artifact_id": (
+                        calibration_authority.artifact_id
+                        if calibration_authority is not None else None
+                    ),
+                },
+            )
+            evidence_repository.create_evaluation(
+                artifact["id"], narrative_evaluation,
+            )
     from app.production.publish import publish_storyboard
     from app.production.revision import (
         ensure_production_revision,
@@ -1047,16 +1045,26 @@ def _finalize_storyboard_evidence(
         contract_version=contract_version,
         qa_profile_version=revision.qa_profile_version or "storyboard-full-gate-2",
     )
-    if narrative_authority:
+    if narrative_authority and verified_review_artifact_id:
         conn.execute(
-            "UPDATE episodes SET narrative_status='ready', "
+            "UPDATE episodes SET narrative_status='scored', "
             "narrative_review_artifact_id=?, narrative_calibration_artifact_id=? "
             "WHERE id=?",
             (
                 verified_review_artifact_id,
-                calibration_authority.artifact_id,
+                (
+                    calibration_authority.artifact_id
+                    if calibration_authority is not None else None
+                ),
                 episode_id,
             ),
+        )
+    elif narrative_authority:
+        conn.execute(
+            "UPDATE episodes SET narrative_status='score_unavailable', "
+            "narrative_review_artifact_id=NULL, "
+            "narrative_calibration_artifact_id=NULL WHERE id=?",
+            (episode_id,),
         )
     else:
         conn.execute(

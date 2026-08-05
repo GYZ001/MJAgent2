@@ -267,8 +267,6 @@ def publish_storyboard(
     if artifact_board.model_dump(mode="json") != board.model_dump(mode="json"):
         raise ValueError("待发布 shots_payload 与完成凭证绑定的 Artifact 内容不一致")
     if episode_row["screenplay_json"]:
-        from app.narrative import validate_storyboard_narrative
-        from app.schemas import StoryboardOutline
         from app.production.screenplay_authority import (
             resolve_downstream_screenplay,
         )
@@ -276,7 +274,10 @@ def publish_storyboard(
         screenplay_context = resolve_downstream_screenplay(episode_id, conn=conn)
         screenplay = screenplay_context.screenplay
         narrative_authority = screenplay_context.narrative_authority_required
-        if screenplay_context.narrative_authority_required:
+        automatic_narrative_gate = False
+        if screenplay_context.narrative_authority_required and automatic_narrative_gate:
+            from app.narrative import validate_storyboard_narrative
+            from app.schemas import StoryboardOutline
             outline = StoryboardOutline.model_validate_json(outline_json) if outline_json else None
             narrative_errors = validate_storyboard_narrative(
                 board,
@@ -378,7 +379,7 @@ def publish_storyboard(
             "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
             (outline_json, episode_id),
         )
-    if narrative_authority:
+    if narrative_authority and verified_review_artifact_id and calibration_authority:
         conn.execute(
             """UPDATE episodes
                   SET status='scripted', script_error=NULL, storyboard_warning=NULL,
@@ -397,11 +398,15 @@ def publish_storyboard(
         conn.execute(
             """UPDATE episodes
                   SET status='scripted', script_error=NULL, storyboard_warning=NULL,
-                      storyboard_artifact_id=?, narrative_status='legacy_unvalidated',
+                      storyboard_artifact_id=?, narrative_status=?,
                       narrative_review_artifact_id=NULL,
                       narrative_calibration_artifact_id=NULL
                 WHERE id=?""",
-            (artifact_id, episode_id),
+            (
+                artifact_id,
+                "score_unavailable" if narrative_authority else "legacy_unvalidated",
+                episode_id,
+            ),
         )
     set_published_artifact(
         revision_id,

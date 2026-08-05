@@ -279,32 +279,10 @@ def _validate_narrative_certificate_authority(
         )
         return True
 
-    try:
-        from app.narrative_review import (
-            COMPARATOR_PROMPT_VERSION,
-            verify_review_chain_for_storyboard_artifact,
-        )
-
-        report_id = verify_review_chain_for_storyboard_artifact(
-            episode_id=scope_id,
-            screenplay=screenplay,
-            storyboard_artifact=artifact,
-        )
-    except Exception as exc:  # noqa: BLE001 - release evidence boundary
-        raise ValueError(f"分镜完成凭证的冷观众证据链无效：{exc}") from exc
-    report_artifact = evidence_repository.get_artifact(report_id)
-    comparator_version = str((report_artifact or {}).get("prompt_version") or "")
-    if comparator_version != COMPARATOR_PROMPT_VERSION:
-        raise ValueError("冷观众审读报告的 comparator 版本与当前运行契约不匹配")
-    _required_exact_runtime_gate(
+    _required_exact_score_only(
         rows,
         evaluator_name=_STORYBOARD_GATE_EVALUATOR,
         evaluator_version=contract_version,
-    )
-    _required_exact_runtime_gate(
-        rows,
-        evaluator_name=_NARRATIVE_REVIEW_EVALUATOR,
-        evaluator_version=comparator_version,
     )
     return True
 

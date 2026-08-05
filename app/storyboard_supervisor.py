@@ -2202,7 +2202,11 @@ async def run_storyboard_supervisor(
             issue for issue in (evaluation.issues or [])
             if _storyboard_warning_requires_auto_repair(issue)
         ]
-        if not evaluation.passed or repair_required_warnings:
+        # QA Score Only: structural completeness was checked above. Content,
+        # continuity and narrative findings remain visible but never route
+        # another paid repair generation.
+        runtime_blocking_errors: list[str] = []
+        if runtime_blocking_errors:
             repair_warning_messages = [
                 str(getattr(issue, "message", "") or "")
                 for issue in repair_required_warnings
@@ -2260,7 +2264,8 @@ async def run_storyboard_supervisor(
         )
         narrative_review_report = None
         narrative_review_artifact_ids: list[str] = []
-        if narrative_authority:
+        automatic_narrative_review = False
+        if narrative_authority and automatic_narrative_review:
             from app.narrative_review import (
                 NarrativeReviewError,
                 run_blind_audience_review,
