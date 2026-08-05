@@ -380,6 +380,48 @@ def derive_continuity_mode(shot: Shot, prev: Shot | None = None) -> str:
     return "same_scene_cut"
 
 
+def resolve_first_last_boundary_relation(
+    shot: Shot,
+    prev: Shot | None,
+    *,
+    planned_edit: str | None,
+    planned_action: str | None,
+) -> tuple[str, str, str]:
+    """Correct boundary motion semantics from the accepted shot contracts."""
+    edit = str(planned_edit or "unknown").strip()
+    action = str(planned_action or "unknown").strip()
+    mode = (shot.continuity_mode or "").strip()
+    explicit_edit = {
+        "reverse_angle": "reverse_angle",
+        "reaction_cut": "reaction_cut",
+        "insert_detail": "insert_cut",
+        "action_continuation": "continuous_take",
+    }.get(mode)
+    if explicit_edit:
+        return (
+            explicit_edit,
+            (
+                "continues_same_action"
+                if mode == "action_continuation"
+                else "starts_new_action"
+            ),
+            f"storyboard_continuity_mode:{mode}",
+        )
+    if prev is None:
+        return edit, action, "planned_relation"
+
+    previous_focus = dialogue_focus_subject(prev)
+    current_focus = dialogue_focus_subject(shot)
+    if previous_focus and current_focus and previous_focus != current_focus:
+        return "reverse_angle", "starts_new_action", "onscreen_speaker_changed"
+
+    previous_visible = set(effective_characters_visible(prev))
+    current_visible = set(effective_characters_visible(shot))
+    if previous_visible != current_visible and edit == "continuous_take":
+        return "angle_cut", "starts_new_action", "visible_cast_changed"
+    return edit, action, "planned_relation"
+
+
 def _merge_structured_entity(base: Any, overlay: Any) -> Any:
     """Merge a partial structured state without erasing inherited values with defaults."""
     merged = base.model_copy(deep=True)
