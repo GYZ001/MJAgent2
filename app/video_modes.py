@@ -1315,6 +1315,85 @@ def reference_generation_prompt(
             f"Reference type: {ref_type}. Shot {shot.shot_no}. Scene: {shot.scene_setting}. "
             f"Single narrative keyframe target: {contract['target_keyframe_desc']}."
         )
+    if identity_seeded and ref_type == "plot_key_frame":
+        contract = _keyframe_contract(shot, bible, screenplay=screenplay)
+        target = str(
+            contract.get("target_keyframe_desc")
+            or shot.last_frame_desc
+            or shot.action_desc
+        ).strip()
+        camera_angle = str(contract.get("camera_angle") or "eye-level").strip()
+        visible = [
+            str(name).strip()
+            for name in (contract.get("visible_characters") or [])
+            if str(name).strip()
+        ]
+        scene_canonical = str(contract.get("scene_canonical") or "").strip()
+        scene_landmarks = [
+            str(item).strip()
+            for item in (contract.get("scene_landmarks") or [])
+            if str(item).strip()
+        ]
+        dialogue_focus = str(
+            contract.get("dialogue_focus_subject") or ""
+        ).strip()
+        compact_contract = [
+            body,
+            "SEEDED KEYFRAME CONTRACT:",
+            f"Freeze exactly one final instant: {target}.",
+            f"Composition: {shot.shot_size}; camera: {camera_angle}; "
+            "preserve the scripted screen direction and scene axis.",
+            (
+                "Visible named identities, each exactly once: "
+                + ", ".join(visible)
+                + ". No additional recognizable person."
+                if visible else
+                "No recognizable person is required in frame."
+            ),
+            (
+                "Scene geometry: " + scene_canonical
+                + (
+                    "; fixed landmarks: " + ", ".join(scene_landmarks)
+                    if scene_landmarks else ""
+                )
+                + "."
+                if scene_canonical or scene_landmarks else ""
+            ),
+            (
+                f"Dialogue framing: only {dialogue_focus} is visible; "
+                "the listener remains fully offscreen."
+                if dialogue_focus else ""
+            ),
+            (
+                "SIDE CAMERA REQUIRED: preserve the side interaction axis and "
+                "keep the interaction zone unobstructed."
+                if contract.get("contact_camera_required") else ""
+            ),
+            (
+                "Show the exact established contact point."
+                if contract.get("established_contact_required") else (
+                    "Keep the subjects visibly separated."
+                    if contract.get("target_contact_phase") == "separated"
+                    else (
+                        "Keep the scripted approach phase without inventing contact."
+                        if contract.get("target_contact_phase") == "approach"
+                        else ""
+                    )
+                )
+            ),
+            (
+                "Reference images are authoritative for identity, outfit, "
+                "proportions, environment, and visual style."
+            ),
+            (
+                "Render the target as one physically continuous progression "
+                "from reference image 1; no cut, morph, duplicate, or identity swap."
+            ),
+            _keyframe_text_instruction(shot, contract),
+            "Clean 9:16 portrait still; no watermark or malformed anatomy.",
+            f"Policy version: {KEYFRAME_PROMPT_CONTRACT_VERSION}.",
+        ]
+        return " ".join(part for part in compact_contract if part)
     common = (
         f"{body} Characters: {anchor_text or '(no visible character)'}. "
         "Episode style: "

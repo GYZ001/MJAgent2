@@ -102,8 +102,10 @@ def test_seeded_keyframe_omits_redundant_textual_character_appearance() -> None:
     assert style_marker in unseeded
     assert marker not in seeded
     assert style_marker not in seeded
-    assert "萧炎: identity, face, body build, and outfit are locked" in seeded
-    assert "Episode style: locked by the provided reference images." in seeded
+    assert "SEEDED KEYFRAME CONTRACT" in seeded
+    assert "Visible named identities, each exactly once: 萧炎" in seeded
+    assert "Reference images are authoritative for identity, outfit" in seeded
+    assert "MULTI-KEYFRAME IDENTITY LOCK" not in seeded
 
 
 def test_keyframe_contract_fingerprint_changes_with_dialogue_emotion() -> None:
