@@ -504,7 +504,7 @@ def test_auto_retake_count_is_persisted_on_child_video_version(monkeypatch) -> N
     assert meta["auto_retake_count"] == 1
 
 
-def test_low_qa_video_stops_auto_retake_after_limit(monkeypatch) -> None:
+def test_low_qa_video_never_enqueues_retake(monkeypatch) -> None:
     conn = _conn()
     _seed_project(conn)
     monkeypatch.setattr(worker, "get_conn", lambda: conn)
@@ -559,7 +559,7 @@ def test_low_qa_video_stops_auto_retake_after_limit(monkeypatch) -> None:
     assert force_best is True
 
 
-def test_low_qa_video_schedules_bounded_directed_retake(monkeypatch) -> None:
+def test_low_qa_video_records_score_only_without_retake(monkeypatch) -> None:
     conn = _conn()
     _seed_project(conn)
     monkeypatch.setattr(worker, "get_conn", lambda: conn)
@@ -604,18 +604,16 @@ def test_low_qa_video_schedules_bounded_directed_retake(monkeypatch) -> None:
         "after_shot_id": None,
     }, version, "/tmp/v.mp4"))
 
-    assert force_best is False
-    assert len(enqueued) == 1
-    assert enqueued[0]["auto_retake_count"] == 1
-    assert enqueued[0]["reroll"] is True
+    assert force_best is True
+    assert enqueued == []
     qa = json.loads(conn.execute(
         "SELECT qa_json FROM shot_versions WHERE id=?", (version,),
     ).fetchone()["qa_json"])
-    assert qa["evaluation_role"] == "retry_and_rank"
-    assert qa["retry_eligible"] is True
+    assert qa["evaluation_role"] == "score_only"
+    assert qa["retry_eligible"] is False
 
 
-def test_complete_mode_qa_records_score_but_defers_retake_to_supervisor(monkeypatch) -> None:
+def test_complete_mode_qa_is_also_score_only(monkeypatch) -> None:
     conn = _conn()
     _seed_project(conn)
     monkeypatch.setattr(worker, "get_conn", lambda: conn)
@@ -660,12 +658,11 @@ def test_complete_mode_qa_records_score_but_defers_retake_to_supervisor(monkeypa
     }, version, "/tmp/v.mp4", allow_autonomous_retake=False))
 
     assert enqueued == []
-    # complete 模式不由 Worker 重抽/采用，返回 False 交给 Supervisor 的预算闭环。
-    assert force_best is False
+    assert force_best is True
     qa = json.loads(conn.execute(
         "SELECT qa_json FROM shot_versions WHERE id=?", (version,),
     ).fetchone()["qa_json"])
     assert qa["overall"] == 0.1
-    assert qa.get("evaluation_role") == "retry_and_rank"
+    assert qa.get("evaluation_role") == "score_only"
     assert qa.get("runtime_blocking") is False
-    assert qa.get("retry_eligible") is True
+    assert qa.get("retry_eligible") is False

@@ -57,7 +57,7 @@ def test_grade_shot_video_a_b_c():
         technical={"passed": True},
         qa={"overall": 0.95, "failure_types": ["character_duplicate"]},
     )
-    assert fatal["grade"] == "C"
+    assert fatal["grade"] == "B"
 
     degraded = grade_shot_video(
         technical={"passed": True},
@@ -100,7 +100,7 @@ def test_issues_from_qa_and_job_and_enqueue():
         shot_no=6,
     )
     assert enq[0].code == "VIDEO_PREFLIGHT_BLOCKED"
-    assert is_fatal(Issue(
+    assert not is_fatal(Issue(
         code="VIDEO_QA_CHARACTER_DUPLICATE",
         severity=IssueSeverity.BLOCKER,
         subject="s",
@@ -119,12 +119,12 @@ def test_repair_router_levels_and_upgrade():
             evidence={"shot_no": 9, "path": "9", "rule_id": "state_mismatch"},
         )
     ])
-    assert plan.level == "L2"
-    assert plan.strategy == "retake_directed"
-    assert plan.is_paid is True
+    assert plan.level == "L0"
+    assert plan.strategy == "handoff_human"
+    assert plan.is_paid is False
     assert plan.pause_state is None
 
-    # QA-only issues remain bounded directed retries; the Supervisor owns the cap.
+    # QA-only issues never escalate into the repair router.
     fp = plan.fingerprint
     counts = bump_fingerprint_count({}, fp)
     counts = bump_fingerprint_count(counts, fp)
@@ -139,8 +139,9 @@ def test_repair_router_levels_and_upgrade():
         fingerprint_counts=counts,
         current_level="L2",
     )
-    assert plan2.level == "L2"
-    assert plan2.strategy == "retake_directed"
+    assert plan2.level == "L0"
+    assert plan2.strategy == "handoff_human"
+    assert plan2.is_paid is False
     assert plan2.pause_state is None
 
     # L5 without auth
@@ -158,7 +159,7 @@ def test_repair_router_levels_and_upgrade():
     assert upgrade_level("L5") == "L6"
 
 
-def test_qa_gain_upgrade():
+def test_qa_gain_never_enters_paid_repair():
     issue = Issue(
         code="VIDEO_QA_LOW_SCORE",
         severity=IssueSeverity.WARNING,
@@ -167,9 +168,9 @@ def test_qa_gain_upgrade():
         evidence={"path": "1", "rule_id": "low_score"},
     )
     plan = route([issue], current_level="L1", qa_history=[0.40, 0.41])
-    assert plan.level == "L2"
-    assert plan.strategy == "retake_directed"
-    assert plan.is_paid is True
+    assert plan.level == "L0"
+    assert plan.strategy == "handoff_human"
+    assert plan.is_paid is False
 
 
 def test_attempts_for_budget():

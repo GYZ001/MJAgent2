@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.media_pipeline.retry_policy import decide_qa_retake, decide_retry_by_error_class
+from app.media_pipeline import retry_policy
+from app.media_pipeline.retry_policy import decide_retry_by_error_class
 
 
 def test_retry_by_error_class_rejects_qa_quality_score_classes() -> None:
@@ -19,24 +20,9 @@ def test_retry_by_error_class_rejects_qa_quality_score_classes() -> None:
         assert decision.allow is False
 
 
-def test_decide_qa_retake_is_bounded_and_never_blocks_closeout() -> None:
-    decision = decide_qa_retake(
-        auto_retake_count=0,
-        qa_overall=0.1,
-        threshold=0.8,
-        hard_failures=["score_below", "consistency_drift"],
-    )
-    assert decision.allow is True
-    assert decision.create_new_version is True
-    exhausted = decide_qa_retake(
-        auto_retake_count=decision.max_attempts,
-        qa_overall=0.1,
-        threshold=0.8,
-        hard_failures=["score_below"],
-    )
-    assert exhausted.allow is False
-    assert exhausted.create_new_version is False
-    assert "自动择优" in exhausted.reason
+def test_qa_retake_policy_no_longer_exists() -> None:
+    assert not hasattr(retry_policy, "decide_qa_retake")
+    assert "QA_RETAKE" not in retry_policy.RetryKind.__members__
 
 
 def test_frontend_scene_usability_does_not_use_hard_gate_for_availability() -> None:

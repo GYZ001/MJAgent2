@@ -6,7 +6,7 @@ import sqlite3
 from app import db, worker
 from app.media_pipeline.concurrency import CHANNEL_DEFAULTS, channel_limit, ensure_channel
 from app.media_pipeline import stages as S
-from app.media_pipeline.retry_policy import decide_qa_retake
+from app.media_pipeline.retry_policy import decide_retry_by_error_class
 from app.media_pipeline.reference_store import upsert_reference_set_from_meta
 from app.media_pipeline.scheduler import can_admit_video_submit, continuity_anchor_ready
 
@@ -60,23 +60,11 @@ def test_channel_defaults_balanced() -> None:
     assert channel_limit(S.RESOURCE_VIDEO_SUBMIT) >= 1
 
 
-def test_qa_retake_uses_bounded_budget_then_closes_best_effort() -> None:
-    """低分或结构性失败触发有限重抽，耗尽后自动择优。"""
-    low_only = decide_qa_retake(auto_retake_count=0, qa_overall=0.2, threshold=0.6)
-    assert low_only.allow
-    d_hard = decide_qa_retake(
-        auto_retake_count=0, qa_overall=0.8, threshold=0.6, hard_failures=["story_repeat"]
-    )
-    assert d_hard.allow
-    assert d_hard.attempt == 0
-    exhausted = decide_qa_retake(
-        auto_retake_count=d_hard.max_attempts,
-        qa_overall=0.8,
-        threshold=0.6,
-        hard_failures=["story_repeat"],
-    )
-    assert not exhausted.allow
-    assert exhausted.attempt == d_hard.max_attempts
+def test_qa_findings_are_rejected_by_retry_allowlist() -> None:
+    for code in ("QA_LOW_SCORE", "VIDEO_QA_STORY_REPEAT", "QUALITY_DRIFT"):
+        decision = decide_retry_by_error_class(code)
+        assert decision.allow is False
+        assert decision.create_new_version is False
 
 
 def test_reference_set_persist(monkeypatch) -> None:

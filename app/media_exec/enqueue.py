@@ -314,6 +314,138 @@ def resume_episode_video_tasks(episode_id: str) -> dict[str, object]:
     }
 
 
+def recover_equivalent_stale_provider_jobs(episode_id: str) -> dict[str, object]:
+    """Resume accepted provider tasks fenced only by an equivalent plan revision.
+
+    The provider handle is immutable and already payable. Recovery rebinds the
+    local execution projection to the current semantically identical shot plan,
+    preserving the submitted plan ID in metadata for audit. No provider create
+    call is made.
+    """
+    from app.video_plan import active_plan_is_current, get_shot_plan
+
+    conn = get_conn()
+    episode = conn.execute(
+        "SELECT id FROM episodes WHERE id=?", (episode_id,),
+    ).fetchone()
+    if episode is None:
+        raise ValueError(f"分集不存在：{episode_id}")
+    rows = conn.execute(
+        """SELECT j.id AS job_id,j.shot_id,j.version_id,j.run_id,j.step_run_id,
+                  v.provider_task_id,v.image_inputs
+             FROM jobs j
+             JOIN shot_versions v ON v.id=j.version_id
+            WHERE j.episode_id=? AND j.kind='video'
+              AND j.status='stale' AND v.status='stale'
+              AND j.provider_non_cancellable=1
+              AND v.provider_task_id IS NOT NULL AND v.provider_task_id!=''
+              AND j.cancellation_requested=0 AND j.abandoned=0
+            ORDER BY j.created_at""",
+        (episode_id,),
+    ).fetchall()
+    recovered = []
+    for row in rows:
+        try:
+            meta = json.loads(row["image_inputs"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        submitted_shot_plan_id = str(meta.get("shot_plan_id") or "")
+        if (
+            not submitted_shot_plan_id
+            or not active_plan_is_current(submitted_shot_plan_id, conn=conn)
+        ):
+            continue
+        current = get_shot_plan(row["shot_id"], conn=conn)
+        if current is None:
+            continue
+        actual_mode = str(
+            meta.get("actual_mode") or meta.get("mode") or meta.get("planned_mode") or ""
+        )
+        if actual_mode != current.mode.value:
+            continue
+
+        meta.update({
+            "submitted_shot_plan_id": submitted_shot_plan_id,
+            "submitted_episode_video_plan_id": meta.get("episode_video_plan_id"),
+            "shot_plan_id": current.shot_plan_id,
+            "episode_video_plan_id": current.episode_video_plan_id,
+            "plan_revision": current.plan_revision,
+            "source_storyboard_revision_id": current.source_storyboard_revision_id,
+            "capability_snapshot_id": current.capability_snapshot_id,
+            "input_revision_fingerprints": dict(current.input_revision_fingerprints),
+            "planned_mode": current.mode.value,
+            "actual_mode": actual_mode,
+            "stale_plan_recovered": True,
+            "stale_plan_recovered_at": now(),
+        })
+        conn.execute(
+            "UPDATE shot_versions SET status='running',error=NULL,image_inputs=? WHERE id=?",
+            (json.dumps(meta, ensure_ascii=False), row["version_id"]),
+        )
+        conn.execute(
+            """UPDATE jobs
+                  SET status='waiting_provider',error=NULL,
+                      lease_owner=NULL,lease_expires_at=NULL,next_retry_at=?,
+                      provider_create_state='accepted',provider_non_cancellable=1,
+                      updated_at=?
+                WHERE id=? AND status='stale'""",
+            (now(), now(), row["job_id"]),
+        )
+        conn.execute(
+            """UPDATE video_generation_attempts
+                  SET shot_plan_id=?,status='provider_running',error=NULL,updated_at=?
+                WHERE version_id=? AND provider_task_id=?""",
+            (
+                current.shot_plan_id,
+                now(),
+                row["version_id"],
+                row["provider_task_id"],
+            ),
+        )
+        conn.execute(
+            """UPDATE shot_video_generation_plans
+                  SET actual_mode=?,status='provider_running',updated_at=?
+                WHERE id=?""",
+            (actual_mode, now(), current.shot_plan_id),
+        )
+        conn.execute(
+            """UPDATE budget_reservations
+                  SET status='reserved',settled_at=NULL,actual_cost_cny=NULL
+                WHERE job_id=? AND status='released'""",
+            (row["job_id"],),
+        )
+        conn.execute(
+            """UPDATE jobs
+                  SET reserved_cost_cny=COALESCE(
+                      (SELECT amount_cny FROM budget_reservations WHERE job_id=?),0
+                  )
+                WHERE id=?""",
+            (row["job_id"], row["job_id"]),
+        )
+        recovered.append(dict(row))
+    if recovered:
+        conn.execute(
+            "UPDATE episodes SET status='generating' WHERE id=?",
+            (episode_id,),
+        )
+    conn.commit()
+    for row in recovered:
+        _enqueue_for_current_status(row["job_id"])
+        mark_media_job_state(
+            row["run_id"],
+            row["step_run_id"],
+            "waiting_provider",
+            "等价计划 revision 已验证，继续轮询原供应商任务",
+        )
+    return {
+        "episode_id": episode_id,
+        "recovered_jobs": len(recovered),
+        "job_ids": [row["job_id"] for row in recovered],
+        "provider_task_ids": [row["provider_task_id"] for row in recovered],
+        "provider_create_calls": 0,
+    }
+
+
 # ---------- 入队 ----------
 
 def _load_shot_model(shot_row) -> "object":

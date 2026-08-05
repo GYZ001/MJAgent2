@@ -6,22 +6,18 @@ from pathlib import Path
 from app.evidence import repository as evidence_repository
 from app.evidence.media import record_reference_asset, select_best_video_candidate
 from app.harness.types import Issue, IssueSeverity
-from app.media_pipeline.retry_policy import RetryKind, decide_qa_retake
+from app.media_pipeline.retry_policy import RetryKind, decide_retry_by_error_class
 from app.multiview import keyframe_gate_passed, pack_is_ready, scene_primary_is_usable
 from app.video_issues import issues_from_qa
 from app.video_modes import ReferenceImageAsset, apply_keep_gate, consistency_retries, reference_gen_retries
 from app.video_repair_router import route as route_video_repair
 
 
-def test_decide_qa_retake_allows_bounded_quality_retry() -> None:
-    decision = decide_qa_retake(
-        auto_retake_count=0,
-        qa_overall=0.1,
-        hard_failures=["character_duplicate", "text_error"],
-    )
-    assert decision.allow is True
-    assert decision.kind == RetryKind.QA_RETAKE
-    assert decision.create_new_version is True
+def test_qa_findings_cannot_enter_retry_policy() -> None:
+    decision = decide_retry_by_error_class("VIDEO_QA_CHARACTER_DUPLICATE")
+    assert decision.allow is False
+    assert decision.kind == RetryKind.TECHNICAL
+    assert decision.create_new_version is False
 
 
 def test_reference_retries_are_zero() -> None:
@@ -113,8 +109,8 @@ def test_repair_router_turns_qa_issue_into_directed_retry() -> None:
             message="分身",
         ),
     ])
-    assert plan.is_paid is True
-    assert plan.strategy == "retake_directed"
+    assert plan.is_paid is False
+    assert plan.strategy == "handoff_human"
     assert plan.pause_state is None
 
 
@@ -179,7 +175,7 @@ def test_record_reference_asset_keeps_explicit_qa_reject_as_warning(tmp_path, mo
     assert model["runtime_blocking"] == 0
 
 
-def test_select_best_defers_low_quality_until_forced_closeout(monkeypatch) -> None:
+def test_select_best_immediately_adopts_first_technical_candidate(monkeypatch) -> None:
     import json
     import sqlite3
 
@@ -210,8 +206,9 @@ def test_select_best_defers_low_quality_until_forced_closeout(monkeypatch) -> No
     monkeypatch.setattr(media, "merge_observed_state_out_into_shot_contract", lambda *a, **k: None)
 
     selected = select_best_video_candidate("s")
-    assert selected is None
+    assert selected is not None
+    assert selected["version_id"] == "low"
     forced = select_best_video_candidate("s", force_best=True)
     assert forced is not None
-    assert forced["version_id"] == "high"
+    assert forced["version_id"] == "low"
     assert forced["fallback"] is True

@@ -368,8 +368,8 @@ def test_classify_video_hard_failures_detects_story_repeat_and_related_failures(
     assert "needs_crop" in failures
 
 
-def test_select_best_video_candidate_defers_then_force_selects_by_risk(monkeypatch) -> None:
-    """仍有重试预算时不抢先采用；收口时综合风险优先于原始总分。"""
+def test_select_best_video_candidate_adopts_first_technical_version(monkeypatch) -> None:
+    """QA 只排序展示；首个技术有效版本立即采用。"""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript("""
@@ -396,25 +396,21 @@ def test_select_best_video_candidate_defers_then_force_selects_by_risk(monkeypat
     )
     conn.commit()
     monkeypatch.setattr(media, "get_conn", lambda: conn)
-    monkeypatch.setattr(media, "get_setting", lambda key: {
-        "video_hard_gate_enabled": "true",
-        "video_auto_retake_limit": "2",
-    }.get(key))
     monkeypatch.setattr(media, "grade_shot_video", lambda *a, **k: {"grade": "B"})
     monkeypatch.setattr(media, "merge_observed_state_out_into_shot_contract", lambda *a, **k: None)
 
     selected = media.select_best_video_candidate("s")
 
-    assert selected is None
-    assert conn.execute("SELECT adopted_version_id FROM shots WHERE id='s'").fetchone()[0] is None
+    assert selected and selected["version_id"] == "low"
+    assert conn.execute("SELECT adopted_version_id FROM shots WHERE id='s'").fetchone()[0] == "low"
     forced = media.select_best_video_candidate("s", force_best=True)
     assert forced and forced["version_id"] == "low"
     assert forced["fallback"] is True
     assert conn.execute("SELECT adopted_version_id FROM shots WHERE id='s'").fetchone()[0] == "low"
 
 
-def test_select_best_video_candidate_force_adopts_lowest_risk_when_retakes_exhausted(monkeypatch) -> None:
-    """重抽名额用尽后采纳技术合格中综合风险最低者，而非盲选总分最高者。"""
+def test_select_best_video_candidate_does_not_replace_existing_adoption(monkeypatch) -> None:
+    """后续候选分数更高也不得自动替换当前采用版。"""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript("""
@@ -441,10 +437,6 @@ def test_select_best_video_candidate_force_adopts_lowest_risk_when_retakes_exhau
     )
     conn.commit()
     monkeypatch.setattr(media, "get_conn", lambda: conn)
-    monkeypatch.setattr(media, "get_setting", lambda key: {
-        "video_hard_gate_enabled": "true",
-        "video_auto_retake_limit": "2",
-    }.get(key))
     import app.artifacts
     monkeypatch.setattr(app.artifacts, "invalidate_episode_final", lambda _: False)
 
@@ -452,12 +444,12 @@ def test_select_best_video_candidate_force_adopts_lowest_risk_when_retakes_exhau
 
     assert selected and selected["version_id"] == "low"
     assert selected["fallback"] is True
-    assert "综合风险最低" in selected["reason"]
+    assert "首个技术有效视频" in selected["reason"]
     assert conn.execute("SELECT adopted_version_id FROM shots WHERE id='s'").fetchone()[0] == "low"
 
 
-def test_select_best_video_candidate_force_best_adopts_single_below_threshold(monkeypatch) -> None:
-    """单条低分候选先留给重试；预算耗尽后必须自动采用。"""
+def test_select_best_video_candidate_adopts_single_low_score_candidate(monkeypatch) -> None:
+    """单条低分候选技术有效时立即采用。"""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript("""
@@ -475,11 +467,10 @@ def test_select_best_video_candidate_force_best_adopts_single_below_threshold(mo
     )
     conn.commit()
     monkeypatch.setattr(media, "get_conn", lambda: conn)
-    monkeypatch.setattr(media, "get_setting", lambda key: "true" if key == "video_hard_gate_enabled" else None)
 
     selected = media.select_best_video_candidate("s")
-    assert selected is None
-    assert conn.execute("SELECT adopted_version_id FROM shots WHERE id='s'").fetchone()[0] is None
+    assert selected and selected["version_id"] == "only"
+    assert conn.execute("SELECT adopted_version_id FROM shots WHERE id='s'").fetchone()[0] == "only"
     forced = media.select_best_video_candidate("s", force_best=True)
     assert forced and forced["version_id"] == "only"
 
