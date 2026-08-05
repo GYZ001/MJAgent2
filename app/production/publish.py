@@ -38,23 +38,10 @@ def publish_screenplay(
     script = load_screenplay_from_artifact(artifact_id)
     conn = get_conn()
     if script.narrative_plan is not None:
-        from app.narrative import validate_screenplay_narrative
         from app.production.screenplay_authority import (
             screenplay_authority_fingerprint,
-            screenplay_authorized_source_chapters,
         )
 
-        narrative_errors = validate_screenplay_narrative(
-            script,
-            require=True,
-            expected_scope_id=episode_id,
-            authorized_source_chapters=screenplay_authorized_source_chapters(
-                episode_id,
-                conn=conn,
-            ),
-        )
-        if narrative_errors:
-            raise ValueError("剧本叙事硬门禁未通过：" + "；".join(narrative_errors[:6]))
         authority_fingerprint = screenplay_authority_fingerprint(
             episode_id,
             conn=conn,
@@ -67,12 +54,17 @@ def publish_screenplay(
             raise ValueError("叙事剧本发布缺少当前 QA Evaluation")
         marks = ",".join("?" for _ in evaluation_ids)
         qa_rows = conn.execute(
-            f"SELECT evaluator_name,evidence_json FROM evaluations WHERE id IN ({marks})",
+            f"""SELECT evaluator_name,evidence_json,evaluation_role,runtime_blocking
+                   FROM evaluations WHERE id IN ({marks})""",
             evaluation_ids,
         ).fetchall()
         authority_evidence = []
         for row in qa_rows:
-            if row["evaluator_name"] != "screenplay_production_qa":
+            if (
+                row["evaluator_name"] != "screenplay_production_qa"
+                or row["evaluation_role"] != "score_only"
+                or bool(row["runtime_blocking"])
+            ):
                 continue
             try:
                 authority_evidence.append(json.loads(row["evidence_json"] or "{}"))
@@ -81,7 +73,7 @@ def publish_screenplay(
         if len(authority_evidence) != 1 or authority_evidence[0].get(
             "authority_input_fingerprint"
         ) != authority_fingerprint:
-            raise ValueError("剧本 QA 证据未精确绑定当前权威输入指纹")
+            raise ValueError("剧本质量评分未精确绑定当前权威输入指纹")
 
     artifact = conn.execute(
         "SELECT status FROM artifacts WHERE id=?",

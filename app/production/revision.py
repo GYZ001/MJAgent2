@@ -155,15 +155,30 @@ def rebind_input_fingerprint(
 
 
 def screenplay_production_state(episode_id: str) -> dict[str, Any]:
-    """Return the UI-safe distinction between Baseline generation and Patch repair."""
+    """Return the persisted screenplay stage and UI-safe recovery action."""
     from app import task_registry
 
+    stage_order = [
+        ("CHARACTER_DISCOVERY", "人物识别"),
+        ("GENERATING_BASELINE", "生成首版"),
+        ("STRUCTURE_VALIDATION", "结构校验"),
+        ("QUALITY_SCORING", "质量评分"),
+        ("PUBLISHING", "原子发布"),
+        ("SUCCEEDED", "已完成"),
+    ]
     rev = get_active_production_revision(episode_id, "screenplay")
     active = task_registry.active("screenplay", episode_id)
     if rev is None:
         return {
             "operation": "baseline",
-            "phase": "BASELINE",
+            "phase": "CHARACTER_DISCOVERY",
+            "phase_label": "人物识别",
+            "stage_index": 0,
+            "stage_count": len(stage_order),
+            "stages": [
+                {"key": key, "label": label, "status": "pending"}
+                for key, label in stage_order
+            ],
             "baseline_done": False,
             "first_evaluation_done": False,
             "task_active": active,
@@ -175,16 +190,48 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
         }
     checkpoint = dict(rev.checkpoint_json or {})
     has_working_baseline = bool(rev.baseline_done and rev.working_artifact_id)
+    published = bool(rev.published_artifact_id)
+    phase = str(
+        checkpoint.get("phase")
+        or ("SUCCEEDED" if published else "STRUCTURE_VALIDATION" if has_working_baseline
+            else "GENERATING_BASELINE")
+    )
+    phase_aliases = {
+        "BASELINE": "GENERATING_BASELINE",
+        "QA": "QUALITY_SCORING",
+        "WAITING_HUMAN": "STRUCTURE_VALIDATION",
+        "FAILED": "STRUCTURE_VALIDATION",
+    }
+    phase = phase_aliases.get(phase, phase)
+    stage_keys = [key for key, _label in stage_order]
+    stage_index = (
+        stage_keys.index(phase)
+        if phase in stage_keys
+        else (len(stage_order) - 1 if published else 0)
+    )
+    stages = []
+    for index, (key, label) in enumerate(stage_order):
+        if published or index < stage_index:
+            status = "completed"
+        elif index == stage_index:
+            status = "in_progress" if active else "paused"
+        else:
+            status = "pending"
+        stages.append({"key": key, "label": label, "status": status})
     return {
         "revision_id": rev.id,
-        "operation": "repair" if has_working_baseline else "baseline",
-        "phase": str(
-            checkpoint.get("phase") or ("QA" if has_working_baseline else "BASELINE")
+        "operation": (
+            "complete" if published else "finalize" if has_working_baseline else "baseline"
         ),
+        "phase": phase,
+        "phase_label": dict(stage_order).get(phase, phase),
+        "stage_index": stage_index,
+        "stage_count": len(stage_order),
+        "stages": stages,
         "baseline_done": rev.baseline_done,
         "first_evaluation_done": rev.first_evaluation_done,
         "task_active": active,
-        "can_resume_repair": bool(has_working_baseline and not active),
+        "can_resume_repair": bool(has_working_baseline and not published and not active),
         "activation_count": int(checkpoint.get("activation_no") or 0),
         "patch_count": len(checkpoint.get("patch_artifact_ids") or []),
         "open_issue_count": len(checkpoint.get("open_issue_ids") or []),

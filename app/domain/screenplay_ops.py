@@ -219,11 +219,18 @@ def _screenplay_status_snapshot(ep, *, shot_count: int, production: dict | None 
         code, message, action = "save_stopping_downstream", "正在安全停止下游任务", "view_save_progress"
     elif screenplay_active:
         operation = production.get("operation") or "baseline"
-        code = "baseline_running" if operation == "baseline" else "repair_running"
-        message = "正在生成首版剧本" if operation == "baseline" else "正在局部修复剧本"
+        code = "baseline_running" if operation == "baseline" else "finalize_running"
+        message = str(
+            production.get("phase_label")
+            or ("正在生成首版剧本" if operation == "baseline" else "正在完成剧本")
+        )
         action = "stop_screenplay"
     elif can_resume:
-        code, message, action = "repair_paused", "局部修复已暂停，可从工作副本继续", "resume_screenplay"
+        code, message, action = (
+            "workflow_paused",
+            "剧本流程已暂停，可从工作副本继续剩余阶段",
+            "resume_screenplay",
+        )
     elif screenplay_status == "ready" and not screenplay_ready:
         code, message, action = "qa_certificate_invalid", "剧本 QA 凭证与当前版本不一致", "refresh"
     elif screenplay_status == "ready" and storyboard_active:
@@ -655,17 +662,17 @@ async def _screenplay_task(
             (ep["project_id"], ep["episode_no"] - 1)).fetchone()
 
         # Delivery 状态必须与真实 production phase 一致：Baseline 尚未落库时
-        # 仍是 running；只有已有 working baseline 才能称为 repairing。
+        # 仍是 running；已有 working baseline 时从确定性阶段继续。
         production_state = _screenplay_production_state(episode_id)
-        is_repair = production_state["operation"] == "repair"
+        is_resume = production_state["operation"] == "finalize"
         conn.execute(
             "UPDATE episodes SET screenplay_status=?, screenplay_error=?, screenplay_updated_at=? WHERE id=?",
             (
-                "repairing" if is_repair else "running",
+                "running",
                 (
-                    "局部修复中：仅修改 Issue 涉及的字段或节点，不会再次整版生成"
-                    if is_repair
-                    else "首次整版 Baseline 生成中；本次完成后只允许局部 Patch"
+                    "从工作副本继续结构校验、评分与发布"
+                    if is_resume
+                    else "正在生成人物上下文与首版剧本"
                 ),
                 now(),
                 episode_id,
@@ -935,7 +942,7 @@ async def _recorded_screenplay_task(
             get_conn().execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone(),
         )
         production_state = _screenplay_production_state(episode_id)
-        if production_state["operation"] == "repair":
+        if production_state["operation"] == "finalize":
             # 正常 Patch 续跑复用已持久化决议，不重复花模型成本；但迁移前的
             # legacy working artifact 若仍有未知身份，必须先补做一次剧本身份审计。
             from app.portraits import (
@@ -996,7 +1003,7 @@ async def _recorded_screenplay_task(
                     recorder.run_id,
                     "CHARACTER_DISCOVERY_SKIPPED",
                     "info",
-                    "已有 Baseline 且人物身份已解析，续跑局部修复时复用持久化决议",
+                    "已有 Baseline，继续后续阶段时复用持久化人物决议",
                     payload={"episode_id": episode_id},
                 )
         else:
@@ -1372,9 +1379,9 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
             episode_id,
             recorder,
             project_id=ep["project_id"],
-            status="repairing" if resume_existing else "running",
+            status="running",
             message=(
-                "继续局部修复：从 working Artifact 和 checkpoint 恢复"
+                "从 working Artifact 继续结构校验、评分与发布"
                 if resume_existing else None
             ),
         )
@@ -1385,15 +1392,15 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
             "action": "retry_resume" if resume_existing else "retry_generate",
         }) from exc
     return {
-        "status": "repairing" if resume_existing else "running",
+        "status": "running",
         "run_id": recorder.run_id,
-        "mode": "repair" if resume_existing else "baseline",
+        "mode": "finalize" if resume_existing else "baseline",
     }
 
 
 @router.post("/episodes/{episode_id}/screenplay/resume")
 async def resume_screenplay(episode_id: str, body: dict | None = Body(None)):
-    """Continue an existing Patch loop; never creates a fresh Baseline."""
+    """Continue deterministic stages from an existing working Baseline."""
     from app.capabilities.dispatch import ui_route
     from app.production.revision import get_active_production_revision
 
@@ -1410,9 +1417,9 @@ async def resume_screenplay(episode_id: str, body: dict | None = Body(None)):
         raise HTTPException(409, "分镜正在生成中，不能同时修复剧本")
     if _screenplay_task_active(episode_id):
         return {
-            "status": "repairing",
+            "status": "running",
             "run_id": ep["active_screenplay_run_id"],
-            "mode": "repair",
+            "mode": "finalize",
             "deduplicated": True,
         }
     rev = get_active_production_revision(episode_id, "screenplay")
@@ -1429,20 +1436,20 @@ async def resume_screenplay(episode_id: str, body: dict | None = Body(None)):
             episode_id,
             recorder,
             project_id=ep["project_id"],
-            status="repairing",
-            message="继续局部修复：从 working Artifact 和 checkpoint 恢复，不会再次整版生成",
+            status="running",
+            message="从 working Artifact 继续结构校验、评分与发布",
         )
     except Exception as exc:
         raise HTTPException(503, {
             "code": "SCREENPLAY_RESUME_FAILED",
-            "message": "局部修复任务未能启动，工作副本和恢复点均已保留，请稍后重试",
+            "message": "剧本后续阶段未能启动，工作副本和恢复点均已保留，请稍后重试",
             "action": "retry_resume",
         }) from exc
     return {
-        "status": "repairing",
+        "status": "running",
         "run_id": recorder.run_id,
         "revision_id": rev.id,
-        "mode": "repair",
+        "mode": "finalize",
     }
 
 
@@ -1801,21 +1808,21 @@ async def start_screenplay_all(project_id: str):
             row = conn.execute("SELECT * FROM episodes WHERE id=?", (eid,)).fetchone()
         recorder = None
         production = _screenplay_production_state(eid)
-        is_repair = bool(production.get("can_resume_repair"))
+        is_resume = bool(production.get("can_resume_repair"))
         try:
             recorder = _new_screenplay_recorder(
                 eid,
-                trigger_type="batch_resume" if is_repair else "batch",
-                parent_run_id=row["active_screenplay_run_id"] if is_repair else None,
+                trigger_type="batch_resume" if is_resume else "batch",
+                parent_run_id=row["active_screenplay_run_id"] if is_resume else None,
             )
             _spawn_screenplay_activation(
                 eid,
                 recorder,
                 project_id=project_id,
-                status="repairing" if is_repair else "running",
+                status="running",
                 message=(
-                    "批量任务已从工作副本继续局部修复"
-                    if is_repair else None
+                    "批量任务已从工作副本继续结构校验、评分与发布"
+                    if is_resume else None
                 ),
                 task_factory=lambda eid=eid, recorder=recorder: _screenplay_guarded(
                     eid,

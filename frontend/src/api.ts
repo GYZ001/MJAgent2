@@ -1723,8 +1723,16 @@ export interface Episode {
   screenplay_state?: ScreenplayState | null;
   screenplay_production?: {
     revision_id?: string;
-    operation: "baseline" | "repair";
+    operation: "baseline" | "finalize" | "complete";
     phase: string;
+    phase_label?: string;
+    stage_index?: number;
+    stage_count?: number;
+    stages?: Array<{
+      key: string;
+      label: string;
+      status: "pending" | "in_progress" | "paused" | "completed";
+    }>;
     baseline_done: boolean;
     first_evaluation_done: boolean;
     task_active: boolean;

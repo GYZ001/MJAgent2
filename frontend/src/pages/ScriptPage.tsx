@@ -173,7 +173,7 @@ export default function ScriptPage() {
   const allDialogueSelected = occurrences.length > 0 && occurrences.every(item => selectedSet.has(item.id))
 
   const screenplayTaskActive = ep?.screenplay_production?.task_active ?? ep?.screenplay_status === 'running'
-  const canResumeRepair = ep?.screenplay_production?.can_resume_repair
+  const canResumeFlow = ep?.screenplay_production?.can_resume_repair
     ?? ep?.screenplay_status === 'repairing'
   const script = draft ?? ep?.screenplay ?? null
   const editing = draft !== null
@@ -401,7 +401,7 @@ export default function ScriptPage() {
   }
 
   const openScreenplayPreview = async () => {
-    if (!ep || hardBudgetExceeded || canResumeRepair) return
+    if (!ep || hardBudgetExceeded || canResumeFlow) return
     setBusy(true)
     try {
       const data = await api.post(`/episodes/${ep.id}/screenplay/preflight`, {
@@ -630,14 +630,14 @@ export default function ScriptPage() {
       : ''
   const dialogueSelectionDisabledReason = busy
     ? '正在处理上一项操作'
-    : canResumeRepair
-      ? '安全恢复点已锁定台词约束，继续修复不会读取本地改动'
+    : canResumeFlow
+      ? '安全恢复点已锁定台词约束，继续流程不会读取本地改动'
       : !occurrences.length
         ? '本集原文未识别到显式台词'
         : ''
   const targetDurationDisabledReason = busy
     ? '正在处理上一项操作'
-    : canResumeRepair
+    : canResumeFlow
       ? '安全恢复点已锁定本次目标时长'
       : ''
   const applyTargetDurationDisabledReason = targetDurationDisabledReason
@@ -658,9 +658,9 @@ export default function ScriptPage() {
           title={busy ? '正在处理上一项操作' : '停止前会说明费用和保留范围'} onClick={() => setStopConfirmOpen(true)}>停止剧本任务</button>
       case 'resume_screenplay':
         return <button className="btn primary" disabled={busy}
-          aria-label={busy ? '继续局部修复，暂不可用：正在处理上一项操作' : '继续局部修复'}
+          aria-label={busy ? '继续剧本流程，暂不可用：正在处理上一项操作' : '继续剧本流程'}
           title={busy ? '正在处理上一项操作' : undefined} onClick={resumeRepair}>
-          继续局部修复
+          继续剧本流程
         </button>
       case 'generate_storyboard':
       case 'resume_storyboard':
@@ -725,7 +725,7 @@ export default function ScriptPage() {
               </span>
             </>
           )}
-          {!screenplayTaskActive && (ep.screenplay || canResumeRepair) && (
+          {!screenplayTaskActive && (ep.screenplay || canResumeFlow) && (
             <button className="btn ghost danger" disabled={busy} onClick={deleteCurrentScreenplay}>
               {ep.screenplay ? '删除当前剧本' : '删除失败剧本'}
             </button>
@@ -811,14 +811,14 @@ export default function ScriptPage() {
                   : ''}
               </small>
             </div>
-            {canResumeRepair && <div className="screenplay-dialogue-warning">当前安全恢复点锁定了约束版本，台词选择只读；继续修复不会使用尚未提交的本地改动。</div>}
+            {canResumeFlow && <div className="screenplay-dialogue-warning">当前安全恢复点锁定了约束版本，台词选择只读；继续流程不会使用尚未提交的本地改动。</div>}
             <div className="screenplay-dialogue-options">
               {occurrences.map(item => (
                 <DialogueOption
                   key={item.id}
                   item={item}
                   checked={selectedSet.has(item.id)}
-                  disabled={Boolean(canResumeRepair)}
+                  disabled={Boolean(canResumeFlow)}
                   onChange={checked => {
                     const next = new Set(requiredOccurrenceIds)
                     if (checked) next.add(item.id)
@@ -847,7 +847,7 @@ export default function ScriptPage() {
             <div className="kv"><b>原文来源范围</b>{script?.source_text_range || sourceRangeText(ep.source_chapters)}{!script?.source_text_range && <em>推断显示</em>}</div>
             <div className="kv"><b>目标时长</b>{ep.target_duration_s}s</div>
             <div className="kv"><b>状态快照</b>v{ep.screenplay_state?.version ?? 0} · {ep.screenplay_state?.code ?? 'unknown'}</div>
-            {ep.screenplay_production?.operation === 'repair' && (
+            {ep.screenplay_production?.operation === 'finalize' && (
               <div className="kv"><b>修复统计</b>
                 已启动 {ep.screenplay_production.activation_count ?? 0} 轮 ·
                 已应用 {ep.screenplay_production.patch_count ?? 0} 个补丁 ·
@@ -871,7 +871,7 @@ export default function ScriptPage() {
             message={screenplayNotice.message}
             guidance={screenplayNotice.severity === 'error'
               ? '已发布剧本和工作草稿会保留。请按顶部主操作重新生成。'
-              : '这不是失败结果；工作副本和安全恢复点已保留，可按顶部主操作继续局部修复。'}
+              : '这不是失败结果；工作副本和安全恢复点已保留，可按顶部主操作继续剧本流程。'}
             variant={screenplayNotice.severity}
             detailLabel={screenplayNotice.severity === 'error' ? '查看剧本错误详情' : '查看剧本处理详情'}
           />

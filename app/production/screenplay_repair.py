@@ -1852,6 +1852,221 @@ async def ensure_source_characters_incremental(
     )
 
 
+def _complete_screenplay_from_working_artifact(
+    *,
+    episode_id: str,
+    episode: dict[str, Any],
+    source_text: str,
+    bible: Bible,
+    revision_id: str,
+    run_id: str | None,
+    checkpoint: dict[str, Any],
+    activation_no: int,
+) -> EpisodeScreenplay:
+    """Validate structure, record score-only QA, then publish atomically.
+
+    Quality observations never trigger Patch or block publication. Only
+    deterministic identity/context failures stop this stage.
+    """
+    from app.harness.contracts import get_contract
+    from app.portraits import (
+        apply_screenplay_character_resolutions,
+        normalize_screenplay_voice_ids,
+        screenplay_character_resolution_errors,
+        screenplay_unknown_identity_errors,
+    )
+    from app.production.screenplay_authority import (
+        SCREENPLAY_QA_PROFILE_VERSION,
+        screenplay_authority_fingerprint,
+    )
+
+    conn = get_conn()
+    rev = get_production_revision(revision_id)
+    if rev is None or not rev.working_artifact_id:
+        raise RuntimeError("剧本结构校验缺少 working Artifact")
+    working_id = rev.working_artifact_id
+    artifact = evidence_repository.get_artifact(working_id)
+    if artifact is None:
+        raise RuntimeError("剧本 working Artifact 不存在")
+    artifact_hash = artifact.get("content_hash") or evidence_repository.content_hash(
+        artifact.get("content")
+    )
+    script = load_screenplay_from_artifact(working_id)
+
+    save_checkpoint(revision_id, {
+        **checkpoint,
+        "phase": "STRUCTURE_VALIDATION",
+        "activation_no": activation_no,
+        "working_artifact_id": working_id,
+        "yield_reason": None,
+    })
+    conn.execute(
+        "UPDATE episodes SET screenplay_status='running',screenplay_error=?,"
+        "screenplay_updated_at=? WHERE id=?",
+        ("正在校验剧本结构与人物上下文", now(), episode_id),
+    )
+    conn.commit()
+    if run_id:
+        evidence_repository.append_event(
+            run_id,
+            "STRUCTURE_VALIDATION_STARTED",
+            "info",
+            "开始校验剧本结构与人物上下文",
+            payload={"artifact_id": working_id},
+        )
+
+    normalization_changes = apply_screenplay_character_resolutions(
+        script,
+        episode.get("character_resolutions") or [],
+    )
+    normalization_changes.extend(normalize_screenplay_voice_ids(script, bible))
+    normalization_changes.extend(_normalize_screenplay_narrative_graph(
+        script,
+        authorized_source_chapters=episode.get("authorized_source_chapters"),
+    ))
+    if normalization_changes:
+        payload = screenplay_artifact_payload(script)
+        normalized_hash = evidence_repository.content_hash(payload)
+        if normalized_hash != artifact_hash:
+            normalized = evidence_repository.create_artifact(
+                EvidenceArtifact(
+                    type="screenplay_document",
+                    scope_type="episode",
+                    scope_id=episode_id,
+                    status="candidate",
+                    trust_level="T1",
+                    content=payload,
+                    parent_artifact_ids=[working_id],
+                    contract_version=rev.contract_version or None,
+                )
+            )
+            update_working_artifact(
+                revision_id,
+                normalized["id"],
+                expected_hash=artifact_hash,
+            )
+            working_id = normalized["id"]
+            artifact_hash = normalized["content_hash"]
+
+    identity_errors = list(dict.fromkeys([
+        *screenplay_character_resolution_errors(
+            script,
+            episode.get("character_resolutions") or [],
+        ),
+        *screenplay_unknown_identity_errors(script, bible),
+    ]))
+    if identity_errors:
+        message = ("剧本缺少可确定的人物身份上下文：" + "；".join(identity_errors[:5]))[:800]
+        conn.execute(
+            "UPDATE episodes SET screenplay_status='failed',screenplay_error=?,"
+            "screenplay_updated_at=? WHERE id=?",
+            (message, now(), episode_id),
+        )
+        conn.commit()
+        save_checkpoint(revision_id, {
+            **checkpoint,
+            "phase": "STRUCTURE_FAILED",
+            "activation_no": activation_no,
+            "working_artifact_id": working_id,
+            "yield_reason": "character_identity_context_missing",
+            "structural_errors": identity_errors,
+        })
+        raise ScreenplayIdentityGateError(message)
+
+    save_checkpoint(revision_id, {
+        **checkpoint,
+        "phase": "QUALITY_SCORING",
+        "activation_no": activation_no,
+        "working_artifact_id": working_id,
+        "yield_reason": None,
+    })
+    conn.execute(
+        "UPDATE episodes SET screenplay_error=?,screenplay_updated_at=? WHERE id=?",
+        ("结构校验已通过，正在记录质量评分", now(), episode_id),
+    )
+    conn.commit()
+    issues, evaluation = run_screenplay_qa(
+        script,
+        bible=bible,
+        source_text=source_text,
+        episode=episode,
+        artifact_id=working_id,
+        artifact_hash=artifact_hash,
+    )
+    evaluation_row = evidence_repository.create_evaluation(working_id, evaluation)
+    evaluation_id = _eval_id_from_create(evaluation_row)
+    if not rev.first_evaluation_done:
+        rev = mark_first_evaluation(
+            revision_id,
+            evaluation_id or f"eval-{working_id}",
+        )
+
+    contract_version = get_contract("screenplay").version
+    current_fingerprint = screenplay_authority_fingerprint(
+        episode_id,
+        conn=conn,
+        source_text=source_text,
+        bible=bible,
+        contract_version=contract_version,
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+    )
+    if rev.input_fingerprint != current_fingerprint:
+        rev = rebind_input_fingerprint(
+            revision_id,
+            input_fingerprint=current_fingerprint,
+            expected_working_artifact_id=working_id,
+        )
+
+    save_checkpoint(revision_id, {
+        **checkpoint,
+        "phase": "PUBLISHING",
+        "activation_no": activation_no,
+        "working_artifact_id": working_id,
+        "quality_issue_count": len(issues),
+        "quality_score": evaluation.score,
+        "yield_reason": None,
+    })
+    conn.execute(
+        "UPDATE episodes SET screenplay_error=?,screenplay_updated_at=? WHERE id=?",
+        ("质量评分已记录，正在原子发布剧本", now(), episode_id),
+    )
+    conn.commit()
+    published = publish_screenplay(
+        episode_id=episode_id,
+        revision_id=revision_id,
+        artifact_id=working_id,
+        artifact_hash=artifact_hash,
+        evaluation_ids=[evaluation_id] if evaluation_id else [],
+        input_fingerprint=current_fingerprint,
+        contract_version=contract_version,
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+        clear_downstream=True,
+    )
+    save_checkpoint(revision_id, {
+        **checkpoint,
+        "phase": "SUCCEEDED",
+        "activation_no": activation_no,
+        "working_artifact_id": working_id,
+        "quality_issue_count": len(issues),
+        "quality_score": evaluation.score,
+        "gate_retry_exhausted": bool(issues),
+        "yield_reason": None,
+    })
+    if run_id:
+        evidence_repository.append_event(
+            run_id,
+            "PUBLISHED",
+            "info",
+            "剧本结构已发布，质量问题仅作为评分提示",
+            payload={
+                **published,
+                "quality_score": evaluation.score,
+                "quality_issue_count": len(issues),
+            },
+        )
+    return load_screenplay_from_artifact(working_id)
+
+
 async def run_screenplay_production(
     *,
     episode_id: str,
@@ -2006,6 +2221,12 @@ async def run_screenplay_production(
     # ---- Baseline（仅一次）----
     if not rev.baseline_done:
         assert_baseline_allowed(rev, command="screenplay.generate", episode_id=episode_id)
+        save_checkpoint(rev.id, {
+            **checkpoint,
+            "phase": "GENERATING_BASELINE",
+            "activation_no": activation_no,
+            "yield_reason": None,
+        })
         if run_id:
             evidence_repository.append_event(
                 run_id, "BASELINE_GENERATION_STARTED", "info",
@@ -2103,6 +2324,21 @@ async def run_screenplay_production(
             )
     elif not rev.working_artifact_id:
         raise RuntimeError("revision 已有 baseline 计数但缺少 working artifact")
+
+    # QA Score Only: once a parseable Baseline exists, resume from that
+    # immutable working Artifact and finish the remaining deterministic stages.
+    # The legacy semantic Patch loop below is intentionally bypassed; quality
+    # observations are recorded but never trigger another model generation.
+    return _complete_screenplay_from_working_artifact(
+        episode_id=episode_id,
+        episode=episode,
+        source_text=source_text,
+        bible=bible,
+        revision_id=rev.id,
+        run_id=run_id,
+        checkpoint=checkpoint,
+        activation_no=activation_no,
+    )
 
     # ---- Repair loop ----
     patches_this_activation = 0

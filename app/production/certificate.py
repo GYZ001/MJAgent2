@@ -123,6 +123,29 @@ def _required_exact_runtime_gate(
     return row
 
 
+def _required_exact_score_only(
+    rows: list[Any],
+    *,
+    evaluator_name: str,
+    evaluator_version: str,
+) -> Any:
+    named = [row for row in rows if row["evaluator_name"] == evaluator_name]
+    if len(named) != 1:
+        raise ValueError(
+            f"完成凭证必须精确引用一个 {evaluator_name} 质量评分"
+        )
+    row = named[0]
+    if not evaluator_version or row["evaluator_version"] != evaluator_version:
+        raise ValueError(
+            f"完成凭证的 {evaluator_name} evaluator_version 与当前契约不匹配"
+        )
+    if row["evaluation_role"] != "score_only" or bool(row["runtime_blocking"]):
+        raise ValueError(
+            f"完成凭证的 {evaluator_name} 必须是非阻断的 score_only 评分"
+        )
+    return row
+
+
 def _narrative_screenplay_for_artifact(
     *,
     kind: Literal["screenplay", "storyboard"],
@@ -243,7 +266,7 @@ def _validate_narrative_certificate_authority(
         raise ValueError("叙事完成凭证的 qa_profile_version 与当前运行契约不匹配")
 
     if kind == "screenplay":
-        _required_exact_runtime_gate(
+        _required_exact_score_only(
             rows,
             evaluator_name=_SCREENPLAY_GATE_EVALUATOR,
             evaluator_version=qa_profile_version,
