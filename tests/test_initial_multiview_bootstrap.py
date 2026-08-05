@@ -109,6 +109,27 @@ def test_initial_character_generation_publishes_complete_three_view_pack(
     assert all(view["image_url"] for view in visible["views"])
 
 
+def test_initial_character_generation_uses_batch_scoped_recovery_operation(
+    asset_db, monkeypatch,
+) -> None:
+    conn, _ = asset_db
+    _seed_bible_project(conn)
+    _patch_successful_character_generation(monkeypatch)
+    encoded = base64.b64encode(b"test-image").decode("ascii")
+    captured = []
+
+    async def capture_primary(*_args, **kwargs):
+        captured.append(kwargs["call_meta"])
+        return {"b64_json": encoded}
+
+    monkeypatch.setattr(refs.hiagent, "generate_image", capture_primary)
+
+    asyncio.run(refs.generate_refs("proj_bootstrap", fresh_after=123.5))
+
+    assert captured[0]["reuse_successful_operation"] is True
+    assert captured[0]["operation_id"].startswith("op_portrait_")
+
+
 def test_interrupted_auto_discovered_portrait_resumes_same_candidate(
     asset_db, monkeypatch,
 ) -> None:

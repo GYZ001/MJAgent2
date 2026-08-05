@@ -524,6 +524,30 @@ def test_custom_text_provider_uses_opt_in_success_cache(monkeypatch) -> None:
     assert result == "cached screenplay"
 
 
+def test_image_provider_uses_opt_in_success_cache(monkeypatch) -> None:
+    async def forbidden_post(*_args, **_kwargs):
+        raise AssertionError("cached image operation must not call provider again")
+
+    monkeypatch.setattr(hiagent, "active_model", lambda *_args: "image-model")
+    monkeypatch.setattr(hiagent, "_model_connection", lambda *_args: ("https://provider", {}))
+    monkeypatch.setattr(hiagent, "_post_json", forbidden_post)
+    monkeypatch.setattr(
+        hiagent,
+        "_cached_successful_provider_response",
+        lambda *_args, **_kwargs: {"data": [{"url": "https://cdn.example/portrait.jpg"}]},
+    )
+
+    result = asyncio.run(hiagent.generate_image(
+        "portrait prompt",
+        call_meta={
+            "reuse_successful_operation": True,
+            "operation_id": "op_portrait_batch_character",
+        },
+    ))
+
+    assert result["url"] == "https://cdn.example/portrait.jpg"
+
+
 def test_video_create_sends_stable_idempotency_key(monkeypatch) -> None:
     seen_headers: list[dict[str, str]] = []
 

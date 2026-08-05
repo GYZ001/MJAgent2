@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -363,16 +364,28 @@ async def generate_refs(
                 ))
                 prompt = base_prompt
                 try:
+                    call_meta = {
+                        "asset_kind": "portrait",
+                        "character_name": c.name,
+                        "episode_no": 1,
+                        "portrait_mode": "initial",
+                        "attempt": attempt,
+                    }
+                    if fresh_after is not None:
+                        operation_material = (
+                            f"{project_id}:{fresh_after}:{c.name}:initial_portrait"
+                        )
+                        call_meta.update({
+                            "operation_id": "op_portrait_" + hashlib.sha256(
+                                operation_material.encode("utf-8")
+                            ).hexdigest()[:32],
+                            "reuse_successful_operation": True,
+                        })
                     item = await hiagent.generate_image(
                         prompt,
                         size=config.REF_IMAGE_SIZE,
-                        call_meta={
-                            "asset_kind": "portrait",
-                            "character_name": c.name,
-                            "episode_no": 1,
-                            "portrait_mode": "initial",
-                            "attempt": attempt,
-                        })
+                        call_meta=call_meta,
+                    )
                     if item.get("url"):
                         await hiagent.download(item["url"], path)
                     elif item.get("b64_json"):

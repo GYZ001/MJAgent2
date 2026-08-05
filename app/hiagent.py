@@ -1586,34 +1586,41 @@ async def generate_image(prompt: str, *, size: str = "1024x1024",
         str((call_meta or {}).get("operation_id") or "").strip()
         or provider_operation_id(kind, model, payload)
     )
-    timeout = httpx.Timeout(connect=10, read=config.TIMEOUT_IMAGE_READ,
-                            write=config.TIMEOUT_IMAGE_WRITE, pool=10)
-    async with _image_semaphore():
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            try:
-                data = await _post_json(
-                    client, f"{base_url}/images/generations", payload,
-                    kind=kind, model=model, headers=model_headers, key_name=f"model:{model}",
-                    meta={**(call_meta or {}), **media_meta, "operation_id": operation_id},
-                    idempotency_key=operation_id)
-            except ProviderError as exc:
-                if not _is_input_text_safety_rejection(exc):
-                    raise
-                sanitized_prompt = _sanitize_image_prompt_for_safety_retry(prompt)
-                if sanitized_prompt == prompt:
-                    raise
-                retry_payload = {**payload, "prompt": sanitized_prompt}
-                data = await _post_json(
-                    client, f"{base_url}/images/generations", retry_payload,
-                    kind=kind, model=model, headers=model_headers, key_name=f"model:{model}",
-                    meta={
-                        **(call_meta or {}),
-                        **media_meta,
-                        "operation_id": operation_id,
-                        "input_safety_retry": True,
-                        "input_safety_reason": str(exc)[:240],
-                    },
-                    idempotency_key=f"{operation_id}-input-safety-1")
+    request_meta = {
+        **(call_meta or {}),
+        **media_meta,
+        "operation_id": operation_id,
+    }
+    data = _cached_successful_provider_response(
+        kind, model, payload, request_meta,
+    )
+    if data is None:
+        timeout = httpx.Timeout(connect=10, read=config.TIMEOUT_IMAGE_READ,
+                                write=config.TIMEOUT_IMAGE_WRITE, pool=10)
+        async with _image_semaphore():
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                try:
+                    data = await _post_json(
+                        client, f"{base_url}/images/generations", payload,
+                        kind=kind, model=model, headers=model_headers, key_name=f"model:{model}",
+                        meta=request_meta,
+                        idempotency_key=operation_id)
+                except ProviderError as exc:
+                    if not _is_input_text_safety_rejection(exc):
+                        raise
+                    sanitized_prompt = _sanitize_image_prompt_for_safety_retry(prompt)
+                    if sanitized_prompt == prompt:
+                        raise
+                    retry_payload = {**payload, "prompt": sanitized_prompt}
+                    data = await _post_json(
+                        client, f"{base_url}/images/generations", retry_payload,
+                        kind=kind, model=model, headers=model_headers, key_name=f"model:{model}",
+                        meta={
+                            **request_meta,
+                            "input_safety_retry": True,
+                            "input_safety_reason": str(exc)[:240],
+                        },
+                        idempotency_key=f"{operation_id}-input-safety-1")
     items = data.get("data") or []
     if not items:
         raise ProviderError(f"图像生成响应为空：{json.dumps(data, ensure_ascii=False)[:300]}")

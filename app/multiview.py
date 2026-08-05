@@ -1348,7 +1348,15 @@ async def ensure_character_multiview_pack(
             path = _view_path(project_id, "character", character_name, "front_full", ep_start)
             item = await _generate_image(
                 front_prompt, seed_inputs=seed,
-                call_meta={"asset_kind": "character_view", "view_role": "front_full", "character_name": character_name},
+                call_meta={
+                    "asset_kind": "character_view",
+                    "view_role": "front_full",
+                    "character_name": character_name,
+                    "operation_id": "op_character_view_" + hashlib.sha256(
+                        f"{portrait_id}:front_full:{front_fp}".encode("utf-8")
+                    ).hexdigest()[:32],
+                    "reuse_successful_operation": True,
+                },
             )
             await _save_image_item(item, path)
             qa = await review_character_view(path, effective_prompt, "front_full")
@@ -1429,7 +1437,15 @@ async def ensure_character_multiview_pack(
         path = _view_path(project_id, "character", character_name, view_role, ep_start)
         item = await _generate_image(
             prompt, seed_inputs=seeds or None,
-            call_meta={"asset_kind": "character_view", "view_role": view_role, "character_name": character_name},
+            call_meta={
+                "asset_kind": "character_view",
+                "view_role": view_role,
+                "character_name": character_name,
+                "operation_id": "op_character_view_" + hashlib.sha256(
+                    f"{portrait_id}:{view_role}:{fp}".encode("utf-8")
+                ).hexdigest()[:32],
+                "reuse_successful_operation": True,
+            },
         )
         await _save_image_item(item, path)
         view_id = _upsert_character_view(
