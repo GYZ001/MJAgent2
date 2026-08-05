@@ -154,6 +154,24 @@ def test_scene_recovery_prepares_missing_list_for_ready_bible(tmp_path, monkeypa
     ).fetchone()["scene_refs_status"] == "running"
 
 
+def test_scene_reference_batch_persists_operation_boundary(tmp_path, monkeypatch) -> None:
+    conn = _fresh_database(tmp_path, monkeypatch)
+    spawned = _capture_spawn(monkeypatch)
+    monkeypatch.setattr(api, "_scene_refs_task_active", lambda _pid: False)
+
+    assert api._start_scene_refs_generation(
+        "p1", ["客厅"], resume=True,
+    ) is True
+
+    row = conn.execute(
+        "SELECT scene_refs_status,scene_refs_batch_started_at "
+        "FROM projects WHERE id='p1'"
+    ).fetchone()
+    assert row["scene_refs_status"] == "running"
+    assert row["scene_refs_batch_started_at"] is not None
+    assert spawned == [("scene_refs", "p1")]
+
+
 def test_single_view_redo_spawn_failure_cancels_created_runs(tmp_path, monkeypatch) -> None:
     conn = _fresh_database(tmp_path, monkeypatch)
 

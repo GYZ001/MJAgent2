@@ -670,7 +670,7 @@ def test_resume_completes_partial_character_pack_instead_of_skipping_it(
     assert persisted["characters"][0]["ref_image_path"] == str(front)
 
 
-def test_scene_exists_accepts_primary_fallback_when_multiview_is_incomplete(
+def test_scene_exists_requires_complete_multiview_pack(
     asset_db, monkeypatch,
 ) -> None:
     conn, tmp_path = asset_db
@@ -688,7 +688,7 @@ def test_scene_exists_accepts_primary_fallback_when_multiview_is_incomplete(
         1,
     )
     monkeypatch.setattr(multiview, "scene_multiview_enabled", lambda: True)
-    assert scenes.scene_ref_exists(conn, "proj_bootstrap", "Courtyard") is True
+    assert scenes.scene_ref_exists(conn, "proj_bootstrap", "Courtyard") is False
 
     conn.execute("UPDATE scene_references SET pack_status='ready' WHERE id=?", (scene_id,))
     for role in ("establishing", "reverse_angle"):
@@ -755,7 +755,7 @@ def test_scene_multiview_generation_uses_candidate_scoped_recovery_operations(
     assert all(item["operation_id"].startswith("op_scene_view_") for item in captured)
 
 
-def test_failed_extra_view_pack_keeps_primary_scene_available_to_video(
+def test_failed_extra_view_pack_does_not_expose_primary_to_video(
     asset_db, monkeypatch,
 ) -> None:
     conn, tmp_path = asset_db
@@ -792,7 +792,8 @@ def test_failed_extra_view_pack_keeps_primary_scene_available_to_video(
     views = multiview.list_scene_views(scene_id, conn=conn)
     assert multiview.scene_pack_is_usable(row, views) is False
     assert multiview.scene_primary_is_usable(row, views) is True
-    assert scenes.scene_ref_for_episode("proj_bootstrap", "Courtyard", 1) == str(image)
+    assert scenes.scene_ref_exists(conn, "proj_bootstrap", "Courtyard") is False
+    assert scenes.scene_ref_for_episode("proj_bootstrap", "Courtyard", 1) is None
 
 
 def test_pending_reverse_view_is_reviewed_without_regeneration(asset_db, monkeypatch) -> None:

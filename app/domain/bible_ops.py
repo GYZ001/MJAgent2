@@ -318,9 +318,14 @@ def _start_scene_refs_generation(
     if _scene_refs_task_active(project_id):
         return False
     conn = get_conn()
+    project_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(projects)").fetchall()
+    }
+    batch_column_supported = "scene_refs_batch_started_at" in project_columns
     previous = conn.execute(
         "SELECT scene_refs_status,scene_refs_error,scene_refs_target,"
-        "scene_refs_batch_started_at FROM projects WHERE id=?",
+        + ("scene_refs_batch_started_at" if batch_column_supported else "NULL AS scene_refs_batch_started_at")
+        + " FROM projects WHERE id=?",
         (project_id,),
     ).fetchone()
     batch_started_at = (
@@ -332,10 +337,18 @@ def _start_scene_refs_generation(
         json.dumps(only_scene, ensure_ascii=False)
         if isinstance(only_scene, list) else only_scene
     )
-    conn.execute(
-        "UPDATE projects SET scene_refs_status='running', scene_refs_error=NULL,"
-        "scene_refs_target=?,scene_refs_batch_started_at=? WHERE id=?",
-        (target_payload, batch_started_at, project_id))
+    if batch_column_supported:
+        conn.execute(
+            "UPDATE projects SET scene_refs_status='running',scene_refs_error=NULL,"
+            "scene_refs_target=?,scene_refs_batch_started_at=? WHERE id=?",
+            (target_payload, batch_started_at, project_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE projects SET scene_refs_status='running',scene_refs_error=NULL,"
+            "scene_refs_target=? WHERE id=?",
+            (target_payload, project_id),
+        )
     conn.commit()
     try:
         task_registry.spawn(
@@ -350,16 +363,25 @@ def _start_scene_refs_generation(
         )
     except Exception as exc:
         if previous:
-            conn.execute(
-                "UPDATE projects SET scene_refs_status=?,scene_refs_error=?,scene_refs_target=?,"
-                "scene_refs_batch_started_at=? "
-                "WHERE id=?",
-                (
-                    previous["scene_refs_status"], previous["scene_refs_error"],
-                    previous["scene_refs_target"], previous["scene_refs_batch_started_at"],
-                    project_id,
-                ),
-            )
+            if batch_column_supported:
+                conn.execute(
+                    "UPDATE projects SET scene_refs_status=?,scene_refs_error=?,scene_refs_target=?,"
+                    "scene_refs_batch_started_at=? WHERE id=?",
+                    (
+                        previous["scene_refs_status"], previous["scene_refs_error"],
+                        previous["scene_refs_target"], previous["scene_refs_batch_started_at"],
+                        project_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    "UPDATE projects SET scene_refs_status=?,scene_refs_error=?,scene_refs_target=? "
+                    "WHERE id=?",
+                    (
+                        previous["scene_refs_status"], previous["scene_refs_error"],
+                        previous["scene_refs_target"], project_id,
+                    ),
+                )
             conn.commit()
         raise ValueError("场景图任务未能启动，原状态和费用凭证已保留，请重试") from exc
     return True

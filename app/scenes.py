@@ -1910,17 +1910,27 @@ async def _ensure_reactive_scene_image(
         _update_bible_scene_canonical(
             conn, project_id, scene.name, scene.scene_canonical, image_path,
         )
-        pack_status = "primary_ready"
         try:
-            from app.multiview import complete_legacy_scene_pack, scene_multiview_enabled
+            from app.multiview import (
+                complete_legacy_scene_pack,
+                pack_result_ok,
+                scene_multiview_enabled,
+            )
             if scene_multiview_enabled():
                 pack = await complete_legacy_scene_pack(
                     project_id, scene.name, episode_no, style,
                 )
-                pack_status = str((pack or {}).get("status") or "primary_ready")
-        except Exception:  # noqa: BLE001 主图已经可用；附加视角沿用人物包的安全降级语义
-            pack_status = "partial_fallback"
-        return {"image_path": image_path, "reused": False, "pack_status": pack_status}
+                if not pack_result_ok(pack):
+                    raise hiagent.ProviderError(
+                        f"场景多视角资产包结构不完整：{scene.name}"
+                    )
+        except Exception:
+            failed = _open_scene_ref(conn, project_id, scene.name)
+            if failed:
+                from app.rejected_media import purge_scene_reference
+                purge_scene_reference(conn, failed["id"])
+            raise
+        return {"image_path": image_path, "reused": False, "pack_status": "ready"}
 
 
 async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenplay, bible) -> dict:
