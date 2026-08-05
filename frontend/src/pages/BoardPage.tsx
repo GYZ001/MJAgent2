@@ -68,11 +68,12 @@ export type StartPreview = {
 
 export function storyboardCharacterFilterOptions(shots: Shot[]): string[] {
   const internalIdentity = /^(?:character|entity|speaker|voice|passerby)[-_]/i
+  const internalSlug = /^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)+$/i
   return [...new Set(
     shots
       .flatMap(shot => [...(shot.characters ?? []), ...(shot.audio_cast ?? [])])
       .map(value => value.trim())
-      .filter(value => value && !internalIdentity.test(value)),
+      .filter(value => value && !internalIdentity.test(value) && !internalSlug.test(value)),
   )]
 }
 

@@ -30,9 +30,11 @@ from app.schemas import (
     Storyboard,
     StoryboardOutline,
     StoryboardOutlineShot,
+    extract_json,
 )
 from app.stages import (
     StageError,
+    StoryboardShotDraft,
     generate_storyboard_next_shot,
     generate_storyboard_outline,
     normalize_storyboard_shot_candidate,
@@ -714,6 +716,160 @@ def _contiguous_shot_rows(rows) -> list:
 
 def _storyboard_hash(board: Storyboard) -> str:
     return evidence_repository.content_hash(board.model_dump(mode="json"))
+
+
+def _restore_misplaced_shot_fields_from_provider(
+    conn,
+    *,
+    episode_id: str,
+    rows,
+    board: Storyboard,
+    outline: StoryboardOutline | None,
+    run_id: str | None,
+) -> bool:
+    """Recover fields returned by a successful call but misplaced at JSON root."""
+    outline_by_no = {
+        int(brief.shot_no): brief
+        for brief in (outline.shots if outline is not None else [])
+    }
+    changed_shots: list[dict[str, Any]] = []
+    for index, (row, shot) in enumerate(zip(rows, board.shots)):
+        missing = [
+            field for field in (
+                "first_frame_desc", "last_frame_desc", "source_excerpt",
+            )
+            if not str(getattr(shot, field, "") or "").strip()
+        ]
+        if not missing:
+            continue
+
+        artifact_ids = [str(row["storyboard_artifact_id"] or "")]
+        visited: set[str] = set()
+        recovered = False
+        while artifact_ids and not recovered:
+            artifact_id = artifact_ids.pop(0)
+            if not artifact_id or artifact_id in visited:
+                continue
+            visited.add(artifact_id)
+            artifact_row = conn.execute(
+                """SELECT created_by_step_run_id,parent_artifact_ids_json
+                     FROM artifacts WHERE id=?""",
+                (artifact_id,),
+            ).fetchone()
+            if artifact_row is None:
+                continue
+            try:
+                artifact_ids.extend(
+                    str(item)
+                    for item in json.loads(
+                        artifact_row["parent_artifact_ids_json"] or "[]"
+                    )
+                    if item
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+            step_run_id = str(artifact_row["created_by_step_run_id"] or "")
+            if not step_run_id:
+                continue
+            call_rows = conn.execute(
+                """SELECT id,response_json FROM provider_calls
+                   WHERE step_run_id=? AND kind='chat'
+                     AND status IN ('OK','SUCCESS','SUCCEEDED')
+                     AND response_json IS NOT NULL
+                   ORDER BY id DESC""",
+                (step_run_id,),
+            ).fetchall()
+            for call_row in call_rows:
+                try:
+                    response = json.loads(call_row["response_json"] or "{}")
+                    raw = str(
+                        response["choices"][0]["message"]["content"]
+                    )
+                    candidate = extract_json(raw)
+                except (
+                    KeyError, IndexError, TypeError, ValueError,
+                    json.JSONDecodeError,
+                ):
+                    continue
+                brief = outline_by_no.get(int(shot.shot_no))
+                normalized, normalizations = normalize_storyboard_shot_candidate(
+                    candidate,
+                    episode_no=board.episode_no,
+                    shot_no=int(shot.shot_no),
+                    outline_story_event_id=(
+                        str(brief.story_event_id or "") if brief else ""
+                    ),
+                    outline_narrative_task=(
+                        brief.model_dump(mode="json") if brief else None
+                    ),
+                    previous_scene_name=(
+                        str(board.shots[index - 1].scene_name or "")
+                        if index > 0 else ""
+                    ),
+                    previous_scene_time=(
+                        str(board.shots[index - 1].scene_time or "")
+                        if index > 0 else ""
+                    ),
+                )
+                moved_fields = {
+                    str(change.get("field") or "").removeprefix("shot.")
+                    for change in normalizations
+                    if change.get("reason") == "misplaced_root_field"
+                }
+                if not moved_fields.intersection(missing):
+                    continue
+                try:
+                    draft = StoryboardShotDraft.model_validate(normalized)
+                    from app.storyboard_workspace import (
+                        align_generated_source_evidence,
+                    )
+
+                    draft.shot.source_excerpt, _binding = (
+                        align_generated_source_evidence(
+                            episode_id,
+                            draft.shot.source_excerpt,
+                        )
+                    )
+                except (TypeError, ValueError, HTTPException):
+                    continue
+                for field in moved_fields:
+                    if field in Shot.model_fields:
+                        setattr(shot, field, getattr(draft.shot, field))
+                changed_shots.append({
+                    "shot_no": int(shot.shot_no),
+                    "fields": sorted(moved_fields),
+                    "provider_call_id": int(call_row["id"]),
+                })
+                recovered = True
+
+    if not changed_shots:
+        return False
+    for row, shot in zip(rows, board.shots):
+        if any(
+            item["shot_no"] == int(shot.shot_no)
+            for item in changed_shots
+        ):
+            _write_shot_fields(
+                conn,
+                str(row["id"]),
+                shot,
+                row["storyboard_artifact_id"],
+                narrative_authority=True,
+            )
+    conn.commit()
+    from app.domain.storyboard_ops import _ensure_current_storyboard_shot_artifacts
+
+    _ensure_current_storyboard_shot_artifacts(conn, episode_id, board)
+    conn.commit()
+    if run_id:
+        evidence_repository.append_event(
+            run_id,
+            "STORYBOARD_PROVIDER_PROJECTION_RECOVERED",
+            "warning",
+            "已从成功供应商响应恢复错层的分镜必填字段",
+            payload={"shots": changed_shots},
+        )
+    return True
 
 
 def _repair_is_pending(cp: SupervisorCheckpoint) -> bool:
@@ -1788,6 +1944,18 @@ async def run_storyboard_supervisor(
         "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
     ).fetchall()
     completed: list[Shot] = _reload_completed(existing_rows)
+    if completed and _restore_misplaced_shot_fields_from_provider(
+        conn,
+        episode_id=episode_id,
+        rows=existing_rows,
+        board=Storyboard(
+            episode_no=ep_data["episode_no"],
+            shots=list(completed),
+        ),
+        outline=outline,
+        run_id=run_id,
+    ):
+        completed = _reload_completed()
     if _repair_is_pending(cp):
         completed = _repair_context_shots(conn, cp, ep_data["episode_no"])
     if completed and not narrative_authority:

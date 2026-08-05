@@ -121,7 +121,8 @@ def is_structural_issue(issue: Issue) -> bool:
     upper_code = code.upper()
     lower_code = code.lower()
     return (
-        upper_code in _STRUCTURAL_CODE_NAMES
+        upper_code == "SOURCE_FIDELITY"
+        or upper_code in _STRUCTURAL_CODE_NAMES
         or upper_code.startswith(_STRUCTURAL_CODE_PREFIXES)
         or any(marker in lower_code for marker in _STRUCTURAL_CODE_MARKERS)
     )

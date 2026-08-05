@@ -85,7 +85,12 @@ describe('分镜台结构化 diff 与问题筛选', () => {
   it('角色筛选不暴露叙事内部身份 ID', () => {
     const value = shot({
       characters: ['孟浩'],
-      audio_cast: ['character-menghao', 'voice-narrator', 'passerby-c'],
+      audio_cast: [
+        'character-menghao',
+        'voice-narrator',
+        'passerby-c',
+        'green-robed-cultivator',
+      ],
     })
     expect(storyboardCharacterFilterOptions([value])).toEqual(['孟浩'])
   })

@@ -153,6 +153,26 @@ def normalize_storyboard_shot_candidate(
     shot = dict(raw_shot)
     normalized["shot"] = shot
 
+    # A common near-valid response closes ``shot`` one brace too early and
+    # continues its remaining fields at the draft root. ``raw_decode`` can
+    # still recover that root object, but Pydantic would otherwise ignore the
+    # misplaced fields. Move only declared Shot fields and never overwrite a
+    # non-empty value already inside ``shot``.
+    for field in Shot.model_fields:
+        if field == "is_final" or field not in normalized:
+            continue
+        root_value = normalized.pop(field)
+        current_value = shot.get(field)
+        if current_value not in (None, "", [], {}):
+            continue
+        shot[field] = root_value
+        changes.append({
+            "field": f"shot.{field}",
+            "from": current_value,
+            "to": root_value,
+            "reason": "misplaced_root_field",
+        })
+
     if shot.get("shot_no") != shot_no:
         changes.append({
             "field": "shot.shot_no", "from": shot.get("shot_no"),
@@ -2552,6 +2572,11 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
         errors.append(f"episode_no={draft.episode_no}，必须等于 {episode['episode_no']}")
     if draft.shot.shot_no != shot_no:
         errors.append(f"shot.shot_no={draft.shot.shot_no}，当前只允许输出第 {shot_no} 镜")
+    for field in ("first_frame_desc", "last_frame_desc", "source_excerpt"):
+        if not str(getattr(draft.shot, field, "") or "").strip():
+            errors.append(
+                f"[REQUIRED_FIELD_MISSING] shot.{field} 是分镜生产必填字段"
+            )
     if draft.is_final and not allow_finish:
         errors.append(f"当前第 {shot_no} 镜还不能作为最后一镜；本集至少需要更多镜头承接完整剧情")
     if must_finish and not draft.is_final:

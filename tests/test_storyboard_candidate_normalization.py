@@ -68,6 +68,49 @@ def test_storyboard_candidate_normalizes_nullable_contract_fields() -> None:
     }
 
 
+def test_storyboard_candidate_restores_shot_fields_misplaced_at_root() -> None:
+    candidate = {
+        "episode_no": 1,
+        "is_final": False,
+        "shot": {
+            "shot_no": 4,
+            "duration_s": 5,
+            "action_desc": "孟浩拽紧藤条并开口询问。",
+        },
+        "first_frame_desc": "黄昏裂缝旁，孟浩双手握住藤条，王有材抓住另一端。",
+        "last_frame_desc": "孟浩拽紧藤条看向王有材，停下动作等待回答。",
+        "source_excerpt": "你还没说，你们到底怎么下去的？",
+        "dialogues": [{
+            "speaker": "孟浩",
+            "line": "你还没说，你们到底怎么下去的？",
+            "emotion": "平静",
+            "delivery": "spoken_dialogue",
+        }],
+    }
+
+    normalized, changes = normalize_storyboard_shot_candidate(
+        candidate,
+        episode_no=1,
+        shot_no=4,
+    )
+
+    assert normalized["shot"]["first_frame_desc"].startswith("黄昏裂缝旁")
+    assert normalized["shot"]["last_frame_desc"].startswith("孟浩拽紧藤条")
+    assert normalized["shot"]["source_excerpt"] == "你还没说，你们到底怎么下去的？"
+    assert normalized["shot"]["dialogues"][0]["speaker"] == "孟浩"
+    assert "first_frame_desc" not in normalized
+    assert {
+        change["field"]
+        for change in changes
+        if change.get("reason") == "misplaced_root_field"
+    } >= {
+        "shot.first_frame_desc",
+        "shot.last_frame_desc",
+        "shot.source_excerpt",
+        "shot.dialogues",
+    }
+
+
 def test_storyboard_candidate_uses_outline_event_id_but_does_not_coerce_objects() -> None:
     normalized, _ = normalize_storyboard_shot_candidate(
         {"episode_no": 1, "shot": {"shot_no": 2, "story_event_id": {"bad": True}}},
