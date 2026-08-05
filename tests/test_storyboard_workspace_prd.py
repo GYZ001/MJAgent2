@@ -455,11 +455,16 @@ async def test_final_tail_with_hard_gates_reopens_existing_repair_instead_of_app
         return object()
 
     monkeypatch.setattr(task_registry, "spawn", fake_spawn)
-    result = await api.resume_storyboard("e1")
+    approved_preview = api.storyboard_start_preflight("e1", {})
+    result = await api.resume_storyboard(
+        "e1",
+        {"preflight_token": approved_preview["preview_token"]},
+    )
 
     assert result["action"] == "resume"
     assert result["next_shot_no"] == 2
     assert spawned == {"kind": "storyboard", "key": "e1", "project_id": "p1"}
+    assert load_latest_checkpoint("e1").last_repair["status"] == "candidate_pending"
     assert storyboard_db.execute(
         "SELECT COUNT(*) AS c FROM shots WHERE episode_id='e1'"
     ).fetchone()["c"] == 1

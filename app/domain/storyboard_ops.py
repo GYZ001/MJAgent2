@@ -1296,6 +1296,39 @@ async def _storyboard_task(
                 bible,
                 screenplay,
             )
+            if not identity_repairs:
+                from app.storyboard_supervisor import (
+                    _repair_is_pending,
+                    load_latest_checkpoint,
+                    run_storyboard_supervisor,
+                )
+
+                repair_checkpoint = load_latest_checkpoint(episode_id)
+                if (
+                    repair_checkpoint is not None
+                    and _repair_is_pending(repair_checkpoint)
+                    and ep["status"] in {"scripted", "scripting"}
+                ):
+                    _preflight_event(
+                        "STORYBOARD_PUBLISHED_REPAIR_CANDIDATE_STARTED",
+                        "已基于发布分镜建立隔离修订候选，正式投影保持不变",
+                        payload={
+                            "artifact_id": ep["published_storyboard_artifact_id"],
+                            "window_start": (
+                                repair_checkpoint.last_repair or {}
+                            ).get("window_start"),
+                            "window_end": (
+                                repair_checkpoint.last_repair or {}
+                            ).get("window_end"),
+                        },
+                    )
+                    return await run_storyboard_supervisor(
+                        episode_id,
+                        resume=True,
+                        run_id=run_id,
+                        preflight_done=True,
+                        new_activation=False,
+                    )
             if not identity_repairs and projection_restored:
                 conn.execute(
                     "UPDATE episodes SET status='scripted',script_error=NULL,"
@@ -2033,9 +2066,15 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
     """内部从 Supervisor Checkpoint / 已验证前缀恢复；对外统一走 POST /storyboard。"""
     body_was_explicit = isinstance(body, dict)
     body = _as_body_dict(body)
+    preview_payload: dict = {}
     if body_was_explicit:
         from app.storyboard_workspace import require_preview
-        require_preview(body.get("preflight_token"), "start:resume", episode_id, consume=True)
+        preview_payload = require_preview(
+            body.get("preflight_token"),
+            "start:resume",
+            episode_id,
+            consume=True,
+        )
     ep = _episode_or_404(episode_id)
     _require_harness_engine(ep["project_id"])
     if ep["screenplay_publish_fence"]:
@@ -2068,6 +2107,19 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
     resume_decision = _storyboard_resume_decision(episode_id, dict(ep))
     if not resume_decision["allowed"]:
         raise HTTPException(409, resume_decision["blocking_reason"])
+    prepared_published_repair = False
+    if preview_payload.get("resume_mode") == "repair_existing":
+        from app.storyboard_supervisor import prepare_published_storyboard_repair
+
+        prepare_published_storyboard_repair(
+            episode_id,
+            [
+                str(message)
+                for message in preview_payload.get("current_gate_issues") or []
+                if str(message).strip()
+            ],
+        )
+        prepared_published_repair = True
     parent = conn.execute(
         """SELECT id FROM workflow_runs
            WHERE workflow_type='storyboard' AND scope_type='episode' AND scope_id=?
@@ -2105,7 +2157,7 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
             episode_id,
             recorder,
             resume=True,
-            new_activation=True,
+            new_activation=not prepared_published_repair,
             priority=0,
         )
         task_registry.spawn(

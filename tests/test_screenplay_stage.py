@@ -485,6 +485,59 @@ def test_dialogue_chain_normalization_excludes_narrator_from_key_lines() -> None
     assert normalized.key_lines == ["谷言：门开了。"]
 
 
+def test_dialogue_chain_normalization_removes_duplicate_evidence_action_as_speaker() -> None:
+    script = EpisodeScreenplay(
+        episode_no=1,
+        full_script_text=(
+            "【场1】日 / 楼梯间\n"
+            "胡太太：一起去吃饭吧。\n"
+            "阿宾：好啊！\n"
+            "两人转身走出楼梯间：前往快餐店。"
+        ),
+        dialogue_chains=[
+            KeyDialogueChain(
+                chain_id="DC1",
+                topic="相约吃饭",
+                turns=[
+                    KeyDialogueTurn(
+                        speaker="胡太太",
+                        line="一起去吃饭吧。",
+                        source_text="一起去吃饭吧。",
+                    ),
+                    KeyDialogueTurn(
+                        speaker="两人转身走出楼梯间",
+                        line="前往快餐店。",
+                        source_text="一起去吃饭吧。",
+                    ),
+                    KeyDialogueTurn(
+                        speaker="阿宾",
+                        line="好啊！",
+                        source_text="好啊！",
+                    ),
+                ],
+            )
+        ],
+        voice_bible=[
+            VoiceCanonical(speaker_id="阿宾", voice_canonical="青年男声"),
+            VoiceCanonical(speaker_id="胡太太", voice_canonical="温柔女声"),
+        ],
+    )
+
+    normalized = normalize_screenplay_candidate(script)
+
+    assert [turn.speaker for turn in normalized.dialogue_chains[0].turns] == [
+        "胡太太",
+        "阿宾",
+    ]
+    assert [turn.speaker for turn in script.dialogue_chains[0].turns] == [
+        "胡太太",
+        "两人转身走出楼梯间",
+        "阿宾",
+    ]
+    assert "两人转身走出楼梯间，前往快餐店。" in normalized.full_script_text
+    assert "两人转身走出楼梯间：" not in normalized.full_script_text
+
+
 def test_ledger_normalization_resolves_composite_speaker_from_content() -> None:
     script = EpisodeScreenplay(
         episode_no=1,

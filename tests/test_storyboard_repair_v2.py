@@ -43,6 +43,7 @@ from app.storyboard_supervisor import (
     _merge_repair_candidate,
     _migrate_checkpoint,
     _open_shot_gap,
+    _repair_is_pending,
     _repair_feedback_for_shot,
     _recover_truncated_outline_from_approved_artifact,
     _repair_candidate_made_progress,
@@ -53,6 +54,7 @@ from app.storyboard_supervisor import (
     _storyboard_hash,
     _validated_candidate_projection,
     _withdraw_legacy_failed_publication,
+    prepare_published_storyboard_repair,
     run_storyboard_supervisor,
     save_checkpoint,
 )
@@ -425,6 +427,36 @@ def test_new_activation_resets_all_activation_local_repair_budgets() -> None:
     assert activated.repair_candidate_shots == []
     assert activated.last_repair["status"] == "superseded_by_new_activation"
     assert activated.outcome is None
+
+
+def test_published_gate_repair_starts_in_isolated_candidate_window(
+    repair_db,
+) -> None:
+    conn, _screenplay = repair_db
+    before = _storyboard_hash(_current_board(conn))
+    save_checkpoint(SupervisorCheckpoint(
+        episode_id="e1",
+        phase="SUCCEEDED",
+        outcome="SUCCEEDED_READY_FOR_CONFIRM",
+        planner_version=STORYBOARD_REPAIR_PLANNER_VERSION,
+        validated_prefix_end=3,
+        next_shot_no=4,
+        expected_total=3,
+        input_versions={"screenplay_artifact_id": "sp1"},
+    ))
+
+    checkpoint = prepare_published_storyboard_repair(
+        "e1",
+        ["Prompt 编译失败：shot_no=2 的画面合同与声音合同不一致"],
+    )
+
+    assert _repair_is_pending(checkpoint)
+    assert checkpoint.activation_no == 1
+    assert checkpoint.last_repair["mode"] == "replace"
+    assert checkpoint.last_repair["window_start"] == 2
+    assert checkpoint.last_repair["window_end"] == 2
+    assert checkpoint.repair_candidate_shots == []
+    assert _storyboard_hash(_current_board(conn)) == before
 
 
 def test_new_activation_withdraws_legacy_failed_gate_publication(repair_db) -> None:

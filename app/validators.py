@@ -1425,6 +1425,53 @@ def normalize_screenplay_dialogue_chains(script: EpisodeScreenplay) -> EpisodeSc
     """Make structured dialogue chains authoritative for downstream key-line delivery."""
     if not script.dialogue_chains:
         return script
+    allowed_speakers = {
+        str(item.speaker_id or "").strip()
+        for item in (script.voice_bible or [])
+        if str(item.speaker_id or "").strip()
+    }
+    if script.narrative_plan is not None:
+        for identity in script.narrative_plan.identity_contracts:
+            allowed_speakers.update({
+                str(identity.identity_id or "").strip(),
+                str(identity.display_name or "").strip(),
+                *(
+                    str(voice_id or "").strip()
+                    for voice_id in (identity.voice_ids or [])
+                ),
+            })
+    for chain in script.dialogue_chains:
+        turns = list(chain.turns or [])
+        normalized_turns = []
+        for index, turn in enumerate(turns):
+            speaker = str(turn.speaker or "").strip()
+            source = _condense(turn.source_text)
+            duplicate_source = bool(source) and any(
+                index != other_index
+                and (
+                    source == _condense(other.source_text)
+                    or source in _condense(other.source_text)
+                    or _condense(other.source_text) in source
+                )
+                for other_index, other in enumerate(turns)
+                if _condense(other.source_text)
+            )
+            if (
+                allowed_speakers
+                and speaker not in allowed_speakers
+                and duplicate_source
+            ):
+                line = str(turn.line or "").strip()
+                for separator in ("：", ":"):
+                    dialogue_line = f"{speaker}{separator}{line}"
+                    if dialogue_line in (script.full_script_text or ""):
+                        script.full_script_text = script.full_script_text.replace(
+                            dialogue_line,
+                            f"{speaker.rstrip('，,。；; ')}，{line}",
+                        )
+                continue
+            normalized_turns.append(turn)
+        chain.turns = normalized_turns
     flattened: list[str] = []
     for chain in script.dialogue_chains:
         for turn in chain.turns or []:
