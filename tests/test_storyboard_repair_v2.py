@@ -1248,6 +1248,17 @@ def test_candidate_partial_progress_rejects_new_hard_gate_regression() -> None:
     ) is False
 
 
+def test_candidate_accepts_newly_exposed_gate_outside_repair_window() -> None:
+    assert _repair_candidate_made_progress(
+        mode="replace",
+        candidate_passed=False,
+        before_messages=["shot_no=8 缺少有效口播"],
+        after_messages=["镜头 10 声音身份未绑定"],
+        window_start=8,
+        window_end=8,
+    ) is True
+
+
 def test_candidate_without_any_resolved_target_is_not_progress() -> None:
     issue = "shot_no=11 的对白同时包含剧情道具操作，shot_size 不得为特写"
 
@@ -1331,6 +1342,8 @@ def test_deterministic_missing_spoken_candidate_uses_published_dialogue_clause()
     assert candidate.dialogues[0].speaker == "老师"
     assert candidate.dialogues[0].line in screenplay.dialogue_chains[0].turns[0].line
     assert candidate.audio_cast == ["老师"]
+    assert candidate.audio_timeline[0].type == "spoken_dialogue"
+    assert candidate.audio_timeline[0].speaker_id == "老师"
     assert shot.dialogues == []
 
 

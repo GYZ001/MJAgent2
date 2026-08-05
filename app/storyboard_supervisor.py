@@ -554,6 +554,8 @@ def _repair_candidate_made_progress(
     candidate_passed: bool,
     before_messages: list[str],
     after_messages: list[str],
+    window_start: int | None = None,
+    window_end: int | None = None,
 ) -> bool:
     """Accept monotonic partial repair so independent issues converge in turn."""
     if candidate_passed or mode == "append":
@@ -564,7 +566,23 @@ def _repair_candidate_made_progress(
         return False
     resolved = before - after
     introduced = after - before
-    return bool(resolved) and not introduced
+    if not resolved:
+        return False
+    if not introduced:
+        return True
+    if window_start is None or window_end is None:
+        return False
+    changed_window = set(range(window_start, window_end + 1))
+    for _code, target in introduced:
+        if not target.startswith("shot:"):
+            return False
+        try:
+            shot_no = int(target.partition(":")[2])
+        except ValueError:
+            return False
+        if shot_no in changed_window:
+            return False
+    return True
 
 
 def _repair_message_atoms(messages: list[str]) -> set[tuple[str, str]]:
@@ -750,6 +768,13 @@ def _deterministic_missing_spoken_candidate(
         *(candidate.audio_cast or []),
         speaker,
     ]))
+    candidate.audio_timeline = []
+    from app.continuity import ensure_audio_timeline
+
+    ensure_audio_timeline(
+        candidate,
+        getattr(screenplay, "voice_bible", None),
+    )
     return candidate
 
 
@@ -2625,6 +2650,8 @@ async def run_storyboard_supervisor(
                 candidate_passed=candidate_evaluation.passed,
                 before_messages=before_messages,
                 after_messages=after_messages,
+                window_start=int(repair.get("window_start") or 1),
+                window_end=int(repair.get("window_end") or 1),
             )
             no_op = _storyboard_hash(candidate_board) == _storyboard_hash(official_board)
             if no_op or not improved:
