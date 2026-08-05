@@ -1890,12 +1890,58 @@ async def _ensure_reactive_scene_image(
             return {"image_path": current_path, "reused": True}
         conn = get_conn()
         broken = conn.execute(
-            "SELECT id,image_path FROM scene_references WHERE project_id=? AND scene_name=? "
+            "SELECT * FROM scene_references WHERE project_id=? AND scene_name=? "
             "AND ep_start=? ORDER BY created_at DESC LIMIT 1",
             (project_id, scene.name, episode_no),
         ).fetchone()
-        if broken and not (broken["image_path"] and Path(broken["image_path"]).is_file()):
-            conn.execute("DELETE FROM scene_references WHERE id=?", (broken["id"],))
+        if broken:
+            broken_path = str(broken["image_path"] or "")
+            if broken_path and Path(broken_path).is_file():
+                from app.multiview import (
+                    complete_legacy_scene_pack,
+                    pack_result_ok,
+                    scene_multiview_enabled,
+                )
+
+                if scene_multiview_enabled():
+                    try:
+                        pack = await complete_legacy_scene_pack(
+                            project_id,
+                            scene.name,
+                            episode_no,
+                            style,
+                        )
+                        if not pack_result_ok(pack):
+                            raise hiagent.ProviderError(
+                                f"场景多视角资产包结构不完整：{scene.name}"
+                            )
+                    except Exception:
+                        from app.rejected_media import purge_scene_reference
+
+                        purge_scene_reference(conn, broken["id"])
+                        raise
+                    _update_bible_scene_canonical(
+                        conn,
+                        project_id,
+                        scene.name,
+                        scene.scene_canonical,
+                        broken_path,
+                    )
+                    return {
+                        "image_path": broken_path,
+                        "reused": True,
+                        "resumed_pack": True,
+                        "pack_status": "ready",
+                    }
+                return {
+                    "image_path": broken_path,
+                    "reused": True,
+                    "pack_status": str(broken["pack_status"] or ""),
+                }
+            conn.execute(
+                "DELETE FROM scene_references WHERE id=?",
+                (broken["id"],),
+            )
             conn.commit()
         image_path = await _generate_and_register_scene(
             project_id,
