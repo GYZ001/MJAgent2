@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
+from io import BytesIO
+from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 
 import pytest
 from fastapi import FastAPI, HTTPException, Request
@@ -14,6 +16,53 @@ from app.capabilities.inputs import ProjectImportNovelInput
 from app.capabilities.policy import reset_approvals_for_tests
 from app.local_session import APPROVAL_HEADER, ensure_session_secret, set_request_session_id
 from tests.conftest import SessionTestClient
+
+
+def _epub_bytes() -> bytes:
+    stream = BytesIO()
+    with ZipFile(stream, "w") as archive:
+        archive.writestr("mimetype", "application/epub+zip", compress_type=ZIP_STORED)
+        archive.writestr(
+            "META-INF/container.xml",
+            """<?xml version="1.0"?>
+            <container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+              <rootfiles>
+                <rootfile full-path="OEBPS/content.opf"
+                          media-type="application/oebps-package+xml"/>
+              </rootfiles>
+            </container>""",
+            compress_type=ZIP_DEFLATED,
+        )
+        archive.writestr(
+            "OEBPS/content.opf",
+            """<?xml version="1.0" encoding="UTF-8"?>
+            <package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+              <manifest>
+                <item id="chapter-1" href="chapter-1.xhtml" media-type="application/xhtml+xml"/>
+                <item id="chapter-2" href="chapter-2.xhtml" media-type="application/xhtml+xml"/>
+              </manifest>
+              <spine>
+                <itemref idref="chapter-1"/>
+                <itemref idref="chapter-2"/>
+              </spine>
+            </package>""",
+            compress_type=ZIP_DEFLATED,
+        )
+        # Deliberately store chapter 2 first: imports must follow the OPF spine.
+        archive.writestr(
+            "OEBPS/chapter-2.xhtml",
+            """<html xmlns="http://www.w3.org/1999/xhtml"><head><title>网页标题</title></head>
+            <body><h1>第二章 转折</h1><p>远处钟声打破了沉默。</p></body></html>""",
+            compress_type=ZIP_DEFLATED,
+        )
+        archive.writestr(
+            "OEBPS/chapter-1.xhtml",
+            """<html xmlns="http://www.w3.org/1999/xhtml"><head><title>不应导入</title></head>
+            <body><nav>目录噪声</nav><h1>第一章 开端</h1><p>少年在夜雨中推开院门。</p>
+            <script>脚本噪声</script></body></html>""",
+            compress_type=ZIP_DEFLATED,
+        )
+    return stream.getvalue()
 
 
 @pytest.fixture
@@ -254,14 +303,55 @@ async def test_import_receipt_recovers_project_after_attachment_store_is_lost(
     assert db.get_conn().execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 1
 
 
-def test_upload_rejects_non_txt_before_approval(client: TestClient) -> None:
+def test_upload_accepts_epub_and_imports_spine_in_order(client: TestClient) -> None:
+    upload = client.post(
+        "/api/attachments/novel",
+        files={"file": ("长夜.epub", _epub_bytes(), "application/epub+zip")},
+    )
+
+    assert upload.status_code == 200, upload.text
+    token = upload.json()["attachment_token"]
+    filename, raw = attachments.read(token)
+    try:
+        created = api._create_project_core(None, filename, raw)
+    finally:
+        attachments.discard(token)
+
+    assert created["ingestion"]["source_format"] == "EPUB"
+    assert created["ingestion"]["chapter_count"] == 2
+    project = db.get_conn().execute(
+        "SELECT name FROM projects WHERE id=?",
+        (created["project_id"],),
+    ).fetchone()
+    chapters = db.get_conn().execute(
+        "SELECT title, content FROM chapters WHERE project_id=? ORDER BY idx",
+        (created["project_id"],),
+    ).fetchall()
+    assert project["name"] == "长夜"
+    assert [row["title"] for row in chapters] == ["第一章 开端", "第二章 转折"]
+    assert "少年在夜雨中推开院门。" in chapters[0]["content"]
+    assert "远处钟声打破了沉默。" in chapters[1]["content"]
+    assert all("噪声" not in row["content"] for row in chapters)
+
+
+def test_upload_rejects_invalid_epub_before_approval(client: TestClient) -> None:
+    response = client.post(
+        "/api/attachments/novel",
+        files={"file": ("broken.epub", b"not a zip archive", "application/epub+zip")},
+    )
+
+    assert response.status_code == 422
+    assert "EPUB 文件损坏" in response.json()["detail"]
+
+
+def test_upload_rejects_unsupported_format_before_approval(client: TestClient) -> None:
     response = client.post(
         "/api/attachments/novel",
         files={"file": ("story.pdf", b"%PDF-1.7 binary", "application/pdf")},
     )
 
     assert response.status_code == 422
-    assert "仅支持 TXT" in response.json()["detail"]
+    assert "仅支持 TXT 或 EPUB" in response.json()["detail"]
 
 
 def test_create_project_rolls_back_partial_rows(monkeypatch) -> None:
