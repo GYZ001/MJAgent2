@@ -363,6 +363,56 @@ def _has_current_storyboard_completion_certificate(conn, episode) -> bool:
     )
 
 
+def _restore_unconfirmed_storyboard_projection(
+    conn,
+    episode,
+) -> Storyboard:
+    """Restore mutable shots from the exact consumed release Artifact."""
+    data = dict(episode)
+    if data.get("status") != "scripted":
+        raise ValueError("只有等待人工确认的分镜允许从发布 Artifact 恢复投影")
+    artifact_id = str(data.get("storyboard_artifact_id") or "")
+    certificate_id = str(data.get("storyboard_completion_certificate_id") or "")
+    revision_id = str(data.get("storyboard_production_revision_id") or "")
+    from app.production.certificate import verify_completion_certificate
+
+    verify_completion_certificate(
+        certificate_id,
+        expected_kind="storyboard",
+        expected_scope_id=str(data.get("id") or ""),
+        expected_artifact_id=artifact_id,
+        expected_production_revision_id=revision_id,
+        allow_consumed=True,
+    )
+    artifact = evidence_repository.get_artifact(artifact_id)
+    if artifact is None:
+        raise ValueError("已签证 Storyboard Artifact 不存在")
+    board = Storyboard.model_validate(artifact.get("content") or {})
+    rows = conn.execute(
+        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
+        (data.get("id"),),
+    ).fetchall()
+    if len(rows) != len(board.shots):
+        raise ValueError("当前 shots 行数与已签证 Storyboard Artifact 不一致")
+    from app.storyboard_supervisor import _write_shot_fields
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for row, shot in zip(rows, board.shots):
+            _write_shot_fields(
+                conn,
+                str(row["id"]),
+                shot,
+                row["storyboard_artifact_id"],
+                narrative_authority=True,
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return board
+
+
 def _assert_storyboard_generation_gate(episode_id: str) -> None:
     """Authorize paid work from a current certificate, never a live score.
 
@@ -732,10 +782,25 @@ def confirm_episode_core(
             verify_current_storyboard_completion_authority,
         )
 
-        verify_current_storyboard_completion_authority(
-            episode=ep,
-            current_storyboard_content=board.model_dump(mode="json"),
-        )
+        try:
+            verify_current_storyboard_completion_authority(
+                episode=ep,
+                current_storyboard_content=board.model_dump(mode="json"),
+            )
+        except ValueError as exc:
+            if "shots 投影" not in str(exc):
+                raise
+            board = _restore_unconfirmed_storyboard_projection(conn, ep)
+            shots_rows = conn.execute(
+                "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
+                (episode_id,),
+            ).fetchall()
+            board = _board_from_shot_rows(shots_rows, ep["episode_no"])
+            shots = board.shots
+            verify_current_storyboard_completion_authority(
+                episode=ep,
+                current_storyboard_content=board.model_dump(mode="json"),
+            )
     if shots and not shots[-1].is_final and not narrative_authority:
         shots[-1].is_final = True
     character_changes = (

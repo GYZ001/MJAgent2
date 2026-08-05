@@ -1209,8 +1209,74 @@ async def _storyboard_task(
             ).fetchall()
             board = _board_from_shot_rows(rows, ep["episode_no"])
             from app.production.certificate import (
+                verify_completion_certificate,
                 verify_current_storyboard_completion_authority,
             )
+            from app.narrative import storyboard_authority_projection
+
+            published_artifact = evidence_repository.get_artifact(
+                str(ep["published_storyboard_artifact_id"])
+            )
+            if published_artifact is None:
+                raise StageError("分镜脚本", ["当前发布分镜 Artifact 已缺失"])
+            published_board = Storyboard.model_validate(
+                published_artifact.get("content") or {}
+            )
+            verify_completion_certificate(
+                str(ep["storyboard_completion_certificate_id"]),
+                expected_kind="storyboard",
+                expected_scope_id=episode_id,
+                expected_artifact_id=str(ep["published_storyboard_artifact_id"]),
+                expected_production_revision_id=str(
+                    ep["storyboard_production_revision_id"] or ""
+                ),
+                allow_consumed=True,
+            )
+            projection_restored = bool(
+                storyboard_authority_projection(board)
+                != storyboard_authority_projection(published_board)
+            )
+            if projection_restored:
+                if ep["status"] in {"confirmed", "generating", "done", "mixed"}:
+                    raise StageError(
+                        "分镜脚本",
+                        ["已确认分镜投影与证书漂移，禁止自动覆盖，请先停止下游"],
+                    )
+                if len(rows) != len(published_board.shots):
+                    raise StageError(
+                        "分镜脚本",
+                        ["当前 shots 行数与已签证 Storyboard Artifact 不一致"],
+                    )
+                from app.storyboard_supervisor import _write_shot_fields
+
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    for row, shot in zip(rows, published_board.shots):
+                        _write_shot_fields(
+                            conn,
+                            str(row["id"]),
+                            shot,
+                            row["storyboard_artifact_id"],
+                            narrative_authority=True,
+                        )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+                rows = conn.execute(
+                    "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
+                    (episode_id,),
+                ).fetchall()
+                board = _board_from_shot_rows(rows, ep["episode_no"])
+                _preflight_event(
+                    "STORYBOARD_PUBLISHED_PROJECTION_RESTORED",
+                    "已从签证 Artifact 恢复 mutable shots 正式投影",
+                    payload={
+                        "artifact_id": ep["published_storyboard_artifact_id"],
+                        "shot_count": len(rows),
+                    },
+                    severity="warning",
+                )
 
             verify_current_storyboard_completion_authority(
                 episode=ep,
@@ -1230,6 +1296,16 @@ async def _storyboard_task(
                 bible,
                 screenplay,
             )
+            if not identity_repairs and projection_restored:
+                conn.execute(
+                    "UPDATE episodes SET status='scripted',script_error=NULL,"
+                    "storyboard_warning=NULL WHERE id=?",
+                    (episode_id,),
+                )
+                conn.commit()
+                from app.storyboard_supervisor import load_latest_checkpoint
+
+                return load_latest_checkpoint(episode_id)
             if not identity_repairs or ep["status"] in {
                 "confirmed", "generating", "done", "mixed",
             }:

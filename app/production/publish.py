@@ -296,7 +296,26 @@ def publish_storyboard(
         kind="storyboard", episode_id=episode_id, certificate_id=cert.certificate_id,
     )
 
-    # 正式投影：由调用方已准备好 shots 行；这里更新指针与状态
+    # 正式投影必须与同一不可变 Artifact 在一个发布收口中写入。调用方
+    # 可能只在内存候选上完成了确定性归一化；只切 episode 指针会留下
+    # “证书正确、mutable shots 漂移”的分裂权威。
+    shot_rows = conn.execute(
+        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
+        (episode_id,),
+    ).fetchall()
+    if len(shot_rows) != len(board.shots):
+        raise ValueError("正式 shots 行数与待发布 Storyboard Artifact 不一致")
+    from app.storyboard_supervisor import _write_shot_fields
+
+    for row, shot in zip(shot_rows, board.shots):
+        _write_shot_fields(
+            conn,
+            str(row["id"]),
+            shot,
+            row["storyboard_artifact_id"],
+            narrative_authority=narrative_authority,
+        )
+
     if outline_json is not None:
         conn.execute(
             "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
