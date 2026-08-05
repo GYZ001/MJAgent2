@@ -2068,16 +2068,24 @@ def _normalize_screenplay_narrative_graph(
                 ]
                 delta["from_state"] = {
                     "beliefs": [
-                        incoming_beliefs[item]
-                        for item in proposition_ids
-                        if item in incoming_beliefs
+                        item
+                        for item in (state_in.get("beliefs") or [])
+                        if (
+                            isinstance(item, dict)
+                            and str(item.get("proposition_id") or "")
+                            in proposition_ids
+                        )
                     ],
                 }
                 delta["to_state"] = {
                     "beliefs": [
-                        outgoing_beliefs[item]
-                        for item in proposition_ids
-                        if item in outgoing_beliefs
+                        item
+                        for item in (state_out.get("beliefs") or [])
+                        if (
+                            isinstance(item, dict)
+                            and str(item.get("proposition_id") or "")
+                            in proposition_ids
+                        )
                     ],
                 }
 
@@ -2111,16 +2119,24 @@ def _normalize_screenplay_narrative_graph(
                     "description": "绑定该观众路径中实际发生的信念变化",
                     "from_state": {
                         "beliefs": [
-                            incoming_beliefs[item]
-                            for item in missing_belief_ids
-                            if item in incoming_beliefs
+                            item
+                            for item in (state_in.get("beliefs") or [])
+                            if (
+                                isinstance(item, dict)
+                                and str(item.get("proposition_id") or "")
+                                in missing_belief_ids
+                            )
                         ],
                     },
                     "to_state": {
                         "beliefs": [
-                            outgoing_beliefs[item]
-                            for item in missing_belief_ids
-                            if item in outgoing_beliefs
+                            item
+                            for item in (state_out.get("beliefs") or [])
+                            if (
+                                isinstance(item, dict)
+                                and str(item.get("proposition_id") or "")
+                                in missing_belief_ids
+                            )
                         ],
                     },
                     "target_confidence": None,
@@ -2183,16 +2199,10 @@ def _normalize_screenplay_narrative_graph(
                     "attention_residue_ids": list(
                         state_in.get("attention_residue_ids") or []
                     ),
-                    "working_memory": list(
-                        state_in.get("working_memory") or []
-                    ),
                 }
                 attention_delta["to_state"] = {
                     "attention_residue_ids": list(
                         state_out.get("attention_residue_ids") or []
-                    ),
-                    "working_memory": list(
-                        state_out.get("working_memory") or []
                     ),
                 }
 

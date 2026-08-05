@@ -30,7 +30,7 @@ from app.character_policy import is_functional_extra
 from app.db import get_conn, get_setting, new_id, now, set_setting
 from app.evidence import repository as evidence_repository
 from app.evidence.media import record_reference_asset
-from app.errors import code_ref
+from app.errors import ContentGenerationError, code_ref
 from app.harness import model_gateway
 from app.harness.types import EvidenceArtifact
 from app.ingest import chapter_is_stub, chapter_titles_match
@@ -106,6 +106,7 @@ async def screen_appearance_changes(entries: list[dict], ep_label: str) -> dict[
 - 没有把握时一律判为未明显变化，避免无意义重绘。
 
 对 changed=true 的角色，给出整合后的【新外观锚点串】new_appearance：40~60 字，沿用既有锚点未变部分，只改真正变化处；保留性别年龄感/发型发色/服装款式与颜色/标志性特征。
+- 外观锚点只允许常规完整着装下可直接看见、可跨镜稳定复现的特征；不得写裸体、内衣、私密身体部位或必须暴露身体才能看见的特征。
 同时给出：
 - change_dimensions：变化维度数组，取值仅限 hair/outfit/accessory/injury/age_stage/face/body_identity
 - persistence：persistent（跨集持续）/ episode（仅本集）/ shot_only（单镜临时，不应更新人物谱）
@@ -1401,6 +1402,7 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
 判定口径：
 {decision_contract}
 - appearance_canonical 是"固定外观锚点串"：40~60 字，须含 性别年龄感/发型发色/服装款式与颜色/1 个标志性特征；只写视觉可见信息，不写性格。原著未写处按画风（{style}）合理补全并保持内部一致。
+- appearance_canonical 只允许常规完整着装下可直接看见、可跨镜稳定复现的特征；不得写裸体、内衣、私密身体部位或必须暴露身体才能看见的特征。
 
 只输出一个 JSON 对象：
 {{"important": true/false, "reason": "一句话依据", "role": "主角|重要配角|反派", "appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}]}}"""
@@ -1870,7 +1872,11 @@ async def _refresh_portrait_on_drift(project_id: str, name: str, episode_no: int
 
         pack_status = "ready"
         if pack_supported:
-            from app.multiview import ensure_character_multiview_pack, PACK_STATUS_READY
+            from app.multiview import (
+                PACK_STATUS_FAILED,
+                ensure_character_multiview_pack,
+                pack_result_ok,
+            )
             try:
                 pack = await ensure_character_multiview_pack(
                     project_id=project_id,
@@ -1882,11 +1888,21 @@ async def _refresh_portrait_on_drift(project_id: str, name: str, episode_no: int
                     base_portrait_id=cur["id"],
                     primary_qa=qa,
                 )
-            except Exception as exc:  # noqa: BLE001 - 主图已落盘，多视角耗尽后保底发布
-                pack = {"status": "partial_fallback", "warning": str(exc)[:300]}
-            pack_status = pack.get("status") or "failed"
-            if pack_status != PACK_STATUS_READY and pack_status != "ready":
-                pack_status = "partial_fallback"
+            except Exception:
+                conn.execute(
+                    "UPDATE character_portraits SET ep_end=?,pack_status=? WHERE id=?",
+                    (episode_no - 1, PACK_STATUS_FAILED, new_portrait_id),
+                )
+                conn.commit()
+                raise
+            if not pack_result_ok(pack):
+                conn.execute(
+                    "UPDATE character_portraits SET ep_end=?,pack_status=? WHERE id=?",
+                    (episode_no - 1, PACK_STATUS_FAILED, new_portrait_id),
+                )
+                conn.commit()
+                raise ContentGenerationError(f"角色多视角包结构不完整：{name}")
+            pack_status = "ready"
             # 原子切换：关闭旧区间，开放新区间
             conn.execute("UPDATE character_portraits SET ep_end=? WHERE id=?", (episode_no - 1, cur["id"]))
             persistence = (change_meta or {}).get("persistence") or "persistent"
@@ -2554,7 +2570,6 @@ async def _generate_discovered_character_portrait(
         portrait_id = str(row["id"])
         image_path = str(row["image_path"] or "")
         candidate_appearance = str(row["appearance"] or appearance)
-        fallback_pack = False
         try:
             if pack_supported:
                 from app.multiview import ensure_character_multiview_pack, pack_result_ok
@@ -2562,27 +2577,24 @@ async def _generate_discovered_character_portrait(
                 existing_status = str(row["pack_status"] or "")
                 if existing_status == "ready":
                     pack = {"status": "ready", "portrait_id": portrait_id, "reused": True}
-                elif existing_status == "partial_fallback":
-                    pack = {
-                        "status": "partial_fallback",
-                        "portrait_id": portrait_id,
-                        "reused": True,
-                    }
                 else:
-                    try:
-                        pack = await ensure_character_multiview_pack(
-                            project_id=project_id,
-                            portrait_id=portrait_id,
-                            character_name=name,
-                            appearance=candidate_appearance,
-                            visual_style=style,
-                            ep_start=ep_start,
-                            base_portrait_id=row["base_portrait_id"],
-                            primary_qa=primary_qa,
-                        )
-                    except Exception as exc:  # noqa: BLE001 - 主图已落盘，侧视角失败安全降级
-                        pack = {"status": "partial_fallback", "warning": str(exc)[:300]}
-                fallback_pack = not pack_result_ok(pack)
+                    pack = await ensure_character_multiview_pack(
+                        project_id=project_id,
+                        portrait_id=portrait_id,
+                        character_name=name,
+                        appearance=candidate_appearance,
+                        visual_style=style,
+                        ep_start=ep_start,
+                        base_portrait_id=row["base_portrait_id"],
+                        primary_qa=primary_qa,
+                    )
+                if not pack_result_ok(pack):
+                    conn.execute(
+                        "UPDATE character_portraits SET pack_status='failed' WHERE id=?",
+                        (portrait_id,),
+                    )
+                    conn.commit()
+                    raise ContentGenerationError(f"角色多视角包结构不完整：{name}")
 
                 # 候选在多视角完成前只占本集闭区间。发布时再原子切换为开区间；
                 # 服务重启后重复执行本段仍更新同一 portrait_id，不会触发唯一键冲突。
@@ -2597,7 +2609,7 @@ async def _generate_discovered_character_portrait(
                         conn.execute("DELETE FROM character_portraits WHERE id=?", (current["id"],))
                 conn.execute(
                     "UPDATE character_portraits SET ep_end=NULL,pack_status=? WHERE id=?",
-                    ("partial_fallback" if fallback_pack else "ready", portrait_id),
+                    ("ready", portrait_id),
                 )
                 conn.commit()
 
@@ -2613,9 +2625,9 @@ async def _generate_discovered_character_portrait(
         return {
             "portrait_id": portrait_id,
             "image_path": image_path,
-            "pack_status": "partial_fallback" if fallback_pack else "ready",
+            "pack_status": "ready",
             "reused": not purge_on_failure,
-            "gate_retry_exhausted": fallback_pack,
+            "gate_retry_exhausted": False,
         }
 
     # 服务重启可能发生在主图和候选行已落盘、侧视角尚未完成之间。此时该行以

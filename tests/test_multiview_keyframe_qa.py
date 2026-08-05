@@ -826,11 +826,11 @@ def test_refresh_portrait_pack_failure_switches_to_primary_fallback(monkeypatch,
     monkeypatch.setattr("app.portraits.record_reference_asset", lambda **k: {"id": "art1", "status": "approved"})
     monkeypatch.setattr("app.multiview.ensure_character_multiview_pack", failed_pack)
 
-    result = asyncio.run(_refresh_portrait_on_drift(
-        "proj", "A", 12, "白发红袍", "anime", 1,
-        change_meta={"persistence": "persistent", "change_dimensions": ["hair", "outfit"]},
-    ))
-    assert result["pack_status"] == "partial_fallback"
+    with pytest.raises(Exception, match="多视角包结构不完整"):
+        asyncio.run(_refresh_portrait_on_drift(
+            "proj", "A", 12, "白发红袍", "anime", 1,
+            change_meta={"persistence": "persistent", "change_dimensions": ["hair", "outfit"]},
+        ))
 
     rows = conn.execute(
         "SELECT id, ep_start, ep_end, pack_status FROM character_portraits WHERE character_name='A'"
@@ -838,10 +838,10 @@ def test_refresh_portrait_pack_failure_switches_to_primary_fallback(monkeypatch,
     assert len(rows) == 2
     old = next(row for row in rows if row["id"] == "p_old")
     new = next(row for row in rows if row["id"] != "p_old")
-    assert old["ep_end"] == 11
+    assert old["ep_end"] is None
     assert new["ep_start"] == 12
-    assert new["ep_end"] is None
-    assert new["pack_status"] == "partial_fallback"
+    assert new["ep_end"] == 11
+    assert new["pack_status"] == "failed"
 
 
 def test_refresh_portrait_replaces_archived_same_episode_segment(monkeypatch, tmp_path) -> None:
@@ -908,20 +908,20 @@ def test_refresh_portrait_replaces_archived_same_episode_segment(monkeypatch, tm
     )
     monkeypatch.setattr("app.multiview.ensure_character_multiview_pack", failed_pack)
 
-    result = asyncio.run(_refresh_portrait_on_drift(
-        "proj", "A", 12, "白发红袍", "anime", 1,
-        change_meta={"persistence": "persistent"},
-    ))
+    with pytest.raises(Exception, match="多视角包结构不完整"):
+        asyncio.run(_refresh_portrait_on_drift(
+            "proj", "A", 12, "白发红袍", "anime", 1,
+            change_meta={"persistence": "persistent"},
+        ))
 
     rows = conn.execute(
         "SELECT id,ep_start,ep_end FROM character_portraits "
         "WHERE project_id='proj' AND character_name='A' ORDER BY ep_start"
     ).fetchall()
-    assert result and result["ep_start"] == 12
     assert len(rows) == 2
-    assert rows[0]["id"] == "p_old" and rows[0]["ep_end"] == 11
+    assert rows[0]["id"] == "p_old" and rows[0]["ep_end"] is None
     assert rows[1]["id"] != "p_stale"
-    assert rows[1]["ep_start"] == 12 and rows[1]["ep_end"] is None
+    assert rows[1]["ep_start"] == 12 and rows[1]["ep_end"] == 11
     assert conn.execute(
         "SELECT COUNT(*) FROM character_portrait_views WHERE portrait_id='p_stale'"
     ).fetchone()[0] == 0

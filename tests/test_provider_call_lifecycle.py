@@ -714,6 +714,27 @@ def test_seeded_image_transient_provider_error_never_drops_identity_seed(monkeyp
     assert seen_inputs == [["data:image/jpeg;base64,identity"]]
 
 
+def test_multiview_seed_rejection_never_retries_without_identity_seed(monkeypatch) -> None:
+    from app import multiview
+
+    seen_inputs: list[list[str] | None] = []
+
+    async def fake_generate_image(prompt, *, size, image_inputs=None, call_meta=None):
+        seen_inputs.append(image_inputs)
+        raise hiagent.ProviderError("InputImageSensitiveContentDetected", raw="HTTP 400")
+
+    monkeypatch.setattr(hiagent, "generate_image", fake_generate_image)
+
+    with pytest.raises(hiagent.ProviderError, match="InputImageSensitiveContentDetected"):
+        asyncio.run(multiview._generate_image(
+            "prompt",
+            seed_inputs=["data:image/jpeg;base64,identity"],
+            call_meta={"asset_kind": "character_view"},
+        ))
+
+    assert seen_inputs == [["data:image/jpeg;base64,identity"]]
+
+
 def test_jobs_overview_includes_running_screenplay(monkeypatch) -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row

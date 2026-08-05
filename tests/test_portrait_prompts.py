@@ -1,7 +1,12 @@
 import json
 import sqlite3
 
-from app.refs import _merge_generated_portraits, portrait_appearance_anchor, portrait_prompt
+from app.refs import (
+    _merge_generated_portraits,
+    portrait_appearance_anchor,
+    portrait_prompt,
+    production_appearance_anchor,
+)
 from app.multiview import character_view_prompt
 from app.portraits import bible_for_episode
 from app.schemas import Bible, Character, World
@@ -28,6 +33,21 @@ def test_ordinary_portrait_prompt_keeps_standard_model_sheet_pose() -> None:
     assert "鞋底均不得贴边或出画" in prompt
     assert "8% 安全边距" in prompt
     assert "禁止额外火焰、斗气光环" in prompt
+
+
+def test_portrait_prompt_keeps_only_clothed_visible_identity_traits() -> None:
+    anchor = (
+        "24岁女性，黑色长发，常穿白色衬衫配半身裙，杏眼，"
+        "标志性特征是粉色乳头与腰侧淡褐色小痣"
+    )
+
+    production_anchor = production_appearance_anchor(anchor)
+    prompt = portrait_prompt("3D动漫CG，虚构数字角色", anchor)
+
+    assert "粉色乳头" not in production_anchor
+    assert "腰侧淡褐色小痣" in production_anchor
+    assert "粉色乳头" not in prompt
+    assert "服装面料不透明并完整覆盖身体" in prompt
 
 
 def test_multiview_prompt_uses_latest_edited_portrait_prompt() -> None:

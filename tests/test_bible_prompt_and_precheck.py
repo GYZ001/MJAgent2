@@ -6,6 +6,8 @@ import sqlite3
 from app.domain import common
 from app.refs import normalize_prompt_text, portrait_prompt
 from app.orchestration.engine import fingerprint
+from app.schemas import Bible, Character, World
+from app.validators import validate_bible
 
 
 def test_normalize_prompt_collapses_duplicate_punctuation() -> None:
@@ -18,6 +20,22 @@ def test_portrait_prompt_uses_normalization() -> None:
     text = portrait_prompt("国风水墨清透光影细腻晕染", "黑发少年。。玄色劲装，目光坚定，身形修长腰佩玉佩")
     assert "。。" not in text
     assert "国风水墨" in text
+
+
+def test_bible_rejects_identity_traits_hidden_by_normal_clothing() -> None:
+    bible = Bible(
+        characters=[Character(
+            name="角色甲",
+            role="主角",
+            appearance_canonical=(
+                "24岁女性，黑色长发，白色衬衫配深色半身裙，"
+                "身形修长，标志性特征是粉色乳头"
+            ),
+        )],
+        world=World(visual_style_canonical="3D动漫CG渲染，虚构数字角色，电影光影"),
+    )
+
+    assert any("常规完整着装下不可见" in error for error in validate_bible(bible))
 
 
 def test_project_or_404_normalizes_sqlite_row_to_dict(monkeypatch) -> None:

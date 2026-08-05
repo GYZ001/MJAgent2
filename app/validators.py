@@ -4481,6 +4481,8 @@ def normalize_offbible_characters(board: Storyboard, bible: Bible | None) -> lis
 
 
 def validate_bible(bible: Bible) -> list[str]:
+    from app.refs import contains_non_production_appearance
+
     errors = []
     # 初始人物谱由 prompt 约束为 ≤8 个；上限放宽到 60，给「按 20 集补录新登场角色」留出增长空间。
     if not 1 <= len(bible.characters) <= 60:
@@ -4491,6 +4493,10 @@ def validate_bible(bible: Bible) -> list[str]:
     for i, c in enumerate(bible.characters):
         if not 30 <= len(c.appearance_canonical) <= 80:
             errors.append(f"characters[{i}]({c.name}).appearance_canonical 长度 {len(c.appearance_canonical)} 字，要求 30~80 字")
+        if contains_non_production_appearance(c.appearance_canonical):
+            errors.append(
+                f"characters[{i}]({c.name}).appearance_canonical 包含常规完整着装下不可见的身体或内衣特征"
+            )
         for r in c.relationships:
             if r.to not in names:
                 errors.append(f"characters[{i}]({c.name}).relationships 指向「{r.to}」不在角色列表中")

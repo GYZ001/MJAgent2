@@ -14,7 +14,12 @@ from typing import Any
 from app import config, hiagent
 from app.atomic_io import atomic_write_bytes
 from app.db import get_conn, get_setting, new_id, now
-from app.refs import _safe_name, portrait_prompt
+from app.refs import (
+    _safe_name,
+    ensure_portrait_clothing_contract,
+    portrait_prompt,
+    production_appearance_anchor,
+)
 
 # ---------- 视角角色常量 ----------
 
@@ -171,7 +176,10 @@ def character_view_prompt(
         "back_full": "背面全身，展示服装背面与发型背部轮廓",
         "face_closeup": "面部近景特写，五官清晰，发型完整入画",
     }.get(view_role, "全身立绘")
-    source = (portrait_prompt or "").strip() or f"{visual_style}。{appearance}"
+    source = ensure_portrait_clothing_contract(
+        (portrait_prompt or "").strip()
+        or f"{visual_style}。{production_appearance_anchor(appearance)}"
+    )
     return (
         f"最新定妆提示词（角色外观与画风的唯一依据）：{source}。"
         f"生成同一角色多视角设定图（{VIEW_ROLE_LABELS.get(view_role, view_role)}）。"
@@ -870,14 +878,12 @@ async def _save_image_item(item: dict, dest: str) -> None:
 
 
 async def _generate_image(prompt: str, *, seed_inputs: list[str] | None = None, call_meta: dict | None = None) -> dict:
-    try:
-        return await hiagent.generate_image(
-            prompt, size=config.REF_IMAGE_SIZE, image_inputs=seed_inputs or None, call_meta=call_meta,
-        )
-    except hiagent.ProviderError:
-        if not seed_inputs:
-            raise
-        return await hiagent.generate_image(prompt, size=config.REF_IMAGE_SIZE, call_meta=call_meta)
+    return await hiagent.generate_image(
+        prompt,
+        size=config.REF_IMAGE_SIZE,
+        image_inputs=seed_inputs or None,
+        call_meta=call_meta,
+    )
 
 
 def _upsert_character_view(

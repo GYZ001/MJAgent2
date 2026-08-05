@@ -70,6 +70,10 @@ _PORTRAIT_CLOTHING_CONTRACT = (
 )
 
 
+def contains_non_production_appearance(anchor: str) -> bool:
+    return bool(_NON_PRODUCTION_APPEARANCE_RE.search(anchor or ""))
+
+
 def production_appearance_anchor(anchor: str) -> str:
     """Keep only identity traits that a normally clothed model sheet can prove."""
     clauses = re.split(r"[，,；;。]+", normalize_prompt_text(anchor or ""))
