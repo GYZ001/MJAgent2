@@ -1990,6 +1990,69 @@ def _normalize_screenplay_narrative_graph(
                 })
                 arc["promise_proposition_ids"] = normalized_promises
 
+        current_promises = [
+            str(item)
+            for item in (arc.get("promise_proposition_ids") or [])
+            if str(item or "").strip()
+        ]
+        current_payoff_ids = [
+            str(item)
+            for item in (arc.get("payoff_contract_ids") or [])
+            if str(item or "").strip()
+        ]
+        current_setup_promises = {
+            str(proposition_id)
+            for payoff_id in current_payoff_ids
+            if payoff_id in payoff_contracts_by_id
+            for proposition_id in (
+                payoff_contracts_by_id[payoff_id].get(
+                    "setup_proposition_ids"
+                ) or []
+            )
+        }
+        newly_linked_payoffs: list[str] = []
+        for proposition_id in current_promises:
+            if proposition_id in current_setup_promises:
+                continue
+            candidates = [
+                payoff_id
+                for payoff_id, payoff in payoff_contracts_by_id.items()
+                if proposition_id in (
+                    payoff.get("setup_proposition_ids") or []
+                )
+            ]
+            if len(candidates) == 1 and candidates[0] not in current_payoff_ids:
+                newly_linked_payoffs.append(candidates[0])
+                current_payoff_ids.append(candidates[0])
+                current_setup_promises.add(proposition_id)
+        if newly_linked_payoffs:
+            changes.append({
+                "kind": "arc_payoff_contract_link",
+                "id": arc.get("arc_id"),
+                "added": newly_linked_payoffs,
+            })
+            arc["payoff_contract_ids"] = current_payoff_ids
+
+        unsupported_promises = [
+            proposition_id
+            for proposition_id in current_promises
+            if proposition_id not in current_setup_promises
+        ]
+        if unsupported_promises and arc.get("core_question_ids"):
+            supported_promises = [
+                proposition_id
+                for proposition_id in current_promises
+                if proposition_id not in unsupported_promises
+            ]
+            changes.append({
+                "kind": "arc_unsupported_promise_removed",
+                "id": arc.get("arc_id"),
+                "from": current_promises,
+                "to": supported_promises,
+                "unsupported": unsupported_promises,
+            })
+            arc["promise_proposition_ids"] = supported_promises
+
     existing_fact_ids = {
         str(item.get("fact_id") or "")
         for item in (data.get("state_facts") or [])

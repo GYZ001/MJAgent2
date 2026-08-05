@@ -2383,6 +2383,44 @@ def test_narrative_normalizer_keeps_ambiguous_arc_promise_for_repair():
     )
 
 
+def test_narrative_normalizer_removes_unbacked_promise_when_question_remains():
+    from app.production.screenplay_repair import (
+        _normalize_screenplay_narrative_graph,
+    )
+
+    script = _minimal_script(
+        narrative_plan=NarrativeContinuityPlan.model_validate({
+            "scope_id": "ep_p",
+            "propositions": [{
+                "proposition_id": "P-GOAL",
+                "semantic_identity_key": "goal",
+                "canonical_statement": "主角希望拿到资格",
+                "narrative_domain": "adapted_story",
+            }],
+            "arc_contracts": [{
+                "arc_id": "ARC-1",
+                "core_question_ids": ["DQ-1"],
+                "promise_proposition_ids": ["P-GOAL"],
+                "payoff_contract_ids": [],
+            }],
+        }),
+    )
+
+    changes = _normalize_screenplay_narrative_graph(
+        script,
+        authorized_source_chapters={},
+    )
+
+    arc = script.narrative_plan.arc_contracts[0]
+    assert arc.core_question_ids == ["DQ-1"]
+    assert arc.promise_proposition_ids == []
+    assert any(
+        change["kind"] == "arc_unsupported_promise_removed"
+        and change["unsupported"] == ["P-GOAL"]
+        for change in changes
+    )
+
+
 def test_spine_spoken_clause_accepts_visible_action_performance():
     from app.validators import validate_screenplay_spine_delivery
 
