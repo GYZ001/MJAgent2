@@ -2040,6 +2040,78 @@ def test_source_span_normalizer_maps_hard_wrapped_import_text():
     )
 
 
+def test_narrative_normalizer_closes_unique_effect_and_perceiver_refs():
+    from app.production.screenplay_repair import (
+        _normalize_screenplay_narrative_graph,
+    )
+
+    script = _minimal_script(
+        narrative_plan=NarrativeContinuityPlan.model_validate({
+            "scope_id": "ep_p",
+            "propositions": [{
+                "proposition_id": "P1",
+                "semantic_identity_key": "result-visible",
+                "canonical_statement": "甲完成了动作",
+                "narrative_domain": "adapted_story",
+                "entity_ids": ["char-a"],
+            }],
+            "events": [{
+                "event_id": "E1",
+                "proposition_ids": ["P1"],
+                "action_ids": ["A1"],
+                "effects_add": ["F2"],
+            }],
+            "atomic_actions": [{
+                "action_id": "A1",
+                "actor_ids": ["char-a"],
+                "semantic_intent": "完成动作",
+                "effects_add": ["F2"],
+                "completion_condition": "动作结果可见",
+                "temporal_phases": [{
+                    "phase_id": "A1/P1",
+                    "start_condition": "动作开始",
+                    "end_condition": "动作完成",
+                    "estimated_min_s": 1.0,
+                }],
+            }],
+            "evidence": [{
+                "evidence_id": "EV1",
+                "anchor": {"type": "event", "id": "E1"},
+                "observable_claim": "甲完成动作",
+                "perceivable_by": ["audience"],
+                "supports_proposition_ids": ["P1"],
+            }],
+            "character_beliefs": [{
+                "character_belief_id": "CB1",
+                "character_id": "char-a",
+                "anchor": {"type": "event", "id": "E1"},
+                "perceived_evidence_ids": ["EV1"],
+                "decision_proposition_ids": ["P1"],
+                "decision_basis_ids": ["EV1"],
+                "decision_action_ids": ["A1"],
+            }],
+        }),
+    )
+
+    changes = _normalize_screenplay_narrative_graph(
+        script,
+        authorized_source_chapters={},
+    )
+
+    fact = next(
+        item for item in script.narrative_plan.state_facts
+        if item.fact_id == "F2"
+    )
+    evidence = script.narrative_plan.evidence[0]
+    assert fact.proposition_id == "P1"
+    assert fact.subject_id == "char-a"
+    assert "char-a" in evidence.perceivable_by
+    assert {item["kind"] for item in changes} >= {
+        "missing_effect_fact",
+        "evidence_perceiver",
+    }
+
+
 def test_spine_spoken_clause_accepts_visible_action_performance():
     from app.validators import validate_screenplay_spine_delivery
 
