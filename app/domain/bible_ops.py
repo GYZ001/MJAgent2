@@ -2832,7 +2832,7 @@ def compute_scene_cost_precheck(
                 "scene_reference_id": item.get("scene_reference_id"),
                 "views": contract_views,
                 "suggested_failed_views": item.get("views") or [],
-                "reason": f"{item.get('reason')}；整包候选通过后原子切换",
+                "reason": f"{item.get('reason')}；整包文件齐全并可读取后原子切换",
                 "category": item.get("category"),
             })
     else:
@@ -2872,9 +2872,9 @@ def compute_scene_cost_precheck(
         "max_retries": 2,
         "estimated_duration_min": [max(1, image_count), max(3, image_count * 3)],
         "scope": scope,
-        "old_asset_policy": "新图在单图及整包 QA 全部通过前仅作候选；旧采用包继续服务下游",
+        "old_asset_policy": "新包文件齐全并可读取后原子切换；质量评分只作提示，切换前旧采用包继续服务下游",
         "idempotency_hint": "同一有效报价重复确认只受理一个任务；范围或价格扩大必须重新确认",
-        "stop_policy": "可停止；已开始步骤可能计费，已通过并落盘的资产保留",
+        "stop_policy": "可停止；已开始步骤可能计费，结构完整并落盘的资产保留",
     }
 
 
