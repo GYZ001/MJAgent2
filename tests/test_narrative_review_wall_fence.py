@@ -283,7 +283,7 @@ async def test_worker_fences_current_shots_projection_drift_before_provider_use(
 
 
 @pytest.mark.asyncio
-async def test_worker_revalidates_certificate_evidence_before_provider_submit(
+async def test_worker_ignores_optional_review_score_change_before_provider_submit(
     monkeypatch,
 ) -> None:
     case = await _published_authority_case(monkeypatch)
@@ -299,15 +299,11 @@ async def test_worker_revalidates_certificate_evidence_before_provider_submit(
     )
     conn.commit()
 
-    with pytest.raises(worker.ReviewDependencyFence) as fenced:
-        worker._assert_review_dependency_fence(
-            {"episode_id": "episode-generic", "shot_id": shot_id},
-            "version-with-invalidated-gate",
-            "provider_submit",
-        )
-    detail = json.loads(str(fenced.value))
-    assert detail["code"] == "NARRATIVE_STORYBOARD_AUTHORITY_INVALID"
-    assert "runtime_gate" in detail["message"] or "审读" in detail["message"]
+    worker._assert_review_dependency_fence(
+        {"episode_id": "episode-generic", "shot_id": shot_id},
+        "version-with-invalidated-gate",
+        "provider_submit",
+    )
 
 
 def test_legacy_plan_null_worker_keeps_missing_snapshot_compatibility(monkeypatch) -> None:

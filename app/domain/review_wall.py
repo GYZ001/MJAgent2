@@ -507,8 +507,22 @@ def _review_narrative_authority_snapshot(conn, ep: dict[str, Any]) -> dict[str, 
             key: storyboard_artifact.get(key)
             for key in ("artifact_id", "content_hash", "status", "verified")
         },
-        "screenplay_certificate": screenplay_certificate,
-        "storyboard_certificate": storyboard_certificate,
+        "screenplay_certificate": {
+            key: screenplay_certificate.get(key)
+            for key in (
+                "certificate_id", "artifact_id", "artifact_hash",
+                "production_revision_id", "contract_version",
+                "qa_profile_version", "consumed", "verified",
+            )
+        },
+        "storyboard_certificate": {
+            key: storyboard_certificate.get(key)
+            for key in (
+                "certificate_id", "artifact_id", "artifact_hash",
+                "production_revision_id", "contract_version",
+                "qa_profile_version", "consumed", "verified",
+            )
+        },
         "storyboard_completion_authority_verified": completion_authority_verified,
         "shots_projection_hash": shots_projection_hash,
         "shots_projection_verified": shots_projection_verified,

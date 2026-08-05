@@ -42,7 +42,7 @@ def _issue_published_grant(case: dict):
     return grant
 
 
-@pytest.mark.parametrize("drift", ["review", "certificate", "shots"])
+@pytest.mark.parametrize("drift", ["certificate", "shots"])
 @pytest.mark.asyncio
 async def test_asset_preparation_has_zero_calls_after_release_authority_drift(
     monkeypatch,
@@ -51,12 +51,7 @@ async def test_asset_preparation_has_zero_calls_after_release_authority_drift(
     case = await _published_authority_case(monkeypatch)
     grant = _issue_published_grant(case)
     conn = db.get_conn()
-    if drift == "review":
-        conn.execute(
-            "UPDATE artifacts SET status='stale' WHERE id=?",
-            (case["report_artifact"]["id"],),
-        )
-    elif drift == "certificate":
+    if drift == "certificate":
         certificate_id = conn.execute(
             "SELECT storyboard_completion_certificate_id FROM episodes "
             "WHERE id='episode-generic'"
@@ -109,6 +104,26 @@ async def test_asset_preparation_has_zero_calls_after_release_authority_drift(
         "RELEASE_QUALIFICATION_CHANGED",
     }
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_optional_review_drift_does_not_revoke_video_grant(monkeypatch) -> None:
+    case = await _published_authority_case(monkeypatch)
+    grant = _issue_published_grant(case)
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE artifacts SET status='stale' WHERE id=?",
+        (case["report_artifact"]["id"],),
+    )
+    conn.commit()
+
+    validated = validate_video_grant(
+        grant.grant_id,
+        episode_id="episode-generic",
+        storyboard_artifact_id=grant.storyboard_artifact_id,
+    )
+
+    assert validated.grant_id == grant.grant_id
 
 
 def test_grant_recomputes_bound_plan_and_capability_snapshot(monkeypatch) -> None:
