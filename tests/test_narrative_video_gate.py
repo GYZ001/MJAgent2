@@ -389,6 +389,35 @@ async def test_display_episode_renumber_keeps_storyboard_authority_current(
 
 
 @pytest.mark.asyncio
+async def test_worker_shot_loader_preserves_stable_uid_for_authority(
+    monkeypatch,
+) -> None:
+    await _published_narrative_case(monkeypatch)
+    conn = db.get_conn()
+    rows = conn.execute(
+        "SELECT * FROM shots WHERE episode_id='episode-generic' ORDER BY shot_no"
+    ).fetchall()
+    episode = conn.execute(
+        "SELECT * FROM episodes WHERE id='episode-generic'"
+    ).fetchone()
+    from app import worker
+    from app.production.certificate import (
+        verify_current_storyboard_completion_authority,
+    )
+    from app.schemas import Storyboard
+
+    board = Storyboard(
+        episode_no=int(episode["episode_no"]),
+        shots=[worker._load_shot_model(row) for row in rows],
+    )
+
+    verify_current_storyboard_completion_authority(
+        episode=episode,
+        current_storyboard_content=board.model_dump(mode="json"),
+    )
+
+
+@pytest.mark.asyncio
 async def test_confirmation_authority_failure_never_mutates_target_duration(
     monkeypatch,
 ) -> None:

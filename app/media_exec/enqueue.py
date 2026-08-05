@@ -320,6 +320,11 @@ def _load_shot_model(shot_row) -> "object":
     from app.continuity import apply_shot_contract
     from app.schemas import Shot
     shot = Shot(
+        shot_uid=(
+            shot_row["shot_uid"]
+            if "shot_uid" in shot_row.keys()
+            else None
+        ) or "",
         shot_no=shot_row["shot_no"], duration_s=shot_row["duration_s"], shot_size=shot_row["shot_size"],
         camera_move=shot_row["camera_move"],
         scene_time=(shot_row["scene_time"] if "scene_time" in shot_row.keys() else "") or "",
