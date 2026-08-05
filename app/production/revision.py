@@ -154,6 +154,74 @@ def rebind_input_fingerprint(
     return revision
 
 
+def bind_unpublished_revision_metadata(
+    revision_id: str,
+    *,
+    input_fingerprint: str,
+    contract_version: str,
+    qa_profile_version: str,
+    conn=None,
+    commit: bool = True,
+) -> ProductionRevision:
+    """Bind metadata omitted when a resumable revision was first initialized.
+
+    Storyboard revisions are created before a final board exists, so their
+    content fingerprint is not available at initialization. This CAS only
+    fills blank values (or accepts exact matches) on an unpublished active
+    revision; conflicting non-empty metadata still fails closed.
+    """
+    if not input_fingerprint or not contract_version or not qa_profile_version:
+        raise ValueError("revision 元数据绑定缺少指纹、契约或评分版本")
+    db = conn or get_conn()
+    row = db.execute(
+        "SELECT * FROM production_revisions WHERE id=?",
+        (revision_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError("revision 元数据绑定的记录不存在")
+    if row["status"] != "active" or row["published_artifact_id"]:
+        raise ValueError("只能绑定尚未发布的 active revision")
+    requested = {
+        "input_fingerprint": input_fingerprint,
+        "contract_version": contract_version,
+        "qa_profile_version": qa_profile_version,
+    }
+    for field, value in requested.items():
+        current = str(row[field] or "")
+        if current and current != value:
+            raise ValueError(f"revision {field} 已绑定其他版本")
+    cursor = db.execute(
+        """UPDATE production_revisions
+              SET input_fingerprint=?,contract_version=?,qa_profile_version=?,
+                  updated_at=?
+            WHERE id=? AND status='active' AND published_artifact_id IS NULL
+              AND input_fingerprint IN ('',?)
+              AND contract_version IN ('',?)
+              AND qa_profile_version IN ('',?)""",
+        (
+            input_fingerprint,
+            contract_version,
+            qa_profile_version,
+            now(),
+            revision_id,
+            input_fingerprint,
+            contract_version,
+            qa_profile_version,
+        ),
+    )
+    if cursor.rowcount != 1:
+        raise ValueError("revision 元数据绑定发生 CAS 冲突")
+    if commit:
+        db.commit()
+    revision = _row_to_revision(db.execute(
+        "SELECT * FROM production_revisions WHERE id=?",
+        (revision_id,),
+    ).fetchone())
+    if revision is None:
+        raise ValueError("revision 元数据绑定后记录不存在")
+    return revision
+
+
 def screenplay_production_state(episode_id: str) -> dict[str, Any]:
     """Return the persisted screenplay stage and UI-safe recovery action."""
     from app import task_registry

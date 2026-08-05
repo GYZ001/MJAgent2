@@ -11,6 +11,7 @@ from app.production.certificate import (
 )
 from app.production.policy import FullRegenDenied, assert_baseline_allowed, assert_patch_ops_allowed
 from app.production.revision import (
+    bind_unpublished_revision_metadata,
     ensure_production_revision,
     mark_baseline_generated,
     mark_first_evaluation,
@@ -131,6 +132,38 @@ def test_revision_authority_rebind_requires_current_working_artifact() -> None:
             revision.id,
             input_fingerprint="stale",
             expected_working_artifact_id="art_stale",
+        )
+
+
+def test_unpublished_revision_metadata_only_fills_blank_values() -> None:
+    revision = ensure_production_revision(
+        episode_id="ep_p",
+        kind="storyboard",
+        resume=False,
+    )
+
+    bound = bind_unpublished_revision_metadata(
+        revision.id,
+        input_fingerprint="board-v1",
+        contract_version="3.0.0",
+        qa_profile_version="storyboard-full-gate-2",
+    )
+
+    assert bound.input_fingerprint == "board-v1"
+    assert bound.contract_version == "3.0.0"
+    assert bound.qa_profile_version == "storyboard-full-gate-2"
+    assert bind_unpublished_revision_metadata(
+        revision.id,
+        input_fingerprint="board-v1",
+        contract_version="3.0.0",
+        qa_profile_version="storyboard-full-gate-2",
+    ).id == revision.id
+    with pytest.raises(ValueError, match="已绑定其他版本"):
+        bind_unpublished_revision_metadata(
+            revision.id,
+            input_fingerprint="board-v2",
+            contract_version="3.0.0",
+            qa_profile_version="storyboard-full-gate-2",
         )
 
 

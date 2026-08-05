@@ -1006,6 +1006,7 @@ def _finalize_storyboard_evidence(
             )
     from app.production.publish import publish_storyboard
     from app.production.revision import (
+        bind_unpublished_revision_metadata,
         ensure_production_revision,
         mark_baseline_generated,
         update_working_artifact,
@@ -1027,6 +1028,15 @@ def _finalize_storyboard_evidence(
             baseline_artifact_id=artifact["id"],
             working_artifact_id=artifact["id"],
         )
+    revision = bind_unpublished_revision_metadata(
+        revision.id,
+        input_fingerprint=(
+            revision.input_fingerprint
+            or evidence_repository.content_hash(board.model_dump(mode="json"))
+        ),
+        contract_version=contract_version,
+        qa_profile_version="storyboard-full-gate-2",
+    )
     eval_rows = conn.execute(
         "SELECT id FROM evaluations WHERE artifact_id=? ORDER BY created_at",
         (artifact["id"],),
