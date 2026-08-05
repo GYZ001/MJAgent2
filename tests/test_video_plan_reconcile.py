@@ -18,6 +18,7 @@ from app.video_plan import (
     bind_plan_release_identity,
     create_local_replan_revision,
     current_storyboard_release_manifest,
+    normalize_ai_shot_plan_candidate,
     publish_plan,
     reconcile_adopted_revision,
     save_capability_snapshot,
@@ -118,6 +119,32 @@ def _conn() -> sqlite3.Connection:
         )
     conn.commit()
     return conn
+
+
+def test_ai_plan_candidate_normalizes_known_relation_and_asset_aliases() -> None:
+    normalized, changes = normalize_ai_shot_plan_candidate({
+        "mode": "REFERENCE_IMAGE_MODE",
+        "relations": {
+            "temporal": "episode_start",
+            "spatial": "establishing",
+            "edit": "none",
+            "action": "origin",
+        },
+        "required_assets": [{
+            "role": "reference_image",
+            "source": "STATIC_BOUNDARY_ASSET",
+            "source_shot_id": None,
+        }],
+    })
+
+    assert normalized["relations"] == {
+        "temporal": "new_domain",
+        "spatial": "new_space",
+        "edit": "unknown",
+        "action": "starts_new_action",
+    }
+    assert normalized["required_assets"] == []
+    assert len(changes) == 5
 
 
 def test_first_adoption_binds_dependency_and_changed_adoption_stales_descendant() -> None:

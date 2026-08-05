@@ -16,7 +16,7 @@ from urllib.parse import quote, urljoin, urlparse
 import httpx
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
-from app.db import get_conn, get_setting, new_id, now
+from app.db import get_conn, get_setting, log_provider_call, new_id, now
 
 
 class VideoGenerationMode(str, Enum):
@@ -173,6 +173,79 @@ class EpisodeVideoGenerationPlan(BaseModel):
     critical_path_latency_ms: int = 0
     safe_parallelism_ratio: float = 1.0
     created_at: float = Field(default_factory=time.time)
+
+
+_RELATION_ALIASES: dict[str, dict[str, str]] = {
+    "temporal": {
+        "episode_start": "new_domain",
+        "continuous": "same_moment",
+        "time_skip_brief": "elapsed",
+    },
+    "spatial": {
+        "establishing": "new_space",
+        "same_scene_reposition": "same_space",
+        "scene_change": "new_space",
+        "same_scene_reverse_angle": "same_space",
+        "same_scene": "same_space",
+    },
+    "edit": {
+        "none": "unknown",
+        "same_scene_cut": "angle_cut",
+        "scene_change": "scene_cut",
+    },
+    "action": {
+        "origin": "starts_new_action",
+        "new_action_same_scene": "starts_new_action",
+        "new_action_with_trajectory": "starts_new_action",
+        "new_scene_action": "starts_new_action",
+        "reaction_insert": "observes_result",
+        "transformative_action_phase": "starts_new_action",
+        "new_scene_action_with_pose_change": "starts_new_action",
+        "action_phase_state_change": "starts_new_action",
+    },
+}
+
+
+def normalize_ai_shot_plan_candidate(
+    value: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Normalize planner enum synonyms without changing its selected mode."""
+    normalized = dict(value)
+    changes: list[dict[str, Any]] = []
+    relations = normalized.get("relations")
+    if isinstance(relations, dict):
+        relations = dict(relations)
+        normalized["relations"] = relations
+        for field, aliases in _RELATION_ALIASES.items():
+            current = str(relations.get(field) or "")
+            replacement = aliases.get(current)
+            if replacement is None:
+                continue
+            relations[field] = replacement
+            changes.append({
+                "field": f"relations.{field}",
+                "from": current,
+                "to": replacement,
+            })
+    if normalized.get("mode") == VideoGenerationMode.REFERENCE_IMAGE_MODE.value:
+        assets = normalized.get("required_assets")
+        if isinstance(assets, list):
+            kept = [
+                item
+                for item in assets
+                if not (
+                    isinstance(item, dict)
+                    and item.get("role") == "reference_image"
+                    and item.get("source") == AssetSource.STATIC_BOUNDARY_ASSET.value
+                )
+            ]
+            if kept != assets:
+                normalized["required_assets"] = kept
+                changes.append({
+                    "field": "required_assets",
+                    "reason": "generic_reference_resolved_at_execution",
+                })
+    return normalized, changes
 
 
 class VideoPlanValidationError(ValueError):
@@ -1126,17 +1199,74 @@ async def generate_episode_plan(
         "\"reason_codes\":[通用关系码],\"confidence\":0到1,\"unknown_dimensions\":[],"
         "\"fallback_order\":[],\"estimated_latency_ms\":整数,\"estimated_cost\":数字}]}"
     )
-    response = await hiagent.chat(
-        [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        temperature=0.1,
-        max_tokens=max(4096, min(20000, len(rows) * 900)),
-        call_meta={
-            "stage": "episode_video_mode_plan",
-            "episode_id": episode_id,
-            "plan_revision": next_revision,
-            "contract_version": "episode-video-plan.v1",
-        },
-    )
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    response: str | None = None
+    cached_call_id: int | None = None
+    cached_rows = db.execute(
+        """SELECT id,request_json,response_json FROM provider_calls
+           WHERE kind='chat' AND status IN ('OK','SUCCESS','SUCCEEDED')
+             AND json_valid(meta)
+             AND json_extract(meta,'$.stage')='episode_video_mode_plan'
+             AND json_extract(meta,'$.episode_id')=?
+             AND response_json IS NOT NULL
+           ORDER BY id DESC LIMIT 8""",
+        (episode_id,),
+    ).fetchall()
+    active_model = hiagent.active_model("text")
+    for cached in cached_rows:
+        try:
+            request_payload = json.loads(cached["request_json"] or "{}")
+            response_payload = json.loads(cached["response_json"] or "{}")
+            if (
+                request_payload.get("model") != active_model
+                or request_payload.get("messages") != messages
+            ):
+                continue
+            response = str(
+                response_payload["choices"][0]["message"]["content"]
+            )
+        except (
+            KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError,
+        ):
+            continue
+        cached_call_id = int(cached["id"])
+        break
+    if response is None:
+        response = await hiagent.chat(
+            messages,
+            temperature=0.1,
+            max_tokens=max(4096, min(20000, len(rows) * 900)),
+            call_meta={
+                "stage": "episode_video_mode_plan",
+                "episode_id": episode_id,
+                "plan_revision": next_revision,
+                "contract_version": "episode-video-plan.v1",
+                "planner_prompt_fingerprint": _hash(prompt_payload),
+                "operation_id": (
+                    "op_video_plan_" + _hash({
+                        "model": active_model,
+                        "messages": messages,
+                    })[:24]
+                ),
+                "reuse_successful_operation": True,
+            },
+        )
+    else:
+        log_provider_call(
+            "episode_video_mode_plan_cache",
+            active_model,
+            "REUSED",
+            None,
+            0,
+            meta={
+                "episode_id": episode_id,
+                "plan_revision": next_revision,
+                "source_provider_call_id": cached_call_id,
+            },
+        )
     parsed = extract_json(response)
     raw_shots = parsed.get("shots") if isinstance(parsed, dict) else None
     if not isinstance(raw_shots, list):
@@ -1146,6 +1276,21 @@ async def generate_episode_plan(
     for index, raw in enumerate(raw_shots):
         if not isinstance(raw, dict):
             raise VideoPlanValidationError([{"code": "AI_PLAN_SCHEMA_INVALID", "index": index}])
+        raw, normalizations = normalize_ai_shot_plan_candidate(raw)
+        if normalizations:
+            log_provider_call(
+                "episode_video_mode_plan_normalization",
+                active_model,
+                "NORMALIZED",
+                None,
+                0,
+                meta={
+                    "episode_id": episode_id,
+                    "plan_revision": next_revision,
+                    "index": index,
+                    "changes": normalizations,
+                },
+            )
         shot_id = str(raw.get("shot_id") or "")
         try:
             shot_plan = ShotVideoGenerationPlan.model_validate({
