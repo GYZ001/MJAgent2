@@ -16,6 +16,7 @@ from app.character_policy import (
 )
 from app.renderability import strip_overdetail_terms
 from app.schemas import Bible, EpisodeScreenplay, Shot
+from app.spoken_contract import SPOKEN_DELIVERIES
 
 # 全知视角的结尾悬念钩旁白（"可他不知道…/殊不知…/然而…"）念在台词【之后】；
 # 其余旁白（情境画外音、人物内心OS、人群声）都是先给情境、人物再开口反应，必须念在台词【之前】。
@@ -110,9 +111,7 @@ def _shot_character_contract_names(shot: Shot) -> list[str]:
     names: list[str] = [
         *((name or "").strip() for name in (shot.characters or [])),
         *((name or "").strip() for name in (shot.characters_visible or [])),
-        *((name or "").strip() for name in (shot.audio_cast or [])),
-        *((dialogue.speaker or "").strip() for dialogue in (shot.dialogues or [])),
-        *((item.speaker_id or "").strip() for item in (shot.audio_timeline or [])),
+        *_shot_voice_contract_names(shot),
     ]
     for role in shot.reference_roles or []:
         prefix, separator, name = str(role or "").partition(":")
@@ -134,10 +133,14 @@ def _shot_visual_contract_names(shot: Shot) -> list[str]:
 
 
 def _shot_voice_contract_names(shot: Shot) -> list[str]:
+    """Return actual spoken identities, excluding non-person ambient sources."""
     names = [
-        *((name or "").strip() for name in (shot.audio_cast or [])),
         *((dialogue.speaker or "").strip() for dialogue in (shot.dialogues or [])),
-        *((item.speaker_id or "").strip() for item in (shot.audio_timeline or [])),
+        *(
+            (item.speaker_id or "").strip()
+            for item in (shot.audio_timeline or [])
+            if item.type in SPOKEN_DELIVERIES
+        ),
     ]
     return list(dict.fromkeys(name for name in names if name))
 

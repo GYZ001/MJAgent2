@@ -361,6 +361,51 @@ def test_narrative_compiler_fails_closed_for_undeclared_legacy_whitelist_role() 
         compile_prompt(shot, _bible(), screenplay=screenplay)
 
 
+def test_narrative_compiler_does_not_treat_ambient_source_as_voice_identity() -> None:
+    screenplay = _screenplay()
+    shot = _shot(
+        audio_cast=["untyped-metallic-impact"],
+        dialogues=[],
+        audio_timeline=[{
+            "start_s": 0.0,
+            "end_s": 5.0,
+            "type": "ambient_sound",
+            "speaker_id": None,
+            "text": "A metallic impact echoes through the room.",
+            "lip_sync": False,
+        }],
+    )
+
+    prompt = compile_prompt(
+        shot,
+        _bible(),
+        screenplay=screenplay,
+        voice_bible=screenplay.voice_bible,
+    )
+
+    assert "A metallic impact echoes through the room." in prompt
+
+
+def test_narrative_compiler_still_rejects_undeclared_spoken_identity() -> None:
+    screenplay = _screenplay()
+    shot = _shot(
+        audio_cast=["undeclared-speaker"],
+        dialogues=[Dialogue(
+            speaker="undeclared-speaker",
+            line="This line is audibly spoken.",
+            delivery="offscreen_voice",
+        )],
+    )
+
+    with pytest.raises(CompileError, match="声音身份"):
+        compile_prompt(
+            shot,
+            _bible(),
+            screenplay=screenplay,
+            voice_bible=screenplay.voice_bible,
+        )
+
+
 def test_offscreen_contract_cannot_be_misused_as_visible_keyframe_subject() -> None:
     screenplay = _screenplay()
     shot = _shot(

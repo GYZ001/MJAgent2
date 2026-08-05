@@ -40,6 +40,7 @@ from app.spoken_contract import (
     content_char_count,
     max_speech_chars,
     segments_from_timeline,
+    spoken_speakers,
     spoken_text_of,
     synchronize_spoken_contract,
     validate_spoken_contract,
@@ -542,23 +543,19 @@ def validate_storyboard(
             if action is not None
             for target_id in action.target_ids
         }
+        spoken_identity_names = set(spoken_speakers(shot))
         delivered_actor_ids = {
             *shot.characters,
             *(shot.characters_visible or []),
             *(shot.visible_entity_ids or []),
-            *(shot.audio_cast or []),
-            *(
-                (dialogue.speaker or "").strip()
-                for dialogue in (shot.dialogues or [])
-                if (dialogue.speaker or "").strip()
-            ),
+            *spoken_identity_names,
             *(shot.offscreen_action_actor_ids or []),
         }
         delivered_target_ids = {
             *shot.characters,
             *(shot.characters_visible or []),
             *(shot.visible_entity_ids or []),
-            *(shot.audio_cast or []),
+            *spoken_identity_names,
             *(shot.offscreen_action_target_ids or []),
         }
         missing_task_actors = task_actor_ids - delivered_actor_ids
@@ -618,18 +615,7 @@ def validate_storyboard(
                     f"{tag}.characters_visible 含「{name}」，但 characters 中没有该角色；"
                     "可见名单必须是镜头角色名单的子集"
                 )
-        contract_speakers = list(shot.audio_cast or [])
-        contract_speakers.extend(
-            (item.speaker_id or "").strip()
-            for item in (shot.audio_timeline or [])
-            if (item.speaker_id or "").strip()
-        )
-        contract_speakers.extend(
-            (dialogue.speaker or "").strip()
-            for dialogue in (shot.dialogues or [])
-            if (dialogue.speaker or "").strip()
-        )
-        for name in dict.fromkeys(contract_speakers):
+        for name in spoken_speakers(shot):
             if narrative_authority:
                 try:
                     if identity_resolver is None:
