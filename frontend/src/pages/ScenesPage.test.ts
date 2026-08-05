@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import { sceneAvailability, sceneUsability } from '../lib/sceneUsability'
-import { handoffGapSelectionToPayment } from './ScenesPage'
+import { handoffGapSelectionToPayment, scenePrepStatus } from './ScenesPage'
+
+describe('场景库步骤状态', () => {
+  it('生成期间优先显示进行中，不把待生成缺口误报为有问题', () => {
+    expect(scenePrepStatus(true, true, 11)).toBe('running')
+    expect(scenePrepStatus(true, false, 11)).toBe('problem')
+  })
+})
 
 describe('场景缺口扫描弹窗交接', () => {
   it('先关闭扫描结果，再打开费用确认，避免确认窗被挡在背后', async () => {

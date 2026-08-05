@@ -21,6 +21,16 @@ import { formatBookTitle } from '../lib/bookTitle'
 import { sceneUsability } from '../lib/sceneUsability'
 import { statusLabel, statusTitle, type PrepStepStatus } from '../lib/statusLabels'
 
+export function scenePrepStatus(
+  hasUnavailable: boolean,
+  generating: boolean,
+  sceneCount: number,
+): PrepStepStatus {
+  if (generating) return 'running'
+  if (hasUnavailable) return 'problem'
+  return sceneCount > 0 ? 'done' : 'idle'
+}
+
 export default function ScenesPage() {
   const { projectId, toast, registerNavigationGuard } = useNav()
   const { data: p, refresh, error, loading } = useProject(projectId!, undefined, 'scenes')
@@ -194,13 +204,7 @@ export default function ScenesPage() {
   const detailScene = detailSceneName ? scenes.find(scene => scene.name === detailSceneName) ?? null : null
   const paramsScene = paramsSceneName ? scenes.find(scene => scene.name === paramsSceneName) ?? null : null
   const hasUnavailable = scenes.some(scene => sceneUsability(scene, false) === 'unavailable')
-  const sceneStatus: PrepStepStatus = hasUnavailable
-    ? 'problem'
-    : generating
-      ? 'running'
-      : scenes.length > 0
-        ? 'done'
-        : 'idle'
+  const sceneStatus = scenePrepStatus(hasUnavailable, generating, scenes.length)
 
   return (
     <>
