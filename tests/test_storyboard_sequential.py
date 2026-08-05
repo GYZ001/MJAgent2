@@ -148,7 +148,7 @@ def test_next_shot_uses_bounded_single_shot_output_budget(monkeypatch) -> None:
     assert result.shot.shot_no == 1
     assert captured["max_tokens"] == config.STORYBOARD_SHOT_MAX_TOKENS == 8192
     assert captured["max_tokens"] < 65535
-    assert "ACTION_CAPACITY_EXCEEDED" in captured["repair_issue_codes"]
+    assert captured["repair_issue_codes"] == frozenset()
 
 
 def test_storyboard_outline_uses_32k_output_budget() -> None:

@@ -603,7 +603,7 @@ function NarrativeReadinessPanel({
         ? '评分建议人工复核'
         : '尚未运行可选评分'
 
-  return <section className="card narrative-readiness" aria-label="全链路叙事一致性">
+  return <section className="card narrative-readiness" aria-label="叙事理解评分（可选）">
     <header>
       <div><b>叙事理解评分（可选）</b><span>检查事件、动作、人物认知与观众理解风险，不改变生产资格</span></div>
       <span className={`stamp ${scored ? 'green' : 'gold'}`}>{reviewCopy}</span>
