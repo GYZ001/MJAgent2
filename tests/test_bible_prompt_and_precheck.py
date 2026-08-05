@@ -35,7 +35,23 @@ def test_bible_rejects_identity_traits_hidden_by_normal_clothing() -> None:
         world=World(visual_style_canonical="3D动漫CG渲染，虚构数字角色，电影光影"),
     )
 
-    assert any("常规完整着装下不可见" in error for error in validate_bible(bible))
+    assert any("常规完整着装、中性站姿下静态可见" in error for error in validate_bible(bible))
+
+
+def test_bible_rejects_behavior_and_subjective_personality_as_appearance() -> None:
+    bible = Bible(
+        characters=[Character(
+            name="角色甲",
+            role="反派",
+            appearance_canonical=(
+                "四十岁男性，短发，深色正装配白衬衫，身材微胖，"
+                "标志性特征是眼神猥琐，看人总带着色欲和算计感"
+            ),
+        )],
+        world=World(visual_style_canonical="3D动漫CG渲染，虚构数字角色，电影光影"),
+    )
+
+    assert any("常规完整着装、中性站姿下静态可见" in error for error in validate_bible(bible))
 
 
 def test_project_or_404_normalizes_sqlite_row_to_dict(monkeypatch) -> None:

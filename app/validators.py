@@ -4495,7 +4495,8 @@ def validate_bible(bible: Bible) -> list[str]:
             errors.append(f"characters[{i}]({c.name}).appearance_canonical 长度 {len(c.appearance_canonical)} 字，要求 30~80 字")
         if contains_non_production_appearance(c.appearance_canonical):
             errors.append(
-                f"characters[{i}]({c.name}).appearance_canonical 包含常规完整着装下不可见的身体或内衣特征"
+                f"characters[{i}]({c.name}).appearance_canonical "
+                "包含不属于常规完整着装、中性站姿下静态可见身份的信息"
             )
         for r in c.relationships:
             if r.to not in names:

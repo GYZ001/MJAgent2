@@ -58,12 +58,17 @@ def normalize_prompt_text(text: str) -> str:
 
 _NON_PRODUCTION_APPEARANCE_RE = re.compile(
     r"(?:乳头|乳晕|乳房|阴部|阴唇|阴蒂|阴毛|生殖器|下体|私处|"
-    r"裸体|裸露|赤裸|一丝不挂|内裤|胸罩|文胸)",
+    r"隐私部位|裸体|裸露|赤裸|一丝不挂|内裤|胸罩|文胸)",
     re.IGNORECASE,
 )
 _CLOTHING_HIDDEN_SKIN_MARK_RE = re.compile(
     r"(?:腰侧|腰部|胸部|腹部|背部|大腿|臀部|髋部|胯部)"
     r"[^，,；;。]*(?:痣|胎记|纹身|疤痕)",
+)
+_NON_STATIC_APPEARANCE_RE = re.compile(
+    r"(?:一举一动|看向|看人|看女人|视线(?:落|停|扫|盯)|"
+    r"自带[^，,；;。]*(?:气场|气质|风情|女人味|书卷气)|"
+    r"色欲|算计感|侵略感|迂腐|猥琐|含春|撩人|志在必得)",
 )
 _APPEARANCE_LIST_PREFIX_RE = re.compile(
     r"^(?P<prefix>.*?标志性特征(?:是|为)?)(?P<items>.*)$",
@@ -78,6 +83,7 @@ def contains_non_production_appearance(anchor: str) -> bool:
     return bool(
         _NON_PRODUCTION_APPEARANCE_RE.search(anchor or "")
         or _CLOTHING_HIDDEN_SKIN_MARK_RE.search(anchor or "")
+        or _NON_STATIC_APPEARANCE_RE.search(anchor or "")
     )
 
 

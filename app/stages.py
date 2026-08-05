@@ -998,7 +998,7 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
 
 要求：
 1. 只收录出场 2 次以上或明显重要的角色，最多 8 个。
-2. appearance_canonical 是该角色的"固定外观锚点串"：40~60 字，必须包含 性别年龄感/发型发色/服装款式与颜色/1 个标志性特征。只写常规完整着装下可直接看见、可跨镜稳定复现的信息，不写性格，不得写裸体、内衣、私密身体部位或必须暴露身体才能看见的特征。原著未描写的部分，按题材合理补全并保持内部一致。
+2. appearance_canonical 是该角色的"固定外观锚点串"：40~60 字，必须包含 性别年龄感/发型发色/服装款式与颜色/1 个标志性特征。只写常规完整着装、中性站姿下可直接看见并能跨镜稳定复现的静态形态：五官、发型、体型、外层服装、可见配饰或面部标记。不写性格、欲望、气质、眼神行为、对他人的注视方式，不得写裸体、内衣、私密身体部位或必须暴露身体才能看见的特征。原著未描写的部分，按题材合理补全并保持内部一致。
 3. visual_style_canonical：25~40 字的全局画风串，包含 美术风格/光线/色调，适配竖屏漫剧，必须依据本书题材定制。【硬性约束】必须是 CG/动画/漫画/插画类的非真人风格（如 3D 渲染、3D 写实 CG、2D 动画、动态漫画、厚涂插画、国漫风等，写实质感/照片级/胶片颗粒等氛围词可以保留），但严禁"真人实拍/真人出镜/实拍摄影"这类真人风格描述（否则后续 Seedance 视频接口会因疑似真人而报错 InputImageSensitiveContentDetected）。核心是画面为 CG/动画渲染而非真人拍摄。
 4. speech_style 用于后续台词写作：句长习惯/口头禅/敬语习惯等，15~30 字。
 5. name 必须互不重复：同一人物的别名/外号/尊称/简称统一成原文最稳定的正式姓名，不要拆成多个角色。
@@ -1714,7 +1714,10 @@ def _narrative_plan_prompt_block(scope_id: str) -> str:
         "deliver+must_keep 事件和每个 target_delta 都必须反向引用唯一主窗口，窗口 event_ids/target_delta_ids "
         "也必须回引它们。\n"
         "9. 同时输出 SceneDramaticContract、NarrativeArcContract 和 SetupPayoffContract；"
-        "非传统段落可设 not_applicable，但必须给出替代戏剧功能，不得强套模板。\n"
+        "非传统段落可设 not_applicable，但必须给出替代戏剧功能，不得强套模板。"
+        "每个 arc.promise_proposition_ids 必须来自该 arc.payoff_contract_ids 所引用合同的 "
+        "setup_proposition_ids；payoff_event_ids 表示兑现事件，intended_inference_ids 表示兑现后推论，"
+        "SetupPayoffContract 不存在 payoff_proposition_ids 字段，不得把末端推论误写成 arc promise。\n"
         "10. 所有 ID 必须唯一且引用存在；AI 不确定时使用 uncertainty/needs_review，"
         "禁止用剧情关键词、动作词表、集数特判或内容类别到修复方案的固定映射。\n"
         "narrative_plan 的完整 JSON 字段与关系结构见文末输出 Schema；"

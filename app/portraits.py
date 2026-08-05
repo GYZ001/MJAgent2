@@ -106,7 +106,7 @@ async def screen_appearance_changes(entries: list[dict], ep_label: str) -> dict[
 - 没有把握时一律判为未明显变化，避免无意义重绘。
 
 对 changed=true 的角色，给出整合后的【新外观锚点串】new_appearance：40~60 字，沿用既有锚点未变部分，只改真正变化处；保留性别年龄感/发型发色/服装款式与颜色/标志性特征。
-- 外观锚点只允许常规完整着装下可直接看见、可跨镜稳定复现的特征；不得写裸体、内衣、私密身体部位或必须暴露身体才能看见的特征。
+- 外观锚点只允许常规完整着装、中性站姿下可直接看见、可跨镜稳定复现的静态形态；不得写性格、欲望、气质、眼神行为、对他人的注视方式、裸体、内衣、私密身体部位或必须暴露身体才能看见的特征。
 同时给出：
 - change_dimensions：变化维度数组，取值仅限 hair/outfit/accessory/injury/age_stage/face/body_identity
 - persistence：persistent（跨集持续）/ episode（仅本集）/ shot_only（单镜临时，不应更新人物谱）
@@ -1420,7 +1420,7 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
 判定口径：
 {decision_contract}
 - appearance_canonical 是"固定外观锚点串"：40~60 字，须含 性别年龄感/发型发色/服装款式与颜色/1 个标志性特征；只写视觉可见信息，不写性格。原著未写处按画风（{style}）合理补全并保持内部一致。
-- appearance_canonical 只允许常规完整着装下可直接看见、可跨镜稳定复现的特征；不得写裸体、内衣、私密身体部位或必须暴露身体才能看见的特征。
+- appearance_canonical 只允许常规完整着装、中性站姿下可直接看见、可跨镜稳定复现的静态形态；不得写性格、欲望、气质、眼神行为、对他人的注视方式、裸体、内衣、私密身体部位或必须暴露身体才能看见的特征。
 
 只输出一个 JSON 对象：
 {{"important": true/false, "reason": "一句话依据", "role": "主角|重要配角|反派", "appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}]}}"""

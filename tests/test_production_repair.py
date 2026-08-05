@@ -2112,6 +2112,99 @@ def test_narrative_normalizer_closes_unique_effect_and_perceiver_refs():
     }
 
 
+def test_narrative_normalizer_projects_unique_arc_inference_to_setup_promise():
+    from app.production.screenplay_repair import (
+        _normalize_screenplay_narrative_graph,
+    )
+
+    script = _minimal_script(
+        narrative_plan=NarrativeContinuityPlan.model_validate({
+            "scope_id": "ep_p",
+            "propositions": [
+                {
+                    "proposition_id": "P-SETUP",
+                    "semantic_identity_key": "setup",
+                    "canonical_statement": "观众先看到明确铺垫",
+                    "narrative_domain": "adapted_story",
+                },
+                {
+                    "proposition_id": "P-INFERENCE",
+                    "semantic_identity_key": "inference",
+                    "canonical_statement": "结尾形成推论",
+                    "narrative_domain": "adapted_story",
+                },
+            ],
+            "setup_payoff_contracts": [{
+                "setup_payoff_id": "SP-1",
+                "setup_proposition_ids": ["P-SETUP"],
+                "intended_inference_ids": ["P-INFERENCE"],
+            }],
+            "arc_contracts": [{
+                "arc_id": "ARC-1",
+                "promise_proposition_ids": ["P-INFERENCE"],
+                "payoff_contract_ids": ["SP-1"],
+            }],
+        }),
+    )
+
+    changes = _normalize_screenplay_narrative_graph(
+        script,
+        authorized_source_chapters={},
+    )
+
+    assert script.narrative_plan.arc_contracts[0].promise_proposition_ids == [
+        "P-SETUP"
+    ]
+    assert any(
+        change["kind"] == "arc_promise_setup_projection"
+        for change in changes
+    )
+
+
+def test_narrative_normalizer_keeps_ambiguous_arc_promise_for_repair():
+    from app.production.screenplay_repair import (
+        _normalize_screenplay_narrative_graph,
+    )
+
+    script = _minimal_script(
+        narrative_plan=NarrativeContinuityPlan.model_validate({
+            "scope_id": "ep_p",
+            "propositions": [
+                {
+                    "proposition_id": proposition_id,
+                    "semantic_identity_key": proposition_id.casefold(),
+                    "canonical_statement": proposition_id,
+                    "narrative_domain": "adapted_story",
+                }
+                for proposition_id in ("P-SETUP-1", "P-SETUP-2", "P-INFERENCE")
+            ],
+            "setup_payoff_contracts": [{
+                "setup_payoff_id": "SP-1",
+                "setup_proposition_ids": ["P-SETUP-1", "P-SETUP-2"],
+                "intended_inference_ids": ["P-INFERENCE"],
+            }],
+            "arc_contracts": [{
+                "arc_id": "ARC-1",
+                "promise_proposition_ids": ["P-INFERENCE"],
+                "payoff_contract_ids": ["SP-1"],
+            }],
+        }),
+    )
+
+    changes = _normalize_screenplay_narrative_graph(
+        script,
+        authorized_source_chapters={},
+    )
+
+    assert script.narrative_plan.arc_contracts[0].promise_proposition_ids == [
+        "P-INFERENCE"
+    ]
+    assert not any(
+        change["kind"] == "arc_promise_setup_projection"
+        for change in changes
+    )
+
+
 def test_spine_spoken_clause_accepts_visible_action_performance():
     from app.validators import validate_screenplay_spine_delivery
 

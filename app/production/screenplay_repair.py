@@ -1712,6 +1712,74 @@ def _normalize_screenplay_narrative_graph(
         )
     }
 
+    payoff_contracts_by_id = {
+        str(item.get("setup_payoff_id") or ""): item
+        for item in (data.get("setup_payoff_contracts") or [])
+        if (
+            isinstance(item, dict)
+            and str(item.get("setup_payoff_id") or "").strip()
+        )
+    }
+    for arc in data.get("arc_contracts") or []:
+        if not isinstance(arc, dict):
+            continue
+        promises = [
+            str(item)
+            for item in (arc.get("promise_proposition_ids") or [])
+            if str(item or "").strip()
+        ]
+        referenced_payoffs = [
+            payoff_contracts_by_id[payoff_id]
+            for payoff_id in (arc.get("payoff_contract_ids") or [])
+            if payoff_id in payoff_contracts_by_id
+        ]
+        setup_promises = {
+            str(proposition_id)
+            for payoff in referenced_payoffs
+            for proposition_id in (payoff.get("setup_proposition_ids") or [])
+            if str(proposition_id or "") in propositions_by_id
+        }
+        orphan_promises = [
+            proposition_id
+            for proposition_id in promises
+            if proposition_id not in setup_promises
+        ]
+        replacements: dict[str, str] = {}
+        for proposition_id in orphan_promises:
+            matching_payoffs = [
+                payoff
+                for payoff in referenced_payoffs
+                if proposition_id in (
+                    payoff.get("intended_inference_ids") or []
+                )
+            ]
+            if len(matching_payoffs) != 1:
+                break
+            setup_ids = list(dict.fromkeys(
+                str(item)
+                for item in (
+                    matching_payoffs[0].get("setup_proposition_ids") or []
+                )
+                if str(item or "") in propositions_by_id
+            ))
+            if len(setup_ids) != 1:
+                break
+            replacements[proposition_id] = setup_ids[0]
+        else:
+            if replacements:
+                normalized_promises = list(dict.fromkeys(
+                    replacements.get(proposition_id, proposition_id)
+                    for proposition_id in promises
+                ))
+                changes.append({
+                    "kind": "arc_promise_setup_projection",
+                    "id": arc.get("arc_id"),
+                    "from": promises,
+                    "to": normalized_promises,
+                    "inference_to_setup": replacements,
+                })
+                arc["promise_proposition_ids"] = normalized_promises
+
     existing_fact_ids = {
         str(item.get("fact_id") or "")
         for item in (data.get("state_facts") or [])
