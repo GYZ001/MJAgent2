@@ -282,6 +282,17 @@ def _recover_missing_unit_headings(chapters: list[dict]) -> list[dict]:
             normalized_title = ""
             for line_index, line in enumerate(lines[1:], start=1):
                 candidate = line.strip()
+                recognized = list(
+                    re.finditer(rf"第([{_CHAPTER_NUMERALS}]+)章", candidate)
+                )
+                if (
+                    recognized
+                    and _parse_chapter_number(recognized[-1].group(1)) == expected
+                    and len(candidate) <= 80
+                ):
+                    split_at = line_index
+                    normalized_title = candidate
+                    break
                 match = re.match(rf"^第([{_CHAPTER_NUMERALS}]+)", candidate)
                 if not match or _parse_chapter_number(match.group(1)) != expected:
                     continue

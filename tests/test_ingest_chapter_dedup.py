@@ -61,6 +61,21 @@ def test_ingest_recovers_standalone_heading_missing_chapter_unit() -> None:
     ]
 
 
+def test_ingest_recovers_embedded_heading_with_volume_prefix() -> None:
+    body = "孟浩辨认药草，古书随之翻过一页。" * 12
+    result = ingest_novel(
+        (
+            f"第九百一十五章 登峰造极\n{body}\n"
+            "六卷名动九山真仙路第916章步步生莲！\n"
+            f"{body}\n"
+            f"第九百一十七章 节节攀升\n{body}"
+        ).encode()
+    )
+
+    assert result["chapter_count"] == 3
+    assert result["chapters"][1]["title"] == "六卷名动九山真仙路第916章步步生莲！"
+
+
 def test_ingest_does_not_treat_numbered_action_as_missing_heading() -> None:
     body = "孟浩检查法宝，确认灵力仍可运转。" * 12
     result = ingest_novel(
