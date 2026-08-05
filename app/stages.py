@@ -819,6 +819,33 @@ async def _run_with_agent_loop(
             instance = None
         else:
             instance, messages = schema_errors(model_cls, obj)
+        if instance is not None and model_cls is Bible:
+            from app.refs import production_appearance_anchor
+
+            normalizations = []
+            for character in instance.characters:
+                original = character.appearance_canonical
+                normalized = production_appearance_anchor(original)
+                if normalized != original:
+                    character.appearance_canonical = normalized
+                    normalizations.append({
+                        "character": character.name,
+                        "from": original,
+                        "to": normalized,
+                    })
+            if normalizations:
+                log_provider_call(
+                    "character_bible_candidate_normalization",
+                    config.MODEL_TEXT,
+                    "NORMALIZED",
+                    None,
+                    0,
+                    meta={
+                        "project_id": loop.scope_id,
+                        "stage": stage,
+                        "changes": normalizations,
+                    },
+                )
         if instance is not None:
             messages = business_validate(instance)
         return (
@@ -1022,6 +1049,7 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
             min_quality_gain=0.03,
             no_gain_rounds=2,
             allow_warning_candidate=False,
+            repair_all_blockers=True,
         ),
     )
     bible = await _run_with_agent_loop(

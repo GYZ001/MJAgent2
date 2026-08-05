@@ -152,6 +152,7 @@ def test_generate_bible_forces_backend_visual_style_prompt(monkeypatch) -> None:
 
     async def fake_loop(*_args, **_kwargs):
         seen["allow_warning_candidate"] = _kwargs["loop"].policy.allow_warning_candidate
+        seen["repair_all_blockers"] = _kwargs["loop"].policy.repair_all_blockers
         return Bible(
             world=World(visual_style_canonical="模型自行写的画风"),
             characters=[
@@ -174,3 +175,4 @@ def test_generate_bible_forces_backend_visual_style_prompt(monkeypatch) -> None:
         "电影级真实质感，现实人物建模，自然光影，细节丰富，东方仙侠风。"
     )
     assert seen["allow_warning_candidate"] is False
+    assert seen["repair_all_blockers"] is True

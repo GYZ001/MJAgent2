@@ -54,6 +54,17 @@ def test_portrait_prompt_keeps_only_clothed_visible_identity_traits() -> None:
     assert "服装面料不透明并完整覆盖身体" in prompt
 
 
+def test_production_anchor_removes_behavior_and_subjective_identity_claims() -> None:
+    anchor = (
+        "40岁男性，短发，身材微胖，深色西装配白衬衫，"
+        "标志性特征是看向女性时色欲外露的眼神，气质强势"
+    )
+
+    production_anchor = production_appearance_anchor(anchor)
+
+    assert production_anchor == "40岁男性，短发，身材微胖，深色西装配白衬衫"
+
+
 def test_multiview_prompt_uses_latest_edited_portrait_prompt() -> None:
     prompt = character_view_prompt(
         "旧画风",
