@@ -34,13 +34,21 @@ from app.errors import ContentGenerationError, code_ref
 from app.harness import model_gateway
 from app.harness.types import EvidenceArtifact
 from app.ingest import chapter_is_stub, chapter_titles_match
-from app.refs import _safe_name, portrait_appearance_anchor, portrait_prompt
+from app.refs import (
+    PRODUCTION_APPEARANCE_MAX_CHARS,
+    PRODUCTION_APPEARANCE_MIN_CHARS,
+    _safe_name,
+    missing_production_appearance_dimensions,
+    portrait_appearance_anchor,
+    portrait_prompt,
+    production_appearance_anchor,
+)
 from app.schemas import Bible, Character, extract_json
 
 FRAGMENT_WINDOW = 220   # 命中角色名前后各取多少字
 FRAGMENT_BUDGET = 4000  # 单角色单段送审片段总字数预算
-APPEARANCE_MIN = 30     # 外观锚点串下限（与 validate_bible 一致）
-APPEARANCE_MAX = 80     # 外观锚点串上限
+APPEARANCE_MIN = PRODUCTION_APPEARANCE_MIN_CHARS
+APPEARANCE_MAX = PRODUCTION_APPEARANCE_MAX_CHARS
 STAGED_INITIAL_EP_START = 2_147_483_647  # 候选包不得命中任何真实集号
 CAST_DISCOVERY_SOURCE_BUDGET = 18000
 CAST_DISCOVERY_DRAFT_BUDGET = 14000
@@ -1399,7 +1407,7 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
         "请判断该称谓是否值得单独建人物卡并定妆。"
     )
     decision_contract = (
-        f"- identity_card_required=true：固定输出 important=true，并完成 30~80 字"
+        f"- identity_card_required=true：固定输出 important=true，并完成 20~80 字"
         f" appearance_canonical；不得因只出现一次而拒绝建卡。"
         if require_identity_card else
         f"- important=true 仅当：「{name}」是【真正的新角色】，且在这段剧情里"
@@ -1430,11 +1438,17 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
     )
     obj = extract_json(raw)
     important = bool(obj.get("important"))
-    appearance = (obj.get("appearance_canonical") or "").strip()
+    appearance = production_appearance_anchor(
+        (obj.get("appearance_canonical") or "").strip()
+    )
     if len(appearance) > APPEARANCE_MAX:
         appearance = appearance[:APPEARANCE_MAX]
     role = (obj.get("role") or "重要配角").strip() or "重要配角"
-    card_complete = APPEARANCE_MIN <= len(appearance) <= APPEARANCE_MAX and bool(role)
+    card_complete = (
+        APPEARANCE_MIN <= len(appearance) <= APPEARANCE_MAX
+        and not missing_production_appearance_dimensions(appearance)
+        and bool(role)
+    )
     if important and not card_complete:
         important = False  # 外观太稀薄不足以稳定定妆 → 不建卡
     known_set = set(known_names)
@@ -1561,6 +1575,9 @@ async def ensure_character_card(
                 and APPEARANCE_MIN
                 <= len(str(verdict.get("appearance_canonical") or "").strip())
                 <= APPEARANCE_MAX
+                and not missing_production_appearance_dimensions(
+                    str(verdict.get("appearance_canonical") or "").strip()
+                )
             )
             if not verdict["important"] and not (
                 require_identity_card and card_complete

@@ -54,6 +54,19 @@ def test_bible_rejects_behavior_and_subjective_personality_as_appearance() -> No
     assert any("常规完整着装、中性站姿下静态可见" in error for error in validate_bible(bible))
 
 
+def test_bible_accepts_compact_complete_production_identity() -> None:
+    bible = Bible(
+        characters=[Character(
+            name="角色甲",
+            role="反派",
+            appearance_canonical="三十岁男性，短发身材高大，常穿深色正装",
+        )],
+        world=World(visual_style_canonical="3D动漫CG渲染，虚构数字角色，电影光影"),
+    )
+
+    assert validate_bible(bible) == []
+
+
 def test_project_or_404_normalizes_sqlite_row_to_dict(monkeypatch) -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row

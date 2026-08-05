@@ -2938,6 +2938,17 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
                         f"[OUTLINE_DURATION_INVALID] shot_id={shot.shot_id or shot.shot_no} "
                         f"duration_s 必须在 {config.VIDEO_DURATION_MIN_S}~{config.VIDEO_DURATION_MAX_S}"
                     )
+            from app.validators import (
+                outline_key_line_capacity_errors,
+                outline_key_line_speaker_errors,
+            )
+
+            narrative_errors.extend(
+                outline_key_line_capacity_errors(o, screenplay)
+            )
+            narrative_errors.extend(
+                outline_key_line_speaker_errors(o, screenplay)
+            )
             narrative_errors.extend(narrative_outline_action_capacity_errors(
                 o,
                 screenplay.narrative_plan,
@@ -3039,6 +3050,8 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
                 "OUTLINE_HARD_LIMIT",
                 "OUTLINE_ORDER_INVALID",
                 "OUTLINE_DURATION_INVALID",
+                "OUTLINE_KEY_LINE_CAPACITY_INVALID",
+                "OUTLINE_KEY_LINE_SPEAKER_MIXED",
             }),
             repair_all_blockers=False,
             baseline_only=False,

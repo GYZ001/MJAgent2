@@ -3291,6 +3291,7 @@ def outline_key_line_capacity_errors(
             text = catalog.get(kid)
             if not text:
                 errors.append(
+                    "[OUTLINE_KEY_LINE_CAPACITY_INVALID] "
                     f"大纲第 {shot.shot_no} 镜 key_line_ids 含未知「{kid}」；"
                     f"合法范围：{', '.join(catalog)}"
                 )
@@ -3301,6 +3302,7 @@ def outline_key_line_capacity_errors(
             lines_for_msg.append(f"{kid}({chars}字)")
         if required_chars > capacity:
             errors.append(
+                "[OUTLINE_KEY_LINE_CAPACITY_INVALID] "
                 f"大纲第 {shot.shot_no} 镜必保留台词约 {required_chars} 字，"
                 f"超过 {duration}s 口播上限 {capacity} 字（{', '.join(lines_for_msg)}）；"
                 "请拆镜或把部分 key_line_ids 挪到相邻镜头，禁止把不可满足合同交给逐镜修复"
@@ -3310,6 +3312,7 @@ def outline_key_line_capacity_errors(
         missing = [kid for kid in catalog if kid not in assigned]
         if missing:
             errors.append(
+                "[OUTLINE_KEY_LINE_CAPACITY_INVALID] "
                 f"大纲未分配关键台词 ID：{', '.join(missing)}；"
                 "请把每条 KL* 写入某一镜的 key_line_ids"
             )
@@ -3381,6 +3384,7 @@ def outline_key_line_speaker_errors(
                 speaker_order.append(speaker)
         if len(speaker_order) > 1:
             errors.append(
+                "[OUTLINE_KEY_LINE_SPEAKER_MIXED] "
                 f"大纲第 {shot.shot_no} 镜分配了多个说话人 {speaker_order}；"
                 "请按话轮拆成相邻单人近景/特写，使用 reverse_angle 或 reaction_cut 正反打"
             )
@@ -4481,7 +4485,12 @@ def normalize_offbible_characters(board: Storyboard, bible: Bible | None) -> lis
 
 
 def validate_bible(bible: Bible) -> list[str]:
-    from app.refs import contains_non_production_appearance
+    from app.refs import (
+        PRODUCTION_APPEARANCE_MAX_CHARS,
+        PRODUCTION_APPEARANCE_MIN_CHARS,
+        contains_non_production_appearance,
+        missing_production_appearance_dimensions,
+    )
 
     errors = []
     # 初始人物谱由 prompt 约束为 ≤8 个；上限放宽到 60，给「按 20 集补录新登场角色」留出增长空间。
@@ -4491,8 +4500,18 @@ def validate_bible(bible: Bible) -> list[str]:
     if len(names) != len(set(names)):
         errors.append("characters.name 存在重复")
     for i, c in enumerate(bible.characters):
-        if not 30 <= len(c.appearance_canonical) <= 80:
-            errors.append(f"characters[{i}]({c.name}).appearance_canonical 长度 {len(c.appearance_canonical)} 字，要求 30~80 字")
+        if not PRODUCTION_APPEARANCE_MIN_CHARS <= len(c.appearance_canonical) <= PRODUCTION_APPEARANCE_MAX_CHARS:
+            errors.append(
+                f"characters[{i}]({c.name}).appearance_canonical 长度 "
+                f"{len(c.appearance_canonical)} 字，要求 "
+                f"{PRODUCTION_APPEARANCE_MIN_CHARS}~{PRODUCTION_APPEARANCE_MAX_CHARS} 字"
+            )
+        missing_dimensions = missing_production_appearance_dimensions(c.appearance_canonical)
+        if missing_dimensions:
+            errors.append(
+                f"characters[{i}]({c.name}).appearance_canonical "
+                f"缺少生产身份维度：{','.join(missing_dimensions)}"
+            )
         if contains_non_production_appearance(c.appearance_canonical):
             errors.append(
                 f"characters[{i}]({c.name}).appearance_canonical "

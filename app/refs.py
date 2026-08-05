@@ -83,6 +83,8 @@ _PORTRAIT_CLOTHING_CONTRACT = (
     "常规角色设定图着装，服装面料不透明并完整覆盖身体，"
     "重点呈现面部、发型、外层服装和可见配饰"
 )
+PRODUCTION_APPEARANCE_MIN_CHARS = 20
+PRODUCTION_APPEARANCE_MAX_CHARS = 80
 
 
 def contains_non_production_appearance(anchor: str) -> bool:
@@ -116,6 +118,19 @@ def production_appearance_anchor(anchor: str) -> str:
         if items:
             kept.append(f"{prefix}{'、'.join(items)}")
     return "，".join(kept).strip("， ")
+
+
+def missing_production_appearance_dimensions(anchor: str) -> list[str]:
+    safe = production_appearance_anchor(anchor)
+    missing = []
+    if not re.search(r"(?:岁|男性|女性|青年|中年|老年|少年|少女|老人|人影)", safe):
+        missing.append("年龄性别")
+    if not re.search(r"(?:发|须|脸|面|眼|眉|肤|身形|身材|体型|高|矮|胖|瘦|形态|人影)", safe):
+        missing.append("外形")
+    spectral = any(token in safe for token in ("透明", "半透明", "虚影", "魂体", "灵魂", "幽灵", "人影"))
+    if not spectral and not re.search(r"(?:穿|衣|衫|裙|裤|鞋|装|袍|服|戴|配饰|手表|眼镜)", safe):
+        missing.append("服装配饰")
+    return missing
 
 
 def ensure_portrait_clothing_contract(prompt: str) -> str:
