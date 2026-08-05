@@ -644,6 +644,56 @@ def test_dialogue_chain_normalization_merges_same_topic_continuation_response() 
     ]
 
 
+def test_dialogue_chain_normalization_keeps_cross_scene_continuation_separate() -> None:
+    script = EpisodeScreenplay(
+        episode_no=1,
+        full_script_text=(
+            "【场1】日 / 客厅\n"
+            "胡太太：帮我拿一下电炉好吗？\n"
+            "【场2】日 / 厨房\n"
+            "阿宾：没有看见电炉。\n"
+            "胡太太：那你下来扶梯。"
+        ),
+        dialogue_chains=[
+            KeyDialogueChain(
+                chain_id="DC1",
+                topic="厨房拿电炉",
+                turns=[
+                    KeyDialogueTurn(
+                        speaker="胡太太",
+                        line="帮我拿一下电炉好吗？",
+                        function="question",
+                        source_text="帮我拿一下电炉好吗？",
+                    )
+                ],
+            ),
+            KeyDialogueChain(
+                chain_id="DC2",
+                topic="厨房拿电炉（续）",
+                turns=[
+                    KeyDialogueTurn(
+                        speaker="阿宾",
+                        line="没有看见电炉。",
+                        function="response",
+                        source_text="没有看见电炉。",
+                    ),
+                    KeyDialogueTurn(
+                        speaker="胡太太",
+                        line="那你下来扶梯。",
+                        function="statement",
+                        source_text="那你下来扶梯。",
+                    ),
+                ],
+            ),
+        ],
+    )
+
+    normalized = normalize_screenplay_candidate(script)
+
+    assert len(normalized.dialogue_chains) == 2
+    assert normalized.dialogue_chains[1].turns[0].function == "statement"
+
+
 def test_ledger_normalization_resolves_composite_speaker_from_content() -> None:
     script = EpisodeScreenplay(
         episode_no=1,

@@ -44,9 +44,11 @@ from app.spoken_contract import (
     synchronize_spoken_contract,
     validate_spoken_contract,
 )
-from app.schemas import (Bible, EpisodeScreenplay, InformationItem, NarrativeContinuityPlan,
-                         Shot, Storyboard, StoryboardOutline, StoryEvent, SHOT_SIZES,
-                         CAMERA_MOVES, TRANSITIONS, CONTINUITY_MODES, DELIVERY_OWNERS)
+from app.schemas import (Bible, EpisodeScreenplay, InformationItem,
+                         KeyDialogueChain, NarrativeContinuityPlan, Shot,
+                         Storyboard, StoryboardOutline, StoryEvent, SHOT_SIZES,
+                         CAMERA_MOVES, TRANSITIONS, CONTINUITY_MODES,
+                         DELIVERY_OWNERS)
 from app.scene_contract import (
     compose_scene_setting,
     scene_name_of,
@@ -1503,6 +1505,73 @@ def normalize_screenplay_dialogue_chains(script: EpisodeScreenplay) -> EpisodeSc
             for scene_no, speaker, line in full_script_turns
             if (_condense(speaker), _condense(line)) in identities
         }
+
+    used_chain_ids = {
+        str(chain.chain_id or "").strip()
+        for chain in script.dialogue_chains
+        if str(chain.chain_id or "").strip()
+    }
+    next_chain_number = 1
+
+    def next_chain_id() -> str:
+        nonlocal next_chain_number
+        while f"DC{next_chain_number}" in used_chain_ids:
+            next_chain_number += 1
+        value = f"DC{next_chain_number}"
+        used_chain_ids.add(value)
+        next_chain_number += 1
+        return value
+
+    split_chains: list[KeyDialogueChain] = []
+    for chain in script.dialogue_chains:
+        located_groups: list[tuple[int, list[Any]]] = []
+        previous_scene = 0
+        for turn in chain.turns or []:
+            turn_identity = (
+                _condense(turn.speaker),
+                _condense(turn.line),
+            )
+            scene_no = next((
+                candidate_scene
+                for candidate_scene, speaker, line in full_script_turns
+                if (
+                    _condense(speaker),
+                    _condense(line),
+                ) == turn_identity
+            ), 0)
+            scene_no = scene_no or previous_scene
+            previous_scene = scene_no
+            if located_groups and located_groups[-1][0] == scene_no:
+                located_groups[-1][1].append(turn)
+            else:
+                located_groups.append((scene_no, [turn]))
+        nonzero_scenes = {
+            scene_no for scene_no, _turns in located_groups if scene_no
+        }
+        if len(nonzero_scenes) <= 1:
+            split_chains.append(chain)
+            continue
+        for group_index, (_scene_no, turns) in enumerate(located_groups):
+            split = chain.model_copy(deep=True)
+            split.chain_id = (
+                chain.chain_id
+                if group_index == 0
+                else next_chain_id()
+            )
+            split.topic = (
+                chain.topic
+                if group_index == 0
+                else f"{str(chain.topic or '').strip()}（续）"
+            )
+            split.turns = turns
+            if (
+                group_index > 0
+                and split.turns
+                and split.turns[0].function == "response"
+            ):
+                split.turns[0].function = "statement"
+            split_chains.append(split)
+    script.dialogue_chains = split_chains
 
     merged_chains: list[KeyDialogueChain] = []
     for chain in script.dialogue_chains:
