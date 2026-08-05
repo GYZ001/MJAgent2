@@ -2325,20 +2325,45 @@ async def run_screenplay_production(
     elif not rev.working_artifact_id:
         raise RuntimeError("revision 已有 baseline 计数但缺少 working artifact")
 
-    # QA Score Only: once a parseable Baseline exists, resume from that
-    # immutable working Artifact and finish the remaining deterministic stages.
-    # The legacy semantic Patch loop below is intentionally bypassed; quality
-    # observations are recorded but never trigger another model generation.
-    return _complete_screenplay_from_working_artifact(
-        episode_id=episode_id,
-        episode=episode,
-        source_text=source_text,
-        bible=bible,
-        revision_id=rev.id,
-        run_id=run_id,
-        checkpoint=checkpoint,
-        activation_no=activation_no,
+    # Quality remains score-only, but a typed narrative graph is consumed as a
+    # hard contract by storyboard generation. Publishing a structurally broken
+    # graph here only moves the same blocker downstream, where shot repair
+    # cannot safely rewrite screenplay authority. Legacy scripts without a
+    # narrative plan keep the score-only fast path; modern invalid graphs enter
+    # the bounded local Patch loop below.
+    working_script = load_screenplay_from_artifact(rev.working_artifact_id)
+    narrative_contract_errors: list[str] = []
+    if working_script.narrative_plan is not None:
+        from app.narrative import validate_screenplay_narrative
+
+        narrative_contract_errors = validate_screenplay_narrative(
+            working_script,
+            require=True,
+            source_text=source_text,
+            expected_scope_id=episode_id,
+            authorized_source_chapters=episode.get("authorized_source_chapters"),
+        )
+    if not narrative_contract_errors:
+        return _complete_screenplay_from_working_artifact(
+            episode_id=episode_id,
+            episode=episode,
+            source_text=source_text,
+            bible=bible,
+            revision_id=rev.id,
+            run_id=run_id,
+            checkpoint=checkpoint,
+            activation_no=activation_no,
+        )
+    conn.execute(
+        "UPDATE episodes SET screenplay_status='repairing',screenplay_error=?,"
+        "screenplay_updated_at=? WHERE id=?",
+        (
+            f"叙事合同有 {len(narrative_contract_errors)} 项结构错误，正在局部修复",
+            now(),
+            episode_id,
+        ),
     )
+    conn.commit()
 
     # ---- Repair loop ----
     patches_this_activation = 0

@@ -1597,6 +1597,61 @@ async def test_score_only_qa_does_not_plan_or_apply_patch(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_invalid_modern_narrative_graph_enters_patch_loop(monkeypatch):
+    from app.evidence import repository as evidence_repository
+    from app.production import screenplay_repair
+
+    revision = ensure_production_revision(
+        episode_id="ep_p",
+        kind="screenplay",
+        resume=False,
+    )
+    script = _minimal_script(
+        stakes="失败将失去资格",
+        narrative_plan=NarrativeContinuityPlan(scope_id="ep_p"),
+    )
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id="ep_p",
+        status="candidate",
+        trust_level="T1",
+        content=screenplay_repair.screenplay_artifact_payload(script),
+    ))
+    mark_baseline_generated(
+        revision.id,
+        baseline_artifact_id=artifact["id"],
+        working_artifact_id=artifact["id"],
+    )
+
+    def reached_patch_loop(*_args, **_kwargs):
+        raise RuntimeError("entered narrative patch loop")
+
+    monkeypatch.setattr(
+        screenplay_repair,
+        "run_screenplay_qa",
+        reached_patch_loop,
+    )
+
+    with pytest.raises(RuntimeError, match="entered narrative patch loop"):
+        await screenplay_repair.run_screenplay_production(
+            episode_id="ep_p",
+            episode={
+                "id": "ep_p",
+                "project_id": "proj_p",
+                "episode_no": 1,
+                "target_duration_s": 50,
+            },
+            source_text="原文",
+            bible=Bible(
+                characters=[],
+                world=World(visual_style_canonical="测试画风"),
+            ),
+            resume=True,
+        )
+
+
+@pytest.mark.asyncio
 async def test_resume_replays_persisted_identity_before_first_qa(monkeypatch):
     from app.evidence import repository as evidence_repository
     from app.production import screenplay_repair
