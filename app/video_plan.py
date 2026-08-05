@@ -1101,16 +1101,24 @@ async def generate_episode_plan(
         and current.source_storyboard_revision_id == revision_id
         and current.capability_snapshot_id == snapshot.id
         and not force
-        and all(item.status != "stale" for item in current.shots)
         and all(
             item.input_revision_fingerprints.get("asset_revisions")
             == asset_fingerprints.get(item.shot_id)
             for item in current.shots
         )
     ):
+        candidate = current.model_copy(deep=True)
+        if candidate.status == "stale":
+            candidate.status = "valid"
+            for item in candidate.shots:
+                item.status = (
+                    "degraded"
+                    if item.degraded_to_mode is not None
+                    else "planned"
+                )
         try:
             validate_episode_plan(
-                current,
+                candidate,
                 list(rows),
                 snapshot,
                 release_manifest=release_manifest,
@@ -1122,7 +1130,20 @@ async def generate_episode_plan(
                 (current.episode_video_plan_id,),
             )
         else:
-            return current
+            if current.status == "stale":
+                db.execute(
+                    "UPDATE episode_video_generation_plans SET status='valid' "
+                    "WHERE id=? AND status='stale'",
+                    (current.episode_video_plan_id,),
+                )
+                for item in candidate.shots:
+                    db.execute(
+                        """UPDATE shot_video_generation_plans
+                              SET status=?,updated_at=? WHERE id=?""",
+                        (item.status, now(), item.shot_plan_id),
+                    )
+                db.commit()
+            return candidate
     if len(rows) == 1:
         only_row = rows[0]
         item = ShotVideoGenerationPlan(
@@ -1668,12 +1689,13 @@ def assert_video_provider_submission_authority(
             "shot_plan_id": shot_plan_id,
         })
     elif selected.shot_plan_id != shot_plan_id:
-        issues.append({
-            "code": "VIDEO_SUBMISSION_SHOT_PLAN_STALE",
-            "shot_id": shot_id,
-            "stored": shot_plan_id,
-            "current": selected.shot_plan_id,
-        })
+        if not active_plan_is_current(shot_plan_id, conn=db):
+            issues.append({
+                "code": "VIDEO_SUBMISSION_SHOT_PLAN_STALE",
+                "shot_id": shot_id,
+                "stored": shot_plan_id,
+                "current": selected.shot_plan_id,
+            })
 
     try:
         submitted_mode = VideoGenerationMode(actual_mode)

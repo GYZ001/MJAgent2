@@ -305,8 +305,14 @@ def test_missing_projection_with_durable_screenplay_pointer_cannot_use_legacy_ma
         current_storyboard_release_manifest("e", conn=conn)
 
 
-def test_local_replan_changes_only_target_contract_identity() -> None:
+def test_local_replan_changes_only_target_contract_identity(monkeypatch) -> None:
     conn = _conn()
+    monkeypatch.setattr(hiagent, "active_provider", lambda _kind: "provider")
+    monkeypatch.setattr(
+        hiagent,
+        "active_model",
+        lambda _kind, _provider=None: "model",
+    )
 
     replacement = create_local_replan_revision(
         "s2",
@@ -322,6 +328,14 @@ def test_local_replan_changes_only_target_contract_identity() -> None:
     assert "LOCAL_REPLAN_FOR_REDO" in target.reason_codes
     assert "local_replan_revision" in target.input_revision_fingerprints
     assert "local_replan_revision" not in unchanged.input_revision_fingerprints
+    selected, _snapshot = assert_video_provider_submission_authority(
+        shot_id="s1",
+        shot_plan_id="svp-1",
+        actual_mode=VideoGenerationMode.REFERENCE_IMAGE_MODE,
+        expected_capability_snapshot_id="cap-1",
+        conn=conn,
+    )
+    assert selected.shot_id == "s1"
 
 
 def test_reference_mode_paid_submission_rejects_current_shot_contract_drift(

@@ -1435,7 +1435,12 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         if incoming_transition == "硬切":
             incoming_transition = None
 
-    preflight_errors = preflight_seedance_gates(shot, prev=prev_shot, prompt_text=None)
+    preflight_errors = preflight_seedance_gates(
+        shot,
+        prev=prev_shot,
+        prompt_text=None,
+        screenplay=screenplay,
+    )
     if preflight_errors:
         raise CompileError("；".join(preflight_errors))
 
@@ -1472,7 +1477,12 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
             }
         else:
             preflight_repair = prompt_scrub
-    preflight_errors = preflight_seedance_gates(shot, prev=prev_shot, prompt_text=prompt_text)
+    preflight_errors = preflight_seedance_gates(
+        shot,
+        prev=prev_shot,
+        prompt_text=prompt_text,
+        screenplay=screenplay,
+    )
     if preflight_errors:
         raise CompileError("；".join(preflight_errors))
 
