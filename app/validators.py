@@ -1670,7 +1670,6 @@ def validate_dialogue_chains(
     total_turns = 0
     full_turns = _script_dialogue_turns(script.full_script_text or "")
     full_texts = [turn[2] for turn in full_turns]
-    source_fragments = source_dialogue_fragments(source_text)
     required_lines = [line for line in (required_dialogue_lines or []) if (line or "").strip()]
     for chain_index, chain in enumerate(chains):
         tag = f"dialogue_chains[{chain_index}]"
@@ -1780,30 +1779,36 @@ def validate_dialogue_chains(
             f"dialogue_chains 共 {total_turns} 个话轮；请至少保留 {MIN_KEY_LINES} 个"
             "推动主线且可追溯的完整话轮"
         )
-    if source_fragments:
-        opening = source_fragments[0]
-        first_chain_source = (
-            (chains[0].turns[0].source_text or "").strip()
-            if chains and chains[0].turns else ""
+    first_chain_source = (
+        (chains[0].turns[0].source_text or "").strip()
+        if chains and chains[0].turns else ""
+    )
+    first_chain_line = (
+        (chains[0].turns[0].line or "").strip()
+        if chains and chains[0].turns else ""
+    )
+    if (
+        first_chain_source
+        and first_chain_line
+        and not textmatch.spoken_digit_sequence_equivalent(
+            first_chain_source,
+            first_chain_line,
         )
-        first_chain_line = (
-            (chains[0].turns[0].line or "").strip()
-            if chains and chains[0].turns else ""
+        and _longest_run_ratio(
+            first_chain_line,
+            first_chain_source,
+        ) < KEY_LINE_PRESENT_RATIO
+        and _bigram_coverage(
+            first_chain_line,
+            first_chain_source,
+        ) < KEY_LINE_BIGRAM_COVERAGE
+    ):
+        errors.append(
+            "dialogue_chains[0].turns[0].source_text 与改编台词语义不匹配："
+            f"原文证据「{first_chain_source}」→台词「{first_chain_line}」；"
+            "D001 必须引用语义支持首条改编对白的原文话语，"
+            "不能强绑整章第一处引号、拟声或已舍弃场景中的无关话语"
         )
-        if _condense(opening) != _condense(first_chain_source):
-            errors.append(
-                f"原文开场第一句对白未作为 dialogue_chains[0].turns[0]：{opening}；"
-                "开场对白是第一条对白链锚点，不能在模型挑选 key_lines 前静默丢失"
-            )
-        elif (
-            not textmatch.spoken_digit_sequence_equivalent(opening, first_chain_line)
-            and _longest_run_ratio(opening, first_chain_line) < KEY_LINE_PRESENT_RATIO
-            and _bigram_coverage(opening, first_chain_line) < KEY_LINE_BIGRAM_COVERAGE
-        ):
-            errors.append(
-                f"开场对白锚点被改写到失去原意：原文「{opening}」→台词「{first_chain_line}」；"
-                "D001 只允许口语压缩，不得替换成另一句台词"
-            )
     if required_lines:
         chain_sources = [
             (turn.source_text or "").strip()

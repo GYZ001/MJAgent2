@@ -68,7 +68,8 @@ _SCENE_STORY_FUNCTION_CODES = {
 }
 _SCENE_NUMBER_RE = re.compile(r"scene_outline\s*第\s*(\d+)\s*场|/scene_blocks/SC(\d+)", re.I)
 _DIALOGUE_SOURCE_MISMATCH_RE = re.compile(
-    r"dialogue_chains\[(\d+)\]\.turns\[(\d+)\]\.source_text\s+未在本集原文中找到"
+    r"dialogue_chains\[(\d+)\]\.turns\[(\d+)\]\.source_text\s+"
+    r"(?:未在本集原文中找到|与改编台词语义不匹配)"
 )
 _SOURCE_SENTENCE_RE = re.compile(r"[^。！？!?\n]+[。！？!?]?")
 _SOURCE_EVIDENCE_STOP_CHARS = set(
@@ -591,11 +592,14 @@ def plan_screenplay_patch(
             chain, turn = turn_ref
             strategy = f"fix_dialogue_source_{chain.chain_id}_{turn_index}"
             if not _strategy_was_tried(tried, strategy):
-                evidence = _best_source_evidence_for_turn(
-                    script,
-                    chain_index=chain_index,
-                    turn_index=turn_index,
-                    source_text=source_text,
+                evidence = (
+                    _unique_source_dialogue(turn.line or "", source_text)
+                    or _best_source_evidence_for_turn(
+                        script,
+                        chain_index=chain_index,
+                        turn_index=turn_index,
+                        source_text=source_text,
+                    )
                 )
                 if evidence and evidence != (turn.source_text or "").strip():
                     return [PatchOperation(
@@ -3591,7 +3595,19 @@ def _normalize_dialogue_source_references(
     citation = str(normalized.get("source_text") or "").strip()
     line = str(normalized.get("line") or "").strip()
     speaker = str(normalized.get("speaker") or "").strip()
-    if not citation or citation in source_text or not line or not speaker:
+    if not citation or not line or not speaker:
+        return normalized
+
+    from app import textmatch
+
+    citation_supports_line = (
+        textmatch.spoken_digit_sequence_equivalent(citation, line)
+        or textmatch.longest_run_ratio(line, citation)
+        >= textmatch.KEY_LINE_PRESENT_RATIO
+        or textmatch.bigram_coverage(line, citation)
+        >= textmatch.KEY_LINE_BIGRAM_COVERAGE
+    )
+    if citation in source_text and citation_supports_line:
         return normalized
 
     source_dialogue = _unique_source_dialogue(line, source_text)

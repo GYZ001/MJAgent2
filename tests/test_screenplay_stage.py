@@ -929,7 +929,7 @@ def test_single_character_reply_with_placeholder_source_is_rejected() -> None:
     assert any("source_text 未在本集原文中找到" in error for error in errors), errors
 
 
-def test_dialogue_chain_rejects_missing_first_source_utterance() -> None:
+def test_dialogue_chain_allows_skipping_unadapted_earlier_source_utterance() -> None:
     script, source = _screenplay_with_source_dialogue_chain()
     script.dialogue_chains[0].turns = script.dialogue_chains[0].turns[1:]
     script.dialogue_chains[0].turns.append(KeyDialogueTurn(
@@ -944,10 +944,13 @@ def test_dialogue_chain_rejects_missing_first_source_utterance() -> None:
         source_text=source, require_dialogue_chains=True,
     )
 
-    assert any("原文开场第一句对白未作为 dialogue_chains[0].turns[0]" in error for error in errors), errors
+    assert not any(
+        "dialogue_chains[0].turns[0].source_text 与改编台词语义不匹配" in error
+        for error in errors
+    ), errors
 
 
-def test_dialogue_chain_rejects_first_anchor_replaced_with_unrelated_line() -> None:
+def test_dialogue_chain_rejects_first_adapted_turn_with_unrelated_source() -> None:
     script, source = _screenplay_with_source_dialogue_chain()
     script.dialogue_chains[0].turns[0].line = "今天天气不错。"
     script.full_script_text = script.full_script_text.replace(
@@ -959,7 +962,25 @@ def test_dialogue_chain_rejects_first_anchor_replaced_with_unrelated_line() -> N
         source_text=source, require_dialogue_chains=True,
     )
 
-    assert any("开场对白锚点被改写到失去原意" in error for error in errors), errors
+    assert any(
+        "dialogue_chains[0].turns[0].source_text 与改编台词语义不匹配" in error
+        for error in errors
+    ), errors
+
+
+def test_dialogue_chain_does_not_bind_quoted_sound_before_adapted_dialogue() -> None:
+    script, source = _screenplay_with_source_dialogue_chain()
+    source = f"门外传来“砰、砰”的敲击声。\n{source}"
+
+    errors = validate_screenplay(
+        script, _bible(), expected_beats=5, episode_no=1,
+        source_text=source, require_dialogue_chains=True,
+    )
+
+    assert not any(
+        "dialogue_chains[0].turns[0].source_text 与改编台词语义不匹配" in error
+        for error in errors
+    ), errors
 
 
 def test_dialogue_chain_accepts_digit_identifier_spoken_in_chinese() -> None:
@@ -1069,8 +1090,9 @@ def test_initial_screenplay_prompt_contains_d001_and_dialogue_chain_contract(mon
 
     asyncio.run(generate_screenplay(episode, source, _bible()))
 
-    assert "【原文开场对白锚点·硬门禁】" in prompts[0]
-    assert "D001：斗之力，三段！" in prompts[0]
+    assert "【首条改编对白来源锚点·硬门禁】" in prompts[0]
+    assert "D001 是本集实际采用的第一条对白" in prompts[0]
+    assert "D001：斗之力，三段！" not in prompts[0]
     assert "【用户多选的必保留台词·按原文位置绑定·逐字硬门禁】" in prompts[0]
     assert "R001：只有三段？" in prompts[0]
     assert "R002：结果无误。" in prompts[0]

@@ -42,7 +42,7 @@ _CONTRACTS: dict[str, StageContract] = {
             "source claims have evidence",
             "every key line is delivered by an explicit screenplay dialogue line",
             "key dialogue is preserved as an ordered context chain rather than isolated quotes",
-            "the first source utterance anchors an explicit dialogue chain before key lines are derived",
+            "the first adapted dialogue turn cites a semantically matching source utterance before key lines are derived",
             "repair iterations retain the complete source task and previous screenplay candidate",
             "source canon and adapted-story propositions have separate provenance",
             "narrative events form an acyclic state-effect graph",

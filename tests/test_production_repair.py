@@ -879,6 +879,44 @@ def test_patch_planner_recognizes_legacy_rederive_and_repairs_opening_anchor():
     assert ops[0].value == "斗之力，三段！"
 
 
+def test_patch_planner_repairs_semantically_unrelated_first_turn_source():
+    from app.production.screenplay_repair import (
+        _patch_strategy_key,
+        plan_screenplay_patch,
+    )
+
+    script = _minimal_script(dialogue_chains=[KeyDialogueChain(
+        chain_id="DC1",
+        topic="校长召见",
+        turns=[KeyDialogueTurn(
+            speaker="白洁",
+            line="校长，您找我？",
+            function="question",
+            source_text="砰、砰",
+        )],
+    )])
+    source = "门外传来“砰、砰”的敲击声。白洁问：“校长，您找我？”"
+    issue = structured_issue(
+        code="SOURCE_FIDELITY",
+        message=(
+            "dialogue_chains[0].turns[0].source_text 与改编台词语义不匹配："
+            "原文证据「砰、砰」→台词「校长，您找我？」"
+        ),
+        subject="screenplay",
+        path="/dialogue_chains",
+        rule_id="opening_anchor",
+        stage="screenplay",
+    )
+
+    ops = plan_screenplay_patch(issue, script, source_text=source)
+
+    assert len(ops) == 1
+    assert ops[0].target["chain_id"] == "DC1"
+    assert ops[0].target["turn_index"] == 0
+    assert ops[0].value == "校长，您找我？"
+    assert _patch_strategy_key(ops) == "fix_dialogue_source_DC1_0"
+
+
 def test_patch_planner_repairs_indexed_source_placeholder_with_exact_source() -> None:
     from app.production.screenplay_repair import _patch_strategy_key, plan_screenplay_patch
 

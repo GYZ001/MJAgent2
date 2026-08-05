@@ -1803,7 +1803,6 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
     episode_cliffhanger = (episode.get("cliffhanger") or "").strip()
     no_episode_hook = not episode_hook and not episode_cliffhanger
     source_dialogues = source_dialogue_fragments(source_text)
-    opening_dialogue_anchor = source_dialogues[0] if source_dialogues else ""
     required_dialogue_lines = [
         str(line).strip()
         for line in (episode.get("required_dialogue_lines") or [])
@@ -1839,12 +1838,14 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
         else "【用户多选的必保留台词】本次未额外勾选；仍须遵守开场对白锚点与主线对白链规则。"
     )
     opening_dialogue_block = (
-        "【原文开场对白锚点·硬门禁】\n"
-        f"- D001：{opening_dialogue_anchor}\n"
-        "D001 必须进入 dialogue_chains[0].turns[0].source_text，并在 adapted line/full_script_text 中落地。"
-        "即使说话人不需跨集定妆，只要其有原文依据且负责触发后续反应，也必须按完整因果链保留。"
-        if opening_dialogue_anchor
-        else "【原文开场对白锚点】本集原文未检测到显式对白。"
+        "【首条改编对白来源锚点·硬门禁】\n"
+        "- D001 是本集实际采用的第一条对白，不是整章最早出现的引号片段。\n"
+        "dialogue_chains[0].turns[0].source_text 必须逐字引用本集原文中语义支持该改编台词的"
+        "真实话语，line 只能做口语压缩，二者不得表达不同内容。"
+        "不得把拟声、环境声或已被改编方案舍弃场景中的无关话语强绑为 D001。"
+        "即使说话人不需跨集定妆，只要该话语被本集采用并负责触发后续反应，也必须按完整因果链保留。"
+        if source_dialogues
+        else "【首条改编对白来源锚点】本集原文未检测到显式对白，禁止凭空发明对白。"
     )
     screenplay_hook_rule = (
         "剧本开头按原文真实开场推进；本集 episode hook 为空，禁止为了格式发明额外开场钩子。"
