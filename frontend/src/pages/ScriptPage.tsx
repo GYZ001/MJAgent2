@@ -510,23 +510,6 @@ export default function ScriptPage() {
     } catch { /* run 已呈现结果 */ }
   }
 
-  const repairDraft = async () => {
-    if (!ep || !draft) return
-    screenplayTimer.start()
-    const result = await run(() => api.post(`/episodes/${ep.id}/screenplay/repair-draft`, {
-      screenplay: draft,
-      expected_version: baselineVersion,
-      idempotency_key: stableKey(`screenplay-repair-draft:${ep.id}`),
-    }), '工作草稿已进入独立修复，完成后会重新执行 QA')
-      .catch(() => screenplayTimer.clear())
-    if (!result) return
-    setQaFailure(null)
-    setDraft(null)
-    setDirty(false)
-    setBaselineVersion(null)
-    localStorage.removeItem(localDraftKey)
-  }
-
   const validateDraft = (value: EpisodeScreenplay | null) => {
     const sections: Record<EditorSection, string[]> = { spine: [], body: [], scenes: [], evidence: [] }
     if (!value) return sections
@@ -878,16 +861,13 @@ export default function ScriptPage() {
         )}
         {qaFailure && (
           <div className="editor-validation screenplay-qa-failure" role="alert">
-            <b>QA 未通过{qaFailure.score != null ? ` · ${qaFailure.score} 分` : ''}</b>
+            <b>结构或人物上下文校验未通过</b>
             {qaFailure.errors.slice(0, 6).map(item => <span key={item}>{item}</span>)}
-            <button className="btn primary" type="button" disabled={busy} onClick={() => void repairDraft()}>
-              进入独立修复并重新 QA
-            </button>
           </div>
         )}
         {screenplayNotice && (
           <OperationError
-            title={screenplayNotice.severity === 'error' ? '剧本生成未完成' : '剧本修复等待继续'}
+            title={screenplayNotice.severity === 'error' ? '剧本流程未完成' : '剧本流程等待继续'}
             message={screenplayNotice.message}
             guidance={screenplayNotice.severity === 'error'
               ? '已发布剧本和工作草稿会保留。请按顶部主操作重新生成。'

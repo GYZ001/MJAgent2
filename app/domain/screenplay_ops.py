@@ -1121,7 +1121,7 @@ async def _recorded_screenplay_task(
             get_conn().execute(
                 "UPDATE episodes SET screenplay_error=?, screenplay_updated_at=? WHERE id=?",
                 (
-                    f"局部修复已暂停，恢复点和工作副本已保留，可继续重试。{public}",
+                    f"剧本后续阶段已暂停，工作副本已保留，可继续流程。{public}",
                     now(),
                     episode_id,
                 ),

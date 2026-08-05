@@ -70,7 +70,7 @@ def test_resume_route_has_a_distinct_capability() -> None:
     assert registry.rest_bindings[
         "POST /api/episodes/{episode_id}/screenplay/resume"
     ] == "screenplay.resume"
-    assert registry.commands["screenplay.resume"].title == "继续剧本局部修复"
+    assert registry.commands["screenplay.resume"].title == "继续剧本流程"
 
 
 @pytest.mark.asyncio
@@ -200,6 +200,34 @@ def test_recovery_does_not_restart_intentionally_paused_repair(monkeypatch) -> N
         api,
         "_new_screenplay_recorder",
         lambda *_args, **_kwargs: pytest.fail("不应自动重启主动暂停的修复"),
+    )
+
+    assert api.recover_screenplay_tasks() == 0
+
+
+def test_recovery_does_not_restart_persisted_cancellation(monkeypatch) -> None:
+    conn = db.get_conn()
+    run_id = repository.create_run(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="cancelled",
+    )
+    conn.execute(
+        "UPDATE workflow_runs SET status='CANCELLED' WHERE id=?",
+        (run_id,),
+    )
+    conn.execute(
+        "UPDATE episodes SET screenplay_status='running', "
+        "screenplay_error='CANCELLING: 正在取消运行', active_screenplay_run_id=? "
+        "WHERE id='e1'",
+        (run_id,),
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        api,
+        "_new_screenplay_recorder",
+        lambda *_args, **_kwargs: pytest.fail("用户取消的任务不应在重启后恢复"),
     )
 
     assert api.recover_screenplay_tasks() == 0

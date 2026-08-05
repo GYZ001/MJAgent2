@@ -588,24 +588,34 @@ def resolve_current_screenplay_authority(
         issues = json.loads(qa_row["issues_json"] or "[]")
     except (TypeError, ValueError, json.JSONDecodeError):
         issues = None
+    score_only = (
+        qa_row["evaluation_role"] == "score_only"
+        and not bool(qa_row["runtime_blocking"])
+    )
+    legacy_runtime_gate = (
+        qa_row["evaluation_role"] == "runtime_gate"
+        and bool(qa_row["runtime_blocking"])
+        and qa_row["status"] == "passed"
+        and bool(qa_row["hard_gate_passed"])
+    )
     if (
         qa_row["artifact_id"] != artifact_id
         or qa_row["evaluator_version"] != SCREENPLAY_QA_PROFILE_VERSION
-        or qa_row["evaluation_role"] != "runtime_gate"
-        or not bool(qa_row["runtime_blocking"])
-        or qa_row["status"] != "passed"
-        or not bool(qa_row["hard_gate_passed"])
+        or not (score_only or legacy_runtime_gate)
         or not isinstance(issues, list)
-        or any(
-            isinstance(issue, dict)
-            and (
-                str(issue.get("severity") or "").lower() == "blocker"
-                or bool(issue.get("must_fix"))
+        or (
+            legacy_runtime_gate
+            and any(
+                isinstance(issue, dict)
+                and (
+                    str(issue.get("severity") or "").lower() == "blocker"
+                    or bool(issue.get("must_fix"))
+                )
+                for issue in (issues or [])
             )
-            for issue in (issues or [])
         )
     ):
-        raise ValueError("剧本生产 QA Evaluation 已漂移或不再通过")
+        raise ValueError("剧本质量评分 Evaluation 已漂移或版本不匹配")
     try:
         evidence = json.loads(qa_row["evidence_json"] or "{}")
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -613,21 +623,7 @@ def resolve_current_screenplay_authority(
     if evidence.get("authority_input_fingerprint") != input_fingerprint:
         raise ValueError("剧本 QA 与当前原文/Bible/改编约束指纹不一致")
 
-    records, source_text = _source_records(db, episode)
-    from app.narrative import validate_screenplay_narrative
-
-    errors = validate_screenplay_narrative(
-        screenplay,
-        require=require_narrative,
-        source_text=source_text,
-        expected_scope_id=episode_id,
-        authorized_source_chapters=screenplay_authorized_source_chapters(
-            episode_id,
-            conn=db,
-        ),
-    )
-    if errors:
-        raise ValueError("已发布剧本无法在当前原文上重验：" + "；".join(errors[:6]))
+    _records, source_text = _source_records(db, episode)
     return ResolvedScreenplayAuthority(
         episode_id=episode_id,
         screenplay=screenplay,
