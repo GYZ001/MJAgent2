@@ -66,6 +66,16 @@ export type StartPreview = {
   }
 }
 
+export function storyboardCharacterFilterOptions(shots: Shot[]): string[] {
+  const internalIdentity = /^(?:character|entity|speaker|voice)[-_]/i
+  return [...new Set(
+    shots
+      .flatMap(shot => [...(shot.characters ?? []), ...(shot.audio_cast ?? [])])
+      .map(value => value.trim())
+      .filter(value => value && !internalIdentity.test(value)),
+  )]
+}
+
 type ConfirmPreview = {
   preview_token?: string
   storyboard_artifact_id?: string | null
@@ -694,7 +704,7 @@ export default function BoardPage() {
   }, [registerNavigationGuard, selectedShot, shotEditDirty])
 
   const scenes = useMemo(() => [...new Set(shots.map(shot => shot.scene_name || shot.scene_setting).filter(Boolean))], [shots])
-  const characters = useMemo(() => [...new Set(shots.flatMap(shot => [...(shot.characters ?? []), ...(shot.audio_cast ?? [])]).filter(Boolean))], [shots])
+  const characters = useMemo(() => storyboardCharacterFilterOptions(shots), [shots])
 
   useEffect(() => {
     if (!selectedShot || selectedShot.id === selectedShotId) return

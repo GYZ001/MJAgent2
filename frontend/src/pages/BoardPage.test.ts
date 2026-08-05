@@ -5,6 +5,7 @@ import {
   isStoryboardProblemShot,
   storyboardGateIssueLabel,
   storyboardDeleteUsesFullClear,
+  storyboardCharacterFilterOptions,
   storyboardProgressCopy,
   storyboardSaveDisabledReason,
   storyboardShotCheckpointLabel,
@@ -79,6 +80,14 @@ describe('分镜台结构化 diff 与问题筛选', () => {
   it('质量优化建议不混入必须处理的问题镜', () => {
     const value = shot({ qa_warnings: ['画面动作含可精简的细节词'] })
     expect(isStoryboardProblemShot(value)).toBe(false)
+  })
+
+  it('角色筛选不暴露叙事内部身份 ID', () => {
+    const value = shot({
+      characters: ['孟浩'],
+      audio_cast: ['character-menghao', 'voice-narrator'],
+    })
+    expect(storyboardCharacterFilterOptions([value])).toEqual(['孟浩'])
   })
 
   it('删除全剧最后一镜时切换到整集清空流程', () => {
