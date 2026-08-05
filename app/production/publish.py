@@ -161,6 +161,7 @@ def publish_screenplay(
         "UPDATE episodes SET screenplay_json=?, screenplay_status='ready', screenplay_error=NULL, "
         "screenplay_updated_at=?, screenplay_artifact_id=?, "
         "published_screenplay_artifact_id=?, "
+        "active_screenplay_run_id=NULL, "
         "status='planned', script_error=NULL WHERE id=?",
         (script.model_dump_json(), now(), artifact_id, artifact_id, episode_id),
     )

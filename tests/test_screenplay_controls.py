@@ -15,6 +15,7 @@ from app.production.revision import (
     ensure_production_revision,
     mark_baseline_generated,
     screenplay_production_state,
+    set_published_artifact,
 )
 
 
@@ -62,6 +63,12 @@ def test_production_state_resumes_post_baseline_stages() -> None:
     assert [item["label"] for item in finalize["stages"]] == [
         "人物识别", "生成首版", "结构校验", "质量评分", "原子发布", "已完成",
     ]
+
+    set_published_artifact(revision.id, "artifact-working")
+    completed = screenplay_production_state("e1")
+    assert completed["operation"] == "complete"
+    assert completed["phase"] == "SUCCEEDED"
+    assert all(item["status"] == "completed" for item in completed["stages"])
 
 
 def test_resume_route_has_a_distinct_capability() -> None:
