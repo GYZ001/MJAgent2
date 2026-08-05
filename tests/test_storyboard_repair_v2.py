@@ -20,6 +20,7 @@ from app.harness.types import EvidenceArtifact
 from app.production.revision import ensure_production_revision
 from app.repair_router import route_issues
 from app.schemas import (
+    AudioTimelineItem,
     Bible,
     Character,
     Dialogue,
@@ -41,6 +42,7 @@ from app.storyboard_supervisor import (
     _apply_repair,
     _begin_repair_activation,
     _commit_repair_candidate,
+    _deterministic_ambient_audio_cast_candidate,
     _deterministic_dialogue_framing_candidate,
     _deterministic_missing_spoken_candidate,
     _merge_repair_candidate,
@@ -1345,6 +1347,26 @@ def test_deterministic_missing_spoken_candidate_uses_published_dialogue_clause()
     assert candidate.audio_timeline[0].type == "spoken_dialogue"
     assert candidate.audio_timeline[0].speaker_id == "老师"
     assert shot.dialogues == []
+
+
+def test_deterministic_ambient_audio_cast_candidate_removes_identity_claim() -> None:
+    shot = _shot(2, action="门外传来一阵敲击声。")
+    shot.audio_cast = ["未绑定的拟音标签"]
+    shot.audio_timeline = [AudioTimelineItem(
+        start_s=0.5,
+        end_s=2.0,
+        type="ambient_sound",
+        speaker_id=None,
+        text="咚咚",
+        lip_sync=False,
+    )]
+
+    candidate = _deterministic_ambient_audio_cast_candidate(shot)
+
+    assert candidate is not None
+    assert candidate.audio_cast == []
+    assert candidate.audio_timeline == shot.audio_timeline
+    assert shot.audio_cast == ["未绑定的拟音标签"]
 
 
 def test_deterministic_single_dialogue_marks_named_listener_offscreen() -> None:

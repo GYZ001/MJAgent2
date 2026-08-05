@@ -1486,7 +1486,25 @@ def normalize_screenplay_dialogue_chains(script: EpisodeScreenplay) -> EpisodeSc
                 continue
             normalized_turns.append(turn)
         chain.turns = normalized_turns
-    merged_chains = []
+    full_script_turns = _script_dialogue_turns(
+        script.full_script_text or ""
+    )
+
+    def chain_scene_nos(chain: KeyDialogueChain) -> set[int]:
+        identities = {
+            (
+                _condense(turn.speaker),
+                _condense(turn.line),
+            )
+            for turn in (chain.turns or [])
+        }
+        return {
+            scene_no
+            for scene_no, speaker, line in full_script_turns
+            if (_condense(speaker), _condense(line)) in identities
+        }
+
+    merged_chains: list[KeyDialogueChain] = []
     for chain in script.dialogue_chains:
         if merged_chains:
             previous = merged_chains[-1]
@@ -1504,10 +1522,15 @@ def normalize_screenplay_dialogue_chains(script: EpisodeScreenplay) -> EpisodeSc
                 str(chain.turns[0].function or "").strip()
                 if chain.turns else ""
             )
+            combined_scenes = {
+                *chain_scene_nos(previous),
+                *chain_scene_nos(chain),
+            }
             if (
                 previous_topic
                 and previous_topic == current_topic
                 and first_function == "response"
+                and len(combined_scenes) <= 1
                 and len(previous.turns) + len(chain.turns)
                 <= DIALOGUE_CHAIN_TURNS_HARD_MAX
             ):
@@ -1516,6 +1539,13 @@ def normalize_screenplay_dialogue_chains(script: EpisodeScreenplay) -> EpisodeSc
                     *chain.turns,
                 ]
                 continue
+            if (
+                previous_topic
+                and previous_topic == current_topic
+                and first_function == "response"
+                and len(combined_scenes) > 1
+            ):
+                chain.turns[0].function = "statement"
         merged_chains.append(chain)
     script.dialogue_chains = merged_chains
     flattened: list[str] = []

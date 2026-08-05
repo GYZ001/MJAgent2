@@ -778,6 +778,24 @@ def _deterministic_missing_spoken_candidate(
     return candidate
 
 
+def _deterministic_ambient_audio_cast_candidate(
+    shot: Shot,
+) -> Shot | None:
+    """Remove identity claims from a timeline that contains only ambient sound."""
+    from app.spoken_contract import effective_spoken_segments
+
+    if (
+        not shot.audio_cast
+        or effective_spoken_segments(shot)
+        or not shot.audio_timeline
+        or any(item.type != "ambient_sound" for item in shot.audio_timeline)
+    ):
+        return None
+    candidate = Shot.model_validate(shot.model_dump(mode="json"))
+    candidate.audio_cast = []
+    return candidate
+
+
 def _recover_truncated_outline_from_approved_artifact(
     conn,
     ep,
@@ -3513,8 +3531,14 @@ def _apply_repair(
                 repair_screenplay,
             )
             deterministic_kind = "published_dialogue_clause"
+        if deterministic is None and target is not None:
+            deterministic = _deterministic_ambient_audio_cast_candidate(target)
+            deterministic_kind = "ambient_sound_identity_cleanup"
         if deterministic is not None:
-            if deterministic_kind == "published_dialogue_clause" and candidate_outline is not None:
+            if deterministic_kind in {
+                "published_dialogue_clause",
+                "ambient_sound_identity_cleanup",
+            } and candidate_outline is not None:
                 brief = next((
                     item for item in candidate_outline.shots
                     if int(item.shot_no) == window_start
