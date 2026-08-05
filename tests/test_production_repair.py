@@ -917,6 +917,54 @@ def test_patch_planner_repairs_semantically_unrelated_first_turn_source():
     assert _patch_strategy_key(ops) == "fix_dialogue_source_DC1_0"
 
 
+def test_patch_planner_delivers_missing_spine_with_one_action_node():
+    from app.production.patch import apply_patch_operation_to_document
+    from app.production.screenplay_repair import (
+        _patch_strategy_key,
+        plan_screenplay_patch,
+    )
+    from app.validators import validate_screenplay_spine_delivery
+
+    script = _minimal_script()
+    issue = structured_issue(
+        code="SPINE_MISSING",
+        message=(
+            "full_script_text 未交付 1 条 must_keep 主线节拍："
+            "S01/甲:应战；必须在对应场次的动作段或角色对白中完整演出"
+        ),
+        subject="screenplay",
+        path="/nodes/S01",
+        related_node_ids=["S01"],
+        rule_id="spine_delivery",
+        stage="screenplay",
+    )
+
+    ops = plan_screenplay_patch(issue, script)
+
+    assert len(ops) == 1
+    assert ops[0].op == "create_node"
+    assert ops[0].target["kind"] == "action_block"
+    assert ops[0].target["scene_id"] == "SC01"
+    assert ops[0].value == {
+        "action_id": "AC-SPINE-S01",
+        "text": "甲应战。",
+    }
+    assert _patch_strategy_key(ops) == "deliver_spine_S01"
+
+    patched, touched = apply_patch_operation_to_document(
+        screenplay_to_document(script),
+        ops[0],
+    )
+    projected = document_to_screenplay(patched)
+
+    assert touched == ["AC-SPINE-S01", "SC01"]
+    assert "甲应战。" in projected.full_script_text
+    assert validate_screenplay_spine_delivery(
+        projected,
+        action_text=projected.full_script_text,
+    ) == []
+
+
 def test_patch_planner_repairs_indexed_source_placeholder_with_exact_source() -> None:
     from app.production.screenplay_repair import _patch_strategy_key, plan_screenplay_patch
 

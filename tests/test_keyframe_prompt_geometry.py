@@ -82,6 +82,7 @@ def test_seeded_keyframe_omits_redundant_textual_character_appearance() -> None:
     shot = _contact_shot(
         characters=["萧炎"],
         characters_visible=["萧炎"],
+        last_frame_desc="萧炎右掌贴住石碑，萧薰儿留在画外。",
     )
 
     unseeded = video_modes.reference_generation_prompt(
@@ -103,7 +104,10 @@ def test_seeded_keyframe_omits_redundant_textual_character_appearance() -> None:
     assert marker not in seeded
     assert style_marker not in seeded
     assert "SEEDED KEYFRAME CONTRACT" in seeded
-    assert "Visible named identities, each exactly once: 萧炎" in seeded
+    assert "萧炎" not in seeded
+    assert "萧薰儿" not in seeded
+    assert "Visible named identities, each exactly once: subject 1" in seeded
+    assert "subject 2留在画外" in seeded
     assert "Reference images are authoritative for identity, outfit" in seeded
     assert "MULTI-KEYFRAME IDENTITY LOCK" not in seeded
 
@@ -810,7 +814,7 @@ def test_provider_boundary_keeps_contract_seeds_and_unique_history(monkeypatch, 
     assert first.path and second.path
     assert "SIDE CAMERA REQUIRED" in prompts[0]
     assert "Reference images lock identity, outfit, style, and environment only" in prompts[0]
-    assert "input image 1 = character '萧炎', profile" in prompts[0]
+    assert "input image 1 = character 'subject 1', profile" in prompts[0]
 
 
 def test_missing_geometry_diagnostics_are_unverified(monkeypatch) -> None:

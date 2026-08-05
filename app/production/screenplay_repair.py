@@ -8,6 +8,7 @@ import re
 from difflib import SequenceMatcher
 from typing import Any
 
+from app import textmatch
 from app.db import get_conn, get_setting, now
 from app.evidence import repository as evidence_repository
 from app.harness.types import Evaluation, EvidenceArtifact, Issue
@@ -50,7 +51,7 @@ from app.renderability import DIALOGUE_CHAIN_TURNS_HARD_MAX, OVERDETAIL_TERMS
 MAX_REPAIR_ACTIVATION_PATCHES = 12
 MAX_REPAIR_ACTIVATION_PASSES = 32
 MAX_STRATEGY_ATTEMPTS_PER_ISSUE = 5
-SCREENPLAY_REPAIR_PLANNER_VERSION = "screenplay-repair-13"
+SCREENPLAY_REPAIR_PLANNER_VERSION = "screenplay-repair-14"
 NON_WAIVABLE_SCREENPLAY_ISSUE_CODES = frozenset({
     "CHARACTER_IDENTITY_UNRESOLVED",
 })
@@ -153,6 +154,11 @@ def _patch_strategy_key(ops: list[PatchOperation]) -> str:
         )
     if op.op == "create_node" and kind == "dialogue_turn":
         return "insert_trigger"
+    if op.op == "create_node" and kind == "action_block":
+        return str(
+            (op.target or {}).get("strategy")
+            or f"create_action_{(op.target or {}).get('id') or 'unknown'}"
+        )
     locator = op.path or str((op.target or {}).get("id") or "")
     return f"{op.op}:{locator}" if locator else op.op
 
@@ -162,6 +168,51 @@ def _strategy_attempt_count(entries: list[str]) -> int:
         1 for entry in entries
         if entry and not entry.startswith(("fail:", "exhausted"))
     )
+
+
+def _best_scene_for_spine_beat(
+    script: EpisodeScreenplay,
+    *,
+    beat_index: int,
+    who: str,
+    does: str,
+) -> str:
+    """Place one authoritative spine action in the closest existing scene."""
+    scenes = list(script.scene_outline or [])
+    if not scenes:
+        return ""
+    beat_text = f"{who}{does}"
+    ranked: list[tuple[float, int, int, str]] = []
+    for index, scene in enumerate(scenes):
+        scene_text = " ".join([
+            scene.story_function or "",
+            scene.summary or "",
+            scene.conflict or "",
+            scene.turn or "",
+            scene.source_basis or "",
+        ])
+        semantic_score = max(
+            textmatch.longest_run_ratio(beat_text, scene_text),
+            textmatch.bigram_coverage(beat_text, scene_text),
+        )
+        actor_score = int(
+            bool(who)
+            and any(
+                who == character
+                or who in character
+                or character in who
+                for character in (scene.characters or [])
+            )
+        )
+        ordinal_distance = abs(index - min(beat_index, len(scenes) - 1))
+        ranked.append((
+            semantic_score,
+            actor_score,
+            -ordinal_distance,
+            f"SC{int(scene.scene_no):02d}",
+        ))
+    ranked.sort(reverse=True)
+    return ranked[0][3]
 
 
 def run_screenplay_qa(
@@ -374,6 +425,53 @@ def plan_screenplay_patch(
     related = list((issue.evidence or {}).get("related_node_ids") or [])
 
     ops: list[PatchOperation] = []
+
+    if code == "SPINE_MISSING" and script.plot_spine is not None:
+        referenced_ids = {
+            str(value).strip().upper()
+            for value in related
+            if re.fullmatch(r"S\d+", str(value).strip(), re.I)
+        }
+        referenced_ids.update(
+            match.upper()
+            for match in re.findall(r"\bS\d+\b", issue.message or "", re.I)
+        )
+        for beat_index, beat in enumerate(script.plot_spine.spine_beats or []):
+            beat_id = str(beat.beat_id or "").strip().upper()
+            if (
+                not beat.must_keep
+                or (referenced_ids and beat_id not in referenced_ids)
+            ):
+                continue
+            strategy = f"deliver_spine_{beat_id}"
+            if _strategy_was_tried(tried, strategy):
+                continue
+            scene_id = _best_scene_for_spine_beat(
+                script,
+                beat_index=beat_index,
+                who=(beat.who or "").strip(),
+                does=(beat.does or "").strip(),
+            )
+            if not scene_id:
+                continue
+            who = (beat.who or "").strip()
+            does = (beat.does or "").strip()
+            action_text = f"{who}{does}".strip()
+            if not action_text:
+                continue
+            return [PatchOperation(
+                op="create_node",
+                target={
+                    "kind": "action_block",
+                    "id": f"AC-SPINE-{beat_id}",
+                    "scene_id": scene_id,
+                    "strategy": strategy,
+                },
+                value={
+                    "action_id": f"AC-SPINE-{beat_id}",
+                    "text": action_text.rstrip("。") + "。",
+                },
+            )]
 
     staging_match = re.search(
         r"\]\s*([^/\s]+)/([^\s]+)\s+在\s+([^\s]+)\s+->\s+([^\s]+)"

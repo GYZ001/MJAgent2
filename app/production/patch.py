@@ -486,6 +486,37 @@ def _create_node(doc: ScreenplayDocument, op: PatchOperation) -> tuple[Screenpla
                 })
                 return ScreenplayDocument.model_validate(data), [turn_id, scene_id]
         raise KeyError(f"create dialogue_turn: scene {scene_id} not found")
+    if kind in {"action_block", "scene_action_block"}:
+        scene_id = str(op.target.get("scene_id") or "")
+        action_id = str(
+            value.get("action_id")
+            or op.target.get("id")
+            or ""
+        ).strip()
+        text = str(value.get("text") or "").strip()
+        if not action_id or not text:
+            raise KeyError("create action_block requires stable action_id and text")
+        if any(
+            str(action.get("action_id") or "") == action_id
+            for block in data.get("scene_blocks") or []
+            for action in block.get("action_blocks") or []
+        ):
+            raise KeyError(f"action_block id already exists: {action_id}")
+        for block in data.get("scene_blocks") or []:
+            if str(block.get("scene_id") or "") == scene_id:
+                actions = block.setdefault("action_blocks", [])
+                node = {"action_id": action_id, "text": text}
+                insert_at = op.target.get("to_index")
+                if insert_at is None:
+                    actions.append(node)
+                else:
+                    index = max(0, min(len(actions), int(insert_at)))
+                    actions.insert(index, node)
+                return ScreenplayDocument.model_validate(data), [
+                    action_id,
+                    scene_id,
+                ]
+        raise KeyError(f"create action_block: scene {scene_id} not found")
     raise FullRegenDenied(f"不支持 create_node kind={kind}")
 
 

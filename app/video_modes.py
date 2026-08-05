@@ -1296,9 +1296,32 @@ def reference_generation_prompt(
     identity_seeded: bool = False,
 ) -> str:
     anchors = _keyframe_character_anchors(shot, bible, screenplay=screenplay)
+    provider_names = list(dict.fromkeys([
+        *anchors,
+        *[
+            str(character.name).strip()
+            for character in bible.characters
+            if str(character.name).strip()
+        ],
+    ]))
+    provider_aliases = (
+        {
+            name: f"subject {position}"
+            for position, name in enumerate(provider_names, start=1)
+        }
+        if identity_seeded else {}
+    )
+
+    def provider_text(value: str) -> str:
+        normalized = str(value or "")
+        for name in sorted(provider_aliases, key=len, reverse=True):
+            normalized = normalized.replace(name, provider_aliases[name])
+        return normalized
+
     anchor_text = "; ".join(
         (
-            f"{name}: identity, face, body build, and outfit are locked by "
+            f"{provider_aliases.get(name, name)}: identity, face, body build, "
+            "and outfit are locked by "
             "the provided reference images"
         )
         if identity_seeded else f"{name}: {appearance}"
@@ -1307,10 +1330,12 @@ def reference_generation_prompt(
     # content_override：LLM 按剧本写的内容提示词。它只能补充美术细节，不能覆盖下方
     # 确定性构图合同。最终合同在截断后追加，避免第二人物/接触点被截掉。
     if content_override:
-        body = content_override.strip()[:_KEYFRAME_LLM_PROMPT_MAX_CHARS]
+        body = provider_text(
+            content_override.strip()[:_KEYFRAME_LLM_PROMPT_MAX_CHARS]
+        )
     else:
         contract = _keyframe_contract(shot, bible, screenplay=screenplay)
-        body = (
+        body = provider_text(
             f"Create one clean 9:16 anime-drama reference image for Seedance. "
             f"Reference type: {ref_type}. Shot {shot.shot_no}. Scene: {shot.scene_setting}. "
             f"Single narrative keyframe target: {contract['target_keyframe_desc']}."
@@ -1322,13 +1347,16 @@ def reference_generation_prompt(
             or shot.last_frame_desc
             or shot.action_desc
         ).strip()
+        target = provider_text(target)
         camera_angle = str(contract.get("camera_angle") or "eye-level").strip()
         visible = [
-            str(name).strip()
+            provider_aliases.get(str(name).strip(), str(name).strip())
             for name in (contract.get("visible_characters") or [])
             if str(name).strip()
         ]
-        scene_canonical = str(contract.get("scene_canonical") or "").strip()
+        scene_canonical = provider_text(
+            str(contract.get("scene_canonical") or "").strip()
+        )
         scene_landmarks = [
             str(item).strip()
             for item in (contract.get("scene_landmarks") or [])
@@ -1337,6 +1365,7 @@ def reference_generation_prompt(
         dialogue_focus = str(
             contract.get("dialogue_focus_subject") or ""
         ).strip()
+        dialogue_focus = provider_aliases.get(dialogue_focus, dialogue_focus)
         compact_contract = [
             body,
             "SEEDED KEYFRAME CONTRACT:",
@@ -1643,7 +1672,27 @@ async def _generate_one_reference(*, project_id: str, episode_no: int, shot: Sho
     if seed_inputs:
         prompt += _SEED_USAGE_NOTE
     if extra_instruction:
-        prompt += " " + extra_instruction.strip()
+        instruction = extra_instruction.strip()
+        if seed_inputs:
+            seed_names = list(dict.fromkeys([
+                *_keyframe_character_anchors(
+                    shot,
+                    bible,
+                    screenplay=screenplay,
+                ),
+                *[
+                    str(character.name).strip()
+                    for character in bible.characters
+                    if str(character.name).strip()
+                ],
+            ]))
+            aliases = {
+                name: f"subject {position}"
+                for position, name in enumerate(seed_names, start=1)
+            }
+            for name in sorted(aliases, key=len, reverse=True):
+                instruction = instruction.replace(name, aliases[name])
+        prompt += " " + instruction
     # 每次生成使用独立文件名：合同升级/并发重抽不得覆盖历史版本已引用的字节。
     base_dest = reference_image_path(project_id, episode_no, shot.shot_no, ref_type, index)
     artifact_token = _safe_ref_name(new_id("img"))
