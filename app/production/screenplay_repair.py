@@ -1116,6 +1116,66 @@ def plan_screenplay_patch(
                                 ))
                             if operations:
                                 return operations
+                if uncovered_fields == {"affective_state"}:
+                    intent = next(
+                        (
+                            item
+                            for item in plan.experience_intents
+                            if any(
+                                path.audience_path_id == path_id
+                                for path in item.audience_paths
+                            )
+                        ),
+                        None,
+                    )
+                    deadline_event_id = (
+                        state_out.anchor.id
+                        if state_out.anchor.type == "event"
+                        else (
+                            intent.anchor_event_ids[-1]
+                            if intent is not None and intent.anchor_event_ids
+                            else ""
+                        )
+                    )
+                    delta_id = f"XD-{path_id}-affective"
+                    existing_delta_ids = {
+                        delta.target_delta_id
+                        for path in (
+                            intent.audience_paths if intent is not None else []
+                        )
+                        for delta in path.target_deltas
+                    }
+                    strategy = f"cover_{path_id}_affective_state"
+                    if (
+                        intent is not None
+                        and deadline_event_id
+                        and delta_id not in existing_delta_ids
+                        and not _strategy_was_tried(tried, strategy)
+                    ):
+                        return [PatchOperation(
+                            op="create_node",
+                            target={
+                                "kind": "narrative_node",
+                                "collection": "experience_intents",
+                                "id": delta_id,
+                                "parent_id": path_id,
+                                "parent_field": "target_deltas",
+                                "strategy": strategy,
+                            },
+                            value={
+                                "target_delta_id": delta_id,
+                                "dimension": "affective",
+                                "proposition_ids": [],
+                                "description": (
+                                    f"{path_id} 的观众情绪由入场状态"
+                                    "变化到目标出场状态"
+                                ),
+                                "from_state": dict(state_in.affective_state),
+                                "to_state": dict(state_out.affective_state),
+                                "required_processing_s": 0.0,
+                                "deadline_event_id": deadline_event_id,
+                            },
+                        )]
 
     recall_task_match = re.search(
         r"\]\s*([^/\s]+)/([^\s]+)\s+在使用前已遗忘\s+\[([^\]]+)\]",

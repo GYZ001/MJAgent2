@@ -39,7 +39,7 @@ REFERENCE_IMAGE_TYPES = {
 
 # 关键帧提示词是分镜级可复用资产的一部分。升级该版本时，未经人工
 # 编辑的旧关键帧不得继续污染新视频版本。
-KEYFRAME_PROMPT_CONTRACT_VERSION = "narrative_action_geometry_v12"
+KEYFRAME_PROMPT_CONTRACT_VERSION = "narrative_action_geometry_v13"
 KEYFRAME_STRUCTURAL_FALLBACK_MODE = "omit_structurally_invalid_keyframe_slots_v1"
 _KEYFRAME_LLM_PROMPT_MAX_CHARS = 1200
 _DEFAULT_KEYFRAME_CANDIDATE_COUNT = 3
@@ -958,6 +958,12 @@ def _shot_for_keyframe_beat(shot: Shot, beat: dict[str, Any] | None) -> Shot:
         "state_in": target,
         "state_out": target,
     }
+    phase = str(beat.get("phase") or "").strip()
+    if phase:
+        update["risk_tags"] = _dedupe_str([
+            *(shot.risk_tags or []),
+            f"timeline_keyframe_phase:{phase}",
+        ])
     height_evidence = explicit_height_difference_evidence(shot)
     if height_evidence:
         update["spatial_anchor"] = "；".join(
@@ -989,7 +995,10 @@ def _shot_for_keyframe_beat(shot: Shot, beat: dict[str, Any] | None) -> Shot:
     # 侧面轴线。不能让起势帧因“尚未接触”又回到正面，否则九图会互相冲突。
     if has_contact_action(shot):
         update["camera_angle"] = "侧面视角"
-        update["risk_tags"] = _dedupe_str([*(shot.risk_tags or []), "timeline_contact_side_axis"])
+        update["risk_tags"] = _dedupe_str([
+            *(update.get("risk_tags") or shot.risk_tags or []),
+            "timeline_contact_side_axis",
+        ])
     return shot.model_copy(deep=True, update=update)
 
 
@@ -1285,6 +1294,92 @@ def reference_gallery_matches_keyframe_contract(
     return True
 
 
+def _seeded_structured_endpoint(
+    shot: Shot,
+    contract: dict[str, object],
+    provider_aliases: dict[str, str],
+) -> str:
+    """Compile a seeded endpoint from typed state instead of free narrative prose."""
+
+    phase = next(
+        (
+            str(tag).split(":", 1)[1]
+            for tag in (shot.risk_tags or [])
+            if str(tag).startswith("timeline_keyframe_phase:")
+        ),
+        "",
+    )
+    if phase and phase not in {"decisive", "closing"}:
+        return ""
+    if not phase and str(contract.get("target_source") or "") not in {
+        "last_frame_desc",
+        "state_out",
+    }:
+        return ""
+
+    def provider_text(value: object) -> str:
+        normalized = str(value or "").strip()
+        for name in sorted(provider_aliases, key=len, reverse=True):
+            normalized = normalized.replace(name, provider_aliases[name])
+        return normalized
+
+    state = shot.continuity_state_out
+    character_states = getattr(state, "characters", {}) or {}
+    visible = [
+        str(name).strip()
+        for name in (contract.get("visible_characters") or [])
+        if str(name).strip()
+    ]
+    character_parts: list[str] = []
+    for name in visible:
+        item = character_states.get(name)
+        if item is None:
+            continue
+        details = [
+            f"{label}={provider_text(getattr(item, field, ''))}"
+            for label, field in (
+                ("pose", "pose"),
+                ("facing", "facing"),
+                ("left hand", "left_hand"),
+                ("right hand", "right_hand"),
+            )
+            if provider_text(getattr(item, field, ""))
+        ]
+        if details:
+            character_parts.append(
+                f"{provider_aliases.get(name, name)} endpoint: " + "; ".join(details)
+            )
+    if visible and not character_parts:
+        return ""
+
+    prop_parts: list[str] = []
+    for item in (getattr(state, "props", {}) or {}).values():
+        if not bool(getattr(item, "required", False)) and (
+            str(getattr(item, "visibility", "") or "") != "required"
+        ):
+            continue
+        details = [
+            f"{label}={provider_text(getattr(item, field, ''))}"
+            for label, field in (
+                ("name", "canonical_name"),
+                ("location", "location"),
+                ("state", "form"),
+            )
+            if provider_text(getattr(item, field, ""))
+        ]
+        if details:
+            prop_parts.append("required prop: " + "; ".join(details))
+
+    parts = [*character_parts, *prop_parts]
+    if not parts:
+        return ""
+    return (
+        "Literal endpoint geometry for the scripted practical action: "
+        + ". ".join(parts)
+        + ". Show only these visible states and do not infer unlisted interaction."
+    )
+
+
 def reference_generation_prompt(
     shot: Shot,
     bible: Bible,
@@ -1342,12 +1437,15 @@ def reference_generation_prompt(
         )
     if identity_seeded and ref_type == "plot_key_frame":
         contract = _keyframe_contract(shot, bible, screenplay=screenplay)
-        target = str(
+        target = _seeded_structured_endpoint(
+            shot,
+            contract,
+            provider_aliases,
+        ) or provider_text(str(
             contract.get("target_keyframe_desc")
             or shot.last_frame_desc
             or shot.action_desc
-        ).strip()
-        target = provider_text(target)
+        ).strip())
         camera_angle = str(contract.get("camera_angle") or "eye-level").strip()
         visible = [
             provider_aliases.get(str(name).strip(), str(name).strip())
@@ -1367,7 +1465,7 @@ def reference_generation_prompt(
         ).strip()
         dialogue_focus = provider_aliases.get(dialogue_focus, dialogue_focus)
         compact_contract = [
-            body,
+            "Create one clean 9:16 portrait narrative keyframe.",
             "SEEDED KEYFRAME CONTRACT:",
             f"Freeze exactly one final instant: {target}.",
             f"Composition: {shot.shot_size}; camera: {camera_angle}; "

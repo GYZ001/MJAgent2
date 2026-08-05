@@ -1484,6 +1484,94 @@ def test_unassigned_audience_state_fields_align_to_prior_contract():
     )
 
 
+def test_unassigned_affective_state_creates_nested_target_delta():
+    from app.narrative import validate_screenplay_narrative
+    from app.production.patch import apply_patch_operation_to_document
+    from app.production.screenplay_repair import (
+        _patch_strategy_key,
+        plan_screenplay_patch,
+    )
+
+    script = _minimal_script(
+        narrative_plan=NarrativeContinuityPlan.model_validate({
+            "scope_id": "ep_p",
+            "events": [
+                {"event_id": "E-1"},
+                {"event_id": "E-2"},
+            ],
+            "audience_priors": [{
+                "audience_prior_id": "AP-1",
+                "scope_id": "ep_p",
+                "audience_description": "首次观看",
+            }],
+            "audience_states": [
+                {
+                    "audience_state_id": "AS-IN",
+                    "audience_prior_id": "AP-1",
+                    "anchor": {"type": "event", "id": "E-1"},
+                    "affective_state": {"tension": 0.2},
+                },
+                {
+                    "audience_state_id": "AS-OUT",
+                    "audience_prior_id": "AP-1",
+                    "anchor": {"type": "event", "id": "E-2"},
+                    "affective_state": {"tension": 0.9},
+                },
+            ],
+            "experience_intents": [{
+                "experience_intent_id": "XI-1",
+                "scope_id": "ep_p",
+                "anchor_event_ids": ["E-2"],
+                "director_objective": "提高紧张感",
+                "audience_paths": [{
+                    "audience_path_id": "XP-AFFECT",
+                    "audience_prior_id": "AP-1",
+                    "audience_state_in_id": "AS-IN",
+                    "audience_state_out_target_id": "AS-OUT",
+                }],
+            }],
+        }),
+    )
+    issue = structured_issue(
+        code="AUDIENCE_TARGET_STATE_DIFF_UNASSIGNED",
+        message=(
+            "[AUDIENCE_TARGET_STATE_DIFF_UNASSIGNED] XP-AFFECT "
+            "入/出状态的结构变化没有 target_delta 负责：['affective_state']"
+        ),
+        subject="screenplay",
+        stage="screenplay",
+    )
+
+    operations = plan_screenplay_patch(issue, script)
+
+    assert len(operations) == 1
+    assert operations[0].op == "create_node"
+    assert operations[0].target["parent_id"] == "XP-AFFECT"
+    assert operations[0].target["parent_field"] == "target_deltas"
+    assert operations[0].value["dimension"] == "affective"
+    assert operations[0].value["from_state"] == {"tension": 0.2}
+    assert operations[0].value["to_state"] == {"tension": 0.9}
+    assert _patch_strategy_key(operations) == (
+        "create_node:XD-XP-AFFECT-affective:node"
+    )
+
+    patched, _touched = apply_patch_operation_to_document(
+        screenplay_to_document(script),
+        operations[0],
+    )
+    projected = document_to_screenplay(patched)
+    validation_errors = validate_screenplay_narrative(
+        projected,
+        require=True,
+        expected_scope_id="ep_p",
+    )
+
+    assert not any(
+        "AUDIENCE_TARGET_STATE_DIFF_UNASSIGNED] XP-AFFECT" in error
+        for error in validation_errors
+    )
+
+
 def test_full_regen_denied_is_a_policy_conflict_not_a_media_error():
     assert errors.classify(FullRegenDenied("denied")) == (
         "conflict",

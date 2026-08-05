@@ -112,6 +112,87 @@ def test_seeded_keyframe_omits_redundant_textual_character_appearance() -> None:
     assert "MULTI-KEYFRAME IDENTITY LOCK" not in seeded
 
 
+def test_seeded_terminal_keyframe_compiles_typed_endpoint_without_free_prose() -> None:
+    shot = _contact_shot(
+        characters=["萧炎", "萧薰儿"],
+        characters_visible=["萧炎", "萧薰儿"],
+        last_frame_desc=(
+            "萧薰儿站到梯子顶端，上半身探向壁橱；"
+            "萧炎仍在下方扶住梯子。"
+        ),
+        continuity_state_out={
+            "characters": {
+                "萧炎": {
+                    "pose": "站在梯子旁",
+                    "facing": "朝向梯子",
+                    "left_hand": "扶住梯子左侧",
+                    "right_hand": "扶住梯子右侧",
+                },
+                "萧薰儿": {
+                    "pose": "站在梯子上层踏板",
+                    "facing": "朝向壁橱",
+                    "left_hand": "扶在壁橱边缘",
+                    "right_hand": "在壁橱内寻找物品",
+                },
+            },
+            "props": {
+                "ladder": {
+                    "canonical_name": "人字梯",
+                    "location": "壁橱下方",
+                    "form": "展开架稳",
+                    "visibility": "required",
+                    "required": True,
+                },
+            },
+        },
+    )
+
+    prompt = video_modes.reference_generation_prompt(
+        shot,
+        _bible(),
+        "plot_key_frame",
+        1,
+        content_override="FREEFORM_PROVIDER_DUPLICATE_MARKER",
+        identity_seeded=True,
+    )
+
+    assert "FREEFORM_PROVIDER_DUPLICATE_MARKER" not in prompt
+    assert "上半身探向" not in prompt
+    assert "Literal endpoint geometry" in prompt
+    assert "subject 1 endpoint:" in prompt
+    assert "subject 2 endpoint:" in prompt
+    assert "right hand=在壁橱内寻找物品" in prompt
+    assert "required prop: name=人字梯; location=壁橱下方; state=展开架稳" in prompt
+    assert prompt.count("Freeze exactly one final instant:") == 1
+
+
+def test_seeded_opening_beat_does_not_reuse_structured_closing_state() -> None:
+    shot = _contact_shot(
+        first_frame_desc="萧炎站在石碑前，右手尚未抬起。",
+        continuity_state_out={
+            "characters": {
+                "萧炎": {
+                    "pose": "STRUCTURED_CLOSING_MARKER",
+                },
+            },
+        },
+    )
+    opening = video_modes.narrative_keyframe_beats(shot, 2)[0]
+    beat_shot = video_modes._shot_for_keyframe_beat(shot, opening)
+
+    prompt = video_modes.reference_generation_prompt(
+        beat_shot,
+        _bible(),
+        "plot_key_frame",
+        1,
+        identity_seeded=True,
+    )
+
+    assert "STRUCTURED_CLOSING_MARKER" not in prompt
+    assert "right hand has not yet been raised" not in prompt
+    assert "右手尚未抬起" in prompt
+
+
 def test_keyframe_contract_fingerprint_changes_with_dialogue_emotion() -> None:
     winning = _contact_shot(dialogues=[{
         "speaker": "萧炎", "line": "我赢了", "emotion": "兴奋",
