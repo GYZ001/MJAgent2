@@ -1,6 +1,6 @@
 import { useDeferredValue, useEffect, useId, useRef, useState } from 'react'
 import { api, numToCn, type Project } from '../api'
-import { useNav, usePoll } from '../App'
+import { shouldRetryPollError, useNav, usePoll } from '../App'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 import SearchField from '../components/SearchField'
 import PrepSubnav from '../components/PrepSubnav'
@@ -90,10 +90,14 @@ export default function EpisodesPage() {
   useEffect(() => {
     if (!projectId) return
     let cancelled = false
+    let terminal = false
     const load = () => {
+      if (terminal) return
       api.get(`/projects/${projectId}/storyboard-metrics`).then((m: any) => {
         if (!cancelled) setSbMetrics(m)
-      }).catch(() => { /* ignore */ })
+      }).catch((error: unknown) => {
+        if (!shouldRetryPollError(error)) terminal = true
+      })
     }
     load()
     const id = window.setInterval(load, scriptingCount > 0 ? 4000 : 15000)

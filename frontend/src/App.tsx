@@ -1105,6 +1105,10 @@ function WorkspaceEmpty({ label, view }: { label: string; view: View }) {
 /** 轮询某资源；interval=0 或函数返回 0 不轮询。intervalMs 传函数时可按最新数据动态调间隔。
  *  手动 refresh 会重新唤醒并计算轮询间隔，覆盖 idle → running 的异步任务状态切换。
  *  内置单飞、卸载后响应保护；页面重新获得焦点时立即追平一次后端状态。 */
+export function shouldRetryPollError(error: unknown): boolean {
+  return Number((error as { status?: number } | null)?.status) !== 404;
+}
+
 export function usePoll<T>(
   fetcher: () => Promise<T>,
   intervalMs: PollInterval<T>,
@@ -1124,6 +1128,7 @@ export function usePoll<T>(
       onError: (e: unknown) => {
         setError(String((e as Error).message || e));
         setLoading(false);
+        return shouldRetryPollError(e);
       },
     });
   }
@@ -1136,6 +1141,7 @@ export function usePoll<T>(
     onError: (e: unknown) => {
       setError(String((e as Error).message || e));
       setLoading(false);
+      return shouldRetryPollError(e);
     },
   });
 

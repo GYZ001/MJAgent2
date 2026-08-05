@@ -1,7 +1,7 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { locationFor, routeFromPath, useNav } from './App'
+import { locationFor, routeFromPath, shouldRetryPollError, useNav } from './App'
 
 describe('无分集工作台路由', () => {
   afterEach(() => vi.unstubAllGlobals())
@@ -64,5 +64,11 @@ describe('无分集工作台路由', () => {
     }
 
     expect(renderToStaticMarkup(createElement(Probe))).toContain('bible:p1')
+  })
+
+  it('对象不存在时停止自动轮询，瞬时故障仍允许恢复', () => {
+    expect(shouldRetryPollError({ status: 404 })).toBe(false)
+    expect(shouldRetryPollError({ status: 500 })).toBe(true)
+    expect(shouldRetryPollError(new Error('网络中断'))).toBe(true)
   })
 })

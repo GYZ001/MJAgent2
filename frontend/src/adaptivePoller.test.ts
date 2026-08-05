@@ -81,4 +81,32 @@ describe('AdaptivePoller', () => {
     expect(received).toEqual([])
     expect(timers).toEqual([])
   })
+
+  it('stops automatic polling when the error callback marks a resource terminal', async () => {
+    const timers: Array<() => void> = []
+    let calls = 0
+    const poller = new AdaptivePoller(
+      async () => {
+        calls += 1
+        throw Object.assign(new Error('资源不存在'), { status: 404 })
+      },
+      1000,
+      {
+        onData: () => undefined,
+        onError: () => false,
+      },
+      {
+        setTimeout: callback => {
+          timers.push(callback)
+          return callback
+        },
+        clearTimeout: () => undefined,
+      },
+    )
+
+    await poller.start()
+
+    expect(calls).toBe(1)
+    expect(timers).toEqual([])
+  })
 })

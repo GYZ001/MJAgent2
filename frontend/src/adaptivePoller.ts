@@ -7,7 +7,7 @@ type PollClock = {
 
 type PollCallbacks<T> = {
   onData: (data: T) => void
-  onError: (error: unknown) => void
+  onError: (error: unknown) => void | boolean
 }
 
 const defaultClock: PollClock = {
@@ -81,7 +81,11 @@ export class AdaptivePoller<T> {
       })
       .catch((error: unknown) => {
         if (this.active && generation === this.generation) {
-          this.callbacks.onError(error)
+          const keepPolling = this.callbacks.onError(error)
+          if (keepPolling === false) {
+            this.active = false
+            this.clearTimer()
+          }
         }
         return null
       })
