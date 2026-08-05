@@ -23,7 +23,7 @@ def test_video_file_gate_rejects_unknown_container(tmp_path, monkeypatch) -> Non
     assert "VIDEO_CONTAINER_INVALID" in {issue.code for issue in result["issues"]}
 
 
-def test_candidate_selection_excludes_recovered_qa_and_records_reason(monkeypatch) -> None:
+def test_candidate_selection_uses_first_technical_version_and_records_reason(monkeypatch) -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript("""
@@ -42,6 +42,6 @@ def test_candidate_selection_excludes_recovered_qa_and_records_reason(monkeypatc
     import app.artifacts
     monkeypatch.setattr(app.artifacts, "invalidate_episode_final", lambda _: False)
     selected = media.select_best_video_candidate("s")
-    assert selected and selected["version_id"] == "v2"
-    assert "自动比较 2 个" in selected["reason"]
-    assert conn.execute("SELECT adopted_version_id FROM shots WHERE id='s'").fetchone()[0] == "v2"
+    assert selected and selected["version_id"] == "v1"
+    assert "首个技术有效视频" in selected["reason"]
+    assert conn.execute("SELECT adopted_version_id FROM shots WHERE id='s'").fetchone()[0] == "v1"

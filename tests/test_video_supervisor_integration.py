@@ -986,7 +986,7 @@ def test_auto_crop_without_ffmpeg_graceful(tmp_path):
     assert result["ok"] is False
 
 
-def test_router_needs_crop_auto_crop():
+def test_router_keeps_qa_crop_finding_score_only():
     plan = route([
         Issue(
             code="VIDEO_QA_NEEDS_CROP",
@@ -996,8 +996,8 @@ def test_router_needs_crop_auto_crop():
             evidence={"path": "1", "rule_id": "needs_crop"},
         )
     ])
-    assert plan.level == "L2"
-    assert plan.strategy == "auto_crop"
+    assert plan.level == "L0"
+    assert plan.strategy == "handoff_human"
     assert plan.is_paid is False
 
 
