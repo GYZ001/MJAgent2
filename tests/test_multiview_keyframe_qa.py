@@ -23,7 +23,35 @@ from app.multiview import (
     normalize_appearance_change,
     pack_references_by_purpose,
     gallery_fingerprint_material,
+    view_generation_operation_id,
 )
+
+
+def test_seeded_view_operation_survives_candidate_row_recreation() -> None:
+    first = view_generation_operation_id(
+        asset_kind="scene_view",
+        view_role="reverse_angle",
+        prompt="same prompt",
+        seed_inputs=["data:image/jpeg;base64,stable-seed"],
+        fallback_identity="scene-candidate-a",
+    )
+    recovered = view_generation_operation_id(
+        asset_kind="scene_view",
+        view_role="reverse_angle",
+        prompt="same prompt",
+        seed_inputs=["data:image/jpeg;base64,stable-seed"],
+        fallback_identity="scene-candidate-b",
+    )
+    changed_seed = view_generation_operation_id(
+        asset_kind="scene_view",
+        view_role="reverse_angle",
+        prompt="same prompt",
+        seed_inputs=["data:image/jpeg;base64,new-seed"],
+        fallback_identity="scene-candidate-b",
+    )
+
+    assert recovered == first
+    assert changed_seed != first
 from app.video_modes import (
     default_reference_decision,
     pack_reference_images_for_seedance,

@@ -117,6 +117,30 @@ def view_input_fingerprint(
     })
 
 
+def view_generation_operation_id(
+    *,
+    asset_kind: str,
+    view_role: str,
+    prompt: str,
+    seed_inputs: list[str],
+    fallback_identity: str,
+) -> str:
+    """Stable across candidate-row recreation, unique across real seed changes."""
+    seed_hashes = [
+        hashlib.sha256(seed.encode("utf-8")).hexdigest()
+        for seed in seed_inputs
+    ]
+    material = json.dumps({
+        "asset_kind": asset_kind,
+        "view_role": view_role,
+        "prompt": prompt,
+        "seed_hashes": seed_hashes,
+        "fallback_identity": "" if seed_hashes else fallback_identity,
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    prefix = "op_character_view_" if asset_kind == "character_view" else "op_scene_view_"
+    return prefix + hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+
+
 def _ready_view_matches_fingerprint(view: dict[str, Any] | None, fingerprint: str) -> bool:
     """ready 视角可复用：指纹一致；旧数据 fingerprint 为空时也复用（由调用方回填）。"""
     if not view or not fingerprint:
@@ -1441,9 +1465,13 @@ async def ensure_character_multiview_pack(
                 "asset_kind": "character_view",
                 "view_role": view_role,
                 "character_name": character_name,
-                "operation_id": "op_character_view_" + hashlib.sha256(
-                    f"{portrait_id}:{view_role}:{fp}".encode("utf-8")
-                ).hexdigest()[:32],
+                    "operation_id": view_generation_operation_id(
+                        asset_kind="character_view",
+                        view_role=view_role,
+                        prompt=prompt,
+                        seed_inputs=seeds,
+                        fallback_identity=f"{portrait_id}:{fp}",
+                    ),
                 "reuse_successful_operation": True,
             },
         )
@@ -1638,9 +1666,13 @@ async def ensure_scene_multiview_pack(
                 "asset_kind": "scene_view",
                 "view_role": "reverse_angle",
                 "scene_name": scene_name,
-                "operation_id": "op_scene_view_" + hashlib.sha256(
-                    f"{scene_reference_id}:reverse_angle:{rev_fp}".encode("utf-8")
-                ).hexdigest()[:32],
+                "operation_id": view_generation_operation_id(
+                    asset_kind="scene_view",
+                    view_role="reverse_angle",
+                    prompt=rev_prompt,
+                    seed_inputs=seeds,
+                    fallback_identity=f"{scene_reference_id}:{rev_fp}",
+                ),
                 "reuse_successful_operation": True,
             },
         )
@@ -1680,9 +1712,13 @@ async def ensure_scene_multiview_pack(
                     "asset_kind": "scene_view",
                     "view_role": "action_zone",
                     "scene_name": scene_name,
-                    "operation_id": "op_scene_view_" + hashlib.sha256(
-                        f"{scene_reference_id}:action_zone:{action_fp}".encode("utf-8")
-                    ).hexdigest()[:32],
+                    "operation_id": view_generation_operation_id(
+                        asset_kind="scene_view",
+                        view_role="action_zone",
+                        prompt=action_prompt,
+                        seed_inputs=seeds,
+                        fallback_identity=f"{scene_reference_id}:{action_fp}",
+                    ),
                     "reuse_successful_operation": True,
                 },
             )
