@@ -2915,6 +2915,25 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
                         "changes": projection_changes,
                     },
                 )
+            from app.validators import (
+                normalize_outline_spoken_durations,
+                outline_key_line_capacity_errors,
+                outline_key_line_speaker_errors,
+            )
+
+            for change in normalize_outline_spoken_durations(o, screenplay):
+                log_provider_call(
+                    "storyboard_outline_spoken_duration",
+                    config.MODEL_TEXT,
+                    "DURATION_NORMALIZED",
+                    None,
+                    0,
+                    meta={
+                        "episode_id": episode.get("id"),
+                        "episode_no": episode.get("episode_no"),
+                        **change,
+                    },
+                )
             narrative_errors: list[str] = []
             if not o.shots:
                 narrative_errors.append("[OUTLINE_EMPTY] 分镜大纲不能为空")
@@ -2938,11 +2957,6 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
                         f"[OUTLINE_DURATION_INVALID] shot_id={shot.shot_id or shot.shot_no} "
                         f"duration_s 必须在 {config.VIDEO_DURATION_MIN_S}~{config.VIDEO_DURATION_MAX_S}"
                     )
-            from app.validators import (
-                outline_key_line_capacity_errors,
-                outline_key_line_speaker_errors,
-            )
-
             narrative_errors.extend(
                 outline_key_line_capacity_errors(o, screenplay)
             )
@@ -3040,7 +3054,7 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
         scope_id=str(episode.get("id") or f"episode-{episode['episode_no']}"),
         artifact_type="storyboard_outline",
         policy=AgentLoopPolicy(
-            max_iterations=2,
+            max_iterations=4,
             stall_rounds=2,
             min_quality_gain=0.03,
             no_gain_rounds=2,
@@ -3066,8 +3080,33 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
         prefill={"episode_no": episode["episode_no"]},
     )
     if screenplay.narrative_plan is not None:
-        # The model-authored directing text and deterministic authority
-        # projection passed the complete graph gate in ``_check``.
+        from app.validators import (
+            normalize_outline_spoken_durations,
+            outline_key_line_capacity_errors,
+            outline_key_line_speaker_errors,
+        )
+
+        normalize_outline_spoken_durations(outline, screenplay)
+        final_errors = [
+            *(
+                f"[OUTLINE_DURATION_INVALID] shot_id={shot.shot_id or shot.shot_no} "
+                f"duration_s 必须在 {config.VIDEO_DURATION_MIN_S}~"
+                f"{config.VIDEO_DURATION_MAX_S}"
+                for shot in outline.shots
+                if not (
+                    config.VIDEO_DURATION_MIN_S
+                    <= int(shot.duration_s or 0)
+                    <= config.VIDEO_DURATION_MAX_S
+                )
+            ),
+            *outline_key_line_capacity_errors(outline, screenplay),
+            *outline_key_line_speaker_errors(outline, screenplay),
+        ]
+        if final_errors:
+            raise StageError(
+                "分镜大纲硬合同",
+                list(dict.fromkeys(final_errors)),
+            )
         return outline
     # 减重试 #2：第一集第 1 镜是强制建场镜，把派给它的判决/反转类 covers 顺延合并到第 2 镜，
     # 避免逐镜阶段"照建场写→漏 covers / 硬塞判决→引入圣经外角色"的连环重试。

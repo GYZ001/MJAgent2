@@ -3319,6 +3319,58 @@ def outline_key_line_capacity_errors(
     return errors
 
 
+def normalize_outline_spoken_durations(
+    outline: StoryboardOutline,
+    screenplay: EpisodeScreenplay,
+) -> list[dict]:
+    """Raise outline durations to the smallest supported exact-speech window."""
+    catalog = key_line_catalog(screenplay)
+    allowed = sorted(
+        duration
+        for duration in config.ALLOWED_DURATIONS
+        if config.VIDEO_DURATION_MIN_S
+        <= duration
+        <= config.VIDEO_DURATION_MAX_S
+    )
+    if not allowed:
+        return []
+    changes: list[dict] = []
+    for shot in outline.shots or []:
+        current = int(shot.duration_s or config.DEFAULT_VIDEO_DURATION_S)
+        required_chars = sum(
+            content_char_count(_strip_speaker(catalog[key_line_id]))
+            for raw_id in (shot.key_line_ids or [])
+            if (
+                (key_line_id := str(raw_id).strip().upper())
+                in catalog
+            )
+        )
+        required_duration = next(
+            (
+                duration
+                for duration in allowed
+                if max_speech_chars(duration) >= required_chars
+            ),
+            allowed[-1],
+        )
+        normalized = max(
+            allowed[0],
+            min(allowed[-1], current),
+            required_duration,
+        )
+        if normalized == current:
+            continue
+        shot.duration_s = normalized
+        changes.append({
+            "shot_no": shot.shot_no,
+            "from_duration_s": current,
+            "to_duration_s": normalized,
+            "required_chars": required_chars,
+            "reason": "exact_spoken_capacity",
+        })
+    return changes
+
+
 def assign_outline_delivery_ids(
     outline: StoryboardOutline, screenplay: EpisodeScreenplay
 ) -> list[dict]:
