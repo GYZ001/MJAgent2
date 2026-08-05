@@ -24,6 +24,8 @@ from app.schemas import (
     Character,
     Dialogue,
     EpisodeScreenplay,
+    KeyDialogueChain,
+    KeyDialogueTurn,
     Shot,
     Storyboard,
     StoryboardOutline,
@@ -40,6 +42,7 @@ from app.storyboard_supervisor import (
     _begin_repair_activation,
     _commit_repair_candidate,
     _deterministic_dialogue_framing_candidate,
+    _deterministic_missing_spoken_candidate,
     _merge_repair_candidate,
     _migrate_checkpoint,
     _open_shot_gap,
@@ -1296,6 +1299,39 @@ def test_deterministic_action_dialogue_framing_candidate(
     assert candidate.shot_size == expected_size
     assert "dialogue_action_staging" in candidate.risk_tags
     assert shot.shot_size == initial_size
+
+
+def test_deterministic_missing_spoken_candidate_uses_published_dialogue_clause() -> None:
+    shot = _shot(
+        2,
+        action="老师告知学生评选结果，并承诺协助完成申报。",
+    )
+    shot.primary_action = "老师向学生确认评选结果并承诺协助申报"
+    shot.characters = ["老师", "学生"]
+    shot.characters_visible = ["老师", "学生"]
+    shot.first_frame_desc = "老师看向学生，正准备开口说明评选结果。"
+    shot.last_frame_desc = "老师说完承诺，学生点头回应。"
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        full_script_text="老师向学生说明结果。",
+        dialogue_chains=[KeyDialogueChain(
+            chain_id="DC1",
+            topic="评选结果与后续申报",
+            turns=[KeyDialogueTurn(
+                speaker="老师",
+                line="本次评选结果已经确定，我会协助你完成申报。",
+                source_text="本次评选结果已经确定，我会协助你完成申报。",
+            )],
+        )],
+    )
+
+    candidate = _deterministic_missing_spoken_candidate(shot, screenplay)
+
+    assert candidate is not None
+    assert candidate.dialogues[0].speaker == "老师"
+    assert candidate.dialogues[0].line in screenplay.dialogue_chains[0].turns[0].line
+    assert candidate.audio_cast == ["老师"]
+    assert shot.dialogues == []
 
 
 def test_deterministic_single_dialogue_marks_named_listener_offscreen() -> None:

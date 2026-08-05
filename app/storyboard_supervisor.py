@@ -652,6 +652,107 @@ def _deterministic_dialogue_framing_candidate(
     return candidate if changed else None
 
 
+def _deterministic_missing_spoken_candidate(
+    shot: Shot,
+    screenplay,
+) -> Shot | None:
+    """Fill a silent speech contract from an exact published dialogue clause."""
+    from app.continuity import implicit_speech_without_dialogue_errors
+    from app.schemas import Dialogue
+    from app.spoken_contract import max_speech_chars
+    from app.textmatch import (
+        atomize_claim,
+        bigram_coverage,
+        condense,
+        longest_run_ratio,
+    )
+
+    if not implicit_speech_without_dialogue_errors(shot):
+        return None
+    allowed_speakers = {
+        str(value or "").strip()
+        for value in [
+            *(shot.characters or []),
+            *(shot.characters_visible or []),
+            *(shot.audio_cast or []),
+        ]
+        if str(value or "").strip()
+    }
+    if not allowed_speakers:
+        return None
+    preferred_speakers: set[str] = set()
+    plan = getattr(screenplay, "narrative_plan", None)
+    action_id = str(getattr(shot, "primary_action_id", "") or "").strip()
+    if plan is not None and action_id:
+        action = next((
+            item for item in plan.atomic_actions
+            if str(item.action_id or "").strip() == action_id
+        ), None)
+        actor_ids = {
+            str(value or "").strip()
+            for value in (action.actor_ids if action is not None else [])
+            if str(value or "").strip()
+        }
+        for identity in plan.identity_contracts:
+            if str(identity.identity_id or "").strip() not in actor_ids:
+                continue
+            preferred_speakers.update(filter(None, [
+                str(identity.display_name or "").strip(),
+                *[
+                    str(value or "").strip()
+                    for value in identity.voice_ids
+                ],
+            ]))
+    candidate_speakers = preferred_speakers & allowed_speakers
+    if not candidate_speakers:
+        candidate_speakers = allowed_speakers
+    context = "；".join(filter(None, (
+        shot.primary_action,
+        shot.action_desc,
+        shot.state_in,
+        shot.state_out,
+        shot.first_frame_desc,
+        shot.last_frame_desc,
+    )))
+    capacity = max_speech_chars(int(shot.duration_s or 0))
+    ranked: list[tuple[float, int, str, str]] = []
+    for chain in screenplay.dialogue_chains or []:
+        for turn in chain.turns or []:
+            speaker = str(turn.speaker or "").strip()
+            line = str(turn.line or "").strip()
+            if speaker not in candidate_speakers or not line:
+                continue
+            clauses = [line, *atomize_claim(line)]
+            for clause in dict.fromkeys(clauses):
+                content_chars = len(condense(clause))
+                if not 4 <= content_chars <= capacity:
+                    continue
+                score = max(
+                    longest_run_ratio(clause, context),
+                    bigram_coverage(clause, context),
+                    bigram_coverage(context, clause),
+                )
+                if score > 0:
+                    ranked.append((score, -content_chars, speaker, clause))
+    if not ranked:
+        return None
+    _score, _size, speaker, line = max(ranked)
+    candidate = Shot.model_validate(shot.model_dump(mode="json"))
+    candidate.dialogues = [
+        Dialogue(
+            speaker=speaker,
+            line=line,
+            emotion="平静",
+            delivery="spoken_dialogue",
+        ),
+    ]
+    candidate.audio_cast = list(dict.fromkeys([
+        *(candidate.audio_cast or []),
+        speaker,
+    ]))
+    return candidate
+
+
 def _recover_truncated_outline_from_approved_artifact(
     conn,
     ep,
@@ -3362,27 +3463,36 @@ def _apply_repair(
         "structure_new_end": structure_new_end,
     }
     cp.repair_candidate_shots = []
-    if (
-        not narrative_repair_active
-        and "DIALOGUE_FRAMING_INVALID" in set(plan.issue_codes or [])
-        and mode == "replace"
-        and window_start == window_end
-    ):
+    if mode == "replace" and window_start == window_end:
         target = next(
             (shot for shot in current_board.shots if int(shot.shot_no) == window_start),
             None,
         )
-        deterministic = (
-            _deterministic_dialogue_framing_candidate(target, plan.issue_messages)
-            if target is not None else None
-        )
+        deterministic = None
+        deterministic_kind = ""
+        if (
+            target is not None
+            and not narrative_repair_active
+            and "DIALOGUE_FRAMING_INVALID" in set(plan.issue_codes or [])
+        ):
+            deterministic = _deterministic_dialogue_framing_candidate(
+                target,
+                plan.issue_messages,
+            )
+            deterministic_kind = "dialogue_action_framing"
+        if deterministic is None and target is not None:
+            deterministic = _deterministic_missing_spoken_candidate(
+                target,
+                repair_screenplay,
+            )
+            deterministic_kind = "published_dialogue_clause"
         if deterministic is not None:
             cp.repair_candidate_shots = [_shot_checkpoint_payload(deterministic)]
             cp.last_repair = {
                 **cp.last_repair,
                 "status": "candidate_generating",
                 "candidate_count": 1,
-                "deterministic_repair": "dialogue_action_framing",
+                "deterministic_repair": deterministic_kind,
             }
     cp.validated_prefix_end = max(0, window_start - 1)
     cp.next_shot_no = window_start
