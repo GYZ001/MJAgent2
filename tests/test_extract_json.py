@@ -60,6 +60,23 @@ def test_inner_quote_repair_does_not_hide_json_structure_errors() -> None:
         extract_json(text, repair_unescaped_inner_quotes=True)
 
 
+def test_extract_json_repairs_declared_singleton_string_object_field_only() -> None:
+    text = (
+        '{"audience_prior_id":"AP-1",'
+        '"attention_memory_assumptions":{"关注主角情绪变化"}}'
+    )
+
+    with pytest.raises(ValueError, match="JSON 解析失败"):
+        extract_json(text)
+
+    assert extract_json(
+        text,
+        repair_singleton_string_object_fields=("attention_memory_assumptions",),
+    )["attention_memory_assumptions"] == {
+        "description": "关注主角情绪变化",
+    }
+
+
 def test_extract_json_closes_only_missing_root_brace_at_eof() -> None:
     text = '{"episode_no": 9, "forbidden_additions": ["禁止发明新角色"]'
 
@@ -137,6 +154,28 @@ def test_screenplay_shape_preserves_string_familiarity_assumptions_as_objects() 
     assert payload["narrative_plan"]["audience_priors"][0][
         "familiarity_assumptions"
     ] == ["知道科举，但不了解修仙宗门"]
+
+
+def test_screenplay_shape_normalizes_action_relation_audit_aliases() -> None:
+    payload = {
+        "episode_no": 1,
+        "narrative_plan": {
+            "action_relation_audits": [{
+                "audit_id": "ARA-1",
+                "action_ids": ["A-1", "A-2"],
+                "relation": "sequential_distinct",
+                "rationale": "动作目标不同，因果递进",
+            }],
+        },
+    }
+
+    normalized, changes = normalize_screenplay_json_shape(payload)
+    audit = normalized["narrative_plan"]["action_relation_audits"][0]
+
+    assert audit["action_relation_audit_id"] == "ARA-1"
+    assert audit["semantically_equivalent"] is False
+    assert audit["reason"] == "动作目标不同，因果递进"
+    assert len(changes) == 3
 
 
 def test_json_stage_failure_has_specific_error_code_and_non_blind_hint() -> None:

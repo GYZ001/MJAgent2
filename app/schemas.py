@@ -783,6 +783,56 @@ def normalize_screenplay_json_shape(obj: dict) -> tuple[dict, list[str]]:
                 normalized_plan["audience_priors"] = normalized_priors
                 normalized["narrative_plan"] = normalized_plan
 
+        current_plan = normalized.get("narrative_plan")
+        audits = (
+            current_plan.get("action_relation_audits")
+            if isinstance(current_plan, dict)
+            else None
+        )
+        if isinstance(audits, list):
+            normalized_audits: list[object] = []
+            audits_changed = False
+            for audit_index, audit in enumerate(audits):
+                if not isinstance(audit, dict):
+                    normalized_audits.append(audit)
+                    continue
+                normalized_audit = dict(audit)
+                if (
+                    "action_relation_audit_id" not in normalized_audit
+                    and normalized_audit.get("audit_id")
+                ):
+                    normalized_audit["action_relation_audit_id"] = normalized_audit.pop(
+                        "audit_id"
+                    )
+                    changes.append(
+                        "narrative_plan.action_relation_audits"
+                        f"[{audit_index}].action_relation_audit_id"
+                    )
+                relation = str(normalized_audit.get("relation") or "").strip().lower()
+                if "semantically_equivalent" not in normalized_audit:
+                    if relation in {"sequential_distinct", "distinct", "different"}:
+                        normalized_audit["semantically_equivalent"] = False
+                    elif relation in {"equivalent", "duplicate", "semantic_equivalent"}:
+                        normalized_audit["semantically_equivalent"] = True
+                    if "semantically_equivalent" in normalized_audit:
+                        changes.append(
+                            "narrative_plan.action_relation_audits"
+                            f"[{audit_index}].semantically_equivalent"
+                        )
+                if "reason" not in normalized_audit and normalized_audit.get("rationale"):
+                    normalized_audit["reason"] = normalized_audit.pop("rationale")
+                    changes.append(
+                        "narrative_plan.action_relation_audits"
+                        f"[{audit_index}].reason"
+                    )
+                if normalized_audit != audit:
+                    audits_changed = True
+                normalized_audits.append(normalized_audit)
+            if audits_changed:
+                normalized_plan = dict(current_plan)
+                normalized_plan["action_relation_audits"] = normalized_audits
+                normalized["narrative_plan"] = normalized_plan
+
     return normalized, changes
 
 

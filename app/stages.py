@@ -719,6 +719,11 @@ async def _run_with_agent_loop(
             obj = extract_json(
                 raw,
                 repair_unescaped_inner_quotes=model_cls is EpisodeScreenplay,
+                repair_singleton_string_object_fields=(
+                    ("attention_memory_assumptions",)
+                    if model_cls is EpisodeScreenplay
+                    else ()
+                ),
             )
         except ValueError as exc:
             messages = [str(exc)]
