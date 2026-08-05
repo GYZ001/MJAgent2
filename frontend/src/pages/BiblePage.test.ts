@@ -3,6 +3,7 @@ import type { Bible, Character } from '../api'
 import {
   bibleConflictFieldLabel,
   bibleStepStatus,
+  characterCompareImages,
   characterIsFitting,
   currentPortrait,
   currentPortraitViews,
@@ -156,6 +157,29 @@ describe('人物定妆主画廊', () => {
       'front',
       'three-quarter',
       'profile',
+    ])
+  })
+
+  it('对比弹窗不会重复展示兼容主图和正面视角的同一文件', () => {
+    const withLegacyMainImage = {
+      name: '孟浩',
+      portraits: [{
+        id: 'current',
+        ep_start: 1,
+        ep_end: null,
+        image_url: '/front.jpg',
+        views: [
+          { id: 'front', view_role: 'front_full', image_url: '/front.jpg' },
+          { id: 'three-quarter', view_role: 'three_quarter', image_url: '/three-quarter.jpg' },
+          { id: 'profile', view_role: 'profile', image_url: '/profile.jpg' },
+        ],
+      }],
+    } as Character
+
+    expect(characterCompareImages(withLegacyMainImage).map(image => image.src)).toEqual([
+      '/front.jpg',
+      '/three-quarter.jpg',
+      '/profile.jpg',
     ])
   })
 })

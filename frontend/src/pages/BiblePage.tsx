@@ -243,24 +243,30 @@ function episodeStepStatus(project: { episodes?: unknown[]; episodes_total?: num
   return 'idle'
 }
 
-function characterCompareImages(character: Character): { src: string; label: string }[] {
+export function characterCompareImages(character: Character): { src: string; label: string }[] {
   const images: { src: string; label: string; ep: number }[] = []
+  const seen = new Set<string>()
+  const addImage = (src: string, label: string, ep: number) => {
+    if (seen.has(src)) return
+    seen.add(src)
+    images.push({ src, label, ep })
+  }
   for (const portrait of character.portraits ?? []) {
     for (const view of portrait.views ?? []) {
       if (view.image_url) {
-        images.push({
-          src: view.image_url,
-          label: `${portraitVersionLabel(portrait)} · ${VIEW_ROLE_LABELS[view.view_role || ''] || view.view_role || '视角'}`,
-          ep: portrait.ep_start,
-        })
+        addImage(
+          view.image_url,
+          `${portraitVersionLabel(portrait)} · ${VIEW_ROLE_LABELS[view.view_role || ''] || view.view_role || '视角'}`,
+          portrait.ep_start,
+        )
       }
     }
     if (portrait.image_url) {
-      images.push({ src: portrait.image_url, label: portraitVersionLabel(portrait), ep: portrait.ep_start })
+      addImage(portrait.image_url, portraitVersionLabel(portrait), portrait.ep_start)
     }
   }
   if (!images.length && character.ref_image_url) {
-    images.push({ src: character.ref_image_url, label: '历史定妆照', ep: 0 })
+    addImage(character.ref_image_url, '历史定妆照', 0)
   }
   return images.sort((a, b) => b.ep - a.ep).map(({ src, label }) => ({ src, label }))
 }
