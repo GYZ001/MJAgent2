@@ -42,6 +42,49 @@ def test_split_does_not_merge_different_titles_with_reused_ordinal() -> None:
     assert chapters[0]["title"] != chapters[1]["title"]
 
 
+def test_ingest_recovers_standalone_heading_missing_chapter_unit() -> None:
+    body = "孟浩检查法宝，确认灵力仍可运转。" * 12
+    result = ingest_novel(
+        (
+            f"第五十二章 丰收\n{body}\n"
+            "第五十三你要怎么谢我？\n"
+            f"{body}\n"
+            f"第五十四章 同宗故人\n{body}"
+        ).encode()
+    )
+
+    assert result["chapter_count"] == 3
+    assert [chapter["title"] for chapter in result["chapters"]] == [
+        "第五十二章 丰收",
+        "第五十三章你要怎么谢我？",
+        "第五十四章 同宗故人",
+    ]
+
+
+def test_ingest_does_not_treat_numbered_action_as_missing_heading() -> None:
+    body = "孟浩检查法宝，确认灵力仍可运转。" * 12
+    result = ingest_novel(
+        (
+            f"第五十二章 丰收\n{body}\n"
+            "第五十三步落下，阵法随之震动。\n"
+            f"{body}\n"
+            f"第五十四章 同宗故人\n{body}"
+        ).encode()
+    )
+
+    assert result["chapter_count"] == 2
+    assert "第五十三步落下" in result["chapters"][0]["content"]
+
+
+def test_clean_text_preserves_chapter_heading_with_update_suffix() -> None:
+    cleaned, removed = clean_text(
+        "第四卷五色至尊第455章莲花变异！（第一更）\n正文内容。"
+    )
+
+    assert "第455章莲花变异！（第一更）" in cleaned
+    assert removed == 0
+
+
 def test_ingest_preserves_single_chapter_heading_with_utf8_bom() -> None:
     raw = "\ufeff第一章 初遇\n雨夜里，林舟在旧车站第一次见到沈青。".encode("utf-8")
 

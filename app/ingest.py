@@ -40,7 +40,7 @@ PUBLISHING_PROMO_RE = re.compile(
 )
 AUTHOR_NOTE_RE = re.compile(
     r"(?:书评区|读者|书友|道友|兄弟姐妹|大大|公众(?:威信|微信|号)|公众号|起点|作者|"
-    r"写书|本书|本章|章节|更新|爆发|上架|订阅|月票|推荐|点击|收藏|抽奖|活动|"
+    r"写书|喜欢写|写作|文章|本书|本章|章节|更新|爆发|上架|订阅|月票|推荐|点击|收藏|抽奖|活动|"
     r"商城|实体书|码字|老婆|女儿|生日|见面会|签售|公测|游戏)",
     re.IGNORECASE,
 )
@@ -159,8 +159,10 @@ def clean_text(text: str) -> tuple[str, int]:
         is_social_ad = bool(
             stripped and len(stripped) <= 160 and SOCIAL_AD_RE.search(stripped)
         )
+        is_heading_line = bool(stripped and CHAPTER_RE.fullmatch(stripped))
         is_publishing_promo = bool(
-            stripped and len(stripped) <= 800 and PUBLISHING_PROMO_RE.search(stripped)
+            stripped and not is_heading_line and len(stripped) <= 800
+            and PUBLISHING_PROMO_RE.search(stripped)
         )
         prior_nonempty = next((item for item in reversed(kept) if item), "")
         after_separator = bool(prior_nonempty and SEPARATOR_ONLY_RE.fullmatch(prior_nonempty))
@@ -224,6 +226,93 @@ def normalize_chapter_title(title: str) -> tuple[str, str]:
     # comparing a short stub with its adjacent rich chapter.
     subject = re.sub(r"[上下中]$", "", subject)
     return ordinal, subject
+
+
+def _parse_chapter_number(value: str) -> int | None:
+    if value.isdigit():
+        return int(value)
+    digits = {
+        "零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+        "五": 5, "六": 6, "七": 7, "八": 8, "九": 9,
+        "壹": 1, "贰": 2, "叁": 3, "肆": 4, "伍": 5,
+        "陆": 6, "柒": 7, "捌": 8, "玖": 9,
+    }
+    units = {"十": 10, "拾": 10, "百": 100, "佰": 100, "千": 1000, "仟": 1000}
+    total = section = number = 0
+    for char in value:
+        if char in digits:
+            number = digits[char]
+        elif char == "万":
+            total += (section + number) * 10000
+            section = number = 0
+        elif char in units:
+            section += (number or 1) * units[char]
+            number = 0
+        else:
+            return None
+    return total + section + number
+
+
+def _chapter_ordinal(title: str) -> int | None:
+    matches = list(re.finditer(rf"第([{_CHAPTER_NUMERALS}]+)章", title or ""))
+    return _parse_chapter_number(matches[-1].group(1)) if matches else None
+
+
+def _recover_missing_unit_headings(chapters: list[dict]) -> list[dict]:
+    """Recover standalone headings such as ``第五十三标题`` using ordinal context.
+
+    A missing unit is accepted only when it is exactly the current ordinal + 1
+    and the next recognized chapter proves that an ordinal was skipped.
+    """
+    recovered: list[dict] = []
+    for index, chapter in enumerate(chapters):
+        next_ordinal = (
+            _chapter_ordinal(str(chapters[index + 1].get("title") or ""))
+            if index + 1 < len(chapters) else None
+        )
+        fragments = [dict(chapter)]
+        while next_ordinal is not None:
+            current = fragments[-1]
+            current_ordinal = _chapter_ordinal(str(current.get("title") or ""))
+            if current_ordinal is None or next_ordinal <= current_ordinal + 1:
+                break
+            expected = current_ordinal + 1
+            lines = str(current.get("content") or "").splitlines()
+            split_at = None
+            normalized_title = ""
+            for line_index, line in enumerate(lines[1:], start=1):
+                candidate = line.strip()
+                match = re.match(rf"^第([{_CHAPTER_NUMERALS}]+)", candidate)
+                if not match or _parse_chapter_number(match.group(1)) != expected:
+                    continue
+                remainder = candidate[match.end():].strip()
+                if not remainder or remainder[0] in "章卷回节" or len(remainder) > 48:
+                    continue
+                if remainder[0] in "步拜层阵剑声拳刀峰海关息日次色":
+                    continue
+                split_at = line_index
+                normalized_title = f"{match.group(0)}章{remainder}"
+                break
+            if split_at is None:
+                break
+            left, _ = clean_text("\n".join(lines[:split_at]))
+            right_lines = lines[split_at:]
+            right_lines[0] = normalized_title
+            right, _ = clean_text("\n".join(right_lines))
+            if len(left) < STUB_CHAPTER_MAX_CHARS or len(right) < STUB_CHAPTER_MAX_CHARS:
+                break
+            current["content"] = left
+            current["char_count"] = len(left)
+            fragments.append({
+                "idx": 0,
+                "title": normalized_title,
+                "content": right,
+                "char_count": len(right),
+            })
+        recovered.extend(fragments)
+    for number, chapter in enumerate(recovered, start=1):
+        chapter["idx"] = number
+    return recovered
 
 
 def chapter_is_stub(chapter: dict) -> bool:
@@ -307,6 +396,7 @@ def _split_chapters_with_removed(text: str) -> tuple[list[dict], list[dict]]:
             chunk = text[i:i + FALLBACK_CHUNK_CHARS].strip()
             if chunk:
                 chapters.append({"idx": len(chapters) + 1, "title": f"第{len(chapters) + 1}段（自动切分）", "content": chunk})
+    chapters = _recover_missing_unit_headings(chapters)
     chapters, removed = dedupe_stub_chapters(chapters)
     return chapters, removed
 
