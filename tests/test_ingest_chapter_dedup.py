@@ -105,6 +105,7 @@ def test_clean_text_removes_web_novel_author_promotions() -> None:
     cleaned, removed = clean_text(
         "孟浩抬头望向山门，决定继续前行。\n"
         "－－－－－－－－－－－－－\n"
+        "\n"
         "书生孟浩和大家见面啦，收藏和推荐票，一个都不要少呀，"
         "首页有新书活动，还有大转盘抽奖和起点币奖励。\n"
         "收藏，推荐票！！\n"
@@ -134,4 +135,22 @@ def test_clean_text_removes_update_and_monthly_ticket_author_notes() -> None:
 
     assert "第三更送上" not in cleaned
     assert "公交月票" in cleaned
+    assert removed == 1
+
+
+def test_clean_text_only_trims_trailing_serial_marker_from_story_line() -> None:
+    cleaned, removed = clean_text(
+        "紫运宗参与了搜寻，却始终无人找到孟浩的踪迹。(未完待续。。)"
+    )
+
+    assert cleaned == "紫运宗参与了搜寻，却始终无人找到孟浩的踪迹。"
+    assert removed == 1
+
+
+def test_clean_text_removes_orphaned_trailing_separator() -> None:
+    cleaned, removed = clean_text(
+        "“这里是什么地方？”\n“靠山宗。”\n\n－－－－－－－－－－－－－"
+    )
+
+    assert cleaned == "“这里是什么地方？”\n“靠山宗。”"
     assert removed == 1

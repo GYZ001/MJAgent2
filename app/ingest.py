@@ -27,7 +27,7 @@ SOCIAL_AD_RE = re.compile(
 )
 PUBLISHING_PROMO_RE = re.compile(
     r"(?:推荐票|会员点击|起点币|新书发布会|发布\s*vip\s*章节|免费抽奖|大转盘抽奖|"
-    r"ipadmini|支持正版|未完待续|码字)"
+    r"ipadmini|支持正版|码字)"
     r"|(?:求|投|给|支持|呼唤|拜托|别忘|争|拼|保底|双倍|冲).{0,12}月票"
     r"|月票.{0,24}(?:求|投|给|支持|呼唤|拜托|别忘|榜|第一|过万|爆发|订阅|双倍|保底|危机)"
     r"|(?:收藏.{0,24}(?:新书|推荐票|抽奖|奖励|会员点击)|新书.{0,24}收藏)"
@@ -38,6 +38,9 @@ PUBLISHING_PROMO_RE = re.compile(
 )
 PROMO_SEPARATOR_RE = re.compile(r"(?:[-_=~*]{4,}|[－—～·]{4,})")
 SEPARATOR_ONLY_RE = re.compile(r"^(?:[-_=~*]{4,}|[－—～·]{4,})$")
+TRAILING_SERIAL_MARKER_RE = re.compile(
+    r"\s*[\(（]?\s*未完待续[\s。.．…·]*[\)）]?\s*$",
+)
 
 FALLBACK_CHUNK_CHARS = 3000
 STUB_CHAPTER_MAX_CHARS = 120
@@ -81,8 +84,23 @@ def clean_text(text: str) -> tuple[str, int]:
     """去广告行、归一空白。返回 (清洗后文本, 删除行数)。"""
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     kept, removed = [], 0
+
+    def drop_separator_before_ad() -> int:
+        while kept and not kept[-1]:
+            kept.pop()
+        if kept and SEPARATOR_ONLY_RE.fullmatch(kept[-1]):
+            kept.pop()
+            return 1
+        return 0
+
     for line in lines:
         stripped = line.strip()
+        stripped, serial_marker_count = TRAILING_SERIAL_MARKER_RE.subn("", stripped)
+        stripped = stripped.strip()
+        if serial_marker_count and not stripped:
+            removed += drop_separator_before_ad()
+            removed += 1
+            continue
         is_social_ad = bool(
             stripped and len(stripped) <= 160 and SOCIAL_AD_RE.search(stripped)
         )
@@ -100,20 +118,24 @@ def clean_text(text: str) -> tuple[str, int]:
                     break
             if prefix:
                 kept.append(prefix)
-            elif kept and SEPARATOR_ONLY_RE.fullmatch(kept[-1]):
-                kept.pop()
-                removed += 1
+            else:
+                removed += drop_separator_before_ad()
             removed += 1
             continue
         if stripped and (
             any(marker in stripped for marker in AD_MARKERS) or is_social_ad
         ):
-            if kept and SEPARATOR_ONLY_RE.fullmatch(kept[-1]):
-                kept.pop()
-                removed += 1
+            removed += drop_separator_before_ad()
             removed += 1
             continue
+        if serial_marker_count:
+            removed += 1
         kept.append(stripped)
+    while kept and not kept[-1]:
+        kept.pop()
+    if kept and SEPARATOR_ONLY_RE.fullmatch(kept[-1]):
+        kept.pop()
+        removed += 1
     cleaned = re.sub(r"\n{3,}", "\n\n", "\n".join(kept))
     return cleaned.strip(), removed
 
