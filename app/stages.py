@@ -2589,6 +2589,8 @@ def _normalized_candidate_board(episode_no: int, completed_shots: list[Shot], sh
 def align_storyboard_source_evidence(
     shot: Shot,
     source_text: str,
+    *,
+    screenplay: EpisodeScreenplay | None = None,
 ) -> AlignedExcerpt | None:
     """Return the first delivery field backed by authorized contiguous source."""
     candidates = [
@@ -2597,7 +2599,7 @@ def align_storyboard_source_evidence(
         shot.narration,
         *[item.text for item in shot.audio_timeline],
     ]
-    return next((
+    aligned = next((
         aligned
         for candidate in candidates
         if str(candidate or "").strip()
@@ -2608,6 +2610,44 @@ def align_storyboard_source_evidence(
         )]
         if aligned is not None
     ), None)
+    if aligned is not None or screenplay is None:
+        return aligned
+
+    primary_event_id = str(shot.story_event_id or "").strip()
+    event_ids = list(dict.fromkeys([
+        *([primary_event_id] if primary_event_id else []),
+        *[
+            str(event_id).strip()
+            for event_id in (shot.event_ids or [])
+            if str(event_id).strip()
+        ],
+    ]))
+    event_source_spans = {
+        str(event.event_id or "").strip(): str(event.source_span or "").strip()
+        for event in (screenplay.events or [])
+        if (
+            str(event.event_id or "").strip()
+            and str(event.source_span or "").strip()
+        )
+    }
+    authoritative_matches = [
+        match
+        for event_id in event_ids
+        if event_id in event_source_spans
+        for match in [
+            align_source_excerpt(
+                event_source_spans[event_id],
+                source_text,
+                min_match_chars=SOURCE_EXCERPT_MIN_CHARS,
+            )
+        ]
+        if match is not None
+    ]
+    unique_matches = {
+        (match.start_offset, match.end_offset, match.excerpt): match
+        for match in authoritative_matches
+    }
+    return next(iter(unique_matches.values())) if len(unique_matches) == 1 else None
 
 
 def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict, bible: Bible,
@@ -2646,6 +2686,7 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
     aligned_excerpt = align_storyboard_source_evidence(
         draft.shot,
         source_text,
+        screenplay=screenplay,
     )
     if aligned_excerpt is None:
         if not str(draft.shot.source_excerpt or "").strip():

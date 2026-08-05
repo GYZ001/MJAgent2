@@ -106,6 +106,51 @@ def test_storyboard_source_evidence_can_use_source_backed_audio() -> None:
     assert aligned.exact is True
 
 
+def test_storyboard_source_evidence_uses_unique_authoritative_event_span() -> None:
+    source = (
+        "前文。那你下来帮我扶梯，我来找找看。她一边说着，一边爬上人字梯，"
+        "阿宾抬头望去。后文。"
+    )
+    screenplay = stages.EpisodeScreenplay(
+        episode_no=1,
+        events=[{
+            "event_id": "E7",
+            "source_span": (
+                "原文第1章：那你下来帮我扶梯，我来找找看。"
+                "她一边说着，一边爬上人字梯，阿宾抬头望去。"
+            ),
+        }],
+    )
+    draft = StoryboardShotDraft.model_validate({
+        "episode_no": 1,
+        "shot": {
+            "shot_no": 14,
+            "duration_s": 5,
+            "shot_size": "中景",
+            "camera_move": "固定",
+            "scene_setting": "中，厨房",
+            "characters": ["阿宾", "胡太太"],
+            "action_desc": "阿宾扶住梯子，胡太太爬上去翻找壁橱。",
+            "first_frame_desc": "阿宾扶住梯子，胡太太准备向上爬。",
+            "last_frame_desc": "胡太太爬到梯子上，阿宾仍在下方扶梯。",
+            "source_excerpt": "模型改写后无法直接回绑的证据。",
+            "story_event_id": "E7",
+            "event_ids": ["E7"],
+            "transition": "硬切",
+        },
+    })
+
+    aligned = align_storyboard_source_evidence(
+        draft.shot,
+        source,
+        screenplay=screenplay,
+    )
+
+    assert aligned is not None
+    assert "她一边说着，一边爬上人字梯" in aligned.excerpt
+    assert source[aligned.start_offset:aligned.end_offset] == aligned.excerpt
+
+
 def test_source_fidelity_issue_remains_a_structural_blocker() -> None:
     message = "shot.source_excerpt 无法在本集授权原文中找到连续依据"
     draft = StoryboardShotDraft.model_construct(
