@@ -191,6 +191,32 @@ def test_domain_preflight_reads_project_state() -> None:
     assert "删除" in bus_pf.summary or "永久" in bus_pf.summary
 
 
+def test_video_batch_preflight_quotes_exact_pending_shot_cost() -> None:
+    from app import db
+
+    conn = db.get_conn()
+    conn.execute(
+        """INSERT INTO episodes(id,project_id,episode_no,status,created_at)
+           VALUES('video-quote-ep','proj_x',1,'confirmed',1)"""
+    )
+    for shot_no, duration in ((1, 10), (2, 6), (3, 5)):
+        conn.execute(
+            """INSERT INTO shots(
+                   id,episode_id,shot_no,duration_s,characters,dialogues
+               ) VALUES(?,?,?,?, '[]','[]')""",
+            (f"video-quote-s{shot_no}", "video-quote-ep", shot_no, duration),
+        )
+    conn.commit()
+
+    result = get_command_bus().preflight(
+        "video.generate_episode",
+        {"episode_id": "video-quote-ep"},
+    )
+
+    assert result.estimated_cost_cny == pytest.approx(16.8)
+    assert "¥16.8" in result.summary
+
+
 def test_approval_token_single_use() -> None:
     preflight = PreflightResult(
         command="project.delete",

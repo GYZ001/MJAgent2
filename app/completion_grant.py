@@ -136,7 +136,13 @@ def authorize_episode_video_budget_increment(
         stamp = now()
         if current:
             baseline = float(current["baseline_cny"] or 0)
-            cap = float(current["cap_cny"] or 0) + amount
+            claimed = float(db.execute(
+                """SELECT COALESCE(SUM(amount_cny),0) AS amount
+                     FROM provider_video_budget_claims
+                    WHERE episode_id=? AND status!='released'""",
+                (episode_id,),
+            ).fetchone()["amount"] or 0)
+            cap = max(float(current["cap_cny"] or 0), baseline + claimed) + amount
         else:
             baseline = _historical_video_liability(episode_id, conn=db)
             cap = baseline + amount
@@ -180,7 +186,6 @@ def authorize_episode_video_budget_absolute(
             if current else _historical_video_liability(episode_id, conn=db)
         )
         cap = max(
-            baseline,
             requested,
             float(current["cap_cny"] or 0) if current else 0.0,
         )
