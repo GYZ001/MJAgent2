@@ -76,7 +76,9 @@ def test_provider_prompt_overrides_conflicting_front_view_and_scale() -> None:
 def test_seeded_keyframe_omits_redundant_textual_character_appearance() -> None:
     bible = _bible()
     marker = "REDUNDANT_APPEARANCE_MARKER"
+    style_marker = "REDUNDANT_STYLE_MARKER"
     bible.characters[0].appearance_canonical = marker
+    bible.world.visual_style_canonical = style_marker
     shot = _contact_shot(
         characters=["萧炎"],
         characters_visible=["萧炎"],
@@ -97,8 +99,11 @@ def test_seeded_keyframe_omits_redundant_textual_character_appearance() -> None:
     )
 
     assert marker in unseeded
+    assert style_marker in unseeded
     assert marker not in seeded
+    assert style_marker not in seeded
     assert "萧炎: identity, face, body build, and outfit are locked" in seeded
+    assert "Episode style: locked by the provided reference images." in seeded
 
 
 def test_keyframe_contract_fingerprint_changes_with_dialogue_emotion() -> None:

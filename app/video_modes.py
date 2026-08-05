@@ -1317,7 +1317,12 @@ def reference_generation_prompt(
         )
     common = (
         f"{body} Characters: {anchor_text or '(no visible character)'}. "
-        f"Episode style: {bible.world.visual_style_canonical}. "
+        "Episode style: "
+        + (
+            "locked by the provided reference images. "
+            if identity_seeded
+            else f"{bible.world.visual_style_canonical}. "
+        )
     )
     if ref_type != "plot_key_frame":
         return (
