@@ -843,6 +843,68 @@ def normalize_screenplay_voice_ids(screenplay, bible: Bible) -> list[dict]:
         if str(voice_id or "").strip()
     }
     changes: list[dict] = []
+    from app.validators import screenplay_speaker_names
+
+    dialogue_speakers = {
+        str(turn.speaker or "").strip()
+        for chain in (getattr(screenplay, "dialogue_chains", None) or [])
+        for turn in (chain.turns or [])
+        if str(turn.speaker or "").strip()
+    }
+    dialogue_speakers.update(screenplay_speaker_names(
+        getattr(screenplay, "full_script_text", "") or "",
+    ))
+    dialogue_turns = [
+        (
+            str(turn.speaker or "").strip(),
+            str(turn.line or "").strip(),
+        )
+        for chain in (getattr(screenplay, "dialogue_chains", None) or [])
+        for turn in (chain.turns or [])
+        if str(turn.speaker or "").strip() and str(turn.line or "").strip()
+    ]
+
+    def alias_candidate(ledger_items) -> str | None:
+        ledger_text = "\n".join(
+            f"{item.content or ''}\n{item.exact_text or ''}"
+            for item in ledger_items
+        )
+        exact_texts = {
+            str(item.exact_text or "").strip()
+            for item in ledger_items
+            if str(item.exact_text or "").strip()
+        }
+        exact_speakers = {
+            speaker
+            for speaker, line in dialogue_turns
+            for exact_text in exact_texts
+            if (
+                speaker in bible_names
+                and (exact_text == line or exact_text in line or line in exact_text)
+            )
+        }
+        mentioned_candidates = {
+            name
+            for name in bible_names
+            if name in dialogue_speakers and name in ledger_text
+        }
+        leading_candidates = {
+            name
+            for name in mentioned_candidates
+            if any(
+                str(item.content or "").strip().startswith(name)
+                for item in ledger_items
+            )
+        }
+        candidates = (
+            exact_speakers
+            if len(exact_speakers) == 1
+            else mentioned_candidates
+            if len(mentioned_candidates) == 1
+            else leading_candidates
+        )
+        return next(iter(candidates)) if len(candidates) == 1 else None
+
     voice_delivery_owners = {"spoken_dialogue", "offscreen_voice", "narration"}
     non_voice_carriers: set[str] = set()
     for voice in getattr(screenplay, "voice_bible", None) or []:
@@ -859,6 +921,8 @@ def normalize_screenplay_voice_ids(screenplay, bible: Bible) -> list[dict]:
             for item in (getattr(screenplay, "information_ledger", None) or [])
             if str(item.speaker_id or "").strip() == source_id
         ]
+        if alias_candidate(ledger_items):
+            continue
         if ledger_items and all(
             str(item.delivery_owner or "").strip() not in voice_delivery_owners
             for item in ledger_items
@@ -901,11 +965,13 @@ def normalize_screenplay_voice_ids(screenplay, bible: Bible) -> list[dict]:
             for voice in (getattr(screenplay, "voice_bible", None) or [])
             if str(voice.speaker_id or "").strip() not in non_voice_carriers
         ]
-        changes.extend({
+        non_voice_changes = [{
             "source_label": source_id,
             "canonical_name": "",
             "resolution": "non_voice_carrier_removed",
-        } for source_id in sorted(non_voice_carriers))
+        } for source_id in sorted(non_voice_carriers)]
+    else:
+        non_voice_changes = []
 
     dialogue_speakers = {
         str(turn.speaker or "").strip()
@@ -913,8 +979,6 @@ def normalize_screenplay_voice_ids(screenplay, bible: Bible) -> list[dict]:
         for turn in (chain.turns or [])
         if str(turn.speaker or "").strip()
     }
-    from app.validators import screenplay_speaker_names
-
     dialogue_speakers.update(screenplay_speaker_names(
         getattr(screenplay, "full_script_text", "") or "",
     ))
@@ -929,15 +993,6 @@ def normalize_screenplay_voice_ids(screenplay, bible: Bible) -> list[dict]:
         for voice in (getattr(screenplay, "voice_bible", None) or [])
         if str(voice.speaker_id or "").strip()
     }
-    dialogue_turns = [
-        (
-            str(turn.speaker or "").strip(),
-            str(turn.line or "").strip(),
-        )
-        for chain in (getattr(screenplay, "dialogue_chains", None) or [])
-        for turn in (chain.turns or [])
-        if str(turn.speaker or "").strip() and str(turn.line or "").strip()
-    ]
     unreferenced_voice_ids: set[str] = set()
 
     for voice in getattr(screenplay, "voice_bible", None) or []:
@@ -958,47 +1013,9 @@ def normalize_screenplay_voice_ids(screenplay, bible: Bible) -> list[dict]:
             if source_id not in referenced_speakers:
                 unreferenced_voice_ids.add(source_id)
             continue
-        ledger_text = "\n".join(
-            f"{item.content or ''}\n{item.exact_text or ''}"
-            for item in ledger_items
-        )
-        exact_texts = {
-            str(item.exact_text or "").strip()
-            for item in ledger_items
-            if str(item.exact_text or "").strip()
-        }
-        exact_speakers = {
-            speaker
-            for speaker, line in dialogue_turns
-            for exact_text in exact_texts
-            if (
-                speaker in bible_names
-                and (exact_text == line or exact_text in line or line in exact_text)
-            )
-        }
-        mentioned_candidates = {
-            name
-            for name in bible_names
-            if name in dialogue_speakers and name in ledger_text
-        }
-        leading_candidates = {
-            name
-            for name in mentioned_candidates
-            if any(
-                str(item.content or "").strip().startswith(name)
-                for item in ledger_items
-            )
-        }
-        candidates = (
-            exact_speakers
-            if len(exact_speakers) == 1
-            else mentioned_candidates
-            if len(mentioned_candidates) == 1
-            else leading_candidates
-        )
-        if len(candidates) != 1:
+        canonical_name = alias_candidate(ledger_items)
+        if not canonical_name:
             continue
-        canonical_name = next(iter(candidates))
         if canonical_name in existing_voice_ids:
             continue
 
@@ -1013,6 +1030,7 @@ def normalize_screenplay_voice_ids(screenplay, bible: Bible) -> list[dict]:
             "resolution": "voice_alias_from_ledger",
         })
 
+    changes.extend(non_voice_changes)
     if unreferenced_voice_ids:
         screenplay.voice_bible = [
             voice

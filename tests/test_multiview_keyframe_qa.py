@@ -781,8 +781,8 @@ def test_clone_portrait_views_zero_cost_bind(tmp_path, monkeypatch) -> None:
     assert all(Path(v["image_path"]).exists() for v in views)
 
 
-def test_refresh_portrait_pack_failure_switches_to_primary_fallback(monkeypatch, tmp_path) -> None:
-    """整包 QA 失败不得切换版本：临时段删除，旧开区间继续生效。"""
+def test_refresh_portrait_pack_failure_preserves_previous_ready_segment(monkeypatch, tmp_path) -> None:
+    """整包结构失败不得切换版本：失败候选归档，旧开区间继续生效。"""
     import asyncio
     import threading
     from app import db

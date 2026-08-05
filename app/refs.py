@@ -61,6 +61,10 @@ _NON_PRODUCTION_APPEARANCE_RE = re.compile(
     r"裸体|裸露|赤裸|一丝不挂|内裤|胸罩|文胸)",
     re.IGNORECASE,
 )
+_CLOTHING_HIDDEN_SKIN_MARK_RE = re.compile(
+    r"(?:腰侧|腰部|胸部|腹部|背部|大腿|臀部|髋部|胯部)"
+    r"[^，,；;。]*(?:痣|胎记|纹身|疤痕)",
+)
 _APPEARANCE_LIST_PREFIX_RE = re.compile(
     r"^(?P<prefix>.*?标志性特征(?:是|为)?)(?P<items>.*)$",
 )
@@ -71,7 +75,10 @@ _PORTRAIT_CLOTHING_CONTRACT = (
 
 
 def contains_non_production_appearance(anchor: str) -> bool:
-    return bool(_NON_PRODUCTION_APPEARANCE_RE.search(anchor or ""))
+    return bool(
+        _NON_PRODUCTION_APPEARANCE_RE.search(anchor or "")
+        or _CLOTHING_HIDDEN_SKIN_MARK_RE.search(anchor or "")
+    )
 
 
 def production_appearance_anchor(anchor: str) -> str:
@@ -82,7 +89,7 @@ def production_appearance_anchor(anchor: str) -> str:
         clause = raw_clause.strip()
         if not clause:
             continue
-        if not _NON_PRODUCTION_APPEARANCE_RE.search(clause):
+        if not contains_non_production_appearance(clause):
             kept.append(clause)
             continue
         match = _APPEARANCE_LIST_PREFIX_RE.match(clause)
@@ -91,7 +98,7 @@ def production_appearance_anchor(anchor: str) -> str:
         items = [
             item.strip()
             for item in re.split(r"[、与和及]+", items_text)
-            if item.strip() and not _NON_PRODUCTION_APPEARANCE_RE.search(item)
+            if item.strip() and not contains_non_production_appearance(item)
         ]
         if items:
             kept.append(f"{prefix}{'、'.join(items)}")

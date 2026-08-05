@@ -1033,12 +1033,17 @@ def test_voice_alias_is_normalized_only_from_unambiguous_ledger_identity() -> No
         "source_label": "V-WYC",
         "canonical_name": "王有材",
         "resolution": "voice_alias_from_ledger",
+    }, {
+        "source_label": "V-AMBIGUOUS",
+        "canonical_name": "",
+        "resolution": "non_voice_carrier_removed",
     }]
     assert script.voice_bible[0].speaker_id == "孟浩"
     assert script.information_ledger[0].speaker_id == "孟浩"
     assert script.voice_bible[1].speaker_id == "王有材"
     assert script.information_ledger[1].speaker_id == "王有材"
-    assert script.voice_bible[2].speaker_id == "V-AMBIGUOUS"
+    assert len(script.voice_bible) == 2
+    assert script.information_ledger[2].speaker_id is None
 
 
 def test_voice_normalization_removes_only_unreferenced_unbound_entries() -> None:
