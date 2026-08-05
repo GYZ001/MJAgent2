@@ -226,7 +226,15 @@ def _assert_review_dependency_fence(job, version_id: str, write_point: str) -> N
             for item in items
             if item.get("shot_id") != target_shot_id
         )
-    assets_equal = not expected_assets or asset_contract(current_assets) == asset_contract(expected_assets)
+    # Modern narrative jobs bind exact asset revisions in the validated video
+    # plan and recheck them again at provider submission. Shot galleries are
+    # downstream outputs: parallel sibling jobs naturally add images and must
+    # not invalidate one another's captured qualification snapshot.
+    assets_equal = bool(
+        current_requires_authority
+        or not expected_assets
+        or asset_contract(current_assets) == asset_contract(expected_assets)
+    )
     if (
         current.get("eligible_for_production")
         and upstream_equal

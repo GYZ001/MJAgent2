@@ -306,6 +306,36 @@ async def test_worker_ignores_optional_review_score_change_before_provider_submi
     )
 
 
+@pytest.mark.asyncio
+async def test_parallel_narrative_job_ignores_sibling_gallery_outputs(
+    monkeypatch,
+) -> None:
+    await _published_authority_case(monkeypatch)
+    snapshot = api._review_upstream_snapshot("episode-generic")
+    shot_id = _insert_version(
+        version_id="version-before-sibling-gallery",
+        snapshot=_captured_review_snapshot(snapshot),
+    )
+    current = {
+        **snapshot,
+        "qualification_version": (
+            f"{snapshot['narrative_authority_version']}:gallery-output-changed"
+        ),
+        "asset_inputs": [{
+            "shot_id": "another-shot",
+            "ref_id": "new-sibling-output",
+            "gate_status": "scored",
+        }],
+    }
+    monkeypatch.setattr(api, "_review_upstream_snapshot", lambda *_a, **_k: current)
+
+    worker._assert_review_dependency_fence(
+        {"episode_id": "episode-generic", "shot_id": shot_id},
+        "version-before-sibling-gallery",
+        "provider_input_adoption",
+    )
+
+
 def test_legacy_plan_null_worker_keeps_missing_snapshot_compatibility(monkeypatch) -> None:
     from tests.test_review_wall_prd import _conn
 
