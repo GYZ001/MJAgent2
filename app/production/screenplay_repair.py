@@ -2106,6 +2106,17 @@ async def run_screenplay_production(
     from app.stages import generate_screenplay_baseline
 
     conn = get_conn()
+    if not isinstance(episode.get("authorized_source_chapters"), dict):
+        from app.production.screenplay_authority import (
+            screenplay_authorized_source_chapters,
+        )
+
+        try:
+            episode["authorized_source_chapters"] = (
+                screenplay_authorized_source_chapters(episode_id)
+            )
+        except ValueError:
+            episode["authorized_source_chapters"] = {}
     contract = get_contract("screenplay")
     from app.production.screenplay_authority import screenplay_authority_fingerprint
 

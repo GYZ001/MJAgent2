@@ -368,11 +368,17 @@ def derive_continuity_mode(shot: Shot, prev: Shot | None = None) -> str:
         if mode == "action_continuation" or mode not in CONTINUITY_MODES:
             return "scene_change" if int(shot.shot_no or 0) == 1 else "same_scene_cut"
         return mode
+    same_context = (
+        same_scene(shot, prev)
+        and _scene_time_context(shot) == _scene_time_context(prev)
+    )
+    if mode == "scene_change" and same_context:
+        return "same_scene_cut"
+    if mode in CONTINUITY_MODES and not same_context:
+        return "scene_change"
     if mode in CONTINUITY_MODES:
         return mode
-    same_location = same_scene(shot, prev)
-    same_time = scene_time_of(shot) == scene_time_of(prev)
-    if not same_location or not same_time:
+    if not same_context:
         return "scene_change"
     # 旧数据 continuity_from_prev=true：仅表示同场景接镜，不是动作连续；默认 same_scene_cut
     if shot.continuity_from_prev:
