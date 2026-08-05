@@ -1293,9 +1293,17 @@ def reference_generation_prompt(
     *,
     content_override: str | None = None,
     screenplay: EpisodeScreenplay | None = None,
+    identity_seeded: bool = False,
 ) -> str:
     anchors = _keyframe_character_anchors(shot, bible, screenplay=screenplay)
-    anchor_text = "; ".join(f"{name}: {appearance}" for name, appearance in anchors.items())
+    anchor_text = "; ".join(
+        (
+            f"{name}: identity, face, body build, and outfit are locked by "
+            "the provided reference images"
+        )
+        if identity_seeded else f"{name}: {appearance}"
+        for name, appearance in anchors.items()
+    )
     # content_override：LLM 按剧本写的内容提示词。它只能补充美术细节，不能覆盖下方
     # 确定性构图合同。最终合同在截断后追加，避免第二人物/接触点被截掉。
     if content_override:
@@ -1546,6 +1554,7 @@ async def _generate_one_reference(*, project_id: str, episode_no: int, shot: Sho
         index,
         content_override=content_override,
         screenplay=screenplay,
+        identity_seeded=bool(seed_inputs),
     )
     if seed_inputs:
         prompt += _SEED_USAGE_NOTE

@@ -73,6 +73,34 @@ def test_provider_prompt_overrides_conflicting_front_view_and_scale() -> None:
     assert video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION in prompt
 
 
+def test_seeded_keyframe_omits_redundant_textual_character_appearance() -> None:
+    bible = _bible()
+    marker = "REDUNDANT_APPEARANCE_MARKER"
+    bible.characters[0].appearance_canonical = marker
+    shot = _contact_shot(
+        characters=["萧炎"],
+        characters_visible=["萧炎"],
+    )
+
+    unseeded = video_modes.reference_generation_prompt(
+        shot,
+        bible,
+        "plot_key_frame",
+        1,
+    )
+    seeded = video_modes.reference_generation_prompt(
+        shot,
+        bible,
+        "plot_key_frame",
+        1,
+        identity_seeded=True,
+    )
+
+    assert marker in unseeded
+    assert marker not in seeded
+    assert "萧炎: identity, face, body build, and outfit are locked" in seeded
+
+
 def test_keyframe_contract_fingerprint_changes_with_dialogue_emotion() -> None:
     winning = _contact_shot(dialogues=[{
         "speaker": "萧炎", "line": "我赢了", "emotion": "兴奋",
