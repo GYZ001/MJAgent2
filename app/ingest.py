@@ -25,6 +25,19 @@ SOCIAL_AD_RE = re.compile(
     r"(?:关注|搜索|添加|加|回复).{0,8}(?:微信公众号|微信号|微信公众平台|QQ群|qq群)"
     r"|(?:微信公众号|微信号|QQ群|qq群).{0,12}(?:关注|搜索|添加|加入|交流|福利|领取)",
 )
+PUBLISHING_PROMO_RE = re.compile(
+    r"(?:推荐票|会员点击|起点币|新书发布会|发布\s*vip\s*章节|免费抽奖|大转盘抽奖|"
+    r"ipadmini|支持正版|未完待续|码字)"
+    r"|(?:求|投|给|支持|呼唤|拜托|别忘|争|拼|保底|双倍|冲).{0,12}月票"
+    r"|月票.{0,24}(?:求|投|给|支持|呼唤|拜托|别忘|榜|第一|过万|爆发|订阅|双倍|保底|危机)"
+    r"|(?:收藏.{0,24}(?:新书|推荐票|抽奖|奖励|会员点击)|新书.{0,24}收藏)"
+    r"|(?:第[0-9一二三四五六七八九十百]+更|[0-9一二三四五六七八九十]+更(?:送上|爆发))"
+    r"|(?:今日|今天|凌晨|晚上|白天).{0,24}(?:爆发|更新|还有[0-9一二三四五六七八九十]+[章更])"
+    r"|(?:手游|游戏).{0,24}(?:公测|下载地址|礼包)",
+    re.IGNORECASE,
+)
+PROMO_SEPARATOR_RE = re.compile(r"(?:[-_=~*]{4,}|[－—～·]{4,})")
+SEPARATOR_ONLY_RE = re.compile(r"^(?:[-_=~*]{4,}|[－—～·]{4,})$")
 
 FALLBACK_CHUNK_CHARS = 3000
 STUB_CHAPTER_MAX_CHARS = 120
@@ -73,9 +86,31 @@ def clean_text(text: str) -> tuple[str, int]:
         is_social_ad = bool(
             stripped and len(stripped) <= 160 and SOCIAL_AD_RE.search(stripped)
         )
+        is_publishing_promo = bool(
+            stripped and len(stripped) <= 800 and PUBLISHING_PROMO_RE.search(stripped)
+        )
+        if stripped and is_publishing_promo:
+            # Scraped chapters often append an author note after a decorative
+            # separator on the same line. Preserve the story sentence before it.
+            prefix = ""
+            for match in reversed(list(PROMO_SEPARATOR_RE.finditer(stripped))):
+                suffix = stripped[match.end():].strip()
+                if suffix and PUBLISHING_PROMO_RE.search(suffix):
+                    prefix = stripped[:match.start()].strip()
+                    break
+            if prefix:
+                kept.append(prefix)
+            elif kept and SEPARATOR_ONLY_RE.fullmatch(kept[-1]):
+                kept.pop()
+                removed += 1
+            removed += 1
+            continue
         if stripped and (
             any(marker in stripped for marker in AD_MARKERS) or is_social_ad
         ):
+            if kept and SEPARATOR_ONLY_RE.fullmatch(kept[-1]):
+                kept.pop()
+                removed += 1
             removed += 1
             continue
         kept.append(stripped)

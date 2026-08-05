@@ -99,3 +99,39 @@ def test_clean_text_keeps_story_wechat_but_removes_social_promotion() -> None:
     assert "他打开微信" in cleaned
     assert "她放下手机" in cleaned
     assert "微信公众号" not in cleaned
+
+
+def test_clean_text_removes_web_novel_author_promotions() -> None:
+    cleaned, removed = clean_text(
+        "孟浩抬头望向山门，决定继续前行。\n"
+        "－－－－－－－－－－－－－\n"
+        "书生孟浩和大家见面啦，收藏和推荐票，一个都不要少呀，"
+        "首页有新书活动，还有大转盘抽奖和起点币奖励。\n"
+        "收藏，推荐票！！\n"
+        "晚上还有一章，今晚八点有语音活动，新书发布会。"
+    )
+
+    assert cleaned == "孟浩抬头望向山门，决定继续前行。"
+    assert removed == 4
+
+
+def test_clean_text_preserves_story_prefix_before_inline_promotion() -> None:
+    cleaned, removed = clean_text(
+        "孟浩深吸口气，淡淡开口。－－－－亲，推荐票别忘了啊\n"
+        "次日，他把收藏的古籍放回书架。"
+    )
+
+    assert cleaned == "孟浩深吸口气，淡淡开口。\n次日，他把收藏的古籍放回书架。"
+    assert removed == 1
+
+
+def test_clean_text_removes_update_and_monthly_ticket_author_notes() -> None:
+    cleaned, removed = clean_text(
+        "剑光落下，山谷重新安静。\n"
+        "第三更送上，今天继续六更爆发，道友们月票请给力！\n"
+        "她买了一张公交月票，随后走进车站。"
+    )
+
+    assert "第三更送上" not in cleaned
+    assert "公交月票" in cleaned
+    assert removed == 1
