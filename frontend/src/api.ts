@@ -1740,6 +1740,9 @@ export interface Episode {
     activation_count?: number;
     patch_count?: number;
     open_issue_count?: number;
+    quality_score?: number | null;
+    quality_issue_count?: number;
+    gate_retry_exhausted?: boolean;
     yield_reason?: string;
   } | null;
   shots?: Shot[];

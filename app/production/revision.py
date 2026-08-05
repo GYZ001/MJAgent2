@@ -242,6 +242,9 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
         "activation_count": int(checkpoint.get("activation_no") or 0),
         "patch_count": len(checkpoint.get("patch_artifact_ids") or []),
         "open_issue_count": len(checkpoint.get("open_issue_ids") or []),
+        "quality_score": checkpoint.get("quality_score"),
+        "quality_issue_count": int(checkpoint.get("quality_issue_count") or 0),
+        "gate_retry_exhausted": bool(checkpoint.get("gate_retry_exhausted")),
         "yield_reason": str(checkpoint.get("yield_reason") or ""),
     }
 

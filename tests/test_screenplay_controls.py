@@ -14,6 +14,7 @@ from app.evidence import repository
 from app.production.revision import (
     ensure_production_revision,
     mark_baseline_generated,
+    save_checkpoint,
     screenplay_production_state,
     set_published_artifact,
 )
@@ -64,11 +65,19 @@ def test_production_state_resumes_post_baseline_stages() -> None:
         "人物识别", "生成首版", "结构校验", "质量评分", "原子发布", "已完成",
     ]
 
+    save_checkpoint(revision.id, {
+        "phase": "SUCCEEDED",
+        "quality_score": 42.0,
+        "quality_issue_count": 3,
+        "gate_retry_exhausted": True,
+    })
     set_published_artifact(revision.id, "artifact-working")
     completed = screenplay_production_state("e1")
     assert completed["operation"] == "complete"
     assert completed["phase"] == "SUCCEEDED"
     assert all(item["status"] == "completed" for item in completed["stages"])
+    assert completed["quality_score"] == 42.0
+    assert completed["quality_issue_count"] == 3
 
 
 def test_resume_route_has_a_distinct_capability() -> None:

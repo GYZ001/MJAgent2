@@ -10116,6 +10116,21 @@ label.f {
   color: var(--cinnabar-deep);
   background: #fff4f1;
 }
+.screenplay-quality-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 7px 0 0;
+  color: #40724f;
+  font: 600 11px/1.4 var(--ui);
+}
+.screenplay-quality-summary.warning {
+  color: #8a641c;
+}
+.screenplay-quality-summary small {
+  color: var(--ink-faint);
+  font: 10px/1.4 var(--ui);
+}
 .screenplay-secondary-row {
   margin-top: 12px;
   padding-top: 12px;

@@ -689,21 +689,34 @@ export default function ScriptPage() {
         </div>
 
         {ep.screenplay_production?.stages?.length ? (
-          <ol className="screenplay-stage-rail" aria-label="剧本制作阶段">
-            {ep.screenplay_production.stages.map((stage, index) => (
-              <li key={stage.key} data-status={stage.status}
-                aria-current={stage.status === 'in_progress' || stage.status === 'paused' ? 'step' : undefined}>
-                <i>{stage.status === 'completed' ? '✓' : index + 1}</i>
-                <span>{stage.label}</span>
-                <small>{
-                  stage.status === 'completed' ? '已完成'
-                    : stage.status === 'in_progress' ? '进行中'
-                      : stage.status === 'paused' ? '已暂停'
-                        : '待开始'
-                }</small>
-              </li>
-            ))}
-          </ol>
+          <>
+            <ol className="screenplay-stage-rail" aria-label="剧本制作阶段">
+              {ep.screenplay_production.stages.map((stage, index) => (
+                <li key={stage.key} data-status={stage.status}
+                  aria-current={stage.status === 'in_progress' || stage.status === 'paused' ? 'step' : undefined}>
+                  <i>{stage.status === 'completed' ? '✓' : index + 1}</i>
+                  <span>{stage.label}</span>
+                  <small>{
+                    stage.status === 'completed' ? '已完成'
+                      : stage.status === 'in_progress' ? '进行中'
+                        : stage.status === 'paused' ? '已暂停'
+                          : '待开始'
+                  }</small>
+                </li>
+              ))}
+            </ol>
+            {ep.screenplay_production.quality_score != null && (
+              <p className={`screenplay-quality-summary ${
+                (ep.screenplay_production.quality_issue_count ?? 0) > 0 ? 'warning' : ''
+              }`}>
+                质量评分 {ep.screenplay_production.quality_score.toFixed(0)} 分
+                {ep.screenplay_production.quality_issue_count
+                  ? ` · ${ep.screenplay_production.quality_issue_count} 项评审风险`
+                  : ' · 未发现评审风险'}
+                <small>评分仅供评审，不影响结构完整剧本发布</small>
+              </p>
+            )}
+          </>
         ) : null}
 
         <div className="screenplay-secondary-row">
