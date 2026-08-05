@@ -3096,12 +3096,8 @@ async def _maybe_auto_qa(
     *,
     allow_autonomous_retake: bool = True,
 ) -> bool:
-    """评分并决定是否在预算内定向重抽。
-
-    返回 ``False`` 表示已安排下一条候选，或由 complete Supervisor 接管；当前
-    版本先保留但不立即采用。返回 ``True`` 表示达到目标、QA 不可用或预算耗尽，
-    调用方应立即 best-effort 择优，绝不能因内容 QA 停住任务。
-    """
+    """旁路评分现有视频，不得据此创建新版本或延迟采用。"""
+    del allow_autonomous_retake  # 兼容旧调用签名；QA 已永久退出控制流。
     if get_setting("auto_qa") != "true" or not shutil.which("ffmpeg"):
         return True
     conn = get_conn()
@@ -3157,84 +3153,28 @@ async def _maybe_auto_qa(
             qa,
             technical=json.loads(version["technical_validation_json"] or "{}") if version else {},
         )
-        from app.media_pipeline.retry_policy import decide_qa_retake
-
-        try:
-            retake_count = int(meta_for_qa.get("auto_retake_count") or 0)
-        except (TypeError, ValueError):
-            retake_count = 0
         qa_unavailable = bool(
             qa.get("overall") is None
             or qa.get("status") == "unverified"
             or qa.get("qa_recovered")
         )
-        decision = decide_qa_retake(
-            auto_retake_count=retake_count,
-            qa_overall=None if qa_unavailable else qa.get("overall"),
-            threshold=get_setting("auto_retake_threshold") or 0.6,
-            hard_failures=[] if qa_unavailable else hard_failures,
-        )
-        qa["evaluation_role"] = "retry_and_rank"
+        qa["evaluation_role"] = "score_only"
         qa["runtime_blocking"] = False
-        qa["retry_eligible"] = decision.allow
-        qa["retry_decision"] = {
-            "allow": decision.allow,
-            "attempt": decision.attempt,
-            "max_attempts": decision.max_attempts,
-            "reason": decision.reason,
-        }
+        qa["retry_eligible"] = False
         qa["score_status"] = "unavailable" if qa_unavailable else "scored"
         _assert_review_dependency_fence(job, version_id, "qa_result")
         _set_version(version_id, qa_json=json.dumps(qa, ensure_ascii=False))
         log_provider_call(
-            "vlm_qa", config.MODEL_VLM, "QA_RETRY_AND_RANK", None, 0,
+            "vlm_qa", config.MODEL_VLM, "QA_SCORE_ONLY", None, 0,
             meta={
                 "shot_id": job["shot_id"],
                 "version_id": version_id,
                 "overall": qa.get("overall"),
                 "score_status": qa.get("score_status"),
                 "hard_failures": hard_failures,
-                "retake": bool(decision.allow and allow_autonomous_retake),
-                "retake_count": retake_count,
-                "retake_limit": decision.max_attempts,
+                "retake": False,
             },
         )
-
-        if decision.allow and allow_autonomous_retake:
-            from app.continuity import retry_patch_for_failure
-
-            negatives: list[str] = []
-            critiques: list[str] = []
-            for failure in hard_failures:
-                patch = retry_patch_for_failure(failure)
-                for item in patch.get("extra_negative") or []:
-                    if item not in negatives:
-                        negatives.append(str(item))
-                hint = str(patch.get("hint") or "").strip()
-                if hint and hint not in critiques:
-                    critiques.append(hint)
-            if not critiques:
-                critiques.append(decision.reason)
-            try:
-                queued = enqueue_shot(
-                    job["shot_id"],
-                    reroll=True,
-                    after_shot_id=job["after_shot_id"],
-                    auto_retake_count=retake_count + 1,
-                    dependency_snapshot=dependency or None,
-                    extra_negative=negatives[:8],
-                    critique=critiques[:6],
-                )
-                if not queued.get("paused_budget"):
-                    return False
-            except Exception as exc:  # noqa: BLE001 - 重抽失败必须退回当前最佳，不中断交付
-                log_provider_call(
-                    "video_qa_retake", config.MODEL_VIDEO, "RETAKE_ENQUEUE_FAILED",
-                    None, 0, error=str(exc),
-                    meta={"shot_id": job["shot_id"], "version_id": version_id},
-                )
-        elif decision.allow and not allow_autonomous_retake:
-            return False
         return True
     except ReviewDependencyFence:
         raise
@@ -3244,7 +3184,7 @@ async def _maybe_auto_qa(
             qa_json=json.dumps({
                 "overall": None,
                 "issues": [f"质检未完成：{exc}"],
-                "evaluation_role": "retry_and_rank",
+                "evaluation_role": "score_only",
                 "score_status": "unavailable",
                 "runtime_blocking": False,
                 "retry_eligible": False,

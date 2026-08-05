@@ -164,7 +164,9 @@ class CoverageLedger(BaseModel):
                 continue
             if e.active_job_id:
                 continue
-            if e.grade == "A" and not e.chain_stale and not e.video_stale:
+            # 技术有效候选一旦存在，就必须先采用并收口；QA 等级、连续性评分
+            # 和内容风险不能把它重新送入付费修复循环。
+            if e.best_version_id:
                 continue
             out.append(e)
         return out
@@ -1911,7 +1913,7 @@ def _adopt_ready_candidates(
     *,
     run_id: str | None,
 ) -> int:
-    """正常运行期采用达到质量目标或 QA 不可用的候选；其余留给有限重试。"""
+    """正常运行期采用首个技术有效候选；QA 只影响风险展示。"""
     adopted = 0
     for entry in ledger.entries:
         if entry.adopted_version_id or not entry.best_version_id:

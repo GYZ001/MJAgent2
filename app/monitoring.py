@@ -87,10 +87,6 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     "auto_concurrency": _number("兼容旧版视频并发", "15", 1, 128, unit="任务"),
     "episode_cost_limit_cny": _number("单集成本上限", "100", 0, 1_000_000, step=.01, unit="元", integer=False),
     "max_ref_images": _number("单镜头最多参考图数", "2", 0, 16, unit="张"),
-    "auto_retake_threshold": _number(
-        "历史质量阈值（不触发重抽）", "0.6", 0, 1, step=.05, integer=False,
-        description="兼容旧配置读取；QA 分数不再控制自动重抽、重试或门禁。",
-    ),
     "max_repair_attempts": _number("修复重试上限", "8", 0, 30, unit="次"),
     "provider_call_retention_days": _number("模型调用日志保留天数", "30", 1, 365, unit="天", immediate=False),
     "error_log_retention_days": _number("错误日志保留天数", "30", 1, 365, unit="天", immediate=False),

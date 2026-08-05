@@ -1,4 +1,4 @@
-"""统一重试 / 自动重抽策略中心。"""
+"""统一偶然错误重试策略中心。"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -13,7 +13,6 @@ class RetryKind(str, Enum):
     SAFETY = "safety"                          # 同版本清 task_id 再提交
     COPYRIGHT = "copyright"
     TECHNICAL = "technical"                    # 技术校验失败 → 可新建版本重提
-    QA_RETAKE = "qa_retake"                    # 质量低分 → 同参考图集重抽
 
 
 @dataclass(frozen=True)
@@ -46,11 +45,7 @@ def decide_retry_by_error_class(
     max_attempts: int | None = None,
     context_missing_retryable: bool = False,
 ) -> RetryDecision:
-    """Generic error-class retry policy for accidental/transient failures.
-
-    Content QA is deliberately rejected by this entry point because its bounded
-    retry-and-rank policy lives in :func:`decide_qa_retake`.
-    """
+    """Generic error-class retry policy for accidental/transient failures."""
     normalized = str(error_class or "").strip().upper()
     lowered = normalized.lower()
     limit = max_attempts if max_attempts is not None else technical_resubmit_limit()
@@ -63,7 +58,7 @@ def decide_retry_by_error_class(
             False,
             RetryKind.TECHNICAL,
             False,
-            "QA/quality/score findings must use the bounded QA retake policy",
+            "QA/quality/score findings are score-only and cannot trigger retries",
             limit,
             attempt,
         )
@@ -101,15 +96,6 @@ def decide_retry_by_error_class(
         attempt,
     )
 
-
-def auto_retake_limit() -> int:
-    """内容 QA 自动重抽上限（不含首条）；耗尽后必须 best-effort 收口。"""
-    try:
-        return min(5, max(0, int(get_setting("video_auto_retake_limit") or 2)))
-    except (TypeError, ValueError):
-        return 2
-
-
 def technical_resubmit_limit() -> int:
     return 2
 
@@ -118,41 +104,8 @@ def job_transient_max_retries() -> int:
     return int(config.VIDEO_JOB_MAX_RETRIES)
 
 
-def decide_qa_retake(*, auto_retake_count: int, qa_overall: float | None, threshold: float | None = None,
-                     hard_failures: list[str] | None = None) -> RetryDecision:
-    """把 QA 变成有界优化信号；低分/结构问题重抽，耗尽后交给择优兜底。"""
-    limit = auto_retake_limit()
-    try:
-        target = float(threshold if threshold is not None else (get_setting("auto_retake_threshold") or 0.6))
-    except (TypeError, ValueError):
-        target = 0.6
-    try:
-        score = float(qa_overall) if qa_overall is not None else None
-    except (TypeError, ValueError):
-        score = None
-    failures = [str(code).strip() for code in (hard_failures or []) if str(code).strip()]
-    low_score = score is not None and score < target
-    needs_retake = bool(failures) or low_score
-    allow = needs_retake and auto_retake_count < limit
-    if not needs_retake:
-        reason = "QA 达到当前质量目标，无需重抽"
-    elif allow:
-        details = ",".join(failures[:4]) if failures else f"score={score:.3f}<{target:.3f}"
-        reason = f"QA 触发有界重抽：{details}"
-    else:
-        reason = f"QA 仍未达目标，但重抽预算已耗尽（{auto_retake_count}/{limit}），转自动择优"
-    return RetryDecision(
-        allow,
-        RetryKind.QA_RETAKE,
-        allow,
-        reason,
-        limit,
-        auto_retake_count,
-    )
-
-
 def first_pass_retake_slot_fraction() -> float:
-    """首轮未覆盖完成前，自动重抽最多占视频槽位的比例。"""
+    """兼容历史重抽任务的调度配额；新 QA 不再创建此类任务。"""
     return 0.25
 
 

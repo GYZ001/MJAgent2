@@ -7,9 +7,9 @@ from app.db import get_setting
 from app.harness.types import Issue, IssueSeverity
 
 DEFAULT_FATAL_FAILURE_TYPES = ("character_duplicate", "text_error")
+VIDEO_QUALITY_REVIEW_THRESHOLD = 0.6
 
-# QA / classify 失败码 → Issue code。内容问题保持 WARNING：用于有限重试和排序，
-# 永远不能单独把整集置为失败或等待人工。
+# QA / classify 失败码 → Issue code。内容问题保持 WARNING，仅用于评分和排序。
 _QA_CODE_MAP: dict[str, tuple[str, IssueSeverity]] = {
     "character_duplicate": ("VIDEO_QA_CHARACTER_DUPLICATE", IssueSeverity.WARNING),
     "text_error": ("VIDEO_QA_TEXT_ARTIFACT", IssueSeverity.WARNING),
@@ -52,9 +52,9 @@ def is_fatal_failure_code(code: str) -> bool:
 
 
 def is_fatal(issue: Issue) -> bool:
-    """Issue 是否属于致命类（不允许降级为 B）。"""
-    if issue.code in {"VIDEO_QA_CHARACTER_DUPLICATE", "VIDEO_QA_TEXT_ARTIFACT"}:
-        return True
+    """非 QA Issue 是否属于需要停止自动处理的致命类。"""
+    if issue.code.startswith("VIDEO_QA_"):
+        return False
     rule = str((issue.evidence or {}).get("rule_id") or "")
     return bool(rule and rule in fatal_failure_types())
 
@@ -137,7 +137,7 @@ def issues_from_qa(
             shot_id=shot_id,
             message=f"视频 QA 质量风险：{ft}",
             shot_no=shot_no, version_id=version_id, job_id=job_id, rule_id=ft,
-            repair_hint="在镜头质量预算内定向重试；预算耗尽后自动择优，不阻断交付",
+            repair_hint="仅供人工复核；不得触发重做、拒绝采用或阻止交付",
         ))
 
     if qa.get("qa_recovered"):
@@ -152,10 +152,7 @@ def issues_from_qa(
         overall = float(qa.get("overall")) if qa.get("overall") is not None else None
     except (TypeError, ValueError):
         overall = None
-    try:
-        threshold = float(get_setting("auto_retake_threshold") or 0.6)
-    except (TypeError, ValueError):
-        threshold = 0.6
+    threshold = VIDEO_QUALITY_REVIEW_THRESHOLD
     if overall is not None and overall < threshold and not hard:
         out.append(_mk(
             "VIDEO_QA_LOW_SCORE", IssueSeverity.WARNING,

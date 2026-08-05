@@ -24,34 +24,15 @@ RepairStrategy = Literal[
 LEVEL_ORDER: list[RepairLevel] = ["L0", "L1", "L2", "L3", "L4", "L5", "L6"]
 
 STALL_ROUNDS = 2
-MIN_QA_GAIN = 0.03
 MAX_CHAIN_CASCADE_DEPTH = 3
 
 _PREFERRED_LEVEL: dict[str, RepairLevel] = {
     "VIDEO_PROVIDER_TRANSIENT": "L0",
     "VIDEO_DOWNLOAD_FAILED": "L0",
     "VIDEO_PROBE_UNAVAILABLE": "L0",
-    "VIDEO_QA_UNAVAILABLE": "L0",
     "VIDEO_PROVIDER_TIMEOUT": "L1",
     "VIDEO_FILE_INVALID": "L1",
     "VIDEO_DURATION_CONTRACT": "L1",
-    "VIDEO_QA_LOW_SCORE": "L1",
-    "VIDEO_QA_CHARACTER_DUPLICATE": "L2",
-    "VIDEO_QA_TEXT_ARTIFACT": "L2",
-    "VIDEO_QA_STATE_MISMATCH": "L2",
-    "VIDEO_QA_STORY_REPEAT": "L2",
-    "VIDEO_QA_FUTURE_LEAK": "L2",
-    "VIDEO_QA_WRONG_DIALOGUE": "L2",
-    "VIDEO_QA_NEEDS_CROP": "L2",
-    "VIDEO_QA_WRONG_IDENTITY": "L2",
-    "VIDEO_QA_WRONG_OUTFIT": "L2",
-    "VIDEO_QA_SUBJECT_OCCLUSION": "L2",
-    "VIDEO_QA_ACTION_MISSING": "L2",
-    "VIDEO_QA_PROP_IDENTITY": "L2",
-    "VIDEO_QA_PROP_STATE": "L2",
-    "VIDEO_QA_OBJECT_COUNT": "L2",
-    "VIDEO_QA_CAMERA_AXIS": "L2",
-    "VIDEO_QA_GEOMETRY": "L2",
     "VIDEO_REFERENCE_UNAVAILABLE": "L3",
     "VIDEO_CHAIN_ANCHOR_BLOCKED": "L3",
     "VIDEO_PROVIDER_SAFETY": "L4",
@@ -104,31 +85,9 @@ def strategy_for_level(
     if level == "L1":
         return "retake_same_input"
     if level == "L2":
-        # needs_crop 优先不计费后处理
-        if codes == {"VIDEO_QA_NEEDS_CROP"} or (
-            "VIDEO_QA_NEEDS_CROP" in codes and len(codes) == 1
-        ):
-            return "auto_crop"
-        if "VIDEO_QA_NEEDS_CROP" in codes and not (
-            codes & {
-                "VIDEO_QA_CHARACTER_DUPLICATE",
-                "VIDEO_QA_TEXT_ARTIFACT",
-                "VIDEO_QA_STATE_MISMATCH",
-                "VIDEO_QA_WRONG_IDENTITY",
-                "VIDEO_QA_ACTION_MISSING",
-                "VIDEO_QA_PROP_IDENTITY",
-                "VIDEO_QA_PROP_STATE",
-            }
-        ):
-            return "auto_crop"
         return "retake_directed"
     if level == "L3":
-        if codes & {
-            "VIDEO_CHAIN_ANCHOR_BLOCKED",
-            "VIDEO_QA_STORY_REPEAT",
-        } or (
-            "VIDEO_QA_STATE_MISMATCH" in codes and chain_position > 0
-        ):
+        if "VIDEO_CHAIN_ANCHOR_BLOCKED" in codes:
             return "degrade_chain"
         return "rebuild_reference"
     if level == "L4":
@@ -212,26 +171,23 @@ def route(
         elif isinstance(item, dict):
             normalized.append(Issue.model_validate(item))
 
-    qa_only = bool(normalized) and all(str(i.code).startswith("VIDEO_QA_") for i in normalized)
-    if qa_only:
-        codes = [i.code for i in normalized]
-        # QA 是有限优化信号，不参与 L3–L6 的暂停/人工升级。次数与成本上限由
-        # Supervisor 统一控制；路由器只给下一次尝试提供可执行方向。
-        level: RepairLevel = "L1" if set(codes) <= {"VIDEO_QA_LOW_SCORE"} else "L2"
-        history = list(qa_history or [])
-        if len(history) >= 2 and history[-1] - history[-2] < MIN_QA_GAIN:
-            level = "L2"
-        strategy = strategy_for_level(level, issues=normalized)
-        negatives, critiques = _directed_patch(normalized) if strategy == "retake_directed" else ([], [])
+    score_only = [
+        issue for issue in normalized
+        if str(issue.code).startswith("VIDEO_QA_")
+    ]
+    normalized = [
+        issue for issue in normalized
+        if not str(issue.code).startswith("VIDEO_QA_")
+    ]
+    if score_only and not normalized:
+        codes = [issue.code for issue in score_only]
         return VideoRepairPlan(
-            level=level,
-            strategy=strategy,
+            level="L0",
+            strategy="handoff_human",
             issue_codes=codes,
-            fingerprint=normalized[0].fingerprint,
-            reason=f"QA 有界质量重试：{', '.join(codes[:4])}",
-            is_paid=strategy not in {"requeue_no_charge", "handoff_human", "auto_crop"},
-            extra_negative=negatives,
-            critique=critiques,
+            fingerprint=score_only[0].fingerprint,
+            reason="QA 只评分，不进入视频修复路由",
+            is_paid=False,
         )
 
     counts = dict(fingerprint_counts or {})
@@ -305,13 +261,6 @@ def route(
     prior = int(counts.get(primary_fp, 0))
     if prior >= STALL_ROUNDS:
         level = upgrade_level(level)
-
-    # QA 边际收益早停 → 升级
-    history = list(qa_history or [])
-    if len(history) >= 2:
-        gain = history[-1] - history[-2]
-        if gain < MIN_QA_GAIN and level in {"L1", "L2"}:
-            level = upgrade_level(level)
 
     # 致命失败换过参考图后仍出现 → L6
     from app.video_issues import is_fatal

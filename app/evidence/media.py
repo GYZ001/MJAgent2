@@ -7,9 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from app.continuity import classify_video_hard_failures
-from app.db import get_conn, get_setting
+from app.db import get_conn
 from app.evidence import repository
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
+
+VIDEO_QUALITY_REVIEW_THRESHOLD = 0.6
 
 
 def _issue(code: str, message: str, subject: str, *, blocker: bool = True) -> Issue:
@@ -129,8 +131,14 @@ def _model_evaluation(qa: dict[str, Any] | None, *, subject: str, evaluator_name
     )
     if recovered:
         issues.append(_issue(
-            "EVALUATOR_RECOVERED", "评估器输出经保守恢复，不能独立触发自动采用", subject
+            "EVALUATOR_RECOVERED", "评估器输出经保守恢复，本次评分不可用", subject,
+            blocker=False,
         ))
+    issues = [
+        issue.model_copy(update={"severity": IssueSeverity.WARNING})
+        if issue.severity == IssueSeverity.BLOCKER else issue
+        for issue in issues
+    ]
     explicit_unverified = qa.get("status") in {"unverified", "pending"}
     status = "error" if recovered or explicit_unverified else (
         "failed" if hard_failures else ("warning" if issues else "passed")
@@ -140,14 +148,14 @@ def _model_evaluation(qa: dict[str, Any] | None, *, subject: str, evaluator_name
         evaluator_name=evaluator_name,
         evaluator_version="1.0.0",
         status=status,
-        hard_gate_passed=not recovered and not explicit_unverified and not hard_failures
-        and qa.get("hard_gate_passed") is not False,
-        evaluation_role=(qa.get("evaluation_role") or "retry_and_rank"),
+        # 兼容旧非空字段；真实语义由 score_only/runtime_blocking 表达。
+        hard_gate_passed=True,
+        evaluation_role="score_only",
         score_status=(
             "unavailable" if recovered or explicit_unverified or score is None else "scored"
         ),
         runtime_blocking=False,
-        retry_eligible=bool(qa.get("retry_eligible")),
+        retry_eligible=False,
         score=score,
         dimension_scores={
             key: float(value) * 100
@@ -349,10 +357,7 @@ def grade_shot_video(
         except (TypeError, ValueError):
             pass
 
-    try:
-        threshold = float(get_setting("auto_retake_threshold") or 0.6)
-    except (TypeError, ValueError):
-        threshold = 0.6
+    threshold = VIDEO_QUALITY_REVIEW_THRESHOLD
 
     hard_failures = classify_video_hard_failures(qa, technical=technical) if technical or qa else []
     fatal = [f for f in hard_failures if is_fatal_failure_code(f)]
@@ -363,8 +368,11 @@ def grade_shot_video(
     version_id = (row or {}).get("id") if row else None
 
     fallback_reason: str | None = None
-    if not passed or fatal:
+    if not passed:
         grade = "C"
+    elif fatal:
+        grade = "B"
+        fallback_reason = "存在高风险质量问题：" + ",".join(fatal)
     elif continuity_degraded:
         grade = "B"
         fallback_reason = "连续性已降链（纯参考图模式），衔接可能变弱"
@@ -439,20 +447,12 @@ def video_candidate_selection_score(
 def select_best_video_candidate(
     shot_id: str, *, force_best: bool = False
 ) -> dict[str, Any] | None:
-    """比较技术合格候选并落盘采用理由。
+    """采用首个技术有效视频；QA 只保留为排序和人工复核信息。
 
-    ``force_best=False`` 只在达到质量目标或 QA 全部不可用时采用；否则返回
-    ``None`` 让 Supervisor/Worker 使用剩余预算定向重试。``force_best=True``
-    表示预算已耗尽，必须选择当前综合风险最低的可播放候选完成交付。
+    ``force_best`` 仅为旧调用兼容。已有采用版不会被后续 QA 或新候选自动替换。
     """
+    del force_best
     conn = get_conn()
-    threshold_row = conn.execute(
-        "SELECT value FROM settings WHERE key='auto_retake_threshold'"
-    ).fetchone()
-    try:
-        threshold = float(threshold_row["value"] if threshold_row else 0.6)
-    except (TypeError, ValueError):
-        threshold = 0.6
     rows = conn.execute(
         "SELECT * FROM shot_versions WHERE shot_id=? AND status='succeeded' ORDER BY version_no",
         (shot_id,),
@@ -481,6 +481,7 @@ def select_best_video_candidate(
             "version_no": row["version_no"],
             "score": score if score is not None else -1.0,
             "qa": qa,
+            "adoption_reason": row["adoption_reason"],
             "hard_failures": hard_failures,
             "qa_recovered": bool(
                 qa.get("qa_recovered")
@@ -496,22 +497,16 @@ def select_best_video_candidate(
     if not technical_pool:
         return None
 
-    # 优先推荐分数达标者；否则取技术合格中最高分（不阻塞采用）。
-    qualified = [
-        entry for entry in technical_pool
-        if not entry["qa_recovered"]
-        and not entry["hard_failures"]
-        and entry["score"] >= threshold
-    ]
-    scored_pool = [entry for entry in technical_pool if not entry["qa_recovered"] and entry["score"] >= 0]
-    if not qualified and not force_best and scored_pool:
-        return None
-
-    candidates = qualified or technical_pool
-    fallback = not bool(qualified)
-
+    previous = conn.execute(
+        "SELECT adopted_version_id FROM shots WHERE id=?", (shot_id,)
+    ).fetchone()
+    adopted_id = previous["adopted_version_id"] if previous else None
+    best = next(
+        (entry for entry in technical_pool if entry["id"] == adopted_id),
+        technical_pool[0],
+    )
     ordered = sorted(
-        candidates,
+        technical_pool,
         key=lambda item: (
             not item["qa_recovered"],
             item["selection_score"],
@@ -520,34 +515,25 @@ def select_best_video_candidate(
         ),
         reverse=True,
     )
-    best = ordered[0]
-    margin = (
-        best["selection_score"] - ordered[1]["selection_score"]
-        if len(ordered) > 1 else best["selection_score"]
-    )
-    if fallback:
-        reason = (
-            f"质量预算耗尽/QA 不可用后自动比较 {len(ordered)} 个技术合格视频；"
-            f"采纳综合风险最低的 v{best['version_no']}，QA={best['score']:.3f}，"
-            f"选择分={best['selection_score']:.3f}（目标 {threshold:.3f}），"
-            f"领先次优 {margin:.3f}，剩余问题={best['hard_failures']}。"
+    already_adopted = adopted_id == best["id"]
+    if already_adopted:
+        reason = best.get("adoption_reason") or (
+            f"保留当前采用版 v{best['version_no']}；后续候选和 QA 评分不得自动替换。"
         )
     else:
         reason = (
-            f"自动比较 {len(ordered)} 个技术合格候选；选择 v{best['version_no']}，"
-            f"QA={best['score']:.3f}，选择分={best['selection_score']:.3f}，"
-            f"领先次优 {margin:.3f}。"
+            f"默认采用首个技术有效视频 v{best['version_no']}；"
+            f"QA={best['score']:.3f}、质量问题={best['hard_failures']} 仅供复核，"
+            "不触发重做或阻止采用。"
         )
-    previous = conn.execute(
-        "SELECT adopted_version_id FROM shots WHERE id=?", (shot_id,)
-    ).fetchone()
     observed_state_out = (best.get("qa") or {}).get("observed_state_out")
     if observed_state_out:
         persist_candidate_observed_state_out(best["id"], str(observed_state_out))
-    conn.execute("UPDATE shots SET adopted_version_id=? WHERE id=?", (best["id"], shot_id))
-    conn.execute("UPDATE shot_versions SET adoption_reason=? WHERE id=?", (reason, best["id"]))
-    conn.commit()
-    if previous and previous["adopted_version_id"] != best["id"]:
+    if not already_adopted:
+        conn.execute("UPDATE shots SET adopted_version_id=? WHERE id=?", (best["id"], shot_id))
+        conn.execute("UPDATE shot_versions SET adoption_reason=? WHERE id=?", (reason, best["id"]))
+        conn.commit()
+    if previous and adopted_id != best["id"]:
         from app.artifacts import invalidate_episode_final
 
         shot = conn.execute("SELECT episode_id FROM shots WHERE id=?", (shot_id,)).fetchone()
@@ -573,10 +559,7 @@ def select_best_video_candidate(
         version_row={"id": best["id"], "image_inputs": image_inputs},
     )
     grade = graded["grade"]
-    # force_best 兜底最多 B 级（不可伪装成 A）
-    if fallback and grade == "A":
-        grade = "B"
-        graded["fallback_reason"] = reason
+    fallback = grade != "A"
     return {
         "version_id": best["id"],
         "reason": reason,
