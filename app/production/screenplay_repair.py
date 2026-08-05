@@ -1955,6 +1955,291 @@ def _normalize_screenplay_narrative_graph(
                 })
                 delta["proposition_ids"] = normalized
 
+    audience_states_by_id = {
+        str(item.get("audience_state_id") or ""): item
+        for item in (data.get("audience_states") or [])
+        if (
+            isinstance(item, dict)
+            and str(item.get("audience_state_id") or "").strip()
+        )
+    }
+    evidence_for_proposition = {
+        proposition_id: [
+            evidence_id
+            for evidence_id, evidence in evidence_by_id.items()
+            if proposition_id in (
+                evidence.get("supports_proposition_ids") or []
+            )
+        ]
+        for proposition_id in propositions_by_id
+    }
+    used_delta_ids = {
+        str(delta.get("target_delta_id") or "")
+        for intent in (data.get("experience_intents") or [])
+        if isinstance(intent, dict)
+        for path in (intent.get("audience_paths") or [])
+        if isinstance(path, dict)
+        for delta in (path.get("target_deltas") or [])
+        if (
+            isinstance(delta, dict)
+            and str(delta.get("target_delta_id") or "").strip()
+        )
+    }
+
+    def unique_delta_id(path_id: str, suffix: str) -> str:
+        base = f"{path_id}-{suffix}"
+        value = base
+        counter = 2
+        while value in used_delta_ids:
+            value = f"{base}-{counter}"
+            counter += 1
+        used_delta_ids.add(value)
+        return value
+
+    for intent in data.get("experience_intents") or []:
+        if not isinstance(intent, dict):
+            continue
+        for path in intent.get("audience_paths") or []:
+            if not isinstance(path, dict):
+                continue
+            state_in = audience_states_by_id.get(
+                str(path.get("audience_state_in_id") or "")
+            )
+            state_out = audience_states_by_id.get(
+                str(path.get("audience_state_out_target_id") or "")
+            )
+            if state_in is None or state_out is None:
+                continue
+            deltas = [
+                item
+                for item in (path.get("target_deltas") or [])
+                if isinstance(item, dict)
+            ]
+            path["target_deltas"] = deltas
+            template = deltas[0] if deltas else {}
+            deadline_event_id = str(
+                template.get("deadline_event_id")
+                or (intent.get("anchor_event_ids") or [""])[-1]
+            )
+            window_id = template.get("primary_delivery_window_id")
+
+            incoming_beliefs = {
+                str(item.get("proposition_id") or ""): item
+                for item in (state_in.get("beliefs") or [])
+                if isinstance(item, dict)
+            }
+            outgoing_beliefs = {
+                str(item.get("proposition_id") or ""): item
+                for item in (state_out.get("beliefs") or [])
+                if isinstance(item, dict)
+            }
+            for delta in deltas:
+                if str(delta.get("dimension") or "") != "belief":
+                    continue
+                for proposition_id in delta.get("proposition_ids") or []:
+                    proposition_id = str(proposition_id)
+                    if proposition_id in outgoing_beliefs:
+                        continue
+                    target_confidence = float(
+                        delta.get("target_confidence")
+                        if delta.get("target_confidence") is not None
+                        else 1.0
+                    )
+                    outgoing_beliefs[proposition_id] = {
+                        "proposition_id": proposition_id,
+                        "stance": "believed",
+                        "confidence": target_confidence,
+                        "evidence_ids": evidence_for_proposition.get(
+                            proposition_id,
+                            [],
+                        ),
+                    }
+                    state_out.setdefault("beliefs", []).append(
+                        outgoing_beliefs[proposition_id]
+                    )
+                    changes.append({
+                        "kind": "audience_target_belief",
+                        "id": state_out.get("audience_state_id"),
+                        "proposition_id": proposition_id,
+                    })
+                proposition_ids = [
+                    str(item)
+                    for item in (delta.get("proposition_ids") or [])
+                ]
+                delta["from_state"] = {
+                    "beliefs": [
+                        incoming_beliefs[item]
+                        for item in proposition_ids
+                        if item in incoming_beliefs
+                    ],
+                }
+                delta["to_state"] = {
+                    "beliefs": [
+                        outgoing_beliefs[item]
+                        for item in proposition_ids
+                        if item in outgoing_beliefs
+                    ],
+                }
+
+            changed_belief_ids = {
+                proposition_id
+                for proposition_id in (
+                    set(incoming_beliefs) | set(outgoing_beliefs)
+                )
+                if incoming_beliefs.get(proposition_id)
+                != outgoing_beliefs.get(proposition_id)
+            }
+            covered_belief_ids = {
+                str(proposition_id)
+                for delta in deltas
+                if str(delta.get("dimension") or "") == "belief"
+                for proposition_id in (
+                    delta.get("proposition_ids") or []
+                )
+            }
+            missing_belief_ids = sorted(
+                changed_belief_ids - covered_belief_ids
+            )
+            if missing_belief_ids:
+                delta = {
+                    "target_delta_id": unique_delta_id(
+                        str(path.get("audience_path_id") or "path"),
+                        "belief",
+                    ),
+                    "dimension": "belief",
+                    "proposition_ids": missing_belief_ids,
+                    "description": "绑定该观众路径中实际发生的信念变化",
+                    "from_state": {
+                        "beliefs": [
+                            incoming_beliefs[item]
+                            for item in missing_belief_ids
+                            if item in incoming_beliefs
+                        ],
+                    },
+                    "to_state": {
+                        "beliefs": [
+                            outgoing_beliefs[item]
+                            for item in missing_belief_ids
+                            if item in outgoing_beliefs
+                        ],
+                    },
+                    "target_confidence": None,
+                    "required_processing_s": 0.5,
+                    "deadline_event_id": deadline_event_id,
+                    "primary_delivery_window_id": window_id,
+                    "custom_dimension": None,
+                }
+                deltas.append(delta)
+                changes.append({
+                    "kind": "audience_belief_delta",
+                    "id": delta["target_delta_id"],
+                    "proposition_ids": missing_belief_ids,
+                })
+
+            attention_changed = (
+                state_in.get("attention_residue_ids")
+                != state_out.get("attention_residue_ids")
+                or state_in.get("working_memory")
+                != state_out.get("working_memory")
+            )
+            attention_delta = next((
+                delta
+                for delta in deltas
+                if str(delta.get("dimension") or "") == "attention"
+            ), None)
+            if attention_changed:
+                if attention_delta is None:
+                    attention_delta = {
+                        "target_delta_id": unique_delta_id(
+                            str(path.get("audience_path_id") or "path"),
+                            "attention",
+                        ),
+                        "dimension": "attention",
+                        "proposition_ids": sorted({
+                            str(item.get("proposition_id") or "")
+                            for item in (
+                                state_out.get("working_memory") or []
+                            )
+                            if (
+                                isinstance(item, dict)
+                                and str(
+                                    item.get("proposition_id") or ""
+                                ).strip()
+                            )
+                        }),
+                        "description": "绑定注意残留与工作记忆变化",
+                        "target_confidence": None,
+                        "required_processing_s": 0.5,
+                        "deadline_event_id": deadline_event_id,
+                        "primary_delivery_window_id": window_id,
+                        "custom_dimension": None,
+                    }
+                    deltas.append(attention_delta)
+                    changes.append({
+                        "kind": "audience_attention_delta",
+                        "id": attention_delta["target_delta_id"],
+                    })
+                attention_delta["from_state"] = {
+                    "attention_residue_ids": list(
+                        state_in.get("attention_residue_ids") or []
+                    ),
+                    "working_memory": list(
+                        state_in.get("working_memory") or []
+                    ),
+                }
+                attention_delta["to_state"] = {
+                    "attention_residue_ids": list(
+                        state_out.get("attention_residue_ids") or []
+                    ),
+                    "working_memory": list(
+                        state_out.get("working_memory") or []
+                    ),
+                }
+
+            if (
+                state_in.get("active_question_ids")
+                != state_out.get("active_question_ids")
+            ):
+                question_delta = next((
+                    delta
+                    for delta in deltas
+                    if (
+                        str(delta.get("dimension") or "") == "other"
+                        and str(delta.get("custom_dimension") or "")
+                        == "active_question_ids"
+                    )
+                ), None)
+                if question_delta is None:
+                    question_delta = {
+                        "target_delta_id": unique_delta_id(
+                            str(path.get("audience_path_id") or "path"),
+                            "questions",
+                        ),
+                        "dimension": "other",
+                        "proposition_ids": [],
+                        "description": "绑定观众主动问题集合变化",
+                        "target_confidence": None,
+                        "required_processing_s": 0.0,
+                        "deadline_event_id": deadline_event_id,
+                        "primary_delivery_window_id": window_id,
+                        "custom_dimension": "active_question_ids",
+                    }
+                    deltas.append(question_delta)
+                    changes.append({
+                        "kind": "audience_question_delta",
+                        "id": question_delta["target_delta_id"],
+                    })
+                question_delta["from_state"] = {
+                    "active_question_ids": list(
+                        state_in.get("active_question_ids") or []
+                    ),
+                }
+                question_delta["to_state"] = {
+                    "active_question_ids": list(
+                        state_out.get("active_question_ids") or []
+                    ),
+                }
+
     delta_requirements: dict[str, tuple[str, float]] = {}
     delta_windows: dict[str, str] = {}
     for intent in data.get("experience_intents") or []:

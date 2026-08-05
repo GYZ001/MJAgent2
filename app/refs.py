@@ -56,10 +56,55 @@ def normalize_prompt_text(text: str) -> str:
     return "".join(kept).strip()
 
 
+_NON_PRODUCTION_APPEARANCE_RE = re.compile(
+    r"(?:乳头|乳晕|乳房|阴部|阴唇|阴蒂|阴毛|生殖器|下体|私处|"
+    r"裸体|裸露|赤裸|一丝不挂|内裤|胸罩|文胸)",
+    re.IGNORECASE,
+)
+_APPEARANCE_LIST_PREFIX_RE = re.compile(
+    r"^(?P<prefix>.*?标志性特征(?:是|为)?)(?P<items>.*)$",
+)
+_PORTRAIT_CLOTHING_CONTRACT = (
+    "常规角色设定图着装，服装面料不透明并完整覆盖身体，"
+    "重点呈现面部、发型、外层服装和可见配饰"
+)
+
+
+def production_appearance_anchor(anchor: str) -> str:
+    """Keep only identity traits that a normally clothed model sheet can prove."""
+    clauses = re.split(r"[，,；;。]+", normalize_prompt_text(anchor or ""))
+    kept: list[str] = []
+    for raw_clause in clauses:
+        clause = raw_clause.strip()
+        if not clause:
+            continue
+        if not _NON_PRODUCTION_APPEARANCE_RE.search(clause):
+            kept.append(clause)
+            continue
+        match = _APPEARANCE_LIST_PREFIX_RE.match(clause)
+        prefix = match.group("prefix") if match else ""
+        items_text = match.group("items") if match else clause
+        items = [
+            item.strip()
+            for item in re.split(r"[、与和及]+", items_text)
+            if item.strip() and not _NON_PRODUCTION_APPEARANCE_RE.search(item)
+        ]
+        if items:
+            kept.append(f"{prefix}{'、'.join(items)}")
+    return "，".join(kept).strip("， ")
+
+
+def ensure_portrait_clothing_contract(prompt: str) -> str:
+    safe = production_appearance_anchor(prompt)
+    if _PORTRAIT_CLOTHING_CONTRACT not in safe:
+        safe = f"{safe}。{_PORTRAIT_CLOTHING_CONTRACT}" if safe else _PORTRAIT_CLOTHING_CONTRACT
+    return normalize_prompt_text(safe)
+
+
 def portrait_prompt(visual_style: str, anchor: str) -> str:
     spectral_tokens = ("透明", "半透明", "虚影", "魂体", "灵魂", "幽灵", "悬浮", "漂浮", "人影")
     style = normalize_prompt_text(visual_style or "")
-    body = normalize_prompt_text(anchor or "")
+    body = production_appearance_anchor(anchor)
     is_spectral = any(token in body for token in spectral_tokens)
     if is_spectral:
         refinements: list[str] = [
@@ -78,12 +123,14 @@ def portrait_prompt(visual_style: str, anchor: str) -> str:
             f"{style}。单角色全身概念定妆设定图：{body}。"
             + "；".join(refinements)
             + "。纯浅米色背景，全身与关联道具完整可见，主体四周保留安全边距。"
+              f"{_PORTRAIT_CLOTHING_CONTRACT}。"
               "仅保留锚点明确要求的特效，禁止额外火焰、斗气光环、文字、水印和 logo"
         )
     return normalize_prompt_text(
         f"{style}。全身角色立绘定妆照：{body}。"
         "正面站立，中性表情，双臂自然下垂，纯浅米色背景，全身完整可见。"
         "头顶、肩臂和鞋底均不得贴边或出画，主体四周保留至少 8% 安全边距。"
+        f"{_PORTRAIT_CLOTHING_CONTRACT}。"
         "仅保留锚点明确要求的特效，禁止额外火焰、斗气光环、文字、水印和 logo"
     )
 
@@ -149,7 +196,7 @@ def portrait_appearance_anchor(prompt: str | None, fallback: str = "") -> str:
     identity/outfit portion. Free-form prompts without the standard marker remain
     authoritative after the same composition suffixes are stripped.
     """
-    fallback_text = normalize_prompt_text(fallback or "").strip()
+    fallback_text = production_appearance_anchor(fallback)
     text = normalize_prompt_text(prompt or "").strip()
     if not text:
         return fallback_text
@@ -164,7 +211,7 @@ def portrait_appearance_anchor(prompt: str | None, fallback: str = "") -> str:
     compact = re.sub(r"\s+", "", text)
     if len(compact) < 8 and len(re.sub(r"\s+", "", fallback_text)) > len(compact):
         return fallback_text
-    return text or fallback_text
+    return production_appearance_anchor(text) or fallback_text
 
 
 async def generate_refs(
@@ -231,19 +278,7 @@ async def generate_refs(
                     except Exception:  # noqa: BLE001 - regular generation retries below
                         pack = None
                     if not pack_result_ok(pack):
-                        # 补齐已尝试但未完成：复用现有主图，不能再次生成并覆盖付费产物。
-                        portrait_row = conn.execute(
-                            "SELECT id FROM character_portraits "
-                            "WHERE project_id=? AND character_name=? AND ep_start=1 "
-                            "ORDER BY created_at DESC LIMIT 1",
-                            (project_id, character.name),
-                        ).fetchone()
-                        if portrait_row:
-                            conn.execute(
-                                "UPDATE character_portraits SET pack_status='partial_fallback' WHERE id=?",
-                                (portrait_row["id"],),
-                            )
-                            conn.commit()
+                        continue
                     row = conn.execute(
                         "SELECT image_path FROM character_portraits "
                         "WHERE project_id=? AND character_name=? AND ep_start=1 "
@@ -268,10 +303,14 @@ async def generate_refs(
         try:
             c.ref_image_path = None
             from app.stages import review_portrait_image
-            base_prompt = ((c.portrait_prompt_override or "").strip()
-                           or portrait_prompt(style, c.appearance_canonical))
+            override = (c.portrait_prompt_override or "").strip()
+            base_prompt = (
+                ensure_portrait_clothing_contract(override)
+                if override
+                else portrait_prompt(style, c.appearance_canonical)
+            )
             effective_appearance = portrait_appearance_anchor(
-                base_prompt, c.appearance_canonical,
+                base_prompt, production_appearance_anchor(c.appearance_canonical),
             )
             last_error: Exception | None = None
             # Score-only：只生成一次；QA 低分不带 critique 重生（PRD QA-SO #14）。
@@ -341,15 +380,12 @@ async def generate_refs(
                             primary_qa=qa,
                         )
                         if not pack_result_ok(pack):
-                            conn.execute(
-                                "UPDATE character_portraits SET pack_status='partial_fallback' WHERE id=?",
-                                (portrait_id,),
+                            raise ContentGenerationError(
+                                f"定妆多视角包结构不完整：{c.name}"
                             )
-                            conn.commit()
                     _portraits.promote_staged_initial_portrait(
                         conn, project_id, c.name, portrait_id,
                     )
-                    # 主图技术可用即进入 Bible；多视角缺口作为风险和后续补齐输入。
                     c.appearance_canonical = effective_appearance
                     c.ref_image_path = path
                     break
@@ -388,12 +424,13 @@ async def generate_refs(
     # fields owned by this task so its old snapshot cannot erase newly added scenes.
     _merge_generated_portraits(conn, project_id, targets)
     conn.commit()
-    # 单个角色的有界生成/补齐耗尽不得把已落盘的其他角色回滚，
-    # 也不得阻塞后续分镜。缺少的角色由文本外观锨点保底。
+    if failures:
+        details = "；".join(f"{name}：{exc}" for name, exc in failures)
+        raise ContentGenerationError(f"定妆资产生成未完整通过：{details}")
     return {
         "generated": [c.name for c in targets if c.ref_image_path],
-        "gate_retry_exhausted": bool(failures),
-        "warnings": [f"{name}：{exc}" for name, exc in failures],
+        "gate_retry_exhausted": False,
+        "warnings": [],
     }
 
 
