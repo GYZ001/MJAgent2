@@ -62,16 +62,17 @@ _NON_PRODUCTION_APPEARANCE_RE = re.compile(
     re.IGNORECASE,
 )
 _CLOTHING_HIDDEN_SKIN_MARK_RE = re.compile(
-    r"(?:腰侧|腰部|胸部|腹部|背部|肩部|手臂|上臂|大腿|腿部|臀部|髋部|胯部)"
+    r"(?:腰侧|腰部|胸部|腹部|背部|肩部|手臂|上臂|(?:左|右)?臂|大腿|腿部|臀部|髋部|胯部)"
     r"[^，,；;。]*(?:痣|胎记|纹身|疤痕|疤)",
 )
 _NON_STATIC_APPEARANCE_RE = re.compile(
-    r"(?:性格|眼神|气度|一举一动|看向|看人|看女人|视线(?:落|停|扫|盯)|"
+    r"(?:性格|气度|一举一动|看向|看人|看女人|视线(?:落|停|扫|盯)|"
     r"自带[^，,；;。]*(?:气场|气质|风情|女人味|书卷气)|"
+    r"眼神(?:躲闪|游移|贪婪|淫邪|迷离)|"
     r"色欲|算计感|侵略感|迂腐|猥琐|含春|撩人|志在必得)",
 )
 _NON_NEUTRAL_CLOTHING_RE = re.compile(
-    r"(?:露肤|暴露|低领|深V|透视|镂空|吊带|超短|高开衩)",
+    r"(?:露肤|露腰|暴露|低领|深V|透视|镂空|吊带|超短|高开衩)",
     re.IGNORECASE,
 )
 _APPEARANCE_LIST_PREFIX_RE = re.compile(
