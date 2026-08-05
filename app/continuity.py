@@ -410,9 +410,13 @@ def resolve_first_last_boundary_relation(
     if prev is None:
         return edit, action, "planned_relation"
 
-    previous_focus = dialogue_focus_subject(prev)
-    current_focus = dialogue_focus_subject(shot)
-    if previous_focus and current_focus and previous_focus != current_focus:
+    previous_speakers = onscreen_dialogue_speakers(prev)
+    current_speakers = onscreen_dialogue_speakers(shot)
+    if (
+        len(previous_speakers) == 1
+        and len(current_speakers) == 1
+        and previous_speakers[0] != current_speakers[0]
+    ):
         return "reverse_angle", "starts_new_action", "onscreen_speaker_changed"
 
     previous_visible = set(effective_characters_visible(prev))
