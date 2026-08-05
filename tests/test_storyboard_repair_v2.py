@@ -1418,6 +1418,87 @@ def test_repair_plan_uses_deterministic_dialogue_candidate_without_provider(repa
     assert planned.repair_candidate_shots[0]["shot_size"] == "近景"
 
 
+def test_missing_spoken_repair_updates_isolated_outline_audio_authority(
+    repair_db,
+) -> None:
+    conn, _screenplay = repair_db
+    shot = _shot(2, action="少年告知众人结果并承诺继续处理。")
+    shot.primary_action = "少年向众人确认结果并承诺继续处理"
+    shot.characters = ["少年"]
+    shot.characters_visible = ["少年"]
+    shot.first_frame_desc = "少年看向众人，正准备开口说明结果。"
+    shot.last_frame_desc = "少年说完承诺，众人安静听着。"
+    conn.execute(
+        "UPDATE shots SET characters=?,action_desc=?,first_frame_desc=?,"
+        "last_frame_desc=?,dialogues='[]',shot_contract_json=? WHERE id='s2'",
+        (
+            json.dumps(shot.characters, ensure_ascii=False),
+            shot.action_desc,
+            shot.first_frame_desc,
+            shot.last_frame_desc,
+            json.dumps(shot.model_dump(mode="json"), ensure_ascii=False),
+        ),
+    )
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=number,
+                scene_setting="日，广场",
+                beat=f"少年完成第{number}步动作",
+                audio_cast=[],
+            )
+            for number in range(1, 4)
+        ],
+    )
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        full_script_text="少年向众人说明结果。",
+        dialogue_chains=[KeyDialogueChain(
+            chain_id="DC1",
+            topic="结果",
+            turns=[KeyDialogueTurn(
+                speaker="少年",
+                line="结果已经确定，我会继续处理。",
+                source_text="结果已经确定，我会继续处理。",
+            )],
+        )],
+    )
+    conn.execute(
+        "UPDATE episodes SET screenplay_json=?,storyboard_outline_json=? WHERE id='e1'",
+        (screenplay.model_dump_json(), outline.model_dump_json()),
+    )
+    conn.commit()
+    plan = route_issues(
+        ["shot_no=2 没有有效 dialogues/audio_timeline 口播，但画面合同要求人物说话"],
+        validated_prefix_end=3,
+        semantic_diagnosis={
+            "scope": "current_shot",
+            "selected_strategy": "repair_current",
+        },
+    )
+
+    planned = _apply_repair(
+        SupervisorCheckpoint(
+            episode_id="e1",
+            planner_version=STORYBOARD_REPAIR_PLANNER_VERSION,
+            validated_prefix_end=3,
+        ),
+        plan,
+        conn,
+        "e1",
+        list(_current_board(conn).shots),
+        outline,
+    )
+
+    assert planned.last_repair["deterministic_repair"] == "published_dialogue_clause"
+    candidate_outline = StoryboardOutline.model_validate(
+        planned.last_repair["candidate_outline"]
+    )
+    assert candidate_outline.shots[1].audio_cast == ["少年"]
+    assert planned.repair_candidate_shots[0]["dialogues"][0]["speaker"] == "少年"
+
+
 def test_early_final_marker_cannot_finish_before_persisted_plan() -> None:
     shots = [_shot(1), _shot(2), _shot(3)]
 

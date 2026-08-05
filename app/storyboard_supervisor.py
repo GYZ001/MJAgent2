@@ -3514,6 +3514,17 @@ def _apply_repair(
             )
             deterministic_kind = "published_dialogue_clause"
         if deterministic is not None:
+            if deterministic_kind == "published_dialogue_clause" and candidate_outline is not None:
+                brief = next((
+                    item for item in candidate_outline.shots
+                    if int(item.shot_no) == window_start
+                ), None)
+                if brief is not None:
+                    brief.audio_cast = list(deterministic.audio_cast or [])
+                    cp.last_repair = {
+                        **cp.last_repair,
+                        "candidate_outline": candidate_outline.model_dump(mode="json"),
+                    }
             cp.repair_candidate_shots = [_shot_checkpoint_payload(deterministic)]
             cp.last_repair = {
                 **cp.last_repair,
