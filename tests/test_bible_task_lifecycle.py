@@ -66,6 +66,56 @@ def test_bible_task_starts_full_refs_after_success(monkeypatch) -> None:
     assert started["args"] == ("proj_test", None)
 
 
+def test_bible_task_does_not_start_unquoted_scene_generation(monkeypatch) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE chapters(project_id TEXT, idx INTEGER)")
+    conn.execute(
+        "CREATE TABLE projects("
+        "id TEXT PRIMARY KEY, bible_json TEXT, bible_version INTEGER DEFAULT 0, "
+        "bible_status TEXT, bible_error TEXT, status TEXT, "
+        "scene_refs_status TEXT DEFAULT 'idle', scene_refs_error TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO projects(id, bible_status, status, scene_refs_status) "
+        "VALUES('proj_test', 'running', 'ingested', 'idle')"
+    )
+    conn.commit()
+
+    async def fake_generate_bible(*_args, **_kwargs):
+        return Bible(
+            world=World(visual_style_canonical="国风水墨"),
+            characters=[
+                Character(
+                    name="萧炎",
+                    role="主角",
+                    appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰间佩火纹玉佩",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    monkeypatch.setattr(api, "generate_bible", fake_generate_bible)
+    monkeypatch.setattr(api, "_start_refs_generation", lambda *_args: True)
+    monkeypatch.setattr(
+        task_registry,
+        "spawn",
+        lambda *_args, **_kwargs: pytest.fail("场景任务必须在场景库完成独立费用确认后启动"),
+    )
+
+    asyncio.run(api._bible_task("proj_test", trigger_full_refs=True))
+
+    row = conn.execute(
+        "SELECT bible_status,scene_refs_status,scene_refs_error FROM projects "
+        "WHERE id='proj_test'"
+    ).fetchone()
+    assert dict(row) == {
+        "bible_status": "ready",
+        "scene_refs_status": "idle",
+        "scene_refs_error": None,
+    }
+
+
 def test_bible_completion_preserves_planned_project_status(monkeypatch) -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row

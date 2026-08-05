@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { Bible, Character } from '../api'
 import {
   bibleConflictFieldLabel,
+  bibleStepStatus,
   characterIsFitting,
   currentPortrait,
   currentPortraitViews,
@@ -33,6 +34,24 @@ const bible = (characters: Character[], style = '国风') => ({
   world: { visual_style_canonical: style },
   characters,
 } as Bible)
+
+describe('人物谱步骤状态', () => {
+  it('定妆生成中不会把尚未产出的图片误报为有问题', () => {
+    expect(bibleStepStatus({
+      bible: bible([character('萧炎')]),
+      bible_status: 'ready',
+      refs_status: 'running',
+    })).toBe('running')
+  })
+
+  it('任务明确失败时仍优先显示有问题', () => {
+    expect(bibleStepStatus({
+      bible: bible([character('萧炎')]),
+      bible_status: 'ready',
+      refs_status: 'failed',
+    })).toBe('problem')
+  })
+})
 
 describe('mergeBibleThreeWay', () => {
   it('保留本地字段修订和服务端新角色', () => {

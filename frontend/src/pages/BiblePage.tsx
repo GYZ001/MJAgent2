@@ -205,19 +205,18 @@ function characterAvailabilityForFilter(
   return portraitAvailability(character, !!project && characterIsFitting(project, character))
 }
 
-function bibleStepStatus(project: {
+export function bibleStepStatus(project: {
   bible?: Bible | null
   bible_status?: string
   refs_status?: string
 }): PrepStepStatus {
   const states = (project.bible?.characters ?? []).map(character => portraitAvailability(character, false))
-  const hasProblem = ['failed', 'warning'].includes(project.bible_status || '')
+  const hasTaskProblem = ['failed', 'warning'].includes(project.bible_status || '')
     || ['failed', 'warning'].includes(project.refs_status || '')
-    || states.some(state => state === 'failed' || state === 'missing')
   const isRunning = project.bible_status === 'running' || project.refs_status === 'running'
-  // 同时有运行任务和 QA/缺口问题时优先“有问题”，运行子状态由页面进度条展示
-  if (hasProblem) return 'problem'
+  if (hasTaskProblem) return 'problem'
   if (isRunning) return 'running'
+  if (states.some(state => state === 'failed' || state === 'missing')) return 'problem'
   if (states.length > 0 && states.every(state => state === 'passed' || state === 'warning')) return 'done'
   if (project.bible_status === 'ready' && project.refs_status === 'ready') return 'done'
   return 'idle'

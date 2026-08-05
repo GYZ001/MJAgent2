@@ -672,24 +672,6 @@ async def _bible_task(
                     (f"人物谱已完成，但定妆任务未能启动，可直接重试定妆。{public}", project_id),
                 )
                 conn.commit()
-            # 场景圣经 + 场景图素材库（与定妆照并行）：跨集场景一致性的底稿。增强项，整段失败都不能影响人物谱主流程。
-            if {"scene_refs_status", "scene_refs_error"}.issubset(project_columns):
-                try:
-                    conn.execute("UPDATE projects SET scene_refs_status='running', scene_refs_error=NULL WHERE id=?",
-                                 (project_id,))
-                    conn.commit()
-                    task_registry.spawn(
-                        "scene_bible", project_id, _scene_bible_and_refs(project_id), project_id=project_id
-                    )
-                except Exception as exc:  # noqa: BLE001 场景库是增强项，但触发失败必须可见
-                    public = errors.record_and_format(
-                        exc, action="scene_bible_spawn", context={"project_id": project_id},
-                    )
-                    conn.execute(
-                        "UPDATE projects SET scene_refs_status='failed', scene_refs_error=? WHERE id=?",
-                        (f"场景圣经任务未能启动：{public}", project_id),
-                    )
-                    conn.commit()
     except asyncio.TimeoutError:
         conn.execute(
             "UPDATE projects SET bible_status='failed', bible_error=? WHERE id=?",
