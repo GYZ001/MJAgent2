@@ -816,13 +816,16 @@ def apply_screenplay_character_resolutions(screenplay, resolutions: list[dict] |
 
 
 def normalize_screenplay_voice_ids(screenplay, bible: Bible) -> list[dict]:
-    """Replace an unbound model voice alias with one provable Bible identity.
+    """Normalize voice aliases and remove unreferenced non-identity entries.
 
     New prompts require Bible character names as speaker IDs.  This migration
     path handles existing working artifacts without guessing from initials or
     role labels: the alias must own ledger text that names exactly one Bible
     character, and that character must actually speak in the screenplay.
-    Ambiguous aliases remain untouched so the identity gate still fails closed.
+    Ambiguous or referenced aliases remain untouched so the identity gate still
+    fails closed. Unbound entries that no spoken field references are dead
+    metadata, not identities, and are removed without inspecting their names or
+    role labels.
     """
     plan = getattr(screenplay, "narrative_plan", None)
     if plan is None:
@@ -832,15 +835,77 @@ def normalize_screenplay_voice_ids(screenplay, bible: Bible) -> list[dict]:
         for character in bible.characters
         if str(character.name or "").strip()
     }
-    if not bible_names:
-        return []
-
     explicitly_bound = {
         str(voice_id or "").strip()
         for contract in plan.identity_contracts
         for voice_id in contract.voice_ids
         if str(voice_id or "").strip()
     }
+    changes: list[dict] = []
+    voice_delivery_owners = {"spoken_dialogue", "offscreen_voice", "narration"}
+    non_voice_carriers: set[str] = set()
+    for voice in getattr(screenplay, "voice_bible", None) or []:
+        source_id = str(voice.speaker_id or "").strip()
+        if (
+            not source_id
+            or str(voice.role_type or "").strip() == "narrator"
+            or source_id in bible_names
+            or source_id in explicitly_bound
+        ):
+            continue
+        ledger_items = [
+            item
+            for item in (getattr(screenplay, "information_ledger", None) or [])
+            if str(item.speaker_id or "").strip() == source_id
+        ]
+        if ledger_items and all(
+            str(item.delivery_owner or "").strip() not in voice_delivery_owners
+            for item in ledger_items
+        ):
+            non_voice_carriers.add(source_id)
+
+    if non_voice_carriers:
+        for item in getattr(screenplay, "information_ledger", None) or []:
+            if str(item.speaker_id or "").strip() in non_voice_carriers:
+                item.speaker_id = None
+        for chain in getattr(screenplay, "dialogue_chains", None) or []:
+            chain.turns = [
+                turn for turn in (chain.turns or [])
+                if str(turn.speaker or "").strip() not in non_voice_carriers
+            ]
+        screenplay.dialogue_chains = [
+            chain for chain in (getattr(screenplay, "dialogue_chains", None) or [])
+            if chain.turns
+        ]
+        retained_key_lines: list[str] = []
+        for line in getattr(screenplay, "key_lines", None) or []:
+            speaker, separator, _ = str(line or "").partition("：")
+            if not separator:
+                speaker, separator, _ = str(line or "").partition(":")
+            if separator and speaker.strip() in non_voice_carriers:
+                continue
+            retained_key_lines.append(line)
+        screenplay.key_lines = retained_key_lines
+        body = getattr(screenplay, "full_script_text", "") or ""
+        for source_id in sorted(non_voice_carriers):
+            body = re.sub(
+                rf"(?m)^(\s*){re.escape(source_id)}"
+                r"(?:[\(（][^\)）]{0,16}[\)）])?\s*[:：]\s*(.*)$",
+                lambda match: f"{match.group(1)}【{match.group(2).strip()}】",
+                body,
+            )
+        screenplay.full_script_text = body
+        screenplay.voice_bible = [
+            voice
+            for voice in (getattr(screenplay, "voice_bible", None) or [])
+            if str(voice.speaker_id or "").strip() not in non_voice_carriers
+        ]
+        changes.extend({
+            "source_label": source_id,
+            "canonical_name": "",
+            "resolution": "non_voice_carrier_removed",
+        } for source_id in sorted(non_voice_carriers))
+
     dialogue_speakers = {
         str(turn.speaker or "").strip()
         for chain in (getattr(screenplay, "dialogue_chains", None) or [])
@@ -852,6 +917,12 @@ def normalize_screenplay_voice_ids(screenplay, bible: Bible) -> list[dict]:
     dialogue_speakers.update(screenplay_speaker_names(
         getattr(screenplay, "full_script_text", "") or "",
     ))
+    ledger_speakers = {
+        str(item.speaker_id or "").strip()
+        for item in (getattr(screenplay, "information_ledger", None) or [])
+        if str(item.speaker_id or "").strip()
+    }
+    referenced_speakers = dialogue_speakers | ledger_speakers
     existing_voice_ids = {
         str(voice.speaker_id or "").strip()
         for voice in (getattr(screenplay, "voice_bible", None) or [])
@@ -866,7 +937,7 @@ def normalize_screenplay_voice_ids(screenplay, bible: Bible) -> list[dict]:
         for turn in (chain.turns or [])
         if str(turn.speaker or "").strip() and str(turn.line or "").strip()
     ]
-    changes: list[dict] = []
+    unreferenced_voice_ids: set[str] = set()
 
     for voice in getattr(screenplay, "voice_bible", None) or []:
         source_id = str(voice.speaker_id or "").strip()
@@ -883,6 +954,8 @@ def normalize_screenplay_voice_ids(screenplay, bible: Bible) -> list[dict]:
             if str(item.speaker_id or "").strip() == source_id
         ]
         if not ledger_items:
+            if source_id not in referenced_speakers:
+                unreferenced_voice_ids.add(source_id)
             continue
         ledger_text = "\n".join(
             f"{item.content or ''}\n{item.exact_text or ''}"
@@ -938,6 +1011,18 @@ def normalize_screenplay_voice_ids(screenplay, bible: Bible) -> list[dict]:
             "canonical_name": canonical_name,
             "resolution": "voice_alias_from_ledger",
         })
+
+    if unreferenced_voice_ids:
+        screenplay.voice_bible = [
+            voice
+            for voice in (getattr(screenplay, "voice_bible", None) or [])
+            if str(voice.speaker_id or "").strip() not in unreferenced_voice_ids
+        ]
+        changes.extend({
+            "source_label": source_id,
+            "canonical_name": "",
+            "resolution": "unreferenced_voice_removed",
+        } for source_id in sorted(unreferenced_voice_ids))
 
     return changes
 

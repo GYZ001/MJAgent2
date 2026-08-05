@@ -1910,6 +1910,8 @@ B. `full_script_text`：真正的剧本正文；只写大形体动作与主线�
 - voice_bible[]：每个元素包含 speaker_id、voice_canonical、language、role_type。Bible 已有角色的
   speaker_id 必须逐字等于人物谱姓名；非 Bible 说话人的 speaker_id 必须逐字出现在对应
   identity_contract.voice_ids；禁止生成 V-MH、VOICE-01 等没有显式身份绑定的独立声音编号。
+  只收录实际被对白链或 information_ledger.speaker_id 引用的说话身份；环境声、动作声和拟音
+  不是人物声音，不得写入 voice_bible。
 - approved_adaptations[] / forbidden_additions[]。
 规则：原文没有的事件默认不得创建；若确需为连贯性补小动作，events[].adaptation_addition 必须为 true，必须写 adaptation_reason，且 approved 必须为 false。
 空钩子规则：本集 hook=「{episode_hook or '（空）'}」、cliffhanger=「{episode_cliffhanger or '（空）'}」；若二者均为空/空白，ending_hook 只能写「无集级钩子」，不得发明原文没有的下一集钩子。
