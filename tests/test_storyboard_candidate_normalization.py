@@ -151,6 +151,72 @@ def test_storyboard_source_evidence_uses_unique_authoritative_event_span() -> No
     assert source[aligned.start_offset:aligned.end_offset] == aligned.excerpt
 
 
+def test_storyboard_candidate_maps_graph_event_to_unique_legacy_event_for_evidence() -> None:
+    source = "前文。她放下手里的文件，抬头确认门外的来人。后文。"
+    screenplay = stages.EpisodeScreenplay(
+        episode_no=1,
+        events=[{
+            "event_id": "E2",
+            "source_span": "她放下手里的文件，抬头确认门外的来人。",
+        }],
+    )
+    candidate = {
+        "episode_no": 1,
+        "shot": {
+            "shot_no": 2,
+            "duration_s": 5,
+            "shot_size": "中景",
+            "camera_move": "固定",
+            "scene_setting": "日，办公室",
+            "characters": ["甲"],
+            "action_desc": "甲放下文件后抬头看向门口。",
+            "first_frame_desc": "甲低头查看手里的文件。",
+            "last_frame_desc": "同一机位，甲放下文件看向门口。",
+            "source_excerpt": "模型改写后无法直接回绑的证据。",
+            "story_event_id": "E-2",
+            "event_ids": ["E-2"],
+            "transition": "硬切",
+        },
+    }
+
+    normalized, changes = normalize_storyboard_shot_candidate(
+        candidate,
+        episode_no=1,
+        shot_no=2,
+        outline_story_event_id="E-2",
+        legacy_story_event_ids=["E2"],
+    )
+    draft = StoryboardShotDraft.model_validate(normalized)
+    aligned = align_storyboard_source_evidence(
+        draft.shot,
+        source,
+        screenplay=screenplay,
+    )
+
+    assert draft.shot.story_event_id == "E2"
+    assert aligned is not None
+    assert aligned.excerpt == "她放下手里的文件，抬头确认门外的来人。"
+    assert any(
+        change["reason"] == "outline_legacy_event_authority"
+        for change in changes
+    )
+
+
+def test_storyboard_candidate_leaves_ambiguous_legacy_event_join_empty() -> None:
+    normalized, _ = normalize_storyboard_shot_candidate(
+        {
+            "episode_no": 1,
+            "shot": {"shot_no": 2, "story_event_id": "model-guess"},
+        },
+        episode_no=1,
+        shot_no=2,
+        outline_story_event_id="E 2",
+        legacy_story_event_ids=["E-2", "E_2"],
+    )
+
+    assert normalized["shot"]["story_event_id"] == ""
+
+
 def test_source_fidelity_issue_remains_a_structural_blocker() -> None:
     message = "shot.source_excerpt 无法在本集授权原文中找到连续依据"
     draft = StoryboardShotDraft.model_construct(
@@ -348,6 +414,76 @@ def test_storyboard_candidate_removes_unassigned_speech_and_expands_duration() -
         "unassigned_spoken_content_removed",
         "derived_joint_capacity",
     }
+
+
+def test_storyboard_candidate_does_not_double_charge_audio_only_required_text() -> None:
+    spoken_line = "这是一段需要十秒才能完整说完并且不应重复计费的对白内容一二三四五六七八九"
+    assert len(spoken_line) == 36
+    candidate = {
+        "episode_no": 1,
+        "shot": {
+            "shot_no": 5,
+            "duration_s": 10,
+            "audio_timeline": [{
+                "start_s": 0,
+                "end_s": 10,
+                "type": "spoken_dialogue",
+                "speaker_id": "speaker-a",
+                "text": spoken_line,
+            }],
+            "required_text": {
+                "exact_text": spoken_line,
+                "strategy": "audio_only",
+            },
+        },
+    }
+    outline_task = {
+        "key_line_ids": ["KL05"],
+        "audio_cast": ["speaker-a"],
+        "capacity_budget": {
+            "action_phase_s": 0.0,
+            "spoken_and_text_s": 10.0,
+            "attention_switch_s": 0.0,
+            "inference_processing_s": 0.0,
+            "reaction_registration_s": 0.0,
+            "spatial_reorientation_s": 0.0,
+            "entry_exit_settle_s": 0.0,
+            "other_s": 0.0,
+        },
+    }
+
+    normalized, _ = normalize_storyboard_shot_candidate(
+        candidate,
+        episode_no=1,
+        shot_no=5,
+        outline_narrative_task=outline_task,
+    )
+
+    assert normalized["shot"]["capacity_budget"]["spoken_and_text_s"] == 10.0
+    assert normalized["shot"]["duration_s"] == 10
+
+
+def test_storyboard_candidate_charges_visual_required_text() -> None:
+    normalized, _ = normalize_storyboard_shot_candidate(
+        {
+            "episode_no": 1,
+            "shot": {
+                "shot_no": 5,
+                "duration_s": 5,
+                "required_text": {
+                    "exact_text": "一二三四五六七八九十一二三四五六七八",
+                    "strategy": "deterministic_insert",
+                },
+            },
+        },
+        episode_no=1,
+        shot_no=5,
+        outline_narrative_task={
+            "capacity_budget": {"spoken_and_text_s": 0.0},
+        },
+    )
+
+    assert normalized["shot"]["capacity_budget"]["spoken_and_text_s"] == 5.0
 
 
 def test_storyboard_candidate_derives_scene_change_and_transition() -> None:

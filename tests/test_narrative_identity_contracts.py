@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from app import portraits
+from app import portraits, stages
 from app.character_policy import is_collective_role, is_functional_extra
 from app.compiler import CompileError, compile_prompt, keyframe_visual_contract
 from app.identity_contracts import (
@@ -283,6 +283,41 @@ def test_storyboard_operational_identity_projection_uses_contract_and_dialogue()
     assert board.shots[0].audio_cast == ["主角"]
     assert board.shots[0].dialogues[0].speaker == "主角"
     assert board.shots[1].audio_cast == ["阿烬", "主角"]
+
+
+def test_storyboard_candidate_projects_operational_identity_before_validation() -> None:
+    screenplay = _screenplay()
+    screenplay.voice_bible.append(VoiceCanonical(
+        speaker_id="主角",
+        voice_canonical="young lead voice",
+    ))
+    screenplay.key_lines = ["主角：出发。"]
+    shot = _shot(
+        characters=["主角"],
+        characters_visible=["character-main"],
+        audio_cast=["character-main"],
+        dialogues=[Dialogue(
+            speaker="character-main",
+            line="出发。",
+            delivery="spoken_dialogue",
+        )],
+    )
+
+    board, errors = stages._normalized_candidate_board(
+        1,
+        [],
+        shot,
+        _bible(),
+        5,
+        narrative_authority=True,
+        narrative_plan=screenplay.narrative_plan,
+        screenplay=screenplay,
+    )
+
+    assert errors == []
+    assert board.shots[0].characters_visible == ["主角"]
+    assert board.shots[0].audio_cast == ["主角"]
+    assert board.shots[0].dialogues[0].speaker == "主角"
 
 
 def test_narrative_compiler_uses_typed_policy_not_role_name_classifiers() -> None:

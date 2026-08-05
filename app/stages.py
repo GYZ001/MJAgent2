@@ -63,6 +63,7 @@ from app.renderability import (
     renderability_prompt_block,
 )
 from app.source_excerpt import AlignedExcerpt, align_source_excerpt
+from app.spoken_contract import onscreen_text_for_capacity
 
 SYSTEM_PREFIX = (
     "你是专业的竖屏漫剧（动态漫画短剧）编剧与分镜师。\n"
@@ -120,12 +121,40 @@ _STORYBOARD_NARRATIVE_AUTHORITY_FIELDS = (
 )
 
 
+def _resolve_legacy_story_event_id(
+    outline_event_id: str,
+    legacy_event_ids: list[str] | tuple[str, ...],
+) -> str:
+    """Join graph and legacy event IDs only when the normalized match is unique."""
+    requested = str(outline_event_id or "").strip()
+    available = list(dict.fromkeys(
+        str(event_id or "").strip()
+        for event_id in legacy_event_ids
+        if str(event_id or "").strip()
+    ))
+    if not requested:
+        return ""
+    if requested in available:
+        return requested
+
+    alias = "".join(ch.casefold() for ch in requested if ch.isalnum())
+    if not alias:
+        return ""
+    matches = [
+        event_id
+        for event_id in available
+        if "".join(ch.casefold() for ch in event_id if ch.isalnum()) == alias
+    ]
+    return matches[0] if len(matches) == 1 else ""
+
+
 def normalize_storyboard_shot_candidate(
     obj: dict[str, Any],
     *,
     episode_no: int,
     shot_no: int,
     outline_story_event_id: str = "",
+    legacy_story_event_ids: list[str] | tuple[str, ...] | None = None,
     outline_narrative_task: dict[str, Any] | None = None,
     previous_scene_name: str = "",
     previous_scene_time: str = "",
@@ -195,13 +224,28 @@ def normalize_storyboard_shot_candidate(
                 "reason": "nullable_list_normalization",
             })
 
-    # The outline is the canonical event allocation when it provides one.
-    if outline_story_event_id and shot.get("story_event_id") != outline_story_event_id:
+    # Narrative graph IDs and the legacy event ledger can use different
+    # separators. Only a unique normalized join may enter the legacy field.
+    authoritative_story_event_id = outline_story_event_id
+    if legacy_story_event_ids is not None:
+        authoritative_story_event_id = _resolve_legacy_story_event_id(
+            outline_story_event_id,
+            legacy_story_event_ids,
+        )
+    if (
+        outline_story_event_id
+        and shot.get("story_event_id") != authoritative_story_event_id
+    ):
         changes.append({
             "field": "shot.story_event_id", "from": shot.get("story_event_id"),
-            "to": outline_story_event_id, "reason": "outline_authoritative",
+            "to": authoritative_story_event_id,
+            "reason": (
+                "outline_legacy_event_authority"
+                if legacy_story_event_ids is not None
+                else "outline_authoritative"
+            ),
         })
-        shot["story_event_id"] = outline_story_event_id
+        shot["story_event_id"] = authoritative_story_event_id
 
     # Narrative allocation is authored and validated at outline time.  The
     # shot model may realize it visually, but must not be asked to retype or
@@ -494,11 +538,7 @@ def normalize_storyboard_shot_candidate(
                 for item in timeline
             )
             required_text = shot.get("required_text")
-            onscreen_text = (
-                str(required_text.get("exact_text") or "")
-                if isinstance(required_text, dict)
-                else ""
-            )
+            onscreen_text = onscreen_text_for_capacity(required_text)
 
             linguistic_chars = max(
                 _content_chars(dialogue_text + narration_text),
@@ -783,6 +823,9 @@ async def _run_with_agent_loop(
                 shot_no=int(storyboard_candidate_context["shot_no"]),
                 outline_story_event_id=str(
                     storyboard_candidate_context.get("outline_story_event_id") or ""
+                ),
+                legacy_story_event_ids=storyboard_candidate_context.get(
+                    "legacy_story_event_ids"
                 ),
                 outline_narrative_task=storyboard_candidate_context.get(
                     "outline_narrative_task"
@@ -2546,7 +2589,9 @@ def _normalized_candidate_board(episode_no: int, completed_shots: list[Shot], sh
                                 target_duration_s: int | None = None,
                                 *,
                                 narrative_authority: bool = False,
-                                narrative_plan: Any | None = None) -> tuple[Storyboard, list[str]]:
+                                narrative_plan: Any | None = None,
+                                screenplay: EpisodeScreenplay | None = None,
+                                ) -> tuple[Storyboard, list[str]]:
     raw_board = Storyboard(episode_no=episode_no, shots=[*completed_shots, shot])
     # 在副本上做合同规范化。未知人物不能靠代码静默删掉；它必须作为
     # 当前候选的模型修复反馈返回，原始台词和角色字段保持完整。
@@ -2573,6 +2618,20 @@ def _normalized_candidate_board(episode_no: int, completed_shots: list[Shot], sh
         ]
     if not narrative_authority:
         normalize_dialogue_focus_offscreen_mentions(board, bible)
+    elif bible is not None and screenplay is not None:
+        from app.identity_contracts import (
+            IdentityContractError,
+            canonicalize_storyboard_operational_identities,
+        )
+
+        try:
+            canonicalize_storyboard_operational_identities(
+                board,
+                bible,
+                screenplay,
+            )
+        except IdentityContractError as exc:
+            return raw_board, [f"分镜身份权威合同无法解析：{exc}"]
     # ② 产品禁止旁白/内心OS：确定性清空 narration 与 timeline narration 轨。
     relieve_spoken_overflow(board)
     prefer_default_shot_durations(
@@ -2711,6 +2770,7 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
         episode["episode_no"], completed_shots, draft.shot, bible, target,
         narrative_authority=narrative_authority,
         narrative_plan=screenplay.narrative_plan,
+        screenplay=screenplay,
     )
     errors.extend(identity_errors)
     current = board.shots[-1]
@@ -3786,6 +3846,11 @@ source_excerpt 内的双引号必须按 JSON 规范转义，或改用中文引�
             "episode_no": episode["episode_no"],
             "shot_no": shot_no,
             "outline_story_event_id": brief.story_event_id if brief is not None else "",
+            "legacy_story_event_ids": [
+                str(event.event_id or "").strip()
+                for event in (screenplay.events or [])
+                if str(event.event_id or "").strip()
+            ],
             "outline_narrative_task": (
                 brief.model_dump(mode="json")
                 if narrative_authority and brief is not None
@@ -3824,6 +3889,7 @@ source_excerpt 内的双引号必须按 JSON 规范转义，或改用中文引�
         episode["target_duration_s"],
         narrative_authority=narrative_authority,
         narrative_plan=screenplay.narrative_plan,
+        screenplay=screenplay,
     )
     if identity_errors:
         raise StageError("分镜人物合同", identity_errors)

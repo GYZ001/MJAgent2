@@ -25,6 +25,7 @@ from app.schemas import (
     Storyboard,
     StoryboardOutline,
 )
+from app.spoken_contract import onscreen_text_for_capacity
 
 NARRATIVE_CONTRACT_VERSION = "narrative-continuity.v1"
 AUDIENCE_PERCEPTUAL_SURFACE_VERSION = "audience-perceptual-surface.v1"
@@ -2405,7 +2406,7 @@ def validate_storyboard_narrative(
                 }
             )
             required_text = getattr(shot, "required_text", None)
-            onscreen_text = _norm(getattr(required_text, "exact_text", ""))
+            onscreen_text = onscreen_text_for_capacity(required_text)
             from app.spoken_contract import content_char_count
 
             linguistic_chars = max(
