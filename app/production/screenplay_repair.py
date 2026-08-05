@@ -1472,6 +1472,30 @@ def _normalize_screenplay_narrative_graph(
         return []
     data = plan.model_dump(mode="json")
     changes: list[dict[str, Any]] = []
+    from app.validators import normalize_screenplay_dialogue_chains
+
+    before_dialogue_chains = [
+        chain.model_dump(mode="json")
+        for chain in (script.dialogue_chains or [])
+    ]
+    before_full_script_text = script.full_script_text
+    normalize_screenplay_dialogue_chains(script)
+    after_dialogue_chains = [
+        chain.model_dump(mode="json")
+        for chain in (script.dialogue_chains or [])
+    ]
+    if (
+        after_dialogue_chains != before_dialogue_chains
+        or script.full_script_text != before_full_script_text
+    ):
+        changes.append({
+            "kind": "dialogue_chain_normalization",
+            "before_chain_count": len(before_dialogue_chains),
+            "after_chain_count": len(after_dialogue_chains),
+            "full_script_text_changed": (
+                script.full_script_text != before_full_script_text
+            ),
+        })
 
     for index, chain in enumerate(script.dialogue_chains or []):
         topic = (chain.topic or "").strip()
