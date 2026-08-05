@@ -664,7 +664,11 @@ def _chat_read_timeout_s(call_meta: dict | None) -> float:
             config.TIMEOUT_CHAT_READ,
             config.TIMEOUT_CHAT_STORYBOARD_OUTLINE_READ,
         )
-    if "baseline" in stage:
+    if (
+        "baseline" in stage
+        or stage == "screenplay_narrative_patch"
+        or stage_key == "narrative_graph_patch"
+    ):
         return max(config.TIMEOUT_CHAT_READ, config.TIMEOUT_CHAT_BASELINE_READ)
     return config.TIMEOUT_CHAT_READ
 

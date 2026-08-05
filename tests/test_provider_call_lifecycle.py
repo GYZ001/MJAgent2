@@ -30,6 +30,8 @@ def test_screenplay_baseline_uses_dedicated_long_read_timeout(monkeypatch) -> No
     assert hiagent._chat_read_timeout_s(None) == 300.0
     assert hiagent._chat_read_timeout_s({"stage": "discover_character_candidates"}) == 300.0
     assert hiagent._chat_read_timeout_s({"stage": "剧本首次整版 Baseline"}) == 600.0
+    assert hiagent._chat_read_timeout_s({"stage": "screenplay_narrative_patch"}) == 600.0
+    assert hiagent._chat_read_timeout_s({"stage_key": "narrative_graph_patch"}) == 600.0
     assert hiagent._chat_read_timeout_s({"stage_key": "storyboard_outline"}) == 720.0
 
 
