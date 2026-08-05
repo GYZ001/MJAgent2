@@ -149,8 +149,8 @@ def test_clean_text_only_trims_trailing_serial_marker_from_story_line() -> None:
 
 def test_clean_text_removes_orphaned_trailing_separator() -> None:
     cleaned, removed = clean_text(
-        "“这里是什么地方？”\n“靠山宗。”\n\n－－－－－－－－－－－－－"
+        "“这里是什么地方？”\n“靠山宗。”\n\n－－－－－－－－－－－－－\n\n;"
     )
 
     assert cleaned == "“这里是什么地方？”\n“靠山宗。”"
-    assert removed == 1
+    assert removed == 2

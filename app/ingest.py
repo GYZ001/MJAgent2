@@ -26,7 +26,8 @@ SOCIAL_AD_RE = re.compile(
     r"|(?:微信公众号|微信号|QQ群|qq群).{0,12}(?:关注|搜索|添加|加入|交流|福利|领取)",
 )
 PUBLISHING_PROMO_RE = re.compile(
-    r"(?:推荐票|会员点击|起点币|新书发布会|发布\s*vip\s*章节|免费抽奖|大转盘抽奖|"
+    r"(?:推荐票|推荐榜|周推荐|月推荐|会员点击|起点币|新书发布会|发布\s*vip\s*章节|"
+    r"免费抽奖|大转盘抽奖|"
     r"ipadmini|支持正版|码字)"
     r"|(?:求|投|给|支持|呼唤|拜托|别忘|争|拼|保底|双倍|冲).{0,12}月票"
     r"|月票.{0,24}(?:求|投|给|支持|呼唤|拜托|别忘|榜|第一|过万|爆发|订阅|双倍|保底|危机)"
@@ -36,8 +37,15 @@ PUBLISHING_PROMO_RE = re.compile(
     r"|(?:手游|游戏).{0,24}(?:公测|下载地址|礼包)",
     re.IGNORECASE,
 )
+AUTHOR_NOTE_RE = re.compile(
+    r"(?:书评区|读者|书友|道友|兄弟姐妹|大大|公众(?:威信|微信|号)|公众号|起点|作者|"
+    r"写书|本书|本章|章节|更新|爆发|上架|订阅|月票|推荐|点击|收藏|抽奖|活动|"
+    r"商城|实体书|码字|老婆|女儿|生日|见面会|签售|公测|游戏)",
+    re.IGNORECASE,
+)
 PROMO_SEPARATOR_RE = re.compile(r"(?:[-_=~*]{4,}|[－—～·]{4,})")
 SEPARATOR_ONLY_RE = re.compile(r"^(?:[-_=~*]{4,}|[－—～·]{4,})$")
+TRAILING_JUNK_ONLY_RE = re.compile(r"^[;；,，:：|丨]+$")
 TRAILING_SERIAL_MARKER_RE = re.compile(
     r"\s*[\(（]?\s*未完待续[\s。.．…·]*[\)）]?\s*$",
 )
@@ -93,10 +101,28 @@ def clean_text(text: str) -> tuple[str, int]:
             return 1
         return 0
 
+    author_note_block = False
+
+    def looks_like_chapter_heading(value: str) -> bool:
+        if CHAPTER_RE.fullmatch(value):
+            return True
+        match = re.match(rf"^第[{_CHAPTER_NUMERALS}]+", value)
+        if not match:
+            return False
+        remainder = value[match.end():].strip()
+        return bool(remainder) and len(remainder) <= 48
+
     for line in lines:
         stripped = line.strip()
         stripped, serial_marker_count = TRAILING_SERIAL_MARKER_RE.subn("", stripped)
         stripped = stripped.strip()
+        if author_note_block:
+            if stripped and looks_like_chapter_heading(stripped):
+                author_note_block = False
+            else:
+                if stripped:
+                    removed += 1
+                continue
         if serial_marker_count and not stripped:
             removed += drop_separator_before_ad()
             removed += 1
@@ -107,13 +133,21 @@ def clean_text(text: str) -> tuple[str, int]:
         is_publishing_promo = bool(
             stripped and len(stripped) <= 800 and PUBLISHING_PROMO_RE.search(stripped)
         )
-        if stripped and is_publishing_promo:
+        prior_nonempty = next((item for item in reversed(kept) if item), "")
+        after_separator = bool(prior_nonempty and SEPARATOR_ONLY_RE.fullmatch(prior_nonempty))
+        is_author_note = bool(
+            stripped and after_separator and len(stripped) <= 1200
+            and AUTHOR_NOTE_RE.search(stripped)
+        )
+        if stripped and (is_publishing_promo or is_author_note):
             # Scraped chapters often append an author note after a decorative
             # separator on the same line. Preserve the story sentence before it.
             prefix = ""
             for match in reversed(list(PROMO_SEPARATOR_RE.finditer(stripped))):
                 suffix = stripped[match.end():].strip()
-                if suffix and PUBLISHING_PROMO_RE.search(suffix):
+                if suffix and (
+                    PUBLISHING_PROMO_RE.search(suffix) or AUTHOR_NOTE_RE.search(suffix)
+                ):
                     prefix = stripped[:match.start()].strip()
                     break
             if prefix:
@@ -121,6 +155,7 @@ def clean_text(text: str) -> tuple[str, int]:
             else:
                 removed += drop_separator_before_ad()
             removed += 1
+            author_note_block = after_separator or bool(prefix)
             continue
         if stripped and (
             any(marker in stripped for marker in AD_MARKERS) or is_social_ad
@@ -131,11 +166,15 @@ def clean_text(text: str) -> tuple[str, int]:
         if serial_marker_count:
             removed += 1
         kept.append(stripped)
-    while kept and not kept[-1]:
-        kept.pop()
-    if kept and SEPARATOR_ONLY_RE.fullmatch(kept[-1]):
-        kept.pop()
-        removed += 1
+    while kept:
+        if not kept[-1]:
+            kept.pop()
+            continue
+        if SEPARATOR_ONLY_RE.fullmatch(kept[-1]) or TRAILING_JUNK_ONLY_RE.fullmatch(kept[-1]):
+            kept.pop()
+            removed += 1
+            continue
+        break
     cleaned = re.sub(r"\n{3,}", "\n\n", "\n".join(kept))
     return cleaned.strip(), removed
 
