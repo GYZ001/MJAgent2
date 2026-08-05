@@ -1410,6 +1410,60 @@ def validate_screenplay_narrative(
                         f"信念变化没有绑定相应命题：{sorted(changed_belief_props - covered_belief_propositions)}"
                     )
 
+            ordered_deltas = sorted(
+                path.target_deltas,
+                key=lambda item: (
+                    event_order.get(item.deadline_event_id, len(event_order)),
+                    item.target_delta_id,
+                ),
+            )
+            total_processing_s = sum(
+                max(0.0, delta.required_processing_s)
+                for delta in ordered_deltas
+            )
+            if (
+                len(ordered_deltas) > 1
+                and total_processing_s > config.VIDEO_DURATION_MAX_S
+            ):
+                prior_states = [
+                    state
+                    for state in index.audience_states.values()
+                    if (
+                        state.audience_prior_id == path.audience_prior_id
+                        and state.audience_state_id
+                        not in {
+                            path.audience_state_in_id,
+                            path.audience_state_out_target_id,
+                        }
+                    )
+                ]
+                for current_delta, next_delta in zip(
+                    ordered_deltas,
+                    ordered_deltas[1:],
+                ):
+                    staged = any(
+                        _target_state_fragment_matches(
+                            current_delta,
+                            current_delta.to_state,
+                            state,
+                        )
+                        and _target_state_fragment_matches(
+                            next_delta,
+                            next_delta.from_state,
+                            state,
+                        )
+                        for state in prior_states
+                    )
+                    if not staged:
+                        errors.append(
+                            "[AUDIENCE_TARGET_DELTA_STAGING_REQUIRED] "
+                            f"{path.audience_path_id}/{path.audience_prior_id} 在 "
+                            f"{current_delta.target_delta_id} -> "
+                            f"{next_delta.target_delta_id} 之间缺少中间 AudienceState；"
+                            f"单镜处理总量 {total_processing_s:.3f}s 超过 "
+                            f"{config.VIDEO_DURATION_MAX_S}s"
+                        )
+
     child_ids = {
         parent_id for event in index.events.values() for parent_id in event.causal_parent_ids
     }
@@ -2320,10 +2374,19 @@ def validate_storyboard_narrative(
             timeline_text = "".join(
                 _norm(getattr(item, "text", ""))
                 for item in (getattr(shot, "audio_timeline", []) or [])
+                if getattr(item, "type", "") in {
+                    "spoken_dialogue",
+                    "offscreen_voice",
+                }
             )
             required_text = getattr(shot, "required_text", None)
             onscreen_text = _norm(getattr(required_text, "exact_text", ""))
-            linguistic_chars = max(len(dialogue_text + narration_text), len(timeline_text)) + len(onscreen_text)
+            from app.spoken_contract import content_char_count
+
+            linguistic_chars = max(
+                content_char_count(dialogue_text + narration_text),
+                content_char_count(timeline_text),
+            ) + content_char_count(onscreen_text)
             text_min_s = (
                 linguistic_chars
                 * float(config.VIDEO_DURATION_MIN_S)
@@ -2333,6 +2396,10 @@ def validate_storyboard_narrative(
                 (
                     float(getattr(item, "end_s", 0) or 0)
                     for item in (getattr(shot, "audio_timeline", []) or [])
+                    if getattr(item, "type", "") in {
+                        "spoken_dialogue",
+                        "offscreen_voice",
+                    }
                 ),
                 default=0.0,
             )

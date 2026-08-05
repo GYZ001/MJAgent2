@@ -14,6 +14,7 @@ from app.production.revision import (
     ensure_production_revision,
     mark_baseline_generated,
     mark_first_evaluation,
+    rebind_input_fingerprint,
 )
 from app.production.screenplay_document import (
     document_to_screenplay,
@@ -93,6 +94,44 @@ def _minimal_script(**overrides) -> EpisodeScreenplay:
     )
     data.update(overrides)
     return EpisodeScreenplay(**data)
+
+
+def test_revision_authority_rebind_requires_current_working_artifact() -> None:
+    from app.evidence import repository as evidence_repository
+
+    revision = ensure_production_revision(
+        episode_id="ep_p",
+        kind="screenplay",
+        input_fingerprint="before",
+        resume=False,
+    )
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id="ep_p",
+        status="candidate",
+        trust_level="T1",
+        content={"title": "测试"},
+    ))
+    mark_baseline_generated(
+        revision.id,
+        baseline_artifact_id=artifact["id"],
+        working_artifact_id=artifact["id"],
+    )
+
+    rebound = rebind_input_fingerprint(
+        revision.id,
+        input_fingerprint="after",
+        expected_working_artifact_id=artifact["id"],
+    )
+
+    assert rebound.input_fingerprint == "after"
+    with pytest.raises(ValueError, match="CAS 冲突"):
+        rebind_input_fingerprint(
+            revision.id,
+            input_fingerprint="stale",
+            expected_working_artifact_id="art_stale",
+        )
 
 
 def test_screenplay_qa_is_read_only_and_nonblocking() -> None:
@@ -1040,6 +1079,283 @@ async def test_narrative_screenplay_uses_deterministic_document_patch_first(
     assert operations[0].op == "split_dialogue_chain_by_scene"
 
 
+def test_decision_chain_patch_is_derived_from_unique_perceivable_evidence():
+    from app.production.patch import _create_node
+    from app.production.screenplay_document import screenplay_to_document
+    from app.production.screenplay_repair import plan_screenplay_patch
+
+    script = _minimal_script(
+        narrative_plan=NarrativeContinuityPlan.model_validate({
+            "scope_id": "ep_p",
+            "events": [{
+                "event_id": "E4",
+                "proposition_ids": ["P-5"],
+                "action_ids": ["A2"],
+            }],
+            "atomic_actions": [{
+                "action_id": "A2",
+                "actor_ids": ["char-a"],
+                "semantic_intent": "角色执行动作",
+                "completion_condition": "动作完成",
+                "decision_requirement": "applies",
+                "temporal_phases": [{
+                    "phase_id": "A2/P1",
+                    "start_condition": "收到请求",
+                    "end_condition": "完成动作",
+                    "estimated_min_s": 1.0,
+                }],
+            }],
+            "evidence": [{
+                "evidence_id": "EV-4",
+                "anchor": {"type": "event", "id": "E4"},
+                "observable_claim": "角色收到请求并执行动作",
+                "perceivable_by": ["char-a", "audience"],
+                "supports_proposition_ids": ["P-5"],
+            }],
+        }),
+    )
+    issue = structured_issue(
+        code="CHARACTER_DECISION_CHAIN_MISSING",
+        message=(
+            "[CHARACTER_DECISION_CHAIN_MISSING] "
+            "E4/A2 的执行者 char-a 缺少感知→判断→选择依据"
+        ),
+        subject="screenplay",
+        path="/nodes/E4",
+        stage="screenplay",
+    )
+
+    operations = plan_screenplay_patch(issue, script)
+
+    assert len(operations) == 1
+    operation = operations[0]
+    assert operation.op == "create_node"
+    assert operation.target["collection"] == "character_beliefs"
+    assert operation.value["decision_action_ids"] == ["A2"]
+    assert operation.value["decision_basis_ids"] == ["EV-4"]
+    patched, _ = _create_node(screenplay_to_document(script), operation)
+    belief = patched.narrative_plan.character_beliefs[0]
+    assert belief.character_id == "char-a"
+    assert belief.anchor.id == "E4"
+
+
+def test_belief_delta_patch_binds_exact_state_and_fills_assumed_unknowns():
+    from app.production.screenplay_repair import (
+        _patch_strategy_key,
+        plan_screenplay_patch,
+    )
+
+    script = _minimal_script(
+        narrative_plan=NarrativeContinuityPlan.model_validate({
+            "scope_id": "ep_p",
+            "audience_priors": [{
+                "audience_prior_id": "AP-1",
+                "scope_id": "ep_p",
+                "audience_description": "首次观看",
+                "assumed_unknown_proposition_ids": ["P-1", "P-2"],
+            }],
+            "audience_states": [
+                {
+                    "audience_state_id": "AS-IN",
+                    "audience_prior_id": "AP-1",
+                    "anchor": {"type": "event", "id": "E1"},
+                    "beliefs": [{
+                        "proposition_id": "P-1",
+                        "stance": "unknown",
+                        "confidence": 0.0,
+                    }],
+                },
+                {
+                    "audience_state_id": "AS-OUT",
+                    "audience_prior_id": "AP-1",
+                    "anchor": {"type": "event", "id": "E2"},
+                    "beliefs": [
+                        {
+                            "proposition_id": "P-1",
+                            "stance": "believed",
+                            "confidence": 1.0,
+                        },
+                        {
+                            "proposition_id": "P-2",
+                            "stance": "believed",
+                            "confidence": 1.0,
+                        },
+                    ],
+                },
+            ],
+            "experience_intents": [{
+                "experience_intent_id": "XI-1",
+                "scope_id": "ep_p",
+                "director_objective": "建立认知",
+                "audience_paths": [{
+                    "audience_path_id": "XP-1",
+                    "audience_prior_id": "AP-1",
+                    "audience_state_in_id": "AS-IN",
+                    "audience_state_out_target_id": "AS-OUT",
+                    "target_deltas": [{
+                        "target_delta_id": "XD-1",
+                        "dimension": "belief",
+                        "proposition_ids": ["P-1", "P-2"],
+                        "description": "建立两个信念",
+                        "from_state": {"stance": "unknown"},
+                        "to_state": {"stance": "believed"},
+                        "deadline_event_id": "E2",
+                    }],
+                }],
+            }],
+        }),
+    )
+    issue = structured_issue(
+        code="TARGET_DELTA_FROM_STATE_MISMATCH",
+        message=(
+            "[TARGET_DELTA_FROM_STATE_MISMATCH] XD-1.from_state "
+            "不是该观众路径入场状态的真实结构片段"
+        ),
+        subject="screenplay",
+        path="/target_delta_from_state_mismatch",
+        stage="screenplay",
+    )
+
+    operations = plan_screenplay_patch(issue, script)
+
+    assert len(operations) == 2
+    assert operations[0].target["id"] == "XD-1"
+    assert operations[0].value["beliefs"][1] == {
+        "proposition_id": "P-2",
+        "stance": "unknown",
+        "confidence": 0.0,
+        "evidence_ids": [],
+    }
+    assert operations[1].target["id"] == "AS-IN"
+    assert _patch_strategy_key(operations) == "replace_field:XD-1:from_state"
+
+
+def test_unassigned_audience_state_fields_align_to_prior_contract():
+    from app.production.screenplay_repair import plan_screenplay_patch
+
+    script = _minimal_script(
+        narrative_plan=NarrativeContinuityPlan.model_validate({
+            "scope_id": "ep_p",
+            "audience_priors": [
+                {
+                    "audience_prior_id": "AP-1",
+                    "scope_id": "ep_p",
+                    "audience_description": "首次观看",
+                },
+                {
+                    "audience_prior_id": "AP-2",
+                    "scope_id": "ep_p",
+                    "audience_description": "已知剧情",
+                    "assumed_known_proposition_ids": ["P-1", "P-2"],
+                },
+            ],
+            "audience_states": [
+                {
+                    "audience_state_id": "AS-1-IN",
+                    "audience_prior_id": "AP-1",
+                    "anchor": {"type": "event", "id": "E1"},
+                },
+                {
+                    "audience_state_id": "AS-1-OUT",
+                    "audience_prior_id": "AP-1",
+                    "anchor": {"type": "event", "id": "E2"},
+                    "working_memory": [{
+                        "proposition_id": "P-1",
+                        "retention_confidence": 0.9,
+                    }],
+                },
+                {
+                    "audience_state_id": "AS-2-IN",
+                    "audience_prior_id": "AP-2",
+                    "anchor": {"type": "event", "id": "E1"},
+                    "beliefs": [{
+                        "proposition_id": "P-1",
+                        "stance": "believed",
+                        "confidence": 1.0,
+                    }],
+                },
+                {
+                    "audience_state_id": "AS-2-OUT",
+                    "audience_prior_id": "AP-2",
+                    "anchor": {"type": "event", "id": "E2"},
+                    "beliefs": [{
+                        "proposition_id": "P-2",
+                        "stance": "believed",
+                        "confidence": 1.0,
+                        "evidence_ids": ["EV-2"],
+                    }],
+                },
+            ],
+            "experience_intents": [{
+                "experience_intent_id": "XI-1",
+                "scope_id": "ep_p",
+                "director_objective": "观众状态",
+                "audience_paths": [
+                    {
+                        "audience_path_id": "XP-1",
+                        "audience_prior_id": "AP-1",
+                        "audience_state_in_id": "AS-1-IN",
+                        "audience_state_out_target_id": "AS-1-OUT",
+                    },
+                    {
+                        "audience_path_id": "XP-2",
+                        "audience_prior_id": "AP-2",
+                        "audience_state_in_id": "AS-2-IN",
+                        "audience_state_out_target_id": "AS-2-OUT",
+                    },
+                ],
+            }],
+        }),
+    )
+    memory_issue = structured_issue(
+        code="AUDIENCE_TARGET_STATE_DIFF_UNASSIGNED",
+        message=(
+            "[AUDIENCE_TARGET_STATE_DIFF_UNASSIGNED] XP-1 "
+            "入/出状态的结构变化没有 target_delta 负责：['working_memory']"
+        ),
+        subject="screenplay",
+        stage="screenplay",
+    )
+    belief_issue = structured_issue(
+        code="AUDIENCE_TARGET_STATE_DIFF_UNASSIGNED",
+        message=(
+            "[AUDIENCE_TARGET_STATE_DIFF_UNASSIGNED] XP-2 "
+            "入/出状态的结构变化没有 target_delta 负责：['beliefs']"
+        ),
+        subject="screenplay",
+        stage="screenplay",
+    )
+
+    memory_ops = plan_screenplay_patch(memory_issue, script)
+    belief_ops = plan_screenplay_patch(belief_issue, script)
+
+    assert len(memory_ops) == 1
+    assert memory_ops[0].target["id"] == "AS-1-OUT"
+    assert memory_ops[0].value == []
+    assert len(belief_ops) == 2
+    assert {operation.target["id"] for operation in belief_ops} == {
+        "AS-2-IN",
+        "AS-2-OUT",
+    }
+    assert all(
+        operation.value == [
+            {
+                "proposition_id": "P-1",
+                "stance": "believed",
+                "confidence": 1.0,
+                "evidence_ids": [],
+            },
+            {
+                "proposition_id": "P-2",
+                "stance": "believed",
+                "confidence": 1.0,
+                "evidence_ids": [],
+            },
+        ]
+        for operation in belief_ops
+    )
+
+
 def test_full_regen_denied_is_a_policy_conflict_not_a_media_error():
     assert errors.classify(FullRegenDenied("denied")) == (
         "conflict",
@@ -1051,7 +1367,7 @@ def test_full_regen_denied_is_a_policy_conflict_not_a_media_error():
 async def test_existing_baseline_resumes_qa_without_calling_full_generation(monkeypatch):
     from app import stages
     from app.evidence import repository as evidence_repository
-    from app.production import screenplay_repair
+    from app.production import screenplay_authority, screenplay_repair
 
     revision = ensure_production_revision(
         episode_id="ep_p",
@@ -1079,6 +1395,11 @@ async def test_existing_baseline_resumes_qa_without_calling_full_generation(monk
 
     monkeypatch.setattr(stages, "generate_screenplay_baseline", forbidden_baseline)
     monkeypatch.setattr(
+        screenplay_authority,
+        "screenplay_authority_fingerprint",
+        lambda *_args, **_kwargs: "authority-test",
+    )
+    monkeypatch.setattr(
         screenplay_repair,
         "run_screenplay_qa",
         lambda *_args, **_kwargs: (
@@ -1090,6 +1411,9 @@ async def test_existing_baseline_resumes_qa_without_calling_full_generation(monk
                 status="passed",
                 hard_gate_passed=True,
                 score=100,
+                    evidence={
+                        "authority_input_fingerprint": "authority-test",
+                    },
             ),
         ),
     )
@@ -1807,6 +2131,87 @@ def test_narrative_node_alias_resolves_unique_schema_collection():
     assert _narrative_collection_for_node(plan, "missing") is None
 
 
+def test_new_narrative_node_infers_collection_from_stable_identity_field():
+    from app.production.screenplay_repair import (
+        _narrative_collection_for_new_node,
+    )
+
+    plan = NarrativeContinuityPlan.model_validate({
+        "scope_id": "ep_p",
+        "character_beliefs": [{
+            "character_belief_id": "CB-1",
+            "character_id": "甲",
+            "anchor": {"type": "event", "id": "E1"},
+        }],
+    }).model_dump(mode="json")
+    new_belief = {
+        "character_belief_id": "CB-2",
+        "character_id": "乙",
+        "anchor": {"type": "event", "id": "E2"},
+    }
+
+    assert _narrative_collection_for_new_node(
+        plan,
+        "CB-2",
+        new_belief,
+    ) == "character_beliefs"
+
+
+def test_new_belief_candidate_routes_to_narrative_preflight():
+    from app.production.screenplay_repair import (
+        _candidate_targets_narrative_graph,
+    )
+
+    plan = NarrativeContinuityPlan.model_validate({
+        "scope_id": "ep_p",
+        "character_beliefs": [{
+            "character_belief_id": "CB-1",
+            "character_id": "甲",
+            "anchor": {"type": "event", "id": "E1"},
+        }],
+    }).model_dump(mode="json")
+    candidate = {
+        "operations": [{
+            "op": "create_node",
+            "target": {
+                "kind": "character_belief",
+                "id": "CB-2",
+                "parent_id": "narrative_plan",
+                "parent_field": "character_beliefs",
+            },
+            "value": {
+                "character_belief_id": "CB-2",
+                "character_id": "乙",
+                "anchor": {"type": "event", "id": "E2"},
+            },
+        }],
+    }
+
+    assert _candidate_targets_narrative_graph(candidate, plan) is True
+
+
+def test_top_level_narrative_parent_is_removed_with_explicit_collection():
+    from app.production.screenplay_repair import (
+        _normalize_top_level_narrative_parent,
+    )
+
+    target = _normalize_top_level_narrative_parent(
+        {
+            "kind": "character_belief",
+            "collection": "character_beliefs",
+            "id": "CB-2",
+            "parent_id": "narrative_plan",
+            "parent_field": "character_beliefs",
+        },
+        collection="character_beliefs",
+        plan_data={"scope_id": "ep_p"},
+    )
+
+    assert "parent_id" not in target
+    assert "parent_field" not in target
+    assert target["collection"] == "character_beliefs"
+
+
 def test_event_fact_patch_expands_to_its_single_atomic_action():
     from app.production.patch import PatchOperation
     from app.production.screenplay_repair import (
@@ -1912,6 +2317,130 @@ def test_candidate_executability_uses_production_patch_path():
 
     assert _candidate_is_executable(destructive, document) is False
     assert _candidate_is_executable(bounded, document) is True
+
+
+def test_document_candidate_preflight_selects_passing_minimal_subset():
+    from app.production.screenplay_repair import _preflight_document_candidate
+    from app.validators import validate_screenplay
+
+    source = (
+        "“救命。” “你是谁？” “还有其他人。” "
+        "“你们怎么来的？” “飞！” “别听他胡说，因为我们是被抓来的。” "
+        "“我不信。”"
+    )
+    script = _minimal_script(
+        full_script_text=(
+            "【场1】夜 / 场地\n"
+            "甲：救命。\n"
+            "乙：你是谁？\n"
+            "甲：还有其他人。\n"
+            "乙：你们怎么来的？\n"
+            "丙（大声），飞！\n"
+            "甲：别听他胡说，因为我们是被抓来的。\n"
+            "乙：我不信。"
+        ),
+        dialogue_chains=[
+            KeyDialogueChain(
+                chain_id="DC1",
+                topic="说明来历",
+                turns=[
+                    KeyDialogueTurn(
+                        speaker="甲",
+                        line="救命。",
+                        function="trigger",
+                        source_text="救命。",
+                    ),
+                    KeyDialogueTurn(
+                        speaker="乙",
+                        line="你是谁？",
+                        function="question",
+                        source_text="你是谁？",
+                    ),
+                    KeyDialogueTurn(
+                        speaker="甲",
+                        line="别听他胡说，因为我们是被抓来的。",
+                        function="response",
+                        source_text="别听他胡说，因为我们是被抓来的。",
+                    ),
+                    KeyDialogueTurn(
+                        speaker="乙",
+                        line="我不信。",
+                        function="response",
+                        source_text="我不信。",
+                    ),
+                ],
+            ),
+        ],
+    )
+    script = document_to_screenplay(screenplay_to_document(script))
+    errors = validate_screenplay(
+        script,
+        Bible(characters=[], world=World(visual_style_canonical="测试画风")),
+        expected_beats=1,
+        episode_no=1,
+        source_text=source,
+        require_dialogue_chains=True,
+    )
+    message = next(error for error in errors if "主线对白上下文断裂" in error)
+    issue = structured_issue(
+        code="KEY_LINE_MISSING",
+        message=message,
+        subject="screenplay",
+        path="/dialogue_chains",
+        rule_id="key_line_context",
+        stage="screenplay",
+    )
+    candidate = {
+        "candidate_id": "CAND-PASSING-BACKUP",
+        "expected_narrative_gain": 1.0,
+        "destructive_cost": 0.1,
+        "operations": [
+            {
+                "op": "replace",
+                "path": "turns",
+                "target": {"kind": "future_dialogue_type", "id": "DC1"},
+                "value": [
+                    *[
+                        turn.model_dump(mode="json")
+                        for turn in script.dialogue_chains[0].turns[:2]
+                    ],
+                    {
+                        "speaker": "乙",
+                        "line": "你们怎么来的？",
+                        "function": "question",
+                        "source_text": "你们怎么来的？",
+                    },
+                    {
+                        "speaker": "丙",
+                        "line": "飞！",
+                        "function": "statement",
+                        "source_text": "飞！",
+                    },
+                    *[
+                        turn.model_dump(mode="json")
+                        for turn in script.dialogue_chains[0].turns[2:]
+                    ],
+                ],
+            },
+            {
+                "op": "replace",
+                "path": "unknown_field",
+                "target": {"kind": "future_node", "id": "UNKNOWN"},
+                "value": "ignored",
+            },
+        ],
+    }
+
+    operations = _preflight_document_candidate(
+        candidate,
+        document=screenplay_to_document(script),
+        source_text=source,
+        issue=issue,
+    )
+
+    assert len(operations) == 1
+    assert operations[0].path == "turns"
+    assert operations[0].target["id"] == "DC1"
 
 
 @pytest.mark.asyncio

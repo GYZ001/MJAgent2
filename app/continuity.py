@@ -78,6 +78,27 @@ _DIALOGUE_PROP_STAGING_RE = re.compile(
 )
 
 
+def _scene_time_context(value: Any) -> str:
+    """Use the same broad time buckets as storyboard validation."""
+    raw = scene_time_of(value)
+    if any(
+        token in raw
+        for token in ("凌晨", "清晨", "早晨", "上午", "白天", "日间", "日")
+    ):
+        return "day"
+    if any(
+        token in raw
+        for token in ("中午", "午后", "下午", "傍晚", "黄昏")
+    ):
+        return "late_day"
+    if any(
+        token in raw
+        for token in ("夜晚", "夜里", "深夜", "午夜", "夜")
+    ):
+        return "night"
+    return re.sub(r"\s+", "", raw).lower()
+
+
 def raw_characters_visible(shot: Shot) -> list[str]:
     """分镜声明的原始可见人物，不应用对白构图派生规则。"""
     return [
@@ -1036,7 +1057,7 @@ def state_chain_errors(
         if prev is not None:
             same_context = (
                 same_scene(shot, prev)
-                and scene_time_of(shot) == scene_time_of(prev)
+                and _scene_time_context(shot) == _scene_time_context(prev)
             )
             if mode == "scene_change" and same_context:
                 errors.append(f"{tag}.continuity_mode=scene_change 但 scene_name/scene_time 与上一镜相同")

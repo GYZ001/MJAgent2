@@ -115,6 +115,45 @@ def get_active_production_revision(episode_id: str, kind: Kind) -> ProductionRev
     return _row_to_revision(row)
 
 
+def rebind_input_fingerprint(
+    revision_id: str,
+    *,
+    input_fingerprint: str,
+    expected_working_artifact_id: str,
+    conn=None,
+    commit: bool = True,
+) -> ProductionRevision:
+    """CAS-bind an active, QA-verified working revision to current authority."""
+    if not input_fingerprint or not expected_working_artifact_id:
+        raise ValueError("revision 指纹重绑缺少权威指纹或 working artifact")
+    db = conn or get_conn()
+    cursor = db.execute(
+        """UPDATE production_revisions
+              SET input_fingerprint=?, updated_at=?
+            WHERE id=? AND status='active'
+              AND working_artifact_id=?
+              AND published_artifact_id IS NULL""",
+        (
+            input_fingerprint,
+            now(),
+            revision_id,
+            expected_working_artifact_id,
+        ),
+    )
+    if cursor.rowcount != 1:
+        raise ValueError("revision 指纹重绑发生 CAS 冲突")
+    if commit:
+        db.commit()
+    row = db.execute(
+        "SELECT * FROM production_revisions WHERE id=?",
+        (revision_id,),
+    ).fetchone()
+    revision = _row_to_revision(row)
+    if revision is None:
+        raise ValueError("revision 指纹重绑后记录不存在")
+    return revision
+
+
 def screenplay_production_state(episode_id: str) -> dict[str, Any]:
     """Return the UI-safe distinction between Baseline generation and Patch repair."""
     from app import task_registry

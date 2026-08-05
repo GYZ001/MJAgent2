@@ -1,6 +1,7 @@
 """剧本 Production Repair Agent：Baseline 一次生成后只做局部 Patch。"""
 from __future__ import annotations
 
+from copy import deepcopy
 import hashlib
 import json
 import re
@@ -30,6 +31,7 @@ from app.production.revision import (
     get_production_revision,
     mark_baseline_generated,
     mark_first_evaluation,
+    rebind_input_fingerprint,
     save_checkpoint,
     update_working_artifact,
 )
@@ -142,6 +144,11 @@ def _patch_strategy_key(ops: list[PatchOperation]) -> str:
         return (
             f"fix_dialogue_function_{op.target.get('chain_id')}_"
             f"{op.target.get('turn_index')}"
+        )
+    if kind == "narrative_node":
+        return (
+            f"{op.op}:{(op.target or {}).get('id') or 'unknown'}:"
+            f"{op.path or 'node'}"
         )
     if op.op == "create_node" and kind == "dialogue_turn":
         return "insert_trigger"
@@ -366,6 +373,146 @@ def plan_screenplay_patch(
 
     ops: list[PatchOperation] = []
 
+    staging_match = re.search(
+        r"\]\s*([^/\s]+)/([^\s]+)\s+在\s+([^\s]+)\s+->\s+([^\s]+)"
+        r"\s+之间缺少中间 AudienceState",
+        issue.message or "",
+    )
+    if (
+        code == "AUDIENCE_TARGET_DELTA_STAGING_REQUIRED"
+        and staging_match
+        and script.narrative_plan is not None
+    ):
+        path_id, prior_id, current_delta_id, next_delta_id = (
+            staging_match.groups()
+        )
+        plan = script.narrative_plan
+        path = next(
+            (
+                item
+                for intent in plan.experience_intents
+                for item in intent.audience_paths
+                if (
+                    item.audience_path_id == path_id
+                    and item.audience_prior_id == prior_id
+                )
+            ),
+            None,
+        )
+        if path is not None:
+            current_delta = next(
+                (
+                    item
+                    for item in path.target_deltas
+                    if item.target_delta_id == current_delta_id
+                ),
+                None,
+            )
+            next_delta = next(
+                (
+                    item
+                    for item in path.target_deltas
+                    if item.target_delta_id == next_delta_id
+                ),
+                None,
+            )
+            state_in = next(
+                (
+                    item
+                    for item in plan.audience_states
+                    if item.audience_state_id == path.audience_state_in_id
+                ),
+                None,
+            )
+            strategy = (
+                f"stage_{path_id}_{current_delta_id}_{next_delta_id}"
+            )
+            if (
+                current_delta is not None
+                and next_delta is not None
+                and state_in is not None
+                and not _strategy_was_tried(tried, strategy)
+            ):
+                state_data = state_in.model_dump(mode="json")
+                fragment = deepcopy(current_delta.to_state)
+                if current_delta.dimension == "belief":
+                    beliefs_by_id = {
+                        str(item.get("proposition_id") or ""): item
+                        for item in state_data.get("beliefs") or []
+                        if isinstance(item, dict)
+                    }
+                    explicit = fragment.pop("beliefs", None)
+                    if isinstance(explicit, list):
+                        for belief in explicit:
+                            if not isinstance(belief, dict):
+                                continue
+                            proposition_id = str(
+                                belief.get("proposition_id") or ""
+                            )
+                            if proposition_id:
+                                beliefs_by_id[proposition_id] = deepcopy(belief)
+                    else:
+                        belief_patch = {
+                            key: deepcopy(value)
+                            for key, value in fragment.items()
+                            if key in {"stance", "confidence", "evidence_ids"}
+                        }
+                        for proposition_id in current_delta.proposition_ids:
+                            current = dict(
+                                beliefs_by_id.get(proposition_id) or {
+                                    "proposition_id": proposition_id,
+                                }
+                            )
+                            current.update(belief_patch)
+                            beliefs_by_id[proposition_id] = current
+                    state_data["beliefs"] = list(beliefs_by_id.values())
+                for field, value in fragment.items():
+                    if field in {"stance", "confidence", "evidence_ids"}:
+                        continue
+                    if (
+                        isinstance(value, dict)
+                        and isinstance(state_data.get(field), dict)
+                    ):
+                        state_data[field] = {
+                            **state_data[field],
+                            **deepcopy(value),
+                        }
+                    elif field in type(state_in).model_fields:
+                        state_data[field] = deepcopy(value)
+
+                existing_ids = {
+                    item.audience_state_id
+                    for item in plan.audience_states
+                }
+                stem = re.sub(
+                    r"[^A-Za-z0-9_-]+",
+                    "-",
+                    f"AS-{prior_id}-MID-{current_delta.deadline_event_id}",
+                ).strip("-")
+                state_id = stem
+                suffix = 2
+                while state_id in existing_ids:
+                    state_id = f"{stem}-{suffix}"
+                    suffix += 1
+                state_data.update({
+                    "audience_state_id": state_id,
+                    "audience_prior_id": prior_id,
+                    "anchor": {
+                        "type": "event",
+                        "id": current_delta.deadline_event_id,
+                    },
+                })
+                return [PatchOperation(
+                    op="create_node",
+                    target={
+                        "kind": "narrative_node",
+                        "collection": "audience_states",
+                        "id": state_id,
+                        "strategy": strategy,
+                    },
+                    value=state_data,
+                )]
+
     # 场级字段必须直接 Patch 源节点。rederive 只会重建投影，无法修复源字段。
     if (
         code in _SCENE_STORY_FUNCTION_CODES
@@ -527,6 +674,450 @@ def plan_screenplay_patch(
                     target={"kind": "dialogue_chain", "id": chain.chain_id,
                             "chain_id": chain.chain_id},
                 )]
+
+    capacity_match = re.search(
+        r"dialogue_chains\[(\d+)\]\.turns\[(\d+)\]\s+纯文字\s+(\d+)\s+字",
+        issue.message or "",
+    )
+    if code == "DIALOGUE_TURN_CAPACITY_EXCEEDED" and capacity_match:
+        from app import config
+
+        chain_index, turn_index, _spoken_chars = map(
+            int,
+            capacity_match.groups(),
+        )
+        if 0 <= chain_index < len(script.dialogue_chains or []):
+            chain = script.dialogue_chains[chain_index]
+            strategy = (
+                f"split_dialogue_turn_{chain.chain_id}_{turn_index}"
+            )
+            if not _strategy_was_tried(tried, strategy):
+                return [PatchOperation(
+                    op="split_dialogue_turn_by_capacity",
+                    target={
+                        "kind": "dialogue_chain_turn",
+                        "id": f"{chain.chain_id}-T{turn_index + 1}",
+                        "chain_id": chain.chain_id,
+                        "turn_index": turn_index,
+                        "strategy": strategy,
+                    },
+                    value={
+                        "max_chars": config.MAX_SPOKEN_CHARS_PER_SHOT,
+                    },
+                )]
+
+    decision_match = re.search(
+        r"\]\s*([^/\s]+)/([^\s]+)\s+的执行者\s+([^\s]+)\s+缺少感知",
+        issue.message or "",
+    )
+    if (
+        code == "CHARACTER_DECISION_CHAIN_MISSING"
+        and decision_match
+        and script.narrative_plan is not None
+    ):
+        event_id, action_id, actor_id = decision_match.groups()
+        strategy = f"create_decision_chain_{event_id}_{action_id}_{actor_id}"
+        if not _strategy_was_tried(tried, strategy):
+            plan = script.narrative_plan
+            event = next(
+                (item for item in plan.events if item.event_id == event_id),
+                None,
+            )
+            action = next(
+                (item for item in plan.atomic_actions if item.action_id == action_id),
+                None,
+            )
+            if (
+                event is not None
+                and action is not None
+                and action_id in event.action_ids
+                and actor_id in action.actor_ids
+                and action.decision_requirement == "applies"
+            ):
+                proposition_ids = list(dict.fromkeys(event.proposition_ids or []))
+                evidence = [
+                    item for item in plan.evidence
+                    if (
+                        item.anchor.type == "event"
+                        and item.anchor.id == event_id
+                        and actor_id in item.perceivable_by
+                        and set(item.supports_proposition_ids) & set(proposition_ids)
+                    )
+                ]
+                if len(evidence) == 1:
+                    evidence_item = evidence[0]
+                    supported = [
+                        proposition_id
+                        for proposition_id in proposition_ids
+                        if proposition_id in evidence_item.supports_proposition_ids
+                    ]
+                    existing_ids = {
+                        item.character_belief_id
+                        for item in plan.character_beliefs
+                    }
+                    belief_no = 1
+                    while f"CB-{belief_no}" in existing_ids:
+                        belief_no += 1
+                    belief_id = f"CB-{belief_no}"
+                    return [PatchOperation(
+                        op="create_node",
+                        target={
+                            "kind": "narrative_node",
+                            "collection": "character_beliefs",
+                            "id": belief_id,
+                            "strategy": strategy,
+                        },
+                        value={
+                            "character_belief_id": belief_id,
+                            "character_id": actor_id,
+                            "anchor": {"type": "event", "id": event_id},
+                            "perceived_evidence_ids": [evidence_item.evidence_id],
+                            "beliefs": [
+                                {
+                                    "proposition_id": proposition_id,
+                                    "stance": "believed",
+                                    "confidence": 1.0,
+                                    "evidence_ids": [evidence_item.evidence_id],
+                                }
+                                for proposition_id in supported
+                            ],
+                            "misbelief_proposition_ids": [],
+                            "decision_proposition_ids": supported,
+                            "decision_basis_ids": [evidence_item.evidence_id],
+                            "decision_action_ids": [action_id],
+                        },
+                    )]
+
+    delta_match = re.search(
+        r"\]\s*([^\s.]+)\.(from_state|to_state)\s+不是",
+        issue.message or "",
+    )
+    if (
+        code in {
+            "TARGET_DELTA_FROM_STATE_MISMATCH",
+            "TARGET_DELTA_TO_STATE_MISMATCH",
+        }
+        and delta_match
+        and script.narrative_plan is not None
+    ):
+        delta_id, state_field = delta_match.groups()
+        plan = script.narrative_plan
+        located = next(
+            (
+                (path, delta)
+                for intent in plan.experience_intents
+                for path in intent.audience_paths
+                for delta in path.target_deltas
+                if delta.target_delta_id == delta_id
+            ),
+            None,
+        )
+        if located is not None:
+            path, delta = located
+            state_id = (
+                path.audience_state_in_id
+                if state_field == "from_state"
+                else path.audience_state_out_target_id
+            )
+            state = next(
+                (
+                    item for item in plan.audience_states
+                    if item.audience_state_id == state_id
+                ),
+                None,
+            )
+            prior = next(
+                (
+                    item for item in plan.audience_priors
+                    if item.audience_prior_id == path.audience_prior_id
+                ),
+                None,
+            )
+            if state is not None and delta.dimension == "belief":
+                beliefs_by_id = {
+                    item.proposition_id: item.model_dump(mode="json")
+                    for item in state.beliefs
+                }
+                missing = [
+                    proposition_id
+                    for proposition_id in delta.proposition_ids
+                    if proposition_id not in beliefs_by_id
+                ]
+                can_add_unknown = (
+                    state_field == "from_state"
+                    and prior is not None
+                    and set(missing).issubset(
+                        set(prior.assumed_unknown_proposition_ids)
+                    )
+                )
+                if not missing or can_add_unknown:
+                    added = [
+                        {
+                            "proposition_id": proposition_id,
+                            "stance": "unknown",
+                            "confidence": 0.0,
+                            "evidence_ids": [],
+                        }
+                        for proposition_id in missing
+                    ]
+                    full_beliefs = [
+                        item.model_dump(mode="json")
+                        for item in state.beliefs
+                    ] + added
+                    selected = {
+                        item["proposition_id"]: item
+                        for item in full_beliefs
+                        if item["proposition_id"] in delta.proposition_ids
+                    }
+                    fragment = {
+                        "beliefs": [
+                            selected[proposition_id]
+                            for proposition_id in delta.proposition_ids
+                        ]
+                    }
+                    strategy = f"bind_{delta_id}_{state_field}"
+                    if not _strategy_was_tried(tried, strategy):
+                        operations = [PatchOperation(
+                            op="replace_field",
+                            path=state_field,
+                            value=fragment,
+                            target={
+                                "kind": "narrative_node",
+                                "collection": "experience_intents",
+                                "id": delta_id,
+                                "strategy": strategy,
+                            },
+                        )]
+                        if missing:
+                            operations.append(PatchOperation(
+                                op="replace_field",
+                                path="beliefs",
+                                value=full_beliefs,
+                                target={
+                                    "kind": "narrative_node",
+                                    "collection": "audience_states",
+                                    "id": state_id,
+                                    "strategy": strategy,
+                                },
+                            ))
+                        return operations
+
+    uncovered_match = re.search(
+        r"\]\s*([^\s]+)\s+入/出状态的结构变化没有 target_delta 负责：\[(.+)\]",
+        issue.message or "",
+    )
+    if (
+        code == "AUDIENCE_TARGET_STATE_DIFF_UNASSIGNED"
+        and uncovered_match
+        and script.narrative_plan is not None
+    ):
+        path_id, raw_fields = uncovered_match.groups()
+        uncovered_fields = set(re.findall(r"'([^']+)'", raw_fields))
+        plan = script.narrative_plan
+        located = next(
+            (
+                path
+                for intent in plan.experience_intents
+                for path in intent.audience_paths
+                if path.audience_path_id == path_id
+            ),
+            None,
+        )
+        if located is not None:
+            state_in = next(
+                (
+                    item for item in plan.audience_states
+                    if item.audience_state_id == located.audience_state_in_id
+                ),
+                None,
+            )
+            state_out = next(
+                (
+                    item for item in plan.audience_states
+                    if item.audience_state_id == located.audience_state_out_target_id
+                ),
+                None,
+            )
+            prior = next(
+                (
+                    item for item in plan.audience_priors
+                    if item.audience_prior_id == located.audience_prior_id
+                ),
+                None,
+            )
+            if state_in is not None and state_out is not None:
+                if (
+                    uncovered_fields == {"working_memory"}
+                    and state_in.attention_residue_ids
+                    == state_out.attention_residue_ids
+                ):
+                    strategy = f"align_{path_id}_working_memory"
+                    if not _strategy_was_tried(tried, strategy):
+                        return [PatchOperation(
+                            op="replace_field",
+                            path="working_memory",
+                            value=list(state_in.working_memory),
+                            target={
+                                "kind": "narrative_node",
+                                "collection": "audience_states",
+                                "id": state_out.audience_state_id,
+                                "strategy": strategy,
+                            },
+                        )]
+                if uncovered_fields == {"beliefs"} and prior is not None:
+                    known = list(dict.fromkeys(
+                        prior.assumed_known_proposition_ids
+                    ))
+                    if known:
+                        canonical = [
+                            {
+                                "proposition_id": proposition_id,
+                                "stance": "believed",
+                                "confidence": 1.0,
+                                "evidence_ids": [],
+                            }
+                            for proposition_id in known
+                        ]
+                        strategy = f"align_{path_id}_known_beliefs"
+                        if not _strategy_was_tried(tried, strategy):
+                            operations: list[PatchOperation] = []
+                            if [
+                                item.model_dump(mode="json")
+                                for item in state_in.beliefs
+                            ] != canonical:
+                                operations.append(PatchOperation(
+                                    op="replace_field",
+                                    path="beliefs",
+                                    value=canonical,
+                                    target={
+                                        "kind": "narrative_node",
+                                        "collection": "audience_states",
+                                        "id": state_in.audience_state_id,
+                                        "strategy": strategy,
+                                    },
+                                ))
+                            if [
+                                item.model_dump(mode="json")
+                                for item in state_out.beliefs
+                            ] != canonical:
+                                operations.append(PatchOperation(
+                                    op="replace_field",
+                                    path="beliefs",
+                                    value=canonical,
+                                    target={
+                                        "kind": "narrative_node",
+                                        "collection": "audience_states",
+                                        "id": state_out.audience_state_id,
+                                        "strategy": strategy,
+                                    },
+                                ))
+                            if operations:
+                                return operations
+
+    recall_task_match = re.search(
+        r"\]\s*([^/\s]+)/([^\s]+)\s+在使用前已遗忘\s+\[([^\]]+)\]",
+        issue.message or "",
+    )
+    if (
+        code == "SETUP_RECALL_TASK_MISSING"
+        and recall_task_match
+        and script.narrative_plan is not None
+    ):
+        payoff_id, prior_id, raw_propositions = recall_task_match.groups()
+        missing_propositions = re.findall(r"'([^']+)'", raw_propositions)
+        plan = script.narrative_plan
+        payoff = next(
+            (
+                item for item in plan.setup_payoff_contracts
+                if item.setup_payoff_id == payoff_id
+            ),
+            None,
+        )
+        paths = [
+            (intent, path)
+            for intent in plan.experience_intents
+            for path in intent.audience_paths
+            if path.audience_prior_id == prior_id
+        ]
+        if payoff is not None and len(paths) == 1 and missing_propositions:
+            intent, path = paths[0]
+            downstream_event = next(
+                iter(payoff.payoff_event_ids),
+                payoff.retention_deadline_event_id,
+            )
+            existing_tasks = [
+                task for task in plan.assimilation_tasks
+                if task.audience_path_id == path.audience_path_id
+            ]
+            strategy = f"recall_task_{payoff_id}_{prior_id}"
+            if not _strategy_was_tried(tried, strategy):
+                if len(existing_tasks) == 1:
+                    task = existing_tasks[0]
+                    required = list(dict.fromkeys([
+                        *task.required_prior_proposition_ids,
+                        *missing_propositions,
+                    ]))
+                    downstream = list(dict.fromkeys([
+                        *task.downstream_dependency_event_ids,
+                        downstream_event,
+                    ]))
+                    operations = [
+                        PatchOperation(
+                            op="replace_field",
+                            path="required_prior_proposition_ids",
+                            value=required,
+                            target={
+                                "kind": "narrative_node",
+                                "collection": "assimilation_tasks",
+                                "id": task.assimilation_task_id,
+                                "strategy": strategy,
+                            },
+                        ),
+                    ]
+                    if downstream != task.downstream_dependency_event_ids:
+                        operations.append(PatchOperation(
+                            op="replace_field",
+                            path="downstream_dependency_event_ids",
+                            value=downstream,
+                            target={
+                                "kind": "narrative_node",
+                                "collection": "assimilation_tasks",
+                                "id": task.assimilation_task_id,
+                                "strategy": strategy,
+                            },
+                        ))
+                    return operations
+                if not existing_tasks and path.target_deltas:
+                    existing_ids = {
+                        task.assimilation_task_id
+                        for task in plan.assimilation_tasks
+                    }
+                    task_no = 1
+                    while f"AT-{task_no}" in existing_ids:
+                        task_no += 1
+                    task_id = f"AT-{task_no}"
+                    return [PatchOperation(
+                        op="create_node",
+                        target={
+                            "kind": "narrative_node",
+                            "collection": "assimilation_tasks",
+                            "id": task_id,
+                            "strategy": strategy,
+                        },
+                        value={
+                            "assimilation_task_id": task_id,
+                            "experience_intent_id": intent.experience_intent_id,
+                            "audience_path_id": path.audience_path_id,
+                            "target_delta_id": path.target_deltas[0].target_delta_id,
+                            "required_prior_proposition_ids": missing_propositions,
+                            "downstream_dependency_event_ids": [downstream_event],
+                            "satisfaction_criteria": (
+                                f"观众在 {downstream_event} 前能回忆命题 "
+                                + "、".join(missing_propositions)
+                            ),
+                            "status": "planned",
+                        },
+                    )]
 
     # key_lines / full_script_text 等纯派生投影才允许 rederive。上下文断裂必须
     # 修复权威 dialogue_chain，重建投影不会补出缺失的触发话轮。
@@ -913,6 +1504,10 @@ def _normalize_screenplay_narrative_graph(
         for chapter_id, text in raw_chapters.items()
         if str(chapter_id).strip() and str(text)
     }
+    changes.extend(_normalize_dialogue_chain_continuity(
+        script,
+        "\n".join(dict.fromkeys(chapters.values())),
+    ))
     for index, evidence in enumerate(data.get("source_evidence") or []):
         if not isinstance(evidence, dict):
             continue
@@ -1069,6 +1664,84 @@ def _normalize_screenplay_narrative_graph(
                 "to": normalized,
             })
             belief["stance"] = normalized
+
+    events = [
+        event for event in (data.get("events") or [])
+        if isinstance(event, dict)
+    ]
+    causal_parent_ids = {
+        str(parent_id)
+        for event in events
+        for parent_id in (event.get("causal_parent_ids") or [])
+        if str(parent_id or "").strip()
+    }
+    critical_event_ids = {
+        str(event.get("event_id") or "")
+        for event in events
+        if (
+            event.get("downstream_dependency_event_ids")
+            or str(event.get("event_id") or "") in causal_parent_ids
+        )
+    }
+    intended = {
+        str(proposition_id)
+        for intent in (data.get("experience_intents") or [])
+        if isinstance(intent, dict)
+        for path in (intent.get("audience_paths") or [])
+        if isinstance(path, dict)
+        for delta in (path.get("target_deltas") or [])
+        if isinstance(delta, dict)
+        for proposition_id in (delta.get("proposition_ids") or [])
+        if str(proposition_id or "").strip()
+    }
+    withheld = {
+        str(item.get("proposition_id") or "")
+        for intent in (data.get("experience_intents") or [])
+        if isinstance(intent, dict)
+        for item in (intent.get("withheld_propositions") or [])
+        if isinstance(item, dict) and str(item.get("proposition_id") or "").strip()
+    }
+    missing_critical = {
+        str(proposition_id)
+        for event in events
+        if str(event.get("event_id") or "") in critical_event_ids
+        for proposition_id in (event.get("proposition_ids") or [])
+        if str(proposition_id or "").strip() not in intended | withheld
+    }
+    if missing_critical:
+        for intent in data.get("experience_intents") or []:
+            if not isinstance(intent, dict):
+                continue
+            for path in intent.get("audience_paths") or []:
+                if not isinstance(path, dict):
+                    continue
+                attention_deltas = [
+                    delta
+                    for delta in (path.get("target_deltas") or [])
+                    if isinstance(delta, dict)
+                    and str(delta.get("dimension") or "") == "attention"
+                ]
+                if len(attention_deltas) != 1:
+                    continue
+                delta = attention_deltas[0]
+                existing = [
+                    str(item)
+                    for item in (delta.get("proposition_ids") or [])
+                    if str(item or "").strip()
+                ]
+                normalized = list(dict.fromkeys([
+                    *existing,
+                    *sorted(missing_critical),
+                ]))
+                if normalized == existing:
+                    continue
+                changes.append({
+                    "kind": "critical_proposition_intent",
+                    "id": delta.get("target_delta_id"),
+                    "from": existing,
+                    "to": normalized,
+                })
+                delta["proposition_ids"] = normalized
 
     delta_requirements: dict[str, tuple[str, float]] = {}
     delta_windows: dict[str, str] = {}
@@ -1511,6 +2184,13 @@ async def run_screenplay_production(
             # or a stale worker repeatedly reports the same material change.
             working_id = normalization_artifact["id"]
             artifact_hash = normalization_hash
+            from app.production.screenplay_document import (
+                ScreenplayDocument,
+                document_to_screenplay,
+            )
+            script = document_to_screenplay(
+                ScreenplayDocument.model_validate(normalization_payload),
+            )
 
         issues, evaluation = run_screenplay_qa(
             script,
@@ -1534,6 +2214,19 @@ async def run_screenplay_production(
                 reopened.add(fp)
 
         if evaluation.status == "passed" and can_issue_certificate(issues):
+            qa_input_fingerprint = str(
+                (evaluation.evidence or {}).get("authority_input_fingerprint") or "",
+            )
+            if not qa_input_fingerprint or qa_input_fingerprint != input_fp:
+                raise ValueError(
+                    "剧本 QA 权威指纹与当前运行输入不一致，禁止签发完成凭证",
+                )
+            if rev.input_fingerprint != qa_input_fingerprint:
+                rev = rebind_input_fingerprint(
+                    rev.id,
+                    input_fingerprint=qa_input_fingerprint,
+                    expected_working_artifact_id=working_id,
+                )
             if run_id:
                 evidence_repository.append_event(
                     run_id, "CERTIFYING", "info", "剧本 QA 已通过，正在签发完成凭证",
@@ -1550,7 +2243,7 @@ async def run_screenplay_production(
                 artifact_id=working_id,
                 artifact_hash=artifact_hash,
                 evaluation_ids=[eval_id] if eval_id else [],
-                input_fingerprint=rev.input_fingerprint,
+                input_fingerprint=qa_input_fingerprint,
                 contract_version=rev.contract_version,
                 qa_profile_version=rev.qa_profile_version,
                 clear_downstream=True,
@@ -1963,6 +2656,74 @@ def _source_references_are_grounded(value: Any, source_text: str) -> bool:
     return True
 
 
+def _normalize_character_decision_basis(value: Any) -> Any:
+    """Constrain decision bases to evidence perceived or propositions held by the node."""
+    if isinstance(value, list):
+        return [_normalize_character_decision_basis(child) for child in value]
+    if not isinstance(value, dict):
+        return value
+    normalized = {
+        key: _normalize_character_decision_basis(child)
+        for key, child in value.items()
+    }
+    basis = normalized.get("decision_basis_ids")
+    if not isinstance(basis, list):
+        return normalized
+    perceived = {
+        str(item or "").strip()
+        for item in normalized.get("perceived_evidence_ids") or []
+        if str(item or "").strip()
+    }
+    held = {
+        str(item.get("proposition_id") or "").strip()
+        for item in normalized.get("beliefs") or []
+        if isinstance(item, dict) and str(item.get("proposition_id") or "").strip()
+    }
+    allowed = perceived | held
+    normalized["decision_basis_ids"] = [
+        str(item)
+        for item in basis
+        if str(item or "").strip() in allowed
+    ]
+    return normalized
+
+
+def _unique_source_dialogue(line: str, source_text: str) -> str | None:
+    """Return one uniquely matching source utterance under the validator contract."""
+    for opening, closing in (("“", "”"), ("「", "」"), ("『", "』"), ('"', '"')):
+        quoted = f"{opening}{line}{closing}"
+        if line and source_text.count(quoted) == 1:
+            return line
+
+    from app import textmatch
+    from app.validators import (
+        KEY_LINE_BIGRAM_COVERAGE,
+        KEY_LINE_PRESENT_RATIO,
+        source_dialogue_fragments,
+    )
+
+    ranked: list[tuple[float, str]] = []
+    for candidate in source_dialogue_fragments(source_text):
+        run_score = textmatch.longest_run_ratio(line, candidate)
+        coverage = textmatch.bigram_coverage(line, candidate)
+        if (
+            run_score >= KEY_LINE_PRESENT_RATIO
+            or coverage >= KEY_LINE_BIGRAM_COVERAGE
+        ):
+            ranked.append((max(run_score, coverage), candidate))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda item: (-item[0], len(item[1]), item[1]))
+    best_score = ranked[0][0]
+    best = {
+        candidate
+        for score, candidate in ranked
+        if abs(score - best_score) < 1e-9
+        and source_text.count(candidate) == 1
+    }
+    return next(iter(best)) if len(best) == 1 else None
+
+
 def _normalize_dialogue_source_references(
     value: Any,
     source_text: str,
@@ -1986,34 +2747,161 @@ def _normalize_dialogue_source_references(
     if not citation or citation in source_text or not line or not speaker:
         return normalized
 
-    from app import textmatch
-    from app.validators import (
-        KEY_LINE_BIGRAM_COVERAGE,
-        KEY_LINE_PRESENT_RATIO,
-        source_dialogue_fragments,
-    )
-
-    ranked: list[tuple[float, str]] = []
-    for candidate in source_dialogue_fragments(source_text):
-        run_score = textmatch.longest_run_ratio(line, candidate)
-        coverage = textmatch.bigram_coverage(line, candidate)
-        if (
-            run_score >= KEY_LINE_PRESENT_RATIO
-            or coverage >= KEY_LINE_BIGRAM_COVERAGE
-        ):
-            ranked.append((max(run_score, coverage), candidate))
-    if not ranked:
-        return normalized
-    ranked.sort(key=lambda item: (-item[0], len(item[1]), item[1]))
-    best_score = ranked[0][0]
-    best = {
-        candidate
-        for score, candidate in ranked
-        if abs(score - best_score) < 1e-9
-    }
-    if len(best) == 1:
-        normalized["source_text"] = next(iter(best))
+    source_dialogue = _unique_source_dialogue(line, source_text)
+    if source_dialogue is not None:
+        normalized["source_text"] = source_dialogue
     return normalized
+
+
+def _normalize_dialogue_chain_continuity(
+    script: EpisodeScreenplay,
+    source_text: str,
+) -> list[dict[str, Any]]:
+    """Fill omitted intervening source-grounded turns before dependent responses."""
+    from app.production.screenplay_document import (
+        action_block_spoken_identity,
+        screenplay_to_document,
+    )
+    from app.schemas import KeyDialogueTurn
+
+    if not source_text or not script.dialogue_chains:
+        return []
+    document = screenplay_to_document(script)
+    observed: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for block in document.scene_blocks:
+        spoken = [
+            (
+                (turn.speaker or "").strip(),
+                (turn.line or "").strip(),
+            )
+            for turn in block.dialogue_turns
+        ]
+        spoken.extend(
+            identity
+            for action in block.action_blocks
+            if (identity := action_block_spoken_identity(action.text)) is not None
+        )
+        for speaker, line in spoken:
+            identity = (block.scene_id, speaker, line)
+            if not speaker or not line or identity in seen:
+                continue
+            source_dialogue = _unique_source_dialogue(line, source_text)
+            if source_dialogue is None:
+                continue
+            seen.add(identity)
+            observed.append({
+                "scene_id": block.scene_id,
+                "speaker": speaker,
+                "line": line,
+                "source_text": source_dialogue,
+                "source_position": source_text.find(source_dialogue),
+            })
+
+    changes: list[dict[str, Any]] = []
+    for chain in script.dialogue_chains:
+        turns = list(chain.turns or [])
+        if len(turns) >= DIALOGUE_CHAIN_TURNS_HARD_MAX:
+            continue
+        existing = {
+            ((turn.speaker or "").strip(), (turn.line or "").strip())
+            for turn in turns
+        }
+        additions: list[dict[str, Any]] = []
+        for turn_index, turn in enumerate(turns):
+            if (turn.function or "").strip() != "response" or turn_index == 0:
+                continue
+            response_identity = (
+                (turn.speaker or "").strip(),
+                (turn.line or "").strip(),
+            )
+            response_matches = [
+                item for item in observed
+                if (item["speaker"], item["line"]) == response_identity
+            ]
+            if len(response_matches) != 1:
+                continue
+            response = response_matches[0]
+            previous = turns[turn_index - 1]
+            previous_source = (
+                (previous.source_text or "").strip()
+                if (previous.source_text or "").strip() in source_text
+                else _unique_source_dialogue(previous.line or "", source_text)
+            )
+            if previous_source is None:
+                continue
+            previous_position = source_text.find(previous_source)
+            eligible = [
+                item for item in observed
+                if (
+                    item["scene_id"] == response["scene_id"]
+                    and previous_position < item["source_position"] < response["source_position"]
+                    and (item["speaker"], item["line"]) not in existing
+                    and (item["speaker"], item["line"]) not in {
+                        (added["speaker"], added["line"]) for added in additions
+                    }
+                )
+            ]
+            remaining = (
+                DIALOGUE_CHAIN_TURNS_HARD_MAX
+                - len(turns)
+                - len(additions)
+            )
+            if remaining <= 0 or not eligible:
+                continue
+            selected = sorted(
+                eligible,
+                key=lambda item: item["source_position"],
+            )[-remaining:]
+            if not any(item["speaker"] != response["speaker"] for item in selected):
+                continue
+            additions.extend(selected)
+        if not additions:
+            continue
+
+        combined: list[tuple[int, int, KeyDialogueTurn]] = []
+        for index, turn in enumerate(turns):
+            source_dialogue = (
+                (turn.source_text or "").strip()
+                if (turn.source_text or "").strip() in source_text
+                else _unique_source_dialogue(turn.line or "", source_text)
+            )
+            position = (
+                source_text.find(source_dialogue)
+                if source_dialogue is not None
+                else len(source_text) + index
+            )
+            combined.append((position, index, turn))
+        for offset, item in enumerate(additions, start=len(turns)):
+            combined.append((
+                int(item["source_position"]),
+                offset,
+                KeyDialogueTurn(
+                    speaker=item["speaker"],
+                    line=item["line"],
+                    function=(
+                        "question"
+                        if item["line"].rstrip().endswith(("?", "？"))
+                        else "statement"
+                    ),
+                    source_text=item["source_text"],
+                ),
+            ))
+        combined.sort(key=lambda item: (item[0], item[1]))
+        chain.turns = [item[2] for item in combined]
+        changes.append({
+            "kind": "dialogue_chain_continuity",
+            "id": chain.chain_id,
+            "added_turns": [
+                {
+                    "speaker": item["speaker"],
+                    "line": item["line"],
+                    "source_text": item["source_text"],
+                }
+                for item in additions
+            ],
+        })
+    return changes
 
 
 def _find_narrative_node(value: Any, node_id: str) -> dict[str, Any] | None:
@@ -2048,6 +2936,93 @@ def _narrative_collection_for_node(
         )
     ]
     return matches[0] if len(matches) == 1 else None
+
+
+def _narrative_collection_for_new_node(
+    plan_data: dict[str, Any],
+    node_id: str,
+    value: dict[str, Any],
+) -> str | None:
+    identity_fields = {
+        key
+        for key, candidate in value.items()
+        if (
+            key.endswith("_id")
+            and str(candidate or "").strip() == node_id
+        )
+    }
+    if not identity_fields:
+        return None
+    matches: list[str] = []
+    for collection, nodes in plan_data.items():
+        if not isinstance(nodes, list):
+            continue
+        if any(
+            isinstance(node, dict)
+            and bool(identity_fields & set(node))
+            for node in nodes
+        ):
+            matches.append(collection)
+    return matches[0] if len(matches) == 1 else None
+
+
+def _candidate_targets_narrative_graph(
+    candidate: dict[str, Any],
+    plan_data: dict[str, Any],
+) -> bool:
+    operations = candidate.get("operations")
+    if not isinstance(operations, list):
+        return False
+    for raw in operations:
+        if not isinstance(raw, dict):
+            continue
+        normalized = _normalize_patch_operation_payload(raw)
+        target = normalized.get("target") or {}
+        node_id = str(target.get("id") or "").strip()
+        collection = re.split(
+            r"[.\[]+",
+            str(target.get("collection") or "").strip(),
+            maxsplit=1,
+        )[0]
+        if collection and isinstance(plan_data.get(collection), list):
+            return True
+        if node_id and _narrative_collection_for_node(plan_data, node_id):
+            return True
+        value = normalized.get("value")
+        if (
+            normalized.get("op") in {"create_node", "insert_node"}
+            and node_id
+            and isinstance(value, dict)
+            and _narrative_collection_for_new_node(
+                plan_data,
+                node_id,
+                value,
+            )
+        ):
+            return True
+    return False
+
+
+def _normalize_top_level_narrative_parent(
+    target: dict[str, Any],
+    *,
+    collection: str,
+    plan_data: dict[str, Any],
+) -> dict[str, Any]:
+    normalized = dict(target)
+    parent_id = str(normalized.get("parent_id") or "").strip()
+    parent_field = str(normalized.get("parent_field") or "").strip()
+    if (
+        collection
+        and parent_field == collection
+        and parent_id in {
+            "narrative_plan",
+            str(plan_data.get("scope_id") or ""),
+        }
+    ):
+        normalized.pop("parent_id", None)
+        normalized.pop("parent_field", None)
+    return normalized
 
 
 def _expand_single_action_event_closure(
@@ -2265,6 +3240,171 @@ def _resolve_dialogue_chain_turn_target(
     }
 
 
+def _preflight_document_candidate(
+    candidate: dict[str, Any],
+    *,
+    document: Any,
+    source_text: str,
+    issue: Issue,
+) -> list[PatchOperation]:
+    """Find the smallest executable operation subset that passes full local QA."""
+    from itertools import combinations
+
+    from app.narrative import validate_screenplay_narrative
+    from app.production.patch import apply_patch_operation_to_document
+    from app.production.screenplay_document import (
+        document_to_screenplay,
+        resolve_field_patch_target,
+    )
+    from app.validators import validate_screenplay
+
+    raw_operations = candidate.get("operations")
+    if not isinstance(raw_operations, list) or not 1 <= len(raw_operations) <= 3:
+        return []
+    try:
+        parsed = [
+            PatchOperation.model_validate(
+                _normalize_patch_operation_payload(raw),
+            )
+            for raw in raw_operations
+            if isinstance(raw, dict)
+        ]
+    except Exception:  # noqa: BLE001 - untrusted model output
+        return []
+    if len(parsed) != len(raw_operations):
+        return []
+
+    def errors_for(candidate_document: Any) -> list[str]:
+        screenplay = document_to_screenplay(candidate_document)
+        errors = validate_screenplay_narrative(screenplay, require=True)
+        errors.extend(validate_screenplay(
+            screenplay,
+            Bible(
+                characters=[],
+                world={"visual_style_canonical": ""},
+            ),
+            expected_beats=max(1, len(screenplay.scene_outline or [])),
+            episode_no=screenplay.episode_no,
+            source_text=source_text,
+            require_dialogue_chains=True,
+            validate_narrative=False,
+        ))
+        return errors
+
+    def error_fingerprints(messages: list[str]) -> set[str]:
+        return {
+            item.fingerprint
+            for item in issues_from_validator_messages(
+                messages,
+                subject="screenplay",
+                stage="screenplay",
+            )
+        }
+
+    baseline_errors = errors_for(document)
+    baseline_fingerprints = error_fingerprints(baseline_errors)
+    for subset_size in range(1, len(parsed) + 1):
+        for subset_indices in combinations(range(len(parsed)), subset_size):
+            working = document
+            accepted: list[PatchOperation] = []
+            valid = True
+            for index in subset_indices:
+                operation = parsed[index].model_copy(deep=True)
+                operation.value = _normalize_dialogue_source_references(
+                    operation.value,
+                    source_text,
+                )
+                target = operation.target or {}
+                collection = re.split(
+                    r"[.\[]+",
+                    str(target.get("collection") or "").strip(),
+                    maxsplit=1,
+                )[0]
+                script_plan = getattr(document, "narrative_plan", None)
+                plan_data = (
+                    script_plan.model_dump(mode="json")
+                    if script_plan is not None
+                    else {}
+                )
+                if collection and isinstance(plan_data.get(collection), list):
+                    valid = False
+                    break
+                if operation.op == "replace_field":
+                    target = resolve_field_patch_target(
+                        working,
+                        path=operation.path,
+                        target=target,
+                    )
+                    operation.target = target
+                    patch_field = re.split(
+                        r"[./]+",
+                        operation.path.strip("/"),
+                    )[-1]
+                    chain_id = str(
+                        target.get("chain_id") or target.get("id") or "",
+                    ).strip()
+                    chain = next(
+                        (
+                            item for item in working.dialogue_chains
+                            if (item.chain_id or "").strip() == chain_id
+                        ),
+                        None,
+                    )
+                    if (
+                        chain is not None
+                        and patch_field == "turns"
+                        and not _dialogue_chain_replacement_is_local(
+                            working,
+                            chain_id=chain_id,
+                            turns=operation.value,
+                        )
+                    ):
+                        valid = False
+                        break
+                if not _source_references_are_grounded(
+                    operation.value,
+                    source_text,
+                ):
+                    valid = False
+                    break
+                before = working.model_dump(mode="json")
+                try:
+                    working, _ = apply_patch_operation_to_document(
+                        working,
+                        operation,
+                    )
+                except Exception:  # noqa: BLE001 - isolated probe
+                    valid = False
+                    break
+                if working.model_dump(mode="json") == before:
+                    valid = False
+                    break
+                accepted.append(operation)
+            if not valid:
+                continue
+            candidate_errors = errors_for(working)
+            if issue.message in candidate_errors:
+                continue
+            if error_fingerprints(candidate_errors) - baseline_fingerprints:
+                continue
+            selection = {
+                "candidate_ids": [candidate.get("candidate_id")],
+                "selected_candidate_id": candidate.get("candidate_id"),
+                "selection_reason": (
+                    "生产执行器对候选操作子集逐一隔离复验后选择的最小充分子集"
+                ),
+                "expected_narrative_gain": candidate.get("expected_narrative_gain"),
+                "destructive_cost": candidate.get("destructive_cost"),
+            }
+            for operation in accepted:
+                operation.target = {
+                    **(operation.target or {}),
+                    "semantic_selection": selection,
+                }
+            return accepted
+    return []
+
+
 async def _llm_field_patch(
     issue: Issue,
     script: EpisodeScreenplay,
@@ -2410,6 +3550,7 @@ async def _llm_field_patch_once(
         },
     )
     try:
+        plan_data = script.narrative_plan.model_dump(mode="json")
         payload = extract_json(raw)
         candidates = list(payload.get("candidate_plans") or [])
         if len(candidates) < 2:
@@ -2426,12 +3567,30 @@ async def _llm_field_patch_once(
                 if isinstance(item, dict) and item is not model_selected
             ],
         ]
+        for candidate in ordered_candidates:
+            if not (
+                bool(candidate.get("satisfies_gap_test"))
+                and bool(candidate.get("preserves_invariants"))
+            ):
+                continue
+            if not _candidate_targets_narrative_graph(candidate, plan_data):
+                preflight = _preflight_document_candidate(
+                    candidate,
+                    document=document,
+                    source_text=source_text,
+                    issue=issue,
+                )
+                if preflight:
+                    return preflight
         selected = next((
             item for item in ordered_candidates
             if (
                 bool(item.get("satisfies_gap_test"))
                 and bool(item.get("preserves_invariants"))
-                and _candidate_is_executable(item, document)
+                and (
+                    _candidate_targets_narrative_graph(item, plan_data)
+                    or _candidate_is_executable(item, document)
+                )
             )
         ), None)
         if selected is None:
@@ -2461,7 +3620,6 @@ async def _llm_field_patch_once(
     ):
         return []
 
-    plan_data = script.narrative_plan.model_dump(mode="json")
     operations = _expand_single_action_event_closure(
         operations,
         plan_data,
@@ -2471,6 +3629,7 @@ async def _llm_field_patch_once(
     safe: list[PatchOperation] = []
     for operation in operations:
         target = operation.target or {}
+        operation.value = _normalize_character_decision_basis(operation.value)
         operation.value = _normalize_dialogue_source_references(
             operation.value,
             source_text,
@@ -2481,6 +3640,26 @@ async def _llm_field_patch_once(
         if not collection and node_id:
             collection = (
                 _narrative_collection_for_node(plan_data, node_id) or ""
+            )
+        if (
+            not collection
+            and operation.op in {"create_node", "insert_node"}
+            and node_id
+            and isinstance(operation.value, dict)
+        ):
+            collection = (
+                _narrative_collection_for_new_node(
+                    plan_data,
+                    node_id,
+                    operation.value,
+                )
+                or ""
+            )
+        if operation.op in {"create_node", "insert_node"} and collection:
+            target = _normalize_top_level_narrative_parent(
+                target,
+                collection=collection,
+                plan_data=plan_data,
             )
         nodes = plan_data.get(collection)
         if isinstance(nodes, list) and node_id:
@@ -2503,7 +3682,7 @@ async def _llm_field_patch_once(
                     issue=issue,
                 )
                 if resolved_owner is None:
-                    return []
+                    continue
                 node, resolved_node_id = resolved_owner
                 if resolved_node_id != node_id:
                     target = {
@@ -2513,11 +3692,11 @@ async def _llm_field_patch_once(
                     }
                     node_id = resolved_node_id
                 if patch_field.endswith("_id") and str(node.get(patch_field) or "") == node_id:
-                    return []
+                    continue
                 if patch_field in {"verbatim_excerpt", "source_text"} and str(
                     operation.value or ""
                 ) not in source_text:
-                    return []
+                    continue
                 operation.path = patch_field
                 if patch_field == "target_deltas" and isinstance(
                     operation.value, list,
@@ -2542,15 +3721,15 @@ async def _llm_field_patch_once(
                         for delta in operation.value
                     ]
             elif operation.op in {"delete_node", "move_node"} and node is None:
-                return []
+                continue
             elif operation.op in {"create_node", "insert_node"}:
                 if node is not None or not isinstance(operation.value, dict):
-                    return []
+                    continue
         elif operation.op == "replace_field":
             from app.production.screenplay_document import resolve_field_patch_target
 
             if not operation.path or operation.path in {"/", "$", "full_script_text"}:
-                return []
+                continue
             patch_field = re.split(
                 r"[./]+", operation.path.strip("/"),
             )[-1]
@@ -2575,7 +3754,7 @@ async def _llm_field_patch_once(
                     chain_id=chain_id,
                     turns=operation.value,
                 ):
-                    return []
+                    continue
                 target = {
                     **target,
                     "kind": "dialogue_chain",
@@ -2595,7 +3774,7 @@ async def _llm_field_patch_once(
                     }
             operation.path = patch_field
         if not _source_references_are_grounded(operation.value, source_text):
-            return []
+            continue
         selection_evidence = {
             "semantic_gap": payload.get("semantic_gap"),
             "candidate_ids": [item.get("candidate_id") for item in candidates if isinstance(item, dict)],
@@ -2614,6 +3793,8 @@ async def _llm_field_patch_once(
         }
         operation.target = {**target, "semantic_selection": selection_evidence}
         safe.append(operation)
+    if not safe:
+        return []
     try:
         from app.production.patch import apply_patch_operation_to_document
 
@@ -2646,7 +3827,15 @@ async def _llm_field_patch_once(
             ))
             return errors
 
-        baseline_errors = set(targeted_errors(document_to_screenplay(document)))
+        baseline_errors = targeted_errors(document_to_screenplay(document))
+        baseline_issue_fingerprints = {
+            item.fingerprint
+            for item in issues_from_validator_messages(
+                baseline_errors,
+                subject="screenplay",
+                stage="screenplay",
+            )
+        }
         candidate_script = document_to_screenplay(candidate_document)
         _normalize_screenplay_narrative_graph(
             candidate_script,
@@ -2673,7 +3862,16 @@ async def _llm_field_patch_once(
                 + issue.message,
             )
         return []
-    introduced = sorted(set(candidate_errors) - baseline_errors)
+    candidate_issues = issues_from_validator_messages(
+        candidate_errors,
+        subject="screenplay",
+        stage="screenplay",
+    )
+    introduced = [
+        item.message
+        for item in candidate_issues
+        if item.fingerprint not in baseline_issue_fingerprints
+    ]
     if introduced:
         if rejection_feedback is not None:
             rejection_feedback.append(

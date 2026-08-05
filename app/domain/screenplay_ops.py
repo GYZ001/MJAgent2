@@ -2158,6 +2158,20 @@ async def edit_screenplay(episode_id: str, body: dict):
             "message": "剧本人物身份未解决，未发布也未清空分镜",
             "errors": [issue.message for issue in hard_identity_issues],
         })
+    if (
+        bool(qa_evaluation.runtime_blocking)
+        and not bool(qa_evaluation.hard_gate_passed)
+    ):
+        raise HTTPException(422, {
+            "code": "screenplay_qa_failed",
+            "message": "剧本 QA 未通过，未发布也未清空分镜",
+            "score": qa_evaluation.score,
+            "errors": [issue.message for issue in qa_issues],
+            "issues": [
+                issue.model_dump(mode="json")
+                for issue in qa_issues
+            ],
+        })
     instance = _prepare_screenplay_for_storage(
         ep, instance,
         keep_existing_id=(old_script.id if old_script else None),
@@ -2259,6 +2273,20 @@ async def edit_screenplay(episode_id: str, body: dict):
                 "code": "screenplay_character_identity_unresolved",
                 "message": "发布前人物身份复核未通过",
                 "errors": [issue.message for issue in hard_identity_issues],
+            })
+        if (
+            bool(final_evaluation.runtime_blocking)
+            and not bool(final_evaluation.hard_gate_passed)
+        ):
+            raise HTTPException(422, {
+                "code": "screenplay_qa_failed",
+                "message": "发布前 QA 复核未通过，当前发布版保持不变",
+                "score": final_evaluation.score,
+                "errors": [issue.message for issue in final_issues],
+                "issues": [
+                    issue.model_dump(mode="json")
+                    for issue in final_issues
+                ],
             })
         evaluation_row = evidence_repository.create_evaluation(
             candidate["id"], final_evaluation,

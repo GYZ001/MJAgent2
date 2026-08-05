@@ -568,8 +568,23 @@ def repair_generated_source_bindings(episode_id: str) -> dict[str, Any]:
     """
     conn = get_conn()
     sources = chapter_sources(episode_id)
+    episode = conn.execute(
+        "SELECT screenplay_json FROM episodes WHERE id=?",
+        (episode_id,),
+    ).fetchone()
+    try:
+        screenplay_payload = json.loads(
+            (episode["screenplay_json"] if episode else None) or "{}"
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        screenplay_payload = {}
+    event_source_spans = {
+        str(item.get("event_id") or ""): str(item.get("source_span") or "")
+        for item in (screenplay_payload.get("events") or [])
+        if isinstance(item, dict) and str(item.get("event_id") or "")
+    }
     shots = conn.execute(
-        """SELECT s.id,s.shot_no,s.source_excerpt
+        """SELECT s.id,s.shot_no,s.source_excerpt,s.shot_contract_json
            FROM shots s
            LEFT JOIN storyboard_source_bindings b ON b.shot_id=s.id
            WHERE s.episode_id=? AND b.shot_id IS NULL
@@ -586,6 +601,37 @@ def repair_generated_source_bindings(episode_id: str) -> dict[str, Any]:
             aligned = align_source_excerpt(candidate, source["content"] or "")
             if aligned is not None:
                 matches.append((aligned.match_chars, int(aligned.exact), source, aligned))
+        if not matches:
+            try:
+                contract = json.loads(row["shot_contract_json"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                contract = {}
+            event_candidates: list[str] = []
+            for event_id in contract.get("event_ids") or []:
+                source_span = event_source_spans.get(str(event_id), "").strip()
+                if not source_span:
+                    continue
+                _prefix, separator, span_text = source_span.partition("：")
+                if not separator:
+                    _prefix, separator, span_text = source_span.partition(":")
+                event_candidates.append(
+                    (span_text if separator else source_span).strip()
+                )
+            for event_candidate in event_candidates:
+                for source in sources:
+                    aligned = align_source_excerpt(
+                        event_candidate,
+                        source["content"] or "",
+                    )
+                    if aligned is not None:
+                        matches.append(
+                            (
+                                aligned.match_chars,
+                                int(aligned.exact),
+                                source,
+                                aligned,
+                            )
+                        )
         if not matches:
             unresolved.append(int(row["shot_no"]))
             continue

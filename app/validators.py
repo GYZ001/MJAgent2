@@ -1511,6 +1511,15 @@ def validate_dialogue_chains(
             grounded_short = _is_grounded_short_utterance(line, source_line, source_text)
             if len(_condense(line)) < 2 and not grounded_short:
                 errors.append(f"{turn_tag}.line 过短或为空")
+            spoken_chars = content_char_count(line)
+            if spoken_chars > config.MAX_SPOKEN_CHARS_PER_SHOT:
+                errors.append(
+                    "[DIALOGUE_TURN_CAPACITY_EXCEEDED] "
+                    f"{turn_tag} 纯文字 {spoken_chars} 字，超过最长 "
+                    f"{config.VIDEO_DURATION_MAX_S}s 单镜口播上限 "
+                    f"{config.MAX_SPOKEN_CHARS_PER_SHOT} 字；"
+                    "必须按原文标点拆成同说话人的连续话轮"
+                )
             if function not in _DIALOGUE_TURN_FUNCTIONS:
                 errors.append(
                     f"{turn_tag}.function=「{function}」非法；只能是 "

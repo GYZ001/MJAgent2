@@ -170,6 +170,11 @@ def test_narrative_review_input_parents_current_screenplay_and_every_shot_artifa
         "SELECT * FROM shots WHERE episode_id='e1' ORDER BY shot_no"
     ).fetchall()
     board = api._board_from_shot_rows(rows, 1)
+    api._ensure_current_storyboard_shot_artifacts(
+        storyboard_db,
+        "e1",
+        board,
+    )
 
     async def stop_after_review_input(**_kwargs):
         raise RuntimeError("review input captured")
@@ -219,6 +224,46 @@ def test_snapshot_version_is_monotonic_and_action_is_unique(storyboard_db):
     assert second["snapshot_version"] > first["snapshot_version"]
     assert second["recommended_action"] == "view_progress"
     assert second["confirmable"] is False
+
+
+def test_board_status_gate_receives_outline_hidden_from_public_response(
+    storyboard_db,
+    monkeypatch,
+):
+    outline_json = json.dumps({
+        "episode_no": 1,
+        "shots": [{"shot_no": 1}],
+        "readability_windows": [{
+            "readability_window_id": "RW-1",
+            "shot_ids": ["SH001"],
+        }],
+    })
+    storyboard_db.execute(
+        "UPDATE episodes SET storyboard_outline_json=? WHERE id='e1'",
+        (outline_json,),
+    )
+    storyboard_db.commit()
+    captured: dict[str, object] = {}
+
+    def current_gate(ep, board, _screenplay, _bible, **_kwargs):
+        captured["outline_json"] = ep.get("storyboard_outline_json")
+        return api.ConfirmationEvaluation(
+            passed=True,
+            errors=[],
+            warnings=[],
+            issues=[],
+            board=board,
+            compact_target=10,
+            estimated_cost_cny=0,
+        )
+
+    monkeypatch.setattr(api, "evaluate_storyboard_for_confirmation", current_gate)
+
+    detail = api.episode_detail("e1", view="board")
+
+    assert captured["outline_json"] == outline_json
+    assert "storyboard_outline_json" not in detail
+    assert detail["storyboard_status"]["hard_gate_issues"] == []
 
 
 def test_unlocatable_legacy_excerpt_is_not_a_user_facing_gate(storyboard_db):
@@ -1095,6 +1140,52 @@ def test_generated_source_binding_repair_replaces_stitched_excerpt(storyboard_db
     ).fetchone()["source_excerpt"]
     assert repaired == "少年推开房门，看见桌上的信"
     assert workspace.verify_or_bind_existing_excerpt("e1", "s1", repaired)["chapter_idx"] == 1
+
+
+def test_generated_source_binding_repair_falls_back_to_story_event_span(
+    storyboard_db,
+):
+    episode = storyboard_db.execute(
+        "SELECT screenplay_json FROM episodes WHERE id='e1'",
+    ).fetchone()
+    screenplay = json.loads(episode["screenplay_json"])
+    screenplay["events"] = [{
+        "event_id": "E1",
+        "source_span": "chapter1：少年推开房门，看见桌上的信，神色骤然一沉。",
+        "source_fact": "少年发现信件",
+        "state_in": "门外",
+        "trigger": "推门",
+        "visible_change": "看见信件",
+        "state_out": "神色一沉",
+    }]
+    row = storyboard_db.execute(
+        "SELECT shot_contract_json FROM shots WHERE id='s1'",
+    ).fetchone()
+    contract = json.loads(row["shot_contract_json"])
+    contract["event_ids"] = ["E1"]
+    storyboard_db.execute(
+        "UPDATE episodes SET screenplay_json=? WHERE id='e1'",
+        (json.dumps(screenplay, ensure_ascii=False),),
+    )
+    storyboard_db.execute(
+        "UPDATE shots SET source_excerpt=?,shot_contract_json=? WHERE id='s1'",
+        (
+            "少年进入房间后发现了改变情绪的重要物品。",
+            json.dumps(contract, ensure_ascii=False),
+        ),
+    )
+    storyboard_db.commit()
+
+    result = workspace.repair_generated_source_bindings("e1")
+
+    assert result == {"bound": 1, "realigned": 1, "unresolved_shot_nos": []}
+    repaired = storyboard_db.execute(
+        "SELECT source_excerpt FROM shots WHERE id='s1'",
+    ).fetchone()["source_excerpt"]
+    assert repaired == "少年推开房门，看见桌上的信，神色骤然一沉。"
+    assert workspace.verify_or_bind_existing_excerpt(
+        "e1", "s1", repaired,
+    )["chapter_idx"] == 1
 
 
 def test_edit_impact_preview_is_noop_safe_and_exact(storyboard_db):

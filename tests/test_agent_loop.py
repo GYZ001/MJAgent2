@@ -3,14 +3,15 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
 from pydantic import BaseModel
 
 from app import api, db, stages
 from app.evaluations.issues import issues_from_messages
 from app.evidence import repository
 from app.harness.context import ContextPack
-from app.harness.types import EvidenceArtifact
-from app.loops import AgentLoop, AgentLoopPolicy
+from app.harness.types import EvidenceArtifact, Issue, IssueSeverity
+from app.loops import AgentLoop, AgentLoopFailure, AgentLoopPolicy
 from app.orchestration.engine import WorkflowRecorder
 from app.schemas import EpisodeScreenplay
 from app.stages import StoryboardShotDraft
@@ -58,6 +59,78 @@ def test_agent_loop_repairs_then_accepts() -> None:
     assert result.exit_reason == "contract_passed"
     assert result.iterations == 2
     assert result.value.value == 2
+
+
+def test_agent_loop_repairs_all_authority_blockers() -> None:
+    outputs = ['{"value": 1}', '{"value": 2}']
+
+    async def producer(iteration, *_args):
+        return outputs[iteration - 1]
+
+    def evaluate(raw: str):
+        value = Candidate.model_validate(json.loads(raw))
+        issues = [] if value.value == 2 else [
+            Issue(
+                code="NARRATIVE_AUTHORITY_DRIFT",
+                severity=IssueSeverity.BLOCKER,
+                subject="episode:e1",
+                message="authority graph does not match",
+                repairable=True,
+            )
+        ]
+        return value, issues
+
+    loop = AgentLoop(
+        stage_key="storyboard_outline",
+        contract_key="storyboard",
+        goal="produce an authority-valid outline",
+        scope_type="episode",
+        scope_id="e1",
+        artifact_type="storyboard_outline",
+        policy=AgentLoopPolicy(
+            max_iterations=2,
+            repair_all_blockers=True,
+        ),
+    )
+
+    result = asyncio.run(loop.run(producer, evaluate))
+
+    assert result.status == "accepted"
+    assert result.iterations == 2
+    assert result.value.value == 2
+
+
+def test_agent_loop_fails_closed_when_authority_blockers_are_exhausted() -> None:
+    async def producer(_iteration, *_args):
+        return '{"value": 1}'
+
+    def evaluate(raw: str):
+        value = Candidate.model_validate(json.loads(raw))
+        return value, [
+            Issue(
+                code="NARRATIVE_AUTHORITY_DRIFT",
+                severity=IssueSeverity.BLOCKER,
+                subject="episode:e1",
+                message="authority graph does not match",
+                repairable=True,
+            )
+        ]
+
+    loop = AgentLoop(
+        stage_key="storyboard_outline",
+        contract_key="storyboard",
+        goal="fail closed",
+        scope_type="episode",
+        scope_id="e1",
+        artifact_type="storyboard_outline",
+        policy=AgentLoopPolicy(
+            max_iterations=1,
+            repair_all_blockers=True,
+        ),
+    )
+
+    with pytest.raises(AgentLoopFailure, match="authority_blockers_exhausted"):
+        asyncio.run(loop.run(producer, evaluate))
 
 
 def test_agent_loop_keeps_repairing_when_structural_issue_changes() -> None:

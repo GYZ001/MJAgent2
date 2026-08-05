@@ -6,6 +6,7 @@ import hashlib
 import json
 from typing import Any
 
+from app import config
 from app.db import get_conn
 from app.evidence import repository as evidence_repository
 from app.ingest import chapter_is_stub, chapter_titles_match
@@ -255,7 +256,74 @@ def screenplay_authority_fingerprint(
         contract_version=contract_version,
         qa_profile_version=qa_profile_version,
     )
+    return _authority_material_fingerprint(material)
+
+
+def _authority_material_fingerprint(material: dict[str, Any]) -> str:
     return hashlib.sha256(_json(material).encode("utf-8")).hexdigest()
+
+
+def _published_authority_input_fingerprint(
+    episode_id: str,
+    *,
+    conn: Any,
+    certificate_id: str,
+    contract_version: str,
+) -> str:
+    """Recover only the known legacy storyboard duration contamination.
+
+    Older storyboard runs persisted their derived planning duration back into
+    ``episodes.target_duration_s`` after screenplay publication.  The release
+    certificate still contains the original complete authority fingerprint.
+    Accept that historical row only when replacing this one field with exactly
+    one legal product duration reproduces the certificate fingerprint.  Any
+    other input drift remains fail-closed.
+    """
+    material = screenplay_authority_material(
+        episode_id,
+        conn=conn,
+        contract_version=contract_version,
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+    )
+    current_fingerprint = _authority_material_fingerprint(material)
+    from app.production.certificate import get_completion_certificate
+
+    certificate = get_completion_certificate(certificate_id, conn=conn)
+    if (
+        certificate is None
+        or not certificate.input_fingerprint
+        or certificate.input_fingerprint == current_fingerprint
+    ):
+        return current_fingerprint
+
+    constraints = material.get("adaptation_constraints")
+    if not isinstance(constraints, dict):
+        return current_fingerprint
+    current_target = constraints.get("target_duration_s")
+    legal_targets = list(range(
+        config.EPISODE_TARGET_MIN_S,
+        config.EPISODE_TARGET_MAX_S + 1,
+        config.EPISODE_TARGET_STEP_S,
+    ))
+    if current_target not in legal_targets:
+        return current_fingerprint
+    matches: list[str] = []
+    for target in legal_targets:
+        if target == current_target:
+            continue
+        candidate = {
+            **material,
+            "adaptation_constraints": {
+                **constraints,
+                "target_duration_s": target,
+            },
+        }
+        candidate_fingerprint = _authority_material_fingerprint(candidate)
+        if candidate_fingerprint == certificate.input_fingerprint:
+            matches.append(candidate_fingerprint)
+    if len(matches) == 1:
+        return matches[0]
+    return current_fingerprint
 
 
 @dataclass(frozen=True)
@@ -461,11 +529,11 @@ def resolve_current_screenplay_authority(
     if not certificate_id or not revision_id:
         raise ValueError("已发布剧本缺少当前完成凭证或 revision")
     contract_version = str(artifact.get("contract_version") or "")
-    input_fingerprint = screenplay_authority_fingerprint(
+    input_fingerprint = _published_authority_input_fingerprint(
         episode_id,
         conn=db,
+        certificate_id=certificate_id,
         contract_version=contract_version,
-        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
     )
     from app.production.certificate import verify_completion_certificate
 

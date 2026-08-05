@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from app import api, db, portraits
 from app.capabilities.direct import enter_handler
+from app.harness.types import Evaluation, Issue, IssueSeverity
 from app.main import app
 from tests.conftest import SessionTestClient
 from tests.test_screenplay_edit_save import _seed_episode, _valid_script
@@ -378,6 +379,49 @@ def test_qa_failed_manual_draft_publishes_with_score_only_warnings() -> None:
         "SELECT type,status FROM artifacts WHERE id=?", (result["artifact_id"],)
     ).fetchone()
     assert tuple(artifact) == ("screenplay_document", "approved")
+
+
+def test_runtime_blocking_manual_draft_routes_to_repair_without_publish(
+    monkeypatch,
+) -> None:
+    _seed_episode(with_artifact=True)
+    changed = _valid_script()
+    changed.logline += " changed"
+    issue = Issue(
+        code="AUDIENCE_TARGET_DELTA_STAGING_REQUIRED",
+        severity=IssueSeverity.BLOCKER,
+        subject="screenplay",
+        message="staged audience state required",
+        evidence={"must_fix": True},
+        repairable=True,
+    )
+    evaluation = Evaluation(
+        evaluator_type="deterministic",
+        evaluator_name="screenplay_production_qa",
+        evaluator_version="screenplay-qa-gate-2",
+        status="failed",
+        hard_gate_passed=False,
+        evaluation_role="runtime_gate",
+        runtime_blocking=True,
+        score=90,
+        issues=[issue],
+    )
+    monkeypatch.setattr(
+        "app.production.screenplay_repair.run_screenplay_qa",
+        lambda *_args, **_kwargs: ([issue], evaluation),
+    )
+
+    with enter_handler(), pytest.raises(HTTPException) as caught:
+        asyncio.run(api.edit_screenplay("e1", {
+            "screenplay": changed.model_dump(mode="json"),
+            "expected_version": "art_sp_old",
+        }))
+
+    assert caught.value.status_code == 422
+    assert caught.value.detail["code"] == "screenplay_qa_failed"
+    assert db.get_conn().execute(
+        "SELECT screenplay_artifact_id FROM episodes WHERE id='e1'"
+    ).fetchone()["screenplay_artifact_id"] == "art_sp_old"
 
 
 def test_manual_screenplay_edit_uses_model_identity_resolution_before_publish(monkeypatch) -> None:

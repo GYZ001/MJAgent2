@@ -431,6 +431,7 @@ def test_confirmation_gate_forwards_narrative_authority_to_shared_validators(
     assert captured["validate"] == {
         "narrative_authority": True,
         "narrative_plan": plan,
+        "screenplay": screenplay,
     }
 
 

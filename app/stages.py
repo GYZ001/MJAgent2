@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+from copy import deepcopy
 import hashlib
 import json
 import math
@@ -34,6 +35,7 @@ from app.validators import (SOURCE_EXCERPT_MIN_CHARS,
                             rewrite_outline_abstract_covers,
                             TRANSITION_HINTS, _atomize_claim, _condense, _covers_has_crowd,
                             _covers_has_spoken, _covers_outside_spoken,
+                            _scene_time_changed,
                             normalize_action_desc, normalize_continuity,
                             normalize_dialogue_focus_offscreen_mentions,
                             normalize_offbible_characters, normalize_transition_visuals,
@@ -104,6 +106,18 @@ _SHOT_NULLABLE_LIST_FIELDS = frozenset({
     "completed_before_action_phase_ids", "reserved_future_event_ids",
     "readability_window_ids",
 })
+_STORYBOARD_NARRATIVE_AUTHORITY_FIELDS = (
+    "shot_id", "scene_id", "event_ids", "spine_beat_ids", "key_line_ids",
+    "primary_action_id",
+    "supporting_action_ids", "action_phase_ids", "visible_entity_ids",
+    "offscreen_action_actor_ids", "offscreen_action_target_ids",
+    "shot_contribution", "audience_state_paths",
+    "planned_state_in_fact_ids", "planned_delta_add_fact_ids",
+    "planned_delta_remove_fact_ids", "planned_state_out_fact_ids",
+    "completed_before_action_ids", "completed_before_action_phase_ids",
+    "reserved_future_event_ids", "readability_window_ids",
+    "narrative_boundary_from_previous",
+)
 
 
 def normalize_storyboard_shot_candidate(
@@ -112,6 +126,9 @@ def normalize_storyboard_shot_candidate(
     episode_no: int,
     shot_no: int,
     outline_story_event_id: str = "",
+    outline_narrative_task: dict[str, Any] | None = None,
+    previous_scene_name: str = "",
+    previous_scene_time: str = "",
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Losslessly normalize common LLM serialization mistakes at the boundary.
 
@@ -166,10 +183,404 @@ def normalize_storyboard_shot_candidate(
         })
         shot["story_event_id"] = outline_story_event_id
 
+    # Narrative allocation is authored and validated at outline time.  The
+    # shot model may realize it visually, but must not be asked to retype or
+    # reinterpret these server-owned IDs, ledgers, budgets, and boundaries.
+    if isinstance(outline_narrative_task, dict):
+        for field in _STORYBOARD_NARRATIVE_AUTHORITY_FIELDS:
+            if field not in outline_narrative_task:
+                continue
+            planned = outline_narrative_task[field]
+            if shot.get(field) == planned:
+                continue
+            changes.append({
+                "field": f"shot.{field}",
+                "from": shot.get(field),
+                "to": planned,
+                "reason": "outline_narrative_authority",
+            })
+            shot[field] = deepcopy(planned)
+
+        for field in ("scene_name", "scene_time"):
+            planned = str(outline_narrative_task.get(field) or "")
+            if planned and shot.get(field) != planned:
+                changes.append({
+                    "field": f"shot.{field}",
+                    "from": shot.get(field),
+                    "to": planned,
+                    "reason": "outline_scene_authority",
+                })
+                shot[field] = planned
+        planned_scene_name = str(
+            outline_narrative_task.get("scene_name") or ""
+        )
+        planned_scene_time = str(
+            outline_narrative_task.get("scene_time") or ""
+        )
+        planned_continuity = str(
+            outline_narrative_task.get("continuity_mode") or ""
+        )
+        expected_continuity = planned_continuity
+        if previous_scene_name or previous_scene_time:
+            changed_scene = (
+                planned_scene_name != previous_scene_name
+                or _scene_time_changed(
+                    previous_scene_time,
+                    planned_scene_time,
+                )
+            )
+            if changed_scene:
+                expected_continuity = "scene_change"
+            elif expected_continuity == "scene_change":
+                expected_continuity = "same_scene_cut"
+        if (
+            expected_continuity
+            and shot.get("continuity_mode") != expected_continuity
+        ):
+            changes.append({
+                "field": "shot.continuity_mode",
+                "from": shot.get("continuity_mode"),
+                "to": expected_continuity,
+                "reason": "derived_scene_continuity",
+            })
+            shot["continuity_mode"] = expected_continuity
+        if (
+            expected_continuity == "scene_change"
+            and shot.get("transition") in {None, "", "硬切"}
+        ):
+            changes.append({
+                "field": "shot.transition",
+                "from": shot.get("transition"),
+                "to": "叠化",
+                "reason": "derived_scene_transition",
+            })
+            shot["transition"] = "叠化"
+
+        planned_audio_cast = outline_narrative_task.get("audio_cast")
+        if isinstance(planned_audio_cast, list):
+            if shot.get("audio_cast") != planned_audio_cast:
+                changes.append({
+                    "field": "shot.audio_cast",
+                    "from": shot.get("audio_cast"),
+                    "to": planned_audio_cast,
+                    "reason": "outline_audio_authority",
+                })
+                shot["audio_cast"] = deepcopy(planned_audio_cast)
+            if (
+                not planned_audio_cast
+                and not outline_narrative_task.get("key_line_ids")
+            ):
+                removed_spoken = bool(
+                    shot.get("dialogues")
+                    or shot.get("narration")
+                    or any(
+                        isinstance(item, dict)
+                        and item.get("type") in {
+                            "spoken_dialogue",
+                            "offscreen_voice",
+                        }
+                        for item in (shot.get("audio_timeline") or [])
+                    )
+                )
+                shot["dialogues"] = []
+                shot["narration"] = ""
+                shot["audio_timeline"] = [
+                    item
+                    for item in (shot.get("audio_timeline") or [])
+                    if not (
+                        isinstance(item, dict)
+                        and item.get("type") in {
+                            "spoken_dialogue",
+                            "offscreen_voice",
+                        }
+                    )
+                ]
+                if removed_spoken:
+                    changes.append({
+                        "field": "shot.spoken_contract",
+                        "reason": "unassigned_spoken_content_removed",
+                    })
+
+        planned_budget = outline_narrative_task.get("capacity_budget")
+        if isinstance(planned_budget, dict):
+            def _content_chars(text: str) -> int:
+                return len(re.sub(r"[\W_]+", "", text, flags=re.UNICODE))
+
+            normalized_timeline = deepcopy(
+                shot.get("audio_timeline") or []
+            )
+            spoken_cursor = 0.0
+            timeline_timing_changed = False
+            for item in normalized_timeline:
+                if (
+                    not isinstance(item, dict)
+                    or item.get("type")
+                    not in {"spoken_dialogue", "offscreen_voice"}
+                ):
+                    continue
+                duration_s = (
+                    _content_chars(str(item.get("text") or ""))
+                    * float(config.VIDEO_DURATION_MIN_S)
+                    / float(config.SPOKEN_CHARS_PER_5_SECONDS)
+                )
+                start_s = spoken_cursor
+                end_s = spoken_cursor + duration_s
+                if (
+                    float(item.get("start_s") or 0) != start_s
+                    or float(item.get("end_s") or 0) != end_s
+                ):
+                    item["start_s"] = start_s
+                    item["end_s"] = end_s
+                    timeline_timing_changed = True
+                spoken_cursor = end_s
+            if timeline_timing_changed:
+                changes.append({
+                    "field": "shot.audio_timeline",
+                    "reason": "derived_spoken_timing",
+                })
+                shot["audio_timeline"] = normalized_timeline
+            primary_onscreen_speaker = next(
+                (
+                    str(item.get("speaker_id") or "").strip()
+                    for item in normalized_timeline
+                    if (
+                        isinstance(item, dict)
+                        and item.get("type") == "spoken_dialogue"
+                        and str(item.get("speaker_id") or "").strip()
+                    )
+                ),
+                "",
+            )
+            dialogue_framing_changed = False
+            if primary_onscreen_speaker:
+                for item in normalized_timeline:
+                    if (
+                        not isinstance(item, dict)
+                        or item.get("type") != "spoken_dialogue"
+                        or str(item.get("speaker_id") or "").strip()
+                        in {"", primary_onscreen_speaker}
+                    ):
+                        continue
+                    item["type"] = "offscreen_voice"
+                    item["lip_sync"] = False
+                    dialogue_framing_changed = True
+            if dialogue_framing_changed:
+                changes.append({
+                    "field": "shot.audio_timeline",
+                    "reason": "single_onscreen_speaker",
+                })
+                shot["audio_timeline"] = normalized_timeline
+            spoken_segments = [
+                item
+                for item in normalized_timeline
+                if (
+                    isinstance(item, dict)
+                    and item.get("type") in {
+                        "spoken_dialogue",
+                        "offscreen_voice",
+                    }
+                    and str(item.get("speaker_id") or "").strip()
+                    and str(item.get("text") or "").strip()
+                )
+            ]
+            if spoken_segments:
+                normalized_dialogues = [
+                    {
+                        "speaker": str(item["speaker_id"]).strip(),
+                        "line": str(item["text"]).strip(),
+                        "emotion": str(
+                            item.get("emotion") or "平静"
+                        ),
+                        "delivery": str(item["type"]),
+                    }
+                    for item in spoken_segments
+                ]
+                if shot.get("dialogues") != normalized_dialogues:
+                    changes.append({
+                        "field": "shot.dialogues",
+                        "from": shot.get("dialogues"),
+                        "to": normalized_dialogues,
+                        "reason": "timeline_spoken_authority",
+                    })
+                    shot["dialogues"] = normalized_dialogues
+            onscreen_speaker_ids = [
+                str(item.get("speaker_id") or "").strip()
+                for item in normalized_timeline
+                if (
+                    isinstance(item, dict)
+                    and item.get("type") == "spoken_dialogue"
+                    and str(item.get("speaker_id") or "").strip()
+                )
+            ]
+            visible_characters = list(
+                shot.get("characters_visible") or []
+            )
+            unique_onscreen_speakers = list(dict.fromkeys(
+                onscreen_speaker_ids
+            ))
+            normalized_visible = (
+                unique_onscreen_speakers
+                if len(unique_onscreen_speakers) == 1
+                else list(dict.fromkeys([
+                    *visible_characters,
+                    *unique_onscreen_speakers,
+                ]))
+            )
+            if normalized_visible != visible_characters:
+                changes.append({
+                    "field": "shot.characters_visible",
+                    "from": visible_characters,
+                    "to": normalized_visible,
+                    "reason": "lip_sync_speaker_visible",
+                })
+                shot["characters_visible"] = normalized_visible
+            if len(unique_onscreen_speakers) == 1:
+                if shot.get("shot_size") not in {"近景", "特写"}:
+                    changes.append({
+                        "field": "shot.shot_size",
+                        "from": shot.get("shot_size"),
+                        "to": "近景",
+                        "reason": "single_speaker_framing",
+                    })
+                    shot["shot_size"] = "近景"
+                if shot.get("camera_move") not in {"固定", "推近"}:
+                    changes.append({
+                        "field": "shot.camera_move",
+                        "from": shot.get("camera_move"),
+                        "to": "固定",
+                        "reason": "single_speaker_framing",
+                    })
+                    shot["camera_move"] = "固定"
+
+            dialogue_text = "".join(
+                str(item.get("line") or "")
+                for item in (shot.get("dialogues") or [])
+                if isinstance(item, dict)
+            )
+            narration_text = str(shot.get("narration") or "")
+            timeline = [
+                item
+                for item in (shot.get("audio_timeline") or [])
+                if (
+                    isinstance(item, dict)
+                    and item.get("type") in {
+                        "spoken_dialogue",
+                        "offscreen_voice",
+                    }
+                )
+            ]
+            timeline_text = "".join(
+                str(item.get("text") or "")
+                for item in timeline
+            )
+            required_text = shot.get("required_text")
+            onscreen_text = (
+                str(required_text.get("exact_text") or "")
+                if isinstance(required_text, dict)
+                else ""
+            )
+
+            linguistic_chars = max(
+                _content_chars(dialogue_text + narration_text),
+                _content_chars(timeline_text),
+            ) + _content_chars(onscreen_text)
+            text_min_s = (
+                linguistic_chars
+                * float(config.VIDEO_DURATION_MIN_S)
+                / float(config.SPOKEN_CHARS_PER_5_SECONDS)
+            )
+            timeline_min_s = max(
+                (
+                    float(item.get("end_s") or 0)
+                    for item in timeline
+                ),
+                default=0.0,
+            )
+            spoken_min_s = max(text_min_s, timeline_min_s)
+            budget = deepcopy(planned_budget)
+            budget["spoken_and_text_s"] = max(
+                float(budget.get("spoken_and_text_s") or 0),
+                spoken_min_s,
+            )
+            if shot.get("capacity_budget") != budget:
+                changes.append({
+                    "field": "shot.capacity_budget",
+                    "from": shot.get("capacity_budget"),
+                    "to": budget,
+                    "reason": "derived_spoken_capacity",
+                })
+                shot["capacity_budget"] = budget
+            required_duration = int(math.ceil(sum(
+                float(budget.get(field) or 0)
+                for field in (
+                    "action_phase_s",
+                    "spoken_and_text_s",
+                    "attention_switch_s",
+                    "inference_processing_s",
+                    "reaction_registration_s",
+                    "spatial_reorientation_s",
+                    "entry_exit_settle_s",
+                    "other_s",
+                )
+            )))
+            current_duration = int(
+                shot.get("duration_s")
+                or config.VIDEO_DURATION_MIN_S
+            )
+            if (
+                current_duration < required_duration
+                <= config.VIDEO_DURATION_MAX_S
+            ):
+                changes.append({
+                    "field": "shot.duration_s",
+                    "from": current_duration,
+                    "to": required_duration,
+                    "reason": "derived_joint_capacity",
+                })
+                shot["duration_s"] = required_duration
+
     return normalized, changes
 
 
-def _render_error_history(error_history: list[list[str]]) -> str:
+def normalize_storyboard_outline_candidate(
+    obj: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Normalize unambiguous outline serialization without weakening its schema."""
+    normalized = dict(obj)
+    changes: list[dict[str, Any]] = []
+    raw_shots = normalized.get("shots")
+    if not isinstance(raw_shots, list):
+        return normalized, changes
+    shots: list[Any] = []
+    for index, raw_shot in enumerate(raw_shots):
+        if not isinstance(raw_shot, dict):
+            shots.append(raw_shot)
+            continue
+        shot = dict(raw_shot)
+        covers = shot.get("covers")
+        if isinstance(covers, list) and all(
+            isinstance(item, str) for item in covers
+        ):
+            merged = "；".join(
+                item.strip() for item in covers if item.strip()
+            )
+            shot["covers"] = merged
+            changes.append({
+                "field": f"shots.{index}.covers",
+                "from": covers,
+                "to": merged,
+                "reason": "join_string_list",
+            })
+        shots.append(shot)
+    normalized["shots"] = shots
+    return normalized, changes
+
+
+def _render_error_history(
+    error_history: list[list[str]],
+    *,
+    latest_keep: int = 12,
+) -> str:
     """渲染历次输出的问题记录（让模型看到自己反复犯的错）。
     与上一轮完全相同的轮次折叠成一行，避免把同样的错误抄 7 遍、把 prompt 撑爆。"""
     blocks: list[str] = []
@@ -177,7 +588,12 @@ def _render_error_history(error_history: list[list[str]]) -> str:
         if i > 0 and errs == error_history[i - 1]:
             blocks.append(f"【第 {i + 1} 次输出】问题与上一次完全相同（未改进）")
             continue
-        keep = 12 if i >= len(error_history) - 2 else 5
+        if i == len(error_history) - 1:
+            keep = latest_keep
+        elif i == len(error_history) - 2:
+            keep = min(12, latest_keep)
+        else:
+            keep = 5
         lines = [f"- {e}" for e in errs[:keep]]
         if len(errs) > keep:
             lines.append(f"- ……（另有 {len(errs) - keep} 条同轮问题从略）")
@@ -267,7 +683,10 @@ async def _run_with_agent_loop(
             previous_candidate = previous_candidate[:repair_candidate_limit]
         repair_prompt = (
             "你此前的输出未通过校验。以下问题均为结构化硬门禁，不是泛泛建议：\n"
-            + _render_error_history(error_history)
+            + _render_error_history(
+                error_history,
+                latest_keep=48 if loop.policy.repair_all_blockers else 12,
+            )
             + emphasis
             + "\n\n只修复上述问题，然后重新输出完整 JSON（不要解释，不要 Markdown）。"
             + "\n\n原任务要求：\n"
@@ -317,6 +736,21 @@ async def _run_with_agent_loop(
                         "normalized_paths": normalized_paths,
                     },
                 )
+        if model_cls is StoryboardOutline and isinstance(obj, dict):
+            obj, normalizations = normalize_storyboard_outline_candidate(obj)
+            if normalizations:
+                log_provider_call(
+                    "storyboard_outline_candidate_normalization",
+                    config.MODEL_TEXT,
+                    "NORMALIZED",
+                    None,
+                    0,
+                    meta={
+                        "episode_id": loop.scope_id,
+                        "stage": stage,
+                        "changes": normalizations,
+                    },
+                )
         if model_cls is StoryboardShotDraft and storyboard_candidate_context is not None:
             obj, normalizations = normalize_storyboard_shot_candidate(
                 obj,
@@ -324,6 +758,19 @@ async def _run_with_agent_loop(
                 shot_no=int(storyboard_candidate_context["shot_no"]),
                 outline_story_event_id=str(
                     storyboard_candidate_context.get("outline_story_event_id") or ""
+                ),
+                outline_narrative_task=storyboard_candidate_context.get(
+                    "outline_narrative_task"
+                ),
+                previous_scene_name=str(
+                    storyboard_candidate_context.get(
+                        "previous_scene_name"
+                    ) or ""
+                ),
+                previous_scene_time=str(
+                    storyboard_candidate_context.get(
+                        "previous_scene_time"
+                    ) or ""
                 ),
             )
             if normalizations:
@@ -2170,18 +2617,7 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
     # task instead of re-inferring it from prose, while leaving legacy outlines
     # (whose narrative fields are all empty) on their existing compatibility path.
     if outline_narrative_task is not None:
-        narrative_fields = (
-            "shot_id", "scene_id", "event_ids", "primary_action_id",
-            "supporting_action_ids", "action_phase_ids", "visible_entity_ids",
-            "offscreen_action_actor_ids", "offscreen_action_target_ids",
-            "capacity_budget", "shot_contribution",
-            "audience_state_paths",
-            "planned_state_in_fact_ids", "planned_delta_add_fact_ids",
-            "planned_delta_remove_fact_ids", "planned_state_out_fact_ids",
-            "completed_before_action_ids", "completed_before_action_phase_ids",
-            "reserved_future_event_ids",
-            "readability_window_ids", "narrative_boundary_from_previous",
-        )
+        narrative_fields = _STORYBOARD_NARRATIVE_AUTHORITY_FIELDS
         planned = outline_narrative_task.model_dump(mode="json", include=set(narrative_fields))
         if any(value not in (None, "", [], {}) for value in planned.values()):
             actual = current.model_dump(mode="json", include=set(narrative_fields))
@@ -2365,6 +2801,27 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
             # preflight structural and relation-based: legacy covers wording,
             # episode-number heuristics and deterministic content transformers
             # must not rewrite an AI-authored narrative allocation.
+            from app.narrative_outline import (
+                normalize_narrative_storyboard_outline,
+            )
+
+            projection_changes = normalize_narrative_storyboard_outline(
+                o,
+                screenplay,
+            )
+            if projection_changes:
+                log_provider_call(
+                    "storyboard_outline_authority_projection",
+                    config.MODEL_TEXT,
+                    "NORMALIZED",
+                    None,
+                    0,
+                    meta={
+                        "episode_id": episode.get("id"),
+                        "episode_no": episode.get("episode_no"),
+                        "changes": projection_changes,
+                    },
+                )
             narrative_errors: list[str] = []
             if not o.shots:
                 narrative_errors.append("[OUTLINE_EMPTY] 分镜大纲不能为空")
@@ -2471,6 +2928,7 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
         ))
         return list(dict.fromkeys(errors))
 
+    narrative_outline = screenplay.narrative_plan is not None
     outline_loop = AgentLoop(
         stage_key="storyboard_outline",
         contract_key="storyboard",
@@ -2479,8 +2937,13 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
         scope_id=str(episode.get("id") or f"episode-{episode['episode_no']}"),
         artifact_type="storyboard_outline",
         policy=AgentLoopPolicy(
-            max_iterations=1, stall_rounds=1, min_quality_gain=0.03,
-            no_gain_rounds=1, allow_warning_candidate=False, baseline_only=True,
+            max_iterations=8 if narrative_outline else 1,
+            stall_rounds=4 if narrative_outline else 1,
+            min_quality_gain=0.01 if narrative_outline else 0.03,
+            no_gain_rounds=4 if narrative_outline else 1,
+            allow_warning_candidate=False,
+            repair_all_blockers=narrative_outline,
+            baseline_only=not narrative_outline,
         ),
     )
     outline = await _run_with_agent_loop(
@@ -2488,12 +2951,12 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
         loop=outline_loop, temperature=0.6,
         max_tokens=config.STORYBOARD_OUTLINE_MAX_TOKENS,
         repair_user_prompt_limit=None,
+        repair_candidate_limit=None if narrative_outline else 6000,
         prefill={"episode_no": episode["episode_no"]},
     )
     if screenplay.narrative_plan is not None:
-        # The model output already passed the complete graph gate in ``_check``.
-        # Returning it verbatim preserves stable IDs, ownership and hand-offs;
-        # any later repair must go through semantic candidate comparison.
+        # The model-authored directing text and deterministic authority
+        # projection passed the complete graph gate in ``_check``.
         return outline
     # 减重试 #2：第一集第 1 镜是强制建场镜，把派给它的判决/反转类 covers 顺延合并到第 2 镜，
     # 避免逐镜阶段"照建场写→漏 covers / 硬塞判决→引入圣经外角色"的连环重试。
@@ -3129,6 +3592,19 @@ source_excerpt 内的双引号必须按 JSON 规范转义，或改用中文引�
             "episode_no": episode["episode_no"],
             "shot_no": shot_no,
             "outline_story_event_id": brief.story_event_id if brief is not None else "",
+            "outline_narrative_task": (
+                brief.model_dump(mode="json")
+                if narrative_authority and brief is not None
+                else None
+            ),
+            "previous_scene_name": (
+                completed_shots[-1].scene_name
+                if completed_shots else ""
+            ),
+            "previous_scene_time": (
+                completed_shots[-1].scene_time
+                if completed_shots else ""
+            ),
         },
         semantic_attempt_id=semantic_attempt_id,
     )

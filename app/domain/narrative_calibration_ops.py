@@ -1,7 +1,6 @@
 """Human one-watch calibration API and current-review evidence resolution."""
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from fastapi import Body, HTTPException
@@ -16,6 +15,7 @@ from app.narrative_calibration import (
     HumanOneWatchObservation,
     ModelTargetEstimate,
     build_calibration_report,
+    persist_ai_one_watch_simulation_authority,
     persist_calibration_report,
     persist_human_one_watch_freeze,
     persist_human_one_watch_observation,
@@ -162,9 +162,12 @@ def narrative_calibration_status():
     except CalibrationContractError as exc:
         row = get_conn().execute(
             """SELECT id FROM artifacts
-               WHERE type='human_one_watch_calibration_report'
+               WHERE type IN (
+                   'human_one_watch_calibration_report',
+                   'ai_one_watch_simulation_report'
+               )
                  AND scope_type='calibration' AND scope_id=?
-               ORDER BY version DESC LIMIT 1""",
+               ORDER BY created_at DESC LIMIT 1""",
             (GLOBAL_CALIBRATION_SCOPE_ID,),
         ).fetchone()
         latest = (
@@ -183,8 +186,190 @@ def narrative_calibration_status():
         "ready": True,
         "artifact_id": authority.artifact_id,
         "artifact_hash": authority.artifact_hash,
+        "authority_mode": authority.authority_mode,
         "model_pass_threshold": authority.model_pass_threshold,
         "report": authority.report.model_dump(mode="json"),
+    }
+
+
+@router.post("/episodes/{episode_id}/narrative-calibration/ai-simulate")
+def activate_ai_one_watch_simulation(episode_id: str):
+    conn = get_conn()
+    episode = conn.execute(
+        "SELECT * FROM episodes WHERE id=?",
+        (episode_id,),
+    ).fetchone()
+    if episode is None:
+        raise HTTPException(404, "剧集不存在")
+    try:
+        screenplay_authority = resolve_current_screenplay_authority(
+            episode_id,
+            conn=conn,
+            require_narrative=True,
+        )
+    except Exception as exc:
+        raise HTTPException(409, f"当前已发布剧本权威链无效：{exc}") from exc
+    from app.domain.storyboard_ops import (
+        _board_from_shot_rows,
+        _ensure_current_storyboard_shot_artifacts,
+    )
+    from app.narrative_review import (
+        NarrativeReviewError,
+        rebind_unchanged_narrative_review,
+    )
+    from app.storyboard_workspace import repair_generated_source_bindings
+
+    source_repair = repair_generated_source_bindings(episode_id)
+    if source_repair["unresolved_shot_nos"]:
+        raise HTTPException(422, {
+            "code": "storyboard_source_evidence_unresolved",
+            "message": "以下镜头仍无法绑定授权原文",
+            "shot_nos": source_repair["unresolved_shot_nos"],
+        })
+    shot_rows = conn.execute(
+        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
+        (episode_id,),
+    ).fetchall()
+    board = _board_from_shot_rows(
+        shot_rows,
+        int(episode["episode_no"]),
+    )
+    _ensure_current_storyboard_shot_artifacts(
+        conn,
+        episode_id,
+        board,
+    )
+
+    report = None
+    report_artifact = None
+    artifact_ids: list[str] = []
+    rows = conn.execute(
+        """SELECT id FROM artifacts
+           WHERE type='narrative_review_report'
+             AND scope_type='episode' AND scope_id=?
+           ORDER BY version DESC""",
+        (episode_id,),
+    ).fetchall()
+    for row in rows:
+        candidate = evidence_repository.get_artifact(str(row["id"]))
+        if candidate is None:
+            continue
+        try:
+            parsed = NarrativeReviewReport.model_validate(
+                candidate.get("content") or {}
+            )
+        except Exception:
+            continue
+        if parsed.decision != "pass":
+            continue
+        gate = conn.execute(
+            """SELECT 1 FROM evaluations
+               WHERE artifact_id=?
+                 AND evaluator_name='narrative_blind_comparator'
+                 AND evaluation_role='runtime_gate'
+                 AND runtime_blocking=1
+                 AND status='passed' AND hard_gate_passed=1
+               LIMIT 1""",
+            (candidate["id"],),
+        ).fetchone()
+        if gate is None:
+            continue
+        report = parsed
+        report_artifact = candidate
+        artifact_ids = list(dict.fromkeys([
+            str(candidate["id"]),
+            *[
+                str(item)
+                for item in (candidate.get("parent_artifact_ids") or [])
+                if str(item)
+            ],
+        ]))
+        break
+    if report is None or report_artifact is None:
+        raise HTTPException(409, "本集尚无可复用的已通过冷观众审读报告")
+
+    try:
+        verified_report_id = verify_persisted_narrative_review(
+            episode_id=episode_id,
+            screenplay=screenplay_authority.screenplay,
+            board=board,
+            report=report,
+            artifact_ids=artifact_ids,
+        )
+    except NarrativeReviewError:
+        try:
+            report, artifact_ids = rebind_unchanged_narrative_review(
+                episode_id=episode_id,
+                screenplay=screenplay_authority.screenplay,
+                board=board,
+                report=report,
+                artifact_ids=artifact_ids,
+            )
+        except NarrativeReviewError as exc:
+            raise HTTPException(409, {
+                "code": "narrative_review_rebind_failed",
+                "message": "当前分镜感知输入已变化，不能复用旧审读",
+                "errors": exc.errors,
+            }) from exc
+        verified_report_id = next(
+            artifact_id
+            for artifact_id in artifact_ids
+            if (
+                (candidate := evidence_repository.get_artifact(artifact_id))
+                is not None
+                and candidate.get("type") == "narrative_review_report"
+            )
+        )
+        report_artifact = evidence_repository.get_artifact(verified_report_id)
+        assert report_artifact is not None
+    try:
+        current = require_current_calibration_authority()
+        if current.authority_mode in {"ai_simulation", "waived"}:
+            failed = [
+                item.target_delta_id
+                for item in report.target_delta_results
+                if item.predicted_score is None
+                or float(item.predicted_score) < current.model_pass_threshold
+            ]
+            if not failed:
+                return {
+                    "activated": True,
+                    "reused": True,
+                    "artifact_id": current.artifact_id,
+                    "authority_mode": current.authority_mode,
+                    "model_pass_threshold": current.model_pass_threshold,
+                    "message": "当前 AI 一次观看模拟权威仍有效",
+                }
+    except CalibrationContractError:
+        pass
+    try:
+        artifact = persist_ai_one_watch_simulation_authority(
+            report,
+            narrative_review_artifact_id=verified_report_id,
+        )
+        authority = require_current_calibration_authority(
+            expected_artifact_id=str(artifact["id"]),
+        )
+    except CalibrationContractError as exc:
+        raise HTTPException(422, {
+            "code": "ai_one_watch_simulation_invalid",
+            "message": str(exc),
+            "errors": exc.errors,
+        }) from exc
+    return {
+        "activated": True,
+        "reused": False,
+        "artifact_id": authority.artifact_id,
+        "authority_mode": authority.authority_mode,
+        "model_pass_threshold": authority.model_pass_threshold,
+        "minimum_predicted_score": authority.report.sample_summary.get(
+            "minimum_predicted_score"
+        ),
+        "message": (
+            "AI 一次观看模拟已通过并激活"
+            if authority.authority_mode == "ai_simulation"
+            else "AI 模拟不足，额外校准层已取消；冷观众硬门禁继续生效"
+        ),
     }
 
 

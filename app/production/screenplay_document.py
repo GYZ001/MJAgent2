@@ -917,6 +917,90 @@ def split_dialogue_chain_by_scene(
     return ScreenplayDocument.model_validate(data), ["dialogue_chains", chain_id, *created_ids]
 
 
+def split_dialogue_turn_by_capacity(
+    doc: ScreenplayDocument,
+    *,
+    chain_id: str,
+    turn_index: int,
+    max_chars: int,
+) -> tuple[ScreenplayDocument, list[str]]:
+    """Split one oversized source-grounded turn at punctuation boundaries."""
+    data = copy.deepcopy(doc.model_dump(mode="json"))
+    chain = next(
+        (
+            item
+            for item in data.get("dialogue_chains") or []
+            if str(item.get("chain_id") or "") == chain_id
+        ),
+        None,
+    )
+    if (
+        chain is None
+        or max_chars <= 0
+        or not 0 <= turn_index < len(chain.get("turns") or [])
+    ):
+        return doc, []
+    turn = chain["turns"][turn_index]
+    line = str(turn.get("line") or "").strip()
+
+    def content_chars(value: str) -> int:
+        return len(re.sub(r"[\W_]+", "", value, flags=re.UNICODE))
+
+    if content_chars(line) <= max_chars:
+        return doc, []
+    clauses = [
+        item.strip()
+        for item in re.findall(r".*?[，。！？；,.!?;]|.+$", line)
+        if item.strip()
+    ]
+    chunks: list[str] = []
+    current = ""
+    for clause in clauses:
+        if current and content_chars(current + clause) > max_chars:
+            chunks.append(current)
+            current = ""
+        if content_chars(clause) <= max_chars:
+            current += clause
+            continue
+        for character in clause:
+            if (
+                current
+                and content_chars(current + character) > max_chars
+            ):
+                chunks.append(current)
+                current = ""
+            current += character
+    if current:
+        chunks.append(current)
+    if len(chunks) <= 1 or any(
+        content_chars(chunk) > max_chars for chunk in chunks
+    ):
+        return doc, []
+
+    source = str(turn.get("source_text") or "")
+    replacements: list[dict[str, Any]] = []
+    for index, chunk in enumerate(chunks):
+        replacement = copy.deepcopy(turn)
+        replacement["line"] = chunk
+        replacement["source_text"] = chunk if chunk in source else source
+        if index:
+            replacement["function"] = "statement"
+        replacements.append(replacement)
+    chain["turns"] = [
+        *chain["turns"][:turn_index],
+        *replacements,
+        *chain["turns"][turn_index + 1:],
+    ]
+    return (
+        ScreenplayDocument.model_validate(data),
+        [
+            "dialogue_chains",
+            chain_id,
+            f"{chain_id}-T{turn_index + 1}",
+        ],
+    )
+
+
 def _build_scene_blocks(script: EpisodeScreenplay) -> list[SceneBlockNode]:
     blocks: list[SceneBlockNode] = []
     known_speakers: dict[str, str] = {}

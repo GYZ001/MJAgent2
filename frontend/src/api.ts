@@ -1149,6 +1149,7 @@ export interface NarrativeCalibrationSummary {
   status: "calibrated" | "awaiting_republish" | "needs_review";
   artifact_id?: string | null;
   bound_artifact_id?: string | null;
+  authority_mode?: "human_calibration" | "ai_simulation" | "waived";
   model_pass_threshold?: number | null;
   calibration_score?: number | null;
   sample_summary?: Record<string, unknown>;

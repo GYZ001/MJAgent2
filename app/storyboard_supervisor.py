@@ -31,7 +31,12 @@ from app.schemas import (
     StoryboardOutline,
     StoryboardOutlineShot,
 )
-from app.stages import StageError, generate_storyboard_next_shot, generate_storyboard_outline
+from app.stages import (
+    StageError,
+    generate_storyboard_next_shot,
+    generate_storyboard_outline,
+    normalize_storyboard_shot_candidate,
+)
 
 SupervisorPhase = Literal[
     "CREATED",
@@ -1215,6 +1220,27 @@ def _commit_repair_candidate(
     return str(candidate_artifact["id"])
 
 
+def _apply_storyboard_planning_target(
+    conn: Any,
+    episode_id: str,
+    episode_data: dict[str, Any],
+    compact_target: int,
+    *,
+    narrative_authority: bool,
+) -> None:
+    """Use a derived storyboard duration without mutating screenplay authority."""
+    if compact_target == episode_data.get("target_duration_s"):
+        return
+    episode_data["target_duration_s"] = compact_target
+    if narrative_authority:
+        return
+    conn.execute(
+        "UPDATE episodes SET target_duration_s=? WHERE id=?",
+        (compact_target, episode_id),
+    )
+    conn.commit()
+
+
 async def run_storyboard_supervisor(
     episode_id: str,
     *,
@@ -1241,6 +1267,7 @@ async def run_storyboard_supervisor(
     )
     from app.domain.storyboard_ops import (
         _board_from_shot_rows,
+        _ensure_current_storyboard_shot_artifacts,
         _finalize_storyboard_evidence,
         _insert_storyboard_shot,
         _assert_storyboard_write_authorized,
@@ -1439,10 +1466,13 @@ async def run_storyboard_supervisor(
     compact_target = _storyboard_target_for_source(
         ep_data.get("target_duration_s"), len(source_text), spine_beat_count=spine_n or None
     )
-    if compact_target != ep_data.get("target_duration_s"):
-        conn.execute("UPDATE episodes SET target_duration_s=? WHERE id=?", (compact_target, episode_id))
-        conn.commit()
-        ep_data["target_duration_s"] = compact_target
+    _apply_storyboard_planning_target(
+        conn,
+        episode_id,
+        ep_data,
+        compact_target,
+        narrative_authority=narrative_authority,
+    )
 
     prev = conn.execute(
         "SELECT cliffhanger FROM episodes WHERE project_id=? AND episode_no=?",
@@ -1532,6 +1562,62 @@ async def run_storyboard_supervisor(
             if prefix_rows
             else []
         )
+        authority_repairs: list[dict[str, Any]] = []
+        if narrative_authority and outline is not None:
+            outline_by_no = {
+                int(brief.shot_no): brief
+                for brief in outline.shots
+            }
+            for index, shot in enumerate(shots):
+                brief = outline_by_no.get(int(shot.shot_no))
+                if brief is None:
+                    continue
+                normalized, changes = normalize_storyboard_shot_candidate(
+                    {
+                        "episode_no": ep_data["episode_no"],
+                        "shot": shot.model_dump(mode="json"),
+                    },
+                    episode_no=ep_data["episode_no"],
+                    shot_no=int(shot.shot_no),
+                    outline_story_event_id=brief.story_event_id or "",
+                    outline_narrative_task=brief.model_dump(mode="json"),
+                )
+                if not changes:
+                    continue
+                normalized_shot = Shot.model_validate(normalized["shot"])
+                shots[index] = normalized_shot
+                _write_shot_fields(
+                    conn,
+                    prefix_rows[index]["id"],
+                    normalized_shot,
+                    prefix_rows[index]["storyboard_artifact_id"],
+                    narrative_authority=True,
+                )
+                authority_repairs.append({
+                    "shot_no": int(shot.shot_no),
+                    "fields": [change["field"] for change in changes],
+                })
+            if authority_repairs:
+                conn.commit()
+                prefix_rows = list(_ensure_current_storyboard_shot_artifacts(
+                    conn,
+                    episode_id,
+                    Storyboard(
+                        episode_no=ep_data["episode_no"],
+                        shots=shots,
+                    ),
+                ))
+                if run_id:
+                    evidence_repository.append_event(
+                        run_id,
+                        "STORYBOARD_OUTLINE_AUTHORITY_REBOUND",
+                        "info",
+                        "已从批准大纲确定性恢复镜头叙事权威字段",
+                        payload={
+                            "episode_id": episode_id,
+                            "repairs": authority_repairs,
+                        },
+                    )
         cp.validated_prefix_end = len(shots)
         cp.next_shot_no = len(shots) + 1
         cp.validated_shot_artifact_ids = [
@@ -2178,44 +2264,166 @@ async def run_storyboard_supervisor(
             from app.narrative_review import (
                 NarrativeReviewError,
                 run_blind_audience_review,
+                verify_persisted_narrative_review,
             )
+            from app.schemas import NarrativeReviewReport
 
-            try:
-                _observations, narrative_review_report, narrative_review_artifact_ids = (
-                    await run_blind_audience_review(
+            checkpoint_review_ids = list(dict.fromkeys(
+                str(item)
+                for item in (
+                    (cp.last_repair or {}).get("narrative_review_artifact_ids")
+                    or []
+                )
+                if str(item)
+            ))
+            if checkpoint_review_ids:
+                try:
+                    report_artifacts = [
+                        evidence_repository.get_artifact(artifact_id)
+                        for artifact_id in checkpoint_review_ids
+                    ]
+                    usable_reports = [
+                        artifact
+                        for artifact in report_artifacts
+                        if artifact is not None
+                        and artifact.get("type") == "narrative_review_report"
+                        and artifact.get("status")
+                        not in {"stale", "rejected", "superseded", "needs_revision"}
+                    ]
+                    if len(usable_reports) != 1:
+                        raise ValueError("检查点没有唯一可复用的冷观众审读报告")
+                    candidate_report = NarrativeReviewReport.model_validate(
+                        usable_reports[0].get("content") or {}
+                    )
+                    verified_report_id = verify_persisted_narrative_review(
+                        episode_id=episode_id,
+                        screenplay=screenplay,
+                        board=evaluation.board,
+                        report=candidate_report,
+                        artifact_ids=checkpoint_review_ids,
+                    )
+                    if verified_report_id != usable_reports[0]["id"]:
+                        raise ValueError("检查点冷观众审读报告指针漂移")
+                    narrative_review_report = candidate_report
+                    narrative_review_artifact_ids = checkpoint_review_ids
+                    if run_id:
+                        evidence_repository.append_event(
+                            run_id,
+                            "NARRATIVE_REVIEW_REUSED",
+                            "info",
+                            "分镜内容未变化，复用检查点中已通过的冷观众审读证据",
+                            payload={"report_artifact_id": verified_report_id},
+                        )
+                except Exception:  # noqa: BLE001 - invalid reuse falls back to a fresh review
+                    narrative_review_report = None
+                    narrative_review_artifact_ids = []
+            if narrative_review_report is None:
+                current_report_rows = conn.execute(
+                    """SELECT id FROM artifacts
+                       WHERE type='narrative_review_report'
+                         AND scope_type='episode' AND scope_id=?
+                         AND status NOT IN (
+                             'stale','rejected','superseded','needs_revision'
+                         )
+                       ORDER BY version DESC""",
+                    (episode_id,),
+                ).fetchall()
+                for row in current_report_rows:
+                    candidate_artifact = evidence_repository.get_artifact(
+                        str(row["id"])
+                    )
+                    if candidate_artifact is None:
+                        continue
+                    candidate_ids = list(dict.fromkeys([
+                        str(candidate_artifact["id"]),
+                        *[
+                            str(item)
+                            for item in (
+                                candidate_artifact.get("parent_artifact_ids")
+                                or []
+                            )
+                            if str(item)
+                        ],
+                    ]))
+                    try:
+                        candidate_report = NarrativeReviewReport.model_validate(
+                            candidate_artifact.get("content") or {}
+                        )
+                        verified_report_id = verify_persisted_narrative_review(
+                            episode_id=episode_id,
+                            screenplay=screenplay,
+                            board=evaluation.board,
+                            report=candidate_report,
+                            artifact_ids=candidate_ids,
+                        )
+                    except Exception:  # noqa: BLE001 - try the next immutable report
+                        continue
+                    narrative_review_report = candidate_report
+                    narrative_review_artifact_ids = candidate_ids
+                    if run_id:
+                        evidence_repository.append_event(
+                            run_id,
+                            "NARRATIVE_REVIEW_REUSED",
+                            "info",
+                            "分镜内容未变化，复用当前已通过的冷观众审读证据",
+                            payload={"report_artifact_id": verified_report_id},
+                        )
+                    break
+            if narrative_review_report is None:
+                try:
+                    (
+                        _observations,
+                        narrative_review_report,
+                        narrative_review_artifact_ids,
+                    ) = await run_blind_audience_review(
                         episode_id=episode_id,
                         screenplay=screenplay,
                         board=evaluation.board,
                         screenplay_artifact_id=ep["screenplay_artifact_id"],
                     )
-                )
-            except NarrativeReviewError as exc:
-                plan = await _route_with_narrative_diagnosis(
-                    exc.errors,
-                    board=evaluation.board,
-                )
-                cp = _apply_repair(
-                    cp, plan, conn, episode_id, list(evaluation.board.shots), outline,
-                )
-                cp.last_repair = {
-                    **(cp.last_repair or {}),
-                    "status": (
-                        "blind_review_failed_paused"
-                        if cp.phase in {"WAITING_HUMAN", "WAITING_AUTHORIZATION", "PAUSED_EXTERNAL"}
-                        else "blind_review_repair_planned"
-                    ),
-                    "blind_review_errors": exc.errors,
-                }
-                save_checkpoint(cp, run_id=run_id)
-                if cp.phase in {"WAITING_HUMAN", "WAITING_AUTHORIZATION", "PAUSED_EXTERNAL"}:
-                    conn.execute(
-                        "UPDATE episodes SET status='scripted', narrative_status='needs_review', script_error=? WHERE id=?",
-                        (("冷观众审读未通过：" + "；".join(exc.errors[:5]))[:800], episode_id),
+                except NarrativeReviewError as exc:
+                    plan = await _route_with_narrative_diagnosis(
+                        exc.errors,
+                        board=evaluation.board,
                     )
-                    conn.commit()
-                    return cp
-                completed = _repair_context_shots(conn, cp, ep_data["episode_no"])
-                continue
+                    cp = _apply_repair(
+                        cp, plan, conn, episode_id, list(evaluation.board.shots), outline,
+                    )
+                    cp.last_repair = {
+                        **(cp.last_repair or {}),
+                        "status": (
+                            "blind_review_failed_paused"
+                            if cp.phase in {
+                                "WAITING_HUMAN",
+                                "WAITING_AUTHORIZATION",
+                                "PAUSED_EXTERNAL",
+                            }
+                            else "blind_review_repair_planned"
+                        ),
+                        "blind_review_errors": exc.errors,
+                    }
+                    save_checkpoint(cp, run_id=run_id)
+                    if cp.phase in {
+                        "WAITING_HUMAN",
+                        "WAITING_AUTHORIZATION",
+                        "PAUSED_EXTERNAL",
+                    }:
+                        conn.execute(
+                            "UPDATE episodes SET status='scripted', narrative_status='needs_review', script_error=? WHERE id=?",
+                            (
+                                (
+                                    "冷观众审读未通过："
+                                    + "；".join(exc.errors[:5])
+                                )[:800],
+                                episode_id,
+                            ),
+                        )
+                        conn.commit()
+                        return cp
+                    completed = _repair_context_shots(
+                        conn, cp, ep_data["episode_no"],
+                    )
+                    continue
             try:
                 from app.narrative_calibration import (
                     assert_report_meets_current_calibration,
@@ -2248,7 +2456,7 @@ async def run_storyboard_supervisor(
                         WHERE id=?""",
                     (
                         (
-                            "分镜结构与冷观众审读已完成，正在等待真人一次观看校准："
+                            "分镜结构与冷观众审读已完成，正在等待一次观看权威："
                             + str(exc)
                         )[:800],
                         episode_id,

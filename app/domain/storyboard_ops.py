@@ -138,13 +138,14 @@ def _narrative_calibration_summary(episode: dict) -> dict:
         ),
         "artifact_id": authority.artifact_id,
         "bound_artifact_id": bound_artifact_id or None,
+        "authority_mode": authority.authority_mode,
         "model_pass_threshold": authority.model_pass_threshold,
         "calibration_score": authority.report.calibration_score,
         "sample_summary": authority.report.sample_summary,
         "blockers": (
             []
             if bound_artifact_id == authority.artifact_id
-            else ["当前分镜尚未绑定最新真人一次观看校准，请重新完成审读发布"]
+            else ["当前分镜尚未绑定最新一次观看权威，请重新完成审读发布"]
         ),
     }
 
@@ -1863,7 +1864,7 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
         # whose downstream projection has already been cleared.  It cannot be
         # resumed as shot N+1 of the new screenplay.
         cp = None
-    if not saved and (cp is None or cp.validated_prefix_end <= 0):
+    if not saved and cp is None:
         raise HTTPException(409, "当前没有可恢复的 Supervisor / 逐镜 checkpoint，请重新生成分镜")
     resume_decision = _storyboard_resume_decision(episode_id, dict(ep))
     if not resume_decision["allowed"]:
@@ -1954,7 +1955,7 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
         "action": "resume",
         "resumed_from_shot": resumed_from_shot,
         "next_shot_no": checkpoint_next or resumed_from_shot + 1,
-        "checkpoint_only": bool(not saved and checkpoint_saved),
+        "checkpoint_only": bool(not saved and cp is not None),
     }
 
 
@@ -3602,9 +3603,14 @@ def episode_detail(episode_id: str, view: str | None = None):
     ep.pop("screenplay_json", None)
     # 分镜大纲（先规划后逐镜填充）：透出给前端做 已通过 k / 计划 N 镜 的进度展示
     outline = None
+    outline_json_for_gate = (
+        ep.get("storyboard_outline_json")
+        if full or view == "board"
+        else None
+    )
     if full or view == "board":
         try:
-            outline = json.loads(ep.get("storyboard_outline_json") or "null")
+            outline = json.loads(outline_json_for_gate or "null")
         except (TypeError, ValueError):
             outline = None
     ep.pop("storyboard_outline_json", None)
@@ -3808,8 +3814,14 @@ def episode_detail(episode_id: str, view: str | None = None):
             s["continuity_degraded"] = False
     ep["shots"] = shots
     if full or view == "board":
+        status_episode = {
+            **ep,
+            # The public response omits the raw JSON, but the shared full gate
+            # must still receive the approved outline readability windows.
+            "storyboard_outline_json": outline_json_for_gate,
+        }
         ep["storyboard_status"] = _storyboard_status_snapshot(
-            ep, shots, ep.get("supervisor"), script,
+            status_episode, shots, ep.get("supervisor"), script,
         )
         if ep["storyboard_status"].pop("_obsolete_policy_repair", False):
             ep["script_error"] = None

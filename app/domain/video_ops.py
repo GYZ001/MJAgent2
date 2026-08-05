@@ -213,9 +213,28 @@ def evaluate_storyboard_for_confirmation(
         if screenplay.narrative_plan is not None:
             from app.narrative import validate_storyboard_narrative
 
+            outline = None
+            try:
+                raw_outline = episode["storyboard_outline_json"]
+            except (KeyError, IndexError, TypeError):
+                raw_outline = getattr(
+                    episode,
+                    "storyboard_outline_json",
+                    None,
+                )
+            if raw_outline:
+                try:
+                    outline = StoryboardOutline.model_validate_json(
+                        raw_outline
+                    )
+                except (TypeError, ValueError):
+                    structural_errors.append(
+                        "[STORYBOARD_OUTLINE_INVALID] 当前分镜大纲无法解析"
+                    )
             structural_errors.extend(validate_storyboard_narrative(
                 board,
                 screenplay,
+                outline=outline,
                 complete=True,
                 expected_scope_id=str(episode["id"]),
             ))
@@ -277,6 +296,7 @@ def evaluate_storyboard_for_confirmation(
         compact_target,
         narrative_authority=narrative_plan is not None,
         narrative_plan=narrative_plan,
+        screenplay=screenplay,
     )
     # 对白构图是视频输入结构，不是审美评分：多人可见、错误景别/运镜会直接改变
     # 参考图和最终画面，必须进入确认硬门禁。动作文字里仍提到画外听者等描述质量

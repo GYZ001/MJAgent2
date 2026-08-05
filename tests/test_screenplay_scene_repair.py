@@ -146,7 +146,7 @@ def test_story_function_patch_targets_only_the_scene_field():
 @pytest.mark.asyncio
 async def test_old_exhausted_checkpoint_resumes_without_second_baseline(monkeypatch):
     from app.evidence import repository as evidence_repository
-    from app.production import screenplay_repair
+    from app.production import screenplay_authority, screenplay_repair
 
     revision = ensure_production_revision(
         episode_id="ep_scene",
@@ -200,11 +200,19 @@ async def test_old_exhausted_checkpoint_resumes_without_second_baseline(monkeypa
             hard_gate_passed=not issues,
             score=90 if issues else 100,
             issues=issues,
+            evidence={
+                "authority_input_fingerprint": "authority-test",
+            },
         )
 
     async def forbidden_baseline(*_args, **_kwargs):
         raise AssertionError("repair resume must not generate a second baseline")
 
+    monkeypatch.setattr(
+        screenplay_authority,
+        "screenplay_authority_fingerprint",
+        lambda *_args, **_kwargs: "authority-test",
+    )
     monkeypatch.setattr(screenplay_repair, "run_screenplay_qa", fake_qa)
     monkeypatch.setattr("app.stages.generate_screenplay_baseline", forbidden_baseline)
     monkeypatch.setattr(

@@ -14344,6 +14344,8 @@ summary:focus-visible,
   background: rgba(255, 255, 255, 0.82);
 }
 .narrative-readiness {
+  position: relative;
+  z-index: 45;
   margin: 12px 0;
 }
 .video-plan-summary {
@@ -14408,6 +14410,11 @@ summary:focus-visible,
 .narrative-calibration-controls > summary {
   cursor: pointer;
   font-weight: 650;
+}
+.narrative-readiness:has(.narrative-calibration-controls[open]) + .board-toolbar {
+  position: relative;
+  z-index: 1;
+  top: auto;
 }
 .narrative-calibration-form {
   display: grid;

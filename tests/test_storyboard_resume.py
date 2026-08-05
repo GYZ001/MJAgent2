@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from app import api, db
 from app.orchestration.engine import WorkflowRecorder
 from app.schemas import EpisodeScreenplay
@@ -123,7 +125,21 @@ def test_resume_storyboard_accepts_needs_edit_checkpoint(tmp_path, monkeypatch) 
     assert conn.execute("SELECT COUNT(*) AS c FROM shots WHERE episode_id='e1'").fetchone()["c"] == 7
 
 
-def test_resume_storyboard_reports_checkpoint_only_progress(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("phase", "validated_prefix_end", "next_shot_no", "expected_total"),
+    [
+        ("PAUSED_EXTERNAL", 4, 5, 10),
+        ("PLANNING_OUTLINE", 0, 1, 0),
+    ],
+)
+def test_resume_storyboard_reports_checkpoint_only_progress(
+    tmp_path,
+    monkeypatch,
+    phase,
+    validated_prefix_end,
+    next_shot_no,
+    expected_total,
+) -> None:
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "storyboard-resume-checkpoint-only.db")
     monkeypatch.setattr(db._local, "conn", None, raising=False)
     db.init_db()
@@ -147,10 +163,10 @@ def test_resume_storyboard_reports_checkpoint_only_progress(tmp_path, monkeypatc
     save_checkpoint(
         SupervisorCheckpoint(
             episode_id="e1",
-            phase="PAUSED_EXTERNAL",
-            validated_prefix_end=4,
-            next_shot_no=5,
-            expected_total=10,
+            phase=phase,
+            validated_prefix_end=validated_prefix_end,
+            next_shot_no=next_shot_no,
+            expected_total=expected_total,
         )
     )
 
@@ -162,6 +178,6 @@ def test_resume_storyboard_reports_checkpoint_only_progress(tmp_path, monkeypatc
 
     result = asyncio.run(api.resume_storyboard("e1"))
 
-    assert result["resumed_from_shot"] == 4
-    assert result["next_shot_no"] == 5
+    assert result["resumed_from_shot"] == validated_prefix_end
+    assert result["next_shot_no"] == next_shot_no
     assert result["checkpoint_only"] is True

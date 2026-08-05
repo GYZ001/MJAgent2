@@ -56,6 +56,10 @@ class AgentLoopPolicy:
     # even though Phase 3 normally records business QA as score-only.  Callers
     # opt those codes into model repair without changing the global QA policy.
     repair_issue_codes: frozenset[str] = field(default_factory=frozenset)
+    # Authority artifacts may not downgrade business blockers to score-only
+    # quality.  Their loop repairs every blocker until the contract passes or
+    # fails closed.
+    repair_all_blockers: bool = False
     # Production Repair：只跑一轮完整生成，无论 QA 是否通过都交出候选给局部 Patch Agent。
     # 禁止再用“重新输出完整 JSON”的修复轮。
     baseline_only: bool = False
@@ -203,7 +207,13 @@ class AgentLoop(Generic[T]):
             targeted_repair_issues = [
                 issue
                 for issue in quality_issues
-                if issue.code in self.policy.repair_issue_codes
+                if (
+                    issue.code in self.policy.repair_issue_codes
+                    or (
+                        self.policy.repair_all_blockers
+                        and issue.severity == IssueSeverity.BLOCKER
+                    )
+                )
             ]
             repair_issues = (
                 [*structural_issues, *targeted_repair_issues]
@@ -336,6 +346,13 @@ class AgentLoop(Generic[T]):
                     issues=blockers,
                     iterations=len(issue_history),
                     artifact_id=last_value_artifact_id,
+                )
+            if self.policy.repair_all_blockers and blockers:
+                raise AgentLoopFailure(
+                    self.stage_key,
+                    blockers,
+                    "authority_blockers_exhausted",
+                    len(issue_history),
                 )
             if last_value_artifact_id:
                 try:

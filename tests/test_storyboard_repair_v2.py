@@ -35,6 +35,7 @@ from app.storyboard_control import request_control
 from app.storyboard_supervisor import (
     STORYBOARD_REPAIR_PLANNER_VERSION,
     SupervisorCheckpoint,
+    _apply_storyboard_planning_target,
     _apply_repair,
     _begin_repair_activation,
     _commit_repair_candidate,
@@ -55,6 +56,31 @@ from app.storyboard_supervisor import (
     run_storyboard_supervisor,
     save_checkpoint,
 )
+
+
+@pytest.mark.parametrize("narrative_authority", [False, True])
+def test_storyboard_planning_target_preserves_published_narrative_duration(
+    repair_db,
+    narrative_authority: bool,
+) -> None:
+    conn, _screenplay_value = repair_db
+    episode_data = dict(
+        conn.execute("SELECT * FROM episodes WHERE id='e1'").fetchone()
+    )
+
+    _apply_storyboard_planning_target(
+        conn,
+        "e1",
+        episode_data,
+        60,
+        narrative_authority=narrative_authority,
+    )
+
+    assert episode_data["target_duration_s"] == 60
+    persisted = conn.execute(
+        "SELECT target_duration_s FROM episodes WHERE id='e1'"
+    ).fetchone()["target_duration_s"]
+    assert persisted == (15 if narrative_authority else 60)
 
 
 @pytest.fixture()

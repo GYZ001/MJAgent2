@@ -20,6 +20,7 @@ from app.production.screenplay_document import (
     rederive_projections,
     screenplay_to_document,
     split_dialogue_chain_by_scene,
+    split_dialogue_turn_by_capacity,
 )
 from app.schemas import EpisodeScreenplay
 
@@ -84,6 +85,18 @@ def apply_patch_operation_to_document(
             or ""
         )
         return split_dialogue_chain_by_scene(document, chain_id=chain_id)
+    if operation.op == "split_dialogue_turn_by_capacity":
+        target = operation.target or {}
+        return split_dialogue_turn_by_capacity(
+            document,
+            chain_id=str(target.get("chain_id") or target.get("id") or ""),
+            turn_index=int(target.get("turn_index") or 0),
+            max_chars=int(
+                (operation.value or {}).get("max_chars")
+                if isinstance(operation.value, dict)
+                else operation.value
+            ),
+        )
     if operation.op in {"replace_field", "add_field"}:
         return apply_field_patch(
             document,

@@ -117,6 +117,43 @@ def test_resolver_fails_closed_on_every_authority_layer_drift(drift: str) -> Non
         resolve_current_screenplay_authority("episode-generic")
 
 
+def test_resolver_recovers_legacy_storyboard_duration_contamination() -> None:
+    _screenplay_value, _artifact, authority = _published_case()
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE episodes SET target_duration_s=60 WHERE id='episode-generic'"
+    )
+    conn.commit()
+
+    resolved = resolve_current_screenplay_authority("episode-generic")
+
+    assert resolved.input_fingerprint == authority.input_fingerprint
+    assert conn.execute(
+        "SELECT target_duration_s FROM episodes WHERE id='episode-generic'"
+    ).fetchone()["target_duration_s"] == 60
+
+
+@pytest.mark.parametrize("extra_drift", [False, True])
+def test_duration_recovery_rejects_non_storyboard_or_combined_drift(
+    extra_drift: bool,
+) -> None:
+    _published_case()
+    conn = db.get_conn()
+    if extra_drift:
+        conn.execute(
+            "UPDATE episodes SET target_duration_s=60,hook='changed' "
+            "WHERE id='episode-generic'"
+        )
+    else:
+        conn.execute(
+            "UPDATE episodes SET target_duration_s=55 WHERE id='episode-generic'"
+        )
+    conn.commit()
+
+    with pytest.raises(ValueError):
+        resolve_current_screenplay_authority("episode-generic")
+
+
 @pytest.mark.asyncio
 async def test_blind_review_rejects_supplied_screenplay_drift_before_model_use() -> None:
     screenplay, artifact, _authority = _published_case()
