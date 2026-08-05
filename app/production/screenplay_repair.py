@@ -1679,6 +1679,178 @@ def _normalize_screenplay_narrative_graph(
             })
             event["proposition_ids"] = normalized
 
+    propositions_by_id = {
+        str(item.get("proposition_id") or ""): item
+        for item in (data.get("propositions") or [])
+        if (
+            isinstance(item, dict)
+            and str(item.get("proposition_id") or "").strip()
+        )
+    }
+    actions_by_id = {
+        str(item.get("action_id") or ""): item
+        for item in (data.get("atomic_actions") or [])
+        if (
+            isinstance(item, dict)
+            and str(item.get("action_id") or "").strip()
+        )
+    }
+    evidence_by_id = {
+        str(item.get("evidence_id") or ""): item
+        for item in (data.get("evidence") or [])
+        if (
+            isinstance(item, dict)
+            and str(item.get("evidence_id") or "").strip()
+        )
+    }
+    events_by_id = {
+        str(item.get("event_id") or ""): item
+        for item in (data.get("events") or [])
+        if (
+            isinstance(item, dict)
+            and str(item.get("event_id") or "").strip()
+        )
+    }
+
+    existing_fact_ids = {
+        str(item.get("fact_id") or "")
+        for item in (data.get("state_facts") or [])
+        if isinstance(item, dict) and str(item.get("fact_id") or "").strip()
+    }
+    missing_effect_ids = {
+        str(fact_id)
+        for event in events_by_id.values()
+        for fact_id in (event.get("effects_add") or [])
+        if str(fact_id or "").strip() not in existing_fact_ids
+    }
+    for missing_fact_id in sorted(missing_effect_ids):
+        producer_events = [
+            event
+            for event in events_by_id.values()
+            if missing_fact_id in (event.get("effects_add") or [])
+        ]
+        producer_actions = [
+            action
+            for action in actions_by_id.values()
+            if missing_fact_id in (action.get("effects_add") or [])
+        ]
+        if len(producer_events) != 1 or len(producer_actions) > 1:
+            continue
+        event = producer_events[0]
+        event_id = str(event.get("event_id") or "")
+        supported = {
+            str(proposition_id)
+            for evidence in evidence_by_id.values()
+            if (
+                isinstance(evidence.get("anchor"), dict)
+                and evidence["anchor"].get("type") == "event"
+                and str(evidence["anchor"].get("id") or "") == event_id
+            )
+            for proposition_id in (
+                evidence.get("supports_proposition_ids") or []
+            )
+            if str(proposition_id or "") in propositions_by_id
+        }
+        candidates = [
+            proposition_id
+            for proposition_id in (event.get("proposition_ids") or [])
+            if proposition_id in supported
+        ]
+        if len(candidates) != 1:
+            continue
+        proposition_id = candidates[0]
+        proposition = propositions_by_id[proposition_id]
+        action = producer_actions[0] if producer_actions else None
+        actors = list((action or {}).get("actor_ids") or [])
+        if len(actors) != 1:
+            continue
+        event_position = list(events_by_id).index(event_id) + 1
+        fact = {
+            "fact_id": missing_fact_id,
+            "proposition_id": proposition_id,
+            "subject_id": actors[0],
+            "predicate_id": str(
+                proposition.get("semantic_identity_key")
+                or f"state-after-{event_id}"
+            ),
+            "value": {
+                "kind": "text",
+                "data": str(proposition.get("canonical_statement") or ""),
+            },
+            "time_scope": f"main@{event_position}",
+            "visibility": "visible",
+            "provenance": "screenplay",
+            "confidence": 1.0,
+        }
+        data.setdefault("state_facts", []).append(fact)
+        existing_fact_ids.add(missing_fact_id)
+        changes.append({
+            "kind": "missing_effect_fact",
+            "id": missing_fact_id,
+            "event_id": event_id,
+            "proposition_id": proposition_id,
+            "subject_id": actors[0],
+        })
+
+    proposition_entities = {
+        proposition_id: {
+            str(entity_id)
+            for entity_id in (item.get("entity_ids") or [])
+            if str(entity_id or "").strip()
+        }
+        for proposition_id, item in propositions_by_id.items()
+    }
+    for belief in data.get("character_beliefs") or []:
+        if not isinstance(belief, dict):
+            continue
+        character_id = str(belief.get("character_id") or "").strip()
+        if not character_id:
+            continue
+        for evidence_id in belief.get("perceived_evidence_ids") or []:
+            evidence = evidence_by_id.get(str(evidence_id))
+            if evidence is None:
+                continue
+            perceivable = list(evidence.get("perceivable_by") or [])
+            if character_id in perceivable:
+                continue
+            supported_entities = {
+                entity_id
+                for proposition_id in (
+                    evidence.get("supports_proposition_ids") or []
+                )
+                for entity_id in proposition_entities.get(
+                    str(proposition_id),
+                    set(),
+                )
+            }
+            anchor = evidence.get("anchor") or {}
+            event = events_by_id.get(str(anchor.get("id") or ""))
+            event_entities = {
+                entity_id
+                for action_id in (
+                    (event or {}).get("action_ids") or []
+                )
+                for entity_id in (
+                    *((actions_by_id.get(str(action_id)) or {}).get(
+                        "actor_ids",
+                    ) or []),
+                    *((actions_by_id.get(str(action_id)) or {}).get(
+                        "target_ids",
+                    ) or []),
+                )
+            }
+            if character_id not in supported_entities | event_entities:
+                continue
+            evidence["perceivable_by"] = [
+                *perceivable,
+                character_id,
+            ]
+            changes.append({
+                "kind": "evidence_perceiver",
+                "id": evidence_id,
+                "character_id": character_id,
+            })
+
     stance_aliases = {
         "accepted": "believed",
         "disbelieved": "rejected",
