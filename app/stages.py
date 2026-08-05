@@ -148,6 +148,41 @@ def _resolve_legacy_story_event_id(
     return matches[0] if len(matches) == 1 else ""
 
 
+def storyboard_shot_authority_context(
+    screenplay: EpisodeScreenplay,
+    brief: StoryboardOutlineShot | None,
+    previous_shot: Shot | None = None,
+) -> dict[str, Any]:
+    """Build the single authority context used by generation and rebound."""
+    return {
+        "outline_story_event_id": (
+            str(brief.story_event_id or "")
+            if brief is not None
+            else ""
+        ),
+        "legacy_story_event_ids": [
+            str(event.event_id or "").strip()
+            for event in (screenplay.events or [])
+            if str(event.event_id or "").strip()
+        ],
+        "outline_narrative_task": (
+            brief.model_dump(mode="json")
+            if brief is not None
+            else None
+        ),
+        "previous_scene_name": (
+            str(previous_shot.scene_name or "")
+            if previous_shot is not None
+            else ""
+        ),
+        "previous_scene_time": (
+            str(previous_shot.scene_time or "")
+            if previous_shot is not None
+            else ""
+        ),
+    }
+
+
 def normalize_storyboard_shot_candidate(
     obj: dict[str, Any],
     *,
@@ -3880,24 +3915,10 @@ source_excerpt 内的双引号必须按 JSON 规范转义，或改用中文引�
             "episode_id": episode.get("id"),
             "episode_no": episode["episode_no"],
             "shot_no": shot_no,
-            "outline_story_event_id": brief.story_event_id if brief is not None else "",
-            "legacy_story_event_ids": [
-                str(event.event_id or "").strip()
-                for event in (screenplay.events or [])
-                if str(event.event_id or "").strip()
-            ],
-            "outline_narrative_task": (
-                brief.model_dump(mode="json")
-                if narrative_authority and brief is not None
-                else None
-            ),
-            "previous_scene_name": (
-                completed_shots[-1].scene_name
-                if completed_shots else ""
-            ),
-            "previous_scene_time": (
-                completed_shots[-1].scene_time
-                if completed_shots else ""
+            **storyboard_shot_authority_context(
+                screenplay,
+                brief if narrative_authority else None,
+                completed_shots[-1] if completed_shots else None,
             ),
         },
         semantic_attempt_id=semantic_attempt_id,

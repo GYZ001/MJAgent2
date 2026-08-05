@@ -5,9 +5,11 @@ from types import SimpleNamespace
 
 from app.domain.video_ops import (ConfirmationEvaluation,
                                   _is_storyboard_terminal_for_confirmation,
+                                  _storyboard_operational_projection_errors,
                                   _storyboard_structural_errors,
                                   evaluate_storyboard_for_confirmation)
-from app.schemas import Bible, Character, Dialogue, EpisodeScreenplay, Shot, Storyboard, World
+from app.schemas import (Bible, Character, Dialogue, EpisodeScreenplay, Shot,
+                         Storyboard, StoryEvent, World)
 from app.validators import validate_storyboard_preserves_key_content
 
 
@@ -83,6 +85,51 @@ def test_structural_gate_accepts_canonical_scene_fields_without_legacy_setting()
     )
 
     assert not any("scene_name" in error for error in errors)
+
+
+def test_operational_projection_is_a_hard_structure_contract() -> None:
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        events=[StoryEvent(event_id="E1")],
+    )
+    invalid = Storyboard(
+        episode_no=1,
+        shots=[
+            _shot(
+                story_event_id="E-1",
+                scene_time="白天",
+                scene_name="办公室",
+                continuity_mode="scene_change",
+                transition="叠化",
+                is_final=False,
+            ),
+            _shot(
+                2,
+                story_event_id="E-1",
+                scene_time="白天",
+                scene_name="办公室",
+                continuity_mode="scene_change",
+                transition="叠化",
+            ),
+        ],
+    )
+
+    errors = _storyboard_operational_projection_errors(
+        invalid,
+        screenplay,
+    )
+
+    assert sum("STORYBOARD_OPERATIONAL_EVENT_ID_INVALID" in e for e in errors) == 2
+    assert any("STORYBOARD_OPERATIONAL_CONTINUITY_INVALID" in e for e in errors)
+
+    for shot in invalid.shots:
+        shot.story_event_id = "E1"
+    invalid.shots[1].continuity_mode = "same_scene_cut"
+    invalid.shots[1].transition = "硬切"
+    assert _storyboard_operational_projection_errors(
+        invalid,
+        screenplay,
+    ) == []
 
 
 def test_evaluate_is_readonly_and_returns_structured_result():

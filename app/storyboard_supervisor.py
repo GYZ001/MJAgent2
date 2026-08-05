@@ -39,6 +39,7 @@ from app.stages import (
     generate_storyboard_next_shot,
     generate_storyboard_outline,
     normalize_storyboard_shot_candidate,
+    storyboard_shot_authority_context,
 )
 
 SupervisorPhase = Literal[
@@ -2091,8 +2092,11 @@ async def run_storyboard_supervisor(
                     },
                     episode_no=ep_data["episode_no"],
                     shot_no=int(shot.shot_no),
-                    outline_story_event_id=brief.story_event_id or "",
-                    outline_narrative_task=brief.model_dump(mode="json"),
+                    **storyboard_shot_authority_context(
+                        screenplay,
+                        brief,
+                        shots[index - 1] if index > 0 else None,
+                    ),
                 )
                 if not changes:
                     continue

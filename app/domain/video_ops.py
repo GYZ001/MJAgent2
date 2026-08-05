@@ -147,6 +147,57 @@ def _storyboard_structural_errors(storyboard: Storyboard) -> list[str]:
     return errors
 
 
+def _storyboard_operational_projection_errors(
+    storyboard: Storyboard,
+    screenplay: EpisodeScreenplay,
+) -> list[str]:
+    """Validate legacy delivery IDs and adjacent-scene routing as hard structure."""
+    from app.scene_contract import scene_name_of, scene_time_of
+    from app.validators import _scene_time_changed
+
+    legacy_event_ids = {
+        str(event.event_id or "").strip()
+        for event in (screenplay.events or [])
+        if str(event.event_id or "").strip()
+    }
+    errors: list[str] = []
+    for index, shot in enumerate(storyboard.shots):
+        event_id = str(shot.story_event_id or "").strip()
+        if event_id and event_id not in legacy_event_ids:
+            errors.append(
+                "[STORYBOARD_OPERATIONAL_EVENT_ID_INVALID] "
+                f"第 {shot.shot_no} 镜 story_event_id=「{event_id}」"
+                "未映射到 screenplay.events 的唯一事件 ID"
+            )
+        if index == 0:
+            continue
+        previous = storyboard.shots[index - 1]
+        same_scene = (
+            scene_name_of(previous) == scene_name_of(shot)
+            and not _scene_time_changed(
+                scene_time_of(previous),
+                scene_time_of(shot),
+            )
+        )
+        mode = str(shot.continuity_mode or "").strip()
+        if same_scene and mode == "scene_change":
+            errors.append(
+                "[STORYBOARD_OPERATIONAL_CONTINUITY_INVALID] "
+                f"第 {shot.shot_no} 镜与上一镜同场同时却使用 scene_change"
+            )
+        elif not same_scene and mode != "scene_change":
+            errors.append(
+                "[STORYBOARD_OPERATIONAL_CONTINUITY_INVALID] "
+                f"第 {shot.shot_no} 镜已跨场或跨时却使用 {mode or '空模式'}"
+            )
+        if same_scene and mode != "scene_change" and shot.transition != "硬切":
+            errors.append(
+                "[STORYBOARD_OPERATIONAL_TRANSITION_INVALID] "
+                f"第 {shot.shot_no} 镜同场切换必须使用硬切"
+            )
+    return errors
+
+
 def evaluate_storyboard_for_confirmation(
     episode,
     storyboard: Storyboard,
@@ -192,6 +243,13 @@ def evaluate_storyboard_for_confirmation(
     compact_target = _compact_episode_target(actual_total or compact_target)
 
     structural_errors = _storyboard_structural_errors(board)
+    if screenplay is not None and screenplay.narrative_plan is not None:
+        structural_errors.extend(
+            _storyboard_operational_projection_errors(
+                board,
+                screenplay,
+            )
+        )
     stripped = sorted({
         str(change.get("stripped") or "").strip()
         for change in character_changes
