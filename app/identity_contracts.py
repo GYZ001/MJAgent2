@@ -141,22 +141,21 @@ class NarrativeIdentityResolver:
             if bible_name:
                 claimed_bible_names.add(bible_name)
                 character = bible_by_name[bible_name]
-                if (
-                    contract.visual_policy == "canonical"
-                    and _clean(contract.visual_canonical)
-                    != _clean(character.appearance_canonical)
-                ):
-                    raise IdentityContractError(
-                        f"身份合同 {identity_id} 的 canonical 外观与 Bible 不一致"
-                    )
+                visual_policy = "canonical"
+                visual_canonical = _clean(character.appearance_canonical)
+                asset_requirement = "required"
+            else:
+                visual_policy = contract.visual_policy
+                visual_canonical = _clean(contract.visual_canonical)
+                asset_requirement = contract.asset_requirement
             resolved = ResolvedIdentity(
                 identity_id=identity_id,
                 display_name=display_name,
                 asset_name=bible_name or display_name,
                 kind=_clean(contract.kind),
-                visual_policy=contract.visual_policy,
-                visual_canonical=_clean(contract.visual_canonical),
-                asset_requirement=contract.asset_requirement,
+                visual_policy=visual_policy,
+                visual_canonical=visual_canonical,
+                asset_requirement=asset_requirement,
                 voice_ids=tuple(_clean(value) for value in contract.voice_ids),
                 source="narrative_contract",
             )

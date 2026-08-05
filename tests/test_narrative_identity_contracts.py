@@ -172,6 +172,37 @@ def test_resolver_handles_named_transient_collective_and_offscreen_by_policy() -
         resolver.resolve("井下回声", usage="visual")
 
 
+def test_bible_identity_overrides_redundant_model_identity_contract() -> None:
+    screenplay = _screenplay()
+    screenplay.narrative_plan.identity_contracts.append(
+        NarrativeIdentityContract(
+            identity_id="character-lead",
+            display_name="主角",
+            kind="model-declared lead",
+            visual_policy="canonical",
+            visual_canonical="与人物谱冲突的银发白衣外观",
+            asset_requirement="required",
+            voice_ids=["主角"],
+            evidence=_evidence("模型重复声明了人物谱已有角色"),
+        )
+    )
+    screenplay.voice_bible.append(
+        VoiceCanonical(
+            speaker_id="主角",
+            voice_canonical="young lead voice",
+        )
+    )
+
+    resolver = narrative_identity_resolver(_bible(), screenplay)
+    resolved = resolver.resolve("character-lead", usage="visual")
+
+    assert resolved.asset_name == "主角"
+    assert resolved.visual_policy == "canonical"
+    assert resolved.visual_canonical == "黑发青年，深灰长衣，左眉有一道细痕"
+    assert resolved.asset_requirement == "required"
+    assert resolver.resolve("主角", usage="voice").identity_id == "character-lead"
+
+
 def test_character_resolution_updates_contract_display_name_but_keeps_stable_id() -> None:
     screenplay = _screenplay()
 
