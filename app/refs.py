@@ -71,7 +71,7 @@ _NON_STATIC_APPEARANCE_RE = re.compile(
     r"色欲|算计感|侵略感|迂腐|猥琐|含春|撩人|志在必得)",
 )
 _NON_NEUTRAL_CLOTHING_RE = re.compile(
-    r"(?:露肤|低领|深V|透视|镂空|吊带|超短|高开衩)",
+    r"(?:露肤|暴露|低领|深V|透视|镂空|吊带|超短|高开衩)",
     re.IGNORECASE,
 )
 _APPEARANCE_LIST_PREFIX_RE = re.compile(

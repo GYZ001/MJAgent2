@@ -1021,7 +1021,7 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
             stall_rounds=2,
             min_quality_gain=0.03,
             no_gain_rounds=2,
-            allow_warning_candidate=True,
+            allow_warning_candidate=False,
         ),
     )
     bible = await _run_with_agent_loop(

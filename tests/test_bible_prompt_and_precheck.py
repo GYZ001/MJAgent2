@@ -148,7 +148,10 @@ def test_generate_bible_forces_backend_visual_style_prompt(monkeypatch) -> None:
     from app.schemas import Bible, Character, World
     import asyncio
 
+    seen = {}
+
     async def fake_loop(*_args, **_kwargs):
+        seen["allow_warning_candidate"] = _kwargs["loop"].policy.allow_warning_candidate
         return Bible(
             world=World(visual_style_canonical="模型自行写的画风"),
             characters=[
@@ -170,3 +173,4 @@ def test_generate_bible_forces_backend_visual_style_prompt(monkeypatch) -> None:
     assert result.world.visual_style_canonical == (
         "电影级真实质感，现实人物建模，自然光影，细节丰富，东方仙侠风。"
     )
+    assert seen["allow_warning_candidate"] is False
