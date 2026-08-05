@@ -161,11 +161,13 @@
 
 第 i 镜实现第 i 拍。关键变化：
 - `scene_setting` 必须逐字等于剧本表渲染标签（代码校验）→ 时间线与场景标签稳定
-- `continuity_mode` 是真实连续性语义；只有 `action_continuation` 使用上镜尾帧作为视频 0 秒起点。`transition` 存在后一镜上，表示它如何从前一镜进入，并由最终编辑执行
+- `continuity_mode` 保留叙事/剪辑语义；视频工具层另按已发布 `FIRST_LAST_FRAME_MODE` 素材合同决定 0 秒输入。场景内第二镜使用首镜采用视频真实尾帧，第三镜起复用紧邻上一镜静态尾帧。
 - `continuity_state_in/out` 保存场景版本/光线/轴线、人物 look/outfit/手部占用、道具 revision/owner/location/form/text_state；代码从上镜 `out` 继承未改字段
 - `key_dialogues` 优先写入 dialogues；`visible_action + turn + carry` 决定 action_desc 的主动作、局势推进和镜尾落点
 - 声轨纪律（2026-07-25 改：禁止旁白）：分镜只保留真实台词（dialogues）；`narration` 必须为空；禁止内心OS/画外解说。人群嘲讽/恭维写进 action_desc。不能把有对白的剧本压成纯画面卡。
+- 静默镜纪律（v15 新增）：有效 `dialogues/audio_timeline` 为空时，`primary_action/action_desc/first_frame_desc/last_frame_desc` 不得要求人物开口、说完、打招呼、问话或做说话口型；否则确认门和视频提交前门禁同时失败，禁止让视频模型自行补词。
 - 首尾帧纪律（v12 新增）：`first_frame_desc` 与 `last_frame_desc` 必须【同机位、同场景、同构图】，只让人物动作从开始推进到结束；二者不能完全相同（`_too_similar` ≥0.85 会退回），但绝不能变成两个不同的镜头/景别/场景——否则 5~10s 视频在两帧间出现反常识的跳变/形变
+- 首尾帧执行纪律（v15 新增）：执行器必须先解析真实首帧，再把该首帧作为第一张 i2i 种子生成尾帧；尾帧缓存指纹包含首帧 SHA-256。视频 prompt 必须声明首图为 0 秒、尾图为结束时刻，并按反打/反应/角度变化选择连续横摇、弧移或推近，禁止同时出现“固定机位”和“换构图”。
 - 物理与特效纪律（v12 新增，主要进图像/视频 prompt）：动作符合现实物理与人体运动规律，禁止瞬移/穿模/道具凭空出现消失；特效光效服从剧情，日常镜头写实克制、不堆满屏光效，仅高潮/爆发镜头用强特效且不遮挡面部
 - `source_excerpt`：每镜必须带对应小说原文逐字摘录，作为 Seedance 兜底参考，不允许改写成摘要
 - shot.characters ⊇ 该拍在场角色（代码校验）
@@ -319,9 +321,9 @@
 
 ## D. Prompt 编译（确定性代码，非 LLM——列在此处仅为完整性）
 
-### D1. Seedance 结构化连续性提示词合同（`seedance_structured_continuity_v4`）
+### D1. Seedance 结构化连续性提示词合同（`seedance_structured_continuity_v5`）
 
-视频最终 prompt 由 `app.compiler.compile_prompt` 确定性编译，合同版本写入 `prompt_contract_version=seedance_structured_continuity_v4`。核心输入是 `continuity_mode`、自然语言状态链与可比较的 `continuity_state_in/out`；仅 `action_continuation` 可使用上一镜尾帧作为 0 秒起点，其余模式必须重新构图。
+视频最终 prompt 由 `app.compiler.compile_prompt` 确定性编译，合同版本写入 `prompt_contract_version=seedance_structured_continuity_v5`。核心输入是叙事 `continuity_mode`、已发布视频模式、首帧来源、镜间关系、自然语言状态链与可比较的 `continuity_state_in/out`。`FIRST_LAST_FRAME_MODE` 以实际输入首帧覆盖文本起点，并新增 `FIRST-LAST CONTINUOUS PATH`，不得再按 `same_scene_cut` 输出“不要沿用上一镜尾帧”的冲突指令。
 
 最终 prompt 固定包含 FORMAT、REFERENCE ROLES、START STATE、ONE CURRENT ACTION、END STATE、STRUCTURED CONTINUITY、AUDIO TIMELINE、ON-SCREEN TEXT、DO NOT 等段落。`required_text.strategy=deterministic_insert` 时，原始视频明确禁字，精确中文由终剪渲染；转场也只由 final_edit 执行，避免双重转场。`source_excerpt` 只作为上游改编证据与校验依据，禁止进入 Seedance 最终 prompt。
 
