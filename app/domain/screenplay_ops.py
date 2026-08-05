@@ -440,7 +440,15 @@ def recover_screenplay_tasks() -> int:
     rows = conn.execute(
         """SELECT e.*
              FROM episodes e
-            WHERE e.screenplay_status='running'
+            WHERE (
+                    e.screenplay_status='running'
+                    AND COALESCE(e.screenplay_error, '') NOT LIKE 'CANCELLING:%'
+                    AND NOT EXISTS(
+                        SELECT 1 FROM workflow_runs cancelled
+                         WHERE cancelled.id=e.active_screenplay_run_id
+                           AND cancelled.status IN ('CANCELLED','CANCELLING')
+                    )
+                  )
                OR (
                     e.screenplay_status='repairing'
                     AND EXISTS(
@@ -1937,13 +1945,19 @@ async def cancel_screenplay(episode_id: str):
             "requested_at": requested_at,
             "message": "worker 尚未返回终态，系统将继续观察，未宣称已停止",
         }
-    fallback = _screenplay_fallback_status(ep)
-    retained = bool(ep.get("screenplay_json"))
-    conn.execute(
+    latest = dict(_episode_or_404(episode_id))
+    fallback = _screenplay_fallback_status(latest)
+    retained = bool(
+        latest.get("screenplay_json")
+        or latest.get("working_screenplay_artifact_id")
+    )
+    cursor = conn.execute(
         "UPDATE episodes SET screenplay_status=?, screenplay_error=NULL, screenplay_updated_at=?, "
         "active_screenplay_run_id=NULL, screenplay_snapshot_version=screenplay_snapshot_version+1 "
-        "WHERE id=?",
-        (fallback, now(), episode_id))
+        "WHERE id=? AND (active_screenplay_run_id=? OR active_screenplay_run_id IS NULL)",
+        (fallback, now(), episode_id, run_id))
+    if cursor.rowcount != 1:
+        raise HTTPException(409, "剧本任务已被新的运行接管，未覆盖其状态")
     conn.commit()
     return {
         "status": fallback,
@@ -2085,6 +2099,12 @@ async def edit_screenplay(episode_id: str, body: dict):
     if routed is not None:
         return routed
     ep = dict(_episode_or_404(episode_id))
+    if _screenplay_task_active(episode_id):
+        raise HTTPException(409, {
+            "code": "screenplay_task_active",
+            "message": "剧本流程正在运行；请先停止并等待任务退出，再发布人工草稿",
+            "run_id": ep.get("active_screenplay_run_id"),
+        })
     current_version = ep.get("screenplay_artifact_id") or ""
     if expected_version is not None and str(expected_version) != str(current_version):
         current_script = _load_screenplay(ep)

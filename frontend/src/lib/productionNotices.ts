@@ -11,6 +11,7 @@ type ScreenplayNoticeInput = {
   screenplay_production?: {
     task_active?: boolean
     can_resume_repair?: boolean
+    phase_label?: string
   } | null
 }
 
@@ -39,6 +40,12 @@ export function screenplayTaskNotice(
   if (episode.screenplay_production?.task_active) return null
 
   if (episode.screenplay_status === 'failed') {
+    if (episode.screenplay_production?.can_resume_repair) {
+      return {
+        severity: 'warning',
+        message: `${episode.screenplay_production.phase_label ?? '剧本流程'}已暂停；${message}`,
+      }
+    }
     return { severity: 'error', message }
   }
 

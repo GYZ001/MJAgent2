@@ -139,9 +139,15 @@ def _required_exact_score_only(
         raise ValueError(
             f"完成凭证的 {evaluator_name} evaluator_version 与当前契约不匹配"
         )
-    if row["evaluation_role"] != "score_only" or bool(row["runtime_blocking"]):
+    score_only = (
+        row["evaluation_role"] == "score_only"
+        and not bool(row["runtime_blocking"])
+    )
+    legacy_gate = _is_passing_runtime_gate(row)
+    if not score_only and not legacy_gate:
         raise ValueError(
             f"完成凭证的 {evaluator_name} 必须是非阻断的 score_only 评分"
+            "或历史已通过的 runtime gate"
         )
     return row
 

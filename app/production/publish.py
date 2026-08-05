@@ -62,8 +62,16 @@ def publish_screenplay(
         for row in qa_rows:
             if (
                 row["evaluator_name"] != "screenplay_production_qa"
-                or row["evaluation_role"] != "score_only"
-                or bool(row["runtime_blocking"])
+                or not (
+                    (
+                        row["evaluation_role"] == "score_only"
+                        and not bool(row["runtime_blocking"])
+                    )
+                    or (
+                        row["evaluation_role"] == "runtime_gate"
+                        and bool(row["runtime_blocking"])
+                    )
+                )
             ):
                 continue
             try:

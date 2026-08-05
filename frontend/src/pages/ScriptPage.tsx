@@ -705,9 +705,29 @@ export default function ScriptPage() {
           </div>
         </div>
 
+        {ep.screenplay_production?.stages?.length ? (
+          <ol className="screenplay-stage-rail" aria-label="剧本制作阶段">
+            {ep.screenplay_production.stages.map((stage, index) => (
+              <li key={stage.key} data-status={stage.status}
+                aria-current={stage.status === 'in_progress' || stage.status === 'paused' ? 'step' : undefined}>
+                <i>{stage.status === 'completed' ? '✓' : index + 1}</i>
+                <span>{stage.label}</span>
+                <small>{
+                  stage.status === 'completed' ? '已完成'
+                    : stage.status === 'in_progress' ? '进行中'
+                      : stage.status === 'paused' ? '已暂停'
+                        : '待开始'
+                }</small>
+              </li>
+            ))}
+          </ol>
+        ) : null}
+
         <div className="screenplay-secondary-row">
           {ep.screenplay && !editing && (
-            <button className="btn" disabled={busy} onClick={() => beginEditing()}>手工编辑全文</button>
+            <button className="btn" disabled={busy || screenplayTaskActive}
+              title={screenplayTaskActive ? '剧本流程运行中，完成或停止后才能编辑已发布版本' : undefined}
+              onClick={() => beginEditing()}>手工编辑全文</button>
           )}
           {editing && (
             <>
@@ -847,11 +867,11 @@ export default function ScriptPage() {
             <div className="kv"><b>原文来源范围</b>{script?.source_text_range || sourceRangeText(ep.source_chapters)}{!script?.source_text_range && <em>推断显示</em>}</div>
             <div className="kv"><b>目标时长</b>{ep.target_duration_s}s</div>
             <div className="kv"><b>状态快照</b>v{ep.screenplay_state?.version ?? 0} · {ep.screenplay_state?.code ?? 'unknown'}</div>
-            {ep.screenplay_production?.operation === 'finalize' && (
-              <div className="kv"><b>修复统计</b>
-                已启动 {ep.screenplay_production.activation_count ?? 0} 轮 ·
-                已应用 {ep.screenplay_production.patch_count ?? 0} 个补丁 ·
-                待处理 {ep.screenplay_production.open_issue_count ?? 0} 项
+            {ep.screenplay_production && (
+              <div className="kv"><b>当前阶段</b>
+                {ep.screenplay_production.phase_label ?? ep.screenplay_production.phase} ·
+                第 {(ep.screenplay_production.stage_index ?? 0) + 1}/
+                {ep.screenplay_production.stage_count ?? ep.screenplay_production.stages?.length ?? 1} 段
               </div>
             )}
           </div>
