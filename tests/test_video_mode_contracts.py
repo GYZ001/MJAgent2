@@ -1,5 +1,4 @@
 import asyncio
-import json
 import pytest
 import sqlite3
 from types import SimpleNamespace

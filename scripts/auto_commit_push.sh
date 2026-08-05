@@ -52,7 +52,12 @@ if ! git add -A; then
 fi
 
 if git diff --cached --quiet --exit-code; then
-  log "No changes to commit"
+  pending_commits=$(git rev-list --count "$REMOTE/$BRANCH..HEAD" 2>/dev/null || printf '1')
+  if [ "$pending_commits" -eq 0 ]; then
+    log "No changes to commit or push"
+    exit 0
+  fi
+  log "No new changes; retrying $pending_commits pending commit(s)"
 else
   author_name=$(git log -1 --format='%an' 2>/dev/null || true)
   author_email=$(git log -1 --format='%ae' 2>/dev/null || true)

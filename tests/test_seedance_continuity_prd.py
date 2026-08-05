@@ -137,6 +137,20 @@ def test_silent_prompt_explicitly_forbids_speech_and_lip_motion() -> None:
     assert "不得自行补充问候、应答、语气词" in prompt
 
 
+def test_silent_nonverbal_response_may_reference_an_existing_request() -> None:
+    shot = _shot(
+        action_desc="林风听完苏婉的请求后点头，起身走向山门。",
+        primary_action="林风以点头答应请求，随后起身走向山门。",
+        first_frame_desc="林风坐在石阶上看向苏婉，双手撑住膝盖。",
+        last_frame_desc="同一机位，林风已经起身走到山门铜环前。",
+    )
+
+    assert not any(
+        "自行发明台词" in error
+        for error in preflight_seedance_gates(shot)
+    )
+
+
 def test_first_last_prompt_uses_real_boundary_contract_and_moving_camera() -> None:
     shot = _shot(
         shot_no=3,
