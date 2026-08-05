@@ -19,12 +19,16 @@ from app.schemas import (
     AudioTimelineItem,
     KeyDialogueChain,
     KeyDialogueTurn,
+    NarrativeEvent,
     StoryboardOutline,
     StoryboardOutlineShot,
     TargetDelta,
 )
 from app.spoken_contract import content_char_count
-from app.validators import validate_dialogue_chains
+from app.validators import (
+    outline_key_line_speaker_errors,
+    validate_dialogue_chains,
+)
 from tests.test_narrative_continuity import _board, _screenplay
 
 
@@ -73,6 +77,148 @@ def test_narrative_outline_projects_graph_owned_fields_deterministically() -> No
         complete=True,
         expected_scope_id="episode-generic",
     ) == []
+
+
+def test_narrative_outline_splits_dialogue_when_speaker_changes() -> None:
+    screenplay = _screenplay()
+    screenplay.dialogue_chains = [
+        KeyDialogueChain(
+            chain_id="DC1",
+            topic="Alternating speakers",
+            turns=[
+                KeyDialogueTurn(
+                    speaker="character-1",
+                    line="The first speaker states the observable result.",
+                    source_text="The first speaker states the observable result.",
+                ),
+                KeyDialogueTurn(
+                    speaker="character-2",
+                    line="The second speaker responds from the reverse angle.",
+                    source_text="The second speaker responds from the reverse angle.",
+                ),
+            ],
+        )
+    ]
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                scene_id="SC-generic",
+                story_event_id="E-1",
+                event_ids=["E-1"],
+                beat="The declared event becomes visible.",
+                covers="The observable result is delivered.",
+                duration_s=5,
+            )
+        ],
+    )
+
+    changes = normalize_narrative_storyboard_outline(
+        outline,
+        screenplay,
+    )
+
+    dialogue_shots = [
+        shot for shot in outline.shots if shot.key_line_ids
+    ]
+    assert changes
+    assert [shot.key_line_ids for shot in dialogue_shots] == [
+        ["KL01"],
+        ["KL02"],
+    ]
+    assert [shot.audio_cast for shot in dialogue_shots] == [
+        ["character-1"],
+        ["character-2"],
+    ]
+    assert outline_key_line_speaker_errors(outline, screenplay) == []
+
+
+def test_narrative_outline_keeps_coarse_snapshot_until_later_deadline() -> None:
+    screenplay = _screenplay()
+    plan = screenplay.narrative_plan
+    plan.events.append(NarrativeEvent(
+        event_id="E-2",
+        proposition_ids=["P-story"],
+        delivery_scope_id="episode-generic",
+        primary_delivery_window_id="RW-2",
+    ))
+    cold_path = next(
+        path
+        for path in plan.experience_intents[0].audience_paths
+        if path.audience_prior_id == "AP-cold"
+    )
+    cold_path.target_deltas.append(TargetDelta(
+        target_delta_id="XD-cold-late-affect",
+        dimension="affective",
+        description="The later event changes the final affective state.",
+        from_state={"affective_state": {}},
+        to_state={"affective_state": {"registration": "settled"}},
+        required_processing_s=1.0,
+        deadline_event_id="E-2",
+        primary_delivery_window_id="RW-2",
+    ))
+    cold_out = next(
+        state
+        for state in plan.audience_states
+        if state.audience_state_id
+        == cold_path.audience_state_out_target_id
+    )
+    cold_out.affective_state = {"registration": "settled"}
+    later_window = plan.readability_windows[0].model_copy(deep=True)
+    later_window.readability_window_id = "RW-2"
+    later_window.event_ids = ["E-2"]
+    later_window.target_delta_ids = ["XD-cold-late-affect"]
+    later_window.shot_ids = ["SH002"]
+    plan.readability_windows.append(later_window)
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                scene_id="SC-generic",
+                event_ids=["E-1"],
+                story_event_id="E-1",
+                beat="The first event is delivered.",
+                covers="The first event becomes observable.",
+            ),
+            StoryboardOutlineShot(
+                shot_no=2,
+                scene_id="SC-generic",
+                event_ids=["E-2"],
+                story_event_id="E-2",
+                beat="The later event changes the final audience state.",
+                covers="The later affective result becomes observable.",
+            ),
+        ],
+    )
+
+    changes = normalize_narrative_storyboard_outline(
+        outline,
+        screenplay,
+    )
+    errors = validate_storyboard_narrative(
+        None,
+        screenplay,
+        outline=outline,
+        complete=True,
+        expected_scope_id="episode-generic",
+    )
+
+    assert changes
+    cold_paths = [
+        path
+        for shot in outline.shots
+        for path in shot.audience_state_paths
+        if path.audience_prior_id == "AP-cold"
+    ]
+    assert cold_paths[0].audience_state_in_id == "AS-cold-in"
+    assert cold_paths[0].audience_state_out_target_id == "AS-cold-in"
+    assert cold_paths[-1].audience_state_out_target_id == "AS-cold-out"
+    assert not any(
+        "SHOT_TARGET_TO_STATE_MISMATCH" in error
+        for error in errors
+    )
 
 
 def _screenplay_needing_staged_audience_state():
