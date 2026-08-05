@@ -297,6 +297,7 @@ export default function App() {
   const agentToggleRef = useRef<HTMLButtonElement | null>(null);
   const restoreAgentFocusRef = useRef(false);
   const toastTimerRef = useRef<number>();
+  const projectsRetryTimerRef = useRef<number>();
   const spineRef = useRef<HTMLElement | null>(null);
   const workspaceSwitcherRef = useRef<HTMLDivElement | null>(null);
   const closeMobileNav = useCallback(() => setMobileNavOpen(false), []);
@@ -338,15 +339,28 @@ export default function App() {
   }, [projectSwitcherOpen]);
 
   const refreshProjects = useCallback(() => {
+    if (projectsRetryTimerRef.current) {
+      window.clearTimeout(projectsRetryTimerRef.current);
+      projectsRetryTimerRef.current = undefined;
+    }
     void api.get("/projects").then((items: Project[]) => {
       setProjects(items);
       setProjectsLoaded(true);
-    }).catch(() => setProjectsLoaded(true));
+    }).catch(() => {
+      setProjectsLoaded(true);
+      projectsRetryTimerRef.current = window.setTimeout(refreshProjects, 2000);
+    });
   }, []);
   useEffect(() => {
     refreshProjects();
     window.addEventListener("manju:projects-changed", refreshProjects);
-    return () => window.removeEventListener("manju:projects-changed", refreshProjects);
+    return () => {
+      window.removeEventListener("manju:projects-changed", refreshProjects);
+      if (projectsRetryTimerRef.current) {
+        window.clearTimeout(projectsRetryTimerRef.current);
+        projectsRetryTimerRef.current = undefined;
+      }
+    };
   }, [refreshProjects]);
   useEffect(() => {
     if (!projectsLoaded || !initialWasRootRef.current) return;
