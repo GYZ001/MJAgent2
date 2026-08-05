@@ -1183,6 +1183,62 @@ async def _storyboard_task(
             payload={"episode_id": episode_id, "episode_no": ep["episode_no"], **(payload or {})},
         )
 
+    def _restore_misclassified_published_artifact(board: Storyboard) -> bool:
+        artifact_id = str(ep["published_storyboard_artifact_id"] or "")
+        certificate_id = str(ep["storyboard_completion_certificate_id"] or "")
+        revision_id = str(ep["storyboard_production_revision_id"] or "")
+        if not artifact_id or not certificate_id or not revision_id:
+            return False
+        artifact = evidence_repository.get_artifact(artifact_id)
+        if artifact is None or artifact.get("status") != "stale":
+            return False
+        certificate = conn.execute(
+            "SELECT * FROM completion_certificates WHERE id=?",
+            (certificate_id,),
+        ).fetchone()
+        revision = conn.execute(
+            "SELECT * FROM production_revisions WHERE id=?",
+            (revision_id,),
+        ).fetchone()
+        if (
+            certificate is None
+            or revision is None
+            or certificate["kind"] != "storyboard"
+            or certificate["scope_id"] != episode_id
+            or certificate["artifact_id"] != artifact_id
+            or certificate["production_revision_id"] != revision_id
+            or revision["status"] != "published"
+            or revision["published_artifact_id"] != artifact_id
+            or artifact.get("scope_type") != "episode"
+            or artifact.get("scope_id") != episode_id
+        ):
+            return False
+        current_hash = evidence_repository.content_hash(
+            artifact.get("content"),
+            artifact.get("file_path"),
+        )
+        if (
+            current_hash != artifact.get("content_hash")
+            or current_hash != certificate["artifact_hash"]
+        ):
+            return False
+        from app.narrative import storyboard_authority_projection
+
+        if (
+            storyboard_authority_projection(board)
+            != storyboard_authority_projection(artifact.get("content") or {})
+        ):
+            return False
+        updated = conn.execute(
+            """UPDATE artifacts
+                  SET status='approved',stale_reason=NULL,
+                      superseded_by_artifact_id=NULL
+                WHERE id=? AND status='stale'""",
+            (artifact_id,),
+        )
+        conn.commit()
+        return updated.rowcount == 1
+
     try:
         if ep["screenplay_status"] != "ready" or not ep["screenplay_json"]:
             raise StageError("分镜脚本", ["请先生成并确认本集可拍剧本，再展开分镜"])
@@ -1208,6 +1264,15 @@ async def _storyboard_task(
                 (episode_id,),
             ).fetchall()
             board = _board_from_shot_rows(rows, ep["episode_no"])
+            if _restore_misclassified_published_artifact(board):
+                _preflight_event(
+                    "STORYBOARD_PUBLISHED_ARTIFACT_STATUS_RESTORED",
+                    "已按完成凭证、发布 revision 与当前投影恢复正式分镜状态",
+                    payload={
+                        "artifact_id": ep["published_storyboard_artifact_id"],
+                    },
+                    severity="warning",
+                )
             from app.production.certificate import (
                 verify_completion_certificate,
                 verify_current_storyboard_completion_authority,

@@ -63,6 +63,9 @@ class AgentLoopPolicy:
     # Production Repair：只跑一轮完整生成，无论 QA 是否通过都交出候选给局部 Patch Agent。
     # 禁止再用“重新输出完整 JSON”的修复轮。
     baseline_only: bool = False
+    # Isolated repair candidates must not supersede approved upstream artifacts
+    # before their enclosing transaction passes the full gate.
+    commit_accepted_artifact: bool = True
 
 
 @dataclass(slots=True)
@@ -354,7 +357,7 @@ class AgentLoop(Generic[T]):
                     "authority_blockers_exhausted",
                     len(issue_history),
                 )
-            if last_value_artifact_id:
+            if last_value_artifact_id and self.policy.commit_accepted_artifact:
                 try:
                     repository.commit_artifact(
                         None,
@@ -473,6 +476,9 @@ class AgentLoop(Generic[T]):
             evidence={"iteration_no": iteration_no, "goal": self.goal},
         )
         if accepted_candidate:
+            if not self.policy.commit_accepted_artifact:
+                create_evaluation(artifact["id"], evaluation, step_run_id=step_run_id)
+                return str(artifact["id"])
             committed = repository.commit_artifact(step_run_id, artifact["id"], [evaluation])
             return str(committed["id"])
         repository.create_evaluation(artifact["id"], evaluation, step_run_id=step_run_id)

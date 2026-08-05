@@ -1456,22 +1456,68 @@ def normalize_screenplay_dialogue_chains(script: EpisodeScreenplay) -> EpisodeSc
                 for other_index, other in enumerate(turns)
                 if _condense(other.source_text)
             )
-            if (
-                allowed_speakers
-                and speaker not in allowed_speakers
-                and duplicate_source
+            source_contains_line = bool(
+                _condense(turn.line)
+                and _condense(turn.line) in source
+            )
+            if duplicate_source and (
+                (
+                    allowed_speakers
+                    and speaker not in allowed_speakers
+                )
+                or (
+                    speaker == "旁白"
+                    and not source_contains_line
+                )
             ):
                 line = str(turn.line or "").strip()
                 for separator in ("：", ":"):
                     dialogue_line = f"{speaker}{separator}{line}"
                     if dialogue_line in (script.full_script_text or ""):
+                        replacement = (
+                            line
+                            if speaker == "旁白"
+                            else f"{speaker.rstrip('，,。；; ')}，{line}"
+                        )
                         script.full_script_text = script.full_script_text.replace(
                             dialogue_line,
-                            f"{speaker.rstrip('，,。；; ')}，{line}",
+                            replacement,
                         )
                 continue
             normalized_turns.append(turn)
         chain.turns = normalized_turns
+    merged_chains = []
+    for chain in script.dialogue_chains:
+        if merged_chains:
+            previous = merged_chains[-1]
+            previous_topic = re.sub(
+                r"[（(]\s*续\s*[）)]\s*$",
+                "",
+                str(previous.topic or "").strip(),
+            )
+            current_topic = re.sub(
+                r"[（(]\s*续\s*[）)]\s*$",
+                "",
+                str(chain.topic or "").strip(),
+            )
+            first_function = (
+                str(chain.turns[0].function or "").strip()
+                if chain.turns else ""
+            )
+            if (
+                previous_topic
+                and previous_topic == current_topic
+                and first_function == "response"
+                and len(previous.turns) + len(chain.turns)
+                <= DIALOGUE_CHAIN_TURNS_HARD_MAX
+            ):
+                previous.turns = [
+                    *previous.turns,
+                    *chain.turns,
+                ]
+                continue
+        merged_chains.append(chain)
+    script.dialogue_chains = merged_chains
     flattened: list[str] = []
     for chain in script.dialogue_chains:
         for turn in chain.turns or []:

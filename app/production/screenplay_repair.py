@@ -3028,6 +3028,28 @@ def _normalize_dialogue_chain_continuity(
 
     if not source_text or not script.dialogue_chains:
         return []
+    changes: list[dict[str, Any]] = []
+    from app.validators import source_dialogue_fragments
+
+    source_dialogues = source_dialogue_fragments(source_text)
+    first_turn = (
+        script.dialogue_chains[0].turns[0]
+        if script.dialogue_chains[0].turns else None
+    )
+    if first_turn is not None and source_dialogues:
+        opening = source_dialogues[0]
+        matched = _unique_source_dialogue(first_turn.line or "", source_text)
+        if (
+            matched == opening
+            and (first_turn.source_text or "").strip() != opening
+        ):
+            changes.append({
+                "kind": "opening_dialogue_source",
+                "id": f"{script.dialogue_chains[0].chain_id}-T1",
+                "from": (first_turn.source_text or "").strip(),
+                "to": opening,
+            })
+            first_turn.source_text = opening
     document = screenplay_to_document(script)
     observed: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
@@ -3060,7 +3082,6 @@ def _normalize_dialogue_chain_continuity(
                 "source_position": source_text.find(source_dialogue),
             })
 
-    changes: list[dict[str, Any]] = []
     for chain in script.dialogue_chains:
         turns = list(chain.turns or [])
         if len(turns) >= DIALOGUE_CHAIN_TURNS_HARD_MAX:

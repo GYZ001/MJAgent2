@@ -3626,6 +3626,7 @@ source_excerpt 内的双引号必须按 JSON 规范转义，或改用中文引�
             allow_warning_candidate=False,
             repair_issue_codes=frozenset(),
             repair_all_blockers=False,
+            commit_accepted_artifact=semantic_attempt_id is None,
         ),
     )
     draft = await _run_with_agent_loop(
