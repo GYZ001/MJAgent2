@@ -477,7 +477,11 @@ class AgentLoop(Generic[T]):
         )
         if accepted_candidate:
             if not self.policy.commit_accepted_artifact:
-                create_evaluation(artifact["id"], evaluation, step_run_id=step_run_id)
+                repository.create_evaluation(
+                    artifact["id"],
+                    evaluation,
+                    step_run_id=step_run_id,
+                )
                 return str(artifact["id"])
             committed = repository.commit_artifact(step_run_id, artifact["id"], [evaluation])
             return str(committed["id"])

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -495,16 +496,24 @@ def register_initial_scene_ref(conn, project_id: str, name: str, image_path: str
 
 
 def scene_ref_exists(conn, project_id: str, name: str) -> bool:
-    """该场景是否已有一张落盘可用的场景图（已登记 scene_references 且文件还在）。
-    批量出图据此跳过已生成的场景，使按钮可幂等重复点击。"""
+    """Whether a complete current scene pack exists."""
+    from app.multiview import (
+        list_scene_views,
+        scene_multiview_enabled,
+        scene_pack_is_usable,
+    )
+
     rows = conn.execute(
         "SELECT * FROM scene_references WHERE project_id=? AND scene_name=?",
         (project_id, name)).fetchall()
-    existing = [r for r in rows if r["image_path"] and Path(r["image_path"]).exists()]
-    if not existing:
-        return False
-    # 主图已经是可交付产物；多视角补齐失败不能让幂等重跑再次烧图。
-    return True
+    for row in rows:
+        if not (row["image_path"] and Path(row["image_path"]).exists()):
+            continue
+        if not scene_multiview_enabled():
+            return True
+        if scene_pack_is_usable(row, list_scene_views(row["id"], conn=conn)):
+            return True
+    return False
 
 
 def _scene_gate_evaluations(artifact_id: str) -> list[dict]:
@@ -1164,14 +1173,11 @@ def scene_ref_for_episode(project_id: str, name: str, episode_no: int | None) ->
         "WHERE project_id=? AND scene_name=? AND ep_start<=? AND (ep_end IS NULL OR ep_end>=?) "
         "ORDER BY ep_start DESC LIMIT 1", (project_id, name, ep, ep)).fetchone()
     if row:
-        from app.multiview import (
-            list_scene_views, scene_multiview_enabled, scene_pack_is_usable, scene_primary_is_usable,
-        )
+        from app.multiview import list_scene_views, scene_multiview_enabled, scene_pack_is_usable
         views = list_scene_views(row["id"], conn=conn)
         usable = (
             not scene_multiview_enabled()
             or scene_pack_is_usable(row, views)
-            or scene_primary_is_usable(row, views)
         )
     else:
         usable = False
@@ -1235,6 +1241,7 @@ async def generate_scene_refs(
     only_scene: str | list[str] | None = None,
     *,
     resume: bool = False,
+    operation_started_at: float | None = None,
 ) -> None:
     """为项目全部（或指定）场景生成定场图，写回 bible_json 的 scenes[*].ref_image_path。"""
     conn = get_conn()
@@ -1418,16 +1425,29 @@ async def generate_scene_refs(
                 ))
                 prompt = retry_prompt or base_prompt
                 try:
+                    call_meta = {
+                        "asset_kind": "scene_reference",
+                        "scene_name": sc.name,
+                        "episode_no": 1,
+                        "scene_ref_mode": "initial",
+                        "attempt": attempt,
+                    }
+                    if operation_started_at is not None:
+                        operation_material = (
+                            f"{project_id}:{operation_started_at}:{sc.name}:"
+                            f"scene_reference:{attempt}"
+                        )
+                        call_meta.update({
+                            "operation_id": "op_scene_reference_" + hashlib.sha256(
+                                operation_material.encode("utf-8")
+                            ).hexdigest()[:32],
+                            "reuse_successful_operation": True,
+                        })
                     item = await _generate_scene_image(
                         prompt,
                         retry_seed,
-                        call_meta={
-                            "asset_kind": "scene_reference",
-                            "scene_name": sc.name,
-                            "episode_no": 1,
-                            "scene_ref_mode": "initial",
-                            "attempt": attempt,
-                        })
+                        call_meta=call_meta,
+                    )
                     await _save_image_item(item, path)
                     # ``record_reference_asset`` 会物理删除硬失败候选。先在
                     # 内存中保留一次纠偏编辑所需的输入，不让失败文件落盘滞留。
@@ -1508,11 +1528,10 @@ async def generate_scene_refs(
                             conn, project_id, sc.name, path, sc.scene_canonical,
                             prompt, qa, bible_version, artifact_id=artifact["id"],
                         )
-                    # 初始场景多视角资产包有界补齐；耗尽后发布主图与已有视角。
+                    # The candidate is publishable only after its required views exist.
                     from app.multiview import (
                         ensure_scene_multiview_pack, scene_multiview_enabled, pack_result_ok,
                     )
-                    pack_fallback = False
                     if scene_multiview_enabled():
                         pack = await ensure_scene_multiview_pack(
                             project_id=project_id,
@@ -1525,12 +1544,9 @@ async def generate_scene_refs(
                             optional_views=[role for role in (sc.required_views or []) if role == "action_zone"],
                         )
                         if not pack_result_ok(pack):
-                            pack_fallback = True
-                            conn.execute(
-                                "UPDATE scene_references SET pack_status='partial_fallback' WHERE id=?",
-                                (scene_id,),
+                            raise ContentGenerationError(
+                                f"场景多视角资产包结构不完整：{sc.name}"
                             )
-                            conn.commit()
                     if is_atomic_replacement and old_current:
                         # 完整包已通过：先把旧当前版本移入新的历史槽，再把候选切为当前。
                         minimum = conn.execute(
@@ -1548,17 +1564,14 @@ async def generate_scene_refs(
                         )
                         adoption_change = {
                             "change_type": "pack_regeneration", "previous_version_id": old_current["id"],
-                            "adoption_reason": (
-                                "多视角补齐重试耗尽后采用当前最佳产物"
-                                if pack_fallback else "付费整包重生完成"
-                            ),
-                            "adopted_at": now(), "gate_retry_exhausted": pack_fallback,
+                            "adoption_reason": "付费整包重生完成",
+                            "adopted_at": now(), "gate_retry_exhausted": False,
                         }
                         if "change_json" in cols:
                             conn.execute(
                                 "UPDATE scene_references SET ep_start=?,ep_end=NULL,pack_status=?,"
                                 "change_json=? WHERE id=?",
-                                (adopted_start, "partial_fallback" if pack_fallback else "ready",
+                                (adopted_start, "ready",
                                  json.dumps(adoption_change, ensure_ascii=False), scene_id),
                             )
                         else:
@@ -1567,7 +1580,6 @@ async def generate_scene_refs(
                                 (adopted_start, scene_id),
                             )
                         conn.commit()
-                    # 主场景图技术可用即发布；多视角补齐耗尽时保留当前最佳产物。
                     sc.ref_image_path = path
                     break
                 except asyncio.CancelledError:

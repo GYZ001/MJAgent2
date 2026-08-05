@@ -319,22 +319,30 @@ def _start_scene_refs_generation(
         return False
     conn = get_conn()
     previous = conn.execute(
-        "SELECT scene_refs_status,scene_refs_error,scene_refs_target FROM projects WHERE id=?",
+        "SELECT scene_refs_status,scene_refs_error,scene_refs_target,"
+        "scene_refs_batch_started_at FROM projects WHERE id=?",
         (project_id,),
     ).fetchone()
+    batch_started_at = (
+        previous["scene_refs_batch_started_at"]
+        if resume and previous and previous["scene_refs_batch_started_at"] is not None
+        else now()
+    )
     target_payload = (
         json.dumps(only_scene, ensure_ascii=False)
         if isinstance(only_scene, list) else only_scene
     )
     conn.execute(
-        "UPDATE projects SET scene_refs_status='running', scene_refs_error=NULL, scene_refs_target=? WHERE id=?",
-        (target_payload, project_id))
+        "UPDATE projects SET scene_refs_status='running', scene_refs_error=NULL,"
+        "scene_refs_target=?,scene_refs_batch_started_at=? WHERE id=?",
+        (target_payload, batch_started_at, project_id))
     conn.commit()
     try:
         task_registry.spawn(
             "scene_refs", project_id,
             _scene_refs_task(
                 project_id, only_scene, resume=resume, parent_run_id=parent_run_id,
+                operation_started_at=batch_started_at,
                 requested_by="system" if resume else "user",
                 trigger_type="resume" if resume else "manual",
             ),
@@ -343,11 +351,13 @@ def _start_scene_refs_generation(
     except Exception as exc:
         if previous:
             conn.execute(
-                "UPDATE projects SET scene_refs_status=?,scene_refs_error=?,scene_refs_target=? "
+                "UPDATE projects SET scene_refs_status=?,scene_refs_error=?,scene_refs_target=?,"
+                "scene_refs_batch_started_at=? "
                 "WHERE id=?",
                 (
                     previous["scene_refs_status"], previous["scene_refs_error"],
-                    previous["scene_refs_target"], project_id,
+                    previous["scene_refs_target"], previous["scene_refs_batch_started_at"],
+                    project_id,
                 ),
             )
             conn.commit()
@@ -3390,6 +3400,7 @@ async def _scene_refs_task(
     only_scene: str | list[str] | None,
     *,
     resume: bool = False,
+    operation_started_at: float | None = None,
     parent_run_id: str | None = None,
     requested_by: str = "user",
     trigger_type: str = "manual",
@@ -3410,10 +3421,19 @@ async def _scene_refs_task(
         recorder.start()
         await recorder.step(
             "scene_references",
-            lambda: generate_scene_refs(project_id, only_scene, resume=resume),
+            lambda: generate_scene_refs(
+                project_id,
+                only_scene,
+                resume=resume,
+                operation_started_at=operation_started_at,
+            ),
             agent_name="reference_asset_loop",
         )
-        conn.execute("UPDATE projects SET scene_refs_status='ready', scene_refs_error=NULL WHERE id=?", (project_id,))
+        conn.execute(
+            "UPDATE projects SET scene_refs_status='ready',scene_refs_error=NULL,"
+            "scene_refs_batch_started_at=NULL WHERE id=?",
+            (project_id,),
+        )
         conn.commit()
         recorder.succeed("场景参考资产已生成并通过证据门禁")
     except asyncio.CancelledError:
@@ -3609,7 +3629,8 @@ async def cancel_scene_refs(project_id: str):
     final_progress = _scene_refs_progress_payload(project_id)
     conn = get_conn()
     conn.execute(
-        "UPDATE projects SET scene_refs_status='idle', scene_refs_error=NULL, scene_refs_target=NULL WHERE id=?",
+        "UPDATE projects SET scene_refs_status='idle',scene_refs_error=NULL,"
+        "scene_refs_target=NULL,scene_refs_batch_started_at=NULL WHERE id=?",
         (project_id,))
     conn.commit()
     was_running = p["scene_refs_status"] == "running"

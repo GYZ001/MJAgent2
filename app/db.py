@@ -1152,6 +1152,7 @@ MIGRATIONS = (
     "ALTER TABLE projects ADD COLUMN scene_refs_status TEXT DEFAULT 'idle'",  # 场景图素材库生成任务状态
     "ALTER TABLE projects ADD COLUMN scene_refs_error TEXT",
     "ALTER TABLE projects ADD COLUMN scene_refs_target TEXT",
+    "ALTER TABLE projects ADD COLUMN scene_refs_batch_started_at REAL",
     "ALTER TABLE shots ADD COLUMN scene_name TEXT",  # 归一化命中的库内规范场景名（渲染期取场景库图复用）
     "ALTER TABLE shots ADD COLUMN scene_time TEXT DEFAULT ''",  # 独立时间标签，不参与场景图匹配
     "ALTER TABLE jobs ADD COLUMN run_id TEXT",

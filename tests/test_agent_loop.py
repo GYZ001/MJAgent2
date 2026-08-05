@@ -61,6 +61,46 @@ def test_agent_loop_repairs_then_accepts() -> None:
     assert result.value.value == 2
 
 
+def test_uncommitted_accepted_candidate_records_evaluation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = AgentLoop(
+        stage_key="storyboard_shot_1",
+        contract_key="storyboard",
+        goal="isolate one accepted shot candidate",
+        scope_type="storyboard_checkpoint",
+        scope_id="e1:1",
+        artifact_type="storyboard_shot",
+        policy=AgentLoopPolicy(commit_accepted_artifact=False),
+    )
+    recorded: list[tuple[str, str | None]] = []
+
+    monkeypatch.setattr(
+        repository,
+        "create_artifact",
+        lambda *_args, **_kwargs: {"id": "art-isolated"},
+    )
+    monkeypatch.setattr(
+        repository,
+        "create_evaluation",
+        lambda artifact_id, _evaluation, *, step_run_id=None: recorded.append(
+            (artifact_id, step_run_id)
+        ),
+    )
+
+    artifact_id = loop._record_candidate(
+        "step-isolated",
+        1,
+        '{"value": 2}',
+        Candidate(value=2),
+        [],
+        1.0,
+    )
+
+    assert artifact_id == "art-isolated"
+    assert recorded == [("art-isolated", "step-isolated")]
+
+
 def test_agent_loop_repairs_all_authority_blockers() -> None:
     outputs = ['{"value": 1}', '{"value": 2}']
 
