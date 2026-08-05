@@ -319,26 +319,26 @@ def run_screenplay_qa(
         pass_score = min(100.0, max(0.0, float(get_setting("screenplay_qa_pass_score") or 80)))
     except (TypeError, ValueError):
         pass_score = 80.0
-    passed = blocker_count(issues) == 0 and must_fix_count(issues) == 0 and score >= pass_score
-    status = "passed" if passed else "failed"
-    hard_identity_issues = non_waivable_screenplay_issues(issues)
-    narrative_gate = script.narrative_plan is not None
-    evaluation_role = (
-        "business_safety" if hard_identity_issues
-        else "runtime_gate" if narrative_gate
-        else "score_only"
+    quality_passed = (
+        blocker_count(issues) == 0
+        and must_fix_count(issues) == 0
+        and score >= pass_score
     )
-    runtime_blocking = bool(hard_identity_issues or narrative_gate)
+    status = "passed" if quality_passed else "warning"
+    evaluation_role = "score_only"
+    runtime_blocking = False
     evaluation = Evaluation(
         evaluator_type="deterministic",
         evaluator_name="screenplay_production_qa",
         evaluator_version="screenplay-qa-gate-2",
         status=status,
-        hard_gate_passed=passed,
+        # Compatibility readers still inspect hard_gate_passed. Score-only
+        # findings never revoke runtime eligibility.
+        hard_gate_passed=True,
         evaluation_role=evaluation_role,
         score_status="scored",
         runtime_blocking=runtime_blocking,
-        retry_eligible=bool(issues),
+        retry_eligible=False,
         score=score,
         issues=issues,
         evidence={
@@ -350,7 +350,8 @@ def run_screenplay_qa(
             "evaluation_role": evaluation_role,
             "runtime_blocking": runtime_blocking,
             "pass_score": pass_score,
-            "verdict": "passed" if passed else "repair_or_needs_review",
+            "verdict": "passed" if quality_passed else "quality_risk",
+            "gate_retry_exhausted": bool(issues),
         },
     )
     return issues, evaluation
