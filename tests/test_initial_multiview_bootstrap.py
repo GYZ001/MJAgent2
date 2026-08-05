@@ -701,6 +701,60 @@ def test_scene_exists_accepts_primary_fallback_when_multiview_is_incomplete(
     assert scenes.scene_ref_exists(conn, "proj_bootstrap", "Courtyard") is True
 
 
+def test_scene_multiview_generation_uses_candidate_scoped_recovery_operations(
+    asset_db, monkeypatch,
+) -> None:
+    conn, tmp_path = asset_db
+    _seed_bible_project(conn, with_scene=True)
+    missing = tmp_path / "missing-scene.jpg"
+    qa = {
+        "overall": 0.95,
+        "status": "ready",
+        "hard_gate_passed": True,
+        "hard_failures": [],
+    }
+    scene_id = scenes.register_initial_scene_ref(
+        conn, "proj_bootstrap", "Courtyard", str(missing),
+        "stone courtyard at dawn with a red gate", "prompt", qa, 1,
+    )
+    captured = []
+    encoded = base64.b64encode(b"scene-image").decode("ascii")
+
+    async def fake_generate(*_args, **kwargs):
+        captured.append(kwargs["call_meta"])
+        return {"b64_json": encoded}
+
+    async def fake_review(*_args, **_kwargs):
+        return dict(qa)
+
+    async def fake_pack(views, _canonical):
+        return {
+            **qa,
+            "views": [
+                {**qa, "view_role": view["view_role"]}
+                for view in views
+            ],
+        }
+
+    monkeypatch.setattr(multiview, "_generate_image", fake_generate)
+    monkeypatch.setattr(multiview, "review_scene_view", fake_review)
+    monkeypatch.setattr(multiview, "review_scene_pack_consistency", fake_pack)
+
+    result = asyncio.run(multiview.ensure_scene_multiview_pack(
+        project_id="proj_bootstrap",
+        scene_reference_id=scene_id,
+        scene_name="Courtyard",
+        scene_canonical="stone courtyard at dawn with a red gate",
+        visual_style="cinematic animation",
+        ep_start=1,
+    ))
+
+    assert result["status"] == "ready"
+    assert {item["view_role"] for item in captured} == {"establishing", "reverse_angle"}
+    assert all(item["reuse_successful_operation"] is True for item in captured)
+    assert all(item["operation_id"].startswith("op_scene_view_") for item in captured)
+
+
 def test_failed_extra_view_pack_keeps_primary_scene_available_to_video(
     asset_db, monkeypatch,
 ) -> None:

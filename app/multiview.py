@@ -1570,7 +1570,16 @@ async def ensure_scene_multiview_pack(
         else:
             path = _view_path(project_id, "scene", scene_name, "establishing", ep_start)
             item = await _generate_image(
-                est_prompt, call_meta={"asset_kind": "scene_view", "view_role": "establishing", "scene_name": scene_name},
+                est_prompt,
+                call_meta={
+                    "asset_kind": "scene_view",
+                    "view_role": "establishing",
+                    "scene_name": scene_name,
+                    "operation_id": "op_scene_view_" + hashlib.sha256(
+                        f"{scene_reference_id}:establishing:{est_fp}".encode("utf-8")
+                    ).hexdigest()[:32],
+                    "reuse_successful_operation": True,
+                },
             )
             await _save_image_item(item, path)
             qa = await review_scene_view(path, scene_canonical, "establishing")
@@ -1625,7 +1634,15 @@ async def ensure_scene_multiview_pack(
         path = _view_path(project_id, "scene", scene_name, "reverse_angle", ep_start)
         item = await _generate_image(
             rev_prompt, seed_inputs=seeds or None,
-            call_meta={"asset_kind": "scene_view", "view_role": "reverse_angle", "scene_name": scene_name},
+            call_meta={
+                "asset_kind": "scene_view",
+                "view_role": "reverse_angle",
+                "scene_name": scene_name,
+                "operation_id": "op_scene_view_" + hashlib.sha256(
+                    f"{scene_reference_id}:reverse_angle:{rev_fp}".encode("utf-8")
+                ).hexdigest()[:32],
+                "reuse_successful_operation": True,
+            },
         )
         await _save_image_item(item, path)
         _upsert_scene_view(
@@ -1659,7 +1676,15 @@ async def ensure_scene_multiview_pack(
             path = _view_path(project_id, "scene", scene_name, "action_zone", ep_start)
             item = await _generate_image(
                 action_prompt, seed_inputs=seeds or None,
-                call_meta={"asset_kind": "scene_view", "view_role": "action_zone", "scene_name": scene_name},
+                call_meta={
+                    "asset_kind": "scene_view",
+                    "view_role": "action_zone",
+                    "scene_name": scene_name,
+                    "operation_id": "op_scene_view_" + hashlib.sha256(
+                        f"{scene_reference_id}:action_zone:{action_fp}".encode("utf-8")
+                    ).hexdigest()[:32],
+                    "reuse_successful_operation": True,
+                },
             )
             await _save_image_item(item, path)
             _upsert_scene_view(
