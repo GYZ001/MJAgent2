@@ -54,7 +54,7 @@ def store_upload(
 ) -> str:
     """落盘到临时文件并登记短时效 token；用户选择/上传文件后立即调用一次。"""
     if not content:
-        raise ValueError("文件为空，请选择包含正文的 TXT 小说")
+        raise ValueError("文件为空，请选择包含正文的 TXT 或 EPUB 小说")
     safe_filename = Path(filename or "upload.txt").name
     upload_key = _upload_key(safe_filename, content)
     with _STORE_LOCK:

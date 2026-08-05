@@ -5,15 +5,21 @@ export interface NovelFileDescriptor {
   size: number
 }
 
+const SUPPORTED_NOVEL_EXTENSIONS = ['.txt', '.epub']
+
 export function validateNovelFile(file: NovelFileDescriptor): string | null {
   const filename = file.name.trim()
-  if (!filename.toLowerCase().endsWith('.txt')) {
-    return `“${filename || '未命名文件'}”不是 TXT 文件，请重新选择`
+  if (!SUPPORTED_NOVEL_EXTENSIONS.some(extension => filename.toLowerCase().endsWith(extension))) {
+    return `“${filename || '未命名文件'}”格式不支持，目前可导入 TXT 或 EPUB`
   }
   if (file.size <= 0) {
     return `“${filename}”没有正文内容，请重新选择`
   }
   return null
+}
+
+export function novelTitleFromFilename(filename: string): string {
+  return filename.replace(/\.(?:txt|epub)$/i, '')
 }
 
 export function formatFileSize(bytes: number): string {

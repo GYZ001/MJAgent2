@@ -298,7 +298,7 @@ def _register_human_only(registry) -> None:
         HumanOnlySpec(
             "human.select_upload_file",
             "选择上传小说文件",
-            "用户在系统文件选择器中挑选 TXT；前端换发短时效 attachment_token",
+            "用户在系统文件选择器中挑选 TXT 或 EPUB；前端换发短时效 attachment_token",
             reason="禁止把任意 file_path 暴露给 Agent",
             rest_routes=("POST /api/attachments/novel",),
             tags=("human", "project"),
@@ -394,7 +394,7 @@ def _register_commands(registry) -> None:
         _cmd(
             "project.import_novel",
             title="导入小说",
-            description="消费 attachment_token 创建项目并导入 TXT，随后自动分集并生成人物谱与多视角素材库",
+            description="消费 attachment_token 创建项目并导入 TXT 或 EPUB，随后自动分集并生成人物谱与多视角素材库",
             input_model=I.ProjectImportNovelInput,
             risk=RiskLevel.R2_MATERIAL,
             confirmation=ConfirmationPolicy.ALWAYS,

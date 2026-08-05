@@ -1,15 +1,23 @@
 import { describe, expect, it } from 'vitest'
-import { formatFileSize, projectEntry, validateNovelFile } from './studioImport'
+import { formatFileSize, novelTitleFromFilename, projectEntry, validateNovelFile } from './studioImport'
 
 describe('validateNovelFile', () => {
-  it('accepts non-empty TXT files regardless of extension case', () => {
+  it('accepts non-empty TXT and EPUB files regardless of extension case', () => {
     expect(validateNovelFile({ name: 'story.txt', size: 12 })).toBeNull()
     expect(validateNovelFile({ name: 'STORY.TXT', size: 12 })).toBeNull()
+    expect(validateNovelFile({ name: 'story.epub', size: 12 })).toBeNull()
+    expect(validateNovelFile({ name: 'STORY.EPUB', size: 12 })).toBeNull()
   })
 
   it('rejects unsupported and empty files before upload', () => {
-    expect(validateNovelFile({ name: 'story.pdf', size: 12 })).toContain('不是 TXT 文件')
+    expect(validateNovelFile({ name: 'story.pdf', size: 12 })).toContain('目前可导入 TXT 或 EPUB')
     expect(validateNovelFile({ name: 'story.txt', size: 0 })).toContain('没有正文内容')
+    expect(validateNovelFile({ name: 'story.epub', size: 0 })).toContain('没有正文内容')
+  })
+
+  it('derives the default title from either supported extension', () => {
+    expect(novelTitleFromFilename('长夜.txt')).toBe('长夜')
+    expect(novelTitleFromFilename('长夜.EPUB')).toBe('长夜')
   })
 })
 

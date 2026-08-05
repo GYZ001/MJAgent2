@@ -98,19 +98,20 @@ async def _read_novel_upload(file: UploadFile) -> tuple[str, bytes]:
     """Bound memory use and reject unsupported uploads before issuing a token."""
     from app.ingest import MAX_NOVEL_UPLOAD_BYTES
 
-    filename = Path(file.filename or "novel.txt").name
-    if Path(filename).suffix.lower() != ".txt":
-        raise HTTPException(422, "仅支持 TXT 小说，请将文件另存为 UTF-8 TXT 后重试")
+    try:
+        filename = validate_novel_filename(file.filename)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     raw = await file.read(MAX_NOVEL_UPLOAD_BYTES + 1)
     if len(raw) > MAX_NOVEL_UPLOAD_BYTES:
         limit_mb = MAX_NOVEL_UPLOAD_BYTES // (1024 * 1024)
         raise HTTPException(413, f"小说文件超过 {limit_mb} MB，请拆分后再导入")
     if not raw:
-        raise HTTPException(400, "文件为空，请选择包含正文的 TXT 小说")
+        raise HTTPException(400, f"文件为空，请选择包含正文的 {SUPPORTED_NOVEL_LABEL} 小说")
     try:
         # Validate while the user is still on the file-selection step. The
         # authoritative parse is repeated inside the transaction below.
-        ingest_novel(raw)
+        ingest_novel(prepare_novel_bytes(filename, raw))
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     return filename, raw
@@ -152,11 +153,10 @@ def _create_project_core(
 ) -> dict:
     """导入小说的领域逻辑，供 REST 路由与 ``project.import_novel`` Command Handler 共用。"""
     if not raw:
-        raise HTTPException(400, "文件为空，请选择包含正文的 TXT 小说")
-    if Path(filename or "").suffix.lower() != ".txt":
-        raise HTTPException(422, "仅支持 TXT 小说，请将文件另存为 UTF-8 TXT 后重试")
+        raise HTTPException(400, f"文件为空，请选择包含正文的 {SUPPORTED_NOVEL_LABEL} 小说")
     try:
-        report = ingest_novel(raw)
+        filename = validate_novel_filename(filename)
+        report = ingest_novel(prepare_novel_bytes(filename, raw))
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     if not report["chapters"]:
@@ -182,7 +182,7 @@ def _create_project_core(
                 "deduplicated_stub_chapters",
                 "auto_split",
             )
-        },
+        } | {"source_format": novel_file_suffix(filename).lstrip(".").upper()},
     }
     try:
         conn.execute(
@@ -215,7 +215,7 @@ def _create_project_core(
 
 @router.post("/attachments/novel")
 async def upload_novel_attachment(file: UploadFile = File(...)):
-    """用户在系统文件选择器中挑选 TXT 后，前端立即换发短时效 attachment_token（不暴露真实路径）。"""
+    """用户选择 TXT/EPUB 后，前端立即换发短时效 attachment_token（不暴露真实路径）。"""
     from app.capabilities.attachments import store_upload
 
     filename, raw = await _read_novel_upload(file)

@@ -21,6 +21,12 @@ from app.harness.contracts import get_contract
 from app.harness.types import Evaluation, EvidenceArtifact
 from app.harness.context import ContextPack
 from app.ingest import chapter_is_stub, chapter_titles_match, ingest_novel
+from app.novel_formats import (
+    SUPPORTED_NOVEL_LABEL,
+    novel_file_suffix,
+    prepare_novel_bytes,
+    validate_novel_filename,
+)
 from app.orchestration.engine import WorkflowRecorder, fingerprint
 from app.planning import chapter_preview
 from app.schemas import (Bible, EpisodeScreenplay, Shot, Storyboard,

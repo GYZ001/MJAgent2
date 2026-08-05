@@ -3,7 +3,7 @@ import { api, Project } from '../api'
 import { useNav, usePoll } from '../App'
 import QueryState from '../components/QueryState'
 import { useFocusTrap } from '../hooks/useFocusTrap'
-import { formatFileSize, projectEntry, validateNovelFile } from './studioImport'
+import { formatFileSize, novelTitleFromFilename, projectEntry, validateNovelFile } from './studioImport'
 
 const STATUS_LABEL: Record<string, [string, string]> = {
   created: ['新建', 'grey'], ingested: ['已导入', 'blue'],
@@ -56,7 +56,7 @@ export default function Studio() {
   function selectFiles(files: FileList | null) {
     if (!files?.length || uploading) return
     if (files.length > 1) {
-      rejectFile('一次只能导入一份 TXT，请重新选择')
+      rejectFile('一次只能导入一份小说，请重新选择')
       return
     }
     const file = files[0]
@@ -78,7 +78,7 @@ export default function Studio() {
       rejectFile(validationError)
       return
     }
-    const projectName = name.trim() || file.name.replace(/\.txt$/i, '')
+    const projectName = name.trim() || novelTitleFromFilename(file.name)
     setSelectedFile(file)
     setImportError(null)
     setImportStage('uploading')
@@ -194,7 +194,7 @@ export default function Studio() {
       {importVisible && <section id={importPanelId} className="card import-panel" aria-busy={uploading || undefined}>
         <div className="section-heading">
           <div><span className="eyebrow">新项目空间</span><h3>上传小说并创建创作空间</h3></div>
-          <span className="hint">仅支持非空 TXT · 自动识别 UTF-8、GB18030 和 Big5</span>
+          <span className="hint">支持 TXT、EPUB · TXT 自动识别 UTF-8、GB18030 和 Big5</span>
         </div>
         <div className="import-grid">
           <div>
@@ -216,8 +216,8 @@ export default function Studio() {
             disabled={uploading}
             aria-busy={uploading || undefined}
             aria-label={uploading
-              ? `选择 TXT 文件，暂不可用：${importStage === 'uploading' ? '正在上传文件' : '正在创建项目'}`
-              : '选择一份 TXT 小说文件，或拖放到此处'}
+              ? `选择小说文件，暂不可用：${importStage === 'uploading' ? '正在上传文件' : '正在创建项目'}`
+              : '选择一份 TXT 或 EPUB 小说文件，或拖放到此处'}
             aria-describedby={importHelpId}
             onClick={() => fileRef.current?.click()}
             onDragOver={e => { e.preventDefault(); setDrag(true) }}
@@ -228,7 +228,7 @@ export default function Studio() {
               selectFiles(e.dataTransfer.files)
             }}
           >
-            <b>{importStage === 'uploading' ? '正在上传 TXT…' : importStage === 'creating' ? '正在创建项目…' : '选择 TXT 文件'}</b>
+            <b>{importStage === 'uploading' ? '正在上传小说…' : importStage === 'creating' ? '正在创建项目…' : '选择 TXT / EPUB 文件'}</b>
             <span>{uploading ? '请保持页面开启，不要重复提交' : '或将一份文件拖到这里'}</span>
           </button>
         </div>
@@ -254,7 +254,7 @@ export default function Studio() {
               {selectedFile && <span>{selectedFile.name} · {formatFileSize(selectedFile.size)}</span>}
               {importStage === 'selected' && selectedFile && (
                 <p className="import-impact">
-                  将创建《{name.trim() || selectedFile.name.replace(/\.txt$/i, '')}》；导入后自动启动分集规划、
+                  将创建《{name.trim() || novelTitleFromFilename(selectedFile.name)}》；导入后自动启动分集规划、
                   人物谱和素材准备，可能产生模型费用。
                 </p>
               )}
@@ -292,7 +292,7 @@ export default function Studio() {
         <input
           ref={fileRef}
           type="file"
-          accept=".txt,text/plain"
+          accept=".txt,.epub,text/plain,application/epub+zip"
           disabled={uploading}
           hidden
           onChange={e => {
@@ -307,7 +307,7 @@ export default function Studio() {
         error={error}
         hasData={Boolean(projects?.length)}
         objectName="项目"
-        emptyText="书房尚空。请在上方导入区选择一份 TXT，创建第一个项目。"
+        emptyText="书房尚空。请在上方导入区选择一份 TXT 或 EPUB，创建第一个项目。"
         onRetry={refresh}
       >
         {projects?.length ? (
