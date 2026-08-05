@@ -567,7 +567,7 @@ def test_screenplay_certificate_requires_gate_from_the_exact_artifact() -> None:
         verify_completion_certificate(certificate)
 
 
-def test_narrative_certificate_rejects_diagnostic_evaluation_as_authority() -> None:
+def test_narrative_certificate_accepts_exact_score_only_evaluation() -> None:
     screenplay_contract = get_contract("screenplay").version
     qa_profile = "screenplay-qa-gate-2"
     artifact = _artifact(
@@ -594,18 +594,19 @@ def test_narrative_certificate_rejects_diagnostic_evaluation_as_authority() -> N
         ),
     )
 
-    with pytest.raises(ValueError, match="runtime_blocking"):
-        issue_completion_certificate(
-            kind="screenplay",
-            scope_id="episode-generic",
-            artifact_id=artifact["id"],
-            artifact_hash=artifact["content_hash"],
-            input_fingerprint=revision.input_fingerprint,
-            contract_version=screenplay_contract,
-            qa_profile_version=qa_profile,
-            evaluation_ids=[diagnostic["id"]],
-            production_revision_id=revision.id,
-        )
+    certificate = issue_completion_certificate(
+        kind="screenplay",
+        scope_id="episode-generic",
+        artifact_id=artifact["id"],
+        artifact_hash=artifact["content_hash"],
+        input_fingerprint=revision.input_fingerprint,
+        contract_version=screenplay_contract,
+        qa_profile_version=qa_profile,
+        evaluation_ids=[diagnostic["id"]],
+        production_revision_id=revision.id,
+    )
+
+    assert certificate.evaluation_ids == [diagnostic["id"]]
 
 
 def test_narrative_certificate_rejects_evaluator_contract_drift() -> None:

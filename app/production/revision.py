@@ -167,6 +167,13 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
         ("SUCCEEDED", "已完成"),
     ]
     rev = get_active_production_revision(episode_id, "screenplay")
+    if rev is None:
+        rev = _row_to_revision(get_conn().execute(
+            "SELECT * FROM production_revisions "
+            "WHERE episode_id=? AND kind='screenplay' AND status='published' "
+            "ORDER BY updated_at DESC LIMIT 1",
+            (episode_id,),
+        ).fetchone())
     active = task_registry.active("screenplay", episode_id)
     if rev is None:
         return {

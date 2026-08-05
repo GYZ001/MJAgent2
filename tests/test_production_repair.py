@@ -153,12 +153,13 @@ def test_screenplay_qa_is_read_only_and_nonblocking() -> None:
 
     assert script.model_dump_json() == before
     assert issues
-    assert evaluation.status == "failed"
+    assert evaluation.status == "warning"
     assert evaluation.evaluation_role == "score_only"
     assert evaluation.runtime_blocking is False
+    assert evaluation.retry_eligible is False
 
 
-def test_unresolved_character_identity_is_a_non_waivable_runtime_gate() -> None:
+def test_unresolved_character_identity_is_reported_without_qa_blocking() -> None:
     from app.production.screenplay_repair import (
         non_waivable_screenplay_issues,
         run_screenplay_qa,
@@ -201,8 +202,9 @@ def test_unresolved_character_identity_is_a_non_waivable_runtime_gate() -> None:
     )
     hard = non_waivable_screenplay_issues(issues)
     assert hard and all(issue.code == "CHARACTER_IDENTITY_UNRESOLVED" for issue in hard)
-    assert evaluation.evaluation_role == "business_safety"
-    assert evaluation.runtime_blocking is True
+    assert evaluation.evaluation_role == "score_only"
+    assert evaluation.runtime_blocking is False
+    assert evaluation.retry_eligible is False
 
 
 @pytest.mark.asyncio
@@ -266,7 +268,10 @@ async def test_retry_exhaustion_never_publishes_unresolved_character_identity(mo
 
     monkeypatch.setattr(screenplay_repair, "publish_screenplay", forbidden_publish)
 
-    with pytest.raises(RuntimeError, match="人物身份预检未通过"):
+    with pytest.raises(
+        screenplay_repair.ScreenplayIdentityGateError,
+        match="缺少可确定的人物身份上下文",
+    ):
         await screenplay_repair.run_screenplay_production(
             episode_id="ep_p",
             episode={
@@ -277,7 +282,11 @@ async def test_retry_exhaustion_never_publishes_unresolved_character_identity(mo
             },
             source_text="原文",
             bible=Bible(
-                characters=[],
+                characters=[Character(
+                    name="萧炎",
+                    role="主角",
+                    appearance_canonical="黑发少年，玄色劲装，目光坚定",
+                )],
                 world=World(visual_style_canonical="测试画风"),
             ),
             resume=True,
@@ -1450,7 +1459,7 @@ async def test_existing_baseline_resumes_qa_without_calling_full_generation(monk
 
 
 @pytest.mark.asyncio
-async def test_noop_patch_attempts_consume_activation_budget(monkeypatch):
+async def test_score_only_qa_does_not_plan_or_apply_patch(monkeypatch):
     from app.evidence import repository as evidence_repository
     from app.production import screenplay_repair
     from app.production.patch import PatchOperation, PatchResult
@@ -1523,37 +1532,35 @@ async def test_noop_patch_attempts_consume_activation_budget(monkeypatch):
 
     monkeypatch.setattr(screenplay_repair, "plan_screenplay_patch", fake_plan)
     monkeypatch.setattr(screenplay_repair, "apply_screenplay_patch", fake_apply)
-    monkeypatch.setattr(screenplay_repair, "MAX_REPAIR_ACTIVATION_PATCHES", 2)
+    monkeypatch.setattr(
+        screenplay_repair,
+        "publish_screenplay",
+        lambda **_kwargs: {"artifact_id": artifact["id"], "status": "ready"},
+    )
 
-    with pytest.raises(screenplay_repair.ScreenplayNarrativeGateError):
-        await screenplay_repair.run_screenplay_production(
-            episode_id="ep_p",
-            episode={
-                "id": "ep_p",
-                "project_id": "proj_p",
-                "episode_no": 1,
-                "target_duration_s": 50,
-            },
-            source_text="原文",
-            bible=Bible(
-                characters=[],
-                world=World(visual_style_canonical="测试画风"),
-            ),
-            resume=True,
-        )
+    result = await screenplay_repair.run_screenplay_production(
+        episode_id="ep_p",
+        episode={
+            "id": "ep_p",
+            "project_id": "proj_p",
+            "episode_no": 1,
+            "target_duration_s": 50,
+        },
+        source_text="原文",
+        bible=Bible(
+            characters=[],
+            world=World(visual_style_canonical="测试画风"),
+        ),
+        resume=True,
+    )
 
-    assert attempts == 2
-    paused = screenplay_repair.get_production_revision(revision.id)
-    episode = db.get_conn().execute(
-        "SELECT screenplay_status,screenplay_error FROM episodes WHERE id='ep_p'"
-    ).fetchone()
-    assert paused is not None
-    assert paused.working_artifact_id == artifact["id"]
-    assert paused.published_artifact_id is None
-    assert paused.checkpoint_json["phase"] == "WAITING_HUMAN"
-    assert paused.checkpoint_json["yield_reason"] == "narrative_gate_needs_review"
-    assert episode["screenplay_status"] == "repairing"
-    assert "禁止发布" in episode["screenplay_error"]
+    assert result is not None
+    assert attempts == 0
+    assert planned == 0
+    completed = screenplay_repair.get_production_revision(revision.id)
+    assert completed is not None
+    assert completed.working_artifact_id == artifact["id"]
+    assert completed.checkpoint_json["phase"] == "SUCCEEDED"
 
 
 @pytest.mark.asyncio

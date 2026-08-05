@@ -37,7 +37,7 @@ def _db(tmp_path, monkeypatch):
     yield
 
 
-def test_production_state_only_allows_patch_resume_after_baseline() -> None:
+def test_production_state_resumes_post_baseline_stages() -> None:
     initial = screenplay_production_state("e1")
     assert initial["operation"] == "baseline"
     assert initial["baseline_done"] is False
@@ -54,10 +54,14 @@ def test_production_state_only_allows_patch_resume_after_baseline() -> None:
         working_artifact_id="artifact-working",
     )
 
-    repair = screenplay_production_state("e1")
-    assert repair["operation"] == "repair"
-    assert repair["baseline_done"] is True
-    assert repair["can_resume_repair"] is True
+    finalize = screenplay_production_state("e1")
+    assert finalize["operation"] == "finalize"
+    assert finalize["phase"] == "STRUCTURE_VALIDATION"
+    assert finalize["baseline_done"] is True
+    assert finalize["can_resume_repair"] is True
+    assert [item["label"] for item in finalize["stages"]] == [
+        "人物识别", "生成首版", "结构校验", "质量评分", "原子发布", "已完成",
+    ]
 
 
 def test_resume_route_has_a_distinct_capability() -> None:
