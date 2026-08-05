@@ -1254,6 +1254,42 @@ def _close_missing_root_object(text: str) -> str:
     return text
 
 
+def _repair_trailing_container_closure(text: str) -> str:
+    """Replace one wrong EOF closer with the uniquely required close sequence."""
+    expected_closers: list[str] = []
+    in_string = False
+    escaped = False
+    last_nonspace = len(text.rstrip()) - 1
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            expected_closers.append("}")
+        elif char == "[":
+            expected_closers.append("]")
+        elif char in "}]":
+            if not expected_closers:
+                return text
+            if expected_closers[-1] != char:
+                if index != last_nonspace or in_string or escaped:
+                    return text
+                return (
+                    text[:index]
+                    + "".join(reversed(expected_closers))
+                    + text[index + 1:]
+                )
+            expected_closers.pop()
+    return text
+
+
 def _repair_singleton_string_object_fields(
     text: str,
     field_names: tuple[str, ...],
@@ -1311,6 +1347,16 @@ def extract_json(
                         if isinstance(obj, dict):
                             return obj
                     candidate = repaired
+            if candidate_error.pos >= len(candidate.rstrip()) - 1:
+                repaired = _repair_trailing_container_closure(candidate)
+                if repaired != candidate:
+                    try:
+                        obj, _ = json.JSONDecoder().raw_decode(repaired)
+                    except json.JSONDecodeError:
+                        pass
+                    else:
+                        if isinstance(obj, dict):
+                            return obj
             # Only an EOF failure may be eligible.  Missing commas and damaged
             # inner structure fail before EOF and must still enter the repair
             # loop instead of being silently guessed here.

@@ -102,6 +102,28 @@ def test_extract_json_does_not_guess_multiple_missing_closers() -> None:
         extract_json(text)
 
 
+def test_extract_json_repairs_unique_wrong_eof_closer_sequence() -> None:
+    text = (
+        '{"episode_no":1,"narrative_plan":{"arc_contracts":'
+        '[{"arc_id":"ARC-1"}]}}'
+    )
+    broken = text[:-3] + "}"
+
+    assert extract_json(broken) == {
+        "episode_no": 1,
+        "narrative_plan": {
+            "arc_contracts": [{"arc_id": "ARC-1"}],
+        },
+    }
+
+
+def test_extract_json_does_not_repair_non_eof_closer_mismatch() -> None:
+    text = '{"episode_no":1,"events":}[]}'
+
+    with pytest.raises(ValueError, match="JSON 解析失败"):
+        extract_json(text)
+
+
 def test_screenplay_shape_hoists_fields_misnested_under_plot_spine() -> None:
     # One brace closes plot_spine; the missing final brace closes the root.
     # This is the shape observed in ERR-20260803-df0cee.

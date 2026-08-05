@@ -18,7 +18,8 @@ from app import errors
 from app.db import get_conn
 from app.evidence import repository as evidence_repository
 from app.harness.contracts import get_contract
-from app.harness.types import Evaluation, EvidenceArtifact, Issue
+from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
+from app.loops.base import is_structural_issue
 from app.repair_router import (
     RepairPlan,
     bump_fingerprint_count,
@@ -401,6 +402,17 @@ def _blocker_messages(draft) -> list[str]:
 
 
 def _is_structural_storyboard_issue(code: Any = None, message: Any = "") -> bool:
+    from app.evaluations.issues import issue_code
+
+    resolved_code = str(code or issue_code(str(message or "")) or "")
+    if is_structural_issue(Issue(
+        code=resolved_code,
+        severity=IssueSeverity.BLOCKER,
+        subject="storyboard",
+        message=str(message or ""),
+        repairable=True,
+    )):
+        return True
     text = f"{code or ''} {message or ''}".lower()
     structural_tokens = (
         "schema",
@@ -1273,6 +1285,7 @@ def _commit_repair_candidate(
                 shot.source_excerpt,
                 *[dialogue.line for dialogue in shot.dialogues],
                 shot.narration,
+                *[item.text for item in shot.audio_timeline],
             ])
             alignment_error: HTTPException | None = None
             for evidence in evidence_candidates:

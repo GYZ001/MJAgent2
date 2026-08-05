@@ -2576,7 +2576,7 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
         errors.append(f"episode_no={draft.episode_no}，必须等于 {episode['episode_no']}")
     if draft.shot.shot_no != shot_no:
         errors.append(f"shot.shot_no={draft.shot.shot_no}，当前只允许输出第 {shot_no} 镜")
-    for field in ("first_frame_desc", "last_frame_desc", "source_excerpt"):
+    for field in ("first_frame_desc", "last_frame_desc"):
         if not str(getattr(draft.shot, field, "") or "").strip():
             errors.append(
                 f"[REQUIRED_FIELD_MISSING] shot.{field} 是分镜生产必填字段"
@@ -2588,19 +2588,36 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
             f"当前已到本集收束位（大纲末镜/技术硬上限），第 {shot_no} 镜必须收束到尾钩并设置 is_final=true"
         )
 
-    aligned_excerpt = align_source_excerpt(
+    evidence_candidates = [
         draft.shot.source_excerpt,
-        source_text,
-        min_match_chars=SOURCE_EXCERPT_MIN_CHARS,
-    )
+        *[dialogue.line for dialogue in draft.shot.dialogues],
+        draft.shot.narration,
+        *[item.text for item in draft.shot.audio_timeline],
+    ]
+    aligned_excerpt = next((
+        aligned
+        for candidate in evidence_candidates
+        if str(candidate or "").strip()
+        for aligned in [align_source_excerpt(
+            str(candidate),
+            source_text,
+            min_match_chars=SOURCE_EXCERPT_MIN_CHARS,
+        )]
+        if aligned is not None
+    ), None)
     if aligned_excerpt is None:
-        errors.append(
-            "shot.source_excerpt 无法在本集授权原文中找到足够强的连续依据；"
-            "请从‘本镜可逐字摘录原文’中复制一段连续原文"
-        )
+        if not str(draft.shot.source_excerpt or "").strip():
+            errors.append(
+                "[REQUIRED_FIELD_MISSING] shot.source_excerpt 是分镜生产必填字段"
+            )
+        else:
+            errors.append(
+                "shot.source_excerpt 无法在本集授权原文中找到足够强的连续依据；"
+                "请从‘本镜可逐字摘录原文’中复制一段连续原文"
+            )
     else:
         # Evidence is an audit field, not creative prose.  Canonicalize harmless
-        # quote/whitespace drift and stitched excerpts before the artifact is saved.
+        # drift or another source-backed delivery field before saving the artifact.
         draft.shot.source_excerpt = aligned_excerpt.excerpt
 
     # 相邻镜允许共享同一主线段落的 source_excerpt（Renderability：不再用「必须推进原文」逼碎镜）。
