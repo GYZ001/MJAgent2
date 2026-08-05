@@ -1204,7 +1204,28 @@ def _close_missing_root_object(text: str) -> str:
     return text
 
 
-def extract_json(text: str, *, repair_unescaped_inner_quotes: bool = False) -> dict:
+def _repair_singleton_string_object_fields(
+    text: str,
+    field_names: tuple[str, ...],
+) -> str:
+    json_string = r'"(?:\\.|[^"\\])*"'
+    for field_name in field_names:
+        pattern = re.compile(
+            rf'"{re.escape(field_name)}"\s*:\s*\{{\s*({json_string})\s*\}}'
+        )
+        text = pattern.sub(
+            rf'"{field_name}":{{"description":\1}}',
+            text,
+        )
+    return text
+
+
+def extract_json(
+    text: str,
+    *,
+    repair_unescaped_inner_quotes: bool = False,
+    repair_singleton_string_object_fields: tuple[str, ...] = (),
+) -> dict:
     """从模型输出中提取第一个完整 JSON 对象。失败抛 ValueError（含原文摘要）。"""
     cleaned = re.sub(r"```(?:json)?\s*", "", text, flags=re.IGNORECASE).replace("```", "").strip()
     first_start = cleaned.find("{")
@@ -1221,10 +1242,13 @@ def extract_json(text: str, *, repair_unescaped_inner_quotes: bool = False) -> d
         remainder = cleaned[start + 1:].lstrip()
         if remainder and not (remainder.startswith('"') or remainder.startswith("}")):
             continue
+        candidate = _repair_singleton_string_object_fields(
+            cleaned[start:],
+            repair_singleton_string_object_fields,
+        )
         try:
-            obj, _ = json.JSONDecoder().raw_decode(cleaned[start:])
+            obj, _ = json.JSONDecoder().raw_decode(candidate)
         except json.JSONDecodeError as exc:
-            candidate = cleaned[start:]
             candidate_error = exc
             if repair_unescaped_inner_quotes:
                 repaired = _escape_unescaped_inner_quotes(candidate)
