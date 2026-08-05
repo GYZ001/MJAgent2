@@ -38,4 +38,17 @@ describe("api session recovery", () => {
     expect(sessionRequests).toBe(2);
     expect(projectTokens).toEqual(["stale-token", "fresh-token"]);
   });
+
+  it("reports a stopped local backend with an actionable error", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new TypeError("Failed to fetch");
+    }));
+
+    const { api } = await import("./api");
+
+    await expect(api.get("/projects")).rejects.toMatchObject({
+      code: "BACKEND_UNAVAILABLE",
+      message: "无法连接本机后端服务，请等待服务恢复后重试",
+    });
+  });
 });

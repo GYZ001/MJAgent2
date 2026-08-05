@@ -5,7 +5,11 @@ import pytest
 from app import portraits
 from app.character_policy import is_collective_role, is_functional_extra
 from app.compiler import CompileError, compile_prompt, keyframe_visual_contract
-from app.identity_contracts import IdentityContractError, narrative_identity_resolver
+from app.identity_contracts import (
+    IdentityContractError,
+    canonicalize_storyboard_operational_identities,
+    narrative_identity_resolver,
+)
 from app.schemas import (
     Bible,
     Character,
@@ -17,6 +21,7 @@ from app.schemas import (
     NarrativeProposition,
     ScriptScene,
     Shot,
+    Storyboard,
     SourceEvidence,
     SourceSpan,
     VoiceCanonical,
@@ -204,6 +209,37 @@ def test_character_resolution_updates_contract_display_name_but_keeps_stable_id(
         "叙事权威图外角色" in error and "路人甲" in error
         for error in errors
     )
+
+
+def test_storyboard_operational_identity_projection_uses_contract_and_dialogue() -> None:
+    screenplay = _screenplay()
+    screenplay.voice_bible.append(VoiceCanonical(
+        speaker_id="主角",
+        voice_canonical="young lead voice",
+    ))
+    screenplay.key_lines = ["主角：出发。"]
+    shot = _shot(
+        characters=["主角", "云吞七号"],
+        characters_visible=["character-main", "transient-node"],
+        audio_cast=["character-main"],
+        dialogues=[Dialogue(
+            speaker="character-main",
+            line="出发。",
+            delivery="spoken_dialogue",
+        )],
+    )
+    board = Storyboard(episode_no=1, shots=[shot])
+
+    changes = canonicalize_storyboard_operational_identities(
+        board,
+        _bible(),
+        screenplay,
+    )
+
+    assert changes
+    assert board.shots[0].characters_visible == ["主角", "云吞七号"]
+    assert board.shots[0].audio_cast == ["主角"]
+    assert board.shots[0].dialogues[0].speaker == "主角"
 
 
 def test_narrative_compiler_uses_typed_policy_not_role_name_classifiers() -> None:

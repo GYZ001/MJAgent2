@@ -66,7 +66,7 @@ def test_bible_task_starts_full_refs_after_success(monkeypatch) -> None:
     assert started["args"] == ("proj_test", None)
 
 
-def test_bible_task_does_not_start_unquoted_scene_generation(monkeypatch) -> None:
+def test_bible_task_starts_scene_preparation_without_unquoted_images(monkeypatch) -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("CREATE TABLE chapters(project_id TEXT, idx INTEGER)")
@@ -97,10 +97,16 @@ def test_bible_task_does_not_start_unquoted_scene_generation(monkeypatch) -> Non
     monkeypatch.setattr(api, "get_conn", lambda: conn)
     monkeypatch.setattr(api, "generate_bible", fake_generate_bible)
     monkeypatch.setattr(api, "_start_refs_generation", lambda *_args: True)
+    prepared: list[str] = []
+    monkeypatch.setattr(
+        api,
+        "_start_scene_bible_preparation",
+        lambda project_id: prepared.append(project_id) or True,
+    )
     monkeypatch.setattr(
         task_registry,
         "spawn",
-        lambda *_args, **_kwargs: pytest.fail("场景任务必须在场景库完成独立费用确认后启动"),
+        lambda *_args, **_kwargs: pytest.fail("免费场景清单准备不应直接启动付费图片任务"),
     )
 
     asyncio.run(api._bible_task("proj_test", trigger_full_refs=True))
@@ -114,6 +120,7 @@ def test_bible_task_does_not_start_unquoted_scene_generation(monkeypatch) -> Non
         "scene_refs_status": "idle",
         "scene_refs_error": None,
     }
+    assert prepared == ["proj_test"]
 
 
 def test_bible_completion_preserves_planned_project_status(monkeypatch) -> None:

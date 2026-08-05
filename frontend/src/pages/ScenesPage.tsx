@@ -217,7 +217,7 @@ export default function ScenesPage() {
 
       <section className="card">
         <h3>场景图素材库
-          <span className="hint">手动扫描现有资产缺口；分镜所需新场景由 AI 自动准备</span>
+          <span className="hint">人物谱完成后自动准备场景设定；图片生成前会单独确认费用</span>
         </h3>
         {!hasBible && (
           <div className="hint">请先到「人物谱」生成角色圣经；场景圣经会在人物谱定稿后自动生成。</div>
@@ -226,9 +226,11 @@ export default function ScenesPage() {
           <div className="library-action-row">
             {!scenes.length && !generating && (
               <button className="btn primary" disabled={busy}
-                aria-label={busy ? '生成场景设定与场景图，暂不可用：正在处理上一项操作' : '生成场景设定与场景图'}
+                aria-label={busy
+                  ? '准备场景清单并预览费用，暂不可用：正在分析原文'
+                  : '准备场景清单并预览费用'}
                 onClick={previewInitialScenes}>
-                生成场景设定与场景图
+                {busy ? '正在分析原文并准备场景清单…' : '准备场景清单并预览费用'}
               </button>
             )}
             {scenes.length > 0 && !generating && (
@@ -248,6 +250,11 @@ export default function ScenesPage() {
             {generating && <span className="stamp gold">生成中</span>}
             {scenes.length > 0 && <span className="stamp green">{scenes.length} 个场景</span>}
             <TaskTimer label="场景图" timer={sceneTimer} />
+          </div>
+        )}
+        {generating && !scenes.length && (
+          <div className="hint task-progress-copy" role="status">
+            正在根据人物谱画风和原文准备场景设定；完成后会展示场景清单，图片出图仍需费用确认。
           </div>
         )}
         {generating && progress && (

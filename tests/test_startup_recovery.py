@@ -124,6 +124,8 @@ def test_reference_spawn_failures_restore_project_state(tmp_path, monkeypatch) -
         api._start_refs_generation("p1", None)
     with pytest.raises(ValueError, match="场景图任务未能启动"):
         api._start_scene_refs_generation("p1", None)
+    with pytest.raises(ValueError, match="场景设定任务未能启动"):
+        api._start_scene_bible_preparation("p1")
 
     project = conn.execute(
         "SELECT refs_status,refs_error,scene_refs_status,scene_refs_error FROM projects WHERE id='p1'"
@@ -134,6 +136,22 @@ def test_reference_spawn_failures_restore_project_state(tmp_path, monkeypatch) -
         "scene_refs_status": "warning",
         "scene_refs_error": "旧场景提示",
     }
+
+
+def test_scene_recovery_prepares_missing_list_for_ready_bible(tmp_path, monkeypatch) -> None:
+    conn = _fresh_database(tmp_path, monkeypatch)
+    conn.execute(
+        "UPDATE projects SET bible_status='ready',scene_refs_status='idle',bible_json=? WHERE id='p1'",
+        (json.dumps({"characters": [], "world": {"visual_style_canonical": "国漫"}}),),
+    )
+    conn.commit()
+    spawned = _capture_spawn(monkeypatch)
+
+    assert api.recover_scene_ref_tasks() == 1
+    assert spawned == [("scene_bible", "p1")]
+    assert conn.execute(
+        "SELECT scene_refs_status FROM projects WHERE id='p1'"
+    ).fetchone()["scene_refs_status"] == "running"
 
 
 def test_single_view_redo_spawn_failure_cancels_created_runs(tmp_path, monkeypatch) -> None:

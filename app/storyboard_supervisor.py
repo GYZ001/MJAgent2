@@ -1870,6 +1870,45 @@ async def run_storyboard_supervisor(
                             "repairs": authority_repairs,
                         },
                     )
+        if narrative_authority and shots:
+            from app.identity_contracts import (
+                canonicalize_storyboard_operational_identities,
+            )
+
+            identity_repairs = canonicalize_storyboard_operational_identities(
+                Storyboard(
+                    episode_no=ep_data["episode_no"],
+                    shots=shots,
+                ),
+                bible,
+                screenplay,
+            )
+            if identity_repairs:
+                for row, shot in zip(prefix_rows, shots):
+                    _write_shot_fields(
+                        conn,
+                        str(row["id"]),
+                        shot,
+                        row["storyboard_artifact_id"],
+                        narrative_authority=True,
+                    )
+                conn.commit()
+                prefix_rows = list(_ensure_current_storyboard_shot_artifacts(
+                    conn,
+                    episode_id,
+                    Storyboard(
+                        episode_no=ep_data["episode_no"],
+                        shots=shots,
+                    ),
+                ))
+                if run_id:
+                    evidence_repository.append_event(
+                        run_id,
+                        "STORYBOARD_OPERATIONAL_IDENTITIES_CANONICALIZED",
+                        "info",
+                        "已把分镜内部身份投影为人物与声音业务身份",
+                        payload={"repairs": identity_repairs},
+                    )
         cp.validated_prefix_end = len(shots)
         cp.next_shot_no = len(shots) + 1
         cp.validated_shot_artifact_ids = [
@@ -2209,6 +2248,16 @@ async def run_storyboard_supervisor(
             board = Storyboard(episode_no=ep_data["episode_no"], shots=[*completed, draft.shot])
             if not narrative_authority:
                 normalize_continuity(board)
+            else:
+                from app.identity_contracts import (
+                    canonicalize_storyboard_operational_identities,
+                )
+
+                canonicalize_storyboard_operational_identities(
+                    board,
+                    bible,
+                    screenplay,
+                )
             character_changes = (
                 []
                 if narrative_authority

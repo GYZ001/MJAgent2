@@ -9,7 +9,12 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Literal
 
-from app.schemas import Bible, EpisodeScreenplay, NarrativeIdentityContract
+from app.schemas import (
+    Bible,
+    EpisodeScreenplay,
+    NarrativeIdentityContract,
+    Storyboard,
+)
 
 
 IdentityUsage = Literal["reference", "visual", "voice"]
@@ -296,3 +301,142 @@ def narrative_identity_resolver(
 ) -> NarrativeIdentityResolver:
     """Build the sole identity-policy resolver for a narrative screenplay."""
     return NarrativeIdentityResolver(bible, screenplay)
+
+
+def canonicalize_storyboard_operational_identities(
+    board: Storyboard,
+    bible: Bible,
+    screenplay: EpisodeScreenplay,
+) -> list[dict[str, object]]:
+    """Project internal narrative IDs to downstream display/voice identities.
+
+    Narrative graph fields keep their immutable internal IDs. Only fields
+    consumed as visible people, speakers or continuity state are rewritten.
+    """
+    if screenplay.narrative_plan is None:
+        return []
+    resolver = narrative_identity_resolver(bible, screenplay)
+    token_map: dict[str, str] = {}
+    for identity in resolver.identities:
+        for token in (
+            identity.identity_id,
+            identity.display_name,
+            *identity.voice_ids,
+        ):
+            if token:
+                token_map[token] = identity.display_name
+
+    line_speakers: dict[str, str] = {}
+    for chain in screenplay.dialogue_chains or []:
+        for turn in chain.turns or []:
+            line = _clean(turn.line)
+            speaker = _clean(turn.speaker)
+            if line and speaker:
+                line_speakers[line] = speaker
+    for item in screenplay.key_lines or []:
+        speaker, separator, line = str(item).partition("：")
+        if not separator:
+            speaker, separator, line = str(item).partition(":")
+        if separator and _clean(speaker) and _clean(line):
+            line_speakers.setdefault(_clean(line), _clean(speaker))
+
+    # Dialogue text is immutable screenplay authority and provides an exact
+    # bridge for persistent characters whose narrative graph uses opaque IDs.
+    for shot in board.shots:
+        for dialogue in shot.dialogues or []:
+            canonical_speaker = line_speakers.get(_clean(dialogue.line))
+            if canonical_speaker:
+                token_map[_clean(dialogue.speaker)] = canonical_speaker
+        for item in shot.audio_timeline or []:
+            canonical_speaker = line_speakers.get(_clean(item.text))
+            if canonical_speaker and _clean(item.speaker_id):
+                token_map[_clean(item.speaker_id)] = canonical_speaker
+
+    # When the visible list and business-name list are positionally complete,
+    # their shared ordering is an explicit shot contract rather than inference.
+    for shot in board.shots:
+        raw_characters = [_clean(value) for value in shot.characters]
+        raw_visible = [_clean(value) for value in shot.characters_visible]
+        if len(raw_characters) == len(raw_visible):
+            for internal, display in zip(raw_visible, raw_characters):
+                if internal and display and display in token_map:
+                    token_map.setdefault(internal, token_map[display])
+        elif len(raw_characters) == 1 and len(raw_visible) == 1:
+            token_map.setdefault(raw_visible[0], token_map.get(
+                raw_characters[0], raw_characters[0],
+            ))
+
+    changes: list[dict[str, object]] = []
+
+    def canonical(token: object) -> str:
+        value = _clean(token)
+        return token_map.get(value, value)
+
+    def replace_list(shot_no: int, field: str, values: list[str]) -> list[str]:
+        replaced = [canonical(value) for value in values]
+        replaced = list(dict.fromkeys(value for value in replaced if value))
+        if replaced != values:
+            changes.append({
+                "shot_no": shot_no,
+                "field": field,
+                "from": list(values),
+                "to": replaced,
+            })
+        return replaced
+
+    for shot in board.shots:
+        shot_no = int(shot.shot_no)
+        shot.characters = replace_list(
+            shot_no, "characters", list(shot.characters),
+        )
+        shot.characters_visible = replace_list(
+            shot_no,
+            "characters_visible",
+            list(shot.characters_visible),
+        )
+        shot.audio_cast = replace_list(
+            shot_no, "audio_cast", list(shot.audio_cast),
+        )
+        for dialogue in shot.dialogues or []:
+            before = dialogue.speaker
+            dialogue.speaker = canonical(dialogue.speaker)
+            if dialogue.speaker != before:
+                changes.append({
+                    "shot_no": shot_no,
+                    "field": "dialogues.speaker",
+                    "from": before,
+                    "to": dialogue.speaker,
+                })
+        for item in shot.audio_timeline or []:
+            if not item.speaker_id:
+                continue
+            before = item.speaker_id
+            item.speaker_id = canonical(item.speaker_id)
+            if item.speaker_id != before:
+                changes.append({
+                    "shot_no": shot_no,
+                    "field": "audio_timeline.speaker_id",
+                    "from": before,
+                    "to": item.speaker_id,
+                })
+        for state_field in ("continuity_state_in", "continuity_state_out"):
+            continuity = getattr(shot, state_field, None)
+            if continuity is None:
+                continue
+            remapped_characters = {
+                canonical(token): state
+                for token, state in continuity.characters.items()
+            }
+            if remapped_characters.keys() != continuity.characters.keys():
+                changes.append({
+                    "shot_no": shot_no,
+                    "field": f"{state_field}.characters",
+                    "from": list(continuity.characters),
+                    "to": list(remapped_characters),
+                })
+                continuity.characters = remapped_characters
+            for state in continuity.characters.values():
+                state.gaze_target = canonical(state.gaze_target)
+            for prop in continuity.props.values():
+                prop.owner = canonical(prop.owner)
+    return changes

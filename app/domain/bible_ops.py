@@ -345,6 +345,49 @@ def _start_scene_refs_generation(
     return True
 
 
+def _start_scene_bible_preparation(
+    project_id: str,
+    *,
+    parent_run_id: str | None = None,
+    requested_by: str = "system",
+    trigger_type: str = "automatic",
+) -> bool:
+    """后台准备免费场景清单；图片生成仍必须经过独立费用确认。"""
+    if _scene_assets_task_active(project_id):
+        return False
+    conn = get_conn()
+    previous = conn.execute(
+        "SELECT scene_refs_status,scene_refs_error FROM projects WHERE id=?",
+        (project_id,),
+    ).fetchone()
+    conn.execute(
+        "UPDATE projects SET scene_refs_status='running',scene_refs_error=NULL WHERE id=?",
+        (project_id,),
+    )
+    conn.commit()
+    try:
+        task_registry.spawn(
+            "scene_bible",
+            project_id,
+            _scene_bible_task(
+                project_id,
+                parent_run_id=parent_run_id,
+                requested_by=requested_by,
+                trigger_type=trigger_type,
+            ),
+            project_id=project_id,
+        )
+    except Exception as exc:
+        if previous:
+            conn.execute(
+                "UPDATE projects SET scene_refs_status=?,scene_refs_error=? WHERE id=?",
+                (previous["scene_refs_status"], previous["scene_refs_error"], project_id),
+            )
+            conn.commit()
+        raise ValueError("场景设定任务未能启动，原状态已保留，请重试") from exc
+    return True
+
+
 def _decode_scene_target(value: str | list[str] | None) -> str | list[str] | None:
     if not isinstance(value, str):
         return value
@@ -355,9 +398,14 @@ def _decode_scene_target(value: str | list[str] | None) -> str | list[str] | Non
     return value.strip() or None
 
 
-async def _scene_bible_and_refs(project_id: str) -> None:
-    """场景圣经生成 + 落库 + 触发场景图批量出图（在人物谱定稿后调用，与定妆照并行）。
-    场景圣经是增强项：失败只记录到 scene_refs_error，不影响人物谱/分集主流程。"""
+async def _scene_bible_task(
+    project_id: str,
+    *,
+    parent_run_id: str | None = None,
+    requested_by: str = "system",
+    trigger_type: str = "automatic",
+) -> None:
+    """生成并落库场景清单，不绕过费用确认自动生成图片。"""
     from app.stages import generate_scene_bible
     conn = get_conn()
     recorder = WorkflowRecorder.create(
@@ -365,8 +413,10 @@ async def _scene_bible_and_refs(project_id: str) -> None:
         scope_type="project",
         scope_id=project_id,
         input_fingerprint=fingerprint(project_id, "scene_bible"),
-        requested_by="user",
+        requested_by=requested_by,
+        trigger_type=trigger_type,
         policy_snapshot={"max_iterations": 4, "warning_blocks_downstream": True},
+        parent_run_id=parent_run_id,
     )
     try:
         recorder.start()
@@ -389,16 +439,20 @@ async def _scene_bible_and_refs(project_id: str) -> None:
         p2 = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
         data = json.loads(p2["bible_json"]) if p2 and p2["bible_json"] else bible.model_dump()
         data["scenes"] = [s.model_dump() for s in scenes]
-        conn.execute("UPDATE projects SET bible_json=? WHERE id=?",
-                     (json.dumps(data, ensure_ascii=False), project_id))
+        conn.execute(
+            "UPDATE projects SET bible_json=?,scene_refs_status='idle',scene_refs_error=NULL "
+            "WHERE id=?",
+            (json.dumps(data, ensure_ascii=False), project_id),
+        )
         conn.commit()
-        recorder.succeed("场景 Bible 已通过合同")
-        if not _start_scene_refs_generation(project_id, None):
-            raise RuntimeError("场景 Bible 已完成，但场景图任务未能启动")
+        recorder.succeed("场景设定已准备，场景图等待费用确认")
     except asyncio.CancelledError:
-        recorder.cancel()
+        if task_registry.shutdown_in_progress():
+            recorder.pause_external("服务重启，场景设定任务等待自动恢复")
+        else:
+            recorder.cancel()
         raise
-    except Exception as exc:  # noqa: BLE001 场景圣经失败不阻断主流程，仅透出状态
+    except Exception as exc:  # noqa: BLE001 场景设定失败不阻断人物谱主流程
         recorder.fail(exc)
         public = errors.record_and_format(exc, action="scene_bible_generate", context={"project_id": project_id})
         conn.execute("UPDATE projects SET scene_refs_status='failed', scene_refs_error=? WHERE id=?",
@@ -524,8 +578,9 @@ def recover_scene_ref_tasks() -> int:
     """
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id, bible_json, bible_status, scene_refs_target "
-        "FROM projects WHERE scene_refs_status='running'"
+        "SELECT id,bible_json,bible_status,scene_refs_status,scene_refs_target "
+        "FROM projects WHERE scene_refs_status='running' "
+        "OR (scene_refs_status='idle' AND bible_status='ready')"
     ).fetchall()
     resumed = 0
     for row in rows:
@@ -541,6 +596,8 @@ def recover_scene_ref_tasks() -> int:
         except (TypeError, ValueError, json.JSONDecodeError):
             bible = {}
         if bible.get("scenes"):
+            if row["scene_refs_status"] != "running":
+                continue
             parent = conn.execute(
                 "SELECT id FROM workflow_runs WHERE workflow_type='scene_references' "
                 "AND scope_type='project' AND scope_id=? AND status='PAUSED_EXTERNAL' "
@@ -566,11 +623,20 @@ def recover_scene_ref_tasks() -> int:
                 )
                 conn.commit()
             continue
+        parent = conn.execute(
+            "SELECT id FROM workflow_runs WHERE workflow_type='scene_bible' "
+            "AND scope_type='project' AND scope_id=? AND status='PAUSED_EXTERNAL' "
+            "AND recovered_by_run_id IS NULL ORDER BY updated_at DESC LIMIT 1",
+            (project_id,),
+        ).fetchone()
         try:
-            task_registry.spawn(
-                "scene_bible", project_id, _scene_bible_and_refs(project_id), project_id=project_id
-            )
-            resumed += 1
+            if _start_scene_bible_preparation(
+                project_id,
+                parent_run_id=parent["id"] if parent else None,
+                requested_by="system",
+                trigger_type="resume" if row["scene_refs_status"] == "running" else "automatic",
+            ):
+                resumed += 1
         except Exception as exc:  # noqa: BLE001
             public = errors.record_and_format(
                 exc, action="scene_bible_recovery_spawn", context={"project_id": project_id},
@@ -672,6 +738,19 @@ async def _bible_task(
                     (f"人物谱已完成，但定妆任务未能启动，可直接重试定妆。{public}", project_id),
                 )
                 conn.commit()
+            if "scene_refs_status" in project_columns:
+                try:
+                    _start_scene_bible_preparation(project_id)
+                except Exception as exc:  # noqa: BLE001 bible remains deliverable
+                    public = errors.record_and_format(
+                        exc, action="scene_bible_spawn_after_bible",
+                        context={"project_id": project_id},
+                    )
+                    conn.execute(
+                        "UPDATE projects SET scene_refs_status='failed',scene_refs_error=? WHERE id=?",
+                        (f"人物谱已完成，但场景设定未能启动，可在场景库重试。{public}", project_id),
+                    )
+                    conn.commit()
     except asyncio.TimeoutError:
         conn.execute(
             "UPDATE projects SET bible_status='failed', bible_error=? WHERE id=?",
@@ -3446,8 +3525,10 @@ async def start_scene_bible(project_id: str, body: dict | None = None):
     conn = get_conn()
     current = json.loads(p["bible_json"])
     current["scenes"] = confirmed_scenes
-    conn.execute("UPDATE projects SET bible_json=?, scene_refs_status='running', scene_refs_error=NULL WHERE id=?",
-                 (json.dumps(current, ensure_ascii=False), project_id))
+    conn.execute(
+        "UPDATE projects SET bible_json=? WHERE id=?",
+        (json.dumps(current, ensure_ascii=False), project_id),
+    )
     conn.commit()
     if not _start_scene_refs_generation(project_id, names):
         raise HTTPException(409, "场景图正在生成中")

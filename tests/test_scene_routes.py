@@ -106,7 +106,7 @@ def test_scene_bible_preview_accepts_scene_list_return(monkeypatch) -> None:
     assert result["generates_images"] is False
 
 
-def test_scene_bible_handoff_unwraps_recorder_step_result(monkeypatch) -> None:
+def test_scene_bible_preparation_persists_list_without_starting_images(monkeypatch) -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute(
@@ -120,8 +120,6 @@ def test_scene_bible_handoff_unwraps_recorder_step_result(monkeypatch) -> None:
     conn.execute("INSERT INTO projects VALUES('p', ?, 'running', NULL)", (bible_json,))
     conn.execute("INSERT INTO chapters VALUES('p', 1, '青山脚下')")
     conn.commit()
-    started: list[tuple[str, object]] = []
-
     class Recorder:
         run_id = "run-scene-bible"
 
@@ -147,12 +145,15 @@ def test_scene_bible_handoff_unwraps_recorder_step_result(monkeypatch) -> None:
     monkeypatch.setattr(
         bible_ops,
         "_start_scene_refs_generation",
-        lambda project_id, target: started.append((project_id, target)) or True,
+        lambda *_args, **_kwargs: pytest.fail("场景图片必须在独立费用确认后启动"),
     )
 
-    asyncio.run(bible_ops._scene_bible_and_refs("p"))
+    asyncio.run(bible_ops._scene_bible_task("p"))
 
-    project = conn.execute("SELECT bible_json FROM projects WHERE id='p'").fetchone()
+    project = conn.execute(
+        "SELECT bible_json,scene_refs_status,scene_refs_error FROM projects WHERE id='p'"
+    ).fetchone()
     payload = json.loads(project["bible_json"])
     assert payload["scenes"][0]["name"] == "青山脚下"
-    assert started == [("p", None)]
+    assert project["scene_refs_status"] == "idle"
+    assert project["scene_refs_error"] is None

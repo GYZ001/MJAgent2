@@ -151,13 +151,7 @@ def _refs_task_active(project_id: str) -> bool:
     return task_registry.active("refs", project_id)
 
 def _scene_refs_task_active(project_id: str) -> bool:
-    """Whether the image-generation phase itself is active.
-
-    Do not include ``scene_bible`` here: that coroutine deliberately starts the
-    image phase before it returns.  Treating the parent phase as an already
-    active image task makes the hand-off reject itself and leaves the persisted
-    status stuck at ``running``.
-    """
+    """Whether the paid image-generation phase itself is active."""
     return task_registry.active("scene_refs", project_id)
 
 

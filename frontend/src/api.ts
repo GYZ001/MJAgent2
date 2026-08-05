@@ -14,6 +14,23 @@ class ApiError extends Error {
   }
 }
 
+function normalizeNetworkError(error: unknown): Error {
+  if (error instanceof ApiError) return error;
+  const message = error instanceof Error ? error.message : String(error);
+  if (
+    error instanceof TypeError
+    || /Failed to fetch|fetch failed|ECONNREFUSED|NetworkError|Load failed/i.test(message)
+  ) {
+    return new ApiError(
+      0,
+      "无法连接本机后端服务，请等待服务恢复后重试",
+      "BACKEND_UNAVAILABLE",
+      "网络错误",
+    );
+  }
+  return error instanceof Error ? error : new Error(message);
+}
+
 const SESSION_HEADER = "X-Manju-Session";
 const APPROVAL_HEADER = "X-Manju-Approval-Token";
 
@@ -37,7 +54,7 @@ async function ensureSession(forceRefresh = false): Promise<void> {
       })
       .catch((err) => {
         sessionReady = null;
-        throw err;
+        throw normalizeNetworkError(err);
       });
   }
   await sessionReady;
@@ -109,15 +126,20 @@ async function request(
       : undefined,
     options?.approvalToken,
   );
-  const resp = await fetch(`/api${path}`, {
-    method,
-    headers,
-    body: isForm
-      ? options?.form
-      : body !== undefined
-        ? JSON.stringify(body)
-        : undefined,
-  });
+  let resp: Response;
+  try {
+    resp = await fetch(`/api${path}`, {
+      method,
+      headers,
+      body: isForm
+        ? options?.form
+        : body !== undefined
+          ? JSON.stringify(body)
+          : undefined,
+    });
+  } catch (error: unknown) {
+    throw normalizeNetworkError(error);
+  }
 
   // 后端重启后，已打开页面可能仍缓存旧会话。401 表示请求尚未进入业务处理，
   // 因此可以安全地重新领取会话并只重试一次，避免页面永久停在失败/加载状态。
