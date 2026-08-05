@@ -69,6 +69,51 @@ def test_storyboard_authority_projection_excludes_score_only_risk_tags() -> None
     )
 
 
+@pytest.mark.asyncio
+async def test_live_projection_drift_blocks_confirmation_but_not_active_revision(
+    monkeypatch,
+) -> None:
+    case = await _published_narrative_case(monkeypatch)
+    conn = db.get_conn()
+    episode = conn.execute(
+        "SELECT * FROM episodes WHERE id='episode-generic'"
+    ).fetchone()
+    project = conn.execute(
+        "SELECT * FROM projects WHERE id='project-generic'"
+    ).fetchone()
+    drifted = case["board"].model_copy(deep=True)
+    drifted.shots[0].action_desc += " Drifted projection."
+
+    blocked = video_ops.evaluate_storyboard_for_confirmation(
+        episode,
+        drifted,
+        case["screenplay"],
+        video_ops._project_bible_or_placeholder(project),
+        has_real_bible=False,
+        record_metrics=False,
+    )
+
+    assert any(
+        "STORYBOARD_AUTHORITY_PROJECTION_DRIFT" in error
+        for error in blocked.errors
+    )
+
+    active_episode = dict(episode)
+    active_episode["active_storyboard_run_id"] = "run-active-revision"
+    active = video_ops.evaluate_storyboard_for_confirmation(
+        active_episode,
+        drifted,
+        case["screenplay"],
+        video_ops._project_bible_or_placeholder(project),
+        has_real_bible=False,
+        record_metrics=False,
+    )
+    assert not any(
+        "STORYBOARD_AUTHORITY_PROJECTION_DRIFT" in error
+        for error in active.errors
+    )
+
+
 def _assert_optional_review_does_not_revoke_authority(case: dict) -> None:
     episode, evaluation = _episode_and_live_evaluation(case)
     assert video_ops._has_current_storyboard_completion_certificate(db.get_conn(), episode) is True

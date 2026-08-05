@@ -2002,6 +2002,42 @@ async def run_storyboard_supervisor(
         if outline is not None:
             save_checkpoint(cp, run_id=run_id)
 
+    def _normalize_completed_authority_board(
+        board: Storyboard,
+    ) -> list[dict[str, Any]]:
+        repairs: list[dict[str, Any]] = []
+        if not narrative_authority or outline is None:
+            return repairs
+        outline_by_no = {
+            int(brief.shot_no): brief
+            for brief in outline.shots
+        }
+        for index, shot in enumerate(board.shots):
+            brief = outline_by_no.get(int(shot.shot_no))
+            if brief is None:
+                continue
+            normalized, changes = normalize_storyboard_shot_candidate(
+                {
+                    "episode_no": ep_data["episode_no"],
+                    "shot": shot.model_dump(mode="json"),
+                },
+                episode_no=ep_data["episode_no"],
+                shot_no=int(shot.shot_no),
+                **storyboard_shot_authority_context(
+                    screenplay,
+                    brief,
+                    board.shots[index - 1] if index > 0 else None,
+                ),
+            )
+            if not changes:
+                continue
+            board.shots[index] = Shot.model_validate(normalized["shot"])
+            repairs.append({
+                "shot_no": int(shot.shot_no),
+                "fields": [change["field"] for change in changes],
+            })
+        return repairs
+
     # A code/policy update can make a previously pending repair obsolete. Before
     # resuming its provider call, re-evaluate a structurally complete official
     # board and keep it when the current gate already passes.
@@ -2020,6 +2056,7 @@ async def run_storyboard_supervisor(
             and len(current_board.shots) == len(outline.shots)
             and current_board.shots[-1].is_final
         ):
+            _normalize_completed_authority_board(current_board)
             current_evaluation = evaluate_storyboard_for_confirmation(
                 ep_data,
                 current_board,
@@ -2075,65 +2112,41 @@ async def run_storyboard_supervisor(
             if prefix_rows
             else []
         )
-        authority_repairs: list[dict[str, Any]] = []
-        if narrative_authority and outline is not None:
-            outline_by_no = {
-                int(brief.shot_no): brief
-                for brief in outline.shots
-            }
-            for index, shot in enumerate(shots):
-                brief = outline_by_no.get(int(shot.shot_no))
-                if brief is None:
-                    continue
-                normalized, changes = normalize_storyboard_shot_candidate(
-                    {
-                        "episode_no": ep_data["episode_no"],
-                        "shot": shot.model_dump(mode="json"),
-                    },
-                    episode_no=ep_data["episode_no"],
-                    shot_no=int(shot.shot_no),
-                    **storyboard_shot_authority_context(
-                        screenplay,
-                        brief,
-                        shots[index - 1] if index > 0 else None,
-                    ),
-                )
-                if not changes:
-                    continue
-                normalized_shot = Shot.model_validate(normalized["shot"])
-                shots[index] = normalized_shot
+        authority_board = Storyboard(
+            episode_no=ep_data["episode_no"],
+            shots=shots,
+        )
+        authority_repairs = _normalize_completed_authority_board(
+            authority_board,
+        )
+        shots = list(authority_board.shots)
+        if authority_repairs:
+            for repair in authority_repairs:
+                index = int(repair["shot_no"]) - 1
                 _write_shot_fields(
                     conn,
                     prefix_rows[index]["id"],
-                    normalized_shot,
+                    shots[index],
                     prefix_rows[index]["storyboard_artifact_id"],
                     narrative_authority=True,
                 )
-                authority_repairs.append({
-                    "shot_no": int(shot.shot_no),
-                    "fields": [change["field"] for change in changes],
-                })
-            if authority_repairs:
-                conn.commit()
-                prefix_rows = list(_ensure_current_storyboard_shot_artifacts(
-                    conn,
-                    episode_id,
-                    Storyboard(
-                        episode_no=ep_data["episode_no"],
-                        shots=shots,
-                    ),
-                ))
-                if run_id:
-                    evidence_repository.append_event(
-                        run_id,
-                        "STORYBOARD_OUTLINE_AUTHORITY_REBOUND",
-                        "info",
-                        "已从批准大纲确定性恢复镜头叙事权威字段",
-                        payload={
-                            "episode_id": episode_id,
-                            "repairs": authority_repairs,
-                        },
-                    )
+            conn.commit()
+            prefix_rows = list(_ensure_current_storyboard_shot_artifacts(
+                conn,
+                episode_id,
+                authority_board,
+            ))
+            if run_id:
+                evidence_repository.append_event(
+                    run_id,
+                    "STORYBOARD_OUTLINE_AUTHORITY_REBOUND",
+                    "info",
+                    "已从批准大纲确定性恢复镜头叙事权威字段",
+                    payload={
+                        "episode_id": episode_id,
+                        "repairs": authority_repairs,
+                    },
+                )
         if narrative_authority and shots:
             from app.identity_contracts import (
                 canonicalize_storyboard_operational_identities,

@@ -250,6 +250,47 @@ def evaluate_storyboard_for_confirmation(
                 screenplay,
             )
         )
+        try:
+            active_storyboard_run_id = episode["active_storyboard_run_id"]
+            storyboard_artifact_id = episode["storyboard_artifact_id"]
+            completion_certificate_id = episode[
+                "storyboard_completion_certificate_id"
+            ]
+        except (KeyError, IndexError, TypeError):
+            active_storyboard_run_id = getattr(
+                episode,
+                "active_storyboard_run_id",
+                None,
+            )
+            storyboard_artifact_id = getattr(
+                episode,
+                "storyboard_artifact_id",
+                None,
+            )
+            completion_certificate_id = getattr(
+                episode,
+                "storyboard_completion_certificate_id",
+                None,
+            )
+        if (
+            not active_storyboard_run_id
+            and storyboard_artifact_id
+            and completion_certificate_id
+        ):
+            from app.production.certificate import (
+                verify_current_storyboard_completion_authority,
+            )
+
+            try:
+                verify_current_storyboard_completion_authority(
+                    episode=episode,
+                    current_storyboard_content=board.model_dump(mode="json"),
+                )
+            except ValueError as exc:
+                structural_errors.append(
+                    "[STORYBOARD_AUTHORITY_PROJECTION_DRIFT] "
+                    f"当前正式镜头投影与已发布 Artifact/完成凭证不一致：{exc}"
+                )
     stripped = sorted({
         str(change.get("stripped") or "").strip()
         for change in character_changes
