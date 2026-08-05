@@ -67,7 +67,7 @@ export type StartPreview = {
 }
 
 export function storyboardCharacterFilterOptions(shots: Shot[]): string[] {
-  const internalIdentity = /^(?:character|entity|speaker|voice)[-_]/i
+  const internalIdentity = /^(?:character|entity|speaker|voice|passerby)[-_]/i
   return [...new Set(
     shots
       .flatMap(shot => [...(shot.characters ?? []), ...(shot.audio_cast ?? [])])
