@@ -143,6 +143,16 @@ def test_repeated_dialogue_text_has_distinct_occurrence_ids() -> None:
     assert matches[0]["offset"] != matches[1]["offset"]
 
 
+def test_single_character_dialogue_requires_occurrence_proof() -> None:
+    with pytest.raises(HTTPException, match="台词过短"):
+        api._normalize_required_dialogue_lines(["飞！"])
+
+    assert api._normalize_required_dialogue_lines(
+        ["飞！"],
+        allow_single_character=True,
+    ) == ["飞！"]
+
+
 def test_character_discovery_bootstraps_placeholder_bible(monkeypatch) -> None:
     conn = db.get_conn()
     conn.execute(

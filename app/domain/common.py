@@ -44,7 +44,11 @@ BIBLE_INTERRUPTED_ERROR = "人物谱任务已中断（服务重载或后台任�
 FALLBACK_VISUAL_STYLE = "国漫风格，非真人CG渲染，统一电影感光影，暖灰色调"
 
 
-def _normalize_required_dialogue_lines(value) -> list[str]:
+def _normalize_required_dialogue_lines(
+    value,
+    *,
+    allow_single_character: bool = False,
+) -> list[str]:
     if value in (None, ""):
         return []
     if not isinstance(value, list):
@@ -58,7 +62,7 @@ def _normalize_required_dialogue_lines(value) -> list[str]:
         if not line:
             continue
         content = condense(strip_speaker(line))
-        if len(content) < 2:
+        if len(content) < 2 and not allow_single_character:
             raise HTTPException(422, f"必保留原文台词过短：{line}")
         if len(line) > 160:
             raise HTTPException(422, f"单条必保留原文台词不能超过 160 字：{line[:30]}…")

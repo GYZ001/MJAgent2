@@ -1280,7 +1280,8 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
         if str(value).strip()
     ]
     requested_dialogues = _normalize_required_dialogue_lines(
-        body.get("required_dialogue_lines") or []
+        body.get("required_dialogue_lines") or [],
+        allow_single_character=bool(requested_occurrence_ids),
     )
     routed = await ui_route(
         "screenplay.generate",
@@ -1340,7 +1341,8 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
             })
         if requested_occurrence_ids:
             requested_dialogues = _normalize_required_dialogue_lines(
-                [by_id[value]["text"] for value in requested_occurrence_ids]
+                [by_id[value]["text"] for value in requested_occurrence_ids],
+                allow_single_character=True,
             )
         _validate_required_dialogues_against_source(
             requested_dialogues, source_text
