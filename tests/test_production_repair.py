@@ -1509,7 +1509,7 @@ def test_unassigned_affective_state_creates_nested_target_delta():
                     "audience_state_id": "AS-IN",
                     "audience_prior_id": "AP-1",
                     "anchor": {"type": "event", "id": "E-1"},
-                    "affective_state": {"tension": 0.2},
+                    "affective_state": {},
                 },
                 {
                     "audience_state_id": "AS-OUT",
@@ -1549,8 +1549,12 @@ def test_unassigned_affective_state_creates_nested_target_delta():
     assert operations[0].target["parent_id"] == "XP-AFFECT"
     assert operations[0].target["parent_field"] == "target_deltas"
     assert operations[0].value["dimension"] == "affective"
-    assert operations[0].value["from_state"] == {"tension": 0.2}
-    assert operations[0].value["to_state"] == {"tension": 0.9}
+    assert operations[0].value["from_state"] == {
+        "affective_state": {},
+    }
+    assert operations[0].value["to_state"] == {
+        "affective_state": {"tension": 0.9},
+    }
     assert _patch_strategy_key(operations) == (
         "create_node:XD-XP-AFFECT-affective:node"
     )

@@ -1170,8 +1170,16 @@ def plan_screenplay_patch(
                                     f"{path_id} 的观众情绪由入场状态"
                                     "变化到目标出场状态"
                                 ),
-                                "from_state": dict(state_in.affective_state),
-                                "to_state": dict(state_out.affective_state),
+                                "from_state": {
+                                    "affective_state": dict(
+                                        state_in.affective_state
+                                    ),
+                                },
+                                "to_state": {
+                                    "affective_state": dict(
+                                        state_out.affective_state
+                                    ),
+                                },
                                 "required_processing_s": 0.0,
                                 "deadline_event_id": deadline_event_id,
                             },
@@ -2475,6 +2483,56 @@ def _normalize_screenplay_narrative_graph(
                         state_out.get("attention_residue_ids") or []
                     ),
                 }
+
+            if state_in.get("affective_state") != state_out.get(
+                "affective_state"
+            ):
+                affective_delta = next((
+                    delta
+                    for delta in deltas
+                    if str(delta.get("dimension") or "") == "affective"
+                ), None)
+                if affective_delta is None:
+                    affective_delta = {
+                        "target_delta_id": unique_delta_id(
+                            str(path.get("audience_path_id") or "path"),
+                            "affective",
+                        ),
+                        "dimension": "affective",
+                        "proposition_ids": [],
+                        "description": "绑定观众入场与目标出场的情绪状态变化",
+                        "target_confidence": None,
+                        "required_processing_s": 0.0,
+                        "deadline_event_id": deadline_event_id,
+                        "primary_delivery_window_id": window_id,
+                        "custom_dimension": None,
+                    }
+                    deltas.append(affective_delta)
+                    changes.append({
+                        "kind": "audience_affective_delta",
+                        "id": affective_delta["target_delta_id"],
+                    })
+                affective_delta["from_state"] = {
+                    "affective_state": dict(
+                        state_in.get("affective_state") or {}
+                    ),
+                }
+                affective_delta["to_state"] = {
+                    "affective_state": dict(
+                        state_out.get("affective_state") or {}
+                    ),
+                }
+                if not affective_delta.get("deadline_event_id"):
+                    affective_delta["deadline_event_id"] = deadline_event_id
+                if (
+                    not affective_delta.get("primary_delivery_window_id")
+                    and window_id
+                ):
+                    affective_delta["primary_delivery_window_id"] = window_id
+                changes.append({
+                    "kind": "audience_affective_delta_state",
+                    "id": affective_delta["target_delta_id"],
+                })
 
             if (
                 state_in.get("active_question_ids")

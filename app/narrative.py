@@ -255,18 +255,20 @@ def _target_state_fragment_matches(delta: Any, fragment: dict[str, Any], state: 
     if dimension == "character_goal":
         actual = state.character_goal_hypotheses
         if set(fragment) == {"character_goal_hypotheses"}:
-            return _json_fragment_matches(fragment["character_goal_hypotheses"], actual)
+            return fragment["character_goal_hypotheses"] == actual
         return _json_fragment_matches(fragment, actual)
     if dimension == "spatial_temporal":
         wrapped = {
             "spatial_model": state.spatial_model,
             "temporal_model": state.temporal_model,
         }
+        if fragment and set(fragment).issubset(wrapped):
+            return all(fragment[key] == wrapped[key] for key in fragment)
         return _json_fragment_matches(fragment, wrapped)
     if dimension == "affective":
         actual = state.affective_state
         if set(fragment) == {"affective_state"}:
-            return _json_fragment_matches(fragment["affective_state"], actual)
+            return fragment["affective_state"] == actual
         return _json_fragment_matches(fragment, actual)
     if dimension == "question":
         return _json_fragment_matches(
