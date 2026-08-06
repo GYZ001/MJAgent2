@@ -282,7 +282,11 @@ def _target_state_fragment_matches(delta: Any, fragment: dict[str, Any], state: 
             {
                 "attention_residue_ids": state.attention_residue_ids,
                 "working_memory": [
-                    item.model_dump(mode="json")
+                    (
+                        item.model_dump(mode="json")
+                        if hasattr(item, "model_dump")
+                        else item
+                    )
                     for item in state.working_memory
                 ],
             },
@@ -842,7 +846,14 @@ def validate_screenplay_narrative(
                 errors.append(f"[EVENT_PRECONDITION_FROM_FUTURE] {event_id} 依赖由未来事件 {producer} 才产生的 {fact_id}")
 
     initial_facts = set(plan.initial_state_fact_ids)
-    produced_facts = set(fact_producer)
+    produced_facts = {
+        *fact_producer,
+        *(
+            fact_id
+            for action in index.actions.values()
+            for fact_id in action.effects_add
+        ),
+    }
     if initial_facts & produced_facts:
         errors.append(
             f"[INITIAL_FACT_HAS_PRODUCER] 初始事实不得同时由本作用域事件产生："
@@ -1425,11 +1436,11 @@ def validate_screenplay_narrative(
                         f"入/出状态的结构变化没有 target_delta 负责：{sorted(uncovered_fields)}"
                     )
                 before_by_prop = {
-                    item.proposition_id: item.model_dump(mode="json", exclude={"proposition_id"})
+                    item.proposition_id: (item.stance, item.confidence)
                     for item in state_in.beliefs
                 }
                 after_by_prop = {
-                    item.proposition_id: item.model_dump(mode="json", exclude={"proposition_id"})
+                    item.proposition_id: (item.stance, item.confidence)
                     for item in state_out.beliefs
                 }
                 changed_belief_props = {

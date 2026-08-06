@@ -586,6 +586,7 @@ def test_narrative_normalizer_closes_action_facts_and_removes_noop_deltas():
                 "experience_intent_id": "XI1",
                 "scope_id": "ep_p",
                 "anchor_event_ids": ["E1"],
+                "attention_target_ids": ["P1"],
                 "director_objective": "Register the event.",
                 "audience_paths": [{
                     "audience_path_id": "XP1",
@@ -647,6 +648,14 @@ def test_narrative_normalizer_closes_action_facts_and_removes_noop_deltas():
         path.audience_prior_id
         for path in script.narrative_plan.experience_intents[0].audience_paths
     } == {"AP1", "AP2"}
+    ap2_path = next(
+        path
+        for path in script.narrative_plan.experience_intents[0].audience_paths
+        if path.audience_prior_id == "AP2"
+    )
+    assert len(ap2_path.target_deltas) == 1
+    assert ap2_path.target_deltas[0].dimension == "attention"
+    assert ap2_path.audience_state_in_id != ap2_path.audience_state_out_target_id
     assert {
         path.audience_prior_id
         for path in script.narrative_plan.scene_contracts[0].audience_state_paths

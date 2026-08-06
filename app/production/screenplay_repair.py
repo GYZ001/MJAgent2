@@ -891,6 +891,87 @@ def plan_screenplay_patch(
                         },
                     )]
 
+    dramatic_state_match = re.search(
+        r"\]\s*([^/\s]+)/([^\s]+)\s+的执行者\s+([^\s]+)"
+        r"\s+缺少目标/情绪/关系状态",
+        issue.message or "",
+    )
+    if (
+        code == "CHARACTER_DRAMATIC_STATE_MISSING"
+        and dramatic_state_match
+        and script.narrative_plan is not None
+    ):
+        event_id, action_id, actor_id = dramatic_state_match.groups()
+        strategy = f"create_dramatic_state_{event_id}_{action_id}_{actor_id}"
+        if not _strategy_was_tried(tried, strategy):
+            plan = script.narrative_plan
+            event = next(
+                (item for item in plan.events if item.event_id == event_id),
+                None,
+            )
+            action = next(
+                (
+                    item for item in plan.atomic_actions
+                    if item.action_id == action_id
+                ),
+                None,
+            )
+            if (
+                event is not None
+                and action is not None
+                and action_id in event.action_ids
+                and actor_id in action.actor_ids
+            ):
+                existing_ids = {
+                    item.character_state_id
+                    for item in plan.character_states
+                }
+                state_no = 1
+                while f"CDS-{state_no}" in existing_ids:
+                    state_no += 1
+                state_id = f"CDS-{state_no}"
+                evidence_ids = [
+                    item.evidence_id
+                    for item in plan.evidence
+                    if (
+                        item.anchor.type == "event"
+                        and item.anchor.id == event_id
+                        and actor_id in item.perceivable_by
+                    )
+                ]
+                return [PatchOperation(
+                    op="create_node",
+                    target={
+                        "kind": "narrative_node",
+                        "collection": "character_states",
+                        "id": state_id,
+                        "strategy": strategy,
+                    },
+                    value={
+                        "character_state_id": state_id,
+                        "character_id": actor_id,
+                        "anchor": {"type": "event", "id": event_id},
+                        "goal_proposition_ids": list(
+                            event.proposition_ids
+                        ),
+                        "stakes_proposition_ids": [],
+                        "relationship_state": {},
+                        "emotion": {
+                            "label": "事件压力",
+                            "intensity": max(
+                                0.0,
+                                min(1.0, float(event.salience or 0)),
+                            ),
+                            "observable_evidence": evidence_ids,
+                        },
+                        "pressure": max(
+                            0.0,
+                            min(1.0, float(event.salience or 0)),
+                        ),
+                        "tactic": action.semantic_intent,
+                    },
+                )]
+
     delta_match = re.search(
         r"\]\s*([^\s.]+)\.(from_state|to_state)\s+不是",
         issue.message or "",
@@ -1185,6 +1266,42 @@ def plan_screenplay_patch(
                             },
                         )]
 
+    recall_decision_match = re.search(
+        r"\]\s*([^\s.]+)\.recall_needed=(?:False|false)"
+        r"\s+与低分位记忆结果\s+(?:True|true)\s+不一致",
+        issue.message or "",
+    )
+    if (
+        code == "SETUP_RECALL_DECISION_MISMATCH"
+        and recall_decision_match
+        and script.narrative_plan is not None
+    ):
+        payoff_id = recall_decision_match.group(1)
+        strategy = f"enable_recall_{payoff_id}"
+        if not _strategy_was_tried(tried, strategy):
+            payoff = next(
+                (
+                    item
+                    for item in (
+                        script.narrative_plan.setup_payoff_contracts
+                    )
+                    if item.setup_payoff_id == payoff_id
+                ),
+                None,
+            )
+            if payoff is not None:
+                return [PatchOperation(
+                    op="replace_field",
+                    path="recall_needed",
+                    value=True,
+                    target={
+                        "kind": "narrative_node",
+                        "collection": "setup_payoff_contracts",
+                        "id": payoff_id,
+                        "strategy": strategy,
+                    },
+                )]
+
     recall_task_match = re.search(
         r"\]\s*([^/\s]+)/([^\s]+)\s+在使用前已遗忘\s+\[([^\]]+)\]",
         issue.message or "",
@@ -1210,8 +1327,27 @@ def plan_screenplay_patch(
             for path in intent.audience_paths
             if path.audience_prior_id == prior_id
         ]
-        if payoff is not None and len(paths) == 1 and missing_propositions:
-            intent, path = paths[0]
+        payoff_event_ids = set(
+            payoff.payoff_event_ids if payoff is not None else []
+        )
+        payoff_paths = [
+            (intent, path)
+            for intent, path in paths
+            if (
+                payoff_event_ids.intersection(intent.anchor_event_ids)
+                or any(
+                    delta.deadline_event_id in payoff_event_ids
+                    for delta in path.target_deltas
+                )
+            )
+        ]
+        selected_paths = payoff_paths if len(payoff_paths) == 1 else paths
+        if (
+            payoff is not None
+            and len(selected_paths) == 1
+            and missing_propositions
+        ):
+            intent, path = selected_paths[0]
             downstream_event = next(
                 iter(payoff.payoff_event_ids),
                 payoff.retention_deadline_event_id,
@@ -2363,6 +2499,14 @@ def _normalize_screenplay_narrative_graph(
             and str(item.get("audience_state_id") or "").strip()
         )
     }
+    audience_priors_by_id = {
+        str(item.get("audience_prior_id") or ""): item
+        for item in (data.get("audience_priors") or [])
+        if (
+            isinstance(item, dict)
+            and str(item.get("audience_prior_id") or "").strip()
+        )
+    }
     evidence_for_proposition = {
         proposition_id: [
             evidence_id
@@ -2477,12 +2621,101 @@ def _normalize_screenplay_narrative_graph(
                 path_id = f"{base_path_id}-{suffix}"
                 suffix += 1
             used_path_ids.add(path_id)
+            target_state_id = state_id
+            target_deltas: list[dict[str, Any]] = []
+            attention_targets = [
+                str(item)
+                for item in (
+                    intent.get("attention_target_ids") or []
+                )
+                if str(item or "").strip()
+            ]
+            source_state = audience_states_by_id.get(state_id)
+            anchor_event_id = str(
+                (intent.get("anchor_event_ids") or [""])[-1]
+            )
+            if attention_targets and source_state is not None:
+                base_state_id = (
+                    f"AS-{prior_id}-"
+                    f"{intent.get('experience_intent_id')}-COARSE"
+                )
+                target_state_id = base_state_id
+                state_suffix = 2
+                while target_state_id in audience_states_by_id:
+                    target_state_id = (
+                        f"{base_state_id}-{state_suffix}"
+                    )
+                    state_suffix += 1
+                target_state = deepcopy(source_state)
+                target_state["audience_state_id"] = target_state_id
+                target_state["anchor"] = {
+                    "type": "event",
+                    "id": anchor_event_id,
+                }
+                before_attention = list(
+                    source_state.get("attention_residue_ids") or []
+                )
+                after_attention = list(dict.fromkeys([
+                    *before_attention,
+                    *attention_targets,
+                ]))
+                before_memory = deepcopy(
+                    source_state.get("working_memory") or []
+                )
+                after_memory = deepcopy(before_memory)
+                if after_attention == before_attention:
+                    remembered = {
+                        str(item.get("proposition_id") or "")
+                        for item in after_memory
+                        if isinstance(item, dict)
+                    }
+                    for proposition_id in attention_targets:
+                        if proposition_id in remembered:
+                            continue
+                        after_memory.append({
+                            "proposition_id": proposition_id,
+                            "retention_confidence": 0.7,
+                        })
+                target_state["attention_residue_ids"] = after_attention
+                target_state["working_memory"] = after_memory
+                data.setdefault("audience_states", []).append(
+                    target_state
+                )
+                audience_states_by_id[target_state_id] = target_state
+                states_by_prior.setdefault(prior_id, []).append(
+                    target_state_id
+                )
+                delta_id = unique_delta_id(path_id, "attention")
+                event = events_by_id.get(anchor_event_id) or {}
+                target_deltas.append({
+                    "target_delta_id": delta_id,
+                    "dimension": "attention",
+                    "proposition_ids": attention_targets,
+                    "description": (
+                        "为缺失先验路径登记当前意图的注意目标"
+                    ),
+                    "from_state": {
+                        "attention_residue_ids": before_attention,
+                        "working_memory": before_memory,
+                    },
+                    "to_state": {
+                        "attention_residue_ids": after_attention,
+                        "working_memory": after_memory,
+                    },
+                    "target_confidence": None,
+                    "required_processing_s": 0.5,
+                    "deadline_event_id": anchor_event_id,
+                    "primary_delivery_window_id": event.get(
+                        "primary_delivery_window_id"
+                    ),
+                    "custom_dimension": None,
+                })
             path = {
                 "audience_path_id": path_id,
                 "audience_prior_id": prior_id,
                 "audience_state_in_id": state_id,
-                "audience_state_out_target_id": state_id,
-                "target_deltas": [],
+                "audience_state_out_target_id": target_state_id,
+                "target_deltas": target_deltas,
             }
             paths.append(path)
             paths_by_prior[prior_id] = path
@@ -2493,7 +2726,8 @@ def _normalize_screenplay_narrative_graph(
                     "experience_intent_id"
                 ),
                 "audience_prior_id": prior_id,
-                "state_id": state_id,
+                "state_in_id": state_id,
+                "state_out_id": target_state_id,
             })
         for prior_id, path in paths_by_prior.items():
             state_id = str(
@@ -2571,6 +2805,15 @@ def _normalize_screenplay_narrative_graph(
                 for item in (state_in.get("beliefs") or [])
                 if isinstance(item, dict)
             }
+            prior = audience_priors_by_id.get(
+                str(path.get("audience_prior_id") or "")
+            ) or {}
+            assumed_unknown = {
+                str(item)
+                for item in (
+                    prior.get("assumed_unknown_proposition_ids") or []
+                )
+            }
             outgoing_beliefs = {
                 str(item.get("proposition_id") or ""): item
                 for item in (state_out.get("beliefs") or [])
@@ -2579,6 +2822,28 @@ def _normalize_screenplay_narrative_graph(
             for delta in deltas:
                 if str(delta.get("dimension") or "") != "belief":
                     continue
+                for proposition_id in delta.get("proposition_ids") or []:
+                    proposition_id = str(proposition_id)
+                    if (
+                        proposition_id in incoming_beliefs
+                        or proposition_id not in assumed_unknown
+                    ):
+                        continue
+                    unknown_belief = {
+                        "proposition_id": proposition_id,
+                        "stance": "unknown",
+                        "confidence": 0.0,
+                        "evidence_ids": [],
+                    }
+                    state_in.setdefault("beliefs", []).append(
+                        unknown_belief
+                    )
+                    incoming_beliefs[proposition_id] = unknown_belief
+                    changes.append({
+                        "kind": "audience_prior_unknown_belief",
+                        "id": state_in.get("audience_state_id"),
+                        "proposition_id": proposition_id,
+                    })
                 for proposition_id in delta.get("proposition_ids") or []:
                     proposition_id = str(proposition_id)
                     if proposition_id in outgoing_beliefs:
