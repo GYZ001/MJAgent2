@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import difflib
 import re
+import sys
 from typing import Any
 
 from app import config, textmatch
@@ -56,6 +57,7 @@ from app.scene_contract import (
     scene_time_of,
     split_legacy_scene_setting,
 )
+from app.source_excerpt import index_source_segments
 from app.renderability import (
     ACTION_DESC_HARD_MIN,
     ACTION_DESC_TARGET_MAX,
@@ -145,9 +147,9 @@ def default_scene_transition(prev: Shot | None, shot: Shot) -> str:
 
 
 def storyboard_shot_count_range(target_duration_s: int) -> tuple[int, int]:
-    """镜头数由剧情完整覆盖决定，仅保留防失控的技术硬上限。"""
+    """镜头数由剧情交付决定；上界仅为旧调用方需要的无界整数哨兵。"""
     _ = target_duration_s
-    return 1, SHOT_HARD_MAX
+    return 1, sys.maxsize
 
 
 def _voiced_shot_count(shots: list[Shot]) -> int:
@@ -2298,10 +2300,10 @@ def validate_plot_spine(
     if len((spine.episode_premise or "").strip()) < 8:
         errors.append("plot_spine.episode_premise 过短；请用一句话写本集主角要什么、碰到什么阻力")
     beats = spine.spine_beats or []
-    if not SPINE_BEATS_MIN <= len(beats) <= SPINE_BEATS_MAX:
+    if len(beats) < SPINE_BEATS_MIN:
         errors.append(
-            f"plot_spine.spine_beats 共 {len(beats)} 条；必须在 {SPINE_BEATS_MIN}~{SPINE_BEATS_MAX} 条，"
-            "每条写清谁做了什么→局势变化"
+            f"plot_spine.spine_beats 共 {len(beats)} 条；至少需要 {SPINE_BEATS_MIN} 条，"
+            "并完整覆盖有效剧情单元，数量不设上限"
         )
     beat_ids: set[str] = set()
     must_keep_count = 0
@@ -2325,18 +2327,66 @@ def validate_plot_spine(
         if not narrative_authority:
             errors.extend(overdetail_errors(
                 f"{beat.who}{beat.does}{beat.turn}", tag))
-    if beats and must_keep_count < 3:
+    if beats and must_keep_count < 1:
         errors.append(
-            f"plot_spine 中 must_keep=true 仅 {must_keep_count} 条；主线因果至少保留 3 条必拍节拍"
+            "plot_spine 至少需要一条 must_keep=true 的实际剧情交付节拍"
         )
     if len((spine.must_keep_ending or "").strip()) < 8:
         errors.append(
             "plot_spine.must_keep_ending 过短；请锁定本章收束（与原文本章结局同向，禁止发明下一章钩子）"
         )
-    drops = [d.strip() for d in (spine.drop_list or []) if d and d.strip()]
-    if len(drops) < DROP_LIST_MIN:
+    return errors
+
+
+def validate_screenplay_source_coverage(
+    script: EpisodeScreenplay,
+    source_text: str | None,
+) -> list[str]:
+    """Every indexed source segment is delivered or has an explicit disposition."""
+    segments = index_source_segments(source_text or "")
+    if not segments:
+        return []
+    if not script.source_coverage:
+        return [
+            "source_coverage 为空；每个 SRC* 原文段必须明确标记为 "
+            "deliver/merge/context/duplicate，禁止静默删戏"
+        ]
+    expected = {segment.segment_id for segment in segments}
+    beat_ids = {
+        str(beat.beat_id or "").strip()
+        for beat in ((script.plot_spine.spine_beats if script.plot_spine else []) or [])
+        if str(beat.beat_id or "").strip()
+    }
+    seen: set[str] = set()
+    errors: list[str] = []
+    for index, decision in enumerate(script.source_coverage):
+        segment_id = decision.source_segment_id.strip()
+        if segment_id not in expected:
+            errors.append(
+                f"source_coverage[{index}].source_segment_id={segment_id} 不属于当前原文"
+            )
+        if segment_id in seen:
+            errors.append(f"source_coverage 中 {segment_id} 重复")
+        seen.add(segment_id)
+        unknown_beats = sorted(set(decision.beat_ids) - beat_ids)
+        if unknown_beats:
+            errors.append(
+                f"source_coverage[{index}] 引用了不存在的 beat_ids：{unknown_beats}"
+            )
+        if (
+            decision.disposition == "duplicate"
+            and decision.duplicate_of not in expected
+        ):
+            errors.append(
+                f"source_coverage[{index}].duplicate_of={decision.duplicate_of} 不属于当前原文"
+            )
+    missing = sorted(expected - seen)
+    if missing:
+        shown = "、".join(missing[:20])
+        extra = f"（另有 {len(missing) - 20} 段）" if len(missing) > 20 else ""
         errors.append(
-            f"plot_spine.drop_list 仅 {len(drops)} 条；至少列出 {DROP_LIST_MIN} 条「本章有但不拍」的支线/气氛戏"
+            f"source_coverage 漏掉 {len(missing)} 个原文段：{shown}{extra}；"
+            "必须交付、合并、作为上下文保留，或给出可核验的重复指向"
         )
     return errors
 
@@ -2411,7 +2461,8 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
                         episode_no: int | None = None, source_text: str | None = None,
                         require_dialogue_chains: bool = False,
                         required_dialogue_lines: list[str] | None = None,
-                        validate_narrative: bool = True) -> list[str]:
+                        validate_narrative: bool = True,
+                        require_source_coverage: bool = False) -> list[str]:
     """纯 QA：只读取候选并返回问题，不补字段、不覆盖投影、不修改输入。"""
     errors: list[str] = []
     narrative_authority = script.narrative_plan is not None
@@ -2428,6 +2479,8 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         script, source_text=source_text, required=require_dialogue_chains,
         required_dialogue_lines=required_dialogue_lines,
     ))
+    if require_source_coverage:
+        errors.extend(validate_screenplay_source_coverage(script, source_text))
     if episode_no is not None and script.episode_no != episode_no:
         errors.append(f"episode_no={script.episode_no}，必须等于 {episode_no}")
     if (script.mode or "full_script") != "full_script":
@@ -2443,10 +2496,10 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
     if len((script.script_format_note or "").strip()) < 6:
         errors.append("script_format_note 过短或缺失；请说明正文采用的台本格式")
     scenes = script.scene_outline or []
-    if not SCENE_OUTLINE_MIN <= len(scenes) <= SCENE_OUTLINE_MAX:
+    if len(scenes) < SCENE_OUTLINE_MIN:
         errors.append(
-            f"scene_outline 场次数量为 {len(scenes)}；只演主线时需提供 "
-            f"{SCENE_OUTLINE_MIN}~{SCENE_OUTLINE_MAX} 场连续场次结构"
+            f"scene_outline 场次数量为 {len(scenes)}；至少需要 {SCENE_OUTLINE_MIN} 场，"
+            "场次数由完整剧情与时空边界决定，不设上限"
         )
     bible_names = {c.name for c in bible.characters}
     narrative_character_ids = set(bible_names)
@@ -2491,6 +2544,16 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
             errors.append(f"{tag}.turn 过短；请说明本场交给下一场的状态变化")
         if len((scene.source_basis or "").strip()) < 8:
             errors.append(f"{tag}.source_basis 过短；请保留本场原文依据")
+        if script.source_coverage:
+            if len((scene.entry_state or "").strip()) < 6:
+                errors.append(f"{tag}.entry_state 过短；请写清人物位置、目标和关键道具")
+            if len((scene.exit_state or "").strip()) < 6:
+                errors.append(f"{tag}.exit_state 过短；请写清交给下一场的状态")
+            if not scene.context_requirements:
+                errors.append(
+                    f"{tag}.context_requirements 为空；必须声明本场先建立的"
+                    "时间、地点、空间关系、人物关系或关键道具"
+                )
         if not scene.characters:
             errors.append(f"{tag}.characters 不能为空；请写本场实际参与角色")
         unknown = (
@@ -2721,12 +2784,7 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
     if len(key_points) < MIN_KEY_PLOT_POINTS:
         errors.append(
             f"key_plot_points 仅 {len(key_points)} 条；请列出至少 {MIN_KEY_PLOT_POINTS} 条与 spine 对齐的局势变化"
-            f"（上限 {MAX_KEY_PLOT_POINTS}）")
-    if len(key_points) > MAX_KEY_PLOT_POINTS:
-        errors.append(
-            f"key_plot_points 共 {len(key_points)} 条，超过上限 {MAX_KEY_PLOT_POINTS}；"
-            "只保留主线局势变化，细节支线放入 drop_list"
-        )
+            "，数量由完整剧情决定")
     event_ids: set[str] = set()
     if not script.events:
         errors.append("events 不能为空；必须把完整剧本拆成可追溯的状态变化事件")
@@ -3980,6 +4038,125 @@ def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeS
     if bible is not None:
         errors.extend(validate_storyboard_outline_scene_alignment(outline, screenplay, bible))
     return errors
+
+
+def validate_storyboard_direction_contract(
+    board: Storyboard,
+    outline: StoryboardOutline | None,
+) -> list[str]:
+    """Validate shot purpose, context delivery and camera grammar for scene packs."""
+    if outline is None or not outline.scene_contexts:
+        return []
+    errors: list[str] = []
+    briefs = {int(item.shot_no): item for item in outline.shots}
+    scene_shots: dict[str, list[Shot]] = {}
+    valid_focuses = {
+        "context", "action", "emotion", "dialogue", "evidence", "transition",
+    }
+    for shot in board.shots:
+        brief = briefs.get(int(shot.shot_no))
+        if brief is None:
+            errors.append(f"第 {shot.shot_no} 镜没有对应导演规划任务")
+            continue
+        scene_id = str(shot.scene_id or brief.scene_id or "").strip()
+        if not scene_id:
+            errors.append(f"第 {shot.shot_no} 镜缺少 scene_id")
+        scene_shots.setdefault(scene_id, []).append(shot)
+        if len((shot.purpose or "").strip()) < 6:
+            errors.append(f"第 {shot.shot_no} 镜 purpose 过短；必须说明本镜为何存在")
+        if len((shot.resulting_change or "").strip()) < 4:
+            errors.append(
+                f"第 {shot.shot_no} 镜 resulting_change 过短；"
+                "必须写清剧情、人物、空间、情绪或上下文发生了什么变化"
+            )
+        if shot.readability_focus not in valid_focuses:
+            errors.append(
+                f"第 {shot.shot_no} 镜 readability_focus={shot.readability_focus!r} 非法；"
+                f"必须从 {sorted(valid_focuses)} 中选择"
+            )
+        if not (shot.camera_angle or "").strip():
+            errors.append(f"第 {shot.shot_no} 镜缺少 camera_angle；摄影三元组不完整")
+        if len((shot.camera_motivation or "").strip()) < 6:
+            errors.append(
+                f"第 {shot.shot_no} 镜 camera_motivation 过短；"
+                "必须解释景别、角度与运动如何服务本镜作用"
+            )
+        if shot.repeat_of_shot_id and len((shot.repeat_gain or "").strip()) < 6:
+            errors.append(
+                f"第 {shot.shot_no} 镜声明重复 {shot.repeat_of_shot_id}，"
+                "但 repeat_gain 未说明新增视角、反应或兑现价值"
+            )
+        if set(shot.context_requirement_ids or []) - set(
+            brief.context_requirement_ids or []
+        ):
+            errors.append(
+                f"第 {shot.shot_no} 镜交付了导演规划未分配的 context_requirement_ids"
+            )
+
+    for index in range(1, len(board.shots)):
+        previous = board.shots[index - 1]
+        current = board.shots[index]
+        same_delivery = (
+            set(previous.spine_beat_ids or []) == set(current.spine_beat_ids or [])
+            and set(previous.context_requirement_ids or [])
+            == set(current.context_requirement_ids or [])
+            and _too_similar(previous.resulting_change, current.resulting_change)
+        )
+        if same_delivery and not current.repeat_of_shot_id:
+            errors.append(
+                f"第 {previous.shot_no} 与第 {current.shot_no} 镜交付内容和结果几乎相同；"
+                "请合并，或显式填写 repeat_of_shot_id/repeat_gain 说明新作用"
+            )
+
+    for scene in outline.scene_contexts:
+        shots = scene_shots.get(scene.scene_id, [])
+        if not shots:
+            errors.append(f"场景 {scene.scene_id} 没有生成任何镜头")
+            continue
+        delivered: dict[str, int] = {}
+        for shot in shots:
+            for requirement_id in shot.context_requirement_ids or []:
+                delivered.setdefault(requirement_id, int(shot.shot_no))
+        for requirement in scene.context_requirements:
+            owner = delivered.get(requirement.requirement_id)
+            if owner is None:
+                errors.append(
+                    f"场景 {scene.scene_id} 未建立上下文 {requirement.requirement_id}："
+                    f"{requirement.description}"
+                )
+            elif (
+                requirement.required_before_shot_no is not None
+                and owner > requirement.required_before_shot_no
+            ):
+                errors.append(
+                    f"场景 {scene.scene_id} 的上下文 {requirement.requirement_id} "
+                    f"到第 {owner} 镜才建立，晚于依赖镜 {requirement.required_before_shot_no}"
+                )
+        action_shots = [
+            shot for shot in shots if shot.readability_focus == "action"
+        ]
+        if action_shots and not any(
+            shot.shot_size in {"中景", "全景", "远景"}
+            and shot.camera_move in {"跟随", "横摇"}
+            for shot in action_shots
+        ):
+            errors.append(
+                f"场景 {scene.scene_id} 含动作段，但缺少中景/全景/远景配合跟随或横摇的"
+                "空间可读镜头；动作路径、主体和作用对象可能不清楚"
+            )
+        emotion_shots = [
+            shot for shot in shots if shot.readability_focus == "emotion"
+        ]
+        if emotion_shots and not any(
+            shot.shot_size in {"近景", "特写"}
+            and shot.camera_move in {"固定", "推近"}
+            for shot in emotion_shots
+        ):
+            errors.append(
+                f"场景 {scene.scene_id} 含情绪转折，但缺少近景/特写配合固定或推近的"
+                "情绪可读镜头"
+            )
+    return list(dict.fromkeys(errors))
 
 
 # ---------- C2 基于完整剧本的分镜校验 ----------

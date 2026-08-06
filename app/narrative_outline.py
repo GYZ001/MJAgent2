@@ -7,7 +7,6 @@ from typing import Any
 
 from app import config
 from app.narrative import _target_state_fragment_matches
-from app.renderability import SHOT_HARD_MAX
 from app.schemas import (
     AudienceStatePathRef,
     EpisodeScreenplay,
@@ -521,9 +520,6 @@ def normalize_narrative_storyboard_outline(
             main.key_line_ids = []
             main.audio_cast = []
         nodes.append((event.event_id, "main", main))
-
-    if len(nodes) > SHOT_HARD_MAX:
-        return []
 
     for position, (_event_id, _role, shot) in enumerate(nodes, start=1):
         shot.shot_no = position

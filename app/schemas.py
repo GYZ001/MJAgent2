@@ -992,6 +992,7 @@ class Shot(BaseModel):
     is_final: bool = False
     context_requirement_ids: list[str] = Field(default_factory=list)
     resulting_change: str = ""
+    readability_focus: str = ""
     camera_motivation: str = ""
     repeat_of_shot_id: str | None = None
     repeat_gain: str = ""
@@ -1058,6 +1059,7 @@ class StoryboardOutlineShot(BaseModel):
     purpose: str = ""
     context_requirement_ids: list[str] = Field(default_factory=list)
     resulting_change: str = ""
+    readability_focus: str = ""
     camera_size: str = ""
     camera_angle: str = ""
     camera_movement: str = ""

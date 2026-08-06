@@ -1639,6 +1639,7 @@ def shot_contract_dict(shot: Shot) -> dict[str, Any]:
         "is_final": bool(shot.is_final),
         "context_requirement_ids": list(shot.context_requirement_ids or []),
         "resulting_change": shot.resulting_change,
+        "readability_focus": shot.readability_focus,
         "camera_motivation": shot.camera_motivation,
         "repeat_of_shot_id": shot.repeat_of_shot_id,
         "repeat_gain": shot.repeat_gain,
@@ -1680,7 +1681,7 @@ def apply_shot_contract(shot: Shot, payload: dict[str, Any] | str | None) -> Sho
         "story_event_id", "purpose", "state_in", "primary_action", "emotion_beat",
         "state_out", "observed_state_out", "continuity_mode", "prompt_contract_version",
         "camera_angle", "spatial_anchor", "spoken_contract_status",
-        "resulting_change", "camera_motivation", "repeat_gain",
+        "resulting_change", "readability_focus", "camera_motivation", "repeat_gain",
     ):
         if data.get(key) not in (None, ""):
             setattr(shot, key, data[key])

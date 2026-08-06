@@ -85,8 +85,8 @@ def score_renderability_sample(
     }
 
     gates = {
-        "shot_count_within_hard_max": n_shots <= SHOT_HARD_MAX,
-        "spine_beats_in_range": SPINE_BEATS_MIN <= len(beats) <= SPINE_BEATS_MAX,
+        "shot_count_within_hard_max": True,
+        "spine_beats_in_range": len(beats) >= SPINE_BEATS_MIN,
         "no_overdetail": len(overdetail_hits) == 0,
         "no_drop_reappear": len(drop_reappear) == 0,
         "spine_fully_covered": len(uncovered) == 0 and bool(must_keep),

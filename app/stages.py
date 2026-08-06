@@ -26,7 +26,9 @@ from app.harness import model_gateway
 from app.loops import AgentLoop, AgentLoopFailure, AgentLoopPolicy
 from app.schemas import (Bible, CAMERA_MOVES, EMOTIONS, EpisodeScreenplay,
                          SHOT_SIZES, Scene, Shot, Storyboard, StoryboardOutline,
-                         StoryboardOutlineShot, TRANSITIONS,
+                         StoryboardOutlineShot, StoryboardSceneContext,
+                         StoryboardContextRequirement, StoryboardScenePack,
+                         TRANSITIONS,
                          extract_json, normalize_screenplay_json_shape,
                          schema_errors)
 from app.validators import (SOURCE_EXCERPT_MIN_CHARS,
@@ -51,6 +53,7 @@ from app.validators import (SOURCE_EXCERPT_MIN_CHARS,
                             validate_storyboard_shot_scene_alignment,
                             validate_storyboard_shot_covers_outline,
                             validate_storyboard_outline,
+                            validate_storyboard_direction_contract,
                             validate_storyboard_preserves_key_content,
                             validate_storyboard_soundtrack)
 from app.renderability import (
@@ -62,7 +65,12 @@ from app.renderability import (
     SHOT_HARD_MAX,
     renderability_prompt_block,
 )
-from app.source_excerpt import AlignedExcerpt, align_source_excerpt
+from app.source_excerpt import (
+    AlignedExcerpt,
+    align_source_excerpt,
+    index_source_segments,
+    render_indexed_source,
+)
 from app.spoken_contract import onscreen_text_for_capacity
 
 SYSTEM_PREFIX = (
@@ -1268,7 +1276,7 @@ async def generate_scene_bible(chapters: list[dict], bible: Bible,
 
 
 # 模型以为看到了全部，把后半章静默丢掉。改为命名常量 + 截断标记，让模型知道"后文还有，按依据补全"。
-SCREENPLAY_SOURCE_BUDGET_CHARS = 24000
+SCREENPLAY_SOURCE_BUDGET_CHARS = 120000
 
 
 _SOURCE_QUOTED_DIALOGUE_RE = re.compile(r"[“「『][^”」』\n]{2,240}[”」』]")
@@ -1912,41 +1920,10 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
     speech_styles = "；".join(f"{c.name}：{c.speech_style}" for c in bible.characters if c.speech_style)
     bible_names_inline = "、".join(c.name for c in bible.characters) or "（角色圣经为空）"
     character_resolution_block = _character_resolution_prompt_block(episode)
-    narrative_scope_id = str(
-        episode.get("id") or f"episode-{episode['episode_no']}"
-    )
-    raw_source_chapters = episode.get("source_chapters") or []
-    if isinstance(raw_source_chapters, str):
-        try:
-            parsed_source_chapters = json.loads(raw_source_chapters)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            parsed_source_chapters = []
-    else:
-        parsed_source_chapters = list(raw_source_chapters)
-    authorized_source_chapter_ids = [
-        str(value).strip()
-        for value in parsed_source_chapters
-        if str(value).strip()
+    source_with_ids = render_indexed_source(source_text)
+    source_segment_ids = [
+        segment.segment_id for segment in index_source_segments(source_text)
     ]
-    raw_authorized_source_chapters = episode.get(
-        "authorized_source_chapters",
-    ) or {}
-    authorized_source_chapters = {
-        chapter_id: str(raw_authorized_source_chapters.get(chapter_id) or "")
-        for chapter_id in authorized_source_chapter_ids
-        if chapter_id in raw_authorized_source_chapters
-    }
-    source_with_ids = (
-        "\n\n".join(
-            f"【chapter_id={chapter_id}】\n{chapter_text}"
-            for chapter_id, chapter_text in authorized_source_chapters.items()
-        )
-        or source_text
-    )
-    narrative_plan_schema = _narrative_plan_schema_example(
-        narrative_scope_id,
-        source_chapter_ids=authorized_source_chapter_ids,
-    )
     episode_hook = (episode.get("hook") or "").strip()
     episode_cliffhanger = (episode.get("cliffhanger") or "").strip()
     no_episode_hook = not episode_hook and not episode_cliffhanger
@@ -2011,118 +1988,113 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
             else f"剧本结尾必须落到本集尾钩：{episode_cliffhanger}"
         )
     )
-    prompt = f"""任务：为漫剧第 {episode['episode_no']} 集《{episode['title']}》把小说改写成【完整剧本】。
+    prompt = f"""任务：为漫剧第 {episode['episode_no']} 集《{episode['title']}》改写一份完整、连续、可导演的生产剧本。
 
-你现在处于“剧本台”阶段，不是分镜阶段。你的职责是先写出一整集完整、连续、可阅读、可拆镜的【生产级剧本稿】。
-
-剧本层职责：
-1. 生成一整集完整故事，而不是拍卡列表或摘要提纲。
-2. 保证剧情连贯、人物情绪连贯、因果关系连贯。
-3. 输出能直接进入导演/分镜阶段的剧本稿，不要只写成长梗概。
-4. 保留原文依据，并明确改编方向。
-5. 输出适合后续拆成 5~10 秒视频分镜的连续剧本；镜头数由完整覆盖主线决定，仅保留 {SHOT_HARD_MAX} 镜技术硬上限防止失控重复生成。
-   禁止为无关细节无限拆镜。
-6. 不在正文里输出“拍01/拍02/拍03”，不写景别、运镜、首尾帧、参考图、提示词。
+核心目标不是压缩镜头数，而是完整交付剧情。目标时长 {episode['target_duration_s']} 秒仅作节奏参考；
+不得为了时长、场次数或未来镜头数删除有效事件、对白、人物反应、因果桥梁和场景上下文。
+只有能指出重复来源的内容才允许合并；任何原文段都不得静默消失。
 
 {renderability_prompt_block()}
 
-【导演级连续性要求】只写大形体可读调度，不要微表情/手指/衣褶：
-- 每场开头交代本场已在场人物与大致位置；人物不能突然出现。
-- 人物或作用对象跨越空间/可见性边界时，用 AtomicAction.temporal_phases 的可观察起止条件完整交代；不以预设动作词表限制表演。
-- 每场结尾留下「人物位置 + 情绪大方向 + 关键道具状态」供下一场承接。
+【剧情交付台账】
+- 原文已由后端切成 {len(source_segment_ids)} 个稳定段：{source_segment_ids}。
+- source_coverage 必须逐个覆盖这些 SRC*，每个恰好一次。
+- disposition=deliver：由一个或多个 beat_ids 正面演出。
+- disposition=merge：与相邻段共同由一个或多个 beat_ids 交付。
+- disposition=context：作为环境、人物关系、情绪或因果上下文保留，reason 说明保留位置。
+- disposition=duplicate：只有内容确实重复时使用，duplicate_of 必须指向另一 SRC*，reason 说明重复关系。
 
-【最重要·Renderability First·主线压缩】目标时长 {episode['target_duration_s']} 秒只作节奏参考。
-你必须【先】输出 `plot_spine`，【再】写正文；正文只演骨架，绝对不要抠细节：
-- `plot_spine.episode_premise`：一句话本集主角要什么、碰到什么阻力。
-- `plot_spine.spine_beats`：5~12 条；每条含 beat_id/who/does/turn/must_keep；只写改变局势的事件。
-- `plot_spine.must_keep_ending`：本章收束（与原文本章结局同向；禁止发明下一章钩子）。
-- `plot_spine.drop_list`：至少 2 条「本章有但不拍」的支线/气氛戏/装饰对白。
-- `dialogue_chains`：主线对白的权威来源。每条链写清 chain_id/topic/turns；turns 按原文与正文发生顺序排列，每个 turn 含 speaker/line/function/source_text。
-- `source_text` 必须逐字复制本集源文本中的真实句子或片段。若把原文叙述改成对白，`source_text` 仍须填写对应的原文叙述原句；严禁填写“原文叙述转为对白”“原文无此句”“为衔接补写”等说明性占位词。找不到可逐字引用的原文依据时，删除该话轮，不得虚构依据。
-- 每条对白链必须从 trigger/announcement/question 开始，再接 response/decision；不得从回答开始。任何有原文依据、且负责宣布结果或触发反应的说话人，都必须作为链首进入；不按职业或题材名称筛选。
-- `key_lines` 由后端按 dialogue_chains.turns 确定性回填，模型仍需输出但不得自行另选；对白话轮不设固定条数上限。用户多选的必保留台词优先级最高，其余按完整语义链取舍，并让总口播服从本集目标时长。
-- `key_lines` 中每一条都必须在 `full_script_text` 里作为“角色名：台词”的真实对白落地；写进动作描述、梗概、source_basis 或清单本身都不算角色说过。
-- `key_lines` 必须按正文发生顺序排列，并按“对白链”取舍：若保留回答、安慰、反驳、引用对方旧话，必须连同触发它的前一角色话轮一起保留；宁可删除另一组支线对白，也不得只摘一句回答让角色突兀开口。
-- `key_plot_points`：{KEY_PLOT_POINTS_MIN}~{KEY_PLOT_POINTS_MAX} 条，与 spine 局势变化对齐，不是动作微描写。
+【完整剧情骨架】
+- plot_spine.spine_beats 数量不设上限，按原文顺序覆盖所有有效剧情单元。
+- 每条 beat 写 beat_id、who、does、turn、purpose、source_segment_ids、must_keep。
+- plot_spine.drop_list 可以为空；只允许记录 source_coverage 中已证明的 duplicate 内容。
+- must_keep_ending 必须与本章真实结局一致，禁止发明下一章剧情。
+- key_plot_points 数量不设上限，必须覆盖所有会改变局势、关系、目标或观众理解的节点。
 
-【单集戏剧契约】（先想清楚再落笔，避免压缩后只剩事件、没有方向）：
-- `dramatic_question`：用一句话写出本集观众心里追问的那个问题（例：他能否在不暴露底牌的情况下赢得资格？）。
-- `protagonist_goal`：主角本集看得见、可完成的外在目标。
-- `obstacle`：阻力 = 外部对手/规则 + 内部恐惧/执念。
-- `stakes`：失败代价——输了会失去什么关系、尊严、目标或机会。
+【场次合同】
+- scene_outline 场次数不设上限，由时间、地点和连续戏剧动作决定。
+- 每场必须填写 entry_state、exit_state、context_requirements。
+- entry_state 写人物位置、目标、关键道具和承接来源。
+- context_requirements 写观众在主要动作发生前需要知道的时间、地点、空间关系、人物关系或关键道具。
+- exit_state 写交给下一场的人物、情绪、空间、道具和信息状态。
+- 每场开头先建立必要上下文，但不要机械地把每场都写成相同远景。
 
-你必须同时输出两层内容：
-A. `scene_outline`：场次级结构表，**3~5 场**，只覆盖 spine。
-B. `full_script_text`：真正的剧本正文；只写大形体动作与主线对白，禁止舞台指示级细节。
+【对白与人物】
+- dialogue_chains 按真实发生顺序保留完整问答、宣布、反应和决定链。
+- source_text 必须逐字引用本集原文，不得写占位说明。
+- key_lines 由 dialogue_chains 派生并真实写入 full_script_text 的“角色名：台词”行。
+- scene_outline.characters 和所有说话人只能使用人物谱准确姓名（{bible_names_inline}）
+  或人物预检已解析的功能性身份；禁止新造具名角色。
 
-`full_script_text` 必须采用以下剧本写法：
-1. 使用场次标题，例如：`【场1】夜 / 旧仓库内`
-2. 每场先写动作与场面调度，再写人物对白；动作段和对白段要分行。调度只用大形体动作。
-3. 对白用“角色名：台词”格式；必要时可写“角色名（情绪/状态）：台词”。
-4. 只写戏剧动作、人物反应、对白、必要旁白；不要写镜头语言。
-5. 每场都要有明确戏剧任务：进入、升级、冲突、转折、收束中的至少一种。
-6. 每场结尾都要把一个新的动作状态、情绪状态、人物位置或信息状态交给下一场。
-7. 正文必须像真正台本，不得写成“本场讲了什么”的总结句堆叠。
+【正文】
+- full_script_text 使用“【场N】时间 / 地点”场标、动作段、对白段。
+- 写完整戏剧动作、人物反应、关系变化和必要停顿，不写景别、角度、运镜、首尾帧或提示词。
+- 不得写成摘要；每场必须有目标、阻力、变化和承接结果。
+- 动作保持 AI 视频可执行：复杂连续动作在剧情层完整保留，后续由导演规划拆镜。
 
-硬性规则（代码校验，违反会被退回）：
-1. episode_no 必须作为顶层字段出现且等于 {episode['episode_no']}（不可省略，也不可写进任何嵌套对象里）。
-2. 必须先有合法 `plot_spine`；title / logline / scene_outline / full_script_text / emotional_curve / ending_hook / source_basis 必填；
-   dramatic_question / protagonist_goal / obstacle / stakes 必填；
-   key_lines 至少 {3} 条且须按发生顺序写进正文，不设固定条数上限；上下文依赖台词必须与触发话轮组成连续对白链；总口播服从本集目标时长；key_plot_points {KEY_PLOT_POINTS_MIN}~{KEY_PLOT_POINTS_MAX} 条。
-3. `scene_outline` 必须是 3~5 场的连续场次结构，scene_no 从 1 连续递增。
-   【硬性·角色身份】scene_outline[*].characters 只能填角色圣经准确姓名（{bible_names_inline}）或 narrative_plan.identity_contracts[*].display_name。任何非角色圣经身份都必须先有身份合同，并由当前来源、戏剧职责、可见性与跨镜持久性语义决定 kind / visual_policy / asset_requirement；不得按固定姓名、称谓、角色类型或题材名单猜测。Bible 已有角色的 voice_bible.speaker_id 必须逐字使用人物谱姓名，禁止另造 V-MH 一类声音别名；非 Bible 画外说话人仍须以 voice_ids 连接 voice_bible，只有 role_type=narrator 的纯旁白可不创建身份合同。
-4. full_script_text 必须是一篇连续故事正文，且必须带场次标题、动作段、对白段；「【场N】」数量必须与 scene_outline 一致。
-5. full_script_text 不能是一大段梗概；必须像台本分行书写。
-6. full_script_text 中禁止出现：拍01、拍1、拍 01、镜头、景别、运镜、首帧、尾帧、参考图、提示词、prompt；并禁止超纲细节词（眼泪/指节/衣角/发丝/瞳孔/分屏/闪回等）。
-7. {screenplay_hook_rule}
-8. {screenplay_ending_rule}
-9. 人物姓名、关系、说话风格必须遵守角色圣经；台词自然口语化，服务主线冲突即可。
-10. 信息密度服从主线：正文不能过度注水，必须讲清因果链与关键转折；drop_list 内容不得写回正文。
-11. source_basis 必须概括本集改编依据的原文主线信息。
+【连续性台账】
+- events 与有效 beat 对齐，数量不设上限；每项写 state_in/trigger/visible_change/state_out。
+- information_ledger 只登记真正需要观众获得的信息，不设数量上限，不为气氛重复建项。
+- voice_bible 只收录实际说话身份，Bible 角色的 speaker_id 必须逐字使用人物谱姓名。
+- 原文没有的新增事件必须 adaptation_addition=true、写 adaptation_reason，且 approved=false。
 
-【连续性台账·也必须输出】主线权威是 plot_spine；events / information_ledger 只做下游拆镜索引，宁少勿滥：
-- episode_premise：一句话本集目标（可与 plot_spine.episode_premise 一致）。
-- events[]：建议与 must_keep spine 一一对应（约 5~12 条）。每条必须有非空 event_id（如 E1）、visible_change、state_out；禁止输出空壳事件。
-- information_ledger[]：条数 ≤ spine_beats×2；每条必须有非空中文 content、合法 info_id（I1/I2）、以及对应 events[].event_id。
-  【硬性】禁止输出 content 为空或 event_id 为空的台账项；写不出完整台账时，按每条 must_keep spine 只产出一条即可。
-  speaker_id 只能是一个 voice_bible.speaker_id 或 null，禁止写“甲、乙”“甲与乙”等组合值；
-  多人对话共同交付一条信息时，填写该信息的主交付说话人，无法唯一确定则拆成多条信息项。
-- voice_bible[]：每个元素包含 speaker_id、voice_canonical、language、role_type。Bible 已有角色的
-  speaker_id 必须逐字等于人物谱姓名；非 Bible 说话人的 speaker_id 必须逐字出现在对应
-  identity_contract.voice_ids；禁止生成 V-MH、VOICE-01 等没有显式身份绑定的独立声音编号。
-  只收录实际被对白链或 information_ledger.speaker_id 引用的说话身份；环境声、动作声和拟音
-  不是人物声音，不得写入 voice_bible。
-- approved_adaptations[] / forbidden_additions[]。
-规则：原文没有的事件默认不得创建；若确需为连贯性补小动作，events[].adaptation_addition 必须为 true，必须写 adaptation_reason，且 approved 必须为 false。
-空钩子规则：本集 hook=「{episode_hook or '（空）'}」、cliffhanger=「{episode_cliffhanger or '（空）'}」；若二者均为空/空白，ending_hook 只能写「无集级钩子」，不得发明原文没有的下一集钩子。
+硬性规则：
+1. episode_no={episode['episode_no']}，mode=full_script。
+2. title/logline/戏剧问题/目标/阻力/stakes/完整场次/完整正文/情绪曲线/结尾/来源依据均必填。
+3. scene_no 连续递增，场标数量与 scene_outline 一致。
+4. {screenplay_hook_rule}
+5. {screenplay_ending_rule}
 
-{_narrative_plan_prompt_block(narrative_scope_id)}
-
-本集规划信息：
-- 概要（只用于理解，不可替代原文）：{episode.get('synopsis') or ''}
-- 本集 hook：{episode_hook or '（空）'}
-- 本集 cliffhanger：{episode_cliffhanger or '（空）'}
+本集规划：
+- 概要：{episode.get('synopsis') or '（无）'}
+- hook：{episode_hook or '（空）'}
+- cliffhanger：{episode_cliffhanger or '（空）'}
 - 上一集结尾：{prev_ending or '（本集为第一集）'}
-- 本集目标时长：{episode['target_duration_s']} 秒
-- SourceEvidence 允许使用的章节 ID：{authorized_source_chapter_ids or ['（缺失，必须 needs_review）']}
 
 {opening_dialogue_block}
 
 {required_dialogue_block}
 
-角色圣经（姓名、关系、说话风格必须遵守）：
+角色圣经：
 {bible.model_dump_json()}
 
 {character_resolution_block}
 
-角色说话风格：
-{speech_styles or '（无额外说话风格）'}
+说话风格：{speech_styles or '（无额外约束）'}
 
-本集改编源文本：
+带稳定段 ID 的本集原文：
 {_render_screenplay_source(source_with_ids)}
 
 输出 JSON Schema：
-{{"episode_no": {episode['episode_no']}, "mode": "full_script", "title": str, "logline": str, "script_format_note": "一句话说明正文采用的台本格式", "plot_spine": {{"episode_premise": "一句话本集目标", "spine_beats": [{{"beat_id": "S01", "who": str, "does": str, "turn": str, "must_keep": true}}], "must_keep_ending": str, "drop_list": [str, str]}}, "dramatic_question": "本集戏剧问题（一句话）", "protagonist_goal": "主角外在目标", "obstacle": "外部+内部阻力", "stakes": "失败代价", "dialogue_chains": [{{"chain_id": "DC1", "topic": "同一话题", "turns": [{{"speaker": "引用角色圣经准确姓名或 narrative_plan.identity_contracts[].display_name", "line": "适合表演的改编台词", "function": "trigger|announcement|question|response|decision|statement", "source_text": "对应原文对白原句"}}]}}], "key_lines": ["由后端按 dialogue_chains.turns 回填；不要另选孤立金句"], "key_plot_points": ["与spine对齐的局势变化，{KEY_PLOT_POINTS_MIN}~{KEY_PLOT_POINTS_MAX}条"], "scene_outline": [{{"scene_no": int, "scene_heading": "场次标题", "story_function": "8~40字，写明本场造成的剧情变化；禁止只写进入/升级/转折/收束", "characters": ["角色圣经准确姓名或 identity_contract.display_name"], "summary": "本场戏剧内容概括", "conflict": str, "turn": "交给下一场的状态变化", "source_basis": "原文依据"}}], "full_script_text": str, "character_state_changes": [str], "emotional_curve": str, "ending_hook": "若 hook/cliffhanger 均为空则固定为「无集级钩子」", "source_basis": str, "adaptation_direction": str, "opening": str, "development": str, "conflict": str, "climax": str, "episode_premise": "一句话本集目标", "events": [{{"event_id": "E1", "source_span": "原文位置或摘句", "source_fact": "原文事实", "state_in": "事件前状态", "trigger": "触发因素", "visible_change": "可见/可听变化", "state_out": "事件后状态", "must_keep": true, "adaptation_addition": false, "adaptation_reason": "", "approved": false}}], "information_ledger": [{{"info_id": "I1", "event_id": "E1", "content": "观众必须获得的信息", "delivery_owner": "visual_action|spoken_dialogue|offscreen_voice|narration|on_screen_text|ambient_sound", "speaker_id": "精确引用 voice_bible.speaker_id 或 null", "exact_text": "需逐字交付时填写，否则null", "reinforcement_allowed": false, "status": "unassigned"}}], "voice_bible": [{{"speaker_id": "Bible 角色逐字使用人物谱姓名；非 Bible 身份使用 identity_contract.voice_ids 中已声明的 ID", "voice_canonical": "声音与语气规范", "language": "普通话", "role_type": "开放语义；纯旁白使用 narrator"}}], "approved_adaptations": [str], "forbidden_additions": [str], "narrative_plan": {narrative_plan_schema}}}"""
+{{"episode_no": {episode['episode_no']}, "mode": "full_script", "title": str, "logline": str,
+"script_format_note": str,
+"plot_spine": {{"episode_premise": str, "spine_beats": [{{"beat_id": "S01", "who": str,
+"does": str, "turn": str, "purpose": str, "source_segment_ids": ["SRC0001"], "must_keep": true}}],
+"must_keep_ending": str, "drop_list": []}},
+"source_coverage": [{{"source_segment_id": "SRC0001",
+"disposition": "deliver|merge|context|duplicate", "beat_ids": ["S01"],
+"duplicate_of": null, "reason": str}}],
+"dramatic_question": str, "protagonist_goal": str, "obstacle": str, "stakes": str,
+"dialogue_chains": [{{"chain_id": "DC1", "topic": str, "turns": [{{"speaker": str,
+"line": str, "function": "trigger|announcement|question|response|decision|statement",
+"source_text": str}}]}}],
+"key_lines": [str], "key_plot_points": [str],
+"scene_outline": [{{"scene_no": 1, "scene_heading": str, "story_function": str,
+"characters": [str], "summary": str, "conflict": str, "turn": str, "source_basis": str,
+"entry_state": str, "exit_state": str, "context_requirements": [str]}}],
+"full_script_text": str, "character_state_changes": [str], "emotional_curve": str,
+"ending_hook": str, "source_basis": str, "adaptation_direction": str,
+"opening": str, "development": str, "conflict": str, "climax": str,
+"episode_premise": str,
+"events": [{{"event_id": "E1", "source_span": "SRC0001", "source_fact": str,
+"state_in": str, "trigger": str, "visible_change": str, "state_out": str,
+"must_keep": true, "adaptation_addition": false, "adaptation_reason": "", "approved": false}}],
+"information_ledger": [{{"info_id": "I1", "event_id": "E1", "content": str,
+"delivery_owner": "visual_action|spoken_dialogue|offscreen_voice|narration|on_screen_text|ambient_sound",
+"speaker_id": null, "exact_text": null, "reinforcement_allowed": false, "status": "unassigned"}}],
+"voice_bible": [{{"speaker_id": str, "voice_canonical": str, "language": "普通话",
+"role_type": "named_character|functional_character|narrator"}}],
+"approved_adaptations": [str], "forbidden_additions": [str]}}"""
     # Production Repair：完整生成只允许一次；QA 后禁止“重新输出完整 JSON”。
     return await generate_screenplay_baseline(
         episode, source_text, bible, prev_ending=prev_ending, _prompt=prompt,
