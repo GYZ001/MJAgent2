@@ -2533,6 +2533,28 @@ def test_seedance_provider_inputs_keep_character_truth_anchor_with_keyframe() ->
     assert refs[2]["selectedForSeedance"] is True
 
 
+def test_seedance_provider_pack_dedupes_repeated_progress_records() -> None:
+    repeated = {
+        "id": "character-a",
+        "url": "data:image/jpeg;base64,YQ==",
+        "path": "/tmp/character-a.jpg",
+        "type": "character",
+        "entity_name": "A",
+        "relatedCharacterIds": ["A"],
+        "selectedForSeedance": True,
+        "purposes": ["video_input"],
+    }
+    refs = [
+        repeated,
+        {**repeated, "id": "duplicate-1"},
+        {**repeated, "id": "duplicate-2"},
+    ]
+
+    packed = video_modes.pack_reference_images_for_seedance(refs)
+
+    assert [ref["id"] for ref in packed] == ["character-a"]
+
+
 def test_seedance_keeps_anchor_for_identity_missing_from_keyframe() -> None:
     refs = [
         {

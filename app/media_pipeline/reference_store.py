@@ -37,6 +37,9 @@ def upsert_reference_set_from_meta(
             discard_file(ref.get("path") or ref.get("image_path"))
             continue
         refs.append(ref)
+    from app.video_modes import dedupe_reference_dicts
+
+    refs = dedupe_reference_dicts(refs)
     meta["reference_images"] = refs
     if not refs:
         existing = meta.get("reference_set_id")

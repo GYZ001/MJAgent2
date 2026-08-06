@@ -1609,7 +1609,9 @@ async def _prepare_reference_mode_inputs(
         _delete_rejected_assets(current_rejected)
         meta["mode_decision"] = video_modes.decision_to_dict(decision)
         meta["reference_generation_complete"] = False
-        meta["reference_images"] = [a.public_dict() for a in current_assets]
+        meta["reference_images"] = video_modes.dedupe_reference_dicts(
+            [a.public_dict() for a in current_assets]
+        )
         candidate_done, candidate_total = _narrative_keyframe_candidate_progress(meta)
         set_pipeline_stage(
             job["id"], media_stages.STAGE_REFERENCE_GENERATE,
@@ -1651,7 +1653,9 @@ async def _prepare_reference_mode_inputs(
         )
         if assets:
             _delete_rejected_assets(rejected_assets)
-            assembled_refs = [a.public_dict() for a in assets]
+            assembled_refs = video_modes.dedupe_reference_dicts(
+                [a.public_dict() for a in assets]
+            )
             assembled_meta = {**meta, "reference_images": assembled_refs}
             if not video_modes.reference_gallery_matches_keyframe_contract(
                 assembled_meta, expected_fingerprint=current_keyframe_fingerprint,
@@ -1744,7 +1748,9 @@ async def _prepare_reference_mode_inputs(
         if not has_tail:
             meta["mode_decision"] = video_modes.decision_to_dict(decision)
             _delete_rejected_assets(rejected_assets)
-            meta["reference_images"] = [a.public_dict() for a in assets]
+            meta["reference_images"] = video_modes.dedupe_reference_dicts(
+                [a.public_dict() for a in assets]
+            )
             meta["reference_static_ready"] = True
             meta["reference_generation_complete"] = False
             meta["continuity_anchor_ready"] = False
@@ -1811,7 +1817,9 @@ async def _prepare_reference_mode_inputs(
     if assets:
         meta["mode_decision"] = video_modes.decision_to_dict(decision)
         _delete_rejected_assets(rejected_assets)
-        meta["reference_images"] = [a.public_dict() for a in assets]
+        meta["reference_images"] = video_modes.dedupe_reference_dicts(
+            [a.public_dict() for a in assets]
+        )
         meta["reference_generation_complete"] = True
         meta["reference_static_ready"] = True
         meta["continuity_anchor_ready"] = True

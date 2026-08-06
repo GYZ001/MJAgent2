@@ -86,6 +86,8 @@ def test_reference_set_persist(monkeypatch) -> None:
         "reference_images": [
             {"id": "r1", "type": "generated", "source": "pipeline", "path": "/tmp/a.jpg",
              "selectedForSeedance": True, "deleted": False, "qualityScore": 0.9},
+            {"id": "r1-duplicate", "type": "generated", "source": "pipeline", "path": "/tmp/a.jpg",
+             "selectedForSeedance": True, "deleted": False, "qualityScore": 0.9},
         ],
         "reference_gallery_revision": 1,
     }
@@ -93,6 +95,7 @@ def test_reference_set_persist(monkeypatch) -> None:
     conn.commit()
     assert set_id
     assert meta["reference_set_id"] == set_id
+    assert [ref["id"] for ref in meta["reference_images"]] == ["r1"]
     row = conn.execute("SELECT COUNT(*) c FROM reference_assets WHERE reference_set_id=?", (set_id,)).fetchone()
     assert row["c"] == 1
 

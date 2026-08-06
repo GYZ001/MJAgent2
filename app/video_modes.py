@@ -4060,11 +4060,23 @@ def pack_reference_images_for_seedance(
     """必需用途优先装箱；分数只在同类候选内排序。关键帧不会被高分定妆照挤掉。"""
     from app.multiview import pack_references_by_purpose
     usable = []
+    seen_inputs: set[str] = set()
     for r in refs:
         # ``purposes`` describes what an asset was generated for and is retained
         # on rejected candidates for audit.  Only the explicit selection flag is
         # authoritative for the current provider request.
         if r.get("selectedForSeedance") and not r.get("deleted"):
+            key = str(
+                r.get("path")
+                or r.get("image_path")
+                or r.get("url")
+                or r.get("id")
+                or ""
+            )
+            if key and key in seen_inputs:
+                continue
+            if key:
+                seen_inputs.add(key)
             usable.append(r)
     if not usable:
         return []
@@ -4156,6 +4168,26 @@ def pack_reference_images_for_seedance(
     return pack_references_by_purpose(
         usable, max_images=limit, continuity_required=continuity_required, char_limit=char_limit,
     )
+
+
+def dedupe_reference_dicts(refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep one persisted/provider record per physical reference input."""
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for ref in refs:
+        key = str(
+            ref.get("path")
+            or ref.get("image_path")
+            or ref.get("url")
+            or ref.get("id")
+            or ""
+        )
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        out.append(ref)
+    return out
 
 
 def _dedupe_assets(assets: list[ReferenceImageAsset]) -> list[ReferenceImageAsset]:
