@@ -4038,20 +4038,19 @@ async def run_screenplay_production(
         screenplay_unknown_identity_errors,
     )
 
-    identity_normalization_changes: list[dict] = []
-    draft_identity_errors: list[str] = []
-    if identity_audit_required:
-        identity_normalization_changes = apply_screenplay_character_resolutions(
-            working_script,
-            episode.get("character_resolutions") or [],
-        )
-        identity_normalization_changes.extend(
-            normalize_screenplay_voice_ids(working_script, bible)
-        )
-        draft_identity_errors = screenplay_unknown_identity_errors(
-            working_script,
-            bible,
-        )
+    # Reapply durable identity resolutions before every QA entry, including
+    # resume paths whose checkpoint already advanced beyond IDENTITY_AUDIT.
+    identity_normalization_changes = apply_screenplay_character_resolutions(
+        working_script,
+        episode.get("character_resolutions") or [],
+    )
+    identity_normalization_changes.extend(
+        normalize_screenplay_voice_ids(working_script, bible)
+    )
+    draft_identity_errors = screenplay_unknown_identity_errors(
+        working_script,
+        bible,
+    )
     # #region debug-point B:post-baseline-identity-gate
     try:
         import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"post-fix","hypothesisId":"B","location":"app/production/screenplay_repair.py:post_baseline_identity_gate","msg":"[DEBUG] Post-baseline identity gate","data":{"episodeId":episode_id,"revisionId":rev.id,"baselineGenerationCount":rev.baseline_generation_count,"resolutionCount":len(episode.get("character_resolutions") or []),"identityErrorCount":len(draft_identity_errors),"scriptChars":len(working_script.model_dump_json())},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
