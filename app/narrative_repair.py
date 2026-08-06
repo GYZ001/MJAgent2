@@ -19,7 +19,7 @@ from app.schemas import (
     extract_json,
 )
 
-REPAIR_DIAGNOSIS_VERSION = "narrative-repair-diagnosis.v2"
+REPAIR_DIAGNOSIS_VERSION = "narrative-repair-diagnosis.v3"
 
 OutlineExecutorOp = Literal[
     "replace_outline_shot",
@@ -389,6 +389,50 @@ def validate_semantic_diagnosis(diagnosis: SemanticRepairDiagnosis) -> list[str]
     return errors
 
 
+def _focus_operation_errors(
+    diagnosis: SemanticRepairDiagnosis,
+    *,
+    focus_shot_no: int | None,
+) -> list[str]:
+    if focus_shot_no is None:
+        return []
+    selected_strategy = normalize_strategy(diagnosis.selected_strategy)
+    selected = next((
+        item
+        for item in diagnosis.candidate_assessments
+        if normalize_strategy(item.strategy) == selected_strategy
+    ), None)
+    if selected is None or not selected.outline_operations:
+        return []
+
+    allowed = {
+        shot_no
+        for shot_no in (
+            focus_shot_no - 1,
+            focus_shot_no,
+            focus_shot_no + 1,
+        )
+        if shot_no > 0
+    }
+    targeted = {
+        int(operation.target.shot_no)
+        for operation in selected.outline_operations
+        if operation.target.shot_no is not None
+    }
+    errors: list[str] = []
+    outside = sorted(targeted - allowed)
+    if outside:
+        errors.append(
+            f"逐镜局部修复只能触及 focus_shot_no={focus_shot_no} 及相邻镜，"
+            f"禁止跨到远端镜头：{outside}"
+        )
+    if targeted and focus_shot_no not in targeted:
+        errors.append(
+            f"逐镜局部修复未触及当前失败镜 focus_shot_no={focus_shot_no}"
+        )
+    return errors
+
+
 async def diagnose_narrative_repair(
     *,
     episode_id: str,
@@ -485,6 +529,11 @@ async def diagnose_narrative_repair(
                 "不得输出 from_fact_id、to_fact_id、trigger_action_id、"
                 "transition_type 等未声明字段"
             ),
+            (
+                "未变化的事实只能放 required_state_invariants；"
+                "source_fact_id 与 target_fact_id 相同或 actual state delta 为空时，"
+                "state_delta_transitions 与 allowed_state_deltas 都必须为空"
+            ),
             "无法归类的语义写入 unclassified_dimensions，不得丢弃",
         ],
         "target_contracts": {
@@ -551,6 +600,10 @@ async def diagnose_narrative_repair(
             errors = [f"JSON/Schema 无效：{exc}"]
             continue
         errors = validate_semantic_diagnosis(diagnosis)
+        errors.extend(_focus_operation_errors(
+            diagnosis,
+            focus_shot_no=focus_shot_no,
+        ))
         selected_strategy = normalize_strategy(diagnosis.selected_strategy)
         selected = next((
             item
