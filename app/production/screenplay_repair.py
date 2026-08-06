@@ -2397,7 +2397,149 @@ def _normalize_screenplay_narrative_graph(
         used_delta_ids.add(value)
         return value
 
-    for intent in data.get("experience_intents") or []:
+    intent_items = [
+        intent
+        for intent in (data.get("experience_intents") or [])
+        if isinstance(intent, dict)
+    ]
+    prior_ids = [
+        str(prior.get("audience_prior_id") or "").strip()
+        for prior in (data.get("audience_priors") or [])
+        if (
+            isinstance(prior, dict)
+            and str(prior.get("audience_prior_id") or "").strip()
+        )
+    ]
+    states_by_prior: dict[str, list[str]] = {}
+    for state_id, state in audience_states_by_id.items():
+        prior_id = str(state.get("audience_prior_id") or "").strip()
+        if prior_id:
+            states_by_prior.setdefault(prior_id, []).append(state_id)
+    used_path_ids = {
+        str(path.get("audience_path_id") or "").strip()
+        for intent in intent_items
+        for path in (intent.get("audience_paths") or [])
+        if (
+            isinstance(path, dict)
+            and str(path.get("audience_path_id") or "").strip()
+        )
+    }
+    current_state_by_prior: dict[str, str] = {}
+    for intent_index, intent in enumerate(intent_items, start=1):
+        paths = [
+            path
+            for path in (intent.get("audience_paths") or [])
+            if isinstance(path, dict)
+        ]
+        intent["audience_paths"] = paths
+        paths_by_prior = {
+            str(path.get("audience_prior_id") or "").strip(): path
+            for path in paths
+            if str(path.get("audience_prior_id") or "").strip()
+        }
+        for prior_id in prior_ids:
+            if prior_id in paths_by_prior:
+                continue
+            state_id = current_state_by_prior.get(prior_id)
+            if not state_id:
+                state_id = next(
+                    (
+                        str(path.get("audience_state_in_id") or "")
+                        for later_intent in intent_items[intent_index:]
+                        for path in (
+                            later_intent.get("audience_paths") or []
+                        )
+                        if (
+                            isinstance(path, dict)
+                            and str(
+                                path.get("audience_prior_id") or ""
+                            ).strip() == prior_id
+                            and str(
+                                path.get("audience_state_in_id") or ""
+                            ).strip()
+                        )
+                    ),
+                    "",
+                )
+            if not state_id:
+                state_id = next(
+                    iter(states_by_prior.get(prior_id) or []),
+                    "",
+                )
+            if not state_id:
+                continue
+            base_path_id = (
+                f"XP-{prior_id}-{intent.get('experience_intent_id')}"
+            )
+            path_id = base_path_id
+            suffix = 2
+            while path_id in used_path_ids:
+                path_id = f"{base_path_id}-{suffix}"
+                suffix += 1
+            used_path_ids.add(path_id)
+            path = {
+                "audience_path_id": path_id,
+                "audience_prior_id": prior_id,
+                "audience_state_in_id": state_id,
+                "audience_state_out_target_id": state_id,
+                "target_deltas": [],
+            }
+            paths.append(path)
+            paths_by_prior[prior_id] = path
+            changes.append({
+                "kind": "coarse_audience_path",
+                "id": path_id,
+                "experience_intent_id": intent.get(
+                    "experience_intent_id"
+                ),
+                "audience_prior_id": prior_id,
+                "state_id": state_id,
+            })
+        for prior_id, path in paths_by_prior.items():
+            state_id = str(
+                path.get("audience_state_out_target_id") or ""
+            ).strip()
+            if state_id:
+                current_state_by_prior[prior_id] = state_id
+
+    for scene in data.get("scene_contracts") or []:
+        if not isinstance(scene, dict):
+            continue
+        paths = [
+            path
+            for path in (scene.get("audience_state_paths") or [])
+            if isinstance(path, dict)
+        ]
+        scene["audience_state_paths"] = paths
+        existing_priors = {
+            str(path.get("audience_prior_id") or "").strip()
+            for path in paths
+        }
+        for prior_id in prior_ids:
+            if prior_id in existing_priors:
+                continue
+            state_id = (
+                current_state_by_prior.get(prior_id)
+                or next(
+                    iter(states_by_prior.get(prior_id) or []),
+                    "",
+                )
+            )
+            if not state_id:
+                continue
+            paths.append({
+                "audience_prior_id": prior_id,
+                "audience_state_in_id": state_id,
+                "audience_state_out_target_id": state_id,
+            })
+            changes.append({
+                "kind": "coarse_scene_audience_path",
+                "id": scene.get("scene_id"),
+                "audience_prior_id": prior_id,
+                "state_id": state_id,
+            })
+
+    for intent in intent_items:
         if not isinstance(intent, dict):
             continue
         for path in intent.get("audience_paths") or []:
@@ -2708,7 +2850,51 @@ def _normalize_screenplay_narrative_graph(
                 }
             retained_deltas = []
             for delta in deltas:
-                if delta.get("from_state") != delta.get("to_state"):
+                semantic_no_change = (
+                    delta.get("from_state") == delta.get("to_state")
+                )
+                if str(delta.get("dimension") or "") == "belief":
+                    proposition_ids = {
+                        str(item)
+                        for item in (
+                            delta.get("proposition_ids") or []
+                        )
+                    }
+                    before_beliefs = {
+                        str(item.get("proposition_id") or ""): (
+                            item.get("stance"),
+                            item.get("confidence"),
+                        )
+                        for item in (state_in.get("beliefs") or [])
+                        if (
+                            isinstance(item, dict)
+                            and str(
+                                item.get("proposition_id") or ""
+                            ) in proposition_ids
+                        )
+                    }
+                    after_beliefs = {
+                        str(item.get("proposition_id") or ""): (
+                            item.get("stance"),
+                            item.get("confidence"),
+                        )
+                        for item in (state_out.get("beliefs") or [])
+                        if (
+                            isinstance(item, dict)
+                            and str(
+                                item.get("proposition_id") or ""
+                            ) in proposition_ids
+                        )
+                    }
+                    semantic_no_change = (
+                        bool(proposition_ids)
+                        and all(
+                            before_beliefs.get(proposition_id)
+                            == after_beliefs.get(proposition_id)
+                            for proposition_id in proposition_ids
+                        )
+                    )
+                if not semantic_no_change:
                     retained_deltas.append(delta)
                     continue
                 delta_id = str(

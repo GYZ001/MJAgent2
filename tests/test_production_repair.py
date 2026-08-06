@@ -508,20 +508,37 @@ def test_narrative_normalizer_closes_action_facts_and_removes_noop_deltas():
                     "subject_id": "char-a",
                     "predicate_id": "state",
                 },
+                {
+                    "fact_id": "F3",
+                    "proposition_id": "P1",
+                    "subject_id": "char-a",
+                    "predicate_id": "state",
+                },
             ],
             "events": [{
                 "event_id": "E1",
-                "action_ids": ["A1"],
+                "action_ids": ["A1", "A2"],
             }],
-            "atomic_actions": [{
-                "action_id": "A1",
-                "actor_ids": ["char-a"],
-                "semantic_intent": "Change the state.",
-                "precondition_fact_ids": ["F1"],
-                "effects_add": ["F2"],
-                "effects_remove": ["F1"],
-                "completion_condition": "The changed state is visible.",
-            }],
+            "atomic_actions": [
+                {
+                    "action_id": "A1",
+                    "actor_ids": ["char-a"],
+                    "semantic_intent": "Begin changing the state.",
+                    "precondition_fact_ids": ["F1"],
+                    "effects_add": ["F2"],
+                    "effects_remove": ["F1"],
+                    "completion_condition": "The intermediate state is visible.",
+                },
+                {
+                    "action_id": "A2",
+                    "actor_ids": ["char-a"],
+                    "semantic_intent": "Finish changing the state.",
+                    "precondition_fact_ids": ["F2"],
+                    "effects_add": ["F3"],
+                    "effects_remove": ["F2"],
+                    "completion_condition": "The final state is visible.",
+                },
+            ],
             "character_beliefs": [{
                 "character_belief_id": "CB1",
                 "character_id": "char-a",
@@ -535,6 +552,10 @@ def test_narrative_normalizer_closes_action_facts_and_removes_noop_deltas():
                 "audience_prior_id": "AP1",
                 "scope_id": "ep_p",
                 "audience_description": "A viewer.",
+            }, {
+                "audience_prior_id": "AP2",
+                "scope_id": "ep_p",
+                "audience_description": "A contextual viewer.",
             }],
             "audience_states": [
                 {
@@ -554,6 +575,11 @@ def test_narrative_normalizer_closes_action_facts_and_removes_noop_deltas():
                         "proposition_id": "P1",
                         "stance": "committed",
                     }],
+                },
+                {
+                    "audience_state_id": "AS2",
+                    "audience_prior_id": "AP2",
+                    "anchor": {"type": "event", "id": "E1"},
                 },
             ],
             "experience_intents": [{
@@ -589,6 +615,14 @@ def test_narrative_normalizer_closes_action_facts_and_removes_noop_deltas():
                 "event_ids": ["E1"],
                 "target_delta_ids": ["XD-NOOP"],
             }],
+            "scene_contracts": [{
+                "scene_id": "SC1",
+                "audience_state_paths": [{
+                    "audience_prior_id": "AP1",
+                    "audience_state_in_id": "AS-IN",
+                    "audience_state_out_target_id": "AS-OUT",
+                }],
+            }],
         }),
     )
 
@@ -599,7 +633,7 @@ def test_narrative_normalizer_closes_action_facts_and_removes_noop_deltas():
 
     event = script.narrative_plan.events[0]
     assert event.precondition_fact_ids == ["F1"]
-    assert event.effects_add == ["F2"]
+    assert event.effects_add == ["F3"]
     assert event.effects_remove == ["F1"]
     assert script.narrative_plan.character_beliefs[0].beliefs[0].stance == "believed"
     assert script.narrative_plan.audience_states[1].beliefs[0].stance == "believed"
@@ -609,9 +643,19 @@ def test_narrative_normalizer_closes_action_facts_and_removes_noop_deltas():
         "XP1-belief"
     ]
     assert script.narrative_plan.assimilation_tasks == []
+    assert {
+        path.audience_prior_id
+        for path in script.narrative_plan.experience_intents[0].audience_paths
+    } == {"AP1", "AP2"}
+    assert {
+        path.audience_prior_id
+        for path in script.narrative_plan.scene_contracts[0].audience_state_paths
+    } == {"AP1", "AP2"}
     assert {change["kind"] for change in changes} >= {
         "event_action_fact_refs",
         "belief_stance",
+        "coarse_audience_path",
+        "coarse_scene_audience_path",
         "no_change_target_delta_removed",
         "removed_delta_window_refs",
         "removed_delta_assimilation_tasks",

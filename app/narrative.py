@@ -279,7 +279,13 @@ def _target_state_fragment_matches(delta: Any, fragment: dict[str, Any], state: 
     if dimension == "attention":
         return _json_fragment_matches(
             fragment,
-            {"attention_residue_ids": state.attention_residue_ids},
+            {
+                "attention_residue_ids": state.attention_residue_ids,
+                "working_memory": [
+                    item.model_dump(mode="json")
+                    for item in state.working_memory
+                ],
+            },
         )
     # Open semantic dimensions remain expressible, but must point at an actual
     # changed fragment of the snapshot instead of becoming unbound prose.
@@ -910,15 +916,35 @@ def validate_screenplay_narrative(
                 errors.append(f"[ACTION_SPLIT_BOUNDARY_MISSING] {action_id} 引用了不存在阶段 {boundary_id}")
 
     for event_id, event in index.events.items():
+        bound_actions = [
+            index.actions[action_id]
+            for action_id in event.action_ids
+            if action_id in index.actions
+        ]
+        action_adds = {
+            fact_id
+            for action in bound_actions
+            for fact_id in action.effects_add
+        }
+        action_removes = {
+            fact_id
+            for action in bound_actions
+            for fact_id in action.effects_remove
+        }
         for action_id in event.action_ids:
             action = index.actions.get(action_id)
             if action is None:
                 continue
-            if not set(action.precondition_fact_ids).issubset(event.precondition_fact_ids):
+            external_preconditions = (
+                set(action.precondition_fact_ids) - action_adds
+            )
+            net_adds = set(action.effects_add) - action_removes
+            net_removes = set(action.effects_remove) - action_adds
+            if not external_preconditions.issubset(event.precondition_fact_ids):
                 errors.append(f"[ACTION_EVENT_PRECONDITION_MISMATCH] {event_id} 未承接 {action_id} 的全部前置事实")
-            if not set(action.effects_add).issubset(event.effects_add):
+            if not net_adds.issubset(event.effects_add):
                 errors.append(f"[ACTION_EVENT_EFFECT_MISMATCH] {event_id} 未承接 {action_id} 的新增事实")
-            if not set(action.effects_remove).issubset(event.effects_remove):
+            if not net_removes.issubset(event.effects_remove):
                 errors.append(f"[ACTION_EVENT_EFFECT_MISMATCH] {event_id} 未承接 {action_id} 的移除事实")
 
     structurally_equivalent_pairs: set[frozenset[str]] = set()
@@ -1377,10 +1403,11 @@ def validate_screenplay_narrative(
                     if (
                         delta.dimension == "attention"
                         and set(state_in.attention_residue_ids) == set(state_out.attention_residue_ids)
+                        and state_in.working_memory == state_out.working_memory
                     ):
                         errors.append(
                             f"[TARGET_DELTA_STATE_MISMATCH] {delta.target_delta_id} 声明注意变化，"
-                            "但 attention_residue_ids 未变化"
+                            "但 attention_residue_ids 与 working_memory 均未变化"
                         )
                     if delta.dimension == "attention":
                         covered_state_fields.update({"attention_residue_ids", "working_memory"})
