@@ -161,6 +161,13 @@ async def test_model_diagnosis_compares_open_candidates_without_issue_code_routi
         "move_outline_shot",
     }
     assert "开放语义意图" in captured["request"]["semantic_intent_contract"]
+    transition_contract = captured["request"][
+        "boundary_state_transition_contract"
+    ]
+    assert "必填" in transition_contract["transition_id"]
+    assert "action_phase_handoff" in transition_contract["basis_type"]
+    hard_rules = "\n".join(captured["request"]["hard_rules"])
+    assert "不得输出 from_fact_id" in hard_rules
     assert captured["meta"]["stage_key"] == "semantic_repair_planner"
 
 

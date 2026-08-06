@@ -463,12 +463,33 @@ async def diagnose_narrative_repair(
             "outline_operations 只能引用当前权威图的稳定 ID；新建/替换节点必须输出完整字段",
             "未预设的 strategy/op 必须绑定当前可用 executor；需要新执行器能力时不得猜测或降级",
             "操作后必须仍满足事件拓扑、状态方程、唯一 owner、deadline、readability window 互指与不重放动作",
+            (
+                "state_delta_transitions 每项必须使用 "
+                "transition_id/basis_type/source_fact_id/target_fact_id/"
+                "basis_action_phase_id/custom_basis/reason；"
+                "不得输出 from_fact_id、to_fact_id、trigger_action_id、"
+                "transition_type 等未声明字段"
+            ),
             "无法归类的语义写入 unclassified_dimensions，不得丢弃",
         ],
         "target_contracts": {
             "replace/delete": "shot_id 或 shot_no 二选一",
             "insert": "after_shot_id、after_shot_no、to_index 最多选一；全空表示末尾",
             "move": "shot_id 或 shot_no 二选一，并必须给出 to_index",
+        },
+        "boundary_state_transition_contract": {
+            "transition_id": "本集唯一的结构关系 ID，必填",
+            "basis_type": (
+                "timeline_change|viewpoint_visibility_change|"
+                "spatial_reorientation|action_phase_handoff|other，必填"
+            ),
+            "source_fact_id": "变化前 fact_id 或 null",
+            "target_fact_id": "变化后 fact_id 或 null",
+            "basis_action_phase_id": (
+                "仅 action_phase_handoff 时引用 phase_id，否则 null"
+            ),
+            "custom_basis": "仅 other 时说明开放关系，否则 null",
+            "reason": "该结构关系为何允许此状态变化，必填",
         },
     }
     prior = ""
