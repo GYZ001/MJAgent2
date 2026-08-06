@@ -469,6 +469,30 @@ def recover_screenplay_tasks() -> int:
         episode_id = row["id"]
         if _screenplay_task_active(episode_id):
             continue
+        from app.production.revision import get_active_production_revision
+
+        revision = get_active_production_revision(episode_id, "screenplay")
+        current_contract = get_contract("screenplay").version
+        if (
+            revision is not None
+            and revision.contract_version
+            and revision.contract_version != current_contract
+        ):
+            conn.execute(
+                "UPDATE episodes SET screenplay_status='repairing',screenplay_error=?,"
+                "active_screenplay_run_id=NULL,screenplay_updated_at=? WHERE id=?",
+                (
+                    (
+                        f"剧本工作副本使用旧合同 {revision.contract_version}；"
+                        f"当前合同为 {current_contract}。旧 Artifact 已保留，"
+                        "请点击继续以创建新 revision，禁止自动恢复旧付费修复循环"
+                    ),
+                    now(),
+                    episode_id,
+                ),
+            )
+            conn.commit()
+            continue
         parent = conn.execute(
             "SELECT id FROM workflow_runs WHERE workflow_type='screenplay' "
             "AND scope_type='episode' AND scope_id=? AND status='PAUSED_EXTERNAL' "

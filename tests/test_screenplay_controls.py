@@ -194,6 +194,50 @@ def test_recovery_resumes_repair_interrupted_by_service_restart(monkeypatch) -> 
     }
 
 
+def test_recovery_does_not_resume_obsolete_contract_revision(monkeypatch) -> None:
+    conn = db.get_conn()
+    revision = ensure_production_revision(
+        episode_id="e1",
+        kind="screenplay",
+        input_fingerprint="old-input",
+        contract_version="2.0.0",
+        qa_profile_version="screenplay-qa-gate-2",
+        resume=False,
+    )
+    parent_run_id = repository.create_run(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="repair",
+    )
+    conn.execute(
+        "UPDATE workflow_runs SET status='PAUSED_EXTERNAL',failure_code='SERVICE_RESTART' "
+        "WHERE id=?",
+        (parent_run_id,),
+    )
+    conn.execute(
+        "UPDATE episodes SET screenplay_status='repairing',active_screenplay_run_id=?,"
+        "screenplay_production_revision_id=? WHERE id='e1'",
+        (parent_run_id, revision.id),
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        api,
+        "_new_screenplay_recorder",
+        lambda *_args, **_kwargs: pytest.fail("旧合同禁止自动恢复"),
+    )
+
+    assert api.recover_screenplay_tasks() == 0
+    episode = conn.execute(
+        "SELECT screenplay_status,screenplay_error,active_screenplay_run_id "
+        "FROM episodes WHERE id='e1'",
+    ).fetchone()
+    assert episode["screenplay_status"] == "repairing"
+    assert "旧合同 2.0.0" in episode["screenplay_error"]
+    assert "当前合同为 3.0.0" in episode["screenplay_error"]
+    assert episode["active_screenplay_run_id"] is None
+
+
 def test_recovery_does_not_restart_intentionally_paused_repair(monkeypatch) -> None:
     conn = db.get_conn()
     run_id = repository.create_run(
