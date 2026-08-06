@@ -1087,6 +1087,7 @@ def test_initial_screenplay_prompt_contains_d001_and_dialogue_chain_contract(mon
         "cliffhanger": "收束",
         "synopsis": "测验结果引发回应",
         "required_dialogue_lines": ["只有三段？", "结果无误。"],
+        "authorized_source_chapters": {"chapter-1": source},
     }
 
     asyncio.run(generate_screenplay(episode, source, _bible()))
@@ -1102,6 +1103,8 @@ def test_initial_screenplay_prompt_contains_d001_and_dialogue_chain_contract(mon
     assert "最终时长由完整剧情、对白容量、主线节拍和场次建立成本自动扩展，不设上限" in prompts[0]
     assert "每组 dialogue_chain 最多 8 个连续话轮" in prompts[0]
     assert "顶层必须输出 narrative_plan" in prompts[0]
+    assert "授权章节 ID：['chapter-1']" in prompts[0]
+    assert '"chapter_id":"chapter-1"' in prompts[0]
 
 
 def test_screenplay_baseline_keeps_structural_bootstrap_retries(monkeypatch) -> None:

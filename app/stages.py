@@ -2021,8 +2021,21 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
         )
     )
     scope_id = str(episode.get("id") or f"episode-{episode['episode_no']}")
+    authorized_source_chapters = episode.get("authorized_source_chapters")
+    source_chapter_ids = (
+        [str(value) for value in authorized_source_chapters]
+        if isinstance(authorized_source_chapters, dict)
+        else [
+            str(value)
+            for value in (episode.get("source_chapters") or [])
+            if str(value).strip()
+        ]
+    )
     narrative_plan_block = _narrative_plan_prompt_block(scope_id)
-    narrative_plan_schema = _narrative_plan_schema_example(scope_id)
+    narrative_plan_schema = _narrative_plan_schema_example(
+        scope_id,
+        source_chapter_ids=source_chapter_ids,
+    )
     prompt = f"""任务：为漫剧第 {episode['episode_no']} 集《{episode['title']}》改写一份完整、连续、可导演的生产剧本。
 
 核心目标不是压缩镜头数，而是完整交付剧情。当前 {episode['target_duration_s']} 秒只是最低节奏参考，
@@ -2108,6 +2121,7 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
 说话风格：{speech_styles or '（无额外约束）'}
 
 带稳定段 ID 的本集原文：
+授权章节 ID：{source_chapter_ids or ['（未提供）']}
 {_render_screenplay_source(source_with_ids)}
 
 输出 JSON Schema：

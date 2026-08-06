@@ -2017,15 +2017,48 @@ def _normalize_screenplay_narrative_graph(
         excerpt = str(evidence.get("verbatim_excerpt") or "")
         if not isinstance(span, dict) or not excerpt:
             continue
-        chapter = chapters.get(str(span.get("chapter_id") or ""))
-        if chapter is None:
-            continue
         evidence_id = evidence.get("source_evidence_id") or f"source-{index}"
-        resolved = _source_evidence_span(
-            chapter,
-            excerpt,
-            context=" ".join(source_contexts.get(str(evidence_id), [])),
+        context = " ".join(source_contexts.get(str(evidence_id), []))
+        chapter_id = str(span.get("chapter_id") or "")
+        chapter = chapters.get(chapter_id)
+        resolved = (
+            _source_evidence_span(chapter, excerpt, context=context)
+            if chapter is not None
+            else None
         )
+        if chapter is None:
+            candidates = (
+                [(candidate_id, None) for candidate_id in chapters]
+                if len(chapters) == 1
+                else [
+                    (candidate_id, candidate)
+                    for candidate_id, candidate_text in chapters.items()
+                    if (
+                        candidate := _source_evidence_span(
+                            candidate_text,
+                            excerpt,
+                            context=context,
+                        )
+                    ) is not None
+                ]
+            )
+            if len(candidates) != 1:
+                continue
+            chapter_id, resolved = candidates[0]
+            chapter = chapters[chapter_id]
+            if resolved is None:
+                resolved = _source_evidence_span(
+                    chapter,
+                    excerpt,
+                    context=context,
+                )
+            changes.append({
+                "kind": "source_chapter",
+                "id": evidence_id,
+                "from": span.get("chapter_id"),
+                "to": chapter_id,
+            })
+            span["chapter_id"] = chapter_id
         if resolved is None:
             continue
         start, end, expanded_excerpt = resolved
