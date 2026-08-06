@@ -1,6 +1,7 @@
 """剧本 Production Repair Agent：Baseline 一次生成后只做局部 Patch。"""
 from __future__ import annotations
 
+from collections import Counter
 from copy import deepcopy
 import hashlib
 import json
@@ -4317,6 +4318,32 @@ def _issue_acceptance_test(issue: Issue) -> str:
     )
 
 
+def _introduced_issue_messages(
+    baseline_issues: list[Issue],
+    candidate_issues: list[Issue],
+) -> list[str]:
+    """Detect new validation slots while allowing one aggregate slot to shrink."""
+    def slot(issue: Issue) -> tuple[str, str, str, str, str]:
+        evidence = issue.evidence or {}
+        return (
+            issue.code,
+            issue.subject,
+            str(evidence.get("path") or evidence.get("span") or ""),
+            str(evidence.get("stage") or ""),
+            issue.severity.value,
+        )
+
+    baseline_counts = Counter(slot(issue) for issue in baseline_issues)
+    candidate_counts: Counter[tuple[str, str, str, str, str]] = Counter()
+    introduced: list[str] = []
+    for issue in candidate_issues:
+        key = slot(issue)
+        candidate_counts[key] += 1
+        if candidate_counts[key] > baseline_counts[key]:
+            introduced.append(issue.message)
+    return introduced
+
+
 def _dialogue_chain_replacement_is_local(
     document: Any,
     *,
@@ -5111,18 +5138,12 @@ def _preflight_document_candidate(
         ))
         return errors
 
-    def error_fingerprints(messages: list[str]) -> set[str]:
-        return {
-            item.fingerprint
-            for item in issues_from_validator_messages(
-                messages,
-                subject="screenplay",
-                stage="screenplay",
-            )
-        }
-
     baseline_errors = errors_for(document)
-    baseline_fingerprints = error_fingerprints(baseline_errors)
+    baseline_issues = issues_from_validator_messages(
+        baseline_errors,
+        subject="screenplay",
+        stage="screenplay",
+    )
     for subset_size in range(1, len(parsed) + 1):
         for subset_indices in combinations(range(len(parsed)), subset_size):
             working = document
@@ -5206,7 +5227,12 @@ def _preflight_document_candidate(
             candidate_errors = errors_for(working)
             if issue.message in candidate_errors:
                 continue
-            if error_fingerprints(candidate_errors) - baseline_fingerprints:
+            candidate_issues = issues_from_validator_messages(
+                candidate_errors,
+                subject="screenplay",
+                stage="screenplay",
+            )
+            if _introduced_issue_messages(baseline_issues, candidate_issues):
                 continue
             selection = {
                 "candidate_ids": [candidate.get("candidate_id")],
@@ -5671,14 +5697,11 @@ async def _llm_field_patch_once(
             return errors
 
         baseline_errors = targeted_errors(document_to_screenplay(document))
-        baseline_issue_fingerprints = {
-            item.fingerprint
-            for item in issues_from_validator_messages(
-                baseline_errors,
-                subject="screenplay",
-                stage="screenplay",
-            )
-        }
+        baseline_issues = issues_from_validator_messages(
+            baseline_errors,
+            subject="screenplay",
+            stage="screenplay",
+        )
         candidate_script = document_to_screenplay(candidate_document)
         _normalize_screenplay_narrative_graph(
             candidate_script,
@@ -5710,11 +5733,10 @@ async def _llm_field_patch_once(
         subject="screenplay",
         stage="screenplay",
     )
-    introduced = [
-        item.message
-        for item in candidate_issues
-        if item.fingerprint not in baseline_issue_fingerprints
-    ]
+    introduced = _introduced_issue_messages(
+        baseline_issues,
+        candidate_issues,
+    )
     if introduced:
         if rejection_feedback is not None:
             rejection_feedback.append(

@@ -3516,6 +3516,47 @@ async def test_semantic_patch_prompt_declares_dialogue_turn_contract(monkeypatch
     assert "禁止输出 narration" in rules
 
 
+def test_candidate_issue_diff_allows_aggregate_error_to_shrink() -> None:
+    from app.production.screenplay_repair import _introduced_issue_messages
+
+    baseline = [structured_issue(
+        code="SPINE_MISSING",
+        message="缺失 4 条主线节拍",
+        subject="screenplay",
+        path="/plot_spine",
+        rule_id="message_before",
+        stage="screenplay",
+    )]
+    reduced = [structured_issue(
+        code="SPINE_MISSING",
+        message="缺失 2 条主线节拍",
+        subject="screenplay",
+        path="/plot_spine",
+        rule_id="message_after",
+        stage="screenplay",
+    )]
+
+    assert _introduced_issue_messages(baseline, reduced) == []
+    assert _introduced_issue_messages(baseline, [
+        *reduced,
+        structured_issue(
+            code="SPINE_MISSING",
+            message="另一条独立缺失",
+            subject="screenplay",
+            path="/plot_spine",
+            rule_id="second_slot",
+            stage="screenplay",
+        ),
+    ]) == ["另一条独立缺失"]
+    assert _introduced_issue_messages(baseline, [structured_issue(
+        code="SPINE_MISSING",
+        message="新场次缺失",
+        subject="screenplay",
+        path="/scene_blocks/SC04",
+        stage="screenplay",
+    )]) == ["新场次缺失"]
+
+
 def test_screenplay_narrative_gate_is_quality_error():
     from app.production.screenplay_repair import ScreenplayNarrativeGateError
 
